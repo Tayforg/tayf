@@ -25,6 +25,23 @@ import { resolve } from "node:path";
 //   * `npm ci --omit=dev --ignore-scripts --no-audit --no-fund` BEFORE
 //     `npm audit --omit=dev --audit-level=high`;
 //   * the checkout drops its credentials.
+//
+// h31-deps-1 widened the workflow with two more jobs, both pinned below:
+//   * `next-advisories` runs scripts/next-advisory-check.mjs. `npm audit` reads
+//     GitHub's global advisory database, which did not hold the Next.js 16.4.5
+//     advisories (GHSA-mfr8-8qww-v76h is published on vercel/next.js with an
+//     empty patched_versions, yet /advisories/GHSA-mfr8-8qww-v76h is a 404), so
+//     the audit job stayed green on 16.4.3. The script reads the repository
+//     advisories directly; it needs no install and gets only the workflow's own
+//     read-only token, for the rate limit.
+//   * `edge-audit` audits scripts/edge-audit/package.json, the exact npm pins
+//     of the Edge Functions (tests/guards/edge-npm-audited.test.ts keeps it
+//     equal to the code). That directory has no committed lockfile, so the job
+//     generates one (`npm install --package-lock-only --ignore-scripts`) and
+//     its setup-node step has no `cache:`.
+// Every job keeps the 10 minute cap, drops the checkout credentials and the
+// workflow keeps `permissions: contents: read` and references no repository
+// secret.
 // ---------------------------------------------------------------------------
 
 const ROOT = resolve(__dirname, "..", "..");
@@ -34,6 +51,14 @@ const AUDIT = resolve(WORKFLOWS, "dep-audit.yml");
 const INSTALL = "npm ci --omit=dev --ignore-scripts --no-audit --no-fund";
 const AUDIT_CMD = "npm audit --omit=dev --audit-level=high";
 const STALE_CLAIM = "Dependabot + `npm audit` cover it";
+
+const JOBS = ["audit", "next-advisories", "edge-audit"];
+const EDGE_INSTALL = "npm install --package-lock-only --ignore-scripts --no-audit --no-fund";
+const EDGE_AUDIT_CMD = "npm audit --audit-level=high";
+const EDGE_DIR = "scripts/edge-audit";
+const NEXT_CHECK_CMD = "node scripts/next-advisory-check.mjs";
+const SETUP_NODE_PIN = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0";
+const CHECKOUT_PIN = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 
 // --- plain-text helpers (character/line scans, no backtracking patterns) ----
 
@@ -128,6 +153,11 @@ function stepsUsing(lines: string[], action: string): string[][] {
   return steps;
 }
 
+/** The code lines of job `id` under `jobs:` (the `id:` line excluded); empty when absent. */
+function jobLines(all: string[], id: string): string[] {
+  return blockOf(blockOf(all, "jobs", 0), id, 2);
+}
+
 let audit = "";
 let lines: string[] = [];
 beforeAll(() => {
@@ -154,10 +184,28 @@ describe("dep-audit.yml exists and is a separate, read-only workflow", () => {
     expect(audit).not.toContain("pull_request_target");
   });
 
-  it("has a job with a timeout of 10 minutes or less", () => {
-    const m = /timeout-minutes:\s*(\d+)/.exec(audit);
-    expect(m).not.toBeNull();
-    expect(Number((m as RegExpExecArray)[1])).toBeLessThanOrEqual(10);
+  it("gives EVERY job a timeout of 10 minutes or less (not just the first)", () => {
+    const timeouts = lines.filter((l) => l.trim().startsWith("timeout-minutes:"));
+    // audit, next-advisories, edge-audit: one per job.
+    expect(timeouts).toHaveLength(JOBS.length);
+    for (const line of timeouts) {
+      const raw = line.trim().slice("timeout-minutes:".length).trim();
+      expect(Number.isInteger(Number(raw)), line).toBe(true);
+      expect(Number(raw), line).toBeGreaterThan(0);
+      expect(Number(raw), line).toBeLessThanOrEqual(10);
+    }
+    for (const id of JOBS) {
+      expect(jobLines(lines, id).some((l) => indentOf(l) === 4 && l.trim().startsWith("timeout-minutes:")), id).toBe(
+        true,
+      );
+    }
+  });
+
+  it("has exactly the audit, next-advisories and edge-audit jobs", () => {
+    const ids = blockOf(lines, "jobs", 0)
+      .filter((l) => indentOf(l) === 2)
+      .map((l) => l.trim());
+    expect(ids).toEqual(JOBS.map((id) => `${id}:`));
   });
 });
 
@@ -183,12 +231,19 @@ describe("dep-audit.yml triggers", () => {
     expect(lines.some((l) => indentOf(l) === 2 && l.trim().startsWith("workflow_dispatch:"))).toBe(true);
   });
 
-  it.each(["pull_request", "push"])("%s is limited to package.json and package-lock.json changes", (event) => {
+  it.each(["pull_request", "push"])("%s is limited to the dependency manifests and their audit inputs", (event) => {
     const trigger = blockOf(lines, event, 2);
     expect(trigger.length).toBeGreaterThan(0);
     const paths = pathsOf(trigger);
     expect(paths).toContain("package.json");
     expect(paths).toContain("package-lock.json");
+    expect(paths).toContain("scripts/edge-audit/**");
+    expect(paths).toContain("scripts/next-advisory-check.mjs");
+    expect(paths).toContain("supabase/functions/**");
+    expect(paths).toContain(".github/workflows/dep-audit.yml");
+    // Still a path filter, not the whole repository.
+    expect(paths.length).toBeLessThanOrEqual(8);
+    expect(paths).not.toContain("**");
   });
 });
 
@@ -214,6 +269,143 @@ describe("dep-audit.yml steps", () => {
     for (const step of checkouts) {
       expect(step.some((l) => l.trim() === "persist-credentials: false")).toBe(true);
     }
+  });
+});
+
+describe("dep-audit.yml jobs: every checkout and setup-node is pinned, credential-free and on Node 24", () => {
+  it.each(JOBS)("%s checks out the pinned action without persisting credentials", (id) => {
+    const steps = stepsUsing(jobLines(lines, id), "actions/checkout");
+    expect(steps).toHaveLength(1);
+    const step = steps[0] as string[];
+    expect(step.some((l) => l.trim() === `- uses: ${CHECKOUT_PIN}`)).toBe(true);
+    expect(step.some((l) => l.trim() === "persist-credentials: false")).toBe(true);
+  });
+
+  it.each(JOBS)("%s sets up the pinned Node 24", (id) => {
+    const steps = stepsUsing(jobLines(lines, id), "actions/setup-node");
+    expect(steps).toHaveLength(1);
+    const step = steps[0] as string[];
+    expect(step.some((l) => l.trim() === `- uses: ${SETUP_NODE_PIN}`)).toBe(true);
+    expect(step.some((l) => l.trim() === "node-version: 24")).toBe(true);
+  });
+
+  it("every checkout in the workflow drops its credentials (three of them now)", () => {
+    const checkouts = stepsUsing(lines, "actions/checkout");
+    expect(checkouts).toHaveLength(JOBS.length);
+    for (const step of checkouts) expect(step.some((l) => l.trim() === "persist-credentials: false")).toBe(true);
+  });
+});
+
+describe("dep-audit.yml next-advisories job (scripts/next-advisory-check.mjs)", () => {
+  const job = () => jobLines(lines, "next-advisories");
+
+  it("exists", () => {
+    expect(job().length).toBeGreaterThan(0);
+  });
+
+  it("runs the advisory check, with the workflow's own read-only token for the API rate limit", () => {
+    expect(runCommands(job())).toContain(NEXT_CHECK_CMD);
+    expect(job().some((l) => l.trim() === "GITHUB_TOKEN: ${{ github.token }}")).toBe(true);
+  });
+
+  it("hands the token to the check step only, not to the whole job", () => {
+    const tokenAt = job().findIndex((l) => l.trim() === "GITHUB_TOKEN: ${{ github.token }}");
+    const runAt = job().findIndex((l) => l.trim() === `run: ${NEXT_CHECK_CMD}`);
+    expect(runAt).toBeGreaterThanOrEqual(0);
+    // Step-level env: below the run line of the same step, nested under `env:` of that step (a
+    // job-level env would put the token line at indent 6).
+    expect(tokenAt).toBeGreaterThan(runAt);
+    expect(indentOf(job()[tokenAt] as string)).toBe(10);
+    expect(job()[tokenAt - 1]?.trim()).toBe("env:");
+  });
+
+  it("has no install step at all (the script uses Node built-ins only)", () => {
+    const installs = runCommands(job()).filter(
+      (r) => r.startsWith("npm ci") || r.startsWith("npm install") || r.startsWith("npm i "),
+    );
+    expect(installs).toEqual([]);
+  });
+
+  it("has no setup-node cache (nothing is installed)", () => {
+    const [step] = stepsUsing(job(), "actions/setup-node");
+    expect((step as string[]).some((l) => l.trim().startsWith("cache:"))).toBe(false);
+  });
+
+  it("has a timeout of 5 minutes or less", () => {
+    const line = job().find((l) => indentOf(l) === 4 && l.trim().startsWith("timeout-minutes:"));
+    expect(Number((line as string).trim().slice("timeout-minutes:".length))).toBeLessThanOrEqual(5);
+  });
+});
+
+describe("dep-audit.yml edge-audit job (scripts/edge-audit)", () => {
+  const job = () => jobLines(lines, "edge-audit");
+
+  it("exists", () => {
+    expect(job().length).toBeGreaterThan(0);
+  });
+
+  it(`runs its commands in ${EDGE_DIR}`, () => {
+    expect(job().some((l) => l.trim() === `working-directory: ${EDGE_DIR}`)).toBe(true);
+  });
+
+  it("generates the lockfile without scripts, then audits at high severity", () => {
+    const runs = runCommands(job());
+    const install = runs.findIndex((r) => r === EDGE_INSTALL);
+    const audited = runs.findIndex((r) => r === EDGE_AUDIT_CMD);
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(audited).toBeGreaterThanOrEqual(0);
+    expect(install).toBeLessThan(audited);
+  });
+
+  it("has no setup-node cache (that directory has no committed lockfile)", () => {
+    const [step] = stepsUsing(job(), "actions/setup-node");
+    expect((step as string[]).some((l) => l.trim().startsWith("cache:"))).toBe(false);
+  });
+
+  it("never runs a real install (no npm ci, no install without --package-lock-only)", () => {
+    for (const cmd of runCommands(job()).filter((r) => r.startsWith("npm ci") || r.startsWith("npm install"))) {
+      expect(cmd).toContain("--package-lock-only");
+      expect(cmd).toContain("--ignore-scripts");
+    }
+  });
+
+  it("has a timeout of 10 minutes or less", () => {
+    const line = job().find((l) => indentOf(l) === 4 && l.trim().startsWith("timeout-minutes:"));
+    expect(Number((line as string).trim().slice("timeout-minutes:".length))).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("dependabot leaves the edge-pinned ESM-only majors alone", () => {
+  const dependabot = codeLines(readFileSync(resolve(ROOT, ".github", "dependabot.yml"), "utf8"));
+  const npmEntry = (() => {
+    const at = dependabot.findIndex((l) => l.trim() === "- package-ecosystem: npm");
+    if (at === -1) return [];
+    const out: string[] = [];
+    for (let i = at + 1; i < dependabot.length; i++) {
+      if ((dependabot[i] as string).trim().startsWith("- package-ecosystem:")) break;
+      out.push(dependabot[i] as string);
+    }
+    return out;
+  })();
+
+  it("has the npm entry", () => {
+    expect(npmEntry.length).toBeGreaterThan(0);
+  });
+
+  it.each(["fast-xml-parser", "strnum"])("ignores semver-major updates of %s (the edge pin guards reject the next major by design)", (name) => {
+    const ignore = blockOf(npmEntry, "ignore", 4);
+    const at = ignore.findIndex((l) => l.trim() === `- dependency-name: ${name}`);
+    expect(at, `${name} must be listed under ignore:`).toBeGreaterThanOrEqual(0);
+    const update = ignore.slice(at + 1, at + 2).map((l) => l.trim());
+    expect(update).toEqual(['update-types: ["version-update:semver-major"]']);
+  });
+
+  it("keeps the minor-and-patch group and ignores nothing else", () => {
+    const names = blockOf(npmEntry, "ignore", 4)
+      .filter((l) => l.trim().startsWith("- dependency-name:"))
+      .map((l) => l.trim().slice("- dependency-name:".length).trim());
+    expect(names.sort()).toEqual(["fast-xml-parser", "strnum"]);
+    expect(npmEntry.some((l) => l.trim() === "update-types: [minor, patch]")).toBe(true);
   });
 });
 

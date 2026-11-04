@@ -14,6 +14,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 import { GET } from "@/app/llms.txt/route";
 import { GET as GET_ROBOTS } from "@/app/robots.txt/route";
+import {
+  isCrawlAllowed,
+  parseRobots,
+  robotsPatternMatches,
+  rulesFor,
+  type RobotsRule,
+} from "../_helpers/robots-match";
 
 const ORIGINAL_ENV = { ...process.env };
 const CONTACT_KEY = "NEXT_PUBLIC_CONTACT_EMAIL";
@@ -164,65 +171,11 @@ describe("GET /llms.txt", () => {
 // absolute link in it that does not hold a `{placeholder}` must be crawlable
 // under /robots.txt. The OpenAPI link used to sit under `Disallow: /api/`.
 //
-// The evaluator below is the RFC 9309 subset these two files use: group
-// selection by exact user-agent token (falling back to `*`), prefix rules,
-// the longest matching rule wins and Allow wins a tie. Plain startsWith and
-// indexOf only: no regular expression ever runs over robots or llms text.
+// The evaluator lives in tests/_helpers/robots-match.ts: RFC 9309 group
+// selection, `*` / trailing-`$` wildcards, longest match wins, Allow wins a
+// tie. It is a character scan; no regular expression ever runs over robots or
+// llms text.
 // ---------------------------------------------------------------------------
-
-interface RobotsRule {
-  allow: boolean;
-  path: string;
-}
-
-function parseRobots(body: string): Map<string, RobotsRule[]> {
-  const groups = new Map<string, RobotsRule[]>();
-  // Consecutive User-agent lines share the rule lines that follow them.
-  let tokens: string[] = [];
-  let previousWasAgent = false;
-  for (const rawLine of body.split("\n")) {
-    const hash = rawLine.indexOf("#");
-    const line = (hash === -1 ? rawLine : rawLine.slice(0, hash)).trim();
-    if (line === "") continue;
-    const colon = line.indexOf(":");
-    if (colon === -1) continue;
-    const key = line.slice(0, colon).trim().toLowerCase();
-    const value = line.slice(colon + 1).trim();
-    if (key === "user-agent") {
-      if (!previousWasAgent) tokens = [];
-      const token = value.toLowerCase();
-      tokens.push(token);
-      if (!groups.has(token)) groups.set(token, []);
-      previousWasAgent = true;
-      continue;
-    }
-    previousWasAgent = false;
-    // `Disallow:` with an empty value allows everything: no rule to record.
-    if ((key === "allow" || key === "disallow") && value !== "") {
-      for (const token of tokens) groups.get(token)!.push({ allow: key === "allow", path: value });
-    }
-  }
-  return groups;
-}
-
-function rulesFor(groups: Map<string, RobotsRule[]>, crawler: string): RobotsRule[] {
-  return groups.get(crawler.toLowerCase()) ?? groups.get("*") ?? [];
-}
-
-function isCrawlAllowed(rules: RobotsRule[], path: string): boolean {
-  let best: RobotsRule | null = null;
-  for (const rule of rules) {
-    if (!path.startsWith(rule.path)) continue;
-    if (
-      best === null ||
-      rule.path.length > best.path.length ||
-      (rule.path.length === best.path.length && rule.allow && !best.allow)
-    ) {
-      best = rule;
-    }
-  }
-  return best === null ? true : best.allow;
-}
 
 /** URLs of every `[text](url)` link, found by scanning for "](" rather than a pattern. */
 function markdownLinkUrls(text: string): string[] {
@@ -283,10 +236,67 @@ describe("llms.txt links are crawlable under /robots.txt", () => {
       expect(rules, `no robots group for ${crawler}`).toBeDefined();
       expect(rules!.length).toBeGreaterThanOrEqual(5);
       for (const rule of rules!) {
-        // The evaluator does plain prefix matching, so no wildcard syntax may sneak in.
-        expect(rule.path.includes("*") || rule.path.includes("$"), rule.path).toBe(false);
+        // A rule path is rooted; comment text and Sitemap lines never become rules.
+        expect(rule.path.startsWith("/"), rule.path).toBe(true);
+        expect(rule.path.includes("#") || rule.path.includes(" "), rule.path).toBe(false);
       }
     }
+  });
+
+  it("the evaluator follows RFC 9309 wildcards: '*' matches any run, a trailing '$' anchors the end, matching starts at path+query", () => {
+    // '*' matches any run of characters: none, and across '/' and '?'.
+    expect(robotsPatternMatches("/*?cluster=", "/metodoloji?cluster=abc")).toBe(true);
+    expect(robotsPatternMatches("/*?cluster=", "/?cluster=abc")).toBe(true);
+    expect(robotsPatternMatches("/*?cluster=", "/a/b/c?cluster=")).toBe(true);
+    expect(robotsPatternMatches("/*?cluster=", "/metodoloji?source=abc")).toBe(false);
+    expect(robotsPatternMatches("/*?cluster=", "/metodoloji?x=1&cluster=abc")).toBe(false);
+    expect(robotsPatternMatches("/*?cluster=", "/metodoloji")).toBe(false);
+    // The match starts at the first character, never in the middle.
+    expect(robotsPatternMatches("/kart", "/cluster/x/kart")).toBe(false);
+    expect(robotsPatternMatches("/cluster/*/kart", "/cluster/abc/kart")).toBe(true);
+    expect(robotsPatternMatches("/cluster/*/kart", "/cluster/abc/kart/extra")).toBe(true);
+    expect(robotsPatternMatches("/cluster/*/kart", "/cluster/abc")).toBe(false);
+    expect(robotsPatternMatches("/cluster/*/kart", "/cluster/abc/opengraph-image")).toBe(false);
+    expect(robotsPatternMatches("/cluster/*/kart", "/cluster/abc?utm_source=x")).toBe(false);
+    // Without '$' a rule is a prefix rule; with it the rule must reach the end.
+    expect(robotsPatternMatches("/api/", "/api/health")).toBe(true);
+    expect(robotsPatternMatches("/exact$", "/exact")).toBe(true);
+    expect(robotsPatternMatches("/exact$", "/exact/")).toBe(false);
+    expect(robotsPatternMatches("/*.pdf$", "/a/b.pdf")).toBe(true);
+    expect(robotsPatternMatches("/*.pdf$", "/a/b.pdf?x=1")).toBe(false);
+    expect(robotsPatternMatches("/*.pdf$", "/a/b.pdfx")).toBe(false);
+    // Backtracking: the first candidate for a literal may not be the one that lets the rule match.
+    expect(robotsPatternMatches("/*/b/c", "/x/b/y/b/c")).toBe(true);
+    expect(robotsPatternMatches("/a*b*c$", "/aXbXbXc")).toBe(true);
+    expect(robotsPatternMatches("/a*b*c$", "/aXbXbXcX")).toBe(false);
+    // Consecutive and trailing stars; a '$' that is not trailing is a literal.
+    expect(robotsPatternMatches("/a**b", "/ab")).toBe(true);
+    expect(robotsPatternMatches("/a*", "/a")).toBe(true);
+    expect(robotsPatternMatches("/a*$", "/a")).toBe(true);
+    expect(robotsPatternMatches("/a$b", "/a$b")).toBe(true);
+    expect(robotsPatternMatches("/a$b", "/ab")).toBe(false);
+    // A pattern is never a regular expression: metacharacters are literal text.
+    expect(robotsPatternMatches("/a.c", "/abc")).toBe(false);
+    expect(robotsPatternMatches("/a+", "/aaa")).toBe(false);
+    expect(robotsPatternMatches("/(a)", "/(a)")).toBe(true);
+  });
+
+  it("wildcard rules take part in longest-match and Allow-wins-a-tie selection", () => {
+    const rules: RobotsRule[] = [
+      { allow: true, path: "/" },
+      { allow: false, path: "/*?cluster=" },
+      { allow: true, path: "/metodoloji?cluster=ok" },
+      { allow: false, path: "/a*" },
+      { allow: true, path: "/*b" },
+    ];
+    expect(isCrawlAllowed(rules, "/blindspots")).toBe(true);
+    expect(isCrawlAllowed(rules, "/metodoloji?cluster=abc")).toBe(false);
+    // The Allow rule is the longer match, so it beats the wildcard Disallow.
+    expect(isCrawlAllowed(rules, "/metodoloji?cluster=ok")).toBe(true);
+    // Both '/a*' and '/*b' match '/ab' with a path length of 3: Allow wins the tie.
+    expect(isCrawlAllowed(rules, "/ab")).toBe(true);
+    expect(isCrawlAllowed(rules, "/ac")).toBe(false);
+    expect(isCrawlAllowed(rules, "/cb")).toBe(true);
   });
 
   it("every same-site link in llms.txt (placeholders skipped) is allowed for *, Googlebot and ClaudeBot", async () => {

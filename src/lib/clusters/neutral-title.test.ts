@@ -797,8 +797,8 @@ describe("pickNeutralTitle first-pick floor ({ floor: true })", () => {
 });
 
 describe("EXTRACTIVE_MODEL_ID and isExtractiveModelId", () => {
-  it("is extractive-v4", () => {
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v4");
+  it("is extractive-v5", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v5");
   });
 
   it("recognises every extractive-* version and nothing else", () => {
@@ -806,6 +806,7 @@ describe("EXTRACTIVE_MODEL_ID and isExtractiveModelId", () => {
     expect(isExtractiveModelId("extractive-v2")).toBe(true);
     expect(isExtractiveModelId("extractive-v3")).toBe(true);
     expect(isExtractiveModelId("extractive-v4")).toBe(true);
+    expect(isExtractiveModelId("extractive-v5")).toBe(true);
     expect(isExtractiveModelId(EXTRACTIVE_MODEL_ID)).toBe(true);
     expect(isExtractiveModelId("claude-haiku-4-5-20251001")).toBe(false);
     expect(isExtractiveModelId("extractive")).toBe(false);
@@ -1503,8 +1504,8 @@ describe("pickNeutralTitle floor: shouted candidates are sentence-cased (h22-edi
 // qualifier of an acting appointment and kept a teaser '...' in the middle of a
 // title. The member titles live in tests/fixtures/neutral-title-h26-flips.json
 // (read-only SELECT on cluster_articles x articles, oldest first); `stored` is
-// the extractive-v4 title the cluster carried then. EXTRACTIVE_MODEL_ID stays
-// 'extractive-v4': the new rules change new picks only.
+// the extractive-v4 title the cluster carried then. h26 did not bump
+// EXTRACTIVE_MODEL_ID (the new rules changed new picks only); h31 did (v5).
 // ---------------------------------------------------------------------------
 
 interface H26Cluster {
@@ -1547,8 +1548,9 @@ describe("h26 fixture", () => {
     }
   });
 
-  it("EXTRACTIVE_MODEL_ID is not bumped by h26 (new picks only)", () => {
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v4");
+  it("h26 did not bump EXTRACTIVE_MODEL_ID (it stayed extractive-v4); h31 did (extractive-v5)", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v5");
+    expect(EXTRACTIVE_MODEL_ID).not.toBe("extractive-v4");
   });
 });
 
@@ -2565,5 +2567,234 @@ describe("h28-live-2: a title that opens with a capital is not recased", () => {
   it("the h27 rule is intact: a speaker label with a lower-case body is recased from the sibling", () => {
     expect(pickNeutralTitle(asTitles([TOKYO_LOWER, TOKYO_PROPER]))).toBe(TOKYO_RECASED);
     expect(pickNeutralTitle(asTitles([TOKYO_PROPER, TOKYO_LOWER]), { floor: true })).toBe(TOKYO_PROPER);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hunt 31 (h31-reader-2, 2026-11-04): two top stories kept a loaded or teaser
+// member headline because the re-pick protects the incumbent and the loaded
+// list had no entry for them. 2ee853c9 (26 sources) was titled "ABD
+// seçimlerinin ardından İran'dan tehdit gibi açıklama" while 25 members report
+// "savaşa hayır dedi"; d89374ba (12 sources) "Gazze'nin tanığı cerrah da ABD'de
+// seçimi kazandı", a sequel line that names nobody. Member titles are the live
+// ones (read-only SELECT on cluster_articles x articles, newest first) in
+// tests/fixtures/neutral-title-h31-loaded.json. The model id is bumped to
+// extractive-v5 so that migration 141 offers the last 14 days again.
+// ---------------------------------------------------------------------------
+
+interface H31Cluster {
+  cid: string;
+  stored: string;
+  titles: string[];
+  fetched_at: string;
+}
+
+const H31: H31Cluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "../../../tests/fixtures/neutral-title-h31-loaded.json"), "utf8"),
+) as H31Cluster[];
+
+const h31 = (cid: string): H31Cluster => {
+  const c = H31.find((x) => x.cid === cid);
+  if (!c) throw new Error(`h31 fixture cluster ${cid} missing`);
+  return c;
+};
+
+const H31_IRAN_FACTUAL = "İran'dan Trump'a seçim mesajı: ABD halkı 'savaşa hayır' dedi";
+const H31_GAZZE_FACTUAL =
+  "Gazze'de gönüllü doktorluk yapan Adam Hamawy, ABD Kongresi'ne seçildi: New Jersey'de bir ilk";
+
+describe("hunt 31 (h31-reader-2)", () => {
+  describe("fixture", () => {
+    it("holds the two live clusters with their stored extractive-v4 titles", () => {
+      expect(H31.map((c) => c.cid)).toEqual(["2ee853c9", "d89374ba"]);
+      expect(h31("2ee853c9").titles).toHaveLength(26);
+      expect(h31("d89374ba").titles).toHaveLength(12);
+      expect(h31("2ee853c9").stored).toBe("ABD seçimlerinin ardından İran'dan tehdit gibi açıklama");
+      expect(h31("d89374ba").stored).toBe("Gazze'nin tanığı cerrah da ABD'de seçimi kazandı");
+      for (const c of H31) {
+        expect(c.titles, c.cid).toContain(c.stored);
+        expect(Number.isNaN(Date.parse(c.fetched_at)), c.cid).toBe(false);
+      }
+    });
+  });
+
+  describe("loadedPenalty: loaded simile, verdict verbs, defeat and 'made history' wording", () => {
+    it.each([
+      "ABD seçimlerinin ardından İran'dan tehdit gibi açıklama",
+      "Trump'ı mavi dalga yıktı",
+      "İKTİDARI YIKTI",
+      "Seçimde hezimeti yaşadı",
+      "hezimete uğradı",
+      "Tarihe geçen seçim",
+      "Gazze'nin tanığı cerrah da ABD'de seçimi kazandı",
+      // Pinned: 'yıktı' is charged for a storm as well as for a party. The charge
+      // falls equally on every member of a cluster, so it never moves a pick by itself.
+      "Fırtına çatıları yıktı",
+    ])("%j costs one loaded unit", (title) => {
+      expect(loadedPenalty(title)).toBe(1);
+    });
+
+    it.each([
+      "Deprem sonrası 3 bina yıkıldı",
+      "Tarihî yarımadada restorasyon",
+      // A particle after the title's first word is never judged.
+      "İran da açıklama yaptı",
+      // A capitalised word before the particle.
+      "Törene Bakan da katıldı",
+      // The particle is the seventh word.
+      "Sel felaketinde 3 kişi öldü, 5 kişi de yaralandı",
+      "Hem Ankara hem de İstanbul'da yağış",
+      "Altın ya da dolar",
+      "Bahçeli: biz de hazırız",
+      // A suffix, not a standalone particle.
+      "ABD'de seçim",
+    ])("%j costs nothing", (title) => {
+      expect(loadedPenalty(title)).toBe(0);
+    });
+
+    it("'tehdit gibi' needs both words ('tehdit' alone and 'tehditkar gibi' are not the simile)", () => {
+      expect(loadedPenalty("İran'dan ABD'ye tehdit")).toBe(0);
+      expect(loadedPenalty("Bakanlıktan tehdit açıklaması")).toBe(0);
+      expect(loadedPenalty("İran'dan tehdit gibi mesaj")).toBe(1);
+      expect(loadedPenalty("İran'dan TEHDİT GİBİ mesaj")).toBe(1);
+    });
+
+    it("'yıktı' is the verb only: 'yıkıldı', 'yıkılan' and 'yıktığı' are not charged", () => {
+      expect(loadedPenalty("Binayı yıktı")).toBe(1);
+      expect(loadedPenalty("Binayı yıkıldı")).toBe(0);
+      expect(loadedPenalty("Eski bina yıkılıyor")).toBe(0);
+      expect(loadedPenalty("Belediyenin yıktığı bina")).toBe(0);
+    });
+
+    it("'hezimet' is charged with its suffixes, 'tarihe geçen' as a phrase", () => {
+      expect(loadedPenalty("Partinin hezimetinin nedeni")).toBe(1);
+      expect(loadedPenalty("Hezimetle sonuçlandı")).toBe(1);
+      expect(loadedPenalty("Tarihe geçen anlar")).toBe(1);
+      expect(loadedPenalty("Tarihe geçti")).toBe(0);
+      expect(loadedPenalty("Tarihe notlar")).toBe(0);
+    });
+  });
+
+  describe("loadedPenalty: the sequel teaser ('<story> da/de ...')", () => {
+    it.each([
+      // The word before the particle is lower case and not a pronoun or conjunction.
+      ["Gazze'nin tanığı cerrah da ABD'de seçimi kazandı", "particle at index 3"],
+      ["kasadaki parayı alan hırsız da yakalandı", "particle at index 4 (the last judged)"],
+      ["Gazze'nin tanığı cerrah da, seçimi kazandı", "a comma after the particle is trimmed"],
+      ["Gazze'nin tanığı \"cerrah\" da seçimi kazandı", "quotes around the word before it are trimmed"],
+      ["Gazze'nin tanığı cerrah de seçimi kazandı", "'de' is the particle too"],
+    ])("%j is a teaser (%s)", (title) => {
+      expect(loadedPenalty(title)).toBe(1);
+    });
+
+    it.each([
+      ["Da Vinci sergisi açıldı", "the particle is the first word"],
+      ["De Bruyne gol attı", "the particle is the first word"],
+      ["kasadaki parayı alan genç hırsız da yakalandı", "the particle is the sixth word"],
+      ["Sorunlar yine de çözülmedi", "yine de"],
+      ["Sorunlar gene de çözülmedi", "gene de"],
+      ["Bakan o da katıldı", "pronoun o"],
+      ["Mesele bu da bitmedi", "pronoun bu"],
+      ["Mesele şu da bitmedi", "pronoun şu"],
+      ["Fiyatlar ben de zam istedim", "pronoun ben"],
+      ["Fiyatlar biz de zam istedik", "pronoun biz"],
+      ["Fiyatlar onlar da zam istedi", "pronoun onlar"],
+      ["Fiyatlar ama da zam istedi", "ama"],
+      ["Zam ise de geldi", "ise"],
+      ["Erdoğan: hayatta da kalır", "a speaker label ends the scan"],
+      ["Bakan Yerlikaya: kasadaki hırsız da yakalandı", "the speaker label ends the scan"],
+      ["Gazze'nin tanığı cerrah ABD'de seçimi kazandı", "no particle"],
+      // Found by the live replay (800 further clusters of the 141 population).
+      ["Ağıralioğlu, enflasyon düşse de alım gücü artmıyorsa başarıdan söz edilemez dedi", "concessive 'düşse de' (even if), 74ce6708"],
+      ["Eisenkot'un, Trump istese de Netanyahu hükümetinde yer almayacağı belirtildi", "concessive 'istese de', 92748902"],
+      ["Gazze'nin tanığı cerrah olsa da seçimi kazandı", "concessive 'olsa da'"],
+      ["Belçika hükümeti düşecek mi? De Wever Kral ile görüşecek", "a capitalised 'De' is a name (De Wever)"],
+      ["Gazze'nin tanığı cerrah Da Silva seçimi kazandı", "a capitalised 'Da' is a name (Da Silva)"],
+      ["Gazze'nin tanığı cerrah DA seçimi kazandı", "a shouted particle is not judged"],
+      ["Anladıysanız bana da anlatın", "personal pronoun 'bana'"],
+      ["Soruları sana da soracağız", "personal pronoun 'sana'"],
+      ["Kararı ona da bildirdiler", "personal pronoun 'ona'"],
+      ["Paketi bize de gösterdiler", "personal pronoun 'bize'"],
+      ["Mesajı onlara da iletti", "personal pronoun 'onlara'"],
+      ["Teklifi bunun da gündeme gelmesi", "demonstrative 'bunun'"],
+      ["Gazze'nin 3 da şüphelisi", "a digit before the particle is not a lower-case word"],
+      ["", "an empty title"],
+      ["   ", "a blank title"],
+    ])("%j is not a teaser (%s)", (title) => {
+      expect(loadedPenalty(title)).toBe(0);
+    });
+
+    it("only the first da/de decides: a later teaser after an excluded one is not charged", () => {
+      expect(loadedPenalty("Hem Ankara hem de İstanbul'da yağış ve depremde de zarar")).toBe(0);
+    });
+
+    it("a teaser also pays when another loaded word is present (the units add up)", () => {
+      expect(loadedPenalty("Gazze'nin tanığı cerrah da seçimi kazandı, hezimete uğrattı")).toBe(2);
+    });
+
+    it("a 2 MB title is read only up to its first five words", () => {
+      const t0 = performance.now();
+      expect(loadedPenalty(`kasadaki ${"x ".repeat(1_000_000)}`)).toBe(0);
+      expect(loadedPenalty(`${"da ".repeat(700_000)}`)).toBe(0);
+      // A 2 MB lower-case first word is still "a lower-case word before the particle".
+      expect(loadedPenalty(`${"x".repeat(2_000_000)} da`)).toBe(1);
+      // A token of nothing but quotes trims to an empty word: no teaser.
+      expect(loadedPenalty(`${'"'.repeat(2_000_000)} da`)).toBe(0);
+      expect(performance.now() - t0).toBeLessThan(1500);
+    });
+  });
+
+  describe("pickNeutralTitle over the two live clusters", () => {
+    it("2ee853c9: the stored simile title is replaced by the factual member title", () => {
+      const c = h31("2ee853c9");
+      const picked = pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+      expect(picked).toBe(H31_IRAN_FACTUAL);
+      expect(loadedPenalty(picked!)).toBe(0);
+      expect(picked).not.toBe(c.stored);
+    });
+
+    it("d89374ba: the stored sequel title is replaced by the factual member title", () => {
+      const c = h31("d89374ba");
+      const picked = pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+      expect(picked).toBe(H31_GAZZE_FACTUAL);
+      expect(loadedPenalty(picked!)).toBe(0);
+      expect(picked).not.toBe(c.stored);
+    });
+
+    it.each([
+      ["2ee853c9", H31_IRAN_FACTUAL],
+      ["d89374ba", H31_GAZZE_FACTUAL],
+    ])("%s: the new pick is a fixed point as incumbent", (cid, expected) => {
+      const c = h31(cid);
+      expect(pickNeutralTitle(asMembers(c.titles), { incumbent: expected })).toBe(expected);
+    });
+
+    it.each([
+      ["2ee853c9", H31_IRAN_FACTUAL],
+      ["d89374ba", H31_GAZZE_FACTUAL],
+    ])("%s: a first pick (no incumbent, floor) is the same title", (cid, expected) => {
+      const c = h31(cid);
+      expect(pickNeutralTitle(asMembers(c.titles))).toBe(expected);
+      expect(pickNeutralTitle(asMembers(c.titles), { floor: true })).toBe(expected);
+    });
+
+    it("a clean stored title stays: the loaded members lose, nothing else moves", () => {
+      expect(
+        pickNeutralTitle(asMembers(h31("2ee853c9").titles), {
+          incumbent: "İran'dan ABD ara seçimleri yorumu: Amerikalılar savaşa hayır dedi",
+        }),
+      ).toBe("İran'dan ABD ara seçimleri yorumu: Amerikalılar savaşa hayır dedi");
+      expect(
+        pickNeutralTitle(asMembers(h31("d89374ba").titles), {
+          incumbent: "Gazze'de gönüllü doktorluk yapan Adam Hamawy, New Jersey'den Temsilciler Meclisi'ne seçildi",
+        }),
+      ).toBe("Gazze'de gönüllü doktorluk yapan Adam Hamawy, New Jersey'den Temsilciler Meclisi'ne seçildi");
+    });
+
+    it("the stored title is the only loaded member of either cluster (a speaker label or a ':' ends the teaser scan)", () => {
+      const loaded = (cid: string) => h31(cid).titles.filter((t) => loadedPenalty(t) > 0);
+      expect(loaded("2ee853c9")).toEqual([h31("2ee853c9").stored]);
+      expect(loaded("d89374ba")).toEqual([h31("d89374ba").stored]);
+    });
   });
 });

@@ -69,6 +69,18 @@ describe("ShareButton — Kartı indir link", () => {
     expect(anchor).toContain('download="tayf-kart.png"');
     expect(anchor).not.toContain('target="_blank"');
   });
+
+  // h31-bots-1: the card is a Satori PNG render per cluster. It is a download
+  // for people, not a page; robots.txt disallows it and the link is nofollow.
+  it("is a nofollow link, so crawlers do not queue the Satori card render", () => {
+    const html = renderToStaticMarkup(
+      <ShareButton clusterId="3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b" title="t" />,
+    );
+
+    const anchorMatch = html.match(/<a[^>]*>[^<]*Kartı indir[^<]*<\/a>/);
+    expect(anchorMatch).not.toBeNull();
+    expect(anchorMatch![0]).toContain('rel="nofollow"');
+  });
 });
 
 // The 4 channel chips. Regex-on-markup, same SSR-only convention as the

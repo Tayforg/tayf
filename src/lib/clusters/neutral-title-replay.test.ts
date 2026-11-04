@@ -208,6 +208,14 @@ const H26: ReplayCluster[] = JSON.parse(
   readFileSync(resolve(__dirname, "../../../tests/fixtures/neutral-title-h26-flips.json"), "utf8"),
 ) as ReplayCluster[];
 
+// Hunt 31 (h31-reader-2, 2026-11-04): the two top stories the extractive-v4 picker
+// kept on a simile ('tehdit gibi') and on a sequel teaser ('cerrah da'). Live member
+// titles, read-only (see neutral-title.test.ts); a separate fixture because the count
+// of the 150-cluster file is pinned.
+const H31: ReplayCluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "../../../tests/fixtures/neutral-title-h31-loaded.json"), "utf8"),
+) as ReplayCluster[];
+
 // The twelve clusters the 150-cluster corpus changed BEFORE the h26 rules
 // (measured on HEAD 5bbc2c3: 12/150 = 0.08). The h26 word list, the qualifier
 // penalty and the teaser-pause rule change none of the 150 picks, so this set
@@ -263,6 +271,65 @@ describe("re-pick replay: the hunt-26 rules", () => {
 
   it("is idempotent: re-picking with the pick as incumbent returns it", () => {
     for (const c of H26) {
+      const picked = repick(c);
+      expect(pickNeutralTitle(c.titles.map((title) => ({ title })), { incumbent: picked }), c.cid).toBe(picked);
+    }
+  });
+});
+
+// Hunt 31 (h31-reader-2, 2026-11-04, extractive-v5): 'tehdit gibi', 'yıktı',
+// 'hezimet...' and 'tarihe geçen' join the loaded words and a sequel teaser
+// ("Gazze'nin tanığı cerrah da ...") pays one loaded unit. Measured with the
+// neutral-title.ts of ed2fc79 (HEAD of the branch) and the new one side by side: the
+// 150-corpus picks are identical, so the list is empty. The rules do reach 2 member
+// titles of the corpus ("Mehmet Pehlivan'ın ağabeyi de tutuklandı", "Bedelli
+// askerliğe de hak tanındı"), neither of which is the pick or beats the stored
+// title by the 0.20 margin. A rule that adds a cid here has to be hand-reviewed
+// (old -> new, better / lateral / worse) before it is listed.
+const CORPUS_CHANGED_BY_H31: string[] = [];
+
+describe("re-pick replay: the hunt-31 rules", () => {
+  const corpusChanged = (): string[] =>
+    CLUSTERS.filter((c) => {
+      const next = repick(c);
+      return next !== null && next !== c.stored;
+    }).map((c) => c.cid);
+
+  it("change the 150 corpus picks only by CORPUS_CHANGED_BY_H31 (the twelve before h26 plus none)", () => {
+    const changed = corpusChanged();
+    expect(changed.sort()).toEqual([...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31].sort());
+  });
+
+  it("churn stays under 10% (prior bar 12.7% at the v3 re-pick; the gate for this wave was 15%)", () => {
+    // 12 / 150 = 0.08: the h31 rules add nothing. If a later rule pushes this past
+    // 0.1, raise the bar to 0.15 here with a comment and a hand-reviewed list.
+    expect(corpusChanged().length / CLUSTERS.length).toBeLessThan(0.1);
+  });
+
+  it("keeps the corpus titles that carry an additive 'de' / 'da' within the first words", () => {
+    // 4248e457 ('... ağabeyi de tutuklandı') and 97575687 ('Bedelli askerliğe de
+    // hak tanındı') trip the sequel-teaser rule as member titles; no pick moves.
+    for (const cid of ["4248e457", "97575687"]) {
+      const c = byId(cid);
+      expect(repick(c), cid).toBe(c.stored);
+    }
+  });
+
+  it("the h31 fixture is intact (2 clusters, none in the 150 corpus, CLUSTERS stays 150)", () => {
+    expect(H31.map((c) => c.cid)).toEqual(["2ee853c9", "d89374ba"]);
+    for (const c of H31) expect(CLUSTERS.some((x) => x.cid === c.cid), c.cid).toBe(false);
+    expect(CLUSTERS).toHaveLength(150);
+  });
+
+  it("re-picks replace the stored simile and sequel titles with a factual member title", () => {
+    expect(repick(H31[0]!)).toBe("İran'dan Trump'a seçim mesajı: ABD halkı 'savaşa hayır' dedi");
+    expect(repick(H31[1]!)).toBe(
+      "Gazze'de gönüllü doktorluk yapan Adam Hamawy, ABD Kongresi'ne seçildi: New Jersey'de bir ilk",
+    );
+  });
+
+  it("is idempotent: re-picking with the pick as incumbent returns it", () => {
+    for (const c of H31) {
       const picked = repick(c);
       expect(pickNeutralTitle(c.titles.map((title) => ({ title })), { incumbent: picked }), c.cid).toBe(picked);
     }

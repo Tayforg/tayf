@@ -1,0 +1,11 @@
+{
+  "name": "tayf-edge-audit",
+  "private": true,
+  "description": "The npm packages the Supabase Edge Functions really run, at their exact pinned versions, so dep-audit.yml can `npm audit` them. Kept equal to the specifiers under supabase/functions/** by tests/guards/edge-npm-audited.test.ts; never installed for real.",
+  "dependencies": {
+    "@sentry/deno": "10.73.0",
+    "@supabase/supabase-js": "2.115.0",
+    "fast-xml-parser": "4.5.7",
+    "strnum": "1.1.2"
+  }
+}

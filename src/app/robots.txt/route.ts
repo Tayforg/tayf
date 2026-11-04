@@ -82,6 +82,25 @@ function group(userAgent: string): string {
     // The script-less iframe widget (src/app/embed): a frame target for other
     // sites, not a page to index. It also answers X-Robots-Tag: noindex.
     "Disallow: /embed/",
+    // Crawl hygiene (h31-bots-1). RFC 9309 wildcards: `*` matches any run of
+    // characters, rules match from the start of path+query.
+    //  - `/*?cluster=` and `/*?source=`: every cluster and source page links a
+    //    per-entity /metodoloji?cluster=<uuid>#duzeltme or ?source=<slug>
+    //    #duzeltme correction deep link. That is ~31.7k URLs for ONE static
+    //    page (the correction form reads the params client-side, so a crawler
+    //    sees identical HTML), and bots matched by htmlLimitedBots get an
+    //    uncached function render of each. The links also carry rel="nofollow"
+    //    (tests/guards/metodoloji-deep-links.test.ts); this keeps the variants
+    //    that are already discovered out of the crawl queue. /metodoloji
+    //    itself stays crawlable.
+    //  - `/cluster/*/kart`: the shareable story card, a Satori PNG render per
+    //    cluster (an uncached function render on a cache miss) that is a
+    //    download for people, not a page; the cluster page itself, its
+    //    opengraph-image and twitter-image are NOT matched and stay allowed.
+    // Still allow-with-terms: no bare `Disallow: /` (see the file header).
+    "Disallow: /*?cluster=",
+    "Disallow: /*?source=",
+    "Disallow: /cluster/*/kart",
   ].join("\n");
 }
 

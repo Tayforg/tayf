@@ -234,8 +234,14 @@ export async function generateMetadata({
     // stop competing for crawl budget / index slots against live clusters.
     // Omitted entirely (undefined) for non-archived clusters so metadata
     // inheritance from the root layout's default robots stays in effect.
-    // A headline-less cluster is kept out of the index the same way.
-    ...(cluster.is_archived || !hasHeadline
+    // A headline-less cluster is kept out of the index the same way, and so is
+    // a single-article cluster (h31-seo-1): it is one outlet's headline and
+    // lead sentence, a thin duplicate of that outlet's own article, and ~71%
+    // of new clusters. The sitemaps, the news sitemap and IndexNow already
+    // require article_count >= 2, so this makes the page agree with them. The
+    // canonical, og:url and JSON-LD stay as they are: shared links still work,
+    // and the page indexes itself the moment a second outlet joins.
+    ...(cluster.is_archived || !hasHeadline || cluster.article_count < 2
       ? { robots: { index: false, follow: true } }
       : {}),
     openGraph: {
@@ -700,6 +706,8 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   <CompareButton clusterId={id} />
                   <Link
                     href={`/metodoloji?cluster=${id}#duzeltme`}
+                    rel="nofollow"
+                    prefetch={false}
                     className="inline-flex items-center max-sm:min-h-11 text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
                   >
                     Düzeltme talebi

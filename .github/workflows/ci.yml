@@ -81,6 +81,56 @@ jobs:
             (cd "$dir" && deno check --no-lock index.ts)
           done
 
+  # `next build` on every PR and push to main (h31-deps-1). lint, tsc and vitest never run the
+  # production build, and PRs get no Vercel preview build, so a prerender / Cache Components error
+  # was first seen AFTER the merge, where it blocks the deploy pipeline: production builds
+  # dpl_8ZSJ62dS7uQFjD8HfXT1fGoGqDED (5ca5d00, PR #138) and dpl_DWEeSk7D3VmUoGyawse3WCwM6yFG (cb41a4a)
+  # of merged main commits both failed that way.
+  #
+  # Measured locally before this job was written (Node 24, fresh `npm ci --ignore-scripts`, ~14 s
+  # build, ~5 s install): with NO service-role key every server read throws before it creates a
+  # client ("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"), the cache-resilience
+  # layer turns that into the empty-state render, and the build passes. So the job makes no request
+  # to any database, and the NEXT_PUBLIC_* values below only get inlined into the client bundle the
+  # way a production build inlines them. The same check run on cb41a4a fails in the prerender; it
+  # does not cover failures that need real rows or a slow database.
+  #
+  # Least privilege: read-only token, no repository secret, no service-role key, no Sentry variable
+  # (without an auth token the Sentry plugin uploads nothing). The three NEXT_PUBLIC_* values are
+  # repository VARIABLES (publishable values that ship to every browser); an unset variable is an
+  # empty string and the build still passes. This job runs the PR's own next.config.ts and every
+  # dependency, which is why it has nothing worth stealing.
+  #
+  # --ignore-scripts: the only install scripts in the tree are unrs-resolver's native-binding
+  # download (the ESLint import resolver, needed by the `check` job's lint step, not by the build)
+  # and fsevents (macOS only); `next build` runs without them.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Mirrors the `check` job: read-only, so least-privilege token.
+    permissions:
+      contents: read
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      # --no-audit: see the `check` job.
+      - run: npm ci --ignore-scripts --no-audit --no-fund --prefer-offline
+
+      - name: Build
+        run: npx next build
+
   # The live-Postgres migration tests (describe.runIf on TAYF_PSQL, tests/migrations/*.test.ts).
   # Without this job a broken live block only ever showed as "skipped". The runner builds a fresh
   # throwaway database per test file from tests/migrations/sql/stub.sql and

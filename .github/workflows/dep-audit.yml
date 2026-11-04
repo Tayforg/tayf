@@ -21,6 +21,29 @@ name: Dependency Audit
 # not `devDependencies`, or this gate would skip it (tests/guards/ci-dep-audit
 # and edge-deps-pinned pin both). --ignore-scripts: audit needs the lockfile
 # only, so no dependency lifecycle script runs in this job.
+#
+# Two more jobs close blind spots of `npm audit` (h31-deps-1):
+#   * next-advisories: `npm audit` reads GitHub's GLOBAL advisory database, and
+#     the Next.js 16.4.5 security release was not in it (GHSA-mfr8-8qww-v76h is
+#     published on vercel/next.js with an empty patched_versions, while
+#     /advisories/GHSA-mfr8-8qww-v76h is a 404), so the audit job above stayed
+#     green on 16.4.3. scripts/next-advisory-check.mjs reads the repository
+#     advisories of vercel/next.js directly and fails when one covers the
+#     installed version and has no recorded fix. It runs no install (Node
+#     built-ins only) and fails closed when GitHub cannot be read. Its runbook
+#     (what to do when it goes red) is in the script's header; the offline
+#     twin is tests/guards/next-security-floor.test.ts.
+#   * edge-audit: the Edge Functions import npm:@supabase/supabase-js and
+#     npm:@sentry/deno (Deno resolves them at deploy time; deno.lock is never
+#     committed) and fast-xml-parser through esm.sh. Those versions are not the
+#     ones package.json installs, so the audit above never saw them.
+#     scripts/edge-audit/package.json lists exactly the edge pins
+#     (tests/guards/edge-npm-audited.test.ts keeps it equal to the code); the
+#     job generates a lockfile for it (that directory has none committed, so its
+#     setup-node has no cache) and audits it at high severity.
+# Every job: 10 minute cap or less, credential-free checkout, no repository
+# secret; the only token is the workflow's own read-only GITHUB_TOKEN, given to
+# the advisory check for the API rate limit.
 on:
   schedule:
     # Mondays 04:17 UTC, clear of the 03:00 cluster audit and the :00/:30
@@ -29,10 +52,22 @@ on:
   workflow_dispatch: {}
   pull_request:
     branches: [main]
-    paths: [package.json, package-lock.json]
+    paths:
+      - package.json
+      - package-lock.json
+      - scripts/edge-audit/**
+      - scripts/next-advisory-check.mjs
+      - supabase/functions/**
+      - .github/workflows/dep-audit.yml
   push:
     branches: [main]
-    paths: [package.json, package-lock.json]
+    paths:
+      - package.json
+      - package-lock.json
+      - scripts/edge-audit/**
+      - scripts/next-advisory-check.mjs
+      - supabase/functions/**
+      - .github/workflows/dep-audit.yml
 
 permissions:
   contents: read
@@ -56,3 +91,50 @@ jobs:
 
       # Fails on a high or critical advisory in a production dependency.
       - run: npm audit --omit=dev --audit-level=high
+
+  # Published Next.js advisories vs the version package-lock.json installs.
+  next-advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No cache and no install: the script uses Node built-ins only.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # The workflow's own read-only token, only so the API call is authenticated
+      # (rate limit). The script sends it to api.github.com and nowhere else.
+      - name: Check Next.js security advisories
+        run: node scripts/next-advisory-check.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # The npm packages the Edge Functions pin, audited at their exact versions.
+  edge-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: scripts/edge-audit
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No `cache:` on purpose: setup-node's npm cache keys on a lockfile, and
+      # scripts/edge-audit has none committed (it is generated below).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Resolves the pinned packages and their dependencies into a lockfile
+      # without installing anything or running a lifecycle script.
+      - run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      # Fails on a high or critical advisory in an edge package or any of its
+      # dependencies.
+      - run: npm audit --audit-level=high

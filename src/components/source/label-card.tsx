@@ -215,6 +215,8 @@ export function LabelCard({
       {/* 6. Dispute link. */}
       <Link
         href={`/metodoloji?source=${encodeURIComponent(slug)}#duzeltme`}
+        rel="nofollow"
+        prefetch={false}
         className="inline-flex items-center text-xs font-medium text-brand hover:underline"
       >
         Bu etikete itiraz et
