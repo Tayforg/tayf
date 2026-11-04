@@ -60,6 +60,9 @@
 //      federation, chamber and union ('Tüketici Hakları Derneği Genel Başkanı'),
 //      so they admit a headline only with a party marker in the title or the
 //      description (PARTY_OFFICE_TITLE_RE, PARTY_MARKER_RE; hunt-21).
+//      The bare stem 'dünya' is a dunya marker only when it is not a life-event or
+//      sport-event idiom ('dünyaya geldi', 'dünyaevine girdi', 'Dünya
+//      Şampiyonası') or when the TITLE names a place abroad: see hunt-32 below.
 //   5. Tokens of three letters or fewer match as whole words; longer stems are
 //      anchored at a word start and may carry any suffix.
 //   6. Four words whose fold collides with another word (gol / göl,
@@ -151,6 +154,86 @@
 // 'Meclis' with no TBMM / Millet Meclisi would leave, as it already does for 'seçim'
 // and 'oy' (none of the 66,578 rows). Three rows with 'meclis' and a chamber word
 // stay in the gate through another marker (AK Parti, MHP, TBMM / İYİ Parti).
+//
+// hunt-32 (2026-11-04) dünya idioms: the bare stem 'dünya' (a word start, any
+// suffix) was a dunya marker, so 'dünyaevine girdi', 'dünyaya geldi' and 'Dünya
+// Şampiyonası' filed weddings, births and sport results as world news (five hours
+// of stored rows: 412 dunya rows, 50 with no other marker, 34 of them through a
+// compound). Dropping the stem (wave BN) was rejected at review: a 7-day replay
+// changed 1,233 rows, 905 leaving dunya and 138 entering. This keeps the stem, the
+// marker list (DUNYA_MARKER_RE), the chain order and the whole politika gate, and
+// takes out only the occurrences that are idioms:
+//
+//   * L, life events: 'dünyaya gel* / getir*', 'dünyaya gözlerini aç*',
+//     'gözlerini dünyaya ...', 'dünyaevi*' / 'dünya evine'.
+//   * S, sport events: 'Dünya [<=3 words] Şampiyonası' and 'Dünya [<=2 words]
+//     Kupası'. A row that leaves dunya through S goes to spor.
+//
+// A row leaves dunya only when ALL of these hold (dunyaIn): (a) no base marker is
+// anywhere in the text (a DUNYA_MARKER_RE word, 'çin' or 'irak'); (b) every
+// 'dunya' of the title and the description is an idiom (DUNYA_PLAIN_RE finds none:
+// 'dünyada', 'dünyadaki', 'dünyayı', 'dünya genelinde', 'yeni dünya düzeni',
+// 'Dünya Bankası', 'Dünya Sağlık Örgütü', 'dünya şampiyonu / ikincisi', 'Türk /
+// İslam / Arap / Batı dünyası', 'dünyanın öbür ucu' are plain uses and keep
+// dunya); (c) the foreign veto FOREIGN_RE does not fire on the TITLE. FOREIGN_RE
+// matches country NAMES with any suffix ('Nijeryalı', 'İtalyan' count) but not the
+// separate demonym words ('Alman', 'İngiliz', 'Fransız', 'Japon', 'Rus').
+//
+// Why the veto reads the title for L and S, not the whole text: a birth, a wedding
+// or a championship is world news when the HEADLINE places it abroad. The named
+// rows conflict with a whole-text country veto: Leclerc's description names the
+// 'Brezilya Grand Prix'si' (a driver's daughter is born, the title is
+// 'Charles Leclerc baba oldu'); the description of 14b2c693 names Hindistan and
+// Yeni Delhi (Turkish wrist wrestlers' nine medals); the Mercedes G-Serisi row
+// says 'Alman otomotiv devi'. The Malezya Grand Prix rows (b5a21766, 11eb80b1) and
+// the Portekiz triathle row have the country in the HEADLINE and stay dunya.
+// The first design had a second scope for the W idioms (a sector word + 'dünyası',
+// 'dünyanın [<=2 words] en', 'dünyaca', 'Dünya Miras*' / 'dünya rekor*'): the
+// veto read title + description there, the brief's literal rule.
+//
+// The W idioms are NOT shipped. The 7-day replay (below) changed 293 rows with all
+// six families (W1 137, W2 75, W3 45, L 25, S 12, W4 1; a row can carry two) and
+// the cap is 60, so the families were cut in a fixed order and re-measured: W4 ->
+// 292 rows, W3 -> 247, W2 narrowed to the adjacent 'dünyanın en' -> 244, W2
+// removed -> 172, W1's sector list cut to nine words (iş, siyaset, sanat, futbol,
+// spor, otomobil, gösteri, moda, müzik) -> 114, W1 removed -> 35. The W rows were
+// read by hand: most were Turkish or celebrity stories (the Zorlu funeral 'iş ve
+// siyaset dünyası', the 'Türk Tıp Dünyası Kurultayı', the Kekova wreck in the
+// Guinness book, 'dünyaca ünlü' actors, the Binance hack), but five were foreign:
+// the Trevi fountain of Roma, the Kowloon Walled City in Hong Kong, Nauru's
+// phosphate wealth ('Naoero'), the Dead Sea sinkholes and a municipal-supermarket
+// story of 'dünyanın en büyük şehirlerinden biri' (the last two name no place in
+// the stored 120 characters, so no veto entry can fix them). The lookarounds of
+// the cut families, for a later wave that brings its own replay and a narrower
+// veto: W1 (?!s(?<=\b<sector>\s+dunyas)), W2 (?!nin(?:\s+[a-z]+){0,2}\s+en\b),
+// W3 (?!ca\b), W4 (?!\s+(?:miras|rekor)).
+//
+// Replay, read-only: HEAD (hunt-31 build) against this module over every stored
+// row created 2026-10-28 15:00Z .. 2026-11-04 15:12Z (67,066 rows, 0 duplicate ids;
+// 15,597 stored politika or son_dakika). 35 rows change, all from dunya: 19 to
+// genel, 12 to spor, 2 to yasam, 1 to ekonomi, 1 to teknoloji. 0 rows enter dunya,
+// 0 rows of any other category change, and the gate (politika | son_dakika) is
+// 12,702 rows before and after (0 rows reach son_dakika through the prefix path).
+// All 35 were read by hand and none is foreign: 23 L rows (Tuğrul Şan's wedding in
+// Ordu, the Göreme rock-fall couple who had just 'dünyaevine girmişti', lambs, a
+// Kangal litter, Leclerc's daughter, a wedding date) and 12 S rows (Turkish
+// wrestlers, a weightlifter, a shooter, the F1 title run; the venue, when named,
+// is only in the description). Known residuals, pinned in the tests: the Tesla
+// market-value list (W2), Mercedes G-Serisi and Kim Kardashian (W1), Hailey
+// Bieber (W3), the UNESCO 'Dünya Mirası' list (W4), the Netflix film about London's
+// 'yeraltı dünyası' (W1), 'dünyanın öbür ucuna' (not in the idiom list). The word
+// windows of the lookarounds run across the newline between the title and the
+// description, so a title ending in 'dünya' can borrow an S idiom from the first
+// words of the description (one of the 35 rows, 13cfce1e 'Milli sporcumuz dünya
+// ikincisi', where it is right).
+//
+// Linear: every pattern starts with the literal 'dunya' (or 'gozlerini'), so the
+// lookarounds run only at a hit; each is bounded by at most four words or by one
+// run of white space, and [a-z0-9-] and \s are disjoint, so a failed word run is
+// never re-split; the runs of white space of two hits are disjoint, so the sum over
+// a text is linear. FOREIGN_RE is a plain alternation of word-start stems, read on
+// the title only. The tests time the worst shapes at 200k characters (the worst
+// pair of calls was 71.9 ms on a busy machine; the old classifier 28.9 to 96.9 ms).
 //
 // Forward-only: it changes the category of NEW rows. `content_hash` does not
 // depend on the category, and nothing is re-enqueued.
@@ -614,15 +697,91 @@ const SPOR_RE = compile(
   ],
 );
 
-const DUNYA_RE = compile(
-  ["abd", "eu", "bm", "nato"],
-  [
-    "amerika", "rusya", "ukrayna", "avrupa", "birlesmis milletler",
-    "ingiltere", "almanya", "fransa", "iran", "israil", "filistin", "gazze",
-    "suriye", "dunya", "uluslararasi", "kuresel", "beyaz saray", "putin",
-    "trump",
-  ],
+// World news: the base markers (countries, blocs, leaders) and the bare stem
+// 'dunya'. The stem is NOT a marker by itself: see 'hunt-32 dünya idioms' in the
+// header, and dunyaIn below.
+const DUNYA_WHOLE = ["abd", "eu", "bm", "nato"];
+const DUNYA_MARKER_STEMS = [
+  "amerika", "rusya", "ukrayna", "avrupa", "birlesmis milletler",
+  "ingiltere", "almanya", "fransa", "iran", "israil", "filistin", "gazze",
+  "suriye", "uluslararasi", "kuresel", "beyaz saray", "putin",
+  "trump",
+];
+const DUNYA_MARKER_RE = compile(DUNYA_WHOLE, DUNYA_MARKER_STEMS);
+const DUNYA_STEM_RE = /\bdunya/;
+
+// One lookaround per idiom family, each tried right after the literal 'dunya': a
+// 'dunya' that none of them rules out is a PLAIN use (dünyada, dünyayı, Dünya
+// Bankası, yeni dünya düzeni, Türk dünyası, iş dünyası, dünyaca ünlü, ...). To drop
+// a family, delete its line. Linear: see the header.
+const DUNYA_IDIOM_LOOKAROUNDS: readonly string[] = [
+  // L: dünyaya gel* / getir* / gözlerini aç*, gözlerini dünyaya ..., dünyaevi*
+  String.raw`(?<!\bgozlerini\s+dunya)`,
+  String.raw`(?!ya\s+(?:gel|getir|gozlerini\s+ac))`,
+  String.raw`(?!\s*evi)`,
+  // S: Dünya [<=3 words] Şampiyonası, Dünya [<=2 words] Kupası
+  String.raw`(?!\s+(?:[a-z0-9-]+\s+){0,3}sampiyona)`,
+  String.raw`(?!\s+(?:[a-z0-9-]+\s+){0,2}kupa)`,
+];
+const DUNYA_PLAIN_RE = new RegExp(String.raw`\bdunya` + DUNYA_IDIOM_LOOKAROUNDS.join(""));
+
+// The S families: a row that leaves dunya through one of them is a sport event.
+const DUNYA_SPORT_EVENT_RE = new RegExp(
+  String.raw`\bdunya\s+(?:[a-z0-9-]+\s+){0,3}sampiyona|\bdunya\s+(?:[a-z0-9-]+\s+){0,2}kupa`,
 );
+
+// The foreign veto, read on the TITLE: a country, capital, leader or
+// international organisation. It matches country NAMES with any suffix
+// ('Nijeryalı', 'İtalyan'), not the separate demonym words ('Alman', 'İngiliz',
+// 'Fransız', 'Japon', 'Rus').
+// Deliberately absent, for their collisions: misir (corn), mali (fiscal), sam,
+// bagdat, asya (a name), roma, cad, sili, karadag, sofya, umman, fas.
+const FOREIGN_WHOLE = [
+  "ab", "bae", "kktc", "imf", "oecd", "opec", "g7", "g20", "iit", "dso", "tdt",
+  "agit", "peru", "modi", "lula", "tusk",
+];
+const FOREIGN_STEMS = [
+  // countries
+  "japonya", "pakistan", "afganistan", "banglades", "sri lanka", "srilanka",
+  "nepal", "endonezya", "malezya", "singapur", "tayland", "vietnam", "filipin",
+  "tayvan", "mogolistan", "kazakistan", "ozbekistan", "kirgizistan",
+  "turkmenistan", "tacikistan", "azerbaycan", "gurcistan", "ermenistan",
+  "kibris", "suudi", "kuveyt", "bahreyn", "birlesik arap", "yemen", "urdun",
+  "lubnan", "libya", "tunus", "cezayir", "sudan", "etiyopya", "somali", "kenya",
+  "nijer", "gana", "senegal", "kamerun", "ruanda", "uganda", "tanzanya",
+  "mozambik", "angola", "zimbabve", "kongo", "afrika", "yunanistan",
+  "bulgaristan", "romanya", "moldova", "macaristan", "polonya", "cekya",
+  "slovakya", "slovenya", "hirvatistan", "sirbistan", "bosna", "kosova",
+  "arnavutluk", "makedonya", "italya", "ispanya", "portekiz", "hollanda",
+  "belcika", "luksemburg", "isvicre", "avusturya", "danimarka", "isvec",
+  "norvec", "finlandiya", "izlanda", "irlanda", "birlesik krallik", "iskocya",
+  "litvanya", "letonya", "estonya", "belarus", "kanada", "meksika", "brezilya",
+  "arjantin", "kolombiya", "venezuela", "kuba", "avustralya", "yeni zelanda",
+  "balkanlar", "ortadogu", "orta dogu", "kafkasya", "korfez ulke",
+  // capitals and cities
+  "washington", "new york", "moskova", "kiev", "kyiv", "londra", "paris",
+  "berlin", "bruksel", "pekin", "tokyo", "seul", "tahran", "tel aviv", "kudus",
+  "beyrut", "kahire", "riyad", "doha", "dubai", "abu dabi", "islamabad",
+  "kabil", "yeni delhi", "baku", "tiflis", "erivan", "atina", "belgrad",
+  "saraybosna", "viyana", "varsova", "budapeste", "prag", "madrid", "lizbon",
+  "amsterdam", "cenevre", "vatikan", "astana", "taskent", "havana", "karakas",
+  "oslo", "stokholm", "kopenhag", "helsinki", "dublin",
+  // leaders and organisations
+  "zelenski", "zelensky", "netanyahu", "biden", "macron", "merz", "scholz",
+  "starmer", "meloni", "cinping", "jinping", "aliyev", "pezeskiyan", "hamaney",
+  "esad", "vucic", "orban", "milei", "maduro", "guterres", "rutte",
+  "von der leyen", "kim jong", "tokayev", "lavrov", "rubio", "unesco", "unicef",
+  "interpol", "europol", "kizilhac", "islam isbirligi", "turk devletleri",
+  "hamas", "hizbullah", "husi", "taliban", "deas", "isid", "buyukelci",
+  "konsolos", "diplomat", "devlet baskan",
+];
+// 'koreografi', 'Hindistan cevizi' and 'katarakt' are not the countries.
+const FOREIGN_RAW = [
+  String.raw`\bkore(?!ograf)`,
+  String.raw`\bhindistan(?!\s+ceviz)`,
+  String.raw`\bkatar(?!akt)`,
+];
+const FOREIGN_RE = compile(FOREIGN_WHOLE, FOREIGN_STEMS, FOREIGN_RAW);
 
 const EKONOMI_RE = compile(
   ["tl", "bist"],
@@ -738,6 +897,16 @@ function cumhurbaskanInTitle(titleHay: string): boolean {
   return m !== null && !SPORT_EVENT_AFTER_RE.test(titleHay.slice(m.index + m[0].length));
 }
 
+// A text is world news when it has a base marker (DUNYA_MARKER_RE, 'çin', 'irak')
+// or a 'dunya' that is not an L / S idiom. A text whose every 'dunya' is an idiom
+// is world news only when the TITLE names a place or an organisation abroad
+// (FOREIGN_RE). See 'hunt-32 dünya idioms' in the header.
+function dunyaIn(titleHay: string, hay: string, lower: string): boolean {
+  if (DUNYA_MARKER_RE.test(hay) || CIN_RE.test(lower) || IRAK_RE.test(lower)) return true;
+  if (!DUNYA_STEM_RE.test(hay)) return false;
+  return DUNYA_PLAIN_RE.test(hay) || FOREIGN_RE.test(titleHay);
+}
+
 // The chain after the breaking-news prefix: politika, the URL section, spor,
 // dunya, ekonomi, teknoloji, yasam, genel. `titleLower` / `descLower` are the
 // unfolded lowercase views (see lowerView).
@@ -783,7 +952,8 @@ function classifyBody(
   if (section) return section;
 
   if (SPOR_RE.test(hay) || GOL_RE.test(lower)) return "spor";
-  if (DUNYA_RE.test(hay) || CIN_RE.test(lower) || IRAK_RE.test(lower)) return "dunya";
+  if (dunyaIn(titleHay, hay, lower)) return "dunya";
+  if (DUNYA_SPORT_EVENT_RE.test(hay)) return "spor";
   if (EKONOMI_RE.test(hay)) return "ekonomi";
   if (TEKNOLOJI_RE.test(hay)) return "teknoloji";
   if (YASAM_RE.test(hay)) return "yasam";

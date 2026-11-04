@@ -4863,3 +4863,570 @@ describe("wave BL (hunt-31): politics gate precision", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Wave BO (h32-livebl-1): Turkish 'dünya' idioms are not world news
+// ---------------------------------------------------------------------------
+//
+// DUNYA_RE carried the bare stem 'dünya' (a word start, any suffix), so every
+// article with a compound ('dünyası', 'dünyaya', 'dünyaevine', 'Dünya
+// Şampiyonası') in a non-political, non-sport text was filed as dunya. A
+// read-only pull of the last five hours (2026-11-04) found 412 stored dunya
+// rows, 50 of them with no other dunya marker, 34 of those through a compound.
+// Wave BN dropped the stem and was rejected (1,233 rows changed, 905 leaving, 138
+// entering). This wave keeps the stem and the marker list and takes out only the
+// idioms that name no place.
+//
+// Six idiom families were built (L life events, S sport events, W1 'sector
+// dünyası', W2 'dünyanın ... en', W3 'dünyaca', W4 'Dünya Miras* / dünya rekor*').
+// The 7-day replay (67,066 stored rows) changed 293 rows with all six, and the
+// cap is 60, so the families were cut in the order W4, W3, W2, W1: L and S alone
+// change 35 rows, every one a non-foreign story. The cut families are pinned in
+// BO_LIVE ('residual') and in BO_CUT below as plain uses that stay dunya.
+//
+// BO_LIVE is every named row of the hunt and of the BN review, title, description
+// and url exactly as stored (the 7-day read-only pull of 2026-11-04). Every row is
+// dunya at HEAD (checked against the HEAD classifier). `expected` is the category
+// after this wave; `kind` is leave (leaves dunya), stay (a plain use or a foreign
+// headline, stays dunya) or residual (stays dunya although it is no world news:
+// its family was cut, or the phrase is not in the idiom list).
+//
+// Three rows of the brief are NOT in BO_LIVE because HEAD does not file them as
+// dunya: fbab55c4 and a8848cb0 (haberler.com /spor/ URL section) and 72b7bc24
+// (cumhuriyet /spor/): they are spor at HEAD and stay spor. The shape of
+// a8848cb0 ('Portekiz'deki Triathle Dünya Şampiyonası') is pinned below with a
+// neutral URL, where it must stay dunya because the HEADLINE names Portekiz.
+
+interface BoRow extends GateRow {
+  expected: NewsCategory;
+  kind: "leave" | "stay" | "residual";
+  note: string;
+}
+
+const BO_LIVE: BoRow[] = [
+  {
+    id: "97aed8b2-cumhuriyet",
+    source: "cumhuriyet",
+    title: "Türk halk müziğinin usta ismi Tuğrul Şan 78 yaşında evlendi",
+    description: "Türk halk müziğinin usta isimlerinden Tuğrul Şan, 78 yaşında Canan Erdaş ile Ordu'da düzenlenen törenle dünyaevine girdi. Açık havada gerçekleştirilen nikâh merasimine Ordu Valisi Muammer Erol da katılarak çiftin mutluluğuna ortak oldu.",
+    url: "https://www.cumhuriyet.com.tr/magazin/turk-halk-muziginin-usta-ismi-tugrul-san-78-yasinda-evlendi-2553324",
+    stored: "dunya",
+    expected: "genel",
+    kind: "leave",
+    note: "L: 'dünyaevine girdi' (a wedding in Ordu); Turkish folk singer, no foreign marker",
+  },
+  {
+    id: "c8462279-elips-haber",
+    source: "elips-haber",
+    title: "Charles Leclerc baba oldu",
+    description: "Ferrari pilotu Charles Leclerc ve eşi Alexandra, ilk çocukları Bianca'nın dünyaya gelmesiyle anne-baba olma sevinci yaşadı. Doğum nedeniyle seyahat takviminde değişikliğe giden Leclerc, Brezilya Grand Prix'sinin ilk antrenman seansını kaçıracak.",
+    url: "https://www.elipshaber.com/charles-leclerc-baba-oldu",
+    stored: "dunya",
+    expected: "genel",
+    kind: "leave",
+    note: "L: 'dünyaya gelmesiyle'; Brezilya appears only in the description, an L idiom reads the headline alone",
+  },
+  {
+    id: "14b2c693-haber7",
+    source: "haber7",
+    title: "Milli sporculardan Dünya Şampiyonasında 9 madalya",
+    description: "DEPSAŞ Enerji Spor Kulübü sporcuları, Hindistan’ın başkenti Yeni Delhi’de düzenlenen 2026 Dünya Bilek Güreşi Şampiyonası’nda ay yıldızlı milli formayla 4 altın, 1 gümüş ve 4 bronz olmak üzere toplam 9 madalya kazandı.",
+    url: "https://spor.haber7.com/diger-branslar/haber/3674163-milli-sporculardan-dunya-sampiyonasinda-9-madalya",
+    stored: "dunya",
+    expected: "spor",
+    kind: "leave",
+    note: "S: 'Dünya Şampiyonasında'; Hindistan / Yeni Delhi only in the description, an S idiom reads the headline alone",
+  },
+  {
+    id: "3693a42c-yenicag",
+    source: "yenicag",
+    title: "Türkiye UIPM Triathle Dünya Şampiyonası'nda 9 madalya kazandı",
+    description: "Portekiz'de düzenlenen UIPM Triathle Dünya Şampiyonası'nda bireysel yarışlar tamamlandı. Milli sporcular, organizasyonda 2 altın, 5 gümüş ve 2 bronz olmak üzere toplam 9 madalya elde etti.",
+    url: "https://www.yenicaggazetesi.com/turkiye-uipm-triathle-dunya-sampiyonasinda-9-madalya-kazandi-1086290h.htm",
+    stored: "dunya",
+    expected: "spor",
+    kind: "leave",
+    note: "S: 'Triathle Dünya Şampiyonası'; Portekiz only in the description",
+  },
+  {
+    id: "fcd8ead7-yenicag",
+    source: "yenicag",
+    title: "Tuba Demir, Dünya Güreş Şampiyonası’nda yarı finale çıktı",
+    description: "2026 Dünya Güreş Şampiyonası’nda mücadele eden milli sporcu Tuba Demir, kadınlar 55 kiloda yarı finale yükseldi.",
+    url: "https://www.yenicaggazetesi.com/tuba-demir-dunya-gures-sampiyonasinda-yari-finale-cikti-1086071h.htm",
+    stored: "dunya",
+    expected: "spor",
+    kind: "leave",
+    note: "S: 'Dünya Güreş Şampiyonası'",
+  },
+  {
+    id: "d4feaee7-cnn-turk",
+    source: "cnn-turk",
+    title: "Vali Çiçek, Bilek Güreşi Dünya Şampiyonası'nda dereceye giren sporcuları tebrik etti",
+    description: "Vali Çiçek, Bilek Güreşi Dünya Şampiyonası'nda dereceye giren sporcuları tebrik etti",
+    url: "https://www.cnnturk.com/yerel-haberler/kayseri/vali-cicek-bilek-guresi-dunya-sampiyonasinda-dereceye-giren-sporculari-tebrik-etti-3487519",
+    stored: "dunya",
+    expected: "spor",
+    kind: "leave",
+    note: "S: 'Bilek Güreşi Dünya Şampiyonası' (a governor congratulating wrestlers in Kayseri)",
+  },
+  {
+    id: "b5a21766-karar",
+    source: "karar",
+    title: "MotoGP’de Malezya heyecanı",
+    description: "MotoGP Dünya Şampiyonası’nda sezonun 19. yarışı Malezya Grand Prix’siyle devam edecek. Sepang’daki mücadelede sıralama turları ve sprint yarışı yarın, ana yarış ise 1 Kasım Pazar günü gerçekleştirilecek.",
+    url: "https://www.karar.com/spor-haberleri/motogpde-malezya-heyecani-2081476",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "stay",
+    note: "S with Malezya in the headline: the headline places the race abroad",
+  },
+  {
+    id: "11eb80b1-karar",
+    source: "karar",
+    title: "Deniz Öncü, Malezya Grand Prix’sinde piste çıkacak",
+    description: "Milli motosikletçi Deniz Öncü, 30 Ekim-1 Kasım tarihlerinde düzenlenecek Dünya Moto2 Şampiyonası Malezya Grand Prix’sinde mücadele edecek. Sepang Pisti’ndeki 17 turluk yarış, 1 Kasım’da TSİ 08.15’te başlayacak. Kadir Erbay ise aynı tarihlerde İspanya Superbike Şampiyonası’nın Jerez Pisti’ndeki sezon finalinde yarışacak.",
+    url: "https://www.karar.com/spor-haberleri/deniz-oncu-malezya-grand-prixsinde-piste-cikacak-2081211",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "stay",
+    note: "S with Malezya in the headline",
+  },
+  {
+    id: "f5ea4249-haberler-com",
+    source: "haberler-com",
+    title: "Nijerya Kebbi'de genç, 2,9 metrelik bisikleti yardımsız sürüp Guinness rekoru kırdı",
+    description: "Nijerya'nın Kebbi eyaletinde yaşayan genç, 2,9 metrelik bisikleti yardımsız sürerek Guinness Dünya Rekoru kırdı. Birnin Kebbi'de tören düzenlendi; gençlerin desteklenmesi ve fırsatlara erişiminin önemi vurgulandı.",
+    url: "https://www.haberler.com/guncel/nijerya-kebbi-de-genc-2-9-metrelik-bisikleti-20377919-haberi/",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "stay",
+    note: "Nijerya in the headline; 'Guinness Dünya Rekoru' is a plain use (the W4 family was cut)",
+  },
+  {
+    id: "5ae13d6a-cumhuriyet",
+    source: "cumhuriyet",
+    title: "Bunun neresi öğrenci zaferi?",
+    description: "Sırbistan'da pazar günkü seçimler gerek dünyada gerekse Türkiye’de geniş kesimlerce, “öğrencilerin on iki yıllık diktatörlüğü yıkması” olarak görüldü. Bizde Sırbistan seçimlerine böyle bakılmasının önemli bir nedeni, dünyadaki olayları iç politikaya baktığımız şekilde görmek isteyişimizdir. Nisandaki Macaristan seçimleri de bazılarınca yine bu eksende yorumlanmıştı. Ben, bunun aceleci bir yaklaşım olduğu görüşündeyim.",
+    url: "https://www.cumhuriyet.com.tr/yazarlar/deniz-berktay/bunun-neresi-ogrenci-zaferi-2551219",
+    stored: "politika",
+    expected: "dunya",
+    kind: "stay",
+    note: "Sırbistan election column; 'dünyada' is a plain use (stored politika, HEAD dunya)",
+  },
+  {
+    id: "92713be7-aksam",
+    source: "aksam",
+    title: "Bedir İttifakı dünyayı salladı: KAAN'ı işaret ettiler",
+    description: "Türkiye, Katar, Pakistan ve Endonezya'nın imzaladığı Bedir Mutabakatı'nı değerlendiren Hint basını, Türk teknolojisiyle ortakların üretim ve sermaye gücünün savunmada yeni bir yapı oluşturabileceğini yazdı. KAAN'ı olası iş birliği projeleri arasında gösteren analizde, Suudi Arabistan ve Mısır'ın da ortaklığa katılabileceği belirtildi.",
+    url: "https://www.aksam.com.tr/trend/bedir-ittifaki-dunyayi-salladi-kaani-isaret-ettiler/haber-1710164",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "stay",
+    note: "Bedir İttifakı; 'dünyayı' is a plain use, Katar / Pakistan / Endonezya in the text",
+  },
+  {
+    id: "550ea258-a-haber",
+    source: "a-haber",
+    title: "Yeni dünya düzeni öldü, sadece cenazesi kalkmadı",
+    description: "İnsanoğlunun en büyük yanılgısı, içinde bulunduğu durumun ezeli ve ebedi olduğuna inanması, bu sanrıya göre düşünüp pozisyon alması.\nOysa her şeyin bir ömrü var.\nAtlantik ötesinin, İkinci Dünya...Devamı için tıklayınız",
+    url: "https://www.ahaber.com.tr/yazarlar/melih-altinok/2026/10/30/yeni-dunya-duzeni-oldu-sadece-cenazesi-kalkmadi",
+    stored: "politika",
+    expected: "dunya",
+    kind: "stay",
+    note: "'Yeni dünya düzeni' is a plain use (stored politika, HEAD dunya)",
+  },
+  {
+    id: "af8c625f-ekonomim",
+    source: "ekonomim",
+    title: "Tesla'nın zirvede olduğu listeye 2 Türk şirketi girdi! İşte en değerli 50 otomobil üreticisi",
+    description: "Dünyanın piyasa değeri en yüksek 50 otomobil üreticisi açıklandı. Tesla zirvedeki yerini korurken, listeye Türkiye'den iki şirket de girmeyi başardı.",
+    url: "https://www.ekonomim.com/foto-galeri/aktuel/teslanin-zirvede-oldugu-listeye-2-turk-sirketi-girdi-iste-en-degerli-50-otomobil-ureticisi-galeri-929158",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "residual",
+    note: "W2 'Dünyanın piyasa değeri en yüksek' (Tesla list): family cut by the 60-row cap, so a plain use; HEAD ekonomi-through-'piyasa' is not reached",
+  },
+  {
+    id: "b3a94855-ajans-haber",
+    source: "ajans-haber",
+    title: "Mercedes-Benz'in ikonik G-Serisi küçülüyor: Efsanenin yeni kardeşi geliyor",
+    description: "Alman otomotiv devi Mercedes-Benz, yaklaşık yarım asırlık geçmişe sahip ikonik G-Serisi ailesini genişletmeye hazırlanıyor. Efsanevi arazi aracının daha kompakt versiyonu üzerinde çalışmalar sürerken yeni modelin tasarımı, motor seçenekleri ve Türkiye pazarındaki olası konumu merak ediliyor. Peki, otomobil dünyasının köklü modellerinden G-Serisi'nin küçük kardeşi neler sunacak?",
+    url: "https://ajanshaber.com.tr/haber/mercedes-benz-in-ikonik-g-serisi-kuculuyor-efsanenin-yeni-kardesi-geliyor",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "residual",
+    note: "W1 'otomobil dünyasının' (Mercedes G-Serisi): family cut by the 60-row cap, so a plain use",
+  },
+  {
+    id: "64cb520a-cumhuriyet",
+    source: "cumhuriyet",
+    title: "Hailey Bieber annelik sonrasında yaşadığı zorlu süreci anlattı: 'Kendimi yalnız hissettim'",
+    description: "Dünyaca ünlü model Hailey Bieber, oğlu Jack Blues'u dünyaya getirdikten sonra adet öncesi disforik bozuklukla mücadele ettiğini ve bu süreçte kendini yalnız hissettiğini açıkladı. Kadın sağlığı konusundaki farkındalık eksikliğine dikkat çeken Bieber, yaşadığı zorlukları paylaşmanın kendisine iyi geldiğini belirtti.",
+    url: "https://www.cumhuriyet.com.tr/magazin/hailey-bieber-annelik-sonrasinda-yasadigi-zorlu-sureci-anlatti-kendimi-yalniz-hissettim-2553302",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "residual",
+    note: "W3 'Dünyaca ünlü' + L 'dünyaya getirdikten' (Hailey Bieber): W3 cut by the 60-row cap, the plain 'dünyaca' keeps dunya",
+  },
+  {
+    id: "770f2028-hurriyet",
+    source: "hurriyet",
+    title: "En çılgın hayali gerçekleşti ama olay da çıktı: Efsanenin kemiklerini sızlattın!",
+    description: "Gösteri dünyasının en renkli simalarından biri olan Kim Kardashian ne yaptı ne etti yine bütün dikkatleri üzerine çekti.",
+    url: "https://www.hurriyet.com.tr/kelebek/stil/efsanenin-kemiklerini-sizlattin-43365799",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "residual",
+    note: "W1 'Gösteri dünyasının en renkli' (Kim Kardashian): family cut by the 60-row cap, so a plain use",
+  },
+  {
+    id: "f87a14bc-yenicag",
+    source: "yenicag",
+    title: "UNESCO’nun 80. yılında Türkiye’nin Dünya Mirası Listesi’ndeki 22 eseri",
+    description: "UNESCO’nun 80. kuruluş yılında Türkiye, Dünya Mirası Listesi’ndeki 20 kültürel ve 2 karma varlığıyla medeniyetler tarihinin en güçlü temsilcileri arasındaki yerini koruyor.",
+    url: "https://www.yenicaggazetesi.com/unesconun-80-yilinda-turkiyenin-dunya-mirasi-listesindeki-22-eseri-1088126h.htm",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "residual",
+    note: "W4 'Dünya Mirası' of a UNESCO list: family cut by the 60-row cap (UNESCO is also an international-organisation veto)",
+  },
+  {
+    id: "a347b59f-yenicag",
+    source: "yenicag",
+    title: "Guy Ritchie ile Jason Statham \"Dogfight\" için Netflix çatısı altında yeniden bir araya geliyor",
+    description: "Guy Ritchie ile Jason Statham, Netflix'in yeni aksiyon filmi Dogfight için bir kez daha güçlerini birleştiriyor. Londra'nın yeraltı dünyasında geçen bir intikam hikayesini konu alan yapımın çekimlerine 2027 yılının başında Birleşik Krallık'ta başlanacak.",
+    url: "https://www.yenicaggazetesi.com/guy-ritchie-ile-jason-statham-dogfight-icin-netflix-catisi-altinda-yeniden-bir-araya-geliyor-1088143h.htm",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "residual",
+    note: "W1 'yeraltı dünyasında' of a Netflix film: family cut by the 60-row cap (Londra and Birleşik Krallık would veto it anyway)",
+  },
+  {
+    id: "ee90ab2e-demokrat-haber",
+    source: "demokrat-haber",
+    title: "Doğayla Baş Başa Tatil: En Güzel Dağ Evleri ve Bungolav Seçenekleri",
+    description: "Şehirden uzaklaşmak için dünyanın öbür ucuna gitmenize gerek yok. Taze hava solumak ve bakış açınızı yenilemek için ülkeyi bile terk etmek zorunda değilsiniz. Aslında Türkiye, sunduğu çeşitlilik açısından o kadar zengin ki insanların neden başka ülkelere tatile çıkmak istediğini anlamak giderek güçl...",
+    url: "https://www.demokrathaber.org/dogayla-bas-basa-tatil-en-guzel-dag-evleri-ve-bungolav-secenekleri",
+    stored: "dunya",
+    expected: "dunya",
+    kind: "residual",
+    note: "'dünyanın öbür ucuna' is a plain use (no idiom family covers it)",
+  },
+];
+
+// Synthetic headlines. Each pins the exact category the rest of the chain gives
+// (read by hand): an idiom that names no place leaves dunya and falls through to
+// ekonomi / teknoloji / yasam / genel, or goes to spor for the sport events.
+// [title, description, expected]
+type BoCase = [string, string | null, NewsCategory];
+
+const BO_LEAVE: BoCase[] = [
+  // L: life events
+  ["Tuğrul Şan 78 yaşında dünyaevine girdi", null, "genel"],
+  ["TUĞRUL ŞAN DÜNYAEVİNE GİRDİ", null, "genel"],
+  ["Ünlü çift nikâh masasına oturdu", "Çift, düzenlenen törenle dünya evine girdi.", "genel"],
+  ["Charles Leclerc baba oldu", "Kızları Bianca dünyaya geldi.", "genel"],
+  ["Ünlü oyuncu gözlerini dünyaya açan oğlunu paylaştı", null, "genel"],
+  ["Ünlü oyuncu kızını dünyaya getirdi", null, "genel"],
+  ["Ünlü çift ikizlerine kavuştu", "Bebekler gözlerini dünyaya açtı.", "genel"],
+  ["Ünlü çift ikizlerine kavuştu", "Minik bebek dünyaya gözlerini açtı.", "genel"],
+  ["Amasya'da koyun dördüz kuzu dünyaya getirdi", null, "genel"],
+  // S: sport events go to spor
+  ["Milli sporculardan Dünya Şampiyonası'nda 9 madalya", null, "spor"],
+  ["Bilek Güreşi Dünya Şampiyonası'nda 3 altın", null, "spor"],
+  ["Dünya Bilek Güreşi Şampiyonası'nda zafer", null, "spor"],
+  ["Okçuluk Dünya Kupası'nda altın", null, "spor"],
+  ["Dünya Güreş Şampiyonası'nda yarı finale çıktı", null, "spor"],
+  ["Dünya Atletizm Şampiyonası'nda Türk sporcu finalde", null, "spor"],
+];
+
+// The families the replay measured and the 60-row cap cut (W1 'sector dünyası',
+// W2 'dünyanın ... en', W3 'dünyaca', W4 'Dünya Miras* / dünya rekor*'): plain
+// uses, they stay dunya. Known residuals; a later wave that re-adds one must
+// bring its own replay (header of category.ts).
+const BO_CUT: BoCase[] = [
+  ["İstanbul iş dünyası yeni yıl hedeflerini açıkladı", null, "dunya"],
+  ["Otomobil dünyasının ikonik modeli yenilendi", null, "dunya"],
+  ["Ahmet Nazif Zorlu son yolculuğuna uğurlandı: İş ve siyaset dünyası Levent'te buluştu", null, "dunya"],
+  ["Dünyanın en pahalı otomobili tanıtıldı", null, "dunya"],
+  ["Rapor yayımlandı", "Dünyanın piyasa değeri en yüksek şirketi belli oldu.", "dunya"],
+  ["Dünyaca ünlü şarkıcı İstanbul'da konser verecek", null, "dunya"],
+  ["DÜNYACA ÜNLÜ ŞARKICI", null, "dunya"],
+  ["Efes Dünya Mirası Listesi'nde", null, "dunya"],
+  ["Genç sporcu dünya rekoru kırdı", null, "dunya"],
+];
+
+const BO_STAY: BoCase[] = [
+  // plain uses of the stem
+  ["Dünya Bankası Türkiye büyüme tahminini yükseltti", null, "dunya"],
+  ["Dünya Sağlık Örgütü uyardı", null, "dunya"],
+  ["Dünya Ticaret Örgütü yeni raporunu yayımladı", null, "dunya"],
+  ["Dünya liderleri Gazze için toplandı", null, "dunya"],
+  ["Yeni dünya düzeni kuruluyor", null, "dunya"],
+  ["Dünyada ticaretin kuralları değişiyor", null, "dunya"],
+  ["Dünyadaki çatışmalar sürüyor", null, "dunya"],
+  ["Dünyayı değiştiren bir buluş", null, "dunya"],
+  ["Dünya genelinde ticaret yavaşladı", null, "dunya"],
+  ["Dünya şampiyonu sporcu yurda döndü", null, "dunya"],
+  ["Dünya ikincisi olan sporcu yurda döndü", null, "dunya"],
+  ["Dünyanın gözü bu zirvede", null, "dunya"],
+  ["Dünyanın öbür ucuna gitmenize gerek yok", null, "dunya"],
+  ["Dünyaya meydan okuyan yeni bir ses", null, "dunya"],
+  ["Dünya Ankara'da buluştu", null, "dunya"],
+  // Türk / İslam / Arap / Batı dünyası stay world news
+  ["Türk dünyası Ankara'da buluştu", null, "dunya"],
+  ["İslam dünyasının ortak meseleleri", null, "dunya"],
+  ["Arap dünyasında yeni dönem", null, "dunya"],
+  ["Batı dünyası bu karara nasıl bakıyor", null, "dunya"],
+  // an S match needs its exact shape: more words than the bound is a plain use
+  ["Dünya a b c d Şampiyonası'nda finale yükseldi", null, "dunya"],
+  ["Dünya a b c Kupası'nda finale yükseldi", null, "dunya"],
+  // W-shaped text with a country, a capital or an organisation
+  ["Dünyanın en büyük havalimanı Dubai'de açıldı", null, "dunya"],
+  ["Japonya'da dünyanın en hızlı treni", null, "dunya"],
+  ["Dünyaca ünlü şarkıcı Kanada'da konserini iptal etti", null, "dunya"],
+  ["Avrupa iş dünyası toplandı", null, "dunya"],
+  ["Nijerya'da genç Guinness Dünya Rekoru kırdı", null, "dunya"],
+  // L or S with a foreign headline
+  ["Sudan'da savaşın ortasında dünyaya gelen bebekler", null, "dunya"],
+  ["Gazze'de dünyaya gelen ikizler", null, "dunya"],
+  ["Londra'da dünya evine girdi", null, "dunya"],
+  ["Astana'daki Dünya Güreş Şampiyonası'nda finale yükseldi", null, "dunya"],
+  ["Milli sporcular Portekiz'deki Triathle Dünya Şampiyonası'nda 9 madalya kazandı", null, "dunya"],
+  ["Japonya'daki Dünya Kupası'nda altın madalya", null, "dunya"],
+  [
+    "MotoGP'de Malezya heyecanı",
+    "MotoGP Dünya Şampiyonası’nda sezonun 19. yarışı Malezya Grand Prix’siyle devam edecek. Sepang’daki mücadelede sıralama turları ve sprint yarışı yarın, ana yarış ise 1 Kasım Pazar günü gerçekleştirilecek.",
+    "dunya",
+  ],
+  // a base marker anywhere in the text (also in the description) keeps dunya
+  ["Yarı finalde yenildi", "Dünya Güreş Şampiyonası'nda Ukraynalı rakibine yenildi.", "dunya"],
+  ["Dünya Kupası biletleri", "ABD'de satışa çıktı.", "dunya"],
+  ["Ünlü oyuncu kızını dünyaya getirdi", "Çift Amerika'da yaşıyor.", "dunya"],
+  ["Genç sporcu dünya rekoru kırdı", "Çin'de düzenlenen yarışta.", "dunya"],
+  ["Dünya Güreş Şampiyonası'nda yarı finale çıktı", "Rakibi İranlı güreşçi oldu.", "dunya"],
+];
+
+// The Seçim headline is politika at HEAD ('seçim' in the title), not dunya. It is
+// pinned so the gate keeps it.
+const BO_OTHER_CHAIN: BoCase[] = [
+  ["İstanbul iş dünyası İTO seçimine hazırlanıyor", null, "politika"],
+  ["Dünyanın gözü bu seçimde", null, "politika"],
+];
+
+describe("wave BO (h32-livebl-1): dünya idioms", () => {
+  describe("the live rows of the hunt and of the BN review", () => {
+    it("is not vacuous: distinct rows, every one filed dunya at HEAD", () => {
+      expect(BO_LIVE).toHaveLength(19);
+      expect(new Set(BO_LIVE.map((r) => r.id)).size).toBe(19);
+      expect(BO_LIVE.filter((r) => r.kind === "leave")).toHaveLength(6);
+      expect(BO_LIVE.filter((r) => r.kind === "stay")).toHaveLength(6);
+      expect(BO_LIVE.filter((r) => r.kind === "residual")).toHaveLength(7);
+      expect(BO_LIVE.filter((r) => r.kind === "leave" && r.expected === "dunya")).toHaveLength(0);
+      expect(BO_LIVE.filter((r) => r.kind !== "leave" && r.expected !== "dunya")).toHaveLength(0);
+      // two rows were stored politika (the old chain), the rest dunya
+      expect(BO_LIVE.filter((r) => r.stored === "politika").map((r) => r.id.slice(0, 8)).sort()).toEqual([
+        "550ea258",
+        "5ae13d6a",
+      ]);
+      expect(BO_LIVE.filter((r) => r.title.trim() === "" || r.url === "")).toHaveLength(0);
+    });
+
+    it.each(BO_LIVE.filter((r) => r.kind === "leave"))("$id leaves dunya for $expected: $note", (row) => {
+      expect(classifyRow(row)).toBe(row.expected);
+    });
+
+    it.each(BO_LIVE.filter((r) => r.kind === "stay"))("$id stays dunya: $note", (row) => {
+      expect(classifyRow(row)).toBe("dunya");
+    });
+
+    it.each(BO_LIVE.filter((r) => r.kind === "residual"))("$id stays dunya (known residual): $note", (row) => {
+      expect(classifyRow(row)).toBe("dunya");
+    });
+  });
+
+  describe("synthetic headlines that name no place leave dunya", () => {
+    it.each(BO_LEAVE)("%s | %s -> %s", (title, description, expected) => {
+      expect(cls(title, description), `${title} | ${description ?? ""}`).toBe(expected);
+    });
+
+    it("the leavers never enter the politics gate", () => {
+      for (const [title, description] of BO_LEAVE) notInGate(title, description);
+    });
+  });
+
+  describe("the cut families are plain uses and stay dunya (known residuals)", () => {
+    it.each(BO_CUT)("%s | %s -> %s", (title, description, expected) => {
+      expect(cls(title, description), `${title} | ${description ?? ""}`).toBe(expected);
+    });
+
+    it("the Zorlu funeral headline is dunya, not politika (wave BL guard)", () => {
+      notInGate("Ahmet Nazif Zorlu son yolculuğuna uğurlandı: İş ve siyaset dünyası Levent'te buluştu");
+    });
+  });
+
+  describe("synthetic headlines that stay dunya", () => {
+    it.each(BO_STAY)("%s | %s -> %s", (title, description, expected) => {
+      expect(cls(title, description), `${title} | ${description ?? ""}`).toBe(expected);
+    });
+  });
+
+  describe("rows that the rest of the chain already files elsewhere keep their category", () => {
+    it.each(BO_OTHER_CHAIN)("%s | %s -> %s", (title, description, expected) => {
+      expect(cls(title, description), `${title} | ${description ?? ""}`).toBe(expected);
+    });
+  });
+
+  describe("the veto reads the HEADLINE", () => {
+    it("an L idiom: a country in the description does not keep dunya", () => {
+      expect(cls("Charles Leclerc baba oldu", "Kızı dünyaya geldi. Brezilya Grand Prix'sini kaçıracak.")).toBe("genel");
+      expect(cls("Ünlü oyuncu baba oldu", "Oğlu dünyaya geldi. Çift Kanada'da yaşıyor.")).toBe("genel");
+    });
+
+    it("an L idiom with a country in the HEADLINE stays dunya", () => {
+      expect(cls("Kanada'da Charles Leclerc baba oldu", "Kızı dünyaya geldi.")).toBe("dunya");
+    });
+
+    it("an S idiom: the venue in the description does not keep dunya", () => {
+      expect(
+        cls(
+          "Milli sporculardan Dünya Şampiyonasında 9 madalya",
+          "Sporcular Hindistan’ın başkenti Yeni Delhi’de düzenlenen Dünya Bilek Güreşi Şampiyonası’nda 9 madalya kazandı.",
+        ),
+      ).toBe("spor");
+    });
+
+    it("a plain use keeps dunya whatever the scope", () => {
+      expect(cls("Ünlü oyuncu kızını dünyaya getirdi", "Dünyada eşi benzeri yoktu.")).toBe("dunya");
+    });
+  });
+
+  describe("the country veto: names with any suffix count, separate demonym words do not", () => {
+    it.each([
+      ["Japonya'da dünyaya gelen bebek"],
+      ["Güney Kore'de dünyaya gelen bebek"],
+      ["Hindistan'da dünyaya gelen bebek"],
+      ["Pakistan'da dünyaya gelen bebek"],
+      ["Endonezya'da dünyaya gelen bebek"],
+      ["Malezya'da dünyaya gelen bebek"],
+      ["Kazakistan'da dünyaya gelen bebek"],
+      ["Azerbaycan'da dünyaya gelen bebek"],
+      ["Suudi Arabistan'da dünyaya gelen bebek"],
+      ["Birleşik Arap Emirlikleri'nde dünyaya gelen bebek"],
+      ["Libya'da dünyaya gelen bebek"],
+      ["Kenya'da dünyaya gelen bebek"],
+      ["Afrika'da dünyaya gelen bebek"],
+      ["Yunanistan'da dünyaya gelen bebek"],
+      ["Romanya'da dünyaya gelen bebek"],
+      ["Sırbistan'da dünyaya gelen bebek"],
+      ["İtalya'da dünyaya gelen bebek"],
+      ["İspanya'da dünyaya gelen bebek"],
+      ["Hollanda'da dünyaya gelen bebek"],
+      ["İsviçre'de dünyaya gelen bebek"],
+      ["Birleşik Krallık'ta dünyaya gelen bebek"],
+      ["Kanada'da dünyaya gelen bebek"],
+      ["Brezilya'da dünyaya gelen bebek"],
+      ["Avustralya'da dünyaya gelen bebek"],
+      ["Ortadoğu'da dünyaya gelen bebek"],
+      ["Nijeryalı çiftin dünyaya gelen bebeği"],
+      ["İtalyan çiftin dünyaya gelen bebeği"],
+      ["Londra'da dünyaya gelen bebek"],
+      ["New York'ta dünyaya gelen bebek"],
+      ["Tahran'da dünyaya gelen bebek"],
+      ["Dubai'de dünyaya gelen bebek"],
+      ["Yeni Delhi'de dünyaya gelen bebek"],
+      ["Zelenski'nin dünyaya gelen torunu"],
+      ["Macron'un dünyaya gelen torunu"],
+      ["UNESCO'nun dünyaya gelen çocuk raporu"],
+      ["Hamas'ın dünyaya gelen çocukları"],
+      ["Taliban yönetiminde dünyaya gelen bebekler"],
+      ["Büyükelçinin dünyaya gelen torunu"],
+      ["IMF'nin dünyaya gelen çocuk raporu"],
+    ])("%s stays dunya", (title) => {
+      expect(cls(title), title).toBe("dunya");
+    });
+
+    it.each([
+      ["Alman oyuncu kızını dünyaya getirdi"],
+      ["İngiliz oyuncu kızını dünyaya getirdi"],
+      ["Fransız oyuncu kızını dünyaya getirdi"],
+      ["Japon aktris kızını dünyaya getirdi"],
+      ["Rus oyuncu kızını dünyaya getirdi"],
+    ])("%s leaves dunya (a separate demonym word is no country name)", (title) => {
+      expect(cls(title), title).toBe("genel");
+    });
+
+    it("the three collision guards: koreografi, Hindistan cevizi, katarakt", () => {
+      expect(cls("Ünlü koreograf kızını dünyaya getirdi")).toBe("genel");
+      expect(cls("Hindistan cevizi yağı satan girişimci kızını dünyaya getirdi")).toBe("genel");
+      expect(cls("Katarakt ameliyatı olan oyuncu kızını dünyaya getirdi")).toBe("genel");
+      expect(cls("Kore'de dünyaya gelen bebek")).toBe("dunya");
+      expect(cls("Hindistan'da dünyaya gelen bebek")).toBe("dunya");
+      expect(cls("Katar'da dünyaya gelen bebek")).toBe("dunya");
+    });
+  });
+
+  describe("an S idiom that leaves dunya goes to spor; the order of the chain is unchanged", () => {
+    it("a /dunya/ URL section still wins before the keyword chain", () => {
+      expect(cls("Tuğrul Şan 78 yaşında dünyaevine girdi", null, "https://x.test/dunya/tugrul-san")).toBe("dunya");
+    });
+
+    it("a /spor/ URL section still wins for an S row", () => {
+      expect(cls("Milli sporcular Triathle Dünya Şampiyonası'nda 4 madalya kazandı", null, "https://x.test/spor/triatlon")).toBe(
+        "spor",
+      );
+    });
+
+    it("politika still beats an idiom row", () => {
+      expect(cls("Cumhurbaşkanı Erdoğan dünyaya gelen torununu kabul etti")).toBe("politika");
+    });
+
+    it("the breaking-news prefix: an idiom row becomes son_dakika, a foreign row stays dunya", () => {
+      expect(cls("Son dakika | Charles Leclerc baba oldu", "Kızı dünyaya geldi.")).toBe("son_dakika");
+      expect(cls("Son dakika | Sudan'da dünyaya gelen bebekler")).toBe("dunya");
+      expect(cls("Son dakika | Dünya Güreş Şampiyonası'nda finale yükseldi")).toBe("spor");
+    });
+  });
+
+  describe("linear time on large inputs (200k characters)", () => {
+    // Measured locally (Node 24, 15 runs after a warm-up, the worst of title +
+    // description in one go, ms; the worst of three sessions on a machine that
+    // other jobs were using): 'dünyaya ' repeated 23.9; 'dünya' + 199 990 letters a
+    // 26.4; 'dünya ' + 199 990 letters a 29.1; 'dünya ab cd ' repeated 46.2;
+    // 'dünyanın a b ' repeated 42.6; 'iş dünyası ' repeated 54.0; 'is' + 200k
+    // blanks + 'dünyası' 22.1; 'gözlerini' + 200k blanks + 'dünyaya' 14.3;
+    // 'dünyaevine ' + 200k keyword-free words (reaches FOREIGN_RE) 41.7; 'dünyaca
+    // ünlü ' + 200k keyword-free words 25.4; 'dünya şampiyonası ' repeated 71.9. The
+    // medians are 3.5 .. 36 ms, and doubling the input from 50k to 400k doubles
+    // the time. The old classifier on the same inputs: 28.9 ms worst on a quiet
+    // run, 96.9 ms under load. The bound is max(100, ceil(3 x 71.9)) = 216 ms for
+    // the two calls: a quadratic scan would cost seconds on these inputs.
+    const PAIR_BUDGET_MS = 216;
+    const filler = "alfa beta gama delta ".repeat(10_000);
+    const inputs: Array<[string, string]> = [
+      ["'dünyaya ' repeated", "dünyaya ".repeat(25_100).slice(0, 200_000)],
+      ["'dünya' + 199 990 letters a", "dünya" + "a".repeat(199_990)],
+      ["'dünya ' + 199 990 letters a", "dünya " + "a".repeat(199_990)],
+      ["'dünya ab cd ' repeated", "dünya ab cd ".repeat(16_700).slice(0, 200_000)],
+      ["'dünyanın a b ' repeated", "dünyanın a b ".repeat(15_400).slice(0, 200_000)],
+      ["'iş dünyası ' repeated", "iş dünyası ".repeat(18_200).slice(0, 200_000)],
+      ["'is' + 200k blanks + 'dünyası'", "is" + " ".repeat(200_000) + "dünyası"],
+      ["'gözlerini' + 200k blanks + 'dünyaya'", "gözlerini" + " ".repeat(200_000) + "dünyaya"],
+      ["'dünyaevine ' + 200k keyword-free words", "dünyaevine " + filler.slice(0, 200_000)],
+      ["'dünyaca ünlü ' + 200k keyword-free words", "dünyaca ünlü " + filler.slice(0, 200_000)],
+      ["'dünya şampiyonası ' repeated", "dünya şampiyonası ".repeat(11_100).slice(0, 200_000)],
+    ];
+
+    it.each(inputs)("%s classifies in under the budget", (_name, text) => {
+      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
+      const started = performance.now();
+      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
+      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
+      const elapsed = performance.now() - started;
+      expect(ALL.has(viaTitle)).toBe(true);
+      expect(ALL.has(viaDescription)).toBe(true);
+      expect(elapsed).toBeLessThan(PAIR_BUDGET_MS);
+    });
+  });
+});
