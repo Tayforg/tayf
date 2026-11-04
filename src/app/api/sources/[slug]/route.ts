@@ -54,6 +54,7 @@ const REGISTRY_HEADERS = {
 // instead of costing a registry lookup per hit.
 const NOT_FOUND_HEADERS = {
   "Cache-Control": "public, s-maxage=300",
+  "Content-Type": "application/json; charset=utf-8",
 };
 
 const sourcesJsonLimit = createRateLimiter("sources-json", {

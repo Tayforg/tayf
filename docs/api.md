@@ -255,7 +255,7 @@ Three more RSS 2.0 feeds, all `GET`, unkeyed, `Content-Type: application/rss+xml
 | `/rss/kor-noktalar.xml` | the blindspots feed (the `/blindspots` page). Item `link`s carry `utm_campaign=kor_nokta`; each description starts with `Kör nokta: ağırlıkla {zone} kaynakları (%N).` |
 | `/blindspots/rss.xml` | the same feed as `/rss/kor-noktalar.xml`, produced by the same code; only the `atom:link rel="self"` URL differs. |
 
-Every item has the headline as `title`, the cluster page as `link` (with the UTM parameters above), the plain `/cluster/{id}` URL as `guid`, the cluster's `first_published` as `pubDate`, and a description such as `7 kaynak · İktidar 4, Bağımsız 2, Muhalefet 1`. The UTM parameters are never part of the `guid`, so a feed reader does not see old items as new.
+Every item has the headline as `title`, the cluster page as `link` (with the UTM parameters above), the plain `/cluster/{id}` URL as `guid`, the cluster's `first_published` as `pubDate`, and a description such as `7 kaynak · İktidar 4 · Bağımsız 2 · Muhalefet 1`: the source count, then the three zones joined by ` · ` (not commas); every zone is printed, zero counts included (`4 kaynak · İktidar 2 · Bağımsız 1 · Muhalefet 0`), so a consumer can split on ` · ` and always gets the same parts. The UTM parameters are never part of the `guid`, so a feed reader does not see old items as new.
 
 - **Item cap**: 30 per feed.
 - **Cache**: `Cache-Control: public, max-age=300, s-maxage=300` on a `200` (5 minutes; unlike `/rss.xml` there is no `stale-while-revalidate`).
@@ -388,7 +388,8 @@ The public, unkeyed source registry: every **active** source, ordered by name, a
 | --- | --- | --- |
 | `200` | the registry | `public, s-maxage=3600, stale-while-revalidate=86400` |
 | `429` | the per-client limiter is empty: `{"error":"Too many requests","details":{"retryAfterMs":...}}` with `Retry-After` (whole seconds, at least 1) | `no-store` |
-| `500` | the registry could not be read: `{"error":"Internal server error","details":{"request_id":"..."}}`. A sustained read failure is a `500`, never a `200` with an empty `sources` list that a CDN would then hold for an hour | not set |
+| `503` | the database is unavailable (a timeout or abort, `PGRST000`-`PGRST003`, `57014`, a gateway `502`/`503`/`504`): `{"error":"Service temporarily unavailable","code":"upstream_unavailable","details":{"request_id":"..."}}` with `Retry-After: 30`. Retry after that many seconds; it is an outage, not a bug in the request | `no-store` |
+| `500` | the registry could not be read for any other reason: `{"error":"Internal server error","details":{"request_id":"..."}}`. A sustained read failure is a `503` or a `500`, never a `200` with an empty `sources` list that a CDN would then hold for an hour | not set |
 
 Rate limit: a 60-token bucket per client, refilling one token per second (about 60 requests per minute sustained; in-memory, so per server instance); the bucket is shared with `GET /api/sources/{slug}`. The query string is never read, so a cache-busting `?cb=<random>` neither mints a cache entry nor costs a database read. The response is not CORS-enabled for browsers by this route; use the keyed `/api/v1/sources` for that.
 
@@ -432,7 +433,8 @@ One source's registry record, its bias-change history and the aggregate reader a
 | `400` | `{"error":"Bad request: malformed URL encoding"}`: a malformed percent-encoding in the slug (`/api/sources/%ff`). Answered by the edge middleware before the route runs, so it neither touches the registry nor spends a rate-limit token. `Content-Type: application/json; charset=utf-8` | `no-store` |
 | `404` | `{"error":"Source not found"}`: no active source has that slug (an unknown slug and a deactivated one look the same) | `public, s-maxage=300` |
 | `429` | same limiter and body as `GET /api/sources`; `Retry-After`, `no-store` | `no-store` |
-| `500` | the registry or the history could not be read | not set |
+| `503` | the database is unavailable (same causes, body and `Retry-After: 30` as `GET /api/sources`): `{"error":"Service temporarily unavailable","code":"upstream_unavailable","details":{"request_id":"..."}}` | `no-store` |
+| `500` | the registry or the history could not be read for any other reason | not set |
 
 The `stale-while-revalidate` window is only 300 s, much shorter than the list's, so a retracted rationale or corrected bias cannot be served from a stale CDN copy for a day. The handler checks the rate limit first, then the slug shape, then the registry, so an `Invalid slug` request also costs one token. The query string is never read.
 
@@ -550,6 +552,19 @@ non-2xx):
   `X-Tayf-Tier` is present when the failure happened after the key was
   resolved (a route's own query) and absent when it happened while resolving
   the key (the key lookup or the usage count failed).
+- `503`: the database is temporarily unavailable (a timeout or abort,
+  `PGRST000`-`PGRST003`, `57014`, a gateway `502`/`503`/`504`), whether while
+  resolving the key or in a route's own query. Body:
+  `{"error":"Service temporarily unavailable","code":"upstream_unavailable","details":{"request_id":"..."}}`:
+  the stable `code` and a `details.request_id` to quote when you report it, and
+  nothing else (never a raw database error). Always carries
+  `Retry-After: 30` (seconds) and, like every `/api/v1` response, a
+  `Cache-Control` of `private, no-store`, so no cache keeps the outage. Retry
+  after the `Retry-After` interval; it is not a bug in your request, and any
+  other unexpected failure stays a `500`. `X-Tayf-Tier` is present only when
+  the key was resolved before the failure (a route's own query) and absent when
+  the failure happened while resolving the key. A `503` from the key lookup
+  fails closed: the request is refused, never admitted unchecked.
 
 **Headers on every `/api/v1` response** (success, error and refusal alike;
 the one exception is the `200` of `GET /api/v1/openapi.json`, which is public
@@ -574,8 +589,8 @@ response, because the tier is only known once the key has been resolved:
 
 | `X-Tayf-Tier` | Responses |
 |---|---|
-| present (the key's tier) | every `2xx`; every `301` / `400` / `404` / `500` a route returns after the key was resolved; the `429`s with `code` `key_minute` and `key_day` |
-| absent | `401`; `403`; `429` `ip_floor`; a `500` raised while resolving the key; `405`; the unknown-path `404` from the catch-all; the edge-middleware `400` for a malformed URL encoding |
+| present (the key's tier) | every `2xx`; every `301` / `400` / `404` / `500` / `503` a route returns after the key was resolved; the `429`s with `code` `key_minute` and `key_day` |
+| absent | `401`; `403`; `429` `ip_floor`; a `500` or `503` raised while resolving the key; `405`; the unknown-path `404` from the catch-all; the edge-middleware `400` for a malformed URL encoding |
 | fixed `free` | the `OPTIONS` preflight `204`: no key is read, so the value says nothing about the caller |
 
 `GET /api/v1/openapi.json` is keyless and carries no `X-Tayf-Tier`. An
@@ -587,6 +602,13 @@ CORS is GET-from-anywhere (this is a read-only public API — any origin may
 call it from the browser as long as it presents a valid key). Every
 `/api/v1/*` route also answers `OPTIONS` with a bare `204` carrying the
 same CORS headers.
+
+**Paths take no trailing slash.** `/api/v1/clusters/` (and likewise
+`/api/oembed/` and `/api/sources/`) is answered by the platform with a `308`
+redirect to the slash-less path before any route runs. That redirect carries
+no CORS headers, and a browser will not follow a redirect on a preflight, so
+`fetch('/api/v1/clusters/', { headers: { Authorization } })` fails with an
+opaque CORS error. Call the slash-less path.
 
 **Envelope**: every response body is wrapped by the same
 `registryEnvelope()` `/api/sources` uses — `licence` (`CC BY-SA 4.0 —
