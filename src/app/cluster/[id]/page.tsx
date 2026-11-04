@@ -297,13 +297,17 @@ export async function generateMetadata({
   const canonicalId = id.toLowerCase();
   // Attributed summary (or null when blank / a bare wire copy) — see
   // summary-attribution.ts. describeForMeta keeps the result under the
-  // ~160 char SERP cap on its own.
+  // ~160 char SERP cap on its own. `agreeWithTitle` (h31-reader-3 v2) is the
+  // same on both summaryAttribution calls of this file (here and in the page
+  // body, whose result the JSON-LD reuses), so the meta description, the JSON-LD
+  // and the page never disagree about whose words the summary is.
   const description = describeForMeta({
     count: wire.effectiveArticleCount,
     attribution: summaryAttribution({
       summary: cluster.summary_tr,
       members,
       wire,
+      agreeWithTitle: hasHeadline ? cluster.title_tr : undefined,
     }),
     // Never build the "tek haber: <title>" fallback sentence from junk.
     title: hasHeadline ? cluster.title_tr : undefined,
@@ -549,11 +553,14 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   });
 
   // Attributed cluster summary — see summary-attribution.ts. Null hides the
-  // summary block entirely (blank text, or a bare wire-copy nobody wrote).
+  // summary block entirely (blank text, or a bare wire-copy nobody wrote). The
+  // seed's description is kept while it agrees with the headline above it and
+  // swapped for the member that agrees best when it does not (h31-reader-3 v2).
   const summary = summaryAttribution({
     summary: cluster.summary_tr,
     members,
     wire,
+    agreeWithTitle: hasHeadline ? cluster.title_tr : undefined,
   });
 
   // T11 (migration 068) — Çerçeveleme makbuzu. The flag is checked FIRST,

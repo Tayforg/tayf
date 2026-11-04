@@ -1,7 +1,8 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import { backOffOpenQuote, tidySummaryText, trimDanglingEnd } from "@/lib/articles/summary-tidy";
+import { findAgreeingMember } from "./summary-agreement";
 import type { WireSignal } from "./wire";
-import type { BiasCategory } from "@/types";
+import type { BiasCategory, SourceKind } from "@/types";
 
 // clusters.summary_tr is the seed article's raw RSS description — one
 // outlet's words, not Tayf's. It must be attributed to that outlet or
@@ -27,6 +28,21 @@ import type { BiasCategory } from "@/types";
 // let a rights-blocked or wire-copied description slip past those checks.
 // Tidied text that comes out empty (the summary was only a CTA or a widget
 // heading) hides the summary, like a blank one.
+//
+// Title agreement (h31-reader-3 v2), OPT-IN: the seed's description is written
+// once, when the cluster is created, so on a developing story it can contradict
+// the headline on the same page (6e19dd5a: "seçimi önde götürüyor" under "Senato'ya
+// seçilen ilk Müslüman oldu"). A caller that passes `agreeWithTitle` (the
+// cluster's current neutral title) keeps the seed while it agrees with that title
+// and otherwise gets the member whose description agrees best, attributed to that
+// member (`findAgreeingMember` in summary-agreement.ts has the whole rule). It
+// runs AFTER every gate above (blank, rights-blocked, wire majority,
+// tidied-empty), so those are untouched, and the shown text is always a member's
+// own description, tidied for display. Only the cluster page passes it (body,
+// generateMetadata and JSON-LD alike, so the three never disagree); rss.xml, the
+// digest and the home/list cards, which have no member rows or no title to
+// compare, keep the seed. Without `agreeWithTitle` the result is byte-identical
+// to what it was before.
 
 // Structural subset of ClusterDetailMember (cluster-detail-query.ts): the
 // cluster page's members satisfy this shape as-is, and lighter callers
@@ -36,6 +52,15 @@ export interface SummaryMember {
   source: {
     name: string;
     bias: BiasCategory;
+    /**
+     * Source kind and slug, read only by the title-agreement choice (wire and
+     * aggregator members never replace the seed; an English outlet's text is not
+     * put under a Turkish story). Absent on lighter projections (the RSS
+     * members): a missing kind reads as an outlet and a missing slug falls back
+     * to the display name (`sourceLang`).
+     */
+    kind?: SourceKind | null;
+    slug?: string | null;
     /**
      * BL-13 per-source rights flag (migration 047): `false` when this
      * outlet has asked Tayf not to reuse its article text. `undefined`
@@ -108,15 +133,39 @@ export interface SummaryAttribution {
   source: SummaryMember["source"] | null;
 }
 
-/** Null hides the summary: blank text, or a wire copy the seed source didn't write. */
+/**
+ * The content hashes a wire redistribution copied: the hash(es) most members
+ * share, ties included. The seed is hidden when its hash is one of them; the
+ * title-agreement choice skips a candidate that holds one. Empty without a wire
+ * redistribution.
+ */
+function wireMajorityHashes(
+  members: SummaryMember[],
+  wire: Pick<WireSignal, "isWireRedistribution">,
+): Set<string> {
+  if (!wire.isWireRedistribution) return new Set();
+  const counts = contentHashCounts(members);
+  const bestCount = Math.max(0, ...counts.values());
+  const majority = new Set<string>();
+  for (const [hash, count] of counts) if (count === bestCount) majority.add(hash);
+  return majority;
+}
+
+/**
+ * Null hides the summary: blank text, or a wire copy the seed source didn't
+ * write. `agreeWithTitle` (opt-in, the cluster page only; see the header) swaps
+ * a seed that disagrees with that title for the member that agrees best.
+ */
 export function summaryAttribution({
   summary,
   members,
   wire,
+  agreeWithTitle,
 }: {
   summary: string;
   members: SummaryMember[];
   wire: Pick<WireSignal, "isWireRedistribution">;
+  agreeWithTitle?: string;
 }): SummaryAttribution | null {
   const text = repairEntityResidue(summary).trim();
   if (text.length === 0) return null;
@@ -139,18 +188,28 @@ export function summaryAttribution({
 
   const seedMember = findSeedMember(members, text);
 
-  if (wire.isWireRedistribution && seedMember) {
+  const majorityHashes = wireMajorityHashes(members, wire);
+  if (seedMember) {
     const hash = seedMember.article.content_hash;
-    if (hash !== null) {
-      const counts = contentHashCounts(members);
-      const bestCount = Math.max(0, ...counts.values());
-      // Tie-safe: hide when the seed's hash is (one of) the majority.
-      if ((counts.get(hash) ?? 0) === bestCount) return null;
-    }
+    // Tie-safe: hide when the seed's hash is (one of) the majority.
+    if (hash !== null && majorityHashes.has(hash)) return null;
   }
 
   const shown = tidySummaryText(text);
   if (shown.length === 0) return null;
+
+  // "Kaynak açıklaması" (no member holds the text) has no seed outlet to compare
+  // a language or a rights flag against: it stays as stored.
+  if (agreeWithTitle !== undefined && seedMember) {
+    const better = findAgreeingMember({
+      members,
+      seed: seedMember,
+      seedShown: shown,
+      title: agreeWithTitle,
+      wireMajorityHashes: majorityHashes,
+    });
+    if (better) return { text: better.text, source: better.member.source };
+  }
   return { text: shown, source: seedMember ? seedMember.source : null };
 }
 

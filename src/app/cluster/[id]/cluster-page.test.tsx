@@ -3789,21 +3789,23 @@ describe("ClusterDetailPage — summary paragraph lang follows the seed outlet (
 });
 
 // ---------------------------------------------------------------------------
-// h31-reader-3 (deferred): the cluster page does NOT swap the seed's summary for
-// a newer member's. The replay over 39 live clusters (4 Nov 2026) changed 19
-// summaries: 4 better, 7 neutral, 8 worse (a feed-cut stub, a teaser question,
-// a dateline, a glued run-on, loaded framing, a text that contradicts the
-// headline). Until a selection rule passes that replay with zero worse rows,
-// the page keeps the seed's text under the seed's outlet, in the body, the meta
-// description and the JSON-LD alike. The newest-member selector was not
-// shipped; these tests keep any future rule honest against those shapes.
+// h31-reader-3 v2: the page keeps the seed's summary while it agrees with the
+// headline and swaps it for the member that agrees best when it does not (token
+// overlap with the neutral title; summary-agreement.ts has the rule). The first
+// try, "the newest eligible member", changed 19 of 39 live summaries and 8 of
+// them for the worse; this one is replayed over the 60 most recently updated
+// multi-article clusters with zero worse rows. The body, the meta description
+// and the JSON-LD must name the same outlet.
 // ---------------------------------------------------------------------------
 
-describe("ClusterDetailPage — summary stays on the seed (h31-reader-3 deferred)", () => {
+describe("ClusterDetailPage — summary follows the headline (h31-reader-3 v2)", () => {
+  const TITLE = "Abdul El Sayed ABD'de Senato'ya seçilen ilk Müslüman oldu";
   const SEED_TEXT =
     "Michigan'daki Senato yarışında, Demokratların Müslüman adayı Abdul ElSayed seçimi önde götürüyor.";
   const BIRGUN_TEXT =
     "Abdul El Sayed, Michigan'da Senato seçimini kazanarak ABD Senatosu'na seçilen ilk Müslüman oldu.";
+  const CUMHURIYET_TEXT =
+    "Abdul El Sayed Michigan'da Senato koltuğunu aldı, ABD Kongresi'ne giren ilk Müslüman Senatör oldu.";
   const OUTLETS: Array<{
     slug: string;
     name: string;
@@ -3815,24 +3817,24 @@ describe("ClusterDetailPage — summary stays on the seed (h31-reader-3 deferred
     { slug: "sozcu", name: "Sözcü", bias: "opposition", at: "2026-11-04T07:00:00.000Z", description: "Michigan'da Senato yarışında oy sayımı sürüyor, ilk sonuçlar Demokrat adayın lehine görünüyor." },
     { slug: "hurriyet", name: "Hürriyet", bias: "center", at: "2026-11-04T08:00:00.000Z", description: "ABD'de ara seçim sonuçları gelmeye başladı; Michigan Senato koltuğunda Demokratlar önde." },
     { slug: "ntv", name: "NTV", bias: "center", at: "2026-11-04T09:30:00.000Z", description: "Michigan Senato seçimini Abdul El Sayed kazandı, seçim sonuçları resmen açıklandı." },
-    { slug: "cumhuriyet", name: "Cumhuriyet", bias: "opposition_leaning", at: "2026-11-04T10:00:00.000Z", description: "Abdul El Sayed Michigan'da Senato koltuğunu aldı, ABD Kongresi'ne giren ilk Müslüman Senatör oldu." },
+    { slug: "cumhuriyet", name: "Cumhuriyet", bias: "opposition_leaning", at: "2026-11-04T10:00:00.000Z", description: CUMHURIYET_TEXT },
     { slug: "birgun", name: "BirGün", bias: "opposition", at: "2026-11-04T10:40:00.000Z", description: BIRGUN_TEXT },
   ];
 
-  /** Six outlets, the seed 4 h older than the newest: the shape a freshening rule would act on. */
-  function freshDetail(newestDescription: string = BIRGUN_TEXT): ClusterDetail {
+  /** Six outlets, the seed (TRT Haber) the oldest, the headline saying the race was decided. */
+  function story(opts: { birgun?: string; title?: string } = {}): ClusterDetail {
     const sources = OUTLETS.map((o) =>
       makeSource({ id: `id-${o.slug}`, slug: o.slug, name: o.name, bias: o.bias, kind: "outlet" }),
     );
     const members = OUTLETS
       .map((o, i) => {
         const m = makeMember(`a-${o.slug}`, sources[i]!, o.at);
-        m.article.description = o.slug === "birgun" ? newestDescription : o.description;
+        m.article.description = o.slug === "birgun" ? (opts.birgun ?? o.description) : o.description;
         return m;
       })
       .reverse(); // newest first, as the detail query returns them
     const cluster = makeCluster({ bias_distribution: emptyDistribution(), article_count: members.length });
-    cluster.title_tr = "Abdul El Sayed ABD'de Senato'ya seçilen ilk Müslüman oldu";
+    cluster.title_tr = opts.title ?? TITLE;
     cluster.summary_tr = SEED_TEXT;
     return {
       cluster,
@@ -3851,8 +3853,18 @@ describe("ClusterDetailPage — summary stays on the seed (h31-reader-3 deferred
   const summaryParagraph = (tree: unknown, text: string) =>
     findElement(tree, (el) => el.type === "p" && collectText(el.props.children).join("") === text);
 
-  it("keeps the seed's text under the seed's outlet although a newer eligible member exists", async () => {
-    const tree = await renderTree(freshDetail());
+  it("the seed contradicts the headline: the member that agrees with it is shown, under its own outlet", async () => {
+    const tree = await renderTree(story());
+    const text = collectText(tree).join("");
+    expect(text).toContain("Özet — BirGün");
+    expect(text).not.toContain("Özet — TRT Haber");
+    expect(summaryParagraph(tree, BIRGUN_TEXT)).not.toBeNull();
+    expect(summaryParagraph(tree, SEED_TEXT)).toBeNull();
+    expect(text).not.toContain("önde götürüyor");
+  });
+
+  it("the seed agrees with the headline: it stays, under the seed's outlet, although a newer member exists", async () => {
+    const tree = await renderTree(story({ title: "Michigan'daki Senato yarışında Abdul ElSayed seçimi önde götürüyor" }));
     const text = collectText(tree).join("");
     expect(text).toContain("Özet — TRT Haber");
     expect(text).not.toContain("Özet — BirGün");
@@ -3860,48 +3872,64 @@ describe("ClusterDetailPage — summary stays on the seed (h31-reader-3 deferred
     expect(summaryParagraph(tree, BIRGUN_TEXT)).toBeNull();
   });
 
-  it("adds no clock and no time element to the byline (byte-identical to before the wave)", async () => {
-    const tree = await renderTree(freshDetail());
-    expect(collectText(tree).join("")).not.toContain("Özet — TRT Haber,");
-    expect(findElement(tree, (el) => el.type === "time" && el.props.dateTime === "2026-11-04T06:28:00.000Z")).toBeNull();
-    expect(findElement(tree, (el) => el.type === "time" && el.props.dateTime === "2026-11-04T10:40:00.000Z")).toBeNull();
+  it("a title with no letter or digit has nothing to agree with: the seed stays", async () => {
+    const tree = await renderTree(story({ title: "…" }));
+    expect(collectText(tree).join("")).toContain("Özet — TRT Haber");
+    expect(summaryParagraph(tree, SEED_TEXT)).not.toBeNull();
   });
 
-  it("the meta description and the JSON-LD description agree with the page: the seed outlet's text", async () => {
-    const detail = freshDetail();
+  it("adds no clock and no time element to the byline", async () => {
+    const tree = await renderTree(story());
+    expect(collectText(tree).join("")).not.toContain("Özet — BirGün,");
+    expect(findElement(tree, (el) => el.type === "time" && el.props.dateTime === "2026-11-04T10:40:00.000Z")).toBeNull();
+    expect(findElement(tree, (el) => el.type === "time" && el.props.dateTime === "2026-11-04T06:28:00.000Z")).toBeNull();
+  });
+
+  it("the meta description and the JSON-LD description name the same outlet and text as the page", async () => {
+    const detail = story();
     const tree = await renderTree(detail);
     const jsonLd = JSON.parse(findJsonLd(tree) ?? "{}") as { description?: string };
-    expect(jsonLd.description).toContain("TRT Haber:");
-    expect(jsonLd.description).not.toContain("BirGün:");
+    expect(jsonLd.description).toContain("BirGün:");
+    expect(jsonLd.description).not.toContain("TRT Haber:");
 
     getClusterDetailOrThrowSpy.mockReset();
     getClusterDetail.mockResolvedValue(detail);
     const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
     expect(getClusterDetailOrThrowSpy).toHaveBeenCalled();
     expect(metadata.description).toBe(jsonLd.description);
+    expect(metadata.description?.startsWith("6 kaynak. BirGün: Abdul El Sayed, Michigan'da Senato")).toBe(true);
+  });
+
+  it("the meta description keeps the seed when the headline is contentless, like the body", async () => {
+    const detail = story({ title: "…" });
+    getClusterDetailOrThrowSpy.mockReset();
+    getClusterDetail.mockResolvedValue(detail);
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
     expect(metadata.description?.startsWith("6 kaynak. TRT Haber: Michigan'daki Senato")).toBe(true);
   });
 
-  // The failure modes the replay found in the newest member's text. None of them
-  // may reach the page while the freshening is off.
+  // The failure modes the newest-member rule produced. None of them may reach the
+  // page, whatever their agreement with the headline: the next best member, or
+  // the seed, is shown instead.
   const HAZARDS: Array<[string, string]> = [
-    ["a feed-cut stub", "Michigan'da Senato seçimini kazanan Abdul El Sayed'in zaferi memnuniyetle…"],
-    ["a teaser question", "Michigan'da ipi göğüsleyerek ABD tarihindeki ilk Müslüman senatör olan Abdul El Sayed kimdir?"],
-    ["a dateline", "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ilk Müslüman senatör oldu."],
+    ["a feed-cut stub", "Michigan'da Senato seçimini kazanan Abdul El Sayed, ABD'de Senato'ya seçilen ilk Müslüman oldu ve tarihe geç..."],
+    ["a teaser question", "Michigan'da ipi göğüsleyerek ABD'de Senato'ya seçilen ilk Müslüman oldu: Abdul El Sayed kimdir?"],
+    ["a dateline", "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ABD'de Senato'ya seçilen ilk Müslüman oldu."],
     [
       "a glued run-on",
-      "Abdul El Sayed Michigan'da Senato seçimini kazandı Abdul El Sayed Michigan'da Senato seçimini kazandı ve tarihe geçti.",
+      "Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu, ABD'de tarihe geçti.",
     ],
   ];
-  it.each(HAZARDS)("a newest member whose text is %s does not replace the seed", async (_label, hazard) => {
-    const tree = await renderTree(freshDetail(hazard));
-    expect(summaryParagraph(tree, SEED_TEXT)).not.toBeNull();
-    expect(collectText(tree).join("")).not.toContain(hazard);
-    expect(collectText(tree).join("")).toContain("Özet — TRT Haber");
+  it.each(HAZARDS)("the newest member's text being %s: the next best member is shown", async (_label, hazard) => {
+    const tree = await renderTree(story({ birgun: hazard }));
+    const text = collectText(tree).join("");
+    expect(text).not.toContain(hazard);
+    expect(text).toContain("Özet — Cumhuriyet");
+    expect(summaryParagraph(tree, CUMHURIYET_TEXT)).not.toBeNull();
   });
 
-  it("no literal match: 'Kaynak açıklaması' with no clock and no time element", async () => {
-    const detail = freshDetail();
+  it("no literal match: 'Kaynak açıklaması' stays as stored, with no clock and no time element", async () => {
+    const detail = story();
     detail.cluster.summary_tr = "Hiçbir üyenin açıklaması olmayan, saklanmış bir özet metni.";
     const tree = await renderTree(detail);
     const text = collectText(tree).join("");
@@ -3913,10 +3941,20 @@ describe("ClusterDetailPage — summary stays on the seed (h31-reader-3 deferred
   });
 
   it("a rights-blocked-everywhere summary stays hidden", async () => {
-    const detail = freshDetail();
+    const detail = story();
     const seed = detail.members.find((m) => m.source.slug === "trt-haber")!;
     seed.source = { ...seed.source, excerpt_allowed: false };
     const tree = await renderTree(detail);
     expect(collectText(tree).join("")).not.toContain("Özet —");
+  });
+
+  it("a replacement from an outlet that asked not to be excerpted is never shown", async () => {
+    const detail = story();
+    const birgun = detail.members.find((m) => m.source.slug === "birgun")!;
+    birgun.source = { ...birgun.source, excerpt_allowed: false };
+    const tree = await renderTree(detail);
+    const text = collectText(tree).join("");
+    expect(text).not.toContain(BIRGUN_TEXT);
+    expect(text).toContain("Özet — Cumhuriyet");
   });
 });

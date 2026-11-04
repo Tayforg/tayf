@@ -7,6 +7,15 @@ import {
   resolveSummaryAttribution,
 } from "./summary-attribution";
 import type { ClusterDetailMember } from "./cluster-detail-query";
+import {
+  AGENCY_COPY_OVERLAP,
+  AGREEMENT_HIGH,
+  AGREEMENT_LOW,
+  summaryDefect,
+  textOverlap,
+  titleAgreement,
+} from "./summary-agreement";
+import { tidySummaryText } from "@/lib/articles/summary-tidy";
 import type { Source } from "@/types";
 
 const T0 = "2026-09-06T10:00:00.000Z";
@@ -1378,5 +1387,814 @@ describe("h32-livebk-2: an uncut text with an unclosed quotation", () => {
         }
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h31-reader-3 v2: the cluster page keeps the seed's description unless it
+// DISAGREES with the cluster's current neutral title. `agreeWithTitle` is an
+// opt-in; every other caller (rss.xml, the digest, the cards) never passes it.
+// ---------------------------------------------------------------------------
+describe("agreeWithTitle: the seed is replaced only when it disagrees with the title (h31-reader-3 v2)", () => {
+  const notWire = { isWireRedistribution: false };
+  const wireDispatch = { isWireRedistribution: true };
+
+  /** A member of a named outlet; the hash is unique per slug unless given. */
+  function outlet(
+    name: string,
+    slug: string,
+    publishedAt: string,
+    description: string | null,
+    extra: { hash?: string | null; kind?: Source["kind"]; allowed?: boolean } = {},
+  ): ClusterDetailMember {
+    const m = member(slug, publishedAt, description, extra.hash === undefined ? `hash-${slug}` : extra.hash);
+    m.source = { ...src(slug), name, slug, kind: extra.kind ?? "outlet" };
+    if (extra.allowed !== undefined) m.source.excerpt_allowed = extra.allowed;
+    return m;
+  }
+
+  /** `summaryAttribution` with the title opted in, the seed text being the stored summary. */
+  const withTitle = (
+    members: ClusterDetailMember[],
+    title: string,
+    summary: string,
+    wire: { isWireRedistribution: boolean } = notWire,
+  ) => summaryAttribution({ summary, members, wire, agreeWithTitle: title });
+
+  // 6e19dd5a (4 Nov 2026, 26 kaynak): the neutral title says El Sayed was
+  // elected, the stored summary is TRT Haber's pre-result article.
+  const TITLE = "Abdul El Sayed ABD'de Senato'ya seçilen ilk Müslüman oldu";
+  const SEED_TEXT =
+    'ABD\'de "çekişmeli eyalet" olarak bilinen ve en kritik ara seçim bölgelerinden biri olan Michigan\'daki Senato yarışında, Demokratların Müslüman adayı Abdul ElSayed seçimi önde götürüyor.';
+  const STAR_TEXT =
+    'ABD\'de "çekişmeli eyalet" olarak bilinen ve en kritik ara seçim bölgelerinden biri olan Michigan\'daki Senato yarışında, Demokratların Müslüman adayı Abdul El-Sayed seçimi kazandı.';
+  const DW_TEXT =
+    "Ara seçimlerde Kongrenin her iki kanadında da çoğunluk Demokratlara geçti. Cumhuriyetçi Parti Teksas ve Kansas gibi eyaletleri kaybetti. Abdul El-Sayed Senato'ya seçilen ilk Müslüman siyasetçi oldu.";
+  const HABER7_TEXT =
+    "ABD'deki senato seçimlerinde Demokrat Parti adayı Abdul El Sayed, Michigan’daki seçimleri resmen kazanarak Senato’ya seçilen ilk Müslüman oldu.";
+  const TURKIYE_TEXT =
+    "ABD’deki ara seçimlerde Michigan eyaletinde, Mısır asıllı Müslüman aday Abdul el-Sayed, Cumhuriyetçi rakibi Mike Rogers’a üstünlük sağlayarak ABD Senatosuna seçilen ilk Müslüman oldu.";
+
+  // The shapes the newest-member rule (attempt 1) chose and the replay judged
+  // worse, each with a strong title agreement so that only the quality
+  // predicates keep it out.
+  const STUB_TEXT =
+    "Michigan'da Senato seçimini kazanan Abdul El Sayed, ABD'de Senato'ya seçilen ilk Müslüman oldu ve tarihe geç...";
+  const TEASER_TEXT =
+    "ABD'deki senato seçimlerinde Demokrat Parti adayı Abdul El Sayed, Michigan’daki seçimleri resmen kazanarak Senato’ya seçilen ilk Müslüman oldu. Peki, Abdul El Sayed kimdir? Kaç yaşında, aslen nereli?";
+  const DATELINE_TEXT =
+    "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ABD'de Senato'ya seçilen ilk Müslüman oldu.";
+  const RUN_ON_TEXT =
+    "Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu, ABD'de tarihe geçti.";
+
+  const SEED_AT = "2026-11-04T06:28:00.000Z";
+  const trt = () => outlet("TRT Haber", "trt-haber", SEED_AT, SEED_TEXT);
+  const star = () => outlet("Star", "star", "2026-11-04T07:05:00.000Z", STAR_TEXT);
+  const dw = () => outlet("DW Türkçe", "dw-turkce", "2026-11-04T07:25:00.000Z", DW_TEXT);
+  const haber7 = () => outlet("Haber7", "haber7", "2026-11-04T07:23:00.000Z", HABER7_TEXT);
+  const turkiye = () => outlet("Türkiye Gazetesi", "turkiye-gazetesi", "2026-11-04T07:49:00.000Z", TURKIYE_TEXT);
+
+  /** The story with the seed, a mid-agreement member and two clean 1.0 members. */
+  function story() {
+    const seed = trt();
+    const members = [turkiye(), haber7(), dw(), star(), seed];
+    return { seed, members };
+  }
+
+  it("the fixture is what the cases below assume (agreement levels and the thresholds)", () => {
+    expect(titleAgreement(TITLE, SEED_TEXT)).toBeCloseTo(4 / 9, 10);
+    expect(titleAgreement(TITLE, STAR_TEXT)).toBeCloseTo(6 / 9, 10);
+    expect(titleAgreement(TITLE, DW_TEXT)).toBeCloseTo(8 / 9, 10);
+    expect(titleAgreement(TITLE, HABER7_TEXT)).toBe(1);
+    expect(titleAgreement(TITLE, TURKIYE_TEXT)).toBe(1);
+    expect(titleAgreement(TITLE, SEED_TEXT)!).toBeLessThan(AGREEMENT_LOW);
+    for (const hazard of [STUB_TEXT, TEASER_TEXT, DATELINE_TEXT, RUN_ON_TEXT]) {
+      expect(titleAgreement(TITLE, hazard)!, hazard).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+      expect(summaryDefect(hazard, hazard), hazard).not.toBeNull();
+    }
+  });
+
+  it("1. 6e19dd5a shape: the seed disagrees with the title, the clean member that agrees best (newest on a tie) replaces it", () => {
+    const { members } = story();
+    const turkiyeMember = members[0]!;
+    const out = withTitle(members, TITLE, SEED_TEXT);
+    expect(out).toStrictEqual({ text: TURKIYE_TEXT, source: turkiyeMember.source });
+    expect(out?.text).not.toContain("önde götürüyor");
+  });
+
+  it("1. the chosen text is the member's tidied description (a CTA tail is peeled off)", () => {
+    const { members } = story();
+    members[0]!.article.description = `${TURKIYE_TEXT}Devamı için tıklayınız`;
+    const out = withTitle(members, TITLE, SEED_TEXT);
+    expect(out?.text).toBe(TURKIYE_TEXT);
+    expect(out?.source).toBe(members[0]!.source);
+  });
+
+  it("2. agreeWithTitle omitted: byte-identical to today (the seed under the seed's outlet)", () => {
+    const { members, seed } = story();
+    const out = summaryAttribution({ summary: SEED_TEXT, members, wire: notWire });
+    expect(out).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+    expect(Object.keys(out ?? {})).toEqual(["text", "source"]);
+    // Undefined, blank and whitespace-only titles are the same as omitted.
+    for (const agreeWithTitle of [undefined, "", "   ", "\n"]) {
+      expect(summaryAttribution({ summary: SEED_TEXT, members, wire: notWire, agreeWithTitle })).toStrictEqual({
+        text: SEED_TEXT,
+        source: seed.source,
+      });
+    }
+  });
+
+  it("3. the seed is kept when it agrees with the title", () => {
+    const { members, seed } = story();
+    const agreeing = "Michigan'daki Senato yarışında Abdul ElSayed seçimi önde götürüyor";
+    expect(titleAgreement(agreeing, SEED_TEXT)).toBe(1);
+    expect(withTitle(members, agreeing, SEED_TEXT)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+  });
+
+  it("3. the seed is kept when nobody agrees any better (the gate needs a member at 0.75 or more)", () => {
+    const seed = trt();
+    const members = [star(), seed, outlet("Sözcü", "sozcu", "2026-11-04T08:00:00.000Z", "Michigan'da Senato yarışında oy sayımı sürüyor, ilk sonuçlar Demokrat adayın lehine görünüyor.")];
+    expect(withTitle(members, TITLE, SEED_TEXT)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+  });
+
+  it("4. the highest agreement wins over a newer member that agrees less", () => {
+    const { members } = story();
+    const newer = outlet("Yeni Şafak", "yeni-safak", "2026-11-04T12:00:00.000Z", "Michigan'da Senato yarışını kazanan Abdul El Sayed, seçilen ilk Müslüman senatör olarak tarihe geçti ve kutlandı.");
+    const score = titleAgreement(TITLE, newer.article.description ?? "")!;
+    expect(score).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+    expect(score).toBeLessThan(1);
+    const out = withTitle([newer, ...members], TITLE, SEED_TEXT);
+    expect(out?.text).toBe(TURKIYE_TEXT);
+  });
+
+  it("4. on an equal agreement the newest member wins, whatever the member order", () => {
+    const { members } = story();
+    expect(withTitle(members, TITLE, SEED_TEXT)?.source?.slug).toBe("turkiye-gazetesi");
+    expect(withTitle([...members].reverse(), TITLE, SEED_TEXT)?.source?.slug).toBe("turkiye-gazetesi");
+    // Move Haber7 after Türkiye Gazetesi: now it is the newest.
+    members.find((m) => m.source.slug === "haber7")!.article.published_at = "2026-11-04T09:00:00.000Z";
+    expect(withTitle(members, TITLE, SEED_TEXT)?.source?.slug).toBe("haber7");
+  });
+
+  it("4. members published at the very same instant fall back to the outlet name, ascending", () => {
+    const { members } = story();
+    const at = "2026-11-04T10:00:00.000Z";
+    for (const m of members) if (m.source.slug === "haber7" || m.source.slug === "turkiye-gazetesi") m.article.published_at = at;
+    expect(withTitle(members, TITLE, SEED_TEXT)?.source?.slug).toBe("haber7"); // "Haber7" < "Türkiye Gazetesi"
+    expect(withTitle([...members].reverse(), TITLE, SEED_TEXT)?.source?.slug).toBe("haber7");
+  });
+
+  it("4. identical texts count once and are credited to the earliest publisher", () => {
+    const { members } = story();
+    // A later outlet copies Haber7's sentence word for word, then a newer clean text of its own.
+    const copy = outlet("Habervakti", "habervakti", "2026-11-04T09:41:00.000Z", HABER7_TEXT);
+    members.push(copy);
+    members.splice(members.findIndex((m) => m.source.slug === "turkiye-gazetesi"), 1);
+    const out = withTitle(members, TITLE, SEED_TEXT);
+    expect(out?.text).toBe(HABER7_TEXT);
+    expect(out?.source?.slug).toBe("haber7"); // not the copy, although the copy is newer
+  });
+
+  it("5. every quality shape of the newest-member rule is kept out, alone and all at once", () => {
+    const hazards: Array<[string, string]> = [
+      ["a feed-cut stub", STUB_TEXT],
+      ["a teaser question", TEASER_TEXT],
+      ["a dateline", DATELINE_TEXT],
+      ["a glued run-on", RUN_ON_TEXT],
+    ];
+    for (const [label, text] of hazards) {
+      const seed = trt();
+      const hazard = outlet("Tuzak", "tuzak", "2026-11-04T09:00:00.000Z", text);
+      // Alone, the hazard is the only strong member: the seed stays.
+      expect(withTitle([hazard, seed], TITLE, SEED_TEXT), label).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+      // With a clean member behind it, the clean one is chosen, never the hazard.
+      const clean = dw();
+      const out = withTitle([hazard, clean, seed], TITLE, SEED_TEXT);
+      expect(out, label).toStrictEqual({ text: DW_TEXT, source: clean.source });
+    }
+    // All four newer than the clean 1.0 members: the clean newest still wins.
+    const { members } = story();
+    hazards.forEach(([, text], i) => {
+      members.push(outlet(`Tuzak ${i}`, `tuzak-${i}`, `2026-11-04T1${i}:00:00.000Z`, text));
+    });
+    expect(withTitle(members, TITLE, SEED_TEXT)?.source?.slug).toBe("turkiye-gazetesi");
+  });
+
+  describe("6. a member that may not stand in", () => {
+    const strong = (extra: Parameters<typeof outlet>[4] = {}, name = "Aday", slug = "aday") =>
+      outlet(name, slug, "2026-11-04T09:00:00.000Z", TURKIYE_TEXT, extra);
+
+    it.each([
+      ["wire kind", { kind: "wire" as const }],
+      ["aggregator kind", { kind: "aggregator" as const }],
+      ["a source that asked not to be excerpted", { allowed: false }],
+    ])("%s is skipped", (_label, extra) => {
+      const seed = trt();
+      expect(withTitle([strong(extra), seed], TITLE, SEED_TEXT)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+      // ... in favour of the next best member.
+      const next = dw();
+      expect(withTitle([strong(extra), next, seed], TITLE, SEED_TEXT)?.source).toBe(next.source);
+    });
+
+    it("niche and outlet kinds, and a source with no kind at all, are eligible", () => {
+      for (const kind of ["niche", "outlet", undefined] as const) {
+        const seed = trt();
+        const candidate = strong({});
+        if (kind === undefined) delete (candidate.source as { kind?: unknown }).kind;
+        else candidate.source.kind = kind;
+        expect(withTitle([candidate, seed], TITLE, SEED_TEXT)?.source).toBe(candidate.source);
+      }
+    });
+
+    it("a member that repeats the seed's text, raw or once tidied, scores what the seed scores and is never chosen", () => {
+      const withCta = `${SEED_TEXT}Devamı için tıklayınız`;
+      const seed = outlet("TRT Haber", "trt-haber", SEED_AT, withCta);
+      const rawCopy = outlet("A", "a", "2026-11-04T09:00:00.000Z", withCta);
+      const tidiedCopy = outlet("B", "b", "2026-11-04T09:10:00.000Z", SEED_TEXT);
+      expect(withTitle([rawCopy, tidiedCopy, seed], TITLE, withCta)).toStrictEqual({
+        text: SEED_TEXT,
+        source: seed.source,
+      });
+    });
+
+    it("a member whose tidied text is shorter than 60 characters is skipped (59 is short, 60 is enough)", () => {
+      const seed = trt();
+      const body59 = "Abdul El Sayed Michigan'da Senato'ya seçilen ilk Müslüman o".slice(0, 59);
+      expect(body59.length).toBe(59);
+      const short = outlet("Kısa", "kisa", "2026-11-04T09:00:00.000Z", body59);
+      expect(titleAgreement(TITLE, body59)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+      expect(withTitle([short, seed], TITLE, SEED_TEXT)?.source).toBe(seed.source);
+      const exact = outlet("Tam", "tam", "2026-11-04T09:00:00.000Z", `${body59}.`);
+      expect(withTitle([exact, seed], TITLE, SEED_TEXT)?.source).toBe(exact.source);
+      const tooShort = outlet("Kısa", "kisa", "2026-11-04T09:00:00.000Z", "Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu.");
+      expect(withTitle([tooShort, seed], TITLE, SEED_TEXT)?.source).toBe(seed.source);
+    });
+
+    it("a member with a blank, missing or CTA-only description is skipped", () => {
+      const seed = trt();
+      for (const description of [null, "", "   ", "Devamı için tıklayınız"]) {
+        const empty = outlet("Boş", "bos", "2026-11-04T09:00:00.000Z", description);
+        expect(withTitle([empty, seed], TITLE, SEED_TEXT)?.source).toBe(seed.source);
+      }
+    });
+
+    it("a member whose text copies a wire or aggregator member's text is skipped: the words are the agency's", () => {
+      for (const kind of ["wire", "aggregator"] as const) {
+        const seed = trt();
+        const agency = outlet("Ajans", "ajans", "2026-11-04T08:00:00.000Z", TURKIYE_TEXT, { kind });
+        const copier = outlet("Kopyacı", "kopyaci", "2026-11-04T09:00:00.000Z", `  ${TURKIYE_TEXT} `);
+        expect(withTitle([copier, agency, seed], TITLE, SEED_TEXT)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+      }
+    });
+
+    it("a member whose text copies a rights-blocked member's text is skipped (BL-13)", () => {
+      const seed = trt();
+      const blocked = outlet("Engelli", "engelli", "2026-11-04T08:00:00.000Z", TURKIYE_TEXT, { allowed: false });
+      const copier = outlet("Kopyacı", "kopyaci", "2026-11-04T09:00:00.000Z", ` ${TURKIYE_TEXT}`);
+      expect(withTitle([copier, blocked, seed], TITLE, SEED_TEXT)?.source).toBe(seed.source);
+    });
+
+    it("wire redistribution: a member holding the majority content hash is skipped, others are not", () => {
+      const seed = outlet("TRT Haber", "trt-haber", SEED_AT, SEED_TEXT, { hash: "own" });
+      const dispatchA = outlet("A", "a", "2026-11-04T09:00:00.000Z", TURKIYE_TEXT, { hash: "dispatch" });
+      const dispatchB = outlet("B", "b", "2026-11-04T09:10:00.000Z", null, { hash: "dispatch" });
+      const dispatchC = outlet("C", "c", "2026-11-04T09:20:00.000Z", null, { hash: "dispatch" });
+      const others = [dispatchA, dispatchB, dispatchC, seed];
+      expect(withTitle(others, TITLE, SEED_TEXT, wireDispatch)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+      // Without a wire redistribution the same member is an ordinary outlet.
+      expect(withTitle(others, TITLE, SEED_TEXT, notWire)?.source).toBe(dispatchA.source);
+    });
+
+    it("a member in another language than the seed's is skipped, an outlet in the seed's language is not", () => {
+      const names = "Abdul El Sayed Michigan Rogers Senate";
+      const seedText = "Local officials in Michigan said that counting would continue on Wednesday morning.";
+      expect(titleAgreement(names, seedText)!).toBeLessThan(AGREEMENT_LOW);
+      const english = "Abdul El Sayed won the Michigan race against Rogers and will be sworn in as a senator next year.";
+      expect(titleAgreement(names, english)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+      const turkish = "Michigan'da Rogers'ı geride bırakan Abdul El Sayed, Senate koltuğunu kazanan ilk Müslüman oldu ve kutlandı.";
+      // A Turkish seed (TRT Haber) never gets an English outlet's text ...
+      const trtSeed = outlet("TRT Haber", "trt-haber", SEED_AT, seedText);
+      const daily = outlet("Daily Sabah", "daily-sabah", "2026-11-04T09:00:00.000Z", english);
+      expect(withTitle([daily, trtSeed], names, seedText)?.source).toBe(trtSeed.source);
+      // ... and an English seed (TRT World) never gets a Turkish outlet's.
+      const worldSeed = outlet("TRT World", "trt-world", SEED_AT, seedText);
+      const sozcu = outlet("Sözcü", "sozcu", "2026-11-04T09:00:00.000Z", turkish);
+      expect(titleAgreement(names, turkish)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+      expect(withTitle([sozcu, worldSeed], names, seedText)?.source).toBe(worldSeed.source);
+      // English for English is fine.
+      expect(withTitle([daily, worldSeed], names, seedText)?.source).toBe(daily.source);
+    });
+  });
+
+  // Review fix (MEDIUM): the exact-string copy test let three of the five replay
+  // swaps through (Haber7, Sabah and Aydınlık each re-ran Anadolu Ajansı's lead
+  // with a phrase dropped or one word changed), and the neutral title echoes the
+  // wire lead, so the agreement score favours exactly those texts. A candidate
+  // that carries 85% or more of an agency's content stems, and the other way
+  // round, is that agency's copy. A longer article that merely contains the lead
+  // is not.
+  describe("6b. a near-verbatim copy of a wire or aggregator member's text is the agency's too", () => {
+    const AGENCY_AT = "2026-11-04T08:00:00.000Z";
+    const LATE = "2026-11-04T09:00:00.000Z";
+    // TURKIYE_TEXT with "Mısır asıllı" dropped: 20 of its 22 stems, 20 of its own 20.
+    const NEAR_COPY =
+      "ABD’deki ara seçimlerde Michigan eyaletinde, Müslüman aday Abdul el-Sayed, Cumhuriyetçi rakibi Mike Rogers’a üstünlük sağlayarak ABD Senatosuna seçilen ilk Müslüman oldu.";
+
+    it("the fixture is what the cases below assume", () => {
+      expect(textOverlap(TURKIYE_TEXT, NEAR_COPY)).toBeGreaterThanOrEqual(AGENCY_COPY_OVERLAP);
+      expect(textOverlap(TURKIYE_TEXT, NEAR_COPY)).toBeLessThan(1);
+      expect(titleAgreement(TITLE, NEAR_COPY)).toBe(1);
+      // An independent rewrite of the same event is far below the threshold.
+      expect(textOverlap(TURKIYE_TEXT, HABER7_TEXT)).toBeLessThan(0.6);
+    });
+
+    it.each(["wire", "aggregator"] as const)(
+      "a near copy of a %s member's text is skipped for the next best member (the exact-copy test alone let it through)",
+      (kind) => {
+        const seed = trt();
+        const agency = outlet("Ajans", "ajans", AGENCY_AT, TURKIYE_TEXT, { kind });
+        const copier = outlet("Kopyacı", "kopyaci", LATE, NEAR_COPY);
+        const next = dw();
+        expect(withTitle([copier, agency, next, seed], TITLE, SEED_TEXT)?.source).toBe(next.source);
+        expect(withTitle([copier, agency, seed], TITLE, SEED_TEXT)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+        // Control: with no agency in the cluster the very same member is the pick.
+        expect(withTitle([copier, next, seed], TITLE, SEED_TEXT)?.source).toBe(copier.source);
+      },
+    );
+
+    it("a near copy with a CTA tail is compared on its tidied text, and so is the agency's", () => {
+      const seed = trt();
+      const agency = outlet("Ajans", "ajans", AGENCY_AT, `${TURKIYE_TEXT} Devamı için tıklayınız`, { kind: "wire" });
+      const copier = outlet("Kopyacı", "kopyaci", LATE, `${NEAR_COPY} Haberin devamı için tıklayınız`);
+      expect(withTitle([copier, agency, seed], TITLE, SEED_TEXT)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+    });
+
+    it("an independent rewrite of the same event is not a copy: it may stand in", () => {
+      const seed = trt();
+      const agency = outlet("Ajans", "ajans", AGENCY_AT, TURKIYE_TEXT, { kind: "wire" });
+      const rewrite = haber7();
+      expect(withTitle([rewrite, agency, seed], TITLE, SEED_TEXT)?.source).toBe(rewrite.source);
+    });
+
+    it("a near copy of an ordinary outlet's text is no agency copy: only wire and aggregator members count", () => {
+      const seed = trt();
+      const original = outlet("Özgün", "ozgun", AGENCY_AT, TURKIYE_TEXT);
+      const copier = outlet("Kopyacı", "kopyaci", LATE, NEAR_COPY);
+      expect(withTitle([copier, original, seed], TITLE, SEED_TEXT)?.source).toBe(copier.source);
+    });
+
+    describe("the threshold (an 8-token title and 20-stem texts: 8 title words + 12 more)", () => {
+      const WORDS = ["kedi", "köpek", "kuş", "balık", "aslan", "kaplan", "zürafa", "horoz"];
+      const TITLE8 = WORDS.join(" ");
+      const tokens = (prefix: string, from: number, to: number) =>
+        Array.from({ length: to - from + 1 }, (_, i) => `${prefix}${String(from + i).padStart(2, "0")}`);
+      const text = (...parts: string[][]) => `${[...WORDS, ...parts.flat()].join(" ")}.`;
+      const SEED_OFF = "hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi (seed).";
+
+      const run = (agencyText: string, candidateText: string, kind: "wire" | "aggregator" = "wire") => {
+        const seed = outlet("Tohum", "tohum", SEED_AT, SEED_OFF);
+        const agency = outlet("Ajans", "ajans", AGENCY_AT, agencyText, { kind });
+        const candidate = outlet("Aday", "aday", LATE, candidateText);
+        return { seed, candidate, out: withTitle([candidate, agency, seed], TITLE8, SEED_OFF) };
+      };
+
+      const AGENCY = text(tokens("p", 1, 12));
+
+      it("the fixture scores what it says", () => {
+        expect(titleAgreement(TITLE8, AGENCY)).toBe(1);
+        expect(textOverlap(AGENCY, text(tokens("p", 1, 9), tokens("q", 1, 3)))).toBeCloseTo(17 / 20, 10);
+        expect(textOverlap(AGENCY, text(tokens("p", 1, 8), tokens("q", 1, 4)))).toBeCloseTo(16 / 20, 10);
+      });
+
+      it("17 of 20 stems shared (exactly 0.85) is a copy, inclusive", () => {
+        const r = run(AGENCY, text(tokens("p", 1, 9), tokens("q", 1, 3)));
+        expect(r.out?.source).toBe(r.seed.source);
+      });
+
+      it("16 of 20 stems shared (0.80) is not a copy", () => {
+        const r = run(AGENCY, text(tokens("p", 1, 8), tokens("q", 1, 4)));
+        expect(r.out?.source).toBe(r.candidate.source);
+      });
+
+      it("a longer article that holds the whole agency lead (20 of 40) is not a copy, the other way round neither", () => {
+        const longer = run(AGENCY, text(tokens("p", 1, 12), tokens("q", 1, 20)));
+        expect(longer.out?.source).toBe(longer.candidate.source);
+        const shorter = run(text(tokens("p", 1, 12), tokens("q", 1, 20)), AGENCY);
+        expect(shorter.out?.source).toBe(shorter.candidate.source);
+      });
+    });
+
+    it("is bounded: 300 qualifying members against 300 agency members stay well under two seconds", () => {
+      const WORDS = ["kedi", "köpek", "kuş", "balık", "aslan", "kaplan", "zürafa", "horoz"];
+      const own = (tag: string, i: number) =>
+        `${WORDS.join(" ")} ${Array.from({ length: 12 }, (_, j) => `${tag}${String(i).padStart(3, "0")}${String.fromCharCode(97 + j)}`).join(" ")}.`;
+      const off = "hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi (seed).";
+      const seed = outlet("Tohum", "tohum", SEED_AT, off);
+      const members = [seed];
+      for (let i = 0; i < 300; i++) {
+        members.push(outlet(`Ajans ${i}`, `ajans-${i}`, AGENCY_AT, own("a", i), { kind: i % 2 === 0 ? "wire" : "aggregator" }));
+        members.push(outlet(`Aday ${i}`, `aday-${i}`, `2026-11-04T10:${String(i % 60).padStart(2, "0")}:00.000Z`, own("c", i)));
+      }
+      const start = Date.now();
+      const out = withTitle(members, WORDS.join(" "), off);
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(out?.source?.slug).toMatch(/^aday-/);
+    });
+  });
+
+  describe("7. thresholds' edges (an 8-token title: kedi köpek kuş balık aslan kaplan zürafa horoz)", () => {
+    const WORDS = ["kedi", "köpek", "kuş", "balık", "aslan", "kaplan", "zürafa", "horoz"];
+    const TITLE8 = WORDS.join(" ");
+    /** A sentence that carries the first `hits` title words and nothing else of the title. */
+    const sentence = (hits: number, salt = "") =>
+      `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`;
+
+    const run = (seedHits: number, candidateHits: number) => {
+      const seed = outlet("Tohum", "tohum", SEED_AT, sentence(seedHits, " (seed)"));
+      const candidate = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", sentence(candidateHits));
+      return {
+        seed,
+        candidate,
+        out: withTitle([candidate, seed], TITLE8, seed.article.description ?? ""),
+      };
+    };
+
+    it("the fixture scores what it says", () => {
+      for (let hits = 0; hits <= 8; hits++) {
+        expect(titleAgreement(TITLE8, sentence(hits))).toBe(hits / 8);
+      }
+    });
+
+    it("a seed at exactly 0.5 (4/8) is kept, one token fewer (3/8) is replaced", () => {
+      const kept = run(4, 8);
+      expect(kept.out?.source).toBe(kept.seed.source);
+      const replaced = run(3, 8);
+      expect(replaced.out?.source).toBe(replaced.candidate.source);
+    });
+
+    it("a candidate at exactly 0.75 (6/8) is enough, one token fewer (5/8) is not", () => {
+      const enough = run(1, 6);
+      expect(enough.out?.source).toBe(enough.candidate.source);
+      const notEnough = run(1, 5);
+      expect(notEnough.out?.source).toBe(notEnough.seed.source);
+    });
+
+    it("a seed that scores 0 is replaced by a 6/8 candidate; a perfect seed is never replaced", () => {
+      const zero = run(0, 6);
+      expect(zero.out?.source).toBe(zero.candidate.source);
+      const perfect = run(8, 8);
+      expect(perfect.out?.source).toBe(perfect.seed.source);
+    });
+
+    it("the gain of 0.3 is inclusive (17-token title: 8/17 -> 14/17 switches, 8/17 -> 13/17 does not)", () => {
+      const words = ["abaka", "bobin", "cidem", "dalka", "ekmek", "fidan", "gazoz", "havuz", "irmak", "jeton", "kapak", "lamba", "masal", "nehir", "orman", "pamuk", "rakip"];
+      const title17 = words.join(" ");
+      const make = (hits: number, salt: string) =>
+        `${words.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`;
+      const seed = outlet("Tohum", "tohum", SEED_AT, make(8, " (seed)"));
+      expect(titleAgreement(title17, make(8, ""))).toBeCloseTo(8 / 17, 10);
+      const strong = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", make(14, ""));
+      const weak = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", make(13, ""));
+      expect(withTitle([strong, seed], title17, seed.article.description ?? "")?.source).toBe(strong.source);
+      expect(withTitle([weak, seed], title17, seed.article.description ?? "")?.source).toBe(seed.source);
+    });
+  });
+
+  describe("8. no signal means no change", () => {
+    it("a title with fewer than 3 content tokens never replaces the seed", () => {
+      const { members, seed } = story();
+      for (const title of ["Seçim sonucu", "ve ile bir", "Michigan"]) {
+        expect(withTitle(members, title, SEED_TEXT)).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+      }
+    });
+
+    it("a summary that is no member's description ('Kaynak açıklaması') stays as stored, with no outlet", () => {
+      const { members } = story();
+      const stored = "Başka bir metin, hiçbir üyenin açıklaması olmayan, saklanmış bir özet metni.";
+      const out = withTitle(members, TITLE, stored);
+      expect(out).toStrictEqual({ text: stored, source: null });
+    });
+
+    it("the gates in front of the choice are untouched: blank, rights-blocked everywhere, wire majority, tidied-empty", () => {
+      const { members } = story();
+      expect(withTitle(members, TITLE, "   ")).toBeNull();
+
+      const blocked = story();
+      blocked.seed.source.excerpt_allowed = false;
+      expect(withTitle(blocked.members, TITLE, SEED_TEXT)).toBeNull();
+
+      const wireStory = story();
+      wireStory.seed.article.content_hash = "dispatch";
+      wireStory.members[1]!.article.content_hash = "dispatch";
+      wireStory.members[2]!.article.content_hash = "dispatch";
+      expect(withTitle(wireStory.members, TITLE, SEED_TEXT, wireDispatch)).toBeNull();
+      // Not a wire redistribution: the same cluster is fine.
+      expect(withTitle(wireStory.members, TITLE, SEED_TEXT, notWire)?.source?.slug).toBe("turkiye-gazetesi");
+
+      const cta = outlet("TRT Haber", "trt-haber", SEED_AT, "Devamı için tıklayınız");
+      expect(withTitle([cta, ...members.slice(0, 2)], TITLE, "Devamı için tıklayınız")).toBeNull();
+    });
+
+    it("a rights-blocked seed hands the attribution to the next matching member, then compares", () => {
+      const blocked = outlet("Engelli", "engelli", SEED_AT, SEED_TEXT, { allowed: false });
+      const open = outlet("TRT Haber", "trt-haber", "2026-11-04T06:30:00.000Z", SEED_TEXT);
+      const candidate = turkiye();
+      expect(withTitle([candidate, open, blocked], TITLE, SEED_TEXT)?.source).toBe(candidate.source);
+      const agree = withTitle([candidate, open, blocked], "Michigan'daki Senato yarışında Abdul ElSayed seçimi önde götürüyor", SEED_TEXT);
+      expect(agree).toStrictEqual({ text: SEED_TEXT, source: open.source });
+    });
+
+    it("does not mutate its inputs", () => {
+      const { members } = story();
+      const before = JSON.stringify(members);
+      withTitle(members, TITLE, SEED_TEXT);
+      expect(JSON.stringify(members)).toBe(before);
+    });
+  });
+
+  // What keeps each of attempt 1's eight worse picks out, and where that stops.
+  //   - On a healthy cluster (the seed covers at least half of the headline's
+  //     words) ALL eight are kept out by one thing: the seed-agrees gate. The
+  //     first test below pins that.
+  //   - Behind a seed that DISAGREES with the headline the gate is open and only
+  //     the candidate's own text counts. Five shapes are still kept out
+  //     lexically: the feed-cut stub (0.30), the teaser (0.71), the dateline lead
+  //     (0.63), the generic round-up (0.42) and the dropped fact (0.44) cover
+  //     less than 0.75 of the headline's words, and the glued run-on covers all
+  //     of them but summaryDefect flags it.
+  //   - Two shapes are NOT kept out lexically: the loaded framing (0.875) and the
+  //     contradiction (1.0) use the headline's own words and are clean text. Tone
+  //     and meaning are not visible to a token overlap. Behind a disagreeing seed
+  //     they win when they are the best-agreeing member; the second block below
+  //     pins that so that a future change to the rule is a conscious decision.
+  describe("9. the eight shapes the newest-member rule (attempt 1) got wrong", () => {
+    interface Shape {
+      id: string;
+      shape: string;
+      title: string;
+      seed: { name: string; slug: string; text: string; kind?: Source["kind"] };
+      pick: { name: string; slug: string; text: string };
+    }
+    const SHAPES: Shape[] = [
+      {
+        id: "0c1478ca",
+        shape: "feed-cut stub",
+        title: "MHP'nin 100 il bin ilçe projesi Diyarbakır Ergani'de sevinçle karşılandı",
+        seed: {
+          name: "Haberler.com",
+          slug: "haberler-com",
+          kind: "aggregator",
+          text: "MHP Genel Başkanı Devlet Bahçeli'nin 100 il bin ilçe projesinde Diyarbakır'ın Ergani ilçesinin adının geçmesi ilçede memnuniyetle karşılandı. Vatandaşlar ve esnaf, Ergani'nin il olmaya uygun olduğunu belirterek projeden duydukları sevinci dile getirdi.",
+        },
+        pick: {
+          name: "Sözcü",
+          slug: "sozcu",
+          text: "MHP Genel Başkanı Devlet Bahçeli'nin il olmasını önerdiği 19 ilçeden Ergani'de, vatandaşlar öneriyi memnuniyetle karşıla...",
+        },
+      },
+      {
+        id: "f6446060",
+        shape: "teaser question",
+        title: "Michigan'da Müslüman Demokrat Abdul El-Sayed kazandı",
+        seed: {
+          name: "CGTN Türk",
+          slug: "cgtn-turk",
+          text: "ABD'de 3 Kasım ara seçimlerinde Michigan'da Demokrat aday Abdul El-Sayed'in, Trump'ın desteklediği Cumhuriyetçi Mike Rogers'ı mağlup ederek Senato yarışını kazandığı bildirildi.",
+        },
+        pick: {
+          name: "DW Türkçe",
+          slug: "dw-turkce",
+          text: "Michigan'da ipi göğüsleyerek ABD tarihindeki ilk Müslüman senatör olmayı başaran Abdul El-Sayed kimdir?",
+        },
+      },
+      {
+        id: "d06e747a",
+        shape: "dateline lead",
+        title: "Selahattin Demirtaş'ın yargılandığı davada yeni gelişme: Dosyalar birleştirildi",
+        seed: {
+          name: "Akşam",
+          slug: "aksam",
+          text: "Eski HDP Eş Genel Başkanı Selahattin Demirtaş'ın Diyarbakır'da 5 ayrı suçtan yargılandığı dava dosyasının Mersin'deki dava dosyasıyla birleştirilmesine karar verildi.",
+        },
+        pick: {
+          name: "Medyascope",
+          slug: "medyascope",
+          text: "İSTANBUL (Medyascope) – Selahattin Demirtaş’ın Diyarbakır’da 2016’da katıldığı etkinlikler nedeniyle yargılandığı davanın Mersin’deki dosyayla birleştirilmesine karar verildi. Demirtaş hakkında 9 yıldan 15 yıla kadar hapis cezası isteniyor.",
+        },
+      },
+      {
+        id: "2b8d3632",
+        shape: "glued run-on",
+        title: "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı",
+        seed: {
+          name: "Haberler.com",
+          slug: "haberler-com",
+          kind: "aggregator",
+          text: "Cumhurbaşkanı Recep Tayyip Erdoğan, Güney Kore Devlet Başkanı Lee Jae Myung'ın davetine icabetle gerçekleştirdiği resmi ziyaretin ardından başkent Seul'den İstanbul'a hareket etti.",
+        },
+        pick: {
+          name: "Yeni Mesaj",
+          slug: "yeni-mesaj",
+          text: "Cumhurbaşkanı Recep Tayyip Erdoğan, Güney Kore Devlet Başkanı Lee Jae-myung'un daveti üzerine gerçekleştirdiği resmi ziyaret kapsamındaki temaslarını tamamlayarak Seul'den ayrıldı Cumhurbaşkanı Recep Tayyip Erdoğan, Güney Kore Devlet Başkanı Lee Jae-myung'un daveti üzerine 8 yıl aradan sonra geldiği Seul'de temaslarını tamamladı. Erdoğan, Seul Seongnam Hava Üssü'nden cumhurbaşkanlığı uçağı \"TUR\" ile Türkiye'ye hareket etti.",
+        },
+      },
+      {
+        id: "2441793c",
+        shape: "loaded framing",
+        title: "İsmail Saymaz ve Murat Ağırel'e 14'er yıl hapis talebi",
+        seed: {
+          name: "Medyascope",
+          slug: "medyascope",
+          text: "Murat Ağırel ve İsmail Saymaz hakkında, Ömer Bolat’ın şikâyeti sonrası fon yayını nedeniyle 14 yıl 10 aya kadar hapis istendi.",
+        },
+        pick: {
+          name: "Yeni Akit",
+          slug: "yeni-akit",
+          text: "Fon soruşturması kapsamında başta Bakan Ömer Bolat olmak üzere bazı bakanlar hakkında iftiralarda bulunan Cumhuriyet yazarları İsmail Saymaz ve Murat Ağırel hakkında “kamu görevlisine görevinden dolayı alenen hakaret”, “iftira”, “halkı yanıltıcı bilgiyi alenen yayma” ve “kişisel verileri hukuka aykırı olarak verme veya ele geçirme” suçlarından ayrı ayrı 14 yıl 10’ar aya kadar hapis cezası talep edildi.",
+        },
+      },
+      {
+        id: "ff217744",
+        shape: "generic round-up",
+        title: "ABD'nin ilk siyahi kadın valisi Georgia eyaletinden Demokrat Keisha Lance Bottoms oldu",
+        seed: {
+          name: "Anadolu Ajansı",
+          slug: "anadolu-ajansi",
+          kind: "wire",
+          text: "ABD'de oy sayımının sürdüğü ara seçimlerde, Georgia eyaletinde Demokrat aday Keisha Lance Bottoms, ABD'nin ilk siyahi kadın valisi seçildi.",
+        },
+        pick: {
+          name: "Euronews Türkçe",
+          slug: "euronews-turkce",
+          text: "ABD'de 3 Kasım'da düzenlenen ara seçimler, siyasi dengeleri değiştirmekle kalmadı, ülke tarihinde bir dizi ilke de sahne oldu. İlk kez bir Müslüman Senato'ya seçilirken, yine ilk kez siyah bir kadın ve Amerikan yerlisi bir kadın valilik yarışlarını kazandı.",
+        },
+      },
+      {
+        id: "aa12e7c3",
+        shape: "dropped fact",
+        title: "İsrail Merkez Seçim Komitesi şeffaflığa aykırı bulguya rastlanmadığını açıkladı",
+        seed: {
+          name: "İşçi Haber",
+          slug: "isci-haber",
+          kind: "niche",
+          text: "İsrail Merkez Seçim Komitesi, 27 Ekim tarihindeki parlamento seçimleri sonrasında yapılan tüm itirazları detaylı şekilde inceledi. Kurul, oylama süreçlerinde şeffaflığa gölge düşürecek herhangi bir usulsüzlük veya bulguya rastlanmadığını açıkladı.",
+        },
+        pick: {
+          name: "CNN Türk",
+          slug: "cnn-turk",
+          text: "İsrail Merkez Seçim Komitesi, 27 Ekim'de gerçekleştirilen seçimlerin kesin sonuçlarını onayladı.",
+        },
+      },
+      {
+        id: "97589454",
+        shape: "contradicts the headline",
+        title: "Demirtaş ve Yüksekdağ için cezaevleri önünde açıklama yapılacak",
+        seed: {
+          name: "Cumhuriyet",
+          slug: "cumhuriyet",
+          text: "Eski HDP Eş Genel Başkanları Selahattin Demirtaş ve Figen Yüksekdağ'ın da aralarında bulunduğu siyasetçilerin tutuklanmasının 10. yılında, Edirne ve Kandıra cezaevleri önünde açıklama yapılacak. DEM Parti Eş Genel Başkanı Tülay Hatimoğulları Edirne'de, Tuncer Bakırhan ise Kandıra'da konuşacak.",
+        },
+        pick: {
+          name: "ABC Haber",
+          slug: "abc-haber",
+          text: "Selahattin Demirtaş ve Figen Yüksekdağ'ın tutuklanmalarının 10. yılında DEM Parti Eş Genel Başkanları Tülay Hatimoğulları ve Tuncer Bakırhan iki ismi cezaevinde ziyaret etti. Cezaevi önündeki açıklamalarda tahliye çağrısı yapıldı.",
+        },
+      },
+    ];
+
+    /** The cluster as the replay saw it: the seed and the newest member (attempt 1's pick) among fillers. */
+    const build = (shape: Shape) => {
+      const seed = outlet(shape.seed.name, shape.seed.slug, "2026-11-04T06:30:00.000Z", shape.seed.text, { kind: shape.seed.kind });
+      const pick = outlet(shape.pick.name, shape.pick.slug, "2026-11-04T14:00:00.000Z", shape.pick.text);
+      const fillers = [1, 2, 3].map((i) =>
+        outlet(`Dolgu ${i}`, `dolgu-${i}`, `2026-11-04T0${7 + i}:00:00.000Z`, `Bugün ${i}. sayfada yer alan başka bir haberin kısa açıklaması burada yer alıyor.`),
+      );
+      return { seed, pick, members: [pick, ...fillers, seed] };
+    };
+
+    it.each(SHAPES.map((s) => [s.id, s.shape, s] as const))(
+      "%s (%s): the seed agrees with the headline, so the newest member's text is not shown",
+      (_id, _shape, shape) => {
+        const { seed, pick, members } = build(shape);
+        expect(titleAgreement(shape.title, shape.seed.text)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+        const out = withTitle(members, shape.title, shape.seed.text);
+        expect(out).toStrictEqual({ text: shape.seed.text, source: seed.source });
+        expect(out?.source).not.toBe(pick.source);
+      },
+    );
+
+    it.each(SHAPES.filter((s) => ["feed-cut stub", "teaser question", "dateline lead", "glued run-on"].includes(s.shape)).map((s) => [s.id, s.shape, s] as const))(
+      "%s (%s): the text is flagged by a quality predicate on its own",
+      (_id, _shape, shape) => {
+        expect(summaryDefect(shape.pick.text, shape.pick.text)).not.toBeNull();
+      },
+    );
+
+    /**
+     * What stops the pick behind a seed that disagrees with the headline: its own
+     * agreement score ("score"), the quality predicates ("predicate"), or nothing
+     * ("nothing": the known limit, see the comment above).
+     */
+    const STOPPED_BY: Record<string, "score" | "predicate" | "nothing"> = {
+      "0c1478ca": "score",
+      f6446060: "score",
+      d06e747a: "score",
+      "2b8d3632": "predicate",
+      "2441793c": "nothing",
+      ff217744: "score",
+      aa12e7c3: "score",
+      "97589454": "nothing",
+    };
+    const OFF_TOPIC = "Hava durumu raporuna göre yurdun birçok bölgesinde sağanak yağış etkili olacak ve sıcaklıklar düşecek.";
+    const behindADisagreeingSeed = (shape: Shape) => {
+      const seed = outlet("Hava Haber", "hava-haber", "2026-11-04T06:30:00.000Z", OFF_TOPIC);
+      const pick = outlet(shape.pick.name, shape.pick.slug, "2026-11-04T14:00:00.000Z", shape.pick.text);
+      return { seed, pick, out: withTitle([pick, seed], shape.title, OFF_TOPIC) };
+    };
+
+    it("the table covers every shape, and the seed of the fixture really disagrees", () => {
+      expect(Object.keys(STOPPED_BY).sort()).toEqual(SHAPES.map((s) => s.id).sort());
+      for (const shape of SHAPES) {
+        expect(titleAgreement(shape.title, OFF_TOPIC)!, shape.id).toBeLessThan(AGREEMENT_LOW);
+      }
+    });
+
+    it.each(SHAPES.filter((s) => STOPPED_BY[s.id] === "score").map((s) => [s.id, s.shape, s] as const))(
+      "%s (%s): behind a seed that disagrees it is still kept out, by its agreement score (under 0.75)",
+      (_id, _shape, shape) => {
+        expect(titleAgreement(shape.title, shape.pick.text)!).toBeLessThan(AGREEMENT_HIGH);
+        const { seed, out } = behindADisagreeingSeed(shape);
+        expect(out).toStrictEqual({ text: OFF_TOPIC, source: seed.source });
+      },
+    );
+
+    it.each(SHAPES.filter((s) => STOPPED_BY[s.id] === "predicate").map((s) => [s.id, s.shape, s] as const))(
+      "%s (%s): behind a seed that disagrees it covers the headline fully and only the quality predicates keep it out",
+      (_id, _shape, shape) => {
+        expect(titleAgreement(shape.title, shape.pick.text)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+        expect(summaryDefect(shape.pick.text, shape.pick.text)).not.toBeNull();
+        const { seed, out } = behindADisagreeingSeed(shape);
+        expect(out).toStrictEqual({ text: OFF_TOPIC, source: seed.source });
+      },
+    );
+
+    describe("known limit: tone and meaning are invisible to a token overlap", () => {
+      it.each(SHAPES.filter((s) => STOPPED_BY[s.id] === "nothing").map((s) => [s.id, s.shape, s] as const))(
+        "%s (%s): clean text in the headline's own words, so behind a seed that disagrees it WINS (only the seed-agrees gate protects a healthy cluster)",
+        (_id, _shape, shape) => {
+          expect(titleAgreement(shape.title, shape.pick.text)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+          expect(summaryDefect(shape.pick.text, tidySummaryText(shape.pick.text))).toBeNull();
+          const { pick, out } = behindADisagreeingSeed(shape);
+          expect(out?.source).toBe(pick.source);
+          expect(out?.text).toBe(tidySummaryText(shape.pick.text));
+        },
+      );
+
+      it("2441793c: a clean member that covers the headline better wins over the loaded text, so the limit is the top scorer's tone, not any qualifier's", () => {
+        const shape = SHAPES.find((s) => s.id === "2441793c")!;
+        const clean = outlet(
+          "Temiz Haber",
+          "temiz-haber",
+          "2026-11-04T08:00:00.000Z",
+          "Murat Ağırel ve İsmail Saymaz hakkında 14'er yıl hapis talebi istendi, dava sürüyor.",
+        );
+        expect(titleAgreement(shape.title, clean.article.description ?? "")).toBe(1);
+        const { seed, pick } = behindADisagreeingSeed(shape);
+        const out = withTitle([pick, clean, seed], shape.title, OFF_TOPIC);
+        expect(out?.source).toBe(clean.source);
+      });
+    });
+  });
+
+  it("10. the meta description follows the new attribution, not the stale seed", () => {
+    const { members } = story();
+    const attribution = withTitle(members, TITLE, SEED_TEXT);
+    const description = describeForMeta({ count: members.length, attribution });
+    expect(description.startsWith("5 kaynak. Türkiye Gazetesi: ABD’deki ara seçimlerde")).toBe(true);
+    expect(description).not.toContain("önde götürüyor");
+    expect(description.length).toBeLessThanOrEqual(160);
+  });
+
+  it("11. the surfaces that never pass a title keep the seed: resolveSummaryAttribution and the memberless path", () => {
+    const { members, seed } = story();
+    expect(
+      resolveSummaryAttribution({ summary: SEED_TEXT, members, lookupFailed: false, wire: notWire }),
+    ).toStrictEqual({ text: SEED_TEXT, source: seed.source });
+    expect(
+      resolveSummaryAttribution({ summary: SEED_TEXT, members: undefined, lookupFailed: false, wire: notWire }),
+    ).toStrictEqual({ text: SEED_TEXT, source: null });
+  });
+
+  it("12. a big roster (1,000 members) is scored in one linear pass", () => {
+    const { members } = story();
+    for (let i = 0; i < 1000; i++) {
+      members.push(
+        outlet(`Kaynak ${i}`, `kaynak-${i}`, `2026-11-04T08:${String(i % 60).padStart(2, "0")}:00.000Z`, `Başka bir olay ${i} hakkında ayrıntılı bilgi veren ve konuyla ilgisi olmayan uzun bir açıklama metni.`),
+      );
+    }
+    const start = Date.now();
+    const out = withTitle(members, TITLE, SEED_TEXT);
+    expect(Date.now() - start).toBeLessThan(2000);
+    expect(out?.source?.slug).toBe("turkiye-gazetesi");
   });
 });
