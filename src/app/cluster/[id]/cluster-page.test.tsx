@@ -2332,6 +2332,37 @@ describe("ClusterDetailPage — İlgili haberler", () => {
     expect(getPoliticsClusters).not.toHaveBeenCalled();
   });
 
+  // Measured on production (2026-11-04, non-archived multi-article clusters
+  // updated in the last 7 days): the `category` of a cluster member is the
+  // politics-gate flag, only 'politika' (8,556 rows) or 'son_dakika' (633 rows).
+  // It never names a topic, so it must not stand in for a null topic7: a Brent
+  // oil or climate story with politika-flagged members would get a wrong
+  // "Politika konusunda son haberler" block on an indexable page.
+  it.each([
+    ["politika", ["politika", "politika", "politika"]],
+    ["son_dakika", ["son_dakika", "son_dakika"]],
+    ["a mix of both", ["politika", "son_dakika", "politika"]],
+  ] as const)(
+    "topic7 null with %s-flagged members: no block and no feed read (article.category is not a topic)",
+    async (_label, categories) => {
+      const detail = relatedDetail({ topic7: null });
+      detail.members = detail.members.map((m, i) => ({
+        ...m,
+        article: { ...m.article, category: categories[i % categories.length] },
+      })) as ClusterDetail["members"];
+      getClusterDetail.mockResolvedValue(detail);
+      getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+      getPoliticsClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+
+      const tree = await pageTree();
+      const slot = await renderSlot(tree, "ClusterRelatedSlot");
+
+      expect(slot).toBeNull();
+      expect(getTopicClusters).not.toHaveBeenCalled();
+      expect(getPoliticsClusters).not.toHaveBeenCalled();
+    },
+  );
+
   describe("a failing or empty feed leaves the article alone", () => {
     it("getTopicClusters answering null (its failure value) resolves the slot to null, with a warning", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
