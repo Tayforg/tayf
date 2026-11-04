@@ -3131,3 +3131,136 @@ describe("ClusterDetailPage — summary paragraph lang follows the seed outlet (
     expect(collectText(tree).join("")).toContain("Kaynak açıklaması");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h31-reader-3 (deferred): the cluster page does NOT swap the seed's summary for
+// a newer member's. The replay over 39 live clusters (4 Nov 2026) changed 19
+// summaries: 4 better, 7 neutral, 8 worse (a feed-cut stub, a teaser question,
+// a dateline, a glued run-on, loaded framing, a text that contradicts the
+// headline). Until a selection rule passes that replay with zero worse rows,
+// the page keeps the seed's text under the seed's outlet, in the body, the meta
+// description and the JSON-LD alike. The newest-member selector was not
+// shipped; these tests keep any future rule honest against those shapes.
+// ---------------------------------------------------------------------------
+
+describe("ClusterDetailPage — summary stays on the seed (h31-reader-3 deferred)", () => {
+  const SEED_TEXT =
+    "Michigan'daki Senato yarışında, Demokratların Müslüman adayı Abdul ElSayed seçimi önde götürüyor.";
+  const BIRGUN_TEXT =
+    "Abdul El Sayed, Michigan'da Senato seçimini kazanarak ABD Senatosu'na seçilen ilk Müslüman oldu.";
+  const OUTLETS: Array<{
+    slug: string;
+    name: string;
+    bias: Source["bias"];
+    at: string;
+    description: string;
+  }> = [
+    { slug: "trt-haber", name: "TRT Haber", bias: "state_media", at: "2026-11-04T06:28:00.000Z", description: SEED_TEXT },
+    { slug: "sozcu", name: "Sözcü", bias: "opposition", at: "2026-11-04T07:00:00.000Z", description: "Michigan'da Senato yarışında oy sayımı sürüyor, ilk sonuçlar Demokrat adayın lehine görünüyor." },
+    { slug: "hurriyet", name: "Hürriyet", bias: "center", at: "2026-11-04T08:00:00.000Z", description: "ABD'de ara seçim sonuçları gelmeye başladı; Michigan Senato koltuğunda Demokratlar önde." },
+    { slug: "ntv", name: "NTV", bias: "center", at: "2026-11-04T09:30:00.000Z", description: "Michigan Senato seçimini Abdul El Sayed kazandı, seçim sonuçları resmen açıklandı." },
+    { slug: "cumhuriyet", name: "Cumhuriyet", bias: "opposition_leaning", at: "2026-11-04T10:00:00.000Z", description: "Abdul El Sayed Michigan'da Senato koltuğunu aldı, ABD Kongresi'ne giren ilk Müslüman Senatör oldu." },
+    { slug: "birgun", name: "BirGün", bias: "opposition", at: "2026-11-04T10:40:00.000Z", description: BIRGUN_TEXT },
+  ];
+
+  /** Six outlets, the seed 4 h older than the newest: the shape a freshening rule would act on. */
+  function freshDetail(newestDescription: string = BIRGUN_TEXT): ClusterDetail {
+    const sources = OUTLETS.map((o) =>
+      makeSource({ id: `id-${o.slug}`, slug: o.slug, name: o.name, bias: o.bias, kind: "outlet" }),
+    );
+    const members = OUTLETS
+      .map((o, i) => {
+        const m = makeMember(`a-${o.slug}`, sources[i]!, o.at);
+        m.article.description = o.slug === "birgun" ? newestDescription : o.description;
+        return m;
+      })
+      .reverse(); // newest first, as the detail query returns them
+    const cluster = makeCluster({ bias_distribution: emptyDistribution(), article_count: members.length });
+    cluster.title_tr = "Abdul El Sayed ABD'de Senato'ya seçilen ilk Müslüman oldu";
+    cluster.summary_tr = SEED_TEXT;
+    return {
+      cluster,
+      members,
+      allSources: sources,
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: members.length,
+        memberCount: members.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  const summaryParagraph = (tree: unknown, text: string) =>
+    findElement(tree, (el) => el.type === "p" && collectText(el.props.children).join("") === text);
+
+  it("keeps the seed's text under the seed's outlet although a newer eligible member exists", async () => {
+    const tree = await renderTree(freshDetail());
+    const text = collectText(tree).join("");
+    expect(text).toContain("Özet — TRT Haber");
+    expect(text).not.toContain("Özet — BirGün");
+    expect(summaryParagraph(tree, SEED_TEXT)).not.toBeNull();
+    expect(summaryParagraph(tree, BIRGUN_TEXT)).toBeNull();
+  });
+
+  it("adds no clock and no time element to the byline (byte-identical to before the wave)", async () => {
+    const tree = await renderTree(freshDetail());
+    expect(collectText(tree).join("")).not.toContain("Özet — TRT Haber,");
+    expect(findElement(tree, (el) => el.type === "time" && el.props.dateTime === "2026-11-04T06:28:00.000Z")).toBeNull();
+    expect(findElement(tree, (el) => el.type === "time" && el.props.dateTime === "2026-11-04T10:40:00.000Z")).toBeNull();
+  });
+
+  it("the meta description and the JSON-LD description agree with the page: the seed outlet's text", async () => {
+    const detail = freshDetail();
+    const tree = await renderTree(detail);
+    const jsonLd = JSON.parse(findJsonLd(tree) ?? "{}") as { description?: string };
+    expect(jsonLd.description).toContain("TRT Haber:");
+    expect(jsonLd.description).not.toContain("BirGün:");
+
+    getClusterDetailOrThrowSpy.mockReset();
+    getClusterDetail.mockResolvedValue(detail);
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    expect(getClusterDetailOrThrowSpy).toHaveBeenCalled();
+    expect(metadata.description).toBe(jsonLd.description);
+    expect(metadata.description?.startsWith("6 kaynak. TRT Haber: Michigan'daki Senato")).toBe(true);
+  });
+
+  // The failure modes the replay found in the newest member's text. None of them
+  // may reach the page while the freshening is off.
+  const HAZARDS: Array<[string, string]> = [
+    ["a feed-cut stub", "Michigan'da Senato seçimini kazanan Abdul El Sayed'in zaferi memnuniyetle…"],
+    ["a teaser question", "Michigan'da ipi göğüsleyerek ABD tarihindeki ilk Müslüman senatör olan Abdul El Sayed kimdir?"],
+    ["a dateline", "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ilk Müslüman senatör oldu."],
+    [
+      "a glued run-on",
+      "Abdul El Sayed Michigan'da Senato seçimini kazandı Abdul El Sayed Michigan'da Senato seçimini kazandı ve tarihe geçti.",
+    ],
+  ];
+  it.each(HAZARDS)("a newest member whose text is %s does not replace the seed", async (_label, hazard) => {
+    const tree = await renderTree(freshDetail(hazard));
+    expect(summaryParagraph(tree, SEED_TEXT)).not.toBeNull();
+    expect(collectText(tree).join("")).not.toContain(hazard);
+    expect(collectText(tree).join("")).toContain("Özet — TRT Haber");
+  });
+
+  it("no literal match: 'Kaynak açıklaması' with no clock and no time element", async () => {
+    const detail = freshDetail();
+    detail.cluster.summary_tr = "Hiçbir üyenin açıklaması olmayan, saklanmış bir özet metni.";
+    const tree = await renderTree(detail);
+    const text = collectText(tree).join("");
+    expect(text).toContain("Özet — Kaynak açıklaması");
+    expect(text).not.toContain("Kaynak açıklaması,");
+    expect(
+      findElement(tree, (el) => el.type === "time" && el.props.dateTime === "2026-11-04T10:40:00.000Z"),
+    ).toBeNull();
+  });
+
+  it("a rights-blocked-everywhere summary stays hidden", async () => {
+    const detail = freshDetail();
+    const seed = detail.members.find((m) => m.source.slug === "trt-haber")!;
+    seed.source = { ...seed.source, excerpt_allowed: false };
+    const tree = await renderTree(detail);
+    expect(collectText(tree).join("")).not.toContain("Özet —");
+  });
+});
