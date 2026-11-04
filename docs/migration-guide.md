@@ -462,7 +462,7 @@ If any step lags, jump to the next section.
    - `status_code = 404` → the `functions_base_url` Vault secret is wrong; it must end in `/functions/v1`.
    - `status_code >= 500` (including `546`, the platform killing the function at its resource limit) → the function failed. Check Edge Function logs in the Supabase Dashboard.
 
-   The heartbeat row `edge_http_errors_30m` counts these same rows, so it can fail on an upstream outage that is not our bug: while KAP answers 500, `kap-ingest` answers 502 to every `kap-drain` tick (on 2026-11-02 all 15 error rows of one 30 minute window were `kap-ingest` 502). Read `left(content, 200)` before chasing a consumer.
+   The heartbeat row `edge_http_errors_30m` counts these same rows, so read `left(content, 200)` before chasing a consumer. Since hunt 30 a KAP-only outage (5xx, timeout, network error or an unusable body) no longer shows up here: `kap-ingest` answers 200 with `"upstream_unavailable":true` and the row ignores it (redeploy `kap-ingest` with `--no-verify-jwt` for this to take effect). A `kap-ingest` 502 now means a Tayf-side failure, a mixed cycle (some days KAP's fault, some ours) or a circuit-breaker trip (403/429). The outage itself is visible in `kap_fetch_state.last_status` / `last_error` (`last_status` 0 means KAP gave no usable answer) and in `net._http_response` rows whose content contains `"upstream_unavailable":true`; see `docs/ops-heartbeat.md` row 2. History: on 2026-11-02 all 15 error rows of one 30 minute window were `kap-ingest` 502 during a KAP outage, before the 200 answer existed.
 
 2. Is `cluster_work` accumulating without being drained?
 

@@ -252,13 +252,13 @@ describe("cluster opengraph-image (real Satori render)", () => {
     );
   });
 
-  it("sets the shorter fallback cache-control header on the not-found card", async () => {
+  it("sets the same short shared cache-control as the 404 on the not-found card (h30-abuse-2)", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(null);
     const { default: Image } = await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
 
-    expect(res.headers.get("cache-control")).toBe("public, s-maxage=60");
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=300");
   });
 
   it("renders the generic unavailable card to a real PNG with no-store when the reader throws", async () => {

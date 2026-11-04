@@ -57,6 +57,33 @@ export function SavedFrame({
   );
 }
 
+/** The /saved load failure, announced by the status region and shown on the page. */
+export const SAVED_LOAD_FAILED_TEXT = "Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.";
+
+/**
+ * The failed state (h30-live-1): the same {@link SavedFrame} as every other
+ * state, with the failure copy as its announcement, so a screen reader hears it
+ * (WCAG 4.1.3). The visible paragraph is aria-hidden: the sr-only status region
+ * above it carries the text for assistive technology, once.
+ *
+ * SavedList returns this by calling it (`return SavedLoadFailed()`), not as
+ * `<SavedLoadFailed />`: the result is then an element of type SavedFrame, the
+ * type the loading branch returns, so React updates the mounted region in place
+ * and the announcement fires. A `<SavedLoadFailed />` element is a different
+ * component type, which would unmount the region and mount a new one with the
+ * text already in it, which is usually not announced. No hooks: it is safe to
+ * call.
+ */
+export function SavedLoadFailed() {
+  return (
+    <SavedFrame announcement={SAVED_LOAD_FAILED_TEXT}>
+      <p aria-hidden="true" className="text-sm text-muted-foreground">
+        {SAVED_LOAD_FAILED_TEXT}
+      </p>
+    </SavedFrame>
+  );
+}
+
 export function SavedEmptyState({
   headingRef,
 }: {
@@ -80,8 +107,8 @@ export function SavedEmptyState({
         Henüz kaydettiğiniz bir hikâye yok
       </h2>
       <p className="text-sm text-muted-foreground max-w-md mx-auto">
-        Hikâye kartlarındaki
-        <Bookmark className="mx-1 inline h-3.5 w-3.5 align-[-2px]" />
+        Hikâye kartlarındaki{" "}
+        <Bookmark aria-hidden="true" className="inline h-3.5 w-3.5 align-[-2px]" />{" "}
         yer imi simgesine dokunarak
         <span className="text-brand font-medium"> favorilerinizi kaydedin</span>.
       </p>
@@ -215,13 +242,8 @@ export function SavedList() {
   }
 
   if (failed) {
-    return (
-      <SavedFrame announcement={announcement}>
-        <p className="text-sm text-muted-foreground">
-          Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.
-        </p>
-      </SavedFrame>
-    );
+    // Announces the failure in the region the loading state already mounted.
+    return SavedLoadFailed();
   }
 
   // Bookmarked ids whose cluster no longer exists (pruned upstream) are

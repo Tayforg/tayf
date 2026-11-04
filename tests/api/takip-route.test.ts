@@ -290,6 +290,21 @@ describe("GET /api/takip -- upstream failure (503)", () => {
     expect(typeof body.error).toBe("string");
   });
 
+  // searchClusters answers { ok: false } immediately (no RPC) when this
+  // instance already has MAX_IN_FLIGHT_SEARCHES searches running (h30-abuse-1);
+  // the route must treat that exactly like an outage: a retryable 503 that no
+  // CDN may keep.
+  it("search saturated ({ok:false}) -> 503, Cache-Control no-store, Retry-After 60", async () => {
+    searchClustersMock.mockResolvedValue({ ok: false });
+    const res = await call("?q=deprem");
+    expect(searchClustersMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("retry-after")).toBe("60");
+    expect(res.headers.get("cache-control")).not.toContain("public");
+    expect(await res.json()).toEqual({ error: "Şu an yüklenemedi" });
+  });
+
   it("503s no-store with Retry-After 60 when the topic read is null", async () => {
     getTopicClustersMock.mockResolvedValue(null);
     const res = await call("?konu=spor");

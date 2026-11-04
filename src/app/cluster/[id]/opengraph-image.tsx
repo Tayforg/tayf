@@ -58,12 +58,6 @@ export const contentType = "image/png";
 export const OG_CACHE_HEADERS = {
   "cache-control": "public, s-maxage=600, stale-while-revalidate=86400",
 };
-// Shorter TTL for the "cluster vanished" fallback card — it should stop
-// being served the moment the cluster reappears (undelete/reindex), not
-// linger for the same 10 minutes as a real card.
-export const OG_FALLBACK_CACHE_HEADERS = {
-  "cache-control": "public, s-maxage=60",
-};
 // The read FAILED (sustained database outage): the cluster is not gone, we just
 // cannot see it. Serve the generic brand card so a crawler still unfurls
 // something, but `no-store` so neither the edge nor a crawler pins it -- the
@@ -74,8 +68,10 @@ export const OG_UNAVAILABLE_CACHE_HEADERS = {
 
 // A malformed id can never resolve to a cluster: answer 404 (cacheable
 // briefly) before any database work. A well-formed but missing UUID still
-// gets the 200 "bulunamadı" fallback card below; a failed read gets a 200
-// generic card that is never cached (OG_UNAVAILABLE_CACHE_HEADERS).
+// gets the 200 "bulunamadı" fallback card below, sent with the SAME short
+// shared TTL (h30-abuse-2): the soft-404 body is accepted, but a repeat fetch
+// of an unknown id must hit the CDN instead of the database. A failed read
+// gets a 200 generic card that is never cached (OG_UNAVAILABLE_CACHE_HEADERS).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const OG_NOT_FOUND_HEADERS = { "cache-control": "public, s-maxage=300" };
 
@@ -180,7 +176,7 @@ export default async function Image({ params }: ImageProps) {
           </div>
         </div>
       ),
-      { ...size, headers: OG_FALLBACK_CACHE_HEADERS },
+      { ...size, headers: OG_NOT_FOUND_HEADERS },
     );
   }
 

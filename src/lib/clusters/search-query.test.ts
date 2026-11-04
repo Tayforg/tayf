@@ -46,6 +46,15 @@ const fixture = vi.hoisted(() => ({
   rpcErrorThreeArg: null as { message: string; code?: string } | null,
   rpcThrows: false,
   rpcCalls: [] as unknown[],
+  // While `hold` is true every search_cluster_ids call returns a pending
+  // promise that the test settles through its deferred (in-flight cap,
+  // single-flight and shed tests).
+  hold: false,
+  deferreds: [] as Array<{
+    args: unknown;
+    succeed: () => void;
+    fail: (err: Error) => void;
+  }>,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -61,6 +70,19 @@ const supabaseFake = await vi.hoisted(async () => {
     rpc: {
       search_cluster_ids: (args: unknown) => {
         fixture.rpcCalls.push(args);
+        if (fixture.hold) {
+          return new Promise<{ data: unknown; error: null }>((resolve, reject) => {
+            fixture.deferreds.push({
+              args,
+              succeed: () =>
+                resolve({
+                  data: fixture.rpcIds.map((id) => ({ id })),
+                  error: null,
+                }),
+              fail: (err) => reject(err),
+            });
+          });
+        }
         if (fixture.rpcThrows) throw new Error("rpc connection reset");
         if (fixture.rpcErrorThreeArg && "p_folded" in (args as object)) {
           return { data: null, error: fixture.rpcErrorThreeArg };
@@ -80,12 +102,28 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { cacheLife, cacheTag } from "next/cache";
-import { SEARCH_LIMIT, searchClusters } from "./search-query";
-import { foldTr, normaliseSearchQuery, turkishQueryVariants } from "./turkish-query";
+import {
+  MAX_IN_FLIGHT_SEARCHES,
+  SEARCH_LIMIT,
+  searchClusters,
+} from "./search-query";
+import {
+  MAX_SEARCH_QUERY_LENGTH,
+  MAX_SEARCH_TERMS,
+  canonicalSearchQuery,
+  foldTr,
+  normaliseSearchQuery,
+  turkishQueryVariants,
+} from "./turkish-query";
 import type { ZoneFeedHealth } from "./feed-health";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
+
+/** Lets every queued microtask and timer callback run. */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
@@ -99,13 +137,20 @@ beforeEach(() => {
   fixture.rpcErrorThreeArg = null;
   fixture.rpcThrows = false;
   fixture.rpcCalls = [];
+  fixture.hold = false;
+  fixture.deferreds = [];
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A test that failed half-way must not leave RPCs pending: they would keep
+  // their in-flight slots for every later test in this file (module state).
+  fixture.hold = false;
+  for (const d of fixture.deferreds) d.succeed();
+  await tick();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -243,17 +288,375 @@ describe("searchClusters query shape", () => {
     });
   });
 
-  it("caps an over-long query at 200 characters", async () => {
+  it("caps an over-long query at 64 characters", async () => {
     await searchClusters("a".repeat(500));
     const args = fixture.rpcCalls[0] as { p_folded: string };
-    expect(args.p_folded).toHaveLength(200);
+    expect(args.p_folded).toHaveLength(MAX_SEARCH_QUERY_LENGTH);
+    expect(args.p_folded).toHaveLength(64);
   });
 
   it("never sends half a surrogate pair when the cap lands inside an emoji", async () => {
-    await searchClusters("a".repeat(199) + "\u{1F600}");
+    await searchClusters("a".repeat(63) + "\u{1F600}" + "b");
     const args = fixture.rpcCalls[0] as { p_folded: string; p_variants: string[] };
-    expect(args.p_folded).toBe("a".repeat(199));
-    expect(args.p_variants[0]).toBe("a".repeat(199));
+    expect(args.p_folded).toBe("a".repeat(63));
+    expect(args.p_variants[0]).toBe("a".repeat(63));
+    // An emoji that ends the query is edge punctuation (a symbol) and goes too.
+    fixture.rpcCalls = [];
+    await searchClusters("a".repeat(63) + "\u{1F600}");
+    const tail = fixture.rpcCalls[0] as { p_folded: string; p_variants: string[] };
+    expect(tail.p_folded).toBe("a".repeat(63));
+    expect(tail.p_variants[0]).toBe("a".repeat(63));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h30-abuse-1: one cache key and one RPC per case/punctuation family, and the
+// query is bounded (6 terms, 64 characters) before the key and the RPC.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters canonical key", () => {
+  it.each(["Erdoğan", "ERDOĞAN!", " erdoğan ", "erdoğan.", "\u201cErdoğan\u201d", "\u00bfErdoğan?"])(
+    "%j sends exactly the RPC args of the lower-case query",
+    async (q) => {
+      await searchClusters(q);
+      expect(fixture.rpcCalls).toEqual([
+        {
+          p_variants: turkishQueryVariants("erdoğan"),
+          p_folded: "erdogan",
+          p_limit: 24,
+        },
+      ]);
+    },
+  );
+
+  it("the canonical spelling is what reaches the RPC for the other Turkish case pairs", async () => {
+    for (const q of ["IŞIK", "Işık", "ışık", "İSTANBUL", "ŞİŞLİ"]) {
+      fixture.rpcCalls = [];
+      await searchClusters(q);
+      expect(fixture.rpcCalls, q).toEqual([
+        {
+          p_variants: turkishQueryVariants(normaliseSearchQuery(q)),
+          p_folded: foldTr(normaliseSearchQuery(q)),
+          p_limit: 24,
+        },
+      ]);
+    }
+  });
+
+  it("a quoted phrase stays a phrase: the variants keep the quotes, the folded arm keeps them too", async () => {
+    await searchClusters('"Devlet Bahçeli"');
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_variants: turkishQueryVariants('"devlet bahçeli"'),
+        p_folded: '"devlet bahceli"',
+        p_limit: 24,
+      },
+    ]);
+    const args = fixture.rpcCalls[0] as { p_variants: string[] };
+    // Turkish letters survive on the search_tsv arm (the key is not folded).
+    expect(args.p_variants.some((v) => v.includes("bahçeli"))).toBe(true);
+  });
+
+  it("'ERDOGAN' (ASCII) and 'erdoğan' stay different searches on purpose", async () => {
+    await searchClusters("ERDOGAN");
+    await searchClusters("erdoğan");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["erdogan"], p_folded: "erdogan", p_limit: 24 },
+      { p_variants: ["erdoğan"], p_folded: "erdogan", p_limit: 24 },
+    ]);
+  });
+
+  it("a 500-character query reaches the RPC capped at 64 characters", async () => {
+    const q = "abc ".repeat(125);
+    expect(q.length).toBeGreaterThanOrEqual(500);
+    await searchClusters(q);
+    const args = fixture.rpcCalls[0] as { p_folded: string; p_variants: string[] };
+    expect(args.p_folded).toBe(foldTr(canonicalSearchQuery(q)));
+    expect(args.p_folded.length).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+    expect(args.p_folded.split(" ").length).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+    for (const v of args.p_variants) {
+      expect(v.length).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+    }
+  });
+
+  it("a 40-term query reaches the RPC with 6 terms", async () => {
+    const q = Array.from({ length: 40 }, (_, i) => `Kelime${i}`).join(" ");
+    await searchClusters(q);
+    const args = fixture.rpcCalls[0] as { p_folded: string; p_variants: string[] };
+    expect(args.p_folded).toBe(foldTr(canonicalSearchQuery(q)));
+    expect(args.p_folded).toBe("kelime0 kelime1 kelime2 kelime3 kelime4 kelime5");
+    expect(args.p_folded.split(" ")).toHaveLength(6);
+    for (const v of args.p_variants) expect(v.split(" ")).toHaveLength(6);
+  });
+
+  it("a query that is only punctuation is 'too short': ok, no RPC, no cache entry", async () => {
+    for (const q of ["!!", "!!!", "\u201c\u201d", "a!", "?a?", "...", "\u{1F600}\u{1F600}"]) {
+      await expect(searchClusters(q), q).resolves.toEqual({ ok: true, bundles: [] });
+    }
+    expect(fixture.rpcCalls).toEqual([]);
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
+  });
+
+  it("still searches a two-character canonical query", async () => {
+    await searchClusters("!ab!");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["ab"], p_folded: "ab", p_limit: 24 },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// In-flight cap + single-flight (per instance). Cache entries are not modelled
+// by the vitest build ("use cache" is a no-op there), so every call that is not
+// de-duplicated by single-flight reaches the RPC; held RPCs make the overlap
+// visible.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters in-flight cap", () => {
+  const DISTINCT = ["alfa", "beta", "gama", "delta"];
+
+  async function startHeld(queries: string[]) {
+    fixture.hold = true;
+    const running = queries.map((q) => searchClusters(q));
+    await tick();
+    return running;
+  }
+
+  function settleAll() {
+    fixture.hold = false;
+    for (const d of fixture.deferreds) d.succeed();
+  }
+
+  it("allows 4 concurrent searches", () => {
+    expect(MAX_IN_FLIGHT_SEARCHES).toBe(4);
+  });
+
+  it("sheds the 5th distinct concurrent search at once, without an RPC", async () => {
+    fixture.rpcIds = ["c1"];
+    fixture.data = [mkRow({ id: "c1", members: [{ id: "a1", sourceId: "s1" }] })];
+    const running = await startHeld(DISTINCT);
+    expect(fixture.rpcCalls).toHaveLength(4);
+    const tagCalls = vi.mocked(cacheTag).mock.calls.length;
+
+    await expect(searchClusters("epsilon")).resolves.toEqual({ ok: false });
+    await expect(searchClusters("zeta")).resolves.toEqual({ ok: false });
+    expect(fixture.rpcCalls).toHaveLength(4);
+    // The shed never entered the cache boundary, so it can never be memoised.
+    expect(vi.mocked(cacheTag).mock.calls).toHaveLength(tagCalls);
+
+    settleAll();
+    const results = await Promise.all(running);
+    for (const r of results) {
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error("expected ok");
+      expect(r.bundles.map((b) => b.cluster.id)).toEqual(["c1"]);
+    }
+  });
+
+  it("releases the slots after success: the next call runs normally", async () => {
+    const running = await startHeld(DISTINCT);
+    settleAll();
+    await Promise.all(running);
+
+    fixture.rpcCalls = [];
+    await expect(searchClusters("epsilon")).resolves.toEqual({
+      ok: true,
+      bundles: [],
+      capped: false,
+    });
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+
+  it("releases the slots after a throw: more failing searches than slots are all attempted", async () => {
+    fixture.rpcThrows = true;
+    const queries = ["alfa", "beta", "gama", "delta", "epsilon", "zeta"];
+    for (const q of queries) {
+      await expect(searchClusters(q), q).resolves.toEqual({ ok: false });
+    }
+    // Cached attempt + live retry for each: none of the six was shed.
+    expect(fixture.rpcCalls).toHaveLength(queries.length * 2);
+
+    fixture.rpcThrows = false;
+    fixture.rpcCalls = [];
+    await expect(searchClusters("eta")).resolves.toMatchObject({ ok: true });
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+
+  it("releases the slots after concurrent failures too", async () => {
+    const running = await startHeld(DISTINCT);
+    fixture.hold = false;
+    fixture.rpcIds = [];
+    for (const d of fixture.deferreds) d.fail(new Error("rpc connection reset"));
+    const results = await Promise.all(running);
+    // The failures are answered (retry or not); none leaks a slot.
+    for (const r of results) expect(typeof r.ok).toBe("boolean");
+
+    fixture.rpcCalls = [];
+    await expect(searchClusters("epsilon")).resolves.toMatchObject({ ok: true });
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+
+  it("a too-short query takes no slot even when the instance is saturated", async () => {
+    const running = await startHeld(DISTINCT);
+    await expect(searchClusters("!!")).resolves.toEqual({ ok: true, bundles: [] });
+    await expect(searchClusters("a")).resolves.toEqual({ ok: true, bundles: [] });
+    expect(fixture.rpcCalls).toHaveLength(4);
+    settleAll();
+    await Promise.all(running);
+  });
+
+  it("does not remember a finished search: the same query runs again later", async () => {
+    await searchClusters("alfa");
+    await searchClusters("alfa");
+    expect(fixture.rpcCalls).toHaveLength(2);
+  });
+});
+
+describe("searchClusters single-flight", () => {
+  it("5 concurrent identical canonical queries cause 1 RPC and share one ok result", async () => {
+    fixture.rpcIds = ["c1"];
+    fixture.data = [mkRow({ id: "c1", members: [{ id: "a1", sourceId: "s1" }] })];
+    fixture.hold = true;
+    const running = ["erdoğan", "ERDOĞAN!", " erdoğan ", "erdoğan.", "\u201cErdoğan\u201d"].map(
+      (q) => searchClusters(q),
+    );
+    await tick();
+    expect(fixture.rpcCalls).toHaveLength(1);
+
+    fixture.hold = false;
+    for (const d of fixture.deferreds) d.succeed();
+    const results = await Promise.all(running);
+
+    expect(fixture.rpcCalls).toHaveLength(1);
+    for (const r of results) {
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error("expected ok");
+      expect(r.bundles.map((b) => b.cluster.id)).toEqual(["c1"]);
+    }
+    expect(results[1]).toEqual(results[0]);
+    expect(results[4]).toEqual(results[0]);
+  });
+
+  it("an identical query is never refused while the instance is saturated", async () => {
+    fixture.hold = true;
+    const running = ["alfa", "beta", "gama", "delta"].map((q) => searchClusters(q));
+    const twin = searchClusters("ALFA!");
+    await tick();
+    expect(fixture.rpcCalls).toHaveLength(4);
+
+    fixture.hold = false;
+    for (const d of fixture.deferreds) d.succeed();
+    await expect(twin).resolves.toEqual({ ok: true, bundles: [], capped: false });
+    await Promise.all(running);
+    expect(fixture.rpcCalls).toHaveLength(4);
+  });
+
+  it("a shared failure is answered to every waiter, and the next call tries afresh", async () => {
+    fixture.hold = true;
+    const a = searchClusters("alfa");
+    const b = searchClusters("ALFA");
+    await tick();
+    expect(fixture.rpcCalls).toHaveLength(1);
+
+    // Let the retry run normally and fail too.
+    fixture.hold = false;
+    fixture.rpcThrows = true;
+    fixture.deferreds[0]!.fail(new Error("rpc connection reset"));
+    await expect(a).resolves.toEqual({ ok: false });
+    await expect(b).resolves.toEqual({ ok: false });
+    // One held attempt + one live retry, shared by both waiters.
+    expect(fixture.rpcCalls).toHaveLength(2);
+
+    fixture.rpcThrows = false;
+    fixture.rpcCalls = [];
+    await expect(searchClusters("alfa")).resolves.toMatchObject({ ok: true });
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+});
+
+describe("searchClusters live retry under load", () => {
+  it("control: a lone failing search still does the live retry (2 RPC calls)", async () => {
+    fixture.rpcThrows = true;
+    await expect(searchClusters("alfa")).resolves.toEqual({ ok: false });
+    expect(fixture.rpcCalls).toHaveLength(2);
+  });
+
+  it("skips the retry while saturated: A fails with ONE RPC, B/C/D unaffected", async () => {
+    fixture.hold = true;
+    const a = searchClusters("alfa");
+    const others = ["beta", "gama", "delta"].map((q) => searchClusters(q));
+    await tick();
+    expect(fixture.rpcCalls).toHaveLength(4);
+
+    fixture.deferreds[0]!.fail(new Error("rpc connection reset"));
+    await expect(a).resolves.toEqual({ ok: false });
+
+    const forA = (fixture.rpcCalls as Array<{ p_folded?: string }>).filter(
+      (c) => c.p_folded === "alfa",
+    );
+    expect(forA).toHaveLength(1);
+    expect(fixture.rpcCalls).toHaveLength(4);
+
+    fixture.hold = false;
+    for (const d of fixture.deferreds) d.succeed();
+    for (const r of await Promise.all(others)) expect(r.ok).toBe(true);
+  });
+
+  it("retries again once a slot is free (3 in flight + the failing one is below the cap)", async () => {
+    fixture.hold = true;
+    const a = searchClusters("alfa");
+    const others = ["beta", "gama"].map((q) => searchClusters(q));
+    await tick();
+    expect(fixture.rpcCalls).toHaveLength(3);
+
+    // Only 3 searches are in flight, so A's retry is allowed; let it succeed.
+    fixture.hold = false;
+    fixture.deferreds[0]!.fail(new Error("rpc connection reset"));
+    await expect(a).resolves.toEqual({ ok: true, bundles: [], capped: false });
+    expect(fixture.rpcCalls).toHaveLength(4);
+
+    for (const d of fixture.deferreds) d.succeed();
+    await Promise.all(others);
+  });
+});
+
+describe("searchClusters logging", () => {
+  const SECRET = "zzgizliarama";
+
+  it("never writes the query to the console, shed and failure paths included", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      // Failure path: cached attempt + live retry both fail.
+      fixture.rpcThrows = true;
+      await searchClusters(`${SECRET} ${SECRET.toUpperCase()}`);
+      fixture.rpcThrows = false;
+
+      // Shed path: saturate the instance and ask for one more.
+      fixture.hold = true;
+      const running = ["alfa", "beta", "gama", "delta"].map((q) => searchClusters(q));
+      await tick();
+      await searchClusters(SECRET);
+      // Retry-skipped path.
+      fixture.deferreds[0]!.fail(new Error("rpc connection reset"));
+      await running[0];
+      fixture.hold = false;
+      for (const d of fixture.deferreds) d.succeed();
+      await Promise.all(running);
+
+      const all = [warn, error, log, info].flatMap((spy) => spy.mock.calls);
+      expect(all.length).toBeGreaterThan(0);
+      const text = JSON.stringify(all).toLowerCase();
+      expect(text).not.toContain(SECRET);
+      const warned = warn.mock.calls.map((c) => String(c[0]));
+      expect(warned).toContain("[clusters] search-query shed: saturated");
+      expect(warned).toContain("[clusters] search-query retry skipped: saturated");
+    } finally {
+      for (const spy of [warn, error, log, info]) spy.mockRestore();
+    }
   });
 });
 

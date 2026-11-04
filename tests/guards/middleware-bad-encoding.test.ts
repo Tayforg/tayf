@@ -126,6 +126,12 @@ function staticHandlerBases(): string[] {
 }
 
 const matches = (source: string, path: string) => getPathMatch(source)(path) !== false;
+/**
+ * The plain-path matcher entries. The one object entry ({ source: '/_next/image',
+ * has: ... }, gate 10) is not a route template and has its own guard in
+ * middleware-matcher.test.ts.
+ */
+const PATH_MATCHERS: string[] = config.matcher.filter((m): m is string => typeof m === "string");
 
 type Outcome = "v1-400" | "json-400" | "text-400" | "not-found-rewrite" | "admin-login-307" | "next" | "other";
 
@@ -209,7 +215,7 @@ describe("middleware bad-encoding parity: every dynamic route", () => {
     const exempt = EXEMPT[route.template];
 
     it(`${route.template} (${route.url}) is matched by config.matcher`, () => {
-      const hit = config.matcher.filter((m) => matches(m, route.url));
+      const hit = PATH_MATCHERS.filter((m) => matches(m, route.url));
       expect(hit, `no config.matcher entry matches ${route.url}; add one in src/middleware.ts`).not.toEqual([]);
     });
 
@@ -283,8 +289,10 @@ describe("middleware bad-encoding parity: well-formed URLs pass through untouche
     "/rapor/tok/markdown",
     `/cluster/${UUID}/kart`,
     `/cluster/${UUID}/opengraph-image`,
-    "/source/cnn-turk/twitter-image",
-    "/source/cnn-turk/opengraph-image",
+    // h30-abuse-5: /source/<slug>/opengraph-image and /twitter-image now run the
+    // slug gate (a fetch, a 404 for an unknown slug); they are pinned in
+    // tests/app/middleware-routing.test.ts. Any other nested sub stays decode-only.
+    "/source/cnn-turk/other-sub",
     "/hikaye/x",
     "/embed/foo/bar",
     "/embed/foo",
@@ -306,7 +314,7 @@ describe("middleware bad-encoding parity: well-formed URLs pass through untouche
     // A nested cluster path with a non-UUID id is not a 404 from the middleware.
     const res = await middleware(request("/cluster/not-a-uuid/kart"));
     expect(res.headers.get("x-middleware-next")).toBe("1");
-    const res2 = await middleware(request("/source/Bad_Slug!/opengraph-image"));
+    const res2 = await middleware(request("/source/Bad_Slug!/other-sub"));
     expect(res2.headers.get("x-middleware-next")).toBe("1");
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -342,7 +350,7 @@ describe("middleware bad-encoding parity: static handlers", () => {
     });
 
     it(`${base}: is matched for the encoded suffix by config.matcher, never for the bare path`, () => {
-      const hit = (path: string) => config.matcher.some((m) => matches(m, path));
+      const hit = (path: string) => PATH_MATCHERS.some((m) => matches(m, path));
       for (const enc of encodings) expect(hit(base + enc), base + enc).toBe(true);
       // /api/v1 is also matched bare, by '/api/v1/:path*'; the rest are not.
       expect(hit(base), base).toBe(base === "/api/v1");
@@ -362,7 +370,7 @@ describe("middleware bad-encoding parity: static handlers", () => {
       expect(classify(await middleware(request(path))), path).toBe("not-found-rewrite");
     }
     // A nested path under a static handler is not matched by its suffix entry at all.
-    const hit = (path: string) => config.matcher.some((m) => matches(m, path));
+    const hit = (path: string) => PATH_MATCHERS.some((m) => matches(m, path));
     for (const path of ["/api/health/x", "/rss.xml/x", "/api/admin/api-keys/x"]) {
       expect(hit(path), path).toBe(false);
     }

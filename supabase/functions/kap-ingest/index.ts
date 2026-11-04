@@ -61,30 +61,95 @@ interface Stats {
   /** false when every attempted day errored — TSF-01, so a total drain
    *  outage doesn't look like a healthy 200 in the cron logs. */
   ok: boolean;
+  /** Failed operations that were KAP's fault: a final 5xx, a network error, a
+   *  timeout, or a body that is not a list of disclosures (isUpstreamUnavailable).
+   *  h30-alerts-5. */
+  upstreamErrors: number;
+  /** Failed operations that were not: a non-5xx KAP status other than a breaker
+   *  trip (e.g. a 404 from a moved endpoint), a disclosures upsert error, or any
+   *  other throw. A breaker trip counts here too, and also sets the cycle's
+   *  `tripped` flag. The deadline counts in neither. */
+  tayfErrors: number;
+  /** Set (true) only when ok is false and every failure in the cycle was KAP's:
+   *  no Tayf-side failure and no breaker trip. The handler answers 200 for it
+   *  instead of 502, so a KAP outage no longer counts as an Edge 5xx in
+   *  ops_health_report row 2 (edge_http_errors_30m). */
+  upstream_unavailable?: boolean;
+}
+
+/**
+ * KAP did not give a usable answer: the request never got an HTTP response
+ * (`status` 0: DNS, connection reset, timeout, ...) or it answered 2xx with a
+ * body that is not a JSON list (`status` = that 2xx). A final HTTP 5xx is a
+ * KapFetchError, classified by isUpstreamUnavailable below.
+ */
+export class KapUpstreamError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "KapUpstreamError";
+    this.status = status;
+  }
+}
+
+/**
+ * True when `err` is an outage of kap.org.tr itself, as opposed to a Tayf-side
+ * fault or an answer KAP gave on purpose. A 403/429 is KAP telling us to stop
+ * (the breaker's business, never "unavailable"); any other 4xx means our
+ * request or the endpoint is wrong. h30-alerts-5.
+ */
+export function isUpstreamUnavailable(err: unknown): err is KapUpstreamError | KapFetchError {
+  return err instanceof KapUpstreamError || (err instanceof KapFetchError && err.status >= 500);
+}
+
+function errorName(err: unknown): string {
+  const name = (err as { name?: unknown } | null | undefined)?.name;
+  return typeof name === "string" && name !== "" ? name : typeof err;
 }
 
 async function fetchDay(day: string, disclosureClass = ""): Promise<KapListItem[]> {
-  const res = await fetchWithRetry(
-    KAP_BASE + KAP_LIST_PATH,
-    {
-      method: "POST",
-      headers: { ...HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify(kapQueryBody(day, day, disclosureClass)),
-    },
-    // SEC-07: a fresh per-attempt timeout signal, built by fetchWithRetry
-    // itself, instead of a single AbortSignal.timeout() constructed here
-    // that starts counting before the retry loop's backoff sleeps even run.
-    { timeoutMs: FETCH_TIMEOUT_MS },
-  );
+  const where = `${day}/${disclosureClass || "*"}`;
+  let res: Response;
+  try {
+    res = await fetchWithRetry(
+      KAP_BASE + KAP_LIST_PATH,
+      {
+        method: "POST",
+        headers: { ...HEADERS, "Content-Type": "application/json" },
+        body: JSON.stringify(kapQueryBody(day, day, disclosureClass)),
+      },
+      // SEC-07: a fresh per-attempt timeout signal, built by fetchWithRetry
+      // itself, instead of a single AbortSignal.timeout() constructed here
+      // that starts counting before the retry loop's backoff sleeps even run.
+      { timeoutMs: FETCH_TIMEOUT_MS },
+    );
+  } catch (err) {
+    // h30-alerts-5: fetch itself threw (DNS, reset, TypeError, TimeoutError):
+    // KAP never answered. Tagged here, where it is produced, so the caller
+    // classifies by type and never by string matching.
+    throw new KapUpstreamError(
+      0,
+      `[kap-ingest] KAP unreachable for ${where}: ${errorName(err)}`,
+      { cause: err },
+    );
+  }
   if (!res.ok) {
     // SEC-07 follow-up: carries the final status so the caller (ingestRange)
     // can decide isBreakerTripStatus(status) without re-parsing this text.
-    throw new KapFetchError(
-      res.status,
-      `[kap-ingest] KAP ${res.status} for ${day}/${disclosureClass || "*"}`,
-    );
+    throw new KapFetchError(res.status, `[kap-ingest] KAP ${res.status} for ${where}`);
   }
-  return (await res.json()) as KapListItem[];
+  // h30-alerts-5: a 2xx whose body is not a JSON list (a maintenance page, an
+  // error object) is KAP's outage, not a Tayf bug.
+  let items: unknown;
+  try {
+    items = await res.json();
+  } catch (err) {
+    throw new KapUpstreamError(res.status, `[kap-ingest] KAP bad body for ${where}`, { cause: err });
+  }
+  if (!Array.isArray(items)) {
+    throw new KapUpstreamError(res.status, `[kap-ingest] KAP bad body for ${where}`);
+  }
+  return items as KapListItem[];
 }
 
 // One day is normally 200-900 rows; earnings-season days can exceed the
@@ -107,6 +172,14 @@ async function fetchDayComplete(day: string, stats: Stats): Promise<KapListItem[
   return [...merged.values()];
 }
 
+/** What ingestRange knows that Stats (the response body) deliberately does not carry. */
+interface RangeOutcome {
+  /** A final 403/429 tripped the persisted breaker this cycle. */
+  tripped: boolean;
+  /** The first upstream failure, for kap_fetch_state.last_status / last_error. */
+  firstUpstream: { status: number; message: string } | null;
+}
+
 async function ingestRange(
   supabase: ReturnType<typeof createServiceClient>,
   from: string,
@@ -114,7 +187,8 @@ async function ingestRange(
   deadline: number,
   stats: Stats,
   isBackfill: boolean,
-): Promise<void> {
+): Promise<RangeOutcome> {
+  const outcome: RangeOutcome = { tripped: false, firstUpstream: null };
   // SEC-07 follow-up: clear the breaker's last_error at most once per
   // cycle, on the first day that actually succeeds — not once per day,
   // which would write kap_fetch_state on every successful fetchDay call.
@@ -158,6 +232,7 @@ async function ingestRange(
           .select("disclosure_index");
         if (error) {
           stats.errors.push(`${day} upsert: ${error.message}`);
+          stats.tayfErrors++;
           continue;
         }
         // Rows actually written, not rows submitted: under
@@ -169,6 +244,15 @@ async function ingestRange(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       stats.errors.push(`${day}: ${message}`);
+      // h30-alerts-5: count the failure by who caused it, at the point it is
+      // caught. A breaker trip lands in tayfErrors too (it is not KAP being
+      // down) and also sets `tripped`, which vetoes upstream_unavailable.
+      if (isUpstreamUnavailable(err)) {
+        stats.upstreamErrors++;
+        outcome.firstUpstream ??= { status: err.status, message };
+      } else {
+        stats.tayfErrors++;
+      }
       // SEC-07 follow-up: only a KapFetchError whose retry ladder exhausted
       // on a final 403/429 trips the breaker — a 5xx or a thrown
       // network/timeout error (TypeError, AbortError, ...) is transient
@@ -178,10 +262,12 @@ async function ingestRange(
       // remaining days too.
       if (err instanceof KapFetchError && isBreakerTripStatus(err.status)) {
         await tripBreaker(supabase, err.status, message);
+        outcome.tripped = true;
         break;
       }
     }
   }
+  return outcome;
 }
 
 /** Read-only breaker check: null when open (no row, DB error, or never tripped). */
@@ -245,6 +331,47 @@ async function clearBreakerError(
     .eq("id", 1);
   if (error) console.warn(`[kap-ingest] clearBreakerError write failed: ${error.message}`);
   else if (count === 0) console.warn("[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist");
+}
+
+/** kap_fetch_state.last_error is shown in one line on /admin/ekonomi. */
+const UPSTREAM_ERROR_MAX_CHARS = 300;
+
+/**
+ * h30-alerts-5: record, once per cycle, that every failure was kap.org.tr's, so
+ * /admin/ekonomi's KAP badge shows the last status and error while the handler
+ * answers 200 {ok:false, upstream_unavailable:true}. Writes last_status,
+ * last_error and updated_at ONLY: it never touches blocked_until (an outage
+ * must not stop the next tick polling, unlike tripBreaker), and the next
+ * successful day clears it through clearBreakerError.
+ *
+ * `status` is the final 5xx, or 0 when there is no usable HTTP answer (network
+ * error, timeout, or a 2xx with an unusable body: storing that 2xx would make
+ * the badge print "200 (normal)" beside an error). Best-effort like the other
+ * state writes: a failing write is logged and never changes the cycle's answer.
+ * Same zero-row warn as tripBreaker.
+ */
+async function recordUpstreamError(
+  supabase: ReturnType<typeof createServiceClient>,
+  status: number,
+  message: string,
+): Promise<void> {
+  try {
+    const { error, count } = await supabase
+      .from("kap_fetch_state")
+      .update(
+        {
+          last_status: status >= 500 ? status : 0,
+          last_error: message.slice(0, UPSTREAM_ERROR_MAX_CHARS),
+          updated_at: new Date().toISOString(),
+        },
+        { count: "exact" },
+      )
+      .eq("id", 1);
+    if (error) console.warn(`[kap-ingest] recordUpstreamError write failed: ${error.message}`);
+    else if (count === 0) console.warn("[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist");
+  } catch (err) {
+    console.warn(`[kap-ingest] recordUpstreamError write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // TS-08 (caller half): best-effort Next.js cache revalidation so the
@@ -352,6 +479,8 @@ export async function runCycle(body: Body): Promise<Stats | KapBreakerSkip> {
     errors: [],
     durationMs: 0,
     ok: true,
+    upstreamErrors: 0,
+    tayfErrors: 0,
   };
 
   if (body.companies) await syncCompanies(supabase, stats);
@@ -365,7 +494,7 @@ export async function runCycle(body: Body): Promise<Stats | KapBreakerSkip> {
   // DB-08: only an explicit `from` is a deliberate backfill; the default
   // (no `from`) poll path is the one that switches to ON CONFLICT DO NOTHING.
   if (!body.companies || body.from) {
-    await ingestRange(supabase, from, to, deadline, stats, Boolean(body.from));
+    const outcome = await ingestRange(supabase, from, to, deadline, stats, Boolean(body.from));
 
     // TSF-01: every day-level throw inside ingestRange is caught and
     // swallowed into stats.errors (so one poison day doesn't block the
@@ -379,6 +508,16 @@ export async function runCycle(body: Body): Promise<Stats | KapBreakerSkip> {
         "kap-ingest",
         new Error(`all ${attemptedDays} day(s) failed: ${stats.errors.slice(0, 5).join(",")}`),
       );
+      // h30-alerts-5: ...but when every one of those failures was kap.org.tr's
+      // (a final 5xx, a network error, a timeout, an unusable body) and nothing
+      // on our side failed and no breaker tripped, the outage is not an Edge
+      // fault. The handler answers 200 for it; Sentry still gets the event above.
+      if (stats.upstreamErrors > 0 && stats.tayfErrors === 0 && !outcome.tripped) {
+        stats.upstream_unavailable = true;
+        if (outcome.firstUpstream) {
+          await recordUpstreamError(supabase, outcome.firstUpstream.status, outcome.firstUpstream.message);
+        }
+      }
     }
   }
 
@@ -430,8 +569,14 @@ Deno.serve(withSentry("kap-ingest", async (req: Request) => {
     // TSF-01: a total-drain-failure cycle reports ok:false with a non-2xx
     // status so the cron run shows red instead of a green 200 — `stats`
     // already carries `ok`, so no separate wrapper field is needed here.
+    // h30-alerts-5: except when every failure was kap.org.tr's own (a final
+    // 5xx, network error, timeout, unusable body): that is 200 with
+    // {ok:false, upstream_unavailable:true}, because pg_net 5xx responses feed
+    // ops_health_report row 2 (edge_http_errors_30m) and a KAP outage pinned it
+    // at FAIL every 2 minutes, masking real Edge faults. A Tayf-side failure,
+    // a mixed cycle and a breaker trip (403/429) still answer 502.
     return new Response(JSON.stringify(result), {
-      status: result.ok ? 200 : 502,
+      status: result.ok || result.upstream_unavailable ? 200 : 502,
       headers: { "content-type": "application/json" },
     });
   } catch (err) {

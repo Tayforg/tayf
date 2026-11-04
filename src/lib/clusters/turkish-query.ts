@@ -163,3 +163,90 @@ export function normaliseSearchQuery(q: string): string {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+// ---------------------------------------------------------------------------
+// Canonical search query: the cache key and the RPC input of the home search
+// (h30-abuse-1).
+//
+// `searchClusters` used to key its cache on `normaliseSearchQuery(q)`, so
+// 'Erdoğan', 'ERDOĞAN!', ' erdoğan ' and 'erdoğan.' were four cache entries and
+// four 0.4-0.5 s `search_cluster_ids` RPCs for one search, and a 200-character
+// 40-word query was a fifth. `canonicalSearchQuery` collapses a case and
+// punctuation family to ONE string and bounds its size before the key is built.
+//
+// There is deliberately NO Turkish fold here. `p_variants` is built from this
+// string by `turkishQueryVariants`, which already lower-cases, upper-cases and
+// title-cases it internally, and `foldTr` maps İ/I/ı to i, so lower-casing with
+// the Turkish rules first leaves BOTH RPC arguments byte-identical to what the
+// un-canonicalised query produced (turkish-query.test.ts pins that parity).
+// Folding the key to ASCII would change them: the `search_tsv` arm would lose
+// its Turkish-letter lexemes, and a quoted '"Devlet Bahçeli"' would reach the
+// folded arm as a plain AND query (migration 129 drops phrases there). So
+// 'erdogan' (ASCII) and 'erdoğan' stay two keys on purpose: their results
+// already differ today.
+// ---------------------------------------------------------------------------
+
+/** The most terms (whitespace-separated words) the archive search keeps. */
+export const MAX_SEARCH_TERMS = 6;
+/** The longest canonical query, in UTF-16 code units (never ends in half an emoji). */
+export const MAX_SEARCH_QUERY_LENGTH = 64;
+
+// One code point at a time: an emoji is a single \p{S} code point but two
+// UTF-16 units, so testing a code unit would never match it.
+const EDGE_PUNCTUATION = /^[\p{P}\p{S}]$/u;
+
+// '"' opens or closes a phrase and '-' negates a term (Postgres
+// websearch_to_tsquery reads both), so they are kept at a term's edge.
+function isStrippableEdge(ch: string): boolean {
+  return ch !== '"' && ch !== "-" && EDGE_PUNCTUATION.test(ch);
+}
+
+/**
+ * Cuts leading and trailing punctuation/symbols off one term. Two indices walk
+ * in from the ends, one code point per step, so the cost is linear in the term
+ * (an anchored `[\p{P}\p{S}]+$` regex is quadratic on a long run that is not at
+ * the end, and CodeQL flags it).
+ */
+function stripEdgePunctuation(term: string): string {
+  const points = Array.from(term);
+  let start = 0;
+  let end = points.length;
+  while (start < end && isStrippableEdge(points[start]!)) start++;
+  while (end > start && isStrippableEdge(points[end - 1]!)) end--;
+  return start === 0 && end === points.length ? term : points.slice(start, end).join("");
+}
+
+/**
+ * The cache key and RPC input for a reader-typed archive-search query:
+ *   1. `normaliseSearchQuery` (controls out, apostrophe suffix dropped,
+ *      whitespace collapsed);
+ *   2. Turkish lower-casing ('IŞIK', 'Işık', 'ışık' -> 'ışık');
+ *   3. punctuation and symbols cut off both edges of every term, so
+ *      'ERDOĞAN!', '“Erdoğan”' and 'Erdoğan.' share a key; a leading '-' and
+ *      the double quote of a phrase search are kept;
+ *   4. terms left empty are dropped and only the first MAX_SEARCH_TERMS kept;
+ *   5. the whole is cut to MAX_SEARCH_QUERY_LENGTH without leaving half a
+ *      surrogate pair, and the cut term's edge is stripped again.
+ * Pure, idempotent and linear in the input. '' means "nothing to search for".
+ * No Turkish fold (see the header above): the RPC arguments do not change.
+ */
+export function canonicalSearchQuery(q: string): string {
+  const terms: string[] = [];
+  for (const raw of normaliseSearchQuery(q).toLocaleLowerCase("tr").split(" ")) {
+    const term = stripEdgePunctuation(raw);
+    if (term === "") continue;
+    terms.push(term);
+    if (terms.length >= MAX_SEARCH_TERMS) break;
+  }
+
+  const joined = terms.join(" ");
+  if (joined.length <= MAX_SEARCH_QUERY_LENGTH) return joined;
+
+  // The cut can land between the halves of a surrogate pair (a lone high
+  // surrogate does not survive the JSON body to Postgres) or leave the last
+  // term ending in punctuation, so strip that term's edge again: this keeps
+  // the function idempotent.
+  const cut = joined.slice(0, MAX_SEARCH_QUERY_LENGTH).replace(/[\ud800-\udbff]$/, "");
+  const lastSpace = cut.lastIndexOf(" ");
+  return (cut.slice(0, lastSpace + 1) + stripEdgePunctuation(cut.slice(lastSpace + 1))).trim();
+}

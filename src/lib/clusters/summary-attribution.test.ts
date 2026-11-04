@@ -649,14 +649,23 @@ function leavesNothingOpen(s: string): boolean {
   );
 }
 
-/** What truncateWords did before h29: cut at the last space of the window, whatever it left open. */
-function legacyTruncate(full: string, max: number): string {
-  if (full.length <= max) return full;
+/**
+ * What truncateWords did before h29: cut at the last space of the window,
+ * whatever it left open. h30-live-1 changed one thing about that cut on purpose
+ * ("Partisi,…" is now "Partisi…"), so the oracle drops ", ; : – — -" in front of
+ * the ellipsis too. Returns the cut and where the dangling-free text ends, so a
+ * caller can tell a cut that ends inside the label.
+ */
+function legacyCut(full: string, max: number): { out: string; end: number } {
+  if (full.length <= max) return { out: full, end: full.length };
   const truncated = full.slice(0, Math.max(0, max - 1));
   const lastSpace = truncated.lastIndexOf(" ");
   const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
-  return cut.trimEnd() + "…";
+  let end = cut.length;
+  while (end > 0 && (",;:–—-".includes(cut.charAt(end - 1)) || cut.charAt(end - 1).trim() === "")) end--;
+  return { out: cut.slice(0, end) + "…", end };
 }
+
 
 describe("describeForMeta never ends inside an open quotation (h29-regress-1)", () => {
   const AA = src("Anadolu Ajansı");
@@ -671,20 +680,20 @@ describe("describeForMeta never ends inside an open quotation (h29-regress-1)", 
   it.each([
     ["3ee2895b, verbatim", YILMAZ_3EE2],
     ["the fix_spec's synthetic", YILMAZ_SYNTHETIC],
-  ])("%s: the description ends in front of the opener", (_label, text) => {
+  ])("%s: the 'Yılmaz…' stub is not published, the description is the one without an attribution (h30-live-1)", (_label, text) => {
     const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
     expect(out.length).toBeLessThanOrEqual(160);
-    expect(out.endsWith("…")).toBe(true);
     expect(occurrences(out, '"') % 2).toBe(0);
     expect(occurrences(out, "“")).toBe(occurrences(out, "”"));
     expect(occurrences(out, "«")).toBe(occurrences(out, "»"));
     expect(occurrences(out, "‘")).toBeLessThanOrEqual(occurrences(out, "’"));
-    expect(out).toBe("4 kaynak. Anadolu Ajansı: Yılmaz…");
+    // h29 pinned "4 kaynak. Anadolu Ajansı: Yılmaz…" here: the speaker and nothing else.
+    expect(out).toBe("4 kaynak.");
   });
 
-  it("the generic label gets the same cut", () => {
+  it("the generic label gets the same fallback (h29 pinned 'Kaynak açıklaması: Yılmaz…')", () => {
     const out = describeForMeta({ count: 4, attribution: { text: YILMAZ_3EE2, source: null } });
-    expect(out).toBe("4 kaynak. Kaynak açıklaması: Yılmaz…");
+    expect(out).toBe("4 kaynak.");
   });
 
   it("holds for every limit: balanced, within the limit, and the text is not cut inside a quotation", () => {
@@ -697,48 +706,85 @@ describe("describeForMeta never ends inside an open quotation (h29-regress-1)", 
     }
   });
 
-  describe("an opener in the first 40 characters of the text", () => {
+  describe("an opener in the first 40 characters of the text (h30-live-1: fewer than 60 characters survive the back-off)", () => {
     it.each([
       ["curly double", "“", "”"],
       ["angle", "«", "»"],
       ["curly single", "‘", "’"],
-    ])("%s quotation: ends right before the opener, with the colon and the blank gone", (_label, open, close) => {
+    ])("%s quotation: the speaker alone is a stub, so the description has no attribution", (_label, open, close) => {
       const text = `Bakan Yılmaz: ${open}${LONG}önemlidir${close} dedi.`;
       const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
-      expect(out).toBe("4 kaynak. Anadolu Ajansı: Bakan Yılmaz…");
+      // h29 pinned "4 kaynak. Anadolu Ajansı: Bakan Yılmaz…".
+      expect(out).toBe("4 kaynak.");
       expect(leavesNothingOpen(out)).toBe(true);
     });
 
-    it.each([
-      ["curly double", "“", "”"],
-      ["angle", "«", "»"],
-      ["curly single", "‘", "’"],
-    ])("%s quotation: a comma in front of the opener goes with it", (_label, open, close) => {
-      const text = `Bakan Yılmaz, ${open}${LONG}önemlidir${close} dedi.`;
-      expect(describeForMeta({ count: 4, attribution: { text, source: AA } })).toBe(
-        "4 kaynak. Anadolu Ajansı: Bakan Yılmaz…",
+    it("the title sentence replaces the stub when there is a title", () => {
+      const text = `Bakan Yılmaz: “${LONG}önemlidir” dedi.`;
+      expect(describeForMeta({ count: 4, attribution: { text, source: AA }, title: "Enerji güvenliği için işbirliği çağrısı" })).toBe(
+        "4 kaynak, tek haber: Enerji güvenliği için işbirliği çağrısı",
       );
     });
 
     it("a straight quotation too", () => {
       const text = `Bakan Yılmaz , : "${LONG}önemlidir" dedi.`;
-      expect(describeForMeta({ count: 4, attribution: { text, source: AA } })).toBe(
-        "4 kaynak. Anadolu Ajansı: Bakan Yılmaz…",
-      );
+      expect(describeForMeta({ count: 4, attribution: { text, source: AA } })).toBe("4 kaynak.");
+    });
+  });
+
+  describe("an opener after at least 60 characters of the text: the cut ends in front of it", () => {
+    // 60 characters of text in front of the quotation.
+    const LEAD = "Enerji Bakanı Yılmaz bugün kentte yaptığı açıklamada şunları söyledi".slice(0, 60);
+
+    it("is 60 characters", () => {
+      expect(LEAD).toHaveLength(60);
+      expect(LEAD.endsWith("şunları")).toBe(true);
+    });
+
+    it.each([
+      ["curly double, colon", "“", "”", ": "],
+      ["angle, colon", "«", "»", ": "],
+      ["curly single, colon", "‘", "’", ": "],
+      ["curly double, comma", "“", "”", ", "],
+      ["angle, comma", "«", "»", ", "],
+      ["curly single, comma", "‘", "’", ", "],
+      ["straight, blank", '"', '"', " "],
+      ["straight, spaced comma and colon", '"', '"', " , : "],
+    ])("%s: ends right before the opener, with the colon, comma and blank gone", (_label, open, close, sep) => {
+      const text = `${LEAD}${sep}${open}${LONG}önemlidir${close} dedi.`;
+      const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
+      expect(out).toBe(`4 kaynak. Anadolu Ajansı: ${LEAD}…`);
+      expect(leavesNothingOpen(out)).toBe(true);
     });
   });
 
   describe("a sentence end in front of a late opener", () => {
+    // 60 characters, full stop included.
+    const SENTENCE = `${"Enerji Bakanı Yılmaz bugün kentte yaptığı açıklamada şunları söyledi".slice(0, 59)}.`;
+
+    it("is 60 characters", () => {
+      expect(SENTENCE).toHaveLength(60);
+    });
+
     it.each([
       ["curly double", "“", "”"],
       ["angle", "«", "»"],
       ["curly single", "‘", "’"],
       ["straight", '"', '"'],
     ])("%s quotation: the description ends at the sentence end, in the same shape as a cut after a period", (_label, open, close) => {
-      const text = `İlk cümle burada bitti. Bakan ${open}${LONG}önemlidir${close} dedi.`;
+      const text = `${SENTENCE} Bakan ${open}${LONG}önemlidir${close} dedi.`;
       const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
-      expect(out).toBe("4 kaynak. Anadolu Ajansı: İlk cümle burada bitti.…");
+      expect(out).toBe(`4 kaynak. Anadolu Ajansı: ${SENTENCE}…`);
       expect(leavesNothingOpen(out)).toBe(true);
+    });
+
+    it.each([
+      ["curly double", "“", "”"],
+      ["straight", '"', '"'],
+    ])("%s quotation: a first sentence of fewer than 60 characters is a stub too (h30-live-1)", (_label, open, close) => {
+      // h29 pinned "4 kaynak. Anadolu Ajansı: İlk cümle burada bitti.…" here.
+      const text = `İlk cümle burada bitti. Bakan ${open}${LONG}önemlidir${close} dedi.`;
+      expect(describeForMeta({ count: 4, attribution: { text, source: AA } })).toBe("4 kaynak.");
     });
   });
 
@@ -792,32 +838,59 @@ describe("describeForMeta never ends inside an open quotation (h29-regress-1)", 
   describe("the rss.xml base path", () => {
     const base = "3 kaynaktan haberler.";
 
+    const LEAD = "Enerji Bakanı Yılmaz bugün kentte yaptığı açıklamada şunları söyledi".slice(0, 60);
+
     it("a quoted attribution comes out balanced", () => {
-      const text = `Bakan Yılmaz, "${"enerji güvenliği ".repeat(40)}önemlidir" dedi.`;
+      const text = `${LEAD}, "${"enerji güvenliği ".repeat(40)}önemlidir" dedi.`;
       const out = describeForMeta({ count: 3, attribution: { text, source: AA }, base }, 400);
-      expect(out).toBe("3 kaynaktan haberler. Anadolu Ajansı: Bakan Yılmaz…");
+      expect(out).toBe(`3 kaynaktan haberler. Anadolu Ajansı: ${LEAD}…`);
       expect(leavesNothingOpen(out)).toBe(true);
       expect(out.length).toBeLessThanOrEqual(400);
     });
 
+    it("a stub (fewer than 60 characters in front of the quotation) gives the base alone (h30-live-1)", () => {
+      const text = `Bakan Yılmaz, "${"enerji güvenliği ".repeat(40)}önemlidir" dedi.`;
+      const out = describeForMeta({ count: 3, attribution: { text, source: AA }, base }, 400);
+      // h29 pinned "3 kaynaktan haberler. Anadolu Ajansı: Bakan Yılmaz…".
+      expect(out).toBe("3 kaynaktan haberler.");
+    });
+
     it("keeps the wire note of the base and the sentence end in front of the opener", () => {
+      const wireBase = "3 kaynaktan haberler. Tek kaynaktan 5 kopya.";
+      const sentence = `${LEAD.slice(0, 59)}.`;
+      const text = `${sentence} Bakan Yılmaz “${"enerji güvenliği ".repeat(40)}önemlidir” dedi.`;
+      const out = describeForMeta({ count: 3, attribution: { text, source: null }, base: wireBase }, 400);
+      expect(out).toBe(`3 kaynaktan haberler. Tek kaynaktan 5 kopya. Kaynak açıklaması: ${sentence}…`);
+      expect(leavesNothingOpen(out)).toBe(true);
+    });
+
+    it("a stub sentence in front of the opener gives the base with its wire note (h30-live-1)", () => {
       const wireBase = "3 kaynaktan haberler. Tek kaynaktan 5 kopya.";
       const text = `Birinci cümle tamamlandı. Bakan Yılmaz “${"enerji güvenliği ".repeat(40)}önemlidir” dedi.`;
       const out = describeForMeta({ count: 3, attribution: { text, source: null }, base: wireBase }, 400);
-      expect(out).toBe("3 kaynaktan haberler. Tek kaynaktan 5 kopya. Kaynak açıklaması: Birinci cümle tamamlandı.…");
-      expect(leavesNothingOpen(out)).toBe(true);
+      // h29 pinned "... Kaynak açıklaması: Birinci cümle tamamlandı.…".
+      expect(out).toBe(wireBase);
     });
   });
 
   describe("balanced inputs are byte-identical to the old cut", () => {
     const prefix = "2 kaynak. Kaynak açıklaması: ";
 
-    it("a text without a quotation: every limit gives the old output", () => {
+    it("a text without a quotation: every limit gives the old output (h30-live-1: a cut that ends inside the label gives '2 kaynak.')", () => {
       const text = "Bekleniyor… ardından açıklama geldi. Bakan Yılmaz toplantıdan çıktı, sonra basına konuştu.";
+      let insideLabel = 0;
       for (let max = prefix.length + 2; max <= prefix.length + text.length + 2; max++) {
         const out = describeForMeta({ count: 2, attribution: { text, source: null } }, max);
-        expect(out, `max=${max}`).toBe(legacyTruncate(prefix + text, max));
+        const { out: legacy, end } = legacyCut(prefix + text, max);
+        if (end <= prefix.length) {
+          expect(out, `max=${max}`).toBe("2 kaynak.");
+          insideLabel++;
+        } else {
+          expect(out, `max=${max}`).toBe(legacy);
+        }
       }
+      // The label-only cuts were reached (the smallest limits).
+      expect(insideLabel).toBeGreaterThan(0);
     });
 
     it("a cut that ends in '…' keeps the old doubled ellipsis", () => {
@@ -833,10 +906,10 @@ describe("describeForMeta never ends inside an open quotation (h29-regress-1)", 
       let backedOff = 0;
       for (let max = prefix.length + 2; max <= prefix.length + text.length + 2; max++) {
         const out = describeForMeta({ count: 2, attribution: { text, source: null } }, max);
-        const legacy = legacyTruncate(prefix + text, max);
+        const { out: legacy, end } = legacyCut(prefix + text, max);
         expect(out.length, `max=${max}`).toBeLessThanOrEqual(max);
         if (leavesNothingOpen(legacy)) {
-          expect(out, `max=${max}`).toBe(legacy);
+          expect(out, `max=${max}`).toBe(end <= prefix.length ? "2 kaynak." : legacy);
           balancedCuts++;
         } else {
           expect(leavesNothingOpen(out), `max=${max}: ${out}`).toBe(true);
@@ -846,6 +919,289 @@ describe("describeForMeta never ends inside an open quotation (h29-regress-1)", 
       // Both branches ran.
       expect(balancedCuts).toBeGreaterThan(10);
       expect(backedOff).toBeGreaterThan(10);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h30-live-1: Meta descriptions are no longer "Outlet: Speaker…" stubs, do not
+// read a U+2018 opener closed by an ASCII apostrophe as an open quotation, and
+// do not end in ",…" / ";…". The texts are clusters.summary_tr of the live rows,
+// verbatim (read-only query, 2026-11-03).
+// ---------------------------------------------------------------------------
+
+/** Oracle for "leaves nothing open" with the h30 rule: an ASCII apostrophe closes an open U+2018 unless a letter follows it. */
+function leavesNothingOpenH30(s: string): boolean {
+  const chars = Array.from(s);
+  let straight = 0;
+  let curly = 0;
+  let angle = 0;
+  let single = 0;
+  chars.forEach((ch, i) => {
+    if (ch === '"') straight++;
+    else if (ch === "“") curly++;
+    else if (ch === "”") curly--;
+    else if (ch === "«") angle++;
+    else if (ch === "»") angle--;
+    else if (ch === "‘") single++;
+    else if (ch === "’") single--;
+    else if (ch === "'" && single > 0 && !/^\p{L}$/u.test(chars[i + 1] ?? "")) single--;
+  });
+  return straight % 2 === 0 && curly <= 0 && angle <= 0 && single <= 0;
+}
+
+/** True when `s` ends in one of , ; : – — - directly in front of the ellipsis. */
+function endsDangling(s: string): boolean {
+  return s.endsWith("…") && ",;:–—-".includes(s.charAt(s.length - 2));
+}
+
+describe("describeForMeta (h30-live-1)", () => {
+  const AA = src("Anadolu Ajansı");
+  const LONG = "enerji güvenliği ".repeat(15);
+  // 3ee2895b-b0ae-48f6-9d8a-3f695953cee3
+  const Y_3EE2 =
+    "Yılmaz, \"İsrail'in kışkırtmalarıyla başlayan savaşlar neticesinde, dünya enerji fiyatlarının ekonomiler üzerindeki baskısına şahitlik ediyoruz. Bu durum, enerji güvenliğinin sağlanmasında işbirliğinin önemini bir kez daha ortaya koymuştur.\" dedi.";
+  const TITLE_3EE2 = "Cumhurbaşkanı Yardımcısı Yılmaz'dan Enerji Piyasası Değerlendirmesi";
+  // c5627cb9-4000-471c-9c42-0be5f29e62b3: U+2018 opener, ASCII closer.
+  const C5627 =
+    "MHP Genel Başkanı Devlet Bahçeli, ‘100 il 1000 ilçe' projesini kamuoyuyla paylaştı. Bahçeli, artan nüfus ve ihtiyaçlara dikkat çekerek 9 yeni il ve 78 yeni ilçe kurulması gerektiğini belirtti.";
+  // e7a9b585-a7cb-4cb9-881b-cf387e5c63b8
+  const E7A9 =
+    "İsrail'de sandıktan koalisyon belirsizliğinin çıktığı 27 Ekim'deki genel seçimlerin ardından muhalefetteki Demokratlar Partisi, başbakanlık için Gadi Eisenkot'u destekleyeceğini açıkladı.";
+  // 5db9fe11-46af-4ba2-82b0-cd49d2fc0482
+  const F5DB =
+    "63’üncüsü düzenlenen Uluslararası Antalya Altın Portakal Film Festivali, Cam Piramid’de gerçekleştirilen ödül töreniyle sona ererken; Ragıp Türk’ün yönettiği “Taş ve Tüy” “en iyi film” dahil 6 ödülle geceye damga vurdu, Yeşim Ustaoğlu “Artakalan” ile \"en iyi yönetmen\" ödülünü kucaklarken; Öykü Karayel, Mehmet Günsür, Mert Fırat ve Erol Babaoğlu oyunculuk dallarında ödüle layık görülen isimler oldu.";
+
+  describe("the 3ee2895b attribution (Yılmaz, \"…long quote…\") falls back to the description without an attribution", () => {
+    it("with a title: '4 kaynak, tek haber: <title>', within 160 and nothing open", () => {
+      for (const source of [AA, null]) {
+        const out = describeForMeta({ count: 4, attribution: { text: Y_3EE2, source }, title: TITLE_3EE2 });
+        expect(out.startsWith("4 kaynak, tek haber: ")).toBe(true);
+        expect(out).toBe(`4 kaynak, tek haber: ${TITLE_3EE2}`);
+        expect(out.length).toBeLessThanOrEqual(160);
+        expect(leavesNothingOpenH30(out)).toBe(true);
+        expect(out).not.toContain("Yılmaz…");
+      }
+    });
+
+    it("the same description as a cluster with no attribution at all", () => {
+      const noAttribution = describeForMeta({ count: 4, attribution: null, title: TITLE_3EE2 });
+      expect(describeForMeta({ count: 4, attribution: { text: Y_3EE2, source: AA }, title: TITLE_3EE2 })).toBe(noAttribution);
+    });
+
+    it("without a title: '4 kaynak.'", () => {
+      expect(describeForMeta({ count: 4, attribution: { text: Y_3EE2, source: AA } })).toBe("4 kaynak.");
+      expect(describeForMeta({ count: 4, attribution: { text: Y_3EE2, source: null } })).toBe("4 kaynak.");
+    });
+
+    it("a blank title is no title", () => {
+      expect(describeForMeta({ count: 4, attribution: { text: Y_3EE2, source: AA }, title: "   " })).toBe("4 kaynak.");
+    });
+
+    it("a long title is cut by the usual word cut, still under 160", () => {
+      const title = "Enerji güvenliği için işbirliği çağrısı yapan Cumhurbaşkanı Yardımcısı ".repeat(4).trim();
+      const out = describeForMeta({ count: 4, attribution: { text: Y_3EE2, source: AA }, title });
+      expect(out.length).toBeLessThanOrEqual(160);
+      expect(out.startsWith("4 kaynak, tek haber: Enerji güvenliği")).toBe(true);
+      expect(out.endsWith("…")).toBe(true);
+      expect(endsDangling(out)).toBe(false);
+    });
+
+    it("a base (rss.xml) is the fallback and the title is not used", () => {
+      expect(
+        describeForMeta({ count: 4, attribution: { text: Y_3EE2, source: AA }, title: TITLE_3EE2, base: "4 kaynaktan haberler." }),
+      ).toBe("4 kaynaktan haberler.");
+    });
+  });
+
+  describe("the 60-character rule: only a quote back-off that keeps fewer than 60 characters of text falls back", () => {
+    // 59 and 60 characters of text in front of the quotation (the prefix is not counted).
+    const BASE = "Enerji Bakanı Yılmaz bugün kentte yaptığı açıklamada şunları söyledi";
+    const LEAD60 = BASE.slice(0, 60);
+    const LEAD59 = BASE.slice(0, 59);
+    const prefix = "4 kaynak. Anadolu Ajansı: ";
+    const quoted = (lead: string) => `${lead}, "${LONG}önemlidir" dedi.`;
+
+    it("60 characters are kept", () => {
+      expect(LEAD60).toHaveLength(60);
+      expect(describeForMeta({ count: 4, attribution: { text: quoted(LEAD60), source: AA } })).toBe(`${prefix}${LEAD60}…`);
+    });
+
+    it("59 characters are a stub", () => {
+      expect(LEAD59).toHaveLength(59);
+      expect(describeForMeta({ count: 4, attribution: { text: quoted(LEAD59), source: AA } })).toBe("4 kaynak.");
+      expect(describeForMeta({ count: 4, attribution: { text: quoted(LEAD59), source: AA }, title: "Başlık burada" })).toBe(
+        "4 kaynak, tek haber: Başlık burada",
+      );
+    });
+
+    it("the count is the text after the prefix: a longer source name does not change it", () => {
+      const longName = src("Anadolu Ajansı Haber Merkezi");
+      expect(describeForMeta({ count: 4, attribution: { text: quoted(LEAD60), source: longName } })).toBe(
+        `4 kaynak. Anadolu Ajansı Haber Merkezi: ${LEAD60}…`,
+      );
+      expect(describeForMeta({ count: 4, attribution: { text: quoted(LEAD59), source: longName } })).toBe("4 kaynak.");
+    });
+
+    it("the generic label counts the same way", () => {
+      expect(describeForMeta({ count: 4, attribution: { text: quoted(LEAD60), source: null } })).toBe(
+        `4 kaynak. Kaynak açıklaması: ${LEAD60}…`,
+      );
+      expect(describeForMeta({ count: 4, attribution: { text: quoted(LEAD59), source: null } })).toBe("4 kaynak.");
+    });
+
+    it("a sentence-end back-off is counted like an opener back-off", () => {
+      const sentence60 = `${LEAD59}.`;
+      const sentence59 = `${BASE.slice(0, 58)}.`;
+      expect(describeForMeta({ count: 4, attribution: { text: `${sentence60} Bakan "${LONG}önemlidir" dedi.`, source: AA } })).toBe(
+        `${prefix}${sentence60}…`,
+      );
+      expect(describeForMeta({ count: 4, attribution: { text: `${sentence59} Bakan "${LONG}önemlidir" dedi.`, source: AA } })).toBe(
+        "4 kaynak.",
+      );
+    });
+
+    it("the title fallback does not apply the rule: its back-off keeps whatever is in front of the opener", () => {
+      const title = `Bakan Yılmaz: “${LONG}önemlidir”`;
+      expect(describeForMeta({ count: 4, attribution: null, title })).toBe("4 kaynak, tek haber: Bakan Yılmaz…");
+    });
+  });
+
+  describe("a plain word cut is not subject to the rule", () => {
+    it("the short cut stays: '2 kaynak. AA: bir iki…'", () => {
+      expect(describeForMeta({ count: 2, attribution: { text: "bir iki üç dört", source: src("AA") } }, 24)).toBe("2 kaynak. AA: bir iki…");
+    });
+
+    it("a balanced quotation cut after a few words is still published", () => {
+      const text = 'Yılmaz, "kısa" dedi ve toplantıdan çıktı, sonra basına konuştu.';
+      const out = describeForMeta({ count: 4, attribution: { text, source: AA } }, 50);
+      // 23 characters of text, far below 60: a plain cut is not held to the rule.
+      expect(out).toBe('4 kaynak. Anadolu Ajansı: Yılmaz, "kısa" dedi ve…');
+      expect(leavesNothingOpenH30(out)).toBe(true);
+    });
+
+    it("a cut that would end inside the label gives the description without an attribution", () => {
+      // prefix "2 kaynak. AA: " is 14 characters; a 16-character limit leaves one character of text.
+      // h29 gave "2 kaynak. AA:…" here.
+      const out = describeForMeta({ count: 2, attribution: { text: "Yılmaz açıkladı", source: src("AA") } }, 16);
+      expect(out).toBe("2 kaynak.");
+      // ... and so does the title sentence when its own lead does not fit.
+      const withTitle = describeForMeta({ count: 2, attribution: { text: "Yılmaz açıkladı", source: src("AA") }, title: "Bir başlık" }, 16);
+      expect(withTitle).toBe("2 kaynak.");
+    });
+  });
+
+  describe("c5627cb9: ‘100 il 1000 ilçe' is a balanced quotation", () => {
+    const prefix = "24 kaynak. Akşam: ";
+
+    it("is cut at a word boundary, not backed off to '…Devlet Bahçeli…'", () => {
+      const out = describeForMeta({ count: 24, attribution: { text: C5627, source: src("Akşam") } });
+      expect(out).toBe(
+        "24 kaynak. Akşam: MHP Genel Başkanı Devlet Bahçeli, ‘100 il 1000 ilçe' projesini kamuoyuyla paylaştı. Bahçeli, artan nüfus ve ihtiyaçlara dikkat çekerek 9…",
+      );
+      expect(out).not.toContain("Bahçeli…");
+      expect(out.length).toBeLessThanOrEqual(160);
+      expect(leavesNothingOpenH30(out)).toBe(true);
+    });
+
+    it("every limit: a plain cut as soon as the text is cut past the quotation, never longer than the limit", () => {
+      const full = prefix + C5627;
+      for (let max = 40; max <= 160; max++) {
+        const out = describeForMeta({ count: 24, attribution: { text: C5627, source: src("Akşam") } }, max);
+        expect(out.length, `max=${max}`).toBeLessThanOrEqual(max);
+        expect(leavesNothingOpenH30(out), `max=${max}: ${out}`).toBe(true);
+        // A limit past the closing apostrophe (index of the closing one + a word) is a plain cut of the full text.
+        const closer = full.indexOf("ilçe'") + "ilçe'".length;
+        if (max > closer + 20) {
+          expect(out.startsWith(`${prefix}MHP Genel Başkanı Devlet Bahçeli, ‘100 il 1000 ilçe' projesini`), `max=${max}`).toBe(true);
+        }
+      }
+    });
+
+    it("an apostrophe in front of a letter keeps the quotation open: '‘İsrail'in …' is still backed off", () => {
+      const lead = "Enerji Bakanı Yılmaz bugün kentte yaptığı açıklamada şunları".padEnd(60, "x").slice(0, 60);
+      const text = `${lead} ‘İsrail'in ${LONG}tutumu`;
+      const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
+      expect(out).toBe(`4 kaynak. Anadolu Ajansı: ${lead}…`);
+    });
+  });
+
+  describe("no dangling punctuation in front of the ellipsis", () => {
+    it("e7a9b585 ends '…Demokratlar Partisi…', not '…Partisi,…'", () => {
+      const out = describeForMeta({ count: 7, attribution: { text: E7A9, source: src("Habertürk") } });
+      expect(out).toBe(
+        "7 kaynak. Habertürk: İsrail'de sandıktan koalisyon belirsizliğinin çıktığı 27 Ekim'deki genel seçimlerin ardından muhalefetteki Demokratlar Partisi…",
+      );
+    });
+
+    it("5db9fe11 ends '…töreniyle sona ererken…', not '…ererken;…'", () => {
+      const out = describeForMeta({ count: 1, attribution: { text: F5DB, source: src("Habertürk") } });
+      expect(out.endsWith("töreniyle sona ererken…")).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(160);
+      expect(leavesNothingOpenH30(out)).toBe(true);
+    });
+
+    /** Every output of `text` over the limits that leave room for the label and a few words. */
+    function outputsOver(text: string, name = "AA"): string[] {
+      const label = "2 kaynak. AA: ".length;
+      const outs: string[] = [];
+      for (let max = label + 2; max <= label + text.length; max++) {
+        outs.push(describeForMeta({ count: 2, attribution: { text, source: src(name) } }, max));
+      }
+      return outs;
+    }
+
+    it.each([",", ";", ":", "–", "—", "-"])("a cut after a word followed by %s drops it, glued or spaced", (mark) => {
+      for (const text of [`bir iki${mark} üç dört beş altı`, `bir iki ${mark} üç dört beş altı`]) {
+        const outs = outputsOver(text);
+        // Before h30 some limit gave "bir iki,…" / "bir iki ,…" / "bir iki -…".
+        expect(outs.filter(endsDangling), text).toEqual([]);
+        expect(outs, text).toContain("2 kaynak. AA: bir iki…");
+      }
+    });
+
+    it("several dangling marks and blanks go together", () => {
+      const outs = outputsOver("bir iki , ; – üç dört beş");
+      expect(outs.filter(endsDangling)).toEqual([]);
+      expect(outs).toContain("2 kaynak. AA: bir iki…");
+    });
+
+    it("a cut after a sentence mark keeps it", () => {
+      const outs = outputsOver("bir iki. üç dört beş altı yedi");
+      expect(outs).toContain("2 kaynak. AA: bir iki.…");
+    });
+
+    it("the title fallback and a base get the same trim", () => {
+      expect(describeForMeta({ count: 3, attribution: null, title: "Bir, iki, üç, dört" }, 27)).toBe("3 kaynak, tek haber: Bir…");
+      expect(
+        describeForMeta({ count: 2, attribution: { text: "bir iki, üç dört beş altı yedi sekiz", source: null }, base: "2 kaynaktan haberler." }, 52),
+      ).toBe("2 kaynaktan haberler. Kaynak açıklaması: bir iki…");
+    });
+
+    const PROPERTY_TEXTS: ReadonlyArray<readonly [string, string, string | null]> = [
+      ["3ee2895b", Y_3EE2, "Anadolu Ajansı"],
+      ["c5627cb9", C5627, "Akşam"],
+      ["e7a9b585", E7A9, "Habertürk"],
+      ["5db9fe11", F5DB, "Habertürk"],
+      ["every mark", "bir, iki; üç: dört – beş — altı - yedi, sekiz; dokuz: on – onbir — oniki - onüç, ondört; onbeş: onaltı – onyedi — onsekiz - ondokuz, yirmi; yirmibir: yirmiiki – yirmiüç", null],
+      ["every mark, spaced", "bir , iki ; üç : dört – beş — altı - yedi , sekiz ; dokuz : on – onbir — oniki - onüç , ondört ; onbeş : onaltı", "AA"],
+      ["double marks", "bir,, iki;; üç:: dört–– beş—— altı-- yedi,- ,; sekiz", "AA"],
+    ];
+
+    it.each(PROPERTY_TEXTS)("%s: no output over limits 40..160 ends in [,;:–—-] followed by '…', within the limit, nothing open", (_label, text, name) => {
+      const source = name === null ? null : src(name);
+      for (let max = 40; max <= 160; max++) {
+        for (const title of [undefined, "Bir, iki; üç: dört – beş — altı - yedi, sekiz; dokuz: on – onbir"]) {
+          for (const base of [undefined, "3 kaynaktan haberler."]) {
+            const out = describeForMeta({ count: 3, attribution: { text, source }, title, base }, max);
+            expect(endsDangling(out), `max=${max}: ${out}`).toBe(false);
+            expect(out.length, `max=${max}`).toBeLessThanOrEqual(Math.max(max, (base ?? "3 kaynak.").length));
+            expect(leavesNothingOpenH30(out), `max=${max}: ${out}`).toBe(true);
+          }
+        }
+        const noAttribution = describeForMeta({ count: 3, attribution: null, title: text }, max);
+        expect(endsDangling(noAttribution), `max=${max}: ${noAttribution}`).toBe(false);
+      }
     });
   });
 });

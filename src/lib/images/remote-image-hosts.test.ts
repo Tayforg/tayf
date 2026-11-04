@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { GENERATED_IMAGE_HOSTS } from "./remote-image-hosts.data";
 import {
   IMAGE_REMOTE_PATTERNS,
+  QUERY_HOSTS,
   isAllowedRemoteImageUrl,
   packHostPatterns,
 } from "./remote-image-hosts";
@@ -48,6 +49,12 @@ const REJECTED_FIXTURES = [
   "https://www.gstatic.com/images/branding/product/1x/googleg_48dp.png",
   "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR7zFtt5ReS8vb2S1Bd10ZiiW4XaIiWgC3zgpPznd79sAwOUI_51sAnarc&s=10",
   "https://evil.example/x.jpg",
+  // h30-abuse-4: a query string on a host that does not need one is a cache
+  // buster, i.e. an origin fetch + transform per variant.
+  "https://cdn.karar.com/news/1945775.jpg?cb=1",
+  "https://img.piri.net/a.jpg?w=1&h=2",
+  "https://img.piri.net/a.jpg?cb=1&cb=2",
+  "https://image.cnnturk.com/i/cnnturk/75/720x490/6ad9cc3f356c6382a222e5e9.jpg?x",
   // plain http, even for a listed host
   "http://img.piri.net/x.jpg",
   "http://image.cnnturk.com/i/cnnturk/75/720x490/6ad9cc3f356c6382a222e5e9.jpg",
@@ -102,6 +109,16 @@ const PARITY_EXTRAS = [
   "https://xn--tmgrup-0za.com.tr/x.jpg",
   "https://img.piri.net/x.jpg#frag",
   "https://img.piri.net/%2e%2e/x.jpg",
+  // an empty query (`?` with nothing after it) has `url.search === ""`
+  "https://img.piri.net/x.jpg?",
+  "https://img.piri.net/x.jpg?#frag",
+  "https://cdn.karar.com/news/1945775.jpg?",
+  // a query on a query host, and on look-alikes of one
+  "https://ia.tmgrup.com.tr/x?u=https://i.tmgrup.com.tr/a.jpeg",
+  "https://tmgrup.com.tr/x?cb=1",
+  "https://ia.tmgrup.com.tr.evil.tld/x?cb=1",
+  "https://www.google.com/s2/favicons?domain=x&sz=64&cb=1",
+  "https://www.google.com/images/x.png?cb=1",
 ];
 
 const ALL_FIXTURES = [...LISTED_FIXTURES, ...REJECTED_FIXTURES, ...PARITY_EXTRAS];
@@ -158,8 +175,165 @@ describe("isAllowedRemoteImageUrl", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h30-abuse-4: every `?cb=N` on an allowlisted host was a fresh origin fetch +
+// transform + cache write. A query string is now matched: only the QUERY_HOSTS
+// families (measured: their images really carry one) may have one.
+// ---------------------------------------------------------------------------
+
+/** A host that matches `entry`: the entry itself, or one label under a `**.` entry. */
+const sampleHost = (entry: string): string =>
+  entry.startsWith("**.") ? `zz.${entry.slice(3)}` : entry;
+
+describe("query strings (h30-abuse-4)", () => {
+  it("rejects a cache-busting query on a host that does not need one, and allows the bare URL", () => {
+    expect(isAllowedRemoteImageUrl("https://cdn.karar.com/news/1945775.jpg?cb=1")).toBe(false);
+    expect(isAllowedRemoteImageUrl("https://cdn.karar.com/news/1945775.jpg")).toBe(true);
+  });
+
+  it("treats an empty search (a bare trailing `?`) as no query", () => {
+    expect(isAllowedRemoteImageUrl("https://cdn.karar.com/news/1945775.jpg?")).toBe(true);
+    // ... but a fragment is refused whatever precedes it (see the fragment block below).
+    expect(isAllowedRemoteImageUrl("https://cdn.karar.com/news/1945775.jpg?#frag")).toBe(false);
+  });
+
+  it("rejects each cb variant on a non-query host, whatever the key", () => {
+    for (const q of ["?cb=1", "?cb=2", "?h30adj=1", "?a", "?=", "?&", "?cb=1&cb=2"]) {
+      expect(isAllowedRemoteImageUrl(`https://cdn.karar.com/news/1945775.jpg${q}`), q).toBe(false);
+    }
+  });
+
+  it("keeps the Google S2 favicon path allowed with its query", () => {
+    expect(isAllowedRemoteImageUrl("https://www.google.com/s2/favicons?domain=x&sz=64")).toBe(true);
+    expect(isAllowedRemoteImageUrl("https://google.com/s2/favicons?domain=x&sz=64")).toBe(true);
+  });
+
+  describe("QUERY_HOSTS", () => {
+    it("is a non-empty subset of GENERATED_IMAGE_HOSTS, in generator form", () => {
+      expect(QUERY_HOSTS.size).toBeGreaterThan(0);
+      for (const entry of QUERY_HOSTS) {
+        expect(GENERATED_IMAGE_HOSTS, entry).toContain(entry);
+        expect(entry, entry).toBe(entry.toLowerCase());
+      }
+    });
+
+    it("holds the families the 2026-11-04 7-day measurement found with queries", () => {
+      for (const entry of [
+        "**.tmgrup.com.tr",
+        "**.anlatilaninotesi.com.tr",
+        "d341l694dl30ad.cloudfront.net",
+        "**.indyturk.com",
+      ]) {
+        expect(QUERY_HOSTS.has(entry), entry).toBe(true);
+      }
+    });
+
+    it("stays small: a long list would put the abuse back", () => {
+      expect(QUERY_HOSTS.size).toBeLessThanOrEqual(10);
+    });
+
+    it("allows a query URL on each entry", () => {
+      for (const entry of QUERY_HOSTS) {
+        const url = `https://${sampleHost(entry)}/a/b.jpg?w=640&h=360&cb=1`;
+        expect(isAllowedRemoteImageUrl(url), url).toBe(true);
+      }
+    });
+
+    it("allows the query URLs the stored data really carries", () => {
+      for (const url of [
+        "https://ia.tmgrup.com.tr/a15c1e/385/228/0/0/1216/720?u=https://i.tmgrup.com.tr/anews/v1/2026/10/21/14-20-1792586090125.jpeg",
+        "https://iasbh.tmgrup.com.tr/877c36/1200/675/53/0/944/501?u=https://isbh.tmgrup.com.tr/sbh/2026/10/20/bu-ulkeyi-kimse-curutemez-1792449838588.jpeg",
+      ]) {
+        expect(isAllowedRemoteImageUrl(url), url).toBe(true);
+      }
+    });
+
+    it("still rejects look-alikes of a query host (suffix tricks, port, http), query or not", () => {
+      for (const url of [
+        "https://tmgrup.com.tr/x?cb=1",
+        "https://ia.tmgrup.com.tr.evil.tld/x?cb=1",
+        "https://evil-tmgrup.com.tr/x?cb=1",
+        "https://ia.tmgrup.com.tr:8443/x?cb=1",
+        "http://ia.tmgrup.com.tr/x?cb=1",
+        "https://x.d341l694dl30ad.cloudfront.net/x?cb=1",
+        "https://other.cloudfront.net/x?cb=1",
+      ]) {
+        expect(isAllowedRemoteImageUrl(url), url).toBe(false);
+      }
+    });
+
+    it("does not widen anything beyond the query: a non-query host is still rejected with one", () => {
+      const nonQuery = GENERATED_IMAGE_HOSTS.filter((e) => !QUERY_HOSTS.has(e));
+      expect(nonQuery.length).toBeGreaterThan(100);
+      for (const entry of nonQuery) {
+        const host = sampleHost(entry);
+        expect(isAllowedRemoteImageUrl(`https://${host}/x.jpg`), host).toBe(true);
+        expect(isAllowedRemoteImageUrl(`https://${host}/x.jpg?cb=1`), host).toBe(false);
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h30-abuse-4 follow-up: Next's matcher compares `url.search`, which is "" for
+// `#N`, so a fragment passes remotePatterns on every listed host while the
+// optimizer keeps it in the href it hashes into its cache key. Each `#N` is a
+// fresh origin fetch + transform + cache write for the same bytes (fetch() drops
+// the fragment). src/middleware.ts (gate 10) answers a `url` containing '#' with
+// a 400, so this predicate refuses it too and the render side never emits one.
+// ---------------------------------------------------------------------------
+describe("URL fragments (h30-abuse-4 follow-up)", () => {
+  it("premise: Next's own matcher still accepts a fragment, so this refusal is not redundant", () => {
+    for (const u of [
+      "https://img.piri.net/x.jpg#1",
+      "https://a.sozcucdn.com/a.jpg#1",
+      "https://a.sozcucdn.com/a.jpg?#1",
+      "https://www.google.com/s2/favicons?domain=x#1",
+    ]) {
+      expect(hasRemoteMatch([], IMAGE_REMOTE_PATTERNS, new URL(u)), u).toBe(true);
+    }
+  });
+
+  it("refuses a fragment on every listed fixture host", () => {
+    for (const base of LISTED_FIXTURES) {
+      expect(isAllowedRemoteImageUrl(base), base).toBe(true);
+      expect(isAllowedRemoteImageUrl(`${base}#1`), `${base}#1`).toBe(false);
+      expect(isAllowedRemoteImageUrl(`${base}#`), `${base}#`).toBe(false);
+    }
+  });
+
+  it("refuses a fragment on a query host, with or without a query", () => {
+    expect(isAllowedRemoteImageUrl("https://a.sozcucdn.com/a.jpg")).toBe(true);
+    expect(isAllowedRemoteImageUrl("https://a.sozcucdn.com/a.jpg#1")).toBe(false);
+    expect(isAllowedRemoteImageUrl("https://a.sozcucdn.com/a.jpg?w=1&h=2#1")).toBe(false);
+    expect(
+      isAllowedRemoteImageUrl("https://ia.tmgrup.com.tr/a/1/2?u=https://i.tmgrup.com.tr/x.jpeg#1"),
+    ).toBe(false);
+  });
+
+  it("refuses a fragment on the Google S2 favicon path", () => {
+    expect(isAllowedRemoteImageUrl("https://www.google.com/s2/favicons?domain=x&sz=64")).toBe(true);
+    expect(isAllowedRemoteImageUrl("https://www.google.com/s2/favicons?domain=x&sz=64#1")).toBe(false);
+  });
+
+  it("refuses a '#' however the URL spells it (a newline the URL parser strips, a late or empty fragment)", () => {
+    for (const u of [
+      "https://img.piri.net/x.jpg\n#1",
+      "https://img.piri.net/x.jpg?#",
+      "https://img.piri.net/x.jpg#a#b",
+      "https://img.piri.net/#",
+    ]) {
+      expect(isAllowedRemoteImageUrl(u), JSON.stringify(u)).toBe(false);
+    }
+  });
+
+  it("keeps an encoded '%23' in a path allowed: it is a path character, not a fragment", () => {
+    expect(isAllowedRemoteImageUrl("https://img.piri.net/foto%2312.jpg")).toBe(true);
+  });
+});
+
 describe("PARITY with Next's own matcher (hasRemoteMatch)", () => {
-  const nextAllows = (u: string): boolean => {
+  const nextMatches = (u: string): boolean => {
     let parsed: URL;
     try {
       parsed = new URL(u);
@@ -168,6 +342,11 @@ describe("PARITY with Next's own matcher (hasRemoteMatch)", () => {
     }
     return hasRemoteMatch([], IMAGE_REMOTE_PATTERNS, parsed);
   };
+  // The one deliberate deviation from Next's matcher: a '#' in the URL. Next's
+  // remotePatterns cannot see a fragment, so src/middleware.ts (gate 10) refuses
+  // it in front of the optimizer and the render side must not emit one. See the
+  // "URL fragments" block below.
+  const nextAllows = (u: string): boolean => nextMatches(u) && !u.includes("#");
 
   it.each(ALL_FIXTURES)("agrees with Next on %j", (url) => {
     expect(isAllowedRemoteImageUrl(url)).toBe(nextAllows(url));
@@ -175,9 +354,7 @@ describe("PARITY with Next's own matcher (hasRemoteMatch)", () => {
 
   it("agrees with Next on the exact input shape the spec names", () => {
     for (const u of ALL_FIXTURES.filter((x) => URL.canParse(x))) {
-      expect(isAllowedRemoteImageUrl(u), u).toBe(
-        hasRemoteMatch([], IMAGE_REMOTE_PATTERNS, new URL(u)),
-      );
+      expect(isAllowedRemoteImageUrl(u), u).toBe(nextAllows(u));
     }
   });
 
@@ -209,9 +386,48 @@ describe("PARITY with Next's own matcher (hasRemoteMatch)", () => {
       }
     }
 
+    // h30-abuse-4: the same probes again with a query string, so the predicate
+    // is held to Next's matcher (which compares `url.search`) for every entry,
+    // query host or not.
+    const queryProbes: string[] = [];
+    for (const entry of GENERATED_IMAGE_HOSTS) {
+      const host = sampleHost(entry);
+      queryProbes.push(
+        `https://${host}/x.jpg?cb=1`,
+        `https://${host}/x.jpg?`,
+        `https://${host}/x.jpg?#f`,
+        `https://${host}/x.jpg?u=https://${host}/y.jpg`,
+        `https://sub.${host}/x.jpg?cb=1`,
+        `http://${host}/x.jpg?cb=1`,
+        `https://${host}:8443/x.jpg?cb=1`,
+      );
+    }
+
     it("generates a non-trivial list to probe", () => {
       expect(GENERATED_IMAGE_HOSTS.length).toBeGreaterThanOrEqual(60);
       expect(probes.length).toBeGreaterThan(400);
+      expect(queryProbes.length).toBeGreaterThan(400);
+    });
+
+    it("agrees with Next on every ?cb=1 variant of every generated entry", () => {
+      const disagreements = queryProbes.filter((u) => isAllowedRemoteImageUrl(u) !== nextAllows(u));
+      expect(disagreements).toEqual([]);
+    });
+
+    it("agrees with Next on every entry with and without a query", () => {
+      for (const entry of GENERATED_IMAGE_HOSTS) {
+        const host = sampleHost(entry);
+        for (const u of [`https://${host}/x.jpg`, `https://${host}/x.jpg?cb=1`]) {
+          expect(isAllowedRemoteImageUrl(u), u).toBe(nextAllows(u));
+        }
+      }
+    });
+
+    it("lets a query through exactly on the QUERY_HOSTS entries", () => {
+      for (const entry of GENERATED_IMAGE_HOSTS) {
+        const u = `https://${sampleHost(entry)}/x.jpg?cb=1`;
+        expect(isAllowedRemoteImageUrl(u), u).toBe(QUERY_HOSTS.has(entry));
+      }
     });
 
     it("agrees with Next on every probe", () => {
@@ -242,6 +458,20 @@ describe("IMAGE_REMOTE_PATTERNS", () => {
       expect(p.hostname).not.toBe("**");
       expect(p.hostname).not.toBe("*");
       expect(p.hostname.length).toBeGreaterThan(3);
+    }
+  });
+
+  it("carries search: '' on every generated group except the QUERY_HOSTS ones, and never on S2", () => {
+    const generated = IMAGE_REMOTE_PATTERNS.filter((p) => p.pathname === undefined);
+    const withSearch = generated.filter((p) => "search" in p);
+    const withoutSearch = generated.filter((p) => !("search" in p));
+    expect(withSearch.length).toBeGreaterThan(20);
+    for (const p of withSearch) expect((p as { search?: string }).search, p.hostname).toBe("");
+    // the query groups: present, few, and no group mixes both kinds
+    expect(withoutSearch.length).toBeGreaterThanOrEqual(1);
+    expect(withoutSearch.length).toBeLessThanOrEqual(3);
+    for (const p of IMAGE_REMOTE_PATTERNS.filter((x) => x.pathname !== undefined)) {
+      expect("search" in p, p.hostname).toBe(false);
     }
   });
 
@@ -289,10 +519,10 @@ describe("GENERATED_IMAGE_HOSTS", () => {
 describe("packHostPatterns", () => {
   it("emits a plain hostname for a single member (a one-item brace group would be literal)", () => {
     expect(packHostPatterns(["a.example.com"], 4)).toEqual([
-      { protocol: "https", hostname: "a.example.com", port: "" },
+      { protocol: "https", hostname: "a.example.com", port: "", search: "" },
     ]);
     expect(packHostPatterns(["**.example.com"], 4)).toEqual([
-      { protocol: "https", hostname: "**.example.com", port: "" },
+      { protocol: "https", hostname: "**.example.com", port: "", search: "" },
     ]);
   });
 
@@ -314,6 +544,58 @@ describe("packHostPatterns", () => {
 
   it("returns [] for no entries", () => {
     expect(packHostPatterns([], 4)).toEqual([]);
+  });
+
+  describe("queryHosts (h30-abuse-4)", () => {
+    const entries = ["**.a.net", "**.q.net", "**.b.net", "e.example.org", "q.example.org", "f.example.org"];
+    const queryHosts = new Set(["**.q.net", "q.example.org"]);
+
+    it("defaults to no query host: every group gets search: ''", () => {
+      const out = packHostPatterns(entries, 3);
+      expect(out.length).toBeGreaterThan(0);
+      for (const p of out) expect(p.search, p.hostname).toBe("");
+    });
+
+    it("packs query-host entries in their own groups, without a search key", () => {
+      const out = packHostPatterns(entries, 3, queryHosts);
+      expect(out).toEqual([
+        { protocol: "https", hostname: "**.{a.net,b.net}", port: "", search: "" },
+        { protocol: "https", hostname: "**.q.net", port: "" },
+        { protocol: "https", hostname: "{e.example.org,f.example.org}", port: "", search: "" },
+        { protocol: "https", hostname: "q.example.org", port: "" },
+      ]);
+      expect("search" in (out[1] ?? {})).toBe(false);
+      expect("search" in (out[3] ?? {})).toBe(false);
+    });
+
+    it("groups several query hosts together, and respects the group size", () => {
+      const many = ["**.q1.net", "**.q2.net", "**.q3.net", "**.n1.net"];
+      const out = packHostPatterns(many, 2, new Set(["**.q1.net", "**.q2.net", "**.q3.net"]));
+      expect(out.map((p) => [p.hostname, "search" in p])).toEqual([
+        ["**.n1.net", true],
+        ["**.{q1.net,q2.net}", false],
+        ["**.q3.net", false],
+      ]);
+    });
+
+    it("never lets a query string through a non-query member, and always through a query member", () => {
+      const out = packHostPatterns(entries, 3, queryHosts);
+      const probe = (u: string) => hasRemoteMatch([], out, new URL(u));
+      expect(probe("https://x.a.net/i.jpg?cb=1")).toBe(false);
+      expect(probe("https://x.b.net/i.jpg?cb=1")).toBe(false);
+      expect(probe("https://e.example.org/i.jpg?cb=1")).toBe(false);
+      expect(probe("https://x.q.net/i.jpg?cb=1")).toBe(true);
+      expect(probe("https://q.example.org/i.jpg?cb=1")).toBe(true);
+      // and without a query every member is reachable
+      for (const host of ["x.a.net", "x.b.net", "x.q.net", "e.example.org", "f.example.org", "q.example.org"]) {
+        expect(probe(`https://${host}/i.jpg`), host).toBe(true);
+      }
+    });
+
+    it("ignores queryHosts members that are not in the entries", () => {
+      const out = packHostPatterns(["**.a.net"], 3, new Set(["**.zzz.net"]));
+      expect(out).toEqual([{ protocol: "https", hostname: "**.a.net", port: "", search: "" }]);
+    });
   });
 
   it("each packed pattern matches exactly what its members would match on their own", () => {

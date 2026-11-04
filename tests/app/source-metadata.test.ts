@@ -166,19 +166,66 @@ describe("/source/[slug] generateMetadata (A4 + H)", () => {
   });
 });
 
+// A real render is heavy and opaque (Satori to PNG bytes), so ImageResponse is
+// mocked the way src/app/cluster/[id]/opengraph-image.test.tsx does: it returns
+// a plain 200 image/png Response whose headers carry what the real card sets
+// (next/og's own `public, max-age=0, must-revalidate` default).
+vi.mock("next/og", () => ({
+  ImageResponse: class {
+    constructor() {
+      return new Response(new Uint8Array([1]), {
+        status: 200,
+        headers: {
+          "content-type": "image/png",
+          "cache-control": "public, max-age=0, must-revalidate",
+        },
+      });
+    }
+  },
+}));
+
 describe("/source/[slug] social image re-exports (H)", () => {
-  it("opengraph-image.tsx re-exports the root card verbatim", async () => {
+  it("opengraph-image.tsx still re-exports the root card's alt, size and contentType verbatim", async () => {
     const sourceOg = await import("@/app/source/[slug]/opengraph-image");
     const rootOg = await import("@/app/opengraph-image");
-    expect(sourceOg.default).toBe(rootOg.default);
     expect(sourceOg.alt).toBe(rootOg.alt);
-    expect(sourceOg.size).toEqual(rootOg.size);
+    expect(sourceOg.size).toBe(rootOg.size);
     expect(sourceOg.contentType).toBe(rootOg.contentType);
   });
 
-  it("twitter-image.tsx re-exports the root card verbatim", async () => {
+  it("serves the root card with a day-long shared cache instead of the per-request default (h30-abuse-5)", async () => {
+    const sourceOg = await import("@/app/source/[slug]/opengraph-image");
+
+    expect(sourceOg.SOURCE_OG_CACHE_HEADERS).toEqual({
+      "cache-control": "public, s-maxage=86400, stale-while-revalidate=604800",
+    });
+    const res = await sourceOg.default();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toBe(
+      sourceOg.SOURCE_OG_CACHE_HEADERS["cache-control"],
+    );
+    expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(0);
+  });
+
+  it("the card does not depend on the slug: two calls give the same status, type and cache-control", async () => {
+    const sourceOg = await import("@/app/source/[slug]/opengraph-image");
+    const a = await sourceOg.default();
+    const b = await sourceOg.default();
+    expect([a.status, a.headers.get("content-type"), a.headers.get("cache-control")]).toEqual([
+      b.status,
+      b.headers.get("content-type"),
+      b.headers.get("cache-control"),
+    ]);
+  });
+
+  it("twitter-image.tsx is the source opengraph-image's own default, so the two cards cannot drift", async () => {
     const sourceTwitter = await import("@/app/source/[slug]/twitter-image");
-    const rootOg = await import("@/app/opengraph-image");
-    expect(sourceTwitter.default).toBe(rootOg.default);
+    const sourceOg = await import("@/app/source/[slug]/opengraph-image");
+    expect(sourceTwitter.default).toBe(sourceOg.default);
+    expect(sourceTwitter.alt).toBe(sourceOg.alt);
+    expect(sourceTwitter.size).toBe(sourceOg.size);
+    expect(sourceTwitter.contentType).toBe(sourceOg.contentType);
   });
 });

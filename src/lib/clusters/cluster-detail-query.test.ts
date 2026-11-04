@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -1436,11 +1438,12 @@ describe("cluster detail cache lifetime", () => {
     expect(cacheTag).toHaveBeenCalledWith(`cluster-detail:${GOOD_ID}`, "clusters");
   });
 
-  it("success: exactly one cacheLife, cluster-feed", async () => {
+  it("success: one cacheLife per cache body, source-directory (inner) then cluster-feed (outer)", async () => {
     seedHealthyDetail();
     await getClusterDetail(GOOD_ID);
-    expect(cacheLife).toHaveBeenCalledTimes(1);
-    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    // The sources directory has its own `"use cache: remote"` body (inner,
+    // runs first); the detail body is the outer one. One literal each.
+    expect(vi.mocked(cacheLife).mock.calls).toEqual([["source-directory"], ["cluster-feed"]]);
   });
 
   it("a genuine missing row is a successful answer: cluster-feed, and no live retry", async () => {
@@ -1585,9 +1588,10 @@ describe("cluster detail: sources-directory failure (partial read)", () => {
     seedSourcesDown();
     const detail = await getClusterDetail(GOOD_ID);
     expect(detail!.sourcesUnavailable).toBe(true);
-    expect(cacheLife).toHaveBeenCalledTimes(1);
-    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    // Inner (directory) and outer (detail) bodies both choose `minutes`.
+    expect(vi.mocked(cacheLife).mock.calls).toEqual([["minutes"], ["minutes"]]);
     expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
     // The detail itself was a successful read: no live retry.
     expect(clustersQueryCount()).toBe(1);
   });
@@ -1596,8 +1600,7 @@ describe("cluster detail: sources-directory failure (partial read)", () => {
     seedHealthyDetail();
     const detail = await getClusterDetail(GOOD_ID);
     expect(detail!.sourcesUnavailable).toBe(false);
-    expect(cacheLife).toHaveBeenCalledTimes(1);
-    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(vi.mocked(cacheLife).mock.calls).toEqual([["source-directory"], ["cluster-feed"]]);
   });
 
   it("a genuinely missing cluster stays a cluster-feed answer (null has no sourcesUnavailable)", async () => {
@@ -1615,8 +1618,7 @@ describe("cluster detail: sources-directory failure (partial read)", () => {
     seedSourcesDown();
     const detail = await getClusterDetailOrThrow(GOOD_ID);
     expect(detail!.sourcesUnavailable).toBe(true);
-    expect(cacheLife).toHaveBeenCalledTimes(1);
-    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(vi.mocked(cacheLife).mock.calls).toEqual([["minutes"], ["minutes"]]);
   });
 
   it("a sourcesUnavailable hit is not recorded as last-good", async () => {
@@ -1784,5 +1786,324 @@ describe("cluster detail: stale-if-error and single-flight", () => {
     await Promise.all([getClusterDetail(GOOD_ID), getClusterDetail(OTHER_ID)]);
     // 2 cached attempts + 2 live retries.
     expect(clustersQueryCount()).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h30-abuse-2: an unknown or case-varied cluster UUID must cost at most ONE
+// clusters read, case variants must share one cache entry, and the 41 kB
+// active-sources directory is read once per cache life through its own
+// parameterless `"use cache: remote"` body, never per cluster id.
+// ---------------------------------------------------------------------------
+
+describe("cluster detail: case-folded key (h30-abuse-2)", () => {
+  // A UUID with hex letters, so upper-casing it changes the string.
+  const LOWER = "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187b";
+  const UPPER = LOWER.toUpperCase();
+  const MIXED = "6EA8b39A-6ca7-4EFE-ab30-71FDF1a2187B";
+  const OTHER_LOWER = "0f1e2d3c-4b5a-4968-8776-655443322110";
+
+  function seedFor(id: string) {
+    responses.clusters = { maybeSingle: { data: mkClusterRow({ id }), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z")],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [mkSource("s1")], error: null } };
+  }
+
+  /** The `.eq("id", ...)` argument of the Nth clusters query. */
+  function clustersEqId(n: number): unknown {
+    const calls = callLog.filter((c) => c.table === "clusters");
+    return calls[n]?.steps.find((s) => s.method === "eq")?.args[1];
+  }
+
+  it("getClusterDetail(UPPER) queries clusters with the lower-case id, tags the lower-case key, and equals the lower-case result", async () => {
+    seedFor(LOWER);
+    const fromLower = await getClusterDetail(LOWER);
+    const lowerEq = clustersEqId(0);
+    vi.mocked(cacheTag).mockClear();
+    callLog = [];
+
+    const fromUpper = await getClusterDetail(UPPER);
+
+    expect(lowerEq).toBe(LOWER);
+    expect(clustersEqId(0)).toBe(LOWER);
+    const memberEq = callLog
+      .find((c) => c.table === "cluster_articles")!
+      .steps.find((s) => s.method === "eq");
+    expect(memberEq!.args).toEqual(["cluster_id", LOWER]);
+    expect(cacheTag).toHaveBeenCalledWith(`cluster-detail:${LOWER}`, "clusters");
+    expect(cacheTag).not.toHaveBeenCalledWith(`cluster-detail:${UPPER}`, "clusters");
+    expect(fromUpper).not.toBeNull();
+    expect(fromUpper).toEqual(fromLower);
+  });
+
+  it("getClusterDetailOrThrow(UPPER) does the same", async () => {
+    seedFor(LOWER);
+    const fromLower = await getClusterDetailOrThrow(LOWER);
+    vi.mocked(cacheTag).mockClear();
+    callLog = [];
+
+    const fromUpper = await getClusterDetailOrThrow(UPPER);
+
+    expect(clustersEqId(0)).toBe(LOWER);
+    expect(cacheTag).toHaveBeenCalledWith(`cluster-detail:${LOWER}`, "clusters");
+    expect(cacheTag).not.toHaveBeenCalledWith(`cluster-detail:${UPPER}`, "clusters");
+    expect(fromUpper).not.toBeNull();
+    expect(fromUpper).toEqual(fromLower);
+  });
+
+  it("a mixed-case spelling reaches PostgREST as the lower-case id too", async () => {
+    seedFor(LOWER);
+    await getClusterDetail(MIXED);
+    expect(clustersEqId(0)).toBe(LOWER);
+  });
+
+  it("an upper-case id on the live-retry path is folded as well", async () => {
+    responses.clusters = {
+      maybeSingleOnce: [TIMEOUT_RESULT],
+      maybeSingle: { data: mkClusterRow({ id: LOWER }), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const detail = await getClusterDetail(UPPER);
+      expect(detail!.cluster.id).toBe(LOWER);
+    } finally {
+      errorSpy.mockRestore();
+    }
+    // cached attempt (timed out) + live retry, both with the folded id.
+    expect(clustersEqId(0)).toBe(LOWER);
+    expect(clustersEqId(1)).toBe(LOWER);
+  });
+
+  it("case variants share ONE last-good entry (the stale-if-error key is folded)", async () => {
+    seedFor(LOWER);
+    const good = await getClusterDetail(LOWER);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+      // The outage serves the entry remembered under the lower-case key to
+      // the upper-case spelling; a different id still gets nothing.
+      await expect(getClusterDetail(UPPER)).resolves.toBe(good);
+      await expect(getClusterDetailOrThrow(UPPER)).resolves.toBe(good);
+      await expect(getClusterDetail(OTHER_LOWER)).resolves.toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("a malformed id is still rejected before any key is built", async () => {
+    await expect(getClusterDetail(`${UPPER}x`)).resolves.toBeNull();
+    await expect(getClusterDetailOrThrow(`${UPPER}x`)).resolves.toBeNull();
+    expect(callLog).toHaveLength(0);
+    expect(cacheTag).not.toHaveBeenCalled();
+  });
+});
+
+describe("cluster detail: an unknown cluster costs ONE read (h30-abuse-2)", () => {
+  const UNKNOWN = "0a1b2c3d-4e5f-4a6b-8c7d-9e8f7a6b5c4d";
+
+  function seedUnknown() {
+    responses.clusters = { maybeSingle: { data: null, error: null } };
+    // Would be returned if (wrongly) read; the null path must not touch them.
+    responses.cluster_articles = { returns: { data: [mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z")], error: null } };
+    responses.sources = { returns: { data: [mkSource("s1")], error: null } };
+  }
+
+  it("getClusterDetail: only the clusters table is queried and the result is null", async () => {
+    seedUnknown();
+    await expect(getClusterDetail(UNKNOWN)).resolves.toBeNull();
+    expect(callLog.map((c) => c.table)).toEqual(["clusters"]);
+  });
+
+  it("getClusterDetailOrThrow: only the clusters table is queried and the result is null", async () => {
+    seedUnknown();
+    await expect(getClusterDetailOrThrow(UNKNOWN)).resolves.toBeNull();
+    expect(callLog.map((c) => c.table)).toEqual(["clusters"]);
+  });
+
+  it("an upper-case unknown id is the same single read", async () => {
+    seedUnknown();
+    await expect(getClusterDetail(UNKNOWN.toUpperCase())).resolves.toBeNull();
+    expect(callLog.map((c) => c.table)).toEqual(["clusters"]);
+  });
+
+  it("an unknown id never opens (or tags) the sources directory", async () => {
+    seedUnknown();
+    await getClusterDetail(UNKNOWN);
+    expect(cacheTag).not.toHaveBeenCalledWith("sources");
+    // Only the outer detail body ran: a missing row is a cluster-feed answer.
+    expect(vi.mocked(cacheLife).mock.calls).toEqual([["cluster-feed"]]);
+  });
+});
+
+describe("cluster detail: the sources directory is its own cache body (h30-abuse-2)", () => {
+  it("a real cluster reads clusters first, then members and the directory", async () => {
+    seedHealthyDetail();
+    responses.sources = {
+      returns: { data: [mkSource("s1"), mkSource("s2")], error: null },
+    };
+    const detail = await getClusterDetail(GOOD_ID);
+
+    const tables = callLog.map((c) => c.table);
+    expect(tables[0]).toBe("clusters");
+    expect(tables.slice(1).sort()).toEqual(["cluster_articles", "sources"]);
+    expect(tables).toHaveLength(3);
+    expect(detail!.allSources.map((s) => s.id)).toEqual(["s1", "s2"]);
+    expect(detail!.sourcesUnavailable).toBe(false);
+
+    // The directory select is the plain column list (no member rights flags).
+    const sourcesCall = callLog.find((c) => c.table === "sources")!;
+    expect(sourcesCall.steps.find((s) => s.method === "select")!.args).toEqual([
+      "id, name, slug, url, rss_url, bias, logo_url, active, kind",
+    ]);
+    expect(sourcesCall.steps.find((s) => s.method === "eq")!.args).toEqual(["active", true]);
+    expect(sourcesCall.steps.find((s) => s.method === "order")!.args).toEqual(["name"]);
+  });
+
+  it("the cluster row is awaited before the members and directory are requested", async () => {
+    seedHealthyDetail();
+    await getClusterDetail(GOOD_ID);
+    const fromEvents = events.filter((e) => e.startsWith("from:"));
+    expect(fromEvents[0]).toBe("from:clusters");
+    expect(fromEvents.slice(1).sort()).toEqual(["from:cluster_articles", "from:sources"]);
+  });
+
+  it("tags the directory 'sources', and its cacheLife is source-directory (inner) then cluster-feed (outer)", async () => {
+    seedHealthyDetail();
+    await getClusterDetail(GOOD_ID);
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(cacheTag).toHaveBeenCalledWith(`cluster-detail:${GOOD_ID}`, "clusters");
+    expect(vi.mocked(cacheLife).mock.calls).toEqual([["source-directory"], ["cluster-feed"]]);
+  });
+
+  describe("when the directory read fails", () => {
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    function seedDirectoryDown(error: { message: string } = { message: "sources boom" }) {
+      responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+      responses.cluster_articles = {
+        returns: { data: [mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z")], error: null },
+      };
+      responses.sources = { returns: { data: null, error } };
+    }
+
+    it("the detail still resolves with sourcesUnavailable and an empty directory, minutes inner and outer", async () => {
+      seedDirectoryDown();
+      const detail = await getClusterDetail(GOOD_ID);
+      expect(detail).not.toBeNull();
+      expect(detail!.sourcesUnavailable).toBe(true);
+      expect(detail!.allSources).toEqual([]);
+      expect(detail!.members).toHaveLength(1);
+      expect(vi.mocked(cacheLife).mock.calls).toEqual([["minutes"], ["minutes"]]);
+    });
+
+    it("logs the failure with the established warn text", async () => {
+      seedDirectoryDown({ message: "sources boom" });
+      await getClusterDetail(GOOD_ID);
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[cluster-detail] sources query error:",
+        expect.stringContaining("sources boom"),
+      );
+    });
+
+    it("the directory is not retried live: one sources query, one clusters query", async () => {
+      seedDirectoryDown();
+      await getClusterDetail(GOOD_ID);
+      expect(callLog.filter((c) => c.table === "sources")).toHaveLength(1);
+      expect(clustersQueryCount()).toBe(1);
+    });
+
+    it("a directory read that throws (not just an error envelope) degrades the same way", async () => {
+      seedDirectoryDown();
+      const realFactory = clientFactories.createReaderClient.getMockImplementation()!;
+      clientFactories.createReaderClient.mockImplementation(() => {
+        const client = realFactory();
+        const from = client.from.bind(client);
+        client.from = (table: string) => {
+          if (table === "sources") throw new Error("sources client exploded");
+          return from(table);
+        };
+        return client;
+      });
+      const detail = await getClusterDetail(GOOD_ID);
+      expect(detail!.sourcesUnavailable).toBe(true);
+      expect(detail!.allSources).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[cluster-detail] sources query error:",
+        expect.stringContaining("sources client exploded"),
+      );
+    });
+  });
+});
+
+describe("cluster detail: source-text guard for the directory cache body (h30-abuse-2)", () => {
+  const SRC = readFileSync(
+    fileURLToPath(new URL("./cluster-detail-query.ts", import.meta.url)),
+    "utf8",
+  );
+  const SIGNATURE = "async function getActiveSourceDirectoryCached()";
+
+  /** The text between the signature's opening brace and the next column-0 `}`. */
+  function directoryBody(): string {
+    const at = SRC.indexOf(SIGNATURE);
+    expect(at, "getActiveSourceDirectoryCached must be declared parameterless").toBeGreaterThanOrEqual(0);
+    const open = SRC.indexOf("{", at);
+    const close = SRC.indexOf("\n}", open);
+    expect(close).toBeGreaterThan(open);
+    return SRC.slice(open + 1, close);
+  }
+
+  it("is declared once, with no parameters (one cache entry, whatever the cluster id)", () => {
+    expect(SRC.indexOf(SIGNATURE)).toBeGreaterThanOrEqual(0);
+    expect(SRC.indexOf(SIGNATURE, SRC.indexOf(SIGNATURE) + 1)).toBe(-1);
+  });
+
+  it('its body starts with "use cache: remote"', () => {
+    expect(directoryBody().trimStart().startsWith('"use cache: remote"')).toBe(true);
+  });
+
+  it('calls cacheTag("sources") before attemptCached', () => {
+    const body = directoryBody();
+    const tag = body.indexOf('cacheTag("sources")');
+    const attempt = body.indexOf("attemptCached(");
+    expect(tag).toBeGreaterThanOrEqual(0);
+    expect(attempt).toBeGreaterThan(tag);
+  });
+
+  it("chooses its lifetime after the attempt, one literal per call", () => {
+    const body = directoryBody();
+    const attempt = body.indexOf("attemptCached(");
+    expect(body.indexOf('cacheLife("source-directory")')).toBeGreaterThan(attempt);
+    expect(body.indexOf('cacheLife("minutes")')).toBeGreaterThan(attempt);
+    expect(body.split("cacheLife(").length - 1).toBe(2);
+  });
+
+  it("the detail body is fed by it and the cluster row is read before it", () => {
+    const fetchStart = SRC.indexOf("async function fetchClusterDetail(");
+    expect(fetchStart).toBeGreaterThanOrEqual(0);
+    const fetchBody = SRC.slice(fetchStart, SRC.indexOf("\n}\n", fetchStart));
+    const clusterRead = fetchBody.indexOf('.from("clusters")');
+    const directoryRead = fetchBody.indexOf("getActiveSourceDirectoryCached()");
+    expect(clusterRead).toBeGreaterThanOrEqual(0);
+    expect(directoryRead).toBeGreaterThan(clusterRead);
+    // The directory is no longer read inline from fetchClusterDetail.
+    expect(fetchBody).not.toContain('.from("sources")');
   });
 });

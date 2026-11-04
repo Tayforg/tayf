@@ -219,11 +219,14 @@ describe("search echo and the minimum query (h23-a11y-4, WCAG 1.4.10 + honest st
     expect(echo).not.toContain("dangerouslySetInnerHTML");
   });
 
-  it("search-bar.tsx caps the input at 200 characters (the search's own MAX_QUERY_LENGTH)", () => {
+  it("search-bar.tsx caps typing at 200 characters; the server bounds the query to 6 terms / 64 characters", () => {
     const bar = blankComments(read("src/components/filters/search-bar.tsx"));
     expect(bar).toContain("maxLength={200}");
+    // The query itself is bounded by canonicalSearchQuery (hunt 30), which replaced
+    // the old 200-character MAX_QUERY_LENGTH constant.
     const search = blankComments(read("src/lib/clusters/search-query.ts"));
-    expect(search).toContain("const MAX_QUERY_LENGTH = 200;");
+    expect(search).toContain("canonicalSearchQuery(q)");
+    expect(search).not.toContain("MAX_QUERY_LENGTH");
   });
 });
 

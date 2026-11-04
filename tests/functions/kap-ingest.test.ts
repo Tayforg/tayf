@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   autoAlias,
@@ -9,6 +11,7 @@ import {
   KAP_BREAKER_BLOCK_MS,
   KAP_CLASSES,
   KAP_PAGE_CAP,
+  KapFetchError,
   mapDisclosure,
   parseCompanies,
   parseKapDate,
@@ -254,7 +257,45 @@ const kapSupabaseFake = await vi.hoisted(async () => {
           : { data: [{ id: 1, ...kapFetchState }], error: null, count: 1 },
     },
   });
-  return { ...fake, kapFetchState, kapFetchStateMissing: missing };
+  // h30-alerts-5: the shared fake cannot fail a write (an upsert().select()
+  // resolves from the patch, a table fixture only answers reads), so the two
+  // Tayf-side faults the upstream classification must tell apart from a KAP
+  // outage are injected by wrapping `from`:
+  //   disclosuresUpsertError  -> every kap_disclosures write answers { error }
+  //   breakerWriteThrows      -> kap_fetch_state .update() REJECTS (a client
+  //                              that throws instead of returning { error })
+  const faults = { disclosuresUpsertError: false, breakerWriteThrows: false };
+  const settling = (settle: () => Promise<unknown>) => {
+    const chain: Record<string, unknown> = {};
+    for (const m of ["upsert", "select", "update", "eq"]) chain[m] = () => chain;
+    chain.then = (
+      onFul?: (v: unknown) => unknown,
+      onRej?: (e: unknown) => unknown,
+    ) => settle().then(onFul, onRej);
+    return chain;
+  };
+  const client = {
+    ...fake.client,
+    from: (table: string) => {
+      if (table === "kap_disclosures" && faults.disclosuresUpsertError) {
+        return settling(async () => ({ data: null, error: { message: "disclosures write failed" } }));
+      }
+      if (table === "kap_fetch_state" && faults.breakerWriteThrows) {
+        const real = fake.client.from(table) as Record<string, unknown>;
+        return new Proxy(real, {
+          get: (target, prop: string) =>
+            prop === "update"
+              ? () =>
+                  settling(async () => {
+                    throw new Error("kap_fetch_state write blew up");
+                  })
+              : target[prop],
+        });
+      }
+      return fake.client.from(table);
+    },
+  };
+  return { ...fake, client, faults, kapFetchState, kapFetchStateMissing: missing };
 });
 
 const kapSentryCalls = vi.hoisted(() => ({
@@ -432,30 +473,46 @@ describe("kap-ingest runCycle", () => {
 
   // TSF-01: every day-level throw inside ingestRange was silently swallowed
   // into stats.errors with nothing after the loop inspecting it, so a total
-  // KAP outage (or a WAF block) on every attempted day still returned a
-  // healthy HTTP 200 — less observable than before this diff, inverting
-  // SEC-05's intent.
-  it("returns ok:false, HTTP 502, and captures exactly once when every day fails", async () => {
+  // outage on every attempted day still returned a healthy HTTP 200 -- less
+  // observable than before this diff, inverting SEC-05's intent.
+  //
+  // h30-alerts-5: that guard now answers 502 only for a TAYF-side total
+  // failure. Here KAP answers fine on every day but the state-table write that
+  // follows the first good fetch throws, so no day completes. (A KAP 5xx /
+  // network / timeout on every day is the upstream-outage describe below.)
+  it("returns ok:false, HTTP 502, and captures exactly once when every day fails on a Tayf-side error", async () => {
     const day1 = "2026-09-10";
     const day2 = "2026-09-11";
-    fetchImpl = async () => {
-      throw new TypeError("network down");
-    };
+    fetchImpl = async () => new Response("[]", { status: 200 });
+    kapSupabaseFake.faults.breakerWriteThrows = true;
 
-    await import("../../supabase/functions/kap-ingest/index.ts");
-    const handler = (globalThis as unknown as {
-      __kapIngestHandler?: (req: Request) => Promise<Response>;
-    }).__kapIngestHandler;
-    expect(handler).toBeTypeOf("function");
+    try {
+      await import("../../supabase/functions/kap-ingest/index.ts");
+      const handler = (globalThis as unknown as {
+        __kapIngestHandler?: (req: Request) => Promise<Response>;
+      }).__kapIngestHandler;
+      expect(handler).toBeTypeOf("function");
 
-    const res = await handler!(authedRequest("http://localhost/kap-ingest", { from: day1, to: day2 }));
-    const body = (await res.json()) as { ok: boolean; days: number };
+      const res = await handler!(authedRequest("http://localhost/kap-ingest", { from: day1, to: day2 }));
+      const body = (await res.json()) as {
+        ok: boolean;
+        days: number;
+        upstream_unavailable?: boolean;
+        upstreamErrors: number;
+        tayfErrors: number;
+      };
 
-    expect(res.status).toBe(502);
-    expect(body.ok).toBe(false);
-    expect(body.days).toBe(0);
-    expect(kapSentryCalls.captured).toHaveLength(1);
-    expect(kapSentryCalls.captured[0]?.fn).toBe("kap-ingest");
+      expect(res.status).toBe(502);
+      expect(body.ok).toBe(false);
+      expect(body.days).toBe(0);
+      expect(body.upstream_unavailable).not.toBe(true);
+      expect(body.upstreamErrors).toBe(0);
+      expect(body.tayfErrors).toBe(2);
+      expect(kapSentryCalls.captured).toHaveLength(1);
+      expect(kapSentryCalls.captured[0]?.fn).toBe("kap-ingest");
+    } finally {
+      kapSupabaseFake.faults.breakerWriteThrows = false;
+    }
   });
 });
 
@@ -554,6 +611,14 @@ describe("kap-ingest circuit breaker (SEC-07 follow-up)", () => {
     expect(update?.patch).toMatchObject({ last_status: 429 });
   });
 
+  // h30-alerts-5: a KAP 5xx / network error is recorded for the admin badge
+  // (last_status / last_error, one write per cycle) but never blocks: no
+  // update may carry blocked_until, so the next tick still polls KAP.
+  const breakerBlocks = () =>
+    kapSupabaseFake.calls
+      .update("kap_fetch_state")
+      .filter((u) => "blocked_until" in (u.patch as Record<string, unknown>));
+
   it("does not trip the breaker on a 5xx (single attempt, e.g. 502)", async () => {
     const day = "2026-09-18";
     fetchImpl = async () => new Response("bad gateway", { status: 502 });
@@ -561,7 +626,8 @@ describe("kap-ingest circuit breaker (SEC-07 follow-up)", () => {
     const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
     await runCycle({ from: day, to: day });
 
-    expect(kapSupabaseFake.calls.update("kap_fetch_state").length).toBe(0);
+    expect(breakerBlocks()).toHaveLength(0);
+    expect(kapSupabaseFake.calls.update("kap_fetch_state")).toHaveLength(1);
   });
 
   it("does not trip the breaker when the retry ladder exhausts on 503 (5xx, not 403/429)", async () => {
@@ -571,7 +637,8 @@ describe("kap-ingest circuit breaker (SEC-07 follow-up)", () => {
     const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
     await runCycle({ from: day, to: day });
 
-    expect(kapSupabaseFake.calls.update("kap_fetch_state").length).toBe(0);
+    expect(breakerBlocks()).toHaveLength(0);
+    expect(kapSupabaseFake.calls.update("kap_fetch_state")).toHaveLength(1);
   });
 
   it("does not trip the breaker on a thrown network error", async () => {
@@ -583,7 +650,8 @@ describe("kap-ingest circuit breaker (SEC-07 follow-up)", () => {
     const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
     await runCycle({ from: day, to: day });
 
-    expect(kapSupabaseFake.calls.update("kap_fetch_state").length).toBe(0);
+    expect(breakerBlocks()).toHaveLength(0);
+    expect(kapSupabaseFake.calls.update("kap_fetch_state")).toHaveLength(1);
   });
 
   it("clears last_error and sets last_status 200 after a successful fetch", async () => {
@@ -640,5 +708,462 @@ describe("kap-ingest circuit breaker (SEC-07 follow-up)", () => {
       "[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist",
     );
     warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h30-alerts-5: an upstream KAP outage is not an edge 5xx.
+//
+// ops_health_report row 2 (edge_http_errors_30m) counts every pg_net response
+// with status >= 500. While kap.org.tr was down, kap-drain (*/2) answered 502
+// every 2 minutes and pinned that row at FAIL, so a real Edge fault added no
+// signal. The handler now answers 200 {ok:false, upstream_unavailable:true}
+// when EVERY failure in the cycle was KAP's (a final 5xx, a network error, a
+// timeout, an unusable body); a Tayf-side failure, a mixed cycle or a breaker
+// trip still answers 502.
+// ---------------------------------------------------------------------------
+
+describe("kap-ingest upstream outage classification (h30-alerts-5)", () => {
+  interface CycleBody {
+    ok: boolean;
+    days: number;
+    errors: string[];
+    upstreamErrors: number;
+    tayfErrors: number;
+    upstream_unavailable?: boolean;
+  }
+
+  const DAY1 = "2026-09-10";
+  const DAY2 = "2026-09-11";
+  const DAY3 = "2026-09-12";
+  const RANGE = { from: DAY1, to: DAY2 };
+
+  const resetState = () => {
+    fetchCalls.length = 0;
+    fetchImpl = async () => new Response("[]", { status: 200 });
+    kapSupabaseFake.calls.mutations.length = 0;
+    kapSupabaseFake.calls.rpc.length = 0;
+    kapSupabaseFake.kapFetchState.blocked_until = null;
+    kapSupabaseFake.kapFetchState.last_status = null;
+    kapSupabaseFake.kapFetchState.last_error = null;
+    kapSupabaseFake.kapFetchStateMissing.value = false;
+    kapSupabaseFake.faults.disclosuresUpsertError = false;
+    kapSupabaseFake.faults.breakerWriteThrows = false;
+    kapSentryCalls.captured.length = 0;
+  };
+
+  beforeEach(() => {
+    resetState();
+    process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        fetchCalls.push({ url, init });
+        return fetchImpl(url, init);
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    resetState();
+  });
+
+  async function post(body: unknown): Promise<{ res: Response; json: CycleBody }> {
+    await import("../../supabase/functions/kap-ingest/index.ts");
+    const handler = (globalThis as unknown as {
+      __kapIngestHandler?: (req: Request) => Promise<Response>;
+    }).__kapIngestHandler;
+    expect(handler).toBeTypeOf("function");
+    const res = await handler!(authedRequest("http://localhost/kap-ingest", body));
+    return { res, json: (await res.json()) as CycleBody };
+  }
+
+  const dayOf = (init: RequestInit): string => (JSON.parse(init.body as string) as { fromDate: string }).fromDate;
+  const stateUpdates = () => kapSupabaseFake.calls.update("kap_fetch_state");
+  const patchOf = (i: number) => stateUpdates()[i]?.patch as Record<string, unknown>;
+  const blockedWrites = () => stateUpdates().filter((u) => "blocked_until" in (u.patch as Record<string, unknown>));
+
+  describe("classifiers", () => {
+    it("KapUpstreamError is an Error that carries the HTTP status (0 = no HTTP answer)", async () => {
+      const { KapUpstreamError } = await import("../../supabase/functions/kap-ingest/index.ts");
+      const err = new KapUpstreamError(0, "[kap-ingest] KAP unreachable for 2026-09-10/*: TypeError");
+      expect(err).toBeInstanceOf(Error);
+      expect(err.name).toBe("KapUpstreamError");
+      expect(err.status).toBe(0);
+      expect(err.message).toContain("unreachable");
+      expect(new KapUpstreamError(200, "bad body").status).toBe(200);
+    });
+
+    it("isUpstreamUnavailable: KapUpstreamError and KapFetchError >= 500 are upstream, nothing else is", async () => {
+      const { isUpstreamUnavailable, KapUpstreamError } = await import(
+        "../../supabase/functions/kap-ingest/index.ts"
+      );
+      expect(isUpstreamUnavailable(new KapUpstreamError(0, "x"))).toBe(true);
+      expect(isUpstreamUnavailable(new KapUpstreamError(200, "bad body"))).toBe(true);
+      for (const status of [500, 502, 503, 504, 599]) {
+        expect(isUpstreamUnavailable(new KapFetchError(status, "x")), String(status)).toBe(true);
+      }
+      for (const status of [400, 401, 403, 404, 429, 499]) {
+        expect(isUpstreamUnavailable(new KapFetchError(status, "x")), String(status)).toBe(false);
+      }
+      for (const other of [new Error("x"), new TypeError("x"), "boom", null, undefined, 502, { status: 502 }]) {
+        expect(isUpstreamUnavailable(other), String(other)).toBe(false);
+      }
+    });
+  });
+
+  describe("answers 200 {ok:false, upstream_unavailable:true} when every failure was KAP's", () => {
+    it.each([500, 502, 503, 504])("a final KAP %i on every day", async (status) => {
+      fetchImpl = async () => new Response("down", { status, headers: { "Retry-After": "0" } });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json.ok).toBe(false);
+      expect(json.upstream_unavailable).toBe(true);
+      expect(json.days).toBe(0);
+      expect(json.errors).toHaveLength(2);
+      expect(json.errors[0]).toContain(`${DAY1}:`);
+      expect(json.errors[0]).toContain(`KAP ${status}`);
+      expect(json.errors[1]).toContain(`${DAY2}:`);
+      expect(json.upstreamErrors).toBe(2);
+      expect(json.tayfErrors).toBe(0);
+    });
+
+    it("a thrown network error (TypeError) on every day", async () => {
+      fetchImpl = async () => {
+        throw new TypeError("fetch failed");
+      };
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json).toMatchObject({ ok: false, upstream_unavailable: true, days: 0 });
+      expect(json.errors).toHaveLength(2);
+      expect(json.errors[0]).toContain("KAP unreachable");
+      expect(json.errors[0]).toContain("TypeError");
+    });
+
+    it("a timeout (DOMException TimeoutError) on every day", async () => {
+      fetchImpl = async () => {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      };
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json).toMatchObject({ ok: false, upstream_unavailable: true, upstreamErrors: 2, tayfErrors: 0 });
+      expect(json.errors[0]).toContain("TimeoutError");
+    });
+
+    it("a KAP 200 whose body is not JSON", async () => {
+      fetchImpl = async () => new Response("<html><body>Bakim calismasi</body></html>", { status: 200 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json).toMatchObject({ ok: false, upstream_unavailable: true, days: 0, upstreamErrors: 2, tayfErrors: 0 });
+      expect(json.errors[0]).toContain("bad body");
+    });
+
+    it("a KAP 200 whose JSON is not a list of disclosures", async () => {
+      fetchImpl = async () => new Response(JSON.stringify({ error: "maintenance" }), { status: 200 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json).toMatchObject({ ok: false, upstream_unavailable: true, upstreamErrors: 2, tayfErrors: 0 });
+    });
+
+    it("a mix of upstream kinds across days (5xx, then a network error)", async () => {
+      fetchImpl = async (_url, init) => {
+        if (dayOf(init) === DAY1) return new Response("bad gateway", { status: 502 });
+        throw new TypeError("fetch failed");
+      };
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json).toMatchObject({ ok: false, upstream_unavailable: true, upstreamErrors: 2, tayfErrors: 0 });
+    });
+
+    it("a deadline that cuts the loop short does not turn an upstream outage into a 502", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-12T10:00:00Z"));
+      fetchImpl = async () => {
+        vi.setSystemTime(Date.now() + 60_000);
+        return new Response("bad gateway", { status: 502 });
+      };
+
+      const { res, json } = await post({ from: DAY1, to: DAY3 });
+
+      expect(json.errors.some((e) => e.startsWith(`deadline before ${DAY2}`))).toBe(true);
+      expect(json.upstreamErrors).toBe(1);
+      expect(json.tayfErrors).toBe(0);
+      expect(res.status).toBe(200);
+      expect(json.upstream_unavailable).toBe(true);
+    });
+
+    it("still reports the failed cycle to Sentry once (only the HTTP status changes)", async () => {
+      fetchImpl = async () => new Response("bad gateway", { status: 502 });
+
+      await post(RANGE);
+
+      expect(kapSentryCalls.captured).toHaveLength(1);
+      expect(kapSentryCalls.captured[0]?.fn).toBe("kap-ingest");
+    });
+  });
+
+  describe("keeps 502 for anything that is not purely KAP's", () => {
+    it("KAP is fine but the disclosures upsert errors on every day: days > 0 keeps ok true and 200 (today's behaviour)", async () => {
+      kapSupabaseFake.faults.disclosuresUpsertError = true;
+      fetchImpl = async () => new Response(JSON.stringify([kapItem(1)]), { status: 200 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(json.days).toBe(2);
+      expect(json.ok).toBe(true);
+      expect(res.status).toBe(200);
+      expect(json.upstream_unavailable).not.toBe(true);
+      expect(json.tayfErrors).toBe(2);
+      expect(json.errors.filter((e) => e.includes("upsert"))).toHaveLength(2);
+      expect(kapSentryCalls.captured).toHaveLength(0);
+    });
+
+    it("every day fails with a non-upstream throw (the state-table client throws)", async () => {
+      kapSupabaseFake.faults.breakerWriteThrows = true;
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(502);
+      expect(json).toMatchObject({ ok: false, days: 0, upstreamErrors: 0, tayfErrors: 2 });
+      expect(json.upstream_unavailable).not.toBe(true);
+      expect(kapSentryCalls.captured).toHaveLength(1);
+    });
+
+    it("a KAP 404 on every day is a Tayf-side problem (the endpoint moved), not an outage", async () => {
+      fetchImpl = async () => new Response("not found", { status: 404 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(502);
+      expect(json).toMatchObject({ ok: false, upstreamErrors: 0, tayfErrors: 2 });
+      expect(json.upstream_unavailable).not.toBe(true);
+      expect(stateUpdates()).toHaveLength(0);
+    });
+
+    it("mixed: one day a KAP 5xx, the next a Tayf-side error, no day completed", async () => {
+      kapSupabaseFake.faults.breakerWriteThrows = true;
+      fetchImpl = async (_url, init) =>
+        dayOf(init) === DAY1 ? new Response("bad gateway", { status: 502 }) : new Response("[]", { status: 200 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(502);
+      expect(json).toMatchObject({ ok: false, days: 0, upstreamErrors: 1, tayfErrors: 1 });
+      expect(json.upstream_unavailable).not.toBe(true);
+      expect(kapSentryCalls.captured).toHaveLength(1);
+    });
+
+    it("mixed: a KAP 5xx and a KAP 404 write nothing to kap_fetch_state", async () => {
+      fetchImpl = async (_url, init) =>
+        dayOf(init) === DAY1
+          ? new Response("bad gateway", { status: 502 })
+          : new Response("not found", { status: 404 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(502);
+      expect(json).toMatchObject({ upstreamErrors: 1, tayfErrors: 1 });
+      expect(json.upstream_unavailable).not.toBe(true);
+      expect(stateUpdates()).toHaveLength(0);
+    });
+
+    it.each([403, 429])("a final %i that trips the breaker still answers 502 and writes the breaker row as today", async (status) => {
+      fetchImpl = async () => new Response("stop", { status, headers: { "Retry-After": "0" } });
+      const before = Date.now();
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(502);
+      expect(json.ok).toBe(false);
+      expect(json.upstream_unavailable).not.toBe(true);
+      // the trip stops the cycle: day 2 is never attempted
+      expect(json.errors).toHaveLength(1);
+      expect(stateUpdates()).toHaveLength(1);
+      const patch = patchOf(0) as { blocked_until: string; last_status: number; last_error: string };
+      expect(patch.last_status).toBe(status);
+      expect(Date.parse(patch.blocked_until)).toBeGreaterThanOrEqual(before + KAP_BREAKER_BLOCK_MS - 2000);
+    });
+
+    it("a KAP 5xx day followed by a breaker trip is a 502 with exactly one (breaker) write", async () => {
+      fetchImpl = async (_url, init) =>
+        dayOf(init) === DAY1 ? new Response("bad gateway", { status: 502 }) : new Response("forbidden", { status: 403 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(502);
+      expect(json.upstream_unavailable).not.toBe(true);
+      expect(stateUpdates()).toHaveLength(1);
+      expect(blockedWrites()).toHaveLength(1);
+      expect(patchOf(0)).toMatchObject({ last_status: 403 });
+    });
+  });
+
+  describe("an upstream_unavailable cycle writes kap_fetch_state id 1 once", () => {
+    it("last_status is the final 5xx, last_error the first upstream message, updated_at set, blocked_until untouched", async () => {
+      fetchImpl = async () => new Response("unavailable", { status: 503, headers: { "Retry-After": "0" } });
+
+      const { res } = await post({ from: DAY1, to: DAY3 });
+
+      expect(res.status).toBe(200);
+      expect(stateUpdates()).toHaveLength(1);
+      const patch = patchOf(0);
+      expect(Object.keys(patch).sort()).toEqual(["last_error", "last_status", "updated_at"]);
+      expect(patch.last_status).toBe(503);
+      expect(patch.last_error).toBe(`[kap-ingest] KAP 503 for ${DAY1}/*`);
+      expect(Number.isFinite(Date.parse(patch.updated_at as string))).toBe(true);
+      expect(stateUpdates()[0]?.state.eq).toEqual([{ col: "id", val: 1 }]);
+      expect(blockedWrites()).toHaveLength(0);
+    });
+
+    it("uses status 0 when KAP never answered", async () => {
+      fetchImpl = async () => {
+        throw new TypeError("fetch failed");
+      };
+
+      await post(RANGE);
+
+      expect(stateUpdates()).toHaveLength(1);
+      expect(patchOf(0).last_status).toBe(0);
+      expect(patchOf(0).last_error).toBe(`[kap-ingest] KAP unreachable for ${DAY1}/*: TypeError`);
+    });
+
+    it("uses status 0 for a 200 with an unusable body, so the admin badge does not show '200 (normal)' beside an error", async () => {
+      fetchImpl = async () => new Response("<html>Bakim</html>", { status: 200 });
+
+      await post(RANGE);
+
+      expect(patchOf(0).last_status).toBe(0);
+      expect(String(patchOf(0).last_error)).toContain("bad body");
+    });
+
+    it("takes status and message together from the FIRST upstream failure of the cycle", async () => {
+      fetchImpl = async (_url, init) => {
+        if (dayOf(init) === DAY1) throw new DOMException("timed out", "TimeoutError");
+        return new Response("bad gateway", { status: 502 });
+      };
+
+      await post(RANGE);
+
+      expect(stateUpdates()).toHaveLength(1);
+      expect(patchOf(0).last_status).toBe(0);
+      expect(patchOf(0).last_error).toBe(`[kap-ingest] KAP unreachable for ${DAY1}/*: TimeoutError`);
+    });
+
+    it("bounds last_error to 300 characters", async () => {
+      fetchImpl = async () => {
+        const err = new Error("x");
+        err.name = "N".repeat(400);
+        throw err;
+      };
+
+      await post(RANGE);
+
+      const lastError = String(patchOf(0).last_error);
+      expect(lastError.length).toBe(300);
+      expect(lastError.startsWith("[kap-ingest] KAP unreachable")).toBe(true);
+    });
+
+    it("warns when the write matches zero rows (kap_fetch_state row 1 missing), like tripBreaker", async () => {
+      kapSupabaseFake.kapFetchStateMissing.value = true;
+      fetchImpl = async () => new Response("bad gateway", { status: 502 });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json.upstream_unavailable).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith("[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist");
+    });
+
+    it("a state write that throws is logged and does not turn the outage into a 500", async () => {
+      kapSupabaseFake.faults.breakerWriteThrows = true;
+      fetchImpl = async () => new Response("bad gateway", { status: 502 });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json.upstream_unavailable).toBe(true);
+      expect(warnSpy.mock.calls.some((c) => String(c[0]).includes("write failed"))).toBe(true);
+    });
+
+    it("a later successful cycle clears it through clearBreakerError, and never writes blocked_until either", async () => {
+      fetchImpl = async () => new Response("bad gateway", { status: 502 });
+      await post(RANGE);
+      fetchImpl = async () => new Response(JSON.stringify([kapItem(900)]), { status: 200 });
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json.ok).toBe(true);
+      expect(json.upstream_unavailable).toBeUndefined();
+      expect(stateUpdates()).toHaveLength(2);
+      expect(patchOf(0)).toMatchObject({ last_status: 502 });
+      expect(patchOf(1)).toMatchObject({ last_error: null, last_status: 200 });
+      expect(blockedWrites()).toHaveLength(0);
+    });
+
+    it("a healthy cycle makes no upstream record and carries no upstream_unavailable flag", async () => {
+      fetchImpl = async () => new Response(JSON.stringify([kapItem(901)]), { status: 200 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json).toMatchObject({ ok: true, days: 2, upstreamErrors: 0, tayfErrors: 0 });
+      expect(json.upstream_unavailable).toBeUndefined();
+      // clearBreakerError only (once per cycle)
+      expect(stateUpdates()).toHaveLength(1);
+      expect(patchOf(0)).toMatchObject({ last_error: null, last_status: 200 });
+    });
+
+    it("a partial outage (one day fine, one day KAP 5xx) stays ok:true with no state record for the failed day", async () => {
+      fetchImpl = async (_url, init) =>
+        dayOf(init) === DAY1 ? new Response("bad gateway", { status: 502 }) : new Response("[]", { status: 200 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(res.status).toBe(200);
+      expect(json).toMatchObject({ ok: true, days: 1, upstreamErrors: 1, tayfErrors: 0 });
+      expect(json.upstream_unavailable).toBeUndefined();
+      expect(stateUpdates()).toHaveLength(1);
+      expect(patchOf(0)).toMatchObject({ last_error: null, last_status: 200 });
+    });
+  });
+
+  describe("docs/ops-heartbeat.md row 2", () => {
+    const doc = readFileSync(resolve(__dirname, "..", "..", "docs", "ops-heartbeat.md"), "utf8");
+    const row2 = doc.split("\n").find((l) => l.startsWith("| 2 | `edge_http_errors_30m`")) ?? "";
+
+    it("says a KAP outage no longer counts and where to look for it", () => {
+      expect(row2).not.toBe("");
+      expect(row2).toContain("upstream_unavailable");
+      expect(row2).toContain('"upstream_unavailable":true');
+      expect(row2).toContain("kap_fetch_state.last_status");
+      expect(row2).toContain("last_error");
+      expect(row2).toContain("/admin/ekonomi");
+      expect(row2).toContain("net._http_response");
+      expect(row2).toContain("--no-verify-jwt");
+    });
+
+    it("says a Tayf-side write failure, a mixed cycle and a breaker trip still answer 502 and count", () => {
+      expect(row2).toMatch(/Tayf-side/);
+      expect(row2).toMatch(/mixed cycle/);
+      expect(row2).toMatch(/circuit-breaker trip/);
+      expect(row2).toContain("502");
+    });
   });
 });

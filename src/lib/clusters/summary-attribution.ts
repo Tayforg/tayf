@@ -1,5 +1,5 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
-import { backOffOpenQuote, tidySummaryText } from "@/lib/articles/summary-tidy";
+import { backOffOpenQuote, tidySummaryText, trimDanglingEnd } from "@/lib/articles/summary-tidy";
 import type { WireSignal } from "./wire";
 import type { BiasCategory } from "@/types";
 
@@ -157,26 +157,54 @@ export function summaryAttribution({
 const ELLIPSIS = "…";
 
 /**
- * Word-boundary truncation shared by every `describeForMeta` branch. A cut that
- * would end inside an open quotation (`Yılmaz, "İsrail'in … baskısına…`,
+ * A quote back-off must keep at least this many characters of the attribution
+ * text (after the "N kaynak. Outlet: " prefix), or the description is the one
+ * without an attribution (h30-live-1). "Yılmaz, "<200-character quote>" dedi."
+ * backed off to "4 kaynak. Anadolu Ajansı: Yılmaz…": a speaker's name is not a
+ * description, and the title sentence is.
+ */
+const MIN_KEPT_AFTER_BACK_OFF = 60;
+
+/**
+ * Word-boundary truncation shared by every `describeForMeta` branch.
+ *
+ * A cut that would end inside an open quotation (`Yılmaz, "İsrail'in … baskısına…`,
  * h29-regress-1) is backed off by {@link backOffOpenQuote}: to the last sentence
  * end or to the word in front of the opener, never to a cut that ends at or
  * before `floor` (the length of the leading sentence and the attribution label,
  * which are not the text). Null when no such cut exists; the caller then falls
- * back to the description without the text. A balanced cut is cut exactly as it
- * always was.
+ * back to the description without the text. h30-live-1: a back-off that keeps
+ * fewer than `minKeptAfterBackOff` characters of text after `floor` is null too;
+ * what is left is a stub.
+ *
+ * A balanced cut is cut as it always was, except that it no longer ends in
+ * ", ; : – — -" in front of the ellipsis ("Demokratlar Partisi,…", h30-live-1)
+ * and is null when that leaves nothing after `floor`. The minimum applies to a
+ * back-off only: a plain word cut keeps what the limit allows.
  */
-function truncateWords(full: string, max: number, floor = 0): string | null {
+function truncateWords(
+  full: string,
+  max: number,
+  floor = 0,
+  minKeptAfterBackOff = 0,
+): string | null {
   if (full.length <= max) return full;
   const truncated = full.slice(0, Math.max(0, max - 1));
   const lastSpace = truncated.lastIndexOf(" ");
   const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
   const kept = backOffOpenQuote(cut, { floor });
   if (kept === null) return null;
-  // A double space at the boundary would leave one blank in front of the
-  // ellipsis ("geçirilecek. …").
-  if (kept === cut) return cut.trimEnd() + ELLIPSIS;
-  return kept.endsWith(ELLIPSIS) ? kept : kept.trimEnd() + ELLIPSIS;
+  if (kept === cut) {
+    // No quotation left open: a plain word cut. A double space at the boundary
+    // would leave one blank in front of the ellipsis ("geçirilecek. …"), and a
+    // dangling mark would read ",…".
+    const end = trimDanglingEnd(cut, cut.length);
+    return end <= floor ? null : cut.slice(0, end) + ELLIPSIS;
+  }
+  const text = kept.endsWith(ELLIPSIS) ? kept.slice(0, -ELLIPSIS.length) : kept;
+  if (text.length - floor < minKeptAfterBackOff) return null;
+  if (kept.endsWith(ELLIPSIS)) return kept;
+  return kept.slice(0, trimDanglingEnd(kept, kept.length)) + ELLIPSIS;
 }
 
 /**
@@ -199,6 +227,12 @@ function truncateWords(full: string, max: number, floor = 0): string | null {
  * `truncateWords`). An attribution text that opens with the quotation has no
  * cut that does not, so the description is the one without an attribution (the
  * title sentence, else `head`).
+ *
+ * h30-live-1: the same description replaces an attribution whose quote back-off
+ * keeps fewer than 60 characters of text (a speaker's name in front of a long
+ * quotation, "Yılmaz…"; the title fallback itself is not held to that), a cut
+ * never ends in ", ; : – — -" in front of the "…", and a cut that would end
+ * inside the label ("N kaynak. Outlet:") has no text to show and falls back too.
  */
 export function describeForMeta(
   {
@@ -230,7 +264,10 @@ export function describeForMeta(
   const prefix = attribution.source
     ? `${head} ${attribution.source.name}: `
     : `${head} Kaynak açıklaması: `;
-  return truncateWords(prefix + attribution.text, max, prefix.length) ?? withoutAttribution();
+  return (
+    truncateWords(prefix + attribution.text, max, prefix.length, MIN_KEPT_AFTER_BACK_OFF) ??
+    withoutAttribution()
+  );
 }
 
 /**

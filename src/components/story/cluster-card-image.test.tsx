@@ -323,6 +323,21 @@ describe("ClusterCardImage — animated GIF filter (http-1)", () => {
   });
 
   it("still renders a .gifv-named or query-only-gif URL (only a .gif path is filtered)", () => {
+    // A QUERY_HOSTS host: h30-abuse-4 allows a query string only on those, so the
+    // URL reaches the GIF filter instead of being dropped by the host check.
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://i.tmgrup.com.tr/img?format=gif"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://i.tmgrup.com.tr/img?format=gif"');
+  });
+
+  it("drops the same query-only URL on a host that may not carry a query string (h30-abuse-4)", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
         src="https://img.piri.net/img?format=gif"
@@ -332,7 +347,9 @@ describe("ClusterCardImage — animated GIF filter (http-1)", () => {
       />,
     );
 
-    expect(markup).toContain('src="https://img.piri.net/img?format=gif"');
+    expect(markup).not.toContain("<img");
+    expect(markup).not.toContain("img.piri.net");
+    expect(markup).toContain('role="img"');
   });
 });
 

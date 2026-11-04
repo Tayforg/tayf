@@ -479,6 +479,62 @@ describe("HomeFeed: a one-character query (no search ran)", () => {
   });
 });
 
+// h30-abuse-1: a query that is only punctuation canonicalises to '' (its cache
+// key and RPC input would be empty), so it is "too short" like a lone letter:
+// no search runs and the page asks for more characters.
+describe("HomeFeed: a punctuation-only query (no search ran)", () => {
+  beforeEach(() => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("ak", "AK Parti")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+  });
+
+  it("q='!!' does not call searchClusters and renders the too-short state", async () => {
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "!!" }) });
+    expect(searchClusters).not.toHaveBeenCalled();
+    const text = visibleText(tree);
+    expect(text).toContain("Aramak için biraz daha yazın");
+    expect(text).toContain("En az 2 karakter yazın.");
+    expect(text).not.toContain("için sonuç yok");
+    expect(text).not.toContain("Hiç haber bulunamadı");
+    expect(text).toContain("Aramayı temizle");
+    expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
+    expect(collectElements(tree).some((e) => e.type === FollowButton)).toBe(false);
+  });
+
+  it.each(["?!", "...", "\u201c\u201d", "a!", "\u{1F600}\u{1F600}"])(
+    "q=%j is too short as well",
+    async (q) => {
+      const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+      expect(searchClusters).not.toHaveBeenCalled();
+      expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
+      expect(visibleText(tree)).toContain("Aramak için biraz daha yazın");
+    },
+  );
+
+  it("keeps the too-short hint when the feed itself failed to load", async () => {
+    getPoliticsClusters.mockRejectedValue(new Error("db down"));
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "!!" }) });
+    expect(searchClusters).not.toHaveBeenCalled();
+    expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
+  });
+});
+
+describe("HomeFeed: the raw query is echoed and searched, only the key is canonical", () => {
+  it("q='ERDOĞAN!' calls searchClusters once with the raw text and echoes it", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("b", "Başbakan açıkladı")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "ERDOĞAN!" }) });
+
+    expect(searchClusters).toHaveBeenCalledTimes(1);
+    expect(searchClusters).toHaveBeenCalledWith("ERDOĞAN!");
+    const text = visibleText(tree);
+    expect(text).toContain("\u201cERDOĞAN!\u201d için 0 sonuç");
+    expect(text).not.toContain("En az 2 karakter");
+    expect(liveRegionText(tree)).toBe("\u201cERDOĞAN!\u201d için sonuç bulunamadı.");
+  });
+});
+
 describe("HomeFeed: a two-character query behaves as before", () => {
   it("searches, counts and says 'için sonuç yok' when nothing matches", async () => {
     getPoliticsClusters.mockResolvedValue(feedOf(bundle("b", "Başbakan açıkladı")));

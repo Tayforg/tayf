@@ -70,6 +70,11 @@ import { buildSecurityHeaders } from "./src/lib/security/headers";
  * tests/guards/image-remote-patterns.test.ts, which keeps a catch-all from
  * coming back. We keep the optimizer (automatic resizing, lazy loading, WebP
  * conversion) instead of falling back to `unoptimized: true`.
+ *
+ * remotePatterns match host, path and query (h30-abuse-4: no query string except
+ * on the QUERY_HOSTS families) but cannot see a URL fragment, which the
+ * optimizer hashes into its cache key: src/middleware.ts (gate 10) 400s any
+ * /_next/image whose `url` contains a '#'.
  */
 const nextConfig: NextConfig = {
   // Browser Sentry is opt-in per build: instrumentation-client.ts dynamically
@@ -135,6 +140,12 @@ const nextConfig: NextConfig = {
     minimumCacheTTL: 86400,
     qualities: [50, 75, 90],
     contentDispositionType: "inline",
+    // Largest origin image the optimizer will download and transform (Next
+    // 16.4.3 types it; the default is 50 MB). 10 MB keeps one hostile or broken
+    // response from pinning a 50 MB fetch + decode while leaving headroom for
+    // the large originals legitimate outlets publish; a 5 MB cap would risk
+    // those. h30-abuse-4.
+    maximumResponseBody: 10_000_000,
     // A `sizes` value with no `vw` term (e.g. the desktop thumbnail's fixed
     // "160px") makes next/image emit every configured width as a srcset
     // candidate instead of scaling by viewport, so the device-size list has

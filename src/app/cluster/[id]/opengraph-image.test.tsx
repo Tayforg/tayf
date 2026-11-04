@@ -26,10 +26,15 @@ vi.mock("next/og", () => ({
     constructor(element: ReactElement, options: Record<string, unknown>) {
       captured = element;
       capturedOptions = options;
-      return new Response(new Uint8Array([1]), {
-        status: 200,
-        headers: { "content-type": "image/png" },
-      });
+      // Like the real ImageResponse: `options.headers` is applied with
+      // Headers.set, so an explicit cache-control reaches the response.
+      const headers = new Headers({ "content-type": "image/png" });
+      for (const [k, v] of Object.entries(
+        (options.headers ?? {}) as Record<string, string>,
+      )) {
+        headers.set(k, v);
+      }
+      return new Response(new Uint8Array([1]), { status: 200, headers });
     }
   },
 }));
@@ -447,9 +452,9 @@ describe("cluster opengraph-image", () => {
     expect(headers["Cache-Control"]).toBeUndefined();
   });
 
-  it("falls back to a 200 PNG when the cluster no longer exists", async () => {
+  it("falls back to a 200 PNG when the cluster no longer exists, CDN-cacheable like the 404 (h30-abuse-2)", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(null);
-    const { default: Image, OG_FALLBACK_CACHE_HEADERS } = await import("./opengraph-image");
+    const { default: Image, OG_NOT_FOUND_HEADERS } = await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
 
@@ -457,13 +462,34 @@ describe("cluster opengraph-image", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
 
-    expect(OG_FALLBACK_CACHE_HEADERS).toEqual({ "cache-control": "public, s-maxage=60" });
+    // The soft-404 card keeps its 200 body but is sent with the same shared
+    // TTL as the malformed-id 404, so repeat fetches of an unknown id are
+    // answered by the CDN instead of re-reading the database.
+    expect(OG_NOT_FOUND_HEADERS).toEqual({ "cache-control": "public, s-maxage=300" });
     const headers = capturedOptions?.headers as Record<string, string>;
-    expect(headers).toEqual(OG_FALLBACK_CACHE_HEADERS);
+    expect(headers).toEqual(OG_NOT_FOUND_HEADERS);
     expect(headers["Cache-Control"]).toBeUndefined();
+    expect(res.headers.get("cache-control")).toBe(OG_NOT_FOUND_HEADERS["cache-control"]);
 
     const body = await res.arrayBuffer();
     expect(body.byteLength).toBeGreaterThan(0);
+  });
+
+  it("the module no longer exports the short-lived OG_FALLBACK_CACHE_HEADERS", async () => {
+    const mod = await import("./opengraph-image");
+    expect(mod).not.toHaveProperty("OG_FALLBACK_CACHE_HEADERS");
+  });
+
+  it("twitter-image re-export sends the unknown-cluster card with the same cache headers", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(null);
+    const tw = await import("./twitter-image");
+    const { OG_NOT_FOUND_HEADERS } = await import("./opengraph-image");
+
+    const res = await tw.default({ params: Promise.resolve({ id: MISSING_ID }) });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(capturedOptions?.headers).toEqual(OG_NOT_FOUND_HEADERS);
   });
 
   it("404s an empty body for a non-UUID id without touching the database", async () => {
@@ -526,9 +552,9 @@ describe("cluster opengraph-image", () => {
     }
   });
 
-  it("keeps 'not found' and 'unavailable' distinct: null still says 'Haber kümesi bulunamadı' with the short public TTL", async () => {
+  it("keeps 'not found' and 'unavailable' distinct: null still says 'Haber kümesi bulunamadı' with the public TTL", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(null);
-    const { default: Image, OG_FALLBACK_CACHE_HEADERS, OG_UNAVAILABLE_CACHE_HEADERS } =
+    const { default: Image, OG_NOT_FOUND_HEADERS, OG_UNAVAILABLE_CACHE_HEADERS } =
       await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
@@ -536,7 +562,7 @@ describe("cluster opengraph-image", () => {
     expect(res.status).toBe(200);
     expect(collectText(captured).join(" ")).toContain("Haber kümesi bulunamadı");
     const headers = capturedOptions?.headers as Record<string, string>;
-    expect(headers).toEqual(OG_FALLBACK_CACHE_HEADERS);
+    expect(headers).toEqual(OG_NOT_FOUND_HEADERS);
     expect(headers).not.toEqual(OG_UNAVAILABLE_CACHE_HEADERS);
   });
 
