@@ -22,7 +22,7 @@
 // See `evaluateOnce` / `evaluateWithRetries` below.
 
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
-import { collectPendingArticles } from "../_shared/jev-pending.ts";
+import { collectPendingArticles, parsePriorityShare } from "../_shared/jev-pending.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
 import {
@@ -87,6 +87,22 @@ const JEV_ARTICLE_FETCH_MAX_PAGES = 10;
  * drain. The remaining budget (JEV_ARTICLE_FETCH_MAX_PAGES -
  * pagesReadByPass1) still goes to pass 2's oldest-first backlog drain. */
 const JEV_ARTICLE_FRESH_MAX_PAGES = 4;
+
+/** Cap on fetchPendingArticles' cluster-priority pass (pass 0): the same
+ * pending query restricted to the politics gate (articles.category in
+ * JEV_POLITICS_CATEGORIES), newest-first. Only those articles are ever
+ * clustered, so they are scored before the rest of the stream. 4 pages x 300
+ * rows is ~1,200 politics rows -- about 13 h of politics-gate articles at the
+ * ~98/h day average, ~15 h in the quieter second half of the day. That depth is
+ * what matters: once the UTC-day cap is hit (~14:00 UTC on 3-4 Nov) the rest
+ * of the day's politics is unscored until the 00:00 reset, and the legacy
+ * passes (newest ~1,200 + oldest ~1,800 of ~10,000 rows in the 24h window)
+ * cannot reach that middle of the window. These pages draw on
+ * JEV_ARTICLE_FETCH_MAX_PAGES, so the per-run page budget is unchanged; the
+ * query is served by idx_articles_politics_published (partial, published_at
+ * desc), no new index. JEV_PRIORITY_SHARE (0..1, default 1) caps the share of
+ * the article limit the pass may take; 0 switches it off. */
+const JEV_ARTICLE_PRIORITY_MAX_PAGES = 4;
 
 /** PostgREST page size for fetchPreviousRegressionAnswers (066). */
 const JEV_REGRESSION_ANSWER_PAGE = 1000;
@@ -351,6 +367,12 @@ function makePorts(apiKey: string, deadlineAt?: number): JevPorts {
       // of publication -- then spends whatever page budget remains on
       // pass 2, an oldest-first drain of the backlog, all within the same
       // JEV_ARTICLE_FETCH_MAX_PAGES round-trip cap.
+      //
+      // Cluster priority: ahead of both passes, the politics-gate subset
+      // (only those articles are ever clustered) is collected newest-first, so
+      // a capped daily budget reaches cluster members before articles that
+      // never cluster. Same limit, same packing -- it only reorders the list;
+      // a failing priority query falls back to the two passes.
       const pageSize = limit * 2;
       const rawSelect = "id, title, description, category, published_at, source:sources(slug)";
 
@@ -371,6 +393,31 @@ function makePorts(apiKey: string, deadlineAt?: number): JevPorts {
         pageSize,
         maxPages: JEV_ARTICLE_FETCH_MAX_PAGES,
         freshMaxPages: JEV_ARTICLE_FRESH_MAX_PAGES,
+        priorityMaxPages: JEV_ARTICLE_PRIORITY_MAX_PAGES,
+        priorityShare: parsePriorityShare(Deno.env.get("JEV_PRIORITY_SHARE")),
+        async fetchPriorityPage(from, to) {
+          const { data, error } = await supabase
+            .from("articles")
+            .select(rawSelect)
+            .gte("published_at", sinceIso)
+            .in("category", JEV_POLITICS_CATEGORIES as unknown as string[])
+            .order("published_at", { ascending: false })
+            .order("id", { ascending: true })
+            .range(from, to);
+          if (error) throw new Error(`jev-shadow: fetchPendingArticles priority failed: ${error.message}`);
+          return (data ?? []) as unknown as RawArticleFetchRow[];
+        },
+        onPriorityError(err) {
+          // Not fatal: collectPendingArticles falls back to the two legacy
+          // passes. Still loud -- a priority query that fails every tick
+          // means the cluster-first ordering silently stopped working.
+          const name = err instanceof Error ? err.name : typeof err;
+          const message = err instanceof Error ? clampErrorForLog(err.message) : "";
+          console.error("[jev-shadow] priority pass failed, falling back", { name, message });
+          // A deadline hit inside the anti-join is the run's own clock, not a
+          // fault: logged above, not paged.
+          if (!(err instanceof JevDeadlineError)) captureException("jev-shadow", err);
+        },
         async fetchPage(order, from, to) {
           const { data, error } = await supabase
             .from("articles")
@@ -387,7 +434,7 @@ function makePorts(apiKey: string, deadlineAt?: number): JevPorts {
       });
 
       console.log(
-        `[jev-shadow] pending articles fresh=${result.freshRows} backlog=${result.backfillRows} pages=${result.pagesRead} deadline_stop=${result.stoppedAtDeadline}`,
+        `[jev-shadow] pending articles priority=${result.priorityRows ?? 0} priority_failed=${result.priorityFailed ?? false} fresh=${result.freshRows} backlog=${result.backfillRows} pages=${result.pagesRead} deadline_stop=${result.stoppedAtDeadline}`,
       );
 
       return result.rows.map(mapRow);
