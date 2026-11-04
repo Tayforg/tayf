@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 // ---------------------------------------------------------------------------
 // WCAG 2.1.1 (Keyboard): a horizontally scrolling element that holds no
 // focusable child cannot be scrolled with the keyboard, because browsers only
-// scroll a scroller that has focus. On /kalite the data table and on
-// /gelistirici the data tables and the code samples overflow at a 390 px
+// scroll a scroller that has focus. On /kalite the data table, on
+// /gelistirici the data tables and the code samples, and on /metodoloji the
+// zone table and the headline-prompt block (h32-a11y-3: a ~140 character first
+// line, scrollWidth 941 vs clientWidth 256 at 390 px) overflow at a 390 px
 // viewport (the /kalite chart no longer scrolls: its labels are HTML around a
 // fluid svg), so each one needs to be a focus stop: tabIndex={0}, a region role with an
 // accessible name (so a screen reader announces what took focus), and a
@@ -295,6 +297,7 @@ export function scanScrollRegions(rawSource: string): ScanResult {
 const GUARDED_PAGES = [
   { file: "src/app/kalite/page.tsx", minRegions: 1 },
   { file: "src/app/gelistirici/page.tsx", minRegions: 6 },
+  { file: "src/app/metodoloji/page.tsx", minRegions: 2 },
 ] as const;
 
 function countOccurrences(text: string, needle: string): number {
@@ -314,7 +317,7 @@ function occurrencesOnCommentLines(raw: string, needle: string): number {
   return count;
 }
 
-describe("scroll regions are keyboard reachable on /kalite and /gelistirici", () => {
+describe("scroll regions are keyboard reachable on /kalite, /gelistirici and /metodoloji", () => {
   for (const { file, minRegions } of GUARDED_PAGES) {
     const raw = readFileSync(resolve(ROOT, file), "utf8");
 

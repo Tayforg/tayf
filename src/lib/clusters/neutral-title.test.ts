@@ -2798,3 +2798,280 @@ describe("hunt 31 (h31-reader-2)", () => {
     });
   });
 });
+
+// hunt 32 (h32-livebl-3): the extractive gate rejects a title whose DOUBLE
+// quotes are unbalanced. Live evidence, read-only SQL through sbq.py -e on
+// 2026-11-04:
+//   select a.title from cluster_articles ca join articles a on a.id = ca.article_id
+//     where ca.cluster_id = '0ab4a7e5-f428-4a11-8861-02631b9a378b'
+//     order by a.published_at, a.id
+//   select title_tr, title_tr_neutral, title_neutral_model from clusters
+//     where id = '0ab4a7e5-f428-4a11-8861-02631b9a378b'
+//     -> "Trump'tan ara seçimler öncesi veto tehdidi" (extractive-v4), the incumbent
+//   exposure of stored extractive titles (title_neutral_model like 'extractive-%'):
+//     odd straight " count = 53, curly “ vs ” mismatch = 29, « vs » mismatch = 0
+// The sixth member (the feed's own cut) opens a straight " it never closes; the
+// v5 re-offer would have installed it over the incumbent.
+describe("h32-livebl-3: unbalanced double quotes", () => {
+  const T0AB4 = [
+    "Trump'tan ara seçimler öncesi veto tehdidi",
+    "Trump'tan seçim öncesi rest! 'Her şeyi veto edeceğim'",
+    "Trump'tan seçim öncesi rest! 'Her şeyi veto edeceğim'",
+    "Seçimleri kaybetme ihtimaline karşı Trump'ın planı: 'Her şeyi veto edeceğim'",
+    "Trump'tan ara seçim yorumu: Kaybedilirse 'Bay Veto' olurum",
+    `Trump'tan Seçim Öncesi Açıklamalar: "Kaybedersek 'Bay Veto' Olurum`,
+  ];
+  const UNBALANCED_0AB4 = T0AB4[5]!;
+  const INCUMBENT_0AB4 = "Trump'tan ara seçimler öncesi veto tehdidi";
+
+  // Independent of the implementation: one character scan, three tallies.
+  function balancedDoubleQuotes(t: string): boolean {
+    let straight = 0;
+    let open = 0;
+    let close = 0;
+    let angleOpen = 0;
+    let angleClose = 0;
+    for (const ch of t) {
+      if (ch === '"') straight++;
+      else if (ch === "“") open++;
+      else if (ch === "”") close++;
+      else if (ch === "«") angleOpen++;
+      else if (ch === "»") angleClose++;
+    }
+    return straight % 2 === 0 && open === close && angleOpen === angleClose;
+  }
+
+  describe("fixtures are otherwise clean", () => {
+    it.each([
+      `Bakan açıkladı: Yeni düzenleme yarın geliyor`,
+      `Erdoğan: "Yeni düzenleme Meclis'e geliyor"`,
+      `Trump'tan ara seçim yorumu: Kaybedilirse 'Bay Veto' olurum`,
+    ])("%j is acceptable", (title) => {
+      expect(isAcceptableNeutral(title, [])).toBe(true);
+    });
+
+    it("the 0ab4a7e5 member with its quote closed is acceptable: the open quote is its only defect", () => {
+      expect(isAcceptableNeutral(`${UNBALANCED_0AB4}"`, T0AB4.slice(0, 5))).toBe(true);
+    });
+  });
+
+  describe("isAcceptableNeutral rejects", () => {
+    it.each([
+      ["the 0ab4a7e5 member with one straight quote", UNBALANCED_0AB4],
+      ["three straight quotes", `Bakan açıkladı: "Yeni düzenleme" yarın "geliyor`],
+      ["a straight quote opened and never closed", `Bakan açıkladı: "Yeni düzenleme yarın geliyor`],
+      ["a straight quote closed and never opened", `Bakan açıkladı: Yeni düzenleme yarın geliyor"`],
+      ["more “ than ”", `Bakan açıkladı: “Yeni düzenleme yarın geliyor`],
+      ["two “ and one ”", `Bakan “açıkladı”: “Yeni düzenleme yarın geliyor`],
+      ["” without “", `Bakan açıkladı: Yeni düzenleme yarın geliyor”`],
+      ["the same-glyph ”...” style", `”Ekonomide yeni dönem” mesajı Ankara'dan verildi`],
+      ["the mixed “...\" style", `“Ekonomide yeni dönem" mesajı Ankara'dan verildi`],
+      ["« without »", `Bakan açıkladı: «Yeni düzenleme yarın geliyor`],
+      ["» without «", `Bakan açıkladı: Yeni düzenleme yarın geliyor»`],
+    ])("%s", (_label, title) => {
+      expect(balancedDoubleQuotes(title)).toBe(false);
+      expect(isAcceptableNeutral(title, [])).toBe(false);
+    });
+
+    it("model output is held to the same rule ({ generated: true })", () => {
+      expect(isAcceptableNeutral(UNBALANCED_0AB4, [], { generated: true })).toBe(false);
+      expect(isAcceptableNeutral(`Bakan açıkladı: "Yeni düzenleme yarın geliyor`, T0AB4, { generated: true })).toBe(false);
+    });
+
+    it("trims first: surrounding whitespace does not hide the unbalanced quote", () => {
+      expect(isAcceptableNeutral(`  ${UNBALANCED_0AB4}  `, [])).toBe(false);
+    });
+  });
+
+  describe("isAcceptableNeutral accepts", () => {
+    it.each([
+      ["a straight pair", `Erdoğan: "Yeni düzenleme Meclis'e geliyor"`],
+      ["two straight pairs", `Bakan "Yeni düzenleme" dedi, muhalefet "tepki" gösterdi`],
+      ["a curly pair", `“Ekonomide yeni dönem” mesajı Ankara'dan verildi`],
+      ["an angle pair", `«Barış» çağrısı İstanbul'da yankı uyandırdı`],
+      ["the 0ab4a7e5 incumbent", INCUMBENT_0AB4],
+      ["a title with 'Bay Veto' in single quotes", `Trump'tan ara seçim yorumu: Kaybedilirse 'Bay Veto' olurum`],
+      ["an unbalanced ‘ (single quotes are never counted)", `Bakan açıkladı: ‘Yeni düzenleme yarın geliyor`],
+      ["an unbalanced ’ (single quotes are never counted)", `Bakan açıkladı: Yeni düzenleme yarın geliyor’`],
+      ["an unbalanced straight single quote", `Bakan açıkladı: 'Yeni düzenleme yarın geliyor`],
+      ["an unbalanced low „ (not counted)", `Bakan açıkladı: „Yeni düzenleme yarın geliyor`],
+      ["an unbalanced modifier ʼ (not counted)", `Bakan açıkladı: ʼYeni düzenleme yarın geliyor`],
+      ["Turkish ’ apostrophes", `Erdoğan’ın açıklaması Meclis’te büyük yankı uyandırdı`],
+      ["an inch mark pair", `Samsung 55" televizyon ve 65" monitör fiyatları düştü`],
+    ])("%s", (_label, title) => {
+      expect(isAcceptableNeutral(title, [])).toBe(true);
+    });
+
+    it("model output with balanced quotes passes ({ generated: true })", () => {
+      expect(isAcceptableNeutral(`Erdoğan: "Yeni düzenleme Meclis'e geliyor"`, [], { generated: true })).toBe(true);
+    });
+  });
+
+  describe("pickNeutralTitle over the six 0ab4a7e5 member titles", () => {
+    it("keeps the incumbent: the unbalanced member does not displace it", () => {
+      expect(pickNeutralTitle(asMembers(T0AB4), { incumbent: INCUMBENT_0AB4 })).toBe(INCUMBENT_0AB4);
+    });
+
+    it("keeps the incumbent when the members arrive in the opposite order", () => {
+      expect(pickNeutralTitle(asMembers([...T0AB4].reverse()), { incumbent: INCUMBENT_0AB4 })).toBe(INCUMBENT_0AB4);
+    });
+
+    it("a first pick (no incumbent) is a member title with balanced quotes", () => {
+      const picked = pickNeutralTitle(asMembers(T0AB4));
+      expect(picked).not.toBeNull();
+      expect(T0AB4).toContain(picked!);
+      expect(picked).not.toBe(UNBALANCED_0AB4);
+      expect(balancedDoubleQuotes(picked!)).toBe(true);
+    });
+
+    it("the floor pick is a member title with balanced quotes", () => {
+      const picked = pickNeutralTitle(asMembers(T0AB4), { floor: true });
+      expect(picked).not.toBeNull();
+      expect(T0AB4).toContain(picked!);
+      expect(picked).not.toBe(UNBALANCED_0AB4);
+      expect(balancedDoubleQuotes(picked!)).toBe(true);
+    });
+
+    it("a stored incumbent with an unbalanced quote is replaced at the next re-pick", () => {
+      const picked = pickNeutralTitle(asMembers(T0AB4), { incumbent: UNBALANCED_0AB4 });
+      expect(picked).not.toBeNull();
+      expect(picked).not.toBe(UNBALANCED_0AB4);
+      expect(T0AB4).toContain(picked!);
+      expect(balancedDoubleQuotes(picked!)).toBe(true);
+    });
+  });
+
+  describe("floor ranking prefers the balanced candidate", () => {
+    // The unbalanced member is listed first and is the longer one, so it wins
+    // every tie and every score comparison against the balanced one.
+    const UNBALANCED = `Bakan Yılmaz: "Yeni vergi düzenlemesi Meclis'e bu hafta geliyor`;
+    const BALANCED = `Bakan Yılmaz: Yeni vergi düzenlemesi Meclis'e geliyor`;
+
+    it("two members, the first unbalanced: the balanced one is picked with { floor: true }", () => {
+      expect(pickNeutralTitle(asMembers([UNBALANCED, BALANCED]), { floor: true })).toBe(BALANCED);
+    });
+
+    it("and without the floor", () => {
+      expect(pickNeutralTitle(asMembers([UNBALANCED, BALANCED]))).toBe(BALANCED);
+    });
+
+    it("when the balanced member only has a soft defect (a question), the floor still prefers it", () => {
+      // Both fail the normal gate (a '?' / an open quote); only the quote is a
+      // hard defect, so the floor takes the question over the open quote.
+      const QUESTION = `Bakan Yılmaz: Yeni vergi düzenlemesi Meclis'e geliyor mu?`;
+      expect(pickNeutralTitle(asMembers([UNBALANCED, QUESTION]))).toBe(null);
+      expect(pickNeutralTitle(asMembers([UNBALANCED, QUESTION]), { floor: true })).toBe(QUESTION);
+    });
+
+    it("when every member is unbalanced the floor is still a last resort, never null", () => {
+      const OTHER = `Bakan Yılmaz: "Yeni vergi düzenlemesi Meclis'e geliyor`;
+      expect(pickNeutralTitle(asMembers([UNBALANCED, OTHER]))).toBe(null);
+      const picked = pickNeutralTitle(asMembers([UNBALANCED, OTHER]), { floor: true });
+      expect([UNBALANCED, OTHER]).toContain(picked);
+    });
+  });
+  // Review fix (hunt-32, MEDIUM): the stored rows this gate REWRITES, replayed.
+  // The headline cron's re-pick calls pickNeutralTitle(items, { incumbent }) on
+  // every live extractive row it is offered (neutral_title_repick_candidates:
+  // is_archived = false, title_neutral_at is null, article_count >= 2, updated_at
+  // in the last 14 days, a model other than extractive-v5 or a grown cluster). The
+  // new hard defect makes a stored incumbent with unbalanced double quotes fail the
+  // gate, so the re-pick replaces it. Read-only SQL through sbq.py -e, 2026-11-04
+  // ~17:10Z: 3,941 clusters in that window, 19 with an unbalanced member title,
+  // exactly 4 with an unbalanced STORED title (all extractive-v4, none v5). Members
+  // are listed newest first, as the route's fetchMemberItems orders them. HEAD
+  // (before this diff) against the working picker over those 19 clusters: 15 are the
+  // same, 0ab4a7e5 (the h32-livebl-3 case) is the one HEAD would have made worse, and
+  // exactly 3 stored titles change because of this diff. Verdicts, each reviewed by
+  // hand:
+  //   9ac41ecc  was  Eski ABD Başkanı Obama'dan Trump’a: “Kimsenin istemediği,
+  //                  gereksiz bir savaşı başlattı"        (a “ closed by a straight ")
+  //             now  Eski ABD Başkanı Obama'dan Trump'a "Diktatör" benzetmesi
+  //             OK. The second member, verbatim, balanced; neutral wording; it
+  //             names the other half of the same Obama interview.
+  //   7a11fe6f  was  Netanyahu’dan, taraftarlarını sandığa çekmek için provokatif
+  //                  paylaşım: "Evimiz için bir savaşın içindeyiz”  (a straight " closed by ”)
+  //             now  Netanyahu’dan seçmene provokatif çağrı: ‘Evimiz için bir savaşın
+  //                  içindeyiz’
+  //             OK. The newest member, verbatim, single quotes; the same quote, 31
+  //             characters shorter.
+  //   fc4ad6b4  was  Bakan Ersoy Edirne’de kütüphane açılışı yaptı: "Ekran
+  //                  bağımlılığına çözüm olacak'            (a " closed by an apostrophe)
+  //             now  Bakan Ersoy, Edirne'de kütüphane açılışı yaptı
+  //             OK. The other member, verbatim, and the better title: the stored one
+  //             ends in the broken quote this fix exists for.
+  //   7ca3324d  stays (no write). All three members are questions, so no candidate
+  //             passes the gate and pickNeutralTitle returns null, as it does at HEAD;
+  //             the route keeps the stored title, which still ends in a stray '"”'.
+  //             Residual, not a regression; it cannot be healed by a re-pick.
+  //   0ab4a7e5  stays "Trump'tan ara seçimler öncesi veto tehdidi" (above); HEAD would
+  //             have installed the unbalanced sixth member.
+  // The two mixed-glyph titles (9ac41ecc, 7a11fe6f) read as balanced to a person but
+  // count as unbalanced under the rule the finding asks for (odd straight " or unequal
+  // “ / ”), so they churn once; a pair-aware check would spare them and is a follow-up
+  // if that churn is not wanted. Post-deploy check (read-only):
+  //   select id, title_tr_neutral, title_neutral_model from public.clusters
+  //    where id in ('9ac41ecc-a6c4-46dd-8aa4-734529b7d495',
+  //                 '7a11fe6f-abf2-43dd-b225-6a034748130b',
+  //                 'fc4ad6b4-37fe-4657-a4cf-37bec1c296fc',
+  //                 '7ca3324d-c076-4dfc-9f47-1f565083cfa3',
+  //                 '0ab4a7e5-f428-4a11-8861-02631b9a378b');
+  // After the headline cron has run ~3 cycles the first three read the "now" titles
+  // above (model extractive-v5), 7ca3324d and 0ab4a7e5 are unchanged.
+  describe("live replay: the four stored titles with unbalanced quotes (2026-11-04)", () => {
+    const LIVE_9AC4 = [
+      "Eski ABD Başkanı Obama'dan Trump’a: “Kimsenin istemediği, gereksiz bir savaşı başlattı\"",
+      "Eski ABD Başkanı Obama'dan Trump'a \"Diktatör\" benzetmesi",
+    ];
+    const LIVE_9AC4_STORED = "Eski ABD Başkanı Obama'dan Trump’a: “Kimsenin istemediği, gereksiz bir savaşı başlattı\"";
+    const LIVE_7A11 = [
+      "Netanyahu’dan seçmene provokatif çağrı: ‘Evimiz için bir savaşın içindeyiz’",
+      "Netanyahu’dan, taraftarlarını sandığa çekmek için provokatif paylaşım: \"Evimiz için bir savaşın içindeyiz”",
+      "Netanyahu'dan taraftarlarını sandığa çekmek için provokatif paylaşımlar: Müslüman Kardeşler destekçileri sandıklara akın ediyor",
+      "İsrail'de katılım son 53 yılın zirvesinde, Netanyahu sağ seçmeni sandığa çağırıyor",
+    ];
+    const LIVE_7A11_STORED = "Netanyahu’dan, taraftarlarını sandığa çekmek için provokatif paylaşım: \"Evimiz için bir savaşın içindeyiz”";
+    const LIVE_FC4A = [
+      "Bakan Ersoy Edirne’de kütüphane açılışı yaptı: \"Ekran bağımlılığına çözüm olacak'",
+      "Bakan Ersoy, Edirne'de kütüphane açılışı yaptı",
+    ];
+    const LIVE_FC4A_STORED = "Bakan Ersoy Edirne’de kütüphane açılışı yaptı: \"Ekran bağımlılığına çözüm olacak'";
+    const LIVE_7CA3 = [
+      "Ümit Özlale, Taha Çakmak'a sordu: Kamu kaynaklarıyla fondan erken çıkışlar finanse edildi mi?",
+      "Ümit Özlale’den Taha Çakmak’a sorular: “Karayipler, Londra ve İsviçre’deki şirketler üzerinden hesabınıza işlem yapıldı mı?\"”",
+      "Görevinden istifa etmişti... YENİ Partili Özlale'den Taha Çakmak'a sorular: 'Karayipler, Londra ve İsviçre’deki şirketler üzerinden hesabınıza işlem yapıldı mı?'",
+    ];
+    const LIVE_7CA3_STORED = "Ümit Özlale’den Taha Çakmak’a sorular: “Karayipler, Londra ve İsviçre’deki şirketler üzerinden hesabınıza işlem yapıldı mı?\"”";
+
+    it("is not vacuous: every stored title fails the gate and is one of its own members", () => {
+      for (const [stored, members] of [
+        [LIVE_9AC4_STORED, LIVE_9AC4],
+        [LIVE_7A11_STORED, LIVE_7A11],
+        [LIVE_FC4A_STORED, LIVE_FC4A],
+        [LIVE_7CA3_STORED, LIVE_7CA3],
+      ] as Array<[string, string[]]>) {
+        expect(members).toContain(stored);
+        expect(isAcceptableNeutral(stored, members.filter((m) => m !== stored))).toBe(false);
+      }
+    });
+
+    it.each([
+      ["9ac41ecc", LIVE_9AC4, LIVE_9AC4_STORED, `Eski ABD Başkanı Obama'dan Trump'a "Diktatör" benzetmesi`],
+      ["7a11fe6f", LIVE_7A11, LIVE_7A11_STORED, `Netanyahu’dan seçmene provokatif çağrı: ‘Evimiz için bir savaşın içindeyiz’`],
+      ["fc4ad6b4", LIVE_FC4A, LIVE_FC4A_STORED, `Bakan Ersoy, Edirne'de kütüphane açılışı yaptı`],
+    ] as Array<[string, string[], string, string]>)(
+      "%s: the re-pick replaces the stored title with a balanced member title",
+      (_cid, members, stored, expected) => {
+        const picked = pickNeutralTitle(asMembers(members), { incumbent: stored });
+        expect(picked).toBe(expected);
+        expect(members).toContain(picked!);
+        expect(balancedDoubleQuotes(picked!)).toBe(true);
+        expect(isAcceptableNeutral(picked!, members.filter((m) => m !== picked))).toBe(true);
+      },
+    );
+
+    it("7ca3324d: every member is a question, so the re-pick finds nothing and the route keeps the stored title", () => {
+      expect(pickNeutralTitle(asMembers(LIVE_7CA3), { incumbent: LIVE_7CA3_STORED })).toBeNull();
+    });
+  });
+});

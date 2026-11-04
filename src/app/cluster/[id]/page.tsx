@@ -642,7 +642,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   row; below sm each group is its own full-width row, so the
                   44 px actions never share a line with the meta text. The
                   bullets live inside their span (mr-2 = the old gap-2), so
-                  no • can be a lone flex child that wraps to a line end. */}
+                  no • can be a lone flex child that wraps to a line end.
+                  h32-a11y-1 (WCAG 1.4.10 reflow at 320 px): the actions row
+                  carries min-w-0 max-w-full and the share channel group may
+                  wrap, so no chip or link is clipped by the card's
+                  overflow-hidden (tests/guards/cluster-actions-reflow.test.ts).
+                  h32-a11y-2: the "bağımsız başlık" link has its • in a span of
+                  its own, outside the link. */}
               <div className="flex flex-wrap items-center gap-2">
                 <div className="contents max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-center max-sm:gap-2 text-[12px] font-medium text-muted-foreground">
                   <span>{formatTurkishTimeAgo(cluster.first_published)}</span>
@@ -664,13 +670,16 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   {wire.memberCount >= 3 &&
                     typeof wire.independentHeadlineCount === "number" &&
                     wire.independentHeadlineCount < wire.effectiveArticleCount && (
-                      <Link
-                        href="/metodoloji#tek-kaynak"
-                        title="Aynı başlığı kullanan kaynaklar tek başlık sayılır."
-                        className="underline decoration-dotted underline-offset-2 hover:text-foreground"
-                      >
-                        · {wire.independentHeadlineCount} bağımsız başlık
-                      </Link>
+                      <span>
+                        <span aria-hidden="true" className="mr-2">•</span>
+                        <Link
+                          href="/metodoloji#tek-kaynak"
+                          title="Aynı başlığı kullanan kaynaklar tek başlık sayılır."
+                          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                        >
+                          {wire.independentHeadlineCount} bağımsız başlık
+                        </Link>
+                      </span>
                     )}
                   {/* wire-redistribution: violet, not amber — amber above is
                       reserved for the Kör nokta ribbon so the two claims
@@ -688,7 +697,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 </div>
                 <div
                   data-row="actions"
-                  className="contents max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-center max-sm:gap-2 font-medium"
+                  className="contents max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-center max-sm:gap-2 min-w-0 max-w-full font-medium"
                 >
                   {/* Same fallback as the h1: the share sheet gets "Haber", and
                       the bookmark gets no title (null = the generic "Kaydet"

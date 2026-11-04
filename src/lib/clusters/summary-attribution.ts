@@ -166,6 +166,26 @@ const ELLIPSIS = "…";
 const MIN_KEPT_AFTER_BACK_OFF = 60;
 
 /**
+ * What is left of a text after {@link backOffOpenQuote} ended it in front of a
+ * quotation, as the description's final shape. `kept` null stays null (no cut
+ * is long enough). A back-off that keeps fewer than `minKeptAfterBackOff`
+ * characters after `floor` is null too (h30-live-1: what is left is a stub).
+ * An existing "…" is kept; any other end gets one, after dangling ", ; : – — -"
+ * and blanks are dropped ("açıkladı." keeps its stop: "açıkladı.…").
+ */
+function finishBackOff(
+  kept: string | null,
+  floor: number,
+  minKeptAfterBackOff: number,
+): string | null {
+  if (kept === null) return null;
+  const text = kept.endsWith(ELLIPSIS) ? kept.slice(0, -ELLIPSIS.length) : kept;
+  if (text.length - floor < minKeptAfterBackOff) return null;
+  if (kept.endsWith(ELLIPSIS)) return kept;
+  return kept.slice(0, trimDanglingEnd(kept, kept.length)) + ELLIPSIS;
+}
+
+/**
  * Word-boundary truncation shared by every `describeForMeta` branch.
  *
  * A cut that would end inside an open quotation (`Yılmaz, "İsrail'in … baskısına…`,
@@ -181,6 +201,13 @@ const MIN_KEPT_AFTER_BACK_OFF = 60;
  * ", ; : – — -" in front of the ellipsis ("Demokratlar Partisi,…", h30-live-1)
  * and is null when that leaves nothing after `floor`. The minimum applies to a
  * back-off only: a plain word cut keeps what the limit allows.
+ *
+ * h32-livebk-2: a text that fits under `max` is not cut, but it can still leave
+ * a quotation open (16f038d3: `Hamaney, "Basra Körfezi … yerle bir etti.` with no
+ * closer). It gets the same back-off as a cut one, with the same `floor` and the
+ * same minimum ({@link finishBackOff}); a balanced text is returned as it is, the
+ * same string. A closing quote is never added: the source's words are not ours
+ * to complete.
  */
 function truncateWords(
   full: string,
@@ -188,7 +215,11 @@ function truncateWords(
   floor = 0,
   minKeptAfterBackOff = 0,
 ): string | null {
-  if (full.length <= max) return full;
+  if (full.length <= max) {
+    const kept = backOffOpenQuote(full, { floor });
+    if (kept === full) return full;
+    return finishBackOff(kept, floor, minKeptAfterBackOff);
+  }
   const truncated = full.slice(0, Math.max(0, max - 1));
   const lastSpace = truncated.lastIndexOf(" ");
   const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
@@ -201,10 +232,7 @@ function truncateWords(
     const end = trimDanglingEnd(cut, cut.length);
     return end <= floor ? null : cut.slice(0, end) + ELLIPSIS;
   }
-  const text = kept.endsWith(ELLIPSIS) ? kept.slice(0, -ELLIPSIS.length) : kept;
-  if (text.length - floor < minKeptAfterBackOff) return null;
-  if (kept.endsWith(ELLIPSIS)) return kept;
-  return kept.slice(0, trimDanglingEnd(kept, kept.length)) + ELLIPSIS;
+  return finishBackOff(kept, floor, minKeptAfterBackOff);
 }
 
 /**
@@ -233,6 +261,14 @@ function truncateWords(
  * quotation, "Yılmaz…"; the title fallback itself is not held to that), a cut
  * never ends in ", ; : – — -" in front of the "…", and a cut that would end
  * inside the label ("N kaynak. Outlet:") has no text to show and falls back too.
+ *
+ * h32-livebk-2: the same back-off runs on a text that fits under `max` and
+ * leaves a quotation open, so a short unclosed quotation (`Hamaney, "Basra
+ * Körfezi … yerle bir etti.`) is not published as it is: it ends in front of the
+ * opener when 60 characters or more survive, else the description is the one
+ * without an attribution. The title fallback goes through the same rule with no
+ * minimum (an uncut title that opens a quotation it never closes ends in front of
+ * the opener, or gives `head` when it opens with it). No closing quote is added.
  */
 export function describeForMeta(
   {

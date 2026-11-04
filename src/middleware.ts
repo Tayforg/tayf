@@ -52,8 +52,23 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     '/cluster/:id', never a ':path*' — that would run the UUID check and the
 //     merged-cluster lookup on /cluster/<id>/kart and the per-cluster
 //     /opengraph-image route too. Those nested routes are matched by
-//     '/cluster/:id/:sub' instead and only get the decode-only answer of gate 8:
-//     the UUID/merge logic below stays single-segment.
+//     '/cluster/:id/:sub' instead and only get the decode-only answer of gate 8
+//     plus the case fold below: the UUID/merge logic stays single-segment.
+//
+//     Canonical lower-case ids (h32-livebk-1). A UUID is case-insensitive, but
+//     every spelling used to render its own full page (own CDN entry, own OG
+//     render, the raw id in client props and share URLs, and a bookmark that
+//     /saved could not remove). The gate now answers EVERY non-lower-case
+//     spelling with exactly one 308 to the lower-case form, merged target
+//     included (lookup() is keyed by the lower-case id, so the upper-case form
+//     of a merged id goes straight to the survivor, never through a chain).
+//     The three nested routes the cluster page owns (/opengraph-image,
+//     /twitter-image, /kart) get the same 308 to the lower-case path, with no
+//     merged lookup; any other sub (and a non-UUID head) stays decode-only. The
+//     query string is kept. A malformed escape is still gate 8's 400, answered
+//     first. /embed/cluster/:id does not share this gate (it is decode-only
+//     below) and is out of scope. The page itself can therefore only ever
+//     render a lower-case id.
 //
 //  4. /source/:slug — a real 404 for a slug that is not in `sources`. The
 //     key space is small (tens of rows), so src/lib/seo/source-slug-gate.ts
@@ -67,10 +82,13 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     images (/source/<slug>/opengraph-image and /twitter-image, the exact path
 //     Next puts in og:image; its content hash is a query string) use the slug
 //     check, because they render a PNG on demand for ANY slug (h30-abuse-5): an
-//     unknown slug gets an empty 404 with `public, s-maxage=300` (no rewrite: an
-//     image URL must not render a page), a lookup failure fails open to the
-//     route. Every other nested path stays on gate 8's decode-only answer, with
-//     no lookup.
+//     unknown slug gets an empty 404 (no rewrite: an image URL must not render a
+//     page), a lookup failure fails open to the route. The 404 keeps
+//     `public, s-maxage=300`, but that header only helps a DOWNSTREAM shared
+//     cache: Vercel runs routing middleware BEFORE its CDN cache, so this answer
+//     is not served by the CDN. What bounds a flood of one bad slug is the 60 s
+//     per-isolate negative cache in source-slug-gate. Every other nested path
+//     stays on gate 8's decode-only answer, with no lookup.
 //
 //  5. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
@@ -409,6 +427,9 @@ const KONU_SLUGS = new Set(["dunya", "ekonomi", "spor", "yasam", "teknoloji", "g
 // above) so the gate and generateStaticParams can never drift apart.
 const GUNDEM_KEYS = new Set(RISING_ENTITIES.map((e) => e.key));
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The nested routes under /cluster/<id> that gate 3 folds to a lower-case id
+// (h32-livebk-1): the per-cluster OG and Twitter images and the /kart card.
+const CLUSTER_CASE_SUBS: ReadonlySet<string> = new Set(["opengraph-image", "twitter-image", "kart"]);
 // No route matches this path — Next renders app/not-found.tsx with a real
 // 404 status and the site's own chrome, instead of a 0-byte response.
 const NOT_FOUND_REWRITE_PATH = "/__tayf-not-found";
@@ -656,18 +677,35 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
   if (pathname.startsWith("/cluster/")) {
     const segment = pathname.slice("/cluster/".length);
     // A nested path (/cluster/<id>/kart, /cluster/<id>/opengraph-image) reaches
-    // here through '/cluster/:id/:sub'. It is decode-only: no UUID check and no
-    // merged-cluster lookup (those stay single-segment), and it must neither 404
-    // nor fall into the admin branch below.
-    if (segment.includes("/")) return decodeOnly(pathname, "text");
+    // here through '/cluster/:id/:sub'. No UUID shape gate and no merged-cluster
+    // lookup (those stay single-segment), and it must neither 404 nor fall into
+    // the admin branch below. Gate 8's decode check runs first; the only other
+    // work is the case fold: a UUID head that is not lower case, on one of the
+    // three routes the cluster page owns, is 308'd to the lower-case path.
+    const slash = segment.indexOf("/");
+    if (slash !== -1) {
+      if (!pathDecodes(pathname)) return badEncoding("text");
+      const head = segment.slice(0, slash);
+      const sub = segment.slice(slash + 1);
+      if (UUID_RE.test(head) && head !== head.toLowerCase() && CLUSTER_CASE_SUBS.has(sub)) {
+        const url = req.nextUrl.clone();
+        url.pathname = `/cluster/${head.toLowerCase()}/${sub}`;
+        return NextResponse.redirect(url, 308);
+      }
+      return NextResponse.next();
+    }
     if (!UUID_RE.test(segment)) return notFoundRewrite(req);
 
     // Merged clusters (migration 099): background refresh, synchronous lookup.
     const refresh = mergedGate.refreshIfStale();
     if (event) event.waitUntil(refresh);
     else void refresh.catch(() => {});
-    const target = mergedGate.lookup(segment);
-    if (target && target !== segment.toLowerCase()) {
+    // Canonical form: lower case, or the survivor of a merge. Anything that is
+    // not already spelled exactly so gets ONE 308, so an upper-case spelling of
+    // a merged id goes straight to the survivor.
+    const lower = segment.toLowerCase();
+    const target = mergedGate.lookup(lower) ?? lower;
+    if (target !== segment) {
       const url = req.nextUrl.clone();
       url.pathname = `/cluster/${target}`;
       return NextResponse.redirect(url, 308);
@@ -691,10 +729,13 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
       // A malformed escape is the 400 of gate 8, whatever the slug is: check it
       // first, so a bad encoding never reaches the lookup.
       if (!pathDecodes(pathname)) return badEncoding("text");
-      // An image URL has no page chrome to show: an empty 404, cacheable for a
-      // few minutes so a flood of one bad slug is answered by the CDN. Fail
-      // open as the page does: "unknown" (lookup failed) and "exists" both
-      // continue to the image route.
+      // An image URL has no page chrome to show: an empty 404. Vercel runs
+      // routing middleware BEFORE its CDN cache, so this answer is not served by
+      // the CDN: what bounds a flood of one bad slug is the 60 s per-isolate
+      // negative cache in source-slug-gate (a repeat is one Map read, no
+      // lookup). The s-maxage only helps a downstream shared cache. Fail open
+      // as the page does: "unknown" (lookup failed) and "exists" both continue
+      // to the image route.
       return (await sourceGate.check(head)) === "missing"
         ? new NextResponse(null, {
             status: 404,

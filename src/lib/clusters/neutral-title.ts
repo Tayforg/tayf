@@ -736,14 +736,49 @@ function hasShoutedRun(t: string): boolean {
   return false;
 }
 
+// Whether the title opens a double quote it never closes (or closes one it never
+// opened): an odd number of straight " (U+0022), unequal “ (U+201C) and ” (U+201D),
+// or unequal « (U+00AB) and » (U+00BB). That also catches the ”...” same-glyph and
+// the “..." mixed styles. Single quotes and apostrophes (' ‘ ’ ʼ) and „ are never
+// counted: a Turkish apostrophe or a lone ‘ is not a quote left open. One pass,
+// no regex.
+function unbalancedDoubleQuotes(t: string): boolean {
+  let straight = 0;
+  let curly = 0;
+  let angle = 0;
+  for (let i = 0; i < t.length; i++) {
+    switch (t.charCodeAt(i)) {
+      case 0x22:
+        straight++;
+        break;
+      case 0x201c:
+        curly++;
+        break;
+      case 0x201d:
+        curly--;
+        break;
+      case 0xab:
+        angle++;
+        break;
+      case 0xbb:
+        angle--;
+        break;
+    }
+  }
+  return straight % 2 === 1 || curly !== 0 || angle !== 0;
+}
+
 // Defects a first-pick floor does not forgive: shouting (all of it, or a run of
-// shouted words), a residual '|', a placeholder, an English headline, a feed cut. A question, a leading "İşte" or an odd length
+// shouted words), a residual '|', unbalanced double quotes, a placeholder, an
+// English headline, a feed cut. A question, a leading "İşte" or an odd length
 // are only less good than the cleaned text of a title nobody has cleaned yet.
 function hasHardDefect(t: string, memberTitles: readonly string[], opts: AcceptOptions): boolean {
   if (/\p{L}/u.test(t) && t === t.toLocaleUpperCase("tr")) return true;
   // An outlet prefix that cleanHeadline could not strip (longer than 25
   // characters) or a separator inside the text: "... SALI |GEDİZ UYARDI: ...".
   if (/[|│]/.test(t)) return true;
+  // A feed cut that opens a double quote it never closes: 'X: "Kaybedersek ...'.
+  if (unbalancedDoubleQuotes(t)) return true;
   if (hasShoutedRun(t)) return true;
   // A bulletin label in the middle of the title (the lead-in is cleanHeadline's).
   if (MID_SON_DAKIKA.test(foldTr(t))) return true;
@@ -757,6 +792,8 @@ function hasHardDefect(t: string, memberTitles: readonly string[], opts: AcceptO
  * Whether a candidate neutral headline may be shown. Rejects a question, a
  * leading "İşte", shouting, a title that is too short or too long, a generic
  * placeholder, an English headline and (copied text only) a truncated one.
+ * Unbalanced double quotes (an odd straight ", unequal “/” or «/») are a hard
+ * defect too, for copied and generated text alike.
  * `memberTitles` are the cluster's other member headlines (the title itself,
  * if present, is ignored). Pure; the headline cron also runs it on LLM output
  * with `{ generated: true }`.

@@ -838,6 +838,27 @@ describe("ClusterDetailPage — honest source count v2 (reader-data)", () => {
     expect(hrefs).toContain("/metodoloji#tek-kaynak");
     expect(text).not.toContain("kopya sayılır");
     expect(text).not.toMatch(/bağımsız başlık.*kopya|kopya.*bağımsız başlık/);
+
+    // h32-a11y-2: the separator is not part of the link. The anchor's name is
+    // exactly "4 bağımsız başlık" (no leading "·" read aloud and underlined),
+    // and it follows an aria-hidden "•" inside one span, like its siblings.
+    const links = findAllElements(
+      tree,
+      (el) => el.props.href === "/metodoloji#tek-kaynak",
+    );
+    expect(links).toHaveLength(1);
+    const link = links[0]!;
+    expect(collectText(link.props.children).join("")).toBe("4 bağımsız başlık");
+
+    const parents = findAllElements(tree, (el) => childList(el).includes(link));
+    expect(parents).toHaveLength(1);
+    const parent = parents[0]!;
+    expect(parent.type).toBe("span");
+    const separator = childList(parent)[0] as TreeElement;
+    expect(separator.type).toBe("span");
+    expect(separator.props["aria-hidden"]).toBe("true");
+    expect(collectText(separator.props.children).join("")).toBe("•");
+    expect(childList(parent)[1]).toBe(link);
   });
 
   it("does not render the independent-headline note when the counts are equal", async () => {

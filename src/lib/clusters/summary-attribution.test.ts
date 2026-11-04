@@ -1205,3 +1205,178 @@ describe("describeForMeta (h30-live-1)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// h32-livebk-2: a text that fits under the limit is not cut, so truncateWords
+// used to return it before the quote back-off ran, and 16f038d3's meta
+// description kept `Hamaney, "Basra Körfezi …` with no closer. The back-off now
+// runs on an uncut text too, with the same floor and the same 60-character rule
+// as on a cut one; a closing quote is never added. The strings below are
+// clusters.summary_tr / title_tr of the live row, verbatim (read-only query,
+// 2026-11-04).
+// ---------------------------------------------------------------------------
+describe("h32-livebk-2: an uncut text with an unclosed quotation", () => {
+  const HABERVAKTI = src("Habervakti");
+  const PREFIX = "4 kaynak. Habervakti: ";
+  // 16f038d3-05f2-4f2b-bda8-64056b175199
+  const SUMMARY_16F0 =
+    "İran dini lideri Hamaney, \"Basra Körfezi ve Hürmüz Boğazı'ndaki gelişmeler, ABD'nin yenilmezliği efsanesini yerle bir etti.";
+  const TITLE_16F0 = "Trump'ın seçim hezimeti sonrası Hamaney'den ABD mesajı";
+  // 80 characters, a full sentence, in front of a quotation that never closes.
+  const SENTENCE = "Bakanlık, kentte yaşanan su kesintisinin yarın akşama kadar süreceğini açıkladı.";
+  const LATE_OPENER_TEXT = `${SENTENCE} Vali, "Ekipler sahada çalışıyor`;
+
+  /** True when `s` leaves no quotation open (the h30 oracle) and holds no stray straight quote. */
+  const closed = (s: string): boolean =>
+    occurrences(s, '"') % 2 === 0 &&
+    occurrences(s, "“") === occurrences(s, "”") &&
+    leavesNothingOpenH30(s);
+
+  it("the stored row fits under the limit, so it is the uncut path", () => {
+    expect(PREFIX.length + SUMMARY_16F0.length).toBeLessThan(160);
+    expect(occurrences(SUMMARY_16F0, '"') % 2).toBe(1);
+    expect(SENTENCE.length).toBe(80);
+  });
+
+  it("16f038d3: the unclosed quotation is a stub (24 characters in front of the opener), so the title sentence is the description", () => {
+    const out = describeForMeta({
+      count: 4,
+      attribution: { source: HABERVAKTI, text: SUMMARY_16F0 },
+      title: TITLE_16F0,
+    });
+    // Before h32-livebk-2: `4 kaynak. Habervakti: İran dini lideri Hamaney, "Basra Körfezi … etti.`
+    expect(out).toBe(`4 kaynak, tek haber: ${TITLE_16F0}`);
+    expect(occurrences(out, '"') % 2).toBe(0);
+    expect(occurrences(out, "“")).toBe(occurrences(out, "”"));
+    expect(out.length).toBeLessThanOrEqual(160);
+  });
+
+  it("16f038d3 without a title, with the generic label, and under an rss base: no attribution", () => {
+    expect(describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text: SUMMARY_16F0 } })).toBe("4 kaynak.");
+    expect(describeForMeta({ count: 4, attribution: { source: null, text: SUMMARY_16F0 }, title: TITLE_16F0 })).toBe(
+      `4 kaynak, tek haber: ${TITLE_16F0}`,
+    );
+    expect(
+      describeForMeta(
+        { count: 4, attribution: { source: HABERVAKTI, text: SUMMARY_16F0 }, base: "4 kaynaktan haberler." },
+        400,
+      ),
+    ).toBe("4 kaynaktan haberler.");
+  });
+
+  describe("a balanced short text is returned exactly as before", () => {
+    it.each([
+      ["a closed straight quotation", 'Bakan Yılmaz, "Yeni dönem başlıyor" dedi.'],
+      ["a closed curly quotation", "Bakan Yılmaz, “Yeni dönem başlıyor” dedi."],
+      ["a closed angle quotation", "Bakan Yılmaz, «Yeni dönem başlıyor» dedi."],
+      ["suffix apostrophes (ABD'nin-style)", "ABD'nin yenilmezliği, İran'ın tutumu ve Hürmüz Boğazı'ndaki gelişmeler konuşuldu."],
+      ["a curly single quotation closed by the ASCII apostrophe (c5627cb9)", "Bahçeli, ‘100 il 1000 ilçe' projesini kamuoyuyla paylaştı."],
+      ["a curly apostrophe", "63’üncüsü düzenlenen festival Cam Piramid’de sona erdi."],
+      ["no quotation at all", "Bakan Yılmaz yarın kentte incelemelerde bulunacak."],
+    ])("%s", (_label, text) => {
+      expect(describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text } })).toBe(`${PREFIX}${text}`);
+      expect(describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text }, title: TITLE_16F0 })).toBe(
+        `${PREFIX}${text}`,
+      );
+      expect(describeForMeta({ count: 4, attribution: { source: null, text } })).toBe(`4 kaynak. Kaynak açıklaması: ${text}`);
+    });
+
+    it("the balanced 16f038d3 sibling (the quotation closes) is not touched", () => {
+      const text = `${SUMMARY_16F0.slice(0, -1)}" dedi.`;
+      expect(occurrences(text, '"') % 2).toBe(0);
+      expect(describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text }, title: TITLE_16F0 })).toBe(
+        `${PREFIX}${text}`,
+      );
+    });
+  });
+
+  describe("an uncut text with at least 60 characters in front of a late unclosed opener is backed off like a cut one", () => {
+    it("ends at the sentence end in front of the opener, in the '.…' convention", () => {
+      expect(PREFIX.length + LATE_OPENER_TEXT.length).toBeLessThan(160);
+      const out = describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text: LATE_OPENER_TEXT } });
+      expect(out).toBe(`${PREFIX}${SENTENCE}…`);
+      expect(closed(out)).toBe(true);
+    });
+
+    it.each([
+      ["straight", '"'],
+      ["curly double", "“"],
+      ["angle", "«"],
+      ["curly single", "‘"],
+    ])("%s opener with no sentence end before it: ends in front of the opener, comma gone", (_label, open) => {
+      const lead = "Enerji Bakanı Yılmaz bugün kentte yaptığı açıklamada şunları söyledi".slice(0, 60);
+      const text = `${lead}, ${open}Ekipler sahada çalışıyor`;
+      const out = describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text } });
+      expect(out).toBe(`${PREFIX}${lead}…`);
+      expect(closed(out)).toBe(true);
+    });
+
+    it("under an rss base too, keeping the wire note of the base", () => {
+      const wireBase = "3 kaynaktan haberler. Tek kaynaktan 5 kopya.";
+      const out = describeForMeta(
+        { count: 3, attribution: { source: HABERVAKTI, text: LATE_OPENER_TEXT }, base: wireBase },
+        400,
+      );
+      expect(out).toBe(`${wireBase} Habervakti: ${SENTENCE}…`);
+    });
+
+    it("never appends a closing quote", () => {
+      const out = describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text: LATE_OPENER_TEXT } });
+      expect(out.endsWith('"')).toBe(false);
+      expect(out).not.toContain("çalışıyor");
+    });
+
+    it("an opener with fewer than 60 characters in front of it is a stub, like on a cut text (h30-live-1)", () => {
+      const text = `Bakan Yılmaz, "Ekipler sahada çalışıyor`;
+      expect(describeForMeta({ count: 4, attribution: { source: HABERVAKTI, text } })).toBe("4 kaynak.");
+    });
+  });
+
+  describe("the title fallback goes through the same rule, with no minimum", () => {
+    it("an uncut title with an unclosed quotation ends in front of the opener", () => {
+      const title = 'Bakan Yılmaz: "Ekipler sahada çalışıyor';
+      const out = describeForMeta({ count: 4, attribution: null, title });
+      expect(out).toBe("4 kaynak, tek haber: Bakan Yılmaz…");
+      expect(closed(out)).toBe(true);
+    });
+
+    it("a title that opens with the quotation gives the bare head", () => {
+      expect(describeForMeta({ count: 4, attribution: null, title: '"Ekipler sahada çalışıyor' })).toBe("4 kaynak.");
+    });
+
+    it("a balanced title is returned exactly", () => {
+      const title = "Bakan Yılmaz: \"Ekipler sahada\" dedi";
+      expect(describeForMeta({ count: 4, attribution: null, title })).toBe(`4 kaynak, tek haber: ${title}`);
+    });
+  });
+
+  describe("every limit at or above the full length, for unbalanced texts", () => {
+    const UNBALANCED: ReadonlyArray<readonly [string, string]> = [
+      ["16f038d3", SUMMARY_16F0],
+      ["late opener after a sentence", LATE_OPENER_TEXT],
+      ["opener at the start", '"Ekipler sahada çalışıyor, bakanlık açıklama yapacak.'],
+      ["three straight quotes", 'Vali "Ekipler" dedi ve ekledi: "Sahadayız ve çalışmalar sürüyor, kesinti yarın akşama kadar bitecek.'],
+      ["unclosed curly double", "Bakanlık açıklaması: Vali, “Ekipler sahada çalışıyor ve yarın akşam bitirecek"],
+      ["unclosed angle", "Bakanlık açıklaması: Vali, «Ekipler sahada çalışıyor ve yarın akşam bitirecek"],
+    ];
+
+    it.each(UNBALANCED)("%s: never an odd number of \", never unequal “/”, within the limit, no closing quote added", (_label, text) => {
+      expect(closed(text)).toBe(false);
+      for (const source of [HABERVAKTI, null]) {
+        const full = (source ? PREFIX : "4 kaynak. Kaynak açıklaması: ").length + text.length;
+        for (let max = full; max <= full + 60; max++) {
+          for (const title of [undefined, TITLE_16F0]) {
+            for (const base of [undefined, "4 kaynaktan haberler."]) {
+              const out = describeForMeta({ count: 4, attribution: { source, text }, title, base }, max);
+              expect(occurrences(out, '"') % 2, `max=${max}: ${out}`).toBe(0);
+              expect(occurrences(out, "“"), `max=${max}: ${out}`).toBe(occurrences(out, "”"));
+              expect(closed(out), `max=${max}: ${out}`).toBe(true);
+              expect(out.length, `max=${max}`).toBeLessThanOrEqual(Math.max(max, (base ?? "4 kaynak.").length));
+              expect(out.endsWith('"'), `max=${max}: ${out}`).toBe(false);
+            }
+          }
+        }
+      }
+    });
+  });
+});
