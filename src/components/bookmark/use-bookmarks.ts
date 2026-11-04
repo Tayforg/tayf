@@ -1,6 +1,11 @@
 "use client";
 import { useCallback, useSyncExternalStore } from "react";
 
+import {
+  normaliseBookmarkId,
+  normaliseBookmarkIds,
+  toggleBookmarkId,
+} from "@/components/bookmark/bookmark-ids";
 import { captureSnapshot, removeSnapshot } from "@/components/bookmark/bookmark-snapshots";
 import { pinForOffline, unpinForOffline } from "@/lib/pwa/offline-pins";
 
@@ -25,7 +30,9 @@ function readSet(): Set<string> {
   if (raw === cachedSerialized) return cachedSet;
   cachedSerialized = raw;
   try {
-    cachedSet = raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+    // Folded to lower case and de-duplicated (h32-livebk-1): an entry saved from
+    // an upper-case /cluster/<ID> URL becomes the same key /saved removes by.
+    cachedSet = raw ? new Set<string>(normaliseBookmarkIds(JSON.parse(raw))) : new Set<string>();
   } catch {
     cachedSet = new Set<string>();
   }
@@ -70,23 +77,28 @@ export function useBookmarks() {
 
   const toggle = useCallback(
     (id: string) => {
-      const next = new Set(ids);
-      if (next.has(id)) {
-        next.delete(id);
-        writeSet(next);
-        removeSnapshot(id);
-        unpinForOffline(id);
+      const r = toggleBookmarkId(ids, id);
+      if (r === null) return;
+      writeSet(r.next);
+      // After writeSet, so captureSnapshot's isStillSaved sees the lower-case key.
+      if (r.added) {
+        void captureSnapshot(r.key);
+        pinForOffline(r.key);
       } else {
-        next.add(id);
-        writeSet(next);
-        void captureSnapshot(id);
-        pinForOffline(id);
+        removeSnapshot(r.key);
+        unpinForOffline(r.key);
       }
     },
     [ids],
   );
 
-  const has = useCallback((id: string) => ids.has(id), [ids]);
+  const has = useCallback(
+    (id: string) => {
+      const key = normaliseBookmarkId(id);
+      return key !== null && ids.has(key);
+    },
+    [ids],
+  );
 
   return { ids, has, toggle, count: ids.size };
 }

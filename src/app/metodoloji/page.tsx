@@ -250,7 +250,12 @@ export default async function MethodologyPage() {
           kullanın.
         </p>
         <div className={cardClass + " space-y-3"}>
-          <div className="overflow-x-auto">
+          <div
+            className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            tabIndex={0}
+            role="region"
+            aria-label="Kategori ve Medya DNA bölgesi tablosu"
+          >
             <table className="w-full border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -650,7 +655,12 @@ export default async function MethodologyPage() {
               </span>
               Kullanılan istem (prompt)
             </summary>
-            <div className="overflow-x-auto border-t border-border/40">
+            <div
+              className="overflow-x-auto border-t border-border/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              tabIndex={0}
+              role="region"
+              aria-label="Kullanılan istem"
+            >
               <pre className="w-max min-w-full px-3 py-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
                 {HEADLINE_PROMPT_TEMPLATE}
               </pre>

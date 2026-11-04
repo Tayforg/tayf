@@ -540,6 +540,28 @@ describe("ShareButton — channel group", () => {
     );
     expect(offenders).toEqual([]);
   });
+
+  // h32-a11y-1 (WCAG 1.4.10 reflow): at 320 CSS px the four chips were one
+  // unwrappable row 279 px wide, so the Bluesky chip was clipped by the hero
+  // card. The group may wrap and may never be wider than its container.
+  it("lets the four channel chips wrap and never outgrow the container (h32-a11y-1)", () => {
+    const groupTag = spanTags.find(
+      (tag) => tag.includes('role="group"') && tag.includes('aria-label="Kanal ile paylaş"'),
+    );
+    expect(groupTag).toBeDefined();
+    const attr = groupTag!.indexOf('class="');
+    expect(attr).toBeGreaterThanOrEqual(0);
+    const valueStart = attr + 'class="'.length;
+    const valueEnd = groupTag!.indexOf('"', valueStart);
+    expect(valueEnd).toBeGreaterThan(valueStart);
+    const tokens = groupTag!
+      .slice(valueStart, valueEnd)
+      .split(/\s+/)
+      .filter(Boolean);
+    for (const token of ["inline-flex", "flex-wrap", "items-center", "gap-1", "max-w-full"]) {
+      expect(tokens, `channel group ${token}`).toContain(token);
+    }
+  });
 });
 
 // h16-mobile-2: the pills were ~28 px tall on a phone. Below sm every control
