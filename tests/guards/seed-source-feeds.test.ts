@@ -155,7 +155,15 @@ describe("seed_sources.sql feed URLs (h33-ops-1, h33-ops-2)", () => {
   });
 
   it("no other seed row uses a bianet.org feed (a duplicate would double-ingest)", () => {
-    expect(seedRows.filter((r) => r.rssUrl.includes("bianet.org")).map((r) => r.slug)).toEqual(["bianet"]);
+    const isBianetHost = (url: string): boolean => {
+      try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host === "bianet.org" || host.endsWith(".bianet.org");
+      } catch {
+        return false;
+      }
+    };
+    expect(seedRows.filter((r) => isBianetHost(r.rssUrl)).map((r) => r.slug)).toEqual(["bianet"]);
   });
 
   it("the research CSV row for Bianet carries the same feed URL as the seed", () => {
