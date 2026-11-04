@@ -34,6 +34,13 @@ export type RelatedFeed =
  * The feed for a stored `clusters.topic7`, or null when there is none. Exact
  * match only: 'POLITIKA', '', a number, null and any unknown value give null
  * (no block), so a stale cache entry without the field degrades to nothing.
+ *
+ * There is deliberately NO fallback from the member articles' `category` when
+ * topic7 is null: on cluster members that column is the politics-gate flag,
+ * only 'politika' or 'son_dakika' (production, 7 days of multi-article
+ * clusters: 8,556 and 633 rows, no other value), so it cannot name a topic and
+ * would label Brent oil or climate stories "Politika". A real fallback needs a
+ * signal that varies, such as the per-article topic7 votes behind migration 067.
  */
 export function relatedFeedFor(topic7: unknown): RelatedFeed | null {
   if (typeof topic7 !== "string") return null;
