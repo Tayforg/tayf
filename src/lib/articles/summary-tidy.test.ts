@@ -1101,8 +1101,8 @@ describe("tidySummaryText appended ticker (h23-live-2)", () => {
     expect(tidySummaryText("\nSon dakika:")).toBe("");
   });
 
-  it("a ticker on the first line is still the leading-ticker rule's business", () => {
-    expect(tidySummaryText("Son dakika... Deprem oldu\nİkinci satır.")).toBe("Deprem oldu İkinci satır.");
+  it("a ticker on the first line is still the leading-ticker rule's business (h31-reader-4: the line break after a letter in front of a capital is now '. ')", () => {
+    expect(tidySummaryText("Son dakika... Deprem oldu\nİkinci satır.")).toBe("Deprem oldu. İkinci satır.");
   });
 
   describe("clamp repair with a ticker line (repairClamp)", () => {
@@ -1220,7 +1220,7 @@ describe("tidySummaryText ordinals and title abbreviations at a clamp (h23-live-
     const out = tidySummaryText(RAW_4CA3);
     expect(out.endsWith("Dr.")).toBe(false);
     expect(out.endsWith("Prof. Dr.")).toBe(false);
-    expect(out).toBe("Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪\uFE0F Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî…");
+    expect(out).toBe("Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum. Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî…");
     // h24: the first word of the next paragraph ("Trump") no longer survives the cut.
     expect(out).not.toContain("Trump");
   });
@@ -1877,7 +1877,7 @@ describe("tidySummaryText clamp word-cut at a line break (h24, 4ca344b8)", () =>
     expect(out).not.toContain("Trump");
     expect(out).not.toContain("...");
     expect(out).toBe(
-      "Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪️ Bilim ve Kültür: Sabri Koz▪️ Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪️ Edebiyat: Sibel Eraslan▪️ Sinema: Burçak Evren▪️ Müzik: Prof. Dr. Gönül Paçacı▪️ Vefa: Ahmed-i Hânî…",
+      "Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum. Bilim ve Kültür: Sabri Koz▪️ Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪️ Edebiyat: Sibel Eraslan▪️ Sinema: Burçak Evren▪️ Müzik: Prof. Dr. Gönül Paçacı▪️ Vefa: Ahmed-i Hânî…",
     );
   });
 
@@ -1935,17 +1935,17 @@ describe("tidySummaryText clamp word-cut at a line break (h24, 4ca344b8)", () =>
 
     it("a related headline in front of the break: today's word cut", () => {
       const raw = clamp(`${w(270)}\n${HEADLINE}\n${UNIT.repeat(40)}`);
-      expect(tidySummaryText(raw)).toBe(`${w(270)} ${HEADLINE} ${UNIT.repeat(16)}bir…`);
+      expect(tidySummaryText(raw)).toBe(`${w(270)}. ${HEADLINE} ${UNIT.repeat(16)}bir…`);
     });
 
     it("a 'Name:' label in front of the break: today's word cut", () => {
       const raw = clamp(`${w(250)}\n${LABEL}\n${UNIT.repeat(40)}`);
-      expect(tidySummaryText(raw)).toBe(`${w(250)} ${LABEL} ${UNIT.repeat(16)}bir…`);
+      expect(tidySummaryText(raw)).toBe(`${w(250)}. ${LABEL} ${UNIT.repeat(16)}bir…`);
     });
 
     it("a heading in capitals in front of the break: today's word cut", () => {
       const raw = clamp(`${w(270)}\n${HEADING}\n${UNIT.repeat(40)}`);
-      expect(tidySummaryText(raw)).toBe(`${w(270)} ${HEADING} ${UNIT.repeat(16)}bir…`);
+      expect(tidySummaryText(raw)).toBe(`${w(270)}. ${HEADING} ${UNIT.repeat(16)}bir…`);
     });
 
     it("120 characters is still a short line, 121 is a paragraph", () => {
@@ -1962,7 +1962,7 @@ describe("tidySummaryText clamp word-cut at a line break (h24, 4ca344b8)", () =>
 
     it("a short line that ends in a sentence mark is a sentence end, which wins as before", () => {
       const raw = clamp(`${w(300)}\nKısa ama noktalı satır.\n${UNIT.repeat(40)}`);
-      expect(tidySummaryText(raw)).toBe(`${w(300)} Kısa ama noktalı satır.`);
+      expect(tidySummaryText(raw)).toBe(`${w(300)}. Kısa ama noktalı satır.`);
     });
   });
 
@@ -3360,6 +3360,12 @@ const H30_BEF9 =
 // d298d680-f9db-4136-be6b-fb36c7867b2a
 const H30_D298 =
   "Yılmaz'ın değerlendirmesi\nCumhurbaşkanı Yardımcısı Cevdet Yılmaz tarafından yapılan değerlendirmede, Türkmenistan'ın zengin doğal kaynakları ve jeostratejik konumunun yanında halkın gayretiyle ekonomi...";
+// f85bc48e-692d-41be-8f6b-0d0ecd1d2281, verbatim: three bullet lines (the later
+// ones lost their markers in the feed). The replay of 8,488 live summaries
+// found it as a false cut of step 1d: the first bullet is a sentence of the
+// story, not a heading.
+const H30_F85B =
+  '- Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti\nKoreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti\nEmine Erdoğan: \n"Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"';
 
 /** A character-scan check that `s` has no newline (never a regex over the text). */
 function hasNoNewline(s: string): boolean {
@@ -3526,10 +3532,16 @@ describe("tidySummaryText heading line (h30-live-1)", () => {
       expect(tidySummaryText(`${head(n)}\n${rest}`)).toBe(rest);
     });
 
-    it.each([1, 14, 141, 300])("%i characters: untouched, only the line break becomes a blank", (n) => {
-      expect(head(n)).toHaveLength(n);
-      expect(tidySummaryText(`${head(n)}\n${rest}`)).toBe(`${head(n)} ${rest}`);
-    });
+    // h31-reader-4 changed the expectation: a first line that is NOT a heading (too
+    // short or too long) still ends in a letter in front of a capital, so the line
+    // break is a sentence boundary and becomes ". ", no longer a bare blank.
+    it.each([1, 14, 141, 300])(
+      "%i characters: not a heading, kept as its own sentence (the line break becomes '. ' since h31-reader-4)",
+      (n) => {
+        expect(head(n)).toHaveLength(n);
+        expect(tidySummaryText(`${head(n)}\n${rest}`)).toBe(`${head(n)}. ${rest}`);
+      },
+    );
   });
 
   describe("untouched", () => {
@@ -3556,8 +3568,8 @@ describe("tidySummaryText heading line (h30-live-1)", () => {
       ["a question mark", "Neden böyle oldu? kimse bilmiyor"],
       ["an exclamation mark", "Vay canına! gerçekten oldu burada"],
       ["an ellipsis", "Başlık… devamı yazılmış burada"],
-    ])("a first line with %s in the middle", (_label, head) => {
-      expect(tidySummaryText(`${head}\n${rest}`)).toBe(`${head} ${rest}`);
+    ])("a first line with %s in the middle (not a heading; h31-reader-4: its line break is '. ')", (_label, head) => {
+      expect(tidySummaryText(`${head}\n${rest}`)).toBe(`${head}. ${rest}`);
     });
 
     it("a single-line text", () => {
@@ -3577,22 +3589,17 @@ describe("tidySummaryText heading line (h30-live-1)", () => {
       );
     });
 
-    // f85bc48e-692d-41be-8f6b-0d0ecd1d2281, verbatim: three bullet lines (the later
-    // ones lost their markers in the feed). The replay of 8,488 live summaries
-    // found it as a false cut of step 1d: the first bullet is a sentence of the
-    // story, not a heading.
-    const H30_F85B =
-      '- Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti\nKoreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti\nEmine Erdoğan: \n"Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"';
-
-    it("f85bc48e: a first line that is a list item is not a heading", () => {
+    it("f85bc48e: a list item is not a heading, and its lines become sentences", () => {
       expect(tidySummaryText(H30_F85B)).toBe(
-        'Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti Koreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti Emine Erdoğan: "Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"',
+        'Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti. Koreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti. Emine Erdoğan: "Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"',
       );
     });
 
+    // h31-reader-4: the bullet is not a heading (step 1d keeps it) and its line is a
+    // sentence of its own, so the line break after it is '. ' and no longer a bare blank.
     it.each(["- ", "– ", "• ", "* ", "\u25AA\uFE0F "])("a first line that starts with the list marker %j", (marker) => {
       const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
-      expect(tidySummaryText(`${marker}Başlık satırı burada yazılı\n${body}`)).toBe(`Başlık satırı burada yazılı ${body}`);
+      expect(tidySummaryText(`${marker}Başlık satırı burada yazılı\n${body}`)).toBe(`Başlık satırı burada yazılı. ${body}`);
     });
 
     it("a dash glued to a digit is not a list marker: '-5 derece ...' can still be a heading", () => {
@@ -3617,10 +3624,12 @@ describe("tidySummaryText heading line (h30-live-1)", () => {
     );
   });
 
-  it("only the first line is looked at: a second heading line stays in the body", () => {
+  // h31-reader-4 changed the expectation: the second heading line stays in the body
+  // as a sentence of its own, so its line break is ". " and no longer a bare blank.
+  it("only the first line is looked at: a second heading line stays in the body, as its own sentence", () => {
     const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
     expect(tidySummaryText(`Birinci başlık satırı yazılı\nİkinci başlık satırı yazılı\n${body}`)).toBe(
-      `İkinci başlık satırı yazılı ${body}`,
+      `İkinci başlık satırı yazılı. ${body}`,
     );
   });
 
@@ -3688,5 +3697,302 @@ describe("tidySummaryText heading line (h30-live-1)", () => {
     const start = performance.now();
     tidySummaryText(input);
     expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe("tidySummaryText line breaks between sentences (h31-reader-4)", () => {
+  // The first line holds a sentence mark in its middle, so step 1d (heading line)
+  // leaves it alone and these cases only exercise step 2.
+  const LEAD = "Bakan konuştu. Haber metni burada biter";
+  const NEXT = "Yeni satır burada başlıyor.";
+
+  describe("a line that ends in punctuation joins with one blank, never with '. '", () => {
+    it.each([".", "!", "?", "…", ":", ";", ",", "–", "—", "-", '"', "”", "»", ")"])(
+      "a line ending in %s",
+      (mark) => {
+        expect(tidySummaryText(`${LEAD}${mark}\n${NEXT}`)).toBe(`${LEAD}${mark} ${NEXT}`);
+      },
+    );
+  });
+
+  describe("a line that ends in a letter or a digit in front of a capital becomes a sentence", () => {
+    it("a letter at the end", () => {
+      expect(tidySummaryText(`${LEAD}\n${NEXT}`)).toBe(`${LEAD}. ${NEXT}`);
+    });
+
+    it("a digit at the end", () => {
+      expect(tidySummaryText("Ölü sayısı 12\nKurtarma çalışmaları sürüyor.")).toBe(
+        "Ölü sayısı 12. Kurtarma çalışmaları sürüyor.",
+      );
+    });
+
+    it.each(["Ç", "Ğ", "İ", "Ö", "Ş", "Ü", "Â", "A", "Z"])("a next line that starts with %s", (ch) => {
+      expect(tidySummaryText(`${LEAD}\n${ch}lan satır burada başlıyor.`)).toBe(
+        `${LEAD}. ${ch}lan satır burada başlıyor.`,
+      );
+    });
+
+    it.each([
+      ["lower case", "ç", "çalışmalar sürüyor."],
+      ["a lower-case dotted i", "i", "ilerleyen saatlerde açıklama yapıldı."],
+      ["a lower-case dotless i", "ı", "ılımlı bir hava bekleniyor."],
+      ["a digit", "2", "2026 yılının son ayı geliyor."],
+      ["a straight quote", '"', '"Tam bir başarı" dedi.'],
+      ["a curly quote", "“", "“Tam bir başarı” dedi."],
+      ["a bracket", "(", "(Fotoğraf: AA) yayımlandı."],
+      ["a dash", "-", "-5 derece bekleniyor."],
+    ])("a next line that starts with %s: only a blank", (_label, _ch, next) => {
+      expect(tidySummaryText(`${LEAD}\n${next}`)).toBe(`${LEAD} ${next}`);
+    });
+  });
+
+  describe("a line that ends in a continuation word goes on in the next line", () => {
+    it.each([
+      ["Bakan açıklama yaptı ve\nAnkara'da toplantı yapıldı.", "Bakan açıklama yaptı ve Ankara'da toplantı yapıldı."],
+      ["Bakan Rusya ile\nİstanbul'da görüştü.", "Bakan Rusya ile İstanbul'da görüştü."],
+      ["Vali açıklama yaptı veya\nBelediye duyurdu.", "Vali açıklama yaptı veya Belediye duyurdu."],
+      ["Takım yendi ama\nÇok yoruldu.", "Takım yendi ama Çok yoruldu."],
+      ["Karar verildi çünkü\nÜlke zor durumda.", "Karar verildi çünkü Ülke zor durumda."],
+      ["Bu iş için\nÖzel bütçe ayrıldı.", "Bu iş için Özel bütçe ayrıldı."],
+      ["Bakan dedi ki\nŞehir güvende.", "Bakan dedi ki Şehir güvende."],
+      ["Takım Ankara kadar\nİstanbul'da da güçlü.", "Takım Ankara kadar İstanbul'da da güçlü."],
+      ["Fire broke out and\nPolice arrived.", "Fire broke out and Police arrived."],
+      ["Police arrived to\nSecure the area.", "Police arrived to Secure the area."],
+    ])("%j", (raw, expected) => {
+      expect(tidySummaryText(raw)).toBe(expected);
+    });
+
+    it("the word is compared in upper case too, with both Turkish and plain folds", () => {
+      expect(tidySummaryText("Bakan açıklama yaptı VE\nAnkara'da toplantı yapıldı.")).toBe(
+        "Bakan açıklama yaptı VE Ankara'da toplantı yapıldı.",
+      );
+      expect(tidySummaryText("Bu iş İÇİN\nÖzel bütçe ayrıldı.")).toBe("Bu iş İÇİN Özel bütçe ayrıldı.");
+      expect(tidySummaryText("Bakan Rusya ILE\nİstanbul'da görüştü.")).toBe("Bakan Rusya ILE İstanbul'da görüştü.");
+    });
+
+    it("the word must stand alone: a suffix or a longer word with the same ending is a sentence end", () => {
+      // "da" after an apostrophe is a suffix; "Sevde", "kaide" and "hiçbiri" only end in a listed word.
+      expect(tidySummaryText("Toplantı Ankara'da\nİstanbul'da sürdü.")).toBe("Toplantı Ankara'da. İstanbul'da sürdü.");
+      expect(tidySummaryText("Başkan konuştu Sevde\nAnkara'da kaldı.")).toBe("Başkan konuştu Sevde. Ankara'da kaldı.");
+      expect(tidySummaryText("Kural bu kaide\nAnkara'da geçerli.")).toBe("Kural bu kaide. Ankara'da geçerli.");
+    });
+
+    it("a word longer than eight letters is never a continuation word", () => {
+      expect(tidySummaryText("Toplantı sürdü ilevarmıyor\nAnkara'da bitti.")).toBe(
+        "Toplantı sürdü ilevarmıyor. Ankara'da bitti.",
+      );
+    });
+
+    it("a heading-shaped first line that ends in a continuation word is not a heading (step 1d keeps it)", () => {
+      // 23 characters, no mark, a capital behind it and a body of 80+ characters: step 1d
+      // would drop it as a heading if it did not end in "ve".
+      const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+      expect(tidySummaryText(`Bakan açıklama yaptı ve\n${body}`)).toBe(`Bakan açıklama yaptı ve ${body}`);
+      expect(tidySummaryText(`Bakan açıklama yaptı\n${body}`)).toBe(body);
+    });
+
+    it("a continuation word on a line of its own", () => {
+      expect(tidySummaryText("Ankara\nve\nİstanbul'da sağanak bekleniyor.")).toBe(
+        "Ankara ve İstanbul'da sağanak bekleniyor.",
+      );
+    });
+  });
+
+  describe("list markers on the later lines are dropped, the first line is left to step 2b", () => {
+    it("bullets with '-', '•' and the square bullet", () => {
+      expect(
+        tidySummaryText("Birinci madde burada\n- İkinci madde burada\n• Üçüncü madde burada\n▪️ Dördüncü madde"),
+      ).toBe("Birinci madde burada. İkinci madde burada. Üçüncü madde burada. Dördüncü madde");
+    });
+
+    it("a lead-in line with a colon and two bullets", () => {
+      expect(tidySummaryText("Gelişmeler:\n- Yangın söndürüldü\n- Yollar açıldı")).toBe(
+        "Gelişmeler: Yangın söndürüldü. Yollar açıldı",
+      );
+    });
+
+    it("the other markers '–' and '*', and two stacked markers", () => {
+      expect(tidySummaryText("Birinci madde burada\n– İkinci madde burada\n* Üçüncü madde burada\n- - Dördüncü madde")).toBe(
+        "Birinci madde burada. İkinci madde burada. Üçüncü madde burada. Dördüncü madde",
+      );
+    });
+
+    it("a dash glued to a digit is not a marker", () => {
+      expect(tidySummaryText("Hava soğuyor\n-5 derece bekleniyor")).toBe("Hava soğuyor -5 derece bekleniyor");
+    });
+
+    it("a marker glued to the word is not a marker either", () => {
+      expect(tidySummaryText("Hava soğuyor\n•Üşüyoruz")).toBe("Hava soğuyor •Üşüyoruz");
+    });
+
+    it("the first line keeps step 2b's budget: it still loses its marker there", () => {
+      expect(tidySummaryText("- Birinci madde burada\n- İkinci madde burada")).toBe(
+        "Birinci madde burada. İkinci madde burada",
+      );
+    });
+
+    it("a leading blank line does not make the next line 'later': step 2b still strips two markers", () => {
+      expect(tidySummaryText("\n\n- - - X\n- Y")).toBe("- X. Y");
+    });
+  });
+
+  describe("single-line texts are untouched", () => {
+    it.each([
+      ["- - - X", "- X"],
+      ["- X", "X"],
+      ["• X", "X"],
+      ["Tek satırlık bir metin burada Yeni", "Tek satırlık bir metin burada Yeni"],
+      ["Ölü sayısı 12 Kurtarma çalışmaları sürüyor.", "Ölü sayısı 12 Kurtarma çalışmaları sürüyor."],
+      ["", ""],
+      ["   ", ""],
+    ])("%j", (raw, expected) => {
+      expect(tidySummaryText(raw)).toBe(expected);
+    });
+
+    it("a lone carriage return is a line break, as it was before", () => {
+      expect(tidySummaryText("Satır bir burada\rSatır iki burada.")).toBe("Satır bir burada. Satır iki burada.");
+      expect(tidySummaryText("Satır bir burada,\rsatır iki burada.")).toBe("Satır bir burada, satır iki burada.");
+    });
+  });
+
+  describe("CRLF, blank lines and blanks around the breaks", () => {
+    it("CRLF with blank and whitespace-only lines in between", () => {
+      expect(tidySummaryText("Satır bir burada\r\n\r\n  \nSatır iki burada.")).toBe(
+        "Satır bir burada. Satır iki burada.",
+      );
+    });
+
+    it("blanks and NBSP around the line breaks", () => {
+      expect(tidySummaryText("Satır bir burada  \t\n   Satır iki burada.")).toBe(
+        "Satır bir burada. Satır iki burada.",
+      );
+    });
+
+    it("leading and trailing line breaks", () => {
+      expect(tidySummaryText("\n\nSatır bir burada\nSatır iki burada.\n\n")).toBe("Satır bir burada. Satır iki burada.");
+    });
+
+    it("a trailing line break after a letter adds no full stop", () => {
+      expect(tidySummaryText("Satır bir burada\n")).toBe("Satır bir burada");
+    });
+  });
+
+  describe("a trailing CTA after a line break is still peeled", () => {
+    it("'Devamı için tıklayınız' on the next line", () => {
+      expect(tidySummaryText("Yangın söndürüldü\nDevamı için tıklayınız")).toBe("Yangın söndürüldü.");
+    });
+
+    it("'Detaylar haberimizde' on the next line after a sentence", () => {
+      expect(tidySummaryText("Yangın söndürüldü.\nDetaylar haberimizde")).toBe("Yangın söndürüldü.");
+    });
+  });
+
+  describe("the older line-break behaviour that must not move", () => {
+    it("a widget heading line is dropped, the lines around it join as before", () => {
+      expect(tidySummaryText("belirtti.\nİlginizi Çekebilir\nToplantıya")).toBe("belirtti. Toplantıya");
+    });
+
+    it("a line ending in a letter in front of a lower-case line", () => {
+      expect(tidySummaryText("a\n\n b")).toBe("a b");
+    });
+  });
+
+  it("f85bc48e verbatim, run through the whole pipeline", () => {
+    expect(tidySummaryText(H30_F85B)).toBe(
+      'Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti. Koreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti. Emine Erdoğan: "Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"',
+    );
+  });
+
+  const FIXTURES: readonly string[] = [
+    H30_F85B,
+    `${LEAD}\n${NEXT}`,
+    `${LEAD}.\n${NEXT}`,
+    "Ölü sayısı 12\nKurtarma çalışmaları sürüyor.",
+    "Bakan açıklama yaptı ve\nAnkara'da toplantı yapıldı.",
+    "Birinci madde burada\n- İkinci madde burada\n• Üçüncü madde burada\n▪️ Dördüncü madde",
+    "Gelişmeler:\n- Yangın söndürüldü\n- Yollar açıldı",
+    "Hava soğuyor\n-5 derece bekleniyor",
+    // At most MAX_MARKER_PASSES (2) stacked markers on the first line: three are the
+    // documented idempotence exception ("- - - X" -> "- X" -> "X").
+    "- - X",
+    "\n\n- - X\n- Y",
+    "Satır bir burada\r\n\r\n  \nSatır iki burada.",
+    "Yangın söndürüldü\nDevamı için tıklayınız",
+    "Yangın söndürüldü\nDevamı için tıklayınız\nDetaylar haberimizde",
+    "Son dakika | Yangın söndürüldü\nYollar açıldı\nTrafik normale döndü",
+    "Satır bir burada\rSatır iki burada.",
+    "A\nB\nC\nD",
+    "1\nA\n2\nB",
+  ];
+
+  it("no newline is left in any output", () => {
+    for (const raw of FIXTURES) {
+      expect(hasNoNewline(tidySummaryText(raw)), raw).toBe(true);
+    }
+  });
+
+  it("is idempotent on every fixture, input and output", () => {
+    for (const raw of FIXTURES) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once), raw).toBe(once);
+      for (const line of [raw, once]) {
+        const again = tidySummaryText(line);
+        expect(tidySummaryText(again), line).toBe(again);
+      }
+    }
+  });
+
+  describe("linear time", () => {
+    // Each bound is 1000 ms; the measured values (Node 24, development machine, cold
+    // process) are recorded next to each case and every one is at most 333 ms, so the
+    // bound keeps 3x headroom. Every input is long enough to expose a quadratic scan.
+    function timed(input: string): { ms: number; out: string } {
+      const start = performance.now();
+      const out = tidySummaryText(input);
+      return { ms: performance.now() - start, out };
+    }
+
+    it("6,000 sentence lines", () => {
+      const input = "Satır kelime burada\n".repeat(6_000);
+      const { ms, out } = timed(input);
+      // Measured: 20-23 ms (3 cold runs; limit 1000, ceiling for the record 333).
+      expect(ms).toBeLessThan(1000);
+      expect(out.startsWith("Satır kelime burada. Satır kelime burada. ")).toBe(true);
+      expect(hasNoNewline(out)).toBe(true);
+    });
+
+    it("15,000 bullet lines", () => {
+      const input = "- Madde\n".repeat(15_000);
+      const { ms, out } = timed(input);
+      // Measured: 33-36 ms (3 cold runs; limit 1000, ceiling for the record 333).
+      expect(ms).toBeLessThan(1000);
+      expect(out.startsWith("Madde. Madde. Madde")).toBe(true);
+      expect(hasNoNewline(out)).toBe(true);
+    });
+
+    it("60,000 one-letter lines", () => {
+      const input = "a\n".repeat(60_000);
+      const { ms, out } = timed(input);
+      // Measured: 60-62 ms (3 cold runs; limit 1000, ceiling for the record 333).
+      expect(ms).toBeLessThan(1000);
+      expect(out.startsWith("a a a a")).toBe(true);
+      expect(hasNoNewline(out)).toBe(true);
+    });
+
+    it("100,000 line breaks and nothing else", () => {
+      const { ms, out } = timed("\n".repeat(100_000));
+      // Measured: 8 ms (3 cold runs; limit 1000, ceiling for the record 333).
+      expect(ms).toBeLessThan(1000);
+      expect(out).toBe("");
+    });
+
+    it("a 100k single line", () => {
+      const input = "kelime ".repeat(14_300);
+      expect(input.length).toBeGreaterThan(99_000);
+      const { ms, out } = timed(input);
+      // Measured: 1.4 ms (3 cold runs; limit 1000, ceiling for the record 333).
+      expect(ms).toBeLessThan(1000);
+      expect(out).toBe(input.trim());
+    });
   });
 });

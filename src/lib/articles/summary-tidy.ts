@@ -18,7 +18,9 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 //                            "<body>\n<title> yazısı ilk önce Serbestiyet
 //                            adresinde yayınlanmıştır." (Serbestiyet) and
 //                            "<body>\n<headline> Medyascope" (Medyascope)
-//   - raw newlines
+//   - raw newlines, and bullet lists whose lines are sentences with no full stop
+//     ("- Koreli öğrenciler ... sohbet etti\nKoreli iki öğrencinin ... tebrik
+//     etti"), which a plain blank would run on into one sentence
 //   - a text the ingest clamp cut mid-word (500 characters ending "...") or an
 //     outlet's own feed cap cut mid-word (Haberport 202/203, Sözcü 123, Daily
 //     Sabah 183 characters ending "...")
@@ -773,9 +775,10 @@ function splitGluedHeadings(s: string): string {
 // 3158fd7a, 6c2af39b, d298d680) and the meta description repeated the heading as
 // if it were the first words of the sentence. The first line is a heading when it
 // is 15 to 140 characters, has no sentence mark and no colon, does not end in a
-// dash or a comma (it is a sentence that goes on in the next line), does not
-// start with a list marker (a bullet is a sentence of the story), and the
-// next line starts with a capital. The heading goes when what is left is a body
+// dash, a comma or a continuation word (LINE_CONTINUATION_WORDS: "ve", "ile",
+// "için", ...; it is a sentence that goes on in the next line), does not start
+// with a list marker (a bullet is a sentence of the story), and the next line
+// starts with a capital. The heading goes when what is left is a body
 // of its own (80 characters, blanks collapsed); a shorter body keeps the heading
 // as its first sentence, joined with ". ".
 // ---------------------------------------------------------------------------
@@ -820,6 +823,9 @@ function dropHeadingLine(s: string): string {
   if (head.length < MIN_HEADING_LINE || head.length > MAX_HEADING_LINE) return s;
   for (const ch of head) if (HEADING_LINE_MARKS.has(ch)) return s;
   if (HEADING_LINE_OPEN_ENDS.has(head.charAt(head.length - 1))) return s;
+  // h31-reader-4: a line that ends in "ve", "ile", "için", ... goes on in the next
+  // line, like one that ends in a comma.
+  if (endsInContinuationWord(head)) return s;
   // A bullet ("- X", "• X") is a sentence of the story, not a heading: the replay
   // of 8,488 live summaries found two bullet lists (f85bc48e, 307cf42b) whose
   // first bullet this step would have dropped. `head` is at most 140 characters.
@@ -827,6 +833,106 @@ function dropHeadingLine(s: string): string {
   const rest = t.slice(nl + 1).trimStart();
   if (!UPPER_TR_LETTER.test(rest.charAt(0))) return s;
   return collapsedLengthReaches(rest, MIN_BODY_AFTER_HEADING) ? rest : `${head}. ${rest}`;
+}
+
+// ---------------------------------------------------------------------------
+// Line breaks between sentences (h31-reader-4). A description that is a bullet
+// list ships one sentence per line and no full stop ("- Koreli öğrencilere ...
+// sohbet etti\nKoreli iki öğrencinin ... tebrik etti\nEmine Erdoğan: ..."; f85bc48e,
+// 8 of 239 live clusters in three days). Collapsing each line break to a blank
+// ran the sentences into one: "... sohbet etti Koreli iki öğrencinin ...".
+// ---------------------------------------------------------------------------
+
+/**
+ * Words a line cannot end a sentence on: a conjunction, a postposition or an
+ * English function word that leaves its phrase open ("Bakan açıklama yaptı ve" /
+ * "Ankara'da toplantı yapıldı."). A line that ends in one of them goes on in the
+ * next line even when that line starts with a capital letter, so a hard-wrapped
+ * sentence is not cut in two. Compared on the tr-TR and the plain lower case of
+ * the whole last word ({@link FOLDS}); see {@link endsInContinuationWord}.
+ */
+const LINE_CONTINUATION_WORDS: ReadonlySet<string> = new Set([
+  "ve", "ile", "veya", "ya", "yahut", "ama", "fakat", "ancak", "lakin", "çünkü",
+  "ki", "da", "de", "için", "gibi", "kadar", "göre", "and", "or", "the", "of", "to",
+]);
+
+/** The last word of a line is looked at over at most this many letters; a longer run is a word that is not listed. */
+const MAX_CONTINUATION_WORD = 8;
+
+/**
+ * True when the last word of `line` is one of {@link LINE_CONTINUATION_WORDS}. The
+ * word is the run of letters at the end of the line (a backward scan over at most
+ * {@link MAX_CONTINUATION_WORD} letters; a longer run is not a listed word), and it
+ * must be preceded by a blank or the start of the line: the "da" of "Ankara'da"
+ * and the "de" of "Sevde" are suffixes and word ends, not words. A line that ends
+ * in a digit or a mark has no last word.
+ */
+function endsInContinuationWord(line: string): boolean {
+  let start = line.length;
+  while (start > 0 && ANY_LETTER.test(line.charAt(start - 1))) {
+    start--;
+    if (line.length - start > MAX_CONTINUATION_WORD) return false;
+  }
+  if (start === line.length) return false;
+  if (start > 0 && !isBlankChar(line.charAt(start - 1))) return false;
+  const word = line.slice(start);
+  return FOLDS.some((fold) => LINE_CONTINUATION_WORDS.has(fold(word)));
+}
+
+/**
+ * Join `next` to the line in front of it: ". " when `prev` ends in a letter or a
+ * digit, `next` starts with an upper-case Turkish letter ({@link UPPER_TR_LETTER})
+ * and `prev` does not end in a {@link LINE_CONTINUATION_WORDS} word, otherwise one
+ * blank (a line that ends in a mark, a quote or a bracket already ends its
+ * sentence or goes on; a next line that starts lower case, with a digit, a quote or
+ * a bracket goes on).
+ */
+function lineSeparator(prev: string, next: string): string {
+  if (
+    isLetterOrDigit(prev.charAt(prev.length - 1)) &&
+    UPPER_TR_LETTER.test(next.charAt(0)) &&
+    !endsInContinuationWord(prev)
+  ) {
+    return ". ";
+  }
+  return " ";
+}
+
+/**
+ * Step 2 of {@link tidySummaryText}: the lines of `s` joined into one text. A
+ * character scan over the line breaks (no regular expression over the whole text,
+ * so the pass is linear): split on "\n" (a lone "\r" is a line break too, as it
+ * was before), trim the blanks of every line (a "\r" goes with them), drop the
+ * empty lines, and strip up to {@link MAX_MARKER_PASSES} leading list markers
+ * ("- ", "• ", "▪️ ") from every line AFTER the first one; the first line is left
+ * to step 2b ({@link stripLeadingNoise}), which therefore behaves as it always did,
+ * and a text with no line break comes back as the same string. Two lines are
+ * joined with ". " or one blank, see {@link lineSeparator}.
+ */
+function joinLines(s: string): string {
+  if (!s.includes("\n") && !s.includes("\r")) return s;
+  const text = s.includes("\r") ? s.split("\r").join("\n") : s;
+  const parts: string[] = [];
+  let prev = "";
+  let pos = 0;
+  while (pos <= text.length) {
+    let end = text.indexOf("\n", pos);
+    if (end < 0) end = text.length;
+    let line = text.slice(pos, end).trim();
+    pos = end + 1;
+    if (prev !== "") {
+      for (let pass = 0; pass < MAX_MARKER_PASSES; pass++) {
+        const next = stripOneListMarker(line);
+        if (next === line) break;
+        line = next.trimStart();
+      }
+    }
+    if (line === "") continue;
+    if (prev !== "") parts.push(lineSeparator(prev, line));
+    parts.push(line);
+    prev = line;
+  }
+  return parts.join("");
 }
 
 /**
@@ -853,13 +959,22 @@ function dropHeadingLine(s: string): string {
  *      leave nothing is not made, so a text that is only "\nSon dakika... X"
  *      still shows its X;
  *   1d. drop a heading first line ({@link dropHeadingLine}, h30-live-1): 15 to
- *      140 characters, none of ". ! ? : …", not ending in ", ; – — -", not
+ *      140 characters, none of ". ! ? : …", not ending in ", ; – — -" or in a
+ *      continuation word ({@link LINE_CONTINUATION_WORDS}), not
  *      starting with a list marker, with a next line that starts with a capital
  *      letter. The heading goes when the
  *      rest is at least {@link MIN_BODY_AFTER_HEADING} characters long (blanks
  *      collapsed), otherwise it stays as the first sentence ("<heading>. <rest>").
  *      Only the first line is looked at, in one pass;
- *   2. collapse every whitespace run that contains a newline to one space;
+ *   2. join the lines ({@link joinLines}, h31-reader-4): blanks around every line
+ *      are trimmed, empty lines are dropped, a list marker ("- ", "• ", "▪️ ") on
+ *      any line but the first is dropped, and two lines are joined with ". " when
+ *      the first ends in a letter or a digit, the next starts with an upper-case
+ *      Turkish letter and the first does not end in a continuation word ("ve",
+ *      "ile", "için", ...; {@link LINE_CONTINUATION_WORDS}), otherwise with one
+ *      space ("Gelişmeler:\n- Yangın söndürüldü\n- Yollar açıldı" ->
+ *      "Gelişmeler: Yangın söndürüldü. Yollar açıldı"). A text with a single line
+ *      is not touched;
  *   2b. peel leading noise: a "Son dakika |" / "Son dakika haberi:" / "Son dakika
  *      gelişmesi..." / "Son dakika haberine göre;" (or "göre,") ticker (at most
  *      {@link MAX_TICKER_PASSES} in total) and a list marker "- " / "• " / "▪️ "
@@ -946,10 +1061,9 @@ export function tidySummaryText(s: string): string {
   //     are still there.
   out = dropHeadingLine(out);
 
-  // 2. Newlines (and the blanks around them) become one space. The lookbehind
-  //    starts a match only at the beginning of a run of blanks, so a very long
-  //    run of spaces with no newline is scanned once, not once per position.
-  out = out.replace(/(?<![^\S\r\n])[^\S\r\n]*[\r\n]\s*/g, " ").trim();
+  // 2. Line breaks become ". " between sentences and one blank elsewhere; list
+  //    markers on the later lines go (h31-reader-4). A character scan, linear.
+  out = joinLines(out).trim();
 
   // 2b. Leading "Son dakika |" / "Son dakika haberi:" ticker and "- " marker.
   out = stripLeadingNoise(out);
