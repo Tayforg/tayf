@@ -141,6 +141,11 @@ export interface ClusterDetail {
      *  only when it is a UUID different from `id`. Optional so pre-099
      *  fixtures compile. */
     merged_into?: string | null;
+    /** Migration 067 topic label ('politika' or a /konu hub slug), or null
+     *  when unset or not a string. Picks the feed of the page's "İlgili
+     *  haberler" block. Optional so fixtures and cache entries written before
+     *  the column was read still compile. */
+    topic7?: string | null;
   };
   members: ClusterDetailMember[];
   allSources: Source[]; // all 144, for MediaDNA rendering
@@ -215,6 +220,8 @@ type ClusterRow = {
   is_archived: boolean;
   /** Migration 099. Optional: pre-099 rows/fixtures pass through. */
   merged_into?: string | null;
+  /** Migration 067. Optional: fixtures that predate the read pass through. */
+  topic7?: string | null;
 };
 
 const MERGED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -340,7 +347,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     const clusterRes = await supabase
       .from("clusters")
       .select(
-        "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived, merged_into"
+        "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived, merged_into, topic7"
       )
       .eq("id", id)
       .maybeSingle<ClusterRow>();
@@ -583,6 +590,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           clusterRow.merged_into.toLowerCase() !== clusterRow.id.toLowerCase()
             ? clusterRow.merged_into.toLowerCase()
             : null,
+        topic7: typeof clusterRow.topic7 === "string" ? clusterRow.topic7 : null,
       },
       members: dedupedMembers,
       allSources: dir.ok ? dir.data : [],

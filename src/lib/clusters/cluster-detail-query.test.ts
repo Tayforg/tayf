@@ -1404,6 +1404,53 @@ describe("migration 099 merged_into pass-through", () => {
   });
 });
 
+// İlgili haberler needs the cluster's topic to pick a feed. It rides on the
+// EXISTING cluster-row read (round-trip 1): one more column, not one more query.
+describe("topic7 pass-through (related stories)", () => {
+  const ID = "11111111-1111-4111-8111-111111111111";
+
+  async function detailWith(topic7: unknown) {
+    responses.clusters = {
+      maybeSingle: { data: mkClusterRow({ topic7 }), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    return getClusterDetail(ID);
+  }
+
+  it("selects topic7 on the cluster row", async () => {
+    await detailWith("ekonomi");
+    const clusterCall = callLog.find((c) => c.table === "clusters");
+    const select = clusterCall!.steps.find((s) => s.method === "select");
+    expect(String(select!.args[0])).toMatch(/\btopic7\b/);
+  });
+
+  it("adds no query: the cluster row is still read exactly once", async () => {
+    await detailWith("ekonomi");
+    expect(clustersQueryCount()).toBe(1);
+  });
+
+  it("an unknown id still ends after that one read (h30-abuse-2 shape kept)", async () => {
+    responses.clusters = { maybeSingle: { data: null, error: null } };
+    expect(await getClusterDetail(ID)).toBeNull();
+    expect(callLog.map((c) => c.table)).toEqual(["clusters"]);
+  });
+
+  it.each([["ekonomi"], ["politika"], ["dunya"], ["genel"]])(
+    "exposes %j as stored",
+    async (v) => {
+      expect((await detailWith(v))!.cluster.topic7).toBe(v);
+    },
+  );
+
+  it.each([[null], [undefined], [42], [{}], [["ekonomi"]]])(
+    "exposes null for %j",
+    async (v) => {
+      expect((await detailWith(v))!.cluster.topic7).toBeNull();
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Cold-read resilience (wave 2): capped client, failure cached for minutes
 // only, and "a timeout is not a 404" via getClusterDetailOrThrow.

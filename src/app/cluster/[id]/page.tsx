@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Suspense } from "react";
+import { Suspense, type ComponentProps } from "react";
 import { notFound, permanentRedirect } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Copy } from "lucide-react";
 
@@ -27,6 +27,7 @@ import { OwnershipLine } from "@/components/story/ownership-line";
 import { StoryTimeline } from "@/components/story/story-timeline";
 import { FactCheckBox } from "@/components/story/fact-check-box";
 import { ThreadLink } from "@/components/story/thread-link";
+import { RelatedStories } from "@/components/story/related-stories";
 import { getClusterFactChecks } from "@/lib/fact-checks/cluster-fact-checks-query";
 import { getPublishedThreadForCluster } from "@/lib/story-threads/public-query";
 import { getSourceMetadata } from "@/lib/sources/factuality";
@@ -44,6 +45,16 @@ import {
   shouldShowPublicFramingReceipt,
 } from "@/lib/clusters/framing-receipt";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { getPoliticsClusters } from "@/lib/clusters/politics-query";
+import {
+  relatedFeedFor,
+  relatedHubLink,
+  relatedTopicLabel,
+  selectRelatedClusters,
+  type RelatedCandidate,
+} from "@/lib/clusters/related-clusters";
+import { getTopicClusters } from "@/lib/clusters/topic-query";
+import { awaitRequestScope, coalesce } from "@/lib/cache-resilience";
 import { hasStoryCardCoverage, storyCardHref } from "@/lib/cards/story-card";
 import { buildShareText } from "@/lib/clusters/share";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
@@ -118,6 +129,81 @@ async function ClusterFactCheckSlot({ id }: { id: string }) {
   return factChecks.length > 0 ? <FactCheckBox items={factChecks} /> : null;
 }
 
+// "İlgili haberler": up to five other recent multi-article clusters on the same
+// topic, plus the topic's hub link. It adds NO query of its own: it reads the
+// feed /konu/<slug> page 1 (and its RSS) already reads, or, for 'politika'
+// (which has no hub), the home feed's shared remote entry. Rendered last, in
+// its own <Suspense fallback={null}>, so a slow feed can never hold the article
+// and the late arrival shifts nothing above it. The WHOLE body is guarded:
+// `getTopicClusters` never throws (null means a failed read) but
+// `getPoliticsClusters` rethrows a sustained outage, and an optional block must
+// never reach error.tsx. A topic that is null, unknown or missing (a cache
+// entry written before the column was read) yields no block. The topic read is
+// also bounded per hub slug (see the comment at the call): `getTopicClusters`
+// has no single-flight key, so without that bound every crawled cluster page
+// would run its own live feed read for as long as the feed's failed cache
+// sentinel lives. Module-private, like the slots above: a page file may only
+// export the Next.js route API.
+async function ClusterRelatedSlot({
+  clusterId,
+  topic7,
+  headline,
+}: {
+  clusterId: string;
+  topic7: string | null;
+  headline: string;
+}) {
+  // The element is built after the try block (react-hooks/error-boundaries
+  // forbids constructing JSX inside it); building one cannot throw.
+  let props: ComponentProps<typeof RelatedStories>;
+  try {
+    const feed = relatedFeedFor(topic7);
+    if (!feed) return null;
+    let bundles: readonly RelatedCandidate[];
+    if (feed.kind === "topic") {
+      // `getTopicClusters` passes no key to its resolver, so while its cached
+      // attempt holds a failed sentinel (memoised for `minutes`) every call
+      // runs its own live, uncoalesced read: a 31-row embedded select held for
+      // up to READER_TIMEOUT_MS, once per crawled or shared cluster page. Bound
+      // it here, per hub slug (six keys, from the TOPIC_SLUGS whitelist, never
+      // user input): concurrent views share ONE in-flight read, and a failed
+      // one arms the 5 s negative cooldown. null is the fetcher's failure
+      // value, so it is turned into a rejection for the cooldown to see; the
+      // catch below then yields no block. A healthy read (a cache hit) is
+      // unchanged. `coalesce` reads the clock, hence the request-scope await
+      // first; this slot already streams inside its own <Suspense>.
+      await awaitRequestScope();
+      const res = await coalesce(`related:konu:${feed.slug}`, async () => {
+        const read = await getTopicClusters(feed.slug, 1);
+        if (!read) throw new Error("konu feed unavailable");
+        return read;
+      });
+      bundles = res.bundles;
+    } else {
+      bundles = (await getPoliticsClusters()).bundles;
+    }
+    const items = selectRelatedClusters({
+      currentId: clusterId,
+      currentTitle: headline,
+      topic: feed.kind === "topic" ? feed.slug : "politika",
+      bundles,
+    });
+    if (items.length === 0) return null;
+    const hub = relatedHubLink(feed);
+    props = {
+      items,
+      topicLabel: relatedTopicLabel(feed),
+      hubHref: hub.href,
+      hubLabel: hub.label,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn("[cluster-related] omitted:", message);
+    return null;
+  }
+  return <RelatedStories {...props} />;
+}
+
 // A cluster whose stored title has no letter or digit once decoded ('&nbsp',
 // '-', '…') has no headline to show or to index (hunt-10: /cluster/46467982-…
 // was served as "&amp;nbsp — Tayf", indexable). Reader side only, no data
@@ -125,6 +211,20 @@ async function ClusterFactCheckSlot({ id }: { id: string }) {
 // metadata goes noindex. Module-private: a page file may only export the
 // Next.js route API.
 const NO_HEADLINE_FALLBACK = "Haber";
+
+// One definition of "this page is offered to the index", shared by the robots
+// tag in generateMetadata and the "İlgili haberler" gate in the page body. An
+// archived cluster, a headline-less one (hunt-10) and a single-article one
+// (h31-seo-1: ~71% of new clusters, one outlet's headline and lead sentence)
+// are noindex; they also get no related block, which would add feed reads to
+// most renders and give no indexable crawl path. Module-private: a page file
+// may only export the Next.js route API.
+function isIndexableCluster(
+  cluster: { is_archived: boolean; article_count: number },
+  hasHeadline: boolean,
+): boolean {
+  return !cluster.is_archived && hasHeadline && cluster.article_count >= 2;
+}
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise and must be awaited.
@@ -241,7 +341,7 @@ export async function generateMetadata({
     // require article_count >= 2, so this makes the page agree with them. The
     // canonical, og:url and JSON-LD stay as they are: shared links still work,
     // and the page indexes itself the moment a second outlet joins.
-    ...(cluster.is_archived || !hasHeadline || cluster.article_count < 2
+    ...(!isIndexableCluster(cluster, hasHeadline)
       ? { robots: { index: false, follow: true } }
       : {}),
     openGraph: {
@@ -928,6 +1028,18 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 hover-lift animate-fade-up stagger-2">
         <MediaDna sources={toMediaDnaSources(allSources)} highlightSlugs={highlightSlugs} />
       </div>
+
+      {/* İlgili haberler: last child, so its streamed arrival moves nothing
+          above it. Indexable pages only (see isIndexableCluster). */}
+      {isIndexableCluster(cluster, hasHeadline) && (
+        <Suspense fallback={null}>
+          <ClusterRelatedSlot
+            clusterId={cluster.id}
+            topic7={cluster.topic7 ?? null}
+            headline={headline}
+          />
+        </Suspense>
+      )}
       </div>
     </>
   );
