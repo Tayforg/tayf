@@ -172,6 +172,13 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     the URL parser strips, and `a.jpg\n#1` would otherwise slip past.
 //     tests/guards/middleware-matcher.test.ts pins the entry under Next's own
 //     matcher.
+//     Scope: this closes the vector for `next start` (self-hosted) only. On
+//     Vercel, /_next/image is served by the platform image service, which
+//     never runs this middleware and ignores the fragment: checked on prod on
+//     2026-11-04, `…a.jpg%231` and `…a.jpg%232` were both x-vercel-cache HIT on
+//     the plain URL's entry, so there is no per-fragment origin fetch to stop.
+//     The query-string half (remotePatterns `search: ""`) does hold on Vercel:
+//     `…a.jpg%3Fcb%3DN` answers 400.
 //
 // The only clock read is Date.now() in gate 7. It runs per request in the Edge
 // middleware, never during prerender, and nothing here does any I/O.

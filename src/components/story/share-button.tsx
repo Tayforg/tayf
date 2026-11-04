@@ -262,6 +262,9 @@ export function ShareButton({ clusterId, title, text, cardHref }: ShareButtonPro
           // last segment is "kart" with no extension, so a valueless
           // `download` would save an extensionless file. KART-06.
           download="tayf-kart.png"
+          // The card is a Satori PNG render per cluster: a download for people,
+          // not a page for a crawler to queue (robots.txt disallows it too).
+          rel="nofollow"
           className={CHIP_CLASS}
         >
           Kartı indir

@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 // ---------------------------------------------------------------------------
 
 import { GET } from "@/app/robots.txt/route";
+import { isCrawlAllowed, parseRobots, rulesFor } from "../_helpers/robots-match";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -32,6 +33,33 @@ const AI_BOTS = [
   "Diffbot",
   "Timpibot",
 ];
+
+// The whole Disallow vocabulary, sorted: /admin, /api/ and /embed/ plus the
+// three crawl-hygiene rules (h31-bots-1).
+const SIX_DISALLOWS = [
+  "Disallow: /*?cluster=",
+  "Disallow: /*?source=",
+  "Disallow: /admin",
+  "Disallow: /api/",
+  "Disallow: /cluster/*/kart",
+  "Disallow: /embed/",
+];
+
+/** Lines of every User-agent group, keyed by the group's first User-agent token. */
+function groupsByAgent(body: string): Map<string, string[]> {
+  const lines = body.split("\n");
+  const out = new Map<string, string[]>();
+  let current: string[] | null = null;
+  for (const line of lines) {
+    if (line.startsWith("User-agent: ")) {
+      current = [];
+      out.set(line.slice("User-agent: ".length), current);
+    }
+    if (current !== null && line === "") current = null;
+    if (current !== null) current.push(line);
+  }
+  return out;
+}
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
@@ -130,7 +158,7 @@ describe("GET /robots.txt", () => {
     const body = await (await GET()).text();
     expect(body).not.toMatch(/^Disallow: \/embed$/m);
     const disallows = new Set(body.match(/^Disallow: .*$/gm));
-    expect([...disallows].sort()).toEqual(["Disallow: /admin", "Disallow: /api/", "Disallow: /embed/"]);
+    expect([...disallows].sort()).toEqual(SIX_DISALLOWS);
   });
 
   it("carves out Allow: /api/v1/openapi.json in every User-agent group (llms.txt links to it; the contract file is keyless and public)", async () => {
@@ -151,7 +179,7 @@ describe("GET /robots.txt", () => {
     expect(lines.filter((l) => l === "Allow: /api/v1/openapi.json")).toHaveLength(userAgents.length);
   });
 
-  it("opens only the three Allow paths and keeps the Disallow set exactly /admin, /api/ and /embed/ (the carve-out is a longer match, not a removal)", async () => {
+  it("opens only the three Allow paths and keeps the Disallow set exactly the six lines (the carve-out is a longer match, not a removal)", async () => {
     const body = await (await GET()).text();
     const lines = body.split("\n");
     const allows = new Set(lines.filter((l) => l.startsWith("Allow:")));
@@ -161,11 +189,7 @@ describe("GET /robots.txt", () => {
       "Allow: /api/v1/openapi.json",
     ]);
     const disallows = new Set(lines.filter((l) => l.startsWith("Disallow:")));
-    expect([...disallows].sort()).toEqual([
-      "Disallow: /admin",
-      "Disallow: /api/",
-      "Disallow: /embed/",
-    ]);
+    expect([...disallows].sort()).toEqual(SIX_DISALLOWS);
   });
 
   it("builds the Sitemap line from NEXT_PUBLIC_SITE_URL", async () => {
@@ -199,5 +223,88 @@ describe("GET /robots.txt", () => {
       expect(group).toContain("Allow: /");
       expect(group).not.toMatch(/^Disallow: \/$/m);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h31-bots-1: ~31.7k per-entity /metodoloji?cluster=<uuid> / ?source=<slug>
+// URLs (one static page, the form reads the params client-side) and the
+// Satori /cluster/<id>/kart PNG renders are kept out of every crawler group.
+// The allow-with-terms stance is unchanged: no bare `Disallow: /`.
+// ---------------------------------------------------------------------------
+describe("GET /robots.txt — crawl-index hygiene (h31-bots-1)", () => {
+  const CLUSTER_ID = "6e19dd5a-0000-0000-0000-000000000000";
+  const HYGIENE_RULES = [
+    "Disallow: /*?cluster=",
+    "Disallow: /*?source=",
+    "Disallow: /cluster/*/kart",
+  ];
+
+  it("has the expected groups: *, Googlebot, Bingbot and every AI bot", async () => {
+    const groups = groupsByAgent(await (await GET()).text());
+    expect([...groups.keys()].sort()).toEqual(["*", "Bingbot", "Googlebot", ...AI_BOTS].sort());
+  });
+
+  it("every User-agent group carries each of the three hygiene rules exactly once", async () => {
+    const groups = groupsByAgent(await (await GET()).text());
+    expect(groups.size).toBe(3 + AI_BOTS.length);
+    for (const [ua, lines] of groups) {
+      for (const rule of HYGIENE_RULES) {
+        expect(lines.filter((l) => l === rule), `${rule} in group for ${ua}`).toHaveLength(1);
+      }
+    }
+  });
+
+  it("the hygiene rules follow Disallow: /embed/ inside each group (one block, no stray group)", async () => {
+    const groups = groupsByAgent(await (await GET()).text());
+    for (const [ua, lines] of groups) {
+      const embed = lines.indexOf("Disallow: /embed/");
+      expect(embed, `embed rule in ${ua}`).toBeGreaterThan(0);
+      expect(lines.slice(embed + 1), `rules after /embed/ in ${ua}`).toEqual(HYGIENE_RULES);
+    }
+  });
+
+  it("stays allow-with-terms: no bare Disallow: / anywhere", async () => {
+    const body = await (await GET()).text();
+    expect(body).not.toMatch(/^Disallow: \/\s*$/m);
+  });
+
+  describe.each(["*", "Googlebot", "Bingbot", ...AI_BOTS])("evaluated for %s", (ua) => {
+    async function rules() {
+      return rulesFor(parseRobots(await (await GET()).text()), ua);
+    }
+
+    it.each([
+      "/",
+      `/cluster/${CLUSTER_ID}`,
+      `/cluster/${CLUSTER_ID}?utm_source=x`,
+      `/cluster/${CLUSTER_ID}/opengraph-image`,
+      `/cluster/${CLUSTER_ID}/twitter-image`,
+      "/metodoloji",
+      "/source/sozcu",
+      "/sources",
+      "/llms.txt",
+      "/sitemap.xml",
+      "/api/sources",
+      "/api/sources/sozcu",
+      "/api/v1/openapi.json",
+    ])("allows %s", async (path) => {
+      expect(isCrawlAllowed(await rules(), path)).toBe(true);
+    });
+
+    it.each([
+      `/metodoloji?cluster=${CLUSTER_ID}`,
+      "/metodoloji?source=star",
+      "/metodoloji?source=a%20b%26c",
+      "/?cluster=x",
+      "/?source=x",
+      `/cluster/${CLUSTER_ID}/kart`,
+      `/cluster/${CLUSTER_ID.toUpperCase()}/kart`,
+      "/admin",
+      "/api/v1/clusters",
+      "/embed/x",
+    ])("disallows %s", async (path) => {
+      expect(isCrawlAllowed(await rules(), path)).toBe(false);
+    });
   });
 });

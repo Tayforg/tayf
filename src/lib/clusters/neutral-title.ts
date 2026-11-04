@@ -90,13 +90,33 @@
 // run of capitalised words bridged by 've' / 'ile' / 'için' / 'veya' ("TDT Aile ve
 // Kadın Konseyi") or in a run that ends with '!' ("Net Mesaj!"); see caseEvidence.
 
+// extractive-v5 (hunt 31, h31-reader-2): MODEL BUMP. Two top stories kept a loaded
+// or teaser member headline because the re-pick protects the incumbent and the
+// loaded list had no entry for them: 2ee853c9 (26 sources) "ABD seçimlerinin
+// ardından İran'dan tehdit gibi açıklama" (25 members report "savaşa hayır dedi")
+// and d89374ba (12 sources) "Gazze'nin tanığı cerrah da ABD'de seçimi kazandı".
+// 'tehdit gibi', 'yıktı', 'hezimet...' and 'tarihe geçen' join the loaded words, and
+// a sequel teaser (a lower-case word and then a standalone 'da' / 'de' among the
+// first five words: "Gazze'nin tanığı cerrah da ...", a continuation of another
+// story that names nobody) pays one loaded unit too; see sequelTeaser. Both are
+// charged to a member's score and to the stored title's score alike, so the 0.25
+// exceeds the 0.20 full-length re-pick margin and the factual member title wins.
+// What the bump does: migration 141 (neutral_title_repick_candidates) re-offers the
+// active clusters of the last 14 days whose title_neutral_model is older than this
+// id, the newest 5000 (about 4,100 today). The headline cron heals about 20 per
+// 5-minute run, so the whole window takes roughly 17 hours. This is the first time
+// the h26, h27 and h28 rules reach stored titles: they changed new picks only and
+// did not bump the id. The re-pick never writes updated_at, so a healed cluster
+// does not jump in the "newest" order. A replay of the 141 population and of the
+// 150-cluster corpus is in neutral-title-replay.test.ts.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
 // the last 14 days of older-version titles (neutral_title_repick_candidates,
 // migration 141). Readers must not compare against this constant: use
 // isExtractiveModelId, which recognises every version.
-export const EXTRACTIVE_MODEL_ID = "extractive-v4";
+export const EXTRACTIVE_MODEL_ID = "extractive-v5";
 
 /** True for any extractive pick, whatever rule version wrote it. */
 export function isExtractiveModelId(model: unknown): boolean {
@@ -218,6 +238,17 @@ const LOADED_FOLDED: RegExp[] = [
   new RegExp(`${L}soğuk\\s+duş`, "u"),
   new RegExp(`${L}perde\\s+arkas[ıi]`, "u"),
   new RegExp(`${L}önemli\\s+(?:açıklama|mesaj|çağrı)`, "u"),
+  // Loaded simile and verdict wording (hunt 31, h31-reader-2). 'tehdit gibi' is
+  // one outlet's editorial simile ("İran'dan tehdit gibi açıklama" while 25 members
+  // quote "savaşa hayır dedi"). 'yıktı' is the verdict verb of a party or a leader
+  // "brought down"; it is charged for a storm that "yıktı" roofs too, which costs
+  // every member of such a cluster the same and so moves no pick, while 'yıkıldı'
+  // (a building collapsed) is a different word and stays free. 'hezimet' has no
+  // right edge (hezimeti, hezimete); 'tarihe geçen' is "made history", not the event.
+  new RegExp(`${L}tehdit\\s+gibi${R}`, "u"),
+  new RegExp(`${L}y[ıi]kt[ıi]${R}`, "u"),
+  new RegExp(`${L}hezimet`, "u"),
+  new RegExp(`${L}tarihe\\s+ge[çc]en${R}`, "u"),
 ];
 
 // Words that attribute a claim instead of asserting it. Tested on foldTr(title).
@@ -270,11 +301,94 @@ export function framingPenalty(title: string): number {
   return n;
 }
 
+// The sequel teaser (hunt 31, h31-reader-2): a title that is the continuation of
+// another story, "Gazze'nin tanığı cerrah da ABD'de seçimi kazandı" ("the surgeon
+// ... too won"). It leans on a headline the reader has not seen and names nobody,
+// so it pays one loaded unit. Judged on the raw title, no regular expression over
+// the whole title: it is walked once, token by token, and the walk stops after the
+// fifth word.
+//   - Tokens are whitespace-delimited, with the punctuation and quotes trimmed off
+//     both ends. The first token that ends in ':' stops the scan: "Bahçeli: biz de
+//     hazırız" is a speaker label and a quote, not a teaser.
+//   - The particle is the FIRST token that reads 'da' or 'de' (a suffix such as
+//     "ABD'de" is not a standalone particle). Only a particle at index 1 to 4 is
+//     judged: at index 0 it is part of a name ("De Bruyne"), and past the fifth word
+//     the title has already said what happened.
+//   - It is a teaser when the token before the particle starts with a lower-case
+//     letter and is not a pronoun or a conjunction that licenses the particle ("ya
+//     da", "hem de", "yine de", "ben de", "bana da", "o da") nor a concessive verb
+//     ("düşse de", "olsa da": 'even if', which ends in -sa / -se). A capitalised word
+//     before it ("İran da açıklama yaptı", "Törene Bakan da katıldı") is a subject
+//     that is named.
+// Deviations from the fix_spec, all found by the live replay of the 141 population:
+//   1. The fix_spec said "no capitalised proper noun before it". That would let
+//      "Gazze'nin tanığı cerrah da ..." through, because 'Gazze'nin' opens the title
+//      with a capital, so the rule judges the word immediately before the particle.
+//   2. A concessive verb before the particle is not a teaser: "Ağıralioğlu,
+//      enflasyon düşse de ... dedi" (74ce6708) was swapped for the vague "Yavuz
+//      Ağıralioğlu'ndan ekonomi eleştirisi", and "Trump istese de" (92748902) was
+//      charged too.
+//   3. The particle has to be written in lower case: a capitalised 'De' / 'Da' after
+//      a lower-case word is a surname ("Belçika hükümeti düşecek mi? De Wever ...").
+//   4. The oblique forms of the pronouns in the exclusion list ("bana da anlatın")
+//      are excluded with them.
+const TEASER_LAST_PARTICLE_INDEX = 4;
+const TEASER_NOT_A_SUBJECT: ReadonlySet<string> = new Set([
+  "ya", "hem", "yine", "gene", "ise", "ama", "ben", "sen", "o", "biz", "siz",
+  "onlar", "bu", "şu",
+  "bana", "sana", "ona", "bize", "size", "onlara", "beni", "seni", "onu", "bizi",
+  "sizi", "onları", "bunu", "buna", "bunun", "şunu", "şuna", "benim", "senin",
+  "onun", "bizim", "sizin", "onların",
+]);
+// A token longer than this is never 'da' / 'de' nor in the set above: only its
+// first letters are kept, so a 2 MB token costs a scan and not a copy.
+const TEASER_TOKEN_KEEP = 24;
+const TEASER_TRAILING_QUOTES: ReadonlySet<string> = new Set([
+  '"', "'", "’", "”", "‘", "“", "»", "«", ")", "]",
+]);
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
+function isTeaserSpace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\u00a0" || ch === "\f" || ch === "\v";
+}
+
+function sequelTeaser(title: string): boolean {
+  const n = title.length;
+  let at = 0;
+  let previous: string | null = null; // the trimmed token before the current one
+  for (let index = 0; index <= TEASER_LAST_PARTICLE_INDEX; index++) {
+    while (at < n && isTeaserSpace(title.charAt(at))) at++;
+    if (at >= n) return false;
+    const start = at;
+    while (at < n && !isTeaserSpace(title.charAt(at))) at++;
+    const end = at;
+    // A speaker label ends the scan.
+    let last = end;
+    while (last > start && TEASER_TRAILING_QUOTES.has(title.charAt(last - 1))) last--;
+    if (last > start && title.charAt(last - 1) === ":") return false;
+    // Trim punctuation and quotes from both ends.
+    let from = start;
+    while (from < end && !WORD_CHAR.test(title.charAt(from))) from++;
+    let to = end;
+    while (to > from && !WORD_CHAR.test(title.charAt(to - 1))) to--;
+    const token = title.slice(from, Math.min(to, from + TEASER_TOKEN_KEEP));
+    if (token === "da" || token === "de") {
+      if (index < 1 || previous === null) return false;
+      if (!/^\p{Ll}/u.test(previous)) return false;
+      const before = previous.toLocaleLowerCase("tr");
+      return !TEASER_NOT_A_SUBJECT.has(before) && !before.endsWith("sa") && !before.endsWith("se");
+    }
+    previous = token;
+  }
+  return false;
+}
+
 /** Number of loaded-wording rules the title trips (0.25 each in scoreTitle). */
 export function loadedPenalty(title: string): number {
   const folded = foldTr(title);
   let n = 0;
   for (const re of LOADED_FOLDED) if (re.test(folded)) n++;
+  if (sequelTeaser(title)) n++;
   return n;
 }
 

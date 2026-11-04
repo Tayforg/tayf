@@ -124,6 +124,8 @@ export function SourceKarneCard({ karne, slug }: SourceKarneCardProps) {
         </Link>
         <Link
           href={`/metodoloji?source=${encodeURIComponent(slug)}#duzeltme`}
+          rel="nofollow"
+          prefetch={false}
           className="inline-flex items-center text-xs font-medium text-brand hover:underline"
         >
           Bu sayılara itiraz et

@@ -4439,3 +4439,427 @@ describe("wave BD (hunt-25): named politicians and the İBB trial in the headlin
     "fon soruşturması / Takasbank / fon stems: founder decision (h25-clusters-2), deliberately not added",
   );
 });
+
+// ---------------------------------------------------------------------------
+// Wave BL (hunt-31): politics gate precision
+// ---------------------------------------------------------------------------
+//
+// Hunt-31 (2026-11-04) found three clusters of NON-political stories that the
+// gate admitted, each through a rule that has a political sense and a
+// non-political one:
+//
+//   * 'meclis' (a POLITIKA_STEMS entry): the İstanbul Ticaret Odası (İTO) chair
+//     election, cluster 00e97812 (10 outlets), says '270 Meclis üyesinin
+//     251'sinin oyunu alarak'. A chamber has an assembly too. The chamber / club
+//     exemption of the 'oy' and 'seçim' rules never reached 'meclis'.
+//   * 'muhalefet': the İçişleri fraud / illegal-betting operation, cluster
+//     ab868b2d (12 outlets), lists the charge 'Siber Güvenlik Kanunu'na
+//     muhalefet'. 'Kanuna muhalefet' is the legal phrase 'contravening the law',
+//     not the opposition (the old guard knew only 'hava muhalefeti').
+//   * 'siyaset dünyası': the Zorlu Holding chair's funeral, cluster 09779679 (5
+//     outlets), says 'İş ve siyaset dünyası Levent'te buluştu'. After a sector
+//     word it is a list of mourners, not politics.
+//
+// LIVE below is every member of the three clusters, title, description and url
+// exactly as stored (read-only SELECTs on 2026-11-04 through the cluster_articles
+// link table); all 27 were stored politika. `keep` is set only on a member whose
+// OWN text names an unambiguous political marker; it stays politika, with the
+// reason.
+
+interface BlRow extends GateRow {
+  keep?: string;
+}
+
+const BL_LIVE: BlRow[] = [
+  // cluster 00e97812: İTO chair re-elected (Şekib Avdagiç), 10 members
+  {
+    id: "00e97812-aydinlik",
+    source: "aydinlik",
+    title: "İTO Yönetim Kurulu Başkanı Şekib Avdagiç güven tazeledi",
+    description: "İTO’nun 22’nci dönem Yönetim Kurulu Başkanlığı seçimi gerçekleştirildi. Seçimde 270 Meclis üyesinin 251’inin oyunu alan Şekib Avdagiç, İTO Yönetim Kurulu Başkanlığı görevine yeniden seçilerek güven tazeledi.",
+    url: "https://www.aydinlik.com.tr/haber/ito-yonetim-kurulu-baskani-sekib-avdagic-guven-tazeledi-597482",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-bloomberg-ht",
+    source: "bloomberg-ht",
+    title: "İTO Başkanlığına yeniden Avdagiç seçildi",
+    description: "İstanbul Ticaret Odası'nın (İTO) 22'nci dönem başkanlığına Şekib Avdagiç, 270 Meclis üyesinin 251'sinin oyunu alarak yeniden seçildi.",
+    url: "https://www.bloomberght.com/ito-baskanligina-yeniden-avdagic-secildi-3793448",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-dijital-gaste",
+    source: "dijital-gaste",
+    title: "İTO Yönetim Kurulu Başkanlığına Şekib Avdagiç yeniden seçildi!",
+    description: "İstanbul Ticaret Odasının 22’nci dönem başkanlığı seçiminde Şekib Avdagiç, 270 meclis üyesinden 251’inin oyunu alarak yeniden yönetim kurulu başkanlığına seçildi.",
+    url: "https://www.dijitalgaste.com/ito-yonetim-kurulu-baskanligina-sekib-avdagic-yeniden-secildi",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-dunya",
+    source: "dunya",
+    title: "İTO'da Şekib Avdagiç yeniden başkan seçildi",
+    description: "İstanbul Ticaret Odasının (İTO) 22'nci dönem Yönetim Kurulu Başkanlığına Şekib Avdagiç yeniden seçildi. 270 meclis üyesinden 251'inin oyunu alan Avdagiç, önümüzdeki dört yılda üretim, ihracat ve istihdamı artırmaya yönelik çalışmalarını sürdüreceklerini açıkladı.",
+    url: "https://www.dunya.com/ekonomi/itoda-sekib-avdagic-yeniden-baskan-secildi-haberi-846401",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-ekonomim",
+    source: "ekonomim",
+    title: "Şekib Avdagiç, rekor destekle yeniden İTO Başkanı",
+    description: "850 bini aşkın üyesiyle Türkiye'nin en büyük ticaret odası olan İstanbul Ticaret Odası'nın (İTO) 22’nci dönem başkanlığına Şekib Avdagiç yeniden seçildi. 270 meclis üyesinin 251 oyunu alarak kendi dönemindeki en yüksek desteğe ulaşan Şekib Avdagiç, değerlendirmesinde “İstanbul iş dünyasını ulusal ve küresel ekonominin etkin, dinamik ve öncü aktörü olarak yarınlara hazırlamaya devam edeceğiz. Türkiye ekonomisinin gelecek inşasının bir parçası olacağız” dedi.",
+    url: "https://www.ekonomim.com/ekonomi/sekib-avdagic-rekor-destekle-yeniden-ito-baskani-haberi-929091",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-gazete-oksijen",
+    source: "gazete-oksijen",
+    title: "Şekib Avdagiç yeniden İTO Başkanı seçildi",
+    description: "İstanbul Ticaret Odası'nın 22'nci dönem başkanlığına Şekib Avdagiç, 270 Meclis üyesinin 251'sinin oyunu alarak yeniden seçildi",
+    url: "https://gazeteoksijen.com/turkiye/sekib-avdagic-yeniden-ito-baskani-secildi-294910",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-haberler-com",
+    source: "haberler-com",
+    title: "Şekib Avdagiç, İTO başkanlığına 270 meclis üyesinin 251 oyuyla yeniden seçildi",
+    description: "İstanbul Ticaret Odası'nın (İTO) 22'nci dönem başkanlığına Şekib Avdagiç, 270 meclis üyesinin 251'inin oyunu alarak yeniden seçildi. Avdagiç, 4 yıl görev yapacak yönetimle İstanbul iş dünyasını ulusal ve küresel ekonomide öncü aktör olarak hazırlamaya devam edeceklerini söyledi.",
+    url: "https://www.haberler.com/ekonomi/sekib-avdagic-ito-baskanligina-270-meclis-uyesinin-20394675-haberi/",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-haberturk",
+    source: "haberturk",
+    title: "İTO Başkanlığına yeniden Avdagiç seçildi",
+    description: "İstanbul Ticaret Odası'nın (İTO) 22'nci dönem başkanlığına Şekib Avdagiç, 270 Meclis üyesinin 251'sinin oyunu alarak yeniden seçildi",
+    url: "https://www.haberturk.com/ekonomi/ito-baskanligina-yeniden-avdagic-secildi-3924869",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-odatv",
+    source: "odatv",
+    title: "İTO'da yeniden Şekib Avdagiç dönemi",
+    description: "İTO'da gerçekleştirilen seçimde Şekib Avdagiç, 270 meclis üyesinden 251'inin oyunu alarak başkanlık görevine yeniden seçildi.",
+    url: "https://www.odatv.com/ekonomi/ito-baskanliginda-yeniden-sekib-avdagic-donemi-120169671",
+    stored: "politika",
+  },
+  {
+    id: "00e97812-yeni-mesaj",
+    source: "yeni-mesaj",
+    title: "İTO Yönetim Kurulu Başkanlığına Şekib Avdagiç yeniden seçildi",
+    description: "850 bini aşkın üyesiyle Türkiye'nin en büyük ticaret odası olan İstanbul Ticaret Odası'nın (İTO) 22'nci dönem başkanlığına Şekib Avdagiç, 270 Meclis üyesinin 251'inin oyunu alarak yeniden seçildi İstanbul Ticaret Odası (İTO) Başkanlığına bugün yapılan seçimde yeniden seçilen Şekib Avdagiç, \"İstanbul iş dünyasını ulusal ve küresel ekonominin etkin, dinamik ve öncü aktörü olarak yarınlara hazırlamaya devam edeceğiz. Türkiye ekonomisinin gelecek inşasının bir parçası olacağız. Nasıl ki bugüne ka...",
+    url: "https://www.yenimesaj.com.tr/ito-yonetim-kurulu-baskanligina-sekib-avdagic-yeniden-secildi-H1620830.htm",
+    stored: "politika",
+  },
+  // cluster ab868b2d: İçişleri fraud / illegal-betting operation, 12 members
+  {
+    id: "ab868b2d-aksam",
+    source: "aksam",
+    title: "19,9 milyar liralık para trafiği deşifre oldu! 11 il merkezli operasyon",
+    description: "İçişleri Bakanlığı, nitelikli dolandırıcılık, yasa dışı bahis, silah kaçakçılığı ve Siber Güvenlik Kanunu'na muhalefet suçlarına yönelik 11 il merkezli operasyonlarda, 19,9 milyar liralık para hareketliliği tespit edilen 230 şüpheli hakkında işlem yapıldığını açıkladı.",
+    url: "https://www.aksam.com.tr/guncel/199-milyar-liralik-para-trafigi-desifre-oldu-11-il-merkezli-operasyon/haber-1711693",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-haber-global",
+    source: "haber-global",
+    title: "11 ilde 230 gözaltı: Dolandırıcılık, yasa dışı bahis, silah kaçakçılığı...",
+    description: "İçişleri Bakanlığı, 11 ilde dolandırıcılık, yasa dışı bahis, silah kaçakçılığı ve Siber Güvenlik Kanunu'na muhalefet suçlarına yönelik düzenlenen operasyonlarda 230 kişinin gözaltına alındığını açıkladı. Zanlıların hesaplarında toplam 19,9 milyar liralık hesap hareketliliği tespit edildiği bildirildi.",
+    url: "https://haberglobal.com/gundem/11-ilde-230-gozalti-dolandiricilik-yasa-disi-bahis-silah-kacakciligi-551784",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-haber7",
+    source: "haber7",
+    title: "11 ilde dev operasyon: 19,9 milyar TL'lik para hareketliliği, 230 şüpheliye işlem!",
+    description: "Son dakika: 11 ilde düzenlenen 'Nitelikli dolandırıcılık', 'Yasa dışı bahis', 'Silah kaçakçılığı' ve 'Siber Güvenlik Kanununa muhalefet' operasyonlarında, 19,9 milyar TL para hareketliliği tespit edilen 230 şüpheli hakkında işlem yapıldı.",
+    url: "https://www.haber7.com/guncel/haber/3673995-11-ilde-dev-operasyon-199-milyar-tllik-para-hareketliligi-230-supheliye-islem",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-haberler-com",
+    source: "haberler-com",
+    title: "İçişleri Bakanlığı 11 ildeki operasyonda 230 kişinin gözaltına alındığını açıkladı",
+    description: "İçişleri Bakanlığı, 11 ilde dolandırıcılık, yasa dışı bahis, silah kaçakçılığı ve Siber Güvenlik Kanunu'na muhalefet suçlarına yönelik operasyonlarda 230 kişinin gözaltına alındığını açıkladı. Şüphelilerin hesaplarında toplam 19,9 milyar liralık hareketlilik tespit edildi.",
+    url: "https://www.haberler.com/3-sayfa/icisleri-bakanligi-11-ildeki-operasyonda-230-20393738-haberi/",
+    stored: "politika",
+    keep: "the HEADLINE names the İçişleri Bakanlığı (POLITIKA_TITLE_RE office word, unchanged by this wave)",
+  },
+  {
+    id: "ab868b2d-haberport",
+    source: "haberport",
+    title: "Geniş çaplı operasyonda 230 şüpheli gözaltına alındı: hesap hareketliliği 19,9 milyar lira",
+    description: "Operasyonun kapsamı:İçişleri Bakanlığı, 11 il merkezli operasyonlarda dolandırıcılık, yasa dışı bahis, silah kaçakçılığı ve Siber Güvenlik Kanunu’na muhalefet suçlarına ilişkin soruşturma yürütüldüğün...",
+    url: "https://www.haberport.com/haber/genis-capli-operasyonda-230-supheli-gozaltina-alindi-hesap-hareketliligi-199-milyar-lira/61934",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-haberturk",
+    source: "haberturk",
+    title: "11 ilde 4 ayrı operasyon: 230 gözaltı",
+    description: "İçişleri Bakanlığı: 11 ilde düzenlenen 'Nitelikli dolandırıcılık', 'Yasa dışı bahis', 'Silah kaçakçılığı' ve 'Siber Güvenlik Kanununa muhalefet' suçlarına yönelik operasyonlarda, 19,9 milyar TL para hareketliliği tespit edilen 230 şüpheli hakkında işlem yapıldı.",
+    url: "https://www.haberturk.com/gundem/son-dakika-11-ilde-4-ayri-operasyon-230-gozalti-3924807",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-hurriyet",
+    source: "hurriyet",
+    title: "11 il merkezli yasa dışı bahis operasyonu: 230 şüpheliye işlem yapıldı",
+    description: "İçişleri Bakanlığı, 11 il merkezli yasa dışı bahis, silah kaçakçılığı ve siber güvenlik kanununa muhalefet suçlarına yönelik operasyonlar düzenlendiğini ve 230 şüpheli hakkında işlem yapıldığını duyurdu. Ayrıca şebekenin 19,9 milyar TL para hareketliliği tespit edildiği belirtildi.",
+    url: "https://www.hurriyet.com.tr/gundem/11-il-merkezli-yasa-disi-bahis-operasyonu-230-supheliye-islem-yapildi-43365259",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-sabah",
+    source: "sabah",
+    title: "11 ilde 4 ayrı operasyon: 230 şüpheliye işlem!",
+    description: "İçişleri Bakanlığı 11 ilde düzenlenen 'Nitelikli dolandırıcılık', 'Yasa dışı bahis', 'Silah kaçakçılığı' ve 'Siber Güvenlik Kanununa muhalefet' suçlarına yönelik operasyonlarda, 19,9 milyar TL para hareketliliği...Devamı için tıklayınız",
+    url: "https://www.sabah.com.tr/gundem/2026/11/04/11-ilde-4-ayri-operasyon-230-supheliye-islem",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-sputnik-turkce",
+    source: "sputnik-turkce",
+    title: "İçişleri Bakanlığı'ndan 11 ilde 4 ayrı operasyon: 230 gözaltı",
+    description: "İçişleri Bakanlığı: 11 ilde düzenlenen 'Nitelikli dolandırıcılık', 'Yasa dışı bahis', 'Silah kaçakçılığı' ve 'Siber Güvenlik Kanununa muhalefet' suçlarına yönelik operasyonlarda, 19.9 milyar TL para hareketliliği tespit edilen 230 şüpheli hakkında işlem yapıldı.",
+    url: "https://anlatilaninotesi.com.tr/20261104/icisleri-bakanligindan-11-ilde-4-ayri-operasyon-230-gozalti-1110098142.html",
+    stored: "politika",
+    keep: "the HEADLINE names the İçişleri Bakanlığı (POLITIKA_TITLE_RE office word, unchanged by this wave)",
+  },
+  {
+    id: "ab868b2d-star",
+    source: "star",
+    title: "19,9 milyar liralık para trafiği! 11 ilde 230 şüpheli yakalandı",
+    description: "İçişleri Bakanlığı, 11 ilde dolandırıcılık, yasa dışı bahis, silah kaçakçılığı ve Siber Güvenlik Kanunu'na muhalefet suçlarına yönelik düzenlenen operasyonlarda 230 kişinin gözaltına alındığını açıkladı. Zanlıların hesaplarında toplam 19,9 milyar liralık hesap hareketliliği tespit edildiği bildirildi.",
+    url: "https://www.star.com.tr/guncel/199-milyar-liralik-para-trafigi-11-ilde-230-supheli-yakalandi-haber-2051088/",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-turkiye-gazetesi",
+    source: "turkiye-gazetesi",
+    title: "11 ilde büyük operasyon! 19.9 milyarlık para trafiği",
+    description: "11 ilde “Nitelikli Dolandırıcılık, Yasa Dışı Bahis, Silah Kaçakçılığı ve Siber Güvenlik Kanununa Muhalefet” suçlarına yönelik operasyon düzenlendi. 19,9 milyar TL para hareketliliği tespit edilirken 230 şüpheli de gözaltına alındı.",
+    url: "https://www.turkiyegazetesi.com.tr/gundem/11-ilde-yasa-disi-bahis-ve-dolandiricilik-operasyonu-19-9-milyar-liralik-para-hareket-1827076",
+    stored: "politika",
+  },
+  {
+    id: "ab868b2d-yeni-safak",
+    source: "yeni-safak",
+    title: "11 ilde suç ağlarına operasyon: 19,9 milyar liralık kirli para trafiği ortaya çıktı",
+    description: "İçişleri Bakanlığı, 11 ilde düzenlenen 'Nitelikli dolandırıcılık', 'Yasa dışı bahis', 'Silah kaçakçılığı' ve 'Siber Güvenlik Kanununa muhalefet' suçlarına yönelik operasyonlarda, 19,9 milyar TL para hareketliliği tespit edilen 230 şüpheli hakkında işlem yapıldığını açıkladı.",
+    url: "https://www.yenisafak.com/gundem/11-ilde-suc-aglarina-operasyon-199-milyar-liralik-kirli-para-trafigi-ortaya-cikti-4869631",
+    stored: "politika",
+  },
+  // cluster 09779679: Zorlu Holding chair's funeral, 5 members
+  {
+    id: "09779679-aksam",
+    source: "aksam",
+    title: "Ahmet Nazif Zorlu son yolculuğuna uğurlandı: İş ve siyaset dünyası Levent'te buluştu",
+    description: "Akciğer kanseri nedeniyle 82 yaşında hayatını kaybeden Zorlu Holding Yönetim Kurulu Başkanı Ahmet Nazif Zorlu, Levent Barbaros Hayrettin Paşa Camisi'nde kılınan cenaze namazının ardından iş ve siyaset dünyasından çok sayıda ismin katılımıyla Zincirlikuyu Mezarlığı'ndaki aile kabristanına defnedildi.",
+    url: "https://www.aksam.com.tr/guncel/ahmet-nazif-zorlu-son-yolculuguna-ugurlandi-is-ve-siyaset-dunyasi-leventte-bulustu/haber-1711830",
+    stored: "politika",
+  },
+  {
+    id: "09779679-haberport",
+    source: "haberport",
+    title: "Ahmet Nazif Zorlu için son görev: iş ve siyaset dünyası törene katıldı",
+    description: "Törenin ayrıntıları:İstanbul'da tedavi gördüğü hastanede hayatını kaybeden Ahmet Nazif Zorlu için Barbaros Hayrettin Paşa Camii'nde öğle namazını takiben cenaze töreni düzenlendi. 82 yaşında vefat ede...",
+    url: "https://www.haberport.com/haber/ahmet-nazif-zorlu-icin-son-gorev-is-ve-siyaset-dunyasi-torene-katildi/62264",
+    stored: "politika",
+  },
+  {
+    id: "09779679-milliyet",
+    source: "milliyet",
+    title: "Zorlu Holding Yönetim Kurulu Başkanı Ahmet Nazif Zorlu son yolculuğuna uğurlandı",
+    description: "Akciğer kanseri nedeniyle bir süredir tedavi gördüğü hastanede 2 Kasım'da 82 yaşında yaşamını yitiren Zorlu'nun cenaze töreni, İstanbul Levent'teki Barbaros Hayrettin Paşa Camisi'nde düzenlendi. Öğle vakti kılınan cenaze namazına, 11'inci Cumhurbaşkanı Abdullah Gül'ün yanı sıra Zorlu'nun ailesi, yakınları, çalışma arkadaşları ile iş ve siyaset dünyasından çok sayıda isim katıldı.\nAhmet Nazif Zorlu'nun naaşı, kılınan cenaze namazının ardından Zincirlikuyu Mezarlığı'ndaki aile kabristanına defn...",
+    url: "https://www.milliyet.com.tr/gundem/zorlu-holding-yonetim-kurulu-baskani-ahmet-nazif-zorlu-son-yolculuguna-ugurlandi-7694221",
+    stored: "politika",
+  },
+  {
+    id: "09779679-muhalif",
+    source: "muhalif",
+    title: "Ahmet Nazif Zorlu son yolculuğuna uğurlandı: Cenaze törenine iş ve siyaset dünyasından yoğun katılım",
+    description: "Zorlu Holding Yönetim Kurulu Başkanı Ahmet Nazif Zorlu için önce holding merkezinde tören düzenlendi, ardından Barbaros Hayrettin Paşa Camisi’nde cenaze namazı...",
+    url: "https://www.muhalif.com.tr/gundem/ahmet-nazif-zorlu-son-yolculuguna-ugurlandi-cenaze-torenine-is-ve-siyaset-dunyasindan-yogun-katilim/747655",
+    stored: "politika",
+  },
+  {
+    id: "09779679-on-haber",
+    source: "on-haber",
+    title: "Ahmet Nazif Zorlu son yolculuğuna uğurlandı",
+    description: "Akciğer kanseri tedavisi gördüğü hastanede 2 Kasım’da 82 yaşında yaşamını yitiren Zorlu için İstanbul Levent’teki Barbaros Hayrettin Paşa Camisi’nde cenaze töreni düzenlendi. Öğle vakti kılınan cenaze namazına 11’inci Cumhurbaşkanı Abdullah Gül’ün yanı sıra Zorlu’nun ailesi, yakınları, çalışma arkadaşlarıyla iş ve siyaset dünyasından çok sayıda isim katıldı. Ahmet Nazif Zorlu’nun naaşı cenaze namazının ardından Zincirlikuyu Mezarlığı’ndaki […]",
+    url: "https://10haber.net/gundem/ahmet-nazif-zorlu-son-yolculuguna-ugurlandi-751809/",
+    stored: "politika",
+  },
+];
+
+describe("wave BL (hunt-31): politics gate precision", () => {
+  describe("the live members of the three clusters", () => {
+    it("is not vacuous: 27 distinct rows, every one stored politika", () => {
+      expect(BL_LIVE).toHaveLength(27);
+      expect(new Set(BL_LIVE.map((r) => r.id)).size).toBe(27);
+      expect(BL_LIVE.filter((r) => r.stored !== "politika")).toHaveLength(0);
+      expect(BL_LIVE.filter((r) => r.id.startsWith("00e97812"))).toHaveLength(10);
+      expect(BL_LIVE.filter((r) => r.id.startsWith("ab868b2d"))).toHaveLength(12);
+      expect(BL_LIVE.filter((r) => r.id.startsWith("09779679"))).toHaveLength(5);
+    });
+
+    it.each(BL_LIVE.filter((r) => r.keep === undefined))(
+      "$id is neither politika nor son_dakika",
+      (row) => {
+        const got = classifyRow(row);
+        expect(got).not.toBe("politika");
+        expect(got).not.toBe("son_dakika");
+      },
+    );
+
+    it.each(BL_LIVE.filter((r) => r.keep !== undefined))("$id stays politika: $keep", (row) => {
+      expect(classifyRow(row)).toBe("politika");
+    });
+  });
+
+  describe("synthetic rows: expected NOT politika and NOT son_dakika", () => {
+    it.each([
+      // a chamber's assembly (the İTO election)
+      [
+        "İTO Başkanlığına yeniden Avdagiç seçildi",
+        "İstanbul Ticaret Odası'nın (İTO) 22'nci dönem başkanlığına Şekib Avdagiç, 270 Meclis üyesinin 251'sinin oyunu alarak yeniden seçildi.",
+      ],
+      ["Ticaret Odası meclis toplantısı yapıldı", null],
+      ["Oda meclisi toplandı", null],
+      ["Meclis üyeleri toplandı", "Eczacı Odası meclis üyeleri yeni dönem için bir araya geldi."],
+      ["Yeni dönem başladı", "Ticaret ve Sanayi Odası meclisi toplandı."],
+      ["Yeni dönem başladı", "ŞUTSO meclis üyeleri oy kullandı."],
+      ["TOBB meclisi toplandı", null],
+      // 'muhalefet' as the legal phrase 'contravening the law'
+      [
+        "11 ilde 4 ayrı operasyon: 230 gözaltı",
+        "İçişleri Bakanlığı: 11 ilde düzenlenen operasyonlarda 230 şüpheliye işlem yapıldı. Siber Güvenlik Kanununa muhalefet suçlarına yönelik çalışma sürüyor.",
+      ],
+      ["Kaçakçılıkla Mücadele Kanununa muhalefet", null],
+      ["KAÇAKÇILIKLA MÜCADELE KANUNUNA MUHALEFET", null],
+      ["6136 sayılı Kanun'a muhalefetten gözaltı", null],
+      ["6136 sayılı Kanun’a muhalefetten gözaltı", null],
+      ["Yasaya muhalefet suçundan tutuklandı", null],
+      ["Yasa'ya muhalefet suçundan tutuklandı", null],
+      ["Yeni gelişme", "Orman Kanunu'na muhalefet suçundan işlem yapıldı."],
+      ["Yeni gelişme", "Ateşli Silahlar Kanunlarına muhalefet suçlamasıyla 3 kişi yakalandı."],
+      ["Yeni gelişme", "Şüpheliler, Siber Güvenlik Kanunu'na muhalefet ve nitelikli dolandırıcılık suçlarından yakalandı."],
+      // 'siyaset dünyası' after a sector word: a list of mourners, guests, fans
+      ["Ahmet Nazif Zorlu son yolculuğuna uğurlandı: İş ve siyaset dünyası Levent'te buluştu", null],
+      ["Son yolculuğuna uğurlandı", "Cenazesine iş, sanat ve siyaset dünyasından yoğun katılım oldu."],
+      ["Son yolculuğuna uğurlandı", "Ahmet Nazif Zorlu'nun cenazesine iş ve siyaset dünyasından yoğun katılım"],
+      ["Son yolculuğuna uğurlandı", "Töreni iş ve siyaset dünyası izledi."],
+      ["İŞ VE SİYASET DÜNYASI BU TÖRENDE BULUŞTU", null],
+      ["Sanat ve siyaset dünyası bu ödül töreninde buluştu", null],
+      ["Spor, siyaset dünyası ve sanatçılar bu maçta bir araya geldi", null],
+      ["Medya ve siyaset dünyası bu ödül töreninde buluştu", null],
+      ["Bilim ve siyaset dünyası bu zirvede bir araya geldi", null],
+      ["Kültür ve siyaset dünyası bu ödül töreninde buluştu", null],
+      ["Ekonomi ve siyaset dünyası bu zirvede buluştu", null],
+    ] as Array<[string, string | null]>)("%s | %s", (title, description) => {
+      notInGate(title, description);
+    });
+  });
+
+  describe("MUST stay politika", () => {
+    it.each([
+      // 'meclis' that is a state assembly, admitted ONLY through the changed rule
+      ["Belediye meclisinde bütçe kavgası", null],
+      ["Belediye meclis üyesi CHP'den istifa etti", null],
+      ["İl genel meclisi üyesi AK Parti'ye geçti", null],
+      ["Meclis'te yeni yargı paketi görüşmeleri başladı", null],
+      ["Meclis'te yeni dönem", null],
+      ["Yeni dönem başladı", "Belediye meclisi bugün toplandı."],
+      ["Yeni dönem başladı", "Meclis'te bütçe görüşmeleri sürüyor."],
+      ["Yeni dönem başladı", "Ticaret Odası başkanı, İl Genel Meclisi'ne konuk oldu."],
+      ["Yeni dönem başladı", "Oda başkanı Millet Meclisi'nde komisyona sunum yaptı."],
+      ["Yeni dönem başladı", "Kulüp yöneticileri Belediye Meclisi'nde konuştu."],
+      ["TBMM Genel Kurulu'nda yoğun mesai", null],
+      ["Ticaret odası başkanı TBMM'de konuştu", null],
+      ["Ticaret odası başkanı milletvekilleriyle görüştü", null],
+      // 'muhalefet' as the opposition
+      ["Ana muhalefet partisi lideri Özel açıklama yaptı", null],
+      ["Muhalefet şerhi yazıldı", null],
+      ["Yeni yasa muhalefetin tepkisini çekti", null],
+      ["Yeni gelişme", "Yeni yasa muhalefetin tepkisini çekti."],
+      ["Kanun teklifi muhalefetin itirazına rağmen kabul edildi", null],
+      ["Yeni gelişme", "Kanun teklifi muhalefetin itirazına rağmen kabul edildi."],
+      ["Muhalefet lideri açıkladı", null],
+      ["Yeni gelişme", "Muhalefet kanuna itiraz etti."],
+      ["Yeni gelişme", "Kanun hükmünde kararnameye muhalefet tepki gösterdi."],
+      ["Yeni gelişme", "Yasa tasarısına muhalefet partileri itiraz etti."],
+      ["Yeni gelişme", "Kanunun görüşmeleri sürerken muhalefet salondan çıktı."],
+      ["Yeni gelişme", "Yasanın ardından muhalefet milletvekilleri konuştu."],
+      // 'yasak' (a ban) is NOT the dative of 'yasa' (a law): a ban followed by the
+      // opposition's reaction is a recurring political headline shape
+      ["Miting yasağına muhalefetten sert tepki", null],
+      ["Eylem yasaklamasına muhalefet tepki gösterdi", null],
+      ["Gösteri yasaklarına muhalefetten itiraz", null],
+      ["MİTİNG YASAĞINA MUHALEFETTEN SERT TEPKİ", null],
+      ["Yeni gelişme", "Sosyal medya yasağına muhalefet partileri itiraz etti."],
+      // 'siyaset' that is not a list of mourners
+      ["Siyaset dünyasında deprem: ünlü isim istifa etti", null],
+      ["SİYASET DÜNYASINDA DEPREM", null],
+      ["Siyaset dünyasında deprem", null],
+      ["Yeni gelişme", "Siyaset dünyasında deprem etkisi yaratan istifa sonrası kulisler hareketlendi."],
+      ["Siyaset kulisleri hareketlendi", null],
+      ["Yeni gelişme", "Siyaset kulisleri hareketlendi."],
+      ["Siyaset ve iş dünyası bu kararı konuşuyor", null],
+      ["Yeni gelişme", "Siyaset ve iş dünyası bu kararı konuşuyor."],
+      ["Bu haftaki siyaset dünyası gündemi", null],
+      ["Yeni gelişme", "Bu haftaki siyaset dünyası gündemi."],
+      // the occupation rule is untouched
+      ["Siyasetçi Ali Veli konuştu", null],
+      ["Yeni gelişme", "Eski siyasetçi Ali Veli konuştu."],
+    ] as Array<[string, string | null]>)("%s | %s", (title, description) => {
+      expect(cls(title, description), `${title} | ${description ?? ""}`).toBe("politika");
+    });
+  });
+
+  describe("the earlier guards keep their expectations", () => {
+    it("'hava muhalefeti' is still the weather", () => {
+      notInGate("Uçuşlar iptal", "Hava muhalefeti nedeniyle seferler yapılamadı.");
+      notInGate("Hava muhalefeti nedeniyle seferler iptal edildi");
+      expect(cls("Yeni gelişme", "Muhalefet hava saldırısını kınadı")).toBe("politika");
+      expect(cls("Muhalefetten hava harekâtı tepkisi")).toBe("politika");
+    });
+
+    it("'ve siyasetçi' is still the occupation in a biography", () => {
+      notInGate("Edebiyat gündemi", "Şair, yazar ve siyasetçi Yahya Kemal Beyatlı'nın vefatının 68. yıl dönümü.");
+      expect(cls("Siyasetçi Ali Veli konuştu")).toBe("politika");
+    });
+  });
+
+  describe("linear time on large inputs (200k characters)", () => {
+    // Measured locally (Node 24.21, 15 runs after a warm-up, the worst of title +
+    // description in one go, ms): 'kanununa muhalefet' repeated 9.7; 'kanun' + 199 990
+    // letters a + ' muhalefet' 9.8; 'kanuna' + blanks + 'muhalefet' 2.6; 'meclis
+    // odası' repeated 13.6; 'iş ve siyaset dünyası' repeated 11.9; 'is ve' + 200k
+    // blanks + 'siyaset dünyası' 3.7; 'siyaset' + 200k blanks + 'dünyası' 2.6. The
+    // worst is 13.6 ms for the two calls (the old classifier: 8.4 ms), so the
+    // 2 x 50 ms below is more than 7 times the measurement.
+    const BUDGET_MS = 50;
+    const inputs: Array<[string, string]> = [
+      ["'kanununa muhalefet ' repeated", "kanununa muhalefet ".repeat(10_500).slice(0, 200_000)],
+      ["'kanun' + 199 990 letters a + ' muhalefet'", "kanun" + "a".repeat(199_990) + " muhalefet"],
+      ["'kanuna' + 199 980 blanks + 'muhalefet'", "kanuna" + " ".repeat(199_980) + "muhalefet"],
+      ["'meclis odası ' repeated", "meclis odası ".repeat(15_400).slice(0, 200_000)],
+      ["'iş ve siyaset dünyası ' repeated", "iş ve siyaset dünyası ".repeat(9_100).slice(0, 200_000)],
+      ["'is ve' + 200k blanks + 'siyaset dünyası'", "is ve" + " ".repeat(200_000) + "siyaset dünyası"],
+      ["'siyaset' + 200k blanks + 'dünyası'", "siyaset" + " ".repeat(200_000) + "dünyası"],
+    ];
+
+    it.each(inputs)("%s classifies in under the budget", (_name, text) => {
+      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
+      const started = performance.now();
+      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
+      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
+      const elapsed = performance.now() - started;
+      expect(ALL.has(viaTitle)).toBe(true);
+      expect(ALL.has(viaDescription)).toBe(true);
+      expect(elapsed).toBeLessThan(BUDGET_MS * 2);
+    });
+  });
+});

@@ -398,6 +398,7 @@ function makeMember(
 function makeCluster(overrides: {
   bias_distribution: BiasDistribution;
   is_archived?: boolean;
+  article_count?: number;
   title_original?: string | null;
   title_method?: ClusterDetail["cluster"]["title_method"];
 }): ClusterDetail["cluster"] {
@@ -407,7 +408,7 @@ function makeCluster(overrides: {
     title_original: overrides.title_original ?? null,
     title_method: overrides.title_method ?? null,
     summary_tr: "Test özeti",
-    article_count: 3,
+    article_count: overrides.article_count ?? 3,
     bias_distribution: overrides.bias_distribution,
     is_blindspot: false,
     blindspot_side: null,
@@ -1290,6 +1291,17 @@ describe("ClusterDetailPage — mobile tap targets (h16-mobile-2)", () => {
     ]);
   });
 
+  it("marks the Düzeltme talebi link nofollow and non-prefetching (h31-bots-1: one static page behind ~31.7k per-cluster URLs)", async () => {
+    const tree = await renderTree();
+    const link = findAllElements(
+      tree,
+      (el) => el.props.href === "/metodoloji?cluster=c1#duzeltme",
+    );
+    expect(link).toHaveLength(1);
+    expect(link[0]!.props.rel).toBe("nofollow");
+    expect(link[0]!.props.prefetch).toBe(false);
+  });
+
   it("lifts the Denge puanı nedir? link to a 44 px row below sm", async () => {
     const tree = await renderTree();
     const link = findAllElements(tree, (el) => el.props.href === "/metodoloji#denge-puani");
@@ -1437,6 +1449,83 @@ describe("generateMetadata — seo-3 archived noindex", () => {
 
     const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
     expect(metadata.robots).toBeUndefined();
+  });
+});
+
+// h31-seo-1: ~71% of new clusters are single-article. The sitemaps, the news
+// sitemap and IndexNow already require article_count >= 2; the page itself
+// must not offer a thin one-outlet duplicate to the index either. The page
+// keeps answering 200 with its own canonical and JSON-LD (shared links work).
+describe("generateMetadata — single-article clusters are noindex (h31-seo-1)", () => {
+  function detailWithCount(articleCount: number, isArchived = false): ClusterDetail {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    return {
+      cluster: makeCluster({
+        bias_distribution: emptyDistribution(),
+        is_archived: isArchived,
+        article_count: articleCount,
+      }),
+      members: [makeMember("a1", source)],
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: articleCount, memberCount: articleCount },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  it("article_count 1: robots index:false, follow:true, canonical still the cluster itself", async () => {
+    getClusterDetail.mockResolvedValue(detailWithCount(1));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.alternates?.canonical).toBe("/cluster/c1");
+    expect(metadata.openGraph?.url).toBe("/cluster/c1");
+    // A real page, not a 404, and the real headline.
+    expect(metadata.title).toBe("Test kümesi");
+    expect(notFound).not.toHaveBeenCalled();
+  });
+
+  it("article_count 0 (no member yet) is noindex too", async () => {
+    getClusterDetail.mockResolvedValue(detailWithCount(0));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+  });
+
+  it("article_count 2: robots left unset so the root layout default (index, follow) applies", async () => {
+    getClusterDetail.mockResolvedValue(detailWithCount(2));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.robots).toBeUndefined();
+    expect(metadata.alternates?.canonical).toBe("/cluster/c1");
+  });
+
+  it("a larger cluster stays indexable", async () => {
+    getClusterDetail.mockResolvedValue(detailWithCount(12));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.robots).toBeUndefined();
+  });
+
+  it.each([1, 2, 12])("an archived cluster with article_count %i is noindex, as before", async (count) => {
+    getClusterDetail.mockResolvedValue(detailWithCount(count, true));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.alternates?.canonical).toBe("/cluster/c1");
+  });
+
+  it("the page of a single-article cluster still renders its JSON-LD (only the index hint changes)", async () => {
+    getClusterDetail.mockResolvedValue(detailWithCount(1));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(findJsonLd(tree)).not.toBeNull();
   });
 });
 

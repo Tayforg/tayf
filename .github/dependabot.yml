@@ -7,6 +7,15 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # The edge runtime pins these two exactly (4.5.7 / 1.1.2) and their next
+      # majors are ESM-only: tests/guards/edge-deps-pinned and ci-dep-audit
+      # reject them by design (see the major-bump PRs #182 and #183). Minor and
+      # patch updates still arrive.
+      - dependency-name: fast-xml-parser
+        update-types: ["version-update:semver-major"]
+      - dependency-name: strnum
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

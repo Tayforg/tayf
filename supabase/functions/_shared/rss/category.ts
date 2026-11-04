@@ -105,6 +105,53 @@
 // Parti deputy congratulating Eskişehirspor (the title says 'milletvekili'),
 // and 'siyaset' in a list of local stakeholders (Kızılay Balıkesir).
 //
+// hunt-31 (2026-11-04) gate precision: three non-political clusters sat in the
+// gate, each through a rule that has a political sense and a non-political one.
+//
+//   * 'meclis' (was a POLITIKA_STEMS entry) is MECLIS_RE now and counts, in the
+//     title and in the description, unless the text names a chamber / TSO / TOBB /
+//     İTO / club and NO state assembly (stateMeclis, STATE_ASSEMBLY_RE). The İTO
+//     chair election (cluster 00e97812, 10 outlets) says '270 Meclis üyesinin
+//     251'sinin oyunu alarak'. 'İTO' is in the MECLIS-only organisation pattern
+//     (MECLIS_ORG_RE), not in ORG_ELECTORATE_RE: two of the ten members (Aydınlık,
+//     OdaTV) write only 'İTO', and the 'oy' and 'seçim' rules stay as they were.
+//   * 'muhalefet' loses the legal phrase 'kanuna muhalefet' ('Siber Güvenlik
+//     Kanununa muhalefet', the İçişleri fraud and illegal-betting operation of
+//     cluster ab868b2d, 12 outlets) next to the old 'hava muhalefeti'. Dative
+//     forms only, so 'Yeni yasa muhalefetin tepkisini çekti' stays politika.
+//   * 'siyaset dünyası' right after a sector list ('iş ve', 'iş, sanat ve',
+//     'spor,') is a list of mourners or guests, not politics (the Zorlu Holding
+//     chair's funeral, cluster 09779679, 5 outlets). Every other 'siyaset' keeps
+//     admitting; 'siyasetçi' is untouched.
+//
+// Replay, read-only: HEAD (hunt-30 build) against this module over every stored
+// row created 2026-10-28 14:00Z .. 2026-11-04 13:39Z (66,578 rows, 0 duplicate
+// ids; 15,588 stored politika or son_dakika). The gate (politika | son_dakika) of
+// the classifier goes from 12,700 rows to 12,631: 0 rows enter, 69 leave, 0
+// change between politika and son_dakika, and the other 66,509 rows keep their
+// category. All 69 leavers were read by hand and none is political:
+//   * 44 chamber 'meclis' rows: 11 İTO chair-election rows, 13 İstanbul Sanayi Odası
+//     (İSO) election rows (one of them the İTO + İSO wrap 'İstanbul yarışında son
+//     tur!'), 2 TOBB İçecek Sanayi Meclisi rows, and 18 rows of the Düzce, Samsun,
+//     Elazığ, Tokat, Bilecik, Beypazarı, Kayseri, Adana (ATO) and Bursa (BTSO,
+//     TEKNOSAB) chambers; exactly three rows leave through 'İTO' alone (Aydınlık,
+//     OdaTV, and the İTO + İSO wrap);
+//   * 19 'kanun* muhalefet' rows: 11 of the İçişleri operation (10 members of cluster
+//     ab868b2d and one more Haberler.com wrap) and 8 charges of the same shape
+//     (2863 / 5607 / 7258 sayılı Kanun'a, Vergi Usul Kanunu, Kültür ve Tabiat
+//     Varlıklarını Koruma Kanunu: contraband, illegal alcohol, a looted-site raid,
+//     an unpaid-tax arrest warrant);
+//   * 6 'iş ve siyaset dünyası' rows: 5 of the Zorlu funeral and the gala of the
+//     film Çatlı 2 ('iş, sanat ve siyaset dünyasından ... davetli').
+// Known residuals: two members of cluster ab868b2d (Haberler.com, Sputnik Türkçe)
+// stay politika because their HEADLINE says 'İçişleri Bakanlığı' (a POLITIKA_TITLE_RE
+// office word, unchanged); 'iş dünyasının ve siyaset dünyasının' (the sector word
+// is not right before 've') and 'siyaset ve iş dünyası' still admit; 'yasalara
+// muhalefet' (plural dative) still admits; 'oda' in the sense of a ROOM beside
+// 'Meclis' with no TBMM / Millet Meclisi would leave, as it already does for 'seçim'
+// and 'oy' (none of the 66,578 rows). Three rows with 'meclis' and a chamber word
+// stay in the gate through another marker (AK Parti, MHP, TBMM / İYİ Parti).
+//
 // Forward-only: it changes the category of NEW rows. `content_hash` does not
 // depend on the category, and nothing is re-enqueued.
 
@@ -219,8 +266,9 @@ const POLITIKA_WHOLE = [
   "chp", "akp", "mhp", "hdp", "kurtulmus", "babacan", "pkk", "ozdag", "btp",
 ];
 const POLITIKA_STEMS = [
-  // 'muhalefet' is a raw pattern below: 'hava muhalefeti' is the weather
-  "milletvekil", "anayasa", "meclis", "tbmm",
+  // 'muhalefet' is a raw pattern below: 'hava muhalefeti' is the weather.
+  // 'meclis' is MECLIS_RE (hunt-31): a chamber has an assembly too.
+  "milletvekil", "anayasa", "tbmm",
   "ak parti", "dem parti", "yeni parti", "iyi parti", "parti genel",
   // TBMM group deputy chairs. A bare 'baskan vekil' is NOT a stem: clubs and
   // federations have deputy chairs too ('Galatasaray Sportif A.Ş.
@@ -255,9 +303,25 @@ const POLITIKA_RAW = [
   // linear.
   "\\berdogan(?!\\s+(?:stad|univ|millet\\s+bahce|parki|bulvari|caddesi|kongre\\s+(?:ve\\s+kultur\\s+)?merkez|kultur\\s+merkez|hastanesi|camii|kulliyesi|spor\\s+salon|lisesi))",
   // 'hava muhalefeti' (adverse weather, the excuse of a power cut) is not the
-  // opposition. The same lookbehind shape as the 'kore' guard below: variable
-  // length but linear, its scan is bounded by one run of white space.
-  "(?<!\\bhava\\s+)\\bmuhalefet",
+  // opposition, and neither is the legal phrase 'kanuna muhalefet' (hunt-31:
+  // "Siber Güvenlik Kanununa muhalefet" is a charge, the İçişleri fraud
+  // operation of cluster ab868b2d). The literal comes FIRST and the lookbehinds
+  // follow it, so they run only at a 'muhalefet' that is already a hit. Each is
+  // variable length but linear: its scan is bounded by one word plus one run of
+  // white space, and a text holds only so many hits (the runs are disjoint). The
+  // law forms are DATIVE on purpose ('kanun' + any suffix + 'a': kanuna,
+  // kanununa, kanun'a, kanunlara; 'yasa' + any suffix + 'ya' / 'na': yasaya,
+  // yasasına), because the nominative 'Yeni yasa muhalefetin tepkisini çekti' and
+  // 'Kanun teklifi muhalefetin itirazına rağmen kabul edildi' are the opposition.
+  // 'yasak' (a ban) shares the 'yasa' prefix but is NOT the law: 'Miting
+  // yasağına muhalefetten sert tepki' and 'Eylem yasaklamasına muhalefet tepki
+  // gösterdi' are the opposition reacting to a ban. The text is folded first, so
+  // the ban is 'yasak…' before a consonant suffix (yasaklamasına, yasaklarına)
+  // and 'yasag…' before a vowel suffix (yasağına -> yasagina); `(?![kg])` after
+  // 'yasa' excludes both, and no law form has a k or g there (yasaya, yasası,
+  // yasasına). The lookahead sits inside the lookbehind and is one character
+  // wide, so the guard stays linear.
+  String.raw`\bmuhalefet(?<!\bhava\s+muhalefet)(?<!\bkanun[a-z']*a\s+muhalefet)(?<!\byasa(?![kg])[a-z']*[yn]a\s+muhalefet)`,
   // 'İşçi Partisi' (the Turkish TİP, Brazil's PT, the British Labour Party),
   // but not the Korean Workers' Party ('Kore İşçi Partisi', 'Kuzey Kore İşçi
   // Partisi', 'Kore'nin İşçi Partisi'): the hunt-20 replay's one false hit
@@ -268,14 +332,27 @@ const POLITIKA_RAW = [
   // and runs only where 'işçi parti' is already about to match.
   "(?<!\\bkore(?:'[a-z]+)?\\s+)\\bisci\\s+parti",
 ];
-const POLITIKA_RE = compile(POLITIKA_WHOLE, [...POLITIKA_STEMS, "siyaset"], POLITIKA_RAW);
+// 'siyaset dünyası' after a sector word is a list of mourners, guests or fans,
+// not politics (hunt-31: "İş ve siyaset dünyası Levent'te buluştu", the funeral
+// of the Zorlu Holding chair, cluster 09779679). SIYASET_LIST_GUARD is a
+// negative lookbehind that sees the sector list ('iş ve', 'iş, sanat ve', 'spor,')
+// right before 'siyaset'; it is tried only where 'siyaset' is followed by
+// 'dünya', so every other 'siyaset' ('siyaset kulisleri', 'Siyaset dünyasında
+// deprem', 'siyasetçi') keeps admitting. Variable length but linear: its scan is
+// bounded by one word, one run of white space and one word.
+const SIYASET_SECTOR = "(?:is|sanat|spor|kultur|bilim|medya|ekonomi)";
+const SIYASET_LIST_GUARD = String.raw`(?<!\b${SIYASET_SECTOR}(?:\s+ve|\s*,)\s+siyaset)`;
+const SIYASET_TITLE = String.raw`\bsiyaset(?:(?!\s+dunya)|${SIYASET_LIST_GUARD})`;
+const SIYASET_DESC = String.raw`\bsiyaset(?!ci)(?:(?!\s+dunya)|${SIYASET_LIST_GUARD})`;
+
+const POLITIKA_RE = compile(POLITIKA_WHOLE, POLITIKA_STEMS, [...POLITIKA_RAW, SIYASET_TITLE]);
 const POLITIKA_DESC_RE = compile(
   POLITIKA_WHOLE,
   POLITIKA_STEMS,
   // 'siyaset' and every form of 'siyasetçi' except the occupation in a list of
   // occupations ('şair, yazar ve siyasetçi Yahya Kemal Beyatlı'); the lookbehind
   // is bounded by one run of white space, like the 'hava' guard.
-  [...POLITIKA_RAW, "\\bsiyaset(?!ci)", "(?<!\\bve\\s+)\\bsiyasetci"],
+  [...POLITIKA_RAW, SIYASET_DESC, "(?<!\\bve\\s+)\\bsiyasetci"],
 );
 
 // Words that make a HEADLINE politics but only decorate a description, so they
@@ -378,6 +455,24 @@ const OTHER_ELECTORATE_RE =
 const NON_STATE_ELECTORATE_RE = new RegExp(
   `${ORG_ELECTORATE_RE.source}|${OTHER_ELECTORATE_RE.source}`,
 );
+// 'meclis' is politics only when it is a STATE assembly (hunt-31). A chamber has
+// an assembly too: the İstanbul Ticaret Odası (İTO) chair election, cluster
+// 00e97812 (10 outlets), says '270 Meclis üyesinin 251'sinin oyunu alarak', and
+// 'meclis' was a POLITIKA_STEMS entry that the chamber / club exemption of the
+// 'oy' and 'seçim' rules never reached. A word start, any suffix ('meclisi',
+// "Meclis'te", 'meclisinde').
+const MECLIS_RE = /\bmeclis/;
+// The organisations whose 'meclis' is not the state's: ORG_ELECTORATE_RE plus İTO,
+// the Istanbul chamber's own acronym. Two of the ten İTO members of cluster
+// 00e97812 (Aydınlık, OdaTV) never write 'Oda' or 'TSO', only 'İTO'. 'İTO' is NOT
+// in ORG_ELECTORATE_RE: that would also move the 'oy' and 'seçim' rules, which
+// this wave leaves alone.
+const MECLIS_ORG_RE = new RegExp(`${ORG_ELECTORATE_RE.source}|\\bito\\b`);
+// A text that names the state assembly itself (TBMM, Millet Meclisi, a municipal
+// or provincial council, a deputy) keeps 'meclis' politics even beside a chamber
+// ('Ticaret odası başkanı TBMM'de konuştu'). Word starts; 'tbmm' is a whole word.
+const STATE_ASSEMBLY_RE =
+  /\btbmm\b|\bmillet\s+meclis|\bbelediye\s+meclis|\bil\s+genel\s+meclis|\bmilletvekil/;
 // 'doğru ürün seçimiyle', 'renk seçimi', 'okul seçimi'
 const CHOICE_SECIM_RE = /\b(?:urun|renk|malzeme|kiyafet|menu|meslek|okul)\s+secim/;
 // 'oy' as a whole word ('oy kullandı', 'oy sayımı'): politics unless the text
@@ -619,6 +714,12 @@ function voteIn(text: string, titleHay: string, hay: string): boolean {
   return VOTE_RE.test(text) && !nonStateElectorate(titleHay, hay);
 }
 
+// 'meclis' in the given text is the state assembly unless the whole text names a
+// chamber, TSO, TOBB, İTO or club and no state assembly (see MECLIS_RE).
+function stateMeclis(text: string, hay: string): boolean {
+  return MECLIS_RE.test(text) && !(MECLIS_ORG_RE.test(hay) && !STATE_ASSEMBLY_RE.test(hay));
+}
+
 // 'seçim' in the title is a state election unless the title is sport, the text
 // names a non-state electorate, or it is the choice sense (see SECIM_TITLE_RE).
 function secimInTitle(titleHay: string, hay: string, titleSport: boolean): boolean {
@@ -660,6 +761,7 @@ function classifyBody(
     POLITIKA_RE.test(titleHay) ||
     POLITIKA_TITLE_RE.test(titleHay) ||
     voteIn(titleHay, titleHay, hay) ||
+    stateMeclis(titleHay, hay) ||
     secimInTitle(titleHay, hay, titleSport) ||
     cumhurbaskanInTitle(titleHay) ||
     (PARTY_OFFICE_TITLE_RE.test(titleHay) &&
@@ -669,6 +771,7 @@ function classifyBody(
   const textHit =
     POLITIKA_DESC_RE.test(descHay) ||
     voteIn(descHay, titleHay, hay) ||
+    stateMeclis(descHay, hay) ||
     ((COMPOUND_BODY_RE.test(hay) ||
       COMPOUND_PARTY_RE.test(hay) ||
       TIP_MEMBER_RE.test(lower) ||
