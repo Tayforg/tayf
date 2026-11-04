@@ -11,12 +11,14 @@ import type {
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
 import type { StoryTimeline as StoryTimelineData } from "@/lib/clusters/story-timeline";
+import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import type { BiasDistribution, Source } from "@/types";
 import { FramingComparison } from "@/components/story/framing-comparison";
 import { MediaDna } from "@/components/story/media-dna";
 import { StoryTimeline } from "@/components/story/story-timeline";
 import { FactCheckBox } from "@/components/story/fact-check-box";
 import { ThreadLink } from "@/components/story/thread-link";
+import { RelatedStories } from "@/components/story/related-stories";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { BalanceChip } from "@/components/story/balance-chip";
 import { ShareButton } from "@/components/story/share-button";
@@ -106,6 +108,31 @@ const getPublishedThreadForCluster = vi.fn();
 vi.mock("@/lib/story-threads/public-query", () => ({
   getPublishedThreadForCluster: (...args: unknown[]) => getPublishedThreadForCluster(...args),
 }));
+// "İlgili haberler" block: the two feed fetchers it reuses are Supabase-backed
+// (topic hubs and the home feed), mocked so the page never reaches a real
+// client. importOriginal keeps TOPIC_SLUGS / TOPIC_LABELS_TR / the types real.
+// Defaults (null / an empty feed) are set in beforeEach.
+const getTopicClusters = vi.fn();
+vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/topic-query")>();
+  return {
+    ...actual,
+    getTopicClusters: (...args: unknown[]) => getTopicClusters(...args),
+  };
+});
+const getPoliticsClusters = vi.fn();
+vi.mock("@/lib/clusters/politics-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/politics-query")>();
+  return {
+    ...actual,
+    getPoliticsClusters: (...args: unknown[]) => getPoliticsClusters(...args),
+  };
+});
+
+import {
+  RETRY_COOLDOWN_MS,
+  __resetCacheResilienceForTests,
+} from "@/lib/cache-resilience";
 
 import ClusterDetailPage, { generateMetadata } from "./page";
 
@@ -425,6 +452,9 @@ const ORIGINAL_SITE_URL_ENV = process.env.NEXT_PUBLIC_SITE_URL;
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+  // The related slot single-flights its topic read per slug and arms a 5 s
+  // cooldown after a failed one: that module state must not leak across tests.
+  __resetCacheResilienceForTests();
   notFound.mockReset();
   getClusterDetail.mockReset();
   getClusterDetailOrThrowSpy.mockReset();
@@ -436,6 +466,14 @@ beforeEach(() => {
   getClusterFactChecks.mockResolvedValue([]);
   getPublishedThreadForCluster.mockReset();
   getPublishedThreadForCluster.mockResolvedValue(null);
+  getTopicClusters.mockReset();
+  getTopicClusters.mockResolvedValue(null);
+  getPoliticsClusters.mockReset();
+  getPoliticsClusters.mockResolvedValue({
+    bundles: [],
+    breakingBundles: [],
+    prefilterCount: 0,
+  });
 });
 
 afterEach(() => {
@@ -2065,6 +2103,572 @@ describe("cluster/[id]/page.tsx source — optional widgets stay out of the arti
     expect(code).toMatch(
       /<Suspense fallback=\{null\}>\s*<ClusterFactCheckSlot id=\{id\} \/>\s*<\/Suspense>/,
     );
+  });
+
+  // İlgili haberler (h31-seo-1 follow-up): the related-stories slot obeys the
+  // same rules as the two above, plus its whole body is guarded.
+  it("related stories: the slot is module-private and each feed fetcher is called once, inside it", () => {
+    expect(code).toContain("async function ClusterRelatedSlot(");
+    expect(code).not.toContain("export async function ClusterRelatedSlot");
+    expect(code).not.toContain("export function ClusterRelatedSlot");
+    const start = code.indexOf("async function ClusterRelatedSlot");
+    const end = code.indexOf("\n}\n", start);
+    const body = code.slice(start, end + 2);
+    for (const fetcher of ["getTopicClusters", "getPoliticsClusters"] as const) {
+      expect(body).toContain(`await ${fetcher}(`);
+      // Exactly one call in the whole file: inside the slot.
+      expect(code.split(`${fetcher}(`).length - 1).toBe(1);
+    }
+    // The WHOLE body is in try/catch: nothing may reach error.tsx.
+    const tryAt = body.indexOf("try {");
+    expect(tryAt).toBeGreaterThan(-1);
+    expect(tryAt).toBeLessThan(body.indexOf("relatedFeedFor("));
+    expect(tryAt).toBeLessThan(body.indexOf("await getTopicClusters("));
+    expect(body.indexOf("catch")).toBeGreaterThan(body.indexOf("await getPoliticsClusters("));
+    expect(body).toContain('console.warn("[cluster-related] omitted:"');
+  });
+
+  it("related stories: the slot renders last inside <Suspense fallback={null}>", () => {
+    expect(code).toMatch(/<Suspense fallback=\{null\}>\s*<ClusterRelatedSlot/);
+  });
+
+  it("related stories: one indexability helper feeds both the robots tag and the block gate", () => {
+    expect(code).toContain("function isIndexableCluster(");
+    expect(code).not.toContain("export function isIndexableCluster");
+    // The definition and its two call sites (generateMetadata and the page).
+    expect(code.split("isIndexableCluster(").length - 1).toBe(3);
+  });
+
+  it("related stories: the topic read goes through a per-slug single-flight, after the request scope, inside the try", () => {
+    const start = code.indexOf("async function ClusterRelatedSlot");
+    const body = code.slice(start, code.indexOf("\n}\n", start) + 2);
+    const tryAt = body.indexOf("try {");
+    const scopeAt = body.indexOf("await awaitRequestScope()");
+    const flightAt = body.indexOf("coalesce(");
+    const readAt = body.indexOf("await getTopicClusters(");
+    expect(tryAt).toBeGreaterThan(-1);
+    expect(scopeAt).toBeGreaterThan(tryAt);
+    expect(flightAt).toBeGreaterThan(scopeAt);
+    expect(readAt).toBeGreaterThan(flightAt);
+    // One key per slug: the key space is the six hub slugs, never user input.
+    expect(body).toContain("coalesce(`related:konu:${feed.slug}`");
+    // The read runs inside the flight and is not the page's own clock read.
+    expect(code.split("coalesce(").length - 1).toBe(1);
+  });
+
+  it("related stories: the page file reads no clock", () => {
+    expect(code).not.toContain("Date.now(");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// İlgili haberler: a server-rendered block at the END of an indexable cluster
+// page, listing up to 5 other recent multi-article clusters on the same topic
+// plus a 'Tüm <Konu> haberleri' hub link. It reuses the feeds /konu/<slug>, the
+// RSS and the home page already read (no new query). It sits in its own
+// null-fallback <Suspense>, so a slow or failed feed can never hold or break
+// the article. Single-article, archived and headline-less pages are noindex
+// and get no block (they would only add feed reads and no crawl path).
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — İlgili haberler", () => {
+  function relatedDetail(
+    clusterExtra: Partial<ClusterDetail["cluster"]> = {},
+  ): ClusterDetail {
+    const sabah = makeSource({ id: "s-sabah", name: "Sabah", bias: "pro_government" });
+    const sozcu = makeSource({ id: "s-sozcu", name: "Sözcü", bias: "opposition_leaning" });
+    const members = [makeMember("a-sabah", sabah), makeMember("a-sozcu", sozcu)];
+    const distribution = emptyDistribution();
+    for (const m of members) distribution[m.source.bias] += 1;
+    return {
+      cluster: {
+        ...makeCluster({ bias_distribution: distribution, article_count: members.length }),
+        ...clusterExtra,
+      },
+      members,
+      allSources: members.map((m) => m.source),
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: members.length,
+        memberCount: members.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  /** A feed row; `n` sets updated_at (one minute apart) so order is unambiguous. */
+  function feedBundle(
+    id: string,
+    n: number,
+    extra: Partial<ClusterBundle["cluster"]> = {},
+  ): ClusterBundle {
+    return {
+      cluster: {
+        id,
+        title_tr: `Ekonomi haberi ${id}`,
+        summary_tr: "",
+        bias_distribution: emptyDistribution(),
+        is_blindspot: false,
+        blindspot_side: null,
+        article_count: 3,
+        first_published: "2026-11-03T09:00:00.000Z",
+        updated_at: `2026-11-03T10:${String(n).padStart(2, "0")}:00.000Z`,
+        ...extra,
+      },
+      articles: [],
+      sources: [],
+    };
+  }
+
+  // Seven rows: the page's own cluster ('c1', the newest) and six others.
+  function sevenBundles(): ClusterBundle[] {
+    return [
+      feedBundle("c1", 30),
+      feedBundle("c-a", 1),
+      feedBundle("c-b", 2),
+      feedBundle("c-c", 3),
+      feedBundle("c-d", 4),
+      feedBundle("c-e", 5),
+      feedBundle("c-f", 6),
+    ];
+  }
+
+  async function pageTree() {
+    return ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+  }
+
+  function markupOf(slot: unknown): string {
+    return renderToStaticMarkup(slot as Parameters<typeof renderToStaticMarkup>[0]);
+  }
+
+  it("topic7 ekonomi: the slot sits in a null-fallback Suspense and the page body never calls the fetcher", async () => {
+    getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "ekonomi" }));
+    getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+
+    const tree = await pageTree();
+
+    const boundary = findSuspenseAround(tree, "ClusterRelatedSlot");
+    expect(boundary).not.toBeNull();
+    expect(boundary?.props?.fallback).toBeNull();
+    expect(getTopicClusters).not.toHaveBeenCalled();
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+  });
+
+  it("topic7 ekonomi: renders the 5 newest other stories with the hub link", async () => {
+    getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "ekonomi" }));
+    getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+
+    const tree = await pageTree();
+    const slot = await renderSlot(tree, "ClusterRelatedSlot");
+
+    // Page 1 of the /konu/ekonomi feed: the same cache key /konu and RSS use.
+    expect(getTopicClusters).toHaveBeenCalledTimes(1);
+    expect(getTopicClusters).toHaveBeenCalledWith("ekonomi", 1);
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+
+    const html = markupOf(slot);
+    expect(html).toContain("İlgili haberler");
+    expect(html).toContain('aria-labelledby="related-stories-heading"');
+    expect(html).toContain('id="related-stories-heading"');
+    expect(html.split("<li").length - 1).toBe(5);
+    // Newest first, the page's own cluster ('c1') and the oldest row left out.
+    const expected = ["c-f", "c-e", "c-d", "c-c", "c-b"];
+    let from = -1;
+    for (const id of expected) {
+      const at = html.indexOf(`href="/cluster/${id}"`);
+      expect(at).toBeGreaterThan(from);
+      from = at;
+    }
+    expect(html).not.toContain('href="/cluster/c1"');
+    expect(html).not.toContain('href="/cluster/c-a"');
+    expect(html).toContain("Ekonomi haberi c-f");
+    expect(html).toContain("kaynak");
+    // The hub link.
+    expect(html).toContain('href="/konu/ekonomi"');
+    expect(html).toContain("Tüm Ekonomi haberleri");
+  });
+
+  it("politika: reads the home feed once, never the topic feed, and links the hub to '/'", async () => {
+    getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "politika" }));
+    getPoliticsClusters.mockResolvedValue({
+      bundles: sevenBundles(),
+      breakingBundles: [],
+      prefilterCount: 7,
+    });
+
+    const tree = await pageTree();
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+    const slot = await renderSlot(tree, "ClusterRelatedSlot");
+
+    expect(getPoliticsClusters).toHaveBeenCalledTimes(1);
+    // The default 'reader' profile: the same entry the home page reads.
+    expect(getPoliticsClusters).toHaveBeenCalledWith();
+    expect(getTopicClusters).not.toHaveBeenCalled();
+
+    const html = markupOf(slot);
+    expect(html).toContain("İlgili haberler");
+    expect(html.split("<li").length - 1).toBe(5);
+    expect(html).toContain('href="/cluster/c-f"');
+    expect(html).not.toContain('href="/cluster/c1"');
+    expect(html).toContain('href="/"');
+    expect(html).toContain("Tüm Politika haberleri");
+    expect(html).not.toContain("/konu/politika");
+  });
+
+  it.each([
+    ["null", { topic7: null }],
+    ["undefined (a stale cache entry without the field)", {}],
+    ["an unknown value", { topic7: "bogus" }],
+    ["a wrong-case value", { topic7: "EKONOMI" }],
+  ] as const)("topic7 %s: the slot resolves null and no feed is read", async (_label, extra) => {
+    getClusterDetail.mockResolvedValue(relatedDetail({ ...extra }));
+    getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+
+    const tree = await pageTree();
+    const slot = await renderSlot(tree, "ClusterRelatedSlot");
+
+    expect(slot).toBeNull();
+    expect(getTopicClusters).not.toHaveBeenCalled();
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+  });
+
+  describe("a failing or empty feed leaves the article alone", () => {
+    it("getTopicClusters answering null (its failure value) resolves the slot to null, with a warning", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "spor" }));
+        getTopicClusters.mockResolvedValue(null);
+
+        const tree = await pageTree();
+        await expect(renderSlot(tree, "ClusterRelatedSlot")).resolves.toBeNull();
+        expect(getTopicClusters).toHaveBeenCalledWith("spor", 1);
+        expect(warn).toHaveBeenCalledWith(
+          "[cluster-related] omitted:",
+          "konu feed unavailable",
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("getPoliticsClusters rejecting resolves the slot to null, with a warning and no throw", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "politika" }));
+        getPoliticsClusters.mockRejectedValue(new Error("politics read failed"));
+
+        const tree = await pageTree();
+        await expect(renderSlot(tree, "ClusterRelatedSlot")).resolves.toBeNull();
+        expect(warn).toHaveBeenCalledWith(
+          "[cluster-related] omitted:",
+          "politics read failed",
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("getTopicClusters throwing (it should not) is contained too", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "dunya" }));
+        getTopicClusters.mockRejectedValue(new Error("boom"));
+
+        const tree = await pageTree();
+        await expect(renderSlot(tree, "ClusterRelatedSlot")).resolves.toBeNull();
+        expect(warn).toHaveBeenCalledWith("[cluster-related] omitted:", "boom");
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("a non-Error rejection is contained as well", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "politika" }));
+        getPoliticsClusters.mockRejectedValue("plain string");
+
+        const tree = await pageTree();
+        await expect(renderSlot(tree, "ClusterRelatedSlot")).resolves.toBeNull();
+        expect(warn).toHaveBeenCalledWith("[cluster-related] omitted:", "plain string");
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("a feed holding only the page's own cluster resolves the slot to null", async () => {
+      getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "ekonomi" }));
+      getTopicClusters.mockResolvedValue({
+        bundles: [feedBundle("c1", 1)],
+        hasMore: false,
+        page: 1,
+      });
+
+      const tree = await pageTree();
+      await expect(renderSlot(tree, "ClusterRelatedSlot")).resolves.toBeNull();
+    });
+
+    it("an empty feed resolves the slot to null", async () => {
+      getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "ekonomi" }));
+      getTopicClusters.mockResolvedValue({ bundles: [], hasMore: false, page: 1 });
+
+      const tree = await pageTree();
+      await expect(renderSlot(tree, "ClusterRelatedSlot")).resolves.toBeNull();
+    });
+
+    it("a feed that never settles cannot hold the article", async () => {
+      getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "ekonomi" }));
+      getTopicClusters.mockImplementation(() => new Promise(() => {}));
+
+      // Resolves although the feed never does: the page does not await it.
+      const tree = await pageTree();
+
+      expect(findSuspenseAround(tree, "ClusterRelatedSlot")).not.toBeNull();
+      expect(collectText(tree).join(" ")).toContain("Test kümesi");
+    });
+  });
+
+  // Outage amplification (hunt-30 BP review): getTopicClusters has no
+  // single-flight key of its own, so while its cached attempt holds a failed
+  // sentinel every view would run its own live read of the heavy embedded
+  // select. The slot bounds that locally: one in-flight read per slug, and a
+  // RETRY_COOLDOWN_MS negative cooldown after a failed one.
+  describe("a failing topic feed is read at most once per slug per outage window", () => {
+    const BASE_MS = Date.UTC(2026, 10, 3, 12, 0, 0);
+
+    let warn: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      // Only Date is faked: promises and microtasks keep running normally.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(BASE_MS);
+      // Every omission is logged; keep the run quiet.
+      warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      warn.mockRestore();
+      vi.useRealTimers();
+    });
+
+    async function slotFor(topic7: string): Promise<Promise<unknown>> {
+      getClusterDetail.mockResolvedValue(relatedDetail({ topic7 }));
+      const tree = await pageTree();
+      return renderSlot(tree, "ClusterRelatedSlot");
+    }
+
+    it("concurrent renders of one slug share ONE in-flight read", async () => {
+      let settle: (value: null) => void = () => {};
+      getTopicClusters.mockImplementation(
+        () => new Promise<null>((resolve) => (settle = resolve)),
+      );
+      getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "spor" }));
+      const tree = await pageTree();
+
+      const renders = Array.from({ length: 8 }, () => renderSlot(tree, "ClusterRelatedSlot"));
+      // Let every render reach its read.
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(getTopicClusters).toHaveBeenCalledTimes(1);
+
+      settle(null);
+      await expect(Promise.all(renders)).resolves.toEqual(Array(8).fill(null));
+      expect(getTopicClusters).toHaveBeenCalledTimes(1);
+    });
+
+    it("a failed read (null) starts a cooldown: repeat renders inside it do not read again", async () => {
+      getTopicClusters.mockResolvedValue(null);
+
+      await expect(slotFor("spor")).resolves.toBeNull();
+      expect(getTopicClusters).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(BASE_MS + RETRY_COOLDOWN_MS - 1);
+      for (let i = 0; i < 5; i++) await expect(slotFor("spor")).resolves.toBeNull();
+      expect(getTopicClusters).toHaveBeenCalledTimes(1);
+    });
+
+    it("a rejected read starts the same cooldown and is still contained", async () => {
+      getTopicClusters.mockRejectedValue(new Error("boom"));
+
+      await expect(slotFor("dunya")).resolves.toBeNull();
+      await expect(slotFor("dunya")).resolves.toBeNull();
+      expect(getTopicClusters).toHaveBeenCalledTimes(1);
+    });
+
+    it("after the cooldown the next render reads again and a recovered feed shows the block", async () => {
+      getTopicClusters.mockResolvedValue(null);
+      await expect(slotFor("ekonomi")).resolves.toBeNull();
+      expect(getTopicClusters).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(BASE_MS + RETRY_COOLDOWN_MS + 1);
+      getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+      const slot = await slotFor("ekonomi");
+
+      expect(getTopicClusters).toHaveBeenCalledTimes(2);
+      const html = markupOf(slot);
+      expect(html).toContain("İlgili haberler");
+      expect(html).toContain('href="/konu/ekonomi"');
+    });
+
+    it("the cooldown is per slug: a failing spor feed does not silence ekonomi", async () => {
+      getTopicClusters.mockImplementation(async (slug: string) =>
+        slug === "spor" ? null : { bundles: sevenBundles(), hasMore: false, page: 1 },
+      );
+
+      await expect(slotFor("spor")).resolves.toBeNull();
+      const slot = await slotFor("ekonomi");
+
+      expect(getTopicClusters).toHaveBeenCalledTimes(2);
+      expect(getTopicClusters).toHaveBeenNthCalledWith(1, "spor", 1);
+      expect(getTopicClusters).toHaveBeenNthCalledWith(2, "ekonomi", 1);
+      expect(markupOf(slot)).toContain("İlgili haberler");
+    });
+
+    it("healthy reads are never cooled down: every render still reads (a cache hit) and shows the block", async () => {
+      getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+
+      for (let i = 0; i < 3; i++) {
+        expect(markupOf(await slotFor("ekonomi"))).toContain("İlgili haberler");
+      }
+      expect(getTopicClusters).toHaveBeenCalledTimes(3);
+    });
+
+    it("a feed that is up but has nothing related is not a failure and arms no cooldown", async () => {
+      getTopicClusters.mockResolvedValue({ bundles: [], hasMore: false, page: 1 });
+
+      await expect(slotFor("ekonomi")).resolves.toBeNull();
+      await expect(slotFor("ekonomi")).resolves.toBeNull();
+      expect(getTopicClusters).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("only indexable pages get the block", () => {
+    it.each([
+      ["a single-article cluster", { topic7: "ekonomi", article_count: 1 }],
+      ["an empty cluster", { topic7: "ekonomi", article_count: 0 }],
+      ["an archived cluster", { topic7: "ekonomi", is_archived: true }],
+      ["a headline-less cluster", { topic7: "ekonomi", title_tr: "&nbsp;" }],
+    ] as const)("%s has no ClusterRelatedSlot and reads no feed", async (_label, extra) => {
+      getClusterDetail.mockResolvedValue(relatedDetail({ ...extra }));
+      getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+
+      const tree = await pageTree();
+
+      expect(findSuspenseAround(tree, "ClusterRelatedSlot")).toBeNull();
+      expect(getTopicClusters).not.toHaveBeenCalled();
+      expect(getPoliticsClusters).not.toHaveBeenCalled();
+      expect(collectText(tree).join(" ")).not.toContain("İlgili haberler");
+    });
+
+    it("the block gate and the robots tag agree for every case above", async () => {
+      const cases: Array<Partial<ClusterDetail["cluster"]>> = [
+        { topic7: "ekonomi", article_count: 1 },
+        { topic7: "ekonomi", is_archived: true },
+        { topic7: "ekonomi", title_tr: "&nbsp;" },
+        { topic7: "ekonomi", article_count: 2 },
+      ];
+      for (const extra of cases) {
+        getClusterDetail.mockResolvedValue(relatedDetail(extra));
+        const meta = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+        const tree = await pageTree();
+        const noindex = meta.robots !== undefined;
+        expect(findSuspenseAround(tree, "ClusterRelatedSlot") === null).toBe(noindex);
+      }
+    });
+  });
+});
+
+describe("RelatedStories component", () => {
+  const items = [
+    { id: "11111111-1111-4111-8111-111111111111", title: "Faiz kararı açıklandı", sourceCount: 12, lang: undefined },
+    { id: "22222222-2222-4222-8222-222222222222", title: "Central bank holds rates", sourceCount: 3, lang: "en" as const },
+  ];
+
+  function render(over: Partial<Parameters<typeof RelatedStories>[0]> = {}): string {
+    return renderToStaticMarkup(
+      <RelatedStories
+        items={items}
+        topicLabel="Ekonomi"
+        hubHref="/konu/ekonomi"
+        hubLabel="Tüm Ekonomi haberleri"
+        {...over}
+      />,
+    );
+  }
+
+  it("is a labelled nav with the h2, the topic line, one li per item and the hub link", () => {
+    const html = render();
+    expect(html).toContain('<nav aria-labelledby="related-stories-heading"');
+    expect(html).toContain('<h2 id="related-stories-heading"');
+    expect(html).toContain(">İlgili haberler</h2>");
+    expect(html).toContain("Ekonomi konusunda son haberler");
+    expect(html.split("<li").length - 1).toBe(2);
+    expect(html).toContain('href="/cluster/11111111-1111-4111-8111-111111111111"');
+    expect(html).toContain('href="/cluster/22222222-2222-4222-8222-222222222222"');
+    expect(html).toContain("12 kaynak");
+    expect(html).toContain("3 kaynak");
+    expect(html).toContain('href="/konu/ekonomi"');
+    expect(html).toContain("Tüm Ekonomi haberleri");
+  });
+
+  it("marks only the English headline lang=en, and hides the separator dot from assistive tech", () => {
+    const html = render();
+    expect(html.split('lang="en"').length - 1).toBe(1);
+    expect(html).toContain('<span aria-hidden="true">· </span>');
+  });
+
+  it("escapes a title instead of injecting it", () => {
+    const html = render({
+      items: [{ id: "x1", title: '<img src=x onerror="alert(1)">', sourceCount: 2, lang: undefined }],
+    });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img");
+  });
+
+  it("gives the hub link a 24 px target (44 px on small screens)", () => {
+    const html = render();
+    expect(html).toContain("min-h-6");
+    expect(html).toContain("max-sm:min-h-11");
+  });
+
+  it("has no opacity-based text colour (WCAG 1.4.3)", () => {
+    const html = render();
+    expect(html).not.toContain("text-muted-foreground/");
+    expect(html).not.toContain("text-foreground/");
+  });
+
+  // Byte budget: this block is added to every indexable cluster page, so it
+  // must stay small. Five rows with 100-character Turkish titles and UUID-style
+  // hrefs measure 3225 bytes of static markup (nav through the hub link, no
+  // streaming wrapper): about 850 of them are the five identical link class
+  // strings, which gzip folds. The ceiling is 3500, so growth is caught but the
+  // literal Tailwind classes need no trimming.
+  it("stays under the byte budget for 5 rows of 100-character Turkish titles", () => {
+    const longTitle =
+      "Merkez Bankası politika faizini yüzde kırk beşte sabit tuttu, piyasalarda dalgalanma sürüyor ve dolar".slice(
+        0,
+        100,
+      );
+    expect(longTitle).toHaveLength(100);
+    const five = Array.from({ length: 5 }, (_, i) => ({
+      id: `0000000${i}-aaaa-4bbb-8ccc-dddddddddddd`,
+      title: longTitle,
+      sourceCount: 12,
+      lang: undefined,
+    }));
+    const bytes = Buffer.byteLength(render({ items: five }), "utf8");
+    expect(bytes).toBeLessThan(3500);
+  });
+
+  it("is a hookless server component (no 'use client', no hooks)", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(
+      join(here, "../../../components/story/related-stories.tsx"),
+      "utf8",
+    );
+    expect(src).not.toContain("use client");
+    expect(src).not.toMatch(/\buse(State|Effect|Ref|Memo|Callback|Context|Reducer)\b/);
+    // Every link is prefetch={false}: two <Link> elements (the row and the hub).
+    expect(src.split("<Link").length - 1).toBe(2);
+    expect(src.split("prefetch={false}").length - 1).toBe(2);
   });
 });
 
