@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { BIAS_ORDER } from "@/lib/bias/config";
+import { publicBlindspotClaim } from "@/lib/clusters/recall-veto";
+import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 
-import { savedUpdatedLabel, toSavedRowView } from "./saved-row";
+import { isRpcMissing, savedUpdatedLabel, toPublicSavedRow, toSavedRowView } from "./saved-row";
 
 const ZEROS = Object.fromEntries(BIAS_ORDER.map((k) => [k, 0]));
 
@@ -142,5 +144,106 @@ describe("savedUpdatedLabel", () => {
   it("falls back to the real clock when no 'now' is given", () => {
     const justNow = new Date(Date.now() - 5_000).toISOString();
     expect(savedUpdatedLabel(justNow)).toBe("Son güncelleme: az önce");
+  });
+});
+
+// h38-saved-1 (migration 158): saved_clusters_v3 returns first_published, so /saved waits
+// BLINDSPOT.feedDelayHours like every other card (publicBlindspotClaim). A v2 fallback row has
+// no first_published and keeps today's behaviour (the veto-only claim).
+describe("toPublicSavedRow: the Kör nokta claim waits BLINDSPOT.feedDelayHours (h38-saved-1)", () => {
+  const NOW = Date.parse("2026-11-05T12:00:00.000Z");
+  const HOUR = 3_600_000;
+  const ago = (hours: number): string => new Date(NOW - hours * HOUR).toISOString();
+  const flagged = (first_published?: string | null) => ({
+    id: "c1",
+    title_tr: "Başlık",
+    bias_distribution: { pro_government: 5, center: 1 },
+    is_blindspot: true,
+    ...(first_published === undefined ? {} : { first_published }),
+  });
+  const pill = (row: Parameters<typeof toPublicSavedRow>[0]) =>
+    toSavedRowView(toPublicSavedRow(row, NOW)).isBlindspot;
+
+  it("shows no pill for a flagged row first published 1 hour ago", () => {
+    expect(pill(flagged(ago(1)))).toBe(false);
+  });
+
+  it("shows the pill for a flagged row first published 25 hours ago", () => {
+    expect(pill(flagged(ago(25)))).toBe(true);
+  });
+
+  it("uses the shared delay: the pill appears exactly at BLINDSPOT.feedDelayHours, not a minute before", () => {
+    expect(BLINDSPOT.feedDelayHours).toBe(24);
+    expect(pill(flagged(new Date(NOW - BLINDSPOT.feedDelayHours * HOUR + 60_000).toISOString()))).toBe(false);
+    expect(pill(flagged(ago(BLINDSPOT.feedDelayHours)))).toBe(true);
+  });
+
+  it("keeps today's behaviour on a v2 fallback row (no first_published): the flag shows at once", () => {
+    expect(pill(flagged())).toBe(true);
+    expect(pill(flagged(null))).toBe(true);
+  });
+
+  it("does not hide a flag over an unparseable first_published or a non-finite clock (missing data never hides)", () => {
+    expect(pill(flagged("not-a-date"))).toBe(true);
+    expect(pill(flagged(""))).toBe(true);
+    expect(toSavedRowView(toPublicSavedRow(flagged(ago(1)), Number.NaN)).isBlindspot).toBe(true);
+    expect(toSavedRowView(toPublicSavedRow(flagged(ago(1)), Number.POSITIVE_INFINITY)).isBlindspot).toBe(true);
+  });
+
+  it("never invents a claim: an unflagged row stays unflagged at any age, and so do non-boolean flags", () => {
+    for (const hours of [0, 1, 25, 400]) {
+      expect(pill({ ...flagged(ago(hours)), is_blindspot: false })).toBe(false);
+    }
+    expect(pill({ ...flagged(ago(100)), is_blindspot: undefined })).toBe(false);
+    for (const odd of ["true", 1, null]) expect(pill({ ...flagged(ago(100)), is_blindspot: odd })).toBe(false);
+  });
+
+  it("a first_published in the future is held back like any young cluster", () => {
+    expect(pill(flagged(new Date(NOW + 2 * HOUR).toISOString()))).toBe(false);
+  });
+
+  it("agrees with publicBlindspotClaim for every age on a grid (the one rule of the site)", () => {
+    for (const hours of [-3, 0, 0.5, 1, 12, 23.99, 24, 24.01, 25, 72, 24 * 30]) {
+      const row = flagged(ago(hours));
+      const viaSite = publicBlindspotClaim(
+        { is_blindspot: true, blindspot_side: null, first_published: row.first_published },
+        NOW,
+      ).isBlindspot;
+      expect(pill(row), `${hours} h`).toBe(viaSite);
+    }
+  });
+
+  it("returns a copy with every other field untouched and does not mutate the input", () => {
+    const input = flagged(ago(1));
+    const snapshot = JSON.stringify(input);
+    const out = toPublicSavedRow(input, NOW);
+    expect(out).not.toBe(input);
+    expect(JSON.stringify(input)).toBe(snapshot);
+    expect(out).toEqual({ ...input, is_blindspot: false });
+    expect(typeof out.is_blindspot).toBe("boolean");
+  });
+
+  it("always yields a real boolean (the row view reads only a literal true)", () => {
+    expect(toPublicSavedRow({ bias_distribution: null }, NOW).is_blindspot).toBe(false);
+    expect(toPublicSavedRow(flagged(ago(30)), NOW).is_blindspot).toBe(true);
+  });
+});
+
+// A missing function answers PGRST202 (PostgREST: not in the schema cache) or 42883 (Postgres:
+// undefined_function). Only those two send /saved to the older RPC; every other error is a real failure.
+describe("isRpcMissing", () => {
+  it("is true for PGRST202 and 42883", () => {
+    expect(isRpcMissing({ code: "PGRST202" })).toBe(true);
+    expect(isRpcMissing({ code: "42883", message: "function public.saved_clusters_v3(uuid[]) does not exist" })).toBe(true);
+  });
+
+  it("is false for any other code, a missing code, null and undefined", () => {
+    for (const code of ["PGRST200", "PGRST201", "PGRST203", "42501", "42P01", "22P02", "57014", "500", "pgrst202", "42883 ", ""]) {
+      expect(isRpcMissing({ code }), code).toBe(false);
+    }
+    expect(isRpcMissing({})).toBe(false);
+    expect(isRpcMissing({ message: "boom" })).toBe(false);
+    expect(isRpcMissing(null)).toBe(false);
+    expect(isRpcMissing(undefined)).toBe(false);
   });
 });

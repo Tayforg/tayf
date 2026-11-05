@@ -53,7 +53,10 @@ import {
 //     first, newer first on a tie;
 //   * fewer than two: mode 'latest', the same pool's newest stories, still
 //     deduped. The component then says "<Konu> gündeminde son haberler" instead
-//     of promising relatedness it cannot show.
+//     of promising relatedness it cannot show. The one related story there may
+//     be leads that list (h38-related-1): the newest-first cut could leave out
+//     the only story that belongs to the page, and it is from the same topic
+//     pool, so the heading stays true.
 // A candidate that shares at least half of its articles with the current
 // cluster (a stale pre-merge copy in a cached feed) is never listed. In today's
 // data an article belongs to one cluster, so that guard is a safety net.
@@ -255,6 +258,16 @@ export const RELATED_GENERIC_WORDS: readonly string[] = [
   "yorum",
   "değerlendirme",
   "Son dakika",
+  // h38: light verbs and magnitude words carry no topic. "istifa etti", "gündem
+  // oldu / peş peşe geldi" (which also folds "öldü") and "milyar dolar/lira"
+  // related unrelated stories and, under h38-related-1, led the 'latest' list.
+  "etti",
+  "edildi",
+  "oldu",
+  "geldi",
+  "verdi",
+  "milyon",
+  "milyar",
 ];
 /** A candidate sharing at least this share of its articles with a kept cluster is a copy (inclusive). */
 export const RELATED_SHARED_MEMBERS = 0.5;
@@ -543,7 +556,9 @@ function dedupe(list: readonly Kept[], stopAt = Infinity): Kept[] {
  *   * with RELATED_MIN_ITEMS or more left returns them as mode 'related', best
  *     score first, newer first on a tie;
  *   * with fewer returns the newest stories of the same pool, deduped the same
- *     way, as mode 'latest'.
+ *     way, as mode 'latest'. The one related story, if there is one, is the
+ *     first of them (h38-related-1) and the others follow newest first; a
+ *     near-duplicate of it stays out, and the limit still holds.
  * Never mutates its input.
  */
 export function buildRelatedBlock(args: {
@@ -628,7 +643,12 @@ export function buildRelatedBlock(args: {
     );
     return { mode: "related", items: best.slice(0, limit).map(toItem) };
   }
-  return { mode: "latest", items: dedupe(pool, limit).map(toItem) };
+  // Fewer than RELATED_MIN_ITEMS related stories (none or a lone one): the pool's newest, deduped. A related
+  // story leads the list, so a lone one that is older than the newest `limit` is not left out; dedupe keeps
+  // the first of a near-duplicate pair, so a newer twin of it stays out and it is listed once.
+  const lead = new Set(related);
+  const rest = lead.size === 0 ? pool : pool.filter((k) => !lead.has(k));
+  return { mode: "latest", items: dedupe([...related, ...rest], limit).map(toItem) };
 }
 
 /**

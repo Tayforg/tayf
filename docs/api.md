@@ -672,7 +672,7 @@ near-identically titled sibling cluster that carries the silent side
 (`sibling_headline`, migration 126); the reason is not exposed. The site waits
 24 h after `first_published` (`BLINDSPOT.feedDelayHours`) before it shows the
 "Kör nokta" pill on every surface (the cards, the cluster page, the weekly
-summary and `/blindspots`). `/blindspots` additionally applies the
+summary and `/blindspots`, and, since migration 158, the saved list `/saved`). `/blindspots` additionally applies the
 content-quality filters and the feed-health suppression (the cards and the
 cluster page apply the feed-health suppression too). This endpoint applies none
 of the wait, the content-quality filters or the feed-health suppression, so a

@@ -2,11 +2,15 @@
 // The anon RPC allowlist, shared by tests that must agree on it.
 //
 // The public anon key reaches data ONLY through these SECURITY DEFINER RPCs
-// (migration 116, plus saved_clusters_v2 of migration 124). Two places must name
-// exactly this set, and a copy in each would drift:
+// (migration 116, plus saved_clusters_v2 of migration 124 and saved_clusters_v3
+// of migration 158). The places that must name exactly this set, and a copy in
+// each would drift:
 //   * tests/guards/anon-surface.test.ts scans the migration text for grants;
-//   * tests/migrations/145-ops-anon-surface.test.ts pins the array literal that
-//     ops_health_report() row 17 (anon_surface) excludes from its runtime check.
+//   * tests/migrations/158-saved-clusters-v3.test.ts pins the array literal that
+//     ops_health_report() row 17 (anon_surface) excludes from its runtime check
+//     (158 re-creates the function with v3 added to 157's five identities);
+//   * tests/migrations/145-ops-anon-surface.test.ts pins the same array as 145
+//     (and, through 150 and 157, up to 157) wrote it: the set BEFORE 158, below.
 //
 // It lives in a helper, not in anon-surface.test.ts, because importing a
 // *.test.ts file registers that file's tests in the importer.
@@ -18,6 +22,7 @@ export const ALLOWED_RPCS = [
   "source_slugs",
   "source_slug_exists",
   "saved_clusters_v2",
+  "saved_clusters_v3",
 ] as const;
 
 // The migration that defines + grants each allowlisted RPC.
@@ -27,6 +32,7 @@ export const ALLOWED_RPC_MIGRATION: Record<(typeof ALLOWED_RPCS)[number], number
   source_slugs: 116,
   source_slug_exists: 116,
   saved_clusters_v2: 124,
+  saved_clusters_v3: 158,
 };
 
 // The allowlist is by FULL IDENTITY (name + argument types), not by name: each allowlisted
@@ -41,9 +47,24 @@ export const ALLOWED_RPC_ARGS: Record<(typeof ALLOWED_RPCS)[number], string> = {
   source_slugs: "",
   source_slug_exists: "text",
   saved_clusters_v2: "uuid[]",
+  saved_clusters_v3: "uuid[]",
 };
 
 /** `name(argument types)` of each allowlisted RPC, in ALLOWED_RPCS order. */
 export const ALLOWED_RPC_IDENTITIES: readonly string[] = ALLOWED_RPCS.map(
+  (name) => `${name}(${ALLOWED_RPC_ARGS[name]})`,
+);
+
+/**
+ * The allowlist as migrations 145, 150 and 157 spell it in ops_health_report() row 17: the five RPCs
+ * that existed before migration 158 added saved_clusters_v3. Those migrations are frozen text, so
+ * their tests pin THIS set, not the current one.
+ */
+export const ALLOWED_RPCS_BEFORE_158: readonly (typeof ALLOWED_RPCS)[number][] = ALLOWED_RPCS.filter(
+  (name) => ALLOWED_RPC_MIGRATION[name] < 158,
+);
+
+/** `name(argument types)` of each RPC in {@link ALLOWED_RPCS_BEFORE_158}, in the same order. */
+export const ALLOWED_RPC_IDENTITIES_BEFORE_158: readonly string[] = ALLOWED_RPCS_BEFORE_158.map(
   (name) => `${name}(${ALLOWED_RPC_ARGS[name]})`,
 );

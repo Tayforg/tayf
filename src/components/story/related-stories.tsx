@@ -30,8 +30,9 @@ function latestHeading(topicLabel: string): string {
  * The heading says what the list is (h34-reader-3). Mode 'related' (the
  * default: the stories scored as related to the page's own headline) is
  * headed "İlgili haberler". Mode 'latest' (fewer than two stories related, so
- * the list is the topic's newest, deduped) is headed "<Konu> gündeminde son
- * haberler" and never claims relatedness. The mode is the `mode` prop, else the
+ * the list is the topic's newest, deduped, led by the one related story when
+ * there is one) is headed "<Konu> gündeminde son haberler" and never claims
+ * relatedness. The mode is the `mode` prop, else the
  * marker `selectRelatedClusters` puts on the list it returns (relatedModeOf),
  * else 'related' (a plain array, the shape callers had before the marker).
  *

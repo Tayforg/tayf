@@ -15,7 +15,8 @@ import { resolve, dirname } from "node:path";
 // narrow:
 //
 //   B1  no import of any '@supabase/*' module (static, require or dynamic);
-//   B2  a literal allowlist of exactly saved_clusters and saved_clusters_v2,
+//   B2  a literal allowlist of exactly saved_clusters, saved_clusters_v2 and
+//       saved_clusters_v3,
 //       and no other 'saved_*' string in the file;
 //   B3  no table, auth, storage, functions or realtime surface;
 //   B4  the env is read as the DIRECT properties process.env.NEXT_PUBLIC_
@@ -33,7 +34,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(here, "../..");
 const BROWSER_CLIENT = resolve(ROOT, "src/lib/supabase/browser.ts");
 
-const ALLOWED_RPC_NAMES = ["saved_clusters", "saved_clusters_v2"];
+const ALLOWED_RPC_NAMES = ["saved_clusters", "saved_clusters_v2", "saved_clusters_v3"];
 
 /** Blanks // and block comments, keeping offsets (and newlines) intact. Copied from anon-surface.test.ts. */
 function blankComments(src: string): string {
@@ -155,12 +156,12 @@ interface Shape {
 
 /** A reference browser.ts-shaped source; each mutation test overrides one piece. */
 function source(shape: Shape = {}): string {
-  const list = shape.list ?? `["saved_clusters", "saved_clusters_v2"]`;
+  const list = shape.list ?? `["saved_clusters", "saved_clusters_v2", "saved_clusters_v3"]`;
   const urlRead = shape.urlRead ?? "process.env.NEXT_PUBLIC_SUPABASE_URL";
   const anonRead = shape.anonRead ?? "process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY";
   const credentials = shape.credentials ?? `"omit"`;
   return [
-    `type SavedRpcName = "saved_clusters" | "saved_clusters_v2";`,
+    `type SavedRpcName = "saved_clusters" | "saved_clusters_v2" | "saved_clusters_v3";`,
     `const ALLOWED_RPCS: ReadonlySet<string> = new Set(${list});`,
     `export function createBrowserClient() {`,
     `  const url = ${urlRead};`,
@@ -184,7 +185,7 @@ describe("browser client weight: src/lib/supabase/browser.ts", () => {
     expect(code).not.toContain("@supabase/");
   });
 
-  it("B2: holds a literal allowlist of exactly saved_clusters and saved_clusters_v2", () => {
+  it("B2: holds a literal allowlist of exactly saved_clusters, saved_clusters_v2 and saved_clusters_v3", () => {
     const lists = literalLists(code).filter((l) => l.some((n) => n.startsWith("saved_")));
     expect(lists).toHaveLength(1);
     expect([...lists[0]!].sort()).toEqual([...ALLOWED_RPC_NAMES].sort());
@@ -234,11 +235,12 @@ describe("browser client weight: the finder catches violations (mutation tests)"
 
   it("flags an allowlist that is missing, widened or narrowed", () => {
     expect(findViolations(source({ list: "[]" }))).not.toEqual([]);
-    expect(findViolations(source({ list: `["saved_clusters", "saved_clusters_v2", "merged_cluster_map"]` }))).not.toEqual([]);
+    expect(findViolations(source({ list: `["saved_clusters", "saved_clusters_v2", "saved_clusters_v3", "merged_cluster_map"]` }))).not.toEqual([]);
+    expect(findViolations(source({ list: `["saved_clusters", "saved_clusters_v2"]` }))).not.toEqual([]);
     expect(findViolations(source({ list: `["saved_clusters"]` }))).not.toEqual([]);
     expect(findViolations(source({ extra: `const extra = "saved_other";` }))).not.toEqual([]);
     // order does not matter
-    expect(findViolations(source({ list: `["saved_clusters_v2", "saved_clusters"]` }))).toEqual([]);
+    expect(findViolations(source({ list: `["saved_clusters_v3", "saved_clusters_v2", "saved_clusters"]` }))).toEqual([]);
   });
 
   it("flags table, auth, storage, functions and realtime access", () => {

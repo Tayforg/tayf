@@ -481,7 +481,30 @@ describe("constants", () => {
       "yorum",
       "değerlendirme",
       "Son dakika",
+      "etti",
+      "edildi",
+      "oldu",
+      "geldi",
+      "verdi",
+      "milyon",
+      "milyar",
     ]);
+  });
+
+  // h38: light verbs and magnitudes never relate two stories on their own.
+  it.each([
+    ["Selvi Boylum Al Yazmalım'ın Cemşit'i Ahmet Mekin yaşıyor mu, öldü mü? Torunundan açıklama geldi", "Mehmet Günsür'ün eşiyle son görüntüsü gündem oldu. Yorumlar peş peşe geldi"],
+    ["Bakan Kacır açıkladı: 2030'a kadar 30 milyar dolarlık teknoloji yatırımı", "ABD Hazine Bakanlığı 125 milyar dolarlık tahvil için 3 ayrı ihale düzenleyecek"],
+    ["Korkuteli Belediye Başkanı görevinden istifa etti", "İspanya'da bakan istifa etti"],
+  ])("light verbs and magnitudes alone do not relate: %s", (a, b) => {
+    expect(isRelatedTitle(a, b)).toBe(false);
+  });
+
+  it.each([
+    ["Ataşehir CHP'de istifa depremi. İki meclis üyesi partiden ayrıldı", "Şişli'de 31 belediye meclis üyesi CHP'den istifa etti"],
+    ["Bakan Memişoğlu'ndan Tütün Uyarısı: İş İşten Geçmeden Bırakın", "Bakan Memişoğlu: Tütün her yıl 100 binden fazla insanımızın hayatına mal oluyor"],
+  ])("real pairs that also carry a light verb stay related: %s", (a, b) => {
+    expect(isRelatedTitle(a, b)).toBe(true);
   });
 });
 
@@ -677,7 +700,8 @@ describe("selectRelatedClusters — relatedness", () => {
     it("a one-word story cannot be the second slot beside a real one", () => {
       const out = select([titled("real", 1, two), titled("weak", 2, one)], { currentTitle: cur });
       expect(out.mode).toBe("latest");
-      expect(ids(out)).toEqual(["weak", "real"]);
+      // The real story is the lone related one, so it leads the 'latest' list (h38-related-1).
+      expect(ids(out)).toEqual(["real", "weak"]);
     });
 
     it("a one-word story is not listed under 'İlgili haberler' next to two real ones", () => {
@@ -1093,7 +1117,7 @@ describe("selectRelatedClusters — 'latest' mode", () => {
     expect(ids(out)).toEqual(["b", "a"]);
   });
 
-  it("is 'latest' when exactly one candidate relates (fewer than 2), and lists the newest, not only that one", () => {
+  it("is 'latest' when exactly one candidate relates (fewer than 2), and lists that one first, then the newest (h38-related-1)", () => {
     const out = select(
       [
         titled("rel", 1, "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı"),
@@ -1103,7 +1127,7 @@ describe("selectRelatedClusters — 'latest' mode", () => {
       { currentTitle: CHP_CURRENT },
     );
     expect(out.mode).toBe("latest");
-    expect(ids(out)).toEqual(["n2", "n1", "rel"]);
+    expect(ids(out)).toEqual(["rel", "n2", "n1"]);
   });
 
   it("counts two near-duplicate related candidates as one story, so it falls back to 'latest'", () => {
@@ -1117,7 +1141,8 @@ describe("selectRelatedClusters — 'latest' mode", () => {
       { currentTitle: cur },
     );
     expect(out.mode).toBe("latest");
-    expect(ids(out)).toEqual(["other", "back"]);
+    // The one related story (the newer of the pair) leads; the older twin stays dropped.
+    expect(ids(out)).toEqual(["back", "other"]);
   });
 
   it("is 'related' from two related stories up, even if that is fewer than five", () => {
@@ -1167,6 +1192,179 @@ describe("selectRelatedClusters — 'latest' mode", () => {
     const latest = select(latestMany);
     expect(latest.mode).toBe("latest");
     expect(latest).toHaveLength(RELATED_MAX);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h38-related-1 (follow-up of #199 / h37-clusters-1): with the tighter verdict
+// a page often keeps exactly ONE related story, which is below
+// RELATED_MIN_ITEMS, so the block is the 'latest' list. That list was the
+// pool's newest five, and the one story that genuinely belongs to the page
+// could be the oldest of the pool and so missing from it: Herzog's warning of a
+// West Bank civil war (3d13347e) kept Herzog's reply to Vance (5aa56498) and
+// listed neither it nor anything about Herzog. The lone related story now leads
+// the 'latest' list. The mode, the heading and every other case stay as they were.
+// ---------------------------------------------------------------------------
+
+describe("selectRelatedClusters — a lone related story leads the 'latest' list (h38-related-1)", () => {
+  const HERZOG = "İsrail Cumhurbaşkanı Herzog, Batı Şeria'da yaklaşan iç savaş uyarısında bulundu";
+  const REPLY = "Herzog'dan Vance'in İsrail açıklamasına yanıt: 'Bu düşünceler bir süredir dile getiriliyor'";
+  // The pool's five newest stories of 2026-11-05 10:07, none of them about Herzog.
+  const NEWEST = [
+    ["686e40c9", "Cumhurbaşkanı Erdoğan: 8 Kasım Zafer Günü'nde Azerbaycan'a bir ziyaret düşünüyorum"],
+    ["faf09ec4", "Kalibaf, Vance'in sözüne rağmen ABD'nin sonraki savaş aşamasına hazırlandığını söyledi"],
+    ["963074a0", "Milli Savunma Bakanı Yaşar Güler Katarlı mevkidaşı ile Ankara'da görüştü"],
+    ["98a1e939", "Cumhurbaşkanı Erdoğan’dan ABD mesajı: ‘Yakın diyalog halinde olmaya devam edeceğiz’"],
+    ["38610f3f", "Cumhurbaşkanı Erdoğan Azerbaycan'a gidiyor: \"Aşamayacağımız hiçbir engel yok\""],
+  ] as const;
+  const herzogPool = (): RelatedCandidate[] => [
+    titled("5aa56498", 1, REPLY), // the oldest of the pool
+    // NEWEST is newest first: 686e40c9 at minute 7 down to 38610f3f at minute 3.
+    ...NEWEST.map(([id, title], i) => titled(id, NEWEST.length + 2 - i, title)),
+  ];
+
+  // Unrelated to CUR and to each other: three stems unique to i.
+  const distinct = (i: number) => `k${i}aaaa k${i}bbbb k${i}cccc`;
+  const CUR = "Kestane Lokanta Marmara Nergis Orman";
+  const LONE = "Kestane Lokanta ruhsatı iptal edildi"; // 2 shared stems with CUR: the only related story
+  /** The lone related story at minute 1, then `n` newer unrelated ones. */
+  const loneThenNewer = (n: number) => [
+    titled("lone", 1, LONE),
+    ...Array.from({ length: n }, (_, i) => titled(`n${i + 1}`, i + 2, distinct(i + 1))),
+  ];
+
+  it("premise: the lone story is related to the page, the newest five are not", () => {
+    expect(isRelatedTitle(HERZOG, REPLY)).toBe(true);
+    for (const [, title] of NEWEST) expect(isRelatedTitle(HERZOG, title), title).toBe(false);
+    expect(isRelatedTitle(CUR, LONE)).toBe(true);
+    for (let i = 1; i <= 8; i++) expect(isRelatedTitle(CUR, distinct(i))).toBe(false);
+  });
+
+  it("Herzog's warning lists Herzog's reply to Vance first, then the newest stories", () => {
+    const out = select(herzogPool(), { currentId: "3d13347e", currentTitle: HERZOG, topic: "dunya" });
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["5aa56498", "686e40c9", "faf09ec4", "963074a0", "98a1e939"]);
+    expect(ids(out)).not.toContain("38610f3f"); // the fifth newest, pushed out by the lead
+  });
+
+  it("keeps the limit: the lead takes one of the five places, the newest stories fill the rest", () => {
+    const out = select(loneThenNewer(8), { currentTitle: CUR });
+    expect(out.mode).toBe("latest");
+    expect(out).toHaveLength(RELATED_MAX);
+    expect(ids(out)).toEqual(["lone", "n8", "n7", "n6", "n5"]);
+    expect(select(loneThenNewer(8), { currentTitle: CUR, max: 1 }).map((i) => i.id)).toEqual(["lone"]);
+    expect(select(loneThenNewer(8), { currentTitle: CUR, max: 3 }).map((i) => i.id)).toEqual(["lone", "n8", "n7"]);
+    // Above RELATED_MAX is still RELATED_MAX.
+    expect(select(loneThenNewer(8), { currentTitle: CUR, max: 99 })).toHaveLength(RELATED_MAX);
+    expect(select(loneThenNewer(8), { currentTitle: CUR, max: 0 })).toHaveLength(0);
+  });
+
+  it("lists the lone story once, wherever it sits in the pool, and the rest stay newest first", () => {
+    const newer = Array.from({ length: 3 }, (_, i) => titled(`n${i + 1}`, i + 2, distinct(i + 1)));
+    const pools: Record<string, RelatedCandidate[]> = {
+      oldest: [titled("lone", 1, LONE), ...newer],
+      middle: [newer[0] as RelatedCandidate, titled("lone", 3, LONE, { updated_at: "2026-11-03T10:03:30.000Z" }), ...newer.slice(1)],
+      newest: [...newer, titled("lone", 9, LONE)],
+    };
+    for (const [where, bundles] of Object.entries(pools)) {
+      const out = select(bundles, { currentTitle: CUR });
+      expect(out.mode, where).toBe("latest");
+      expect(ids(out).filter((id) => id === "lone"), where).toHaveLength(1);
+      expect(ids(out)[0], where).toBe("lone");
+      expect(ids(out).slice(1), where).toEqual(["n3", "n2", "n1"]);
+    }
+  });
+
+  it("when the lone story is already the newest the list is the same as before", () => {
+    const bundles = [...loneThenNewer(3).slice(1), titled("lone", 9, LONE)];
+    const out = select(bundles, { currentTitle: CUR });
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["lone", "n3", "n2", "n1"]);
+  });
+
+  it("a newer near-duplicate of the lone story does not follow it into the list", () => {
+    const dup = "Lokanta ruhsatı iptal edildi mahkeme kararı"; // not related to CUR, but 80% the lone title
+    expect(isRelatedTitle(CUR, dup)).toBe(false);
+    expect(Math.max(titleAgreement(LONE, dup) ?? 0, titleAgreement(dup, LONE) ?? 0)).toBeGreaterThanOrEqual(
+      RELATED_DUPLICATE_AGREEMENT,
+    );
+    const out = select([titled("lone", 1, LONE), titled("n1", 2, distinct(1)), titled("dup", 9, dup)], {
+      currentTitle: CUR,
+    });
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["lone", "n1"]);
+  });
+
+  it("two near-duplicate related stories are still ONE story: the newer leads, the older stays out", () => {
+    const cur = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretini tamamladı";
+    const out = select(
+      [
+        titled("left", 1, "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı"),
+        titled("back", 2, "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü"),
+        ...Array.from({ length: 6 }, (_, i) => titled(`n${i + 1}`, i + 3, distinct(i + 1))),
+      ],
+      { currentTitle: cur },
+    );
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["back", "n6", "n5", "n4", "n3"]);
+  });
+
+  it("only a story that passed the exclusions can lead: an archived, merged, single-article or other-topic related story cannot", () => {
+    const base = Array.from({ length: 3 }, (_, i) => titled(`n${i + 1}`, i + 2, distinct(i + 1)));
+    const variants: Record<string, RelatedCandidate> = {
+      archived: titled("lone", 1, LONE, { is_archived: true }),
+      merged: titled("lone", 1, LONE, { merged_into: "elsewhere" }),
+      "single article": titled("lone", 1, LONE, { article_count: 1 }),
+      "other topic": titled("lone", 1, LONE, { topic7: "yasam" }),
+      "same title as the page": titled("lone", 1, CUR),
+    };
+    for (const [why, lone] of Object.entries(variants)) {
+      const out = select([lone, ...base], { currentTitle: CUR });
+      expect(out.mode, why).toBe("latest");
+      expect(ids(out), why).toEqual(["n3", "n2", "n1"]);
+    }
+  });
+
+  it("a lone related story that shares half its articles with the current cluster does not lead", () => {
+    const art = (id: string) => ({ id, title: "t", source_id: `s-${id}` });
+    const self = { ...cand("self", 9, { title_tr: CUR }), articles: [art("a1"), art("a2")] };
+    const twin = { ...titled("lone", 1, LONE), articles: [art("a1"), art("x2")] };
+    const out = select([self, twin, ...loneThenNewer(3).slice(1)], { currentTitle: CUR });
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["n3", "n2", "n1"]);
+  });
+
+  it("the mode stays 'latest' and buildRelatedBlock carries the same items as the array", () => {
+    const args = { currentId: "self", currentTitle: CUR, topic: "ekonomi", bundles: loneThenNewer(8) };
+    const block = buildRelatedBlock(args);
+    expect(block.mode).toBe("latest");
+    expect(Object.keys(block).sort()).toEqual(["items", "mode"]);
+    expect(block.items.map((i) => i.id)).toEqual(["lone", "n8", "n7", "n6", "n5"]);
+    expect(block.items[0]).toEqual({ id: "lone", title: LONE, sourceCount: 3, lang: undefined });
+    const selected = selectRelatedClusters(args);
+    expect(relatedModeOf(selected)).toBe("latest");
+    expect([...selected]).toEqual(block.items);
+  });
+
+  it("does not move the input", () => {
+    const bundles = loneThenNewer(8);
+    const before = JSON.stringify(bundles);
+    select(bundles, { currentTitle: CUR });
+    expect(JSON.stringify(bundles)).toBe(before);
+  });
+
+  it("no related story: unchanged, the pool's newest five", () => {
+    const bundles = Array.from({ length: 8 }, (_, i) => titled(`n${i + 1}`, i + 1, distinct(i + 1)));
+    const out = select(bundles, { currentTitle: CUR });
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["n8", "n7", "n6", "n5", "n4"]);
+  });
+
+  it("two or more related stories: unchanged, mode 'related' with only the related ones", () => {
+    const two = "Kestane Lokanta Marmara festivali başladı"; // 3 shared stems
+    const out = select([titled("a", 1, LONE), titled("b", 2, two), ...loneThenNewer(6).slice(1)], { currentTitle: CUR });
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["b", "a"]);
   });
 });
 
@@ -1412,7 +1610,7 @@ describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
     }
   });
 
-  it("'latest' blocks list the newest stories first", () => {
+  it("'latest' blocks list the newest stories first, after the one related story if there is one (h38-related-1)", () => {
     const updated = new Map<string, number>();
     for (const rows of Object.values(POOLS)) for (const r of rows) updated.set(r.id, Date.parse(r.updated_at));
     let latest = 0;
@@ -1420,9 +1618,31 @@ describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
       const out = blockFor(page);
       if (!out || out.mode !== "latest") continue;
       latest++;
-      const times = out.map((i) => updated.get(i.id) ?? 0);
+      // 'latest' means fewer than two related stories; the one there may be leads, the rest are newest first.
+      const lead = out.filter((i) => isRelatedTitle(page.headline, i.title));
+      expect(lead.length, page.id.slice(0, 8)).toBeLessThanOrEqual(1);
+      if (lead.length === 1) expect(out[0]?.id).toBe(lead[0]?.id);
+      const times = out.slice(lead.length).map((i) => updated.get(i.id) ?? 0);
       expect(times).toEqual([...times].sort((a, b) => b - a));
     }
     expect(latest).toBeGreaterThan(0);
+  });
+
+  it("a page with exactly one related story in its pool lists it first, in mode 'latest' (h38-related-1)", () => {
+    let lone = 0;
+    for (const page of PAGES) {
+      const feed = relatedFeedFor(page.topic7);
+      if (!feed) continue;
+      const topic = feed.kind === "topic" ? feed.slug : "politika";
+      const related = (POOLS[topic] ?? []).filter((r) => r.id !== page.id && isRelatedTitle(page.headline, r.title_tr));
+      if (related.length !== 1) continue;
+      lone++;
+      const out = blockFor(page) ?? [];
+      expect(out.mode, page.id.slice(0, 8)).toBe("latest");
+      expect(out[0]?.id, page.id.slice(0, 8)).toBe(related[0]?.id);
+      expect(ids(out).filter((id) => id === related[0]?.id)).toHaveLength(1);
+      expect(out.length).toBeLessThanOrEqual(RELATED_MAX);
+    }
+    expect(lone).toBeGreaterThan(0);
   });
 });

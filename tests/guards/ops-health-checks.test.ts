@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150, 157).
+// 115, 119, 122, 136, 145, 150, 157, 158).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -34,6 +34,10 @@ import { fileURLToPath } from "node:url";
 // 157 (h36-pipeline-1) appended row 20 (`feed_poll_stale`, active sources without a quarantine marker whose
 // fetch_last_at is older than 30 minutes): the newest version carries it LAST, after cron_jobs_stalled, and
 // keeps rows 1-19 as 150 wrote them (tests/migrations/157-ingest-poll-stale.test.ts pins that byte identity).
+// 158 (h38-saved-1) adds the sixth anon RPC, saved_clusters_v3, to row 17's allowlist: it re-creates the function
+// with 157's text verbatim except three row-17 spots (the identity array, "five" -> "six" in a comment, and
+// "(5 izinli RPC hariç)" -> "(6 ..."), so the "rows 1-17 as 145 wrote them" check below allows exactly those
+// spots in the newest version (tests/migrations/158-saved-clusters-v3.test.ts pins the full diff against 157).
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -55,6 +59,24 @@ const MIGRATION_145 = resolve(MIGRATIONS_DIR, "145_ops_anon_surface_check.sql");
 const CREATE_LINE = "create or replace function public.ops_health_report()";
 /** What follows the last row's `return next;` in every version. */
 const FN_END = "\n\n  return;\nend\n$fn$;";
+
+/**
+ * 145's rows 1-17 as migration 158 re-creates them: the same text with the three spots where row 17 names the
+ * allowlisted anon RPCs moved from five to six (saved_clusters_v3 appended to the identity array).
+ */
+function withSixthAnonRpc(rows145: string): string {
+  const swaps: ReadonlyArray<readonly [string, string]> = [
+    ["outside the five allowlisted RPCs", "outside the six allowlisted RPCs"],
+    ["'saved_clusters_v2(uuid[])'])", "'saved_clusters_v2(uuid[])', 'saved_clusters_v3(uuid[])'])"],
+    ["' (5 izinli RPC hariç)'", "' (6 izinli RPC hariç)'"],
+  ];
+  let out = rows145;
+  for (const [from, to] of swaps) {
+    expect(out.split(from).length - 1, `145 row 17 has ${from} once`).toBe(1);
+    out = out.replace(from, to);
+  }
+  return out;
+}
 
 function stripSqlComments(sql: string): string {
   return sql.replace(/--[^\n]*/g, "");
@@ -96,10 +118,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(12);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(13);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -180,7 +202,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${CRON_CHECK} (migration 150), ${LAST_CHECK} (migration 157) in that order, ${LAST_CHECK} LAST`, () => {
-    expect(newest.num).toBeGreaterThanOrEqual(157);
+    expect(newest.num).toBeGreaterThanOrEqual(158);
     for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, CRON_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
     expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
     expect(newest.names.indexOf(GAPS_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
@@ -209,14 +231,16 @@ describe("ops_health_report(): the newest version", () => {
     // the executable create line is in the file once (comments are stripped before counting)
     expect(newest.code.indexOf(CREATE_LINE)).toBeGreaterThanOrEqual(0);
     expect(newest.code.indexOf(CREATE_LINE, newest.code.indexOf(CREATE_LINE) + 1), "the create line is executable once").toBe(-1);
-    expect(rawNewest.slice(at, at + rows145.length)).toBe(rows145);
+    // 158 changed row 17 in exactly three spots (the sixth anon RPC); everything else is 145's text
+    const expected = newest.num >= 158 ? withSixthAnonRpc(rows145) : rows145;
+    expect(rawNewest.slice(at, at + expected.length)).toBe(expected);
     // the next non-blank line is the row-18 marker comment
-    const rest = rawNewest.slice(at + rows145.length);
+    const rest = rawNewest.slice(at + expected.length);
     const nextLine = rest.split("\n").find((l) => l.trim() !== "");
     expect(nextLine?.trimStart().startsWith("-- 18. queue_lag (migration 150).")).toBe(true);
     expect(rest.startsWith("\n\n  -- 18. queue_lag (migration 150).")).toBe(true);
     // and the function ends after the last row's `return next;`
-    expect(rawNewest.indexOf(FN_END, at)).toBeGreaterThan(at + rows145.length);
+    expect(rawNewest.indexOf(FN_END, at)).toBeGreaterThan(at + expected.length);
   });
 
   /** The text of one check: from its `check_name :=` up to the next one (or the end of the body). */

@@ -65,7 +65,7 @@ export const metadata: Metadata = staticPageMetadata({
 const CHANGELOG = [
   {
     date: "2026-11-05",
-    text: `Kör nokta etiketi artık kartlarda (Kaydedilenler listesi hariç), haber sayfasında ve haftalık özette de ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünüyor; daha önce bu bekleme yalnızca Kör Noktalar listesi içindi.`,
+    text: `Kör nokta etiketi artık kartlarda, haber sayfasında ve haftalık özette de ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünüyor; daha önce bu bekleme yalnızca Kör Noktalar listesi içindi.`,
   },
   {
     date: "2026-11-01",
@@ -341,8 +341,7 @@ export default async function MethodologyPage() {
             yapmadı&quot; ayırt edilemez, bu yüzden {BLINDSPOT.minSources}{" "}
             kaynak eşiği var. Bir küme eşikleri geçtiğinde bile, karşı
             tarafa yetişme fırsatı tanımak için &ldquo;Kör nokta&rdquo;
-            etiketi kartlarda (Kaydedilenler listesi hariç), haber
-            sayfasında, haftalık özette ve{" "}
+            etiketi kartlarda, haber sayfasında, haftalık özette ve{" "}
             <Link href="/blindspots" className={quietLink}>
               Kör Noktalar
             </Link>{" "}
