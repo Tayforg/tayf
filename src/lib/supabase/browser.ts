@@ -2,8 +2,9 @@
 // has NO table or sequence privileges (migration 117; the RLS SELECT policies
 // of 017 no longer apply), so the only thing this client may call is the
 // allowlisted SECURITY DEFINER RPC saved_clusters (migration 116) or its
-// saved_clusters_v2 sibling (124): a bounded, read-only lookup of at most 200
-// clusters by id. Used by client components that need data keyed on
+// saved_clusters_v2 (124) and saved_clusters_v3 (158, adds first_published)
+// siblings: a bounded, read-only lookup of at most 200 clusters by id. Used by
+// client components that need data keyed on
 // browser-only state — e.g. the Saved page resolving localStorage bookmark ids
 // to cluster titles. Never `.from(...)`: tests/guards/anon-surface.test.ts pins
 // the importers and the RPC names.
@@ -18,7 +19,7 @@
 //
 // Module-level singleton: every consumer shares one client per tab.
 
-type SavedRpcName = "saved_clusters" | "saved_clusters_v2";
+type SavedRpcName = "saved_clusters" | "saved_clusters_v2" | "saved_clusters_v3";
 
 export interface BrowserRpcError {
   message: string;
@@ -35,7 +36,7 @@ export interface BrowserClient {
 }
 
 // Enforced at runtime too: a cast cannot widen what the anon key may reach.
-const ALLOWED_RPCS: ReadonlySet<string> = new Set(["saved_clusters", "saved_clusters_v2"]);
+const ALLOWED_RPCS: ReadonlySet<string> = new Set(["saved_clusters", "saved_clusters_v2", "saved_clusters_v3"]);
 
 const failure = (error: BrowserRpcError) => ({ data: null, error });
 

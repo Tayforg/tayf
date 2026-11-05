@@ -496,6 +496,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "150_ops_queue_and_cron_liveness.sql",
       // 157 re-creates ops_health_report() with 150's text verbatim (rows 1-19, including row 4's VALUES-list copy of BIAS_TO_ZONE) plus row 20 (feed_poll_stale); pinned by tests/migrations/157-ingest-poll-stale.test.ts
       "157_ingest_poll_stale.sql",
+      // 158 re-creates ops_health_report() with 157's text verbatim (rows 1-20, including row 4's VALUES-list copy of BIAS_TO_ZONE) except three spots in row 17 (the sixth anon RPC, saved_clusters_v3); pinned by tests/migrations/158-saved-clusters-v3.test.ts
+      "158_saved_clusters_v3.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

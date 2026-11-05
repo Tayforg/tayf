@@ -6,7 +6,7 @@ import { AlertTriangle, Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
 import { SavedMixCard } from "@/components/bookmark/saved-mix-card";
-import { savedUpdatedLabel, toSavedRowView } from "@/components/bookmark/saved-row";
+import { isRpcMissing, savedUpdatedLabel, toPublicSavedRow, toSavedRowView } from "@/components/bookmark/saved-row";
 import { savedRemovalAnnouncement, savedRemoveLabel } from "@/components/bookmark/bookmark-label";
 import {
   changeBadgeLabels,
@@ -20,9 +20,9 @@ import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { focusTargetAfterRemove } from "@/lib/follows/follows";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// saved_clusters_v2 (migration 124; v1 from 116 has the same caps) truncates its
-// input to 200 ids and returns at most 200 rows, so send the newest 200
-// bookmarks.
+// saved_clusters_v3 (migration 158; v2 from 124 and v1 from 116 have the same
+// caps) truncates its input to 200 ids and returns at most 200 rows, so send the
+// newest 200 bookmarks.
 const SAVED_RPC_MAX_IDS = 200;
 
 interface SavedRow {
@@ -32,8 +32,17 @@ interface SavedRow {
   article_count: number;
   bias_distribution: unknown;
   updated_at: string;
-  /** Absent on rows from the v1 fallback (migration 124 not applied yet). */
+  /**
+   * Absent on rows from the v1 fallback (migration 124 not applied yet). Once the
+   * rows have loaded this is the public claim: the flag with the veto (database,
+   * migration 138) and the feed-delay wait (toPublicSavedRow) applied.
+   */
   is_blindspot?: boolean;
+  /**
+   * saved_clusters_v3 only (migration 158); absent on rows from the v2 / v1
+   * fallback, null when the cluster has none. The wait reads it, nothing renders it.
+   */
+  first_published?: string | null;
 }
 
 // The one live region of the page (WCAG 4.1.3). SavedList returns this frame on
@@ -153,10 +162,17 @@ export function SavedList() {
         }
         const { createBrowserClient } = await import("@/lib/supabase/browser");
         const client = createBrowserClient();
-        let res = await client.rpc("saved_clusters_v2", { p_ids: ids });
-        // PGRST202 = the function is not in PostgREST's schema cache, i.e.
-        // migration 124 is not applied yet. Only then fall back to v1 (no
-        // is_blindspot, so no pill); any other error keeps the fail-open path.
+        let res = await client.rpc("saved_clusters_v3", { p_ids: ids });
+        // PGRST202 (not in PostgREST's schema cache) or 42883 (undefined
+        // function) = migration 158 is not applied yet. Fall back once to v2:
+        // same rows without first_published, so the pill follows the veto only
+        // (what /saved showed before 158) until the migration lands.
+        if (isRpcMissing(res.error)) {
+          res = await client.rpc("saved_clusters_v2", { p_ids: ids });
+        }
+        // PGRST202 again = migration 124 is not applied either. Only then fall
+        // back to v1 (no is_blindspot, so no pill); any other error keeps the
+        // fail-open path.
         if (res.error?.code === "PGRST202") {
           res = await client.rpc("saved_clusters", { p_ids: ids });
         }
@@ -168,7 +184,13 @@ export function SavedList() {
           setRows([]);
           return;
         }
-        const loaded = (data ?? []) as SavedRow[];
+        // The one clock read of the page, after the rows have loaded and inside
+        // the effect (never during a render): the blindspot pill waits
+        // BLINDSPOT.feedDelayHours after first_published like every other card.
+        // The claim therefore settles when the list is opened; a pill that is
+        // still waiting appears on the next visit after the delay.
+        const nowMs = Date.now();
+        const loaded = ((data ?? []) as SavedRow[]).map((row) => toPublicSavedRow(row, nowMs));
         // Device-local change detection; effect-only (never during render).
         const snaps = readSnapshots();
         const { changes: found, toWrite } = reconcileSnapshots(loaded, snaps, new Date().toISOString());

@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ALLOWED_RPCS, ALLOWED_RPC_IDENTITIES } from "../_helpers/anon-rpc-allowlist";
+import {
+  ALLOWED_RPCS_BEFORE_158 as ALLOWED_RPCS,
+  ALLOWED_RPC_IDENTITIES_BEFORE_158 as ALLOWED_RPC_IDENTITIES,
+} from "../_helpers/anon-rpc-allowlist";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 145 ("ops-anon-surface-check"), h19-security-1.
@@ -783,7 +786,7 @@ describe("145 allowlist parity", () => {
   /** The identity expression the check compares: name plus argument types, exactly as oidvectortypes prints them. */
   const IDENTITY_EXPR = "p.proname::text || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')' <> all (";
 
-  it("the array after the identity expression lists exactly ALLOWED_RPC_IDENTITIES (tests/_helpers/anon-rpc-allowlist.ts), in order", () => {
+  it("the array after the identity expression lists exactly the five identities of ALLOWED_RPC_IDENTITIES_BEFORE_158 (tests/_helpers/anon-rpc-allowlist.ts), in order (158 added a sixth in its own re-creation)", () => {
     const at = row17.indexOf(IDENTITY_EXPR);
     expect(at, "the exclusion compares name + argument types").toBeGreaterThan(0);
     expect(quotedNamesOfArray(row17, at)).toEqual([...ALLOWED_RPC_IDENTITIES]);

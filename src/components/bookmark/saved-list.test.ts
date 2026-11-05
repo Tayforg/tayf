@@ -40,11 +40,13 @@ describe("saved-list.tsx source", () => {
 describe("saved-list.tsx change badges", () => {
   const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
 
-  it("reads rows through the saved_clusters_v2 RPC (bias_distribution and is_blindspot are in its return shape)", () => {
-    expect(src.match(/\.rpc\("saved_clusters_v2"/g)).toHaveLength(1);
-    expect(src).toMatch(/\.rpc\("saved_clusters_v2",\s*\{\s*p_ids:\s*ids\s*\}\)/);
+  it("reads rows through the saved_clusters_v3 RPC first (bias_distribution, is_blindspot and first_published are in its return shape)", () => {
+    expect(src.match(/\.rpc\("saved_clusters_v3"/g)).toHaveLength(1);
+    expect(src).toMatch(/\.rpc\("saved_clusters_v3",\s*\{\s*p_ids:\s*ids\s*\}\)/);
     expect(src).toContain("bias_distribution: unknown");
     expect(src).toContain("is_blindspot?: boolean");
+    // absent on v2 / v1 fallback rows, null when the cluster has no first_published
+    expect(src).toContain("first_published?: string | null");
   });
 
   it("imports reconcileSnapshots and changeBadgeLabels", () => {
@@ -78,16 +80,21 @@ describe("saved-list.tsx reading-diet card", () => {
     expect(src).not.toMatch(/\btrack\(/);
   });
 
-  it("one v2 lookup plus a PGRST202-only v1 fallback (no new fetch for the diet)", () => {
+  it("one v3 lookup plus a missing-RPC fallback to v2 and a PGRST202-only fallback to v1 (no new fetch for the diet)", () => {
+    expect(src.match(/\.rpc\("saved_clusters_v3"/g)).toHaveLength(1);
     expect(src.match(/\.rpc\("saved_clusters_v2"/g)).toHaveLength(1);
     expect(src.match(/\.rpc\("saved_clusters"/g)).toHaveLength(1);
     expect(src).toMatch(/\.rpc\("saved_clusters",\s*\{\s*p_ids:\s*ids\s*\}\)/);
-    // The v1 call sits behind the PGRST202 check, after the v2 call.
+    // v3 first, the v2 call behind isRpcMissing, the v1 call behind the PGRST202 check, in that order.
     const code = src.replace(/\/\/[^\n]*/g, "");
+    const v3At = code.indexOf('.rpc("saved_clusters_v3"');
+    const missingAt = code.indexOf("isRpcMissing(res.error)");
     const v2At = code.indexOf('.rpc("saved_clusters_v2"');
     const codeAt = code.indexOf("PGRST202");
     const v1At = code.indexOf('.rpc("saved_clusters",');
-    expect(v2At).toBeGreaterThan(-1);
+    expect(v3At).toBeGreaterThan(-1);
+    expect(missingAt).toBeGreaterThan(v3At);
+    expect(v2At).toBeGreaterThan(missingAt);
     expect(codeAt).toBeGreaterThan(v2At);
     expect(v1At).toBeGreaterThan(codeAt);
     // Array.from(...) is not a PostgREST table call.
@@ -119,14 +126,22 @@ describe("saved-list.tsx RPC input hygiene", () => {
   });
 });
 
-describe("saved-list.tsx v2 lookup and v1 fallback", () => {
+describe("saved-list.tsx v3 lookup, v2 fallback and v1 fallback", () => {
   const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
   // Line comments removed, so prose can neither satisfy nor trip a code guard.
   const code = src.replace(/\/\/[^\n]*/g, "");
 
-  it("falls back to v1 only when v2 is missing from the schema cache (PGRST202), before the shared error handling", () => {
+  it("falls back from v3 to v2 once, only when v3 is missing (PGRST202 or 42883), then from v2 to v1 only on PGRST202, before the shared error handling", () => {
     expect(src).toMatch(/const client = createBrowserClient\(\);/);
-    expect(src).toMatch(/let res = await client\.rpc\("saved_clusters_v2",\s*\{\s*p_ids:\s*ids\s*\}\);/);
+    expect(src).toMatch(/let res = await client\.rpc\("saved_clusters_v3",\s*\{\s*p_ids:\s*ids\s*\}\);/);
+    expect(src).toMatch(
+      /if \(isRpcMissing\(res\.error\)\) \{\s*res = await client\.rpc\("saved_clusters_v2",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
+    );
+    expect(src).toMatch(/import\s*\{[^}]*isRpcMissing[^}]*\}\s*from\s*["']@\/components\/bookmark\/saved-row["']/);
+    const v2At = src.indexOf('res = await client.rpc("saved_clusters_v2",');
+    const v1CheckAt = src.indexOf('res.error?.code === "PGRST202"');
+    expect(v2At).toBeGreaterThan(-1);
+    expect(v1CheckAt).toBeGreaterThan(v2At);
     expect(src).toMatch(
       /if \(res\.error\?\.code === "PGRST202"\) \{\s*res = await client\.rpc\("saved_clusters",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
     );
@@ -141,6 +156,52 @@ describe("saved-list.tsx v2 lookup and v1 fallback", () => {
   it("keeps the fail-open path for every other error code", () => {
     expect(src).toContain("if (error) {");
     expect(src).toContain("setFailed(true);");
+  });
+});
+
+// h38-saved-1: the pill waits BLINDSPOT.feedDelayHours here too. The component reads the clock
+// once, in the effect after the rows have loaded (never during a render), and maps every row
+// through publicBlindspotClaim (via toPublicSavedRow) before anything else sees the flag.
+describe("saved-list.tsx public Kör nokta claim (h38-saved-1)", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+  const code = src.replace(/\/\/[^\n]*/g, "");
+
+  it("imports toPublicSavedRow from the saved-row module", () => {
+    expect(src).toMatch(/import\s*\{[^}]*toPublicSavedRow[^}]*\}\s*from\s*["']@\/components\/bookmark\/saved-row["']/);
+  });
+
+  it("reads the clock exactly once, and only inside the effect that loads the rows", () => {
+    expect(code.match(/Date\.now\(\)/g)).toHaveLength(1);
+    const effectAt = code.indexOf("useEffect(");
+    const effectEnd = code.indexOf("}, [idList]);");
+    const clockAt = code.indexOf("Date.now()");
+    expect(effectAt).toBeGreaterThan(-1);
+    expect(clockAt).toBeGreaterThan(effectAt);
+    expect(clockAt).toBeLessThan(effectEnd);
+    // not while rendering: nothing before the first hook, nothing after the effect
+    expect(code.slice(0, effectAt)).not.toContain("Date.now");
+    expect(code.slice(effectEnd)).not.toContain("Date.now");
+    expect(code).not.toMatch(/new Date\(\)(?!\.toISOString\(\))/);
+  });
+
+  it("maps the loaded rows after the error check and before the snapshots and setRows see them", () => {
+    const errorAt = code.indexOf("const { data, error } = res;");
+    const clockAt = code.indexOf("Date.now()");
+    const mapAt = code.indexOf("toPublicSavedRow(");
+    const reconcileAt = code.indexOf("reconcileSnapshots(");
+    const setRowsAt = code.indexOf("setRows(loaded)");
+    expect(errorAt).toBeGreaterThan(-1);
+    expect(clockAt).toBeGreaterThan(errorAt);
+    expect(mapAt).toBeGreaterThan(clockAt);
+    expect(reconcileAt).toBeGreaterThan(mapAt);
+    expect(setRowsAt).toBeGreaterThan(reconcileAt);
+    expect(code).toMatch(/\.map\(\(row\) => toPublicSavedRow\(row, nowMs\)\)/);
+    expect(code).toContain("reconcileSnapshots(loaded, snaps,");
+  });
+
+  it("the pill still renders only for view.isBlindspot, which is now the public claim", () => {
+    expect(code).toContain("const view = toSavedRowView(row);");
+    expect(code).toContain("view.isBlindspot && (");
   });
 });
 

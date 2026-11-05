@@ -183,16 +183,17 @@ describe("/metodoloji page", () => {
     expect(collectHrefs(tree)).toContain("/gelistirici");
   });
 
-  it("says the Kör nokta label waits BLINDSPOT.feedDelayHours on cards (the saved list excepted), the story page, the weekly summary and the list, and that the stored flag is immediate (h37-content-1)", async () => {
+  it("says the Kör nokta label waits BLINDSPOT.feedDelayHours on cards (the saved list included, no exception), the story page, the weekly summary and the list, and that the stored flag is immediate (h37-content-1, h38-saved-1)", async () => {
     const { default: MethodologyPage } = await import("./page");
     const tree = await MethodologyPage();
     const text = collectText(tree).join("");
 
     expect(text).toContain(
-      `Bir küme eşikleri geçtiğinde bile, karşı tarafa yetişme fırsatı tanımak için “Kör nokta” etiketi kartlarda (Kaydedilenler listesi hariç), haber sayfasında, haftalık özette ve Kör Noktalar listesinde ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünür — veritabanındaki işaretleme anlıktır.`,
+      `Bir küme eşikleri geçtiğinde bile, karşı tarafa yetişme fırsatı tanımak için “Kör nokta” etiketi kartlarda, haber sayfasında, haftalık özette ve Kör Noktalar listesinde ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünür — veritabanındaki işaretleme anlıktır.`,
     );
-    // The saved list (/saved) shows the pill at once: the copy must say so.
-    expect(text).toContain("Kaydedilenler listesi hariç");
+    // /saved waits too since migration 158 (saved_clusters_v3 returns first_published): the h37 exception is gone.
+    expect(text).not.toContain("Kaydedilenler listesi hariç");
+    expect(text).not.toContain("(Kaydedilenler");
     // The old wording promised the wait only for the list.
     expect(text).not.toContain("gecikme sadece herkese açık listeleme içindir");
   });
@@ -241,8 +242,10 @@ describe("/metodoloji page", () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
-    const entry = `Kör nokta etiketi artık kartlarda (Kaydedilenler listesi hariç), haber sayfasında ve haftalık özette de ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünüyor; daha önce bu bekleme yalnızca Kör Noktalar listesi içindi.`;
+    const entry = `Kör nokta etiketi artık kartlarda, haber sayfasında ve haftalık özette de ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünüyor; daha önce bu bekleme yalnızca Kör Noktalar listesi içindi.`;
     expect(text).toContain(entry);
+    // The entry carries no exception for the saved list any more (h38-saved-1).
+    expect(entry).not.toContain("Kaydedilenler");
     const tail = text.slice(text.indexOf("Son güncelleme:"));
     expect(tail.startsWith("Son güncelleme: 2026-11-05")).toBe(true);
     expect(/Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(tail)?.[1]).toBe("2026-11-05");
