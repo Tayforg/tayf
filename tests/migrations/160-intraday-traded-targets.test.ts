@@ -44,7 +44,7 @@ const md5 = (text: string): string => createHash("md5").update(text).digest("hex
 
 /** Index of the statement itself: the marker at the start of a line (a header comment may quote it too). */
 function statementStart(sql: string): number {
-  const at = sql.search(new RegExp(`^${FN_MARKER.replace(/[()]/g, "\\$&")}`, "m"));
+  const at = sql.search(new RegExp(`^${FN_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m"));
   expect(at, `expected a line starting with "${FN_MARKER}"`).toBeGreaterThanOrEqual(0);
   return at;
 }
