@@ -233,11 +233,35 @@ export const HEADLINE_CONTAIN_BLOCK_PREFIXES = [
 // Member-headline scan. An incoming article is compared with the seed and the
 // latest of a candidate cluster by the full scorer and, headline lane only,
 // with the HEADLINE_MEMBER_SCAN_MAX newest member headlines the consumer
-// already holds from the member rows its context load fetches. The cap bounds
-// memory and per-article CPU (<= 20 candidates x 12 lane evaluations); the
-// replay is insensitive to it (clusters: cap 4 -> 2,818, 12 -> 2,821, 24 ->
-// 2,820, unbounded -> 2,820), so it is not a tuned value.
-export const HEADLINE_MEMBER_SCAN_MAX = 12;
+// already holds from the member rows its context load fetches.
+//
+// h40-clusters-1: the time window, not the count, bounds the scan. The loop
+// skips members newer than HEADLINE_LANE_MAX_HOURS after the article and stops
+// at the first one older than it (newest first), so a cluster costs only the
+// members inside +-6 h. The count is a memory ceiling, not a tuning knob: it
+// was 12 (replay "insensitive": clusters 4 -> 2,818, 12 -> 2,821, 24 -> 2,820,
+// unbounded -> 2,820), but the replay corpus has few clusters past 12 members,
+// and in production the 12 newest dropped the matching member of busy
+// clusters, so a phrase-identical follow-up opened a twin of a top story:
+//   67695cbd  cnn-turk 'SON DAKIKA... MHP lideri Bahceli: Teror bitecek ...'
+//             was rank 13 of 17 when haber-com repeated it; twin d58cf466
+//             grew to 8 articles;
+//   8d656fdd  the sozcu member was rank 17 of 26 (twin 2cce15f0);
+//   9fcc79ba  the phrase-identical 'Emir Sarigul hakkinda yeni karar...'
+//             members sat past rank 12 of 34 (twin 3a81b524).
+// 48 covers all of them (replayed with the real lane: 0.85, 0.82 and 0.80 at
+// ranks 13, 17 and 21; they stay twins at 12 and join at 24 and 48).
+//
+// Measured on production, 2026-11-05. Of 3,086 arrivals into busy clusters (>= 8
+// members) over 5 days, 20% saw more than 12 members inside the 6 h window and
+// 0.06% (2) more than 48 (the maximum was 50). Precision: only 17 of 10,171
+// politics articles (3.4 a day) gained a lane hit from a member ranked 13-48 of
+// another busy cluster, and all 17 were the same story. Cost: the scan is bounded
+// by the window, at most MAX_CANDIDATE_CLUSTERS (20) x 48 lane evaluations of
+// ~0.5 us each per article (178 -> 206 for the 20 hottest clusters of the
+// context, +28 evaluations = ~15 us), and a cluster's headlines are tokenised
+// once per context build (754 -> 884 titles, ~0.6 ms).
+export const HEADLINE_MEMBER_SCAN_MAX = 48;
 
 // (2) Entity-driven false joins. Cluster dd5535a7 was seeded by an entity-
 //     heavy ceremony story (10 entities); an unrelated 3-entity article

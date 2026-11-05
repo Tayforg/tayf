@@ -293,7 +293,11 @@ beforeAll(async () => {
       "degil",
       "tekzip",
     ]);
-    expect(legacyConstants.HEADLINE_MEMBER_SCAN_MAX).toBe(12);
+    // h40-clusters-1: 12 -> 48. The 6 h lane window bounds the scan, the cap is
+    // only a memory ceiling; 12 evicted the matching member of busy clusters
+    // (ranks 13, 17 and 34 in the three twin cases of 2026-11-01..05).
+    expect(legacyConstants.HEADLINE_MEMBER_SCAN_MAX).toBe(48);
+    expect(portConstants.HEADLINE_MEMBER_SCAN_MAX).toBe(48);
     // Size guard (review of wave AB).
     expect(portConstants.HEADLINE_CONTAIN_MIN_SIZE_RATIO).toBe(
       legacyConstants.HEADLINE_CONTAIN_MIN_SIZE_RATIO,

@@ -667,6 +667,151 @@ describe("isRoundupTitle: the 14-day export, row by row", () => {
   });
 });
 
+// h40-clusters-2 (2026-11-05): IndyTurk publishes a nightly digest whose title is just
+// "Kısa haberler" (14 in 14 days, about 21:00-23:00 UTC). Its description is the first
+// item of the digest, so the clusterer matched it on that description and 7 of the 14
+// became members of unrelated politics clusters (b59f3bb6 with 43 articles, e7cde92e
+// with 18, ...), one of them seeding the 1-article cluster a520b58a titled "Kısa
+// haberler". Shape I: the digest title alone, with the same optional date tail as E.
+describe("isRoundupTitle: shape I, the IndyTürk 'Kısa haberler' digest (h40-clusters-2)", () => {
+  it.each([
+    // The title as indyturk publishes it, and the casing / diacritic variants.
+    "Kısa haberler",
+    "Kısa Haberler",
+    "KISA HABERLER",
+    "kısa haberler",
+    "KİSA HABERLER", // dotted capital İ
+    "Kisa haberler", // ASCII-only typing
+    "KISA haberler",
+    "Kısa HABERLER",
+    // Punctuation: a trailing colon, a trailing dash, sentence punctuation, quotes.
+    "Kısa haberler:",
+    "Kısa haberler :",
+    "Kısa haberler -",
+    "Kısa haberler.",
+    "Kısa haberler!",
+    "Kısa haberler…",
+    '"Kısa haberler"',
+    "“Kısa haberler”",
+    // Whitespace: collapsed and trimmed (tab, newline, NBSP, double space).
+    "  Kısa   haberler  ",
+    "Kısa\thaberler",
+    "Kısa\nhaberler",
+    "Kısa haberler",
+    // The same date tails shape E accepts.
+    "Kısa haberler (4 Kasım 2026)",
+    "Kısa haberler ( 4 Kasım 2026 )",
+    "Kısa haberler (04.11.2026)",
+    "Kısa haberler - 04.11.2026",
+    "Kısa haberler – 4 Kasım 2026",
+    "Kısa haberler — 4 Kasım",
+    "Kısa haberler | 4 Kasım 2026 Çarşamba",
+    "Kısa haberler, 4 Kasım",
+    "Kısa haberler: 4 Kasım 2026",
+    "Kısa haberler 4 Kasım",
+    "Kısa haberler 04/11/2026",
+    "KISA HABERLER - 4 KASIM 2026",
+    // The long form.
+    "Günün kısa haberleri",
+    "Günün Kısa Haberleri",
+    "GÜNÜN KISA HABERLERİ",
+    "Gunun kisa haberleri",
+    "Günün kısa haberleri:",
+    "Günün kısa haberleri (4 Kasım 2026)",
+    "Günün kısa haberleri - 04.11.2026",
+    "Günün kısa haberleri!",
+  ])("skips %j", (title) => {
+    expect(isRoundupTitle(title)).toBe(true);
+  });
+
+  it("NFC-composes a decomposed 'Günün' (u + combining diaeresis)", () => {
+    expect(isRoundupTitle("Günün kısa haberleri")).toBe(true);
+  });
+
+  it.each([
+    // The brief's named stories: the phrase leads or follows, but there is more.
+    "Kısa haberler: Erdoğan Bakü'ye gitti",
+    "Kısa sürede haberler yayıldı",
+    "Haberler kısa kesildi",
+    "Kısa kısa: Bahçeli'den açıklama",
+    // Ordinary headlines that merely start with 'Kısa'.
+    "Kısa sürede 3 milyon aşı yapıldı",
+    "Kısa sürede toparlandı",
+    "Kısa çalışma ödeneği 3 ay daha uzatıldı",
+    "Kısa çalışma ödeneği",
+    "Kısa vadeli faiz oranları yükseldi",
+    "Kısa dalga radyo yayını durduruldu",
+    "Kısa mesaj dolandırıcılığına dikkat",
+    "Kısa süreli tutuklama kararı",
+    "Kısa bir açıklama yaptı",
+    "Kısa",
+    "Kısa haber",
+    "Haberler",
+    "Kısa haberler ve yorumlar",
+    "Kısa haberler: Meclis'te yoğun gündem",
+    "Kısa haberler | Erdoğan Bakü'ye gitti",
+    "Kısa haberler - Bahçeli'den açıklama",
+    // The phrase inside a longer headline, either side.
+    "Çok kısa haberler",
+    "TRT Kısa haberler",
+    "İşte günün kısa haberleri",
+    "Kısa haberler özetle",
+    "Haberler kısa kısa",
+    // A date that is only the prefix of more text, or malformed.
+    "Kısa haberler - 4 Kasım 2026 seçimleri",
+    "Kısa haberler 2026 seçimleri",
+    "Kısa haberler 123 Kasım",
+    "Kısa haberler 04.11.26",
+    "Kısa haberler 4 Kasım 2026 2027",
+    // The long form with a story attached.
+    "Günün kısa haberleri: Erdoğan Bakü'ye gitti",
+    "Günün kısa haberlerinde Bahçeli sürprizi",
+    "Günün kısa haberleri ve yorumlar",
+    "Günün haberleri",
+    "Günün kısa",
+    "Bugünün kısa haberleri: Meclis kapanıyor",
+  ])("keeps %j", (title) => {
+    expect(isRoundupTitle(title)).toBe(false);
+  });
+
+  it("is anchored at both ends: a prefix or a suffix around the phrase is a story", () => {
+    for (const phrase of ["Kısa haberler", "Günün kısa haberleri"]) {
+      expect(isRoundupTitle(`${phrase} - 4 Kasım 2026`)).toBe(true);
+      expect(isRoundupTitle(`${phrase}: Erdoğan görüştü`)).toBe(false);
+      expect(isRoundupTitle(`${phrase} - 4 Kasım 2026 ve devamı`)).toBe(false);
+      expect(isRoundupTitle(`Yarınki ${phrase}`)).toBe(false);
+      expect(isRoundupTitle(`TRT ${phrase}`)).toBe(false);
+      expect(isRoundupTitle(`${phrase}x`)).toBe(false);
+      expect(isRoundupTitle(`x${phrase}`)).toBe(false);
+    }
+  });
+
+  it("leaves the other shapes alone: the bare trailing separator is shape I only", () => {
+    // Shape E phrases followed by a colon and a story, or a colon alone after a story, stay stories.
+    expect(isRoundupTitle("Haber turu: Erdoğan'dan Kuzey Irak açıklaması")).toBe(false);
+    expect(isRoundupTitle("Gündem özeti: Erdoğan ile Bahçeli görüştü")).toBe(false);
+    expect(isRoundupTitle("Resmi Gazete'de bugün: Asgari ücret")).toBe(false);
+    expect(isRoundupTitle("Haber turu:")).toBe(false);
+    expect(isRoundupTitle("Gündem özeti -")).toBe(false);
+    expect(isRoundupTitle("Resmi Gazete'de bugün:")).toBe(false);
+  });
+
+  it("answers in linear time on adversarial input around the new phrases", () => {
+    const adversarial = [
+      "Kısa haberler" + " ".repeat(50_000) + "x",
+      "Kısa haberler - " + "1 ".repeat(30_000),
+      "kısa haberler".repeat(10_000),
+      "günün kısa haberleri".repeat(10_000),
+      "Kısa haberler" + ":".repeat(50_000),
+      "Kısa haberler" + "!".repeat(50_000) + "x",
+      "Kısa haberler (".repeat(20_000),
+    ];
+    const started = performance.now();
+    for (const title of adversarial) expect(isRoundupTitle(title)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
 describe("isRoundupTitle: robustness", () => {
   it("answers in linear time on adversarial input (no catastrophic backtracking)", () => {
     const adversarial = [

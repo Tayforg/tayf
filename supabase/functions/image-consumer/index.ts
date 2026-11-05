@@ -15,18 +15,30 @@
 //      a. If read_ct > MAX_READS → pgmq.archive (permanent failure path —
 //         the payload survives in pgmq.a_image_backfill for audit).
 //      b. Load the article row; skip if missing or already imaged.
-//      c. Pick the extractor (fetchHeroImage for the three audit-flagged
-//         slugs, fetchOgImage otherwise).
+//      c. Pick the extractor (fetchHeroImageResult for the three audit-flagged
+//         slugs, fetchOgImageResult otherwise). The answer is found / none /
+//         blocked: blocked means the site served a Cloudflare challenge instead
+//         of the page (h40-edgefns-1).
 //      d. On success: update articles.image_url + reset attempts, archive.
 //      e. On not-found / errored: bump image_backfill_attempts +
-//         attempted_at, archive. No requeue here: the hourly pg_cron job
-//         'image-backfill-requeue' (migration 142, public.image_backfill_requeue)
-//         re-sends articles at attempts 1-4 whose last try is over 2 h old and
-//         that are under 7 days old. The 5th failure parks the row
-//         (attempted_at pushed 7 days ahead), which takes it out of that pool.
+//         attempted_at, archive. No requeue here: the pg_cron job
+//         'image-backfill-requeue' (migration 142, re-cut by 154: '2,17,32,47 * * * *',
+//         40 per run, 20 s stagger) re-sends only rows at attempts 1-2 whose
+//         last try is over 2 h old and that are under 7 days old. A row that
+//         keeps missing is fetched at most 3 times (the insert-trigger message
+//         plus 2 re-sends) and then stays at attempts=3 with a past attempted_at.
+//         The 5th-attempt park (attempted_at pushed 7 days ahead) applies only
+//         to a row that some other path re-enqueues (the pre-154 1-4 requeue,
+//         or a manual reset).
+//         A blocked page (Medyascope, 403 + cf-mitigated: challenge, since
+//         2026-10-29) takes the same path as not-found, bumpAttempt then archive,
+//         so a blocking site is asked at most 3 times per article; it is only
+//         counted apart (`blocked`, `blockedBySource`, slugs only) so the block
+//         is visible. Nothing is retried and no other URL is tried.
 //      f. On a placeholder og:image (publisher logo card / 'son dakika'
 //         stand-in, db-4): never stored. Treated like (e) — attempt bumped
-//         (parked after 5), archived — and counted separately.
+//         (parked on the 5th attempt only for a re-enqueued row, as in (e)),
+//         archived — and counted separately.
 //   3. Stops when the wall budget is exhausted or the queue is empty.
 
 import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts";
@@ -37,9 +49,10 @@ import {
   type PgmqMessage,
 } from "../_shared/pgmq.ts";
 import {
-  fetchHeroImage,
-  fetchOgImage,
+  fetchHeroImageResult,
+  fetchOgImageResult,
   isValidImageUrl,
+  type OgImageResult,
 } from "../_shared/og-image.ts";
 import { isPlaceholderImageUrl } from "../_shared/image-url.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
@@ -80,7 +93,7 @@ const READ_BUDGET_FLOOR_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 5000;
 // The hero-image slugs read up to 200 KB of heavy pages (haberler.com first
 // among them) and are the ones the requeue (migration 142) retries most, so
-// they get og-image.ts's stock 8s instead. Used only in the fetchHeroImage
+// they get og-image.ts's stock 8s instead. Used only in the fetchHeroImageResult
 // call; the plain og:image path stays at REQUEST_TIMEOUT_MS.
 const HERO_REQUEST_TIMEOUT_MS = 8000;
 // Slugs that get the extended-window hero-image extractor (audit IMG1).
@@ -147,6 +160,7 @@ interface ArticleRow {
 type Outcome =
   | "found"
   | "not-found"
+  | "blocked"
   | "placeholder"
   | "errored"
   | "skipped-no-url"
@@ -158,9 +172,18 @@ type Outcome =
 // Per-message worker
 // ---------------------------------------------------------------------------
 
+/** Slug that stands in for an article whose source is unknown, in `blockedBySource`. */
+const UNKNOWN_SLUG = "unknown";
+
+/**
+ * Process one message. `onBlocked` is called with the source slug (UNKNOWN_SLUG
+ * when the article has none), never a URL, just before a `blocked` outcome is
+ * returned, so the drain can count blocks per source.
+ */
 async function processMessage(
   client: SupabaseClient,
   msg: PgmqMessage<ImageJob>,
+  onBlocked: (slug: string) => void = () => {},
 ): Promise<Outcome> {
   const articleId = msg.message?.article_id;
 
@@ -231,14 +254,14 @@ async function processMessage(
   const slug = article.source_id ? sources.get(article.source_id) ?? null : null;
   const useHero = slug !== null && HERO_IMAGE_SLUGS.has(slug);
 
-  let ogImage: string | null = null;
+  let fetched: OgImageResult;
   try {
-    ogImage = useHero
-      ? await fetchHeroImage(article.url, slug, { timeoutMs: HERO_REQUEST_TIMEOUT_MS })
-      : await fetchOgImage(article.url, { timeoutMs: REQUEST_TIMEOUT_MS });
+    fetched = useHero
+      ? await fetchHeroImageResult(article.url, slug, { timeoutMs: HERO_REQUEST_TIMEOUT_MS })
+      : await fetchOgImageResult(article.url, { timeoutMs: REQUEST_TIMEOUT_MS });
   } catch (err) {
-    // fetchOgImage / fetchHeroImage are contracted not to throw; this is
-    // defensive. Any throw collapses to errored.
+    // fetchOgImageResult / fetchHeroImageResult are contracted not to throw;
+    // this is defensive. Any throw collapses to errored.
     const m = err instanceof Error ? err.message : String(err);
     console.error(
       "[image-consumer] msg-error",
@@ -254,6 +277,20 @@ async function processMessage(
     await safeArchive(client, msg.msg_id);
     return "errored";
   }
+
+  // h40-edgefns-1: the site answered with a Cloudflare challenge instead of the
+  // page. The handling is deliberately the one not-found gets (one attempt, one
+  // archive): the row stops at attempts 3 (the requeue in migration 154
+  // re-sends only attempts 1-2, every 15 minutes), so a site that is blocking us
+  // is asked at most 3 times per article. No retry, no other URL. Only the
+  // outcome differs, so the block shows in the drain summary and the logs.
+  if (fetched.kind === "blocked") {
+    await bumpAttempt(client, article);
+    await safeArchive(client, msg.msg_id);
+    onBlocked(slug ?? UNKNOWN_SLUG);
+    return "blocked";
+  }
+  const ogImage = fetched.kind === "found" ? fetched.url : null;
 
   // db-4 ingest half: the page advertises a publisher logo card / 'son dakika'
   // stand-in. Never store it. Counted as an attempt (parked after
@@ -375,6 +412,10 @@ interface DrainSummary {
   drained: number;
   found: number;
   notFound: number;
+  /** Pages the site answered with a bot challenge (h40-edgefns-1); counted apart from notFound, handled the same way. */
+  blocked: number;
+  /** `blocked` per source slug, slugs only (UNKNOWN_SLUG for an article without a source); never a URL. */
+  blockedBySource: Record<string, number>;
   placeholders: number;
   errored: number;
   skipped: number;
@@ -387,6 +428,8 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
   let drained = 0;
   let found = 0;
   let notFound = 0;
+  let blocked = 0;
+  const blockedBySource: Record<string, number> = {};
   let placeholders = 0;
   let errored = 0;
   let skipped = 0;
@@ -419,7 +462,9 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
       if (Date.now() - startedAt >= WALL_BUDGET_MS) break;
       let outcome: Outcome;
       try {
-        outcome = await processMessage(client, msg);
+        outcome = await processMessage(client, msg, (blockedSlug) => {
+          blockedBySource[blockedSlug] = (blockedBySource[blockedSlug] ?? 0) + 1;
+        });
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err);
         console.error(
@@ -444,6 +489,9 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
         case "not-found":
           notFound += 1;
           break;
+        case "blocked":
+          blocked += 1;
+          break;
         case "placeholder":
           placeholders += 1;
           break;
@@ -466,6 +514,8 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
     drained,
     found,
     notFound,
+    blocked,
+    blockedBySource,
     placeholders,
     errored,
     skipped,

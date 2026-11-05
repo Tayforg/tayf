@@ -1094,14 +1094,14 @@ describe("150 docs/ops-heartbeat.md", () => {
     section = doc.slice(at, next < 0 ? doc.length : next);
   });
 
-  it("the title and the intro list 150, and the row count is 19 (20 once 157 appended its row)", () => {
+  it("the title and the intro list 150, and the row count is 19 (20 once 157 appended its row, 21 once 161 did)", () => {
     const title = doc.slice(0, doc.indexOf("\n"));
     expect(title).toContain("145, 150");
     expect(doc).toContain("migrations 077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150");
-    // 157 appended a twentieth row and moved these counts (tests/migrations/157-ingest-poll-stale.test.ts pins 20)
-    expect(doc).toMatch(/(19|20) fixed-order rows/);
+    // 157 appended a twentieth row and 161 a twenty-first, and they moved these counts (tests/migrations/161-image-coverage-by-source.test.ts pins 21)
+    expect(doc).toMatch(/(19|20|21) fixed-order rows/);
     expect(doc).not.toContain("17 fixed-order rows");
-    expect(doc).toMatch(/always returns exactly\n(19|20) rows/);
+    expect(doc).toMatch(/always returns exactly\n(19|20|21) rows/);
   });
 
   it("the table has rows 18 and 19 with their thresholds and baselines", () => {

@@ -8,18 +8,34 @@
 //
 // Surface mirrors the Node helper one-to-one:
 //   - fetchOgImage(url, opts?)              → primary 50 KB <head>-bound path
+//   - fetchOgImageResult(url, opts?)        → the same fetch, but the answer is
+//                                              found / none / blocked (a
+//                                              Cloudflare challenge), h40-edgefns-1
+//   - classifyFetchBlock(status, headers, bodyHead)
+//                                           → 'challenge' | null, a pure
+//                                              classifier of the response the
+//                                              fetch already returned
 //   - extractHeroImageFromHtml(html)        → pure extractor (testable)
 //   - extractOgImage(html)                  → og:image only, not validated
 //   - fetchHeroImage(url, slug, opts?)      → extended-window fetch for the
 //                                              three audit-flagged sources
 //                                              (haberler-com, trt-haber,
 //                                              anadolu-ajansi)
+//   - fetchHeroImageResult(url, slug, opts?) → fetchHeroImage with the
+//                                              found / none / blocked answer
 //   - isValidImageUrl(url)                  → favicon/logo/data: filter
 //
 // Contract:
 //   - Never throws. Any SafeFetchError, timeout, parse failure, or oversized
-//     body collapses to a null return. The image-consumer treats null as
-//     "no image found" and moves on.
+//     body collapses to a null return (fetchOgImage / fetchHeroImage) or to
+//     { kind: "none" } (the *Result variants). The image-consumer treats that
+//     as "no image found" and moves on.
+//   - fetchOgImage / fetchHeroImage are thin wrappers over the *Result
+//     variants (url | null). The only thing the variants add is a name for a
+//     Cloudflare challenge ({ kind: "blocked", status }): they read the status,
+//     headers and body head of the ONE response the fetch already got. They
+//     never make a second request, retry, change the User-Agent or try another
+//     endpoint.
 //   - All fetches respect a per-request AbortSignal timeout (default 8s).
 //   - All fetches are GET-only, follow at most 3 redirects, and reject any
 //     hop whose target resolves to a private IP.
@@ -29,7 +45,7 @@ import {
   isPlaceholderImageUrl,
   normalizeImageUrl,
 } from "./image-url.ts";
-import { safeFetch, SafeFetchError } from "./safe-fetch.ts";
+import { safeFetch, type SafeFetchResult } from "./safe-fetch.ts";
 
 // hunt-26 security-3: the page is untrusted (any feed-supplied article URL), so
 // nothing here may backtrack. The <meta>/<link> image candidates come from a
@@ -301,30 +317,141 @@ export function isValidImageUrl(url: unknown): url is string {
 }
 
 /**
- * Fetch the first 50 KB of an article URL (stopping early at `</head>`) and
- * return the og:image URL, or null if none is advertised. Never throws — any
- * network/timeout/SSRF/parse failure returns null and is silently dropped.
+ * What one article fetch found. `blocked` means the site answered the fetch
+ * with a bot challenge (see `classifyFetchBlock`): the page was never served,
+ * so "no image" would be the wrong word for it. Every other non-2xx, a page with
+ * no usable image and every failure are `none`.
  */
-export async function fetchOgImage(
+export type OgImageResult =
+  | { readonly kind: "found"; readonly url: string }
+  | { readonly kind: "none" }
+  | { readonly kind: "blocked"; readonly status: number };
+
+/** Header source for `classifyFetchBlock`: a Headers instance or a plain object. */
+export type FetchBlockHeaders =
+  | { get(name: string): string | null }
+  | Readonly<Record<string, string>>;
+
+/** The statuses a Cloudflare challenge is served with. A 2xx or a 404 is never one. */
+const CHALLENGE_STATUSES = new Set([403, 429, 503]);
+// Both markers sit in the first bytes of a challenge page (the fetch stops at
+// `</head>` or at the byte cap); bounding the scan keeps it cheap on a hostile body.
+const CHALLENGE_SCAN_CHARS = 200_000;
+const CHALLENGE_TITLE_SCAN_CHARS = 16_384;
+const CHALLENGE_TITLE_OPEN = "<title>";
+const CHALLENGE_TITLE_TEXT = "just a moment";
+const CHALLENGE_SCRIPT_MARKER = "challenge-platform";
+
+function headerValue(
+  headers: FetchBlockHeaders | null | undefined,
+  lowerName: string,
+): string | null {
+  if (!headers) return null;
+  if (typeof (headers as { get?: unknown }).get === "function") {
+    return (headers as { get(name: string): string | null }).get(lowerName);
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (asciiLower(name) === lowerName) return typeof value === "string" ? value : null;
+  }
+  return null;
+}
+
+/**
+ * Names a Cloudflare bot challenge from the response a fetch already returned:
+ * its status, its headers and the head of its body (h40-edgefns-1). Pure: no I/O,
+ * no request.
+ *
+ * Only 403, 429 and 503 can be a challenge, and then any one of three markers
+ * decides: the `cf-mitigated: challenge` response header, the
+ * `<title>Just a moment...</title>` interstitial, or the
+ * `/cdn-cgi/challenge-platform/` script the interstitial loads. A plain 403
+ * without a marker, a 404 and every 2xx answer null: ordinary Cloudflare pages
+ * carry the challenge-platform script too, so the status gate matters.
+ */
+export function classifyFetchBlock(
+  status: number,
+  headers: FetchBlockHeaders | null | undefined,
+  bodyHead: string,
+): "challenge" | null {
+  if (!CHALLENGE_STATUSES.has(status)) return null;
+  const mitigated = headerValue(headers, "cf-mitigated");
+  if (mitigated !== null && asciiLower(mitigated.trim()) === "challenge") {
+    return "challenge";
+  }
+  if (typeof bodyHead !== "string" || bodyHead === "") return null;
+  const head = bodyHead.length > CHALLENGE_SCAN_CHARS
+    ? bodyHead.slice(0, CHALLENGE_SCAN_CHARS)
+    : bodyHead;
+  const title = asciiLower(head.slice(0, CHALLENGE_TITLE_SCAN_CHARS));
+  const titleAt = title.indexOf(CHALLENGE_TITLE_OPEN);
+  if (titleAt !== -1) {
+    const text = title.slice(
+      titleAt + CHALLENGE_TITLE_OPEN.length,
+      titleAt + CHALLENGE_TITLE_OPEN.length + 64,
+    ).trimStart();
+    if (text.startsWith(CHALLENGE_TITLE_TEXT)) return "challenge";
+  }
+  if (head.includes(CHALLENGE_SCRIPT_MARKER)) return "challenge";
+  return null;
+}
+
+/**
+ * Turn the one response a fetch got into an OgImageResult. A non-2xx answer is
+ * `blocked` when `classifyFetchBlock` names it a challenge and `none` otherwise;
+ * a 2xx answer is `found` when `extract` yields an image and `none` when not.
+ */
+function resultFromResponse(
+  response: SafeFetchResult,
+  extract: (html: string) => string | null,
+): OgImageResult {
+  if (response.status < 200 || response.status >= 300) {
+    return classifyFetchBlock(response.status, response.headers, response.body) ===
+        "challenge"
+      ? { kind: "blocked", status: response.status }
+      : { kind: "none" };
+  }
+  const url = extract(response.body);
+  return url === null ? { kind: "none" } : { kind: "found", url };
+}
+
+/**
+ * Fetch the first 50 KB of an article URL (stopping early at `</head>`) and
+ * report what it found: the og:image URL (`found`), nothing (`none`), or a bot
+ * challenge (`blocked`, with the HTTP status). Never throws — any
+ * network/timeout/SSRF/parse failure is `none`. One GET, no retry.
+ */
+export async function fetchOgImageResult(
   url: string,
   opts: FetchOgImageOptions = {},
-): Promise<string | null> {
+): Promise<OgImageResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   try {
-    const result = await safeFetch(url, {
+    const response = await safeFetch(url, {
       headers: DEFAULT_HEADERS,
       timeoutMs,
       maxBytes: MAX_HTML_BYTES,
       shouldStopReading: (html) => html.includes("</head>"),
     });
-    if (result.status < 200 || result.status >= 300) return null;
-    return extractOgImage(result.body);
-  } catch (err) {
+    return resultFromResponse(response, extractOgImage);
+  } catch {
     // SafeFetchError is the SSRF-policy violation path; AbortError surfaces
-    // as a generic Error on timeout. Both collapse to null per the contract.
-    if (err instanceof SafeFetchError) return null;
-    return null;
+    // as a generic Error on timeout. All collapse to none per the contract.
+    return { kind: "none" };
   }
+}
+
+/**
+ * Fetch the first 50 KB of an article URL (stopping early at `</head>`) and
+ * return the og:image URL, or null if none is advertised. Never throws — any
+ * network/timeout/SSRF/parse failure returns null and is silently dropped.
+ * A thin wrapper over fetchOgImageResult: a block is null here too.
+ */
+export async function fetchOgImage(
+  url: string,
+  opts: FetchOgImageOptions = {},
+): Promise<string | null> {
+  const result = await fetchOgImageResult(url, opts);
+  return result.kind === "found" ? result.url : null;
 }
 
 /**
@@ -410,22 +537,23 @@ export function createHeroStopProbe(): (accumulated: string) => boolean {
 }
 
 /**
- * Source-aware hero-image fetcher. For the three audit-flagged slugs this
- * reads the full 200 KB budget (no </head> short-circuit) and runs the
- * extended extractor set. For every other slug it delegates straight to
- * fetchOgImage so existing behaviour is untouched.
+ * Source-aware hero-image fetcher with the found / none / blocked answer. For
+ * the three audit-flagged slugs this reads the full 200 KB budget (no </head>
+ * short-circuit) and runs the extended extractor set. For every other slug it
+ * delegates straight to fetchOgImageResult so existing behaviour is untouched.
+ * Never throws; one GET, no retry.
  */
-export async function fetchHeroImage(
+export async function fetchHeroImageResult(
   url: string,
   sourceSlug: string | null | undefined,
   opts: FetchOgImageOptions = {},
-): Promise<string | null> {
+): Promise<OgImageResult> {
   if (!sourceSlug || !HERO_IMAGE_SOURCES.has(sourceSlug)) {
-    return fetchOgImage(url, opts);
+    return fetchOgImageResult(url, opts);
   }
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   try {
-    const result = await safeFetch(url, {
+    const response = await safeFetch(url, {
       headers: DEFAULT_HEADERS,
       timeoutMs,
       maxBytes: HERO_MAX_HTML_BYTES,
@@ -433,10 +561,24 @@ export async function fetchHeroImage(
       // candidate — keeps the common case as fast as fetchOgImage.
       shouldStopReading: createHeroStopProbe(),
     });
-    if (result.status < 200 || result.status >= 300) return null;
-    return extractHeroImageFromHtml(result.body);
-  } catch (err) {
-    if (err instanceof SafeFetchError) return null;
-    return null;
+    return resultFromResponse(response, extractHeroImageFromHtml);
+  } catch {
+    return { kind: "none" };
   }
+}
+
+/**
+ * Source-aware hero-image fetcher. For the three audit-flagged slugs this
+ * reads the full 200 KB budget (no </head> short-circuit) and runs the
+ * extended extractor set. For every other slug it delegates straight to
+ * fetchOgImage so existing behaviour is untouched. A thin wrapper over
+ * fetchHeroImageResult: the URL or null, never throws.
+ */
+export async function fetchHeroImage(
+  url: string,
+  sourceSlug: string | null | undefined,
+  opts: FetchOgImageOptions = {},
+): Promise<string | null> {
+  const result = await fetchHeroImageResult(url, sourceSlug, opts);
+  return result.kind === "found" ? result.url : null;
 }

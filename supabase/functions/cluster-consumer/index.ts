@@ -331,6 +331,12 @@ interface ClusterContext {
   // Built once per context over seed+latest docs; incoming articles score
   // via cosineQuery instead of triggering a per-message rebuild.
   tfidf: TfidfIndex;
+  // h40-clusters-1 (diagnostic only): epoch ms of the oldest updated_at among the
+  // non-sticky rows of the newest-CONTEXT_CLUSTER_CAP window this context was
+  // built from; null when the window was empty. The drain summary reports it as
+  // ctx_window_min: a value of an hour or less means a busy story that went quiet
+  // for an hour had already fallen out of the window.
+  windowOldestUpdatedMs: number | null;
 }
 
 interface QueueMessage {
@@ -366,6 +372,9 @@ let jevLiveAttempts = 0;
 let descriptionSwapSuspects = 0;
 let descriptionSwapSamples: string[] = [];
 const DESCRIPTION_SWAP_SAMPLE_MAX = 3;
+// h40-clusters-1: at most this many {article_id, top_cluster_id, top_score}
+// samples of created_with_floor_candidate in one drain summary.
+const CREATED_FLOOR_SAMPLE_MAX = 3;
 // Guards against two overlapping POST /drainQueue invocations in the same
 // warm isolate: drainQueue() resets jevLive/jevLiveAttempts as its first
 // statements, so a second concurrent drain would zero the first drain's
@@ -505,6 +514,25 @@ async function inChunked<R>(
 // Cluster context loader (rolling 48h politics window)
 // ---------------------------------------------------------------------------
 
+// Epoch ms of the oldest parseable updated_at of `rows`; null when there is none
+// (an empty window, or no row with a usable timestamp). Does not rely on the
+// order of `rows`.
+function oldestUpdatedMs(rows: readonly { updated_at: string }[]): number | null {
+  let oldest: number | null = null;
+  for (const row of rows) {
+    const ms = Date.parse(row.updated_at);
+    if (!Number.isFinite(ms)) continue;
+    if (oldest === null || ms < oldest) oldest = ms;
+  }
+  return oldest;
+}
+
+// Whole minutes from `oldestMs` to `nowMs`, never negative; null when unknown.
+function windowAgeMinutes(oldestMs: number | null | undefined, nowMs: number): number | null {
+  if (oldestMs === null || oldestMs === undefined || !Number.isFinite(oldestMs)) return null;
+  return Math.max(0, Math.round((nowMs - oldestMs) / 60_000));
+}
+
 async function loadClusterContext(): Promise<ClusterContext> {
   const cutoffIso = new Date(
     Date.now() - TIME_WINDOW_HOURS * 60 * 60 * 1000,
@@ -577,6 +605,10 @@ async function loadClusterContext(): Promise<ClusterContext> {
     }
   }
 
+  // The window's age, from the newest-CAP rows only (the sticky tail is older by
+  // construction and would hide the very crowding this number is there to show).
+  const windowOldestUpdatedMs = oldestUpdatedMs(newestRows);
+
   const rowsById = new Map<string, StickyRow>();
   for (const row of [...newestRows, ...stickyRows]) {
     if (!rowsById.has(row.id)) rowsById.set(row.id, row);
@@ -623,6 +655,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     headlinesByCluster: new Map(),
     indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map(), byToken: new Map() },
     tfidf,
+    windowOldestUpdatedMs,
   };
 
   if (clusters.length === 0) return emptyCtx;
@@ -760,7 +793,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
 
   // Member headlines for the scan. Sorting is by publication time and only
   // the newest HEADLINE_MEMBER_SCAN_MAX members per cluster are tokenised, so
-  // a 50-article story costs 12 tokenisations, not 50.
+  // a 100-article story costs HEADLINE_MEMBER_SCAN_MAX tokenisations, not 100.
   const headlinesByCluster = new Map<string, HeadlineMember[]>();
   for (const [clusterId, ids] of memberIdsByCluster.entries()) {
     const members: Array<{ art: ClusterMemberArticle; ms: number }> = [];
@@ -797,6 +830,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     headlinesByCluster,
     indices,
     tfidf,
+    windowOldestUpdatedMs,
   };
 }
 
@@ -1705,6 +1739,10 @@ interface ProcessOutcome {
   score?: number;
   sourcesBefore?: string[];
   articleSourceId?: string | null;
+  // h40-clusters-1 (diagnostic, "created" only): the context's best candidate when
+  // it scored at least FALLBACK_FLOOR and the article still opened a cluster.
+  // Ids and a number; never a title or a URL.
+  floorCandidate?: { clusterId: string; score: number };
 }
 
 async function processArticle(
@@ -2376,6 +2414,16 @@ async function clusterArticle(
     category: article.category,
     signature: article.signature ?? undefined,
   });
+  // `scored` only holds candidates at FALLBACK_FLOOR or better, so a primary here
+  // means the article opened a cluster although the context had a floor candidate
+  // (below MATCH_THRESHOLD, blocked by its source, or rejected by Jev).
+  if (primary) {
+    return {
+      result: "created",
+      clusterId: newId,
+      floorCandidate: { clusterId: primary.clusterId, score: primary.score },
+    };
+  }
   return { result: "created", clusterId: newId };
 }
 
@@ -2796,6 +2844,21 @@ interface InvocationSummary {
   // plus up to 3 sample article ids.
   descriptionSwapSuspects: number;
   descriptionSwapSamples: string[];
+  // h40-clusters-1 (diagnostics, counts and ids only -- never a title or a URL).
+  // Whole minutes from now to the oldest updated_at among the newest-
+  // CONTEXT_CLUSTER_CAP clusters of the context this drain used (null when that
+  // window was empty). An hour or less at the time a twin was opened means the
+  // twin's older cluster had already left the window.
+  ctx_window_min: number | null;
+  // New clusters opened while the context's best candidate scored at least
+  // FALLBACK_FLOOR (it did not join: below MATCH_THRESHOLD, source-blocked or
+  // rejected by Jev), plus up to CREATED_FLOOR_SAMPLE_MAX samples of them.
+  created_with_floor_candidate: number;
+  created_with_floor_candidate_samples: Array<{
+    article_id: string;
+    top_cluster_id: string;
+    top_score: number;
+  }>;
   duration_ms: number;
   budgeted_out: boolean;
   jev_live: JevLiveState;
@@ -2964,6 +3027,9 @@ async function drainQueue(): Promise<InvocationSummary> {
     failedPermanent: 0,
     descriptionSwapSuspects: 0,
     descriptionSwapSamples: [],
+    ctx_window_min: null,
+    created_with_floor_candidate: 0,
+    created_with_floor_candidate_samples: [],
     duration_ms: 0,
     budgeted_out: false,
     jev_live: jevLive,
@@ -3083,6 +3149,16 @@ async function drainQueue(): Promise<InvocationSummary> {
           case "created":
             summary.created += 1;
             if (outcome.clusterId) touchedClusterIds.add(outcome.clusterId);
+            if (outcome.floorCandidate) {
+              summary.created_with_floor_candidate += 1;
+              if (summary.created_with_floor_candidate_samples.length < CREATED_FLOOR_SAMPLE_MAX) {
+                summary.created_with_floor_candidate_samples.push({
+                  article_id: articleId,
+                  top_cluster_id: outcome.floorCandidate.clusterId,
+                  top_score: Math.round(outcome.floorCandidate.score * 1000) / 1000,
+                });
+              }
+            }
             break;
           case "skipped":
             summary.skipped += 1;
@@ -3224,6 +3300,10 @@ async function drainQueue(): Promise<InvocationSummary> {
   // next drain.
   summary.descriptionSwapSuspects = descriptionSwapSuspects;
   summary.descriptionSwapSamples = [...descriptionSwapSamples];
+  // h40-clusters-1: the age of the window of the context the drain ended with
+  // (windowOldestUpdatedMs is set once per context build, so this is the window
+  // the last message was scored against).
+  summary.ctx_window_min = windowAgeMinutes(clusterContextCache?.windowOldestUpdatedMs, Date.now());
   summary.duration_ms = Date.now() - startedAt;
   const after = await queueDepth(supabase, QUEUE_NAME);
   // One JSON-shaped summary line per drain (audit O13) — depth + oldest-age

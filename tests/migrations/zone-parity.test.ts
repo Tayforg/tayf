@@ -500,6 +500,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "158_saved_clusters_v3.sql",
       // 159 re-creates ops_health_report() with 158's text verbatim (rows 1-20, including row 4's VALUES-list copy of BIAS_TO_ZONE) except row 20 (feed_poll_stale also fails at one feed over 60 minutes); pinned by tests/migrations/159-ingest-stale-admission.test.ts
       "159_ingest_stale_admission.sql",
+      // 161 re-creates ops_health_report() with 159's text verbatim (rows 1-20, including row 4's VALUES-list copy of BIAS_TO_ZONE) plus row 21 (image_coverage, per-source image-less share); pinned by tests/migrations/161-image-coverage-by-source.test.ts
+      "161_image_coverage_by_source.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
