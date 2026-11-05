@@ -69,7 +69,7 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   const { data: sourceRow, error: sourceError } = await supabase
     .from("sources")
     .select(
-      "id, name, slug, url, rss_url, bias, logo_url, active, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note",
+      "id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note",
     )
     .eq("slug", slug)
     .maybeSingle();

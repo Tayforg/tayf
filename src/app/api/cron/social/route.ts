@@ -126,6 +126,7 @@ function planChannel(
   const topCandidates = topBundles.map((b) => ({
     ...toCandidateBundle(b),
     isBlindspot: b.cluster.is_blindspot,
+    blindspotPending: b.blindspotPending,
   }));
 
   const topStory = selectTopStory({

@@ -7,8 +7,11 @@ import {
   AGREEMENT_MIN_GAIN,
   AGREEMENT_MIN_TITLE_TOKENS,
   agreementSwitches,
+  contentWords,
   hasFiniteVerb,
   seedDisqualified,
+  sharedStemsExcluding,
+  stemsOf,
   summaryDefect,
   textOverlap,
   titleAgreement,
@@ -91,6 +94,142 @@ describe("titleStemOverlap (the counts behind titleAgreement)", () => {
 
   it("treats a non-string text as sharing nothing", () => {
     expect(titleStemOverlap("kedi köpek kuş", undefined as unknown as string)).toEqual({ shared: 0, total: 3 });
+  });
+});
+
+describe("stemsOf and sharedStemsExcluding (h37-clusters-1: the shared stems, minus words that must not count)", () => {
+  it("stemsOf is the folded five-character content stems: case, diacritics, apostrophe suffix and stopwords gone", () => {
+    expect([...stemsOf("Cumhurbaşkanı Erdoğan'ın ziyareti")].sort()).toEqual(["cumhu", "erdog", "ziyar"]);
+    expect([...stemsOf("İSTANBUL ve ISTANBUL")]).toEqual(["istan"]);
+    expect(stemsOf("").size).toBe(0);
+    expect(stemsOf(undefined as unknown as string).size).toBe(0);
+  });
+
+  it("stemsOf hands out a fresh set each time (a caller may keep it)", () => {
+    const a = stemsOf("kedi köpek");
+    a.add("zzz");
+    expect(stemsOf("kedi köpek").has("zzz")).toBe(false);
+  });
+
+  it("counts the distinct stems of a that b also has", () => {
+    const none = new Set<string>();
+    expect(sharedStemsExcluding("kedi köpek kuş balık", "kedi ve köpek", none)).toBe(2);
+    expect(sharedStemsExcluding("kedi köpek kuş balık", "aslan kaplan", none)).toBe(0);
+    // Multiplicity does not matter, on either side.
+    expect(sharedStemsExcluding("kedi kedi kedi köpek", "kedi kedi", none)).toBe(1);
+    // Same folding as titleStemOverlap: suffixes, diacritics, case.
+    expect(sharedStemsExcluding("Senato'ya Michigan'da Rogers’ı", "SENATO michigan", none)).toBe(2);
+    // Five characters: kazan, seçil, and "hapis" is not "hapsi".
+    expect(sharedStemsExcluding("kazandı seçildi hapis", "kazanarak seçilen hapsi", none)).toBe(2);
+  });
+
+  it("agrees with titleStemOverlap when nothing is excluded", () => {
+    for (const [t, x] of [
+      ["kedi köpek kuş balık", "kedi ve köpek"],
+      ["Senato'ya Michigan'da Rogers’ı", "senato michigan"],
+      ["kedi kedi köpek kuş", "kuş"],
+    ] as const) {
+      expect(sharedStemsExcluding(t, x, new Set())).toBe(titleStemOverlap(t, x)?.shared);
+    }
+  });
+
+  it("drops the excluded stems from the count (stems, not words: the caller folds them the same way)", () => {
+    const a = "Cumhurbaşkanı Erdoğan Azerbaycan'a ziyaret düşünüyor";
+    const b = "Emine Erdoğan'dan Güney Kore ziyaretine ilişkin paylaşım";
+    expect(sharedStemsExcluding(a, b, new Set())).toBe(2); // erdog, ziyar
+    expect(sharedStemsExcluding(a, b, new Set(["erdog"]))).toBe(1);
+    expect(sharedStemsExcluding(a, b, new Set(["erdog", "ziyar"]))).toBe(0);
+    // A stem neither text has changes nothing.
+    expect(sharedStemsExcluding(a, b, new Set(["nobody"]))).toBe(2);
+    // The excluded set is read, never written.
+    const excluded = new Set(["erdog"]);
+    sharedStemsExcluding(a, b, excluded);
+    expect([...excluded]).toEqual(["erdog"]);
+  });
+
+  it("has no minimum-token rule: a two-word title still counts (titleStemOverlap says null for it)", () => {
+    expect(titleStemOverlap("Erdoğan ziyaret", "Erdoğan ziyaret etti")).toBeNull();
+    expect(sharedStemsExcluding("Erdoğan ziyaret", "Erdoğan ziyaret etti", new Set())).toBe(2);
+    expect(sharedStemsExcluding("Erdoğan ziyaret", "Erdoğan ziyaret etti", new Set(["erdog"]))).toBe(1);
+  });
+
+  it("is 0 for an empty text and for a non-string on either side", () => {
+    const none = new Set<string>();
+    expect(sharedStemsExcluding("", "kedi", none)).toBe(0);
+    expect(sharedStemsExcluding("kedi", "", none)).toBe(0);
+    expect(sharedStemsExcluding(undefined as unknown as string, "kedi", none)).toBe(0);
+    expect(sharedStemsExcluding("kedi", null as unknown as string, none)).toBe(0);
+    expect(sharedStemsExcluding(42 as unknown as string, 7 as unknown as string, none)).toBe(0);
+  });
+
+  it("is symmetric in its count of distinct shared stems", () => {
+    const a = "Kestane Lokanta Marmara Nergis Orman";
+    const b = "Lokanta Nergis festivali";
+    expect(sharedStemsExcluding(a, b, new Set())).toBe(sharedStemsExcluding(b, a, new Set()));
+    expect(sharedStemsExcluding(a, b, new Set(["lokan"]))).toBe(1);
+  });
+});
+
+describe("contentWords and the skipWord parameter of sharedStemsExcluding (review fix: generic words match as words)", () => {
+  it("contentWords is the folded content words: case, diacritics, apostrophe suffix, stopwords and one-letter words gone", () => {
+    expect(contentWords("Cumhurbaşkanı Erdoğan'ın ve ZİYARETİ")).toEqual(["cumhurbaskani", "erdogan", "ziyareti"]);
+    expect(contentWords("İSTANBUL ile ISTANBUL")).toEqual(["istanbul", "istanbul"]);
+    expect(contentWords("a b ve 7")).toEqual(["7"]);
+  });
+
+  it("contentWords is the word list behind stemsOf: the same words cut to five characters", () => {
+    const text = "Cumhuriyet Bayramı'nda kutlamalar, Kestane lokantası ve 14 Kasım";
+    expect(new Set(contentWords(text).map((w) => w.slice(0, 5)))).toEqual(stemsOf(text));
+  });
+
+  it("contentWords is [] for an empty string and for a non-string", () => {
+    expect(contentWords("")).toEqual([]);
+    expect(contentWords(undefined as unknown as string)).toEqual([]);
+    expect(contentWords(null as unknown as string)).toEqual([]);
+    expect(contentWords(42 as unknown as string)).toEqual([]);
+  });
+
+  it("skipWord drops the flagged words from BOTH texts before the stems are built", () => {
+    const a = "Cumhuriyet Bayramı kutlaması Cumhurbaşkanı";
+    const b = "Cumhurbaşkanı Bayramı Cumhuriyet töreni";
+    // No skip: cumhu, bayra are shared.
+    expect(sharedStemsExcluding(a, b, new Set())).toBe(2);
+    // Skipping the exact word 'cumhurbaskani' leaves Cumhuriyet's `cumhu` alone: still shared.
+    expect(sharedStemsExcluding(a, b, new Set(), (w) => w === "cumhurbaskani")).toBe(2);
+    // Skipping every cumhu* word removes the stem from both sides.
+    expect(sharedStemsExcluding(a, b, new Set(), (w) => w.startsWith("cumhu"))).toBe(1);
+  });
+
+  it("a stem that only a skipped word on one side carries is not shared with the other side's plain word", () => {
+    // Without skipWord: `cumhu` is shared (Cumhurbaşkanı vs Cumhuriyet). With the
+    // generic word skipped on its side, Cumhuriyet has nothing to match.
+    expect(sharedStemsExcluding("Cumhurbaşkanı Kestane", "Cumhuriyet Kestane", new Set())).toBe(2);
+    expect(
+      sharedStemsExcluding("Cumhurbaşkanı Kestane", "Cumhuriyet Kestane", new Set(), (w) => w === "cumhurbaskani"),
+    ).toBe(1);
+  });
+
+  it("skipWord receives the folded word (diacritics out, lower case) and is called with nothing else", () => {
+    const seen: string[] = [];
+    sharedStemsExcluding("Açıklama ve İSTANBUL", "açıklama", new Set(), (w) => {
+      seen.push(w);
+      return false;
+    });
+    expect(seen.length).toBeGreaterThan(0);
+    for (const w of seen) expect(w).toMatch(/^[a-z0-9]+$/);
+    expect(seen).not.toContain("ve");
+  });
+
+  it("without skipWord the behaviour is unchanged, and `excluded` still applies beside it", () => {
+    const a = "Kestane Lokanta Marmara Nergis";
+    const b = "Kestane Lokanta Nergis festivali";
+    expect(sharedStemsExcluding(a, b, new Set())).toBe(3);
+    expect(sharedStemsExcluding(a, b, new Set(["kesta"]), (w) => w === "lokanta")).toBe(1);
+  });
+
+  it("is still 0 for a non-string on either side when a skipWord is given", () => {
+    expect(sharedStemsExcluding(undefined as unknown as string, "kedi", new Set(), () => true)).toBe(0);
+    expect(sharedStemsExcluding("kedi", null as unknown as string, new Set(), () => false)).toBe(0);
   });
 });
 

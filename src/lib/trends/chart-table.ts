@@ -47,8 +47,17 @@ function dayLabelTr(day: string): string {
 }
 
 /**
+ * Appended to the label of the last, still-filling day (h37-content-3). It
+ * says the count is incomplete, not that the day is "today": the flag is baked
+ * into a cache entry that can be served past Istanbul midnight.
+ */
+const PARTIAL_LABEL_SUFFIX = " (eksik)";
+
+/**
  * One row per bucket, oldest day first (YYYY-MM-DD keys sort lexicographically
- * in chronological order). The input is not mutated.
+ * in chronological order). The input is not mutated. A `partial` bucket (the
+ * day still counting when the snapshot was built) reads "5 Kasım (eksik)";
+ * every other label is as is.
  */
 export function chartTableRows(buckets: readonly DayBucket[]): ChartTableRow[] {
   return [...buckets]
@@ -57,7 +66,9 @@ export function chartTableRows(buckets: readonly DayBucket[]): ChartTableRow[] {
       const { iktidar, bagimsiz, muhalefet } = bucket.counts;
       return {
         day: bucket.day,
-        label: dayLabelTr(bucket.day),
+        label: bucket.partial
+          ? `${dayLabelTr(bucket.day)}${PARTIAL_LABEL_SUFFIX}`
+          : dayLabelTr(bucket.day),
         iktidar,
         bagimsiz,
         muhalefet,

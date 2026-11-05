@@ -137,6 +137,59 @@ describe("bucketIstanbulDays", () => {
   });
 });
 
+// h37-content-3: the window always ends on the current Istanbul day, whose
+// rollup row is still filling up. bucketIstanbulDays flags exactly that bucket
+// so /trends can draw it as "in progress" instead of as a collapse.
+describe("bucketIstanbulDays — partial current day", () => {
+  it("flags the last bucket (2026-11-05 at 12:36 TRT) as partial and none of the other 29", () => {
+    const buckets = bucketIstanbulDays([], Date.parse("2026-11-05T09:36:00Z"));
+
+    expect(buckets).toHaveLength(30);
+    const last = buckets[buckets.length - 1]!;
+    expect(last.day).toBe("2026-11-05");
+    expect(last.partial).toBe(true);
+    for (const b of buckets.slice(0, -1)) {
+      expect(b.partial).not.toBe(true);
+    }
+    expect(buckets.filter((b) => b.partial === true)).toHaveLength(1);
+  });
+
+  it("follows the Istanbul day across midnight: 00:30 TRT on the 6th flags 2026-11-06", () => {
+    // 21:30Z on the 5th is 00:30 on the 6th in Istanbul (UTC+3).
+    const buckets = bucketIstanbulDays([], Date.parse("2026-11-05T21:30:00Z"));
+
+    const last = buckets[buckets.length - 1]!;
+    expect(last.day).toBe("2026-11-06");
+    expect(last.partial).toBe(true);
+    // Yesterday (the 5th) is now a finished day.
+    const yesterday = buckets[buckets.length - 2]!;
+    expect(yesterday.day).toBe("2026-11-05");
+    expect(yesterday.partial).not.toBe(true);
+  });
+
+  it("flags the day by the window position, not by whether it has rows", () => {
+    const withRows = bucketIstanbulDays(
+      [{ day: "2026-11-05", zone: "iktidar", count: 7 }],
+      Date.parse("2026-11-05T09:36:00Z"),
+    );
+    const last = withRows[withRows.length - 1]!;
+    expect(last.partial).toBe(true);
+    expect(last.total).toBe(7);
+  });
+
+  it("does not change counts or totals: only the flag is new", () => {
+    const rows = [
+      { day: "2026-11-04", zone: "iktidar" as const, count: 3883 },
+      { day: "2026-11-05", zone: "muhalefet" as const, count: 843 },
+    ];
+    const buckets = bucketIstanbulDays(rows, Date.parse("2026-11-05T09:36:00Z"));
+
+    expect(buckets.reduce((acc, b) => acc + b.total, 0)).toBe(3883 + 843);
+    expect(buckets[buckets.length - 2]!.counts.iktidar).toBe(3883);
+    expect(buckets[buckets.length - 1]!.counts.muhalefet).toBe(843);
+  });
+});
+
 describe("hourBucketStart", () => {
   it("floors an instant to the start of its UTC hour", () => {
     const ms = Date.parse("2026-09-28T22:47:31.123Z");

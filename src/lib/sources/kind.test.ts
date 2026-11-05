@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  NON_VOTING_CLAUSE,
+  NON_VOTING_KIND_NOTE,
   SOURCE_KINDS,
   SOURCE_KIND_META,
+  nonVotingNote,
   sourceKindOf,
   isVotingSource,
   partitionByVote,
@@ -58,5 +61,30 @@ describe("partitionByVote", () => {
 
     expect(voting.map((m) => m.id)).toEqual(["m0", "m2", "m4"]);
     expect(nonVoting.map((m) => m.id)).toEqual(["m1", "m3"]);
+  });
+});
+
+// One voice: the cluster-page legend (story-timeline), the /source label card
+// and the cluster kart all say the same thing about a source that does not vote.
+describe("non-voting wording", () => {
+  it("pins the cluster-page wording the other surfaces reuse", () => {
+    expect(NON_VOTING_CLAUSE).toBe("spektruma ve ilk sıraya sayılmaz");
+    expect(NON_VOTING_KIND_NOTE).toBe("toplayıcı / niş kaynak; spektruma ve ilk sıraya sayılmaz");
+  });
+
+  it("names the kind and reuses the shared clause for aggregator and niche", () => {
+    expect(nonVotingNote("aggregator")).toBe("Toplayıcı kaynak; spektruma ve ilk sıraya sayılmaz.");
+    expect(nonVotingNote("niche")).toBe("Niş kaynak; spektruma ve ilk sıraya sayılmaz.");
+  });
+
+  it("is null for the voting kinds and for a missing kind (legacy rows are outlets)", () => {
+    expect(nonVotingNote("outlet")).toBeNull();
+    expect(nonVotingNote("wire")).toBeNull();
+    expect(nonVotingNote(undefined)).toBeNull();
+    expect(nonVotingNote(null)).toBeNull();
+  });
+
+  it("treats an unknown kind string as an outlet, never as non-voting", () => {
+    expect(nonVotingNote("something-else" as never)).toBeNull();
   });
 });

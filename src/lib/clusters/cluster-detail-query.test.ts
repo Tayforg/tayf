@@ -144,6 +144,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 import { cacheLife, cacheTag } from "next/cache";
 import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
+import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 import {
   getClusterDetail,
   getClusterDetailOrThrow,
@@ -1349,6 +1350,154 @@ describe("getClusterDetail blindspot recall veto (migration 071)", () => {
     } finally {
       logSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h37-content-1 — the cluster page, share card, embed and oEmbed all read this
+// row, so the public claim waits BLINDSPOT.feedDelayHours here, like /blindspots.
+// ---------------------------------------------------------------------------
+
+describe("getClusterDetail blindspot feed delay (h37-content-1)", () => {
+  const ID = "11111111-1111-4111-8111-111111111111";
+  const HOUR_MS = 60 * 60 * 1000;
+  const NOW = Date.parse("2026-11-05T12:00:00.000Z");
+
+  function setFlaggedRow(ageMs: number, overrides: Record<string, unknown> = {}) {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          blindspot_recall_veto: false,
+          bias_distribution: { pro_government: 5 },
+          first_published: new Date(NOW - ageMs).toISOString(),
+          ...overrides,
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+  }
+
+  let nowSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    nowSpy = vi.spyOn(Date, "now").mockReturnValue(NOW);
+  });
+  afterEach(() => {
+    nowSpy.mockRestore();
+  });
+
+  it("holds back the claim for a flagged cluster 1 h old with healthy feeds: no isBlindspot, no side, no suppression flags, and the feed-health gate still runs once", async () => {
+    setFlaggedRow(HOUR_MS);
+    const result = await getClusterDetail(ID);
+    expect(result!.cluster.is_blindspot).toBe(false);
+    expect(result!.cluster.blindspot_side).toBeNull();
+    expect(result!.blindspotSuppressed).toBe(false);
+    expect(result!.blindspotRecallVetoed).toBe(false);
+    // A held-back claim still asks the feed-health gate: a young cluster is
+    // exactly the one a current outage touches (review fix).
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the feed-health note for a flagged cluster 1 h old whose silent pole is degraded: blindspotSuppressed true, still no claim, no side, not vetoed", async () => {
+    const health = {
+      iktidar: { total: 10, healthy: 9, healthyShare: 0.9, degraded: false },
+      muhalefet: { total: 10, healthy: 2, healthyShare: 0.2, degraded: true },
+      bagimsiz: { total: 5, healthy: 5, healthyShare: 1, degraded: false },
+    };
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue(health);
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation((zone: string) => zone === "iktidar");
+    setFlaggedRow(HOUR_MS);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getClusterDetail(ID);
+      expect(result!.cluster.is_blindspot).toBe(false);
+      expect(result!.cluster.blindspot_side).toBeNull();
+      expect(result!.blindspotSuppressed).toBe(true);
+      expect(result!.blindspotRecallVetoed).toBe(false);
+      expect(feedHealthMock.shouldSuppressBlindspot).toHaveBeenCalledWith("iktidar", health);
+      const suppressionLogs = logSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("[feed-health] suppressed blindspot"),
+      );
+      expect(suppressionLogs).toHaveLength(1);
+      expect(suppressionLogs[0]?.[0]).toContain(`suppressed blindspot for cluster ${ID}`);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("a flagged young cluster with no derivable dominant zone skips the feed-health fetch (nothing to ask about)", async () => {
+    setFlaggedRow(HOUR_MS, { bias_distribution: {} });
+    const result = await getClusterDetail(ID);
+    expect(result!.cluster.is_blindspot).toBe(false);
+    expect(result!.blindspotSuppressed).toBe(false);
+    expect(feedHealthMock.getZoneFeedHealth).not.toHaveBeenCalled();
+  });
+
+  it("a vetoed young cluster and a never-flagged one still skip the feed-health fetch", async () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      setFlaggedRow(HOUR_MS, { blindspot_recall_veto: true });
+      await getClusterDetail(ID);
+      expect(feedHealthMock.getZoneFeedHealth).not.toHaveBeenCalled();
+
+      __resetCacheResilienceForTests();
+      setFlaggedRow(HOUR_MS, { is_blindspot: false, blindspot_side: null });
+      await getClusterDetail(ID);
+      expect(feedHealthMock.getZoneFeedHealth).not.toHaveBeenCalled();
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("keeps the claim and the stored side for a cluster 25 h old, and runs the feed-health gate", async () => {
+    setFlaggedRow(25 * HOUR_MS);
+    const result = await getClusterDetail(ID);
+    expect(result!.cluster.is_blindspot).toBe(true);
+    expect(result!.cluster.blindspot_side).toBe("pro_government");
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the claim at exactly BLINDSPOT.feedDelayHours old and holds it back one millisecond earlier", async () => {
+    setFlaggedRow(BLINDSPOT.feedDelayHours * HOUR_MS);
+    expect((await getClusterDetail(ID))!.cluster.is_blindspot).toBe(true);
+
+    __resetCacheResilienceForTests();
+    setFlaggedRow(BLINDSPOT.feedDelayHours * HOUR_MS - 1);
+    expect((await getClusterDetail(ID))!.cluster.is_blindspot).toBe(false);
+  });
+
+  it("reads 'now' from the clock inside the fetch: the same row flips when the clock moves past the delay", async () => {
+    setFlaggedRow(23 * HOUR_MS);
+    expect((await getClusterDetail(ID))!.cluster.is_blindspot).toBe(false);
+
+    __resetCacheResilienceForTests();
+    nowSpy.mockReturnValue(NOW + 2 * HOUR_MS);
+    // Same stored first_published as the row above (setFlaggedRow measures from
+    // the fixed NOW), read 2 h later: now 25 h old.
+    setFlaggedRow(23 * HOUR_MS);
+    expect((await getClusterDetail(ID))!.cluster.is_blindspot).toBe(true);
+  });
+
+  it("still reports a vetoed young cluster as vetoed (the veto outranks the delay)", async () => {
+    setFlaggedRow(HOUR_MS, { blindspot_recall_veto: true });
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const result = await getClusterDetail(ID);
+      expect(result!.cluster.is_blindspot).toBe(false);
+      expect(result!.blindspotRecallVetoed).toBe(true);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("does not touch a cluster that was never flagged, however young", async () => {
+    setFlaggedRow(HOUR_MS, { is_blindspot: false, blindspot_side: null });
+    const result = await getClusterDetail(ID);
+    expect(result!.cluster.is_blindspot).toBe(false);
+    expect(result!.cluster.blindspot_side).toBeNull();
   });
 });
 

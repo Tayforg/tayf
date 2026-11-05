@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { BLINDSPOT } from "@/lib/bias/config";
 import { TICKER_RELEVANCE_MIN } from "@/lib/finance/kap-pickup";
 
 import { API_PLANS, V1_COMMON_NOTES_TR, V1_ENDPOINTS } from "./v1-docs";
@@ -75,6 +76,38 @@ describe("kap pickup relevance note (Turkish decimal)", () => {
     expect(pickup!.summaryEn).not.toMatch(/\d,\d/);
     for (const r of pickup!.responses) expect(r.descriptionEn).not.toMatch(/\d,\d/);
     for (const p of pickup!.params) expect(p.descriptionEn).not.toMatch(/\d,\d/);
+  });
+});
+
+// Review fix editorial-3: the site shows the "Kör nokta" pill BLINDSPOT.feedDelayHours
+// after first_published on every gated surface; /api/v1/clusters returns the stored
+// flag minus the recall veto without waiting. A consumer must not read the field as
+// the site's pill.
+describe("/api/v1/clusters is_blindspot notes (editorial-3)", () => {
+  const clusters = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters");
+
+  it("exists", () => {
+    expect(clusters).toBeDefined();
+  });
+
+  it("keeps the recall-veto note", () => {
+    expect(clusters!.notesTr).toContain("is_blindspot, sitenin kör nokta geri çağırma (recall veto) kuralını uygular.");
+  });
+
+  it("adds a note that the site waits BLINDSPOT.feedDelayHours and this endpoint does not, pointing at the alerts feed", () => {
+    expect(BLINDSPOT.feedDelayHours).toBe(24);
+    const note = clusters!.notesTr.find((n) => n.startsWith("Site, kör nokta etiketini"));
+    expect(note).toBe(
+      `Site, kör nokta etiketini kartlarda ve haber sayfasında ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra gösterir; bu uç nokta etiketi beklemeden döndürür (beklemeyi uygulayan liste: /api/v1/alerts/blindspots).`,
+    );
+  });
+
+  it("puts the delay note right after the recall-veto note", () => {
+    const notes = clusters!.notesTr;
+    const veto = notes.findIndex((n) => n.startsWith("is_blindspot, sitenin kör nokta geri çağırma"));
+    const wait = notes.findIndex((n) => n.startsWith("Site, kör nokta etiketini"));
+    expect(veto).toBeGreaterThanOrEqual(0);
+    expect(wait).toBe(veto + 1);
   });
 });
 

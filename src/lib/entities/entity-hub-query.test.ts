@@ -394,6 +394,35 @@ describe("getEntityHub result", () => {
   });
 });
 
+describe("getEntityHub blindspot feed delay (h37-content-1)", () => {
+  it("holds back a flagged claim first published 1 h ago and keeps one 30 h old", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(null);
+    fixture.rpcRows = [
+      { id: "young", total: 2 },
+      { id: "old", total: 2 },
+    ];
+    const flagged = (id: string, ageMs: number) => ({
+      ...mkRow({
+        id,
+        bias_distribution: { pro_government: 9, opposition: 1 },
+        members: [
+          { id: `${id}-a1`, sourceId: `${id}-s1` },
+          { id: `${id}-a2`, sourceId: `${id}-s2` },
+        ],
+      }),
+      is_blindspot: true,
+      blindspot_side: "pro_government",
+      first_published: new Date(Date.now() - ageMs).toISOString(),
+    });
+    fixture.data = [flagged("young", 3_600_000), flagged("old", 30 * 3_600_000)];
+    const result = await getEntityHub("erdogan");
+    const byId = new Map((result?.bundles ?? []).map((b) => [b.cluster.id, b.cluster]));
+    expect(byId.get("young")?.is_blindspot).toBe(false);
+    expect(byId.get("young")?.blindspot_side).toBeNull();
+    expect(byId.get("old")?.is_blindspot).toBe(true);
+  });
+});
+
 describe("getEntityHub v1 fallback (migration 125 not applied yet)", () => {
   it("falls back to v1 exactly once on PGRST202 and builds the bundles from the v1 rows", async () => {
     fixture.rpcError = { message: "Could not find the function", code: "PGRST202" };

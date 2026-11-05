@@ -81,9 +81,11 @@ export default async function WeeklyPage() {
 
   // `null` = the week could not be read; an empty `rows` = it produced nothing.
   const clusters = read?.rows ?? null;
+  // `read.asOfMs` is the clock stamped inside the cached read: the blindspot
+  // delay is measured against it, never against a clock read in this render.
   const summary =
-    clusters !== null && clusters.length > 0
-      ? summariseWeek(clusters, health)
+    read !== null && read.rows.length > 0
+      ? summariseWeek(read.rows, health, read.asOfMs)
       : null;
 
   // The cluster read pages through the whole window and has its own ceiling.

@@ -84,6 +84,7 @@ import {
   type EmbeddedClusterRow,
 } from "./politics-query";
 import type { ZoneFeedHealth } from "./feed-health";
+import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 import { createReaderClient, createServerClient } from "@/lib/supabase/server";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 
@@ -142,7 +143,10 @@ function mkCluster(opts: MkClusterOpts) {
       ? { blindspot_recall_veto: opts.blindspot_recall_veto }
       : {}),
     article_count: opts.article_count ?? opts.members.length,
-    first_published: opts.first_published ?? iso(10 * 60 * 1000),
+    // A flagged fixture defaults to a cluster older than the public feed delay
+    // (h37-content-1: BLINDSPOT.feedDelayHours); the delay tests set their own age.
+    first_published:
+      opts.first_published ?? iso(opts.is_blindspot ? 30 * 60 * 60 * 1000 : 10 * 60 * 1000),
     updated_at: opts.updated_at ?? iso(5 * 60 * 1000),
     cluster_articles: opts.members.map((m) => ({
       articles: {
@@ -527,7 +531,7 @@ describe("buildClusterBundle source kind", () => {
       ],
     }) as unknown as EmbeddedClusterRow;
 
-    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row));
+    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row), null, NOW_MS);
 
     const kindById = Object.fromEntries(
       bundle.sources.map((s) => [s.id, s.kind]),
@@ -555,7 +559,7 @@ describe("buildClusterBundle source kind", () => {
       ],
     }) as unknown as EmbeddedClusterRow;
 
-    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row));
+    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row), null, NOW_MS);
 
     expect(bundle.sources).toEqual([
       {
@@ -1288,6 +1292,116 @@ describe("blindspot recall veto", () => {
     const { bundles } = await getPoliticsClusters();
     expect(bundles[0].cluster.is_blindspot).toBe(true);
     expect(bundles[0].cluster.blindspot_side).toBe("pro_government");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h37-content-1 — the public "Kör nokta" claim waits BLINDSPOT.feedDelayHours,
+// like /blindspots does. The stored flag is untouched; only the card row is.
+// ---------------------------------------------------------------------------
+
+describe("blindspot feed delay (h37-content-1)", () => {
+  const HOUR_MS = 60 * 60 * 1000;
+
+  function flaggedRow(id: string, ageMs: number, veto?: boolean) {
+    return mkCluster({
+      id,
+      is_blindspot: true,
+      blindspot_side: "pro_government",
+      bias_distribution: { pro_government: 9, opposition: 1 },
+      first_published: iso(ageMs),
+      ...(veto !== undefined ? { blindspot_recall_veto: veto } : {}),
+      members: [
+        { id: `${id}-a1`, sourceId: `${id}-s1`, category: "politika" },
+        { id: `${id}-a2`, sourceId: `${id}-s2`, category: "politika" },
+      ],
+    });
+  }
+
+  it("maps a flagged row 1 h old to a card with no pill and no side, but keeps the cluster listed", async () => {
+    response = { data: [flaggedRow("young", HOUR_MS, false)], error: null };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0].cluster.is_blindspot).toBe(false);
+    expect(bundles[0].cluster.blindspot_side).toBeNull();
+    // The Son Dakika strip shares the same mapped row.
+    expect(breakingBundles).toHaveLength(1);
+    expect(breakingBundles[0].cluster.is_blindspot).toBe(false);
+    expect(breakingBundles[0].cluster.blindspot_side).toBeNull();
+  });
+
+  it("keeps the pill and the side on a row 25 h old", async () => {
+    response = { data: [flaggedRow("old", 25 * HOUR_MS, false)], error: null };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].cluster.is_blindspot).toBe(true);
+    expect(bundles[0].cluster.blindspot_side).toBe("pro_government");
+  });
+
+  it("keeps the pill at exactly BLINDSPOT.feedDelayHours old and hides it one millisecond earlier", async () => {
+    response = {
+      data: [
+        flaggedRow("exact", BLINDSPOT.feedDelayHours * HOUR_MS),
+        flaggedRow("just-short", BLINDSPOT.feedDelayHours * HOUR_MS - 1),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    const byId = new Map(bundles.map((b) => [b.cluster.id, b]));
+    expect(byId.get("exact")!.cluster.is_blindspot).toBe(true);
+    expect(byId.get("just-short")!.cluster.is_blindspot).toBe(false);
+  });
+
+  it("marks only a held-back claim as blindspotPending (not an old claim, a vetoed one or a non-blindspot)", async () => {
+    response = {
+      data: [
+        flaggedRow("young", HOUR_MS),
+        flaggedRow("old", 40 * HOUR_MS),
+        flaggedRow("young-vetoed", HOUR_MS, true),
+        mkCluster({
+          id: "plain-young",
+          first_published: iso(HOUR_MS),
+          members: [
+            { id: "p1", sourceId: "ps1", category: "politika" },
+            { id: "p2", sourceId: "ps2", category: "politika" },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { bundles } = await getPoliticsClusters();
+    const pending = Object.fromEntries(bundles.map((b) => [b.cluster.id, b.blindspotPending === true]));
+    expect(pending).toEqual({
+      young: true,
+      old: false,
+      "young-vetoed": false,
+      "plain-young": false,
+    });
+    // A held-back claim is not a recall veto and logs none.
+    const lines = infoSpy.mock.calls.map((c) => String(c[0]));
+    expect(lines).toEqual(["[recall-veto] withdrew blindspot for cluster young-vetoed"]);
+    infoSpy.mockRestore();
+  });
+
+  it("does not run the feed-health suppression for a held-back claim (nothing left to suppress)", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue({
+      iktidar: { total: 10, healthy: 10, healthyShare: 1, degraded: false },
+      bagimsiz: { total: 10, healthy: 10, healthyShare: 1, degraded: false },
+      muhalefet: { total: 10, healthy: 2, healthyShare: 0.2, degraded: true },
+    } satisfies ZoneFeedHealth);
+    response = { data: [flaggedRow("young-degraded", HOUR_MS)], error: null };
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    await getPoliticsClusters();
+    expect(infoSpy.mock.calls.map((c) => String(c[0]))).toEqual([]);
+    infoSpy.mockRestore();
+  });
+
+  it("buildClusterBundle takes 'now' from its caller, never from the clock", () => {
+    const row = flaggedRow("clocked", 30 * HOUR_MS) as unknown as EmbeddedClusterRow;
+    const members = flattenClusterMembers(row);
+    // The wall clock is 30 h past first_published; the caller says it is 10 h.
+    expect(buildClusterBundle(row, members, null, NOW_MS - 20 * HOUR_MS).bundle.cluster.is_blindspot).toBe(false);
+    expect(buildClusterBundle(row, members, null, NOW_MS).bundle.cluster.is_blindspot).toBe(true);
   });
 });
 

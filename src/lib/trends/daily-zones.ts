@@ -31,6 +31,14 @@ import type { MediaDnaZone } from "@/types";
 // order as the existing hourly revalidate, and the previous days are
 // complete. The live view stays the source of truth for the refresh function
 // only.
+//
+// The `partial` flag (h37-content-3) is baked into the cache entry together with
+// the data. That entry is served up to about 1 h past Istanbul midnight (the
+// hourly revalidate), and longer to the first request after an idle spell
+// (cacheLife sets no `expire`, so a stale entry is served while it regenerates).
+// For that whole time its last day is the PREVIOUS Istanbul day. So the marker
+// the page draws must say the last day's count is incomplete, never that the
+// day is "today".
 
 export const WINDOW_DAYS = 30;
 export const TRENDS_TIME_ZONE = "Europe/Istanbul";
@@ -42,6 +50,16 @@ export type DayBucket = {
   counts: Record<MediaDnaZone, number>;
   /** Sum of counts (cached so the renderer doesn't re-add). */
   total: number;
+  /**
+   * `true` on the last bucket of the window only: the Istanbul day that was
+   * still filling up when the snapshot was built. Set by `bucketIstanbulDays`
+   * from the `nowMs` of the cached fetcher, so the renderer never reads a
+   * clock. The flag is baked into the cache entry, which is served up to about 1 h past Istanbul midnight and longer
+   * to the first request after an idle spell (no `expire`), so by then that
+   * day may no longer be "today": the marker must say "incomplete", not
+   * "today". Absent on every finished day.
+   */
+  partial?: boolean;
 };
 
 /** One row per (day, zone) from the `trends_daily_zone_counts_ist_rollup` table. */
@@ -97,6 +115,12 @@ export function hourBucketStart(ms: number): number {
  * reintroduces DST (it has observed none since 2016). The Y/M/D triple is
  * timezone-agnostic once extracted; stepping it in UTC and re-formatting
  * with `en-CA`(UTC) keeps every key contiguous by construction.
+ *
+ * The bucket of `todayKey` is the only one flagged `partial: true`: the window
+ * always ends on the current Istanbul day, whose rollup row is still filling
+ * up (see "Freshness" above), so /trends can draw it as "in progress" instead
+ * of as a collapse. The flag derives from the same `nowMs` as the window, so it
+ * is baked into the cache entry together with the data it describes.
  */
 export function bucketIstanbulDays(
   rows: AggregateRow[],
@@ -113,6 +137,7 @@ export function bucketIstanbulDays(
       day: key,
       counts: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
       total: 0,
+      ...(key === todayKey ? { partial: true } : {}),
     });
   }
 

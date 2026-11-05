@@ -18,6 +18,14 @@
 // Missing data never hides anything: `undefined` (fixtures, rows fetched
 // before 071 was applied) and `null` are pass-through. Only a literal
 // `true` vetoes.
+//
+// h37-content-1: the claim readers SEE also waits `BLINDSPOT.feedDelayHours`
+// after the cluster's first publication (`publicBlindspotClaim` below), the
+// same wait /blindspots already applies, so a pill is not shown while the
+// absent side is still catching up. `applyRecallVeto` stays the raw veto for
+// callers that must not wait (the /api/v1 contract, the SQL parity tests).
+
+import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 
 /**
  * Minimum Jev `blindspot_recall` probability for a silent-side article to
@@ -52,6 +60,47 @@ export function applyRecallVeto<S>(row: RecallVetoRow<S>): RecallVetoResult<S> {
     blindspotSide: row.blindspot_side,
     vetoed: false,
   };
+}
+
+export interface PublicBlindspotClaim<S> extends RecallVetoResult<S> {
+  /**
+   * True only when a real, unvetoed claim is held back because the cluster
+   * was first published less than `BLINDSPOT.feedDelayHours` ago. The stored
+   * flag is untouched and the claim appears by itself once the delay is up.
+   */
+  pending: boolean;
+}
+
+/**
+ * The blindspot claim a reader may see: `applyRecallVeto`, then the same
+ * `BLINDSPOT.feedDelayHours` wait /blindspots applies to its list. A flagged,
+ * unvetoed cluster younger than the delay yields no claim and no side
+ * (`pending: true`); at exactly the delay and older, the stored claim shows.
+ *
+ * Pure: the caller passes `nowMs`, read ONCE inside its cache scope (never
+ * `Date.now()` in an uncached render). A veto outranks the delay (a vetoed
+ * row is `vetoed`, never `pending`). Missing data never hides anything: a
+ * `first_published` that is null, undefined or unparseable, or a `nowMs`
+ * that is not finite, behaves exactly like `applyRecallVeto`.
+ */
+export function publicBlindspotClaim<S>(
+  row: RecallVetoRow<S> & { first_published?: string | null },
+  nowMs: number,
+): PublicBlindspotClaim<S> {
+  const veto = applyRecallVeto(row);
+  if (!veto.isBlindspot) return { ...veto, pending: false };
+
+  const firstPublishedMs =
+    typeof row.first_published === "string" ? Date.parse(row.first_published) : Number.NaN;
+  if (!Number.isFinite(firstPublishedMs) || !Number.isFinite(nowMs)) {
+    return { ...veto, pending: false };
+  }
+
+  const delayMs = BLINDSPOT.feedDelayHours * 3_600_000;
+  if (nowMs - firstPublishedMs >= delayMs) return { ...veto, pending: false };
+
+  // Mirrors the migration-032 invariant: no blindspot => no side.
+  return { isBlindspot: false, blindspotSide: null, vetoed: false, pending: true };
 }
 
 /** Same shape as the feed-health suppression log line. */

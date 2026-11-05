@@ -156,6 +156,8 @@ function mkRow(opts: {
   title_tr?: string;
   updated_at?: string;
   memberCount?: number;
+  first_published?: string;
+  is_blindspot?: boolean;
 }) {
   const memberCount = opts.memberCount ?? 1;
   return {
@@ -164,10 +166,10 @@ function mkRow(opts: {
     title_tr_neutral: null,
     summary_tr: "summary",
     bias_distribution: {},
-    is_blindspot: false,
-    blindspot_side: null,
+    is_blindspot: opts.is_blindspot ?? false,
+    blindspot_side: opts.is_blindspot ? "pro_government" : null,
     article_count: memberCount,
-    first_published: "2026-09-18T10:00:00.000Z",
+    first_published: opts.first_published ?? "2026-09-18T10:00:00.000Z",
     updated_at: opts.updated_at ?? "2026-09-18T11:00:00.000Z",
     cluster_articles: Array.from({ length: memberCount }, (_, i) => ({
       articles: {
@@ -297,6 +299,25 @@ describe("getTopicClusters", () => {
 // only pager link went to N-1 (also empty). The fetcher now answers "where does
 // the list end?" with ONE lean head/exact count, but only when it is needed:
 // zero rows on a page > 1. A page that has rows, and page 1, never pay for it.
+
+describe("getTopicClusters: blindspot feed delay (h37-content-1)", () => {
+  it("holds back a flagged claim first published 1 h ago and keeps an older one", async () => {
+    fixture.clusters = [
+      mkRow({
+        id: "young",
+        is_blindspot: true,
+        first_published: new Date(Date.now() - 3_600_000).toISOString(),
+      }),
+      mkRow({ id: "old", is_blindspot: true }),
+    ];
+    const page = await getTopicClusters("dunya", 1);
+    const byId = new Map((page?.bundles ?? []).map((b) => [b.cluster.id, b.cluster]));
+    expect(byId.get("young")?.is_blindspot).toBe(false);
+    expect(byId.get("young")?.blindspot_side).toBeNull();
+    expect(byId.get("old")?.is_blindspot).toBe(true);
+    expect(byId.get("old")?.blindspot_side).toBe("pro_government");
+  });
+});
 
 describe("getTopicClusters: lastPage on a page past the end", () => {
   it("page 3 with 0 rows issues exactly one extra head/exact count read with the same four filters as the list read", async () => {

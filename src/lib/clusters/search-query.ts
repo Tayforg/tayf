@@ -151,11 +151,15 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
     (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
   );
 
+  // One clock read for the whole result: it ages every row's blindspot claim
+  // (this body only runs inside the "use cache" attempt or after the request
+  // scope on the live retry, so the read is allowed).
+  const nowMs = Date.now();
   const bundles: ClusterBundle[] = [];
   for (const row of rows) {
     const members = flattenClusterMembers(row);
     if (members.length === 0) continue;
-    bundles.push(buildClusterBundle(row, members, health).bundle);
+    bundles.push(buildClusterBundle(row, members, health, nowMs).bundle);
   }
   return { bundles, capped };
 }

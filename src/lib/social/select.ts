@@ -131,7 +131,14 @@ export function selectBlindspotsToPost(
 }
 
 export interface SelectTopStoryArgs {
-  bundles: ReadonlyArray<SocialCandidateBundle & { isBlindspot?: boolean }>;
+  /**
+   * `blindspotPending` (h37-content-1): the card row hides a flagged claim
+   * younger than BLINDSPOT.feedDelayHours, but a flagged story is still not a
+   * top story for this channel, so a held-back claim is skipped like a shown one.
+   */
+  bundles: ReadonlyArray<
+    SocialCandidateBundle & { isBlindspot?: boolean; blindspotPending?: boolean }
+  >;
   nowMs: number;
   postedIds: ReadonlySet<string>;
   lastTopStoryAtMs: number | null;
@@ -153,7 +160,7 @@ export function selectTopStory(args: SelectTopStoryArgs): SocialCandidateBundle 
   }
 
   for (const bundle of bundles) {
-    if (bundle.isBlindspot) continue;
+    if (bundle.isBlindspot || bundle.blindspotPending) continue;
     if (bundle.sources.length < SOCIAL_TOP_MIN_SOURCES) continue;
     const effectiveCount = bundle.effectiveArticleCount ?? bundle.sources.length;
     if (effectiveCount < SOCIAL_TOP_MIN_SOURCES) continue;

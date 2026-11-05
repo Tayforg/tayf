@@ -154,11 +154,14 @@ async function fetchWeekArchiveClusters(range: {
     // Single clock read, same rationale as weekly-query.ts: the upper
     // bound must not let a source-controlled future first_published leak
     // a cluster into a past week.
-    const nowIso = new Date(Date.now()).toISOString();
+    // The same instant is stamped on the read (`asOfMs`) so summariseWeek can
+    // age each blindspot claim against it (h37-content-1).
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
 
     // A throw from readAllPages (a page error or an invalid page size) lands
     // in the catch below and becomes `null`.
-    return await readAllPages(
+    const read = await readAllPages(
       (from, to) =>
         supabase
           .from("clusters")
@@ -177,6 +180,7 @@ async function fetchWeekArchiveClusters(range: {
           .returns<WeeklyClusterRow[]>(),
       { label: "week archive clusters", maxPages: WEEK_ARCHIVE_MAX_PAGES },
     );
+    return { ...read, asOfMs: nowMs };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[week-archive] clusters unavailable: ${message}`);

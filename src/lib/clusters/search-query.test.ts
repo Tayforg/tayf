@@ -169,6 +169,7 @@ function mkRow(opts: {
   bias_distribution?: unknown;
   is_blindspot?: boolean;
   blindspot_side?: unknown;
+  first_published?: string;
   members: Array<{ id: string; sourceId: string; content_hash?: string | null }>;
 }) {
   return {
@@ -180,7 +181,7 @@ function mkRow(opts: {
     is_blindspot: opts.is_blindspot ?? false,
     blindspot_side: opts.blindspot_side ?? null,
     article_count: opts.members.length,
-    first_published: "2026-04-18T10:00:00.000Z",
+    first_published: opts.first_published ?? "2026-04-18T10:00:00.000Z",
     updated_at: "2026-04-18T11:00:00.000Z",
     cluster_articles: opts.members.map((m) => ({
       articles: {
@@ -1069,5 +1070,29 @@ describe("feed-health gated blindspot suppression (search results)", () => {
     expect(result.bundles).toHaveLength(1);
     expect(result.bundles[0]?.cluster.is_blindspot).toBe(true);
     expect(result.bundles[0]?.cluster.blindspot_side).toBe("pro_government");
+  });
+
+  it("holds back a flagged claim first published 1 h ago, like the home feed (h37-content-1)", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(null);
+    fixture.rpcIds = ["young", "old"];
+    const flagged = {
+      is_blindspot: true,
+      blindspot_side: "pro_government",
+      bias_distribution: { pro_government: 9, opposition: 1 },
+      members: [
+        { id: "a1", sourceId: "s1" },
+        { id: "a2", sourceId: "s2" },
+      ],
+    };
+    fixture.data = [
+      mkRow({ id: "young", first_published: new Date(Date.now() - 3_600_000).toISOString(), ...flagged }),
+      mkRow({ id: "old", ...flagged }),
+    ];
+    const result = await searchClusters("deprem");
+    if (!result.ok) throw new Error("expected ok");
+    const byId = new Map(result.bundles.map((b) => [b.cluster.id, b.cluster]));
+    expect(byId.get("young")?.is_blindspot).toBe(false);
+    expect(byId.get("young")?.blindspot_side).toBeNull();
+    expect(byId.get("old")?.is_blindspot).toBe(true);
   });
 });

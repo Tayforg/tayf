@@ -64,6 +64,10 @@ export const metadata: Metadata = staticPageMetadata({
 // on top (pinned by page.test.tsx).
 const CHANGELOG = [
   {
+    date: "2026-11-05",
+    text: `Kör nokta etiketi artık kartlarda (Kaydedilenler listesi hariç), haber sayfasında ve haftalık özette de ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünüyor; daha önce bu bekleme yalnızca Kör Noktalar listesi içindi.`,
+  },
+  {
     date: "2026-11-01",
     text: "Kör nokta doğrulaması genişledi: aynı olayı neredeyse aynı başlıkla veren kardeş bir kümede karşı taraf da varsa kör nokta işareti gösterilmiyor.",
   },
@@ -336,13 +340,14 @@ export default async function MethodologyPage() {
             taraf görmezden geldi&quot; ile &quot;henüz kimse haber
             yapmadı&quot; ayırt edilemez, bu yüzden {BLINDSPOT.minSources}{" "}
             kaynak eşiği var. Bir küme eşikleri geçtiğinde bile, karşı
-            tarafa yetişme fırsatı tanımak için{" "}
+            tarafa yetişme fırsatı tanımak için &ldquo;Kör nokta&rdquo;
+            etiketi kartlarda (Kaydedilenler listesi hariç), haber
+            sayfasında, haftalık özette ve{" "}
             <Link href="/blindspots" className={quietLink}>
               Kör Noktalar
             </Link>{" "}
-            listesine {BLINDSPOT.feedDelayHours} saat sonra girer —
-            veritabanındaki işaretleme kendisi anlıktır, gecikme sadece
-            herkese açık listeleme içindir.
+            listesinde ilk yayından {BLINDSPOT.feedDelayHours} saat sonra
+            görünür — veritabanındaki işaretleme anlıktır.
           </p>
           <p className={proseClass}>
             Tayf&apos;ın kümeleyicisi aynı olayı bazen iki ayrı kümeye böler.

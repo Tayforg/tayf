@@ -216,7 +216,20 @@ const ZONE_ROWS: ReadonlyArray<{ zone: MediaDnaZone; label: string }> = [
   { zone: "muhalefet", label: "Muhalefet medyası" },
 ];
 
-export function buildKarneView(k: SourceKarne): KarneView {
+export interface KarneViewOptions {
+  /**
+   * Whether the source's kind votes (default true). An aggregator or niche
+   * source has no vote: migration 106 derives its own_zone from the bias
+   * label, so "the zone that wrote the story" is a zone it never voted in and
+   * the same-side clause is dropped. The count itself stays.
+   */
+  voting?: boolean;
+}
+
+export function buildKarneView(
+  k: SourceKarne,
+  { voting = true }: KarneViewOptions = {},
+): KarneView {
   if (k.nClusters < KARNE_MIN_CLUSTERS) {
     return { state: "insufficient", n: k.nClusters };
   }
@@ -230,7 +243,7 @@ export function buildKarneView(k: SourceKarne): KarneView {
       : null;
 
   let blindspotText = `Kör nokta işaretli haberler: ${formatCountTr(k.nBlindspot)}`;
-  if (k.nBlindspot > 0) {
+  if (voting && k.nBlindspot > 0) {
     blindspotText += ` · ${formatCountTr(k.nBlindspotSameSide)} tanesinde haberi ağırlıkla yazan bölgedeydi`;
   }
 

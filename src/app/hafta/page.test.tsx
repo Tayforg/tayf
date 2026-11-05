@@ -48,7 +48,9 @@ type WordsResult =
 
 const mocks = vi.hoisted(() => ({
   /** What getWeeklyClusters resolves: the paged read, or null when unreadable. */
-  clusters: null as { rows: unknown[]; truncated: boolean } | null,
+  clusters: null as { rows: unknown[]; truncated: boolean; asOfMs?: number } | null,
+  /** Every (rows, health, nowMs) call the page made to summariseWeek. */
+  summariseCalls: [] as unknown[][],
   labelChanges: null as
     | Array<{
         slug: string;
@@ -83,7 +85,10 @@ vi.mock("@/lib/weekly/weekly-query", () => ({
   WEEKLY_CLUSTER_LIMIT: 5000,
   getWeeklyClusters: () => Promise.resolve(mocks.clusters),
   getWeeklyLabelChanges: () => Promise.resolve(mocks.labelChanges),
-  summariseWeek: () => mocks.summary,
+  summariseWeek: (...args: unknown[]) => {
+    mocks.summariseCalls.push(args);
+    return mocks.summary;
+  },
 }));
 
 vi.mock("@/lib/clusters/feed-health", () => ({
@@ -223,6 +228,7 @@ const FULL_SUMMARY: Summary = {
 };
 
 beforeEach(() => {
+  mocks.summariseCalls = [];
   mocks.clusters = { rows: [{ id: "cl-1" }], truncated: false };
   mocks.labelChanges = [];
   mocks.summary = FULL_SUMMARY;
@@ -431,6 +437,15 @@ describe("WeeklyPage — data present", () => {
     mocks.clusters = { rows: [{ id: "cl-1" }], truncated: true };
     const capped = collectText(await WeeklyPage()).join(" ");
     expect(capped).toContain(caveat);
+  });
+
+  it("measures the blindspot delay against the cached read's own clock (asOfMs), never a clock read in the render (h37-content-1)", async () => {
+    mocks.clusters = { rows: [{ id: "cl-1" }], truncated: false, asOfMs: 1_790_000_000_000 };
+
+    await WeeklyPage();
+
+    expect(mocks.summariseCalls).toHaveLength(1);
+    expect(mocks.summariseCalls[0]![2]).toBe(1_790_000_000_000);
   });
 
   it("never infers truncation from the row count (a 5,000-row read that ended on its own is complete)", async () => {

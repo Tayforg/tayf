@@ -64,7 +64,7 @@ Live counts for articles, clusters, and sources.
 - `neutralizedRatio`: `neutralized / neutralizedEligible`, 2 decimals; `oldestPendingNeutralAgeSec` is null when no eligible cluster is awaiting a neutral headline
 - `quality` (migration 039): summary of the latest `cluster_quality_snapshots` row (written by `node scripts/audit-clusters.mjs --json --persist`) — `null` before the first audit run, or during a partially-applied 039 migration window
 - Planner estimates: `articles.total` and `articles.withImage` are read with `Prefer: count=planned` (Postgres statistics estimate, typically within a few %, refreshed by autovacuum ANALYZE), so `avgArticlesPerCluster` and `avgArticlesPerMultiCluster` (which use `articles.total`) are approximate. All other counts (`last24h`, `lastHour`, `politics*`, `clusters.total`/`multiArticle`/`blindspots`, `sources.*`) are exact. `neutralizedEligible` and `neutralized` are exact, served by `headline_neutral_counts()` (migration 083) in a single scan; an RPC failure returns 503 with `details.queries: ["headlineNeutralCounts"]`
-- `clusters.blindspots`: the raw count of `clusters` rows with `is_blindspot = true` (exact, no other filter). It is an internal gauge, **not** the public "Kör nokta" claim: it ignores the recall veto (`blindspot_recall_veto`, set by either the `jev_recall` or the `sibling_headline` rule), archived and merged status, the 24 h feed delay and the `/blindspots` quality filters, so it is higher than the number of cards on `/blindspots`. Use `GET /api/v1/clusters` or `GET /api/v1/alerts/blindspots` for the public claim
+- `clusters.blindspots`: the raw count of `clusters` rows with `is_blindspot = true` (exact, no other filter). It is an internal gauge, **not** the public "Kör nokta" claim: it ignores the recall veto (`blindspot_recall_veto`, set by either the `jev_recall` or the `sibling_headline` rule), archived and merged status, the 24 h feed delay and the `/blindspots` quality filters, so it is higher than the number of cards on `/blindspots`. `GET /api/v1/alerts/blindspots` applies the site's 24 h wait, while `GET /api/v1/clusters` applies only the recall veto and returns the flag without waiting
 - `ingest.rowErrorsLastHour` (migration 039): `sum(row_errors)` over `ingest_cycles` rows finished in the last hour; `0` when the table is empty or not yet migrated
 
 ---
@@ -663,17 +663,23 @@ cluster. The column is probed once per server process; if the probe ever
 fails (e.g. the column is absent on a preview deploy) the field degrades to
 `null` for the remaining lifetime of that process rather than erroring.
 
-`is_blindspot` and `blindspot_side` carry the public "Kör nokta" claim,
-`is_blindspot AND NOT blindspot_recall_veto`. When a cluster's stored flag is
-set but a veto withdrew it, the record reports `is_blindspot: false` and
-`blindspot_side: null`. Two rules set the veto: Jev's `blindspot_recall` stage
-(`jev_recall`, migration 071) and a near-identically titled sibling cluster that
-carries the silent side (`sibling_headline`, migration 126); the reason is not
-exposed. The `/blindspots` page adds filters that this endpoint does not: the
-24 h delay after `first_published`, the content-quality filters and the
-feed-health suppression, so a record can say `is_blindspot: true` for a cluster
-the page does not (yet) list. `blindspot_side` is the category of the side that
-*covered* the story, not the silent side.
+`is_blindspot` and `blindspot_side` are the stored flag minus the recall veto,
+`is_blindspot AND NOT blindspot_recall_veto`; they are **not** the claim the
+site shows. When a cluster's stored flag is set but a veto withdrew it, the
+record reports `is_blindspot: false` and `blindspot_side: null`. Two rules set
+the veto: Jev's `blindspot_recall` stage (`jev_recall`, migration 071) and a
+near-identically titled sibling cluster that carries the silent side
+(`sibling_headline`, migration 126); the reason is not exposed. The site waits
+24 h after `first_published` (`BLINDSPOT.feedDelayHours`) before it shows the
+"Kör nokta" pill on every surface (the cards, the cluster page, the weekly
+summary and `/blindspots`). `/blindspots` additionally applies the
+content-quality filters and the feed-health suppression (the cards and the
+cluster page apply the feed-health suppression too). This endpoint applies none
+of the wait, the content-quality filters or the feed-health suppression, so a
+record can say `is_blindspot: true` for a cluster the site does not (yet) show
+as a blindspot, for example one first published 3 hours ago.
+`GET /api/v1/alerts/blindspots` applies the 24 h wait. `blindspot_side` is the
+category of the side that *covered* the story, not the silent side.
 
 **Paging** (keyset): clusters are ordered `updated_at` descending, then `id`
 descending. `next_cursor` is always present: send it back as `?before=` (with

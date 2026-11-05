@@ -295,6 +295,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       "title, özgün başlığa geri düşebilir; bu durumda başlığın hakları ilgili yayın kuruluşuna aittir.",
       "blindspot_side, haberi YAPAN tarafın kategorisidir — sessiz kalan taraf değil.",
       "is_blindspot, sitenin kör nokta geri çağırma (recall veto) kuralını uygular.",
+      `Site, kör nokta etiketini kartlarda ve haber sayfasında ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra gösterir; bu uç nokta etiketi beklemeden döndürür (beklemeyi uygulayan liste: /api/v1/alerts/blindspots).`,
       "sources listesi toplayıcı ve niş türündeki kaynakları da içerir.",
     ],
     params: [SINCE_PARAM, LIMIT_PARAM, BEFORE_PARAM],

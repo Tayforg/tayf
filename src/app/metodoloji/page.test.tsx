@@ -183,6 +183,20 @@ describe("/metodoloji page", () => {
     expect(collectHrefs(tree)).toContain("/gelistirici");
   });
 
+  it("says the Kör nokta label waits BLINDSPOT.feedDelayHours on cards (the saved list excepted), the story page, the weekly summary and the list, and that the stored flag is immediate (h37-content-1)", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = await MethodologyPage();
+    const text = collectText(tree).join("");
+
+    expect(text).toContain(
+      `Bir küme eşikleri geçtiğinde bile, karşı tarafa yetişme fırsatı tanımak için “Kör nokta” etiketi kartlarda (Kaydedilenler listesi hariç), haber sayfasında, haftalık özette ve Kör Noktalar listesinde ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünür — veritabanındaki işaretleme anlıktır.`,
+    );
+    // The saved list (/saved) shows the pill at once: the copy must say so.
+    expect(text).toContain("Kaydedilenler listesi hariç");
+    // The old wording promised the wait only for the list.
+    expect(text).not.toContain("gecikme sadece herkese açık listeleme içindir");
+  });
+
   it("explains the blindspot recall veto (migration 071) with the threshold from the shared module", async () => {
     const { default: MethodologyPage } = await import("./page");
     const tree = await MethodologyPage();
@@ -223,7 +237,22 @@ describe("/metodoloji page", () => {
     expect(near).toBeGreaterThan(sibling);
   });
 
-  it("lists the sibling-veto CHANGELOG entry first, dated 2026-11-01, and the footer follows it", async () => {
+  it("lists the feed-delay CHANGELOG entry first, dated 2026-11-05, and the footer reads that date (h37-content-1)", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    const entry = `Kör nokta etiketi artık kartlarda (Kaydedilenler listesi hariç), haber sayfasında ve haftalık özette de ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünüyor; daha önce bu bekleme yalnızca Kör Noktalar listesi içindi.`;
+    expect(text).toContain(entry);
+    const tail = text.slice(text.indexOf("Son güncelleme:"));
+    expect(tail.startsWith("Son güncelleme: 2026-11-05")).toBe(true);
+    expect(/Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(tail)?.[1]).toBe("2026-11-05");
+    // The entry is the first list item: its date directly precedes its text,
+    // and it comes before the sibling-veto entry of 2026-11-01.
+    expect(tail).toContain(`2026-11-05 ${entry}`);
+    expect(tail.indexOf(entry)).toBeLessThan(tail.indexOf("Kör nokta doğrulaması genişledi:"));
+  });
+
+  it("lists the sibling-veto CHANGELOG entry second, dated 2026-11-01, right after the feed-delay entry", async () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
@@ -231,9 +260,11 @@ describe("/metodoloji page", () => {
       "Kör nokta doğrulaması genişledi: aynı olayı neredeyse aynı başlıkla veren kardeş bir kümede karşı taraf da varsa kör nokta işareti gösterilmiyor.";
     expect(text).toContain(entry);
     const tail = text.slice(text.indexOf("Son güncelleme:"));
-    expect(/Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(tail)?.[1]).toBe("2026-11-01");
-    // The entry is the first list item: its date directly precedes its text.
+    // The entry's date directly precedes its text.
     expect(tail).toContain(`2026-11-01 ${entry}`);
+    const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
+    // footer, the 2026-11-05 entry, then this one.
+    expect(dates.slice(0, 3)).toEqual(["2026-11-05", "2026-11-05", "2026-11-01"]);
     expect(tail.indexOf(entry)).toBeLessThan(
       tail.indexOf("Kör noktaya yakın: kör nokta eşiğinin hemen altında"),
     );
@@ -676,9 +707,11 @@ describe("/metodoloji page: changelog order", () => {
     expect(denge).toBeGreaterThan(sources);
 
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer, then the 2026-11-01 sibling-veto entry (126), then the three 2026-10-22 entries
-    expect(dates.slice(0, 5)).toEqual([
-      "2026-11-01",
+    // footer, then the 2026-11-05 feed-delay entry, the 2026-11-01 sibling-veto
+    // entry (126), then the three 2026-10-22 entries
+    expect(dates.slice(0, 6)).toEqual([
+      "2026-11-05",
+      "2026-11-05",
       "2026-11-01",
       "2026-10-22",
       "2026-10-22",

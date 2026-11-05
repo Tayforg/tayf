@@ -4,7 +4,6 @@ import { notFound, unstable_rethrow } from "next/navigation";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
-import { BIAS_LABELS } from "@/lib/bias/config";
 import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
@@ -22,6 +21,7 @@ import { getSourceProfile } from "@/lib/sources/source-profile-query";
 import { getSourceAgreement } from "@/lib/game/agreement";
 import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
 import { isThinSource } from "@/lib/seo/thin-source";
+import { sourceMetaDescription } from "@/lib/sources/source-meta-description";
 import {
   CLICKBAIT_PRECISION_CHECK,
   getClickbaitKarne,
@@ -89,14 +89,13 @@ export async function generateMetadata({
   }
 
   const { source, articleCount7d } = profile;
-  const biasLabel = BIAS_LABELS[source.bias];
   // A source with no article in the last 7 days is thin: the page says nothing
   // a searcher wants, so it is `noindex, follow` and drops the "0 haber" count
   // from the snippet. sources.xml skips the same slugs (src/lib/seo/thin-source.ts).
   const thin = isThinSource(articleCount7d);
-  const description = thin
-    ? `${source.name} (${biasLabel}) kaynağının Tayf profili: siyasi duruşu ve geçmiş haberleri.`
-    : `${source.name} (${biasLabel}) — son 7 günde ${formatCountTr(articleCount7d)} haber. Tayf üzerinden bu Türk haber kaynağının son haberlerini ve siyasi duruşunu görün.`;
+  // An aggregator / niche source does not vote, so its snippet names the kind
+  // instead of a political stance (source-meta-description.ts).
+  const description = sourceMetaDescription(source, articleCount7d);
 
   return {
     // Plain title — root layout's `title.template = "%s — Tayf"` adds suffix.
@@ -243,9 +242,10 @@ export default async function SourceProfilePage({ params }: PageProps) {
         trusteeNote={source.trustee_note}
         history={zoneHistory}
         readerAgreement={readerAgreement}
+        kind={source.kind}
       />
 
-      <SourceKarneCard karne={sourceKarne} slug={source.slug} />
+      <SourceKarneCard karne={sourceKarne} slug={source.slug} kind={source.kind} />
 
       <SourceReliabilityCard
         reliability={sourceReliability}

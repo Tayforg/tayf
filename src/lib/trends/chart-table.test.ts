@@ -141,6 +141,57 @@ describe("chartTableRows", () => {
       },
     );
   });
+
+  // h37-content-3: the last row is today's partial Istanbul day; a screen
+  // reader (and a sighted reader opening the table) must hear that it is not a
+  // finished day.
+  describe("partial (current) day", () => {
+    function partialBucket(day: string, iktidar: number, bagimsiz: number, muhalefet: number): DayBucket {
+      return { ...bucket(day, iktidar, bagimsiz, muhalefet), partial: true };
+    }
+
+    it("labels a partial bucket '5 Kasım (eksik)' (the snapshot's last day, not 'today')", () => {
+      const rows = chartTableRows([partialBucket("2026-11-05", 1768, 665, 843)]);
+
+      expect(rows[0]!.label).toBe("5 Kasım (eksik)");
+      // The flag is baked into a cache entry served past midnight: never say 'today'.
+      expect(rows[0]!.label).not.toContain("bugün");
+      expect(rows[0]!.label).not.toContain("sürüyor");
+    });
+
+    it("leaves every other label unchanged, including a finished day and partial: false", () => {
+      const rows = chartTableRows([
+        bucket("2026-11-03", 1, 1, 1),
+        { ...bucket("2026-11-04", 1, 1, 1), partial: false },
+        partialBucket("2026-11-05", 1, 1, 1),
+      ]);
+
+      expect(rows.map((r) => r.label)).toEqual([
+        "3 Kasım",
+        "4 Kasım",
+        "5 Kasım (eksik)",
+      ]);
+    });
+
+    it("keeps the row shape and the numbers of a partial bucket", () => {
+      const rows = chartTableRows([partialBucket("2026-11-05", 1768, 665, 843)]);
+
+      expect(Object.keys(rows[0]!).sort()).toEqual(
+        ["bagimsiz", "day", "iktidar", "label", "muhalefet", "total"],
+      );
+      expect(rows[0]).toMatchObject({
+        day: "2026-11-05",
+        iktidar: 1768,
+        bagimsiz: 665,
+        muhalefet: 843,
+        total: 3276,
+      });
+    });
+
+    it("an invalid key keeps its raw text and still carries the marker", () => {
+      expect(chartTableRows([partialBucket("bad", 1, 1, 1)])[0]!.label).toBe("bad (eksik)");
+    });
+  });
 });
 
 describe("chart-table.ts — source guard", () => {

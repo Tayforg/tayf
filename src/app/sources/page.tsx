@@ -418,7 +418,7 @@ export default async function SourcesPage() {
       <PageHero
         kicker="Türkiye medya haritası"
         title="Kaynaklar"
-        subtitle={`Tayf ${totalSources} Türk haber kaynağını izliyor. Her biri bir siyasi duruşa yerleştirilmiş.`}
+        subtitle={`Tayf ${totalSources} Türk haber kaynağını izliyor. Yanlılık dağılımına sayılan kaynakların her biri bir siyasi duruşa yerleştirilmiş.`}
       />
       <p className="text-xs text-muted-foreground">
         Yanlılık dağılımına sayılan:{" "}

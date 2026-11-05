@@ -324,8 +324,10 @@ export function toV1ClusterRecord(
       return a.slug.localeCompare(b.slug);
     });
 
-  // Migration 071: the public API must match the site — a blindspot claim
-  // the recall veto withdrew is reported as no blindspot, with no side.
+  // Migration 071: the API applies the recall veto, so a withdrawn claim reads
+  // as no blindspot with no side. It deliberately does NOT apply
+  // BLINDSPOT.feedDelayHours (publicBlindspotClaim): the site shows the pill
+  // 24 h after first_published, this field does not wait. See docs/api.md.
   const veto = applyRecallVeto(row);
 
   return {
