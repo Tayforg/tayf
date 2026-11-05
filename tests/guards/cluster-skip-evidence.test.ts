@@ -20,6 +20,12 @@ import { resolve, dirname } from "node:path";
 // pins the shape that must not come back: a score-only noteDupBlock call, a
 // skip-log write that can run in a dry run, a skip-log failure that can fail the
 // message.
+//
+// h45-clusters-1 adds a 4th kind, 'same-source-update' (a source's follow-up on its
+// own story). The rule stays: noteDupBlock is never called with score-only
+// evidence, and the new kind may come only from the pure, in-memory title
+// predicate (isSameSourceUpdate, reached through sameSourceDupEvidence). Whether it
+// skips or only logs is a code constant (SAME_SOURCE_UPDATE_ENFORCE), pinned below.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -221,5 +227,105 @@ describe("cluster-consumer: cluster_skip_log is written only behind !dryRun, bes
     expect(body).toMatch(/if\s*\(\s*skipLogWarned\s*\)\s*return\s*;/);
     expect(body).toMatch(/skipLogWarned\s*=\s*true/);
     expect(body).toMatch(/console\.warn\(/);
+  });
+});
+
+describe("cluster-consumer: the same-source-update kind comes only from the pure title predicate (h45-clusters-1)", () => {
+  const PURE = /\bsupabase\b|\bawait\b|\bfetch\s*\(|\bDeno\.|\bconsole\./;
+
+  it("DupEvidence lists exactly the four kinds, the new one last (the weakest)", () => {
+    const m = src.match(/type\s+DupEvidence\s*=\s*([^;]+);/);
+    expect(m).not.toBeNull();
+    const kinds = [...(m?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    expect(kinds).toEqual(["fingerprint", "exact-title", "headline-lane", "same-source-update"]);
+  });
+
+  it('the literal "same-source-update" is returned in exactly one place: sameSourceDupEvidence', () => {
+    const returns = [...src.matchAll(/return\s+"same-source-update"/g)];
+    expect(returns).toHaveLength(1);
+    expect(functionBody(src, "sameSourceDupEvidence")).toMatch(/return\s+"same-source-update"/);
+    // and it is returned only when no other kind was found
+    expect(functionBody(src, "sameSourceDupEvidence")).toMatch(/evidence\s*===\s*null\s*&&\s*sameSourceUpdateMember\(/);
+  });
+
+  it("no noteDupBlock call site passes the new kind (or any literal but `fingerprint`) itself", () => {
+    for (const c of callSites()) {
+      expect(c.args[2] ?? "", c.text).not.toMatch(/same-source-update/);
+    }
+  });
+
+  it("the predicate and everything it calls are pure and in-memory: no client, no await, no fetch, no Deno, no logging", () => {
+    for (const name of ["isSameSourceUpdate", "namedSubjectTokens", "sameSourceMembers", "sameSourceUpdateMember"]) {
+      expect(functionBody(src, name), name).not.toMatch(PURE);
+    }
+  });
+
+  it("isSameSourceUpdate keeps all its conditions: window, shared stems, named subject, both vetoes", () => {
+    const body = functionBody(src, "isSameSourceUpdate");
+    expect(body).toMatch(/Number\.isFinite\(a\.ms\)\s*\|\|\s*!Number\.isFinite\(b\.ms\)/);
+    expect(body).toMatch(/SAME_SOURCE_UPDATE_MAX_HOURS/);
+    expect(body).toMatch(/SAME_SOURCE_UPDATE_MIN_SHARED/);
+    expect(body).toMatch(/\.numbers\.has\(/); // a shared numeral is no stem
+    expect(body).toMatch(/namedSubjectTokens\(/);
+    expect(body).toMatch(/subjectVetoFires\(/);
+    expect(body).toMatch(/incidentVetoFires\(/);
+  });
+
+  it("noteDupBlock: without enforcement the new kind never reaches dupBlock (it only fills the shadow holder), with it the kind is the weakest", () => {
+    const def = src.search(/const\s+noteDupBlock\s*=\s*\(/);
+    const paramsOpen = src.indexOf("(", def);
+    const body = enclosed(src, src.indexOf("{", paramsOpen + enclosed(src, paramsOpen).length));
+    const shadow = body.search(/evidence\s*===\s*"same-source-update"\s*&&\s*!SAME_SOURCE_UPDATE_ENFORCE/);
+    expect(shadow).toBeGreaterThan(-1);
+    // the shadow branch returns before the first dupBlock write
+    const ret = body.indexOf("return;", shadow);
+    expect(ret).toBeGreaterThan(shadow);
+    expect(ret).toBeLessThan(body.search(/dupBlock\.clusterId\s*=\s*clusterId/));
+    // the weakest kind: any other kind replaces a held 'same-source-update'
+    expect(body).toMatch(/dupBlock\.evidence\s*===\s*"same-source-update"\s*&&\s*evidence\s*!==\s*"same-source-update"/);
+  });
+
+  it("the shadow hit is logged and counted once, in takeSameSourceSkip, live drains only", () => {
+    const def = src.search(/const\s+takeSameSourceSkip\s*=/);
+    const paramsOpen = src.indexOf("(", def);
+    const body = enclosed(src, src.indexOf("{", src.indexOf("=>", paramsOpen)));
+    expect(body).toMatch(/updateShadow\.clusterId\s*!==\s*null\s*&&\s*!updateShadow\.reported/);
+    expect(body).toMatch(/updateShadow\.reported\s*=\s*true/);
+    expect(body).toMatch(/\[cluster-consumer\] same-source-update shadow article=\$\{article\.id\} cluster=\$\{updateShadow\.clusterId\} member=/);
+    expect(body).toMatch(/if\s*\(\s*!dryRun\s*\)\s*sameSourceUpdateShadow\s*\+=\s*1/);
+    // the counter is per drain: reset in drainQueue, copied into the summary
+    expect(functionBody(src, "drainQueue")).toMatch(/sameSourceUpdateShadow\s*=\s*0\s*;/);
+    expect(src).toMatch(/summary\.sameSourceUpdateShadow\s*=\s*sameSourceUpdateShadow\s*;/);
+  });
+
+  it("SAME_SOURCE_UPDATE_ENFORCE is a code constant from constants.ts, never an env var (turning it on is a PR)", () => {
+    expect(raw).toMatch(/SAME_SOURCE_UPDATE_ENFORCE,\s*\n/); // in the constants import list
+    expect(src).not.toMatch(/Deno\.env\.get\([^)]*SAME_SOURCE/);
+    expect(src).not.toMatch(/SAME_SOURCE_UPDATE_ENFORCE\s*=[^=]/);
+  });
+});
+
+describe("cluster constants: the same-source-update tunables are mirrored and pinned (h45-clusters-1)", () => {
+  it("SAME_SOURCE_UPDATE_MAX_HOURS = 6, SAME_SOURCE_UPDATE_MIN_SHARED = 2, identical in constants.ts and constants.mjs", async () => {
+    const ts = await import("../../supabase/functions/_shared/cluster/constants.ts");
+    const mjs = await import("../../scripts/lib/cluster/constants.mjs");
+    expect(mjs.SAME_SOURCE_UPDATE_MAX_HOURS).toBe(ts.SAME_SOURCE_UPDATE_MAX_HOURS);
+    expect(mjs.SAME_SOURCE_UPDATE_MIN_SHARED).toBe(ts.SAME_SOURCE_UPDATE_MIN_SHARED);
+    expect(mjs.SAME_SOURCE_UPDATE_ENFORCE).toBe(ts.SAME_SOURCE_UPDATE_ENFORCE);
+    // pinned, so "both undefined" can never pass as parity
+    expect(ts.SAME_SOURCE_UPDATE_MAX_HOURS).toBe(6);
+    expect(ts.SAME_SOURCE_UPDATE_MIN_SHARED).toBe(2);
+    // the window is the headline lane's
+    expect(ts.SAME_SOURCE_UPDATE_MAX_HOURS).toBe(ts.HEADLINE_LANE_MAX_HOURS);
+    expect(typeof ts.SAME_SOURCE_UPDATE_ENFORCE).toBe("boolean");
+  });
+
+  it("SAME_SOURCE_UPDATE_ENFORCE ships OFF (shadow): the 48 h replay's hand-checked precision was 28.7% (29 of 101 hits), see the h45 PR; flip it in a PR once shadow data reaches 90%", async () => {
+    const ts = await import("../../supabase/functions/_shared/cluster/constants.ts");
+    expect(ts.SAME_SOURCE_UPDATE_ENFORCE).toBe(false);
+    const decl = readFileSync(resolve(here, "../../supabase/functions/_shared/cluster/constants.ts"), "utf8");
+    expect(decl).toMatch(/export const SAME_SOURCE_UPDATE_ENFORCE:\s*boolean\s*=\s*(true|false)\s*;/);
+    const mirror = readFileSync(resolve(here, "../../scripts/lib/cluster/constants.mjs"), "utf8");
+    expect(mirror).toMatch(/export const SAME_SOURCE_UPDATE_ENFORCE\s*=\s*(true|false)\s*;/);
   });
 });

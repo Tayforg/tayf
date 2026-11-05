@@ -23,6 +23,25 @@ import {
 } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
 import { cleanDescription } from "../../supabase/functions/_shared/cluster/description-clean.ts";
 import { extractEntities } from "../../supabase/functions/_shared/cluster/entities.ts";
+import { incidentVetoFires, subjectVetoFires } from "../../supabase/functions/_shared/cluster/ensemble.ts";
+
+// h45-clusters-1: SAME_SOURCE_UPDATE_ENFORCE is a code constant (a PR turns it on,
+// no dashboard switch), so the tests flip it through a mock of the constants module.
+// Everything else in that module stays real. A test sets `updateFlag.override` to
+// true / false before its drain; `beforeEach` resets it to null, which means "the
+// shipped value", so every other test of this file runs the shipped configuration.
+// The getter is read at the call site, no module reset needed.
+const updateFlag = vi.hoisted(() => ({ override: null as boolean | null, shipped: false }));
+vi.mock("../../supabase/functions/_shared/cluster/constants.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../supabase/functions/_shared/cluster/constants.ts")>();
+  updateFlag.shipped = actual.SAME_SOURCE_UPDATE_ENFORCE;
+  return {
+    ...actual,
+    get SAME_SOURCE_UPDATE_ENFORCE(): boolean {
+      return updateFlag.override ?? updateFlag.shipped;
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Contract tests for the cluster-consumer Edge Function.
@@ -528,6 +547,8 @@ beforeEach(() => {
   clusterQueries.length = 0;
   stickyQuery.error = null;
   resetPgmqState();
+  // h45-clusters-1: back to the shipped SAME_SOURCE_UPDATE_ENFORCE.
+  updateFlag.override = null;
   for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
   // Reset the shared Supabase fake's mutation + rpc log so each test
   // observes only its own writes.
@@ -1819,7 +1840,12 @@ describe("cluster-consumer Edge Function", () => {
         authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
       );
       expect(res.status).toBe(200);
-      return (await res.json()) as { matched: number; created: number; skipped: number };
+      return (await res.json()) as {
+        matched: number;
+        created: number;
+        skipped: number;
+        sameSourceUpdateShadow: number;
+      };
     }
 
     const linkedClusters = () =>
@@ -1847,6 +1873,11 @@ describe("cluster-consumer Edge Function", () => {
     });
 
     it("h14-cluster-1: the same match without evidence (a different headline, 3 shared stems) is not a duplicate: no join, the article opens its own cluster", async () => {
+      // h45-clusters-1: with the same-source-update evidence OFF (the shadow setting this
+      // pair was written for). The pair shares the named subject Izmir and 3 stems, so
+      // the 4th kind of evidence does tie it ('proje onaylandi' / 'calisma durduruldu',
+      // two developments of one port story): the shadow counter sees it, see the next test.
+      updateFlag.override = false;
       seedClusters();
       scoreBy({ [A.fp]: result(0.6), [B.fpSeed]: result(0.39, CAPPED) });
 
@@ -1855,8 +1886,24 @@ describe("cluster-consumer Edge Function", () => {
       expect(body.matched).toBe(0);
       expect(body.skipped).toBe(0);
       expect(body.created).toBe(1);
+      expect(body.sameSourceUpdateShadow).toBe(1);
       expect(linkedClusters()).toEqual([]);
       expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+    });
+
+    it("h45-clusters-1: the same pair with SAME_SOURCE_UPDATE_ENFORCE on is skipped as a follow-up of the source's own member (documented borderline: a second development of one story)", async () => {
+      updateFlag.override = true;
+      seedClusters();
+      scoreBy({ [A.fp]: result(0.6), [B.fpSeed]: result(0.39, CAPPED) });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(0);
+      expect(body.skipped).toBe(1);
+      expect(body.sameSourceUpdateShadow).toBe(0);
+      expect(linkedClusters()).toEqual([]);
+      expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
     });
 
     it("control: the same secondary without the cap is the ordinary fallback join and still joins", async () => {
@@ -3256,6 +3303,8 @@ describe("cluster-consumer Edge Function", () => {
       failedTransient: number;
       descriptionSwapSuspects: number;
       descriptionSwapSamples: string[];
+      // h45-clusters-1: articles whose same-source follow-up evidence was only logged (shadow).
+      sameSourceUpdateShadow: number;
       admission: { would_create: number; would_match: number };
     }
     async function drain(): Promise<DrainBody> {
@@ -4346,6 +4395,500 @@ describe("cluster-consumer Edge Function", () => {
           expect(body.created).toBe(1);
           expect(skipLogWrites()).toHaveLength(0);
         });
+      });
+    });
+
+    // ---- h45-clusters-1: a source's own follow-up on a story it already has in a cluster ----
+    //
+    // wouldDuplicate() blocks the join whenever the article's source is already a
+    // member of the cluster, and the same-source skip (h12/h14) is taken only on a
+    // fingerprint, an exact-title or a headline-lane tie. A follow-up in other words
+    // has none of them, so it opened a twin and the other outlets then joined the
+    // twin: Spain 34/6 (haberler-com aec9f530 then 870aeeb7, 9 min apart), Vance
+    // 19/9, Israel 19/12, Bayraktar 16/7. A 4th kind of evidence, 'same-source-update',
+    // is computed from the same pure member scan: a same-source member within
+    // SAME_SOURCE_UPDATE_MAX_HOURS, >= 2 shared non-numeral headline stems, a shared
+    // named subject, no subject / incident veto. SAME_SOURCE_UPDATE_ENFORCE (a code
+    // constant) decides between a skip and a shadow log line.
+    describe("h45-clusters-1: a source's follow-up on its own story does not open a twin", () => {
+      const MIN = 60_000;
+      const UPDATE_REASON = "same-source-duplicate/same-source-update";
+
+      // Live titles (prod, 2026-11-04/05). `member` sits in the large cluster, `incoming` seeded the twin.
+      const SPAIN_MEMBER = "İspanya Ulaştırma Bakanı Puente, 69 kişinin öldüğü kazanın ardından istifa etti";
+      const SPAIN_NEW = "İspanya'da 69 kişinin öldüğü tren kazası sonrası bakan istifa etti";
+      const VANCE_MEMBER = "Vance, Cumhuriyetçilerin ara seçim yenilgisinin nedenini İran savaşı olarak açıkladı";
+      const VANCE_NEW = "JD Vance, Kongre ara seçim yenilgisini İran savaşı ve İsrail ilişkilerine bağladı";
+      const ISRAEL_MEMBER = "İsrail Merkez Seçim Komitesi şeffaflığa aykırı bulguya rastlanmadığını açıkladı";
+      const ISRAEL_NEW = "İsrail Merkez Seçim Komitesi 27 Ekim seçim sonuçlarını 15 lehte oyla onayladı";
+      const BAYRAKTAR_MEMBER =
+        'Enerji Bakanı Alparslan Bayraktar: "Türkiye 2040 itibarıyla 175 bin megavatlık rüzgar ve güneş kurulu gücüne ulaşacak. Yatırım tutarı yaklaşık 100 milyar dolar"';
+      const BAYRAKTAR_NEW = 'Bakan Bayraktar "Enerjide bağımsız olacağız" deyip duyurdu! İşte 5 maddelik yol haritası';
+      // Negative controls
+      const HR_MEMBER = "Bakan Güler, Hırvatistan Parlamento Başkanı Jandroković ile görüştü";
+      const HR_NEW = "Bakan Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü";
+      const KOREA_MEMBER = "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı";
+      const KOREA_NEW = "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü";
+      const BURSA = "Bursa'da Anadolu Otoyolu'nda zincirleme kaza, 5 yaralı";
+      const KONYA = "Konya'da Anadolu Otoyolu'nda zincirleme kaza, 5 yaralı";
+
+      interface Hit {
+        name: string;
+        member: string;
+        incoming: string;
+        memberAgeMs: number;
+        seedTitle: string;
+        score: number;
+      }
+      const HITS: Hit[] = [
+        {
+          name: "Spain",
+          member: SPAIN_MEMBER,
+          incoming: SPAIN_NEW,
+          memberAgeMs: 9 * MIN,
+          seedTitle: "İspanya'da tren kazası: Ulaştırma Bakanı Puente istifasını açıkladı",
+          score: 0.62,
+        },
+        {
+          name: "Vance",
+          member: VANCE_MEMBER,
+          incoming: VANCE_NEW,
+          memberAgeMs: 0,
+          seedTitle: "İşte ABD'deki seçim hezimetinin nedeni! Trump'ın en yakın adamı açıkladı",
+          score: 0.55,
+        },
+        {
+          name: "Israel",
+          member: ISRAEL_MEMBER,
+          incoming: ISRAEL_NEW,
+          memberAgeMs: 3 * 60 * MIN,
+          seedTitle: "İsrail seçimlerinde sayım sürüyor, sonuçlar bekleniyor",
+          score: 0.5,
+        },
+      ];
+
+      const skipLogRows = () =>
+        supabaseFakeCalls
+          .upsert("cluster_skip_log")
+          .flatMap((m) => m.patch as Array<Record<string, unknown>>);
+      const skipLogWrites = () => supabaseFakeCalls.forTable("cluster_skip_log");
+      const shadowLogs = () =>
+        logSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("same-source-update shadow"));
+      const scoredAgainst = () =>
+        vi.mocked(scoreMock).mock.calls.map((c) => (c[1] as { strict?: string | null } | null | undefined)?.strict);
+
+      async function updatePair() {
+        await importHandler();
+        const mod = await import("../../supabase/functions/cluster-consumer/index.ts");
+        return mod.isSameSourceUpdate;
+      }
+
+      /** The big cluster c1: another outlet seeded it (wire), the source's own member is the newer row. */
+      function seedHit(h: Hit, opts: { incomingSourceId?: string; msgId?: number } = {}) {
+        seedCluster(
+          "c1",
+          34,
+          [
+            { id: "c1-seed", sourceId: "src-wire", fp: "fp-c1s", ageMs: h.memberAgeMs + 90 * MIN, title: h.seedTitle },
+            { id: "c1-mem", sourceId: "src-outlet", fp: "fp-c1m", ageMs: h.memberAgeMs, title: h.member },
+          ],
+          { title: h.member },
+        );
+        queueIncoming({ sourceId: opts.incomingSourceId ?? "src-outlet", title: h.incoming, msgId: opts.msgId ?? 4501 });
+        scoreBy({ "fp-c1s": h.score, "fp-c1m": 0.1 });
+      }
+
+      describe("the predicate (pure title pair)", () => {
+        it("fixture premises: for the live pairs the headline lane, an equal title and both vetoes are all silent, so only the new kind can tie them", () => {
+          for (const h of [...HITS, { name: "Bayraktar", member: BAYRAKTAR_MEMBER, incoming: BAYRAKTAR_NEW, memberAgeMs: 6 * MIN }]) {
+            const hours = h.memberAgeMs / 3_600_000;
+            expect(headlineLane(headlineTokens(h.incoming), headlineTokens(h.member), hours).fired, h.name).toBe(false);
+            expect(normalizeTurkish(h.incoming), h.name).not.toBe(normalizeTurkish(h.member));
+            expect(subjectVetoFires(h.incoming, h.member), h.name).toBe(false);
+            expect(incidentVetoFires(h.incoming, h.member), h.name).toBe(false);
+          }
+        });
+
+        it("fires for the Spain, Vance, Israel and Bayraktar pairs, in either direction", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          for (const [a, b, gapMs] of [
+            [SPAIN_NEW, SPAIN_MEMBER, 9 * MIN],
+            [VANCE_NEW, VANCE_MEMBER, 0],
+            [ISRAEL_NEW, ISRAEL_MEMBER, 3 * 60 * MIN],
+            [BAYRAKTAR_NEW, BAYRAKTAR_MEMBER, 6 * MIN],
+          ] as const) {
+            expect(pair({ title: a, ms: t }, { title: b, ms: t - gapMs }), a).toBe(true);
+            expect(pair({ title: b, ms: t - gapMs }, { title: a, ms: t }), b).toBe(true);
+            // a member that is NEWER than the article counts the same
+            expect(pair({ title: a, ms: t - gapMs }, { title: b, ms: t }), a).toBe(true);
+          }
+        });
+
+        it("the 6 h window: 6 h exactly still fires, one second more does not (the Erdogan Korea pair is 11 h apart)", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          const SIX_H = 6 * 60 * MIN;
+          expect(pair({ title: SPAIN_NEW, ms: t }, { title: SPAIN_MEMBER, ms: t - SIX_H })).toBe(true);
+          expect(pair({ title: SPAIN_NEW, ms: t }, { title: SPAIN_MEMBER, ms: t - SIX_H - 1000 })).toBe(false);
+          expect(pair({ title: SPAIN_NEW, ms: t - SIX_H - 1000 }, { title: SPAIN_MEMBER, ms: t })).toBe(false);
+          // Korea: inside 6 h the pair would fire (two shared stems, the named subject Guney Kore), at 11 h it does not.
+          expect(pair({ title: KOREA_NEW, ms: t }, { title: KOREA_MEMBER, ms: t - 5 * 60 * MIN })).toBe(true);
+          expect(pair({ title: KOREA_NEW, ms: t }, { title: KOREA_MEMBER, ms: t - 11 * 60 * MIN })).toBe(false);
+        });
+
+        it("a different leading actor is vetoed: Guler vs Fidan with the same Hirvatistan template, 30 min apart", async () => {
+          const pair = await updatePair();
+          // Premise: the existing subject veto already fires for this pair.
+          expect(subjectVetoFires(HR_NEW, HR_MEMBER)).toBe(true);
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          expect(pair({ title: HR_NEW, ms: t }, { title: HR_MEMBER, ms: t - 30 * MIN })).toBe(false);
+        });
+
+        it("different provinces for the same incident template are vetoed (incident veto)", async () => {
+          const pair = await updatePair();
+          expect(incidentVetoFires(BURSA, KONYA)).toBe(true);
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          expect(pair({ title: BURSA, ms: t }, { title: KONYA, ms: t - 10 * MIN })).toBe(false);
+          // Control: the same province twice is the same incident.
+          expect(pair({ title: BURSA, ms: t }, { title: "Bursa'da Anadolu Otoyolu'nda zincirleme kaza: 5 kişi yaralandı", ms: t - 10 * MIN })).toBe(true);
+        });
+
+        it("shared stems without a shared named subject do not fire (the h14 Muhbir / Eller Yukarı / Suikast Treni film template)", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          const SUIKAST = "Suikast Treni filminin konusu ne? Suikast Treni filminin oyuncuları kim?";
+          const MUHBIR = "Muhbir filminin konusu ne? Muhbir filminin oyuncuları kim?";
+          const ELLER = "Eller Yukarı filminin konusu ne? Eller Yukarı filminin oyuncuları kim?";
+          // Premise: the pairs do share >= 2 non-generic stems.
+          const shared = [...headlineTokens(MUHBIR).tokens].filter((x) => headlineTokens(SUIKAST).tokens.has(x));
+          expect(shared.length).toBeGreaterThanOrEqual(2);
+          expect(pair({ title: MUHBIR, ms: t }, { title: SUIKAST, ms: t - 22 * MIN })).toBe(false);
+          expect(pair({ title: ELLER, ms: t }, { title: SUIKAST, ms: t - 22 * MIN })).toBe(false);
+          // Lower-case in one headline: 'Dolar' vs 'dolar' is not a named subject there.
+          expect(pair({ title: "Dolar güne yükselişle başladı, altın geriledi", ms: t }, { title: "Altın güne yükselişle başladı, dolar geriledi", ms: t - 5 * MIN })).toBe(false);
+        });
+
+        it("generic names do not count as a named subject (Erdogan, Cumhurbaskani, Bakan, Turkiye)", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          expect(
+            pair(
+              { title: "Erdoğan faiz kararı için yeni açıklama yaptı", ms: t },
+              { title: "Erdoğan yeni faiz kararı açıkladı", ms: t - 5 * MIN },
+            ),
+          ).toBe(false);
+        });
+
+        it("fewer than two shared non-numeral stems do not fire (a shared numeral is no stem)", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          const a = "Ankara'da 69 yeni vaka";
+          const b = "Ankara'dan 69 ilk haber";
+          // Premise: exactly the place name and the numeral are shared.
+          const shared = [...headlineTokens(a).tokens].filter((x) => headlineTokens(b).tokens.has(x));
+          expect(shared).toHaveLength(2);
+          expect(shared).toContain("69");
+          expect(pair({ title: a, ms: t }, { title: b, ms: t - 5 * MIN })).toBe(false);
+        });
+
+        it("an all-caps headline names nothing: every word is capitalised", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          expect(pair({ title: ISRAEL_NEW, ms: t }, { title: ISRAEL_MEMBER.toLocaleUpperCase("tr"), ms: t - 5 * MIN })).toBe(false);
+        });
+
+        it("empty or missing titles, non-finite times: false, never a throw", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          expect(pair({ title: "", ms: t }, { title: SPAIN_MEMBER, ms: t })).toBe(false);
+          expect(pair({ title: SPAIN_NEW, ms: t }, { title: "", ms: t })).toBe(false);
+          expect(pair({ title: undefined as unknown as string, ms: t }, { title: null as unknown as string, ms: t })).toBe(false);
+          expect(pair({ title: SPAIN_NEW, ms: Number.NaN }, { title: SPAIN_MEMBER, ms: t })).toBe(false);
+          expect(pair({ title: SPAIN_NEW, ms: t }, { title: SPAIN_MEMBER, ms: Number.POSITIVE_INFINITY })).toBe(false);
+        });
+
+        it("a huge title is clipped to HEADLINE_TITLE_MAX_CHARS: a named subject past the clip does not count", async () => {
+          const pair = await updatePair();
+          const t = Date.parse("2026-11-04T12:00:00Z");
+          // Three shared stems up front, the only capitalised shared word past character 300.
+          const head = "kaza istifa etti ";
+          const pad = "dolgu ".repeat(Math.ceil(HEADLINE_TITLE_MAX_CHARS / 6) + 5);
+          const clipped = `${head}${pad}Puente`;
+          expect(clipped.indexOf("Puente")).toBeGreaterThan(HEADLINE_TITLE_MAX_CHARS);
+          expect(pair({ title: clipped, ms: t }, { title: clipped, ms: t - 5 * MIN })).toBe(false);
+          // Control: the same word inside the first 300 characters does fire.
+          const early = `Puente ${head}${pad}`;
+          expect(pair({ title: early, ms: t }, { title: early, ms: t - 5 * MIN })).toBe(true);
+          // A 200k-character title is cheap and still a boolean.
+          const started = Date.now();
+          expect(typeof pair({ title: "Kelime ".repeat(30_000), ms: t }, { title: SPAIN_MEMBER, ms: t })).toBe("boolean");
+          expect(Date.now() - started).toBeLessThan(1000);
+        });
+      });
+
+      describe("hits: the live twins", () => {
+        for (const h of HITS) {
+          it(`${h.name}, ENFORCE=true -> skipped, no cluster, one cluster_skip_log row with reason ${UPDATE_REASON}`, async () => {
+            updateFlag.override = true;
+            seedHit(h);
+
+            const body = await drain();
+
+            // Non-vacuous: the big cluster really was scored and source-blocked.
+            expect(scoredAgainst()).toContain("fp-c1s");
+            expect(body.skipped).toBe(1);
+            expect(body.created).toBe(0);
+            expect(body.matched).toBe(0);
+            expect(body.failedTransient).toBe(0);
+            expect(body.sameSourceUpdateShadow).toBe(0);
+            expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+            expect(supabaseFakeCalls.insert("cluster_articles")).toHaveLength(0);
+            expect(linkedClusters()).toEqual([]);
+            expect(pgmqState.archived).toContain(4501);
+            const rows = skipLogRows();
+            expect(rows).toHaveLength(1);
+            expect(rows[0]).toMatchObject({ article_id: "art-twin", cluster_id: "c1", reason: UPDATE_REASON });
+            expect(rows[0]?.score as number).toBeCloseTo(h.score, 5);
+            expect(skipLogs()).toHaveLength(1);
+            expect(String(skipLogs()[0]?.[0])).toContain("evidence=same-source-update");
+            expect(shadowLogs()).toHaveLength(0);
+          });
+
+          it(`${h.name}, ENFORCE=false (shadow) -> a cluster is still created, sameSourceUpdateShadow=1, the log line names article / cluster / member / score`, async () => {
+            updateFlag.override = false;
+            seedHit(h);
+
+            const body = await drain();
+
+            expect(scoredAgainst()).toContain("fp-c1s");
+            expect(body.created).toBe(1);
+            expect(body.skipped).toBe(0);
+            expect(body.matched).toBe(0);
+            expect(body.sameSourceUpdateShadow).toBe(1);
+            expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+            expect(linkedClusters()).toEqual([]);
+            expect(skipLogs()).toHaveLength(0);
+            expect(skipLogWrites()).toHaveLength(0);
+            expect(shadowLogs()).toHaveLength(1);
+            expect(String(shadowLogs()[0]?.[0])).toBe(
+              `[cluster-consumer] same-source-update shadow article=art-twin cluster=c1 member=c1-mem score=${h.score.toFixed(3)}`,
+            );
+          });
+        }
+
+        it("the member may be the SEED row alone: a 52-member cluster whose oldest member (outside the newest-48 scan list) is the source's own", async () => {
+          updateFlag.override = true;
+          const members = [
+            { id: "c1-seed", sourceId: "src-outlet", fp: "fp-c1s", ageMs: 5 * 60 * MIN, title: SPAIN_MEMBER },
+            ...Array.from({ length: 51 }, (_, i) => ({
+              id: `c1-f${i}`,
+              sourceId: "src-wire",
+              fp: `fp-c1f${i}`,
+              ageMs: (4 * 60 - i * 3) * MIN,
+              title: `Dolgu${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))} haberi sürüyor`,
+            })),
+          ];
+          seedCluster("c1", 52, members, { title: SPAIN_MEMBER });
+          queueIncoming({ sourceId: "src-outlet", title: SPAIN_NEW, msgId: 4502 });
+          scoreBy({ "fp-c1s": 0.62 });
+
+          const body = await drain();
+
+          expect(HEADLINE_MEMBER_SCAN_MAX).toBeLessThan(members.length);
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(skipLogRows()).toMatchObject([{ cluster_id: "c1", reason: UPDATE_REASON }]);
+        });
+      });
+
+      describe("negative controls: no skip, no shadow hit, a cluster is created (both ENFORCE settings)", () => {
+        const CONTROLS: Array<{ name: string; hit: Hit }> = [
+          {
+            name: "Guler vs Fidan: the subject veto fires (30 min apart, same Hirvatistan template)",
+            hit: { name: "hr", member: HR_MEMBER, incoming: HR_NEW, memberAgeMs: 30 * MIN, seedTitle: "Hırvatistan Meclis Başkanı Ankara'da ağırlandı", score: 0.62 },
+          },
+          {
+            name: "Erdogan Korea, the member is 11 h older (outside the 6 h window)",
+            hit: { name: "korea", member: KOREA_MEMBER, incoming: KOREA_NEW, memberAgeMs: 11 * 60 * MIN, seedTitle: "Güney Kore ziyareti sürüyor", score: 0.62 },
+          },
+          {
+            name: "Spain pair, but the cluster scores 0.39 (below MATCH_THRESHOLD)",
+            hit: { ...HITS[0]!, score: 0.39 },
+          },
+          {
+            name: "Spain pair, 0.30",
+            hit: { ...HITS[0]!, score: 0.3 },
+          },
+        ];
+        for (const enforce of [true, false]) {
+          for (const c of CONTROLS) {
+            it(`ENFORCE=${enforce}: ${c.name}`, async () => {
+              updateFlag.override = enforce;
+              seedHit(c.hit);
+
+              const body = await drain();
+
+              expect(scoredAgainst()).toContain("fp-c1s");
+              expect(body.created).toBe(1);
+              expect(body.skipped).toBe(0);
+              expect(body.sameSourceUpdateShadow).toBe(0);
+              expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+              expect(skipLogs()).toHaveLength(0);
+              expect(skipLogWrites()).toHaveLength(0);
+              expect(shadowLogs()).toHaveLength(0);
+            });
+          }
+        }
+
+        it("a source the cluster does not hold simply joins it: the new evidence only ever speaks for a blocked source", async () => {
+          updateFlag.override = true;
+          seedHit(HITS[0]!, { incomingSourceId: "src-posta" });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(body.created).toBe(0);
+          expect(body.skipped).toBe(0);
+          expect(linkedClusters()).toEqual(["c1"]);
+          expect(skipLogWrites()).toHaveLength(0);
+        });
+
+        it("another cluster that takes the article ends the story: no skip, and a shadow hit is not counted", async () => {
+          updateFlag.override = false;
+          seedHit(HITS[0]!);
+          seedCluster("c2", 3, [{ id: "c2-m", sourceId: "src-posta", fp: "fp-c2", ageMs: 20 * MIN, title: SPAIN_NEW }], { title: SPAIN_NEW });
+          scoreBy({ "fp-c1s": 0.62, "fp-c1m": 0.1, "fp-c2": 0.5 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(body.created).toBe(0);
+          expect(linkedClusters()).toEqual(["c2"]);
+          expect(body.sameSourceUpdateShadow).toBe(0);
+          expect(shadowLogs()).toHaveLength(0);
+        });
+      });
+
+      describe("priority: the existing kinds keep it", () => {
+        const LANE_VARIANT = "İsrail Merkez Seçim Komitesi 27 Ekim seçim sonuçlarını 15 lehte oyla resmen onayladı";
+
+        /** c1: update evidence (3 h older member); c2: a member that fires the headline lane against the incoming title. */
+        function seedTwoClusters(first: "update" | "lane") {
+          expect(headlineLane(headlineTokens(ISRAEL_NEW), headlineTokens(LANE_VARIANT), 0.3).fired).toBe(true);
+          expect(normalizeTurkish(ISRAEL_NEW)).not.toBe(normalizeTurkish(LANE_VARIANT));
+          const updateCluster = first === "update" ? "c1" : "c2";
+          const laneCluster = first === "update" ? "c2" : "c1";
+          const sizes = first === "update" ? [18, 7] : [7, 18];
+          // The bigger cluster is tried first when both score inside the 0.10 margin.
+          seedCluster(updateCluster, sizes[0]!, [
+            { id: `${updateCluster}-s`, sourceId: "src-wire", fp: `fp-${updateCluster}s`, ageMs: 5 * 60 * MIN, title: "İsrail seçimlerinde sayım sürüyor" },
+            { id: `${updateCluster}-m`, sourceId: "src-outlet", fp: `fp-${updateCluster}m`, ageMs: 3 * 60 * MIN, title: ISRAEL_MEMBER },
+          ], { title: ISRAEL_MEMBER });
+          seedCluster(laneCluster, sizes[1]!, [
+            { id: `${laneCluster}-s`, sourceId: "src-wire", fp: `fp-${laneCluster}s`, ageMs: 2 * 60 * MIN, title: "İsrail seçimlerinde sayım sürüyor" },
+            { id: `${laneCluster}-m`, sourceId: "src-outlet", fp: `fp-${laneCluster}m`, ageMs: 20 * MIN, title: LANE_VARIANT },
+          ], { title: LANE_VARIANT });
+          queueIncoming({ sourceId: "src-outlet", title: ISRAEL_NEW, msgId: 4511 });
+          scoreBy({
+            [`fp-${updateCluster}s`]: 0.87,
+            [`fp-${updateCluster}m`]: 0.1,
+            [`fp-${laneCluster}s`]: 0.8,
+            [`fp-${laneCluster}m`]: 0.1,
+          });
+          return { updateCluster, laneCluster };
+        }
+
+        for (const first of ["update", "lane"] as const) {
+          for (const enforce of [true, false]) {
+            it(`ENFORCE=${enforce}: update evidence on the ${first === "update" ? "first" : "second"} cluster, headline-lane evidence on the ${first === "update" ? "second" : "first"} -> the skip records the lane`, async () => {
+              updateFlag.override = enforce;
+              const { laneCluster } = seedTwoClusters(first);
+
+              const body = await drain();
+
+              expect(body.skipped).toBe(1);
+              expect(body.created).toBe(0);
+              expect(body.sameSourceUpdateShadow).toBe(0);
+              expect(skipLogRows()).toMatchObject([{ cluster_id: laneCluster, reason: "same-source-duplicate/headline-lane" }]);
+              expect(shadowLogs()).toHaveLength(0);
+            });
+          }
+        }
+
+        it("ENFORCE=false: two clusters with update evidence count ONE shadow hit and log the first", async () => {
+          updateFlag.override = false;
+          seedCluster("c1", 18, [
+            { id: "c1-s", sourceId: "src-wire", fp: "fp-c1s", ageMs: 5 * 60 * MIN, title: "İsrail seçimlerinde sayım sürüyor" },
+            { id: "c1-m", sourceId: "src-outlet", fp: "fp-c1m", ageMs: 3 * 60 * MIN, title: ISRAEL_MEMBER },
+          ], { title: ISRAEL_MEMBER });
+          seedCluster("c2", 7, [
+            { id: "c2-s", sourceId: "src-wire", fp: "fp-c2s", ageMs: 5 * 60 * MIN, title: "İsrail seçimlerinde sayım sürüyor" },
+            { id: "c2-m", sourceId: "src-outlet", fp: "fp-c2m", ageMs: 2 * 60 * MIN, title: ISRAEL_MEMBER },
+          ], { title: ISRAEL_MEMBER });
+          queueIncoming({ sourceId: "src-outlet", title: ISRAEL_NEW, msgId: 4512 });
+          scoreBy({ "fp-c1s": 0.87, "fp-c1m": 0.1, "fp-c2s": 0.8, "fp-c2m": 0.1 });
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(body.sameSourceUpdateShadow).toBe(1);
+          expect(shadowLogs()).toHaveLength(1);
+          expect(String(shadowLogs()[0]?.[0])).toContain("cluster=c1 member=c1-m");
+        });
+      });
+
+      describe("dry run (admission shadow)", () => {
+        it("ENFORCE=true: the follow-up is skipped like any other same-source duplicate, no skip-log write", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          updateFlag.override = true;
+          seedCluster("c1", 34, [
+            { id: "c1-s", sourceId: "src-wire", fp: "fp-c1s", ageMs: 100 * MIN, title: "İspanya'da tren kazası: Ulaştırma Bakanı Puente istifasını açıkladı" },
+            { id: "c1-m", sourceId: "src-outlet", fp: "fp-c1m", ageMs: 9 * MIN, title: SPAIN_MEMBER },
+          ], { title: SPAIN_MEMBER });
+          queueIncoming({ sourceId: "src-outlet", title: SPAIN_NEW, category: "ekonomi", admit: "shadow", msgId: 4521 });
+          scoreBy({ "fp-c1s": 0.62, "fp-c1m": 0.1 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.admission.would_create).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(skipLogWrites()).toHaveLength(0);
+          expect(skipLogs()).toHaveLength(1);
+          expect(String(skipLogs()[0]?.[0])).toContain("evidence=same-source-update");
+          expect(String(skipLogs()[0]?.[0])).toContain("dry-run");
+        });
+
+        it("ENFORCE=false: would_create as before, the shadow line carries `dry-run` and the live counter stays 0", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          updateFlag.override = false;
+          seedCluster("c1", 34, [
+            { id: "c1-s", sourceId: "src-wire", fp: "fp-c1s", ageMs: 100 * MIN, title: "İspanya'da tren kazası: Ulaştırma Bakanı Puente istifasını açıkladı" },
+            { id: "c1-m", sourceId: "src-outlet", fp: "fp-c1m", ageMs: 9 * MIN, title: SPAIN_MEMBER },
+          ], { title: SPAIN_MEMBER });
+          queueIncoming({ sourceId: "src-outlet", title: SPAIN_NEW, category: "ekonomi", admit: "shadow", msgId: 4522 });
+          scoreBy({ "fp-c1s": 0.62, "fp-c1m": 0.1 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(0);
+          expect(body.admission.would_create).toBe(1);
+          expect(body.sameSourceUpdateShadow).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(skipLogWrites()).toHaveLength(0);
+          expect(shadowLogs()).toHaveLength(1);
+          expect(String(shadowLogs()[0]?.[0])).toContain("dry-run");
+        });
+      });
+
+      it("the drain summary always carries sameSourceUpdateShadow (0 when nothing was shadowed)", async () => {
+        queueIncoming({ sourceId: "src-wire" });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.sameSourceUpdateShadow).toBe(0);
       });
     });
 
