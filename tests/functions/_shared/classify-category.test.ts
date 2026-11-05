@@ -3003,10 +3003,16 @@ describe("robustness", () => {
     it.each(inputs)("%s classifies in under 50 ms", (_name, text) => {
       // Warm the JIT so the measurement is the steady-state cost.
       classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
-      const started = performance.now();
-      const out = classifyCategory(text, text, NEUTRAL_URL);
-      const elapsed = performance.now() - started;
-      expect(ALL.has(out)).toBe(true);
+      // Best of three: a full-suite run on a shared CI runner can stall one
+      // call past the budget (70 ms seen); a backtracking regression is slow
+      // on every run, so the minimum still catches it.
+      let elapsed = Infinity;
+      for (let run = 0; run < 3; run++) {
+        const started = performance.now();
+        const out = classifyCategory(text, text, NEUTRAL_URL);
+        elapsed = Math.min(elapsed, performance.now() - started);
+        expect(ALL.has(out)).toBe(true);
+      }
       expect(elapsed).toBeLessThan(BUDGET_MS);
     });
 
