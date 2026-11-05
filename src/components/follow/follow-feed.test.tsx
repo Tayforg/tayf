@@ -31,6 +31,7 @@ function follow(kind: Follow["kind"], value: string): Follow {
 }
 const SECIM = follow("q", "seçim");
 const EKONOMI = follow("konu", "ekonomi");
+const DEVA = follow("gundem", "deva");
 
 function item(over: Partial<FollowItem> = {}): FollowItem {
   return {
@@ -227,6 +228,13 @@ describe("retry result announcement wiring (source guard: effects need a browser
 });
 
 describe("EmptyState", () => {
+  it("tells the reader the button also lives on gündem pages", () => {
+    const text = textOf(EmptyState({}));
+    expect(text).toContain(
+      "Bir konu ya da gündem sayfasında veya aramada “Takip et”e dokunun.",
+    );
+  });
+
   it("has a focusable heading so focus can land there after the last unfollow", () => {
     const markup = renderToStaticMarkup(<EmptyState />);
     expect(markup).toMatch(/<h2 [^>]*tabindex="-1"[^>]*>Henüz bir şey takip etmiyorsunuz<\/h2>/);
@@ -237,6 +245,57 @@ describe("EmptyState", () => {
     const h2 = collect(EmptyState({ headingRef })).find((el) => el.type === "h2");
     expect(h2?.props?.ref).toBe(headingRef);
     expect(h2?.props?.tabIndex).toBe(-1);
+  });
+});
+
+describe("FollowSection -- gündem (entity hub) follow", () => {
+  it("shows the entity's label as the heading, not the key", () => {
+    const markup = renderToStaticMarkup(section(DEVA, undefined));
+    expect(markup).toMatch(/<h2 [^>]*tabindex="-1"[^>]*>DEVA<\/h2>/);
+    expect(markup).not.toContain("“deva”");
+  });
+
+  it("links 'Tümü' to the /gundem/<key> hub, named after the entity", () => {
+    const markup = renderToStaticMarkup(section(DEVA, undefined));
+    const link = /<a [^>]*>Tümü<\/a>/.exec(markup)?.[0] ?? "";
+    expect(link).toContain('href="/gundem/deva"');
+    expect(link).toContain('aria-label="Tümü: DEVA"');
+    expect(markup).toContain(">Tümü</a>");
+    expect(markup).not.toContain("/?q=");
+  });
+
+  it("names the remove button after the entity", () => {
+    const markup = renderToStaticMarkup(section(DEVA, undefined));
+    expect(markup).toContain('aria-label="DEVA takibini bırak"');
+  });
+
+  it("uses the recent-window empty copy and no corroboration caption (a hub is newest first)", () => {
+    const empty = renderToStaticMarkup(section(DEVA, { status: "ok", items: [] }));
+    expect(empty).toContain("Son dönemde eşleşen hikâye yok.");
+    expect(empty).not.toContain("Eşleşen hikâye bulunamadı.");
+    const list = renderToStaticMarkup(section(DEVA, { status: "ok", items: [item()] }));
+    expect(list).not.toContain("En çok kaynaklı eşleşmeler");
+    expect(list).toContain("Bir haber başlığı");
+  });
+
+  it("does not reserve the keyword caption line in the loading skeleton", () => {
+    const skeleton = renderToStaticMarkup(section(DEVA, undefined));
+    expect(skeleton).not.toContain('class="h-4 px-2"');
+    const keyword = renderToStaticMarkup(section(SECIM, undefined));
+    expect(keyword).toContain('class="h-4 px-2"');
+  });
+
+  it("gives a keyword, a topic and a hub follow distinct accessible names", () => {
+    const markup = renderToStaticMarkup(
+      <>
+        {section(SECIM, undefined)}
+        {section(EKONOMI, undefined)}
+        {section(DEVA, undefined)}
+      </>,
+    );
+    const labels = [...markup.matchAll(/aria-label="([^"]+)"/g)].map((m) => m[1]);
+    expect(labels).toHaveLength(6);
+    expect(new Set(labels).size).toBe(6);
   });
 });
 

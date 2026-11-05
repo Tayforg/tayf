@@ -19,8 +19,10 @@ import { ZONE_META } from "@/lib/bias/config";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { niceScale } from "@/lib/format/nice-scale";
 import { trendBarTitle } from "@/lib/trends/bar-title";
+import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { chartTableRows } from "@/lib/trends/chart-table";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
+import { MAX_ITEMS, withHubLinks, type RisingResult } from "@/lib/trends/rising";
 import { getRisingEntities } from "@/lib/trends/rising-query";
 import type { MediaDnaZone } from "@/types";
 
@@ -60,6 +62,16 @@ import type { MediaDnaZone } from "@/types";
 // over the per-entity daily rollup; it also resolves `null` instead of
 // throwing, and the section degrades on its own copy, so a failure of either
 // fetch never hides the other.
+//
+// Hub links (h43-entities-3). A rising row links to its /gundem hub only when
+// that hub is indexable; a thin or unreadable one links to the home search
+// instead (withHubLinks). The hubs are read HERE, at page level and after
+// getRisingEntities resolved, for at most MAX_ITEMS rows, and never inside a
+// "use cache" function: getEntityHub is a resolveCachedOrRetry getter, and its
+// live retry awaits connection(), which throws inside a cache body and fails
+// `next build` (tests/guards/cache-retry-prerender.test.ts). Each read is one
+// of the 62 per-key cache entries /gundem/[key] and the hubs sitemap already
+// share, so a warm page costs no extra query.
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -97,11 +109,28 @@ const PARTIAL_DASH = "3 2";
 const PARTIAL_HEADER_NOTE = " (son gün dahil, eksik)";
 const PARTIAL_ARIA_NOTE = " Son günün sayımı eksik.";
 
+/**
+ * The rising result with each row's href settled against its hub. A result
+ * without rows (failed read, thin history, nothing rising) is returned as is
+ * and reads no hub. Rows past MAX_ITEMS are dropped (computeRising never
+ * returns more) so the reads stay bounded.
+ */
+async function linkRisingHubs(rising: RisingResult | null): Promise<RisingResult | null> {
+  if (rising === null || rising.status !== "ok" || rising.items.length === 0) {
+    return rising;
+  }
+  const items = rising.items.slice(0, MAX_ITEMS);
+  const reads = await Promise.all(items.map((item) => getEntityHub(item.key)));
+  const hubs = new Map(items.map((item, i) => [item.key, reads[i] ?? null] as const));
+  return { ...rising, items: withHubLinks(items, hubs) };
+}
+
 export default async function TrendsPage() {
-  const [buckets, rising] = await Promise.all([
+  const [buckets, risingRaw] = await Promise.all([
     fetchIstanbulTimeline(),
     getRisingEntities(),
   ]);
+  const rising = await linkRisingHubs(risingRaw);
 
   // `null` means the fetch itself failed (Supabase error, or — at build
   // time — env vars not yet wired) — a distinct, honest state from "zero

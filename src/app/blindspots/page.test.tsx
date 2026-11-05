@@ -632,6 +632,8 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
   function cardBundle(
     counts: { iktidar: number; bagimsiz: number; muhalefet: number },
     distribution: Record<string, number>,
+    sources: unknown[] = [],
+    dominantZone: "iktidar" | "bagimsiz" | "muhalefet" = "iktidar",
   ) {
     const total = counts.iktidar + counts.bagimsiz + counts.muhalefet;
     return {
@@ -647,8 +649,8 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
         updated_at: "2026-10-22T11:00:00.000Z",
       },
       articles: [],
-      sources: [],
-      dominantZone: "iktidar",
+      sources,
+      dominantZone,
       // Deliberately the Math.round-prone share: the page must not read it.
       dominantPct: counts.iktidar / total,
       votingZoneCounts: counts,
@@ -721,5 +723,164 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
     expect(text).toContain("%100 İktidar");
     expect(text).not.toContain("Sadece");
     expect(text).not.toContain("tek tarafta");
+  });
+
+  // h43-blindspots-1: the flag rule is vote-only by design, so "Sadece İktidar
+  // yazdı" prints over a story a non-voting (toplayıcı / niş) source from
+  // another zone also wrote (cluster 5692a4a1: İşçi Haber, a niche Muhalefet
+  // source). Only the wording changes: the chip says what the SPECTRUM shows
+  // and the side note names the uncounted outsiders. The flag, the counts and
+  // the percent are untouched.
+  describe("qualified claim when a non-voting source from another zone also wrote it (h43-blindspots-1)", () => {
+    const src = (id: string, bias: string, kind?: string | null) => ({
+      id,
+      name: id,
+      bias,
+      logo_url: null,
+      ...(kind === undefined ? {} : { kind }),
+    });
+
+    // Shaped like cluster 5692a4a1-3c17-429e-87d1-8a5af5741ec6: ten voting
+    // İktidar sources (nine outlets and the wire anadolu-ajansi) ...
+    const voting10 = [
+      src("aksam", "gov_leaning", "outlet"),
+      src("cnn-turk", "gov_leaning", "outlet"),
+      src("haber7", "gov_leaning", "outlet"),
+      src("hurriyet", "gov_leaning", "outlet"),
+      src("milat", "gov_leaning", "outlet"),
+      src("milliyet", "gov_leaning", "outlet"),
+      src("dirilis-postasi", "pro_government", "outlet"),
+      src("trt-haber", "pro_government", "outlet"),
+      src("yeni-safak", "pro_government", "outlet"),
+      src("anadolu-ajansi", "pro_government", "wire"),
+    ];
+    const IKTIDAR_10 = { iktidar: 10, bagimsiz: 0, muhalefet: 0 };
+    const IKTIDAR_10_DIST = { pro_government: 4, gov_leaning: 6 };
+    // ... plus the three that do not vote.
+    const hablerCom = src("haberler-com", "gov_leaning", "aggregator");
+    const ajansHaber = src("ajans-haber", "center", "aggregator");
+    const isciHaber = src("isci-haber", "opposition", "niche");
+
+    it("reads 'Spektrumda sadece İktidar' and '%100 tek tarafta · +2 toplayıcı/niş kaynak (sayılmaz)' for the 5692a4a1 shape", async () => {
+      const { text } = await renderCard(
+        cardBundle(IKTIDAR_10, IKTIDAR_10_DIST, [...voting10, hablerCom, ajansHaber, isciHaber]),
+      );
+
+      expect(text).toContain("Spektrumda sadece İktidar");
+      expect(text).toContain("%100 tek tarafta · +2 toplayıcı/niş kaynak (sayılmaz)");
+      // The bare claim is gone: the story was not written by İktidar alone.
+      expect(text).not.toContain("Sadece İktidar yazdı");
+      expect(text).not.toContain("yazdı");
+    });
+
+    it("names one outsider as '+1 toplayıcı/niş kaynak (sayılmaz)'", async () => {
+      const { text } = await renderCard(
+        cardBundle(IKTIDAR_10, IKTIDAR_10_DIST, [...voting10, isciHaber]),
+      );
+
+      expect(text).toContain("Spektrumda sadece İktidar");
+      expect(text).toContain("%100 tek tarafta · +1 toplayıcı/niş kaynak (sayılmaz)");
+    });
+
+    it("qualifies a Muhalefet-dominant card by the non-voting sources outside Muhalefet", async () => {
+      const { text } = await renderCard(
+        cardBundle(
+          { iktidar: 0, bagimsiz: 0, muhalefet: 3 },
+          { opposition: 2, opposition_leaning: 1 },
+          [
+            src("sozcu", "opposition_leaning", "outlet"),
+            src("halk-tv", "opposition", "outlet"),
+            src("birgun", "opposition", "outlet"),
+            // d5a6d9ab-like: an İktidar aggregator and a Bağımsız aggregator.
+            src("haberler-com", "gov_leaning", "aggregator"),
+            src("son-dakika", "center", "aggregator"),
+            // Inside the zone: never counted.
+            src("niche-muhalefet", "opposition_leaning", "niche"),
+          ],
+          "muhalefet",
+        ),
+      );
+
+      expect(text).toContain("Spektrumda sadece Muhalefet");
+      expect(text).toContain("%100 tek tarafta · +2 toplayıcı/niş kaynak (sayılmaz)");
+      expect(text).not.toContain("Sadece Muhalefet yazdı");
+    });
+
+    it("keeps the byte-identical 'Sadece İktidar yazdı' / '%100 tek tarafta' when there is no non-voting source at all", async () => {
+      const { html, text } = await renderCard(
+        cardBundle({ iktidar: 5, bagimsiz: 0, muhalefet: 0 }, { pro_government: 5 }),
+      );
+
+      expect(text).toContain("Sadece İktidar yazdı");
+      expect(text).toContain("%100 tek tarafta");
+      expect(text).not.toContain("Spektrumda");
+      expect(text).not.toContain("toplayıcı");
+      // Exact markup, not just text: the chip's text node and the whole side
+      // note element are what they were before the qualifier existed.
+      expect(html).toContain("Sadece İktidar yazdı</span>");
+      expect(html).toContain(
+        '<span class="text-[11px] text-muted-foreground"><span class="font-mono">%100</span> tek tarafta</span>',
+      );
+    });
+
+    it("keeps the unqualified claim when the only non-voting sources sit inside the dominant zone", async () => {
+      const { html, text } = await renderCard(
+        cardBundle(IKTIDAR_10, IKTIDAR_10_DIST, [...voting10, hablerCom]),
+      );
+
+      expect(text).toContain("Sadece İktidar yazdı");
+      expect(text).toContain("%100 tek tarafta");
+      expect(text).not.toContain("Spektrumda");
+      expect(text).not.toContain("toplayıcı");
+      expect(html).toContain(
+        '<span class="text-[11px] text-muted-foreground"><span class="font-mono">%100</span> tek tarafta</span>',
+      );
+    });
+
+    it("treats a source with a null or missing kind as voting, so it never qualifies the claim", async () => {
+      const { text } = await renderCard(
+        cardBundle(IKTIDAR_10, IKTIDAR_10_DIST, [
+          ...voting10,
+          src("legacy-null", "opposition", null),
+          src("legacy-missing", "center"),
+        ]),
+      );
+
+      expect(text).toContain("Sadece İktidar yazdı");
+      expect(text).not.toContain("Spektrumda");
+      expect(text).not.toContain("toplayıcı");
+    });
+
+    it("leaves a card that does not claim 'only one side' alone, outsiders or not", async () => {
+      const { text } = await renderCard(
+        cardBundle(
+          { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+          { pro_government: 11, center: 1, opposition: 1 },
+          [src("a", "pro_government", "outlet"), isciHaber, ajansHaber],
+        ),
+      );
+
+      // Same chip as without sources: the largest-remainder %84, no qualifier.
+      expect(text).toContain("%84 İktidar");
+      expect(text).not.toContain("Spektrumda");
+      expect(text).not.toContain("Sadece");
+      expect(text).not.toContain("toplayıcı");
+      expect(text).not.toContain("tek tarafta");
+    });
+
+    it("does not change the flag rule: 250/1/0 with an outsider is still not 'only one side'", async () => {
+      const { text } = await renderCard(
+        cardBundle(
+          { iktidar: 250, bagimsiz: 1, muhalefet: 0 },
+          { pro_government: 250, center: 1 },
+          [isciHaber],
+        ),
+      );
+
+      expect(text).toContain("%100 İktidar");
+      expect(text).not.toContain("Spektrumda");
+      expect(text).not.toContain("Sadece");
+      expect(text).not.toContain("toplayıcı");
+    });
   });
 });

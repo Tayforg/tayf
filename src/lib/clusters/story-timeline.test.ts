@@ -651,3 +651,162 @@ describe("helpers", () => {
     expect(missingZones(BASE.slice(0, 1))).toEqual(["bagimsiz", "muhalefet"]);
   });
 });
+
+// h43-blindspots-1: "bu kümede haber yok" is a statement about the whole
+// cluster, but absence is judged on VOTING members only. When a toplayıcı / niş
+// source from the absent zone is plotted on the same timeline (cluster
+// 5692a4a1: İşçi Haber, a niche Muhalefet source, next to "Muhalefet
+// kaynaklarından bu kümede haber yok"), the bare line contradicts the page.
+// The line is then qualified with "Spektruma sayılan" (counted by the
+// spectrum). Only wording moves: absentZones, joins and every other string stay.
+describe("buildStoryTimeline — absent zone qualified by a non-voting point in that zone (h43-blindspots-1)", () => {
+  // Bağımsız is the absent zone here.
+  const twoZones = [
+    member("Sabah", "pro_government", "2026-09-27T06:12:00Z"),
+    member("A Haber", "pro_government", "2026-09-27T06:20:00Z"),
+    member("Sözcü", "opposition_leaning", "2026-09-27T08:22:00Z"),
+  ];
+  // Muhalefet is the absent zone here.
+  const noMuhalefet = [
+    member("Sabah", "pro_government", "2026-09-27T06:12:00Z"),
+    member("Karar", "center", "2026-09-27T06:40:00Z"),
+    member("BBC", "international", "2026-09-27T07:00:00Z"),
+  ];
+  // İktidar is the absent zone here (Karar is the first mover).
+  const noIktidar = [
+    member("Karar", "center", "2026-09-27T06:12:00Z"),
+    member("BBC", "international", "2026-09-27T06:30:00Z"),
+    member("Sözcü", "opposition_leaning", "2026-09-27T08:22:00Z"),
+  ];
+
+  it("qualifies the Bağımsız line (lower-case adjective, no possessive)", () => {
+    const ajans = member("Ajans Haber", "center", "2026-09-27T06:30:00Z");
+    const t = buildStoryTimeline(twoZones, null, health({}), [ajans])!;
+    expect(t.absentZones).toEqual(["bagimsiz"]);
+    expect(t.summary).toBe(
+      "İlk: Sabah · 09:12 — Spektruma sayılan bağımsız kaynaklardan bu kümede haber yok — Muhalefet 2 sa 10 dk sonra katıldı",
+    );
+    expect(t.summary).not.toContain("— Bağımsız kaynaklardan");
+  });
+
+  it("qualifies the Muhalefet line (possessive)", () => {
+    const isci = member("İşçi Haber", "opposition", "2026-09-27T07:30:00Z");
+    const t = buildStoryTimeline(noMuhalefet, null, health({}), [isci])!;
+    expect(t.absentZones).toEqual(["muhalefet"]);
+    expect(t.summary).toBe(
+      "İlk: Sabah · 09:12 — Bağımsız 28 dk sonra katıldı — Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok",
+    );
+    expect(t.summary).not.toContain("— Muhalefet kaynaklarından");
+  });
+
+  it("qualifies the İktidar line (possessive), even when the non-voting source posted first", () => {
+    const haberler = member("Haberler.com", "gov_leaning", "2026-09-27T05:50:00Z");
+    const t = buildStoryTimeline(noIktidar, null, health({}), [haberler])!;
+    expect(t.absentZones).toEqual(["iktidar"]);
+    expect(t.first.sourceName).toBe("Karar");
+    expect(t.summary).toBe(
+      "İlk: Karar · 09:12 — Spektruma sayılan İktidar kaynaklarından bu kümede haber yok — Muhalefet 2 sa 10 dk sonra katıldı",
+    );
+  });
+
+  it("qualifies only the zones that have a non-voting point and leaves the other absent zone as it was", () => {
+    const allIktidar = [
+      member("Sabah", "pro_government", "2026-09-27T06:12:00Z"),
+      member("A Haber", "pro_government", "2026-09-27T06:20:00Z"),
+      member("Yeni Şafak", "pro_government", "2026-09-27T06:40:00Z"),
+    ];
+    const isci = member("İşçi Haber", "opposition", "2026-09-27T07:30:00Z");
+    const t = buildStoryTimeline(allIktidar, null, health({}), [isci])!;
+    expect(t.absentZones).toEqual(["bagimsiz", "muhalefet"]);
+    expect(t.summary).toBe(
+      "İlk: Sabah · 09:12 — Bağımsız kaynaklardan bu kümede haber yok — Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok",
+    );
+  });
+
+  it("says it once however many non-voting sources are in the zone", () => {
+    const a = member("İşçi Haber", "opposition", "2026-09-27T07:30:00Z");
+    const b = member("Niş Muhalefet", "opposition_leaning", "2026-09-27T07:40:00Z");
+    const t = buildStoryTimeline(noMuhalefet, null, health({}), [a, b])!;
+    expect(t.summary.match(/Spektruma sayılan/g)).toHaveLength(1);
+  });
+
+  it("keeps the existing wording when the non-voting points are in other zones", () => {
+    const base = buildStoryTimeline(twoZones, null, health({}))!;
+    // Muhalefet and İktidar non-voting sources do not explain a Bağımsız gap.
+    const nicheOpposition = member("Niş Muhalefet", "opposition", "2026-09-27T06:50:00Z");
+    const aggregatorIktidar = member("Haberler.com", "gov_leaning", "2026-09-27T06:55:00Z");
+    const t = buildStoryTimeline(twoZones, null, health({}), [nicheOpposition, aggregatorIktidar])!;
+    expect(t.summary).toBe(base.summary);
+    expect(t.summary).toContain("— Bağımsız kaynaklardan bu kümede haber yok —");
+    expect(t.summary).not.toContain("Spektruma sayılan");
+  });
+
+  it("keeps the existing wording with no non-voting argument, an empty one, or a present zone", () => {
+    const expected =
+      "İlk: Sabah · 09:12 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet 2 sa 10 dk sonra katıldı";
+    expect(buildStoryTimeline(twoZones, null, health({}))!.summary).toBe(expected);
+    expect(buildStoryTimeline(twoZones, null, health({}), [])!.summary).toBe(expected);
+    // A non-voting source in a zone that DID vote changes nothing.
+    const ajansInMuhalefet = member("Niş Muhalefet", "opposition", "2026-09-27T06:50:00Z");
+    expect(buildStoryTimeline(twoZones, null, health({}), [ajansInMuhalefet])!.summary).toBe(
+      expected,
+    );
+  });
+
+  it("keeps the degraded-feed wording ahead of the qualified absence (precedence unchanged)", () => {
+    const ajans = member("Ajans Haber", "center", "2026-09-27T06:30:00Z");
+    const t = buildStoryTimeline(twoZones, null, health({ bagimsiz: true }), [ajans])!;
+    expect(t.degradedAbsentZones).toEqual(["bagimsiz"]);
+    expect(t.summary).toContain("— Bağımsız kaynakların akışı şu an sorunlu");
+    expect(t.summary).not.toContain("Spektruma sayılan");
+    expect(t.summary).not.toContain("bu kümede haber yok");
+  });
+
+  it("qualifies a non-degraded absent zone while another absent zone is degraded", () => {
+    const allIktidar = [
+      member("Sabah", "pro_government", "2026-09-27T06:12:00Z"),
+      member("A Haber", "pro_government", "2026-09-27T06:20:00Z"),
+      member("Yeni Şafak", "pro_government", "2026-09-27T06:40:00Z"),
+    ];
+    const ajans = member("Ajans Haber", "center", "2026-09-27T06:30:00Z");
+    const t = buildStoryTimeline(allIktidar, null, health({ muhalefet: true }), [ajans])!;
+    expect(t.summary).toBe(
+      "İlk: Sabah · 09:12 — Spektruma sayılan bağımsız kaynaklardan bu kümede haber yok — Muhalefet kaynaklarının akışı şu an sorunlu",
+    );
+  });
+
+  it("changes wording only: absence, joins, first mover, points and the zone line are what they were", () => {
+    const isci = member("İşçi Haber", "opposition", "2026-09-27T07:30:00Z");
+    const without = buildStoryTimeline(noMuhalefet, null, health({}))!;
+    const withNv = buildStoryTimeline(noMuhalefet, null, health({}), [isci])!;
+
+    expect(withNv.absentZones).toEqual(without.absentZones);
+    expect(withNv.degradedAbsentZones).toEqual(without.degradedAbsentZones);
+    expect(withNv.zoneJoin).toEqual(without.zoneJoin);
+    expect(withNv.zoneFirsts).toEqual(without.zoneFirsts);
+    expect(withNv.zoneLine).toBe(without.zoneLine);
+    expect(withNv.first).toEqual(without.first);
+    expect(withNv.summary).not.toBe(without.summary);
+    expect(withNv.summary.replace("Spektruma sayılan ", "")).toBe(without.summary);
+    // The non-voting source is still just a plotted, non-voting point.
+    expect(withNv.points.find((p) => p.sourceName === "İşçi Haber")?.voting).toBe(false);
+  });
+
+  it("does not qualify on a non-voting member that has no plottable time (no point)", () => {
+    const base = buildStoryTimeline(noMuhalefet, null, health({}))!;
+    const undated = member("İşçi Haber", "opposition", "not-a-date");
+    const t = buildStoryTimeline(noMuhalefet, null, health({}), [undated])!;
+    expect(t.points.map((p) => p.sourceName)).not.toContain("İşçi Haber");
+    expect(t.summary).toBe(base.summary);
+  });
+
+  it("qualifies on a non-voting point whose future pubDate is clamped by seenAt", () => {
+    const future = member("İşçi Haber", "opposition", "2026-09-27T12:00:00Z", {
+      articleId: "future-nv",
+    });
+    const t = buildStoryTimeline(noMuhalefet, { "future-nv": "2026-09-27T07:30:00Z" }, health({}), [
+      future,
+    ])!;
+    expect(t.summary).toContain("— Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok");
+  });
+});

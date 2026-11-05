@@ -110,6 +110,19 @@ export type RisingHubSpec = {
    */
   requires?: readonly string[];
   /**
+   * Single words that, standing directly in front of the entity's word, make it
+   * someone else's: "ABD Dışişleri Bakanı" and "İran Dışişleri Sözcüsü" are
+   * foreign ministries, not the Turkish one. Folded lowercase ASCII words
+   * (entries that fold to more than one word are dropped). entity-hub.ts emits
+   * one fixed-length negative lookbehind per word, `(?<!abd\s)(?<!iran\s)`,
+   * right before the base word, so the word counts only where it is NOT directly
+   * preceded by a listed word and one whitespace character. Unlike `excludes`
+   * it looks at the word's own neighbour, not at the whole story: a story that
+   * also names the Turkish ministry once, unprefixed, still matches. It applies
+   * to every form, `trusted` or not.
+   */
+  notAfter?: readonly string[];
+  /**
    * Keeps the entity's single-word forms out of amounts: the word must not
    * follow a digit or a quantity word ("100 dolar", "2,1 milyar dolarlık",
    * "milyarlarca doları"). Only for entities whose bare name is also a unit,
@@ -276,7 +289,68 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
   enflasyon: { hubMatch: "prefix" },
   faiz: { hubMatch: "prefix" },
   dolar: { hubMatch: "prefix", quantityGuard: true },
-  borsa: { aliases: ["Borsa", "BIST"], hubMatch: "prefix", inflections: ["Borsada", "Borsası"] },
+  // The Turkish ministry only: "Dışişleri" right after a foreign country word
+  // ("ABD Dışişleri Bakanı Rubio", "İran Dışişleri Sözcüsü") is that country's.
+  disisleri: {
+    notAfter: [
+      "abd",
+      "amerika",
+      "almanya",
+      "alman",
+      "fransa",
+      "fransiz",
+      "iran",
+      "israil",
+      "cin",
+      "yunanistan",
+      "yunan",
+      "ukrayna",
+      "rusya",
+      "rus",
+      "kktc",
+      "ingiltere",
+      "ingiliz",
+      "katar",
+      "misir",
+      "suriye",
+      "lubnan",
+      "pakistan",
+      "hindistan",
+      "azerbaycan",
+      "ermenistan",
+      "japonya",
+      "kore",
+      "venezuela",
+      "polonya",
+      "ispanya",
+      "italya",
+      "macaristan",
+      "avrupa",
+    ],
+  },
+  // Borsa İstanbul and BIST name the exchange on their own (trusted). The bare
+  // "borsa" is also the New York, Asian and European bourses and crypto
+  // exchanges, so it is vetoed by those cues anywhere in the story.
+  borsa: {
+    aliases: ["Borsa İstanbul", "Borsa", "BIST"],
+    hubMatch: "prefix",
+    trusted: ["Borsa İstanbul", "BIST"],
+    inflections: ["Borsada", "Borsası"],
+    excludes: [
+      "new york",
+      "wall street",
+      "nasdaq",
+      "dow jones",
+      "nikkei",
+      "asya borsa",
+      "avrupa borsa",
+      "londra borsa",
+      "frankfurt",
+      "binance",
+      "kripto",
+      "ticaret borsa",
+    ],
+  },
   pkk: { inflections: ["PKK/KCK"] },
   "asgari-ucret": { inflections: ["asgari ücretli", "asgari ücretlilerin"] },
 };

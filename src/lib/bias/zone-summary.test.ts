@@ -3,11 +3,12 @@ import { describe, it, expect } from "vitest";
 import {
   dominantZonePercent,
   isOnlyZone,
+  nonVotingOutsideZone,
   zoneCountsOf,
   zonePercents,
 } from "./zone-summary";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import type { BiasDistribution, MediaDnaZone } from "@/types";
+import type { BiasCategory, BiasDistribution, MediaDnaZone, SourceKind } from "@/types";
 
 function dist(partial: Partial<BiasDistribution>): BiasDistribution {
   return { ...emptyBiasDistribution(), ...partial };
@@ -153,5 +154,141 @@ describe("isOnlyZone", () => {
 
   it("is false when two other zones are split", () => {
     expect(isOnlyZone({ iktidar: 3, bagimsiz: 0, muhalefet: 2 }, "iktidar")).toBe(false);
+  });
+});
+
+// h43-blindspots-1: "Sadece İktidar yazdı" is decided on the VOTING tally, so
+// it can print over a story that a toplayıcı / niş source from another zone
+// also carried (cluster 5692a4a1: İşçi Haber, a niche Muhalefet source). The
+// helper counts those outsiders so the chip can qualify its claim.
+describe("nonVotingOutsideZone", () => {
+  type Src = { kind?: SourceKind | null; bias: BiasCategory };
+
+  // Shaped like cluster 5692a4a1-3c17-429e-87d1-8a5af5741ec6: ten voting
+  // İktidar sources (nine outlets and the wire anadolu-ajansi), plus three
+  // non-voting ones: haberler-com (aggregator, gov_leaning: İktidar),
+  // ajans-haber (aggregator, center: Bağımsız) and isci-haber (niche,
+  // opposition: Muhalefet).
+  const voting10: Src[] = [
+    ...Array.from({ length: 6 }, (): Src => ({ kind: "outlet", bias: "gov_leaning" })),
+    ...Array.from({ length: 3 }, (): Src => ({ kind: "outlet", bias: "pro_government" })),
+    { kind: "wire", bias: "pro_government" },
+  ];
+  const cluster5692: Src[] = [
+    ...voting10,
+    { kind: "aggregator", bias: "gov_leaning" },
+    { kind: "aggregator", bias: "center" },
+    { kind: "niche", bias: "opposition" },
+  ];
+
+  it("counts the 5692a4a1-shaped fixture as 2 outsiders for iktidar", () => {
+    expect(nonVotingOutsideZone(cluster5692, "iktidar")).toBe(2);
+  });
+
+  it("answers per zone: the non-voting sources NOT in that zone", () => {
+    // bagimsiz: haberler-com (İktidar) and isci-haber (Muhalefet) are outside.
+    expect(nonVotingOutsideZone(cluster5692, "bagimsiz")).toBe(2);
+    // muhalefet: haberler-com (İktidar) and ajans-haber (Bağımsız) are outside.
+    expect(nonVotingOutsideZone(cluster5692, "muhalefet")).toBe(2);
+  });
+
+  it("does not count a non-voting source inside the zone itself", () => {
+    expect(
+      nonVotingOutsideZone([{ kind: "aggregator", bias: "gov_leaning" }], "iktidar"),
+    ).toBe(0);
+    expect(
+      nonVotingOutsideZone([{ kind: "niche", bias: "opposition_leaning" }], "muhalefet"),
+    ).toBe(0);
+    expect(nonVotingOutsideZone([{ kind: "niche", bias: "center" }], "bagimsiz")).toBe(0);
+  });
+
+  it("never counts voting kinds (outlet, wire), whatever their zone", () => {
+    expect(
+      nonVotingOutsideZone(
+        [
+          { kind: "outlet", bias: "opposition" },
+          { kind: "wire", bias: "center" },
+        ],
+        "iktidar",
+      ),
+    ).toBe(0);
+  });
+
+  it("treats a null or missing kind as voting (isVotingKind's default)", () => {
+    expect(
+      nonVotingOutsideZone(
+        [
+          { kind: null, bias: "opposition" },
+          { bias: "center" },
+          { kind: undefined, bias: "opposition_leaning" },
+        ],
+        "iktidar",
+      ),
+    ).toBe(0);
+  });
+
+  it("treats an unrecognised kind string as the default (voting), not as non-voting", () => {
+    expect(
+      nonVotingOutsideZone(
+        [{ kind: "podcast" as unknown as SourceKind, bias: "opposition" }],
+        "iktidar",
+      ),
+    ).toBe(0);
+  });
+
+  it("maps every one of the ten bias keys through BIAS_TO_ZONE (legacy keys included)", () => {
+    const zoneOfKey: Record<BiasCategory, MediaDnaZone> = {
+      pro_government: "iktidar",
+      gov_leaning: "iktidar",
+      state_media: "iktidar",
+      islamist_conservative: "iktidar",
+      nationalist: "iktidar",
+      center: "bagimsiz",
+      international: "bagimsiz",
+      pro_kurdish: "bagimsiz",
+      opposition_leaning: "muhalefet",
+      opposition: "muhalefet",
+    };
+    for (const [bias, zone] of Object.entries(zoneOfKey) as Array<[BiasCategory, MediaDnaZone]>) {
+      for (const probe of ZONES) {
+        expect(nonVotingOutsideZone([{ kind: "niche", bias }], probe)).toBe(
+          zone === probe ? 0 : 1,
+        );
+      }
+    }
+  });
+
+  it("counts every kind that is not voting: aggregator and niche", () => {
+    expect(
+      nonVotingOutsideZone(
+        [
+          { kind: "aggregator", bias: "opposition" },
+          { kind: "niche", bias: "center" },
+        ],
+        "iktidar",
+      ),
+    ).toBe(2);
+  });
+
+  it("is 0 for an empty list and for an all-voting list", () => {
+    expect(nonVotingOutsideZone([], "iktidar")).toBe(0);
+    expect(nonVotingOutsideZone(voting10, "iktidar")).toBe(0);
+    expect(nonVotingOutsideZone(voting10, "muhalefet")).toBe(0);
+  });
+
+  it("does not mutate its input", () => {
+    const input = cluster5692.map((s) => ({ ...s }));
+    const before = JSON.stringify(input);
+    nonVotingOutsideZone(input, "iktidar");
+    expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it("handles a large list (10k sources)", () => {
+    const big: Src[] = Array.from({ length: 10_000 }, (_, i): Src => ({
+      kind: i % 2 === 0 ? "niche" : "outlet",
+      bias: "opposition",
+    }));
+    expect(nonVotingOutsideZone(big, "iktidar")).toBe(5_000);
+    expect(nonVotingOutsideZone(big, "muhalefet")).toBe(0);
   });
 });

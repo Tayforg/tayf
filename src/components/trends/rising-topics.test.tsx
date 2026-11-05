@@ -126,3 +126,37 @@ describe("<RisingTopics>", () => {
     expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
   });
 });
+
+// h43-entities-3: a row whose hub is thin links to the home search (/?q=...).
+// That route is request-time and DB-backed, so next/link must not prefetch it
+// for every row in view (the hub footer uses a plain anchor for the same
+// reason); a /gundem hub is a prerendered page and keeps the default prefetch.
+describe("<RisingTopics> link prefetch", () => {
+  type El = { type?: unknown; props?: { href?: unknown; prefetch?: unknown; children?: unknown } };
+
+  function links(data: RisingResult): El[] {
+    const out: El[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node && typeof node === "object") {
+        const el = node as El;
+        if (typeof el.props?.href === "string") out.push(el);
+        if (el.props?.children !== undefined) walk(el.props.children);
+      }
+    };
+    walk(RisingTopics({ data }));
+    return out;
+  }
+
+  it("does not prefetch a home-search link", () => {
+    const [link] = links(ok([item({ href: "/?q=Merkez%20Bankas%C4%B1" })]));
+    expect(link?.props?.prefetch).toBe(false);
+  });
+
+  it("keeps the default prefetch for a /gundem hub link", () => {
+    const [link] = links(ok([item({ key: "msb", label: "MSB", href: "/gundem/msb" })]));
+    expect(link?.props?.href).toBe("/gundem/msb");
+    expect(link?.props?.prefetch).toBeUndefined();
+  });
+});
+

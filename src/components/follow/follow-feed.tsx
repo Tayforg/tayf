@@ -31,15 +31,16 @@ import {
   type FollowItem,
 } from "@/lib/follows/follows";
 
-// Client half of /takip. For every followed keyword / topic it asks
-// GET /api/takip (max 3 requests in flight) and lists what matches. A topic
-// follow lists the newest stories of the last 7 days; a keyword follow lists
-// the most-corroborated matches the search returned, newest first (the search
-// has no date window, so the copy never promises "the latest"). "yeni" counts
-// come from a snapshot of each follow's seenAt taken BEFORE the visit marks
-// them seen, so the badges stay on screen for this visit and are gone on the
-// next one. For a keyword follow "yeni" is a lower bound: a fresh story the
-// search did not return cannot be counted.
+// Client half of /takip. For every followed keyword / topic / gündem hub it
+// asks GET /api/takip (max 3 requests in flight) and lists what matches. A
+// topic follow lists the newest stories of the last 7 days and a hub follow the
+// newest of the hub page's own list (the same matcher as /gundem/<key>); a
+// keyword follow lists the most-corroborated matches the search returned,
+// newest first (the search has no date window, so the copy never promises
+// "the latest"). "yeni" counts come from a snapshot of each follow's seenAt
+// taken BEFORE the visit marks them seen, so the badges stay on screen for this
+// visit and are gone on the next one. For a keyword follow "yeni" is a lower
+// bound: a fresh story the search did not return cannot be counted.
 //
 // Accessibility: ONE polite live region (FeedFrame) is mounted in every state
 // -- placeholder, empty and list -- so it never remounts and a removal can be
@@ -322,7 +323,7 @@ export function EmptyState({
         Henüz bir şey takip etmiyorsunuz
       </h2>
       <p className="text-sm text-muted-foreground max-w-md mx-auto">
-        Bir konu sayfasında ya da aramada “Takip et”e dokunun.
+        Bir konu ya da gündem sayfasında veya aramada “Takip et”e dokunun.
       </p>
       <p className="text-sm">
         <Link

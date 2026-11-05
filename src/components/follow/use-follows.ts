@@ -3,13 +3,13 @@ import { useCallback, useSyncExternalStore } from "react";
 
 import {
   addFollow,
+  canonicalFollow,
   FOLLOWS_CHANGE_EVENT,
   FOLLOWS_KEY,
   followKey,
   hasFollow,
   markSeen as markSeenIn,
   MAX_FOLLOWS,
-  normalizeFollowValue,
   parseStoredFollows,
   removeFollow,
   serializeFollows,
@@ -97,19 +97,17 @@ export const followsStore = {
   getServerSnapshot,
 
   toggle(kind: FollowKind, value: string): ToggleResult {
-    const normalized = normalizeFollowValue(kind, value);
-    if (normalized === null) return "invalid";
+    // Canonical, so a keyword that is a hub's label ("deva") finds, adds and
+    // removes the hub follow -- the same identity parseStoredFollows gives it.
+    const canonical = canonicalFollow(kind, value);
+    if (canonical === null) return "invalid";
     const current = readList();
-    const key = followKey({ kind, value: normalized });
+    const key = followKey(canonical);
     if (current.some((f) => followKey(f) === key)) {
       commit(removeFollow(current, key));
       return "removed";
     }
-    const { list, result } = addFollow(
-      current,
-      { kind, value: normalized },
-      new Date().toISOString(),
-    );
+    const { list, result } = addFollow(current, canonical, new Date().toISOString());
     if (result === "added") commit(list);
     return result;
   },

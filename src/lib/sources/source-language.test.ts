@@ -11,13 +11,26 @@ import {
   sourceLang,
 } from "./source-language";
 
-// h17-a11y-2 (WCAG 3.1.2 Language of Parts): the five English-language
-// outlets render inside <html lang="tr">, so a screen reader pronounces their
+// h17-a11y-2 (WCAG 3.1.2 Language of Parts): the English-language outlets
+// render inside <html lang="tr">, so a screen reader pronounces their
 // headlines with Turkish phonetics. sourceLang() is a code constant -- no DB
 // column -- and cards only carry the source NAME (their `sources (...)`
 // projection has no slug), so the name fallback matters as much as the slug.
+// h43-sources-2 added the sixth outlet, MFA Turkey (kind niche): its items
+// reach cluster pages and /source/mfa-turkey with English titles.
 
 const ENGLISH_SLUGS = [
+  "a-news",
+  "daily-sabah",
+  "hurriyet-daily-news",
+  "mfa-turkey",
+  "trt-world",
+  "turkiye-today",
+] as const;
+
+// The five outlets h17-a11y-2 named, kept apart so a regression on the
+// original set cannot hide behind the new sixth entry.
+const ORIGINAL_FIVE_SLUGS = [
   "a-news",
   "daily-sabah",
   "hurriyet-daily-news",
@@ -30,6 +43,7 @@ const PROD_NAMES = [
   "A News",
   "Daily Sabah",
   "Hürriyet Daily News",
+  "MFA Turkey",
   "TRT World",
   "Türkiye Today",
 ] as const;
@@ -50,6 +64,23 @@ describe("sourceLang: slug lookup", () => {
   it("does not match a slug that merely contains an English slug", () => {
     expect(sourceLang({ slug: "daily-sabah-turkce" })).toBeUndefined();
     expect(sourceLang({ slug: "trt-world-x" })).toBeUndefined();
+    expect(sourceLang({ slug: "mfa-turkey-x" })).toBeUndefined();
+    expect(sourceLang({ slug: "mfa" })).toBeUndefined();
+  });
+
+  it("returns 'en' for the mfa-turkey slug (h43-sources-2)", () => {
+    expect(sourceLang({ slug: "mfa-turkey" })).toBe("en");
+    expect(sourceLang({ slug: " mfa-turkey\n" })).toBe("en");
+  });
+
+  it.each(ORIGINAL_FIVE_SLUGS)("still returns 'en' for the original outlet %s", (slug) => {
+    expect(sourceLang({ slug })).toBe("en");
+  });
+
+  it("still returns undefined for Turkish outlets after the sixth slug was added", () => {
+    for (const slug of ["sozcu", "sabah", "hurriyet", "anadolu-ajansi", "disisleri"]) {
+      expect(sourceLang({ slug })).toBeUndefined();
+    }
   });
 });
 
@@ -79,6 +110,26 @@ describe("sourceLang: name-only lookup (cards carry no slug)", () => {
       expect(sourceLang({ name })).toBe("en");
     },
   );
+
+  // h43-sources-2: the production name is 'MFA Turkey'; 'MFA Türkiye' is the
+  // outlet's own newer spelling. Both go through foldName.
+  it.each([
+    "MFA Turkey",
+    "MFA Türkiye",
+    "mfa turkey",
+    "mfa türkiye",
+    "MFA TURKEY",
+    "MFA TÜRKİYE", // dotted İ: needs the tr-TR fold
+    "  MFA   Turkey ",
+  ])("returns 'en' for the MFA Turkey name variant %j", (name) => {
+    expect(sourceLang({ name })).toBe("en");
+  });
+
+  it("does not match a name that merely contains the MFA Turkey name", () => {
+    expect(sourceLang({ name: "MFA Turkey Türkçe" })).toBeUndefined();
+    expect(sourceLang({ name: "MFA" })).toBeUndefined();
+    expect(sourceLang({ name: "Dışişleri Bakanlığı" })).toBeUndefined();
+  });
 
   it("returns undefined for a Turkish outlet name", () => {
     expect(sourceLang({ name: "Sözcü" })).toBeUndefined();
@@ -150,7 +201,7 @@ describe("sourceLang: the cluster-page call shapes (h23-a11y-1)", () => {
 describe("clusterTextLang", () => {
   const english = ENGLISH_SLUGS.map((slug) => ({ slug }));
 
-  it("returns 'en' when every source is English (all five slugs)", () => {
+  it("returns 'en' when every source is English (all six slugs)", () => {
     expect(clusterTextLang(english)).toBe("en");
   });
 
@@ -336,9 +387,15 @@ describe("headlineLang", () => {
 });
 
 describe("ENGLISH_SOURCE_SLUGS / ENGLISH_SOURCE_NAMES", () => {
-  it("ENGLISH_SOURCE_SLUGS has exactly the five English slugs", () => {
+  it("ENGLISH_SOURCE_SLUGS has exactly the six English slugs, mfa-turkey included", () => {
     expect([...ENGLISH_SOURCE_SLUGS].sort()).toEqual([...ENGLISH_SLUGS].sort());
-    expect(ENGLISH_SOURCE_SLUGS.size).toBe(5);
+    expect(ENGLISH_SOURCE_SLUGS.size).toBe(6);
+    expect(ENGLISH_SOURCE_SLUGS.has("mfa-turkey")).toBe(true);
+  });
+
+  it("ENGLISH_SOURCE_NAMES holds the folded MFA Turkey spellings", () => {
+    expect(ENGLISH_SOURCE_NAMES.has("mfa turkey")).toBe(true);
+    expect(ENGLISH_SOURCE_NAMES.has("mfa türkiye")).toBe(true);
   });
 
   it("ENGLISH_SOURCE_NAMES holds only folded (lower-case, trimmed) names", () => {

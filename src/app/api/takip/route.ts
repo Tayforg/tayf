@@ -4,26 +4,39 @@ import { apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
 import { searchClusters } from "@/lib/clusters/search-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import { getTopicClusters, isTopicSlug } from "@/lib/clusters/topic-query";
+import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
   FOLLOW_ITEMS_MAX,
+  isFollowGundemKey,
   normalizeKeyword,
   RAW_MAX,
 } from "@/lib/follows/follows";
 
 /**
- * GET /api/takip?q=<keyword> | ?konu=<slug> -- the read side of "Takip
- * ettiklerim". Follows are client-only (localStorage); this answers for ONE
- * follow at a time by reusing the readers the site already has:
- *   q    -> searchClusters   (the same path /?q= renders)
- *   konu -> getTopicClusters (the same path /konu/[slug] renders)
+ * GET /api/takip?q=<keyword> | ?konu=<slug> | ?gundem=<key> -- the read side of
+ * "Takip ettiklerim". Follows are client-only (localStorage); this answers for
+ * ONE follow at a time by reusing the readers the site already has:
+ *   q      -> searchClusters   (the same path /?q= renders)
+ *   konu   -> getTopicClusters (the same path /konu/[slug] renders)
+ *   gundem -> getEntityHub     (the same path /gundem/[key] renders)
  * No database access of its own, no writes, no auth.
  *
+ * Why gundem exists: a hub's "Takip et" used to follow the bare label as a
+ * keyword, and the keyword search is a generic stemmed archive search -- it
+ * lists "devam" under DEVA, Polish courts under Anayasa Mahkemesi and
+ * municipal councils under Meclis, all of which the hub's matcher (curated
+ * aliases, excludes, word boundaries; migration 125) filters out. The key is
+ * checked against the RISING_ENTITIES key set before anything is read, so
+ * request input never reaches the hub RPC as text.
+ *
  * Ordering: a topic read already comes back newest-first (updated_at inside a
- * 7-day window). A keyword search does NOT -- search_cluster_ids ranks by
- * article_count desc with no date window and returns at most 12 ids -- so a
- * keyword answer is re-ordered newest-first (first_published) before the cap.
+ * 7-day window), and so does a hub read (first_published desc inside the RPC's
+ * 14-day window) -- both keep the reader's order. A keyword search does NOT --
+ * search_cluster_ids ranks by article_count desc with no date window and
+ * returns at most 12 ids -- so a keyword answer is re-ordered newest-first
+ * (first_published) before the cap.
  * That surfaces the freshest of what the search returned, but it cannot add a
  * fresh low-corroboration story the search never returned: for a keyword follow
  * the client's "yeni" count is a lower bound, and the UI says the list is
@@ -109,10 +122,24 @@ export const GET = withApiErrors(async (request: Request) => {
   const params = new URL(request.url).searchParams;
   const qAll = params.getAll("q");
   const konuAll = params.getAll("konu");
+  const gundemAll = params.getAll("gundem");
 
-  // Exactly one parameter, exactly once.
-  if (qAll.length + konuAll.length !== 1) {
+  // Exactly one parameter, exactly once (q, konu and gundem never combine).
+  if (qAll.length + konuAll.length + gundemAll.length !== 1) {
     return errorResponse(400, "Geçersiz istek");
+  }
+
+  if (gundemAll.length === 1) {
+    // Exact membership in the curated key set; anything else (a label, a
+    // different case, "__proto__") is a 400 and never reaches the reader.
+    const key = gundemAll[0] as string;
+    if (!isFollowGundemKey(key)) return errorResponse(400, "Geçersiz gündem");
+
+    const hub = await getEntityHub(key);
+    if (hub === null) {
+      return errorResponse(503, "Şu an yüklenemedi", { "Retry-After": "60" });
+    }
+    return okResponse(hub.bundles, { recencySort: false });
   }
 
   if (qAll.length === 1) {

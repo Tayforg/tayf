@@ -147,7 +147,10 @@ export default async function EntityHubPage({ params }: PageProps) {
           ) : (
             <span />
           )}
-          <FollowButton kind="q" value={label} />
+          {/* The ENTITY, not its label as a keyword: a keyword follow runs the
+              generic stemmed archive search ("DEVA" lists every "devam"),
+              while kind="gundem" is answered by this page's own matcher. */}
+          <FollowButton kind="gundem" value={entity.key} />
         </div>
         <p className={noteClass}>{MATCH_NOTE}</p>
       </div>

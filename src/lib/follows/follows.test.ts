@@ -11,6 +11,7 @@ vi.mock("next/cache", () => ({
 
 import {
   addFollow,
+  canonicalFollow,
   countNew,
   FOLLOW_TOPIC_LABELS,
   FOLLOW_TOPIC_SLUGS,
@@ -25,6 +26,7 @@ import {
   followListCaption,
   followRowMeta,
   hasFollow,
+  isFollowGundemKey,
   isFollowTopicSlug,
   KEYWORD_MAX,
   KEYWORD_MIN,
@@ -44,6 +46,7 @@ import {
 } from "./follows";
 import { TOPIC_LABELS_TR, TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
+import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 const NOW = "2026-10-22T09:00:00.000Z";
 
@@ -52,6 +55,9 @@ function q(value: string, over: Partial<Follow> = {}): Follow {
 }
 function konu(value: string, over: Partial<Follow> = {}): Follow {
   return { kind: "konu", value, addedAt: NOW, seenAt: NOW, ...over };
+}
+function gundem(value: string, over: Partial<Follow> = {}): Follow {
+  return { kind: "gundem", value, addedAt: NOW, seenAt: NOW, ...over };
 }
 
 describe("constants", () => {
@@ -248,8 +254,13 @@ describe("parseStoredFollows", () => {
   });
 
   it("re-normalises stored keyword values", () => {
-    const raw = JSON.stringify([{ kind: "q", value: "  İMAMOĞLU ", addedAt: NOW, seenAt: NOW }]);
-    expect(parseStoredFollows(raw)[0]?.value).toBe("imamoğlu");
+    // A non-hub keyword: "  İMAMOĞLU " now upgrades to the hub (see the legacy
+    // upgrade block below), so the plain re-normalisation is pinned on a
+    // keyword no hub is named after.
+    const raw = JSON.stringify([
+      { kind: "q", value: "  SEÇİM   SONUÇLARI ", addedAt: NOW, seenAt: NOW },
+    ]);
+    expect(parseStoredFollows(raw)[0]?.value).toBe("seçim sonuçları");
   });
 
   it("turns an unparseable addedAt / seenAt into null, and keeps a parseable one", () => {
@@ -658,13 +669,307 @@ describe("followRowMeta", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h43-entities-1: the "gundem" kind. A /gundem/<key> hub follows the ENTITY
+// (matched by the hub's aliases, excludes and word boundaries), not its bare
+// label as a free-text archive search ("deva" matches "devam", "Meclis"
+// matches every municipal council).
+// ---------------------------------------------------------------------------
+
+describe("gundem follow kind", () => {
+  it("isFollowGundemKey accepts exactly the RISING_ENTITIES keys", () => {
+    for (const e of RISING_ENTITIES) expect(isFollowGundemKey(e.key)).toBe(true);
+    expect(isFollowGundemKey("deva")).toBe(true);
+    expect(isFollowGundemKey("not-a-key")).toBe(false);
+    expect(isFollowGundemKey("DEVA")).toBe(false);
+    expect(isFollowGundemKey(" deva")).toBe(false);
+    expect(isFollowGundemKey("")).toBe(false);
+    expect(isFollowGundemKey(null)).toBe(false);
+    expect(isFollowGundemKey(42)).toBe(false);
+    expect(isFollowGundemKey(["deva"])).toBe(false);
+  });
+
+  it("isFollowGundemKey is not fooled by Object.prototype names", () => {
+    for (const k of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"]) {
+      expect(isFollowGundemKey(k)).toBe(false);
+    }
+  });
+
+  it("normalizeFollowValue('gundem', v) returns v only for a known key", () => {
+    expect(normalizeFollowValue("gundem", "deva")).toBe("deva");
+    expect(normalizeFollowValue("gundem", "iyi-parti")).toBe("iyi-parti");
+    expect(normalizeFollowValue("gundem", "not-a-key")).toBeNull();
+    expect(normalizeFollowValue("gundem", "DEVA")).toBeNull();
+    // A label is not a key.
+    expect(normalizeFollowValue("gundem", "Özgür Özel")).toBeNull();
+    expect(normalizeFollowValue("gundem", "../x")).toBeNull();
+    expect(normalizeFollowValue("gundem", "__proto__")).toBeNull();
+    expect(normalizeFollowValue("gundem", 7)).toBeNull();
+    expect(normalizeFollowValue("gundem", null)).toBeNull();
+  });
+
+  it("builds key, href, label and API path from the entity", () => {
+    const f = gundem("deva");
+    expect(followKey(f)).toBe("gundem:deva");
+    expect(followApiPath(f)).toBe("/api/takip?gundem=deva");
+    expect(followHref(f)).toBe("/gundem/deva");
+    expect(followLabel(f)).toBe("DEVA");
+    expect(followLabel(gundem("ozgur-ozel"))).toBe("Özgür Özel");
+    expect(followLabel(gundem("tcmb"))).toBe("Merkez Bankası");
+  });
+
+  it("labels every entity with its RISING_ENTITIES label and links to its hub", () => {
+    for (const e of RISING_ENTITIES) {
+      expect(followLabel(gundem(e.key))).toBe(e.label);
+      expect(followHref(gundem(e.key))).toBe(`/gundem/${e.key}`);
+      expect(followApiPath(gundem(e.key))).toBe(`/api/takip?gundem=${e.key}`);
+    }
+  });
+
+  it("the q and konu helpers are unchanged by the new kind", () => {
+    expect(followHref(q("deva partisi"))).toBe("/?q=deva%20partisi");
+    expect(followApiPath(q("deva partisi"))).toBe("/api/takip?q=deva%20partisi");
+    expect(followHref(konu("ekonomi"))).toBe("/konu/ekonomi");
+    expect(followApiPath(konu("ekonomi"))).toBe("/api/takip?konu=ekonomi");
+  });
+
+  it("a hub is a recency list: topic-style empty copy, no corroboration caption", () => {
+    expect(followEmptyText("gundem")).toBe("Son dönemde eşleşen hikâye yok.");
+    expect(followListCaption("gundem")).toBeNull();
+  });
+
+  it("parseFollowKey round-trips gundem:<key> and rejects anything else", () => {
+    expect(parseFollowKey("gundem:deva")).toEqual({ kind: "gundem", value: "deva" });
+    expect(parseFollowKey(followKey(gundem("iyi-parti")))).toEqual({
+      kind: "gundem",
+      value: "iyi-parti",
+    });
+    for (const key of ["gundem:", "gundem:DEVA", "gundem:nope", "gundem:../x", "gundem:__proto__"]) {
+      expect(parseFollowKey(key)).toBeNull();
+    }
+  });
+
+  it("round-trips through serializeFollows and parseStoredFollows", () => {
+    const list = [q("seçim"), gundem("deva"), konu("ekonomi", { seenAt: null }), gundem("meclis", { addedAt: null })];
+    expect(parseStoredFollows(serializeFollows(list))).toEqual(list);
+    expect(JSON.parse(serializeFollows([gundem("deva")]))).toEqual([
+      { kind: "gundem", value: "deva", addedAt: NOW, seenAt: NOW },
+    ]);
+  });
+
+  it("drops a stored gundem entry whose key is unknown, wrong-cased or not a string", () => {
+    const raw = JSON.stringify([
+      { kind: "gundem", value: "not-a-key", addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", value: "DEVA", addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", value: 5, addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", value: "__proto__", addedAt: NOW, seenAt: NOW },
+    ]);
+    expect(parseStoredFollows(raw)).toEqual([]);
+  });
+
+  it("addFollow adds a gundem follow with addedAt = seenAt = now and refuses unknown keys", () => {
+    const r = addFollow([], { kind: "gundem", value: "deva" }, NOW);
+    expect(r.result).toBe("added");
+    expect(r.list).toEqual([gundem("deva")]);
+
+    const base = [q("seçim")];
+    const bad = addFollow(base, { kind: "gundem", value: "not-a-key" }, NOW);
+    expect(bad.result).toBe("invalid");
+    expect(bad.list).toBe(base);
+
+    const dup = addFollow(r.list, { kind: "gundem", value: "deva" }, NOW);
+    expect(dup.result).toBe("exists");
+  });
+});
+
+// A hub button used to store the bare label as a keyword follow, so every
+// reader who tapped "Takip et" on /gundem/deva holds {kind:"q", value:"deva"}.
+// Those upgrade, on read, to the hub follow they were meant to be.
+describe("legacy keyword follow -> gundem follow upgrade", () => {
+  it("upgrades a stored q whose value is a RISING_ENTITIES label, keeping the stamps", () => {
+    const raw = JSON.stringify([{ kind: "q", value: "DEVA", addedAt: NOW, seenAt: NOW }]);
+    expect(parseStoredFollows(raw)).toEqual([gundem("deva")]);
+
+    const stamped = JSON.stringify([
+      { kind: "q", value: "deva", addedAt: "2026-10-01T00:00:00.000Z", seenAt: null },
+    ]);
+    expect(parseStoredFollows(stamped)).toEqual([
+      gundem("deva", { addedAt: "2026-10-01T00:00:00.000Z", seenAt: null }),
+    ]);
+  });
+
+  it("matches the label in its stored (lower-cased, Turkish-folded) form", () => {
+    // What the old hub button really stored: normalizeKeyword(label).
+    const raw = JSON.stringify([
+      { kind: "q", value: normalizeKeyword("İYİ Parti"), addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: normalizeKeyword("Merkez Bankası"), addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: normalizeKeyword("Anayasa Mahkemesi"), addedAt: NOW, seenAt: NOW },
+    ]);
+    expect(parseStoredFollows(raw).map(followKey)).toEqual([
+      "gundem:iyi-parti",
+      "gundem:tcmb",
+      "gundem:aym",
+    ]);
+  });
+
+  it("upgrades every label to its own key (labels are unique after normalisation)", () => {
+    const normalised = RISING_ENTITIES.map((e) => normalizeKeyword(e.label));
+    expect(new Set(normalised).size).toBe(RISING_ENTITIES.length);
+    for (const e of RISING_ENTITIES) {
+      const raw = JSON.stringify([{ kind: "q", value: e.label, addedAt: NOW, seenAt: NOW }]);
+      expect(parseStoredFollows(raw), e.key).toEqual([gundem(e.key)]);
+    }
+  });
+
+  it("applies the add-time rule: a padded or re-cased label upgrades to the hub", () => {
+    // Parse and add share canonicalFollow, so what addFollow would store for
+    // "  İMAMOĞLU " / "Deva" is what a stored copy reads back as.
+    const raw = JSON.stringify([
+      { kind: "q", value: "  İMAMOĞLU ", addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: "Deva", addedAt: NOW, seenAt: NOW },
+    ]);
+    expect(parseStoredFollows(raw).map(followKey)).toEqual(["gundem:imamoglu", "gundem:deva"]);
+  });
+
+  it("parse is idempotent and agrees with hasFollow / addFollow on non-canonical data", () => {
+    const raw = JSON.stringify([
+      { kind: "q", value: "Deva", addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: "  İMAMOĞLU ", addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: "deva partisi", addedAt: NOW, seenAt: NOW },
+      { kind: "konu", value: "ekonomi", addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", value: "tcmb", addedAt: NOW, seenAt: NOW },
+      "DEVA",
+      "  Merkez   Bankası ",
+    ]);
+    const parsed = parseStoredFollows(raw);
+
+    // serialize -> parse is a fixed point.
+    expect(parseStoredFollows(serializeFollows(parsed))).toEqual(parsed);
+    // Every follow the list holds is found by the lookup the button uses ...
+    for (const f of parsed) expect(hasFollow(parsed, f.kind, f.value), followKey(f)).toBe(true);
+    // ... and re-adding the hub a stored keyword became is "exists", never a duplicate.
+    expect(parsed.map(followKey)).toEqual([
+      "gundem:deva",
+      "gundem:imamoglu",
+      "q:deva partisi",
+      "konu:ekonomi",
+      "gundem:tcmb",
+    ]);
+    const again = addFollow(parsed, { kind: "gundem", value: "deva" }, NOW);
+    expect(again.result).toBe("exists");
+    expect(again.list).toBe(parsed);
+    // The keyword the reader stored and the hub it upgraded to are one follow.
+    expect(hasFollow(parsed, "q", "deva")).toBe(true);
+    expect(hasFollow(parsed, "gundem", "deva")).toBe(true);
+  });
+
+  it("upgrades a label stored padded and upper-cased, for every hub", () => {
+    for (const e of RISING_ENTITIES) {
+      const raw = JSON.stringify([
+        { kind: "q", value: `  ${e.label.toLocaleUpperCase("tr")} `, addedAt: NOW, seenAt: NOW },
+      ]);
+      expect(parseStoredFollows(raw), e.key).toEqual([gundem(e.key)]);
+    }
+  });
+
+  it("leaves a keyword that merely contains a label alone", () => {
+    const raw = JSON.stringify([
+      { kind: "q", value: "deva partisi", addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: "chp'li", addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: "devam", addedAt: NOW, seenAt: NOW },
+    ]);
+    expect(parseStoredFollows(raw).map(followKey)).toEqual([
+      "q:deva partisi",
+      "q:chp'li",
+      "q:devam",
+    ]);
+  });
+
+  it("upgrades a legacy bare-string keyword too", () => {
+    expect(parseStoredFollows('["DEVA"]')).toEqual([
+      gundem("deva", { addedAt: null, seenAt: null }),
+    ]);
+  });
+
+  it("never touches a konu follow (a topic slug is not a label)", () => {
+    const raw = JSON.stringify([{ kind: "konu", value: "ekonomi", addedAt: NOW, seenAt: NOW }]);
+    expect(parseStoredFollows(raw)).toEqual([konu("ekonomi")]);
+  });
+
+  it("dedupes q:DEVA and gundem:deva into ONE gundem follow (first wins)", () => {
+    const both = JSON.stringify([
+      { kind: "q", value: "DEVA", addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", value: "deva", addedAt: null, seenAt: null },
+    ]);
+    const out = parseStoredFollows(both);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toEqual(gundem("deva"));
+
+    const reversed = JSON.stringify([
+      { kind: "gundem", value: "deva", addedAt: null, seenAt: null },
+      { kind: "q", value: "DEVA", addedAt: NOW, seenAt: NOW },
+    ]);
+    const out2 = parseStoredFollows(reversed);
+    expect(out2).toHaveLength(1);
+    expect(out2[0]).toEqual(gundem("deva", { addedAt: null, seenAt: null }));
+  });
+
+  it("an upgraded entry frees its slot toward MAX_FOLLOWS like any duplicate", () => {
+    const entries: unknown[] = [
+      { kind: "q", value: "DEVA", addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", value: "deva", addedAt: NOW, seenAt: NOW },
+    ];
+    for (let i = 0; i < MAX_FOLLOWS; i++) {
+      entries.push({ kind: "q", value: `kelime ${i}`, addedAt: NOW, seenAt: NOW });
+    }
+    const out = parseStoredFollows(JSON.stringify(entries));
+    expect(out).toHaveLength(MAX_FOLLOWS);
+    expect(out[0]?.kind).toBe("gundem");
+    expect(out[MAX_FOLLOWS - 1]?.value).toBe(`kelime ${MAX_FOLLOWS - 2}`);
+  });
+
+  it("canonicalFollow applies the same rule to a fresh value", () => {
+    expect(canonicalFollow("q", "  DEVA ")).toEqual({ kind: "gundem", value: "deva" });
+    expect(canonicalFollow("q", "deva partisi")).toEqual({ kind: "q", value: "deva partisi" });
+    expect(canonicalFollow("q", "a")).toBeNull();
+    expect(canonicalFollow("gundem", "deva")).toEqual({ kind: "gundem", value: "deva" });
+    expect(canonicalFollow("gundem", "DEVA")).toBeNull();
+    expect(canonicalFollow("konu", "ekonomi")).toEqual({ kind: "konu", value: "ekonomi" });
+    expect(canonicalFollow("konu", "politika")).toBeNull();
+    expect(canonicalFollow("x" as unknown as "q", "seçim")).toBeNull();
+  });
+
+  // Without this the same keyword would flip kind on the next page load: a
+  // search-box "Takip et" on ?q=deva would store q:deva, read back as
+  // gundem:deva after a reload, and the button would forget it was followed.
+  it("addFollow and hasFollow agree with the upgrade, so a keyword never flips kind on reload", () => {
+    const added = addFollow([], { kind: "q", value: "  DEVA " }, NOW);
+    expect(added.result).toBe("added");
+    expect(added.list).toEqual([gundem("deva")]);
+
+    const list = [gundem("deva")];
+    expect(hasFollow(list, "q", "DEVA")).toBe(true);
+    expect(hasFollow(list, "gundem", "deva")).toBe(true);
+    expect(hasFollow(list, "q", "deva partisi")).toBe(false);
+    expect(addFollow(list, { kind: "q", value: "deva" }, NOW).result).toBe("exists");
+    expect(parseStoredFollows(serializeFollows(added.list))).toEqual(added.list);
+  });
+});
+
 describe("module purity (bundled to the client)", () => {
-  it("imports nothing from react, next or the server -- only the pure time helpers", () => {
+  it("imports nothing from react, next or the server -- only the pure time helpers and the pure hub vocabulary", () => {
     const src = readFileSync(resolve(__dirname, "follows.ts"), "utf8");
     const imports = src.match(/^\s*(?:import|export)\s[^;]*?from\s+["'][^"']+["']/gm) ?? [];
     const specifiers = imports.map((i) => /from\s+["']([^"']+)["']/.exec(i)?.[1]);
-    expect(specifiers).toEqual(["@/lib/time"]);
+    expect(specifiers).toEqual(["@/lib/time", "@/lib/trends/rising-entities"]);
     expect(src).not.toMatch(/\brequire\s*\(/);
+  });
+
+  it("the hub vocabulary it reads is itself import-free (it is also bundled to the Edge middleware)", () => {
+    const src = readFileSync(resolve(__dirname, "../trends/rising-entities.ts"), "utf8");
+    const imports = src.match(/^\s*(?:import|export)\s[^;]*?from\s+["'][^"']+["']/gm) ?? [];
+    expect(imports).toEqual([]);
   });
 
   it("the one allowed dependency is itself import-free", () => {

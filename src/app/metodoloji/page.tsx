@@ -14,7 +14,6 @@ import {
 } from "@/lib/bias/balance";
 import {
   BIAS_LABELS,
-  BIAS_ORDER,
   BIAS_TO_ZONE,
   BLINDSPOT,
   SURPRISE,
@@ -44,11 +43,17 @@ import {
 } from "@/lib/headline/prompt";
 import { getNeutralizedStatus } from "@/lib/headline/status";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
+import { WRITABLE_SOURCE_BIAS } from "@/lib/validation/source-input";
 
 // /metodoloji — Tayf's methodology + trust page. Every number on this page
 // is imported from the same contract modules the pipeline runs on
 // (supabase/functions/_shared/cluster/blindspot.ts, wire.ts, ownership.ts)
 // so the prose can never drift from the code that actually enforces it.
+//
+// The category table lists WRITABLE_SOURCE_BIAS, the five biases production's
+// CHECK (sources_alignment_check) can store, and not the ten BiasCategory keys
+// the app merely parses. Widening the CHECK is a founder decision
+// (h26-integrity-1); when it happens this table follows the constant.
 
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
@@ -238,13 +243,13 @@ export default async function MethodologyPage() {
         <SectionHeading
           id="kaynaklar"
           title="Kaynaklar nasıl etiketleniyor"
-          meta="10 kategori → 3 bölge"
+          meta="5 kategori → 3 bölge"
         />
         <p className={proseClass}>
-          Her kaynak, editoryal duruşuna göre 10 ayrıntılı yanlılık
-          kategorisinden birine atanır. Bu 10 kategori, gösterimde ve kör
-          nokta/sürpriz hesaplamalarında 3 geniş &quot;Medya DNA&quot;
-          bölgesine (İktidar, Bağımsız, Muhalefet) toplanır. Kategoriler ve
+          Her kaynak, editoryal duruşuna göre 5 yanlılık kategorisinden birine
+          atanır. Bu 5 kategori, gösterimde ve kör nokta/sürpriz
+          hesaplamalarında 3 geniş &quot;Medya DNA&quot; bölgesine (İktidar,
+          Bağımsız, Muhalefet) toplanır. Kategoriler ve
           güvenilirlik notları Tayf ekibi tarafından, kaynağın yayın
           geçmişine bakılarak elle atanır; dış bir derecelendirme
           kuruluşunun verisi değildir. Bir etikete itiraz etmek için{" "}
@@ -272,7 +277,7 @@ export default async function MethodologyPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/30">
-                {BIAS_ORDER.map((bias) => {
+                {WRITABLE_SOURCE_BIAS.map((bias) => {
                   const zone = BIAS_TO_ZONE[bias];
                   const meta = ZONE_META[zone];
                   return (
@@ -295,12 +300,6 @@ export default async function MethodologyPage() {
               </tbody>
             </table>
           </div>
-          <p className={noteClass}>
-            Not: &quot;Milliyetçi&quot; kaynaklar İktidar bölgesine
-            sayılır — MHP, Cumhur İttifakı&apos;nın bir ortağıdır, dolayısıyla
-            milliyetçi bir kaynağın MHP&apos;yi olumlu haber yapması
-            spektrumlar-arası bir sürpriz sayılmaz.
-          </p>
           <p className={noteClass}>
             Toplayıcı (ör. Haberler.com, Onedio) ve niş (spor, finans,
             kurumsal) türündeki kaynaklar kümelerde listelenir ama yanlılık

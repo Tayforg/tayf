@@ -37,8 +37,12 @@ export function RisingTopics({ data }: { data: RisingResult | null }) {
         <ol className="grid gap-2 sm:grid-cols-2">
           {data.items.map((item) => (
             <li key={item.key} className="text-sm">
+              {/* A row whose hub is thin links to the home search (rising.ts
+                  withHubLinks). That route is request-time and DB-backed, so it
+                  is not prefetched; a /gundem hub is prerendered and is. */}
               <Link
                 href={item.href}
+                prefetch={item.href.startsWith("/gundem/") ? undefined : false}
                 className="font-semibold text-foreground underline decoration-dotted underline-offset-2 hover:text-brand"
               >
                 {item.label}

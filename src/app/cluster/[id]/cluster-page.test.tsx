@@ -1808,8 +1808,12 @@ describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
       el as unknown as Parameters<typeof renderToStaticMarkup>[0],
     );
     expect(html).toContain("Kim önce yazdı?");
+    // The absent zone has a plotted non-voting point (the Haberler.com
+    // aggregator), so the absence line is the qualified one (h43-blindspots-1):
+    // "no source counted toward the spectrum", not "no source at all". One
+    // toContain covers both the role=img aria-label and the summary <p>.
     expect(html).toContain(
-      "İlk: CNN Türk · 09:05 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet 2 sa 17 dk sonra katıldı",
+      "İlk: CNN Türk · 09:05 — Spektruma sayılan bağımsız kaynaklardan bu kümede haber yok — Muhalefet 2 sa 17 dk sonra katıldı",
     );
     // 3 voting + the (earlier) aggregator, plotted as a non-voting point.
     expect(html).toContain("Tüm sıra (4 kaynak)");
