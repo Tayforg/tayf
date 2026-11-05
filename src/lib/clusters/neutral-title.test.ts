@@ -3682,7 +3682,7 @@ describe("hunt 35 (h35): preferUnglued", () => {
       ["WhatsApp", "WhatsApp'a yeni özellik geliyor: mesajlar kendiliğinden silinecek"],
       ["iPhone", "iPhone 17 satışları Türkiye'de yeniden başladı"],
     ])("%s: twins that differ only in punctuation carry the same join, whichever is picked", (_brand, title) => {
-      const curly = title.replace("'", "’");
+      const curly = title.replaceAll("'", "’");
       expect(curly).not.toBe(title);
       expect(gluedJoinCount(title)).toBe(gluedJoinCount(curly));
       expect(preferUnglued(title, [title, curly])).toBe(title);
