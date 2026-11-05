@@ -5,6 +5,7 @@ import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { BalanceChip } from "@/components/story/balance-chip";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
+import { RelativeTime } from "@/components/story/relative-time";
 import { SourceLogo } from "@/components/source/source-logo";
 import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
@@ -99,8 +100,10 @@ interface ClusterCardProps {
   /**
    * "Now" for the time-ago badge (epoch ms). A fully static page
    * (generateStaticParams, e.g. /gundem/[key]) MUST pass it: without it the
-   * badge reads the clock, which fails `next build` there. Dynamic pages may
-   * omit it.
+   * badge reads the clock, which fails `next build` there. Passing it also
+   * renders the badge as the client <RelativeTime>, which re-bases a stale
+   * cached age to the reader's clock after mount (h34-perf-1). Dynamic pages
+   * may omit it and keep the plain server string.
    */
   nowMs?: number;
 }
@@ -214,7 +217,14 @@ function ClusterMetaBadges({
 
       <span className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground">
         <Clock className="h-3 w-3" />
-        {formatTurkishTimeAgo(firstPublished, { now: nowMs })}
+        {/* A cached page passes nowMs (its read's own clock), so its age is
+            re-based to the reader's clock after mount (h34-perf-1). A page
+            that renders per request omits it and keeps the server string. */}
+        {nowMs === undefined ? (
+          formatTurkishTimeAgo(firstPublished)
+        ) : (
+          <RelativeTime iso={firstPublished} nowMs={nowMs} />
+        )}
       </span>
 
       {balance && (

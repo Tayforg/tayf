@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import h26Fixtures from "../../../tests/fixtures/summary-tidy-h26.json";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
+import { cleanDescription, stripTrailingTeasers } from "../../../supabase/functions/_shared/cluster/description-clean";
 import { backOffOpenQuote, tidySummaryText, trimDanglingEnd, WIDGET_HEADINGS } from "./summary-tidy";
 
 // [input, expected] — every row is an exact `toBe`.
@@ -1154,10 +1155,24 @@ describe("tidySummaryText appended ticker (h23-live-2)", () => {
     });
 
     it("a line longer than 120 characters is not skipped", () => {
-      const mid = `Yeni bir haber! ${"x".repeat(110)}`;
+      // h34-reader-5: the repaired line says "kelimeler" like the first line (the stem "kelime"), so the
+      // teaser strip leaves it alone; an unrelated "Yeni bir haber!" headline would now be dropped there.
+      const mid = `Yeni kelimeler geldi! ${"x".repeat(110)}`;
       expect(mid.length).toBeGreaterThan(120);
       const raw = clamp(`${FIRST_LINE}\n${mid}\n${TAIL}`);
-      expect(tidySummaryText(raw)).toBe(`${FIRST_LINE} Yeni bir haber!`);
+      expect(tidySummaryText(raw)).toBe(`${FIRST_LINE} Yeni kelimeler geldi!`);
+    });
+
+    it("h34-reader-5: a repaired paragraph that keeps only a short unrelated exclamation sentence loses it to the teaser strip", () => {
+      // HEAD kept ' Yeni bir haber!' here: the clamp repair cuts the long (> 120 characters)
+      // middle paragraph back to its first sentence, "Yeni bir haber!". The raw text itself is no
+      // teaser (the stored line is long), but the repaired paragraph is a headline-shaped last line
+      // with an exclamation anchor that shares no stem with the first line, so the h34 strip drops
+      // it. Accepted behaviour change; "Yeni kelimeler geldi!" above shares the stem "kelime" and stays.
+      const mid = `Yeni bir haber! ${"x".repeat(110)}`;
+      const raw = clamp(`${FIRST_LINE}\n${mid}\n${TAIL}`);
+      expect(stripTrailingTeasers(raw)).toBe(raw);
+      expect(tidySummaryText(raw)).toBe(FIRST_LINE);
     });
 
     it("a line of exactly 120 characters is skipped", () => {
@@ -3994,5 +4009,163 @@ describe("tidySummaryText line breaks between sentences (h31-reader-4)", () => {
       expect(ms).toBeLessThan(1000);
       expect(out).toBe(input.trim());
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h34-reader-5 (hunt 34, 2026-11-05): trailing teaser lines in the shown summary.
+//
+// d91ab2f1 (Erdoğan returns from Korea) stores two real sentences and then two
+// other stories' headlines pasted by the feed. tidySummaryText now drops them with
+// stripTrailingTeasers (one implementation, shared with the cluster consumer's
+// cleanDescription; tests/functions/_shared/description-clean.test.ts holds the
+// shape table). The rows are the stored summary_tr texts, read-only, 2026-11-05.
+// ---------------------------------------------------------------------------
+
+const H34_D91 =
+  "Cumhurbaşkanı Erdoğan'ı, \"TUR\" uçağıyla geldiği Atatürk Havalimanı'nda, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, İstanbul Valisi Davut Gül ile AK Parti İstanbul İl Başkanı Abdullah Özdemir ve ilgililer karşıladı.\nCumhurbaşkanı Erdoğan ile eşi Emine Erdoğan ve ziyarette kendisine eşlik eden heyet üyeleri de İstanbul'a geldi.\nAnkara'da kritik güvenlik zirvesi! Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi\nDünyanın gözü ABD'den gelen sonuçlarda! İşte ABD'deki seçim hezimetinin nedeni! Trump...";
+const H34_D91_SHOWN =
+  "Cumhurbaşkanı Erdoğan'ı, \"TUR\" uçağıyla geldiği Atatürk Havalimanı'nda, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, İstanbul Valisi Davut Gül ile AK Parti İstanbul İl Başkanı Abdullah Özdemir ve ilgililer karşıladı. Cumhurbaşkanı Erdoğan ile eşi Emine Erdoğan ve ziyarette kendisine eşlik eden heyet üyeleri de İstanbul'a geldi.";
+
+const H34_AB24_LEAD =
+  "Ankara Cumhuriyet Başsavcılığı koordinesinde, Alihan Kuriş suç örgütüne yönelik operasyonda gözaltına alınan şüphelilerden 19’u tutuklandı, 5’i adli kontrol şartıyla serbest bırakıldı.";
+const H34_AB24 = `${H34_AB24_LEAD}\nMacron duyurdu: Fransa'da yağma ve şiddet olaylarının ardından 'yasaklama' kararı!\nBeyaz Saray tarih verdi: ABD, 3 Kasım seçimlerinden önce İran'a saldırmayacak`;
+
+const H34_FD00_KEPT =
+  "Manisa Organize Sanayi Bölgesi'ndeki akü fabrikasında henüz belirlenemeyen nedenle yangın çıktı.\nİhbar üzerine bölgeye itfaiye ve sağlık ekipleri sevk edildi.\nİtfaiye ekipleri, yangını kontrol altına almak için çalışmalarını sürdürüyor.\nİçişleri Bakanlığı duyurdu: Çukurova Belediye Başkanı Emrah Kozay görevden uzaklaştırıldı";
+const H34_FD00 = `${H34_FD00_KEPT}\nVolkswagen'de kriz sürüyor! Çalışanlardan 'hafta sonu greve gideriz' tehdidi`;
+
+const H34_1E6D_LEAD =
+  "Çin’in Tibet Özerk Bölgesi’nde TSİ 17.33’te 7 büyüklüğünde deprem meydana geldi.\nÇin Deprem Ağları Merkezi (CENC) verilerine göre, merkez üssü Tibet'in kuzeyindeki Nagqu olan deprem yerin 10 kilometre derinliğinde gerçekleşti.\nCENC, sarsıntının bölgede hissedildiğini açıkladı. Depremdeki can ve mal kaybına ilişkin henüz açıklama yapılmadı.";
+const H34_1E6D_JULIDE = "Jülide Kural sessizliğini bozdu! Kadir İnanır’ın miras tartışmaları sonrası ilk açıklama";
+const H34_1E6D = `${H34_1E6D_LEAD}\n${H34_1E6D_JULIDE}\nLütfi Arıboğan hakkında 5 yıla kadar hapis istemi! İşte FETÖ'cü Ba...`;
+
+/** [label, stored text, shown text] */
+const H34_ROWS: ReadonlyArray<readonly [string, string, string]> = [
+  ["d91ab2f1: two teaser lines (an unpunctuated one with a mid-line '!' and a clamped 'İşte ...!' one)", H34_D91, H34_D91_SHOWN],
+  ["ab24d85a: an exclamation headline and an unpunctuated headline after it", H34_AB24, H34_AB24_LEAD],
+  [
+    "fd00fb08: the exclamation headline goes, the unpunctuated headline in front of it stays",
+    H34_FD00,
+    tidySummaryText(H34_FD00_KEPT),
+  ],
+  [
+    "1e6da42b: the clamped headline goes, the one that shares the stem 'açıkla' stays",
+    H34_1E6D,
+    tidySummaryText(`${H34_1E6D_LEAD}\n${H34_1E6D_JULIDE}`),
+  ],
+];
+
+describe("tidySummaryText drops trailing teaser lines (h34-reader-5)", () => {
+  it.each(H34_ROWS)("%s", (_label, stored, shown) => {
+    expect(tidySummaryText(stored)).toBe(shown);
+  });
+
+  it("d91ab2f1: the shown text keeps both real sentences and loses the only 'Trump'", () => {
+    const out = tidySummaryText(H34_D91);
+    expect(out).toBe(H34_D91_SHOWN);
+    expect(out.endsWith("de İstanbul'a geldi.")).toBe(true);
+    expect(out).not.toContain("Trump");
+    expect(out).not.toContain("Çiftçi");
+    expect(out).toContain("AK Parti İstanbul İl Başkanı Abdullah Özdemir");
+  });
+
+  it("fd00fb08 and 1e6da42b: the kept headline is still there (nothing proves it is a teaser)", () => {
+    expect(tidySummaryText(H34_FD00)).toContain("Çukurova Belediye Başkanı Emrah Kozay görevden uzaklaştırıldı");
+    expect(tidySummaryText(H34_FD00)).not.toContain("Volkswagen");
+    expect(tidySummaryText(H34_1E6D)).toContain("Jülide Kural sessizliğini bozdu!");
+    expect(tidySummaryText(H34_1E6D)).not.toContain("Arıboğan");
+  });
+
+  describe("parity with the cluster consumer's cleaning", () => {
+    it.each(H34_ROWS)("%s: tidying the stripped text gives the same shown text", (_label, stored) => {
+      const stripped = stripTrailingTeasers(stored);
+      expect(stripped).not.toBe(stored);
+      expect(cleanDescription(stored)).toBe(stripped);
+      expect(tidySummaryText(stripped)).toBe(tidySummaryText(stored));
+    });
+
+    it("the shapes the strip refuses are refused here too (same text in, same text out)", () => {
+      const refused = [
+        // a headline-shaped last line that ends in a full stop
+        "Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.\nVolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor.",
+        // a quoted line
+        'Manisa\'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.\nVolkswagen\'de kriz sürüyor! "Greve gideriz" dediler',
+        // a bare clamp
+        "Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.\nVolkswagen'de kriz sürüyor, çalışanlar greve gidiyor...",
+        // the same story
+        "Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.\nManisa'da korkutan yangın! İtfaiye ekipleri müdahale etti",
+        // a bullet
+        "Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.\n- Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor",
+        // b5f5c40f: a real paragraph opened by a conjunction ("Ama ...!"), then a call-to-action line
+        "Gelin, Kardeş-Gardaş'a, duygusallıktan uzak konuşalım, biraz da dertleşelim.\nAma şu iki liderin sözünü, ayrıca o tarihi belgeyi imzalayanların kıymetini asla unutmayalım!\n Azerbaycan'ın sevinci...Devamı için tıklayınız",
+        // a speech in typographic single quotes ending in a quoted "!"
+        "Kabine toplantısı sona erdi.\nBakan Yılmaz: ‘Kimse endişe etmesin, bu iş burada bitmeyecek!’",
+      ];
+      for (const raw of refused) {
+        expect(stripTrailingTeasers(raw) === raw, raw).toBe(true);
+        const second = raw.split("\n")[1]!.replace(/^- /, "");
+        expect(tidySummaryText(raw), raw).toContain(second.slice(0, 20));
+      }
+    });
+  });
+
+  it("the h31-reader-4 bullet list and its neighbours are unchanged", () => {
+    expect(tidySummaryText(H30_F85B)).toBe(
+      'Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti. Koreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti. Emine Erdoğan: "Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"',
+    );
+    expect(tidySummaryText("Gelişmeler:\n- Yangın söndürüldü!\n- Yollar açıldı!")).toBe(
+      "Gelişmeler: Yangın söndürüldü! Yollar açıldı!",
+    );
+    expect(tidySummaryText("Birinci madde burada\n- İkinci madde burada\n• Üçüncü madde burada\n▪️ Dördüncü madde")).toBe(
+      "Birinci madde burada. İkinci madde burada. Üçüncü madde burada. Dördüncü madde",
+    );
+  });
+
+  it("a real multi-sentence description with an exclamation in the middle of a sentence keeps every line", () => {
+    const raw = "Galatasaray, Stuttgart'ı 2-0 yendi.\nKazandık! Galatasaray taraftarı stadı inletti\nStuttgart cephesinde hayal kırıklığı yaşandı.";
+    expect(tidySummaryText(raw)).toBe(
+      "Galatasaray, Stuttgart'ı 2-0 yendi. Kazandık! Galatasaray taraftarı stadı inletti. Stuttgart cephesinde hayal kırıklığı yaşandı.",
+    );
+  });
+
+  describe("order of the steps", () => {
+    it("a ticker line cut first, then the teaser in front of it", () => {
+      const raw = "Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.\nVolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor\nSon dakika... Rusya için 3 fırsat!";
+      expect(tidySummaryText(raw)).toBe("Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.");
+    });
+
+    it("a text whose only later line is a teaser keeps its first line (nothing is emptied)", () => {
+      expect(tidySummaryText("Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti\nVolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor")).toBe(
+        "Manisa'da akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti",
+      );
+      expect(tidySummaryText("\nVolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor")).toBe(
+        "Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor",
+      );
+    });
+  });
+
+  it("no newline is left and the output is idempotent on every teaser row", () => {
+    for (const [, stored] of H34_ROWS) {
+      const once = tidySummaryText(stored);
+      expect(hasNoNewline(once)).toBe(true);
+      expect(tidySummaryText(once)).toBe(once);
+    }
+  });
+
+  it("100k-character adversarial inputs stay linear (1000 ms bound each)", () => {
+    const inputs = [
+      "Giriş cümlesi burada biter.\n" + "Gündem hareketli! Piyasalar duyurdu\n".repeat(3_000),
+      "Giriş cümlesi burada biter.\n" + "!".repeat(100_000),
+      "Giriş cümlesi burada biter.\n" + "A! ".repeat(33_000),
+      "Giriş cümlesi burada biter.\n" + "a".repeat(100_000) + "!",
+      "\n".repeat(100_000) + "Başlık duyuruldu! Gündem hareketli",
+      "x\n".repeat(50_000) + "Volkswagen kriz sürüyor!",
+    ];
+    for (const raw of inputs) {
+      const start = performance.now();
+      tidySummaryText(raw);
+      expect(performance.now() - start, `${raw.length} chars`).toBeLessThan(1000);
+    }
   });
 });

@@ -10,6 +10,7 @@ import {
   REPICK_MARGIN_FULL_LENGTH,
   cleanHeadline,
   framingPenalty,
+  gluedJoinCount,
   incumbentDefect,
   isAcceptableNeutral,
   isExtractiveModelId,
@@ -19,6 +20,7 @@ import {
   lowerCaseSourced,
   lowercaseLeak,
   pickNeutralTitle,
+  preferUnglued,
   recaseFromSiblings,
   siblingCapitalForms,
 } from "./neutral-title";
@@ -3573,5 +3575,334 @@ describe("hunt 34 (h34-reader-2): advertorial wording is loaded", () => {
     "Şahlan adlı köyde yangın çıktı",
   ])("%s is not loaded", (title) => {
     expect(loadedPenalty(title)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt 35 (h35): the glued-twin tiebreak, still extractive-v6 (no model bump).
+// ---------------------------------------------------------------------------
+// e02ef916 (read-only, 2026-11-05, three members) was stored as "... Tel
+// AvivWashington ilişkisini ...": one outlet's feed lost the hyphen of "Tel
+// Aviv-Washington", a second outlet wrote it correctly, and the picker chose the
+// glued variant (the two fold to different strings, so neither is a duplicate of
+// the other). preferUnglued() runs after the pick: when the pick holds a glued
+// lower-to-upper join inside a word and another member title is the very same
+// text with fewer such joins, that member title is shipped instead.
+
+const E02_GLUED =
+  "İsrail gazetesi: ABD'deki seçim sonuçları, Tel AvivWashington ilişkisini yeniden şekillendirebilir";
+const E02_CLEAN =
+  "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini yeniden şekillendirebilir";
+const E02_OTHER = "İSRAİL'İ BEKLEYEN 3 TEHLİKE";
+
+describe("hunt 35 (h35): gluedJoinCount", () => {
+  it.each([
+    ["Tel Aviv-Washington ilişkisi", 0],
+    ["Tel AvivWashington ilişkisi", 1],
+    ["ÇanakkaleÖzel", 1],
+    ["İzmirİstanbul", 1],
+    ["KadıköyŞişli", 1],
+    ["AyşeFatmaMehmet", 2],
+    ["", 0],
+    ["ilişkisini yeniden şekillendirebilir", 0],
+  ])("%s has %i glued join(s)", (title, count) => {
+    expect(gluedJoinCount(title)).toBe(count);
+  });
+
+  it.each([
+    "TBMM'de AKParti ABD'deki DEM Parti AFAD'dan",
+    "İSRAİL'İ BEKLEYEN 3 TEHLİKE",
+    "Merkez Bankası faizi 12AB oranında sabit tuttu",
+    "Ankara'da Çarşamba günü İstanbul'a gidecek",
+    "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+  ])("no join in %s (capitals after an apostrophe, a space, a digit or another capital)", (title) => {
+    expect(gluedJoinCount(title)).toBe(0);
+  });
+
+  it.each(["YouTube", "TikTok", "WhatsApp", "iPhone", "LinkedIn", "McDonald's"])(
+    "the brand %s counts as one join (it is safe because both twins carry it, not because it is uncounted)",
+    (brand) => {
+      expect(gluedJoinCount(brand)).toBe(1);
+    },
+  );
+});
+
+describe("hunt 35 (h35): preferUnglued", () => {
+  it("e02ef916: ships the correctly punctuated twin in place of the glued pick", () => {
+    expect(preferUnglued(E02_GLUED, [E02_GLUED, E02_CLEAN, E02_OTHER])).toBe(E02_CLEAN);
+    expect(preferUnglued(E02_GLUED, [E02_OTHER, E02_CLEAN, E02_GLUED])).toBe(E02_CLEAN);
+  });
+
+  it("returns the cleaned member text (a lead-in or outlet prefix on the twin is stripped)", () => {
+    expect(preferUnglued(E02_GLUED, [`SON DAKİKA | ${E02_CLEAN}`])).toBe(E02_CLEAN);
+  });
+
+  it("a pick without a glued join is returned untouched, whatever the members hold", () => {
+    expect(preferUnglued(E02_CLEAN, [E02_GLUED, E02_CLEAN])).toBe(E02_CLEAN);
+    expect(preferUnglued("Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı", BAKIRKOY)).toBe(
+      "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+    );
+  });
+
+  it("no twin among the members leaves the glued pick alone (the tiebreak never invents text)", () => {
+    expect(preferUnglued(E02_GLUED, [E02_GLUED, E02_OTHER])).toBe(E02_GLUED);
+    expect(preferUnglued(E02_GLUED, [])).toBe(E02_GLUED);
+  });
+
+  it("works with Turkish capitals on both sides of the join", () => {
+    const glued = "Kadıköy ve Şişli'de ÇanakkaleÖzel Yönetimi toplantısı yapıldı";
+    const clean = "Kadıköy ve Şişli'de Çanakkale-Özel Yönetimi toplantısı yapıldı";
+    expect(preferUnglued(glued, [glued, clean])).toBe(clean);
+    const gluedIstanbul = "Ankara'dan açıklama: İzmirİstanbul hattında seferler yeniden başladı";
+    const cleanIstanbul = "Ankara'dan açıklama: İzmir/İstanbul hattında seferler yeniden başladı";
+    expect(preferUnglued(gluedIstanbul, [cleanIstanbul])).toBe(cleanIstanbul);
+  });
+
+  it("takes the twin with the fewest joins, not the first one that has fewer", () => {
+    const two = "Kadıköy ve Şişli'de ÇanakkaleÖzel YönetimiToplantısı yapıldı";
+    const one = "Kadıköy ve Şişli'de Çanakkale-Özel YönetimiToplantısı yapıldı";
+    const zero = "Kadıköy ve Şişli'de Çanakkale-Özel Yönetimi-Toplantısı yapıldı";
+    expect(preferUnglued(two, [one, zero])).toBe(zero);
+    expect(preferUnglued(two, [zero, one])).toBe(zero);
+    expect(preferUnglued(two, [one])).toBe(one);
+  });
+
+  it("needs strictly fewer joins: a twin that is glued somewhere else does not win", () => {
+    const a = "İsrail gazetesi: ABD'deki seçim sonuçları, Tel AvivWashington ilişkisini yeniden şekillendirebilir";
+    const b = "İsrail gazetesi: ABD'deki seçim sonuçları, TelAviv Washington ilişkisini yeniden şekillendirebilir";
+    expect(gluedJoinCount(a)).toBe(gluedJoinCount(b));
+    expect(preferUnglued(a, [b])).toBe(a);
+    expect(preferUnglued(b, [a])).toBe(b);
+  });
+
+  describe("brands are never swapped", () => {
+    it.each([
+      ["YouTube", "YouTube'da yeni abonelik paketi duyuruldu"],
+      ["TikTok", "TikTok'ta yeni düzenleme: yaş sınırı getirildi"],
+      ["WhatsApp", "WhatsApp'a yeni özellik geliyor: mesajlar kendiliğinden silinecek"],
+      ["iPhone", "iPhone 17 satışları Türkiye'de yeniden başladı"],
+    ])("%s: twins that differ only in punctuation carry the same join, whichever is picked", (_brand, title) => {
+      const curly = title.replace("'", "’");
+      expect(curly).not.toBe(title);
+      expect(gluedJoinCount(title)).toBe(gluedJoinCount(curly));
+      expect(preferUnglued(title, [title, curly])).toBe(title);
+      expect(preferUnglued(curly, [title, curly])).toBe(curly);
+    });
+
+    it("a sloppy-case or shouted spelling of the brand is not a twin (case is part of the key)", () => {
+      const brand = "YouTube'da yeni abonelik paketi duyuruldu";
+      const sloppy = "Youtube'da yeni abonelik paketi duyuruldu";
+      const shouted = "YOUTUBE'DA YENİ ABONELİK PAKETİ DUYURULDU";
+      expect(gluedJoinCount(sloppy)).toBe(0);
+      expect(gluedJoinCount(shouted)).toBe(0);
+      expect(preferUnglued(brand, [brand, sloppy, shouted])).toBe(brand);
+    });
+
+    it("pickNeutralTitle keeps the YouTube title as picked, in either member order", () => {
+      const a = "YouTube'da yeni abonelik paketi duyuruldu";
+      const b = "YouTube’da yeni abonelik paketi duyuruldu";
+      expect(pickNeutralTitle(asMembers([a, b]))).toBe(a);
+      expect(pickNeutralTitle(asMembers([b, a]))).toBe(b);
+      expect(pickNeutralTitle(asMembers([a, b]), { incumbent: b })).toBe(b);
+      expect(pickNeutralTitle(asMembers([b, a]), { incumbent: a })).toBe(a);
+    });
+  });
+
+  describe("non-twin candidates are never considered", () => {
+    const glued = E02_GLUED;
+    it.each([
+      ["a different last word", "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini yeniden şekillendirecek"],
+      ["an extra word", "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini yeniden şekillendirebilir bir kez"],
+      ["a missing word", "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini şekillendirebilir"],
+      ["the same words in another order", "ABD'deki seçim sonuçları, İsrail gazetesi: Tel Aviv-Washington ilişkisini yeniden şekillendirebilir"],
+      ["a different spelling of one word", "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Vashington ilişkisini yeniden şekillendirebilir"],
+    ])("%s", (_why, other) => {
+      expect(gluedJoinCount(other)).toBe(0);
+      expect(preferUnglued(glued, [glued, other])).toBe(glued);
+    });
+
+    it("a different number is a different title: digits are part of the key", () => {
+      const g39 = "İsrail gazetesi: Tel AvivWashington hattında 39 kişi tutuklandı iddiası";
+      const c40 = "İsrail gazetesi: Tel Aviv-Washington hattında 40 kişi tutuklandı iddiası";
+      const c39 = "İsrail gazetesi: Tel Aviv-Washington hattında 39 kişi tutuklandı iddiası";
+      expect(preferUnglued(g39, [g39, c40])).toBe(g39);
+      expect(preferUnglued(g39, [g39, c40, c39])).toBe(c39);
+    });
+
+    it("the shouted unrelated member of e02ef916 is not a candidate either", () => {
+      expect(preferUnglued(glued, [E02_OTHER])).toBe(glued);
+    });
+  });
+
+  describe("a twin must itself be fit to ship", () => {
+    it("a twin that is a question is not swapped in", () => {
+      const asked = `${E02_CLEAN}?`;
+      expect(isAcceptableNeutral(asked, [])).toBe(false);
+      expect(preferUnglued(E02_GLUED, [E02_GLUED, asked])).toBe(E02_GLUED);
+    });
+
+    it("a twin outside the gate's length limit is not swapped in", () => {
+      const long = `${"Tel AvivWashington ilişkisi".padEnd(30, " ")}${"yeniden şekillendirebilir ".repeat(6)}`.trim();
+      const twin = long.replace("AvivWashington", "Aviv-Washington");
+      expect(isAcceptableNeutral(twin, [])).toBe(false);
+      expect(preferUnglued(long, [twin])).toBe(long);
+    });
+  });
+
+  it("hostile input stays cheap: 20 members of 100 KB are scanned once each", () => {
+    const glued = "abC ".repeat(25_000);
+    const twin = "ab-C ".repeat(25_000);
+    const t0 = performance.now();
+    expect(preferUnglued(glued, Array.from({ length: 20 }, () => twin))).toBe(glued);
+    expect(performance.now() - t0).toBeLessThan(2000);
+  });
+});
+
+describe("hunt 35 (h35): pickNeutralTitle over e02ef916", () => {
+  it("the fixture is what the database holds: one glued twin, one clean twin, one unrelated title", () => {
+    expect(gluedJoinCount(E02_GLUED)).toBe(1);
+    expect(gluedJoinCount(E02_CLEAN)).toBe(0);
+    expect(E02_GLUED.replace("AvivWashington", "Aviv-Washington")).toBe(E02_CLEAN);
+    expect(isAcceptableNeutral(E02_GLUED, [E02_CLEAN, E02_OTHER])).toBe(true);
+    expect(isAcceptableNeutral(E02_CLEAN, [E02_GLUED, E02_OTHER])).toBe(true);
+  });
+
+  it.each([
+    ["glued, clean, other", [E02_GLUED, E02_CLEAN, E02_OTHER]],
+    ["clean, glued, other", [E02_CLEAN, E02_GLUED, E02_OTHER]],
+    ["other, glued, clean", [E02_OTHER, E02_GLUED, E02_CLEAN]],
+    ["glued, other, clean", [E02_GLUED, E02_OTHER, E02_CLEAN]],
+  ])("first pick, members in the order %s: the clean twin", (_order, titles) => {
+    expect(pickNeutralTitle(asMembers(titles))).toBe(E02_CLEAN);
+    expect(pickNeutralTitle(asMembers(titles), { floor: true })).toBe(E02_CLEAN);
+  });
+
+  it("a re-pick heals the stored glued title (the live row of 2026-11-05)", () => {
+    expect(pickNeutralTitle(asMembers([E02_GLUED, E02_CLEAN, E02_OTHER]), { incumbent: E02_GLUED })).toBe(E02_CLEAN);
+    expect(pickNeutralTitle(asMembers([E02_OTHER, E02_CLEAN, E02_GLUED]), { incumbent: E02_GLUED })).toBe(E02_CLEAN);
+  });
+
+  it("a re-pick keeps a stored clean title, and is idempotent", () => {
+    const members = asMembers([E02_GLUED, E02_CLEAN, E02_OTHER]);
+    expect(pickNeutralTitle(members, { incumbent: E02_CLEAN })).toBe(E02_CLEAN);
+    const healed = pickNeutralTitle(members, { incumbent: E02_GLUED });
+    expect(pickNeutralTitle(members, { incumbent: healed })).toBe(healed);
+  });
+
+  it("a glued stored title with no twin among the members stays (nothing to swap to)", () => {
+    expect(pickNeutralTitle(asMembers([E02_GLUED, E02_OTHER]), { incumbent: E02_GLUED })).toBe(E02_GLUED);
+  });
+
+  it("a stored glued title next to a non-twin member stays", () => {
+    const nonTwin = "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini yeniden şekillendirecek";
+    expect(pickNeutralTitle(asMembers([E02_GLUED, nonTwin, E02_OTHER]), { incumbent: E02_GLUED })).toBe(E02_GLUED);
+  });
+
+  it("still extractive-v6: the tiebreak changes new picks and re-picks of offered rows, with no model bump", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
+  });
+
+  it("the picks of the older fixtures hold no glued join, so the tiebreak never touches them", () => {
+    for (const set of [BAKIRKOY, HAKKARI, IL_100, KISA_HABERLER, GOKTAS, RUBIO]) {
+      const picked = pickNeutralTitle(asMembers(set), { floor: true });
+      expect(picked).not.toBeNull();
+      expect(gluedJoinCount(picked!)).toBe(0);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt 35 (h35): replay of the live population (read-only, 2026-11-05).
+//
+// Two populations, each with the full member titles (cluster_articles x articles):
+//   1. every cluster whose stored title_tr_neutral matches
+//      '[a-zçğıöşü][A-ZÇĞİÖŞÜ]' (168 clusters: 149 extractive-v1, 9 v5, 7 v4, 3 v6);
+//   2. every cluster with a glued member title published in the last 21 days (240).
+// Each was picked with the code before the tiebreak (HEAD) and after it, as a
+// re-pick (the stored title is the incumbent, what the headline cron does) and as a
+// first pick ({ floor: true }). Changed: 3 re-picks (e02ef916, 0ccee1cb, 3187ac3b)
+// and 3 first picks (e02ef916, 3187ac3b, 2408b41e), every one a glued variant
+// replaced by the same text with its separator. The other 162 stored titles with a
+// join are brands (MasterChef, SpaceX, AfD, YouTube, WhatsApp ...) or glues with no
+// twin among the members (nothing to swap to). The six clusters below are the
+// changed ones and two brand controls, in src/lib/clusters/__fixtures__/h35-glued-twins.json.
+// ---------------------------------------------------------------------------
+
+interface H35Cluster {
+  cid: string;
+  stored: string;
+  model: string;
+  titles: string[];
+  /** null: the re-pick finds nothing acceptable and the cron keeps the stored title. */
+  repick: string | null;
+  first: string;
+  headRepick: string | null;
+  headFirst: string;
+  why: string;
+}
+
+const H35: H35Cluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h35-glued-twins.json"), "utf8"),
+) as H35Cluster[];
+
+const lettersAndDigits = (t: string): string => t.replace(/[^\p{L}\p{N}]+/gu, "");
+
+describe("hunt 35 (h35): replay of the live population", () => {
+  it("holds the three changed clusters, the one first-pick-only cluster and two brand controls", () => {
+    expect(H35.map((c) => c.cid)).toEqual(["e02ef916", "0ccee1cb", "3187ac3b", "2408b41e", "9456ee8c", "f0ac5829"]);
+    for (const c of H35) {
+      expect(c.titles.length, c.cid).toBeGreaterThanOrEqual(2);
+      expect(c.stored.trim().length, c.cid).toBeGreaterThan(0);
+      expect(c.why.length, c.cid).toBeGreaterThan(10);
+    }
+  });
+
+  it.each(["e02ef916", "0ccee1cb", "3187ac3b", "2408b41e", "9456ee8c", "f0ac5829"])(
+    "%s: the re-pick and the first pick are the recorded ones",
+    (cid) => {
+      const c = H35.find((x) => x.cid === cid)!;
+      const members = asMembers(c.titles);
+      expect(pickNeutralTitle(members, { incumbent: c.stored }), `${cid} re-pick`).toBe(c.repick);
+      expect(pickNeutralTitle(members, { floor: true }), `${cid} first pick`).toBe(c.first);
+    },
+  );
+
+  it("exactly three re-picks and three first picks change, and each is a glued variant replaced by its twin", () => {
+    const rePicks = H35.filter((c) => c.repick !== c.headRepick).map((c) => c.cid);
+    const firstPicks = H35.filter((c) => c.first !== c.headFirst).map((c) => c.cid);
+    expect(rePicks).toEqual(["e02ef916", "0ccee1cb", "3187ac3b"]);
+    expect(firstPicks).toEqual(["e02ef916", "3187ac3b", "2408b41e"]);
+    for (const c of H35) {
+      for (const [head, now] of [[c.headRepick, c.repick], [c.headFirst, c.first]] as const) {
+        if (head === now) continue;
+        expect(head, c.cid).not.toBeNull();
+        expect(now, c.cid).not.toBeNull();
+        expect(gluedJoinCount(head!), `${c.cid}: ${head}`).toBeGreaterThan(gluedJoinCount(now!));
+        expect(lettersAndDigits(now!), c.cid).toBe(lettersAndDigits(head!));
+        expect(c.titles.some((t) => cleanHeadline(t) === now), `${c.cid}: ${now} is a member's own cleaned wording`).toBe(true);
+        expect(isAcceptableNeutral(now!, c.titles.filter((t) => cleanHeadline(t) !== now))).toBe(true);
+      }
+    }
+  });
+
+  it("the brand controls are untouched: SpaceX and MasterChef keep their joins (f0ac5829 is over the 110-character gate, so its re-pick finds nothing and the cron keeps it)", () => {
+    for (const cid of ["9456ee8c", "f0ac5829"]) {
+      const c = H35.find((x) => x.cid === cid)!;
+      expect(c.repick ?? c.stored, cid).toBe(c.stored);
+      expect(c.repick, cid).toBe(c.headRepick);
+      expect(c.first, cid).toBe(c.headFirst);
+      expect(gluedJoinCount(c.stored), cid).toBeGreaterThan(0);
+    }
+  });
+
+  it("the stored glued v1 and v6 titles heal on their next re-pick; a clean stored title is idempotent", () => {
+    for (const c of H35) {
+      const members = asMembers(c.titles);
+      const kept = c.repick ?? c.stored;
+      if (gluedJoinCount(c.stored) > 0 && kept !== c.stored) {
+        expect(gluedJoinCount(kept), c.cid).toBeLessThan(gluedJoinCount(c.stored));
+      }
+      expect(pickNeutralTitle(members, { incumbent: kept }) ?? kept, c.cid).toBe(kept);
+    }
   });
 });

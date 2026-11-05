@@ -129,6 +129,24 @@
 // half of its stamped size) instead of doubling. There is no UPDATE: the headline cron
 // heals about 20 clusters per 5-minute run.
 
+// extractive-v6 (hunt 35, h35; still extractive-v6, NO model bump: a bump would re-offer
+// about 3,900 clusters in the middle of the v6 heal for a rule that changes the text of
+// three stored titles; a replay of the 168 live clusters whose stored title holds a glued
+// join and of the 240 with a glued member title in the last 21 days changes 3 re-picks and
+// 3 first picks, all of them a glued variant swapped for its correctly punctuated twin):
+// a pick that holds a glued lower-to-upper join inside a word is replaced by a member title
+// that is the same text with fewer such joins. e02ef916 was titled "... Tel
+// AvivWashington ilişkisini ...": one outlet's feed lost the hyphen of "Tel
+// Aviv-Washington", a second outlet wrote it correctly, and the picker chose the glued
+// variant (the two fold to different strings, so neither counts as a duplicate of the
+// other). preferUnglued() runs on the final result of pickNeutralTitle, the first pick and
+// the stored title a re-pick keeps alike, and only swaps to a member title that has the same
+// letters and digits in the same case (so a brand such as YouTube, TikTok, WhatsApp or
+// iPhone, which both twins carry, is never swapped) and passes the gate. It never writes a
+// text no member wrote. Without a bump a glued title that already carries v6 heals only when
+// migration 155's growth rule offers its cluster again (it has grown by greatest(3, half of
+// its stamped size)); one still stamped v1 to v5 heals in the running v6 pass.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
@@ -1738,6 +1756,69 @@ export function incumbentDefect(inc: string, best: string, memberTitles: readonl
   return minorityClaim(incStems, bestStems, sampleStems) || missingSubject(incStems, bestStems, sample, sampleStems);
 }
 
+// ---------------------------------------------------------------------------
+// The glued twin (extractive-v6, hunt 35, h35).
+// ---------------------------------------------------------------------------
+//
+// A feed that loses a hyphen or a slash between two capitalised words glues them:
+// "Tel Aviv-Washington" arrives as "Tel AvivWashington". The glued title and the
+// correct one fold to different strings, so the duplicate rule keeps both, and the
+// glued one can outscore its twin (its token 'avivwashington' is shared by nobody,
+// yet in e02ef916 it won in all four member orders). A glued join is a lower-case
+// letter directly followed by an upper-case one inside a word. Brands have them
+// legitimately (YouTube, TikTok, WhatsApp, iPhone), which is why the join alone never
+// decides anything: a swap needs a member title that is the same text with strictly
+// fewer joins, and a brand appears in both twins.
+
+/** A lower-case letter immediately followed by an upper-case one (Unicode, so 'ç' + 'Ö' counts). */
+const GLUED_JOIN = /(?<=\p{Ll})\p{Lu}/gu;
+const NOT_LETTER_OR_DIGIT = /[^\p{L}\p{N}]+/gu;
+
+/**
+ * Number of glued joins in a title: a lower-case letter directly followed by an upper-case
+ * letter ("AvivWashington" has one, "Aviv-Washington", "TBMM'de" and "ABD" none). Brands
+ * such as "YouTube" and "iPhone" count one each.
+ */
+export function gluedJoinCount(title: string): number {
+  return title.match(GLUED_JOIN)?.length ?? 0;
+}
+
+// What two twins share: every letter and digit, in order and in the same case. The
+// separators between them are the only difference. Case is kept on purpose: folding it
+// would make "Youtube'da ..." and a shouted "YOUTUBE'DA ..." twins of "YouTube'da ..." and
+// swap a correct brand spelling for a worse one. Digits are kept because 39 and 40 are
+// different titles.
+function twinKey(title: string): string {
+  return title.replace(NOT_LETTER_OR_DIGIT, "");
+}
+
+/**
+ * The glued-twin tiebreak: when `chosen` holds a glued join (see gluedJoinCount) and a
+ * member title, cleaned, is the same text with strictly fewer joins (identical letters and
+ * digits in the same case, only the separators differ) and passes isAcceptableNeutral, that
+ * member's cleaned title is returned instead; of several, the one with the fewest joins, the
+ * first in member order on a tie. Any other `chosen` is returned as passed, and a member
+ * that is not a twin is never considered. Pure; the members are the cluster's raw titles.
+ */
+export function preferUnglued(chosen: string, memberTitles: readonly string[]): string {
+  let bestJoins = gluedJoinCount(chosen);
+  if (bestJoins === 0) return chosen;
+  const key = twinKey(chosen);
+  let best = chosen;
+  for (let i = 0; i < memberTitles.length; i++) {
+    const raw = (memberTitles[i] ?? "").trim();
+    if (raw === "") continue;
+    const cleaned = cleanHeadline(raw);
+    const joins = gluedJoinCount(cleaned);
+    if (joins >= bestJoins || twinKey(cleaned) !== key) continue;
+    if (cleaned === "" || LEAD_IN.test(foldTr(cleaned))) continue;
+    if (!isAcceptableNeutral(cleaned, memberTitles.filter((_, j) => j !== i))) continue;
+    best = cleaned;
+    bestJoins = joins;
+  }
+  return best;
+}
+
 /**
  * Returns the cleaned headline of the most central, least sensational
  * member that passes isAcceptableNeutral, or null when there is nothing to
@@ -1747,9 +1828,18 @@ export function incumbentDefect(inc: string, best: string, memberTitles: readonl
  * best candidate (see PickOptions); null then means only "nothing usable".
  * With `{ incumbent }` the stored title wins unless it fails the gate or loses
  * by REPICK_MARGIN / REPICK_MARGIN_FULL_LENGTH (see PickOptions). Member titles that fold to the same
- * text count once, the first occurrence standing.
+ * text count once, the first occurrence standing. Whatever the result (a first pick, a floor pick, the
+ * stored title a re-pick keeps), a glued word join in it gives way to a member title that is the same
+ * text without the join (preferUnglued, h35).
  */
 export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {}): string | null {
+  const picked = pickNeutralTitleCore(members, opts);
+  if (picked === null) return null;
+  return preferUnglued(picked, members.map((m) => m.title ?? ""));
+}
+
+// The pick itself (extractive-v1 to v6); pickNeutralTitle adds the glued-twin tiebreak on top.
+function pickNeutralTitleCore(members: MemberTitle[], opts: PickOptions): string | null {
   const seen = new Set<string>();
   const items = members
     .map((m) => ({ ...m, title: (m.title ?? "").trim() }))

@@ -3438,3 +3438,26 @@ select (extract(epoch from q.enqueued_at)::bigint % 3600) / 600 as bucket_of_10_
 Acceptance: p95 under 320 s in every bucket and `image-consumer` averaging under 8 s at `:20`, `:25` and `:30`.
 
 **Rollback** (nothing else depends on 154): re-run only 142's function section (`create or replace function public.image_backfill_requeue(` through its `grant execute`; `md5(prosrc)` is `917624baf55f5021fe458e8f0664b6d1` again), then `select cron.unschedule('image-backfill-requeue');`, `select cron.schedule('image-backfill-requeue', '17 * * * *', $$ set statement_timeout = '60s'; select public.image_backfill_requeue(150); $$);`, `update public.ops_cron_expected set note = '17 * * * *' where jobname = 'image-backfill-requeue';` and `delete from supabase_migrations.schema_migrations where version = '154';`. Messages already on the queue are ordinary `image_backfill` messages. Dry runs: `tests/migrations/sql/154-image-requeue-stagger-dryrun.sql` (local PostgreSQL 15 only, never production).
+
+## 156 — entity hubs match only the summary's first line (`entity_cluster_ids_v2` body v3): APPLY 156 + DEPLOY cluster-consumer, any order
+
+**Why:** `d91ab2f1` (Erdoğan returns from Korea) was listed under `/gundem/trump` because its stored `summary_tr` carries a pasted related-news teaser, "İşte ... Trump...", under two real sentences. Milliyet and Posta paste other stories' headlines under an article without a "Son dakika" marker, and 125's hub regex ran over the whole `summary_tr`, so the teaser's "Trump" was the only match (hunt 34, h34-reader-5).
+
+**What 156 does** (one function replaced, one transaction, safe to re-apply): `create or replace function public.entity_cluster_ids_v2(text[], text[], timestamptz, integer)` with one changed term. The regex text now takes `pg_catalog.split_part(coalesce(c.summary_tr, ''), E'\n', 1)` (the first line of the summary) instead of the whole `summary_tr`. Same signature, `SECURITY DEFINER`, `search_path = ''`, execute revoked from public, anon and authenticated and granted to `service_role`. No table, index or data change, no backfill. **Expected effect** (production replay, read-only, 2026-11-05): `/gundem/afad` goes from 24 to 20 clusters, and 46 (key, cluster) removals in total over 22 keys, of which 11 are pasted teasers or tickers; the other 35 name the entity in a later real sentence, which is the price of a first-line rule. 40 of the 62 hub keys do not change, and nothing is added anywhere.
+
+**Order:** independent, any order. The app needs no deploy for 156 (it only calls the function). The other half of the fix, the trailing-teaser strip `stripTrailingTeasers` in `supabase/functions/_shared/cluster/description-clean.ts`, reaches the clustering fingerprint and entities only after `npx supabase functions deploy cluster-consumer --no-verify-jwt`: `supabase/functions/cluster-consumer/index.ts` is the only function that imports `_shared/cluster/description-clean.ts`. Ingest does NOT import it (it uses its own cleaner in `_shared/rss/normalize.ts`, so `content_hash` and the stored description stay byte-identical) and needs no redeploy. The shown-summary strip (`src/lib/articles/summary-tidy.ts`) ships with the Vercel app deploy. Until the consumer is deployed, new clusters keep seeding from the unstripped description; 156 already keeps the hubs clean for them because it reads only the first summary line.
+
+**Verify** (read-only):
+
+```sql
+-- the new body is live (expect t)
+select position('split_part' in prosrc) > 0 from pg_proc where proname = 'entity_cluster_ids_v2';
+-- service_role only (expect f, f)
+select has_function_privilege('anon', 'public.entity_cluster_ids_v2(text[],text[],timestamptz,integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.entity_cluster_ids_v2(text[],text[],timestamptz,integer)', 'execute');
+select count(*) from supabase_migrations.schema_migrations where version = '156';   -- 1
+```
+
+Then `curl -s https://www.tayfhaber.com/gundem/trump` and check that `d91ab2f1` is gone (the hubs switch as their `clusters-entity` cache entries expire), and that `/gundem/erdogan` still lists it (its title names Erdoğan).
+
+**Rollback:** re-run the `create or replace function public.entity_cluster_ids_v2` statement of `125_entity_cluster_ids_v2.sql` (the bare `summary_tr` term), then `delete from supabase_migrations.schema_migrations where version = '156';`. The app does not care which of the two bodies is live. The consumer deploy is independent of the rollback.

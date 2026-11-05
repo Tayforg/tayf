@@ -42,6 +42,16 @@
 // (src/lib/articles/summary-tidy.ts): it cuts at the ticker line like
 // cleanDescription() does and also drops up to two short, unpunctuated lines in
 // front of it. cleanDescription()'s own output is deliberately unchanged.
+//
+// Other outlets paste "related news" headlines under an article without any ticker
+// ("...İstanbul'a geldi.\nAnkara'da kritik güvenlik zirvesi! Bakan Çiftçi, İtalyan
+// mevkidaşı ile bir araya geldi\nDünyanın gözü ABD'den gelen sonuçlarda! İşte ABD'deki
+// seçim hezimetinin nedeni! Trump...", cluster d91ab2f1, hunt 34, h34-reader-5): the
+// teaser gave an Erdoğan-returns story its only "Trump", so it listed under
+// /gundem/trump. stripTrailingTeasers() drops such headline-shaped trailing lines
+// (an exclamation headline that shares no content stem with the text in front of it,
+// plus the unpunctuated headlines after it); cleanDescription() applies it last, and
+// summary-tidy.ts imports the same function for the shown summary.
 
 // A ticker line: "Son dakika", "SON DAKİKA" or "Son Dakika" at the start of a
 // line (leading blanks allowed), followed by 1-3 dots, an ellipsis, a colon or
@@ -247,7 +257,18 @@ export function cleanDescription(d: string | null | undefined): string | null | 
   // marker), then the ticker cut.
   const text = stripFeedWrappers(d);
   const at = findTickerBreak(text);
-  return at === -1 ? text : text.slice(0, at).trimEnd();
+  const cut = at === -1 ? text : text.slice(0, at).trimEnd();
+  // Then the trailing teaser lines (h34-reader-5). A strip can leave a footer or an
+  // excerpt marker at the very end ("body […]\nTeaser!"), and unwrapping it can expose
+  // another trailing line, so strip and unwrap alternate until nothing changes (at most
+  // MAX_WRAPPER_PASSES times). A text without a teaser is returned exactly as before.
+  let out = cut;
+  for (let pass = 0; pass < MAX_WRAPPER_PASSES; pass++) {
+    const stripped = stripTrailingTeasers(out);
+    if (stripped === out) break;
+    out = stripFeedWrappers(stripped);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +324,218 @@ export function cutAppendedTicker(text: string): string {
     end = lineBreak;
     dropped++;
   }
+  return text.slice(0, cutAt).trimEnd();
+}
+
+// ---------------------------------------------------------------------------
+// Trailing teaser lines (h34-reader-5, hunt 34).
+//
+// A feed pastes other stories' headlines under an article. d91ab2f1's stored
+// summary is two real sentences and then
+//   "Ankara'da kritik güvenlik zirvesi! Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi"
+//   "Dünyanın gözü ABD'den gelen sonuçlarda! İşte ABD'deki seçim hezimetinin nedeni! Trump..."
+// and the only "Trump" of the cluster was the second one. The shape is told apart
+// from article text by three things together, and a line that fails ANY of them
+// stays ("when unsure, keep"):
+//  1. Headline shape: 12 to 160 characters, at least three words, starting with a
+//     capital letter or a digit (not a list marker, not "1." / "2)"), and not led by
+//     a conjunction (Ama, Fakat, Ancak, Lakin, Oysa, Çünkü, Ve, Yani, Ayrıca,
+//     Üstelik: such a line continues the article, so the walk stops there; b5f5c40f
+//     "Ama şu iki liderin sözünü ... unutmayalım!"). No quotation mark: the
+//     double-quote family plus the opening single quotes U+2018 and U+201B (a quoted
+//     line is somebody's words). ASCII ' and U+2019 are NOT quote marks here, they
+//     are Turkish apostrophes (Fransa'da, 19’u) and the ab24d85a teaser holds
+//     'yasaklama' in ASCII quotes. Not ending in a full stop, ":", ";", "," or "?".
+//     A line that ends in "..." / "…" is a clamp of a sentence unless it also holds
+//     a headline exclamation (measured on 245 live multi-line summaries, 2026-11-05:
+//     162 later lines end in an ellipsis, 158 have no headline exclamation and are
+//     clamp tails of real sentences), so it counts only then.
+//  2. An ANCHOR: some line of the trailing run holds an exclamation used as
+//     headline punctuation, a "!" at the end of the line or followed by a blank
+//     ("Sel, yıldırım, dolu, hortum! Meteoroloji ...", "İşte ...!"). A "!" directly
+//     followed by ' ’ or ‘ closes a quoted speech ("...bitmeyecek!'") and is no
+//     anchor. Real prose rarely carries one outside quotes. Without an anchor
+//     nothing is cut: the unpunctuated bullet lists of h31-reader-4 have the same
+//     shape as a headline.
+//  3. No content stem shared with the text in front of the run: every word of 6+
+//     letters is reduced to its first 6 folded letters, and a line that has one in
+//     common with the text before the run is about the same story, so the walk
+//     stops there.
+// The lines examined are the trailing run (at most TEASER_MAX_RUN lines, blank lines
+// skipped; a longer run is a digest and is left alone). The cut is made at the first
+// anchor of the run that survived the stem test, so the unpunctuated headlines
+// AFTER an anchor go with it and the ones in front of it stay. The first non-blank
+// line is never examined.
+//
+// No regular expression runs over the text: lines are found with indexOf /
+// lastIndexOf, only lines of at most 400 raw characters are looked at, and the
+// regular expressions below are single-character tests. At most five lines and
+// 2,000 characters of lead text are scanned, so the cost is linear in the input
+// and bounded by a constant per call after the line search.
+// ---------------------------------------------------------------------------
+
+const TEASER_MIN_LINE = 12;
+const TEASER_MAX_LINE = 160;
+/** A line longer than this (blanks included) is text and ends the run. */
+const TEASER_MAX_RAW_LINE = 400;
+const TEASER_MIN_WORDS = 3;
+/** A run of more trailing headline-shaped lines than this is left alone. */
+const TEASER_MAX_RUN = 4;
+const TEASER_STEM_LEN = 6;
+/** Characters of lead text that feed the stem set. */
+const TEASER_LEAD_SCAN = 2000;
+// The double-quote family plus the two OPENING single quotes U+2018 and U+201B (summary-tidy
+// treats both as quote openers). ASCII ' and U+2019 are deliberately absent: Turkish uses them
+// as apostrophes (Fransa'da, 19’u) and the ab24d85a teaser holds 'yasaklama' in ASCII quotes.
+const TEASER_QUOTES: ReadonlySet<string> = new Set([
+  '"', "“", "”", "„", "«", "»", "‟", "〝", "〞", "＂",
+  "‘", // ‘ left single quotation mark
+  "‛", // ‛ single high-reversed-9 quotation mark
+]);
+/** A "!" directly followed by one of these closes a quoted speech ("...bitmeyecek!'"), it is no headline mark. */
+const TEASER_QUOTE_CLOSERS: ReadonlySet<string> = new Set(["'", "’", "‘"]);
+/**
+ * A line led by one of these continues the article ("Ama şu iki liderin sözünü ... unutmayalım!"),
+ * it is never a pasted headline. Compared lower-cased with the Turkish locale.
+ */
+const TEASER_CONTINUATION_OPENERS: ReadonlySet<string> = new Set([
+  "ama", "fakat", "ancak", "lakin", "oysa", "çünkü", "ve", "yani", "ayrıca", "üstelik",
+]);
+const TEASER_ENDS_NOT_HEADLINE: ReadonlySet<string> = new Set([".", ":", ";", ",", "?"]);
+const ONE_UPPER = /^\p{Lu}$/u;
+const ONE_LETTER = /^\p{L}$/u;
+const ONE_ALNUM = /^[\p{L}\p{N}]$/u;
+
+function isDigitChar(ch: string): boolean {
+  return ch >= "0" && ch <= "9";
+}
+
+/**
+ * 0 = not a teaser-shaped line, 1 = headline-shaped, 2 = headline-shaped with a
+ * headline exclamation (an anchor). `t` is the trimmed line.
+ */
+function teaserShape(t: string): 0 | 1 | 2 {
+  if (t.length < TEASER_MIN_LINE || t.length > TEASER_MAX_LINE) return 0;
+  const first = t.charAt(0);
+  if (!isDigitChar(first) && !ONE_UPPER.test(first)) return 0; // lower case, a marker, a quote
+  if (isDigitChar(first)) {
+    // "1." / "12)" numbered item; "63 suçlu ..." is a headline.
+    let d = 1;
+    while (d < 4 && isDigitChar(t.charAt(d))) d++;
+    const after = t.charAt(d);
+    if (after === "." || after === ")") return 0;
+  }
+  // A line that opens with a conjunction continues the article: its first word (letters up
+  // to the first blank or non-letter) is looked up lower-cased with the Turkish locale.
+  let wordEnd = 0;
+  while (wordEnd < t.length && ONE_LETTER.test(t.charAt(wordEnd))) wordEnd++;
+  if (wordEnd > 0 && TEASER_CONTINUATION_OPENERS.has(t.slice(0, wordEnd).toLocaleLowerCase("tr"))) return 0;
+  let words = 0;
+  let inWord = false;
+  let bang = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t.charAt(i);
+    if (TEASER_QUOTES.has(ch)) return 0;
+    if (isBlank(t.charCodeAt(i))) {
+      inWord = false;
+      continue;
+    }
+    if (!inWord) {
+      words++;
+      inWord = true;
+    }
+    if (ch === "!") {
+      // Headline punctuation: the last character, or followed by a blank or other mark. Not
+      // "bitmeyecek!'" / "!’": an exclamation closing a quoted speech.
+      const next = t.charAt(i + 1);
+      if (i === t.length - 1 || (!ONE_ALNUM.test(next) && !TEASER_QUOTE_CLOSERS.has(next))) bang = true;
+    }
+  }
+  if (words < TEASER_MIN_WORDS) return 0;
+  const last = t.charAt(t.length - 1);
+  const ellipsis = last === "…" || t.endsWith("..");
+  if (TEASER_ENDS_NOT_HEADLINE.has(last) && !ellipsis) return 0;
+  if (ellipsis && !bang) return 0;
+  return bang ? 2 : 1;
+}
+
+/** Add the stem (first TEASER_STEM_LEN folded letters) of every word of 6+ letters of `s[0, limit)`. */
+function addTeaserStems(s: string, limit: number, into: Set<string>): void {
+  const end = Math.min(s.length, limit);
+  let wordStart = -1;
+  for (let i = 0; i <= end; i++) {
+    const letter = i < end && ONE_LETTER.test(s.charAt(i));
+    if (letter) {
+      if (wordStart === -1) wordStart = i;
+      continue;
+    }
+    if (wordStart !== -1 && i - wordStart >= TEASER_STEM_LEN) {
+      const folded = foldNameToken(s.slice(wordStart, i));
+      if (folded.length >= TEASER_STEM_LEN) into.add(folded.slice(0, TEASER_STEM_LEN));
+    }
+    wordStart = -1;
+  }
+}
+
+function sharesTeaserStem(line: string, stems: ReadonlySet<string>): boolean {
+  const own = new Set<string>();
+  addTeaserStems(line, line.length, own);
+  for (const stem of own) if (stems.has(stem)) return true;
+  return false;
+}
+
+/** Index of the "\n" that ends the first non-blank line, or -1 when no line follows it. */
+function leadLineEnd(text: string): number {
+  let pos = 0;
+  while (pos <= text.length) {
+    const nl = text.indexOf("\n", pos);
+    const stop = nl === -1 ? text.length : nl;
+    if (text.slice(pos, stop).trim() !== "") return nl;
+    if (nl === -1) return -1;
+    pos = nl + 1;
+  }
+  return -1;
+}
+
+/**
+ * Drop the headline-shaped teaser lines pasted under an article (see the section
+ * comment). The first non-blank line is never touched; the SAME string is returned
+ * when nothing is cut; otherwise the kept text with its end trimmed. Pure, linear,
+ * idempotent; null, '' and non-strings are returned as they are.
+ */
+export function stripTrailingTeasers(text: string): string {
+  if (typeof text !== "string" || text.length === 0) return text;
+  const leadEnd = leadLineEnd(text);
+  if (leadEnd === -1) return text;
+
+  // 1. The trailing run of headline-shaped lines, from the end of the text backwards.
+  const run: Array<{ start: number; line: string; anchor: boolean }> = [];
+  let end = text.length; // exclusive end of the span under inspection
+  while (end > leadEnd) {
+    const nl = text.lastIndexOf("\n", end - 1);
+    const start = nl + 1;
+    if (end - start > TEASER_MAX_RAW_LINE) break;
+    const line = text.slice(start, end).trim();
+    if (line !== "") {
+      const shape = teaserShape(line);
+      if (shape === 0) break;
+      if (run.length >= TEASER_MAX_RUN) return text; // a digest, not a teaser pair
+      run.push({ start, line, anchor: shape === 2 });
+    }
+    end = nl;
+  }
+  if (run.length === 0) return text;
+
+  // 2. Walk it from the end; a line that shares a content stem with the text in
+  //    front of the run is about the story itself and ends the walk.
+  const lead = new Set<string>();
+  addTeaserStems(text, Math.min(run[run.length - 1]!.start, TEASER_LEAD_SCAN), lead);
+  let cutAt = -1;
+  for (const entry of run) {
+    if (sharesTeaserStem(entry.line, lead)) break;
+    if (entry.anchor) cutAt = entry.start;
+  }
+  if (cutAt === -1) return text;
   return text.slice(0, cutAt).trimEnd();
 }
 
