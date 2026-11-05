@@ -7,6 +7,7 @@ import { DataNote } from "@/components/finance/data-note";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
 import { fmtWhen, pctChange } from "@/lib/finance/format";
+import { optionalRead } from "@/lib/finance/optional-read";
 import {
   fetchCircuitBreakers,
   fetchEconFeed,
@@ -15,6 +16,8 @@ import {
   fetchReferencePrices,
   fetchTopTickers,
   refKey,
+  type Disclosure,
+  type QuoteStat,
 } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
 import { marketCueText, quoteFreshness, rebaseQuoteOnStat } from "@/lib/finance/session";
@@ -37,6 +40,13 @@ export const metadata: Metadata = staticPageMetadata({
 //   strip; and the KAP disclosure stream.
 // Data: migrations 049-051 via lib/finance/queries, live quotes via
 // lib/finance/quotes (Yahoo, cached 5 min).
+//
+// h41-resilience-3: only the feed, the top tickers and the KAP stream are
+// essential; their failure still throws to error.tsx. The circuit-breaker
+// strip, the quote stats and the reference prices only decorate them, so each
+// goes through optionalRead and degrades to its section's empty state (the
+// strip says it is unavailable; a move without stats is "—"; a missing
+// reference price drops the "since the headline" value).
 
 const CLASS_LABEL: Record<string, string> = { FR: "finansal rapor", ODA: "özel durum", DG: "duyuru", DKB: "diğer" };
 
@@ -47,29 +57,35 @@ export default async function EkonomiPage() {
   // Taken after connection(): never read the clock in a prerender path.
   // currentTimeMs() is the repo's Date.now() wrapper (react-hooks/purity).
   const nowMs = currentTimeMs();
-  const [feed, top, disclosures, breakers] = await Promise.all([
+  const [feed, top, disclosures, breakersRead] = await Promise.all([
     fetchEconFeed(80),
     fetchTopTickers(2, 24),
     fetchRecentDisclosures(40),
-    fetchCircuitBreakers(),
+    optionalRead<Disclosure[]>("circuit-breakers", fetchCircuitBreakers(), []),
   ]);
+  const breakers = breakersRead.value;
   // TS-11: normalise the ticker set ONCE, outside the cache boundary, and
   // hand every cached fetcher the same sorted array. getQuotes/fetchQuoteStats
   // each independently sort+dedupe internally too, but doing it here as well
   // means the three run against the exact same Next cache key shape instead
   // of three independently-expiring 60 s entries that can briefly disagree.
   const tickerKey = [...new Set([...top.map((t) => t.ticker), ...feed.flatMap((f) => f.tickers)])].sort();
-  const [yahooQuotes, stats, refs] = await Promise.all([
+  const [yahooQuotes, statsRead, refsRead] = await Promise.all([
     getQuotes(tickerKey),
-    fetchQuoteStats(tickerKey),
-    fetchReferencePrices(feed.map((f) => f.id).sort()),
+    optionalRead<Record<string, QuoteStat>>("quote-stats", fetchQuoteStats(tickerKey), {}),
+    optionalRead<Record<string, number>>("reference-prices", fetchReferencePrices(feed.map((f) => f.id).sort()), {}),
   ]);
+  const stats = statsRead.value;
+  const refs = refsRead.value;
   // h36-data-1: during the session Yahoo's previous close is the one from two
   // sessions back, so the day move (and the tavan/taban tag) is re-based on the
   // settled close in bist_quote_stats, and a move past the +-10 % band becomes
-  // unknown ("—"). Everything below reads the re-based quotes.
+  // unknown ("—"). Everything below reads the re-based quotes. When the stats
+  // read itself failed there is no settled close to re-base on, and Yahoo's own
+  // move is the wrong one by definition: every quote loses its baseline, so its
+  // move renders as "—" with no tavan/taban tag (h41-resilience-3).
   const quotes = Object.fromEntries(
-    Object.entries(yahooQuotes).map(([t, q]) => [t, rebaseQuoteOnStat(q, stats[t])]),
+    Object.entries(yahooQuotes).map(([t, q]) => [t, statsRead.failed ? { ...q, hasBaseline: false } : rebaseQuoteOnStat(q, stats[t])]),
   );
 
   // Market cue: when the freshest quote on screen is not from a live session,
@@ -110,7 +126,7 @@ export default async function EkonomiPage() {
 
       <TickerTape items={top} quotes={quotes} stats={stats} staleTickers={staleTickers} />
 
-      <BreakerStrip breakers={breakers} />
+      <BreakerStrip breakers={breakers} unavailable={breakersRead.failed} />
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <Panel title="Haber akışı" meta={`${feed.length} haber, hisse eşleşmeli`} className="lg:row-span-2">

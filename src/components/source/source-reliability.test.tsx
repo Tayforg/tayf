@@ -176,12 +176,14 @@ describe("SourceReliabilityCard", () => {
 
   it("renders the values and the 'how' texts", () => {
     const t = text(reliability());
-    expect(t).toContain("20 haber/gün · 30/30 gün yayın");
+    // The fixture window (12:00Z -> 12:00Z) is rolling, so it touches 31
+    // Istanbul dates and 30 active days print as 30/31 (h41-derived-3).
+    expect(t).toContain("20 haber/gün · 30/31 gün yayın");
     expect(t).toContain("%12 (12/100)");
     expect(t).toContain("%5 (6/120)");
     expect(t).toContain("Ortalama Denge puanı 50/100 (n = 20 küme)");
     expect(t).toContain(
-      "Son 30 günün haber sayısı 30’a bölünür; etkin gün, en az bir haber yayımlanan gündür (Türkiye saati).",
+      "Son 30 günün haber sayısı 30’a bölünür. Etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati); 30 günlük pencere 31 takvim gününe yayılır, ilk ve son gün kısmidir.",
     );
     expect(t).toContain(
       "Ajans dağıtımı sayılan kümelerde başlığı ve özeti başka bir kaynakla aynı olan haberlerin payı (haber gövdesi karşılaştırılmaz); yön belirtmez.",
@@ -202,7 +204,7 @@ describe("SourceReliabilityCard", () => {
     expect(t).not.toContain("%16 (3/19)");
     expect(t).not.toContain("Ortalama Denge puanı");
     // Cadence and the karne-based blindspot share are not gated by these.
-    expect(t).toContain("20 haber/gün · 30/30 gün yayın");
+    expect(t).toContain("20 haber/gün · 30/31 gün yayın");
     expect(t).toContain("%5 (6/120)");
   });
 
@@ -219,10 +221,40 @@ describe("SourceReliabilityCard", () => {
     expect(t).toContain("Son 30 günde haber yok");
   });
 
-  it("clamps active_days = window_days + 1 on screen", () => {
+  it("shows 31/31 for a source that published on every date the window touches", () => {
     const t = text(reliability({ activeDays: 31 }));
-    expect(t).toContain("30/30 gün yayın");
-    expect(t).not.toContain("31/30");
+    expect(t).toContain("31/31 gün yayın");
+    expect(t).not.toContain("30/30 gün yayın");
+  });
+
+  // h41-derived-3: /source/haberport printed "30/30 gün yayın" with no article
+  // on 2026-10-24 (fayn: 2026-10-11) because 31 dates were clamped to 30.
+  it("never prints 30/30 for a missed-day source on a rolling 31-date window (haberport shape)", () => {
+    const t = text(
+      reliability({
+        windowStart: "2026-10-06T15:00:00.000Z",
+        windowEnd: "2026-11-05T15:00:00.000Z",
+        nArticles: 15_615,
+        activeDays: 30,
+      }),
+    );
+    expect(t).toContain("520,5 haber/gün · 30/31 gün yayın");
+    expect(t).not.toContain("30/30");
+  });
+
+  it("keeps 30/30 and the short explanation on an Istanbul-midnight aligned window", () => {
+    const t = text(
+      reliability({
+        windowStart: "2026-10-05T21:00:00.000Z",
+        windowEnd: "2026-11-04T21:00:00.000Z",
+        activeDays: 30,
+      }),
+    );
+    expect(t).toContain("20 haber/gün · 30/30 gün yayın");
+    expect(t).toContain(
+      "Son 30 günün haber sayısı 30’a bölünür; etkin gün, en az bir haber yayımlanan gündür (Türkiye saati).",
+    );
+    expect(t).not.toContain("takvim gününe yayılır");
   });
 
   it("renders the neutral footnote", () => {

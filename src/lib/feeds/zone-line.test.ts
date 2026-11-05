@@ -3,6 +3,7 @@ import {
   zoneCountsFromSources,
   votingZoneCounts,
   formatZoneLine,
+  sourceCountHead,
 } from "./zone-line";
 
 describe("zoneCountsFromSources", () => {
@@ -109,5 +110,48 @@ describe("formatZoneLine", () => {
     expect(
       formatZoneLine({ iktidar: 0, bagimsiz: 0, muhalefet: 0 }),
     ).toBe("İktidar 0 · Bağımsız 0 · Muhalefet 0");
+  });
+});
+
+describe("sourceCountHead", () => {
+  it("adds the classified (voting) count in parentheses when some members do not vote", () => {
+    expect(
+      sourceCountHead(10, { iktidar: 8, bagimsiz: 0, muhalefet: 0 }),
+    ).toBe("10 kaynak (8 sınıflandırılmış)");
+  });
+
+  it("prints the bare count when every member votes (zone sum equals the total)", () => {
+    expect(
+      sourceCountHead(7, { iktidar: 4, bagimsiz: 2, muhalefet: 1 }),
+    ).toBe("7 kaynak");
+  });
+
+  it("says 0 sınıflandırılmış when no member votes", () => {
+    expect(
+      sourceCountHead(3, { iktidar: 0, bagimsiz: 0, muhalefet: 0 }),
+    ).toBe("3 kaynak (0 sınıflandırılmış)");
+  });
+
+  it("keeps the bare count when the zones sum to more than the total (defensive: synthetic or stale tallies)", () => {
+    expect(
+      sourceCountHead(2, { iktidar: 4, bagimsiz: 1, muhalefet: 0 }),
+    ).toBe("2 kaynak");
+  });
+
+  it("prints an empty cluster as 0 kaynak, with no parentheses", () => {
+    expect(
+      sourceCountHead(0, { iktidar: 0, bagimsiz: 0, muhalefet: 0 }),
+    ).toBe("0 kaynak");
+  });
+
+  it("never changes the number of ' · ' parts of a description built around it", () => {
+    for (const [total, counts] of [
+      [10, { iktidar: 8, bagimsiz: 0, muhalefet: 0 }],
+      [7, { iktidar: 4, bagimsiz: 2, muhalefet: 1 }],
+      [3, { iktidar: 0, bagimsiz: 0, muhalefet: 0 }],
+    ] as const) {
+      const description = `${sourceCountHead(total, counts)} · ${formatZoneLine(counts)}`;
+      expect(description.split(" · ")).toHaveLength(4);
+    }
   });
 });

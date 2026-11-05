@@ -262,7 +262,7 @@ describe("GET /api/cron/social — kill switches / config", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("dry run builds the zone line on the voting basis: bundle sources carry kind, an aggregator is counted in 'N kaynak' only", async () => {
+  it("dry run builds the zone line on the voting basis: bundle sources carry kind, an aggregator is counted in 'N kaynak' and the head names the classified count", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "t";
     process.env.TELEGRAM_CHANNEL_ID = "c";
     process.env.SOCIAL_POST_DRY_RUN = "1";
@@ -290,7 +290,9 @@ describe("GET /api/cron/social — kill switches / config", () => {
       (p) => p.clusterId === "bs-agg",
     );
     expect(preview).toBeDefined();
-    expect(preview!.text).toContain("6 kaynak: İktidar 5 · Bağımsız 0 · Muhalefet 0");
+    expect(preview!.text).toContain(
+      "6 kaynak (5 sınıflandırılmış): İktidar 5 · Bağımsız 0 · Muhalefet 0",
+    );
   });
 });
 

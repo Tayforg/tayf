@@ -2,15 +2,18 @@
 
 import { useEffect } from "react";
 import { AlertTriangle } from "lucide-react";
+import { RetryButton } from "@/components/ui/retry-button";
 
 // Catches the lib/finance/queries throws (Supabase error, or the 049/050
 // tables not applied yet) so the reader gets a retry instead of a 500.
 export default function EkonomiError({
   error,
-  reset,
+  retry,
 }: {
   error: Error & { digest?: string };
-  reset: () => void;
+  // Next 16 passes `retry` (refresh + reset in a transition) next to `reset`
+  // (clears boundary state only, no re-fetch); recovery needs the former.
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[ekonomi-error]", error);
@@ -33,13 +36,10 @@ export default function EkonomiError({
         <p className="text-sm text-muted-foreground">
           Kaynak veritabanı yanıt vermedi ya da finans tabloları henüz kurulmadı.
         </p>
-        <button
-          type="button"
-          onClick={reset}
-          className="inline-flex items-center gap-1.5 rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium hover:bg-foreground/90 transition-colors"
-        >
-          Tekrar dene
-        </button>
+        <RetryButton
+          onRetry={retry}
+          className="inline-flex items-center gap-1.5 rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium hover:bg-foreground/90 transition-colors aria-disabled:opacity-60"
+        />
       </div>
     </div>
   );

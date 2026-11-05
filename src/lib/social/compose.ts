@@ -1,4 +1,8 @@
-import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
+import {
+  formatZoneLine,
+  sourceCountHead,
+  votingZoneCounts,
+} from "@/lib/feeds/zone-line";
 import { withUtm } from "@/lib/feeds/rss-builder";
 import { ZONE_META } from "@/lib/bias/config";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
@@ -20,8 +24,9 @@ export interface ComposeSource {
   /**
    * Zone lines and the "N bölge" count tally only voting kinds (outlet,
    * wire) via `votingZoneCounts`, matching the card. Optional/nullable like
-   * `Source.kind`: a missing or null kind counts as voting. "N kaynak" stays
-   * the full `sources.length`, as on the card.
+   * `Source.kind`: a missing or null kind counts as voting. The "N kaynak"
+   * head is the full `sources.length`, as on the card, and carries the voting
+   * count in parentheses when they differ ("10 kaynak (8 sınıflandırılmış)").
    */
   kind?: SourceKind | null;
 }
@@ -62,14 +67,14 @@ function utmUrl(clusterUrl: string, channel: "telegram" | "bluesky", campaign: "
 export function composeTelegramBlindspot(input: ComposeBlindspotInput): TelegramText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const n = input.sources.length;
+  const head = sourceCountHead(input.sources.length, counts);
   const zoneLabel = ZONE_META[input.dominantZone].label;
   const url = utmUrl(input.clusterUrl, "telegram", "kor_nokta");
 
   const lines = [
     `Kör nokta · ${zoneLabel} ağırlıklı haber`,
     input.title,
-    `${n} kaynak: ${zoneLine}`,
+    `${head}: ${zoneLine}`,
     "Diğer bölgelerden bu kümede az ya da hiç haber yok.",
     url,
   ];
@@ -80,12 +85,12 @@ export function composeTelegramBlindspot(input: ComposeBlindspotInput): Telegram
 export function composeTelegramTopStory(input: ComposeTopStoryInput): TelegramText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const n = input.sources.length;
+  const head = sourceCountHead(input.sources.length, counts);
   const url = utmUrl(input.clusterUrl, "telegram", "gundem");
   const zoneCount = countZonesCovered(counts);
 
   const lines = [
-    `Gündem · ${n} kaynak, ${zoneCount} bölge`,
+    `Gündem · ${head}, ${zoneCount} bölge`,
     input.title,
     zoneLine,
     `Kim nasıl yazdı: ${url}`,
@@ -145,14 +150,14 @@ function buildBlueskyText(lines: string[], titleIndex: number): string {
 export function composeBlueskyBlindspot(input: ComposeBlindspotInput): BlueskyText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const n = input.sources.length;
+  const head = sourceCountHead(input.sources.length, counts);
   const zoneLabel = ZONE_META[input.dominantZone].label;
   const url = utmUrl(input.clusterUrl, "bluesky", "kor_nokta");
 
   const lines = [
     `Kör nokta · ${zoneLabel} ağırlıklı haber`,
     input.title,
-    `${n} kaynak: ${zoneLine}`,
+    `${head}: ${zoneLine}`,
     "Diğer bölgelerden bu kümede az ya da hiç haber yok.",
   ];
 
@@ -167,11 +172,11 @@ export function composeBlueskyBlindspot(input: ComposeBlindspotInput): BlueskyTe
 export function composeBlueskyTopStory(input: ComposeTopStoryInput): BlueskyText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const n = input.sources.length;
+  const head = sourceCountHead(input.sources.length, counts);
   const zoneCount = countZonesCovered(counts);
   const url = utmUrl(input.clusterUrl, "bluesky", "gundem");
 
-  const lines = [`Gündem · ${n} kaynak, ${zoneCount} bölge`, input.title, zoneLine];
+  const lines = [`Gündem · ${head}, ${zoneCount} bölge`, input.title, zoneLine];
 
   const text = buildBlueskyText(lines, 1);
 

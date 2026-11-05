@@ -8,11 +8,29 @@ import { Telescope, Eye, Bookmark, Settings, TrendingUp } from "lucide-react";
 // `max-sm:` floor lifts the touch target to 44 px (the size used elsewhere on
 // the site; WCAG 2.5.8 only requires 24). sm+ is unchanged, and the h-14 header
 // row is taller than 44 px, so the header height does not move.
+//
+// Current-page cue (h41-a11y-1, WCAG 1.4.1 / 1.4.11): the tint alone is
+// bg-foreground/10 over the header, 1.21:1 on the dark theme, and below `sm`
+// there is no label for font-weight to show on. The active link therefore also
+// carries a full-foreground 2 px bottom border (>= 3:1 in both themes, pinned
+// by tests/styles/nav-current-contrast.test.ts). It is a border rather than a
+// ring or box-shadow, which forced-colors mode drops. `border-b-2` is in the
+// shared base so every link reserves the same height (the border sits inside
+// min-h-11 under border-box, so the 44 px floor and the h-14 row hold), and the
+// colour is chosen per state: `border-transparent` lives in `inactive` only,
+// because Tailwind emits .border-transparent after .border-foreground and the
+// two together would leave the active bar invisible.
+//
+// Forced-colors mode: the browser repaints a transparent border in the system
+// colour (LinkText), so without more every idle link would show the same 2 px
+// bar as the current one. `forced-colors:border-[Canvas]` pins the idle bar to
+// the page background there, so only the current link keeps a visible bar. It
+// belongs to the idle states only, never to `active`.
 const baseLink =
-  "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center";
+  "flex items-center gap-1.5 rounded-md border-b-2 px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center";
 const inactive =
-  "text-foreground/80 hover:text-foreground hover:bg-muted/50";
-const active = "bg-foreground/10 text-foreground font-medium";
+  "border-transparent forced-colors:border-[Canvas] text-foreground/80 hover:text-foreground hover:bg-muted/50";
+const active = "border-foreground bg-foreground/10 text-foreground font-medium";
 
 interface NavLinksProps {
   /**
@@ -115,10 +133,10 @@ export function NavLinksView({
           <Link
             href="/admin"
             aria-current={isAdmin ? "page" : undefined}
-            className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center ${
+            className={`flex items-center gap-1.5 rounded-md border-b-2 px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center ${
               isAdmin
                 ? active
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                : "border-transparent forced-colors:border-[Canvas] text-muted-foreground hover:text-foreground hover:bg-muted/50"
             }`}
           >
             <Settings className="h-3.5 w-3.5" />

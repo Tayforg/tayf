@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
+import { isValidElement } from "react";
 import type { ReactElement, ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -9,6 +12,13 @@ import type { ReactElement, ReactNode } from "react";
 // layout's `index,follow`. The raw error digest is also kept out of the
 // visible copy (it was thin, repeated "Hata kodu: ..." text on a failed page)
 // and exposed as a `data-digest` attribute for support/debugging instead.
+//
+// h41-resilience-1: "Tekrar dene" must actually re-fetch. Next 16.4.5 hands
+// the error component `{ error, reset, retry }`. `reset()` only clears the
+// boundary state and re-renders the same rejected RSC payload (no request is
+// made, the error card just comes back); `retry()` is
+// `startTransition(() => { router.refresh(); reset(); })`, which re-fetches
+// the segment. Every boundary's button must therefore call `retry`.
 // ---------------------------------------------------------------------------
 
 // The boundaries call useEffect (console.error logging). Neutralise it so the
@@ -19,6 +29,12 @@ vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return { ...actual, useEffect: () => undefined };
 });
+
+// The boundaries render <RetryButton>, which reads the router. renderToStaticMarkup
+// has no app router, so give it an inert one.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
 
 vi.mock("next/link", () => ({
   default: ({
@@ -35,12 +51,17 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+import { RetryButton } from "@/components/ui/retry-button";
 import GlobalError from "./error";
 import EkonomiError from "./ekonomi/error";
 import ClusterError from "./cluster/[id]/error";
 import TrendsError from "./trends/error";
 
-type ErrorProps = { error: Error & { digest?: string }; reset: () => void };
+type ErrorProps = {
+  error: Error & { digest?: string };
+  reset: () => void;
+  retry: () => void;
+};
 
 const BOUNDARIES: ReadonlyArray<[string, (props: ErrorProps) => ReactElement]> = [
   ["src/app/error.tsx", GlobalError],
@@ -57,10 +78,32 @@ function withDigest(digest?: string): Error & { digest?: string } {
   return err;
 }
 
+// Element-tree walk: the boundaries return plain host elements (plus the
+// mocked next/link function component, whose props.children we still visit),
+// so no renderer is needed to find the button and invoke its handler.
+function childrenOf(el: ReactElement): ReactNode[] {
+  const children = (el.props as { children?: ReactNode }).children;
+  if (children === undefined || children === null) return [];
+  return Array.isArray(children) ? children : [children];
+}
+
+function findElements(
+  node: ReactNode,
+  match: (el: ReactElement) => boolean,
+): ReactElement[] {
+  if (Array.isArray(node)) return node.flatMap((n) => findElements(n, match));
+  if (!isValidElement(node)) return [];
+  const el = node as ReactElement;
+  return [
+    ...(match(el) ? [el] : []),
+    ...childrenOf(el).flatMap((c) => findElements(c, match)),
+  ];
+}
+
 describe.each(BOUNDARIES)("%s", (_label, Boundary) => {
   it("emits <meta name=robots content=noindex> and exposes the digest as data-digest only", () => {
     const markup = renderToStaticMarkup(
-      <Boundary error={withDigest("d123")} reset={() => {}} />,
+      <Boundary error={withDigest("d123")} reset={() => {}} retry={() => {}} />,
     );
 
     expect(markup).toMatch(ROBOTS_NOINDEX);
@@ -73,6 +116,7 @@ describe.each(BOUNDARIES)("%s", (_label, Boundary) => {
     const tree = Boundary({
       error: withDigest("d123"),
       reset: () => {},
+      retry: () => {},
     }) as ReactElement<{
       "data-digest"?: string;
       children: ReactElement<{ name?: string; content?: string }>[];
@@ -89,6 +133,7 @@ describe.each(BOUNDARIES)("%s", (_label, Boundary) => {
     const tree = Boundary({
       error: withDigest(),
       reset: () => {},
+      retry: () => {},
     }) as ReactElement<{ "data-digest"?: string }>;
 
     expect(tree.props["data-digest"]).toBeUndefined();
@@ -96,7 +141,7 @@ describe.each(BOUNDARIES)("%s", (_label, Boundary) => {
 
   it("still noindexes and omits data-digest when the error has no digest", () => {
     const markup = renderToStaticMarkup(
-      <Boundary error={withDigest()} reset={() => {}} />,
+      <Boundary error={withDigest()} reset={() => {}} retry={() => {}} />,
     );
 
     expect(markup).toMatch(ROBOTS_NOINDEX);
@@ -106,9 +151,102 @@ describe.each(BOUNDARIES)("%s", (_label, Boundary) => {
 
   it("keeps the retry button", () => {
     const markup = renderToStaticMarkup(
-      <Boundary error={withDigest("d123")} reset={() => {}} />,
+      <Boundary error={withDigest("d123")} reset={() => {}} retry={() => {}} />,
     );
 
     expect(markup).toContain("Tekrar dene");
   });
+
+  it("announces the pending refresh: the retry button carries a polite status region and aria-disabled", () => {
+    // retry() is startTransition(refresh + reset): the error card stays on
+    // screen, unchanged, until the RSC refresh resolves. RetryButton is what
+    // gives the reader a pending state, an ignored double click and a live region.
+    const markup = renderToStaticMarkup(
+      <Boundary error={withDigest("d123")} reset={() => {}} retry={() => {}} />,
+    );
+
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain('aria-live="polite"');
+    expect(markup).toContain('aria-disabled="false"');
+    expect(markup).toContain("Tekrar dene");
+  });
+
+  it("'Tekrar dene' is a <RetryButton onRetry={retry}>: calling onRetry runs retry() once and never reset() (element tree)", () => {
+    const resetSpy = vi.fn();
+    const retrySpy = vi.fn();
+    const tree = Boundary({
+      error: withDigest("d123"),
+      reset: resetSpy,
+      retry: retrySpy,
+    });
+
+    const buttons = findElements(tree, (el) => el.type === RetryButton);
+    expect(buttons).toHaveLength(1);
+    // No raw <button> beside it: the only retry control is the shared one.
+    expect(findElements(tree, (el) => el.type === "button")).toHaveLength(0);
+
+    const onRetry = (buttons[0]?.props as { onRetry?: unknown }).onRetry;
+    expect(typeof onRetry).toBe("function");
+    (onRetry as () => void)();
+
+    expect(retrySpy).toHaveBeenCalledTimes(1);
+    expect(resetSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps the label and the boundary's own button styling on the shared button", () => {
+    const tree = Boundary({
+      error: withDigest("d123"),
+      reset: () => {},
+      retry: () => {},
+    });
+
+    const [button] = findElements(tree, (el) => el.type === RetryButton);
+    const props = button?.props as { label?: string; className?: string };
+    // Default label ("Tekrar dene") is kept.
+    expect(props.label ?? "Tekrar dene").toBe("Tekrar dene");
+    expect(props.className).toContain("rounded-full");
+    expect(props.className).toContain("bg-foreground");
+    expect(props.className).toContain("aria-disabled:opacity-60");
+  });
+});
+
+describe("error boundaries — source guard", () => {
+  const APP_DIR = resolve(__dirname);
+
+  function findErrorFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) out.push(...findErrorFiles(full));
+      else if (name === "error.tsx") out.push(full);
+    }
+    return out.sort();
+  }
+
+  const files = findErrorFiles(APP_DIR);
+
+  it("finds at least the four known route boundaries (the guard is not vacuous)", () => {
+    expect(files.map((f) => relative(APP_DIR, f))).toEqual(
+      expect.arrayContaining([
+        "cluster/[id]/error.tsx",
+        "ekonomi/error.tsx",
+        "error.tsx",
+        "trends/error.tsx",
+      ]),
+    );
+  });
+
+  it.each(files.map((f) => [relative(APP_DIR, f), f] as const))(
+    "%s wires 'Tekrar dene' to retry, not reset",
+    (_rel, file) => {
+      const source = readFileSync(file, "utf8");
+      expect(source).not.toMatch(/onClick=\{reset\}/);
+      expect(source).not.toMatch(/onRetry=\{reset\}/);
+      expect(source).toMatch(/\bretry\b/);
+      // A raw <button onClick={retry}> gives no pending state; use the shared one.
+      expect(source).not.toMatch(/<button\b/);
+      expect(source).toMatch(/import \{ RetryButton \} from "@\/components\/ui\/retry-button";/);
+      expect(source).toMatch(/<RetryButton\b[^>]*\bonRetry=\{retry\}/);
+    },
+  );
 });

@@ -231,6 +231,102 @@ describe("NavLinks — 44 px touch targets on phones (h14-polish-5)", () => {
   });
 });
 
+describe("NavLinks — current-page cue is not colour or tint alone (h41-a11y-1)", () => {
+  // The old cue was bg-foreground/10 (1.21:1 against the header) plus 80% vs
+  // 100% icon opacity, and below `sm` the labels are sr-only so font-weight
+  // cannot show either. WCAG 1.4.1 / 1.4.11: the active link now carries a
+  // full-foreground 2 px bottom border. Every link reserves the same border in
+  // `border-transparent`, so nothing shifts when the page changes. In
+  // forced-colors mode a transparent border is repainted in the system colour
+  // (LinkText), which would make every idle bar identical to the current one;
+  // so idle links are pinned to Canvas there (`forced-colors:border-[Canvas]`)
+  // and only the current link keeps a visible bar.
+  const tokensOf = (el: Elementish | undefined) =>
+    String(el?.props?.className).split(/\s+/).filter(Boolean);
+  const ALL = ["/", "/blindspots", "/ekonomi", "/saved", "/admin"] as const;
+
+  it("marks only the Ekonomi link with a full-foreground bottom border on /ekonomi", () => {
+    const tree = NavLinksView({ pathname: "/ekonomi", showAdmin: true });
+    const active = tokensOf(findByHref(tree, "/ekonomi"));
+    expect(active).toContain("border-b-2");
+    expect(active).toContain("border-foreground");
+    expect(active).not.toContain("border-transparent");
+    // The old tint and weight stay as supplements.
+    expect(active).toContain("bg-foreground/10");
+    expect(active).toContain("font-medium");
+  });
+
+  it("gives every other link the same border width in transparent (no layout shift)", () => {
+    const tree = NavLinksView({ pathname: "/ekonomi", showAdmin: true });
+    for (const href of ALL.filter((h) => h !== "/ekonomi")) {
+      const tokens = tokensOf(findByHref(tree, href));
+      expect(tokens, href).toContain("border-b-2");
+      expect(tokens, href).toContain("border-transparent");
+      expect(tokens, href).not.toContain("border-foreground");
+    }
+  });
+
+  it("treats the admin link the same way when /admin is current", () => {
+    const tree = NavLinksView({ pathname: "/admin", showAdmin: true });
+    const admin = tokensOf(findByHref(tree, "/admin"));
+    expect(admin).toContain("border-b-2");
+    expect(admin).toContain("border-foreground");
+    expect(admin).not.toContain("border-transparent");
+    for (const href of ALL.filter((h) => h !== "/admin")) {
+      const tokens = tokensOf(findByHref(tree, href));
+      expect(tokens, href).toContain("border-transparent");
+      expect(tokens, href).not.toContain("border-foreground");
+    }
+  });
+
+  it.each(ALL)("each link is one of exactly {active, idle} border states: %s", (current) => {
+    const tree = NavLinksView({ pathname: current, showAdmin: true });
+    for (const href of ALL) {
+      const tokens = tokensOf(findByHref(tree, href));
+      const isCurrent = href === current;
+      expect(tokens.includes("border-foreground"), `${href} on ${current}`).toBe(isCurrent);
+      expect(tokens.includes("border-transparent"), `${href} on ${current}`).toBe(!isCurrent);
+      // Forced-colors repaints transparent borders in LinkText; idle links are
+      // pinned to Canvas so only the current link keeps a visible bar.
+      expect(tokens.includes("forced-colors:border-[Canvas]"), `${href} on ${current}`).toBe(
+        !isCurrent,
+      );
+      expect(tokens, `${href} on ${current}`).toContain("border-b-2");
+    }
+  });
+
+  it("keeps aria-current='page' on the current link and nowhere else", () => {
+    const tree = NavLinksView({ pathname: "/ekonomi", showAdmin: true });
+    for (const href of ALL) {
+      const link = findByHref(tree, href);
+      expect(link?.props?.["aria-current"], href).toBe(href === "/ekonomi" ? "page" : undefined);
+    }
+    const admin = NavLinksView({ pathname: "/admin", showAdmin: true });
+    expect(findByHref(admin, "/admin")?.props?.["aria-current"]).toBe("page");
+    expect(findByHref(admin, "/")?.props?.["aria-current"]).toBeUndefined();
+  });
+
+  it("the static-shell fallback (pathname: null) marks no link active but reserves the border", () => {
+    const tree = NavLinksView({ pathname: null, showAdmin: true });
+    for (const href of ALL) {
+      const link = findByHref(tree, href);
+      const tokens = tokensOf(link);
+      expect(link?.props?.["aria-current"], href).toBeUndefined();
+      expect(tokens, href).not.toContain("border-foreground");
+      expect(tokens, href).toContain("border-b-2");
+      expect(tokens, href).toContain("border-transparent");
+    }
+  });
+
+  it("does not use a ring or shadow for the cue (those are dropped in forced-colors mode)", () => {
+    const tree = NavLinksView({ pathname: "/blindspots", showAdmin: true });
+    const tokens = tokensOf(findByHref(tree, "/blindspots"));
+    // The only ring on a link is the focus ring; the current-page cue adds none.
+    expect(tokens.filter((t) => t.includes("ring") && !t.startsWith("focus-visible:"))).toEqual([]);
+    expect(tokens.filter((t) => t.startsWith("shadow"))).toEqual([]);
+  });
+});
+
 describe("SearchBar — labelled search input (best effort)", () => {
   it("renders role=search and a label wired to the input via id/htmlFor", async () => {
     const { SearchBar } = await import("@/components/filters/search-bar");

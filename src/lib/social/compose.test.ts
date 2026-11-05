@@ -16,9 +16,10 @@ const SOURCES_MIXED: Array<{ bias: BiasCategory }> = [
 ];
 
 // An aggregator is listed on the card (and counted in "N kaynak") but never
-// votes, so the zone line and the "N bölge" count must leave it out. Its
-// center bias is the only Bağımsız entry, which makes a raw recount visible:
-// it would read Bağımsız 1 and "3 bölge".
+// votes, so the zone line and the "N bölge" count must leave it out, and the
+// head says so: "4 kaynak (3 sınıflandırılmış)". Its center bias is the only
+// Bağımsız entry, which makes a raw recount visible: it would read Bağımsız 1
+// and "3 bölge".
 const SOURCES_WITH_AGGREGATOR: Array<{
   bias: BiasCategory;
   kind?: SourceKind | null;
@@ -30,25 +31,92 @@ const SOURCES_WITH_AGGREGATOR: Array<{
 ];
 const VOTING_LINE = "İktidar 2 · Bağımsız 0 · Muhalefet 1";
 
+// 10 members, 2 of them aggregators: the zones add up to 8, not 10.
+const TEN_MEMBERS_TWO_AGGREGATORS: Array<{
+  bias: BiasCategory;
+  kind?: SourceKind | null;
+}> = [
+  ...Array.from({ length: 8 }, () => ({
+    bias: "pro_government" as BiasCategory,
+    kind: "outlet" as SourceKind,
+  })),
+  { bias: "center", kind: "aggregator" },
+  { bias: "opposition", kind: "aggregator" },
+];
+const HEAD_8_OF_10 = "10 kaynak (8 sınıflandırılmış)";
+const LINE_8_OF_10 = "İktidar 8 · Bağımsız 0 · Muhalefet 0";
+
 describe("zone line voting basis (aggregators excluded)", () => {
-  it("Telegram blindspot: zone line drops the aggregator, 'N kaynak' keeps it", () => {
+  it("Telegram blindspot: 10 members with 2 aggregators prints the classified count in parentheses", () => {
+    const { text } = composeTelegramBlindspot({
+      title: "Başlık",
+      clusterUrl: "https://tayfhaber.com/cluster/c1",
+      dominantZone: "iktidar",
+      sources: TEN_MEMBERS_TWO_AGGREGATORS,
+    });
+    expect(text.split("\n")[2]).toBe(`${HEAD_8_OF_10}: ${LINE_8_OF_10}`);
+  });
+
+  it("Telegram top story: the headline uses the same head", () => {
+    const { text } = composeTelegramTopStory({
+      title: "Başlık",
+      clusterUrl: "https://tayfhaber.com/cluster/c2",
+      sources: TEN_MEMBERS_TWO_AGGREGATORS,
+    });
+    const lines = text.split("\n");
+    expect(lines[0]).toBe(`Gündem · ${HEAD_8_OF_10}, 1 bölge`);
+    expect(lines[2]).toBe(LINE_8_OF_10);
+  });
+
+  it("Bluesky blindspot and top story use the same head as Telegram", () => {
+    const blindspot = composeBlueskyBlindspot({
+      title: "Başlık",
+      clusterUrl: "https://tayfhaber.com/cluster/c1",
+      dominantZone: "iktidar",
+      sources: TEN_MEMBERS_TWO_AGGREGATORS,
+    });
+    expect(blindspot.text.split("\n")[2]).toBe(`${HEAD_8_OF_10}: ${LINE_8_OF_10}`);
+    const top = composeBlueskyTopStory({
+      title: "Başlık",
+      clusterUrl: "https://tayfhaber.com/cluster/c2",
+      sources: TEN_MEMBERS_TWO_AGGREGATORS,
+    });
+    expect(top.text.split("\n")[0]).toBe(`Gündem · ${HEAD_8_OF_10}, 1 bölge`);
+  });
+
+  it("an all-voting cluster keeps the bare count", () => {
+    const { text } = composeTelegramBlindspot({
+      title: "Başlık",
+      clusterUrl: "https://tayfhaber.com/cluster/c1",
+      dominantZone: "iktidar",
+      sources: [
+        { bias: "pro_government", kind: "outlet" },
+        { bias: "center", kind: "wire" },
+      ],
+    });
+    expect(text.split("\n")[2]).toBe(
+      "2 kaynak: İktidar 1 · Bağımsız 1 · Muhalefet 0",
+    );
+  });
+
+  it("Telegram blindspot: zone line drops the aggregator, the head names the classified count", () => {
     const { text } = composeTelegramBlindspot({
       title: "Başlık",
       clusterUrl: "https://tayfhaber.com/cluster/c1",
       dominantZone: "iktidar",
       sources: SOURCES_WITH_AGGREGATOR,
     });
-    expect(text.split("\n")[2]).toBe(`4 kaynak: ${VOTING_LINE}`);
+    expect(text.split("\n")[2]).toBe(`4 kaynak (3 sınıflandırılmış): ${VOTING_LINE}`);
   });
 
-  it("Telegram top story: zone line and 'N bölge' drop the aggregator, 'N kaynak' keeps it", () => {
+  it("Telegram top story: zone line and 'N bölge' drop the aggregator, the head names the classified count", () => {
     const { text } = composeTelegramTopStory({
       title: "Başlık",
       clusterUrl: "https://tayfhaber.com/cluster/c2",
       sources: SOURCES_WITH_AGGREGATOR,
     });
     const lines = text.split("\n");
-    expect(lines[0]).toBe("Gündem · 4 kaynak, 2 bölge");
+    expect(lines[0]).toBe("Gündem · 4 kaynak (3 sınıflandırılmış), 2 bölge");
     expect(lines[2]).toBe(VOTING_LINE);
   });
 
@@ -59,7 +127,7 @@ describe("zone line voting basis (aggregators excluded)", () => {
       dominantZone: "iktidar",
       sources: SOURCES_WITH_AGGREGATOR,
     });
-    expect(text.split("\n")[2]).toBe(`4 kaynak: ${VOTING_LINE}`);
+    expect(text.split("\n")[2]).toBe(`4 kaynak (3 sınıflandırılmış): ${VOTING_LINE}`);
     expect(embed.description).toBe(VOTING_LINE);
   });
 
@@ -70,7 +138,7 @@ describe("zone line voting basis (aggregators excluded)", () => {
       sources: SOURCES_WITH_AGGREGATOR,
     });
     const lines = text.split("\n");
-    expect(lines[0]).toBe("Gündem · 4 kaynak, 2 bölge");
+    expect(lines[0]).toBe("Gündem · 4 kaynak (3 sınıflandırılmış), 2 bölge");
     expect(lines[2]).toBe(VOTING_LINE);
     expect(embed.description).toBe(VOTING_LINE);
   });
@@ -85,7 +153,7 @@ describe("zone line voting basis (aggregators excluded)", () => {
       ],
     });
     const lines = text.split("\n");
-    expect(lines[0]).toBe("Gündem · 2 kaynak, 1 bölge");
+    expect(lines[0]).toBe("Gündem · 2 kaynak (1 sınıflandırılmış), 1 bölge");
     expect(lines[2]).toBe("İktidar 1 · Bağımsız 0 · Muhalefet 0");
   });
 

@@ -958,3 +958,195 @@ describe("the H1 names the company (hunt-17)", () => {
     expect(textOfNode(nav!.props.children)).toBe("Ekonomi/ARCLK");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h41-resilience-3: the quote stats and the intraday bars are decorative. Their
+// failure must not replace the whole ticker page with the error boundary; the
+// page that depends on the ticker's own data (existence probe, fetchTickerPage)
+// still throws exactly as before.
+// ---------------------------------------------------------------------------
+
+import { IntradayChart } from "@/components/finance/intraday-chart";
+import { PanelEmpty } from "@/components/finance/panel";
+import { fmtPct, fmtPrice } from "@/lib/finance/format";
+
+describe("optional reads degrade instead of throwing (h41-resilience-3)", () => {
+  const CHART_NOTE = "Gün içi grafik şu an yüklenemedi.";
+  const NO_DATA_COPY = "Bu hisse için seans içi veri henüz toplanmadı. Haberde geçen hisseler seans boyunca 5 dakikada bir kaydedilir.";
+  const params = () => Promise.resolve({ ticker: "THYAO" });
+
+  // Yahoo's payload during the session: the previous close is two sessions back
+  // (300), so a 330 price reads as +10 % / tavan. 2026-11-05 is a Thursday and
+  // 11:50Z is inside the BIST session, so the quote is live, not halted.
+  const yahoo = () => ({
+    THYAO: {
+      ticker: "THYAO",
+      price: 330,
+      prevClose: 300,
+      changePct: 10,
+      hasBaseline: true,
+      closes: [290, 300, 330],
+      currency: "TRY",
+      asOf: "2026-11-05T11:50:00.000Z",
+    },
+  });
+
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-05T12:00:00Z"));
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+    stubRenderableTickerPage();
+    getQuotesMock.mockResolvedValue(yahoo());
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const render = async () => collectEls(await TickerPage({ params: params() }));
+  const emptyNotes = (els: El[]) => els.filter((e) => e.type === PanelEmpty).map((e) => textOfNode(e.props.children));
+  const limitTags = (els: El[]) =>
+    els.filter((e) => e.type === "span" && String(e.props.className ?? "").includes("bg-brand/20")).map((e) => textOfNode(e.props.children));
+  const unknownMove = (els: El[]) => els.some((e) => e.type === "span" && textOfNode(e.props.children) === "değişim bilinmiyor");
+
+  describe("fetchIntraday rejects", () => {
+    it("the page resolves, the chart slot is empty and says the chart could not be loaded", async () => {
+      fetchIntradayMock.mockRejectedValue(new Error("[finance] fetchIntraday: statement timeout"));
+
+      const els = await render();
+
+      expect(els.some((e) => e.type === IntradayChart)).toBe(false);
+      expect(emptyNotes(els)).toContain(CHART_NOTE);
+      expect(emptyNotes(els)).not.toContain(NO_DATA_COPY);
+      // The header must not claim the data is absent when the read merely failed.
+      const panel = els.find((e) => e.props.title === "Seans içi");
+      expect(panel?.props.meta).toBe("5 dakikalık veri yüklenemedi");
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith("[ekonomi] optional read failed: intraday");
+    });
+
+    it("the rest of the page still renders (header, price, panels)", async () => {
+      fetchIntradayMock.mockRejectedValue(new Error("boom"));
+
+      const els = await render();
+
+      expect(els.find((e) => e.type === "h1")).toBeDefined();
+      expect(els.some((e) => e.props.title === "Basın ilgisi")).toBe(true);
+      expect(els.some((e) => e.props.title === "KAP bildirimleri")).toBe(true);
+    });
+
+    it("a read that SUCCEEDED with no bars keeps the old empty copy (the note is only for a failure)", async () => {
+      fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
+
+      const els = await render();
+      const notes = emptyNotes(els);
+
+      expect(notes).toContain(NO_DATA_COPY);
+      expect(notes).not.toContain(CHART_NOTE);
+      // An answered read with no data keeps the original absence claim.
+      expect(els.find((e) => e.props.title === "Seans içi")?.props.meta).toBe("5 dakikalık veri henüz yok");
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("a read that succeeded with bars still draws the chart, unchanged", async () => {
+      const bars = [
+        { ts: "2026-11-05T07:00:00.000Z", close: 321, volume: 10 },
+        { ts: "2026-11-05T07:05:00.000Z", close: 322, volume: 12 },
+      ];
+      fetchIntradayMock.mockResolvedValue({ day: "2026-11-05", bars });
+
+      const els = await render();
+
+      const chart = els.find((e) => e.type === IntradayChart);
+      expect(chart?.props.bars).toEqual(bars);
+      expect(emptyNotes(els)).not.toContain(CHART_NOTE);
+    });
+  });
+
+  describe("fetchQuoteStats rejects", () => {
+    it("the page resolves with a known-move-free quote: the move is '—' and there is no tavan/taban tag", async () => {
+      fetchQuoteStatsMock.mockRejectedValue(new Error("[finance] fetchQuoteStats: statement timeout"));
+
+      const els = await render();
+
+      expect(limitTags(els)).toEqual([]);
+      expect(unknownMove(els)).toBe(true);
+      // Yahoo's +10 % (two sessions back) is not printed anywhere.
+      expect(JSON.stringify(els.map((e) => textOfNode(e.props.children)))).not.toContain(fmtPct(10));
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith("[ekonomi] optional read failed: quote-stats");
+    });
+
+    it("still shows Yahoo's price", async () => {
+      fetchQuoteStatsMock.mockRejectedValue(new Error("boom"));
+
+      const els = await render();
+
+      expect(els.some((e) => e.type === "span" && String(e.props.className ?? "").includes("text-3xl") && textOfNode(e.props.children) === fmtPrice(330))).toBe(true);
+    });
+
+    it("control: with the stats read answering (even empty) the same Yahoo quote IS tagged tavan", async () => {
+      fetchQuoteStatsMock.mockResolvedValue({});
+
+      const els = await render();
+
+      expect(limitTags(els)).toEqual(["tavan"]);
+      expect(unknownMove(els)).toBe(false);
+      // The +10 % IS printed here, so the absence check above is not vacuous.
+      expect(JSON.stringify(els.map((e) => textOfNode(e.props.children)))).toContain(fmtPct(10));
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("does not stop the intraday chart from drawing", async () => {
+      fetchQuoteStatsMock.mockRejectedValue(new Error("boom"));
+      fetchIntradayMock.mockResolvedValue({
+        day: "2026-11-05",
+        bars: [
+          { ts: "2026-11-05T07:00:00.000Z", close: 321, volume: 10 },
+          { ts: "2026-11-05T07:05:00.000Z", close: 322, volume: 12 },
+        ],
+      });
+
+      const els = await render();
+
+      const chart = els.find((e) => e.type === IntradayChart);
+      expect(chart).toBeDefined();
+      // No stat and no baseline on the quote: the dashed previous-close line is dropped, not guessed.
+      expect(chart!.props.prevClose).toBeNull();
+    });
+  });
+
+  describe("both decorative reads reject", () => {
+    it("the page still resolves, with one warning per read", async () => {
+      fetchQuoteStatsMock.mockRejectedValue(new Error("a"));
+      fetchIntradayMock.mockRejectedValue(new Error("b"));
+
+      const els = await render();
+
+      expect(limitTags(els)).toEqual([]);
+      expect(emptyNotes(els)).toContain(CHART_NOTE);
+      expect(warn.mock.calls.map((c) => c[0]).sort()).toEqual([
+        "[ekonomi] optional read failed: intraday",
+        "[ekonomi] optional read failed: quote-stats",
+      ]);
+    });
+  });
+
+  describe("the essential reads keep their throw contract", () => {
+    it("fetchTickerPage rejecting rejects the page", async () => {
+      const boom = new Error("[finance] fetchTickerPage: statement timeout");
+      fetchTickerPageMock.mockRejectedValue(boom);
+
+      await expect(TickerPage({ params: params() })).rejects.toBe(boom);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("an unknown existence probe still rejects the page", async () => {
+      probeState.company = { data: null, error: TIMEOUT };
+
+      await expect(TickerPage({ params: params() })).rejects.toThrow("[ekonomi] ticker existence unknown: THYAO");
+    });
+  });
+});

@@ -10,11 +10,20 @@ import {
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /kalite — M-09, the pipeline's own quality scoreboard. Publishes the
-// exact numbers `node scripts/audit-clusters.mjs --json --persist` writes
-// nightly to `cluster_quality_snapshots` (.github/workflows/cluster-audit.yml,
-// 03:00 UTC), read via src/lib/quality/snapshots.ts (unit tested there —
-// this file trusts its null-safe, never-throw contract and only decides how
-// to render null / [] / real rows).
+// exact numbers `node scripts/audit-clusters.mjs --json --persist` writes once
+// a day to `cluster_quality_snapshots` (.github/workflows/cluster-audit.yml),
+// read via src/lib/quality/snapshots.ts (unit tested there — this file trusts
+// its null-safe, never-throw contract and only decides how to render null /
+// [] / real rows).
+//
+// Basis and timing are stated as they are (h41-derived-1). The audit reads only
+// politika/son_dakika articles (scripts/audit-clusters.mjs POLITICS_CATEGORIES),
+// so every count here is politics-only. The workflow is scheduled for 03:00 UTC
+// but GitHub starts scheduled runs late (observed 07:35-10:38 UTC) and skips
+// some days, so the page never claims a fixed hour or "every night": it says the
+// job runs once a day, prints each row's real `taken_at`, and counts the days
+// with no measurement. The chart places points by Istanbul calendar day for the
+// same reason (a missing day shows as a wider step, see chartX).
 //
 // Precision and recall are deliberately NOT shown as numbers here — see the
 // section below the table. `report.mjs`'s precision/recall PROBES exist
@@ -27,7 +36,7 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 export const metadata: Metadata = staticPageMetadata({
   title: "Küme kalitesi",
   description:
-    "Tayf'ın kümeleme ardışık düzeninin her gece kendi üzerinde ölçtüğü kalite sayıları: haber ve küme sayısı, tekil küme oranı, kaynak çeşitliliği ve kör nokta tutarsızlık oranı.",
+    "Tayf'ın kümeleme ardışık düzeninin günde bir kez kendi üzerinde ölçtüğü kalite sayıları (yalnızca siyaset haberleri): haber ve küme sayısı, tekil küme oranı, kaynak çeşitliliği ve kör nokta tutarsızlık oranı.",
   path: "/kalite",
 });
 
@@ -56,6 +65,102 @@ function formatCount(n: number): string {
   return n.toLocaleString("tr-TR");
 }
 
+const ISTANBUL_TZ = "Europe/Istanbul";
+const DAY_MS = 86_400_000;
+
+// Built once per module; the formats are pinned to Istanbul like formatTurkishDate.
+const ISTANBUL_TIME_FORMAT = new Intl.DateTimeFormat("tr-TR", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+  timeZone: ISTANBUL_TZ,
+});
+const ISTANBUL_DATE_PARTS = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  timeZone: ISTANBUL_TZ,
+});
+
+/**
+ * The instant a row was really measured: '5 Kasım 2026 13:26' (Istanbul).
+ * The job is scheduled for 03:00 UTC but GitHub runs it hours late, so the
+ * date alone would hide when the numbers were taken.
+ */
+function formatMeasuredAt(iso: string): string {
+  const date = formatTurkishDate(iso);
+  if (date === "") return "";
+  return `${date} ${ISTANBUL_TIME_FORMAT.format(new Date(iso))}`;
+}
+
+/**
+ * The Istanbul calendar day of an instant as a whole day number (days from
+ * 1970-01-01 to that civil date), so two instants can be subtracted into
+ * calendar days. NaN for an unparseable timestamp.
+ */
+function istanbulDayNumber(iso: string): number {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return NaN;
+  const parts = ISTANBUL_DATE_PARTS.formatToParts(t);
+  const part = (type: string): number =>
+    Number(parts.find((p) => p.type === type)?.value);
+  return Date.UTC(part("year"), part("month") - 1, part("day")) / DAY_MS;
+}
+
+/**
+ * Horizontal position of a snapshot in the chart's plot box. Points are
+ * placed by Istanbul calendar-day offset from the first snapshot, not by row
+ * index, so a day with no measurement leaves a visible, proportional gap
+ * instead of silently collapsing (10-12, 10-13, 10-15: the middle point sits
+ * at one third, not one half). The first snapshot lands on `plotLeft`, the
+ * last on `plotLeft + plotWidth`.
+ *
+ * If every snapshot falls on one Istanbul day (two manual runs, say) there is
+ * no day offset to use, so the time of day spreads them instead. An
+ * unparseable timestamp sits on the left edge rather than producing NaN.
+ */
+export function chartX(
+  takenAtIso: string,
+  firstIso: string,
+  lastIso: string,
+  plotLeft: number,
+  plotWidth: number,
+): number {
+  const day = istanbulDayNumber(takenAtIso);
+  const firstDay = istanbulDayNumber(firstIso);
+  const lastDay = istanbulDayNumber(lastIso);
+
+  let fraction = 0;
+  if (Number.isFinite(day) && Number.isFinite(firstDay) && Number.isFinite(lastDay)) {
+    if (lastDay > firstDay) {
+      fraction = (day - firstDay) / (lastDay - firstDay);
+    } else {
+      const at = new Date(takenAtIso).getTime();
+      const start = new Date(firstIso).getTime();
+      const end = new Date(lastIso).getTime();
+      fraction = end > start ? (at - start) / (end - start) : 0;
+    }
+  }
+  return plotLeft + Math.min(1, Math.max(0, fraction)) * plotWidth;
+}
+
+/**
+ * Istanbul calendar days between the first and last snapshot (inclusive) that
+ * have no snapshot at all. Counts distinct days, not rows, so a second run on
+ * one day cannot hide an empty day elsewhere.
+ */
+function countMissingDays(snapshots: ReadonlyArray<{ takenAt: string }>): number {
+  const days = new Set<number>();
+  for (const s of snapshots) {
+    const day = istanbulDayNumber(s.takenAt);
+    if (Number.isFinite(day)) days.add(day);
+  }
+  if (days.size < 2) return 0;
+  const all = [...days];
+  const spanned = Math.max(...all) - Math.min(...all) + 1;
+  return spanned - days.size;
+}
+
 export default async function QualityPage() {
   const snapshots = await getQualitySnapshots();
 
@@ -64,17 +169,19 @@ export default async function QualityPage() {
       <PageHero
         kicker="Şeffaflık"
         title="Küme kalitesi"
-        subtitle="Tayf, kendi kümeleme ardışık düzeninin kalitesini her gece ölçer ve burada — dışarıdan bir denetim değil, sistemin kendi üzerinde çalıştırdığı bir ölçüm olarak — yayımlar."
+        subtitle="Tayf, kendi kümeleme ardışık düzeninin kalitesini günde bir kez ölçer ve burada — dışarıdan bir denetim değil, sistemin kendi üzerinde çalıştırdığı bir ölçüm olarak — yayımlar."
       />
 
       <section className="space-y-3">
         <p className={proseClass}>
           Bu sayfadaki her sayı, günlük denetim işinin (
           <code className="font-mono text-xs">.github/workflows/cluster-audit.yml</code>
-          , 03:00 UTC) çalıştırdığı <code className="font-mono text-xs">scripts/audit-clusters.mjs</code>{" "}
-          betiğinin, aynı gece kümelemenin ürettiği verinin üzerinde
+          ) çalıştırdığı <code className="font-mono text-xs">scripts/audit-clusters.mjs</code>{" "}
+          betiğinin, çalıştığı andan geriye son 48 saatin verisi üzerinde
           hesapladığı ve <code className="font-mono text-xs">cluster_quality_snapshots</code>{" "}
-          tablosuna yazdığı sonuçtur. Aşağıda son 30 gecelik kayıt gösterilir.
+          tablosuna yazdığı sonuçtur. İş günde bir kez çalışır; GitHub
+          zamanlanmış işleri geciktirebildiği için ölçüm saati değişir ve bazı
+          günler ölçüm alınamayabilir. Aşağıda son 30 ölçüm gösterilir.
         </p>
       </section>
 
@@ -114,8 +221,8 @@ function EmptyState() {
   return (
     <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
       <p className="text-sm text-muted-foreground">
-        Henüz hiç gece denetimi kaydedilmedi. İlk kayıt, günlük denetim işi
-        (03:00 UTC) ilk kez çalıştığında burada görünecek.
+        Henüz hiç denetim ölçümü kaydedilmedi. İlk kayıt, günlük denetim işi
+        ilk kez çalıştığında burada görünecek.
       </p>
     </div>
   );
@@ -123,8 +230,14 @@ function EmptyState() {
 
 function StatTiles({ latest }: { latest: QualitySnapshot }) {
   const tiles: Array<{ label: string; value: string }> = [
-    { label: "Haber sayısı", value: formatCount(latest.articleCount) },
-    { label: "Küme sayısı", value: formatCount(latest.clusterCount) },
+    {
+      label: `Siyaset haberi (${latest.windowHours} saat)`,
+      value: formatCount(latest.articleCount),
+    },
+    {
+      label: "Küme sayısı (tek haberliler dahil)",
+      value: formatCount(latest.clusterCount),
+    },
     { label: "Tekil küme oranı", value: formatPercent(latest.singletonRate) },
     {
       label: "Kaynak çeşitliliği",
@@ -141,9 +254,9 @@ function StatTiles({ latest }: { latest: QualitySnapshot }) {
       <p className="text-xs text-muted-foreground">
         Son ölçüm:{" "}
         <span className="font-mono text-foreground">
-          {formatTurkishDate(latest.takenAt)}
+          {formatMeasuredAt(latest.takenAt)}
         </span>{" "}
-        · son {latest.windowHours} saatlik pencere
+        (İstanbul saati) · son {latest.windowHours} saatlik pencere
       </p>
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         {tiles.map((tile) => (
@@ -205,8 +318,7 @@ function SingletonRateChart({ snapshots }: { snapshots: QualitySnapshot[] }) {
     return (
       <section className="space-y-2">
         <p className="text-xs text-muted-foreground">
-          Grafik için en az iki gecelik kayıt gerekiyor — henüz yalnızca bir
-          kayıt var.
+          Grafik için en az iki ölçüm gerekiyor — henüz yalnızca bir kayıt var.
         </p>
       </section>
     );
@@ -217,21 +329,22 @@ function SingletonRateChart({ snapshots }: { snapshots: QualitySnapshot[] }) {
   const maxRate = Math.max(...rates);
   const span = maxRate - minRate || 1;
 
-  const points = chrono.map((s, i) => {
-    const x = PAD_LEFT + (i / (n - 1)) * PLOT_W;
+  const first = chrono[0]!;
+  const last = chrono[n - 1]!;
+
+  const points = chrono.map((s) => {
+    const x = chartX(s.takenAt, first.takenAt, last.takenAt, PAD_LEFT, PLOT_W);
     const y = PAD_TOP + PLOT_H - ((s.singletonRate - minRate) / span) * PLOT_H;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
-
-  const first = chrono[0]!;
-  const last = chrono[n - 1]!;
+  const missingDays = countMissingDays(chrono);
   const firstDate = formatTurkishDate(first.takenAt);
   const lastDate = formatTurkishDate(last.takenAt);
 
   return (
     <section className={cardClass + " space-y-2"}>
       <h2 className="text-[11px] uppercase tracking-[0.1em] text-muted-foreground">
-        Tekil küme oranı — son {n} gece
+        {`Tekil küme oranı — son ${n} ölçüm`}
       </h2>
       {/* pl-10 is the gutter the percent labels sit in (right-full of the plot box). */}
       <div className="w-full pl-10">
@@ -239,7 +352,7 @@ function SingletonRateChart({ snapshots }: { snapshots: QualitySnapshot[] }) {
           <svg
             viewBox={`0 0 ${CHART_W} ${CHART_H}`}
             role="img"
-            aria-label={`Son ${n} gecelik kayıtta (${firstDate}–${lastDate}) tekil küme oranı %${Math.round(minRate * 100)} ile %${Math.round(maxRate * 100)} arasında değişti; en son değer %${Math.round(last.singletonRate * 100)}.`}
+            aria-label={`Son ${n} ölçümde (${firstDate}–${lastDate}) tekil küme oranı %${Math.round(minRate * 100)} ile %${Math.round(maxRate * 100)} arasında değişti; en son değer %${Math.round(last.singletonRate * 100)}.`}
             className="block h-auto w-full"
           >
             <g
@@ -300,6 +413,11 @@ function SingletonRateChart({ snapshots }: { snapshots: QualitySnapshot[] }) {
           </span>
         </div>
       </div>
+      {missingDays > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          {`Bu aralıkta ${missingDays} gün ölçüm yok.`}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -308,7 +426,7 @@ function SnapshotsTable({ snapshots }: { snapshots: QualitySnapshot[] }) {
   return (
     <section className={cardClass}>
       <h2 id="kalite-tablo" className="sr-only">
-        Gece gece kalite ölçümleri
+        Günlük kalite ölçümleri
       </h2>
       <div
         className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -320,10 +438,10 @@ function SnapshotsTable({ snapshots }: { snapshots: QualitySnapshot[] }) {
           <thead>
             <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
               <th scope="col" className="py-2 pr-4 font-medium">
-                Tarih
+                Tarih ve saat (İstanbul saati)
               </th>
               <th scope="col" className="py-2 pr-4 font-medium">
-                Haber
+                Siyaset haberi
               </th>
               <th scope="col" className="py-2 pr-4 font-medium">
                 Küme
@@ -343,7 +461,7 @@ function SnapshotsTable({ snapshots }: { snapshots: QualitySnapshot[] }) {
             {snapshots.map((s) => (
               <tr key={s.id}>
                 <td className="py-2.5 pr-4 whitespace-nowrap text-muted-foreground">
-                  {formatTurkishDate(s.takenAt)}
+                  {formatMeasuredAt(s.takenAt)}
                 </td>
                 <td className="py-2.5 pr-4 font-mono text-foreground">
                   {formatCount(s.articleCount)}
@@ -376,6 +494,16 @@ function Definitions() {
         Tanımlar
       </h2>
       <dl className="grid gap-3 sm:grid-cols-2">
+        <div className={ruleCard}>
+          <dt className={ruleTerm}>Kapsam</dt>
+          <dd className={ruleDef}>
+            Denetim yalnızca politika ve son dakika kategorisindeki haberleri
+            ve bu haberlerin kümelerini sayar. Bu yüzden haber ve küme
+            sayıları, tüm kategorileri kapsayan /trends ve kaynak
+            sayfalarındaki sayılardan küçüktür; küme sayısına tek haberli
+            kümeler de dahildir.
+          </dd>
+        </div>
         <div className={ruleCard}>
           <dt className={ruleTerm}>Tekil küme (singleton)</dt>
           <dd className={ruleDef}>
