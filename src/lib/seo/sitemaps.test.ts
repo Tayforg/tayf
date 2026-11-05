@@ -609,6 +609,38 @@ describe("getNewsSitemapXml", () => {
     fixture.clustersError = { message: "db down" };
     await expect(getNewsSitemapXml("https://tayf.test")).rejects.toThrow(/db down/);
   });
+
+  // h34-reader-2 follow-up: the cluster page serves a question / explainer title
+  // `noindex`, so the news sitemap must not submit it ("Submitted URL marked
+  // noindex"). The test is on the SERVED title: the neutral one when it has text.
+  it("leaves out a cluster whose served title is a question or an explainer", async () => {
+    fixture.clusters = [
+      { id: "ok-1", title_tr: "Merkez Bankası faizi sabit tuttu", title_tr_neutral: null, first_published: "2026-09-27T10:00:00.000Z" },
+      { id: "q-mark", title_tr: "Saniye Caran kimdir? Kaç yaşında, nereli?", title_tr_neutral: null, first_published: "2026-09-27T10:01:00.000Z" },
+      { id: "q-phrase", title_tr: "Saniye Caran kimdir kaç yaşında nereli", title_tr_neutral: "  ", first_published: "2026-09-27T10:02:00.000Z" },
+      { id: "q-neutral", title_tr: "Faiz kararı açıklandı", title_tr_neutral: "Faiz kararı ne olacak?", first_published: "2026-09-27T10:03:00.000Z" },
+      { id: "ok-neutral", title_tr: "Saniye Caran kimdir?", title_tr_neutral: "Saniye Caran CHP'den istifa etti", first_published: "2026-09-27T10:04:00.000Z" },
+    ];
+    const xml = await getNewsSitemapXml("https://tayf.test");
+
+    expect(xml).toContain("https://tayf.test/cluster/ok-1<");
+    expect(xml).toContain("https://tayf.test/cluster/ok-neutral<");
+    expect(xml).not.toContain("/cluster/q-mark<");
+    expect(xml).not.toContain("/cluster/q-phrase<");
+    expect(xml).not.toContain("/cluster/q-neutral<");
+    expect((xml.match(/<url>/g) ?? []).length).toBe(2);
+    // The served title of a listed cluster is still the neutral one.
+    expect(xml).toContain("<news:title>Saniye Caran CHP&apos;den istifa etti</news:title>");
+  });
+
+  it("an all-question window is a legitimate empty urlset, not an error", async () => {
+    fixture.clusters = [
+      { id: "q-1", title_tr: "Bu ne zaman bitecek?", title_tr_neutral: null, first_published: "2026-09-27T10:00:00.000Z" },
+    ];
+    const xml = await getNewsSitemapXml("https://tayf.test");
+    expect((xml.match(/<url>/g) ?? []).length).toBe(0);
+    expect(xml).toContain("<urlset");
+  });
 });
 
 describe("getClustersMonthXml", () => {
@@ -648,6 +680,53 @@ describe("getClustersMonthXml", () => {
     await expect(getClustersMonthXml("https://tayf.test", "2026-09")).rejects.toThrow(
       /range boom/,
     );
+  });
+
+  // h34-reader-2 follow-up: same rule as the news sitemap (the page serves a
+  // question / explainer title `noindex`). The select carries the two title
+  // columns for it.
+  it("reads the two title columns and leaves out a cluster whose served title is a question", async () => {
+    fixture.clusters = [
+      { id: "m-ok", updated_at: "2026-09-01T00:00:00.000Z", title_tr: "Merkez Bankası faizi sabit tuttu", title_tr_neutral: null },
+      { id: "m-q", updated_at: "2026-09-02T00:00:00.000Z", title_tr: "Saniye Caran kimdir? Kaç yaşında, nereli?", title_tr_neutral: null },
+      { id: "m-q-neutral", updated_at: "2026-09-03T00:00:00.000Z", title_tr: "Faiz kararı", title_tr_neutral: "Faiz ne olacak?" },
+      { id: "m-ok-neutral", updated_at: "2026-09-04T00:00:00.000Z", title_tr: "Kimdir bu?", title_tr_neutral: "Bakan Çiftçi İtalyan mevkidaşıyla görüştü" },
+      { id: "m-bare", updated_at: "2026-09-05T00:00:00.000Z" },
+    ];
+    const xml = await getClustersMonthXml("https://tayf.test", "2026-09");
+
+    const state = fixture.lastClustersState as BuilderState;
+    const columns = String((state.selectArgs as unknown[])[0]);
+    expect(columns).toContain("title_tr");
+    expect(columns).toContain("title_tr_neutral");
+    expect(columns).toContain("updated_at");
+
+    expect(xml).toContain("/cluster/m-ok<");
+    expect(xml).toContain("/cluster/m-ok-neutral<");
+    expect(xml).toContain("/cluster/m-bare<"); // no title on the row: nothing to judge
+    expect(xml).not.toContain("/cluster/m-q<");
+    expect(xml).not.toContain("/cluster/m-q-neutral<");
+    expect((xml.match(/<url>/g) ?? []).length).toBe(3);
+  });
+
+  it("paging is by rows read, not rows listed: a full page of questions still asks for the next page", async () => {
+    fixture.clusters = [
+      ...Array.from({ length: 1000 }, (_, i) => ({
+        id: `q-${i}`,
+        updated_at: "2026-09-01T00:00:00.000Z",
+        title_tr: "Bu kimdir?",
+        title_tr_neutral: null,
+      })),
+      { id: "last-ok", updated_at: "2026-09-02T00:00:00.000Z", title_tr: "Düz başlık", title_tr_neutral: null },
+    ];
+    const xml = await getClustersMonthXml("https://tayf.test", "2026-09");
+
+    expect(fixture.rangeCalls).toEqual([
+      { from: 0, to: 999 },
+      { from: 1000, to: 1999 },
+    ]);
+    expect((xml.match(/<url>/g) ?? []).length).toBe(1);
+    expect(xml).toContain("/cluster/last-ok<");
   });
 });
 

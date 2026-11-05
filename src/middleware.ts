@@ -65,10 +65,49 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     The three nested routes the cluster page owns (/opengraph-image,
 //     /twitter-image, /kart) get the same 308 to the lower-case path, with no
 //     merged lookup; any other sub (and a non-UUID head) stays decode-only. The
-//     query string is kept. A malformed escape is still gate 8's 400, answered
-//     first. /embed/cluster/:id does not share this gate (it is decode-only
-//     below) and is out of scope. The page itself can therefore only ever
-//     render a lower-case id.
+//     query string of the page itself is kept. A malformed escape is still gate
+//     8's 400, answered first. /embed/cluster/:id does not share this gate (it
+//     is decode-only below) and is out of scope. The page itself can therefore
+//     only ever render a lower-case id.
+//
+//     Canonical image queries (h34-security-1). The three nested routes ignore
+//     their query, but the CDN keys on it: ?v=<random> on /kart, on a cluster's
+//     /opengraph-image or /twitter-image (or on a source's, gate 4) is a fresh
+//     MISS and a fresh Satori render every time, which sidesteps the s-maxage
+//     the routes set for the exact URL (h30-abuse-2, h30-abuse-5). The only
+//     legitimate query is Next's own content hash on the two file-convention
+//     images (IMAGE_HASH_QUERY: '?' + 16 lower-case hex, what og:image and
+//     twitter:image carry); /kart is linked bare (story-card.ts, share-button).
+//     Anything else is answered with ONE 308 to the bare path, folded into the
+//     case 308 above (an upper-case id with a junk query goes straight to the
+//     lower-case bare path, never through two hops). A 308 here is an edge
+//     answer with no I/O; the render it replaces is a Node function plus Satori
+//     plus 50-140 kB of egress. Only a head that is a UUID once percent-decoded
+//     is touched: the routes 404 any other head before doing work, and the id
+//     itself is not bounded here (no existence probe, same deliberate deviation
+//     as above). The decoding matters: Next decodes a dynamic segment before the
+//     route runs, so /cluster/%32b8d3632-.../kart (any digit written %XX, in any
+//     case) renders exactly like the plain spelling, and a UUID test on the raw
+//     segment let every escaped spelling skip the rule (about 2^36 spellings per
+//     id, each its own CDN key). The one 308 therefore also folds an escaped head
+//     to the canonical lower-case path. A static sub is not decoded (an escaped
+//     /%6Bart is a 404 on prod). The Location is the request's own NextURL,
+//     cloned, so it keeps the request origin and carries nothing the client sent
+//     except the (UUID-validated) path.
+//
+//     What the query rule does NOT stop: IMAGE_HASH_QUERY is a shape test, so
+//     ?0000000000000001, ?0000000000000002, ... are 2^64 allowed spellings of the
+//     two file-convention images (cluster and source, og and twitter), each a
+//     fresh CDN key and a fresh render. It closes the naive cache busters (?v=,
+//     ?cb=, any parameter) and /kart completely; it cannot enumerate the one hash
+//     the build emits per image. That hash is the bundler's content hash of the
+//     route file (Turbopack's, not the webpack loader's: that loader's hash of the
+//     current route file did not match the one on prod when tried), computed after next.config is
+//     loaded and never exposed to the middleware bundle, so there is nothing to
+//     allow-list without reimplementing it, and a wrong list would 308 every real
+//     unfurl. The remaining cost is bounded by a rate rule, not by this gate:
+//     founder follow-up, a WAF rate limit on /cluster/*/(opengraph-image|
+//     twitter-image) and /source/*/(opengraph-image|twitter-image).
 //
 //  4. /source/:slug — a real 404 for a slug that is not in `sources`. The
 //     key space is small (tens of rows), so src/lib/seo/source-slug-gate.ts
@@ -88,7 +127,10 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     cache: Vercel runs routing middleware BEFORE its CDN cache, so this answer
 //     is not served by the CDN. What bounds a flood of one bad slug is the 60 s
 //     per-isolate negative cache in source-slug-gate. Every other nested path
-//     stays on gate 8's decode-only answer, with no lookup.
+//     stays on gate 8's decode-only answer, with no lookup. For a slug that is
+//     not missing, the two image routes then get the canonical-query rule of
+//     gate 3 (a query other than Next's content hash is one 308 to the bare
+//     path), so the order is: bad escape (400), unknown slug (404), query (308).
 //
 //  5. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
@@ -430,6 +472,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // The nested routes under /cluster/<id> that gate 3 folds to a lower-case id
 // (h32-livebk-1): the per-cluster OG and Twitter images and the /kart card.
 const CLUSTER_CASE_SUBS: ReadonlySet<string> = new Set(["opengraph-image", "twitter-image", "kart"]);
+// The only query the image routes are ever asked with (h34-security-1): Next's
+// content hash on the file-convention images, '?' + 16 lower-case hex (the
+// og:image / twitter:image URLs). Anything else is a CDN key that renders the
+// same bytes. A shape test, not an allow-list of the emitted hashes (see gate 3:
+// 2^64 spellings still pass). Anchored and linear.
+const IMAGE_HASH_QUERY = /^\?[0-9a-f]{16}$/;
 // No route matches this path — Next renders app/not-found.tsx with a real
 // 404 status and the site's own chrome, instead of a 0-byte response.
 const NOT_FOUND_REWRITE_PATH = "/__tayf-not-found";
@@ -437,6 +485,17 @@ const ADMIN_COOKIE_NAME = "admin_session";
 
 function notFoundRewrite(req: NextRequest): NextResponse {
   return NextResponse.rewrite(new URL(NOT_FOUND_REWRITE_PATH, req.url));
+}
+
+/**
+ * The query an image route may keep (h34-security-1). `search` is NextURL.search:
+ * '' or '?...'. /kart takes none; the file-convention images take Next's content
+ * hash and nothing else (not the hash plus a parameter, not an upper-case or
+ * short or long hash, not an escaped one).
+ */
+function allowedImageSearch(sub: string, search: string): string {
+  if (sub === "kart") return "";
+  return IMAGE_HASH_QUERY.test(search) ? search : "";
 }
 
 // The admin shell is session-gated, never shared content. Without a header Next
@@ -501,6 +560,15 @@ function imageFragmentRefused(): NextResponse {
  */
 function decodeOnly(pathname: string, kind: BadEncodingKind): NextResponse {
   return pathDecodes(pathname) ? NextResponse.next() : badEncoding(kind);
+}
+
+/** `segment` percent-decoded once (what Next hands a dynamic route), or null when it has a malformed escape. */
+function decodeSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
 }
 
 /** True when the whole pathname percent-decodes (no malformed '%' escape). */
@@ -687,10 +755,26 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
       if (!pathDecodes(pathname)) return badEncoding("text");
       const head = segment.slice(0, slash);
       const sub = segment.slice(slash + 1);
-      if (UUID_RE.test(head) && head !== head.toLowerCase() && CLUSTER_CASE_SUBS.has(sub)) {
-        const url = req.nextUrl.clone();
-        url.pathname = `/cluster/${head.toLowerCase()}/${sub}`;
-        return NextResponse.redirect(url, 308);
+      // The head is compared DECODED. NextURL.pathname stays percent-encoded and
+      // Next decodes a dynamic segment before the route runs, so
+      // /cluster/%32b8d3632-.../kart renders like the plain spelling (checked on
+      // prod, 2026-11-05) while a test on the raw segment never saw a UUID. Every
+      // escaped or upper-case spelling now takes the one 308 to the canonical
+      // lower-case path (`lowerHead !== head` is true for any spelling that is not
+      // already it). The sub is NOT decoded: Next does not match an escaped static
+      // segment (/kart as /%6Bart answers 404 on prod), so there is nothing to fold.
+      const decodedHead = CLUSTER_CASE_SUBS.has(sub) ? decodeSegment(head) : null;
+      if (decodedHead !== null && UUID_RE.test(decodedHead)) {
+        // One 308 covers the case fold, the escape fold and the query fold
+        // (h34-security-1), so a request that needs several still takes a single hop.
+        const lowerHead = decodedHead.toLowerCase();
+        const search = allowedImageSearch(sub, req.nextUrl.search);
+        if (lowerHead !== head || search !== req.nextUrl.search) {
+          const url = req.nextUrl.clone();
+          url.pathname = `/cluster/${lowerHead}/${sub}`;
+          url.search = search;
+          return NextResponse.redirect(url, 308);
+        }
       }
       return NextResponse.next();
     }
@@ -736,12 +820,21 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
       // lookup). The s-maxage only helps a downstream shared cache. Fail open
       // as the page does: "unknown" (lookup failed) and "exists" both continue
       // to the image route.
-      return (await sourceGate.check(head)) === "missing"
-        ? new NextResponse(null, {
-            status: 404,
-            headers: { "cache-control": "public, s-maxage=300" },
-          })
-        : NextResponse.next();
+      if ((await sourceGate.check(head)) === "missing") {
+        return new NextResponse(null, {
+          status: 404,
+          headers: { "cache-control": "public, s-maxage=300" },
+        });
+      }
+      // Past the slug gate (h34-security-1): a query other than Next's content
+      // hash is one 308 to the bare path instead of a fresh render per variant.
+      const search = allowedImageSearch(sub, req.nextUrl.search);
+      if (search !== req.nextUrl.search) {
+        const url = req.nextUrl.clone();
+        url.search = search;
+        return NextResponse.redirect(url, 308);
+      }
+      return NextResponse.next();
     }
     // Fail open: "unknown" falls through to the page's own soft 404.
     return (await sourceGate.check(rest)) === "missing"

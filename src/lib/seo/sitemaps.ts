@@ -4,6 +4,7 @@ import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { escapeXml } from "@/lib/feeds/rss-builder";
 import { createReaderClient } from "@/lib/supabase/server";
 import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
+import { hasIndexableTitle, servedClusterTitle } from "@/lib/seo/indexable-title";
 import { THIN_SOURCE_MIN, THIN_SOURCE_WINDOW_DAYS, isThinSource } from "@/lib/seo/thin-source";
 import { WEEK_ARCHIVE_MAX_WEEKS, shiftWeek, weekRange } from "@/lib/weekly/week-archive";
 import { WEEK_ARCHIVE_FIRST, weekKeyFromMs } from "@/lib/weekly/week-key";
@@ -17,6 +18,15 @@ import { WEEK_ARCHIVE_FIRST, weekKeyFromMs } from "@/lib/weekly/week-key";
 // delivered an article in the last 7 days (silent ones are `noindex` and are
 // left out, see thin-source.ts), and /sitemaps/hubs.xml for the indexable entity hubs (built in hub-sitemap.ts,
 // which this file deliberately does not import).
+//
+// The cluster lists (the month files and the news file) hold only clusters the
+// page itself offers to the index: article_count >= 2 (3 for news), not archived,
+// and a served title that is not a question or an SEO explainer (h34-reader-2:
+// the page marks such a cluster `noindex`, so listing it would be a Search
+// Console "Submitted URL marked noindex" error). The title test is
+// hasIndexableTitle (indexable-title.ts) on `title_tr_neutral ?? title_tr`, done
+// in JS on the rows read: the explainer phrases are folded matches PostgREST
+// cannot express, and paging stays by rows read.
 //
 // Every DB-backed builder below THROWS on a Supabase error instead of
 // returning an empty result — an empty-but-cached sitemap would silently
@@ -434,14 +444,13 @@ async function readNewsSitemapXml(baseUrl: string): Promise<string> {
     throw new Error(`news sitemap query failed: ${error.message}`);
   }
 
-  const entries: NewsUrlEntry[] = (data ?? []).map((row) => {
-    const neutral = row.title_tr_neutral?.trim();
-    return {
+  const entries: NewsUrlEntry[] = (data ?? [])
+    .filter((row) => hasIndexableTitle(row))
+    .map((row) => ({
       loc: `${baseUrl}/cluster/${row.id}`,
-      title: neutral ? neutral : row.title_tr,
+      title: servedClusterTitle(row),
       publishedAt: row.first_published,
-    };
-  });
+    }));
 
   return renderNewsUrlset(entries);
 }
@@ -465,6 +474,8 @@ export async function getNewsSitemapXml(baseUrl: string): Promise<string> {
 interface MonthClusterRow {
   id: string;
   updated_at: string;
+  title_tr: string | null;
+  title_tr_neutral: string | null;
 }
 
 async function readClustersMonthXml(baseUrl: string, month: string): Promise<string> {
@@ -479,7 +490,7 @@ async function readClustersMonthXml(baseUrl: string, month: string): Promise<str
 
     const { data, error } = await supabase
       .from("clusters")
-      .select("id, updated_at")
+      .select("id, updated_at, title_tr, title_tr_neutral")
       .eq("is_archived", false)
       .gte("article_count", 2)
       .gte("first_published", start)
@@ -495,6 +506,7 @@ async function readClustersMonthXml(baseUrl: string, month: string): Promise<str
 
     const rows = data ?? [];
     for (const row of rows) {
+      if (!hasIndexableTitle(row)) continue;
       entries.push({ loc: `${baseUrl}/cluster/${row.id}`, lastmod: row.updated_at });
     }
 

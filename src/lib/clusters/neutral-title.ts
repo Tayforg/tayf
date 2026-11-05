@@ -110,13 +110,32 @@
 // does not jump in the "newest" order. A replay of the 141 population and of the
 // 150-cluster corpus is in neutral-title-replay.test.ts.
 
+// extractive-v6 (hunt 34, h34-reader-1 and h34-reader-2): MODEL BUMP. The re-pick's
+// incumbent protection froze five live top-story titles: b6fe7960 (19 sources)
+// says Vance blamed the loss on Israel while about 12 members say the war, 2f43df00
+// names no subject ("DEM Parti Sözcüsü ile Barış Anneleri'ni kabul etti" while eight
+// of nine members say Kurtulmuş), 97da6195 (28 sources) is a vague Title Case line,
+// 97589454 announces ("açıklama yapılacak") what the members report as done and
+// 268d231b dropped its verb. incumbentDefect() lowers the bar for such a stored title
+// from REPICK_MARGIN / REPICK_MARGIN_FULL_LENGTH to zero (a minority claim, a Title
+// Case run, a majority subject the stored title lacks); it never decides a pick by
+// itself: the best member title must still outscore the stored one. The first-pick
+// floor no longer ships a question or an SEO explainer ("Saniye Caran kimdir? ...
+// kaç yaşında, nereli?") while any statement exists (isQuestionTitle), and
+// 'şahlanış', 'dev dönüşüm', 'tescillendi' and 'sarsılmaz' (an advertorial's
+// vocabulary) join the loaded words. What the bump does: migration 141 re-offers the
+// active clusters of the last 14 days whose title_neutral_model is older than this id,
+// and migration 155 re-offers a stamped cluster after it has grown by greatest(3,
+// half of its stamped size) instead of doubling. There is no UPDATE: the headline cron
+// heals about 20 clusters per 5-minute run.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
 // the last 14 days of older-version titles (neutral_title_repick_candidates,
 // migration 141). Readers must not compare against this constant: use
 // isExtractiveModelId, which recognises every version.
-export const EXTRACTIVE_MODEL_ID = "extractive-v5";
+export const EXTRACTIVE_MODEL_ID = "extractive-v6";
 
 /** True for any extractive pick, whatever rule version wrote it. */
 export function isExtractiveModelId(model: unknown): boolean {
@@ -249,6 +268,14 @@ const LOADED_FOLDED: RegExp[] = [
   new RegExp(`${L}y[ıi]kt[ıi]${R}`, "u"),
   new RegExp(`${L}hezimet`, "u"),
   new RegExp(`${L}tarihe\\s+ge[çc]en${R}`, "u"),
+  // Advertorial vocabulary (hunt 34, h34-reader-2, 82a06ce6: "Çeyrek asırlık istikrar,
+  // küresel siyasette şahlanış: 24 yıllık dev dönüşüm verilerle tescillendi"). The
+  // first two have no right edge on purpose (şahlanışı, dönüşümü); 'tescillendi' and
+  // 'sarsılmaz' are whole words.
+  new RegExp(`${L}şahlanış`, "u"),
+  new RegExp(`${L}dev\\s+dönüşüm`, "u"),
+  new RegExp(`${L}tescillendi${R}`, "u"),
+  new RegExp(`${L}sarsılmaz${R}`, "u"),
 ];
 
 // Words that attribute a claim instead of asserting it. Tested on foldTr(title).
@@ -809,6 +836,40 @@ export function isAcceptableNeutral(
   if (/^işte(?![\p{L}\p{N}])/u.test(foldTr(t))) return false;
   if (hasHardDefect(t, memberTitles, opts)) return false;
   return true;
+}
+
+// The question and SEO-explainer phrases a title can carry without a '?'
+// ("Saniye Caran kimdir kaç yaşında nereli"). Matched on whole words of the folded
+// title, so 'kimdirler' and 'zamanında' are not hits.
+const QUESTION_PHRASES: readonly string[] = [
+  "kimdir", "kac yasinda", "nereli", "ne zaman", "oldu mu", "kim elendi",
+];
+// A headline is far shorter; a hostile feed title costs a bounded scan.
+const QUESTION_SCAN_MAX_CHARS = 1000;
+// "<speaker>: <opening quote>": what follows is the speaker's words, so a '?' there
+// is a quoted question ("Erdoğan'ın kuzeni sordu: 'Ballı'nınki sıradan bir intihar
+// mı?'"), which is news, not an SEO question.
+const SPEAKER_QUOTE_OPEN = /:\s*["“'‘«]/u;
+
+/**
+ * Whether a headline is a question or an SEO explainer: it holds a '?', or one of
+ * 'kimdir', 'kaç yaşında', 'nereli', 'ne zaman', 'oldu mu', 'kim elendi' as whole
+ * words (Turkish-folded, so 'KİMDİR' and 'Kaç Yaşında' count). Two clusters of
+ * explainers ("Saniye Caran kimdir? ... kaç yaşında, nereli?") used to ship as the
+ * floor pick of a first pick and to be served index,follow (h34-reader-2). The first-pick
+ * floor ranks such a title last and the cluster page keeps it out of the index.
+ * Only the headline's own words count: a speaker's quote after "<speaker>: '" is left
+ * out, so a quoted question stays an ordinary headline.
+ * Pure; false for a missing or non-string title.
+ */
+export function isQuestionTitle(title: string): boolean {
+  if (typeof title !== "string" || title === "") return false;
+  const head = title.slice(0, QUESTION_SCAN_MAX_CHARS);
+  const quote = SPEAKER_QUOTE_OPEN.exec(head);
+  const own = quote ? head.slice(0, quote.index) : head;
+  if (own.includes("?")) return true;
+  const padded = ` ${fold(own)} `;
+  return QUESTION_PHRASES.some((phrase) => padded.includes(` ${phrase} `));
 }
 
 const NUMBER = /\d+(?:[.,]\d+)?/g;
@@ -1407,8 +1468,10 @@ export interface PickOptions {
   /**
    * First pick of a cluster that has no neutral title yet. When no candidate
    * passes isAcceptableNeutral, return the cleaned best-scored candidate that
-   * has no hard defect (shouting, placeholder, English, feed cut), else the
-   * cleaned best-scored one, instead of null: the alternative is the raw
+   * has no hard defect (shouting, placeholder, English, feed cut) and is not a
+   * question or SEO explainer (isQuestionTitle, extractive-v6: those rank below
+   * every statement, however short), else the best-scored question without a
+   * hard defect, else the cleaned best-scored one, instead of null: the alternative is the raw
    * `title_tr` with its lead-ins and '!' on every surface. A candidate that is
    * all capitals is sentence-cased first (extractive-v4), so shouting alone no
    * longer ranks it below a title with a soft defect. A re-pick leaves this
@@ -1420,7 +1483,8 @@ export interface PickOptions {
    * passed when it passes isAcceptableNeutral and no lead-in survives in it,
    * unless the best acceptable member title outscores it by REPICK_MARGIN (a
    * stored title under FULL_LENGTH_TITLE_CHARS) or REPICK_MARGIN_FULL_LENGTH
-   * (a longer one). It is scored like a member that is not itself part of the comparison: its
+   * (a longer one), or by any margin at all when incumbentDefect says the stored
+   * title is itself the defect (extractive-v6). It is scored like a member that is not itself part of the comparison: its
    * centrality is the mean similarity to the members whose text differs from
    * it, so a stored title equal to member k scores like member k. A blank or
    * missing incumbent changes nothing.
@@ -1448,6 +1512,230 @@ function scoreTitle(title: string, centrality: number, ctx: ScoreContext): numbe
     0.002 * Math.max(0, title.length - 90) -
     0.008 * Math.max(0, FULL_LENGTH_TITLE_CHARS - title.length)
   );
+}
+
+// ---------------------------------------------------------------------------
+// The stored title's defect (extractive-v6, hunt 34, h34-reader-1).
+// ---------------------------------------------------------------------------
+//
+// The re-pick protects the stored title (the incumbent) unless the best member title
+// outscores it by REPICK_MARGIN / REPICK_MARGIN_FULL_LENGTH. That bar is right for two
+// good titles that differ in wording, and wrong for a stored title that is itself the
+// defect: b6fe7960 (19 sources) said Vance blamed the loss on Israel while about 12 of
+// 19 members say the war, 97da6195 (28 sources) is a vague Title Case line, 2f43df00
+// names no subject. incumbentDefect() recognises such a title from the members alone
+// (no word list), and a stored title that has the defect gives way to any member title
+// that outscores it at all. It does not pick: the caller still compares scores.
+//
+// Every share below is measured over the SAMPLE: the deduplicated member titles minus
+// the copies of the stored title and of the best candidate themselves, so a title is
+// never counted as evidence for itself. A stem is the first STEM_LETTERS letters of a
+// folded content word (the word before an apostrophe suffix, hyphen or slash; no stop
+// words, three letters or more, no digits), which keeps 'israil' / 'israil'e' together.
+//
+// A first version judged "the words only the stored title has are rare, the words only
+// the best has are common" and, replayed, changed 26 of the 150 corpus titles (HEAD: 12)
+// and 81 of the 1,891 v5 titles of the last 7 days (HEAD: 2), most of the extra ones a
+// lateral swap or a different sub-event ('Keisha Lance Bottoms' is a rare name, not a
+// minority claim; Fidan's G20 attendance became his meeting with Rubio). What separates a
+// minority claim from an elaboration is what the stored title OMITS: b6fe7960's covers a
+// quarter of the eight stems most members use (it has 'seçim' and 'ABD', not 'Vance',
+// 'kaybetmek', 'neden', 'İran', 'savaş'), while a longer title that names a person still
+// has the words everybody uses. The rule is therefore a coverage rule, and a
+// missing subject needs 75% of the members (at 50% it changed eight more titles of the 7-day
+// replay, one of them 'Devlet Bahçeli'nin kız kardeşi hayatını kaybetti' for a condolence
+// message). Replay of the final rules: 12 of 150 (the twelve HEAD already changes) and 15
+// of 1,891 (HEAD: 2), the other 13 hand-reviewed in __fixtures__/h34-incumbents.json.
+
+/** Fewer sample members than this say too little about a "majority". */
+const DEFECT_MIN_SAMPLE = 5;
+const STEM_LETTERS = 5;
+/** The words only the stored title has are said by under this mean share of the sample ... */
+const MINORITY_SUPPORT = 0.25;
+/** ... the majority vocabulary is every stem said by at least this share, ... */
+const MAJORITY_SUPPORT = 0.4;
+/** ... of which there must be at least this many ... */
+const MAJORITY_MIN_STEMS = 4;
+/** ... the stored title covers at most this share of it ... */
+const INCUMBENT_MAX_COVERAGE = 0.5;
+/** ... and the best candidate covers at least this much more. */
+const MIN_COVERAGE_GAP = 0.3;
+/** A proper-noun stem the stored title lacks is a missing subject when this share of the sample says it. */
+const SUBJECT_SUPPORT = 0.75;
+/** A proper noun is capitalised mid-title by at least this many sample members and written lower-case by none. */
+const SUBJECT_MIN_CAPITALISED = 2;
+/** A run of this many capitalised common nouns in a row is Title Case ... */
+const TITLE_CASE_RUN = 3;
+/** ... judged against at least this many other member titles. */
+const TITLE_CASE_MIN_SAMPLE = 3;
+
+// The words before an apostrophe suffix, hyphen or slash ("AYM'den" -> 'aym',
+// "Mahkemesi'nden" -> 'mahke'): tokens() would also keep the suffixes ('den', 'nden').
+function stemSet(title: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of title.slice(0, EVIDENCE_MAX_CHARS).split(WORD_JOINERS).slice(0, EVIDENCE_MAX_TOKENS)) {
+    for (const t of fold(stemOf(raw)).split(" ")) {
+      if (t.length >= 3 && !STOP.has(t) && !hasDigit(t)) out.add(t.slice(0, STEM_LETTERS));
+    }
+  }
+  return out;
+}
+
+/** Share of the sample whose stem set holds `stem`. */
+function shareOf(stem: string, sample: readonly Set<string>[]): number {
+  let n = 0;
+  for (const s of sample) if (s.has(stem)) n++;
+  return n / sample.length;
+}
+
+/**
+ * The stored title says what few members say and omits what most say: its own words
+ * (the best candidate lacks them) are under MINORITY_SUPPORT of the sample on
+ * average, and it covers at most INCUMBENT_MAX_COVERAGE of the majority vocabulary
+ * (the stems at least MAJORITY_SUPPORT of the sample says, MAJORITY_MIN_STEMS or more
+ * of them) where the best candidate covers MIN_COVERAGE_GAP more.
+ */
+function minorityClaim(inc: Set<string>, best: Set<string>, sample: readonly Set<string>[]): boolean {
+  const incOnly = [...inc].filter((s) => !best.has(s));
+  if (incOnly.length === 0) return false;
+  if (incOnly.reduce((sum, s) => sum + shareOf(s, sample), 0) / incOnly.length >= MINORITY_SUPPORT) return false;
+  const counts = new Map<string, number>();
+  for (const stems of sample) for (const s of stems) counts.set(s, (counts.get(s) ?? 0) + 1);
+  const majority = [...counts].filter(([, n]) => n / sample.length >= MAJORITY_SUPPORT).map(([s]) => s);
+  if (majority.length < MAJORITY_MIN_STEMS) return false;
+  const covered = (stems: Set<string>): number => majority.filter((s) => stems.has(s)).length / majority.length;
+  const incCoverage = covered(inc);
+  return incCoverage <= INCUMBENT_MAX_COVERAGE && covered(best) - incCoverage >= MIN_COVERAGE_GAP;
+}
+
+/** How many sample titles write a word in lower case, and how many with a capital (a Title Case title adds none). */
+interface CaseVotes {
+  lower: Map<string, number>;
+  capital: Map<string, number>;
+}
+
+function caseVotes(sample: readonly string[]): CaseVotes {
+  const votes: CaseVotes = { lower: new Map(), capital: new Map() };
+  for (const member of sample) {
+    const evidence = caseEvidence(cleanHeadline(member));
+    for (const word of evidence.lower) votes.lower.set(word, (votes.lower.get(word) ?? 0) + 1);
+    for (const word of evidence.spellings.keys()) votes.capital.set(word, (votes.capital.get(word) ?? 0) + 1);
+  }
+  return votes;
+}
+
+/**
+ * A run of TITLE_CASE_RUN or more capitalised words that the sample writes in lower
+ * case ("Kararı: İfade Özgürlüğü ..." against 'kararı', 'ifade özgürlüğü'). The title's
+ * first word and a word after a sentence end are capitalised by grammar and neither
+ * count nor break a run; a lower-case word, a word nobody writes in lower case (a
+ * name) or a ',' ';' '.' '!' '?' '…' ends it.
+ */
+function titleCaseRun(title: string, votes: CaseVotes): boolean {
+  const words = title.trim().slice(0, EVIDENCE_MAX_CHARS).split(/\s+/).slice(0, EVIDENCE_MAX_TOKENS);
+  let run = 0;
+  for (let i = 0; i < words.length; i++) {
+    const token = words[i]!;
+    const stem = stemOf(token);
+    if (stem === "" || !startsUpper(stem)) {
+      run = 0;
+      continue;
+    }
+    const prev = i > 0 ? words[i - 1]! : "";
+    const grammatical = i === 0 || [".", "!", "?", "…"].includes(prev.charAt(prev.length - 1));
+    if (!grammatical) {
+      const word = stem.toLocaleLowerCase("tr");
+      const asLower = votes.lower.get(word) ?? 0;
+      if (asLower > 0 && asLower > (votes.capital.get(word) ?? 0)) {
+        run++;
+        if (run >= TITLE_CASE_RUN) return true;
+      } else {
+        run = 0;
+      }
+    }
+    if (RUN_END_CHARS.has(token.charAt(token.length - 1))) run = 0;
+  }
+  return false;
+}
+
+/**
+ * A proper-noun stem that at least SUBJECT_SUPPORT of the sample says and the best
+ * candidate has, which the stored title lacks ("TBMM Başkanı Kurtulmuş, 'Barış
+ * Anneleri'ni kabul etti" against "DEM Parti Sözcüsü ile Barış Anneleri'ni kabul
+ * etti": 'Kurtulmuş' is in eight of nine member titles). A stem is a proper noun when
+ * SUBJECT_MIN_CAPITALISED sample titles write it with a capital past their first
+ * word and none writes it in lower case. Only for a stored title whose own words are
+ * a minority (under MINORITY_SUPPORT of the sample on average): a shorter title that
+ * merely omits a name the others add is not wrong.
+ */
+function missingSubject(
+  inc: Set<string>,
+  best: Set<string>,
+  sample: readonly string[],
+  sampleStems: readonly Set<string>[],
+): boolean {
+  const incOnly = [...inc].filter((s) => !best.has(s));
+  if (incOnly.length === 0) return false;
+  if (incOnly.reduce((sum, s) => sum + shareOf(s, sampleStems), 0) / incOnly.length >= MINORITY_SUPPORT) return false;
+  const wanted = [...best].filter((s) => !inc.has(s) && shareOf(s, sampleStems) >= SUBJECT_SUPPORT);
+  if (wanted.length === 0) return false;
+  const capitalised = new Map<string, number>();
+  const lowered = new Set<string>();
+  for (const member of sample) {
+    const words = member.trim().slice(0, EVIDENCE_MAX_CHARS).split(/\s+/).slice(0, EVIDENCE_MAX_TOKENS);
+    const counted = new Set<string>();
+    for (let i = 0; i < words.length; i++) {
+      const stem = stemOf(words[i]!);
+      if (stem === "" || hasDigit(stem)) continue;
+      const key = fold(stem).replace(/ /g, "").slice(0, STEM_LETTERS);
+      const prev = i > 0 ? words[i - 1]! : "";
+      const grammatical = i === 0 || [".", "!", "?", "…"].includes(prev.charAt(prev.length - 1));
+      if (!startsUpper(stem)) lowered.add(key);
+      else if (!grammatical && !counted.has(key)) {
+        counted.add(key);
+        capitalised.set(key, (capitalised.get(key) ?? 0) + 1);
+      }
+    }
+  }
+  return wanted.some((s) => (capitalised.get(s) ?? 0) >= SUBJECT_MIN_CAPITALISED && !lowered.has(s));
+}
+
+/**
+ * Whether the stored title `inc` is itself the defect, judged against the best
+ * member title `best` and the cluster's member titles: (1) a minority claim (it says
+ * what few members say and omits the words most of them use), (2) a Title Case run
+ * (TITLE_CASE_RUN capitalised words the others write in lower case) or (3) a missing
+ * subject (a proper noun that SUBJECT_SUPPORT of the others say and only `best` has).
+ * Rules (1) and (3) need DEFECT_MIN_SAMPLE other members. A `best` that is Title Case
+ * itself changes nothing, so it is never a defect. True lowers the re-pick margin to
+ * zero: the stored title still stays unless `best` outscores it. Pure; the copies of
+ * `inc` and `best` among the members are not evidence.
+ */
+export function incumbentDefect(inc: string, best: string, memberTitles: readonly string[]): boolean {
+  const incFold = fold(inc);
+  const bestFold = fold(best);
+  if (incFold === "" || bestFold === "" || incFold === bestFold) return false;
+  const seen = new Set<string>();
+  const sample: string[] = [];
+  for (const raw of memberTitles) {
+    const t = (raw ?? "").trim().slice(0, EVIDENCE_MAX_CHARS);
+    if (t === "") continue;
+    const key = fold(t);
+    const cleaned = fold(cleanHeadline(t));
+    if (key === incFold || cleaned === incFold || key === bestFold || cleaned === bestFold) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    sample.push(t);
+  }
+  if (sample.length < TITLE_CASE_MIN_SAMPLE) return false;
+  const votes = caseVotes(sample);
+  if (titleCaseRun(best, votes)) return false;
+  if (titleCaseRun(inc, votes)) return true;
+  if (sample.length < DEFECT_MIN_SAMPLE) return false;
+  const sampleStems = sample.map(stemSet);
+  const incStems = stemSet(inc);
+  const bestStems = stemSet(best);
+  return minorityClaim(incStems, bestStems, sampleStems) || missingSubject(incStems, bestStems, sample, sampleStems);
 }
 
 /**
@@ -1501,7 +1789,11 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
   let evidence: CaseEvidence[] | null = null;
 
   let best: { cleaned: string; score: number } | null = null;
+  // The first-pick floor, best first: a statement with no hard defect, then a
+  // question (or SEO explainer) with none (h34-reader-2: a question is never the
+  // soft pick while any statement exists), then whatever ranked highest.
   let floorSoft: string | null = null;
+  let floorQuestion: string | null = null;
   let floorAny: string | null = null;
   for (const { index, score } of scored) {
     const cleaned = cleanHeadline(items[index]!.title);
@@ -1524,7 +1816,13 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
     // first, so "NEV'İN MİRASI GÜNDEM OLDU" ships as "Nev'in mirası gündem oldu".
     const floorTitle = isAllCaps(shown) ? sentenceCaseShout(shown, others) : shown;
     floorAny ??= floorTitle;
-    if (floorSoft === null && !hasHardDefect(floorTitle, others, {})) floorSoft = floorTitle;
+    if (floorSoft === null) {
+      const question = isQuestionTitle(floorTitle);
+      if (!(question && floorQuestion !== null) && !hasHardDefect(floorTitle, others, {})) {
+        if (question) floorQuestion = floorTitle;
+        else floorSoft = floorTitle;
+      }
+    }
   }
 
   const incumbent = opts.incumbent;
@@ -1546,10 +1844,13 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
         n++;
       }
       const incScore = scoreTitle(inc, n > 0 ? sim / n : 0, ctx);
+      // A stored title that is itself the defect (a minority claim, Title Case, no
+      // majority subject) gives way to any member title that outscores it at all.
+      if (incumbentDefect(inc, best.cleaned, memberTitles)) return best.score > incScore ? best.cleaned : incumbent;
       const margin = inc.length >= FULL_LENGTH_TITLE_CHARS ? REPICK_MARGIN_FULL_LENGTH : REPICK_MARGIN;
       return best.score - incScore < margin ? incumbent : best.cleaned;
     }
   }
 
-  return best?.cleaned ?? floorSoft ?? floorAny;
+  return best?.cleaned ?? floorSoft ?? floorQuestion ?? floorAny;
 }

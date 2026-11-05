@@ -1,0 +1,1198 @@
+{
+ "_note": "h34-reader-3 fixture. Read-only export on 2026-11-05: pools.politika = the 30 bundles of the live home feed (/rss.xml order, article_count = distinct sources, title_tr = neutral title when set); pools.<slug> = /konu/<slug> page 1 (is_archived=false, article_count>=2, updated_at within 7 days, updated_at desc, id desc, 30 rows). pages = the 30 cluster pages of the home feed with their stored topic7 (null: relatedFeedFor gives no block).",
+ "capturedAt": "2026-11-05T01:36:00.000Z",
+ "pools": {
+  "politika": [
+   {
+    "id": "9fcc79ba-e135-458c-b60e-825ea1943ad9",
+    "title_tr": "Mustafa Sarıgül'ün oğlu Emir Sarıgül ev hapsi kararıyla tahliye edildi",
+    "article_count": 47,
+    "updated_at": "2026-11-04T20:16:02.945Z"
+   },
+   {
+    "id": "b59f3bb6-f24d-4348-abb0-0bf82682f69d",
+    "title_tr": "Mekke Anlaşması'nın ilk maddesi kabul edildi",
+    "article_count": 26,
+    "updated_at": "2026-11-05T00:43:01.214Z"
+   },
+   {
+    "id": "9b5ba0c6-fb41-4aff-ba4b-d49ef719a7e2",
+    "title_tr": "Korkuteli Belediye Başkanı Saniye Caran, CHP'den istifa etti",
+    "article_count": 31,
+    "updated_at": "2026-11-04T16:40:04.348Z"
+   },
+   {
+    "id": "bcda0006-3873-4367-8819-95476c5c1579",
+    "title_tr": "Trump, seçimleri kaybetmelerinin sebebinin \"İran savaşı\" ve buna bağlı \"hayat pahalılığı\" olduğunu söyledi",
+    "article_count": 19,
+    "updated_at": "2026-11-04T21:37:01.669Z"
+   },
+   {
+    "id": "b6fe7960-f4fc-4546-8345-ff04e676c15b",
+    "title_tr": "ABD Başkan Yardımcısı seçim yenilgisini İsrail'e bağladı",
+    "article_count": 19,
+    "updated_at": "2026-11-04T19:33:11.168Z"
+   },
+   {
+    "id": "3ab2202c-966b-4d9b-8530-f53926ea29a2",
+    "title_tr": "Dışişleri Bakanlığı'ndan Avrupa Komisyonu raporuna tepki",
+    "article_count": 19,
+    "updated_at": "2026-11-04T19:33:11.501Z"
+   },
+   {
+    "id": "97da6195-ead2-4d66-bbaa-6316bff96ecc",
+    "title_tr": "Anayasa Mahkemesi'nden Canan Karatay Kararı: İfade Özgürlüğü Vurgusu",
+    "article_count": 28,
+    "updated_at": "2026-11-04T12:40:04.293Z"
+   },
+   {
+    "id": "6e19dd5a-7d4a-4632-88a1-888e93804827",
+    "title_tr": "Abdul El Sayed ABD'de Senato'ya seçilen ilk Müslüman oldu",
+    "article_count": 27,
+    "updated_at": "2026-11-04T14:58:04.304Z"
+   },
+   {
+    "id": "2b8d3632-3d4f-43f9-be3b-12041c34982c",
+    "title_tr": "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı",
+    "article_count": 24,
+    "updated_at": "2026-11-04T20:04:01.487Z"
+   },
+   {
+    "id": "aba2cc40-cb4c-4007-809f-a0fa709a5d08",
+    "title_tr": "Almanya'da Bavyera Eyalet Başbakan Yardımcısı Aiwanger otelde ölü bulundu",
+    "article_count": 9,
+    "updated_at": "2026-11-05T00:43:01.491Z"
+   },
+   {
+    "id": "78e56dca-2dbc-444f-802c-bc57a21f5202",
+    "title_tr": "ABD seçimlerinden sonra Hamaney'den ilk açıklama",
+    "article_count": 18,
+    "updated_at": "2026-11-04T12:51:09.988Z"
+   },
+   {
+    "id": "a8fa75e2-970b-45ed-924e-cd913d081375",
+    "title_tr": "Bakan Gürlek açıkladı: Yasa dışı bahis operasyonunda 5 bin 949 tutuklama",
+    "article_count": 13,
+    "updated_at": "2026-11-04T19:16:06.179Z"
+   },
+   {
+    "id": "aa12e7c3-bfd5-4a9f-8652-41e9e462584b",
+    "title_tr": "İsrail Merkez Seçim Komitesi şeffaflığa aykırı bulguya rastlanmadığını açıkladı",
+    "article_count": 19,
+    "updated_at": "2026-11-04T14:58:03.878Z"
+   },
+   {
+    "id": "85b2e468-725b-4942-894c-2009d3b7f28d",
+    "title_tr": "İspanya Ulaştırma Bakanı Puente, tren kazasının ardından istifa etti",
+    "article_count": 34,
+    "updated_at": "2026-11-04T10:36:10.815Z"
+   },
+   {
+    "id": "b84a5deb-6dd4-4c9a-8109-b90cd45adee6",
+    "title_tr": "İsrail basını: ABD ara seçimlerini Demokratların kazanması Trump ve İsrail için ağır darbe",
+    "article_count": 11,
+    "updated_at": "2026-11-04T19:52:03.198Z"
+   },
+   {
+    "id": "a89cba66-29ce-442b-92b9-7915e9f9b3f6",
+    "title_tr": "Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi",
+    "article_count": 10,
+    "updated_at": "2026-11-04T21:34:03.567Z"
+   },
+   {
+    "id": "d06e747a-1208-4374-80bb-c7950ed6cbd0",
+    "title_tr": "Selahattin Demirtaş'ın yargılandığı davada yeni gelişme: Dosyalar birleştirildi",
+    "article_count": 14,
+    "updated_at": "2026-11-04T12:19:02.782Z"
+   },
+   {
+    "id": "f85bc48e-692d-41be-8f6b-0d0ecd1d2281",
+    "title_tr": "Emine Erdoğan, Yunus Emre Enstitüsünün Seul'deki kültür merkezinin resmi açılışını yaptı",
+    "article_count": 15,
+    "updated_at": "2026-11-04T13:16:04.564Z"
+   },
+   {
+    "id": "f86ef76c-2012-4e88-ae4d-5bd08941b8b8",
+    "title_tr": "Brent petrolün varil fiyatı, ABD ara seçimlerinin etkisiyle 94 dolar seviyesine geriledi",
+    "article_count": 8,
+    "updated_at": "2026-11-04T18:16:02.479Z"
+   },
+   {
+    "id": "7155dab6-958e-4f13-9d7d-59f150c6ed40",
+    "title_tr": "JD Vance, Kongre ara seçim yenilgisini İran savaşı ve İsrail ilişkilerine bağladı",
+    "article_count": 9,
+    "updated_at": "2026-11-04T20:28:01.989Z"
+   },
+   {
+    "id": "d91ab2f1-a095-4213-b228-ae5391f7272c",
+    "title_tr": "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü",
+    "article_count": 8,
+    "updated_at": "2026-11-04T20:58:03.684Z"
+   },
+   {
+    "id": "fed00dfd-be12-404e-8c8b-17f5ca226e0b",
+    "title_tr": "YENİ Parti'nin Birinci Olağan Kurultayı’nın sloganı belli oldu",
+    "article_count": 13,
+    "updated_at": "2026-11-04T12:19:02.991Z"
+   },
+   {
+    "id": "8dac1159-9ca8-4288-9716-ee961c78730b",
+    "title_tr": "Ümit Özdağ, tehdit davasından beraat etti",
+    "article_count": 11,
+    "updated_at": "2026-11-04T14:31:03.201Z"
+   },
+   {
+    "id": "2f43df00-2c22-4f77-afbe-e6ceb1263d2b",
+    "title_tr": "DEM Parti Sözcüsü ile Barış Anneleri'ni kabul etti",
+    "article_count": 9,
+    "updated_at": "2026-11-04T15:28:02.060Z"
+   },
+   {
+    "id": "97589454-912e-4785-9ef6-75106b39f6f9",
+    "title_tr": "Demirtaş ve Yüksekdağ için cezaevleri önünde açıklama yapılacak",
+    "article_count": 14,
+    "updated_at": "2026-11-04T14:31:05.321Z"
+   },
+   {
+    "id": "07592cf8-3a81-486e-9b48-5790609698a5",
+    "title_tr": "ABD Senatosu Azınlık Lideri Demokrat Schumer: İran'la savaşı sona erdireceğiz",
+    "article_count": 7,
+    "updated_at": "2026-11-04T19:16:07.133Z"
+   },
+   {
+    "id": "4e15412a-a59c-47be-8e71-67adc4948577",
+    "title_tr": "Dışişleri'nden AB'nin 2026 raporuna sert tepki: Mesnetsiz iddiaları reddediyoruz",
+    "article_count": 8,
+    "updated_at": "2026-11-04T16:49:04.052Z"
+   },
+   {
+    "id": "92a56e9e-737d-4675-adf7-b08637e58597",
+    "title_tr": "Netanyahu’dan İslamcı partilere sert suçlama: \"İsrail’in güvenliğini tehdit ediyorlar\"",
+    "article_count": 2,
+    "updated_at": "2026-11-05T01:07:01.840Z"
+   },
+   {
+    "id": "00e97812-d688-45cf-ab41-49fb1e77a434",
+    "title_tr": "İTO'da Şekib Avdagiç yeniden başkan seçildi",
+    "article_count": 11,
+    "updated_at": "2026-11-04T14:10:04.332Z"
+   },
+   {
+    "id": "268d231b-c7fe-43f2-b9c9-b06039074d77",
+    "title_tr": "Rusya'dan ABD seçimlerine ilk değerlendirme: Trump'ın barış çabalarını umuyoruz",
+    "article_count": 9,
+    "updated_at": "2026-11-04T14:54:14.439Z"
+   }
+  ],
+  "dunya": [
+   {
+    "id": "aba2cc40-cb4c-4007-809f-a0fa709a5d08",
+    "title_tr": "Almanya'da Bavyera Eyalet Başbakan Yardımcısı Aiwanger otelde ölü bulundu",
+    "article_count": 9,
+    "updated_at": "2026-11-05T00:43:01.491Z"
+   },
+   {
+    "id": "a89cba66-29ce-442b-92b9-7915e9f9b3f6",
+    "title_tr": "Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi",
+    "article_count": 10,
+    "updated_at": "2026-11-04T21:34:03.567Z"
+   },
+   {
+    "id": "d91ab2f1-a095-4213-b228-ae5391f7272c",
+    "title_tr": "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü",
+    "article_count": 8,
+    "updated_at": "2026-11-04T20:58:03.684Z"
+   },
+   {
+    "id": "2a242da2-275d-401f-98b1-5f9a5195ac71",
+    "title_tr": "İran: Savaş, Trump'ın siyasi yenilgisine sebep oldu",
+    "article_count": 5,
+    "updated_at": "2026-11-04T20:22:04.167Z"
+   },
+   {
+    "id": "2b8d3632-3d4f-43f9-be3b-12041c34982c",
+    "title_tr": "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı",
+    "article_count": 24,
+    "updated_at": "2026-11-04T20:04:01.487Z"
+   },
+   {
+    "id": "b84a5deb-6dd4-4c9a-8109-b90cd45adee6",
+    "title_tr": "İsrail basını: ABD ara seçimlerini Demokratların kazanması Trump ve İsrail için ağır darbe",
+    "article_count": 11,
+    "updated_at": "2026-11-04T19:52:03.198Z"
+   },
+   {
+    "id": "b579ed63-d938-4063-96e0-8e492e777d88",
+    "title_tr": "ABD'deki seçimlere dünyadan tepkiler",
+    "article_count": 2,
+    "updated_at": "2026-11-04T19:49:00.937Z"
+   },
+   {
+    "id": "3ab2202c-966b-4d9b-8530-f53926ea29a2",
+    "title_tr": "Dışişleri Bakanlığı'ndan Avrupa Komisyonu raporuna tepki",
+    "article_count": 19,
+    "updated_at": "2026-11-04T19:33:11.501Z"
+   },
+   {
+    "id": "1e99d784-d55e-4295-89ce-ef8c4dae21b6",
+    "title_tr": "Bakan Çiftçi'den İtalya ile iş birliği mesajı: İleri taşımayı hedefliyoruz",
+    "article_count": 2,
+    "updated_at": "2026-11-04T19:33:10.159Z"
+   },
+   {
+    "id": "38a4e57a-04f3-4afe-bba5-9a05706a6950",
+    "title_tr": "Netanyahu ve koalisyon ortakları ABD ara seçimlerine sessiz kaldı",
+    "article_count": 2,
+    "updated_at": "2026-11-04T19:21:08.835Z"
+   },
+   {
+    "id": "2e28dcf7-ef68-45cf-a3df-214599305d3e",
+    "title_tr": "İspanya'da 69 kişinin öldüğü tren kazası sonrası bakan istifa etti",
+    "article_count": 6,
+    "updated_at": "2026-11-04T18:33:14.675Z"
+   },
+   {
+    "id": "941685a2-ec51-40f0-869a-b42f16dcddd9",
+    "title_tr": "İlklere sahne olan ABD ara seçimlerinin çok konuşulan kazananları gündemde",
+    "article_count": 3,
+    "updated_at": "2026-11-04T18:04:07.348Z"
+   },
+   {
+    "id": "9f18b020-c6e6-4f4b-a3af-214e595c2a2a",
+    "title_tr": "Rutte, Kuzey Makedonya Cumhurbaşkanıyla bölgesel güvenliği görüştü",
+    "article_count": 2,
+    "updated_at": "2026-11-04T17:34:03.497Z"
+   },
+   {
+    "id": "cd334d3b-83ed-439b-8445-f7195d5b1b22",
+    "title_tr": "Fransa'dan ABD ara seçimi açıklaması: Demokrasi için çok iyi haber",
+    "article_count": 4,
+    "updated_at": "2026-11-04T17:31:03.321Z"
+   },
+   {
+    "id": "4e15412a-a59c-47be-8e71-67adc4948577",
+    "title_tr": "Dışişleri'nden AB'nin 2026 raporuna sert tepki: Mesnetsiz iddiaları reddediyoruz",
+    "article_count": 8,
+    "updated_at": "2026-11-04T16:49:04.052Z"
+   },
+   {
+    "id": "323385c8-e4ca-46b9-ac7d-82d8743dc914",
+    "title_tr": "Polonya Başbakanı Tusk, Trump'a vetoyu aşırı kullanmamasını tavsiye etti",
+    "article_count": 2,
+    "updated_at": "2026-11-04T16:21:07.790Z"
+   },
+   {
+    "id": "9cdcf0c3-4d7c-4a44-89e2-416d544cdb75",
+    "title_tr": "Çekya Başbakanı Babis, Demokrat zaferinin ABD'de işleyişi kilitleyeceğini söyledi",
+    "article_count": 2,
+    "updated_at": "2026-11-04T15:52:03.723Z"
+   },
+   {
+    "id": "723e4a55-2326-4328-8585-2eea4cdaf0ed",
+    "title_tr": "ABD seçimlerinde Demokratların zaferi sonrası Netanyahu sessizliğini korudu",
+    "article_count": 3,
+    "updated_at": "2026-11-04T15:39:06.198Z"
+   },
+   {
+    "id": "aa12e7c3-bfd5-4a9f-8652-41e9e462584b",
+    "title_tr": "İsrail Merkez Seçim Komitesi şeffaflığa aykırı bulguya rastlanmadığını açıkladı",
+    "article_count": 19,
+    "updated_at": "2026-11-04T14:58:03.878Z"
+   },
+   {
+    "id": "268d231b-c7fe-43f2-b9c9-b06039074d77",
+    "title_tr": "Rusya'dan ABD seçimlerine ilk değerlendirme: Trump'ın barış çabalarını umuyoruz",
+    "article_count": 9,
+    "updated_at": "2026-11-04T14:54:14.439Z"
+   },
+   {
+    "id": "b7c2f541-c8b0-4686-bdc8-a34a23b4507b",
+    "title_tr": "İran'dan ABD ara seçimlerine ilişkin açıklama: \"Amerikalılar savaşa hayır dedi\"",
+    "article_count": 2,
+    "updated_at": "2026-11-04T14:52:05.758Z"
+   },
+   {
+    "id": "c53b0c14-fbde-471e-bda1-4524fff25877",
+    "title_tr": "Türkiye-ABD ilişkisi ara seçimlerden sonra nasıl şekillenecek?",
+    "article_count": 2,
+    "updated_at": "2026-11-04T14:34:04.158Z"
+   },
+   {
+    "id": "16f038d3-05f2-4f2b-bda8-64056b175199",
+    "title_tr": "Trump'ın seçim hezimeti sonrası Hamaney'den ABD mesajı",
+    "article_count": 4,
+    "updated_at": "2026-11-04T14:25:07.185Z"
+   },
+   {
+    "id": "991f3a41-1294-4087-bf2e-e5b9ee2de333",
+    "title_tr": "Kremlin'den seçim sonrası ABD mesajı",
+    "article_count": 4,
+    "updated_at": "2026-11-04T14:16:02.882Z"
+   },
+   {
+    "id": "909f6421-0c5e-4bbd-9147-13bec42e7c01",
+    "title_tr": "Suriye Cumhurbaşkanı Şara, Suudi Arabistan'a ikili ilişkiler ve anlaşmalar için gitti",
+    "article_count": 3,
+    "updated_at": "2026-11-04T13:58:06.669Z"
+   },
+   {
+    "id": "efcad380-8003-4cda-9ce4-d46553bc8aa5",
+    "title_tr": "İran'da ABD ara seçim sonuçları yeni çatışma endişesini gündeme getirdi",
+    "article_count": 3,
+    "updated_at": "2026-11-04T13:39:08.990Z"
+   },
+   {
+    "id": "f85bc48e-692d-41be-8f6b-0d0ecd1d2281",
+    "title_tr": "Emine Erdoğan, Yunus Emre Enstitüsünün Seul'deki kültür merkezinin resmi açılışını yaptı",
+    "article_count": 15,
+    "updated_at": "2026-11-04T13:16:04.564Z"
+   },
+   {
+    "id": "93a0165a-88b8-4c0b-b323-7cac2c9a4b01",
+    "title_tr": "Ankara'nın BM adımı komşuyu karıştırdı: Diplomatik ve siyasi baş ağrısı",
+    "article_count": 2,
+    "updated_at": "2026-11-04T13:07:01.075Z"
+   },
+   {
+    "id": "2408b41e-f03c-44c7-b597-1dc3a9da3807",
+    "title_tr": "Türkiye-Güney Kore stratejik iş birlikleri uluslararası basında",
+    "article_count": 2,
+    "updated_at": "2026-11-04T13:01:03.411Z"
+   },
+   {
+    "id": "ff217744-6ceb-4e0e-908b-64eb202e9101",
+    "title_tr": "ABD'nin ilk siyahi kadın valisi Georgia eyaletinden Demokrat Keisha Lance Bottoms oldu",
+    "article_count": 14,
+    "updated_at": "2026-11-04T12:57:08.148Z"
+   }
+  ],
+  "ekonomi": [
+   {
+    "id": "4e0c0003-541a-4ff1-92c3-142755bb919b",
+    "title_tr": "Bakan Kacır, Seul'de Güney Koreli şirketlerin üst düzey yöneticileriyle görüştüklerini bildirdi",
+    "article_count": 6,
+    "updated_at": "2026-11-05T01:03:14.976Z"
+   },
+   {
+    "id": "6e1fa382-e17c-4b0d-95c7-4d739aabb2c1",
+    "title_tr": "YENİ Partili Özlale’den 407 milyon TL’lik ödeme açıklaması",
+    "article_count": 3,
+    "updated_at": "2026-11-04T23:01:02.097Z"
+   },
+   {
+    "id": "cdc12af0-dd46-4b50-8d42-d98a709e0437",
+    "title_tr": "Bakan Bolat'tan Nusaybin açıklaması: Suriye tarafı henüz hazır değil",
+    "article_count": 3,
+    "updated_at": "2026-11-04T20:01:00.986Z"
+   },
+   {
+    "id": "6d1ca807-05a0-435f-9419-222ba94e7ff4",
+    "title_tr": "ABD seçimleri piyasaları sarstı. Brent petrolde sert düşüş",
+    "article_count": 4,
+    "updated_at": "2026-11-04T19:10:09.477Z"
+   },
+   {
+    "id": "f86ef76c-2012-4e88-ae4d-5bd08941b8b8",
+    "title_tr": "Brent petrolün varil fiyatı, ABD ara seçimlerinin etkisiyle 94 dolar seviyesine geriledi",
+    "article_count": 8,
+    "updated_at": "2026-11-04T18:16:02.479Z"
+   },
+   {
+    "id": "322e1714-6e98-46a8-909d-46a0794d526b",
+    "title_tr": "Trump'ın seçim yenilgisi petrolü düşürdü: Benzinde 4,80 TL indirim beklentisi",
+    "article_count": 3,
+    "updated_at": "2026-11-04T15:37:03.706Z"
+   },
+   {
+    "id": "be15a4d7-753c-4f60-9271-891471a4dee7",
+    "title_tr": "ABD Hazine Bakanlığı 125 milyar dolarlık tahvil için 3 ayrı ihale düzenleyecek",
+    "article_count": 3,
+    "updated_at": "2026-11-04T15:28:02.367Z"
+   },
+   {
+    "id": "00e97812-d688-45cf-ab41-49fb1e77a434",
+    "title_tr": "İTO'da Şekib Avdagiç yeniden başkan seçildi",
+    "article_count": 11,
+    "updated_at": "2026-11-04T14:10:04.332Z"
+   },
+   {
+    "id": "da7920c2-73cb-43f4-a8f5-ca9f35c2630f",
+    "title_tr": "Demokratların seçim başarısı Asya'da risk iştahını artırdı",
+    "article_count": 4,
+    "updated_at": "2026-11-04T13:58:06.354Z"
+   },
+   {
+    "id": "9456ee8c-9f7e-4ea9-9e12-7c07b8dd602d",
+    "title_tr": "ABD'deki seçim Musk'ın şirketlerini vurdu: Tesla ve SpaceX hisseleri geriledi",
+    "article_count": 3,
+    "updated_at": "2026-11-04T13:37:02.286Z"
+   },
+   {
+    "id": "c2a994a2-25eb-4e64-b878-80bd728ef26a",
+    "title_tr": "ING’den ABD ara seçimleri analizi: Dolar için 101,25 seviyesi öne çıktı",
+    "article_count": 2,
+    "updated_at": "2026-11-04T12:51:08.885Z"
+   },
+   {
+    "id": "45cbcc24-be1a-4121-ba07-d274ef840e58",
+    "title_tr": "ABD Seçimleri Sonrası Altın ve Gümüş Yükselişe Geçti. İslam Memiş Piyasaları Değerlendirdi",
+    "article_count": 2,
+    "updated_at": "2026-11-04T12:46:04.687Z"
+   },
+   {
+    "id": "7da7b319-13a6-4b20-a4c7-676e522135bd",
+    "title_tr": "İhracatçılara 2027 müjdesi. Bakan Bolat: 2027'de destekler 65 milyar lira olacak",
+    "article_count": 2,
+    "updated_at": "2026-11-04T11:01:01.356Z"
+   },
+   {
+    "id": "b96d038a-b039-4fc9-b6c2-300e0c1b329b",
+    "title_tr": "2027 yılı bütçesi komisyonda. Bakan Bolat: Ayrılan kaynak 65 milyar lira olacak",
+    "article_count": 5,
+    "updated_at": "2026-11-04T10:54:05.453Z"
+   },
+   {
+    "id": "57f9b800-48f9-4c3c-a232-71260378601c",
+    "title_tr": "ABD seçimleri sonrası altın fiyatlarında yeni ralli: Gözler şimdi o veride",
+    "article_count": 2,
+    "updated_at": "2026-11-04T10:01:03.302Z"
+   },
+   {
+    "id": "85fa9aef-d927-4f68-989f-60add4b132e3",
+    "title_tr": "Küresel piyasalar ABD'deki ara seçim sonuçlarına odaklandı",
+    "article_count": 12,
+    "updated_at": "2026-11-04T09:06:05.756Z"
+   },
+   {
+    "id": "ffbd5d66-8077-43f8-876f-b7f10e77ce83",
+    "title_tr": "Piyasalara Trump etkisi: Petrol düştü, altın ve gümüş yükselişe geçti",
+    "article_count": 2,
+    "updated_at": "2026-11-04T08:34:04.467Z"
+   },
+   {
+    "id": "8bd08fc2-704b-437c-9bfb-2c1a43b253ab",
+    "title_tr": "Altın 4 bin doları aştı: Trump'ın seçim yenilgisinde İran ayrıntısı",
+    "article_count": 2,
+    "updated_at": "2026-11-04T08:19:06.584Z"
+   },
+   {
+    "id": "ddc4c78d-f66a-4240-acbe-06c33cd32135",
+    "title_tr": "ABD ara seçimleri sonrası Asya borsaları karışık, Nikkei yüzde 1,42 geriledi",
+    "article_count": 2,
+    "updated_at": "2026-11-04T07:49:04.244Z"
+   },
+   {
+    "id": "d5a6d9ab-f01f-456b-bc82-324fb8f80433",
+    "title_tr": "Yavuzyılmaz, ortak alan elektriğine 2027'de yüzde 82-104 zam yapılacağını öne sürdü",
+    "article_count": 8,
+    "updated_at": "2026-11-04T07:36:10.500Z"
+   },
+   {
+    "id": "0ef5843d-8bab-451a-88cb-019deeb8051b",
+    "title_tr": "Küresel piyasalarda ABD seçimlerinin etkisi: Dolar geriledi, altın yükseldi",
+    "article_count": 3,
+    "updated_at": "2026-11-04T07:36:09.812Z"
+   },
+   {
+    "id": "46980da8-930b-440d-bb1b-998cad9de79d",
+    "title_tr": "ABD ara seçimleri sonrası altın yükselişe geçti",
+    "article_count": 3,
+    "updated_at": "2026-11-04T07:27:06.627Z"
+   },
+   {
+    "id": "1e6208a3-93fd-4c1a-a13e-30cdef3be4df",
+    "title_tr": "Bakan Kacır: Selden etkilenen KOBİ'lere 1 milyon TL'ye kadar kredi desteği verilecek",
+    "article_count": 20,
+    "updated_at": "2026-11-04T07:25:10.773Z"
+   },
+   {
+    "id": "e5bacff6-2b0b-44a1-a825-3071dad4d7e3",
+    "title_tr": "ABD seçimlerinde 'Demokrat' dalgası altının yönünü yukarı çevirdi",
+    "article_count": 3,
+    "updated_at": "2026-11-04T07:25:08.350Z"
+   },
+   {
+    "id": "f7c24415-60a4-477e-ae44-cc0bfff808fd",
+    "title_tr": "Bakan Işıkhan'dan İşsizlik Sigortası Fonu ile ilgili iddialara yanıt",
+    "article_count": 17,
+    "updated_at": "2026-11-04T07:25:05.800Z"
+   },
+   {
+    "id": "8dff5a78-6897-461d-9a1c-d09eacbed31a",
+    "title_tr": "Altın fiyatları ABD seçimleri sonrası yükselişte",
+    "article_count": 5,
+    "updated_at": "2026-11-04T07:03:06.623Z"
+   },
+   {
+    "id": "30959fc3-9f2e-4e62-bf14-5038813adba7",
+    "title_tr": "ABD seçimleri altın fiyatlarını yükseltti: Gram altın 6 bin 335 liraya çıktı",
+    "article_count": 3,
+    "updated_at": "2026-11-04T06:24:06.483Z"
+   },
+   {
+    "id": "9f7c27c3-4a0e-49e2-99ca-2ff85c6e9f41",
+    "title_tr": "ABD seçimleri doları vurdu: Küresel piyasalarda düşüş, dolar/TL 50 lira seviyesinde",
+    "article_count": 2,
+    "updated_at": "2026-11-04T05:40:15.968Z"
+   },
+   {
+    "id": "dd026e44-9794-4361-9910-bccbb562e57e",
+    "title_tr": "Altında seçim etkisi: Demokratların yükselişi piyasaları hareketlendirdi",
+    "article_count": 4,
+    "updated_at": "2026-11-04T05:13:03.276Z"
+   },
+   {
+    "id": "9bc793d4-1945-41ee-93b0-8219bc093bd2",
+    "title_tr": "ABD tahvillerinde seçim rallisi: Getiriler sert geriledi",
+    "article_count": 2,
+    "updated_at": "2026-11-04T05:07:02.148Z"
+   }
+  ],
+  "genel": [
+   {
+    "id": "9fcc79ba-e135-458c-b60e-825ea1943ad9",
+    "title_tr": "Mustafa Sarıgül'ün oğlu Emir Sarıgül ev hapsi kararıyla tahliye edildi",
+    "article_count": 47,
+    "updated_at": "2026-11-04T20:16:02.945Z"
+   },
+   {
+    "id": "59a68086-eccc-405f-ad25-f96b8cff5ff6",
+    "title_tr": "'Kaşif Kozinoğlu'nun ATK raporu gönderildi: 'Ölüm nedeni' açıklandı",
+    "article_count": 6,
+    "updated_at": "2026-11-04T20:10:05.557Z"
+   },
+   {
+    "id": "a8fa75e2-970b-45ed-924e-cd913d081375",
+    "title_tr": "Bakan Gürlek açıkladı: Yasa dışı bahis operasyonunda 5 bin 949 tutuklama",
+    "article_count": 13,
+    "updated_at": "2026-11-04T19:16:06.179Z"
+   },
+   {
+    "id": "31fde7d7-548c-42b2-8f5e-7d293510f329",
+    "title_tr": "Denizli'de çöp kamyonu sürücüsü, sıkışan temizlikçinin ölümü üzerine gözaltına alındı",
+    "article_count": 2,
+    "updated_at": "2026-11-04T17:04:04.707Z"
+   },
+   {
+    "id": "a6f14801-085c-4112-a904-90a3d23d45af",
+    "title_tr": "Sivas’ta tarihi eser niteliği taşıyan Aziz Mor Gabriel tablosu ele geçirildi",
+    "article_count": 2,
+    "updated_at": "2026-11-04T14:10:02.994Z"
+   },
+   {
+    "id": "bbe26fe7-5f6a-4096-a737-fafdfaa75373",
+    "title_tr": "İçişleri Bakanlığı: 327 şüpheli yakalandı. Dolandırıcılık operasyonu",
+    "article_count": 5,
+    "updated_at": "2026-11-04T10:49:03.939Z"
+   },
+   {
+    "id": "96072cb0-5c44-471f-a3be-cb0618bca593",
+    "title_tr": "İçişleri duyurdu. 11 ilde kaçakçılık ve siber suç operasyonları: 230 gözaltı",
+    "article_count": 2,
+    "updated_at": "2026-11-04T07:52:04.327Z"
+   },
+   {
+    "id": "ab868b2d-1767-4588-90de-361a43e5f26f",
+    "title_tr": "19,9 milyar liralık para trafiği deşifre oldu. 11 il merkezli operasyon",
+    "article_count": 12,
+    "updated_at": "2026-11-04T07:49:08.516Z"
+   },
+   {
+    "id": "27d110fb-d169-4b72-a231-b61b3e1c908a",
+    "title_tr": "Ticaret Bakanlığı açıkladı: Gümrüklerde 459 kilo uyuşturucu ele geçirildi",
+    "article_count": 3,
+    "updated_at": "2026-11-04T06:55:04.277Z"
+   },
+   {
+    "id": "6862abf5-29a0-46da-b942-734dca79c289",
+    "title_tr": "Kış yüzünü gösteriyor: Bakanlık zirai don uyarısı yaptı",
+    "article_count": 5,
+    "updated_at": "2026-11-03T14:31:03.982Z"
+   },
+   {
+    "id": "6cd43b31-fffe-4e88-99ba-cabc8c0bbe4a",
+    "title_tr": "İBB yöneticisinin kaçırılmasında 24 sanık için iddianame hazırlandı",
+    "article_count": 17,
+    "updated_at": "2026-11-03T14:16:01.777Z"
+   },
+   {
+    "id": "a1736c84-c7fc-45e9-929b-8c43e2ed3b86",
+    "title_tr": "Erhan Karaal’ın kaçırılmasına ilişkin soruşturma tamamlandı",
+    "article_count": 2,
+    "updated_at": "2026-11-03T13:58:01.693Z"
+   },
+   {
+    "id": "31db77de-bf15-4423-bd33-062b9b23b59f",
+    "title_tr": "Barınağa götürülmek istenen köpek öldü: 2 tutuklama",
+    "article_count": 3,
+    "updated_at": "2026-11-03T13:22:03.500Z"
+   },
+   {
+    "id": "ac000e0b-d0eb-4f5c-a4e9-2706b5755f34",
+    "title_tr": "Bakanlıktan 23 ilde yağış alarmı: Sel, dolu ve hortum riski",
+    "article_count": 4,
+    "updated_at": "2026-11-03T12:34:07.951Z"
+   },
+   {
+    "id": "73ff50e0-a191-48ab-a667-3ac67b8c53f8",
+    "title_tr": "Sarıgül soruşturmasında 4 kişi daha tutuklandı",
+    "article_count": 4,
+    "updated_at": "2026-11-02T18:46:02.643Z"
+   },
+   {
+    "id": "7f5ef440-6223-4d0c-8539-bfdc55930d03",
+    "title_tr": "Sarıgül soruşturmasında 4 kişiye tutuklama talebi",
+    "article_count": 17,
+    "updated_at": "2026-11-02T18:39:07.304Z"
+   },
+   {
+    "id": "eb513170-cdd6-4eb1-8d1a-81df932f8042",
+    "title_tr": "Sarıgül ailesine yönelik kara para soruşturmasında 10 şüpheli adliyeye sevk edildi",
+    "article_count": 17,
+    "updated_at": "2026-11-02T17:42:07.744Z"
+   },
+   {
+    "id": "d80972a7-0168-42cd-ba3a-d195ad0db298",
+    "title_tr": "Sarıgül ailesine yönelik soruşturmada dört şüpheliye tutuklama talebi",
+    "article_count": 3,
+    "updated_at": "2026-11-02T15:31:04.356Z"
+   },
+   {
+    "id": "848f51b2-6c62-4c54-aae1-baec518b0a13",
+    "title_tr": "Silivri'de batan gemideki denizcilerin ailelerinden çağrı: Bütün imkanlar birleştirilsin",
+    "article_count": 3,
+    "updated_at": "2026-11-02T15:09:06.263Z"
+   },
+   {
+    "id": "0f516356-4c3d-456c-85be-d9c26cecf864",
+    "title_tr": "İçişleri duyurdu... 11 ilde 'siber' operasyon: 86 tutuklama",
+    "article_count": 2,
+    "updated_at": "2026-11-02T13:24:15.664Z"
+   },
+   {
+    "id": "b52576d1-bb79-4c17-8d64-81b1b31f2422",
+    "title_tr": "MESEM’deki ilk günüydü, 6. kattan düşerek öldü: ‘Ne baret vardı, ne koruyucu file’",
+    "article_count": 2,
+    "updated_at": "2026-11-02T11:10:03.260Z"
+   },
+   {
+    "id": "38aa610e-7dda-40e1-9143-74f74cea7db1",
+    "title_tr": "İçişleri Bakanı Çiftçi açıkladı: İstanbul'da suç örgütlerine 190 operasyon, bin 545 tutuklama",
+    "article_count": 21,
+    "updated_at": "2026-11-02T09:52:02.789Z"
+   },
+   {
+    "id": "50f441fa-be11-4db5-86ff-633f8ab44409",
+    "title_tr": "11 ilde eş zamanlı operasyon: Tarihi geçmiş kanser ilaçlarını piyasaya süren şebeke çökertildi",
+    "article_count": 30,
+    "updated_at": "2026-11-02T07:54:15.304Z"
+   },
+   {
+    "id": "4f4c38f9-f48a-4877-8c0f-82698c3cf974",
+    "title_tr": "Son kullanma tarihi geçmiş kanser ilaçlarında 11 ilde 22 şüpheli gözaltına alındı",
+    "article_count": 4,
+    "updated_at": "2026-11-02T07:48:07.962Z"
+   },
+   {
+    "id": "dd0def1d-3391-4eeb-b35d-f6763a730c57",
+    "title_tr": "Bakan Gürlek, kanser ilacı operasyonunda 22 şüphelinin gözaltına alındığını açıkladı",
+    "article_count": 4,
+    "updated_at": "2026-11-02T07:21:12.002Z"
+   },
+   {
+    "id": "1fca6b8a-83fe-4b25-a502-a89f86b5fc46",
+    "title_tr": "Son kullanma tarihi geçmiş ilaç operasyonu. Gözaltılar var",
+    "article_count": 3,
+    "updated_at": "2026-11-02T07:10:05.984Z"
+   },
+   {
+    "id": "92a09490-8da2-4769-ab46-f641730377d2",
+    "title_tr": "AFAD ve Kandilli 2 Kasım 2026 Depremler Listesi",
+    "article_count": 4,
+    "updated_at": "2026-11-02T06:55:08.996Z"
+   },
+   {
+    "id": "19b2131d-5830-4e41-94b2-b4ec3a1811c8",
+    "title_tr": "Erzincan'da Eğitimciler İçin Okul Acil İhbar Modülü Tanıtıldı",
+    "article_count": 3,
+    "updated_at": "2026-11-02T05:43:03.371Z"
+   },
+   {
+    "id": "596bd112-b654-4229-81d7-b86654c6c6e1",
+    "title_tr": "İzmir'de toprak kayması nedeniyle 3 bina tahliye edildi",
+    "article_count": 2,
+    "updated_at": "2026-11-02T05:01:01.483Z"
+   },
+   {
+    "id": "8088059e-73b9-4967-9a4e-2534fd24acdf",
+    "title_tr": "Meteoroloji'den 'kırmızı alarm': Gökyüzü bu gece kararıyor",
+    "article_count": 2,
+    "updated_at": "2026-11-02T04:46:01.524Z"
+   }
+  ],
+  "yasam": [
+   {
+    "id": "7faafe69-d78d-43b4-a0b5-088534f16f4d",
+    "title_tr": "Bakan Memişoğlu'ndan \"organ bağışı\" çağrısı",
+    "article_count": 9,
+    "updated_at": "2026-11-04T14:58:04.705Z"
+   },
+   {
+    "id": "83243719-7d15-49a4-b952-d343cb9c166c",
+    "title_tr": "Yılmaz Erdoğan kam davulu sahnesi için özür diledi",
+    "article_count": 17,
+    "updated_at": "2026-11-04T09:46:01.727Z"
+   },
+   {
+    "id": "f0ac5829-003c-49d9-8a0b-1ec2efd9aeeb",
+    "title_tr": "MasterChef'te ortalık karıştı: Şadi'nin Ayşe'ye o hareketi olay oldu: Sosyal medyada 'Diskalife' yorumları yağdı",
+    "article_count": 2,
+    "updated_at": "2026-11-04T08:58:02.856Z"
+   },
+   {
+    "id": "8ce2c503-f749-4387-b4dd-c0a1d5cb8f98",
+    "title_tr": "Emine Erdoğan, İzzet Keribar'ın Güney Kore'de çektiği fotoğraflardan oluşan sergiyi ziyaret etti",
+    "article_count": 12,
+    "updated_at": "2026-11-03T14:45:09.365Z"
+   },
+   {
+    "id": "434379f6-e664-47ae-851d-4a35f9ce9d94",
+    "title_tr": "Ahmet Şık: Kalp rahatsızlığım başarılı bir by-pass ameliyatı ile noktalandı",
+    "article_count": 4,
+    "updated_at": "2026-11-03T14:34:05.742Z"
+   },
+   {
+    "id": "43108107-bec1-42a2-ae60-9adfdc477b2f",
+    "title_tr": "Yüsra Geyik takside bekledi, Nehir Erdoğan arka kapıdan çıktı",
+    "article_count": 2,
+    "updated_at": "2026-11-03T07:19:02.464Z"
+   },
+   {
+    "id": "c7286eee-a766-4da9-ac47-b77d9c6efb1d",
+    "title_tr": "Bakan Memişoğlu: Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz",
+    "article_count": 2,
+    "updated_at": "2026-11-03T06:43:02.113Z"
+   },
+   {
+    "id": "a43d7f73-98d7-4b7a-9013-a20c629aae76",
+    "title_tr": "Bakan Memişoğlu'ndan Tütün Uyarısı: İş İşten Geçmeden Bırakın",
+    "article_count": 2,
+    "updated_at": "2026-11-02T13:58:02.778Z"
+   },
+   {
+    "id": "6ad1cd10-cdf1-42ef-aefc-e0470eb8912d",
+    "title_tr": "Bakan Memişoğlu: Tütün her yıl 100 binden fazla insanımızın hayatına mal oluyor",
+    "article_count": 2,
+    "updated_at": "2026-11-02T12:13:01.291Z"
+   },
+   {
+    "id": "c2bfa2e0-b370-4add-a5e6-b5a755d54ca9",
+    "title_tr": "Bakan Memişoğlu paylaştı: Türkiye sigara kullanımında dünya ikincisi",
+    "article_count": 3,
+    "updated_at": "2026-11-02T11:48:08.035Z"
+   },
+   {
+    "id": "22d1b7be-9bc5-404a-aa73-8fdd21666443",
+    "title_tr": "Tarkan COP31 Türkiye için söyledi: Uyan",
+    "article_count": 13,
+    "updated_at": "2026-11-02T08:37:02.014Z"
+   },
+   {
+    "id": "4e248689-9400-44c2-9aee-3bd7d66072df",
+    "title_tr": "Bakan Murat Kurum'dan Tarkan'a teşekkür: 'COP31 öncesi çok değerli bir farkındalık oluşturdunuz'",
+    "article_count": 7,
+    "updated_at": "2026-11-02T08:28:02.584Z"
+   },
+   {
+    "id": "d8d5ea63-2078-4cc1-9e08-61eb3981c94b",
+    "title_tr": "Selvi Boylum Al Yazmalım'ın Cemşit'i Ahmet Mekin yaşıyor mu, öldü mü? Torunundan son dakika açıklama geldi",
+    "article_count": 2,
+    "updated_at": "2026-11-02T07:04:01.872Z"
+   },
+   {
+    "id": "bec74859-2b6f-4567-a5e0-13ab53a3486b",
+    "title_tr": "Ehmedê Xanî Vefa Ödülü, Abdullah Keskin’e verilecek",
+    "article_count": 2,
+    "updated_at": "2026-11-02T06:06:15.426Z"
+   },
+   {
+    "id": "ed61b0cb-a865-4b22-8e1b-c1f909454673",
+    "title_tr": "Masterchef kim elendi, kim gitti?",
+    "article_count": 3,
+    "updated_at": "2026-11-02T04:34:01.824Z"
+   },
+   {
+    "id": "609bdf18-a857-4ee1-908a-bdd70ec4737e",
+    "title_tr": "Suikast Treni filminin konusu ne? Suikast Treni filminin oyuncuları kim?",
+    "article_count": 2,
+    "updated_at": "2026-11-01T17:24:07.298Z"
+   },
+   {
+    "id": "7bc7a2c3-eed1-466b-a2ae-d0b439e9278e",
+    "title_tr": "Eşinin 'köy yerinde kimse gelmez' sözüne rağmen pes etmeyen kadın, mor renkli eviyle kendi işinin patronu oldu",
+    "article_count": 3,
+    "updated_at": "2026-11-01T16:49:01.675Z"
+   },
+   {
+    "id": "779d8775-b3ca-4001-b8e6-b28698978ce4",
+    "title_tr": "Kışın kapalı evde süpürge riski: Toz seviyesi 90 dakika boyunca yüksek kalıyor",
+    "article_count": 2,
+    "updated_at": "2026-11-01T16:40:04.643Z"
+   },
+   {
+    "id": "bf9bd1da-9a77-43e3-be3a-3de1fc92d065",
+    "title_tr": "Beştepe Millet Ormanı'nda hafta sonu yoğunluğu",
+    "article_count": 2,
+    "updated_at": "2026-11-01T16:33:05.639Z"
+   },
+   {
+    "id": "f16c0171-2a39-42cd-a050-7134a984c4bd",
+    "title_tr": "Elazığ’da 38 kiloluk dev kabak görenleri şaşırttı",
+    "article_count": 2,
+    "updated_at": "2026-11-01T16:10:03.222Z"
+   },
+   {
+    "id": "b5d10e68-2503-4608-add2-eead293f2433",
+    "title_tr": "Mehmet Günsür'ün eşiyle son görüntüsü gündem oldu. Yorumlar peş peşe geldi",
+    "article_count": 3,
+    "updated_at": "2026-11-01T15:37:03.386Z"
+   },
+   {
+    "id": "bb2cb3af-793b-4994-b03c-ddacf8f90e3c",
+    "title_tr": "Köyceğiz Toparlar Merkez Camii'nde Sabah Namazı Buluşması",
+    "article_count": 3,
+    "updated_at": "2026-11-01T15:01:02.356Z"
+   },
+   {
+    "id": "6e634a7c-c177-40cc-bc5f-1ec5aa764f8b",
+    "title_tr": "İzmir’in 110 lezzet noktasında gastronomi keşfi",
+    "article_count": 8,
+    "updated_at": "2026-11-01T14:33:09.626Z"
+   },
+   {
+    "id": "bbd10b20-0176-4609-ab03-4d5e8d285b74",
+    "title_tr": "Sadece antik dönemden kalan kuyularda olgunlaşıyor: Yemek için 4 ay bekleniyor",
+    "article_count": 2,
+    "updated_at": "2026-11-01T13:58:02.392Z"
+   },
+   {
+    "id": "ad43b3c9-b854-4460-bc3c-6c6c2e7fed30",
+    "title_tr": "Engin Altan Düzyatan, Ürdün'de Mike Tyson ve Ronaldinho ile buluştu",
+    "article_count": 4,
+    "updated_at": "2026-11-01T13:55:04.638Z"
+   },
+   {
+    "id": "92b3a6a9-e4fd-4ef9-b7d5-768e5ec56d21",
+    "title_tr": "Katy Perry 42'nci yaşını Justin Trudeau ile kutladı. Macera dolu kareler",
+    "article_count": 3,
+    "updated_at": "2026-11-01T13:52:02.585Z"
+   },
+   {
+    "id": "9183922c-da59-4afe-812e-b5d2c3ef3b2e",
+    "title_tr": "Öykü Karayel’den Altın Portakal’da özgürlük mesajı",
+    "article_count": 3,
+    "updated_at": "2026-11-01T12:31:00.690Z"
+   },
+   {
+    "id": "a4519d8d-2493-4566-b3cf-10b87018fae1",
+    "title_tr": "Hastalığına meydan okuyup dönmüştü: 16 konserden 125 milyon dolar kazandı",
+    "article_count": 2,
+    "updated_at": "2026-11-01T10:18:12.754Z"
+   },
+   {
+    "id": "e7925c6f-48fa-4057-ba15-2ce5fa097b0a",
+    "title_tr": "Viral olan kahkaha sonrası Emre Kınay’dan dava kararı",
+    "article_count": 2,
+    "updated_at": "2026-11-01T08:31:01.850Z"
+   },
+   {
+    "id": "dc64ea89-5a22-48fc-8c67-eda4af978be1",
+    "title_tr": "İbrahim Çelikkol 6 Yaşındaki Oğlu Ali ile Spor Yaptı",
+    "article_count": 2,
+    "updated_at": "2026-11-01T08:16:01.721Z"
+   }
+  ],
+  "spor": [
+   {
+    "id": "0b5eee69-db07-4e5e-bc89-753a20dc9ad0",
+    "title_tr": "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nın şampiyonu Enka oldu",
+    "article_count": 4,
+    "updated_at": "2026-11-02T09:34:04.282Z"
+   },
+   {
+    "id": "ca8dfdd8-f464-4cd0-a5be-bed8b1a416bd",
+    "title_tr": "Galatasaray'da Stuttgart maçı öncesi gözler Okan Buruk'ta",
+    "article_count": 2,
+    "updated_at": "2026-11-02T07:28:05.030Z"
+   },
+   {
+    "id": "3dfc7489-20ec-48e2-8bb7-5a74e9e8748a",
+    "title_tr": "Beşiktaş Kasımpaşa'ya takıldı lider Galatasaray ile puan farkı açıldı",
+    "article_count": 5,
+    "updated_at": "2026-11-01T19:13:03.666Z"
+   },
+   {
+    "id": "d8c49a89-c34c-4cec-94c3-0cddbf555dee",
+    "title_tr": "Abdullah Kavukcu istifa etti",
+    "article_count": 3,
+    "updated_at": "2026-11-01T16:25:04.613Z"
+   },
+   {
+    "id": "65bafdb1-398e-45e4-97a0-7ee7f808d2be",
+    "title_tr": "Son dakikada gelen golle İnegöl'den zorlu üç puan",
+    "article_count": 2,
+    "updated_at": "2026-11-01T15:40:09.337Z"
+   },
+   {
+    "id": "a81379a9-01f9-4f7f-9da5-31e01b4f2446",
+    "title_tr": "Fenerbahçe'de yönetim olağanüstü toplanıyor: İstifa seçeneği masada",
+    "article_count": 2,
+    "updated_at": "2026-11-01T10:42:17.684Z"
+   },
+   {
+    "id": "78626b2f-45e2-4a5a-993a-ad42d0bdf8b0",
+    "title_tr": "Fenerbahçe’de teknik direktör planı değişti. İki adayla acil görüşme",
+    "article_count": 2,
+    "updated_at": "2026-11-01T10:24:10.208Z"
+   },
+   {
+    "id": "6c5c5709-27ec-4499-8f60-5fe20eb2f2d7",
+    "title_tr": "Galatasaray Kulübü İkinci Başkanı Metin Öztürk istifa etti",
+    "article_count": 2,
+    "updated_at": "2026-11-01T10:13:01.683Z"
+   },
+   {
+    "id": "56ad81f4-bb5d-476a-b4b8-ac56b70728bd",
+    "title_tr": "48. İstanbul Maratonu'nun kazananları belli oldu: Rekor kırıldı",
+    "article_count": 2,
+    "updated_at": "2026-11-01T08:27:15.455Z"
+   },
+   {
+    "id": "57a1cf14-0908-4986-b2fa-283b1ee15570",
+    "title_tr": "Cumhuriyet Koşusu'nun kazananı 'Özmen Bey'",
+    "article_count": 2,
+    "updated_at": "2026-10-31T15:37:03.819Z"
+   },
+   {
+    "id": "8cc4e693-18f2-4fe9-8452-d3f264fa39ba",
+    "title_tr": "Kerem'den harika bir gol: Eskişehirspor 1-0 Iğdır FK (MAÇ SONUCU)",
+    "article_count": 2,
+    "updated_at": "2026-10-29T20:33:16.573Z"
+   }
+  ],
+  "teknoloji": [
+   {
+    "id": "9344a2a5-95a8-4adf-b4f4-d60ae9054584",
+    "title_tr": "Cumhurbaşkanlığı'ndan siber güvenlik uyarısı: IPhone kullanıcıları dikkat",
+    "article_count": 2,
+    "updated_at": "2026-11-04T14:25:03.992Z"
+   },
+   {
+    "id": "f3c85092-91ef-4c7e-a1ec-c3541f8a428a",
+    "title_tr": "Bakan Kacır yeni İMECE uyduları için tarih verdi",
+    "article_count": 2,
+    "updated_at": "2026-11-02T11:58:06.148Z"
+   },
+   {
+    "id": "c4a73937-c083-44c8-80d6-7cd12b43e01c",
+    "title_tr": "Sosyal Medyada Yaş Doğrulama Tuzaklarına Karşı Uyarı",
+    "article_count": 2,
+    "updated_at": "2026-11-02T06:19:01.518Z"
+   },
+   {
+    "id": "a006ab26-1462-48a0-8c0f-1325b689bebd",
+    "title_tr": "TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri sahiplerini buldu",
+    "article_count": 6,
+    "updated_at": "2026-10-31T15:33:11.708Z"
+   },
+   {
+    "id": "df00b8ac-185f-47cc-bc75-781d498c896f",
+    "title_tr": "Ödülü Erdoğan verdi: Aziz Sancar Bilim Ödülü Özlem Türeci ve Uğur Şahin'in",
+    "article_count": 3,
+    "updated_at": "2026-10-31T14:43:01.103Z"
+   },
+   {
+    "id": "bdbf9948-e7b6-46f1-91d7-cc588516f9ea",
+    "title_tr": "Yapmayanın hesabı kapatılacak: Sosyal medyada yeni dönem yarın başlıyor",
+    "article_count": 5,
+    "updated_at": "2026-10-31T13:13:03.823Z"
+   },
+   {
+    "id": "a3b1ea87-3213-448d-bbfe-2727111e21cf",
+    "title_tr": "Türk Dünyası Diyalog Forumu'nda Yapay Zeka Sınamaları Masaya Yatırıldı",
+    "article_count": 3,
+    "updated_at": "2026-10-31T11:07:02.290Z"
+   },
+   {
+    "id": "41fa482e-5c34-4907-ab87-033fc162d184",
+    "title_tr": "Gençlerle buluşmada sağlık vizyonunu paylaştı: idealizm, e‑Nabız ve yerli robotik hedefleri",
+    "article_count": 5,
+    "updated_at": "2026-10-31T09:52:03.293Z"
+   },
+   {
+    "id": "11315a00-85ee-4876-833c-0dd4f473483b",
+    "title_tr": "Turkcell'in BiP OVA kanalına yeni özellik eklendi",
+    "article_count": 2,
+    "updated_at": "2026-10-30T08:57:13.134Z"
+   },
+   {
+    "id": "fc09210b-c585-4ca7-bb31-20db2fbd78f8",
+    "title_tr": "Dijital hafızayı biz inşa etmeliyiz: Duran'dan yapay zekâ uyarısı",
+    "article_count": 2,
+    "updated_at": "2026-10-30T08:34:05.901Z"
+   }
+  ]
+ },
+ "pages": [
+  {
+   "id": "9fcc79ba-e135-458c-b60e-825ea1943ad9",
+   "topic7": "genel",
+   "headline": "Mustafa Sarıgül'ün oğlu Emir Sarıgül ev hapsi kararıyla tahliye edildi"
+  },
+  {
+   "id": "b59f3bb6-f24d-4348-abb0-0bf82682f69d",
+   "topic7": "politika",
+   "headline": "Mekke Anlaşması'nın ilk maddesi kabul edildi"
+  },
+  {
+   "id": "9b5ba0c6-fb41-4aff-ba4b-d49ef719a7e2",
+   "topic7": "politika",
+   "headline": "Korkuteli Belediye Başkanı Saniye Caran, CHP'den istifa etti"
+  },
+  {
+   "id": "bcda0006-3873-4367-8819-95476c5c1579",
+   "topic7": "politika",
+   "headline": "Trump, seçimleri kaybetmelerinin sebebinin \"İran savaşı\" ve buna bağlı \"hayat pahalılığı\" olduğunu söyledi"
+  },
+  {
+   "id": "b6fe7960-f4fc-4546-8345-ff04e676c15b",
+   "topic7": "politika",
+   "headline": "ABD Başkan Yardımcısı seçim yenilgisini İsrail'e bağladı"
+  },
+  {
+   "id": "3ab2202c-966b-4d9b-8530-f53926ea29a2",
+   "topic7": "dunya",
+   "headline": "Dışişleri Bakanlığı'ndan Avrupa Komisyonu raporuna tepki"
+  },
+  {
+   "id": "97da6195-ead2-4d66-bbaa-6316bff96ecc",
+   "topic7": null,
+   "headline": "Anayasa Mahkemesi'nden Canan Karatay Kararı: İfade Özgürlüğü Vurgusu"
+  },
+  {
+   "id": "6e19dd5a-7d4a-4632-88a1-888e93804827",
+   "topic7": null,
+   "headline": "Abdul El Sayed ABD'de Senato'ya seçilen ilk Müslüman oldu"
+  },
+  {
+   "id": "2b8d3632-3d4f-43f9-be3b-12041c34982c",
+   "topic7": "dunya",
+   "headline": "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı"
+  },
+  {
+   "id": "aba2cc40-cb4c-4007-809f-a0fa709a5d08",
+   "topic7": "dunya",
+   "headline": "Almanya'da Bavyera Eyalet Başbakan Yardımcısı Aiwanger otelde ölü bulundu"
+  },
+  {
+   "id": "78e56dca-2dbc-444f-802c-bc57a21f5202",
+   "topic7": "dunya",
+   "headline": "ABD seçimlerinden sonra Hamaney'den ilk açıklama"
+  },
+  {
+   "id": "a8fa75e2-970b-45ed-924e-cd913d081375",
+   "topic7": "genel",
+   "headline": "Bakan Gürlek açıkladı: Yasa dışı bahis operasyonunda 5 bin 949 tutuklama"
+  },
+  {
+   "id": "aa12e7c3-bfd5-4a9f-8652-41e9e462584b",
+   "topic7": "dunya",
+   "headline": "İsrail Merkez Seçim Komitesi şeffaflığa aykırı bulguya rastlanmadığını açıkladı"
+  },
+  {
+   "id": "85b2e468-725b-4942-894c-2009d3b7f28d",
+   "topic7": "dunya",
+   "headline": "İspanya Ulaştırma Bakanı Puente, tren kazasının ardından istifa etti"
+  },
+  {
+   "id": "b84a5deb-6dd4-4c9a-8109-b90cd45adee6",
+   "topic7": "dunya",
+   "headline": "İsrail basını: ABD ara seçimlerini Demokratların kazanması Trump ve İsrail için ağır darbe"
+  },
+  {
+   "id": "a89cba66-29ce-442b-92b9-7915e9f9b3f6",
+   "topic7": "dunya",
+   "headline": "Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi"
+  },
+  {
+   "id": "d06e747a-1208-4374-80bb-c7950ed6cbd0",
+   "topic7": "politika",
+   "headline": "Selahattin Demirtaş'ın yargılandığı davada yeni gelişme: Dosyalar birleştirildi"
+  },
+  {
+   "id": "f85bc48e-692d-41be-8f6b-0d0ecd1d2281",
+   "topic7": "dunya",
+   "headline": "Emine Erdoğan, Yunus Emre Enstitüsünün Seul'deki kültür merkezinin resmi açılışını yaptı"
+  },
+  {
+   "id": "f86ef76c-2012-4e88-ae4d-5bd08941b8b8",
+   "topic7": "ekonomi",
+   "headline": "Brent petrolün varil fiyatı, ABD ara seçimlerinin etkisiyle 94 dolar seviyesine geriledi"
+  },
+  {
+   "id": "7155dab6-958e-4f13-9d7d-59f150c6ed40",
+   "topic7": "politika",
+   "headline": "JD Vance, Kongre ara seçim yenilgisini İran savaşı ve İsrail ilişkilerine bağladı"
+  },
+  {
+   "id": "d91ab2f1-a095-4213-b228-ae5391f7272c",
+   "topic7": "dunya",
+   "headline": "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü"
+  },
+  {
+   "id": "fed00dfd-be12-404e-8c8b-17f5ca226e0b",
+   "topic7": "politika",
+   "headline": "YENİ Parti'nin Birinci Olağan Kurultayı’nın sloganı belli oldu"
+  },
+  {
+   "id": "8dac1159-9ca8-4288-9716-ee961c78730b",
+   "topic7": "politika",
+   "headline": "Ümit Özdağ, tehdit davasından beraat etti"
+  },
+  {
+   "id": "2f43df00-2c22-4f77-afbe-e6ceb1263d2b",
+   "topic7": "politika",
+   "headline": "DEM Parti Sözcüsü ile Barış Anneleri'ni kabul etti"
+  },
+  {
+   "id": "97589454-912e-4785-9ef6-75106b39f6f9",
+   "topic7": "politika",
+   "headline": "Demirtaş ve Yüksekdağ için cezaevleri önünde açıklama yapılacak"
+  },
+  {
+   "id": "07592cf8-3a81-486e-9b48-5790609698a5",
+   "topic7": null,
+   "headline": "ABD Senatosu Azınlık Lideri Demokrat Schumer: İran'la savaşı sona erdireceğiz"
+  },
+  {
+   "id": "4e15412a-a59c-47be-8e71-67adc4948577",
+   "topic7": "dunya",
+   "headline": "Dışişleri'nden AB'nin 2026 raporuna sert tepki: Mesnetsiz iddiaları reddediyoruz"
+  },
+  {
+   "id": "92a56e9e-737d-4675-adf7-b08637e58597",
+   "topic7": null,
+   "headline": "Netanyahu’dan İslamcı partilere sert suçlama: \"İsrail’in güvenliğini tehdit ediyorlar\""
+  },
+  {
+   "id": "00e97812-d688-45cf-ab41-49fb1e77a434",
+   "topic7": "ekonomi",
+   "headline": "İTO'da Şekib Avdagiç yeniden başkan seçildi"
+  },
+  {
+   "id": "268d231b-c7fe-43f2-b9c9-b06039074d77",
+   "topic7": "dunya",
+   "headline": "Rusya'dan ABD seçimlerine ilk değerlendirme: Trump'ın barış çabalarını umuyoruz"
+  }
+ ]
+}

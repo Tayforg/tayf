@@ -10,9 +10,11 @@ import {
   REPICK_MARGIN_FULL_LENGTH,
   cleanHeadline,
   framingPenalty,
+  incumbentDefect,
   isAcceptableNeutral,
   isExtractiveModelId,
   isGenericTitle,
+  isQuestionTitle,
   loadedPenalty,
   lowerCaseSourced,
   lowercaseLeak,
@@ -797,8 +799,8 @@ describe("pickNeutralTitle first-pick floor ({ floor: true })", () => {
 });
 
 describe("EXTRACTIVE_MODEL_ID and isExtractiveModelId", () => {
-  it("is extractive-v5", () => {
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v5");
+  it("is extractive-v6", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
   });
 
   it("recognises every extractive-* version and nothing else", () => {
@@ -807,6 +809,7 @@ describe("EXTRACTIVE_MODEL_ID and isExtractiveModelId", () => {
     expect(isExtractiveModelId("extractive-v3")).toBe(true);
     expect(isExtractiveModelId("extractive-v4")).toBe(true);
     expect(isExtractiveModelId("extractive-v5")).toBe(true);
+    expect(isExtractiveModelId("extractive-v6")).toBe(true);
     expect(isExtractiveModelId(EXTRACTIVE_MODEL_ID)).toBe(true);
     expect(isExtractiveModelId("claude-haiku-4-5-20251001")).toBe(false);
     expect(isExtractiveModelId("extractive")).toBe(false);
@@ -1548,9 +1551,10 @@ describe("h26 fixture", () => {
     }
   });
 
-  it("h26 did not bump EXTRACTIVE_MODEL_ID (it stayed extractive-v4); h31 did (extractive-v5)", () => {
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v5");
+  it("h26 did not bump EXTRACTIVE_MODEL_ID (it stayed extractive-v4); h31 (v5) and h34 (v6) did", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
     expect(EXTRACTIVE_MODEL_ID).not.toBe("extractive-v4");
+    expect(EXTRACTIVE_MODEL_ID).not.toBe("extractive-v5");
   });
 });
 
@@ -3073,5 +3077,501 @@ describe("h32-livebl-3: unbalanced double quotes", () => {
     it("7ca3324d: every member is a question, so the re-pick finds nothing and the route keeps the stored title", () => {
       expect(pickNeutralTitle(asMembers(LIVE_7CA3), { incumbent: LIVE_7CA3_STORED })).toBeNull();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt 34 (h34-reader-1, h34-reader-2), extractive-v6.
+//
+// h34-reader-1: the re-pick protects the incumbent (the stored title) unless the
+// best member title outscores it by 0.05 / 0.20. That bar froze five live v5
+// titles on top stories: b6fe7960 (19 sources) says Vance blamed the loss on
+// Israel while about 12 members say the war; 2f43df00 names no subject; 97da6195
+// (28 sources) is Title Case and vague; 97589454 announces what the members
+// already report as done; 268d231b dropped its verb. incumbentDefect lowers the
+// bar to zero for a stored title that carries a minority claim, a Title Case run
+// or no majority subject.
+//
+// h34-reader-2: a question or SEO-explainer headline ("Saniye Caran kimdir? ...
+// kaç yaşında, nereli?") shipped as the floor pick of two-member clusters and was
+// served index,follow. A question can only be the last resort of the floor now,
+// and the cluster page keeps it out of the index.
+//
+// Member titles of the five incumbent clusters are the live ones, read-only
+// SELECT on cluster_articles x articles on 2026-11-05, newest first, in
+// src/lib/clusters/__fixtures__/h34-incumbents.json.
+// ---------------------------------------------------------------------------
+
+interface H34Cluster {
+  cid: string;
+  stored: string;
+  article_count: number;
+  stamped: number;
+  model: string;
+  titles: string[];
+  /** The title the v6 re-pick returns with the stored title as incumbent (the stored title when it stays). */
+  expected: string;
+  /** Hand verdict of the old -> new swap: better, lateral (never worse), or kept. */
+  verdict: "better" | "lateral" | "kept";
+  why: string;
+}
+
+const H34: H34Cluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h34-incumbents.json"), "utf8"),
+) as H34Cluster[];
+
+const h34 = (cid: string): H34Cluster => {
+  const c = H34.find((x) => x.cid === cid);
+  if (!c) throw new Error(`h34 fixture cluster ${cid} missing`);
+  return c;
+};
+
+/** The five live clusters of the finding; the rest of the fixture is the 7-day replay's other changes. */
+const H34_LIVE = ["b6fe7960", "2f43df00", "97da6195", "97589454", "268d231b"];
+const H34_REPLAY = H34.map((c) => c.cid).filter((cid) => !H34_LIVE.includes(cid));
+const h34Repick = (c: H34Cluster): string | null => pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+
+describe("hunt 34 (h34-reader-1): fixture", () => {
+  it("holds the five live clusters first, each stored title one of its own members and stamped v5", () => {
+    expect(H34.slice(0, 5).map((c) => [c.cid, c.titles.length])).toEqual([
+      ["b6fe7960", 19],
+      ["2f43df00", 9],
+      ["97da6195", 28],
+      ["97589454", 14],
+      ["268d231b", 9],
+    ]);
+    for (const c of H34) {
+      expect(c.model, c.cid).toBe("extractive-v5");
+      expect(c.titles, c.cid).toContain(c.stored);
+      expect(c.titles.length, c.cid).toBe(c.article_count);
+      expect(c.stamped, c.cid).toBeLessThanOrEqual(c.article_count);
+    }
+  });
+
+  it("holds the nine other titles the 7-day replay of v5 clusters changes, each with a hand verdict", () => {
+    expect(H34_REPLAY).toEqual([
+      "7155dab6",
+      "78e56dca",
+      "374651ca",
+      "ce2b364b",
+      "bb5bca11",
+      "d53ac82f",
+      "18c49fa0",
+      "2e50b09e",
+      "759b5665",
+    ]);
+    // Zero worse is the bar; no more than three lateral swaps.
+    expect(H34.filter((c) => c.verdict === "lateral")).toHaveLength(3);
+    expect(H34.map((c) => c.verdict).filter((v) => !["better", "lateral", "kept"].includes(v))).toEqual([]);
+    for (const c of H34) expect(c.why.length, c.cid).toBeGreaterThan(10);
+  });
+});
+
+describe("hunt 34 (h34-reader-1): incumbentDefect heals four of the five live titles", () => {
+  it.each(["b6fe7960", "2f43df00", "97da6195", "97589454"])(
+    "%s: the re-pick no longer returns the stored title, but a member's own cleaned wording",
+    (cid) => {
+      const c = h34(cid);
+      const picked = h34Repick(c);
+      expect(picked).not.toBeNull();
+      expect(picked).not.toBe(c.stored);
+      expect(picked).toBe(c.expected);
+      expect(c.titles.some((t) => cleanHeadline(t) === picked), `${cid}: ${picked}`).toBe(true);
+      expect(isAcceptableNeutral(picked!, c.titles.filter((t) => cleanHeadline(t) !== picked))).toBe(true);
+    },
+  );
+
+  it("the hand-reviewed picks", () => {
+    expect(h34Repick(h34("b6fe7960"))).toBe(
+      'ABD Başkan Yardımcısı Vance: "Ara seçimleri kaybetmemizin nedeni İran savaşı"',
+    );
+    expect(h34Repick(h34("2f43df00"))).toBe("TBMM Başkanı Kurtulmuş, 'Barış Anneleri'ni kabul etti");
+    expect(h34Repick(h34("97da6195"))).toBe('AYM\'den "Canan Karatay" kararı: Verilen ceza hak ihlali sayıldı');
+    expect(h34Repick(h34("97589454"))).toBe(
+      "Demirtaş ve Yüksekdağ'ın tutukluluğunda 10. yıl: DEM Parti'den cezaevi önünde açıklama",
+    );
+  });
+
+  it.each(["b6fe7960", "2f43df00", "97da6195", "97589454"])(
+    "%s: incumbentDefect is true for (stored, fresh best)",
+    (cid) => {
+      const c = h34(cid);
+      const best = pickNeutralTitle(asMembers(c.titles))!;
+      expect(incumbentDefect(c.stored, best, c.titles)).toBe(true);
+    },
+  );
+
+  it.each(["b6fe7960", "2f43df00", "97da6195", "97589454"])("%s: the new pick is a fixed point as incumbent", (cid) => {
+    const c = h34(cid);
+    const picked = h34Repick(c);
+    expect(pickNeutralTitle(asMembers(c.titles), { incumbent: picked })).toBe(picked);
+    // Idempotent: a second re-pick over the same members changes nothing.
+    expect(pickNeutralTitle(asMembers(c.titles), { incumbent: pickNeutralTitle(asMembers(c.titles), { incumbent: picked }) })).toBe(picked);
+  });
+
+  it.each(["b6fe7960", "2f43df00", "97da6195", "97589454"])("%s: a first pick (no incumbent) is the same title", (cid) => {
+    const c = h34(cid);
+    expect(pickNeutralTitle(asMembers(c.titles))).toBe(h34Repick(c));
+    expect(pickNeutralTitle(asMembers(c.titles), { floor: true })).toBe(h34Repick(c));
+  });
+
+  it("b6fe7960: the Israel claim is a minority (4 of 19, the stored title among them) and the pick follows the war", () => {
+    const c = h34("b6fe7960");
+    const israel = c.titles.filter((t) => t.includes("İsrail"));
+    const war = c.titles.filter((t) => t.toLocaleLowerCase("tr").includes("savaş"));
+    expect(israel).toHaveLength(4);
+    expect(israel).toContain(c.stored);
+    expect(war).toHaveLength(11);
+    expect(h34Repick(c)).toMatch(/savaşı/);
+    expect(h34Repick(c)).not.toMatch(/İsrail/);
+  });
+
+  it("268d231b stays (narrowed): the stored title covers 4 of the 5 words most members use, so no rule fires", () => {
+    // Residual, kept on purpose: any coverage threshold loose enough to flip it also flips the lateral
+    // swaps the 7-day replay was run to avoid (see the header of incumbentDefect). It is re-offered by the
+    // cron when it grows (migration 155: stamped 8 -> offered at 12) and by the v6 bump.
+    const c = h34("268d231b");
+    const best = pickNeutralTitle(asMembers(c.titles))!;
+    expect(best).toBe("Rusya'dan ABD'deki seçim sonuçlarına dair ilk açıklama");
+    expect(incumbentDefect(c.stored, best, c.titles)).toBe(false);
+    expect(h34Repick(c)).toBe(c.stored);
+  });
+});
+
+describe("hunt 34 (h34-reader-1): the nine other changes of the 7-day replay", () => {
+  it.each(H34_REPLAY.map((cid) => [cid] as const))("%s: the re-pick returns the hand-reviewed title", (cid) => {
+    const c = h34(cid);
+    const picked = h34Repick(c);
+    expect(picked).toBe(c.expected);
+    expect(picked).not.toBe(c.stored);
+    expect(c.titles.some((t) => cleanHeadline(t) === picked), `${cid}: ${picked}`).toBe(true);
+    expect(isAcceptableNeutral(picked!, c.titles.filter((t) => cleanHeadline(t) !== picked))).toBe(true);
+    // A fixed point, and a first pick says the same.
+    expect(pickNeutralTitle(asMembers(c.titles), { incumbent: picked })).toBe(picked);
+    expect(pickNeutralTitle(asMembers(c.titles))).toBe(picked);
+  });
+});
+
+// Healthy stored titles that must stay. Each is a cluster of the 150-cluster corpus
+// (tests/fixtures/neutral-title-repick-replay.json) whose fresh best pick differs from the
+// stored title, so the margin is what keeps it: the case incumbentDefect must not touch.
+const CONTROL_CORPUS: Array<{ cid: string; stored: string; titles: string[] }> = JSON.parse(
+  readFileSync(resolve(__dirname, "../../../tests/fixtures/neutral-title-repick-replay.json"), "utf8"),
+) as Array<{ cid: string; stored: string; titles: string[] }>;
+const CONTROLS = ["a2e404ed", "589cb288", "f7af72db", "dfe20405", "1d83b5ac"];
+
+describe("hunt 34 (h34-reader-1): controls, a good stored title stays", () => {
+  it.each(CONTROLS)("%s: the margin keeps the stored title and incumbentDefect is false", (cid) => {
+    const c = CONTROL_CORPUS.find((x) => x.cid === cid);
+    expect(c, cid).toBeDefined();
+    expect(c!.titles.length).toBeGreaterThanOrEqual(25);
+    const fresh = pickNeutralTitle(asMembers(c!.titles))!;
+    expect(fresh).not.toBe(c!.stored); // not vacuous: a different best exists
+    expect(incumbentDefect(c!.stored, fresh, c!.titles)).toBe(false);
+    expect(pickNeutralTitle(asMembers(c!.titles), { incumbent: c!.stored })).toBe(c!.stored);
+  });
+});
+
+describe("hunt 34 (h34-reader-1): incumbentDefect", () => {
+  // --- (1) a minority claim: the stored title omits what most members say --------------
+  const DEPREM = [
+    "Malatya'da 4,5 büyüklüğünde deprem oldu",
+    "AFAD duyurdu: Malatya'da 4,5 büyüklüğünde deprem",
+    "Malatya'da deprem: AFAD büyüklüğü 4,5 olarak açıkladı",
+    "Malatya'da korkutan deprem! AFAD 4,5 büyüklüğünü duyurdu",
+    "Kandilli: Malatya'da 4,5 büyüklüğünde deprem meydana geldi",
+    "Malatya'daki depremde yaralanan olmadı",
+    "Malatya depremi sonrası AFAD'dan açıklama",
+  ];
+  const DEPREM_BEST = "Malatya'da 4,5 büyüklüğünde deprem oldu";
+  const DEPREM_MINORITY = "Malatya'da baraj çatladı, tahliye başladı";
+
+  it("(1) a stored title with its own rare words that omits the majority vocabulary is a defect", () => {
+    expect(incumbentDefect(DEPREM_MINORITY, DEPREM_BEST, [...DEPREM, DEPREM_MINORITY])).toBe(true);
+  });
+
+  it("(1) not with fewer than five other members (too little to call a majority)", () => {
+    expect(incumbentDefect(DEPREM_MINORITY, DEPREM_BEST, DEPREM.slice(0, 5))).toBe(false); // sample of 4
+    expect(incumbentDefect(DEPREM_MINORITY, DEPREM_BEST, DEPREM.slice(0, 6))).toBe(true); // sample of 5
+  });
+
+  it("(1) not when the stored title only elaborates: it still carries the words most members use", () => {
+    const georgia = [
+      "Georgia'da ilk siyahi kadın vali seçildi",
+      "ABD'de ilk siyahi kadın vali Georgia'dan çıktı",
+      "Georgia ilk siyahi kadın valisini seçti",
+      "Georgia eyaletinde ilk siyahi kadın vali oldu",
+      "ABD seçimlerinde Georgia'nın ilk siyahi kadın valisi belli oldu",
+      "Georgia'da tarihi seçim: İlk siyahi kadın vali",
+    ];
+    const elaborate = "Georgia'nın ilk siyahi kadın valisi Demokrat Keisha Lance Bottoms oldu";
+    expect(incumbentDefect(elaborate, "Georgia'da ilk siyahi kadın vali seçildi", [...georgia, elaborate])).toBe(false);
+  });
+
+  it("(1) not when the stored title's own words are said by many members (a synonym, not a claim)", () => {
+    const members = [
+      "Fidan ABD'de G20 toplantısına katıldı",
+      "Bakan Fidan G20 Dışişleri Bakanları Toplantısı'na katıldı",
+      "G20 Dışişleri Bakanları Toplantısı ABD'de başladı, Fidan katıldı",
+      "Dışişleri Bakanı Fidan G20 toplantısında konuştu",
+      "Fidan Atlanta'daki G20 toplantısında Rubio ile görüştü",
+      "ABD'deki G20 toplantısında Türkiye'yi Fidan temsil etti",
+    ];
+    expect(incumbentDefect("Bakan Fidan ABD'de G20 toplantısına katıldı", "Fidan ABD'de G20 toplantısına katıldı", members)).toBe(
+      false,
+    );
+  });
+
+  it("(1) a stored title identical to the best, or a blank one, is never a defect", () => {
+    expect(incumbentDefect(DEPREM_BEST, DEPREM_BEST, DEPREM)).toBe(false);
+    expect(incumbentDefect("", DEPREM_BEST, DEPREM)).toBe(false);
+    expect(incumbentDefect(DEPREM_MINORITY, "", DEPREM)).toBe(false);
+    expect(incumbentDefect(DEPREM_MINORITY, DEPREM_BEST, [])).toBe(false);
+  });
+
+  it("is safe on hostile input: missing entries, a 2 MB member title, thousands of members", () => {
+    expect(incumbentDefect(DEPREM_MINORITY, DEPREM_BEST, [null as unknown as string, undefined as unknown as string, "  "])).toBe(false);
+    const huge = `deprem ${"x".repeat(2_000_000)}`;
+    expect(typeof incumbentDefect(DEPREM_MINORITY, DEPREM_BEST, [huge, ...DEPREM])).toBe("boolean");
+    const many = Array.from({ length: 3000 }, (_, i) => `Malatya'da ${i} büyüklüğünde deprem ${i} oldu`);
+    const started = Date.now();
+    expect(typeof incumbentDefect(DEPREM_MINORITY, DEPREM_BEST, many)).toBe("boolean");
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  // --- (2) a Title Case run ----------------------------------------------------------------
+  const BUTCE = [
+    "Meclis'te bütçe görüşmeleri başladı: genel kurul toplandı",
+    "TBMM genel kurulu bütçe kanunu teklifini kabul etti",
+    "Bütçe kanunu teklifi genel kurulda kabul edildi",
+    "Genel kurul bütçe teklifini oyladı, kanun kabul edildi",
+    "Meclis genel kurulu 2027 bütçe kanununu kabul etti",
+  ];
+  const BUTCE_TITLE_CASE = "TBMM'de Genel Kurul Bütçe Kanununu Kabul Etti";
+  const BUTCE_PLAIN = "TBMM genel kurulu bütçe kanunu teklifini kabul etti";
+
+  it("(2) a run of three capitalised common nouns the members write in lower case is a defect", () => {
+    expect(incumbentDefect(BUTCE_TITLE_CASE, BUTCE_PLAIN, [...BUTCE, BUTCE_TITLE_CASE])).toBe(true);
+  });
+
+  it("(2) not when the best candidate is Title Case itself (nothing to gain)", () => {
+    expect(incumbentDefect(BUTCE_TITLE_CASE, "Meclis Genel Kurulu Bütçe Kanununu Kabul Etti", [...BUTCE, BUTCE_TITLE_CASE])).toBe(false);
+  });
+
+  it("(2) not for capitalised names: nobody writes them in lower case", () => {
+    const members = [
+      "Cumhurbaşkanı Erdoğan Ankara'da Zelenskiy ile görüştü",
+      "Erdoğan ve Zelenskiy Ankara'da bir araya geldi",
+      "Zelenskiy Ankara'ya geldi, Erdoğan ile görüşecek",
+      "Ankara'da Erdoğan-Zelenskiy görüşmesi yapıldı",
+    ];
+    const names = "Cumhurbaşkanı Recep Tayyip Erdoğan Ankara'da Volodimir Zelenskiy ile görüştü";
+    expect(incumbentDefect(names, "Erdoğan ve Zelenskiy Ankara'da bir araya geldi", [...members, names])).toBe(false);
+  });
+
+  it("(2) sentence case with one capitalised word after a colon is not a run", () => {
+    const stored = "AYM'den Canan Karatay kararı: İfade özgürlüğü ihlal edildi";
+    const members = [
+      "AYM'den karar: ifade özgürlüğü ihlal edildi, hak ihlali sayıldı",
+      "Anayasa Mahkemesi kararı: ifade özgürlüğü ihlali",
+      "Mahkemeden ifade özgürlüğü kararı: ceza hak ihlali sayıldı",
+      "Karar çıktı: ifade özgürlüğü ihlal edildi",
+    ];
+    expect(incumbentDefect(stored, "Anayasa Mahkemesi kararı: ifade özgürlüğü ihlali", [...members, stored])).toBe(false);
+  });
+
+  // --- (3) a missing majority subject --------------------------------------------------------
+  const KURTULMUS = [
+    "TBMM Başkanı Kurtulmuş, Barış Anneleri heyetini kabul etti",
+    "Kurtulmuş Barış Anneleri heyetini kabul etti",
+    "Barış Anneleri heyeti Kurtulmuş tarafından kabul edildi",
+    "Kurtulmuş'tan Barış Anneleri heyetine kabul",
+    "Barış Anneleri heyeti Meclis'te Kurtulmuş ile görüştü",
+    "TBMM Başkanı Kurtulmuş Barış Anneleri heyetiyle bir araya geldi",
+    "Barış Anneleri, Kurtulmuş'u ziyaret etti",
+    "Barış Anneleri heyeti Meclis'te kabul edildi",
+  ];
+  const KURTULMUS_BEST = "Kurtulmuş Barış Anneleri heyetini kabul etti";
+  const KURTULMUS_NOBODY = "Barış Anneleri heyeti Meclis'te kabul edildi, görüşme sürdü";
+
+  it("(3) a proper noun 7 of 8 members carry, which only the best has, is a missing subject", () => {
+    expect(incumbentDefect(KURTULMUS_NOBODY, KURTULMUS_BEST, KURTULMUS)).toBe(true);
+  });
+
+  it("(3) not when the name is said by only half of the members (the bar is 75%, not 50%)", () => {
+    const half = KURTULMUS.map((t, i) => (i % 2 === 0 ? t : t.replace(/Kurtulmuş'?\w*/gu, "").replace(/\s{2,}/g, " ").trim()));
+    expect(incumbentDefect(KURTULMUS_NOBODY, KURTULMUS_BEST, half)).toBe(false);
+  });
+
+  it("(3) not when the stored title is a shorter version with no words of its own", () => {
+    expect(incumbentDefect("Barış Anneleri heyeti kabul edildi", KURTULMUS_BEST, KURTULMUS)).toBe(false);
+  });
+
+  it("(3) not when the word is not a proper noun (a member also writes it in lower case)", () => {
+    const common = [
+      "Bakan Gürlek yeni düzenlemeyi açıkladı",
+      "Bakan Gürlek düzenleme yaptı",
+      "Bakan Gürlek: düzenleme yürürlüğe girdi",
+      "Bakan Gürlek yeni düzenleme için konuştu",
+      "Bakan Gürlek düzenlemeyi duyurdu",
+      "bakan Gürlek düzenleme yapacağını söyledi",
+      "Bakan Gürlek düzenlemeyi savundu",
+    ];
+    // 'bakan' is capitalised mid-title nowhere here, and written in lower case once.
+    expect(incumbentDefect("Gürlek'ten kanun çıkışı yapıldı yoktu", "Bakan Gürlek yeni düzenlemeyi açıkladı", common)).toBe(false);
+  });
+});
+
+// Live member titles of the three floor clusters of h34-reader-2 (read-only SELECT,
+// 2026-11-05, newest first). 5dd6dc99: two SEO explainers and one short news line;
+// 41b1d77c: two question headlines; 82a06ce6: one advertorial headline twice.
+const SARIGUL_BEDROOM = [
+  "O görüntüler yeniden gündeme geldi: Sarıgül'ün yatak odasındaki sır ne?",
+  "Sarıgül'ün yatak odasında ne var? O görüntü yeniden gündemde",
+];
+const SANIYE_CARAN = [
+  "CHP’den istifa etti",
+  "Saniye Caran kimdir, neden istifa etti? Korkuteli Belediye Başkanı Saniye Caran kaç yaşında, nereli, eşi kim?",
+  "Saniye Caran kimdir? Korkuteli Belediye Başkanı Saniye Caran kaç yaşında, nereli?",
+];
+const CEYREK_ASIR =
+  "Çeyrek asırlık istikrar, küresel siyasette şahlanış: 24 yıllık dev dönüşüm verilerle tescillendi";
+
+describe("hunt 34 (h34-reader-2): isQuestionTitle", () => {
+  it.each([
+    "Sarıgül'ün yatak odasındaki sır ne?",
+    "Saniye Caran kimdir",
+    "Korkuteli Belediye Başkanı Saniye Caran kaç yaşında",
+    "Saniye Caran nereli",
+    "Zam ne zaman yapılacak",
+    "Bugün deprem oldu mu",
+    "Masterchef kim elendi",
+    "SANİYE CARAN KİMDİR",
+    "Kaç Yaşında, Nereli, Eşi Kim",
+  ])("%s is a question", (title) => {
+    expect(isQuestionTitle(title)).toBe(true);
+  });
+
+  it.each([
+    "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı",
+    "İstanbul'da deprem oldu",
+    "Merkez Bankası faizi sabit tuttu",
+    "Zamanında açıklanan karar yürürlüğe girdi",
+    "Kimdirler diye soranlara yanıt verildi",
+    "Genelkurmay'dan açıklama",
+    "",
+    // A speaker's quoted question is news, not an SEO question.
+    "Erdoğan'ın kuzeni sordu: 'Ballı'nınki sıradan bir intihar mı?'",
+    "Bahçeli: \"Kim kime ne zaman hesap soracak?\"",
+    "Özel: “Bu bütçe kimin için?” dedi",
+    "Bakan: ‘Zam oldu mu?’ sorusuna yanıt verdi",
+  ])("%s is not", (title) => {
+    expect(isQuestionTitle(title)).toBe(false);
+  });
+
+  it.each([
+    // The '?' sits before the speaker's quote, so the headline itself asks.
+    "Asgari ücret ne kadar olacak? Bakan: 'Çalışmalar sürüyor'",
+    // A colon with no opening quote is not a quote.
+    "Son durum: okullar tatil mi?",
+    "Saniye Caran kimdir: 'Göreve devam edeceğim'",
+  ])("%s is still a question (the asking part is outside the quote)", (title) => {
+    expect(isQuestionTitle(title)).toBe(true);
+  });
+
+  it("is safe on a missing or non-string title", () => {
+    expect(isQuestionTitle(null as unknown as string)).toBe(false);
+    expect(isQuestionTitle(undefined as unknown as string)).toBe(false);
+  });
+});
+
+describe("hunt 34 (h34-reader-2): the first-pick floor", () => {
+  it("5dd6dc99: the one non-question member wins over two SEO explainers", () => {
+    const picked = pickNeutralTitle(asMembers(SANIYE_CARAN), { floor: true });
+    expect(picked).toBe("CHP’den istifa etti");
+    expect(isQuestionTitle(picked!)).toBe(false);
+  });
+
+  it("5dd6dc99 without the floor still has no pick (nothing passes the gate)", () => {
+    expect(pickNeutralTitle(asMembers(SANIYE_CARAN))).toBeNull();
+  });
+
+  it("41b1d77c: an all-question cluster still gets a floor title (the cron must not loop) but it is a question", () => {
+    const picked = pickNeutralTitle(asMembers(SARIGUL_BEDROOM), { floor: true });
+    expect(picked).not.toBeNull();
+    expect(isQuestionTitle(picked!)).toBe(true);
+    expect(SARIGUL_BEDROOM.some((t) => cleanHeadline(t) === picked)).toBe(true);
+  });
+
+  it("a question only competes as the last resort: any usable statement beats it, however short", () => {
+    const picked = pickNeutralTitle(
+      asMembers(["Belediye başkanı kimdir, kaç yaşında, nereli?", "Başkan istifa etti"]),
+      { floor: true },
+    );
+    expect(picked).toBe("Başkan istifa etti");
+  });
+
+  it("a question still beats a hard-defect candidate (an English headline), as before", () => {
+    const picked = pickNeutralTitle(
+      asMembers([
+        "Bakırköy soruşturmasında kimler tutuklandı, süreç nasıl işleyecek?",
+        "Bakirkoy municipality probe ends with 39 arrests in the city",
+      ]),
+      { floor: true },
+    );
+    expect(picked).toBe("Bakırköy soruşturmasında kimler tutuklandı, süreç nasıl işleyecek?");
+  });
+
+  it("an SEO explainer without a '?' (here too long for the gate) is also kept out of the soft pick", () => {
+    const explainer =
+      "Korkuteli Belediye Başkanı Saniye Caran kimdir kaç yaşında nereli eşi kim neden istifa etti tüm ayrıntılar haberimizde";
+    expect(isQuestionTitle(explainer)).toBe(true);
+    expect(isAcceptableNeutral(explainer, [])).toBe(false);
+    expect(pickNeutralTitle(asMembers([explainer, "CHP’den istifa etti"]), { floor: true })).toBe(
+      "CHP’den istifa etti",
+    );
+  });
+
+  it("a cluster with a good statement is unchanged by the floor rule", () => {
+    for (const set of [BAKIRKOY, HAKKARI, IL_100, KISA_HABERLER, GOKTAS, RUBIO]) {
+      expect(pickNeutralTitle(asMembers(set), { floor: true })).toBe(pickNeutralTitle(asMembers(set)));
+    }
+  });
+});
+
+describe("hunt 34 (h34-reader-2): advertorial wording is loaded", () => {
+  it("82a06ce6: the advertorial headline pays three loaded units", () => {
+    expect(loadedPenalty(CEYREK_ASIR)).toBe(3);
+  });
+
+  it("it still ships as the only candidate (a floor pick, a normal pick), but any plain member beats it", () => {
+    expect(pickNeutralTitle(asMembers([CEYREK_ASIR, CEYREK_ASIR]), { floor: true })).toBe(CEYREK_ASIR);
+    expect(
+      pickNeutralTitle(
+        asMembers([CEYREK_ASIR, "Cumhurbaşkanı Erdoğan 24 yıllık dönemi değerlendirdi: Ekonomi büyüdü"]),
+      ),
+    ).toBe("Cumhurbaşkanı Erdoğan 24 yıllık dönemi değerlendirdi: Ekonomi büyüdü");
+  });
+
+  it.each([
+    ["küresel siyasette şahlanış yaşandı", 1],
+    ["Şahlanış dönemi başladı", 1],
+    ["ekonomide dev dönüşüm başladı", 1],
+    ["Dev Dönüşüm Programı açıklandı", 1],
+    ["istikrar verilerle tescillendi", 1],
+    ["Sarsılmaz iradeyle devam ediyoruz", 1],
+    ["sarsılmaz birlik vurgusu", 1],
+  ])("%s trips %i loaded rule", (title, units) => {
+    expect(loadedPenalty(title)).toBe(units);
+  });
+
+  it.each([
+    "Marka tescili için başvuru yapıldı",
+    "Devlet dönüşüm programını açıkladı",
+    "Dev kazı çalışması başladı",
+    "Sarsıntı sonrası hasar tespit çalışması sürüyor",
+    "Şahlan adlı köyde yangın çıktı",
+  ])("%s is not loaded", (title) => {
+    expect(loadedPenalty(title)).toBe(0);
   });
 });

@@ -2267,7 +2267,10 @@ describe("ClusterDetailPage — İlgili haberler", () => {
     expect(getPoliticsClusters).not.toHaveBeenCalled();
 
     const html = markupOf(slot);
-    expect(html).toContain("İlgili haberler");
+    // sevenBundles() holds nothing related to the page headline, so the block is
+    // the honest "latest" one (h34-reader-3), never headed "İlgili haberler".
+    expect(html).toContain("Ekonomi gündeminde son haberler");
+    expect(html).not.toContain("İlgili haberler");
     expect(html).toContain('aria-labelledby="related-stories-heading"');
     expect(html).toContain('id="related-stories-heading"');
     expect(html.split("<li").length - 1).toBe(5);
@@ -2288,6 +2291,20 @@ describe("ClusterDetailPage — İlgili haberler", () => {
     expect(html).toContain("Tüm Ekonomi haberleri");
   });
 
+  it("topic7 genel: the 'latest' heading reads 'Genel gündemde son haberler' (not 'Genel gündeminde')", async () => {
+    getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "genel" }));
+    getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
+
+    const slot = await renderSlot(await pageTree(), "ClusterRelatedSlot");
+
+    expect(getTopicClusters).toHaveBeenCalledWith("genel", 1);
+    const html = markupOf(slot);
+    expect(html).toContain("Genel gündemde son haberler");
+    expect(html).not.toContain("gündeminde");
+    expect(html).not.toContain("İlgili haberler");
+    expect(html).toContain('href="/konu/genel"');
+  });
+
   it("politika: reads the home feed once, never the topic feed, and links the hub to '/'", async () => {
     getClusterDetail.mockResolvedValue(relatedDetail({ topic7: "politika" }));
     getPoliticsClusters.mockResolvedValue({
@@ -2306,7 +2323,8 @@ describe("ClusterDetailPage — İlgili haberler", () => {
     expect(getTopicClusters).not.toHaveBeenCalled();
 
     const html = markupOf(slot);
-    expect(html).toContain("İlgili haberler");
+    expect(html).toContain("Politika gündeminde son haberler");
+    expect(html).not.toContain("İlgili haberler");
     expect(html.split("<li").length - 1).toBe(5);
     expect(html).toContain('href="/cluster/c-f"');
     expect(html).not.toContain('href="/cluster/c1"');
@@ -2535,7 +2553,7 @@ describe("ClusterDetailPage — İlgili haberler", () => {
 
       expect(getTopicClusters).toHaveBeenCalledTimes(2);
       const html = markupOf(slot);
-      expect(html).toContain("İlgili haberler");
+      expect(html).toContain("Ekonomi gündeminde son haberler");
       expect(html).toContain('href="/konu/ekonomi"');
     });
 
@@ -2550,14 +2568,14 @@ describe("ClusterDetailPage — İlgili haberler", () => {
       expect(getTopicClusters).toHaveBeenCalledTimes(2);
       expect(getTopicClusters).toHaveBeenNthCalledWith(1, "spor", 1);
       expect(getTopicClusters).toHaveBeenNthCalledWith(2, "ekonomi", 1);
-      expect(markupOf(slot)).toContain("İlgili haberler");
+      expect(markupOf(slot)).toContain("Ekonomi gündeminde son haberler");
     });
 
     it("healthy reads are never cooled down: every render still reads (a cache hit) and shows the block", async () => {
       getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
 
       for (let i = 0; i < 3; i++) {
-        expect(markupOf(await slotFor("ekonomi"))).toContain("İlgili haberler");
+        expect(markupOf(await slotFor("ekonomi"))).toContain("Ekonomi gündeminde son haberler");
       }
       expect(getTopicClusters).toHaveBeenCalledTimes(3);
     });
@@ -2577,6 +2595,8 @@ describe("ClusterDetailPage — İlgili haberler", () => {
       ["an empty cluster", { topic7: "ekonomi", article_count: 0 }],
       ["an archived cluster", { topic7: "ekonomi", is_archived: true }],
       ["a headline-less cluster", { topic7: "ekonomi", title_tr: "&nbsp;" }],
+      ["a question-titled cluster (h34-reader-2)", { topic7: "ekonomi", title_tr: "Sarıgül'ün yatak odasındaki sır ne?" }],
+      ["an SEO-explainer cluster without a '?' (h34-reader-2)", { topic7: "ekonomi", title_tr: "Saniye Caran kimdir kaç yaşında nereli" }],
     ] as const)("%s has no ClusterRelatedSlot and reads no feed", async (_label, extra) => {
       getClusterDetail.mockResolvedValue(relatedDetail({ ...extra }));
       getTopicClusters.mockResolvedValue({ bundles: sevenBundles(), hasMore: false, page: 1 });
@@ -2594,6 +2614,7 @@ describe("ClusterDetailPage — İlgili haberler", () => {
         { topic7: "ekonomi", article_count: 1 },
         { topic7: "ekonomi", is_archived: true },
         { topic7: "ekonomi", title_tr: "&nbsp;" },
+        { topic7: "ekonomi", title_tr: "Saniye Caran kimdir? Korkuteli Belediye Başkanı kaç yaşında, nereli?" },
         { topic7: "ekonomi", article_count: 2 },
       ];
       for (const extra of cases) {
@@ -3956,5 +3977,123 @@ describe("ClusterDetailPage — summary follows the headline (h31-reader-3 v2)",
     const text = collectText(tree).join("");
     expect(text).not.toContain(BIRGUN_TEXT);
     expect(text).toContain("Özet — Cumhuriyet");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h34-reader-2 (2026-11-05): the floor pick shipped SEO questions as the neutral
+// headline of two-member clusters ("Sarıgül'ün yatak odasındaki sır ne?", "Saniye
+// Caran kimdir? ... kaç yaşında, nereli?") and the page served them index,follow.
+// A served title that is a question (isQuestionTitle: a '?' or an explainer phrase)
+// is now noindex,follow, merged with the archived / headline-less / single-article
+// conditions it sits beside. Canonical, og:url and the real headline stay.
+// ---------------------------------------------------------------------------
+
+function titledDetail(
+  titleTr: string,
+  opts: { articleCount?: number; isArchived?: boolean } = {},
+): ClusterDetail {
+  const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+  const count = opts.articleCount ?? 3;
+  const cluster = makeCluster({
+    bias_distribution: emptyDistribution(),
+    is_archived: opts.isArchived ?? false,
+    article_count: count,
+  });
+  cluster.title_tr = titleTr;
+  return {
+    cluster,
+    members: [makeMember("a1", source)],
+    allSources: [source],
+    wire: { isWireRedistribution: false, effectiveArticleCount: count, memberCount: count },
+    blindspotSuppressed: false,
+    blindspotRecallVetoed: false,
+  };
+}
+
+describe("generateMetadata — a question or SEO-explainer headline is noindex,follow (h34-reader-2)", () => {
+  it.each([
+    ["a '?' headline", "O görüntüler yeniden gündeme geldi: Sarıgül'ün yatak odasındaki sır ne?"],
+    [
+      "a 'kimdir ... kaç yaşında, nereli?' explainer",
+      "Saniye Caran kimdir? Korkuteli Belediye Başkanı Saniye Caran kaç yaşında, nereli?",
+    ],
+    ["a 'kim elendi' headline", "Masterchef kim elendi, kim gitti?"],
+    ["an explainer without a '?'", "Saniye Caran kimdir kaç yaşında nereli"],
+    ["a 'ne zaman' headline without a '?'", "Emekli zammı ne zaman yatacak"],
+  ])("%s: robots index:false, follow:true; headline, canonical and og:url unchanged", async (_label, titleTr) => {
+    getClusterDetail.mockResolvedValue(titledDetail(titleTr));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.title).toBe(titleTr);
+    expect(metadata.alternates?.canonical).toBe("/cluster/c1");
+    expect(metadata.openGraph?.url).toBe("/cluster/c1");
+    expect(notFound).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an ordinary headline", "Merkez Bankası faizi sabit tuttu"],
+    ["a headline with 'ne' and 'zaman' apart", "Ne yapacağız dediler, zaman gösterdi"],
+    ["a headline with 'kimdirler'", "Kimdirler diye soranlara yanıt verildi"],
+  ])("%s with 2+ articles stays indexable (robots left to the root layout)", async (_label, titleTr) => {
+    getClusterDetail.mockResolvedValue(titledDetail(titleTr, { articleCount: 2 }));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.robots).toBeUndefined();
+    expect(metadata.title).toBe(titleTr);
+  });
+
+  it("merges with the existing conditions, it does not replace them", async () => {
+    // A single-article cluster with an ordinary title is still noindex ...
+    getClusterDetail.mockResolvedValue(titledDetail("Merkez Bankası faizi sabit tuttu", { articleCount: 1 }));
+    expect((await generateMetadata({ params: Promise.resolve({ id: "c1" }) })).robots).toEqual({
+      index: false,
+      follow: true,
+    });
+    // ... an archived one too ...
+    getClusterDetail.mockResolvedValue(titledDetail("Merkez Bankası faizi sabit tuttu", { isArchived: true }));
+    expect((await generateMetadata({ params: Promise.resolve({ id: "c1" }) })).robots).toEqual({
+      index: false,
+      follow: true,
+    });
+    // ... and a question title with every other condition met is noindex on its own.
+    getClusterDetail.mockResolvedValue(titledDetail("Zam gelecek mi?", { articleCount: 12 }));
+    expect((await generateMetadata({ params: Promise.resolve({ id: "c1" }) })).robots).toEqual({
+      index: false,
+      follow: true,
+    });
+  });
+
+  it("a question title on an archived or single-article cluster is the same noindex,follow object", async () => {
+    for (const detail of [
+      titledDetail("Zam gelecek mi?", { isArchived: true }),
+      titledDetail("Zam gelecek mi?", { articleCount: 1 }),
+    ]) {
+      getClusterDetail.mockResolvedValue(detail);
+      const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+      expect(metadata.robots).toEqual({ index: false, follow: true });
+    }
+  });
+
+  it("the page source builds the verdict from hasIndexableTitle in the one shared helper", () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "page.tsx"), "utf8");
+    expect(src).toContain('from "@/lib/seo/indexable-title"');
+    const start = src.indexOf("function isIndexableCluster(");
+    const body = src.slice(start, src.indexOf("\n}\n", start) + 2);
+    expect(body).toContain("hasIndexableTitle({ title_tr: cluster.title_tr })");
+    // Still the one definition: the definition and its two call sites.
+    expect(src.split("isIndexableCluster(").length - 1).toBe(3);
+  });
+
+  it("the month sitemap, the news sitemap and IndexNow apply the same helper (they never list a noindex URL)", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "lib", "seo");
+    for (const file of ["sitemaps.ts", "indexnow.ts"]) {
+      const src = readFileSync(join(root, file), "utf8");
+      expect(src, file).toContain('from "@/lib/seo/indexable-title"');
+      expect(src, file).toContain("hasIndexableTitle(");
+    }
   });
 });

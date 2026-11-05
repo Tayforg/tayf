@@ -103,8 +103,10 @@ export const JEV_AUDIT_CANDIDATE_LIMIT = 600;
 /** Must equal EXTRACTIVE_MODEL_ID in src/lib/clusters/neutral-title.ts
  * (tests/migrations/jev-shadow-parity.test.ts). Titles still written under an
  * older extractive version join the neutral_pick stage as the headline cron
- * re-picks them (migration 141). */
-export const JEV_NEUTRAL_MODEL_ID = "extractive-v5";
+ * re-picks them (migrations 141 and 155). extractive-v6 (hunt 34): the stage
+ * sees a cluster again only once the cron has re-stamped it, about 20 per
+ * 5-minute run, so it is thin for roughly 17 hours after the bump. */
+export const JEV_NEUTRAL_MODEL_ID = "extractive-v6";
 /** Stamped into every jev_answer as `question_set`. The 2026-09-20 limits
  * test showed instruction paraphrases flip ~30% of borderline titles, so a
  * prediction is only comparable to others made with the SAME question text.

@@ -108,12 +108,19 @@ describe("middleware gate 3 — canonical lower-case cluster id (single segment)
 });
 
 describe("middleware gate 3 — nested cluster routes", () => {
-  it.each(["opengraph-image", "twitter-image", "kart"])(
-    "308s /cluster/<UPPER>/%s to the lower-case path, keeping the query, without a merged lookup",
-    async (sub) => {
-      const res = await middleware(req(`/cluster/${UPPER}/${sub}?abc`));
+  // h34-security-1: the only query a nested image route keeps is Next's content
+  // hash on the two file-convention images; /kart is linked bare and keeps none.
+  // The full matrix lives in tests/guards/middleware-image-query.test.ts.
+  it.each([
+    ["opengraph-image", "?56699f89608b1910", "?56699f89608b1910"],
+    ["twitter-image", "?d6c8a6d3b387b35f", "?d6c8a6d3b387b35f"],
+    ["kart", "?abc", ""],
+  ])(
+    "308s /cluster/<UPPER>/%s%s to the lower-case path with the query %j, without a merged lookup",
+    async (sub, query, kept) => {
+      const res = await middleware(req(`/cluster/${UPPER}/${sub}${query}`));
       expect(res.status).toBe(308);
-      expect(res.headers.get("location")).toBe(`${ORIGIN}/cluster/${LOWER}/${sub}?abc`);
+      expect(res.headers.get("location")).toBe(`${ORIGIN}/cluster/${LOWER}/${sub}${kept}`);
       expect(lookup).not.toHaveBeenCalled();
     },
   );

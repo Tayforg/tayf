@@ -47,13 +47,14 @@ import {
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 import {
+  buildRelatedBlock,
   relatedFeedFor,
   relatedHubLink,
   relatedTopicLabel,
-  selectRelatedClusters,
   type RelatedCandidate,
 } from "@/lib/clusters/related-clusters";
 import { getTopicClusters } from "@/lib/clusters/topic-query";
+import { hasIndexableTitle } from "@/lib/seo/indexable-title";
 import { awaitRequestScope, coalesce } from "@/lib/cache-resilience";
 import { hasStoryCardCoverage, storyCardHref } from "@/lib/cards/story-card";
 import { buildShareText } from "@/lib/clusters/share";
@@ -182,7 +183,7 @@ async function ClusterRelatedSlot({
     } else {
       bundles = (await getPoliticsClusters()).bundles;
     }
-    const items = selectRelatedClusters({
+    const { mode, items } = buildRelatedBlock({
       currentId: clusterId,
       currentTitle: headline,
       topic: feed.kind === "topic" ? feed.slug : "politika",
@@ -192,6 +193,7 @@ async function ClusterRelatedSlot({
     const hub = relatedHubLink(feed);
     props = {
       items,
+      mode,
       topicLabel: relatedTopicLabel(feed),
       hubHref: hub.href,
       hubLabel: hub.label,
@@ -214,16 +216,27 @@ const NO_HEADLINE_FALLBACK = "Haber";
 
 // One definition of "this page is offered to the index", shared by the robots
 // tag in generateMetadata and the "İlgili haberler" gate in the page body. An
-// archived cluster, a headline-less one (hunt-10) and a single-article one
+// archived cluster, a headline-less one (hunt-10), a single-article one
 // (h31-seo-1: ~71% of new clusters, one outlet's headline and lead sentence)
-// are noindex; they also get no related block, which would add feed reads to
-// most renders and give no indexable crawl path. Module-private: a page file
-// may only export the Next.js route API.
+// and one whose served title is a question or an SEO explainer (h34-reader-2:
+// "Saniye Caran kimdir? ... kaç yaşında, nereli?", 16 of them in 3 days, all
+// served index,follow) are noindex; they also get no related block, which would
+// add feed reads to most renders and give no indexable crawl path. The question
+// test is hasIndexableTitle (src/lib/seo/indexable-title.ts) on the title the
+// page serves (`title_tr`, which is the neutral title when there is one); the
+// month and news sitemaps and the IndexNow ping apply the very same test, so
+// none of them lists a URL this tag refuses. Module-private: a page file may
+// only export the Next.js route API.
 function isIndexableCluster(
-  cluster: { is_archived: boolean; article_count: number },
+  cluster: { is_archived: boolean; article_count: number; title_tr: string },
   hasHeadline: boolean,
 ): boolean {
-  return !cluster.is_archived && hasHeadline && cluster.article_count >= 2;
+  return (
+    !cluster.is_archived &&
+    hasHeadline &&
+    cluster.article_count >= 2 &&
+    hasIndexableTitle({ title_tr: cluster.title_tr })
+  );
 }
 
 interface PageProps {
@@ -339,10 +352,12 @@ export async function generateMetadata({
     // Omitted entirely (undefined) for non-archived clusters so metadata
     // inheritance from the root layout's default robots stays in effect.
     // A headline-less cluster is kept out of the index the same way, and so is
-    // a single-article cluster (h31-seo-1): it is one outlet's headline and
+    // one whose served title is a question or an SEO explainer (h34-reader-2),
+    // and so is a single-article cluster (h31-seo-1): it is one outlet's headline and
     // lead sentence, a thin duplicate of that outlet's own article, and ~71%
-    // of new clusters. The sitemaps, the news sitemap and IndexNow already
-    // require article_count >= 2, so this makes the page agree with them. The
+    // of new clusters. The sitemaps, the news sitemap and IndexNow require
+    // article_count >= 2 and skip a question / explainer title through the same
+    // hasIndexableTitle, so the page agrees with them on both counts. The
     // canonical, og:url and JSON-LD stay as they are: shared links still work,
     // and the page indexes itself the moment a second outlet joins.
     ...(!isIndexableCluster(cluster, hasHeadline)
