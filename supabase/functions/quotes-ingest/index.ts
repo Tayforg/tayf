@@ -13,9 +13,11 @@
 //                             each ticker is read again once the closing
 //                             auction has settled instead of keeping the
 //                             pre-auction pass (h11-finance-2).
-//   POST {"mode":"intraday"}  every ticker named in the news in the last
-//                             7 days: today's 5-minute bars (5d when the
-//                             ticker has none yet). Every 5 min in session.
+//   POST {"mode":"intraday"}  every traded ticker (bist_companies.shares_traded)
+//                             named in the news in the last 7 days, 120 at a
+//                             time, stalest bar first (migration 160): today's
+//                             5-minute bars (5d when the ticker has none yet).
+//                             Every 5 min in session.
 //
 // Optional {"tickers":["THYAO"],"range":"1y"} overrides the target list.
 
@@ -47,6 +49,9 @@ interface Stats {
   fetched: number;
   bars: number;
   failed: string[];
+  /** How many of `failed` are Yahoo "404"s (h39-pipeline2-2): a real symbol
+   *  that goes dark shows up here without parsing the failed array. */
+  notFound: number;
   durationMs: number;
   /** false when every target ticker failed — SEC-05, so a total feed
    *  outage doesn't look like a healthy 200 in the cron logs. */
@@ -159,7 +164,7 @@ export async function runCycle(body: Body): Promise<Stats> {
   // on it. Daily rows only: bist_bars_5m has no such column.
   const fetchedAt = new Date(startedAt).toISOString();
   const mode = body.mode === "intraday" ? "intraday" : "daily";
-  const stats: Stats = { mode, tickers: 0, fetched: 0, bars: 0, failed: [], durationMs: 0, ok: true };
+  const stats: Stats = { mode, tickers: 0, fetched: 0, bars: 0, failed: [], notFound: 0, durationMs: 0, ok: true };
   const supabase = createServiceClient();
 
   // Target list: explicit override, else the SQL helpers from 051/058.
@@ -226,7 +231,9 @@ export async function runCycle(body: Body): Promise<Stats> {
       }
       stats.fetched++;
     } catch (err) {
-      stats.failed.push(`${t.ticker}:${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      stats.failed.push(`${t.ticker}:${message}`);
+      if (message === "yahoo 404") stats.notFound++;
     }
   });
 

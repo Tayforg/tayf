@@ -225,6 +225,10 @@ let forcedIngestCyclesInsertError: string | null = null;
 let ingestCyclesInsertAttempts = 0;
 let ingestCyclesMissingColumnCode: string | null = null;
 let ingestCyclesFailAllCode: string | null = null;
+// h39-pipeline2-1 (migration 159): the same switch for a database that has 157 but
+// not 159. An insert that names stale_deferred or oldest_stale_min fails with this
+// code; a row without them is accepted.
+let ingestCyclesMissing159Code: string | null = null;
 
 // One entry per `.rpc("existing_source_content_hash_pairs", { p_source_ids,
 // p_hashes })` call this test made -- the chunked (source_id, content_hash)
@@ -612,6 +616,21 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
                 },
               });
             }
+            if (
+              ingestCyclesMissing159Code &&
+              arr.some((r) => "stale_deferred" in (r as Record<string, unknown>))
+            ) {
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code: ingestCyclesMissing159Code,
+                  message:
+                    ingestCyclesMissing159Code === "42703"
+                      ? 'column "stale_deferred" of relation "ingest_cycles" does not exist'
+                      : "Could not find the 'stale_deferred' column of 'ingest_cycles' in the schema cache",
+                },
+              });
+            }
             if (forcedIngestCyclesInsertError) {
               return Promise.resolve({
                 data: null,
@@ -708,6 +727,14 @@ type FetchOverride = {
   // flag onto a result directly.
   bodyBytes?: number;
   parseDeferred?: boolean;
+  // h39-pipeline2-1: the mocked body takes this many ms to arrive, so it asks the
+  // parse budgets after every feed that has no delay (a 4.25 MB body finishes
+  // last). Real timers: the tests that use it fake only Date.
+  delayMs?: number;
+  // h39-pipeline2-1: the mocked fetchFeed throws this message after the delay,
+  // before it asks the parse budgets anything (a worker that throws; runPool
+  // catches it and logs 'worker threw').
+  throwError?: string;
 };
 
 const fetcherItems: Record<string, MockFeedItem[]> = {};
@@ -750,7 +777,9 @@ vi.mock("../../supabase/functions/_shared/rss/fetcher.ts", () => ({
         cached: opts?.conditionalCache?.get(source.id),
       });
       const items = fetcherItems[source.rss_url] ?? [];
-      const { bodyBytes, ...override } = fetcherResultOverrides[source.rss_url] ?? {};
+      const { bodyBytes, delayMs, throwError, ...override } = fetcherResultOverrides[source.rss_url] ?? {};
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (throwError) throw new Error(throwError);
       // Like the real fetcher: the parse budget is asked only for a changed
       // 2xx body -- never for an error, a 304 or a body-hash hit.
       if (opts?.admitParse && !override.error && !override.notModified) {
@@ -854,6 +883,7 @@ beforeEach(() => {
   forcedIngestCyclesInsertError = null;
   ingestCyclesInsertAttempts = 0;
   ingestCyclesMissingColumnCode = null;
+  ingestCyclesMissing159Code = null;
   ingestCyclesFailAllCode = null;
   fakeSources.length = 0;
   for (const k of Object.keys(fetchResponses)) delete fetchResponses[k];
@@ -6007,5 +6037,444 @@ describe("BHA starvation by the isolate item budget [h36-pipeline-1]", () => {
     }
     expect(ingestCyclesInsertAttempts).toBe(1);
     expect(ingestCycleInserts).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h39-pipeline2-1: #198 put the stale feeds first in the START order and sized BHA
+// from its known item count, and BHA was still starved: admission follows the order
+// bodies ARRIVE in, and its 4.25 MB body finishes last. On a fresh isolate the other
+// feeds had taken 7.17 of the 8 MB of the cycle and 4,299 of the 5,000 isolate items
+// (ingest response 2026-11-05 12:24Z). The stalest feed now books its items before
+// the pool starts, inside the isolate item budget, and is admitted against that
+// booking when its body arrives.
+// ---------------------------------------------------------------------------
+
+describe("stale feed reservation: BHA's body arrives last on a busy fresh isolate [h39-pipeline2-1]", () => {
+  const PUB = "Wed, 04 Nov 2026 10:00:00 GMT";
+  const CYCLE = 180_000;
+  const NOW = Math.floor(Date.parse("2026-11-05T12:24:00Z") / CYCLE) * CYCLE;
+  const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
+  const rss = (id: string) => `https://${id}.h39.example/rss.xml`;
+  // Six feeds of 1.2 MB each: 7.2 MB of body. With fetch_items_count 573 each books
+  // ceil(573 * 1.25) = 717 items, 4,302 in all, and parses 717 real ones.
+  const SMALL_IDS = Array.from({ length: 6 }, (_, i) => `s${i}-small`);
+  const SMALL_ITEMS = 717;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.INGEST_MAX_PARSES_PER_CYCLE;
+  });
+
+  function seed(id: string, itemCount: number, extra: Record<string, unknown> = {}) {
+    fakeSources.push({
+      id,
+      name: id,
+      slug: id,
+      url: `https://${id}.h39.example`,
+      rss_url: rss(id),
+      active: true,
+      fetch_etag: null,
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 0,
+      fetch_last_at: minutesAgo(1),
+      ...extra,
+    });
+    fetcherItems[rss(id)] = Array.from({ length: itemCount }, (_, i) => ({
+      title: `${id} kaynağının ${i}. haberi`,
+      link: `https://${id}.h39.example/haber/konu-${i}`,
+      pubDate: PUB,
+    }));
+  }
+
+  /** Six changed small feeds that arrive at once, plus bha (stale, 1000 items, 4.25 MB) arriving 30 ms later. */
+  function seedBusyIsolate(bhaOverride: Record<string, unknown> = {}, bhaExtra: Record<string, unknown> = {}) {
+    SMALL_IDS.forEach((id, i) => {
+      seed(id, SMALL_ITEMS, { fetch_items_count: 573 });
+      fetcherResultOverrides[rss(id)] = { bodyBytes: 1_200_000, etag: `"s${i}"`, bodyHash: `s${i}` };
+    });
+    seed("bha", 1000, { fetch_last_at: minutesAgo(20), fetch_items_count: 1000, ...bhaExtra });
+    fetcherResultOverrides[rss("bha")] = {
+      bodyBytes: 4_250_000,
+      etag: '"bha1"',
+      bodyHash: "bha1",
+      delayMs: 30,
+      ...bhaOverride,
+    };
+  }
+
+  /** Records the highest `used` the isolate state ever held, estimates included. */
+  async function trackIsolate(initialUsed = 0) {
+    const order = await import("../../supabase/functions/ingest/order.ts");
+    let used = initialUsed;
+    let peak = initialUsed;
+    Object.defineProperty(order.isolateItems, "used", {
+      configurable: true,
+      get: () => used,
+      set: (v: number) => {
+        used = v;
+        if (v > peak) peak = v;
+      },
+    });
+    return { peak: () => peak, used: () => used };
+  }
+
+  async function runCycle(): Promise<Record<string, unknown>> {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  function freshIsolate() {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "5000";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  }
+
+  const storedSources = () => new Set(upserted.map((r) => r.source_id as string));
+
+  it("parses bha even though six feeds took 7.2 MB and about 4,300 items first, and a small feed waits instead", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    seedBusyIsolate();
+
+    const c = await runCycle();
+
+    const stored = storedSources();
+    expect(stored.has("bha")).toBe(true);
+    expect(upserted.filter((r) => r.source_id === "bha")).toHaveLength(1000);
+    // 1250 reserved + 5 x 717 = 4835: the sixth small feed no longer fits, so IT waits.
+    expect(SMALL_IDS.filter((id) => stored.has(id))).toHaveLength(5);
+    expect(c.parseDeferred).toBe(1);
+    expect(c.isolateBudgetDeferred).toBe(1);
+    expect(c.staleDeferred).toBe(0);
+    expect(c.oldestStaleMin).toBe(20);
+    // The hard constraint: the isolate never held more than the budget, at any moment.
+    expect(iso.peak()).toBeLessThanOrEqual(5000);
+    expect(c.isolateItemsUsed).toBe(5 * SMALL_ITEMS + 1000);
+    expect(c.isolateItemsUsed as number).toBeLessThanOrEqual(5000);
+    // The per-cycle byte budget is not changed; the reserved feed alone passes it, by its own size at most.
+    expect(c.parsedBytes as number).toBe(5 * 1_200_000 + 4_250_000);
+    expect(c.parsedBytes as number).toBeLessThanOrEqual(8_000_000 + 4_250_000);
+  });
+
+  it("books nothing past the limit when bha's real count is smaller than reserved: the room goes back", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    seedBusyIsolate();
+    fetcherItems[rss("bha")] = (fetcherItems[rss("bha")] ?? []).slice(0, 600);
+
+    const c = await runCycle();
+
+    expect(storedSources().has("bha")).toBe(true);
+    expect(c.isolateItemsUsed).toBe(5 * SMALL_ITEMS + 600);
+    expect(iso.peak()).toBeLessThanOrEqual(5000);
+  });
+
+  it("releases the reservation when bha answers 304: isolateItemsUsed excludes the 1250", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    seedBusyIsolate({ notModified: true, status: 304 });
+
+    const c = await runCycle();
+
+    expect(c.notModified).toBe(1);
+    expect(c.staleDeferred).toBe(0);
+    // Only what the small feeds really parsed; 1250 more would mean the reservation leaked, and
+    // less than that would mean it was handed back twice.
+    expect(c.isolateItemsUsed).toBe(5 * SMALL_ITEMS);
+    expect(iso.used()).toBe(5 * SMALL_ITEMS);
+    expect(iso.peak()).toBeLessThanOrEqual(5000);
+  });
+
+  it("gives the room back as soon as bha answers, so feeds whose bodies arrive after its 304 can use it", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    seedBusyIsolate({ notModified: true, status: 304, delayMs: 0 });
+    // the six small feeds are the slow ones this time
+    for (const id of SMALL_IDS) {
+      fetcherResultOverrides[rss(id)] = { ...fetcherResultOverrides[rss(id)], delayMs: 30 };
+    }
+
+    const c = await runCycle();
+
+    // 6 x 717 = 4302 fits once bha's 1250 is back; with the reservation still held the sixth would wait
+    expect(c.parseDeferred).toBe(0);
+    expect(c.isolateBudgetDeferred).toBe(0);
+    expect(SMALL_IDS.filter((id) => storedSources().has(id))).toHaveLength(6);
+    expect(c.isolateItemsUsed).toBe(6 * SMALL_ITEMS);
+    expect(iso.peak()).toBeLessThanOrEqual(5000);
+  });
+
+  it("releases the reservation when bha's fetch fails", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      seedBusyIsolate({ error: "Status code 503", status: 503 });
+      const c = await runCycle();
+      expect(c.failed).toBe(1);
+      expect(c.isolateItemsUsed).toBe(5 * SMALL_ITEMS);
+      expect(iso.used()).toBe(5 * SMALL_ITEMS);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("keeps one parse slot for bha at the cap: with 55 changed small feeds arriving first, bha still parses and one small feed waits", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    // 55 small feeds fill every slot of the default cap (MAX_PARSES_PER_CYCLE 55) before bha's body
+    // (4.25 MB, 500 ms) arrives; without a slot held for it bha is refused at the cap (parse_deferred 1,
+    // stale_deferred 1 on 2026-11-05 10:24Z and 10:36Z).
+    const smallIds = Array.from({ length: 55 }, (_, i) => `m${String(i).padStart(2, "0")}-small`);
+    smallIds.forEach((id, i) => {
+      seed(id, 20, { fetch_items_count: 20 });
+      fetcherResultOverrides[rss(id)] = { bodyBytes: 30_000, etag: `"m${i}"`, bodyHash: `m${i}` };
+    });
+    seed("bha", 1000, { fetch_last_at: minutesAgo(20), fetch_items_count: 1000 });
+    fetcherResultOverrides[rss("bha")] = { bodyBytes: 4_250_000, etag: '"bha1"', bodyHash: "bha1", delayMs: 500 };
+
+    const c = await runCycle();
+
+    expect(storedSources().has("bha")).toBe(true);
+    expect(upserted.filter((r) => r.source_id === "bha")).toHaveLength(1000);
+    // the other feeds got maxParses - 1 = 54 slots, so one small feed waits (it is not a stale one)
+    expect(smallIds.filter((id) => storedSources().has(id))).toHaveLength(54);
+    expect(c.fetched).toBe(55);
+    expect(c.parseDeferred).toBe(1);
+    expect(c.staleDeferred).toBe(0);
+    // the cap is never exceeded: 54 x 20 + bha's 1000 real items, and nothing left booked
+    expect(c.isolateItemsUsed).toBe(54 * 20 + 1000);
+    expect(iso.used()).toBe(54 * 20 + 1000);
+    expect(iso.peak()).toBeLessThanOrEqual(5000);
+  });
+
+  it("the held slot never lets the cycle pass the cap: with INGEST_MAX_PARSES_PER_CYCLE=2, a-small parses, b-small waits, bha parses", async () => {
+    freshIsolate();
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "2";
+    const iso = await trackIsolate();
+    seed("a-small", 100, { fetch_items_count: 80 });
+    seed("b-small", 100, { fetch_items_count: 80 });
+    seed("bha", 1000, { fetch_last_at: minutesAgo(20), fetch_items_count: 1000 });
+    fetcherResultOverrides[rss("a-small")] = { bodyBytes: 150_000, etag: '"a"', bodyHash: "a" };
+    fetcherResultOverrides[rss("b-small")] = { bodyBytes: 150_000, etag: '"b"', bodyHash: "b" };
+    fetcherResultOverrides[rss("bha")] = { bodyBytes: 4_250_000, etag: '"bha"', bodyHash: "bha", delayMs: 30 };
+
+    const c = await runCycle();
+
+    expect(storedSources().has("a-small")).toBe(true);
+    expect(storedSources().has("b-small")).toBe(false);
+    expect(storedSources().has("bha")).toBe(true);
+    expect(c.fetched).toBe(2);
+    expect(c.parseDeferred).toBe(1);
+    expect(c.staleDeferred).toBe(0);
+    // a-small's 100 and bha's 1000: the reservation is bha's booking, the 1250 estimate settled to 1000
+    expect(c.isolateItemsUsed).toBe(1100);
+    expect(iso.used()).toBe(1100);
+  });
+
+  it("frees the held slot when bha answers 304 at the cap: both small feeds that arrive after it parse", async () => {
+    freshIsolate();
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "2";
+    const iso = await trackIsolate();
+    seed("a-small", 100, { fetch_items_count: 80 });
+    seed("b-small", 100, { fetch_items_count: 80 });
+    seed("bha", 1000, { fetch_last_at: minutesAgo(20), fetch_items_count: 1000 });
+    fetcherResultOverrides[rss("a-small")] = { bodyBytes: 150_000, etag: '"a"', bodyHash: "a", delayMs: 30 };
+    fetcherResultOverrides[rss("b-small")] = { bodyBytes: 150_000, etag: '"b"', bodyHash: "b", delayMs: 30 };
+    fetcherResultOverrides[rss("bha")] = { notModified: true, status: 304, delayMs: 0 };
+
+    const c = await runCycle();
+
+    // bha's 304 came first and handed back its slot and its 1250 items: neither small feed is held back
+    expect(c.notModified).toBe(1);
+    expect(c.fetched).toBe(2);
+    expect(c.parseDeferred).toBe(0);
+    expect(c.staleDeferred).toBe(0);
+    expect(storedSources().has("a-small")).toBe(true);
+    expect(storedSources().has("b-small")).toBe(true);
+    expect(c.isolateItemsUsed).toBe(200);
+    expect(iso.used()).toBe(200);
+  });
+
+  it("an expired-quarantine probe is not the stale feed: it takes neither the reservation nor oldestStaleMin, so bha is parsed", async () => {
+    freshIsolate();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await trackIsolate();
+      seedBusyIsolate();
+      // Quarantined for 24 h and probed once the marker has passed: fetch_last_at is the last attempt (1441
+      // minutes ago), it still has the marker, and ops row 20 does not count it.
+      seed("probe", 100, {
+        fetch_last_at: minutesAgo(1441),
+        fetch_quarantined_until: minutesAgo(1),
+        fetch_fail_streak: 40,
+        fetch_items_count: 100,
+      });
+      fetcherResultOverrides[rss("probe")] = { error: "Status code 503", status: 503 };
+
+      const c = await runCycle();
+
+      expect(c.oldestStaleMin).toBe(20);
+      expect(storedSources().has("bha")).toBe(true);
+      expect(c.staleDeferred).toBe(0);
+      expect(c.failed).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("a worker that throws while the reservation is held still hands the 1250 items back (the finally after the pool)", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      seedBusyIsolate({ throwError: "boom" });
+
+      const c = await runCycle();
+
+      expect(storedSources().has("bha")).toBe(false);
+      // the five small feeds that fit beside the 1250 reservation; the throwing worker skipped the
+      // per-feed release, so only the release after the pool can return the 1250
+      expect(c.isolateItemsUsed).toBe(5 * SMALL_ITEMS);
+      expect(iso.used()).toBe(5 * SMALL_ITEMS);
+      expect(errSpy).toHaveBeenCalledWith("[ingest] worker threw", "bha", expect.any(Error));
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("a reused isolate with 4300 items used gets no reservation: bha is deferred as today and counted in staleDeferred", async () => {
+    freshIsolate();
+    const iso = await trackIsolate(4300);
+    seedBusyIsolate();
+    // the small feeds did not change this cycle; only bha is a changed body
+    for (const id of SMALL_IDS) fetcherResultOverrides[rss(id)] = { notModified: true, status: 304 };
+
+    const c = await runCycle();
+
+    expect(c.parseDeferred).toBe(1);
+    expect(c.isolateBudgetDeferred).toBe(1);
+    expect(c.staleDeferred).toBe(1);
+    expect(c.oldestStaleMin).toBe(20);
+    expect(storedSources().has("bha")).toBe(false);
+    // no reservation was booked and nothing else was: the isolate still holds what it held
+    expect(c.isolateItemsUsed).toBe(4300);
+    expect(iso.peak()).toBe(4300);
+  });
+
+  it("a stale feed that was reserved but never fits (the body grew far past its count) is judged like any other feed: a lone one on a fresh isolate is still admitted", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    // 7.8 MB is 5,200 items by size, more than 4x the cap of 1250: the count is not believed.
+    seed("bha", 1000, { fetch_last_at: minutesAgo(20), fetch_items_count: 1000 });
+    fetcherResultOverrides[rss("bha")] = { bodyBytes: 7_800_000, etag: '"bha"', bodyHash: "bha" };
+
+    const c = await runCycle();
+
+    expect(c.parseDeferred).toBe(0);
+    expect(storedSources().has("bha")).toBe(true);
+    expect(c.staleDeferred).toBe(0);
+    // the reservation was handed back before the plain admission, so nothing is counted twice
+    expect(c.isolateItemsUsed).toBe(1000);
+    expect(iso.used()).toBe(1000);
+  });
+
+  it("the same grown feed on a busy isolate is deferred, its reservation is given back, and the isolate is never over the limit", async () => {
+    freshIsolate();
+    const iso = await trackIsolate(3000);
+    seed("bha", 1000, { fetch_last_at: minutesAgo(20), fetch_items_count: 1000 });
+    fetcherResultOverrides[rss("bha")] = { bodyBytes: 7_800_000, etag: '"bha"', bodyHash: "bha" };
+
+    const c = await runCycle();
+
+    expect(c.parseDeferred).toBe(1);
+    expect(c.isolateBudgetDeferred).toBe(1);
+    expect(c.staleDeferred).toBe(1);
+    expect(c.isolateItemsUsed).toBe(3000);
+    expect(iso.peak()).toBeLessThanOrEqual(5000);
+  });
+
+  it("a stale feed with no known item count gets no reservation (nothing to size it with): the cycle behaves as before", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    seedBusyIsolate({}, { fetch_items_count: null });
+
+    const c = await runCycle();
+
+    // never measured: estimated by size alone (2,833 items), so it still waits behind the small feeds, as before
+    expect(storedSources().has("bha")).toBe(false);
+    expect(c.isolateBudgetDeferred).toBe(1);
+    expect(c.staleDeferred).toBe(1);
+    expect(c.oldestStaleMin).toBe(20);
+    // the six small feeds booked their 6 x 717 and nothing else was held
+    expect(iso.peak()).toBe(6 * SMALL_ITEMS);
+    expect(c.isolateItemsUsed).toBe(6 * SMALL_ITEMS);
+  });
+
+  it("nothing stale: no reservation, staleDeferred 0 and oldestStaleMin 0", async () => {
+    freshIsolate();
+    const iso = await trackIsolate();
+    seed("x-feed", 5, { fetch_items_count: 5 });
+    fetcherResultOverrides[rss("x-feed")] = { bodyBytes: 7_500, etag: '"x"', bodyHash: "x" };
+
+    const c = await runCycle();
+
+    expect(iso.peak()).toBe(5);
+    expect(c.staleDeferred).toBe(0);
+    expect(c.oldestStaleMin).toBe(0);
+  });
+
+  it("writes stale_deferred and oldest_stale_min on the ingest_cycles row (migration 159)", async () => {
+    freshIsolate();
+    await trackIsolate(4300);
+    seedBusyIsolate();
+    for (const id of SMALL_IDS) fetcherResultOverrides[rss(id)] = { notModified: true, status: 304 };
+
+    await runCycle();
+
+    expect(ingestCycleInserts).toHaveLength(1);
+    const row = ingestCycleInserts[0] as Record<string, unknown>;
+    expect(row.stale_deferred).toBe(1);
+    expect(row.oldest_stale_min).toBe(20);
+    // 157's counters are still on the row
+    expect(row.parse_deferred).toBe(1);
+    expect(row.isolate_budget_deferred).toBe(1);
+    expect(row.parse_deferred_max_streak).toBe(1);
+  });
+
+  for (const code of ["PGRST204", "42703"]) {
+    it(`retries the cycle row once without the new columns when the database lacks migration 159 (error ${code})`, async () => {
+      ingestCyclesMissing159Code = code;
+      seed("x-feed", 1, { fetch_items_count: 1 });
+
+      await runCycle();
+
+      expect(ingestCyclesInsertAttempts).toBe(2);
+      expect(ingestCycleInserts).toHaveLength(1);
+      const row = ingestCycleInserts[0] as Record<string, unknown>;
+      expect(row).not.toHaveProperty("stale_deferred");
+      expect(row).not.toHaveProperty("oldest_stale_min");
+      expect(row.fetched).toBe(1);
+      expect(row).toHaveProperty("prefilter_errors");
+    });
+  }
+
+  it("a database with neither 157 nor 159 still gets one retry (the legacy row has none of the five)", async () => {
+    ingestCyclesMissingColumnCode = "42703";
+    seed("x-feed", 1, { fetch_items_count: 1 });
+
+    await runCycle();
+
+    expect(ingestCyclesInsertAttempts).toBe(2);
+    const row = ingestCycleInserts[0] as Record<string, unknown>;
+    for (const k of ["isolate_budget_deferred", "parse_deferred", "parse_deferred_max_streak", "stale_deferred", "oldest_stale_min"]) {
+      expect(row, k).not.toHaveProperty(k);
+    }
   });
 });

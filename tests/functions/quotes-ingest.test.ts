@@ -323,6 +323,74 @@ describe("quotes-ingest runCycle", () => {
     expect(sentryCalls.captured[0]?.fn).toBe("quotes-ingest");
   });
 
+  // h39-pipeline2-2: a real symbol that goes dark answers 404 like a non-traded code did; the
+  // summary counts the 'yahoo 404' failures so that shows without parsing the failed array.
+  describe("stats.notFound (h39-pipeline2-2)", () => {
+    const byTicker = (statusOf: Record<string, number>): FetchImpl => async (url) => {
+      const ticker = new URL(url).pathname.split("/").pop()!.replace(".IS", "");
+      const status = statusOf[ticker] ?? 200;
+      return status === 200
+        ? new Response(JSON.stringify(chartPayload([utcSecs(2026, 8, 15, 9, 0)])), { status: 200 })
+        : new Response("nope", { status });
+    };
+
+    it("intraday: counts exactly the 'yahoo 404' failures; other failures stay in failed but are not counted", async () => {
+      quotesRpcState.intradayTargets = [
+        { ticker: "THYAO", last_ts: null },
+        { ticker: "OYA", last_ts: null },
+        { ticker: "SEK", last_ts: null },
+        { ticker: "SAHOL", last_ts: null },
+        { ticker: "EREGL", last_ts: null },
+      ];
+      fetchImpl = byTicker({ OYA: 404, SEK: 404, SAHOL: 500, EREGL: 403 });
+
+      const { runCycle } = await import("../../supabase/functions/quotes-ingest/index.ts");
+      const stats = await runCycle({ mode: "intraday" });
+
+      expect(stats.notFound).toBe(2);
+      expect(stats.fetched).toBe(1);
+      expect(stats.ok).toBe(true);
+      expect([...stats.failed].sort()).toEqual(["EREGL:yahoo 403", "OYA:yahoo 404", "SAHOL:yahoo 500", "SEK:yahoo 404"]);
+    });
+
+    it("daily mode counts them too", async () => {
+      quotesRpcState.dailyTargets = [
+        { ticker: "THYAO", last_day: "2026-09-15" },
+        { ticker: "BRISA", last_day: null },
+      ];
+      fetchImpl = byTicker({ BRISA: 404 });
+
+      const { runCycle } = await import("../../supabase/functions/quotes-ingest/index.ts");
+      const stats = await runCycle({ mode: "daily" });
+
+      expect(stats.notFound).toBe(1);
+      expect(stats.failed).toEqual(["BRISA:yahoo 404"]);
+    });
+
+    it("is 0 when nothing 404s (a clean run, and a run with only a 500)", async () => {
+      quotesRpcState.intradayTargets = [{ ticker: "THYAO", last_ts: null }, { ticker: "SAHOL", last_ts: null }];
+      fetchImpl = byTicker({ SAHOL: 500 });
+
+      const { runCycle } = await import("../../supabase/functions/quotes-ingest/index.ts");
+      expect((await runCycle({ mode: "intraday" })).notFound).toBe(0);
+
+      fetchImpl = byTicker({});
+      expect((await runCycle({ mode: "intraday" })).notFound).toBe(0);
+    });
+
+    it("an all-404 run still reports ok:false (SEC-05) and counts every target, and the count is in the JSON summary", async () => {
+      quotesRpcState.intradayTargets = [{ ticker: "AKCKM", last_ts: null }, { ticker: "ARTI", last_ts: null }];
+      fetchImpl = byTicker({ AKCKM: 404, ARTI: 404 });
+
+      const { runCycle } = await import("../../supabase/functions/quotes-ingest/index.ts");
+      const stats = await runCycle({ mode: "intraday" });
+
+      expect(stats.ok).toBe(false);
+      expect(stats.notFound).toBe(2);
+      expect(JSON.parse(JSON.stringify(stats))).toMatchObject({ notFound: 2, tickers: 2, fetched: 0 });
+    });
+  });
+
   it("sends an honest, contactable User-Agent to Yahoo", async () => {
     quotesRpcState.intradayTargets = [{ ticker: "THYAO" }];
     let capturedHeaders: Record<string, string> | undefined;

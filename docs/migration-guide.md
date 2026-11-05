@@ -3542,3 +3542,111 @@ select version, name from supabase_migrations.schema_migrations where version = 
 Then open `/saved` with a bookmarked, flagged story younger than 24 hours: no pill; the same story after 24 hours: the pill.
 
 **Rollback** (nothing else in the database depends on 158; one transaction): `drop function public.saved_clusters_v3(uuid[]);`, then re-run ONLY 157's `ops_health_report()` section, the text of `157_ingest_poll_stale.sql` from `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;` (the report returns to the five-RPC allowlist, md5 `d4e50357ea4ae0b85601d5e2047c2c7c`, length 41827), then `notify pgrst, 'reload schema';` and remove ledger row 158 (`delete from supabase_migrations.schema_migrations where version = '158';`). Drop the function only together with the report (or after it): a v3 that still exists while the report is back at five entries reads as `fail`. A client that gets `PGRST202` or `42883` from v3 reads v2, so the app keeps working.
+
+## 159 — ingest stale-feed admission (`ingest_cycles.stale_deferred` / `oldest_stale_min`, `ops_health_report` row 20 fails at 60 minutes): APPLY 159 BEFORE DEPLOYING ingest
+
+**Why:** #198 (migration 157) did not end BHA's starvation. The opposition wire went 107 minutes unpolled on 2026-11-05 (09:25 to 11:12Z) and was still skipped on most cycles at 12:26Z (fetch_last_at 11.4 min old after three cycles). #198 put the stale feeds first in the order fetches START in, but admission follows the order bodies ARRIVE in, and BHA's 4.25 MB body finishes last: on a fresh isolate the other feeds had taken 7.17 of the 8 MB cycle byte budget and 4,299 of the 5,000 isolate items (ingest response of 12:24:01Z), so it was refused, and on the next, reused isolate the item budget (4,299 + 1,250 > 5,000) refused it again before the isolate recycled and the in-memory priority was lost. Row 20 (`feed_poll_stale`) read `warn` / 1 in eight consecutive snapshots (`bha 218 dk` ... `bha 99 dk`) and nothing paged, because one stale feed can only warn (hunt 39, h39-pipeline2-1). The ingest change reserves the stalest feed's items (never above the 5,000-item isolate budget) before the fetch pool starts; 159 is its observability and its pager.
+
+**What 159 does** (additive, one transaction, safe to re-apply):
+
+- adds two nullable integer columns to `public.ingest_cycles`, no default: `stale_deferred` (stale feeds the cycle still deferred, expected 0) and `oldest_stale_min` (whole minutes since `fetch_last_at` of the oldest stale feed at cycle start), written by ingest with each cycle row (NULL on older rows). A "stale feed" is a source with no quarantine marker (`fetch_quarantined_until` null, row 20's population) whose `fetch_last_at` is null or older than three cycle periods: the daily probe of an expired quarantine (its `fetch_last_at` is its last attempt, about 1,440 minutes old) is not one, so it neither sets `oldest_stale_min` nor takes the reservation. A column added without a default is a catalogue change only;
+- re-creates `ops_health_report()` with 158's text verbatim (md5 `04c2ffc4d047278703cd16f02db6808d`, length 41855, the production fingerprint) except row 20 `feed_poll_stale`: it is now `fail` when 3 or more counted feeds are over 30 minutes **or when any counted feed was last polled more than 60 minutes ago**, `warn` at 1, else `pass`. The population (active sources with no quarantine marker), `observed`, `threshold` 3 and the detail text are unchanged. The function comment lists 159 and the new rule; the revoke and the grant (`service_role` only) are 158's;
+- adds, changes and unschedules no pg_cron job; no data rewrite, no index, no grant to anon or authenticated.
+
+**Order:** apply 159 before deploying ingest (`supabase db push`, operator), then `npx supabase functions deploy ingest --no-verify-jwt`. PostgREST reloads its schema cache on the `notify`, so the ingest insert naming the two columns is accepted from the first cycle. The reverse order is safe but costs counters: an insert that names a column the table lacks fails the whole row, so ingest retries the `ingest_cycles` insert once without all five new columns (157's three and 159's two) when the answer is Postgres `42703` or PostgREST `PGRST204`, logs `ingest_cycles deferral columns missing (migration 157 not applied? or 159?)` once per cycle and writes the row it wrote before 157; no cycle row is lost, but 157's `isolate_budget_deferred` / `parse_deferred` / `parse_deferred_max_streak` are absent until 159 is applied too. The Vercel app needs no deploy. The ingest build changes no budget: `ISOLATE_ITEM_BUDGET` (5,000), `PARSE_BUDGET_BYTES` (8 MB) and `MAX_PARSES_PER_CYCLE` (55) are untouched; a reservation is booked under the isolate limit, a cycle's byte total can exceed the byte budget by at most the one reserved feed's own body, and while the reservation is held one parse slot is kept for the reserved feed (the other feeds get at most 54 of the 55, so small feeds that arrive first cannot leave it at the cap; the slot is freed with the reservation on a 304, an error or a release, and the total never passes 55).
+
+**Verify** (read-only):
+
+```sql
+select count(*) from public.ops_health_report();   -- expect 20
+select check_name, status, observed, threshold, detail
+  from public.ops_health_report() where check_name = 'feed_poll_stale';
+-- expect pass / 0 / 3 / "aktif kaynakların hepsi son 30 dakikada yoklandı (91)"; one feed over 60 minutes now reads fail
+select column_name, data_type, is_nullable from information_schema.columns
+ where table_schema = 'public' and table_name = 'ingest_cycles'
+   and column_name in ('stale_deferred', 'oldest_stale_min');   -- 2 rows, integer, YES
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;
+-- a2246bc0ea663b123144a2fa4c4f5735, 42501 (was 04c2ffc4d047278703cd16f02db6808d, 41855)
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('service_role', 'public.ops_health_report()', 'execute');
+select version, name from supabase_migrations.schema_migrations where version = '159';   -- 1 row
+```
+
+After the ingest deploy (replace `<deploy>` with the deploy time), for two hours:
+
+```sql
+-- BHA is parsed on each fresh isolate on which it is more than 9 minutes old. Fresh and reused
+-- isolates alternate every 3 minutes, so that is about every 12 minutes. Sampled every 10 minutes,
+-- expect at most about 13 minutes; a sample over 15 minutes, or stale_deferred > 0, means a reservation was missed
+select slug, now() - fetch_last_at as age from public.sources where slug = 'bha';
+-- feed_poll_stale shows no bha rows
+select taken_at, status, detail from public.ops_health_snapshots
+ where check_name = 'feed_poll_stale' and taken_at > timestamptz '<deploy>' order by taken_at;
+-- the new counters: stale_deferred mostly 0
+select started_at, stale_deferred, oldest_stale_min, parse_deferred, isolate_budget_deferred
+  from public.ingest_cycles where started_at > timestamptz '<deploy>' order by started_at desc limit 20;
+-- BHA created-minus-published p50 for new rows: under 20 min
+select percentile_cont(0.5) within group (order by extract(epoch from a.created_at - a.published_at) / 60)
+  from public.articles a join public.sources s on s.id = a.source_id
+ where s.slug = 'bha' and a.created_at > timestamptz '<deploy>';
+```
+
+Also watch `net._http_response` for ingest: no 546 / `CPUTime` bodies. Judge `isolateItemsUsed` on bodies with `isolateCycles` 1 (a fresh isolate) only: expect at most about 5000 (the replay peak is 4,994). Bodies with `isolateCycles` 2 already read 5,919 to 6,530 on the build in production before this change (2026-11-05 12:00 to 13:09Z), because `settle()` charges the real item counts over the size estimates after each parse; that is the baseline, not a regression of the reservation. Judge the deploy by the 546 / `CPUTime` bodies, `stale_deferred` and BHA's age.
+
+**Rollback** (nothing else depends on 159; one transaction): re-run ONLY 158's `ops_health_report()` section, the text of `158_saved_clusters_v3.sql` from `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;` (row 20 returns to fail at 3 stale feeds only, md5 `04c2ffc4d047278703cd16f02db6808d`, length 41855), then `alter table public.ingest_cycles drop column if exists stale_deferred, drop column if exists oldest_stale_min;`, `notify pgrst, 'reload schema';` and remove ledger row 159 (`delete from supabase_migrations.schema_migrations where version = '159';`). Dropping the columns while the new ingest build is deployed is safe (it retries the cycle row without them). To roll the ingest change back, redeploy the previous ingest function; the columns and the 60-minute rule can stay.
+
+## 160 — quotes-ingest intraday keeps only traded tickers (`bist_intraday_targets` joins `bist_companies.shares_traded`): APPLY 160, DEPLOY quotes-ingest in any order
+
+**Why:** `quotes-intraday` (`*/5 7-15 * * 1-5` UTC) asks `public.bist_intraday_targets(120)` for its tickers. 058's body took every distinct `article_tickers.ticker` of the last 7 days with no `shares_traded` filter, so a news code that is not a traded share never got a bar, kept `last_ts` NULL and sorted to the head (`order by b.last_ts nulls first`) of every run for ever. Yahoo answers those with 404. On 2026-11-05 the six consecutive intraday responses from 12:15 to 12:40Z were all `tickers 120, fetched 66, 54 x "yahoo 404"` (AKCVR, AKCKM, ARTI, ATAC, AYDGN, BOYNR, DENIZ, DNZ, FNCLL, KILER, OYA, SEK, TRMEN ...), about 650 Yahoo requests an hour that were certain to fail, while the 131 real news tickers shared the remaining 66 slots (news-ticker bar lag p50 21.0 min, p90 26.0 min at 12:41Z). Last 7 days: 186 news tickers, 131 with a bar in 2 days, 55 with none, and 52 of those 55 have no `shares_traded` company. The daily mode already restricts to traded tickers (051 / 052); the intraday mode never got the filter (hunt 39, h39-pipeline2-2).
+
+**What 160 does** (additive, one transaction, safe to re-apply):
+
+- `create or replace function public.bist_intraday_targets(p_limit int default 120)` with the **same signature, return columns (`ticker text, last_ts timestamptz`), `language sql`, `stable` and SECURITY INVOKER** as 058 section 7. The body is 058's body plus `intersect select distinct unnest(tickers) as ticker from public.bist_companies where shares_traded` in the `t` subquery, the traded set exactly as `bist_daily_targets` writes it. The left join on `bist_bars_5m`, `order by b.last_ts nulls first, t.ticker` and `limit p_limit` are unchanged, so the stalest-first rotation works as before;
+- restates 058's `revoke execute ... from anon, authenticated, public` and `grant execute ... to service_role` for this one function (no-ops on production, where the ACL already is `{postgres=X/postgres,service_role=X/postgres}`);
+- adds, changes and unschedules no pg_cron job, touches no table, column, index or row, and leaves `bist_daily_targets` and the daily mode alone.
+
+**Production fingerprint the replace was based on** (read-only, 2026-11-05): `bist_intraday_targets(integer)` has `md5(prosrc)` `ee892ad1547b7563bb43bb3ba4b17e52` (length 315), LANGUAGE sql, STABLE, SECURITY INVOKER, `proconfig` NULL, owner `postgres`, and that md5 is the md5 of the text between the `$$` markers of 058 section 7, the latest migration that defines it (`tests/migrations/160-intraday-traded-targets.test.ts` recomputes it). The new body is `md5(prosrc)` `36d7209bf11615ba628fcee3f274faa3`, length 422.
+
+**Read-only replay before shipping** (the new body run inline, `p_limit` 120): candidates **186 -> 134** (52 removed, every one of them in the 404 list); of the 120 rows, 54 were 404 codes before and **2 after, OYA and SEK** (traded shares Yahoo has no data for: never fetched, so they still sort first; a data-quality note, not part of this fix). 52 other tickers enter the batch (THYAO, GARAN, BIMAS, TUPRS, ...); 134 candidates for 120 slots, so the 14 stalest wait one run. Cost unchanged (EXPLAIN ANALYZE 48.6 ms before, 48.4 ms after).
+
+**quotes-ingest** (optional, small): the JSON summary gains `notFound`, the count of `yahoo 404` failures, so a real symbol going dark shows without parsing the `failed` array. Nothing else changes; the function calls the same RPC with the same `p_limit`. Deploy it with `npx supabase functions deploy quotes-ingest --no-verify-jwt`. 160 works without the deploy and the deploy works without 160, in either order.
+
+**Order:** apply 160 (`supabase db push`, operator); the next `quotes-intraday` tick (every 5 minutes, 07:00-15:55 UTC on weekdays) uses the new function. No Vercel deploy.
+
+**Verify** (read-only):
+
+```sql
+select md5(prosrc), length(prosrc), prosecdef, provolatile, proacl::text
+  from pg_proc where oid = 'public.bist_intraday_targets(integer)'::regprocedure;
+-- 36d7209bf11615ba628fcee3f274faa3, 422, f, s, {postgres=X/postgres,service_role=X/postgres}
+select has_function_privilege('anon', 'public.bist_intraday_targets(integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.bist_intraday_targets(integer)', 'execute'),
+       has_function_privilege('service_role', 'public.bist_intraday_targets(integer)', 'execute');   -- f, f, t
+select version, name from supabase_migrations.schema_migrations where version = '160';   -- 1 row
+select count(*), count(*) filter (where last_ts is null) from public.bist_intraday_targets(1000);
+-- about 134 candidates (was 186), and only the traded never-fetched ones (OYA, SEK today) have last_ts null
+```
+
+Then, during the next session (07:00-15:55 UTC), the intraday responses:
+
+```sql
+select to_char(created at time zone 'UTC', 'HH24:MI:SS') as at_utc, status_code,
+       (content::jsonb ->> 'tickers')::int as tickers, (content::jsonb ->> 'fetched')::int as fetched,
+       (select count(*) from jsonb_array_elements_text(content::jsonb -> 'failed') f where f like '%:yahoo 404') as n404,
+       (select count(*) from jsonb_array_elements_text(content::jsonb -> 'failed') f where f like '%:deadline') as n_deadline,
+       content::jsonb ->> 'notFound' as not_found   -- null until quotes-ingest is redeployed
+  from net._http_response
+ where created > now() - interval '30 minutes' and content like '{"mode":"intraday"%'
+ order by created desc limit 6;
+-- before 160: tickers 120, fetched 66, n404 54, n_deadline 0 on every row
+-- after 160: n404 at most 3 (OYA, SEK and a symbol that just went dark), fetched >= 110, n_deadline 0
+select round((percentile_cont(0.5) within group (order by extract(epoch from now() - b.last_ts) / 60))::numeric, 1) as p50_min,
+       round((percentile_cont(0.9) within group (order by extract(epoch from now() - b.last_ts) / 60))::numeric, 1) as p90_min
+  from (select distinct ticker from public.article_tickers where created_at >= now() - interval '7 days') t
+  join (select ticker, max(ts) as last_ts from public.bist_bars_5m group by 1) b using (ticker);
+-- during the session: p90 falls from about 26-28 min toward about 22 min (Yahoo's own delay is about 15 min plus the 5 min cadence)
+```
+
+**Rollback** (nothing else depends on 160; one transaction): re-run ONLY 058 section 7's `create or replace function public.bist_intraday_targets(p_limit int default 120)` statement (the text of `058_finance_hardening.sql` from that line through its closing `$$;`; it restores `md5(prosrc)` `ee892ad1547b7563bb43bb3ba4b17e52`), then remove ledger row 160 (`delete from supabase_migrations.schema_migrations where version = '160';`). The ACL does not change in either direction. A redeployed quotes-ingest that reports `notFound` is harmless without 160.
