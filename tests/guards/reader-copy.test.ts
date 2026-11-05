@@ -144,9 +144,15 @@ describe("reader copy", () => {
   });
 
   it("the timeline hour-bucket count is formatted too", () => {
-    const code = blankComments(read("src/app/timeline/page.tsx"));
+    // The header text is built in the bucketing module (h36-journeys-2), which
+    // is where the one count interpolation has to go through formatCountTr.
+    const code = blankComments(read("src/lib/clusters/timeline-buckets.ts"));
     const labelLines = code.split("\n").filter((line) => line.includes("rows.length") && line.includes("küme"));
     expect(labelLines).toHaveLength(1);
     expect(labelLines[0]).toContain("formatCountTr(");
+    // The page renders that label and interpolates no raw bucket count itself.
+    const page = blankComments(read("src/app/timeline/page.tsx"));
+    expect(page).toContain("bucketCountLabel(");
+    expect(page.split("\n").filter((line) => line.includes("rows.length") && line.includes("küme"))).toEqual([]);
   });
 });

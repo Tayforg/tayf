@@ -14,12 +14,29 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+//
+// h36-journeys-3: the hero and the description are shared by all three modes, so
+// they name no per-mode numbers. "60 saniye" and "10 manşet" belong to Bölge
+// alone (its idle line in zone-guess-game.tsx) and Günün Tayf'ı is 5 headlines
+// with no timer; the per-mode explainer lives in oyun-modes.tsx.
 export const metadata: Metadata = staticPageMetadata({
   title: "Tarafı tahmin et",
   description:
-    "60 saniyede 10 manşet: hangi taraf yazdı, tahmin et. Tayf'ın 118 kaynak etiketi için oyuncuların ilk dış çapraz kontrolü.",
+    "Manşetleri oku, hangi taraftan bir kaynağın yazdığını tahmin et: 60 saniyelik Bölge turu, Çerçeve oylaması ve herkes için aynı 5 manşetlik Günün Tayf\u2019ı.",
   path: "/oyun",
 });
+
+/**
+ * The mode-neutral masthead copy above the mode switch (exported for the unit
+ * test). The H1 stays a literal `title="..."` on the <PageHero> below, not a
+ * field here: tests/app/page-title-sentence-case.test.ts reads that literal to
+ * keep the H1 and the <title> in agreement.
+ */
+export const OYUN_HERO = {
+  kicker: "Oyun",
+  subtitle:
+    "Manşeti oku, hangi taraftaki bir kaynağın yazdığını tahmin et. Üç mod: Bölge, Çerçeve ve Günün Tayf\u2019ı.",
+} as const;
 
 // /oyun — three games behind one mode switch (OyunModes, "use client"),
 // picked from a Server Component that fetches the Bölge headline pool
@@ -86,11 +103,7 @@ export default async function OyunPage({
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-3xl space-y-6">
-      <PageHero
-        kicker="60 saniyelik oyun"
-        title="Tarafı tahmin et"
-        subtitle="10 manşet, 3 seçenek: İktidar, Bağımsız, Muhalefet. Hangi kaynağın hangi tarafta yazdığını tahmin et."
-      />
+      <PageHero kicker={OYUN_HERO.kicker} title="Tarafı tahmin et" subtitle={OYUN_HERO.subtitle} />
 
       <OyunModes
         headlines={headlines}

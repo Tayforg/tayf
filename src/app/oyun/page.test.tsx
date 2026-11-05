@@ -18,7 +18,7 @@ vi.mock("@/lib/game/daily-query", () => ({
   getDailyPuzzle: async () => null,
 }));
 
-import OyunPage from "./page";
+import OyunPage, { OYUN_HERO, metadata } from "./page";
 
 // h28-journey-2: a four-paragraph disclaimer card above the mode switch pushed
 // "Başla" below the fold on a phone. The card now sits below <OyunModes> and
@@ -81,4 +81,51 @@ describe("OyunPage -- first screen order", () => {
     expect(markup.indexOf("Tarafı tahmin et")).toBeGreaterThan(-1);
     expect(markup.indexOf("Tarafı tahmin et")).toBeLessThan(markup.indexOf('aria-label="Oyun modu"'));
   });
+});
+
+// h36-journeys-3: the static hero and the meta description promised "60
+// saniyelik oyun" / "10 manşet" in every mode, but Günün Tayf'ı is 5 headlines
+// with no timer, and the home teaser links straight to it. The hero is shared by
+// all three modes, so it names none of their numbers; the per-mode line
+// ("10 manşet, 60 saniye") stays in the Bölge round (oyun-modes.test.tsx).
+describe("OyunPage -- mode-neutral hero and description", () => {
+  it("OYUN_HERO promises neither the 60-second timer nor 10 headlines", () => {
+    for (const text of [OYUN_HERO.kicker, OYUN_HERO.subtitle]) {
+      expect(text).not.toContain("60 saniye");
+      expect(text).not.toContain("10 manşet");
+    }
+  });
+
+  it("OYUN_HERO names the game and all three modes", () => {
+    expect(OYUN_HERO.kicker).toBe("Oyun");
+    expect(OYUN_HERO.subtitle).toContain("Bölge");
+    expect(OYUN_HERO.subtitle).toContain("Çerçeve");
+    expect(OYUN_HERO.subtitle).toContain("Günün Tayf\u2019ı");
+  });
+
+  it("the meta description keeps the 60 seconds on Bölge and names the 5-headline daily", () => {
+    const description = metadata.description ?? "";
+
+    expect(description).toContain("Bölge");
+    expect(description).toContain("5 manşet");
+    expect(description).toContain("Çerçeve");
+    expect(description).toContain("Günün Tayf\u2019ı");
+    expect(description).not.toContain("60 saniyede 10 manşet");
+    expect(description).not.toContain("10 manşet");
+  });
+
+  it("the social descriptions say the same as the meta description", () => {
+    expect(metadata.openGraph?.description).toBe(metadata.description);
+    expect(metadata.twitter?.description).toBe(metadata.description);
+  });
+
+  for (const { name, searchParams } of VARIANTS) {
+    it(`${name}: renders the neutral hero, not the '60 saniyelik oyun' kicker`, async () => {
+      const markup = await renderPage(searchParams);
+
+      expect(markup).toContain(OYUN_HERO.subtitle);
+      expect(markup).not.toContain("60 saniyelik oyun");
+      expect(markup).not.toContain("10 manşet, 3 seçenek");
+    });
+  }
 });

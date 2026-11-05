@@ -134,6 +134,18 @@ export function priceTickKurus(kurus: number): number {
   return 1;
 }
 
+/** The +-10 % band of a base price: tick-stepped limits, and the tick each sits on, all in TL. */
+export interface LimitPrices {
+  /** Highest valid price not above base x 1.10. */
+  tavan: number;
+  /** Lowest valid price not below base x 0.90. */
+  taban: number;
+  /** Tick (TL) of the band the tavan falls in. */
+  upTick: number;
+  /** Tick (TL) of the band the taban falls in. */
+  downTick: number;
+}
+
 /**
  * BIST equity price limits are +-10 % of the base price (the previous close),
  * but a price only exists on the tick grid: tavan is the highest valid price
@@ -143,25 +155,41 @@ export function priceTickKurus(kurus: number): number {
  * that is taban; a fixed 9,5 % threshold never flags it. Likewise 6,98 -> 6,30
  * (-9,74 %) is NOT taban, because 6,29 is valid.
  *
+ * Shared by limitFlag (is this price at a limit?) and the quote band guard in
+ * session.ts (is this price outside the band altogether, which no honest base
+ * can produce?). Null for a base that is missing, not finite, not positive or
+ * under one kurus.
+ */
+export function limitPrices(prevClose: number | null | undefined): LimitPrices | null {
+  if (prevClose == null || !Number.isFinite(prevClose) || !(prevClose > 0)) return null;
+  const baseKurus = Math.round(prevClose * 100);
+  if (!(baseKurus > 0)) return null;
+  // Integer kurus: baseKurus x 110 / 100 is exact up to the one division.
+  const upRaw = (baseKurus * 110) / 100;
+  const downRaw = (baseKurus * 90) / 100;
+  const upTick = priceTickKurus(upRaw);
+  const downTick = priceTickKurus(downRaw);
+  return {
+    tavan: (Math.floor(upRaw / upTick) * upTick) / 100,
+    taban: (Math.ceil(downRaw / downTick) * downTick) / 100,
+    upTick: upTick / 100,
+    downTick: downTick / 100,
+  };
+}
+
+/**
+ * Whether a price is at the BIST limit (see limitPrices for the tick rules).
+ *
  * Given a finite `prevClose` > 0 and a finite `price` the answer is the
  * tick-aware one (and `pct` is ignored). Without them it falls back to the old
  * rule: anything past +-9,5 % is, for a reader, at the limit.
  */
 export function limitFlag(pct: number, prevClose?: number | null, price?: number | null): "tavan" | "taban" | null {
-  if (prevClose != null && price != null && Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price)) {
-    const baseKurus = Math.round(prevClose * 100);
-    if (baseKurus > 0) {
-      // Integer kurus: baseKurus x 110 / 100 is exact up to the one division.
-      const upRaw = (baseKurus * 110) / 100;
-      const downRaw = (baseKurus * 90) / 100;
-      const upTick = priceTickKurus(upRaw);
-      const downTick = priceTickKurus(downRaw);
-      const tavan = (Math.floor(upRaw / upTick) * upTick) / 100;
-      const taban = (Math.ceil(downRaw / downTick) * downTick) / 100;
-      if (price >= tavan - 1e-6) return "tavan";
-      if (price <= taban + 1e-6) return "taban";
-      return null;
-    }
+  const limits = price != null && Number.isFinite(price) ? limitPrices(prevClose) : null;
+  if (limits && price != null) {
+    if (price >= limits.tavan - 1e-6) return "tavan";
+    if (price <= limits.taban + 1e-6) return "taban";
+    return null;
   }
   if (pct >= 9.5) return "tavan";
   if (pct <= -9.5) return "taban";

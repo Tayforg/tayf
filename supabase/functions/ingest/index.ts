@@ -101,6 +101,7 @@ import {
   interleaveBySource,
   isolateItems,
   prioritizeIds,
+  prioritizeStale,
   rotateForCycle,
   upsertWithBisect,
 } from "./order.ts";
@@ -464,12 +465,13 @@ interface CycleStats {
   contentlessTitlesDropped: number;
   // Parse budget: changed feeds this cycle refused a parse because the cycle
   // already used its MAX_PARSES_PER_CYCLE / PARSE_BUDGET_BYTES. Not failures:
-  // they are retried first next cycle. Summary line and HTTP JSON only.
+  // they are retried first next cycle. Summary line, HTTP JSON and, since
+  // migration 157, `ingest_cycles.parse_deferred`.
   parseDeferred: number;
   // The longest run of consecutive cycles any feed has been deferred, counting
   // this one (0 when nothing was deferred): starvation made visible. Best
-  // effort across warm invocations, like the priority set. Summary line and
-  // HTTP JSON only.
+  // effort across warm invocations, like the priority set. Summary line, HTTP
+  // JSON and, since migration 157, `ingest_cycles.parse_deferred_max_streak`.
   parseDeferredMaxStreak: number;
   // Body bytes of the feeds this cycle admitted to a parse. Summary and HTTP
   // JSON only: there is no `ingest_cycles` column for it.
@@ -483,7 +485,8 @@ interface CycleStats {
   // BEFORE the full normalisation; `itemsNormalized` counts the rows that got
   // it, `itemsKnownSkipped` the items it was skipped for (stored for this
   // source under the same headline). Summary line and HTTP JSON only: there is
-  // no `ingest_cycles` column for any of the counters below.
+  // no `ingest_cycles` column for the counters below, except the one named
+  // `isolateBudgetDeferred` (migration 157).
   itemsKnownSkipped: number;
   // Feeds whose stored-url lookup failed (any batch): every item of such a feed
   // takes the full path, exactly as before the lookup existed (fail-open).
@@ -491,7 +494,8 @@ interface CycleStats {
   // Isolate item budget (hunt-11, A-ingest-cpu): items booked on this isolate
   // so far, cycles it has served, and changed feeds this cycle refused because
   // they did not fit what is left of the isolate's allowance (each also counts
-  // in `parseDeferred`).
+  // in `parseDeferred`). `isolateBudgetDeferred` is also written to
+  // `ingest_cycles.isolate_budget_deferred` since migration 157.
   isolateItemsUsed: number;
   isolateCycles: number;
   isolateBudgetDeferred: number;
@@ -1372,17 +1376,34 @@ async function maybeFlushFetchState(
   await persistSourceFetchState(supabase, drainFetchState(updates));
 }
 
+// True for the errors a missing column answers: Postgres 42703 (undefined
+// column) and PostgREST PGRST204 ("Could not find the 'x' column of 'y' in the
+// schema cache", what an insert naming an unknown column gets). Anything else
+// is a real failure and is not retried.
+function isMissingColumnError(error: { code?: string; message?: string }): boolean {
+  if (error.code === "42703" || error.code === "PGRST204") return true;
+  return /could not find the .* column|column .* does not exist/i.test(error.message ?? "");
+}
+
 // Best-effort telemetry write: one row per cycle in `ingest_cycles`
 // (migration 039), regardless of whether the cycle finished cleanly or
 // `runCycle` is unwinding through a thrown error. Errors here are logged
 // and swallowed — a telemetry outage must never fail (or re-fail) a cycle.
+//
+// Migration 157 adds three counters (isolate_budget_deferred, parse_deferred,
+// parse_deferred_max_streak). An insert that names a column the table does not
+// have fails the WHOLE row, so while 157 is not applied the first insert is
+// retried ONCE without them (the same pattern as the legacy sources select for
+// migration 119). Ingest can therefore be deployed before or after 157; the
+// counters are simply absent until the migration is applied. Apply 157 first
+// anyway: a cycle row written without them is a cycle you cannot count.
 async function recordIngestCycle(
   supabase: ReturnType<typeof createServiceClient>,
   startedAt: number,
   stats: CycleStats,
 ): Promise<void> {
   try {
-    const { error } = await supabase.from("ingest_cycles").insert({
+    const row = {
       started_at: new Date(startedAt).toISOString(),
       fetched: stats.fetched,
       inserted: stats.inserted,
@@ -1398,9 +1419,26 @@ async function recordIngestCycle(
       // case where an unguarded throw unwinds before stats.durationMs was
       // ever assigned.
       duration_ms: stats.durationMs || Date.now() - startedAt,
+    };
+    // Migration 157: how often the budgets deferred a changed feed this cycle,
+    // and the longest streak of consecutive deferrals of one feed.
+    const { error } = await supabase.from("ingest_cycles").insert({
+      ...row,
+      isolate_budget_deferred: stats.isolateBudgetDeferred,
+      parse_deferred: stats.parseDeferred,
+      parse_deferred_max_streak: stats.parseDeferredMaxStreak,
     });
-    if (error) {
+    if (!error) return;
+    if (!isMissingColumnError(error)) {
       console.error(`[ingest] ingest_cycles insert failed: ${error.message}`);
+      return;
+    }
+    console.warn(
+      "[ingest] ingest_cycles deferral columns missing (migration 157 not applied?): inserting the legacy row",
+    );
+    const retry = await supabase.from("ingest_cycles").insert(row);
+    if (retry.error) {
+      console.error(`[ingest] ingest_cycles insert failed: ${retry.error.message}`);
     }
   } catch (err) {
     console.error("[ingest] ingest_cycles insert threw", err);
@@ -1524,9 +1562,19 @@ async function runCycleBody(
   const deferredBefore = new Map(parseDeferredIds);
   const priorityIds = new Set(deferredBefore.keys());
   parseDeferredIds.clear();
+  //
+  // h36-pipeline-1: a feed the budgets refuse writes no fetch state, and the
+  // memory above is lost when the isolate recycles, so a big feed (BHA, 4.25 MB)
+  // could stay unfetched for hours. The sources whose `fetch_last_at` is null
+  // or older than three cycle periods are therefore put first, oldest first
+  // (the first one meets a fresh isolate's `used === 0` admission); the
+  // in-memory deferrals still go before those within an isolate.
   const toFetch = prioritizeIds(
-    rotateForCycle(
-      liveSources.filter((s) => !isQuarantined(s, startedAt)),
+    prioritizeStale(
+      rotateForCycle(
+        liveSources.filter((s) => !isQuarantined(s, startedAt)),
+        startedAt,
+      ),
       startedAt,
     ),
     priorityIds,
@@ -1638,7 +1686,11 @@ async function runCycleBody(
         // yes; only then are the estimated items booked on the isolate. Either
         // refusal flows through `result.parseDeferred` below.
         admitParse: (bodyBytes) => {
-          const estimated = estimateItems(bodyBytes);
+          // The feed's last parsed item count (migration 119) caps the size
+          // estimate: BHA's 4.25 MB is 1000 items, not 2,833 (h36-pipeline-1).
+          // Only while the body is within 4x of that cap; a body far bigger
+          // than the count explains keeps the size-only estimate.
+          const estimated = estimateItems(bodyBytes, source.fetch_items_count);
           if (!itemBudget.fits(estimated)) {
             stats.isolateBudgetDeferred++;
             return false;

@@ -17,7 +17,7 @@ import {
   refKey,
 } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
-import { marketCueText, quoteFreshness } from "@/lib/finance/session";
+import { marketCueText, quoteFreshness, rebaseQuoteOnStat } from "@/lib/finance/session";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { currentTimeMs } from "@/lib/time";
 
@@ -59,11 +59,18 @@ export default async function EkonomiPage() {
   // means the three run against the exact same Next cache key shape instead
   // of three independently-expiring 60 s entries that can briefly disagree.
   const tickerKey = [...new Set([...top.map((t) => t.ticker), ...feed.flatMap((f) => f.tickers)])].sort();
-  const [quotes, stats, refs] = await Promise.all([
+  const [yahooQuotes, stats, refs] = await Promise.all([
     getQuotes(tickerKey),
     fetchQuoteStats(tickerKey),
     fetchReferencePrices(feed.map((f) => f.id).sort()),
   ]);
+  // h36-data-1: during the session Yahoo's previous close is the one from two
+  // sessions back, so the day move (and the tavan/taban tag) is re-based on the
+  // settled close in bist_quote_stats, and a move past the +-10 % band becomes
+  // unknown ("—"). Everything below reads the re-based quotes.
+  const quotes = Object.fromEntries(
+    Object.entries(yahooQuotes).map(([t, q]) => [t, rebaseQuoteOnStat(q, stats[t])]),
+  );
 
   // Market cue: when the freshest quote on screen is not from a live session,
   // say so once instead of letting every chip look like today's move. "Piyasa

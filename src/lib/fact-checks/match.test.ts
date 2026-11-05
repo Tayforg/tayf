@@ -6,6 +6,8 @@ import {
   buildFtsQuery,
   scoreCluster,
   rankMatches,
+  MATCH_METHOD,
+  GENERIC_CLAIM_VERB_STEMS,
   MIN_MATCHED_TERMS,
   SHADOW_MIN_SCORE,
   PUBLISH_MIN_SCORE,
@@ -71,15 +73,19 @@ describe("extractFactCheckTerms", () => {
 
 describe("buildFtsQuery", () => {
   it("returns null under 2 words", () => {
-    expect(buildFtsQuery({ stems: [], entityStems: [], ftsWords: ["tek"] })).toBeNull();
-    expect(buildFtsQuery({ stems: [], entityStems: [], ftsWords: [] })).toBeNull();
+    expect(
+      buildFtsQuery({ stems: [], entityStems: [], nameSpans: [], ftsWords: ["tek"] }),
+    ).toBeNull();
+    expect(
+      buildFtsQuery({ stems: [], entityStems: [], nameSpans: [], ftsWords: [] }),
+    ).toBeNull();
   });
 
   it("caps at 6 words, entities first, joined with ' or '", () => {
     const ftsWords = [
       "entity1", "entity2", "entity3", "entity4", "entity5", "entity6", "entity7", "other1",
     ];
-    const q = buildFtsQuery({ stems: [], entityStems: [], ftsWords });
+    const q = buildFtsQuery({ stems: [], entityStems: [], nameSpans: [], ftsWords });
     expect(q).toBe("entity1 or entity2 or entity3 or entity4 or entity5 or entity6");
   });
 
@@ -195,6 +201,482 @@ describe("rankMatches", () => {
       expect(ranked[i - 1]!.score).toBeGreaterThanOrEqual(ranked[i]!.score);
     }
     expect(ranked.some((r) => r.clusterId === "none")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h36-data-2: a person's first + last name plus one generic claim verb must
+// not clear the publish gate (keyword-v2).
+// ---------------------------------------------------------------------------
+
+const FIDAN_TITLE = "Hakan Fidan'ın Almanca konuştuğu video gerçek mi?";
+const TUGAY_TITLE =
+  "Cemil Tugay’ın katıldığı temizlik çalışmalarını gösteren video güncel mi?";
+const NASA_TITLE = "NASA astronotu Deniz Burnham’ın Türkçe konuştuğu video gerçek";
+const PANAMA_TITLE = "Video Panama’da Gerçekleşen 7.7 Büyüklüğündeki Depremi mi Gösteriyor?";
+
+describe("MATCH_METHOD", () => {
+  it("is keyword-v2 so rows written by the name-span rule are distinguishable", () => {
+    expect(MATCH_METHOD).toBe("keyword-v2");
+  });
+});
+
+describe("GENERIC_CLAIM_VERB_STEMS", () => {
+  it("holds exactly the claim-verb stems stemTr can produce", () => {
+    expect([...GENERIC_CLAIM_VERB_STEMS].sort()).toEqual(
+      ["acikl", "goste", "katil", "konus", "payla", "soyle", "yapti"].sort(),
+    );
+  });
+
+  it("every entry is reachable: the stemmer keeps at most 5 characters", () => {
+    for (const stem of GENERIC_CLAIM_VERB_STEMS) {
+      expect(stem.length).toBeLessThanOrEqual(5);
+      expect(stemTr(stem)).toBe(stem);
+    }
+  });
+
+  it("maps real verb forms onto the set (paylaştı, konuştuğu, katıldığı, ...)", () => {
+    for (const word of [
+      "paylaştı",
+      "paylaştığı",
+      "konuştuğu",
+      "katıldığı",
+      "gösteren",
+      "açıkladı",
+      "söyledi",
+      "yaptığı",
+    ]) {
+      expect(GENERIC_CLAIM_VERB_STEMS.has(stemTr(foldTr(word).trim()))).toBe(true);
+    }
+  });
+});
+
+describe("extractFactCheckTerms nameSpans", () => {
+  it("finds the person name in a sentence-case title, first word allowed", () => {
+    expect(extractFactCheckTerms(FIDAN_TITLE).nameSpans).toEqual([["hakan", "fidan"]]);
+    expect(extractFactCheckTerms(TUGAY_TITLE).nameSpans).toEqual([["cemil", "tugay"]]);
+  });
+
+  it("finds a mid-title name that ends at its apostrophe word", () => {
+    expect(extractFactCheckTerms(NASA_TITLE).nameSpans).toEqual([["deniz", "burnh"]]);
+  });
+
+  it("yields no spans for a Title Case title (Doğruluk Payı style)", () => {
+    expect(extractFactCheckTerms(PANAMA_TITLE).nameSpans).toEqual([]);
+    expect(
+      extractFactCheckTerms(
+        "Cemil Tugay’ın Katıldığı Temizlik Çalışmalarını Gösteren Video Güncel mi?",
+      ).nameSpans,
+    ).toEqual([]);
+    expect(
+      extractFactCheckTerms("Doğu Akdeniz'de Deniz Sınırları Neden Tartışmalı?").nameSpans,
+    ).toEqual([]);
+  });
+
+  it("does not read an all-capitalised title as one long name", () => {
+    // One run swallows the whole title; with no lowercase content word it is Title Case.
+    expect(extractFactCheckTerms("Bir Okul Saldırısı Başlamadan Önlenebilir mi?").nameSpans).toEqual(
+      [],
+    );
+    expect(
+      extractFactCheckTerms("2. Trump Döneminde Avrupa’da Aşırı Sağ").nameSpans,
+    ).toEqual([]);
+  });
+
+  it("keeps role + name runs of a sentence-case title as one name each", () => {
+    expect(
+      extractFactCheckTerms(
+        "Dışişleri Bakanı Hakan Fidan’ın Adalet Bakanı Akın Gürlek’in elini sıkmadığı iddiası",
+      ).nameSpans,
+    ).toEqual([
+      ["disis", "bakan", "hakan", "fidan"],
+      ["adale", "bakan", "akin", "gurle"],
+    ]);
+  });
+
+  it("stops a run before the next lowercase word when no apostrophe ends it", () => {
+    expect(
+      extractFactCheckTerms("Deniz Burnham astronotu mesaj verdi").nameSpans,
+    ).toEqual([["deniz", "burnh"]]);
+  });
+
+  it("returns one span per name, each ending at its own apostrophe word", () => {
+    expect(
+      extractFactCheckTerms("Cemil Tugay’ın Kadir Topbaş’la görüştüğü iddia edilen video")
+        .nameSpans,
+    ).toEqual([
+      ["cemil", "tugay"],
+      ["kadir", "topba"],
+    ]);
+  });
+
+  it("does not span a single capitalised word", () => {
+    expect(
+      extractFactCheckTerms("Erdoğan'ın açıklaması geldi bugün").nameSpans,
+    ).toEqual([]);
+  });
+
+  it("does not merge two names separated by a comma", () => {
+    expect(extractFactCheckTerms("Erdoğan, Bahçeli ile görüştü").nameSpans).toEqual([]);
+  });
+
+  it("does not count a leading stopword as part of a name", () => {
+    // "Video" is a stopword: only "mekke" is left, which is not a 2-word name.
+    expect(
+      extractFactCheckTerms("Video Mekke'ye yapılan İHA saldırısını mı gösteriyor?")
+        .nameSpans,
+    ).toEqual([]);
+  });
+
+  it("is empty for an empty title, an all-lowercase title and RSS categories", () => {
+    expect(extractFactCheckTerms("").nameSpans).toEqual([]);
+    expect(extractFactCheckTerms("büyük bir toplantı düzenlendi").nameSpans).toEqual([]);
+    expect(
+      extractFactCheckTerms("basit bir başlık metni buraya", ["Hakan Fidan"]).nameSpans,
+    ).toEqual([]);
+  });
+
+  it("keeps the existing stems and entityStems unchanged", () => {
+    const t = extractFactCheckTerms(FIDAN_TITLE);
+    expect(t.stems).toEqual(["hakan", "fidan", "alman", "konus"]);
+    expect(t.entityStems).toEqual(["fidan", "alman"]);
+  });
+});
+
+describe("scoreCluster distinctTerms", () => {
+  function termsOf(stems: string[], nameSpans: string[][] = [], entityStems = stems.slice(0, 1)) {
+    return { stems, entityStems, nameSpans, ftsWords: [] };
+  }
+
+  it("is exposed on the result and is 0 when nothing matches", () => {
+    const r = scoreCluster(termsOf(["alpha", "beta"]), doc("c", "tamamen alakasız"));
+    expect(r.distinctTerms).toBe(0);
+  });
+
+  it("counts a name span once however many of its stems matched", () => {
+    const t = termsOf(["hakan", "fidan", "konus", "zirve"], [["hakan", "fidan"]], ["fidan"]);
+    const r = scoreCluster(t, doc("c", "hakan fidan zirve"));
+    expect(r.matched).toEqual(["hakan", "fidan", "zirve"]);
+    expect(r.distinctTerms).toBe(2);
+  });
+
+  it("counts a span when only one of its stems matched", () => {
+    const t = termsOf(["hakan", "fidan", "zirve"], [["hakan", "fidan"]], ["fidan"]);
+    const r = scoreCluster(t, doc("c", "bakan fidan zirve"));
+    expect(r.matched).toEqual(["fidan", "zirve"]);
+    expect(r.distinctTerms).toBe(2);
+  });
+
+  it("does not count a span none of whose stems matched", () => {
+    const t = termsOf(["hakan", "fidan", "zirve"], [["hakan", "fidan"]], ["fidan"]);
+    const r = scoreCluster(t, doc("c", "bakan zirve"));
+    expect(r.distinctTerms).toBe(1);
+  });
+
+  it("counts two different name spans separately", () => {
+    const t = termsOf(
+      ["cemil", "tugay", "kadir", "topba"],
+      [
+        ["cemil", "tugay"],
+        ["kadir", "topba"],
+      ],
+      ["tugay"],
+    );
+    const r = scoreCluster(t, doc("c", "cemil tugay kadir topbaş"));
+    expect(r.distinctTerms).toBe(2);
+  });
+
+  it("generic claim-verb stems still weigh in the score but never count as distinct terms", () => {
+    const t = termsOf(["alpha", "beta", "konus", "katil"], [], ["alpha"]);
+    const r = scoreCluster(t, doc("c", "alpha beta konus katil"));
+    expect(r.matched).toEqual(["alpha", "beta", "konus", "katil"]);
+    // alpha is an entity (weight 2); the two verb stems still carry weight 1
+    // each, so 5 matched weight / 5 total weight.
+    expect(r.score).toBe(1);
+    expect(r.distinctTerms).toBe(2);
+    expect(r.decision).toBe("shadow");
+  });
+
+  it("a third non-generic term lifts the same pair to publish", () => {
+    const t = termsOf(["alpha", "beta", "gamma", "konus"], [], ["alpha"]);
+    const r = scoreCluster(t, doc("c", "alpha beta gamma konus"));
+    expect(r.distinctTerms).toBe(3);
+    expect(r.decision).toBe("publish");
+  });
+
+  it("every generic verb stem is excluded from the distinct count", () => {
+    for (const verb of GENERIC_CLAIM_VERB_STEMS) {
+      const t = termsOf(["alpha", "beta", verb], [], ["alpha"]);
+      const r = scoreCluster(t, doc("c", `alpha beta ${verb}`));
+      expect(r.matched).toContain(verb);
+      expect(r.distinctTerms).toBe(2);
+      expect(r.decision).toBe("shadow");
+    }
+  });
+
+  it("a name span keeps counting even when its stem is also a generic verb stem", () => {
+    const t = termsOf(["konus", "katil", "zirve"], [["konus", "katil"]], ["zirve"]);
+    const r = scoreCluster(t, doc("c", "konus katil zirve"));
+    expect(r.distinctTerms).toBe(2);
+  });
+
+  it("the shadow rule is unchanged: 2 matched terms and score >= 0.3 stays shadow", () => {
+    const t = termsOf(["alpha", "beta", "konus"], [], ["alpha"]);
+    const r = scoreCluster(t, doc("c", "alpha konus"));
+    expect(r.matched.length).toBe(2);
+    expect(r.distinctTerms).toBe(1);
+    expect(r.decision).toBe("shadow");
+  });
+
+  // ct-1, an accepted recall cost. A span is any run of 2+ capitalised words, so
+  // a role before the name or a place after it joins the person's span and the
+  // whole run counts once. The on-topic pair below has 4 matched stems and a
+  // 0.727 score, so keyword-v1 (matched >= 3) would have published it; keyword-v2
+  // sees 2 distinct terms (the span, and "g20") and parks it in shadow, where an
+  // operator can promote it. A wrong box is worse than none, so the heuristic is
+  // not loosened without labelled data. See "Known recall cost" in
+  // docs/fact-checks.md.
+  it("a role and a place that join the name's span cost recall: an on-topic pair lands in shadow", () => {
+    const t = extractFactCheckTerms(
+      "Cumhurbaşkanı Erdoğan Yeni Delhi'de G20 zirvesine katıldı mı?",
+    );
+    expect(t.nameSpans).toEqual([["cumhu", "erdog", "yeni", "delhi"]]);
+
+    const r = scoreCluster(t, doc("c", "Erdoğan Yeni Delhi'de G20"));
+    expect(r.matched).toEqual(["erdog", "yeni", "delhi", "g20"]);
+    expect(r.distinctTerms).toBe(2);
+    expect(r.score).toBe(0.727);
+    expect(r.decision).toBe("shadow");
+  });
+
+  // secdb-2: two spans that share a stem are one person, not two pieces of
+  // evidence. "Ali Veli", "Veli Ali" and "Ali Veli Can" all match through the
+  // same two stems, so the pair has ONE distinct term and must not publish.
+  it("overlapping name spans that share matched stems count once", () => {
+    const t = extractFactCheckTerms("Ali Veli, Veli Ali, Ali Veli Can ne dedi?");
+    expect(t.nameSpans).toEqual([
+      ["ali", "veli"],
+      ["veli", "ali"],
+      ["ali", "veli", "can"],
+    ]);
+
+    const r = scoreCluster(t, doc("c", "Ali Veli"));
+    expect(r.matched).toEqual(["ali", "veli"]);
+    expect(r.distinctTerms).toBe(1);
+    expect(r.decision).toBe("shadow");
+  });
+
+  it("the same person named twice in one title (Hakan Fidan ... Hakan Fidan'ın) is one term", () => {
+    const t = extractFactCheckTerms(
+      "Bakan Hakan Fidan ve Hakan Fidan'ın Almanca konuştuğu video",
+    );
+    const r = scoreCluster(t, doc("c", "Hakan Fidan Almanca"));
+    expect(r.matched).toEqual(["hakan", "fidan", "alman"]);
+    // The person (once) + "alman"; before the fix the two overlapping spans
+    // counted twice and the pair published.
+    expect(r.distinctTerms).toBe(2);
+    expect(r.decision).toBe("shadow");
+  });
+
+  it("a span counts only if it claims a matched stem no earlier span claimed", () => {
+    const t = {
+      stems: ["alpha", "beta", "gamma", "delta"],
+      entityStems: ["alpha"],
+      nameSpans: [
+        ["alpha", "beta"],
+        ["beta", "gamma"],
+        ["delta", "epsil"],
+      ],
+      ftsWords: [],
+    };
+    // beta, gamma and delta match. Span 1 claims beta; span 2 claims gamma (new);
+    // span 3 claims delta (new). Three distinct terms.
+    const r = scoreCluster(t, doc("c", "beta gamma delta"));
+    expect(r.matched).toEqual(["beta", "gamma", "delta"]);
+    expect(r.distinctTerms).toBe(3);
+    // Without "gamma" span 2 only repeats beta and adds nothing.
+    const r2 = scoreCluster(t, doc("c", "beta delta"));
+    expect(r2.matched).toEqual(["beta", "delta"]);
+    expect(r2.distinctTerms).toBe(2);
+  });
+});
+
+/**
+ * The 11 auto-published keyword-v1 rows audited on 2026-11-05. Each ClusterDoc
+ * is the real cluster headline (`title_tr_neutral`) plus the real member
+ * titles, trimmed to the titles that carry the support for the stored
+ * `matched_terms` (the full clusters have up to 23 members). Every fixture is
+ * asserted to reproduce the stored `matched_terms` and `score` under the
+ * current stemmer, so the replay below is a replay of the live rows.
+ */
+interface RealPair {
+  id: string;
+  factCheckTitle: string;
+  headline: string;
+  memberTitles: string[];
+  storedMatched: string[];
+  storedScore: number;
+}
+
+const WRONG_PUBLISHED_PAIRS: RealPair[] = [
+  {
+    id: "2df57b90",
+    factCheckTitle: "Cemil Tugay’ın katıldığı temizlik çalışmalarını gösteren video güncel mi?",
+    headline: "CHP'den Özel'e \"Cemil Tugay\" tepkisi",
+    memberTitles: [
+      "CHP Sözcüsü Müslim Sarı: Özgür Özel'e ilk defa katılıyorum; Partisini satıp gidenler haindir",
+      "CHP Sözcüsü Sarı, Kılıçdaroğlu'nun Özel'e tavsiyesini açıkladı: \"Cemil Tugay'ı bir daha aday göstermeyiniz\"",
+      "CHP Sözcüsü Müslim Sarı'dan Özgür Özel açıklaması: \"İlk defa katılıyorum, partisini satan haindir\"",
+      "CHP'li Sarı: Cemil Tugay'ı aday gösterenler İzmir halkından özür dileyecek",
+    ],
+    storedMatched: ["cemil", "tugay", "katil", "goste"],
+    storedScore: 0.625,
+  },
+  {
+    id: "cc57f5f6",
+    factCheckTitle: "Hakan Fidan'ın Almanca konuştuğu video gerçek mi?",
+    headline: "Dışişleri Bakanı Hakan Fidan konuşuyor",
+    memberTitles: [],
+    storedMatched: ["hakan", "fidan", "konus"],
+    storedScore: 0.667,
+  },
+  {
+    id: "26e48fc5",
+    factCheckTitle: "Hakan Fidan'ın Almanca konuştuğu video gerçek mi?",
+    headline: "Bakü’de Herzog protestosu: Türkiye dahil çok sayıda ülke salonu terk etti",
+    memberTitles: [
+      "Dışişleri Bakanı Hakan Fidan İsrail Cumhurbaşkanı Herzog'un konuşması başlarken salonu terk etti",
+      "Hakan Fidan, Bakü'de: İsrail Cumhurbaşkanı konuşurken salonu terk etti",
+    ],
+    storedMatched: ["hakan", "fidan", "konus"],
+    storedScore: 0.667,
+  },
+  {
+    id: "9a0d12b4",
+    factCheckTitle: "Hakan Fidan'ın Almanca konuştuğu video gerçek mi?",
+    headline: "Bakan Fidan: Bağımsız ve egemen bir Filistin Devleti kurulmalı",
+    memberTitles: [
+      "Bakü’de İsrail protestosu: Hakan Fidan, konuşma sırasında salonu terk etti!",
+      "Dışişleri Bakanı Hakan Fidan Bakü'deki CICA Zirvesi'nde konuştu: Bağımsız Filistin Devleti kurulmalı",
+    ],
+    storedMatched: ["hakan", "fidan", "konus"],
+    storedScore: 0.667,
+  },
+];
+
+const RIGHT_PUBLISHED_PAIRS: RealPair[] = [
+  {
+    id: "7b68e915",
+    factCheckTitle: "Bir Okul Saldırısı Başlamadan Önlenebilir mi?",
+    headline: "TBMM Okul Saldırılarının Nedenlerini Araştırma Komisyonu Manisa'da çalışmalarına başladı",
+    memberTitles: [],
+    storedMatched: ["okul", "saldi", "basla"],
+    storedScore: 0.75,
+  },
+  {
+    id: "1b427672",
+    factCheckTitle: "Video Rusya’nın Ukrayna’ya Yaptığı Saldırıyı mı Gösteriyor?",
+    headline: "Rusya Ukrayna Bilim Akademisi'ni vurdu: 3'ü çocuk 19 kişi yaralandı",
+    memberTitles: [
+      "Ukrayna: Kiev'deki Ukrayna Bilimler Akademisi'ne düzenlenen saldırıda 1 kişi öldü, 4 kişi yaralandı",
+      "Kiev'deki Bilimler Akademisi'ne saldırı: 1 ölü, 4 yaralı",
+    ],
+    storedMatched: ["rusya", "ukray", "saldi"],
+    storedScore: 0.6,
+  },
+  {
+    id: "34787e03",
+    factCheckTitle: "Video Fransa’daki Öğrenci Eylemlerini mi Gösteriyor?",
+    headline: "Fransa'da Eğitim Bakanı ile görüşen öğrenciler, eylemlerini sürdürecek",
+    memberTitles: [],
+    storedMatched: ["frans", "ogren", "eylem"],
+    storedScore: 0.75,
+  },
+  {
+    id: "2eec34a0",
+    factCheckTitle: "NASA astronotu Deniz Burnham’ın Türkçe konuştuğu video gerçek",
+    headline: "NASA'nın Adanalı astronotu Deniz Burnham'dan hemşehrilerine mesaj var: Uzaydan el sallayacağım",
+    memberTitles: [],
+    storedMatched: ["nasa", "astro", "deniz", "burnh"],
+    storedScore: 0.7,
+  },
+  {
+    id: "0fdb8c08",
+    factCheckTitle: "Video Panama’da Gerçekleşen 7.7 Büyüklüğündeki Depremi mi Gösteriyor?",
+    headline: "Panama'da depremin ardından \"Ulusal Acil Durum\" ilan edildi",
+    memberTitles: [
+      "Panama'da 7.7 büyüklüğünde deprem! \"Ulusal Acil Durum\" ilan edildi",
+      "Panama'da 7,7 büyüklüğünde deprem: Ulusal acil durum ilan edildi",
+    ],
+    storedMatched: ["panam", "buyuk", "depre"],
+    storedScore: 0.6,
+  },
+  {
+    id: "b789fa23",
+    factCheckTitle: "Video Panama’da Gerçekleşen 7.7 Büyüklüğündeki Depremi mi Gösteriyor?",
+    headline: "Panama'da 7.6 büyüklüğünde deprem. Çok sayıda ülke için tsunami uyarısı",
+    memberTitles: [],
+    storedMatched: ["panam", "buyuk", "depre"],
+    storedScore: 0.6,
+  },
+  {
+    id: "d2b6332c",
+    factCheckTitle: "Doğu Akdeniz'de Deniz Sınırları Neden Tartışmalı?",
+    headline: "AB'den Türkiye-Libya Anlaşmasına Tepki: Kılıçdaroğlu'ndan Brüksel'e Sert Yanıt",
+    memberTitles: [
+      "Kılıçdaroğlu'ndan AB'ye 'Libya mutabakatı' tepkisi: ‘Doğu Akdeniz milli bir meseledir’",
+      "Dışişleri Bakanı Hakan Fidan: 'Doğu Akdeniz'e gelecek olan istikrar fevkalade önemli'",
+      "Bakan Fidan: LibyaTürkiye deniz yetki alanları mutabakatı meşru bir anlaşmadır",
+      "Libya'nın attığı tarih adım! Bakan Fidan: Tartışmaya gerek yok son derece meşru bir anlaşma",
+      "Mısır’dan Türkiye-Libya deniz yetki muhtırasının onaylanmasına ilişkin açıklama: 'Reddediyoruz'",
+      "Dışişleri Bakanı Fidan’dan AB’ye Libya mesajı: Meşru bir anlaşmadır, tartışmaya gerek yok",
+    ],
+    storedMatched: ["dogu", "akden", "deniz", "tarti"],
+    storedScore: 0.778,
+  },
+];
+
+describe("replay of the audited published rows (keyword-v2)", () => {
+  it.each(WRONG_PUBLISHED_PAIRS)(
+    "wrong pair $id reproduces its stored terms but is no longer publishable",
+    (pair) => {
+      const t = extractFactCheckTerms(pair.factCheckTitle);
+      const r = scoreCluster(t, doc(pair.id, pair.headline, pair.memberTitles));
+      expect(r.matched).toEqual(pair.storedMatched);
+      expect(r.score).toBe(pair.storedScore);
+      // Before the fix this pair cleared 3 matched terms, an entity and 0.6.
+      expect(r.matched.length).toBeGreaterThanOrEqual(MIN_MATCHED_TERMS);
+      expect(r.entityMatched).toBeGreaterThanOrEqual(1);
+      expect(r.score).toBeGreaterThanOrEqual(PUBLISH_MIN_SCORE);
+      // The person's name is one distinct term; the claim verbs add none.
+      expect(r.distinctTerms).toBe(1);
+      expect(r.distinctTerms).toBeLessThanOrEqual(r.matched.length);
+      expect(r.decision).toBe("shadow");
+    },
+  );
+
+  it.each(RIGHT_PUBLISHED_PAIRS)(
+    "on-topic pair $id reproduces its stored terms and stays publishable",
+    (pair) => {
+      const t = extractFactCheckTerms(pair.factCheckTitle);
+      const r = scoreCluster(t, doc(pair.id, pair.headline, pair.memberTitles));
+      expect(r.matched).toEqual(pair.storedMatched);
+      expect(r.score).toBe(pair.storedScore);
+      expect(r.distinctTerms).toBeGreaterThanOrEqual(MIN_MATCHED_TERMS);
+      expect(r.distinctTerms).toBeLessThanOrEqual(r.matched.length);
+      expect(r.decision).toBe("publish");
+    },
+  );
+
+  it("rankMatches keeps the wrong Fidan clusters as shadow rows, not publish", () => {
+    const t = extractFactCheckTerms(FIDAN_TITLE);
+    const docs = WRONG_PUBLISHED_PAIRS.filter((p) => p.factCheckTitle === FIDAN_TITLE).map(
+      (p) => doc(p.id, p.headline, p.memberTitles),
+    );
+    expect(docs).toHaveLength(3);
+    const ranked = rankMatches(t, docs);
+    expect(ranked).toHaveLength(3);
+    expect(ranked.every((r) => r.decision === "shadow")).toBe(true);
   });
 });
 

@@ -3,8 +3,14 @@ import Link from "next/link";
 
 import { NewClustersPill } from "@/components/timeline/new-clusters-pill";
 import { PageHero } from "@/components/ui/page-hero";
+import {
+  bucketByHour,
+  bucketCountLabel,
+  bucketedRowCount,
+  isTimelineTruncated,
+} from "@/lib/clusters/timeline-buckets";
 import { TIMELINE_HEAD_LIMIT } from "@/lib/clusters/timeline-head";
-import { getRecentClusters, type ClusterRow } from "@/lib/clusters/timeline-query";
+import { getRecentClusters, TIMELINE_LIMIT } from "@/lib/clusters/timeline-query";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
@@ -14,7 +20,7 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 export const metadata: Metadata = staticPageMetadata({
   title: "Zaman çizelgesi",
   description:
-    "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı.",
+    "Son 24 saatte ilk haberi çıkan haber kümeleri, saat saat sıralandı.",
   path: "/timeline",
 });
 
@@ -25,15 +31,18 @@ export const metadata: Metadata = staticPageMetadata({
 //
 // Server Component. Query lives in @/lib/clusters/timeline-query so it can
 // be unit tested without rendering JSX. Hour bucketing is done in-memory
-// off the `first_published` timestamp, then rendered as a list of
-// <section> blocks — one per hour, newest first.
+// off the `first_published` timestamp (@/lib/clusters/timeline-buckets), then
+// rendered as a list of <section> blocks — one per hour, newest first.
 //
 // Cached at the route segment with `revalidate = 60` so the wall feels
 // near-live without slamming Supabase on every navigation. The
 // TIMELINE_LIMIT (200) row cap keeps the payload bounded even on a busy news
 // day; a busy day mints more qualifying clusters than that, so the subtitle
 // names the real total (a separate head/exact count) whenever the list is
-// capped, instead of presenting the capped length as the day's count.
+// capped, instead of presenting the capped length as the day's count. The cap
+// cuts the oldest hour mid-hour, so a capped list drops that hour (its header
+// would otherwise print the tail's row count as the hour's total) and the
+// subtitle's "en yeni N" counts only the rows still shown.
 //
 // Realtime-lite: <NewClustersPill> (client) polls /api/timeline/head every ~2
 // min while the tab is visible and offers "N yeni küme · Yenile" (router.refresh)
@@ -44,13 +53,6 @@ export const metadata: Metadata = staticPageMetadata({
 // rendered when the read failed (rows === null). The hero and the pill share a
 // `relative` wrapper (a positioning context, no spacing): the pill is absolutely
 // placed in the 32 px space-y-8 gap below it, so it never moves the list (CLS 0).
-
-interface HourBucket {
-  // ISO of the top-of-hour the rows in this bucket belong to. Used as the
-  // section key and as the input to `formatHourLabel`.
-  hourISO: string;
-  rows: ClusterRow[];
-}
 
 // Format an ISO timestamp as `HH:MM` in the Europe/Istanbul wall clock —
 // Tayf is a Türk news product so every visible time stamp is local TR time.
@@ -75,15 +77,17 @@ const HOUR_LABEL_FORMAT = new Intl.DateTimeFormat("tr-TR", {
 
 // Subtitle honesty: `n` is what the list shows, `total` what the count read
 // found (null = the count failed). Never present a capped length as the total.
-// Exported for the unit test. Counts go through formatCountTr ("1.234").
+// "ilk haberi çıkan" matches the query: it filters on first_published, not on
+// when the cluster row was created. Exported for the unit test. Counts go
+// through formatCountTr ("1.234").
 export function timelineSubtitle(n: number, total: number | null): string {
   if (n === 0 || total === n) {
-    return `Son 24 saatte oluşturulan ${formatCountTr(n)} haber kümesi, saat saat sıralandı.`;
+    return `Son 24 saatte ilk haberi çıkan ${formatCountTr(n)} haber kümesi, saat saat sıralandı.`;
   }
   if (total === null) {
-    return `Son 24 saatte oluşturulan en yeni ${formatCountTr(n)} küme, saat saat sıralandı.`;
+    return `Son 24 saatte ilk haberi çıkan en yeni ${formatCountTr(n)} küme, saat saat sıralandı.`;
   }
-  return `Son 24 saatte oluşturulan ${formatCountTr(total)} haber kümesinin en yeni ${formatCountTr(n)} tanesi, saat saat sıralandı.`;
+  return `Son 24 saatte ilk haberi çıkan ${formatCountTr(total)} haber kümesinin en yeni ${formatCountTr(n)} tanesi, saat saat sıralandı.`;
 }
 
 function formatHourLabel(hourISO: string): string {
@@ -94,32 +98,6 @@ function formatRowTime(iso: string): string {
   return TIME_FORMAT.format(new Date(iso));
 }
 
-// Bucket cluster rows by the top-of-hour their first_published falls into.
-// We key on a UTC top-of-hour ISO string — the wall-clock label is a render-
-// time concern handled by `formatHourLabel`. Buckets are returned in the
-// same order they were first seen, which (because the SQL is ORDER BY
-// first_published DESC) is newest hour → oldest hour.
-function bucketByHour(rows: ClusterRow[]): HourBucket[] {
-  const buckets = new Map<string, ClusterRow[]>();
-  for (const row of rows) {
-    const d = new Date(row.first_published);
-    // Top-of-hour in UTC. Two clusters published 14:03 and 14:57 land in
-    // the same bucket; one published 15:01 starts a new one.
-    d.setUTCMinutes(0, 0, 0);
-    const key = d.toISOString();
-    const bucket = buckets.get(key);
-    if (bucket) {
-      bucket.push(row);
-    } else {
-      buckets.set(key, [row]);
-    }
-  }
-  return Array.from(buckets.entries()).map(([hourISO, rowsForHour]) => ({
-    hourISO,
-    rows: rowsForHour,
-  }));
-}
-
 export default async function TimelinePage() {
   // null = the read failed (timeout / outage), [] = it read fine and nothing
   // was minted. The two get different copy: a failure must never read as
@@ -128,7 +106,15 @@ export default async function TimelinePage() {
   // baked into a static shell could outlive the outage in crawlers.
   const recent = await getRecentClusters();
   const rows = recent === null ? null : recent.rows;
-  const buckets = rows === null ? [] : bucketByHour(rows);
+  // A capped list ends mid-hour: bucketByHour drops that oldest hour (or flags
+  // a lone one partial), and the subtitle counts the rows that are still shown.
+  // A full page whose count read failed (total === null) is treated as capped.
+  const buckets =
+    recent === null
+      ? []
+      : bucketByHour(recent.rows, {
+          truncated: isTimelineTruncated(recent.rows.length, recent.total, TIMELINE_LIMIT),
+        });
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
@@ -138,8 +124,8 @@ export default async function TimelinePage() {
           title="Zaman çizelgesi"
           subtitle={
             recent === null
-              ? "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı."
-              : timelineSubtitle(recent.rows.length, recent.total)
+              ? "Son 24 saatte ilk haberi çıkan haber kümeleri, saat saat sıralandı."
+              : timelineSubtitle(bucketedRowCount(buckets), recent.total)
           }
         />
         {rows !== null && (
@@ -169,7 +155,7 @@ export default async function TimelinePage() {
                   {formatHourLabel(bucket.hourISO)}
                 </h2>
                 <span className="text-[11px] text-muted-foreground">
-                  {formatCountTr(bucket.rows.length)} küme
+                  {bucketCountLabel(bucket)}
                 </span>
               </div>
               <ul className="space-y-2">

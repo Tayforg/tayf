@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150).
+// 115, 119, 122, 136, 145, 150, 157).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -30,7 +30,10 @@ import { fileURLToPath } from "node:url";
 // 150 (h24-ops-1) appended rows 18 (`queue_lag`, the age and depth of the pgmq queues cluster_work and
 // image_backfill plus poison messages) and 19 (`cron_jobs_stalled`, the jobs listed in
 // public.ops_cron_expected against cron.job and cron.job_run_details): the newest version carries them in that
-// order, cron_jobs_stalled LAST, and keeps rows 1-17 byte for byte as 145 wrote them.
+// order and keeps rows 1-17 byte for byte as 145 wrote them.
+// 157 (h36-pipeline-1) appended row 20 (`feed_poll_stale`, active sources without a quarantine marker whose
+// fetch_last_at is older than 30 minutes): the newest version carries it LAST, after cron_jobs_stalled, and
+// keeps rows 1-19 as 150 wrote them (tests/migrations/157-ingest-poll-stale.test.ts pins that byte identity).
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -46,7 +49,8 @@ const ROUTE_CHECK = "cron_route_failures_30m";
 const SIZE_CHECK = "db_size_mb";
 const ANON_CHECK = "anon_surface";
 const QUEUE_CHECK = "queue_lag";
-const LAST_CHECK = "cron_jobs_stalled";
+const CRON_CHECK = "cron_jobs_stalled";
+const LAST_CHECK = "feed_poll_stale";
 const MIGRATION_145 = resolve(MIGRATIONS_DIR, "145_ops_anon_surface_check.sql");
 const CREATE_LINE = "create or replace function public.ops_health_report()";
 /** What follows the last row's `return next;` in every version. */
@@ -92,10 +96,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(11);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(12);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -175,16 +179,17 @@ describe("ops_health_report(): the newest version", () => {
     expect(after).toMatch(/\|\|\s*v\.reason/);
   });
 
-  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${LAST_CHECK} (migration 150) in that order, ${LAST_CHECK} LAST`, () => {
-    expect(newest.num).toBeGreaterThanOrEqual(150);
-    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
+  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${CRON_CHECK} (migration 150), ${LAST_CHECK} (migration 157) in that order, ${LAST_CHECK} LAST`, () => {
+    expect(newest.num).toBeGreaterThanOrEqual(157);
+    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, CRON_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
     expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
     expect(newest.names.indexOf(GAPS_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
     expect(newest.names.indexOf(ROUTE_CHECK)).toBeGreaterThan(newest.names.indexOf(GAPS_CHECK));
     expect(newest.names.indexOf(SIZE_CHECK)).toBeGreaterThan(newest.names.indexOf(ROUTE_CHECK));
     expect(newest.names.indexOf(ANON_CHECK)).toBeGreaterThan(newest.names.indexOf(SIZE_CHECK));
     expect(newest.names.indexOf(QUEUE_CHECK)).toBeGreaterThan(newest.names.indexOf(ANON_CHECK));
-    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(QUEUE_CHECK));
+    expect(newest.names.indexOf(CRON_CHECK)).toBeGreaterThan(newest.names.indexOf(QUEUE_CHECK));
+    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(CRON_CHECK));
   });
 
   it("keeps rows 1-17 byte for byte as 145 wrote them (raw text, comments included) and appends the queue_lag marker right after row 17", () => {
@@ -393,7 +398,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("cron_jobs_stalled joins public.ops_cron_expected to cron.job and cron.job_run_details and can fail, warn and answer unknown", () => {
-    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    const seg = slice(CRON_CHECK).replace(/\s+/g, " ");
     expect(seg).toContain("public.ops_cron_expected");
     expect(seg).toContain("cron.job ");
     expect(seg).toContain("cron.job_run_details");
@@ -404,13 +409,34 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("cron_jobs_stalled never mentions the secret-bearing pg_cron columns `command` and `return_message` outside string literals", () => {
-    const outside = wordsOf(blankLiterals(slice(LAST_CHECK)));
+    const outside = wordsOf(blankLiterals(slice(CRON_CHECK)));
     expect(outside).not.toContain("command");
     expect(outside).not.toContain("return_message");
     // the scan is not vacuous: it sees the words that are there, and skips the ones inside literals
     expect(outside).toContain("jobname");
     expect(outside).toContain("start_time");
     expect(wordsOf(blankLiterals("select command from t where x = 'return_message'"))).toEqual(["select", "command", "from", "t", "where", "x"]);
+  });
+
+  it("feed_poll_stale reads active sources without a quarantine marker, counts the ones not polled for 30 minutes, and can fail, warn and answer unknown", () => {
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    expect(seg).toContain("from public.sources x where x.active and x.fetch_quarantined_until is null");
+    expect(seg).toContain("x.fetch_last_at < pg_catalog.now() - interval '30 minutes'");
+    expect(seg).toContain("threshold := 3");
+    expect(seg).toMatch(/when f_stale >= 3 then 'fail'/);
+    expect(seg).toMatch(/when f_stale >= 1 then 'warn'/);
+    expect(seg).toMatch(/status\s*:=\s*'unknown'/i);
+  });
+
+  it("feed_poll_stale only reads, and reads no url, validator or header column", () => {
+    const outside = wordsOf(blankLiterals(slice(LAST_CHECK)));
+    for (const w of ["insert", "update", "delete", "truncate", "drop", "alter", "create", "perform", "execute"]) {
+      expect(outside, w).not.toContain(w);
+    }
+    for (const w of ["rss_url", "url", "fetch_etag", "fetch_body_hash", "fetch_last_modified"]) {
+      expect(outside, w).not.toContain(w);
+    }
+    expect(outside).toContain("fetch_last_at");
   });
 
   it("revokes from public, anon and authenticated, and grants execute only to service_role", () => {

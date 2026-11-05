@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/clusters/timeline-query", () => ({
   getRecentClusters: () => Promise.resolve(mocks.result),
+  TIMELINE_LIMIT: 200,
 }));
 
 import { NewClustersPill } from "@/components/timeline/new-clusters-pill";
@@ -119,6 +120,30 @@ function mkRows(n: number) {
   }));
 }
 
+/** `n` rows inside one UTC hour (10:00-10:59), newest first. */
+function mkRowsInOneHour(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `s${i}`,
+    title_tr: `Küme ${i}`,
+    title_tr_neutral: null,
+    article_count: 2,
+    first_published: new Date(
+      Date.UTC(2026, 8, 18, 10, 59, 0) - i * 1000,
+    ).toISOString(),
+  }));
+}
+
+/** Every hour-section count header ("N küme" / "en az N küme"), in page order. */
+function hourCountLabels(tree: unknown): string[] {
+  const out: string[] = [];
+  walk(tree, (el) => {
+    if (el.type !== "span") return;
+    const text = collectText(el.props?.children).join("");
+    if (/küme$/.test(text)) out.push(text);
+  });
+  return out;
+}
+
 beforeEach(() => {
   mocks.result = null;
 });
@@ -126,22 +151,22 @@ beforeEach(() => {
 describe("timelineSubtitle", () => {
   it("groups four-digit counts with the tr-TR dot", () => {
     expect(timelineSubtitle(1234, 1234)).toBe(
-      "Son 24 saatte oluşturulan 1.234 haber kümesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 1.234 haber kümesi, saat saat sıralandı.",
     );
     expect(timelineSubtitle(1000, 2500)).toBe(
-      "Son 24 saatte oluşturulan 2.500 haber kümesinin en yeni 1.000 tanesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 2.500 haber kümesinin en yeni 1.000 tanesi, saat saat sıralandı.",
     );
     expect(timelineSubtitle(1234, null)).toBe(
-      "Son 24 saatte oluşturulan en yeni 1.234 küme, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan en yeni 1.234 küme, saat saat sıralandı.",
     );
   });
 
   it("leaves counts below 1.000 as they are", () => {
     expect(timelineSubtitle(200, 234)).toBe(
-      "Son 24 saatte oluşturulan 234 haber kümesinin en yeni 200 tanesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 234 haber kümesinin en yeni 200 tanesi, saat saat sıralandı.",
     );
     expect(timelineSubtitle(0, null)).toBe(
-      "Son 24 saatte oluşturulan 0 haber kümesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 0 haber kümesi, saat saat sıralandı.",
     );
   });
 });
@@ -173,7 +198,7 @@ describe("/timeline", () => {
     const tree = await TimelinePage();
 
     expect(subtitleOf(tree)).toBe(
-      "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan haber kümeleri, saat saat sıralandı.",
     );
     const p = findParagraph(tree, UNAVAILABLE_COPY);
     expect(p).not.toBeNull();
@@ -191,7 +216,7 @@ describe("/timeline", () => {
     expect(findParagraph(tree, EMPTY_COPY)).not.toBeNull();
     expect(collectText(tree).join("")).not.toContain(UNAVAILABLE_COPY);
     expect(subtitleOf(tree)).toBe(
-      "Son 24 saatte oluşturulan 0 haber kümesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 0 haber kümesi, saat saat sıralandı.",
     );
   });
 
@@ -201,7 +226,7 @@ describe("/timeline", () => {
     const tree = await TimelinePage();
 
     expect(subtitleOf(tree)).toBe(
-      "Son 24 saatte oluşturulan 0 haber kümesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 0 haber kümesi, saat saat sıralandı.",
     );
     expect(findParagraph(tree, EMPTY_COPY)).not.toBeNull();
   });
@@ -230,7 +255,7 @@ describe("/timeline", () => {
     const tree = await TimelinePage();
 
     expect(subtitleOf(tree)).toBe(
-      "Son 24 saatte oluşturulan 2 haber kümesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 2 haber kümesi, saat saat sıralandı.",
     );
     const text = collectText(tree).join("");
     expect(text).not.toContain(UNAVAILABLE_COPY);
@@ -244,22 +269,93 @@ describe("/timeline", () => {
     const tree = await TimelinePage();
 
     expect(subtitleOf(tree)).toBe(
-      "Son 24 saatte oluşturulan en yeni 3 küme, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan en yeni 3 küme, saat saat sıralandı.",
     );
     expect(subtitleOf(tree)).not.toContain("haber kümesi");
     expect(hasRobotsMeta(tree)).toBe(false);
   });
 
-  it("capped list (rows < total): names the real total and how many are shown", async () => {
+  // h36-journeys-2: a capped feed (rows < total) cuts the OLDEST hour mid-hour,
+  // so that bucket is dropped and the subtitle's "en yeni N" counts only what is
+  // still shown. mkRows(200) spans five hours: 1 + 60 + 60 + 60 rows in the four
+  // newest and the last 19 minutes of the fifth, which is the dropped one.
+  it("capped list (rows < total): names the real total and how many are shown, without the cut-off hour", async () => {
     mocks.result = { rows: mkRows(200), total: 234 };
 
     const tree = await TimelinePage();
 
     expect(subtitleOf(tree)).toBe(
-      "Son 24 saatte oluşturulan 234 haber kümesinin en yeni 200 tanesi, saat saat sıralandı.",
+      "Son 24 saatte ilk haberi çıkan 234 haber kümesinin en yeni 181 tanesi, saat saat sıralandı.",
     );
     expect(hasRobotsMeta(tree)).toBe(false);
     expect(collectText(tree).join("")).not.toContain(UNAVAILABLE_COPY);
+  });
+
+  it("capped list: the header counts of the hours shown sum to the subtitle's 'en yeni N'", async () => {
+    mocks.result = { rows: mkRows(200), total: 234 };
+
+    const tree = await TimelinePage();
+
+    const counts = hourCountLabels(tree);
+    expect(counts).toEqual(["1 küme", "60 küme", "60 küme", "60 küme"]);
+    const sum = counts.reduce((n, label) => n + Number.parseInt(label, 10), 0);
+    expect(subtitleOf(tree)).toContain(`en yeni ${sum} tanesi`);
+  });
+
+  it("capped list: the cut-off oldest hour's header is not rendered", async () => {
+    mocks.result = { rows: mkRows(200), total: 234 };
+
+    const tree = await TimelinePage();
+
+    // Five hours were read, four are shown; the 19-row tail of the fifth would
+    // have read "19 küme" while the hour holds more.
+    expect(hourCountLabels(tree)).toHaveLength(4);
+    expect(hourCountLabels(tree)).not.toContain("19 küme");
+  });
+
+  it("uncapped list (total === rows.length): every hour is shown, headers read 'N küme'", async () => {
+    mocks.result = { rows: mkRows(200), total: 200 };
+
+    const tree = await TimelinePage();
+
+    expect(hourCountLabels(tree)).toEqual(["1 küme", "60 küme", "60 küme", "60 küme", "19 küme"]);
+    expect(subtitleOf(tree)).toBe(
+      "Son 24 saatte ilk haberi çıkan 200 haber kümesi, saat saat sıralandı.",
+    );
+  });
+
+  // A full page (rows === TIMELINE_LIMIT) with an unknown total (the count read
+  // failed) is treated as cut: the oldest hour is dropped rather than printed as
+  // "19 küme" when the hour holds more. The subtitle then names only what is shown.
+  it("full page and unknown total (count failed): the oldest hour is dropped, never printed as its tail", async () => {
+    mocks.result = { rows: mkRows(200), total: null };
+
+    const tree = await TimelinePage();
+
+    expect(hourCountLabels(tree)).toEqual(["1 küme", "60 küme", "60 küme", "60 küme"]);
+    expect(hourCountLabels(tree)).not.toContain("19 küme");
+    expect(subtitleOf(tree)).toBe(
+      "Son 24 saatte ilk haberi çıkan en yeni 181 küme, saat saat sıralandı.",
+    );
+  });
+
+  it("capped list inside a single hour: the bucket is kept and its header says 'en az N küme'", async () => {
+    mocks.result = { rows: mkRowsInOneHour(30), total: 45 };
+
+    const tree = await TimelinePage();
+
+    expect(hourCountLabels(tree)).toEqual(["en az 30 küme"]);
+    expect(subtitleOf(tree)).toBe(
+      "Son 24 saatte ilk haberi çıkan 45 haber kümesinin en yeni 30 tanesi, saat saat sıralandı.",
+    );
+  });
+
+  it("single hour, nothing cut (total === rows.length): the header is the plain count", async () => {
+    mocks.result = { rows: mkRowsInOneHour(30), total: 30 };
+
+    const tree = await TimelinePage();
+
+    expect(hourCountLabels(tree)).toEqual(["30 küme"]);
   });
 
   // -------------------------------------------------------------------------

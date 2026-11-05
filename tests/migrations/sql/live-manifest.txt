@@ -44,6 +44,8 @@ run | 138-saved-clusters-veto.test.ts | tests/migrations/sql/138-saved-clusters-
 run | 139-content-twin-candidates.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql | - | 0
 run | 149-source-article-key-parent-segment.test.ts | tests/migrations/sql/149-source-article-key-parent-segment-dryrun.sql | - | 0
 run | 150-ops-queue-cron-liveness.test.ts | tests/migrations/sql/150-ops-queue-cron-liveness-dryrun.sql | - | 0
+# 157: 150's dry-run leaves 145 + 150 applied on stand-ins for pg_cron / pg_net / pgmq; 041 adds sources.fetch_last_at (the report reads it); 157 is applied twice.
+run | 157-ingest-poll-stale.test.ts | tests/migrations/sql/150-ops-queue-cron-liveness-dryrun.sql supabase/migrations/041_source_fetch_state.sql supabase/migrations/157_ingest_poll_stale.sql supabase/migrations/157_ingest_poll_stale.sql | - | 0
 run | 151-cluster-attach-probe.test.ts | tests/migrations/sql/151-cluster-attach-probe-dryrun.sql | - | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql | TAYF_SHAPE=prod | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql | TAYF_SHAPE=chain | 0
