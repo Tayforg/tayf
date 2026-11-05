@@ -223,7 +223,7 @@ async function fetchTopicClusters(
     for (const row of pageRows) {
       const members = flattenClusterMembers(row);
       if (members.length === 0) continue;
-      bundles.push(buildClusterBundle(row, members, health).bundle);
+      bundles.push(buildClusterBundle(row, members, health, nowMs).bundle);
     }
 
     // Past the end (a page > 1 with no rows at all): tell the page where the

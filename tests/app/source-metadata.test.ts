@@ -57,6 +57,45 @@ const activeClient = createSupabaseFake({
   },
 }).client;
 
+// h37-content-2: an aggregator (Haberler.com is `gov_leaning` with 10.5k
+// articles a week) does not vote, so its page must not describe a "siyasi
+// duruş". `kind` rides on the sources row the profile query selects.
+const AGGREGATOR_SOURCE = {
+  ...CNN_SOURCE,
+  id: "s-hab",
+  name: "Haberler.com",
+  slug: "haberler-com",
+  url: "https://haberler.com",
+  rss_url: "https://haberler.com/rss",
+  bias: "gov_leaning",
+  kind: "aggregator",
+};
+
+const aggregatorActiveClient = createSupabaseFake({
+  tables: {
+    sources: [AGGREGATOR_SOURCE],
+    articles: [
+      {
+        id: "a1",
+        title: "Bir haber",
+        description: null,
+        url: "https://haberler.com/bir-haber",
+        image_url: null,
+        published_at: "2026-11-01T10:00:00.000Z",
+      },
+    ],
+    source_zone_history: [],
+  },
+}).client;
+
+const aggregatorSilentClient = createSupabaseFake({
+  tables: {
+    sources: [{ ...AGGREGATOR_SOURCE, kind: "niche", name: "Fanatik", slug: "fanatik" }],
+    articles: [],
+    source_zone_history: [],
+  },
+}).client;
+
 const notFoundClient = createSupabaseFake({
   tables: {
     sources: [],
@@ -141,6 +180,41 @@ describe("/source/[slug] generateMetadata (A4 + H)", () => {
     expect(meta.description).not.toContain("0 haber");
     expect(meta.openGraph?.description).toBe(expected);
     expect(meta.twitter?.description).toBe(expected);
+  });
+
+  it("an aggregator's description names the kind and has no stance text (h37-content-2)", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/server", () => ({
+      createServerClient: () => aggregatorActiveClient,
+      createReaderClient: () => aggregatorActiveClient,
+    }));
+    const { generateMetadata } = await import("@/app/source/[slug]/page");
+
+    const meta = await generateMetadata({ params: Promise.resolve({ slug: "haberler-com" }) });
+
+    const expected =
+      "Haberler.com (Toplayıcı kaynak) — son 7 günde 1 haber. Tayf üzerinden bu kaynağın son haberlerini görün.";
+    expect(meta.description).toBe(expected);
+    expect(meta.description).not.toContain("siyasi duruş");
+    expect(meta.description).not.toContain("Hükümete Meyilli");
+    expect(meta.openGraph?.description).toBe(expected);
+    expect(meta.twitter?.description).toBe(expected);
+    expect(meta.robots).toBeUndefined();
+  });
+
+  it("a silent niche source keeps noindex,follow and gets the thin non-voting description", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/server", () => ({
+      createServerClient: () => aggregatorSilentClient,
+      createReaderClient: () => aggregatorSilentClient,
+    }));
+    const { generateMetadata } = await import("@/app/source/[slug]/page");
+
+    const meta = await generateMetadata({ params: Promise.resolve({ slug: "fanatik" }) });
+
+    expect(meta.robots).toEqual({ index: false, follow: true });
+    expect(meta.description).toBe("Fanatik (Niş) kaynağının Tayf profili ve geçmiş haberleri.");
+    expect(meta.description).not.toContain("siyasi duruş");
   });
 
   it("a read timeout is noindex + null canonical and never claims the source is missing", async () => {

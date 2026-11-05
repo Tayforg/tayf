@@ -276,6 +276,23 @@ async function collectText(node: unknown, out: string[] = []): Promise<string[]>
   return out;
 }
 
+/** First string value of `props[name]` found walking `props.children` only. */
+function findPropString(node: unknown, name: string): string | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findPropString(child, name);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    const props = (node as { props?: { children?: unknown; [k: string]: unknown } }).props;
+    if (typeof props?.[name] === "string") return props[name] as string;
+    return findPropString(props?.children, name);
+  }
+  return undefined;
+}
+
 /**
  * Collects every `href` prop found anywhere in a React element tree.
  * Expands `<DenominatorNote>` (a one-level-deep function component whose
@@ -352,6 +369,20 @@ describe("/sources page — source-kind UI", () => {
     expect(text).toContain("Toplayıcı");
     expect(text).toContain("Ajans");
     expect(hrefs).toContain("/metodoloji#kaynaklar");
+  });
+
+  // h37-content-2: the aggregators and niche sources carry a bias label too,
+  // but only the voting ones are placed on the spectrum - the header must not
+  // claim "each one" is, right above the line that says they are not counted.
+  it("the header scopes the political-stance claim to the sources that vote", async () => {
+    // <PageHero subtitle> is a prop, not a child, so the text walker above
+    // never reaches it: read the prop off the element instead.
+    const subtitle = findPropString(await SourcesPage(), "subtitle");
+
+    expect(subtitle).toContain(
+      "Yanlılık dağılımına sayılan kaynakların her biri bir siyasi duruşa yerleştirilmiş.",
+    );
+    expect(subtitle).not.toContain("Her biri bir siyasi duruşa yerleştirilmiş");
   });
 
   it("A-M4 / PERF-01: links to /kaynaklar/durum via the DenominatorNote, derived from the already-fetched rows with no second query", async () => {

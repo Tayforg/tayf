@@ -35,6 +35,29 @@ export const SOURCE_KIND_META: Record<SourceKind, { label: string; description: 
   },
 };
 
+/**
+ * What a source that does not vote is excluded from, in the words the cluster
+ * pages already use (the story-timeline legend, the kart, /karsilastir). Kept
+ * in one place so the /source label card and the cluster pages say the same
+ * thing about an aggregator or niche source.
+ */
+export const NON_VOTING_CLAUSE = "spektruma ve ilk sıraya sayılmaz";
+
+/** The cluster-page legend wording for the two non-voting kinds together. */
+export const NON_VOTING_KIND_NOTE = `toplayıcı / niş kaynak; ${NON_VOTING_CLAUSE}`;
+
+/**
+ * One-line "does not vote" note for a source of this kind: the kind's own
+ * label plus the shared clause ("Toplayıcı kaynak; spektruma ve ilk sıraya
+ * sayılmaz."). null for the voting kinds and for a missing or unknown kind
+ * (those normalise to "outlet", which votes) so a caller can render it
+ * conditionally.
+ */
+export function nonVotingNote(kind: SourceKind | null | undefined): string | null {
+  if (isVotingKind(kind)) return null;
+  return `${SOURCE_KIND_META[normalizeSourceKind(kind)].label} kaynak; ${NON_VOTING_CLAUSE}.`;
+}
+
 /** Normalized `SourceKind` of a source (undefined → "outlet", which votes). */
 export function sourceKindOf(source: Pick<Source, "kind">): SourceKind {
   return normalizeSourceKind(source.kind);

@@ -286,6 +286,48 @@ describe("buildKarneView", () => {
     expect(none.blindspotText).toBe("Kör nokta işaretli haberler: 0");
   });
 
+  // h37-content-2: for aggregator / niche sources migration 106 derives
+  // own_zone from the bias label, so "yazan bölgedeydi" would compare the
+  // cluster's blindspot side with a zone the source never voted in.
+  describe("voting option", () => {
+    const haberler = karne({ nClusters: 400, nMulti: 300, nSolo: 100, nBlindspot: 153, nBlindspotSameSide: 129 });
+
+    it("{ voting: false } drops the same-side clause and keeps the count", () => {
+      const v = buildKarneView(haberler, { voting: false });
+      if (v.state !== "ok") throw new Error("expected ok");
+      expect(v.blindspotText).toBe("Kör nokta işaretli haberler: 153");
+      expect(v.blindspotText).not.toContain("yazan bölgedeydi");
+    });
+
+    it("the default stays byte-identical (the clause is kept)", () => {
+      const v = buildKarneView(haberler);
+      if (v.state !== "ok") throw new Error("expected ok");
+      expect(v.blindspotText).toBe(
+        "Kör nokta işaretli haberler: 153 · 129 tanesinde haberi ağırlıkla yazan bölgedeydi",
+      );
+    });
+
+    it("{ voting: true } and an empty options object equal the default", () => {
+      expect(buildKarneView(haberler, { voting: true })).toEqual(buildKarneView(haberler));
+      expect(buildKarneView(haberler, {})).toEqual(buildKarneView(haberler));
+    });
+
+    it("{ voting: false } changes nothing but blindspotText", () => {
+      const voting = buildKarneView(haberler);
+      const nonVoting = buildKarneView(haberler, { voting: false });
+      if (voting.state !== "ok" || nonVoting.state !== "ok") throw new Error("expected ok");
+      expect(nonVoting).toEqual({ ...voting, blindspotText: "Kör nokta işaretli haberler: 153" });
+    });
+
+    it("{ voting: false } leaves the insufficient state and a zero-blindspot source alone", () => {
+      const small = karne({ nClusters: 19, nMulti: 5, nSolo: 14 });
+      expect(buildKarneView(small, { voting: false })).toEqual(buildKarneView(small));
+      const none = buildKarneView(karne({ nBlindspot: 0, nBlindspotSameSide: 0 }), { voting: false });
+      if (none.state !== "ok") throw new Error("expected ok");
+      expect(none.blindspotText).toBe("Kör nokta işaretli haberler: 0");
+    });
+  });
+
   // Counts of four digits or more are grouped the way the subtitle already
   // groups the cluster count ("1.749 haber kümesi"); the shares used to print
   // raw "1055/1749" in the same card.

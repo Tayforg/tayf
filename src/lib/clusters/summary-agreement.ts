@@ -89,7 +89,7 @@ const EPSILON = 1e-9;
  * "Senato" and "senatör"). It errs towards matching, which only makes the seed
  * look better (the safe side) and a replacement has to clear 0.75 anyway.
  */
-const STEM_LENGTH = 5;
+export const STEM_LENGTH = 5;
 
 /**
  * Function words that carry no topic, in the folded spelling (no diacritics, "ı"
@@ -127,12 +127,32 @@ function words(text: string): string[] {
     .filter((w) => w !== "");
 }
 
-/** Stems of the content words of `text` (stopwords and one-letter words dropped). */
-function contentStems(text: string): Set<string> {
+/** True for a folded word that carries content: not a stopword, not a lone letter (a lone digit stays). */
+function isContentWord(w: string): boolean {
+  if (STOPWORDS.has(w)) return false;
+  return w.length >= 2 || /^\p{N}$/u.test(w);
+}
+
+/**
+ * The content words of `text` in the folded spelling, whole (not yet cut to
+ * {@link STEM_LENGTH}): exactly the words {@link stemsOf} cuts its stems from, in
+ * text order, repeats kept. Stopwords and one-letter words are out; apostrophe
+ * suffixes are gone. [] for a non-string. For a caller that has to tell two words
+ * with one stem apart ("Cumhurbaşkanı" and "Cumhuriyet" are both `cumhu`).
+ */
+export function contentWords(text: string): string[] {
+  return typeof text === "string" ? words(text).filter(isContentWord) : [];
+}
+
+/**
+ * Stems of the content words of `text` (stopwords and one-letter words dropped).
+ * A word `skipWord` flags (it is given the folded whole word) leaves no stem.
+ */
+function contentStems(text: string, skipWord?: (foldedWord: string) => boolean): Set<string> {
   const stems = new Set<string>();
   for (const w of words(text)) {
-    if (STOPWORDS.has(w)) continue;
-    if (w.length < 2 && !/^\p{N}$/u.test(w)) continue;
+    if (!isContentWord(w)) continue;
+    if (skipWord?.(w)) continue;
     stems.add(w.slice(0, STEM_LENGTH));
   }
   return stems;
@@ -183,6 +203,45 @@ export function titleStemOverlap(
   let shared = 0;
   for (const stem of stems) if (present.has(stem)) shared++;
   return { shared, total: stems.size };
+}
+
+/**
+ * The distinct content stems of `text` (folded, first five characters, stopwords
+ * and one-letter words out) as a fresh set the caller may keep or extend; empty
+ * for a non-string. The vocabulary {@link sharedStemsExcluding} compares in, so a
+ * caller that builds an `excluded` set runs its words through here, not through
+ * its own folding.
+ */
+export function stemsOf(text: string): Set<string> {
+  return typeof text === "string" ? contentStems(text) : new Set<string>();
+}
+
+/**
+ * How many distinct content stems of `a` that `b` also carries, not counting the
+ * ones in `excluded` (stems as {@link stemsOf} returns them). Same folding and
+ * the same single pass as {@link titleStemOverlap}, with two differences: there
+ * is NO minimum-token rule (a two-word `a` still counts, where titleStemOverlap
+ * says null), and the result is the bare count, not a share. 0 when either side
+ * is not a string. Used by "İlgili haberler" (h37-clusters-1) to ask how much two
+ * headlines share BEYOND the entity they both name. `excluded` is only read.
+ *
+ * `skipWord`, when given, is asked about every folded content word of BOTH texts
+ * and a word it flags is dropped before the stems are built, so it leaves no
+ * stem on either side. That is how a word is told from another word with the same
+ * five characters: excluding the stem `cumhu` would also drop "Cumhuriyet",
+ * dropping the word "Cumhurbaşkanı" does not.
+ */
+export function sharedStemsExcluding(
+  a: string,
+  b: string,
+  excluded: ReadonlySet<string>,
+  skipWord?: (foldedWord: string) => boolean,
+): number {
+  if (typeof a !== "string" || typeof b !== "string") return 0;
+  const present = contentStems(b, skipWord);
+  let shared = 0;
+  for (const stem of contentStems(a, skipWord)) if (present.has(stem) && !excluded.has(stem)) shared++;
+  return shared;
 }
 
 /** Shared stems over the size of the LARGER set: 1 for the same words, 0 when either set is empty. */

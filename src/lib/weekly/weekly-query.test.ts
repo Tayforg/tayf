@@ -92,6 +92,7 @@ import type { ZoneFeedHealth, ZoneHealth } from "@/lib/clusters/feed-health";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 import { POSTGREST_MAX_ROWS } from "@/lib/db/paging";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
+import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -142,6 +143,14 @@ const ZERO_DISTRIBUTION: BiasDistribution = {
 function dist(partial: Partial<Record<BiasCategory, number>>): BiasDistribution {
   return { ...ZERO_DISTRIBUTION, ...partial };
 }
+
+/**
+ * The clock summariseWeek is handed (the epoch ms of the cached read). Three
+ * days after `row()`'s default first_published, so a default row is far past
+ * the public blindspot delay; the delay tests build their own ages.
+ */
+const NOW_MS = Date.parse("2026-09-21T09:00:00.000Z");
+const HOUR_MS = 3_600_000;
 
 function row(overrides: Partial<WeeklyClusterRow> = {}): WeeklyClusterRow {
   return {
@@ -268,6 +277,19 @@ describe("getWeeklyClusters", () => {
     expect(toMs - fromMs).toBe(WEEK_MS);
   });
 
+  it("stamps the read with the one clock value its window was cut from (asOfMs)", async () => {
+    const before = Date.now();
+    const read = await getWeeklyClusters();
+    const after = Date.now();
+
+    expect(read!.asOfMs).toBeGreaterThanOrEqual(before);
+    expect(read!.asOfMs).toBeLessThanOrEqual(after);
+    // The same instant bounds the window: upper bound == asOfMs, lower == asOfMs - 7 d.
+    const state = fixture.clusterState as BuilderState;
+    const to = state.lte.find((l) => l.col === "first_published");
+    expect(Date.parse(String(to!.val))).toBe(read!.asOfMs);
+  });
+
   it("returns the rows Supabase gave it, not truncated", async () => {
     fixture.clusters = [row({ id: "a" }), row({ id: "b" })];
 
@@ -282,7 +304,7 @@ describe("getWeeklyClusters", () => {
   it("returns an empty read (not null) when the window has no clusters", async () => {
     fixture.clusters = [];
 
-    await expect(getWeeklyClusters()).resolves.toEqual({ rows: [], truncated: false });
+    await expect(getWeeklyClusters()).resolves.toEqual({ rows: [], truncated: false, asOfMs: expect.any(Number) });
   });
 
   it("reads every cluster of a 1,991-row week in two pages, in a deterministic order (the 1,000-row PostgREST cap no longer hides rows 1001-1991)", async () => {
@@ -322,7 +344,7 @@ describe("getWeeklyClusters", () => {
     fixture.clusters = window;
 
     const read = await getWeeklyClusters();
-    const zoneCounts = summariseWeek(read!.rows, null).zoneCounts;
+    const zoneCounts = summariseWeek(read!.rows, null, read!.asOfMs).zoneCounts;
 
     expect(zoneCounts).toEqual(directZoneSum(window));
     expect(zoneCounts).not.toEqual(directZoneSum(window.slice(0, 1000)));
@@ -396,7 +418,7 @@ describe("weekly readers: a failure is cached for minutes only", () => {
 
   it("getWeeklyClusters: an empty week is a successful answer (cluster-feed)", async () => {
     fixture.clusters = [];
-    await expect(getWeeklyClusters()).resolves.toEqual({ rows: [], truncated: false });
+    await expect(getWeeklyClusters()).resolves.toEqual({ rows: [], truncated: false, asOfMs: expect.any(Number) });
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
   });
@@ -607,6 +629,7 @@ describe("summariseWeek — zone counts", () => {
         row({ id: "b", bias_distribution: dist({ opposition: 2, center: 2 }) }),
       ],
       null,
+      NOW_MS,
     );
 
     expect(summary.zoneCounts).toEqual({ iktidar: 3, bagimsiz: 3, muhalefet: 2 });
@@ -618,14 +641,14 @@ describe("summariseWeek — zone counts", () => {
     // output rather than validating it.
     (malformed as { bias_distribution: unknown }).bias_distribution = null;
 
-    const summary = summariseWeek([malformed, row({ id: "ok" })], null);
+    const summary = summariseWeek([malformed, row({ id: "ok" })], null, NOW_MS);
 
     expect(summary.zoneCounts).toEqual({ iktidar: 1, bagimsiz: 1, muhalefet: 0 });
     expect(summary.topClusters.map((c) => c.id)).toEqual(["ok"]);
   });
 
   it("is all zeros for no rows and yields empty lists", () => {
-    const summary = summariseWeek([], null);
+    const summary = summariseWeek([], null, NOW_MS);
 
     expect(summary.zoneCounts).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 0 });
     expect(summary.topClusters).toEqual([]);
@@ -641,6 +664,7 @@ describe("summariseWeek — topClusters", () => {
         row({ id: "narrow", bias_distribution: dist({ pro_government: 9 }), article_count: 9 }),
       ],
       null,
+      NOW_MS,
     );
 
     expect(summary.topClusters.map((c) => c.id)).toEqual(["wide"]);
@@ -677,7 +701,7 @@ describe("summariseWeek — topClusters", () => {
       }),
     ];
 
-    const summary = summariseWeek(rows, null);
+    const summary = summariseWeek(rows, null, NOW_MS);
 
     expect(summary.topClusters.map((c) => c.id)).toEqual(["dup-a", "other"]);
     expect(summary.topClusters.map((c) => c.articleCount)).toEqual([29, 10]);
@@ -698,7 +722,7 @@ describe("summariseWeek — topClusters", () => {
       ),
     ];
 
-    const summary = summariseWeek(rows, null);
+    const summary = summariseWeek(rows, null, NOW_MS);
 
     expect(summary.topClusters).toHaveLength(5);
     expect(summary.topClusters.map((c) => c.id)).toEqual([
@@ -721,7 +745,7 @@ describe("summariseWeek — topClusters", () => {
       }),
     );
 
-    const summary = summariseWeek(rows, null);
+    const summary = summariseWeek(rows, null, NOW_MS);
 
     expect(summary.topClusters).toHaveLength(5);
     expect(summary.topClusters.map((c) => c.articleCount)).toEqual([9, 7, 6, 5, 3]);
@@ -734,6 +758,7 @@ describe("summariseWeek — topClusters", () => {
         row({ id: "r", title_tr_neutral: null, title_tr: "Sadece ham" }),
       ],
       null,
+      NOW_MS,
     );
 
     expect(summary.topClusters.map((c) => c.title)).toEqual(["Nötr", "Sadece ham"]);
@@ -753,6 +778,7 @@ describe("summariseWeek — blindspots", () => {
         }),
       ],
       null,
+      NOW_MS,
     );
 
     expect(summary.blindspots).toEqual([
@@ -769,7 +795,7 @@ describe("summariseWeek — blindspots", () => {
         bias_distribution: distribution,
         article_count: articleCount,
       });
-      return summariseWeek([r], null).blindspots[0];
+      return summariseWeek([r], null, NOW_MS).blindspots[0];
     }
 
     it("15 iktidar / 1 bağımsız / 1 muhalefet: share 15/17 and the bar's own 88", () => {
@@ -845,6 +871,7 @@ describe("summariseWeek — blindspots", () => {
         }),
       ],
       null,
+      NOW_MS,
     );
 
     expect(summary.blindspots[0]?.side).toBe("muhalefet");
@@ -859,13 +886,13 @@ describe("summariseWeek — blindspots", () => {
     });
     (malformed as { bias_distribution: unknown }).bias_distribution = null;
 
-    const summary = summariseWeek([malformed], null);
+    const summary = summariseWeek([malformed], null, NOW_MS);
 
     expect(summary.blindspots).toEqual([]);
   });
 
   it("ignores rows that are not flagged as blindspots", () => {
-    const summary = summariseWeek([row({ id: "plain", is_blindspot: false })], null);
+    const summary = summariseWeek([row({ id: "plain", is_blindspot: false })], null, NOW_MS);
 
     expect(summary.blindspots).toEqual([]);
   });
@@ -891,7 +918,7 @@ describe("summariseWeek — blindspots", () => {
     // muhalefet degraded => an iktidar-side blindspot claim ("muhalefet
     // chose not to cover") is unverifiable and must be suppressed; the
     // muhalefet-side claim is still checkable against a healthy iktidar.
-    const summary = summariseWeek(rows, DEGRADED_MUHALEFET);
+    const summary = summariseWeek(rows, DEGRADED_MUHALEFET, NOW_MS);
 
     expect(summary.blindspots.map((b) => b.id)).toEqual(["muhalefet-side"]);
   });
@@ -918,7 +945,7 @@ describe("summariseWeek — blindspots", () => {
       }),
     ];
 
-    const summary = summariseWeek(rows, null);
+    const summary = summariseWeek(rows, null, NOW_MS);
 
     expect(summary.blindspots.map((b) => b.id)).toEqual(["dup-a"]);
   });
@@ -934,8 +961,8 @@ describe("summariseWeek — blindspots", () => {
       }),
     ];
 
-    expect(summariseWeek(rows, null).blindspots).toHaveLength(1);
-    expect(summariseWeek(rows, health()).blindspots).toHaveLength(1);
+    expect(summariseWeek(rows, null, NOW_MS).blindspots).toHaveLength(1);
+    expect(summariseWeek(rows, health(), NOW_MS).blindspots).toHaveLength(1);
   });
 
   it("excludes a recall-vetoed blindspot (migration 071) but still counts it in topClusters", () => {
@@ -959,10 +986,66 @@ describe("summariseWeek — blindspots", () => {
       }),
     ];
 
-    const summary = summariseWeek(rows, null);
+    const summary = summariseWeek(rows, null, NOW_MS);
 
     expect(summary.blindspots.map((b) => b.id)).toEqual(["kept"]);
     expect(summary.topClusters.map((c) => c.id)).toEqual(["vetoed"]);
+  });
+
+  describe("public blindspot delay (h37-content-1)", () => {
+    const flagged = (id: string, ageMs: number, extra: Partial<WeeklyClusterRow> = {}) =>
+      row({
+        id,
+        title_tr_neutral: null,
+        title_tr: `Kör nokta haberi ${id}`,
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        blindspot_recall_veto: false,
+        // Two zones so the row also qualifies for topClusters.
+        bias_distribution: dist({ pro_government: 5, center: 1 }),
+        article_count: 6,
+        first_published: new Date(NOW_MS - ageMs).toISOString(),
+        ...extra,
+      });
+
+    it("keeps a claim 1 h old out of the blindspot list but still counts it in zone totals and topClusters", () => {
+      const rows = [flagged("young", HOUR_MS)];
+
+      const summary = summariseWeek(rows, null, NOW_MS);
+
+      expect(summary.blindspots).toEqual([]);
+      expect(summary.zoneCounts).toEqual({ iktidar: 5, bagimsiz: 1, muhalefet: 0 });
+      expect(summary.topClusters.map((c) => c.id)).toEqual(["young"]);
+    });
+
+    it("lists a claim 25 h old", () => {
+      const summary = summariseWeek([flagged("old", 25 * HOUR_MS)], null, NOW_MS);
+      expect(summary.blindspots.map((b) => b.id)).toEqual(["old"]);
+    });
+
+    it("lists a claim at exactly BLINDSPOT.feedDelayHours old and holds it back one millisecond earlier", () => {
+      const at = summariseWeek([flagged("exact", BLINDSPOT.feedDelayHours * HOUR_MS)], null, NOW_MS);
+      const short = summariseWeek([flagged("short", BLINDSPOT.feedDelayHours * HOUR_MS - 1)], null, NOW_MS);
+      expect(at.blindspots.map((b) => b.id)).toEqual(["exact"]);
+      expect(short.blindspots).toEqual([]);
+    });
+
+    it("takes the young/old split per row, so one week mixes both", () => {
+      const rows = [
+        flagged("young", 2 * HOUR_MS, { article_count: 9 }),
+        flagged("old", 30 * HOUR_MS, { article_count: 4 }),
+        flagged("vetoed", 50 * HOUR_MS, { blindspot_recall_veto: true }),
+      ];
+      expect(summariseWeek(rows, null, NOW_MS).blindspots.map((b) => b.id)).toEqual(["old"]);
+    });
+
+    it.each([
+      ["unparseable", "not-a-date"],
+      ["empty", ""],
+    ])("never hides a claim whose first_published is %s (missing data never hides)", (_l, fp) => {
+      const summary = summariseWeek([flagged("odd", 0, { first_published: fp })], null, NOW_MS);
+      expect(summary.blindspots.map((b) => b.id)).toEqual(["odd"]);
+    });
   });
 
   it("treats a null/absent recall veto as pass-through", () => {
@@ -988,7 +1071,7 @@ describe("summariseWeek — blindspots", () => {
       }),
     ];
 
-    expect(summariseWeek(rows, null).blindspots.map((b) => b.id)).toEqual([
+    expect(summariseWeek(rows, null, NOW_MS).blindspots.map((b) => b.id)).toEqual([
       "null-veto",
       "absent-veto",
     ]);
@@ -1007,7 +1090,7 @@ describe("summariseWeek — blindspots", () => {
       }),
     );
 
-    const summary = summariseWeek(rows, null);
+    const summary = summariseWeek(rows, null, NOW_MS);
 
     expect(summary.blindspots).toHaveLength(5);
     expect(summary.blindspots.map((b) => b.articleCount)).toEqual([9, 8, 6, 4, 3]);

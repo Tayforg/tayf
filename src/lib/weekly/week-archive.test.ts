@@ -249,7 +249,7 @@ describe("getWeekArchiveClusters", () => {
 
     const read = await getWeekArchiveClusters("2026-W40");
 
-    expect(read).toEqual({ rows: [{ id: "c1" }], truncated: false });
+    expect(read).toEqual({ rows: [{ id: "c1" }], truncated: false, asOfMs: expect.any(Number) });
     const gteCols = supabaseState.calls.gte.map((c) => c.col);
     const ltCols = supabaseState.calls.lt.map((c) => c.col);
     expect(gteCols).toContain("first_published");
@@ -353,6 +353,20 @@ describe("getWeekArchiveClusters", () => {
 describe("getWeekArchiveClusters read profile + cache lifetime", () => {
   const TIMEOUT_MESSAGE = "AbortError: Supabase request exceeded 4000 ms";
 
+  it("stamps the read with the clock it was taken at (asOfMs), the same instant as its upper bound", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    supabaseState.rows = [{ id: "c1" }];
+
+    const before = Date.now();
+    const read = await getWeekArchiveClusters("2026-W40");
+    const after = Date.now();
+
+    expect(read!.asOfMs).toBeGreaterThanOrEqual(before);
+    expect(read!.asOfMs).toBeLessThanOrEqual(after);
+    const upper = supabaseState.calls.lte.find((c) => c.col === "first_published");
+    expect(Date.parse(String(upper!.val))).toBe(read!.asOfMs);
+  });
+
   it("builds its data client with the capped createReaderClient, never the plain one", async () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
     await getWeekArchiveClusters("2026-W40");
@@ -367,6 +381,7 @@ describe("getWeekArchiveClusters read profile + cache lifetime", () => {
     await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual({
       rows: [{ id: "c1" }],
       truncated: false,
+      asOfMs: expect.any(Number),
     });
 
     expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
@@ -381,7 +396,7 @@ describe("getWeekArchiveClusters read profile + cache lifetime", () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
     supabaseState.rows = [];
 
-    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual({ rows: [], truncated: false });
+    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual({ rows: [], truncated: false, asOfMs: expect.any(Number) });
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("hours");
   });

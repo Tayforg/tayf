@@ -7,7 +7,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
-import { applyRecallVeto } from "@/lib/clusters/recall-veto";
+import { publicBlindspotClaim } from "@/lib/clusters/recall-veto";
 import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/db/paging";
 import { dedupeByTitle } from "@/lib/weekly/dedupe-titles";
 import { createReaderClient } from "@/lib/supabase/server";
@@ -140,6 +140,13 @@ export interface WeeklyBlindspot {
 export interface WeeklyClusterRead {
   rows: WeeklyClusterRow[];
   truncated: boolean;
+  /**
+   * The clock the read's window was cut from (epoch ms), stamped inside the
+   * cache scope. The page hands it to `summariseWeek` as `nowMs` so the
+   * blindspot delay is measured against the read itself, not against a clock
+   * read in an uncached render (which Cache Components forbids).
+   */
+  asOfMs: number;
 }
 
 export interface WeeklySummary {
@@ -214,10 +221,16 @@ function sideShareOf(
  * whose feeds are degraded cannot be said to have *chosen* silence, so
  * `shouldSuppressBlindspot` drops those claims (null health = fail open,
  * suppress nothing — see feed-health.ts).
+ *
+ * `nowMs` (h37-content-1) is the epoch ms of the read the rows came from
+ * (`WeeklyClusterRead.asOfMs`): a flagged, unvetoed cluster first published
+ * less than BLINDSPOT.feedDelayHours before it stays out of the blindspot
+ * list, like /blindspots, but still counts in the zone totals and topClusters.
  */
 export function summariseWeek(
   rows: WeeklyClusterRow[],
   health: ZoneFeedHealth | null,
+  nowMs: number,
 ): WeeklySummary {
   const zoneCounts = emptyZoneCounts();
   const topClusters: WeeklyTopCluster[] = [];
@@ -240,7 +253,8 @@ export function summariseWeek(
 
     // Migration 071 recall veto: a withdrawn claim leaves the blindspot
     // list only — the story still counts toward zone totals and topClusters.
-    const veto = applyRecallVeto(row);
+    // A claim still inside the public delay is held back the same way.
+    const veto = publicBlindspotClaim(row, nowMs);
     if (veto.isBlindspot) {
       const side = row.blindspot_side
         ? zoneOf(row.blindspot_side)
@@ -299,7 +313,7 @@ async function fetchWeeklyClusters(): Promise<WeeklyClusterRead | null> {
 
     // A throw from readAllPages (a page error or an invalid page size) lands
     // in the catch below and becomes `null`.
-    return await readAllPages(
+    const read = await readAllPages(
       (from, to) =>
         supabase
           .from("clusters")
@@ -319,6 +333,7 @@ async function fetchWeeklyClusters(): Promise<WeeklyClusterRead | null> {
           .returns<WeeklyClusterRow[]>(),
       { label: "weekly clusters", maxPages: WEEKLY_CLUSTER_MAX_PAGES },
     );
+    return { ...read, asOfMs: nowMs };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[weekly] clusters unavailable: ${message}`);

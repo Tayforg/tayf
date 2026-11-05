@@ -86,6 +86,17 @@ const ZONE_FILL: Record<MediaDnaZone, string> = {
   muhalefet: "#10b981", // emerald-500
 };
 
+// h37-content-3: how the last, `partial` bucket (the Istanbul day still filling
+// up when this snapshot was built) is told apart from the finished days. The
+// wording is relative to the snapshot, never "today": the cache entry that bakes
+// the flag in is served up to about an hour past Istanbul midnight, and longer
+// to the first request after an idle spell, so a "bugün" claim could be a day
+// stale.
+const PARTIAL_FILL_OPACITY = 0.45;
+const PARTIAL_DASH = "3 2";
+const PARTIAL_HEADER_NOTE = " (son gün dahil, eksik)";
+const PARTIAL_ARIA_NOTE = " Son günün sayımı eksik.";
+
 export default async function TrendsPage() {
   const [buckets, rising] = await Promise.all([
     fetchIstanbulTimeline(),
@@ -133,6 +144,13 @@ export default async function TrendsPage() {
   const yMax = Math.max(1, ...buckets.map((b) => b.total));
   const totalArticles = buckets.reduce((acc, b) => acc + b.total, 0);
 
+  // h37-content-3: the last bucket is the Istanbul day that was still running
+  // when the snapshot was built. The flag was set by the cached fetcher from
+  // its own hour-quantized clock, so
+  // the render stays clock-free (Cache Components). yMax and the totals above
+  // deliberately still include that day: only its presentation changes.
+  const hasPartialDay = buckets.some((b) => b.partial === true);
+
   const barWidth = (PLOT_W - BAR_GAP * (WINDOW_DAYS - 1)) / WINDOW_DAYS;
 
   // Gridlines and axis labels sit on round numbers: niceScale() picks a
@@ -156,7 +174,7 @@ export default async function TrendsPage() {
           <div className="text-xs text-muted-foreground space-y-0.5">
             <div>
               Toplam <span className="font-mono">{formatCountTr(totalArticles)}</span> haber, son{" "}
-              {WINDOW_DAYS} gün
+              {WINDOW_DAYS} gün{hasPartialDay ? PARTIAL_HEADER_NOTE : null}
             </div>
             <div>
               Yalnızca spektruma sayılan kaynaklar (haber siteleri ve ajanslar) · günler
@@ -189,7 +207,7 @@ export default async function TrendsPage() {
           <svg
             viewBox={`0 0 ${CHART_W} ${CHART_H}`}
             role="img"
-            aria-label={`Son ${WINDOW_DAYS} gün boyunca günlük haber sayısı, Medya DNA bölgesine göre yığılmış sütun grafiği. Toplam ${formatCountTr(totalArticles)} haber.`}
+            aria-label={`Son ${WINDOW_DAYS} gün boyunca günlük haber sayısı, Medya DNA bölgesine göre yığılmış sütun grafiği. Toplam ${formatCountTr(totalArticles)} haber.${hasPartialDay ? PARTIAL_ARIA_NOTE : ""}`}
             className="w-full h-auto min-w-[640px]"
           >
             {/* Horizontal gridlines + y-axis labels. Stroke uses
@@ -240,6 +258,7 @@ export default async function TrendsPage() {
             <g>
               {buckets.map((bucket, idx) => {
                 const x = PAD_LEFT + idx * (barWidth + BAR_GAP);
+                const isPartial = bucket.partial === true;
                 let cursorY = PAD_TOP + PLOT_H; // bottom of plot area
                 const segments = ZONES.map((zone) => {
                   const count = bucket.counts[zone];
@@ -254,11 +273,24 @@ export default async function TrendsPage() {
                       width={barWidth}
                       height={segHeight}
                       fill={ZONE_FILL[zone]}
+                      {...(isPartial
+                        ? {
+                            // Lighter fill + a dashed outline in the zone
+                            // colour: still reads as "unfinished" for readers
+                            // who cannot tell the two opacities apart.
+                            fillOpacity: PARTIAL_FILL_OPACITY,
+                            stroke: ZONE_FILL[zone],
+                            strokeWidth: 1,
+                            strokeDasharray: PARTIAL_DASH,
+                          }
+                        : {})}
                     >
                       {/* A single string child: React 19 renders a <title>
                           with multiple children (day, label, count as
                           separate JSX expressions) as an empty <title></title>. */}
-                      <title>{trendBarTitle(bucket.day, ZONE_META[zone].label, count)}</title>
+                      <title>
+                        {trendBarTitle(bucket.day, ZONE_META[zone].label, count, isPartial)}
+                      </title>
                     </rect>
                   );
                 });

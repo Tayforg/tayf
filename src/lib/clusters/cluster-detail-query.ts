@@ -18,7 +18,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
-import { applyRecallVeto, logRecallVeto } from "@/lib/clusters/recall-veto";
+import { logRecallVeto, publicBlindspotClaim } from "@/lib/clusters/recall-veto";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { createReaderClient } from "@/lib/supabase/server";
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
@@ -410,12 +410,26 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     // Migration 071 recall veto runs FIRST: a vetoed cluster skips the
     // feed-health fetch entirely (the veto is a matching fact, not a feed
     // outage, so blindspotSuppressed stays false).
-    const veto = applyRecallVeto(clusterRow);
+    //
+    // h37-content-1: the claim also waits BLINDSPOT.feedDelayHours after
+    // first_published, like /blindspots, so the page, share card, embed and
+    // oEmbed show no "Kör nokta" for a story still inside that wait. A held-back
+    // claim is not a recall withdrawal (blindspotRecallVetoed stays false) and
+    // never shows a pill, but it still asks the feed-health gate: a feed outage
+    // is a current event, so the clusters it touches are mostly younger than the
+    // delay, and "bazı kaynaklara şu an ulaşamıyoruz" (feedDegraded on the page,
+    // the 'suppressed' section of the weekly report) must survive the wait. A
+    // pending claim whose silent pole is degraded therefore reads as it did
+    // before the wait existed: blindspotSuppressed true, no claim, no side.
+    // ONE clock read: this fetcher only runs inside the "use cache: remote"
+    // attempt or after the request scope on the live retry, never in an
+    // uncached render.
+    const veto = publicBlindspotClaim(clusterRow, Date.now());
     if (veto.vetoed) logRecallVeto(id);
     let isBlindspot = veto.isBlindspot;
     let blindspotSide = veto.blindspotSide;
     let blindspotSuppressed = false;
-    if (isBlindspot) {
+    if (isBlindspot || veto.pending) {
       const dominantZone = dominantZoneOf(distribution);
       if (dominantZone) {
         const health = await getZoneFeedHealth();

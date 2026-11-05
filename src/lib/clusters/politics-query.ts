@@ -27,7 +27,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "./feed-health";
-import { applyRecallVeto, logRecallVeto } from "./recall-veto";
+import { logRecallVeto, publicBlindspotClaim } from "./recall-veto";
 import { detectWireRedistribution } from "./wire";
 
 // Politics-filtered cluster fetcher used by the /clusters page.
@@ -130,6 +130,14 @@ export interface ClusterBundle {
    * cluster-card.tsx this wave so the badge is deferred — see report).
    */
   isWireRedistribution?: boolean;
+  /**
+   * h37-content-1: true when the cluster is flagged a blindspot and not
+   * vetoed, but is still inside BLINDSPOT.feedDelayHours of its first
+   * publication, so `cluster.is_blindspot` is false for this render and the
+   * card shows no pill. Readers that gate on the raw claim rather than the
+   * card (the social top-story pick) read this to keep treating it as one.
+   */
+  blindspotPending?: boolean;
   /**
    * R2 wire-collapse: the count to use for ranking. Equals
    * `cluster.article_count` for normal clusters; for wire redistributions
@@ -327,6 +335,12 @@ async function fetchPoliticsClusters(
     if (clusterRows.length === 0)
       return { bundles: [], breakingBundles: [], prefilterCount: 0 };
 
+    // ONE clock read for the whole scope (this body only runs inside the
+    // "use cache" attempt or after the request scope on the live retry): it
+    // ages the blindspot claim of every row below AND cuts the Son Dakika
+    // window, so the two can never disagree about "now".
+    const nowMs = Date.now();
+
     const bundles: ClusterBundle[] = [];
     // Side-table: bundle → its post-dedupe member list. Used by
     // scoreCluster() below for velocity, zone-diversity, and dominance
@@ -346,7 +360,7 @@ async function fetchPoliticsClusters(
       const hits = members.filter((m) => isPoliticsMember(m)).length;
       if (hits / members.length < POLITICS_THRESHOLD) continue;
 
-      const { bundle, dedupedMembers } = buildClusterBundle(c, members, health);
+      const { bundle, dedupedMembers } = buildClusterBundle(c, members, health, nowMs);
 
       // Stash the deduped members on the bundle so the scorer below can
       // reach published_at + sources.bias without re-flattening. We use a
@@ -378,11 +392,10 @@ async function fetchPoliticsClusters(
     // is a recency guarantee, not a ranking. Capped at BREAKING_LIMIT
     // so a major-event burst doesn't push every other section below
     // the fold.
-    const breakingNowMs = Date.now();
     const breakingBundles = bundles
       .filter(
         (b) =>
-          breakingNowMs - new Date(b.cluster.first_published).getTime() <
+          nowMs - new Date(b.cluster.first_published).getTime() <
           BREAKING_WINDOW_MS
       )
       .sort(
@@ -467,20 +480,27 @@ export interface ClusterBundleBuildResult {
  * pre-filtering (e.g. this file's politics-majority gate below); this
  * function assumes `members` is already the candidate set for the row.
  *
- * `health` (Pack C, feed-health-gated blindspots) is an OPTIONAL third
- * parameter that defaults to `undefined` — omitting it (every caller
- * before this pack) means "no suppression", so no existing behaviour
- * changes. When provided, a `is_blindspot` cluster whose silent pole zone
- * is degraded has its blindspot claim withdrawn for this read: the
+ * `health` (Pack C, feed-health-gated blindspots) may be `null` or
+ * `undefined`; both mean "no suppression". When provided, an `is_blindspot`
+ * cluster whose silent pole zone is degraded has its blindspot claim
+ * withdrawn for this read: the
  * returned bundle's `is_blindspot` is forced `false` and `blindspot_side`
  * `null`. This is READ-PATH ONLY — the underlying `clusters.is_blindspot`
  * / `blindspot_side` columns are never written here or anywhere in this
  * pack.
+ *
+ * `nowMs` (h37-content-1) is the caller's ONE clock read for its cache
+ * scope, required so no caller can forget it: a flagged, unvetoed cluster
+ * younger than BLINDSPOT.feedDelayHours has its claim held back exactly like
+ * /blindspots holds it back (`publicBlindspotClaim`), and the bundle says so
+ * through `blindspotPending`. Never call Date.now() in an uncached render to
+ * produce it.
  */
 export function buildClusterBundle(
   c: EmbeddedClusterRow,
   members: EmbeddedArticle[],
-  health?: ZoneFeedHealth | null,
+  health: ZoneFeedHealth | null | undefined,
+  nowMs: number,
 ): ClusterBundleBuildResult {
   // Sort by published_at ASC FIRST so the dedupe pass below
   // deterministically keeps the EARLIEST article per source.
@@ -578,7 +598,11 @@ export function buildClusterBundle(
   // Migration 071 recall veto runs FIRST: Jev found same-event coverage from
   // the silent side, so the claim is withdrawn as a matching fact, not a
   // feed outage — a vetoed cluster never reaches the feed-health check.
-  const veto = applyRecallVeto(c);
+  //
+  // h37-content-1: the same claim also waits BLINDSPOT.feedDelayHours after
+  // first_published, like /blindspots. A held-back claim is `pending`, not
+  // withdrawn: no log line, no feed-health check (nothing left to suppress).
+  const veto = publicBlindspotClaim(c, nowMs);
   if (veto.vetoed) logRecallVeto(c.id);
   let isBlindspot = veto.isBlindspot;
   let blindspotSide = veto.blindspotSide;
@@ -657,6 +681,7 @@ export function buildClusterBundle(
     // for normal clusters, dropped to the unique-hash count for
     // wire redistributions.
     isWireRedistribution: wire.isWire,
+    blindspotPending: veto.pending,
     effectiveArticleCount: wire.isWire
       ? wire.uniqueHashes
       : dedupedMembers.length,

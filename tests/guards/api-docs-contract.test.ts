@@ -18,6 +18,10 @@ import { formatZoneLine } from "@/lib/feeds/zone-line";
 //       joined with " · " by formatZoneLine, every zone printed, zero included.
 //   (d) The /api/v1 CORS section tells browser callers that a trailing slash is
 //       answered by the platform with a 308 that carries no CORS headers.
+//   (e) The /api/v1/clusters section and the /api/health note do not call
+//       is_blindspot the site's public claim: the site waits BLINDSPOT.feedDelayHours
+//       after first_published, the endpoint returns the flag minus the recall veto
+//       without waiting (review fix editorial-3).
 //
 // The OpenAPI side is read through the real builder, not copied, so a status
 // added to v1-docs.ts later fails here until the prose follows.
@@ -181,6 +185,50 @@ describe("docs/api.md CORS section warns about the trailing-slash 308 (h33-api-2
     expect(cors).toContain("no CORS headers");
     expect(cors).toContain("preflight");
     expect(cors).toContain("slash-less");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (e) is_blindspot on /api/v1/clusters is the stored flag minus the veto
+// ---------------------------------------------------------------------------
+
+describe("docs/api.md /api/v1/clusters says is_blindspot is not the site's pill (editorial-3)", () => {
+  const clusters = section(DOC, "### `GET /api/v1/clusters`");
+
+  it("finds the section (not vacuous)", () => {
+    expect(clusters).toContain("is_blindspot");
+  });
+
+  it("no longer says the fields carry the public claim", () => {
+    expect(clusters).not.toContain('carry the public "Kör nokta" claim');
+    expect(clusters).not.toContain("carry the public");
+  });
+
+  it("describes the fields as the stored flag minus the recall veto", () => {
+    expect(clusters).toContain("is_blindspot AND NOT blindspot_recall_veto");
+    expect(clusters).toMatch(/stored flag/);
+  });
+
+  it("says the site waits 24 h after first_published on every surface and that this endpoint does not", () => {
+    // The markdown is hard-wrapped: compare with whitespace runs collapsed.
+    const flat = clusters.replace(/\s+/g, " ");
+    expect(flat).toContain("BLINDSPOT.feedDelayHours");
+    expect(flat).toMatch(/waits 24 h after `first_published`/);
+    expect(flat).toMatch(/cards, the cluster page, the weekly summary and `\/blindspots`/);
+    expect(flat).toMatch(/This endpoint applies none of the wait/);
+    expect(flat).toContain("`GET /api/v1/alerts/blindspots` applies the 24 h wait");
+  });
+
+  it("does not attribute the 24 h delay to the /blindspots page alone", () => {
+    expect(clusters).not.toMatch(/page adds filters that this endpoint does not/);
+  });
+
+  it("the /api/health note sends readers to the alerts feed for the 24 h wait and says /api/v1/clusters applies only the veto", () => {
+    const line = DOC.split("\n").find((l) => l.startsWith("- `clusters.blindspots`:"));
+    expect(line).toBeDefined();
+    expect(line).not.toContain("for the public claim");
+    expect(line).toContain("`GET /api/v1/alerts/blindspots` applies the site's 24 h wait");
+    expect(line).toContain("`GET /api/v1/clusters` applies only the recall veto");
   });
 });
 

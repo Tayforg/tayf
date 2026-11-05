@@ -429,3 +429,55 @@ describe("LabelCard — reader agreement", () => {
     expect(text).not.toContain("0.633");
   });
 });
+
+// h37-content-2: the label exists for an aggregator / niche source (the chips
+// stay), but the card says in the open that it does not vote.
+describe("LabelCard — non-voting kinds", () => {
+  const NOTE_AGGREGATOR = "Toplayıcı kaynak; spektruma ve ilk sıraya sayılmaz.";
+  const NOTE_NICHE = "Niş kaynak; spektruma ve ilk sıraya sayılmaz.";
+
+  it("shows the aggregator note right under the chips and above the rationale", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, bias: "gov_leaning", kind: "aggregator" }));
+
+    expect(texts).toContain(NOTE_AGGREGATOR);
+    expect(texts.indexOf(NOTE_AGGREGATOR)).toBeGreaterThan(texts.indexOf("Hükümete Meyilli"));
+    expect(texts.indexOf(NOTE_AGGREGATOR)).toBeLessThan(texts.indexOf("Gerekçe henüz girilmedi"));
+  });
+
+  it("keeps the zone and bias chips for a non-voting source (the label exists)", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, bias: "gov_leaning", kind: "aggregator" }));
+
+    expect(texts).toContain("İktidar");
+    expect(texts).toContain("Hükümete Meyilli");
+  });
+
+  it("shows the same line with the niche label for kind niche", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, kind: "niche" }));
+
+    expect(texts).toContain(NOTE_NICHE);
+    expect(texts).not.toContain(NOTE_AGGREGATOR);
+  });
+
+  it("reuses the cluster-page wording verbatim after the kind name", () => {
+    const text = collectText(LabelCard({ ...BASE_PROPS, kind: "aggregator" })).join(" ");
+
+    expect(text).toContain("spektruma ve ilk sıraya sayılmaz");
+  });
+
+  it("renders no such line for outlet, wire, null or an omitted kind", () => {
+    for (const kind of ["outlet", "wire", null, undefined] as const) {
+      const text = collectText(LabelCard({ ...BASE_PROPS, kind })).join(" ");
+      expect(text, String(kind)).not.toContain("sayılmaz");
+      expect(text, String(kind)).not.toContain("Toplayıcı");
+      expect(text, String(kind)).not.toContain("Niş kaynak");
+    }
+  });
+
+  it("leaves every other section as it was (output differs only by the one note)", () => {
+    const voting = collectText(LabelCard({ ...BASE_PROPS, kind: "outlet" }));
+    const aggregator = collectText(LabelCard({ ...BASE_PROPS, kind: "aggregator" }));
+
+    expect(aggregator.filter((t) => t !== NOTE_AGGREGATOR)).toEqual(voting);
+    expect(collectText(LabelCard(BASE_PROPS))).toEqual(voting);
+  });
+});

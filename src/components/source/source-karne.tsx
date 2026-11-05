@@ -3,11 +3,13 @@ import Link from "next/link";
 import { ZONE_META } from "@/lib/bias/config";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { formatCountTr } from "@/lib/format/number-tr";
+import { isVotingKind } from "@/lib/sources/kind";
 import {
   buildKarneView,
   clusterCountLine,
   type SourceKarneRead,
 } from "@/lib/sources/karne";
+import type { SourceKind } from "@/types";
 
 // "Kapsama karnesi" card on /source/[slug], under the Etiket kartı.
 // Server Component, plain props, no Supabase. Neutral wording only: never
@@ -16,15 +18,18 @@ import {
 export interface SourceKarneCardProps {
   karne: SourceKarneRead | null;
   slug: string;
+  /** The source's kind; a missing kind is an outlet (votes). An aggregator or
+   *  niche source gets no "yazan bölgedeydi" clause (see buildKarneView). */
+  kind?: SourceKind | null;
 }
 
 const FOOTNOTE_BODY =
   "Yalnızca Tayf'ın kümelediği (siyaset ve son dakika) haberler sayılır. Eşleştirilemeyen bir haber, başka kaynakların o olayı yazmadığı anlamına gelmez; farklı dildeki yayınlar ve eşleştirme hataları bu oranı etkiler. Karşı taraftan aynı olayı anlatan haber bulunan kümeler kör nokta sayısına dahil değildir.";
 
-export function SourceKarneCard({ karne, slug }: SourceKarneCardProps) {
+export function SourceKarneCard({ karne, slug, kind }: SourceKarneCardProps) {
   if (!karne) return null;
 
-  const view = buildKarneView(karne);
+  const view = buildKarneView(karne, { voting: isVotingKind(kind) });
   const subtitle = clusterCountLine(
     karne.windowDays,
     karne.windowEnd,

@@ -4,9 +4,11 @@ import pool from "./__fixtures__/h34-related-pool.json";
 import {
   RELATED_DUPLICATE_AGREEMENT,
   RELATED_ENTITY_BONUS,
+  RELATED_GENERIC_WORDS,
   RELATED_MAX,
   RELATED_MIN_ITEMS,
   RELATED_MIN_SCORE,
+  RELATED_MIN_SHARED_KEYS,
   RELATED_MIN_SHARED_STEMS,
   buildRelatedBlock,
   entityKeysIn,
@@ -452,10 +454,34 @@ describe("constants", () => {
     expect(RELATED_MIN_ITEMS).toBe(2);
     // One ordinary shared word never relates two stories (h34-reader-3 fix pass).
     expect(RELATED_MIN_SHARED_STEMS).toBe(2);
+    // Three different shared entity keys relate two stories on their own. Not two:
+    // a person and his country or party co-occur in one title phrase ("ABD Başkanı
+    // Trump", "CHP Genel Başkanı Özgür Özel"), so two keys can be one fact.
+    expect(RELATED_MIN_SHARED_KEYS).toBe(3);
     // The bonus alone must not clear the floor: an entity is supporting
     // evidence for some wording overlap, never a reason by itself.
     expect(RELATED_ENTITY_BONUS).toBeGreaterThan(0);
     expect(RELATED_ENTITY_BONUS).toBeLessThan(RELATED_MIN_SCORE);
+  });
+
+  // h37-clusters-1: the generic words an 'İlgili haberler' match may never rest
+  // on, in the order the brief lists them. They are job titles and reporting
+  // verbs, not a story.
+  it("pin the generic words that never count as a shared stem", () => {
+    expect([...RELATED_GENERIC_WORDS]).toEqual([
+      "Cumhurbaşkanı",
+      "Başkan",
+      "Bakan",
+      "açıklama",
+      "açıkladı",
+      "mesaj",
+      "ziyaret",
+      "paylaşım",
+      "tepki",
+      "yorum",
+      "değerlendirme",
+      "Son dakika",
+    ]);
   });
 });
 
@@ -632,11 +658,14 @@ describe("selectRelatedClusters — relatedness", () => {
       expect(titleStemOverlap(cur, one)).toEqual({ shared: 1, total: 5 });
     });
 
-    it("isRelatedTitle: one shared word is not enough, two are, a shared entity carries one", () => {
+    it("isRelatedTitle: one shared word is not enough, two are, a shared entity needs a stem of its own", () => {
       expect(isRelatedTitle(cur, one)).toBe(false);
       expect(isRelatedTitle(cur, two)).toBe(true);
-      expect(isRelatedTitle(CHP_CURRENT, "CHP Genel Merkezi'nde toplantı")).toBe(true);
+      // The entity's own word ("CHP") is the only thing these two share: not related.
+      expect(isRelatedTitle(CHP_CURRENT, "CHP Genel Merkezi'nde toplantı")).toBe(false);
       expect(isRelatedTitle(CHP_CURRENT, "Belediye toplantısı yapıldı")).toBe(false);
+      // An entity plus one more shared stem is (h37-clusters-1).
+      expect(isRelatedTitle(CHP_CURRENT, "Korkuteli'de CHP'li başkanın istifası")).toBe(true);
     });
 
     it("two one-word stories fall back to 'latest' instead of filling the block", () => {
@@ -660,29 +689,62 @@ describe("selectRelatedClusters — relatedness", () => {
       expect(ids(out)).toEqual(["real2", "real"]);
     });
 
-    it("still relates a single shared word when it is a shared entity (the hub's own aliases carry it)", () => {
-      const withEntity = "CHP Genel Merkezi'nde toplantı";
+    it("a shared entity is not a shared word: the entity plus one more shared stem relates, the entity alone does not", () => {
+      const entityOnly = "CHP Genel Merkezi'nde toplantı"; // chp, and nothing else in common
+      const entityPlusOne = "CHP'de Korkuteli tartışması"; // chp + one more shared stem (korku)
       const second = "Başkan Yardımcısı CHP'den istifa etti";
-      const out = select([titled("e", 1, withEntity), titled("s", 2, second)], { currentTitle: CHP_CURRENT });
-      expect(out.mode).toBe("related");
-      expect(ids(out)).toEqual(["s", "e"]);
+      const both = select([titled("e", 1, entityPlusOne), titled("s", 2, second)], { currentTitle: CHP_CURRENT });
+      expect(both.mode).toBe("related");
+      expect(ids(both)).toEqual(["s", "e"]);
+      // The entity-only story takes no slot: with it and one real story there is one
+      // related story, so the block is the honest 'latest' list.
+      const alone = select([titled("n", 1, entityOnly), titled("s", 2, second)], { currentTitle: CHP_CURRENT });
+      expect(alone.mode).toBe("latest");
+      // And beside two real ones it is not listed under 'İlgili haberler'.
+      const three = select(
+        [titled("n", 1, entityOnly), titled("e", 2, entityPlusOne), titled("s", 3, second)],
+        { currentTitle: CHP_CURRENT },
+      );
+      expect(three.mode).toBe("related");
+      expect(ids(three)).toEqual(["s", "e"]);
     });
   });
 
-  it("lets a shared entity lift a one-stem overlap over the floor, and only then", () => {
-    const withEntity = "CHP Genel Merkezi'nde toplantı"; // shares the CHP stem and the CHP key
+  it("the entity bonus still lifts the SCORE over the floor, but a story needs a stem beyond the entity's own words", () => {
+    const entityOnly = "CHP Genel Merkezi'nde toplantı"; // shares the CHP stem and the CHP key
     const withoutEntity = "Belediye toplantısı yapıldı"; // shares one stem, no key
+    const entityPlusOne = "CHP'de Korkuteli tartışması"; // shares chp + korku
     const second = "Başkan Yardımcısı CHP'den istifa etti";
-    expect(titleAgreement(current, withEntity)).toBeLessThan(RELATED_MIN_SCORE);
+    expect(titleAgreement(current, entityOnly)).toBeLessThan(RELATED_MIN_SCORE);
     expect(titleAgreement(current, withoutEntity)).toBeLessThan(RELATED_MIN_SCORE);
-    expect(relatedScore(current, withEntity)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+    // The score is unchanged by h37-clusters-1 (the order of a block does not move)...
+    expect(relatedScore(current, entityOnly)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
     expect(relatedScore(current, withoutEntity)).toBeLessThan(RELATED_MIN_SCORE);
+    // ...but clearing the floor on the entity's word alone no longer relates two stories.
+    expect(isRelatedTitle(current, entityOnly)).toBe(false);
+    expect(isRelatedTitle(current, withoutEntity)).toBe(false);
+    expect(isRelatedTitle(current, entityPlusOne)).toBe(true);
     const out = select(
-      [titled("e", 1, withEntity), titled("n", 2, withoutEntity), titled("s", 3, second)],
+      [titled("e", 1, entityPlusOne), titled("o", 2, entityOnly), titled("n", 3, withoutEntity), titled("s", 4, second)],
       { currentTitle: current },
     );
     expect(out.mode).toBe("related");
     expect(ids(out)).toEqual(["s", "e"]);
+  });
+
+  it("an entity matched through an alias still carries ONE other shared stem (TCMB and Merkez Bankası)", () => {
+    const cur = "Merkez Bankası politika faizini yüzde 40'ta sabit tuttu"; // keys: faiz, tcmb
+    const viaAlias = "TCMB'den sabit kur mesajı"; // tcmb key, and one real shared stem: sabit
+    const aliasOnly = "TCMB başkanı yeni dönem için ilk toplantıyı yaptı"; // tcmb key, nothing shared
+    const bankOnly = "Merkez Bankası'ndan açıklama"; // shares the entity's own words only
+    expect(isRelatedTitle(cur, viaAlias)).toBe(true);
+    expect(isRelatedTitle(cur, aliasOnly)).toBe(false);
+    expect(isRelatedTitle(cur, bankOnly)).toBe(false);
+    const out = select([titled("alias", 1, viaAlias), titled("also", 2, "Merkez Bankası rezervleri sabit kaldı")], {
+      currentTitle: cur,
+    });
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["also", "alias"]);
   });
 
   it("matches aliases the wording does not share (TCMB and Merkez Bankası)", () => {
@@ -694,6 +756,224 @@ describe("selectRelatedClusters — relatedness", () => {
       "also",
       "alias",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h37-clusters-1: an entity's own words are the entity key, never the one
+// shared stem. The h34 rule let "Erdoğan" count twice: as the shared entity key
+// AND as the single shared stem that the key then "carried", so the Azerbaijan
+// page listed Emine Erdoğan's Korea post and a Filiz Erdoğan story sat beside
+// Yılmaz Erdoğan's. The score is unchanged (so ordering is); only the verdict is.
+// ---------------------------------------------------------------------------
+
+describe("a shared entity's own words are never the shared stem (h37-clusters-1)", () => {
+  const AZERBAIJAN = "Cumhurbaşkanı Erdoğan: 8 Kasım Zafer Günü'nde Azerbaycan'a bir ziyaret düşünüyorum";
+  const HERZOG = "İsrail Cumhurbaşkanı Herzog, Batı Şeria'da yaklaşan iç savaş uyarısında bulundu";
+  const IRAN_SENATOR = "İran'a saldırılara ABD'li senatörden tepki: Yasa dışı ve anayasaya aykırı";
+  const TREASURY = "ABD Hazine Bakanlığı 125 milyar dolarlık tahvil için 3 ayrı ihale düzenleyecek";
+  const FILIZ = "Müzisyen Filiz Erdoğan, mesanesinin delindiği iddiasıyla suç duyurusunda bulundu";
+
+  const NOT_RELATED: readonly (readonly [string, string, string])[] = [
+    ["Erdoğan: Azerbaycan ziyareti vs Emine Erdoğan'ın Kore paylaşımı", AZERBAIJAN, "Emine Erdoğan'dan Güney Kore ziyaretine ilişkin paylaşım"],
+    ["Erdoğan: Azerbaycan ziyareti vs Erdoğan'ın ABD mesajı", AZERBAIJAN, "Cumhurbaşkanı Erdoğan’dan ABD mesajı: ‘Yakın diyalog halinde olmaya devam edeceğiz’"],
+    ["Herzog'un iç savaş uyarısı vs Jerusalem Post'un 4 seçim yazısı (İsrail)", HERZOG, "Jerusalem Post, 10 gündeki 4 seçimin İsrail'in diplomatik konumunu zayıflattığını yazdı"],
+    ["Herzog'un iç savaş uyarısı vs Vance'in İsrail ziyareti", HERZOG, "Vance İsrail'de: Gazze için yeni plan"],
+    ["İran'a saldırılara ABD'li senatörün tepkisi vs ABD seçimlerine dünyanın tepkileri", IRAN_SENATOR, "ABD'deki seçimlere dünyadan tepkiler"],
+    ["ABD Hazine'nin tahvil ihalesi vs ABD seçimi sonrası altın", TREASURY, "ABD seçimleri sonrası altın uçuşa geçti! Yeni hedef 7 bin lira"],
+    ["Filiz Erdoğan'ın suç duyurusu vs Yılmaz Erdoğan'ın özrü", FILIZ, "Yılmaz Erdoğan kam davulu sahnesi için özür diledi"],
+    ["Filiz Erdoğan'ın suç duyurusu vs Emine Erdoğan'ın sergisi", FILIZ, "Emine Erdoğan'dan Güney Kore'de sergi ziyareti"],
+  ];
+
+  it.each(NOT_RELATED)("is not related: %s", (_label, a, b) => {
+    expect(isRelatedTitle(a, b)).toBe(false);
+  });
+
+  it.each(NOT_RELATED)("keeps the score the old rule gave, so ordering is unchanged: %s", (_label, a, b) => {
+    // The pair still shares an entity key and clears the floor; only the verdict moved.
+    expect(entityKeysIn(a).some((k) => entityKeysIn(b).includes(k))).toBe(true);
+    expect(relatedScore(a, b)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+  });
+
+  it("stays related when the entity is backed by a stem of its own", () => {
+    const pairs: readonly (readonly [string, string])[] = [
+      // The entity (Erdoğan) plus Azerbaycan.
+      [AZERBAIJAN, "Başkan Erdoğan'dan Azerbaycan mesajı: Aşamayacağımız hiçbir engel yoktur"],
+      // The entity (ABD) plus 'seçim'.
+      ["ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi", "Küresel piyasalara ABD seçimi etkisi"],
+      // The entity (CHP) plus istifa and etti; Başkan is generic and does not count.
+      [CHP_CURRENT, "Başkan Yardımcısı CHP'den istifa etti"],
+      // No entity at all, two ordinary shared stems.
+      ["Kestane Lokanta Marmara Nergis Orman", "Kestane Lokanta ruhsatı iptal edildi"],
+    ];
+    for (const [a, b] of pairs) expect(isRelatedTitle(a, b), `${a} <- ${b}`).toBe(true);
+  });
+
+  it("generic words (Cumhurbaşkanı, Başkan, ziyaret, mesaj, tepki ...) never count as the shared stem", () => {
+    // Entity plus ONE generic word: not related. Entity plus one real word: related.
+    const cur = "Erdoğan Macaristan ziyaretinde Başbakan Orban ile görüştü";
+    expect(isRelatedTitle(cur, "Erdoğan'dan Japonya ziyareti")).toBe(false); // erdog + ziyar
+    expect(isRelatedTitle(cur, "Erdoğan'dan Orban mesajı")).toBe(true); // erdog + orban
+    // No entity: two generic words are not two shared stems.
+    const plain = "Bakan açıklama yaptı Kestane Lokanta";
+    expect(isRelatedTitle(plain, "Bakan açıklama yaptı Zeytin Yonca")).toBe(false);
+    expect(isRelatedTitle(plain, "Bakan açıklama Kestane Yonca")).toBe(false); // kestane is the only real one
+    expect(isRelatedTitle(plain, "Kestane Lokanta Yonca Papaz")).toBe(true);
+    // Son dakika is a label, not a topic.
+    expect(isRelatedTitle("Son dakika Kestane Lokanta Marmara", "Son dakika Zeytin Yonca Papaz")).toBe(false);
+  });
+
+  it("the stems of every entity key a title can share are excluded, whichever of its aliases the titles use", () => {
+    // Merkez Bankası and TCMB are one key: neither spelling is the shared stem.
+    expect(isRelatedTitle("Merkez Bankası faiz kararı sonrası piyasalar", "Merkez Bankası rezervleri arttı")).toBe(false);
+    expect(isRelatedTitle("Merkez Bankası rezervleri arttı bugün", "TCMB rezervleri arttı")).toBe(true);
+    // A key's own multi-word label ("Mansur Yavaş") is excluded stem by stem.
+    expect(isRelatedTitle("Mansur Yavaş Ankara'da konuştu kente", "Mansur Yavaş İzmir'de bir araya geldi")).toBe(false);
+  });
+
+  it("only the stems of a SHARED key are excluded: a word the hub's guard does not read as the entity still counts", () => {
+    // 'Meclis' is the key in the first title (Genel Kurul is its cue) and an ordinary word in the second
+    // (a municipal council: the hub's own exclude vetoes it), so the key is not shared and 'mecli' is a
+    // plain shared stem like 'bütçe' and 'görüşmeleri'.
+    const a = "Meclis Genel Kurulu'nda bütçe görüşmeleri başladı";
+    const b = "Belediye meclisi bütçe görüşmeleri yaptı";
+    expect(entityKeysIn(a)).toContain("meclis");
+    expect(entityKeysIn(b)).not.toContain("meclis");
+    expect(isRelatedTitle(a, b)).toBe(true);
+  });
+
+  it("selects: the Azerbaijan page lists the Azerbaijan story, not the Korea post or the ABD message", () => {
+    const out = select(
+      [
+        titled("korea", 1, "Emine Erdoğan'dan Güney Kore ziyaretine ilişkin paylaşım"),
+        titled("abd", 2, "Cumhurbaşkanı Erdoğan’dan ABD mesajı: ‘Yakın diyalog halinde olmaya devam edeceğiz’"),
+        titled("az", 3, "Başkan Erdoğan'dan Azerbaycan mesajı: Aşamayacağımız hiçbir engel yoktur"),
+        titled("az2", 4, "Azerbaycan Cumhurbaşkanı Aliyev, Erdoğan'ın ziyaret planını duyurdu"),
+        titled("other", 5, "Dolar kuru güne yükselişle başladı"),
+      ],
+      { currentTitle: AZERBAIJAN, topic: "politika" },
+    );
+    expect(out.mode).toBe("related");
+    expect(ids(out).sort()).toEqual(["az", "az2"]);
+  });
+
+  it("falls back to 'latest' when only entity-word matches are left (Herzog and the three 'İsrail' items)", () => {
+    const out = select(
+      [
+        titled("jp", 1, "Jerusalem Post, 10 gündeki 4 seçimin İsrail'in diplomatik konumunu zayıflattığını yazdı"),
+        titled("vance", 2, "Vance İsrail'de: Gazze için yeni plan"),
+        titled("basin", 3, "İsrail basını: ABD ara seçimlerini nasıl gördü"),
+      ],
+      { currentTitle: HERZOG, topic: "dunya" },
+    );
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["basin", "vance", "jp"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Several DIFFERENT shared entities are evidence of a shared story, one is not
+// (review fix correctness-related-recall-multi-key). A third shared key relates
+// two titles on its own; a second does not, because a person key and its country
+// or party key co-occur in one title phrase.
+// ---------------------------------------------------------------------------
+
+describe("three different shared entity keys relate two stories", () => {
+  it("relates Trump + Çin + ABD headlines about the same affair (abd, cin, trump)", () => {
+    const a = "ABD Başkanı Trump Çin ile ticaret anlaşması imzaladı";
+    const b = "ABD Başkanı Trump Çin'e gümrük vergisi açıkladı";
+    expect(entityKeysIn(a).filter((k) => entityKeysIn(b).includes(k))).toEqual(["abd", "cin", "trump"]);
+    expect(isRelatedTitle(a, b)).toBe(true);
+  });
+
+  it("does not relate two headlines that share a person and his country (abd + trump): one title phrase, two keys", () => {
+    const a = "ABD Başkanı Trump Venezuela'ya kara harekatı emri verdi";
+    const b = "ABD Başkanı Trump Epstein dosyaları hakkında konuştu";
+    expect(entityKeysIn(a).filter((k) => entityKeysIn(b).includes(k))).toEqual(["abd", "trump"]);
+    expect(isRelatedTitle(a, b)).toBe(false);
+  });
+
+  it("does not relate two headlines that share a party leader and his party (chp + ozgur-ozel)", () => {
+    const a = "CHP Genel Başkanı Özgür Özel Manisa'da miting yaptı";
+    const b = "CHP lideri Özgür Özel: Kurultay davası düşmeli";
+    expect(isRelatedTitle(a, b)).toBe(false);
+  });
+
+  it("does not relate two headlines that share a president and his party (akp + erdogan)", () => {
+    const a = "Cumhurbaşkanı Erdoğan AK Parti grup toplantısında konuştu";
+    const b = "AK Parti Genel Başkanı Erdoğan yeni MYK'yı açıkladı";
+    expect(isRelatedTitle(a, b)).toBe(false);
+  });
+
+  it("keeps the score, so ordering does not move", () => {
+    const a = "ABD Başkanı Trump Çin ile ticaret anlaşması imzaladı";
+    const b = "ABD Başkanı Trump Çin'e gümrük vergisi açıkladı";
+    expect(relatedScore(a, b)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+  });
+
+  it("selects: two Trump-Çin-ABD stories fill the block as 'related'", () => {
+    const out = select(
+      [
+        titled("x", 1, "ABD Başkanı Trump Çin'e gümrük vergisi açıkladı"),
+        titled("y", 2, "Trump ve Şi Cinping Çin ABD ticaret görüşmesi yaptı"),
+      ],
+      { currentTitle: "ABD Başkanı Trump Çin ile ticaret anlaşması imzaladı", topic: "dunya" },
+    );
+    expect(out.mode).toBe("related");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Generic words match as words, not as 5-character stems (review fix
+// correctness-generic-stem-collision). "Cumhurbaşkanı" folds to the stem
+// `cumhu`, which is also the stem of "Cumhuriyet" and "Cumhur"; "değerlendirme"
+// folds to `deger`, the stem of "değer".
+// ---------------------------------------------------------------------------
+
+describe("generic words match as words, not as bare stems", () => {
+  it("Cumhuriyet is not Cumhurbaşkanı: two Cumhuriyet Bayramı headlines are related", () => {
+    expect(
+      isRelatedTitle(
+        "Cumhuriyet Bayramı kutlamaları iptal edildi",
+        "Cumhuriyet Bayramı'nda tören yapılacak",
+      ),
+    ).toBe(true);
+  });
+
+  it("two Cumhuriyet gazetesi headlines are related", () => {
+    expect(
+      isRelatedTitle(
+        "Cumhuriyet gazetesi yazarı hakkında soruşturma başlatıldı",
+        "Cumhuriyet gazetesi genel yayın yönetmeni ifade verdi",
+      ),
+    ).toBe(true);
+  });
+
+  it("değer (value) is not değerlendirme: the two 'değer kazandı' headlines are related", () => {
+    expect(isRelatedTitle("Altın değer kazandı yatırımcı", "Gümüş değer kazandı rekor")).toBe(true);
+  });
+
+  it("Cumhurbaşkanlığı is still the generic word Cumhurbaşkanı (an inflection of it)", () => {
+    expect(
+      isRelatedTitle(
+        "Cumhurbaşkanlığı Kestane Lokanta Marmara",
+        "Cumhurbaşkanlığı Kestane Yonca Papaz",
+      ),
+    ).toBe(false);
+  });
+
+  it("açıklandı and paylaştı are still the generic açıklama and paylaşım", () => {
+    expect(isRelatedTitle("Bakan açıklandı Kestane Lokanta", "Bakan açıklandı Zeytin Yonca")).toBe(false);
+    expect(isRelatedTitle("Kestane Lokanta paylaştı Marmara", "Zeytin Yonca paylaştı Papaz")).toBe(false);
+  });
+
+  it("değerlendirmeler (an inflection of değerlendirme) is still generic", () => {
+    expect(isRelatedTitle("Değerlendirmeler Kestane Lokanta", "Değerlendirmeler Zeytin Yonca")).toBe(false);
+  });
+
+  it("Cumhurbaşkanı stays generic on both sides: Bayramı is then the only real shared word, which is not enough", () => {
+    // Cumhurbaşkanı is generic on both sides; the only real shared word is Bayramı.
+    expect(isRelatedTitle("Cumhurbaşkanı Bayramı kutladı Kestane", "Cumhurbaşkanı Bayramı Zeytin Yonca")).toBe(false);
   });
 });
 
@@ -878,8 +1158,8 @@ describe("selectRelatedClusters — 'latest' mode", () => {
   });
 
   it("never lists more than RELATED_MAX in either mode", () => {
-    // One shared stem (chp) plus the key: related, and pairwise far from duplicates.
-    const many = Array.from({ length: 12 }, (_, i) => titled(`c${i}`, i + 1, `CHP ${distinct(i)}`));
+    // The key (chp) plus one stem of its own (korku): related, and pairwise far from duplicates.
+    const many = Array.from({ length: 12 }, (_, i) => titled(`c${i}`, i + 1, `CHP Korkuteli ${distinct(i)}`));
     const related = select(many, { currentTitle: CHP_CURRENT });
     expect(related.mode).toBe("related");
     expect(related).toHaveLength(RELATED_MAX);
@@ -949,7 +1229,7 @@ describe("selectRelatedClusters — the return value carries the mode", () => {
   it("stays fast and bounded on a large pool (5,000 candidates)", () => {
     const big = Array.from({ length: 5000 }, (_, i) =>
       cand(`id-${String(i).padStart(5, "0")}`, i % 60, {
-        title_tr: `Haber${i}Alfa Haber${i}Beta Haber${i}Gama CHP`,
+        title_tr: `Haber${i}Alfa Haber${i}Beta Haber${i}Gama CHP Korkuteli`,
         updated_at: new Date(Date.UTC(2026, 10, 3, 0, 0, 0) + i * 1000).toISOString(),
       }),
     );
@@ -1054,7 +1334,12 @@ describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
     const out = blockFor(page) ?? [];
     expect(out.mode).toBe("related");
     const got = ids(out).map((id) => id.slice(0, 8));
-    expect(got).toEqual(["d91ab2f1", "2408b41e", "f85bc48e"]);
+    // h37-clusters-1: f85bc48e (Emine Erdoğan opens the Yunus Emre institute in Seoul) used to be
+    // third. It is a story of the same trip, but it shares only the entity's own word ("Erdoğan")
+    // with this headline (Seul is not "Güney Kore"), and the entity word is no longer the shared
+    // stem. Recall cost of the fix, pinned so a change to it is a decision.
+    expect(got).toEqual(["d91ab2f1", "2408b41e"]);
+    expect(got).not.toContain("f85bc48e");
     expect(got).not.toContain("9f18b020"); // Rutte / Kuzey Makedonya Cumhurbaşkanı
     expect(got).not.toContain("909f6421"); // Suriye Cumhurbaşkanı Şara
   });

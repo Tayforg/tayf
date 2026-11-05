@@ -277,8 +277,8 @@ describe("selectBlindspotsToPost", () => {
 
 function topBundle(
   id: string,
-  overrides: Partial<SocialCandidateBundle & { isBlindspot?: boolean }> = {},
-): SocialCandidateBundle & { isBlindspot?: boolean } {
+  overrides: Partial<SocialCandidateBundle & { isBlindspot?: boolean; blindspotPending?: boolean }> = {},
+): SocialCandidateBundle & { isBlindspot?: boolean; blindspotPending?: boolean } {
   return {
     cluster: {
       id,
@@ -317,6 +317,20 @@ describe("selectTopStory", () => {
 
   it("skips a blindspot", () => {
     const bundles = [topBundle("c1", { isBlindspot: true }), topBundle("c2")];
+    const out = selectTopStory({
+      bundles,
+      nowMs: NOW,
+      postedIds: new Set(),
+      lastTopStoryAtMs: null,
+    });
+    expect(out?.cluster.id).toBe("c2");
+  });
+
+  it("skips a blindspot whose public claim is only held back by the feed delay (h37-content-1: the cards hide it, the crons do not)", () => {
+    const bundles = [
+      topBundle("c1", { isBlindspot: false, blindspotPending: true }),
+      topBundle("c2"),
+    ];
     const out = selectTopStory({
       bundles,
       nowMs: NOW,

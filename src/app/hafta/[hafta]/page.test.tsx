@@ -13,6 +13,8 @@ import type { ReactNode } from "react";
 const mocks = vi.hoisted(() => ({
   getFeedStatusSummary: vi.fn(),
   getWeekArchiveClusters: vi.fn(),
+  /** Every (rows, health, nowMs) call the page made to summariseWeek. */
+  summariseCalls: [] as unknown[][],
 }));
 
 vi.mock("next/server", () => ({
@@ -37,11 +39,14 @@ vi.mock("@/lib/weekly/week-archive", async (importOriginal) => {
 
 vi.mock("@/lib/weekly/weekly-query", () => ({
   WEEKLY_CLUSTER_LIMIT: 5000,
-  summariseWeek: () => ({
-    zoneCounts: { iktidar: 6, bagimsiz: 3, muhalefet: 1 },
-    topClusters: [],
-    blindspots: [],
-  }),
+  summariseWeek: (...args: unknown[]) => {
+    mocks.summariseCalls.push(args);
+    return {
+      zoneCounts: { iktidar: 6, bagimsiz: 3, muhalefet: 1 },
+      topClusters: [],
+      blindspots: [],
+    };
+  },
 }));
 
 vi.mock("@/lib/clusters/feed-health", () => ({
@@ -115,6 +120,7 @@ describe("/hafta/[hafta] source status", () => {
   const closed = shiftWeek(current, -1) as string;
 
   beforeEach(() => {
+    mocks.summariseCalls = [];
     mocks.getFeedStatusSummary.mockReset();
     mocks.getWeekArchiveClusters.mockReset();
     mocks.getWeekArchiveClusters.mockResolvedValue({
@@ -147,6 +153,20 @@ describe("/hafta/[hafta] source status", () => {
     expect(text).toContain(UNKNOWN);
     expect(text).not.toContain("71 / 96");
     expect(mocks.getFeedStatusSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("measures the blindspot delay against the cached read's own clock (asOfMs), never a clock read in the render (h37-content-1)", async () => {
+    mocks.getFeedStatusSummary.mockResolvedValue({ delivering: 71, total: 96 });
+    mocks.getWeekArchiveClusters.mockResolvedValue({
+      rows: [{ id: "cl-1" }],
+      truncated: false,
+      asOfMs: 1_790_000_000_000,
+    });
+
+    await renderWeek(current);
+
+    expect(mocks.summariseCalls).toHaveLength(1);
+    expect(mocks.summariseCalls[0]![2]).toBe(1_790_000_000_000);
   });
 
   it("a closed week never reads the live status and states no source basis", async () => {

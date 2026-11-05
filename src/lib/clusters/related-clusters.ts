@@ -1,11 +1,18 @@
 import { entityHubPatterns, foldEntityText } from "@/lib/entities/entity-hub";
 import { headlineLang, sourceLang } from "@/lib/sources/source-language";
-import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
+import { RISING_ENTITIES, RISING_HUB_SPECS } from "@/lib/trends/rising-entities";
 import {
   isContentlessTitle,
   repairEntityResidue,
 } from "../../../supabase/functions/_shared/rss/entities";
-import { titleAgreement, titleStemOverlap } from "./summary-agreement";
+import {
+  STEM_LENGTH,
+  contentWords,
+  sharedStemsExcluding,
+  stemsOf,
+  titleAgreement,
+  titleStemOverlap,
+} from "./summary-agreement";
 import {
   isTopicSlug,
   TOPIC_LABELS_TR,
@@ -29,9 +36,17 @@ import {
 //     hub's own folded patterns and precision guards, so "AKP" and "AK Parti"
 //     are one key and a Polish court is not the AYM);
 //   * score >= RELATED_MIN_SCORE AND (two or more shared content stems, or a
-//     shared entity key) is 'related' (isRelatedTitle): one ordinary shared
-//     word is exactly 0.2 for a 5-stem title and says nothing about the story
-//     (RELATED_MIN_SHARED_STEMS). Near-duplicates are dropped
+//     shared entity key plus one shared stem, or RELATED_MIN_SHARED_KEYS (three)
+//     different shared entity keys) is 'related' (isRelatedTitle):
+//     one ordinary shared word is exactly 0.2 for a 5-stem title and says
+//     nothing about the story (RELATED_MIN_SHARED_STEMS). A shared stem is one
+//     that is NOT a word of a shared entity and NOT a generic word
+//     (RELATED_GENERIC_WORDS: h37-clusters-1): "Erdoğan" in two Erdoğan
+//     headlines is the entity key, not also "the one shared word", so Emine
+//     Erdoğan's Korea post is not related to the Azerbaijan visit, and "İsrail"
+//     alone does not relate three Israel stories. Three different shared keys
+//     ("ABD", "Çin", "Trump" in two trade headlines) are evidence on their own
+//     even when every word they share is an entity's. Near-duplicates are dropped
 //     first (a title that agrees >= RELATED_DUPLICATE_AGREEMENT, in either
 //     direction, with a newer kept one), so two clusters of one event take one
 //     slot. Two or more 'related' stories left: mode 'related', best score
@@ -178,6 +193,9 @@ export const RELATED_MIN_SCORE = 0.2;
  * RELATED_MIN_SCORE on purpose: a shared entity supports some wording overlap
  * (and bridges aliases the wording does not share) but never relates two
  * stories on its own, so "ABD" or "Erdoğan" in two headlines is not enough.
+ * Nor are the entity's own words ever the shared stem that the entity is then
+ * "backed by" (h37-clusters-1): see {@link RELATED_GENERIC_WORDS} and
+ * isRelatedTitle.
  */
 export const RELATED_ENTITY_BONUS = 0.15;
 /** Two titles agreeing at least this much, in either direction, are one story (inclusive). */
@@ -186,13 +204,58 @@ export const RELATED_DUPLICATE_AGREEMENT = 0.6;
 export const RELATED_MIN_ITEMS = 2;
 /**
  * Content stems two titles must share to be related, unless they also share an
- * entity-hub key (which carries a single shared word). titleAgreement is the
- * share of the CURRENT title's stems, so a 5-stem title scores exactly
+ * entity-hub key (which then needs just one more). titleAgreement is the share
+ * of the CURRENT title's stems, so a 5-stem title scores exactly
  * RELATED_MIN_SCORE on ONE shared word, and one ordinary word ("Cumhurbaşkanı",
  * "istifa", "edildi") says nothing about the story: it related a Rutte story to
  * an Erdoğan one, and a single such story kept a block under "İlgili haberler".
+ * Only DISTINCT stems count: the words of a shared entity and the
+ * RELATED_GENERIC_WORDS are left out of the count (h37-clusters-1).
  */
 export const RELATED_MIN_SHARED_STEMS = 2;
+/**
+ * Different entity-hub keys two titles must share to be related on the keys
+ * alone, with no stem beyond the entities' own words (the score floor still
+ * applies). Because every word of a shared entity is left out of the stem count,
+ * two headlines about one affair that name only entities ("ABD Başkanı Trump
+ * Çin ile ticaret anlaşması imzaladı" and "... Çin'e gümrük vergisi açıkladı":
+ * abd, cin, trump) would otherwise share nothing countable.
+ *
+ * It is three, not two, because a person key and his country or party key
+ * co-occur in one title phrase: "ABD Başkanı Trump", "CHP Genel Başkanı Özgür
+ * Özel", "AK Parti ... Erdoğan". Two keys are then often ONE fact, and two
+ * headlines that share only that phrase say nothing about each other (in
+ * production, 19 of 59 Trump cluster titles of 3 days also carried "ABD").
+ */
+export const RELATED_MIN_SHARED_KEYS = 3;
+/**
+ * Words that say what kind of headline it is, not what it is about: a job title
+ * or a reporting verb. They never count as a shared stem, entity or not
+ * (h37-clusters-1: "ziyaret" and "Cumhurbaşkanı" were the second shared word of
+ * Erdoğan's Azerbaijan visit and Emine Erdoğan's Korea post). A title word is
+ * one of them when it has the same five-character stem as a listed word and, for
+ * a listed word of more than seven characters, also shares all but its last two
+ * characters with it. So "Başkan" also covers "Başkanı" and "Başkanlığı",
+ * "ziyaret" covers "ziyareti", and "Cumhurbaşkanı" covers "Cumhurbaşkanlığı"
+ * but NOT "Cumhuriyet" or "Cumhur" (same `cumhu`, a different word); "açıklama"
+ * covers "açıklandı", "açıkladı" and "açıklaması" but not "açıklık"; "değerlendirme"
+ * covers "değerlendirmeler" but not "değer" (value). The list is curated and
+ * short on purpose: a topic word does not belong here.
+ */
+export const RELATED_GENERIC_WORDS: readonly string[] = [
+  "Cumhurbaşkanı",
+  "Başkan",
+  "Bakan",
+  "açıklama",
+  "açıkladı",
+  "mesaj",
+  "ziyaret",
+  "paylaşım",
+  "tepki",
+  "yorum",
+  "değerlendirme",
+  "Son dakika",
+];
 /** A candidate sharing at least this share of its articles with a kept cluster is a copy (inclusive). */
 export const RELATED_SHARED_MEMBERS = 0.5;
 /** Candidates considered per call: the newest N after the exclusions. The feeds hold 30 or 31 rows. */
@@ -241,8 +304,96 @@ export function entityKeysIn(title: string): string[] {
     .sort();
 }
 
-function shareKey(a: readonly string[], b: readonly string[]): boolean {
-  return a.some((key) => b.includes(key));
+// ---------------------------------------------------------------------------
+// Stems that must not count as "the shared word" (h37-clusters-1). Built once,
+// on first use, from curated data only (never from a title), through the same
+// folding every title goes through (summary-agreement's stemsOf).
+// ---------------------------------------------------------------------------
+
+let entityStems: ReadonlyMap<string, ReadonlySet<string>> | null = null;
+let genericWordTest: ((foldedWord: string) => boolean) | null = null;
+
+/**
+ * The stems of every spelling an entity key goes by: its label, its folded
+ * tokens, and the hub's aliases and inflections (RISING_HUB_SPECS). So "AK
+ * Parti" and "AKP" are one key and both spellings are the entity, and
+ * "Merkez Bankası" and "TCMB" likewise.
+ */
+function stemsOfEntity(key: string): ReadonlySet<string> {
+  if (entityStems === null) {
+    const built = new Map<string, ReadonlySet<string>>();
+    for (const entity of RISING_ENTITIES) {
+      const spec = RISING_HUB_SPECS[entity.key];
+      const stems = new Set<string>();
+      for (const text of [
+        entity.label,
+        ...entity.tokens,
+        ...(spec?.aliases ?? []),
+        ...(spec?.inflections ?? []),
+      ]) {
+        for (const stem of stemsOf(text)) stems.add(stem);
+      }
+      built.set(entity.key, stems);
+    }
+    entityStems = built;
+  }
+  return entityStems.get(key) ?? new Set<string>();
+}
+
+/** How many leading characters two strings share. */
+function commonPrefixLength(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let n = 0;
+  while (n < max && a.charCodeAt(n) === b.charCodeAt(n)) n++;
+  return n;
+}
+
+/** A listed word this short is matched on its stem alone (the five-character stem is nearly all of it). */
+const GENERIC_STEM_ONLY_MAX = 7;
+/** A longer listed word is matched when the title word shares all but this many trailing characters. */
+const GENERIC_SUFFIX_ALLOWANCE = 2;
+
+/**
+ * Whether a folded title word (as summary-agreement's contentWords returns it)
+ * is one of RELATED_GENERIC_WORDS: the same five-character stem as a listed word
+ * and, for a listed word of more than GENERIC_STEM_ONLY_MAX characters, the same
+ * leading characters up to GENERIC_SUFFIX_ALLOWANCE short of its length. Words
+ * with one stem and different meanings stay apart: "Cumhuriyet" and
+ * "Cumhurbaşkanı" are both `cumhu`. Built once, on first use, from curated data
+ * only (never from a title).
+ */
+function genericWord(): (foldedWord: string) => boolean {
+  if (genericWordTest === null) {
+    const byStem = new Map<string, string[]>();
+    for (const listed of RELATED_GENERIC_WORDS) {
+      for (const token of contentWords(listed)) {
+        const stem = token.slice(0, STEM_LENGTH);
+        const tokens = byStem.get(stem);
+        if (tokens) tokens.push(token);
+        else byStem.set(stem, [token]);
+      }
+    }
+    genericWordTest = (word) => {
+      const tokens = byStem.get(word.slice(0, STEM_LENGTH));
+      if (!tokens) return false;
+      return tokens.some(
+        (token) =>
+          token.length <= GENERIC_STEM_ONLY_MAX ||
+          commonPrefixLength(word, token) >= token.length - GENERIC_SUFFIX_ALLOWANCE,
+      );
+    };
+  }
+  return genericWordTest;
+}
+
+const NO_STEMS: ReadonlySet<string> = new Set<string>();
+
+/** The stems of the shared entity keys: they do not count as shared between two titles that both name `sharedKeys`. */
+function excludedStems(sharedKeys: readonly string[]): ReadonlySet<string> {
+  if (sharedKeys.length === 0) return NO_STEMS;
+  const excluded = new Set<string>();
+  for (const key of sharedKeys) for (const stem of stemsOfEntity(key)) excluded.add(stem);
+  return excluded;
 }
 
 /** The score of one candidate title against already-computed keys of the current one. */
@@ -253,7 +404,18 @@ function scoreAgainst(currentTitle: string, currentKeys: readonly string[], titl
 /**
  * The score of one candidate title against the current one, and whether it
  * counts as related: score >= RELATED_MIN_SCORE and either RELATED_MIN_SHARED_STEMS
- * shared content stems or a shared entity key plus at least one shared stem.
+ * distinct shared stems, or a shared entity key plus at least one, or
+ * RELATED_MIN_SHARED_KEYS different shared keys.
+ *
+ * The score counts every shared stem, so ordering is what it always was. The
+ * verdict does not: a stem that belongs to a SHARED entity key (the words of
+ * its label, tokens, aliases and inflections) or a word of
+ * RELATED_GENERIC_WORDS is not a shared stem. The entity is already counted
+ * once, as the key (and the bonus); counting its own word again as "the one
+ * shared stem" made any two Erdoğan, ABD or İsrail headlines related
+ * (h37-clusters-1). Several different shared keys, though, are several
+ * different facts in common, so a third one relates two titles whose shared
+ * words are all entity words.
  */
 function evidenceAgainst(
   currentTitle: string,
@@ -261,13 +423,17 @@ function evidenceAgainst(
   title: string,
 ): { score: number; related: boolean } {
   const overlap = titleStemOverlap(currentTitle, title);
-  const shared = overlap?.shared ?? 0;
-  const agreement = overlap === null ? 0 : shared / overlap.total;
-  const entity = shareKey(currentKeys, entityKeysIn(title));
+  const agreement = overlap === null ? 0 : overlap.shared / overlap.total;
+  const candidateKeys = entityKeysIn(title);
+  const sharedKeys = currentKeys.filter((key) => candidateKeys.includes(key));
+  const entity = sharedKeys.length > 0;
   const score = entity ? agreement + RELATED_ENTITY_BONUS : agreement;
+  if (score < RELATED_MIN_SCORE - EPSILON) return { score, related: false };
+  const distinct = sharedStemsExcluding(currentTitle, title, excludedStems(sharedKeys), genericWord());
   const related =
-    score >= RELATED_MIN_SCORE - EPSILON &&
-    (shared >= RELATED_MIN_SHARED_STEMS || (entity && shared >= 1));
+    distinct >= RELATED_MIN_SHARED_STEMS ||
+    (entity && distinct >= 1) ||
+    sharedKeys.length >= RELATED_MIN_SHARED_KEYS;
   return { score, related };
 }
 
@@ -285,7 +451,11 @@ export function relatedScore(currentTitle: string, candidateTitle: string): numb
  * Whether `candidateTitle` counts as related to `currentTitle`: its
  * {@link relatedScore} is at least RELATED_MIN_SCORE (inclusive) and the two
  * share RELATED_MIN_SHARED_STEMS content stems, or an entity-hub key together
- * with at least one stem. False for a non-string.
+ * with at least one stem, or RELATED_MIN_SHARED_KEYS different entity-hub keys.
+ * The words of a shared entity and the RELATED_GENERIC_WORDS are not shared
+ * stems: two titles that only share "Erdoğan" (or "Cumhurbaşkanı ... ziyaret")
+ * are not related, and neither are two that share a person and his country or
+ * party only (two keys). False for a non-string.
  */
 export function isRelatedTitle(currentTitle: string, candidateTitle: string): boolean {
   if (typeof currentTitle !== "string" || typeof candidateTitle !== "string") return false;
@@ -368,8 +538,8 @@ function dedupe(list: readonly Kept[], stopAt = Infinity): Kept[] {
  * Then, on the newest POOL_CAP of what is left, in recency order (`updated_at`
  * descending, an unparseable date last, equal dates by id descending): scores
  * each against the current title and keeps the ones at or above
- * RELATED_MIN_SCORE and share two content stems or an entity key (isRelatedTitle),
- * removes near-duplicates (the newer of a pair stays), and
+ * RELATED_MIN_SCORE and share two distinct stems, an entity key plus one, or three
+ * entity keys (isRelatedTitle), removes near-duplicates (the newer of a pair stays), and
  *   * with RELATED_MIN_ITEMS or more left returns them as mode 'related', best
  *     score first, newer first on a tie;
  *   * with fewer returns the newest stories of the same pool, deduped the same

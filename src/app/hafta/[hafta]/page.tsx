@@ -94,7 +94,8 @@ export default async function WeekArchivePage({ params }: PageProps) {
   ]);
 
   const rows = read?.rows ?? null;
-  const summary = rows !== null && rows.length > 0 ? summariseWeek(rows, health) : null;
+  const summary =
+    read !== null && read.rows.length > 0 ? summariseWeek(read.rows, health, read.asOfMs) : null;
   const label = weekLabelTr(hafta);
 
   const prevKey = shiftWeek(hafta, -1);

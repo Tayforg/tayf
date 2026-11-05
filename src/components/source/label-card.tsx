@@ -1,7 +1,8 @@
 import Link from "next/link";
-import type { BiasCategory } from "@/types";
+import type { BiasCategory, SourceKind } from "@/types";
 import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
 import { getSourceMetadata } from "@/lib/sources/factuality";
+import { nonVotingNote } from "@/lib/sources/kind";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { ownerLineParts } from "@/lib/sources/owner-line";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
@@ -36,6 +37,9 @@ export interface LabelCardProps {
   /** Aggregate /oyun guess share for this outlet, or null below the
    *  publication threshold (see @/lib/game/agreement). */
   readerAgreement: ReaderAgreement | null;
+  /** The source's kind; a missing kind is an outlet (votes). An aggregator or
+   *  niche source keeps its chips but gets a "does not vote" note under them. */
+  kind?: SourceKind | null;
 }
 
 const EMPTY_RATIONALE = "Gerekçe henüz girilmedi";
@@ -67,8 +71,10 @@ export function LabelCard({
   trusteeNote,
   history,
   readerAgreement,
+  kind,
 }: LabelCardProps) {
   const zone = zoneOf(bias);
+  const notVotingNote = nonVotingNote(kind);
   const zoneMeta = ZONE_META[zone];
   const rationale = zoneRationale && zoneRationale.trim().length > 0 ? zoneRationale.trim() : null;
   const meta = getSourceMetadata(slug);
@@ -120,6 +126,13 @@ export function LabelCard({
           </span>
         ) : null}
       </div>
+
+      {/* 1b. Non-voting kinds (toplayıcı / niş) keep the chips above - the
+          label exists - but they are not on the spectrum, so say so right
+          under them, in the cluster pages' words. */}
+      {notVotingNote ? (
+        <p className="text-xs text-muted-foreground">{notVotingNote}</p>
+      ) : null}
 
       {/* 2. Rationale — operator text verbatim, or the honest empty state.
           NEVER synthesised, paraphrased or LLM-filled. */}

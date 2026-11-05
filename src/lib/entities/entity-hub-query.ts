@@ -150,7 +150,7 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
   for (const row of sorted) {
     const members = flattenClusterMembers(row);
     if (members.length === 0) continue;
-    bundles.push(buildClusterBundle(row, members, health).bundle);
+    bundles.push(buildClusterBundle(row, members, health, asOfMs).bundle);
   }
   return { bundles, total, asOfMs };
 }

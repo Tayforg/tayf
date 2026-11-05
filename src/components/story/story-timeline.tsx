@@ -1,5 +1,6 @@
 import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
+import { NON_VOTING_KIND_NOTE } from "@/lib/sources/kind";
 import { sourceLang } from "@/lib/sources/source-language";
 import type { StoryTimeline as StoryTimelineData } from "@/lib/clusters/story-timeline";
 import type { MediaDnaZone } from "@/types";
@@ -150,7 +151,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
       </p>
       {hasNonVoting && (
         <p className="text-[10px] text-muted-foreground">
-          İçi boş daire: toplayıcı / niş kaynak; spektruma ve ilk sıraya sayılmaz.
+          {`İçi boş daire: ${NON_VOTING_KIND_NOTE}.`}
         </p>
       )}
     </section>

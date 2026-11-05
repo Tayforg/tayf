@@ -56,6 +56,8 @@ const fixture = vi.hoisted(() => ({
   articles: [] as Envelope[],
   history: [] as Envelope[],
   served: { sources: 0, count: 0, articles: 0, history: 0 },
+  /** The column list each `sources` query asked for. */
+  sourceSelects: [] as string[],
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
 }));
@@ -71,7 +73,11 @@ const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../../../tests/_helpers/supabase-fake");
   return helper.createSupabaseFake({
     tables: {
-      sources: () => take("sources") as never,
+      sources: (state: unknown) => {
+        const args = (state as { selectArgs: unknown[] }).selectArgs;
+        fixture.sourceSelects.push(String(args[0]));
+        return take("sources") as never;
+      },
       articles: (state: unknown) => {
         const args = (state as { selectArgs: unknown[] }).selectArgs;
         const isCount = (args[1] as { head?: boolean } | undefined)?.head === true;
@@ -162,6 +168,7 @@ beforeEach(() => {
   seedHappyPath();
   fixture.served = { sources: 0, count: 0, articles: 0, history: 0 };
   fixture.clientOpts = [];
+  fixture.sourceSelects = [];
   order.events = [];
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
@@ -198,6 +205,19 @@ describe("getSourceProfile found / missing", () => {
     expect(cacheLife).toHaveBeenCalledWith("source-directory");
     expect(cacheTag).toHaveBeenCalledWith("sources", "articles");
     expect(connection).not.toHaveBeenCalled();
+  });
+
+  // h37-content-2: the page tells an aggregator / niche source apart by
+  // `source.kind`; a select that omits the column makes every source read as
+  // an outlet (a voting kind), which silently hides the "does not vote" note.
+  it("selects the kind column and hands it to the page", async () => {
+    fixture.sources = [{ data: [{ ...SOURCE_ROW, kind: "aggregator" }], error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(fixture.sourceSelects).toHaveLength(1);
+    expect(fixture.sourceSelects[0]?.split(",").map((c) => c.trim())).toContain("kind");
+    expect(profile?.source.kind).toBe("aggregator");
   });
 
   it("a missing row returns null (the only case that may 404) and is cached as source-directory, with no retry", async () => {

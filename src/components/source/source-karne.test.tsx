@@ -4,6 +4,7 @@ import { createElement } from "react";
 
 import { SourceKarneCard } from "./source-karne";
 import { toSourceKarne, type SourceKarneRead } from "@/lib/sources/karne";
+import type { SourceKind } from "@/types";
 
 function karne(over: Partial<SourceKarneRead> = {}): SourceKarneRead {
   return {
@@ -27,8 +28,8 @@ function karne(over: Partial<SourceKarneRead> = {}): SourceKarneRead {
   };
 }
 
-function html(k: SourceKarneRead | null, slug = "sozcu"): string {
-  return renderToStaticMarkup(createElement(SourceKarneCard, { karne: k, slug }));
+function html(k: SourceKarneRead | null, slug = "sozcu", kind?: SourceKind | null): string {
+  return renderToStaticMarkup(createElement(SourceKarneCard, { karne: k, slug, kind }));
 }
 
 // Character scan (not a tag regex): every tag becomes one space.
@@ -49,8 +50,8 @@ function stripTags(markup: string): string {
 }
 
 // renderToStaticMarkup HTML-escapes apostrophes; compare on decoded text.
-function text(k: SourceKarneRead | null, slug = "sozcu"): string {
-  return stripTags(html(k, slug))
+function text(k: SourceKarneRead | null, slug = "sozcu", kind?: SourceKind | null): string {
+  return stripTags(html(k, slug, kind))
     .replace(/&#x27;/g, "'")
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ");
@@ -174,5 +175,32 @@ describe("SourceKarneCard", () => {
         expect(t).not.toMatch(new RegExp(`(?<![\\p{L}])${w}(?![\\p{L}])`, "u"));
       }
     }
+  });
+});
+
+// h37-content-2: an aggregator / niche source has no vote, so "yazan bölgedeydi"
+// (compared against a zone derived from its bias label) is dropped.
+describe("SourceKarneCard kind pass-through", () => {
+  const CLAUSE = "tanesinde haberi ağırlıkla yazan bölgedeydi";
+
+  it("drops the same-side clause for aggregator and niche, keeping the blindspot count", () => {
+    for (const kind of ["aggregator", "niche"] as const) {
+      const t = text(karne(), "haberler-com", kind);
+      expect(t, kind).toContain("Kör nokta işaretli haberler: 6");
+      expect(t, kind).not.toContain(CLAUSE);
+    }
+  });
+
+  it("keeps the clause for outlet, wire, null and an omitted kind", () => {
+    for (const kind of ["outlet", "wire", null, undefined] as const) {
+      expect(text(karne(), "sozcu", kind), String(kind)).toContain(
+        `Kör nokta işaretli haberler: 6 · 2 ${CLAUSE}`,
+      );
+    }
+  });
+
+  it("changes nothing else in the card", () => {
+    const strip = (t: string) => t.replace(` · 2 ${CLAUSE}`, "");
+    expect(text(karne(), "x", "aggregator")).toBe(strip(text(karne(), "x")));
   });
 });
