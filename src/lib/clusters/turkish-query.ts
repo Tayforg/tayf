@@ -216,6 +216,37 @@ function stripEdgePunctuation(term: string): string {
   return start === 0 && end === points.length ? term : points.slice(start, end).join("");
 }
 
+interface SearchTerm {
+  /** The word as the reader typed it (controls replaced, nothing else touched). */
+  typed: string;
+  /** Its canonical form: apostrophe suffix cut, Turkish lower-case, edges stripped. */
+  term: string;
+}
+
+/**
+ * The one walk over a reader-typed query that `canonicalSearchQuery`,
+ * `searchQueryCut` and `searchedWordsAsTyped` all share, so what they call "a
+ * term" cannot drift apart. Words are split on whitespace; a word that is
+ * empty once cleaned (bare punctuation, an emoji) is not a term. Stops after
+ * `limit` terms, so the cost is linear in the input and never in the number of
+ * words past the limit. The cleaning is `normaliseSearchQuery` applied word by
+ * word, which is the same as applying it to the whole text first (a word holds
+ * no whitespace and the apostrophe cut never reaches across one).
+ */
+function searchTerms(q: string, limit: number): SearchTerm[] {
+  const out: SearchTerm[] = [];
+  for (const typed of q.replace(UNSAFE_CHARS, " ").split(/\s+/)) {
+    if (typed === "") continue;
+    const term = stripEdgePunctuation(
+      normaliseSearchQuery(typed).toLocaleLowerCase("tr"),
+    );
+    if (term === "") continue;
+    out.push({ typed, term });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 /**
  * The cache key and RPC input for a reader-typed archive-search query:
  *   1. `normaliseSearchQuery` (controls out, apostrophe suffix dropped,
@@ -231,13 +262,7 @@ function stripEdgePunctuation(term: string): string {
  * No Turkish fold (see the header above): the RPC arguments do not change.
  */
 export function canonicalSearchQuery(q: string): string {
-  const terms: string[] = [];
-  for (const raw of normaliseSearchQuery(q).toLocaleLowerCase("tr").split(" ")) {
-    const term = stripEdgePunctuation(raw);
-    if (term === "") continue;
-    terms.push(term);
-    if (terms.length >= MAX_SEARCH_TERMS) break;
-  }
+  const terms = searchTerms(q, MAX_SEARCH_TERMS).map((t) => t.term);
 
   const joined = terms.join(" ");
   if (joined.length <= MAX_SEARCH_QUERY_LENGTH) return joined;
@@ -249,4 +274,50 @@ export function canonicalSearchQuery(q: string): string {
   const cut = joined.slice(0, MAX_SEARCH_QUERY_LENGTH).replace(/[\ud800-\udbff]$/, "");
   const lastSpace = cut.lastIndexOf(" ");
   return (cut.slice(0, lastSpace + 1) + stripEdgePunctuation(cut.slice(lastSpace + 1))).trim();
+}
+
+// ---------------------------------------------------------------------------
+// Which cap changed the search (h42-search-2).
+//
+// The 6-term and 64-character caps are a deliberate cost bound, but they used to
+// be silent: a reader who typed 7 words got the archive of the first 6 under an
+// echo that claimed all 7, and the in-feed filter still applied the 7th. The home
+// page says so now ("Arama ilk 6 kelimeyle yapıldı.") and filters the feed with the
+// same words the archive used.
+// ---------------------------------------------------------------------------
+
+/** Which cap shortened a query: the term count or the character length. */
+export type SearchQueryCut = "terms" | "length";
+
+/**
+ * Null when `canonicalSearchQuery(q)` searches everything the reader typed.
+ * 'length' when the 64-character cut applies to the kept terms (checked first:
+ * it is the tighter bound, so the words that survive are fewer than MAX_SEARCH_TERMS);
+ * 'terms' when only more than MAX_SEARCH_TERMS non-empty terms were typed.
+ * Reads at most MAX_SEARCH_TERMS + 1 terms.
+ */
+export function searchQueryCut(q: string): SearchQueryCut | null {
+  const found = searchTerms(q, MAX_SEARCH_TERMS + 1);
+  const kept = found.slice(0, MAX_SEARCH_TERMS).map((t) => t.term).join(" ");
+  if (kept.length > MAX_SEARCH_QUERY_LENGTH) return "length";
+  return found.length > MAX_SEARCH_TERMS ? "terms" : null;
+}
+
+/**
+ * True when the caps dropped part of what the reader typed. False for a
+ * canonical query passed back in (it is already within both caps).
+ */
+export function searchQueryWasShortened(q: string): boolean {
+  return searchQueryCut(q) !== null;
+}
+
+/**
+ * The first MAX_SEARCH_TERMS words of `q` as the reader typed them (case and
+ * punctuation kept, whitespace collapsed, bare-punctuation words skipped as the
+ * search skips them): the text the page echoes back for a shortened query.
+ */
+export function searchedWordsAsTyped(q: string): string {
+  return searchTerms(q, MAX_SEARCH_TERMS)
+    .map((t) => t.typed)
+    .join(" ");
 }

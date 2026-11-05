@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   archiveHeading,
+  searchTokenAlternatives,
   searchTokens,
   titleMatchesTokens,
 } from "./in-feed-match";
@@ -15,6 +16,10 @@ import {
 
 const matches = (q: string, title: string) =>
   titleMatchesTokens(title, searchTokens(q));
+
+// A card matches when ANY alternative token list matches (page.tsx does the same).
+const matchesAlt = (q: string, title: string) =>
+  searchTokenAlternatives(q).some((alt) => titleMatchesTokens(title, alt));
 
 describe("searchTokens", () => {
   it("splits on whitespace and lowercases the Turkish way", () => {
@@ -260,5 +265,86 @@ describe("archiveHeading", () => {
 
   it("reads 'Arşivden: en ilgili N sonuç' when the RPC hit its cap", () => {
     expect(archiveHeading(22, true)).toBe("Arşivden: en ilgili 22 sonuç");
+  });
+});
+
+// h42-search-1: the archive treats AKP and AK Parti as one party (search-aliases.ts),
+// so the in-feed filter has to as well, or the cards above the archive section
+// would disagree with the archive about what the query means.
+describe("searchTokenAlternatives", () => {
+  it("is just searchTokens(q) when the query holds no alias", () => {
+    expect(searchTokenAlternatives("Erdoğan")).toEqual([["erdogan"]]);
+    expect(searchTokenAlternatives("ak")).toEqual([["ak"]]);
+    expect(searchTokenAlternatives("akşener")).toEqual([["aksener"]]);
+    expect(searchTokenAlternatives("")).toEqual([[]]);
+  });
+
+  it("adds the 'ak parti' tokens for 'AKP', own tokens first", () => {
+    expect(searchTokenAlternatives("AKP")).toEqual([["akp"], ["ak", "parti"]]);
+  });
+
+  it("adds the 'akp' token for 'AK Parti'", () => {
+    expect(searchTokenAlternatives("AK Parti")).toEqual([
+      ["ak", "parti"],
+      ["akp"],
+    ]);
+  });
+
+  it("keeps the other tokens in the substituted list", () => {
+    expect(searchTokenAlternatives("AKP İstanbul")).toEqual([
+      ["akp", "istanbul"],
+      ["ak", "parti", "istanbul"],
+    ]);
+  });
+
+  it("agrees with the archive: no alternative once the query uses quotes, a negation or 'or'", () => {
+    expect(searchTokenAlternatives('"ak parti"')).toEqual([["ak", "parti"]]);
+    expect(searchTokenAlternatives("akp -chp")).toEqual([["akp"]]);
+    expect(searchTokenAlternatives("akp or chp")).toEqual([["akp", "chp"]]);
+  });
+
+  it("is consistent with the archive's input: the canonical query gives the same lists", () => {
+    expect(searchTokenAlternatives("akp'nin")).toEqual(searchTokenAlternatives("akp"));
+    expect(searchTokenAlternatives("AK PARTİ")).toEqual(
+      searchTokenAlternatives("ak parti"),
+    );
+  });
+});
+
+describe("alias matching in the feed (AKP <-> AK Parti)", () => {
+  it("'AKP' matches 'AK Parti Grup Başkanı ...'", () => {
+    expect(matchesAlt("AKP", "AK Parti Grup Başkanı Abdullah Güler açıkladı")).toBe(true);
+  });
+
+  it("'AK Parti' matches \"AKP'den açıklama\"", () => {
+    expect(matchesAlt("AK Parti", "AKP'den açıklama")).toBe(true);
+  });
+
+  it("keeps matching its own spelling", () => {
+    expect(matchesAlt("AKP", "AKP'den açıklama")).toBe(true);
+    expect(matchesAlt("AK Parti", "AK Parti Grup Başkanı açıkladı")).toBe(true);
+  });
+
+  it("carries the rest of the query across the alias", () => {
+    expect(matchesAlt("akp istanbul", "AK Parti İstanbul İl Başkanı konuştu")).toBe(true);
+    expect(matchesAlt("akp istanbul", "AK Parti Ankara İl Başkanı konuştu")).toBe(false);
+  });
+
+  it("does not match an unrelated title", () => {
+    expect(matchesAlt("AKP", "CHP Genel Başkanı Özel konuştu")).toBe(false);
+    expect(matchesAlt("AK Parti", "Başbakan dakikaya kadar bekledi")).toBe(false);
+  });
+
+  it("leaves the 'ak' prefix behaviour unchanged", () => {
+    expect(matchesAlt("ak", "AK Parti açıklama yaptı")).toBe(true);
+    expect(matchesAlt("ak", "Akşener açıklama yaptı")).toBe(true);
+    expect(matchesAlt("ak", "AKP'den açıklama")).toBe(true);
+    expect(matchesAlt("ak", "Başbakan dakikaya kadar bekledi")).toBe(false);
+    expect(matchesAlt("ak", "dakika bakan")).toBe(false);
+  });
+
+  it("matches nothing for an empty or operator-only query (as before)", () => {
+    expect(matchesAlt("", "AK Parti")).toBe(false);
+    expect(matchesAlt("-akp", "AKP'den açıklama")).toBe(false);
   });
 });

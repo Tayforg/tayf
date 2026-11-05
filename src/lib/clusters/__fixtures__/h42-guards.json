@@ -1,0 +1,161 @@
+[
+ {
+  "cid": "d1ed614b",
+  "id": "d1ed614b-baf0-43e8-b5d9-df4db3c65d1c",
+  "guard": "framing",
+  "stored": "AK Parti toplantısında fon vurgunu tepkisi: Şamil Tayyar o sözleri paylaştı",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "AK Parti'den Fatma Betül için olay çağrı! Salon ayakta alkışladı",
+   "AK Parti toplantısında fon vurgunu tepkisi: Şamil Tayyar o sözleri paylaştı",
+   "Şamil Tayyar AK Parti toplantısında yaşananları aktardı: Fatma Betül Sayan Kaya'ya yargılama çağrısı yapıldı herkes alkışladı"
+  ],
+  "why": "loaded rule: a swap that trades \"vurgun\" for the framed \"olay çağrı\" is refused"
+ },
+ {
+  "cid": "c85af1d5",
+  "id": "c85af1d5-d392-48de-9748-775781654ce6",
+  "guard": "framing",
+  "stored": "Almanya Dışişleri Bakanı Wadephul Duyurdu: Türk İş İnsanları İçin Vize Süreçleri Kolaylaştırılıyor",
+  "model": "extractive-v6",
+  "article_count": 5,
+  "titles": [
+   "Almanya'dan Türkiye'ye vize müjdesi: İşlemleri hızlandıracak adım atıldı! Dışişleri Bakanı duyurdu",
+   "Almanya'dan Türkiye'ye vize kolaylığı açıklaması: 'Çok hızlı bir şekilde hayata geçiriyoruz'",
+   "Avrupa ülkesinden dikkat çeken vize kararı! 'Türkiye için hızlandırılacak'",
+   "Almanya Dışişleri Bakanı Wadephul Duyurdu: Türk İş İnsanları İçin Vize Süreçleri Kolaylaştırılıyor",
+   "Almanya'dan Türkiye'ye vize müjdesi! Dışişleri Bakanı duyurdu"
+  ],
+  "why": "titleCase rule, and a lexicon change: the plain-looking member title carries 'müjdesi', which is framing since h42, so it no longer wins the fresh pick and the Title Case stored title (which is the fresh pick now) stays"
+ },
+ {
+  "cid": "fd95db1f",
+  "id": "fd95db1f-fb7a-417b-bd94-2c4f44e189d3",
+  "guard": "same-story",
+  "stored": "İsrail Savunma Bakanı Katz: Seçim öncesi İran'a saldırma planımız yok",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "İran'dan son dakika Mekke İttifakı açıklaması",
+   "İran'dan son dakika Mekke İttifakı açıklaması",
+   "İran’dan İsrail seçimlerine ilişkin açıklama: Sonuç bizim için fark yaratmayacak",
+   "İran: Tahran toplantısı bölge iç güvenliğinin şekillenmesi için başlangıç olabilir",
+   "İran: 'Mekke İttifakı'nın Tahran toplantısı bölgesel güvenlik için başlangıç olabilir'",
+   "İran: Toplantı, bölgesel güvenlik için somut adım olacak",
+   "İsrail Savunma Bakanı Katz: Seçim öncesi İran'a saldırma planımız yok",
+   "İsrail Savunma Bakanı Katz, seçim öncesi İran'a saldırma niyeti olmadığını iddia etti"
+  ],
+  "why": "hedge rule: the best member title is a conference about another subject (token overlap under 0.1)"
+ },
+ {
+  "cid": "d6fefff8",
+  "id": "d6fefff8-36f6-4c15-8f26-209243f65ff0",
+  "guard": "same-story",
+  "stored": "Zelenski: Cumhurbaşkanı Erdoğan ile Karadeniz Tahıl Koridoru Üzerinde Çalışma Konusunda Anlaştık",
+  "model": "extractive-v6",
+  "article_count": 14,
+  "titles": [
+   "Zelenskiy'den İstanbul'da Fener Rum Patrikhanesi'ne ziyaret",
+   "Zelenskiy'den patrikhaneye ziyaret",
+   "Zelenskiy Fener Rum Ortodoks Patrikhanesi'ni ziyaret etti",
+   "Zelenskiy'den İstanbul'da Fener Rum Patrikhanesi'ne ziyaret! Patrik Bartholomeos ile görüştü",
+   "Zelenskiy'nin İstanbul temaslarında kritik durak: Fener Rum Patrikhanesi",
+   "Cumhurbaşkanı Erdoğan, Ukrayna Devlet Başkanı Zelenskiy ile görüştü",
+   "Zelenskiy Bartholomeos ile görüştü: Rusya-Ukrayna savaşının dini cephesi mi?",
+   "Ukrayna Devlet Başkanı Zelenski Fener Rum Patrikhanesi'ni ziyaret etti",
+   "Zelenskiy'den karadeniz vurgusu: türkiye ile güvenlik, tahıl ve enerji iş birliği öne çıktı",
+   "Zelenskiy’den Erdoğan’a teşekkür: Tahıl koridorunda mutabakat, barış için Türkiye seçeneği",
+   "Zelenski: Cumhurbaşkanı Erdoğan ile Karadeniz Tahıl Koridoru Üzerinde Çalışma Konusunda Anlaştık",
+   "İstanbul'da barış zirvesi! Zelenski: Cumhurbaşkanı Erdoğan ile mutabık kaldık",
+   "Erdoğan ve Zelenskiy'den Karadeniz için yeni adım: Rusya ile de görüşeceğiz",
+   "Ukrayna Devlet Başkanı Zelenskiy: \"Bugün Cumhurbaşkanı Erdoğan ile Karadeniz Tahıl Koridoru üzerinde çalışmak konusunda mutabık kaldık\""
+  ],
+  "why": "titleCase rule: the best member title is a visit, the stored one a grain-corridor quote (overlap 0)"
+ },
+ {
+  "cid": "cd767f4f",
+  "id": "cd767f4f-46c2-47d2-8ce5-94d240ec4237",
+  "guard": "title-case-target",
+  "stored": "MHP Genel Başkanı Bahçeli, 19 ilçe arasında Kozan'ı saydı; Kozan'da heyecan arttı",
+  "model": "extractive-v6",
+  "article_count": 6,
+  "titles": [
+   "Türkiye'de İl Olması Beklenen 19 İlçe Belli Oldu: 81 İlden 100 İle Çıkılabilir!",
+   "İL OLACAK İLÇELER BELLİ OLDU MU? DEVLET BAHÇELİ’NİN '19 YENİ İL' ÖNERİSİNDEKİ İLÇELER VE İLLER HANGİLERİ? (TAM LİSTE)",
+   "İL OLACAK İLÇELER: İl Sayısı Artacak Mı? Bahçeli'nin Dediği 19 İlçe Hangi İllerde? Hangi İlçeler İl Olacak?",
+   "Türkiye’nin il haritası değişebilir! İşte il olma potansiyeli taşıyan 19 ilçe",
+   "MHP Genel Başkanı Bahçeli, 19 ilçe arasında Kozan'ı saydı; Kozan'da heyecan arttı",
+   "MHP Genel Başkanı Bahçeli, 19 ilçe arasında Kozan'ı saydı; Kozan'da heyecan arttı"
+  ],
+  "why": "hedge rule: the best member title is itself Title Case"
+ },
+ {
+  "cid": "5f6a7a36",
+  "id": "5f6a7a36-4717-42d8-947c-57c1a7d86242",
+  "guard": "title-case-target",
+  "stored": "Güllü cinayetinde gerekçeli karar açıklandı",
+  "model": "extractive-v6",
+  "article_count": 7,
+  "titles": [
+   "Güllü Cinayetinde Gerekçeli Karar Açıklandı, Tuğyan Gülter'in Cezasında Sultan Nur Ulu'nun İfadesi Etkili Oldu",
+   "Güllü cinayetinde gerekçeli karar açıklandı: Müebbet hapis cezası",
+   "Güllü Cinayetinde gerekçeli karar açıklandı! Dikkat çeken detaylar",
+   "Güllü cinayetinde gerekçeli karar açıklandı! Tuğyan'a verilen hapis cezasında etkili olan o ifade!",
+   "Güllü'nün ölümüne ilişkin davada gerekçeli karar açıklandı",
+   "Güllü cinayetinde gerekçeli karar açıklandı",
+   "Güllü Cinayetinde gerekçeli karar açıklandı; Tuğyan'a verilen hapis cezasında Sultan'ın yeminli ifadesi etkili oldu"
+  ],
+  "why": "hedge rule: the best member title is a 14-word Title Case line"
+ },
+ {
+  "cid": "d58b0e72",
+  "id": "d58b0e72-1482-416b-b33a-6ba41db9865a",
+  "guard": "title-case-target",
+  "stored": "Bakan Bayraktar duyurdu: Elektrik altyapısına 100 milyar dolarlık yatırım hedefliyoruz",
+  "model": "extractive-v6",
+  "article_count": 5,
+  "titles": [
+   "Bayraktar: Milli Enerji 2040 vizyonu 5 Kasım'da açıklanacak",
+   "Bakan Bayraktar Duyurdu: Milli Enerji 2040 Vizyonu Açıklanıyor",
+   "Milli Enerji 2040 vizyonu 5 Kasım'da açıklanacak! Bakan Bayraktar tarihi verdi: 100 milyar dolarlık yatırım",
+   "İletim ve dağıtıma 100 milyar dolarlık yatırım hedefi: Milli Enerji 2040'la altyapı dönüşümü",
+   "Bakan Bayraktar duyurdu: Elektrik altyapısına 100 milyar dolarlık yatırım hedefliyoruz"
+  ],
+  "why": "number rule: \"2040\" belongs to a Title Case programme name"
+ },
+ {
+  "cid": "85feaf84",
+  "id": "85feaf84-98f1-45b0-82a6-b4696a908366",
+  "guard": "numberless",
+  "stored": "Martı TAG davasında karar çıktı",
+  "model": "extractive-v6",
+  "article_count": 7,
+  "titles": [
+   "4 yıldır devam ediyordu: Martı TAG davasında karar çıktı",
+   "Dört yıl süren Martı TAG davasında karar çıktı: Yasal olarak kapatılamaz",
+   "Martı TAG davasında mahkemeden dikkat çeken karar",
+   "Martı TAG davasında 4 yıl sonra karar: Mahkeme yasaklanamayacağına hükmetti",
+   "Martı TAG davasında karar çıktı",
+   "Tam 4 yıl sürdü: Martı TAG davasında karar çıktı",
+   "Martı TAG davasında karar: \"Mahkeme tarafından yasaklanamaz\""
+  ],
+  "why": "number rule: a stored title without any number omits them by style"
+ },
+ {
+  "cid": "22f3f677",
+  "id": "22f3f677-85be-4671-a21f-13e868adbe81",
+  "guard": "numberless",
+  "stored": "İYİ Parti lideri Dervişoğlu çocukların korkmadan büyüyeceği Türkiye'yi istedi",
+  "model": "extractive-v6",
+  "article_count": 5,
+  "titles": [
+   "İYİ Parti 9 yaşında... Dervişoğlu’ndan iktidara salvolar: 'İYİ Parti zapt edilemez'",
+   "Dervişoğlu: Bütün kaleler zapt edilebilir ama İYİ Parti zapt edilemez",
+   "Müsavat Dervişoğlu’ndan kayyım ve operasyon mesajı: “İYİ Parti zapt edilemez”",
+   "İYİ Parti lideri Dervişoğlu çocukların korkmadan büyüyeceği Türkiye'yi istedi",
+   "Dervişoğlu, partisinin 9'uncu kuruluş yıl dönümünde açıklamalar yapıyor"
+  ],
+  "why": "number rule: the same"
+ }
+]

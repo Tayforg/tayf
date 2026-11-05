@@ -142,7 +142,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 
 // Import AFTER mocks are declared.
 import { cacheLife, cacheTag } from "next/cache";
-import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
+import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 import {
@@ -633,6 +633,135 @@ describe("getClusterDetail row shaping", () => {
     expect(bySource["s-aggregator"]).toBe("aggregator");
     expect(bySource["s-null-kind"]).toBe("outlet");
     expect(bySource["s-no-kind"]).toBe("outlet");
+  });
+});
+
+// h42-latency-1: until the headline cron's first write (every 5 minutes) a
+// cluster of 2+ members showed the seed article's raw outlet headline on its
+// page, in <title>, og:title and the JSON-LD. The detail now computes the
+// cron's own first pick from the member titles it already loads. Cluster
+// 7d502c04 on 2026-11-05 is the real case.
+describe("getClusterDetail first-pick headline (h42-latency-1)", () => {
+  const ID = "11111111-1111-4111-8111-111111111111";
+  const SEED = "Eski Ulaştırma Bakanı Denizolgun’un ölüm nedeni netleşti... İşte detaylar!";
+  const SECOND = "Eski Bakan Denizolgun'un şüpheli ölümüyle ilgili Adli Tıp raporu netleşti";
+
+  const cronPick = (newestFirst: string[]) =>
+    pickNeutralTitle(
+      newestFirst.map((title) => ({ title })),
+      { floor: true },
+    );
+
+  function debutMembers() {
+    return [
+      // Newest member first or last: the detail must not care.
+      mkEmbeddedMember("a-second", "s2", "2026-04-17T08:48:39Z", { article: { title: SECOND } }),
+      mkEmbeddedMember("a-seed", "s1", "2026-04-17T08:41:00Z", { article: { title: SEED } }),
+    ];
+  }
+
+  function load(clusterOverrides: Record<string, unknown>, members: unknown[] = debutMembers()) {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({ title_tr: SEED, title_tr_neutral: null, ...clusterOverrides }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = { returns: { data: members, error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    return getClusterDetail(ID);
+  }
+
+  it("shows the cron's first pick, labels it as picked from the sources, and discloses the original", async () => {
+    const result = await load({});
+    const expected = cronPick([SECOND, SEED]);
+
+    expect(expected).not.toBe(SEED);
+    expect(result!.cluster.title_tr).toBe(expected);
+    expect(result!.cluster.title_tr).not.toMatch(/İşte detaylar/i);
+    // The "Özgün başlık" disclosure still shows the outlet's original.
+    expect(result!.cluster.title_original).toBe(SEED);
+    // A pick from member headlines is extractive, even though no model id is stored yet.
+    expect(result!.cluster.title_method).toBe("extractive");
+  });
+
+  it("treats a blank neutral title like a missing one", async () => {
+    const result = await load({ title_tr_neutral: "   " });
+    expect(result!.cluster.title_tr).toBe(cronPick([SECOND, SEED]));
+    expect(result!.cluster.title_original).toBe(SEED);
+    expect(result!.cluster.title_method).toBe("extractive");
+  });
+
+  it("gives the same title whatever order the members come back in", async () => {
+    const a = await load({}, debutMembers());
+    callLog = [];
+    __resetCacheResilienceForTests();
+    const b = await load({}, [...debutMembers()].reverse());
+    expect(a!.cluster.title_tr).toBe(b!.cluster.title_tr);
+  });
+
+  it("feeds the picker every member, including a second article of the same source (the cron does)", async () => {
+    const THIRD = "Eski Bakan Arif Ahmet Denizolgun'un ölüm nedeni belli oldu: Adli Tıp raporu ortaya çıktı";
+    const members = [
+      mkEmbeddedMember("a-seed", "s1", "2026-04-17T08:41:00Z", { article: { title: SEED } }),
+      mkEmbeddedMember("a-second", "s2", "2026-04-17T08:48:39Z", { article: { title: SECOND } }),
+      mkEmbeddedMember("a-third", "s2", "2026-04-17T08:55:00Z", { article: { title: THIRD } }),
+    ];
+    const result = await load({}, members);
+
+    expect(result!.members).toHaveLength(2); // the card list is still deduped by source
+    expect(cronPick([THIRD, SECOND, SEED])).not.toBe(cronPick([SECOND, SEED]));
+    expect(result!.cluster.title_tr).toBe(cronPick([THIRD, SECOND, SEED]));
+  });
+
+  it("leaves a stored neutral title and its provenance exactly as they were", async () => {
+    const stored = "Eski bakan Denizolgun’un ölüm nedeni belli oldu: Adli Tıp raporu ortaya çıktı";
+    const result = await load({ title_tr_neutral: stored, title_neutral_model: EXTRACTIVE_MODEL_ID });
+    expect(result!.cluster.title_tr).toBe(stored);
+    expect(result!.cluster.title_original).toBe(SEED);
+    expect(result!.cluster.title_method).toBe("extractive");
+
+    const llm = await load({ title_tr_neutral: stored, title_neutral_model: "claude-haiku-4-5-20251001" });
+    expect(llm!.cluster.title_tr).toBe(stored);
+    expect(llm!.cluster.title_method).toBe("llm");
+  });
+
+  it("keeps title_tr for a one-member cluster: the cron never titles it", async () => {
+    const raw = "SON DAKİKA: Tek kaynaklı haber!";
+    const result = await load({ title_tr: raw }, [
+      mkEmbeddedMember("only", "s1", "2026-04-17T08:41:00Z", { article: { title: raw } }),
+    ]);
+    expect(result!.cluster.title_tr).toBe(raw);
+    expect(result!.cluster.title_original).toBeNull();
+    expect(result!.cluster.title_method).toBeNull();
+  });
+
+  it("keeps title_tr for an archived cluster: the cron skips archived rows", async () => {
+    const result = await load({ is_archived: true });
+    expect(result!.cluster.title_tr).toBe(SEED);
+    expect(result!.cluster.title_original).toBeNull();
+    expect(result!.cluster.title_method).toBeNull();
+  });
+
+  it("repairs entity residue in a picked title like it does in a stored one", async () => {
+    const members = [
+      mkEmbeddedMember("e1", "s1", "2026-04-17T08:41:00Z", {
+        article: { title: "Bakan Yılmaz &quot;istifa&quot; iddialarını yalanladı" },
+      }),
+      mkEmbeddedMember("e2", "s2", "2026-04-17T08:48:00Z", {
+        article: { title: "Bakan Yılmaz &quot;istifa&quot; iddialarına yanıt verdi" },
+      }),
+    ];
+    const result = await load({ title_tr: "Bakan Yılmaz &quot;istifa&quot; dedi" }, members);
+    const picked = cronPick([members[1]!.article.title, members[0]!.article.title])!;
+    expect(picked).toContain("&quot;"); // the picker keeps the residue; the detail repairs it
+    expect(result!.cluster.title_tr).toBe(picked.replaceAll("&quot;", '"'));
+    expect(result!.cluster.title_tr).not.toBe('Bakan Yılmaz "istifa" dedi');
+  });
+
+  it("reads the picked title from the members it already loaded: no extra query", async () => {
+    await load({});
+    expect(callLog.map((c) => c.table).sort()).toEqual(["cluster_articles", "clusters", "sources"]);
   });
 });
 

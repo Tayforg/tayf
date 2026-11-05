@@ -567,7 +567,11 @@ describe("extractive re-pick: what is written", () => {
   });
 
   it("a null pick (nothing acceptable) stamps only and keeps the stored title", async () => {
-    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Kısa haberler", article_count: 2 })];
+    // The stored title is a member's own wording that fails the gate (a question): not stale (h42-titles-1),
+    // nothing passes the gate, the pick is null and the stored title stays.
+    dbState.repickRows = [
+      repickRow("r1", { title_tr_neutral: "100 il olacak mı, hangi ilçeler il olacak?", article_count: 2 }),
+    ];
     members("r1", ["100 il olacak mı, hangi ilçeler il olacak?", "POLİS BİLE ŞAŞKINA DÖNDÜ"]);
 
     const { body } = await run("203.0.113.63");
@@ -575,6 +579,20 @@ describe("extractive re-pick: what is written", () => {
     const patch = patchOf(updateFor("r1")!);
     expect(patch).toEqual({ title_neutral_model: EXTRACTIVE_MODEL_ID, title_neutral_member_count: 2 });
     expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
+  it("h42 review (sec-db-1): a stored title that fails the gate and that no member carries is replaced by the floor pick, so migration 162's stale set does not offer it again", async () => {
+    // "Kısa haberler" is a placeholder no member carries. It used to come back as null (stamp only, row stays in the stale set).
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Kısa haberler", article_count: 2 })];
+    members("r1", ["100 il olacak mı, hangi ilçeler il olacak?", "POLİS BİLE ŞAŞKINA DÖNDÜ"]);
+
+    const { body } = await run("203.0.113.64");
+    expect(body.clusters!.r1).toEqual({ status: "repicked" });
+    expect(patchOf(updateFor("r1")!)).toEqual({
+      title_tr_neutral: "Polis bile şaşkına döndü",
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: 2,
+    });
   });
 
   it("a cluster with no members stamps only", async () => {
@@ -750,12 +768,40 @@ describe("extractive re-pick (hunt 16): the stored title is the incumbent", () =
   });
 
   it("keeps the stored title when its members are all unacceptable and the title itself passes the gate", async () => {
-    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Eski başlık burada duruyor", article_count: 2 })];
+    // The stored title is the first member's wording without its question mark: a member's text (h42-titles-1
+    // replaces a stored title no member carries, see the next test).
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Masterchef kim elendi, kim gitti", article_count: 2 })];
     members("r1", ["Masterchef kim elendi, kim gitti?", "MasterChef'te kim elendi? Kim kazandı, kim gitti?"]);
 
     const { body } = await run("203.0.113.95");
     expect(body.clusters!.r1).toEqual({ status: "repick-kept" });
     expect("title_tr_neutral" in patchOf(updateFor("r1")!)).toBe(false);
+  });
+
+  it("h42 review (editorial-1): a stored title that passes the gate and that no member carries is kept when every member is a question (never a floor title that fails the gate)", async () => {
+    // Part of migration 162's residue: the row is stamped and stays offered until its old_title is 7 days old.
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Eski başlık burada duruyor", article_count: 2 })];
+    members("r1", ["Masterchef kim elendi, kim gitti?", "MasterChef'te kim elendi? Kim kazandı, kim gitti?"]);
+
+    const { body } = await run("203.0.113.97");
+    expect(body.clusters!.r1).toEqual({ status: "repick-kept" });
+    expect(patchOf(updateFor("r1")!)).toEqual({
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: 2,
+    });
+  });
+
+  it("h42 review (sec-db-1): a stored question that no member carries is replaced by a member's own wording, the floor pick", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Eski başlık hâlâ duruyor mu?", article_count: 2 })];
+    members("r1", ["Masterchef kim elendi, kim gitti?", "MasterChef'te kim elendi? Kim kazandı, kim gitti?"]);
+
+    const { body } = await run("203.0.113.98");
+    expect(body.clusters!.r1).toEqual({ status: "repicked" });
+    expect(patchOf(updateFor("r1")!)).toEqual({
+      title_tr_neutral: "MasterChef'te kim elendi? Kim kazandı, kim gitti?",
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: 2,
+    });
   });
 
   it("the first pick passes no incumbent: an IS NULL cluster takes the best member title", async () => {
@@ -818,7 +864,8 @@ describe("extractive IS NULL pass", () => {
   });
 
   it("the re-pick stays strict: a row that already has a title keeps it when no member is acceptable", async () => {
-    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Eski başlık burada duruyor" })];
+    // The stored title is the first member's wording without its question mark (a member's text).
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "100 il olacak mı, hangi ilçeler il olacak" })];
     members("r1", ["100 il olacak mı, hangi ilçeler il olacak?", "Bakırköy soruşturması neden başladı, kim tutuklandı?"]);
 
     const { body } = await run("203.0.113.82");

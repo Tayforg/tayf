@@ -11,6 +11,9 @@ import {
   foldTr,
   normaliseSearchQuery,
   pgLower,
+  searchQueryCut,
+  searchQueryWasShortened,
+  searchedWordsAsTyped,
   titleCaseTr,
   turkishQueryVariants,
 } from "./turkish-query";
@@ -482,5 +485,143 @@ describe("canonicalSearchQuery", () => {
     expect(canonicalSearchQuery("!".repeat(100_000))).toBe("");
     expect(canonicalSearchQuery("a ".repeat(50_000))).toBe("a a a a a a");
     expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h42-search-2: the 6-term / 64-character cap is a deliberate cost bound, but a
+// reader who typed 7 words used to get results for 6 of them under a heading that
+// claimed all 7. searchQueryWasShortened says when the cap changed the search.
+// ---------------------------------------------------------------------------
+
+describe("searchQueryWasShortened", () => {
+  const words = (n: number) => Array.from({ length: n }, (_, i) => `kelime${i + 1}`).join(" ");
+
+  it("is false for 6 terms and true for 7", () => {
+    expect(searchQueryWasShortened(words(6))).toBe(false);
+    expect(searchQueryWasShortened(words(7))).toBe(true);
+    expect(searchQueryWasShortened(words(40))).toBe(true);
+  });
+
+  it("is false for short, empty and blank queries", () => {
+    for (const q of ["", "   ", "\t\n", "erdoğan", "Erdoğan Cumhurbaşkanı", "a"]) {
+      expect(searchQueryWasShortened(q), JSON.stringify(q)).toBe(false);
+    }
+  });
+
+  it("is true for a 70-character 3-term query (the length cap, not the term cap)", () => {
+    const q = `${"a".repeat(23)} ${"b".repeat(23)} ${"c".repeat(22)}`;
+    expect(q).toHaveLength(70);
+    expect(q.split(" ")).toHaveLength(3);
+    expect(searchQueryWasShortened(q)).toBe(true);
+  });
+
+  it("is true for a 300-character single term", () => {
+    expect(searchQueryWasShortened("a".repeat(300))).toBe(true);
+  });
+
+  it("treats exactly MAX_SEARCH_QUERY_LENGTH characters as whole and one more as cut", () => {
+    expect(searchQueryWasShortened("a".repeat(MAX_SEARCH_QUERY_LENGTH))).toBe(false);
+    expect(searchQueryWasShortened("a".repeat(MAX_SEARCH_QUERY_LENGTH + 1))).toBe(true);
+    // 6 terms that add up to exactly 64 characters with their spaces.
+    const sixAt64 = ["a".repeat(10), "b".repeat(10), "c".repeat(10), "d".repeat(10), "e".repeat(10), "f".repeat(9)].join(" ");
+    expect(sixAt64).toHaveLength(64);
+    expect(searchQueryWasShortened(sixAt64)).toBe(false);
+    expect(searchQueryWasShortened(`${sixAt64}x`)).toBe(true);
+  });
+
+  it("gives false for the canonical output passed back in", () => {
+    const inputs = [
+      words(7),
+      words(40),
+      `${"a".repeat(23)} ${"b".repeat(23)} ${"c".repeat(22)}`,
+      "a".repeat(300),
+      "a".repeat(63) + "\u{1F600}" + "b",
+      "ERDOĞAN! " + words(9),
+    ];
+    for (const q of inputs) {
+      expect(searchQueryWasShortened(q), q.slice(0, 20)).toBe(true);
+      expect(searchQueryWasShortened(canonicalSearchQuery(q)), q.slice(0, 20)).toBe(false);
+    }
+  });
+
+  it("counts a term only when something is left of it after the cleaning", () => {
+    // Six words plus bare punctuation, emoji and a control character: still six terms.
+    expect(searchQueryWasShortened(`${words(6)} !!! ?? \u{1F600} \u0000 “”`)).toBe(false);
+    // The apostrophe suffix is cut and the case is folded, so this is still 7 terms.
+    expect(searchQueryWasShortened("Erdoğan'ın Özel'in a1 b2 c3 d4 e5")).toBe(true);
+    // Edge punctuation does not make a term longer for the length check.
+    expect(searchQueryWasShortened("(a) (b) (c) (d) (e) (f)")).toBe(false);
+  });
+
+  it("is linear: 100k characters finish at once", () => {
+    const started = performance.now();
+    expect(searchQueryWasShortened("a ".repeat(50_000))).toBe(true);
+    expect(searchQueryWasShortened("! ".repeat(50_000))).toBe(false);
+    expect(searchQueryWasShortened("!a".repeat(50_000))).toBe(true);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("searchQueryCut", () => {
+  it("is null when nothing was cut", () => {
+    expect(searchQueryCut("erdoğan")).toBeNull();
+    expect(searchQueryCut("a b c d e f")).toBeNull();
+    expect(searchQueryCut("")).toBeNull();
+  });
+
+  it("says 'terms' when only the term cap applied", () => {
+    expect(searchQueryCut("a b c d e f g")).toBe("terms");
+  });
+
+  it("says 'length' when the 64-character cap applied, even with fewer than 6 terms", () => {
+    expect(searchQueryCut(`${"a".repeat(23)} ${"b".repeat(23)} ${"c".repeat(22)}`)).toBe("length");
+    expect(searchQueryCut("a".repeat(300))).toBe("length");
+  });
+
+  it("prefers 'length' when both caps apply (the tighter bound is the true one)", () => {
+    expect(searchQueryCut(`${"a".repeat(30)} ${"b".repeat(30)} c d e f g h`)).toBe("length");
+  });
+
+  it("agrees with searchQueryWasShortened", () => {
+    for (const q of ["", "x", "a b c d e f", "a b c d e f g", "a".repeat(80)]) {
+      expect(searchQueryWasShortened(q)).toBe(searchQueryCut(q) !== null);
+    }
+  });
+});
+
+describe("searchedWordsAsTyped", () => {
+  it("returns the first 6 words with the reader's own casing and punctuation", () => {
+    expect(searchedWordsAsTyped("Erdoğan! Özel, Bahçeli (Akşener) Kılıçdaroğlu İmamoğlu zebra")).toBe(
+      "Erdoğan! Özel, Bahçeli (Akşener) Kılıçdaroğlu İmamoğlu",
+    );
+  });
+
+  it("returns the whole query when there are 6 words or fewer", () => {
+    expect(searchedWordsAsTyped("Erdoğan Özel")).toBe("Erdoğan Özel");
+    expect(searchedWordsAsTyped("")).toBe("");
+  });
+
+  it("collapses whitespace and skips terms that are only punctuation, like the search does", () => {
+    expect(searchedWordsAsTyped("  a   b !!! c \u{1F600} d  e f g ")).toBe("a b c d e f");
+  });
+
+  it("keeps the words in step with the canonical query", () => {
+    const q = "ERDOĞAN'ın  Özel!  a1 b2 c3 d4 e5 f6";
+    const typed = searchedWordsAsTyped(q);
+    expect(typed.split(" ")).toHaveLength(MAX_SEARCH_TERMS);
+    expect(canonicalSearchQuery(typed)).toBe(canonicalSearchQuery(q));
+  });
+});
+
+describe("canonicalSearchQuery keeps its output while sharing the term walk", () => {
+  it.each([
+    ["Erdoğan'ın  Özel'den", "erdoğan özel"],
+    ["  ERDOĞAN!  ", "erdoğan"],
+    ["a b c d e f g h", "a b c d e f"],
+    ["!!! a ??? b", "a b"],
+    ['"Ak Parti" -CHP', '"ak parti" -chp'],
+  ])("%j -> %j", (input, expected) => {
+    expect(canonicalSearchQuery(input)).toBe(expected);
   });
 });

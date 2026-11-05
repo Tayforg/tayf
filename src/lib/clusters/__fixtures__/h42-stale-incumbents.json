@@ -1,0 +1,67 @@
+[
+ {
+  "cid": "31fde7d7",
+  "id": "31fde7d7-548c-42b2-8f5e-7d293510f329",
+  "stored": "Denizli'de çöp kamyonu sürücüsü, sıkışan temizlikçinin ölümü üzerine gözaltına alındı",
+  "article_count": 2,
+  "stamped": 2,
+  "model": "extractive-v6",
+  "titles": [
+   "Denizli'de direk ile çöp kamyonu arasına sıkışan temizlik işçisi hayatını kaybetti",
+   "Denizli'de direk ile çöp kamyonu arasına sıkışan temizlik işçisi hayatını kaybetti"
+  ],
+  "why": "Both members now read that the cleaner died; the stored title still says the truck driver was detained (an edit chain the 074 write-back applied to articles.title only)."
+ },
+ {
+  "cid": "620362a3",
+  "id": "620362a3-7e0c-4279-b77b-35cf4792c5af",
+  "stored": "Bahçelievler'de inşaat kazısında göçük: 2 kişi toprak altında kaldı",
+  "article_count": 4,
+  "stamped": 2,
+  "model": "extractive-v6",
+  "titles": [
+   "Son dakika! İstanbul'da inşaatta göçük: 2 işçi toprak altında",
+   "Son Dakika: Bahçelievler'de göçük! İşçinin cansız bedenine ulaşıldı",
+   "Bahçelievler'deki inşaat göçüğünde acı haber: Toprak altında kalan işçi hayatını kaybetti",
+   "Bahçelievler'de inşaatta toprak kayması! Göçük altında kalan 1 işçi hayatını kaybetti"
+  ],
+  "why": "cumhuriyet edited \"2 kişi toprak altında kaldı\"; the members now report the worker died."
+ },
+ {
+  "cid": "5893d4e5",
+  "id": "5893d4e5-813c-463f-978e-bc4c36e3a434",
+  "stored": "İBB davası 104. gün: Gizli tanıklar söz alacak",
+  "article_count": 4,
+  "stamped": 4,
+  "model": "extractive-v6",
+  "titles": [
+   "İBB davasında 3. duruşmada 3. gün: Gizli tanıklar dinleniyor",
+   "İBB davası 104. gün: Gizli tanıklar konuştu: 'Gördüm' yok, 'duydum' var",
+   "İBB davasında üçüncü celsede gizli tanık Gürgen konuştu: \"Gördüğüm yok ama konuşulanlar hep öyleydi başkanım\"",
+   "İBB davasında üçüncü celsenin üçüncü günü başlıyor: Gizli tanıkların dinlenmesi bekleniyor"
+  ],
+  "why": "odatv edited its headline; the stored title (\"Gizli tanıklar söz alacak\") is the superseded text, no current member carries it."
+ },
+ {
+  "cid": "38610f3f",
+  "id": "38610f3f-ee96-464b-aa84-f174c76385f1",
+  "stored": "Cumhurbaşkanı Erdoğan Azerbaycan'a gidiyor: \"Aşamayacağımız hiçbir engel yok\"",
+  "article_count": 11,
+  "stamped": 8,
+  "model": "extractive-v6",
+  "titles": [
+   "Son dakika... Cumhurbaşkanı Erdoğan Azerbaycan'a gidiyor! 'Kardeşliğimizin aşamayacağı hiçbir engel yok'",
+   "Erdoğan'dan Azerbaycan açıklaması: Kardeşliğimizin aşamayacağı hiçbir engel yok",
+   "Cumhurbaşkanı Erdoğan'dan ABD'deki ara seçim sonuçlarına ilişkin değerlendirme: 'Bölgemizin huzura kavuşmasını istiyoruz'",
+   "Cumhurbaşkanı Erdoğan'dan Azerbaycan Açıklaması: 8 Kasım Zafer Günü'nde Bakü Ziyareti Sinyali",
+   "Erdoğan'dan Azerbaycan açıklaması! Ziyaret için tarih verdi",
+   "Cumhurbaşkanı Erdoğan'dan Azerbaycan açıklaması: 8 Kasım Zafer Günü'nde Bakü ziyareti sinyali",
+   "Tasada da sevinçte de bir! Başkan Erdoğan gardaş Azerbaycan'a gidiyor: \"Evelallah aşamayacağımız hiçbir engel yok\"",
+   "Cumhurbaşkanı Erdoğan: \"8 Kasım'da Azerbaycan'ın Zafer Günü var. Ben de fevkalade bir durum söz konusu olmazsa 8 Kasım günü Azerbaycan ziyareti yapmayı düşünüyorum. İnşallah bu ziyaret vesilesiyle gerekli adımları atma imkanımız olur\"",
+   "Cumhurbaşkanı Erdoğan: 8 Kasım'da Azerbaycan'a gideceğim",
+   "Başkan Erdoğan'dan Azerbaycan mesajı: Aşamayacağımız hiçbir engel yoktur",
+   "Erdoğan: 8 Kasım'da Azerbaycan'a gidebilirim"
+  ],
+  "why": "No current member carries the stored title: the 'Son dakika' member quotes 'Kardeşliğimizin aşamayacağı hiçbir engel yok', the stored title ends in a different quote (an earlier edit)."
+ }
+]

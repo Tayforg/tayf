@@ -27,6 +27,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "./feed-health";
+import { clusterDisplayTitle } from "./display-headline";
 import { logRecallVeto, publicBlindspotClaim } from "./recall-veto";
 import { detectWireRedistribution } from "./wire";
 
@@ -246,9 +247,10 @@ export type EmbeddedClusterRow = {
   /**
    * H2-WORKER neutral-headline pipeline (migration 019 + headline-worker.mjs):
    * the LLM-rewritten neutral version of `title_tr`. NULL until the rewrite
-   * worker has processed the cluster. Page consumers coalesce
-   * `title_tr_neutral ?? title_tr` so neutralized titles win as soon as
-   * they're available without a destructive overwrite of the original.
+   * worker has processed the cluster. buildClusterBundle shows it as soon as
+   * it exists (no destructive overwrite of the original) and, while it is
+   * still NULL, the cron's own first pick over the member titles
+   * (display-headline.ts), not the raw `title_tr`.
    */
   title_tr_neutral: string | null;
   summary_tr: string;
@@ -624,18 +626,22 @@ export function buildClusterBundle(
     }
   }
 
+  // H2 neutral-headline coalesce: prefer the stored neutral title once the
+  // headline cron has written it (an empty one is junk and counts as missing).
+  // h42-latency-1: until that first write (the cron runs every 5 minutes) a
+  // cluster of 2+ members used to show the seed article's raw outlet headline,
+  // clickbait and all, in the top slots. It now shows the cron's own first pick
+  // (`pickNeutralTitle(members, { floor: true })`), computed here from the raw
+  // member list the cron also reads (pre-dedupe: a second article of a source
+  // still counts), so the heading does not change when the cron writes. Pure,
+  // runs inside the caller's `use cache` body, writes nothing. A cluster with
+  // fewer than 2 members keeps `title_tr`: the cron never titles it.
+  const { title: headline } = clusterDisplayTitle(c, members);
+
   const bundle: ClusterBundle = {
     cluster: {
       id: c.id,
-      // H2 neutral-headline coalesce: prefer the LLM-rewritten neutral
-      // title once H2-WORKER has produced it. Falls back to the original
-      // seed-inherited title for clusters that haven't been rewritten yet.
-      // Empty strings are coalesced too — an empty neutral title would
-      // mean the rewriter wrote junk and we'd rather show the original.
-      title_tr:
-        c.title_tr_neutral && c.title_tr_neutral.trim().length > 0
-          ? c.title_tr_neutral
-          : c.title_tr,
+      title_tr: headline,
       summary_tr: c.summary_tr,
       bias_distribution: biasDistribution,
       is_blindspot: isBlindspot,

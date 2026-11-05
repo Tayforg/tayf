@@ -630,15 +630,208 @@ describe("HomeFeed: a 300 character query does not overflow", () => {
     expect(String(emptyP?.props?.className)).toContain("max-w-full");
   });
 
-  it("keeps the live region and the title at 60 code points as before", async () => {
+  it("keeps the live region and the title at 60 code points (plus the h42-search-2 note: this query is cut at 64 characters)", async () => {
     const tree = await longTree();
     expect(liveRegionText(tree)).toBe(
-      `“${"a".repeat(59)}…” için sonuç bulunamadı.`,
+      `“${"a".repeat(59)}…” için sonuç bulunamadı. Arama sorgunun ilk 64 karakteriyle yapıldı.`,
     );
     expect(await generateMetadata({ searchParams: Promise.resolve({ q: long }) })).toEqual({
       title: { absolute: `“${"a".repeat(59)}…” araması — Tayf` },
       robots: { index: false, follow: true },
     });
+  });
+});
+
+describe("HomeFeed: AKP and AK Parti are one search (h42-search-1)", () => {
+  const feed = () =>
+    feedOf(
+      bundle("grup", "AK Parti Grup Başkanı Abdullah Güler açıkladı"),
+      bundle("akp", "AKP'den açıklama"),
+      bundle("chp", "CHP Genel Başkanı Özel konuştu"),
+    );
+
+  it.each(["AKP", "AK Parti", "ak parti", "AK PARTİ", "akp'nin"])(
+    "%s lists both spellings in the feed, in feed order, and not CHP",
+    async (q) => {
+      getPoliticsClusters.mockResolvedValue(feed());
+      searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+      const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+
+      expect(clusterCardIds(tree), q).toEqual(["grup", "akp"]);
+      expect(visibleText(tree)).toContain("için 2 sonuç");
+    },
+  );
+
+  it("hands the archive the raw query, so the cache key and the follow target are unchanged", async () => {
+    getPoliticsClusters.mockResolvedValue(feed());
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+    await HomeFeed({ searchParams: Promise.resolve({ q: "AKP" }) });
+
+    expect(searchClusters).toHaveBeenCalledTimes(1);
+    expect(searchClusters).toHaveBeenCalledWith("AKP");
+  });
+
+  it("keeps a quoted 'AK Parti' exact, like the archive does (no AKP card)", async () => {
+    getPoliticsClusters.mockResolvedValue(feed());
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+    const tree = await HomeFeed({
+      searchParams: Promise.resolve({ q: '"AK Parti"' }),
+    });
+
+    expect(clusterCardIds(tree)).toEqual(["grup"]);
+  });
+
+  it("leaves the 'ak' prefix behaviour alone", async () => {
+    getPoliticsClusters.mockResolvedValue(
+      feedOf(
+        bundle("grup", "AK Parti Grup Başkanı açıkladı"),
+        bundle("aks", "Akşener açıklama yaptı"),
+        bundle("bas", "Başbakan dakikaya kadar bekledi"),
+      ),
+    );
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "ak" }) });
+
+    expect(clusterCardIds(tree)).toEqual(["grup", "aks"]);
+  });
+});
+
+describe("HomeFeed: a query past the search cap says so (h42-search-2)", () => {
+  const six = "Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan";
+  const seven = `${six} zebra`;
+  const TERM_NOTE = "Arama ilk 6 kelimeyle yapıldı.";
+  const LENGTH_NOTE = "Arama sorgunun ilk 64 karakteriyle yapıldı.";
+
+  function givenFeed() {
+    getPoliticsClusters.mockResolvedValue(
+      feedOf(bundle("e", "Erdoğan konuştu"), bundle("b", "Başbakan açıkladı")),
+    );
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+  }
+
+  it("a 7-word query echoes its first 6 words and the note, not the 7th word", async () => {
+    givenFeed();
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: seven }) });
+
+    const text = visibleText(tree);
+    expect(text).toContain(`“${six}” için 1 sonuç`);
+    expect(text).toContain(TERM_NOTE);
+    expect(text).not.toContain("zebra");
+  });
+
+  it("puts the note in the one live region as well", async () => {
+    givenFeed();
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: seven }) });
+
+    expect(liveRegionText(tree)).toBe(`“${six}” için 1 sonuç bulundu. ${TERM_NOTE}`);
+  });
+
+  it("still hands the archive the raw query (the cache key is built from it)", async () => {
+    givenFeed();
+    await HomeFeed({ searchParams: Promise.resolve({ q: seven }) });
+
+    expect(searchClusters).toHaveBeenCalledTimes(1);
+    expect(searchClusters).toHaveBeenCalledWith(seven);
+  });
+
+  it("filters the feed with the same words as the archive: the 7-word query equals its first 6", async () => {
+    givenFeed();
+    const longTree = await HomeFeed({ searchParams: Promise.resolve({ q: seven }) });
+    givenFeed();
+    const shortTree = await HomeFeed({ searchParams: Promise.resolve({ q: six }) });
+
+    expect(clusterCardIds(longTree)).toEqual(["e"]);
+    expect(clusterCardIds(longTree)).toEqual(clusterCardIds(shortTree));
+  });
+
+  it("a different 7th word does not change the feed either (it used to empty it)", async () => {
+    givenFeed();
+    const tree = await HomeFeed({
+      searchParams: Promise.resolve({ q: `${six} konuştu zebra` }),
+    });
+    // 8 words: the 7th and 8th are beyond the cap, so the feed is the 6-word one.
+    expect(clusterCardIds(tree)).toEqual(["e"]);
+  });
+
+  it("says nothing extra for a 6-word query", async () => {
+    givenFeed();
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: six }) });
+
+    const text = visibleText(tree);
+    expect(text).toContain(`“${six}” için 1 sonuç`);
+    expect(text).not.toContain("Arama ilk");
+    expect(text).not.toContain("Arama sorgunun");
+    expect(liveRegionText(tree)).toBe(`“${six}” için 1 sonuç bulundu.`);
+  });
+
+  it("says nothing extra for a 3-word query", async () => {
+    givenFeed();
+    const tree = await HomeFeed({
+      searchParams: Promise.resolve({ q: "Erdoğan konuştu bugün" }),
+    });
+
+    const text = visibleText(tree);
+    expect(text).toContain("“Erdoğan konuştu bugün” için");
+    expect(text).not.toContain("Arama ilk");
+    expect(text).not.toContain("Arama sorgunun");
+    expect(liveRegionText(tree)).not.toContain("Arama ");
+  });
+
+  it("names the character cap when a 3-word query is longer than 64 characters", async () => {
+    givenFeed();
+    const q = `${"a".repeat(23)} ${"b".repeat(23)} ${"c".repeat(22)}`;
+    expect(q).toHaveLength(70);
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+
+    expect(visibleText(tree)).toContain(LENGTH_NOTE);
+    expect(visibleText(tree)).not.toContain(TERM_NOTE);
+    expect(liveRegionText(tree)).toContain(LENGTH_NOTE);
+  });
+
+  it("keeps the empty-search card to the 6 searched words, and the count line carries the note once", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("b", "Başbakan açıkladı")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: seven }) });
+
+    const text = visibleText(tree);
+    expect(text).toContain(`“${six}” için 0 sonuç. ${TERM_NOTE}`);
+    expect(text).toContain(`“${six}” için sonuç yok. Farklı bir kelime deneyin.`);
+    expect(text.split(TERM_NOTE)).toHaveLength(2);
+    expect(text).not.toContain("zebra");
+    expect(liveRegionText(tree)).toBe(`“${six}” için sonuç bulunamadı. ${TERM_NOTE}`);
+  });
+
+  it("escapes markup in the echoed words (the note adds no HTML)", async () => {
+    givenFeed();
+    const tree = await HomeFeed({
+      searchParams: Promise.resolve({ q: "<b>x</b> a1 b2 c3 d4 e5 f6" }),
+    });
+
+    expect(collectElements(tree).some((e) => e.type === "b")).toBe(false);
+    expect(visibleText(tree)).toContain(TERM_NOTE);
+    const echoes = collectRendered(tree, new Set(["EmptySearch"])).filter(
+      (e) => typeName(e) === "SearchEcho",
+    );
+    for (const echo of echoes) {
+      const markup = renderToStaticMarkup(
+        createElement(echo.type as never, echo.props as never),
+      );
+      expect(markup).not.toContain("<b>");
+      expect(markup).toContain("&lt;b&gt;x&lt;/b&gt;");
+    }
+  });
+
+  it("does not add the note to a query that is too short to search", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf());
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "!" }) });
+
+    expect(searchClusters).not.toHaveBeenCalled();
+    expect(visibleText(tree)).not.toContain("Arama ilk");
+    expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
   });
 });
 
