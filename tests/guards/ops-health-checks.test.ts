@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150, 157, 158, 159).
+// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -40,6 +40,9 @@ import { fileURLToPath } from "node:url";
 // spots in the newest version (tests/migrations/158-saved-clusters-v3.test.ts pins the full diff against 157).
 // 159 (h39-pipeline2-1) changes only row 20: `feed_poll_stale` is a fail at one counted feed over 60 minutes as well as at
 // three over 30 (tests/migrations/159-ingest-stale-admission.test.ts pins the byte identity of everything else against 158).
+// 161 (h40-edgefns-1) appended row 21 (`image_coverage`, per outlet/wire source the share of the last 24 hours' articles stored
+// without an image against the source's own 14 days before; warn only): the newest version carries it LAST, after feed_poll_stale,
+// and keeps rows 1-20 as 159 wrote them (tests/migrations/161-image-coverage-by-source.test.ts pins that byte identity).
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -56,7 +59,8 @@ const SIZE_CHECK = "db_size_mb";
 const ANON_CHECK = "anon_surface";
 const QUEUE_CHECK = "queue_lag";
 const CRON_CHECK = "cron_jobs_stalled";
-const LAST_CHECK = "feed_poll_stale";
+const LAST_CHECK = "image_coverage";
+const STALE_CHECK = "feed_poll_stale";
 const MIGRATION_145 = resolve(MIGRATIONS_DIR, "145_ops_anon_surface_check.sql");
 const CREATE_LINE = "create or replace function public.ops_health_report()";
 /** What follows the last row's `return next;` in every version. */
@@ -120,10 +124,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(14);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(15);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -203,9 +207,9 @@ describe("ops_health_report(): the newest version", () => {
     expect(after).toMatch(/\|\|\s*v\.reason/);
   });
 
-  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${CRON_CHECK} (migration 150), ${LAST_CHECK} (migration 157) in that order, ${LAST_CHECK} LAST`, () => {
-    expect(newest.num).toBeGreaterThanOrEqual(159);
-    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, CRON_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
+  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${CRON_CHECK} (migration 150), ${STALE_CHECK} (migration 157), ${LAST_CHECK} (migration 161) in that order, ${LAST_CHECK} LAST`, () => {
+    expect(newest.num).toBeGreaterThanOrEqual(161);
+    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, CRON_CHECK, STALE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
     expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
     expect(newest.names.indexOf(GAPS_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
     expect(newest.names.indexOf(ROUTE_CHECK)).toBeGreaterThan(newest.names.indexOf(GAPS_CHECK));
@@ -213,7 +217,8 @@ describe("ops_health_report(): the newest version", () => {
     expect(newest.names.indexOf(ANON_CHECK)).toBeGreaterThan(newest.names.indexOf(SIZE_CHECK));
     expect(newest.names.indexOf(QUEUE_CHECK)).toBeGreaterThan(newest.names.indexOf(ANON_CHECK));
     expect(newest.names.indexOf(CRON_CHECK)).toBeGreaterThan(newest.names.indexOf(QUEUE_CHECK));
-    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(CRON_CHECK));
+    expect(newest.names.indexOf(STALE_CHECK)).toBeGreaterThan(newest.names.indexOf(CRON_CHECK));
+    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(STALE_CHECK));
   });
 
   it("keeps rows 1-17 byte for byte as 145 wrote them (raw text, comments included) and appends the queue_lag marker right after row 17", () => {
@@ -233,7 +238,7 @@ describe("ops_health_report(): the newest version", () => {
     // the executable create line is in the file once (comments are stripped before counting)
     expect(newest.code.indexOf(CREATE_LINE)).toBeGreaterThanOrEqual(0);
     expect(newest.code.indexOf(CREATE_LINE, newest.code.indexOf(CREATE_LINE) + 1), "the create line is executable once").toBe(-1);
-    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20; everything else is 145's text
+    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20, 161 appended row 21; everything else is 145's text
     const expected = newest.num >= 158 ? withSixthAnonRpc(rows145) : rows145;
     expect(rawNewest.slice(at, at + expected.length)).toBe(expected);
     // the next non-blank line is the row-18 marker comment
@@ -445,7 +450,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("feed_poll_stale reads active sources without a quarantine marker, counts the ones not polled for 30 minutes, and can fail, warn and answer unknown", () => {
-    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    const seg = slice(STALE_CHECK).replace(/\s+/g, " ");
     expect(seg).toContain("from public.sources x where x.active and x.fetch_quarantined_until is null");
     expect(seg).toContain("x.fetch_last_at < pg_catalog.now() - interval '30 minutes'");
     expect(seg).toContain("threshold := 3");
@@ -455,7 +460,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("feed_poll_stale also fails at one counted feed last polled more than 60 minutes ago (159): f_old counts it, and a copy-paste of 157's fail-at-3-only status must not come back", () => {
-    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    const seg = slice(STALE_CHECK).replace(/\s+/g, " ");
     expect(seg).toContain("pg_catalog.count(*) filter (where x.fetch_last_at < pg_catalog.now() - interval '60 minutes')::numeric");
     expect(seg).toContain("into f_total, f_stale, f_old, f_never, f_list");
     expect(seg).not.toMatch(/status := case when f_stale >= 3 then 'fail'/);
@@ -465,7 +470,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("feed_poll_stale only reads, and reads no url, validator or header column", () => {
-    const outside = wordsOf(blankLiterals(slice(LAST_CHECK)));
+    const outside = wordsOf(blankLiterals(slice(STALE_CHECK)));
     for (const w of ["insert", "update", "delete", "truncate", "drop", "alter", "create", "perform", "execute"]) {
       expect(outside, w).not.toContain(w);
     }
@@ -473,6 +478,33 @@ describe("ops_health_report(): the newest version", () => {
       expect(outside, w).not.toContain(w);
     }
     expect(outside).toContain("fetch_last_at");
+  });
+
+  it("image_coverage (161) compares each outlet/wire source's 24 hour image-less share (newest hour skipped) with its own 14 days before, and can warn and answer unknown but never fail", () => {
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    expect(seg).toContain("threshold := 1");
+    expect(seg).toContain("s.kind in ('outlet', 'wire')");
+    expect(seg).toContain("a.created_at >= v_now - interval '25 hours' and a.created_at < v_now - interval '1 hour'");
+    expect(seg).toContain("a.created_at >= v_now - interval '15 days' and a.created_at < v_now - interval '25 hours'");
+    expect(seg).toContain("pg_catalog.count(*) filter (where a.image_url is null)::numeric");
+    expect(seg).toContain("rs.nul / rs.n >= 0.5 and rs.nul / rs.n - b.nul / b.n >= 0.4");
+    expect(seg).toContain("status := case when i_hit >= 1 then 'warn' else 'pass' end;");
+    expect(seg).not.toMatch(/'fail'/i);
+    expect(seg).toMatch(/status\s*:=\s*'unknown'/i);
+  });
+
+  it("image_coverage only reads, bounds every scan of public.articles on created_at, and reads no url, title or body column", () => {
+    const outside = wordsOf(blankLiterals(slice(LAST_CHECK)));
+    for (const w of ["insert", "update", "delete", "truncate", "drop", "alter", "create", "perform", "execute"]) {
+      expect(outside, w).not.toContain(w);
+    }
+    for (const w of ["url", "rss_url", "title", "summary", "description", "content", "content_hash"]) {
+      expect(outside, w).not.toContain(w);
+    }
+    expect(outside).toContain("image_url");
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    expect(seg.split("from public.articles a").length - 1).toBe(2);
+    expect(seg.split("a.created_at >= v_now - interval").length - 1).toBe(2);
   });
 
   it("revokes from public, anon and authenticated, and grants execute only to service_role", () => {

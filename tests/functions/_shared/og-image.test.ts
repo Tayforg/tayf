@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  classifyFetchBlock,
   extractHeroImageFromHtml,
   extractOgImage,
+  fetchHeroImage,
+  fetchHeroImageResult,
+  fetchOgImage,
+  fetchOgImageResult,
   isValidImageUrl,
 } from "../../../supabase/functions/_shared/og-image.ts";
 
@@ -576,5 +581,232 @@ describe("hostile pages: no super-linear backtracking", () => {
     const a = timed(() => extractHeroImageFromHtml(small)).ms;
     const b = timed(() => extractHeroImageFromHtml(large)).ms;
     expect(b).toBeLessThan(Math.max(a * 40, 30));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h40-edgefns-1: a Cloudflare challenge must be told apart from a page that has
+// no image. Medyascope's article pages answer HTTP 403 with `cf-mitigated:
+// challenge` (title "Just a moment...") since 2026-10-29; fetchOgImage returned
+// null for every non-2xx, so the image-consumer counted a block as "not-found"
+// and nothing showed that 90% of that outlet's articles had lost their image.
+//
+// classifyFetchBlock only classifies what the one existing fetch already
+// returned. The fetch*Result variants carry the answer to the consumer; the
+// original fetchOgImage / fetchHeroImage stay thin url|null wrappers.
+// ---------------------------------------------------------------------------
+
+const CHALLENGE_HTML =
+  '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>' +
+  '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"></head><body>' +
+  "<script>(function(){var s=document.createElement('script');" +
+  "s.src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=9a1b2c3d';" +
+  "document.head.appendChild(s);})();</script></body></html>";
+
+describe("classifyFetchBlock (h40-edgefns-1)", () => {
+  it.each([
+    ["a 403 with cf-mitigated: challenge", 403, { "cf-mitigated": "challenge" }, ""],
+    ["a 403 whose header name and value are in other cases", 403, { "CF-Mitigated": "Challenge" }, ""],
+    ["a 403 whose header value has padding", 403, { "cf-mitigated": " challenge " }, ""],
+    ["a 503 with the 'Just a moment...' title in the body head", 503, {}, "<html><head><title>Just a moment...</title></head>"],
+    ["a 503 with the title in other cases and spaced", 503, {}, "<HEAD><TITLE>  just a MOMENT...</TITLE>"],
+    ["a 403 with the challenge-platform script", 403, {}, CHALLENGE_HTML],
+    ["a 429 with the challenge-platform script", 429, {}, '<script src="/cdn-cgi/challenge-platform/scripts/x.js"></script>'],
+    ["the real Medyascope answer: 403, header, title and script", 403, { "cf-mitigated": "challenge", server: "cloudflare" }, CHALLENGE_HTML],
+  ])("returns 'challenge' for %s", (_label, status, headers, body) => {
+    expect(classifyFetchBlock(status, headers, body)).toBe("challenge");
+  });
+
+  it("reads the header from a Headers instance as well as from a plain object", () => {
+    expect(classifyFetchBlock(403, new Headers({ "cf-mitigated": "challenge" }), "")).toBe("challenge");
+    expect(classifyFetchBlock(403, new Headers({ server: "cloudflare" }), "")).toBeNull();
+  });
+
+  it.each([
+    ["a plain 403 with no marker", 403, {}, "<html><body>Forbidden</body></html>"],
+    ["a plain 403 from cloudflare without a challenge marker", 403, { server: "cloudflare" }, ""],
+    ["a 404", 404, {}, "not found"],
+    ["a 200", 200, {}, "<html><head><title>Haber</title></head></html>"],
+    ["a 500", 500, {}, ""],
+    ["a 403 whose cf-mitigated header is not 'challenge'", 403, { "cf-mitigated": "block" }, ""],
+    ["a 403 whose title merely starts like the marker", 403, {}, "<title>Just a minute</title>"],
+  ])("returns null for %s", (_label, status, headers, body) => {
+    expect(classifyFetchBlock(status, headers, body)).toBeNull();
+  });
+
+  it("never calls a 2xx or a 404 a challenge, whatever the markers say (normal Cloudflare pages carry the challenge-platform script)", () => {
+    for (const status of [200, 204, 301, 304, 404, 410, 500]) {
+      expect(classifyFetchBlock(status, { "cf-mitigated": "challenge" }, CHALLENGE_HTML), String(status)).toBeNull();
+    }
+  });
+
+  it("tolerates missing headers and a missing body", () => {
+    expect(classifyFetchBlock(403, null, "")).toBeNull();
+    expect(classifyFetchBlock(403, undefined, undefined as unknown as string)).toBeNull();
+    expect(classifyFetchBlock(403, {}, "")).toBeNull();
+  });
+
+  it("stays fast on a large hostile body", () => {
+    const body = "<title>" + " ".repeat(200_000);
+    const t0 = performance.now();
+    expect(classifyFetchBlock(503, {}, body)).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(300);
+  });
+});
+
+describe("fetchOgImageResult / fetchHeroImageResult (h40-edgefns-1)", () => {
+  const ARTICLE = "https://medyascope.tv/2026/11/05/berlinde-iktidarin-kapisinda-kimlik-kontrolu/";
+  const COVER = "https://cdn.example.com/photos/cover.jpg";
+  const PAGE_WITH_IMAGE = `<html><head><meta property="og:image" content="${COVER}"></head><body></body></html>`;
+  const PAGE_WITHOUT_IMAGE = "<html><head><title>Haber</title></head><body></body></html>";
+  const UA = "Mozilla/5.0 (compatible; Tayf/1.0; +https://tayf.app)";
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  function serve(status: number, body: string, headers: Record<string, string> = {}): void {
+    fetchMock = vi.fn(async () => new Response(body, { status, headers: { "content-type": "text/html", ...headers } }));
+    vi.stubGlobal("fetch", fetchMock);
+  }
+
+  beforeEach(() => {
+    // safeFetch resolves the host through Deno.resolveDns before it dials; a public address lets the stubbed fetch run.
+    vi.stubGlobal("Deno", {
+      resolveDns: async (_host: string, type: string) => {
+        if (type === "A") return ["93.184.215.14"];
+        throw new Error("NotFound");
+      },
+      serve: () => undefined,
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe("fetchOgImageResult", () => {
+    it("403 + cf-mitigated: challenge -> blocked with the status", async () => {
+      serve(403, CHALLENGE_HTML, { "cf-mitigated": "challenge", server: "cloudflare" });
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "blocked", status: 403 });
+    });
+
+    it("503 with the 'Just a moment...' title -> blocked 503", async () => {
+      serve(503, CHALLENGE_HTML);
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "blocked", status: 503 });
+    });
+
+    it("200 with an og:image -> found with the url", async () => {
+      serve(200, PAGE_WITH_IMAGE);
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "found", url: COVER });
+    });
+
+    it("200 with no image -> none", async () => {
+      serve(200, PAGE_WITHOUT_IMAGE);
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "none" });
+    });
+
+    it("a 200 page that carries the challenge-platform script is not a block", async () => {
+      serve(200, PAGE_WITH_IMAGE.replace("</body>", '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body>'), {
+        "cf-mitigated": "challenge",
+      });
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "found", url: COVER });
+    });
+
+    it("a 404 and a plain 403 are none, as before", async () => {
+      serve(404, "not found");
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "none" });
+      serve(403, "<html>Forbidden</html>");
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "none" });
+    });
+
+    it("never throws: a failing fetch is none", async () => {
+      fetchMock = vi.fn(async () => {
+        throw new TypeError("network down");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(fetchOgImageResult(ARTICLE)).resolves.toEqual({ kind: "none" });
+    });
+
+    it("never throws: a URL the SSRF guard refuses is none, and nothing is dialled", async () => {
+      serve(200, PAGE_WITH_IMAGE);
+      await expect(fetchOgImageResult("http://169.254.169.254/latest/meta-data/")).resolves.toEqual({ kind: "none" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("classifies the one response it got: exactly one request, the same user agent, no retry", async () => {
+      serve(403, CHALLENGE_HTML, { "cf-mitigated": "challenge" });
+      await fetchOgImageResult(ARTICLE);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const init = fetchMock.mock.calls[0]?.[1] as { headers: Headers; method: string };
+      expect(init.method).toBe("GET");
+      expect(init.headers.get("user-agent")).toBe(UA);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toBe(ARTICLE);
+    });
+  });
+
+  describe("fetchHeroImageResult", () => {
+    it.each(["anadolu-ajansi", "haberler-com", "trt-haber", "cumhuriyet", "medyascope", null, undefined])(
+      "403 + cf-mitigated: challenge -> blocked for slug %s",
+      async (slug) => {
+        serve(403, CHALLENGE_HTML, { "cf-mitigated": "challenge" });
+        await expect(fetchHeroImageResult(ARTICLE, slug)).resolves.toEqual({ kind: "blocked", status: 403 });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["anadolu-ajansi", "cumhuriyet", null])("200 with an og:image -> found for slug %s", async (slug) => {
+      serve(200, PAGE_WITH_IMAGE);
+      await expect(fetchHeroImageResult(ARTICLE, slug)).resolves.toEqual({ kind: "found", url: COVER });
+    });
+
+    it.each(["anadolu-ajansi", "cumhuriyet"])("200 with no image -> none for slug %s", async (slug) => {
+      serve(200, PAGE_WITHOUT_IMAGE);
+      await expect(fetchHeroImageResult(ARTICLE, slug)).resolves.toEqual({ kind: "none" });
+    });
+
+    it("a hero slug keeps the extended extractor: twitter:image is found where og:image is absent", async () => {
+      serve(200, '<html><head><meta name="twitter:image" content="https://cdn.example.com/photos/tw.jpg"></head></html>');
+      await expect(fetchHeroImageResult(ARTICLE, "anadolu-ajansi")).resolves.toEqual({
+        kind: "found",
+        url: "https://cdn.example.com/photos/tw.jpg",
+      });
+      // the stock path for any other slug reads og:image only
+      await expect(fetchHeroImageResult(ARTICLE, "cumhuriyet")).resolves.toEqual({ kind: "none" });
+    });
+
+    it("never throws and makes one request on a failure", async () => {
+      fetchMock = vi.fn(async () => {
+        throw new TypeError("network down");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(fetchHeroImageResult(ARTICLE, "anadolu-ajansi")).resolves.toEqual({ kind: "none" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("fetchOgImage / fetchHeroImage stay thin url|null wrappers", () => {
+    it("fetchOgImage returns the url when found, null when blocked, none or failing", async () => {
+      serve(200, PAGE_WITH_IMAGE);
+      await expect(fetchOgImage(ARTICLE)).resolves.toBe(COVER);
+      serve(403, CHALLENGE_HTML, { "cf-mitigated": "challenge" });
+      await expect(fetchOgImage(ARTICLE)).resolves.toBeNull();
+      serve(200, PAGE_WITHOUT_IMAGE);
+      await expect(fetchOgImage(ARTICLE)).resolves.toBeNull();
+      fetchMock = vi.fn(async () => {
+        throw new TypeError("network down");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(fetchOgImage(ARTICLE)).resolves.toBeNull();
+    });
+
+    it("fetchHeroImage returns the url when found, null when blocked or none, for a hero slug and any other", async () => {
+      for (const slug of ["anadolu-ajansi", "cumhuriyet", null]) {
+        serve(200, PAGE_WITH_IMAGE);
+        await expect(fetchHeroImage(ARTICLE, slug)).resolves.toBe(COVER);
+        serve(403, CHALLENGE_HTML, { "cf-mitigated": "challenge" });
+        await expect(fetchHeroImage(ARTICLE, slug)).resolves.toBeNull();
+        serve(200, PAGE_WITHOUT_IMAGE);
+        await expect(fetchHeroImage(ARTICLE, slug)).resolves.toBeNull();
+      }
+    });
   });
 });

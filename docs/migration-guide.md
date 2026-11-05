@@ -3650,3 +3650,58 @@ select round((percentile_cont(0.5) within group (order by extract(epoch from now
 ```
 
 **Rollback** (nothing else depends on 160; one transaction): re-run ONLY 058 section 7's `create or replace function public.bist_intraday_targets(p_limit int default 120)` statement (the text of `058_finance_hardening.sql` from that line through its closing `$$;`; it restores `md5(prosrc)` `ee892ad1547b7563bb43bb3ba4b17e52`), then remove ledger row 160 (`delete from supabase_migrations.schema_migrations where version = '160';`). The ACL does not change in either direction. A redeployed quotes-ingest that reports `notFound` is harmless without 160.
+
+## 161 — `image_coverage` (`ops_health_report` row 21) and `image-consumer` tells a Cloudflare challenge from "no image": APPLY 161, THEN DEPLOY image-consumer
+
+**Why:** medyascope.tv has answered every article fetch of the image consumer with a Cloudflare challenge (HTTP 403, `cf-mitigated: challenge`, title `Just a moment...`) since 2026-10-29. Its articles stored without an image, per day by `created_at` (image-less / total): 10-19..10-27 = 0 every day (12 to 47 a day); 10-28 1/26; 10-29 4/15; 10-30 27/32; 10-31 21/24; 11-01 15/18; 11-02 32/38; 11-03 34/37; 11-04 40/45; 11-05 28/31, every settled row at `image_backfill_attempts >= 3`. `fetchOgImage` and `fetchHeroImage` returned `null` for any non-2xx, so `image-consumer` filed the block as `not-found`, and no ops row noticed: `queue_lag` reads depth and age, `sources_newly_dark` (row 13) watches missing articles, and the report had no per-source image row. The code change does not touch the block: no User-Agent change, no retry, no other endpoint, no extra request. It only classifies the response the existing fetch already returned, and makes it visible.
+
+**What 161 does** (additive, one transaction, safe to re-apply):
+
+- re-creates `ops_health_report()` with 159's text verbatim (md5 `a2246bc0ea663b123144a2fa4c4f5735`, length 42501, the production fingerprint) plus **one new row, the 21st, `image_coverage`**: per source of kind `outlet` or `wire` with at least 10 articles created between 25 hours and 1 hour ago (the newest hour is skipped, the backfill has not reached it), the share stored without an image against the same source's own share over the 14 days before (at least 10 articles in it); **warn** when the 24 hour share is at least 50% and at least 40 points above that baseline; `observed` is the number of such sources, threshold 1; never a fail. The detail lists slug and the two percentages only (`... medyascope %86 görselsiz (14 gün: %38)`). Read-only on production (2026-11-05): 31-40 ms warm, 0.3-1.0 s on a cold cache, through `idx_articles_created_at` (the 24 hour window) and `idx_articles_created_source` (the baseline, only for sources over 50%); expected today `warn` / 1 naming medyascope. The function comment gains the description; revoke and grant are 159's two statements;
+- adds, changes and unschedules no pg_cron job; no table, column or index; no data rewrite; **no reset of the parked rows**.
+
+**What the image-consumer build does** (`supabase/functions/_shared/og-image.ts`, `supabase/functions/image-consumer`): new `classifyFetchBlock(status, headers, bodyHead)` returns `'challenge'` for a 403/429/503 that carries `cf-mitigated: challenge`, the `<title>Just a moment...` interstitial or the `challenge-platform` script (a 2xx or a 404 never); `fetchOgImageResult` / `fetchHeroImageResult` answer `{kind: 'found', url}`, `{kind: 'none'}` or `{kind: 'blocked', status}`, and `fetchOgImage` / `fetchHeroImage` stay thin `url | null` wrappers. `processMessage` gets a `blocked` outcome that is handled **exactly like not-found** (one `bumpAttempt`, one archive, so the row stops at attempts 3 (the requeue re-sends attempts 1-2 only, every 15 minutes) and a blocking site is asked at most 3 times per article) and is counted apart: the drain summary and the `drain` log line gain `blocked` and `blockedBySource` (slugs only, no URL, `unknown` for an article without a source).
+
+**Order:** apply 161 first (`supabase db push`, operator), then deploy the function: `npx supabase functions deploy image-consumer --no-verify-jwt`. The reverse order is safe: the new function needs nothing from the database that 161 adds, and the report works with or without the row. No Vercel deploy.
+
+**Verify** (read-only):
+
+```sql
+select count(*) from public.ops_health_report();   -- expect 21
+select check_name, status, observed, threshold, detail
+  from public.ops_health_report() where check_name = 'image_coverage';
+-- expect warn / 1 / 1 / "son 24 saatte görselsiz haber oranı sıçrayan kaynak 1: medyascope %NN görselsiz (14 gün: %MM)" today;
+-- pass / 0 / 1 once the site lets the fetch through again (or after the block has filled the 14 day baseline, around 2026-11-08)
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;
+-- c1c2ff6c61daede5a5e8c8695547b445, 47349 (was a2246bc0ea663b123144a2fa4c4f5735, 42501)
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('service_role', 'public.ops_health_report()', 'execute');   -- expect f, f, t
+select version, name from supabase_migrations.schema_migrations where version = '161';   -- 1 row
+```
+
+After the deploy, the next image-drain bodies carry the block, by slug, without a URL (the image-consumer bodies contain `"drained"`):
+
+```sql
+select created, content::jsonb ->> 'blocked' as blocked, content::jsonb -> 'blockedBySource' as by_source
+  from net._http_response
+ where created > now() - interval '30 minutes' and content like '%"drained"%'
+ order by created desc limit 10;
+-- blocked > 0 and {"medyascope": n} while the site blocks us; notFound no longer includes those pages
+```
+
+The per-day check is unchanged until access returns (the numbers above): `select (created_at at time zone 'UTC')::date, count(*) filter (where image_url is null), count(*) from public.articles where source_id = (select id from public.sources where slug = 'medyascope') and created_at > now() - interval '17 days' group by 1 order by 1`.
+
+**Rollback** (nothing else depends on 161; one transaction): re-run ONLY 159's `ops_health_report()` section, the text of `159_ingest_stale_admission.sql` from `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;` (it restores `md5(prosrc)` `a2246bc0ea663b123144a2fa4c4f5735`, length 42501, and 20 rows), then remove ledger row 161 (`delete from supabase_migrations.schema_migrations where version = '161';`). The ACL does not change in either direction. To undo the function, redeploy the previous `image-consumer`; a new function without 161 is harmless (the report just has no row 21), and 161 without the new function only reads the existing numbers.
+
+**Founder follow-up (not part of this change, nothing here runs it):** access is a decision, not code. Ask Medyascope to allowlist Tayf's User-Agent (`Mozilla/5.0 (compatible; Tayf/1.0; +https://tayf.app)`), or approve a sanctioned image source (their RSS items carry no image). Once the fetch works again, the rows that gave up stay out of the requeue pool: most stop at attempts 3, and those from before migration 154 sit at 5 with attempted_at 7 days ahead. `image_backfill_requeue` picks only `image_backfill_attempts` 1 or 2, and only when the last try is over 2 hours old (a row parked at the 5th attempt has `image_backfill_attempted_at` 7 days ahead), so a one-off founder SQL puts the last 7 days back into its pool, newest first, 40 per quarter hour:
+
+```sql
+-- founder, ONLY after the site lets the fetch through; touches medyascope's image-less rows of the last 7 days
+update public.articles a
+   set image_backfill_attempts = 1,
+       image_backfill_attempted_at = now() - interval '3 hours'   -- a parked row's attempted_at lies 7 days ahead
+ where a.source_id = (select id from public.sources where slug = 'medyascope')
+   and a.image_url is null and a.image_backfill_attempts >= 3
+   and a.created_at > now() - interval '7 days';
+```

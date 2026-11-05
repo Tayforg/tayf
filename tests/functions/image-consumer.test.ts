@@ -167,6 +167,7 @@ const supabaseFake = await vi.hoisted(async () => {
         { id: "src-trt", slug: "trt-haber" },
         { id: "src-aa", slug: "anadolu-ajansi" },
         { id: "src-plain", slug: "cumhuriyet" },
+        { id: "src-medyascope", slug: "medyascope" },
       ],
     },
   });
@@ -267,9 +268,12 @@ vi.mock("../../supabase/functions/_shared/safe-fetch.ts", () => ({
 
 // `og:image` extraction. We keep this minimal — the real helper does more
 // (head-only fetch, charset sniff). The mocked export names mirror the
-// real module: `fetchOgImage` (async, fetches the article HTML and pulls
-// the og:image URL), `fetchHeroImage` (fallback chain), and the
-// `isValidImageUrl` guard. The SUT imports them by name.
+// real module: `fetchOgImageResult` / `fetchHeroImageResult` (async, fetch the
+// article HTML and answer found / none / blocked; these are what the SUT calls),
+// the thin url|null wrappers `fetchOgImage` / `fetchHeroImage`, and the
+// `isValidImageUrl` guard. The SUT imports them by name. A non-2xx answer is
+// classified by the REAL `classifyFetchBlock`, so the block markers under test
+// are the production ones.
 vi.mock("../../supabase/functions/_shared/og-image.ts", async () => {
   // Pull the mocked safeFetch through the standard module path so the SUT
   // and these helpers share the same instance — and so flipping the
@@ -278,6 +282,9 @@ vi.mock("../../supabase/functions/_shared/og-image.ts", async () => {
   const safeFetchModule = await import(
     "../../supabase/functions/_shared/safe-fetch.ts"
   );
+  const actualOgImage = await vi.importActual<
+    typeof import("../../supabase/functions/_shared/og-image.ts")
+  >("../../supabase/functions/_shared/og-image.ts");
   const ogImageFromHtml = (html: string): string | null => {
     const m =
       html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
@@ -306,35 +313,56 @@ vi.mock("../../supabase/functions/_shared/og-image.ts", async () => {
       return null;
     }
   };
-  const fetchOgImage = vi.fn(async (articleUrl: string) => {
+  type MockResult =
+    | { kind: "found"; url: string }
+    | { kind: "none" }
+    | { kind: "blocked"; status: number };
+  const resultFor = async (articleUrl: string): Promise<MockResult> => {
     try {
       const res = await safeFetchModule.safeFetch(articleUrl);
       const body = typeof (res as { body?: unknown }).body === "string"
         ? (res as { body: string }).body
         : "";
       const status = (res as { status?: number }).status ?? 200;
-      if (status < 200 || status >= 300) return null;
-      return await validateImageUrl(ogImageFromHtml(body));
+      if (status < 200 || status >= 300) {
+        const headers = (res as { headers?: Headers }).headers;
+        return actualOgImage.classifyFetchBlock(status, headers, body) ===
+            "challenge"
+          ? { kind: "blocked", status }
+          : { kind: "none" };
+      }
+      const url = await validateImageUrl(ogImageFromHtml(body));
+      return url === null ? { kind: "none" } : { kind: "found", url };
     } catch {
-      return null;
+      return { kind: "none" };
     }
+  };
+  const fetchOgImageResult = vi.fn(
+    async (articleUrl: string, _opts?: unknown) => resultFor(articleUrl),
+  );
+  const fetchHeroImageResult = vi.fn(
+    async (articleUrl: string, _slug?: unknown, _opts?: unknown) =>
+      resultFor(articleUrl),
+  );
+  const fetchOgImage = vi.fn(async (articleUrl: string, _opts?: unknown) => {
+    const r = await resultFor(articleUrl);
+    return r.kind === "found" ? r.url : null;
   });
-  const fetchHeroImage = vi.fn(async (articleUrl: string) => {
-    try {
-      const res = await safeFetchModule.safeFetch(articleUrl);
-      const body = typeof (res as { body?: unknown }).body === "string"
-        ? (res as { body: string }).body
-        : "";
-      const status = (res as { status?: number }).status ?? 200;
-      if (status < 200 || status >= 300) return null;
-      return await validateImageUrl(ogImageFromHtml(body));
-    } catch {
-      return null;
-    }
-  });
+  const fetchHeroImage = vi.fn(
+    async (articleUrl: string, _slug?: unknown, _opts?: unknown) => {
+      const r = await resultFor(articleUrl);
+      return r.kind === "found" ? r.url : null;
+    },
+  );
   const isValidImageUrl = (u: unknown): u is string =>
     typeof u === "string" && /^https?:\/\//.test(u);
-  return { fetchOgImage, fetchHeroImage, isValidImageUrl };
+  return {
+    fetchOgImage,
+    fetchHeroImage,
+    fetchOgImageResult,
+    fetchHeroImageResult,
+    isValidImageUrl,
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -342,12 +370,23 @@ vi.mock("../../supabase/functions/_shared/og-image.ts", async () => {
 // ---------------------------------------------------------------------------
 
 const htmlResponses: Record<string, string> = {};
+// h40-edgefns-1: a URL listed here is answered with exactly this status,
+// headers and body instead of a 200 from `htmlResponses` (a Cloudflare challenge
+// is a 403 with `cf-mitigated: challenge`). `fetchedUrls` logs every request the
+// stub served, so a test can prove the consumer made one request, not a retry.
+const rawResponses: Record<
+  string,
+  { status: number; headers?: Record<string, string>; body?: string }
+> = {};
+const fetchedUrls: string[] = [];
 const originalFetch = globalThis.fetch;
 
 beforeEach(() => {
   resetPgmqState();
   for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
   for (const k of Object.keys(htmlResponses)) delete htmlResponses[k];
+  for (const k of Object.keys(rawResponses)) delete rawResponses[k];
+  fetchedUrls.length = 0;
   _articleUpdatesStore.length = 0;
   // Reset the shared Supabase fake's mutation log so each test observes
   // only its own writes — the bridge above derives `articleUpdates` from
@@ -361,6 +400,14 @@ beforeEach(() => {
     input: RequestInfo | URL,
   ): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString();
+    fetchedUrls.push(url);
+    const raw = rawResponses[url];
+    if (raw !== undefined) {
+      return new Response(raw.body ?? "", {
+        status: raw.status,
+        headers: raw.headers ?? {},
+      });
+    }
     const html = htmlResponses[url];
     if (html === undefined) return new Response("not found", { status: 404 });
     return new Response(html, {
@@ -784,8 +831,8 @@ describe("image-consumer extractor timeout by source slug (h15-images-2)", () =>
   async function extractors() {
     const og = await import("../../supabase/functions/_shared/og-image.ts");
     return {
-      hero: og.fetchHeroImage as unknown as ReturnType<typeof vi.fn>,
-      plain: og.fetchOgImage as unknown as ReturnType<typeof vi.fn>,
+      hero: og.fetchHeroImageResult as unknown as ReturnType<typeof vi.fn>,
+      plain: og.fetchOgImageResult as unknown as ReturnType<typeof vi.fn>,
     };
   }
 
@@ -793,7 +840,7 @@ describe("image-consumer extractor timeout by source slug (h15-images-2)", () =>
     ["haberler-com", "src-haberler"],
     ["trt-haber", "src-trt"],
     ["anadolu-ajansi", "src-aa"],
-  ])("fetches a %s article with fetchHeroImage and an 8000 ms timeout", async (slug, sourceId) => {
+  ])("fetches a %s article with fetchHeroImageResult and an 8000 ms timeout", async (slug, sourceId) => {
     const { hero, plain } = await extractors();
     const url = await runWithSource(`art-hero-${slug}`, sourceId);
 
@@ -804,7 +851,7 @@ describe("image-consumer extractor timeout by source slug (h15-images-2)", () =>
     expect(articleUpdates).toContainEqual({ id: `art-hero-${slug}`, image_url: COVER });
   });
 
-  it("fetches any other slug with fetchOgImage and a 5000 ms timeout", async () => {
+  it("fetches any other slug with fetchOgImageResult and a 5000 ms timeout", async () => {
     const { hero, plain } = await extractors();
     const url = await runWithSource("art-plain-1", "src-plain");
 
@@ -814,7 +861,7 @@ describe("image-consumer extractor timeout by source slug (h15-images-2)", () =>
     expect(articleUpdates).toContainEqual({ id: "art-plain-1", image_url: COVER });
   });
 
-  it("fetches an article without a source with fetchOgImage and a 5000 ms timeout", async () => {
+  it("fetches an article without a source with fetchOgImageResult and a 5000 ms timeout", async () => {
     const handler = await importHandler();
     if (!handler) throw new Error("handler not registered");
     const { hero, plain } = await extractors();
@@ -835,5 +882,262 @@ describe("image-consumer extractor timeout by source slug (h15-images-2)", () =>
     expect(plain).toHaveBeenCalledTimes(1);
     expect(plain.mock.calls[0]).toEqual([url, { timeoutMs: 5000 }]);
     expect(hero).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h40-edgefns-1: a Cloudflare-challenged page is not "no image". Medyascope has
+// answered every article fetch with 403 + `cf-mitigated: challenge` since
+// 2026-10-29 (about 90% of its articles stored without an image); the consumer
+// counted each as 'not-found' and nothing showed it. A blocked fetch now has its
+// own outcome and summary counters (`blocked`, `blockedBySource`, slugs only),
+// but it is handled exactly like not-found: one bumpAttempt, one archive, so the
+// row stops at attempts 3 and the 15-minute requeue (attempts 1-2 only) asks a
+// blocking site at most 3 times. Nothing is retried here, and no second request
+// is made.
+// ---------------------------------------------------------------------------
+describe("image-consumer blocked pages (h40-edgefns-1)", () => {
+  const CHALLENGE_BODY =
+    '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>' +
+    '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script></body></html>';
+  const CHALLENGE_HEADERS = {
+    "cf-mitigated": "challenge",
+    server: "cloudflare",
+    "content-type": "text/html; charset=UTF-8",
+  };
+  const COVER = "https://cdn.example.com/photos/cover.jpg";
+
+  type Summary = Record<string, unknown> & {
+    drained: number;
+    found: number;
+    notFound: number;
+    placeholders: number;
+    errored: number;
+    blocked: number;
+    blockedBySource: Record<string, number>;
+  };
+
+  function seed(
+    id: string,
+    opts: { attempts?: number; sourceId?: string | null } = {},
+  ): string {
+    const url = `https://medyascope.tv/2026/11/05/${id}/`;
+    fakeArticles[id] = {
+      id,
+      url,
+      source_id: opts.sourceId === undefined ? "src-medyascope" : opts.sourceId,
+      image_url: null,
+      image_backfill_attempts: opts.attempts ?? 0,
+    } as unknown as { url: string; image_url?: string | null };
+    return url;
+  }
+
+  function block(url: string, status = 403): void {
+    rawResponses[url] = { status, headers: CHALLENGE_HEADERS, body: CHALLENGE_BODY };
+  }
+
+  function patchesFor(id: string): Array<Record<string, unknown>> {
+    return supabaseFake.fake.calls
+      .update("articles")
+      .filter((m) => m.state.eq.some((p) => p.col === "id" && p.val === id))
+      .map((m) => (m.patch ?? {}) as Record<string, unknown>);
+  }
+
+  async function drainMessages(
+    messages: Array<{ msgId: number; articleId: string }>,
+  ): Promise<Summary> {
+    const handler = await importHandler();
+    if (!handler) throw new Error("handler not registered");
+    pgmqState.pending = messages.map((m) => ({
+      msg_id: m.msgId,
+      read_ct: 1,
+      message: { article_id: m.articleId },
+    }));
+    const res = await handler(
+      authedRequest("http://localhost/image-consumer", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as Summary;
+  }
+
+  it("a challenged page is outcome 'blocked': summary blocked 1, blockedBySource {medyascope: 1}, not a not-found", async () => {
+    block(seed("art-blk-1", { attempts: 2 }));
+
+    const summary = await drainMessages([{ msgId: 601, articleId: "art-blk-1" }]);
+
+    expect(summary.blocked).toBe(1);
+    expect(summary.blockedBySource).toEqual({ medyascope: 1 });
+    expect(summary.notFound).toBe(0);
+    expect(summary.found).toBe(0);
+    expect(summary.placeholders).toBe(0);
+    expect(summary.errored).toBe(0);
+    expect(summary.drained).toBe(1);
+  });
+
+  it("is handled exactly like not-found: one bumpAttempt (N -> N+1), no image_url write, the message archived not deleted", async () => {
+    block(seed("art-blk-2", { attempts: 2 }));
+
+    await drainMessages([{ msgId: 602, articleId: "art-blk-2" }]);
+
+    const patches = patchesFor("art-blk-2");
+    // Tripwire: the bump went through the fake, so the next assertions are not green because the chain no-op'd.
+    expect(patches).toHaveLength(1);
+    expect(patches.some((p) => "image_url" in p)).toBe(false);
+    expect(patches[0]?.image_backfill_attempts).toBe(3);
+    expect(typeof patches[0]?.image_backfill_attempted_at).toBe("string");
+    expect(pgmqState.archived).toEqual([602]);
+    expect(pgmqState.deleted).toEqual([]);
+  });
+
+  it("parks the row (attempted_at about 7 days ahead) when a blocked fetch is the 5th attempt (a re-enqueued row)", async () => {
+    block(seed("art-blk-3", { attempts: 4 }));
+
+    const before = Date.now();
+    await drainMessages([{ msgId: 603, articleId: "art-blk-3" }]);
+
+    const patches = patchesFor("art-blk-3");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.image_backfill_attempts).toBe(5);
+    const parkedAt = Date.parse(String(patches[0]?.image_backfill_attempted_at));
+    const week = 7 * 24 * 3600 * 1000;
+    expect(parkedAt).toBeGreaterThanOrEqual(before + week - 1000);
+    expect(parkedAt).toBeLessThanOrEqual(Date.now() + week + 1000);
+    expect(pgmqState.archived).toContain(603);
+  });
+
+  it("makes exactly one request per blocked article: no retry, no second endpoint", async () => {
+    const url = seed("art-blk-4");
+    block(url);
+
+    await drainMessages([{ msgId: 604, articleId: "art-blk-4" }]);
+
+    expect(fetchedUrls).toEqual([url]);
+  });
+
+  it("a 503 'Just a moment...' page and a 429 with the challenge script are blocked too", async () => {
+    rawResponses[seed("art-blk-5")] = { status: 503, headers: {}, body: CHALLENGE_BODY };
+    rawResponses[seed("art-blk-6")] = {
+      status: 429,
+      headers: {},
+      body: '<script src="/cdn-cgi/challenge-platform/scripts/x.js"></script>',
+    };
+
+    const summary = await drainMessages([
+      { msgId: 605, articleId: "art-blk-5" },
+      { msgId: 606, articleId: "art-blk-6" },
+    ]);
+
+    expect(summary.blocked).toBe(2);
+    expect(summary.blockedBySource).toEqual({ medyascope: 2 });
+    expect(summary.notFound).toBe(0);
+  });
+
+  it("counts blocks per source in one drain, slugs only: two outlets and an article without a source", async () => {
+    block(seed("art-blk-7"));
+    block(seed("art-blk-8"));
+    block(seed("art-blk-9", { sourceId: "src-plain" }));
+    block(seed("art-blk-10", { sourceId: null }));
+
+    const summary = await drainMessages([
+      { msgId: 607, articleId: "art-blk-7" },
+      { msgId: 608, articleId: "art-blk-8" },
+      { msgId: 609, articleId: "art-blk-9" },
+      { msgId: 610, articleId: "art-blk-10" },
+    ]);
+
+    expect(summary.blocked).toBe(4);
+    expect(summary.blockedBySource).toEqual({ medyascope: 2, cumhuriyet: 1, unknown: 1 });
+    expect(pgmqState.archived.sort()).toEqual([607, 608, 609, 610]);
+  });
+
+  it("the drain summary carries no URL, host or article id", async () => {
+    block(seed("art-blk-11"));
+
+    const summary = await drainMessages([{ msgId: 611, articleId: "art-blk-11" }]);
+
+    const text = JSON.stringify(summary);
+    expect(text).not.toContain("http");
+    expect(text).not.toContain("medyascope.tv");
+    expect(text).not.toContain("art-blk-11");
+    expect(text).toContain("medyascope");
+  });
+
+  it("a hero-slug source that is blocked is counted by its slug too (fetchHeroImageResult path)", async () => {
+    block(seed("art-blk-12", { sourceId: "src-aa" }));
+
+    const summary = await drainMessages([{ msgId: 612, articleId: "art-blk-12" }]);
+
+    expect(summary.blocked).toBe(1);
+    expect(summary.blockedBySource).toEqual({ "anadolu-ajansi": 1 });
+    expect(patchesFor("art-blk-12")[0]?.image_backfill_attempts).toBe(1);
+  });
+
+  it("not-found is unchanged: a plain 403, a 404 and a page with no image are notFound, blocked stays 0", async () => {
+    rawResponses[seed("art-nf-1")] = { status: 403, headers: { server: "cloudflare" }, body: "<html>Forbidden</html>" };
+    seed("art-nf-2"); // no response registered: the stub answers 404
+    const noImage = seed("art-nf-3");
+    htmlResponses[noImage] = "<html><head><title>Haber</title></head></html>";
+
+    const summary = await drainMessages([
+      { msgId: 621, articleId: "art-nf-1" },
+      { msgId: 622, articleId: "art-nf-2" },
+      { msgId: 623, articleId: "art-nf-3" },
+    ]);
+
+    expect(summary.notFound).toBe(3);
+    expect(summary.blocked).toBe(0);
+    expect(summary.blockedBySource).toEqual({});
+    for (const id of ["art-nf-1", "art-nf-2", "art-nf-3"]) {
+      expect(patchesFor(id)[0]?.image_backfill_attempts).toBe(1);
+    }
+    expect(pgmqState.archived.sort()).toEqual([621, 622, 623]);
+  });
+
+  it("a found image is unchanged: written to the row, attempts reset, blocked 0", async () => {
+    const url = seed("art-ok-1", { attempts: 2 });
+    htmlResponses[url] = `<html><head><meta property="og:image" content="${COVER}" /></head></html>`;
+
+    const summary = await drainMessages([{ msgId: 631, articleId: "art-ok-1" }]);
+
+    expect(patchesFor("art-ok-1")).toContainEqual(
+      expect.objectContaining({ image_url: COVER, image_backfill_attempts: 0 }),
+    );
+    expect(summary.found).toBe(1);
+    expect(summary.blocked).toBe(0);
+    expect(summary.blockedBySource).toEqual({});
+  });
+
+  it("a placeholder og:image is unchanged: placeholders 1, blocked 0", async () => {
+    const url = seed("art-ph-b1");
+    htmlResponses[url] =
+      '<html><head><meta property="og:image" content="https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg" /></head></html>';
+
+    const summary = await drainMessages([{ msgId: 641, articleId: "art-ph-b1" }]);
+
+    expect(summary.placeholders).toBe(1);
+    expect(summary.blocked).toBe(0);
+    expect(summary.notFound).toBe(0);
+  });
+
+  it("a mixed batch keeps every counter apart", async () => {
+    block(seed("art-mix-1"));
+    const ok = seed("art-mix-2");
+    htmlResponses[ok] = `<html><head><meta property="og:image" content="${COVER}" /></head></html>`;
+    seed("art-mix-3"); // 404
+
+    const summary = await drainMessages([
+      { msgId: 651, articleId: "art-mix-1" },
+      { msgId: 652, articleId: "art-mix-2" },
+      { msgId: 653, articleId: "art-mix-3" },
+    ]);
+
+    expect(summary).toMatchObject({
+      drained: 3,
+      found: 1,
+      notFound: 1,
+      blocked: 1,
+      blockedBySource: { medyascope: 1 },
+      errored: 0,
+    });
   });
 });

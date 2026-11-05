@@ -562,12 +562,13 @@ describe("157 docs/ops-heartbeat.md", () => {
     doc = readFileSync(DOC_OPS_HEARTBEAT, "utf8");
   });
 
-  it("the title and the intro list 157, and the row count is 20", () => {
+  it("the title and the intro list 157, and the row count is 20 (21 once 161 appended its row)", () => {
     expect(doc.slice(0, doc.indexOf("\n"))).toContain("150, 157");
     expect(doc).toContain("migrations 077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150 and 157");
-    expect(doc).toContain("20 fixed-order rows");
+    // 161 appended a twenty-first row and moved these counts (tests/migrations/161-image-coverage-by-source.test.ts pins 21)
+    expect(doc).toMatch(/(20|21) fixed-order rows/);
     expect(doc).not.toContain("19 fixed-order rows");
-    expect(doc).toContain("always returns exactly\n20 rows");
+    expect(doc).toMatch(/always returns exactly\n(20|21) rows/);
   });
 
   it("the table has row 20 after row 19, with its predicate, thresholds and the readout", () => {

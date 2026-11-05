@@ -35,9 +35,16 @@
 //      Bugünün kararları neler? 21 Ekim Resmi Gazete yayımlandı! Resmi Gazete atamalar listesi!"
 //   H  posta's "RESMİ GAZETE KARARLARI 26 EKİM 2026! Resmi Gazete'de bugünün kararları neler?"
 //
+//   I  (kısa haberler|günün kısa haberleri)[date tail][ trailing separator]
+//      IndyTürk's nightly digest (h40-clusters-2, 2026-11-05): the title is exactly "Kısa
+//      haberler" and the description is the first item of the digest, so the clusterer matched
+//      it on that item and 7 of 14 digests joined unrelated politics clusters (b59f3bb6 with 43
+//      articles, e7cde92e with 18, ...). One bare trailing separator is allowed ("Kısa haberler:").
+//
 // Deliberately NOT matched: "21 EKİM RESMİ GAZETE KARARLARI: <one decision's headline>" (CNN
 // Türk) carries a story; "Piyasalarda günün özeti: 20 Ekim 2026 BIST 100'de ..." is a market
-// recap, not a politics roundup.
+// recap, not a politics roundup; "Kısa haberler: Erdoğan Bakü'ye gitti", "Kısa sürede ..." and
+// "Kısa çalışma ödeneği ..." are stories (shape I is the whole title, never a prefix).
 //
 // ReDoS: every pattern below is built from literal text, `?`, `{n}` and `{n,m}` only. There is
 // no `*`, no `+` and no nested quantifier, the input is capped, and the whitespace / punctuation
@@ -151,6 +158,8 @@ const SHAPES: readonly RegExp[] = [
   ),
   // H
   new RegExp(`^${RG} ${KARAR} ${DATE}(?: ?[!\\-\\u2013\\u2014:|,] ?${RG_DE} bugunun kararlari neler)?$`),
+  // I (h40-clusters-2): the title alone, a date tail, and at most one bare trailing separator.
+  new RegExp(`^(?:kisa haberler|gunun kisa haberleri)(?:${DATE_TAIL})?(?: ?${SEP})?$`),
 ];
 
 /** True when `title` is, as a whole, a daily roundup / bulletin header and must not be

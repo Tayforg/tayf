@@ -6,7 +6,11 @@ import { resolve } from "node:path";
 // via `vi.mocked(scoreMock).mockImplementation(...)` -- band-low/band-high
 // classification depends on the ensemble score, and the real ensemble
 // scorer is not exercised at all under this file's mocks.
-import { headlineLane, score as scoreMock } from "../../supabase/functions/_shared/cluster/ensemble.ts";
+import {
+  headlineLane,
+  headlineOnlyScore as headlineOnlyScoreMock,
+  score as scoreMock,
+} from "../../supabase/functions/_shared/cluster/ensemble.ts";
 import {
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_MEMBER_SCAN_MAX,
@@ -493,6 +497,9 @@ vi.mock("../../supabase/functions/_shared/cluster/ensemble.ts", async (importOri
   >();
   return {
     ...actual,
+    // Pass-through spy (h40-clusters-1): the real headline lane still decides,
+    // the tests only count how many member headlines the scan evaluates.
+    headlineOnlyScore: vi.fn(actual.headlineOnlyScore),
     score: vi.fn((_a: unknown, _b: unknown) => ({
       score: 0.82,
       components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
@@ -2268,13 +2275,17 @@ describe("cluster-consumer Edge Function", () => {
 
     describe("headlinesByCluster cap and order", () => {
       const N = HEADLINE_MEMBER_SCAN_MAX + 3;
-      // Member k (1 = newest) and its disjoint five-word headline.
+      // Member k (1 = newest) and its disjoint five-word headline. Two-letter
+      // prefixes keep the headlines disjoint beyond the 15 one-letter ones.
       const WORDS = ["kalem", "sepet", "ceylan", "tavan", "bozkurt"];
       const LETTERS = "bcdfghjklmnprst";
-      const titleOf = (k: number) => WORDS.map((w) => `${LETTERS[k - 1]}${w}`).join(" ");
-      const hoursAgoOf = (k: number) => 0.5 + 0.2 * (k - 1); // 0.5 h .. 3.3 h, all inside the 6 h lane
+      const prefixOf = (k: number) =>
+        `${LETTERS[Math.floor((k - 1) / LETTERS.length)]}${LETTERS[(k - 1) % LETTERS.length]}`;
+      const titleOf = (k: number) => WORDS.map((w) => `${prefixOf(k)}${w}`).join(" ");
+      // 0.5 h .. 5.5 h for 51 members, all inside the 6 h lane window.
+      const hoursAgoOf = (k: number) => 0.5 + 0.1 * (k - 1);
 
-      function seedFifteenMembers() {
+      function seedBeyondCapMembers() {
         addCluster(CL, N);
         // Insert in a scrambled order: the cap must follow publication time,
         // not row order.
@@ -2286,6 +2297,9 @@ describe("cluster-consumer Edge Function", () => {
       }
 
       it("fixtures are disjoint five-word headlines", () => {
+        // h40-clusters-1: the cap is 48, so the fixtures reach 51 members.
+        expect(HEADLINE_MEMBER_SCAN_MAX).toBe(48);
+        expect(N).toBe(51);
         const seen = new Set<string>();
         for (let k = 1; k <= N; k++) {
           const t = headlineTokens(titleOf(k)).tokens;
@@ -2299,11 +2313,13 @@ describe("cluster-consumer Edge Function", () => {
 
       it.each([
         { label: "the second newest member", k: 2, matched: 1 },
-        { label: "the 12th newest member (the last one kept)", k: HEADLINE_MEMBER_SCAN_MAX, matched: 1 },
-        { label: "the 13th newest member (the first one evicted)", k: HEADLINE_MEMBER_SCAN_MAX + 1, matched: 0 },
-        { label: "the 14th newest member", k: HEADLINE_MEMBER_SCAN_MAX + 2, matched: 0 },
+        { label: "the 13th newest member (evicted by the old cap of 12)", k: 13, matched: 1 },
+        { label: "the 34th newest member", k: 34, matched: 1 },
+        { label: "the 48th newest member (the last one kept)", k: HEADLINE_MEMBER_SCAN_MAX, matched: 1 },
+        { label: "the 49th newest member (the first one evicted)", k: HEADLINE_MEMBER_SCAN_MAX + 1, matched: 0 },
+        { label: "the 50th newest member", k: HEADLINE_MEMBER_SCAN_MAX + 2, matched: 0 },
       ])("an article repeating the headline of $label -> matched=$matched", async ({ k, matched }) => {
-        seedFifteenMembers();
+        seedBeyondCapMembers();
         queueIncoming(2100 + k, "art-hl", titleOf(k));
         scoreOnly();
 
@@ -2315,7 +2331,7 @@ describe("cluster-consumer Edge Function", () => {
       });
 
       it("the seed (oldest, outside the cap) and the latest (newest) are still compared through score()", async () => {
-        seedFifteenMembers();
+        seedBeyondCapMembers();
         queueIncoming(2200, "art-hl", titleOf(N));
         scoreOnly([{ a: titleOf(N), b: titleOf(N), s: 0.82 }]);
 
@@ -2329,6 +2345,413 @@ describe("cluster-consumer Edge Function", () => {
         );
         expect(comparedWith).toContain(titleOf(N));
         expect(comparedWith).toContain(titleOf(1));
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // h40-clusters-1. HEADLINE_MEMBER_SCAN_MAX = 12 dropped the matching member
+    // of busy clusters, so a phrase-identical follow-up opened a twin of a top
+    // story: cnn-turk 'SON DAKIKA... MHP lideri Bahceli: Teror bitecek ...' was
+    // rank 13 of 17 (twin d58cf466, now 8 articles), sozcu rank 17 of 26 (twin
+    // 2cce15f0) and 'Emir Sarigul hakkinda yeni karar...' rank 13 of 34 (twin
+    // 3a81b524). The 6 h lane window, not the count, bounds the scan; the cap is
+    // a memory ceiling (48).
+    // -----------------------------------------------------------------------
+    describe("h40-clusters-1: the scan reaches the matching member of a busy cluster at any rank inside the 6 h window", () => {
+      const GURLEK_MEMBER = "Bakan Gürlek'ten 'fon soruşturması' için çarpıcı açıklama";
+      const GURLEK_INCOMING = "Bakan Gürlek'ten fon soruşturması açıklaması";
+      const BAHCELI_MEMBER = "SON DAKİKA... MHP lideri Bahçeli: Terör bitecek kardeşlik yükselecek";
+      const BAHCELI_INCOMING = "Bahçeli: Terör bitecek, kardeşlik yükselecek";
+      const FIRST_H = 0.2; // the newest member is 12 min old
+      const STEP_H = 5 / 60; // members arrive 5 minutes apart
+      // Unrelated filler headlines: disjoint from both stories and from each other.
+      const LETTERS = "bcdfghjklmnprst";
+      const fillerTitle = (r: number) => {
+        const p = `${LETTERS[Math.floor((r - 1) / LETTERS.length)]}${LETTERS[(r - 1) % LETTERS.length]}`;
+        return `${p}kalem ${p}sepet ${p}ceylan`;
+      };
+      const rankHoursAgo = (r: number) => FIRST_H + (r - 1) * STEP_H;
+
+      type DrainSummary = {
+        matched: number;
+        created: number;
+        failedTransient: number;
+        ctx_window_min: number | null;
+        created_with_floor_candidate: number;
+        created_with_floor_candidate_samples: Array<Record<string, unknown>>;
+      };
+      const drainSummary = async () => (await drain()) as unknown as DrainSummary;
+
+      // `size` members, newest first, 5 minutes apart. Rank `matchRank`
+      // carries `matchTitle`; with `matchHoursAgo` it (and every older member)
+      // is moved to that age. Every other member is an unrelated filler.
+      function seedBusyCluster(
+        clusterId: string,
+        size: number,
+        matchRank: number,
+        matchTitle: string,
+        matchSourceId: string,
+        matchHoursAgo = rankHoursAgo(matchRank),
+      ) {
+        addCluster(clusterId, size);
+        for (let r = 1; r <= size; r++) {
+          const at = r < matchRank ? rankHoursAgo(r) : matchHoursAgo + (r - matchRank) * STEP_H;
+          if (r === matchRank) addMember(clusterId, `${clusterId}-m${r}`, matchTitle, at, matchSourceId);
+          else addMember(clusterId, `${clusterId}-m${r}`, fillerTitle(r), at, null);
+        }
+      }
+
+      // How many members of `clusterId` are newer than the one titled `title`.
+      function rankOf(clusterId: string, title: string): number {
+        const members = Object.values(fakeArticles) as Array<{ id: string; title: string; published_at: string }>;
+        const inCluster = members.filter((a) =>
+          clusterArticleRows.some((r) => r.cluster_id === clusterId && r.article_id === a.id),
+        );
+        const target = inCluster.find((a) => a.title === title);
+        if (!target) throw new Error(`no member titled ${title}`);
+        return 1 + inCluster.filter((a) => Date.parse(a.published_at) > Date.parse(target.published_at)).length;
+      }
+
+      it("fixtures: the real headline lane fires for both phrase-identical pairs, and neither filler shares a token with them", () => {
+        for (const [incoming, member] of [
+          [GURLEK_INCOMING, GURLEK_MEMBER],
+          [BAHCELI_INCOMING, BAHCELI_MEMBER],
+        ] as const) {
+          const lane = headlineLane(headlineTokens(incoming), headlineTokens(member), 1.5);
+          expect(lane.fired).toBe(true);
+        }
+        const story = new Set([
+          ...headlineTokens(GURLEK_MEMBER).tokens,
+          ...headlineTokens(BAHCELI_MEMBER).tokens,
+        ]);
+        for (let r = 1; r <= 49; r++) {
+          const tokens = headlineTokens(fillerTitle(r)).tokens;
+          expect(tokens.size).toBe(3);
+          for (const t of tokens) expect(story.has(t)).toBe(false);
+        }
+        // An identical filler headline is a lane hit (the truncation test relies on it).
+        expect(headlineLane(headlineTokens(fillerTitle(47)), headlineTokens(fillerTitle(47)), 0.5).fired).toBe(true);
+      });
+
+      it("Gürlek: a 30-member cluster whose 18th-newest member is the phrase-identical headline -> the follow-up joins it", async () => {
+        seedBusyCluster(CL, 30, 18, GURLEK_MEMBER, "src-posta");
+        expect(rankOf(CL, GURLEK_MEMBER)).toBe(18);
+        expect(rankOf(CL, GURLEK_MEMBER)).toBeGreaterThan(12);
+        queueIncoming(3101, "art-gurlek", GURLEK_INCOMING, 0, "src-outlet");
+        scoreOnly();
+
+        const body = await drainSummary();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual([CL]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+      });
+
+      it("Bahçeli: a 17-member cluster whose 13th-newest member is the cnn-turk 'SON DAKİKA...' headline -> the haber-com follow-up joins it", async () => {
+        seedBusyCluster(CL, 17, 13, BAHCELI_MEMBER, "src-cnn-turk");
+        expect(rankOf(CL, BAHCELI_MEMBER)).toBe(13);
+        queueIncoming(3102, "art-bahceli", BAHCELI_INCOMING, 0, "src-agg");
+        scoreOnly();
+
+        const body = await drainSummary();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual([CL]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+      });
+
+      it("the same member just inside the 6 h lane window (5.9 h before the article) still joins", async () => {
+        seedBusyCluster(CL, 30, 18, GURLEK_MEMBER, "src-posta", HEADLINE_LANE_MAX_HOURS - 0.1);
+        queueIncoming(3103, "art-gurlek", GURLEK_INCOMING, 0, "src-outlet");
+        scoreOnly();
+
+        const body = await drainSummary();
+
+        expect(body.matched).toBe(1);
+        expect(linkedClusters()).toEqual([CL]);
+      });
+
+      it("negative control: the same member published 7 h before the article gives no join (the 6 h window still bounds the scan)", async () => {
+        expect(HEADLINE_LANE_MAX_HOURS).toBe(6);
+        seedBusyCluster(CL, 30, 18, GURLEK_MEMBER, "src-posta", 7);
+        expect(rankOf(CL, GURLEK_MEMBER)).toBe(18);
+        queueIncoming(3104, "art-gurlek", GURLEK_INCOMING, 0, "src-outlet");
+        scoreOnly();
+
+        const body = await drainSummary();
+
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+      });
+
+      it("the window bounds the work, not only the result: a 30-member cluster with 13 members older than 6 h costs 16 lane evaluations (ranks 2..17), not 28", async () => {
+        // Rank 1 is the latest and rank 30 the seed: both go through score(),
+        // not the scan. Ranks 18..30 are 7-8 h old and must never be evaluated.
+        seedBusyCluster(CL, 30, 18, GURLEK_MEMBER, "src-posta", 7);
+        queueIncoming(3109, "art-gurlek", GURLEK_INCOMING, 0, "src-outlet");
+        scoreOnly();
+
+        await drainSummary();
+
+        expect(vi.mocked(headlineOnlyScoreMock)).toHaveBeenCalledTimes(16);
+      });
+
+      it("the count caps the work: a 51-member cluster, all inside the window, costs HEADLINE_MEMBER_SCAN_MAX - 1 evaluations (the latest is skipped, the seed is past the cap)", async () => {
+        // The seed (rank 51, the Gürlek headline) is outside the 48 newest: only
+        // score() compares with it, so this article cannot join.
+        seedBusyCluster(CL, 51, 51, GURLEK_MEMBER, "src-posta");
+        expect(rankHoursAgo(51)).toBeLessThan(HEADLINE_LANE_MAX_HOURS);
+        queueIncoming(3110, "art-gurlek", GURLEK_INCOMING, 0, "src-outlet");
+        scoreOnly();
+
+        const body = await drainSummary();
+
+        expect(vi.mocked(headlineOnlyScoreMock)).toHaveBeenCalledTimes(HEADLINE_MEMBER_SCAN_MAX - 1);
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+      });
+
+      it("a cluster loaded by the stem probe keeps the same reach (loadProbeCluster reads the same cap): rank 18 of 30 joins", async () => {
+        const PROBE = "cl-probe";
+        // Not among the context fixtures; only the probe rpc knows it.
+        for (let r = 1; r <= 30; r++) {
+          const at = rankHoursAgo(r);
+          if (r === 18) addMember(PROBE, `${PROBE}-m${r}`, GURLEK_MEMBER, at, "src-posta");
+          else addMember(PROBE, `${PROBE}-m${r}`, fillerTitle(r), at, null);
+        }
+        expect(rankOf(PROBE, GURLEK_MEMBER)).toBe(18);
+        rpcFixtures.cluster_stem_probe = () => ({
+          data: [
+            {
+              id: PROBE,
+              title_tr: "Küme",
+              title_tr_neutral: null,
+              first_published: iso(rankHoursAgo(30)),
+              updated_at: iso(rankHoursAgo(1)),
+              article_count: 30,
+            },
+          ],
+          error: null,
+        });
+        queueIncoming(3106, "art-gurlek", GURLEK_INCOMING, 0, "src-outlet");
+        scoreOnly();
+
+        const body = await drainSummary();
+
+        // Premise: nothing in the context, so the probe path produced the join.
+        expect(supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_stem_probe")).toHaveLength(1);
+        expect(clusterArticleEqReads).toContain(PROBE);
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual([PROBE]);
+      });
+
+      it("insertHeadlineMember truncates at the constant: after a join the 47th-newest old member is still scanned, the 48th-newest is dropped", async () => {
+        // 49 members (the seed is the oldest). The context keeps the newest 48.
+        // Article X joins through the stubbed full scorer and becomes the newest
+        // entry, so the list is cut back to 48 by dropping the OLDEST kept one
+        // (old rank 48). Z, next, repeats old rank 48's headline: gone, so Z
+        // opens its own cluster. Y repeats old rank 47's headline: still scanned,
+        // joins. (Z goes before Y: Y's own insertion would cut the list again.)
+        addCluster(CL, 49);
+        // 3 minutes apart: rank 49 (the seed) is 3.0 h old, every rank inside the 6 h window.
+        for (let r = 1; r <= 49; r++) addMember(CL, `ins-${r}`, fillerTitle(r), 0.6 + (r - 1) * 0.05, null);
+        // X shares its tokens with the latest member, which makes the cluster a candidate.
+        const X = `${fillerTitle(1)} detayları`;
+        queueIncoming(3107, "art-x", X, 0.5, "src-outlet");
+        queueIncoming(3108, "art-z", fillerTitle(48), 0.1, "src-wire");
+        queueIncoming(3109, "art-y", fillerTitle(47), 0.05, "src-agg");
+        // X joins on the latest (old rank 1) by the stubbed score; every other pair scores 0.
+        scoreOnly([{ a: X, b: fillerTitle(1), s: 0.82 }]);
+
+        const body = await drainSummary();
+
+        expect(body.matched).toBe(2);
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([CL, CL]);
+      });
+
+      describe("drain summary diagnostics", () => {
+        const SEED = "Sarıgül ailesine kara para soruşturmasında yeni operasyon";
+        const LATEST = "Meclis tatile girdi, yeni dönem ekimde başlayacak";
+
+        function seedFloorCandidateCluster() {
+          addCluster(CL, 2);
+          addMember(CL, "dg-seed", SEED, 3);
+          addMember(CL, "dg-latest", LATEST, 2);
+        }
+        // Every full-scorer pair scores 0.38: inside [FALLBACK_FLOOR 0.36, MATCH_THRESHOLD 0.40).
+        const scoreEverythingAt = (s: number) =>
+          vi.mocked(scoreMock).mockImplementation(() => result(s));
+
+        it("an article created although its best candidate scored >= FALLBACK_FLOOR counts once and leaves one id-and-number sample", async () => {
+          seedFloorCandidateCluster();
+          const incoming = `${SEED} haberi`;
+          queueIncoming(3201, "art-floor", incoming, 0, "src-outlet");
+          scoreEverythingAt(0.38);
+
+          const body = await drainSummary();
+
+          expect(body.matched).toBe(0);
+          expect(body.created).toBe(1);
+          expect(body.created_with_floor_candidate).toBe(1);
+          expect(body.created_with_floor_candidate_samples).toEqual([
+            { article_id: "art-floor", top_cluster_id: CL, top_score: 0.38 },
+          ]);
+        });
+
+        it("samples carry ids and numbers only: no title and no url anywhere in the summary body", async () => {
+          seedFloorCandidateCluster();
+          const incoming = `${SEED} haberi`;
+          queueIncoming(3202, "art-floor", incoming, 0, "src-outlet");
+          scoreEverythingAt(0.38);
+
+          const body = await drainSummary();
+
+          const [sample] = body.created_with_floor_candidate_samples;
+          expect(Object.keys(sample ?? {}).sort()).toEqual(["article_id", "top_cluster_id", "top_score"]);
+          expect(typeof sample?.article_id).toBe("string");
+          expect(typeof sample?.top_cluster_id).toBe("string");
+          expect(typeof sample?.top_score).toBe("number");
+          const raw = JSON.stringify(body);
+          expect(raw).not.toContain(incoming);
+          expect(raw).not.toContain(SEED);
+          expect(raw).not.toContain("example.com");
+        });
+
+        it("an article that opens a cluster with no candidate at all does not count", async () => {
+          queueIncoming(3203, "art-lonely", "Tamamen alakasız bir başlık: sepet kalem ceylan", 0, "src-outlet");
+
+          const body = await drainSummary();
+
+          expect(body.created).toBe(1);
+          expect(body.created_with_floor_candidate).toBe(0);
+          expect(body.created_with_floor_candidate_samples).toEqual([]);
+        });
+
+        it("an article that joins its candidate does not count", async () => {
+          seedFloorCandidateCluster();
+          queueIncoming(3204, "art-joins", `${SEED} haberi`, 0, "src-outlet");
+          // default score 0.82 (a match)
+
+          const body = await drainSummary();
+
+          expect(body.matched).toBe(1);
+          expect(body.created_with_floor_candidate).toBe(0);
+          expect(body.created_with_floor_candidate_samples).toEqual([]);
+        });
+
+        it("a candidate just below FALLBACK_FLOOR (0.35) does not count", async () => {
+          seedFloorCandidateCluster();
+          queueIncoming(3205, "art-below", `${SEED} haberi`, 0, "src-outlet");
+          scoreEverythingAt(0.35);
+
+          const body = await drainSummary();
+
+          expect(body.created).toBe(1);
+          expect(body.created_with_floor_candidate).toBe(0);
+          expect(body.created_with_floor_candidate_samples).toEqual([]);
+        });
+
+        it("a candidate at FALLBACK_FLOOR (0.36) counts", async () => {
+          seedFloorCandidateCluster();
+          queueIncoming(3206, "art-at", `${SEED} haberi`, 0, "src-outlet");
+          scoreEverythingAt(0.4 * 0.9 + 0.001);
+
+          const body = await drainSummary();
+
+          expect(body.created).toBe(1);
+          expect(body.created_with_floor_candidate).toBe(1);
+        });
+
+        it("the counter is exact but the samples stop at three", async () => {
+          seedFloorCandidateCluster();
+          // Distinct tails and sources: the strict-fingerprint fast path and the
+          // same-source duplicate skip must not swallow any of them.
+          const tails = ["ankara", "izmir", "bursa", "adana", "konya"];
+          const sources = ["src-outlet", "src-agg", "src-wire", "src-posta", "src-cnn-turk"];
+          for (let i = 1; i <= 5; i++) {
+            queueIncoming(3210 + i, `art-many-${i}`, `${SEED} haberi ${tails[i - 1]}`, 0, sources[i - 1]);
+          }
+          scoreEverythingAt(0.38);
+
+          const body = await drainSummary();
+
+          expect(body.created).toBe(5);
+          expect(body.created_with_floor_candidate).toBe(5);
+          expect(body.created_with_floor_candidate_samples).toHaveLength(3);
+          expect(body.created_with_floor_candidate_samples.map((s) => s.article_id)).toEqual([
+            "art-many-1",
+            "art-many-2",
+            "art-many-3",
+          ]);
+        });
+
+        it("ctx_window_min is the age of the oldest updated_at among the newest-rows window, as a finite number of minutes", async () => {
+          seedFloorCandidateCluster();
+          // Two more rows; the oldest of the three is 90 minutes old.
+          const row = (id: string, minutesAgo: number) => ({
+            id,
+            title_tr: "Küme",
+            title_tr_neutral: "Küme",
+            first_published: iso(minutesAgo / 60),
+            updated_at: iso(minutesAgo / 60),
+            article_count: 1,
+          });
+          clusterRows.push(row("cl-recent", 10), row("cl-oldest", 90));
+          addMember("cl-recent", "wm-1", "Maliye bakanı bütçe sunumu yaptı", 0.2);
+          addMember("cl-oldest", "wm-2", "Dışişleri bakanlığı basın toplantısı düzenledi", 1.5);
+
+          const body = await drainSummary();
+
+          expect(typeof body.ctx_window_min).toBe("number");
+          expect(Number.isFinite(body.ctx_window_min)).toBe(true);
+          expect(body.ctx_window_min).toBeGreaterThanOrEqual(89);
+          expect(body.ctx_window_min).toBeLessThanOrEqual(91);
+        });
+
+        it("sticky-tail clusters are not part of the window: 200 newest rows ~90 min old plus an 8 h sticky row -> about 90, not 480", async () => {
+          for (let i = 0; i < 200; i++) {
+            const minutesAgo = 5 + (i * 85) / 199; // 5 .. 90 minutes
+            clusterRows.push({
+              id: `cl-w${i}`,
+              title_tr: "Küme",
+              title_tr_neutral: "Küme",
+              first_published: iso(minutesAgo / 60),
+              updated_at: iso(minutesAgo / 60),
+              article_count: 1,
+            });
+          }
+          stickyClusterRows.push({
+            id: "cl-sticky",
+            title_tr: "Eski büyük hikaye",
+            title_tr_neutral: "Eski büyük hikaye",
+            first_published: iso(9),
+            updated_at: iso(8),
+            article_count: 6,
+            is_archived: false,
+            merged_into: null,
+          });
+
+          const body = await drainSummary();
+
+          // Premise: the sticky query really ran.
+          expect(clusterQueries.some((q) => (q as { lt?: Array<{ col: string }> }).lt?.some((p) => p.col === "updated_at"))).toBe(true);
+          expect(body.ctx_window_min).toBeGreaterThanOrEqual(89);
+          expect(body.ctx_window_min).toBeLessThanOrEqual(91);
+        });
+
+        it("an empty context has no window: ctx_window_min is null, not 0 and not NaN", async () => {
+          const body = await drainSummary();
+
+          expect(body.ctx_window_min).toBeNull();
+          expect(body.created_with_floor_candidate).toBe(0);
+          expect(body.created_with_floor_candidate_samples).toEqual([]);
+        });
       });
     });
 
@@ -5641,3 +6064,134 @@ describe("roundup titles are never clustered (Resmi Gazete roundups, wave BF W3)
 // a missing or mis-imported SUT fails loud rather than silently passing as
 // a no-op. The suite no longer skips when the handler cannot be loaded.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// h40-clusters-2 (2026-11-05): IndyTurk's nightly "Kısa haberler" digest is never
+// clustered. Its title carries nothing; its description is the first item of the
+// digest, and that is what matched: 7 of 14 digests joined unrelated politics
+// clusters (b59f3bb6 with 43 articles, e7cde92e with 18, ...) and one seeded the
+// 1-article cluster a520b58a titled "Kısa haberler". isRoundupTitle() now knows
+// the title (shape I); the two existing skip sites in cluster-consumer handle it
+// with no change of their own. The fake source list has no indyturk row, so the
+// incoming article uses src-wire: the skip looks at the title only.
+// ---------------------------------------------------------------------------
+describe("the 'Kısa haberler' digest is never clustered (h40-clusters-2)", () => {
+  const LEAD = "Erdoğan Bakü'ye gitti ve Aliyev ile görüştü";
+  const DESCRIPTION = `${LEAD}. Bahçeli'den yeni açıklama geldi.`;
+  const SEEDED = "c-kisa-target";
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  /** An existing politics cluster seeded by the digest's first item. */
+  function seedCluster() {
+    clusterRows.push({
+      id: SEEDED,
+      title_tr: LEAD,
+      title_tr_neutral: LEAD,
+      first_published: ago(40 * 60_000),
+      updated_at: ago(60_000),
+      article_count: 1,
+    });
+    clusterArticleRows.push({ cluster_id: SEEDED, article_id: "seed-member" });
+    fakeArticles["seed-member"] = {
+      id: "seed-member",
+      source_id: "src-outlet",
+      title: LEAD,
+      description: DESCRIPTION,
+      published_at: ago(30 * 60_000),
+      fingerprint: "fp-seed-member",
+      entities: [],
+      category: "politika",
+      minhash_sig: null,
+      minhash_version: null,
+    };
+  }
+
+  /** The digest: the same description as the seed, only the title differs. */
+  function queueDigest(id: string, msgId: number, title: string) {
+    (pgmqState.pending as unknown as Array<{ msg_id: number; read_ct: number; message: unknown }>).push({
+      msg_id: msgId,
+      read_ct: 1,
+      message: { article_id: id },
+    });
+    fakeArticles[id] = {
+      id,
+      source_id: "src-wire",
+      title,
+      description: DESCRIPTION,
+      url: `https://example.com/${id}`,
+      category: "politika",
+      published_at: new Date().toISOString(),
+    };
+  }
+
+  async function drain(): Promise<{ drained: number; matched: number; created: number; skipped: number; roundupSkipped: number }> {
+    const handler = await importHandler();
+    if (!handler) throw new Error("unreachable");
+    const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Awaited<ReturnType<typeof drain>>;
+  }
+
+  const linkedClusters = () =>
+    supabaseFakeCalls.rpc
+      .filter((r) => r.name === "cluster_link_atomic")
+      .map((r) => (r.args as { p_cluster_id: string }).p_cluster_id);
+
+  it("an article titled 'Kısa haberler' whose description matches an existing cluster's seed is skipped 'roundup-title' and joins nothing", async () => {
+    seedCluster();
+    queueDigest("art-kisa", 9101, "Kısa haberler");
+
+    const body = await drain();
+
+    expect(body.drained).toBe(1);
+    expect(body.skipped).toBe(1);
+    expect(body.roundupSkipped).toBe(1);
+    expect(body.matched).toBe(0);
+    expect(body.created).toBe(0);
+    expect(linkedClusters()).toEqual([]);
+    expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+    expect(supabaseFakeCalls.insert("cluster_articles")).toHaveLength(0);
+    expect(supabaseFakeCalls.upsert("cluster_articles")).toHaveLength(0);
+    expect(supabaseFakeCalls.forTable("cluster_skip_log")).toHaveLength(0);
+    expect(vi.mocked(scoreMock)).not.toHaveBeenCalled();
+    expect(pgmqState.archived).toContain(9101);
+    expect(logSpy.mock.calls.map((c) => c[0])).toContain("[cluster-consumer] roundup-title skip article=art-kisa");
+  });
+
+  it("control: the same article and description under a story headline joins the cluster (the title is the only reason the digest did not)", async () => {
+    seedCluster();
+    queueDigest("art-kisa-story", 9102, "Kısa haberler: Erdoğan Bakü'ye gitti");
+
+    const body = await drain();
+
+    expect(body.roundupSkipped).toBe(0);
+    expect(body.skipped).toBe(0);
+    expect(body.matched).toBe(1);
+    expect(linkedClusters()).toEqual([SEEDED]);
+  });
+
+  it.each(["KISA HABERLER", "Kısa Haberler", "Kısa haberler:", "Kısa haberler (4 Kasım 2026)", "Günün kısa haberleri"])(
+    "the variant %j is skipped as well",
+    async (title) => {
+      seedCluster();
+      queueDigest("art-kisa-variant", 9103, title);
+
+      const body = await drain();
+
+      expect(body.roundupSkipped).toBe(1);
+      expect(body.matched).toBe(0);
+      expect(linkedClusters()).toEqual([]);
+    },
+  );
+});
