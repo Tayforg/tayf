@@ -63,11 +63,26 @@ export const TOPIC_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /** Hard ceiling on ?sayfa= so the "use cache" key space stays finite. */
 export const TOPIC_MAX_PAGE = 20;
 
+/** Fewest clusters a hub's page 1 may list, when it has no page 2, and still
+ *  be indexed (h44-topics-3). Tayf only clusters articles that pass the
+ *  politics gate, so /konu/spor and /konu/teknoloji hold the 10 or so
+ *  politics-adjacent stories of the week, not a sports or tech feed; a page
+ *  that thin is kept out of the index (topic-page-robots.ts). At most
+ *  TOPIC_PAGE_SIZE, so "page 1 is full" needs no extra count read: the extra
+ *  row that sets `hasMore` already answers it. */
+export const TOPIC_INDEX_MIN_CLUSTERS = 20;
+
 /** Honest-note copy. The page renders TOPIC_NOTE_PREFIX then a <Link
  *  href="/metodoloji"> whose text is TOPIC_NOTE_LINK_LABEL. */
 export const TOPIC_NOTE_PREFIX =
   "Konu etiketleri otomatik atanır (Jev, eşik 0,8) — ";
 export const TOPIC_NOTE_LINK_LABEL = "yöntem";
+
+/** One sentence under the /konu index counts: what a hub is, so "son 7 günde 10
+ *  küme" next to Spor is not read as the whole week's sports news. States only
+ *  what is true of the data: clusters come from politics-gated articles. */
+export const TOPIC_INDEX_SCOPE_NOTE =
+  "Tayf yalnızca siyasi gündeme giren haberleri kümeler; konu sayfaları bu haberlerin konu dağılımıdır.";
 
 const TOPIC_SLUG_SET: ReadonlySet<string> = new Set(TOPIC_SLUGS);
 
@@ -194,10 +209,20 @@ async function fetchTopicClusters(
       slug,
       sinceIso,
     )
-      .order("updated_at", { ascending: false })
-      // Tiebreaker: clusters.updated_at is stamped now() by cluster_link_atomic
-      // (migration 027), so members linked in one transaction can share a
-      // timestamp. Without a unique second key, OFFSET pagination over ties
+      // The window above is on updated_at, but the ORDER is first_published:
+      // each card prints its first_published age, and ordering by updated_at
+      // put a story first published days ago (and refreshed since) above one
+      // published this morning, so the ages read 13 saat, 1 gün, 3 Kasım,
+      // 1 gün, ... (h44-time-2). Same split entity-hub-query.ts:41-44 made
+      // for the /gundem hubs. The RSS feed reads this same page, so its items
+      // come out newest-first by pubDate. Served by clusters_topic7_updated_idx
+      // (topic7, updated_at desc): the window is an index range of at most a
+      // few hundred rows (344 for the largest hub, dunya) and the sort is a
+      // top-N heapsort, so no extra index is needed.
+      .order("first_published", { ascending: false })
+      // Tiebreaker: first_published is an article's published_at (the seed's
+      // at creation, cluster-consumer createCluster), so two clusters can
+      // share one. Without a unique second key, OFFSET pagination over ties
       // can duplicate one cluster on the next page while hiding another.
       // clusters.id is the uuid primary key (003_create_clusters.sql:2).
       .order("id", { ascending: false })
@@ -403,12 +428,18 @@ export function buildTopicCollectionPage(args: {
  *  Search-result and share-card copy, so it describes what the reader gets and
  *  names neither the classifier nor its threshold: that disclosure lives in
  *  the on-page note (TOPIC_NOTE_PREFIX), which the CT-3 parity guard pins.
- *  The label is lowercased with the Turkish locale ("Yaşam" -> "yaşam"). The
- *  longest hub (teknoloji) comes to 140 characters, inside a 155-character
- *  snippet. Paged hubs (?sayfa=N) share it. */
+ *  It also promises no more than the hub holds: only politics-gated articles
+ *  are clustered, so a hub is "the topic's stories that meet the political
+ *  agenda", not a topic feed (h44-topics-3; the old "Son 7 günün spor
+ *  haberleri" did). The label is lowercased with the Turkish locale ("Yaşam"
+ *  -> "yaşam"). The noun labels form the compound "<label> haberleri"; the one
+ *  adjective label, genel, has no possessor for "-leri" and reads "genel
+ *  haberler". The longest hub (teknoloji) comes to 137 characters, inside a
+ *  155-character snippet. Paged hubs (?sayfa=N) share it. */
 export function topicDescription(slug: TopicSlug): string {
   const lower = TOPIC_LABELS_TR[slug].toLocaleLowerCase("tr-TR");
-  return `Son 7 günün ${lower} haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.`;
+  const noun = slug === "genel" ? `${lower} haberler` : `${lower} haberleri`;
+  return `Siyasi gündemle kesişen ${noun}, son 7 gün: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.`;
 }
 
 /** Pure. The exact Metadata object /konu/[slug] exports.

@@ -66,6 +66,7 @@ import {
   retryDelayMs,
   runJevShadow,
   parseArticlePack,
+  parseArticlesPoliticsReserve,
   sumStageLedgers,
   type JevStageBudgets,
 } from "../_shared/jev.ts";
@@ -1142,6 +1143,11 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
       cap,
       mode,
       articlePack: parseArticlePack(Deno.env.get("JEV_ARTICLE_PACK")),
+      // h44-time-1: part of the 'articles' daily allowance is held for
+      // politics-gate articles so the evening's political clusters still get
+      // their topic7. Integer >= 0 tokens; unset or invalid = the default
+      // (3,000,000); 0 switches the reserve off. Never adds to the allowance.
+      articlesPoliticsReserveTokens: parseArticlesPoliticsReserve(Deno.env.get("JEV_ARTICLES_POLITICS_RESERVE_TOKENS")),
     });
     console.log("[jev-shadow]", JSON.stringify(result));
     return jsonResponse(result);

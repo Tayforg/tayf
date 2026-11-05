@@ -68,8 +68,13 @@ export async function generateMetadata({
     const page = clampTopicPage(parseInt(raw ?? "1", 10));
     const base = topicMetadata(slug, page);
     // Same "use cache" key as the body below (slug + clamped page), so this
-    // adds no extra round trip. A failed read or a page past the last one is
-    // noindex,follow; an empty page 1 stays indexable (topicPageRobots).
+    // adds no extra round trip. noindex,follow for a failed read, a page past
+    // the last one, and (h44-topics-3) a page 1 with no next page and fewer
+    // than TOPIC_INDEX_MIN_CLUSTERS clusters, an empty one included: only
+    // politics-gated articles are clustered, so /konu/spor and /konu/teknoloji
+    // hold ~10 stale clusters and must not pass for a sports or tech feed. This
+    // narrows the earlier rule that an empty page 1 stays indexable
+    // (topicPageRobots has the reasoning).
     const result = await getTopicClusters(slug, page);
     const robots = topicPageRobots(page, result);
     return {
@@ -211,7 +216,9 @@ export default async function TopicHubPage({
               body robots meta is unproven, so verify with Search Console
               URL Inspection on a staging deploy pointed at a dead DB.
               Absent from the ok and ok-but-empty states: the empty branch
-              below is a real, readable answer and stays indexable. */}
+              below is a real, readable answer. Whether a thin or empty page 1
+              is indexed is decided once, in generateMetadata (topicPageRobots),
+              never by a second body meta. */}
           <meta name="robots" content="noindex" />
           <p className={unavailableTextClass}>{UNAVAILABLE_COPY}</p>
         </div>

@@ -423,6 +423,50 @@ describe("getNearBlindspotsSafe feed quality and health gates", () => {
     expect(await ids()).toEqual([]);
   });
 
+  // h44-consistency-3: the SEO-explainer filter judges the headline the list
+  // shows (title_tr_neutral ?? title_tr), not the stored seed title.
+  describe("SEO filter runs on the served headline (h44-consistency-3)", () => {
+    const SEED_SEO = "Semiha Bahçeli kimdir, Semiha Bahçeli kaç yaşında, nereli?";
+    const NEUTRAL_CLEAN = "Cumhurbaşkanı Erdoğan'dan Devlet Bahçeli'ye taziye mesajı";
+
+    it("keeps a near-blindspot whose seed title is an SEO explainer but whose served title is clean, with the served title", async () => {
+      // 11 İktidar + 4 Muhalefet = 73% dominant share (inside [70, 80)).
+      seedRows([
+        splitRow("seo-seed-clean-served", 11, 4, {
+          title_tr: SEED_SEO,
+          title_tr_neutral: NEUTRAL_CLEAN,
+        }),
+      ]);
+
+      const items = (await getNearBlindspotsSafe()) ?? [];
+
+      expect(items.map((i) => i.id)).toEqual(["seo-seed-clean-served"]);
+      expect(items[0]?.title).toBe(NEUTRAL_CLEAN);
+      expect(items[0]?.dominantShare).toBeGreaterThanOrEqual(0.7);
+      expect(items[0]?.dominantShare).toBeLessThan(0.8);
+    });
+
+    it("skips a cluster whose served (neutral) title is an SEO explainer although the seed is clean", async () => {
+      seedRows([
+        splitRow("clean-seed-seo-served", 11, 4, {
+          title_tr: "Bakan X açıkladı",
+          title_tr_neutral: "Ali Koç kimdir?",
+        }),
+      ]);
+      expect(await ids()).toEqual([]);
+    });
+
+    it("still skips an SEO seed title when there is no neutral title", async () => {
+      seedRows([
+        splitRow("seo-seed-no-neutral", 11, 4, {
+          title_tr: "Ali Koç kimdir?",
+          title_tr_neutral: null,
+        }),
+      ]);
+      expect(await ids()).toEqual([]);
+    });
+  });
+
   it("skips a cluster that is one wire copy amplified (passesFeedFilters wire_dedup)", async () => {
     const row = splitRow("wire", 7, 3);
     for (const ca of row.cluster_articles) ca.articles.content_hash = "same-wire-copy";

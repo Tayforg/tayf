@@ -235,6 +235,44 @@
 // the title only. The tests time the worst shapes at 200k characters (the worst
 // pair of calls was 71.9 ms on a busy machine; the old classifier 28.9 to 96.9 ms).
 //
+// hunt-44 (2026-11-05) other Erdoğans: the bare surname 'Erdoğan' is a politika hit
+// (the first entry of POLITIKA_RAW), so a given name before it made no difference:
+// the director Yılmaz Erdoğan ('Yılmaz Erdoğan kam davulu sahnesi için özür
+// diledi'), the actress Nehir Erdoğan and the musician Filiz Erdoğan were clustered
+// and their celebrity stories showed up on /konu/yasam with İktidar / Muhalefet
+// bars (clusters 83243719, 43108107, ba759e17). The entry now carries a negative
+// lookbehind on NON_PRESIDENT_ERDOGAN_GIVEN_NAMES (yilmaz, nehir, filiz) and nothing
+// else changes: 'Recep Tayyip' / 'Emine' / 'Bilal Erdoğan', 'Cumhurbaşkanı Erdoğan',
+// "Erdoğan'dan", 'Sayın Erdoğan' and 'President Erdogan' still admit, and so does
+// 'Cevdet Yılmaz Erdoğan'ın talimatıyla' (the 'cevdet yilmaz' title marker).
+//
+// Replay, read-only: HEAD (hunt-43 build, 7332b38) against this module over every
+// stored row created 2026-10-30 21:51Z .. 2026-11-05 21:48Z (58,357 rows). politika
+// goes from 10,655 rows to 10,636 and the gate (politika | son_dakika) from 10,787 to
+// 10,768: 0 rows enter, 19 leave (12 to genel, 7 to yasam), and the other 58,338
+// rows keep their category. All 19 name Yılmaz, Nehir or Filiz Erdoğan in the title
+// or the description and have no other politika marker: 16 title rows (the director's
+// kam davulu apology, 'Yüsra Geyik takside beklerken, Nehir Erdoğan arka kapıdan
+// kaçtı', two Filiz Erdoğan headlines) and 3 description-only rows of the Filiz
+// Erdoğan cluster. The 14-day set of every row that names Erdoğan (4,033 rows) goes
+// from 3,938 politika rows to 3,897 (41 leave, 0 enter).
+// Known residual, pinned in the tests: the lookbehind sees the word right before the
+// surname only. 15 of the 34 rows of the 6 days that name one of the three people
+// in full (26 in the title, 8 only in the description) stay politika: 10 titles and
+// 5 descriptions, because their DESCRIPTION later says the bare surname ('GÖK-DER yöneticileriyle bir araya gelen Erdoğan,
+// ...', 'Erdoğan, Bilkent Şehir Hastanesi'nde ...'); two of the four idea titles
+// (252159b7, 98d9dd5b) leave only when read without that description. A later wave
+// can drop the bare 'Erdoğan' from the DESCRIPTION pattern when the text names a
+// listed pair: that variant measured 34 leavers in the same 6 days (63 in 14) and
+// none of them is the president.
+//
+// Linear: the lookbehind follows the literal 'erdogan', so it runs only at a hit and
+// reads back over one run of white space and one word; the runs of two hits are
+// disjoint. The 100k-character tests time the worst shapes (a blank run before a
+// surname, 'yılmaz' + 100k blanks + 'erdoğan'); V8 ran the prefix form
+// (lookbehind before the literal) at the same speed on those inputs, but the
+// literal-first form does not depend on that.
+//
 // Forward-only: it changes the category of NEW rows. `content_hash` does not
 // depend on the category, and nothing is re-enqueued.
 
@@ -373,6 +411,24 @@ const POLITIKA_STEMS = [
   "gelecek parti", "memleket parti", "buyuk birlik parti",
   "bagimsiz turkiye parti",
 ];
+// Given names that make a bare 'Erdoğan' somebody other than the president
+// (hunt-44, 2026-11-05): the director Yılmaz Erdoğan, the actress Nehir Erdoğan
+// and the musician Filiz Erdoğan. The hunt-44 data, six days of stored politika
+// rows with '<word> Erdoğan' and no tayyip / emine / bilal / cumhurbaşkanı /
+// başkan before it: yılmaz 19, nehir 4, filiz 3, so their celebrity stories were
+// clustered and shown on /konu/yasam with İktidar / Muhalefet bars. The other
+// words that precede 'Erdoğan' in that data are political ('Özel'den', 'Sayın',
+// 'President'). Folded ASCII, matched as whole words right before the surname.
+//
+// FAMILY NAMES MUST NEVER BE ADDED (recep, tayyip, emine, bilal, sumeyye, esra,
+// burak, necmettin): 'Emine Erdoğan' and 'Bilal Erdoğan' are the political
+// mentions the entry exists for. A name is added only when a replay of stored
+// rows shows a person who is not the president and no other politika marker in
+// the text. 'Cevdet Yılmaz Erdoğan'ın ...' stays politika through the
+// 'cevdet yilmaz' title marker below.
+const NON_PRESIDENT_ERDOGAN_GIVEN_NAMES = ["yilmaz", "nehir", "filiz"];
+const NON_PRESIDENT_ERDOGAN_LOOKBEHIND = String.raw`(?<!\b(?:${NON_PRESIDENT_ERDOGAN_GIVEN_NAMES.join("|")})\s+erdogan)`;
+
 const POLITIKA_RAW = [
   // 'Bahcelievler' is a neighbourhood, not the MHP leader
   "\\bbahceli(?!ev)",
@@ -384,7 +440,17 @@ const POLITIKA_RAW = [
   // 'parki' the possessive of 'park'). Every alternative starts with a letter
   // and the optional group sits between two literals, so the lookahead is
   // linear.
-  "\\berdogan(?!\\s+(?:stad|univ|millet\\s+bahce|parki|bulvari|caddesi|kongre\\s+(?:ve\\s+kultur\\s+)?merkez|kultur\\s+merkez|hastanesi|camii|kulliyesi|spor\\s+salon|lisesi))",
+  //
+  // hunt-44: the given names of NON_PRESIDENT_ERDOGAN_GIVEN_NAMES before the
+  // surname are somebody else ('Yılmaz Erdoğan kam davulu sahnesi için özür
+  // diledi'). The literal 'erdogan' comes FIRST and the lookbehind follows it,
+  // like the 'muhalefet' guards below, so it is tried only at a surname that is
+  // already a hit. It is variable length (one run of white space) but linear: its
+  // scan reads back over one run of white space and one word, and the runs of two
+  // hits are disjoint. It sees only the word right before the surname: 'Yılmaz,
+  // Erdoğan'a', 'Yılmaz ve Erdoğan' and 'Erdoğan Yılmaz'ı kabul etti' stay the
+  // president. The same entry feeds the title and the description pattern.
+  `\\berdogan${NON_PRESIDENT_ERDOGAN_LOOKBEHIND}(?!\\s+(?:stad|univ|millet\\s+bahce|parki|bulvari|caddesi|kongre\\s+(?:ve\\s+kultur\\s+)?merkez|kultur\\s+merkez|hastanesi|camii|kulliyesi|spor\\s+salon|lisesi))`,
   // 'hava muhalefeti' (adverse weather, the excuse of a power cut) is not the
   // opposition, and neither is the legal phrase 'kanuna muhalefet' (hunt-31:
   // "Siber Güvenlik Kanununa muhalefet" is a charge, the İçişleri fraud

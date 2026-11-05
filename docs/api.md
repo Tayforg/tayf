@@ -251,7 +251,7 @@ Three more RSS 2.0 feeds, all `GET`, unkeyed, `Content-Type: application/rss+xml
 
 | URL | Content |
 | --- | --- |
-| `/rss/{topic}.xml` | the first page of the `/konu/{topic}` hub. `{topic}` is one of `dunya`, `ekonomi`, `spor`, `yasam`, `teknoloji`, `genel`. Clusters of that topic updated in the last 7 days with at least two articles, newest first. Item `link`s carry `utm_source=rss&utm_medium=feed&utm_campaign=konu_{topic}`. |
+| `/rss/{topic}.xml` | the first page of the `/konu/{topic}` hub. `{topic}` is one of `dunya`, `ekonomi`, `spor`, `yasam`, `teknoloji`, `genel`. Clusters of that topic updated in the last 7 days with at least two articles, ordered by `first_published`, newest first (ties by cluster id), so the items run newest-first by `pubDate` and in the same order as the cards on the hub. The 7-day window is on the cluster's `updated_at`, not `first_published`: a story first published earlier that gained a source this week is still listed, below the newer ones. Item `link`s carry `utm_source=rss&utm_medium=feed&utm_campaign=konu_{topic}`. |
 | `/rss/kor-noktalar.xml` | the blindspots feed (the `/blindspots` page). Item `link`s carry `utm_campaign=kor_nokta`; each description starts with `Kör nokta: ağırlıkla {zone} kaynakları (%N).` |
 | `/blindspots/rss.xml` | the same feed as `/rss/kor-noktalar.xml`, produced by the same code; only the `atom:link rel="self"` URL differs. |
 

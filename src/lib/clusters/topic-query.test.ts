@@ -55,6 +55,11 @@ const fixture = vi.hoisted(() => ({
   countThrows: false,
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
+  /** Make the list read behave like PostgREST: sort the fixture rows by the
+   *  `.order()` calls the code actually recorded (string compare, which is
+   *  exact for ISO timestamps and uuids). Off by default: most tests only
+   *  need the recorded builder state. */
+  applyRecordedOrder: false,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -79,6 +84,23 @@ const supabaseFake = await vi.hoisted(async () => {
         fixture.clusterState = state;
         if (fixture.clustersThrows) throw new Error("boom");
         if (fixture.clustersError) return { data: null, error: fixture.clustersError };
+        if (fixture.applyRecordedOrder) {
+          const keys = state.order.map((o) => ({
+            col: o.col,
+            sign: (o.opts as { ascending?: boolean } | undefined)?.ascending === false ? -1 : 1,
+          }));
+          const sorted = [...(fixture.clusters as Array<Record<string, unknown>>)].sort(
+            (a, b) => {
+              for (const { col, sign } of keys) {
+                const x = String(a[col]);
+                const y = String(b[col]);
+                if (x !== y) return x < y ? -sign : sign;
+              }
+              return 0;
+            },
+          );
+          return { data: sorted, error: null };
+        }
         return { data: fixture.clusters, error: null };
       },
     },
@@ -114,6 +136,7 @@ import {
   TOPIC_WINDOW_MS,
   TOPIC_NOTE_PREFIX,
   TOPIC_NOTE_LINK_LABEL,
+  TOPIC_INDEX_SCOPE_NOTE,
 } from "./topic-query";
 import { CLUSTER_EMBED_SELECT, type ClusterBundle } from "./politics-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
@@ -134,6 +157,7 @@ beforeEach(() => {
   fixture.countNullSlug = null;
   fixture.countThrows = false;
   fixture.clientOpts = [];
+  fixture.applyRecordedOrder = false;
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -196,7 +220,7 @@ function mkRow(opts: {
 // --- getTopicClusters --------------------------------------------------------
 
 describe("getTopicClusters", () => {
-  it("filters on topic7 = slug, is_archived = false and the trailing 7-day updated_at window, newest first", async () => {
+  it("filters on topic7 = slug, is_archived = false and the trailing 7-day updated_at window, newest story first", async () => {
     const before = Date.now();
     await getTopicClusters("dunya", 1);
     const after = Date.now();
@@ -206,16 +230,15 @@ describe("getTopicClusters", () => {
     expect(String(state.selectArgs[0])).toBe(CLUSTER_EMBED_SELECT);
     expect(state.eq).toContainEqual({ col: "is_archived", val: false });
     expect(state.eq).toContainEqual({ col: "topic7", val: "dunya" });
-    expect(state.order).toContainEqual({
-      col: "updated_at",
-      opts: { ascending: false },
-    });
-    // Tiebreaker on the uuid primary key: without it, OFFSET pagination over
-    // rows sharing an updated_at timestamp is not a total order.
-    expect(state.order).toContainEqual({
-      col: "id",
-      opts: { ascending: false },
-    });
+    // h44-time-2: ordered by the age each card prints (first_published), then
+    // the uuid primary key as the tiebreaker. Without a unique second key,
+    // OFFSET pagination over rows sharing a first_published is not a total
+    // order. updated_at is deliberately NOT an ordering key any more: it only
+    // windows the read (the .gte below), exactly like entity-hub-query.ts.
+    expect(state.order).toEqual([
+      { col: "first_published", opts: { ascending: false } },
+      { col: "id", opts: { ascending: false } },
+    ]);
 
     const from = state.gte.find((g) => g.col === "updated_at");
     expect(from).toBeDefined();
@@ -290,6 +313,111 @@ describe("getTopicClusters", () => {
     expect(result).not.toBeNull();
     expect(result?.bundles).toEqual([]);
     expect(result?.hasMore).toBe(false);
+  });
+});
+
+// --- order: the age a card prints is the order it sits in (h44-time-2) --------
+//
+// The window stays on updated_at (hub counts and page sizes do not change), but
+// the order follows first_published, because that is the age every card prints.
+// Ordering by updated_at put a story first published 3 days ago, refreshed this
+// hour, above one first published 13 hours ago, so the printed ages read
+// '13 saat önce', '1 gün önce', '3 Kasım 2026', '1 gün önce', ... entity-hub-
+// query.ts:41-44 fixed the same defect for /gundem hubs the same way.
+
+describe("getTopicClusters: order follows first_published (h44-time-2)", () => {
+  // updated_at order (b, c, a, d) is NOT first_published order (d, a, c, b),
+  // and a/d share a first_published, so the id tiebreaker is exercised too.
+  const rows = () => [
+    mkRow({
+      id: "b",
+      first_published: "2026-11-02T09:00:00.000Z",
+      updated_at: "2026-11-05T20:00:00.000Z",
+    }),
+    mkRow({
+      id: "c",
+      first_published: "2026-11-05T08:00:00.000Z",
+      updated_at: "2026-11-05T19:00:00.000Z",
+    }),
+    mkRow({
+      id: "a",
+      first_published: "2026-11-05T10:00:00.000Z",
+      updated_at: "2026-11-05T10:30:00.000Z",
+    }),
+    mkRow({
+      id: "d",
+      first_published: "2026-11-05T10:00:00.000Z",
+      updated_at: "2026-11-05T10:10:00.000Z",
+    }),
+  ];
+
+  it("keeps the window on updated_at and adds no first_published filter, so hub counts and page sizes are unchanged", async () => {
+    await getTopicClusters("dunya", 1);
+
+    const state = fixture.clusterState as BuilderState;
+    expect(state.gte.filter((g) => g.col === "updated_at")).toHaveLength(1);
+    expect(state.gte.some((g) => g.col === "first_published")).toBe(false);
+    expect(state.gte).toContainEqual({ col: "article_count", val: 2 });
+    expect(state.range).toEqual({ from: 0, to: TOPIC_PAGE_SIZE });
+  });
+
+  it("sends first_published desc first and id desc second, on every page", async () => {
+    for (const page of [1, 2, TOPIC_MAX_PAGE]) {
+      await getTopicClusters("dunya", page);
+      expect((fixture.clusterState as BuilderState).order).toEqual([
+        { col: "first_published", opts: { ascending: false } },
+        { col: "id", opts: { ascending: false } },
+      ]);
+    }
+  });
+
+  it("returns the bundles monotone non-increasing in cluster.first_published once the database applies that order", async () => {
+    fixture.clusters = rows();
+    fixture.applyRecordedOrder = true;
+
+    const result = await getTopicClusters("dunya", 1);
+
+    const published = (result?.bundles ?? []).map((b) =>
+      Date.parse(b.cluster.first_published),
+    );
+    expect(published).toHaveLength(4);
+    for (let i = 1; i < published.length; i++) {
+      expect(published[i]!).toBeLessThanOrEqual(published[i - 1]!);
+    }
+    // The tied pair (a, d) is broken by id desc, and the freshly refreshed old
+    // story (b) sits last instead of first.
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["d", "a", "c", "b"]);
+  });
+
+  it("the fixture's updated_at-desc order differs from its first_published-desc order, so the monotone test above can fail", () => {
+    const byUpdated = [...rows()]
+      .sort((x, y) => Date.parse(y.updated_at) - Date.parse(x.updated_at))
+      .map((r) => r.id);
+    const byPublished = [...rows()]
+      .sort(
+        (x, y) =>
+          Date.parse(y.first_published) - Date.parse(x.first_published) ||
+          (x.id < y.id ? 1 : -1),
+      )
+      .map((r) => r.id);
+    expect(byUpdated).toEqual(["b", "c", "a", "d"]);
+    expect(byPublished).toEqual(["d", "a", "c", "b"]);
+  });
+
+  it("does not reorder rows it was given: the database order is the page order", async () => {
+    fixture.clusters = rows();
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["b", "c", "a", "d"]);
+  });
+
+  it("the last-page count read stays lean: no ordering key of any kind", async () => {
+    fixture.countsBySlug = { dunya: 61 };
+
+    await getTopicClusters("dunya", 3);
+
+    expect((fixture.countStates[0] as BuilderState).order).toEqual([]);
   });
 });
 
@@ -641,6 +769,18 @@ describe("TOPIC_LABELS_TR / TOPIC_SLUGS", () => {
   });
 });
 
+describe("TOPIC_INDEX_SCOPE_NOTE (the sentence under the /konu index counts)", () => {
+  it("is the exact scope sentence: only politics-gated stories are clustered, hubs are their topic split", () => {
+    expect(TOPIC_INDEX_SCOPE_NOTE).toBe(
+      "Tayf yalnızca siyasi gündeme giren haberleri kümeler; konu sayfaları bu haberlerin konu dağılımıdır.",
+    );
+  });
+
+  it("carries no classifier jargon (that lives in TOPIC_NOTE_PREFIX)", () => {
+    expect(TOPIC_INDEX_SCOPE_NOTE).not.toMatch(/jev|eşik|0,8/i);
+  });
+});
+
 describe("TOPIC_NOTE_PREFIX / TOPIC_NOTE_LINK_LABEL", () => {
   it("TOPIC_NOTE_PREFIX names Jev and states the 0,8 threshold, and the note links to /metodoloji", () => {
     expect(TOPIC_NOTE_PREFIX).toContain("Jev");
@@ -666,7 +806,7 @@ describe("topicMetadata", () => {
     expect(meta.title).toBe("Dünya haberleri");
     expect(meta.robots).toBeUndefined();
     expect(meta.description).toBe(
-      "Son 7 günün dünya haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+      "Siyasi gündemle kesişen dünya haberleri, son 7 gün: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
     );
   });
 
@@ -740,12 +880,41 @@ describe("topicMetadata", () => {
     expect(paged.twitter?.description).toBe(first.description);
   });
 
-  it("topicDescription fills the template with the lowercase label (tr-TR), and the longest one still fits a snippet", () => {
+  it("topicDescription fills the template with the lowercase label (tr-TR)", () => {
     expect(topicDescription("yasam")).toBe(
-      "Son 7 günün yaşam haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+      "Siyasi gündemle kesişen yaşam haberleri, son 7 gün: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
     );
-    // The longest label (Teknoloji) is the worst case for the snippet budget.
-    expect(topicDescription("teknoloji").length).toBeLessThanOrEqual(155);
+  });
+
+  // h44-topics-3: Tayf clusters only articles that pass the politics gate, so a
+  // hub holds the politics-adjacent stories of its topic, not "the week's spor
+  // news". The old copy ("Son 7 günün teknoloji haberleri, olaylara göre
+  // gruplanmış") promised the second; this one says the first.
+  it("topicDescription('teknoloji') is the politics-scoped copy, not a promise of a full topic feed", () => {
+    expect(topicDescription("teknoloji")).toBe(
+      "Siyasi gündemle kesişen teknoloji haberleri, son 7 gün: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+    );
+    expect(topicDescription("spor")).toMatch(/^Siyasi gündemle kesişen spor haberleri/);
+    expect(topicDescription("spor")).not.toContain("olaylara göre gruplanmış");
+  });
+
+  // 'Genel' is an adjective, not a noun: "genel haberleri" (a possessive
+  // compound with no possessor) is not Turkish, so the genel hub reads
+  // "genel haberler". The noun labels keep the "<label> haberleri" compound.
+  it("topicDescription('genel') uses the plain 'genel haberler' noun phrase, not the ungrammatical 'genel haberleri'", () => {
+    expect(topicDescription("genel")).toBe(
+      "Siyasi gündemle kesişen genel haberler, son 7 gün: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+    );
+    expect(topicDescription("genel")).not.toContain("genel haberleri");
+  });
+
+  it.each(TOPIC_SLUGS)("topicDescription('%s') fits a 155-character snippet", (slug) => {
+    expect(topicDescription(slug).length).toBeLessThanOrEqual(155);
+  });
+
+  it("no hub description is longer than 155 characters (measured max 137)", () => {
+    const longest = Math.max(...TOPIC_SLUGS.map((slug) => topicDescription(slug).length));
+    expect(longest).toBeLessThanOrEqual(155);
   });
 
   it("page 1 and an omitted page carry no query string", () => {

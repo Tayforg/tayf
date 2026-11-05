@@ -128,7 +128,11 @@ function toNearItem(
   if (members.length === 0) return null;
 
   const deduped = dedupeBySource(members);
-  if (!passesFeedFilters({ title_tr: c.title_tr }, deduped).ok) return null;
+  // Filter on the served headline: the list shows title_tr_neutral ?? title_tr
+  // (the item's `title`), so the SEO-explainer gate must judge that, not the
+  // stored seed.
+  const servedTitle = c.title_tr_neutral ?? c.title_tr;
+  if (!passesFeedFilters({ title_tr: servedTitle }, deduped).ok) return null;
 
   // zoneTallyOf counts voting kinds only (outlet, wire): aggregators and
   // niche sources neither raise nor lower the share.
@@ -140,7 +144,7 @@ function toNearItem(
 
   return {
     id: c.id,
-    title: c.title_tr_neutral ?? c.title_tr,
+    title: servedTitle,
     dominantZone,
     dominantShare: tally.dominantShare,
     memberCount: deduped.length,

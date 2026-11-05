@@ -109,8 +109,16 @@ reserve for calls still in flight, with its allowance, and stops dispatching
 when the next call would cross it. Later stages keep running and the run still
 closes `ok`; its `note` reads `daily cap: articles=37,title_versions=12` (items
 left undone this run, counted per run; they stay pending and age out of the 24 h
-window). If the budget read fails the run goes on uncapped and the monthly cap
-stays the backstop. Only the founder raises an allowance, by `update
+window). Since h44-time-1, the `articles` stage also holds a politics reserve
+inside the same allowance: non-politics articles (category outside `politika` /
+`son_dakika`) stop once the day's spend reaches the allowance minus the Edge
+secret `JEV_ARTICLES_POLITICS_RESERVE_TOKENS` (default 3,000,000; `0` turns the
+reserve off). Those items count as "reserved", not "capped", and the note gains
+`articles_reserved=N` after any plain `articles=N` entry (e.g.
+`daily cap: articles_reserved=130`). This earlier stop is expected behaviour,
+not a regression; see "Jev `articles` daily cap: politics reserve (h44-time-1)" in
+`docs/architecture.md`. If the budget read fails the run goes on uncapped and the
+monthly cap stays the backstop. Only the founder raises an allowance, by `update
 public.jev_stage_budgets`; no job, migration or agent does. Alerts already open
 from before the cap resolve themselves (`under_allowance`) once a later day
 comes in at or under the allowance and they are still unacknowledged.

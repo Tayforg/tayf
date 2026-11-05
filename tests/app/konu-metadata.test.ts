@@ -11,14 +11,16 @@ vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
 import { generateMetadata } from "@/app/konu/[slug]/page";
 import { getTopicClusters } from "@/lib/clusters/topic-query";
 
-// Default: a non-empty page, so the canonical tests below see an indexable
-// page (no robots override) regardless of the page number they ask for.
+// Default: a non-empty page with a next page, so the canonical tests below see
+// an indexable page (no robots override) regardless of the page number they ask
+// for. (A page 1 with no next page and under 20 clusters is noindex since
+// h44-topics-3; see the describe block below.)
 beforeEach(() => {
   vi.mocked(getTopicClusters).mockReset();
   vi.mocked(getTopicClusters).mockResolvedValue({
     bundles: [{}],
     page: 1,
-    hasMore: false,
+    hasMore: true,
   } as never);
 });
 
@@ -91,13 +93,53 @@ describe("/konu/[slug] generateMetadata — noindex past the last page", () => {
     expect(meta.alternates?.canonical).toBe("/konu/dunya?sayfa=2");
   });
 
-  it("leaves an empty page 1 indexable (no robots override)", async () => {
+  // h44-topics-3 narrowed the old "an empty page 1 stays indexable" rule: only
+  // politics-gated articles are clustered, so a hub with no page 2 and fewer
+  // than TOPIC_INDEX_MIN_CLUSTERS (20) clusters is too thin to be a topic feed.
+  it("noindexes (follow kept) an empty page 1", async () => {
     vi.mocked(getTopicClusters).mockResolvedValue({
       bundles: [],
       page: 1,
       hasMore: false,
     } as never);
     const meta = await generateMetadata(req("dunya", undefined));
+    expect(meta.robots).toEqual({ index: false, follow: true });
+    // Only robots changes: the canonical, the description and the RSS alternate stay.
+    expect(meta.alternates?.canonical).toBe("/konu/dunya");
+    expect(meta.alternates?.types).toEqual({
+      "application/rss+xml": "/rss/dunya.xml",
+    });
+  });
+
+  it("noindexes (follow kept) a thin page 1 of 10 clusters with no page 2 (spor, teknoloji today)", async () => {
+    vi.mocked(getTopicClusters).mockResolvedValue({
+      bundles: Array.from({ length: 10 }, () => ({})),
+      page: 1,
+      hasMore: false,
+    } as never);
+    for (const slug of ["spor", "teknoloji"]) {
+      const meta = await generateMetadata(req(slug, undefined));
+      expect(meta.robots).toEqual({ index: false, follow: true });
+    }
+  });
+
+  it("leaves page 1 of a hub that has a page 2 (30 clusters, hasMore) indexable", async () => {
+    vi.mocked(getTopicClusters).mockResolvedValue({
+      bundles: Array.from({ length: 30 }, () => ({})),
+      page: 1,
+      hasMore: true,
+    } as never);
+    const meta = await generateMetadata(req("dunya", undefined));
+    expect(meta.robots).toBeUndefined();
+  });
+
+  it("leaves a page 1 of exactly 20 clusters with no page 2 indexable (the threshold itself)", async () => {
+    vi.mocked(getTopicClusters).mockResolvedValue({
+      bundles: Array.from({ length: 20 }, () => ({})),
+      page: 1,
+      hasMore: false,
+    } as never);
+    const meta = await generateMetadata(req("ekonomi", undefined));
     expect(meta.robots).toBeUndefined();
   });
 

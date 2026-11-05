@@ -161,7 +161,11 @@ function toBlindspotBundle(
   // distribution is computed against unique outlets.
   const deduped = dedupeBySource(members);
 
-  if (!passesFeedFilters({ title_tr: c.title_tr }, deduped).ok) return null;
+  // Filter on the served headline: the card shows title_tr_neutral ?? title_tr
+  // (below), so the SEO-explainer gate must judge that, not the stored seed.
+  if (!passesFeedFilters({ title_tr: c.title_tr_neutral ?? c.title_tr }, deduped).ok) {
+    return null;
+  }
 
   // Live tally over unique outlets — re-checked against the contract so a
   // cluster whose `is_blindspot` flag has gone stale can never surface.
