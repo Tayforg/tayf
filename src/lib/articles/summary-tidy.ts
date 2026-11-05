@@ -2,6 +2,7 @@ import {
   cutAppendedTicker,
   isUnpunctuatedShortLine,
   stripFeedWrappers,
+  stripTrailingTeasers,
 } from "../../../supabase/functions/_shared/cluster/description-clean";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
 
@@ -958,6 +959,10 @@ function joinLines(s: string): string {
  *      için 3 fırsat!"), also while the newlines are present. A cut that would
  *      leave nothing is not made, so a text that is only "\nSon dakika... X"
  *      still shows its X;
+ *   1c2. drop the headline-shaped teaser lines pasted under the body
+ *      ({@link stripTrailingTeasers}, h34-reader-5): an exclamation headline that
+ *      shares no content stem with the text in front of it, and the unpunctuated
+ *      headlines after it. Never the first line; when unsure the line stays;
  *   1d. drop a heading first line ({@link dropHeadingLine}, h30-live-1): 15 to
  *      140 characters, none of ". ! ? : …", not ending in ", ; – — -" or in a
  *      continuation word ({@link LINE_CONTINUATION_WORDS}), not
@@ -1056,6 +1061,13 @@ export function tidySummaryText(s: string): string {
   //     the text down to nothing.
   const withoutTicker = cutAppendedTicker(out);
   if (withoutTicker.trim() !== "") out = withoutTicker;
+
+  // 1c2. Headline-shaped teaser lines pasted under the body (h34-reader-5, d91ab2f1:
+  //     "...İstanbul'a geldi.\nAnkara'da kritik güvenlik zirvesi! Bakan Çiftçi ...\n
+  //     Dünyanın gözü ABD'den gelen sonuçlarda! İşte ... Trump..."). The same function the
+  //     cluster consumer's cleanDescription applies; the first line is never cut, so a
+  //     text is never emptied. While the line breaks are still there.
+  out = stripTrailingTeasers(out);
 
   // 1d. A heading line on top of the body (h30-live-1), while the line breaks
   //     are still there.

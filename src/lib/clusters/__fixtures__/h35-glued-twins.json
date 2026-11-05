@@ -1,0 +1,98 @@
+[
+ {
+  "cid": "e02ef916",
+  "stored": "İsrail gazetesi: ABD'deki seçim sonuçları, Tel AvivWashington ilişkisini yeniden şekillendirebilir",
+  "model": "extractive-v6",
+  "titles": [
+   "İsrail gazetesi: ABD'deki seçim sonuçları, Tel AvivWashington ilişkisini yeniden şekillendirebilir",
+   "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini yeniden şekillendirebilir",
+   "İSRAİL'İ BEKLEYEN 3 TEHLİKE"
+  ],
+  "repick": "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini yeniden şekillendirebilir",
+  "first": "İsrail gazetesi: ABD'deki seçim sonuçları, Tel Aviv-Washington ilişkisini yeniden şekillendirebilir",
+  "headRepick": "İsrail gazetesi: ABD'deki seçim sonuçları, Tel AvivWashington ilişkisini yeniden şekillendirebilir",
+  "headFirst": "İsrail gazetesi: ABD'deki seçim sonuçları, Tel AvivWashington ilişkisini yeniden şekillendirebilir",
+  "why": "the live row: one feed lost the hyphen of Tel Aviv-Washington and the glued variant was stored (v6); the re-pick keeps the incumbent, so the heal needs the tiebreak on the incumbent path too"
+ },
+ {
+  "cid": "0ccee1cb",
+  "stored": "ÇeşmeliTaşucu Otoyolu'nun Kızkalesi kesimi trafiğe açılıyor",
+  "model": "extractive-v1",
+  "titles": [
+   "Çeşmeli-Taşucu Otoyolu'nun Kızkalesi kesimi 19 Ekim'de trafiğe açılacak",
+   "ÇeşmeliTaşucu Otoyolu'nun Kızkalesi kesimi trafiğe açılıyor",
+   "Mersin ulaşımında dönüşüm: Çeşmeli-Kızkalesi otoyolu 18 ekimde trafiğe açılıyor",
+   "Mersin ulaşımında yeni dönem: Çeşmeli-Kızkalesi Otoyolu açılıyor",
+   "Bakan Uraloğlu duyurdu: Çeşmeli-Kızkalesi Otoyolu’nun 19 Ekim Pazartesi günü trafiğe açılacak",
+   "Çeşmeli-Taşucu Otoyolu'nun Kızkalesi kesimi trafiğe açılıyor",
+   "Çeşmeli-Taşucu Otoyolu'nun Kızkalesi kesimi 19 Ekim'de trafiğe açılacak",
+   "Mersin’de ulaşımı değiştirecek proje tamamlandı! 2,5 saatlik yol 18 dakika olacak"
+  ],
+  "repick": "Çeşmeli-Taşucu Otoyolu'nun Kızkalesi kesimi trafiğe açılıyor",
+  "first": "Çeşmeli-Taşucu Otoyolu'nun Kızkalesi kesimi trafiğe açılıyor",
+  "headRepick": "ÇeşmeliTaşucu Otoyolu'nun Kızkalesi kesimi trafiğe açılıyor",
+  "headFirst": "Çeşmeli-Taşucu Otoyolu'nun Kızkalesi kesimi trafiğe açılıyor",
+  "why": "Cesmeli-Tasucu motorway: the stored v1 title is the glued variant of a correctly punctuated member"
+ },
+ {
+  "cid": "3187ac3b",
+  "stored": "HalkalıKapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+  "model": "extractive-v1",
+  "titles": [
+   "Halkalı-Kapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+   "HalkalıKapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+   "Halkalı-Kapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+   "Halkalı-Kapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+   "Edirne'den Avrupa'ya hızlı tren kapısı! Yeni gar 9 Ekim'de açılıyor",
+   "Türkiye'nin Avrupa bağlantısını güçlendirecek: Dev projede açılış zamanı"
+  ],
+  "repick": "Halkalı-Kapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+  "first": "Halkalı-Kapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+  "headRepick": "HalkalıKapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+  "headFirst": "HalkalıKapıkule Hızlı Tren Hattı'nın Edirne Garı açılışa hazır",
+  "why": "Halkali-Kapikule rail line: the glued variant is stored (v1) and is also the fresh first pick"
+ },
+ {
+  "cid": "2408b41e",
+  "stored": "Türkiye-Güney Kore stratejik iş birlikleri uluslararası basında",
+  "model": "extractive-v6",
+  "titles": [
+   "TürkiyeGüney Kore stratejik iş birlikleri uluslararası basında",
+   "Türkiye-Güney Kore stratejik iş birlikleri uluslararası basında"
+  ],
+  "repick": "Türkiye-Güney Kore stratejik iş birlikleri uluslararası basında",
+  "first": "Türkiye-Güney Kore stratejik iş birlikleri uluslararası basında",
+  "headRepick": "Türkiye-Güney Kore stratejik iş birlikleri uluslararası basında",
+  "headFirst": "TürkiyeGüney Kore stratejik iş birlikleri uluslararası basında",
+  "why": "the stored v6 title is already clean; a fresh first pick would have been the glued variant"
+ },
+ {
+  "cid": "9456ee8c",
+  "stored": "ABD'deki seçim Musk'ın şirketlerini vurdu: Tesla ve SpaceX hisseleri geriledi",
+  "model": "extractive-v6",
+  "titles": [
+   "ABD'de Demokratların seçim zaferi Musk'ın şirketlerini vurdu",
+   "ABD'deki seçim Musk'ın şirketlerini vurdu: Tesla ve SpaceX hisseleri geriledi",
+   "ABD seçimleri Elon Musk’ın şirketlerini vurdu: Tesla ve SpaceX’te yüzde 5 kayıp"
+  ],
+  "repick": "ABD'deki seçim Musk'ın şirketlerini vurdu: Tesla ve SpaceX hisseleri geriledi",
+  "first": "ABD'deki seçim Musk'ın şirketlerini vurdu: Tesla ve SpaceX hisseleri geriledi",
+  "headRepick": "ABD'deki seçim Musk'ın şirketlerini vurdu: Tesla ve SpaceX hisseleri geriledi",
+  "headFirst": "ABD'deki seçim Musk'ın şirketlerini vurdu: Tesla ve SpaceX hisseleri geriledi",
+  "why": "control: SpaceX is a brand every member spells the same, nothing to swap"
+ },
+ {
+  "cid": "f0ac5829",
+  "stored": "MasterChef'te ortalık karıştı: Şadi'nin Ayşe'ye o hareketi olay oldu: Sosyal medyada 'Diskalife' yorumları yağdı",
+  "model": "extractive-v6",
+  "titles": [
+   "MasterChef'te Şadi'nin Ayşe'ye yaptığı hareketi görenler gözlerine inanamadı! Tepkiler çığ gibi büyüdü: 'Diskalifiye'",
+   "MasterChef'te ortalık karıştı: Şadi'nin Ayşe'ye o hareketi olay oldu: Sosyal medyada 'Diskalife' yorumları yağdı"
+  ],
+  "repick": null,
+  "first": "MasterChef'te ortalık karıştı: Şadi'nin Ayşe'ye o hareketi olay oldu: Sosyal medyada 'Diskalife' yorumları yağdı",
+  "headRepick": null,
+  "headFirst": "MasterChef'te ortalık karıştı: Şadi'nin Ayşe'ye o hareketi olay oldu: Sosyal medyada 'Diskalife' yorumları yağdı",
+  "why": "control: MasterChef is a brand every member spells the same, nothing to swap"
+ }
+]

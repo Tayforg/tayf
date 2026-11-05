@@ -99,8 +99,17 @@ const nextConfig: NextConfig = {
   htmlLimitedBots: HTML_LIMITED_BOTS,
   cacheLife: {
     // Cluster-worker cycles every 15-60s (adaptive), so a 5-min revalidate
-    // window keeps the homepage at most ~5 min stale while cutting Supabase
-    // egress on this path ~10x vs the previous 30s window.
+    // window cuts Supabase egress on this path ~10x vs the previous 30s window.
+    // Under steady traffic a reader sees data at most ~5 min old. After an idle
+    // spell the first reader is served the stale PPR shell AND the stale
+    // 'use cache' entry, each up to `expire` old and stacked, then both refresh
+    // in the background for the next reader (measured 2026-11-05: ages about an
+    // hour young on /gundem/<key>, a /timeline list missing the newest cluster).
+    // `expire` stays 3600: lowering it turns that stale hit into a blocking
+    // regeneration for the first reader, and no preview has measured how long
+    // that takes. The relative ages on cached hub cards no longer depend on
+    // this window: RelativeTime (src/components/story/relative-time.tsx)
+    // re-bases them to the reader's clock after mount.
     'cluster-feed': {
       stale: 60,
       revalidate: 300,

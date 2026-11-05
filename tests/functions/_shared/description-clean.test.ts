@@ -16,6 +16,7 @@ import {
   foldNameToken,
   personNames,
   stripFeedWrappers,
+  stripTrailingTeasers,
 } from "../../../supabase/functions/_shared/cluster/description-clean.ts";
 import { GENERIC_ENTITIES } from "../../../supabase/functions/_shared/cluster/constants.ts";
 import { extractEntities } from "../../../supabase/functions/_shared/cluster/entities.ts";
@@ -1686,5 +1687,375 @@ describe("cleanDescription inherits the site-name footer rule (h24-feeds-2)", ()
       const once = cleanDescription(input);
       expect(cleanDescription(once)).toBe(once);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h34-reader-5 (hunt 34, 2026-11-05): trailing teaser lines.
+//
+// Milliyet, Posta and a few more outlets paste other stories' headlines under an
+// article ("related news"), without the "Son dakika..." marker: d91ab2f1 (Erdoğan
+// returns from Korea) ends in "Ankara'da kritik güvenlik zirvesi! Bakan Çiftçi,
+// İtalyan mevkidaşı ile bir araya geldi" and "Dünyanın gözü ABD'den gelen
+// sonuçlarda! İşte ABD'deki seçim hezimetinin nedeni! Trump...", so it showed on
+// /gundem/trump only through that teaser. stripTrailingTeasers() drops such
+// headline-shaped trailing lines: never the first line, and only a run that holds
+// an exclamation headline and shares no content stem with the text in front of it.
+// When unsure the line stays.
+//
+// The rows are the stored summary_tr texts, read-only, 2026-11-05.
+// ---------------------------------------------------------------------------
+
+const T_D91 =
+  "Cumhurbaşkanı Erdoğan'ı, \"TUR\" uçağıyla geldiği Atatürk Havalimanı'nda, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, İstanbul Valisi Davut Gül ile AK Parti İstanbul İl Başkanı Abdullah Özdemir ve ilgililer karşıladı.\nCumhurbaşkanı Erdoğan ile eşi Emine Erdoğan ve ziyarette kendisine eşlik eden heyet üyeleri de İstanbul'a geldi.\nAnkara'da kritik güvenlik zirvesi! Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi\nDünyanın gözü ABD'den gelen sonuçlarda! İşte ABD'deki seçim hezimetinin nedeni! Trump...";
+const T_D91_KEPT =
+  "Cumhurbaşkanı Erdoğan'ı, \"TUR\" uçağıyla geldiği Atatürk Havalimanı'nda, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, İstanbul Valisi Davut Gül ile AK Parti İstanbul İl Başkanı Abdullah Özdemir ve ilgililer karşıladı.\nCumhurbaşkanı Erdoğan ile eşi Emine Erdoğan ve ziyarette kendisine eşlik eden heyet üyeleri de İstanbul'a geldi.";
+
+const T_AB24_LEAD =
+  "Ankara Cumhuriyet Başsavcılığı koordinesinde, Alihan Kuriş suç örgütüne yönelik operasyonda gözaltına alınan şüphelilerden 19’u tutuklandı, 5’i adli kontrol şartıyla serbest bırakıldı.";
+const T_AB24 = `${T_AB24_LEAD}\nMacron duyurdu: Fransa'da yağma ve şiddet olaylarının ardından 'yasaklama' kararı!\nBeyaz Saray tarih verdi: ABD, 3 Kasım seçimlerinden önce İran'a saldırmayacak`;
+
+const T_FD00_KEPT =
+  "Manisa Organize Sanayi Bölgesi'ndeki akü fabrikasında henüz belirlenemeyen nedenle yangın çıktı.\nİhbar üzerine bölgeye itfaiye ve sağlık ekipleri sevk edildi.\nİtfaiye ekipleri, yangını kontrol altına almak için çalışmalarını sürdürüyor.\nİçişleri Bakanlığı duyurdu: Çukurova Belediye Başkanı Emrah Kozay görevden uzaklaştırıldı";
+const T_FD00 = `${T_FD00_KEPT}\nVolkswagen'de kriz sürüyor! Çalışanlardan 'hafta sonu greve gideriz' tehdidi`;
+
+const T_1E6D_LEAD =
+  "Çin’in Tibet Özerk Bölgesi’nde TSİ 17.33’te 7 büyüklüğünde deprem meydana geldi.\nÇin Deprem Ağları Merkezi (CENC) verilerine göre, merkez üssü Tibet'in kuzeyindeki Nagqu olan deprem yerin 10 kilometre derinliğinde gerçekleşti.\nCENC, sarsıntının bölgede hissedildiğini açıkladı. Depremdeki can ve mal kaybına ilişkin henüz açıklama yapılmadı.";
+// "ilk açıklama" shares the stem "acikla" (açıkladı / açıklama) with the earthquake text, so the walk
+// from the end stops in front of it: when unsure, the line stays.
+const T_1E6D_KEPT = `${T_1E6D_LEAD}\nJülide Kural sessizliğini bozdu! Kadir İnanır’ın miras tartışmaları sonrası ilk açıklama`;
+const T_1E6D = `${T_1E6D_KEPT}\nLütfi Arıboğan hakkında 5 yıla kadar hapis istemi! İşte FETÖ'cü Ba...`;
+
+// b5f5c40f (a25c022b is the same text with a longer last line): the real paragraph "Ama şu iki
+// liderin sözünü ... asla unutmayalım!" ends in "!" and the call-to-action line under it is
+// headline-shaped, so before the review fix the walk reached the "Ama ...!" line as an anchor
+// and cut the paragraph. A line that opens with a conjunction continues the article.
+const T_B5F5 =
+  "Gelin, Kardeş-Gardaş'a, duygusallıktan uzak konuşalım, biraz da dertleşelim.\nAma şu iki liderin sözünü, ayrıca o tarihi belgeyi imzalayanların kıymetini asla unutmayalım!\n Azerbaycan'ın sevinci...Devamı için tıklayınız";
+
+/** Real rows that must come back as the SAME string: the teaser is not provable, the line stays. */
+const T_UNCHANGED_ROWS: ReadonlyArray<readonly [string, string]> = [
+  [
+    "c2bfa2e0 (a headline, then a clamped line that names the same minister: the end of the text is not a teaser)",
+    "Sağlık Bakanı Kemal Memişoğlu, \"Sağlık, insanın en büyük zenginliğidir. Bu zenginliği korumak, yalnızca hastalıkları tedavi etmekle değil, hastalıklara yol açan riskleri henüz ortaya çıkmadan önlemekle mümkündür. Bu anlayışla, toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi kararlılıkla sürdürüyoruz.\" dedi.\nSel, yıldırım, dolu, hortum! Meteoroloji 8 ilde alarm seviyesini yükseltti\nBakan Memişoğlu, Zonguldak'ta Alaplı Devlet Hastanesi ve Karadeniz Ereğli Ağız ve Diş Sağlığı Merkezi'n...",
+  ],
+  [
+    "9e989f81 (a headline, then a clamped line of the same meeting)",
+    "HABER MERKEZİ- Cumhurbaşkanı Recep Tayyip Erdoğan, bugün Cumhurbaşkanlığı Külliyesi'nde Kabine Toplantısı'na başkanlık ediyor. Fonların tasfiye sürecindeki son durum, koordinasyon kurulu raporları, fon mağdurları için atılan adımlar ve sermaye piyasalarındaki gelişmeler Cumhurbaşkanı Erdoğan'ın başkanlığındaki Kabine Toplantısı'nda ele alınacak.\n63 suçlu Türkiye'ye getirildi! Listede Survivor Hikmet Tuğsuz ve Sıfır Bir oyuncusu Cengizhan Yurdutek de var\nBeştepe'deki toplantıda, ilgili kurumla...",
+  ],
+  [
+    "7237b008 (a clamped fragment without a headline mark)",
+    "Bakan Kacır, NSosyal hesabından, söz konusu görüşmeye ilişkin paylaşım yaptı.Cumhurbaşkanı Recep Tayyip Erdoğan'ın heyetine iştirakle bulunduğu Güney Kore'de, kalıcı mıknatıs üretiminde faaliyet gösteren JS Link'in Yönetim Kurulu Başkanı Park ve beraberindeki yetkililerle görüştüğünü aktaran Kacır, \"Yatırım ve işbirliği imkanlarını ele aldık. Türkiye'nin sanayi ve teknoloji alanındaki gücünü daha ileriye taşıyacak ortaklıkları geliştirmeye devam edeceğiz.\" ifadesini kullandı.\nSeul'de strateji...",
+  ],
+  [
+    "4ca344b8 (a bare 'Trump ...' clamp after a blank line)",
+    "Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum\n▪️ Bilim ve Kültür: Sabri Koz▪️ Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪️ Edebiyat: Sibel Eraslan▪️ Sinema: Burçak Evren▪️ Müzik: Prof. Dr. Gönül Paçacı▪️ Vefa: Ahmed-i Hânî\n\nTrump ...",
+  ],
+  [
+    "f85bc48e (the h31-reader-4 bullet list: unpunctuated lines, no headline mark)",
+    '- Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti\nKoreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti\nEmine Erdoğan: \n"Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"',
+  ],
+  ["1f0261af (a mid-text headline followed by a clamped line of the same panel)", H23_1F02],
+  [
+    "b5f5c40f (a real paragraph opened by 'Ama' and closed by '!', then a 'Devamı için tıklayınız' call-to-action line: the paragraph is text)",
+    T_B5F5,
+  ],
+];
+
+const T_BODY = "Manisa Organize Sanayi Bölgesi'ndeki akü fabrikasında yangın çıktı, itfaiye ekipleri müdahale etti.";
+const T_HEAD = "Volkswagen'de kriz sürüyor! Çalışanlardan hafta sonu greve gideriz tehdidi";
+
+describe("stripTrailingTeasers (h34-reader-5): the real rows", () => {
+  it("d91ab2f1: both teaser lines go, the first two sentences stay exactly", () => {
+    const out = stripTrailingTeasers(T_D91);
+    expect(out).toBe(T_D91_KEPT);
+    expect(out.endsWith("İstanbul'a geldi.")).toBe(true);
+    expect(out).not.toContain("Trump");
+    expect(out).not.toContain("Çiftçi");
+    expect(out.split("\n")).toHaveLength(2);
+  });
+
+  it("d91ab2f1: cleanDescription gives the same text, and the entity extractor no longer sees trump", () => {
+    const title = "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü";
+    expect(cleanDescription(T_D91)).toBe(T_D91_KEPT);
+    expect(extractEntities(`${title} ${T_D91}`)).toContain("trump");
+    expect(extractEntities(`${title} ${cleanDescription(T_D91)}`)).not.toContain("trump");
+  });
+
+  it("ab24d85a: an exclamation headline and the unpunctuated headline after it both go (only line 0 is left)", () => {
+    expect(stripTrailingTeasers(T_AB24)).toBe(T_AB24_LEAD);
+  });
+
+  it("fd00fb08: the exclamation headline goes; the unpunctuated headline IN FRONT of it stays (nothing proves it)", () => {
+    expect(stripTrailingTeasers(T_FD00)).toBe(T_FD00_KEPT);
+  });
+
+  it("1e6da42b: the clamped exclamation headline goes; the one in front of it stays (it shares the stem 'açıkla' with the text)", () => {
+    expect(stripTrailingTeasers(T_1E6D)).toBe(T_1E6D_KEPT);
+  });
+
+  it.each(T_UNCHANGED_ROWS)("%s: the SAME string comes back", (_label, input) => {
+    expect(stripTrailingTeasers(input) === input).toBe(true);
+    expect(cleanDescription(input)).toBe(input);
+  });
+});
+
+describe("stripTrailingTeasers: shapes that must NOT be cut", () => {
+  const SAME: ReadonlyArray<readonly [string, string]> = [
+    ["a one-line text (line 0 is never a teaser)", "Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor"],
+    ["a first line that is a headline, then another headline: only the second may go (see below), the first stays", T_BODY],
+    ["a mid-line '!' but the line ends in a full stop (a sentence)", `${T_BODY}\nVolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor.`],
+    ["a headline with a double quote (unsure)", `${T_BODY}\nVolkswagen'de kriz sürüyor! "Greve gideriz" dediler`],
+    ["a headline with a curly quote (unsure)", `${T_BODY}\nVolkswagen'de kriz sürüyor! “Greve gideriz” dediler`],
+    ["a headline with guillemets (unsure)", `${T_BODY}\nVolkswagen'de kriz sürüyor! «Greve gideriz» dediler`],
+    ["a dash bullet", `${T_BODY}\n- Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor`],
+    ["a dot bullet", `${T_BODY}\n• Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor`],
+    ["a numbered item", `${T_BODY}\n1. Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor`],
+    ["a numbered item with a bracket", `${T_BODY}\n2) Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor`],
+    ["a lower-case start (a hard-wrapped sentence)", `${T_BODY}\nvolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor`],
+    ["a question mark at the end", `${T_BODY}\nVolkswagen'de kriz sürüyor! Çalışanlar greve mi gidiyor?`],
+    ["a colon at the end", `${T_BODY}\nVolkswagen'de kriz sürüyor! Çalışanlar şunu söyledi:`],
+    ["a comma at the end", `${T_BODY}\nVolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor,`],
+    ["a bare ellipsis (a clamp), no headline mark", `${T_BODY}\nVolkswagen'de kriz sürüyor, çalışanlar greve gidiyor...`],
+    ["a bare unicode ellipsis", `${T_BODY}\nVolkswagen'de kriz sürüyor, çalışanlar greve gidiyor…`],
+    ["a short clamp that is just a name", `${T_BODY}\nTrump ...`],
+    ["an unpunctuated headline with no exclamation anywhere", `${T_BODY}\nVolkswagen'de kriz sürüyor çalışanlar greve gidiyor`],
+    ["a headline that shares a content stem with the text in front of it (same story)", `${T_BODY}\nManisa'da korkutan yangın! İtfaiye ekipleri müdahale etti`],
+    ["a stem shared through a suffix (fabrika / fabrikasında)", `${T_BODY}\nFabrika önünde bekleyiş! İşçiler greve gidiyor`],
+    ["a headline shorter than 12 characters", `${T_BODY}\nEvet bu!`],
+    ["a headline longer than 160 characters", `${T_BODY}\nVolkswagen'de kriz sürüyor! ${"Çalışanlar greve gidiyor ve sendika yönetimi toplantı yapıyor ".repeat(3)}`],
+    ["a real sentence AFTER the headline (the end of the text is text)", `${T_BODY}\nVolkswagen'de kriz sürüyor! Çalışanlar greve gidiyor\nSendika yönetimi bu akşam toplanacak.`],
+    ["five trailing headlines: a run that long is a digest, not a teaser pair", `${T_BODY}\n${Array.from({ length: 5 }, (_, i) => `Başlık ${["bir", "iki", "üç", "dört", "beş"][i]} duyuruldu! Gündem hareketli`).join("\n")}`],
+    ["a text that is only blank lines after the first line", `${T_BODY}\n\n   \n`],
+    ["no line break at all", T_BODY],
+  ];
+  it.each(SAME)("%s", (_label, input) => {
+    expect(stripTrailingTeasers(input) === input).toBe(true);
+  });
+
+  it("returns '' for '' and passes null-ish input through", () => {
+    expect(stripTrailingTeasers("")).toBe("");
+    expect(stripTrailingTeasers(null as unknown as string) === (null as unknown as string)).toBe(true);
+    expect(stripTrailingTeasers(undefined as unknown as string) === (undefined as unknown as string)).toBe(true);
+  });
+});
+
+// Review fixes (h35): a quoted "!" is no anchor, single-quote openers are quote marks,
+// and a line led by a conjunction continues the article. ASCII ' and U+2019 stay
+// apostrophes (Fransa'da, 19’u): they are NOT quote marks for the shape test.
+describe("stripTrailingTeasers: quoted exclamations and conjunction-led lines are text", () => {
+  const QUOTED_LEAD = "Kabine toplantısı sona erdi.";
+  const QUOTED: ReadonlyArray<readonly [string, string]> = [
+    [
+      "a speech in typographic single quotes (U+2018 ... U+2019)",
+      `${QUOTED_LEAD}\nBakan Yılmaz: ‘Kimse endişe etmesin, bu iş burada bitmeyecek!’`,
+    ],
+    [
+      "a speech in ASCII single quotes: the '!' in front of the closing quote is no anchor",
+      `${QUOTED_LEAD}\nBakan Yılmaz: 'Kimse endişe etmesin, bu iş burada bitmeyecek!'`,
+    ],
+    [
+      "a '!' in front of a closing U+2019 with no opening quote is no anchor either",
+      `${QUOTED_LEAD}\nBakan Yılmaz: Kimse endişe etmesin, bu iş burada bitmeyecek!’`,
+    ],
+    [
+      "a speech opened by U+201B (single high-reversed-9 quote)",
+      `${QUOTED_LEAD}\nBakan Yılmaz: ‛Kimse endişe etmesin, bu iş burada bitmeyecek!’`,
+    ],
+    [
+      "a speech in double quotes (already kept)",
+      `${QUOTED_LEAD}\nBakan Yılmaz: "Kimse endişe etmesin, bu iş burada bitmeyecek!"`,
+    ],
+  ];
+  it.each(QUOTED)("%s", (_label, input) => {
+    expect(stripTrailingTeasers(input) === input).toBe(true);
+    expect(cleanDescription(input)).toBe(input);
+  });
+
+  it.each(["Ama", "Fakat", "Ancak", "Lakin", "Oysa", "Çünkü", "Ve", "Yani", "Ayrıca", "Üstelik", "AMA", "ÇÜNKÜ", "AYRICA"])(
+    "a line led by the conjunction %s continues the article and is never cut",
+    (word) => {
+      const input = `${T_BODY}\n${word} Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor`;
+      expect(stripTrailingTeasers(input) === input).toBe(true);
+    },
+  );
+
+  it("a conjunction anchor in front of a headline stops the walk: only the lines after it are judged", () => {
+    // The "Ama ...!" line is text, so it is not an anchor; the headline under it has no anchor of its own.
+    const input = `${T_BODY}\nAma Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor\nBeyaz Saray tarih verdi gündem hareketli`;
+    expect(stripTrailingTeasers(input) === input).toBe(true);
+  });
+
+  it("a headline whose first word only STARTS like a conjunction is still a teaser ('Amansız', 'Vekil')", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\nAmansız kriz sürüyor! Çalışanlar greve gidiyor`)).toBe(T_BODY);
+    expect(stripTrailingTeasers(`${T_BODY}\nVekil Volkswagen'de kriz sürüyor! Çalışanlar greve gidiyor`)).toBe(T_BODY);
+  });
+
+  it("ab24d85a regression guard: the headline with 'yasaklama' in ASCII quotes is still stripped", () => {
+    // Its teaser holds 'yasaklama' in ASCII single quotes and "Fransa'da" with an ASCII apostrophe:
+    // those must not count as quote marks, or the real teaser would stay.
+    expect(T_AB24).toContain("'yasaklama' kararı!");
+    expect(stripTrailingTeasers(T_AB24)).toBe(T_AB24_LEAD);
+    expect(cleanDescription(T_AB24)).toBe(T_AB24_LEAD);
+  });
+
+  it("a headline with a plain apostrophe and a U+2019 apostrophe is still stripped (they are not quotes)", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\nFransa'da kriz sürüyor! 19’u tutuklandı`)).toBe(T_BODY);
+  });
+});
+
+describe("stripTrailingTeasers: shapes that ARE cut", () => {
+  it("an exclamation headline at the end goes, the text before it is trimmed", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\n${T_HEAD}`)).toBe(T_BODY);
+    expect(stripTrailingTeasers(`${T_BODY}\n${T_HEAD}\n\n  `)).toBe(T_BODY);
+  });
+
+  it("a headline that ends in '!' without any other mark", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\nVolkswagen'de kriz derinleşiyor!`)).toBe(T_BODY);
+  });
+
+  it("an 'İşte ... !' headline", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\nİşte Volkswagen çalışanlarının talepleri! Grev kapıda`)).toBe(T_BODY);
+  });
+
+  it("a clamped headline: '!' inside and '...' at the end", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\nVolkswagen'de kriz sürüyor! İşte çalışanların taleb...`)).toBe(T_BODY);
+    expect(stripTrailingTeasers(`${T_BODY}\nVolkswagen'de kriz sürüyor! İşte çalışanların taleb…`)).toBe(T_BODY);
+  });
+
+  it("a headline after blank lines and a CRLF break", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\r\n\r\n${T_HEAD}\r\n`)).toBe(T_BODY);
+  });
+
+  it("two headlines, three headlines, four headlines: all go", () => {
+    for (const n of [2, 3, 4]) {
+      const heads = Array.from({ length: n }, (_, i) => `Gündem ${["bir", "iki", "üç", "dört"][i]} duyuruldu! Piyasalar hareketli`);
+      expect(stripTrailingTeasers(`${T_BODY}\n${heads.join("\n")}`), `${n} headlines`).toBe(T_BODY);
+    }
+  });
+
+  it("unpunctuated headlines AFTER an exclamation headline go with it, the ones in front of it stay", () => {
+    expect(stripTrailingTeasers(`${T_BODY}\nPiyasalarda dalgalanma sürüyor\n${T_HEAD}\nBakan yarın açıklama yapacak`)).toBe(
+      `${T_BODY}\nPiyasalarda dalgalanma sürüyor`,
+    );
+  });
+
+  it("the first line is never cut, even when it looks like a headline", () => {
+    const out = stripTrailingTeasers(`${T_HEAD}\nGündem bir duyuruldu! Piyasalar hareketli`);
+    expect(out).toBe(T_HEAD);
+  });
+
+  it("a blank first line does not make the next line 'later': the first non-blank line stays", () => {
+    expect(stripTrailingTeasers(`\n${T_HEAD}\nGündem bir duyuruldu! Piyasalar hareketli`)).toBe(`\n${T_HEAD}`);
+  });
+});
+
+describe("stripTrailingTeasers: properties", () => {
+  const ROWS: readonly string[] = [
+    T_D91, T_AB24, T_FD00, T_1E6D,
+    ...T_UNCHANGED_ROWS.map(([, s]) => s),
+    ...FIXTURES.map((f) => f.description),
+    H23_1F02,
+  ];
+
+  it("is idempotent on every row, input and output", () => {
+    for (const row of ROWS) {
+      const once = stripTrailingTeasers(row);
+      expect(stripTrailingTeasers(once), row.slice(0, 40)).toBe(once);
+    }
+  });
+
+  it("never lengthens a text and keeps its first line", () => {
+    for (const row of ROWS) {
+      const out = stripTrailingTeasers(row);
+      expect(out.length).toBeLessThanOrEqual(row.length);
+      expect(row.startsWith(out)).toBe(true);
+      expect(out.split("\n")[0]).toBe(row.split("\n")[0]);
+    }
+  });
+
+  it("does not touch the five real milliyet ticker rows beyond what cleanDescription already did", () => {
+    for (const f of FIXTURES) {
+      const cleaned = f.description.slice(0, f.description.indexOf("\nSon dakika")).trimEnd();
+      expect(cleanDescription(f.description)).toBe(cleaned);
+      expect(stripTrailingTeasers(cleaned) === cleaned).toBe(true);
+    }
+  });
+
+  it("never throws on odd input", () => {
+    for (const s of ["\n", "\n\n", "\r", "\u0000", "😀\n😀!", "\ud83d\nA B C D E F G!", "!\n!", "a\nb!", "\n!\n!\n!\n!\n!\n!"]) {
+      expect(() => stripTrailingTeasers(s), JSON.stringify(s)).not.toThrow();
+    }
+  });
+
+  it("100k-character adversarial inputs finish in under 50 ms each (no backtracking, no quadratic scan)", () => {
+    const inputs = [
+      "x\n".repeat(50_000) + "Volkswagen kriz sürüyor!",
+      "Giriş cümlesi burada.\n" + "Gündem hareketli! Piyasalar duyurdu\n".repeat(3_000),
+      "Giriş cümlesi burada.\n" + "!".repeat(100_000),
+      "Giriş cümlesi burada.\n" + "A! ".repeat(33_000),
+      "Giriş cümlesi burada.\n" + "a".repeat(100_000) + "!",
+      "Giriş cümlesi burada.\n" + " ".repeat(100_000) + "Başlık duyuruldu! Gündem",
+      "Giriş cümlesi burada.\n" + "...".repeat(33_000),
+      "\n".repeat(100_000) + "Başlık duyuruldu! Gündem",
+      "Giriş. ".repeat(14_000) + "\nBaşlık duyuruldu! Gündem hareketli",
+      ("a b c d e f ".repeat(30) + "!\n").repeat(8_000),
+    ];
+    for (const s of inputs) {
+      const start = performance.now();
+      stripTrailingTeasers(s);
+      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(50);
+    }
+  });
+});
+
+describe("cleanDescription applies the teaser strip after the wrappers and the ticker (h34-reader-5)", () => {
+  it("a teaser in front of a ticker line goes with the ticker cut and the strip", () => {
+    expect(cleanDescription(`${T_BODY}\n${T_HEAD}\nSon dakika... Başka bir haberin başlığı`)).toBe(T_BODY);
+  });
+
+  it("a teaser behind a Medyascope-style footer line is judged after the footer is gone", () => {
+    expect(cleanDescription(`${T_BODY}\n${T_HEAD}\nBaşlık tekrarı Medyascope`)).toBe(T_BODY);
+  });
+
+  it("a teaser behind an excerpt marker: the marker is trailing once the teaser is gone and becomes '…'", () => {
+    expect(cleanDescription(`${T_BODY.slice(0, -1)} [\u2026]\n${T_HEAD}`)).toBe(`${T_BODY.slice(0, -1)}\u2026`);
+    expect(cleanDescription(`${T_BODY} [...]\n${T_HEAD}`)).toBe(T_BODY);
+  });
+
+  it("strip and unwrap alternate: a footer exposed by a strip, and the line it exposes, are both judged", () => {
+    const row =
+      "Başlık tekrarı Medyascope\nManisa'da korkutan yangın! İtfaiye ekipleri müdahale etti\nBaşlık tekrarı Medyascope\nİşte Volkswagen çalışanlarının talepleri! Grev kapıda\n";
+    const once = cleanDescription(row);
+    expect(once).toBe("Başlık tekrarı Medyascope");
+    expect(cleanDescription(once)).toBe(once);
+  });
+
+  it("is the identity on texts without a trailing teaser", () => {
+    for (const [, input] of T_UNCHANGED_ROWS) expect(cleanDescription(input)).toBe(input);
+  });
+
+  it("is idempotent on the teaser rows", () => {
+    for (const row of [T_D91, T_AB24, T_FD00, T_1E6D]) {
+      const once = cleanDescription(row);
+      expect(cleanDescription(once)).toBe(once);
+    }
+  });
+
+  it("the stored description is still not part of ingest: normalize.ts and the rss modules never import the strip", () => {
+    const dir = resolve(__dirname, "..", "..", "..", "supabase", "functions", "_shared", "rss");
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
+      const src = stripTsComments(readFileSync(resolve(dir, f), "utf8"));
+      expect(src, `${f} must not use stripTrailingTeasers`).not.toMatch(/stripTrailingTeasers/);
+    }
+  });
+});
+
+describe("stripTrailingTeasers has one implementation (h34-reader-5)", () => {
+  it("summary-tidy.ts imports it from the shared cluster module and does not redefine it", () => {
+    const src = stripTsComments(readFileSync(resolve(__dirname, "..", "..", "..", "src", "lib", "articles", "summary-tidy.ts"), "utf8"));
+    expect(src).toContain('from "../../../supabase/functions/_shared/cluster/description-clean"');
+    expect(src).toMatch(/\bstripTrailingTeasers\(/);
+    expect(src).not.toMatch(/function\s+stripTrailingTeasers/);
   });
 });

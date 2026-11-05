@@ -37,3 +37,30 @@ describe("next.config.ts cacheLife 'status' profile (/durum)", () => {
     expect(p.stale).toBeLessThanOrEqual(60);
   });
 });
+
+// h34-perf-1: the comment above 'cluster-feed' promised "at most ~5 min stale".
+// The measured worst case is an idle spell, where the first reader gets the
+// stale PPR shell AND the stale 'use cache' entry (each up to `expire` old).
+describe("next.config.ts cacheLife 'cluster-feed' profile (home, hubs, /timeline)", () => {
+  it("is defined with stale <= revalidate <= expire", () => {
+    const p = profile("cluster-feed");
+    expect(p.stale).toBeLessThanOrEqual(p.revalidate);
+    expect(p.revalidate).toBeLessThanOrEqual(p.expire);
+  });
+
+  it("keeps expire at 3600: lowering it turns the idle-spell stale hit into a blocking regeneration that no preview has measured", () => {
+    expect(profile("cluster-feed").expire).toBe(3600);
+  });
+
+  it("documents the real worst case instead of promising ~5 min", () => {
+    const start = src.indexOf("cacheLife: {");
+    const end = src.indexOf("'cluster-feed'", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const comment = src.slice(start, end);
+    expect(comment).not.toMatch(/at most ~5 min stale/);
+    expect(comment).toMatch(/shell/i);
+    expect(comment).toMatch(/expire/);
+    expect(comment).toMatch(/RelativeTime/);
+  });
+});

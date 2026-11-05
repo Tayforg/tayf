@@ -338,7 +338,7 @@ Cue phrases are folded lower-case ASCII and open-ended, except a single word of 
 | RPC | Migration | Match | Order |
 |---|---|---|---|
 | `entity_cluster_ids(p_variants, p_since, p_limit)` | 123 | Three OR'd stemmed `websearch_to_tsquery` variants of the label against `clusters.search_tsv` (the block of `search_cluster_ids`, 083) | `updated_at desc, id` |
-| `entity_cluster_ids_v2(p_queries, p_patterns, p_since, p_limit)` | 125 | Recall: the stemmed tsquery of `p_queries` (OR'd, first 12) on the same GIN index. Precision, ANDed: the folded title, neutral title and summary must match any of `p_patterns` (first 12, empty strings removed) with the `~` operator | `first_published desc, id` |
+| `entity_cluster_ids_v2(p_queries, p_patterns, p_since, p_limit)` | 125, 156 | Recall: the stemmed tsquery of `p_queries` (OR'd, first 12) on the same GIN index. Precision, ANDed: the folded title, neutral title and the summary's first line (156: the text before its first newline, so a related-news headline pasted under the article does not count) must match any of `p_patterns` (first 12, empty strings removed) with the `~` operator | `first_published desc, id` |
 
 123 alone lists every cluster whose *stem* matches, and the Turkish stemmer collapses unrelated words (`devam` under DEVA, `domuz` under Dolar), which is why 125 adds the literal-match guard. v2 orders by `first_published` because the cards print that age. `entity-hub-query.ts` calls v2 first and falls back to 123 only on `PGRST202` (125 not applied yet), so the app can deploy before the migration.
 
