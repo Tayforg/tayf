@@ -46,11 +46,14 @@ async function render(): Promise<string> {
 
 const label = (key: string): string => RISING_ENTITIES.find((e) => e.key === key)!.label;
 
-/** Every `<a>` of the page body: href and inner text. */
+/**
+ * Every `<a>` of the page body: href and inner text. A hub chip's text is one
+ * plain string, so the inner text is taken as is (no tag stripping).
+ */
 function anchors(html: string): Array<{ href: string; text: string }> {
-  return [...html.matchAll(/<a\b[^>]*\bhref="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => ({
+  return [...html.matchAll(/<a\b[^>]*\bhref="([^"]*)"[^>]*>([^<]*)<\/a>/g)].map((m) => ({
     href: m[1]!,
-    text: m[2]!.replace(/<[^>]+>/g, ""),
+    text: m[2]!,
   }));
 }
 
