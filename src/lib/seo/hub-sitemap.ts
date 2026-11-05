@@ -1,5 +1,5 @@
 import { entityHubRobots } from "@/lib/entities/entity-hub";
-import { getEntityHub } from "@/lib/entities/entity-hub-query";
+import { getEntityHub, type EntityHub } from "@/lib/entities/entity-hub-query";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 import { renderUrlset, type SitemapUrlEntry } from "./sitemaps";
@@ -27,7 +27,9 @@ import { renderUrlset, type SitemapUrlEntry } from "./sitemaps";
 // rule as every other DB-backed sitemap builder in sitemaps.ts. The throw is
 // immediate: the first batch with a null ends the build, so a request during a
 // reader outage starts at most HUB_SITEMAP_CONCURRENCY live retries instead of
-// one per key (hub-sitemap.test.ts pins the call counts).
+// one per key (hub-sitemap.test.ts pins the call counts). The chunked read
+// itself is readAllEntityHubs, which the /gundem index shares (it fails open to
+// its static list on a null instead of throwing).
 
 /** Hub reads in flight at once. 62 sequential reads would be slow on a cold
  *  cache; 62 at once would open a burst of RPCs against the reader. */
@@ -49,31 +51,53 @@ function newestFirstPublished(
   return best === null ? null : best.raw;
 }
 
-export async function getHubsSitemapXml(baseUrl: string): Promise<string> {
-  const results: Array<Awaited<ReturnType<typeof getEntityHub>>> = [];
+/**
+ * Reads every curated hub through getEntityHub, HUB_SITEMAP_CONCURRENCY at a
+ * time, and returns key -> read in RISING_ENTITIES order. Shared by the hubs
+ * sitemap (below) and the /gundem index (h43-entities-3); the policy for a
+ * failed read stays with the caller: the sitemap throws, the index fails open
+ * to its static list.
+ *
+ * A null is a read that already failed twice (the cached attempt and a live
+ * retry), so the answer is decided. This stops after the first batch that
+ * holds one: starting the remaining batches would only send more live retries
+ * at a reader that is struggling (the sitemap's 503 is no-store, so the CDN
+ * does not absorb repeat hits). The returned map therefore holds the keys of
+ * every batch that was started, the failed ones as null, and no later key. An
+ * outage costs at most HUB_SITEMAP_CONCURRENCY retry chains per call, not
+ * RISING_ENTITIES.length. A rejected read rejects the call.
+ */
+export async function readAllEntityHubs(): Promise<Map<string, EntityHub | null>> {
+  const hubs = new Map<string, EntityHub | null>();
 
   for (let i = 0; i < RISING_ENTITIES.length; i += HUB_SITEMAP_CONCURRENCY) {
     const chunk = RISING_ENTITIES.slice(i, i + HUB_SITEMAP_CONCURRENCY);
     const settled = await Promise.all(chunk.map((e) => getEntityHub(e.key)));
+    chunk.forEach((e, j) => hubs.set(e.key, settled[j] ?? null));
+    if (settled.some((r) => r === null)) break;
+  }
 
-    // Fail fast: a null is a read that already failed twice (the cached attempt
-    // and a live retry), so the answer is decided. Starting the remaining
-    // batches would only send more live retries at a reader that is struggling
-    // (the 503 is no-store, so the CDN does not absorb repeat hits). The first
-    // batch with a failure is the last batch started: an outage costs at most
-    // HUB_SITEMAP_CONCURRENCY retry chains per request, not RISING_ENTITIES.length.
-    const failed = settled.filter((r) => r === null).length;
+  return hubs;
+}
+
+export async function getHubsSitemapXml(baseUrl: string): Promise<string> {
+  const hubs = await readAllEntityHubs();
+
+  // A null (or a key the reader never got to) means a read that failed: throw
+  // for the first batch that holds one, never publish a partial urlset.
+  for (let i = 0; i < RISING_ENTITIES.length; i += HUB_SITEMAP_CONCURRENCY) {
+    const chunk = RISING_ENTITIES.slice(i, i + HUB_SITEMAP_CONCURRENCY);
+    const failed = chunk.filter((e) => (hubs.get(e.key) ?? null) === null).length;
     if (failed > 0) {
       throw new Error(
         `hubs sitemap: hub read failed (${failed} of ${chunk.length} in the batch at ${i})`,
       );
     }
-    results.push(...settled);
   }
 
   const entries: SitemapUrlEntry[] = [];
-  RISING_ENTITIES.forEach((entity, i) => {
-    const result = results[i];
+  RISING_ENTITIES.forEach((entity) => {
+    const result = hubs.get(entity.key);
     if (result === undefined || result === null) return;
     if (entityHubRobots(result) !== undefined) return;
 

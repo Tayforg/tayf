@@ -167,13 +167,18 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
 // a failed attempt ({ ok: false }) is memoised for `minutes` only. Exactly one
 // `cacheLife` call per invocation, after the attempt, with one literal per call
 // (tests/guards/cache-life-literal.test.ts); `cacheTag` stays first.
+//
+// The one piece of logic after that: the `at` stamp on a successful read (the
+// epoch ms of the database read, which fetchEntityHub already took), so a cache
+// HIT can be remembered as a last-good value without reading the clock on the
+// hit path (cache-resilience.ts, section 4). A failed attempt carries no stamp.
 async function cachedEntityHub(key: string) {
   "use cache";
   cacheTag("clusters-entity");
   const r = await attemptCached("clusters-entity", () => fetchEntityHub(key));
   if (r.ok) cacheLife("cluster-feed");
   else cacheLife("minutes");
-  return r;
+  return r.ok ? { ...r, at: r.data.asOfMs } : r;
 }
 
 /**
@@ -181,14 +186,20 @@ async function cachedEntityHub(key: string) {
  * with the same key, so they share one cache entry). An unknown key resolves
  * to null without touching Supabase or the cache. On a cache-attempt failure
  * it retries live once (bypassing the cache boundary, never memoising a
- * failure) and, if that fails too, logs and resolves to null — the page's
- * honest "unavailable" state. Never throws.
+ * failure) and, if that fails too, logs and serves the last good read of that
+ * hub this instance saw (under 60 min old) before resolving to null — the
+ * page's honest "unavailable" state. Concurrent live retries for one hub share
+ * one read and a failed one backs off for a few seconds (key
+ * `clusters-entity:<key>`; the key is one of the 62 curated hub keys, so the
+ * key space is bounded). That matters because /gundem and /trends now read up
+ * to 8 hubs per request, and without it every visitor would start its own
+ * retries against a struggling reader. Never throws.
  */
 export async function getEntityHub(key: string): Promise<EntityHub | null> {
   if (entityByKey(key) === null) return null;
 
   return resolveCachedOrRetry<EntityHub | null>(
-    "clusters-entity",
+    { label: "clusters-entity", key: `clusters-entity:${key}` },
     () => cachedEntityHub(key),
     () => fetchEntityHub(key),
     null,

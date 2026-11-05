@@ -1,13 +1,18 @@
 // Language of the text a source publishes (WCAG 3.1.2 Language of Parts, AA).
 //
-// The document is <html lang="tr">, but five registered outlets publish in
+// The document is <html lang="tr">, but six registered outlets publish in
 // English. Their headlines and excerpts must carry lang="en" so a screen
 // reader switches voice instead of pronouncing English with Turkish phonetics
 // (~1,300 articles a week; h17-a11y-2).
 //
+// h17-a11y-2 named five: a-news, daily-sabah, hurriyet-daily-news, trt-world
+// and turkiye-today. h43-sources-2 added the sixth, mfa-turkey (MFA Turkey /
+// MFA Türkiye, kind niche): all of its items have English titles and several
+// are cluster members, so they reach cluster pages as well as /source/mfa-turkey.
+//
 // This is a CODE CONSTANT, not data: `public.sources` has no language column
-// and this change adds no migration and writes nothing. Adding a sixth English
-// outlet means adding its slug here (and its display name below).
+// and this change adds no migration and writes nothing. Adding a seventh
+// English outlet means adding its slug here (and its display name below).
 //
 // Two call shapes exist because two kinds of caller exist:
 //   - /source/[slug] has the full source row, so it matches on the slug.
@@ -47,11 +52,12 @@
 // join from clusters to their members' sources. Until then those headlines
 // keep the inherited lang="tr".
 
-/** Slugs of the registered English-language outlets (exactly five). */
+/** Slugs of the registered English-language outlets (exactly six). */
 export const ENGLISH_SOURCE_SLUGS: ReadonlySet<string> = new Set([
   "a-news",
   "daily-sabah",
   "hurriyet-daily-news",
+  "mfa-turkey",
   "trt-world",
   "turkiye-today",
 ]);
@@ -65,6 +71,8 @@ export const ENGLISH_SOURCE_NAMES: ReadonlySet<string> = new Set([
   "daily sabah",
   "hürriyet daily news",
   "hurriyet daily news",
+  "mfa turkey",
+  "mfa türkiye",
   "trt world",
   "türkiye today",
   "turkiye today",

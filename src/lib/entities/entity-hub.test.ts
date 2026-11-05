@@ -243,6 +243,52 @@ function excludeAlt(exclude: string): string {
 }
 
 /**
+ * Test-side restatement of the `notAfter` rule, deliberately not imported: one
+ * fixed-length negative lookbehind per word, `(?<!abd\s)(?<!iran\s)`, sitting
+ * right after `\m` and before the base word.
+ */
+function notAfterLookbehinds(words: readonly string[]): string {
+  return words.map((w) => `(?<!${w}\\s)`).join("");
+}
+
+/** The foreign-country words in front of which "Dışişleri" is not the Turkish ministry (the spec, restated). */
+const DISISLERI_NOT_AFTER = [
+  "abd",
+  "amerika",
+  "almanya",
+  "alman",
+  "fransa",
+  "fransiz",
+  "iran",
+  "israil",
+  "cin",
+  "yunanistan",
+  "yunan",
+  "ukrayna",
+  "rusya",
+  "rus",
+  "kktc",
+  "ingiltere",
+  "ingiliz",
+  "katar",
+  "misir",
+  "suriye",
+  "lubnan",
+  "pakistan",
+  "hindistan",
+  "azerbaycan",
+  "ermenistan",
+  "japonya",
+  "kore",
+  "venezuela",
+  "polonya",
+  "ispanya",
+  "italya",
+  "macaristan",
+  "avrupa",
+] as const;
+
+/**
  * The guard in front of a non-trusted base: a negative lookahead over the
  * excludes, then a positive lookahead over the requires (each only when its
  * list is non-empty), then `[\s\S]*`. A requires phrase follows the same
@@ -302,7 +348,14 @@ describe("entityHubPatterns (exact runtime values)", () => {
     ],
     akp: ["\\mak\\s+parti", "\\makp\\M"],
     zelenski: ["\\mzelenski\\M", "\\mzelenskiy\\M", "\\mzelensky\\M", "\\mzelenskyy\\M"],
-    borsa: ["\\mborsa", "\\mbist"],
+    // 'Borsa İstanbul' and 'BIST' are trusted (bare); the bare 'Borsa' carries the exclude guard.
+    borsa: [
+      "\\mborsa\\s+istanbul",
+      "^(?![\\s\\S]*(?:\\mnew\\s+york|\\mwall\\s+street|\\mnasdaq|\\mdow\\s+jones|\\mnikkei|\\masya\\s+borsa|\\mavrupa\\s+borsa|\\mlondra\\s+borsa|\\mfrankfurt|\\mbinance|\\mkripto|\\mticaret\\s+borsa))[\\s\\S]*\\mborsa",
+      "\\mbist",
+    ],
+    // One fixed-length negative lookbehind per foreign-country word, right before the base word.
+    disisleri: [`\\m${notAfterLookbehinds(DISISLERI_NOT_AFTER)}disisleri\\M`],
     erdogan: ["\\merdogan\\M"],
     chp: ["\\mchp\\M"],
     cin: ["\\mcin\\M"],
@@ -546,6 +599,86 @@ describe("entityHubPatterns (exact runtime values)", () => {
       ).toEqual([`${guardPrefix(["kanada"])}\\m${QUANTITY_GUARD}dolar\\M`]);
     });
   });
+
+  describe("notAfter", () => {
+    it("emits one fixed-length negative lookbehind per word, right before the base word", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["abd", "iran"] })).toEqual([
+        "\\m(?<!abd\\s)(?<!iran\\s)xyz\\M",
+      ]);
+    });
+
+    it("guards the first word of a multi-word form and leaves its tail open", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Xyz Abc"], notAfter: ["abd"] })).toEqual([
+        "\\m(?<!abd\\s)xyz\\s+abc",
+      ]);
+    });
+
+    it("keeps the prefix-match open end", () => {
+      expect(
+        entityHubPatterns(bare, { aliases: ["Xyz"], hubMatch: "prefix", notAfter: ["abd"] }),
+      ).toEqual(["\\m(?<!abd\\s)xyz"]);
+    });
+
+    it("folds Turkish letters and case, and dedupes", () => {
+      expect(
+        entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["ABD", "İran", "Çin", "abd"] }),
+      ).toEqual(["\\m(?<!abd\\s)(?<!iran\\s)(?<!cin\\s)xyz\\M"]);
+    });
+
+    it("emits nothing for undefined, an empty list, or entries that fold to nothing", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: [] })).toEqual(["\\mxyz\\M"]);
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["", "***", "  "] })).toEqual([
+        "\\mxyz\\M",
+      ]);
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"] })).toEqual(["\\mxyz\\M"]);
+    });
+
+    it("keeps only single words, so every lookbehind stays one fixed-length alternative", () => {
+      // 'a|b' and 'd(e)' fold to two words and 'two words' is a phrase: all dropped.
+      // 'c.*' folds to the single word 'c'; no metacharacter reaches the pattern.
+      const out = entityHubPatterns(bare, {
+        aliases: ["Xyz"],
+        notAfter: ["a|b", "c.*", "d(e)", "two words"],
+      });
+      expect(out).toEqual(["\\m(?<!c\\s)xyz\\M"]);
+    });
+
+    it("sits after the amount guard on a quantityGuard entity", () => {
+      expect(
+        entityHubPatterns(bare, { aliases: ["Dolar"], quantityGuard: true, notAfter: ["abd"] }),
+      ).toEqual([`\\m${QUANTITY_GUARD}(?<!abd\\s)dolar\\M`]);
+    });
+
+    it("composes with excludes: the guard wraps the lookbehind-guarded base", () => {
+      expect(
+        entityHubPatterns(bare, { aliases: ["Xyz"], excludes: ["kanada"], notAfter: ["abd"] }),
+      ).toEqual([`${guardPrefix(["kanada"])}\\m(?<!abd\\s)xyz\\M`]);
+    });
+
+    it("is a property of the word, not of the story: a trusted form carries it too", () => {
+      expect(
+        entityHubPatterns(bare, {
+          aliases: ["TBMM", "Xyz"],
+          trusted: ["TBMM"],
+          excludes: ["israil"],
+          notAfter: ["abd"],
+        }),
+      ).toEqual(["\\m(?<!abd\\s)tbmm\\M", `${guardPrefix(["israil"])}\\m(?<!abd\\s)xyz\\M`]);
+    });
+
+    it("blocks the word only right after a listed word, with one whitespace character between", () => {
+      const pat = pgPatternToJs(
+        entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["abd", "iran"] })[0] as string,
+      );
+      expect(pat.test("xyz")).toBe(true);
+      expect(pat.test("abd xyz")).toBe(false);
+      expect(pat.test("iran xyz bakani")).toBe(false);
+      expect(pat.test("abd\nxyz")).toBe(false);
+      expect(pat.test("abd ve xyz")).toBe(true);
+      expect(pat.test("abd, xyz")).toBe(true);
+      expect(pat.test("abd xyz ve turkiye xyz")).toBe(true);
+    });
+  });
 });
 
 describe("hub matching behaviour (the SQL guard, in JS)", () => {
@@ -676,6 +809,88 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
     expect(hubMatches("borsa", "borsada")).toBe(true);
   });
 
+  it("borsa: New York, Asia and Binance stories are not Borsa İstanbul", () => {
+    for (const sample of [
+      "New York borsası Demokratların zaferinin ardından yükselişle kapandı",
+      "New York borsasında seçim günü: Nasdaq rekor kırdı",
+      "ABD ara seçimleri sonrası Asya borsaları karışık, Nikkei geriledi",
+      "FBI, kripto para borsası Binance'teki siber soygundan Kuzey Kore'yi sorumlu tuttu",
+      "Wall Street güne düşüşle başladı, borsalarda satış var",
+      "Dow Jones ve S&P 500 borsa endeksleri geriledi",
+      "Avrupa borsaları ekside, Frankfurt DAX zayıf",
+      "Londra borsası rekor seviyede",
+      "Gaziantep Ticaret Borsası meclis başkanı seçildi",
+      "Kripto borsası hacmi düştü",
+    ]) {
+      expect(hubMatches("borsa", sample), sample).toBe(false);
+    }
+  });
+
+  it("borsa: Borsa İstanbul, BIST and the bare Turkish 'borsa' stay in", () => {
+    for (const sample of [
+      "Borsa İstanbul Genel Müdür Vekilliğine Atila Türeli getirildi",
+      "YENİ Parti'nin fon ve borsa manipülasyonu önergesi reddedildi",
+      "Borsadaki 173 milyar dolarlık erimeyi bütçeyle karşılaştırdı",
+      "BIST 100 endeksi günü yükselişle tamamladı",
+      "Borsa güne yükselişle başladı",
+      "Borsası'nda işlem hacmi arttı, Borsa İstanbul'da rekor",
+    ]) {
+      expect(hubMatches("borsa", sample), sample).toBe(true);
+    }
+  });
+
+  it("borsa: Borsa İstanbul and BIST are trusted, so a foreign cue in the same story does not drop them", () => {
+    expect(hubMatches("borsa", "Borsa İstanbul güne Wall Street'in izinden başladı")).toBe(true);
+    expect(hubMatches("borsa", "BIST 100, New York borsasına paralel düştü")).toBe(true);
+    expect(hubMatches("borsa", "Nasdaq düştü, borsa güne düşüşle başladı")).toBe(false);
+  });
+
+  it("disisleri: a foreign ministry is not the Turkish one", () => {
+    for (const sample of [
+      "ABD Dışişleri Bakanı Rubio, başkanlık yarışı için istifa edecek iddiası",
+      "Yunanistan Dışişleri Bakanlığı çalışanlarından 2 günlük grev",
+      "İran Dışişleri Sözcüsü, nükleer saldırıya ellerimiz bağlı değil yanıtını verdi",
+      "KKTC Dışişleri Bakanlığından Avrupa Komisyonu raporuna tepki",
+      "Almanya Dışişleri Bakanı Wadephul duyurdu",
+      "Çin Dışişleri Bakanlığı Sözcüsü açıklama yaptı",
+      "Rus Dışişleri Bakanı Lavrov: görüşme sürüyor",
+      "Rusya Dışişleri Bakanlığı'ndan tepki",
+      "Fransa Dışişleri Bakanı Paris'te konuştu",
+      "İsrail Dışişleri Bakanı Saar açıklama yaptı",
+      "Azerbaycan Dışişleri Bakanlığı notasını iletti",
+      "Kuzey Kore Dışişleri Bakanlığı füze denemesini savundu",
+      "Avrupa Dışişleri Bakanları toplandı",
+      "ABD Dışişleri Bakanı Rubio ve ABD Dışişleri Bakanlığı sözcüsü konuştu",
+      // any whitespace between the country and the ministry counts, a newline included
+      "ABD\nDışişleri Bakanlığı sözcüsü konuştu",
+    ]) {
+      expect(hubMatches("disisleri", sample), sample).toBe(false);
+    }
+  });
+
+  it("disisleri: the Turkish ministry stays in, including a story that also names a foreign one", () => {
+    for (const sample of [
+      "Dışişleri Bakanı Fidan, KKTC'yi ziyaret edecek",
+      "Dışişleri'nden AB'nin 2026 raporuna sert tepki",
+      "Dışişleri’nden AB’nin 2026 raporuna sert tepki",
+      "Dışişleri Bakanlığı Büyükelçi Metin Ergin'in hayatını kaybettiğini duyurdu",
+      "Dışişleri Bakanı Hakan Fidan, İran Dışişleri Bakanı Arakçi ile görüştü",
+      "İran Dışişleri Bakanı Arakçi, Dışişleri Bakanı Hakan Fidan ile görüştü",
+      "Türkiye Dışişleri Bakanlığı açıklama yaptı",
+      "Dışişleri",
+      "TÜRKİYE: DIŞİŞLERİ BAKANLIĞI",
+      "ABD ve Dışişleri Bakanlığı görüşmesi",
+    ]) {
+      expect(hubMatches("disisleri", sample), sample).toBe(true);
+    }
+  });
+
+  it("disisleri: only a listed word directly before the ministry blocks it", () => {
+    expect(hubMatches("disisleri", "Abdullah Dışişleri Bakanlığı'na atandı")).toBe(true);
+    expect(hubMatches("disisleri", "ABD, Dışişleri Bakanlığı")).toBe(true);
+    expect(hubMatches("disisleri", "Ankara Dışişleri Bakanlığı")).toBe(true);
+  });
+
   it("cin: 'Cinayet' is out, \"Çin'in\" is in", () => {
     expect(hubMatches("cin", "Cinayet davası")).toBe(false);
     expect(hubMatches("cin", "Çin'in")).toBe(true);
@@ -700,11 +915,16 @@ describe("entityHubQueries", () => {
     for (const s of ["zelenski", "zelenskiy", "zelensky", "zelenskyy"]) expect(q).toContain(s);
   });
 
-  it("borsa searches 'borsa' and 'bist' but never the generic word 'istanbul'", () => {
+  it("borsa searches 'borsa istanbul', 'borsa' and 'bist' but never the generic word 'istanbul' alone", () => {
     const q = entityHubQueries(entityByKey("borsa")!);
+    expect(q).toContain("borsa istanbul");
     expect(q).toContain("borsa");
     expect(q).toContain("bist");
-    for (const s of q) expect(s).not.toContain("istanbul");
+    // 'istanbul' only ever travels with 'borsa': a bare query would list every Istanbul story.
+    for (const s of q) {
+      if (/stanbul/i.test(s)) expect(s, s).toMatch(/^borsa\s/i);
+    }
+    expect(q.length).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
   });
 
   it("borsa also searches the inflected spellings whose stems differ from the bare word", () => {
@@ -764,9 +984,13 @@ describe("invariants over every curated entity", () => {
   // pattern is compared as a backslash and a metacharacter never passes as one.
   const esc = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const WORD = "[a-z0-9]+";
-  const PLAIN = `${esc("\\m")}${WORD}(?:${esc("\\s")}\\+${WORD})*(?:${esc("\\M")})?`;
-  const QUANT = `${esc("\\m")}${esc(QUANTITY_GUARD)}${WORD}(?:${esc("\\M")})?`;
-  const ALTS = `${PLAIN}(?:${esc("|")}${PLAIN})*`;
+  // One alternative of an exclude / require guard: no lookbehind allowed.
+  const ALT = `${esc("\\m")}${WORD}(?:${esc("\\s")}\\+${WORD})*(?:${esc("\\M")})?`;
+  // The notAfter block: one fixed-length `(?<!word\s)` per word, right after `\m`.
+  const NOTAFTER = `(?:${esc("(?<!")}${WORD}${esc("\\s)")})+`;
+  const PLAIN = `${esc("\\m")}(?:${NOTAFTER})?${WORD}(?:${esc("\\s")}\\+${WORD})*(?:${esc("\\M")})?`;
+  const QUANT = `${esc("\\m")}${esc(QUANTITY_GUARD)}(?:${NOTAFTER})?${WORD}(?:${esc("\\M")})?`;
+  const ALTS = `${ALT}(?:${esc("|")}${ALT})*`;
   const EXCL = `${esc("(?![\\s\\S]*(?:")}${ALTS}${esc("))")}`;
   const REQ = `${esc("(?=[\\s\\S]*(?:")}${ALTS}${esc("))")}`;
   // `^`, then the negative lookahead and/or the positive one (in that order), then `[\s\S]*`.
@@ -806,9 +1030,103 @@ describe("invariants over every curated entity", () => {
       "^(?=[\\s\\S]*(?:\\mfoo))(?![\\s\\S]*(?:\\mbar))[\\s\\S]*\\mdeva\\M",
       "(?=[\\s\\S]*(?:\\mfoo))[\\s\\S]*\\mdeva\\M",
       `\\m${QUANTITY_GUARD}deva\\s+x\\s`,
+      // lookbehinds that are not one fixed-length `(?<!word\s)` right after `\m`
+      "\\m(?<!abd)deva\\M",
+      "\\m(?<!abd\\s|iran\\s)deva\\M",
+      "\\m(?<!abd\\s+)deva\\M",
+      "\\m(?<!ab.\\s)deva\\M",
+      "\\m(?<=abd\\s)deva\\M",
+      "\\m(?<abd>x)deva\\M",
+      "(?<!abd\\s)\\mdeva\\M",
+      "\\mdeva(?<!abd\\s)\\M",
+      "^(?![\\s\\S]*(?:\\m(?<!abd\\s)foo))[\\s\\S]*\\mdeva\\M",
     ]) {
       expect(bad, bad).not.toMatch(GRAMMAR);
     }
+  });
+
+  it("every emitted lookbehind is a negative, fixed-length, single alternative: valid in JS and in PostgreSQL ARE", () => {
+    // Negative only, one alternative (no `|`), no quantifier (no `*`, `+`, `?`, `{`): a
+    // literal digit class or word, then at most one `\s`. Nothing JS-only (named groups,
+    // `\p{..}`, `\k<..>`, variable-length lookbehind) reaches the RPC.
+    const FIXED = /^!(?:\[0-9\]|[a-z0-9]+)(?:\\s)?$/;
+    let lookbehinds = 0;
+    for (const e of RISING_ENTITIES) {
+      for (const p of entityHubPatterns(e)) {
+        expect(() => pgPatternToJs(p), `${e.key} ${p}`).not.toThrow();
+        const found = [...p.matchAll(/\(\?<([^)]*)\)/g)];
+        expect(found.length, `${e.key} ${p}`).toBe(p.split("(?<").length - 1);
+        for (const m of found) {
+          lookbehinds++;
+          expect(m[1], `${e.key}: (?<${m[1]})`).toMatch(FIXED);
+        }
+        expect(p, `${e.key} ${p}`).not.toMatch(/\\[pPkbBdDwW]|\(\?<=|\(\?<[a-z]/);
+      }
+    }
+    // dolar's eight amount guards plus disisleri's country guards, at least.
+    expect(lookbehinds).toBeGreaterThanOrEqual(8 + DISISLERI_NOT_AFTER.length);
+  });
+
+  it("disisleri: every country lookbehind sits directly after \\m and before the word", () => {
+    const [p] = entityHubPatterns(entityByKey("disisleri")!);
+    expect(p).toBe(`\\m${notAfterLookbehinds(DISISLERI_NOT_AFTER)}disisleri\\M`);
+    expect(p!.match(/\(\?<!/g)).toHaveLength(DISISLERI_NOT_AFTER.length);
+  });
+
+  describe("hostile input stays linear (100k characters)", () => {
+    const N = 100_000;
+    const fit = (unit: string) => unit.repeat(Math.ceil(N / unit.length)).slice(0, N);
+    // Folded text, as the SQL sees it. Each input is built so a backtracking engine has the
+    // most room to go quadratic: a guard that scans to the very end, a blocked word on
+    // every line, a cue that never appears, a match only at the far end.
+    const inputs: Array<[string, string]> = [
+      ["a's", "a".repeat(N)],
+      ["spaces", " ".repeat(N)],
+      ["newlines", "\n".repeat(N)],
+      ["abd prefixes", fit("abd ")],
+      ["every disisleri blocked", fit("abd disisleri ")],
+      ["every disisleri open", fit("disisleri ")],
+      ["near misses", fit("disisler borsas meclisi ")],
+      ["borsa repeated, exclude at the end", `${fit("borsa ")}`.slice(0, N - 9) + " new york"],
+      ["exclude repeated, borsa at the end", fit("new york ").slice(0, N - 6) + " borsa"],
+      ["meclis without any cue", fit("meclis ")],
+      ["meclis repeated, cue at the end", fit("meclis ").slice(0, N - 5) + " tbmm"],
+      ["dolar behind amounts", fit("100 dolar milyar dolar ")],
+      ["digits", "1".repeat(N)],
+    ];
+    const keys = ["disisleri", "borsa", "meclis", "aym", "tcmb", "dolar"];
+
+    it("builds every input at exactly 100k characters", () => {
+      for (const [name, text] of inputs) expect(text.length, name).toBe(N);
+    });
+
+    it("every pattern of the guarded hubs finishes each input well inside a second", () => {
+      let worst = 0;
+      let worstWhat = "";
+      for (const key of keys) {
+        for (const p of entityHubPatterns(entityByKey(key)!)) {
+          const re = pgPatternToJs(p);
+          for (const [name, text] of inputs) {
+            const t0 = performance.now();
+            re.test(text);
+            const dt = performance.now() - t0;
+            if (dt > worst) {
+              worst = dt;
+              worstWhat = `${key} ${name}`;
+            }
+          }
+        }
+      }
+      // Linear work is a few milliseconds per run; a quadratic pattern needs seconds on 100k.
+      expect(worst, worstWhat).toBeLessThan(500);
+    });
+
+    it("folding 100k characters of Turkish text is linear too", () => {
+      const t0 = performance.now();
+      const out = foldEntityText("İĞÜŞÖÇı ".repeat(Math.ceil(N / 8)).slice(0, N));
+      expect(out.length).toBeGreaterThan(0);
+      expect(performance.now() - t0).toBeLessThan(500);
+    });
   });
 
   it("no pattern starts with '(?': Postgres reads that as embedded options", () => {
@@ -959,13 +1277,13 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("excludes is curated on exactly aym, tcmb and meclis; quantityGuard on dolar only", () => {
+  it("excludes is curated on exactly aym, borsa, meclis and tcmb; quantityGuard on dolar only", () => {
     expect(
       specs
         .filter(([, s]) => s.excludes !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["aym", "meclis", "tcmb"]);
+    ).toEqual(["aym", "borsa", "meclis", "tcmb"]);
     expect(
       specs
         .filter(([, s]) => s.quantityGuard !== undefined)
@@ -973,6 +1291,75 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
         .sort(),
     ).toEqual(["dolar"]);
     expect(RISING_HUB_SPECS.dolar?.quantityGuard).toBe(true);
+  });
+
+  it("aym, tcmb, meclis, disisleri and borsa each carry a precision guard: excludes, requires or notAfter", () => {
+    for (const key of ["aym", "tcmb", "meclis", "disisleri", "borsa"]) {
+      const spec = RISING_HUB_SPECS[key];
+      expect(spec, key).toBeDefined();
+      const n =
+        (spec?.excludes ?? []).length + (spec?.requires ?? []).length + (spec?.notAfter ?? []).length;
+      expect(n, `${key} has no excludes, requires or notAfter`).toBeGreaterThan(0);
+    }
+  });
+
+  it("notAfter is curated on exactly disisleri, as folded single ASCII words", () => {
+    expect(
+      specs
+        .filter(([, s]) => s.notAfter !== undefined)
+        .map(([k]) => k)
+        .sort(),
+    ).toEqual(["disisleri"]);
+    for (const [key, spec] of specs) {
+      for (const w of spec.notAfter ?? []) {
+        expect(w, `${key}: ${w}`).toBe(foldEntityText(w));
+        expect(w, `${key}: ${w}`).toMatch(/^[a-z0-9]+$/);
+      }
+      expect(new Set(spec.notAfter ?? []).size, key).toBe((spec.notAfter ?? []).length);
+    }
+  });
+
+  it("the disisleri notAfter list: foreign countries only, never Turkey itself", () => {
+    expect(RISING_HUB_SPECS.disisleri?.notAfter).toEqual([...DISISLERI_NOT_AFTER]);
+    for (const own of ["turkiye", "turk", "tc", "ankara", "fidan"]) {
+      expect(RISING_HUB_SPECS.disisleri?.notAfter, own).not.toContain(own);
+    }
+    // The hub still searches by the label, with no alias, exclude or require.
+    expect(RISING_HUB_SPECS.disisleri?.aliases).toBeUndefined();
+    expect(RISING_HUB_SPECS.disisleri?.excludes).toBeUndefined();
+    expect(RISING_HUB_SPECS.disisleri?.requires).toBeUndefined();
+  });
+
+  it("the borsa spec: Borsa İstanbul and BIST are trusted, New York, Asia and Binance are vetoed", () => {
+    expect(RISING_HUB_SPECS.borsa).toEqual({
+      aliases: ["Borsa İstanbul", "Borsa", "BIST"],
+      trusted: ["Borsa İstanbul", "BIST"],
+      hubMatch: "prefix",
+      inflections: ["Borsada", "Borsası"],
+      excludes: [
+        "new york",
+        "wall street",
+        "nasdaq",
+        "dow jones",
+        "nikkei",
+        "asya borsa",
+        "avrupa borsa",
+        "londra borsa",
+        "frankfurt",
+        "binance",
+        "kripto",
+        "ticaret borsa",
+      ],
+    });
+  });
+
+  it("the rollup tokens of the guarded hubs did not change (parity with migration 112)", () => {
+    const tokens = (key: string) => RISING_ENTITIES.find((e) => e.key === key)?.tokens;
+    expect(tokens("disisleri")).toEqual(["disisleri"]);
+    expect(tokens("borsa")).toEqual(["borsa", "bist"]);
+    expect(tokens("tcmb")).toEqual(["tcmb", "merkez bankasi"]);
+    expect(tokens("aym")).toEqual(["aym", "anayasa mahkemesi"]);
+    expect(tokens("meclis")).toEqual(["meclis", "tbmm"]);
   });
 
   it("requires is curated on exactly meclis", () => {
@@ -1022,9 +1409,10 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     );
   });
 
-  it("curated trusted sets: AYM, TCMB, and the two unambiguous parliament names", () => {
+  it("curated trusted sets: AYM, TCMB, the unambiguous parliament names, Borsa İstanbul and BIST", () => {
     expect(RISING_HUB_SPECS.aym?.trusted).toEqual(["AYM"]);
     expect(RISING_HUB_SPECS.tcmb?.trusted).toEqual(["TCMB"]);
     expect(RISING_HUB_SPECS.meclis?.trusted).toEqual(["TBMM", "Büyük Millet Meclisi"]);
+    expect(RISING_HUB_SPECS.borsa?.trusted).toEqual(["Borsa İstanbul", "BIST"]);
   });
 });

@@ -2576,7 +2576,7 @@ The migration aborts rather than commit a partial backfill, so a successful appl
 
 **Cost:** the per-day statement was timed read-only on production before writing the migration: 0.95-2.1 s for yesterday, 3.6 s for a 21-day-old day nobody had touched (the statement narrows each day with two index range scans so a late-ingest repair day does not heap-scan every article since then; the plain `created_at >=` form took 10.1 s cold for 2026-10-13). A normal hourly run does 2-4 such statements. If the combined cron run ever gets too long, split it: `select cron.alter_job((select jobid from cron.job where jobname = 'trends-rollup-refresh'), command := 'select public.trends_daily_zone_counts_ist_refresh();');` and schedule `select public.trends_daily_entity_counts_ist_refresh();` as its own job.
 
-**Changing the vocabulary:** edit `src/lib/trends/rising-entities.ts` and write a new migration that `create or replace`s the refresh function with the new `emap` VALUES and re-runs the backfill; `tests/migrations/112-trends-entity-rollup.test.ts` pins the migration to the TS list and its fold strings.
+**Changing the vocabulary:** edit `src/lib/trends/rising-entities.ts` and write a new migration that `create or replace`s the refresh function with the new `emap` VALUES and re-runs the backfill (copy the body of the NEWEST migration that replaced the function, which since 163 is 163's with its `guard_map` / `guarded` block; copying 112's text would silently drop the guards); `tests/migrations/112-trends-entity-rollup.test.ts` pins the migration to the TS list and its fold strings.
 
 **Rollback:** nothing else depends on 112; the card degrades to its "hesaplanamıyor" copy.
 
@@ -3756,3 +3756,57 @@ select count(distinct e.cluster_id) from e join public.clusters c on c.id = e.cl
 Then `GET /cluster/31fde7d7-548c-42b2-8f5e-7d293510f329` (after the page's ISR window) shows "...temizlik işçisi hayatını kaybetti" in `<title>` and the H1.
 
 **Rollback** (nothing else depends on 162; one transaction): re-run section 1 of `155_neutral_title_repick_growth.sql` (its `create or replace function`, `comment on function`, `revoke` and `grant`; it restores `md5(prosrc)` `e0d9b88645ff3d4952fb44d02b38ee98`, length 839), then remove ledger row 162 (`delete from supabase_migrations.schema_migrations where version = '162';`). The ACL does not change in either direction. The picker change needs no rollback for the SQL: a Vercel build without it simply never repairs the stale rows.
+
+## 163 — "Yükselen Konular" counts only what the hubs would show (`trends_daily_entity_counts_ist_refresh` guards): APPLY 163, no deploy-order constraint
+
+**Why:** 112 joins every title gram to the vocabulary with none of the guards the `/gundem/<key>` hubs apply (`RISING_HUB_SPECS` excludes for `tcmb`, `aym` and `meclis`, `QUANTITY_GUARD` for `dolar`, `src/lib/trends/rising-entities.ts` and `src/lib/entities/entity-hub.ts`). On 2026-11-05 (read-only) `/trends` listed "Merkez Bankası · Bugün 38 haber · 7 günlük ortalamanın 2,1 katı", and 10 of those 38 titles were the Bank of England ("İngiltere Merkez Bankası faizi yüzde 4'e çıkardı", aksam, anadolu-ajansi, euronews, sozcu, ...); the rest is mostly the weekly TCMB reserves item. `dolar` read 47, of which 35 name an amount ("158,1 milyar dolar", "200 milyon dolar", "brent petrolün varili 94,07 dolar"). `meclis` counted "İsrail Meclis Başkanı", "İran Meclis Başkanı" and municipal "meclis üyesi" stories; `aym` counted "Polonya Anayasa Mahkemesi" (h43-entities-3).
+
+**What 163 does** (function-only, one transaction, safe to re-apply): `create or replace function public.trends_daily_entity_counts_ist_refresh(p_days integer default 2)` with 112's **signature, `SECURITY DEFINER`, `search_path = ''`, `plan_cache_mode = force_custom_plan` and grants** (revoke from public, anon, authenticated; execute to `service_role`), the comment restated, and 112's body **byte for byte except two places**: a marked block between the `hits` and `agg` CTEs (`-- 163 guards begin` .. `-- 163 guards end`: `guard_map` and `guarded`, joined back to `day_articles` for the folded title), and `agg` counting `from guarded h`. The guards:
+
+- `tcmb`: a hit is dropped when the folded title matches one of `RISING_HUB_SPECS.tcmb.excludes` (`avrupa merkez`, `ecb`, `fed`, `abd merkez`, `amerikan merkez`, `israil merkez`, `ingiltere merkez`, `japonya merkez`, `rusya merkez`, `cin merkez`) and has no `tcmb` word (TCMB is trusted: "TCMB, Fed kararını değerlendirdi" stays);
+- `aym` and `meclis`: the same rule with their excludes; the trusted tokens `aym`, `tbmm` and `büyük millet meclisi` bypass the veto. The hub's `requires` list for the bare "Meclis" is **not** mirrored;
+- `dolar`: a hit is kept only when some `dolar` in the title passes `QUANTITY_GUARD` (not after a digit, `bin`, `milyon`, `milyar`, `trilyon`, `milyonlarca`, `milyarlarca`);
+- every other entity passes untouched. It creates, drops, alters and deletes nothing else, schedules no cron job and writes no row. `tests/migrations/163-trends-entity-rollup-guards.test.ts` pins the body to 112's, the regex strings to `RISING_HUB_SPECS` and `QUANTITY_GUARD`, and runs a JS twin on the four fixtures of the spec.
+
+**No backfill.** The hourly `trends-rollup-refresh` run (`:25`) recomputes the last 2 Istanbul days (and any day within 10 days that received a late-ingested row) with the new body, so today and yesterday are right one run after applying. Older baseline rows (D-2 .. D-8) keep their unguarded counts and leave the 7-day baseline within a week. Until then the baseline of `tcmb`, `dolar`, `meclis` and `aym` is a little high, so a spike in those four is judged against a generous baseline: it can be hidden for a few days, never invented.
+
+**Function fingerprint** (`md5(prosrc)`, `length(prosrc)`):
+
+| | md5 | length |
+|---|---|---|
+| production before 163 (read-only, 2026-11-05) = the body of 112 | `b0a0dcce4dd8df781c35ed7a73af576e` | 5937 |
+| after 163 | `dc1e1d4780b3b8d2e9c0a4ac8c64caf8` | 7590 |
+
+**Read-only replay before shipping** (the per-day statement of 112/163 without its `insert`, as a plain SELECT for the Istanbul day 2026-11-05, run through the read-only SQL console; 0.8-1.3 s, the same as 112's):
+
+| entity | 112 (now) | 163 |
+|---|---|---|
+| `tcmb` | 38 | 28 |
+| `dolar` | 47 | 12 |
+| `meclis` | 127 | 105 |
+| `aym` | 13 | 12 |
+
+The other 58 entities are identical. The 10 dropped `tcmb` titles are all "İngiltere Merkez Bankası ..."; two more Bank of England stories stay because no title carries the phrase "ingiltere merkez" (the hub has the same hole), and 26 are domestic (weekly reserves, TCMB reports). A currency headline with a date in front ("5 kasım 2026 dolar kuru ne kadar oldu?") reads as an amount and is dropped, as it is on the dolar hub. 2026-11-02: `tcmb` 20 -> 18, `dolar` 64 -> 18, `meclis` 99 -> 89. 2026-10-26 (the deepest day the function can touch) took 1.2 s against 1.1 s for 112's text, both warm.
+
+**Order:** apply `163_trends_entity_rollup_guards.sql` (`supabase db push`, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/163_trends_entity_rollup_guards.sql`; operator) at any time. It depends on no app build and nothing depends on it; the Vercel deploy of the `/trends` hub-link change (a thin hub links to the home search) can go before or after. No Edge Function deploy.
+
+**Verify** (read-only):
+
+```sql
+select md5(prosrc), length(prosrc), prosecdef, proconfig::text, proacl::text
+  from pg_proc where oid = 'public.trends_daily_entity_counts_ist_refresh(integer)'::regprocedure;
+-- dc1e1d4780b3b8d2e9c0a4ac8c64caf8, 7590, t, {"search_path=\"\"",plan_cache_mode=force_custom_plan}, {postgres=X/postgres,service_role=X/postgres}
+select has_function_privilege('anon', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute'),
+       has_function_privilege('service_role', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute');   -- f, f, t
+select version, name from supabase_migrations.schema_migrations where version = '163';   -- 1 row
+-- after the next :25 run: today's guarded counts (updated_at later than the apply)
+select entity, count, updated_at from public.trends_daily_entity_counts_ist_rollup
+ where day = (now() at time zone 'Europe/Istanbul')::date and entity in ('tcmb', 'dolar', 'meclis', 'aym') order by entity;
+select jobid, status, return_message, start_time, end_time from cron.job_run_details
+ where jobid = (select jobid from cron.job where jobname = 'trends-rollup-refresh') order by runid desc limit 3;
+```
+
+Then `GET /trends`: a "Yükselen Konular" row whose hub is thin (fewer than 3 clusters) links to `/?q=<label>`, and `GET /gundem` shows no link to a hub with no cluster in the last 14 days (for example `/gundem/hamas` while it is empty).
+
+**Rollback** (nothing else depends on 163; one transaction): re-run the function statements of `112_trends_entity_rollup.sql` (section 2: its `create or replace function`, `comment on function`, `revoke` and `grant`; it restores `md5(prosrc)` `b0a0dcce4dd8df781c35ed7a73af576e`, length 5937), then remove ledger row 163 (`delete from supabase_migrations.schema_migrations where version = '163';`). The ACL does not change in either direction. The next `:25` run recomputes today and yesterday unguarded again.

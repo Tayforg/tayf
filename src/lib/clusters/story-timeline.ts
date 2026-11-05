@@ -173,6 +173,17 @@ const ABSENT_TEXT: Record<MediaDnaZone, string> = {
   bagimsiz: "Bağımsız kaynaklardan bu kümede haber yok",
   muhalefet: "Muhalefet kaynaklarından bu kümede haber yok",
 };
+// Absence is judged on VOTING members, so "bu kümede haber yok" can sit next to
+// a plotted toplayıcı / niş point from the very same zone (cluster 5692a4a1:
+// İşçi Haber, a niche Muhalefet source). Then the line says whose absence it is:
+// the sources the spectrum counts. Same noun/adjective split as above. Used
+// only when the absent zone has at least one non-voting point; otherwise
+// ABSENT_TEXT is unchanged.
+const ABSENT_TEXT_QUALIFIED: Record<MediaDnaZone, string> = {
+  iktidar: "Spektruma sayılan İktidar kaynaklarından bu kümede haber yok",
+  bagimsiz: "Spektruma sayılan bağımsız kaynaklardan bu kümede haber yok",
+  muhalefet: "Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok",
+};
 const DEGRADED_TEXT: Record<MediaDnaZone, string> = {
   iktidar: "İktidar kaynaklarının akışı şu an sorunlu",
   bagimsiz: "Bağımsız kaynakların akışı şu an sorunlu",
@@ -253,9 +264,13 @@ function firstMoverLabel(names: readonly string[]): string {
  * widen the axis and appear in `points` with `voting: false`, but never
  * count toward the source floor, the first mover, a zone's join, absence,
  * the summary or `zoneFirsts` — an aggregator reposting first must not read
- * as a zone "joining". Clocks inside the summary / zone line follow the
- * VOTING span's midnight crossing (so a niche source can't rewrite them);
- * the point clocks follow the plotted axis's.
+ * as a zone "joining". The one thing they change is the WORDING of an absent
+ * zone's line: with a non-voting point in that zone it reads "Spektruma sayılan
+ * X kaynaklarından bu kümede haber yok" instead of the bare "X kaynaklarından
+ * bu kümede haber yok" (h43-blindspots-1); `absentZones` itself is unchanged.
+ * Clocks inside the summary / zone line follow the VOTING span's midnight
+ * crossing (so a niche source can't rewrite them); the point clocks follow the
+ * plotted axis's.
  */
 export function buildStoryTimeline(
   members: readonly StoryTimelineMember[],
@@ -326,6 +341,8 @@ export function buildStoryTimeline(
   // placeable. Non-voting members are never coverage.
   const absentZones = missingZones(members);
   const degradedAbsentZones = absentZones.filter((z) => health?.[z].degraded === true);
+  // Zones with a plotted non-voting point: their absence line is qualified.
+  const nonVotingZones = new Set(points.filter((p) => !p.voting).map((p) => p.zone));
 
   const tied = votingPoints.filter((p) => p.t - firstT < STORY_TIE_MS);
   const head = votingPoints[0];
@@ -357,7 +374,7 @@ export function buildStoryTimeline(
     } else if (degradedAbsentZones.includes(zone)) {
       parts.push(DEGRADED_TEXT[zone]);
     } else if (absentZones.includes(zone)) {
-      parts.push(ABSENT_TEXT[zone]);
+      parts.push(nonVotingZones.has(zone) ? ABSENT_TEXT_QUALIFIED[zone] : ABSENT_TEXT[zone]);
     }
     // Otherwise the zone is present but undated — say nothing about it.
   }

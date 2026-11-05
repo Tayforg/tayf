@@ -13,8 +13,12 @@ import {
   computeRising,
   formatRatio,
   shiftDayKey,
+  withHubLinks,
+  type RisingItem,
   type RisingResult,
 } from "./rising";
+import { ENTITY_HUB_MIN_INDEXABLE } from "@/lib/entities/entity-hub";
+import type { EntityHub } from "@/lib/entities/entity-hub-query";
 import {
   RISING_ENTITIES,
   RISING_FOLD_FROM,
@@ -532,5 +536,134 @@ describe("foldTitleGrams / fold constants", () => {
 
   it("the fold target is plain lowercase ASCII", () => {
     expect(RISING_FOLD_TO).toMatch(/^[a-z]+$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// withHubLinks (h43-entities-3): a rising row links to its /gundem hub only
+// when that hub is indexable. A thin (< ENTITY_HUB_MIN_INDEXABLE clusters),
+// empty or unreadable hub is noindex and would show the reader one unrelated
+// card or none, so the row links to the home search for the label instead.
+// ---------------------------------------------------------------------------
+
+/** A hub read holding `n` bundles (only the length is read). */
+function hubWith(n: number): EntityHub {
+  return {
+    bundles: Array.from({ length: n }, () => ({})),
+    total: n,
+    asOfMs: 0,
+  } as unknown as EntityHub;
+}
+
+function risingItem(over: Partial<RisingItem> = {}): RisingItem {
+  return {
+    key: "tcmb",
+    label: "Merkez Bankası",
+    href: "/gundem/tcmb",
+    count: 38,
+    baseline: 18,
+    ratio: 2.1,
+    ratioLabel: "2,1",
+    ratioIsLowerBound: false,
+    isNew: false,
+    ...over,
+  };
+}
+
+describe("withHubLinks", () => {
+  it("a thin hub links to the home search for the label", () => {
+    const out = withHubLinks([risingItem()], new Map([["tcmb", hubWith(1)]]));
+    expect(out[0]!.href).toBe("/?q=Merkez%20Bankas%C4%B1");
+  });
+
+  it("an empty hub (no clusters) links to the home search", () => {
+    const out = withHubLinks([risingItem()], new Map([["tcmb", hubWith(0)]]));
+    expect(out[0]!.href).toBe("/?q=Merkez%20Bankas%C4%B1");
+  });
+
+  it("a failed read (null) links to the home search", () => {
+    const out = withHubLinks([risingItem()], new Map([["tcmb", null]]));
+    expect(out[0]!.href).toBe("/?q=Merkez%20Bankas%C4%B1");
+  });
+
+  it("a key missing from the map is treated like a failed read", () => {
+    const out = withHubLinks([risingItem()], new Map());
+    expect(out[0]!.href).toBe("/?q=Merkez%20Bankas%C4%B1");
+  });
+
+  it("an indexable hub keeps the /gundem/<key> link", () => {
+    const msb = risingItem({ key: "msb", label: "MSB", href: "/gundem/msb" });
+    const out = withHubLinks([msb], new Map([["msb", hubWith(ENTITY_HUB_MIN_INDEXABLE)]]));
+    expect(out[0]!.href).toBe("/gundem/msb");
+  });
+
+  it("the boundary: one bundle short of indexable is a search link, exactly indexable is a hub link", () => {
+    const below = withHubLinks(
+      [risingItem()],
+      new Map([["tcmb", hubWith(ENTITY_HUB_MIN_INDEXABLE - 1)]]),
+    );
+    const at = withHubLinks(
+      [risingItem()],
+      new Map([["tcmb", hubWith(ENTITY_HUB_MIN_INDEXABLE)]]),
+    );
+    expect(below[0]!.href).toBe("/?q=Merkez%20Bankas%C4%B1");
+    expect(at[0]!.href).toBe("/gundem/tcmb");
+  });
+
+  it("builds the hub link from the key, not from the incoming href", () => {
+    const out = withHubLinks(
+      [risingItem({ href: "/somewhere-else" })],
+      new Map([["tcmb", hubWith(20)]]),
+    );
+    expect(out[0]!.href).toBe("/gundem/tcmb");
+  });
+
+  it("percent-encodes the label (spaces, Turkish letters, reserved characters)", () => {
+    const out = withHubLinks(
+      [risingItem({ key: "asgari-ucret", label: "Asgari ücret & zam?" })],
+      new Map([["asgari-ucret", null]]),
+    );
+    expect(out[0]!.href).toBe(`/?q=${encodeURIComponent("Asgari ücret & zam?")}`);
+    expect(out[0]!.href).not.toContain(" ");
+    expect(out[0]!.href).not.toContain("&");
+  });
+
+  it("changes nothing but href, and keeps the order", () => {
+    const items = [
+      risingItem({ key: "msb", label: "MSB", href: "/gundem/msb", count: 36, ratio: 5.7 }),
+      risingItem({ key: "tcmb", count: 38, isNew: true, ratioIsLowerBound: true }),
+      risingItem({ key: "meclis", label: "Meclis", href: "/gundem/meclis", count: 122 }),
+    ];
+    const out = withHubLinks(
+      items,
+      new Map([
+        ["msb", hubWith(9)],
+        ["tcmb", hubWith(1)],
+        ["meclis", hubWith(50)],
+      ]),
+    );
+
+    expect(out.map((i) => i.key)).toEqual(["msb", "tcmb", "meclis"]);
+    expect(out.map((i) => i.href)).toEqual([
+      "/gundem/msb",
+      "/?q=Merkez%20Bankas%C4%B1",
+      "/gundem/meclis",
+    ]);
+    out.forEach((o, i) => {
+      const { href: _o, ...rest } = o;
+      const { href: _i, ...orig } = items[i]!;
+      expect(rest).toEqual(orig);
+    });
+  });
+
+  it("does not mutate its input", () => {
+    const items = [risingItem()];
+    const snapshot = structuredClone(items);
+    withHubLinks(items, new Map([["tcmb", hubWith(0)]]));
+    expect(items).toEqual(snapshot);
+  });
+
+  it("returns an empty list for no items", () => {
+    expect(withHubLinks([], new Map())).toEqual([]);
   });
 });

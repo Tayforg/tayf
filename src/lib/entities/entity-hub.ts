@@ -89,6 +89,17 @@ export function entityHubNote(total: number, shown: number): string {
 //     milyar dolarlık" and "milyarlarca doları" are amounts, not the currency.
 //   * inflections (akp, dem, iyi-parti, asgari-ucret, pkk, borsa): widen the
 //     stemmed prefilter only; the patterns do not change.
+//   * excludes (borsa, 2026-11-05): 'Borsa İstanbul' and 'BIST' are trusted and
+//     stay bare; the bare "borsa" is vetoed by new york, wall street, nasdaq,
+//     dow jones, nikkei, asya/avrupa/londra borsa, frankfurt, binance, kripto
+//     and ticaret borsa, so the New York, Asian, crypto-exchange and commodity
+//     exchange stories drop out.
+//   * notAfter (disisleri, 2026-11-05): `\m` + one `(?<!word\s)` per foreign
+//     country word + the base word, so "ABD Dışişleri Bakanı", "İran Dışişleri
+//     Sözcüsü" and "KKTC Dışişleri" are not the Turkish ministry, while a story
+//     that also names "Dışişleri Bakanı Fidan" unprefixed still matches. Every
+//     lookbehind is a single fixed-length literal, so the pattern is valid in
+//     JS and in PostgreSQL ARE and runs in linear time on both (100k characters).
 // Postgres AREs support (?=...), (?!...) and (?<!...) (checked on production). A
 // pattern starts with `^`, never `(?`, which Postgres would read as embedded
 // options.
@@ -157,6 +168,19 @@ export function entityHubNote(total: number, shown: number): string {
 //      meclis grubu" story. Both carry a real cue word, so only a narrower
 //      phrase ('ticaret borsas') could close the first; the second reads the
 //      same as a TBMM group story and is left alone.
+//
+// disisleri and borsa (h43-entities-2, 2026-11-05), measured read-only through
+// entity_cluster_ids_v2 with the app's exact arrays, 14-day window, live
+// clusters; the JS twin and PostgreSQL agree on all 186 + 38 old rows:
+//   disisleri  186 -> 129   57 dropped, 0 added; all 73 patterns of the 62
+//                           entities compile in Postgres
+//   borsa       38 ->  24   14 dropped, 0 added: 8 New York, 2 Asia, 2 Binance
+//                           (crypto) and 2 Ticaret Borsası (commodity exchange)
+// Residue left in disisleri, by design of a one-word lookbehind: a second,
+// unprefixed mention in the same text (the original headline of a cluster whose
+// neutral title says "Almanya Dışişleri", "Dışişleri de sessiz kaldı" in an
+// Israeli story, "Başbakan Yardımcısı ve Dışişleri Bakanı" compounds) and
+// countries that are not in the list (Yemen, Küba, Norveç, Filistin, İsviçre).
 // ---------------------------------------------------------------------------
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {
@@ -259,6 +283,25 @@ function guardAlternatives(phrases: readonly string[] | undefined): string[] {
 }
 
 /**
+ * The `notAfter` block: one fixed-length negative lookbehind per word,
+ * `(?<!abd\s)(?<!iran\s)`, so the base word that follows is not directly
+ * preceded by a listed word and one whitespace character. Only an entry that
+ * folds to exactly ONE word is used (a phrase, or an "a|b" that folds to two
+ * words, is dropped), so every lookbehind is a single literal of fixed length:
+ * valid in JavaScript and in PostgreSQL ARE alike. Deduped, in curated order;
+ * "" when none is left.
+ */
+function notAfterGuard(words: readonly string[] | undefined): string {
+  const single = (words ?? [])
+    .map(foldedWords)
+    .filter((w) => w.length === 1)
+    .map((w) => w[0] as string);
+  return dedupe(single)
+    .map((w) => `(?<!${w}\\s)`)
+    .join("");
+}
+
+/**
  * `p_patterns` for entity_cluster_ids_v2: one PostgreSQL regex (ARE) per form,
  * matched against the folded title and summary. For each form: fold it, split
  * it into words on /[^a-z0-9]+/ and join them with `\s+`.
@@ -283,6 +326,12 @@ function guardAlternatives(phrases: readonly string[] | undefined): string[] {
  *   The guard is emitted only when either list holds a usable entry. The
  *   pattern starts with `^`, never `(?`, which Postgres would read as embedded
  *   options. A trusted form ("TCMB", "TBMM") stays bare.
+ *   * `notAfter`: `\m` + notAfterGuard + the first word, so "Dışişleri" does not
+ *     match right behind "ABD", "İran" or another listed country word. It is
+ *     part of the base, so it applies to a trusted form too, and it sits after
+ *     the amount guard on a `quantityGuard` word. Unlike `excludes` it reads only
+ *     the word's own neighbour: a story that names the Turkish ministry once,
+ *     unprefixed, still matches.
  */
 export function entityHubPatterns(
   entity: RisingEntity,
@@ -298,6 +347,7 @@ export function entityHubPatterns(
           requireAlts.length > 0 ? `(?=[\\s\\S]*(?:${requireAlts.join("|")}))` : ""
         }[\\s\\S]*`
       : "";
+  const notAfter = notAfterGuard(spec.notAfter);
   const patterns: string[] = [];
   for (const form of entityHubForms(entity, spec)) {
     const words = foldedWords(form);
@@ -305,10 +355,10 @@ export function entityHubPatterns(
     const body = words.join("\\s+");
     const base =
       words.length > 1
-        ? `\\m${body}`
+        ? `\\m${notAfter}${body}`
         : spec.quantityGuard === true
-          ? `\\m${QUANTITY_GUARD}${body}${prefix ? "" : "\\M"}`
-          : `\\m${body}${prefix ? "" : "\\M"}`;
+          ? `\\m${QUANTITY_GUARD}${notAfter}${body}${prefix ? "" : "\\M"}`
+          : `\\m${notAfter}${body}${prefix ? "" : "\\M"}`;
     patterns.push(trusted.has(form) ? base : `${guard}${base}`);
   }
   return dedupe(patterns).slice(0, ENTITY_HUB_MAX_TERMS);

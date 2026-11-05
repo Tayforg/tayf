@@ -26,7 +26,11 @@ import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
 import { buildSilenceDigest } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
-import { dominantZonePercent, isOnlyZone } from "@/lib/bias/zone-summary";
+import {
+  dominantZonePercent,
+  isOnlyZone,
+  nonVotingOutsideZone,
+} from "@/lib/bias/zone-summary";
 import { cardEnterClass } from "@/lib/ui/card-enter";
 import {
   getBlindspotsSafe,
@@ -241,7 +245,9 @@ interface BlindspotCardProps {
   isAging?: boolean;
 }
 
-// Composes the existing <ClusterCard> with a "Sadece X yazdı" ribbon and a
+// Composes the existing <ClusterCard> with a "Sadece X yazdı" ribbon (or the
+// qualified "Spektrumda sadece X" when a non-voting source from another zone
+// also wrote the story) and a
 // dominant-zone tint frame. We deliberately do NOT duplicate ClusterCard's
 // markup — the ribbon sits above and the tint is a parent ring + bg layer
 // so any future ClusterCard tweak (e.g. layout, image rules) is inherited
@@ -255,7 +261,22 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
   const pct = dominantZonePercent(bundle.votingZoneCounts, bundle.dominantZone);
   const only = isOnlyZone(bundle.votingZoneCounts, bundle.dominantZone);
   const pctLabel = `%${pct}`;
-  const chipLabel = only ? `Sadece ${meta.label} yazdı` : `${pctLabel} ${meta.label}`;
+  // h43-blindspots-1: "only" is a claim about the voting sources. When a
+  // toplayıcı / niş source from another zone also carried the story, "yazdı"
+  // would be false, so the chip says what the spectrum shows and the side note
+  // names the uncounted outsiders. The flag rule and every count are untouched;
+  // with no such outsider both strings are exactly what they always were.
+  const outsiders = only ? nonVotingOutsideZone(bundle.sources, bundle.dominantZone) : 0;
+  const chipLabel = !only
+    ? `${pctLabel} ${meta.label}`
+    : outsiders > 0
+      ? `Spektrumda sadece ${meta.label}`
+      : `Sadece ${meta.label} yazdı`;
+  // One string (leading space kept) so the markup stays a single text node.
+  const sideNote =
+    outsiders > 0
+      ? ` tek tarafta · +${outsiders} toplayıcı/niş kaynak (sayılmaz)`
+      : " tek tarafta";
 
   return (
     <div
@@ -271,7 +292,8 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
           </span>
           {only && (
             <span className="text-[11px] text-muted-foreground">
-              <span className="font-mono">{pctLabel}</span> tek tarafta
+              <span className="font-mono">{pctLabel}</span>
+              {sideNote}
             </span>
           )}
         </div>

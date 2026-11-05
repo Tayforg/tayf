@@ -23,7 +23,7 @@ vi.mock("@/lib/entities/entity-hub-query", () => ({
 
 import { ENTITY_HUB_MIN_INDEXABLE } from "@/lib/entities/entity-hub";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
-import { HUB_SITEMAP_CONCURRENCY, getHubsSitemapXml } from "./hub-sitemap";
+import { HUB_SITEMAP_CONCURRENCY, getHubsSitemapXml, readAllEntityHubs } from "./hub-sitemap";
 import { renderUrlset } from "./sitemaps";
 
 const BASE = "https://tayf.test";
@@ -389,5 +389,71 @@ describe("getHubsSitemapXml: escaping", () => {
         { loc: `${BASE}/gundem/${key(5)}`, lastmod: "2026-10-30T10:00:00Z" },
       ]),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readAllEntityHubs (h43-entities-3): the chunked read of every hub, shared by
+// the sitemap builder above and the /gundem index. It returns what was read
+// (a null stays a null) and leaves the policy to the caller: the sitemap
+// throws, the index fails open to its static list.
+// ---------------------------------------------------------------------------
+
+describe("readAllEntityHubs", () => {
+  it("returns a Map of every curated key to its read, in RISING_ENTITIES order", async () => {
+    serve({ [key(0)]: hub(3), [key(1)]: hub(0), [key(5)]: hub(17) });
+
+    const hubs = await readAllEntityHubs();
+
+    expect(hubs).toBeInstanceOf(Map);
+    expect([...hubs.keys()]).toEqual(RISING_ENTITIES.map((e) => e.key));
+    expect(hubs.get(key(0))).toEqual(hub(3));
+    expect(hubs.get(key(1))).toEqual(hub(0));
+    expect(hubs.get(key(5))?.total).toBe(17);
+  });
+
+  it("reads each key exactly once, in chunks of HUB_SITEMAP_CONCURRENCY", async () => {
+    serve({});
+    await readAllEntityHubs();
+
+    expect(mocks.getEntityHub.mock.calls.map((c) => c[0])).toEqual(
+      RISING_ENTITIES.map((e) => e.key),
+    );
+  });
+
+  it("keeps a failed read as null instead of throwing", async () => {
+    serve({ [key(3)]: null });
+
+    const hubs = await readAllEntityHubs();
+
+    expect(hubs.get(key(3))).toBeNull();
+    expect(hubs.has(key(3))).toBe(true);
+  });
+
+  it("fails fast: the first batch holding a null is the last batch started", async () => {
+    serve({ [key(HUB_SITEMAP_CONCURRENCY + 1)]: null });
+
+    const hubs = await readAllEntityHubs();
+
+    expect(mocks.getEntityHub).toHaveBeenCalledTimes(2 * HUB_SITEMAP_CONCURRENCY);
+    // The keys of the two batches that were read are present; later ones are absent.
+    expect(hubs.size).toBe(2 * HUB_SITEMAP_CONCURRENCY);
+    expect(hubs.has(key(2 * HUB_SITEMAP_CONCURRENCY))).toBe(false);
+    expect(hubs.get(key(HUB_SITEMAP_CONCURRENCY + 1))).toBeNull();
+  });
+
+  it("an outage (every read null) costs one batch, not all keys", async () => {
+    mocks.getEntityHub.mockResolvedValue(null);
+
+    const hubs = await readAllEntityHubs();
+
+    expect(mocks.getEntityHub).toHaveBeenCalledTimes(HUB_SITEMAP_CONCURRENCY);
+    expect([...hubs.values()].every((h) => h === null)).toBe(true);
+  });
+
+  it("propagates a rejected read", async () => {
+    mocks.getEntityHub.mockRejectedValue(new Error("boom"));
+
+    await expect(readAllEntityHubs()).rejects.toThrow("boom");
   });
 });

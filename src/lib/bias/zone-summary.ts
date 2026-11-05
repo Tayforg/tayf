@@ -1,6 +1,6 @@
-import { zoneOf } from "@/lib/bias/config";
+import { isVotingKind, zoneOf } from "@/lib/bias/config";
 import { roundPercents } from "@/lib/bias/round-percents";
-import type { BiasDistribution, MediaDnaZone } from "@/types";
+import type { BiasCategory, BiasDistribution, MediaDnaZone, SourceKind } from "@/types";
 
 // Pure helpers for collapsing a cluster's 10-category `BiasDistribution`
 // into the 3 Medya DNA zone counts, percentages, and dominant-zone calls.
@@ -68,4 +68,32 @@ export function isOnlyZone(
   return ZONE_ORDER.every((other) =>
     other === zone ? counts[other] > 0 : counts[other] === 0,
   );
+}
+
+/**
+ * How many toplayıcı / niş (non-voting) sources sit OUTSIDE `zone`.
+ *
+ * "Sadece X yazdı" is decided on the voting tally only (`isOnlyZone`), so it
+ * can be printed over a story an aggregator or niche source from another zone
+ * also carried (cluster 5692a4a1: İşçi Haber, a niche Muhalefet source). The
+ * flag rule is right by design; only the wording claims who wrote, so a
+ * non-zero count lets the chip qualify itself ("Spektrumda sadece X"). Never a
+ * vote: nothing here changes a count, a share or a blindspot flag.
+ *
+ * A source is non-voting by `isVotingKind` (null / missing kind votes, like
+ * everywhere else). One without a recognised bias has no zone, so it is not
+ * "inside" `zone` and is counted: the error that adds a qualifier is the
+ * honest one. `sources` must already be de-duplicated per source (a
+ * `BlindspotBundle.sources` is).
+ */
+export function nonVotingOutsideZone(
+  sources: readonly { kind?: SourceKind | null; bias: BiasCategory }[],
+  zone: MediaDnaZone,
+): number {
+  let outside = 0;
+  for (const source of sources) {
+    if (isVotingKind(source.kind)) continue;
+    if (zoneOf(source.bias) !== zone) outside += 1;
+  }
+  return outside;
 }

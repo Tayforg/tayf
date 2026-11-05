@@ -169,7 +169,8 @@ describe("/gundem index page source", () => {
   const src = read("src/app/gundem/page.tsx");
   const code = blankComments(src);
 
-  it("reads no database (no query module, no Supabase, no cache directive)", () => {
+  it("reads the hubs only through readAllEntityHubs (no query module, no Supabase, no cache directive)", () => {
+    expect(code).toContain("readAllEntityHubs(");
     expect(code).not.toMatch(/supabase/i);
     expect(code).not.toMatch(/-query["']/);
     expect(code).not.toContain("next/cache");
@@ -233,10 +234,14 @@ describe("sitemap", () => {
 });
 
 describe("trends links", () => {
-  it("rising.ts points an entity at its hub, not at the home search", () => {
+  it("rising.ts points an entity at its hub; the home search is only withHubLinks' fallback for a thin hub", () => {
     const code = blankComments(read("src/lib/trends/rising.ts"));
     expect(code).toContain("href: `/gundem/${entity.key}`");
-    expect(code).not.toContain("/?q=");
+    const at = code.indexOf("export function withHubLinks");
+    expect(at).toBeGreaterThan(-1);
+    // computeRising itself never links to the search; only the hub-aware step does.
+    expect(code.slice(0, at)).not.toContain("/?q=");
+    expect(code.slice(at)).toContain("/?q=");
   });
 });
 
@@ -484,7 +489,7 @@ describe("/gundem/[key] body", () => {
     expect(text).not.toContain("tanesi listeleniyor");
   });
 
-  it("offers a follow button for the label as a query, in every state", async () => {
+  it("offers a follow button for the ENTITY (kind gundem, value = key), in every state", async () => {
     for (const result of [null, { bundles: [], total: 0, asOfMs: 0 }, { bundles: [bundle("a")], total: 1, asOfMs: 0 }]) {
       mocks.result = result;
       const tree = await renderHub("ozgur-ozel");
@@ -493,7 +498,7 @@ describe("/gundem/[key] body", () => {
         (el) => typeof el.type === "function" && (el.type as { name?: string }).name === "FollowButton",
       );
       expect(follow).toHaveLength(1);
-      expect(follow[0]!.props).toMatchObject({ kind: "q", value: "Özgür Özel" });
+      expect(follow[0]!.props).toMatchObject({ kind: "gundem", value: "ozgur-ozel" });
     }
   });
 
@@ -606,8 +611,10 @@ describe("/gundem index body", () => {
     expect(indexMetadata.alternates?.canonical).toBe("/gundem");
   });
 
-  it("renders the hero and one prefetch-off chip per entity, in vocabulary order", () => {
-    const tree = GundemIndexPage();
+  // The mocked hub read is null here (beforeEach), so this is the fail-open list:
+  // every hub a plain link, no counts. src/app/gundem/page.test.tsx covers the counts.
+  it("renders the hero and one prefetch-off chip per entity, in vocabulary order", async () => {
+    const tree = await GundemIndexPage();
     const text = pageText(tree);
     expect(text).toContain("Gündemdeki adlar");
     expect(text).toContain("Kişi, parti, kurum ve ülkelere göre son 14 günün haberleri.");
@@ -631,9 +638,9 @@ describe("/gundem index body", () => {
     }
   });
 
-  it("renders one JSON-LD script: CollectionPage of all hubs in vocabulary order + BreadcrumbList", () => {
+  it("renders one JSON-LD script: CollectionPage of all hubs in vocabulary order + BreadcrumbList", async () => {
     const scripts = elements(
-      GundemIndexPage(),
+      await GundemIndexPage(),
       (el) => el.type === "script" && el.props?.type === "application/ld+json",
     );
     expect(scripts).toHaveLength(1);

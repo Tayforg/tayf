@@ -1,3 +1,6 @@
+import { entityHubRobots } from "@/lib/entities/entity-hub";
+import type { EntityHub } from "@/lib/entities/entity-hub-query";
+
 import { RISING_ENTITIES } from "./rising-entities";
 
 // Pure ranking behind "Yükselen Konular" (migration 112). Input is the
@@ -45,7 +48,11 @@ export type RollupRow = { day: string; entity: string; count: number };
 export type RisingItem = {
   key: string;
   label: string;
-  /** The entity's /gundem hub (src/app/gundem/[key]); the hub page links on to the home search. */
+  /**
+   * computeRising sets the entity's /gundem hub (src/app/gundem/[key]);
+   * withHubLinks then swaps it for the home search when that hub is thin,
+   * empty or unreadable.
+   */
   href: string;
   /** Articles mentioning the entity on the ranked day. */
   count: number;
@@ -202,4 +209,35 @@ export function computeRising(
   }
 
   return { status: "ok", dayLabel: "Bugün", day: todayKey, items: [] };
+}
+
+/**
+ * Where a rising row links once the entity's hub is known (h43-entities-3).
+ * The /gundem/<key> hub only when it is indexable (entityHubRobots is
+ * undefined: at least ENTITY_HUB_MIN_INDEXABLE clusters); otherwise the home
+ * search for the label, the same `/?q=` link the hub's own footer offers. A
+ * thin hub is noindex and, for a rising entity, usually shows one unrelated
+ * card ("Merkez Bankası" opened a hub with a single fund-investigation story
+ * while 38 headlines had named it that day). A failed read (null) or a key
+ * missing from the map is treated the same way, so a reader outage degrades
+ * to the search link instead of a possibly empty hub.
+ *
+ * Pure: no I/O and no clock. The caller reads the hubs (outside any
+ * "use cache" function, see src/app/trends/page.tsx) and passes them in.
+ * Only `href` changes; order and every other field are kept.
+ */
+export function withHubLinks(
+  items: readonly RisingItem[],
+  hubs: ReadonlyMap<string, EntityHub | null>,
+): RisingItem[] {
+  return items.map((item) => {
+    const hub = hubs.get(item.key) ?? null;
+    const indexable = hub !== null && entityHubRobots(hub) === undefined;
+    return {
+      ...item,
+      href: indexable
+        ? `/gundem/${item.key}`
+        : `/?q=${encodeURIComponent(item.label)}`,
+    };
+  });
 }

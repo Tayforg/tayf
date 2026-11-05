@@ -81,6 +81,7 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { cacheLife, cacheTag } from "next/cache";
+import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
@@ -96,6 +97,10 @@ import { getEntityHub } from "./entity-hub-query";
 const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(() => {
+  // getEntityHub is keyed (single-flight, 5 s negative cooldown, last-good): the
+  // module-level state would otherwise leak between the sequential failure
+  // tests below, which each expect exactly one cached attempt + one live retry.
+  __resetCacheResilienceForTests();
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.data = [];
@@ -228,7 +233,14 @@ describe("getEntityHub query shape", () => {
     expect(borsa!.p_queries).toEqual(
       expect.arrayContaining(["borsa", "bist", "borsada", "borsası"]),
     );
-    expect(borsa!.p_patterns).toEqual(["\\mborsa", "\\mbist"]);
+    // 'Borsa İstanbul' and 'BIST' are bare (trusted); the bare 'Borsa' carries the
+    // exclude guard that keeps New York, Asia and Binance stories out (h43-entities-2).
+    expect(borsa!.p_patterns).toHaveLength(3);
+    expect(borsa!.p_patterns[0]).toBe("\\mborsa\\s+istanbul");
+    expect(borsa!.p_patterns[1]).toMatch(
+      /^\^\(\?!\[\\s\\S\]\*\(\?:\\mnew\\s\+york\|.*\\mkripto\|\\mticaret\\s\+borsa\)\)\[\\s\\S\]\*\\mborsa$/,
+    );
+    expect(borsa!.p_patterns[2]).toBe("\\mbist");
   });
 
   it("embeds exactly the returned ids with .in('id', ids)", async () => {
@@ -520,6 +532,41 @@ describe("getEntityHub error handling (never throws)", () => {
 
     expect(fixture.rpcCalls).toHaveLength(2);
     expect(fixture.embedCalls).toBe(2);
+  });
+
+  it("concurrent callers of one hub share ONE live retry (single-flight per key)", async () => {
+    fixture.rpcError = { message: "db down" };
+
+    const results = await Promise.all([getEntityHub("deva"), getEntityHub("deva")]);
+
+    expect(results).toEqual([null, null]);
+    // Two cached attempts (one per caller) + ONE shared live retry. Without a
+    // key every caller runs its own retry: 4 calls.
+    expect(fixture.rpcCalls).toHaveLength(3);
+  });
+
+  it("different hubs never share a flight", async () => {
+    fixture.rpcError = { message: "db down" };
+
+    await Promise.all([getEntityHub("deva"), getEntityHub("erdogan")]);
+
+    // 2 cached attempts + 2 live retries.
+    expect(fixture.rpcCalls).toHaveLength(4);
+  });
+
+  it("serves the last good read (under 60 min old) before null when the reader is down", async () => {
+    fixture.rpcRows = [{ id: "c1", total: 4 }];
+    fixture.data = [one("c1")];
+    const good = await getEntityHub("deva");
+    expect(good?.total).toBe(4);
+
+    fixture.rpcError = { message: "db down" };
+    const stale = await getEntityHub("deva");
+
+    expect(stale?.total).toBe(4);
+    expect(stale?.bundles.map((b) => b.cluster.id)).toEqual(["c1"]);
+    // A hub never read successfully still resolves to null.
+    await expect(getEntityHub("erdogan")).resolves.toBeNull();
   });
 
   it("returns the live retry's result when only the cached attempt failed", async () => {

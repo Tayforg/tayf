@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -33,8 +33,25 @@ let mockBuckets: Bucket[] | null = null;
 // pre-existing test on the failure branch of the new section.
 let mockRising: RisingResult | null = null;
 
+// h43-entities-3: the page reads the hub of each rising row (getEntityHub, a
+// resolveCachedOrRetry getter) AFTER the rising list resolved, outside any
+// "use cache" function. Mocked per key; an unlisted key is a failed read (null).
+// `callLog` records the order of the two kinds of read.
+let mockHubs: Record<string, unknown> = {};
+const callLog: string[] = [];
+
 vi.mock("@/lib/trends/rising-query", () => ({
-  getRisingEntities: vi.fn(async () => mockRising),
+  getRisingEntities: vi.fn(async () => {
+    callLog.push("rising");
+    return mockRising;
+  }),
+}));
+
+vi.mock("@/lib/entities/entity-hub-query", () => ({
+  getEntityHub: vi.fn(async (key: string) => {
+    callLog.push(`hub:${key}`);
+    return mockHubs[key] ?? null;
+  }),
 }));
 
 vi.mock("@/lib/trends/daily-zones", async () => {
@@ -51,7 +68,8 @@ import TrendsPage, { metadata } from "./page";
 import { WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { RisingTopics } from "@/components/trends/rising-topics";
 import { PageHero } from "@/components/ui/page-hero";
-import type { RisingResult } from "@/lib/trends/rising";
+import { MAX_ITEMS, type RisingItem, type RisingResult } from "@/lib/trends/rising";
+import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { ZONE_META } from "@/lib/bias/config";
 import { ScrollToEnd } from "@/components/trends/scroll-to-end";
 
@@ -375,7 +393,10 @@ describe("/trends page — Yükselen Konular section", () => {
     const heroIdx = kids.findIndex((el) => el.type === PageHero);
     expect(heroIdx).toBe(0);
     expect(kids[heroIdx + 1]?.type).toBe(RisingTopics);
-    expect(kids[heroIdx + 1]?.props?.data).toBe(RISING_OK);
+    // The hub of "erdogan" is not mocked (a failed read), so its row links to
+    // the home search, exactly the fixture's href: the data is equal, not the
+    // same object (the page re-links the rows).
+    expect(kids[heroIdx + 1]?.props?.data).toEqual(RISING_OK);
     expect(collectElements(tree).filter((el) => el.type === RisingTopics)).toHaveLength(1);
   });
 
@@ -942,5 +963,162 @@ describe("/trends page — partial current day (h37-content-3)", () => {
     expect(code).not.toMatch(/new Date\b/);
     expect(code).not.toMatch(/istanbulDayKey/);
     expect(code).toMatch(/\.partial\b/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h43-entities-3: a rising row links to its /gundem hub only when the hub is
+// indexable. "Merkez Bankası · Bugün 38 haber" used to open a noindex hub with
+// one unrelated cluster. The hub reads happen at page level, after
+// getRisingEntities resolved, for at most MAX_ITEMS rows, and never inside a
+// "use cache" function (tests/guards/cache-retry-prerender.test.ts).
+// ---------------------------------------------------------------------------
+
+/** A hub read holding `n` bundles (only the length is read). */
+function hubWith(n: number): unknown {
+  return { bundles: Array.from({ length: n }, () => ({})), total: n, asOfMs: 0 };
+}
+
+function risingRow(key: string, label: string): RisingItem {
+  return {
+    key,
+    label,
+    href: `/gundem/${key}`,
+    count: 30,
+    baseline: 5,
+    ratio: 6,
+    ratioLabel: "6,0",
+    ratioIsLowerBound: false,
+    isNew: false,
+  };
+}
+
+function okRising(items: RisingItem[]): RisingResult {
+  return { status: "ok", dayLabel: "Bugün", day: "2026-11-05", items };
+}
+
+/** The data prop the page hands to <RisingTopics>. */
+async function risingData(): Promise<RisingResult | null> {
+  const tree = await TrendsPage();
+  const section = collectElements(tree).find((el) => el.type === RisingTopics);
+  expect(section).toBeDefined();
+  return section!.props!.data as RisingResult | null;
+}
+
+function hrefs(data: RisingResult | null): string[] {
+  if (data === null || data.status !== "ok") throw new Error("expected ok data");
+  return data.items.map((i) => i.href);
+}
+
+describe("/trends page: rising rows link only to indexable hubs", () => {
+  beforeEach(() => {
+    callLog.length = 0;
+    mockHubs = {};
+    mockBuckets = zeroBuckets();
+    vi.mocked(getEntityHub).mockClear();
+  });
+
+  it("keeps the /gundem link for an indexable hub and sends thin, empty and failed hubs to the home search", async () => {
+    mockRising = okRising([
+      risingRow("msb", "MSB"),
+      risingRow("tcmb", "Merkez Bankası"),
+      risingRow("hamas", "Hamas"),
+      risingRow("meclis", "Meclis"),
+    ]);
+    mockHubs = {
+      msb: hubWith(9), // indexable
+      tcmb: hubWith(1), // thin
+      hamas: hubWith(0), // empty
+      // meclis: not mocked -> null (failed read)
+    };
+
+    expect(hrefs(await risingData())).toEqual([
+      "/gundem/msb",
+      "/?q=Merkez%20Bankas%C4%B1",
+      "/?q=Hamas",
+      "/?q=Meclis",
+    ]);
+  });
+
+  it("renders the thin row's link in the page markup", async () => {
+    mockRising = okRising([risingRow("tcmb", "Merkez Bankası")]);
+    mockHubs = { tcmb: hubWith(1) };
+
+    const tree = await TrendsPage();
+    const section = collectElements(tree).find((el) => el.type === RisingTopics);
+    const html = renderToStaticMarkup(section as unknown as React.ReactElement);
+
+    expect(html).toContain('href="/?q=Merkez%20Bankas%C4%B1"');
+    expect(html).not.toContain("/gundem/tcmb");
+  });
+
+  it("changes only href: counts, ratios and the day label pass through", async () => {
+    const items = [risingRow("tcmb", "Merkez Bankası")];
+    mockRising = okRising(items);
+    mockHubs = { tcmb: hubWith(1) };
+
+    const data = await risingData();
+
+    expect(data).toEqual({
+      ...okRising([{ ...items[0]!, href: "/?q=Merkez%20Bankas%C4%B1" }]),
+    });
+    // The cached result itself is never mutated.
+    expect(items[0]!.href).toBe("/gundem/tcmb");
+  });
+
+  it("reads the hubs only after the rising list resolved, once per row", async () => {
+    mockRising = okRising([risingRow("msb", "MSB"), risingRow("tcmb", "Merkez Bankası")]);
+
+    await TrendsPage();
+
+    expect(callLog[0]).toBe("rising");
+    const hubReads = callLog.filter((c) => c.startsWith("hub:")).sort();
+    expect(hubReads).toEqual(["hub:msb", "hub:tcmb"]);
+    expect(callLog.lastIndexOf("rising")).toBeLessThan(callLog.indexOf(hubReads[0]!));
+  });
+
+  it("reads at most MAX_ITEMS hubs and lists at most MAX_ITEMS rows", async () => {
+    expect(MAX_ITEMS).toBe(8);
+    mockRising = okRising(
+      Array.from({ length: 12 }, (_, i) => risingRow(`k${i}`, `Konu ${i}`)),
+    );
+
+    const data = await risingData();
+
+    expect(getEntityHub).toHaveBeenCalledTimes(MAX_ITEMS);
+    expect(vi.mocked(getEntityHub).mock.calls.map((c) => c[0])).toEqual(
+      Array.from({ length: MAX_ITEMS }, (_, i) => `k${i}`),
+    );
+    expect(hrefs(data)).toHaveLength(MAX_ITEMS);
+  });
+
+  it.each([
+    ["a failed rising read (null)", null as RisingResult | null],
+    ["insufficient history", { status: "insufficient" } as RisingResult],
+    ["nothing rising", okRising([])],
+  ])("reads no hub for %s and passes the result through", async (_name, rising) => {
+    mockRising = rising;
+
+    const data = await risingData();
+
+    expect(getEntityHub).not.toHaveBeenCalled();
+    expect(data).toBe(rising);
+  });
+
+  it("links the same way in the unavailable-chart branch", async () => {
+    mockBuckets = null;
+    mockRising = okRising([risingRow("msb", "MSB"), risingRow("tcmb", "Merkez Bankası")]);
+    mockHubs = { msb: hubWith(9), tcmb: hubWith(2) };
+
+    expect(hrefs(await risingData())).toEqual(["/gundem/msb", "/?q=Merkez%20Bankas%C4%B1"]);
+  });
+
+  it("never reads a hub inside a \"use cache\" function (the page itself carries no cache directive)", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+    expect(code).not.toMatch(/["']use cache/);
+    expect(code).toMatch(/getEntityHub\(/);
+    expect(code).toMatch(/withHubLinks\(/);
   });
 });

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
-// GET /api/takip -- the read side of "Takip ettiklerim". It reuses the two
-// existing readers (searchClusters = the /?q= path, getTopicClusters = /konu),
-// so both are mocked here; their Supabase behaviour is covered next to them.
+// GET /api/takip -- the read side of "Takip ettiklerim". It reuses the three
+// existing readers (searchClusters = the /?q= path, getTopicClusters = /konu,
+// getEntityHub = /gundem/[key]), so all are mocked here; their Supabase
+// behaviour is covered next to them.
 // Every test uses its own x-real-ip so the process-local limiter state of one
 // test can never bleed into another.
 // ---------------------------------------------------------------------------
@@ -29,7 +30,13 @@ vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
   };
 });
 
+const getEntityHubMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/entities/entity-hub-query", () => ({
+  getEntityHub: (key: string) => getEntityHubMock(key),
+}));
+
 import { GET } from "@/app/api/takip/route";
+import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 let ipCounter = 0;
 function nextIp(): string {
@@ -90,8 +97,10 @@ function bundle(o: BundleOpts) {
 beforeEach(() => {
   searchClustersMock.mockReset();
   getTopicClustersMock.mockReset();
+  getEntityHubMock.mockReset();
   searchClustersMock.mockResolvedValue({ ok: true, bundles: [] });
   getTopicClustersMock.mockResolvedValue({ bundles: [], hasMore: false, page: 1 });
+  getEntityHubMock.mockResolvedValue({ bundles: [], total: 0, asOfMs: 0 });
 });
 
 afterEach(() => {
@@ -270,11 +279,208 @@ describe("GET /api/takip -- validation (400)", () => {
     expect(body.error.length).toBeGreaterThan(0);
     expect(searchClustersMock).not.toHaveBeenCalled();
     expect(getTopicClustersMock).not.toHaveBeenCalled();
+    expect(getEntityHubMock).not.toHaveBeenCalled();
   });
 
   it("uses the Turkish keyword message for a bad q", async () => {
     const res = await call("?q=a");
     expect(await res.json()).toEqual({ error: "Geçersiz anahtar kelime" });
+  });
+});
+
+// h43-entities-1: a /gundem/<key> hub follow reads through getEntityHub (the
+// hub's aliases, excludes and word boundaries), NOT the generic stemmed archive
+// search. ?q=DEVA returned 9 "devam" collisions out of 10; ?gundem=deva must
+// return only what /gundem/deva itself lists.
+describe("GET /api/takip -- gundem (entity hub) path", () => {
+  it("calls getEntityHub(key) with the validated key and answers 200", async () => {
+    getEntityHubMock.mockResolvedValue({
+      bundles: [bundle({ id: "h1" }), bundle({ id: "h2" })],
+      total: 2,
+      asOfMs: 1,
+    });
+
+    const res = await call("?gundem=deva");
+
+    expect(getEntityHubMock).toHaveBeenCalledTimes(1);
+    expect(getEntityHubMock).toHaveBeenCalledWith("deva");
+    expect(searchClustersMock).not.toHaveBeenCalled();
+    expect(getTopicClustersMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe(PUBLIC_CACHE);
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    const body = (await res.json()) as { items: Array<{ id: string }> };
+    expect(body.items.map((i) => i.id)).toEqual(["h1", "h2"]);
+  });
+
+  it("keeps the hub's own order (the RPC already returns first_published desc)", async () => {
+    getEntityHubMock.mockResolvedValue({
+      bundles: [
+        bundle({ id: "newest", firstPublished: "2026-11-05T08:00:00+00:00" }),
+        bundle({ id: "middle", firstPublished: "2026-11-03T08:00:00+00:00" }),
+        bundle({ id: "oldest", firstPublished: "2026-11-01T08:00:00+00:00" }),
+      ],
+      total: 3,
+      asOfMs: 1,
+    });
+    const res = await call("?gundem=aym");
+    const body = (await res.json()) as { items: Array<{ id: string }> };
+    expect(body.items.map((i) => i.id)).toEqual(["newest", "middle", "oldest"]);
+  });
+
+  it("caps the list at FOLLOW_ITEMS_MAX (10), keeping the newest end of the hub order", async () => {
+    getEntityHubMock.mockResolvedValue({
+      bundles: Array.from({ length: 20 }, (_, i) => bundle({ id: `h${i}` })),
+      total: 120,
+      asOfMs: 1,
+    });
+    const res = await call("?gundem=chp");
+    const body = (await res.json()) as { items: Array<{ id: string }> };
+    expect(body.items).toHaveLength(10);
+    expect(body.items[0]?.id).toBe("h0");
+    expect(body.items[9]?.id).toBe("h9");
+  });
+
+  it("maps exactly the same fields as the q and konu paths", async () => {
+    const b = bundle({
+      id: "h1",
+      title: "DEVA Partisi kongresi",
+      articleCount: 7,
+      isBlindspot: true,
+      biases: ["pro_government", "center", "opposition", "opposition"],
+    });
+    getEntityHubMock.mockResolvedValue({ bundles: [b], total: 1, asOfMs: 1 });
+    const hub = await (await call("?gundem=deva")).json();
+
+    searchClustersMock.mockResolvedValue({ ok: true, bundles: [b] });
+    const keyword = await (await call("?q=deva%20partisi")).json();
+
+    expect(hub).toEqual({
+      items: [
+        {
+          id: "h1",
+          title: "DEVA Partisi kongresi",
+          firstPublished: "2026-10-22T08:00:00+00:00",
+          updatedAt: "2026-10-22T09:30:00+00:00",
+          sourceCount: 7,
+          isBlindspot: true,
+          zoneLine: "İktidar 1 · Bağımsız 1 · Muhalefet 2",
+        },
+      ],
+    });
+    expect(hub).toEqual(keyword);
+  });
+
+  it("answers 200 with an empty items array for a hub with no clusters", async () => {
+    const res = await call("?gundem=hamas");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe(PUBLIC_CACHE);
+    expect(await res.json()).toEqual({ items: [] });
+  });
+
+  it("accepts every curated RISING_ENTITIES key", async () => {
+    expect(RISING_ENTITIES.length).toBeGreaterThanOrEqual(60);
+    for (const e of RISING_ENTITIES) {
+      getEntityHubMock.mockClear();
+      const res = await call(`?gundem=${e.key}`);
+      expect(res.status, e.key).toBe(200);
+      expect(getEntityHubMock).toHaveBeenCalledWith(e.key);
+    }
+  });
+
+  it("503s no-store with Retry-After 60 when the hub read is null", async () => {
+    getEntityHubMock.mockResolvedValue(null);
+    const res = await call("?gundem=deva");
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("retry-after")).toBe("60");
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    expect(await res.json()).toEqual({ error: "Şu an yüklenemedi" });
+  });
+
+  it("never sets a public cache header when the hub reader throws (500)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    getEntityHubMock.mockRejectedValue(new Error("boom"));
+    const res = await call("?gundem=deva");
+    expect(res.status).toBe(500);
+    expect(res.headers.get("cache-control") ?? "").not.toContain("public");
+  });
+
+  it("does not mutate the bundle array the reader returned (it sits behind a cache)", async () => {
+    const bundles = [bundle({ id: "x1" }), bundle({ id: "x2" })];
+    getEntityHubMock.mockResolvedValue({ bundles, total: 2, asOfMs: 1 });
+    await call("?gundem=deva");
+    expect(bundles.map((b) => b.cluster.id)).toEqual(["x1", "x2"]);
+  });
+
+  it("spends a rate-limit token like the other paths (429 after 40)", async () => {
+    const ip = nextIp();
+    for (let i = 0; i < 40; i++) {
+      expect((await call("?gundem=deva", ip)).status).toBe(200);
+    }
+    const res = await call("?gundem=deva", ip);
+    expect(res.status).toBe(429);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(getEntityHubMock).toHaveBeenCalledTimes(40);
+  });
+});
+
+describe("GET /api/takip -- gundem validation (400)", () => {
+  const badKey: Array<[string, string]> = [
+    ["unknown key", "?gundem=xyz"],
+    ["upper-case key", "?gundem=DEVA"],
+    ["a label, not a key", `?gundem=${encodeURIComponent("Özgür Özel")}`],
+    ["padded key", "?gundem=deva%20"],
+    ["empty key", "?gundem="],
+    ["traversal", `?gundem=${encodeURIComponent("../x")}`],
+    ["Object.prototype name", "?gundem=__proto__"],
+    ["constructor", "?gundem=constructor"],
+    ["a control character", "?gundem=%00deva"],
+    ["a very long key", `?gundem=${"a".repeat(5000)}`],
+  ];
+
+  it.each(badKey)("400s 'Geçersiz gündem' for %s without touching a reader", async (_name, search) => {
+    const res = await call(search);
+    expect(res.status).toBe(400);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    expect(await res.json()).toEqual({ error: "Geçersiz gündem" });
+    expect(getEntityHubMock).not.toHaveBeenCalled();
+    expect(searchClustersMock).not.toHaveBeenCalled();
+    expect(getTopicClustersMock).not.toHaveBeenCalled();
+  });
+
+  const combos: Array<[string, string]> = [
+    ["gundem and q", "?gundem=deva&q=x"],
+    ["q and gundem", "?q=seçim&gundem=deva"],
+    ["gundem and konu", "?gundem=deva&konu=ekonomi"],
+    ["all three", "?q=seçim&konu=ekonomi&gundem=deva"],
+    ["gundem repeated", "?gundem=deva&gundem=aym"],
+    ["gundem repeated with the same key", "?gundem=deva&gundem=deva"],
+    ["gundem with an invalid q", "?gundem=deva&q=a"],
+  ];
+
+  it.each(combos)("400s 'Geçersiz istek' for %s without touching a reader", async (_name, search) => {
+    const res = await call(search);
+    expect(res.status).toBe(400);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ error: "Geçersiz istek" });
+    expect(getEntityHubMock).not.toHaveBeenCalled();
+    expect(searchClustersMock).not.toHaveBeenCalled();
+    expect(getTopicClustersMock).not.toHaveBeenCalled();
+  });
+
+  it("does not echo or log the rejected value", async () => {
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    const res = await call("?gundem=gizlideger");
+    expect(JSON.stringify(await res.json())).not.toContain("gizlideger");
+    const logged = spies
+      .flatMap((s) => s.mock.calls)
+      .map((args) => args.map(String).join(" "))
+      .join("\n");
+    expect(logged).not.toContain("gizlideger");
   });
 });
 

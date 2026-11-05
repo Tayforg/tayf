@@ -28,7 +28,14 @@ vi.mock("@/lib/sources/registry-query", () => ({
   getActiveSourceSlugs: vi.fn(async () => mockActiveSlugs),
 }));
 
-import { BIAS_LABELS, BLINDSPOT, SURPRISE, ZONE_META } from "@/lib/bias/config";
+import {
+  BIAS_LABELS,
+  BIAS_TO_ZONE,
+  BLINDSPOT,
+  SURPRISE,
+  ZONE_META,
+} from "@/lib/bias/config";
+import { WRITABLE_SOURCE_BIAS } from "@/lib/validation/source-input";
 import {
   BALANCE_BALANCED_MIN,
   BALANCE_LABELS,
@@ -158,8 +165,10 @@ describe("/metodoloji page", () => {
     expect(text).toContain(`≤ %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)}`);
     expect(text).toContain(`En az ${HEADLINE_MIN_ARTICLE_COUNT} kaynağı`);
 
-    for (const label of Object.values(BIAS_LABELS)) {
-      expect(text).toContain(label);
+    // Only the biases production can store are documented (h43-sources-1):
+    // the other five BiasCategory labels must NOT be on the page.
+    for (const bias of WRITABLE_SOURCE_BIAS) {
+      expect(text).toContain(BIAS_LABELS[bias]);
     }
     for (const zone of Object.values(ZONE_META)) {
       expect(text).toContain(zone.label);
@@ -815,5 +824,158 @@ describe("/metodoloji page: tagged-source counts follow the active registry", ()
     expect(pageSource).not.toContain("taggedSources");
     expect(pageSource).not.toContain("SOURCE_METADATA");
     expect(pageSource).toContain('from "@/lib/sources/registry-query"');
+  });
+});
+
+// h43-sources-1: the category table documents the five biases production can
+// store (the live CHECK sources_alignment_check, WRITABLE_SOURCE_BIAS), not the
+// ten the app can parse. The other five (Devlet Medyası, İslamcı/Muhafazakâr,
+// Uluslararası, Kürt Yanlısı, Milliyetçi) have no row in production, and the
+// old "Milliyetçi -> İktidar" note contradicted the live labels (odatv and
+// yenicag are Muhalefet, benguturk is Merkez). Widening the CHECK is a founder
+// decision (h26-integrity-1), so this page follows WRITABLE_SOURCE_BIAS and
+// never a literal.
+describe("/metodoloji page: category table follows WRITABLE_SOURCE_BIAS (h43-sources-1)", () => {
+  type Row = { key: string | null; props: { children: unknown[] } };
+
+  async function renderTree() {
+    const { default: MethodologyPage } = await import("./page");
+    return MethodologyPage();
+  }
+
+  function tableRows(tree: unknown): Row[] {
+    const tbody = findElement(tree, (el) => el.type === "tbody");
+    expect(tbody).not.toBeNull();
+    return (tbody?.props?.children ?? []) as Row[];
+  }
+
+  it("renders exactly one row per WRITABLE_SOURCE_BIAS key, keyed by it, in order", async () => {
+    const rows = tableRows(await renderTree());
+
+    // The shared constant is the source of the row count; pin 5 so a silent
+    // widening shows up here as a conscious edit, not a quiet page change.
+    expect(WRITABLE_SOURCE_BIAS).toHaveLength(5);
+    expect(rows).toHaveLength(WRITABLE_SOURCE_BIAS.length);
+    expect(rows.map((r) => r.key)).toEqual([...WRITABLE_SOURCE_BIAS]);
+  });
+
+  it("labels each row BIAS_LABELS[k] and zones it BIAS_TO_ZONE[k] (İktidar, İktidar, Bağımsız, Muhalefet, Muhalefet)", async () => {
+    const rows = tableRows(await renderTree());
+    const cells = rows.map((r) => r.props.children.map((c) => collectText(c).join("")));
+
+    expect(cells).toEqual(
+      WRITABLE_SOURCE_BIAS.map((k) => [BIAS_LABELS[k], ZONE_META[BIAS_TO_ZONE[k]].label]),
+    );
+    // And the literal copy the spec names, so the contract tables cannot drift
+    // together with the page unnoticed.
+    expect(cells).toEqual([
+      ["Hükümete Yakın", "İktidar"],
+      ["Hükümete Meyilli", "İktidar"],
+      ["Merkez", "Bağımsız"],
+      ["Muhalefete Meyilli", "Muhalefet"],
+      ["Muhalefet", "Muhalefet"],
+    ]);
+  });
+
+  it("keeps each row's contract dot colour", async () => {
+    const rows = tableRows(await renderTree());
+    const strings = collectStringProps(rows).join(" ");
+    for (const k of WRITABLE_SOURCE_BIAS) {
+      expect(strings).toContain(ZONE_META[BIAS_TO_ZONE[k]].dot);
+    }
+  });
+
+  it("reads '5 kategori → 3 bölge' in the section meta", async () => {
+    const tree = await renderTree();
+    const heading = findElement(
+      tree,
+      (el) => el.props?.id === "kaynaklar" && typeof el.props?.meta === "string",
+    );
+    expect(heading).not.toBeNull();
+    expect(heading?.props?.meta).toBe("5 kategori → 3 bölge");
+    expect(heading?.props?.title).toBe("Kaynaklar nasıl etiketleniyor");
+  });
+
+  it("says 5 yanlılık kategorisi in the exact copy and keeps the rest of the paragraph", async () => {
+    const text = collectText(await renderTree()).join("");
+
+    expect(text).toContain(
+      'Her kaynak, editoryal duruşuna göre 5 yanlılık kategorisinden birine atanır. Bu 5 kategori, gösterimde ve kör nokta/sürpriz hesaplamalarında 3 geniş "Medya DNA" bölgesine (İktidar, Bağımsız, Muhalefet) toplanır.',
+    );
+    expect(text).toContain(
+      "Kategoriler ve güvenilirlik notları Tayf ekibi tarafından, kaynağın yayın geçmişine bakılarak elle atanır; dış bir derecelendirme kuruluşunun verisi değildir. Bir etikete itiraz etmek için düzeltme formunu kullanın.",
+    );
+  });
+
+  it("never mentions the ten-category taxonomy or the five unstorable categories", async () => {
+    const tree = await renderTree();
+    const text = collectText(tree).join("");
+    const strings = collectStringProps(tree).join(" ");
+
+    for (const stale of [
+      "10 kategori",
+      "10 ayrıntılı",
+      "Devlet Medyası",
+      "Kürt Yanlısı",
+      "Milliyetçi",
+      "Uluslararası",
+      "İslamcı/Muhafazakâr",
+    ]) {
+      expect(text).not.toContain(stale);
+      expect(strings).not.toContain(stale);
+    }
+    // The deleted "Milliyetçi -> İktidar" note's own claim.
+    expect(text).not.toContain("Cumhur İttifakı");
+    expect(text).not.toMatch(/\bMHP\b/);
+    // The five labels of the unstorable categories, straight from the contract.
+    const storable = new Set<string>(WRITABLE_SOURCE_BIAS);
+    for (const [bias, label] of Object.entries(BIAS_LABELS)) {
+      if (storable.has(bias)) continue;
+      expect(text).not.toContain(label);
+    }
+  });
+
+  it("keeps the Toplayıcı/niş note and the #kaynaklar / #duzeltme anchors", async () => {
+    const tree = await renderTree();
+    const text = collectText(tree).join("");
+
+    expect(text).toContain(
+      "Toplayıcı (ör. Haberler.com, Onedio) ve niş (spor, finans, kurumsal) türündeki kaynaklar kümelerde listelenir ama yanlılık dağılımına, kör nokta ve sürpriz hesaplarına sayılmaz; hangi kaynağın hangi türde olduğu Kaynaklar sayfasında işaretlidir.",
+    );
+    const ids = collectIds(tree);
+    expect(ids).toContain("kaynaklar");
+    expect(ids).toContain("duzeltme");
+    const hrefs = collectHrefs(tree);
+    expect(hrefs).toContain("#kaynaklar");
+    expect(hrefs).toContain("#duzeltme");
+  });
+
+  // The guard: the page maps the IMPORTED constant. A literal key list (or the
+  // ten-key BIAS_ORDER) would let a future CHECK widening update the contract
+  // and leave this table behind, or the reverse.
+  describe("source guard", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(here, "page.tsx"), "utf8");
+    // Blank comments (offsets kept) so prose cannot satisfy or trip a pattern.
+    const source = raw
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p1: string) =>
+        p1 + " ".repeat(m.length - p1.length),
+      );
+
+    it("imports WRITABLE_SOURCE_BIAS from @/lib/validation/source-input and maps it", () => {
+      expect(source).toMatch(
+        /import\s*\{[^}]*\bWRITABLE_SOURCE_BIAS\b[^}]*\}\s*from\s*["']@\/lib\/validation\/source-input["']/,
+      );
+      expect(source).toContain("WRITABLE_SOURCE_BIAS.map(");
+    });
+
+    it("does not map the ten-key BIAS_ORDER or spell any bias key as a literal", () => {
+      expect(source).not.toContain("BIAS_ORDER");
+      for (const key of Object.keys(BIAS_LABELS)) {
+        expect(source).not.toContain(`"${key}"`);
+        expect(source).not.toContain(`'${key}'`);
+      }
+    });
   });
 });

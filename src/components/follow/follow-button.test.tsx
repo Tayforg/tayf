@@ -8,6 +8,7 @@ import { FollowButton, FollowButtonView } from "./follow-button";
 import { FOLLOWS_CHANGE_EVENT, FOLLOWS_KEY, MAX_FOLLOWS } from "@/lib/follows/follows";
 import { HomeFeed } from "@/app/page";
 import TopicHubPage from "@/app/konu/[slug]/page";
+import EntityHubPage from "@/app/gundem/[key]/page";
 import { SearchEcho } from "@/components/search/search-echo";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 
@@ -33,6 +34,11 @@ vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/clusters/topic-query")>();
   return { ...actual, getTopicClusters: () => Promise.resolve(null) };
 });
+// The hub read fails here: the follow button must still be offered (it follows
+// the entity, not the page's data).
+vi.mock("@/lib/entities/entity-hub-query", () => ({
+  getEntityHub: () => Promise.resolve(null),
+}));
 
 // ---------------------------------------------------------------------------
 // The vitest environment is "node" (no DOM), so the component is covered two
@@ -71,6 +77,15 @@ describe("FollowButton -- server render", () => {
     expect(markup).toContain('aria-label="Takip et: Ekonomi"');
   });
 
+  it("names a gündem follow after the entity's label, not the key", () => {
+    const markup = renderToStaticMarkup(<FollowButton kind="gundem" value="deva" />);
+    expect(markup).toContain("Takip et");
+    expect(markup).toContain('aria-label="Takip et: DEVA"');
+    expect(markup).toContain('aria-pressed="false"');
+    const ozel = renderToStaticMarkup(<FollowButton kind="gundem" value="ozgur-ozel" />);
+    expect(ozel).toContain('aria-label="Takip et: Özgür Özel"');
+  });
+
   it.each([
     ["q", "a"],
     ["q", ""],
@@ -80,6 +95,11 @@ describe("FollowButton -- server render", () => {
     ["konu", "politika"],
     ["konu", "../x"],
     ["konu", "Ekonomi"],
+    ["gundem", "xyz"],
+    ["gundem", "DEVA"],
+    ["gundem", "Özgür Özel"],
+    ["gundem", ""],
+    ["gundem", "__proto__"],
   ] as const)("renders nothing for an invalid %s value %j", (kind, value) => {
     expect(renderToStaticMarkup(<FollowButton kind={kind} value={value} />)).toBe("");
   });
@@ -353,6 +373,66 @@ describe("followsStore", () => {
     expect(store.read()).toHaveLength(1);
   });
 
+  it("toggle adds a gündem follow under its key and persists the entity, not its label", async () => {
+    const store = await loadStore();
+    expect(store.toggle("gundem", "deva")).toBe("added");
+    const saved = JSON.parse(h.storage.get(FOLLOWS_KEY)!) as unknown[];
+    expect(saved).toEqual([
+      {
+        kind: "gundem",
+        value: "deva",
+        addedAt: "2026-10-22T09:00:00.000Z",
+        seenAt: "2026-10-22T09:00:00.000Z",
+      },
+    ]);
+    expect(store.toggle("gundem", "deva")).toBe("removed");
+    expect(store.read()).toEqual([]);
+  });
+
+  it("toggle refuses an unknown gündem key without writing or notifying", async () => {
+    const store = await loadStore();
+    const onChange = vi.fn();
+    store.subscribe(onChange);
+    expect(store.toggle("gundem", "xyz")).toBe("invalid");
+    expect(store.toggle("gundem", "DEVA")).toBe("invalid");
+    expect(h.setItem).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("a keyword equal to a hub label is stored (and toggled off) as the hub follow", async () => {
+    const store = await loadStore();
+    expect(store.toggle("q", "DEVA")).toBe("added");
+    expect(JSON.parse(h.storage.get(FOLLOWS_KEY)!)).toMatchObject([
+      { kind: "gundem", value: "deva" },
+    ]);
+    // The search-box button for ?q=deva and the hub button are one follow.
+    expect(store.toggle("gundem", "deva")).toBe("removed");
+    expect(store.read()).toEqual([]);
+    store.toggle("gundem", "deva");
+    expect(store.toggle("q", "deva")).toBe("removed");
+    expect(store.read()).toEqual([]);
+  });
+
+  it("an old hub-button keyword follow reads back as the hub follow, without a write", async () => {
+    h.storage.set(
+      FOLLOWS_KEY,
+      JSON.stringify([
+        { kind: "q", value: "deva", addedAt: "2026-10-01T00:00:00.000Z", seenAt: "2026-10-02T00:00:00.000Z" },
+        { kind: "q", value: "deva partisi", addedAt: null, seenAt: null },
+      ]),
+    );
+    const store = await loadStore();
+    expect(store.read().map((f) => `${f.kind}:${f.value}`)).toEqual([
+      "gundem:deva",
+      "q:deva partisi",
+    ]);
+    expect(store.read()[0]).toMatchObject({
+      addedAt: "2026-10-01T00:00:00.000Z",
+      seenAt: "2026-10-02T00:00:00.000Z",
+    });
+    expect(h.setItem).not.toHaveBeenCalled();
+  });
+
   it("toggle on an existing follow removes it", async () => {
     const store = await loadStore();
     store.toggle("q", "Seçim");
@@ -592,6 +672,13 @@ describe("entry points", () => {
       searchParams: Promise.resolve({}),
     });
     expect(followButtonProps(tree)).toEqual([{ kind: "konu", value: "ekonomi" }]);
+  });
+
+  it("/gundem/[key] offers a hub follow (kind gundem, value = the entity key), not the bare label as a keyword", async () => {
+    const tree = await EntityHubPage({ params: Promise.resolve({ key: "deva" }) });
+    expect(followButtonProps(tree)).toEqual([{ kind: "gundem", value: "deva" }]);
+    const aym = await EntityHubPage({ params: Promise.resolve({ key: "aym" }) });
+    expect(followButtonProps(aym)).toEqual([{ kind: "gundem", value: "aym" }]);
   });
 
   it("/saved links to /takip next to Haber diyetim", () => {

@@ -1,7 +1,9 @@
-// "Takip ettiklerim" -- client-side follows of a keyword or a /konu slug.
+// "Takip ettiklerim" -- client-side follows of a keyword, a /konu slug or a
+// /gundem entity hub.
 //
-// Pure module: NO React, NO next/*, NO server imports (the one allowed import,
-// @/lib/time, is itself dependency-free). It is bundled to the client
+// Pure module: NO React, NO next/*, NO server imports (the two allowed imports,
+// @/lib/time and the hub vocabulary @/lib/trends/rising-entities, are plain
+// data / helpers with no imports of their own). It is bundled to the client
 // (use-follows.ts, follow-button.tsx, follow-feed.tsx) and unit-tested in the
 // node environment. Follows live in localStorage only (key below); the server
 // never sees them, it just answers GET /api/takip for one follow at a time.
@@ -9,6 +11,7 @@
 // anything (an older build's shape, another script's write, hand edits).
 
 import { formatTurkishTimeAgo } from "@/lib/time";
+import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 export const FOLLOWS_KEY = "tayf:follows";
 export const FOLLOWS_CHANGE_EVENT = "tayf:follows-change";
@@ -43,7 +46,15 @@ export const FOLLOW_TOPIC_LABELS: Record<FollowTopicSlug, string> = {
   genel: "Genel",
 };
 
-export type FollowKind = "q" | "konu";
+/**
+ * q      a free-text archive search (the stemmed /?q= path)
+ * konu   a /konu/<slug> topic
+ * gundem a /gundem/<key> entity hub. The value is the RISING_ENTITIES key, and
+ *        the server answers it through the hub's own matcher (aliases,
+ *        excludes, word boundaries), NOT through the keyword search -- which
+ *        lists "devam" under DEVA and Polish courts under Anayasa Mahkemesi.
+ */
+export type FollowKind = "q" | "konu" | "gundem";
 
 export type Follow = {
   kind: FollowKind;
@@ -57,6 +68,13 @@ export type Follow = {
 export type AddFollowResult = "added" | "exists" | "full" | "invalid";
 
 const TOPIC_SLUG_SET: ReadonlySet<string> = new Set(FOLLOW_TOPIC_SLUGS);
+
+// key -> label of every hub. A Map (not an object) so "__proto__" and
+// "constructor" are plain misses; the only way a value gets in is by being a
+// curated RISING_ENTITIES key.
+const GUNDEM_LABELS: ReadonlyMap<string, string> = new Map(
+  RISING_ENTITIES.map((e) => [e.key, e.label]),
+);
 
 // Control characters (Cc) cannot be typed into a search box and have no place
 // in a stored keyword; lone surrogates (Cs) would make encodeURIComponent
@@ -81,11 +99,74 @@ export function isFollowTopicSlug(v: unknown): v is FollowTopicSlug {
   return typeof v === "string" && TOPIC_SLUG_SET.has(v);
 }
 
+/** True only for an exact, curated RISING_ENTITIES key (the /gundem/<key> slug). */
+export function isFollowGundemKey(v: unknown): v is string {
+  return typeof v === "string" && GUNDEM_LABELS.has(v);
+}
+
+// from -> to, except that a `from` produced by two entries maps to nothing
+// (ambiguous), so canonicalFollow never guesses between two hubs. No two hubs
+// collide today; follows.test.ts pins that.
+function uniqueLookup(
+  pairs: Iterable<readonly [string, string]>,
+): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const [from, to] of pairs) {
+    if (ambiguous.has(from)) continue;
+    if (map.has(from)) {
+      map.delete(from);
+      ambiguous.add(from);
+      continue;
+    }
+    map.set(from, to);
+  }
+  return map;
+}
+
+// Hub key by its label in keyword form ("deva", "merkez bankası"). A reader who
+// tapped "Takip et" on /gundem/deva before the hub follow existed holds
+// {kind:"q", value:"deva"}: the old button stored normalizeKeyword(label). The
+// same lookup serves a keyword typed into the search box, because both go
+// through normalizeKeyword first (canonicalFollow).
+const GUNDEM_KEY_BY_KEYWORD = uniqueLookup(
+  RISING_ENTITIES.flatMap((e) => {
+    const keyword = normalizeKeyword(e.label);
+    return keyword === null ? [] : [[keyword, e.key] as const];
+  }),
+);
+
 /** The stored form of `value` for `kind`, or null when it is not followable. */
 export function normalizeFollowValue(kind: FollowKind, value: unknown): string | null {
   if (kind === "q") return normalizeKeyword(value);
   if (kind === "konu") return isFollowTopicSlug(value) ? value : null;
+  if (kind === "gundem") return isFollowGundemKey(value) ? value : null;
   return null;
+}
+
+/**
+ * The stored identity of a follow: `value` normalised for `kind`, and a keyword
+ * that normalises to a hub's label becomes that hub ({kind:"q", value:"  DEVA "}
+ * -> {kind:"gundem", value:"deva"}). Anything else keeps its kind. null when the
+ * input is not followable. ONE rule for every path: add / has / toggle use it
+ * on what the reader types, and parseStoredFollows (coerceEntry) uses it on what
+ * is already in storage, so parse is idempotent (parse(serialize(parse(x))) ==
+ * parse(x)), a keyword stored as "Deva" reads back as the hub follow the button
+ * looks up, and re-adding it reports "exists" instead of storing a duplicate.
+ * Deliberately exact beyond normalisation: "deva partisi", "chp'li" and "devam"
+ * stay keywords, because guessing would rewrite a follow the reader chose.
+ */
+export function canonicalFollow(
+  kind: FollowKind,
+  value: unknown,
+): { kind: FollowKind; value: string } | null {
+  const normalized = normalizeFollowValue(kind, value);
+  if (normalized === null) return null;
+  if (kind === "q") {
+    const key = GUNDEM_KEY_BY_KEYWORD.get(normalized);
+    if (key !== undefined) return { kind: "gundem", value: key };
+  }
+  return { kind, value: normalized };
 }
 
 export function followKey(f: Pick<Follow, "kind" | "value">): string {
@@ -100,7 +181,7 @@ export function parseFollowKey(
   if (colon < 0) return null;
   const kind = key.slice(0, colon);
   const value = key.slice(colon + 1);
-  if (kind !== "q" && kind !== "konu") return null;
+  if (kind !== "q" && kind !== "konu" && kind !== "gundem") return null;
   return normalizeFollowValue(kind, value) === value ? { kind, value } : null;
 }
 
@@ -109,9 +190,9 @@ export function hasFollow(
   kind: FollowKind,
   value: unknown,
 ): boolean {
-  const normalized = normalizeFollowValue(kind, value);
-  if (normalized === null) return false;
-  const key = followKey({ kind, value: normalized });
+  const canonical = canonicalFollow(kind, value);
+  if (canonical === null) return false;
+  const key = followKey(canonical);
   return list.some((f) => followKey(f) === key);
 }
 
@@ -123,16 +204,20 @@ function cleanStamp(v: unknown): string | null {
 function coerceEntry(entry: unknown): Follow | null {
   // Legacy shape: a bare string was a keyword.
   if (typeof entry === "string") {
-    const value = normalizeKeyword(entry);
-    return value === null ? null : { kind: "q", value, addedAt: null, seenAt: null };
+    const c = canonicalFollow("q", entry);
+    return c === null ? null : { ...c, addedAt: null, seenAt: null };
   }
   if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
   const o = entry as Record<string, unknown>;
   const kind = o.kind;
-  if (kind !== "q" && kind !== "konu") return null;
-  const value = normalizeFollowValue(kind, o.value);
-  if (value === null) return null;
-  return { kind, value, addedAt: cleanStamp(o.addedAt), seenAt: cleanStamp(o.seenAt) };
+  if (kind !== "q" && kind !== "konu" && kind !== "gundem") return null;
+  const addedAt = cleanStamp(o.addedAt);
+  const seenAt = cleanStamp(o.seenAt);
+  // Same rule as add / has / toggle: a keyword that is a hub's label becomes
+  // the hub follow, stamps kept.
+  const c = canonicalFollow(kind, o.value);
+  if (c === null) return null;
+  return { ...c, addedAt, seenAt };
 }
 
 /** Never throws. Invalid entries are dropped, duplicates collapse (first wins). */
@@ -182,9 +267,9 @@ export function addFollow(
   input: { kind: FollowKind; value: string },
   nowIso: string,
 ): { list: readonly Follow[]; result: AddFollowResult } {
-  const value = normalizeFollowValue(input.kind, input.value);
-  if (value === null) return { list, result: "invalid" };
-  const next: Follow = { kind: input.kind, value, addedAt: nowIso, seenAt: nowIso };
+  const canonical = canonicalFollow(input.kind, input.value);
+  if (canonical === null) return { list, result: "invalid" };
+  const next: Follow = { ...canonical, addedAt: nowIso, seenAt: nowIso };
   const key = followKey(next);
   if (list.some((f) => followKey(f) === key)) return { list, result: "exists" };
   if (list.length >= MAX_FOLLOWS) return { list, result: "full" };
@@ -227,18 +312,22 @@ export function countNew(
 }
 
 export function followHref(f: Pick<Follow, "kind" | "value">): string {
-  return f.kind === "q" ? `/?q=${encodeURIComponent(f.value)}` : `/konu/${f.value}`;
+  if (f.kind === "q") return `/?q=${encodeURIComponent(f.value)}`;
+  if (f.kind === "gundem") return `/gundem/${encodeURIComponent(f.value)}`;
+  return `/konu/${f.value}`;
 }
 
 export function followLabel(f: Pick<Follow, "kind" | "value">): string {
   if (f.kind === "q") return `“${f.value}”`;
+  if (f.kind === "gundem") return GUNDEM_LABELS.get(f.value) ?? f.value;
   return isFollowTopicSlug(f.value) ? FOLLOW_TOPIC_LABELS[f.value] : f.value;
 }
 
 /**
  * Empty-state copy for a follow whose read returned nothing. A topic read is
- * the last 7 days; a keyword search has NO date window (it ranks the whole
- * archive by corroboration), so only the topic copy may say "son dönemde".
+ * the last 7 days and a hub read the last 14; a keyword search has NO date
+ * window (it ranks the whole archive by corroboration), so only the topic and
+ * hub copy may say "son dönemde".
  */
 export function followEmptyText(kind: FollowKind): string {
   return kind === "q"
@@ -274,9 +363,9 @@ export function focusTargetAfterRemove(
 }
 
 export function followApiPath(f: Pick<Follow, "kind" | "value">): string {
-  return f.kind === "q"
-    ? `/api/takip?q=${encodeURIComponent(f.value)}`
-    : `/api/takip?konu=${f.value}`;
+  if (f.kind === "q") return `/api/takip?q=${encodeURIComponent(f.value)}`;
+  if (f.kind === "gundem") return `/api/takip?gundem=${encodeURIComponent(f.value)}`;
+  return `/api/takip?konu=${f.value}`;
 }
 
 // ---------------------------------------------------------------------------
