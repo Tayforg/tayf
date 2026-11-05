@@ -92,15 +92,103 @@ shadow floor: pairs scoring 0.3-0.59 are written but never shown
 (`is_published = false`), so they're auditable and promotable by an
 operator without ever being auto-published on weak signal.
 
+## Post-launch precision audit (2026-11-05) -- `keyword-v2`
+
+The Step 0 calibration above judged only 10 pairs at the 0.6 cut. Production
+now holds 181 `cluster_fact_checks` rows (11 published, 170 shadow; all
+`method = 'keyword-v1'`, `decided_by = 'auto'`), and **4 of the 11 published
+links were wrong** (measured precision 7/11 = 0.636, not 0.90):
+
+| Fact-check (Teyit) | Wrong cluster(s) | matched_terms | score |
+|---|---|---|---|
+| "Hakan Fidan'ın Almanca konuştuğu video gerçek mi?" | `cc57f5f6`, `26e48fc5`, `9a0d12b4` (three unrelated Fidan stories) | hakan, fidan, konus | 0.667 |
+| "Cemil Tugay'ın katıldığı temizlik çalışmalarını gösteren video güncel mi?" | `2df57b90` (an unrelated CHP story naming Tugay) | cemil, tugay, katil, goste | 0.625 |
+
+The other 7 published links (NASA / Deniz Burnham, Panama x2, okul saldırısı,
+Fransa öğrenci eylemleri, Rusya/Ukrayna, Doğu Akdeniz) are on topic.
+
+**Root cause.** `matched.length >= 3` treated a person's first and last name
+as two independent pieces of evidence and a generic claim verb ("konuş",
+"katıl", "göster") as a third. Name + name + verb cleared
+`matched >= 3`, `entityMatched >= 1` and `score >= 0.6` for any story that
+merely named the same person.
+
+**Fix (`MATCH_METHOD = "keyword-v2"`, no migration, no LLM).**
+
+- `extractFactCheckTerms` also returns `nameSpans`: the stems of person-name
+  spans, i.e. runs of 2+ adjacent capitalised words (a title may open with
+  one). A run ends at, and includes, the first word with an apostrophe suffix
+  ("Fidan'ın") or one ending in clause punctuation, and otherwise stops before
+  the next non-capitalised word. A run must carry at least 2 stems (a leading
+  "Video" is not part of a name).
+- Spans are only trusted in sentence-case titles (Teyit). Title Case titles
+  (Doğruluk Payı) yield none, because adjacency means nothing when every word
+  is capitalised. The test is: lowercase-initial content words at least as
+  many as capitalised ones, **not counting the words inside the candidate
+  spans themselves**, and a title with no lowercase content word at all (and
+  2+ capitalised ones) is Title Case outright. Two real titles motivate the
+  refinements: "Hakan Fidan'ın **Almanca** konuştuğu video" has a capitalised
+  language name next to the name, and "Bir Okul Saldırısı Başlamadan
+  Önlenebilir mi?" is one run that swallows the whole title.
+- `GENERIC_CLAIM_VERB_STEMS` (`konus`, `katil`, `goste`, `acikl`, `soyle`,
+  `yapti`, `payla`) still count in `matched` and in the score weight but never
+  toward the term minimum.
+- `scoreCluster` reports `distinctTerms` = (name spans that claim a matched
+  stem no earlier span claimed) + (matched stems outside any span that are not
+  generic claim verbs). Overlapping spans of one person ("Bakan Hakan Fidan ve
+  Hakan Fidan'ın ...", or "Ali Veli, Veli Ali, Ali Veli Can") share stems, so
+  the second and third add nothing and the person counts once. **Publish**
+  needs `distinctTerms >= MIN_MATCHED_TERMS (3)`, `matched.length >=
+  MIN_MATCHED_TERMS` (the keyword-v1 gate, kept so v2 can only publish what v1
+  would have), an entity match and `score >= 0.6`. The **shadow** rule is
+  unchanged (2 matched terms, `score >= 0.3`).
+- **Known recall cost.** A span is any run of 2+ capitalised words, so a role
+  before the name ("CHP Genel Başkanı Özgür Özel") and an adjacent place with a
+  case suffix ("Özel Silivri'de", "Erdoğan Yeni Delhi'de") join the person's
+  span and count once. An on-topic pair whose evidence is role/name/place plus
+  one other term therefore lands in shadow, where an operator can promote it,
+  instead of publishing. Example: "Cumhurbaşkanı Erdoğan Yeni Delhi'de G20
+  zirvesine katıldı mı?" against the headline "Erdoğan Yeni Delhi'de G20" has 4
+  matched stems and a 0.727 score (keyword-v1 would publish it) but 2 distinct
+  terms (the span and `g20`), so it is shadow; `match.test.ts` pins this. A
+  wrong box is worse than none, so the heuristic stays as it is. The candidate
+  refinement is a locative-suffix split (close the run before a -de/-da/-te/-ta
+  word), but it needs a replay of all stored pairs first.
+
+**Replay** (read-only; every stored pair re-scored from the live cluster
+headline and member titles). All 11 published rows reproduce their stored
+`matched_terms` and `score` exactly (170 shadow rows: 162 reproduce, 8 have
+drifted because their clusters changed since scoring). Result for all 181
+pairs, old matcher and new matcher on the same data:
+
+- exactly the 4 wrong published pairs above flip to shadow (`distinctTerms = 1`);
+- the 7 on-topic published pairs stay `publish` (`distinctTerms` 3-4);
+- 0 shadow-to-publish flips, and no pair changes score or matched terms.
+
+`distinctTerms <= matched.length` always, so keyword-v2 can only publish less
+than keyword-v1, never more. It holds by construction: a span counts only if it
+claims a matched stem no earlier span claimed, so overlapping spans of one
+person cannot count twice, and the publish gate also keeps v1's
+`matched.length >= 3`. Tests: `src/lib/fact-checks/match.test.ts`
+rebuilds all 11 published pairs from their real headline and member titles.
+
+**This does not repair rows already live.** The cron only re-scores fact-checks
+from the last `RECENT_WINDOW_DAYS = 3` days and only ever promotes shadow rows,
+never demotes an auto-published one, so the four keyword-v1 links above stay
+on the site until an operator unpublishes them with the SQL under *Ops notes*.
+Rows written after this change carry `method = 'keyword-v2'`; audit the old
+ones with `select * from cluster_fact_checks where method = 'keyword-v1' and
+is_published;`.
+
 ## Volume expectation
 
 Fact-checkers mostly debunk viral social-media claims, not the
 professional-outlet coverage this corpus is built from -- prod `sources`
 has 0 rows matching teyit/doğruluk/malumat, confirming the two universes
 rarely overlap. Match volume is expected to stay small; the gate is
-deliberately conservative (`MIN_MATCHED_TERMS = 3`, an entity match
-required, `MAX_CLUSTERS_PER_FACT_CHECK = 3`) -- a wrong "doğrulama" box is
-worse than none.
+deliberately conservative (`MIN_MATCHED_TERMS = 3` distinct terms, an entity
+match required, `MAX_CLUSTERS_PER_FACT_CHECK = 3`) -- a wrong "doğrulama" box
+is worse than none.
 
 ## Ops notes
 

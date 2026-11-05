@@ -277,6 +277,47 @@ export function prioritizeIds<T extends { id: string }>(
   return [...head, ...tail];
 }
 
+/**
+ * Stable reorder of `rows` for a fresh isolate: the sources whose
+ * `fetch_last_at` is null (never fetched, or unparseable) or older than
+ * `staleMs` go first, oldest first (a null counts as the oldest), then the rest
+ * in their original order. Ties among the stale keep their input order.
+ *
+ * Why: a feed the parse or isolate budget refuses writes no fetch state, so the
+ * age of `fetch_last_at` is the only deferral signal that outlives an isolate
+ * (`parseDeferredIds` is module scope and is lost when the isolate recycles).
+ * Put in front, the first stale feed meets a fresh isolate's `used === 0`
+ * admission instead of waiting for the rotation to place it early. The default
+ * is three cycle periods: a healthy feed is fetched, 200 or 304, every cycle, so
+ * 9 minutes without a write means it was skipped or deferred. A future timestamp
+ * (clock skew) is fresh. Returns a new array; the rows are the same objects.
+ * Compose it BEFORE `prioritizeIds`, so a deferral remembered in memory still
+ * goes first within an isolate.
+ */
+export function prioritizeStale<T extends { id: string; fetch_last_at?: string | null }>(
+  rows: readonly T[],
+  nowMs: number,
+  staleMs: number = 3 * CYCLE_PERIOD_MS,
+): T[] {
+  const stale: Array<{ row: T; at: number }> = [];
+  const fresh: T[] = [];
+  for (const row of rows) {
+    const raw = row.fetch_last_at;
+    const parsed = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+    if (Number.isNaN(parsed)) {
+      stale.push({ row, at: Number.NEGATIVE_INFINITY });
+    } else if (nowMs - parsed > staleMs) {
+      stale.push({ row, at: parsed });
+    } else {
+      fresh.push(row);
+    }
+  }
+  // Array.prototype.sort is stable (ES2019): equal ages keep their input order.
+  // The comparison avoids -Infinity - -Infinity (NaN).
+  stale.sort((a, b) => (a.at === b.at ? 0 : a.at < b.at ? -1 : 1));
+  return [...stale.map((s) => s.row), ...fresh];
+}
+
 // ---------------------------------------------------------------------------
 // Isolate item budget (hunt-11, A-ingest-cpu)
 // ---------------------------------------------------------------------------
@@ -321,13 +362,49 @@ export interface IsolateItemState {
 export const isolateItems: IsolateItemState = { used: 0, cycles: 0 };
 
 /**
+ * Headroom over a feed's last known item count: the estimate may be at most
+ * this much above what the feed held when it was last parsed (a feed grows a
+ * little between polls; `settle` replaces the booking with the real count).
+ */
+export const KNOWN_ITEMS_HEADROOM = 1.25;
+
+/**
+ * The largest ratio of the size estimate to the capped known count that is still
+ * read as "the same feed with fatter items" (BHA: 2,833 by size against a cap of
+ * 1,250, a ratio of 2.27) rather than a feed that changed shape. Past it the
+ * stored count is not believed and the size-only estimate stands, because the
+ * body size is third-party input to the CPU guard and a stale count must not
+ * shrink it (estimateItems(4_000_000, 12) is 2,666, not 15).
+ */
+export const KNOWN_ITEMS_MAX_SIZE_RATIO = 4;
+
+/**
  * Items a feed body of `bytes` bytes is assumed to hold: `max(1, floor(bytes /
  * 1500))`. Never below 1, so even an empty-looking body books something; a
  * non-finite or negative size counts as 1.
+ *
+ * `knownItems` is the feed's last parsed item count (`sources.fetch_items_count`,
+ * migration 119). When it is a positive integer the size estimate is capped at
+ * `cap = ceil(knownItems * 1.25)`: a feed whose items are far bigger than 1.5 kB
+ * (BHA: 4.25 MB for 1000 items, 4.2 kB each) would otherwise book 2,833 items
+ * for a parse that costs 1,000, and `fits()` would refuse it on every isolate
+ * that already holds more than 2,167 items (h36-pipeline-1). The cap is applied
+ * only while the size estimate is at most `cap * KNOWN_ITEMS_MAX_SIZE_RATIO` (4):
+ * a body far larger than the known count can explain is a feed that changed
+ * shape, or one whose stored count is stale, and keeps the size-only estimate.
+ * Anything else (null, undefined, 0, a fraction, NaN) also leaves the size-only
+ * estimate. The cap only ever lowers an estimate, never raises it.
  */
-export function estimateItems(bytes: number): number {
+export function estimateItems(bytes: number, knownItems?: number | null): number {
   if (!Number.isFinite(bytes) || bytes <= 0) return 1;
-  return Math.max(1, Math.floor(bytes / ESTIMATED_BYTES_PER_ITEM));
+  const bySize = Math.max(1, Math.floor(bytes / ESTIMATED_BYTES_PER_ITEM));
+  if (typeof knownItems === "number" && Number.isInteger(knownItems) && knownItems > 0) {
+    const cap = Math.ceil(knownItems * KNOWN_ITEMS_HEADROOM);
+    if (bySize <= cap * KNOWN_ITEMS_MAX_SIZE_RATIO) {
+      return Math.max(1, Math.min(bySize, cap));
+    }
+  }
+  return bySize;
 }
 
 export interface ItemBudget {

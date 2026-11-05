@@ -338,7 +338,7 @@ describe("GET /api/cron/fact-checks", () => {
       const row = rows.find((r) => r.cluster_id === "cluster-1");
       expect(row).toBeDefined();
       expect(typeof row!.is_published).toBe("boolean");
-      expect(row!.method).toBe("keyword-v1");
+      expect(row!.method).toBe("keyword-v2");
     });
 
     it("promotes an existing auto shadow row (decided_by=auto, is_published=false) when now publish", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CYCLE_PERIOD_MS,
   ISOLATE_ITEM_BUDGET,
+  KNOWN_ITEMS_MAX_SIZE_RATIO,
   createItemBudget,
   createParseBudget,
   estimateItems,
@@ -9,6 +10,7 @@ import {
   interleaveBySource,
   isolateItems,
   prioritizeIds,
+  prioritizeStale,
   rotateForCycle,
   upsertWithBisect,
 } from "../../supabase/functions/ingest/order.ts";
@@ -462,6 +464,72 @@ describe("estimateItems", () => {
     expect(estimateItems(Number.NaN)).toBe(1);
     expect(estimateItems(Number.POSITIVE_INFINITY)).toBe(1);
   });
+
+  // h36-pipeline-1: BHA's body is 4.25 MB for 1000 items (4.2 kB an item), so the
+  // size-only estimate books 2,833 items for a feed that costs 1,000.
+  describe("with the feed's last known item count", () => {
+    it("is unchanged without a usable count: size alone still gives 2,833 for BHA's 4.25 MB", () => {
+      expect(estimateItems(4_250_000)).toBe(2833);
+      expect(estimateItems(4_250_000, null)).toBe(2833);
+      expect(estimateItems(4_250_000, undefined)).toBe(2833);
+    });
+
+    it("caps the size estimate at 125% of the known count (ceil): 1,250 for BHA", () => {
+      expect(estimateItems(4_250_000, 1000)).toBe(1250);
+    });
+
+    // secdb-1: the cap is only trusted while the body is plausibly the same feed
+    // with fatter items. A body more than KNOWN_ITEMS_MAX_SIZE_RATIO (4) times
+    // the capped count means the feed changed shape (or serves a huge body that
+    // its stored count no longer describes); a stale count must not shrink that
+    // estimate, because the size is third-party input to the CPU guard.
+    it("returns to the size-only estimate when the body is far larger than the known count explains", () => {
+      expect(estimateItems(4_250_000, 3)).toBe(2833);
+      expect(estimateItems(4_250_000, 1)).toBe(2833);
+      expect(estimateItems(4_000_000, 12)).toBe(2666);
+    });
+
+    it("the ratio boundary: size 4 x the capped count is still capped, one item above is not", () => {
+      expect(KNOWN_ITEMS_MAX_SIZE_RATIO).toBe(4);
+      // by size 500 = 4 x ceil(100 * 1.25) = 4 x 125: capped to 125.
+      expect(estimateItems(750_000, 100)).toBe(125);
+      // by size 501 > 4 x 125: the size-only estimate stands.
+      expect(estimateItems(751_500, 100)).toBe(501);
+    });
+
+    it("a stale small count no longer lets a large body into an almost-full isolate", () => {
+      const budget = createItemBudget(5000, { used: 4000, cycles: 1 });
+      // was true when the 12-item count capped the estimate at 15
+      expect(budget.fits(estimateItems(4_000_000, 12))).toBe(false);
+    });
+
+    it("never goes above the size estimate: a smaller body keeps its own estimate", () => {
+      expect(estimateItems(300_000, 1000)).toBe(200);
+      expect(estimateItems(45 * 1500, 1000)).toBe(45);
+      expect(estimateItems(3000, 1000)).toBe(2);
+    });
+
+    it("ignores a count that is not a positive integer (0, negative, fractional, NaN, Infinity)", () => {
+      for (const known of [0, -4, 0.5, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(estimateItems(4_250_000, known), String(known)).toBe(2833);
+      }
+    });
+
+    it("still returns at least 1, and 1 for a bad size, whatever the count", () => {
+      expect(estimateItems(0, 1000)).toBe(1);
+      expect(estimateItems(100, 1000)).toBe(1);
+      expect(estimateItems(-5, 1000)).toBe(1);
+      expect(estimateItems(Number.NaN, 1000)).toBe(1);
+      expect(estimateItems(Number.POSITIVE_INFINITY, 1000)).toBe(1);
+    });
+
+    it("lets BHA in on an isolate that already holds 3,000 items, which the size-only estimate refuses", () => {
+      const budget = createItemBudget(5000, { used: 3000, cycles: 1 });
+      expect(budget.fits(estimateItems(4_250_000, 1000))).toBe(true);
+      // documents the bug: 3000 + 2833 > 5000
+      expect(budget.fits(estimateItems(4_250_000))).toBe(false);
+    });
+  });
 });
 
 describe("createItemBudget", () => {
@@ -564,5 +632,127 @@ describe("isolate item budget defaults", () => {
 
   it("starts with an empty module-scope state", () => {
     expect(isolateItems).toEqual({ used: 0, cycles: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h36-pipeline-1: a feed the isolate budget refuses writes no fetch state, so the
+// parse-deferral memory (parseDeferredIds, module scope) is lost when the isolate
+// recycles. The age of fetch_last_at is the persisted signal.
+// ---------------------------------------------------------------------------
+
+describe("prioritizeStale", () => {
+  const NOW = Date.parse("2026-11-05T08:00:00.000Z");
+  const MIN = 60_000;
+  const ago = (minutes: number) => new Date(NOW - minutes * MIN).toISOString();
+  type Src = { id: string; fetch_last_at?: string | null };
+
+  it("moves a stale feed to the front and keeps the others in their order", () => {
+    const rows: Src[] = [
+      { id: "a", fetch_last_at: ago(1) },
+      { id: "bha", fetch_last_at: ago(160) },
+      { id: "c", fetch_last_at: ago(2) },
+    ];
+    expect(prioritizeStale(rows, NOW).map((r) => r.id)).toEqual(["bha", "a", "c"]);
+  });
+
+  it("treats a null, undefined or unparseable fetch_last_at as stale", () => {
+    const rows: Src[] = [
+      { id: "fresh", fetch_last_at: ago(1) },
+      { id: "null", fetch_last_at: null },
+      { id: "undef" },
+      { id: "junk", fetch_last_at: "not a date" },
+    ];
+    expect(prioritizeStale(rows, NOW).map((r) => r.id)).toEqual(["null", "undef", "junk", "fresh"]);
+  });
+
+  it("orders the stale feeds oldest first, never-fetched first of all, ties in input order", () => {
+    const rows: Src[] = [
+      { id: "fresh", fetch_last_at: ago(0) },
+      { id: "s30", fetch_last_at: ago(30) },
+      { id: "s300", fetch_last_at: ago(300) },
+      { id: "never", fetch_last_at: null },
+      { id: "s30b", fetch_last_at: ago(30) },
+      { id: "s100", fetch_last_at: ago(100) },
+    ];
+    expect(prioritizeStale(rows, NOW).map((r) => r.id)).toEqual(["never", "s300", "s100", "s30", "s30b", "fresh"]);
+  });
+
+  it("the default threshold is three cycle periods (9 minutes): older is stale, exactly at or inside is not", () => {
+    const rows: Src[] = [
+      { id: "inside", fetch_last_at: new Date(NOW - 3 * CYCLE_PERIOD_MS + 1).toISOString() },
+      { id: "edge", fetch_last_at: new Date(NOW - 3 * CYCLE_PERIOD_MS).toISOString() },
+      { id: "over", fetch_last_at: new Date(NOW - 3 * CYCLE_PERIOD_MS - 1).toISOString() },
+    ];
+    expect(prioritizeStale(rows, NOW).map((r) => r.id)).toEqual(["over", "inside", "edge"]);
+  });
+
+  it("takes the threshold as a parameter", () => {
+    const rows: Src[] = [
+      { id: "a", fetch_last_at: ago(5) },
+      { id: "b", fetch_last_at: ago(20) },
+    ];
+    expect(prioritizeStale(rows, NOW, 10 * MIN).map((r) => r.id)).toEqual(["b", "a"]);
+    expect(prioritizeStale(rows, NOW, 30 * MIN).map((r) => r.id)).toEqual(["a", "b"]);
+  });
+
+  it("a fetch_last_at in the future (clock skew) is fresh, not stale", () => {
+    const rows: Src[] = [
+      { id: "a", fetch_last_at: ago(1) },
+      { id: "future", fetch_last_at: new Date(NOW + 5 * MIN).toISOString() },
+      { id: "old", fetch_last_at: ago(60) },
+    ];
+    expect(prioritizeStale(rows, NOW).map((r) => r.id)).toEqual(["old", "a", "future"]);
+  });
+
+  it("returns a new array, keeps extra fields and the same objects, and handles empty and all-fresh input", () => {
+    expect(prioritizeStale([], NOW)).toEqual([]);
+    const fresh: Array<Src & { slug: string }> = [
+      { id: "a", slug: "a", fetch_last_at: ago(1) },
+      { id: "b", slug: "b", fetch_last_at: ago(2) },
+    ];
+    const out = prioritizeStale(fresh, NOW);
+    expect(out).toEqual(fresh);
+    expect(out).not.toBe(fresh);
+    expect(out[0]).toBe(fresh[0]);
+    const input: Src[] = [
+      { id: "x", fetch_last_at: ago(1) },
+      { id: "y", fetch_last_at: null },
+    ];
+    const snapshot = JSON.stringify(input);
+    prioritizeStale(input, NOW);
+    expect(JSON.stringify(input)).toBe(snapshot);
+  });
+
+  it("composes with prioritizeIds: an in-memory deferral still wins within an isolate", () => {
+    const rows: Src[] = [
+      { id: "a", fetch_last_at: ago(1) },
+      { id: "deferred", fetch_last_at: ago(2) },
+      { id: "bha", fetch_last_at: ago(160) },
+    ];
+    const order = prioritizeIds(prioritizeStale(rows, NOW), ["deferred"]);
+    expect(order.map((r) => r.id)).toEqual(["deferred", "bha", "a"]);
+  });
+
+  it("a fresh isolate (nothing booked yet) admits BHA after the reorder, and refuses it before", () => {
+    // [x est 2200, y est 1500, bha est 2833]: 2200 + 1500 = 3700, so BHA needs 3700 + 2833 <= 5000, which fails.
+    const rows: Array<Src & { est: number }> = [
+      { id: "x", est: 2200, fetch_last_at: ago(1) },
+      { id: "y", est: 1500, fetch_last_at: ago(2) },
+      { id: "bha", est: 2833, fetch_last_at: ago(160) },
+    ];
+    const admitted = (order: Array<{ id: string; est: number }>): string[] => {
+      const budget = createItemBudget(5000, { used: 0, cycles: 0 });
+      const out: string[] = [];
+      for (const r of order) {
+        if (!budget.fits(r.est)) continue;
+        budget.book(r.est);
+        out.push(r.id);
+      }
+      return out;
+    };
+    expect(admitted(rows)).toEqual(["x", "y"]); // today: BHA is starved
+    // the first stale feed gets the used === 0 admission; x (2833 + 2200 > 5000) waits, y (2833 + 1500) fits
+    expect(admitted(prioritizeStale(rows, NOW))).toEqual(["bha", "y"]);
   });
 });

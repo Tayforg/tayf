@@ -5,7 +5,9 @@
 // Istanbul is a fixed UTC+3 (no DST since 2016), so calendar days are derived
 // by shifting the epoch by hand, the same way format.ts does.
 
+import { limitPrices } from "@/lib/finance/format";
 import type { Company, QuoteStat } from "@/lib/finance/queries";
+import type { Quote } from "@/lib/finance/quotes";
 
 const IST_OFFSET_MS = 3 * 3600 * 1000;
 const DAY_MS = 24 * 3600 * 1000;
@@ -130,6 +132,76 @@ export function chartBaseline(args: {
   if (session > statDay) return stat.lastClose;
   if (session === statDay) return stat.prevClose ?? quotePrevClose;
   return null;
+}
+
+/** Sub-kurus slack for comparing a price with a band limit (float noise only). */
+const BAND_EPSILON = 1e-6;
+
+/**
+ * Whether two bases are the same price to the kurus: a base back-solved from
+ * Yahoo's percent differs from the settled close by float noise, which is no
+ * reason to rewrite a quote that already measures from the right close.
+ */
+const sameBase = (a: number, b: number) => Math.abs(a - b) < 0.005;
+
+/**
+ * A price more than one tick past tavan or taban cannot exist on a day whose
+ * base is `prevClose`, so a quote showing one was measured from the wrong
+ * base. Such a quote keeps its price but loses its baseline, which the chips
+ * and the header already render as "—" with no limit tag. The tick of slack
+ * leaves a real limit hit (and a price a tick off the grid) alone. Skipped for
+ * a quote that already has no baseline (its prevClose is the price itself).
+ */
+function withinBandOrUnknown(quote: Quote): Quote {
+  if (quote.hasBaseline === false || !Number.isFinite(quote.price)) return quote;
+  const band = limitPrices(quote.prevClose);
+  if (!band) return quote;
+  const outside =
+    quote.price > band.tavan + band.upTick + BAND_EPSILON || quote.price < band.taban - band.downTick - BAND_EPSILON;
+  return outside ? { ...quote, hasBaseline: false } : quote;
+}
+
+/**
+ * Re-bases a quote's day move on bist_quote_stats (h36-data-1).
+ *
+ * During a session Yahoo's 5d/1d payload resolves the previous close to the
+ * close from TWO sessions back, so the live price was measured against D-2
+ * ("tavan +%13,58" on a +3,35 % day, a move past the +-10 % band). The stat
+ * row is the daily bar of `stat.lastDay`, so which of its closes is the base
+ * for the session the quote belongs to (the Istanbul day of `quote.asOf`)
+ * depends on whether the days line up, the same rule chartBaseline draws the
+ * intraday chart's dashed line with:
+ *  - stat day before the session day: lastClose is the previous close.
+ *  - same day: the stat's own prevClose.
+ *  - stat day after the session day: it describes a later session; keep the quote.
+ * With no stat, no usable asOf, or no usable base the quote is kept as it was.
+ *
+ * Whatever the base, the result goes through a band guard (see
+ * withinBandOrUnknown), so a stat that is itself stale or unadjusted (a capital
+ * increase leaves prevClose on the old share price) can never put a move past
+ * the daily limit on screen: the move becomes unknown instead.
+ */
+export function rebaseQuoteOnStat(quote: Quote, stat: QuoteStat | null | undefined): Quote {
+  if (!stat) return withinBandOrUnknown(quote);
+  const asOfMs = Date.parse(quote.asOf);
+  if (!Number.isFinite(asOfMs)) return withinBandOrUnknown(quote);
+
+  const sessionDay = new Date(asOfMs + IST_OFFSET_MS).toISOString().slice(0, 10);
+  const statDay = dayKey(stat.lastDay);
+  if (statDay > sessionDay) return withinBandOrUnknown(quote);
+
+  const base = statDay < sessionDay ? stat.lastClose : stat.prevClose;
+  if (base == null || !Number.isFinite(base) || !(base > 0)) return withinBandOrUnknown(quote);
+
+  // Already measured from this close: keep Yahoo's own percent untouched.
+  if (quote.hasBaseline !== false && sameBase(quote.prevClose, base)) return withinBandOrUnknown(quote);
+
+  return withinBandOrUnknown({
+    ...quote,
+    prevClose: base,
+    changePct: ((quote.price - base) / base) * 100,
+    hasBaseline: true,
+  });
 }
 
 /**

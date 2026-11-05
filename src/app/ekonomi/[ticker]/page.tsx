@@ -32,6 +32,7 @@ import {
   intradayEmptyCopy,
   priceEmptyLabel,
   quoteFreshness,
+  rebaseQuoteOnStat,
   rvolLabel,
 } from "@/lib/finance/session";
 import { isThinTicker } from "@/lib/finance/ticker-index";
@@ -254,8 +255,12 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
     fetchQuoteStats([ticker]),
     fetchIntraday(ticker),
   ]);
-  const quote = quotes[ticker];
   const stat = stats[ticker];
+  // h36-data-1: Yahoo's previous close is the one from two sessions back during
+  // the session; re-base the day move on the settled close in bist_quote_stats
+  // (and make a move past the +-10 % band unknown) before anything reads it.
+  const yahooQuote = quotes[ticker];
+  const quote = yahooQuote ? rebaseQuoteOnStat(yahooQuote, stat) : undefined;
   // A quote is "halted" when its last trade is days old: no move, limit tag or
   // volume is shown for it. A quote without a baseline (hasBaseline false) has
   // a placeholder 0 move, which is unknown, not flat.

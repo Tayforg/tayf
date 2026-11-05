@@ -3461,3 +3461,51 @@ select count(*) from supabase_migrations.schema_migrations where version = '156'
 Then `curl -s https://www.tayfhaber.com/gundem/trump` and check that `d91ab2f1` is gone (the hubs switch as their `clusters-entity` cache entries expire), and that `/gundem/erdogan` still lists it (its title names Erdoğan).
 
 **Rollback:** re-run the `create or replace function public.entity_cluster_ids_v2` statement of `125_entity_cluster_ids_v2.sql` (the bare `summary_tr` term), then `delete from supabase_migrations.schema_migrations where version = '156';`. The app does not care which of the two bodies is live. The consumer deploy is independent of the rollback.
+
+## 157 — ingest deferral counters + `feed_poll_stale` (`ops_health_report` row 20): APPLY 157 first, THEN DEPLOY ingest
+
+**Why:** BHA (an opposition wire, a 4.25 MB body of 1000 items) was last polled 2 h 39 min before the 2026-11-05 08:24Z reading while its peers were under a minute old, and its newest stored article was 17 hours old. The ingest isolate item budget estimated its body as `floor(bytes / 1500) = 2,833` items, which `createItemBudget().fits()` admits only on an isolate that holds at most 2,167 of the 5,000 items; a refused feed writes no fetch state, and the in-memory memory of deferred feeds is lost when the isolate recycles. No ops row fires before 24-72 hours of silence, and `ingest_cycles` did not count the deferrals (hunt 36, h36-pipeline-1). The ingest change (a `fetch_items_count`-based estimate and stale-first ordering) is in the ingest function; 157 is its observability.
+
+**What 157 does** (additive, one transaction, safe to re-apply):
+
+- adds three nullable integer columns to `public.ingest_cycles`: `isolate_budget_deferred`, `parse_deferred` and `parse_deferred_max_streak`, written by ingest with each cycle row (NULL on older rows);
+- re-creates `ops_health_report()` with 150's text verbatim through row 19 and appends row 20 `feed_poll_stale`: the active sources with no quarantine marker (`fetch_quarantined_until is null`) whose `fetch_last_at` is older than 30 minutes; **warn at 1, fail at 3**. A source never polled (`fetch_last_at` null) is not counted, only named in the detail. The function returns 20 rows; the detail carries slugs and minutes only. Row 20 was evaluated on production before it shipped: 118 active sources, 27 quarantined (fail streaks 32-59), 0 never polled, 1 stale (`bha`, 171 min); the next oldest feed was 3.9 min old, so a healthy roster reads 0;
+- adds, changes and unschedules no pg_cron job; no data rewrite, no index.
+
+**Order:** apply 157 first (`supabase db push`), then deploy ingest: `npx supabase functions deploy ingest --no-verify-jwt`. The reverse order is safe too: an insert that names a column the table lacks fails the whole cycle row, so ingest retries the `ingest_cycles` insert once without the three columns when the answer is Postgres `42703` or PostgREST `PGRST204` (the same pattern as the legacy `sources` select for 119). Deployed before 157, ingest logs `ingest_cycles deferral columns missing (migration 157 not applied?)` once per cycle and writes the row it wrote before; the counters are simply absent until 157 is applied. **Expected right after 157, before the ingest deploy: row 20 reads `warn` / 1 with `bha`** (BHA is stale today); it returns to `pass` once the new ingest reaches a fresh isolate and polls BHA every cycle. The Vercel app needs no deploy.
+
+**Verify** (read-only):
+
+```sql
+select count(*) from public.ops_health_report();   -- expect 20
+select check_name, status, observed, threshold, detail
+  from public.ops_health_report() where check_name = 'feed_poll_stale';
+-- before the ingest deploy: warn / 1 / 3 / "30 dakikadır yoklanmayan aktif kaynak 1: bha 171 dk" (the minutes grow);
+-- after it: pass / 0 / 3 / "aktif kaynakların hepsi son 30 dakikada yoklandı (91)"
+select column_name, data_type, is_nullable from information_schema.columns
+ where table_schema = 'public' and table_name = 'ingest_cycles'
+   and column_name in ('isolate_budget_deferred', 'parse_deferred', 'parse_deferred_max_streak');   -- 3 rows, integer, YES
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('service_role', 'public.ops_health_report()', 'execute');
+select version, name from supabase_migrations.schema_migrations where version = '157';   -- 1 row
+```
+
+After the ingest deploy (replace `<deploy>` with the deploy time):
+
+```sql
+-- BHA polled every cycle: stays under 10 minutes across a 2 h sample
+select slug, now() - fetch_last_at as age from public.sources where slug = 'bha';
+-- BHA's lag from publication to storage, last day (was p50 79 min, p90 363 min over 3 days): expect p50 under 20 min
+select percentile_cont(0.5) within group (order by extract(epoch from a.created_at - a.published_at) / 60)
+  from public.articles a join public.sources s on s.id = a.source_id
+ where s.slug = 'bha' and a.published_at > now() - interval '1 day';
+-- the counters arrive on the cycle rows (deferrals are expected at news peaks, a streak above 2 is not)
+select started_at, isolate_budget_deferred, parse_deferred, parse_deferred_max_streak
+  from public.ingest_cycles where started_at > timestamptz '<deploy>' order by started_at desc limit 10;
+```
+
+Also watch `net._http_response` for ingest 546 / `CPUTime` bodies against the 6 hour baseline before the deploy: the estimate cap books BHA at 1,250 items instead of 2,833 (the cap, 125% of the stored `fetch_items_count`, is applied only while the size estimate is at most 4 times it; a body further out than that keeps the size-only estimate, so a stale small count cannot shrink a big body's estimate), so an isolate admits it more often, and the item budget (5,000), the byte budget (8 MB) and the parse cap (55) are unchanged. If 546s rise, lower `INGEST_ISOLATE_ITEM_BUDGET` (no deploy needed) and report it.
+
+**Rollback** (nothing else depends on 157): re-run ONLY 150's `ops_health_report()` section, the text of `150_ops_queue_and_cron_liveness.sql` from `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;` (it returns the report to 19 rows, md5 `2445cd7d15a23d4af88d42ddf79ac2ff`), then remove the three columns (`alter table public.ingest_cycles drop column if exists isolate_budget_deferred, drop column if exists parse_deferred, drop column if exists parse_deferred_max_streak;`), run `notify pgrst, 'reload schema';` and remove ledger row 157 (`delete from supabase_migrations.schema_migrations where version = '157';`). Dropping the columns while the new ingest is deployed is safe (it retries the cycle row without them). To roll the ingest change back, redeploy the previous ingest function; the columns and row 20 can stay.

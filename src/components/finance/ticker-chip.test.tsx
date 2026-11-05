@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { TickerChip, TickerTape } from "./ticker-chip";
 import type { Quote } from "@/lib/finance/quotes";
 import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
+import { rebaseQuoteOnStat } from "@/lib/finance/session";
 
 // Walks the element tree the way label-card.test.tsx and framing-game.test.tsx
 // do, since vitest runs in a plain node environment (no jsdom/RTL).
@@ -255,6 +256,65 @@ describe("TickerTape", () => {
       const text = textOf(TickerTape({ items: info, quotes: { INFO: quoteAt(6.98, 6.3) }, stats }));
       expect(text).not.toContain("taban");
       expect(text).not.toContain("tavan");
+    });
+  });
+
+  describe("rebased quotes (h36-data-1)", () => {
+    const thy: TickerAttention[] = [{ ticker: "THYAO", articles: 6, sources: 4, ratio: null, title: "THY" } as TickerAttention];
+    // What Yahoo served at 08:10Z on 2026-11-05: the live price measured against
+    // the 11-03 close (265.00) instead of the 11-04 close (291.25).
+    const yahoo: Quote = {
+      ticker: "THYAO",
+      price: 301,
+      prevClose: 265,
+      changePct: 13.58,
+      hasBaseline: true,
+      closes: [262, 265, 291.25, 301],
+      currency: "TRY",
+      asOf: "2026-11-05T08:10:00Z",
+    };
+    const thyStat: QuoteStat = {
+      ticker: "THYAO",
+      lastDay: "2026-11-04",
+      lastClose: 291.25,
+      prevClose: 265,
+      lastVolume: 1000,
+      avgVolume20: 900,
+      rvol: 1.1,
+    };
+
+    it("the raw Yahoo quote is the bug: +%13,58 and a tavan tag", () => {
+      const text = textOf(TickerTape({ items: thy, quotes: { THYAO: yahoo }, stats: { THYAO: thyStat } }));
+      expect(text).toContain("+%13,58");
+      expect(text).toContain("tavan");
+    });
+
+    it("THYAO rebased on the 11-04 close renders +%3,35 and no tavan", () => {
+      const rebased = rebaseQuoteOnStat(yahoo, thyStat);
+      const text = textOf(TickerTape({ items: thy, quotes: { THYAO: rebased }, stats: { THYAO: thyStat } }));
+      expect(text).toContain("+%3,35");
+      expect(text).not.toContain("13,58");
+      expect(text).not.toContain("tavan");
+      expect(text).not.toContain("taban");
+    });
+
+    it("the chip reads the same rebased quote", () => {
+      const text = textOf(TickerChip({ ticker: "THYAO", quote: rebaseQuoteOnStat(yahoo, thyStat) }));
+      expect(text).toContain("+%3,35");
+      expect(text).not.toContain("tavan");
+    });
+
+    it("a quote the band guard rejects renders '—' with no percent and no limit tag, price kept", () => {
+      const guarded = rebaseQuoteOnStat({ ...yahoo, price: 11.8, prevClose: 109.1, changePct: -89.18 }, undefined);
+      const tape = textOf(TickerTape({ items: thy, quotes: { THYAO: guarded }, stats: {} }));
+      const chip = textOf(TickerChip({ ticker: "THYAO", quote: guarded }));
+      for (const text of [tape, chip]) {
+        expect(text).toContain("—");
+        expect(text).not.toContain("%");
+        expect(text).not.toContain("tavan");
+        expect(text).not.toContain("taban");
+        expect(text).toContain("11,80");
+      }
     });
   });
 

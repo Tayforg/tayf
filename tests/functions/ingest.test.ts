@@ -216,6 +216,15 @@ let forcedTitleEditRpcError: string | null = null;
 // error instead of recording the row — used to prove `recordIngestCycle`'s
 // try/catch absorbs a telemetry-write failure instead of failing the cycle.
 let forcedIngestCyclesInsertError: string | null = null;
+// h36-pipeline-1 (migration 157): attempts the SUT made at the "ingest_cycles"
+// insert, and a switch that makes the mock behave like a database WITHOUT
+// migration 157: an insert that names isolate_budget_deferred (or either other
+// new column) fails with this error code, the way PostgREST / Postgres answer
+// an unknown column. `ingestCyclesRejectCode` set to anything else than a
+// missing-column code fails every insert with that code.
+let ingestCyclesInsertAttempts = 0;
+let ingestCyclesMissingColumnCode: string | null = null;
+let ingestCyclesFailAllCode: string | null = null;
 
 // One entry per `.rpc("existing_source_content_hash_pairs", { p_source_ids,
 // p_hashes })` call this test made -- the chunked (source_id, content_hash)
@@ -581,6 +590,28 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
         insert: (rows: unknown) => {
           const arr = Array.isArray(rows) ? rows : [rows];
           if (table === "ingest_cycles") {
+            ingestCyclesInsertAttempts++;
+            if (ingestCyclesFailAllCode) {
+              return Promise.resolve({
+                data: null,
+                error: { code: ingestCyclesFailAllCode, message: "permission denied for table ingest_cycles" },
+              });
+            }
+            if (
+              ingestCyclesMissingColumnCode &&
+              arr.some((r) => "isolate_budget_deferred" in (r as Record<string, unknown>))
+            ) {
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code: ingestCyclesMissingColumnCode,
+                  message:
+                    ingestCyclesMissingColumnCode === "42703"
+                      ? 'column "isolate_budget_deferred" of relation "ingest_cycles" does not exist'
+                      : "Could not find the 'isolate_budget_deferred' column of 'ingest_cycles' in the schema cache",
+                },
+              });
+            }
             if (forcedIngestCyclesInsertError) {
               return Promise.resolve({
                 data: null,
@@ -821,6 +852,9 @@ beforeEach(() => {
   recordedTitleVersionKeys.clear();
   forcedSourcesError = null;
   forcedIngestCyclesInsertError = null;
+  ingestCyclesInsertAttempts = 0;
+  ingestCyclesMissingColumnCode = null;
+  ingestCyclesFailAllCode = null;
   fakeSources.length = 0;
   for (const k of Object.keys(fetchResponses)) delete fetchResponses[k];
   for (const k of Object.keys(fetcherItems)) delete fetcherItems[k];
@@ -4263,9 +4297,9 @@ describe("parse budget: deferring changed feeds [parse budget]", () => {
     expect(body.parseDeferred).toBe(2);
     expect(body.parsedBytes).toBe(3_000_000);
     expect(upsertedSourceIds().size).toBe(1);
-    // The parsed-bytes figure is cycle JSON only.
+    // The parsed-bytes figure is cycle JSON only; the deferral count is a column since migration 157.
     expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("parsed_bytes");
-    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("parse_deferred");
+    expect(ingestCycleInserts[0]?.parse_deferred).toBe(2);
   });
 
   it("a feed bigger than the budget cannot starve: deferred once, it goes first next cycle and is parsed even over budget", async () => {
@@ -4412,8 +4446,8 @@ describe("parse budget: deferring changed feeds [parse budget]", () => {
     process.env.INGEST_MAX_PARSES_PER_CYCLE = "1";
     const fresh = await run();
     expect(fresh.parseDeferredMaxStreak, "a drained feed starts again at 1").toBe(1);
-    // Summary and HTTP JSON only: there is no ingest_cycles column for it.
-    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("parse_deferred_max_streak");
+    // Also a column since migration 157 (ingest_cycles.parse_deferred_max_streak).
+    expect(ingestCycleInserts[0]?.parse_deferred_max_streak).toBe(1);
   });
 
   it("an on-budget cycle is unchanged: nothing deferred, parsedBytes sums the bodies", async () => {
@@ -5755,5 +5789,223 @@ describe("isolate item budget across cycles on one isolate [hunt-11 A-ingest-cpu
     // 5000 by default: nothing is deferred.
     expect(c1.isolateBudgetDeferred).toBe(0);
     expect(c1.inserted).toBe(46);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h36-pipeline-1: BHA (a 4.25 MB feed of 1000 items) was starved by the isolate
+// item budget. (1) the booking uses the feed's last known item count, (2) a
+// source whose fetch_last_at is stale goes first (the persisted deferral
+// signal, since the in-memory memory dies with the isolate), (3) the cycle row
+// records the deferral counters (migration 157), with a fallback while the
+// migration is not applied.
+// ---------------------------------------------------------------------------
+
+describe("BHA starvation by the isolate item budget [h36-pipeline-1]", () => {
+  const PUB = "Wed, 04 Nov 2026 10:00:00 GMT";
+  const CYCLE = 180_000;
+  // A rotation offset of 0 for two and for three sources: floor(t / CYCLE) is a multiple of 6.
+  const slot0 = (() => {
+    const slot = Math.floor(Date.parse("2026-11-05T08:00:00Z") / CYCLE);
+    return slot - (slot % 6);
+  })();
+  const NOW = slot0 * CYCLE;
+  const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function seed(id: string, extra: Record<string, unknown> = {}) {
+    fakeSources.push({
+      id,
+      name: id,
+      slug: id,
+      url: `https://${id}.h36.example`,
+      rss_url: `https://${id}.h36.example/rss.xml`,
+      active: true,
+      fetch_etag: null,
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 0,
+      fetch_last_at: minutesAgo(1),
+      ...extra,
+    });
+    fetcherItems[`https://${id}.h36.example/rss.xml`] = [
+      { title: `${id} haberi bir`, link: `https://${id}.h36.example/haber/1`, pubDate: PUB },
+    ];
+  }
+
+  async function runCycle(): Promise<Record<string, unknown>> {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  it("books a feed from its known item count: 2200 + BHA (4.25 MB, 1000 items) fits under 5000, where 2200 + 2833 did not", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "5000";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    seed("a-wide", { fetch_items_count: null });
+    seed("b-bha", { fetch_items_count: 1000 });
+    fetcherResultOverrides["https://a-wide.h36.example/rss.xml"] = { bodyBytes: 2200 * 1500, etag: '"a1"', bodyHash: "a1" };
+    fetcherResultOverrides["https://b-bha.h36.example/rss.xml"] = { bodyBytes: 4_250_000, etag: '"b1"', bodyHash: "b1" };
+
+    const c = await runCycle();
+
+    expect(fetchFeedCalls.map((f) => f.sourceId)).toEqual(["a-wide", "b-bha"]);
+    expect(c.isolateBudgetDeferred).toBe(0);
+    expect(c.parseDeferred).toBe(0);
+    expect(c.inserted).toBe(2);
+  });
+
+  it("without a known item count the size estimate still applies (nothing changes for a feed never measured)", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "5000";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    seed("a-wide", { fetch_items_count: null });
+    seed("b-bha", { fetch_items_count: null });
+    fetcherResultOverrides["https://a-wide.h36.example/rss.xml"] = { bodyBytes: 2200 * 1500, etag: '"a1"', bodyHash: "a1" };
+    fetcherResultOverrides["https://b-bha.h36.example/rss.xml"] = { bodyBytes: 4_250_000, etag: '"b1"', bodyHash: "b1" };
+
+    const c = await runCycle();
+
+    // 2200 + floor(4_250_000 / 1500) = 5033 > 5000
+    expect(c.isolateBudgetDeferred).toBe(1);
+    expect(c.parseDeferred).toBe(1);
+  });
+
+  it("puts a stale feed first on a fresh isolate, so it gets the used === 0 admission instead of waiting for the rotation", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "5000";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    // Rotation offset 0 keeps the base order x, y, bha. BHA has no item count here, so its estimate is 2833.
+    seed("x-feed");
+    seed("y-feed");
+    seed("z-bha", { fetch_last_at: minutesAgo(160) });
+    fetcherResultOverrides["https://x-feed.h36.example/rss.xml"] = { bodyBytes: 2200 * 1500, etag: '"x1"', bodyHash: "x1" };
+    fetcherResultOverrides["https://y-feed.h36.example/rss.xml"] = { bodyBytes: 1500 * 1500, etag: '"y1"', bodyHash: "y1" };
+    fetcherResultOverrides["https://z-bha.h36.example/rss.xml"] = { bodyBytes: 2833 * 1500, etag: '"z1"', bodyHash: "z1" };
+
+    const c = await runCycle();
+
+    expect(fetchFeedCalls.map((f) => f.sourceId)).toEqual(["z-bha", "x-feed", "y-feed"]);
+    // BHA (2833) is admitted first; x (2200) no longer fits; y (1500) does.
+    expect(c.isolateBudgetDeferred).toBe(1);
+    expect(c.parseDeferred).toBe(1);
+    expect(c.inserted).toBe(2);
+    const stored = upserted.map((r) => r.source_id);
+    expect(stored).toContain("z-bha");
+    expect(stored).toContain("y-feed");
+    expect(stored).not.toContain("x-feed");
+  });
+
+  it("a feed deferred in memory still goes ahead of the stale ones within one isolate", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "5000";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    seed("x-feed");
+    seed("y-feed");
+    seed("z-bha", { fetch_last_at: minutesAgo(160) });
+    fetcherResultOverrides["https://x-feed.h36.example/rss.xml"] = { bodyBytes: 2200 * 1500, etag: '"x1"', bodyHash: "x1" };
+    fetcherResultOverrides["https://y-feed.h36.example/rss.xml"] = { bodyBytes: 1500 * 1500, etag: '"y1"', bodyHash: "y1" };
+    fetcherResultOverrides["https://z-bha.h36.example/rss.xml"] = { bodyBytes: 2833 * 1500, etag: '"z1"', bodyHash: "z1" };
+    await runCycle(); // x is deferred here (see the test above)
+
+    // The next cycle, 3 minutes later on the same isolate: every feed was polled a minute ago, BHA 160 minutes ago.
+    fetchFeedCalls.length = 0;
+    vi.setSystemTime(NOW + CYCLE);
+    for (const src of fakeSources) {
+      src.fetch_last_at = src.id === "z-bha" ? minutesAgo(157) : new Date(NOW + CYCLE - 60_000).toISOString();
+    }
+    await runCycle();
+    // x was deferred by the previous cycle on this isolate: first, then the stale z-bha, then y.
+    expect(fetchFeedCalls.map((f) => f.sourceId)).toEqual(["x-feed", "z-bha", "y-feed"]);
+  });
+
+  it("leaves a quarantined stale feed out: it is not fetched, however old its fetch_last_at", async () => {
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    seed("a-live");
+    seed("b-dead", {
+      fetch_last_at: minutesAgo(600),
+      fetch_fail_streak: 59,
+      fetch_quarantined_until: new Date(NOW + 3_600_000).toISOString(),
+    });
+
+    await runCycle();
+
+    expect(fetchFeedCalls.map((f) => f.sourceId)).toEqual(["a-live"]);
+  });
+
+  it("writes the deferral counters on the ingest_cycles row (migration 157)", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "5000";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    seed("x-feed");
+    seed("y-feed");
+    fetcherResultOverrides["https://x-feed.h36.example/rss.xml"] = { bodyBytes: 3000 * 1500, etag: '"x1"', bodyHash: "x1" };
+    fetcherResultOverrides["https://y-feed.h36.example/rss.xml"] = { bodyBytes: 3000 * 1500, etag: '"y1"', bodyHash: "y1" };
+
+    const c = await runCycle();
+
+    expect(c.isolateBudgetDeferred).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(1);
+    const row = ingestCycleInserts[0] as Record<string, unknown>;
+    expect(row.isolate_budget_deferred).toBe(1);
+    expect(row.parse_deferred).toBe(1);
+    expect(row.parse_deferred_max_streak).toBe(1);
+    // the columns of migrations 039 and 074 are still there
+    for (const k of ["started_at", "fetched", "inserted", "row_errors", "failed", "prefilter_errors", "duration_ms"]) {
+      expect(row, k).toHaveProperty(k);
+    }
+  });
+
+  it("writes zeros for a cycle that deferred nothing", async () => {
+    seed("x-feed");
+    await runCycle();
+    const row = ingestCycleInserts[0] as Record<string, unknown>;
+    expect(row.isolate_budget_deferred).toBe(0);
+    expect(row.parse_deferred).toBe(0);
+    expect(row.parse_deferred_max_streak).toBe(0);
+  });
+
+  for (const code of ["PGRST204", "42703"]) {
+    it(`retries the cycle row once without the new columns when the database lacks migration 157 (error ${code})`, async () => {
+      ingestCyclesMissingColumnCode = code;
+      seed("x-feed");
+
+      await runCycle();
+
+      expect(ingestCyclesInsertAttempts).toBe(2);
+      expect(ingestCycleInserts).toHaveLength(1);
+      const row = ingestCycleInserts[0] as Record<string, unknown>;
+      expect(row).not.toHaveProperty("isolate_budget_deferred");
+      expect(row).not.toHaveProperty("parse_deferred");
+      expect(row).not.toHaveProperty("parse_deferred_max_streak");
+      expect(row.fetched).toBe(1);
+      expect(row).toHaveProperty("prefilter_errors");
+    });
+  }
+
+  it("does not retry for an error that is not a missing column (one attempt, the cycle still answers 200)", async () => {
+    ingestCyclesFailAllCode = "42501";
+    seed("x-feed");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await runCycle();
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(ingestCyclesInsertAttempts).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(0);
   });
 });

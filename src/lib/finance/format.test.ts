@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { articleCountLabel, coverageScopeNote, disclosureWindowLabel, fmtPct, limitFlag, priceTickKurus } from "./format";
+import {
+  articleCountLabel,
+  coverageScopeNote,
+  disclosureWindowLabel,
+  fmtPct,
+  limitFlag,
+  limitPrices,
+  priceTickKurus,
+} from "./format";
 
 describe("fmtPct (Turkish prefix form: sign, then %, then the number)", () => {
   it("writes the /ekonomi moves of h19-copy-2 as -%4,73 / +%9,95 / -%3,21", () => {
@@ -168,5 +176,42 @@ describe("limitFlag", () => {
       expect(limitFlag(-9.6, 100, Number.NaN)).toBe("taban");
       expect(limitFlag(2, 100)).toBeNull();
     });
+  });
+});
+
+describe("limitPrices (h36-data-1: the band limitFlag and the quote guard share)", () => {
+  it("returns the tick-stepped tavan/taban and the tick (in TL) each limit sits on", () => {
+    // 100 x 1.1 = 110 sits in the 0,10 band, 100 x 0.9 = 90 in the 0,05 band.
+    expect(limitPrices(100)).toEqual({ tavan: 110, taban: 90, upTick: 0.1, downTick: 0.05 });
+  });
+
+  it("THYAO 291.25: both limits sit in the 0,25 band (320.25 / 262.25)", () => {
+    expect(limitPrices(291.25)).toEqual({ tavan: 320.25, taban: 262.25, upTick: 0.25, downTick: 0.25 });
+  });
+
+  it("0.73: tavan 0.80 (0.803 down to the 0,01 tick), taban 0.66 (0.657 up)", () => {
+    expect(limitPrices(0.73)).toEqual({ tavan: 0.8, taban: 0.66, upTick: 0.01, downTick: 0.01 });
+  });
+
+  it("rounds the previous close to the kurus first", () => {
+    expect(limitPrices(0.6600001)).toEqual(limitPrices(0.66));
+  });
+
+  it("is null for a previous close that is missing, zero, negative, sub-kurus or not finite", () => {
+    expect(limitPrices(null)).toBeNull();
+    expect(limitPrices(undefined)).toBeNull();
+    expect(limitPrices(0)).toBeNull();
+    expect(limitPrices(-5)).toBeNull();
+    expect(limitPrices(0.004)).toBeNull();
+    expect(limitPrices(Number.NaN)).toBeNull();
+    expect(limitPrices(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("limitFlag agrees with it at both limits and one tick inside", () => {
+    const lim = limitPrices(291.25)!;
+    expect(limitFlag(0, 291.25, lim.tavan)).toBe("tavan");
+    expect(limitFlag(0, 291.25, lim.tavan - lim.upTick)).toBeNull();
+    expect(limitFlag(0, 291.25, lim.taban)).toBe("taban");
+    expect(limitFlag(0, 291.25, lim.taban + lim.downTick)).toBeNull();
   });
 });
