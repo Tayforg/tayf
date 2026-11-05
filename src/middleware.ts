@@ -476,8 +476,11 @@ const CLUSTER_CASE_SUBS: ReadonlySet<string> = new Set(["opengraph-image", "twit
 // content hash on the file-convention images, '?' + 16 lower-case hex (the
 // og:image / twitter:image URLs). Anything else is a CDN key that renders the
 // same bytes. A shape test, not an allow-list of the emitted hashes (see gate 3:
-// 2^64 spellings still pass). Anchored and linear.
-const IMAGE_HASH_QUERY = /^\?[0-9a-f]{16}$/;
+// 2^64 spellings still pass). Anchored and linear. The optional '=' is not
+// slack: on Vercel the router hands middleware the value-less '?<hash>' re-
+// serialised as '?<hash>=' (prod, 2026-11-05: the page's own og:image URL
+// answered 308 under the strict pattern), so both spellings are the hash.
+const IMAGE_HASH_QUERY = /^\?[0-9a-f]{16}=?$/;
 // No route matches this path — Next renders app/not-found.tsx with a real
 // 404 status and the site's own chrome, instead of a 0-byte response.
 const NOT_FOUND_REWRITE_PATH = "/__tayf-not-found";

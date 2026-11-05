@@ -88,7 +88,6 @@ const JUNK_IMAGE_QUERIES: readonly string[] = [
   "?56699F89608B1910",
   "?56699f89608b191",
   "?56699f89608b19100",
-  `?${OG_HASH}=`,
   `?${OG_HASH}=1`,
   "?%35699f89608b1910",
   "?56699f89608g1910",
@@ -131,6 +130,15 @@ describe("middleware — /cluster/<id>/(opengraph-image|twitter-image) allow onl
     ["opengraph-image", TWITTER_HASH],
   ])("passes /%s?%s through (no redirect)", async (sub, hash) => {
     expectPassThrough(await middleware(req(`/cluster/${LOWER}/${sub}?${hash}`)), `${sub}?${hash}`);
+  });
+
+  // Vercel's router re-serialises the value-less '?<hash>' as '?<hash>=' before
+  // middleware sees it (prod 2026-11-05: the page's own og:image answered 308).
+  it.each([
+    ["opengraph-image", OG_HASH],
+    ["twitter-image", TWITTER_HASH],
+  ])("passes /%s?%s= (the router's re-serialised hash) through (no redirect)", async (sub, hash) => {
+    expectPassThrough(await middleware(req(`/cluster/${LOWER}/${sub}?${hash}=`)), `${sub}?${hash}=`);
   });
 
   it.each(["opengraph-image", "twitter-image"])("passes the bare /%s through", async (sub) => {
