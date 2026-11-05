@@ -14,7 +14,11 @@ import {
   withUtm,
   type RssItemInput,
 } from "@/lib/feeds/rss-builder";
-import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
+import {
+  formatZoneLine,
+  sourceCountHead,
+  votingZoneCounts,
+} from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 
 // GET /rss/[topic].xml — one RSS 2.0 feed per topic hub (TOPIC_SLUGS) plus
@@ -59,15 +63,18 @@ function topicItem(base: string, slug: TopicSlug, bundle: ClusterBundle): RssIte
     medium: "feed",
     campaign: `konu_${slug}`,
   });
-  const zoneLine = formatZoneLine(votingZoneCounts(bundle.sources));
-  const n = bundle.sources.length;
+  // Zones count voting sources only; the head is every member, with the
+  // voting count in parentheses when they differ (see sourceCountHead).
+  const counts = votingZoneCounts(bundle.sources);
+  const zoneLine = formatZoneLine(counts);
+  const head = sourceCountHead(bundle.sources.length, counts);
 
   return {
     title: bundle.cluster.title_tr,
     link,
     guid: `${base}/cluster/${bundle.cluster.id}`,
     pubDate: bundle.cluster.first_published,
-    description: `${n} kaynak · ${zoneLine}`,
+    description: `${head} · ${zoneLine}`,
   };
 }
 

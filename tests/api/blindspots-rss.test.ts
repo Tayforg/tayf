@@ -176,6 +176,59 @@ describe("GET /blindspots/rss.xml", () => {
     expect(body).toContain("2 kaynak · İktidar 4 · Bağımsız 1 · Muhalefet 0");
   });
 
+  it("marks the voting count when aggregators are among the members, and the zones add up to it", async () => {
+    mocks.blindspots = {
+      bundles: [
+        bundle({
+          dominantPct: 1,
+          sources: [
+            ...Array.from({ length: 8 }, (_, i) => ({
+              id: `v${i}`,
+              name: `V${i}`,
+              bias: "pro_government",
+              kind: "outlet",
+            })),
+            { id: "a1", name: "Agg1", bias: "center", kind: "aggregator" },
+            { id: "a2", name: "Agg2", bias: "center", kind: "aggregator" },
+          ],
+          votingZoneCounts: { iktidar: 8, bagimsiz: 0, muhalefet: 0 },
+        }),
+      ],
+    };
+    const body = await (await callRoute()).text();
+    const description = /<description>(Kör nokta[^<]*)<\/description>/.exec(body)?.[1];
+    expect(description).toBe(
+      "Kör nokta: ağırlıkla İktidar kaynakları (%100). 10 kaynak (8 sınıflandırılmış) · İktidar 8 · Bağımsız 0 · Muhalefet 0",
+    );
+    expect(description!.split(" · ")).toHaveLength(4);
+  });
+
+  it("keeps the bare count when every member votes, still 4 parts on ' · '", async () => {
+    mocks.blindspots = {
+      bundles: [
+        bundle({
+          dominantPct: 4 / 7,
+          sources: [
+            { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
+            { id: "s2", name: "B", bias: "pro_government", kind: "outlet" },
+            { id: "s3", name: "C", bias: "state_media", kind: "wire" },
+            { id: "s4", name: "D", bias: "gov_leaning", kind: "outlet" },
+            { id: "s5", name: "E", bias: "center", kind: "outlet" },
+            { id: "s6", name: "F", bias: "center", kind: "outlet" },
+            { id: "s7", name: "G", bias: "opposition", kind: "outlet" },
+          ],
+          votingZoneCounts: { iktidar: 4, bagimsiz: 2, muhalefet: 1 },
+        }),
+      ],
+    };
+    const body = await (await callRoute()).text();
+    const description = /<description>(Kör nokta[^<]*)<\/description>/.exec(body)?.[1];
+    expect(description).toBe(
+      "Kör nokta: ağırlıkla İktidar kaynakları (%57). 7 kaynak · İktidar 4 · Bağımsız 2 · Muhalefet 1",
+    );
+    expect(description!.split(" · ")).toHaveLength(4);
+  });
+
   it("prints the largest-remainder percent (%84), not Math.round's %85, for an 11/1/1 tally", async () => {
     // 11/13 = 84.6: the card's bar reads "İktidar: 11 kaynak (%84)".
     mocks.blindspots = {

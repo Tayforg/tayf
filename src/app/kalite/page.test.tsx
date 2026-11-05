@@ -37,7 +37,7 @@ vi.mock("@/lib/quality/snapshots", () => ({
 
 import { formatTurkishDate } from "@/lib/time";
 
-import QualityPage, { metadata } from "./page";
+import QualityPage, { chartX, metadata } from "./page";
 
 /**
  * Collects every string/number leaf under a React element tree. page.tsx
@@ -335,7 +335,7 @@ describe("QualityPage — data present", () => {
       expect(label).toContain(`${first}–${last}`);
       expect(label).toContain("%85");
       expect(label).toContain("%90");
-      expect(label).toContain("Son 2 gecelik");
+      expect(label).toContain("Son 2 ölçümde");
     });
 
     it("draws no SVG <text>: the svg holds only gridlines and the polyline", async () => {
@@ -430,5 +430,294 @@ describe("QualityPage — data present", () => {
 
     expect(text).toMatch(/tek(il)? küme|singleton/i);
     expect(text).toMatch(/ajans|kendi (url|adres)/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h41-derived-1: the page must state its basis (politics only) and its timing
+// (a daily job that GitHub runs late, so the hour varies and days can be
+// missing) truthfully, and the chart must not hide missing days.
+// ---------------------------------------------------------------------------
+
+const FORBIDDEN_TIMING_COPY = ["03:00 UTC", "aynı gece", "her gece", "gecelik"];
+
+function expectNoNightlyClaims(text: string) {
+  for (const phrase of FORBIDDEN_TIMING_COPY) {
+    expect(text).not.toContain(phrase);
+  }
+  expect(text).not.toMatch(/son\s+\d+\s+gece/i);
+  // No remaining "gece" wording of any kind: the job is daily, not nightly.
+  expect(text).not.toMatch(/gece/i);
+}
+
+describe("timing copy: a daily job whose hour varies, not a fixed 03:00 nightly run", () => {
+  it("metadata says günde bir kez and no nightly claim", () => {
+    const description = metadata.description as string;
+    expect(description).toContain("günde bir kez");
+    expect(description).not.toContain("her gece");
+    expect(description).not.toMatch(/gece/i);
+  });
+
+  it("states the cadence as günde bir kez and warns the hour varies and days can be missing (data present)", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 2, takenAt: "2026-09-18T08:12:00.000Z" }),
+      snapshot({ id: 1, takenAt: "2026-09-17T09:40:00.000Z" }),
+    ];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("günde bir kez");
+    expect(text).toContain("GitHub zamanlanmış işleri geciktirebildiği için ölçüm saati değişir");
+    expect(text).toContain("bazı günler ölçüm alınamayabilir");
+    expect(text).toContain("Aşağıda son 30 ölçüm gösterilir.");
+    expectNoNightlyClaims(text);
+  });
+
+  it("makes no nightly claim in the unavailable state", async () => {
+    mockSnapshots.value = null;
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("günde bir kez");
+    expectNoNightlyClaims(text);
+  });
+
+  it("makes no nightly claim in the empty state and drops the fixed hour", async () => {
+    mockSnapshots.value = [];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("günde bir kez");
+    expect(text).toContain("Henüz hiç denetim ölçümü kaydedilmedi");
+    expectNoNightlyClaims(text);
+  });
+
+  it("says 'en az iki ölçüm' (not gece) when there is a single snapshot", async () => {
+    mockSnapshots.value = [snapshot({ id: 1 })];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("en az iki ölçüm");
+    expectNoNightlyClaims(text);
+  });
+
+  it("names the chart 'son {n} ölçüm' and its aria-label 'Son {n} ölçümde'", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 3, takenAt: "2026-09-19T08:00:00.000Z" }),
+      snapshot({ id: 2, takenAt: "2026-09-18T08:00:00.000Z" }),
+      snapshot({ id: 1, takenAt: "2026-09-17T08:00:00.000Z" }),
+    ];
+
+    const tree = await QualityPage();
+    const text = collectText(tree).join(" ");
+    const label = String(findSvg(tree)!.props["aria-label"]);
+
+    expect(text).toContain("Tekil küme oranı — son 3 ölçüm");
+    expect(label).toContain("Son 3 ölçümde");
+    expect(label).not.toMatch(/gece/i);
+  });
+
+  it("titles the screen-reader table 'Günlük kalite ölçümleri'", async () => {
+    mockSnapshots.value = [snapshot()];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("Günlük kalite ölçümleri");
+    expect(text).not.toContain("Gece gece");
+  });
+
+  it("shows each row's actual measurement time (Istanbul), not only its date", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 2, takenAt: "2026-11-05T10:26:54.000Z" }),
+      snapshot({ id: 1, takenAt: "2026-11-04T07:35:10.000Z" }),
+    ];
+
+    const tree = await QualityPage();
+    const cells = allElements(tree)
+      .filter(({ el }) => el.type === "td")
+      .map(({ el }) => collectText(el.props.children).join(""));
+
+    // 10:26Z = 13:26 and 07:35Z = 10:35 in Istanbul (UTC+3).
+    expect(cells.some((c) => c.includes("13:26"))).toBe(true);
+    expect(cells.some((c) => c.includes("10:35"))).toBe(true);
+    expect(collectText(tree).join(" ")).toContain("İstanbul saati");
+  });
+});
+
+describe("scope copy: counts are politics-only", () => {
+  it("labels the stat tiles 'Siyaset haberi (48 saat)' and 'Küme sayısı (tek haberliler dahil)'", async () => {
+    mockSnapshots.value = [snapshot()];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("Siyaset haberi (48 saat)");
+    expect(text).toContain("Küme sayısı (tek haberliler dahil)");
+    expect(text).not.toContain("Haber sayısı");
+  });
+
+  it("defines a 'Kapsam' term that says politika ve son dakika", async () => {
+    mockSnapshots.value = [snapshot()];
+
+    const els = allElements(await QualityPage());
+    const dt = els.find(
+      ({ el }) => el.type === "dt" && collectText(el.props.children).join("") === "Kapsam",
+    );
+
+    expect(dt).toBeDefined();
+    const box = collectText(dt!.parent!.props.children).join(" ");
+    expect(box).toContain("politika ve son dakika");
+    expect(box).toContain("tek haberli kümeler de dahildir");
+  });
+
+  it("defines Kapsam even when there is no data", async () => {
+    mockSnapshots.value = null;
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("Kapsam");
+    expect(text).toContain("politika ve son dakika");
+  });
+});
+
+describe("chartX: points sit at their Istanbul calendar-day offset, not at their index", () => {
+  const LEFT = 4;
+  const WIDTH = 632;
+
+  it("puts the first snapshot at the left edge and the last at the right edge", () => {
+    const first = "2026-10-12T08:00:00.000Z";
+    const last = "2026-10-15T09:00:00.000Z";
+
+    expect(chartX(first, first, last, LEFT, WIDTH)).toBeCloseTo(LEFT, 6);
+    expect(chartX(last, first, last, LEFT, WIDTH)).toBeCloseTo(LEFT + WIDTH, 6);
+  });
+
+  it("puts the middle of 10-12, 10-13, 10-15 at one third of the plot width, not one half", () => {
+    const first = "2026-10-12T08:00:00.000Z";
+    const mid = "2026-10-13T09:30:00.000Z";
+    const last = "2026-10-15T10:38:00.000Z";
+
+    expect(chartX(mid, first, last, LEFT, WIDTH)).toBeCloseTo(LEFT + WIDTH / 3, 6);
+  });
+
+  it("counts the Istanbul day, not the UTC day (21:30Z is already the next day in Istanbul)", () => {
+    const first = "2026-10-12T08:00:00.000Z"; // 10-12 in Istanbul
+    const mid = "2026-10-12T21:30:00.000Z"; // 10-13 00:30 in Istanbul
+    const last = "2026-10-14T08:00:00.000Z"; // 10-14 in Istanbul
+
+    expect(chartX(mid, first, last, LEFT, WIDTH)).toBeCloseTo(LEFT + WIDTH / 2, 6);
+  });
+
+  it("with two snapshots the points sit at both ends", () => {
+    const first = "2026-10-12T08:00:00.000Z";
+    const last = "2026-10-13T08:30:00.000Z";
+
+    expect(chartX(first, first, last, LEFT, WIDTH)).toBe(LEFT);
+    expect(chartX(last, first, last, LEFT, WIDTH)).toBe(LEFT + WIDTH);
+  });
+
+  it("two snapshots on the same Istanbul day still sit at both ends, with no NaN", () => {
+    const first = "2026-10-12T08:00:00.000Z";
+    const last = "2026-10-12T10:00:00.000Z";
+    const middle = "2026-10-12T09:00:00.000Z";
+
+    expect(chartX(first, first, last, LEFT, WIDTH)).toBe(LEFT);
+    expect(chartX(last, first, last, LEFT, WIDTH)).toBe(LEFT + WIDTH);
+    expect(chartX(middle, first, last, LEFT, WIDTH)).toBeCloseTo(LEFT + WIDTH / 2, 6);
+  });
+
+  it("returns the left edge for an unparseable timestamp instead of NaN", () => {
+    const x = chartX("not-a-date", "2026-10-12T08:00:00.000Z", "2026-10-13T08:00:00.000Z", LEFT, WIDTH);
+
+    expect(Number.isFinite(x)).toBe(true);
+    expect(x).toBe(LEFT);
+  });
+
+  it("draws the polyline by calendar day: a missing day leaves a wider step", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 3, takenAt: "2026-10-15T08:00:00.000Z", singletonRate: 0.7 }),
+      snapshot({ id: 2, takenAt: "2026-10-13T08:00:00.000Z", singletonRate: 0.8 }),
+      snapshot({ id: 1, takenAt: "2026-10-12T08:00:00.000Z", singletonRate: 0.9 }),
+    ];
+
+    const tree = await QualityPage();
+    const poly = allElements(tree).find(({ el }) => el.type === "polyline");
+    const xs = String(poly!.el.props.points)
+      .split(" ")
+      .map((pt) => Number(pt.split(",")[0]));
+
+    expect(xs).toHaveLength(3);
+    // 10-12 -> 10-13 is one day of three, 10-13 -> 10-15 is two.
+    expect(xs[1]! - xs[0]!).toBeCloseTo((xs[2]! - xs[0]!) / 3, 0);
+  });
+});
+
+describe("gap note: missing measurement days are stated, not collapsed", () => {
+  it("says how many days have no measurement when days are missing", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 4, takenAt: "2026-10-15T08:00:00.000Z" }),
+      snapshot({ id: 3, takenAt: "2026-10-13T08:00:00.000Z" }),
+      snapshot({ id: 2, takenAt: "2026-10-12T08:00:00.000Z" }),
+    ];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    // 10-12..10-15 is 4 days, 3 rows: 10-14 is missing.
+    expect(text).toContain("Bu aralıkta 1 gün ölçüm yok.");
+  });
+
+  it("counts every missing day across several gaps (10-14, 10-20 and 10-21 -> 3)", async () => {
+    const days = ["10-12", "10-13", "10-15", "10-16", "10-17", "10-18", "10-19", "10-22"];
+    mockSnapshots.value = days
+      .map((d, i) => snapshot({ id: i + 1, takenAt: `2026-${d}T08:00:00.000Z` }))
+      .reverse();
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    // 10-12..10-22 is 11 days, 8 rows.
+    expect(text).toContain("Bu aralıkta 3 gün ölçüm yok.");
+  });
+
+  it("is absent when every day has a measurement", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 3, takenAt: "2026-10-14T08:00:00.000Z" }),
+      snapshot({ id: 2, takenAt: "2026-10-13T09:00:00.000Z" }),
+      snapshot({ id: 1, takenAt: "2026-10-12T07:35:00.000Z" }),
+    ];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).not.toContain("ölçüm yok");
+  });
+
+  it("is absent with a single snapshot (no chart, no range)", async () => {
+    mockSnapshots.value = [snapshot({ id: 1 })];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).not.toContain("ölçüm yok");
+  });
+
+  it("counts days by Istanbul calendar day: 21:30Z and 08:00Z next day are one day, not two", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 2, takenAt: "2026-10-13T08:00:00.000Z" }),
+      snapshot({ id: 1, takenAt: "2026-10-12T21:30:00.000Z" }),
+    ];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).not.toContain("ölçüm yok");
+  });
+
+  it("does not let a second measurement on one day hide a missing day", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 3, takenAt: "2026-10-14T08:00:00.000Z" }),
+      snapshot({ id: 2, takenAt: "2026-10-12T15:00:00.000Z" }),
+      snapshot({ id: 1, takenAt: "2026-10-12T08:00:00.000Z" }),
+    ];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    // 3 rows over 3 days, but 10-13 has none.
+    expect(text).toContain("Bu aralıkta 1 gün ölçüm yok.");
   });
 });

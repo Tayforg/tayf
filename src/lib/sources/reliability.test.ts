@@ -57,6 +57,7 @@ import {
   diversityFromZoneMix,
   getSourceReliability,
   insufficient,
+  istanbulDateSpan,
   reliabilityCountLine,
   toSourceReliability,
   type SourceReliability,
@@ -68,8 +69,11 @@ function raw(over: Record<string, unknown> = {}) {
   return {
     source_id: ID,
     window_days: 30,
-    window_start: "2026-08-30T00:00:00Z",
-    window_end: "2026-09-29T00:00:00Z",
+    // Istanbul-midnight aligned (2026-08-30 00:00 -> 2026-09-29 00:00 +03:00),
+    // so the window spans exactly 30 calendar dates. Production windows are
+    // rolling and almost never aligned; the h41 tests below use those shapes.
+    window_start: "2026-08-29T21:00:00Z",
+    window_end: "2026-09-28T21:00:00Z",
     n_articles: 600,
     active_days: 30,
     n_clusters: 100,
@@ -138,8 +142,8 @@ describe("toSourceReliability", () => {
   it("maps a valid row", () => {
     expect(toSourceReliability(raw())).toEqual({
       windowDays: 30,
-      windowStart: "2026-08-30T00:00:00Z",
-      windowEnd: "2026-09-29T00:00:00Z",
+      windowStart: "2026-08-29T21:00:00Z",
+      windowEnd: "2026-09-28T21:00:00Z",
       nArticles: 600,
       activeDays: 30,
       nClusters: 100,
@@ -293,6 +297,89 @@ describe("reliabilityCountLine", () => {
   });
 });
 
+// h41-derived-3 (2026-11-05): /source/haberport printed "30/30 gün yayın" with
+// no article on 2026-10-24 (fayn: 2026-10-11). The window is a rolling 30 x 24 h
+// that spans 31 Europe/Istanbul dates, the view clamped 31 -> 30, so a source
+// that skipped a whole interior day looked identical to a perfect one. The
+// denominator is now the number of dates the window spans.
+describe("istanbulDateSpan", () => {
+  it("counts the Istanbul dates a rolling window touches, both partial ends included", () => {
+    expect(istanbulDateSpan("2026-10-06T15:00:00Z", "2026-11-05T15:00:00Z")).toBe(31);
+    // fayn's refresh instant (14:15Z) is the same shape.
+    expect(istanbulDateSpan("2026-10-06T14:15:00Z", "2026-11-05T14:15:00Z")).toBe(31);
+  });
+
+  it("counts an Istanbul-midnight aligned window as exactly its length", () => {
+    expect(istanbulDateSpan("2026-10-05T21:00:00Z", "2026-11-04T21:00:00Z")).toBe(30);
+    expect(istanbulDateSpan("2026-10-06T00:00:00+03:00", "2026-11-05T00:00:00+03:00")).toBe(30);
+  });
+
+  it("treats windowEnd as exclusive: end - 1 ms decides the last date", () => {
+    // 21:00:00.000Z is Istanbul midnight: that instant belongs to the next date.
+    expect(istanbulDateSpan("2026-10-05T21:00:00Z", "2026-10-06T21:00:00Z")).toBe(1);
+    expect(istanbulDateSpan("2026-10-05T21:00:00Z", "2026-10-06T21:00:00.001Z")).toBe(2);
+    // One millisecond before Istanbul midnight is still the previous date.
+    expect(istanbulDateSpan("2026-10-05T20:59:59.999Z", "2026-10-05T21:00:00Z")).toBe(1);
+    expect(istanbulDateSpan("2026-10-05T20:59:59.999Z", "2026-10-05T21:00:00.001Z")).toBe(2);
+  });
+
+  it("handles a single instant-wide window, a year boundary and a leap day", () => {
+    expect(istanbulDateSpan("2026-10-06T12:00:00Z", "2026-10-06T12:00:00.001Z")).toBe(1);
+    expect(istanbulDateSpan("2026-12-31T20:00:00Z", "2027-01-01T00:00:00Z")).toBe(2);
+    expect(istanbulDateSpan("2028-02-27T21:00:00Z", "2028-03-01T21:00:00Z")).toBe(3);
+    expect(istanbulDateSpan("2027-02-27T21:00:00Z", "2027-03-01T21:00:00Z")).toBe(2);
+  });
+
+  it("uses a fixed UTC+3 (no daylight saving) in summer and winter alike", () => {
+    expect(istanbulDateSpan("2026-06-30T21:00:00Z", "2026-07-30T21:00:00Z")).toBe(30);
+    expect(istanbulDateSpan("2026-12-14T21:00:00Z", "2027-01-13T21:00:00Z")).toBe(30);
+    expect(istanbulDateSpan("2026-03-28T21:00:00Z", "2026-03-30T21:00:00Z")).toBe(2);
+    expect(istanbulDateSpan("2026-10-24T21:00:00Z", "2026-10-26T21:00:00Z")).toBe(2);
+  });
+
+  it("gives NaN for unparseable input", () => {
+    expect(istanbulDateSpan("x", "2026-11-05T15:00:00Z")).toBeNaN();
+    expect(istanbulDateSpan("2026-10-06T15:00:00Z", "not a date")).toBeNaN();
+    expect(istanbulDateSpan("", "")).toBeNaN();
+    expect(istanbulDateSpan(undefined as unknown as string, "2026-11-05T15:00:00Z")).toBeNaN();
+    expect(istanbulDateSpan("2026-10-06T15:00:00Z", null as unknown as string)).toBeNaN();
+  });
+
+  it("gives NaN for an empty or reversed window (not a window at all)", () => {
+    expect(istanbulDateSpan("2026-11-05T15:00:00Z", "2026-11-05T15:00:00Z")).toBeNaN();
+    expect(istanbulDateSpan("2026-11-05T15:00:00Z", "2026-10-06T15:00:00Z")).toBeNaN();
+  });
+
+  it("agrees with an Intl.DateTimeFormat date enumeration on 300 pseudo-random windows", () => {
+    // Independent oracle: walk the window in 15-minute steps (plus end - 1 ms)
+    // and count the distinct Europe/Istanbul calendar dates seen.
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/Istanbul",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    let seed = 41;
+    const next = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    const base = Date.parse("2026-01-01T00:00:00Z");
+    for (let i = 0; i < 300; i++) {
+      const start = base + Math.floor(next() * 365 * 86_400_000);
+      const length = 1 + Math.floor(next() * 40 * 86_400_000);
+      const end = start + length;
+      const seen = new Set<string>();
+      for (let t = start; t < end; t += 15 * 60_000) seen.add(fmt.format(t));
+      seen.add(fmt.format(end - 1));
+      expect(
+        istanbulDateSpan(new Date(start).toISOString(), new Date(end).toISOString()),
+        `${new Date(start).toISOString()} -> ${new Date(end).toISOString()}`,
+      ).toBe(seen.size);
+    }
+  });
+});
+
 describe("buildReliabilityView", () => {
   const byKey = (rows: ReturnType<typeof buildReliabilityView>) =>
     Object.fromEntries(rows.map((r) => [r.key, r]));
@@ -331,7 +418,9 @@ describe("buildReliabilityView", () => {
       expect(b.value).toBe("285,8 haber/gün · 30/30 gün yayın");
     });
 
-    it("clamps active_days = window_days + 1 to the window for display", () => {
+    it("clamps active_days = window_days + 1 to an aligned window (it spans only 30 dates)", () => {
+      // An article stamped exactly at window_end (`<= v_end` in 111) lands on
+      // the next Istanbul date, so activeDays can exceed an aligned span.
       const row = byKey(buildReliabilityView(rel({ activeDays: 31 }), null)).cadence!;
       expect(row.value).toBe("20 haber/gün · 30/30 gün yayın");
       expect(row.value).not.toContain("31");
@@ -358,10 +447,196 @@ describe("buildReliabilityView", () => {
 
     it("uses the row's own window length", () => {
       const row = byKey(
-        buildReliabilityView(rel({ windowDays: 14, nArticles: 28, activeDays: 14 }), null),
+        buildReliabilityView(
+          rel({
+            windowDays: 14,
+            windowStart: "2026-09-14T21:00:00Z",
+            windowEnd: "2026-09-28T21:00:00Z",
+            nArticles: 28,
+            activeDays: 14,
+          }),
+          null,
+        ),
       ).cadence!;
       expect(row.value).toBe("2 haber/gün · 14/14 gün yayın");
       expect(row.how).toContain("Son 14 günün");
+    });
+  });
+
+  describe("Yayın sıklığı: the denominator is the dates the window spans (h41-derived-3)", () => {
+    // The production shape: a rolling 30 x 24 h window ending at a refresh
+    // instant (not Istanbul midnight), so it touches 31 calendar dates.
+    const ROLLING = {
+      windowStart: "2026-10-06T15:00:00Z",
+      windowEnd: "2026-11-05T15:00:00Z",
+    };
+    // The same window, Istanbul-midnight aligned: 30 dates.
+    const ALIGNED = {
+      windowStart: "2026-10-05T21:00:00Z",
+      windowEnd: "2026-11-04T21:00:00Z",
+    };
+    const HOW_30 =
+      "Son 30 günün haber sayısı 30’a bölünür; etkin gün, en az bir haber yayımlanan gündür (Türkiye saati).";
+    const HOW_31 =
+      "Son 30 günün haber sayısı 30’a bölünür. Etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati); 30 günlük pencere 31 takvim gününe yayılır, ilk ve son gün kısmidir.";
+    const cadence = (over: Partial<SourceReliability>) =>
+      byKey(buildReliabilityView(rel(over), null)).cadence!;
+
+    it("prints 30/31 for a source that missed one whole interior day (haberport shape)", () => {
+      // 15 615 articles = 520,5 per day over 30; 2026-10-24 has none.
+      const row = cadence({ ...ROLLING, nArticles: 15_615, activeDays: 30 });
+      expect(row.value).toBe("520,5 haber/gün · 30/31 gün yayın");
+      expect(row.value).not.toContain("30/30");
+    });
+
+    it("prints 30/31 for the fayn shape too (window ends 14:15Z, 2026-10-11 empty)", () => {
+      const row = cadence({
+        windowStart: "2026-10-06T14:15:00Z",
+        windowEnd: "2026-11-05T14:15:00Z",
+        nArticles: 9_000,
+        activeDays: 30,
+      });
+      expect(row.value).toBe("300 haber/gün · 30/31 gün yayın");
+    });
+
+    it("prints 31/31 for a source active on every date the window touches", () => {
+      const row = cadence({ ...ROLLING, activeDays: 31 });
+      expect(row.value).toBe("20 haber/gün · 31/31 gün yayın");
+    });
+
+    it("keeps 30/30 for an aligned window with 30 active days", () => {
+      const row = cadence({ ...ALIGNED, activeDays: 30 });
+      expect(row.value).toBe("20 haber/gün · 30/30 gün yayın");
+      expect(row.how).toBe(HOW_30);
+    });
+
+    it("never prints more days than the window spans, even if the row says so", () => {
+      // An aligned window cannot hold 31 dates (an article stamped exactly at
+      // window_end is the only way to get there), so it is clamped.
+      expect(cadence({ ...ALIGNED, activeDays: 31 }).value).toBe("20 haber/gün · 30/30 gün yayın");
+    });
+
+    it("leaves the rate on windowDays, not on the date span", () => {
+      // 600 / 30 = 20, not 600 / 31.
+      expect(cadence({ ...ROLLING, nArticles: 600, activeDays: 30 }).value).toBe(
+        "20 haber/gün · 30/31 gün yayın",
+      );
+    });
+
+    it("prints a low day count against the full span, not against windowDays", () => {
+      expect(cadence({ ...ROLLING, nArticles: 3, activeDays: 1 }).value).toBe(
+        "0,1 haber/gün · 1/31 gün yayın",
+      );
+    });
+
+    it("falls back to windowDays when the window instants are unparseable", () => {
+      const bad = cadence({ windowStart: "x", windowEnd: "y", activeDays: 31 });
+      expect(bad.value).toBe("20 haber/gün · 30/30 gün yayın");
+      expect(bad.how).toBe(HOW_30);
+      expect(cadence({ windowStart: "x", windowEnd: "y", activeDays: 29 }).value).toBe(
+        "20 haber/gün · 29/30 gün yayın",
+      );
+    });
+
+    it("falls back to windowDays when the window is shorter than windowDays (inconsistent row)", () => {
+      // A windowDays-long window always touches at least windowDays dates; a
+      // smaller span means the row disagrees with itself, so do not shrink the
+      // denominator below the one the rate divides by.
+      const row = cadence({
+        windowStart: "2026-11-01T15:00:00Z",
+        windowEnd: "2026-11-05T15:00:00Z",
+        activeDays: 4,
+      });
+      expect(row.value).toBe("20 haber/gün · 4/30 gün yayın");
+      expect(row.how).toBe(HOW_30);
+    });
+
+    it("explains a spanning window in the `how` text, with the exact wording", () => {
+      expect(cadence({ ...ROLLING, activeDays: 30 }).how).toBe(HOW_31);
+    });
+
+    it("keeps today's `how` text when span === windowDays", () => {
+      expect(cadence({ ...ALIGNED, activeDays: 30 }).how).toBe(HOW_30);
+    });
+
+    it("uses the row's own window length in both the value and the `how` text", () => {
+      const row = cadence({
+        windowDays: 14,
+        windowStart: "2026-10-22T15:00:00Z",
+        windowEnd: "2026-11-05T15:00:00Z",
+        nArticles: 28,
+        activeDays: 14,
+      });
+      expect(row.value).toBe("2 haber/gün · 14/15 gün yayın");
+      expect(row.how).toBe(
+        "Son 14 günün haber sayısı 14’a bölünür. Etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati); 14 günlük pencere 15 takvim gününe yayılır, ilk ve son gün kısmidir.",
+      );
+    });
+
+    it("says nothing about days when there were no articles", () => {
+      const row = cadence({ ...ROLLING, nArticles: 0, activeDays: 0, nClusters: 0, nWireCopy: 0 });
+      expect(row.value).toBe("Son 30 günde haber yok");
+    });
+
+    it("replays the production shape end to end: per-date articles -> active_days -> the card text", () => {
+      // Build each source's article instants (one per Istanbul date of the
+      // window, minus the empty day), count distinct Istanbul dates the way
+      // 111's `count(distinct (published_at at time zone 'Europe/Istanbul')::date)`
+      // does, and feed that count through the validator and the view.
+      const fmt = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Europe/Istanbul",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+      const windowStart = "2026-10-06T15:00:00Z"; // 18:00 Istanbul
+      const windowEnd = "2026-11-05T15:00:00Z"; // 18:00 Istanbul
+      const dates: string[] = [];
+      for (let d = 0; d < 31; d++) {
+        dates.push(fmt.format(Date.parse("2026-10-06T12:00:00Z") + d * 86_400_000));
+      }
+      expect(dates[0]).toBe("2026-10-06");
+      expect(dates[30]).toBe("2026-11-05");
+
+      const articlesFor = (emptyDate: string | null): number[] =>
+        dates
+          .filter((date) => date !== emptyDate)
+          .map((date) => {
+            // The window opens at 18:00 on the first date and closes at 18:00
+            // on the last, so pick a time of day inside it for each.
+            const time = date === dates[0] ? "20:00" : date === dates[30] ? "10:00" : "12:00";
+            return Date.parse(`${date}T${time}:00+03:00`);
+          });
+
+      const cadenceFor = (emptyDate: string | null) => {
+        const times = articlesFor(emptyDate);
+        for (const t of times) {
+          expect(t).toBeGreaterThanOrEqual(Date.parse(windowStart));
+          expect(t).toBeLessThanOrEqual(Date.parse(windowEnd));
+        }
+        const activeDays = new Set(times.map((t) => fmt.format(t))).size;
+        const row = toSourceReliability(
+          raw({
+            window_start: windowStart,
+            window_end: windowEnd,
+            n_articles: times.length * 100,
+            active_days: activeDays,
+          }),
+        )!;
+        return { activeDays, cadence: byKey(buildReliabilityView(row, null)).cadence! };
+      };
+
+      const haberport = cadenceFor("2026-10-24");
+      expect(haberport.activeDays).toBe(30);
+      expect(haberport.cadence.value).toBe("100 haber/gün · 30/31 gün yayın");
+
+      const fayn = cadenceFor("2026-10-11");
+      expect(fayn.activeDays).toBe(30);
+      expect(fayn.cadence.value).toBe("100 haber/gün · 30/31 gün yayın");
+
+      const perfect = cadenceFor(null);
+      expect(perfect.activeDays).toBe(31);
+      expect(perfect.cadence.value).toBe("103,3 haber/gün · 31/31 gün yayın");
     });
   });
 

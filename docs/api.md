@@ -255,7 +255,9 @@ Three more RSS 2.0 feeds, all `GET`, unkeyed, `Content-Type: application/rss+xml
 | `/rss/kor-noktalar.xml` | the blindspots feed (the `/blindspots` page). Item `link`s carry `utm_campaign=kor_nokta`; each description starts with `Kör nokta: ağırlıkla {zone} kaynakları (%N).` |
 | `/blindspots/rss.xml` | the same feed as `/rss/kor-noktalar.xml`, produced by the same code; only the `atom:link rel="self"` URL differs. |
 
-Every item has the headline as `title`, the cluster page as `link` (with the UTM parameters above), the plain `/cluster/{id}` URL as `guid`, the cluster's `first_published` as `pubDate`, and a description such as `7 kaynak · İktidar 4 · Bağımsız 2 · Muhalefet 1`: the source count, then the three zones joined by ` · ` (not commas); every zone is printed, zero counts included (`4 kaynak · İktidar 2 · Bağımsız 1 · Muhalefet 0`), so a consumer can split on ` · ` and always gets the same parts. The UTM parameters are never part of the `guid`, so a feed reader does not see old items as new.
+Every item has the headline as `title`, the cluster page as `link` (with the UTM parameters above), the plain `/cluster/{id}` URL as `guid`, the cluster's `first_published` as `pubDate`, and a description such as `7 kaynak · İktidar 4 · Bağımsız 2 · Muhalefet 1`: the source count, then the three zones joined by ` · ` (not commas); every zone is printed, zero counts included (`4 kaynak · İktidar 2 · Bağımsız 1 · Muhalefet 0`), so a consumer can split on ` · ` and always gets the same parts (four, after any `Kör nokta: …` prefix). The UTM parameters are never part of the `guid`, so a feed reader does not see old items as new.
+
+The source count counts every member of the cluster, aggregator and niche sources included, but the three zones count outlet and wire sources only (the sources that vote on the card's spectrum). When aggregator or niche members are present, the count carries the number of counted sources in parentheses, `{N} kaynak ({M} sınıflandırılmış)`, and the zones add up to `M`: `10 kaynak (8 sınıflandırılmış) · İktidar 8 · Bağımsız 0 · Muhalefet 0`. When every member counts there are no parentheses and the zones add up to `N`. The parenthesis is part of the first ` · ` part, so the part count does not change. The `/rss/kor-noktalar.xml` description puts the `Kör nokta: ağırlıkla {zone} kaynakları (%N). ` prefix in front of that same text.
 
 - **Item cap**: 30 per feed.
 - **Cache**: `Cache-Control: public, max-age=300, s-maxage=300` on a `200` (5 minutes; unlike `/rss.xml` there is no `stale-while-revalidate`).
@@ -654,7 +656,11 @@ see *Paging* below).
 ```
 
 Only clusters whose members are ≥60% `politika`/`son_dakika` are returned
-(same majority rule the home feed uses). Per member, only `{slug, zone}` is
+(same majority rule the home feed uses). `sources` lists every member source,
+aggregator and niche sources included, while `bias_distribution` (and the
+`source_count` of `GET /api/v1/alerts/blindspots`) count outlet and wire
+sources only, so `sources` can be longer than the `bias_distribution` total.
+Per member, only `{slug, zone}` is
 ever surfaced — no article title, URL, image or description is present
 anywhere in the payload; the only URL in a cluster record is Tayf's own
 `/cluster/<id>` link. `topic7` is nullable: the `clusters.topic7` column

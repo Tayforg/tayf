@@ -3,13 +3,16 @@
 import { useEffect } from "react";
 import Link from "next/link";
 import { AlertTriangle } from "lucide-react";
+import { RetryButton } from "@/components/ui/retry-button";
 
 export default function GlobalError({
   error,
-  reset,
+  retry,
 }: {
   error: Error & { digest?: string };
-  reset: () => void;
+  // Next 16 passes `retry` (refresh + reset in a transition) next to `reset`
+  // (clears boundary state only, no re-fetch); recovery needs the former.
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[global-error]", error);
@@ -33,13 +36,10 @@ export default function GlobalError({
           Beklenmeyen bir hata oluştu. Tekrar deneyebilir veya ana sayfaya dönebilirsiniz.
         </p>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={reset}
-            className="inline-flex items-center gap-1.5 rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium hover:bg-foreground/90 transition-colors"
-          >
-            Tekrar dene
-          </button>
+          <RetryButton
+            onRetry={retry}
+            className="inline-flex items-center gap-1.5 rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium hover:bg-foreground/90 transition-colors aria-disabled:opacity-60"
+          />
           <Link
             href="/"
             className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"

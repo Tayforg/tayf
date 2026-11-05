@@ -72,15 +72,71 @@ describe("blindspotRssItem", () => {
       bundle("c1", {
         dominantZone: "muhalefet",
         dominantPct: 2 / 3,
+        // 3 voters (1 iktidar, 2 muhalefet) plus 3 non-voting members.
+        sources: [
+          { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
+          { id: "s2", name: "B", bias: "opposition", kind: "outlet" },
+          { id: "s3", name: "C", bias: "opposition", kind: "wire" },
+          { id: "s4", name: "D", bias: "center", kind: "aggregator" },
+          { id: "s5", name: "E", bias: "center", kind: "aggregator" },
+          { id: "s6", name: "F", bias: "center", kind: "niche" },
+        ],
         votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 2 },
-      }),
+      } as unknown as Partial<BlindspotBundle>),
     );
-    // "6 kaynak" is sources.length (the card's count, aggregator included);
-    // the zone line is the voting tally, so the aggregator's Bağımsız vote
-    // is not there (a raw recount of `sources` would read Bağımsız 2).
+    // "6 kaynak" is every listed member (the card's count); the parenthesised
+    // 3 is the voting count the zones add up to. The non-voting members'
+    // Bağımsız bias is not in the zones (a raw recount would read Bağımsız 3).
     expect(item.description).toBe(
-      "Kör nokta: ağırlıkla Muhalefet kaynakları (%67). 6 kaynak · İktidar 1 · Bağımsız 0 · Muhalefet 2",
+      "Kör nokta: ağırlıkla Muhalefet kaynakları (%67). 6 kaynak (3 sınıflandırılmış) · İktidar 1 · Bağımsız 0 · Muhalefet 2",
     );
+  });
+
+  it("marks the voting count when 2 of 10 members are aggregators, so the zones add up", () => {
+    const item = blindspotRssItem(
+      BASE,
+      bundle("c5", {
+        dominantPct: 1,
+        sources: [
+          ...Array.from({ length: 8 }, (_, i) => ({
+            id: `v${i}`,
+            name: `V${i}`,
+            bias: "pro_government",
+            kind: "outlet",
+          })),
+          { id: "a1", name: "Agg1", bias: "center", kind: "aggregator" },
+          { id: "a2", name: "Agg2", bias: "center", kind: "aggregator" },
+        ],
+        votingZoneCounts: { iktidar: 8, bagimsiz: 0, muhalefet: 0 },
+      } as unknown as Partial<BlindspotBundle>),
+    );
+    expect(item.description).toBe(
+      "Kör nokta: ağırlıkla İktidar kaynakları (%100). 10 kaynak (8 sınıflandırılmış) · İktidar 8 · Bağımsız 0 · Muhalefet 0",
+    );
+    expect(item.description.split(" · ")).toHaveLength(4);
+  });
+
+  it("keeps the bare count when every member votes", () => {
+    const item = blindspotRssItem(
+      BASE,
+      bundle("c6", {
+        dominantPct: 4 / 7,
+        sources: [
+          { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
+          { id: "s2", name: "B", bias: "pro_government", kind: "outlet" },
+          { id: "s3", name: "C", bias: "state_media", kind: "wire" },
+          { id: "s4", name: "D", bias: "gov_leaning", kind: "outlet" },
+          { id: "s5", name: "E", bias: "center", kind: "outlet" },
+          { id: "s6", name: "F", bias: "center", kind: "outlet" },
+          { id: "s7", name: "G", bias: "opposition", kind: "outlet" },
+        ],
+        votingZoneCounts: { iktidar: 4, bagimsiz: 2, muhalefet: 1 },
+      } as unknown as Partial<BlindspotBundle>),
+    );
+    expect(item.description).toBe(
+      "Kör nokta: ağırlıkla İktidar kaynakları (%57). 7 kaynak · İktidar 4 · Bağımsız 2 · Muhalefet 1",
+    );
+    expect(item.description.split(" · ")).toHaveLength(4);
   });
 
   it("prints %84 (the bar's largest-remainder figure), not Math.round's %85, for an 11/1/1 tally", () => {

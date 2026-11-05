@@ -60,6 +60,21 @@ import {
 // entries from an in-memory handler, so cross-instance reuse can only be
 // verified on a real deployment (count rpc/econ_feed in Supabase edge_logs).
 //
+// h41-resilience-3: "every fetcher throws" is the FETCHER contract, not the page
+// contract. The pages decide which reads are essential and keep the throw for
+// those: fetchEconFeed, fetchTopTickers, fetchRecentDisclosures, and on
+// /ekonomi/[ticker] the existence probe and fetchTickerPage. The decorative reads
+// are wrapped by the page in `optionalRead` (./optional-read.ts), which turns a
+// rejection into the section's empty state plus one warning:
+//   /ekonomi           fetchCircuitBreakers, fetchQuoteStats, fetchReferencePrices
+//   /ekonomi/[ticker]  fetchQuoteStats, fetchIntraday
+// The catch sits OUTSIDE the cache (in the page body, after connection()), so the
+// fallback is rendered but never stored: the `"use cache"` bodies above still
+// park only their own `minutes` sentinel, and the fetchers themselves keep
+// throwing. That also retires the "cached empty page" worry for these reads: a
+// degraded section is request-time output. Do not move the catch into a fetcher
+// or a `"use cache"` body, or a blip would be cached for a full cacheLife.
+//
 // Input normalisation and empty-input short-circuits (fetchQuoteStats,
 // fetchReferencePrices) live in the exported function, so the cached function
 // only ever sees the normalised argument and an empty request makes no cache

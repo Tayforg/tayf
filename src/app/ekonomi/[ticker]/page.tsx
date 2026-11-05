@@ -24,7 +24,16 @@ import {
   limitFlag,
   moveClass,
 } from "@/lib/finance/format";
-import { fetchIntraday, fetchQuoteStats, fetchTickerPage, haltNoticeToShow, latestTradingHalt } from "@/lib/finance/queries";
+import { optionalRead } from "@/lib/finance/optional-read";
+import {
+  fetchIntraday,
+  fetchQuoteStats,
+  fetchTickerPage,
+  haltNoticeToShow,
+  latestTradingHalt,
+  type Bar5m,
+  type QuoteStat,
+} from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
 import {
   chartBaseline,
@@ -45,6 +54,12 @@ import { cn } from "@/lib/utils";
 // session's 5-minute chart with headlines marked on it, 30 days of press
 // attention, the articles that named it, and its KAP disclosures with how
 // fast (or how early) the press reacted.
+//
+// h41-resilience-3: the ticker's own data (existence probe, fetchTickerPage) is
+// essential and still throws to error.tsx. The quote stats and the intraday
+// bars only decorate it, so they go through optionalRead: without the stats the
+// day move is unknown ("—", no tavan/taban tag); without the bars the chart slot
+// says it could not load.
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/;
 
@@ -250,17 +265,21 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // ticker. Every render below already treats `page.company` as nullable.
   const page = await fetchTickerPage(ticker);
 
-  const [quotes, stats, intraday] = await Promise.all([
+  const [quotes, statsRead, intradayRead] = await Promise.all([
     getQuotes([ticker]),
-    fetchQuoteStats([ticker]),
-    fetchIntraday(ticker),
+    optionalRead<Record<string, QuoteStat>>("quote-stats", fetchQuoteStats([ticker]), {}),
+    optionalRead<{ day: string | null; bars: Bar5m[] }>("intraday", fetchIntraday(ticker), { day: null, bars: [] }),
   ]);
-  const stat = stats[ticker];
+  const stat = statsRead.value[ticker];
+  const intraday = intradayRead.value;
   // h36-data-1: Yahoo's previous close is the one from two sessions back during
   // the session; re-base the day move on the settled close in bist_quote_stats
   // (and make a move past the +-10 % band unknown) before anything reads it.
+  // When the stats read itself failed there is no settled close to re-base on and
+  // Yahoo's own move is the wrong one, so the quote loses its baseline instead:
+  // price shown, move "—", no tavan/taban tag (h41-resilience-3).
   const yahooQuote = quotes[ticker];
-  const quote = yahooQuote ? rebaseQuoteOnStat(yahooQuote, stat) : undefined;
+  const quote = yahooQuote ? (statsRead.failed ? { ...yahooQuote, hasBaseline: false } : rebaseQuoteOnStat(yahooQuote, stat)) : undefined;
   // A quote is "halted" when its last trade is days old: no move, limit tag or
   // volume is shown for it. A quote without a baseline (hasBaseline false) has
   // a placeholder 0 move, which is unknown, not flat.
@@ -366,10 +385,16 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
 
       <Panel
         title="Seans içi"
-        meta={sessionDay ? `${sessionDay.split("-").reverse().join(".")}, 5 dakikalık kapanışlar, haberler işaretli` : "5 dakikalık veri henüz yok"}
+        meta={
+          sessionDay
+            ? `${sessionDay.split("-").reverse().join(".")}, 5 dakikalık kapanışlar, haberler işaretli`
+            : intradayRead.failed
+              ? "5 dakikalık veri yüklenemedi"
+              : "5 dakikalık veri henüz yok"
+        }
       >
         {intraday.bars.length < 2 ? (
-          <PanelEmpty>{intradayEmptyCopy(page.company)}</PanelEmpty>
+          <PanelEmpty>{intradayRead.failed ? "Gün içi grafik şu an yüklenemedi." : intradayEmptyCopy(page.company)}</PanelEmpty>
         ) : (
           <IntradayChart
             bars={intraday.bars}

@@ -62,9 +62,21 @@ function BreakerChip({ breaker }: { breaker: Disclosure }) {
   );
 }
 
-export function BreakerStrip({ breakers }: { breakers: readonly Disclosure[] }) {
+/**
+ * `unavailable` is set by /ekonomi when the circuit-breaker read failed
+ * (h41-resilience-3). With no notice to show, the strip then says so in one
+ * muted line instead of vanishing, because an absent strip reads as "no circuit
+ * breakers today". Notices that did arrive are always listed.
+ */
+export function BreakerStrip({ breakers, unavailable = false }: { breakers: readonly Disclosure[]; unavailable?: boolean }) {
   const { shown, rest } = selectBreakers(breakers);
-  if (shown.length === 0) return null;
+  if (shown.length === 0) {
+    return unavailable ? (
+      <p className="border border-border bg-black/25 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+        Devre kesici listesi şu an yüklenemedi.
+      </p>
+    ) : null;
+  }
 
   return (
     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border border-border bg-black/25 px-3 py-1.5 font-mono text-[11px]">

@@ -301,3 +301,36 @@ describe("BreakerStrip", () => {
     expect(countOccurrences(markup, LINK_PREFIX)).toBe(9);
   });
 });
+
+// h41-resilience-3: a failed circuit-breaker read used to take the whole
+// /ekonomi page to the error boundary. The page now hands the strip
+// `unavailable` and an empty list; the strip says so in one muted line instead
+// of vanishing (which would read as "no circuit breakers today").
+describe("BreakerStrip unavailable", () => {
+  const NOTE = "Devre kesici listesi şu an yüklenemedi.";
+
+  it("renders a one-line muted note and no links when the read failed", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={[]} unavailable />);
+
+    expect(markup).toContain(NOTE);
+    expect(markup).toContain("text-muted-foreground");
+    expect(markup).not.toContain("<details");
+    expect(markup).not.toContain(LINK_PREFIX);
+    expect(markup).not.toContain("devre kesici bugün");
+    expect(countOccurrences(markup, "<p")).toBe(1);
+  });
+
+  it("keeps the note out of the way when the read succeeded, empty or not", () => {
+    expect(renderToStaticMarkup(<BreakerStrip breakers={[]} />)).toBe("");
+    expect(renderToStaticMarkup(<BreakerStrip breakers={[]} unavailable={false} />)).toBe("");
+    expect(renderToStaticMarkup(<BreakerStrip breakers={distinctRows(2)} unavailable={false} />)).not.toContain(NOTE);
+  });
+
+  it("still lists real notices if a caller passes both (data beats the note)", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={distinctRows(2)} unavailable />);
+
+    expect(markup).toContain("devre kesici bugün");
+    expect(countOccurrences(markup, LINK_PREFIX)).toBe(2);
+    expect(markup).not.toContain(NOTE);
+  });
+});

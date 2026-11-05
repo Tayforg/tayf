@@ -7,7 +7,7 @@ import {
   withUtm,
   type RssItemInput,
 } from "@/lib/feeds/rss-builder";
-import { formatZoneLine } from "@/lib/feeds/zone-line";
+import { formatZoneLine, sourceCountHead } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 
 // The blindspots RSS feed, served from two URLs that MUST stay identical:
@@ -34,10 +34,12 @@ export function blindspotRssItem(
   // The exact voting tally dominantZone/dominantPct are derived from. Both the
   // zone line and the "%N" in the prefix come from it, and N is the same
   // largest-remainder percent the card's bar and chip print (11/1/1 is 84,
-  // not Math.round's 85); "N kaynak" stays the full source count, as on the
-  // card. dominantPct is only the sort key, never copy.
+  // not Math.round's 85). The head is the full member count, as on the card,
+  // with the voting count in parentheses when aggregator or niche members make
+  // it differ, so the zones add up to what is printed. dominantPct is only the
+  // sort key, never copy.
   const zoneLine = formatZoneLine(bundle.votingZoneCounts);
-  const n = bundle.sources.length;
+  const head = sourceCountHead(bundle.sources.length, bundle.votingZoneCounts);
   const zoneLabel = ZONE_META[bundle.dominantZone].label;
   const pct = dominantZonePercent(bundle.votingZoneCounts, bundle.dominantZone);
   const prefix = `Kör nokta: ağırlıkla ${zoneLabel} kaynakları (%${pct}). `;
@@ -47,7 +49,7 @@ export function blindspotRssItem(
     link,
     guid: `${base}/cluster/${bundle.cluster.id}`,
     pubDate: bundle.cluster.first_published,
-    description: `${prefix}${n} kaynak · ${zoneLine}`,
+    description: `${prefix}${head} · ${zoneLine}`,
   };
 }
 

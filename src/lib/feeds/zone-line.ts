@@ -13,6 +13,14 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 // Aggregators and niche feeds are listed on the card but never vote, so
 // `votingZoneCounts` is what every surface that prints a zone line calls.
 // `zoneCountsFromSources` stays for raw, kind-blind tallies.
+//
+// The head in front of the zone line ("N kaynak") counts EVERY member, the
+// way the card does, while the zones count voting sources only, so the two
+// numbers can differ. `sourceCountHead` prints the full count and, when it
+// differs from the zone total, the voting count too: "10 kaynak (8
+// sınıflandırılmış) · İktidar 8 · Bağımsız 0 · Muhalefet 0". The zones then
+// always add up to the parenthesised number (or to N when there is none),
+// the same wording the share text uses (src/lib/clusters/share.ts).
 
 const ZONE_ORDER: readonly MediaDnaZone[] = [
   "iktidar",
@@ -65,8 +73,9 @@ export function zoneCountsFromSources(
  * aggregator and niche are dropped, and a missing/null `kind` counts as
  * voting (`isVotingKind`'s default). This is the card's basis (DB
  * `bias_distribution`, `zoneTallyOf`), so a zone line printed from it agrees
- * with the card the reader clicks through to. "N kaynak" stays the full
- * `sources.length`, matching the card's source count.
+ * with the card the reader clicks through to. The line's head ("N kaynak")
+ * is the full member count, so print it through `sourceCountHead`, which adds
+ * the voting count in parentheses when the two differ.
  */
 export function votingZoneCounts(
   sources: ReadonlyArray<ZoneLineSource>,
@@ -79,4 +88,23 @@ export function formatZoneLine(counts: Record<MediaDnaZone, number>): string {
   return ZONE_ORDER.map((zone) => `${ZONE_LABELS_TR[zone]} ${counts[zone]}`).join(
     " · ",
   );
+}
+
+/**
+ * The head that goes in front of a zone line: 'N kaynak', or
+ * 'N kaynak (M sınıflandırılmış)' when only M of the N members vote, so the
+ * zones that follow add up to the number the reader can see. `total` is every
+ * member (aggregator and niche included, as on the card); M is the sum of
+ * `counts`, the voting tally.
+ *
+ * When the zones add up to N or more there is nothing to qualify (a stale or
+ * synthetic tally can exceed the member list): the bare count is kept.
+ */
+export function sourceCountHead(
+  total: number,
+  counts: Record<MediaDnaZone, number>,
+): string {
+  const voting = ZONE_ORDER.reduce((sum, zone) => sum + counts[zone], 0);
+  if (voting >= total) return `${total} kaynak`;
+  return `${total} kaynak (${voting} sınıflandırılmış)`;
 }

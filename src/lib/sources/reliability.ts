@@ -27,8 +27,13 @@ import {
 //     the karne).
 //   - Cadence: n_articles = every article of the source published in the
 //     window (not in the future); active_days = distinct Europe/Istanbul dates
-//     among them. A 30-day window spans up to 31 dates, so activeDays may be
-//     windowDays + 1; the view clamps it for display.
+//     among them. A rolling 30 x 24 h window ends mid-day, so it touches 31
+//     calendar dates (30 only when it is Istanbul-midnight aligned) and
+//     activeDays may be windowDays + 1. The card prints
+//     `activeDays/istanbulDateSpan` (h41-derived-3): the denominator is the
+//     number of dates the stored window touches, never clamped down to
+//     windowDays, so a source that skipped a whole interior day cannot read
+//     30/30. The rate stays n_articles / windowDays.
 //   - Wire copy: per cluster, members deduped to the earliest article per
 //     source (dedupeBySource); the cluster is wire per detectWireRedistribution
 //     (>= 3 members, distinct hashes / members <= WIRE_UNIQUE_HASH_RATIO, a
@@ -201,14 +206,64 @@ export function insufficient(n: number, min: number): string {
   return `Yeterli örnek yok (n = ${formatCountTr(n)}, en az ${formatCountTr(min)}).`;
 }
 
+// Europe/Istanbul has been UTC+3 all year since 2016 (no daylight saving).
+const ISTANBUL_OFFSET_MS = 3 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Whole days since the epoch of the Istanbul calendar date containing `ms`. */
+function istanbulDayNumber(ms: number): number {
+  return Math.floor((ms + ISTANBUL_OFFSET_MS) / DAY_MS);
+}
+
+/**
+ * How many Europe/Istanbul calendar dates the window touches: from the date of
+ * `windowStartIso` to the date of `windowEndIso - 1 ms`, inclusive (the end
+ * instant is exclusive, so an Istanbul-midnight end does not count the next
+ * date). A rolling `windowDays x 24 h` window gives `windowDays + 1`; one that
+ * starts at Istanbul midnight gives `windowDays`. NaN for unparseable input or
+ * a window that is empty or reversed.
+ */
+export function istanbulDateSpan(
+  windowStartIso: string,
+  windowEndIso: string,
+): number {
+  const start = Date.parse(windowStartIso);
+  const end = Date.parse(windowEndIso);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return NaN;
+  }
+  return istanbulDayNumber(end - 1) - istanbulDayNumber(start) + 1;
+}
+
+/**
+ * The cadence denominator: the dates the row's window touches. Falls back to
+ * windowDays when the instants are unusable, and also when the span is SHORTER
+ * than windowDays (a windowDays-long window always touches at least that many
+ * dates, so a smaller span means the row disagrees with itself; the rate
+ * divides by windowDays, and the denominator must not drop below it).
+ */
+function cadenceSpan(rel: SourceReliability): number {
+  const span = istanbulDateSpan(rel.windowStart, rel.windowEnd);
+  return Number.isFinite(span) && span >= rel.windowDays ? span : rel.windowDays;
+}
+
 function cadenceValue(rel: SourceReliability): string {
   if (rel.nArticles === 0) return `Son ${rel.windowDays} günde haber yok`;
   const perDay = rel.nArticles / rel.windowDays;
   // A non-zero rate must never be shown as "0".
   const rate =
     Math.round(perDay * 10) === 0 ? "<0,1" : RATE_FORMAT.format(perDay);
-  const days = Math.min(rel.activeDays, rel.windowDays);
-  return `${rate} haber/gün · ${days}/${rel.windowDays} gün yayın`;
+  const span = cadenceSpan(rel);
+  const days = Math.min(rel.activeDays, span);
+  return `${rate} haber/gün · ${days}/${span} gün yayın`;
+}
+
+function cadenceHow(rel: SourceReliability): string {
+  const span = cadenceSpan(rel);
+  if (span === rel.windowDays) {
+    return `Son ${rel.windowDays} günün haber sayısı ${rel.windowDays}’a bölünür; etkin gün, en az bir haber yayımlanan gündür (Türkiye saati).`;
+  }
+  return `Son ${rel.windowDays} günün haber sayısı ${rel.windowDays}’a bölünür. Etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati); ${rel.windowDays} günlük pencere ${span} takvim gününe yayılır, ilk ve son gün kısmidir.`;
 }
 
 // One full sentence that names the role of the number (the share's
@@ -229,7 +284,7 @@ export function buildReliabilityView(
     label: "Yayın sıklığı",
     value: cadenceValue(rel),
     note: null,
-    how: `Son ${rel.windowDays} günün haber sayısı ${rel.windowDays}’a bölünür; etkin gün, en az bir haber yayımlanan gündür (Türkiye saati).`,
+    how: cadenceHow(rel),
     basis: null,
   };
 
