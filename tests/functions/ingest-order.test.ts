@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CYCLE_PERIOD_MS,
   ISOLATE_ITEM_BUDGET,
+  KNOWN_ITEMS_HEADROOM,
   KNOWN_ITEMS_MAX_SIZE_RATIO,
   createItemBudget,
   createParseBudget,
@@ -9,9 +10,12 @@ import {
   groupChunkBySource,
   interleaveBySource,
   isolateItems,
+  pickStaleReservation,
   prioritizeIds,
   prioritizeStale,
+  reserveItemsFor,
   rotateForCycle,
+  summarizeStale,
   upsertWithBisect,
 } from "../../supabase/functions/ingest/order.ts";
 
@@ -754,5 +758,418 @@ describe("prioritizeStale", () => {
     expect(admitted(rows)).toEqual(["x", "y"]); // today: BHA is starved
     // the first stale feed gets the used === 0 admission; x (2833 + 2200 > 5000) waits, y (2833 + 1500) fits
     expect(admitted(prioritizeStale(rows, NOW))).toEqual(["bha", "y"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h39-pipeline2-1: #198 put the stale feed first in the START order, but the order
+// bodies ARRIVE in is what admission follows: BHA's 4.25 MB body finishes last, after
+// the other feeds took 7.17 of the 8 MB and 4,299 of the 5,000 items, so it was refused.
+// A stale feed now books its items BEFORE the pool starts (a reservation inside the
+// isolate item budget, never above it) and is admitted against the reservation.
+// ---------------------------------------------------------------------------
+
+describe("pickStaleReservation", () => {
+  const NOW = Date.parse("2026-11-05T12:00:00.000Z");
+  const MIN = 60_000;
+  const ago = (minutes: number) => new Date(NOW - minutes * MIN).toISOString();
+  type Src = { id: string; fetch_last_at?: string | null; fetch_items_count?: number | null };
+
+  it("picks the stalest stale source and sizes it from its known item count: bha 1000 -> 1250", () => {
+    const rows: Src[] = [
+      { id: "fresh", fetch_last_at: ago(1), fetch_items_count: 30 },
+      { id: "bha", fetch_last_at: ago(20), fetch_items_count: 1000 },
+      { id: "x", fetch_last_at: ago(12), fetch_items_count: 50 },
+    ];
+    expect(pickStaleReservation(rows, NOW)).toEqual({ id: "bha", items: 1250 });
+  });
+
+  it("sizes with the same headroom estimateItems caps at (ceil of count * KNOWN_ITEMS_HEADROOM)", () => {
+    const rows: Src[] = [{ id: "a", fetch_last_at: ago(30), fetch_items_count: 7 }];
+    expect(KNOWN_ITEMS_HEADROOM).toBe(1.25);
+    expect(pickStaleReservation(rows, NOW)).toEqual({ id: "a", items: Math.ceil(7 * KNOWN_ITEMS_HEADROOM) });
+    expect(pickStaleReservation(rows, NOW)?.items).toBe(9);
+  });
+
+  it("returns null when nothing is stale", () => {
+    const rows: Src[] = [
+      { id: "a", fetch_last_at: ago(1), fetch_items_count: 100 },
+      { id: "b", fetch_last_at: ago(8), fetch_items_count: 100 },
+    ];
+    expect(pickStaleReservation(rows, NOW)).toBeNull();
+  });
+
+  it("returns null for an empty list", () => {
+    expect(pickStaleReservation([], NOW)).toBeNull();
+  });
+
+  it("returns null when the stale feed has no known item count (null, undefined, 0, a fraction, NaN, negative)", () => {
+    for (const count of [null, undefined, 0, 0.5, Number.NaN, -3, Number.POSITIVE_INFINITY]) {
+      const rows: Src[] = [{ id: "bha", fetch_last_at: ago(60), fetch_items_count: count }];
+      expect(pickStaleReservation(rows, NOW), String(count)).toBeNull();
+    }
+  });
+
+  it("skips a null, undefined or unparseable fetch_last_at (a bootstrap source is not a starved one)", () => {
+    const rows: Src[] = [
+      { id: "null", fetch_last_at: null, fetch_items_count: 500 },
+      { id: "undef", fetch_items_count: 500 },
+      { id: "junk", fetch_last_at: "not a date", fetch_items_count: 500 },
+    ];
+    expect(pickStaleReservation(rows, NOW)).toBeNull();
+  });
+
+  it("a future timestamp (clock skew) counts as fresh", () => {
+    const rows: Src[] = [{ id: "skew", fetch_last_at: new Date(NOW + 5 * MIN).toISOString(), fetch_items_count: 500 }];
+    expect(pickStaleReservation(rows, NOW)).toBeNull();
+  });
+
+  it("the default threshold is three cycle periods: at the edge is fresh, one millisecond over is stale", () => {
+    const edge: Src[] = [{ id: "edge", fetch_last_at: new Date(NOW - 3 * CYCLE_PERIOD_MS).toISOString(), fetch_items_count: 10 }];
+    const over: Src[] = [{ id: "over", fetch_last_at: new Date(NOW - 3 * CYCLE_PERIOD_MS - 1).toISOString(), fetch_items_count: 10 }];
+    expect(pickStaleReservation(edge, NOW)).toBeNull();
+    expect(pickStaleReservation(over, NOW)).toEqual({ id: "over", items: 13 });
+  });
+
+  it("a bha parsed one reused cycle ago (5.5 minutes old) gets no reservation, which pins its roughly 12-minute cadence", () => {
+    // Fresh and reused isolates alternate every 3 minutes: parsed on a fresh one at T0, bha is
+    // 5.9 minutes old at T0+6 (the next fresh one), under the 9-minute rule. Lowering the rule would
+    // make the stalest-wins pick a small feed the reused isolate deferred at T0+3 instead (it is
+    // older than bha by seconds), so the threshold stays and the guide says "about every 12 minutes".
+    const rows: Src[] = [{ id: "bha", fetch_last_at: ago(5.5), fetch_items_count: 1000 }];
+    expect(pickStaleReservation(rows, NOW)).toBeNull();
+    expect(pickStaleReservation([{ id: "bha", fetch_last_at: ago(9.1), fetch_items_count: 1000 }], NOW)).toEqual({ id: "bha", items: 1250 });
+  });
+
+  it("takes the threshold as a parameter", () => {
+    const rows: Src[] = [{ id: "a", fetch_last_at: ago(5), fetch_items_count: 100 }];
+    expect(pickStaleReservation(rows, NOW)).toBeNull();
+    expect(pickStaleReservation(rows, NOW, 4 * MIN)).toEqual({ id: "a", items: 125 });
+  });
+
+  it("an older stale source without a count does not hide a younger stale one that has one", () => {
+    const rows: Src[] = [
+      { id: "never-counted", fetch_last_at: ago(300), fetch_items_count: null },
+      { id: "bha", fetch_last_at: ago(20), fetch_items_count: 1000 },
+    ];
+    expect(pickStaleReservation(rows, NOW)).toEqual({ id: "bha", items: 1250 });
+  });
+
+  it("ties on age go to the first in input order", () => {
+    const rows: Src[] = [
+      { id: "first", fetch_last_at: ago(20), fetch_items_count: 100 },
+      { id: "second", fetch_last_at: ago(20), fetch_items_count: 900 },
+    ];
+    expect(pickStaleReservation(rows, NOW)?.id).toBe("first");
+  });
+
+  it("does not mutate or reorder its input", () => {
+    const rows: Src[] = [
+      { id: "a", fetch_last_at: ago(1), fetch_items_count: 5 },
+      { id: "b", fetch_last_at: ago(90), fetch_items_count: 5 },
+    ];
+    const snapshot = JSON.stringify(rows);
+    pickStaleReservation(rows, NOW);
+    expect(JSON.stringify(rows)).toBe(snapshot);
+  });
+});
+
+describe("summarizeStale", () => {
+  const NOW = Date.parse("2026-11-05T12:00:00.000Z");
+  const MIN = 60_000;
+  const ago = (minutes: number) => new Date(NOW - minutes * MIN).toISOString();
+  type Src = { id: string; fetch_last_at?: string | null };
+
+  it("lists exactly the ids prioritizeStale puts first, and the oldest age in whole minutes", () => {
+    const rows: Src[] = [
+      { id: "fresh", fetch_last_at: ago(1) },
+      { id: "bha", fetch_last_at: ago(11.4) },
+      { id: "never", fetch_last_at: null },
+      { id: "x", fetch_last_at: ago(12) },
+    ];
+    const s = summarizeStale(rows, NOW);
+    expect([...s.ids].sort()).toEqual(["bha", "never", "x"]);
+    expect(s.oldestMin).toBe(12);
+    const front = prioritizeStale(rows, NOW).slice(0, s.ids.size).map((r) => r.id);
+    expect([...s.ids].sort()).toEqual([...front].sort());
+  });
+
+  it("is 0 minutes and no ids when nothing is stale", () => {
+    const s = summarizeStale([{ id: "a", fetch_last_at: ago(2) }], NOW);
+    expect(s.ids.size).toBe(0);
+    expect(s.oldestMin).toBe(0);
+    expect(summarizeStale([], NOW)).toEqual({ ids: new Set(), oldestMin: 0 });
+  });
+
+  it("a never-polled source is stale but has no age: it counts as an id and leaves oldestMin alone", () => {
+    const s = summarizeStale([{ id: "new", fetch_last_at: null }, { id: "ok", fetch_last_at: ago(1) }], NOW);
+    expect([...s.ids]).toEqual(["new"]);
+    expect(s.oldestMin).toBe(0);
+  });
+
+  it("a future timestamp is fresh; the threshold is a parameter", () => {
+    expect(summarizeStale([{ id: "skew", fetch_last_at: new Date(NOW + MIN).toISOString() }], NOW).ids.size).toBe(0);
+    const s = summarizeStale([{ id: "a", fetch_last_at: ago(5) }], NOW, 4 * MIN);
+    expect([...s.ids]).toEqual(["a"]);
+    expect(s.oldestMin).toBe(5);
+  });
+});
+
+describe("createItemBudget().reserve", () => {
+  const fresh = (used = 0) => ({ used, cycles: 1 });
+
+  it("books n on a fresh isolate and returns true: 1250 reserved, 3750 left", () => {
+    const state = fresh();
+    const budget = createItemBudget(5000, state);
+    expect(budget.reserve(1250)).toBe(true);
+    expect(state.used).toBe(1250);
+    expect(budget.used).toBe(1250);
+    expect(budget.fits(3800)).toBe(false);
+    expect(budget.fits(3750)).toBe(true);
+  });
+
+  it("settle gives a reservation back or turns it into the real count", () => {
+    const kept = fresh();
+    const a = createItemBudget(5000, kept);
+    expect(a.reserve(1250)).toBe(true);
+    a.settle(1250, 1250);
+    expect(kept.used).toBe(1250);
+
+    const released = fresh();
+    const b = createItemBudget(5000, released);
+    expect(b.reserve(1250)).toBe(true);
+    b.settle(1250, 0);
+    expect(released.used).toBe(0);
+  });
+
+  it("refuses, and books nothing, when used + n would pass the limit", () => {
+    const state = fresh(4300);
+    const budget = createItemBudget(5000, state);
+    expect(budget.reserve(1250)).toBe(false);
+    expect(state.used).toBe(4300);
+  });
+
+  it("books up to the limit exactly, never past it, and has no used === 0 exception", () => {
+    const state = fresh();
+    const budget = createItemBudget(5000, state);
+    expect(budget.reserve(5001)).toBe(false); // fits() would admit this on a fresh isolate; reserve must not
+    expect(state.used).toBe(0);
+    expect(budget.reserve(5000)).toBe(true);
+    expect(state.used).toBe(5000);
+    expect(budget.reserve(1)).toBe(false);
+    expect(state.used).toBe(5000);
+  });
+
+  it("refuses a negative, NaN or infinite size and leaves the state alone", () => {
+    const state = fresh(10);
+    const budget = createItemBudget(5000, state);
+    for (const n of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(budget.reserve(n), String(n)).toBe(false);
+      expect(state.used).toBe(10);
+    }
+  });
+
+  it("two cycles on one isolate share it: a reservation counts against the next cycle's budget too", () => {
+    const state = fresh();
+    expect(createItemBudget(5000, state).reserve(1250)).toBe(true);
+    expect(createItemBudget(5000, state).reserve(3751)).toBe(false);
+    expect(createItemBudget(5000, state).reserve(3750)).toBe(true);
+  });
+
+  it("a held reservation never lets the isolate book more than the limit in total", () => {
+    const state = fresh();
+    const budget = createItemBudget(5000, state);
+    expect(budget.reserve(1250)).toBe(true);
+    let booked = 0;
+    for (let i = 0; i < 10; i++) {
+      if (budget.fits(717)) {
+        budget.book(717);
+        booked += 717;
+      }
+      expect(state.used).toBeLessThanOrEqual(5000);
+    }
+    expect(booked).toBe(5 * 717); // 1250 + 5 * 717 = 4835; a sixth would be 5552
+    // the reserved feed takes its 1250 back out of the reservation and may grow into what is left
+    budget.settle(1250, 1250);
+    expect(state.used).toBe(4835);
+    expect(state.used).toBeLessThanOrEqual(5000);
+  });
+});
+
+describe("createParseBudget().admit with a reservation", () => {
+  it("admits a reserved feed past the byte budget: 7.2 MB in, then BHA's 4.25 MB", () => {
+    const b = createParseBudget(55, 8_000_000);
+    expect(b.admit(7_200_000)).toBe(true);
+    expect(b.admit(4_250_000)).toBe(false); // today
+    expect(b.admit(4_250_000, false, true)).toBe(true); // reserved
+    // the bytes and the parse still count
+    expect(b.bytes).toBe(11_450_000);
+    expect(b.parses).toBe(2);
+  });
+
+  it("leaves the priority overshoot slot untouched", () => {
+    const b = createParseBudget(55, 8_000_000);
+    expect(b.admit(7_200_000)).toBe(true);
+    expect(b.admit(4_250_000, false, true)).toBe(true);
+    expect(b.admit(4_000_000, true)).toBe(true); // the one priority overshoot is still there
+    expect(b.admit(4_000_000, true)).toBe(false); // and now it is spent
+  });
+
+  it("never bypasses maxParses", () => {
+    const b = createParseBudget(2, 8_000_000);
+    expect(b.admit(10)).toBe(true);
+    expect(b.admit(10)).toBe(true);
+    expect(b.admit(10, false, true)).toBe(false);
+    expect(b.admit(10, true, true)).toBe(false);
+    expect(b.parses).toBe(2);
+    expect(b.bytes).toBe(20);
+  });
+
+  it("with maxParses 0 refuses even a reserved feed", () => {
+    const b = createParseBudget(0, 8_000_000);
+    expect(b.admit(1, false, true)).toBe(false);
+    expect(b.parses).toBe(0);
+  });
+
+  it("is off by default: admit(bytes) and admit(bytes, priority) behave as before", () => {
+    const b = createParseBudget(55, 1_000);
+    expect(b.admit(900)).toBe(true);
+    expect(b.admit(500)).toBe(false);
+    expect(b.admit(500, false, false)).toBe(false);
+    expect(b.bytes).toBe(900);
+  });
+});
+
+describe("a stale feed whose body arrives last on a busy fresh isolate [h39-pipeline2-1]", () => {
+  // The #198 order tests fed admission in START order. Admission follows ARRIVAL order: the
+  // small feeds finish first, BHA's 4.25 MB last.
+  const LIMIT = 5000;
+  const small = Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, bytes: 1_200_000, est: 717 }));
+  const bha = { id: "bha", bytes: 4_250_000, est: 1250 };
+
+  function simulate(reserve: boolean): { admitted: string[]; deferred: string[]; used: number; bytes: number } {
+    const state = { used: 0, cycles: 1 };
+    const items = createItemBudget(LIMIT, state);
+    const parse = createParseBudget(55, 8_000_000);
+    const reserved = reserve ? items.reserve(1250) : false;
+    const admitted: string[] = [];
+    const deferred: string[] = [];
+    for (const f of [...small, bha]) {
+      const isBha = f.id === "bha";
+      if (isBha && reserved) {
+        if (!parse.admit(f.bytes, false, true)) {
+          deferred.push(f.id);
+          items.settle(1250, 0);
+          continue;
+        }
+        items.settle(1250, f.est);
+        admitted.push(f.id);
+        continue;
+      }
+      if (!items.fits(f.est) || !parse.admit(f.bytes)) {
+        deferred.push(f.id);
+        continue;
+      }
+      items.book(f.est);
+      admitted.push(f.id);
+    }
+    return { admitted, deferred, used: state.used, bytes: parse.bytes };
+  }
+
+  it("without a reservation (today) BHA is refused by both budgets", () => {
+    const r = simulate(false);
+    expect(r.deferred).toContain("bha");
+    expect(r.admitted).toHaveLength(6);
+  });
+
+  it("with the reservation BHA is admitted, a small feed waits instead, and the isolate stays at or under 5000 items", () => {
+    const r = simulate(true);
+    expect(r.admitted).toContain("bha");
+    expect(r.deferred).toEqual(["s5"]);
+    expect(r.used).toBeLessThanOrEqual(LIMIT);
+    expect(r.used).toBe(5 * 717 + 1250);
+  });
+});
+
+describe("reserveItemsFor: one reservation, released exactly once", () => {
+  const fresh = (used = 0) => ({ used, cycles: 1 });
+  const bha = { id: "bha", items: 1250 };
+
+  it("holds the items for the picked feed only", () => {
+    const state = fresh();
+    const r = reserveItemsFor(createItemBudget(5000, state), bha);
+    expect(r.state).toBe("held");
+    expect(state.used).toBe(1250);
+    expect(r.heldFor("bha")).toBe(1250);
+    expect(r.heldFor("someone-else")).toBe(0);
+  });
+
+  it("makes no reservation without a pick, or when the room is not there (a reused, busy isolate)", () => {
+    const s1 = fresh();
+    const none = reserveItemsFor(createItemBudget(5000, s1), null);
+    expect(none.state).toBe("none");
+    expect(none.heldFor("bha")).toBe(0);
+    expect(none.release()).toBe(false);
+    expect(s1.used).toBe(0);
+
+    const s2 = fresh(4300);
+    const busy = reserveItemsFor(createItemBudget(5000, s2), bha);
+    expect(busy.state).toBe("none");
+    expect(busy.heldFor("bha")).toBe(0);
+    expect(busy.consume(1250)).toBe(false);
+    expect(busy.release()).toBe(false);
+    expect(s2.used).toBe(4300);
+  });
+
+  it("never holds more than the limit, even for a feed alone on a fresh isolate", () => {
+    const state = fresh();
+    const r = reserveItemsFor(createItemBudget(5000, state), { id: "huge", items: 6000 });
+    expect(r.state).toBe("none");
+    expect(state.used).toBe(0);
+  });
+
+  it("consume turns the reservation into a booking of the estimate and releases nothing afterwards", () => {
+    const state = fresh();
+    const r = reserveItemsFor(createItemBudget(5000, state), bha);
+    expect(r.consume(1100)).toBe(true);
+    expect(r.state).toBe("consumed");
+    expect(state.used).toBe(1100);
+    expect(r.heldFor("bha")).toBe(0);
+    expect(r.release()).toBe(false); // the feed's parse owns the booking now
+    expect(state.used).toBe(1100);
+    expect(r.consume(1100)).toBe(false);
+  });
+
+  it("consume may exceed the reservation: the booking is the estimate", () => {
+    const state = fresh();
+    const r = reserveItemsFor(createItemBudget(5000, state), bha);
+    expect(r.consume(1400)).toBe(true);
+    expect(state.used).toBe(1400);
+  });
+
+  it("release gives the items back, once: a second and third call change nothing", () => {
+    const state = fresh(300);
+    const r = reserveItemsFor(createItemBudget(5000, state), bha);
+    expect(state.used).toBe(1550);
+    expect(r.release()).toBe(true);
+    expect(state.used).toBe(300);
+    expect(r.state).toBe("released");
+    expect(r.release()).toBe(false);
+    expect(r.release()).toBe(false);
+    expect(state.used).toBe(300);
+    expect(r.heldFor("bha")).toBe(0);
+    expect(r.consume(1000)).toBe(false);
+    expect(state.used).toBe(300);
+  });
+
+  it("a release after other feeds settled in between takes back exactly its own items", () => {
+    const state = fresh();
+    const budget = createItemBudget(5000, state);
+    const r = reserveItemsFor(budget, bha);
+    budget.book(717);
+    budget.settle(717, 400); // a small feed parsed fewer items than estimated
+    expect(state.used).toBe(1650);
+    r.release();
+    expect(state.used).toBe(400);
   });
 });

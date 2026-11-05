@@ -100,9 +100,12 @@ import {
   groupChunkBySource,
   interleaveBySource,
   isolateItems,
+  pickStaleReservation,
   prioritizeIds,
   prioritizeStale,
+  reserveItemsFor,
   rotateForCycle,
+  summarizeStale,
   upsertWithBisect,
 } from "./order.ts";
 import type { BisectUpsertResult } from "./order.ts";
@@ -224,8 +227,14 @@ const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
 //     feed is admitted when nothing was booked yet on the isolate (any one feed
 //     fits a fresh one) or when its estimated items (body bytes / 1500) fit
 //     what is left; there is no priority exemption. The estimate is replaced by
-//     the real item count after the parse. The h11 analysis fitted the cost of
-//     the old pipeline at about 280 ms fixed plus 0.256 ms per item on the
+//     the real item count after the parse. One feed does get its room ahead of the
+//     others (h39-pipeline2-1): before the fetch pool starts, the stalest source
+//     with a known item count has ceil(1.25 x fetch_items_count) items booked with
+//     `ItemBudget.reserve`, which stays under the limit (no fresh-isolate
+//     exception), so admission in body-ARRIVAL order cannot starve a big feed that
+//     arrives last (BHA, 4.25 MB). The booking becomes the feed's own when it is
+//     parsed and goes back on any other outcome; the limit is the same number. The
+//     h11 analysis fitted the cost of the old pipeline at about 280 ms fixed plus 0.256 ms per item on the
 //     Edge runtime; 280 + 0.256 x 5,000 is about 1.56 s, which leaves 0.4 s of
 //     the 2 s. The known-url skip makes a poll about 90% cheaper per item
 //     (64.0 to 6.3 us above), so the number now has more margin than it was
@@ -238,7 +247,14 @@ const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
 //     below what a normal isolate parses in two cycles trades 546s for
 //     deferral.
 //  2. MAX_PARSES_PER_CYCLE (55) and PARSE_BUDGET_BYTES: changed feeds and body
-//     bytes parsed in one cycle; the coarse per-cycle cap below.
+//     bytes parsed in one cycle; the coarse per-cycle cap below. The feed that has
+//     isolate items reserved (above) is held to the parse count but not to the
+//     byte budget, so a cycle's bytes can exceed PARSE_BUDGET_BYTES by that one
+//     body (BHA: 4.25 MB) and by no more: every other feed is still held to it.
+//     One parse slot is also kept for that feed while its reservation is held:
+//     the other feeds may take at most MAX_PARSES_PER_CYCLE - 1, so 55 small
+//     feeds that arrive first cannot leave it at the cap. The slot is freed with
+//     the reservation, and the total never passes MAX_PARSES_PER_CYCLE.
 //  3. The cycle deadline (CYCLE_DEADLINE_MS), for wall clock.
 //
 // Why 55 parses (a data-derived number, not a round one). `ingest_cycles`, the
@@ -499,6 +515,18 @@ interface CycleStats {
   isolateItemsUsed: number;
   isolateCycles: number;
   isolateBudgetDeferred: number;
+  // Stale-feed admission (h39-pipeline2-1): sources with no quarantine marker
+  // (`fetch_quarantined_until` null, ops_health_report() row 20's population)
+  // whose `fetch_last_at` was null or older than three cycle periods when the
+  // cycle started are the "stale" ones (`prioritizeStale`'s rule; a probe of an
+  // expired quarantine is not one). `staleDeferred` counts how many of them this
+  // cycle still deferred (it should be 0: the stalest one with a known item count
+  // gets isolate items reserved before the pool starts); `oldestStaleMin` is the
+  // age of the oldest one in whole minutes (0 when none has a timestamp). Summary
+  // line, HTTP JSON and, since migration 159, `ingest_cycles.stale_deferred` and
+  // `ingest_cycles.oldest_stale_min`.
+  staleDeferred: number;
+  oldestStaleMin: number;
   durationMs: number;
 }
 
@@ -1391,12 +1419,14 @@ function isMissingColumnError(error: { code?: string; message?: string }): boole
 // and swallowed — a telemetry outage must never fail (or re-fail) a cycle.
 //
 // Migration 157 adds three counters (isolate_budget_deferred, parse_deferred,
-// parse_deferred_max_streak). An insert that names a column the table does not
-// have fails the WHOLE row, so while 157 is not applied the first insert is
-// retried ONCE without them (the same pattern as the legacy sources select for
-// migration 119). Ingest can therefore be deployed before or after 157; the
-// counters are simply absent until the migration is applied. Apply 157 first
-// anyway: a cycle row written without them is a cycle you cannot count.
+// parse_deferred_max_streak) and migration 159 two more (stale_deferred,
+// oldest_stale_min). An insert that names a column the table does not have fails
+// the WHOLE row, so while either migration is not applied the first insert is
+// retried ONCE without all five (the same pattern as the legacy sources select
+// for migration 119). Ingest can therefore be deployed before or after 157 and
+// 159; the counters are simply absent until the migrations are applied. Apply
+// both first anyway: a cycle row written without them is a cycle you cannot
+// count, and with 159 missing it also loses 157's three.
 async function recordIngestCycle(
   supabase: ReturnType<typeof createServiceClient>,
   startedAt: number,
@@ -1421,12 +1451,15 @@ async function recordIngestCycle(
       duration_ms: stats.durationMs || Date.now() - startedAt,
     };
     // Migration 157: how often the budgets deferred a changed feed this cycle,
-    // and the longest streak of consecutive deferrals of one feed.
+    // and the longest streak of consecutive deferrals of one feed. Migration 159:
+    // how many of the stale feeds were still deferred, and the age of the oldest.
     const { error } = await supabase.from("ingest_cycles").insert({
       ...row,
       isolate_budget_deferred: stats.isolateBudgetDeferred,
       parse_deferred: stats.parseDeferred,
       parse_deferred_max_streak: stats.parseDeferredMaxStreak,
+      stale_deferred: stats.staleDeferred,
+      oldest_stale_min: stats.oldestStaleMin,
     });
     if (!error) return;
     if (!isMissingColumnError(error)) {
@@ -1434,7 +1467,7 @@ async function recordIngestCycle(
       return;
     }
     console.warn(
-      "[ingest] ingest_cycles deferral columns missing (migration 157 not applied?): inserting the legacy row",
+      "[ingest] ingest_cycles deferral columns missing (migration 157 not applied? or 159?): inserting the legacy row",
     );
     const retry = await supabase.from("ingest_cycles").insert(row);
     if (retry.error) {
@@ -1485,6 +1518,8 @@ async function runCycle(): Promise<CycleStats> {
     isolateItemsUsed: 0,
     isolateCycles: 0,
     isolateBudgetDeferred: 0,
+    staleDeferred: 0,
+    oldestStaleMin: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -1580,9 +1615,31 @@ async function runCycleBody(
     priorityIds,
   );
   stats.quarantined = liveSources.length - toFetch.length;
+  //
+  // h39-pipeline2-1: that order is only the order the fetches START in; admission
+  // follows the order the BODIES arrive in, and BHA's 4.25 MB body finishes last,
+  // after the other feeds took the cycle's bytes and the isolate's items (7.17 MB
+  // and 4,299 of 5,000 items on 2026-11-05 12:24Z), and it lost both budgets again.
+  // So the stalest source with a known item count also gets its items RESERVED
+  // before the pool starts (see `reserveItemsFor` below), and the stale ones are
+  // counted for the cycle row. `staleIds` is `prioritizeStale`'s rule, read at
+  // cycle start.
+  //
+  // Both read only the sources with NO quarantine marker (`fetch_quarantined_until`
+  // null), which is ops_health_report() row 20's population. A source whose marker
+  // has passed is still in `toFetch` (it is probed once, about every 1440 minutes)
+  // and its `fetch_last_at` is that last attempt, so it would be the "oldest stale"
+  // one on every probe cycle and would take the reservation from a feed that is
+  // starved. The stale-first ORDER (`prioritizeStale` above) is unchanged.
+  const unquarantined = toFetch.filter((s) => s.fetch_quarantined_until == null);
+  const stale = summarizeStale(unquarantined, startedAt);
+  const staleIds = stale.ids;
+  stats.oldestStaleMin = stale.oldestMin;
+  const staleReservation = pickStaleReservation(unquarantined, startedAt);
   // Read once per cycle; anything but a positive integer means the default.
+  const maxParses = positiveIntEnv(Deno.env.get("INGEST_MAX_PARSES_PER_CYCLE"), MAX_PARSES_PER_CYCLE);
   const budget = createParseBudget(
-    positiveIntEnv(Deno.env.get("INGEST_MAX_PARSES_PER_CYCLE"), MAX_PARSES_PER_CYCLE),
+    maxParses,
     positiveIntEnv(Deno.env.get("INGEST_PARSE_BUDGET_BYTES"), PARSE_BUDGET_BYTES),
   );
   // The isolate-wide item budget (hunt-11): module-scope state, so it carries
@@ -1594,6 +1651,12 @@ async function runCycleBody(
   );
   isolateItems.cycles++;
   const itemBudget = createItemBudget(isolateLimit, isolateItems);
+  // Books the stale feed's items under the isolate limit (never over it, and with
+  // no fresh-isolate exception), or makes no reservation when they do not fit: a
+  // busy, reused isolate behaves as before. The booking is handed back, once, on
+  // every path on which the feed is not parsed (see the fetch worker, and the
+  // `finally` after the pool), or becomes the feed's own booking when it is.
+  const reservation = reserveItemsFor(itemBudget, staleReservation);
 
   // Hydrate the module-scope conditionalCache from what we persisted last
   // cycle so the first fetch after a cold start (empty Map) still sends
@@ -1691,16 +1754,49 @@ async function runCycleBody(
           // Only while the body is within 4x of that cap; a body far bigger
           // than the count explains keeps the size-only estimate.
           const estimated = estimateItems(bodyBytes, source.fetch_items_count);
+          const priority = priorityIds.has(source.id);
+          // h39-pipeline2-1: the feed this cycle reserved items for is admitted
+          // against that booking. Its items are already in `used`, so only an
+          // estimate ABOVE the reservation has to fit (and then under the limit,
+          // there is no fresh-isolate exception while the reservation is held);
+          // the per-cycle byte budget does not apply to it, `maxParses` does.
+          const held = reservation.heldFor(source.id);
+          if (held > 0) {
+            if (estimated <= held || itemBudget.fits(estimated - held)) {
+              if (!budget.admit(bodyBytes, priority, true)) return false;
+              reservation.consume(estimated);
+              booked = estimated;
+              return true;
+            }
+            // The body grew far past what the feed's count explains and the extra
+            // does not fit: hand the reservation back and judge the feed like any
+            // other, so a lone feed on a fresh isolate is still admitted whatever
+            // its size. The reservation never makes this worse than before.
+            reservation.release();
+          }
           if (!itemBudget.fits(estimated)) {
             stats.isolateBudgetDeferred++;
             return false;
           }
-          if (!budget.admit(bodyBytes, priorityIds.has(source.id))) return false;
+          // While the reservation is held, one parse slot is kept for the reserved
+          // feed: the others may take at most maxParses - 1, so its body (it arrives
+          // last) is not refused at the cap by 55 small feeds that came first. The
+          // slot is freed with the reservation (304, error, release); the reserved
+          // feed's own `budget.admit(.., .., true)` above still stops at maxParses.
+          if (reservation.state === "held" && budget.parses + 1 >= maxParses) return false;
+          if (!budget.admit(bodyBytes, priority)) return false;
           itemBudget.book(estimated);
           booked = estimated;
           return true;
         },
       });
+
+      // h39-pipeline2-1: the reserved feed is back from the network. If it was
+      // parsed, its reservation became its booking in `admitParse`; on every other
+      // outcome (304, body-hash hit, fetch error, a refusal below) the items it
+      // held go back to the isolate now, for the feeds still to come. A no-op for
+      // any other feed, and once the reservation is consumed or released.
+      if (source.id === staleReservation?.id) reservation.release();
 
       // Parse budget: checked FIRST. The fetcher refused to decode and parse
       // this feed's changed body, so there is nothing to record about it: no
@@ -1712,6 +1808,7 @@ async function runCycleBody(
       // front of the next cycle.
       if (result.parseDeferred) {
         stats.parseDeferred++;
+        if (staleIds.has(source.id)) stats.staleDeferred++;
         const streak = (deferredBefore.get(source.id) ?? 0) + 1;
         parseDeferredIds.set(source.id, streak);
         if (streak > stats.parseDeferredMaxStreak) stats.parseDeferredMaxStreak = streak;
@@ -1970,7 +2067,12 @@ async function runCycleBody(
       }
     },
     fetchDeadline,
-  );
+  ).finally(() => {
+    // A reserved feed the pool never reached (the fetch deadline passed first), or
+    // one whose worker threw: the reservation must not outlive the cycle, it
+    // would stay on this isolate's allowance until the platform recycles it.
+    reservation.release();
+  });
   stats.parsedBytes = budget.bytes;
   if (stats.parseDeferred > 0) {
     // Count only: never a url or a headline.
@@ -1980,6 +2082,14 @@ async function runCycleBody(
   }
   stats.isolateItemsUsed = isolateItems.used;
   stats.isolateCycles = isolateItems.cycles;
+  if (stats.staleDeferred > 0) {
+    // Count and age only: never a url or a headline. A stale feed that is still
+    // deferred means it found no room this cycle (a reused isolate with no room
+    // for a reservation, or the parse cap): see ingest_cycles.stale_deferred.
+    console.log(
+      `[ingest] stale feeds: ${stats.staleDeferred} still deferred (oldest unpolled ${stats.oldestStaleMin} min, reservation ${reservation.state}, ${isolateItems.used} of ${isolateLimit} items used on this isolate)`,
+    );
+  }
   if (stats.isolateBudgetDeferred > 0) {
     // Count only: never a url or a headline. These feeds are also in
     // `parseDeferred` above (the same deferral path); this line says why.

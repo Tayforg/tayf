@@ -48,6 +48,10 @@ run | 150-ops-queue-cron-liveness.test.ts | tests/migrations/sql/150-ops-queue-c
 run | 157-ingest-poll-stale.test.ts | tests/migrations/sql/150-ops-queue-cron-liveness-dryrun.sql supabase/migrations/041_source_fetch_state.sql supabase/migrations/157_ingest_poll_stale.sql supabase/migrations/157_ingest_poll_stale.sql | - | 0
 # 158: the dry-run script builds the chain itself (150's dry-run, 041, 157, then 124 and 138) and applies 158 twice, so it is the setup.
 run | 158-saved-clusters-v3.test.ts | tests/migrations/sql/158-saved-clusters-v3-dryrun.sql | - | 0
+# 159: 150's dry-run leaves 145 + 150 applied on stand-ins for pg_cron / pg_net / pgmq; 041 adds sources.fetch_last_at (the report reads it); 157 adds the ingest_cycles counters; 159 is applied twice (158 is not needed: 159 carries its row 17 text).
+run | 159-ingest-stale-admission.test.ts | tests/migrations/sql/150-ops-queue-cron-liveness-dryrun.sql supabase/migrations/041_source_fetch_state.sql supabase/migrations/157_ingest_poll_stale.sql supabase/migrations/159_ingest_stale_admission.sql supabase/migrations/159_ingest_stale_admission.sql | - | 0
+# 160: the dry-run script builds the state itself (bist_bars_5m, then 058's function as production has it with its grants) and applies 160 twice, so it is the setup.
+run | 160-intraday-traded-targets.test.ts | tests/migrations/sql/160-intraday-traded-targets-dryrun.sql | - | 0
 run | 151-cluster-attach-probe.test.ts | tests/migrations/sql/151-cluster-attach-probe-dryrun.sql | - | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql | TAYF_SHAPE=prod | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql | TAYF_SHAPE=chain | 0

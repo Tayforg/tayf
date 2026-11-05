@@ -199,6 +199,65 @@ describe("TickerTape", () => {
     expect(classOf(root)).not.toContain("ring-inset");
   });
 
+  // h39-a11y-1 (WCAG 1.4.10 Reflow): .sr-only is position:absolute. The strip
+  // clips with overflow-x-auto, but an overflow clip only reaches descendants
+  // whose containing block is the scroller or inside it. With no positioned
+  // ancestor between the sr-only "değişim bilinmiyor" and <main class=relative>,
+  // the span of a chip far to the right (TERA, at x ~ 1766 on a 375 px phone)
+  // escaped the clip and made /ekonomi scroll sideways. `relative` on the
+  // strip makes the strip the containing block, so the clip applies.
+  describe("sr-only move text stays inside the strip's clip (h39-a11y-1)", () => {
+    const tokens = (n: Node) => classOf(n).split(/\s+/).filter(Boolean);
+
+    it("the strip div is positioned (relative) as well as overflow-x-auto and tayf-scroll-x", () => {
+      const root = collect(TickerTape({ items, quotes: { OZATD: { ...quote, hasBaseline: false } }, stats }))[0]!;
+      expect(root.type).toBe("div");
+      const cls = tokens(root);
+      expect(cls).toContain("relative");
+      expect(cls).toContain("overflow-x-auto");
+      expect(cls).toContain("tayf-scroll-x");
+    });
+
+    it("the 'değişim bilinmiyor' sr-only span is a descendant of that positioned strip", () => {
+      const root = collect(TickerTape({ items, quotes: { OZATD: { ...quote, hasBaseline: false } }, stats }))[0]!;
+      const unknown = spans(collect(root.props.children)).filter(
+        (n) => n.props.children === "değişim bilinmiyor" && tokens(n).includes("sr-only"),
+      );
+      expect(unknown).toHaveLength(1);
+    });
+
+    it("a stale quote puts the same sr-only text under the same positioned strip", () => {
+      const root = collect(TickerTape({ items, quotes: { OZATD: quote }, stats, staleTickers: new Set(["OZATD"]) }))[0]!;
+      expect(tokens(root)).toContain("relative");
+      const unknown = spans(collect(root.props.children)).filter((n) => n.props.children === "değişim bilinmiyor");
+      expect(unknown).toHaveLength(1);
+    });
+
+    it("every chip with an unknown move adds one sr-only span, all inside the one positioned strip", () => {
+      const three: TickerAttention[] = ["OZATD", "TURSG", "TERA"].map(
+        (ticker) => ({ ticker, articles: 2, sources: 2, ratio: null, title: ticker }) as TickerAttention,
+      );
+      const quotes: Record<string, Quote> = {
+        OZATD: { ...quote, hasBaseline: false },
+        TURSG: { ...quote, ticker: "TURSG", changePct: 4 },
+        TERA: { ...quote, ticker: "TERA", hasBaseline: false },
+      };
+      const nodes = collect(TickerTape({ items: three, quotes, stats }));
+      const strips = nodes.filter((n) => n.type === "div" && tokens(n).includes("tayf-scroll-x"));
+      expect(strips).toHaveLength(1);
+      expect(tokens(strips[0]!)).toContain("relative");
+      expect(spans(nodes).filter((n) => n.props.children === "değişim bilinmiyor")).toHaveLength(2);
+    });
+
+    it("the chip links are not positioned themselves (they are the unchanged flex items)", () => {
+      const links = collect(TickerTape({ items, quotes: { OZATD: { ...quote, hasBaseline: false } }, stats })).filter(
+        (n) => n.type === Link,
+      );
+      expect(links).toHaveLength(1);
+      expect(tokens(links[0]!)).not.toContain("relative");
+    });
+  });
+
   it("renders the percentage for a known move", () => {
     const el = TickerTape({ items, quotes: { OZATD: quote }, stats });
     const text = textOf(el);

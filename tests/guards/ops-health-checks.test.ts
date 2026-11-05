@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150, 157, 158).
+// 115, 119, 122, 136, 145, 150, 157, 158, 159).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -38,6 +38,8 @@ import { fileURLToPath } from "node:url";
 // with 157's text verbatim except three row-17 spots (the identity array, "five" -> "six" in a comment, and
 // "(5 izinli RPC hariç)" -> "(6 ..."), so the "rows 1-17 as 145 wrote them" check below allows exactly those
 // spots in the newest version (tests/migrations/158-saved-clusters-v3.test.ts pins the full diff against 157).
+// 159 (h39-pipeline2-1) changes only row 20: `feed_poll_stale` is a fail at one counted feed over 60 minutes as well as at
+// three over 30 (tests/migrations/159-ingest-stale-admission.test.ts pins the byte identity of everything else against 158).
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -118,10 +120,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(13);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(14);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -202,7 +204,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${CRON_CHECK} (migration 150), ${LAST_CHECK} (migration 157) in that order, ${LAST_CHECK} LAST`, () => {
-    expect(newest.num).toBeGreaterThanOrEqual(158);
+    expect(newest.num).toBeGreaterThanOrEqual(159);
     for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, CRON_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
     expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
     expect(newest.names.indexOf(GAPS_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
@@ -231,7 +233,7 @@ describe("ops_health_report(): the newest version", () => {
     // the executable create line is in the file once (comments are stripped before counting)
     expect(newest.code.indexOf(CREATE_LINE)).toBeGreaterThanOrEqual(0);
     expect(newest.code.indexOf(CREATE_LINE, newest.code.indexOf(CREATE_LINE) + 1), "the create line is executable once").toBe(-1);
-    // 158 changed row 17 in exactly three spots (the sixth anon RPC); everything else is 145's text
+    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20; everything else is 145's text
     const expected = newest.num >= 158 ? withSixthAnonRpc(rows145) : rows145;
     expect(rawNewest.slice(at, at + expected.length)).toBe(expected);
     // the next non-blank line is the row-18 marker comment
@@ -447,9 +449,19 @@ describe("ops_health_report(): the newest version", () => {
     expect(seg).toContain("from public.sources x where x.active and x.fetch_quarantined_until is null");
     expect(seg).toContain("x.fetch_last_at < pg_catalog.now() - interval '30 minutes'");
     expect(seg).toContain("threshold := 3");
-    expect(seg).toMatch(/when f_stale >= 3 then 'fail'/);
+    expect(seg).toMatch(/when f_stale >= 3 or f_old >= 1 then 'fail'/);
     expect(seg).toMatch(/when f_stale >= 1 then 'warn'/);
     expect(seg).toMatch(/status\s*:=\s*'unknown'/i);
+  });
+
+  it("feed_poll_stale also fails at one counted feed last polled more than 60 minutes ago (159): f_old counts it, and a copy-paste of 157's fail-at-3-only status must not come back", () => {
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    expect(seg).toContain("pg_catalog.count(*) filter (where x.fetch_last_at < pg_catalog.now() - interval '60 minutes')::numeric");
+    expect(seg).toContain("into f_total, f_stale, f_old, f_never, f_list");
+    expect(seg).not.toMatch(/status := case when f_stale >= 3 then 'fail'/);
+    // the 30-minute count and the quarantine exclusion are still what observed and the population are
+    expect(seg).toContain("observed := f_stale;");
+    expect(seg).toContain("from public.sources x where x.active and x.fetch_quarantined_until is null");
   });
 
   it("feed_poll_stale only reads, and reads no url, validator or header column", () => {

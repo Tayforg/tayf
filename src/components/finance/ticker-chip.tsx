@@ -87,7 +87,9 @@ export function TickerChip({
 // scrolls sideways on narrow screens instead of wrapping. overflow-x-auto
 // clips anything painted outside a link's box, so the focus ring is inset
 // (drawn inside the link); the standalone chip has no clipping ancestor and
-// keeps its outside ring.
+// keeps its outside ring. The strip is positioned (`relative`) so absolutely
+// positioned descendants (the sr-only move text) are contained and clipped by
+// the scroller instead of widening the page.
 //
 // `staleTickers` are the tickers whose last trade is too old to call a move
 // (the page's isStale). Like the chip, the tape then keeps the price but shows
@@ -106,7 +108,7 @@ export function TickerTape({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="tayf-scroll-x flex overflow-x-auto border border-border bg-foreground/[0.03] font-mono text-[11px] leading-none">
+    <div className="tayf-scroll-x relative flex overflow-x-auto border border-border bg-foreground/[0.03] font-mono text-[11px] leading-none">
       {items.map((t) => {
         const q = quotes[t.ticker];
         const s = stats[t.ticker];

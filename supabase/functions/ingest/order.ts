@@ -220,9 +220,14 @@ export interface ParseBudget {
    *   3. it fits (`bytes so far + bytes <= maxBytes`) -> admit.
    *   4. `priority` and no overshoot yet this cycle -> admit, once.
    *   5. otherwise refuse.
+   * `reserved` marks the one feed the cycle reserved isolate items for (see
+   * `pickStaleReservation`): only `maxParses` applies to it (rule 1), so rules 3
+   * to 5 are skipped, and it does not spend the priority overshoot of rule 4. Its
+   * bytes and its parse still count in `bytes` and `parses`. The isolate item
+   * budget, not this one, is the CPU guard that a reserved feed stays under.
    * A refusal changes nothing. Pure and synchronous: it never throws.
    */
-  admit(bytes: number, priority?: boolean): boolean;
+  admit(bytes: number, priority?: boolean, reserved?: boolean): boolean;
   /** Parses admitted so far. */
   readonly parses: number;
   /** Body bytes admitted so far. */
@@ -234,9 +239,9 @@ export function createParseBudget(maxParses: number, maxBytes: number): ParseBud
   let used = 0;
   let overshot = false;
   return {
-    admit(bytes: number, priority = false): boolean {
+    admit(bytes: number, priority = false, reserved = false): boolean {
       if (parses >= maxParses) return false;
-      if (parses === 0 || used + bytes <= maxBytes) {
+      if (reserved || parses === 0 || used + bytes <= maxBytes) {
         parses++;
         used += bytes;
         return true;
@@ -316,6 +321,72 @@ export function prioritizeStale<T extends { id: string; fetch_last_at?: string |
   // The comparison avoids -Infinity - -Infinity (NaN).
   stale.sort((a, b) => (a.at === b.at ? 0 : a.at < b.at ? -1 : 1));
   return [...stale.map((s) => s.row), ...fresh];
+}
+
+/**
+ * Which sources `prioritizeStale` classes as stale (same rule, same default
+ * threshold), and how long the oldest of them has gone unpolled: `ids` holds every
+ * source whose `fetch_last_at` is null, unparseable or older than `staleMs`;
+ * `oldestMin` is the largest age among those that have a timestamp, in whole
+ * minutes (0 when there is none; a never-polled source is stale but has no age).
+ * Telemetry only (`ingest_cycles.oldest_stale_min`, migration 159): it reads the
+ * cycle-start state, before anything is fetched. Pure.
+ */
+export function summarizeStale<T extends { id: string; fetch_last_at?: string | null }>(
+  rows: readonly T[],
+  nowMs: number,
+  staleMs: number = 3 * CYCLE_PERIOD_MS,
+): { ids: Set<string>; oldestMin: number } {
+  const ids = new Set<string>();
+  let oldestMs = 0;
+  for (const row of rows) {
+    const raw = row.fetch_last_at;
+    const parsed = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+    if (Number.isNaN(parsed)) {
+      ids.add(row.id);
+    } else if (nowMs - parsed > staleMs) {
+      ids.add(row.id);
+      if (nowMs - parsed > oldestMs) oldestMs = nowMs - parsed;
+    }
+  }
+  return { ids, oldestMin: Math.floor(oldestMs / 60_000) };
+}
+
+/**
+ * The one feed a cycle reserves isolate items for before any body is fetched
+ * (h39-pipeline2-1). Returns the stalest source whose `fetch_last_at` parses and is
+ * older than `staleMs` (default three cycle periods, as in `prioritizeStale`) and
+ * whose `fetch_items_count` is a positive integer, with `items =
+ * ceil(fetch_items_count * KNOWN_ITEMS_HEADROOM)`: the most `estimateItems` can book
+ * for it. Otherwise null. A null, missing or unparseable `fetch_last_at` (a
+ * bootstrap source) is skipped, a source with no known count is skipped (nothing to
+ * size the reservation with; the stale-first order still helps it), and a timestamp
+ * in the future counts as fresh. Ties on age go to the first in input order. Pure.
+ *
+ * Why: `prioritizeStale` only changes the order feeds START in. Admission follows
+ * the order bodies ARRIVE in, and a 4.25 MB body arrives last, after the other
+ * feeds took the isolate's items and the cycle's bytes. Booking its items up front
+ * (`ItemBudget.reserve`) holds the room until it arrives.
+ */
+export function pickStaleReservation<
+  T extends { id: string; fetch_last_at?: string | null; fetch_items_count?: number | null },
+>(
+  rows: readonly T[],
+  nowMs: number,
+  staleMs: number = 3 * CYCLE_PERIOD_MS,
+): { id: string; items: number } | null {
+  let best: { id: string; items: number; at: number } | null = null;
+  for (const row of rows) {
+    const raw = row.fetch_last_at;
+    const parsed = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+    if (Number.isNaN(parsed) || !(nowMs - parsed > staleMs)) continue;
+    const count = row.fetch_items_count;
+    if (typeof count !== "number" || !Number.isInteger(count) || count <= 0) continue;
+    if (best === null || parsed < best.at) {
+      best = { id: row.id, items: Math.ceil(count * KNOWN_ITEMS_HEADROOM), at: parsed };
+    }
+  }
+  return best === null ? null : { id: best.id, items: best.items };
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +491,15 @@ export interface ItemBudget {
   /** Books `n` items (the estimate, before the parse). */
   book(n: number): void;
   /**
+   * Books `n` items for a feed that has not arrived yet, but only when they fit:
+   * `used + n <= limit`, with NO `used === 0` exception (a reservation never
+   * lets the isolate hold more than its limit, even for one feed). Returns
+   * whether it booked; a refusal, a negative, NaN or infinite `n` changes
+   * nothing. The caller hands the booking back with `settle(n, actual)`, where
+   * `actual` is the real estimate when the feed is parsed and 0 when it is not.
+   */
+  reserve(n: number): boolean;
+  /**
    * Replaces a booking of `booked` items with the `actual` count: adjusts
    * `used` by `actual - booked`, never below zero.
    */
@@ -443,6 +523,11 @@ export function createItemBudget(limit: number, state: IsolateItemState): ItemBu
     book(n: number): void {
       state.used += n;
     },
+    reserve(n: number): boolean {
+      if (!Number.isFinite(n) || n < 0 || state.used + n > limit) return false;
+      state.used += n;
+      return true;
+    },
     settle(booked: number, actual: number): void {
       state.used = Math.max(0, state.used + (actual - booked));
     },
@@ -450,5 +535,89 @@ export function createItemBudget(limit: number, state: IsolateItemState): ItemBu
       return state.used;
     },
     limit,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Stale-feed reservation (h39-pipeline2-1)
+// ---------------------------------------------------------------------------
+//
+// #198 (h36-pipeline-1) put the stale feeds first in the START order and sized a
+// feed from its known item count, and BHA was still starved: admission follows
+// the order bodies ARRIVE in, and its 4.25 MB body finishes last. On a fresh
+// isolate the other feeds had already taken 7.17 of the 8 MB of the cycle and
+// 4,299 of the 5,000 isolate items, so the byte budget and the item budget both
+// refused it, and the priority it gets from the in-memory deferral set is lost
+// whenever the isolate recycles (and does not exempt it from `fits()` anyway).
+//
+// The reservation books the stalest feed's items in the isolate item budget BEFORE
+// the fetch pool starts, so the other feeds can only use what is left, and admits
+// that feed against the booking when its body arrives (`ParseBudget.admit(.., ..,
+// true)` skips the byte budget for it). The reservation is made with
+// `ItemBudget.reserve`, which has no `used === 0` exception, so the isolate never
+// holds more than its limit because of it; the ISOLATE_ITEM_BUDGET, the byte budget
+// and the parse cap are the same numbers as before. While the reservation is held,
+// index.ts also keeps one of the `maxParses` slots for that feed (the other feeds
+// get at most `maxParses - 1`), so small feeds that arrive first cannot leave it at
+// the cap; the slot is freed with the reservation. A reservation that is not used
+// (304, body-hash hit, fetch error, parse refusal, never reached) is released.
+
+export interface ItemReservation {
+  /**
+   * "none": nothing was reserved (no pick, or no room); "held": reserved, not yet
+   * claimed or released; "consumed": the feed arrived and was admitted;
+   * "released": given back.
+   */
+  readonly state: "none" | "held" | "consumed" | "released";
+  /** Items held for `id` right now: the reservation while it is "held" and `id` is its feed, else 0. */
+  heldFor(id: string): number;
+  /**
+   * The reserved feed arrived and was admitted: replaces the reservation with a
+   * booking of `estimated` items (the caller has checked that any excess over the
+   * reservation fits). True when it did; false, changing nothing, unless "held".
+   * The booking is the caller's from here on (`settle(estimated, actual)` after the
+   * parse); `release` no longer touches it.
+   */
+  consume(estimated: number): boolean;
+  /**
+   * Gives the held items back (`settle(items, 0)`). True when this call did;
+   * false, changing nothing, unless "held". Safe to call on every exit path of
+   * the reserved feed and once more after the pool: the items are returned
+   * exactly once, and never after the feed's parse took them over.
+   */
+  release(): boolean;
+}
+
+/**
+ * Reserves `pick.items` on `budget` for the feed `pick.id` (see
+ * `pickStaleReservation`). No reservation ("none") when `pick` is null or the items
+ * do not fit under the limit (`ItemBudget.reserve`): a busy, reused isolate keeps
+ * today's behaviour.
+ */
+export function reserveItemsFor(
+  budget: ItemBudget,
+  pick: { id: string; items: number } | null,
+): ItemReservation {
+  let state: ItemReservation["state"] = "none";
+  if (pick !== null && pick.items > 0 && budget.reserve(pick.items)) state = "held";
+  return {
+    get state() {
+      return state;
+    },
+    heldFor(id: string): number {
+      return state === "held" && pick !== null && pick.id === id ? pick.items : 0;
+    },
+    consume(estimated: number): boolean {
+      if (state !== "held" || pick === null) return false;
+      budget.settle(pick.items, estimated);
+      state = "consumed";
+      return true;
+    },
+    release(): boolean {
+      if (state !== "held" || pick === null) return false;
+      budget.settle(pick.items, 0);
+      state = "released";
+      return true;
+    },
   };
 }
