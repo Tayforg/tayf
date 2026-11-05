@@ -22,12 +22,18 @@ import {
 } from "@/lib/clusters/politics-query";
 import {
   archiveHeading,
-  searchTokens,
+  searchTokenAlternatives,
   titleMatchesTokens,
 } from "@/lib/clusters/in-feed-match";
 import { searchClusters } from "@/lib/clusters/search-query";
 import { composeSearchView } from "@/lib/clusters/search-view";
-import { canonicalSearchQuery } from "@/lib/clusters/turkish-query";
+import {
+  MAX_SEARCH_QUERY_LENGTH,
+  MAX_SEARCH_TERMS,
+  canonicalSearchQuery,
+  searchQueryCut,
+  searchedWordsAsTyped,
+} from "@/lib/clusters/turkish-query";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { groupByDayBucket } from "@/lib/home/day-buckets";
 import {
@@ -267,6 +273,20 @@ export async function HomeFeed({
     isTooShortQuery(q) ||
     (typed && canonicalSearchQuery(q).length < MIN_QUERY_LENGTH);
   const searchable = typed && !tooShort;
+  // h42-search-2: the archive keeps at most MAX_SEARCH_TERMS words and
+  // MAX_SEARCH_QUERY_LENGTH characters (a cost bound, h30-abuse-1). When that cut
+  // part of what the reader typed, the page says so and echoes only the words the
+  // search used, instead of claiming results for the whole text. The raw q still
+  // goes to searchClusters (the cache key is built from it) and to the follow
+  // button; only the words shown back are the searched ones.
+  const cut = searchable ? searchQueryCut(q) : null;
+  const echoQ = searchable && cut !== null ? searchedWordsAsTyped(q) : q;
+  const cutNote =
+    cut === "terms"
+      ? `Arama ilk ${MAX_SEARCH_TERMS} kelimeyle yapıldı.`
+      : cut === "length"
+        ? `Arama sorgunun ilk ${MAX_SEARCH_QUERY_LENGTH} karakteriyle yapıldı.`
+        : null;
   // searchStatusText only knows the normalised floor, so a punctuation-only
   // query would be announced as "no results" while the page says "type more":
   // the canonical decision wins in the live region too.
@@ -315,9 +335,15 @@ export async function HomeFeed({
   // Turkish casing and dotted/dotless I folded ("ISTANBUL" matches
   // "İstanbul'da", "ak" matches "AK Parti" but not "dakikaya"). Quotes,
   // `or` and -negations are ignored; the archive RPC interprets those.
-  const tokens = q ? searchTokens(q.slice(0, 200)) : null;
+  // The tokens come from the CANONICAL query, the exact words the archive
+  // searches (so word 7 and on no longer empty the feed while the archive
+  // ignores them, h42-search-2), and an alias like AKP / AK Parti adds the other
+  // spelling as a second token list, as the archive does (h42-search-1): a card
+  // matches when ANY list matches.
+  const alternatives = q ? searchTokenAlternatives(canonicalSearchQuery(q)) : null;
   const matchesQuery = (b: ClusterBundle) =>
-    tokens === null || titleMatchesTokens(b.cluster.title_tr, tokens);
+    alternatives === null ||
+    alternatives.some((tokens) => titleMatchesTokens(b.cluster.title_tr, tokens));
 
   const filteredBreaking = breakingBundles.filter(matchesQuery);
   const filtered = bundles.filter(matchesQuery);
@@ -424,12 +450,17 @@ export async function HomeFeed({
         text={
           tooShort
             ? tooShortStatus
-            : searchStatusText({
-                q,
-                count: resultCount,
-                capped: view.archiveCappedTotal,
-                unavailable: view.archiveUnavailable,
-              })
+            : [
+                searchStatusText({
+                  q: echoQ,
+                  count: resultCount,
+                  capped: view.archiveCappedTotal,
+                  unavailable: view.archiveUnavailable,
+                }),
+                cutNote,
+              ]
+                .filter(Boolean)
+                .join(" ")
         }
       />
 
@@ -446,7 +477,8 @@ export async function HomeFeed({
       {searchable && (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="min-w-0 text-xs text-muted-foreground break-words [overflow-wrap:anywhere]">
-            <SearchEcho q={q} /> için {formatCountTr(resultCount)} sonuç
+            <SearchEcho q={echoQ} /> için {formatCountTr(resultCount)} sonuç
+            {cutNote !== null && `. ${cutNote}`}
           </p>
           <FollowButton kind="q" value={q} />
         </div>
@@ -540,7 +572,9 @@ export async function HomeFeed({
               <SearchUnavailable />
             ))}
 
-          {view.emptySearch && <EmptySearch query={q} tooShort={tooShort} />}
+          {view.emptySearch && (
+            <EmptySearch query={echoQ} tooShort={tooShort} />
+          )}
         </>
       )}
     </>

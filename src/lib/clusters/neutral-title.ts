@@ -147,6 +147,42 @@
 // migration 155's growth rule offers its cluster again (it has grown by greatest(3, half of
 // its stamped size)); one still stamped v1 to v5 heals in the running v6 pass.
 
+// extractive-v6 (hunt 42, h42-titles-1 and h42-titles-2; still extractive-v6, NO model bump).
+// h42-titles-1: a stored title that no current member carries is not protected. An outlet edits a
+// headline, migration 074 rewrites articles.title and never touches clusters.title_tr_neutral, and the
+// incumbent branch only compared scores: 31fde7d7 kept a detention claim on a workplace death after both
+// members read "...temizlik işçisi hayatını kaybetti". incumbentIsMemberTitle (case-, quote- and
+// separator-blind; the recased, sentence-cased, quote-repaired, glued-twin and lead-in forms of a member
+// title still count) is asked first, whether or not the stored title passes the gate (the stale set of
+// migration 162 never looks at the gate, so a stored question or a surviving lead-in is stale too). A stale
+// stored title that fails the gate gives way to the first pick with the floor, a member's own wording. One
+// that passes the gate gives way to the best member wording in three steps (repickStale): the best member
+// that passes the gate and is neither more loaded or framed than the stored title nor Title Case; else the
+// best member that passes the gate; else the stored title itself, never a floor title that fails the gate.
+// Migration 162 offers the clusters of the last 7 days of edits to the re-pick.
+// h42-titles-2: the incumbent's 0.20 margin protected four kinds of stored title a fresh pick replaces.
+// Lexicon: figurative 'darbe' ('ağır darbe', "Trump'a ara seçim darbesi"), 'istifa depremi', an unmarked
+// 'tsunami', 'çöküyor', 'dehşet', price 'çakıldı', 'zehir zemberek', 'tarihi başarı' and FETÖ'cü are loaded,
+// and 'şoku', 'skandalı', 'rezaleti', 'müjdesi' are framing; the hedge vocabulary gains the modal and
+// forecast forms ('değişebilir', 'bekleniyor', 'muhtemel', 'olası', 'olmazsa', 'sinyal', 'düşünüyor'), as a
+// SEPARATE wide set that only the hedge switch rule reads (carriesWideHedge).
+// incumbentSwitchRule: a loaded, hedge-dropping, number-cutting or Title Case stored title gives way to the
+// best member title with no margin, behind guards found by the replay below: no swap toward more
+// framing, none to a Title Case title, the hedge / number / Title Case rules only to a title that restates
+// the stored one (token overlap 0.1), the number rule only for a stored title that states a number and only
+// when the best title restates every one of them, and the loaded rule only to a title at least as central
+// as the stored one.
+// Review fixes (h42 review of the first version, 2026-11-05): the 'X deprem' entry matches 'depremi' /
+// 'depremler...' only; 'darbe' followed by 'sonrası', 'planı', 'davası', 'iddia...', 'kararı', 'teşebbüsü', or a
+// physical blow (body part in the dative or ablative, 'darbe sonucu', 'darbe alan') is not figurative;
+// 'çakıldı' is a price move only beside a market word; 'tsunami' with a toll ('ölü', 'yaralı') is the event;
+// 'Müjdeci' is a surname; 'Butlan CHP'si', 'feci', 'kıskacı', 'gözyaşlarına boğul', 'tarihi karşılama' are loaded
+// and 'acı haber', 'dikkat çekti', 'böyle görüntülendi' framing; 'COP31' / 'F-16' are names, not figures.
+// A replay over the 3,884 clusters of the 14-day re-pick set changes 139 titles (3.58%; HEAD changed 12;
+// the first version 158), and the model id stays: 1 of the 30 hand-reviewed entries is still worse (59bcbd7c,
+// an idiom with a typo that no lexicon entry catches) and 84 rows of the set were still on a model older than
+// v6. See neutral-title-replay.test.ts and __fixtures__/h42-*.json.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
@@ -237,13 +273,25 @@ const FRAMING_RAW: RegExp[] = [
 const FRAMING_FOLDED: RegExp[] = [
   /son\s*dak[iı]ka/u,
   new RegExp(`${L}(?:flaş|flas|canlı|canli)${R}`, "u"),
-  new RegExp(
-    `${L}(?:bomba|şok|sok|skandal|rezalet|olay|dev|kritik|müjde|mujde)${R}`,
-    "u",
-  ),
+  new RegExp(`${L}(?:bomba|olay|dev|kritik)${R}`, "u"),
+  // Case-suffixed forms (h42-titles-2): "Texas şoku", "Fon skandalı", "skandalında", "rezaleti" slipped
+  // past the whole-word entry above. 'şok' / 'sok' take an explicit suffix list so 'sokak', 'sokağa' and
+  // 'Sokolov' never match; 'skandal' and 'rezalet' take any letters ('skandalın', 'rezalete'), and so does
+  // 'müjde' ("vize müjdesi", c85af1d5 in the 14-day replay: a Title Case swap landed on it), except
+  // 'müjdeci' (a surname: "Yeniden Refah Partili Müjdeci'den Ömer Çelik'e yanıt"; review, correctness-2).
+  // 'olay' and 'dev' keep the right edge above ('olayı', 'devlet' are ordinary words).
+  new RegExp(`${L}(?:şok|sok)(?:u|a|ta|tan|un|unu|una|unda|undan|lar|ları)?${R}`, "u"),
+  new RegExp(`${L}(?:skandal|rezalet)\\p{L}*`, "u"),
+  new RegExp(`${L}(?:müjde|mujde)(?!c[iı])\\p{L}*`, "u"),
   /dikkat çeken|dikkat ceken|işte o|iste o|işte detaylar|iste detaylar|bakın|bakin/u,
   // A Haber / Sabah house style for the president.
   new RegExp(`${L}başkan erdoğan${R}`, "u"),
+  // Wording the swap targets of the 14-day replay carried (h42 review, editorial-4): 'acı haber' (a
+  // sentence-opening label), and the teaser verbs 'dikkat çekti' ("Kılıçdaroğlu detayı dikkat çekti") and
+  // 'böyle görüntülendi' ("... obruk böyle görüntülendi").
+  new RegExp(`${L}acı\\s+haber${R}`, "u"),
+  /dikkat\s+çekti/u,
+  /böyle\s+görüntülen/u,
 ];
 
 // Wording that editorialises rather than reports. Costs more than framing:
@@ -294,10 +342,96 @@ const LOADED_FOLDED: RegExp[] = [
   new RegExp(`${L}dev\\s+dönüşüm`, "u"),
   new RegExp(`${L}tescillendi${R}`, "u"),
   new RegExp(`${L}sarsılmaz${R}`, "u"),
+  // Figurative disaster and verdict wording the incumbent protection kept (hunt 42, h42-titles-2).
+  // 'istifa depremi' (020a0a63 "Ataşehir CHP'de istifa depremi"): only after the listed nouns, so
+  // 'Marmara depremi' and 'Kahramanmaraş'ta 4.2 büyüklüğünde deprem' stay free. Only the possessive or the
+  // plural ('depremi', 'depremler...') is the metaphor: a bare 'deprem' after the noun is the natural event
+  // ("AK Parti deprem bölgesinde incelemelerde bulundu", "Borsa deprem sonrası sert düştü"; review, correctness-2).
+  new RegExp(`${L}(?:istifa|seçim|siyaset|transfer|borsa|piyasa|ihraç|kabine|parti)\\s+deprem(?:i|ler)\\p{L}*`, "u"),
+  // 'çöküyor' (671bc01e "İBB davası çöküyor"): the present tense verdict; 'bina çöktü' is reporting.
+  new RegExp(`${L}çöküyor${R}`, "u"),
+  // 'dehşet' with no right edge (29c38a16 family, "Afyonkarahisar'da dehşet", 'dehşete düşüren').
+  new RegExp(`${L}dehşet`, "u"),
+  // 'zehir zemberek' (a verdict on a statement) and 'tarihi başarı' (59bcbd7c "Arap partilerden tarihi
+  // başarı"); 'tarihi karar' stays free.
+  new RegExp(`${L}zehir\\s+zemberek`, "u"),
+  new RegExp(`${L}tarihi\\s+başar[ıi]`, "u"),
+  // The agent-noun suffix on FETÖ ("FETÖ'cü Enes"): a label for a person, where plain 'FETÖ' (an
+  // organisation named by the prosecutors) stays free.
+  new RegExp(`${L}fetö['’]?c[üu]`, "u"),
+  // Wording the swap targets of the 14-day replay carried (h42 review, editorial-4). 'Butlan CHP'si' is a
+  // partisan label for the party (the court term 'mutlak butlan' stays free); 'feci' and 'tarihi karşılama'
+  // are the lexicon's 'korkunç' and 'görkemli' under other words; 'kıskacı' only as the possessive
+  // ("rüşvet kıskacı"), so the military 'kıskaç hareketi' stays free; 'gözyaşlarına boğul' is the tear-jerker idiom.
+  new RegExp(`(?<!mutlak\\s)${L}butlan\\s+chp`, "u"),
+  new RegExp(`${L}feci${R}`, "u"),
+  new RegExp(`${L}k[ıi]skac[ıi]${R}`, "u"),
+  new RegExp(`${L}gözyaşlarına\\s+boğul`, "u"),
+  new RegExp(`${L}tarihi\\s+karşılama`, "u"),
 ];
 
-// Words that attribute a claim instead of asserting it. Tested on foldTr(title).
-const HEDGE = new RegExp(`${L}(?:iddia|öne\\s+sürd|ifade)`, "u");
+// Figurative 'darbe' (hunt 42, h42-titles-2): "Netanyahu'ya Ağır Darbe" (29c38a16), "Trump'a ara seçim
+// darbesi", "Netanyahu'ya kendi ülkesinden darbe" (5f761c9a). Two forms, both never before 'girişim' (a
+// coup attempt is reporting): an intensifier or 'seçim' directly before it, or a name in the dative
+// ("...'a" / "...'ya" / "...'e" / "...'ye") followed within three words by it, where those words are not
+// 'askeri' or 'girişim'. 'askeri darbe', '15 Temmuz darbe girişimi' and 'darbe girişimi davası' stay free.
+// The review (correctness-2) found the first version charging a coup REPORTED about, and a blow TAKEN:
+//   - 'darbe' followed by 'sonrası', 'planı', 'davası', 'iddia...', 'kararı', 'teşebbüsü' is the coup as an
+//     event ("Myanmar'a darbe sonrası yaptırım kararı", "Erdoğan'a yönelik darbe planı iddianamesi");
+//   - an intensifier form followed by 'sonucu', 'alan', 'aldı', 'aldığı' or 'alarak' is a physical blow
+//     ("Başına aldığı ağır darbe sonucu hayatını kaybetti"), and so is any title that names a body part in
+//     the dative or ablative ("Kafasına sert darbe alan genç ...", "göğsüne", "boynuna", "vücuduna"). 'yüz'
+//     takes the dative only: 'yüzünden' ("because of") is not a body part.
+const NOT_COUP_ATTEMPT = String.raw`(?!\s+(?:giri[şs]im|sonras|plan|dava|iddia|karar|te[şs]ebb))`;
+const NOT_BLOW_TAKEN = String.raw`(?!\s+(?:sonucu|alan|ald[ıi]|alarak))`;
+const DARBE_INTENSIFIER = new RegExp(
+  `${L}(?:ağır|büyük|sert|seçim|kendi\\s+ülkesinden)\\s+darbe\\p{L}*${R}${NOT_COUP_ATTEMPT}${NOT_BLOW_TAKEN}`,
+  "u",
+);
+const DARBE_AFTER_NAME = new RegExp(
+  `${L}\\p{L}+['’]y?[ae]${R}(?:\\s+(?!askeri|askerî|giri[şs]im)[\\p{L}\\p{N}]+){0,3}\\s+darbe(?:si)?${R}${NOT_COUP_ATTEMPT}`,
+  "u",
+);
+const BLOW_ON_BODY = new RegExp(
+  `${L}(?:baş|kafa|göğs|boyn|vücud)s?[ıiuü](?:na|ne|ndan|nden)${R}|${L}yüz[ıiuü]?(?:na|ne)${R}`,
+  "u",
+);
+
+// 'tsunami' is loaded ("ABD'de sandık tsunamisi", 'mavi tsunami') unless the title also carries a
+// literal marker of the natural event: uyarı, dalga, kıyı, büyüklüğünde, deprem, AFAD, Kandilli, or its
+// toll ('ölü', 'yaralı', 'can kaybı', 'hayatını kaybetti': "Endonezya'da tsunami: 12 ölü"; review, editorial-5).
+const TSUNAMI = new RegExp(`${L}tsunami`, "u");
+const TSUNAMI_LITERAL =
+  /uyar[ıi]|dalga|k[ıi]y[ıi]|büyüklüğ|deprem|afad|kandilli|ölü|yaral|can\s+kayb|hayat[ıi]n[ıi]\s+kaybet/u;
+
+// 'çakıldı' about prices ("hisseleri çakıldı") is loaded. Anything that hit a wall, a tree or the ground is
+// not: the review (correctness-2) found "Otomobil duvara çakıldı", "Tır markete çakıldı" and "Projenin ilk
+// kazığı çakıldı" charged, so the verb only counts when the title also names a market (PRICE_MARKET) and the
+// aircraft exemption of the first version is gone: nothing to exempt. 'çakıl' alone and 'çakıllı' are
+// gravel, so a letter must follow the passive 'çakıl' and it must not be a second 'l'. The open stems take
+// any suffix ('hisseleri', 'fiyatları'); 'kur', 'değer', 'euro' and 'altın' only their own, so 'kurum',
+// 'değerli', 'Eurovision' and 'altında' (under) are not markets.
+const PRICE_CRASH = new RegExp(`${L}çak[ıi]l(?!l)\\p{L}+`, "u");
+const PRICE_MARKET = new RegExp(
+  `${L}(?:hisse|borsa|b[iı]st|endeks|dolar|f[iı]yat|kr[iı]pto|b[iı]tco[iı]n|petrol|p[iı]yasa|fa[iı]z|tahv[iı]l)\\p{L}*|${L}(?:kur|değer|euro|altın)(?:u|i|ı|lar|ları|ler|leri|ın|in)?${R}`,
+  "u",
+);
+
+// Words that attribute a claim instead of asserting it. Tested on foldTr(title). HEDGE is the allegation
+// set of hunt 22 ('iddia', 'öne sürdü', 'ifade'); every scoring path reads it: carriesHedge, ctx.hedged and
+// the hedge-loss term. HEDGE_WIDE adds the modal and forecast vocabulary of h42-titles-2: a stem plus
+// -ebilir / -abilir / -ebilecek / -abilecek ("Fed'in faiz hesabı değişebilir"), and 'bekleniyor',
+// 'muhtemel', 'olası', 'olmazsa', 'sinyal', 'düşünüyor' (8ea9e45f: two of three members hedge and the
+// stored "Fed beklentilerini değiştirdi" asserted it). It drives ONLY incumbentSwitchRule's hedge branch:
+// when the wide set fed the existing paths too, d5a6d9ab ("Yavuzyılmaz, ... zam yapılacağını öne sürdü",
+// a stored title that attributes) turned into a defect and was traded for "gizli elektrik zammı
+// uyarısı: ... zam gelebilir", losing the 2027 and 82-104 figures (h42 review, editorial-3).
+const HEDGE_ALLEGATION = String.raw`${L}(?:iddia|öne\s+sürd|ifade)`;
+const HEDGE = new RegExp(HEDGE_ALLEGATION, "u");
+const HEDGE_WIDE = new RegExp(
+  `${HEDGE_ALLEGATION}|\\p{L}[ae]bil(?:ir|ece)|${L}(?:bekleniyor|muhtemel|olas[ıi]|olmazsa|sinyal|düşünüyor)`,
+  "u",
+);
 
 /**
  * What a title pays for dropping the hedge its cluster's members carry: when
@@ -310,8 +444,17 @@ export const HEDGE_LOSS_PENALTY = 0.15;
 const HEDGED_MIN_MEMBERS = 3;
 const HEDGED_SHARE = 0.4;
 
-function carriesHedge(title: string): boolean {
+/** True when the title attributes what it says as an allegation (see HEDGE); exported for tests. Pure. */
+export function carriesHedge(title: string): boolean {
   return HEDGE.test(foldTr(title));
+}
+
+/**
+ * True when the title attributes or qualifies what it says in the wide vocabulary (HEDGE_WIDE: the allegation
+ * words plus the modal and forecast ones). Only the hedge switch rule asks. Exported for tests. Pure.
+ */
+export function carriesWideHedge(title: string): boolean {
+  return HEDGE_WIDE.test(foldTr(title));
 }
 
 // The qualifier of an acting appointment: 'vekaleten' (by proxy), 'vekalet',
@@ -433,6 +576,13 @@ export function loadedPenalty(title: string): number {
   const folded = foldTr(title);
   let n = 0;
   for (const re of LOADED_FOLDED) if (re.test(folded)) n++;
+  // A blow on a named body part is physical, whatever the intensifier (review, correctness-2).
+  if (!BLOW_ON_BODY.test(folded)) {
+    if (DARBE_INTENSIFIER.test(folded)) n++;
+    if (DARBE_AFTER_NAME.test(folded)) n++;
+  }
+  if (TSUNAMI.test(folded) && !TSUNAMI_LITERAL.test(folded)) n++;
+  if (PRICE_CRASH.test(folded) && PRICE_MARKET.test(folded)) n++;
   if (sequelTeaser(title)) n++;
   return n;
 }
@@ -890,12 +1040,17 @@ export function isQuestionTitle(title: string): boolean {
   return QUESTION_PHRASES.some((phrase) => padded.includes(` ${phrase} `));
 }
 
-const NUMBER = /\d+(?:[.,]\d+)?/g;
+// The number, then an optional distributive suffix ("14'er", "10’ar", "5'şer", "3’şar") or an ordinal dot
+// ("104. gün") that is read past, not as a part of it (h42-titles-2): "14'er yıl" says 14, "104." says 104.
+const NUMBER = /(\d+(?:[.,]\d+)?)(?:['’](?:er|ar|şer|şar)(?![\p{L}\p{N}])|\.(?![\d]))?/gu;
 
-// "91,1" and "91.1" are one number.
-function numsOf(title: string): Set<string> {
+/**
+ * The numbers a title states, as strings: "91,1" and "91.1" are one number, and a distributive
+ * ("14'er") or ordinal ("104.") suffix is not part of it. Exported for tests. Pure.
+ */
+export function numsOf(title: string): Set<string> {
   const out = new Set<string>();
-  for (const m of title.match(NUMBER) ?? []) out.add(m.replace(",", "."));
+  for (const m of title.matchAll(NUMBER)) out.add((m[1] ?? "").replace(",", "."));
   return out;
 }
 
@@ -1505,7 +1660,9 @@ export interface PickOptions {
    * title is itself the defect (extractive-v6). It is scored like a member that is not itself part of the comparison: its
    * centrality is the mean similarity to the members whose text differs from
    * it, so a stored title equal to member k scores like member k. A blank or
-   * missing incumbent changes nothing.
+   * missing incumbent changes nothing. A stored title that no member carries any more
+   * (incumbentIsMemberTitle is false: the outlet edited it away) is not protected at
+   * all, whether or not it passes the gate: see pickNeutralTitle.
    */
   incumbent?: string | null;
 }
@@ -1719,20 +1876,14 @@ function missingSubject(
 }
 
 /**
- * Whether the stored title `inc` is itself the defect, judged against the best
- * member title `best` and the cluster's member titles: (1) a minority claim (it says
- * what few members say and omits the words most of them use), (2) a Title Case run
- * (TITLE_CASE_RUN capitalised words the others write in lower case) or (3) a missing
- * subject (a proper noun that SUBJECT_SUPPORT of the others say and only `best` has).
- * Rules (1) and (3) need DEFECT_MIN_SAMPLE other members. A `best` that is Title Case
- * itself changes nothing, so it is never a defect. True lowers the re-pick margin to
- * zero: the stored title still stays unless `best` outscores it. Pure; the copies of
- * `inc` and `best` among the members are not evidence.
+ * The evidence the defect rules and the Title Case rule read: the deduplicated member titles minus
+ * the copies of the stored title and of the best candidate. Empty when the two are the same text
+ * or either folds to nothing (then nothing is judged).
  */
-export function incumbentDefect(inc: string, best: string, memberTitles: readonly string[]): boolean {
+function defectSample(inc: string, best: string, memberTitles: readonly string[]): string[] {
   const incFold = fold(inc);
   const bestFold = fold(best);
-  if (incFold === "" || bestFold === "" || incFold === bestFold) return false;
+  if (incFold === "" || bestFold === "" || incFold === bestFold) return [];
   const seen = new Set<string>();
   const sample: string[] = [];
   for (const raw of memberTitles) {
@@ -1745,6 +1896,22 @@ export function incumbentDefect(inc: string, best: string, memberTitles: readonl
     seen.add(key);
     sample.push(t);
   }
+  return sample;
+}
+
+/**
+ * Whether the stored title `inc` is itself the defect, judged against the best
+ * member title `best` and the cluster's member titles: (1) a minority claim (it says
+ * what few members say and omits the words most of them use), (2) a Title Case run
+ * (TITLE_CASE_RUN capitalised words the others write in lower case) or (3) a missing
+ * subject (a proper noun that SUBJECT_SUPPORT of the others say and only `best` has).
+ * Rules (1) and (3) need DEFECT_MIN_SAMPLE other members. A `best` that is Title Case
+ * itself changes nothing, so it is never a defect. True lowers the re-pick margin to
+ * zero: the stored title still stays unless `best` outscores it. Pure; the copies of
+ * `inc` and `best` among the members are not evidence.
+ */
+export function incumbentDefect(inc: string, best: string, memberTitles: readonly string[]): boolean {
+  const sample = defectSample(inc, best, memberTitles);
   if (sample.length < TITLE_CASE_MIN_SAMPLE) return false;
   const votes = caseVotes(sample);
   if (titleCaseRun(best, votes)) return false;
@@ -1754,6 +1921,167 @@ export function incumbentDefect(inc: string, best: string, memberTitles: readonl
   const incStems = stemSet(inc);
   const bestStems = stemSet(best);
   return minorityClaim(incStems, bestStems, sampleStems) || missingSubject(incStems, bestStems, sample, sampleStems);
+}
+
+// ---------------------------------------------------------------------------
+// The stored title gives way with no margin (hunt 42, h42-titles-2).
+// ---------------------------------------------------------------------------
+//
+// The incumbent's 0.20 margin protects a good stored title from a lateral swap. It also protected four
+// kinds of stored title that a fresh pick on the same members replaces, because the score does not see
+// them (or sees them for a fraction of the margin): loaded wording the lexicon did not know ("Netanyahu'ya
+// Ağır Darbe", "istifa depremi", "İBB davası çöküyor"), a dropped hedge (8ea9e45f: 2 of 3 members say
+// 'bekleniyor' / 'değişebilir'; the stored "Fed beklentilerini değiştirdi" states it), a number cut short
+// (2441793c: 4 of 6 members say '14 yıl 10 ay'; the stored "14'er yıl hapis talebi") and Title Case
+// (6d0f5c12: incumbentDefect fired but the best title did not outscore it, and scoreTitle has no case
+// term). Each of these returns the best member title outright; the best title has passed
+// isAcceptableNeutral, so what the stored title is replaced with is always an acceptable member wording.
+
+/** At least this many other member titles, and at least this share of them, must carry a number for its absence to count. */
+const NUMBER_MIN_MEMBERS = 2;
+const NUMBER_SHARE = 0.5;
+
+// numsOf without the digits glued to letters: 'COP31', 'F-16' and 'R4' are names, not figures (d69feb0f counted
+// COP31 as 31 and switched to the Bakan Çiftçi '26 bin personel' story). The lookbehind skips a digit run that
+// follows a letter (with an optional hyphen), and a digit that follows a digit, so the second digit of 'COP31'
+// is not read as a number of its own. numsOf itself stays as it is: first-pick scoring and numeralOutliers use it.
+const STANDALONE_NUMBER = new RegExp(`(?<!\\p{L}-?)(?<!\\d)${NUMBER.source}`, "gu");
+
+function standaloneNumsOf(title: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of title.matchAll(STANDALONE_NUMBER)) out.add((m[1] ?? "").replace(",", "."));
+  return out;
+}
+
+/**
+ * The stored title states a number but lacks one that at least NUMBER_SHARE (and at least
+ * NUMBER_MIN_MEMBERS) of the other member titles carry, and the best candidate carries it. `items` are
+ * the deduplicated usable members; the copies of the stored title are not evidence about themselves.
+ * The stored title has to state some number: "14'er yıl" (2441793c) cut the months, while a numberless
+ * "Martı TAG davasında karar çıktı" is a style the replay showed no reason to swap (29 of the first 51
+ * swaps of this rule had a numberless stored title, most of them lateral, three of them worse).
+ */
+function lacksMajorityNumber(inc: string, best: string, items: readonly MemberTitle[]): boolean {
+  const incNums = standaloneNumsOf(inc);
+  // A stored title that states no number at all omits them by style, it did not cut one: no mismatch to repair.
+  if (incNums.size === 0) return false;
+  const bestNums = numsOf(best);
+  // The rule repairs a figure that was cut short and restated in full ("14'er yıl" -> "14 yıl 10 ay"), so every
+  // figure the stored title states has to be restated by the best title too. A stored "1 milyon 83 bin 706 TL"
+  // against a best title that says 'rekor ceza' was a fine figure dropped (5dec458d, 494bafc1).
+  for (const n of incNums) if (!bestNums.has(n)) return false;
+  const incFold = fold(inc);
+  const others = items.filter((m) => fold(m.title) !== incFold && fold(cleanHeadline(m.title)) !== incFold);
+  if (others.length < NUMBER_MIN_MEMBERS) return false;
+  const counts = new Map<string, number>();
+  for (const m of others) for (const n of numsOf(m.title)) counts.set(n, (counts.get(n) ?? 0) + 1);
+  for (const [n, count] of counts) {
+    if (count >= NUMBER_MIN_MEMBERS && count / others.length >= NUMBER_SHARE && !incNums.has(n) && bestNums.has(n)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * A whole-title Title Case needs at least this many words of three letters or more. Eight, not the four
+ * caseEvidence uses: the 150-cluster corpus holds "112 Acil Çağrı ve Koordinasyon Genel Müdürlüğü kuruldu"
+ * (an institution's name is capitalised on purpose: 5 of 6 words) and it must stay.
+ */
+const TITLE_CASE_TITLE_MIN_WORDS = 8;
+
+/**
+ * Whether almost every word of the title starts with a capital: at least TITLE_CASE_TITLE_MIN_WORDS words
+ * of TITLE_CASE_MIN_LETTERS letters or more (digits and the bare number words left out), TITLE_CASE_SHARE
+ * of them capitalised ("ABD Ara Seçimlerinde İlk Sonuçlar Belli Oldu: Senato Demokratlara Geçti"). The
+ * same share caseEvidence uses to stop reading a sibling's capitals as names, here with a higher word
+ * floor: a headline of two names and three common words is not Title Case. titleCaseRun is the other
+ * detector: it needs the sample to write those words in lower case, which a Title Case title made of
+ * words nobody else uses ('İlk', 'Sonuçlar', 'Belli', 'Oldu') never gets.
+ */
+export function isTitleCaseTitle(title: string, minWords: number = TITLE_CASE_TITLE_MIN_WORDS): boolean {
+  let long = 0;
+  let capitalised = 0;
+  for (const token of title.trim().slice(0, EVIDENCE_MAX_CHARS).split(/\s+/).slice(0, EVIDENCE_MAX_TOKENS)) {
+    const stem = stemOf(token);
+    if (stem === "" || hasDigit(stem) || letterCount(stem) < TITLE_CASE_MIN_LETTERS) continue;
+    long++;
+    if (startsUpper(stem)) capitalised++;
+  }
+  return long >= minWords && capitalised / long >= TITLE_CASE_SHARE;
+}
+
+/**
+ * The stored title is Title Case and the best candidate is not: a run of capitalised words the sample
+ * writes in lower case (titleCaseRun, incumbentDefect's detector) or a title whose words are almost all
+ * capitalised (isTitleCaseTitle). The sample is incumbentDefect's, and needs TITLE_CASE_MIN_SAMPLE titles.
+ */
+function titleCaseIncumbent(inc: string, best: string, memberTitles: readonly string[]): boolean {
+  const sample = defectSample(inc, best, memberTitles);
+  if (sample.length < TITLE_CASE_MIN_SAMPLE) return false;
+  const votes = caseVotes(sample);
+  const titleCase = (t: string): boolean => titleCaseRun(t, votes) || isTitleCaseTitle(t);
+  return titleCase(inc) && !titleCase(best);
+}
+
+type SwitchRule = "loaded" | "hedge" | "number" | "titleCase";
+
+/**
+ * The hedge, number and Title Case rules repair a wording of the SAME story ("14'er yıl" for "14 yıl 10 ay"),
+ * so the title they swap to has to restate the stored title: at least this token overlap (Jaccard over
+ * tokens()). The 14-day replay showed the unguarded rules landing on a different angle of the day's news
+ * (fd95db1f, an Israeli minister's denial, became a conference about the Mekke alliance; d6fefff8, a
+ * grain-corridor quote, became a patriarchate visit). The loaded rule has no such floor: 5f761c9a's
+ * "Netanyahu'ya kendi ülkesinden darbe" shares no word with the attributed title that replaces it.
+ */
+const SAME_STORY_MIN_OVERLAP = 0.1;
+/** No swap lands on a title with this many words of three letters or more that is (almost) all capitals. */
+const SWITCH_TARGET_TITLE_CASE_WORDS = 5;
+
+/**
+ * How many of the cluster's usable members carry the wide hedge vocabulary (HEDGE_WIDE), at least
+ * HEDGED_MIN_MEMBERS of them in the cluster and HEDGED_SHARE of the cluster: the hedge switch rule's own
+ * measure, apart from ScoreContext.hedged (the allegation set) that scoring uses.
+ */
+function hedgedWide(items: readonly MemberTitle[]): boolean {
+  return (
+    items.length >= HEDGED_MIN_MEMBERS &&
+    items.filter((m) => carriesWideHedge(m.title)).length / items.length >= HEDGED_SHARE
+  );
+}
+
+/**
+ * Which h42-titles-2 rule makes the stored title `inc` give way to the best candidate `best` with no
+ * margin, or null when none does: (1) the stored title is loaded and the best one is not and at least as
+ * central as the stored one, (2) the cluster hedges in the wide vocabulary, the stored title does not and the
+ * best one does, (3) the stored title lacks a number that half of the other members carry and the best one has
+ * it, (4) the stored title is Title Case and the best one is not. Checked in that order; the first that holds
+ * names the rule. No rule swaps to a title with more framing or to a Title Case title
+ * (SWITCH_TARGET_TITLE_CASE_WORDS), and rules (2) to (4) need a best title that restates the stored one
+ * (SAME_STORY_MIN_OVERLAP).
+ *
+ * The centrality guard of (1) (h42 review, editorial-6): ad76f79a's stored "...perde arkası" title is a member
+ * and central (mean member overlap 0.194); the loaded rule swapped it for a title one member in six wrote
+ * (0.130). `incCentrality` is the mean similarity the core computed for the stored title's score;
+ * `bestCentrality` is the same mean for the best candidate, computed only when the loaded rule is reached.
+ */
+function incumbentSwitchRule(
+  inc: string,
+  best: string,
+  items: readonly MemberTitle[],
+  memberTitles: readonly string[],
+  incCentrality: number,
+  bestCentrality: () => number,
+): SwitchRule | null {
+  if (isTitleCaseTitle(best, SWITCH_TARGET_TITLE_CASE_WORDS)) return null;
+  // No rule trades toward more framing: d1ed614b swapped "fon vurgunu tepkisi" for "olay çağrı" in the replay.
+  if (framingPenalty(best) > framingPenalty(inc)) return null;
+  if (loadedPenalty(inc) > 0 && loadedPenalty(best) === 0 && bestCentrality() >= incCentrality) return "loaded";
+  if (jaccard(tokens(inc), tokens(best)) < SAME_STORY_MIN_OVERLAP) return null;
+  if (hedgedWide(items) && !carriesWideHedge(inc) && carriesWideHedge(best)) return "hedge";
+  if (lacksMajorityNumber(inc, best, items)) return "number";
+  if (titleCaseIncumbent(inc, best, memberTitles)) return "titleCase";
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1819,6 +2147,123 @@ export function preferUnglued(chosen: string, memberTitles: readonly string[]): 
   return best;
 }
 
+// ---------------------------------------------------------------------------
+// A stored title that no current member carries (h42-titles-1).
+// ---------------------------------------------------------------------------
+//
+// An outlet edits a headline and migration 074 (apply_article_title_edits) rewrites
+// articles.title, but it never touches clusters.title_tr_neutral: 31fde7d7 kept "Denizli'de
+// çöp kamyonu sürücüsü, sıkışan temizlikçinin ölümü üzerine gözaltına alındı" (a detention
+// claim) while both members had been edited to "... temizlik işçisi hayatını kaybetti". The
+// incumbent branch of the re-pick only compares scores, so a stored title that no member says
+// any more was kept as a "good" title. A stored title is supposed to be a member's wording:
+// this asks whether it still is, ignoring everything the picker itself changes (case, quotes,
+// separators, a glued join, a lead-in).
+
+/** Every character outside letters and digits, removed: the key ignores case, quotes and separators. */
+const NOT_LETTER_OR_DIGIT_KEY = /[^\p{L}\p{N}]+/gu;
+
+function memberKey(title: string): string {
+  return title.toLocaleLowerCase("tr").replace(NOT_LETTER_OR_DIGIT_KEY, "");
+}
+
+// cleanHeadline's house-style rewrite as it stood before it learned to leave "Başkan Erdoğan Tosun" alone
+// (a capitalised name after it is a different person): v1 to v5 titles stored "Cumhurbaşkanı Erdoğan
+// Tokayev'i ..." from "Başkan Erdoğan Tokayev'i ...". Those stored titles are still a member's wording.
+const LEGACY_HOUSE_STYLE = /(?<![\p{L}\p{N}])Başkan Erdoğan(?![\p{L}\p{N}])/gu;
+
+/**
+ * Whether the stored title `inc` is still some member's wording. True when a member title m has
+ * key(cleanHeadline(m)) === key(inc) or key(m) contains key(inc), where key is the Turkish lower
+ * case with every character outside letters and digits removed. That makes it blind to case,
+ * separators and quotes, so a recased ("türkiye" -> "Türkiye"), sentence-cased (a shouted
+ * member), quote-repaired or glued-twin ("Tel Aviv-Washington" against "Tel AvivWashington")
+ * form of a member title still counts, and so does the cleaned form of a title with a lead-in,
+ * an outlet prefix, and the "Başkan Erdoğan" -> "Cumhurbaşkanı Erdoğan" rewrite older cleaning rules
+ * applied before a capitalised name. Pass ALL raw member titles, not the
+ * generic-filtered list. A title with no letter or digit is not judged here (true): the
+ * acceptance gate rejects it. No members: false. Each member is read up to
+ * EVIDENCE_MAX_CHARS characters, so a hostile feed title costs a bounded scan. Pure.
+ */
+export function incumbentIsMemberTitle(inc: string, memberTitles: readonly string[]): boolean {
+  const own = memberKey(inc);
+  if (own === "") return true;
+  for (const raw of memberTitles) {
+    if (typeof raw !== "string") continue;
+    const title = raw.trim().slice(0, EVIDENCE_MAX_CHARS);
+    if (title === "") continue;
+    if (memberKey(title).includes(own)) return true;
+    if (memberKey(cleanHeadline(title)) === own) return true;
+    if (title.includes("Başkan Erdoğan") && memberKey(title.replace(LEGACY_HOUSE_STYLE, "Cumhurbaşkanı Erdoğan")).includes(own)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The member titles the pick works from: blank titles and placeholders ("Kısa haberler", a
+ * live-blog lead-in) out, and a title that folds to the same text as an earlier one counted once.
+ */
+function usableItems(members: MemberTitle[]): MemberTitle[] {
+  const seen = new Set<string>();
+  return members
+    .map((m) => ({ ...m, title: (m.title ?? "").trim() }))
+    .filter((m) => m.title.length > 0 && !isGenericTitle(m.title))
+    .filter((m) => {
+      const key = fold(m.title);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+/**
+ * Whether the stored title is a candidate the gate accepts: it passes isAcceptableNeutral against the usable
+ * member titles and no lead-in survives in it.
+ */
+function passesGate(inc: string, memberTitles: readonly string[]): boolean {
+  return isAcceptableNeutral(inc, memberTitles) && !LEAD_IN.test(foldTr(inc));
+}
+
+/**
+ * The pick for a stored title that no member carries any more (incumbentIsMemberTitle is false), staleness
+ * being independent of the gate (h42 review, sec-db-1): migration 162's stale set never looks at it, so a
+ * stored title that fails the gate (a question, a surviving lead-in) is stale too, and null would leave the
+ * row in the set for 7 days.
+ *   - The stored title fails the gate: the floor first pick of the members, a member's own wording.
+ *   - It passes the gate (h42 review, editorial-1; member wording is still the contract, the quality guards
+ *     only choose among members):
+ *       1. the best member that passes the gate AND is no more loaded or framed than the stored title and
+ *          not Title Case (without the floor);
+ *       2. else the best member that passes the gate: a member's wording still beats a removed headline;
+ *       3. else the stored title, as passed: no member passes the gate, and a floor title that fails it
+ *          (a 193-character quote, a question) must not replace one that passes (fd5896d8). This and a
+ *          stored title whose members give no usable title (null) are the residue: the row is re-offered
+ *          and stamped on each tick until its old_title is 7 days old.
+ * Null when there is no usable member title at all.
+ */
+function repickStale(members: MemberTitle[], opts: PickOptions, incumbent: string): string | null {
+  const items = usableItems(members);
+  if (items.length === 0) return null;
+  const inc = incumbent.trim();
+  const base: CoreOptions = { ...opts, incumbent: undefined };
+  if (!passesGate(inc, items.map((m) => m.title))) return pickNeutralTitleCore(members, { ...base, floor: true });
+
+  const incLoaded = loadedPenalty(inc);
+  const incFraming = framingPenalty(inc);
+  const guarded = pickNeutralTitleCore(members, {
+    ...base,
+    floor: false,
+    accept: (shown) =>
+      loadedPenalty(shown) <= incLoaded &&
+      framingPenalty(shown) <= incFraming &&
+      !isTitleCaseTitle(shown, SWITCH_TARGET_TITLE_CASE_WORDS),
+  });
+  if (guarded !== null) return guarded;
+  return pickNeutralTitleCore(members, { ...base, floor: false }) ?? incumbent;
+}
+
 /**
  * Returns the cleaned headline of the most central, least sensational
  * member that passes isAcceptableNeutral, or null when there is nothing to
@@ -1828,28 +2273,29 @@ export function preferUnglued(chosen: string, memberTitles: readonly string[]): 
  * best candidate (see PickOptions); null then means only "nothing usable".
  * With `{ incumbent }` the stored title wins unless it fails the gate or loses
  * by REPICK_MARGIN / REPICK_MARGIN_FULL_LENGTH (see PickOptions). Member titles that fold to the same
- * text count once, the first occurrence standing. Whatever the result (a first pick, a floor pick, the
- * stored title a re-pick keeps), a glued word join in it gives way to a member title that is the same
- * text without the join (preferUnglued, h35).
+ * text count once, the first occurrence standing. A stored title that no member carries any more (the
+ * outlet edited it away: incumbentIsMemberTitle, h42-titles-1) is not protected: the pick is a member's own
+ * wording (repickStale), and the stored title only stays when no member passes the gate.
+ * Whatever the result (a first pick, a floor pick, the stored title a re-pick keeps), a glued word join
+ * in it gives way to a member title that is the same text without the join (preferUnglued, h35).
  */
 export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {}): string | null {
-  const picked = pickNeutralTitleCore(members, opts);
+  const inc = opts.incumbent?.trim() ?? "";
+  const stale = inc !== "" && !incumbentIsMemberTitle(inc, members.map((m) => m.title ?? ""));
+  const picked = stale ? repickStale(members, opts, opts.incumbent as string) : pickNeutralTitleCore(members, opts);
   if (picked === null) return null;
   return preferUnglued(picked, members.map((m) => m.title ?? ""));
 }
 
+/** The pick's own options: PickOptions plus the member filter the stale re-pick passes (not part of the public type). */
+interface CoreOptions extends PickOptions {
+  /** Extra condition on a candidate's shown form, checked together with isAcceptableNeutral. */
+  accept?: (shown: string) => boolean;
+}
+
 // The pick itself (extractive-v1 to v6); pickNeutralTitle adds the glued-twin tiebreak on top.
-function pickNeutralTitleCore(members: MemberTitle[], opts: PickOptions): string | null {
-  const seen = new Set<string>();
-  const items = members
-    .map((m) => ({ ...m, title: (m.title ?? "").trim() }))
-    .filter((m) => m.title.length > 0 && !isGenericTitle(m.title))
-    .filter((m) => {
-      const key = fold(m.title);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string | null {
+  const items = usableItems(members);
   if (items.length === 0) return null;
 
   const toks = items.map((m) => tokens(m.title));
@@ -1897,7 +2343,11 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: PickOptions): string
     const forms = capitalFormsFrom(evidence.filter((_, j) => j !== index));
     const oddOneOut = forms.size > 0 && isOddOneOut(forms, items[index]!.title, cleaned);
     const shown = oddOneOut ? recaseWith(forms, cleaned) : cleaned;
-    if (!(oddOneOut && leaksWith(forms, shown)) && isAcceptableNeutral(shown, others)) {
+    if (
+      !(oddOneOut && leaksWith(forms, shown)) &&
+      isAcceptableNeutral(shown, others) &&
+      (opts.accept === undefined || opts.accept(shown))
+    ) {
       best = { cleaned: shown, score };
       break;
     }
@@ -1933,7 +2383,28 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: PickOptions): string
         sim += jaccard(incToks, toks[j]!);
         n++;
       }
-      const incScore = scoreTitle(inc, n > 0 ? sim / n : 0, ctx);
+      const incCentrality = n > 0 ? sim / n : 0;
+      const incScore = scoreTitle(inc, incCentrality, ctx);
+      // The best candidate's centrality, the same mean against the members that are not the candidate itself
+      // (raw, cleaned or as shown): asked only by the loaded rule.
+      const bestCentrality = (): number => {
+        const bestFold = fold(best!.cleaned);
+        const bestToks = tokens(best!.cleaned);
+        let bsim = 0;
+        let bn = 0;
+        for (let j = 0; j < items.length; j++) {
+          const t = items[j]!.title;
+          const tf = fold(t);
+          if (tf === bestFold || fold(cleanHeadline(t)) === bestFold) continue;
+          bsim += jaccard(bestToks, toks[j]!);
+          bn++;
+        }
+        return bn > 0 ? bsim / bn : 0;
+      };
+      // A loaded, hedge-dropping, number-cutting or Title Case stored title gives way with no margin (h42-titles-2).
+      if (incumbentSwitchRule(inc, best.cleaned, items, memberTitles, incCentrality, bestCentrality) !== null) {
+        return best.cleaned;
+      }
       // A stored title that is itself the defect (a minority claim, Title Case, no
       // majority subject) gives way to any member title that outscores it at all.
       if (incumbentDefect(inc, best.cleaned, memberTitles)) return best.score > incScore ? best.cleaned : incumbent;

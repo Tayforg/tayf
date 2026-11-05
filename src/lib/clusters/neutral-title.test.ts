@@ -8,22 +8,28 @@ import {
   QUALIFIER_LOSS_PENALTY,
   REPICK_MARGIN,
   REPICK_MARGIN_FULL_LENGTH,
+  carriesHedge,
+  carriesWideHedge,
   cleanHeadline,
   framingPenalty,
   gluedJoinCount,
   incumbentDefect,
+  incumbentIsMemberTitle,
   isAcceptableNeutral,
   isExtractiveModelId,
   isGenericTitle,
   isQuestionTitle,
+  isTitleCaseTitle,
   loadedPenalty,
   lowerCaseSourced,
   lowercaseLeak,
+  numsOf,
   pickNeutralTitle,
   preferUnglued,
   recaseFromSiblings,
   siblingCapitalForms,
 } from "./neutral-title";
+import { foldTr as searchFoldTr } from "./turkish-query";
 
 // Member titles are real prod headlines from the Sept-2026 replay corpus and
 // the hunt-15 (2026-11-01) fixtures: Bakırköy (e67ede66), Hakkari (d0a4e6ae),
@@ -1045,14 +1051,27 @@ describe("pickNeutralTitle { incumbent }: a re-pick is conservative", () => {
     expect(pickNeutralTitle(asMembers(ALTIN_PORTAKAL), { incumbent: padded })).toBe(padded);
   });
 
-  it("an incumbent that fails the gate and no acceptable member: null (the caller keeps the stored title)", () => {
+  it("an incumbent that fails the gate and that a member carries, with no acceptable member: null (the caller keeps the stored title)", () => {
+    // The stored title is a member's own wording (MASTERCHEF[0], a question), so it is not stale (h42-titles-1)
+    // and the old rule holds: nothing passes the gate, the caller keeps what it has.
+    expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent: MASTERCHEF[0] })).toBeNull();
+  });
+
+  it("an incumbent that fails the gate and that no member carries, with no acceptable member: the floor pick, a member's own wording (h42 review, sec-db-1)", () => {
+    // Before the review fix a stored title that failed the gate was "the old rule's business" and the answer was
+    // null, so migration 162's stale set (it never looks at the gate) offered the row again on every tick.
     const withQuestion = "Bakırköy soruşturmasında kimler tutuklandı, süreç nasıl işleyecek?";
-    expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent: withQuestion })).toBeNull();
-    expect(pickNeutralTitle(asMembers(IZMIR_KESINTI), { incumbent: withQuestion })).toBeNull();
+    expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent: withQuestion })).toBe("Masterchef kim elendi, kim gitti?");
+    const izmir = pickNeutralTitle(asMembers(IZMIR_KESINTI), { incumbent: withQuestion });
+    expect(izmir).not.toBeNull();
+    expect(izmir).toBe(pickNeutralTitle(asMembers(IZMIR_KESINTI), { floor: true }));
   });
 
   it("an acceptable incumbent and no acceptable member: the incumbent", () => {
-    const incumbent = "MasterChef'te elenen isim belli oldu";
+    // The first member's wording without its question mark: a member's text (h42-titles-1 asks
+    // for that, see "non-member incumbent" below), and the incumbent passes the gate while both
+    // members fail it ('?').
+    const incumbent = "Masterchef kim elendi, kim gitti";
     expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent })).toBe(incumbent);
   });
 
@@ -1487,7 +1506,12 @@ describe("pickNeutralTitle floor: shouted candidates are sentence-cased (h22-edi
 
   it("non-floor picks are unchanged: a shouted candidate is still rejected, not re-cased", () => {
     expect(pickNeutralTitle(asMembers(["NEV'İN MİRASI GÜNDEM OLDU"]))).toBeNull();
-    expect(pickNeutralTitle(asMembers(["NEV'İN MİRASI GÜNDEM OLDU"]), { incumbent: "Kısa haberler" })).toBeNull();
+    // A stored title that is itself a member and fails the gate: nothing passes, the caller keeps it.
+    expect(pickNeutralTitle(asMembers(["NEV'İN MİRASI GÜNDEM OLDU"]), { incumbent: "NEV'İN MİRASI GÜNDEM OLDU" })).toBeNull();
+    // One that no member carries is replaced by the floor pick (h42 review, sec-db-1), not left to loop.
+    expect(pickNeutralTitle(asMembers(["NEV'İN MİRASI GÜNDEM OLDU"]), { incumbent: "Kısa haberler" })).toBe(
+      "Nev'in mirası gündem oldu",
+    );
   });
 
   it("a mixed-case floor candidate is not touched", () => {
@@ -3905,4 +3929,1360 @@ describe("hunt 35 (h35): replay of the live population", () => {
       expect(pickNeutralTitle(members, { incumbent: kept }) ?? kept, c.cid).toBe(kept);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// h42-titles-1: a stored title that no current member carries (the outlet edited it away)
+// ---------------------------------------------------------------------------
+//
+// apply_article_title_edits (migration 074) rewrites articles.title when an outlet changes a
+// headline, and never touches clusters.title_tr_neutral. 31fde7d7 kept "... sürücüsü, ...
+// gözaltına alındı" on a workplace death after both members had been edited to "... temizlik
+// işçisi hayatını kaybetti"; the re-pick returned the stored title because the incumbent branch
+// never asked whether any member still carries it. Four live clusters (read-only SELECT of
+// clusters x cluster_articles x articles, 2026-11-05) are in
+// src/lib/clusters/__fixtures__/h42-stale-incumbents.json, newest member first.
+
+interface H42StaleCluster {
+  cid: string;
+  id: string;
+  stored: string;
+  article_count: number;
+  stamped: number;
+  model: string;
+  titles: string[];
+  why: string;
+}
+
+const H42_STALE: H42StaleCluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h42-stale-incumbents.json"), "utf8"),
+) as H42StaleCluster[];
+
+describe("non-member incumbent (h42-titles-1): the fixture", () => {
+  it("holds the four live clusters, each stamped v6 and each with a stored title no member carries", () => {
+    expect(H42_STALE.map((c) => c.cid)).toEqual(["31fde7d7", "620362a3", "5893d4e5", "38610f3f"]);
+    for (const c of H42_STALE) {
+      expect(c.model, c.cid).toBe("extractive-v6");
+      expect(c.titles.length, c.cid).toBeGreaterThanOrEqual(2);
+      expect(c.id.startsWith(c.cid), c.cid).toBe(true);
+      expect(c.why.length, c.cid).toBeGreaterThan(10);
+      expect(c.titles, c.cid).not.toContain(c.stored);
+      expect(incumbentIsMemberTitle(c.stored, c.titles), c.cid).toBe(false);
+    }
+  });
+});
+
+describe("non-member incumbent (h42-titles-1): the stale stored title gives way", () => {
+  it.each(H42_STALE.map((c) => [c.cid] as const))("%s: the re-pick no longer returns the stored title", (cid) => {
+    const c = H42_STALE.find((x) => x.cid === cid)!;
+    const members = asMembers(c.titles);
+    const picked = pickNeutralTitle(members, { incumbent: c.stored });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    // The same title a first pick (with the floor) makes: the stored title simply is not a candidate.
+    expect(picked).toBe(pickNeutralTitle(members, { floor: true }));
+    // A member's own cleaned wording, so it never invents text.
+    expect(c.titles.some((t) => cleanHeadline(t) === picked), `${cid}: ${picked}`).toBe(true);
+    expect(incumbentIsMemberTitle(picked!, c.titles), cid).toBe(true);
+    // A fixed point: the new title is a member title, so the next re-pick keeps it.
+    expect(pickNeutralTitle(members, { incumbent: picked })).toBe(picked);
+  });
+
+  it("31fde7d7: the detention claim is replaced by the title both members now carry", () => {
+    const c = H42_STALE.find((x) => x.cid === "31fde7d7")!;
+    expect(c.stored).toMatch(/gözaltına alındı/);
+    const picked = pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+    expect(picked).toBe("Denizli'de direk ile çöp kamyonu arasına sıkışan temizlik işçisi hayatını kaybetti");
+    expect(picked).not.toMatch(/gözaltı/);
+  });
+
+  it("620362a3: the old rescue claim is replaced by a member title that reports the death", () => {
+    const c = H42_STALE.find((x) => x.cid === "620362a3")!;
+    const picked = pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+    expect(picked).toMatch(/hayatını kaybetti/);
+    expect(picked).not.toMatch(/toprak altında kaldı/);
+  });
+
+  it("the member order does not decide it", () => {
+    for (const c of H42_STALE) {
+      const forward = pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+      const reversed = pickNeutralTitle(asMembers([...c.titles].reverse()), { incumbent: c.stored });
+      expect(forward, c.cid).not.toBe(c.stored);
+      expect(reversed, c.cid).not.toBe(c.stored);
+      expect(incumbentIsMemberTitle(reversed!, c.titles), c.cid).toBe(true);
+    }
+  });
+
+  it("is never null for these four clusters, which have a usable member title (the residue of migration 162 is the cases that do not)", () => {
+    for (const c of H42_STALE) {
+      for (const opts of [{ incumbent: c.stored }, { incumbent: c.stored, floor: true }]) {
+        expect(pickNeutralTitle(asMembers(c.titles), opts), c.cid).not.toBeNull();
+      }
+    }
+  });
+
+  it("a stale stored title that fails the gate is replaced by the floor pick of the members (h42 review, sec-db-1)", () => {
+    // "Kısa haberler" fails the gate and no member carries it: the answer used to be null (the old rule's
+    // business), which left the row in migration 162's stale set forever. It is the first pick with the floor now.
+    expect(pickNeutralTitle(asMembers(["NEV'İN MİRASI GÜNDEM OLDU"]), { incumbent: "Kısa haberler" })).toBe(
+      "Nev'in mirası gündem oldu",
+    );
+    // Nothing usable among the members: still null, the one case the floor cannot help.
+    expect(pickNeutralTitle(asMembers(["Kısa haberler", "Son dakika"]), { incumbent: "Bir başlık burada yazılı" })).toBeNull();
+  });
+
+  it("a stale stored title with a surviving lead-in is replaced by the floor pick too", () => {
+    const members = ["Ankara Valiliği: yağış nedeniyle yarın okullar tatil", "Ankara'da kar yağışı nedeniyle eğitime ara verildi"];
+    const picked = pickNeutralTitle(asMembers(members), { incumbent: "SON DAKİKA: Ankara'da şiddetli yağış nedeniyle okullar tatil edildi" });
+    expect(picked).not.toBeNull();
+    expect(members.some((t) => cleanHeadline(t) === picked)).toBe(true);
+  });
+
+  it("an acceptable stored title that no member carries is kept when every member fails the gate (editorial-1: never a floor title that fails the gate)", () => {
+    // MASTERCHEF is two questions. The stored title is the invented text of that cluster; no member passes the
+    // gate, so the only text that passes it is the stored one. The floor title is a question: not shipped
+    // over a title that passes. This is part of migration 162's residue (the row is re-offered and stamped each
+    // tick until its old_title is 7 days old).
+    const incumbent = "MasterChef'te elenen isim belli oldu";
+    expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent })).toBe(incumbent);
+  });
+
+  it("a blank incumbent and no members are unchanged", () => {
+    const c = H42_STALE[0]!;
+    expect(pickNeutralTitle(asMembers(c.titles), { incumbent: "   " })).toBe(pickNeutralTitle(asMembers(c.titles)));
+    expect(pickNeutralTitle(asMembers(c.titles), { incumbent: null })).toBe(pickNeutralTitle(asMembers(c.titles)));
+    expect(pickNeutralTitle([], { incumbent: c.stored })).toBeNull();
+    expect(pickNeutralTitle(asMembers(["Kısa haberler", "Son dakika"]), { incumbent: c.stored })).toBeNull();
+  });
+});
+
+describe("non-member incumbent (h42-titles-1): controls that keep the incumbent", () => {
+  it("(a) a stored title that is a member title recased from its siblings (h27-copy-2) stays", () => {
+    const members = asTitles([TOKYO_LOWER, TOKYO_PROPER]);
+    expect(incumbentIsMemberTitle(TOKYO_RECASED, [TOKYO_LOWER, TOKYO_PROPER])).toBe(true);
+    expect(pickNeutralTitle(members, { incumbent: TOKYO_RECASED })).toBe(TOKYO_RECASED);
+    // The stored lower-case form of the same member stays too.
+    const stored = "Avrupa, türkiye’yi stratejik ortak olarak görmeli çağrısı berlinden yükseldi";
+    expect(incumbentIsMemberTitle(stored, [BERLIN_LOWER, BERLIN_PROPER])).toBe(true);
+    expect(pickNeutralTitle(asTitles([BERLIN_LOWER, BERLIN_PROPER]), { incumbent: stored })).toBe(stored);
+  });
+
+  it("(b) a stored sentence case of a shouted member stays", () => {
+    const shouted = "NEV'İN MİRASI GÜNDEM OLDU";
+    const stored = "Nev'in mirası gündem oldu";
+    expect(incumbentIsMemberTitle(stored, [shouted])).toBe(true);
+    expect(pickNeutralTitle(asMembers([shouted]), { incumbent: stored })).toBe(stored);
+  });
+
+  it("(c) a stored cleanHeadline of a 'Son dakika... X' member stays", () => {
+    const member = "Son dakika... Ankara'da şiddetli yağış nedeniyle okullar tatil edildi";
+    const other = "Ankara Valiliği: yağış nedeniyle yarın okullar tatil";
+    const stored = cleanHeadline(member);
+    expect(stored).toBe("Ankara'da şiddetli yağış nedeniyle okullar tatil edildi");
+    expect(incumbentIsMemberTitle(stored, [member, other])).toBe(true);
+    expect(pickNeutralTitle(asMembers([member, other]), { incumbent: stored })).toBe(stored);
+  });
+
+  it("(d) a stored hyphenated title whose only member is the glued twin stays", () => {
+    expect(incumbentIsMemberTitle(E02_CLEAN, [E02_GLUED, E02_OTHER])).toBe(true);
+    // The glued member is the same text: the incumbent is not stale, and no member beats it, so it is not swapped for the glued twin.
+    expect(pickNeutralTitle(asMembers([E02_GLUED, E02_OTHER]), { incumbent: E02_CLEAN })).toBe(E02_CLEAN);
+  });
+
+  it("(e) the older incumbent fixtures keep their recorded results (h34 live clusters, expected title)", () => {
+    for (const c of H34) {
+      expect(incumbentIsMemberTitle(c.stored, c.titles), c.cid).toBe(true);
+      expect(pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored }), c.cid).toBe(c.expected);
+    }
+  });
+});
+
+describe("incumbentIsMemberTitle (h42-titles-1)", () => {
+  const MEMBERS = [
+    "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı",
+    "SON DAKİKA | Merkez Bankası faizi sabit tuttu",
+  ];
+
+  it("is true for an exact member title", () => {
+    expect(incumbentIsMemberTitle("Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı", MEMBERS)).toBe(true);
+  });
+
+  it("is blind to case, so a sentence-cased or recased member form counts", () => {
+    expect(incumbentIsMemberTitle("BAKIRKÖY BELEDİYESİ SORUŞTURMASINDA 39 ŞÜPHELİ TUTUKLANDI", MEMBERS)).toBe(true);
+    expect(incumbentIsMemberTitle("bakırköy belediyesi soruşturmasında 39 şüpheli tutuklandı", MEMBERS)).toBe(true);
+  });
+
+  it("is blind to punctuation, quotes and separators, so a repaired quote or a glued twin counts", () => {
+    expect(incumbentIsMemberTitle("Bakırköy Belediyesi soruşturmasında, 39 şüpheli: tutuklandı!", MEMBERS)).toBe(true);
+    expect(incumbentIsMemberTitle("Merkez Bankası faizi sabit tuttu", MEMBERS)).toBe(true);
+    expect(incumbentIsMemberTitle("Tel Aviv-Washington ilişkisi değişiyor", ["Tel AvivWashington ilişkisi değişiyor"])).toBe(true);
+    expect(incumbentIsMemberTitle("Erdoğan'ın 'Bakü' ziyareti", ['Erdoğan’ın "Bakü" ziyareti'])).toBe(true);
+  });
+
+  it("is true for the cleaned form of a member that carries a lead-in or an outlet prefix", () => {
+    expect(incumbentIsMemberTitle("Merkez Bankası faizi sabit tuttu", ["SON DAKİKA | Merkez Bankası faizi sabit tuttu"])).toBe(true);
+    expect(incumbentIsMemberTitle("Ankara'da yağış var", ["Son dakika... Ankara'da yağış var"])).toBe(true);
+  });
+
+  it("is true for the 'Başkan Erdoğan' house style an earlier cleanHeadline rewrote before a capitalised name", () => {
+    // 3ee5b1b3 / 071989bb / cc01f26a in the 14-day set: v1 to v5 stored "Cumhurbaşkanı Erdoğan Tokayev'i ..." from
+    // "Başkan Erdoğan Tokayev'i ...", which today's cleanHeadline leaves alone ("Başkan Erdoğan Tosun" is a different person).
+    expect(
+      incumbentIsMemberTitle("Külliye'de Kritik Zirve: Cumhurbaşkanı Erdoğan Tokayev'i Ağırlayacak", [
+        "Külliye'de Kritik Zirve: Başkan Erdoğan Tokayev'i Ağırlayacak",
+      ]),
+    ).toBe(true);
+    expect(
+      incumbentIsMemberTitle("Cumhurbaşkanı Erdoğan LG Electronics heyetini kabul etti", [
+        "Başkan Erdoğan LG Electronics heyetini kabul etti",
+      ]),
+    ).toBe(true);
+    // The other way round and a different person stay apart.
+    expect(incumbentIsMemberTitle("Başkan Erdoğan Tokayev'i ağırlayacak", ["Cumhurbaşkanı Erdoğan Tokayev'i ağırlayacak"])).toBe(false);
+    expect(incumbentIsMemberTitle("Cumhurbaşkanı Erdoğan Tosun açıklaması", ["Başkan Erdoğan Tosun'un açıklaması"])).toBe(false);
+  });
+
+  it("is true when the stored title is a part of a longer member title", () => {
+    expect(incumbentIsMemberTitle("Merkez Bankası faizi sabit tuttu", ["Merkez Bankası faizi sabit tuttu, piyasalar yükseldi"])).toBe(true);
+  });
+
+  it("is false for a title no member carries, even one that shares most words", () => {
+    expect(incumbentIsMemberTitle("Bakırköy Belediyesi soruşturmasında 40 şüpheli tutuklandı", MEMBERS)).toBe(false);
+    expect(incumbentIsMemberTitle("Merkez Bankası faizi düşürdü", MEMBERS)).toBe(false);
+    expect(
+      incumbentIsMemberTitle("Denizli'de çöp kamyonu sürücüsü gözaltına alındı", [
+        "Denizli'de çöp kamyonu arasına sıkışan işçi hayatını kaybetti",
+      ]),
+    ).toBe(false);
+  });
+
+  it("reads Turkish dotted and dotless i the Turkish way", () => {
+    expect(incumbentIsMemberTitle("Işık ve İpek", ["IŞIK VE İPEK"])).toBe(true);
+    expect(incumbentIsMemberTitle("Isik ve Ipek", ["Işık ve İpek"])).toBe(false);
+  });
+
+  it("is false for no members, and true for a stored title with no letters or digits (the gate judges that one)", () => {
+    expect(incumbentIsMemberTitle("Bakırköy Belediyesi soruşturması", [])).toBe(false);
+    expect(incumbentIsMemberTitle("...", MEMBERS)).toBe(true);
+    expect(incumbentIsMemberTitle("", MEMBERS)).toBe(true);
+  });
+
+  it("ignores non-string and blank members, and survives special characters and emoji", () => {
+    expect(incumbentIsMemberTitle("Ankara'da yağış var", ["", undefined as unknown as string, "Ankara'da yağış var"])).toBe(true);
+    expect(incumbentIsMemberTitle("Maç sonu 🎉 Galatasaray kazandı", ["Maç sonu Galatasaray kazandı"])).toBe(true);
+    expect(incumbentIsMemberTitle("Tablo ') drop table--", ["Tablo ') drop table--"])).toBe(true);
+  });
+
+  it("stays cheap on a hostile 1 MB member title and on 5,000 members", () => {
+    const t0 = performance.now();
+    const huge = "ab ".repeat(350_000);
+    expect(incumbentIsMemberTitle("Merkez Bankası faizi sabit tuttu", [huge])).toBe(false);
+    const many = Array.from({ length: 5000 }, (_, i) => `Başlık numarası ${i} burada`);
+    expect(incumbentIsMemberTitle("Merkez Bankası faizi sabit tuttu", many)).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h42-titles-2: incumbent protection kept loaded, hedge-dropping, number-cut and Title Case titles
+// ---------------------------------------------------------------------------
+//
+// Eight live clusters (read-only SELECT of clusters x cluster_articles x articles, 2026-11-05, members
+// newest first) in src/lib/clusters/__fixtures__/h42-incumbents.json. Each stored title is a member's
+// own wording, so none of them is the h42-titles-1 case; each was kept (or, 29c38a16 and a7c389d6,
+// is controlled) by the incumbent's 0.20 margin although a plain member title says the same without
+// the loaded word, the dropped hedge, the cut number or the Title Case:
+//   29c38a16  "Netanyahu'ya Ağır Darbe"  020a0a63  "istifa depremi"  671bc01e  "İBB davası çöküyor"
+//   5f761c9a  "kendi ülkesinden darbe"   8ea9e45f  hedge dropped      2441793c  "14'er yıl" for "14 yıl 10 ay"
+//   6d0f5c12  Title Case                 a7c389d6  Title Case (control, already switches)
+
+interface H42Cluster {
+  cid: string;
+  id: string;
+  stored: string;
+  article_count: number;
+  stamped: number;
+  model: string;
+  titles: string[];
+  why: string;
+}
+
+const H42: H42Cluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h42-incumbents.json"), "utf8"),
+) as H42Cluster[];
+
+const h42 = (cid: string): H42Cluster => {
+  const c = H42.find((x) => x.cid === cid);
+  if (!c) throw new Error(`h42 fixture cluster ${cid} missing`);
+  return c;
+};
+const h42Repick = (cid: string): string | null => {
+  const c = h42(cid);
+  return pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+};
+
+/** A run of three or more consecutive capitalised words after the first (the Title Case the picker must not ship). */
+const capitalisedRun = (title: string): number => {
+  let run = 0;
+  let best = 0;
+  title
+    .split(/\s+/)
+    .slice(1)
+    .forEach((w) => {
+      const first = w.replace(/^[^\p{L}]+/u, "").charAt(0);
+      run = first !== "" && first === first.toLocaleUpperCase("tr") && first !== first.toLocaleLowerCase("tr") ? run + 1 : 0;
+      best = Math.max(best, run);
+    });
+  return best;
+};
+
+describe("h42-titles-2: the fixture", () => {
+  it("holds the eight live clusters, each stamped v6 and each stored title one of its own members", () => {
+    expect(H42.map((c) => c.cid)).toEqual([
+      "29c38a16",
+      "020a0a63",
+      "671bc01e",
+      "5f761c9a",
+      "8ea9e45f",
+      "2441793c",
+      "6d0f5c12",
+      "a7c389d6",
+    ]);
+    for (const c of H42) {
+      expect(c.model, c.cid).toBe("extractive-v6");
+      expect(c.id.startsWith(c.cid), c.cid).toBe(true);
+      expect(c.why.length, c.cid).toBeGreaterThan(10);
+      expect(incumbentIsMemberTitle(c.stored, c.titles), `${c.cid} is not the h42-titles-1 case`).toBe(true);
+    }
+  });
+});
+
+describe("h42-titles-2 (a): loaded wording the lexicon missed", () => {
+  it.each([
+    ["figurative darbe, 'ağır darbe'", "Netanyahu'ya Ağır Darbe"],
+    ["figurative darbe, 'ara seçim darbesi' after a dative name", "Trump'a ara seçim darbesi"],
+    ["figurative darbe, dative name then 'kendi ülkesinden darbe'", "Netanyahu'ya kendi ülkesinden darbe"],
+    ["figurative darbe, 'büyük darbe'", "Enflasyon rakamları hükümete büyük darbe vurdu"],
+    ["figurative darbe, 'sert darbe'", "Borsaya sert darbe: endeks yüzde 5 düştü"],
+    ["a tsunami with no literal marker", "ABD'de sandık tsunamisi"],
+    ["a 'mavi tsunami'", "mavi tsunami"],
+    ["figurative deprem, 'istifa depremi'", "istifa depremi"],
+    ["figurative deprem, 'transfer depremi'", "Galatasaray'da transfer depremi"],
+    ["'çöküyor'", "İBB davası çöküyor"],
+    ["'dehşet' with no right edge", "Afyonkarahisar'da dehşet"],
+    ["'dehşete düşüren'", "dehşete düşüren"],
+    ["'çakıldı' about prices", "hisseleri çakıldı"],
+    ["'zehir zemberek'", "zehir zemberek açıklama"],
+    ["'tarihi başarı'", "mücadelede tarihi başarı"],
+    ["the agent-noun suffix on FETÖ", "FETÖ'cü Enes"],
+  ])("loadedPenalty > 0: %s", (_why, title) => {
+    expect(loadedPenalty(title), title).toBeGreaterThan(0);
+  });
+
+  it.each([
+    "Kahramanmaraş'ta 4.2 büyüklüğünde deprem",
+    "Marmara depremi",
+    "deprem bölgesinde konut",
+    "Japonya'da tsunami uyarısı",
+    "Tsunami dalgası kıyıya ulaştı",
+    "Kandilli: tsunami riski bulunmuyor",
+    "15 Temmuz darbe girişimi",
+    "askeri darbe",
+    "darbe girişimi davası",
+    "Ankara'ya askeri darbe girişimi planlayan subaylar yargılanıyor",
+    "sokakta",
+    "olayı",
+    "devlet",
+    "bina çöktü",
+    "FETÖ üyeliğinden tutuklandı",
+    "tarihi karar",
+    "Uçak pistin dışına çıktı",
+    "THY uçağı Frankfurt'a indi, bagajlar teslim edildi",
+  ])("loadedPenalty and framingPenalty stay 0: %s", (title) => {
+    expect(loadedPenalty(title), title).toBe(0);
+    expect(framingPenalty(title), title).toBe(0);
+  });
+
+  it("'çakıldı' about an aircraft is a crash, not a price move", () => {
+    expect(loadedPenalty("Askeri uçak çakıldı: pilot kurtuldu")).toBe(0);
+    expect(loadedPenalty("Helikopter dağa çakıldı")).toBe(0);
+    expect(loadedPenalty("İHA tarlaya çakıldı")).toBe(0);
+    expect(loadedPenalty("Uçağın çakılması sonrası soruşturma")).toBe(0);
+    expect(loadedPenalty("Dolar karşısında liranın değeri çakıldı")).toBeGreaterThan(0);
+    // 'iha' is a whole word: 'ihale' and 'ihanet' are not an unmanned aircraft.
+    expect(loadedPenalty("İhale sonrası hisseler çakıldı")).toBeGreaterThan(0);
+  });
+
+  it("a tsunami with a literal marker (uyarı, dalga, kıyı, büyüklüğünde, deprem, AFAD, Kandilli) is a news event", () => {
+    for (const marker of ["uyarısı", "dalgası", "kıyıya", "7,8 büyüklüğünde", "depremi sonrası", "AFAD", "Kandilli"]) {
+      expect(loadedPenalty(`Tsunami ${marker}`), marker).toBe(0);
+    }
+  });
+
+  it("'darbe' after a dative name is judged within three words, and never before 'girişim'", () => {
+    expect(loadedPenalty("Trump'a ağır darbe indirdi")).toBeGreaterThan(0);
+    expect(loadedPenalty("Erdoğan'a yönelik darbe girişimi soruşturması")).toBe(0);
+    expect(loadedPenalty("Netanyahu'ya sandıkta ağır darbe girişimi iddiası")).toBe(0);
+    // four words between the name and 'darbe': not a figurative blow on that name
+    expect(loadedPenalty("Netanyahu'ya bir iki üç dört darbe")).toBe(0);
+    expect(loadedPenalty("Bakanlığa askeri darbe sonrası kurulan komisyon")).toBe(0);
+  });
+
+  it("'deprem' is figurative only after the listed nouns", () => {
+    for (const noun of ["istifa", "seçim", "siyaset", "transfer", "borsa", "piyasa", "ihraç", "kabine", "parti"]) {
+      expect(loadedPenalty(`${noun} depremi`), noun).toBeGreaterThan(0);
+    }
+    expect(loadedPenalty("İzmir'de deprem oldu")).toBe(0);
+    expect(loadedPenalty("Deprem sonrası konut yardımı")).toBe(0);
+    expect(loadedPenalty("Seçim sonuçları açıklandı")).toBe(0);
+    expect(loadedPenalty("Borsa günü yükselişle kapattı")).toBe(0);
+  });
+
+  it("plain FETÖ stays free, only the agent-noun suffix is loaded", () => {
+    expect(loadedPenalty("FETÖ soruşturmasında 12 gözaltı")).toBe(0);
+    expect(loadedPenalty("FETÖ’cü olduğu gerekçesiyle ihraç edildi")).toBeGreaterThan(0);
+    expect(loadedPenalty("Fetöcü yapılanma")).toBeGreaterThan(0);
+  });
+
+  it("framingPenalty > 0 for the suffixed forms of şok, skandal and rezalet", () => {
+    for (const title of ["Texas şoku", "Fon skandalı", "skandalında", "rezaleti", "Piyasalarda şok", "şoku yaşadı", "skandalın ardından", "rezalete tepki"]) {
+      expect(framingPenalty(title), title).toBeGreaterThan(0);
+    }
+  });
+
+  it("'sok' takes only its own suffixes, so 'sokak' never matches", () => {
+    for (const title of ["sokak", "Sokakta kavga", "sokağa çıkma yasağı", "sokaklarda kutlama", "Sokolov turnuvada"]) {
+      expect(framingPenalty(title), title).toBe(0);
+    }
+    for (const title of ["Piyasalarda sok", "Texas soku", "soka girdi", "sokta", "soktan", "sokun etkisi"]) {
+      expect(framingPenalty(title), title).toBeGreaterThan(0);
+    }
+  });
+
+  it("'olay' and 'dev' keep their right edge", () => {
+    expect(framingPenalty("olayı")).toBe(0);
+    expect(framingPenalty("devlet")).toBe(0);
+    expect(framingPenalty("olay yeri")).toBeGreaterThan(0);
+    expect(framingPenalty("dev yatırım")).toBeGreaterThan(0);
+  });
+
+  it("a shouted cue is still not evidence of a name (the framing change reaches caseEvidence)", () => {
+    expect(siblingCapitalForms(["Haber: TEXAS ŞOKU yaşandı", "x"]).has("şoku")).toBe(false);
+  });
+});
+
+describe("h42-titles-2 (b): modal and forecast words are hedges (the wide vocabulary, used only by the hedge switch rule)", () => {
+  it.each(["değişebilir", "gidebilirim", "azalması bekleniyor", "olası", "muhtemel", "olmazsa", "sinyali", "Yapabilecekler arasında", "yeni sinyal verdi", "kararı düşünüyor"])(
+    "carriesWideHedge is true for %s",
+    (title) => {
+      expect(carriesWideHedge(title), title).toBe(true);
+    },
+  );
+
+  it("the three old hedges still count in both vocabularies, case-blind", () => {
+    for (const title of ["İddia: Bakan istifa etti", "Öne sürdü", "İFADE verdi", "ÖNE SÜRDÜ"]) {
+      expect(carriesWideHedge(title), title).toBe(true);
+      expect(carriesHedge(title), title).toBe(true);
+    }
+  });
+
+  it.each([
+    "Fed faizi sabit tuttu",
+    "Bakan açıklama yaptı",
+    "Erdoğan Bakü'ye gitti",
+    "Sabit kur uygulanacak",
+    "Tabii ki öyle",
+    "Faiz kararı açıklandı",
+  ])("carriesWideHedge is false for %s", (title) => {
+    expect(carriesWideHedge(title), title).toBe(false);
+  });
+
+  it("carriesHedge stays HEAD's allegation set (iddia, öne sürdü, ifade): the modal and forecast words are not in it (h42 review, editorial-3)", () => {
+    for (const title of ["değişebilir", "azalması bekleniyor", "olası", "muhtemel", "olmazsa", "sinyali", "kararı düşünüyor"]) {
+      expect(carriesHedge(title), title).toBe(false);
+    }
+    // The existing scoring paths (carriesHedge, ctx.hedged, the hedge-loss term) therefore read the HEAD vocabulary:
+    // widening it changed which stored titles count as hedge-dropping (d5a6d9ab lost its figures to 'gizli elektrik zammı').
+    expect(carriesHedge("Yavuzyılmaz, ortak alan elektriğine 2027'de yüzde 82-104 zam yapılacağını öne sürdü")).toBe(true);
+  });
+
+  it("8ea9e45f: two of three members hedge, so the stored title that states it as done gives way to the hedged member title", () => {
+    const c = h42("8ea9e45f");
+    const picked = h42Repick("8ea9e45f");
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect(carriesWideHedge(c.stored)).toBe(false);
+    expect(carriesWideHedge(picked!)).toBe(true);
+    expect(c.titles.some((t) => cleanHeadline(t) === picked)).toBe(true);
+  });
+
+  it("a stored title that carries the hedge itself is not displaced by the hedge rule", () => {
+    const titles = [
+      "ABD'de seçim sonrası yeni beklenti: Fed'in faiz hesabı değişebilir",
+      "ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi",
+      "ABD'deki ara seçim sonuçlarıyla Fed'e ilişkin faiz artırım beklentilerinin azalması bekleniyor",
+    ];
+    const stored = titles[0]!;
+    expect(carriesWideHedge(stored)).toBe(true);
+    expect(pickNeutralTitle(asMembers(titles), { incumbent: stored })).toBe(stored);
+  });
+
+  it("two members cannot make a cluster hedged (HEDGED_MIN_MEMBERS stays 3)", () => {
+    const titles = [
+      "ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi",
+      "ABD'deki ara seçim sonuçlarıyla Fed'e ilişkin faiz artırım beklentilerinin azalması bekleniyor",
+    ];
+    expect(pickNeutralTitle(asMembers(titles), { incumbent: titles[0] })).toBe(titles[0]);
+  });
+});
+
+describe("h42-titles-2 (c): numsOf reads the bare number", () => {
+  it("a distributive or ordinal suffix is not part of the number", () => {
+    expect([...numsOf("İsmail Saymaz ve Murat Ağırel'e 14'er yıl hapis talebi")]).toEqual(["14"]);
+    expect([...numsOf("Saymaz ve Ağırel'e 14 yıl 10’ar aya kadar hapis istemi")].sort()).toEqual(["10", "14"]);
+    expect([...numsOf("İBB davası 104. gün: Gizli tanıklar söz alacak")]).toEqual(["104"]);
+    expect([...numsOf("5'şer yıl, 3’şar ay")].sort()).toEqual(["3", "5"]);
+    expect([...numsOf("104.")]).toEqual(["104"]);
+  });
+
+  it("the existing readings are unchanged: decimals with ',' or '.', several numbers, none", () => {
+    expect([...numsOf("91,1 kilogram uyuşturucu")]).toEqual(["91.1"]);
+    expect([...numsOf("91.1 kilogram")]).toEqual(["91.1"]);
+    expect([...numsOf("14 yıl 10 ay")].sort()).toEqual(["10", "14"]);
+    expect([...numsOf("Bakan açıklama yaptı")]).toEqual([]);
+    expect([...numsOf("")]).toEqual([]);
+  });
+
+  it("2441793c: the stored \"14'er yıl\" cut the months, and a member title with '14 yıl 10 ay' wins", () => {
+    const c = h42("2441793c");
+    expect(c.stored).toBe("İsmail Saymaz ve Murat Ağırel'e 14'er yıl hapis talebi");
+    const picked = h42Repick("2441793c");
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect(picked).toContain("10 ay");
+    expect(c.titles.some((t) => cleanHeadline(t) === picked)).toBe(true);
+  });
+
+  it("a number that fewer than half of the other members carry does not displace the stored title", () => {
+    const titles = [
+      "Merkez Bankası politika faizini yüzde 40'ta sabit tuttu",
+      "Merkez Bankası politika faizini sabit tuttu",
+      "Merkez Bankası faiz kararını açıkladı: politika faizi sabit",
+      "Merkez Bankası politika faizinde değişiklik yapmadı",
+    ];
+    expect(pickNeutralTitle(asMembers(titles), { incumbent: titles[1] })).toBe(titles[1]);
+  });
+});
+
+describe("h42-titles-2 (d): the stored title gives way with no margin", () => {
+  it.each(["020a0a63", "671bc01e", "5f761c9a"])(
+    "%s: a loaded stored title is replaced by an unloaded member title",
+    (cid) => {
+      const c = h42(cid);
+      expect(loadedPenalty(c.stored), `${cid} stored is loaded`).toBeGreaterThan(0);
+      const picked = h42Repick(cid);
+      expect(picked).not.toBeNull();
+      expect(picked).not.toBe(c.stored);
+      expect(loadedPenalty(picked!), `${cid}: ${picked}`).toBe(0);
+      expect(c.titles.some((t) => cleanHeadline(t) === picked), cid).toBe(true);
+      // A fixed point.
+      expect(pickNeutralTitle(asMembers(c.titles), { incumbent: picked })).toBe(picked);
+    },
+  );
+
+  it("29c38a16: the \"Ağır Darbe\" title is loaded, and the re-pick no longer returns it", () => {
+    const c = h42("29c38a16");
+    expect(loadedPenalty(c.stored)).toBeGreaterThan(0);
+    const picked = h42Repick("29c38a16");
+    expect(picked).not.toBe(c.stored);
+    expect(loadedPenalty(picked!)).toBe(0);
+  });
+
+  it("671bc01e: the plain member title names the 2 hidden witnesses", () => {
+    expect(h42Repick("671bc01e")).toBe("İBB davasında dinlenen 2 gizli tanık: Görmedim, duydum rüşvet bağı kurdum");
+  });
+
+  it("6d0f5c12: a Title Case stored title is replaced by a sentence-case member title", () => {
+    const c = h42("6d0f5c12");
+    expect(capitalisedRun(c.stored)).toBeGreaterThanOrEqual(3);
+    const picked = h42Repick("6d0f5c12");
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect(capitalisedRun(picked!)).toBeLessThan(3);
+    expect(picked).toBe("ABD ara seçimlerinde Senato çoğunluğu Demokratlara geçti");
+  });
+
+  it("a7c389d6 keeps today's result", () => {
+    expect(h42Repick("a7c389d6")).toBe("Sigara yasağında yeni dönem: Park, plaj ve duraklar için düzenleme geliyor");
+  });
+
+  it("every pick is a fixed point, deterministic in member order and never null", () => {
+    for (const c of H42) {
+      const picked = h42Repick(c.cid);
+      expect(picked, c.cid).not.toBeNull();
+      expect(pickNeutralTitle(asMembers(c.titles), { incumbent: picked }), c.cid).toBe(picked);
+      const reversed = pickNeutralTitle(asMembers([...c.titles].reverse()), { incumbent: c.stored });
+      expect(reversed, c.cid).not.toBeNull();
+    }
+  });
+
+  it("a cluster whose members all say 'darbe girişimi' keeps its title", () => {
+    const titles = [
+      "Darbe girişimi davasında mahkeme kararını açıkladı",
+      "Darbe girişimi davasında karar duruşması görüldü",
+      "Askeri darbe girişimi davasında karar bugün çıktı",
+      "Darbe girişimi davası sanıkları hakkında karar verildi",
+    ];
+    for (const stored of titles) {
+      expect(loadedPenalty(stored), stored).toBe(0);
+      expect(pickNeutralTitle(asMembers(titles), { incumbent: stored }), stored).toBe(stored);
+    }
+  });
+
+  it("when every member is loaded the same way the stored title stays (the rule needs an unloaded pick)", () => {
+    const titles = [
+      "İBB davası çöküyor: gizli tanık duruşmada konuştu",
+      "İBB davası çöküyor: gizli tanık ifadesini değiştirdi",
+      "İBB davası çöküyor: üç gizli tanık dinlendi",
+    ];
+    const stored = titles[1]!;
+    expect(pickNeutralTitle(asMembers(titles), { incumbent: stored })).toBe(stored);
+  });
+
+  it("a loaded stored title stays when no member title is better (the only acceptable candidate is the stored title)", () => {
+    const stored = "İBB davası çöküyor: gizli tanık duruşmada konuştu";
+    expect(pickNeutralTitle(asMembers([stored, "Kısa haberler"]), { incumbent: stored })).toBe(stored);
+  });
+
+  it("an unloaded stored title next to a loaded better-looking member stays", () => {
+    const stored = "İBB davasında gizli tanık duruşmada konuştu";
+    const titles = [stored, "İBB davası çöküyor: gizli tanık duruşmada konuştu", "İBB davası çöküyor: gizli tanık ifade verdi"];
+    expect(loadedPenalty(stored)).toBe(0);
+    expect(pickNeutralTitle(asMembers(titles), { incumbent: stored })).toBe(stored);
+  });
+
+  it("no model bump: the rules change new picks and the re-picks the cron already offers (the replay gate failed)", () => {
+    // The 14-day replay (neutral-title-replay.test.ts, hunt 42) changes 4% of the set and its hand-reviewed
+    // sample holds regressions, and the v6 heal had 84 rows left on a model older than v6, so the id stays.
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h42-titles-2: the guards the 14-day replay added (src/lib/clusters/__fixtures__/h42-guards.json)
+// ---------------------------------------------------------------------------
+//
+// The first version of the no-margin rules, run over the 3,884 clusters of the 14-day re-pick set, swapped a
+// stored title for something worse in these nine (members read-only, 2026-11-05). Each guard below is what
+// keeps them: no swap toward more framing, no swap to a Title Case title, the hedge / number / Title Case
+// rules only to a title that restates the stored one, and the number rule only for a stored title that
+// states a number.
+
+interface H42Guard {
+  cid: string;
+  id: string;
+  guard: "framing" | "same-story" | "title-case-target" | "numberless";
+  stored: string;
+  model: string;
+  article_count: number;
+  titles: string[];
+  why: string;
+}
+
+const H42_GUARDS: H42Guard[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h42-guards.json"), "utf8"),
+) as H42Guard[];
+
+const tokenOverlap = (a: string, b: string): number => {
+  const words = (t: string): Set<string> =>
+    new Set(t.toLocaleLowerCase("tr").split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 5));
+  const x = words(a);
+  const y = words(b);
+  const inter = [...x].filter((w) => y.has(w)).length;
+  return inter / Math.max(1, x.size + y.size - inter);
+};
+
+describe("h42-titles-2: the guards of the no-margin rules (live clusters of the 14-day replay)", () => {
+  it("the fixture holds the nine clusters, each stored title one of its own members and stamped v6", () => {
+    expect(H42_GUARDS.map((g) => g.cid)).toEqual([
+      "d1ed614b",
+      "c85af1d5",
+      "fd95db1f",
+      "d6fefff8",
+      "cd767f4f",
+      "5f6a7a36",
+      "d58b0e72",
+      "85feaf84",
+      "22f3f677",
+    ]);
+    for (const g of H42_GUARDS) {
+      expect(g.model, g.cid).toBe("extractive-v6");
+      expect(g.why.length, g.cid).toBeGreaterThan(10);
+      expect(incumbentIsMemberTitle(g.stored, g.titles), g.cid).toBe(true);
+    }
+  });
+
+  it.each(H42_GUARDS.map((g) => [g.cid, g.guard] as const))("%s (%s): the re-pick keeps the stored title", (cid) => {
+    const g = H42_GUARDS.find((x) => x.cid === cid)!;
+    expect(pickNeutralTitle(asMembers(g.titles), { incumbent: g.stored })).toBe(g.stored);
+  });
+
+  it("framing: the loaded rule does not trade 'vurgun' for the framed 'olay çağrı'", () => {
+    const g = H42_GUARDS.find((x) => x.cid === "d1ed614b")!;
+    const best = pickNeutralTitle(asMembers(g.titles))!;
+    expect(best).not.toBe(g.stored);
+    expect(framingPenalty(best), best).toBeGreaterThan(framingPenalty(g.stored));
+    // The loaded rule's own condition holds: the stored "vurgunu" is loaded, the fresh pick is not.
+    expect(loadedPenalty(g.stored)).toBeGreaterThan(0);
+    expect(loadedPenalty(best)).toBe(0);
+  });
+
+  it("framing, in the lexicon: 'müjdesi' is framing, so the Title Case title is the fresh pick over the 'vize müjdesi' member", () => {
+    const g = H42_GUARDS.find((x) => x.cid === "c85af1d5")!;
+    expect(framingPenalty("Almanya'dan Türkiye'ye vize müjdesi. Dışişleri Bakanı duyurdu")).toBeGreaterThan(0);
+    expect(pickNeutralTitle(asMembers(g.titles))).toBe(g.stored);
+  });
+
+  it("same story: the member title the hedge and Title Case rules would swap to shares almost no word with the stored one", () => {
+    for (const cid of ["fd95db1f", "d6fefff8"]) {
+      const g = H42_GUARDS.find((x) => x.cid === cid)!;
+      const best = pickNeutralTitle(asMembers(g.titles))!;
+      expect(best, cid).not.toBe(g.stored);
+      expect(tokenOverlap(g.stored, best), `${cid}: ${best}`).toBeLessThan(0.15);
+    }
+  });
+
+  it("title case target: the member title a rule would swap to is itself a Title Case line", () => {
+    for (const cid of ["5f6a7a36", "d58b0e72"]) {
+      const g = H42_GUARDS.find((x) => x.cid === cid)!;
+      const best = pickNeutralTitle(asMembers(g.titles))!;
+      expect(best, cid).not.toBe(g.stored);
+      expect(capitalisedRun(best), `${cid}: ${best}`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("cd767f4f: with the hedge vocabulary back to HEAD's for scoring, the fresh pick is the stored title (the guard no longer has a target)", () => {
+    // 'değişebilir' and 'çıkılabilir' made two of five members hedged in the wide vocabulary, which charged the
+    // plain stored title 0.15 and let a Title Case line win. The wide set only drives the hedge switch rule now
+    // (h42 review, editorial-3), so nothing is charged and the stored title is its own fresh pick.
+    const g = H42_GUARDS.find((x) => x.cid === "cd767f4f")!;
+    expect(pickNeutralTitle(asMembers(g.titles))).toBe(g.stored);
+  });
+
+  it("numberless: a stored title without a number is not swapped for one that carries the members' number", () => {
+    for (const cid of ["85feaf84", "22f3f677"]) {
+      const g = H42_GUARDS.find((x) => x.cid === cid)!;
+      expect(g.stored, cid).not.toMatch(/\d/);
+      const best = pickNeutralTitle(asMembers(g.titles))!;
+      expect(best, cid).toMatch(/\d/);
+    }
+  });
+
+  it("a stored title that states a figure cut short is repaired by a title that restates it in full (the 2441793c case again, synthetic)", () => {
+    const titles = [
+      "Eski bakan hakkında 5 yıl hapis istendi",
+      "Eski bakan hakkında 5 yıl 8 ay hapis istendi",
+      "Eski bakan için 5 yıl 8 ay hapis cezası talep edildi",
+      "Eski bakana 5 yıl 8 ay hapis istemi",
+    ];
+    // The stored title states 5; three of the other three members state 5 and 8, and the best title restates both.
+    const picked = pickNeutralTitle(asMembers(titles), { incumbent: titles[0] });
+    expect(picked).not.toBe(titles[0]);
+    expect(picked).toMatch(/5 yıl 8 ay/);
+  });
+
+  it("a stored figure the best title does not restate is not repaired: 40 against 39 takes the normal margin path (h42 review, editorial-2)", () => {
+    const titles = [
+      "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı",
+      "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+      "Bakırköy Belediyesine yönelik soruşturmada 39 şüpheli tutuklandı",
+      "Bakırköy Belediyesi soruşturmasında 40 kişi tutuklandı",
+    ];
+    // 40 is one outlet's, but the number rule no longer fires: the best title does not state 40. A stored
+    // title this close to the best one is kept by the 0.05 margin or replaced by the margin, never by the rule.
+    const picked = pickNeutralTitle(asMembers(titles), { incumbent: titles[3] });
+    expect(picked === titles[3] || /39/.test(picked ?? "")).toBe(true);
+  });
+});
+
+describe("h42-titles-2: hostile input stays cheap", () => {
+  it("loadedPenalty, framingPenalty, carriesHedge, carriesWideHedge and numsOf on a 1 MB title of every shape", () => {
+    const shapes = [
+      "a".repeat(1_000_000),
+      "a'a ".repeat(250_000),
+      "Netanyahu'ya ".repeat(80_000),
+      "1 ".repeat(500_000),
+      "14'er ".repeat(160_000),
+      "ağır darbe ".repeat(90_000),
+      "ç".repeat(1_000_000),
+      // The review's body-part, market and number patterns (bounded quantifiers, no nested backtracking).
+      "başı".repeat(250_000),
+      "baş ağır darbe ".repeat(66_000),
+      "hisse çakıl çakıldı ".repeat(50_000),
+      "COP31 F-16 R4 ".repeat(70_000),
+      "a1".repeat(500_000),
+    ];
+    const t0 = performance.now();
+    for (const shape of shapes) {
+      loadedPenalty(shape);
+      framingPenalty(shape);
+      carriesHedge(shape);
+      carriesWideHedge(shape);
+      numsOf(shape);
+    }
+    expect(performance.now() - t0).toBeLessThan(5000);
+  });
+
+  it("a stale re-pick whose stored title and members hold long runs of glued digits and body-part words stays cheap", () => {
+    const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
+    titles[10] = `Merkez Bankası faizi COP31 ${"F-16 R4 a1 ".repeat(8_000)}sabit tuttu`;
+    titles[20] = `Başına ${"baş kafa göğs ".repeat(8_000)}ağır darbe aldı`;
+    const t0 = performance.now();
+    pickNeutralTitle(asMembers(titles), { incumbent: `Merkez Bankası faizi ${"COP31 F-16 ".repeat(5_000)}sabit tuttu` });
+    pickNeutralTitle(asMembers(titles), { incumbent: titles[10] });
+    expect(performance.now() - t0).toBeLessThan(5000);
+  });
+
+  it("a re-pick over 200 members with a 100 KB title among them", () => {
+    const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
+    titles[100] = `Netanyahu'ya ${"ağır ".repeat(20_000)}darbe`;
+    const t0 = performance.now();
+    pickNeutralTitle(asMembers(titles), { incumbent: titles[0] });
+    pickNeutralTitle(asMembers(titles), { incumbent: "Merkez Bankası faizi sabit tuttu ve karar metnini yayımladı" });
+    expect(performance.now() - t0).toBeLessThan(5000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h42 review fixes: sec-db-1 / correctness-1 (the stale set terminates), correctness-2 and editorial-5
+// (lexicon false positives), editorial-1 (the stale pick keeps quality guards), editorial-2 (the number rule),
+// editorial-3 (the wide hedge vocabulary), editorial-4 (lexicon the swap targets missed), editorial-6
+// (centrality guard). Live clusters of the 14-day set, members read-only 2026-11-05, in
+// src/lib/clusters/__fixtures__/h42-review-fixes.json (stored title and member titles newest first).
+// ---------------------------------------------------------------------------
+
+interface H42ReviewCluster {
+  cid: string;
+  id: string;
+  stored: string;
+  model: string;
+  article_count: number;
+  titles: string[];
+  why: string;
+}
+
+const H42_REVIEW: H42ReviewCluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h42-review-fixes.json"), "utf8"),
+) as H42ReviewCluster[];
+
+const review = (cid: string): H42ReviewCluster => {
+  const c = H42_REVIEW.find((x) => x.cid === cid);
+  if (!c) throw new Error(`h42 review fixture cluster ${cid} missing`);
+  return c;
+};
+const reviewRepick = (cid: string): string | null => {
+  const c = review(cid);
+  return pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+};
+
+describe("h42 review: the fixture", () => {
+  it("holds 39 live clusters, each stamped v6 (d69feb0f and ad76f79a were still v4 mid-heal), with a reason and a title list the size of its article count", () => {
+    expect(H42_REVIEW).toHaveLength(39);
+    for (const c of H42_REVIEW) {
+      expect(c.model, c.cid).toBe(["d69feb0f", "ad76f79a"].includes(c.cid) ? "extractive-v4" : "extractive-v6");
+      expect(c.id.startsWith(c.cid), c.cid).toBe(true);
+      expect(c.why.length, c.cid).toBeGreaterThan(10);
+      expect(c.titles.length, c.cid).toBe(c.article_count);
+    }
+  });
+});
+
+// ---- sec-db-1 / correctness-1: the stale set terminates --------------------------------------------------
+
+// The key of migration 162's stale set, mirrored: tayf_search_fold (turkish-query's foldTr), then every character
+// outside [a-z0-9] removed. A member carries the stored title when its key contains the stored title's key, or
+// when it does in the legacy wording ('Başkan Erdoğan' read as 'Cumhurbaşkanı Erdoğan'); an empty key is never stale.
+const sqlKey = (text: string): string => searchFoldTr(text).replace(/[^a-z0-9]+/g, "");
+const sqlCarries = (stored: string, member: string): boolean => {
+  const key = sqlKey(stored);
+  if (key === "") return false;
+  return (
+    sqlKey(member).includes(key) ||
+    sqlKey(member.replaceAll("Başkan Erdoğan", "Cumhurbaşkanı Erdoğan")).includes(key)
+  );
+};
+const sqlStale = (stored: string, titles: readonly string[]): boolean =>
+  sqlKey(stored) !== "" && !titles.some((t) => sqlCarries(stored, t));
+// What the first version of the CTE compared: the plain fold, no alphabet key.
+const plainFoldCarries = (stored: string, member: string): boolean =>
+  searchFoldTr(member).includes(searchFoldTr(stored));
+
+describe("stale set terminates (h42 review, sec-db-1 / correctness-1): the five live shapes", () => {
+  const SHAPES = ["38721672", "a6874bad", "cc01f26a", "502e3032", "c2e4a77c"];
+
+  it("the fixture strings are the live ones", () => {
+    expect(review("a6874bad").stored).toBe("Ege Denizi’nde 4,7 büyüklüğünde deprem");
+    expect(review("a6874bad").titles).toContain("Ege Denizi'nde 4,7 büyüklüğünde deprem! AFAD son dakika verilerini açıkladı");
+    expect(review("38721672").stored).toBe('TDT 13. Liderler Zirvesi "Türk Yüzyılı" temasıyla başlıyor');
+    expect(review("38721672").titles).toContain("TDT 13. Liderler Zirvesi “Türk Yüzyılı” temasıyla başlıyor");
+    expect(review("cc01f26a").stored).toBe("Cumhurbaşkanı Erdoğan LG Electronics heyetini kabul etti");
+    expect(review("cc01f26a").titles).toContain("Başkan Erdoğan LG Electronics heyetini kabul etti");
+    expect(review("502e3032").titles).toHaveLength(2);
+    expect(review("c2e4a77c").titles).toHaveLength(2);
+  });
+
+  it.each(SHAPES)(
+    "%s: either the SQL key finds the stored title in a member, or the re-pick returns a different member wording that the key finds",
+    (cid) => {
+      const c = review(cid);
+      const carried = c.titles.some((t) => sqlCarries(c.stored, t));
+      const picked = reviewRepick(cid);
+      expect(carried || (picked !== null && picked !== c.stored), `${cid}: carried=${carried} picked=${picked}`).toBe(true);
+      if (!carried) {
+        // The new stored title is a member's wording: the next candidate query no longer returns the row.
+        expect(c.titles.some((t) => sqlCarries(picked!, t)), `${cid}: ${picked}`).toBe(true);
+        expect(sqlStale(picked!, c.titles)).toBe(false);
+      }
+    },
+  );
+
+  it("38721672 and a6874bad: the plain fold misses the stored title (quotes, apostrophes), the alphanumeric key finds it", () => {
+    for (const cid of ["38721672", "a6874bad"]) {
+      const c = review(cid);
+      expect(c.titles.some((t) => plainFoldCarries(c.stored, t)), `${cid} plain fold`).toBe(false);
+      expect(c.titles.some((t) => sqlCarries(c.stored, t)), `${cid} key`).toBe(true);
+      expect(sqlStale(c.stored, c.titles), cid).toBe(false);
+      // The picker agrees: a member carries it, nothing to repair.
+      expect(incumbentIsMemberTitle(c.stored, c.titles), cid).toBe(true);
+    }
+  });
+
+  it("cc01f26a: only the legacy 'Başkan Erdoğan' replace finds the stored 'Cumhurbaşkanı Erdoğan' wording", () => {
+    const c = review("cc01f26a");
+    expect(c.titles.some((t) => sqlKey(t).includes(sqlKey(c.stored)))).toBe(false);
+    expect(c.titles.some((t) => sqlCarries(c.stored, t))).toBe(true);
+    expect(sqlStale(c.stored, c.titles)).toBe(false);
+    expect(incumbentIsMemberTitle(c.stored, c.titles)).toBe(true);
+  });
+
+  it.each(["502e3032", "c2e4a77c"])(
+    "%s: the stored title fails the gate and no member carries it, so the re-pick returns the floor pick, a member's wording",
+    (cid) => {
+      const c = review(cid);
+      expect(isAcceptableNeutral(c.stored, c.titles)).toBe(false);
+      expect(incumbentIsMemberTitle(c.stored, c.titles)).toBe(false);
+      expect(sqlStale(c.stored, c.titles)).toBe(true);
+      const picked = reviewRepick(cid);
+      expect(picked).not.toBeNull();
+      expect(picked).not.toBe(c.stored);
+      expect(picked).toBe(pickNeutralTitle(asMembers(c.titles), { floor: true }));
+      expect(c.titles.some((t) => cleanHeadline(t) === picked), `${cid}: ${picked}`).toBe(true);
+      // A fixed point: the pick is a member title now, so the next re-pick keeps it (null, "keep the stored
+      // title", is the answer for a member title that fails the gate: these are questions).
+      const again = pickNeutralTitle(asMembers(c.titles), { incumbent: picked });
+      expect(again === null || again === picked, `${cid}: ${again}`).toBe(true);
+    },
+  );
+
+  it("the picker's member test is never narrower than the SQL key: a title the key carries is a member title to the picker", () => {
+    for (const c of H42_REVIEW) {
+      if (sqlStale(c.stored, c.titles)) continue;
+      expect(incumbentIsMemberTitle(c.stored, c.titles), `${c.cid}: ${c.stored}`).toBe(true);
+    }
+  });
+
+  it("an empty SQL key is never stale (a stored title with no letter or digit)", () => {
+    expect(sqlStale("...", ["Ankara'da yağış var"])).toBe(false);
+    expect(sqlStale("", ["Ankara'da yağış var"])).toBe(false);
+  });
+
+  it("the residue the 162 header states: a stored title that passes the gate when no member does stays, so the row is re-offered", () => {
+    // fd5896d8: the stored title passes, the only other candidate is a 193-character quote that does not.
+    const c = review("fd5896d8");
+    expect(sqlStale(c.stored, c.titles)).toBe(true);
+    expect(reviewRepick("fd5896d8")).toBe(c.stored);
+    // No usable member title at all: null, the stored title stays and the row stays offered.
+    expect(pickNeutralTitle(asMembers(["Kısa haberler", "Son dakika"]), { incumbent: "Bir başlık burada yazılı" })).toBeNull();
+  });
+});
+
+// ---- editorial-1: the stale pick keeps quality guards -----------------------------------------------------
+
+describe("stale stored title (h42 review, editorial-1): member wording is the contract, quality guards only", () => {
+  it("fd5896d8: no member passes the gate except a 193-character quote, so the stored title stays (never a floor title that fails the gate)", () => {
+    const c = review("fd5896d8");
+    expect(isAcceptableNeutral(c.stored, c.titles)).toBe(true);
+    expect(incumbentIsMemberTitle(c.stored, c.titles)).toBe(false);
+    const picked = reviewRepick("fd5896d8");
+    expect(picked).toBe(c.stored);
+    // The floor pick would have shipped the long quote, which fails the gate.
+    const floor = pickNeutralTitle(asMembers(c.titles), { floor: true })!;
+    expect(floor.length).toBeGreaterThan(110);
+    expect(isAcceptableNeutral(floor, c.titles.filter((t) => cleanHeadline(t) !== floor))).toBe(false);
+  });
+
+  it("edf65020: the framed 'TBMM Başkanı Kurtulmuş’tan ... mesajı' title is not the replacement", () => {
+    const c = review("edf65020");
+    const picked = reviewRepick("edf65020");
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect(framingPenalty(picked!), picked!).toBe(0);
+    expect(picked).not.toMatch(/mesajı/);
+    expect(c.titles.some((t) => cleanHeadline(t) === picked)).toBe(true);
+  });
+
+  it("04d5f3a4: the replacement is not a Title Case line", () => {
+    const c = review("04d5f3a4");
+    const picked = reviewRepick("04d5f3a4");
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect(isTitleCaseTitle(picked!, 5), picked!).toBe(false);
+    expect(c.titles.some((t) => cleanHeadline(t) === picked)).toBe(true);
+  });
+
+  it.each(["9ef524ec", "8ea4ca14", "2ecf8af6"])(
+    "%s: every member is the same loaded headline, so no guarded candidate exists and the member's wording still beats the removed headline (step 2)",
+    (cid) => {
+      const c = review(cid);
+      const distinct = new Set(c.titles);
+      expect(distinct.size, cid).toBe(1);
+      const picked = reviewRepick(cid);
+      expect(picked, cid).not.toBeNull();
+      expect(picked, cid).not.toBe(c.stored);
+      expect(loadedPenalty(picked!), `${cid}: ${picked}`).toBeGreaterThan(loadedPenalty(c.stored));
+      expect(c.titles.some((t) => cleanHeadline(t) === picked), cid).toBe(true);
+    },
+  );
+
+  it("step 1 refuses a member that is more loaded than the stored title when a guarded one exists", () => {
+    const stored = "Mersin'de beton blok altında 19 yıllık ceset bulundu, 6 şüpheli gözaltına alındı";
+    const loaded = "Mersin'de 19 yıllık dehşet: beton blok altında ceset çıktı, 6 şüpheli yakalandı";
+    const plain = "Mersin'de beton blok kırılınca 19 yıllık ceset ortaya çıktı, 6 şüpheli yakalandı";
+    const picked = pickNeutralTitle(asMembers([loaded, loaded.replace("dehşet", "dehşet verici"), plain]), { incumbent: stored });
+    expect(picked).toBe(plain);
+  });
+
+  it.each(["7f472cf5", "d49f7016"])("%s: the replacement is no Title Case and no more framed than the stored title", (cid) => {
+    const c = review(cid);
+    const picked = reviewRepick(cid);
+    expect(picked, cid).not.toBeNull();
+    expect(isTitleCaseTitle(picked!, 5), `${cid}: ${picked}`).toBe(false);
+    expect(framingPenalty(picked!), `${cid}: ${picked}`).toBeLessThanOrEqual(framingPenalty(c.stored));
+  });
+
+  it.each(["31fde7d7", "620362a3", "5893d4e5"])(
+    "%s: the h42-titles-1 clusters still change to a member wording other than the stored title",
+    (cid) => {
+      const c = review(cid);
+      const picked = reviewRepick(cid);
+      expect(picked).not.toBeNull();
+      expect(picked).not.toBe(c.stored);
+      expect(c.titles.some((t) => cleanHeadline(t) === picked), `${cid}: ${picked}`).toBe(true);
+      expect(pickNeutralTitle(asMembers(c.titles), { incumbent: picked })).toBe(picked);
+    },
+  );
+
+  it("31fde7d7 still reports the death, not the detention", () => {
+    expect(reviewRepick("31fde7d7")).toBe("Denizli'de direk ile çöp kamyonu arasına sıkışan temizlik işçisi hayatını kaybetti");
+  });
+
+  it("step 2: when only a member that is worse than the stored title on the guards passes the gate, its wording still beats a removed headline", () => {
+    // The stored title is clean; the one passing member says 'çöküyor' (loaded). The guarded pass finds nothing,
+    // the unguarded one returns the member: a member's wording beats a headline the outlet removed.
+    const stored = "İBB davasında gizli tanıklar duruşmada ifade verdi";
+    const members = ["İBB davası çöküyor: gizli tanık duruşmada konuştu", "Kısa haberler"];
+    expect(loadedPenalty(stored)).toBe(0);
+    expect(pickNeutralTitle(asMembers(members), { incumbent: stored })).toBe("İBB davası çöküyor: gizli tanık duruşmada konuştu");
+  });
+
+  it("step 1 prefers the guarded member: a clean member beats a better-scored loaded one", () => {
+    const stored = "Merkez Bankası politika faizini yüzde 40 seviyesinde sabit bıraktı";
+    const loaded = "Merkez Bankası'ndan korkunç karar: politika faizi sabit bırakıldı";
+    const clean = "Merkez Bankası politika faizi kararını açıkladı";
+    const members = [loaded, loaded.replace("korkunç ", "korkunç büyük "), clean];
+    const picked = pickNeutralTitle(asMembers(members), { incumbent: stored });
+    expect(picked).toBe(clean);
+  });
+
+  it("step 3: the stored title stays when no member passes the gate (the 162 residue)", () => {
+    const stored = "MasterChef'te elenen isim belli oldu";
+    expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent: stored })).toBe(stored);
+  });
+
+  it("a stored title that passes the gate and that a member carries is not touched by the stale path", () => {
+    const c = review("38721672");
+    expect(pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored })).toBe(c.stored);
+  });
+});
+
+// ---- editorial-2: the number rule repairs only a figure that was cut short --------------------------------
+
+describe("number rule (h42 review, editorial-2): a name with digits is not a figure, and every stored figure must be restated", () => {
+  it.each(["5dec458d", "494bafc1", "d69feb0f"])("%s: the stored title is kept", (cid) => {
+    const c = review(cid);
+    expect(reviewRepick(cid), cid).toBe(c.stored);
+  });
+
+  it("5dec458d keeps '1 milyon 83 bin 706 TL' instead of 'rekor ceza'", () => {
+    expect(reviewRepick("5dec458d")).toMatch(/1 milyon 83 bin 706 TL/);
+  });
+
+  it("494bafc1 keeps '28 bin lira ceza' instead of the 2 milyon TL story", () => {
+    expect(reviewRepick("494bafc1")).toMatch(/28 bin lira ceza/);
+  });
+
+  it("d69feb0f: 'COP31' is a name, so the stored title states no number and stays instead of switching to the '26 bin personel' story", () => {
+    expect(reviewRepick("d69feb0f")).toMatch(/COP31/);
+    expect(reviewRepick("d69feb0f")).not.toMatch(/26 bin personel/);
+  });
+
+  it("numsOf itself is unchanged: first-pick scoring and the numeral-outlier rule still read 'COP31' as 31", () => {
+    expect([...numsOf("COP31 alanında incelemeler")]).toEqual(["31"]);
+    expect([...numsOf("F-16 uçakları")]).toEqual(["16"]);
+  });
+
+  it("2441793c: the cut figure restated in full is the rule's intended case", () => {
+    expect(reviewRepick("2441793c")).toBe("İsmail Saymaz ve Murat Ağırel'e 14 yıl 10 ay hapis cezası istendi");
+  });
+
+  it("a stored figure the best title does not restate is not repaired: e67ede66 (40 against 39) and 555510ca (56 against 37) take the normal margin path and keep the stored title", () => {
+    // Both used to switch through the number rule (h42-titles-2); the stored 40 and 56 are not in the best title.
+    for (const cid of ["e67ede66", "555510ca"]) {
+      const c = review(cid);
+      expect(reviewRepick(cid), cid).toBe(c.stored);
+    }
+  });
+});
+
+// ---- editorial-3: the wide hedge vocabulary has one user --------------------------------------------------
+
+describe("hedge vocabulary (h42 review, editorial-3): the wide set only drives the hedge switch rule", () => {
+  it("d5a6d9ab keeps the stored title that already attributes ('öne sürdü'); it was swapped for 'gizli elektrik zammı uyarısı'", () => {
+    const c = review("d5a6d9ab");
+    expect(reviewRepick("d5a6d9ab")).toBe(c.stored);
+    expect(reviewRepick("d5a6d9ab")).toMatch(/82-104/);
+  });
+
+  it("8ea9e45f still swaps through the hedge rule (two of three members hedge in the wide vocabulary)", () => {
+    const c = h42("8ea9e45f");
+    const picked = h42Repick("8ea9e45f");
+    expect(picked).not.toBe(c.stored);
+    expect(carriesWideHedge(picked!)).toBe(true);
+    expect(carriesWideHedge(c.stored)).toBe(false);
+  });
+});
+
+// ---- editorial-6: the loaded rule does not swap toward an off-centre angle --------------------------------
+
+describe("loaded rule (h42 review, editorial-6): the swap target must be at least as central as the stored title", () => {
+  it("ad76f79a keeps its 'perde arkası' stored title (central, a member) instead of a 1-of-6 angle", () => {
+    const c = review("ad76f79a");
+    expect(loadedPenalty(c.stored)).toBeGreaterThan(0);
+    expect(incumbentIsMemberTitle(c.stored, c.titles)).toBe(true);
+    expect(reviewRepick("ad76f79a")).toBe(c.stored);
+  });
+
+  it.each(["5f761c9a", "29c38a16", "020a0a63", "671bc01e"])("%s: the intended loaded swap still happens", (cid) => {
+    const c = review(cid);
+    expect(loadedPenalty(c.stored), cid).toBeGreaterThan(0);
+    const picked = reviewRepick(cid);
+    expect(picked, cid).not.toBeNull();
+    expect(picked, cid).not.toBe(c.stored);
+    expect(loadedPenalty(picked!), `${cid}: ${picked}`).toBe(0);
+  });
+});
+
+// ---- correctness-2 and editorial-5: lexicon false positives ------------------------------------------------
+
+describe("lexicon false positives (h42 review, correctness-2 / editorial-5)", () => {
+  it.each([
+    "AK Parti deprem bölgesinde incelemelerde bulundu",
+    "Borsa deprem sonrası sert düştü",
+    "Piyasa deprem sonrası toparlandı",
+    "Kabine deprem toplantısı için olağanüstü toplanıyor",
+    "Myanmar'a darbe sonrası yaptırım kararı",
+    "Niger'e darbe sonrası Fransa askerlerini çekiyor",
+    "Erdoğan'a yönelik darbe planı iddianamesi",
+    "Başına aldığı ağır darbe sonucu hayatını kaybetti",
+    "Kafasına sert darbe alan genç hastanede öldü",
+    "Otomobil duvara çakıldı: 2 yaralı",
+    "Tır markete çakıldı",
+    "Hafif ticari araç ağaca çakıldı, sürücü öldü",
+    "Projenin ilk kazığı çakıldı",
+    "Endonezya'da tsunami: 12 ölü",
+    "Tsunami: yüzlerce yaralı",
+  ])("loadedPenalty is 0 for %s", (title) => {
+    expect(loadedPenalty(title), title).toBe(0);
+  });
+
+  it.each([
+    "Ataşehir CHP'de istifa depremi",
+    "Seçim depremleri yaşandı",
+    "Netanyahu'ya Ağır Darbe",
+    "Trump'a ara seçim darbesi",
+    "Netanyahu'ya kendi ülkesinden darbe",
+    "Hisseler çakıldı",
+    "Altın fiyatları çakıldı",
+    "Dolar kuru çakıldı",
+    "BIST 100 endeksi çakıldı",
+    "Sandık tsunamisi",
+  ])("loadedPenalty stays at least 1 for %s", (title) => {
+    expect(loadedPenalty(title), title).toBeGreaterThanOrEqual(1);
+  });
+
+  it("'Sandık tsunamisi' stays exactly 1", () => {
+    expect(loadedPenalty("Sandık tsunamisi")).toBe(1);
+  });
+
+  it("'deprem' is figurative only as 'depremi' / 'depremler...' after the listed nouns, never as a bare 'deprem'", () => {
+    expect(loadedPenalty("istifa deprem")).toBe(0);
+    expect(loadedPenalty("parti deprem bölgesine gitti")).toBe(0);
+    expect(loadedPenalty("seçim depremleri")).toBeGreaterThan(0);
+    expect(loadedPenalty("Borsada deprem etkisi sürüyor")).toBe(0);
+  });
+
+  it("a blow taken on the body or a 'darbe' that is a result is not figurative", () => {
+    for (const title of [
+      "Başına darbe alan sürücü hayatını kaybetti",
+      "Göğsüne ağır darbe alarak yere yığıldı",
+      "Vücuduna aldığı büyük darbe nedeniyle yaşamını yitirdi",
+      "Sert darbe aldı, hastaneye kaldırıldı",
+      "Ağır darbe sonucu öldü",
+    ]) {
+      expect(loadedPenalty(title), title).toBe(0);
+    }
+  });
+
+  it("'darbe' stays figurative before a name and in the intensifier form when no body part is named", () => {
+    expect(loadedPenalty("Hükümete ağır darbe")).toBeGreaterThan(0);
+    expect(loadedPenalty("Enflasyon rakamları hükümete büyük darbe vurdu")).toBeGreaterThan(0);
+    expect(loadedPenalty("Trump'a seçim darbesi")).toBeGreaterThan(0);
+  });
+
+  it("'çakıldı' is a price move only beside a market word; an object that hit a wall is not", () => {
+    expect(loadedPenalty("Askeri uçak çakıldı: pilot kurtuldu")).toBe(0);
+    expect(loadedPenalty("Helikopter dağa çakıldı")).toBe(0);
+    expect(loadedPenalty("İHA tarlaya çakıldı")).toBe(0);
+    expect(loadedPenalty("Kurum binasına araç çakıldı")).toBe(0);
+    expect(loadedPenalty("Değerli taş yüklü kamyon çakıldı")).toBe(0);
+    expect(loadedPenalty("Euro çakıldı")).toBeGreaterThan(0);
+    expect(loadedPenalty("Petrol fiyatları çakıldı")).toBeGreaterThan(0);
+    expect(loadedPenalty("Kripto piyasası çakıldı")).toBeGreaterThan(0);
+    expect(loadedPenalty("Liranın değeri çakıldı")).toBeGreaterThan(0);
+    expect(loadedPenalty("Faiz kararı sonrası tahvil çakıldı")).toBeGreaterThan(0);
+  });
+
+  it("'tsunami' next to a casualty count is the natural event", () => {
+    for (const title of ["Tsunami: 12 ölü", "Tsunamide 30 yaralı", "Tsunamide can kaybı 40'ı aştı", "Tsunamide onlarca kişi hayatını kaybetti"]) {
+      expect(loadedPenalty(title), title).toBe(0);
+    }
+  });
+
+  it("'Müjdeci' (a surname) is not framing; 'müjde' and its suffixed forms still are", () => {
+    expect(framingPenalty("Yeniden Refah Partili Müjdeci'den Ömer Çelik'e yanıt")).toBe(0);
+    expect(framingPenalty("Müjdeci: yeni dönem")).toBe(0);
+    expect(framingPenalty("vize müjdesi")).toBeGreaterThan(0);
+    expect(framingPenalty("Emekliye müjde")).toBeGreaterThan(0);
+    expect(framingPenalty("Müjdeler olsun")).toBeGreaterThan(0);
+  });
+
+  it("the three swap cases keep the stored title (the lexicon changes, the margin decides)", () => {
+    const cases: Array<[string, string[]]> = [
+      [
+        "AK Parti deprem bölgesinde incelemelerde bulundu",
+        [
+          "AK Parti deprem bölgesinde incelemelerde bulundu",
+          "AK Parti heyeti deprem bölgesinde incelemelerde bulundu",
+          "AK Parti Genel Başkan Yardımcısı Hatay'da incelemelerde bulundu",
+        ],
+      ],
+      [
+        "Borsa deprem sonrası güne düşüşle başladı",
+        [
+          "Borsa deprem sonrası güne düşüşle başladı",
+          "Borsa İstanbul deprem sonrası güne düşüşle başladı",
+          "BIST 100 endeksi deprem sonrası güne düşüşle başladı",
+        ],
+      ],
+      [
+        "Gabon'a darbe sonrası AB yaptırım kararı aldı",
+        [
+          "Gabon'a darbe sonrası AB yaptırım kararı aldı",
+          "AB, Gabon'a darbe sonrası yaptırım kararı aldı",
+          "Avrupa Birliği Gabon'a yönelik yaptırım kararı aldı",
+        ],
+      ],
+      [
+        "Myanmar'a darbe sonrası yaptırım kararı",
+        [
+          "Myanmar'a darbe sonrası yaptırım kararı",
+          "Myanmar'a yönelik yaptırım kararı Resmi Gazete'de",
+          "Myanmar yaptırım kararı yürürlüğe girdi",
+        ],
+      ],
+      [
+        "Tır markete çakıldı: 2 yaralı",
+        [
+          "Tır markete çakıldı: 2 yaralı",
+          "Kontrolden çıkan tır markete girdi, 2 kişi yaralandı",
+          "Tır market vitrinine daldı: 2 yaralı",
+        ],
+      ],
+    ];
+    for (const [stored, titles] of cases) {
+      expect(loadedPenalty(stored), stored).toBe(0);
+      expect(pickNeutralTitle(asMembers(titles), { incumbent: stored }), stored).toBe(stored);
+    }
+  });
+});
+
+// ---- editorial-4: lexicon the swap targets did not know ----------------------------------------------------
+
+describe("lexicon additions (h42 review, editorial-4): the wording the swap targets carried", () => {
+  it.each([
+    ["ce1fefd7", "Butlan CHP'sinin İstanbul İl Yönetimi belli oldu: Kendisine sorulmadan listeye adı yazılanlar var"],
+    ["bb37c171", "Arnavutköy'de feci kaza. Atın bacağı otomobile saplandı"],
+    ["6900ace0", "Seul'de 8 yıl sonra tarihi karşılama: Cumhurbaşkanı Erdoğan Güney Kore'de"],
+    ["2594cfb8", "Şarkıcı Nevzat Doğansoy son yolculuğuna uğurlandı: Cenaze töreninde konuşan acılı ağabeyi gözyaşlarına boğuldu"],
+    ["57c73dc7", "İmamoğlu davasında rüşvet kıskacı: Ruhsat için milyonluk çekleri vermek zorunda kaldık"],
+  ])("%s: loadedPenalty is 1 for the wording of the swap target", (cid, title) => {
+    expect(review(cid).titles.some((t) => t === title || cleanHeadline(t) === title), cid).toBe(true);
+    expect(loadedPenalty(title), title).toBe(1);
+  });
+
+  it.each([
+    ["f2b6d1ea", "CHP'den Yeni Yol'a milletvekili transferi iddiası: Kılıçdaroğlu detayı dikkat çekti"],
+    ["8efc4f4a", "Konya’da mısır tarlasında oluştu, 8 metre derinliğindeki obruk böyle görüntülendi"],
+  ])("%s: framingPenalty is 1 for the wording of the swap target", (cid, title) => {
+    expect(review(cid).titles.some((t) => t === title || cleanHeadline(t) === title), cid).toBe(true);
+    expect(framingPenalty(title), title).toBe(1);
+  });
+
+  it("'acı haber' is framing", () => {
+    expect(framingPenalty("Bahçelievler'deki inşaat göçüğünde acı haber: Toprak altında kalan işçi hayatını kaybetti")).toBe(1);
+  });
+
+  it("the literal uses stay free", () => {
+    expect(loadedPenalty("CHP'nin mutlak butlan davasında karar")).toBe(0);
+    expect(loadedPenalty("Mutlak butlan CHP davası yarın görülecek")).toBe(0);
+    expect(loadedPenalty("Ordu kıskaç hareketi başlattı")).toBe(0);
+    expect(loadedPenalty("Tarihi karar Resmi Gazete'de")).toBe(0);
+    expect(loadedPenalty("Cenaze töreninde gözyaşları sel oldu")).toBe(0);
+    expect(framingPenalty("Rapor açıklandı")).toBe(0);
+  });
+
+  it.each(["ce1fefd7", "6900ace0"])("%s keeps the stored title (the swap target is loaded)", (cid) => {
+    expect(reviewRepick(cid)).toBe(review(cid).stored);
+  });
+
+  it.each(["bb37c171", "15b4041e", "f2b6d1ea", "8efc4f4a", "2594cfb8"])(
+    "%s: the stored title is not traded for the wording the lexicon now flags",
+    (cid) => {
+      const c = review(cid);
+      const picked = reviewRepick(cid);
+      expect(picked, cid).not.toBeNull();
+      expect(loadedPenalty(picked!), `${cid}: ${picked}`).toBeLessThanOrEqual(loadedPenalty(c.stored));
+      expect(framingPenalty(picked!), `${cid}: ${picked}`).toBeLessThanOrEqual(framingPenalty(c.stored));
+    },
+  );
 });

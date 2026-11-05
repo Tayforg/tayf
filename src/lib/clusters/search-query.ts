@@ -2,6 +2,7 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
 import { createReaderClient } from "@/lib/supabase/server";
+import { expandAliasQuery } from "./search-aliases";
 import {
   canonicalSearchQuery,
   foldTr,
@@ -27,6 +28,9 @@ import {
 //   - `p_folded`: the ASCII-folded query (`foldTr`, the twin of 129's
 //     `tayf_search_fold`) matched against the folded index, so 'sisli' finds
 //     Şişli and 'cumhurbaskani' finds Cumhurbaşkanı.
+// An alias in the query (AKP <-> AK Parti, search-aliases.ts) is expanded into a
+// two-way websearch `or` for BOTH arguments, so 'AKP' and 'AK Parti' send the
+// same RPC call; the cache key below stays the canonical query.
 // The RPC returns matching ids ONLY — no per-candidate lateral embed runs
 // before the sort/limit (see 083's header for why an ids-first two-step beats
 // the single embedded-select shape the audit measured at up to 11s).
@@ -94,14 +98,20 @@ interface SearchFetch {
 // as `searchClusters`' retry on a cache-attempt failure. `key` is already
 // canonical and length-checked by `searchClusters` before this is ever called.
 async function fetchSearchClusters(key: string): Promise<SearchFetch> {
-  const variants = turkishQueryVariants(key);
+  // h42-search-1: a query holding an alias is searched under both spellings. The
+  // expansion is built from the canonical key, so the cost bound (6 terms, 64
+  // characters, one alias, two disjuncts) holds, and a query without an alias
+  // (the common case) takes exactly the arguments it always did.
+  const expansion = expandAliasQuery(key);
+  const variants = turkishQueryVariants(expansion ? expansion.variantsQuery : key);
   if (variants.length === 0) return { bundles: [], capped: false };
+  const folded = foldTr(expansion ? expansion.foldedQuery : key);
 
   const supabase = createReaderClient();
 
   let res = await supabase.rpc("search_cluster_ids", {
     p_variants: variants,
-    p_folded: foldTr(key),
+    p_folded: folded,
     p_limit: SEARCH_LIMIT,
   });
   // PGRST202 = the 3-arg function is not in PostgREST's schema cache, i.e.

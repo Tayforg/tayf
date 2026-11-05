@@ -319,6 +319,32 @@ function cleanDescription(raw?: string | null): string | null {
 
 const TR_WALL_CLOCK_AS_UTC_SLUGS: ReadonlySet<string> = new Set(["cnn-turk"]);
 
+// h42-latency-2: the opposite mislabel. Daily Sabah's feed mixes two kinds of
+// <pubDate>, both labelled "+0300":
+//
+//   Thu, 05 Nov 2026 20:04:00 +0300   minute precision (":00"): honest
+//                                     Istanbul time.
+//   Thu, 05 Nov 2026 13:54:18 +0300   seconds precision: the clock is UTC and
+//                                     only the label is wrong -- the row was
+//                                     ingested at 13:57Z, not 16:57Z.
+//
+// Read at face value the second kind lands exactly 3 h in the past (127 rows
+// in 14 days sat in the 180-190 min created_at - published_at bins against 6-9
+// in the neighbouring ones), which made card ages 3 h too old and let a skewed
+// row win `first_published = min(published_at)` of a multi-source cluster.
+// Evidence: __fixtures__/daily-sabah-dates.json.
+//
+// Per source on purpose. The discriminator (a non-zero seconds field next to a
+// "+0300" label) is the ordinary shape of every OTHER Turkish outlet's correct
+// stamp -- 43,765 such rows from 88 sources in the 7 days before this fix --
+// so no rule about the format alone can tell the two apart.
+const UTC_WALL_CLOCK_SECONDS_SLUGS: ReadonlySet<string> = new Set(["daily-sabah"]);
+
+// Seconds field (group 1) of a stamp whose zone is the numeric Istanbul offset
+// (`+0300` / `+03:00`), the only label the fixture shows on a UTC clock. The
+// string is already trimmed, so the offset is the last token.
+const SECONDS_BEFORE_ISTANBUL_OFFSET_RE = /\d{2}:\d{2}:(\d{2})(?:\.\d+)?\s*\+03:?00$/;
+
 // Trailing `Z`, a numeric offset (`+03:00` / `+0300` / `-05:00`), or a named
 // zone token (GMT, UTC, UT, or a US abbreviation like EST/PDT).
 const ZONE_DESIGNATOR_RE = /(?:Z|[+-]\d{2}:?\d{2}|GMT|UTC?|[PMCE][SD]T)\s*$/i;
@@ -353,6 +379,9 @@ export interface ParseDateOptions {
  *   3. `sourceSlug` is in `TR_WALL_CLOCK_AS_UTC_SLUGS` AND the designator is
  *      UTC-like -> subtract 3h (the source labelled Istanbul wall-clock
  *      time as UTC).
+ *   3b. `sourceSlug` is in `UTC_WALL_CLOCK_SECONDS_SLUGS` AND the stamp is
+ *      labelled `+0300` / `+03:00` AND its seconds field is not `00` -> add
+ *      3h (the source labelled a UTC clock as Istanbul time; h42-latency-2).
  *   4. Clamp: the result is never later than `nowMs` -- `published_at`
  *      must never outrun ingest time.
  */
@@ -399,6 +428,14 @@ export function parseDate(raw: string | undefined, opts: ParseDateOptions): stri
     UTC_LIKE_DESIGNATOR_RE.test(trimmed)
   ) {
     ms -= 3 * 60 * 60 * 1000;
+  }
+
+  // Rule 3b: a UTC clock labelled +03:00 (h42-latency-2). `new Date` above
+  // read it as Istanbul time, 3 h too early; put the 3 h back. Checked only for
+  // the listed slugs, so every other source pays nothing and changes nothing.
+  if (hasDesignator && sourceSlug && UTC_WALL_CLOCK_SECONDS_SLUGS.has(sourceSlug)) {
+    const m = SECONDS_BEFORE_ISTANBUL_OFFSET_RE.exec(trimmed);
+    if (m && m[1] !== "00") ms += 3 * 60 * 60 * 1000;
   }
 
   // Rule 4: never later than ingest time.

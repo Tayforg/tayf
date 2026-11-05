@@ -1,3 +1,4 @@
+import { clusterDisplayTitle } from "@/lib/clusters/display-headline";
 import { isExtractiveModelId } from "@/lib/clusters/neutral-title";
 import { cacheLife, cacheTag } from "next/cache";
 import { cache } from "react";
@@ -551,9 +552,28 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     const repairTitle = (t: string): string =>
       typeof t === "string" ? repairEntityResidue(t) : "";
     const originalTitle = repairTitle(clusterRow.title_tr);
-    const neutralTitle = clusterRow.title_tr_neutral
+    const storedNeutralTitle = clusterRow.title_tr_neutral
       ? repairTitle(clusterRow.title_tr_neutral)
       : "";
+
+    // h42-latency-1: the headline cron writes the first neutral title on a */5
+    // tick, so a new cluster used to show the seed article's raw outlet headline
+    // here (page <h1>, <title>, og:title, JSON-LD) until then. A cluster of 2+
+    // members that the cron would still title gets the cron's own first pick,
+    // computed from the member titles already loaded (the whole list, pre-dedupe,
+    // as the cron reads it). It is the neutral title for every purpose below, so
+    // the "Özgün başlık" disclosure still shows the outlet's original, and the
+    // value agrees with what the cron writes a moment later. Archived clusters
+    // are skipped by the cron, so they keep title_tr. Pure, no write, and the
+    // result passes through the same entity repair as a stored title.
+    const picked =
+      storedNeutralTitle.trim().length === 0 && !clusterRow.is_archived
+        ? clusterDisplayTitle(
+            { title_tr: clusterRow.title_tr, title_tr_neutral: null },
+            members.map((m) => ({ title: m.article.title, published_at: m.article.published_at })),
+          )
+        : null;
+    const neutralTitle = picked?.picked ? repairTitle(picked.title) : storedNeutralTitle;
     const headlines = {
       original: originalTitle,
       neutral: neutralTitle.trim().length > 0 ? neutralTitle : null,
@@ -583,8 +603,10 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         // rewrite produced the same text as the original, which discloses
         // nothing new).
         title_original: headlines.replaced ? headlines.original : null,
+        // A title picked here from the member headlines is extractive, though no
+        // model id is stored until the cron's first write.
         title_method: headlines.replaced
-          ? isExtractiveModelId(clusterRow.title_neutral_model)
+          ? picked?.picked || isExtractiveModelId(clusterRow.title_neutral_model)
             ? "extractive"
             : "llm"
           : null,

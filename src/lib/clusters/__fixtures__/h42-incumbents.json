@@ -1,0 +1,136 @@
+[
+ {
+  "cid": "29c38a16",
+  "id": "29c38a16-a929-4ea7-868d-82bebcb24545",
+  "stored": "İsrail'de Netanyahu'ya Ağır Darbe: Müttefiki Desteği Çekti",
+  "article_count": 7,
+  "stamped": 5,
+  "model": "extractive-v6",
+  "titles": [
+   "Ortak Liste, Eisenkot’un hükümeti kurmakla görevlendirilmesini önerdi",
+   "İsrail vatandaşı Filistinlileri temsil eden Ortak Liste, Eisenkot'un hükümet kurmakla görevlendirilmesini önerdi",
+   "İsrail'de hükümet kurma çabaları: Arap partileri Eisenkot'a destek verecek",
+   "İsrail'de Arap partileri kilidi açtı: Ortak Liste'den Eisenkot'a destek",
+   "İsrail'de Arap partilerden Eisenkot'a hükümeti kurma desteği",
+   "İsrail'de Netanyahu'ya Ağır Darbe: Müttefiki Desteği Çekti",
+   "SON KALESİ GİTTİ"
+  ],
+  "why": "Loaded figurative 'darbe' (\"Netanyahu'ya Ağır Darbe\"): every member writes plainly that the Arab parties will back Eisenkot; the stored title scored loadedPenalty 0 so the 0.20 margin kept it."
+ },
+ {
+  "cid": "020a0a63",
+  "id": "020a0a63-c5de-49d5-9cf6-78369a35bd5c",
+  "stored": "Ataşehir CHP'de istifa depremi. İki meclis üyesi partiden ayrıldı",
+  "article_count": 6,
+  "stamped": 5,
+  "model": "extractive-v6",
+  "titles": [
+   "Ataşehir Belediye Meclisi'nde istifa deprem",
+   "Ataşehir Belediyesinde 2 meclis üyesi CHP'den istifa etti",
+   "CHP ile bağlarını kopardılar! İki meclis üyesi istifa etti",
+   "Ataşehir Belediye Meclisinde istifa depremi! Müslüm Kocaoğlu CHP'den ayrılarak DEM Parti'ye geçti",
+   "Ataşehir CHP'de istifa depremi! İki meclis üyesi partiden ayrıldı",
+   "Ataşehir'de iki CHP'li meclis üyesi istifa etti, Kocaoğlu DEM Parti'ye geçti"
+  ],
+  "why": "Loaded figurative 'deprem' (\"istifa depremi\"): two councillors resigned, a plain member title says so."
+ },
+ {
+  "cid": "671bc01e",
+  "id": "671bc01e-5742-4b32-8cb0-d08babb0d6c0",
+  "stored": "İBB davası çöküyor. 2 gizli tanık: Görmedim, duydum, rüşvet bağı kurdum",
+  "article_count": 2,
+  "stamped": 2,
+  "model": "extractive-v6",
+  "titles": [
+   "İBB davası çöküyor… 2 gizli tanık: Görmedim, duydum, rüşvet bağı kurdum",
+   "İBB davasında dinlenen 2 gizli tanık: Görmedim, duydum rüşvet bağı kurdum"
+  ],
+  "why": "Loaded 'çöküyor' (\"İBB davası çöküyor\") over a plain member title (\"İBB davasında dinlenen 2 gizli tanık\")."
+ },
+ {
+  "cid": "5f761c9a",
+  "id": "5f761c9a-7854-4ffc-9ff1-03a8a9bd2080",
+  "stored": "Netanyahu'ya kendi ülkesinden darbe: Asıl düşmanımız o ve çetesi",
+  "article_count": 5,
+  "stamped": 5,
+  "model": "extractive-v6",
+  "titles": [
+   "Ofer Cassif Eisenkot hükümeti için neden destek veriyor?",
+   "Netanyahu'yu devirmek için kritik adım! Muhalefetten Eisenkot kararı",
+   "Netanyahu'ya kendi ülkesinden darbe: Asıl düşmanımız o ve çetesi",
+   "İsrailli milletvekili, \"asıl düşmanımız Netanyahu ve çetesi\" diyerek Eisenkot'a hükümet kurma çağrısı yaptı",
+   "Ofer Cassif, Eisenkot'u hükümet kurması için Cumhurbaşkanına önereceklerini söyledi"
+  ],
+  "why": "An unattributed 'darbe' (\"Netanyahu'ya kendi ülkesinden darbe\"): the plain pick attributes the claim to Cassif."
+ },
+ {
+  "cid": "8ea9e45f",
+  "id": "8ea9e45f-fe59-418f-9c3d-7d6cf4c9f44c",
+  "stored": "ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi",
+  "article_count": 3,
+  "stamped": 2,
+  "model": "extractive-v6",
+  "titles": [
+   "ABD’de seçim sonrası yeni beklenti: Fed’in faiz hesabı değişebilir",
+   "ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi",
+   "ABD'deki ara seçim sonuçlarıyla Fed'e ilişkin faiz artırım beklentilerinin azalması bekleniyor"
+  ],
+  "why": "Hedge lost: 2 of 3 members hedge ('bekleniyor', 'değişebilir'); the stored title states it as done."
+ },
+ {
+  "cid": "2441793c",
+  "id": "2441793c-279c-4762-a92d-53219b8f7ce1",
+  "stored": "İsmail Saymaz ve Murat Ağırel'e 14'er yıl hapis talebi",
+  "article_count": 6,
+  "stamped": 6,
+  "model": "extractive-v6",
+  "titles": [
+   "İsmail Saymaz ve Murat Ağırel hakkında 14 yıl 10 ay hapis cezası istendi",
+   "Bolat ve bakanlara fon iftirasına iddianame! Ağırel ve Saymaz için 14 yıl 10 ay hapis talebi",
+   "İsmail Saymaz ve Murat Ağırel'e 14 yıl 10 ay hapis cezası istendi",
+   "Son dakika... Gazeteciler Murat Ağırel ve İsmail Saymaz hakkında 14 yıl 10’ar aya kadar hapis istemi",
+   "İsmail Saymaz ve Murat Ağırel'e 14'er yıl hapis talebi",
+   "Murat Ağırel ve İsmail Saymaz’a “fon” iddianamesi: Bakanın şikâyeti sonrası dava açıldı"
+  ],
+  "why": "Number cut: 4 of 6 members say '14 yıl 10 ay'; the stored title keeps only \"14'er yıl\"."
+ },
+ {
+  "cid": "6d0f5c12",
+  "id": "6d0f5c12-8d06-4c6c-82b0-4e9d4503004b",
+  "stored": "ABD Ara Seçimlerinde İlk Sonuçlar Belli Oldu: Senato Demokratlara Geçti",
+  "article_count": 6,
+  "stamped": 6,
+  "model": "extractive-v6",
+  "titles": [
+   "ABD ara seçimlerinde Senato çoğunluğu Demokratlara geçti",
+   "ABD seçimlerinde kritik viraj: Demokratlar Senato'da kontrolü ele geçirdi",
+   "ABD Ara Seçimlerinde İlk Sonuçlar Belli Oldu: Senato Demokratlara Geçti",
+   "ABD’de ara seçimlerde Trump’a ağır darbe:  Cumhuriyetçilerin kaleleri yıkıldı, Senato Demokratlara geçti",
+   "ABD'de ara seçimlerde Demokratların zaferi: Temsilciler Meclisi el değiştirdi, Senato'da kritik kazanımlar",
+   "ABD ara seçimlerinde tarihi sonuç! Trump'a soğuk duş: Senato ve Temsilciler Meclisi Demokratlara geçti"
+  ],
+  "why": "Title Case stored title (\"ABD Ara Seçimlerinde İlk Sonuçlar Belli Oldu: ...\") while the sample writes those words in lower case; incumbentDefect fired but best.score did not exceed the stored score."
+ },
+ {
+  "cid": "a7c389d6",
+  "id": "a7c389d6-7525-4af6-8767-a1d2f4e03b22",
+  "stored": "Türkiye'ye Tarihi Sigara Yasağı Geliyor: Açık Havada Da Sigara İçmek Yasaklanıyor",
+  "article_count": 11,
+  "stamped": 8,
+  "model": "extractive-v6",
+  "titles": [
+   "Sigara yasağında yeni dönem: Park, plaj ve duraklar için düzenleme",
+   "Türkiye'de sigara yasaklarının kapsamı genişliyor: Park, plaj ve duraklar gündemde",
+   "Sigara yasağında yeni dönem: Park, plaj ve duraklar için düzenleme geliyor",
+   "Açık havada sigara içmeye yasak geliyor: Japonya ve Avustralya modelleri incelendi",
+   "Yeni yasaklar yolda! Artık açık havada da sigara içilmeyecek",
+   "Tarihi sigara yasakları yolda: Türkiye, Japonya ve Avustralya modelini uygulayacak",
+   "Meclis'te görüşülecek: Sigara kısıtlamaları açık havaya taşınabilir",
+   "Tarihi sigara yasakları yolda! Türkiye, Japonya ve Avustralya modelini uygulayacak",
+   "Açık havada da sigara içmek yasak olacak!",
+   "Açık havada sigaraya yeni sınır mı geliyor? Park, plaj, durak… Sigara yasağında kapsam genişleyebilir",
+   "Türkiye'ye Tarihi Sigara Yasağı Geliyor: Açık Havada Da Sigara İçmek Yasaklanıyor!"
+  ],
+  "why": "Title Case stored title that already switches today (control: the result must not change)."
+ }
+]

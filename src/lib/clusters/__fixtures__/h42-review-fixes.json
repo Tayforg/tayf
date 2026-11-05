@@ -1,0 +1,623 @@
+[
+ {
+  "cid": "38721672",
+  "id": "38721672-a738-45c1-a605-fa5d49fbba2e",
+  "stored": "TDT 13. Liderler Zirvesi \"Türk Yüzyılı\" temasıyla başlıyor",
+  "model": "extractive-v6",
+  "article_count": 14,
+  "titles": [
+   "Cumhurbaşkanı Erdoğan’dan TDT Zirvesi’nde tarihi mesaj: Türk dünyasında ayrılığa gayrılığa yer yok",
+   "Cumhurbaşkanı Erdoğan'dan Türk dünyasına mesaj: Aramızda ayrılığa yer yok",
+   "Cumhurbaşkanı Erdoğan: Türk dünyasının aile fotoğrafında ayrılığa yer yoktur, hepimiz biriz beraberiz",
+   "CANLI | Erdoğan, Türk Devletleri Teşkilatı Zirvesi'nde konuşuyor",
+   "TÜRK DÜNYASI ANKARA'DA",
+   "Başkan Erdoğan Türk Devletleri Teşkilatı 13. Zirvesi'nde konuşuyor! Beştepe'den önemli açıklamalar",
+   "TDT 13. Liderler Zirvesi \"Türk Yüzyılı\" temasıyla Ankara'da başlıyor",
+   "Türk Devletleri Teşkilatı 13. Liderler Zirvesi başladı",
+   "TDT 13. Liderler Zirvesi “Türk Yüzyılı” temasıyla başlıyor",
+   "TDT Ankara Zirvesi: Türk dünyasının birliği Bakü sınavından geçiyor",
+   "\"Türk Yüzyılı\" teması... TDT liderleri Ankara'da bir araya geliyor",
+   "Türk dünyasının kalbi Ankara'da atıyor",
+   "TDT 13. Liderler Zirvesi \"Türk Yüzyılı\" temasıyla başladı! Erdoğan'dan zirvede önemli açıklamalar",
+   "TDT 13. Liderler Zirvesi Türk Yüzyılı temasıyla başlıyor"
+  ],
+  "why": "stale-set shape: stored straight quotes, member curly quotes (SQL fold alone did not match)"
+ },
+ {
+  "cid": "a6874bad",
+  "id": "a6874bad-7a3f-4d64-8112-5e7fee62b2b0",
+  "stored": "Ege Denizi’nde 4,7 büyüklüğünde deprem",
+  "model": "extractive-v6",
+  "article_count": 10,
+  "titles": [
+   "Ege Denizi'nde 4.7 Büyüklüğünde Korkutan Deprem",
+   "AFAD duyurdu: Ege Denizi’nde 4.7 büyüklüğünde deprem",
+   "Ege Denizi'nde 4,7 büyüklüğünde deprem! AFAD son dakika verilerini açıkladı",
+   "Ege'de 4.7 büyüklüğünde deprem",
+   "Son dakika! Ege Denizi'nde 4.7 büyüklüğünde deprem",
+   "AFAD duyurdu... Ege Denizi'nde 4.7 büyüklüğünde deprem",
+   "Son dakika... Ege Denizi’nde peş peşe depremler",
+   "SON DAKİKA! Ege Denizi'nde 4,7 büyüklüğünde deprem",
+   "SON DAKİKA! Ege Denizi'nde 4.7 büyüklüğünde korkutan deprem",
+   "Son dakika... Ege Denizi'nde 4,7 büyüklüğünde deprem"
+  ],
+  "why": "stale-set shape: stored curly apostrophe, member straight apostrophe and a longer headline"
+ },
+ {
+  "cid": "cc01f26a",
+  "id": "cc01f26a-33e8-4623-8c82-40c0b694c399",
+  "stored": "Cumhurbaşkanı Erdoğan LG Electronics heyetini kabul etti",
+  "model": "extractive-v6",
+  "article_count": 17,
+  "titles": [
+   "Cumhurbaşkanı Erdoğan, Güney Koreli iş insanlarıyla bir araya geldi",
+   "Cumhurbaşkanı Erdoğan, Güney Koreli iş insanlarıyla bir araya geldi",
+   "Cumhurbaşkanı Erdoğan Güney Koreli Şirket Yöneticilerini Kabul Etti",
+   "Cumhurbaşkanı Erdoğan, Güney Koreli şirketlerin CEO’larıyla görüştü",
+   "Cumhurbaşkanı Erdoğan, Samsung, LG ve Hyundai'nin üst düzey yöneticilerini kabul etti",
+   "Cumhurbaşkanı Erdoğan, Güney Koreli iş insanlarıyla bir araya geldi",
+   "Cumhurbaşkanı Erdoğan'dan Güney Kore'de iş dünyası temasları",
+   "Başkan Erdoğan'ın yoğun Güney Kore temasları tamam: Yurda döndü",
+   "Cumhurbaşkanı Erdoğan LG CEO'su Lyu Jae-cheol ile görüştü",
+   "Erdoğan, Güney Kore'de küresel şirketlerin üst yöneticilerini kabul etti",
+   "Cumhurbaşkanı Erdoğan, Seul’de LG Heyetini Kabul Etti",
+   "Cumhurbaşkanı Erdoğan Seul'de: Teknoloji devlerinin yöneticilerini kabul etti",
+   "Cumhurbaşkanı Erdoğan LG CEO'su Lyu Jae-cheol'u ile görüştü",
+   "Erdoğan Seul'de Samsung CEO'su Roh Tae-moon ve beraberindeki heyeti kabul etti",
+   "Başkan Erdoğan LG Electronics heyetini kabul etti",
+   "Cumhurbaşkanı Erdoğan Seul'de teknoloji devlerini kabul etti",
+   "Erdoğan, Güney Kore'de küresel şirketlerin üst yöneticilerini kabul etti"
+  ],
+  "why": "stale-set shape: stored 'Cumhurbaşkanı Erdoğan', member 'Başkan Erdoğan' (legacy house-style rewrite)"
+ },
+ {
+  "cid": "502e3032",
+  "id": "502e3032-28eb-466c-be5a-c9736a242f56",
+  "stored": "Polonya'da Anayasa Mahkemesi krizinin nedeni ne? İşte 11 yıllık kavganın perde arkası",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Polonya'daki Anayasa Mahkemesi krizinin nedeni ne? İşte 11 yıllık kavganın perde arkası",
+   "Polonya'daki Anayasa Mahkemesi krizinin nedeni ne? İşte 11 yıllık kavganın perde arkası"
+  ],
+  "why": "stale-set shape: stored title fails the gate (a question), members say 'Polonya'daki'"
+ },
+ {
+  "cid": "c2e4a77c",
+  "id": "c2e4a77c-1262-4929-b928-3cd0d44403e9",
+  "stored": "KYK burs ve kredi başvuru sonuçları açıklandı mı, ne zaman açıklanacak? GSB 2026-2027 e-Devlet sorgulama ekranı",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "GSB KYK BURS SONUÇLARI | GSB KYK BURS SONUÇLARI AÇIKLANDI MI? 2026-2027 KYK BURS VE KREDİ BAŞVURU SONUCU AÇIKLAMA TARİHİ BELLİ OLDU MU? BURS VE KREDİ BAŞVURU SONUÇLARI NASIL ÖĞRENİLİR?",
+   "KYK burs sonuçları ne zaman açıklanacak 2026? KYK e-Devlet sonuç sorgulama ekranı"
+  ],
+  "why": "stale-set shape: stored title fails the gate (a question), members are SEO question headlines"
+ },
+ {
+  "cid": "fd5896d8",
+  "id": "fd5896d8-1b85-4f87-99c3-6263dc9cdba3",
+  "stored": "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz'dan 'emekli düzenlemesi' açıklaması",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Fon tasfiyesinde son dakika gelişmesi! Cumhurbaşkanı Yardımcısı Cevdet Yılmaz ara ödemeler için tarih verdi. Ödemeler ne zaman başlayacak, kimleri kapsayacak?",
+   "Cumhurbaşkanı Yardımcısı Yılmaz: \"Hakkaniyeti, adaleti gözeten yaklaşımla emeklilerimizin daha iyi koşullara kavuşması yönünde tüm gayretimizi sarfedeceğiz, imkanlarımızı bu yönde kullanacağız\""
+  ],
+  "why": "stored title passes the gate, no member carries it, the only member passing the old picker is a 193-character quote"
+ },
+ {
+  "cid": "edf65020",
+  "id": "edf65020-6783-4cb0-b4a2-237151aa98de",
+  "stored": "Numan Kurtulmuş: Önümüzdeki günlerde süreci kontrol ve takip edecek bir izleme komisyonunu kuracağız",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "TBMM Başkanı Kurtulmuş’tan \"Terörsüz Türkiye\" Vurgusu: TBMM Bünyesinde İzleme Komisyonu Kuruluyor",
+   "Numan Kurtulmuş: Önümüzdeki günlerde bir izleme komisyonunu kuracağız",
+   "TBMM Başkanı Kurtulmuş'tan 'Terörsüz Türkiye' mesajı: Meclis'te izleme komisyonu kurulacak"
+  ],
+  "why": "stale stored title; the first pick is a framed 'TBMM Başkanı Kurtulmuş'tan ... mesajı' title"
+ },
+ {
+  "cid": "04d5f3a4",
+  "id": "04d5f3a4-2742-4ebf-aa59-39f3ce27faa5",
+  "stored": "Erdoğan Azerbaycan semalarında Aliyev'in Zafer Günü'nü kutladı",
+  "model": "extractive-v6",
+  "article_count": 14,
+  "titles": [
+   "Erdoğan'dan Aliyev'e havada telsizden kutlama",
+   "Cumhurbaşkanı Erdoğan’dan İlham Aliyev'e gökyüzünde dikkat çeken mesaj!",
+   "Erdoğan, Azerbaycan hava sahasından geçerken özel mesaj iletti",
+   "Cumhurbaşkanı Erdoğan'dan gökyüzünde dikkat çeken mesaj! Azerbaycan halkına ve Aliyev'e seslendi",
+   "Erdoğan, Azerbaycan hava sahasından geçerken özel mesaj iletti",
+   "Erdoğan'dan Azerbaycan semalarında Aliyev'e sürpriz mesaj: Pilot aracılığıyla iletti",
+   "Cumhurbaşkanı Erdoğan'dan Azerbaycan'a anlamlı tebrik",
+   "Cumhurbaşkanı Erdoğan'dan Azerbaycan Semalarında Aliyev'e Telsiz Mesajı",
+   "Başkan Erdoğan, Aliyev ve Azerbaycan halkının Zafer Günü'nü tebrik etti",
+   "Cumhurbaşkanı Erdoğan’dan Azerbaycan semalarında Aliyev’e özel mesaj!",
+   "Cumhurbaşkanı Erdoğan'dan Azerbaycan hava sahasındayken anlamlı tebrik",
+   "Cumhurbaşkanı Erdoğan telsizle Aliyev'e seslendi",
+   "Başkan Erdoğan, Azerbaycan hava sahasından geçerken telsizle Aliyev'e seslendi! 8 Kasım Zafer Günü'nü kutladı",
+   "Kore yolunda Gardaş'a sürpriz! Başkan Erdoğan Aliyev'i Azerbaycan semalarından tebrik etti"
+  ],
+  "why": "stale stored title; the first pick is a Title Case line"
+ },
+ {
+  "cid": "9ef524ec",
+  "id": "9ef524ec-7f36-4672-bbcf-3af7ede29d46",
+  "stored": "Bolu Dağı Tüneli'nde TIR'ın çarptığı otomobil takla attı, 4 kişi yaralandı",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Bolu Dağı Tüneli’nde dehşet anları kamerada! Çarptığı otomobil takla attı, TIR durmadı",
+   "Bolu Dağı Tüneli’nde dehşet anları kamerada! Çarptığı otomobil takla attı, TIR durmadı"
+  ],
+  "why": "stale stored title; the first pick gains a loaded word ('dehşet')"
+ },
+ {
+  "cid": "8ea4ca14",
+  "id": "8ea4ca14-2461-4c43-9092-1191c14e8ab2",
+  "stored": "Giza'da tır ile yolcu minibüsü çarpıştı, ilk belirlemelere göre 10 ölü, 24 yaralı",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Mısır'da korkunç kaza! Minibüs ile tır çarpıştı: 10 ölü, 24 yaralı",
+   "Mısır'da korkunç kaza! Minibüs ile tır çarpıştı: 10 ölü, 24 yaralı"
+  ],
+  "why": "stale stored title; the first pick gains a loaded word ('korkunç')"
+ },
+ {
+  "cid": "2ecf8af6",
+  "id": "2ecf8af6-8c5e-4176-90e2-a2d62f486710",
+  "stored": "Mersin merkezli 6 ilde 'mumya ceset' cinayetinde 6 şüpheli gözaltına alındı",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Mersin'de 19 yıllık \"Mumya ceset\" dehşeti! Kiracı betonu kırınca ortaya çıktı, 6 şüpheli yakalandı",
+   "Mersin'de 19 yıllık \"Mumya ceset\" dehşeti! Kiracı betonu kırınca ortaya çıktı, 6 şüpheli yakalandı"
+  ],
+  "why": "stale stored title; the first pick gains a loaded word ('dehşeti')"
+ },
+ {
+  "cid": "7f472cf5",
+  "id": "7f472cf5-52bb-440f-b377-d230966b349b",
+  "stored": "Bakan Kurum ile Mansur Yavaş görüştü",
+  "model": "extractive-v6",
+  "article_count": 41,
+  "titles": [
+   "Mansur Yavaş, Murat Kurum'u ziyaret etti: \"Daha önce Sayın Cumhurbaşkanı'na sunduğumuz konuları görüştük\"",
+   "Murat Kurum ile Mansur Yavaş arasında kritik görüşme!",
+   "Murat Kurum, Mansur Yavaş ile görüştü: “Ortak akılla çalışmaya devam edeceğiz”",
+   "Bakan Kurum, Mansur Yavaş'la görüştü! Cumhurbaşkanı Erdoğan detayı...",
+   "Mansur Yavaş Bakan Murat Kurum'la görüştü",
+   "Bakan Kurum, Ankara Büyükşehir Belediye Başkanı Yavaş'ı kabul etti",
+   "Mansur Yavaş ile Murat Kurum bir araya geldi: Görüşmenin gündemi belli oldu",
+   "Başkentte Kritik Görüşme! Mansur Yavaş ve Murat Kurum Bir Araya Geldi",
+   "Bakan Kurum, Ankara Büyükşehir Belediye Başkanı Mansur Yavaş’ı kabul etti",
+   "En son Cemil Tugay ziyaret etmişti! Bakan Murat Kurum, Mansur Yavaş’ı kabul etti",
+   "Murat Kurum ile Mansur Yavaş bir araya geldi",
+   "BAKAN KURUM, YAVAŞ'LA GÖRÜŞTÜ",
+   "Başkentte iş birliği mesajı: Bakan Kurum ve Mansur Yavaş bir araya geldi",
+   "Mansur Yavaş’tan Bakan Murat Kurum’a ziyaret",
+   "Bakan Murat Kurum ile Mansur Yavaş Bakanlıkta Bir Araya Geldi",
+   "Yavaş'tan Kurum'a ziyaret",
+   "Başkentte Kritik Zirve: Bakan Kurum ile Bağımsız Başkan Yavaş’tan ‘Ortak Akıl’ Mesaisi",
+   "Bakan Murat Kurum ABB Başkanı Mansur Yavaş'ı kabul etti",
+   "Yavaş, Kurum'la 'Erdoğan'a sunduğu konuları' görüştü",
+   "Bakan Kurum, ABB Başkanı Mansur Yavaş ile görüştü",
+   "Bakan Kurum ve Mansur Yavaş bir araya geldi: \"Ankara’mız için ortak akılla çalışmaya devam edeceğiz\"",
+   "Mansur Yavaş ve Murat Kurum bir araya geldi",
+   "Bakan Kurum, Mansur Yavaş'ı kabul etti",
+   "Bakanlıkta bir araya geldiler! Mansur Yavaş ve Murat Kurum görüştü",
+   "Bakan Kurum, Mansur Yavaş ile görüştü",
+   "Bakan Kurum Ankara Büyükşehir Belediye Başkanı Mansur Yavaş’ı kabul etti",
+   "Çevre Bakanı Kurum, ABB Başkanı Yavaş'ı kabul etti, Ankara'nın ihtiyaçları ele alındı",
+   "Bakan Murat Kurum, Mansur Yavaş’ı kabul etti: Ankara için ortak akılla çalışmaya devam edeceğiz",
+   "Bakan Kurum, Ankara Büyükşehir Belediye Başkanı Mansur Yavaş’ı kabul etti: 'Ortak akılla çalışmaya devam'",
+   "Ankara için ortak akıl buluşması! Bakan Kurum, Mansur Yavaş'ı kabul etti",
+   "Çevre Bakanı Murat Kurum ile ABB Başkanı Mansur Yavaş bir araya geldi",
+   "Bakan Kurum, Mansur Yavaş'ı kabul etti: Ortak akılla çalışmaya devam edeceğiz",
+   "Mansur Yavaş ve Murat Kurum bu fotoğraf çekilirken ne konuştu?",
+   "SON DAKİKA: Bakan Kurum, Mansur Yavaş ile görüştü",
+   "Bakan Kurum ve Mansur Yavaş bir araya geldi",
+   "Murat Kurum ile bir araya geldi: Mansur Yavaş görüşmenin detaylarını açıkladı",
+   "Başkentte hareketli dakikalar! Mansur Yavaş ile Bakan Murat Kurum bir araya geldi: İşte kulisleri sallayan görüşmenin perde arkası",
+   "Bakan Kurum, Ankara Büyükşehir Belediye Başkanı Mansur Yavaş’ı kabul etti",
+   "Bakan Kurum, Ankara Büyükşehir Belediye Başkanı Yavaş'ı kabul etti",
+   "SON DAKİKA! Bakan Kurum, Mansur Yavaş'ı kabul etti",
+   "Mansur Yavaş ve Murat Kurum bakanlıkta görüştü"
+  ],
+  "why": "stale stored title; the first pick is Title Case"
+ },
+ {
+  "cid": "d49f7016",
+  "id": "d49f7016-6a95-46ca-a612-c6162be2960c",
+  "stored": "ABD ara seçimlerinde ilk sonuçlar belli oldu: Donald Trump'a ağır darbe",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Dünya için kritik seçim",
+   "Son dakika... ABD ara seçimlerinde tarihe geçen sonuçlar: 'Dönüm noktası'"
+  ],
+  "why": "stale stored title; the first pick is a framed fragment"
+ },
+ {
+  "cid": "74db6582",
+  "id": "74db6582-627d-4728-a8cc-cfdf37871682",
+  "stored": "İstanbul Maltepe'de çöken Kardeşler Apartmanı hak sahiplerine konutlar hazırlandı",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Bakan Kurum: Onu istemeyen; TOKİ ile evlerini yerinde dönüştürerek yeni yuvalarına sahip olacak",
+   "Maltepe'de çöken Kardeşler Apartmanı'nın hak sahiplerine yeni konut! Anahtarlar yarın teslim edilmeye başlanacak",
+   "Maltepe'de çöken Kardeşler Apartmanı'nın yerine yeni yuvalar hazır! 20 günde konut müjdesi"
+  ],
+  "why": "stale stored title; the first pick is a fragment"
+ },
+ {
+  "cid": "31fde7d7",
+  "id": "31fde7d7-548c-42b2-8f5e-7d293510f329",
+  "stored": "Denizli'de çöp kamyonu sürücüsü, sıkışan temizlikçinin ölümü üzerine gözaltına alındı",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Denizli'de direk ile çöp kamyonu arasına sıkışan temizlik işçisi hayatını kaybetti",
+   "Denizli'de direk ile çöp kamyonu arasına sıkışan temizlik işçisi hayatını kaybetti"
+  ],
+  "why": "workplace death: stored detention claim, both members now read 'hayatını kaybetti'"
+ },
+ {
+  "cid": "620362a3",
+  "id": "620362a3-7e0c-4279-b77b-35cf4792c5af",
+  "stored": "Bahçelievler'de inşaat kazısında göçük: 2 kişi toprak altında kaldı",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "Son dakika! İstanbul'da inşaatta göçük: 2 işçi toprak altında",
+   "Son Dakika: Bahçelievler'de göçük! İşçinin cansız bedenine ulaşıldı",
+   "Bahçelievler'deki inşaat göçüğünde acı haber: Toprak altında kalan işçi hayatını kaybetti",
+   "Bahçelievler'de inşaatta toprak kayması! Göçük altında kalan 1 işçi hayatını kaybetti"
+  ],
+  "why": "stored rescue claim, members now report a death"
+ },
+ {
+  "cid": "5893d4e5",
+  "id": "5893d4e5-813c-463f-978e-bc4c36e3a434",
+  "stored": "İBB davası 104. gün: Gizli tanıklar söz alacak",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "İBB davasında 3. duruşmada 3. gün: Gizli tanıklar dinleniyor",
+   "İBB davası 104. gün: Gizli tanıklar konuştu: 'Gördüm' yok, 'duydum' var",
+   "İBB davasında üçüncü celsede gizli tanık Gürgen konuştu: \"Gördüğüm yok ama konuşulanlar hep öyleydi başkanım\"",
+   "İBB davasında üçüncü celsenin üçüncü günü başlıyor: Gizli tanıkların dinlenmesi bekleniyor"
+  ],
+  "why": "stale stored day count, members carry another count"
+ },
+ {
+  "cid": "5dec458d",
+  "id": "5dec458d-fb78-4382-bf26-417523d17408",
+  "stored": "Ticaret Bakanlığı ilanda 6 bin TL isteyen satıcıya 1 milyon 83 bin 706 TL ceza verdi",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "Yedek parça ilanında fiyat tuzağı! 111 TL'ye koydu, 6 bin TL istedi: Bakanlıktan milyonluk ceza",
+   "Vatandaşı böyle kandıracaktı! İlanda 111 TL yazıp 6 bin istedi: Bakanlıktan fiyat oyununa milyonluk ceza",
+   "111 liralık yedek parçaya 6 bin lira istedi... Ticaret Bakanlığı'ndan yanıltıcı ilana rekor ceza",
+   "Ticaret Bakanlığı ilanda 6 bin TL isteyen satıcıya 1 milyon 83 bin 706 TL ceza verdi."
+  ],
+  "why": "stored '1 milyon 83 bin 706 TL' is a fine figure, the best member says 'rekor ceza'"
+ },
+ {
+  "cid": "494bafc1",
+  "id": "494bafc1-095a-467e-83d0-6fc28c0a8769",
+  "stored": "Bakanlıktan yanıltıcı ilan veren emlak şirketine 28 bin lira ceza",
+  "model": "extractive-v6",
+  "article_count": 6,
+  "titles": [
+   "2 milyon TL'lik ev ilanında peşinat oyunu: Bakanlıktan emlak şirketine ceza",
+   "2 milyon TL'lik satılık ev ilanı cezasız kalmadı! İşte kesilen ceza",
+   "2 milyon liralık daire ilanı için emlak şirketine ceza kesildi",
+   "Bakanlıktan yanıltıcı ilan veren emlak şirketine 28 bin lira ceza",
+   "Bu ilanın bedeli ağır oldu! Bakanlıktan emlak şirketine 28 bin 620 TL ceza",
+   "Bu ilanın bedeli ağır oldu! Bakanlıktan emlak şirketine 28 bin 620 TL ceza"
+  ],
+  "why": "stored '28 bin lira' vs a member '2 milyon TL'lik' story"
+ },
+ {
+  "cid": "d69feb0f",
+  "id": "d69feb0f-e12c-45b6-b302-4a16afeb7981",
+  "stored": "Bakan Kurum, Antalya'da COP31 alanında incelemelerde bulundu",
+  "model": "extractive-v4",
+  "article_count": 7,
+  "titles": [
+   "COP31 Zirvesi'nde 26 bin personel görev yapacak",
+   "Bakan Çiftçi: COP31 Zirvesi'nde 26 bin personel görev yapacak",
+   "Antalya'da COP31 için 26 bin kişilik güvenlik ağı oluşturuluyor",
+   "Bakanlar Kurum ve Çiftçi, COP31 alanını yerinde inceledi: \"Ekonomimize 4 milyar dolarlık hareket oluşturacak\"",
+   "Bakan Kurum: COP31, Antalya'da 2 milyar dolarlık doğrudan ekonomik hareketlilik oluşturacak",
+   "Bakan Kurum, Antalya'da COP31 alanında incelemelerde bulundu:",
+   "Bakan Kurum: COP31’de 1 milyonu aşkın ziyaretçi, çarpan etkisiyle 3-4 milyar ekonomik hareketlilik bekliyoruz"
+  ],
+  "why": "stored 'COP31' is a name, not the number 31"
+ },
+ {
+  "cid": "2441793c",
+  "id": "2441793c-279c-4762-a92d-53219b8f7ce1",
+  "stored": "İsmail Saymaz ve Murat Ağırel'e 14'er yıl hapis talebi",
+  "model": "extractive-v6",
+  "article_count": 6,
+  "titles": [
+   "İsmail Saymaz ve Murat Ağırel hakkında 14 yıl 10 ay hapis cezası istendi",
+   "Bolat ve bakanlara fon iftirasına iddianame! Ağırel ve Saymaz için 14 yıl 10 ay hapis talebi",
+   "İsmail Saymaz ve Murat Ağırel'e 14 yıl 10 ay hapis cezası istendi",
+   "Son dakika... Gazeteciler Murat Ağırel ve İsmail Saymaz hakkında 14 yıl 10’ar aya kadar hapis istemi",
+   "İsmail Saymaz ve Murat Ağırel'e 14'er yıl hapis talebi",
+   "Murat Ağırel ve İsmail Saymaz’a “fon” iddianamesi: Bakanın şikâyeti sonrası dava açıldı"
+  ],
+  "why": "stored \"14'er yıl\" cut the months, a member restates '14 yıl 10 ay'"
+ },
+ {
+  "cid": "e67ede66",
+  "id": "e67ede66-75d7-4250-b3d9-478abe1d8206",
+  "stored": "Bakırköy Belediyesi soruşturmasında 40 kişi tutuklandı",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı",
+   "Bakırköy Belediyesine Yönelik Yolsuzluk Soruşturmasında 39 Tutuklama",
+   "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+   "Bakırköy Belediyesine yönelik soruşturmada 39 şüpheli tutuklandı",
+   "Bakırköy Belediyesine yönelik soruşturmada 39 şüpheli tutuklandı",
+   "Bakırköy Belediyesi operasyonu: 39 kişi tutuklandı",
+   "Bakırköy Belediyesi soruşturmasında 40 kişi tutuklandı",
+   "Bakırköy operasyonu... 63 şüpheli adliyede"
+  ],
+  "why": "stored 40 is one outlet's figure, the members say 39 (normal margin path)"
+ },
+ {
+  "cid": "555510ca",
+  "id": "555510ca-f84a-4776-9382-6d3ba1322a6c",
+  "stored": "Bakırköy Belediyesi’ne operasyon: Başkan yardımcıları dahil 56 gözaltı",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Bakırköy Belediyesi’ne operasyon: Başkan yardımcıları dahil 56 gözaltı",
+   "Bakırköy Belediyesi'ne operasyon: 5’i belediye başkan yardımcısı 37 gözaltı!",
+   "Bakırköy Belediyesine operasyon: 5 başkan yardımcısı dahil 37 kişi gözaltına alındı"
+  ],
+  "why": "stored 56 against 37 in the members (normal margin path)"
+ },
+ {
+  "cid": "d5a6d9ab",
+  "id": "d5a6d9ab-f01f-456b-bc82-324fb8f80433",
+  "stored": "Yavuzyılmaz, ortak alan elektriğine 2027'de yüzde 82-104 zam yapılacağını öne sürdü",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "YENİ Partili Yavuzyılmaz'dan apartman aidatlarına zam uyarısı: Gizli elektrik zammı geliyor",
+   "Milletvekili Deniz Yavuzyılmaz'dan zam iddiası \"Apartman ve sitelerin ortak alan elektrik faturalarına 104'e varan zam\"",
+   "Yeni Partili Yavuzyılmaz'dan aidatlara zam uyarısı: Elektrik faturaları iki katına çıkabilir",
+   "Yavuzyılmaz’dan aidat uyarısı: Ortak elektriğe yüzde 104 zam iddiası",
+   "YENİ Partili Yavuzyılmaz duyurdu: Apartman aidatları gizli elektrik zammı yüzünden artabilir",
+   "Yeni Partili Deniz Yavuzyılmaz'dan gizli elektrik zammı uyarısı: Apartman aidatlarına zam gelebilir",
+   "Yavuzyılmaz, ortak alan elektriğine 2027'de yüzde 82-104 zam yapılacağını öne sürdü",
+   "Apartman aidatlarına elektrik zammı iddiası! Yavuzyılmaz: Ortak alan faturaları 2027'de yüzde 104'e kadar artacak"
+  ],
+  "why": "stored title already attributes ('öne sürdü'); the wide hedge vocabulary must not swap it"
+ },
+ {
+  "cid": "8ea9e45f",
+  "id": "8ea9e45f-fe59-418f-9c3d-7d6cf4c9f44c",
+  "stored": "ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "ABD’de seçim sonrası yeni beklenti: Fed’in faiz hesabı değişebilir",
+   "ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi",
+   "ABD'deki ara seçim sonuçlarıyla Fed'e ilişkin faiz artırım beklentilerinin azalması bekleniyor"
+  ],
+  "why": "two of three members hedge ('bekleniyor', 'değişebilir'); the stored title states it as done"
+ },
+ {
+  "cid": "ad76f79a",
+  "id": "ad76f79a-3cf0-4468-bb0e-d02edacd8ff9",
+  "stored": "İzmir'de CHP'den AK Parti'ye geçişin perde arkası. Tugay'dan Erdoğan'a övgü dolu sözler",
+  "model": "extractive-v4",
+  "article_count": 6,
+  "titles": [
+   "Cemil Tugay'dan sürpriz Erdoğan açıklaması! İzmirlileri sevindirecek karar! Büyük indirim",
+   "Cemil Tugay, İzmir'i bekleyen hizmetleri anlattı",
+   "İzmir'de CHP'den AK Parti'ye geçişin perde arkası! Tugay'dan Erdoğan'a övgü dolu sözler",
+   "Cemil Tugay AK Parti'ye geçiş sürecini anlattı! Başkan Erdoğan'dan övgüyle bahsetti: Son 25 yıla damga vuran güçlü siyasetçi",
+   "Cemil Tugay'dan AK Parti ve Başkan Erdoğan'a övgü: 100-200 yıl sonra da hizmetleriyle anılacak!",
+   "Cemil Tugay'dan Başkan Erdoğan'a övgü dolu sözler! \"Türkiye'nin yetiştirdiği en güçlü siyasetçi\""
+  ],
+  "why": "stored title is a member and central; the loaded rule would swap it for a 1-of-6 angle"
+ },
+ {
+  "cid": "5f761c9a",
+  "id": "5f761c9a-7854-4ffc-9ff1-03a8a9bd2080",
+  "stored": "Netanyahu'ya kendi ülkesinden darbe: Asıl düşmanımız o ve çetesi",
+  "model": "extractive-v6",
+  "article_count": 5,
+  "titles": [
+   "Ofer Cassif Eisenkot hükümeti için neden destek veriyor?",
+   "Netanyahu'yu devirmek için kritik adım! Muhalefetten Eisenkot kararı",
+   "Netanyahu'ya kendi ülkesinden darbe: Asıl düşmanımız o ve çetesi",
+   "İsrailli milletvekili, \"asıl düşmanımız Netanyahu ve çetesi\" diyerek Eisenkot'a hükümet kurma çağrısı yaptı",
+   "Ofer Cassif, Eisenkot'u hükümet kurması için Cumhurbaşkanına önereceklerini söyledi"
+  ],
+  "why": "loaded stored title, the swap target is at least as central"
+ },
+ {
+  "cid": "29c38a16",
+  "id": "29c38a16-a929-4ea7-868d-82bebcb24545",
+  "stored": "İsrail'de Netanyahu'ya Ağır Darbe: Müttefiki Desteği Çekti",
+  "model": "extractive-v6",
+  "article_count": 7,
+  "titles": [
+   "Ortak Liste, Eisenkot’un hükümeti kurmakla görevlendirilmesini önerdi",
+   "İsrail vatandaşı Filistinlileri temsil eden Ortak Liste, Eisenkot'un hükümet kurmakla görevlendirilmesini önerdi",
+   "İsrail'de hükümet kurma çabaları: Arap partileri Eisenkot'a destek verecek",
+   "İsrail'de Arap partileri kilidi açtı: Ortak Liste'den Eisenkot'a destek",
+   "İsrail'de Arap partilerden Eisenkot'a hükümeti kurma desteği",
+   "İsrail'de Netanyahu'ya Ağır Darbe: Müttefiki Desteği Çekti",
+   "SON KALESİ GİTTİ"
+  ],
+  "why": "loaded stored title ('Ağır Darbe'), the swap target is at least as central"
+ },
+ {
+  "cid": "020a0a63",
+  "id": "020a0a63-c5de-49d5-9cf6-78369a35bd5c",
+  "stored": "Ataşehir CHP'de istifa depremi. İki meclis üyesi partiden ayrıldı",
+  "model": "extractive-v6",
+  "article_count": 6,
+  "titles": [
+   "Ataşehir Belediye Meclisi'nde istifa deprem",
+   "Ataşehir Belediyesinde 2 meclis üyesi CHP'den istifa etti",
+   "CHP ile bağlarını kopardılar! İki meclis üyesi istifa etti",
+   "Ataşehir Belediye Meclisinde istifa depremi! Müslüm Kocaoğlu CHP'den ayrılarak DEM Parti'ye geçti",
+   "Ataşehir CHP'de istifa depremi! İki meclis üyesi partiden ayrıldı",
+   "Ataşehir'de iki CHP'li meclis üyesi istifa etti, Kocaoğlu DEM Parti'ye geçti"
+  ],
+  "why": "loaded stored title ('istifa depremi'), the swap target is more central"
+ },
+ {
+  "cid": "671bc01e",
+  "id": "671bc01e-5742-4b32-8cb0-d08babb0d6c0",
+  "stored": "İBB davası çöküyor. 2 gizli tanık: Görmedim, duydum, rüşvet bağı kurdum",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "İBB davası çöküyor… 2 gizli tanık: Görmedim, duydum, rüşvet bağı kurdum",
+   "İBB davasında dinlenen 2 gizli tanık: Görmedim, duydum rüşvet bağı kurdum"
+  ],
+  "why": "loaded stored title ('çöküyor'), the swap target is as central"
+ },
+ {
+  "cid": "ce1fefd7",
+  "id": "ce1fefd7-1243-4724-bf58-7eaa87929a23",
+  "stored": "CHP İstanbul İl Yönetimi belli oldu. İşte Mehmet Ali Yüksel’in çalışma kadrosu",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Butlan CHP'sinin İstanbul İl Yönetimi belli oldu: Kendisine sorulmadan listeye adı yazılanlar var!",
+   "CHP İstanbul İl Yönetimi belli oldu! İşte Mehmet Ali Yüksel’in çalışma kadrosu"
+  ],
+  "why": "the swap target says 'Butlan CHP'si', a partisan label"
+ },
+ {
+  "cid": "bb37c171",
+  "id": "bb37c171-2aad-4b50-859d-4752ec7774d1",
+  "stored": "Korkunç kaza. Atın kopan bacağı otomobile saplandı",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Korkunç kaza! Atın kopan bacağı otomobile saplandı",
+   "Arnavutköy'de feci kaza! Atın bacağı otomobile saplandı",
+   "Korkunç kazada akılalmaz olay! Atın kopan bacağı araca saplandı"
+  ],
+  "why": "'Korkunç kaza' against 'feci kaza' (a lateral swap)"
+ },
+ {
+  "cid": "6900ace0",
+  "id": "6900ace0-6264-4c6f-b8b8-81415ad18f1e",
+  "stored": "8 yıl sonra görkemli karşılama: Cumhurbaşkanı Erdoğan Seul'de",
+  "model": "extractive-v6",
+  "article_count": 5,
+  "titles": [
+   "Seul'de resmi karşılama: Erdoğan, Lee Jae-myung tarafından sarayda kabul edildi",
+   "8 yıl sonra Seul'de görkemli karşılama! Cumhurbaşkanı Erdoğan şaşkınlığını gizleyemedi",
+   "Seul'de 8 yıl sonra tarihi karşılama: Cumhurbaşkanı Erdoğan Güney Kore'de",
+   "8 yıl sonra görkemli karşılama: Cumhurbaşkanı Erdoğan Seul'de",
+   "Yeni anlaşmalar masada! Cumhurbaşkanı Erdoğan'a Seul'de görkemli karşılama"
+  ],
+  "why": "'görkemli karşılama' against 'tarihi karşılama' (a lateral swap)"
+ },
+ {
+  "cid": "f2b6d1ea",
+  "id": "f2b6d1ea-b41b-4c44-bf5a-3f94b4589c5f",
+  "stored": "CHP'den 'Yeni Yol'a grup desteği: 'Bir milletvekili daha geçecek'",
+  "model": "extractive-v6",
+  "article_count": 11,
+  "titles": [
+   "CHP'den Yeni Yol'a milletvekili transferi iddiası: Kılıçdaroğlu detayı dikkat çekti",
+   "Yeni Yol grubu için butlan CHP'sinden transfer iddiası: 'Kılıçdaroğlu çok sesliliğe inanıyor'",
+   "CHP'den Yeni Yol'a vekil transferi yapılacağı iddiası: \"Kılıçdaroğlu çok sesliliğe inanıyor\"",
+   "Yeni Yol'a CHP'den milletvekili desteği gündemde",
+   "CHP'den 'Yeni Yol'a grup desteği: 'Bir milletvekili daha geçecek'",
+   "Yeni Yol bu kez nasıl grup kuracak: Biri eski iki formül var",
+   "TBMM'de ‘Yeni Yol’ arayışı! Kılıçdaroğlu devreye girdi",
+   "Yeni Yol'un grup statüsü tehlikede: CHP'den bir milletvekili daha geçebilir",
+   "Bir vekil partisinden istifa etti, grup düştü! Kılıçdaroğlu ve Yeniden Refah iddiası",
+   "Kılıçdaroğlu'ndan hamle! Yeni Yol'un grup formülü belli oluyor",
+   "Kılıçdaroğlu'ndan Yeni Yol'a can suyu"
+  ],
+  "why": "the swap target says 'detayı dikkat çekti'"
+ },
+ {
+  "cid": "8efc4f4a",
+  "id": "8efc4f4a-0c9f-4072-8ea8-cccfa5c21a48",
+  "stored": "Hasat sırasında ortaya çıktı: Konya'da tarlada 10 metre çaplı obruk",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Konya’da mısır tarlasında oluştu, 8 metre derinliğindeki obruk böyle görüntülendi",
+   "Hasat sırasında ortaya çıktı: Konya'da tarlada 10 metre çaplı obruk",
+   "Konya Karapınar'da mısır tarlasında 8 metrelik obruk! Biçerdöver operatörleri son anda fark etti"
+  ],
+  "why": "the swap target says 'böyle görüntülendi'"
+ },
+ {
+  "cid": "2594cfb8",
+  "id": "2594cfb8-6f0e-4ff9-b242-ef927c559b99",
+  "stored": "Nev son yolculuğuna uğurlanıyor",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Şarkıcı Nevzat Doğansoy son yolculuğuna uğurlandı: Cenaze töreninde konuşan acılı ağabeyi gözyaşlarına boğuldu",
+   "Nev son yolculuğuna uğurlandı"
+  ],
+  "why": "the swap target says '... gözyaşlarına boğuldu'"
+ },
+ {
+  "cid": "57c73dc7",
+  "id": "57c73dc7-bfc5-4025-9258-846a5344b5ea",
+  "stored": "İmamoğlu davasında ruhsat için çek iddiası: Vermeseydik ruhsat alamazdık",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Nişantaşı Koru için 5 çek iddiası! Tanık anlattı: Vermeseydik ruhsat alamazdık",
+   "İmamoğlu davasında rüşvet kıskacı: Ruhsat için milyonluk çekleri vermek zorunda kaldık"
+  ],
+  "why": "the swap target says 'rüşvet kıskacı'"
+ },
+ {
+  "cid": "59bcbd7c",
+  "id": "59bcbd7c-9d78-4682-beba-27de8b97ebb6",
+  "stored": "İsrail’de Netanyahu çoğunluğu kaybetti: Arap partileri hükümetin anahtarı oldu",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Netanyahu'ya sandık darbesi! Likud birinci ancak çoğunluk muhalefette... Arap partilerden tarihi başarı",
+   "İsrail’de sandıktan düğüm çıktı: Netanyahu hükümet kuramıyor, muhalafet Arap partilere kapalı"
+  ],
+  "why": "an idiom ('düğüm çıktı') plus the typo 'muhalafet' in the swap target"
+ },
+ {
+  "cid": "15b4041e",
+  "id": "15b4041e-acb1-4b8a-8abb-7efdc2a9881f",
+  "stored": "Sakarya'da bürokrasi ipleri koptu. AKP'li Belediye Başkanı'ndan Vali'ye zehir zemberek açıklama",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "AK Partili başkan ‘bürokrasinin sorumsuzluğu’nu topa tuttu: Bakan gelecekti, vali engelledi",
+   "AK Partili Karasu Belediye Başkanı ve Vali arasında gerginlik: Bıçak kemiğe dayandı",
+   "Sakarya'da bürokrasi ipleri koptu... AKP'li Belediye Başkanı'ndan Vali'ye zehir zemberek açıklama",
+   "AKP’li başkan valiyi topa tuttu! Zehir zemberek sözler"
+  ],
+  "why": "'zehir zemberek' against 'topa tuttu' (a lateral swap)"
+ }
+]

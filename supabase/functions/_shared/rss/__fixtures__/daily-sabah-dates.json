@@ -1,0 +1,70 @@
+{
+  "source": "daily-sabah",
+  "feedUrl": "https://www.dailysabah.com/rss/home-page",
+  "fetchedAt": "2026-11-05T17:29:30Z",
+  "note": "Raw <pubDate> strings exactly as the ingest parser exposes them (the feed carries no dc:date, so isoDate is absent and pubDate is the field normalize.ts reads). One read-only GET on 2026-11-05. ingestedAt is public.articles.created_at of the stored row (UTC, read-only query): the moment ingest first saw the item, i.e. a few minutes after it was published. For every secondsPrecision item the wall clock in pubDate read as UTC lands 0-10 min before ingestedAt, i.e. the \"+0300\" label is false and the clock is UTC; for every minutePrecision item (\":00\") the +0300 label is honest.",
+  "secondsPrecision": [
+    {
+      "title": "Istanbul summit aims to boost co-op in Turkic cinema",
+      "link": "https://www.dailysabah.com/arts/cinema/istanbul-summit-aims-to-boost-co-op-in-turkic-cinema",
+      "pubDate": "Thu, 05 Nov 2026 13:54:18 +0300",
+      "ingestedAt": "2026-11-05T13:57:06.295Z"
+    },
+    {
+      "title": "When sun clocks out early, your mood may follow",
+      "link": "https://www.dailysabah.com/life/health/when-sun-clocks-out-early-your-mood-may-follow",
+      "pubDate": "Thu, 05 Nov 2026 13:38:26 +0300",
+      "ingestedAt": "2026-11-05T13:39:06.665Z"
+    },
+    {
+      "title": "State, public united in Türkiye's fight against terrorism: Kurtulmuş",
+      "link": "https://www.dailysabah.com/politics/state-public-united-in-turkiyes-fight-against-terrorism-kurtulmus/news",
+      "pubDate": "Thu, 05 Nov 2026 13:18:51 +0300",
+      "ingestedAt": "2026-11-05T13:21:05.117Z"
+    },
+    {
+      "title": "Alexander the Great biography wins prestigious Baillie Gifford Prize",
+      "link": "https://www.dailysabah.com/arts/alexander-the-great-biography-wins-prestigious-baillie-gifford-prize/news",
+      "pubDate": "Thu, 05 Nov 2026 13:10:14 +0300",
+      "ingestedAt": "2026-11-05T13:12:06.246Z"
+    },
+    {
+      "title": "Fiery finale for NASA's Swift telescope after 2 decades in space",
+      "link": "https://www.dailysabah.com/life/science/fiery-finale-for-nasas-swift-telescope-after-2-decades-in-space",
+      "pubDate": "Thu, 05 Nov 2026 12:36:36 +0300",
+      "ingestedAt": "2026-11-05T12:39:04.596Z"
+    }
+  ],
+  "minutePrecision": [
+    {
+      "title": "Rubio may quit as US top diplomat ahead of 2028 bid: Report",
+      "link": "https://www.dailysabah.com/world/americas/rubio-may-quit-as-us-top-diplomat-ahead-of-2028-bid-report",
+      "pubDate": "Thu, 05 Nov 2026 20:04:00 +0300",
+      "ingestedAt": "2026-11-05T17:27:05.474Z"
+    },
+    {
+      "title": "Türkiye's FM Fidan meets Croatian parliament speaker in Ankara",
+      "link": "https://www.dailysabah.com/politics/diplomacy/turkiyes-fm-fidan-meets-croatian-parliament-speaker-in-ankara",
+      "pubDate": "Thu, 05 Nov 2026 19:45:00 +0300",
+      "ingestedAt": "2026-11-05T17:15:08.929Z"
+    },
+    {
+      "title": "Paraguay's President Pena resigns amid digital banking crisis",
+      "link": "https://www.dailysabah.com/world/americas/paraguays-president-pena-resigns-amid-digital-banking-crisis",
+      "pubDate": "Thu, 05 Nov 2026 19:34:00 +0300",
+      "ingestedAt": "2026-11-05T16:45:14.534Z"
+    },
+    {
+      "title": "Türkiye, Qatar explore deeper defense ties, joint production",
+      "link": "https://www.dailysabah.com/business/defense/turkiye-qatar-explore-deeper-defense-ties-joint-production",
+      "pubDate": "Thu, 05 Nov 2026 17:39:00 +0300",
+      "ingestedAt": "2026-11-05T15:09:05.123Z"
+    },
+    {
+      "title": "Bingo, Care Bears, Pokémon cards enter Toy Hall of Fame",
+      "link": "https://www.dailysabah.com/life/bingo-care-bears-pokemon-cards-enter-toy-hall-of-fame/news",
+      "pubDate": "Thu, 05 Nov 2026 17:33:00 +0300",
+      "ingestedAt": "2026-11-05T14:39:05.276Z"
+    }
+  ]
+}

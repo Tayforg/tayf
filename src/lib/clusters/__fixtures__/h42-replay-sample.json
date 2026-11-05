@@ -1,0 +1,600 @@
+[
+ {
+  "cid": "e0c9b092",
+  "id": "e0c9b092-e3b2-48e5-b640-eef3d9442b65",
+  "rule": "number",
+  "stored": "Almatı'da 585 kilo kaldıran görme engelli Şehmuz Çevik, 5 altınla dünyanın en iyisi oldu",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "Milli halterci Şehmuz Çevik, dünya şampiyonasında 5 altın kazandı",
+   "Yüzde 90 görme engelli sporcumuz dünya şampiyonu! 5 altın madalya kazandı",
+   "Almatı'da 585 kilo kaldıran görme engelli Şehmuz Çevik, 5 altınla dünyanın en iyisi oldu",
+   "Yüzde 90 görme engelli memur Şehmuz Çevik dünya şampiyonu oldu! 5 altın madalya kazandı"
+  ],
+  "expected": "Almatı'da 585 kilo kaldıran görme engelli Şehmuz Çevik, 5 altınla dünyanın en iyisi oldu",
+  "verdict": "kept",
+  "why": "review editorial-2: the stored '585 kilo ... 5 altın' title keeps two figures the best title does not restate; the number rule no longer fires and the margin keeps it",
+  "first": "Yüzde 90 görme engelli memur Şehmuz Çevik dünya şampiyonu oldu. 5 altın madalya kazandı",
+  "firstVerdict": "lateral"
+ },
+ {
+  "cid": "d5a6d9ab",
+  "id": "d5a6d9ab-f01f-456b-bc82-324fb8f80433",
+  "rule": "defect",
+  "stored": "Yavuzyılmaz, ortak alan elektriğine 2027'de yüzde 82-104 zam yapılacağını öne sürdü",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "YENİ Partili Yavuzyılmaz'dan apartman aidatlarına zam uyarısı: Gizli elektrik zammı geliyor",
+   "Milletvekili Deniz Yavuzyılmaz'dan zam iddiası \"Apartman ve sitelerin ortak alan elektrik faturalarına 104'e varan zam\"",
+   "Yeni Partili Yavuzyılmaz'dan aidatlara zam uyarısı: Elektrik faturaları iki katına çıkabilir",
+   "Yavuzyılmaz’dan aidat uyarısı: Ortak elektriğe yüzde 104 zam iddiası",
+   "YENİ Partili Yavuzyılmaz duyurdu: Apartman aidatları gizli elektrik zammı yüzünden artabilir",
+   "Yeni Partili Deniz Yavuzyılmaz'dan gizli elektrik zammı uyarısı: Apartman aidatlarına zam gelebilir",
+   "Yavuzyılmaz, ortak alan elektriğine 2027'de yüzde 82-104 zam yapılacağını öne sürdü",
+   "Apartman aidatlarına elektrik zammı iddiası! Yavuzyılmaz: Ortak alan faturaları 2027'de yüzde 104'e kadar artacak"
+  ],
+  "expected": "Yavuzyılmaz, ortak alan elektriğine 2027'de yüzde 82-104 zam yapılacağını öne sürdü",
+  "verdict": "kept",
+  "why": "review editorial-3: the stored title already attributes ('öne sürdü'); the wide hedge vocabulary no longer re-ranks the cluster, so the defect path is not reached and the attributed figures stay",
+  "first": "Yeni Partili Deniz Yavuzyılmaz'dan gizli elektrik zammı uyarısı: Apartman aidatlarına zam gelebilir",
+  "firstVerdict": "worse"
+ },
+ {
+  "cid": "020a0a63",
+  "id": "020a0a63-c5de-49d5-9cf6-78369a35bd5c",
+  "rule": "loaded",
+  "stored": "Ataşehir CHP'de istifa depremi. İki meclis üyesi partiden ayrıldı",
+  "model": "extractive-v6",
+  "article_count": 6,
+  "titles": [
+   "Ataşehir Belediye Meclisi'nde istifa deprem",
+   "Ataşehir Belediyesinde 2 meclis üyesi CHP'den istifa etti",
+   "CHP ile bağlarını kopardılar! İki meclis üyesi istifa etti",
+   "Ataşehir Belediye Meclisinde istifa depremi! Müslüm Kocaoğlu CHP'den ayrılarak DEM Parti'ye geçti",
+   "Ataşehir CHP'de istifa depremi! İki meclis üyesi partiden ayrıldı",
+   "Ataşehir'de iki CHP'li meclis üyesi istifa etti, Kocaoğlu DEM Parti'ye geçti"
+  ],
+  "expected": "Ataşehir'de iki CHP'li meclis üyesi istifa etti, Kocaoğlu DEM Parti'ye geçti",
+  "verdict": "better",
+  "why": "\"istifa depremi\" is loaded; the new title reports the resignations"
+ },
+ {
+  "cid": "59bcbd7c",
+  "id": "59bcbd7c-9d78-4682-beba-27de8b97ebb6",
+  "rule": "nonmember",
+  "stored": "İsrail’de Netanyahu çoğunluğu kaybetti: Arap partileri hükümetin anahtarı oldu",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Netanyahu'ya sandık darbesi! Likud birinci ancak çoğunluk muhalefette... Arap partilerden tarihi başarı",
+   "İsrail’de sandıktan düğüm çıktı: Netanyahu hükümet kuramıyor, muhalafet Arap partilere kapalı"
+  ],
+  "expected": "İsrail’de sandıktan düğüm çıktı: Netanyahu hükümet kuramıyor, muhalafet Arap partilere kapalı",
+  "verdict": "worse",
+  "why": "a clean factual title (no member carries it any more) is replaced by an idiom (\"düğüm çıktı\") with a typo (\"muhalafet\")"
+ },
+ {
+  "cid": "7fb6a143",
+  "id": "7fb6a143-2d2c-40ba-b90f-b2dc30c3458c",
+  "rule": "nonmember",
+  "stored": "Fenerbahçe'den İsmail Kartal ayrılığı sonrası son dakika Kuyt açıklaması",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Takım ona emanet! İşte Fenerbahçe'nin geçici hocası",
+   "SON DAKİKA: Fenerbahçe'den açıklama: Yeni teknik direktör belirlenene kadar...",
+   "Fenerbahçe'den teknik direktör açıklaması! İsmail Kartal ayrılığı sonrası Kuyt gelişmesi"
+  ],
+  "expected": "Fenerbahçe'den teknik direktör açıklaması. İsmail Kartal ayrılığı sonrası Kuyt gelişmesi",
+  "verdict": "better",
+  "why": "drops the mid-title \"son dakika\" label"
+ },
+ {
+  "cid": "02405bfe",
+  "id": "02405bfe-e8b6-46e5-8bf8-dd52bb6c379c",
+  "rule": "titleCase",
+  "stored": "Cumhurbaşkanı Erdoğan'ın Azerbaycan Dışişleri Bakanı ile Samimi Sohbeti Gündem Oldu",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "Beştepe'deki zirvede samimi anlar: Erdoğan, Azerbaycanlı bakanla sohbet etti!",
+   "Erdoğan ile Bayramov görüşmesinde dış politika ve iş birliği vurgulandı",
+   "Cumhurbaşkanı Erdoğan ile Azerbaycanlı Bakan Bayramov arasında samimi anlar!",
+   "Erdoğan, Azerbaycan Dışişleri Bakanı Bayramov'u kabul etti",
+   "Cumhurbaşkanı Erdoğan, Azerbaycan Dışişleri Bakanı Bayramov’u kabul etti",
+   "Türkiye ve Azerbaycan arasında ayrılık yok: Başkan Erdoğan ve Ceyhun Bayramov arasında samimi kare!",
+   "Cumhurbaşkanı Erdoğan'ın Azerbaycan Dışişleri Bakanı ile Samimi Sohbeti Gündem Oldu",
+   "Cumhurbaşkanı Erdoğan'dan Azerbaycanlı bakana özel ilgi"
+  ],
+  "expected": "Cumhurbaşkanı Erdoğan, Azerbaycan Dışişleri Bakanı Bayramov’u kabul etti",
+  "verdict": "better",
+  "why": "Title Case clickbait (\"Samimi Sohbeti Gündem Oldu\") becomes a plain report"
+ },
+ {
+  "cid": "9e5b27cb",
+  "id": "9e5b27cb-e8ec-47d3-a705-8aec831431d1",
+  "rule": "loaded",
+  "stored": "Cenazeye giden aile ölümden döndü: Bolu Dağı Tüneli'nde korkunç kaza",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "Bolu Dağı Tüneli’nde dehşet: Çarpıp kaçan tır dört kişiyi yaraladı",
+   "Bolu Dağı Tüneli'nde korkunç kaza: Cenazeye giden aile ölümden döndü!",
+   "Cenazeye giden aile ölümden döndü: Bolu Dağı Tüneli'nde korkunç kaza",
+   "Cenazeye giderken Bolu Dağı tüneli'nde takla attılar, kaçan tır aranıyor"
+  ],
+  "expected": "Cenazeye giden aile ölümden döndü: Bolu Dağı Tüneli'nde korkunç kaza",
+  "verdict": "kept",
+  "why": "review editorial-6: the 'korkunç kaza' title is central (0.505 mean member overlap) and the event title is not (0.321); the loaded rule needs a target at least as central, so the stored title stays (a swap the first version made and judged better, now lost)",
+  "first": "Cenazeye giderken Bolu Dağı tüneli'nde takla attılar, kaçan tır aranıyor",
+  "firstVerdict": "better"
+ },
+ {
+  "cid": "4e63468a",
+  "id": "4e63468a-d543-42b4-9aa9-8777bfb6d8da",
+  "rule": "nonmember",
+  "stored": "YENİ Partili Yavuzyılmaz'dan BYD’ye vergi muafiyeti iddiası: Kamunun kaybı 615 milyon doları aştı",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "Yeni Partili Yavuzyılmaz, BYD’ye verilen teşvikin ardından oluşan kamu zararını açıkladı",
+   "Deniz Yavuzyılmaz'dan BYD iddiası: ‘Yatırım askıya alındı, kamunun vergi kaybı 615 milyon dolar’",
+   "YENİ Parti Milletvekili Yavuzyılmaz'dan BYD hakkında 615 milyon dolarlık vergi kaybı iddiası",
+   "BYD’ye vergi muafiyeti iddiası: Kamunun kaybı 615 milyon doları aştı",
+   "“Vatandaşın hakkı olan 615 milyon doları BYD’den tahsil edin”",
+   "YENİ Partili Yavuzyılmaz'dan BYD hakkında 615 milyon dolarlık vergi kaybı iddiası: İki bakana çağrı yaptı",
+   "Deniz Yavuzyılmaz: BYD'ye tanınan vergi muafiyeti kamuya 615 milyon dolara mal oldu",
+   "Yavuzyılmaz'dan BYD iddiası: 615 milyon dolar vergi kaybı! Fabrika askıda, 59 bin araç satıldı"
+  ],
+  "expected": "YENİ Parti Milletvekili Yavuzyılmaz'dan BYD hakkında 615 milyon dolarlık vergi kaybı iddiası",
+  "verdict": "lateral",
+  "why": "both attributed; the new one gives the office and the amount"
+ },
+ {
+  "cid": "4cc2a30a",
+  "id": "4cc2a30a-53b0-44f7-88ae-83ca172dae92",
+  "rule": "nonmember",
+  "stored": "Fon soruşturmasında eski vekil Ertan Aydın'a tutuklama talebi",
+  "model": "extractive-v6",
+  "article_count": 16,
+  "titles": [
+   "Fon soruşturması kapsamında gözaltına alınmıştı: Eski AKP’li milletvekili Ertan Aydın hakkında tutuklama talebi",
+   "Fon soruşturması: Eski başbakan danışmanı Ertan Aydın hakkında tutuklama talebi",
+   "Eski Başbakan Danışmanı Ertan Aydın için tutuklama talebi: Fon soruşturmasında hakimliğe sevk edildi",
+   "Fon soruşturmasında AK Parti milletvekili Ertan Aydın'a ev hapsi",
+   "Fon soruşturması: Eski AK Parti milletvekili Ertan Aydın hakkında ev hapsi kararı",
+   "Eski AK Parti milletvekili Ertan Aydın hakkında tutuklama talebi",
+   "Fon soruşturmasında Ertan Aydın'a ev hapsi ve yurt dışı çıkış yasağı kararı",
+   "\"Türkiye Yüzyılı\" kampanyasının mimarıydı: Fon vurgununda Ertan Aydın hakkında ev hapsi kararı",
+   "Fon soruşturmasında eski vekil Ertan Aydın'a ev hapsi",
+   "Eski Başbakan danışmanı Ertan Aydın hakkında ev hapsi ve yurtdışı çıkış yasağı kararı",
+   "Fon soruşturmasında eski vekil İçin tutuklama talebi",
+   "Son dakika...Eski başbakan danışmanına ev hapsi",
+   "Fon soruşturmasında eski Başbakan danışmanı Ertan Aydın hakkında tutuklama talebi",
+   "Fon soruşturmasında eski vekile tutuklama talebi",
+   "Fon soruşturmasında eski milletvekili Ertan Aydın'a tutuklama talebi",
+   "Eski vekil için tutuklama talebi!"
+  ],
+  "expected": "Fon soruşturmasında eski Başbakan danışmanı Ertan Aydın hakkında tutuklama talebi",
+  "verdict": "lateral",
+  "why": "another description of the same man"
+ },
+ {
+  "cid": "1a8c62fa",
+  "id": "1a8c62fa-990c-43e0-80f6-14d15412a7bd",
+  "rule": "nonmember",
+  "stored": "İçişleri Bakanlığı: Kahramanmaraş’ta 16 yıllık faili meçhul cinayet aydınlatıldı",
+  "model": "extractive-v6",
+  "article_count": 9,
+  "titles": [
+   "Kız olduğu için bebeğini öldürdü! İçişleri Bakanlığı: Anne tutuklandı",
+   "Kahramanmaraş'ta 16 yıl sonra çözülen sır: Bebek cinayetinde korkunç itiraf",
+   "Kahramanmaraş'ta 2010'daki bebek cinayeti aydınlatıldı: Anne tutuklandı",
+   "Faili meçhul bebek cinayeti aydınlatıldı!",
+   "Kahramanmaraş’ta 16 yıllık bebek cinayeti dosyası aydınlatıldı",
+   "Kahramanmaraş'ta 2010 yılında bulunan bebek cesediyle ilgili faili meçhul cinayet aydınlatıldı",
+   "Boş arazide bulunmuştu: Bebek cinayetinde düğüm çözüldü",
+   "İçişleri Bakanlığı duyurdu: Kahramanmaraş’ta 16 yıllık bebek cinayeti aydınlatıldı",
+   "Cinayet Haberleri: 15 yıl sonra gelen korkunç itiraf!"
+  ],
+  "expected": "Kahramanmaraş’ta 16 yıllık bebek cinayeti dosyası aydınlatıldı",
+  "verdict": "lateral",
+  "why": "loses the ministry attribution, gains the nature of the case"
+ },
+ {
+  "cid": "620362a3",
+  "id": "620362a3-7e0c-4279-b77b-35cf4792c5af",
+  "rule": "nonmember",
+  "stored": "Bahçelievler'de inşaat kazısında göçük: 2 kişi toprak altında kaldı",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "Son dakika! İstanbul'da inşaatta göçük: 2 işçi toprak altında",
+   "Son Dakika: Bahçelievler'de göçük! İşçinin cansız bedenine ulaşıldı",
+   "Bahçelievler'deki inşaat göçüğünde acı haber: Toprak altında kalan işçi hayatını kaybetti",
+   "Bahçelievler'de inşaatta toprak kayması! Göçük altında kalan 1 işçi hayatını kaybetti"
+  ],
+  "expected": "Bahçelievler'de inşaatta toprak kayması. Göçük altında kalan 1 işçi hayatını kaybetti",
+  "verdict": "better",
+  "why": "h42-titles-1 live case: the worker died; 'acı haber' is framing now, so the replacement reports the death without the label",
+  "first": "Bahçelievler'deki inşaat göçüğünde acı haber: Toprak altında kalan işçi hayatını kaybetti",
+  "firstVerdict": "better"
+ },
+ {
+  "cid": "bb37c171",
+  "id": "bb37c171-2aad-4b50-859d-4752ec7774d1",
+  "rule": "loaded",
+  "stored": "Korkunç kaza. Atın kopan bacağı otomobile saplandı",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Korkunç kaza! Atın kopan bacağı otomobile saplandı",
+   "Arnavutköy'de feci kaza! Atın bacağı otomobile saplandı",
+   "Korkunç kazada akılalmaz olay! Atın kopan bacağı araca saplandı"
+  ],
+  "expected": "Korkunç kaza. Atın kopan bacağı otomobile saplandı",
+  "verdict": "kept",
+  "why": "review editorial-6: 'korkunç' -> 'feci' was a lateral swap; the target is less central (0.505 -> 0.393) and 'feci' is loaded now, so the stored title stays",
+  "first": "Arnavutköy'de feci kaza. Atın bacağı otomobile saplandı",
+  "firstVerdict": "lateral"
+ },
+ {
+  "cid": "8075c430",
+  "id": "8075c430-81c8-4d19-80c1-62091adc108d",
+  "rule": "nonmember",
+  "stored": "Bakan Işıkhan'dan duyurdu: Emekli maaşları için yeni düzenleme yolda",
+  "model": "extractive-v6",
+  "article_count": 27,
+  "titles": [
+   "Bakan Işıkhan'dan emekli maaşlarına 'ilave zam' mesajı!",
+   "Bakan Işıkhan'dan emekli maaşı açıklaması: Emekli maaşlarına ilave iyileştirme yapılacak",
+   "Çalışmalar başladı: Emekliye 2027 Ocak zammı dışında ek iyileştirme hazırlığı",
+   "Bakan Işıkhan’dan emekli ve asgari ücret açıklaması: İlave iyileştirme teklifi Meclis’e geliyor",
+   "Bakan Işıkhan'dan emekli aylıkları açıklaması: Ocak ayı için düzenleme hazırlanıyor",
+   "Bakan Işıkhan'dan emekli maaşları için yeni hazırlık: İlave iyileştirme yolda",
+   "Bakan Işıkhan: Emeklilerimizin gelirlerini iyileştirmek için gerekli adımları atıyoruz",
+   "Emekli maaşlarına 2027 Ocak düzenlemesi! Bakan Işıkhan'dan yeni iyileştirme açıklaması",
+   "Bakan Işıkhan'dan Emekli Maaşları İçin Yeni Çalışma Açıklaması",
+   "Bakan Işıkhan'dan emekli maaşı açıklaması",
+   "Bakan Işıkhan’dan emeklilere zam mesajı: “2027 için yeni iyileştirme hazırlığı”",
+   "Bakan Işıkhan duyurdu! Emekli maaşları için harekete geçildi",
+   "Bakan Işıkhan'dan emekli maaşı açıklaması",
+   "Bakan Işıkhan'dan emekli maaşı açıklaması: Yasal artışa ilave iyileştirme yapılacak",
+   "Çalışma Ve Sosyal Güvenlik Bakanı Vedat Işıkhan'dan emekli maaşı açıklaması",
+   "Emekliye Ek İyileştirme Sinyali! Bakan Işıkhan Yeni Düzenleme İçin Tarih Verdi",
+   "Bakan Işıkhan’dan emekliye müjde: Yasal zamma ilave ek iyileştirme geliyor",
+   "Bakan Işıkhan'dan emekli maaşı açıklaması",
+   "Emekliye 2027 düzenlemesi! Maaşlara ilave iyileştirme hazırlığı: Bakan Işıkhan ayrıntıları açıkladı",
+   "Emekli maaşı düzenlemesi: Bakan Işıkhan detayları açıkladı",
+   "EMEKLİYE EK ZAM HAZIRLIĞI",
+   "Bakan Işıkhan duyurdu: Emekli maaşları için yeni düzenleme geliyor",
+   "Bakan Işıkhan duyurdu: Emekli maaşları için yeni düzenleme yolda",
+   "Bakan Işıkhan tarih verdi: Emekli maaşlarına ek iyileştirme hazırlığı",
+   "Bakan açıkladı: Emekli maaşlarına yeni zam müjdesi",
+   "Bakan Işıkhan'dan emekli maaşı açıklaması",
+   "Bakan Işıkhan: Emekli maaşlarında ilave iyileştirmeleri içeren çalışma yapıyoruz"
+  ],
+  "expected": "Bakan Işıkhan'dan emekli maaşı açıklaması: Emekli maaşlarına ilave iyileştirme yapılacak",
+  "verdict": "lateral",
+  "why": "both announce a pension change; the stored \"yolda\" is hype, the new one a promise"
+ },
+ {
+  "cid": "57c73dc7",
+  "id": "57c73dc7-bfc5-4025-9258-846a5344b5ea",
+  "rule": "nonmember",
+  "stored": "İmamoğlu davasında ruhsat için çek iddiası: Vermeseydik ruhsat alamazdık",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Nişantaşı Koru için 5 çek iddiası! Tanık anlattı: Vermeseydik ruhsat alamazdık",
+   "İmamoğlu davasında rüşvet kıskacı: Ruhsat için milyonluk çekleri vermek zorunda kaldık"
+  ],
+  "expected": "Nişantaşı Koru için 5 çek iddiası. Tanık anlattı: Vermeseydik ruhsat alamazdık",
+  "verdict": "lateral",
+  "why": "the stored title is the superseded text; the replacement is a member title that keeps the 'iddiası' attribution and no loaded word ('rüşvet kıskacı' is charged now), but names the Nişantaşı Koru checks instead of the İmamoğlu trial",
+  "first": "İmamoğlu davasında rüşvet kıskacı: Ruhsat için milyonluk çekleri vermek zorunda kaldık",
+  "firstVerdict": "worse"
+ },
+ {
+  "cid": "39a2cd01",
+  "id": "39a2cd01-3581-4135-aea1-e0422a4e8c10",
+  "rule": "nonmember",
+  "stored": "İstanbul'a 8 Şeritli Yeni Köprü Geliyor: 196 Metrelik Kuleler Havadan Görüntülendi",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "İstanbul'a 8 Şeritli Yeni Köprü Geliyor: Sazlıdere Üzerinde 196 Metrelik Kuleler Yükseliyor",
+   "İstanbul'a 8 şeritli yeni köprü! Sazlıdere Köprüsü’ndeki çalışmalar havadan görüntülendi"
+  ],
+  "expected": "İstanbul'a 8 şeritli yeni köprü. Sazlıdere Köprüsü’ndeki çalışmalar havadan görüntülendi",
+  "verdict": "better",
+  "why": "the stored title is Title Case; the replacement is a sentence-case member title (a Title Case target is refused), same facts about the Sazlıdere bridge",
+  "first": "İstanbul'a 8 Şeritli Yeni Köprü Geliyor: Sazlıdere Üzerinde 196 Metrelik Kuleler Yükseliyor",
+  "firstVerdict": "lateral"
+ },
+ {
+  "cid": "5893d4e5",
+  "id": "5893d4e5-813c-463f-978e-bc4c36e3a434",
+  "rule": "nonmember",
+  "stored": "İBB davası 104. gün: Gizli tanıklar söz alacak",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "İBB davasında 3. duruşmada 3. gün: Gizli tanıklar dinleniyor",
+   "İBB davası 104. gün: Gizli tanıklar konuştu: 'Gördüm' yok, 'duydum' var",
+   "İBB davasında üçüncü celsede gizli tanık Gürgen konuştu: \"Gördüğüm yok ama konuşulanlar hep öyleydi başkanım\"",
+   "İBB davasında üçüncü celsenin üçüncü günü başlıyor: Gizli tanıkların dinlenmesi bekleniyor"
+  ],
+  "expected": "İBB davasında 3. duruşmada 3. gün: Gizli tanıklar dinleniyor",
+  "verdict": "better",
+  "why": "the stored \"söz alacak\" is the superseded text (h42-titles-1 live case)"
+ },
+ {
+  "cid": "ce1fefd7",
+  "id": "ce1fefd7-1243-4724-bf58-7eaa87929a23",
+  "rule": "loaded",
+  "stored": "CHP İstanbul İl Yönetimi belli oldu. İşte Mehmet Ali Yüksel’in çalışma kadrosu",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Butlan CHP'sinin İstanbul İl Yönetimi belli oldu: Kendisine sorulmadan listeye adı yazılanlar var!",
+   "CHP İstanbul İl Yönetimi belli oldu! İşte Mehmet Ali Yüksel’in çalışma kadrosu"
+  ],
+  "expected": "CHP İstanbul İl Yönetimi belli oldu. İşte Mehmet Ali Yüksel’in çalışma kadrosu",
+  "verdict": "kept",
+  "why": "review editorial-4: the swap target says \"Butlan CHP'si\", which the lexicon now charges as loaded, so the stored title stays",
+  "first": "Butlan CHP'sinin İstanbul İl Yönetimi belli oldu: Kendisine sorulmadan listeye adı yazılanlar var",
+  "firstVerdict": "worse"
+ },
+ {
+  "cid": "8cf7ebad",
+  "id": "8cf7ebad-0951-4337-aa1d-6ded90d55ee4",
+  "rule": "margin",
+  "stored": "Trump’a ara seçim darbesi dünya basınında: Mavi tsunami",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Trump’a ara seçim darbesi dünya basınında: Mavi tsunami…",
+   "Dünya basını ABD'deki ara seçimlerde 'Trump'ın yenilgisini' yazdı! 'Mavi tsunami, sonun başlangıcı'"
+  ],
+  "expected": "Dünya basını ABD'deki ara seçimlerde 'Trump'ın yenilgisini' yazdı. 'Mavi tsunami, sonun başlangıcı'",
+  "verdict": "better",
+  "why": "two loaded figures become one, quoted, and attributed to the press"
+ },
+ {
+  "cid": "9f7c27c3",
+  "id": "9f7c27c3-4a0e-49e2-99ca-2ff85c6e9f41",
+  "rule": "nonmember",
+  "stored": "ABD seçimleri doları vurdu: Küresel piyasalarda düşüş, dolar/TL 50 lira seviyesinde",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Dolar/TL 50 liranın üzerinde: ABD seçimlerinin ardından döviz piyasalarında son durum",
+   "Dolar 50 TL'nin üstünde! ABD seçim gelişmeleri izleniyor"
+  ],
+  "expected": "Dolar/TL 50 liranın üzerinde: ABD seçimlerinin ardından döviz piyasalarında son durum",
+  "verdict": "better",
+  "why": "\"doları vurdu\" becomes the level"
+ },
+ {
+  "cid": "9bf46d9b",
+  "id": "9bf46d9b-27c6-4b9d-badd-fb4cd50b4d01",
+  "rule": "nonmember",
+  "stored": "Fatma Betül Sayan Kaya ve eşi ifadeye çağrıldı",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "Eski Bakan Fatma Betül Sayan Kaya, yeniden ifadeye çağrıldı",
+   "Fatma Betül Sayan Kaya ifadeye çağrıldı: Fon soruşturmasında 3 isim için işlem",
+   "Fatma Betül Sayan Kaya dahil üç kişi ifadeye çağrıldı",
+   "Fatma Betül Sayan Kaya ifadeye çağrıldı",
+   "Fon soruşturması: Fatma Betül Sayan Kaya 'şüpheli' sıfatıyla yeniden ifadeye çağrıldı",
+   "Fon soruşturmasında yeni gelişme: Fatma Betül Sayan Kaya ve eşi ikinci kez ifade verecek",
+   "'Fon' vurgununda yeni gelişme: Fatma Betül Sayan Kaya ve eşi ikinci kez ifadeye çağrıldı",
+   "Son dakika! Fon soruşturmasında yeni gelişme: Fatma Betül Sayan Kaya ve eşi dahil 3 kişi ifadeye çağrıldı"
+  ],
+  "expected": "Fatma Betül Sayan Kaya dahil üç kişi ifadeye çağrıldı",
+  "verdict": "lateral",
+  "why": "a corrected head count"
+ },
+ {
+  "cid": "3da0948c",
+  "id": "3da0948c-d621-4d89-aee7-e00101e162aa",
+  "rule": "nonmember",
+  "stored": "Özgür Özel: İmamoğlu İstanbul'a verdiği sözü tutuyor",
+  "model": "extractive-v6",
+  "article_count": 10,
+  "titles": [
+   "Özel, partisinin grup toplantısında konuşuyor",
+   "Özgür Özel'den Erdoğan'a 'fon vurgunu' çağrısı: 'Biliyordun, istifa et! Bilmiyordun, seçime götür!'",
+   "Özgür Özel, YENİ Parti grup toplantısında konuşuyor",
+   "Özgür Özel konuşuyor",
+   "Özgür Özel kürsüden yüklendi",
+   "YENİ Parti grup toplantısı | Özel’den ‘fon’ çıkışı: ‘Üç beş bürokratı yollayarak kurtulamazsın, listede bakanlar var’",
+   "Özgür Özel Meclis'te konuşuyor",
+   "Son dakika... Özgür Özel: \"İfadelerle itibar suiskastı yapılıyor\"",
+   "CANLI | Özgür Özel, TBMM'deki grup toplantısında konuşuyor",
+   "Son Dakika... Özgür Özel, YENİ Parti grup toplantısında konuşuyor"
+  ],
+  "expected": "Özgür Özel: \"İfadelerle itibar suiskastı yapılıyor\"",
+  "verdict": "lateral",
+  "why": "another quote of the same speaker (the stored one is gone)"
+ },
+ {
+  "cid": "bcda0006",
+  "id": "bcda0006-3873-4367-8819-95476c5c1579",
+  "rule": "nonmember",
+  "stored": "Trump, seçimleri kaybetmelerinin sebebinin \"İran savaşı\" ve buna bağlı \"hayat pahalılığı\" olduğunu söyledi",
+  "model": "extractive-v6",
+  "article_count": 20,
+  "titles": [
+   "Trump seçim yenilgisinin nedenini açıkladı: İran savaşı",
+   "Trump'tan Kongre seçimleri itirafı! Tarihi hezimeti 'İran savaşı' ve 'hayat pahalılığına' bağladı",
+   "Trump seçim yenilgisini İran savaşına bağladı: Yine aynısını yapardım",
+   "Trump: Ara seçimlerdeki yenilgimizin nedeni İran savaşı",
+   "Trump: Seçimi İran savaşı yüzünden kaybettik",
+   "Trump, ara seçim yenilgisini İran savaşı ve hayat pahalılığına bağladı",
+   "Trump, Demokratlara karşı seçimleri kaybetmelerini \"İran'la savaş\" ve \"hayat pahalılığına\" bağladı",
+   "ABD Başkanı Donald Trump, seçim yenilgisinin sebebini açıkladı: \"İran savaşı\"",
+   "Trump'tan Kongre seçimleri itirafı! Tarihi hezimeti 'İran savaşı' ve 'hayat pahalılığına' bağladı",
+   "Trump, seçimleri kaybetmelerini “İran’la savaş” ve “hayat pahalılığına” bağladı",
+   "Trump yenilgiyi kabullendi: \"Seçim yenilgisi İran Savaşı'nın sonucuydu. Buna değerdi\"",
+   "Trump: Seçimleri İran savaşından dolayı kaybettik",
+   "Trump seçim yenilgisini değerlendirdi: İran savaşı buna değerdi",
+   "Trump seçim hezimetinden sonra ilk kez ortaya çıktı: Yenilginin nedenini açıkladı",
+   "ABD Başkanı Donald Trump, seçim yenilgisinin sebebini açıkladı: \"İran savaşı\"",
+   "Trump'tan seçim yenilgisi sonrası 'İran savaşı' itirafı: Buna değerdi",
+   "Trump'tan seçim 'itirafı' geldi: 'İran savaşı buna değer miydi' sorusunu yanıtladı",
+   "Trump, Demokratlara karşı seçimleri kaybetmelerini \"İran'la savaş\" ve \"hayat pahalılığına\" bağladı",
+   "Trump'tan seçim itirafı: İran savaşı etkili oldu",
+   "Trump, Demokratlara karşı seçimleri kaybetmelerini \"İran'la savaş\" ve \"hayat pahalılığına\" bağladı"
+  ],
+  "expected": "Trump, ara seçim yenilgisini İran savaşı ve hayat pahalılığına bağladı",
+  "verdict": "better",
+  "why": "shorter and exact"
+ },
+ {
+  "cid": "07cfa29d",
+  "id": "07cfa29d-d42a-4977-9140-ed4a2c2ebbe2",
+  "rule": "nonmember",
+  "stored": "Mekke Anlaşması TBMM Genel Kurulunda: CHP'den destek",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Genel Kurul’da Mekke Antlaşması’na CHP’den tam destek",
+   "Mekke Anlaşması TBMM Genel Kurulunda: Birinci madde kabul edildi, birleşime 14.00'te devam edilecek",
+   "CHP, Mekke Anlaşması'na olumlu oy vereceğini TBMM'de açıkladı"
+  ],
+  "expected": "Genel Kurul’da Mekke Antlaşması’na CHP’den tam destek",
+  "verdict": "lateral",
+  "why": "the same facts; \"tam destek\" is a shade stronger"
+ },
+ {
+  "cid": "b2d44624",
+  "id": "b2d44624-70fa-469e-96c7-f815ae0d3648",
+  "rule": "nonmember",
+  "stored": "İsrail muhalefet lideri Eisenkot 'Siyonist askerlik hükümeti' kuracaklarını açıkladı",
+  "model": "extractive-v6",
+  "article_count": 6,
+  "titles": [
+   "Eisenkot: Siyonist askerlik hükümeti kuracağız",
+   "Netanyahu'nun rakibi hedefini açıkladı: 'Siyonist askerlik hükümeti'",
+   "İsrail'de muhalefet lideri Eisenkot \"Siyonist askerlik hükümeti\" kuracaklarını belirtti",
+   "İsrail'de muhalefet lideri Eisenkot \"Siyonist askerlik hükümeti\" kuracaklarını açıkladı: Arap partileriyle iş birliği yapmayacağı mesajı olarak değerlendirildi",
+   "Netanyahu'ya rakibinden rest! Siyonist askerlik hükümeti kuracak",
+   "Netanyahu'ya rakibinden rest! Siyonist askerlik hükümeti kuracak"
+  ],
+  "expected": "İsrail'de muhalefet lideri Eisenkot \"Siyonist askerlik hükümeti\" kuracaklarını belirtti",
+  "verdict": "lateral",
+  "why": "\"açıkladı\" becomes \"belirtti\""
+ },
+ {
+  "cid": "5c113d83",
+  "id": "5c113d83-f40e-4e93-afef-b7ed3d50b33b",
+  "rule": "nonmember",
+  "stored": "Gölbaşı yolunda yayaya araç çarptı: Yaralıya ilk yardımı Vali Küçük ve Milletvekili Şan yaptı",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Kazada yaralanan vatandaşa vali ve milletvekilinden ilk yardım",
+   "Adıyaman'da araç çarpan yayaya ilk müdahale vali ve milletvekilinden",
+   "Adıyaman'da araç çarpan yayaya ilk müdahale vali ve milletvekilinden"
+  ],
+  "expected": "Kazada yaralanan vatandaşa vali ve milletvekilinden ilk yardım",
+  "verdict": "lateral",
+  "why": "loses the names of the governor and the MP"
+ },
+ {
+  "cid": "074faa60",
+  "id": "074faa60-b3fd-444a-ba4b-4f85277edca5",
+  "rule": "number",
+  "stored": "Organize suç bilançosu açıklandı: 8 bini aşkın kişi tutuklandı",
+  "model": "extractive-v6",
+  "article_count": 4,
+  "titles": [
+   "Bakan Çiftçi duyurdu: Suç örgütlerine yönelik 1741 operasyonda 8 bini aşkın şüpheli tutuklandı",
+   "Organize suç örgütlerine 1741 operasyon: 8 binden fazla tutuklama!",
+   "Organize suç bilançosu açıklandı: 8 bini aşkın kişi tutuklandı",
+   "5 yılın 5 katını aştı! Türkiye’ye suçlu iadelerinde rekor seviye"
+  ],
+  "expected": "Bakan Çiftçi duyurdu: Suç örgütlerine yönelik 1741 operasyonda 8 bini aşkın şüpheli tutuklandı",
+  "verdict": "better",
+  "why": "adds the minister and the operation count"
+ },
+ {
+  "cid": "2911b0a4",
+  "id": "2911b0a4-65e1-45fa-b76c-f8686a18c744",
+  "rule": "nonmember",
+  "stored": "Arnavutluk Meclisi’nde sis bombası: Polis şiddetine karşı öğrencilere destek",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Arnavutluk'ta muhalefet milletvekillerinden polis protestosu: Mecliste sis bombası",
+   "Arnavutluk Meclisinde muhalefet kürsüyü bloke edip sis bombası kullandı"
+  ],
+  "expected": "Arnavutluk'ta muhalefet milletvekillerinden polis protestosu: Mecliste sis bombası",
+  "verdict": "better",
+  "why": "the new title says who did what"
+ },
+ {
+  "cid": "112a68bd",
+  "id": "112a68bd-68d3-4bc8-ab0b-6d12b37762b8",
+  "rule": "nonmember",
+  "stored": "Zelenski İstanbul’a geldi: Erdoğan ile görüşecek",
+  "model": "extractive-v6",
+  "article_count": 10,
+  "titles": [
+   "İstanbul’a gelen Zelenski Cumhurbaşkanı Erdoğan ile görüştü",
+   "Kritik görüşme! Cumhurbaşkanı Erdoğan-Zelenskiy görüşmesi sona erdi",
+   "Son dakika... Dolmabahçe'deki Erdoğan-Zelenskiy görüşmesi başladı",
+   "Zelenski İstanbul'da! Cumhurbaşkanı Erdoğan ile görüştü",
+   "Cumhurbaşkanı Erdoğan ile Ukrayna lideri Zelenski'nin görüşmesi başladı",
+   "İstanbul'da kritik görüşme: Başkan Erdoğan, Zelenski ile bir araya geldi",
+   "Cumhurbaşkanı Erdoğan'dan kritik görüşme! Ukrayna Devlet Başkanı Zelenski İstanbul'da",
+   "Son dakika: Erdoğan ve Zelenskiy İstanbul'da görüştü!",
+   "Ukrayna Devlet Başkanı Zelenski İstanbul'da! Kritik zirvede masada neler var?",
+   "Cumhurbaşkanı Erdoğan Zelenski görüşmesi sona erdi"
+  ],
+  "expected": "İstanbul’a gelen Zelenski Cumhurbaşkanı Erdoğan ile görüştü",
+  "verdict": "better",
+  "why": "the meeting is held, not announced"
+ },
+ {
+  "cid": "d84320be",
+  "id": "d84320be-06dd-42c3-8387-2f33ec038493",
+  "rule": "nonmember",
+  "stored": "Bakırköy Belediyesi soruşturması: 61 kişi adliyede",
+  "model": "extractive-v6",
+  "article_count": 8,
+  "titles": [
+   "Son Dakika... Bakırköy Belediyesi soruşturmasında yeni gelişme: 61 kişi adliyeye sevk edildi",
+   "Bakırköy Belediyesi soruşturmasında 61 şüphelinin işlemleri tamamlandı",
+   "Bakırköy Belediyesi'ne ihale soruşturması: 61 şüpheli adliyede",
+   "Bakırköy Belediyesine yönelik soruşturmada gözaltına alınan 61 kişi adliyede",
+   "Bakırköy Belediyesine yönelik soruşturmada 61 şüpheli adliyeye sevk edildi",
+   "Bakırköy Belediyesine \"ihale\" soruşturması: Şüpheliler adliyede",
+   "Bakırköy Belediyesi soruşturması: 6 kişi serbest, 40 kişiye tutuklama talebi",
+   "Bakırköy Belediyesine yönelik soruşturma: Belediye Başkanının babası dahil 61 şüpheli adliyeye sevk edildi"
+  ],
+  "expected": "Bakırköy Belediyesine yönelik soruşturmada 61 şüpheli adliyeye sevk edildi",
+  "verdict": "better",
+  "why": "\"adliyede\" becomes \"adliyeye sevk edildi\", with the right word for the people"
+ },
+ {
+  "cid": "52d35501",
+  "id": "52d35501-8572-49f7-88d9-90cb3ae4f1db",
+  "rule": "nonmember",
+  "stored": "Suriye'de sel: 5 ölü",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Suriye'de sel: 7 ölü",
+   "Suriye'de sel: 7 ölü"
+  ],
+  "expected": "Suriye'de sel: 7 ölü",
+  "verdict": "better",
+  "why": "the toll moved from 5 to 7"
+ }
+]

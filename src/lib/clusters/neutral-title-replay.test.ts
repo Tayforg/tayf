@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanHeadline, isAcceptableNeutral, loadedPenalty, pickNeutralTitle } from "./neutral-title";
+import {
+  EXTRACTIVE_MODEL_ID,
+  cleanHeadline,
+  incumbentIsMemberTitle,
+  isAcceptableNeutral,
+  loadedPenalty,
+  pickNeutralTitle,
+} from "./neutral-title";
 
 // Replay of the headline cron's re-pick over production data. The fixture is
 // 150 clusters (article_count >= 4, the most recently updated) captured on
@@ -54,7 +61,9 @@ describe("re-pick replay over 150 production clusters", () => {
       const next = repick(c);
       return next !== null && next !== c.stored;
     });
-    expect(changed.length / CLUSTERS.length).toBeLessThan(0.1);
+    // 16/150 = 0.107 since hunt 42 (CORPUS_CHANGED_BY_H42: three stored titles no member carries and one the
+    // no-margin rules replace); 12/150 = 0.08 before. The bar in the title is 15%.
+    expect(changed.length / CLUSTERS.length).toBeLessThan(0.15);
   });
 
   it("never returns null for these clusters (a stored title is always kept or replaced)", () => {
@@ -236,14 +245,49 @@ const CORPUS_CHANGED_BEFORE_H26 = [
   "2cc0838e",
 ];
 
+// hunt 42 (2026-11-05). Two sets of changes beyond the twelve above, hand-reviewed (old -> new).
+//
+// h42-titles-1: a stored title that no current member carries (the outlet edited it away, or the member
+// that carried it left) is no longer protected as an incumbent. Three of the 150 corpus clusters hold such
+// a title (a fourth, c26c8c14, is in the list above already: its stored "SON DAKİKA..." title fails the gate):
+//   112a68bd  "Zelenski İstanbul’a geldi: Erdoğan ile görüşecek"
+//             -> "İstanbul’a gelen Zelenski Cumhurbaşkanı Erdoğan ile görüştü"   better: the members report
+//                the meeting as held, the stored future tense is superseded
+//   d6675bd8  "Bakırköy Belediyesi soruşturması: 39 tutuklama"
+//             -> "Bakırköy Belediyesine yönelik soruşturmada 39 tutuklama"        lateral: same facts, a
+//                member's own wording instead of a fragment no member says
+//   e3262ca6  "Dışişleri Bakanı Fidan: Rusya ve Ukrayna, büyük bir fedakarlıkta bulunarak bir anlaşmaya
+//              varmak zorundalar" -> "Bakan Fidan: Rusya ve Ukrayna anlaşmaya varmak zorunda"
+//             lateral: the same statement without the 108-character paraphrase no member carries
+// h42-titles-2: the stored title gives way with no margin (loaded wording, a dropped hedge, a cut number,
+// Title Case). One of the 150 corpus clusters (the first version changed three; the review fixes took two
+// back, below):
+//   66173a8a  "ABD, Ukrayna'ya 2,1 milyar dolarlık 500 adet PAC-3 füzesi satışına onay verdi"  (hedge)
+//             -> "ABD, Ukrayna'ya savunma alanında 2,1 milyar dolarlık olası satışı onayladı"   better: an
+//                approval of a possible sale, not a sale made
+// Left out after the h42 review (these two used to be in the list, so the count is 16/150 = 10.7%, not 18/150):
+//   9e5b27cb  "Cenazeye giden aile ölümden döndü: Bolu Dağı Tüneli'nde korkunç kaza"  (loaded, editorial-6)
+//             stays: the stored title is central (mean member overlap 0.505) and the event title it was
+//             swapped for is not (0.321); the loaded rule needs a target at least as central. The first
+//             version judged that swap better, so this is a better change given up for the guard that stops
+//             ad76f79a's central 'perde arkası' title losing to a 1-of-6 angle.
+//   e67ede66  "Bakırköy Belediyesi soruşturmasında 40 kişi tutuklandı"                (number, editorial-2)
+//             stays: the stored 40 is one outlet's figure, but the best title (39) does not restate it, so the
+//             number rule (which repairs only a figure cut short and restated in full) no longer fires.
+const CORPUS_CHANGED_BY_H42 = ["112a68bd", "d6675bd8", "e3262ca6", "66173a8a"];
+
 describe("re-pick replay: the hunt-26 rules", () => {
-  it("change none of the 150 corpus picks beyond the twelve that changed before (churn 12/150)", () => {
+  it("change none of the 150 corpus picks beyond the twelve that changed before and the four of hunt 42 (churn 16/150)", () => {
     const changed = CLUSTERS.filter((c) => {
       const next = repick(c);
       return next !== null && next !== c.stored;
     }).map((c) => c.cid);
-    expect(changed.sort()).toEqual([...CORPUS_CHANGED_BEFORE_H26].sort());
-    expect(changed.length / CLUSTERS.length).toBeLessThan(0.1);
+    expect(changed.sort()).toEqual([...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H42].sort());
+    expect(changed.length / CLUSTERS.length).toBeLessThan(0.15);
+    // The h26 rules themselves move none of the picks: the twelve are the ones before them.
+    expect(changed.filter((cid) => !CORPUS_CHANGED_BY_H42.includes(cid)).sort()).toEqual(
+      [...CORPUS_CHANGED_BEFORE_H26].sort(),
+    );
   });
 
   it("the h26 fixture is intact (8 clusters, none of them in the 150 corpus)", () => {
@@ -295,15 +339,18 @@ describe("re-pick replay: the hunt-31 rules", () => {
       return next !== null && next !== c.stored;
     }).map((c) => c.cid);
 
-  it("change the 150 corpus picks only by CORPUS_CHANGED_BY_H31 (the twelve before h26 plus none)", () => {
+  it("change the 150 corpus picks only by CORPUS_CHANGED_BY_H31 (the twelve before h26 plus none) and CORPUS_CHANGED_BY_H42", () => {
     const changed = corpusChanged();
-    expect(changed.sort()).toEqual([...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31].sort());
+    expect(changed.sort()).toEqual(
+      [...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31, ...CORPUS_CHANGED_BY_H42].sort(),
+    );
   });
 
-  it("churn stays under 10% (prior bar 12.7% at the v3 re-pick; the gate for this wave was 15%)", () => {
-    // 12 / 150 = 0.08: the h31 rules add nothing. If a later rule pushes this past
-    // 0.1, raise the bar to 0.15 here with a comment and a hand-reviewed list.
-    expect(corpusChanged().length / CLUSTERS.length).toBeLessThan(0.1);
+  it("churn stays under 15% (prior bar 12.7% at the v3 re-pick; the gate for this wave was 15%)", () => {
+    // 12 / 150 = 0.08: the h31 rules add nothing. Hunt 42 pushed it to 16 / 150 = 0.107 (hand-reviewed at
+    // CORPUS_CHANGED_BY_H42), so the bar is the 15% gate.
+    expect(corpusChanged().length / CLUSTERS.length).toBeLessThan(0.15);
+    expect(corpusChanged().filter((cid) => !CORPUS_CHANGED_BY_H42.includes(cid)).length / CLUSTERS.length).toBeLessThan(0.1);
   });
 
   it("keeps the corpus titles that carry an additive 'de' / 'da' within the first words", () => {
@@ -521,19 +568,32 @@ describe("re-pick replay: the hunt-34 rules", () => {
       return next !== null && next !== c.stored;
     }).map((c) => c.cid);
 
-  it("change none of the 150 corpus picks beyond the twelve that changed before (churn 12/150 = 8%)", () => {
+  it("change none of the 150 corpus picks beyond the twelve that changed before and the four of hunt 42 (churn 16/150 = 10.7%)", () => {
     const changed = corpusChanged();
-    expect(changed.sort()).toEqual([...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31].sort());
+    expect(changed.sort()).toEqual(
+      [...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31, ...CORPUS_CHANGED_BY_H42].sort(),
+    );
     expect(changed.length / CLUSTERS.length).toBeLessThan(0.15);
-    expect(changed.length / CLUSTERS.length).toBeLessThan(0.1);
+    // Without the four of hunt 42 it is still the 12/150 = 8% of before.
+    expect(changed.filter((cid) => !CORPUS_CHANGED_BY_H42.includes(cid)).length / CLUSTERS.length).toBeLessThan(0.1);
   });
 
-  it("the margin still keeps all 79 corpus titles whose fresh best pick differs from the stored one", () => {
+  it("the margin still keeps all 76 corpus titles whose fresh best pick differs from the stored one (79 before hunt 42)", () => {
     const keptByMargin = CLUSTERS.filter((c) => {
       const items = c.titles.map((title) => ({ title }));
       return pickNeutralTitle(items) !== c.stored && repick(c) === c.stored;
     });
-    expect(keptByMargin).toHaveLength(79);
+    // 79 - 4 + 1: the four of CORPUS_CHANGED_BY_H42 no longer stay, and e3281cbd joins: its stored
+    // "KOBİ'lere patent müjdesi: ..." was its own fresh pick, and now that 'müjdesi' is framing the
+    // fresh pick is the Kacır title while the margin keeps the stored one. 9e5b27cb and e67ede66 (the
+    // first version replaced them, see CORPUS_CHANGED_BY_H42) stay, which is the 2 more of the first count (74).
+    expect(keptByMargin).toHaveLength(76);
+    expect(keptByMargin.map((c) => c.cid)).toContain("e3281cbd");
+    const nowReplaced = CLUSTERS.filter((c) => {
+      const items = c.titles.map((title) => ({ title }));
+      return pickNeutralTitle(items) !== c.stored && repick(c) !== c.stored && CORPUS_CHANGED_BY_H42.includes(c.cid);
+    });
+    expect(nowReplaced.map((c) => c.cid).sort()).toEqual([...CORPUS_CHANGED_BY_H42].sort());
   });
 
   it("the fixture holds 14 clusters (13 changed by the rule, 268d231b kept), none in the 150 corpus", () => {
@@ -568,5 +628,134 @@ describe("re-pick replay: the hunt-34 rules", () => {
       if (c.verdict === "kept") expect(fresh, c.cid).not.toBe(c.stored);
       else expect(fresh, c.cid).toBe(c.expected);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hunt 42 (h42-titles-1 and h42-titles-2): the replay over the 14-day re-pick set.
+//
+// The set: every cluster that neutral_title_repick_candidates walks (not archived, no LLM title, a stored
+// extractive title, article_count >= 2, updated in the last 14 days): 3,884 clusters on 2026-11-05 (3,739
+// stamped v6, 145 still v4), each with its member titles newest first (read-only SELECT of cluster_articles
+// x articles, nothing written). pickNeutralTitle(members, { incumbent: stored }) before (HEAD 11af736) and
+// after the hunt-42 change, as first written and as it stands after the review fixes (sec-db-1,
+// correctness-2, editorial-1 to editorial-6):
+//
+//                         HEAD              first version          after the review fixes
+//   changed titles        12 = 0.31%        158 = 4.07%            139 = 3.58%   (limit for the v7 bump: 15%)
+//   by the rule that made the change (final, 139): stored title no member carries (h42-titles-1) 96,
+//                         loaded wording 12, number 9, hedge 6, Title Case 5, margin 5, incumbentDefect 4,
+//                         gate or first pick 1, glued-twin tiebreak 1 (e02ef916, "Tel Aviv-Washington")
+//   stored title not a member title (the churn guard of h42-titles-1): 97 of 3,884 = 2.5% (limit 5%);
+//                         96 are replaced by a member's wording, 1 (fd5896d8) stays: its stored title passes the
+//                         gate and its one other member is a 193-character quote that does not (the 162 residue)
+//   the 150-cluster corpus: 12 -> 18 (first version) -> 16 of 150 = 10.7% (CORPUS_CHANGED_BY_H42)
+//   85 clusters of the set return null (nothing passes the gate and the stored title is a member's own: the
+//                         cron keeps it, as before)
+//   fixed points: 138 of the 139 picks are kept by the next re-pick; 04d5f3a4's stale pick is the best
+//                         member that is neither Title Case nor more framed, and a later regular re-pick takes
+//                         the top-scored (Title Case) line through incumbentDefect: it does not loop, the cron
+//                         stamps the row after one pick
+//
+// Thirty of the 146 changes of the FIRST version that differed from HEAD's result were drawn at random
+// (seed 4242) and judged by hand as a Turkish editor, old -> new, in
+// src/lib/clusters/__fixtures__/h42-replay-sample.json: 14 better, 12 lateral, 4 worse. Re-run on the
+// final picker, 25 of the 30 still change (14 better, 10 lateral, 1 worse: 59bcbd7c) and 5 now keep the
+// stored title (e0c9b092 and the number rule, d5a6d9ab and the hedge vocabulary, 9e5b27cb and bb37c171 and
+// the centrality guard, ce1fefd7 and the lexicon). The `first` and `firstVerdict` fields keep the first
+// version's judgment of the eight entries whose result moved. The sample was not redrawn: it is the first
+// version's, re-run. The remaining worse one keeps the v7 bump from shipping (the gate is "no regression
+// in the sample"), and the v6 heal had not finished either (84 of the set were still extractive-v4 at 18:00Z).
+// The picker rules ship without the bump: they reach first picks, the re-picks of grown clusters and the
+// stale-edit clusters migration 162 offers.
+// ---------------------------------------------------------------------------
+
+interface H42Sample {
+  cid: string;
+  id: string;
+  rule: "nonmember" | "loaded" | "number" | "hedge" | "titleCase" | "defect" | "margin";
+  stored: string;
+  model: string;
+  article_count: number;
+  titles: string[];
+  expected: string;
+  verdict: "better" | "lateral" | "worse" | "kept";
+  why: string;
+  /** The first version's result and judgment, where the review fixes moved the entry. */
+  first?: string;
+  firstVerdict?: "better" | "lateral" | "worse";
+}
+
+const H42_SAMPLE: H42Sample[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h42-replay-sample.json"), "utf8"),
+) as H42Sample[];
+
+const h42SampleMembers = (c: H42Sample) => c.titles.map((title) => ({ title }));
+
+describe("re-pick replay: the hunt-42 sample of the 14-day set", () => {
+  it("holds the 30 hand-reviewed entries: 25 still change (14 better, 10 lateral, 1 worse) and 5 keep the stored title, each with a reason", () => {
+    expect(H42_SAMPLE).toHaveLength(30);
+    const count = (v: string) => H42_SAMPLE.filter((c) => c.verdict === v).length;
+    expect([count("better"), count("lateral"), count("worse"), count("kept")]).toEqual([14, 10, 1, 5]);
+    expect(H42_SAMPLE.filter((c) => c.verdict === "worse").map((c) => c.cid)).toEqual(["59bcbd7c"]);
+    expect(H42_SAMPLE.filter((c) => c.verdict === "kept").map((c) => c.cid)).toEqual([
+      "e0c9b092",
+      "d5a6d9ab",
+      "9e5b27cb",
+      "bb37c171",
+      "ce1fefd7",
+    ]);
+    // The eight entries the review fixes moved carry the first version's result and judgment.
+    expect(H42_SAMPLE.filter((c) => c.first !== undefined).map((c) => c.cid).sort()).toEqual(
+      ["39a2cd01", "57c73dc7", "620362a3", "9e5b27cb", "bb37c171", "ce1fefd7", "d5a6d9ab", "e0c9b092"].sort(),
+    );
+    for (const c of H42_SAMPLE) {
+      expect(c.why.length, c.cid).toBeGreaterThan(10);
+      expect(c.id.startsWith(c.cid), c.cid).toBe(true);
+      expect(c.titles.length, c.cid).toBe(c.article_count);
+    }
+  });
+
+  it.each(H42_SAMPLE.filter((c) => c.verdict !== "kept").map((c) => [c.cid] as const))(
+    "%s: the re-pick returns the recorded title",
+    (cid) => {
+      const c = H42_SAMPLE.find((x) => x.cid === cid)!;
+      const picked = pickNeutralTitle(h42SampleMembers(c), { incumbent: c.stored });
+      expect(picked).toBe(c.expected);
+      expect(picked).not.toBe(c.stored);
+      expect(c.titles.some((t) => cleanHeadline(t) === picked), `${cid}: ${picked}`).toBe(true);
+      expect(isAcceptableNeutral(picked!, c.titles.filter((t) => cleanHeadline(t) !== picked))).toBe(true);
+      // A fixed point: the pick is a member title, so the next re-pick keeps it.
+      expect(pickNeutralTitle(h42SampleMembers(c), { incumbent: picked })).toBe(picked);
+    },
+  );
+
+  it.each(H42_SAMPLE.filter((c) => c.verdict === "kept").map((c) => [c.cid] as const))(
+    "%s: the review fixes keep the stored title (the first version replaced it)",
+    (cid) => {
+      const c = H42_SAMPLE.find((x) => x.cid === cid)!;
+      expect(c.first, cid).toBeDefined();
+      expect(c.first, cid).not.toBe(c.stored);
+      expect(c.expected, cid).toBe(c.stored);
+      expect(pickNeutralTitle(h42SampleMembers(c), { incumbent: c.stored }), cid).toBe(c.stored);
+    },
+  );
+
+  it("the non-member rule's sample entries are exactly the stored titles no member carries", () => {
+    for (const c of H42_SAMPLE) {
+      expect(incumbentIsMemberTitle(c.stored, c.titles), c.cid).toBe(c.rule !== "nonmember");
+    }
+  });
+
+  it("the loaded-rule entries that still change replace a loaded stored title with an unloaded one", () => {
+    for (const c of H42_SAMPLE.filter((x) => x.rule === "loaded" && x.verdict !== "kept")) {
+      expect(loadedPenalty(c.stored), c.cid).toBeGreaterThan(0);
+      expect(loadedPenalty(c.expected), c.cid).toBe(0);
+    }
+  });
+
+  it("no model bump: the id stays extractive-v6 while the sample holds a regression and the v6 heal is unfinished", () => {
+    expect(H42_SAMPLE.some((c) => c.verdict === "worse")).toBe(true);
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
   });
 });

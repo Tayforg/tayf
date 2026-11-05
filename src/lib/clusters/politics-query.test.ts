@@ -84,6 +84,7 @@ import {
   type EmbeddedClusterRow,
 } from "./politics-query";
 import type { ZoneFeedHealth } from "./feed-health";
+import { pickNeutralTitle } from "./neutral-title";
 import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 import { createReaderClient, createServerClient } from "@/lib/supabase/server";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
@@ -776,14 +777,14 @@ describe("neutral headline coalesce", () => {
             { id: "a2", sourceId: "s2", category: "politika" },
           ],
         }),
+        // One member: the headline cron never titles it (it needs 2), so a
+        // blank neutral title still falls back to the original. The same blank
+        // title on a 2-member cluster is computed; see "first-pick headline".
         mkCluster({
           id: "neutral-blank",
           title_tr: "original-2",
           title_tr_neutral: "   ",
-          members: [
-            { id: "b1", sourceId: "s1", category: "politika" },
-            { id: "b2", sourceId: "s2", category: "politika" },
-          ],
+          members: [{ id: "b1", sourceId: "s1", category: "politika" }],
         }),
       ],
       error: null,
@@ -792,6 +793,128 @@ describe("neutral headline coalesce", () => {
     const byId = Object.fromEntries(bundles.map((b) => [b.cluster.id, b]));
     expect(byId["neutral-wins"].cluster.title_tr).toBe("neutral version");
     expect(byId["neutral-blank"].cluster.title_tr).toBe("original-2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h42-latency-1: first-pick headline before the headline cron
+// ---------------------------------------------------------------------------
+//
+// A new cluster has title_tr_neutral = NULL until /api/cron/headline ticks
+// (*/5), so it used to debut with the seed article's raw outlet headline.
+// The bundle now carries the cron's own first pick, computed from the member
+// titles it already holds. Cluster 7d502c04 on 2026-11-05 is the real case.
+
+describe("first-pick headline (h42-latency-1)", () => {
+  const SEED = "Eski Ulaştırma Bakanı Denizolgun’un ölüm nedeni netleşti... İşte detaylar!";
+  const SECOND = "Eski Bakan Denizolgun'un şüpheli ölümüyle ilgili Adli Tıp raporu netleşti";
+  const THIRD = "Eski Bakan Arif Ahmet Denizolgun'un ölüm nedeni belli oldu: Adli Tıp raporu ortaya çıktı";
+
+  // What the cron writes for these members: newest first, floor on.
+  const cronPick = (newestFirst: string[]) =>
+    pickNeutralTitle(
+      newestFirst.map((title) => ({ title })),
+      { floor: true },
+    );
+
+  const debutRow = (overrides: Partial<Parameters<typeof mkCluster>[0]> = {}) =>
+    mkCluster({
+      id: "debut",
+      title_tr: SEED,
+      title_tr_neutral: null,
+      members: [
+        // Deliberately oldest first: the bundle must order them newest first.
+        { id: "d1", sourceId: "s1", title: SEED, published_at: iso(14 * 60 * 1000) },
+        { id: "d2", sourceId: "s2", title: SECOND, published_at: iso(6 * 60 * 1000) },
+      ],
+      ...overrides,
+    });
+
+  it("renders the cron's first pick, not the seed's raw headline, while title_tr_neutral is null", async () => {
+    response = { data: [debutRow()], error: null };
+    const { bundles } = await getPoliticsClusters();
+    const title = bundles[0]!.cluster.title_tr;
+
+    expect(title).toBe(cronPick([SECOND, SEED]));
+    expect(title).not.toBe(SEED);
+    expect(title).not.toMatch(/İşte detaylar/i);
+  });
+
+  it("gives the same title whatever order the select returns the members in", async () => {
+    const forward = debutRow();
+    const reversed = debutRow();
+    reversed.cluster_articles = [...reversed.cluster_articles].reverse();
+
+    response = { data: [forward], error: null };
+    const a = (await getPoliticsClusters()).bundles[0]!.cluster.title_tr;
+    __resetCacheResilienceForTests();
+    response = { data: [reversed], error: null };
+    const b = (await getPoliticsClusters()).bundles[0]!.cluster.title_tr;
+
+    expect(a).toBe(b);
+  });
+
+  it("feeds the picker every member, including a second article of the same source (the cron does)", async () => {
+    const members = [
+      { id: "m1", sourceId: "s1", title: SEED, published_at: iso(14 * 60 * 1000) },
+      { id: "m2", sourceId: "s2", title: SECOND, published_at: iso(9 * 60 * 1000) },
+      // Same source as m2: dropped from the card, but the cron titles from it.
+      { id: "m3", sourceId: "s2", title: THIRD, published_at: iso(5 * 60 * 1000) },
+    ];
+    response = { data: [mkCluster({ id: "dupe", title_tr: SEED, members })], error: null };
+    const { bundles } = await getPoliticsClusters();
+
+    expect(bundles[0]!.articles).toHaveLength(2);
+    // The case only means something if the second article changes the pick.
+    expect(cronPick([THIRD, SECOND, SEED])).not.toBe(cronPick([SECOND, SEED]));
+    expect(bundles[0]!.cluster.title_tr).toBe(cronPick([THIRD, SECOND, SEED]));
+  });
+
+  it("treats a blank neutral title like a missing one", async () => {
+    response = { data: [debutRow({ title_tr_neutral: "   " })], error: null };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0]!.cluster.title_tr).toBe(cronPick([SECOND, SEED]));
+  });
+
+  it("leaves a stored neutral title exactly as it was, so the cron's write changes nothing", async () => {
+    const stored = "Eski bakan Denizolgun’un ölüm nedeni belli oldu: Adli Tıp raporu ortaya çıktı";
+    response = { data: [debutRow({ title_tr_neutral: stored })], error: null };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0]!.cluster.title_tr).toBe(stored);
+  });
+
+  it("keeps title_tr for a one-member cluster: the cron never titles it", async () => {
+    const raw = "SON DAKİKA: Tek kaynaklı haber!";
+    response = {
+      data: [
+        mkCluster({
+          id: "single",
+          title_tr: raw,
+          members: [{ id: "x1", sourceId: "s1", title: raw }],
+        }),
+      ],
+      error: null,
+    };
+    // The cluster query asks for article_count >= 2; the member list is what
+    // this render holds, and it is what the guard reads.
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0]!.cluster.title_tr).toBe(raw);
+  });
+
+  it("does the pick without touching the database again: one clusters read, nothing else", async () => {
+    response = { data: [debutRow()], error: null };
+    await getPoliticsClusters();
+    expect(callLog).toHaveLength(1);
+    expect(callLog[0]!.table).toBe("clusters");
+    expect(callLog[0]!.steps.every((st) => !["update", "insert", "upsert", "delete", "rpc"].includes(st.method))).toBe(
+      true,
+    );
+  });
+
+  it("is applied by buildClusterBundle itself, so search, topic and entity-hub bundles inherit it", () => {
+    const row = debutRow() as unknown as EmbeddedClusterRow;
+    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row), null, NOW_MS);
+    expect(bundle.cluster.title_tr).toBe(cronPick([SECOND, SEED]));
   });
 });
 

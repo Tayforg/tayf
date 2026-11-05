@@ -408,6 +408,124 @@ describe("searchClusters canonical key", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h42-search-1: AKP and AK Parti are one party. The cache key stays the
+// canonical query; only the RPC arguments carry the alias disjunction.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters alias expansion (AKP <-> AK Parti)", () => {
+  const EXPANDED = {
+    p_variants: turkishQueryVariants('akp or "ak parti"'),
+    p_folded: "akp or ak parti",
+    p_limit: 24,
+  };
+
+  it("'AKP' sends the websearch disjunction, folded arm unquoted", async () => {
+    await searchClusters("AKP");
+    expect(fixture.rpcCalls).toEqual([EXPANDED]);
+    expect(EXPANDED.p_variants).toEqual(['akp or "ak parti"']);
+  });
+
+  it("'AK Parti' sends byte-identical RPC arguments to 'AKP'", async () => {
+    await searchClusters("AKP");
+    await searchClusters("AK Parti");
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(fixture.rpcCalls[1]).toEqual(fixture.rpcCalls[0]);
+    expect(JSON.stringify(fixture.rpcCalls[1])).toBe(JSON.stringify(fixture.rpcCalls[0]));
+  });
+
+  it("every spelling of the query ('AK PARTİ', 'ak partı', \"AKP'nin\") reaches the same arguments", async () => {
+    for (const q of ["AK PARTİ", "Ak Partı", "AKP'nin", " akp. "]) {
+      fixture.rpcCalls = [];
+      await searchClusters(q);
+      expect(fixture.rpcCalls, q).toEqual([EXPANDED]);
+    }
+  });
+
+  it("keeps the rest of the query in both disjuncts", async () => {
+    await searchClusters("AKP İstanbul");
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_variants: turkishQueryVariants('akp istanbul or "ak parti" istanbul'),
+        p_folded: "akp istanbul or ak parti istanbul",
+        p_limit: 24,
+      },
+    ]);
+  });
+
+  it("a Turkish-letter term beside the alias keeps its letters on the variants arm and folds on the other", async () => {
+    await searchClusters("AKP Şişli");
+    const args = fixture.rpcCalls[0] as { p_variants: string[]; p_folded: string };
+    expect(args.p_folded).toBe("akp sisli or ak parti sisli");
+    expect(args.p_variants.some((v) => v.includes("şişli"))).toBe(true);
+    expect(args.p_variants.every((v) => v.includes('"ak parti"'))).toBe(true);
+  });
+
+  it("'Erdoğan' reaches the RPC byte-identical to before", async () => {
+    await searchClusters("Erdoğan");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["erdoğan"], p_folded: "erdogan", p_limit: 24 },
+    ]);
+    expect(JSON.stringify(fixture.rpcCalls[0])).toBe(
+      '{"p_variants":["erdoğan"],"p_folded":"erdogan","p_limit":24}',
+    );
+  });
+
+  it.each(["akşener", "ak", "chp", "akparti", '"ak parti"', "akp -chp", "akp or chp"])(
+    "%j is not expanded (arguments identical to the plain canonical query)",
+    async (q) => {
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      expect(fixture.rpcCalls).toEqual([
+        {
+          p_variants: turkishQueryVariants(canonical),
+          p_folded: foldTr(canonical),
+          p_limit: 24,
+        },
+      ]);
+    },
+  );
+
+  it("the single-flight key is still the canonical query (one RPC for a burst of AKP spellings)", async () => {
+    fixture.hold = true;
+    const a = searchClusters("AKP");
+    const b = searchClusters("akp!");
+    const c = searchClusters(" AKP ");
+    await tick();
+    expect(fixture.rpcCalls).toHaveLength(1);
+    fixture.hold = false;
+    for (const d of fixture.deferreds) d.succeed();
+    await Promise.all([a, b, c]);
+  });
+
+  it("a phrase-making term ('covid_19') keeps the folded arm as it was before the alias: no standalone 'or' in p_folded (h42 review)", async () => {
+    // 129 turns a leftover phrase (<->) into plainto_tsquery, which is all AND: an 'or' in p_folded would then be a
+    // required lexeme and the folded arm would match nothing. The variants arm still expands.
+    for (const q of ["AKP covid_19", "AK Parti covid_19", "akp covid--19"]) {
+      fixture.rpcCalls = [];
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      const args = fixture.rpcCalls[0] as { p_variants: string[]; p_folded: string; p_limit: number };
+      expect(args.p_folded, q).toBe(foldTr(canonical));
+      expect(args.p_folded.split(" "), q).not.toContain("or");
+      expect(args.p_variants.some((v) => v.includes('"ak parti"')), q).toBe(true);
+    }
+    // And a plain query still expands on the folded arm.
+    fixture.rpcCalls = [];
+    await searchClusters("AKP covid-19");
+    expect((fixture.rpcCalls[0] as { p_folded: string }).p_folded).toBe("akp covid-19 or ak parti covid-19");
+  });
+
+  it("falls back to the two-argument function with the expanded variants when 129 is missing", async () => {
+    fixture.rpcErrorThreeArg = { message: "not found", code: "PGRST202" };
+    await searchClusters("AKP");
+    expect(fixture.rpcCalls).toEqual([
+      EXPANDED,
+      { p_variants: EXPANDED.p_variants, p_limit: 24 },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // In-flight cap + single-flight (per instance). Cache entries are not modelled
 // by the vitest build ("use cache" is a no-op there), so every call that is not
 // de-duplicated by single-flight reaches the RPC; held RPCs make the overlap
