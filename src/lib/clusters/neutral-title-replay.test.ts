@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanHeadline, isAcceptableNeutral, pickNeutralTitle } from "./neutral-title";
+import { cleanHeadline, isAcceptableNeutral, loadedPenalty, pickNeutralTitle } from "./neutral-title";
 
 // Replay of the headline cron's re-pick over production data. The fixture is
 // 150 clusters (article_count >= 4, the most recently updated) captured on
@@ -481,5 +481,92 @@ describe("hunt-28: a title that opens with a capital is never recased", () => {
 
   it("a re-pick leaves the stored rows alone (no backfill)", () => {
     for (const c of H28) expect(pickNeutralTitle(members(c), { incumbent: c.stored }), c.cid).toBe(c.stored);
+  });
+});
+
+// Hunt 34 (h34-reader-1, 2026-11-05, extractive-v6): incumbentDefect lowers the re-pick
+// margin to zero for a stored title that is itself the defect (a minority claim that omits
+// what most members say, a Title Case run, a majority subject it lacks). It would be wrong
+// to measure that on the 150-cluster corpus alone, so this replays two populations.
+//
+// 1. The 150-cluster corpus above: the v6 rules change exactly the twelve picks that changed
+//    before h26, i.e. 12/150 = 0.08, under the 0.15 gate of this wave (the first version of the
+//    rule, "its own words are rare and the best has a common word", changed 26 = 17.3% and
+//    swapped Fidan's G20 attendance for his meeting with Rubio).
+// 2. Every extractive-v5 cluster active in the last 7 days (2026-11-05, read-only SELECT of 1,891
+//    clusters and their 9,090 member titles, stored title as incumbent): 15 changed, 2 of them
+//    by the picker as it stood at HEAD (a80e9457 and 6ff2e710, whose full-length stored titles
+//    lost by more than the 0.20 margin), 13 by the new rule. The 13 are in
+//    __fixtures__/h34-incumbents.json with their hand verdict: 10 better, 3 lateral, 0 worse
+//    (a lateral swap trades one acceptable title for another of the same value: a campaign
+//    slogan quote for a neutral description, Title Case for a sentence-case line that loses a
+//    place name, a minority quote for the line most members carry).
+//    The fixture also holds 268d231b, the one live cluster of the finding no rule heals.
+interface H34Replay {
+  cid: string;
+  stored: string;
+  titles: string[];
+  expected: string;
+  verdict: "better" | "lateral" | "kept";
+}
+
+const H34_REPLAY: H34Replay[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h34-incumbents.json"), "utf8"),
+) as H34Replay[];
+
+describe("re-pick replay: the hunt-34 rules", () => {
+  const corpusChanged = (): string[] =>
+    CLUSTERS.filter((c) => {
+      const next = repick(c);
+      return next !== null && next !== c.stored;
+    }).map((c) => c.cid);
+
+  it("change none of the 150 corpus picks beyond the twelve that changed before (churn 12/150 = 8%)", () => {
+    const changed = corpusChanged();
+    expect(changed.sort()).toEqual([...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31].sort());
+    expect(changed.length / CLUSTERS.length).toBeLessThan(0.15);
+    expect(changed.length / CLUSTERS.length).toBeLessThan(0.1);
+  });
+
+  it("the margin still keeps all 79 corpus titles whose fresh best pick differs from the stored one", () => {
+    const keptByMargin = CLUSTERS.filter((c) => {
+      const items = c.titles.map((title) => ({ title }));
+      return pickNeutralTitle(items) !== c.stored && repick(c) === c.stored;
+    });
+    expect(keptByMargin).toHaveLength(79);
+  });
+
+  it("the fixture holds 14 clusters (13 changed by the rule, 268d231b kept), none in the 150 corpus", () => {
+    expect(H34_REPLAY).toHaveLength(14);
+    expect(H34_REPLAY.filter((c) => c.verdict === "kept").map((c) => c.cid)).toEqual(["268d231b"]);
+    for (const c of H34_REPLAY) expect(CLUSTERS.some((x) => x.cid === c.cid), c.cid).toBe(false);
+    expect(CLUSTERS).toHaveLength(150);
+  });
+
+  it("the 7-day replay: 10 better, 3 lateral, 0 worse, every new title acceptable, unloaded and a fixed point", () => {
+    const verdicts = H34_REPLAY.map((c) => c.verdict);
+    expect(verdicts.filter((v) => v === "better")).toHaveLength(10);
+    expect(verdicts.filter((v) => v === "lateral")).toHaveLength(3);
+    expect(verdicts.filter((v) => v === "kept")).toHaveLength(1);
+    for (const c of H34_REPLAY) {
+      const picked = repick(c);
+      expect(picked, c.cid).toBe(c.expected);
+      if (c.verdict === "kept") {
+        expect(picked, c.cid).toBe(c.stored);
+        continue;
+      }
+      expect(picked, c.cid).not.toBe(c.stored);
+      expect(isAcceptableNeutral(picked!, c.titles.filter((t) => cleanHeadline(t) !== picked)), c.cid).toBe(true);
+      expect(loadedPenalty(picked!), c.cid).toBe(0);
+      expect(pickNeutralTitle(c.titles.map((title) => ({ title })), { incumbent: picked }), c.cid).toBe(picked);
+    }
+  });
+
+  it("a first pick (no incumbent) over the 14 fixture clusters is the re-pick, except where the stored title stays", () => {
+    for (const c of H34_REPLAY) {
+      const fresh = pickNeutralTitle(c.titles.map((title) => ({ title })));
+      if (c.verdict === "kept") expect(fresh, c.cid).not.toBe(c.stored);
+      else expect(fresh, c.cid).toBe(c.expected);
+    }
   });
 });

@@ -4,8 +4,15 @@ const KEY = "abcdef0123456789abcdef0123456789";
 const ID = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 const h = vi.hoisted(() => ({
-  states: [] as Array<{ in: Array<{ col: string; vals: unknown[] }>; eq: Array<{ col: string; val: unknown }>; gte: Array<{ col: string; val: unknown }> }>,
+  states: [] as Array<{
+    in: Array<{ col: string; vals: unknown[] }>;
+    eq: Array<{ col: string; val: unknown }>;
+    gte: Array<{ col: string; val: unknown }>;
+    selectArgs: unknown[];
+  }>,
   error: null as { message: string } | null,
+  // Per-id extra columns the eligibility select returns (titles), by cluster id.
+  titles: {} as Record<string, { title_tr?: string | null; title_tr_neutral?: string | null }>,
 }));
 
 const fake = await vi.hoisted(async () => {
@@ -16,7 +23,7 @@ const fake = await vi.hoisted(async () => {
         h.states.push(state as never);
         if (h.error) return { data: null, error: h.error };
         const ids = (state.in.find((f) => f.col === "id")?.vals ?? []) as string[];
-        return { data: ids.map((id) => ({ id })), error: null };
+        return { data: ids.map((id) => ({ id, ...(h.titles[id] ?? {}) })), error: null };
       },
     },
   });
@@ -39,6 +46,7 @@ beforeEach(async () => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "svc";
   h.states.length = 0;
   h.error = null;
+  h.titles = {};
   vi.resetModules();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-09-29T10:00:00Z"));
@@ -123,6 +131,44 @@ describe("pingIndexNowForClusters", () => {
     expect(body.key).toBe(KEY);
     expect(body.keyLocation).toBe("https://tayf.test/indexnow-key.txt");
     expect(body.urlList).toEqual([`https://tayf.test/cluster/${ID(1)}`, `https://tayf.test/cluster/${ID(2)}`]);
+  });
+
+  // h34-reader-2 follow-up: a cluster whose served title is a question or an
+  // explainer is `noindex` on the page, so it is not pinged either.
+  it("reads the two title columns in the same query", async () => {
+    await mod.pingIndexNowForClusters([ID(1)]);
+    const columns = String(h.states[0]!.selectArgs[0]);
+    expect(columns).toContain("id");
+    expect(columns).toContain("title_tr");
+    expect(columns).toContain("title_tr_neutral");
+  });
+
+  it("leaves out a cluster whose served title is a question or an explainer", async () => {
+    h.titles[ID(1)] = { title_tr: "Merkez Bankası faizi sabit tuttu", title_tr_neutral: null };
+    h.titles[ID(2)] = { title_tr: "Saniye Caran kimdir? Kaç yaşında, nereli?", title_tr_neutral: null };
+    h.titles[ID(3)] = { title_tr: "Faiz kararı", title_tr_neutral: "Faiz ne olacak?" };
+    h.titles[ID(4)] = { title_tr: "Saniye Caran kimdir?", title_tr_neutral: "Saniye Caran CHP'den istifa etti" };
+    const r = await mod.pingIndexNowForClusters([ID(1), ID(2), ID(3), ID(4)]);
+    expect(r).toEqual({ status: "sent", count: 2, httpStatus: 200 });
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.urlList).toEqual([`https://tayf.test/cluster/${ID(1)}`, `https://tayf.test/cluster/${ID(4)}`]);
+  });
+
+  it("is 'empty' with no fetch and no limiter token spent when every cluster is a question", async () => {
+    h.titles[ID(1)] = { title_tr: "Bu ne zaman bitecek?", title_tr_neutral: null };
+    h.titles[ID(2)] = { title_tr: "Seçim ne zaman", title_tr_neutral: null };
+    expect(await mod.pingIndexNowForClusters([ID(1), ID(2)])).toEqual({ status: "empty", count: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+    // The two limiter tokens are untouched: two real pings still go out.
+    expect((await mod.pingIndexNowForClusters([ID(5)])).status).toBe("sent");
+    expect((await mod.pingIndexNowForClusters([ID(6)])).status).toBe("sent");
+  });
+
+  it("a question cluster is never marked pinged, so it is judged again on the next ping", async () => {
+    h.titles[ID(1)] = { title_tr: "Bu kimdir?", title_tr_neutral: null };
+    await mod.pingIndexNowForClusters([ID(1)]);
+    h.titles[ID(1)] = { title_tr: "Bu kimdir?", title_tr_neutral: "Bakan Çiftçi İtalya'da görüştü" };
+    expect((await mod.pingIndexNowForClusters([ID(1)])).status).toBe("sent");
   });
 
   it("caps the batch at 100", async () => {

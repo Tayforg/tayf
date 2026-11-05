@@ -834,6 +834,25 @@ describe("neutral model id parity (M3)", () => {
   it("JEV_NEUTRAL_MODEL_ID equals EXTRACTIVE_MODEL_ID", () => {
     expect(JEV_NEUTRAL_MODEL_ID).toBe(EXTRACTIVE_MODEL_ID);
   });
+
+  // h34-reader-1: the neutral-title rules changed (incumbentDefect, the question
+  // floor, advertorial wording), so both constants moved to extractive-v6 together
+  // and the cron re-picks every active cluster of the last 14 days. The next bump
+  // has to touch both files and this pin.
+  it("both constants are extractive-v6 (h34-reader-1)", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
+    expect(JEV_NEUTRAL_MODEL_ID).toBe("extractive-v6");
+  });
+
+  it("both declarations are the literal string, not a computed value", () => {
+    const jev = readFileSync(resolve(FUNCTIONS_DIR, "_shared", "jev.ts"), "utf8");
+    const neutral = readFileSync(
+      resolve(__dirname, "..", "..", "src", "lib", "clusters", "neutral-title.ts"),
+      "utf8",
+    );
+    expect(jev).toMatch(/^export const JEV_NEUTRAL_MODEL_ID = "extractive-v6";$/m);
+    expect(neutral).toMatch(/^export const EXTRACTIVE_MODEL_ID = "extractive-v6";$/m);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { createRateLimiter } from "@/lib/rate-limit";
+import { hasIndexableTitle } from "@/lib/seo/indexable-title";
 import { siteUrl } from "@/lib/site-url";
 
 // IndexNow pings (Bing, Yandex, ...) for freshly (re)clustered stories.
@@ -101,14 +102,22 @@ export async function pingIndexNowForClusters(
     if (fresh.length === 0) return { status: "empty", count: 0 };
 
     const supabase = createServerClient();
+    // Same eligibility as the sitemaps: not archived, two articles, and a served
+    // title that is not a question or an explainer (the cluster page serves such
+    // a cluster `noindex`, so pinging it would submit a URL that refuses the
+    // index). The two title columns are read for that test only.
     const { data, error } = await supabase
       .from("clusters")
-      .select("id")
+      .select("id, title_tr, title_tr_neutral")
       .in("id", fresh.slice(0, BATCH_MAX))
       .eq("is_archived", false)
       .gte("article_count", 2);
     if (error) throw new Error(`eligibility query failed: ${error.message}`);
-    const eligible = ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
+    const eligible = (
+      (data ?? []) as Array<{ id: string; title_tr?: string | null; title_tr_neutral?: string | null }>
+    )
+      .filter((r) => hasIndexableTitle(r))
+      .map((r) => r.id);
     if (eligible.length === 0) return { status: "empty", count: 0 };
 
     if (!limiter("global").allowed) {

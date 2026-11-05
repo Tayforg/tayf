@@ -1,8 +1,11 @@
+import { entityHubPatterns, foldEntityText } from "@/lib/entities/entity-hub";
 import { headlineLang, sourceLang } from "@/lib/sources/source-language";
+import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 import {
   isContentlessTitle,
   repairEntityResidue,
 } from "../../../supabase/functions/_shared/rss/entities";
+import { titleAgreement, titleStemOverlap } from "./summary-agreement";
 import {
   isTopicSlug,
   TOPIC_LABELS_TR,
@@ -10,13 +13,40 @@ import {
 } from "./topic-query";
 
 // "İlgili haberler": the block at the end of an indexable cluster page that
-// lists other recent multi-article clusters on the same topic. Pure helpers
-// only: no I/O and no clock. The page reads an existing cached feed and hands
-// the bundles here; nothing in this file fetches.
+// lists other recent multi-article clusters from the page's topic feed. Pure
+// helpers only: no I/O and no clock. The page reads an existing cached feed and
+// hands the bundles here; nothing in this file fetches.
 //
-// Imports are constants and types only (topic-query's slug list and labels,
-// the entity helpers the page already uses, the language helpers the cards
-// use), so the unit tests need no mocks.
+// h34-reader-3: the block used to be "the 5 newest stories of the same topic",
+// whatever they were about (the Korkuteli CHP-resignation page linked the
+// Bavarian deputy premier's death and Netanyahu; one block held both
+// Erdoğan-Korea clusters). Now each candidate is scored against the current
+// title and the block says what it is:
+//   * score = titleAgreement(current title, candidate title) (the share of the
+//     current title's content stems the candidate carries, ./summary-agreement)
+//     + RELATED_ENTITY_BONUS when both titles name one entity-hub key (the 62
+//     curated entities of src/lib/trends/rising-entities.ts, matched with the
+//     hub's own folded patterns and precision guards, so "AKP" and "AK Parti"
+//     are one key and a Polish court is not the AYM);
+//   * score >= RELATED_MIN_SCORE AND (two or more shared content stems, or a
+//     shared entity key) is 'related' (isRelatedTitle): one ordinary shared
+//     word is exactly 0.2 for a 5-stem title and says nothing about the story
+//     (RELATED_MIN_SHARED_STEMS). Near-duplicates are dropped
+//     first (a title that agrees >= RELATED_DUPLICATE_AGREEMENT, in either
+//     direction, with a newer kept one), so two clusters of one event take one
+//     slot. Two or more 'related' stories left: mode 'related', best score
+//     first, newer first on a tie;
+//   * fewer than two: mode 'latest', the same pool's newest stories, still
+//     deduped. The component then says "<Konu> gündeminde son haberler" instead
+//     of promising relatedness it cannot show.
+// A candidate that shares at least half of its articles with the current
+// cluster (a stale pre-merge copy in a cached feed) is never listed. In today's
+// data an article belongs to one cluster, so that guard is a safety net.
+//
+// Imports are constants, types and pure helpers (topic-query's slug list and
+// labels, the entity helpers the page already uses, the language helpers the
+// cards use, the title-agreement scorer, the entity hub's pattern builder), so
+// the unit tests need no mocks.
 
 /** The most stories the block ever lists. */
 export const RELATED_MAX = 5;
@@ -92,7 +122,7 @@ export interface RelatedCandidate {
     topic7?: string | null;
   };
   effectiveArticleCount?: number;
-  articles?: readonly { title: string; source_id: string; source_name?: string }[];
+  articles?: readonly { id?: string; title: string; source_id: string; source_name?: string }[];
   sources?: readonly { id: string; name: string; slug?: string | null }[];
 }
 
@@ -123,39 +153,249 @@ function langOfCandidate(title: string, c: RelatedCandidate): "en" | undefined {
   );
 }
 
-interface Kept {
-  key: string;
-  ms: number;
-  item: RelatedCluster;
+/** Which kind of block the page renders: 'related' stories, or the 'latest' of the topic. */
+export type RelatedMode = "related" | "latest";
+
+/** The block as a plain value: the mode and the stories under it. */
+export interface RelatedBlock {
+  mode: RelatedMode;
+  items: RelatedCluster[];
 }
 
 /**
- * Up to `max` (never more than RELATED_MAX) other stories from a feed, newest
- * first. Drops, in this order: the page's own cluster, anything under two
- * articles, archived and merged clusters, a different `topic7`, a contentless
- * title, a title equal to the current one (a duplicate-looking story) and a
- * repeated id (the first occurrence wins). Then sorts a COPY by `updated_at`
- * descending (an unparseable date last), equal dates by id descending, the
- * order fetchTopicClusters uses. Never mutates its input.
+ * What {@link selectRelatedClusters} returns: the stories as an ordinary array
+ * (so a call site that only reads `.length` and passes it on keeps working)
+ * with the mode riding along as a non-enumerable `mode` property, which
+ * RelatedStories reads. It does not survive a copy (`[...items]`, `.slice()`),
+ * and {@link relatedModeOf} then gives the legacy 'related'.
  */
-export function selectRelatedClusters(args: {
+export type RelatedSelection = RelatedCluster[] & { readonly mode: RelatedMode };
+
+/** The score at or above which a candidate counts as related (inclusive). */
+export const RELATED_MIN_SCORE = 0.2;
+/**
+ * Added to the score when both titles name one entity-hub key. Below
+ * RELATED_MIN_SCORE on purpose: a shared entity supports some wording overlap
+ * (and bridges aliases the wording does not share) but never relates two
+ * stories on its own, so "ABD" or "Erdoğan" in two headlines is not enough.
+ */
+export const RELATED_ENTITY_BONUS = 0.15;
+/** Two titles agreeing at least this much, in either direction, are one story (inclusive). */
+export const RELATED_DUPLICATE_AGREEMENT = 0.6;
+/** Fewer related stories than this and the block falls back to mode 'latest'. */
+export const RELATED_MIN_ITEMS = 2;
+/**
+ * Content stems two titles must share to be related, unless they also share an
+ * entity-hub key (which carries a single shared word). titleAgreement is the
+ * share of the CURRENT title's stems, so a 5-stem title scores exactly
+ * RELATED_MIN_SCORE on ONE shared word, and one ordinary word ("Cumhurbaşkanı",
+ * "istifa", "edildi") says nothing about the story: it related a Rutte story to
+ * an Erdoğan one, and a single such story kept a block under "İlgili haberler".
+ */
+export const RELATED_MIN_SHARED_STEMS = 2;
+/** A candidate sharing at least this share of its articles with a kept cluster is a copy (inclusive). */
+export const RELATED_SHARED_MEMBERS = 0.5;
+/** Candidates considered per call: the newest N after the exclusions. The feeds hold 30 or 31 rows. */
+const POOL_CAP = 100;
+
+/** Guards the ratio comparisons against floating point (3/5 is 0.6, 1/5 is 0.2). */
+const EPSILON = 1e-9;
+/** A title is scanned for entities up to this many characters (a headline is 60 to 150). */
+const ENTITY_SCAN_CHARS = 400;
+
+// ---------------------------------------------------------------------------
+// Entity keys. The hub's own patterns (src/lib/entities/entity-hub.ts), which
+// are PostgreSQL regexes: only the word anchors \m and \M differ from
+// JavaScript, and \b stands for both (the same twin entity-hub.test.ts uses).
+// Built once, on first use, from curated data only (never from a title).
+// ---------------------------------------------------------------------------
+
+interface EntityMatcher {
+  key: string;
+  patterns: readonly RegExp[];
+}
+
+let entityMatchers: readonly EntityMatcher[] | null = null;
+
+function matchers(): readonly EntityMatcher[] {
+  if (entityMatchers === null) {
+    entityMatchers = RISING_ENTITIES.map((entity) => ({
+      key: entity.key,
+      patterns: entityHubPatterns(entity).map((p) => new RegExp(p.replace(/\\[mM]/g, "\\b"))),
+    }));
+  }
+  return entityMatchers;
+}
+
+/**
+ * The entity-hub keys a title names (sorted), by label and by alias, with the
+ * hub's folding (Turkish letters, case) and precision guards. [] for a title
+ * with none and for a non-string.
+ */
+export function entityKeysIn(title: string): string[] {
+  if (typeof title !== "string" || title === "") return [];
+  const folded = foldEntityText(title.slice(0, ENTITY_SCAN_CHARS));
+  return matchers()
+    .filter((m) => m.patterns.some((re) => re.test(folded)))
+    .map((m) => m.key)
+    .sort();
+}
+
+function shareKey(a: readonly string[], b: readonly string[]): boolean {
+  return a.some((key) => b.includes(key));
+}
+
+/** The score of one candidate title against already-computed keys of the current one. */
+function scoreAgainst(currentTitle: string, currentKeys: readonly string[], title: string): number {
+  return evidenceAgainst(currentTitle, currentKeys, title).score;
+}
+
+/**
+ * The score of one candidate title against the current one, and whether it
+ * counts as related: score >= RELATED_MIN_SCORE and either RELATED_MIN_SHARED_STEMS
+ * shared content stems or a shared entity key plus at least one shared stem.
+ */
+function evidenceAgainst(
+  currentTitle: string,
+  currentKeys: readonly string[],
+  title: string,
+): { score: number; related: boolean } {
+  const overlap = titleStemOverlap(currentTitle, title);
+  const shared = overlap?.shared ?? 0;
+  const agreement = overlap === null ? 0 : shared / overlap.total;
+  const entity = shareKey(currentKeys, entityKeysIn(title));
+  const score = entity ? agreement + RELATED_ENTITY_BONUS : agreement;
+  const related =
+    score >= RELATED_MIN_SCORE - EPSILON &&
+    (shared >= RELATED_MIN_SHARED_STEMS || (entity && shared >= 1));
+  return { score, related };
+}
+
+/**
+ * How related `candidateTitle` is to `currentTitle`: titleAgreement (0 when the
+ * current title has too few content tokens to say anything) plus
+ * RELATED_ENTITY_BONUS once when both name an entity-hub key.
+ */
+export function relatedScore(currentTitle: string, candidateTitle: string): number {
+  if (typeof currentTitle !== "string" || typeof candidateTitle !== "string") return 0;
+  return scoreAgainst(currentTitle, entityKeysIn(currentTitle), candidateTitle);
+}
+
+/**
+ * Whether `candidateTitle` counts as related to `currentTitle`: its
+ * {@link relatedScore} is at least RELATED_MIN_SCORE (inclusive) and the two
+ * share RELATED_MIN_SHARED_STEMS content stems, or an entity-hub key together
+ * with at least one stem. False for a non-string.
+ */
+export function isRelatedTitle(currentTitle: string, candidateTitle: string): boolean {
+  if (typeof currentTitle !== "string" || typeof candidateTitle !== "string") return false;
+  return evidenceAgainst(currentTitle, entityKeysIn(currentTitle), candidateTitle).related;
+}
+
+// ---------------------------------------------------------------------------
+// Selection
+// ---------------------------------------------------------------------------
+
+interface Kept {
+  key: string;
+  ms: number;
+  title: string;
+  folded: string;
+  members: ReadonlySet<string> | null;
+  candidate: RelatedCandidate;
+  effective: number;
+}
+
+/** The distinct, non-empty article ids of a candidate, or null when it carries none. */
+function memberIds(c: RelatedCandidate): ReadonlySet<string> | null {
+  const ids = new Set<string>();
+  for (const a of c.articles ?? []) {
+    if (typeof a?.id === "string" && a.id !== "") ids.add(a.id);
+  }
+  return ids.size > 0 ? ids : null;
+}
+
+/** True when at least RELATED_SHARED_MEMBERS of the smaller member list sits in both. */
+function sharesHalfTheMembers(a: ReadonlySet<string> | null, b: ReadonlySet<string> | null): boolean {
+  if (a === null || b === null) return false;
+  let shared = 0;
+  for (const id of a) if (b.has(id)) shared++;
+  return shared / Math.min(a.size, b.size) >= RELATED_SHARED_MEMBERS - EPSILON;
+}
+
+/** Same words (folded titles equal) or agreement >= RELATED_DUPLICATE_AGREEMENT in either direction. */
+function nearDuplicate(a: Kept, b: Kept): boolean {
+  if (a.folded === b.folded) return true;
+  const best = Math.max(titleAgreement(a.title, b.title) ?? 0, titleAgreement(b.title, a.title) ?? 0);
+  return best >= RELATED_DUPLICATE_AGREEMENT - EPSILON;
+}
+
+/** Newest first (an unparseable date last), equal dates by id descending: the order fetchTopicClusters uses. */
+function byRecency(a: Kept, b: Kept): number {
+  const aBad = Number.isNaN(a.ms);
+  const bBad = Number.isNaN(b.ms);
+  if (aBad !== bBad) return aBad ? 1 : -1;
+  if (!aBad && a.ms !== b.ms) return b.ms - a.ms;
+  if (a.key === b.key) return 0;
+  return a.key < b.key ? 1 : -1;
+}
+
+/**
+ * `list` (already in recency order) without the stories that repeat a newer one
+ * kept before them: near-duplicate titles, or half the articles in common. The
+ * newer story of a duplicate pair is the one that stays. Stops once `stopAt`
+ * are kept.
+ */
+function dedupe(list: readonly Kept[], stopAt = Infinity): Kept[] {
+  const kept: Kept[] = [];
+  for (const c of list) {
+    if (kept.length >= stopAt) break;
+    if (kept.some((k) => nearDuplicate(k, c) || sharesHalfTheMembers(k.members, c.members))) continue;
+    kept.push(c);
+  }
+  return kept;
+}
+
+/**
+ * The block for a cluster page, as a plain `{ mode, items }`. Up to `max`
+ * (never more than RELATED_MAX) other stories from a feed.
+ *
+ * Drops, in this order: the page's own cluster, anything under two articles,
+ * archived and merged clusters, a different `topic7`, a contentless title, a
+ * title equal to the current one (a duplicate-looking story), a repeated id
+ * (the first occurrence wins) and a story that shares at least half of its
+ * articles with the current cluster (when the current cluster is in the pool).
+ * Then, on the newest POOL_CAP of what is left, in recency order (`updated_at`
+ * descending, an unparseable date last, equal dates by id descending): scores
+ * each against the current title and keeps the ones at or above
+ * RELATED_MIN_SCORE and share two content stems or an entity key (isRelatedTitle),
+ * removes near-duplicates (the newer of a pair stays), and
+ *   * with RELATED_MIN_ITEMS or more left returns them as mode 'related', best
+ *     score first, newer first on a tie;
+ *   * with fewer returns the newest stories of the same pool, deduped the same
+ *     way, as mode 'latest'.
+ * Never mutates its input.
+ */
+export function buildRelatedBlock(args: {
   currentId: string;
   currentTitle: string;
   topic: string;
   bundles: readonly RelatedCandidate[];
   max?: number;
-}): RelatedCluster[] {
+}): RelatedBlock {
   const requested =
     typeof args.max === "number" && !Number.isNaN(args.max)
       ? Math.trunc(args.max)
       : RELATED_MAX;
   const limit = Math.max(0, Math.min(requested, RELATED_MAX));
-  if (limit === 0) return [];
+  if (limit === 0) return { mode: "latest", items: [] };
 
   const currentKey = String(args.currentId).toLowerCase();
-  const currentTitle = foldTitle(repairEntityResidue(String(args.currentTitle)));
+  const currentTitle = repairEntityResidue(String(args.currentTitle));
+  const currentFolded = foldTitle(currentTitle);
 
   const seen = new Set<string>();
+  let currentMembers: ReadonlySet<string> | null = null;
   const kept: Kept[] = [];
   for (const c of args.bundles) {
     const cluster = c?.cluster;
@@ -163,7 +403,10 @@ export function selectRelatedClusters(args: {
       continue;
     }
     const key = cluster.id.toLowerCase();
-    if (key === currentKey) continue;
+    if (key === currentKey) {
+      currentMembers ??= memberIds(c);
+      continue;
+    }
     // `!(n >= 2)` also drops a missing or NaN count.
     if (!(cluster.article_count >= 2)) continue;
     if (cluster.is_archived === true || cluster.merged_into) continue;
@@ -171,7 +414,8 @@ export function selectRelatedClusters(args: {
 
     const title = repairEntityResidue(cluster.title_tr).trim();
     if (isContentlessTitle(title)) continue;
-    if (foldTitle(title) === currentTitle) continue;
+    const folded = foldTitle(title);
+    if (folded === currentFolded) continue;
 
     if (seen.has(key)) continue;
     seen.add(key);
@@ -180,26 +424,66 @@ export function selectRelatedClusters(args: {
     kept.push({
       key,
       ms: Date.parse(cluster.updated_at),
-      item: {
-        id: cluster.id,
-        title,
-        sourceCount:
-          typeof effective === "number" && Number.isFinite(effective)
-            ? effective
-            : cluster.article_count,
-        lang: langOfCandidate(title, c),
-      },
+      title,
+      folded,
+      members: memberIds(c),
+      candidate: c,
+      effective:
+        typeof effective === "number" && Number.isFinite(effective)
+          ? effective
+          : cluster.article_count,
     });
   }
 
-  kept.sort((a, b) => {
-    const aBad = Number.isNaN(a.ms);
-    const bBad = Number.isNaN(b.ms);
-    if (aBad !== bBad) return aBad ? 1 : -1;
-    if (!aBad && a.ms !== b.ms) return b.ms - a.ms;
-    if (a.key === b.key) return 0;
-    return a.key < b.key ? 1 : -1;
+  const pool = kept
+    .sort(byRecency)
+    .slice(0, POOL_CAP)
+    .filter((k) => !sharesHalfTheMembers(currentMembers, k.members));
+
+  const currentKeys = entityKeysIn(currentTitle);
+  const scored = pool.map((k) => ({ k, ...evidenceAgainst(currentTitle, currentKeys, k.title) }));
+  const related = dedupe(scored.filter((s) => s.related).map((s) => s.k));
+
+  const toItem = (k: Kept): RelatedCluster => ({
+    id: k.candidate.cluster.id,
+    title: k.title,
+    sourceCount: k.effective,
+    lang: langOfCandidate(k.title, k.candidate),
   });
 
-  return kept.slice(0, limit).map((k) => k.item);
+  if (related.length >= RELATED_MIN_ITEMS) {
+    const scoreOf = new Map(scored.map((s) => [s.k, s.score]));
+    const best = [...related].sort(
+      (a, b) => (scoreOf.get(b) ?? 0) - (scoreOf.get(a) ?? 0) || byRecency(a, b),
+    );
+    return { mode: "related", items: best.slice(0, limit).map(toItem) };
+  }
+  return { mode: "latest", items: dedupe(pool, limit).map(toItem) };
+}
+
+/**
+ * {@link buildRelatedBlock}'s stories as an array that also carries the mode
+ * (see {@link RelatedSelection}). The cluster page calls this one.
+ */
+export function selectRelatedClusters(args: {
+  currentId: string;
+  currentTitle: string;
+  topic: string;
+  bundles: readonly RelatedCandidate[];
+  max?: number;
+}): RelatedSelection {
+  const { mode, items } = buildRelatedBlock(args);
+  return Object.defineProperty(items, "mode", {
+    value: mode,
+    enumerable: false,
+  }) as RelatedSelection;
+}
+
+/**
+ * The mode a list of stories carries: 'latest' only when it was marked so by
+ * {@link selectRelatedClusters}; a plain array, a copy or anything else is the
+ * legacy 'related'.
+ */
+export function relatedModeOf(items: unknown): RelatedMode {
+  return (items as { mode?: unknown } | null | undefined)?.mode === "latest" ? "latest" : "related";
 }

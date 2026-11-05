@@ -11,6 +11,7 @@ import {
   AGENCY_COPY_OVERLAP,
   AGREEMENT_HIGH,
   AGREEMENT_LOW,
+  seedDisqualified,
   summaryDefect,
   textOverlap,
   titleAgreement,
@@ -2163,6 +2164,397 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
         const out = withTitle([pick, clean, seed], shape.title, OFF_TOPIC);
         expect(out?.source).toBe(clean.source);
       });
+    });
+  });
+
+  // h34-reader-4: the gate above looks at the SEED's agreement only. A seed that
+  // is itself defective in form (78e56dca: a Sözcü feed cut that never says what
+  // Hamaney said; b6fe7960: three opening “ and one closing ”) covers half the
+  // headline's words and was kept. It now counts as disagreeing, and the gain over
+  // it is waived: the candidate still needs 0.75 and every quality predicate.
+  describe("9b. a seed that is a feed-cut stub or has unbalanced quotes (h34-reader-4)", () => {
+    // 78e56dca (18 kaynak), 4 Kasım 2026. The seed is Sözcü's 123-character cut.
+    const HAMANEY_TITLE = "ABD seçimlerinden sonra Hamaney'den ilk açıklama";
+    const HAMANEY_SEED =
+      "İran Dini Lideri Mücteba Hamaney, ABD ara seçim sonuçlarının Washington'ın İran'a yönelik düşmanca yaklaşımını değiştirm...";
+    const HAMANEY_SEED_SHOWN =
+      "İran Dini Lideri Mücteba Hamaney, ABD ara seçim sonuçlarının Washington'ın İran'a yönelik düşmanca yaklaşımını…";
+    const HAMANEY_MEMBERS: Array<[string, string, string, string, Source["kind"]]> = [
+      ["Cumhuriyet", "cumhuriyet", "2026-11-04T11:07:00.000Z", "İran'ın dini lideri Mücteba Hamaney, ABD'de Demokratların Kongre ara seçimlerinde elde ettiği kazanımların Washington'ın Tahran'a yönelik politikalarını değiştirmeyeceğini savundu. ABD yönetimine taviz verilmesinin veya ülkedeki siyasi liderliğin değişmesinin ilişkileri düzelteceğini düşünenlerin \"ağır biçimde yanıldığını\" belirten Hamaney, Washington'ı İran'a karşı onlarca yıldır düşmanca politikalar izlemekle suçladı.", "outlet"],
+      ["TRT Haber", "trt-haber", "2026-11-04T12:19:00.000Z", "İran lideri Mücteba Hamaney, ABDdeki ara seçim sonuçlarının ardından, Amerikan siyasetindeki değişikliklerin Washingtonın \"İrana yönelik düşmanlığını\" değiştirmeyeceğini söyledi.", "outlet"],
+      ["Diriliş Postası", "dirilis-postasi", "2026-11-04T12:22:14.000Z", "İran lideri Mücteba Hamaney, ABD'deki ara seçim sonuçlarının Washington'ın İran politikasını değiştirmeyeceğini söyleyerek tavize karşı uyardı.", "outlet"],
+      ["Evrensel", "evrensel", "2026-11-04T12:19:00.000Z", "İran lideri Mücteba Hamaney, ABD'deki ara seçim sonuçlarının ardından Washington’ın Tahran’a yönelik yaklaşımında bir değişim olmayacağını, bu ülkenin \"İran'a yönelik düşmanlığını\" değiştirmeyeceğini ifade etti.", "outlet"],
+      ["Anadolu Ajansı", "anadolu-ajansi", "2026-11-04T12:06:46.000Z", "İran lideri Mücteba Hamaney, ABD'deki ara seçim sonuçlarının ardından, Amerikan siyasi liderliğindeki veya parti dinamiklerindeki değişikliklerin bu ülkenin \"İran'a yönelik düşmanlığını\" değiştirmeyeceğini ifade etti.", "wire"],
+    ];
+    /** Not in the stored cluster: a member whose text says it with the headline's own words. */
+    const HAMANEY_AGREES =
+      "İran lideri Mücteba Hamaney, ABD seçimlerinden sonra yaptığı ilk açıklamada Washington'ın İran politikasının değişmeyeceğini söyledi.";
+
+    const hamaneyMembers = () => {
+      const seed = outlet("Sözcü", "sozcu", "2026-11-04T10:55:56.000Z", HAMANEY_SEED);
+      const others = HAMANEY_MEMBERS.map(([name, slug, at, text, kind]) => outlet(name, slug, at, text, { kind }));
+      return { seed, others, members: [...others, seed] };
+    };
+
+    // b6fe7960 (19 kaynak): Serbestiyet's description, three “ against one ”.
+    const VANCE_TITLE = "ABD Başkan Yardımcısı seçim yenilgisini İsrail'e bağladı";
+    const VANCE_SEED =
+      "ABD Başkan Yardımcısı JD Vance: “Seçimi kaybetmemizin nedeni savaş. Başkan dün gece bunu bizzat söyledi” “Vance 2024’te Trump’a oy verip bu kez Demokratlara yönelen seçmenlerin taleplerini de sıraladı: “Savaşı bitirin. Hayat pahalılığına ve enflasyona odaklanın. Amerika’yı önceleyin. İsrail’le ilişkimizi değiştirin.\nJD Vance bayrak açtı: Seçimi kaybetmemizin nedeni savaş yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.";
+    const VANCE_AKSAM =
+      "ABD Başkan Yardımcısı JD Vance, Cumhuriyetçilerin Kongre ara seçimlerinde yaşadığı yenilgiyi İran'la savaşa ve İsrail'le ilişkilere bağladı. Vance, \"Kaybetmemizin nedeni savaştır\" diyerek Trump'ın da bunu dile getirdiğini hatırlattı.";
+    const VANCE_DIRILIS =
+      "ABD Başkan Yardımcısı JD Vance, Kongre ara seçimlerini Cumhuriyetçi Partinin kaybetmesinin nedenini İran'la savaş ve İsrail'le ilişkilere bağladı.";
+    const VANCE_CUMHURIYET =
+      "ABD Başkan Yardımcısı James Vance, Cumhuriyetçi Parti'nin ara seçimlerde yaşadığı ağır yenilginin nedeninin İran savaşı olduğunu belirterek, \"Kaybetmemizin nedeni savaş. Başkan Donald Trump da dün gece bunu bizzat söyledi\" dedi.";
+    const VANCE_HABERPORT =
+      "Vance kaybın sorumlusu olarak İran savaşını gösterdiABD Başkan Yardımcısı James David Vance, Cumhuriyetçi Parti'nin ara seçimlerde yaşadığı ağır yenilginin en önemli nedeninin İran savaşı olduğunu sav...";
+
+    const vanceMembers = () => {
+      const seed = outlet("Serbestiyet", "serbestiyet", "2026-11-04T16:24:14.000Z", VANCE_SEED);
+      const aksam = outlet("Akşam", "aksam", "2026-11-04T17:06:00.000Z", VANCE_AKSAM);
+      const dirilis = outlet("Diriliş Postası", "dirilis-postasi", "2026-11-04T17:17:00.000Z", VANCE_DIRILIS);
+      const cumhuriyet = outlet("Cumhuriyet", "cumhuriyet", "2026-11-04T16:57:00.000Z", VANCE_CUMHURIYET);
+      const haberport = outlet("Haberport", "haberport", "2026-11-04T16:57:41.000Z", VANCE_HABERPORT);
+      return { seed, aksam, dirilis, cumhuriyet, haberport, members: [haberport, dirilis, aksam, cumhuriyet, seed] };
+    };
+
+    it("the fixtures are what the cases below assume", () => {
+      // 78e56dca: the seed covers exactly half of the headline, so the old gate kept it.
+      expect(HAMANEY_SEED).toHaveLength(123);
+      expect(tidySummaryText(HAMANEY_SEED)).toBe(HAMANEY_SEED_SHOWN);
+      expect(titleAgreement(HAMANEY_TITLE, HAMANEY_SEED_SHOWN)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+      expect(seedDisqualified(HAMANEY_SEED, HAMANEY_SEED_SHOWN)).toBe("stub");
+      for (const [name, , , text] of HAMANEY_MEMBERS) {
+        expect(titleAgreement(HAMANEY_TITLE, text)!, name).toBeLessThan(AGREEMENT_HIGH);
+      }
+      expect(titleAgreement(HAMANEY_TITLE, HAMANEY_AGREES)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+      expect(summaryDefect(HAMANEY_AGREES, HAMANEY_AGREES)).toBeNull();
+      // b6fe7960: a seed at 5/7 with unbalanced quotes; two members at or above 0.75.
+      const shown = tidySummaryText(VANCE_SEED);
+      expect(titleAgreement(VANCE_TITLE, shown)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+      expect(seedDisqualified(VANCE_SEED, shown)).toBe("quotes");
+      expect(titleAgreement(VANCE_TITLE, VANCE_AKSAM)).toBe(1);
+      expect(titleAgreement(VANCE_TITLE, VANCE_DIRILIS)!).toBeCloseTo(6 / 7, 10);
+      expect(titleAgreement(VANCE_TITLE, VANCE_CUMHURIYET)!).toBeLessThan(AGREEMENT_HIGH);
+      expect(summaryDefect(VANCE_HABERPORT, tidySummaryText(VANCE_HABERPORT))).toBe("stub");
+    });
+
+    it("1. 78e56dca: the stub is replaced by a member that agrees, although the stub covers half of the headline", () => {
+      const { members } = hamaneyMembers();
+      const agrees = outlet("Habertürk", "haberturk", "2026-11-04T12:03:40.000Z", HAMANEY_AGREES);
+      const out = withTitle([agrees, ...members], HAMANEY_TITLE, HAMANEY_SEED);
+      expect(out).toStrictEqual({ text: HAMANEY_AGREES, source: agrees.source });
+    });
+
+    it("1. the same stub with the same members and no title (rss.xml, the digest, the cards): the seed, as before", () => {
+      const { seed, members } = hamaneyMembers();
+      const agrees = outlet("Habertürk", "haberturk", "2026-11-04T12:03:40.000Z", HAMANEY_AGREES);
+      const all = [agrees, ...members];
+      expect(summaryAttribution({ summary: HAMANEY_SEED, members: all, wire: notWire })).toStrictEqual({
+        text: HAMANEY_SEED_SHOWN,
+        source: seed.source,
+      });
+      expect(
+        resolveSummaryAttribution({ summary: HAMANEY_SEED, members: all, lookupFailed: false, wire: notWire }),
+      ).toStrictEqual({ text: HAMANEY_SEED_SHOWN, source: seed.source });
+      expect(summaryAttributionWithoutMembers({ summary: HAMANEY_SEED, wire: notWire })).toStrictEqual({
+        text: HAMANEY_SEED_SHOWN,
+        source: null,
+      });
+    });
+
+    it("2. b6fe7960: the summary with three “ and one ” gives way to the best clean member", () => {
+      const { members, aksam } = vanceMembers();
+      const out = withTitle(members, VANCE_TITLE, VANCE_SEED);
+      expect(out).toStrictEqual({ text: VANCE_AKSAM, source: aksam.source });
+      // The meta description follows the page: no unbalanced quotation in it.
+      const description = describeForMeta({ count: members.length, attribution: out });
+      expect(description.startsWith("5 kaynak. Akşam: ABD Başkan Yardımcısı JD Vance")).toBe(true);
+      expect(description).not.toContain("“");
+    });
+
+    it("2. without Akşam the next member at or above 0.75 is chosen; without both, the seed stays", () => {
+      const { members, dirilis, seed } = vanceMembers();
+      const noAksam = members.filter((m) => m.source.slug !== "aksam");
+      expect(withTitle(noAksam, VANCE_TITLE, VANCE_SEED)).toStrictEqual({ text: VANCE_DIRILIS, source: dirilis.source });
+      const neither = noAksam.filter((m) => m.source.slug !== "dirilis-postasi");
+      expect(withTitle(neither, VANCE_TITLE, VANCE_SEED)).toStrictEqual({
+        text: tidySummaryText(VANCE_SEED),
+        source: seed.source,
+      });
+    });
+
+    it("2. the pick does not depend on the member order", () => {
+      const { members, aksam } = vanceMembers();
+      for (const order of [members, [...members].reverse()]) {
+        expect(withTitle(order, VANCE_TITLE, VANCE_SEED)?.source).toBe(aksam.source);
+      }
+    });
+
+    it("3. 78e56dca as stored: no member reaches 0.75, so the stub stays and the summary is never blanked", () => {
+      const { seed, members } = hamaneyMembers();
+      expect(withTitle(members, HAMANEY_TITLE, HAMANEY_SEED)).toStrictEqual({
+        text: HAMANEY_SEED_SHOWN,
+        source: seed.source,
+      });
+    });
+
+    it("3. a title with fewer than 3 content tokens carries no signal: the defective seed stays", () => {
+      const { seed, members } = hamaneyMembers();
+      const agrees = outlet("Habertürk", "haberturk", "2026-11-04T12:03:40.000Z", HAMANEY_AGREES);
+      for (const title of ["Hamaney açıklama", "ve ile bir", "Hamaney"]) {
+        expect(withTitle([agrees, ...members], title, HAMANEY_SEED)).toStrictEqual({
+          text: HAMANEY_SEED_SHOWN,
+          source: seed.source,
+        });
+      }
+    });
+
+    describe("the gain over the seed is waived, the candidate's 0.75 is not (an 8-token title)", () => {
+      const WORDS = ["elma", "armut", "kiraz", "üzüm", "incir", "çilek", "muz", "nar"];
+      const TITLE8 = WORDS.join(" ");
+      const sentence = (hits: number) =>
+        `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`;
+      /** A cut text with no verb in it that carries the first `hits` title words. */
+      const stub = (hits: number) =>
+        `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler ve uzmanların görüşleri…`;
+      const run = (seedText: string, candidateText: string) => {
+        const seed = outlet("Tohum", "tohum", SEED_AT, seedText);
+        const candidate = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", candidateText);
+        return { seed, candidate, out: withTitle([candidate, seed], TITLE8, seedText) };
+      };
+
+      it("the fixture scores what it says", () => {
+        for (let hits = 0; hits <= 8; hits++) {
+          expect(titleAgreement(TITLE8, stub(hits)), `stub ${hits}`).toBe(hits / 8);
+          expect(titleAgreement(TITLE8, sentence(hits)), `sentence ${hits}`).toBe(hits / 8);
+        }
+        expect(seedDisqualified(stub(6), stub(6))).toBe("stub");
+        expect(summaryDefect(sentence(6), sentence(6))).toBeNull();
+      });
+
+      it("a stub at 0.75 gives way to a clean 0.75 (a gain of 0)", () => {
+        const r = run(stub(6), sentence(6));
+        expect(r.out?.source).toBe(r.candidate.source);
+      });
+
+      it("a stub at 1.0 gives way to a clean 0.75 (a negative gain): the form decides", () => {
+        const r = run(stub(8), sentence(6));
+        expect(r.out?.source).toBe(r.candidate.source);
+      });
+
+      it("below 0.75 the candidate does not qualify: 5/8 leaves the stub", () => {
+        const r = run(stub(6), sentence(5));
+        expect(r.out?.source).toBe(r.seed.source);
+      });
+
+      it("the same texts with a clean seed at 0.75: the seed is kept whatever the candidate", () => {
+        const r = run(`${sentence(6).slice(0, -1)} (seed).`, sentence(8));
+        expect(r.out?.source).toBe(r.seed.source);
+      });
+    });
+
+    describe("4. a clean seed that covers half of the headline is never replaced", () => {
+      const WORDS = ["elma", "armut", "kiraz", "üzüm", "incir", "çilek", "muz", "nar"];
+      const TITLE8 = WORDS.join(" ");
+      const best = `${WORDS.join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`;
+      const kept = (seedText: string) => {
+        const seed = outlet("Tohum", "tohum", SEED_AT, seedText);
+        const candidate = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", best);
+        expect(titleAgreement(TITLE8, tidySummaryText(seedText))!, seedText).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+        return withTitle([candidate, seed], TITLE8, seedText)?.source === seed.source;
+      };
+
+      it.each([
+        ["an ellipsis after a sentence that has its verb", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi…"],
+        ["three dots after a clause that has its verb", "elma armut kiraz üzüm hakkında şehir genelinde uzmanlar açıklama yaptı..."],
+        ["balanced curly quotes", "elma armut kiraz üzüm hakkında “şehir genelinde yeni gelişmeler” yaşandığı bildirildi."],
+        ["balanced straight quotes", 'elma armut kiraz üzüm hakkında "şehir genelinde yeni gelişmeler" yaşandığı bildirildi.'],
+        ["apostrophes and single curly quotes", "elma armut kiraz üzüm hakkında ‘şehir’ genelinde Ankara’daki yeni gelişmeler yaşandığı bildirildi."],
+        ["an ellipsis in the middle", "elma armut kiraz üzüm hakkında şehir genelinde ... yeni gelişmeler yaşandığı bildirildi."],
+      ])("%s", (_label, seedText) => {
+        expect(kept(seedText)).toBe(true);
+      });
+
+      it("a 500-character ingest clamp that the tidy step cut back to a sentence end", () => {
+        const one = "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi.";
+        const two = "Uzmanlar durumu değerlendirdi ve yetkililer açıklama yapacağını duyurdu.";
+        let body = "";
+        for (let i = 0; body.length < 560; i++) body += `${i % 2 === 0 ? one : two} `;
+        const raw = `${body.slice(0, 497)}...`;
+        expect(raw).toHaveLength(500);
+        expect(tidySummaryText(raw).endsWith("…")).toBe(false);
+        expect(kept(raw)).toBe(true);
+      });
+    });
+
+    describe("5. the seed's form: every shape is replaced by a clean member, alone", () => {
+      const WORDS = ["elma", "armut", "kiraz", "üzüm", "incir", "çilek", "muz", "nar"];
+      const TITLE8 = WORDS.join(" ");
+      const clean = `${WORDS.slice(0, 7).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`;
+      const SEED_SHAPES: Array<[string, string]> = [
+        ["a cut with no verb", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler ve uzmanların açıklama..."],
+        ["an ellipsis character", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler ve uzmanların açıklamaları…"],
+        ["an opener with no closer", "elma armut kiraz üzüm hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi."],
+        ["a closer with no opener", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi.”"],
+        ["an odd straight quote", 'elma armut kiraz üzüm hakkında "şehir genelinde yeni gelişmeler yaşandığı bildirildi.'],
+        ["two openers and a closer", "elma “armut kiraz üzüm” hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi."],
+      ];
+
+      it.each(SEED_SHAPES)("%s", (_label, seedText) => {
+        expect(titleAgreement(TITLE8, tidySummaryText(seedText))!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+        const seed = outlet("Tohum", "tohum", SEED_AT, seedText);
+        const candidate = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", clean);
+        expect(withTitle([candidate, seed], TITLE8, seedText)).toStrictEqual({ text: clean, source: candidate.source });
+        // Alone, the shape stays: the summary is never blanked.
+        expect(withTitle([seed], TITLE8, seedText)).toStrictEqual({
+          text: tidySummaryText(seedText),
+          source: seed.source,
+        });
+      });
+    });
+
+    describe("6. the candidate keeps every quality bar behind a defective seed", () => {
+      const TITLE_8 = TITLE;
+      // A defective seed that still agrees with the headline: a cut with no verb, 6/9 of TITLE.
+      const SEED_STUB = "Michigan'da Senato seçimini kazanan Abdul El Sayed, ABD'de Senato'ya seçilen ilk Müslüman…";
+      const stubSeed = () => outlet("TRT Haber", "trt-haber", SEED_AT, SEED_STUB);
+
+      it("the fixture is what the cases below assume", () => {
+        expect(titleAgreement(TITLE_8, SEED_STUB)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+        expect(seedDisqualified(SEED_STUB, SEED_STUB)).toBe("stub");
+      });
+
+      it("a feed-cut stub, a teaser, a dateline and a run-on never stand in; a clean member does", () => {
+        const hazards: Array<[string, string]> = [
+          ["a feed-cut stub", STUB_TEXT],
+          ["a teaser question", TEASER_TEXT],
+          ["a dateline", DATELINE_TEXT],
+          ["a glued run-on", RUN_ON_TEXT],
+        ];
+        for (const [label, text] of hazards) {
+          const seed = stubSeed();
+          const hazard = outlet("Tuzak", "tuzak", "2026-11-04T09:00:00.000Z", text);
+          expect(withTitle([hazard, seed], TITLE_8, SEED_STUB), label).toStrictEqual({ text: SEED_STUB, source: seed.source });
+          const clean = dw();
+          expect(withTitle([hazard, clean, seed], TITLE_8, SEED_STUB), label).toStrictEqual({ text: DW_TEXT, source: clean.source });
+        }
+      });
+
+      it("a member that itself has unbalanced quotes (or a cut) is no better than the seed", () => {
+        const open = `“${HABER7_TEXT}`;
+        const odd = `${HABER7_TEXT.slice(0, 20)} "${HABER7_TEXT.slice(20)}`;
+        for (const text of [open, odd, `${HABER7_TEXT}”`]) {
+          const seed = stubSeed();
+          const bad = outlet("Bozuk", "bozuk", "2026-11-04T09:00:00.000Z", text);
+          expect(titleAgreement(TITLE_8, text)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+          expect(withTitle([bad, seed], TITLE_8, SEED_STUB)).toStrictEqual({ text: SEED_STUB, source: seed.source });
+          const clean = haber7();
+          expect(withTitle([bad, clean, seed], TITLE_8, SEED_STUB)?.source).toBe(clean.source);
+        }
+      });
+
+      it("another outlet's copy of the seed's own text is not a replacement", () => {
+        const seed = stubSeed();
+        const copy = outlet("Kopyacı", "kopyaci", "2026-11-04T09:00:00.000Z", SEED_STUB);
+        const tidiedCopy = outlet("Kopyacı 2", "kopyaci-2", "2026-11-04T09:10:00.000Z", `${SEED_STUB} Devamı için tıklayınız`);
+        expect(withTitle([tidiedCopy, copy, seed], TITLE_8, SEED_STUB)).toStrictEqual({ text: SEED_STUB, source: seed.source });
+        const odd = 'Michigan\'da "Senato seçimini kazanan Abdul El Sayed, ABD\'de Senato\'ya seçilen ilk Müslüman oldu.';
+        const oddSeed = outlet("TRT Haber", "trt-haber", SEED_AT, odd);
+        const oddCopy = outlet("Kopyacı", "kopyaci", "2026-11-04T09:00:00.000Z", odd);
+        expect(titleAgreement(TITLE_8, odd)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+        expect(withTitle([oddCopy, oddSeed], TITLE_8, odd)).toStrictEqual({ text: odd, source: oddSeed.source });
+      });
+
+      it.each([
+        ["wire kind", { kind: "wire" as const }],
+        ["aggregator kind", { kind: "aggregator" as const }],
+        ["a source that asked not to be excerpted", { allowed: false }],
+      ])("%s is skipped", (_label, extra) => {
+        const seed = stubSeed();
+        const strong = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", TURKIYE_TEXT, extra);
+        expect(withTitle([strong, seed], TITLE_8, SEED_STUB)).toStrictEqual({ text: SEED_STUB, source: seed.source });
+        const next = dw();
+        expect(withTitle([strong, next, seed], TITLE_8, SEED_STUB)?.source).toBe(next.source);
+      });
+
+      it("a near copy of a wire member's text is the agency's: skipped", () => {
+        const seed = stubSeed();
+        const agency = outlet("Ajans", "ajans", "2026-11-04T08:00:00.000Z", TURKIYE_TEXT, { kind: "wire" });
+        const copier = outlet(
+          "Kopyacı",
+          "kopyaci",
+          "2026-11-04T09:00:00.000Z",
+          "ABD’deki ara seçimlerde Michigan eyaletinde, Müslüman aday Abdul el-Sayed, Cumhuriyetçi rakibi Mike Rogers’a üstünlük sağlayarak ABD Senatosuna seçilen ilk Müslüman oldu.",
+        );
+        expect(withTitle([copier, agency, seed], TITLE_8, SEED_STUB)).toStrictEqual({ text: SEED_STUB, source: seed.source });
+      });
+
+      it("a member in another language, a wire-majority hash and a short text are skipped", () => {
+        const seed = stubSeed();
+        const english = outlet(
+          "Daily Sabah",
+          "daily-sabah",
+          "2026-11-04T09:00:00.000Z",
+          "Abdul El Sayed won the Michigan race and became the first Muslim elected to the Senate, ABD Senato ilk Müslüman Abdul El Sayed.",
+        );
+        const short = outlet("Kısa", "kisa", "2026-11-04T09:05:00.000Z", "Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu.");
+        const dispatchA = outlet("A", "a", "2026-11-04T09:10:00.000Z", TURKIYE_TEXT, { hash: "dispatch" });
+        const dispatchB = outlet("B", "b", "2026-11-04T09:20:00.000Z", null, { hash: "dispatch" });
+        const dispatchC = outlet("C", "c", "2026-11-04T09:30:00.000Z", null, { hash: "dispatch" });
+        seed.article.content_hash = "own";
+        expect(withTitle([english, short, seed], TITLE_8, SEED_STUB)).toStrictEqual({ text: SEED_STUB, source: seed.source });
+        expect(withTitle([dispatchA, dispatchB, dispatchC, seed], TITLE_8, SEED_STUB, wireDispatch)).toStrictEqual({
+          text: SEED_STUB,
+          source: seed.source,
+        });
+      });
+    });
+
+    describe("7. the gates in front of the choice are untouched", () => {
+      it("a defective seed that every holder asked not to be excerpted is still hidden", () => {
+        const blocked = outlet("Engelli", "engelli", SEED_AT, HAMANEY_SEED, { allowed: false });
+        const agrees = outlet("Habertürk", "haberturk", "2026-11-04T12:03:40.000Z", HAMANEY_AGREES);
+        expect(withTitle([agrees, blocked], HAMANEY_TITLE, HAMANEY_SEED)).toBeNull();
+      });
+
+      it("a defective seed that is the wire dispatch's copy is still hidden", () => {
+        const { members } = vanceMembers();
+        const seed = members.find((m) => m.source.slug === "serbestiyet")!;
+        seed.article.content_hash = "dispatch";
+        members.filter((m) => m.source.slug !== "serbestiyet").slice(0, 2).forEach((m) => {
+          m.article.content_hash = "dispatch";
+        });
+        expect(withTitle(members, VANCE_TITLE, VANCE_SEED, wireDispatch)).toBeNull();
+        expect(withTitle(members, VANCE_TITLE, VANCE_SEED, notWire)?.source?.slug).toBe("aksam");
+      });
+
+      it("a blank summary and a summary no member holds behave as before", () => {
+        const { members } = vanceMembers();
+        expect(withTitle(members, VANCE_TITLE, "   ")).toBeNull();
+        const stored = 'Başka bir metin, hiçbir üyenin açıklaması olmayan, "saklanmış bir özet metni.';
+        expect(withTitle(members, VANCE_TITLE, stored)).toStrictEqual({ text: stored, source: null });
+      });
+
+      it("does not mutate its inputs", () => {
+        const { members } = vanceMembers();
+        const before = JSON.stringify(members);
+        withTitle(members, VANCE_TITLE, VANCE_SEED);
+        expect(JSON.stringify(members)).toBe(before);
+      });
+    });
+
+    it("8. a big roster (1,000 members) behind a defective seed is scored in one linear pass", () => {
+      const { members, aksam } = vanceMembers();
+      for (let i = 0; i < 1000; i++) {
+        members.push(
+          outlet(`Kaynak ${i}`, `kaynak-${i}`, `2026-11-04T18:${String(i % 60).padStart(2, "0")}:00.000Z`, `Başka bir olay ${i} hakkında ayrıntılı bilgi veren ve konuyla ilgisi olmayan uzun bir açıklama metni.`),
+        );
+      }
+      const start = Date.now();
+      const out = withTitle(members, VANCE_TITLE, VANCE_SEED);
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(out?.source).toBe(aksam.source);
     });
   });
 

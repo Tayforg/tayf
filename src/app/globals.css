@@ -1,5 +1,17 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* Tailwind 4 scans every non-ignored file under the project root for class
+   candidates. Tests and fixtures never reach a browser, but their strings did
+   reach this render-blocking sheet (an invalid arbitrary height lifted from a
+   doc comment, a width utility from a copy-register test, ...: about 12 kB raw
+   of dead rules). Paths are relative to this file. Only sources that never ship
+   may be listed here: the admin pages render in production and stay scanned,
+   and so does scripts/ (the admin content-twins view imports from it). Pinned
+   by tests/styles/tailwind-sources.test.ts. */
+@source not "../../tests";
+@source not "../**/*.test.ts";
+@source not "../**/*.test.tsx";
+@source not "../**/__fixtures__";
 
 @custom-variant dark (&:is(.dark *));
 

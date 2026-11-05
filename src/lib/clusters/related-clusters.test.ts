@@ -1,14 +1,26 @@
 import { describe, it, expect } from "vitest";
 
+import pool from "./__fixtures__/h34-related-pool.json";
 import {
+  RELATED_DUPLICATE_AGREEMENT,
+  RELATED_ENTITY_BONUS,
   RELATED_MAX,
+  RELATED_MIN_ITEMS,
+  RELATED_MIN_SCORE,
+  RELATED_MIN_SHARED_STEMS,
+  buildRelatedBlock,
+  entityKeysIn,
+  isRelatedTitle,
   relatedFeedFor,
   relatedHubLink,
+  relatedModeOf,
+  relatedScore,
   relatedTopicLabel,
   selectRelatedClusters,
   type RelatedCandidate,
   type RelatedFeed,
 } from "./related-clusters";
+import { titleAgreement, titleStemOverlap } from "./summary-agreement";
 import { TOPIC_LABELS_TR, TOPIC_SLUGS } from "./topic-query";
 
 // ---------------------------------------------------------------------------
@@ -20,6 +32,8 @@ type ClusterOverrides = Partial<RelatedCandidate["cluster"]>;
 /**
  * One candidate. `n` drives a distinct, strictly increasing updated_at (one
  * minute apart) so "newest first" is unambiguous unless a test overrides it.
+ * The default title carries three content stems that are unique to the id, so
+ * two default rows are never near-duplicates of each other.
  */
 function cand(
   id: string,
@@ -31,7 +45,7 @@ function cand(
   return {
     cluster: {
       id,
-      title_tr: `Haber ${id} başlığı`,
+      title_tr: `${id}Alfa ${id}Beta ${id}Gama`,
       article_count: 3,
       updated_at: `2026-11-03T10:${minute}:00.000Z`,
       is_archived: false,
@@ -352,13 +366,13 @@ describe("selectRelatedClusters — lang", () => {
       cand(
         "no-sources",
         2,
-        { title_tr: "Central bank holds rates steady" },
-        { articles: [{ title: "Central bank holds rates steady", source_id: "ds" }] },
+        { title_tr: "Parliament passes budget reform" },
+        { articles: [{ title: "Parliament passes budget reform", source_id: "ds" }] },
       ),
       cand(
         "no-articles",
         3,
-        { title_tr: "Central bank holds rates steady" },
+        { title_tr: "Oil prices climb sharply today" },
         { sources },
       ),
     ]);
@@ -409,5 +423,721 @@ describe("RelatedFeed type", () => {
   it("is a closed union", () => {
     const feeds: RelatedFeed[] = [{ kind: "politika" }, { kind: "topic", slug: "spor" }];
     expect(feeds.map((f) => f.kind)).toEqual(["politika", "topic"]);
+  });
+});
+
+// ===========================================================================
+// h34-reader-3: relatedness, near-duplicate removal and the honest 'latest'
+// mode. The block used to be "the 5 newest stories in the same topic", so the
+// Korkuteli CHP-resignation page linked the Bavarian deputy premier's death and
+// Netanyahu, and one block could hold both Erdoğan-Korea clusters.
+// ===========================================================================
+
+/** Either direction: the share of one title's stems the other carries. */
+function agree(a: string, b: string): number {
+  return Math.max(titleAgreement(a, b) ?? 0, titleAgreement(b, a) ?? 0);
+}
+
+/** A cluster row with a title and an update time n minutes into the hour. */
+function titled(id: string, n: number, title: string, rest: ClusterOverrides = {}) {
+  return cand(id, n, { title_tr: title, ...rest });
+}
+
+const CHP_CURRENT = "Korkuteli Belediye Başkanı Saniye Caran, CHP'den istifa etti";
+
+describe("constants", () => {
+  it("pin the decisions of the brief", () => {
+    expect(RELATED_MIN_SCORE).toBe(0.2);
+    expect(RELATED_DUPLICATE_AGREEMENT).toBe(0.6);
+    expect(RELATED_MIN_ITEMS).toBe(2);
+    // One ordinary shared word never relates two stories (h34-reader-3 fix pass).
+    expect(RELATED_MIN_SHARED_STEMS).toBe(2);
+    // The bonus alone must not clear the floor: an entity is supporting
+    // evidence for some wording overlap, never a reason by itself.
+    expect(RELATED_ENTITY_BONUS).toBeGreaterThan(0);
+    expect(RELATED_ENTITY_BONUS).toBeLessThan(RELATED_MIN_SCORE);
+  });
+});
+
+describe("entityKeysIn", () => {
+  it("finds the entity-hub keys a title names, by label and by alias", () => {
+    expect(entityKeysIn("TCMB faiz kararını açıkladı")).toEqual(["faiz", "tcmb"]);
+    expect(entityKeysIn("Merkez Bankası politika faizini sabit tuttu")).toEqual(["faiz", "tcmb"]);
+  });
+
+  it("treats AK Parti and AKP as the same key, with Turkish casing and suffixes folded", () => {
+    expect(entityKeysIn("AK Parti'den açıklama")).toEqual(["akp"]);
+    expect(entityKeysIn("AKP'li vekil istifa etti")).toEqual(["akp"]);
+    expect(entityKeysIn("ERDOĞAN'IN Güney Kore ziyareti")).toEqual(["erdogan"]);
+    expect(entityKeysIn("İYİ Parti kurultayı")).toEqual(["iyi-parti"]);
+  });
+
+  it("keeps the hub's own precision guards (a foreign court is not the AYM)", () => {
+    expect(entityKeysIn("Polonya Anayasa Mahkemesi kararını verdi")).toEqual([]);
+    expect(entityKeysIn("Anayasa Mahkemesi kararını verdi")).toEqual(["aym"]);
+    expect(entityKeysIn("Devam eden süreç")).toEqual([]);
+    expect(entityKeysIn("Belediye meclisi toplandı")).toEqual([]);
+  });
+
+  it("scans only the first 400 characters, so an enormous title costs the same as a long headline", () => {
+    expect(entityKeysIn(`CHP ${"x".repeat(200_000)}`)).toEqual(["chp"]);
+    expect(entityKeysIn(`${"x ".repeat(300)}CHP`)).toEqual([]);
+  });
+
+  it("is empty for a title with no entity, an empty string and a non-string", () => {
+    expect(entityKeysIn("Mekke Anlaşması'nın ilk maddesi kabul edildi")).toEqual([]);
+    expect(entityKeysIn("")).toEqual([]);
+    expect(entityKeysIn(undefined as unknown as string)).toEqual([]);
+    expect(entityKeysIn(null as unknown as string)).toEqual([]);
+    expect(entityKeysIn(42 as unknown as string)).toEqual([]);
+  });
+});
+
+describe("relatedScore", () => {
+  it("is titleAgreement against the current title, plus the entity bonus when a key is shared", () => {
+    const other = "Belediye Başkanı Ali Veli CHP'den istifa etti";
+    // 5 of the current title's 8 content stems; both name CHP.
+    expect(titleAgreement(CHP_CURRENT, other)).toBeCloseTo(5 / 8, 10);
+    expect(relatedScore(CHP_CURRENT, other)).toBeCloseTo(5 / 8 + RELATED_ENTITY_BONUS, 10);
+  });
+
+  it("has no bonus without a shared key", () => {
+    const other = "Belediye Başkanı Ali Veli istifa etti";
+    expect(entityKeysIn(other)).toEqual([]);
+    expect(relatedScore(CHP_CURRENT, other)).toBeCloseTo(4 / 8, 10);
+  });
+
+  it("is 0 for an unrelated title", () => {
+    expect(relatedScore(CHP_CURRENT, "Mekke Anlaşması'nın ilk maddesi kabul edildi")).toBe(0);
+  });
+
+  it("adds the bonus once, however many keys are shared", () => {
+    const a = "TCMB faiz kararını açıkladı";
+    const b = "Merkez Bankası faiz kararı sonrası piyasalar";
+    expect(entityKeysIn(a)).toEqual(["faiz", "tcmb"]);
+    expect(relatedScore(a, b)).toBeCloseTo((titleAgreement(a, b) ?? 0) + RELATED_ENTITY_BONUS, 10);
+  });
+
+  it("is only the bonus, or 0, when the current title is too short to score (null agreement)", () => {
+    expect(titleAgreement("CHP kurultayı", "CHP kurultayı yapıldı")).toBeNull();
+    expect(relatedScore("CHP kurultayı", "CHP kurultayı yapıldı")).toBeCloseTo(RELATED_ENTITY_BONUS, 10);
+    expect(relatedScore("Kısa başlık", "Başka bir haber")).toBe(0);
+  });
+
+  it("never throws on junk", () => {
+    expect(relatedScore(undefined as unknown as string, "x")).toBe(0);
+    expect(relatedScore("x", null as unknown as string)).toBe(0);
+    expect(relatedScore("", "")).toBe(0);
+  });
+});
+
+describe("selectRelatedClusters — relatedness", () => {
+  const current = CHP_CURRENT;
+  // Three facets of the story, pairwise below the 60% duplicate line.
+  const strong = "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı"; // 4/8 + bonus
+  const medium = "Belediye başkanları istifa dalgası"; // 3/8
+  const weak = "Saniye Caran yeni partisine katılacak mı"; // 2/8
+  const unrelated = "Mekke Anlaşması'nın ilk maddesi kabul edildi";
+
+  it("premise: the three facets are related to the page and not to each other", () => {
+    expect(relatedScore(current, strong)).toBeCloseTo(4 / 8 + RELATED_ENTITY_BONUS, 10);
+    expect(relatedScore(current, medium)).toBeCloseTo(3 / 8, 10);
+    expect(relatedScore(current, weak)).toBeCloseTo(2 / 8, 10);
+    expect(relatedScore(current, unrelated)).toBe(0);
+    for (const [x, y] of [[strong, medium], [strong, weak], [medium, weak]] as const) {
+      expect(agree(x, y)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    }
+  });
+
+  it("lists related stories (score >= 0.2) and none that share nothing with the current title", () => {
+    const out = select(
+      [
+        titled("unrelated", 9, unrelated),
+        titled("weak", 8, weak),
+        titled("medium", 5, medium),
+        titled("strong", 1, strong),
+      ],
+      { currentTitle: current },
+    );
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["strong", "medium", "weak"]);
+  });
+
+  it("orders by relatedness first: a better match beats a newer one", () => {
+    const out = select(
+      [titled("newer-weaker", 9, medium), titled("older-stronger", 1, strong)],
+      { currentTitle: current },
+    );
+    expect(ids(out)).toEqual(["older-stronger", "newer-weaker"]);
+  });
+
+  it("breaks a tie by updated_at descending (then id descending)", () => {
+    const a = "Belediye Başkanı Ali Veli istifa etti"; // beled baska istif etti = 4/8
+    const b = "Korkuteli Caran yerine kimse gelmedi istifa etti"; // korku caran istif etti = 4/8
+    expect(relatedScore(current, a)).toBeCloseTo(relatedScore(current, b), 10);
+    expect(agree(a, b)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    expect(ids(select([titled("old", 1, a), titled("new", 2, b)], { currentTitle: current }))).toEqual([
+      "new",
+      "old",
+    ]);
+    const same = "2026-11-03T10:00:00.000Z";
+    expect(
+      ids(
+        select(
+          [titled("aaa", 1, a, { updated_at: same }), titled("zzz", 1, b, { updated_at: same })],
+          { currentTitle: current },
+        ),
+      ),
+    ).toEqual(["zzz", "aaa"]);
+  });
+
+  it("keeps the floor inclusive: exactly 0.2 is related, just under is not", () => {
+    // 10 content stems in the current title: two shared stems = 0.2, the floor.
+    const cur = "Alfa Beta Gama Delta Epsilon Zeta Kappa Lambda Sigma Omega";
+    const exactly = "Alfa Beta festivali başladı";
+    const alsoExactly = "Gama Delta konseri başladı";
+    const under = "Alfa festivali başladı"; // 1/10
+    expect(relatedScore(cur, exactly)).toBeCloseTo(0.2, 10);
+    expect(relatedScore(cur, alsoExactly)).toBeCloseTo(0.2, 10);
+    expect(isRelatedTitle(cur, exactly)).toBe(true);
+    expect(isRelatedTitle(cur, under)).toBe(false);
+    const out = select(
+      [titled("one", 1, exactly), titled("two", 2, alsoExactly), titled("none", 3, under)],
+      { currentTitle: cur },
+    );
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["two", "one"]);
+
+    // Two shared stems but just under the floor (2/11): not related either.
+    const cur11 = `${cur} Theta`;
+    expect(relatedScore(cur11, exactly)).toBeCloseTo(2 / 11, 10);
+    expect(isRelatedTitle(cur11, exactly)).toBe(false);
+  });
+
+  // h34-reader-3 fix pass. titleAgreement is the share of the CURRENT title's
+  // stems, so with 5 stems one shared word is exactly 0.2 and cleared the floor:
+  // "Cumhurbaşkanı" alone related a Rutte story to an Erdoğan one, and a single
+  // such story could fill the second slot and keep the block under "İlgili
+  // haberler". One ordinary word is not evidence of a shared story.
+  describe("one ordinary shared word never relates two stories", () => {
+    const cur = "Kestane Lokanta Marmara Nergis Orman"; // 5 content stems
+    const one = "Kestane festivali başladı"; // 1 shared stem = 0.2
+    const other = "Lokanta ruhsatı iptal edildi"; // 1 shared stem = 0.2
+    const two = "Kestane Lokanta ruhsatı iptal edildi"; // 2 shared stems = 0.4
+    const alsoTwo = "Marmara Nergis festivali başladı"; // 2 shared stems = 0.4
+
+    it("premise: each of the one-word stories scores exactly the old floor", () => {
+      expect(relatedScore(cur, one)).toBeCloseTo(0.2, 10);
+      expect(relatedScore(cur, other)).toBeCloseTo(0.2, 10);
+      expect(titleStemOverlap(cur, one)).toEqual({ shared: 1, total: 5 });
+    });
+
+    it("isRelatedTitle: one shared word is not enough, two are, a shared entity carries one", () => {
+      expect(isRelatedTitle(cur, one)).toBe(false);
+      expect(isRelatedTitle(cur, two)).toBe(true);
+      expect(isRelatedTitle(CHP_CURRENT, "CHP Genel Merkezi'nde toplantı")).toBe(true);
+      expect(isRelatedTitle(CHP_CURRENT, "Belediye toplantısı yapıldı")).toBe(false);
+    });
+
+    it("two one-word stories fall back to 'latest' instead of filling the block", () => {
+      const out = select([titled("a", 1, one), titled("b", 2, other)], { currentTitle: cur });
+      expect(out.mode).toBe("latest");
+      expect(ids(out)).toEqual(["b", "a"]);
+    });
+
+    it("a one-word story cannot be the second slot beside a real one", () => {
+      const out = select([titled("real", 1, two), titled("weak", 2, one)], { currentTitle: cur });
+      expect(out.mode).toBe("latest");
+      expect(ids(out)).toEqual(["weak", "real"]);
+    });
+
+    it("a one-word story is not listed under 'İlgili haberler' next to two real ones", () => {
+      const out = select(
+        [titled("real", 1, two), titled("real2", 2, alsoTwo), titled("weak", 3, one)],
+        { currentTitle: cur },
+      );
+      expect(out.mode).toBe("related");
+      expect(ids(out)).toEqual(["real2", "real"]);
+    });
+
+    it("still relates a single shared word when it is a shared entity (the hub's own aliases carry it)", () => {
+      const withEntity = "CHP Genel Merkezi'nde toplantı";
+      const second = "Başkan Yardımcısı CHP'den istifa etti";
+      const out = select([titled("e", 1, withEntity), titled("s", 2, second)], { currentTitle: CHP_CURRENT });
+      expect(out.mode).toBe("related");
+      expect(ids(out)).toEqual(["s", "e"]);
+    });
+  });
+
+  it("lets a shared entity lift a one-stem overlap over the floor, and only then", () => {
+    const withEntity = "CHP Genel Merkezi'nde toplantı"; // shares the CHP stem and the CHP key
+    const withoutEntity = "Belediye toplantısı yapıldı"; // shares one stem, no key
+    const second = "Başkan Yardımcısı CHP'den istifa etti";
+    expect(titleAgreement(current, withEntity)).toBeLessThan(RELATED_MIN_SCORE);
+    expect(titleAgreement(current, withoutEntity)).toBeLessThan(RELATED_MIN_SCORE);
+    expect(relatedScore(current, withEntity)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+    expect(relatedScore(current, withoutEntity)).toBeLessThan(RELATED_MIN_SCORE);
+    const out = select(
+      [titled("e", 1, withEntity), titled("n", 2, withoutEntity), titled("s", 3, second)],
+      { currentTitle: current },
+    );
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["s", "e"]);
+  });
+
+  it("matches aliases the wording does not share (TCMB and Merkez Bankası)", () => {
+    const cur = "Merkez Bankası politika faizini yüzde 40'ta sabit tuttu";
+    const alias = "TCMB başkanı yeni dönem için ilk toplantıyı yaptı"; // shares one stem + the tcmb key
+    const also = "Merkez Bankası rezervleri arttı"; // 2 stems
+    expect(titleAgreement(cur, alias)).toBeLessThan(RELATED_MIN_SCORE);
+    expect(ids(select([titled("alias", 1, alias), titled("also", 2, also)], { currentTitle: cur }))).toEqual([
+      "also",
+      "alias",
+    ]);
+  });
+});
+
+describe("selectRelatedClusters — near-duplicates", () => {
+  const cur = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretini tamamladı";
+  const left = "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı";
+  const back = "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü";
+
+  it("premise: the two Erdoğan-Korea headlines agree well over 60% (one direction is enough)", () => {
+    expect(agree(left, back)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+  });
+
+  it("yields only the newer of two near-duplicates, whichever order they arrive in", () => {
+    const extra = "Erdoğan Kore dönüşü kabine toplantısı yapacak"; // distinct, still related
+    const a = [titled("left", 5, left), titled("back", 9, back), titled("extra", 1, extra)];
+    for (const bundles of [a, [...a].reverse()]) {
+      const out = select(bundles, { currentTitle: cur });
+      expect(ids(out)).not.toEqual(expect.arrayContaining(["left", "back"]));
+      expect(ids(out)).toContain("back");
+      expect(ids(out)).not.toContain("left");
+    }
+  });
+
+  it("keeps the newer one even when the older scores higher", () => {
+    const olderTitle = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretini tamamladı yurda döndü";
+    const newerTitle = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretinden döndü";
+    const third = "Erdoğan Kore dönüşü kabine toplantısı yapacak";
+    expect(relatedScore(cur, olderTitle)).toBeGreaterThan(relatedScore(cur, newerTitle));
+    expect(agree(olderTitle, newerTitle)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+    expect(agree(newerTitle, third)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    const out = select(
+      [titled("older-higher", 1, olderTitle), titled("newer-lower", 9, newerTitle), titled("x", 3, third)],
+      { currentTitle: cur },
+    );
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["newer-lower", "x"]);
+  });
+
+  it("drops at exactly 60% agreement and keeps a title just under it", () => {
+    const base = "Kestane Lokanta Marmara Nergis Orman";
+    const sixty = "Kestane Lokanta Marmara Zeytin Yonca"; // 3 of 5 either way
+    const forty = "Kestane Lokanta Zeytin Yonca Papaz"; // 2 of 5 either way
+    expect(agree(base, sixty)).toBeCloseTo(0.6, 10);
+    expect(agree(base, forty)).toBeCloseTo(0.4, 10);
+    const out = select([titled("base", 9, base), titled("sixty", 5, sixty), titled("forty", 3, forty)]);
+    expect(ids(out)).toEqual(["base", "forty"]);
+  });
+
+  it("also dedupes in 'latest' mode, newest first", () => {
+    const out = select([titled("a", 1, left), titled("b", 2, back), titled("c", 3, "Dolar kuru güne yükselişle başladı")]);
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["c", "b"]);
+  });
+
+  it("dedupes equal folded titles even when they are too short for titleAgreement", () => {
+    const out = select([
+      titled("old", 1, "ışık  YANDI"),
+      titled("new", 2, "  Işık yandı "),
+      titled("other", 3, "Su kesildi"),
+    ]);
+    expect(ids(out)).toEqual(["other", "new"]);
+  });
+
+  it("compares against every kept item, not only the last one", () => {
+    const first = "Kestane Lokanta Marmara Nergis Orman";
+    const second = "Zeytin Yonca Papaz Sedir Tunç";
+    const third = "Kestane Lokanta Marmara Fiyat Rapor"; // duplicates the OLDER of the kept two
+    const out = select([titled("first", 3, first), titled("second", 4, second), titled("third", 2, third)]);
+    expect(ids(out)).toEqual(["second", "first"]);
+  });
+
+  it("drops a candidate that shares at least half of its members with the current cluster", () => {
+    const art = (id: string) => ({ id, title: "t", source_id: `s-${id}` });
+    const bundles: RelatedCandidate[] = [
+      cand("self", 9, { title_tr: CHP_CURRENT }, { articles: [art("a1"), art("a2"), art("a3"), art("a4")] }),
+      // 2 of 4 shared: exactly half, dropped (a stale pre-merge twin).
+      titled("half", 8, "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı", {}),
+      titled("few", 7, "Belediye başkanları istifa dalgası", {}),
+      titled("plain", 6, "Saniye Caran yeni partisine katılacak mı", {}),
+    ];
+    bundles[1] = {
+      ...(bundles[1] as RelatedCandidate),
+      articles: [art("a1"), art("a2"), art("x3"), art("x4")],
+    };
+    bundles[2] = {
+      ...(bundles[2] as RelatedCandidate),
+      articles: [art("a1"), art("y2"), art("y3"), art("y4")],
+    };
+    const out = select(bundles, { currentId: "self", currentTitle: CHP_CURRENT });
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["few", "plain"]);
+  });
+
+  it("does nothing about members when the current cluster is not in the pool, or articles are absent", () => {
+    const art = (id: string) => ({ id, title: "t", source_id: `s-${id}` });
+    const out = select(
+      [
+        titled("with-articles", 2, "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı", {}),
+        titled("bare", 1, "Belediye başkanları istifa dalgası"),
+      ].map((c, i) => (i === 0 ? { ...c, articles: [art("a1"), art("a2")] } : c)),
+      { currentId: "elsewhere", currentTitle: CHP_CURRENT },
+    );
+    expect(ids(out)).toEqual(["with-articles", "bare"]);
+  });
+});
+
+describe("selectRelatedClusters — 'latest' mode", () => {
+  // Three content stems unique to i, none shared with any other i or with the CHP title.
+  const distinct = (i: number) => `k${i}aaaa k${i}bbbb k${i}cccc`;
+
+  it("is 'latest', newest first, when nothing relates", () => {
+    const out = select(
+      [titled("a", 1, "Mekke Anlaşması'nın ilk maddesi kabul edildi"), titled("b", 3, "Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi")],
+      { currentTitle: CHP_CURRENT },
+    );
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["b", "a"]);
+  });
+
+  it("is 'latest' when exactly one candidate relates (fewer than 2), and lists the newest, not only that one", () => {
+    const out = select(
+      [
+        titled("rel", 1, "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı"),
+        titled("n1", 2, "Mekke Anlaşması'nın ilk maddesi kabul edildi"),
+        titled("n2", 3, "Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi"),
+      ],
+      { currentTitle: CHP_CURRENT },
+    );
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["n2", "n1", "rel"]);
+  });
+
+  it("counts two near-duplicate related candidates as one story, so it falls back to 'latest'", () => {
+    const cur = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretini tamamladı";
+    const out = select(
+      [
+        titled("left", 1, "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı"),
+        titled("back", 2, "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü"),
+        titled("other", 3, "Dolar kuru güne yükselişle başladı"),
+      ],
+      { currentTitle: cur },
+    );
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["other", "back"]);
+  });
+
+  it("is 'related' from two related stories up, even if that is fewer than five", () => {
+    const out = select(
+      [
+        titled("a", 1, "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı"),
+        titled("b", 2, "Belediye başkanları istifa dalgası"),
+        titled("n", 3, "Mekke Anlaşması'nın ilk maddesi kabul edildi"),
+      ],
+      { currentTitle: CHP_CURRENT },
+    );
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["a", "b"]);
+  });
+
+  it("is 'latest' with no items for an empty pool (the page then renders nothing)", () => {
+    const out = select([]);
+    expect(out.mode).toBe("latest");
+    expect(out).toHaveLength(0);
+  });
+
+  it("is 'latest' when the current title is too short to compare", () => {
+    const out = select([titled("a", 1, distinct(1)), titled("b", 2, distinct(2))], { currentTitle: "Kısa" });
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["b", "a"]);
+  });
+
+  it("applies every exclusion in 'latest' mode too (self, single-article, archived, merged, contentless)", () => {
+    const out = select([
+      cand("self", 9),
+      titled("single", 8, "Tek haber başlığı burada", { article_count: 1 }),
+      titled("archived", 7, "Arşivlenmiş haber başlığı burada", { is_archived: true }),
+      titled("merged", 6, "Birleşmiş haber başlığı burada", { merged_into: "22222222-2222-4222-8222-222222222222" }),
+      titled("junk", 5, "&nbsp;"),
+      titled("ok", 1, "Normal haber başlığı burada"),
+    ]);
+    expect(ids(out)).toEqual(["ok"]);
+  });
+
+  it("never lists more than RELATED_MAX in either mode", () => {
+    // One shared stem (chp) plus the key: related, and pairwise far from duplicates.
+    const many = Array.from({ length: 12 }, (_, i) => titled(`c${i}`, i + 1, `CHP ${distinct(i)}`));
+    const related = select(many, { currentTitle: CHP_CURRENT });
+    expect(related.mode).toBe("related");
+    expect(related).toHaveLength(RELATED_MAX);
+    const latestMany = Array.from({ length: 12 }, (_, i) => titled(`l${i}`, i + 1, distinct(i)));
+    const latest = select(latestMany);
+    expect(latest.mode).toBe("latest");
+    expect(latest).toHaveLength(RELATED_MAX);
+  });
+});
+
+describe("selectRelatedClusters — the return value carries the mode", () => {
+  it("is a real array whose mode does not show up when it is spread, listed or serialised", () => {
+    const out = select([titled("a", 1, "Dolar kuru güne yükselişle başladı")]);
+    expect(Array.isArray(out)).toBe(true);
+    expect(out.mode).toBe("latest");
+    expect(relatedModeOf(out)).toBe("latest");
+    expect(Object.keys(out)).toEqual(["0"]);
+    expect(JSON.parse(JSON.stringify(out))).toEqual([expect.objectContaining({ id: "a" })]);
+    expect([...out]).toHaveLength(1);
+    expect(select([])).toEqual([]);
+  });
+
+  it("relatedModeOf reads 'latest' only from a real 'latest' marker; anything else is the legacy 'related'", () => {
+    const related = select(
+      [
+        titled("a", 1, "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı"),
+        titled("b", 2, "Belediye başkanları istifa dalgası"),
+      ],
+      { currentTitle: CHP_CURRENT },
+    );
+    expect(related.mode).toBe("related");
+    expect(relatedModeOf(related)).toBe("related");
+    expect(relatedModeOf([])).toBe("related");
+    expect(relatedModeOf(undefined as unknown as unknown[])).toBe("related");
+    expect(relatedModeOf(Object.assign([], { mode: "bogus" }))).toBe("related");
+  });
+
+  it("buildRelatedBlock gives the same answer as a plain {mode, items} object", () => {
+    const bundles = [
+      titled("a", 1, "Mekke Anlaşması'nın ilk maddesi kabul edildi"),
+      titled("b", 2, "Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi"),
+    ];
+    const block = buildRelatedBlock({
+      currentId: "self",
+      currentTitle: CHP_CURRENT,
+      topic: "politika",
+      bundles,
+    });
+    expect(block).toEqual({ mode: "latest", items: [expect.objectContaining({ id: "b" }), expect.objectContaining({ id: "a" })] });
+    expect(Array.isArray(block.items)).toBe(true);
+    expect(Object.keys(block).sort()).toEqual(["items", "mode"]);
+    expect(block.items.map((i) => i.id)).toEqual(ids(select(bundles, { currentTitle: CHP_CURRENT, topic: "politika" })));
+  });
+
+  it("does not mutate its input in either mode", () => {
+    const bundles = [
+      titled("a", 1, "Korkuteli'de CHP'li belediye başkanı partisinden ayrıldı"),
+      titled("b", 2, "Belediye başkanları istifa dalgası"),
+      titled("c", 3, "Mekke Anlaşması'nın ilk maddesi kabul edildi"),
+    ];
+    const snapshot = JSON.stringify(bundles);
+    select(bundles, { currentTitle: CHP_CURRENT });
+    select(bundles);
+    expect(JSON.stringify(bundles)).toBe(snapshot);
+  });
+
+  it("stays fast and bounded on a large pool (5,000 candidates)", () => {
+    const big = Array.from({ length: 5000 }, (_, i) =>
+      cand(`id-${String(i).padStart(5, "0")}`, i % 60, {
+        title_tr: `Haber${i}Alfa Haber${i}Beta Haber${i}Gama CHP`,
+        updated_at: new Date(Date.UTC(2026, 10, 3, 0, 0, 0) + i * 1000).toISOString(),
+      }),
+    );
+    const out = select(big, { currentTitle: CHP_CURRENT });
+    expect(out.length).toBeLessThanOrEqual(RELATED_MAX);
+    expect(out[0]?.id).toBe("id-04999");
+  });
+
+  it("survives junk rows and junk titles", () => {
+    const junk = [
+      null,
+      undefined,
+      {},
+      { cluster: null },
+      { cluster: { id: 5 } },
+      { cluster: { id: "x", title_tr: 7, article_count: 3, updated_at: "2026-11-03T10:00:00Z" } },
+      titled("ok", 1, "Normal haber başlığı burada"),
+    ] as unknown as RelatedCandidate[];
+    expect(ids(select(junk))).toEqual(["ok"]);
+    expect(
+      ids(select([titled("ok", 1, "Normal haber başlığı burada")], { currentTitle: undefined as unknown as string })),
+    ).toEqual(["ok"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The live pool (read-only export of 2026-11-05, src/lib/clusters/__fixtures__/
+// h34-related-pool.json): pools.politika is the home feed (what a 'politika'
+// cluster page reads), pools.<slug> is /konu/<slug> page 1, and `pages` are the
+// 30 cluster pages of the home feed with their stored topic7.
+// ---------------------------------------------------------------------------
+
+type PoolRow = { id: string; title_tr: string; article_count: number; updated_at: string };
+const POOLS = pool.pools as Record<string, PoolRow[]>;
+const PAGES = pool.pages as { id: string; topic7: string | null; headline: string }[];
+
+function poolFor(key: string): RelatedCandidate[] {
+  return (POOLS[key] ?? []).map((c) => ({ cluster: { ...c, is_archived: false, merged_into: null } }));
+}
+
+function pageOf(prefix: string) {
+  const page = PAGES.find((p) => p.id.startsWith(prefix));
+  if (!page) throw new Error(`fixture has no page ${prefix}`);
+  return page;
+}
+
+/** What /cluster/<id> renders today: the feed its topic7 names, or null (no block). */
+function blockFor(page: { id: string; topic7: string | null; headline: string }) {
+  const feed = relatedFeedFor(page.topic7);
+  if (!feed) return null;
+  const topic = feed.kind === "topic" ? feed.slug : "politika";
+  return selectRelatedClusters({
+    currentId: page.id,
+    currentTitle: page.headline,
+    topic,
+    bundles: poolFor(topic),
+  });
+}
+
+describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
+  it("fixture sanity: 30 home pages, the home pool and the six hub pools", () => {
+    expect(PAGES).toHaveLength(30);
+    expect(POOLS.politika).toHaveLength(30);
+    for (const slug of TOPIC_SLUGS) expect((POOLS[slug] ?? []).length).toBeGreaterThan(0);
+    for (const rows of Object.values(POOLS)) {
+      for (const r of rows) {
+        expect(typeof r.id).toBe("string");
+        expect(typeof r.title_tr).toBe("string");
+        expect(r.article_count).toBeGreaterThanOrEqual(2);
+        expect(Number.isNaN(Date.parse(r.updated_at))).toBe(false);
+      }
+    }
+  });
+
+  it("Korkuteli CHP-resignation page: no Bavarian death, Netanyahu or Mekke list, and no pretence of relatedness", () => {
+    const page = pageOf("9b5ba0c6");
+    expect(page.headline).toBe(CHP_CURRENT);
+    const out = blockFor(page);
+    expect(out).not.toBeNull();
+    const got = out ?? [];
+    // Nothing in the pool is about a CHP resignation or a municipality, so the
+    // honest block is the latest list, not "İlgili haberler".
+    expect(got.mode).toBe("latest");
+    // And in whatever mode: if it were 'related', no item may share nothing.
+    if (got.mode === "related") {
+      for (const item of got) expect(relatedScore(page.headline, item.title)).toBeGreaterThan(0);
+    }
+  });
+
+  it("never claims 'related' for an item with zero stem overlap AND no shared entity", () => {
+    for (const page of PAGES) {
+      const out = blockFor(page);
+      if (!out || out.mode !== "related") continue;
+      for (const item of out) {
+        expect(relatedScore(page.headline, item.title)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+      }
+    }
+  });
+
+  it("Erdoğan-leaves-Korea page: the trip's stories are related, Rutte's and Şara's lone 'Cumhurbaşkanı' is not", () => {
+    const page = pageOf("2b8d3632");
+    const out = blockFor(page) ?? [];
+    expect(out.mode).toBe("related");
+    const got = ids(out).map((id) => id.slice(0, 8));
+    expect(got).toEqual(["d91ab2f1", "2408b41e", "f85bc48e"]);
+    expect(got).not.toContain("9f18b020"); // Rutte / Kuzey Makedonya Cumhurbaşkanı
+    expect(got).not.toContain("909f6421"); // Suriye Cumhurbaşkanı Şara
+  });
+
+  it("every item of a 'related' block shares two content stems with the page or an entity key, and clears the floor", () => {
+    let related = 0;
+    for (const page of PAGES) {
+      const out = blockFor(page);
+      if (!out || out.mode !== "related") continue;
+      related++;
+      for (const item of out) {
+        const o = titleStemOverlap(page.headline, item.title);
+        const keys = entityKeysIn(page.headline);
+        const shareEntity = entityKeysIn(item.title).some((k) => keys.includes(k));
+        expect(isRelatedTitle(page.headline, item.title), `${page.id.slice(0, 8)} <- ${item.title}`).toBe(true);
+        expect((o?.shared ?? 0) >= RELATED_MIN_SHARED_STEMS || (shareEntity && (o?.shared ?? 0) >= 1)).toBe(true);
+      }
+    }
+    expect(related).toBeGreaterThan(0);
+  });
+
+  it("Spain-minister page: the two Erdoğan-Korea clusters no longer share a block, and the newer one stays", () => {
+    const out = blockFor(pageOf("85b2e468")) ?? [];
+    const korea = ids(out).filter((id) => id.startsWith("d91ab2f1") || id.startsWith("2b8d3632"));
+    expect(korea).toHaveLength(1);
+    expect(korea[0]?.startsWith("d91ab2f1")).toBe(true); // 20:58 beats 20:04
+    // Only one story of the pool is about the Spanish train-crash resignation,
+    // so the block is the honest latest list rather than "İlgili haberler".
+    expect(out.mode).toBe("latest");
+  });
+
+  it("Erdoğan-returns-from-Korea page: related, led by the sibling cluster and the trip's other stories", () => {
+    const page = pageOf("d91ab2f1");
+    const out = blockFor(page) ?? [];
+    expect(out.mode).toBe("related");
+    expect(out[0]?.id.startsWith("2b8d3632")).toBe(true);
+    expect(out.length).toBeGreaterThanOrEqual(RELATED_MIN_ITEMS);
+    for (const item of out) expect(relatedScore(page.headline, item.title)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+  });
+
+  it("US-midterms pages list midterms stories only: the Hamaney reaction page", () => {
+    const page = pageOf("78e56dca");
+    const out = blockFor(page) ?? [];
+    expect(out.mode).toBe("related");
+    expect(out).toHaveLength(RELATED_MAX);
+    for (const item of out) expect(item.title).toMatch(/ABD|Trump|seçim/i);
+  });
+
+  it("every page: at most 5, never itself, no pair of near-duplicates, and the mode matches the content", () => {
+    for (const page of PAGES) {
+      const out = blockFor(page);
+      if (!out) {
+        expect(relatedFeedFor(page.topic7)).toBeNull();
+        continue;
+      }
+      expect(out.length).toBeLessThanOrEqual(RELATED_MAX);
+      expect(ids(out)).not.toContain(page.id);
+      for (let i = 0; i < out.length; i++) {
+        for (let j = i + 1; j < out.length; j++) {
+          expect(agree((out[i] as { title: string }).title, (out[j] as { title: string }).title)).toBeLessThan(
+            RELATED_DUPLICATE_AGREEMENT,
+          );
+        }
+      }
+      if (out.mode === "related") {
+        expect(out.length).toBeGreaterThanOrEqual(RELATED_MIN_ITEMS);
+        const scores = out.map((i) => relatedScore(page.headline, i.title));
+        expect(scores).toEqual([...scores].sort((a, b) => b - a));
+      }
+    }
+  });
+
+  it("'latest' blocks list the newest stories first", () => {
+    const updated = new Map<string, number>();
+    for (const rows of Object.values(POOLS)) for (const r of rows) updated.set(r.id, Date.parse(r.updated_at));
+    let latest = 0;
+    for (const page of PAGES) {
+      const out = blockFor(page);
+      if (!out || out.mode !== "latest") continue;
+      latest++;
+      const times = out.map((i) => updated.get(i.id) ?? 0);
+      expect(times).toEqual([...times].sort((a, b) => b - a));
+    }
+    expect(latest).toBeGreaterThan(0);
   });
 });

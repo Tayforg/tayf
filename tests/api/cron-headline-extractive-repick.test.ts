@@ -265,7 +265,7 @@ describe("extractive re-pick: the rpc call", () => {
     expect(res.status).toBe(200);
     expect(repickCalls()).toHaveLength(1);
     expect(repickCalls()[0]!.args).toEqual({ p_model: EXTRACTIVE_MODEL_ID, p_limit: 20 });
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v5");
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
   });
 
   it("never calls it in llm mode", async () => {
@@ -711,7 +711,7 @@ describe("extractive re-pick (hunt 16): the stored title is the incumbent", () =
     const patch = patchOf(updateFor("97575687")!);
     expect(patch.title_tr_neutral).toMatch(/BES|birikim/i);
     expect(patch.title_tr_neutral).not.toBe(BEDELLI_FRAGMENT);
-    expect(patch.title_neutral_model).toBe("extractive-v5");
+    expect(patch.title_neutral_model).toBe("extractive-v6");
     expect(patch.title_neutral_member_count).toBe(6);
     expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:97575687", "max");
     expect(revalidateTagMock).toHaveBeenCalledWith("clusters-politics", "max");

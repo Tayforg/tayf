@@ -25,7 +25,9 @@ Each ping sends `keyLocation` = `<site>/indexnow-key.txt`.
 and Yandex) with `{ host, key, keyLocation, urlList }`. URLs are
 `<site>/cluster/<id>` for clusters from `cluster-detail:<uuid>` tags received by
 `POST /api/revalidate`, limited to non-archived clusters with `article_count >= 2`
-(same eligibility as the clusters sitemap). The ping runs after the response.
+whose served title is not a question or an SEO explainer (same eligibility as the
+clusters sitemaps: the cluster page serves such a cluster `noindex`, see
+`src/lib/seo/indexable-title.ts`). The ping runs after the response.
 
 ## Limits
 
