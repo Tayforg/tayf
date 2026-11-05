@@ -37,6 +37,7 @@ import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts
 import {
   deserializeSignature,
   fingerprint,
+  foldTurkishWord,
   MINHASH_VERSION,
   serializeSignature,
   headlineTokens,
@@ -49,16 +50,29 @@ import {
 import { extractEntities } from "../_shared/cluster/entities.ts";
 import { bandKeys, LSH_BANDS } from "../_shared/cluster/lsh.ts";
 import { TfidfIndex, type TfidfQuery } from "../_shared/cluster/tfidf.ts";
-import { headlineLane, headlineOnlyScore, score } from "../_shared/cluster/ensemble.ts";
+import {
+  headlineLane,
+  headlineOnlyScore,
+  incidentVetoFires,
+  score,
+  subjectVetoFires,
+} from "../_shared/cluster/ensemble.ts";
 import {
   CONTEXT_STICKY_HOURS,
   CONTEXT_STICKY_MAX,
   CONTEXT_STICKY_MIN_ARTICLES,
+  GENERIC_ENTITIES,
+  HEADLINE_GENERIC_PREFIXES,
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_MEMBER_SCAN_MAX,
+  HEADLINE_TITLE_MAX_CHARS,
   MATCH_THRESHOLD,
   MAX_CANDIDATE_CLUSTERS,
   MIN_SHARED_ENTITIES,
+  SAME_SOURCE_UPDATE_ENFORCE,
+  SAME_SOURCE_UPDATE_MAX_HOURS,
+  SAME_SOURCE_UPDATE_MIN_SHARED,
+  SUBJECT_STOP_WORDS,
   TIME_WINDOW_HOURS,
   TOKEN_CANDIDATE_MIN_SHARED,
   TOKEN_MIN_LEN,
@@ -372,6 +386,11 @@ let jevLiveAttempts = 0;
 let descriptionSwapSuspects = 0;
 let descriptionSwapSamples: string[] = [];
 const DESCRIPTION_SWAP_SAMPLE_MAX = 3;
+// h45-clusters-1 (shadow): articles that carried 'same-source-update' evidence
+// while SAME_SOURCE_UPDATE_ENFORCE is off and went on to open a cluster of their
+// own, i.e. the twins the skip would have prevented. Reset at the top of every
+// drainQueue() next to descriptionSwapSuspects.
+let sameSourceUpdateShadow = 0;
 // h40-clusters-1: at most this many {article_id, top_cluster_id, top_score}
 // samples of created_with_floor_candidate in one drain summary.
 const CREATED_FLOOR_SAMPLE_MAX = 3;
@@ -1517,13 +1536,143 @@ function wouldDuplicate(
 //                 cluster came from the exact-title probe (its seed headline
 //                 equals this article's)
 //   headline-lane the headline lane fires against a same-source member
-type DupEvidence = "fingerprint" | "exact-title" | "headline-lane";
+//   same-source-update  (h45-clusters-1) a follow-up in other words: a member of
+//                 the same source within SAME_SOURCE_UPDATE_MAX_HOURS, shared
+//                 headline stems and a shared named subject (isSameSourceUpdate).
+//                 The weakest kind: any of the three above replaces it
+//                 (noteDupBlock), and with SAME_SOURCE_UPDATE_ENFORCE off it
+//                 is only logged and counted, never a skip.
+type DupEvidence = "fingerprint" | "exact-title" | "headline-lane" | "same-source-update";
+
+// One side of the same-source-update test: a title and its publication time in
+// ms. `tokens` are the title's headlineTokens when the caller already holds them.
+export interface UpdateSide {
+  title: string;
+  ms: number;
+  tokens?: HeadlineTokens;
+}
+
+// Words that name nobody: the subject veto's role / wire stop words, the generic
+// entities (bakan, abd, turkiye, erdogan, fidan, istanbul, ...) and, by prefix,
+// the headline lane's boilerplate (cumhurbaskan..., erdogan..., bakan..., turkiye...).
+const UPDATE_GENERIC_WORDS: ReadonlySet<string> = new Set([...SUBJECT_STOP_WORDS, ...GENERIC_ENTITIES]);
+
+// The folded named-subject tokens of a title: every capitalised word (up to its
+// first apostrophe, leading quotes and brackets ignored) that is not generic,
+// read the way the subject veto reads its subject span but over the whole
+// (clipped) title. A headline written entirely in capitals names nothing: every
+// word of it is capitalised.
+function namedSubjectTokens(title: string): Set<string> {
+  const out = new Set<string>();
+  const clipped = title.slice(0, HEADLINE_TITLE_MAX_CHARS);
+  if (clipped === clipped.toLocaleUpperCase("tr")) return out;
+  for (const word of clipped.split(/\s+/)) {
+    // \u0027 and \u2019: the straight and the typographic apostrophe.
+    const stem = word.replace(/^[^\p{L}\p{N}]+/u, "").split(/[\u0027\u2019]/)[0] ?? "";
+    const first = [...stem][0] ?? "";
+    if (!/\p{L}/u.test(first) || first === first.toLocaleLowerCase("tr")) continue;
+    for (const piece of foldTurkishWord(stem).split(/[^a-z0-9]+/)) {
+      if (piece === "" || UPDATE_GENERIC_WORDS.has(piece)) continue;
+      if (HEADLINE_GENERIC_PREFIXES.some((p) => piece.startsWith(p))) continue;
+      out.add(piece);
+    }
+  }
+  return out;
+}
+
+// h45-clusters-1. Pure and in-memory: true when two articles of ONE source read
+// as the same story told twice. ALL of: the two publication times are finite and
+// at most SAME_SOURCE_UPDATE_MAX_HOURS apart; the titles share at least
+// SAME_SOURCE_UPDATE_MIN_SHARED headline stems that are not numerals (headlineTokens
+// already drops the generic prefixes); at least one named subject (a capitalised,
+// non-generic word) occurs in both original titles; and neither the subject veto
+// (different leading actor, same template) nor the incident veto (different
+// provinces) fires. A shared numeral is not a stem: "69 kisi" alone proves
+// nothing, and a changing death toll is still the same story.
+export function isSameSourceUpdate(a: UpdateSide, b: UpdateSide): boolean {
+  if (typeof a.title !== "string" || typeof b.title !== "string") return false;
+  if (a.title === "" || b.title === "") return false;
+  if (!Number.isFinite(a.ms) || !Number.isFinite(b.ms)) return false;
+  if (Math.abs(a.ms - b.ms) > SAME_SOURCE_UPDATE_MAX_HOURS * 3_600_000) return false;
+
+  const ta = a.tokens ?? headlineTokens(a.title);
+  const tb = b.tokens ?? headlineTokens(b.title);
+  let shared = 0;
+  for (const t of ta.tokens) {
+    if (!ta.numbers.has(t) && tb.tokens.has(t)) shared += 1;
+  }
+  if (shared < SAME_SOURCE_UPDATE_MIN_SHARED) return false;
+
+  const namedA = namedSubjectTokens(a.title);
+  if (namedA.size === 0) return false;
+  let sharedName = false;
+  for (const w of namedSubjectTokens(b.title)) {
+    if (namedA.has(w)) {
+      sharedName = true;
+      break;
+    }
+  }
+  if (!sharedName) return false;
+  return !subjectVetoFires(a.title, b.title) && !incidentVetoFires(a.title, b.title);
+}
+
+interface SameSourceMember {
+  id: string;
+  ms: number;
+  title: string;
+  tokens: HeadlineTokens;
+}
+
+// The members of `clusterId` that share the article's source: the cluster's
+// recent member headlines (ctx.headlinesByCluster, the newest HEADLINE_MEMBER_SCAN_MAX)
+// plus its seed and latest rows, which may fall outside that list and are the
+// rows the scorer compared against. Pure and in-memory.
+function sameSourceMembers(
+  ctx: ClusterContext,
+  clusterId: string,
+  article: Pick<EnrichedArticle, "id" | "source_id">,
+): SameSourceMember[] {
+  const members: SameSourceMember[] = [];
+  const listed = new Set<string>();
+  for (const m of ctx.headlinesByCluster.get(clusterId) ?? []) {
+    if (m.sourceId !== article.source_id || m.id === article.id) continue;
+    listed.add(m.id);
+    members.push({ id: m.id, ms: m.publishedMs, title: m.title, tokens: m.tokens });
+  }
+  for (const m of [ctx.seedByCluster.get(clusterId), ctx.latestByCluster.get(clusterId)]) {
+    if (!m || m.source_id !== article.source_id || m.id === article.id || listed.has(m.id)) continue;
+    listed.add(m.id);
+    members.push({ id: m.id, ms: Date.parse(m.published_at), title: m.title, tokens: headlineTokens(m.title) });
+  }
+  return members;
+}
+
+// The first same-source member (newest first) that isSameSourceUpdate ties to
+// the article, or null.
+function sameSourceUpdateMember(
+  members: readonly SameSourceMember[],
+  article: Pick<EnrichedArticle, "title" | "published_at">,
+  articleHeadline: HeadlineTokens,
+): SameSourceMember | null {
+  const articleMs = Date.parse(article.published_at);
+  for (const m of members) {
+    if (
+      isSameSourceUpdate(
+        { title: article.title, ms: articleMs, tokens: articleHeadline },
+        { title: m.title, ms: m.ms, tokens: m.tokens },
+      )
+    ) {
+      return m;
+    }
+  }
+  return null;
+}
 
 // Pure and in-memory (no DB read, dry-run safe). Reads the same-source members
-// of the cluster from ctx.headlinesByCluster (the newest HEADLINE_MEMBER_SCAN_MAX)
-// plus the seed and latest rows, and returns the strongest evidence found, or
-// null when nothing ties the article to one of them. Exact-title wins over the
-// lane when different members of the source give both.
+// of the cluster (sameSourceMembers) and returns the strongest evidence found, or
+// null when nothing ties the article to one of them. Priority: exact-title, then
+// the headline lane, then (h45-clusters-1) same-source-update. Exact-title wins
+// over the lane when different members of the source give both.
 function sameSourceDupEvidence(
   ctx: ClusterContext,
   clusterId: string,
@@ -1537,20 +1686,7 @@ function sameSourceDupEvidence(
   const identifiable = articleHeadline.tokens.size >= TITLE_PROBE_MIN_TOKENS;
   if (probeHit && identifiable) return "exact-title";
 
-  const members: Array<{ id: string; ms: number; title: string; tokens: HeadlineTokens }> = [];
-  const listed = new Set<string>();
-  for (const m of ctx.headlinesByCluster.get(clusterId) ?? []) {
-    if (m.sourceId !== article.source_id || m.id === article.id) continue;
-    listed.add(m.id);
-    members.push({ id: m.id, ms: m.publishedMs, title: m.title, tokens: m.tokens });
-  }
-  // Seed and latest may fall outside the scan list (older than its newest
-  // HEADLINE_MEMBER_SCAN_MAX); they are the rows the scorer compared against.
-  for (const m of [ctx.seedByCluster.get(clusterId), ctx.latestByCluster.get(clusterId)]) {
-    if (!m || m.source_id !== article.source_id || m.id === article.id || listed.has(m.id)) continue;
-    listed.add(m.id);
-    members.push({ id: m.id, ms: Date.parse(m.published_at), title: m.title, tokens: headlineTokens(m.title) });
-  }
+  const members = sameSourceMembers(ctx, clusterId, article);
   if (members.length === 0) return null;
 
   const articleMs = Date.parse(article.published_at);
@@ -1566,6 +1702,9 @@ function sameSourceDupEvidence(
     ) {
       evidence = "headline-lane";
     }
+  }
+  if (evidence === null && sameSourceUpdateMember(members, article, articleHeadline) !== null) {
+    return "same-source-update";
   }
   return evidence;
 }
@@ -1835,8 +1974,9 @@ async function clusterArticle(
   // h12-cluster-1, narrowed by h14-cluster-1: remembers the first cluster that
   // matched at MATCH_THRESHOLD or better, was blocked because it already holds
   // this article's source, AND is tied to that source's own member by strong
-  // evidence (DupEvidence: equal strict fingerprint, equal folded headline, or
-  // the headline lane against that member). If nothing else takes the article,
+  // evidence (DupEvidence: equal strict fingerprint, equal folded headline, the
+  // headline lane against that member, or -- h45-clusters-1, only with
+  // SAME_SOURCE_UPDATE_ENFORCE -- a follow-up in other words). If nothing else takes the article,
   // opening a new cluster would only create a twin of that cluster, so the
   // article is skipped instead (see the end of this function). A block without
   // evidence is not recorded: a bare ensemble score is not proof of a
@@ -1851,9 +1991,34 @@ async function clusterArticle(
     score: 0,
     evidence: null,
   };
+  // h45-clusters-1 (shadow): the first cluster that blocked the article with
+  // 'same-source-update' evidence at MATCH_THRESHOLD or better while
+  // SAME_SOURCE_UPDATE_ENFORCE is off. Never a skip: takeSameSourceSkip logs and
+  // counts it once, and only when nothing took the article.
+  const updateShadow: { clusterId: string | null; score: number; memberId: string | null; reported: boolean } = {
+    clusterId: null,
+    score: 0,
+    memberId: null,
+    reported: false,
+  };
   const noteDupBlock = (clusterId: string, matchScore: number, evidence: DupEvidence | null) => {
     if (evidence === null) return;
-    if (matchScore >= MATCH_THRESHOLD && dupBlock.clusterId === null) {
+    if (evidence === "same-source-update" && !SAME_SOURCE_UPDATE_ENFORCE) {
+      if (matchScore >= MATCH_THRESHOLD && updateShadow.clusterId === null) {
+        updateShadow.clusterId = clusterId;
+        updateShadow.score = matchScore;
+        updateShadow.memberId =
+          sameSourceUpdateMember(sameSourceMembers(ctx, clusterId, article), article, headlineTokens(article.title))?.id ?? null;
+      }
+      return;
+    }
+    // 'same-source-update' is the weakest kind: a block held with it is replaced by
+    // the first block of any other kind, so the existing kinds keep their priority.
+    if (
+      matchScore >= MATCH_THRESHOLD &&
+      (dupBlock.clusterId === null ||
+        (dupBlock.evidence === "same-source-update" && evidence !== "same-source-update"))
+    ) {
       dupBlock.clusterId = clusterId;
       dupBlock.score = matchScore;
       dupBlock.evidence = evidence;
@@ -1870,6 +2035,16 @@ async function clusterArticle(
       );
       if (!dryRun) await recordSkip(article.id, { clusterId: dupBlock.clusterId, score: dupBlock.score, evidence: dupBlock.evidence });
       return { result: "skipped", reason: "same-source-duplicate", score: outcomeScore };
+    }
+    // h45-clusters-1 shadow: this article is about to open a cluster although the
+    // evidence says it is a follow-up of its own source's member. Log it and count
+    // it (live drains only), once per article.
+    if (updateShadow.clusterId !== null && !updateShadow.reported) {
+      updateShadow.reported = true;
+      console.log(
+        `[cluster-consumer] same-source-update shadow article=${article.id} cluster=${updateShadow.clusterId} member=${updateShadow.memberId ?? "unknown"} score=${updateShadow.score.toFixed(3)}${dryRun ? " dry-run" : ""}`,
+      );
+      if (!dryRun) sameSourceUpdateShadow += 1;
     }
     return null;
   };
@@ -2350,7 +2525,9 @@ async function clusterArticle(
   // counted in `skipped`, and a live skip is also written to cluster_skip_log.
   // A source-blocked match without that evidence (a templated MinHash false
   // match, h14-cluster-1) never sets dupBlock and still opens a cluster, as
-  // does the weak-match case (best score below MATCH_THRESHOLD).
+  // does the weak-match case (best score below MATCH_THRESHOLD). The same holds
+  // for a follow-up in other words while SAME_SOURCE_UPDATE_ENFORCE is off: it is
+  // logged and counted by takeSameSourceSkip and opens a cluster (h45-clusters-1).
   const dupSkip = await takeSameSourceSkip(primary?.score);
   if (dupSkip) return dupSkip;
 
@@ -2844,6 +3021,10 @@ interface InvocationSummary {
   // plus up to 3 sample article ids.
   descriptionSwapSuspects: number;
   descriptionSwapSamples: string[];
+  // h45-clusters-1 (shadow): follow-ups of a source on its own story that would
+  // have been skipped with SAME_SOURCE_UPDATE_ENFORCE on and opened a cluster
+  // instead. Always 0 once the constant is true (they are skipped, not counted).
+  sameSourceUpdateShadow: number;
   // h40-clusters-1 (diagnostics, counts and ids only -- never a title or a URL).
   // Whole minutes from now to the oldest updated_at among the newest-
   // CONTEXT_CLUSTER_CAP clusters of the context this drain used (null when that
@@ -3006,6 +3187,7 @@ async function drainQueue(): Promise<InvocationSummary> {
   jevLiveAttempts = 0;
   descriptionSwapSuspects = 0;
   descriptionSwapSamples = [];
+  sameSourceUpdateShadow = 0;
 
   // Migration 089 ("ADMIT"): read the flag inside drainQueue (not at module
   // load) so the Deno-env polyfill test harness keeps working, same
@@ -3027,6 +3209,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     failedPermanent: 0,
     descriptionSwapSuspects: 0,
     descriptionSwapSamples: [],
+    sameSourceUpdateShadow: 0,
     ctx_window_min: null,
     created_with_floor_candidate: 0,
     created_with_floor_candidate_samples: [],
@@ -3300,6 +3483,7 @@ async function drainQueue(): Promise<InvocationSummary> {
   // next drain.
   summary.descriptionSwapSuspects = descriptionSwapSuspects;
   summary.descriptionSwapSamples = [...descriptionSwapSamples];
+  summary.sameSourceUpdateShadow = sameSourceUpdateShadow;
   // h40-clusters-1: the age of the window of the context the drain ended with
   // (windowOldestUpdatedMs is set once per context build, so this is the window
   // the last message was scored against).

@@ -521,3 +521,31 @@ export const HEADLINE_STEM_MAX_PASSES = 3;
 //     unacceptable); lowering MATCH_THRESHOLD to 0.36 instead gives +28 S with
 //     more N, and also moves every pair that has entities.
 export const ENTITY_SPARSE_TEXT_FACTOR = 0.90;
+
+// (7) h45-clusters-1: a source's own follow-up on a story it already has in a
+//     cluster. The consumer refuses to put two articles of one source into one
+//     cluster (wouldDuplicate), and the same-source skip (h12/h14) needs a strict
+//     fingerprint, an equal folded title or the headline lane against that
+//     source's member. A follow-up in other words has none of them, so it opened
+//     a twin cluster and the other outlets then joined the twin (haberler-com's
+//     "Ispanya Ulastirma Bakani Puente ... istifa etti" and, 9 min later,
+//     "Ispanya'da 69 kisinin oldugu tren kazasi sonrasi bakan istifa etti":
+//     clusters of 34 and 6; Vance 19/9, Israel 19/12, Bayraktar 16/7).
+//     The 4th kind of dup evidence, 'same-source-update', fires when the blocked
+//     cluster scored >= MATCH_THRESHOLD AND a member of the article's own source
+//     was published within SAME_SOURCE_UPDATE_MAX_HOURS of it AND the two titles
+//     share >= SAME_SOURCE_UPDATE_MIN_SHARED non-numeral headline stems AND at
+//     least one capitalised, non-generic word occurs in both (a named subject)
+//     AND neither the subject veto nor the incident veto fires.
+//     The window is the headline lane's (HEADLINE_LANE_MAX_HOURS): milliyet's
+//     "Erdogan Guney Kore'den ayrildi" (07:42) and "... yurda dondu" (18:42) are
+//     11 h apart and stay two clusters.
+//     SAME_SOURCE_UPDATE_ENFORCE is a constant, not an env var, so turning it on
+//     is a reviewed PR and not a dashboard change. false = shadow: the consumer
+//     logs the hit and counts it (drain summary: sameSourceUpdateShadow) and the
+//     article still opens its cluster as before; true = the article is skipped
+//     like any other same-source duplicate (cluster_skip_log reason
+//     'same-source-duplicate/same-source-update').
+export const SAME_SOURCE_UPDATE_MAX_HOURS = 6;
+export const SAME_SOURCE_UPDATE_MIN_SHARED = 2;
+export const SAME_SOURCE_UPDATE_ENFORCE = false;
