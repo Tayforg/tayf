@@ -754,7 +754,7 @@ async function headerLine(buckets: Bucket[]): Promise<string> {
       collectText(el).join("").startsWith("Toplam"),
   );
   expect(line).toBeDefined();
-  return renderToStaticMarkup(line as unknown as React.ReactElement).replace(/<[^>]+>/g, "");
+  return collectText(line!).join("");
 }
 
 async function svgAriaLabel(buckets: Bucket[]): Promise<string> {
