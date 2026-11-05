@@ -150,6 +150,25 @@ export function parseArticlePack(raw: string | null | undefined): JevArticlePack
 export function questionSetVersionFor(pack: JevArticlePack): string {
   return pack === "slim" ? JEV_QUESTION_SET_VERSION_SLIM : JEV_QUESTION_SET_VERSION;
 }
+/** h44-time-1: tokens of the 'articles' daily allowance held back for
+ * politics-gate articles (category politika / son_dakika). About 2,400 such
+ * articles a day x ~1,221 input tokens. A slice OF the allowance, never on top
+ * of it: the full allowance stays the hard ceiling. Only runJevShadow's caller
+ * (jev-shadow/index.ts, env JEV_ARTICLES_POLITICS_RESERVE_TOKENS) applies this
+ * default; runJevShadow itself reserves nothing unless told to. */
+export const JEV_ARTICLES_POLITICS_RESERVE_DEFAULT = 3_000_000;
+/** Parses JEV_ARTICLES_POLITICS_RESERVE_TOKENS: a plain non-negative integer
+ * (digits only, trimmed) is taken as is, 0 switches the reserve off, and
+ * anything else -- unset, blank, negative, fractional, exponent, hex, junk,
+ * past the safe-integer range, a non-string -- falls back to the default.
+ * Never throws. */
+export function parseArticlesPoliticsReserve(raw: string | null | undefined): number {
+  if (typeof raw !== "string") return JEV_ARTICLES_POLITICS_RESERVE_DEFAULT;
+  const text = raw.trim();
+  if (!/^[0-9]+$/.test(text)) return JEV_ARTICLES_POLITICS_RESERVE_DEFAULT;
+  const n = Number(text);
+  return Number.isSafeInteger(n) ? n : JEV_ARTICLES_POLITICS_RESERVE_DEFAULT;
+}
 /** Migration 064: a cluster_member prediction below this probability queues
  * the (cluster, article) pair into jev_unlink_candidates for a human to
  * review on /admin. */
@@ -2074,6 +2093,12 @@ interface StageStats {
    * allowance (jev_stage_budgets) would have been crossed. Per run: the
    * next tick starts again from the day's real spend. */
   capped: number;
+  /** h44-time-1: items this stage did NOT dispatch because they would have
+   * spent into the politics reserve (allowance - reserve) -- the full
+   * allowance still had room. Distinct from `capped` (the allowance itself).
+   * Absent until a reserve stop actually happens, so a run with no reserve
+   * (0, the library default) serialises byte-identically to before. */
+  reserved?: number;
 }
 
 interface RunCtx {
@@ -2084,6 +2109,10 @@ interface RunCtx {
   cap: number;
   mode: JevRunMode;
   articlePack: JevArticlePack;
+  /** h44-time-1: tokens of the 'articles' daily allowance held for
+   * politics-gate articles. 0 (or anything unusable) = no reserve = the
+   * pre-reserve single-queue behaviour. */
+  articlesPoliticsReserve: number;
   monthTokens: number;
   calls: number;
   errors: number;
@@ -2117,6 +2146,10 @@ interface RunCtx {
   /** jev-budget: stages that stopped dispatching because of the daily cap,
    * in the order they hit it. Feeds the run's `daily cap: ...` note. */
   cappedStages: StageName[];
+  /** h44-time-1: stages that stopped dispatching into the politics reserve, in
+   * the order they hit it. Feeds `<stage>_reserved=N` in the `daily cap: ...`
+   * note. Like the cap it is never a stop reason. */
+  reservedStages: StageName[];
   /** Migration 066: non-null only when mode === 'regression' and a
    * regression run row was actually opened (never when the monthly cap was
    * already exceeded). */
@@ -2282,13 +2315,32 @@ export function stageCapReached(input: {
   inFlight: number;
   perCallTokens: number;
   allowance: number | null | undefined;
+  /** h44-time-1: tokens of the allowance held back for another class of
+   * caller. The effective allowance is `allowance - clamp(reserve, 0,
+   * allowance)`; null, undefined, NaN, non-finite and negative values are 0
+   * (the plain allowance). A reserve at or past the allowance leaves nothing
+   * for this caller. It can only ever cap EARLIER than the plain allowance,
+   * never later: the full allowance stays the ceiling for everyone else. */
+  reserve?: number | null | undefined;
 }): boolean {
   const { allowance } = input;
   if (allowance === null || allowance === undefined || !Number.isFinite(allowance)) return false;
-  return input.spentDay + input.spentRun + input.perCallTokens * (input.inFlight + 1) > allowance;
+  const { reserve } = input;
+  const held =
+    typeof reserve === "number" && Number.isFinite(reserve) && reserve > 0 ? Math.min(reserve, Math.max(allowance, 0)) : 0;
+  return input.spentDay + input.spentRun + input.perCallTokens * (input.inFlight + 1) > allowance - held;
 }
 
-function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number, cap: number, mode: JevRunMode, articlePack: JevArticlePack = "full"): RunCtx {
+function makeCtx(
+  ports: JevPorts,
+  runId: number,
+  t0: number,
+  deadlineMs: number,
+  cap: number,
+  mode: JevRunMode,
+  articlePack: JevArticlePack = "full",
+  articlesPoliticsReserve: number = 0,
+): RunCtx {
   return {
     ports,
     runId,
@@ -2297,6 +2349,7 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     cap,
     mode,
     articlePack,
+    articlesPoliticsReserve,
     monthTokens: 0,
     calls: 0,
     errors: 0,
@@ -2310,6 +2363,7 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     regression: null,
     budget: null,
     cappedStages: [],
+    reservedStages: [],
     inFlight: {
       articles: 0,
       clusters: 0,
@@ -2484,8 +2538,11 @@ async function callOnce(
 }
 
 /** jev-budget: whether the next call on `stage` would cross its UTC-day
- * allowance. False without a budget snapshot (no port, or the read failed). */
-function dailyCapReached(ctx: RunCtx, stage: StageName): boolean {
+ * allowance. False without a budget snapshot (no port, or the read failed).
+ * h44-time-1: with `reserveTokens` > 0 the allowance is first reduced by that
+ * reserve (stageCapReached's `reserve`), so a non-reserved caller stops where
+ * the reserved slice begins; 0 (the default) is the plain allowance. */
+function dailyCapReached(ctx: RunCtx, stage: StageName, reserveTokens: number = 0): boolean {
   const budget = ctx.budget;
   if (!budget) return false;
   const key = ledgerKey(ctx.mode, stage);
@@ -2502,6 +2559,7 @@ function dailyCapReached(ctx: RunCtx, stage: StageName): boolean {
       dayTokens: day?.tokens ?? 0,
     }),
     allowance: budget.allowance[key],
+    reserve: reserveTokens,
   });
 }
 
@@ -2517,6 +2575,13 @@ function dailyCapReached(ctx: RunCtx, stage: StageName): boolean {
  * remaining items only -- ctx.stopReason is never set, so later stages keep
  * running and the run still closes 'ok'. Every callOnce site sits inside a
  * processStage worker, so this is the one gate for all of them.
+ *
+ * h44-time-1: `options.reserveTokens` (> 0) holds that many tokens of the
+ * stage's allowance back from THIS queue only. A stop that happens only
+ * because of the reserve (the full allowance still has room) books the rest of
+ * the queue into stats.reserved / ctx.reservedStages instead of capped /
+ * cappedStages, and is just as little a stop reason. Without it (or with 0) the
+ * gate is exactly the plain daily cap.
  */
 async function processStage<T>(
   ctx: RunCtx,
@@ -2524,9 +2589,14 @@ async function processStage<T>(
   items: readonly T[],
   worker: (item: T) => Promise<void>,
   concurrency: number = JEV_CONCURRENCY,
+  options: { reserveTokens?: number } = {},
 ): Promise<void> {
   if (items.length === 0) return;
   let idx = 0;
+  const reserveTokens =
+    typeof options.reserveTokens === "number" && Number.isFinite(options.reserveTokens) && options.reserveTokens > 0
+      ? options.reserveTokens
+      : 0;
 
   const runOne = async (): Promise<void> => {
     while (idx < items.length) {
@@ -2541,13 +2611,20 @@ async function processStage<T>(
         }
         throw err;
       }
-      if (dailyCapReached(ctx, stageName)) {
+      if (dailyCapReached(ctx, stageName, reserveTokens)) {
         // The first worker to see it books the rest of the stage as capped and
         // closes the queue; the others fall out of their while condition. There
         // is no await between this check and idx++ below, so no worker can
         // dequeue past a cap another worker just saw.
-        ctx.stages[stageName].capped += items.length - idx;
-        if (!ctx.cappedStages.includes(stageName)) ctx.cappedStages.push(stageName);
+        if (reserveTokens > 0 && !dailyCapReached(ctx, stageName)) {
+          // Only the reserve stopped it: the plain allowance still has room.
+          const stats = ctx.stages[stageName];
+          stats.reserved = (stats.reserved ?? 0) + (items.length - idx);
+          if (!ctx.reservedStages.includes(stageName)) ctx.reservedStages.push(stageName);
+        } else {
+          ctx.stages[stageName].capped += items.length - idx;
+          if (!ctx.cappedStages.includes(stageName)) ctx.cappedStages.push(stageName);
+        }
         idx = items.length;
         return;
       }
@@ -3036,7 +3113,7 @@ function buildTickerRows(
 
 async function runArticlesStage(ctx: RunCtx, sinceIso: string): Promise<void> {
   const items = await ctx.ports.fetchPendingArticles(sinceIso, JEV_ARTICLE_LIMIT);
-  await processStage(ctx, "articles", items, async (article) => {
+  const scoreArticle = async (article: JevArticleRow): Promise<void> => {
     const request = buildArticleCall(article, ctx.articlePack);
     const result = await callOnce(ctx, "articles", request);
     if (!result) {
@@ -3060,6 +3137,26 @@ async function runArticlesStage(ctx: RunCtx, sinceIso: string): Promise<void> {
     );
     ctx.stages.articles.rows += rows.length;
     await pushRows(ctx, rows);
+  };
+
+  // h44-time-1: no reserve (0, the library default) is the plain single queue,
+  // in the order fetchPendingArticles returned, behind the plain daily cap.
+  if (ctx.articlesPoliticsReserve <= 0) {
+    await processStage(ctx, "articles", items, scoreArticle);
+    return;
+  }
+
+  // Politics-gate articles (politika / son_dakika) are the only ones that ever
+  // reach clustering, so they run first and against the FULL allowance. The
+  // rest run afterwards and stop where the reserved slice of the allowance
+  // begins (allowance - reserve): the total never exceeds the allowance, the
+  // reserve only decides who gets the last tokens. Each partition keeps the
+  // order the fetch gave it (jev-pending already puts the newest politics first).
+  const politics = items.filter((article) => politicsBaseline(article.category));
+  const rest = items.filter((article) => !politicsBaseline(article.category));
+  await processStage(ctx, "articles", politics, scoreArticle);
+  await processStage(ctx, "articles", rest, scoreArticle, JEV_CONCURRENCY, {
+    reserveTokens: ctx.articlesPoliticsReserve,
   });
 }
 
@@ -3755,6 +3852,12 @@ async function loadStageBudgets(ctx: RunCtx): Promise<void> {
  *    stops dispatching once today's spend + this run's + a reserve for calls in
  *    flight would pass its jev_stage_budgets allowance. Never a stop reason:
  *    later stages run and the status stays 'ok'; the note says `daily cap: ...`.
+ *  - Politics reserve (h44-time-1, opts.articlesPoliticsReserveTokens > 0): the
+ *    articles stage scores politics-gate articles first against the full
+ *    allowance, then the rest only down to allowance - reserve. Same total, same
+ *    "never a stop reason" contract; a reserve stop is counted in
+ *    stages.articles.reserved and the note gains `articles_reserved=N`. Reserve
+ *    0 is the plain cap, byte for byte.
  *  - A single call's failure is a per-subject skip (errors++, keep going).
  *    A JevRateLimitError aborts the remaining run with status 'rate_limited'.
  *  - budgetExceeded is re-checked after every successful call; true stops
@@ -3768,7 +3871,17 @@ async function loadStageBudgets(ctx: RunCtx): Promise<void> {
  */
 export async function runJevShadow(
   ports: JevPorts,
-  opts: { deadlineMs?: number; cap?: number; nowIso?: string; mode?: JevRunMode; articlePack?: JevArticlePack } = {},
+  opts: {
+    deadlineMs?: number;
+    cap?: number;
+    nowIso?: string;
+    mode?: JevRunMode;
+    articlePack?: JevArticlePack;
+    /** h44-time-1: tokens of the 'articles' daily allowance held for
+     * politics-gate articles (see parseArticlesPoliticsReserve). Undefined, 0
+     * and anything that is not a positive finite number mean no reserve. */
+    articlesPoliticsReserveTokens?: number;
+  } = {},
 ): Promise<JevShadowResult> {
   const t0 = ports.now();
   const deadlineMs = opts.deadlineMs ?? JEV_DEADLINE_MS;
@@ -3783,7 +3896,10 @@ export async function runJevShadow(
   // evaluate() call has happened yet).
   const runId = await withDbRetry(ports, "startRun", () => ports.startRun());
   const articlePack: JevArticlePack = opts.articlePack ?? "full";
-  const ctx = makeCtx(ports, runId, t0, deadlineMs, cap, mode, articlePack);
+  const reserveOpt = opts.articlesPoliticsReserveTokens;
+  const articlesPoliticsReserve =
+    typeof reserveOpt === "number" && Number.isFinite(reserveOpt) && reserveOpt > 0 ? reserveOpt : 0;
+  const ctx = makeCtx(ports, runId, t0, deadlineMs, cap, mode, articlePack, articlesPoliticsReserve);
   ctx.monthTokens = month.input_tokens;
 
   let status: JevRunStatus = "ok";
@@ -3819,8 +3935,15 @@ export async function runJevShadow(
       // jev-budget: a stage that hit its daily allowance leaves the status
       // alone (migration 108 counts 'ok' as a healthy run even with zero
       // calls) and only says so in the note. Any failure/deadline note wins.
-      if (note === null && ctx.cappedStages.length > 0) {
-        note = `daily cap: ${ctx.cappedStages.map((stage) => `${stage}=${ctx.stages[stage].capped}`).join(",")}`;
+      // h44-time-1: a stage that stopped only because of the politics reserve is
+      // named `<stage>_reserved=N` after the plain `<stage>=N` entries, so a day
+      // with no reserve stop reads exactly as before.
+      if (note === null && (ctx.cappedStages.length > 0 || ctx.reservedStages.length > 0)) {
+        const entries = [
+          ...ctx.cappedStages.map((stage) => `${stage}=${ctx.stages[stage].capped}`),
+          ...ctx.reservedStages.map((stage) => `${stage}_reserved=${ctx.stages[stage].reserved ?? 0}`),
+        ];
+        note = `daily cap: ${entries.join(",")}`;
       }
     }
   } catch (err) {

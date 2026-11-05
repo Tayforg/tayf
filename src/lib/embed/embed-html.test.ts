@@ -312,7 +312,7 @@ describe("renderEmbedHtml", () => {
     expect(html).toContain("@media (max-height:187px){.b{display:none}");
     expect(html).toContain("system-ui");
     // never a fixed pixel width that could force a horizontal scrollbar at 320
-    // (`max-width:240px` in the media query is a condition, not a width)
+    // (`max-width:260px` in the media query is a condition, not a width)
     expect(html).not.toMatch(/(?<![-\w])width:\s*\d{3,}px/);
     expect(html).not.toMatch(/min-width:\s*\d{3,}px/);
   });
@@ -324,7 +324,7 @@ describe("renderEmbedHtml", () => {
     it("clamps the title and the legend to one line in short frames", () => {
       const start = style.indexOf("@media (max-height:187px){");
       expect(start).toBeGreaterThan(-1);
-      const block = style.slice(start, style.indexOf("@media (max-width:240px){"));
+      const block = style.slice(start, style.indexOf("@media (max-width:260px){"));
       expect(block).toContain("h1{font-size:15px;min-height:1.25em;-webkit-line-clamp:1;line-clamp:1}");
       expect(block).toContain(".l{-webkit-line-clamp:1;line-clamp:1}");
     });
@@ -349,9 +349,25 @@ describe("renderEmbedHtml", () => {
       }
     });
 
+    // Measured in headless Chrome: a qualified legend 'N kaynak (M sınıflandırılmış)'
+    // with up to 3-digit N/M wraps to 3 lines in the full layout below 253px, and
+    // with a ribbon it squeezed the h1 to 1.27-1.84 lines at 241-252 x 188-200
+    // (overflow:hidden then cut the second line mid-glyph). The narrow layout
+    // (3-line legend clamp budgeted, ~167px) must therefore cover up to 260px.
+    it("takes the narrow block for every width where the qualified legend wraps to 3 lines", () => {
+      const breakpoint = Number(style.match(/@media \(max-width:(\d+)px\)\{/)?.[1]);
+      expect(Number.isInteger(breakpoint)).toBe(true);
+      for (const width of [241, 245, 248, 250, 252, 253, 260]) {
+        expect(width, `a ${width}px-wide frame must get the narrow layout`).toBeLessThanOrEqual(breakpoint);
+      }
+      for (const width of [261, 320, 560]) {
+        expect(width, `a ${width}px-wide frame keeps the full layout`).toBeGreaterThan(breakpoint);
+      }
+    });
+
     it("tightens padding and drops the brand line in narrow frames, after the short-frame block", () => {
       const heightAt = style.indexOf("@media (max-height:187px){");
-      const widthAt = style.indexOf("@media (max-width:240px){");
+      const widthAt = style.indexOf("@media (max-width:260px){");
       expect(heightAt).toBeGreaterThan(-1);
       expect(widthAt).toBeGreaterThan(heightAt);
       const block = style.slice(widthAt);
@@ -452,6 +468,59 @@ describe("renderEmbedHtml", () => {
   it("is deterministic", () => {
     const m = buildEmbedModel(detail({}), ORIGIN);
     expect(renderEmbedHtml(m)).toBe(renderEmbedHtml(m));
+  });
+});
+
+// h44-consistency-1: the zone percents are computed over the classified
+// (voting) sources only, so a legend that prints the full member count next to
+// them must say so, in the wording the share text / RSS / Telegram use
+// (sourceCountHead): 'N kaynak (M sınıflandırılmış)'.
+describe("renderEmbedHtml legend basis (h44-consistency-1)", () => {
+  function legendFor(over: Parameters<typeof detail>[0]): string {
+    const html = renderEmbedHtml(buildEmbedModel(detail(over), ORIGIN));
+    const m = html.match(/<p class="l">([^<]*)<\/p>/);
+    expect(m).not.toBeNull();
+    return m![1]!;
+  }
+
+  it("names the classified basis when only 9 of 10 members vote (prod b34a5fe0: 1/4/4)", () => {
+    const legend = legendFor({
+      sourceCount: 10,
+      distribution: dist({ pro_government: 1, center: 4, opposition: 4 }),
+    });
+    expect(legend).toBe("İktidar %11 · Bağımsız %45 · Muhalefet %44 · 10 kaynak (9 sınıflandırılmış)");
+  });
+
+  it("is byte-identical to the old legend when every member is classified", () => {
+    const legend = legendFor({
+      sourceCount: 10,
+      distribution: dist({ pro_government: 5, center: 3, opposition: 2 }),
+    });
+    expect(legend).toBe("İktidar %50 · Bağımsız %30 · Muhalefet %20 · 10 kaynak");
+    expect(legend).not.toContain("sınıflandırılmış)");
+  });
+
+  it("keeps the bare count when a stale tally exceeds the member count", () => {
+    const legend = legendFor({
+      sourceCount: 3,
+      distribution: dist({ pro_government: 2, center: 1, opposition: 1 }),
+    });
+    expect(legend).toBe("İktidar %50 · Bağımsız %25 · Muhalefet %25 · 3 kaynak");
+  });
+
+  it("leaves the empty-distribution sentence unchanged", () => {
+    const legend = legendFor({ distribution: dist(), sourceCount: 2 });
+    expect(legend).toBe("Bu haberde henüz sınıflandırılmış kaynak yok · 2 kaynak");
+  });
+
+  it("uses the shared helper's wording (same string as the share text / RSS head)", async () => {
+    const { sourceCountHead } = await import("@/lib/feeds/zone-line");
+    const head = sourceCountHead(10, { iktidar: 1, bagimsiz: 4, muhalefet: 4 });
+    const legend = legendFor({
+      sourceCount: 10,
+      distribution: dist({ pro_government: 1, center: 4, opposition: 4 }),
+    });
+    expect(legend.endsWith(` · ${head}`)).toBe(true);
   });
 });
 

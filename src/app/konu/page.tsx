@@ -4,6 +4,7 @@ import Link from "next/link";
 import { PageHero } from "@/components/ui/page-hero";
 import {
   getTopicCounts,
+  TOPIC_INDEX_SCOPE_NOTE,
   TOPIC_LABELS_TR,
   TOPIC_NOTE_LINK_LABEL,
   TOPIC_NOTE_PREFIX,
@@ -67,6 +68,10 @@ export default async function TopicIndexPage() {
         {counts === null ? (
           <p className={metaClass}>{COUNTS_UNAVAILABLE_COPY}</p>
         ) : null}
+        {/* h44-topics-3: only politics-gated articles are clustered, so a hub's
+            count is a share of the political agenda, not of all coverage in that
+            topic. Shown with the counts and also when they failed to load. */}
+        <p className={metaClass}>{TOPIC_INDEX_SCOPE_NOTE}</p>
       </section>
 
       <p className={noteClass}>

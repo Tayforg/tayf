@@ -10,6 +10,7 @@ import {
   zonePercents,
 } from "@/lib/bias/zone-summary";
 import { displayHeadline } from "@/lib/embed/embed-html";
+import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { formatPctTr } from "@/lib/format/number-tr";
 import {
   OG_TITLE_LINE_HEIGHT,
@@ -290,7 +291,7 @@ export default async function Image({ params }: ImageProps) {
                 color: "#e4e4e7",
               }}
             >
-              {wire.effectiveArticleCount} kaynak
+              {sourceCountHead(wire.effectiveArticleCount, zones)}
             </div>
             {/* wire-redistribution: violet, not amber — amber is reserved
                 for the Kör nokta ribbon below so the two claims never

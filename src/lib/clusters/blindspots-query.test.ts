@@ -704,6 +704,96 @@ describe("getBlindspots source logo_url (browser-3)", () => {
   });
 });
 
+// h44-consistency-3: the SEO-explainer filter must judge the headline the card
+// shows (title_tr_neutral ?? title_tr), not the stored seed title. Prod case
+// 25de268f: seed 'Semiha Bahçeli kimdir, ...' (an SEO explainer), served
+// neutral title 'Cumhurbaşkanı Erdoğan'dan Devlet Bahçeli'ye taziye mesajı',
+// 18 articles, a real blindspot that /blindspots hid.
+describe("getBlindspots SEO filter runs on the served headline (h44-consistency-3)", () => {
+  const SEED_SEO = "Semiha Bahçeli kimdir, Semiha Bahçeli kaç yaşında, nereli?";
+  const NEUTRAL_CLEAN = "Cumhurbaşkanı Erdoğan'dan Devlet Bahçeli'ye taziye mesajı";
+
+  /** 16 distinct voting outlets (14 İktidar), all politika, distinct hashes. */
+  function mkWideRow(
+    id: string,
+    titles: { title_tr: string; title_tr_neutral: string | null },
+  ) {
+    const bias = (i: number): BiasCategory =>
+      i < 14 ? "pro_government" : i === 14 ? "center" : "opposition";
+    return {
+      ...mkBlindspotClusterRow(id, "pro_government"),
+      ...titles,
+      article_count: 16,
+      cluster_articles: Array.from({ length: 16 }, (_, i) => {
+        const { articles } = mkMember(id, i, bias(i));
+        return {
+          articles: {
+            ...articles,
+            // mkMember's day-of-month is a single digit (invalid from index 9
+            // on), so the date is rebuilt; every member keeps a distinct hash.
+            published_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+            content_hash: `hash-${id}-${i}`,
+          },
+        };
+      }),
+    };
+  }
+
+  it("returns a blindspot whose seed title is an SEO explainer but whose served title is clean, with the served title", async () => {
+    seedRows([
+      mkWideRow("seo-seed-clean-served", {
+        title_tr: SEED_SEO,
+        title_tr_neutral: NEUTRAL_CLEAN,
+      }),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles.map((b) => b.cluster.id)).toEqual(["seo-seed-clean-served"]);
+    expect(bundles[0]!.cluster.title_tr).toBe(NEUTRAL_CLEAN);
+    expect(bundles[0]!.votingZoneCounts).toEqual({ iktidar: 14, bagimsiz: 1, muhalefet: 1 });
+  });
+
+  it("filters a cluster whose served (neutral) title is an SEO explainer although the seed is clean", async () => {
+    seedRows([
+      mkWideRow("clean-seed-seo-served", {
+        title_tr: "Bakan X açıkladı",
+        title_tr_neutral: "Ali Koç kimdir?",
+      }),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toEqual([]);
+  });
+
+  it("still filters an SEO seed title when there is no neutral title", async () => {
+    seedRows([
+      mkWideRow("seo-seed-no-neutral", {
+        title_tr: "Ali Koç kimdir?",
+        title_tr_neutral: null,
+      }),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toEqual([]);
+  });
+
+  it("keeps a clean seed with a clean neutral title (no behaviour change)", async () => {
+    seedRows([
+      mkWideRow("clean-both", {
+        title_tr: "Bakan X açıkladı",
+        title_tr_neutral: "Bakan X faiz kararını açıkladı",
+      }),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles.map((b) => b.cluster.title_tr)).toEqual(["Bakan X faiz kararını açıkladı"]);
+  });
+});
+
 describe("getBlindspots feed-health suppression", () => {
   it("fetches health once (alongside the first batch) and drops a cluster whose silent pole shouldSuppressBlindspot flags, logging once", async () => {
     const health = {

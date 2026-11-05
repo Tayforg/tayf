@@ -412,6 +412,96 @@ describe("cluster opengraph-image", () => {
     expect(text).not.toContain("kopya");
   });
 
+  // h44-consistency-1: the zone tiles are computed over the classified
+  // (voting) sources only, so a chip that prints every member must say so, in
+  // the wording sourceCountHead gives the share text / RSS / Telegram.
+  describe("source-count chip basis (h44-consistency-1)", () => {
+    const ZERO_DIST = {
+      pro_government: 0,
+      gov_leaning: 0,
+      state_media: 0,
+      center: 0,
+      opposition_leaning: 0,
+      opposition: 0,
+      nationalist: 0,
+      islamist_conservative: 0,
+      pro_kurdish: 0,
+      international: 0,
+    };
+
+    it("says '9 kaynak (8 sınıflandırılmış)' for a 9-member cluster with 8 voting sources", async () => {
+      getClusterDetailOrThrow.mockResolvedValueOnce(
+        mkDetail({
+          article_count: 9,
+          is_blindspot: false,
+          blindspot_side: null,
+          bias_distribution: { ...ZERO_DIST, pro_government: 3, center: 3, opposition: 2 },
+        }),
+      );
+      const { default: Image } = await import("./opengraph-image");
+
+      await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+      const text = collectText(captured).join("");
+      expect(text).toContain("9 kaynak (8 sınıflandırılmış)");
+    });
+
+    it("stays '9 kaynak' (byte-identical) when every member is classified", async () => {
+      getClusterDetailOrThrow.mockResolvedValueOnce(
+        mkDetail({
+          article_count: 9,
+          is_blindspot: false,
+          blindspot_side: null,
+          bias_distribution: { ...ZERO_DIST, pro_government: 3, center: 3, opposition: 3 },
+        }),
+      );
+      const { default: Image } = await import("./opengraph-image");
+
+      await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+      const text = collectText(captured).join("");
+      expect(text).toContain("9 kaynak");
+      expect(text).not.toContain("sınıflandırılmış");
+    });
+
+    it("keeps the bare wire-adjusted count when it is below the classified total", async () => {
+      // effectiveArticleCount (1) is below the classified total (4): there is
+      // nothing to qualify, exactly as sourceCountHead prints it elsewhere.
+      getClusterDetailOrThrow.mockResolvedValueOnce(
+        mkDetail(
+          { article_count: 7, is_blindspot: false, blindspot_side: null },
+          { isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 7 },
+        ),
+      );
+      const { default: Image } = await import("./opengraph-image");
+
+      await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+      const text = collectText(captured).join("");
+      expect(text).toContain("1 kaynak");
+      expect(text).not.toContain("sınıflandırılmış");
+    });
+
+    it("uses the shared helper's wording", async () => {
+      const { sourceCountHead } = await import("@/lib/feeds/zone-line");
+      getClusterDetailOrThrow.mockResolvedValueOnce(
+        mkDetail({
+          article_count: 12,
+          is_blindspot: false,
+          blindspot_side: null,
+          bias_distribution: { ...ZERO_DIST, pro_government: 4, opposition: 5 },
+        }),
+      );
+      const { default: Image } = await import("./opengraph-image");
+
+      await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+      const text = collectText(captured).join("");
+      expect(text).toContain(sourceCountHead(12, { iktidar: 4, bagimsiz: 0, muhalefet: 5 }));
+      expect(text).toContain("12 kaynak (9 sınıflandırılmış)");
+    });
+  });
+
   it("renders both the blindspot ribbon and the wire pill together (densest layout)", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail(

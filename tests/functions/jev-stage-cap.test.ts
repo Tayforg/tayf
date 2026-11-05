@@ -460,6 +460,87 @@ describe("stageCapReached", () => {
   });
 });
 
+// --- 5b. stageCapReached with a politics reserve (h44-time-1) -------------------------
+
+describe("stageCapReached reserve", () => {
+  // 7,999,000 + 1,221 = 8,000,221: past 11M - 3M, still far under 11M.
+  const day = { spentDay: 7_999_000, spentRun: 0, inFlight: 0, perCallTokens: 1_221, allowance: 11_000_000 };
+
+  it("caps a call that would land inside the reserved slice: allowance - reserve is the effective allowance", () => {
+    expect(stageCapReached({ ...day, reserve: 3_000_000 })).toBe(true);
+  });
+
+  it("the same input with reserve 0 is not capped", () => {
+    expect(stageCapReached({ ...day, reserve: 0 })).toBe(false);
+  });
+
+  it("an omitted reserve is the same as 0", () => {
+    expect(stageCapReached(day)).toBe(false);
+    expect(stageCapReached({ ...day, reserve: undefined })).toBe(false);
+  });
+
+  it("keeps the full allowance as the hard ceiling, reserve or not", () => {
+    const over = { ...day, spentDay: 10_999_000 };
+    // 10,999,000 + 1,221 = 11,000,221 > 11,000,000.
+    expect(stageCapReached({ ...over, reserve: 0 })).toBe(true);
+    expect(stageCapReached({ ...over, reserve: 3_000_000 })).toBe(true);
+    // A reserve can only ever cap EARLIER, never later than the plain allowance.
+    for (const spentDay of [0, 7_000_000, 7_998_779, 7_998_780, 9_000_000, 10_998_779, 10_998_780, 11_500_000]) {
+      const plain = stageCapReached({ ...day, spentDay, reserve: 0 });
+      const withReserve = stageCapReached({ ...day, spentDay, reserve: 3_000_000 });
+      if (plain) expect(withReserve).toBe(true);
+    }
+  });
+
+  it("lands exactly on allowance - reserve and refuses one token more (boundary)", () => {
+    // 7,998,779 + 1,221 = 8,000,000: exactly the effective allowance -> allowed.
+    expect(stageCapReached({ ...day, spentDay: 7_998_779, reserve: 3_000_000 })).toBe(false);
+    expect(stageCapReached({ ...day, spentDay: 7_998_780, reserve: 3_000_000 })).toBe(true);
+  });
+
+  it("still counts the run's own spend and the calls in flight against the effective allowance", () => {
+    expect(stageCapReached({ ...day, spentDay: 7_000_000, spentRun: 998_779, reserve: 3_000_000 })).toBe(false);
+    expect(stageCapReached({ ...day, spentDay: 7_000_000, spentRun: 998_780, reserve: 3_000_000 })).toBe(true);
+    // 1,000 * (7 + 1) = 8,000 <= 8,000 but 1,000 * (8 + 1) = 9,000 > 8,000.
+    const flight = { spentDay: 0, spentRun: 0, perCallTokens: 1_000, allowance: 11_000 };
+    expect(stageCapReached({ ...flight, inFlight: 7, reserve: 3_000 })).toBe(false);
+    expect(stageCapReached({ ...flight, inFlight: 8, reserve: 3_000 })).toBe(true);
+  });
+
+  it("treats a null, undefined, NaN, infinite or negative reserve as 0", () => {
+    for (const reserve of [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, -3_000_000]) {
+      expect(stageCapReached({ ...day, reserve })).toBe(false);
+    }
+    // And a bad reserve never lifts the plain ceiling.
+    expect(stageCapReached({ ...day, spentDay: 11_000_001, reserve: Number.NaN })).toBe(true);
+  });
+
+  it("a reserve larger than the allowance makes every non-reserved call capped", () => {
+    const fresh = { spentDay: 0, spentRun: 0, inFlight: 0, perCallTokens: 1_221, allowance: 11_000_000 };
+    expect(stageCapReached({ ...fresh, reserve: 11_000_000 })).toBe(true);
+    expect(stageCapReached({ ...fresh, reserve: 99_000_000 })).toBe(true);
+    expect(stageCapReached({ ...fresh, reserve: Number.MAX_SAFE_INTEGER })).toBe(true);
+  });
+
+  it("no allowance still means no cap, whatever the reserve", () => {
+    for (const allowance of [null, undefined, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(stageCapReached({ ...day, spentDay: 1e12, allowance, reserve: 3_000_000 })).toBe(false);
+    }
+  });
+
+  it("does not move a plain-allowance answer when the reserve is 0 (identical to the pre-reserve formula)", () => {
+    const legacy = (i: { spentDay: number; spentRun: number; inFlight: number; perCallTokens: number; allowance: number }) =>
+      i.spentDay + i.spentRun + i.perCallTokens * (i.inFlight + 1) > i.allowance;
+    for (const spentDay of [0, 1, 899, 900, 901, 1_000, 5_000]) {
+      for (const inFlight of [0, 1, 7]) {
+        const input = { spentDay, spentRun: 17, inFlight, perCallTokens: 100, allowance: 1_000 };
+        expect(stageCapReached({ ...input, reserve: 0 })).toBe(legacy(input));
+        expect(stageCapReached(input)).toBe(legacy(input));
+      }
+    }
+  });
+});
+
 // --- 6. runJevShadow with the daily cap ---------------------------------------------
 
 describe("runJevShadow daily stage cap", () => {

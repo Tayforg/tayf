@@ -12,8 +12,10 @@ import type { ReactNode } from "react";
 // <meta name="robots" content="noindex">. An empty page PAST the last one emits
 // NO body meta: generateMetadata's topicPageRobots already puts
 // `noindex, follow` in <head> from the same cache key, so the page carries ONE
-// robots meta, not two. The ok state and an empty page 1 emit none, or a
-// healthy hub would drop out of the index. The failure is cached for "minutes"
+// robots meta, not two. The ok state and an empty page 1 emit none either: a
+// page 1 with no next page and under 20 clusters is noindexed by the same
+// generateMetadata call (h44-topics-3), and a healthy hub must not carry a
+// second, body-level noindex. The failure is cached for "minutes"
 // (topic-query.ts), so the prerendered noindex lives about a minute.
 //
 // Past the last page the reader is never left on a dead end: the pager offers
@@ -166,7 +168,7 @@ describe("/konu/[slug] failed state", () => {
     expect(collectText(tree).join("")).not.toContain(UNAVAILABLE_COPY);
   });
 
-  it("does NOT emit a robots meta for a legitimately empty page 1 (read fine, nothing matched)", async () => {
+  it("emits NO body robots meta for an empty page 1 either (read fine, nothing matched; generateMetadata owns the noindex)", async () => {
     mocks.result = { bundles: [], hasMore: false, page: 1 };
 
     const tree = await render();
@@ -631,10 +633,11 @@ function meta(slug: string, sayfa?: string | string[]) {
 
 describe("/konu/[slug] generateMetadata", () => {
   // generateMetadata now reads the same cached feed as the body (to noindex a
-  // failed read or a page past the last one), so give these identity tests a
-  // healthy, non-empty page. The robots cases live in tests/app/konu-metadata.test.ts.
+  // failed read, a page past the last one or a thin page 1), so give these
+  // identity tests a healthy page 1 that has a next page. The robots cases live
+  // in tests/app/konu-metadata.test.ts.
   beforeEach(() => {
-    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 1 };
+    mocks.result = { bundles: [bundle("c1")], hasMore: true, page: 1 };
   });
 
   it("page 1: canonical and og:url are /konu/<slug>, and the RSS alternate is advertised", async () => {
@@ -655,7 +658,7 @@ describe("/konu/[slug] generateMetadata", () => {
     const paged = await meta("spor", "2");
 
     expect(first.description).toBe(
-      "Son 7 günün spor haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+      "Siyasi gündemle kesişen spor haberleri, son 7 gün: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
     );
     expect(paged.description).toBe(first.description);
     expect(String(first.description)).not.toMatch(/jev|eşik|0,8/i);

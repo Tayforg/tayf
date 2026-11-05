@@ -1,6 +1,7 @@
 import { tallyZones, zoneOf } from "@/lib/bias/config";
 import { isOnlyZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
 import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
+import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import type { MediaDnaZone } from "@/types";
 
@@ -48,7 +49,14 @@ export interface EmbedModel {
   percents: Record<MediaDnaZone, number>;
   /** Sum of the three zone counts. 0 means nothing is classified yet. */
   total: number;
-  /** wire.effectiveArticleCount: the honest "N kaynak". */
+  /**
+   * wire.effectiveArticleCount: the deduped member count for a normal
+   * cluster, the distinct-text count for a wire redistribution. The legend
+   * qualifies it with the classified count ("N kaynak (M sınıflandırılmış)")
+   * only when `total` (the voting count) is smaller. For a wire cluster whose
+   * votes exceed this count the legend stays a plain "N kaynak", a known gap
+   * against buildShareText's "M sınıflandırılmış haber" left for a follow-up.
+   */
   sourceCount: number;
   ribbon: string | null;
   /** UTM-tagged cluster URL (raw; escaped on render). */
@@ -125,9 +133,14 @@ export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedMod
 // Layout budget (heights in px; html/body never scroll, so anything that does
 // not fit is clipped -- the budgets below keep that from ever happening
 // inside oEmbed's documented range of 120-240, default 200):
-// - Full layout, worst case (320x200 with ribbon and a two-line legend): 2
-//   border + 24 padding + 13.5 brand + 17 ribbon + 42.5 title (2 lines) + 10
-//   bar + 32.4 legend (2 lines) + 16.2 link + 5x6 gaps = ~188px < 200.
+// - Full layout, worst case (261px+ wide, 200 tall, with ribbon and a
+//   two-line legend): 2 border + 24 padding + 13.5 brand + 17 ribbon + 42.5
+//   title (2 lines) + 10 bar + 32.4 legend (2 lines) + 16.2 link + 5x6 gaps =
+//   ~188px < 200. The two-line legend holds from 261px up only: the qualified
+//   legend "N kaynak (M sınıflandırılmış)" with up to 3-digit N/M wraps to 3
+//   lines below 253px, which squeezed the h1 to 1.27-1.84 lines at 241-252 x
+//   188-200 (measured in headless Chrome), so the narrow layout below now
+//   covers every frame up to 260px wide.
 // - Compact layout (max-height:187px, one px below that worst case): every
 //   frame the full layout cannot hold takes it. The title is a shrinkable
 //   flex item, so in a frame shorter than the full layout needs the container
@@ -140,9 +153,9 @@ export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedMod
 //   <= 120. The title's min-height is exactly one 15px line, so it can never
 //   be squeezed below one line (no mid-glyph cut).
 // - 120x120: ~95px without a ribbon, ~116px with a one-line ribbon.
-// - 120x200 with ribbon (narrow frame: no brand, 15px title, 8px 10px
-//   padding, 4px gaps): 2+16+17+37.5+10+48.6 (legend clamped to 3 lines)
-//   +16.2+20 = ~167px <= 200.
+// - 120x200 with ribbon (narrow frame, now every width up to 260px: no brand,
+//   15px title, 8px 10px padding, 4px gaps): 2+16+17+37.5+10+48.6 (legend
+//   clamped to 3 lines) +16.2+20 = ~167px <= 200.
 // The ribbon and the link never wrap: they ellipsize. The link is left
 // stretched to the full width (no align-self) so its tap target stays wide.
 const STYLE = [
@@ -161,7 +174,7 @@ const STYLE = [
   ".l{flex:none;margin:0;font-size:12px;color:var(--mu);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3}",
   ".a{flex:none;max-width:100%;margin-top:auto;font-size:12px;font-weight:600;color:var(--fg);text-decoration:underline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
   "@media (max-height:187px){.b{display:none}.c{padding:8px 12px;gap:4px}h1{font-size:15px;min-height:1.25em;-webkit-line-clamp:1;line-clamp:1}.l{-webkit-line-clamp:1;line-clamp:1}}",
-  "@media (max-width:240px){.b{display:none}.c{padding:8px 10px;gap:4px}h1{font-size:15px}}",
+  "@media (max-width:260px){.b{display:none}.c{padding:8px 10px;gap:4px}h1{font-size:15px}}",
 ].join("");
 
 const HEAD_META =
@@ -171,10 +184,14 @@ const HEAD_META =
   '<meta name="robots" content="noindex,nofollow">';
 
 function legendOf(model: EmbedModel): string {
-  const sources = `${model.sourceCount} kaynak`;
-  if (model.total === 0) return `Bu haberde henüz sınıflandırılmış kaynak yok · ${sources}`;
+  if (model.total === 0) {
+    return `Bu haberde henüz sınıflandırılmış kaynak yok · ${model.sourceCount} kaynak`;
+  }
   const zones = ZONES.map((z) => `${ZONE_LABEL[z]} %${model.percents[z]}`).join(" · ");
-  return `${zones} · ${sources}`;
+  // The percents are over the classified (voting) sources only while the count
+  // is every member, so name the basis the way the share text / RSS do:
+  // 'N kaynak (M sınıflandırılmış)' when M < N, plain 'N kaynak' otherwise.
+  return `${zones} · ${sourceCountHead(model.sourceCount, model.counts)}`;
 }
 
 function ariaLabelOf(model: EmbedModel): string {

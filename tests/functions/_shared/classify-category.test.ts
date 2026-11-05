@@ -555,11 +555,152 @@ const SYNTHETIC: SyntheticRow[] = [
   { id: "son-dakika-ascii-caps", title: "SON DAKIKA haberi geldi", expected: "son_dakika", why: "ASCII I" },
   { id: "breaking", title: "Breaking: Tokyo'da deprem", expected: "yasam", why: "english flag; wave AX classifies the remainder (deprem)" },
   { id: "acil-leading", title: "ACİL durum toplantısı yapıldı", expected: "son_dakika", why: "title starts with acil" },
+  // hunt-44 (2026-11-05): headlines that must STAY politika when the bare surname
+  // 'Erdoğan' stops admitting after a deny-listed given name. The idea titles are
+  // verbatim (the four negatives are in the describe block below).
+  { id: "h44-ozel-fon", title: "Özel'den Erdoğan'a fon krizi çıkışı: Üç-beş bürokratla bu işten kurtulamazsın", expected: "politika", why: "hunt-44: a leader's remark addressed to Erdoğan" },
+  { id: "h44-dolmabahce", title: "Dolmabahçe buluşmasında Erdoğan ve Zelenskiy güvenlik ve iş birliğini masaya yatırdı", expected: "politika", why: "hunt-44: the president at a summit" },
+  { id: "h44-babacan-sayin", title: "Ali Babacan: Tüm yetkiyi kendi elinde toplayan Sayın Erdoğan, artık bu işin altından kalkamamaktadır", expected: "politika", why: "hunt-44: 'Sayın Erdoğan'" },
+  { id: "h44-president-erdogan", title: "President Erdoğan meets top South Korean executives in Seoul visit", expected: "politika", why: "hunt-44: English 'President Erdoğan'" },
+  // real stored title (2026-11-05 export, id 2185a99a); the description names the family only as 'Emine Erdoğan'
+  { id: "h44-emine-sifir-atik", title: "Emine Erdoğan, Fox Carney ile Sıfır Atık Vakfını ziyaret etti", description: "Emine Erdoğan, Kanada Başbakanı Mark Carney'nin eşi Diana Fox Carney ile Sıfır Atık Vakfını ziyaret etti.", expected: "politika", why: "hunt-44: Emine Erdoğan is never a deny-listed given name" },
+  // synthetic: 'cevdet yilmaz' is its own title marker, so the Yılmaz lookbehind cannot drop it
+  { id: "h44-cevdet-yilmaz-erdogan", title: "Cevdet Yılmaz Erdoğan'ın talimatıyla toplantı yaptı", expected: "politika", why: "hunt-44: stays politika through the 'cevdet yilmaz' title marker" },
 ];
 
 describe("classifyCategory: synthetic rows (idea titles verbatim + positives)", () => {
   it.each(SYNTHETIC)("$id -> $expected ($why)", (row) => {
     expect(classifyCategory(row.title, row.description ?? null, row.url ?? NEUTRAL_URL)).toBe(row.expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-44 (2026-11-05): the bare surname 'Erdoğan' was a politika title hit, so
+// the other Erdoğans of the news (the director Yılmaz, the actress Nehir, the
+// musician Filiz) went through clustering and the politics pipeline, and their
+// celebrity stories showed up on /konu/yasam with İktidar / Muhalefet bars.
+// Six days of stored politika rows with '<given name> Erdoğan' and no
+// tayyip / emine / bilal / cumhurbaşkanı / başkan before it: yılmaz 19, nehir 4,
+// filiz 3 (clusters ba759e17, 83243719, 43108107). The fix is ingest-time only:
+// NON_PRESIDENT_ERDOGAN_GIVEN_NAMES in category.ts, a lookbehind on the 'erdogan'
+// entry of POLITIKA_RAW. The idea titles below are verbatim; the descriptions
+// are cut from the stored rows at the sentence that names the person in full.
+// ---------------------------------------------------------------------------
+
+describe("hunt-44: another Erdoğan (Yılmaz, Nehir, Filiz) is not the president", () => {
+  const OTHER_ERDOGAN_TITLES: string[] = [
+    "Müzisyen Filiz Erdoğan, mesanesinin delindiği iddiasıyla suç duyurusunda bulundu",
+    "Yılmaz Erdoğan kam davulu sahnesi için özür diledi",
+    "Yüsra Geyik takside bekledi, Nehir Erdoğan arka kapıdan çıktı",
+    "Ekin Türkmen, Yılmaz Erdoğan ile aralarındaki diyalog hakkında konuştu",
+  ];
+
+  it.each(OTHER_ERDOGAN_TITLES)("%s leaves the gate", (title) => {
+    const out = cls(title);
+    expect(out).not.toBe("politika");
+    expect(out).not.toBe("son_dakika");
+  });
+
+  it.each([
+    ["Yılmaz Erdoğan'ın X hesabı askıya alındı"],
+    ["Yılmaz Erdoğan’dan ‘kam davulu’ özrü"],
+    ["Yılmaz Erdoğan, Kam Davulu sahnesi nedeniyle özür diledi: 'Bilgi eksikliğine dayalı bir özensizlik'"],
+    ["Nehir Erdoğan'dan açıklama"],
+    ["Filiz Erdoğan'a destek yağdı"],
+  ])("a given name with a suffix or a quote still leaves: %s", (title) => {
+    expect(cls(title)).not.toBe("politika");
+  });
+
+  it("the typed case, ASCII spelling and white-space variants of the pair all leave", () => {
+    expect(cls("YILMAZ ERDOĞAN KAM DAVULU İÇİN ÖZÜR DİLEDİ")).not.toBe("politika");
+    expect(cls("Yilmaz Erdogan kam davulu icin ozur diledi")).not.toBe("politika");
+    expect(cls("NEHİR ERDOĞAN arka kapıdan çıktı")).not.toBe("politika");
+    expect(cls("Yılmaz  Erdoğan özür diledi")).not.toBe("politika");
+    expect(cls("Yılmaz Erdoğan özür diledi")).not.toBe("politika");
+    expect(cls("Filiz\tErdoğan suç duyurusunda bulundu")).not.toBe("politika");
+  });
+
+  it("the description is guarded the same way (the pattern is shared)", () => {
+    expect(cls("Dizi haberi", "Yönetmen Yılmaz Erdoğan yeni projesini anlattı.")).not.toBe("politika");
+    expect(cls("Magazin gündemi", "Oyuncu Nehir Erdoğan arkadaşlarıyla bir araya geldi.")).not.toBe("politika");
+    expect(cls("Yanlış tedavi iddiası", "Ankara'da müzisyen Filiz Erdoğan doktor ve hastane hakkında suç duyurusunda bulundu")).not.toBe("politika");
+  });
+
+  it("a real description that repeats only the full name leaves too", () => {
+    // stored row 2026-11-05 13:36Z (elipshaber): the description names 'Yılmaz Erdoğan’ın' and nothing else
+    expect(
+      cls(
+        "Ekin Türkmen, Yılmaz Erdoğan ile aralarındaki diyalog hakkında konuştu",
+        "\"Organize İşler: Karun Hazinesi\" filminde rol alan oyuncu Ekin Türkmen, yönetmen ve oyuncu Yılmaz Erdoğan’ın geçmişte kendisi için sarf ettiği “Seksapelini bu kadar çarçur eden bir oyuncu görmedim” şeklindeki ifadelerin arka planına açıklık getirdi.",
+        "https://www.elipshaber.com/ekin-turkmen-yilmaz-erdogan-ile-aralarindaki-diyalog-hakkinda-konustu",
+      ),
+    ).not.toBe("politika");
+  });
+
+  // Known residual, measured in the hunt-44 replay: the lookbehind sees the word
+  // right before the surname only. A description that names the person in full
+  // and later says the bare 'Erdoğan' ('GÖK-DER yöneticileriyle bir araya gelen
+  // Erdoğan, ...') still admits through the description pattern. Pinned so that a
+  // later wave that closes it changes this row on purpose.
+  it("known residual: a later bare 'Erdoğan' in the description still admits", () => {
+    expect(
+      cls(
+        "Yılmaz Erdoğan kam davulu sahnesi için özür diledi",
+        "Ünlü sanatçı ve yönetmen Yılmaz Erdoğan, “Organize İşler: Karun Hazinesi” dizisindeki kam davulu sahnesi nedeniyle gelen eleştirilerin ardından açıklama yaptı. GÖK-DER yöneticileriyle bir araya gelen Erdoğan, yaşananların bilgi eksikliğinden kaynaklanan bir özensizlik olduğunu kabul ederek kendisinin ve ekibinin adına özür diledi.",
+        "https://abcgazetesi.com.tr/magazin/yilmaz-erdogan-kam-davulu-sahnesi-icin-ozur-diledi-876190",
+      ),
+    ).toBe("politika");
+  });
+
+  describe("the president and his family stay politika", () => {
+    it.each([
+      ["Recep Tayyip Erdoğan Rize'de konuştu"],
+      ["Cumhurbaşkanı Erdoğan Seul'de temaslarını sürdürüyor"],
+      ["Emine Erdoğan Özbekistan'da çocuklarla bir araya geldi"],
+      ["Bilal Erdoğan hakkında yeni iddia"],
+      ["Necmettin Bilal Erdoğan Ensar Vakfı programında konuştu"],
+      ["Sümeyye Erdoğan Bayraktar teknoloji zirvesine katıldı"],
+      ["Esra Erdoğan Albayrak'tan açıklama"],
+      ["Burak Erdoğan'ın şirketine ilişkin iddialar"],
+      ["Erdoğan'dan yeni açıklama"],
+      ["Sayın Erdoğan'a çağrı"],
+      ["President Erdogan said Turkey would host the summit"],
+    ])("%s", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+
+    it("also from the description", () => {
+      expect(cls("Yeni düzenleme", "Cumhurbaşkanı Recep Tayyip Erdoğan'ın imzasıyla yayımlandı.")).toBe("politika");
+      expect(cls("Yeni düzenleme", "Emine Erdoğan Sıfır Atık Vakfı'nı ziyaret etti.")).toBe("politika");
+    });
+  });
+
+  describe("the lookbehind sees only the word right before the surname", () => {
+    it.each([
+      ["Yılmaz, Erdoğan'a rapor sundu", "a comma ends the name"],
+      ["Yılmaz ve Erdoğan görüştü", "'ve' between"],
+      ["Cevdet Yılmaz ile Erdoğan görüştü", "'ile' between"],
+      ["Erdoğan Yılmaz'ı kabul etti", "the given name AFTER the surname"],
+      ["Nehir kıyısında Erdoğan konuştu", "'nehir' (a river) two words before"],
+      ["Filiz Hanım'ın ardından Erdoğan konuştu", "a name two words before"],
+      ["Yılmaz Erdoğan'ın dizisini eleştiren Erdoğan: 'Sanat sınır tanımaz'", "a second, bare mention"],
+      ["Yılmaz Erdoğan ve Cumhurbaşkanı Erdoğan aynı karede", "the president named beside the director"],
+    ])("%s stays politika (%s)", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+  });
+
+  describe("the deny list", () => {
+    it("is exactly the three given names of the hunt-44 data, in folded ASCII", () => {
+      const src = readFileSync(
+        resolve(__dirname, "..", "..", "..", "supabase", "functions", "_shared", "rss", "category.ts"),
+        "utf8",
+      );
+      const decl = /const NON_PRESIDENT_ERDOGAN_GIVEN_NAMES\s*=\s*\[([^\]]*)\]/.exec(src);
+      expect(decl).not.toBeNull();
+      const names = [...decl![1]!.matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+      expect(names).toEqual(["yilmaz", "nehir", "filiz"]);
+    });
   });
 });
 
@@ -2998,6 +3139,12 @@ describe("robustness", () => {
       ["100k kore blanks", "kore" + " ".repeat(99_980) + "işçi parti"],
       ["100k genel başkan", "Genel Başkan ".repeat(7_700).slice(0, 100_000)],
       ["100k il başkan with a near-miss marker", "il başkan partizan ".repeat(5_300).slice(0, 100_000)],
+      // hunt-44: the given-name lookbehind on the 'erdogan' entry
+      ["100k yılmaz erdoğan", "Yılmaz Erdoğan ".repeat(6_700).slice(0, 100_000)],
+      ["100k blanks before an erdoğan", " ".repeat(99_990) + "erdoğan"],
+      ["100k yılmaz blanks erdoğan", "yılmaz" + " ".repeat(99_980) + "erdoğan"],
+      ["100k blank runs between yılmaz and erdoğan", ("yılmaz" + " ".repeat(94) + "erdoğan ").repeat(1_000)],
+      ["100k erdoğan near-misses", "yılmaz, erdoğan yılmazer erdoğan nehir. erdoğan ".repeat(2_100).slice(0, 100_000)],
     ];
 
     it.each(inputs)("%s classifies in under 50 ms", (_name, text) => {

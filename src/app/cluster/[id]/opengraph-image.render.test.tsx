@@ -241,6 +241,32 @@ describe("cluster opengraph-image (real Satori render)", () => {
     expect(bytes.byteLength).toBeGreaterThan(10_000);
   });
 
+  // h44-consistency-1: the widest top row is the qualified chip ("N kaynak (M
+  // sınıflandırılmış)") next to the wire pill. The right padding (x >= 1128)
+  // must stay empty: the chip widens, nothing may run off the canvas.
+  it("keeps the right padding empty with the qualified source-count chip next to the wire pill", async () => {
+    const wire = { isWireRedistribution: true, effectiveArticleCount: 9, memberCount: 9 };
+    const base = blindspotDetail();
+    const render = async (distribution: ClusterDetail["cluster"]["bias_distribution"]) => {
+      getClusterDetailOrThrow.mockResolvedValueOnce({
+        ...base,
+        cluster: { ...base.cluster, article_count: 9, bias_distribution: distribution },
+        wire,
+      });
+      const { default: Image } = await import("./opengraph-image");
+      return decodePng(await pngBytes(await Image({ params: Promise.resolve({ id: VALID_ID }) })));
+    };
+    // 9 members, 7 voting -> "9 kaynak (7 sınıflandırılmış)"; 9 voting -> "9 kaynak".
+    const qualified = await render({ ...base.cluster.bias_distribution, pro_government: 4, gov_leaning: 2, state_media: 1 });
+    const plain = await render({ ...base.cluster.bias_distribution, pro_government: 5, gov_leaning: 3, state_media: 1 });
+
+    for (let y = 60; y < 120; y += 6) {
+      for (let x = 1136; x < 1200; x += 8) {
+        expectNear(pixelAt(qualified, x, y), pixelAt(plain, x, y), `right padding at (${x},${y})`);
+      }
+    }
+  }, 30_000);
+
   it("sets the exact edge cache-control header on the real Response", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(blindspotDetail());
     const { default: Image } = await import("./opengraph-image");

@@ -1,4 +1,5 @@
 import { escapeXml } from "@/lib/feeds/rss-builder";
+import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import type { MediaDnaZone } from "@/types";
 
@@ -33,18 +34,27 @@ export function renderSpectrumBadgeSvg(input: {
   const n = safeInt(input.sourceCount);
   const total = ZONE_ORDER.reduce((a, z) => a + safeInt(input.zones[z]), 0);
   const empty = total <= 0;
-  const pct = zonePercents({
+  const counts: Record<MediaDnaZone, number> = {
     iktidar: safeInt(input.zones.iktidar),
     bagimsiz: safeInt(input.zones.bagimsiz),
     muhalefet: safeInt(input.zones.muhalefet),
-  });
+  };
+  const pct = zonePercents(counts);
+  // The percents are over the classified (voting) sources only, while `n` is
+  // wire.effectiveArticleCount: the deduped member count for a normal cluster,
+  // the distinct-text count for a wire redistribution. sourceCountHead adds
+  // '(M sınıflandırılmış)' only when the voting count M is smaller than N:
+  // 'N kaynak (M sınıflandırılmış)' when M < N, plain 'N kaynak' otherwise. For
+  // a wire cluster whose votes exceed N the head stays plain, a known gap
+  // against buildShareText's 'M sınıflandırılmış haber' left for a follow-up.
+  const head = sourceCountHead(n, counts);
 
   const label = empty
     ? "Tayf yelpazesi: sınıflandırılmış kaynak yok"
-    : `Tayf yelpazesi: İktidar %${pct.iktidar}, Bağımsız %${pct.bagimsiz}, Muhalefet %${pct.muhalefet} · ${n} kaynak`;
+    : `Tayf yelpazesi: İktidar %${pct.iktidar}, Bağımsız %${pct.bagimsiz}, Muhalefet %${pct.muhalefet} · ${head}`;
   const caption = empty
     ? `${n} kaynak`
-    : `${n} kaynak · %${pct.iktidar}/%${pct.bagimsiz}/%${pct.muhalefet}`;
+    : `${head} · %${pct.iktidar}/%${pct.bagimsiz}/%${pct.muhalefet}`;
 
   let bar: string;
   if (empty) {
