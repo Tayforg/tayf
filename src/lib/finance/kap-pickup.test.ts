@@ -5,6 +5,10 @@ import {
   dropIrrelevant,
   effectiveMentionMs,
   formatPickupLag,
+  formatPickupRate,
+  pickupRowKind,
+  relatedOnlyCountLabel,
+  RELATED_ONLY_LABEL,
   relevanceKeys,
   summarizePickups,
   TICKER_RELEVANCE_MIN,
@@ -23,6 +27,7 @@ function disclosure(overrides: Partial<PickupDisclosure> = {}): PickupDisclosure
     publishedAt: new Date(T).toISOString(),
     subject: "Genel Kurul",
     disclosureClass: "ODA",
+    issuer: true,
     ...overrides,
   };
 }
@@ -198,6 +203,7 @@ describe("summarizePickups", () => {
       firstLagMinutes: null,
       windowComplete: true,
       overlapping: 0,
+      issuer: true,
       ...overrides,
     };
   }
@@ -240,6 +246,213 @@ describe("summarizePickups", () => {
     expect(totals.disclosures).toBe(2);
     expect(totals.pickedUp).toBe(1);
     expect(totals.pickupRate).toBe(0.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h48-ekonomi-2: a notice that only NAMES the share (a Takasbank "Temerrüt
+// İşlemi" list, an MKK / SPK trading-ban list; the ticker sits in
+// related_stocks, not stock_codes) is not the ticker's own filing. It used to
+// be counted as one and was credited with the ticker's unrelated articles:
+// /ekonomi/ALARK said "bildirim 3, haberi çıkan 2 (%67)" under a coverage
+// panel that said "bildirim 0". Related-only rows are listed, never scored.
+// ---------------------------------------------------------------------------
+describe("computePickups: related-only notices carry no pickup numbers", () => {
+  const issuerFiling = disclosure({ disclosureIndex: 1, publishedAt: new Date(T).toISOString() });
+  const relatedNotice = disclosure({
+    disclosureIndex: 2,
+    publishedAt: new Date(T + 100 * HOUR).toISOString(),
+    subject: "Temerrüt İşlemi",
+    issuer: false,
+  });
+  const OUTLET_C: PickupSource = { id: "s4", slug: "t24", bias: "center", kind: "outlet" };
+
+  function at(offsetHours: number, id: string, sourceId: string): PickupMention {
+    const iso = new Date(T + offsetHours * HOUR).toISOString();
+    return mention({ articleId: id, publishedAt: iso, createdAt: iso, sourceId });
+  }
+
+  // 2 mentions inside the issuer filing's window, 5 inside the related-only notice's.
+  const mentions = [
+    at(1, "a1", "s1"),
+    at(2, "a2", "s2"),
+    at(101, "b1", "s1"),
+    at(102, "b2", "s2"),
+    at(103, "b3", "s4"),
+    at(104, "b4", "s4"),
+    at(105, "b5", "s4"),
+  ];
+  const sources = sourcesMap(OUTLET_A, OUTLET_B, OUTLET_C);
+  const NOW = T + 300 * HOUR;
+
+  it("matches mentions for the issuer filing only: the related-only notice scores zero", () => {
+    const results = computePickups([issuerFiling, relatedNotice], mentions, sources, NOW);
+    const byIndex = new Map(results.map((r) => [r.disclosureIndex, r]));
+
+    expect(byIndex.get(1)).toMatchObject({ issuer: true, articles: 2, outlets: 2 });
+    expect(byIndex.get(2)).toMatchObject({
+      issuer: false,
+      articles: 0,
+      outlets: 0,
+      zones: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+      sources: [],
+      firstLagMinutes: null,
+    });
+  });
+
+  it("a related-only notice sharing the issuer filing's exact window still gets none of its mentions", () => {
+    const sameTime = disclosure({ disclosureIndex: 3, publishedAt: new Date(T).toISOString(), issuer: false });
+    const results = computePickups([issuerFiling, sameTime], mentions, sources, NOW);
+
+    expect(results.find((r) => r.disclosureIndex === 1)!.articles).toBe(2);
+    expect(results.find((r) => r.disclosureIndex === 3)!.articles).toBe(0);
+  });
+
+  it("keeps the related-only notice in the list, with its subject and KAP link", () => {
+    const results = computePickups([issuerFiling, relatedNotice], mentions, sources, NOW);
+
+    expect(results.map((r) => r.disclosureIndex)).toEqual([2, 1]);
+    expect(results[0]).toMatchObject({
+      subject: "Temerrüt İşlemi",
+      kapUrl: "https://www.kap.org.tr/tr/Bildirim/2",
+      windowComplete: true,
+    });
+  });
+
+  it("overlapping counts only issuer filings: a related-only neighbour claims no article", () => {
+    const neighbour = disclosure({ disclosureIndex: 4, publishedAt: new Date(T + 10 * HOUR).toISOString(), issuer: false });
+    const results = computePickups([issuerFiling, neighbour], mentions, sources, NOW);
+
+    expect(results.find((r) => r.disclosureIndex === 1)!.overlapping).toBe(0);
+    expect(results.find((r) => r.disclosureIndex === 4)!.overlapping).toBe(0);
+  });
+
+  it("two issuer filings within 48 h still overlap each other", () => {
+    const second = disclosure({ disclosureIndex: 5, publishedAt: new Date(T + 10 * HOUR).toISOString() });
+    const results = computePickups([issuerFiling, second], mentions, sources, NOW);
+
+    expect(results.every((r) => r.overlapping === 1)).toBe(true);
+  });
+});
+
+describe("summarizePickups: issuer filings only", () => {
+  function row(overrides: Partial<DisclosurePickup> = {}): DisclosurePickup {
+    return {
+      disclosureIndex: 1,
+      disclosedAt: new Date(T).toISOString(),
+      subject: null,
+      disclosureClass: null,
+      kapUrl: "https://www.kap.org.tr/tr/Bildirim/1",
+      articles: 0,
+      outlets: 0,
+      zones: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+      sources: [],
+      firstLagMinutes: null,
+      windowComplete: true,
+      overlapping: 0,
+      issuer: true,
+      ...overrides,
+    };
+  }
+
+  it("one issuer filing with 2 mentions plus one related-only notice with 5: disclosures 1, pickedUp 1, rate 1, relatedOnly 1", () => {
+    const pickups = computePickups(
+      [
+        disclosure({ disclosureIndex: 1, publishedAt: new Date(T).toISOString() }),
+        disclosure({ disclosureIndex: 2, publishedAt: new Date(T + 100 * HOUR).toISOString(), issuer: false }),
+      ],
+      [
+        mention({ articleId: "a1", publishedAt: new Date(T + HOUR).toISOString(), createdAt: new Date(T + HOUR).toISOString(), sourceId: "s1" }),
+        mention({ articleId: "a2", publishedAt: new Date(T + 2 * HOUR).toISOString(), createdAt: new Date(T + 2 * HOUR).toISOString(), sourceId: "s1" }),
+        ...[1, 2, 3, 4, 5].map((i) =>
+          mention({
+            articleId: `b${i}`,
+            publishedAt: new Date(T + (100 + i) * HOUR).toISOString(),
+            createdAt: new Date(T + (100 + i) * HOUR).toISOString(),
+            sourceId: "s2",
+          }),
+        ),
+      ],
+      sourcesMap(OUTLET_A, OUTLET_B),
+      T + 300 * HOUR,
+    );
+    const totals = summarizePickups(pickups);
+
+    expect(totals.disclosures).toBe(1);
+    expect(totals.pickedUp).toBe(1);
+    expect(totals.pickupRate).toBe(1);
+    expect(totals.relatedOnly).toBe(1);
+    // Zones come from the issuer filing's outlet (sabah, iktidar) alone; birgun only
+    // appears under the related-only notice and must not leak into the distribution.
+    expect(totals.zones).toEqual({ iktidar: 1, bagimsiz: 0, muhalefet: 0 });
+    expect(totals.outlets).toBe(1);
+    expect(totals.medianFirstLagMinutes).toBe(60);
+  });
+
+  it("only related-only notices: disclosures 0, pickupRate null, relatedOnly counts them", () => {
+    const totals = summarizePickups([row({ issuer: false }), row({ disclosureIndex: 2, issuer: false })]);
+
+    expect(totals.disclosures).toBe(0);
+    expect(totals.pickedUp).toBe(0);
+    expect(totals.pickupRate).toBeNull();
+    expect(totals.medianFirstLagMinutes).toBeNull();
+    expect(totals.relatedOnly).toBe(2);
+    expect(totals.zones).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 0 });
+  });
+
+  it("filters on issuer, not on articles: a related-only row that still carries numbers is ignored", () => {
+    const totals = summarizePickups([
+      row({ issuer: true, articles: 0 }),
+      row({
+        disclosureIndex: 2,
+        issuer: false,
+        articles: 9,
+        firstLagMinutes: 5,
+        outlets: 1,
+        sources: [{ slug: "birgun", zone: "muhalefet" }],
+      }),
+    ]);
+
+    expect(totals.disclosures).toBe(1);
+    expect(totals.pickedUp).toBe(0);
+    expect(totals.pickupRate).toBe(0);
+    expect(totals.medianFirstLagMinutes).toBeNull();
+    expect(totals.outlets).toBe(0);
+    expect(totals.zones).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 0 });
+    expect(totals.relatedOnly).toBe(1);
+  });
+
+  it("an empty list has relatedOnly 0", () => {
+    expect(summarizePickups([]).relatedOnly).toBe(0);
+  });
+});
+
+describe("panel formatting helpers (pure, so the server component needs no render test)", () => {
+  it("RELATED_ONLY_LABEL is the one sentence the panel puts on a related-only row", () => {
+    expect(RELATED_ONLY_LABEL).toBe("hisseyi anan bildirim · yankı hesaplanmaz");
+  });
+
+  it("pickupRowKind: related-only wins over every other state, even with articles", () => {
+    expect(pickupRowKind({ issuer: false, articles: 0, windowComplete: true })).toBe("related-only");
+    expect(pickupRowKind({ issuer: false, articles: 4, windowComplete: false })).toBe("related-only");
+  });
+
+  it("pickupRowKind: issuer rows are picked-up, empty-closed or empty-open", () => {
+    expect(pickupRowKind({ issuer: true, articles: 3, windowComplete: true })).toBe("picked-up");
+    expect(pickupRowKind({ issuer: true, articles: 0, windowComplete: true })).toBe("empty-closed");
+    expect(pickupRowKind({ issuer: true, articles: 0, windowComplete: false })).toBe("empty-open");
+  });
+
+  it("formatPickupRate: a whole percent, rounded, or an em dash when there is no rate", () => {
+    expect(formatPickupRate(null)).toBe("—");
+    expect(formatPickupRate(0)).toBe("%0");
+    expect(formatPickupRate(2 / 3)).toBe("%67");
+    expect(formatPickupRate(1)).toBe("%100");
+  });
+
+  it("relatedOnlyCountLabel: null for 0, '+N hisseyi anan bildirim' otherwise", () => {
+    expect(relatedOnlyCountLabel(0)).toBeNull();
+    expect(relatedOnlyCountLabel(3)).toBe("+3 hisseyi anan bildirim");
   });
 });
 

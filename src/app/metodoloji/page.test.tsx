@@ -61,6 +61,7 @@ import { countClassifiedSources } from "@/lib/sources/classification";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import {
+  EXTRACTIVE_MIN_ARTICLE_COUNT,
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_TEMPLATE,
 } from "@/lib/headline/prompt";
@@ -163,7 +164,10 @@ describe("/metodoloji page", () => {
     expect(text).toContain(`${SURPRISE.minMargin} fazla`);
 
     expect(text).toContain(`≤ %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)}`);
-    expect(text).toContain(`En az ${HEADLINE_MIN_ARTICLE_COUNT} kaynağı`);
+    // The cron gates on clusters.article_count (member articles), not on distinct outlets.
+    expect(text).toContain(`En az ${HEADLINE_MIN_ARTICLE_COUNT} haberi olan kümeler için`);
+    expect(text).toContain(`en az ${EXTRACTIVE_MIN_ARTICLE_COUNT} haberi olan kümeler için`);
+    expect(text).not.toContain("kaynağı olan kümeler için");
 
     // Only the biases production can store are documented (h43-sources-1):
     // the other five BiasCategory labels must NOT be on the page.
@@ -229,7 +233,7 @@ describe("/metodoloji page", () => {
     expect(SIBLING_VETO.minJaccard).toBe(0.5);
     const sentences = [
       "Aynı olay bazen neredeyse aynı başlıkla ikinci bir kümeye düşer.",
-      `Bu yüzden ${SIBLING_VETO.windowHours} saat içindeki diğer kümelerde başlığı büyük ölçüde örtüşen haberler de aranır (kelimelerin en az yarısı ve en az ${SIBLING_VETO.minShared} kelime ortak olmalı).`,
+      `Bu yüzden ${SIBLING_VETO.windowHours} saat içindeki diğer kümelerde başlığı büyük ölçüde örtüşen haberler de aranır: iki başlığın kelime kökleri karşılaştırılır (${SIBLING_VETO.tokenMinLen} harften kısa kelimeler sayılmaz, kök = kelimenin ilk ${SIBLING_VETO.stemLen} harfi); ortak köklerin sayısı en az ${SIBLING_VETO.minShared} olmalı ve iki başlıktaki tüm köklerin (ortak olanlar bir kez sayılır) en az yarısını oluşturmalı.`,
       "Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.",
     ];
     for (const sentence of sentences) expect(text).toContain(sentence);

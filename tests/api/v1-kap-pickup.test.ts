@@ -23,8 +23,20 @@ const fixtures = vi.hoisted(() => {
     {
       disclosure_index: 4242,
       published_at: new Date(disclosedAtMs).toISOString(),
+      stock_codes: ["THYAO"],
       subject: "Genel Kurul Toplantısı",
       disclosure_class: "ODA",
+    },
+    // h48-ekonomi-2: a Takasbank-style notice that only names the share. Its window
+    // (12 h before the filing up to 36 h after) holds the fixture articles, which
+    // used to be credited to it.
+    {
+      disclosure_index: 4141,
+      published_at: new Date(disclosedAtMs - 12 * HOUR).toISOString(),
+      stock_codes: [],
+      related_stocks: ["THYAO"],
+      subject: "Temerrüt İşlemi",
+      disclosure_class: "DG",
     },
   ];
 
@@ -145,6 +157,17 @@ const DISCLOSURE_KEYS = [
   "sources",
   "window_complete",
   "overlapping_disclosures",
+  "issuer",
+].sort();
+
+const TOTALS_KEYS = [
+  "disclosures",
+  "picked_up",
+  "pickup_rate",
+  "median_first_lag_minutes",
+  "outlets",
+  "zones",
+  "related_only",
 ].sort();
 
 describe("GET /api/v1/kap/pickup", () => {
@@ -206,12 +229,43 @@ describe("GET /api/v1/kap/pickup", () => {
     }
   });
 
+  it("carries exactly the totals keys, with the additive related_only count", async () => {
+    const { GET } = await import("@/app/api/v1/kap/pickup/route");
+    const body = await (await GET(req("?ticker=THYAO", FREE_KEY))).json();
+    expect(Object.keys(body.totals).sort()).toEqual(TOTALS_KEYS);
+  });
+
+  it("h48-ekonomi-2: issuer per disclosure; a related-only notice is listed with zero numbers and left out of totals", async () => {
+    const { GET } = await import("@/app/api/v1/kap/pickup/route");
+    const res = await GET(req("?ticker=THYAO", FREE_KEY));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    const byIndex = new Map<number, Record<string, unknown>>(
+      body.disclosures.map((d: Record<string, unknown>) => [d.disclosure_index as number, d]),
+    );
+    expect(body.count).toBe(2);
+    expect(byIndex.get(4242)).toMatchObject({ issuer: true, articles: 1 });
+    expect(byIndex.get(4141)).toMatchObject({
+      issuer: false,
+      articles: 0,
+      outlets: 0,
+      first_lag_minutes: null,
+      overlapping_disclosures: 0,
+      sources: [],
+      zones: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+    });
+    expect(body.totals).toMatchObject({ disclosures: 1, picked_up: 1, pickup_rate: 1, related_only: 1 });
+    // The list holds both notices; the count of filings the rates are over is the issuer one.
+    expect(body.total_disclosures === null || typeof body.total_disclosures === "number").toBe(true);
+  });
+
   it("carries capped (boolean) and total_disclosures (number or null) on the wire", async () => {
     const { GET } = await import("@/app/api/v1/kap/pickup/route");
     const res = await GET(req("?ticker=THYAO", FREE_KEY));
     expect(res.status).toBe(200);
     const body = await res.json();
-    // One fixture disclosure against the default limit of 50: not capped.
+    // Two fixture disclosures against the default limit of 50: not capped.
     expect(body.capped).toBe(false);
     expect(body.total_disclosures === null || typeof body.total_disclosures === "number").toBe(true);
   });
@@ -273,6 +327,7 @@ function tickerPickup(overrides: Partial<TickerPickup> = {}): TickerPickup {
     pickups: [],
     totals: {
       disclosures: 0,
+      relatedOnly: 0,
       pickedUp: 0,
       pickupRate: null,
       medianFirstLagMinutes: null,
@@ -319,6 +374,69 @@ describe("toV1PickupBody: capped and total_disclosures", () => {
     const keys = Object.keys(toV1PickupBody(tickerPickup()));
     const at = keys.indexOf("truncated");
     expect(keys.slice(at, at + 3)).toEqual(["truncated", "capped", "total_disclosures"]);
+  });
+});
+
+describe("toV1PickupBody: issuer and related_only (h48-ekonomi-2)", () => {
+  const pickup = (issuer: boolean) => ({
+    disclosureIndex: issuer ? 1 : 2,
+    disclosedAt: "2026-10-30T10:00:00.000Z",
+    subject: issuer ? "Genel Kurul" : "Temerrüt İşlemi",
+    disclosureClass: null,
+    issuer,
+    kapUrl: `https://www.kap.org.tr/tr/Bildirim/${issuer ? 1 : 2}`,
+    articles: issuer ? 2 : 0,
+    outlets: issuer ? 1 : 0,
+    zones: { ...EMPTY_ZONES },
+    sources: [],
+    firstLagMinutes: issuer ? 30 : null,
+    windowComplete: true,
+    overlapping: 0,
+  });
+
+  it("copies issuer onto every disclosure record, true and false alike", () => {
+    const body = toV1PickupBody(tickerPickup({ pickups: [pickup(true), pickup(false)] }));
+    expect(body.disclosures.map((d) => d.issuer)).toEqual([true, false]);
+  });
+
+  it("maps totals.relatedOnly to totals.related_only, and keeps pickup_rate null with no issuer filing", () => {
+    const body = toV1PickupBody(
+      tickerPickup({
+        pickups: [pickup(false)],
+        totals: {
+          disclosures: 0,
+          relatedOnly: 1,
+          pickedUp: 0,
+          pickupRate: null,
+          medianFirstLagMinutes: null,
+          outlets: 0,
+          zones: { ...EMPTY_ZONES },
+        },
+      }),
+    );
+    expect(body.totals.related_only).toBe(1);
+    expect(body.totals.pickup_rate).toBeNull();
+    expect(body.totals.disclosures).toBe(0);
+    expect(body.count).toBe(1);
+  });
+
+  it("adds no key at the top level (the additive fields live inside totals and each record)", () => {
+    const keys = Object.keys(toV1PickupBody(tickerPickup())).sort();
+    expect(keys).toEqual(
+      [
+        "ticker",
+        "window_hours",
+        "since",
+        "until",
+        "relevance_filter",
+        "truncated",
+        "capped",
+        "total_disclosures",
+        "totals",
+        "count",
+        "disclosures",
+      ].sort(),
+    );
   });
 });
 

@@ -98,8 +98,8 @@ describe("fetchTickerPickup", () => {
           captured.disclosures = state;
           return {
             data: [
-              { disclosure_index: 2, published_at: iso(disclosedAt2), subject: null, disclosure_class: "ODA" },
-              { disclosure_index: 1, published_at: iso(disclosedAt1), subject: "Bildirim", disclosure_class: "ODA" },
+              { disclosure_index: 2, published_at: iso(disclosedAt2), stock_codes: ["THYAO"], subject: null, disclosure_class: "ODA" },
+              { disclosure_index: 1, published_at: iso(disclosedAt1), stock_codes: ["THYAO"], subject: "Bildirim", disclosure_class: "ODA" },
             ],
             error: null,
           };
@@ -149,7 +149,7 @@ describe("fetchTickerPickup", () => {
     const { client } = createSupabaseFake({
       tables: {
         kap_disclosures: () => ({
-          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), subject: null, disclosure_class: null }],
+          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), stock_codes: ["THYAO"], subject: null, disclosure_class: null }],
           error: null,
         }),
         article_tickers: () => ({ data: mentionRows, error: null }),
@@ -175,7 +175,7 @@ describe("fetchTickerPickup", () => {
     const { client } = createSupabaseFake({
       tables: {
         kap_disclosures: () => ({
-          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), subject: null, disclosure_class: null }],
+          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), stock_codes: ["THYAO"], subject: null, disclosure_class: null }],
           error: null,
         }),
         article_tickers: () => ({
@@ -199,6 +199,7 @@ describe("fetchTickerPickup", () => {
       Array.from({ length: n }, (_, i) => ({
         disclosure_index: i + 1,
         published_at: iso(NOW - (i + 1) * 26 * HOUR),
+        stock_codes: ["ISMEN"],
         subject: null,
         disclosure_class: null,
       }));
@@ -283,7 +284,7 @@ describe("fetchTickerPickup", () => {
     const { client } = createSupabaseFake({
       tables: {
         kap_disclosures: () => ({
-          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), subject: null, disclosure_class: null }],
+          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), stock_codes: ["THYAO"], subject: null, disclosure_class: null }],
           error: null,
         }),
         article_tickers: () => ({ data: null, error: { message: "db down" } }),
@@ -301,7 +302,7 @@ describe("fetchTickerPickup", () => {
     const { client } = createSupabaseFake({
       tables: {
         kap_disclosures: () => ({
-          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), subject: null, disclosure_class: null }],
+          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), stock_codes: ["THYAO"], subject: null, disclosure_class: null }],
           error: null,
         }),
         article_tickers: () => ({
@@ -317,9 +318,140 @@ describe("fetchTickerPickup", () => {
     await expect(fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 })).rejects.toThrow();
   });
 
+  // h48-ekonomi-2: issuer = the ticker is in the notice's own stock_codes. A notice
+  // tagged only in related_stocks (Takasbank / MKK lists that name the share) is
+  // listed but never scored, exactly like issuerDisclosureIndexes() in queries.ts.
+  describe("h48-ekonomi-2: issuer vs related-only disclosures", () => {
+    const ISSUER_ROW = {
+      disclosure_index: 1685308,
+      published_at: iso(NOW - 3 * DAY),
+      stock_codes: ["ALARK"],
+      subject: "Genel Kurul",
+      disclosure_class: "ODA",
+    };
+    const RELATED_ROW = {
+      disclosure_index: 1692166,
+      published_at: iso(NOW - 2 * DAY),
+      stock_codes: [] as string[],
+      related_stocks: ["ALARK"],
+      subject: "Temerrüt İşlemi",
+      disclosure_class: "DG",
+    };
+
+    async function run(
+      rows: unknown[],
+      opts: { mentions?: Array<{ article_id: string; published_at: string; created_at: string; source_id: string | null }> } = {},
+    ) {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const kapStates: BuilderState[] = [];
+      const mentionStates: BuilderState[] = [];
+      const { client } = createSupabaseFake({
+        tables: {
+          kap_disclosures: (state) => {
+            kapStates.push(state);
+            if ((state.selectArgs[1] as { head?: boolean } | undefined)?.head === true) {
+              return { data: null, error: null, count: rows.length };
+            }
+            return { data: rows, error: null };
+          },
+          article_tickers: (state) => {
+            mentionStates.push(state);
+            return { data: opts.mentions ?? [], error: null };
+          },
+          jev_shadow_predictions: () => ({ data: [], error: null }),
+          sources: () => ({ data: [], error: null }),
+        },
+      });
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      const result = await fetchTickerPickup(client as never, "ALARK", NOW - 30 * DAY, NOW, { limit: 60 });
+      return { result, kapStates, mentionStates };
+    }
+
+    it("the disclosure list read selects stock_codes (the issuer rule needs it)", async () => {
+      const { kapStates } = await run([ISSUER_ROW]);
+      const list = kapStates.find((s) => (s.selectArgs[1] as { head?: boolean } | undefined)?.head !== true)!;
+      expect(String(list.selectArgs[0]).split(",")).toContain("stock_codes");
+    });
+
+    it("stock_codes [] with related_stocks ['ALARK'] is issuer false; stock_codes ['ALARK'] is issuer true", async () => {
+      const { result } = await run([RELATED_ROW, ISSUER_ROW]);
+      const byIndex = new Map(result.pickups.map((p) => [p.disclosureIndex, p]));
+
+      expect(byIndex.get(1692166)?.issuer).toBe(false);
+      expect(byIndex.get(1685308)?.issuer).toBe(true);
+    });
+
+    it("a null or missing stock_codes is not an issuer filing", async () => {
+      const { result } = await run([
+        { ...RELATED_ROW, disclosure_index: 11, stock_codes: null },
+        { disclosure_index: 12, published_at: iso(NOW - DAY), subject: null, disclosure_class: null },
+      ]);
+
+      expect(result.pickups.map((p) => p.issuer)).toEqual([false, false]);
+    });
+
+    it("a multi-issuer filing that includes the ticker is an issuer filing", async () => {
+      const { result } = await run([{ ...ISSUER_ROW, stock_codes: ["AKSA", "ALARK"] }]);
+
+      expect(result.pickups[0]?.issuer).toBe(true);
+    });
+
+    it("related-only notices get no mentions and stay out of the totals, even when the ticker has articles", async () => {
+      const { result } = await run([RELATED_ROW, ISSUER_ROW], {
+        mentions: [
+          // Inside the related-only notice's window (2 d ago), not the issuer filing's (3 d ago, window ends 1 d ago).
+          { article_id: "a1", published_at: iso(NOW - 2 * DAY + HOUR), created_at: iso(NOW - 2 * DAY + HOUR), source_id: null },
+        ],
+      });
+      const related = result.pickups.find((p) => p.disclosureIndex === 1692166)!;
+
+      expect(related.articles).toBe(0);
+      expect(result.totals.disclosures).toBe(1);
+      expect(result.totals.relatedOnly).toBe(1);
+      expect(result.pickups).toHaveLength(2);
+      expect(result.totalDisclosures).toBe(2);
+    });
+
+    it("ALARK shape: only related-only notices -> 3 rows listed, disclosures 0, pickupRate null, and no article_tickers read", async () => {
+      const rows = [1692166, 1692046, 1685308].map((i, n) => ({
+        ...RELATED_ROW,
+        disclosure_index: i,
+        published_at: iso(NOW - (n + 1) * DAY),
+      }));
+      const { result, mentionStates } = await run(rows);
+
+      expect(result.pickups).toHaveLength(3);
+      expect(result.pickups.every((p) => p.issuer === false && p.articles === 0)).toBe(true);
+      expect(result.totals.disclosures).toBe(0);
+      expect(result.totals.pickedUp).toBe(0);
+      expect(result.totals.pickupRate).toBeNull();
+      expect(result.totals.relatedOnly).toBe(3);
+      expect(mentionStates).toHaveLength(0);
+      expect(result.truncated).toBe(false);
+      expect(result.capped).toBe(false);
+    });
+
+    it("the mention window is bounded by the issuer filings only", async () => {
+      const { mentionStates } = await run([
+        { ...RELATED_ROW, published_at: iso(NOW - 20 * DAY) },
+        { ...ISSUER_ROW, published_at: iso(NOW - 10 * DAY) },
+      ]);
+
+      const gte = mentionStates[0]?.gte.find((g) => g.col === "published_at");
+      expect(gte?.val).toBe(iso(NOW - 10 * DAY - 3 * HOUR));
+    });
+
+    it("an empty result carries relatedOnly 0", async () => {
+      const { result } = await run([]);
+
+      expect(result.totals.relatedOnly).toBe(0);
+      expect(result.totals.pickupRate).toBeNull();
+    });
+  });
+
   describe("mention paging (PostgREST clamps every response at 1,000 rows)", () => {
     const oneDisclosure = () => ({
-      data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), subject: null, disclosure_class: null }],
+      data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), stock_codes: ["THYAO"], subject: null, disclosure_class: null }],
       error: null,
     });
 

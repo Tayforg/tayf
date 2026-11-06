@@ -17,6 +17,7 @@ import {
 } from "@/lib/finance/ticker-relevance";
 import { readAllPages } from "@/lib/finance/paging";
 import {
+  CIRCUIT_BREAKER_DAY_LIMIT,
   CIRCUIT_BREAKER_TEXT,
   NOT_CIRCUIT_BREAKER_OR,
   tickerDisclosureOr,
@@ -504,7 +505,8 @@ interface DisclosureRow {
   /** Tickers a notice names without being filed by them (halts, bans, insider trades). */
   related_stocks?: string[] | null;
   subject: string | null;
-  summary: string | null;
+  /** Absent when the read used a narrow select without it (the circuit-breaker strip). */
+  summary?: string | null;
   disclosure_class: string | null;
 }
 
@@ -517,7 +519,7 @@ function toDisclosure(r: DisclosureRow): Disclosure {
     // h11-finance-1: a notice tagged only in related_stocks shows those as its chips.
     stockCodes: codes.length > 0 ? codes : (r.related_stocks ?? []),
     subject: r.subject,
-    summary: r.summary,
+    summary: r.summary ?? null,
     disclosureClass: r.disclosure_class,
   };
 }
@@ -536,6 +538,12 @@ function issuerDisclosureIndexes(rows: readonly DisclosureRow[], ticker: string)
 }
 
 const DISCLOSURE_SELECT = "disclosure_index,published_at,kap_title,stock_codes,related_stocks,subject,summary,disclosure_class";
+/**
+ * h48-ekonomi-3: the circuit-breaker strip reads a whole day (hundreds of rows) and
+ * shows a ticker code and a time, so it asks for no `summary` (the long free text);
+ * toDisclosure maps the missing column to `summary: null`.
+ */
+const BREAKER_SELECT = "disclosure_index,published_at,kap_title,stock_codes,related_stocks,subject,disclosure_class";
 /** `.ilike()` pattern (the builder method takes `%`). */
 const CIRCUIT_BREAKER = `%${CIRCUIT_BREAKER_TEXT}%`;
 
@@ -621,7 +629,7 @@ async function readCircuitBreakers(limit: number): Promise<Disclosure[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase
     .from("kap_disclosures")
-    .select(DISCLOSURE_SELECT)
+    .select(BREAKER_SELECT)
     .ilike("subject", CIRCUIT_BREAKER)
     .gte("published_at", `${istDate()}T00:00:00+03:00`)
     .order("published_at", { ascending: false })
@@ -639,8 +647,13 @@ async function fetchCircuitBreakersCached(limit: number) {
   return r;
 }
 
-/** Today's circuit-breaker notices (Istanbul day), newest first. */
-export async function fetchCircuitBreakers(limit = 60): Promise<Disclosure[]> {
+/**
+ * Today's circuit-breaker notices (Istanbul day), newest first. By default the
+ * whole day up to PostgREST's 1,000-row cap (h48-ekonomi-3: the former 60 cut off
+ * 20 of one day's 74 tickers before the strip could dedupe them); a result of
+ * exactly CIRCUIT_BREAKER_DAY_LIMIT rows may be cut and the strip says so.
+ */
+export async function fetchCircuitBreakers(limit = CIRCUIT_BREAKER_DAY_LIMIT): Promise<Disclosure[]> {
   return resolveCachedOrThrow(
     "finance-circuit-breakers",
     () => fetchCircuitBreakersCached(limit),

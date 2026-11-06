@@ -3,12 +3,17 @@ import { describe, expect, it } from "vitest";
 
 import type { Disclosure } from "@/lib/finance/queries";
 
-import { BREAKER_STRIP_VISIBLE, BreakerStrip, selectBreakers } from "./breaker-strip";
+import { BREAKER_STRIP_VISIBLE, BreakerStrip, breakerLabel, selectBreakers } from "./breaker-strip";
 
 // h28-journey-3: /ekonomi rendered every one of fetchCircuitBreakers(60)'s rows
 // as a chip (60 links, 514 px tall on a phone, with VANGD and IHEVA repeated),
 // pushing "Haber akışı" to y=811. The strip now shows the newest 8 distinct
 // tickers and folds the rest into a native <details>.
+//
+// h48-ekonomi-3: the read behind it used to stop at the newest 60 notices, so 20 of
+// one day's 74 tickers never reached the strip. The page now hands it the whole
+// Istanbul day (up to PostgREST's 1,000 rows); the label states the true distinct
+// ticker count, and a read that hit the limit says so instead of cutting silently.
 
 const NEWEST_MS = Date.parse("2026-11-02T12:00:00.000Z");
 const LINK_PREFIX = 'href="/ekonomi/';
@@ -250,7 +255,7 @@ describe("BreakerStrip", () => {
   it("keeps the label and the byte-identical chip markup", () => {
     const markup = renderToStaticMarkup(<BreakerStrip breakers={[row(1, "VANGD", "2026-11-02T10:58:00.000Z")]} />);
 
-    expect(markup).toContain('<span class="text-amber-400">devre kesici bugün</span>');
+    expect(markup).toContain('<span class="text-amber-400">devre kesici bugün · 1 hisse</span>');
     expect(markup).toContain(
       '<span class="flex items-baseline gap-1.5">' +
         `<a class="${CHIP_LINK_CLASS}" href="/ekonomi/VANGD">VANGD</a>` +
@@ -302,6 +307,85 @@ describe("BreakerStrip", () => {
   });
 });
 
+/**
+ * `rows` notices, newest first one minute apart, over `distinct` tickers: the
+ * first `distinct` rows are all different, the rest repeat the newest tickers
+ * (as a day's second and third halt of the same share do).
+ */
+function dayOfNotices(rows: number, distinct: number): Disclosure[] {
+  return Array.from({ length: rows }, (_, i) => row(i, codeOf(i % distinct), minutesAgo(i)));
+}
+
+describe("BreakerStrip: the whole day, with an honest count (h48-ekonomi-3)", () => {
+  it("90 notices for 75 distinct tickers: 8 visible links, 67 inside <details>, '+67 daha', 'N = 75' in the label", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={dayOfNotices(90, 75)} />);
+    const detailsAt = markup.indexOf("<details");
+
+    expect(detailsAt).toBeGreaterThan(-1);
+    expect(countOccurrences(markup.slice(0, detailsAt), LINK_PREFIX)).toBe(8);
+    expect(countOccurrences(markup.slice(detailsAt), LINK_PREFIX)).toBe(67);
+    expect(markup).toContain('>+67 daha<span class="sr-only"> (devre kesici)</span></summary>');
+    expect(markup).toContain('<span class="text-amber-400">devre kesici bugün · 75 hisse</span>');
+    expect(countOccurrences(markup, "<details")).toBe(1);
+    // 90 rows are fewer than the read limit: nothing was cut.
+    expect(markup).not.toContain("son 1.000 bildirim");
+  });
+
+  it("counts distinct tickers, not rows, and not the 8 that are visible", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={buildFixture()} />);
+
+    // 60 rows - 1 without a ticker - 2 repeats = 57 tickers.
+    expect(markup).toContain("devre kesici bugün · 57 hisse");
+    expect(countOccurrences(markup, LINK_PREFIX)).toBe(57);
+  });
+
+  it("1,000 notices (the read limit) show the cut note, so a cut is never silent", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={dayOfNotices(1000, 400)} />);
+
+    expect(markup).toContain("devre kesici bugün · 400 hisse");
+    expect(markup).toContain("(son 1.000 bildirim)");
+    expect(countOccurrences(markup, LINK_PREFIX)).toBe(400);
+    expect(markup).toContain('>+392 daha<span class="sr-only"> (devre kesici)</span></summary>');
+    expect(countOccurrences(markup, "(son 1.000 bildirim)")).toBe(1);
+  });
+
+  it("999 notices are below the limit: no cut note", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={dayOfNotices(999, 400)} />);
+
+    expect(markup).toContain("devre kesici bugün · 400 hisse");
+    expect(markup).not.toContain("son 1.000 bildirim");
+  });
+
+  it("keeps the 8-visible plus <details> layout and no aria-label when the read was cut", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={dayOfNotices(1000, 400)} />);
+    const detailsAt = markup.indexOf("<details");
+
+    expect(countOccurrences(markup.slice(0, detailsAt), LINK_PREFIX)).toBe(8);
+    expect(countOccurrences(markup, "<details")).toBe(1);
+    expect(markup).not.toContain("aria-label");
+  });
+
+  it("a cut read with no usable ticker still renders nothing", () => {
+    const rows = Array.from({ length: 1000 }, (_, i) => row(i, null, minutesAgo(i)));
+
+    expect(renderToStaticMarkup(<BreakerStrip breakers={rows} />)).toBe("");
+  });
+});
+
+describe("breakerLabel", () => {
+  it("'devre kesici bugün · N hisse' below the limit", () => {
+    expect(breakerLabel(75, 90)).toEqual({ text: "devre kesici bugün · 75 hisse", cut: null });
+    expect(breakerLabel(1, 1)).toEqual({ text: "devre kesici bugün · 1 hisse", cut: null });
+  });
+
+  it("adds '(son 1.000 bildirim)' exactly when the rows read reach the limit", () => {
+    expect(breakerLabel(400, 999).cut).toBeNull();
+    expect(breakerLabel(400, 1000).cut).toBe("(son 1.000 bildirim)");
+    expect(breakerLabel(400, 1001).cut).toBe("(son 1.000 bildirim)");
+    expect(breakerLabel(400, 1000).text).toBe("devre kesici bugün · 400 hisse");
+  });
+});
+
 // h41-resilience-3: a failed circuit-breaker read used to take the whole
 // /ekonomi page to the error boundary. The page now hands the strip
 // `unavailable` and an empty list; the strip says so in one muted line instead
@@ -324,6 +408,13 @@ describe("BreakerStrip unavailable", () => {
     expect(renderToStaticMarkup(<BreakerStrip breakers={[]} />)).toBe("");
     expect(renderToStaticMarkup(<BreakerStrip breakers={[]} unavailable={false} />)).toBe("");
     expect(renderToStaticMarkup(<BreakerStrip breakers={distinctRows(2)} unavailable={false} />)).not.toContain(NOTE);
+  });
+
+  it("never shows the cut note on the unavailable line", () => {
+    const markup = renderToStaticMarkup(<BreakerStrip breakers={[]} unavailable />);
+
+    expect(markup).not.toContain("son 1.000 bildirim");
+    expect(markup).not.toContain("hisse");
   });
 
   it("still lists real notices if a caller passes both (data beats the note)", () => {

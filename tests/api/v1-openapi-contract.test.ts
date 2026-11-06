@@ -564,6 +564,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
       pickups: [],
       totals: {
         disclosures: 0,
+        relatedOnly: 0,
         pickedUp: 0,
         pickupRate: null,
         medianFirstLagMinutes: null,
@@ -597,6 +598,63 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     expect(Object.keys(properties).sort()).toEqual(Object.keys(body).sort());
     expect(properties.capped).toEqual(expect.objectContaining({ type: "boolean" }));
     expect(properties.total_disclosures?.type).toEqual(["integer", "null"]);
+  });
+
+  it("h48-ekonomi-2: the nested pickup schemas document the additive issuer and related_only fields", () => {
+    const schemas = doc.components.schemas as Record<
+      string,
+      { required?: string[]; properties?: Record<string, { type?: unknown }> }
+    >;
+    const record = schemas.V1PickupDisclosure!;
+    expect(record.required).toContain("issuer");
+    expect(record.properties?.issuer?.type).toBe("boolean");
+
+    const response = schemas.KapPickupResponse as unknown as {
+      allOf: Array<{ required?: string[]; properties?: Record<string, { required?: string[]; properties?: Record<string, { type?: unknown }> }> }>;
+    };
+    const totals = response.allOf.find((p) => p.required)!.properties!.totals!;
+    expect(totals.required).toContain("related_only");
+    expect(totals.properties?.related_only?.type).toBe("integer");
+    // Every key the wire mapper emits for totals / a record has a property schema.
+    const body = toV1PickupBody({
+      ticker: "THYAO",
+      since: "2026-10-02T00:00:00.000Z",
+      until: "2026-11-01T00:00:00.000Z",
+      pickups: [
+        {
+          disclosureIndex: 1,
+          disclosedAt: "2026-10-30T10:00:00.000Z",
+          subject: null,
+          disclosureClass: null,
+          issuer: true,
+          kapUrl: "https://www.kap.org.tr/tr/Bildirim/1",
+          articles: 0,
+          outlets: 0,
+          zones: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+          sources: [],
+          firstLagMinutes: null,
+          windowComplete: true,
+          overlapping: 0,
+        },
+      ],
+      totals: {
+        disclosures: 1,
+        relatedOnly: 0,
+        pickedUp: 0,
+        pickupRate: 0,
+        medianFirstLagMinutes: null,
+        outlets: 0,
+        zones: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+      },
+      relevanceApplied: true,
+      truncated: false,
+      totalDisclosures: 1,
+      capped: false,
+    });
+    expect(Object.keys(totals.properties ?? {}).sort()).toEqual(Object.keys(body.totals).sort());
+    expect([...(totals.required ?? [])].sort()).toEqual(Object.keys(body.totals).sort());
+    expect(Object.keys(record.properties ?? {}).sort()).toEqual(Object.keys(body.disclosures[0]!).sort());
+    expect([...(record.required ?? [])].sort()).toEqual(Object.keys(body.disclosures[0]!).sort());
   });
 
   it("documents the 405 on every GET endpoint (and only GET endpoints)", () => {

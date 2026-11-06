@@ -38,6 +38,7 @@ import { getSourceMetadata, type Factuality } from "@/lib/sources/factuality";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { getActiveSourceSlugs } from "@/lib/sources/registry-query";
 import {
+  EXTRACTIVE_MIN_ARTICLE_COUNT,
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_TEMPLATE,
 } from "@/lib/headline/prompt";
@@ -357,7 +358,7 @@ export default async function MethodologyPage() {
           </p>
           <p className={proseClass}>
             {`Aynı olay bazen neredeyse aynı başlıkla ikinci bir kümeye düşer.`}{" "}
-            {`Bu yüzden ${SIBLING_VETO.windowHours} saat içindeki diğer kümelerde başlığı büyük ölçüde örtüşen haberler de aranır (kelimelerin en az yarısı ve en az ${SIBLING_VETO.minShared} kelime ortak olmalı).`}{" "}
+            {`Bu yüzden ${SIBLING_VETO.windowHours} saat içindeki diğer kümelerde başlığı büyük ölçüde örtüşen haberler de aranır: iki başlığın kelime kökleri karşılaştırılır (${SIBLING_VETO.tokenMinLen} harften kısa kelimeler sayılmaz, kök = kelimenin ilk ${SIBLING_VETO.stemLen} harfi); ortak köklerin sayısı en az ${SIBLING_VETO.minShared} olmalı ve iki başlıktaki tüm köklerin (ortak olanlar bir kez sayılır) en az yarısını oluşturmalı.`}{" "}
             {`Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.`}
           </p>
           <h3
@@ -629,7 +630,7 @@ export default async function MethodologyPage() {
             </p>
           )}
           <p className={proseClass}>
-            En az {HEADLINE_MIN_ARTICLE_COUNT} kaynağı olan kümeler için, üye
+            En az {HEADLINE_MIN_ARTICLE_COUNT} haberi olan kümeler için, üye
             makalelerin başlıkları bir LLM&apos;e gönderilir ve LLM,
             aşağıdaki sabit istemi (prompt)
             kullanarak tarafsız, olgusal, tek cümlelik bir toplu başlık
@@ -639,8 +640,9 @@ export default async function MethodologyPage() {
             görüntülenebilir.
           </p>
           <p className={proseClass}>
-            LLM kapalıyken ara bir adım çalışır: en az 2 kaynağı olan kümeler
-            için üye başlıklar arasından diğerlerine en çok benzeyen, en az
+            LLM kapalıyken ara bir adım çalışır:
+            en az {EXTRACTIVE_MIN_ARTICLE_COUNT} haberi olan kümeler için üye
+            başlıklar arasından diğerlerine en çok benzeyen, en az
             sansasyonel olanı seçilir ve kaynağın üslup işaretleri
             (&quot;Son dakika&quot;, ünlem, büyük harf, &quot;Başkan
             Erdoğan&quot; gibi ev stili) temizlenir. Bu bir sentez değildir

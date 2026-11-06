@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { tickerDisclosureOr } from "./disclosure-filter";
+import { CIRCUIT_BREAKER_DAY_LIMIT, tickerDisclosureOr } from "./disclosure-filter";
+
+describe("CIRCUIT_BREAKER_DAY_LIMIT", () => {
+  it("is PostgREST's 1,000-row response cap: the strip reads a whole Istanbul day in one request", () => {
+    expect(CIRCUIT_BREAKER_DAY_LIMIT).toBe(1000);
+  });
+});
 
 describe("tickerDisclosureOr", () => {
   it("matches stock_codes OR related_stocks and keeps the circuit-breaker clause, as ONE filter string", () => {

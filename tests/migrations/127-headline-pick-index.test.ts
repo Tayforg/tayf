@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { HEADLINE_MIN_ARTICLE_COUNT } from "@/lib/headline/prompt";
+import { EXTRACTIVE_MIN_ARTICLE_COUNT, HEADLINE_MIN_ARTICLE_COUNT } from "@/lib/headline/prompt";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 127 ("headline-pick-index").
@@ -297,10 +297,10 @@ describe("127 index definitions", () => {
 });
 
 describe("127 constant parity with the route and the prompt module", () => {
-  it("the extractive predicate's article_count literal equals EXTRACTIVE_MIN_ARTICLE_COUNT in route.ts", () => {
-    const m = /const EXTRACTIVE_MIN_ARTICLE_COUNT = (\d+);/.exec(route);
-    expect(m, "EXTRACTIVE_MIN_ARTICLE_COUNT not found in route.ts").not.toBeNull();
-    expect(predicate(byName()[EXTRACTIVE_NAME] as string).minCount).toBe(Number((m as RegExpExecArray)[1]));
+  it("the extractive predicate's article_count literal equals EXTRACTIVE_MIN_ARTICLE_COUNT, which route.ts imports from the prompt module", () => {
+    expect(routeFlat).toMatch(/import \{[^}]*\bEXTRACTIVE_MIN_ARTICLE_COUNT\b[^}]*\} from "@\/lib\/headline\/prompt";/);
+    expect(routeFlat).not.toMatch(/const EXTRACTIVE_MIN_ARTICLE_COUNT\b/);
+    expect(predicate(byName()[EXTRACTIVE_NAME] as string).minCount).toBe(EXTRACTIVE_MIN_ARTICLE_COUNT);
   });
 
   it("the llm predicate's article_count literal equals HEADLINE_MIN_ARTICLE_COUNT, which route.ts aliases as MIN_ARTICLE_COUNT", () => {

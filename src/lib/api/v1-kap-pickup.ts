@@ -77,6 +77,12 @@ export interface V1PickupDisclosure {
   sources: Array<{ slug: string; zone: string }>;
   window_complete: boolean;
   overlapping_disclosures: number;
+  /**
+   * The ticker is one of the notice's own stock_codes. false: the notice only names
+   * the share (a Takasbank or MKK list, a trading ban); it is listed with zero
+   * numbers and is not part of `totals`.
+   */
+  issuer: boolean;
 }
 
 export interface V1PickupBody {
@@ -91,12 +97,16 @@ export interface V1PickupBody {
   /** Every disclosure of the ticker in the window (uncapped); null when the count failed. */
   total_disclosures: number | null;
   totals: {
+    /** The ticker's own filings (issuer: true) in the list; every other total is over these too. */
     disclosures: number;
     picked_up: number;
+    /** null when `disclosures` is 0. */
     pickup_rate: number | null;
     median_first_lag_minutes: number | null;
     outlets: number;
     zones: Record<string, number>;
+    /** Listed notices that only name the ticker (issuer: false); never scored. */
+    related_only: number;
   };
   count: number;
   disclosures: V1PickupDisclosure[];
@@ -119,6 +129,7 @@ export function toV1PickupBody(r: TickerPickup): V1PickupBody {
       median_first_lag_minutes: r.totals.medianFirstLagMinutes,
       outlets: r.totals.outlets,
       zones: r.totals.zones,
+      related_only: r.totals.relatedOnly,
     },
     count: r.pickups.length,
     disclosures: r.pickups.map((p) => ({
@@ -134,6 +145,7 @@ export function toV1PickupBody(r: TickerPickup): V1PickupBody {
       sources: p.sources,
       window_complete: p.windowComplete,
       overlapping_disclosures: p.overlapping,
+      issuer: p.issuer,
     })),
   };
 }

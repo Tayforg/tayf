@@ -733,6 +733,89 @@ describe("finance query fetchers (live Supabase shape)", () => {
     expect(gte?.val).toBe(`${istToday()}T00:00:00+03:00`);
   });
 
+  // h48-ekonomi-3: the strip used to read the newest 60 notices and dedupe after the
+  // cut, so 20 of one day's 74 tickers were missing. It now reads the whole Istanbul
+  // day (the largest day seen is 475 notices) up to PostgREST's 1,000-row cap, with a
+  // narrow select: no `summary`, the long free text the strip never shows.
+  describe("h48-ekonomi-3: fetchCircuitBreakers reads the whole Istanbul day", () => {
+    const BREAKER_SELECT = "disclosure_index,published_at,kap_title,stock_codes,related_stocks,subject,disclosure_class";
+
+    it("requests .limit(1000) by default, not 60", async () => {
+      await fetchCircuitBreakers();
+      expect((fixture.lastKapState as BuilderState).limit).toBe(1000);
+    });
+
+    it("still honours an explicit limit", async () => {
+      await fetchCircuitBreakers(5);
+      expect((fixture.lastKapState as BuilderState).limit).toBe(5);
+    });
+
+    it("selects the narrow column list: no summary", async () => {
+      await fetchCircuitBreakers();
+      const state = fixture.lastKapState as BuilderState;
+      expect(state.selectArgs[0]).toBe(BREAKER_SELECT);
+      expect(String(state.selectArgs[0])).not.toContain("summary");
+    });
+
+    it("keeps the Istanbul-day cut-off and newest-first order", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-11-06T09:00:00Z"));
+      await fetchCircuitBreakers();
+      const state = fixture.lastKapState as BuilderState;
+      expect(state.gte.find((g) => g.col === "published_at")?.val).toBe("2026-11-06T00:00:00+03:00");
+      expect(state.order).toEqual([{ col: "published_at", opts: { ascending: false } }]);
+    });
+
+    it("maps a row without a summary to summary: null and keeps the related_stocks chip fallback", async () => {
+      fixture.kapDisclosures = [
+        {
+          disclosure_index: 1693001,
+          published_at: "2026-11-06T07:00:03Z",
+          kap_title: "KAPLM",
+          stock_codes: ["KAPLM"],
+          related_stocks: [],
+          subject: "Devre Kesici",
+          disclosure_class: null,
+        },
+        {
+          disclosure_index: 1693002,
+          published_at: "2026-11-06T07:01:00Z",
+          kap_title: "BORSA İSTANBUL A.Ş.",
+          stock_codes: [],
+          related_stocks: ["VANGD"],
+          subject: "Devre Kesici",
+          disclosure_class: null,
+        },
+      ];
+      const rows = await fetchCircuitBreakers();
+      expect(rows).toEqual([
+        {
+          disclosureIndex: 1693001,
+          publishedAt: "2026-11-06T07:00:03Z",
+          kapTitle: "KAPLM",
+          stockCodes: ["KAPLM"],
+          subject: "Devre Kesici",
+          summary: null,
+          disclosureClass: null,
+        },
+        {
+          disclosureIndex: 1693002,
+          publishedAt: "2026-11-06T07:01:00Z",
+          kapTitle: "BORSA İSTANBUL A.Ş.",
+          stockCodes: ["VANGD"],
+          subject: "Devre Kesici",
+          summary: null,
+          disclosureClass: null,
+        },
+      ]);
+    });
+
+    it("the other disclosure readers keep their summary column", async () => {
+      await fetchRecentDisclosures(10);
+      expect(String((fixture.lastKapState as BuilderState).selectArgs[0])).toContain("summary");
+    });
+  });
+
   it("fetchIntraday picks the Istanbul day of the newest bar across a 21:00 UTC boundary", async () => {
     // 21:05 UTC is 00:05 Istanbul the NEXT calendar day.
     fixture.bars5m = [

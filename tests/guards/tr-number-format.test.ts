@@ -96,16 +96,24 @@ describe("tr-TR percent / count formatting", () => {
     expect(code).not.toContain("Toplam ${totalArticles} haber.");
   });
 
-  it("/source/[slug] hides RSS boilerplate excerpts", () => {
+  it("/source/[slug] hides RSS boilerplate excerpts, headline echoes and style sheets", () => {
     const src = read("src/app/source/[slug]/page.tsx");
     expect(
       importsFrom(src, "@/lib/articles/description-boilerplate"),
       "imports isBoilerplateDescription",
     ).toBe(true);
     expect(src).toMatch(/import\s*\{[^}]*\bisBoilerplateDescription\b[^}]*\}\s*from/);
-    // The excerpt paragraph is gated on it, not merely imported.
-    expect(stripComments(src)).toMatch(
-      /articleExcerptEligible\(article,\s*source\)\s*&&\s*!isBoilerplateDescription\(article\.description\)/,
+    expect(src).toMatch(/import\s*\{[^}]*\bisHeadlineEcho\b[^}]*\}\s*from/);
+    expect(src).toMatch(/import\s*\{[^}]*\bstripLeadingStyleRules\b[^}]*\}\s*from/);
+    // The excerpt paragraph is gated on them, not merely imported (h48-ingest-1):
+    // the rights gate, then the leading style sheet off, then the three checks.
+    const code = stripComments(src);
+    expect(code).toMatch(
+      /articleExcerptEligible\(article,\s*source\)\s*\?\s*stripLeadingStyleRules\(article\.description\)/,
     );
+    expect(code).toMatch(
+      /excerpt\s*!==\s*""\s*&&\s*!isBoilerplateDescription\(excerpt\)\s*&&\s*!isHeadlineEcho\(article\.title,\s*excerpt\)/,
+    );
+    expect(code).toMatch(/\{showExcerpt\s*\?/);
   });
 });

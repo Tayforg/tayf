@@ -463,7 +463,8 @@ describe("source/[slug]/page.tsx wiring (source guard)", () => {
       /<p\s+lang=\{articleLang\}[^>]*>\s*\{article\.title\}\s*<\/p>/,
     );
     expect(page).toMatch(
-      /<p\s+lang=\{articleLang\}[^>]*>\s*\{article\.description\}\s*<\/p>/,
+      // h48-ingest-1: the excerpt is the description with a leading style sheet off.
+      /<p\s+lang=\{articleLang\}[^>]*>\s*\{excerpt\}\s*<\/p>/,
     );
     // No other lang= attribute on the page (source name, time-ago, headings stay Turkish).
     expect(page.match(/\blang=/g)).toHaveLength(2);

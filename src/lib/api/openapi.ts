@@ -246,6 +246,7 @@ function buildSchemas(): Record<string, unknown> {
       "sources",
       "window_complete",
       "overlapping_disclosures",
+      "issuer",
     ],
     properties: {
       disclosure_index: { type: "integer" },
@@ -263,6 +264,10 @@ function buildSchemas(): Record<string, unknown> {
       },
       window_complete: { type: "boolean" },
       overlapping_disclosures: { type: "integer" },
+      // true: the ticker is one of the notice's own stock_codes. false: the
+      // notice only names the share; it is listed with zero numbers and is not
+      // part of `totals`.
+      issuer: { type: "boolean" },
     },
   };
 
@@ -315,14 +320,19 @@ function buildSchemas(): Record<string, unknown> {
               "median_first_lag_minutes",
               "outlets",
               "zones",
+              "related_only",
             ],
             properties: {
+              // The ticker's own filings (issuer: true); every total below is over these.
               disclosures: { type: "integer" },
               picked_up: { type: "integer" },
+              // null when `disclosures` is 0.
               pickup_rate: { type: ["number", "null"] },
               median_first_lag_minutes: { type: ["number", "null"] },
               outlets: { type: "integer" },
               zones: { type: "object", additionalProperties: { type: "number" } },
+              // Listed notices that only name the ticker (issuer: false); never scored.
+              related_only: { type: "integer" },
             },
           },
           count: { type: "integer" },

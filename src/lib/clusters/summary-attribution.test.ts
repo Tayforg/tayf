@@ -2590,3 +2590,61 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
     expect(out?.source?.slug).toBe("turkiye-gazetesi");
   });
 });
+
+describe("h48-ingest-1: 'Ayrıntılar geliyor...' placeholders hide the summary like 'Click to continue'", () => {
+  const wire = { isWireRedistribution: false };
+  const A72F = "Ayrıntılar geliyor...\n\n\n\nKKTC Başbakanı Üstel, KKTC ile ilgili açıklamaları için Cumhurbaşkanı Erdoğan'a teşekkür etti";
+  const PLACEHOLDERS = [
+    "Ayrıntılar geliyor...",
+    "ayrıntılar geliyor...",
+    "Detaylar gelecek…",
+    "DETAYLAR GELİYOR",
+    "Ayrıntılar birazdan...\nKaynak: TRT Haber",
+    A72F,
+  ];
+
+  it.each(PLACEHOLDERS)("hides %j (members present, members absent, batched lookup)", (summary) => {
+    const members = [member("milliyet", T0, summary)];
+    expect(summaryAttribution({ summary, members, wire })).toBeNull();
+    expect(summaryAttribution({ summary, members, wire, agreeWithTitle: "Üstel Erdoğan'a teşekkür etti" })).toBeNull();
+    expect(summaryAttributionWithoutMembers({ summary, wire })).toBeNull();
+    expect(resolveSummaryAttribution({ summary, members, lookupFailed: false, wire })).toBeNull();
+    expect(resolveSummaryAttribution({ summary, members: undefined, lookupFailed: false, wire })).toBeNull();
+  });
+
+  it("the meta / OG / JSON-LD description falls back exactly as it does for 'Click to continue' (fbb078b4)", () => {
+    const description = (summary: string) =>
+      describeForMeta({
+        count: 4,
+        attribution: summaryAttribution({ summary, members: [member("milliyet", T0, summary)], wire }),
+        title: "Üstel Erdoğan'a teşekkür etti",
+      });
+    const baseline = description("Click to continue");
+    expect(baseline).toBe("4 kaynak, tek haber: Üstel Erdoğan'a teşekkür etti");
+    for (const summary of PLACEHOLDERS) {
+      expect(description(summary), summary).toBe(baseline);
+      expect(description(summary), summary).not.toMatch(/Ayrıntılar|Detaylar|ayrıntılar/);
+    }
+    // Without a title the fallback is the bare count, again the same as for the CTA.
+    const bare = (summary: string) =>
+      describeForMeta({
+        count: 4,
+        attribution: summaryAttribution({ summary, members: [member("milliyet", T0, summary)], wire }),
+      });
+    expect(bare("Ayrıntılar geliyor...")).toBe(bare("Click to continue"));
+    expect(bare("Ayrıntılar geliyor...")).toBe("4 kaynak.");
+  });
+
+  it("a summary that merely starts with the phrase is a real summary and still shows", () => {
+    const summary = "Ayrıntılar geliyor: Bakan Yılmaz yeni vergi düzenlemesini açıkladı ve gelecek ay yürürlüğe girecek.";
+    const shown = summaryAttribution({ summary, members: [member("milliyet", T0, summary)], wire });
+    expect(shown?.text).toBe(summary);
+    expect(shown?.source?.name).toBe("milliyet");
+  });
+
+  it("a placeholder tail behind a real sentence is stripped and the sentence is kept", () => {
+    const summary = "Bakan Yılmaz yeni vergi düzenlemesini açıkladı. Ayrıntılar geliyor...";
+    const shown = summaryAttribution({ summary, members: [member("milliyet", T0, summary)], wire });
+    expect(shown?.text).toBe("Bakan Yılmaz yeni vergi düzenlemesini açıkladı.");
+  });
+});

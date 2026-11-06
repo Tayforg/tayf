@@ -816,13 +816,14 @@ production) — this endpoint is always ticker- and time-bounded on
   "since": "…", "until": "…",
   "relevance_filter": { "task": "ticker_relevance", "min_prob": 0.2, "applied": true },
   "truncated": false,
-  "capped": false, "total_disclosures": 12,
+  "capped": false, "total_disclosures": 14,
   "totals": {
     "disclosures": 12, "picked_up": 9, "pickup_rate": 0.75,
     "median_first_lag_minutes": 184, "outlets": 14,
-    "zones": { "iktidar": 5, "bagimsiz": 6, "muhalefet": 3 }
+    "zones": { "iktidar": 5, "bagimsiz": 6, "muhalefet": 3 },
+    "related_only": 2
   },
-  "count": 12,
+  "count": 14,
   "disclosures": [
     {
       "disclosure_index": 1234567, "disclosed_at": "…", "subject": "…",
@@ -831,7 +832,8 @@ production) — this endpoint is always ticker- and time-bounded on
       "articles": 4, "outlets": 3, "first_lag_minutes": 95,
       "zones": { "iktidar": 1, "bagimsiz": 2, "muhalefet": 0 },
       "sources": [{ "slug": "sabah", "zone": "iktidar" }],
-      "window_complete": true, "overlapping_disclosures": 0
+      "window_complete": true, "overlapping_disclosures": 0,
+      "issuer": true
     }
   ]
 }
@@ -844,6 +846,22 @@ Notes:
   within 48h of each other, the same article counts toward both —
   `overlapping_disclosures` on each record makes that visible instead of
   silently deduping it away.
+- **`issuer` and `totals.related_only`** (additive): `issuer: true` means the
+  ticker is one of the notice's own `stock_codes`, i.e. the company filed it.
+  `issuer: false` means the notice only *names* the share (a Takasbank
+  "Temerrüt İşlemi" or MKK list, an SPK trading ban: the ticker sits in
+  `related_stocks`). Those records stay in `disclosures` (and in `count` and
+  `total_disclosures`), but they carry no pickup numbers (`articles`,
+  `outlets`, `first_lag_minutes` stay `0` / `null`, `sources` is empty), they
+  never overlap another record, and they are left out of every `totals`
+  figure: `totals.disclosures`, `picked_up`, `pickup_rate`,
+  `median_first_lag_minutes`, `outlets` and `zones` are over the `issuer: true`
+  records only. `totals.related_only` counts the listed `issuer: false`
+  records, and `pickup_rate` is `null` when there is no `issuer: true` record.
+  Before this field a related-only notice was scored with the ticker's
+  unrelated articles. Clients that sum `disclosures[].articles` keep working;
+  clients that read `totals.disclosures` now get the issuer count, which is
+  what `/ekonomi/[ticker]` shows.
 - **Relevance filter**: mentions Jev's `ticker_relevance` shadow model
   scored below 0.2 are excluded (a documented false-positive band — e.g. a
   political-party story matching a same-named ticker). Unscored mentions

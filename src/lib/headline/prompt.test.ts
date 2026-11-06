@@ -1,5 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { buildHeadlinePrompt, HEADLINE_PROMPT_TEMPLATE } from "./prompt";
+import {
+  buildHeadlinePrompt,
+  EXTRACTIVE_MIN_ARTICLE_COUNT,
+  HEADLINE_MIN_ARTICLE_COUNT,
+  HEADLINE_PROMPT_TEMPLATE,
+} from "./prompt";
+
+describe("article-count gates", () => {
+  // The cron route imports both from this module; migrations 127 and 141 carry
+  // hand-written copies of the numbers. Changing either is a behaviour change
+  // (and a new migration), not a copy edit, so pin them here.
+  it("the extractive gate is 2 member articles (moved here from the cron route, same value)", () => {
+    expect(EXTRACTIVE_MIN_ARTICLE_COUNT).toBe(2);
+  });
+
+  it("the LLM gate is 3 member articles, stricter than the extractive gate", () => {
+    expect(HEADLINE_MIN_ARTICLE_COUNT).toBe(3);
+    expect(HEADLINE_MIN_ARTICLE_COUNT).toBeGreaterThan(EXTRACTIVE_MIN_ARTICLE_COUNT);
+  });
+});
 
 describe("buildHeadlinePrompt", () => {
   it("builds the numbered title list exactly like the old inline template literal", () => {

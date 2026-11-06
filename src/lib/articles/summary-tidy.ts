@@ -4,7 +4,11 @@ import {
   stripFeedWrappers,
   stripTrailingTeasers,
 } from "../../../supabase/functions/_shared/cluster/description-clean";
-import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
+import {
+  BOILERPLATE_PHRASES,
+  startsWithPlaceholderLine,
+  TRAILING_CTA_PHRASES,
+} from "./description-boilerplate";
 
 // Read-time tidy for feed residue in a cluster summary.
 //
@@ -35,6 +39,9 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 //     göre," / "Son dakika gelişmesi..." ticker and a leading list marker
 //     ("- ", "• ", "▪️ ")
 //   - a trailing "Detaylar haberimizde..." / "İşte ayrıntılar..." sentence
+//   - a "coming soon" placeholder instead of a summary: "Ayrıntılar geliyor..."
+//     / "Detaylar gelecek...", alone or as the first line of a text that goes on
+//     with another story's headline (a72f9464); the whole summary is hidden
 //   - another story's headline appended after the body (Milliyet: a "related
 //     news" line and its "Son dakika..." ticker)
 //   - double spaces
@@ -936,8 +943,189 @@ function joinLines(s: string): string {
   return parts.join("");
 }
 
+// ---------------------------------------------------------------------------
+// Embedded style sheet (h48-ingest-1). Elips Haber's feed puts the sheet of its
+// notice template in front of the notice: "BODY { font-family: Calibri, Arial;
+// font-size: 12pt; margin : 15px; background-color:#FFFAF4; }\n table { border:
+// 1px solid #B96F00; ... }\n td { ... }\n\nİLANEN TEBLİGAT..." (17 rows in 14
+// days, no other source), and the ingest tag stripper keeps the text of a
+// <style> element. The source page used to print that as the excerpt.
+//
+// An indexOf scan, no regular expression over the text (the strip-tags.ts O(n)
+// rule, h26-security-2): every character is looked at a bounded number of
+// times, and a text that does not start like a rule is left after one
+// `indexOf("{")`. A rule is only taken for a rule when all of these hold:
+//   - the selector (at most 200 characters, ASCII only) is made of element
+//     names from a list of HTML elements, class / id / attribute / pseudo
+//     selectors and combinators: "BODY", "table td", ".bik-ilan-detay .content",
+//     "ul > li:hover"; a word that is no element ("Haber metni body {") makes
+//     the text prose;
+//   - the block has no "{" inside and holds at least one "property: value"
+//     declaration, every one of them with a property of letters and hyphens.
+// A sheet the feed cut inside a rule ("... font-size: 10pt; pad...") has no
+// closing brace; it counts as a rule when what is there is a valid block so far
+// (its unfinished last declaration is at most 100 ASCII characters), and the
+// text is then all sheet.
+// ---------------------------------------------------------------------------
+
+/** A selector longer than this is prose. */
+const MAX_SELECTOR_LENGTH = 200;
+/** The longest CSS property name is far below this. */
+const MAX_PROPERTY_LENGTH = 40;
+/** The last, unfinished declaration of a cut sheet is looked at up to this length. */
+const MAX_PARTIAL_DECLARATION = 100;
+
+/** HTML element names a selector may start a token with (compared lower-case). */
+const HTML_ELEMENTS: ReadonlySet<string> = new Set([
+  "html", "body", "head", "style", "div", "span", "p", "a", "table", "thead", "tbody",
+  "tfoot", "tr", "td", "th", "caption", "colgroup", "col", "ul", "ol", "li", "dl", "dt",
+  "dd", "h1", "h2", "h3", "h4", "h5", "h6", "img", "hr", "br", "b", "i", "u", "s", "em",
+  "strong", "small", "big", "font", "center", "pre", "code", "blockquote", "form",
+  "input", "button", "label", "select", "option", "textarea", "section", "article",
+  "header", "footer", "nav", "main", "aside", "figure", "figcaption", "sup", "sub",
+  "abbr", "cite", "q", "mark", "tt", "strike", "del", "ins", "iframe", "video", "audio",
+  "canvas", "svg", "nobr", "address", "fieldset", "legend",
+]);
+
+/** ASCII punctuation a selector may hold besides letters, digits and blanks. */
+const SELECTOR_MARKS: ReadonlySet<string> = new Set([
+  "_", "-", ".", "#", "*", ">", "+", "~", ":", ",", "[", "]", "=", '"', "'", "(", ")",
+  "@", "%", "|", "^", "$", "\\", "/", "&", "!",
+]);
+
+const ASCII_LETTER_OR_DIGIT = /^[A-Za-z0-9]$/;
+const SELECTOR_SEPARATORS = /[\s,>+~]+/;
+const ELEMENT_NAME = /^[A-Za-z][A-Za-z0-9]*/;
+
+function isAscii(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) > 126) return false;
+  return true;
+}
+
+/** True when `text` (at most {@link MAX_SELECTOR_LENGTH} characters) reads as a CSS selector list. */
+function isCssSelector(text: string): boolean {
+  let tokens = 0;
+  for (const ch of text) {
+    if (!ASCII_LETTER_OR_DIGIT.test(ch) && !SELECTOR_MARKS.has(ch) && ch.trim() !== "") return false;
+  }
+  for (const token of text.split(SELECTOR_SEPARATORS)) {
+    if (token === "") continue;
+    tokens++;
+    const first = token.charAt(0);
+    if (first >= "0" && first <= "9") return false;
+    const element = ELEMENT_NAME.exec(token);
+    // A token that starts with a letter is an element name; any other start is a
+    // class, an id, a pseudo-class, an attribute, an at-rule or "*".
+    if (element !== null && !HTML_ELEMENTS.has(element[0].toLowerCase())) return false;
+  }
+  return tokens > 0;
+}
+
+/** True when `name` is a CSS property name: 1 to {@link MAX_PROPERTY_LENGTH} letters and hyphens. */
+function isCssProperty(name: string): boolean {
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_PROPERTY_LENGTH) return false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed.charAt(i);
+    if (ch !== "-" && !(ch >= "a" && ch <= "z") && !(ch >= "A" && ch <= "Z")) return false;
+  }
+  return true;
+}
+
+/**
+ * True when `block` (the text between "{" and its "}" or the end of the text)
+ * is a declaration list: at least one "property: value", no "{", every finished
+ * declaration with a valid property. With `closed` false the feed cut the text
+ * inside the block, so the unfinished last declaration only has to be short
+ * ASCII (and to have a valid property when it already holds a ":").
+ */
+function isDeclarationBlock(block: string, closed: boolean): boolean {
+  if (block.includes("{")) return false;
+  let declarations = 0;
+  let pos = 0;
+  while (pos <= block.length) {
+    let semicolon = block.indexOf(";", pos);
+    const last = semicolon < 0;
+    if (last) semicolon = block.length;
+    const declaration = block.slice(pos, semicolon).trim();
+    pos = semicolon + 1;
+    if (declaration === "") {
+      if (last) break;
+      continue;
+    }
+    const colon = declaration.indexOf(":");
+    if (last && !closed) {
+      if (declaration.length > MAX_PARTIAL_DECLARATION || !isAscii(declaration)) return false;
+      if (colon >= 0 && !isCssProperty(declaration.slice(0, colon))) return false;
+      break;
+    }
+    if (colon < 1 || !isCssProperty(declaration.slice(0, colon))) return false;
+    declarations++;
+    if (last) break;
+  }
+  return declarations > 0;
+}
+
+/** Index of the first non-blank character of `s` at or after `from` (`s.length` when none). */
+function skipBlanks(s: string, from: number): number {
+  let i = from;
+  while (i < s.length && isBlankChar(s.charAt(i))) i++;
+  return i;
+}
+
+/**
+ * True for what is left of a sheet the feed cut inside a selector (".bik-ilan-detay
+ * .cont..."): it starts with a class or id selector and is ASCII from end to end.
+ * Only asked after at least one rule has been taken off the front.
+ */
+function isCssFragment(rest: string): boolean {
+  if (rest.length < 2) return false;
+  const first = rest.charAt(0);
+  if (first !== "." && first !== "#") return false;
+  const second = rest.charAt(1);
+  if (!(second >= "a" && second <= "z") && !(second >= "A" && second <= "Z") && second !== "_" && second !== "-") {
+    return false;
+  }
+  return isAscii(rest);
+}
+
+/**
+ * `description` without the CSS rules it starts with (h48-ingest-1): each rule
+ * is "selector { property: value; ... }" (see the section header for what counts
+ * as one). The leading run is dropped and the rest returned trimmed, possibly "":
+ * the whole text was a sheet, or the feed cut the sheet inside a rule or a
+ * selector. A text that does not start with a rule comes back as the same
+ * string, byte for byte, and so does one whose braces come later in the sentence
+ * ("Bakan {açıkladı: bugün} dedi", "body { color: red; }" behind prose).
+ * Linear: `indexOf` scans that only move forward, no backtracking.
+ */
+export function stripLeadingStyleRules(description: string): string {
+  let pos = skipBlanks(description, 0);
+  let rules = 0;
+  while (pos < description.length) {
+    const open = description.indexOf("{", pos);
+    if (open < 0 || open - pos > MAX_SELECTOR_LENGTH) break;
+    if (!isCssSelector(description.slice(pos, open))) break;
+    const close = description.indexOf("}", open + 1);
+    const closed = close >= 0;
+    if (!isDeclarationBlock(description.slice(open + 1, closed ? close : description.length), closed)) break;
+    // The sheet was cut inside this rule: nothing behind it.
+    if (!closed) return "";
+    pos = skipBlanks(description, close + 1);
+    rules++;
+  }
+  if (rules === 0) return description;
+  const rest = description.slice(pos).trim();
+  return isCssFragment(rest) ? "" : rest;
+}
+
 /**
  * Tidy a summary for display. Steps, in order:
+ *   pre. a text whose first line is, on its own, a placeholder phrase ("Ayrıntılar
+ *      geliyor...", "Detaylar gelecek...", "Click to continue"; see
+ *      {@link startsWithPlaceholderLine}) is hidden whole, even when other lines
+ *      follow: a72f9464 is "Ayrıntılar geliyor...\n\n\n\n<another story's headline>"
+ *      and the headline is not this outlet's summary (h48-ingest-1). Returns "";
  *   0. repair a text the ingest clamp or an outlet feed cap cut
  *      ({@link repairClamp}); keyed on the raw input, so it runs before anything
  *      changes the length;
@@ -1033,6 +1221,10 @@ function joinLines(s: string): string {
  * sees a feed-cap signature and repairs it. The summary is tidied once.
  */
 export function tidySummaryText(s: string): string {
+  // pre. A placeholder first line: nothing behind it is ours to show. On the raw
+  //     input, before anything is reshaped. Linear (see startsWithPlaceholderLine).
+  if (startsWithPlaceholderLine(s)) return "";
+
   // 0. Ingest clamp ("...tedaviye devam edecek şeki..."), on the raw input.
   const repaired = repairClamp(s);
 

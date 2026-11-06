@@ -13,6 +13,14 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
  * it behind a dedup rule. A mention strictly before its disclosure's `t`
  * is never pickup, no matter how close.
  *
+ * h48-ekonomi-2: only the ticker's OWN filings (`issuer`: stock_codes has the
+ * ticker) are scored. A notice that merely names the share (a Takasbank
+ * "Temerrüt İşlemi" list, an MKK or SPK ban list: the ticker is only in
+ * related_stocks) is still listed, but it carries no pickup numbers and stays
+ * out of every total: it was credited with the ticker's unrelated articles, and
+ * /ekonomi/ALARK read "bildirim 3, haberi çıkan 2 (%67)" under a coverage panel
+ * that said "bildirim 0". Same rule as the coverage panel's issuerDisclosureIndexes.
+ *
  * `disclosure_coverage` (the existing view used by the page's "KAP ile
  * basın arası" panel) is NEVER queried here: an unbounded count against it
  * timed out at 60s in production (see data-3 evidence). Everything below
@@ -45,6 +53,8 @@ export interface PickupDisclosure {
   publishedAt: string;
   subject: string | null;
   disclosureClass: string | null;
+  /** The ticker is one of the notice's own `stock_codes` (false: it is only named in `related_stocks`). */
+  issuer: boolean;
 }
 
 export interface PickupMention {
@@ -66,6 +76,8 @@ export interface DisclosurePickup {
   disclosedAt: string;
   subject: string | null;
   disclosureClass: string | null;
+  /** Copy of the disclosure's `issuer`: false rows are listed with zero numbers and are not summarised. */
+  issuer: boolean;
   kapUrl: string;
   articles: number;
   outlets: number;
@@ -77,7 +89,10 @@ export interface DisclosurePickup {
 }
 
 export interface PickupTotals {
+  /** The ticker's own filings (`issuer`) in the list; related-only notices are not counted. */
   disclosures: number;
+  /** Listed notices that only name the ticker (`issuer: false`): shown, never scored. */
+  relatedOnly: number;
   pickedUp: number;
   pickupRate: number | null;
   medianFirstLagMinutes: number | null;
@@ -151,6 +166,8 @@ export function computePickups(
   const withT = disclosures
     .map((d) => ({ d, t: validMs(d.publishedAt) }))
     .filter((x): x is { d: PickupDisclosure; t: number } => x.t !== null);
+  // Only issuer filings claim mentions, so only they can overlap one another.
+  const issuerWithT = withT.filter((x) => x.d.issuer);
 
   const mentionsWithEff = mentions
     .map((m) => ({ m, eff: effectiveMentionMs(m) }))
@@ -158,7 +175,8 @@ export function computePickups(
 
   const results: DisclosurePickup[] = withT.map(({ d, t }) => {
     const windowEnd = t + PICKUP_WINDOW_MS;
-    const matches = mentionsWithEff.filter((x) => x.eff >= t && x.eff < windowEnd);
+    // A related-only notice is not the ticker's filing: no mention is "pickup" of it.
+    const matches = d.issuer ? mentionsWithEff.filter((x) => x.eff >= t && x.eff < windowEnd) : [];
 
     let articles = 0;
     let firstEff: number | null = null;
@@ -186,15 +204,18 @@ export function computePickups(
         return a.slug.localeCompare(b.slug);
       });
 
-    const overlapping = withT.filter(
-      (other) => other.d.disclosureIndex !== d.disclosureIndex && Math.abs(other.t - t) < PICKUP_WINDOW_MS,
-    ).length;
+    const overlapping = d.issuer
+      ? issuerWithT.filter(
+          (other) => other.d.disclosureIndex !== d.disclosureIndex && Math.abs(other.t - t) < PICKUP_WINDOW_MS,
+        ).length
+      : 0;
 
     return {
       disclosureIndex: d.disclosureIndex,
       disclosedAt: d.publishedAt,
       subject: d.subject,
       disclosureClass: d.disclosureClass,
+      issuer: d.issuer,
       kapUrl: `https://www.kap.org.tr/tr/Bildirim/${d.disclosureIndex}`,
       articles,
       outlets: votingSlugToZone.size,
@@ -217,12 +238,16 @@ function median(nums: readonly number[]): number | null {
 }
 
 /**
- * Aggregate totals across a ticker's pickups. `outlets`/`zones` are
- * distinct VOTING sources across ALL disclosures (a source appearing in
+ * Aggregate totals across a ticker's pickups. Everything but `relatedOnly` is
+ * over the ticker's own filings (`issuer`) only. `outlets`/`zones` are
+ * distinct VOTING sources across all of those (a source appearing in
  * two overlapping disclosures counts once), not a sum of per-disclosure
- * counts. `medianFirstLagMinutes` is over picked-up disclosures only.
+ * counts. `medianFirstLagMinutes` is over picked-up disclosures only, and
+ * `pickupRate` is null when there is no issuer filing to divide by.
  */
-export function summarizePickups(p: readonly DisclosurePickup[]): PickupTotals {
+export function summarizePickups(all: readonly DisclosurePickup[]): PickupTotals {
+  const p = all.filter((x) => x.issuer);
+  const relatedOnly = all.length - p.length;
   const disclosures = p.length;
   const pickedUpList = p.filter((x) => x.articles > 0);
   const pickedUp = pickedUpList.length;
@@ -243,6 +268,7 @@ export function summarizePickups(p: readonly DisclosurePickup[]): PickupTotals {
 
   return {
     disclosures,
+    relatedOnly,
     pickedUp,
     pickupRate,
     medianFirstLagMinutes,
@@ -259,4 +285,26 @@ export function formatPickupLag(minutes: number | null): string {
   if (abs < 60) return `${Math.round(abs)} dk sonra`;
   if (abs < 1440) return `${Math.round(abs / 60)} saat sonra`;
   return `${Math.round(abs / 1440)} gün sonra`;
+}
+
+/** What a related-only row says instead of "N haber · M kaynak" (the panel and the tests share this). */
+export const RELATED_ONLY_LABEL = "hisseyi anan bildirim · yankı hesaplanmaz";
+
+export type PickupRowKind = "related-only" | "picked-up" | "empty-closed" | "empty-open";
+
+/** Which of the panel's four row states a pickup is in; related-only beats every other. */
+export function pickupRowKind(p: Pick<DisclosurePickup, "issuer" | "articles" | "windowComplete">): PickupRowKind {
+  if (!p.issuer) return "related-only";
+  if (p.articles > 0) return "picked-up";
+  return p.windowComplete ? "empty-closed" : "empty-open";
+}
+
+/** "%67" for a rate of 2/3, an em dash when there is no issuer filing to rate. */
+export function formatPickupRate(rate: number | null): string {
+  return rate === null ? "—" : `%${Math.round(rate * 100)}`;
+}
+
+/** "+3 hisseyi anan bildirim" beside the filing count, or null when no related-only notice is listed. */
+export function relatedOnlyCountLabel(n: number): string | null {
+  return n > 0 ? `+${n} hisseyi anan bildirim` : null;
 }
