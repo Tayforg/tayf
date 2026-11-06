@@ -13,6 +13,28 @@ export function countNewSince(timestamps: readonly string[], stamp: string | nul
   return n;
 }
 
+/**
+ * Whether a home render may advance the last-visit stamp. The stamp means "the
+ * reader saw the top of the feed", so only page 1 of the plain feed counts, and
+ * only when the feed itself rendered: the FeedUnavailable shell shows no
+ * stories, a /?q= search view shows a filtered slice, and ?page=N is deeper
+ * than the top. Stamping on any of those makes the next session's pill skip
+ * every story published since that render that the reader never saw. `q` is the
+ * page's firstQuery() value (undefined when blank); an empty string is treated
+ * the same way.
+ */
+export function shouldStampLastVisit({
+  page,
+  q,
+  feedOk,
+}: {
+  page: number;
+  q: string | undefined;
+  feedOk: boolean;
+}): boolean {
+  return feedOk && page === 1 && !q;
+}
+
 export function readLastVisit(): string | null {
   try {
     return window.localStorage.getItem(LAST_VISIT_KEY);

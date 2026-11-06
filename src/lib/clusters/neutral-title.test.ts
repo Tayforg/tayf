@@ -5635,3 +5635,123 @@ describe("h54-editorial-4: hostile input stays cheap", () => {
     expect(performance.now() - t0).toBeLessThan(5000);
   });
 });
+
+// h54-editorial-3: a columnist's insult became the indexable "neutral" title of
+// 539e6666 ("Utanmazlık abidesi Sarıgül, Özgür Özel’i tehdit mi etti": a Hürriyet
+// /yazarlar/nedim-sener column, next to a Yeni Akit news rewrite). A member whose
+// URL is an opinion column (isOpinionUrl; the headline cron sets the flag) is not a
+// candidate while a non-opinion member with a usable title exists.
+describe("h54-editorial-3: opinion columns are not candidates for the neutral title", () => {
+  const COLUMN = "Utanmazlık abidesi Sarıgül, Özgür Özel’i tehdit mi etti";
+  const YENI_AKIT = "Nedim Şener, Sarıgül’ün sözlerinin peşine düştü… Utanmazlık abidesi” Sarıgül Özgür Özel’i tehdit mi etti?";
+  // 4555a9bd: the same Salih Tuna column on Sabah and on A Haber, nothing else.
+  const TUNA = "Anladıysanız bana da anlatın";
+
+  it("539e6666: the Yeni Akit headline, not the Hürriyet column's, is the first pick", () => {
+    const members = [
+      { title: COLUMN, source: "hurriyet", opinion: true },
+      { title: YENI_AKIT, source: "yeni-akit", opinion: false },
+    ];
+    expect(pickNeutralTitle(members, { floor: true })).toBe(YENI_AKIT);
+    expect(pickNeutralTitle([...members].reverse(), { floor: true })).toBe(YENI_AKIT);
+  });
+
+  it("539e6666: the flag is what changes it (the same two titles unflagged still pick the column)", () => {
+    const members = [{ title: COLUMN }, { title: YENI_AKIT }];
+    expect(pickNeutralTitle(members, { floor: true })).toBe(COLUMN);
+  });
+
+  it("without the floor the news title that fails the gate gives null, never the column's title", () => {
+    const members = [
+      { title: COLUMN, opinion: true },
+      { title: YENI_AKIT, opinion: false },
+    ];
+    expect(pickNeutralTitle(members)).toBeNull();
+  });
+
+  it("4555a9bd: an all-opinion set is picked exactly as today", () => {
+    const flagged = [
+      { title: TUNA, source: "a-haber", opinion: true },
+      { title: TUNA, source: "sabah", opinion: true },
+    ];
+    const plain = flagged.map(({ title, source }) => ({ title, source }));
+    expect(pickNeutralTitle(flagged, { floor: true })).toBe(TUNA);
+    expect(pickNeutralTitle(flagged, { floor: true })).toBe(pickNeutralTitle(plain, { floor: true }));
+    expect(pickNeutralTitle(flagged)).toBe(pickNeutralTitle(plain));
+  });
+
+  it("an all-opinion set of different titles is picked as if none were flagged", () => {
+    const titles = [
+      "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı",
+      "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+      "Bakırköy Belediyesine yönelik soruşturmada 39 şüpheli tutuklandı",
+    ];
+    const flagged = titles.map((title) => ({ title, opinion: true }));
+    expect(pickNeutralTitle(flagged, { floor: true })).toBe(pickNeutralTitle(titles.map((title) => ({ title })), { floor: true }));
+    expect(pickNeutralTitle(flagged, { floor: true })).not.toBeNull();
+  });
+
+  it("opinion: false and an absent flag are the same, and a roster with no opinion member is picked as today", () => {
+    const plain = BAKIRKOY.map((title) => ({ title }));
+    const explicit = BAKIRKOY.map((title) => ({ title, opinion: false }));
+    expect(pickNeutralTitle(explicit, { floor: true })).toBe(pickNeutralTitle(plain, { floor: true }));
+    expect(pickNeutralTitle(explicit)).toBe(pickNeutralTitle(plain));
+  });
+
+  it("an opinion title never wins over the news titles, whatever its position", () => {
+    const column = "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı";
+    const news = BAKIRKOY.map((title) => ({ title, opinion: false }));
+    const withColumn = [{ title: column, opinion: true }, ...news];
+    const picked = pickNeutralTitle(withColumn, { floor: true });
+    expect(picked).not.toBe(column);
+    expect(picked).toBe(pickNeutralTitle(news, { floor: true }));
+    expect(pickNeutralTitle([...news, { title: column, opinion: true }], { floor: true })).toBe(picked);
+  });
+
+  it("a column's wording is not evidence for the news titles either (it leaves centrality and the siblings)", () => {
+    const column = "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı";
+    const news = BAKIRKOY.map((title) => ({ title }));
+    const flagged = [...news.map((m) => ({ ...m, opinion: false })), { title: column, opinion: true }];
+    expect(pickNeutralTitle(flagged, { floor: true })).toBe(pickNeutralTitle(news, { floor: true }));
+  });
+
+  it("a non-opinion member without a usable title does not count: a blank or a placeholder leaves the column", () => {
+    const column = { title: COLUMN, opinion: true };
+    expect(pickNeutralTitle([column, { title: "   ", opinion: false }], { floor: true })).toBe(COLUMN);
+    expect(pickNeutralTitle([column, { title: "Kısa haberler", opinion: false }], { floor: true })).toBe(COLUMN);
+    expect(pickNeutralTitle([column, { title: "", opinion: false }])).toBe(COLUMN);
+  });
+
+  it("a stored title that only the column carries is not protected once a news member exists", () => {
+    const news = BAKIRKOY.map((title) => ({ title, opinion: false }));
+    const column = "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı";
+    const flagged = [...news, { title: column, opinion: true }];
+    const picked = pickNeutralTitle(flagged, { incumbent: column });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(column);
+    expect(BAKIRKOY).toContain(picked);
+  });
+
+  it("a stored title that a news member carries stays protected as before", () => {
+    const news = BAKIRKOY.map((title) => ({ title, opinion: false }));
+    const stored = pickNeutralTitle(news, { floor: true })!;
+    const flagged = [...news, { title: "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı", opinion: true }];
+    expect(pickNeutralTitle(flagged, { incumbent: stored })).toBe(stored);
+  });
+
+  it("does not mutate the member list, and a roster at the fetch cap (200 members) with columns among it is still cheap", () => {
+    const members = [
+      { title: COLUMN, opinion: true },
+      { title: YENI_AKIT, opinion: false },
+    ];
+    const before = JSON.stringify(members);
+    pickNeutralTitle(members, { floor: true });
+    expect(JSON.stringify(members)).toBe(before);
+
+    const big = [] as Array<{ title: string; opinion: boolean }>;
+    for (let i = 0; i < 200; i++) big.push({ title: `Bakırköy Belediyesi soruşturmasında ${i} şüpheli tutuklandı`, opinion: i % 7 === 0 });
+    const t0 = performance.now();
+    expect(pickNeutralTitle(big, { floor: true })).not.toBeNull();
+    expect(performance.now() - t0).toBeLessThan(5000);
+  });
+});

@@ -1,4 +1,5 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
+import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { tidySummaryText } from "@/lib/articles/summary-tidy";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { sourceLang } from "@/lib/sources/source-language";
@@ -95,6 +96,19 @@ import type { SummaryMember } from "./summary-attribution";
 // phrases, not a reading of the story. A story that moved on in a way these three
 // families do not name (an indictment over an investigation, a verdict over a
 // trial) is as invisible as before.
+//
+// h54-editorial-3: an opinion column is not the story's summary. 539e6666's seed was
+// a Hürriyet /yazarlar/ column's lead ("TÜRK siyasi tarihinde utanmazlıkta yarışacak
+// iki örnek vardır; ..."), a thesis stated as fact under "Özet — Hürriyet". Two rules,
+// both read from the member's article URL (`isOpinionUrl`; a member without a `url`
+// is not known to be a column):
+//   - an OPINION SEED counts as malformed, like a stub or a stale seed: it counts as
+//     disagreeing, the gain over it is waived and its own text is kept out of the
+//     candidates. It is replaced only by a member that clears every other gate;
+//     with none it stays (never blank), and the page labels it "köşe yazısı";
+//   - an OPINION MEMBER is never a replacement, for any seed: a Sabah or A Haber
+//     mirror of the same column covers the headline as well as the original does.
+// Lexical and linear like the rest: the URL path is the outlet's own word for it.
 
 /** A seed scoring below this disagrees with the title (exclusive: 0.5 is kept). */
 export const AGREEMENT_LOW = 0.5;
@@ -769,18 +783,21 @@ function byNewest(a: Scored, b: Scored): number {
  * qualifiers.
  *
  * The seed must disagree with `title` ({@link AGREEMENT_LOW}), be malformed
- * ({@link seedDisqualified}: a feed-cut stub, unbalanced quotes; h34-reader-4) or
- * be a stage behind the title ({@link stageBehindTitle}: "tutuklandı" over
- * "tutuklama talebiyle"; h54-editorial-1); a title without enough content tokens,
- * or a clean seed that agrees and is not behind, returns null before any other
- * member is looked at. For a malformed or stale seed the gain over the seed is
- * waived, and two more conditions hold: the member's text is not the seed's own
+ * ({@link seedDisqualified}: a feed-cut stub, unbalanced quotes; h34-reader-4), be
+ * a stage behind the title ({@link stageBehindTitle}: "tutuklandı" over
+ * "tutuklama talebiyle"; h54-editorial-1) or be an opinion column (its article
+ * `url` is an opinion path, {@link isOpinionUrl}; h54-editorial-3); a title without
+ * enough content tokens, or a clean seed that agrees and is not behind, returns
+ * null before any other member is looked at. For a malformed, opinion or stale seed
+ * the gain over the seed is waived, and two more conditions hold: the member's text is not the seed's own
  * (raw or tidied, under another outlet's name) and has no unbalanced quotes. For a
  * stale seed a third holds: the member's text states the outcome the title
  * reports and is not itself a stage behind it ({@link carriesOutcome}). A member
  * qualifies when ALL of these hold:
  *   - its source allows excerpts (`excerpt_allowed !== false`) and is not a wire
  *     or aggregator (`normalizeSourceKind`; a missing kind is an outlet);
+ *   - it is not an opinion column (its article `url` is not an opinion path,
+ *     h54-editorial-3), whatever the seed is;
  *   - it is written in the seed's language (`sourceLang`);
  *   - its content hash is not one of `wireMajorityHashes` (the dispatch a wire
  *     redistribution copied: the seed's own check, applied to the candidate);
@@ -820,9 +837,12 @@ export function findAgreeingMember({
   // held against them.
   const families = outcomeFamilies(title);
   const stale = isBehind(families, seedShown);
-  // A malformed or a stale seed is replaced for what it is, not for what it covers:
-  // its score and the gain over it no longer apply.
-  const malformed = seedDisqualified(seedRaw, seedShown) !== null || stale;
+  // An opinion column is the story's summary only when nothing else can be
+  // (h54-editorial-3): it is replaced for what it is, whatever it covers.
+  const opinionSeed = isOpinionUrl(seed.article.url);
+  // A malformed, an opinion or a stale seed is replaced for what it is, not for what
+  // it covers: its score and the gain over it no longer apply.
+  const malformed = seedDisqualified(seedRaw, seedShown) !== null || stale || opinionSeed;
   if (!malformed && !disagrees(seedScore)) return null;
 
   const texts = members.map((m) => repairEntityResidue(m.article.description ?? "").trim());
@@ -868,6 +888,9 @@ export function findAgreeingMember({
     // text is in that set): the rule is "no wire or aggregator member".
     const kind = normalizeSourceKind(m.source.kind);
     if (kind === "wire" || kind === "aggregator") return;
+    // A column never stands in for the summary, whether the seed is news or a column
+    // (a mirror of the seed's own column covers the headline as well as it does).
+    if (isOpinionUrl(m.article.url)) return;
     if (sourceLang(m.source) !== seedLang) return;
     const hash = m.article.content_hash;
     if (hash !== null && wireMajorityHashes.has(hash)) return;

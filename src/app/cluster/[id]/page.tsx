@@ -70,7 +70,9 @@ import { getMemberSeenAt } from "@/lib/clusters/story-timeline-query";
 import {
   describeForMeta,
   summaryAttribution,
+  summaryLabel,
 } from "@/lib/clusters/summary-attribution";
+import { isAllOpinion } from "@/lib/articles/opinion-url";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { RelativeTime } from "@/components/story/relative-time";
 import { StaleCopyNotice } from "@/components/pwa/stale-copy-notice";
@@ -577,6 +579,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     wire,
     agreeWithTitle: hasHeadline ? cluster.title_tr : undefined,
   });
+  // h54-editorial-3: every member's article URL is an opinion path (/yazarlar/...):
+  // the cluster is columns and nothing else, and the header says so beside the
+  // source count. Derived from the URLs at read time; nothing is stored.
+  const allOpinion = isAllOpinion(members);
 
   // T11 (migration 068) — Çerçeveleme makbuzu. The flag is checked FIRST,
   // synchronously, so a flag-off deploy (the default — see pack.md's ops
@@ -808,6 +814,14 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     <span aria-hidden="true" className="mr-2">•</span>
                     {wire.effectiveArticleCount} kaynak
                   </span>
+                  {/* h54-editorial-3: every member is an opinion column (URL
+                      path /yazarlar/, /kose-yazilari/, ...). Neutral chip, not
+                      amber (Kör nokta) and not violet (wire redistribution). */}
+                  {allOpinion && (
+                    <span className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5 font-medium text-foreground">
+                      Köşe yazısı
+                    </span>
+                  )}
                   {/* Honest source count v2 (reader-data): when several of
                       the shown sources used the exact same headline (folded
                       for case/punctuation/quotes), say so without calling it
@@ -932,10 +946,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             {summary && (
               <div className="space-y-1">
                 <div className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
-                  <span>
-                    Özet —{" "}
-                    {summary.source ? summary.source.name : "Kaynak açıklaması"}
-                  </span>
+                  <span>{summaryLabel(summary)}</span>
                   {summary.source && (
                     <BiasBadge bias={summary.source.bias} size="sm" />
                   )}

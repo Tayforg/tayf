@@ -4369,3 +4369,147 @@ describe("generateMetadata — a question or SEO-explainer headline is noindex,f
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// h54-editorial-3: an opinion column is not news. The summary of 539e6666 was a
+// Hürriyet /yazarlar/ column's lead under a bare "Özet — Hürriyet"; the page now
+// says "Özet — Hürriyet · köşe yazısı" when the shown summary's member is a column
+// (isOpinionUrl), and a cluster in which EVERY member is a column gets a
+// "Köşe yazısı" pill beside the source count. Both are derived from the article
+// URLs at read time: no column, no migration.
+// ---------------------------------------------------------------------------
+
+describe("ClusterDetailPage — opinion columns (h54-editorial-3)", () => {
+  const TITLE = "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri tartışma yarattı";
+  const COLUMN_TEXT =
+    "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri tartışma yarattı; bu yazıda sözlerin ardındaki siyaseti ve yarattığı tartışmayı ele alıyorum.";
+  const NEWS_TEXT =
+    "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri üzerine CHP'den açıklama geldi, sözler siyasette tartışma yarattı.";
+  const MIRROR_TEXT =
+    "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri tartışma yarattı; yazar sözlerin sert tonuna dikkat çekiyor ve gerekçelerini sıralıyor.";
+
+  interface Spec {
+    slug: string;
+    name: string;
+    url: string;
+    description: string;
+    at: string;
+  }
+  const HURRIYET: Spec = {
+    slug: "hurriyet",
+    name: "Hürriyet",
+    url: "https://www.hurriyet.com.tr/yazarlar/nedim-sener/utanmazlik-abidesi-43365220",
+    description: COLUMN_TEXT,
+    at: "2026-11-04T03:07:31.000Z",
+  };
+  const SABAH: Spec = {
+    slug: "sabah",
+    name: "Sabah",
+    url: "https://www.sabah.com.tr/yazarlar/salih-tuna/2026/11/04/anladiysaniz-bana-da-anlatin",
+    description: MIRROR_TEXT,
+    at: "2026-11-04T09:00:00.000Z",
+  };
+  const YENI_AKIT: Spec = {
+    slug: "yeni-akit",
+    name: "Yeni Akit",
+    url: "https://www.yeniakit.com.tr/haber/sarigul-ozel-2031769.html",
+    description: NEWS_TEXT,
+    at: "2026-11-04T08:14:00.000Z",
+  };
+
+  function detailOf(specs: Spec[], summary = COLUMN_TEXT): ClusterDetail {
+    const sources = specs.map((s) => makeSource({ id: `id-${s.slug}`, slug: s.slug, name: s.name, kind: "outlet" }));
+    const members = specs
+      .map((s, i) => {
+        const m = makeMember(`a-${s.slug}`, sources[i]!, s.at);
+        m.article.url = s.url;
+        m.article.description = s.description;
+        return m;
+      })
+      .sort((a, b) => Date.parse(b.article.published_at) - Date.parse(a.article.published_at));
+    const cluster = makeCluster({ bias_distribution: emptyDistribution(), article_count: members.length });
+    cluster.title_tr = TITLE;
+    cluster.summary_tr = summary;
+    return {
+      cluster,
+      members,
+      allSources: sources,
+      wire: { isWireRedistribution: false, effectiveArticleCount: members.length, memberCount: members.length },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  /** The element whose own text is exactly `text` (the pill, not the row around it). */
+  const elementWithText = (tree: unknown, text: string) =>
+    findElement(tree, (el) => typeof el.type === "string" && collectText(el.props.children).join("") === text);
+
+  /** The first meta row: the age, the source count and the badges. */
+  const metaRow = (tree: unknown) =>
+    findElement(
+      tree,
+      (el) =>
+        el.type === "div" &&
+        typeof el.props.className === "string" &&
+        el.props.className.includes("text-[12px] font-medium text-muted-foreground"),
+    );
+
+  it("an opinion summary is labelled 'Özet — <Outlet> · köşe yazısı'", async () => {
+    const tree = await renderTree(detailOf([HURRIYET, SABAH]));
+    const text = collectText(tree).join("");
+    expect(text).toContain("Özet — Hürriyet · köşe yazısı");
+  });
+
+  it("a cluster whose every member is a column shows the 'Köşe yazısı' pill beside the source count", async () => {
+    const tree = await renderTree(detailOf([HURRIYET, SABAH]));
+    const pill = elementWithText(tree, "Köşe yazısı");
+    expect(pill).not.toBeNull();
+    expect(pill?.type).toBe("span");
+    const row = collectText(metaRow(tree)?.props.children).join("");
+    expect(row).toMatch(/2 kaynak.*Köşe yazısı/);
+  });
+
+  it("a mixed cluster (539e6666: a column and a news rewrite) has no pill, and its summary is the news member's, unlabelled", async () => {
+    const tree = await renderTree(detailOf([HURRIYET, YENI_AKIT]));
+    const text = collectText(tree).join("");
+    expect(elementWithText(tree, "Köşe yazısı")).toBeNull();
+    expect(text).toContain("Özet — Yeni Akit");
+    expect(text).not.toContain("köşe yazısı");
+    expect(text).not.toContain("Özet — Hürriyet");
+    expect(findElement(tree, (el) => el.type === "p" && collectText(el.props.children).join("") === NEWS_TEXT)).not.toBeNull();
+    expect(findElement(tree, (el) => el.type === "p" && collectText(el.props.children).join("") === COLUMN_TEXT)).toBeNull();
+  });
+
+  it("a mixed cluster whose news member cannot replace the column keeps the column's summary, labelled, with no pill", async () => {
+    const weak: Spec = { ...YENI_AKIT, description: "CHP'den yeni bir açıklama geldi, ayrıntılar henüz netleşmedi ve konu gündemde." };
+    const tree = await renderTree(detailOf([HURRIYET, weak]));
+    const text = collectText(tree).join("");
+    expect(text).toContain("Özet — Hürriyet · köşe yazısı");
+    expect(elementWithText(tree, "Köşe yazısı")).toBeNull();
+  });
+
+  it("a news cluster has neither cue", async () => {
+    const other: Spec = { ...SABAH, slug: "sozcu", name: "Sözcü", url: "https://www.sozcu.com.tr/sarigul-ozel-p1" };
+    const tree = await renderTree(detailOf([YENI_AKIT, other], NEWS_TEXT));
+    const text = collectText(tree).join("");
+    expect(elementWithText(tree, "Köşe yazısı")).toBeNull();
+    expect(text).toContain("Özet — Yeni Akit");
+    expect(text).not.toContain("köşe yazısı");
+  });
+
+  it("the pill is a plain-token chip: full-contrast text tokens and no computed class names", async () => {
+    const tree = await renderTree(detailOf([HURRIYET, SABAH]));
+    const className = String(elementWithText(tree, "Köşe yazısı")?.props.className ?? "");
+    expect(className).toContain("rounded-full");
+    expect(className).not.toMatch(/text-(?:muted-foreground|brand)\/\d+/);
+    expect(className).not.toMatch(/[`$]|\{/);
+  });
+
+  it("the JSON-LD and the page name the same summary outlet for a mixed cluster", async () => {
+    const detail = detailOf([HURRIYET, YENI_AKIT]);
+    const tree = await renderTree(detail);
+    const jsonLd = JSON.parse(findJsonLd(tree) ?? "{}") as { description?: string };
+    expect(jsonLd.description).toContain("Yeni Akit:");
+    expect(jsonLd.description).not.toContain("Hürriyet:");
+  });
+});

@@ -17,6 +17,7 @@ import {
   followLabel,
   followListCaption,
   followRowMeta,
+  followRowsToShow,
   MAX_FOLLOWS,
   parseFollowItems,
   parseFollowKey,
@@ -36,6 +37,10 @@ import {
 // visit and are gone on the next one. For a keyword follow "yeni" is a lower
 // bound: a fresh story the search did not return cannot be counted.
 //
+// A list shows ROWS_PER_FOLLOW rows by default but grows to the last "yeni"
+// story (followRowsToShow), so the badge counts only rows on screen and the
+// markSeen at the end of the visit consumes only stories the reader was shown.
+//
 // Accessibility: ONE polite live region (FeedFrame) is mounted in every state
 // -- placeholder, empty and list -- so it never remounts and a removal can be
 // announced. Unfollowing moves focus to the neighbouring follow's heading (or
@@ -51,14 +56,19 @@ type FeedState =
   | { status: "error"; reason: "rate" | "down" };
 
 // What the polite region says once a RETRY's fetch has landed (WCAG 4.1.3).
-// The count is the rows actually shown, which is why it is capped at
-// ROWS_PER_FOLLOW. The empty case mirrors the visible followEmptyText: an empty
+// The count is the rows actually shown: ROWS_PER_FOLLOW, or more when the list
+// grew to cover every "yeni" story (followRowsToShow with the follow's seenAt
+// snapshot). The empty case mirrors the visible followEmptyText: an empty
 // list means "nothing matched", not "no new news".
-export function retryResultAnnouncement(label: string, state: FeedState): string {
+export function retryResultAnnouncement(
+  label: string,
+  state: FeedState,
+  seenAt: string | null,
+): string {
   if (state.status === "ok") {
     return state.items.length === 0
       ? `${label} yüklendi · eşleşen hikâye yok`
-      : `${label} yüklendi · ${Math.min(state.items.length, ROWS_PER_FOLLOW)} hikâye`;
+      : `${label} yüklendi · ${followRowsToShow(state.items, seenAt, ROWS_PER_FOLLOW)} hikâye`;
   }
   return state.reason === "rate"
     ? `${label}: çok sık yenilendi, biraz sonra tekrar deneyin`
@@ -112,6 +122,12 @@ export function FollowFeed() {
 
   const [results, setResults] = useState<Record<string, FeedState>>({});
   const [seenSnapshot, setSeenSnapshot] = useState<Record<string, string | null>>({});
+  // Mirrors seenSnapshot (updated in an effect after every commit) for the fetch
+  // effect below, which must read the current per-key baseline when a retry
+  // lands but must NOT list seenSnapshot as a dependency: it is keyed on the
+  // set of follows and the retry nonce only, or every snapshot change would
+  // refetch.
+  const seenSnapshotRef = useRef<Record<string, string | null>>({});
   const [announcement, setAnnouncement] = useState("");
   // Bumped by a retry so the fetch effect re-runs without the follow set changing.
   const [retryNonce, setRetryNonce] = useState(0);
@@ -198,7 +214,8 @@ export function FollowFeed() {
         const label = retryPending.current.get(item.key);
         if (label !== undefined) {
           retryPending.current.delete(item.key);
-          setAnnouncement(retryResultAnnouncement(label, outcome));
+          const seenAt = seenSnapshotRef.current[item.key] ?? null;
+          setAnnouncement(retryResultAnnouncement(label, outcome, seenAt));
         }
       });
       if (controller.signal.aborted) return;
@@ -210,6 +227,13 @@ export function FollowFeed() {
 
     return () => controller.abort();
   }, [keysSignature, retryNonce]);
+
+  // Declared after the fetch effect on purpose: the fetches settle in later
+  // tasks, long after this commit's effects have all run, so the ref is current
+  // whenever a retry result reads it.
+  useEffect(() => {
+    seenSnapshotRef.current = seenSnapshot;
+  });
 
   useEffect(() => {
     const target = pendingFocus.current;
@@ -328,6 +352,9 @@ export function EmptyState({
 
 function newBadgeLabel(state: FeedState | undefined, seenAt: string | null): string | null {
   if (state?.status !== "ok") return null;
+  // Counts every "yeni" item of the response, and that is exactly the rows on
+  // screen: SectionBody renders followRowsToShow() rows, which always reach the
+  // last new item. Keep the two on the same countNew rule.
   const n = countNew(state.items, seenAt);
   if (n === 0) return null;
   // The API caps a follow at FOLLOW_ITEMS_MAX items, so "all of them are new"
@@ -390,7 +417,13 @@ export function FollowSection({
       </div>
 
       <div className="mt-2">
-        <SectionBody kind={follow.kind} state={state} label={label} onRetry={onRetry} />
+        <SectionBody
+          kind={follow.kind}
+          state={state}
+          seenAt={seenAt}
+          label={label}
+          onRetry={onRetry}
+        />
       </div>
     </section>
   );
@@ -399,18 +432,27 @@ export function FollowSection({
 export function SectionBody({
   kind,
   state,
+  seenAt = null,
   label,
   onRetry,
 }: {
   kind: Follow["kind"];
   state: FeedState | undefined;
+  /**
+   * The follow's seenAt snapshot for this visit; decides how many rows to show
+   * (followRowsToShow). Omitted = no baseline = the default ROWS_PER_FOLLOW.
+   */
+  seenAt?: string | null;
   /** The follow's label; names the retry button. */
   label?: string;
   onRetry?: () => void;
 }) {
   if (state === undefined) {
-    // Mirrors the loaded list (caption line + ROWS_PER_FOLLOW rows) so the
-    // page does not jump when the answer arrives.
+    // Reserves the default list (caption line + ROWS_PER_FOLLOW rows), the
+    // common case. The loaded list can still be shorter (few or no matches, an
+    // error) or longer: followRowsToShow extends it up to FOLLOW_ITEMS_MAX rows
+    // so every "yeni" story is on screen. That growth is accepted (spec
+    // h55-personal-1) so the badge and markSeen match what the reader saw.
     return (
       <div aria-busy="true">
         {kind === "q" && <div className="h-4 px-2" />}
@@ -457,7 +499,7 @@ export function SectionBody({
         <p className="px-2 text-[11px] text-muted-foreground">{caption}</p>
       )}
       <ul className="space-y-1">
-        {state.items.slice(0, ROWS_PER_FOLLOW).map((item) => (
+        {state.items.slice(0, followRowsToShow(state.items, seenAt, ROWS_PER_FOLLOW)).map((item) => (
           <li key={item.id}>
             <Link
               href={`/cluster/${item.id}`}

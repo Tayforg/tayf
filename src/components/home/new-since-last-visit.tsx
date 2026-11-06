@@ -17,6 +17,13 @@ const getServerSnapshot = () => null;
 interface NewSinceLastVisitProps {
   /** ISO `first_published` of the clusters rendered on the page. */
   timestamps: string[];
+  /**
+   * Whether this render showed the feed (page.tsx: shouldStampLastVisit). Only
+   * then is the last-visit stamp advanced; the outage shell, a search view and
+   * ?page=N leave it alone so the next session still counts what was missed.
+   * Server-decided and a plain boolean, so it cannot cause a hydration mismatch.
+   */
+  stamp: boolean;
 }
 
 // The role="status" container is ALWAYS rendered, empty on the server and on a
@@ -26,13 +33,15 @@ interface NewSinceLastVisitProps {
 // (absolutely positioned, 1px, clipped), so the empty region adds no gap to the
 // page's space-y flow. The visible pill appears inside it only when something
 // is new.
-export function NewSinceLastVisit({ timestamps }: NewSinceLastVisitProps) {
-  const stamp = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const count = countNewSince(timestamps, stamp);
+export function NewSinceLastVisit({ timestamps, stamp }: NewSinceLastVisitProps) {
+  const since = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const count = countNewSince(timestamps, since);
 
+  // Re-runs when `stamp` flips: clearing a search on "/" (false -> true) puts the
+  // reader back on the feed, which is a visit worth stamping.
   useEffect(() => {
-    writeLastVisit(new Date().toISOString());
-  }, []);
+    if (stamp) writeLastVisit(new Date().toISOString());
+  }, [stamp]);
 
   return (
     <div role="status" aria-live="polite" className={count > 0 ? "" : "sr-only"}>

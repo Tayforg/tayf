@@ -46,6 +46,22 @@ function item(over: Partial<FollowItem> = {}): FollowItem {
   };
 }
 
+const SEEN_AT = "2026-10-22T09:00:00.000Z";
+
+/**
+ * One item per flag, newest first, ids unique per position: true = first
+ * published after SEEN_AT (a "yeni" story), false = before it.
+ */
+function newsItems(flags: boolean[]): FollowItem[] {
+  return flags.map((isNew, i) =>
+    item({
+      id: `aaaaaaaa-1111-4111-8111-${String(i).padStart(12, "0")}`,
+      title: `Haber ${i}`,
+      firstPublished: isNew ? `2026-10-22T10:${String(59 - i).padStart(2, "0")}:00+00:00` : "2026-10-22T08:00:00+00:00",
+    }),
+  );
+}
+
 type El = { type?: unknown; props?: Record<string, unknown> };
 
 function collect(node: unknown, out: El[] = []): El[] {
@@ -134,37 +150,50 @@ describe("FeedFrame / live region", () => {
 
 describe("retryResultAnnouncement", () => {
   type State = Parameters<typeof retryResultAnnouncement>[1];
+  const SEEN = "2026-10-22T09:00:00.000Z";
 
-  it("reads the loaded count, capped at the five rows actually shown", () => {
+  it("reads the loaded count, capped at the five rows shown when nothing is new", () => {
     const items = Array.from({ length: 7 }, (_, i) =>
       item({ id: `aaaaaaaa-1111-4111-8111-00000000000${i}` }),
     );
     const state: State = { status: "ok", items };
-    expect(retryResultAnnouncement("“seçim”", state)).toBe("“seçim” yüklendi · 5 hikâye");
+    expect(retryResultAnnouncement("“seçim”", state, null)).toBe("“seçim” yüklendi · 5 hikâye");
   });
 
   it("reads the exact count below the cap", () => {
     const state: State = { status: "ok", items: [item()] };
-    expect(retryResultAnnouncement("Ekonomi", state)).toBe("Ekonomi yüklendi · 1 hikâye");
+    expect(retryResultAnnouncement("Ekonomi", state, null)).toBe("Ekonomi yüklendi · 1 hikâye");
+  });
+
+  // h55-personal-1: the rows grow to cover every new story, so the count the
+  // region reads is the rows on screen, not a flat five.
+  it("counts the extended rows: 8 items, all new after seenAt -> 8 hikâye", () => {
+    const state: State = { status: "ok", items: newsItems(Array(8).fill(true)) };
+    expect(retryResultAnnouncement("Ekonomi", state, SEEN)).toBe("Ekonomi yüklendi · 8 hikâye");
+  });
+
+  it("with no baseline (seenAt null) 8 items still read as the five default rows", () => {
+    const state: State = { status: "ok", items: newsItems(Array(8).fill(true)) };
+    expect(retryResultAnnouncement("Ekonomi", state, null)).toBe("Ekonomi yüklendi · 5 hikâye");
   });
 
   it("says there is no match (not 'no news') when the list came back empty", () => {
     const state: State = { status: "ok", items: [] };
-    const text = retryResultAnnouncement("Ekonomi", state);
+    const text = retryResultAnnouncement("Ekonomi", state, SEEN);
     expect(text).toBe("Ekonomi yüklendi · eşleşen hikâye yok");
     expect(text).not.toContain("yeni haber yok");
   });
 
   it("explains a rate-limited retry", () => {
     const state: State = { status: "error", reason: "rate" };
-    expect(retryResultAnnouncement("“seçim”", state)).toBe(
+    expect(retryResultAnnouncement("“seçim”", state, null)).toBe(
       "“seçim”: çok sık yenilendi, biraz sonra tekrar deneyin",
     );
   });
 
   it("reports a retry that failed again", () => {
     const state: State = { status: "error", reason: "down" };
-    expect(retryResultAnnouncement("“seçim”", state)).toBe("“seçim” şu an yüklenemedi");
+    expect(retryResultAnnouncement("“seçim”", state, null)).toBe("“seçim” şu an yüklenemedi");
   });
 
   it("every outcome names the follow it is about", () => {
@@ -175,7 +204,7 @@ describe("retryResultAnnouncement", () => {
       { status: "error", reason: "down" },
     ];
     for (const state of states) {
-      expect(retryResultAnnouncement("Ekonomi", state)).toContain("Ekonomi");
+      expect(retryResultAnnouncement("Ekonomi", state, SEEN)).toContain("Ekonomi");
     }
   });
 });
@@ -224,6 +253,22 @@ describe("retry result announcement wiring (source guard: effects need a browser
   it("still has exactly one live region (announcing reuses it)", () => {
     expect(count(src, 'role="status"')).toBe(1);
     expect(count(src, 'aria-live="polite"')).toBe(1);
+  });
+
+  // h55-personal-1: the announcement counts rows with the reader's baseline. The
+  // effect cannot depend on seenSnapshot (that would refetch on every snapshot
+  // change), so it reads the per-key snapshot from a ref mirrored by an effect.
+  it("reads the per-key seenAt from a ref, passing it to retryResultAnnouncement", () => {
+    expect(src).toContain("seenSnapshotRef = useRef<Record<string, string | null>>({})");
+    expect(fetchEffect).toContain("seenSnapshotRef.current[item.key] ?? null");
+    expect(fetchEffect).toContain("retryResultAnnouncement(label, outcome, seenAt)");
+  });
+
+  it("mirrors seenSnapshot into that ref outside the fetch effect, and keeps the effect's deps", () => {
+    expect(count(src, "seenSnapshotRef.current = seenSnapshot")).toBe(1);
+    expect(fetchEffect).not.toContain("seenSnapshotRef.current = seenSnapshot");
+    expect(src).toContain("}, [keysSignature, retryNonce]);");
+    expect(src).not.toMatch(/\}, \[[^\]]*seenSnapshot[^\]]*\]\);/);
   });
 });
 
@@ -489,6 +534,130 @@ describe("FollowSection", () => {
       ),
     );
     expect(markup).toContain("1 yeni");
+  });
+});
+
+// h55-personal-1: the "N yeni" badge and the rows must agree. The list used to
+// show 5 rows while the badge counted all 10 API items, and markSeen then
+// stamped the unseen rows 6-10 as seen. The rows now extend to the last new
+// story (followRowsToShow), so every story the badge calls "yeni" is on screen.
+describe("FollowSection -- the rows cover every 'yeni' story", () => {
+  function render(flags: boolean[], seenAt: string | null) {
+    const items = newsItems(flags);
+    const markup = renderToStaticMarkup(
+      section(EKONOMI, { status: "ok", items }, { seenAt }),
+    );
+    return { items, markup };
+  }
+
+  /** Cluster ids linked from the rendered rows, in order. */
+  function renderedIds(markup: string): string[] {
+    return [...markup.matchAll(/<li><a [^>]*href="\/cluster\/([^"]+)"/g)].map((m) => m[1] as string);
+  }
+
+  /** Text of the badge pill, or null. */
+  function badgeText(markup: string): string | null {
+    return /<span class="shrink-0 rounded-full bg-brand\/15[^>]*>([^<]*)<\/span>/.exec(markup)?.[1] ?? null;
+  }
+
+  /** How many rendered rows were first published after seenAt. */
+  function renderedNewRows(items: FollowItem[], markup: string, seenAt: string): number {
+    const byId = new Map(items.map((i) => [i.id, i]));
+    return renderedIds(markup).filter(
+      (id) => Date.parse(byId.get(id)!.firstPublished) > Date.parse(seenAt),
+    ).length;
+  }
+
+  it("(a) 10 items all after seenAt -> 10 rows and '10+ yeni'", () => {
+    const { markup } = render(Array(10).fill(true), SEEN_AT);
+    expect(count(markup, "<li>")).toBe(10);
+    expect(renderedIds(markup)).toHaveLength(10);
+    expect(badgeText(markup)).toBe("10+ yeni");
+  });
+
+  it("(b) 7 new + 3 old -> 7 rows and '7 yeni'", () => {
+    const { items, markup } = render([...Array(7).fill(true), ...Array(3).fill(false)], SEEN_AT);
+    expect(renderedIds(markup)).toHaveLength(7);
+    expect(badgeText(markup)).toBe("7 yeni");
+    expect(renderedNewRows(items, markup, SEEN_AT)).toBe(7);
+  });
+
+  it("(c) 2 new, the first and the seventh row -> 7 rows and '2 yeni'", () => {
+    const flags = Array(10).fill(false);
+    flags[0] = true;
+    flags[6] = true;
+    const { items, markup } = render(flags, SEEN_AT);
+    expect(renderedIds(markup)).toHaveLength(7);
+    expect(badgeText(markup)).toBe("2 yeni");
+    expect(renderedNewRows(items, markup, SEEN_AT)).toBe(2);
+  });
+
+  it("a new story below row 5 is rendered even when fewer than 5 are new", () => {
+    const flags = Array(10).fill(false);
+    flags[7] = true;
+    const { items, markup } = render(flags, SEEN_AT);
+    expect(renderedIds(markup)).toEqual(items.slice(0, 8).map((i) => i.id));
+    expect(badgeText(markup)).toBe("1 yeni");
+  });
+
+  it("(d) no baseline (seenAt null) -> the default 5 rows and no badge", () => {
+    const { markup } = render(Array(10).fill(true), null);
+    expect(renderedIds(markup)).toHaveLength(5);
+    expect(badgeText(markup)).toBeNull();
+    expect(markup).not.toContain("yeni");
+  });
+
+  it("nothing new keeps the default 5 rows and shows no badge", () => {
+    const { markup } = render(Array(10).fill(false), SEEN_AT);
+    expect(renderedIds(markup)).toHaveLength(5);
+    expect(badgeText(markup)).toBeNull();
+  });
+
+  it("(e) the two-item case still shows '1 yeni' and both rows", () => {
+    const { markup } = render([true, false], SEEN_AT);
+    expect(renderedIds(markup)).toHaveLength(2);
+    expect(badgeText(markup)).toBe("1 yeni");
+  });
+
+  it("the badge number always equals the new rows on screen", () => {
+    const cases: boolean[][] = [
+      [...Array(7).fill(true), ...Array(3).fill(false)],
+      [true, false, false, false, false, false, true, false, false, false],
+      [false, false, true, false, false, false, false, false, false, false],
+      [true, true, true, false, false, false, false, false, false, false],
+      [false, false, false, false, false, false, false, false, false, true],
+    ];
+    for (const flags of cases) {
+      const { items, markup } = render(flags, SEEN_AT);
+      const wanted = flags.filter(Boolean).length;
+      expect(badgeText(markup)).toBe(`${wanted} yeni`);
+      expect(renderedNewRows(items, markup, SEEN_AT)).toBe(wanted);
+    }
+  });
+
+  it("hands seenAt through to its body (the body decides how many rows to show)", () => {
+    const tree = FollowSection({
+      follow: EKONOMI,
+      state: { status: "ok", items: newsItems([true]) },
+      seenAt: SEEN_AT,
+      onRemove: () => {},
+    });
+    const body = collect(tree).find((el) => el.type === SectionBody);
+    expect(body?.props?.seenAt).toBe(SEEN_AT);
+  });
+
+  it("SectionBody on its own, without a baseline, keeps the five-row cap", () => {
+    const markup = renderToStaticMarkup(
+      <SectionBody kind="konu" state={{ status: "ok", items: newsItems(Array(10).fill(true)) }} label="Ekonomi" />,
+    );
+    expect(count(markup, "<li>")).toBe(5);
+  });
+
+  it("the loading skeleton keeps ROWS_PER_FOLLOW rows whatever the baseline", () => {
+    const markup = renderToStaticMarkup(
+      <SectionBody kind="konu" state={undefined} seenAt={SEEN_AT} label="Ekonomi" />,
+    );
+    expect(count(markup, "h-[54px]")).toBe(5);
   });
 });
 

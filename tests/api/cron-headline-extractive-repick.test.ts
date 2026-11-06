@@ -46,6 +46,8 @@ interface ClusterRow {
 interface MemberTitle {
   title: string;
   published_at: string | null;
+  /** The article url (h54-editorial-3). Absent on a row the fixture did not give one. */
+  url?: string;
 }
 
 interface RepickRow {
@@ -67,6 +69,8 @@ const dbState = vi.hoisted(() => ({
   /** Reject any update whose patch carries the stamp column (migration 141 not applied). */
   stampColumnMissing: false,
   memberFetchLimits: [] as Array<number | null>,
+  /** The select list of every cluster_articles read (h54-editorial-3: it must ask for the article url). */
+  memberSelects: [] as unknown[][],
   /** Added to Date.now() once the IS NULL pick resolved (simulates a slow run). */
   clockOffsetMs: 0,
   slowAfterPick: false,
@@ -98,6 +102,7 @@ const supabaseFake = await vi.hoisted(async () => {
       },
       cluster_articles: (state) => {
         dbState.memberFetchLimits.push(state.limit);
+        dbState.memberSelects.push(state.selectArgs);
         const clusterIdEq = state.eq.find((e) => e.col === "cluster_id");
         const id = clusterIdEq?.val as string | undefined;
         if (id && dbState.memberFetchErrorFor.has(id)) {
@@ -105,7 +110,7 @@ const supabaseFake = await vi.hoisted(async () => {
         }
         const members = (id ? dbState.membersByCluster[id] : undefined) ?? [];
         return {
-          data: members.map((m) => ({ articles: { title: m.title, published_at: m.published_at } })),
+          data: members.map((m) => ({ articles: { title: m.title, published_at: m.published_at, url: m.url } })),
           error: null,
         };
       },
@@ -155,6 +160,7 @@ beforeEach(() => {
   dbState.updateErrorFor = new Map();
   dbState.stampColumnMissing = false;
   dbState.memberFetchLimits = [];
+  dbState.memberSelects = [];
   dbState.clockOffsetMs = 0;
   dbState.slowAfterPick = false;
   dbState.clockOffsetActive = false;
@@ -985,5 +991,90 @@ describe("updated_at is never written", () => {
       title_neutral_model: EXTRACTIVE_MODEL_ID,
       title_neutral_member_count: 3,
     });
+  });
+});
+
+// h54-editorial-3: opinion columns are not candidates for the neutral title. The
+// member fetch asks for the article url and flags a member whose URL path is an
+// opinion path (isOpinionUrl); the picker drops flagged members while a news
+// member with a usable title exists. 539e6666 (Hürriyet /yazarlar/ column + Yeni
+// Akit news rewrite) was titled with the columnist's insult.
+describe("opinion columns (h54-editorial-3)", () => {
+  const COLUMN_TITLE = "Utanmazlık abidesi Sarıgül, Özgür Özel’i tehdit mi etti";
+  const COLUMN_URL = "https://www.hurriyet.com.tr/yazarlar/nedim-sener/utanmazlik-abidesi-sarigul-ozgur-ozeli-tehdit-mi-etti-43365220";
+  const NEWS_TITLE = "Nedim Şener, Sarıgül’ün sözlerinin peşine düştü… Utanmazlık abidesi” Sarıgül Özgür Özel’i tehdit mi etti?";
+  const NEWS_URL = "https://www.yeniakit.com.tr/haber/nedim-sener-sarigulun-sozlerinin-pesine-dustu-utanmazlik-abidesi-sarigul-ozgur-ozeli-tehdit-mi-etti-2031769.html";
+  const SABAH_URL = "https://www.sabah.com.tr/yazarlar/salih-tuna/2026/11/04/anladiysaniz-bana-da-anlatin";
+  const AHABER_URL = "https://www.ahaber.com.tr/yazarlar/salih-tuna/2026/11/04/anladiysaniz-bana-da-anlatin";
+  const TUNA = "Anladıysanız bana da anlatın";
+
+  function membersWithUrls(id: string, rows: Array<{ title: string; url: string }>): void {
+    dbState.membersByCluster[id] = rows.map((r, i) => ({
+      title: r.title,
+      url: r.url,
+      published_at: new Date(Date.UTC(2026, 0, i + 1)).toISOString(),
+    }));
+  }
+
+  it("the member fetch selects the article url next to the title and the date, in both passes", async () => {
+    dbState.clusters = [cluster("c1")];
+    dbState.repickRows = [repickRow("r1")];
+    members("c1", TWO_GOOD);
+    members("r1", TWO_GOOD);
+
+    const { res } = await run("203.0.113.201");
+    expect(res.status).toBe(200);
+    expect(dbState.memberSelects).toHaveLength(2);
+    for (const select of dbState.memberSelects) {
+      expect(String(select[0])).toMatch(/title,\s*published_at,\s*url/);
+    }
+  });
+
+  it("539e6666: the first pick is the Yeni Akit headline, not the Hürriyet columnist's", async () => {
+    dbState.clusters = [cluster("c1", { article_count: 2 })];
+    membersWithUrls("c1", [
+      { title: COLUMN_TITLE, url: COLUMN_URL },
+      { title: NEWS_TITLE, url: NEWS_URL },
+    ]);
+
+    const { res, body } = await run("203.0.113.202");
+    expect(res.status).toBe(200);
+    expect(body.rewrote).toBe(1);
+    expect(patchOf(updateFor("c1")!).title_tr_neutral).toBe(NEWS_TITLE);
+    expect(patchOf(updateFor("c1")!).title_tr_neutral).not.toBe(COLUMN_TITLE);
+  });
+
+  it("4555a9bd: a cluster of nothing but columns is titled as before", async () => {
+    dbState.clusters = [cluster("c1", { article_count: 2 })];
+    membersWithUrls("c1", [
+      { title: TUNA, url: SABAH_URL },
+      { title: TUNA, url: AHABER_URL },
+    ]);
+
+    const { body } = await run("203.0.113.203");
+    expect(body.rewrote).toBe(1);
+    expect(patchOf(updateFor("c1")!).title_tr_neutral).toBe(TUNA);
+  });
+
+  it("members whose rows carry no url are picked as before (nothing says they are columns)", async () => {
+    dbState.clusters = [cluster("c1")];
+    members("c1", TWO_GOOD);
+
+    await run("203.0.113.204");
+    expect(patchOf(updateFor("c1")!).title_tr_neutral).toBe(BEST_OF_TWO_GOOD);
+  });
+
+  it("a re-pick does not protect a stored title that only a column carries", async () => {
+    const columnTitle = "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı";
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: columnTitle, article_count: 4 })];
+    membersWithUrls("r1", [
+      { title: columnTitle, url: "https://www.hurriyet.com.tr/yazarlar/ali-veli/bakirkoy-1" },
+      ...TWO_GOOD.map((title, i) => ({ title, url: `https://www.cumhuriyet.com.tr/turkiye/bakirkoy-${i}` })),
+    ]);
+
+    const { body } = await run("203.0.113.205");
+    expect(body.repicked).toBe(1);
+    const written = patchOf(updateFor("r1")!).title_tr_neutral;
+    expect(TWO_GOOD).toContain(written);
   });
 });
