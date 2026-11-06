@@ -8,7 +8,9 @@ import {
   SEARCH_FOLD_FROM,
   SEARCH_FOLD_TO,
   canonicalSearchQuery,
+  cleanQueryUnicode,
   foldTr,
+  isTurkishSuffixTail,
   normaliseSearchQuery,
   pgLower,
   searchQueryCut,
@@ -623,5 +625,369 @@ describe("canonicalSearchQuery keeps its output while sharing the term walk", ()
     ['"Ak Parti" -CHP', '"ak parti" -chp'],
   ])("%j -> %j", (input, expected) => {
     expect(canonicalSearchQuery(input)).toBe(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h50-search-2: three inputs the cleanup used to misread.
+//   1. a dash BETWEEN words ('Erdoğan - Bahçeli', 'trump <-> iran') is a
+//      separator, not websearch's NOT;
+//   2. an apostrophe is cut only before a Turkish case or possessive suffix, so
+//      Kur'an, O'Brien and L'Oréal keep their name;
+//   3. NFD, zero-width and full-width input gets the same fold as NFC input.
+// ---------------------------------------------------------------------------
+
+describe("canonicalSearchQuery: a dash between words is a separator (h50-search-2)", () => {
+  it.each([
+    ["Erdoğan - Bahçeli", "erdoğan bahçeli"],
+    ["trump <-> iran", "trump iran"],
+    ["a — b", "a b"],
+    ["a – b", "a b"],
+    ["a -- b", "a b"],
+    ["a ‐ b", "a b"],
+    ["a − b", "a b"],
+    ["a － b", "a b"],
+    ["a -> b", "a b"],
+    ["a <- b", "a b"],
+    ["- - -", ""],
+    ["a - ", "a"],
+    ['"devlet - bahçeli"', '"devlet bahçeli"'],
+  ])("%j -> %j", (input, expected) => {
+    expect(canonicalSearchQuery(input)).toBe(expected);
+  });
+
+  it("an attached '-word' still negates", () => {
+    expect(canonicalSearchQuery("erdoğan -bahçeli")).toBe("erdoğan -bahçeli");
+    expect(canonicalSearchQuery("-chp seçim")).toBe("-chp seçim");
+    expect(canonicalSearchQuery("-trump")).toBe("-trump");
+  });
+
+  it("a separator dash does not use up one of the 6 term slots", () => {
+    expect(canonicalSearchQuery("a - b - c - d - e - f - g")).toBe("a b c d e f");
+    expect(searchQueryCut("a - b - c - d - e - f")).toBeNull();
+    expect(searchQueryWasShortened("a - b - c - d - e - f")).toBe(false);
+    expect(searchQueryCut("a - b - c - d - e - f - g")).toBe("terms");
+  });
+
+  it("searchedWordsAsTyped skips the separator like the search does", () => {
+    expect(searchedWordsAsTyped("Erdoğan - Bahçeli")).toBe("Erdoğan Bahçeli");
+  });
+
+  it("keeps a hyphen inside a word", () => {
+    expect(canonicalSearchQuery("ak-parti - chp")).toBe("ak-parti chp");
+  });
+});
+
+describe("isTurkishSuffixTail (h50-search-2)", () => {
+  it.each([
+    "ın", "in", "un", "ün", "nın", "nin", "nun", "nün",
+    "a", "e", "ya", "ye", "na", "ne",
+    "ı", "i", "u", "ü", "yı", "yi", "yu", "yü", "nı", "ni", "nu", "nü",
+    "da", "de", "ta", "te", "dan", "den", "tan", "ten", "daki", "deki",
+    "nda", "nde", "ndan", "nden", "ndaki",
+    "la", "le", "yla", "yle",
+    "lar", "ler", "ları", "leri", "ların", "lerin", "lardan", "lerden", "liler", "lılar",
+    "li", "lı", "lu", "lü",
+    "ında", "inde", "ının", "inin", "ımız", "imizin",
+    "ca", "ce", "ça", "çe", "dır", "dir", "tur", "tür",
+    "si", "sı", "su", "sü", "sın", "sin",
+    "cü", "ci", "cı", "çi", "cüler", "ciler", "dekiler", "dakiler", "ndekiler",
+  ])("%s is a Turkish suffix tail", (tail) => {
+    expect(isTurkishSuffixTail(tail)).toBe(true);
+  });
+
+  it.each(["IN", "NİN", "DEN", "LİLER", "İN", "DEKI", "NDAKI", "DEKILER"])("matches upper case with the Turkish rules: %s", (tail) => {
+    expect(isTurkishSuffixTail(tail)).toBe(true);
+  });
+
+  it.each([
+    "an", "brien", "oréal", "neil", "angelo", "hara", "leary", "id", "ba", "min", "golo", "roll", "x", "z",
+  ])("%s is not", (tail) => {
+    expect(isTurkishSuffixTail(tail)).toBe(false);
+  });
+
+  it("is false for the empty tail (the caller drops a dangling apostrophe itself)", () => {
+    expect(isTurkishSuffixTail("")).toBe(false);
+  });
+
+  it("checks the length first: a 12-letter tail can match, a 13-letter one cannot", () => {
+    expect(isTurkishSuffixTail("larlarlarlar")).toBe(true);
+    expect("larlarlarlar").toHaveLength(12);
+    expect(isTurkishSuffixTail("larlarlarlarl")).toBe(false);
+    expect(isTurkishSuffixTail(`la${"r".repeat(100_000)}`)).toBe(false);
+  });
+});
+
+describe("apostrophes: only a Turkish suffix is cut (h50-search-2)", () => {
+  it.each([
+    ["Kur'an", "kur'an"],
+    ["O'Brien", "o'brien"],
+    ["L'Oréal", "l'oréal"],
+    ["Kur’an", "kur’an"],
+    ["D'Angelo", "d'angelo"],
+    ["Qur'an", "qur'an"],
+  ])("keeps the name whole: %j -> %j", (input, expected) => {
+    expect(canonicalSearchQuery(input)).toBe(expected);
+  });
+
+  it.each([
+    "Erdoğan'ın",
+    "Erdoğan’dan",
+    "Özel'den",
+    "Bahçeli'nin",
+    "İmamoğlu'na",
+    "Türkiye'deki",
+    "AKP'nin",
+    "CHP'liler",
+    "Putin'le",
+    "Sezai'yi",
+    "İstanbul'u",
+    "Kılıçdaroğlu'ndan",
+    "Gazze'ye",
+    "İsrail'in",
+    "FETÖ'cüler",
+    "AKP'ci",
+    "CHP'ciler",
+    "Türkiye'dekiler",
+    "İstanbul'dakiler",
+  ])("cuts the suffix of %j", (input) => {
+    const name = canonicalSearchQuery(input);
+    expect(name).not.toMatch(/['’]/);
+    expect(name).toBe(
+      input.split(/['’]/)[0]!.toLocaleLowerCase("tr"),
+    );
+  });
+
+  it("gives the bare lower-cased name for the listed suffixed forms", () => {
+    expect(canonicalSearchQuery("Erdoğan'ın")).toBe("erdoğan");
+    expect(canonicalSearchQuery("Kılıçdaroğlu'ndan")).toBe("kılıçdaroğlu");
+    expect(canonicalSearchQuery("İmamoğlu'nu")).toBe("imamoğlu");
+    expect(canonicalSearchQuery("CHP'liler")).toBe("chp");
+  });
+
+  it("cuts only the last suffix of a name that carries an apostrophe itself", () => {
+    expect(canonicalSearchQuery("Kur'an'ın")).toBe("kur'an");
+    expect(canonicalSearchQuery("O'Brien'a")).toBe("o'brien");
+  });
+
+  it("reads the tail in upper case and in ASCII spelling", () => {
+    expect(canonicalSearchQuery("ERDOĞAN'IN")).toBe("erdoğan");
+    expect(canonicalSearchQuery("AKP'NİN")).toBe("akp");
+    expect(canonicalSearchQuery("Erdogan'in")).toBe("erdogan");
+    expect(canonicalSearchQuery("Turkiye'deki")).toBe("turkiye");
+  });
+
+  it("reads the relative 'ki' after Turkish upper-casing: ASCII 'KI' lower-cases to 'kı' and is still cut", () => {
+    expect(canonicalSearchQuery("ABD'DEKI")).toBe("abd");
+    expect(canonicalSearchQuery("ANKARA'DAKI")).toBe("ankara");
+    expect(canonicalSearchQuery("ABD'DEKILER")).toBe("abd");
+  });
+
+  it("still drops a dangling apostrophe after a letter", () => {
+    expect(normaliseSearchQuery("Erdoğan'")).toBe("Erdoğan");
+    expect(normaliseSearchQuery("Erdoğan''")).toBe("Erdoğan");
+    expect(canonicalSearchQuery("Erdoğan'")).toBe("erdoğan");
+  });
+
+  it("normaliseSearchQuery keeps a non-suffix tail and cuts a suffix tail", () => {
+    expect(normaliseSearchQuery("Kur'an")).toBe("Kur'an");
+    expect(normaliseSearchQuery("O'Brien")).toBe("O'Brien");
+    expect(normaliseSearchQuery("L’Oréal")).toBe("L’Oréal");
+    expect(normaliseSearchQuery("Kur'an'ın")).toBe("Kur'an");
+    expect(normaliseSearchQuery("Özel'den Kur'an")).toBe("Özel Kur'an");
+  });
+
+  it("the RPC arguments for a kept apostrophe equal those of the uncanonicalised query", () => {
+    for (const x of ["Kur'an", "O'Brien", "L'Oréal"]) {
+      const canonical = canonicalSearchQuery(x);
+      const normalised = normaliseSearchQuery(x);
+      expect(turkishQueryVariants(canonical), x).toEqual(turkishQueryVariants(normalised));
+      expect(foldTr(canonical), x).toBe(foldTr(normalised));
+    }
+  });
+
+  it("a stacked apostrophe run is cut or kept as one unit, so a second pass changes nothing", () => {
+    for (const q of ["ş''z", "ş'''z", "a''ın", "a'ın'ın", "x'a'b", "x'a'ın", "ab'ın-'a", "kur''an"]) {
+      const once = canonicalSearchQuery(q);
+      expect(canonicalSearchQuery(once), JSON.stringify(q)).toBe(once);
+    }
+  });
+
+  it("the 64-character cut cannot leave a suffix tail behind (a second pass would cut it)", () => {
+    // 'daxyz' is not a suffix, but the cut at 64 characters keeps only 'da'.
+    const q = `${"a".repeat(61)}'daxyz`;
+    const once = canonicalSearchQuery(q);
+    expect(once).toBe("a".repeat(61));
+    expect(canonicalSearchQuery(once)).toBe(once);
+  });
+
+  it("the 64-character cut cannot leave a lone '-' behind (it would be a separator next time)", () => {
+    const q = `${"a".repeat(62)} -bahçeli`;
+    const once = canonicalSearchQuery(q);
+    expect(once).toBe("a".repeat(62));
+    expect(canonicalSearchQuery(once)).toBe(once);
+  });
+
+  it("is linear on the shapes that make a backtracking regex quadratic", () => {
+    const started = performance.now();
+    canonicalSearchQuery(`a${"'".repeat(100_000)}!`);
+    canonicalSearchQuery(`a'${"b".repeat(100_000)}`);
+    canonicalSearchQuery("a'ın".repeat(30_000));
+    canonicalSearchQuery("'".repeat(100_000));
+    canonicalSearchQuery(`a${"'ın".repeat(30_000)}`);
+    normaliseSearchQuery(`a${"'".repeat(100_000)}!`);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("Unicode: NFD, zero-width and full-width input gets the NFC fold (h50-search-2)", () => {
+  const NFD_SISLI = "şişli";
+
+  it("an NFD 'şişli' has the same key as the NFC one, and folds to 'sisli'", () => {
+    expect(NFD_SISLI).not.toBe("şişli");
+    expect(canonicalSearchQuery(NFD_SISLI)).toBe("şişli");
+    expect(canonicalSearchQuery("şişli")).toBe("şişli");
+    expect(foldTr(canonicalSearchQuery(NFD_SISLI))).toBe("sisli");
+    expect(normaliseSearchQuery(NFD_SISLI)).toBe("şişli");
+  });
+
+  it("'erdoğan' is unchanged, NFC or NFD", () => {
+    expect(canonicalSearchQuery("erdoğan")).toBe("erdoğan");
+    expect(canonicalSearchQuery("erdoğan")).toBe("erdoğan");
+  });
+
+  it("an NFD dotted capital I ends up as the same key as İ", () => {
+    expect(canonicalSearchQuery("İstanbul")).toBe(canonicalSearchQuery("İstanbul"));
+    expect(canonicalSearchQuery("İstanbul")).toBe("istanbul");
+  });
+
+  it.each([
+    ["soft hyphen", "tr­ump"],
+    ["zero-width space after", "trump​"],
+    ["byte order mark before", "﻿trump"],
+    ["zero-width joiner", "tr‍ump"],
+    ["zero-width non-joiner", "tr‌ump"],
+    ["right-to-left override", "‮trump"],
+    ["word joiner", "tru⁠mp"],
+    ["full-width letters", "ＴＲＵＭＰ"],
+    ["full-width lower case", "ｔｒｕｍｐ"],
+    ["format characters at both ends", "\u200b\u2060trump\u200f\ufeff"],
+  ])("%s: %j has the key 'trump'", (_label, input) => {
+    expect(canonicalSearchQuery(input)).toBe("trump");
+  });
+
+  it("zero-width removal joins the halves of a word, it does not split it", () => {
+    expect(canonicalSearchQuery("a​b")).toBe("ab");
+  });
+
+  it("a query of format characters only is ''", () => {
+    expect(canonicalSearchQuery("​‌﻿")).toBe("");
+    expect(normaliseSearchQuery("​﻿")).toBe("");
+  });
+
+  it("NFKC folds full-width digits, ligatures and a full-width apostrophe", () => {
+    expect(canonicalSearchQuery("２０２６")).toBe("2026");
+    expect(canonicalSearchQuery("ﬁnans")).toBe("finans");
+    expect(canonicalSearchQuery("Erdoğan＇ın")).toBe("erdoğan");
+    expect(canonicalSearchQuery("Kur＇an")).toBe("kur'an");
+  });
+
+  it("a format character hides neither a negation nor a suffix", () => {
+    expect(canonicalSearchQuery("​-bahçeli")).toBe("-bahçeli");
+    expect(canonicalSearchQuery("－bahçeli")).toBe("-bahçeli");
+    expect(canonicalSearchQuery("Erdoğan'​ın")).toBe("erdoğan");
+  });
+
+  it("deleting format characters first keeps the result NFKC-stable (a ZWSP between a letter and its accent)", () => {
+    const once = canonicalSearchQuery("a​́");
+    expect(once).toBe("á");
+    expect(canonicalSearchQuery(once)).toBe(once);
+  });
+
+  it("cleanQueryUnicode is NFKC without \\p{Cf}, and idempotent", () => {
+    expect(cleanQueryUnicode("Ｔr​ump")).toBe("Trump");
+    expect(cleanQueryUnicode("")).toBe("");
+    const once = cleanQueryUnicode("a​́­ﬁ");
+    expect(cleanQueryUnicode(once)).toBe(once);
+  });
+
+  it("is linear: 100k characters of format characters and 100k NFD letters finish at once", () => {
+    const started = performance.now();
+    expect(canonicalSearchQuery("​".repeat(100_000))).toBe("");
+    expect(canonicalSearchQuery("ş".repeat(50_000)).length).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("canonicalSearchQuery is idempotent over the h50-search-2 inputs", () => {
+  const fixtures = [
+    "Erdoğan - Bahçeli",
+    "trump <-> iran",
+    "a — b",
+    "erdoğan -bahçeli",
+    "Kur'an",
+    "O'Brien",
+    "L'Oréal",
+    "Erdoğan'ın",
+    "Erdoğan’dan",
+    "Özel'den",
+    "Bahçeli'nin",
+    "İmamoğlu'na",
+    "Türkiye'deki",
+    "AKP'nin",
+    "CHP'liler",
+    "Putin'le",
+    "Sezai'yi",
+    "İstanbul'u",
+    "Kılıçdaroğlu'ndan",
+    "Gazze'ye",
+    "İsrail'in",
+    "Kur'an'ın",
+    "FETÖ'cüler",
+    "AKP'ci",
+    "CHP'ciler",
+    "Türkiye'dekiler",
+    "İstanbul'dakiler",
+    "ABD'DEKI",
+    "ANKARA'DAKI",
+    "şişli",
+    "tr­ump",
+    "trump​",
+    "﻿trump",
+    "ＴＲＵＭＰ",
+    "a​́",
+  ];
+
+  it.each(fixtures)("%j", (q) => {
+    const once = canonicalSearchQuery(q);
+    expect(canonicalSearchQuery(once)).toBe(once);
+  });
+
+  it("is idempotent, bounded and surrogate-safe over 4000 seeded random queries with apostrophes, dashes and format characters", () => {
+    let state = 0x51ed270b;
+    const next = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const alphabet = [
+      "a", "n", "ı", "d", "e", "l", "r", "I", "İ", "ş", "Ğ", "1", " ", " ", " ",
+      "'", "'", "’", "ʼ", "‘", "-", "-", "—", "<", ">", '"', ".", "!",
+      "​", "­", "﻿", "́", "̇", "̧", "Ａ", "－", "\u{1F600}", "\ud83d", "\u0000", "\t",
+    ];
+    for (let n = 0; n < 4000; n++) {
+      const len = Math.floor(next() * 120);
+      let q = "";
+      for (let i = 0; i < len; i++) q += alphabet[Math.floor(next() * alphabet.length)]!;
+      const once = canonicalSearchQuery(q);
+      const label = JSON.stringify(q);
+      expect(canonicalSearchQuery(once), label).toBe(once);
+      expect(once.length, label).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+      expect(once.split(" ").filter(Boolean).length, label).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+      expect(hasLoneSurrogate(once), label).toBe(false);
+      expect(once, label).toBe(once.trim());
+      expect(/(^| )-+( |$)/.test(once), label).toBe(false);
+    }
   });
 });

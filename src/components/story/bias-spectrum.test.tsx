@@ -94,6 +94,145 @@ describe("BiasSpectrum — percentages sum to 100", () => {
   });
 });
 
+// h50-biasmath-2: the count noun in every tooltip. A single story's bar counts
+// one source per outlet ('kaynak'); the topic / entity / thread bars sum those
+// slots over many stories, where the same outlet counts once per story, so
+// those callers say 'kaynak kaydı' (the wording /hafta already uses).
+describe("BiasSpectrum — countUnit", () => {
+  /** Every title="..." attribute, in document order (bar segments, then legend). */
+  function titles(markup: string): string[] {
+    return [...markup.matchAll(/ title="([^"]*)"/g)].map((m) => m[1] ?? "");
+  }
+
+  // 115 + 38 + 49 = 202 -> 56.9 / 18.8 / 24.3 -> %57 / %19 / %24 (the prod
+  // /konu/genel numbers the idea was filed from).
+  const SUMMED = dist({ pro_government: 115, center: 38, opposition: 49 });
+
+  describe("default unit stays 'kaynak'", () => {
+    const THREE_TO_TWO = dist({ pro_government: 3, opposition: 2 });
+
+    it("compact titles read 'İktidar: 3 kaynak (%60)', bar then legend", () => {
+      const markup = renderToStaticMarkup(
+        <BiasSpectrum distribution={THREE_TO_TWO} compact />,
+      );
+
+      expect(titles(markup)).toEqual([
+        "İktidar: 3 kaynak (%60)",
+        "Muhalefet: 2 kaynak (%40)",
+        "İktidar: 3 kaynak (%60)",
+        "Muhalefet: 2 kaynak (%40)",
+      ]);
+    });
+
+    it("full titles read '<category>: 3 kaynak (%60)', bar then legend", () => {
+      const markup = renderToStaticMarkup(<BiasSpectrum distribution={THREE_TO_TWO} />);
+
+      expect(titles(markup)).toEqual([
+        "Hükümete Yakın: 3 kaynak (%60)",
+        "Muhalefet: 2 kaynak (%40)",
+        "Hükümete Yakın: 3 kaynak (%60)",
+        "Muhalefet: 2 kaynak (%40)",
+      ]);
+    });
+
+    it("an explicit countUnit='kaynak' renders exactly what the default renders", () => {
+      for (const compact of [true, false]) {
+        expect(
+          renderToStaticMarkup(
+            <BiasSpectrum distribution={THREE_TO_TWO} compact={compact} countUnit="kaynak" />,
+          ),
+        ).toBe(
+          renderToStaticMarkup(<BiasSpectrum distribution={THREE_TO_TWO} compact={compact} />),
+        );
+      }
+    });
+  });
+
+  describe("countUnit='kaynak kaydı'", () => {
+    it("compact: every bar and legend title reads 'İktidar: 115 kaynak kaydı (%57)'", () => {
+      const markup = renderToStaticMarkup(
+        <BiasSpectrum distribution={SUMMED} compact countUnit="kaynak kaydı" />,
+      );
+
+      expect(titles(markup)).toEqual([
+        "İktidar: 115 kaynak kaydı (%57)",
+        "Bağımsız: 38 kaynak kaydı (%19)",
+        "Muhalefet: 49 kaynak kaydı (%24)",
+        "İktidar: 115 kaynak kaydı (%57)",
+        "Bağımsız: 38 kaynak kaydı (%19)",
+        "Muhalefet: 49 kaynak kaydı (%24)",
+      ]);
+      expect(markup).not.toContain(" kaynak (");
+    });
+
+    it("full: every bar and legend title reads '<category>: N kaynak kaydı (%P)'", () => {
+      const markup = renderToStaticMarkup(
+        <BiasSpectrum distribution={SUMMED} countUnit="kaynak kaydı" />,
+      );
+
+      expect(titles(markup)).toEqual([
+        "Hükümete Yakın: 115 kaynak kaydı (%57)",
+        "Merkez: 38 kaynak kaydı (%19)",
+        "Muhalefet: 49 kaynak kaydı (%24)",
+        "Hükümete Yakın: 115 kaynak kaydı (%57)",
+        "Merkez: 38 kaynak kaydı (%19)",
+        "Muhalefet: 49 kaynak kaydı (%24)",
+      ]);
+      expect(markup).not.toContain(" kaynak (");
+    });
+
+    it("keeps the Turkish thousands separator and the prefix percent", () => {
+      const markup = renderToStaticMarkup(
+        <BiasSpectrum
+          distribution={dist({ pro_government: 1234, opposition: 766 })}
+          compact
+          countUnit="kaynak kaydı"
+        />,
+      );
+
+      expect(titles(markup)).toEqual([
+        "İktidar: 1.234 kaynak kaydı (%62)",
+        "Muhalefet: 766 kaynak kaydı (%38)",
+        "İktidar: 1.234 kaynak kaydı (%62)",
+        "Muhalefet: 766 kaynak kaydı (%38)",
+      ]);
+    });
+
+    it("changes only the title text: the visible legend and the bar widths are untouched", () => {
+      const strip = (html: string) => html.replace(/ title="[^"]*"/g, "");
+
+      for (const compact of [true, false]) {
+        expect(
+          strip(
+            renderToStaticMarkup(
+              <BiasSpectrum distribution={SUMMED} compact={compact} countUnit="kaynak kaydı" />,
+            ),
+          ),
+        ).toBe(
+          strip(renderToStaticMarkup(<BiasSpectrum distribution={SUMMED} compact={compact} />)),
+        );
+      }
+    });
+
+    it("still renders nothing for an empty distribution", () => {
+      expect(
+        renderToStaticMarkup(
+          <BiasSpectrum
+            distribution={emptyBiasDistribution()}
+            compact
+            countUnit="kaynak kaydı"
+          />,
+        ),
+      ).toBe("");
+      expect(
+        renderToStaticMarkup(
+          <BiasSpectrum distribution={emptyBiasDistribution()} countUnit="kaynak kaydı" />,
+        ),
+      ).toBe("");
+    });
+  });
+});
+
 describe("BiasSpectrum — text contrast", () => {
   it("uses no opacity-modified muted-foreground text token in either mode", () => {
     const compact = renderToStaticMarkup(

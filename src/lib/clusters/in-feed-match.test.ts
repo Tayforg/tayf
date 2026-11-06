@@ -6,6 +6,7 @@ import {
   searchTokens,
   titleMatchesTokens,
 } from "./in-feed-match";
+import { canonicalSearchQuery } from "./turkish-query";
 
 // In-feed filter for the home search: every query token must occur at a word
 // start in the cluster title. The matching is order-free, ignores quotes and
@@ -346,5 +347,183 @@ describe("alias matching in the feed (AKP <-> AK Parti)", () => {
   it("matches nothing for an empty or operator-only query (as before)", () => {
     expect(matchesAlt("", "AK Parti")).toBe(false);
     expect(matchesAlt("-akp", "AKP'den açıklama")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h50-search-2: the in-feed filter reads the same inputs the archive does.
+// An apostrophe is cut only before a Turkish suffix, a dash between words is a
+// separator, and NFD, zero-width and full-width input gets the NFC fold.
+// ---------------------------------------------------------------------------
+
+describe("searchTokens: apostrophes (h50-search-2)", () => {
+  it("keeps a name that carries an apostrophe whole", () => {
+    expect(searchTokens("Kur'an")).toEqual(["kur'an"]);
+    expect(searchTokens("O'Brien")).toEqual(["o'brien"]);
+    // foldTr mirrors the SQL fold: Turkish letters only, so é stays é.
+    expect(searchTokens("L'Oréal")).toEqual(["l'oréal"]);
+  });
+
+  it("maps the typographic apostrophes to one key, so Kur’an and Kur'an agree", () => {
+    expect(searchTokens("Kur\u2019an")).toEqual(["kur'an"]);
+    expect(searchTokens("Kur\u02bcan")).toEqual(["kur'an"]);
+    expect(searchTokens("Kur\u2018an")).toEqual(["kur'an"]);
+  });
+
+  it.each([
+    ["Erdoğan'ın", "erdogan"],
+    ["Erdoğan\u2019dan", "erdogan"],
+    ["Özel'den", "ozel"],
+    ["Bahçeli'nin", "bahceli"],
+    ["İmamoğlu'na", "imamoglu"],
+    ["Türkiye'deki", "turkiye"],
+    ["AKP'nin", "akp"],
+    ["CHP'liler", "chp"],
+    ["Putin'le", "putin"],
+    ["Sezai'yi", "sezai"],
+    ["İstanbul'u", "istanbul"],
+    ["Kılıçdaroğlu'ndan", "kilicdaroglu"],
+    ["Gazze'ye", "gazze"],
+    ["İsrail'in", "israil"],
+    ["ERDOĞAN'IN", "erdogan"],
+  ])("cuts the Turkish suffix of %j", (q, key) => {
+    expect(searchTokens(q)).toEqual([key]);
+  });
+
+  it("cuts only the last suffix of a name with an apostrophe", () => {
+    expect(searchTokens("Kur'an'ın")).toEqual(["kur'an"]);
+  });
+
+  it("cuts the -ci / -cü and the relative -dekiler tails the archive cuts (the card and the archive narrow the same way)", () => {
+    expect(searchTokens("FETÖ'cüler")).toEqual(searchTokens("FETÖ"));
+    expect(searchTokens("Türkiye'dekiler")).toEqual(searchTokens("Türkiye"));
+    expect(searchTokens("FETÖ'cüler")).toEqual(["feto"]);
+    expect(searchTokens("Türkiye'dekiler")).toEqual(["turkiye"]);
+    expect(searchTokens("ABD'DEKI")).toEqual(["abd"]);
+  });
+
+  it("still drops a dangling apostrophe", () => {
+    expect(searchTokens("Erdoğan'")).toEqual(["erdogan"]);
+    expect(searchTokens("Erdoğan''")).toEqual(["erdogan"]);
+  });
+
+  it("keeps a leading apostrophe word (it is edge-trimmed, not cut to nothing)", () => {
+    expect(searchTokens("'seçim")).toEqual(["secim"]);
+  });
+
+  it("is linear on a long apostrophe run, a long tail and a long punctuation run inside a word", () => {
+    const started = performance.now();
+    searchTokens(`a${"'".repeat(100_000)}!`);
+    searchTokens(`a'${"b".repeat(100_000)}`);
+    searchTokens("a'ın ".repeat(30_000));
+    // A trailing-run regex retries from every position of the run (quadratic).
+    searchTokens(`a${"!".repeat(100_000)}b`);
+    searchTokens(`${"!".repeat(100_000)}a${"?".repeat(100_000)}`);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it("trims punctuation from both edges of a word and keeps what is inside", () => {
+    expect(searchTokens("!!(ak-parti)??")).toEqual(["ak-parti"]);
+    expect(searchTokens("\u201cseçim\u201d")).toEqual(["secim"]);
+    expect(searchTokens("1.5")).toEqual(["1.5"]);
+    expect(searchTokens("\u{1F525}deprem\u{1F525}")).toEqual(["deprem"]);
+  });
+});
+
+describe("titleMatchesTokens: Kur'an, O'Brien and friends (h50-search-2)", () => {
+  it("finds the Kur’an-ı Kerim story (typographic apostrophe in the title)", () => {
+    expect(
+      titleMatchesTokens(
+        "Cumhurbaşkanı Erdoğan, Kur’an-ı Kerim hocası...",
+        searchTokens("Kur'an"),
+      ),
+    ).toBe(true);
+  });
+
+  it("finds it with an ASCII apostrophe in the title and a typographic one typed", () => {
+    expect(
+      titleMatchesTokens("Erdoğan Kur'an kursunu açtı", searchTokens("Kur\u2019an")),
+    ).toBe(true);
+  });
+
+  it("does not match Kurum, Kurtulmuş or Kürdistan any more (it used to search 'kur')", () => {
+    const tokens = searchTokens("Kur'an");
+    expect(titleMatchesTokens("Bakan Kurum konuştu", tokens)).toBe(false);
+    expect(titleMatchesTokens("Kurtulmuş açıklama yaptı", tokens)).toBe(false);
+    expect(titleMatchesTokens("Kürdistan referandumu", tokens)).toBe(false);
+    expect(titleMatchesTokens("bağ kurdum dedi", tokens)).toBe(false);
+  });
+
+  it("finds O'Brien and L'Oréal", () => {
+    expect(titleMatchesTokens("Conan O’Brien Türkiye’ye geliyor", searchTokens("O'Brien"))).toBe(true);
+    expect(titleMatchesTokens("L'Oréal hisseleri yükseldi", searchTokens("L'Oréal"))).toBe(true);
+    expect(titleMatchesTokens("L’Oréal hisseleri yükseldi", searchTokens("L'Oréal"))).toBe(true);
+  });
+
+  it("still finds a name in a suffixed headline: Erdoğan'ın matches 'Erdoğan konuştu' and 'Erdoğan’dan'", () => {
+    expect(titleMatchesTokens("Erdoğan konuştu", searchTokens("Erdoğan'ın"))).toBe(true);
+    expect(titleMatchesTokens("Özel, Erdoğan’dan yanıt istedi", searchTokens("Erdoğan'ın"))).toBe(true);
+  });
+
+  it("the same word with and without the apostrophe typed finds the same title", () => {
+    expect(matches("Kur'an", "Kur’an-ı Kerim hocası")).toBe(true);
+    expect(matches("Kur’an", "Kur'an-ı Kerim hocası")).toBe(true);
+  });
+});
+
+describe("searchTokens: dashes (h50-search-2)", () => {
+  it("reads 'erdoğan - bahçeli' as two words", () => {
+    expect(searchTokens("erdoğan - bahçeli")).toEqual(["erdogan", "bahceli"]);
+  });
+
+  it.each(["trump <-> iran", "trump — iran", "trump – iran", "trump -- iran", "trump \u2212 iran"])(
+    "reads %j as two words",
+    (q) => {
+      expect(searchTokens(q)).toEqual(["trump", "iran"]);
+    },
+  );
+
+  it("an attached -word is still a negation", () => {
+    expect(searchTokens("erdoğan -bahçeli")).toEqual(["erdogan"]);
+  });
+
+  it("agrees with the canonical query: the page hands searchTokens the canonical form", () => {
+    for (const q of ["Erdoğan - Bahçeli", "trump <-> iran", "a — b", "erdoğan -bahçeli", "Kur'an'ın"]) {
+      expect(searchTokens(canonicalSearchQuery(q)), q).toEqual(searchTokens(q));
+    }
+  });
+});
+
+describe("Unicode: NFD, zero-width and full-width input (h50-search-2)", () => {
+  it("an NFD token matches an NFC title and the other way round", () => {
+    expect(titleMatchesTokens("Şişli Belediyesi açıklama yaptı", searchTokens("s\u0327is\u0327li"))).toBe(true);
+    expect(titleMatchesTokens("S\u0327is\u0327li Belediyesi", searchTokens("şişli"))).toBe(true);
+    expect(searchTokens("s\u0327is\u0327li")).toEqual(["sisli"]);
+  });
+
+  it("zero-width characters inside a word are ignored", () => {
+    expect(searchTokens("tr\u200bump")).toEqual(["trump"]);
+    expect(searchTokens("trump\u200b")).toEqual(["trump"]);
+    expect(searchTokens("\ufefftrump")).toEqual(["trump"]);
+    expect(searchTokens("tr\u00adump")).toEqual(["trump"]);
+    expect(titleMatchesTokens("Trump açıklama yaptı", searchTokens("trump\u200b"))).toBe(true);
+  });
+
+  it("a zero-width character in the TITLE does not hide a word", () => {
+    expect(titleMatchesTokens("Tr\u200bump açıklama yaptı", searchTokens("trump"))).toBe(true);
+  });
+
+  it("full-width letters fold to ASCII", () => {
+    expect(searchTokens("ＴＲＵＭＰ")).toEqual(["trump"]);
+    expect(titleMatchesTokens("Trump açıklama yaptı", searchTokens("ＴＲＵＭＰ"))).toBe(true);
+  });
+
+  it("a zero-width or full-width mark cannot hide a negation", () => {
+    expect(searchTokens("\u200b-bahçeli")).toEqual([]);
+    expect(searchTokens("erdoğan \uff0dbahçeli")).toEqual(["erdogan"]);
+  });
+
+  it("a query of zero-width characters only has no token", () => {
+    expect(searchTokens("\u200b\u200c\ufeff")).toEqual([]);
   });
 });

@@ -21,8 +21,9 @@ export const MIN_QUERY_LENGTH = 2;
 
 /**
  * True for a query that was typed but is too short to search: its normalised
- * form (the same cleaning searchClusters applies: control characters out, an
- * apostrophe suffix dropped, whitespace collapsed) has fewer than
+ * form (the same cleaning searchClusters applies: Unicode cleaned, control
+ * characters out, a Turkish apostrophe suffix dropped, whitespace collapsed)
+ * has fewer than
  * MIN_QUERY_LENGTH characters. A blank or missing q is "no search", not "too
  * short", so it is false. Callers use it to say "type more" instead of
  * claiming a search found nothing when none ran.
@@ -43,6 +44,19 @@ export function displayQuery(q: string | undefined): string {
   const points = Array.from(clean);
   if (points.length <= SEARCH_QUERY_DISPLAY_MAX) return clean;
   return `${points.slice(0, SEARCH_QUERY_DISPLAY_MAX - 1).join("")}…`;
+}
+
+/**
+ * The result count as a reader-facing phrase, shared by the visible line under
+ * the search box and the screen-reader sentence so the two cannot word it
+ * differently (h50-search-3). "2 sonuç" when the list is complete; "en ilgili 24
+ * sonuç" when the archive search filled its page (SEARCH_LIMIT) and more matches
+ * may exist, because a bare "24 sonuç" would read as the total. The count has
+ * Turkish dot grouping ("1.234") and a non-finite count reads as 0.
+ */
+export function resultCountPhrase(count: number, capped: boolean): string {
+  const text = `${formatCountTr(count)} sonuç`;
+  return capped ? `en ilgili ${text}` : text;
 }
 
 export interface SearchStatusArgs {
@@ -76,13 +90,13 @@ export function searchStatusText({
   if (unavailable) {
     return results === 0
       ? "Arama şu an yanıt vermiyor."
-      : `“${shown}” için ${formatCountTr(results)} sonuç bulundu; arşiv araması şu an yanıt vermiyor.`;
+      : `“${shown}” için ${resultCountPhrase(results, false)} bulundu; arşiv araması şu an yanıt vermiyor.`;
   }
   if (results === 0) return `“${shown}” için sonuç bulunamadı.`;
   if (capped) {
-    return `“${shown}” için en ilgili ${formatCountTr(results)} sonuç gösteriliyor.`;
+    return `“${shown}” için ${resultCountPhrase(results, true)} gösteriliyor.`;
   }
-  return `“${shown}” için ${formatCountTr(results)} sonuç bulundu.`;
+  return `“${shown}” için ${resultCountPhrase(results, false)} bulundu.`;
 }
 
 /**

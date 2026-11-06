@@ -57,6 +57,7 @@ import HomePage, { HomeFeed, generateMetadata } from "./page";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { FollowButton } from "@/components/follow/follow-button";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
+import { resultCountPhrase } from "@/lib/search/search-status";
 
 type Elementish = { type?: unknown; props?: Record<string, unknown> };
 
@@ -389,7 +390,7 @@ describe("HomeFeed — result count is the same on every page of one search", ()
   it("page 1 lists 15 feed cards plus the archive and reports 38 results", async () => {
     const tree = await renderPage("1");
     expect(clusterCardIds(tree)).toHaveLength(15 + 22);
-    expect(visibleText(tree)).toContain("“deprem” için 38 sonuç");
+    expect(visibleText(tree)).toContain("“deprem” için en ilgili 38 sonuç");
     expect(statusText(tree)).toBe(
       "“deprem” için en ilgili 38 sonuç gösteriliyor.",
     );
@@ -398,7 +399,7 @@ describe("HomeFeed — result count is the same on every page of one search", ()
   it("page 2 shows the last feed card, no archive rows, and the same 38 results", async () => {
     const tree = await renderPage("2");
     expect(clusterCardIds(tree)).toEqual(["f16"]);
-    expect(visibleText(tree)).toContain("“deprem” için 38 sonuç");
+    expect(visibleText(tree)).toContain("“deprem” için en ilgili 38 sonuç");
     expect(statusText(tree)).toBe(
       "“deprem” için en ilgili 38 sonuç gösteriliyor.",
     );
@@ -406,10 +407,162 @@ describe("HomeFeed — result count is the same on every page of one search", ()
 
   it("a page past the end is clamped and still reports the same total", async () => {
     const tree = await renderPage("99");
-    expect(visibleText(tree)).toContain("“deprem” için 38 sonuç");
+    expect(visibleText(tree)).toContain("“deprem” için en ilgili 38 sonuç");
     expect(statusText(tree)).toBe(
       "“deprem” için en ilgili 38 sonuç gösteriliyor.",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h50-search-3: the visible result line used to print the 24-row cap as the
+// total ('“istanbul” için 24 sonuç') while the live region and the archive
+// heading on the same page said 'en ilgili'. Both lines are built from
+// resultCountPhrase now.
+// ---------------------------------------------------------------------------
+
+describe("HomeFeed: the visible result line says 'en ilgili' when the archive is capped (h50-search-3)", () => {
+  const inFeed = bundle("f1", "Deprem haberi");
+  const archiveOnly = (n: number) =>
+    Array.from({ length: n }, (_, i) => bundle(`x${i + 1}`, `Arşiv kaydı ${i + 1}`));
+
+  /** One in-feed match for "deprem" plus `archiveRows` archive-only rows. */
+  async function render(
+    archiveRows: number,
+    capped: boolean,
+    q = "deprem",
+  ) {
+    getPoliticsClusters.mockResolvedValue(feedOf(inFeed));
+    searchClusters.mockResolvedValue({
+      ok: true,
+      bundles: [inFeed, ...archiveOnly(archiveRows)],
+      capped,
+    });
+    return HomeFeed({ searchParams: Promise.resolve({ q }) });
+  }
+
+  it("capped: the echo paragraph reads '“q” için en ilgili N sonuç'", async () => {
+    const tree = await render(23, true);
+    expect(visibleText(tree)).toContain("“deprem” için en ilgili 24 sonuç");
+    expect(visibleText(tree)).not.toMatch(/için 24 sonuç/);
+  });
+
+  it("uncapped: the echo paragraph reads '“q” için N sonuç'", async () => {
+    const tree = await render(1, false);
+    expect(visibleText(tree)).toContain("“deprem” için 2 sonuç");
+    expect(visibleText(tree)).not.toContain("en ilgili");
+    expect(liveRegionText(tree)).toBe("“deprem” için 2 sonuç bulundu.");
+  });
+
+  it("the visible line and the live region carry the same phrase (one helper)", async () => {
+    for (const capped of [true, false]) {
+      const tree = await render(23, capped);
+      const phrase = resultCountPhrase(24, capped);
+      expect(visibleText(tree), String(capped)).toContain(`“deprem” için ${phrase}`);
+      expect(liveRegionText(tree), String(capped)).toContain(`“deprem” için ${phrase}`);
+    }
+    expect(liveRegionText(await render(23, true))).toBe(
+      "“deprem” için en ilgili 24 sonuç gösteriliyor.",
+    );
+  });
+
+  it("formats a capped count with Turkish thousands grouping", async () => {
+    const tree = await render(1233, true);
+    expect(visibleText(tree)).toContain("“deprem” için en ilgili 1.234 sonuç");
+  });
+
+  it("an archive that returned nothing new is not 'capped', even when the RPC filled its page", async () => {
+    // Every archive row is already in the feed: nothing archive-only is left.
+    getPoliticsClusters.mockResolvedValue(feedOf(inFeed));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [inFeed], capped: true });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "deprem" }) });
+    expect(visibleText(tree)).toContain("“deprem” için 1 sonuç");
+    expect(visibleText(tree)).not.toContain("en ilgili");
+  });
+
+  it("page 2 of a capped search reads the same phrase", async () => {
+    const feed = Array.from({ length: 16 }, (_, i) => bundle(`g${i + 1}`, `Deprem haberi ${i + 1}`));
+    getPoliticsClusters.mockResolvedValue(feedOf(...feed));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [feed[0]!, ...archiveOnly(23)], capped: true });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "deprem", page: "2" }) });
+    expect(visibleText(tree)).toContain("“deprem” için en ilgili 39 sonuç");
+  });
+
+  it("keeps the term-cap note after a capped phrase", async () => {
+    const six = "Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan";
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("e", "Erdoğan konuştu")));
+    searchClusters.mockResolvedValue({
+      ok: true,
+      bundles: [bundle("e", "Erdoğan konuştu"), ...archiveOnly(23)],
+      capped: true,
+    });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: `${six} zebra` }) });
+
+    expect(visibleText(tree)).toContain(
+      `“${six}” için en ilgili 24 sonuç. Arama ilk 6 kelimeyle yapıldı.`,
+    );
+    expect(liveRegionText(tree)).toBe(
+      `“${six}” için en ilgili 24 sonuç gösteriliyor. Arama ilk 6 kelimeyle yapıldı.`,
+    );
+  });
+
+  it("keeps the term-cap note after an uncapped phrase", async () => {
+    const six = "Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan";
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("e", "Erdoğan konuştu")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: `${six} zebra` }) });
+
+    expect(visibleText(tree)).toContain(`“${six}” için 1 sonuç. Arama ilk 6 kelimeyle yapıldı.`);
+  });
+
+  it("keeps the length-cap note after a capped phrase", async () => {
+    const q = `${"a".repeat(23)} ${"b".repeat(23)} ${"c".repeat(22)}`;
+    getPoliticsClusters.mockResolvedValue(feedOf());
+    searchClusters.mockResolvedValue({ ok: true, bundles: archiveOnly(24), capped: true });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+
+    expect(visibleText(tree)).toContain(
+      "için en ilgili 24 sonuç. Arama sorgunun ilk 64 karakteriyle yapıldı.",
+    );
+  });
+
+  it("an archive-unavailable result never says 'en ilgili' (visible line or live region)", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(inFeed));
+    searchClusters.mockResolvedValue({ ok: false });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "deprem" }) });
+
+    expect(visibleText(tree)).toContain("“deprem” için 1 sonuç");
+    expect(visibleText(tree)).not.toContain("en ilgili");
+    expect(liveRegionText(tree)).not.toContain("en ilgili");
+    expect(liveRegionText(tree)).toBe(
+      "“deprem” için 1 sonuç bulundu; arşiv araması şu an yanıt vermiyor.",
+    );
+  });
+
+  it("an unavailable archive wins even if a view claims both (the guard is on the page, not only in the view)", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(inFeed));
+    searchClusters.mockResolvedValue({ ok: false });
+    viewOverride = () => ({
+      archive: [],
+      archiveUnavailable: true,
+      emptySearch: false,
+      archiveCapped: true,
+      archiveTotal: 23,
+      archiveCappedTotal: true,
+    });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "deprem" }) });
+
+    expect(visibleText(tree)).toContain("“deprem” için 24 sonuç");
+    expect(visibleText(tree)).not.toContain("en ilgili");
+  });
+
+  it("no results: says '0 sonuç' without 'en ilgili'", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("b", "Başbakan açıkladı")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "deprem" }) });
+
+    expect(visibleText(tree)).toContain("“deprem” için 0 sonuç");
+    expect(visibleText(tree)).not.toContain("en ilgili");
   });
 });
 

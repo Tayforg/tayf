@@ -47,9 +47,22 @@ interface BiasSpectrumProps {
    * keeps `compact` off so the full breakdown stays visible there.
    */
   compact?: boolean;
+  /**
+   * The noun after the count in every bar / legend tooltip ("İktidar: 3
+   * kaynak (%60)"). A single story's bar counts one source per outlet, so the
+   * default 'kaynak' is right. A bar that SUMS several stories' distributions
+   * (topic hub, entity hub, story-thread day) counts one source slot per outlet
+   * per story, so the same outlet appears once per story: those callers pass
+   * 'kaynak kaydı', the wording /hafta uses for the same basis.
+   */
+  countUnit?: string;
 }
 
-export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProps) {
+export function BiasSpectrum({
+  distribution,
+  compact = false,
+  countUnit = "kaynak",
+}: BiasSpectrumProps) {
   if (compact) {
     const zones: Record<MediaDnaZone, number> = {
       iktidar: 0,
@@ -81,7 +94,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
             return (
               <div
                 key={segment.key}
-                title={`${segment.label}: ${formatCountTr(zones[segment.key])} kaynak (${formatPctTr(pct)})`}
+                title={`${segment.label}: ${formatCountTr(zones[segment.key])} ${countUnit} (${formatPctTr(pct)})`}
                 className={`${segment.color} transition-all duration-500`}
                 style={{ width: `${(zones[segment.key] / zoneTotal) * 100}%` }}
               />
@@ -96,7 +109,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
             return (
               <span
                 key={segment.key}
-                title={`${segment.label}: ${formatCountTr(zones[segment.key])} kaynak (${formatPctTr(pct)})`}
+                title={`${segment.label}: ${formatCountTr(zones[segment.key])} ${countUnit} (${formatPctTr(pct)})`}
                 className="flex items-center gap-1 text-[11px] text-muted-foreground"
               >
                 <span className={`inline-block h-2 w-2 rounded-full forced-color-adjust-none ${segment.dot}`} />
@@ -129,7 +142,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
           return (
             <div
               key={segment.key}
-              title={`${segment.label}: ${formatCountTr(distribution[segment.key])} kaynak (${formatPctTr(pct)})`}
+              title={`${segment.label}: ${formatCountTr(distribution[segment.key])} ${countUnit} (${formatPctTr(pct)})`}
               className={`${segment.color} transition-all duration-500`}
               style={{ width: `${(distribution[segment.key] / total) * 100}%` }}
             />
@@ -144,7 +157,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
           return (
             <span
               key={segment.key}
-              title={`${segment.label}: ${formatCountTr(distribution[segment.key])} kaynak (${formatPctTr(pct)})`}
+              title={`${segment.label}: ${formatCountTr(distribution[segment.key])} ${countUnit} (${formatPctTr(pct)})`}
               className="flex items-center gap-1 text-[11px] text-muted-foreground"
             >
               <span className={`inline-block h-2 w-2 rounded-full forced-color-adjust-none ${segment.dot}`} />

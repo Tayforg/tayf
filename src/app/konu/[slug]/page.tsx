@@ -266,7 +266,11 @@ export default async function TopicHubPage({
               {SPECTRUM_HEADING}
             </h2>
             {spectrumTotal > 0 ? (
-              <BiasSpectrum distribution={distribution} compact />
+              <BiasSpectrum
+                distribution={distribution}
+                compact
+                countUnit="kaynak kaydı"
+              />
             ) : (
               <p className={noteClass}>{SPECTRUM_EMPTY_COPY}</p>
             )}

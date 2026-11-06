@@ -34,12 +34,12 @@ import {
   searchQueryCut,
   searchedWordsAsTyped,
 } from "@/lib/clusters/turkish-query";
-import { formatCountTr } from "@/lib/format/number-tr";
 import { groupByDayBucket } from "@/lib/home/day-buckets";
 import {
   MIN_QUERY_LENGTH,
   displayQuery,
   isTooShortQuery,
+  resultCountPhrase,
   searchStatusText,
   searchTitle,
 } from "@/lib/search/search-status";
@@ -420,6 +420,13 @@ export async function HomeFeed({
   // list is page 1 only, and the count must not change on ?page=2. One number
   // for the visible "N sonuç" line and the screen-reader announcement.
   const resultCount = inFeedIds.size + view.archiveTotal;
+  // The visible line words the count like the live region does (h50-search-3):
+  // "en ilgili 24 sonuç" when the archive filled its page, because a bare
+  // "24 sonuç" reads as the total. A failed archive search is never "capped".
+  const resultPhrase = resultCountPhrase(
+    resultCount,
+    view.archiveCappedTotal && !view.archiveUnavailable,
+  );
 
   // We track a global render index across buckets so the first ~3
   // ClusterCards (above the fold) still get the priority hint, even
@@ -477,7 +484,7 @@ export async function HomeFeed({
       {searchable && (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="min-w-0 text-xs text-muted-foreground break-words [overflow-wrap:anywhere]">
-            <SearchEcho q={echoQ} /> için {formatCountTr(resultCount)} sonuç
+            <SearchEcho q={echoQ} /> için {resultPhrase}
             {cutNote !== null && `. ${cutNote}`}
           </p>
           <FollowButton kind="q" value={q} />

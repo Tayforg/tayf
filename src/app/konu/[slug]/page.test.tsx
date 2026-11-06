@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import Link from "next/link";
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 // ---------------------------------------------------------------------------
 // /konu/[slug] failed state. Harness copied from src/app/hafta/page.test.tsx:
@@ -541,6 +542,38 @@ describe("/konu/[slug] kaynak dağılımı", () => {
     const text = collectText(tree).join("");
     expect(text).toContain(SPECTRUM_HEADING);
     expect(text).not.toContain(SPECTRUM_EMPTY_COPY);
+  });
+
+  // h50-biasmath-2: the bar sums one source slot per outlet per listed story, so
+  // the same outlet counts once per story. 'kaynak' would read as distinct
+  // outlets; the count noun is 'kaynak kaydı' (as on /hafta).
+  it("counts the summed slots as 'kaynak kaydı' in every rendered spectrum title", async () => {
+    mocks.result = {
+      bundles: [
+        bundle("c1", { pro_government: 1, opposition: 1 }),
+        bundle("c2", { pro_government: 1, center: 1 }),
+      ],
+      hasMore: false,
+      page: 1,
+    };
+
+    const tree = await render();
+    const spectra = elementsOfType(tree, BiasSpectrum);
+
+    expect(spectra).toHaveLength(1);
+    expect(spectra[0]?.props?.countUnit).toBe("kaynak kaydı");
+
+    const markup = renderToStaticMarkup(spectra[0] as unknown as ReactElement);
+    const titles = [...markup.matchAll(/ title="([^"]*)"/g)].map((m) => m[1]);
+    expect(titles).toEqual([
+      "İktidar: 2 kaynak kaydı (%50)",
+      "Bağımsız: 1 kaynak kaydı (%25)",
+      "Muhalefet: 1 kaynak kaydı (%25)",
+      "İktidar: 2 kaynak kaydı (%50)",
+      "Bağımsız: 1 kaynak kaydı (%25)",
+      "Muhalefet: 1 kaynak kaydı (%25)",
+    ]);
+    expect(markup).not.toContain(" kaynak (");
   });
 
   it("wraps the heading in <section aria-labelledby=topic-spectrum-heading> placed before the ClusterCard list", async () => {
