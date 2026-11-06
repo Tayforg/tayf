@@ -28,6 +28,16 @@ const TICKER_SHAPE = /^[A-Z0-9]{2,6}$/;
 export const CIRCUIT_BREAKER_TEXT = "Devre Kesici";
 
 /**
+ * h48-ekonomi-3: how many of today's circuit-breaker notices /ekonomi reads, in
+ * ONE request: PostgREST's response cap (`max_rows`, 1,000 on Supabase), because
+ * a bigger `.limit()` would silently come back at 1,000 anyway. The largest day
+ * seen is 475 notices (23 Oct), so a day normally fits whole; a read that returns
+ * exactly this many may be cut, and the strip then says so. Lives here, in a
+ * module with no server imports, because the strip component needs the number too.
+ */
+export const CIRCUIT_BREAKER_DAY_LIMIT = 1000;
+
+/**
  * TS-06: `.not('subject','ilike',CIRCUIT_BREAKER)` compiles to
  * `subject NOT ILIKE ...`, which is NULL (not TRUE) for a NULL subject --
  * PostgREST drops those rows even though they plainly aren't circuit breaker

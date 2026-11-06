@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { EXTRACTIVE_MIN_ARTICLE_COUNT } from "@/lib/headline/prompt";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 141 ("neutral-title-repick").
@@ -250,10 +251,9 @@ describe("141 index definition", () => {
     }
   });
 
-  it("its article_count floor is the route's EXTRACTIVE_MIN_ARTICLE_COUNT", () => {
-    const m = /const EXTRACTIVE_MIN_ARTICLE_COUNT = (\d+);/.exec(route);
-    expect(m, "EXTRACTIVE_MIN_ARTICLE_COUNT not found in route.ts").not.toBeNull();
-    expect(INDEX_STMT).toContain(`article_count >= ${(m as RegExpExecArray)[1]};`);
+  it("its article_count floor is the route's EXTRACTIVE_MIN_ARTICLE_COUNT (imported from the prompt module)", () => {
+    expect(routeFlat).toMatch(/import \{[^}]*\bEXTRACTIVE_MIN_ARTICLE_COUNT\b[^}]*\} from "@\/lib\/headline\/prompt";/);
+    expect(INDEX_STMT).toContain(`article_count >= ${EXTRACTIVE_MIN_ARTICLE_COUNT};`);
   });
 });
 

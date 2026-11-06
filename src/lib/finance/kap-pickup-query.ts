@@ -35,6 +35,13 @@ import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/ser
  * through the shared one-string or() (./disclosure-filter.ts), so halts and
  * other related-only notices are part of the ticker's disclosures here too.
  *
+ * h48-ekonomi-2: the list still holds the related-only notices (a Takasbank or
+ * MKK list that merely names the share), but each row says whether the ticker
+ * is one of its own `stock_codes` (`issuer`, the rule queries.ts's
+ * issuerDisclosureIndexes applies to the coverage panel). Only issuer filings
+ * are matched with mentions and summarised; with none, the mention read is
+ * skipped altogether.
+ *
  * h11-finance-3: `totalDisclosures` is a head:true count of the same filter and
  * window, so the panel can say "son 60 bildirim (30 günde 102)" instead of
  * "son 30 gün" over a list cut at its limit. It is the one read here besides the
@@ -42,7 +49,7 @@ import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/ser
  * not take the panel or the API response down.
  */
 
-const DISCLOSURE_SELECT = "disclosure_index,published_at,subject,disclosure_class";
+const DISCLOSURE_SELECT = "disclosure_index,published_at,stock_codes,subject,disclosure_class";
 const MENTION_PAGE_SIZE = 1000;
 const MENTION_MAX_PAGES = 5;
 const RELEVANCE_CHUNK = 100;
@@ -65,6 +72,8 @@ export interface TickerPickup {
 interface DisclosureRow {
   disclosure_index: number;
   published_at: string;
+  /** The notice's issuers; the ticker being in it is what makes the row an `issuer` filing. */
+  stock_codes?: string[] | null;
   subject: string | null;
   disclosure_class: string | null;
 }
@@ -177,13 +186,32 @@ export async function fetchTickerPickup(
     publishedAt: r.published_at,
     subject: r.subject,
     disclosureClass: r.disclosure_class,
+    issuer: (r.stock_codes ?? []).includes(ticker),
   }));
 
   if (disclosures.length === 0) {
     return emptyResult(ticker, sinceIso, nowIso, totalDisclosures);
   }
 
-  const disclosureMs = disclosures.map((d) => new Date(d.publishedAt).getTime());
+  // Related-only notices are listed with zero numbers and no mention is read for
+  // them: with no issuer filing at all there is nothing to match mentions to.
+  const issuerDisclosures = disclosures.filter((d) => d.issuer);
+  if (issuerDisclosures.length === 0) {
+    const pickups = computePickups(disclosures, [], new Map(), nowMs);
+    return {
+      ticker,
+      since: sinceIso,
+      until: nowIso,
+      pickups,
+      totals: summarizePickups(pickups),
+      relevanceApplied: true,
+      truncated: false,
+      totalDisclosures,
+      capped: disclosures.length >= opts.limit,
+    };
+  }
+
+  const disclosureMs = issuerDisclosures.map((d) => new Date(d.publishedAt).getTime());
   const minDisclosureMs = Math.min(...disclosureMs);
   const maxDisclosureMs = Math.max(...disclosureMs);
   const mentionGte = new Date(minDisclosureMs - PUBLISHED_AT_SKEW_MARGIN_MS).toISOString();

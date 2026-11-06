@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import h26Fixtures from "../../../tests/fixtures/summary-tidy-h26.json";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
 import { cleanDescription, stripTrailingTeasers } from "../../../supabase/functions/_shared/cluster/description-clean";
-import { backOffOpenQuote, tidySummaryText, trimDanglingEnd, WIDGET_HEADINGS } from "./summary-tidy";
+import {
+  backOffOpenQuote,
+  stripLeadingStyleRules,
+  tidySummaryText,
+  trimDanglingEnd,
+  WIDGET_HEADINGS,
+} from "./summary-tidy";
 
 // [input, expected] — every row is an exact `toBe`.
 const CHANGES: ReadonlyArray<readonly [string, string]> = [
@@ -4167,5 +4173,203 @@ describe("tidySummaryText drops trailing teaser lines (h34-reader-5)", () => {
       tidySummaryText(raw);
       expect(performance.now() - start, `${raw.length} chars`).toBeLessThan(1000);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h48-ingest-1: "Ayrıntılar geliyor..." placeholders and embedded <style> sheets.
+// ---------------------------------------------------------------------------
+
+describe("h48-ingest-1: 'coming soon' placeholders in a cluster summary", () => {
+  it.each([
+    "Ayrıntılar geliyor...",
+    "ayrıntılar geliyor...",
+    "Ayrıntılar gelecek…",
+    "Detaylar geliyor",
+    "Detaylar gelecek...",
+    "DETAYLAR GELİYOR",
+    "AYRINTILAR GELİYOR...",
+  ])("%j alone gives ''", (raw) => {
+    expect(tidySummaryText(raw)).toBe("");
+  });
+
+  it.each([
+    ["Zam geldi. Ayrıntılar geliyor...", "Zam geldi."],
+    ["Zam geldi. Detaylar gelecek…", "Zam geldi."],
+    ["Bakan açıklama yaptı Detaylar geliyor", "Bakan açıklama yaptı"],
+    ["Zam geldi. AYRINTILAR GELECEK", "Zam geldi."],
+  ])("strips the placeholder as a tail: %j", (raw, expected) => {
+    expect(tidySummaryText(raw)).toBe(expected);
+  });
+
+  it.each([
+    "Ayrıntılar geliyor: Bakan Yılmaz açıklama yaptı",
+    "Detaylar gelecek hafta açıklanacak.",
+    "Bakan açıklama yaptı, ayrıntılar geliyor",
+  ])("keeps a sentence that merely contains the phrase: %j", (raw) => {
+    expect(tidySummaryText(raw)).toBe(raw);
+  });
+
+  it("a72f9464: a placeholder first line followed by another story's headline gives ''", () => {
+    const raw =
+      "Ayrıntılar geliyor...\n\n\n\nKKTC Başbakanı Üstel, KKTC ile ilgili açıklamaları için Cumhurbaşkanı Erdoğan'a teşekkür etti";
+    expect(tidySummaryText(raw)).toBe("");
+  });
+
+  it.each([
+    "Ayrıntılar birazdan...\nKaynak: TRT Haber",
+    "\n  Detaylar gelecek…\r\nBaşka bir başlık",
+    "Click to continue\nBakan açıkladı",
+    "Detaylar geliyor\rBaşlık",
+  ])("any placeholder first line hides the whole text: %j", (raw) => {
+    expect(tidySummaryText(raw)).toBe("");
+  });
+
+  it("only a FIRST line counts: a placeholder on a later line is a tail like before", () => {
+    expect(tidySummaryText("Bakan açıklama yaptı.\nAyrıntılar geliyor...")).toBe("Bakan açıklama yaptı.");
+  });
+
+  it("a first line that merely starts with the phrase is a sentence, not a placeholder", () => {
+    expect(tidySummaryText("Ayrıntılar geliyor: Bakan Yılmaz açıklama yaptı\nİkinci satır geldi.")).toBe(
+      "Ayrıntılar geliyor: Bakan Yılmaz açıklama yaptı. İkinci satır geldi.",
+    );
+  });
+
+  it("is idempotent on the placeholder inputs and stays linear on 1 MB of blank lines", () => {
+    expect(tidySummaryText(tidySummaryText("Ayrıntılar geliyor...\nX"))).toBe("");
+    const start = performance.now();
+    expect(tidySummaryText("\n".repeat(1_000_000) + "Ayrıntılar geliyor...\nX")).toBe("");
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe("stripLeadingStyleRules (h48-ingest-1, Elips Haber)", () => {
+  const ELIPS =
+    "BODY { font-family: Calibri, Arial; font-size: 12pt; margin : 15px; background-color:#FFFAF4; }\n" +
+    "        table { border:1px solid #B96F00; margin-top:10px; margin-bottom:10px; background-color:white; }\n" +
+    "        td { border:1px solid #B96F00; font-size: 12pt; padding:1 3 1 5; }\n\nİLANEN TEBLİGAT...";
+
+  it("drops the leading run of CSS rules and returns the rest trimmed", () => {
+    expect(stripLeadingStyleRules(ELIPS)).toBe("İLANEN TEBLİGAT...");
+  });
+
+  it("the sample from the spec (three rules, tab and newline indentation)", () => {
+    expect(
+      stripLeadingStyleRules(
+        "BODY { font-family: Calibri, Arial; font-size: 12pt; margin : 15px; background-color:#FFFAF4; }\n table { border:1px solid #B96F00; } td { padding: 2px; }\n\nİLANEN TEBLİGAT...",
+      ),
+    ).toBe("İLANEN TEBLİGAT...");
+  });
+
+  it("handles one rule, a rule without a final semicolon and rules glued together", () => {
+    expect(stripLeadingStyleRules("p { color: red } Haber metni burada.")).toBe("Haber metni burada.");
+    expect(stripLeadingStyleRules("p{color:red;}a{color:blue;}Haber metni")).toBe("Haber metni");
+    expect(stripLeadingStyleRules("  \n .cls, #id > li:hover { margin: 0 auto !important; } Metin")).toBe("Metin");
+  });
+
+  it("returns '' when the whole text is CSS (a sheet and nothing behind it)", () => {
+    expect(stripLeadingStyleRules("td { padding: 2px; }")).toBe("");
+    expect(stripLeadingStyleRules("BODY { font-family: Calibri; }\n  table { border: 1px solid red; }  \n")).toBe("");
+  });
+
+  it("returns '' for a sheet the feed cut inside a rule or inside a selector (the 300-character cap)", () => {
+    const cutInBody = "BODY { font-family: Calibri, Arial; font-size: 12pt; }\n td { border:1px solid #B96F00; font-size: 10pt; pad...";
+    expect(stripLeadingStyleRules(cutInBody)).toBe("");
+    const cutInSelector =
+      "BODY { font-family: Calibri, Arial; font-size: 12pt; margin : 15px; }\n        td { border:1px solid #B96F00; font-size: 10pt; padding:1 3 1 5; }\n.bik-ilan-detay .cont...";
+    expect(stripLeadingStyleRules(cutInSelector)).toBe("");
+    expect(stripLeadingStyleRules("BODY { font-family: Calibri, Arial; font-size: 12pt; margin")).toBe("");
+  });
+
+  it("leaves a plain sentence unchanged, byte for byte (the same string)", () => {
+    const plain = "  Bakan Yılmaz yeni vergi düzenlemesini açıkladı.  ";
+    expect(stripLeadingStyleRules(plain)).toBe(plain);
+    expect(stripLeadingStyleRules("")).toBe("");
+    expect(stripLeadingStyleRules("   ")).toBe("   ");
+    expect(stripLeadingStyleRules("Ayrıntılar geliyor...")).toBe("Ayrıntılar geliyor...");
+  });
+
+  it("leaves text with braces later in the sentence unchanged", () => {
+    for (const s of [
+      "Bakan Yılmaz {font-family: Arial; color: red;} dedi.",
+      "Haber metni body { color: red; } sonra devam eder.",
+      "Kabine toplantısı sonrası {açıklama} bekleniyor",
+      "Bir cümle } ve bir { daha",
+      "{ color: red; } Haber metni", // no selector: not a rule
+      "{{{ }}}",
+    ]) {
+      expect(stripLeadingStyleRules(s), s).toBe(s);
+    }
+  });
+
+  it("leaves a sentence that opens like a selector but whose block is not declarations", () => {
+    for (const s of [
+      "Bakan {açıkladı: bugün} dedi",
+      "Haber { Bakan açıkladı } metni",
+      "Haber { a: b; c d e } metni",
+      "Haber { nested { color: red; } } metni",
+      "Haber {} metni",
+      "Haber { ; } metni",
+    ]) {
+      expect(stripLeadingStyleRules(s), s).toBe(s);
+    }
+  });
+
+  it("does not take a sentence for a selector: the words in front of the brace must be CSS, not prose", () => {
+    for (const s of [
+      "İstanbul'da yangın { color: red; } çıktı",
+      "Haber metni body { color: red; } sonra devam eder.",
+      "Bakan Yılmaz yeni vergi { color: red; } dedi",
+      "Table td Haber { color: red; } Metin",
+    ]) {
+      expect(stripLeadingStyleRules(s), s).toBe(s);
+    }
+  });
+
+  it("accepts element names in any case, class and id selectors, combinators, pseudo-classes and attribute selectors", () => {
+    expect(stripLeadingStyleRules("TABLE TD { padding: 2px; } Metin")).toBe("Metin");
+    expect(stripLeadingStyleRules("ul > li + li, a:hover, input[type=text] { color: red; } Metin")).toBe("Metin");
+    expect(stripLeadingStyleRules("* { margin: 0; } h1.baslik#ust { font-size: 2em; } Metin")).toBe("Metin");
+  });
+
+  it("an overlong selector is not a selector (200 characters)", () => {
+    const s = "a".repeat(300) + " { color: red; } Metin";
+    expect(stripLeadingStyleRules(s)).toBe(s);
+  });
+
+  it("stops after the leading run: a rule behind real text stays", () => {
+    expect(stripLeadingStyleRules("p { color: red; } Metin. a { color: blue; } sonra")).toBe(
+      "Metin. a { color: blue; } sonra",
+    );
+  });
+
+  it("a real text that starts with # or . after the CSS is kept when it has a letter outside ASCII", () => {
+    expect(stripLeadingStyleRules("p { color: red; }\n#SONDAKİKA Deprem oldu")).toBe("#SONDAKİKA Deprem oldu");
+    expect(stripLeadingStyleRules("p { color: red; }\n...Bakan açıkladı")).toBe("...Bakan açıkladı");
+  });
+
+  it("a 100 KB '{{{{...' string finishes in linear time and comes back unchanged", () => {
+    const braces = "{".repeat(100_000);
+    const start = performance.now();
+    expect(stripLeadingStyleRules(braces)).toBe(braces);
+    expect(stripLeadingStyleRules("a" + braces)).toBe("a" + braces);
+    expect(stripLeadingStyleRules("a {" + braces)).toBe("a {" + braces);
+    expect(stripLeadingStyleRules("}".repeat(100_000))).toBe("}".repeat(100_000));
+    expect(stripLeadingStyleRules("a { b: c; } ".repeat(10_000))).toBe("");
+    const unclosedRules = "a { b: c; ".repeat(10_000); // the first block never closes and holds "a { b" as a property
+    expect(stripLeadingStyleRules(unclosedRules)).toBe(unclosedRules);
+    const closedWithoutSemicolon = "a { b: c } ".repeat(10_000);
+    expect(stripLeadingStyleRules(closedWithoutSemicolon)).toBe("");
+    expect(stripLeadingStyleRules("{ ".repeat(50_000) + "x")).toBe("{ ".repeat(50_000) + "x");
+    expect(stripLeadingStyleRules(" ".repeat(100_000) + "x")).toBe(" ".repeat(100_000) + "x");
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  it("a long run of declarations and of semicolons stays linear", () => {
+    const start = performance.now();
+    stripLeadingStyleRules("a { " + "x: y; ".repeat(50_000) + "} Metin");
+    stripLeadingStyleRules("a { " + ";".repeat(100_000) + " } Metin");
+    stripLeadingStyleRules("a { " + "x".repeat(100_000));
+    expect(performance.now() - start).toBeLessThan(1000);
   });
 });

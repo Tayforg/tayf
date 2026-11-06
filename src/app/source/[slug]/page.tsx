@@ -7,7 +7,8 @@ import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
-import { isBoilerplateDescription } from "@/lib/articles/description-boilerplate";
+import { isBoilerplateDescription, isHeadlineEcho } from "@/lib/articles/description-boilerplate";
+import { stripLeadingStyleRules } from "@/lib/articles/summary-tidy";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { sourceLang } from "@/lib/sources/source-language";
 import { optimizedThumbSrcSet } from "@/lib/images/image-url";
@@ -320,6 +321,21 @@ export default async function SourceProfilePage({ params }: PageProps) {
               const thumb = articleImageEligible(article, source)
                 ? optimizedThumbSrcSet(article.image_url)
                 : null;
+              // The excerpt line (h48-ingest-1). Elips Haber's feed puts the
+              // sheet of its notice template in front of the notice, so the
+              // leading CSS rules go first. What is left is shown only when it
+              // is a summary: not empty, not an RSS call-to-action or
+              // "Ayrıntılar geliyor..." stub, not punctuation, and not the
+              // card's own headline again (Korkusuz ships the title as the
+              // description, CNN Türk half of the time). Read-time only; the
+              // stored description is untouched.
+              const excerpt = articleExcerptEligible(article, source)
+                ? stripLeadingStyleRules(article.description)
+                : "";
+              const showExcerpt =
+                excerpt !== "" &&
+                !isBoilerplateDescription(excerpt) &&
+                !isHeadlineEcho(article.title, excerpt);
               return (
                 <li
                   key={article.id}
@@ -355,14 +371,15 @@ export default async function SourceProfilePage({ params }: PageProps) {
                         {article.title}
                       </p>
                       {/* RSS call-to-action stubs ("Click to continue",
-                          "Devamını oku") are not summaries: hide them. */}
-                      {articleExcerptEligible(article, source) &&
-                      !isBoilerplateDescription(article.description) ? (
+                          "Devamını oku", "Ayrıntılar geliyor..."), a
+                          description that is only the title, and a leaked
+                          style sheet are not summaries: hide them. */}
+                      {showExcerpt ? (
                         <p
                           lang={articleLang}
                           className="text-xs text-muted-foreground leading-snug line-clamp-2"
                         >
-                          {article.description}
+                          {excerpt}
                         </p>
                       ) : null}
                       <p className="font-mono text-[10px] text-muted-foreground">

@@ -237,3 +237,120 @@ describe("/source/[slug] generateMetadata keeps the existing noindex rule", () =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// h48-ingest-1: what the excerpt line under a card may be.
+// ---------------------------------------------------------------------------
+
+type Row = { title: string; description: string | null };
+
+function articlesOf(rows: Row[]): SourceProfile["articles"] {
+  return rows.map((r, i) => ({
+    id: `x${i}`,
+    title: r.title,
+    description: r.description,
+    url: `https://ornek.example/x${i}`,
+    image_url: null,
+    published_at: "2026-11-05T09:00:00.000Z",
+  }));
+}
+
+/** How many times `needle` occurs in the text of the page. */
+function occurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
+}
+
+describe("/source/[slug] excerpt line (h48-ingest-1)", () => {
+  const ELIPS_CSS =
+    "BODY { font-family: Calibri, Arial; font-size: 12pt; margin : 15px; background-color:#FFFAF4; }\n" +
+    "        table { border:1px solid #B96F00; margin-top:10px; margin-bottom:10px; background-color:white; }\n" +
+    "        td { border:1px solid #B96F00; font-size: 12pt; padding:1 3 1 5; }\n\nİLANEN TEBLİGAT...";
+
+  it("shows a real summary", async () => {
+    const text = textOf(
+      await render(
+        profileOf({
+          articles: articlesOf([
+            { title: "Bakan Yılmaz yeni vergiyi açıkladı", description: "Düzenleme gelecek ay yürürlüğe girecek." },
+          ]),
+        }),
+      ),
+    );
+    expect(text).toContain("Düzenleme gelecek ay yürürlüğe girecek.");
+  });
+
+  it("hides an excerpt that is the title again (case, punctuation and spacing aside), shows the title once", async () => {
+    const rows: Row[] = [
+      { title: "Korkusuz haber başlığı", description: "Korkusuz haber başlığı" },
+      { title: "CNN Türk başlığı geldi", description: "  CNN TÜRK BAŞLIĞI GELDİ. " },
+      { title: "Üçüncü başlık burada yazıyor", description: "Üçüncü başlık burada yaz..." },
+    ];
+    const text = textOf(await render(profileOf({ articles: articlesOf(rows) })));
+    expect(occurrences(text, "Korkusuz haber başlığı")).toBe(1);
+    expect(occurrences(text, "Üçüncü başlık burada yazıyor")).toBe(1);
+    expect(text).not.toContain("Üçüncü başlık burada yaz...");
+    expect(text.toLocaleLowerCase("tr-TR")).not.toContain("cnn türk başlığı geldi. ");
+    expect(occurrences(text.toLocaleLowerCase("tr-TR"), "cnn türk başlığı geldi")).toBe(1);
+  });
+
+  it("keeps an excerpt that starts with the title and goes on", async () => {
+    const description = "Korkusuz haber başlığı. Devamında ayrıntılar ve açıklamalar yer alıyor.";
+    const text = textOf(
+      await render(profileOf({ articles: articlesOf([{ title: "Korkusuz haber başlığı", description }]) })),
+    );
+    expect(text).toContain(description);
+  });
+
+  it.each(["Ayrıntılar geliyor...", "Detaylar gelecek…", "DETAYLAR GELİYOR...", ".", "…", "...", "Click to continue", "Ayrıntılar birazdan..."])(
+    "hides the placeholder %j (the card reads as if it had no description)",
+    async (description) => {
+      const shown = textOf(await render(profileOf({ articles: articlesOf([{ title: "Bir başlık", description }]) })));
+      const none = textOf(await render(profileOf({ articles: articlesOf([{ title: "Bir başlık", description: null }]) })));
+      expect(shown).toBe(none);
+    },
+  );
+
+  it("strips a leading <style> sheet (Elips Haber) and shows what follows it", async () => {
+    const text = textOf(
+      await render(profileOf({ articles: articlesOf([{ title: "Elips ilan başlığı", description: ELIPS_CSS }]) })),
+    );
+    expect(text).not.toContain("BODY");
+    expect(text).not.toContain("font-family");
+    expect(text).not.toContain("#B96F00");
+    expect(text).toContain("İLANEN TEBLİGAT...");
+  });
+
+  it("hides an excerpt that is nothing but a sheet", async () => {
+    const css = "BODY { font-family: Calibri; }\n td { padding: 2px; }";
+    const shown = textOf(await render(profileOf({ articles: articlesOf([{ title: "Elips ilan", description: css }]) })));
+    const none = textOf(await render(profileOf({ articles: articlesOf([{ title: "Elips ilan", description: null }]) })));
+    expect(shown).toBe(none);
+  });
+
+  it("an excerpt that equals the title once the sheet is gone is hidden", async () => {
+    const rows: Row[] = [{ title: "İLANEN TEBLİGAT...", description: ELIPS_CSS }];
+    const text = textOf(await render(profileOf({ articles: articlesOf(rows) })));
+    expect(occurrences(text, "İLANEN TEBLİGAT")).toBe(1);
+    expect(text).not.toContain("BODY");
+  });
+
+  it("a null or empty description shows no excerpt", async () => {
+    const rows: Row[] = [
+      { title: "Boş açıklamalı haber", description: null },
+      { title: "Boş dizgili haber", description: "" },
+    ];
+    const text = textOf(await render(profileOf({ articles: articlesOf(rows) })));
+    expect(text).toContain("Boş açıklamalı haber");
+    expect(text).toContain("Boş dizgili haber");
+  });
+
+  it("a source that has not allowed excerpts shows none, whatever the description", async () => {
+    const profile = profileOf({
+      articles: articlesOf([{ title: "Bir başlık", description: "Bu gerçek bir özet cümlesidir." }]),
+    });
+    profile.source.excerpt_allowed = false;
+    const text = textOf(await render(profile));
+    expect(text).toContain("Bir başlık");
+    expect(text).not.toContain("Bu gerçek bir özet cümlesidir.");
+  });
+});

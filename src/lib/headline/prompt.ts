@@ -11,6 +11,15 @@
 // route's actual gate.
 export const HEADLINE_MIN_ARTICLE_COUNT = 3;
 
+// Minimum member-article count before a cluster gets the extractive neutral
+// title (the fallback that runs while the LLM is off). Same unit as
+// HEADLINE_MIN_ARTICLE_COUNT: `clusters.article_count`, a count of member
+// ARTICLES, not of distinct outlets (one outlet can contribute several
+// members). Moved here from the cron route so /metodoloji can state it from the
+// constant; migrations 127 and 141 carry hand-written copies of the number and
+// are pinned to it by tests/migrations/.
+export const EXTRACTIVE_MIN_ARTICLE_COUNT = 2;
+
 // Provenance stamp written into `clusters.title_neutral_prompt_version`
 // (migration 046) alongside `title_tr_neutral` / `title_neutral_at`, so a
 // rewritten title can always be traced back to the exact prompt that

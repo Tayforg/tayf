@@ -8,6 +8,7 @@ import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/err
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
   buildHeadlinePrompt,
+  EXTRACTIVE_MIN_ARTICLE_COUNT,
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
@@ -164,8 +165,9 @@ const LLM_BATCH = 5;
 // Extractive mode has no per-cluster cost, so it covers every multi-source
 // cluster and drains faster. Selection is on title_tr_neutral IS NULL, which
 // migration 019's partial index does not cover; at ~100k clusters with the
-// is_archived + article_count filters the scan is still milliseconds.
-const EXTRACTIVE_MIN_ARTICLE_COUNT = 2;
+// is_archived + article_count filters the scan is still milliseconds. The
+// article_count floor (EXTRACTIVE_MIN_ARTICLE_COUNT) lives in
+// src/lib/headline/prompt.ts, next to the LLM floor, so /metodoloji can quote it.
 const EXTRACTIVE_BATCH = 50;
 
 // Members fetched per cluster. The LLM prompt slices to the newest 8

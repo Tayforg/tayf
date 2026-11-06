@@ -1,15 +1,22 @@
 import Link from "next/link";
 
+import { CIRCUIT_BREAKER_DAY_LIMIT } from "@/lib/finance/disclosure-filter";
 import { fmtClock } from "@/lib/finance/format";
 import type { Disclosure } from "@/lib/finance/queries";
 
-// Today's circuit-breaker strip on /ekonomi. fetchCircuitBreakers(60) hands
-// the page up to 60 notices, many of them the same ticker twice; rendering
-// every one made a 514 px wall of codes on a phone and pushed "Haber akışı"
-// to y=811 (h28-journey-3). The cap is presentational only: the strip shows
-// the newest BREAKER_STRIP_VISIBLE distinct tickers and folds the rest into a
-// native <details> (no client JS), so every ticker stays one tap away. The
-// summary has no aria-label: its accessible name is the visible "+N daha" plus a
+// Today's circuit-breaker strip on /ekonomi. fetchCircuitBreakers() hands the
+// page the whole Istanbul day (up to CIRCUIT_BREAKER_DAY_LIMIT notices, the
+// PostgREST response cap), many of them the same ticker twice; rendering every
+// one made a 514 px wall of codes on a phone and pushed "Haber akışı" to y=811
+// (h28-journey-3). The visible cap is presentational only: the strip shows the
+// newest BREAKER_STRIP_VISIBLE distinct tickers and folds the rest into a native
+// <details> (no client JS), so every ticker the read returned stays one tap away.
+// The read itself is not cut at 60 any more (h48-ekonomi-3: that dropped 20 of one
+// day's 74 tickers before the dedupe), the label states the true distinct-ticker
+// count, and a read that returned exactly the limit says "(son 1.000 bildirim)"
+// so a cut is never silent. The read is newest first, so a cut drops the day's
+// earliest notices and what the strip shows is the last N ("son"). The summary
+// has no aria-label: its accessible name is the visible "+N daha" plus a
 // screen-reader-only " (devre kesici)", so it starts with the visible text
 // (WCAG 2.5.3, Label in Name).
 
@@ -49,6 +56,20 @@ export function selectBreakers(
   return { shown: distinct.slice(0, visible), rest: distinct.slice(visible) };
 }
 
+/**
+ * The strip's label: the true number of distinct tickers (`distinct`), plus a
+ * muted note when the read returned `rowsRead` >= the limit, i.e. may have been cut.
+ */
+export function breakerLabel(distinct: number, rowsRead: number): { text: string; cut: string | null } {
+  return {
+    text: `devre kesici bugün · ${distinct} hisse`,
+    cut:
+      rowsRead >= CIRCUIT_BREAKER_DAY_LIMIT
+        ? `(son ${CIRCUIT_BREAKER_DAY_LIMIT.toLocaleString("tr-TR")} bildirim)`
+        : null,
+  };
+}
+
 function BreakerChip({ breaker }: { breaker: Disclosure }) {
   return (
     <span className="flex items-baseline gap-1.5">
@@ -78,9 +99,11 @@ export function BreakerStrip({ breakers, unavailable = false }: { breakers: read
     ) : null;
   }
 
+  const label = breakerLabel(shown.length + rest.length, breakers.length);
   return (
     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border border-border bg-black/25 px-3 py-1.5 font-mono text-[11px]">
-      <span className="text-amber-400">devre kesici bugün</span>
+      <span className="text-amber-400">{label.text}</span>
+      {label.cut ? <span className="text-muted-foreground">{label.cut}</span> : null}
       {shown.map((b) => (
         <BreakerChip key={b.disclosureIndex} breaker={b} />
       ))}

@@ -1,5 +1,12 @@
 import { ZONE_META } from "@/lib/bias/config";
-import { formatPickupLag } from "@/lib/finance/kap-pickup";
+import {
+  formatPickupLag,
+  formatPickupRate,
+  pickupRowKind,
+  RELATED_ONLY_LABEL,
+  relatedOnlyCountLabel,
+  type DisclosurePickup,
+} from "@/lib/finance/kap-pickup";
 import { PICKUP_LIMIT, getTickerPickupSafe } from "@/lib/finance/kap-pickup-query";
 import { disclosureWindowLabel, fmtWhen } from "@/lib/finance/format";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
@@ -14,6 +21,12 @@ import type { MediaDnaZone } from "@/types";
 // The window label is honest about the cap (h11-finance-3): the pickup read is
 // cut at PICKUP_LIMIT disclosures, so a busy ticker reads "son 60 bildirim
 // (30 günde 102)" instead of "son 30 gün" over a list that stops at 60.
+//
+// h48-ekonomi-2: a notice that only names the share (a Takasbank or MKK list)
+// is listed but carries no numbers: its row says RELATED_ONLY_LABEL, and the
+// stats above count the company's own filings alone, so "bildirim" agrees with
+// the "KAP ile basın arası" panel. All wording lives in pure helpers in
+// kap-pickup.ts (tested there); this file only lays it out.
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -30,6 +43,25 @@ function ZoneCounts({ zones }: { zones: Record<MediaDnaZone, number> }) {
       ))}
     </span>
   );
+}
+
+/** The grey line under a row: the pickup numbers, or why there are none. */
+function PickupRowStatus({ p }: { p: DisclosurePickup }) {
+  switch (pickupRowKind(p)) {
+    case "related-only":
+      return <>{RELATED_ONLY_LABEL}</>;
+    case "empty-closed":
+      return <>48 saatte haber yok</>;
+    case "empty-open":
+      return <>henüz haber yok · süre dolmadı</>;
+    case "picked-up":
+      return (
+        <>
+          {p.articles} haber · {p.outlets} kaynak · ilk: {formatPickupLag(p.firstLagMinutes)}
+          {p.outlets > 0 ? <ZoneCounts zones={p.zones} /> : null}
+        </>
+      );
+  }
 }
 
 export async function KapPickupPanel({ ticker }: { ticker: string }) {
@@ -49,7 +81,7 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
 
   const { totals } = data;
   const rows = data.pickups.slice(0, 8);
-  const rateLabel = totals.pickupRate === null ? "—" : `${Math.round(totals.pickupRate * 100)}`;
+  const relatedOnlyNote = relatedOnlyCountLabel(totals.relatedOnly);
 
   return (
     <Panel
@@ -59,12 +91,17 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-4">
         <div>
           <dt className="text-muted-foreground">bildirim</dt>
-          <dd className="text-lg tabular-nums">{totals.disclosures}</dd>
+          <dd className="text-lg tabular-nums">
+            {totals.disclosures}
+            {relatedOnlyNote ? (
+              <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">{relatedOnlyNote}</span>
+            ) : null}
+          </dd>
         </div>
         <div>
           <dt className="text-muted-foreground">haberi çıkan</dt>
           <dd className="text-lg tabular-nums">
-            {totals.pickedUp} <span className="text-[10px] text-muted-foreground">(%{rateLabel})</span>
+            {totals.pickedUp} <span className="text-[10px] text-muted-foreground">({formatPickupRate(totals.pickupRate)})</span>
           </dd>
         </div>
         <div>
@@ -99,18 +136,7 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
                 {p.subject ?? "Bildirim"}
               </a>
               <p className="text-[10px] text-muted-foreground">
-                {p.articles === 0 ? (
-                  p.windowComplete ? (
-                    "48 saatte haber yok"
-                  ) : (
-                    "henüz haber yok · süre dolmadı"
-                  )
-                ) : (
-                  <>
-                    {p.articles} haber · {p.outlets} kaynak · ilk: {formatPickupLag(p.firstLagMinutes)}
-                    {p.outlets > 0 ? <ZoneCounts zones={p.zones} /> : null}
-                  </>
-                )}
+                <PickupRowStatus p={p} />
                 {p.overlapping > 0 ? (
                   <span className="ml-1 text-muted-foreground">
                     (yakın tarihli {p.overlapping} bildirimle ortak pencere)
@@ -126,7 +152,9 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
         Yankı: bildirimden sonraki 48 saatte hisseyi anan haberler; bildirimden önceki haberler sayılmaz. Kaynak
         dağılımı yalnızca sınıflandırılmış haber kaynaklarını kaynak başına bir kez sayar (toplayıcılar hariç).
         Otomatik ilgi denetiminin şirketle ilgisiz bulduğu eşleşmeler çıkarılır. Birbirine 48 saatten yakın
-        bildirimlerde aynı haber her birine sayılır. Devre kesici bildirimleri hariçtir.
+        bildirimlerde aynı haber her birine sayılır. Devre kesici bildirimleri hariçtir. Hisseyi yalnızca anan
+        bildirimlerde (Takasbank ve MKK listeleri, işlem yasağı gibi) şirketin kendi bildirimi olmadığından yankı
+        hesaplanmaz; toplamlara girmezler.
       </p>
     </Panel>
   );
