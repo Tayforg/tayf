@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161).
+// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -43,6 +43,9 @@ import { fileURLToPath } from "node:url";
 // 161 (h40-edgefns-1) appended row 21 (`image_coverage`, per outlet/wire source the share of the last 24 hours' articles stored
 // without an image against the source's own 14 days before; warn only): the newest version carries it LAST, after feed_poll_stale,
 // and keeps rows 1-20 as 159 wrote them (tests/migrations/161-image-coverage-by-source.test.ts pins that byte identity).
+// 167 (h51-pipeline-1) changes only row 18's poison count: messages archived in the last 24 hours with read_ct > 3 (the
+// consumers' MAX_READS contract, the 4th read), not read_ct >= 3 (tests/migrations/167-ops-queue-poison-contract.test.ts pins
+// the byte identity of everything else against 161).
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -124,10 +127,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(15);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(16);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -409,7 +412,9 @@ describe("ops_health_report(): the newest version", () => {
     for (const rel of ["pgmq.q_cluster_work", "pgmq.q_image_backfill", "pgmq.a_cluster_work", "pgmq.a_image_backfill"]) {
       expect(seg, rel).toContain(rel);
     }
-    expect(seg).toContain("read_ct >= 3");
+    // poison is the consumers' contract: archived after read_ct EXCEEDS MAX_READS (3), on the 4th read (migration 167; 150 to 161 said >= 3)
+    expect(seg).toContain("read_ct > 3");
+    expect(seg).not.toContain("read_ct >= 3");
     expect(seg).toContain("interval '24 hours'");
     for (const limit of ["300", "900", "1800", "3600"]) expect(seg, limit).toContain(limit);
     expect(seg).toContain("threshold := 900");

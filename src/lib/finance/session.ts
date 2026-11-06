@@ -5,7 +5,7 @@
 // Istanbul is a fixed UTC+3 (no DST since 2016), so calendar days are derived
 // by shifting the epoch by hand, the same way format.ts does.
 
-import { limitPrices } from "@/lib/finance/format";
+import { fmtKat, limitPrices } from "@/lib/finance/format";
 import type { Company, QuoteStat } from "@/lib/finance/queries";
 import type { Quote } from "@/lib/finance/quotes";
 
@@ -206,7 +206,8 @@ export function rebaseQuoteOnStat(quote: Quote, stat: QuoteStat | null | undefin
 
 /**
  * Relative volume plus, when the volume belongs to a different day than the
- * session on screen, that day as dd.MM ("hacim 1,3x ... · 30.10 seansı").
+ * session on screen, that day as dd.MM ("hacim 20 günlük ortalamanın 1,3 katı ·
+ * 30.10 seansı"; the wording is built by rvolPhrase / rvolParts).
  */
 export function rvolLabel(
   stat: QuoteStat | null | undefined,
@@ -215,6 +216,33 @@ export function rvolLabel(
   if (stat?.rvol == null) return null;
   if (intradayDay == null || dayKey(stat.lastDay) === dayKey(intradayDay)) return { rvol: stat.rvol, dayLabel: null };
   return { rvol: stat.rvol, dayLabel: ddMMOfDay(stat.lastDay) };
+}
+
+/**
+ * The relative-volume wording of the /ekonomi/<ticker> header, in the pieces
+ * the header colours separately: "20 günlük ortalamanın" | "1,9 katı" |
+ * "05.11 seansı" (null when the volume belongs to the session on screen).
+ * The genitive "ortalamanın" needs its head noun "katı", as on /trends
+ * ("7 günlük ortalamanın 3,1 katı"); the compact chip form "1,9x" is only for
+ * places with no genitive in front of it. rvolPhrase joins these pieces, so
+ * the markup and the string cannot drift apart.
+ */
+export function rvolParts(v: { rvol: number; dayLabel: string | null }): {
+  basis: string;
+  ratio: string;
+  day: string | null;
+} {
+  return {
+    basis: "20 günlük ortalamanın",
+    ratio: `${fmtKat(v.rvol)} katı`,
+    day: v.dayLabel ? `${v.dayLabel} seansı` : null,
+  };
+}
+
+/** One string: "20 günlük ortalamanın 1,9 katı" (+ " · 05.11 seansı" for another day's volume). */
+export function rvolPhrase(v: { rvol: number; dayLabel: string | null }): string {
+  const p = rvolParts(v);
+  return `${p.basis} ${p.ratio}${p.day ? ` · ${p.day}` : ""}`;
 }
 
 type CompanyMeta = Pick<Company, "city" | "sharesTraded" | "tickers">;

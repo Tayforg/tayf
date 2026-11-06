@@ -4,7 +4,9 @@ import {
   articleCountLabel,
   coverageScopeNote,
   disclosureWindowLabel,
+  fmtKat,
   fmtPct,
+  fmtX,
   limitFlag,
   limitPrices,
   priceTickKurus,
@@ -25,6 +27,23 @@ describe("fmtPct (Turkish prefix form: sign, then %, then the number)", () => {
   it("writes a flat move without a sign", () => {
     expect(fmtPct(0)).toBe("%0,00");
     expect(fmtPct(-0.001)).toBe("%0,00");
+  });
+});
+
+describe("fmtKat (h51-morphology-2: the ratio as a bare number, for '... katı')", () => {
+  it("rounds to one decimal with the Turkish decimal comma and no 'x'", () => {
+    expect(fmtKat(1.94)).toBe("1,9");
+    expect(fmtKat(0.66)).toBe("0,7");
+    expect(fmtKat(12)).toBe("12,0");
+  });
+
+  it("keeps the grouping dot of tr-TR for four-digit ratios", () => {
+    expect(fmtKat(1234.5)).toBe("1.234,5");
+  });
+
+  it("leaves the compact chip form fmtX as it was ('hacim 1,9x' has no genitive)", () => {
+    expect(fmtX(1.94)).toBe("1,9x");
+    expect(fmtX(12)).toBe("12,0x");
   });
 });
 

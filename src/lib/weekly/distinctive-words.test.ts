@@ -632,3 +632,96 @@ describe("isHoroscopeHeadline", () => {
     expect(isHoroscopeHeadline("")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Quoted headlines (h51-morphology-1): an opening quote is plain punctuation,
+// not a suffix apostrophe, so the quoted word is counted, listed and deduped.
+// ---------------------------------------------------------------------------
+
+describe("buildWeeklyDistinctiveWords: quoted headlines", () => {
+  /** A week with every zone at the minimum and `extra` rows added to muhalefet. */
+  function quoteWeek(extra: WeeklyWordsArticleRow[]): WeeklyWordsArticleRow[] {
+    return [
+      ...fillerRows(MIN, GOV_IDS, "gov"),
+      ...fillerRows(MIN, IND_IDS, "ind"),
+      ...fillerRows(MIN, OPP_IDS, "opp"),
+      ...extra,
+    ];
+  }
+
+  function muhalefetTerm(rows: WeeklyWordsArticleRow[], term: string) {
+    const result = buildWeeklyDistinctiveWords(rows, SOURCES);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") throw new Error("expected an ok result");
+    return { result, hit: result.zones.muhalefet.find((t) => t.term === term) };
+  }
+
+  it("counts a headline whose AKP follows an opening quote after a colon", () => {
+    // 15 plain AKP headlines + 6 of the form: Tepki yağdı: 'AKP vatandaşa ...'
+    const { result, hit } = muhalefetTerm(
+      quoteWeek([
+        ...templateRows(15, OPP_IDS, "akp-p", (i) => `AKP kongresi sonrası tartışma ${i}`),
+        ...templateRows(
+          6,
+          OPP_IDS,
+          "akp-q",
+          (i) => `Yeni Parti'den tepki yağdı: 'AKP vatandaşa yeni bir tuzak kuruyor' ${i}`,
+        ),
+      ]),
+      "akp",
+    );
+    expect(result.status).toBe("ok");
+    expect(hit).toBeDefined();
+    expect(hit!.count).toBe(21);
+    expect(hit!.display).toBe("AKP");
+  });
+
+  it("lists a word that only ever appears in opening quotes", () => {
+    const { hit } = muhalefetTerm(
+      quoteWeek(
+        templateRows(12, OPP_IDS, "slg", (i) => `Sokakta slogan: 'Tuzak' diyenler çoğaldı ${i}`),
+      ),
+      "tuzak",
+    );
+    expect(hit).toBeDefined();
+    expect(hit!.count).toBe(12);
+  });
+
+  it("still cuts the Turkish suffix in the same headlines: Erdoğan’ın is counted as erdoğan", () => {
+    const { result, hit } = muhalefetTerm(
+      quoteWeek(
+        templateRows(12, OPP_IDS, "erd", (i) => `Erdoğan’ın 'Reform' paketi sonrası tepki ${i}`),
+      ),
+      "erdoğan",
+    );
+    expect(hit).toBeDefined();
+    expect(hit!.count).toBe(12);
+    const surfaces = result.status === "ok" ? result.zones.muhalefet.map((t) => t.term) : [];
+    expect(surfaces).not.toContain("erdoğan’ın");
+    expect(surfaces).not.toContain("erdoğanın");
+  });
+
+  it("dedupe keeps two headlines that differ only in the quoted word", () => {
+    const result = buildWeeklyDistinctiveWords(
+      quoteWeek([
+        { id: "q-a", title: "'İhmal' iddiası", url: null, source_id: "src-opp-1", created_at: "x" },
+        { id: "q-b", title: "'Darbe' iddiası", url: null, source_id: "src-opp-2", created_at: "x" },
+      ]),
+      SOURCES,
+    );
+    expect(result.status).toBe("ok");
+    expect(result.sample.muhalefet).toBe(MIN + 2);
+  });
+
+  it("dedupe folds a quoted and an unquoted copy of the same headline into one", () => {
+    const result = buildWeeklyDistinctiveWords(
+      quoteWeek([
+        { id: "q-a", title: "'AKP' yeni kararı açıkladı", url: null, source_id: "src-opp-1", created_at: "x" },
+        { id: "q-b", title: "AKP yeni kararı açıkladı", url: null, source_id: "src-opp-2", created_at: "x" },
+      ]),
+      SOURCES,
+    );
+    expect(result.status).toBe("ok");
+    expect(result.sample.muhalefet).toBe(MIN + 1);
+  });
+});

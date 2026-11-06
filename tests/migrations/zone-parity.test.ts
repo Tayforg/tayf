@@ -502,6 +502,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "159_ingest_stale_admission.sql",
       // 161 re-creates ops_health_report() with 159's text verbatim (rows 1-20, including row 4's VALUES-list copy of BIAS_TO_ZONE) plus row 21 (image_coverage, per-source image-less share); pinned by tests/migrations/161-image-coverage-by-source.test.ts
       "161_image_coverage_by_source.sql",
+      // 167 re-creates ops_health_report() with 161's text verbatim (rows 1-21, including row 4's VALUES-list copy of BIAS_TO_ZONE) except the read_ct comparison of row 18 (queue_lag poison is read_ct > 3, the consumers' MAX_READS contract); pinned by tests/migrations/167-ops-queue-poison-contract.test.ts
+      "167_ops_queue_poison_contract.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

@@ -457,8 +457,12 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
     // nicely with the legacy worker which runs IMG_CONCURRENCY=5 in parallel.
     for (const msg of batch) {
       // Deadline hit mid-batch: leave the remaining messages untouched —
-      // the visibility timeout returns them to the queue — so they never
-      // count toward the read_ct-based poison check.
+      // the visibility timeout returns them to the queue. They are NOT free:
+      // pgmq.read already bumped read_ct for this unprocessed tail (see the
+      // note above READ_BUDGET_FLOOR_MS), so each one comes back a read
+      // closer to the poison gate (read_ct > MAX_READS). The floor on the
+      // read loop above limits how often a batch is leased with too little
+      // budget left to process it.
       if (Date.now() - startedAt >= WALL_BUDGET_MS) break;
       let outcome: Outcome;
       try {

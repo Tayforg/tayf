@@ -19,7 +19,6 @@ import {
   fmtPct,
   fmtPrice,
   fmtWhen,
-  fmtX,
   istToday,
   limitFlag,
   moveClass,
@@ -43,6 +42,8 @@ import {
   quoteFreshness,
   rebaseQuoteOnStat,
   rvolLabel,
+  rvolParts,
+  rvolPhrase,
 } from "@/lib/finance/session";
 import { isThinTicker } from "@/lib/finance/ticker-index";
 import { errorShellMetadata, sharePageMetadata } from "@/lib/seo/page-metadata";
@@ -302,6 +303,8 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
     </a>
   ) : null;
   const volume = halted ? null : rvolLabel(stat, intraday.day);
+  // h51-morphology-2: the volume wording comes from session.ts only.
+  const volumeParts = volume ? rvolParts(volume) : null;
   const metaLine = companyMetaLine(page.company);
   // hunt-17: the H1 names the company when the KAP title yields a short name.
   const displayName = companyDisplayName(page.company?.title);
@@ -363,12 +366,14 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                   </div>
                 )}
                 {haltLine}
-                {volume ? (
-                  <div className={cn("mt-0.5 text-[11px] tabular-nums", volume.rvol >= 2 ? "text-amber-400" : "text-muted-foreground")}>
-                    hacim {fmtX(volume.rvol)}{" "}
-                    <span className="text-muted-foreground">
-                      20 günlük ortalamanın{volume.dayLabel ? ` · ${volume.dayLabel} seansı` : ""}
-                    </span>
+                {volume && volumeParts ? (
+                  <div
+                    title={`hacim ${rvolPhrase(volume)}`}
+                    className={cn("mt-0.5 text-[11px] tabular-nums", volume.rvol >= 2 ? "text-amber-400" : "text-muted-foreground")}
+                  >
+                    {/* textContent: "hacim " + rvolPhrase(volume). The ratio keeps the outer (amber) colour. */}
+                    hacim <span className="text-muted-foreground">{volumeParts.basis}</span> {volumeParts.ratio}
+                    {volumeParts.day ? <span className="text-muted-foreground">{` · ${volumeParts.day}`}</span> : null}
                   </div>
                 ) : null}
               </div>
