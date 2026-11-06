@@ -12,6 +12,7 @@ import {
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
+import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import {
   EXTRACTIVE_MODEL_ID,
   isAcceptableNeutral,
@@ -65,6 +66,16 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * result into `clusters.title_tr_neutral` and stamps
  * `title_neutral_at = now()`. The LLM cost stays under $1/month at the
  * default cadence — keep the batch small.
+ *
+ * OPINION COLUMNS (h54-editorial-3)
+ * -------------------------------
+ * The member fetch selects each article's URL and flags a member whose path is
+ * an opinion path (`isOpinionUrl`: /yazarlar/, /kose-yazilari/, /opinion/ ...).
+ * The extractive picker leaves a flagged member out while at least one news
+ * member has a usable title, so a columnist's headline is not the cluster's
+ * "neutral" title; a cluster of columns only is titled as before. No new column,
+ * no model bump: a stored title is re-picked only for the reasons below. The LLM
+ * prompt is not changed.
  *
  * EXTRACTIVE MODE
  * ---------------
@@ -226,7 +237,7 @@ interface ClusterCandidate {
 
 // PostgREST returns embedded selects as arrays when the FK is many-to-one;
 // the legacy worker treated it as a single object. Accept both shapes here.
-type ClusterArticleNested = { title: string | null; published_at: string | null };
+type ClusterArticleNested = { title: string | null; published_at: string | null; url: string | null };
 interface ClusterArticleRow {
   articles: ClusterArticleNested | ClusterArticleNested[] | null;
 }
@@ -287,13 +298,17 @@ async function rewriteClusterHeadline(input: {
 interface MemberItem {
   title: string;
   published_at: string | null;
+  /** The article's URL is an opinion path (/yazarlar/..., isOpinionUrl): the picker leaves a column out while a news member exists. */
+  opinion: boolean;
 }
 
 /**
  * The titles of a cluster's articles, newest first, capped at
  * MEMBER_FETCH_CAP. Both passes use it. Ties on `published_at` break on the
  * title, so equal timestamps order the same on every run and the picker's
- * stable tie-break is deterministic.
+ * stable tie-break is deterministic. Each item carries `opinion`, derived from
+ * the article URL (h54-editorial-3: 539e6666 was titled with a Hürriyet
+ * columnist's insult); the URL itself goes no further.
  */
 async function fetchMemberItems(
   supabase: SupabaseClient,
@@ -301,7 +316,7 @@ async function fetchMemberItems(
 ): Promise<{ items: MemberItem[]; error: PostgrestError | null }> {
   const { data: memberRows, error } = await supabase
     .from("cluster_articles")
-    .select("articles ( title, published_at )")
+    .select("articles ( title, published_at, url )")
     .eq("cluster_id", clusterId)
     .limit(MEMBER_FETCH_CAP);
   if (error) return { items: [], error };
@@ -310,7 +325,7 @@ async function fetchMemberItems(
   for (const r of (memberRows ?? []) as unknown as ClusterArticleRow[]) {
     const a = Array.isArray(r.articles) ? r.articles[0] : r.articles;
     if (!a || !a.title) continue;
-    items.push({ title: a.title, published_at: a.published_at });
+    items.push({ title: a.title, published_at: a.published_at, opinion: isOpinionUrl(a.url) });
   }
   // Newest-first so the LLM sees the freshest framings of the story.
   items.sort((a, b) => {

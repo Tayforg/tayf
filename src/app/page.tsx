@@ -35,6 +35,7 @@ import {
   searchedWordsAsTyped,
 } from "@/lib/clusters/turkish-query";
 import { groupByDayBucket } from "@/lib/home/day-buckets";
+import { shouldStampLastVisit } from "@/lib/last-visit";
 import {
   MIN_QUERY_LENGTH,
   displayQuery,
@@ -322,7 +323,8 @@ export async function HomeFeed({
                 })
           }
         />
-        <NewSinceLastVisit timestamps={[]} />
+        {/* No stories were shown, so this render must not count as a visit. */}
+        <NewSinceLastVisit stamp={false} timestamps={[]} />
         <FeedUnavailable />
       </>
     );
@@ -471,7 +473,12 @@ export async function HomeFeed({
         }
       />
 
-      <NewSinceLastVisit timestamps={renderedTimestamps} />
+      {/* The last-visit stamp advances only when the reader was on page 1 of
+          the plain feed: not a /?q= view, not ?page=N (shouldStampLastVisit). */}
+      <NewSinceLastVisit
+        stamp={shouldStampLastVisit({ page: safePage, q, feedOk: true })}
+        timestamps={renderedTimestamps}
+      />
 
       <FocusFeedOnPageChange
         page={safePage}

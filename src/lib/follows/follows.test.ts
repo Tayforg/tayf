@@ -25,6 +25,7 @@ import {
   followLabel,
   followListCaption,
   followRowMeta,
+  followRowsToShow,
   hasFollow,
   isFollowGundemKey,
   isFollowTopicSlug,
@@ -454,6 +455,90 @@ describe("countNew", () => {
 
   it("returns 0 for an empty list", () => {
     expect(countNew([], NOW)).toBe(0);
+  });
+});
+
+describe("followRowsToShow", () => {
+  const SEEN = "2026-10-22T09:00:00.000Z";
+  const NEW_AT = "2026-10-22T10:00:00+00:00";
+  const OLD_AT = "2026-10-22T08:00:00+00:00";
+
+  /** One item per flag: true = published after SEEN, false = before it. */
+  const items = (flags: boolean[]) =>
+    flags.map((isNew) => ({ firstPublished: isNew ? NEW_AT : OLD_AT }));
+  const repeat = (flag: boolean, n: number) => Array.from({ length: n }, () => flag);
+
+  it("shows every row when all 10 items are new, even past the base", () => {
+    expect(followRowsToShow(items(repeat(true, 10)), SEEN, 5)).toBe(10);
+  });
+
+  it("extends to the last new row: 7 new at indices 0-6 plus 3 old -> 7", () => {
+    expect(followRowsToShow(items([...repeat(true, 7), ...repeat(false, 3)]), SEEN, 5)).toBe(7);
+  });
+
+  it("a new item deep in an updated_at-ordered list pulls the cut-off down to it", () => {
+    const flags = repeat(false, 10);
+    flags[0] = true;
+    flags[6] = true;
+    expect(followRowsToShow(items(flags), SEEN, 5)).toBe(7);
+  });
+
+  it("keeps the base when the new rows already fit inside it", () => {
+    expect(followRowsToShow(items([true, true, ...repeat(false, 8)]), SEEN, 5)).toBe(5);
+  });
+
+  it("is the base when nothing is new", () => {
+    expect(followRowsToShow(items(repeat(false, 10)), SEEN, 5)).toBe(5);
+  });
+
+  it("is the base with no baseline (seenAt null): the feed claims no novelty", () => {
+    expect(followRowsToShow(items(repeat(true, 10)), null, 5)).toBe(5);
+  });
+
+  it("is the base for an unparseable seenAt", () => {
+    expect(followRowsToShow(items(repeat(true, 10)), "garbage", 5)).toBe(5);
+  });
+
+  it("never shows more rows than there are items", () => {
+    expect(followRowsToShow(items(repeat(false, 3)), SEEN, 5)).toBe(3);
+    expect(followRowsToShow(items(repeat(true, 3)), SEEN, 5)).toBe(3);
+  });
+
+  it("is 0 for an empty list", () => {
+    expect(followRowsToShow([], SEEN, 5)).toBe(0);
+    expect(followRowsToShow([], null, 5)).toBe(0);
+  });
+
+  it("an item with an unparseable timestamp is not new, so it never extends the cut-off", () => {
+    const list = [
+      ...items(repeat(false, 6)),
+      { firstPublished: "garbage" },
+      ...items(repeat(false, 3)),
+    ];
+    expect(followRowsToShow(list, SEEN, 5)).toBe(5);
+  });
+
+  it("compares instants like countNew (offset vs Z, equal is not new)", () => {
+    const list = [
+      ...items(repeat(false, 6)),
+      { firstPublished: "2026-10-22T09:00:00+00:00" }, // == SEEN: not new
+      { firstPublished: "2026-10-22T09:00:00.500+00:00" }, // 0.5 s after: new
+      ...items(repeat(false, 2)),
+    ];
+    expect(followRowsToShow(list, SEEN, 5)).toBe(8);
+  });
+
+  it("agrees with countNew: every new item sits inside the rows shown", () => {
+    for (const flags of [
+      repeat(true, 10),
+      [...repeat(true, 7), ...repeat(false, 3)],
+      [false, true, false, false, false, false, false, true, false, false],
+      repeat(false, 10),
+    ]) {
+      const list = items(flags);
+      const shown = list.slice(0, followRowsToShow(list, SEEN, 5));
+      expect(countNew(shown, SEEN)).toBe(countNew(list, SEEN));
+    }
   });
 });
 

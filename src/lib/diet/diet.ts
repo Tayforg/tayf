@@ -13,7 +13,8 @@ export const DIET_TTL_DAYS = 30;
 export const DIET_WEEK_DAYS = 7;
 // Below this many 7-day clicks we show raw counts + a low-sample note
 // instead of a spectrum bar — a bar built from 3 clicks would read as a
-// confident ratio it isn't.
+// confident ratio it isn't. The least-read nudge (`nudgeZones`) honours the
+// same floor.
 export const DIET_MIN_SAMPLE = 10;
 // A second click on the same zone within this window is almost always a
 // double-click / accidental re-fire, not a second read; drop it.
@@ -197,4 +198,32 @@ export function summarizeDiet(entries: readonly DietEntry[], nowMs: number): Die
     leastRead,
     sampleOk: total >= DIET_MIN_SAMPLE,
   };
+}
+
+/**
+ * The sides the /diyetim "En az okuduğunuz taraf" nudge may point at.
+ *
+ * `leastRead` always names one zone, so on a tie it falls back to spectrum
+ * order (İktidar first, Muhalefet never) and it is set from a single click.
+ * Neither is acceptable for a nudge on a neutrality site, so the nudge uses
+ * this instead:
+ *   1. `[]` below the page's own DIET_MIN_SAMPLE floor (`sampleOk`) or with no
+ *      weekly clicks: DietSummary's "Az veri var" line is the only guidance.
+ *   2. Otherwise every zone whose 7-day count equals the 7-day minimum.
+ *   3. Among those, every zone whose 30-day count equals their 30-day minimum
+ *      (the same tie-break as `leastRead`).
+ *   4. `[]` when all three zones are still tied: no side is behind.
+ * Zones come back in DIET_ZONES order for display only; the order never
+ * decides who is included.
+ */
+export function nudgeZones(summary: DietSummary): DietZone[] {
+  if (!summary.sampleOk || summary.total === 0) return [];
+
+  const weekMin = Math.min(...DIET_ZONES.map((zone) => summary.counts[zone]));
+  const weekTied = DIET_ZONES.filter((zone) => summary.counts[zone] === weekMin);
+
+  const monthMin = Math.min(...weekTied.map((zone) => summary.counts30d[zone]));
+  const tied = weekTied.filter((zone) => summary.counts30d[zone] === monthMin);
+
+  return tied.length === DIET_ZONES.length ? [] : tied;
 }

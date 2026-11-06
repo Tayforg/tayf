@@ -5,6 +5,7 @@ import {
   summaryAttributionWithoutMembers,
   describeForMeta,
   resolveSummaryAttribution,
+  summaryLabel,
 } from "./summary-attribution";
 import type { ClusterDetailMember } from "./cluster-detail-query";
 import {
@@ -2864,5 +2865,186 @@ describe("h48-ingest-1: 'Ayrıntılar geliyor...' placeholders hide the summary 
     const summary = "Bakan Yılmaz yeni vergi düzenlemesini açıkladı. Ayrıntılar geliyor...";
     const shown = summaryAttribution({ summary, members: [member("milliyet", T0, summary)], wire });
     expect(shown?.text).toBe("Bakan Yılmaz yeni vergi düzenlemesini açıkladı.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h54-editorial-3: an opinion column's thesis is not the story's summary. The
+// summary of 539e6666 was the Hürriyet column's lead ("TÜRK siyasi tarihinde
+// utanmazlıkta yarışacak iki örnek vardır; ...") under "Özet — Hürriyet", with no
+// cue that it is a column. A member whose URL is an opinion path (isOpinionUrl)
+// is, as the SEED, malformed (the gain over it is waived) and, as a CANDIDATE,
+// never a replacement. When the shown summary's member is opinion the label says
+// so (summaryLabel); only the cluster page passes a title, so only it can swap.
+// ---------------------------------------------------------------------------
+describe("h54-editorial-3: opinion members and the summary", () => {
+  const notWire = { isWireRedistribution: false };
+  const TITLE = "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri tartışma yarattı";
+  // The column's lead covers the whole title: the old rule keeps it.
+  const COLUMN_TEXT =
+    "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri tartışma yarattı; bu yazıda sözlerin ardındaki siyaseti ve yarattığı tartışmayı ele alıyorum.";
+  const NEWS_TEXT =
+    "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri üzerine CHP'den açıklama geldi, sözler siyasette tartışma yarattı.";
+  const MIRROR_TEXT =
+    "Mustafa Sarıgül'ün Özgür Özel'e yönelik sözleri tartışma yarattı; yazar sözlerin sert tonuna dikkat çekiyor ve gerekçelerini sıralıyor.";
+  const HURRIYET_COLUMN_URL = "https://www.hurriyet.com.tr/yazarlar/nedim-sener/utanmazlik-abidesi-43365220";
+  const SABAH_COLUMN_URL = "https://www.sabah.com.tr/yazarlar/salih-tuna/2026/11/04/anladiysaniz-bana-da-anlatin";
+  const NEWS_URL = "https://www.yeniakit.com.tr/haber/sarigul-ozel-2031769.html";
+
+  function outlet(
+    name: string,
+    slug: string,
+    publishedAt: string,
+    description: string | null,
+    /** null: the member carries no url at all (a lighter projection, the RSS members). */
+    url: string | null,
+    extra: { kind?: Source["kind"]; allowed?: boolean } = {},
+  ): ClusterDetailMember {
+    const m = member(slug, publishedAt, description, `hash-${slug}`);
+    m.source = { ...src(slug), name, slug, kind: extra.kind ?? "outlet" };
+    if (extra.allowed !== undefined) m.source.excerpt_allowed = extra.allowed;
+    if (url === null) delete (m.article as { url?: string }).url;
+    else m.article.url = url;
+    return m;
+  }
+
+  const hurriyet = (url: string | null = HURRIYET_COLUMN_URL) =>
+    outlet("Hürriyet", "hurriyet", "2026-11-04T03:07:31.000Z", COLUMN_TEXT, url);
+  const yeniAkit = (url: string | null = NEWS_URL) =>
+    outlet("Yeni Akit", "yeni-akit", "2026-11-04T08:14:00.000Z", NEWS_TEXT, url);
+  const sabah = (url: string | null = SABAH_COLUMN_URL) =>
+    outlet("Sabah", "sabah", "2026-11-04T09:00:00.000Z", MIRROR_TEXT, url);
+
+  const withTitle = (members: ClusterDetailMember[], summary = COLUMN_TEXT, title = TITLE) =>
+    summaryAttribution({ summary, members, wire: notWire, agreeWithTitle: title });
+
+  it("the fixture is what the cases below assume: the column's lead covers the headline, so only its URL can replace it", () => {
+    expect(titleAgreement(TITLE, COLUMN_TEXT)).toBe(1);
+    expect(titleAgreement(TITLE, NEWS_TEXT)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+    expect(titleAgreement(TITLE, MIRROR_TEXT)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+    for (const text of [COLUMN_TEXT, NEWS_TEXT, MIRROR_TEXT]) {
+      expect(summaryDefect(text, tidySummaryText(text)), text).toBeNull();
+      expect(seedDisqualified(text, tidySummaryText(text)), text).toBeNull();
+    }
+  });
+
+  it("without URLs nothing is known about the members: the covering seed stays (the old rule, byte for byte)", () => {
+    const seed = hurriyet(null);
+    const out = withTitle([seed, yeniAkit(null)]);
+    expect(out).toStrictEqual({ text: COLUMN_TEXT, source: seed.source });
+  });
+
+  it("an opinion seed with a qualifying news member is replaced by it, and the news summary carries no column cue", () => {
+    const members = [hurriyet(), yeniAkit()];
+    const out = withTitle(members);
+    expect(out).toStrictEqual({ text: NEWS_TEXT, source: members[1]!.source });
+    expect(out).not.toHaveProperty("opinion");
+    expect(summaryLabel(out!)).toBe("Özet — Yeni Akit");
+  });
+
+  it("the pick does not depend on the member order", () => {
+    const members = [hurriyet(), yeniAkit()];
+    for (const order of [members, [...members].reverse()]) {
+      expect(withTitle(order)?.source?.slug).toBe("yeni-akit");
+    }
+  });
+
+  it("an opinion seed alone is kept, never blanked, and its label says it is a column", () => {
+    const seed = hurriyet();
+    const out = withTitle([seed]);
+    expect(out).toStrictEqual({ text: COLUMN_TEXT, source: seed.source, opinion: true });
+    expect(summaryLabel(out!)).toBe("Özet — Hürriyet · köşe yazısı");
+    expect(summaryLabel(out!)).toContain("köşe yazısı");
+  });
+
+  it("an opinion member never stands in for an opinion seed: a mirror column is no replacement", () => {
+    const seed = hurriyet();
+    const out = withTitle([seed, sabah()]);
+    expect(out?.source?.slug).toBe("hurriyet");
+    expect(out?.text).toBe(COLUMN_TEXT);
+    expect(summaryLabel(out!)).toContain("köşe yazısı");
+  });
+
+  it("the news member wins over a newer, equally covering mirror column", () => {
+    const out = withTitle([hurriyet(), sabah(), yeniAkit()]);
+    expect(out?.source?.slug).toBe("yeni-akit");
+    expect(out).not.toHaveProperty("opinion");
+  });
+
+  it("an opinion member is not a replacement for a NEWS seed that disagrees with the title either", () => {
+    const newsSeedText = "Ankara'da bugün hava güneşli geçecek ve sıcaklık mevsim normallerinde seyredecek.";
+    const seed = outlet("TRT Haber", "trt-haber", "2026-11-04T01:00:00.000Z", newsSeedText, "https://www.trthaber.com/haber/x-1.html");
+    expect(titleAgreement(TITLE, newsSeedText)!).toBeLessThan(AGREEMENT_LOW);
+    // The column covers the title completely and is the only member that does.
+    const out = withTitle([seed, hurriyet()], newsSeedText);
+    expect(out).toStrictEqual({ text: newsSeedText, source: seed.source });
+    // Without the opinion URL the same column WOULD have replaced it (the rule is the URL, nothing else).
+    expect(withTitle([seed, hurriyet(null)], newsSeedText)?.source?.slug).toBe("hurriyet");
+  });
+
+  it("the other gates still stand for the replacement of an opinion seed (rights, aggregator, wire)", () => {
+    const seed = hurriyet();
+    const stays = { text: COLUMN_TEXT, source: seed.source, opinion: true };
+    expect(withTitle([seed, outlet("Yeni Akit", "yeni-akit", "2026-11-04T08:14:00.000Z", NEWS_TEXT, NEWS_URL, { allowed: false })])).toStrictEqual(stays);
+    expect(withTitle([seed, outlet("Haberler", "haberler", "2026-11-04T08:14:00.000Z", NEWS_TEXT, NEWS_URL, { kind: "aggregator" })])).toStrictEqual(stays);
+    expect(withTitle([seed, outlet("AA", "aa", "2026-11-04T08:14:00.000Z", NEWS_TEXT, NEWS_URL, { kind: "wire" })])).toStrictEqual(stays);
+  });
+
+  it("a news member that covers too little of the headline does not replace the opinion seed (AGREEMENT_HIGH still applies)", () => {
+    const weak = outlet("Zayıf", "zayif", "2026-11-04T08:14:00.000Z", "CHP'den yeni bir açıklama geldi, ayrıntılar henüz netleşmedi ve konu gündemde.", NEWS_URL);
+    expect(titleAgreement(TITLE, weak.article.description ?? "")!).toBeLessThan(AGREEMENT_HIGH);
+    const seed = hurriyet();
+    expect(withTitle([seed, weak])).toStrictEqual({ text: COLUMN_TEXT, source: seed.source, opinion: true });
+  });
+
+  it("a headline with too few content words carries no signal: the opinion seed stays, labelled", () => {
+    const seed = hurriyet();
+    const out = withTitle([seed, yeniAkit()], COLUMN_TEXT, "Sarıgül konuştu");
+    expect(out).toStrictEqual({ text: COLUMN_TEXT, source: seed.source, opinion: true });
+  });
+
+  it("the surfaces that pass no title keep the opinion seed and never swap (rss.xml, the digest, the cards)", () => {
+    const members = [hurriyet(), yeniAkit()];
+    const out = summaryAttribution({ summary: COLUMN_TEXT, members, wire: notWire });
+    expect(out?.source?.slug).toBe("hurriyet");
+    expect(out?.text).toBe(COLUMN_TEXT);
+    expect(resolveSummaryAttribution({ summary: COLUMN_TEXT, members, lookupFailed: false, wire: notWire })?.source?.slug).toBe("hurriyet");
+  });
+
+  it("only the shown summary's own member decides the label: an opinion member elsewhere in the roster adds no cue", () => {
+    const seed = yeniAkit();
+    const out = withTitle([seed, hurriyet()], NEWS_TEXT);
+    expect(out).toStrictEqual({ text: NEWS_TEXT, source: seed.source });
+    expect(summaryLabel(out!)).toBe("Özet — Yeni Akit");
+  });
+
+  it("a summary no member holds ('Kaynak açıklaması') names no outlet and carries no column cue", () => {
+    const out = withTitle([hurriyet(), yeniAkit()], "Hiçbir üyenin açıklaması olmayan, saklanmış bir özet metni.");
+    expect(out).toStrictEqual({ text: "Hiçbir üyenin açıklaması olmayan, saklanmış bir özet metni.", source: null });
+    expect(summaryLabel(out!)).toBe("Özet — Kaynak açıklaması");
+  });
+
+  it("summaryLabel: the plain label, the column label and the unattributed label, exactly", () => {
+    const m = yeniAkit();
+    expect(summaryLabel({ text: "x", source: m.source })).toBe("Özet — Yeni Akit");
+    expect(summaryLabel({ text: "x", source: m.source, opinion: true })).toBe("Özet — Yeni Akit · köşe yazısı");
+    expect(summaryLabel({ text: "x", source: null })).toBe("Özet — Kaynak açıklaması");
+  });
+
+  it("does not mutate its inputs, and a 1,000-member roster is still one linear pass", () => {
+    const members = [hurriyet(), sabah(), yeniAkit()];
+    const before = JSON.stringify(members);
+    withTitle(members);
+    expect(JSON.stringify(members)).toBe(before);
+
+    for (let i = 0; i < 1000; i++) {
+      members.push(
+        outlet(`Kaynak ${i}`, `kaynak-${i}`, `2026-11-04T05:${String(i % 60).padStart(2, "0")}:00.000Z`, `Başka bir olay ${i} hakkında ayrıntılı bilgi veren ve konuyla ilgisi olmayan uzun bir açıklama metni.`, `https://example.com/haber/${i}`),
+      );
+    }
+    const start = Date.now();
+    const out = withTitle(members);
+    expect(Date.now() - start).toBeLessThan(2000);
+    expect(out?.source?.slug).toBe("yeni-akit");
   });
 });

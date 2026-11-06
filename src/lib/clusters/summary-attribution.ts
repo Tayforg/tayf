@@ -1,4 +1,5 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
+import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { backOffOpenQuote, tidySummaryText, trimDanglingEnd } from "@/lib/articles/summary-tidy";
 import { findAgreeingMember } from "./summary-agreement";
 import type { WireSignal } from "./wire";
@@ -43,6 +44,15 @@ import type { BiasCategory, SourceKind } from "@/types";
 // digest and the home/list cards, which have no member rows or no title to
 // compare, keep the seed. Without `agreeWithTitle` the result is byte-identical
 // to what it was before.
+//
+// Opinion columns (h54-editorial-3): a member whose article `url` is an opinion path
+// (`isOpinionUrl`: /yazarlar/..., /kose-yazilari/..., /opinion/...) is an outlet's
+// columnist, not its news desk. As the seed it counts as malformed and as a
+// candidate it never replaces anything (summary-agreement.ts). When the member the
+// summary is attributed to is such a column, the attribution carries `opinion: true`
+// and the cluster page labels it with `summaryLabel` ("Özet — Hürriyet · köşe
+// yazısı"). The flag is present only when true, so every other result is unchanged.
+// A member without a `url` (the RSS members) is never an opinion member.
 
 // Structural subset of ClusterDetailMember (cluster-detail-query.ts): the
 // cluster page's members satisfy this shape as-is, and lighter callers
@@ -73,6 +83,12 @@ export interface SummaryMember {
     published_at: string;
     content_hash: string | null;
     description?: string | null;
+    /**
+     * The article's URL, read only to tell an opinion column from news
+     * (`isOpinionUrl`, h54-editorial-3). Absent on lighter projections: a missing
+     * url is a news article.
+     */
+    url?: string | null;
   };
 }
 
@@ -131,6 +147,33 @@ function contentHashCounts(members: SummaryMember[]): Map<string, number> {
 export interface SummaryAttribution {
   text: string;
   source: SummaryMember["source"] | null;
+  /**
+   * Present, and true, only when the member the text is attributed to is an
+   * opinion column (its article URL is an opinion path, h54-editorial-3). Absent
+   * otherwise, never `false`. Read by {@link summaryLabel}.
+   */
+  opinion?: true;
+}
+
+/** The cue that follows an outlet's name when the summary is its columnist's, not its news desk's. */
+const OPINION_CUE = "köşe yazısı";
+
+/**
+ * The cluster page's summary heading: "Özet — <Outlet>", "Özet — <Outlet> · köşe
+ * yazısı" when the summary is an opinion column's, or "Özet — Kaynak açıklaması"
+ * when no member holds the text. Pure.
+ */
+export function summaryLabel(attribution: SummaryAttribution): string {
+  if (!attribution.source) return "Özet — Kaynak açıklaması";
+  const label = `Özet — ${attribution.source.name}`;
+  return attribution.opinion === true ? `${label} · ${OPINION_CUE}` : label;
+}
+
+/** The attribution of `text` to `member`, flagged when that member is an opinion column. */
+function attributedTo(text: string, member: SummaryMember | null): SummaryAttribution {
+  const out: SummaryAttribution = { text, source: member ? member.source : null };
+  if (member && isOpinionUrl(member.article.url)) out.opinion = true;
+  return out;
 }
 
 /**
@@ -208,9 +251,9 @@ export function summaryAttribution({
       title: agreeWithTitle,
       wireMajorityHashes: majorityHashes,
     });
-    if (better) return { text: better.text, source: better.member.source };
+    if (better) return attributedTo(better.text, better.member);
   }
-  return { text: shown, source: seedMember ? seedMember.source : null };
+  return attributedTo(shown, seedMember);
 }
 
 const ELLIPSIS = "…";

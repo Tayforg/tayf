@@ -311,6 +311,40 @@ export function countNew(
   return n;
 }
 
+/**
+ * How many of `items` (newest-first as the API returns them) a follow's list
+ * must render so that every story countNew() calls "yeni" is on screen:
+ * min(items.length, max(base, index of the last new item + 1)).
+ *
+ * The API returns up to FOLLOW_ITEMS_MAX items but a section shows `base` rows
+ * by default, and a topic read is ordered by updated_at (not first_published),
+ * so a new story can sit below row `base`. Without this, the badge counted
+ * stories the reader could not see and the visit's markSeen then consumed them.
+ * "New" is exactly countNew's rule (Date.parse(firstPublished) > Date.parse(seenAt),
+ * an unparseable timestamp is never new), and with no usable baseline nothing is
+ * new, so the list stays at `base`.
+ */
+export function followRowsToShow(
+  items: ReadonlyArray<{ firstPublished: string }>,
+  seenAt: string | null,
+  base: number,
+): number {
+  let rows = base;
+  if (seenAt !== null) {
+    const seenMs = Date.parse(seenAt);
+    if (Number.isFinite(seenMs)) {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const ms = Date.parse((items[i] as { firstPublished: string }).firstPublished);
+        if (Number.isFinite(ms) && ms > seenMs) {
+          rows = Math.max(base, i + 1);
+          break;
+        }
+      }
+    }
+  }
+  return Math.min(items.length, rows);
+}
+
 export function followHref(f: Pick<Follow, "kind" | "value">): string {
   if (f.kind === "q") return `/?q=${encodeURIComponent(f.value)}`;
   if (f.kind === "gundem") return `/gundem/${encodeURIComponent(f.value)}`;

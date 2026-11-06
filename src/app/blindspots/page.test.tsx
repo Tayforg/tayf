@@ -220,14 +220,73 @@ describe("/blindspots page", () => {
     expect(text).toContain("96");
   });
 
-  it("hunt-27: the DenominatorNote is the FIRST child of the feed, in its own null-fallback Suspense", async () => {
+  it("hunt-27: the DenominatorNote is the FIRST child of the feed, in its own Suspense whose fallback is the numberless DenominatorNote (h55-browser-1)", async () => {
     const tree = (await BlindspotsFeed()) as Elementish;
 
     const boundary = findSuspenseAround(tree, "BlindspotsDenominator");
     expect(boundary).toBeDefined();
-    expect(boundary?.props?.fallback).toBeNull();
+    // h55-browser-1: the fallback is no longer null. It is the fail-open
+    // DenominatorNote, so the line box exists from the feed's first paint.
+    const fallback = boundary?.props?.fallback as Elementish | null | undefined;
+    expect(fallback).not.toBeNull();
+    expect(fallback?.type).toBe(DenominatorNote);
+    expect(fallback?.props).toEqual({ delivering: null, total: null });
     const children = tree.props?.children as unknown[];
     expect(children[0]).toBe(boundary);
+  });
+
+  describe("h55-browser-1: the slot reserves its line before the summary resolves", () => {
+    const NUMBERLESS =
+      "Paylar, yanlılık dağılımına sayılan ve son 72 saatte en az bir haber veren kaynaklar üzerinden hesaplanır.";
+
+    async function fallbackOf(): Promise<Elementish> {
+      const tree = await BlindspotsFeed();
+      const fallback = findSuspenseAround(tree, "BlindspotsDenominator")?.props
+        ?.fallback as Elementish | null | undefined;
+      if (!fallback) throw new Error("the denominator Suspense has no fallback");
+      return fallback;
+    }
+
+    it("the fallback's text is the text of DenominatorNote({ delivering: null, total: null }) -- the numberless wording", async () => {
+      const fallbackText = collectText(await fallbackOf()).join(" ");
+      const expected = collectText(
+        DenominatorNote({ delivering: null, total: null }),
+      ).join(" ");
+
+      expect(fallbackText).toBe(expected);
+      expect(fallbackText).toContain(NUMBERLESS);
+      // No figure is shown before the summary is known (no fabricated N/M).
+      expect(fallbackText).not.toContain("59");
+      expect(fallbackText).not.toContain("96");
+    });
+
+    it("the fallback keeps the link to /kaynaklar/durum", async () => {
+      expect(collectHrefs(await fallbackOf())).toContain("/kaynaklar/durum");
+    });
+
+    it("the fallback never calls the feed-status read (it is static, so it paints with the feed)", async () => {
+      await fallbackOf();
+
+      expect(getFeedStatusSummary).not.toHaveBeenCalled();
+    });
+
+    it("fallback and resolved note share one root <p> with one class: the late summary swaps words in place, it adds no line", async () => {
+      const feed = await BlindspotsFeed();
+      const resolved = (await renderSlot(feed, "BlindspotsDenominator")) as Elementish;
+      const resolvedRoot = DenominatorNote(
+        resolved.props as unknown as Parameters<typeof DenominatorNote>[0],
+      ) as unknown as Elementish;
+      const fallbackRoot = DenominatorNote(
+        (await fallbackOf()).props as unknown as Parameters<typeof DenominatorNote>[0],
+      ) as unknown as Elementish;
+
+      expect(fallbackRoot.type).toBe("p");
+      expect(resolvedRoot.type).toBe("p");
+      expect(fallbackRoot.props?.className).toBe(resolvedRoot.props?.className);
+      // The resolved note differs only by its figures.
+      expect(collectText(resolved).join(" ")).toContain("59");
+      expect(collectText(resolved).join(" ")).toContain("96");
+    });
   });
 
   it("hunt-27: BlindspotsFeed neither calls nor awaits getFeedStatusSummary (an optional widget cannot hold the feed)", async () => {
@@ -296,9 +355,13 @@ describe("/blindspots page source — the feed-status read stays out of Blindspo
     expect(slot).toContain("<DenominatorNote");
   });
 
-  it("the slot is rendered inside <Suspense fallback={null}>", () => {
+  it("the slot is rendered inside <Suspense fallback={<DenominatorNote delivering={null} total={null} />}> (h55-browser-1)", () => {
     expect(code).toMatch(
-      /<Suspense fallback=\{null\}>\s*<BlindspotsDenominator \/>\s*<\/Suspense>/,
+      /<Suspense\s+fallback=\{\s*<DenominatorNote\s+delivering=\{null\}\s+total=\{null\}\s*\/>\s*\}\s*>\s*<BlindspotsDenominator\s*\/>\s*<\/Suspense>/,
+    );
+    // The old null-fallback shape around the slot is gone.
+    expect(code).not.toMatch(
+      /<Suspense\s+fallback=\{null\}\s*>\s*<BlindspotsDenominator\b/,
     );
   });
 });

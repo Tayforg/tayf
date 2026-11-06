@@ -183,6 +183,17 @@
 // an idiom with a typo that no lexicon entry catches) and 84 rows of the set were still on a model older than
 // v6. See neutral-title-replay.test.ts and __fixtures__/h42-*.json.
 
+// h54-editorial-3 (still extractive-v6, NO model bump): an opinion column is not a candidate. 539e6666 was
+// titled with a Hürriyet columnist's insult ("Utanmazlık abidesi Sarıgül, Özgür Özel’i tehdit mi etti", a
+// /yazarlar/nedim-sener/ column) next to a Yeni Akit news rewrite of it. A MemberTitle whose article URL is
+// an opinion path (`opinion`, set by the caller from isOpinionUrl: the headline cron does) is dropped from
+// the pick, its centrality, its sibling evidence and the incumbent's "does a member carry it" test, as long
+// as at least one non-opinion member with a usable title exists (`withoutOpinion`). A cluster that is
+// columns and nothing else (4555a9bd) is picked as before. A stored title only a column carries is stale
+// (repickStale), so a re-pick for any other reason replaces it; there is no backfill and no model bump, so a
+// stored title is not re-offered because of this change alone. Readers that compute the first pick before
+// the cron has written one (display-headline.ts) hold no article URLs and still pick over every title.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
@@ -199,6 +210,13 @@ export function isExtractiveModelId(model: unknown): boolean {
 export interface MemberTitle {
   title: string;
   source?: string | null;
+  /**
+   * The article is an opinion column (its URL path is an opinion path, isOpinionUrl in
+   * src/lib/articles/opinion-url.ts). Such a member is not a candidate while a non-opinion
+   * member with a usable title exists (`withoutOpinion`); a cluster of columns only is picked
+   * as if none were flagged. Absent or false: a news article.
+   */
+  opinion?: boolean;
 }
 
 const DIACRITICS: Record<string, string> = {
@@ -2314,6 +2332,24 @@ export function incumbentIsMemberTitle(inc: string, memberTitles: readonly strin
   return false;
 }
 
+/** A trimmed title the pick can work with: not blank and not a placeholder ("Kısa haberler", a live-blog lead-in). */
+function isUsableTitle(trimmed: string): boolean {
+  return trimmed.length > 0 && !isGenericTitle(trimmed);
+}
+
+/**
+ * The members the pick chooses among (h54-editorial-3): the opinion columns (`opinion: true`) are dropped
+ * when at least one non-opinion member has a usable title, and kept when none has (a cluster of columns
+ * only, or news members that are all blank or placeholders, is picked as before). Judged BEFORE usableItems
+ * folds twins together, so a column and a news article that share a headline cannot make the news one
+ * disappear. Returns the same array when nothing is flagged, a new one otherwise; never mutates.
+ */
+function withoutOpinion(members: MemberTitle[]): MemberTitle[] {
+  if (!members.some((m) => m.opinion === true)) return members;
+  const hasNews = members.some((m) => m.opinion !== true && isUsableTitle((m.title ?? "").trim()));
+  return hasNews ? members.filter((m) => m.opinion !== true) : members;
+}
+
 /**
  * The member titles the pick works from: blank titles and placeholders ("Kısa haberler", a
  * live-blog lead-in) out, and a title that folds to the same text as an earlier one counted once.
@@ -2322,7 +2358,7 @@ function usableItems(members: MemberTitle[]): MemberTitle[] {
   const seen = new Set<string>();
   return members
     .map((m) => ({ ...m, title: (m.title ?? "").trim() }))
-    .filter((m) => m.title.length > 0 && !isGenericTitle(m.title))
+    .filter((m) => isUsableTitle(m.title))
     .filter((m) => {
       const key = fold(m.title);
       if (seen.has(key)) return false;
@@ -2389,10 +2425,15 @@ function repickStale(members: MemberTitle[], opts: PickOptions, incumbent: strin
  * text count once, the first occurrence standing. A stored title that no member carries any more (the
  * outlet edited it away: incumbentIsMemberTitle, h42-titles-1) is not protected: the pick is a member's own
  * wording (repickStale), and the stored title only stays when no member passes the gate.
+ * Members flagged `opinion` (an opinion column by URL) are dropped first when a non-opinion member with a
+ * usable title exists (`withoutOpinion`, h54-editorial-3): they are neither candidates nor evidence, and a
+ * stored title that only a column carries counts as carried by no member (stale).
  * Whatever the result (a first pick, a floor pick, the stored title a re-pick keeps), a glued word join
  * in it gives way to a member title that is the same text without the join (preferUnglued, h35).
  */
-export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {}): string | null {
+export function pickNeutralTitle(allMembers: MemberTitle[], opts: PickOptions = {}): string | null {
+  // h54-editorial-3: an opinion column is not a candidate, nor does it carry the stored title.
+  const members = withoutOpinion(allMembers);
   const inc = opts.incumbent?.trim() ?? "";
   const stale = inc !== "" && !incumbentIsMemberTitle(inc, members.map((m) => m.title ?? ""));
   const picked = stale ? repickStale(members, opts, opts.incumbent as string) : pickNeutralTitleCore(members, opts);
@@ -2408,7 +2449,7 @@ interface CoreOptions extends PickOptions {
 
 // The pick itself (extractive-v1 to v6); pickNeutralTitle adds the glued-twin tiebreak on top.
 function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string | null {
-  const items = usableItems(members);
+  const items = usableItems(withoutOpinion(members));
   if (items.length === 0) return null;
 
   const toks = items.map((m) => tokens(m.title));

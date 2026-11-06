@@ -6,12 +6,14 @@ import {
   appendDiet,
   dietEntryFromTrack,
   summarizeDiet,
+  nudgeZones,
   DIET_TTL_DAYS,
   DIET_MAX_ENTRIES,
   DIET_DEDUPE_MS,
   DIET_MIN_SAMPLE,
   DIET_ZONES,
   type DietEntry,
+  type DietZone,
 } from "./diet";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -233,6 +235,88 @@ describe("summarizeDiet", () => {
     expect(summarizeDiet(nine, NOW).sampleOk).toBe(false);
     expect(summarizeDiet(ten, NOW).sampleOk).toBe(true);
     expect(DIET_MIN_SAMPLE).toBe(10);
+  });
+});
+
+// h55-personal-2: the /diyetim "En az okuduğunuz taraf" nudge used to point at
+// `leastRead` even below the page's own 10-click floor, and `leastRead` breaks a
+// full tie by spectrum order (Muhalefet never won). `nudgeZones` is the
+// nudge's own selector: nothing below the floor, every still-tied zone
+// instead of the first, nothing when no side is behind.
+describe("nudgeZones", () => {
+  function clicks(zone: DietZone, n: number, t = NOW): DietEntry[] {
+    return Array.from({ length: n }, (_, i) => ({ t: t - i, z: zone }));
+  }
+  const nudgeFor = (entries: DietEntry[]) => nudgeZones(summarizeDiet(entries, NOW));
+
+  it("is empty with 0 clicks", () => {
+    expect(nudgeFor([])).toEqual([]);
+  });
+
+  it("is empty below the 10-click floor (9 clicks, all iktidar)", () => {
+    expect(nudgeFor(clicks("iktidar", 9))).toEqual([]);
+  });
+
+  it("is empty for a single click, whichever side it was on", () => {
+    for (const zone of DIET_ZONES) expect(nudgeFor(clicks(zone, 1)), zone).toEqual([]);
+  });
+
+  it("names both unread sides at the floor (10 clicks, all iktidar, no history)", () => {
+    expect(nudgeFor(clicks("iktidar", 10))).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("is not biased towards the spectrum-first side: 10 muhalefet clicks name iktidar and bagimsiz", () => {
+    expect(nudgeFor(clicks("muhalefet", 10))).toEqual(["iktidar", "bagimsiz"]);
+  });
+
+  it("names the single zone with the strict weekly minimum (6/4/0)", () => {
+    const entries = [...clicks("iktidar", 6), ...clicks("bagimsiz", 4)];
+    expect(nudgeFor(entries)).toEqual(["muhalefet"]);
+  });
+
+  it("is empty when all three sides are tied (4/4/4)", () => {
+    const entries = [...clicks("iktidar", 4), ...clicks("bagimsiz", 4), ...clicks("muhalefet", 4)];
+    expect(nudgeFor(entries)).toEqual([]);
+  });
+
+  it("breaks a weekly tie between two sides by the lower 30-day count", () => {
+    // 10 this week on iktidar; bagimsiz also has 2 older clicks (30d = 2), muhalefet none.
+    const entries = [
+      ...clicks("iktidar", 10),
+      { t: NOW - 10 * DAY_MS, z: "bagimsiz" as const },
+      { t: NOW - 11 * DAY_MS, z: "bagimsiz" as const },
+    ];
+    expect(nudgeFor(entries)).toEqual(["muhalefet"]);
+  });
+
+  it("keeps both sides when the weekly and the 30-day counts tie", () => {
+    const entries = [
+      ...clicks("iktidar", 10),
+      { t: NOW - 10 * DAY_MS, z: "bagimsiz" as const },
+      { t: NOW - 11 * DAY_MS, z: "muhalefet" as const },
+    ];
+    expect(nudgeFor(entries)).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("returns the two lowest 30-day sides when the weekly counts are all tied but 30-day counts differ", () => {
+    const entries = [
+      ...clicks("iktidar", 4),
+      ...clicks("bagimsiz", 4),
+      ...clicks("muhalefet", 4),
+      { t: NOW - 10 * DAY_MS, z: "bagimsiz" as const },
+    ];
+    expect(nudgeFor(entries)).toEqual(["iktidar", "muhalefet"]);
+  });
+
+  it("ignores clicks older than the week when checking the floor", () => {
+    const entries = [...clicks("iktidar", 9), ...clicks("iktidar", 5, NOW - 9 * DAY_MS)];
+    expect(nudgeFor(entries)).toEqual([]);
+  });
+
+  it("does not change summarizeDiet's leastRead contract (spectrum-order tie-break stays)", () => {
+    const summary = summarizeDiet(clicks("iktidar", 10), NOW);
+    expect(summary.leastRead).toBe("bagimsiz");
+    expect(nudgeZones(summary)).toEqual(["bagimsiz", "muhalefet"]);
   });
 });
 

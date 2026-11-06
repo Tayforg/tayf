@@ -137,7 +137,14 @@ export async function BlindspotsFeed() {
 
   return (
     <>
-      <Suspense fallback={null}>
+      {/* perf-4 (h55-browser-1): this slot sits ABOVE the count line, so a null
+          fallback let the summary resolve after the feed had streamed and
+          insert a 48-68 px line that pushed the whole feed down. The fallback
+          is the fail-open, numberless DenominatorNote instead: its line box
+          exists from the feed's first paint, and the late summary only swaps
+          "kaynaklar" for "N/M kaynak" in place. The note stays first, and the
+          feed still never awaits the summary (hunt-27). */}
+      <Suspense fallback={<DenominatorNote delivering={null} total={null} />}>
         <BlindspotsDenominator />
       </Suspense>
 
@@ -233,10 +240,12 @@ export async function BlindspotsFeed() {
 // bundle can span either pole), so this reads the cheap
 // `getFeedStatusSummary()` existence probe from src/lib/sources/feed-status.ts
 // rather than A1's `getZoneFeedHealth()`/`zoneYieldDenominator`. Rendered by
-// BlindspotsFeed in its own `<Suspense fallback={null}>` at the position the
-// note always had; `getFeedStatusSummary()` never throws (null degrades the
-// note to wording without numbers). Module-private on purpose: tests locate
-// it by name (page.test.tsx).
+// BlindspotsFeed in its own <Suspense> at the position the note always had.
+// The boundary's fallback is the same note without numbers, so the slot
+// reserves its line from the first paint and this component only swaps in the
+// figures (h55-browser-1). `getFeedStatusSummary()` never throws (null
+// degrades the note to that same wording). Module-private on purpose: tests
+// locate it by name (page.test.tsx).
 async function BlindspotsDenominator() {
   await connection();
   const feedSummary = await getFeedStatusSummary();
