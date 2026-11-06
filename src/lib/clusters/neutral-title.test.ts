@@ -2821,9 +2821,15 @@ describe("hunt 31 (h31-reader-2)", () => {
       ).toBe("Gazze'de gönüllü doktorluk yapan Adam Hamawy, New Jersey'den Temsilciler Meclisi'ne seçildi");
     });
 
-    it("the stored title is the only loaded member of either cluster (a speaker label or a ':' ends the teaser scan)", () => {
+    it("the stored title is the only loaded member of either cluster (a speaker label or a ':' ends the teaser scan), but for one member h54-editorial-4 charges", () => {
       const loaded = (cid: string) => h31(cid).titles.filter((t) => loadedPenalty(t) > 0);
-      expect(loaded("2ee853c9")).toEqual([h31("2ee853c9").stored]);
+      // h54-editorial-4 ('<noun> kabusu', one unit): a second member of 2ee853c9 now counts as loaded, a threat reported
+      // in the outlet's own words ("... ihanet edilirse kabusu yaşarsınız!"). It was free under the h31 lexicon. The
+      // picks of this describe do not move: that member was never the pick, and the fixed-point tests above still hold.
+      const KABUSU_MEMBER = "İran'dan ABD seçim sonuçlarıyla ilgili sert mesaj: Halkın iradesine ihanet edilirse kabusu yaşarsınız!";
+      expect(h31("2ee853c9").titles).toContain(KABUSU_MEMBER);
+      expect(loaded("2ee853c9").filter((t) => t !== h31("2ee853c9").stored)).toEqual([KABUSU_MEMBER]);
+      expect(loaded("2ee853c9")).toContain(h31("2ee853c9").stored);
       expect(loaded("d89374ba")).toEqual([h31("d89374ba").stored]);
     });
   });
@@ -5285,4 +5291,347 @@ describe("lexicon additions (h42 review, editorial-4): the wording the swap targ
       expect(framingPenalty(picked!), `${cid}: ${picked}`).toBeLessThanOrEqual(framingPenalty(c.stored));
     },
   );
+});
+
+// ---- h54-editorial-2: a stored title that fails the length or '?' gate is re-picked once a clean member exists ----
+//
+// Migration 169 offers a stamped cluster again when it has grown since the stamp and the stored title fails the
+// gate (more than ACCEPT_MAX_LEN characters, fewer than ACCEPT_MIN_LEN, or a '?'). The cron re-picks it with
+// { incumbent }, so these pins say what that pick returns for the three live clusters (2026-11-06, extractive-v6,
+// stamped at 2 members and grown to 3 or 4): the stored title is a member's own text, it fails the gate, and the
+// pick is a member that passes. The titles are the real members; the sources are the real slugs.
+
+describe("h54-editorial-2: a gate-failing incumbent gives way to the member that passes", () => {
+  const D096_HABERLER =
+    "Cumhurbaşkanı Erdoğan: \"Azerbaycan'la ilişkilerimiz, klasik diplomatik temasların çok ötesindedir. İki ülkenin kopmaz bağı ortak tarihimizin, kültürümüzün, kaderimizin ve inşallah geleceğimizin ürünüdür\"";
+  const D096_AA = "Cumhurbaşkanı Erdoğan: Azerbaycan'la ilişkilerimiz klasik diplomatik temasların çok ötesindedir";
+  const D096 = [
+    { source: "haberler-com", title: D096_HABERLER },
+    { source: "turkiye-gazetesi", title: '"İKİ ÜLKENİN BAĞI KOPMAZ"' },
+    { source: "anadolu-ajansi", title: D096_AA },
+  ];
+
+  const E442_HURRIYET =
+    "Emir Sarıgül’den Özgür Özel’i yalanlayan etkin pişmanlık ifadesi: 100 bin dolar rüşvet verilen kutu içindeki atkıları ağustosta değil ekimde kendi kredi kartımla aldım";
+  const E442_AHABER = "Emir Sarıgül'ün üçüncü ifadesi ortaya çıktı: Özel'e verilen para ve lüks hediyelerin belgelerini sunacağım";
+  const E442 = [
+    { source: "elips-haber", title: "Emir Sarıgül'den 350 bin dolar iddiasını reddeden Özgür Özel'e cevap!" },
+    { source: "a-haber", title: E442_AHABER },
+    {
+      source: "takvim",
+      title: "Emir Sarıgül 3'üncü kez ifade verdi! Özgür Özel'e atkı tepkisi Yeni Parti iddiası: Bağış yapmam için baskı yaptılar",
+    },
+    { source: "hurriyet", title: E442_HURRIYET },
+  ];
+
+  const E075_YENI_SAFAK =
+    "Cumhurbaşkanı Erdoğan'dan basın özgürlüğü kuruluşlarına sert tepki: Türkiye'de aslan kesilenler İsrail karşısında kağıttan kaplan";
+  const E075_PICK = "Erdoğan'dan basın özgürlüğü kuruluşlarına tepki";
+  const E075 = [
+    { source: "en-politik", title: E075_PICK },
+    { source: "yeni-safak", title: E075_YENI_SAFAK },
+    {
+      source: "haberler-com",
+      title:
+        "Cumhurbaşkanı Erdoğan: \"Türkiye söz konusu olduğun aslan kesilenler, mesele soykırım şebekesi olunca bakıyorsunuz hemen kağıttan kaplana dönüşüyor.\"",
+    },
+  ];
+
+  it.each([
+    ["d096acf8", D096, D096_HABERLER, D096_AA, 203],
+    ["442e0395", E442, E442_HURRIYET, E442_AHABER, 167],
+    ["e0750c57", E075, E075_YENI_SAFAK, E075_PICK, 129],
+  ] as const)("%s: the stored title (%i characters) fails the gate, and the re-pick returns the member that passes", (_cid, members, stored, expected, len) => {
+    expect(stored.length).toBe(len);
+    expect(stored.length).toBeGreaterThan(110);
+    expect(isAcceptableNeutral(stored, [])).toBe(false);
+    expect(isAcceptableNeutral(expected, [])).toBe(true);
+    // The stored title is a member's own text, so incumbentIsMemberTitle does not unprotect it: the gate does.
+    expect(incumbentIsMemberTitle(stored, members.map((m) => m.title))).toBe(true);
+    expect(pickNeutralTitle([...members], { incumbent: stored })).toBe(expected);
+    // A fresh pick agrees: one re-offer is enough to heal the cluster.
+    expect(pickNeutralTitle([...members])).toBe(expected);
+  });
+
+  it("the member order does not change the answer", () => {
+    for (const [members, stored, expected] of [
+      [D096, D096_HABERLER, D096_AA],
+      [E442, E442_HURRIYET, E442_AHABER],
+      [E075, E075_YENI_SAFAK, E075_PICK],
+    ] as const) {
+      expect(pickNeutralTitle([...members].reverse(), { incumbent: stored })).toBe(expected);
+    }
+  });
+
+  it("control: a stored title that passes the gate is still kept (the gate-fail branch only offers, it does not force)", () => {
+    expect(pickNeutralTitle([...D096], { incumbent: D096_AA })).toBe(D096_AA);
+    expect(pickNeutralTitle([...E075], { incumbent: E075_PICK })).toBe(E075_PICK);
+  });
+});
+
+// ---- h54-editorial-4: partisan epithets are loaded wording ------------------------------------------------------
+//
+// The lexicon of h42-titles-2 (#204) missed four families that ship as the "neutral" headline and keep the h42
+// 'loaded' incumbent switch from firing (it needs loadedPenalty(inc) > 0): 'işgalci' and 'Siyonist' outside
+// quotation marks, an epithet in front of a name ('Katil Netanyahu', 'Soykırımcı İsrail'), and a figurative
+// '<noun> kabusu'. One unit each, like 'vurgun'. Live clusters, 2026-11-06 (extractive-v6): f771e177 (Akşam's
+// 'İşgalci İsrail'in koalisyon kabusu: ...'), 96915d56 (Star's 'Siyonist lobinin musluğu kesiliyor: ...'), 4e89e31d
+// ('Katil Netanyahu seçim yenilgisini hazmedemedi', both members), 7a26bbe9 and 130a9e04 ('Soykırımcı ...'), and two
+// that QUOTE an actor: b2d44624 (Eisenkot: 'Siyonist askerlik hükümeti') and 6d7faa51 (Netanyahu: ''Siyonist
+// çoğunluk ...''), which must stay free.
+
+describe("h54-editorial-4: loadedPenalty charges the missing epithets", () => {
+  it.each([
+    ["f771e177, Akşam", "İşgalci İsrail'in koalisyon kabusu: Hükümeti kurma görevi için tarih belli oldu"],
+    ["4e89e31d, Milat", "Katil Netanyahu seçim yenilgisini hazmedemedi"],
+    ["96915d56, Star", "Siyonist lobinin musluğu kesiliyor: ABD'nin ilk Müslüman senatörü Sayed'den Trump'a destek"],
+    ["7a26bbe9, Star", "Soykırımcı Netanyahu'dan seçim provokasyonu... \"Koltuğu için güvenlik krizi çıkaracak\""],
+    ["130a9e04, Milat", "Soykırımcı İsrail Gazze'de son 48 saatte 6 kişiyi daha katletti"],
+  ])("%s: loadedPenalty is at least 1", (_label, title) => {
+    expect(loadedPenalty(title), title).toBeGreaterThanOrEqual(1);
+  });
+
+  it("charges one unit per rule: (a) 'işgalci' / 'siyonist', (b) an epithet before a name, (c) 'X kabusu'", () => {
+    // (b) alone
+    expect(loadedPenalty("Katil Netanyahu seçim yenilgisini hazmedemedi")).toBe(1);
+    expect(loadedPenalty("Soykırımcı Netanyahu'dan seçim provokasyonu")).toBe(1);
+    // (a) alone
+    expect(loadedPenalty("Siyonist lobinin musluğu kesiliyor: ABD'nin ilk Müslüman senatörü Sayed'den Trump'a destek")).toBe(1);
+    expect(loadedPenalty("Rus işgalci güçler köyden çekildi")).toBe(1);
+    // (c) alone
+    expect(loadedPenalty("Enflasyon kabusu sürüyor: Mart ayı rakamları açıklandı")).toBe(1);
+    // 'işgalci' + the epithet before a name + 'kabusu'
+    expect(loadedPenalty("İşgalci İsrail'in koalisyon kabusu: Hükümeti kurma görevi için tarih belli oldu")).toBe(3);
+  });
+
+  it("(a) has a left edge only: the suffixed forms are charged", () => {
+    expect(loadedPenalty("Siyonistlerin Gazze planı ortaya çıktı")).toBe(1);
+    expect(loadedPenalty("İşgalcinin askerleri köyü terk etti")).toBe(1);
+    expect(loadedPenalty("Siyonistleşme tartışması büyüdü")).toBe(1);
+    // ...and a longer word that merely ends in the stem is not
+    expect(loadedPenalty("Antisiyonistlik suçlaması mahkemeye taşındı")).toBe(0);
+  });
+
+  it("(a) is case-blind in the Turkish way: shouted and dotless-I spellings count", () => {
+    expect(loadedPenalty("SİYONİST rejim Gazze'ye saldırdı")).toBe(1);
+    expect(loadedPenalty("İŞGALCİ ordu kenti bombaladı")).toBe(1);
+    expect(loadedPenalty("SOYKIRIMCI İSRAİL Gazze'de sivilleri vurdu")).toBe(1);
+    expect(loadedPenalty("KATİL NETANYAHU seçimi kaybetti")).toBe(1);
+  });
+
+  it("(b) charges Katil / Soykırımcı / İşgalci in front of a capitalised name, after a colon or an opening quote too", () => {
+    expect(loadedPenalty("Erdoğan'dan tepki: Katil Netanyahu kürsüde")).toBeGreaterThanOrEqual(1);
+    expect(loadedPenalty("Soykırımcı İsrail Gazze'de son 48 saatte 6 kişiyi daha katletti")).toBe(1);
+    expect(loadedPenalty("Tahran'dan açıklama: \"Katil Netanyahu\" sözleri")).toBeGreaterThanOrEqual(1);
+  });
+
+  it("(b) still charges a Title Case headline when the epithet stands before Israel or Netanyahu (the folded rule)", () => {
+    expect(loadedPenalty("Katil Netanyahu Seçim Yenilgisini Hazmedemedi")).toBe(1);
+    expect(loadedPenalty("Soykırımcı İsrail Gazze'de Son 48 Saatte 6 Kişiyi Daha Katletti")).toBe(1);
+    expect(loadedPenalty("KATİL NETANYAHU SEÇİMİ KAYBETTİ")).toBe(1);
+  });
+
+  it("(b) still charges the sentence-case spelling of a name behind the epithet (the raw rule)", () => {
+    expect(loadedPenalty("Soykırımcı Trump'tan yeni tehdit: Gazze'yi boşaltacağız")).toBe(1);
+    expect(loadedPenalty("Katil Esad rejiminin son günleri anlatıldı")).toBe(1);
+    // ...while the same words without a name behind the epithet stay free
+    expect(loadedPenalty("Eşini öldüren katil yakalandı")).toBe(0);
+  });
+
+  it("(c) charges 'kabusu' after a noun and not the other shapes", () => {
+    expect(loadedPenalty("Seçim kabusu sona erdi")).toBe(1);
+    expect(loadedPenalty("Trump'ın gümrük kabusu piyasaları vurdu")).toBe(1);
+    // a title that starts with the word has no noun in front of it
+    expect(loadedPenalty("Kabusu yaşayan genç anlattı")).toBe(0);
+    // 'kabus' without the possessive is not the figure
+    expect(loadedPenalty("Uykusunda kabus gören çocuk hastaneye kaldırıldı")).toBe(0);
+  });
+});
+
+describe("h54-editorial-4: loadedPenalty keeps the literal uses free", () => {
+  it.each([
+    "İsrail'de hükümet kurma görevinin verileceği tarih açıklandı",
+    "İsrail muhalefet lideri Eisenkot 'Siyonist askerlik hükümeti' kuracaklarını açıkladı",
+    "Eşini öldüren katil yakalandı",
+    "Katil zanlısı tutuklandı",
+    "Katil Zanlısı Tutuklandı",
+    // correctness-4: in Title Case every word is capitalised, so the capital after 'Katil' is the style, not a name.
+    "Eşini Öldüren Katil Yakalandı",
+    "Katil Koca Tutuklandı",
+    "Seri Katil Ted Bundy Belgeseli Yayında",
+    "Annesini Öldüren Katil Cezaevinde İntihar Etti",
+    "Katile ağırlaştırılmış müebbet hapis cezası verildi",
+    "Soykırım davası Lahey'de görülüyor",
+    "BM soykırım raporunu yayımladı",
+    "Batı Şeria'da işgal altındaki bölgelerde yeni yerleşim kararı",
+    "Netanyahu: Hamas'a karşı savaş sürecek",
+  ])("%s: loadedPenalty is 0", (title) => {
+    expect(loadedPenalty(title), title).toBe(0);
+  });
+
+  it("an actor's quoted words stay free in every quotation style, but only the quoted span", () => {
+    const quoted: [string, string][] = [
+      ["straight single (b2d44624)", "İsrail muhalefet lideri Eisenkot 'Siyonist askerlik hükümeti' kuracaklarını açıkladı"],
+      ["straight double (b2d44624, Evrensel)", "İsrail'de muhalefet lideri Eisenkot \"Siyonist askerlik hükümeti\" kuracaklarını belirtti"],
+      ["curly double", "İsrail'de muhalefet lideri Eisenkot “Siyonist askerlik hükümeti” kuracaklarını belirtti"],
+      ["curly single", "İsrail'de muhalefet lideri Eisenkot ‘Siyonist askerlik hükümeti’ kuracaklarını belirtti"],
+      ["guillemets", "İsrail'de muhalefet lideri Eisenkot «Siyonist askerlik hükümeti» kuracaklarını belirtti"],
+      ["doubled apostrophes (6d7faa51, BirGün)", "Netanyahu'dan ırkçı blok çağrısı: ''Siyonist çoğunluk aklını başına toplamalı''"],
+      ["the quote after a speaker colon", "Netanyahu'nun rakibi hedefini açıkladı: 'Siyonist askerlik hükümeti'"],
+      ["a quoted işgalci", "Hamas lideri \"işgalci güçler\" ifadesini kullandı"],
+    ];
+    for (const [label, title] of quoted) expect(loadedPenalty(title), label).toBe(0);
+  });
+
+  it("an unquoted occurrence next to a quoted one is still charged once", () => {
+    expect(loadedPenalty("Eisenkot \"Siyonist\" dedi, Siyonist rejim yanıt verdi")).toBe(1);
+    expect(loadedPenalty("Eisenkot 'Siyonist askerlik hükümeti' dedi, Siyonist rejim yanıt verdi")).toBe(1);
+  });
+
+  it("an apostrophe inside a word is not a quotation mark: the span between two of them is not hidden", () => {
+    // A naive pairing of the two apostrophes would strip "in Siyonist ordusu Gazze" and charge nothing.
+    expect(loadedPenalty("İsrail'in Siyonist ordusu Gazze'de ilerliyor")).toBe(1);
+    expect(loadedPenalty("İsrail’in Siyonist ordusu Gazze’de ilerliyor")).toBe(1);
+  });
+
+  it("a quote that never closes hides nothing", () => {
+    expect(loadedPenalty("Eisenkot \"Siyonist askerlik hükümeti kuracağız")).toBe(1);
+    expect(loadedPenalty("Eisenkot 'Siyonist askerlik hükümeti kuracağız")).toBe(1);
+    expect(loadedPenalty("Eisenkot “Siyonist askerlik hükümeti kuracağız")).toBe(1);
+  });
+});
+
+describe("h54-editorial-4: pickNeutralTitle over the live clusters", () => {
+  const f771 = [
+    { source: "aksam", title: "İşgalci İsrail'in koalisyon kabusu: Hükümeti kurma görevi için tarih belli oldu" },
+    { source: "cgtn-turk", title: "İsrail'de hükümet ne zaman kurulacak? Cumhurbaşkanı'ndan resmi açıklama!" },
+    { source: "milliyet", title: "İsrail'de hükümet kurma görevinin verileceği tarih açıklandı" },
+  ];
+  const F771_STORED = f771[0]!.title;
+  const F771_PICK = "İsrail'de hükümet kurma görevinin verileceği tarih açıklandı";
+
+  const d969 = [
+    { source: "anadolu-ajansi", title: "ABD'nin ilk Müslüman senatörü Sayed, Trump'ın İsrail'e yardımların kesilmesi çağrısını destekledi" },
+    { source: "star", title: "Siyonist lobinin musluğu kesiliyor: ABD'nin ilk Müslüman senatörü Sayed'den Trump'a destek" },
+    { source: "haberler-com", title: "ABD Senatosuna seçilen ilk Müslüman Sayed, İsrail'e yardımın kesilmesine destek verdi" },
+  ];
+  const D969_STORED = d969[1]!.title;
+
+  const katil = [
+    { source: "milat", title: "Katil Netanyahu seçim yenilgisini hazmedemedi" },
+    {
+      source: "trt-haber",
+      title: "Katil Netanyahu seçim yenilgisini hazmedemedi: Arap partilerini hedef alıp seçimlere hile karıştırıldığını öne sürdü",
+    },
+  ];
+
+  const golan = [
+    { source: "star", title: "Soykırımcı Netanyahu'dan seçim provokasyonu... \"Koltuğu için güvenlik krizi çıkaracak\"" },
+    { source: "haberler-com", title: "Yair Golan, Netanyahu'yu iktidar için güvenlik krizi çıkarmakla suçladı" },
+  ];
+
+  const gazze = [
+    { source: "milat", title: "Soykırımcı İsrail Gazze'de son 48 saatte 6 kişiyi daha katletti" },
+    { source: "dirilis-postasi", title: "Gazze'de can kaybı 74 bin 594'e yükseldi: 48 saatte 6 ölü" },
+    { source: "haberler-com", title: "İsrail ateşkese rağmen Gazze'de son 48 saatte 6 kişiyi öldürdü, 26 yaraladı" },
+  ];
+
+  const eisenkot = [
+    { source: "cgtn-turk", title: "Eisenkot: Siyonist askerlik hükümeti kuracağız" },
+    { source: "sozcu", title: "Netanyahu'nun rakibi hedefini açıkladı: 'Siyonist askerlik hükümeti'" },
+    { source: "yeni-mesaj", title: "İsrail'de muhalefet lideri Eisenkot \"Siyonist askerlik hükümeti\" kuracaklarını belirtti" },
+    {
+      source: "evrensel",
+      title:
+        "İsrail'de muhalefet lideri Eisenkot \"Siyonist askerlik hükümeti\" kuracaklarını açıkladı: Arap partileriyle iş birliği yapmayacağı mesajı olarak değerlendirildi",
+    },
+    { source: "son-dakika", title: "Netanyahu'ya rakibinden rest! Siyonist askerlik hükümeti kuracak" },
+    { source: "haberler-com", title: "Netanyahu'ya rakibinden rest! Siyonist askerlik hükümeti kuracak" },
+  ];
+  const EISENKOT_STORED = "İsrail muhalefet lideri Eisenkot 'Siyonist askerlik hükümeti' kuracaklarını açıkladı";
+
+  it("f771e177: the loaded stored title gives way to Milliyet's plain wording (the h42 'loaded' switch now fires)", () => {
+    expect(loadedPenalty(F771_STORED)).toBeGreaterThan(0);
+    expect(loadedPenalty(F771_PICK)).toBe(0);
+    expect(pickNeutralTitle(f771, { incumbent: F771_STORED })).toBe(F771_PICK);
+    expect(pickNeutralTitle([...f771].reverse(), { incumbent: F771_STORED })).toBe(F771_PICK);
+  });
+
+  it("f771e177: a plain stored title is kept (nothing to swap)", () => {
+    expect(pickNeutralTitle(f771, { incumbent: F771_PICK })).toBe(F771_PICK);
+  });
+
+  it("96915d56: a fresh pick carries no loaded wording when an acceptable AA member exists", () => {
+    expect(isAcceptableNeutral(d969[0]!.title, d969.map((m) => m.title))).toBe(true);
+    const fresh = pickNeutralTitle(d969);
+    expect(fresh).not.toBeNull();
+    expect(loadedPenalty(fresh!), fresh!).toBe(0);
+    expect(fresh).not.toBe(D969_STORED);
+    // and the stored Star wording gives way to a loaded-free member
+    const swapped = pickNeutralTitle(d969, { incumbent: D969_STORED });
+    expect(swapped).not.toBeNull();
+    expect(loadedPenalty(swapped!), swapped!).toBe(0);
+  });
+
+  it("4e89e31d: both members carry the epithet, so there is nothing clean to swap to and the stored title stays (the floor, documented)", () => {
+    const stored = katil[0]!.title;
+    expect(katil.every((m) => loadedPenalty(m.title) > 0)).toBe(true);
+    expect(pickNeutralTitle(katil, { incumbent: stored })).toBe(stored);
+    // a first pick still names a member: the floor never invents a title
+    const first = pickNeutralTitle(katil, { floor: true });
+    expect(katil.map((m) => m.title)).toContain(first);
+  });
+
+  it("7a26bbe9 and 130a9e04: a loaded stored title gives way to the clean member", () => {
+    const g = pickNeutralTitle(golan, { incumbent: golan[0]!.title });
+    expect(g).toBe(golan[1]!.title);
+    const z = pickNeutralTitle(gazze, { incumbent: gazze[0]!.title });
+    expect(z).not.toBe(gazze[0]!.title);
+    expect(z).not.toBeNull();
+    expect(loadedPenalty(z!), z!).toBe(0);
+  });
+
+  it("b2d44624: the quoted epithet is free, so the pick is the quoted wording it was before the rule (fresh, with the stored title, with the member as the stored title)", () => {
+    const yeniMesaj = eisenkot[2]!.title;
+    expect(loadedPenalty(EISENKOT_STORED)).toBe(0);
+    expect(loadedPenalty(yeniMesaj)).toBe(0);
+    expect(pickNeutralTitle(eisenkot)).toBe(yeniMesaj);
+    expect(pickNeutralTitle(eisenkot, { incumbent: EISENKOT_STORED })).toBe(yeniMesaj);
+    expect(pickNeutralTitle(eisenkot, { incumbent: yeniMesaj })).toBe(yeniMesaj);
+  });
+
+  it("6d7faa51: BirGün's doubled-apostrophe quote is free and Evrensel's unquoted wording is charged, so the stored quoted title is kept", () => {
+    const bg = "Netanyahu'dan ırkçı blok çağrısı: ''Siyonist çoğunluk aklını başına toplamalı''";
+    const ev = "Netanyahu'dan ırkçı blok çağrısı: Siyonist çoğunluk aklını başına toplamalı ve birleşmeli";
+    expect(loadedPenalty(bg)).toBe(0);
+    expect(loadedPenalty(ev)).toBe(1);
+    const members = [
+      { source: "birgun", title: bg },
+      { source: "evrensel", title: ev },
+    ];
+    expect(pickNeutralTitle(members, { incumbent: bg })).toBe(bg);
+  });
+});
+
+describe("h54-editorial-4: hostile input stays cheap", () => {
+  it("loadedPenalty on a 1 MB title of every quoting and epithet shape", () => {
+    const shapes = [
+      "'".repeat(1_000_000),
+      '"'.repeat(1_000_000),
+      "' ".repeat(500_000),
+      "'a".repeat(500_000),
+      "“".repeat(1_000_000),
+      "‘a ".repeat(330_000),
+      "siyonist '".repeat(100_000),
+      "Katil ".repeat(160_000),
+      "Katil" + " ".repeat(1_000_000),
+      "a".repeat(1_000_000) + " kabusu",
+      "a ".repeat(500_000) + "kabusu",
+      "işgalci ".repeat(120_000),
+      "İsrail'in 'Siyonist ".repeat(50_000),
+    ];
+    const t0 = performance.now();
+    for (const shape of shapes) loadedPenalty(shape);
+    expect(performance.now() - t0).toBeLessThan(5000);
+  });
 });

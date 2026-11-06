@@ -1,17 +1,11 @@
 "use client";
 
-import {
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type ReactNode,
-  type Ref,
-} from "react";
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
 
 import { followsStore, useFollows } from "@/components/follow/use-follows";
+import { useHydrated } from "@/lib/hooks/use-hydrated";
 import {
   countNew,
   focusTargetAfterRemove,
@@ -90,18 +84,6 @@ async function fetchFollowState(
     // Network failure, bad JSON or an abort (the caller discards aborted runs).
     return { status: "error", reason: "down" };
   }
-}
-
-const subscribeNever = () => () => {};
-// false while server-rendering and during hydration, true afterwards. Lets the
-// first paint be a neutral placeholder instead of flashing the empty state at
-// every reader who does have follows (the server snapshot is always empty).
-function useHydrated(): boolean {
-  return useSyncExternalStore(
-    subscribeNever,
-    () => true,
-    () => false,
-  );
 }
 
 // The one live region of the page. FollowFeed always returns this frame, so

@@ -60,6 +60,8 @@ run | 161-image-coverage-by-source.test.ts | tests/migrations/sql/150-ops-queue-
 run | 167-ops-queue-poison-contract.test.ts | tests/migrations/sql/167-ops-queue-poison-contract-dryrun.sql | - | 0
 # 168: the dry-run script builds the state itself (framing_votes of 068, the pool table of 105, then 105's draw as production has it, gated on its md5, and a baseline that shows a voted story's siblings coming back) and applies 168 twice (checking that the session_hash index exists exactly once), so it is the setup. Every live case runs inside its own rolled-back transaction.
 run | 168-framing-draw-one-per-event.test.ts | tests/migrations/sql/168-framing-draw-one-per-event-dryrun.sql | - | 0
+# 169: the dry-run script builds the state itself (the two stamp columns of 141 and 155, 129's fold, then 162 from its own file, gated on its md5, and a baseline that shows a stamped cluster with a gate-failing title waiting for the growth bar) and applies 169 twice, so it is the setup. Every live case runs inside its own rolled-back transaction.
+run | 169-repick-gate-fail.test.ts | tests/migrations/sql/169-repick-gate-fail-dryrun.sql | - | 0
 run | 151-cluster-attach-probe.test.ts | tests/migrations/sql/151-cluster-attach-probe-dryrun.sql | - | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql | TAYF_SHAPE=prod | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql | TAYF_SHAPE=chain | 0

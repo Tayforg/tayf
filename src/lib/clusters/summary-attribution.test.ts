@@ -2558,6 +2558,224 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
     });
   });
 
+  // h54-editorial-1: the gate above reads the seed's WORDS. b34a5fe0 (21 kaynak,
+  // 5-6 Kasım 2026): the neutral title says "tutuklandı", the seed (GZT, the
+  // earliest member) says "tutuklama talebiyle mahkemeye sevk edildi". "tutuklama"
+  // and "tutuklandı" are both the stem "tutuk", so the seed covers 6 of the 7
+  // title stems and was kept. A headline that reports a LATER stage of the story
+  // than the seed (summary-agreement.ts, stageBehindTitle) now counts the seed as
+  // disagreeing, like a stub: the gain is waived and a member that states the
+  // outcome, and is not itself at the earlier stage, replaces it.
+  describe("9c. a seed that reports an earlier stage than the headline (h54-editorial-1)", () => {
+    const KAYA_TITLE = "Fon soruşturmasında Fatma Betül Sayan Kaya tutuklandı";
+    // The GZT seed of b34a5fe0, verbatim ("Beyül" is the feed's typo).
+    const KAYA_SEED =
+      "İstanbul Cumhuriyet Başsavcılığı tarafından yürütülen fon soruşturması kapsamında; Fatma Beyül Sayan Kaya tutuklama talebiyle mahkemeye sevk edildi Eski SPK Başkanı İbrahim Ömer Gönül ve İlyas Kaya adli kontrolle mahkemeye sevk edildi.";
+    const KAYA_CUMHURIYET =
+      "Fon vurgunun yeni bir gelişme yaşandı. Fatma Betül Sayan Kaya tutuklama talebiyle sulh ceza hakimliğine sevk edildi.";
+    const KAYA_MEDYASCOPE =
+      "Fon krizi soruşturması kapsamında yeniden ifade veren eski bakan Fatma Betül Sayan Kaya, tutuklanarak cezaevine gönderildi.";
+    const KAYA_HABER_COM =
+      "Fatma Betül Sayan Kaya fon soruşturmasında tutuklandı. İlyas Kaya ve eski SPK Başkanı İbrahim Ömer Gönül adli kontrol şartıyla serbest bırakıldı.";
+    // haberler-com, an aggregator: it states the REQUEST for the arrest ("tutuklanması ... istendi").
+    const KAYA_HABERLER =
+      "İstanbul Cumhuriyet Başsavcılığı tarafından yürütülen fon soruşturmasında eski Aile ve Sosyal Politikalar Bakanı Fatma Betül Sayan Kaya'nın eşi İlyas Kaya hakkında adli kontrol talep edildi. İlyas Kaya, yurt dışına çıkış yasağı ve imza yükümlülüğü uygulanması talebiyle hakimliğe sevk edildi. Aynı soruşturma kapsamında Fatma Betül Sayan Kaya'nın tutuklanması, eski SPK Başkanı İbrahim Ömer Gönül hakkında ise adli kontrol uygulanması istendi.";
+    // Covers all seven title stems and never says whether she was arrested.
+    const KAYA_SILENT =
+      "Fon soruşturmasında Fatma Betül Sayan Kaya hakkında karar bekleniyor, tutuklama kararı henüz çıkmadı.";
+
+    const gzt = () => outlet("GZT", "gzt", "2026-11-05T19:42:12.000Z", KAYA_SEED);
+    const cumhuriyet = () => outlet("Cumhuriyet", "cumhuriyet", "2026-11-05T19:46:00.000Z", KAYA_CUMHURIYET);
+    const medyascope = () => outlet("Medyascope", "medyascope", "2026-11-05T22:59:00.000Z", KAYA_MEDYASCOPE);
+    const haberCom = () => outlet("Haber.com", "haber-com", "2026-11-06T09:06:57.000Z", KAYA_HABER_COM);
+    const haberler = () =>
+      outlet("Haberler.com", "haberler-com", "2026-11-05T20:18:42.000Z", KAYA_HABERLER, { kind: "aggregator" });
+
+    it("the fixtures are what the cases below assume", () => {
+      // The old gate keeps the seed: it covers 6 of the 7 title stems and is well formed.
+      expect(titleAgreement(KAYA_TITLE, KAYA_SEED)!).toBeCloseTo(6 / 7, 10);
+      expect(titleAgreement(KAYA_TITLE, KAYA_SEED)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+      expect(seedDisqualified(KAYA_SEED, tidySummaryText(KAYA_SEED))).toBeNull();
+      // Cumhuriyet agrees as well as the seed does and is at the same stage; the two
+      // members that state the outcome cover the whole title.
+      expect(titleAgreement(KAYA_TITLE, KAYA_CUMHURIYET)!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+      expect(titleAgreement(KAYA_TITLE, KAYA_MEDYASCOPE)).toBe(1);
+      expect(titleAgreement(KAYA_TITLE, KAYA_HABER_COM)).toBe(1);
+      expect(titleAgreement(KAYA_TITLE, KAYA_SILENT)).toBe(1);
+      for (const text of [KAYA_SEED, KAYA_CUMHURIYET, KAYA_MEDYASCOPE, KAYA_HABER_COM, KAYA_SILENT]) {
+        expect(summaryDefect(text, tidySummaryText(text)), text).toBeNull();
+      }
+    });
+
+    it("b34a5fe0: the seed with the request is replaced by a member that states the arrest (newest on a tie)", () => {
+      const members = [gzt(), cumhuriyet(), medyascope(), haberCom(), haberler()];
+      const out = withTitle(members, KAYA_TITLE, KAYA_SEED);
+      expect(out).toStrictEqual({ text: KAYA_HABER_COM, source: members[3]!.source });
+      expect(out?.text).toContain("tutuklan");
+      expect(out?.text).not.toContain("talebiyle");
+      // The meta description follows the page.
+      const description = describeForMeta({ count: members.length, attribution: out });
+      expect(description.startsWith("5 kaynak. Haber.com: Fatma Betül Sayan Kaya fon soruşturmasında tutuklandı")).toBe(true);
+      expect(description).not.toContain("talebiyle");
+    });
+
+    it("the member at the same stage as the seed never stands in, although it covers 6 of the 7 title stems", () => {
+      const members = [gzt(), cumhuriyet(), medyascope()];
+      expect(withTitle(members, KAYA_TITLE, KAYA_SEED)?.source?.slug).toBe("medyascope");
+      // Without anyone who states the arrest the seed stays: never blank.
+      const seed = gzt();
+      const out = withTitle([seed, cumhuriyet(), haberler()], KAYA_TITLE, KAYA_SEED);
+      expect(out).toStrictEqual({ text: KAYA_SEED, source: seed.source });
+    });
+
+    it("a member that covers the title but never says whether she was arrested does not stand in", () => {
+      const seed = gzt();
+      const silent = outlet("Sessiz", "sessiz", "2026-11-06T08:00:00.000Z", KAYA_SILENT);
+      expect(withTitle([seed, silent], KAYA_TITLE, KAYA_SEED)).toStrictEqual({ text: KAYA_SEED, source: seed.source });
+      // With a member that does state it, that one wins over the newer silent one.
+      expect(withTitle([seed, silent, medyascope()], KAYA_TITLE, KAYA_SEED)?.source?.slug).toBe("medyascope");
+    });
+
+    it("the pick does not depend on the member order", () => {
+      const members = [gzt(), cumhuriyet(), medyascope(), haberCom(), haberler()];
+      for (const order of [members, [...members].reverse(), [members[3]!, members[0]!, members[4]!, members[2]!, members[1]!]]) {
+        expect(withTitle(order, KAYA_TITLE, KAYA_SEED)?.source?.slug).toBe("haber-com");
+      }
+    });
+
+    it("the other gates still apply to a replacement for a stale seed (rights, kind, wire copy, defect, language)", () => {
+      const seed = gzt();
+      const stays = { text: KAYA_SEED, source: seed.source };
+      const blocked = outlet("Medyascope", "medyascope", "2026-11-05T22:59:00.000Z", KAYA_MEDYASCOPE, { allowed: false });
+      expect(withTitle([seed, blocked], KAYA_TITLE, KAYA_SEED)).toStrictEqual(stays);
+      const wire = outlet("AA", "anadolu-ajansi", "2026-11-05T22:59:00.000Z", KAYA_MEDYASCOPE, { kind: "wire" });
+      expect(withTitle([seed, wire], KAYA_TITLE, KAYA_SEED)).toStrictEqual(stays);
+      const aggregator = outlet("Agg", "agg", "2026-11-05T22:59:00.000Z", KAYA_MEDYASCOPE, { kind: "aggregator" });
+      expect(withTitle([seed, aggregator], KAYA_TITLE, KAYA_SEED)).toStrictEqual(stays);
+      const teaser = outlet("Tuzak", "tuzak", "2026-11-05T22:59:00.000Z", `${KAYA_MEDYASCOPE} Peki, Kaya kimdir? Kaç yaşında?`);
+      expect(withTitle([seed, teaser], KAYA_TITLE, KAYA_SEED)).toStrictEqual(stays);
+      // A wire dispatch's hash is not a candidate's either.
+      const dispatch = outlet("Medyascope", "medyascope", "2026-11-05T22:59:00.000Z", KAYA_MEDYASCOPE, { hash: "dispatch" });
+      const copy = outlet("Kopya", "kopya", "2026-11-05T23:00:00.000Z", KAYA_CUMHURIYET, { hash: "dispatch" });
+      expect(withTitle([seed, dispatch, copy], KAYA_TITLE, KAYA_SEED, wireDispatch)).toStrictEqual(stays);
+    });
+
+    // correctness-1: a REQUEST that holds the stem "tutuklan" is not the arrest.
+    it("case A: a newer member that only reports the REQUEST ('tutuklanması talep edilen') never stands in for a stale seed", () => {
+      const request = outlet(
+        "Yeni",
+        "yeni",
+        "2026-11-06T01:00:00.000Z",
+        "Fon soruşturmasında tutuklanması talep edilen Fatma Betül Sayan Kaya, sulh ceza hakimliğine sevk edildi.",
+      );
+      expect(titleAgreement(KAYA_TITLE, request.article.description ?? "")!).toBeGreaterThanOrEqual(AGREEMENT_HIGH);
+      expect(withTitle([gzt(), medyascope(), request], KAYA_TITLE, KAYA_SEED)?.source?.slug).toBe("medyascope");
+      expect(withTitle([request, medyascope(), gzt()], KAYA_TITLE, KAYA_SEED)?.source?.slug).toBe("medyascope");
+      // With nobody who states the arrest the seed stays: never blank.
+      const seed = gzt();
+      expect(withTitle([seed, request], KAYA_TITLE, KAYA_SEED)).toStrictEqual({ text: KAYA_SEED, source: seed.source });
+    });
+
+    it("case B: a headline at the REQUEST stage ('Tutuklanması talep edilen ...') is not an arrest outcome, so the seed is kept", () => {
+      const title = "Tutuklanması talep edilen Fatma Betül Sayan Kaya hakimliğe sevk edildi";
+      const moved = outlet(
+        "Yeni",
+        "yeni",
+        "2026-11-06T01:00:00.000Z",
+        "Fon soruşturmasında hakimliğe sevk edilen Fatma Betül Sayan Kaya tutuklandı.",
+      );
+      expect(titleAgreement(title, KAYA_SEED)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+      const seed = gzt();
+      expect(withTitle([seed, moved], title, KAYA_SEED)).toStrictEqual({ text: KAYA_SEED, source: seed.source });
+    });
+
+    it("the seed's own text under another outlet's name is not a replacement", () => {
+      const seed = gzt();
+      const copy = outlet("Kopya", "kopya", "2026-11-06T08:00:00.000Z", KAYA_SEED);
+      expect(withTitle([seed, copy], KAYA_TITLE, KAYA_SEED)).toStrictEqual({ text: KAYA_SEED, source: seed.source });
+    });
+
+    it("a seed that states the outcome is kept, and so is a seed at the stage the headline reports", () => {
+      const outcomeSeed = "Fon soruşturması kapsamında ifade veren Fatma Betül Sayan Kaya tutuklandı. Eşi İlyas Kaya adli kontrolle serbest bırakıldı.";
+      const seed = outlet("GZT", "gzt", "2026-11-05T19:42:12.000Z", outcomeSeed);
+      expect(withTitle([seed, medyascope(), haberCom()], KAYA_TITLE, outcomeSeed)).toStrictEqual({
+        text: outcomeSeed,
+        source: seed.source,
+      });
+      // The headline is at the request stage too: nothing is behind it.
+      const requestTitle = "Fon soruşturmasında Fatma Betül Sayan Kaya tutuklama talebiyle sevk edildi";
+      const stageSeed = gzt();
+      expect(withTitle([stageSeed, cumhuriyet(), medyascope()], requestTitle, KAYA_SEED)).toStrictEqual({
+        text: KAYA_SEED,
+        source: stageSeed.source,
+      });
+    });
+
+    it("the surfaces that never pass a title keep the stale seed by design (rss.xml, the digest, the cards)", () => {
+      const members = [gzt(), cumhuriyet(), medyascope(), haberCom()];
+      const seed = members[0]!;
+      expect(summaryAttribution({ summary: KAYA_SEED, members, wire: notWire })).toStrictEqual({
+        text: KAYA_SEED,
+        source: seed.source,
+      });
+      expect(
+        resolveSummaryAttribution({ summary: KAYA_SEED, members, lookupFailed: false, wire: notWire }),
+      ).toStrictEqual({ text: KAYA_SEED, source: seed.source });
+    });
+
+    it("a headline with too few content words carries no signal: the seed stays (unchanged rule)", () => {
+      const seed = gzt();
+      expect(withTitle([seed, medyascope()], "Kaya tutuklandı", KAYA_SEED)).toStrictEqual({
+        text: KAYA_SEED,
+        source: seed.source,
+      });
+    });
+
+    it("the death family: a headline that reports the death replaces a seed that reports the injury", () => {
+      const title = "Kocaeli'de yangında yaralanan kadın hayatını kaybetti";
+      const injured = "Kocaeli'de çıkan yangında yaralanan kadın hastaneye kaldırıldı ve yoğun bakıma alındı.";
+      const died = "Kocaeli'de çıkan yangında yaralanan kadın, tedavi gördüğü hastanede hayatını kaybetti.";
+      expect(titleAgreement(title, injured)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+      const seed = outlet("Birinci", "birinci", "2026-11-05T10:00:00.000Z", injured);
+      const later = outlet("İkinci", "ikinci", "2026-11-05T14:00:00.000Z", died);
+      expect(withTitle([seed, later], title, injured)).toStrictEqual({ text: died, source: later.source });
+      // A text at the injury stage is no replacement, and without the death the seed stays.
+      const other = outlet("Üçüncü", "ucuncu", "2026-11-05T11:00:00.000Z", "Kocaeli'de çıkan yangında yaralanan kadın ağır yaralı olarak hastaneye kaldırıldı, tedavisi sürüyor.");
+      expect(withTitle([seed, other], title, injured)).toStrictEqual({ text: injured, source: seed.source });
+    });
+
+    it("the release family: a headline that reports the release replaces a seed that reports the request", () => {
+      const title = "Eski SPK Başkanı İbrahim Ömer Gönül adli kontrolle serbest bırakıldı";
+      const asked =
+        "Eski SPK Başkanı İbrahim Ömer Gönül hakkında adli kontrol şartıyla tahliye talebiyle hakimliğe başvuruldu.";
+      const freed = "Eski SPK Başkanı İbrahim Ömer Gönül, adli kontrol şartıyla serbest bırakıldı.";
+      expect(titleAgreement(title, asked)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+      const seed = outlet("Birinci", "birinci", "2026-11-05T22:00:00.000Z", asked);
+      const later = outlet("İkinci", "ikinci", "2026-11-06T01:00:00.000Z", freed);
+      expect(withTitle([seed, later], title, asked)).toStrictEqual({ text: freed, source: later.source });
+    });
+
+    it("a big roster (1,000 members) behind a stale seed is scored in one linear pass", () => {
+      const members = [gzt(), cumhuriyet(), medyascope()];
+      for (let i = 0; i < 1000; i++) {
+        members.push(
+          outlet(`Kaynak ${i}`, `kaynak-${i}`, `2026-11-05T20:${String(i % 60).padStart(2, "0")}:00.000Z`, `Başka bir olay ${i} hakkında ayrıntılı bilgi veren ve konuyla ilgisi olmayan uzun bir açıklama metni.`),
+        );
+      }
+      const start = Date.now();
+      const out = withTitle(members, KAYA_TITLE, KAYA_SEED);
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(out?.source?.slug).toBe("medyascope");
+    });
+
+    it("does not mutate its inputs", () => {
+      const members = [gzt(), cumhuriyet(), medyascope(), haberCom(), haberler()];
+      const before = JSON.stringify(members);
+      withTitle(members, KAYA_TITLE, KAYA_SEED);
+      expect(JSON.stringify(members)).toBe(before);
+    });
+  });
+
   it("10. the meta description follows the new attribution, not the stale seed", () => {
     const { members } = story();
     const attribution = withTitle(members, TITLE, SEED_TEXT);

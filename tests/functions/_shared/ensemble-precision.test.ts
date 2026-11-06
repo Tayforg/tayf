@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import {
+  counterVetoFires,
   headlineLane,
   isMatch,
   score,
@@ -1089,6 +1090,405 @@ describe("h19-recall-1 precision unchanged", () => {
       expect(shared.components.primary).toBe(
         TFIDF_WEIGHT * 0.6 + ENTITY_WEIGHT * shared.components.entityRatio,
       );
+    });
+  });
+});
+
+// h54-precision-1: a next-day hearing joined the previous day's cluster through
+// the MinHash lane, which has no check on ordinal counters. Prod cluster
+// ee3f0368 (104th hearing of the Imamoglu trial, 2026-11-04 evening) held Yeni
+// Safak's "105. duruşması başladı" (2026-11-05 09:15Z) as its 5th voting source,
+// which made it a public 'Kör nokta'. The signatures below are the real
+// articles.minhash_sig rows of 79061611-bc11-4694-9064-34ecf0864cd1 (istiklal,
+// seed) and ba6cfc6c-6cd1-4d1b-a084-b32631f69772 (yeni-safak): 43 of 64 values
+// agree (J = 0.671875), jaccardScore = 0.6 + 0.4 * J = 0.8688, and at a 12.84 h
+// gap the pair scored about 0.64 against MATCH_THRESHOLD 0.40.
+describe("ensemble precision: ordinal counter veto (h54-precision-1)", () => {
+  const noFp = { strict: null, signature: null };
+  const ISTIKLAL =
+    '"İmamoğlu çıkar amaçlı suç örgütü" davasının 104. duruşması sona erdi';
+  const YENI_SAFAK =
+    '"İmamoğlu çıkar amaçlı suç örgütü" davasının 105. duruşması başladı';
+  const SIG_ISTIKLAL = Uint32Array.from([
+    12386452, 10596166, 1040990, 26661945, 36021788, 6607717, 14716501, 9625486,
+    4046865, 2886268, 30568213, 8821180, 18561633, 1352665, 6475912, 3614890,
+    33527557, 46272, 9456426, 66056916, 31828455, 33717030, 7970752, 18620374,
+    530264, 1317999, 9719889, 21872778, 14694685, 12313884, 2074878, 9162725,
+    7099108, 9916804, 15738023, 26733641, 5425046, 18659034, 1252879, 12103613,
+    13356831, 19493331, 2721240, 11745331, 9088121, 3621747, 9361983, 35904507,
+    10040515, 57377623, 9709390, 22210481, 4680527, 4461757, 9408393, 5404611,
+    38366604, 4132171, 52980652, 35725076, 2411715, 4268656, 36933970, 2971468,
+  ]);
+  const SIG_YENI_SAFAK = Uint32Array.from([
+    12386452, 20118176, 1040990, 26661945, 3722366, 12482163, 17477097, 9625486,
+    4046865, 2886268, 30568213, 8821180, 18561633, 1352665, 6475912, 3614890,
+    46934726, 46272, 9456426, 37997086, 8498316, 22137458, 7970752, 3634883,
+    530264, 1317999, 9719889, 21872778, 51767084, 12313884, 2074878, 9162725,
+    7099108, 9916804, 15738023, 26733641, 5425046, 30717071, 1252879, 12103613,
+    3091767, 56993759, 2721240, 57483594, 9088121, 3621747, 9361983, 83666911,
+    10040515, 63664015, 80618460, 6979719, 4680527, 4461757, 9408393, 14223463,
+    38366604, 44081575, 52980652, 31449701, 2411715, 4268656, 36933970, 2971468,
+  ]);
+  const HOURS =
+    (Date.parse("2026-11-05T09:15:08Z") - Date.parse("2026-11-04T20:25:00Z")) / 3_600_000;
+  const TFIDF = 0.55;
+  const FP_A = { strict: null, signature: SIG_ISTIKLAL };
+  const FP_B = { strict: null, signature: SIG_YENI_SAFAK };
+
+  const prod = (aTitle: string | null, bTitle: string | null) =>
+    score(FP_A, FP_B, extractEntities(ISTIKLAL), extractEntities(YENI_SAFAK), TFIDF, HOURS, {
+      aSourceSlug: "istiklal",
+      bSourceSlug: "yeni-safak",
+      aTitle,
+      bTitle,
+    });
+
+  describe("the fixture is the prod pair", () => {
+    it("shares 43 of the 64 MinHash values and sits 12.8 hours apart", () => {
+      expect(SIG_ISTIKLAL).toHaveLength(64);
+      expect(SIG_YENI_SAFAK).toHaveLength(64);
+      let same = 0;
+      for (let i = 0; i < 64; i++) if (SIG_ISTIKLAL[i] === SIG_YENI_SAFAK[i]) same++;
+      expect(same).toBe(43);
+      expect(HOURS).toBeGreaterThan(12.8);
+      expect(HOURS).toBeLessThan(12.9);
+    });
+
+    it("without titles the MinHash lane alone carries the pair over the threshold (the bug)", () => {
+      const r = prod(null, null);
+      expect(r.components.jaccard).toBe(43 / 64);
+      expect(r.components.jaccardScore).toBe(0.6 + 0.4 * (43 / 64));
+      expect(r.components.counterVeto).toBe(false);
+      expect(r.score).toBeGreaterThan(0.6);
+      expect(r.score).toBeLessThan(0.7);
+      expect(isMatch(r)).toBe(true);
+    });
+  });
+
+  describe("fires: 104. duruşma vs 105. duruşma", () => {
+    it("caps the pair under the match threshold and reports components.counterVeto", () => {
+      const r = prod(ISTIKLAL, YENI_SAFAK);
+      expect(r.components.counterVeto).toBe(true);
+      expect(isMatch(r)).toBe(false);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.subjectVeto).toBe(false);
+      expect(r.components.incidentVeto).toBe(false);
+      // Non-vacuous: the uncapped MinHash lane was far above the cap.
+      expect(r.components.jaccardScore).toBeGreaterThan(SUBJECT_VETO_CAP);
+      expect(r.components.raw).toBe(SUBJECT_VETO_CAP);
+      expect(r.score).toBe(SUBJECT_VETO_CAP * r.components.timeDecay);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD);
+    });
+
+    it("caps the primary lane too: strong text and entities cannot carry the pair", () => {
+      const r = score(noFp, noFp, ["imamoglu", "chp"], ["imamoglu", "chp"], 0.95, 1, {
+        aTitle: ISTIKLAL,
+        bTitle: YENI_SAFAK,
+      });
+      expect(r.components.primary).toBeGreaterThan(SUBJECT_VETO_CAP);
+      expect(r.components.counterVeto).toBe(true);
+      expect(r.components.raw).toBe(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("is symmetric in its two titles", () => {
+      const r = score(FP_B, FP_A, extractEntities(YENI_SAFAK), extractEntities(ISTIKLAL), TFIDF, HOURS, {
+        aTitle: YENI_SAFAK,
+        bTitle: ISTIKLAL,
+      });
+      expect(r.components.counterVeto).toBe(true);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("leaves the sourcePenalty / timeDecay multipliers on the capped raw", () => {
+      const r = score(FP_A, FP_B, [], [], TFIDF, HOURS, {
+        aSourceSlug: "haberler-com",
+        bSourceSlug: "yeni-safak",
+        aTitle: ISTIKLAL,
+        bTitle: YENI_SAFAK,
+      });
+      expect(r.components.sourcePenalty).toBe(0.85);
+      expect(r.score).toBe(SUBJECT_VETO_CAP * r.components.timeDecay * 0.85);
+    });
+  });
+
+  describe("does not fire", () => {
+    it("104. vs 104. (sona erdi vs başladı) keeps the pair matched", () => {
+      const same = '"İmamoğlu çıkar amaçlı suç örgütü" davasının 104. duruşması başladı';
+      const r = prod(ISTIKLAL, same);
+      expect(r.components.counterVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+      expect(r.score).toBe(prod(null, null).score);
+    });
+
+    it("104. duruşma vs 3. gün: different counter nouns", () => {
+      const r = prod(ISTIKLAL, '"İmamoğlu çıkar amaçlı suç örgütü" davasında 3. gün');
+      expect(r.components.counterVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("a title without any counter vs one with a counter (Akşam-style follow-up)", () => {
+      const aksam = '"İmamoğlu çıkar amaçlı suç örgütü" davasında duruşma sona erdi';
+      const r = prod(ISTIKLAL, aksam);
+      expect(r.components.counterVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+      expect(prod(aksam, ISTIKLAL).components.counterVeto).toBe(false);
+    });
+
+    it("missing or empty titles never veto", () => {
+      for (const [a, b] of [[null, YENI_SAFAK], [ISTIKLAL, null], ["", YENI_SAFAK], [ISTIKLAL, ""], [null, null]] as const) {
+        const r = prod(a, b);
+        expect(r.components.counterVeto, `${a} | ${b}`).toBe(false);
+        expect(isMatch(r)).toBe(true);
+      }
+    });
+
+    it("the strict-fingerprint auto-accept returns before the veto and reports it as false", () => {
+      const same = { strict: "c".repeat(40), signature: null };
+      const r = score(same, same, [], [], TFIDF, HOURS, { aTitle: ISTIKLAL, bTitle: YENI_SAFAK });
+      expect(r.components.autoAccept).toBe(true);
+      expect(r.components.counterVeto).toBe(false);
+      expect(r.score).toBe(1);
+    });
+
+    it("reports counterVeto on every non-auto-accept result, false by default", () => {
+      const r = score(noFp, noFp, [], [], 0.58, 6);
+      expect(Object.keys(r.components)).toContain("counterVeto");
+      expect(r.components.counterVeto).toBe(false);
+    });
+  });
+
+  describe("counterVetoFires", () => {
+    const fires = (a: string, b: string) => counterVetoFires(a, b);
+    // Prod cluster 5893d4e5 (odatv and medyascope, one hour apart): one trial, two
+    // counters on different scales (days of the whole trial vs a hearing's day).
+    const ODATV_IBB =
+      "İBB davası 104. gün: Gizli tanıklar konuştu: 'Gördüm' yok, 'duydum' var";
+    const MEDYASCOPE_IBB = "İBB davasında 3. duruşmada 3. gün: Gizli tanıklar dinleniyor";
+
+    it("fires on the prod pair and on every counter noun", () => {
+      expect(fires(ISTIKLAL, YENI_SAFAK)).toBe(true);
+      for (const [a, b] of [
+        ["Davanın 1. oturumu başladı", "Davanın 2. oturumu başladı"],
+        ["Davada 5. celse görüldü", "Davada 6. celse görüldü"],
+        ["Savaşın 400. günü", "Savaşın 401. günü"],
+        ["Seçimin 1. turu yapıldı", "Seçimin 2. turu yapıldı"],
+        ["Ligin 12. haftası tamamlandı", "Ligin 13. haftası tamamlandı"],
+      ] as const) {
+        expect(fires(a, b), `${a} | ${b}`).toBe(true);
+        expect(fires(b, a), `${b} | ${a}`).toBe(true);
+      }
+    });
+
+    it("reads inflected nouns and Turkish capitals (İ, Ş, Ü, I) the way headlineTokens folds them", () => {
+      expect(fires("DAVANIN 104. DURUŞMASI BAŞLADI", "DAVANIN 105. DURUŞMASI BAŞLADI")).toBe(true);
+      expect(fires("104. duruşmasında karar", "105. duruşmasında karar")).toBe(true);
+      expect(fires("Seçimin 1. TURUNDA oy kullandı", "Seçimin 2. turunda oy kullandı")).toBe(true);
+      expect(fires("Savaşın 5. GÜNÜNDE saldırı", "Savaşın 6. gününde saldırı")).toBe(true);
+      expect(fires("Ligin 3. haftasında lider", "Ligin 4. haftasında lider")).toBe(true);
+      expect(fires("Davanın 7. OTURUMUNDA ifade", "Davanın 8. oturumunda ifade")).toBe(true);
+    });
+
+    it("tolerates spacing around the dot: '104.duruşma', '104 . duruşma', no-break space, tabs", () => {
+      expect(fires("Dava 104.duruşma", "Dava 105. duruşma")).toBe(true);
+      expect(fires("Dava 104 . duruşma", "Dava 105. duruşma")).toBe(true);
+      expect(fires("Dava 104 .  duruşma", "Dava 105.duruşma")).toBe(true);
+      expect(fires("Dava 104. duruşma", "Dava 105. duruşma")).toBe(true);
+      expect(fires("Dava 104\t.\tduruşma", "Dava 105. duruşma")).toBe(true);
+    });
+
+    it("does not fire when both titles carry the same number, leading zeros ignored", () => {
+      expect(fires(ISTIKLAL, ISTIKLAL.replace("sona erdi", "başladı"))).toBe(false);
+      expect(fires("Savaşın 05. günü", "Savaşın 5. günü")).toBe(false);
+    });
+
+    it("does not fire across different counter nouns", () => {
+      expect(fires("Davanın 104. duruşması", "Davanın 3. günü")).toBe(false);
+      expect(fires("Davanın 104. duruşması", "Ligin 3. haftası")).toBe(false);
+    });
+
+    it("does not fire when either title has no counter at all", () => {
+      expect(fires(ISTIKLAL, '"İmamoğlu çıkar amaçlı suç örgütü" davasında duruşma sona erdi')).toBe(false);
+      expect(fires("Duruşma ertelendi", "Karar bekleniyor")).toBe(false);
+      expect(fires("", ISTIKLAL)).toBe(false);
+      expect(fires(ISTIKLAL, "")).toBe(false);
+      expect(fires("", "")).toBe(false);
+    });
+
+    it("needs a dot: a duration or a plain count is not a counter", () => {
+      expect(fires("Davada 104 duruşma yapıldı", "Davada 105 duruşma yapıldı")).toBe(false);
+      expect(fires("Hafta 3 gün sürdü", "Hafta 5 gün sürdü")).toBe(false);
+      expect(fires("3 gün sürdü", "5 gün sürdü")).toBe(false);
+    });
+
+    it("needs the noun right after the dot: dates, decimals and thousands are not counters", () => {
+      expect(fires("05.11.2026 tarihli duruşma", "04.11.2026 tarihli duruşma")).toBe(false);
+      expect(fires("2.5 gün sürdü", "3.5 gün sürdü")).toBe(false);
+      expect(fires("1.000 tur attı", "2.000 tur attı")).toBe(false);
+    });
+
+    it("counts only runs of at most four digits", () => {
+      expect(fires("12345. gün", "12346. gün")).toBe(false);
+      expect(fires("1000. gün", "1001. gün")).toBe(true);
+      expect(fires("9999. gün", "9998. gün")).toBe(true);
+    });
+
+    it("does not read look-alike words as counters: Türkiye, turizm, turnuva, gündem, Güney, günlük", () => {
+      expect(fires("3. Türkiye Kupası", "5. Türkiye Kupası")).toBe(false);
+      expect(fires("2. Turizm Zirvesi", "4. Turizm Zirvesi")).toBe(false);
+      expect(fires("1. Turnuva başladı", "2. Turnuva başladı")).toBe(false);
+      expect(fires("Meclis'in 3. gündem maddesi", "Meclis'in 5. gündem maddesi")).toBe(false);
+      expect(fires("Ekibin 2. Güney Kore maçı", "Ekibin 3. Güney Kore maçı")).toBe(false);
+      expect(fires("Fiyatın 1. günlük artışı", "Fiyatın 2. günlük artışı")).toBe(false);
+    });
+
+    it("fires when ANY shared noun has disjoint numbers, and not when the shared noun overlaps", () => {
+      expect(fires("104. duruşmanın 3. günü", "104. duruşmanın 4. günü")).toBe(true);
+      expect(fires("104. duruşmanın 3. günü", "105. duruşmanın 3. günü")).toBe(true);
+      expect(fires("104. duruşma, 3. gün", "104. duruşma, 3. gün")).toBe(false);
+      // One side names two numbers of one noun; any overlap means no veto.
+      expect(fires("Savaşın 4. günü ve 5. günü", "Savaşın 5. günü")).toBe(false);
+      expect(fires("Savaşın 4. günü ve 5. günü", "Savaşın 6. günü")).toBe(true);
+    });
+
+    it("does not fire when one title names a scope noun the other lacks: nested scopes are compared like for like (correctness-2)", () => {
+      // Prod cluster 5893d4e5: odatv counts the trial's days, medyascope the
+      // hearing within the trial and then its day. "104. gün" and "3. gün" are on
+      // different scales, so the pair is not two instalments of one story.
+      expect(fires(ODATV_IBB, MEDYASCOPE_IBB)).toBe(false);
+      expect(fires(MEDYASCOPE_IBB, ODATV_IBB)).toBe(false);
+      expect(fires("İBB davası 104. gün: x", "İBB davasında 3. celsenin 3. günü: x")).toBe(false);
+      expect(fires("İBB davasında 3. celsenin 3. günü: x", "İBB davası 104. gün: x")).toBe(false);
+      // The accepted trade-off: a title that names a scope noun the other lacks no
+      // longer vetoes, even when the shared noun's numbers differ.
+      expect(fires("İBB davasının 104. duruşması", "İBB davasının 105. duruşmasının 2. günü")).toBe(false);
+    });
+
+    it("still fires when both titles name the same set of counter nouns and one of them is disjoint", () => {
+      expect(fires("104. duruşmanın 3. günü", "105. duruşmanın 3. günü")).toBe(true);
+      expect(fires("İBB davasında 3. duruşmada 3. gün", "İBB davasında 4. duruşmada 3. gün")).toBe(true);
+      expect(fires("İBB davasında 3. duruşmada 3. gün", "İBB davasında 3. duruşmada 4. gün")).toBe(true);
+    });
+
+    it("reads only the first HEADLINE_TITLE_MAX_CHARS characters, like the other lanes", () => {
+      const pad = "x ".repeat(HEADLINE_TITLE_MAX_CHARS / 2);
+      expect(fires(`${pad}104. duruşma`, `${pad}105. duruşma`)).toBe(false);
+      expect(fires(`104. duruşma ${pad}`, `105. duruşma ${pad}`)).toBe(true);
+    });
+
+    it("is linear on adversarial input (no backtracking blow-up)", () => {
+      const n = 200_000;
+      const evil = [
+        `1${" ".repeat(n)}x`,
+        `1${" ".repeat(n)}.${" ".repeat(n)}x`,
+        "1.".repeat(n),
+        "1 . ".repeat(n),
+        `${"9".repeat(n)}. gün`,
+        `${"1 ".repeat(n)}. gün`,
+        `1.${" ".repeat(n)}gün`,
+        " ".repeat(n) + "1.",
+      ];
+      const t0 = performance.now();
+      for (const s of evil) {
+        expect(fires(s, `${s}2`)).toBe(false);
+        expect(fires(s, ISTIKLAL)).toBe(false);
+      }
+      expect(performance.now() - t0).toBeLessThan(500);
+    });
+
+    it("handles emoji, surrogate pairs and non-Latin digits without throwing", () => {
+      expect(fires("🚨 104. duruşma 🔥", "🚨 105. duruşma 🔥")).toBe(true);
+      expect(fires("𝟏𝟎𝟒. duruşma", "𝟏𝟎𝟓. duruşma")).toBe(false);
+      expect(fires("١٠٤. duruşma", "١٠٥. duruşma")).toBe(false);
+      expect(fires("104. duruşma'; DROP TABLE articles;--", "105. duruşma")).toBe(true);
+    });
+
+    it("is false for non-string input instead of throwing", () => {
+      expect(counterVetoFires(null as unknown as string, ISTIKLAL)).toBe(false);
+      expect(counterVetoFires(ISTIKLAL, undefined as unknown as string)).toBe(false);
+      expect(counterVetoFires(42 as unknown as string, 43 as unknown as string)).toBe(false);
+    });
+  });
+
+  describe("parity with scripts/lib/cluster (.mjs twin)", () => {
+    interface MjsSide {
+      score: (
+        a: unknown,
+        b: unknown,
+        ea: Iterable<string>,
+        eb: Iterable<string>,
+        tfidf: number,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => { score: number; components: Record<string, unknown> };
+    }
+    let legacy: MjsSide;
+    beforeAll(async () => {
+      legacy = (await import("../../../scripts/lib/cluster/ensemble.mjs")) as unknown as MjsSide;
+    });
+
+    const LONG_PAD = "x ".repeat(HEADLINE_TITLE_MAX_CHARS / 2);
+    const PAIRS: ReadonlyArray<readonly [string | null, string | null, boolean]> = [
+      [ISTIKLAL, YENI_SAFAK, true],
+      [YENI_SAFAK, ISTIKLAL, true],
+      [ISTIKLAL, ISTIKLAL.replace("sona erdi", "başladı"), false],
+      [ISTIKLAL, '"İmamoğlu çıkar amaçlı suç örgütü" davasında 3. gün', false],
+      [ISTIKLAL, '"İmamoğlu çıkar amaçlı suç örgütü" davasında duruşma sona erdi', false],
+      ["DAVANIN 104. DURUŞMASI", "DAVANIN 105. DURUŞMASI", true],
+      ["Seçimin 1. TURUNDA", "Seçimin 2. turunda", true],
+      ["Savaşın 5. GÜNÜNDE", "Savaşın 6. gününde", true],
+      ["Dava 104.duruşma", "Dava 105 . duruşma", true],
+      ["Dava 104. duruşma", "Dava 105. duruşma", true],
+      ["3. Türkiye Kupası", "5. Türkiye Kupası", false],
+      ["Meclis'in 3. gündem maddesi", "Meclis'in 5. gündem maddesi", false],
+      ["12345. gün", "12346. gün", false],
+      ["1000. gün", "1001. gün", true],
+      ["Savaşın 05. günü", "Savaşın 5. günü", false],
+      ["104. duruşmanın 3. günü", "104. duruşmanın 4. günü", true],
+      // correctness-2: nested scopes against a single scope never veto (prod 5893d4e5).
+      [
+        "İBB davası 104. gün: Gizli tanıklar konuştu: 'Gördüm' yok, 'duydum' var",
+        "İBB davasında 3. duruşmada 3. gün: Gizli tanıklar dinleniyor",
+        false,
+      ],
+      [
+        "İBB davasında 3. duruşmada 3. gün: Gizli tanıklar dinleniyor",
+        "İBB davası 104. gün: Gizli tanıklar konuştu: 'Gördüm' yok, 'duydum' var",
+        false,
+      ],
+      ["İBB davası 104. gün: x", "İBB davasında 3. celsenin 3. günü: x", false],
+      ["İBB davasında 3. duruşmada 3. gün", "İBB davasında 4. duruşmada 3. gün", true],
+      ["Davada 104 duruşma yapıldı", "Davada 105 duruşma yapıldı", false],
+      ["🚨 104. duruşma 🔥", "🚨 105. duruşma 🔥", true],
+      [`${LONG_PAD}104. duruşma`, `${LONG_PAD}105. duruşma`, false],
+      [null, YENI_SAFAK, false],
+      ["", "", false],
+    ];
+
+    it("components and score are identical (===) to the .mjs twin for every pair, with and without MinHash", () => {
+      for (const [a, b, expected] of PAIRS) {
+        for (const sig of [false, true]) {
+          const fa = sig ? FP_A : noFp;
+          const fb = sig ? FP_B : noFp;
+          const port = score(fa, fb, [], [], TFIDF, HOURS, { aTitle: a, bTitle: b });
+          const old = legacy.score(fa, fb, [], [], TFIDF, HOURS, { aTitle: a, bTitle: b });
+          expect(port.score, `${a} | ${b}: score`).toBe(old.score);
+          expect(Object.keys(port.components).sort()).toEqual(Object.keys(old.components).sort());
+          expect(Object.keys(port.components)).toContain("counterVeto");
+          for (const k of Object.keys(port.components)) {
+            expect((port.components as Record<string, unknown>)[k], `${a} | ${b}: ${k}`).toBe(old.components[k]);
+          }
+          expect(port.components.counterVeto, `${a} | ${b}`).toBe(expected);
+        }
+      }
+    });
+
+    it("the strict auto-accept result carries counterVeto: false in both", () => {
+      const same = { strict: "c".repeat(40), signature: null };
+      const port = score(same, same, [], [], TFIDF, HOURS, { aTitle: ISTIKLAL, bTitle: YENI_SAFAK });
+      const old = legacy.score(same, same, [], [], TFIDF, HOURS, { aTitle: ISTIKLAL, bTitle: YENI_SAFAK });
+      expect(port.components.counterVeto).toBe(false);
+      expect(old.components.counterVeto).toBe(false);
     });
   });
 });
