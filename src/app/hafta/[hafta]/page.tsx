@@ -23,6 +23,8 @@ import {
   weekLabelTr,
   WEEK_ARCHIVE_FIRST,
 } from "@/lib/weekly/week-archive";
+import { weekArchiveRobots } from "@/lib/weekly/week-archive-robots";
+import { isArchiveWeekInRange } from "@/lib/weekly/week-key";
 import { summariseWeek } from "@/lib/weekly/weekly-query";
 
 // /hafta/[hafta] — ISO-week permalink into the archive (owned-channels
@@ -45,10 +47,9 @@ async function validKeyOrNotFound(rawKey: string): Promise<string> {
   if (!parsed) notFound();
 
   const currentKey = weekKeyFromMs(Date.now());
-  // String comparison is safe here: both sides are the canonical
-  // 'YYYY-Www' shape (zero-padded week), so lexicographic order matches
-  // chronological order within the archive's bounded key space.
-  if (rawKey < WEEK_ARCHIVE_FIRST || rawKey > currentKey) {
+  // The range check is a string compare (isArchiveWeekInRange explains why it
+  // is sound), shared with generateMetadata below.
+  if (!isArchiveWeekInRange(rawKey, currentKey)) {
     notFound();
   }
   return currentKey;
@@ -57,16 +58,34 @@ async function validKeyOrNotFound(rawKey: string): Promise<string> {
 export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
+  // Same order as the page body: params, THEN connection(), THEN parse. This
+  // route is request-time, which is why the metadata can report the week read
+  // (the static /hafta, /trends and /timeline skip a failure noindex because a
+  // noindex baked into a prerender would outlive the failure; that cannot
+  // happen here) and why the clock read below is allowed.
   const { hafta } = await params;
+  await connection();
   const parsed = parseWeekKey(hafta);
   if (!parsed) return {};
 
   const label = weekLabelTr(hafta);
-  return sharePageMetadata({
+  const base = sharePageMetadata({
     title: `Haftanın yelpazesi — ${label}`,
     description: `${label}: hangi taraf neyi öne çıkardı? Bölge payları, en geniş yelpazeli haberler ve kör noktalar.`,
     path: `/hafta/${hafta}`,
   });
+
+  // An out-of-range key 404s in the body (and in the edge gate). Never feed it
+  // to the cached read: every distinct key would become its own cache entry.
+  if (!isArchiveWeekInRange(hafta, weekKeyFromMs(Date.now()))) return base;
+
+  // The page body's own "use cache" call (same key), so this adds no round
+  // trip. noindex,follow when the read failed (null: the "hesaplanamıyor"
+  // shell) or the week has no rows (the empty shell); a normal week keeps the
+  // layout's indexable default.
+  const read = await getWeekArchiveClusters(hafta);
+  const robots = weekArchiveRobots(read);
+  return { ...base, ...(robots ? { robots } : {}) };
 }
 
 // No generateStaticParams: the archive grows every week and a stale

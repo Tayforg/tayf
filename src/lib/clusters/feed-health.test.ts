@@ -101,6 +101,9 @@ function row(opts: {
    * that only care about the fetch-status axis don't have to think about
    * the yield axis they're not exercising. */
   recent?: Array<{ id: string }>;
+  /** `sources.fetch_fail_streak`. The key is left off the row entirely when
+   * the test does not pass it, which is the legacy / test-double shape. */
+  fetch_fail_streak?: number | null;
 }) {
   recentSeq += 1;
   return {
@@ -108,6 +111,7 @@ function row(opts: {
     fetch_last_status: opts.fetch_last_status ?? 200,
     fetch_last_at: opts.fetch_last_at === undefined ? ago(0) : opts.fetch_last_at,
     recent: opts.recent ?? [{ id: `recent-${recentSeq}` }],
+    ...("fetch_fail_streak" in opts ? { fetch_fail_streak: opts.fetch_fail_streak } : {}),
   };
 }
 
@@ -152,6 +156,12 @@ describe("getZoneFeedHealth query shape", () => {
     expect(String(state.selectArgs[0])).toContain("recent:articles(id)");
     expect(String(state.selectArgs[0])).toContain("fetch_last_status");
     expect(String(state.selectArgs[0])).toContain("fetch_last_at");
+  });
+
+  it("h49-ops-1: selects fetch_fail_streak so a refused 2xx body is not counted as a good fetch", async () => {
+    await getZoneFeedHealth();
+    const state = fixture.lastState as BuilderState;
+    expect(String(state.selectArgs[0])).toContain("fetch_fail_streak");
   });
 
   it("adds a 72h gte on recent.published_at and probes with limit(1, { referencedTable: 'recent' }) — same cheap-compute shape as active-count.ts", async () => {
@@ -285,6 +295,102 @@ describe("getZoneFeedHealth health computation", () => {
     expect(health.bagimsiz.fetchOk).toBe(0);
     expect(health.bagimsiz.healthy).toBe(0);
     expect(health.bagimsiz.degraded).toBe(true);
+  });
+
+  describe("h49-ops-1: a 2xx/304 answer with a fail streak was refused, not fetched", () => {
+    // A parsed 2xx/304 resets fetch_fail_streak to 0, so status 200 together
+    // with a streak above 0 is an HTML page or a parse failure. 5 such feeds
+    // (t24, turkiye-today, voa-turkce, yenisoz, rudaw-turkce) sit at 200 with
+    // streaks of 34-60 and re-stamp fetch_last_at on every daily retry.
+    it("a 200 fetched 10 minutes ago with fetch_fail_streak 5 is NOT fetch-ok", async () => {
+      fixture.data = [
+        row({
+          bias: "center",
+          fetch_last_status: 200,
+          fetch_last_at: ago(10 * 60 * 1000),
+          fetch_fail_streak: 5,
+        }),
+      ];
+      const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+      expect(health.bagimsiz.total).toBe(1);
+      expect(health.bagimsiz.fetchOk).toBe(0);
+      expect(health.bagimsiz.fetchOkShare).toBe(0);
+      expect(health.bagimsiz.healthy).toBe(0);
+      expect(health.bagimsiz.degraded).toBe(true);
+    });
+
+    it("a 304 with a fail streak is NOT fetch-ok either", async () => {
+      fixture.data = [
+        row({
+          bias: "center",
+          fetch_last_status: 304,
+          fetch_last_at: ago(10 * 60 * 1000),
+          fetch_fail_streak: 1,
+        }),
+      ];
+      const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+      expect(health.bagimsiz.fetchOk).toBe(0);
+    });
+
+    it.each([
+      ["streak 0", 0],
+      ["streak null", null],
+      ["streak undefined", undefined],
+    ])("the same row with %s IS fetch-ok", async (_name, streak) => {
+      fixture.data = [
+        row({
+          bias: "center",
+          fetch_last_status: 200,
+          fetch_last_at: ago(10 * 60 * 1000),
+          fetch_fail_streak: streak,
+        }),
+      ];
+      const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+      expect(health.bagimsiz.fetchOk).toBe(1);
+      expect(health.bagimsiz.healthy).toBe(1);
+      expect(health.bagimsiz.degraded).toBe(false);
+    });
+
+    it("a row that omits the fetch_fail_streak key (legacy shape) IS fetch-ok", async () => {
+      fixture.data = [
+        row({ bias: "center", fetch_last_status: 200, fetch_last_at: ago(10 * 60 * 1000) }),
+      ];
+      expect("fetch_fail_streak" in (fixture.data[0] as object)).toBe(false);
+      const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+      expect(health.bagimsiz.fetchOk).toBe(1);
+    });
+
+    it("only the refused feeds drop out of the zone share", async () => {
+      // 10 bagimsiz sources: 7 healthy, 3 refused 200s (streak 34-60).
+      fixture.data = [
+        ...Array.from({ length: 7 }, () =>
+          row({ bias: "center", fetch_last_status: 200, fetch_last_at: ago(0), fetch_fail_streak: 0 }),
+        ),
+        ...[34, 58, 60].map((streak) =>
+          row({ bias: "center", fetch_last_status: 200, fetch_last_at: ago(0), fetch_fail_streak: streak }),
+        ),
+      ];
+      const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+      expect(health.bagimsiz.total).toBe(10);
+      expect(health.bagimsiz.fetchOk).toBe(7);
+      expect(health.bagimsiz.fetchOkShare).toBe(0.7);
+      expect(health.bagimsiz.degraded).toBe(false);
+    });
+
+    it("four refused 200s out of ten push the zone under the 0.7 gate", async () => {
+      // 10 sources: 6 healthy, 4 refused 200s -> 0.6 < 0.7 -> degraded.
+      fixture.data = [
+        ...Array.from({ length: 6 }, () =>
+          row({ bias: "pro_government", fetch_last_status: 200, fetch_last_at: ago(0), fetch_fail_streak: 0 }),
+        ),
+        ...Array.from({ length: 4 }, () =>
+          row({ bias: "pro_government", fetch_last_status: 200, fetch_last_at: ago(0), fetch_fail_streak: 60 }),
+        ),
+      ];
+      const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+      expect(health.iktidar.fetchOkShare).toBeCloseTo(0.6);
+      expect(health.iktidar.degraded).toBe(true);
+    });
   });
 
   it("uses zoneOf from @/lib/bias/config to bucket every bias category", async () => {

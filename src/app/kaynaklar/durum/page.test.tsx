@@ -414,6 +414,120 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     expect(textOf(cells[5])).toBe("403");
   });
 
+  describe("a success code with a fail streak (h49-ops-1)", () => {
+    // t24, turkiye-today, voa-turkce, yenisoz and rudaw-turkce answer 200 with
+    // an HTML page: ingest stores the 200, counts a failure and quarantines. A
+    // bare "200" under "Son HTTP durumu" next to "erişim yok · karantinada" was
+    // contradictory on the public page.
+    const quarantinedUntil = new Date(NOW + 20 * HOUR).toISOString();
+
+    it("a quarantined 200 with streak 60 reads '200 · geçersiz akış' in the HTTP cell", () => {
+      const tree = body([
+        rawRow({
+          slug: "t24",
+          name: "T24",
+          latest: stale,
+          fetch_last_status: 200,
+          fetch_fail_streak: 60,
+          fetch_quarantined_until: quarantinedUntil,
+        }),
+      ]);
+      const cells = elements(rowOf(tree, "t24")).filter((e) => e.type === "td");
+      const cellTexts = cells.map((cell) => textOf(cell));
+
+      // columns: Kaynak, Sessiz, Tür, Bölge, Son haber, Son HTTP durumu, 7 gün
+      expect(cellTexts[5]).toBe("200 · geçersiz akış");
+      expect(cellTexts[1]).toContain("erişim yok");
+      expect(cellTexts[1]).toContain("karantinada");
+    });
+
+    it("the HTTP cell may wrap below sm so the 19-character label does not widen the phone table", () => {
+      // The label cannot wrap under a bare whitespace-nowrap, so its ~160 px
+      // min-content would undo the phone narrowing of the headers. Below sm it
+      // wraps at its spaces; from sm up it stays on one line.
+      const tree = body([
+        rawRow({
+          slug: "t24",
+          name: "T24",
+          latest: stale,
+          fetch_last_status: 200,
+          fetch_fail_streak: 60,
+          fetch_quarantined_until: quarantinedUntil,
+        }),
+      ]);
+      const cells = elements(rowOf(tree, "t24")).filter((e) => e.type === "td");
+      const cls = String(cells[5]?.props?.className).split(/\s+/);
+
+      expect(cls).toContain("sm:whitespace-nowrap");
+      expect(cls).not.toContain("whitespace-nowrap");
+      expect(textOf(cells[5])).toBe("200 · geçersiz akış");
+    });
+
+    it("an unquarantined 200 with a streak of 2 reads '200 · geçersiz akış' too", () => {
+      const tree = body([
+        rawRow({ slug: "yeni-bozuk", name: "Yeni Bozuk", latest: stale, fetch_fail_streak: 2 }),
+      ]);
+      const cells = elements(rowOf(tree, "yeni-bozuk")).filter((e) => e.type === "td");
+      expect(textOf(cells[5])).toBe("200 · geçersiz akış");
+    });
+
+    it("a 304 with a fail streak reads '304 · geçersiz akış'", () => {
+      const tree = body([
+        rawRow({
+          slug: "bozuk-304",
+          name: "Bozuk 304",
+          latest: stale,
+          fetch_last_status: 304,
+          fetch_fail_streak: 1,
+        }),
+      ]);
+      const cells = elements(rowOf(tree, "bozuk-304")).filter((e) => e.type === "td");
+      expect(textOf(cells[5])).toBe("304 · geçersiz akış");
+    });
+
+    it("a healthy 200 (streak 0) still reads '200'", () => {
+      const tree = body([rawRow({ slug: "saglam", name: "Sağlam Haber", fetch_fail_streak: 0 })]);
+      const cells = elements(rowOf(tree, "saglam")).filter((e) => e.type === "td");
+      expect(textOf(cells[5])).toBe("200");
+    });
+
+    it("a legacy row without the streak column still reads '200'", () => {
+      const tree = body([rawRow({ slug: "eski", name: "Eski Haber" })]);
+      const cells = elements(rowOf(tree, "eski")).filter((e) => e.type === "td");
+      expect(textOf(cells[5])).toBe("200");
+    });
+
+    it("a quarantined 403 keeps its bare digits (the streak only relabels success codes)", () => {
+      const tree = body([
+        rawRow({
+          slug: "halk-tv",
+          name: "Halk TV",
+          latest: stale,
+          fetch_last_status: 403,
+          fetch_fail_streak: 60,
+          fetch_quarantined_until: quarantinedUntil,
+        }),
+      ]);
+      const cells = elements(rowOf(tree, "halk-tv")).filter((e) => e.type === "td");
+      expect(textOf(cells[5])).toBe("403");
+    });
+
+    it("a quarantined row with no HTTP answer (0) keeps its dash", () => {
+      const tree = body([
+        rawRow({
+          slug: "cevapsiz-karantina",
+          name: "Cevapsız Karantina",
+          latest: stale,
+          fetch_last_status: 0,
+          fetch_fail_streak: 60,
+          fetch_quarantined_until: quarantinedUntil,
+        }),
+      ]);
+      const cells = elements(rowOf(tree, "cevapsiz-karantina")).filter((e) => e.type === "td");
+      expect(textOf(cells[5])).toBe("—");
+    });
+  });
+
   it("a row that has never been fetched shows a dash in the HTTP cell", () => {
     const tree = body([
       rawRow({ slug: "yeni", name: "Yeni Haber", fetch_last_status: null }),

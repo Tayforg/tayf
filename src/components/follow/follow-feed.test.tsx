@@ -246,6 +246,78 @@ describe("EmptyState", () => {
     expect(h2?.props?.ref).toBe(headingRef);
     expect(h2?.props?.tabIndex).toBe(-1);
   });
+
+  // h49-browser-2: the two links are the only actions for a new visitor, and
+  // were 101x18 / 104x18 bare text links. On phones (max-sm) they get the site's
+  // 44 px floor; sm and up is unchanged (max-sm:min-h-11 never applies there).
+  describe("empty-state links (h49-browser-2)", () => {
+    const TOUCH_TOKENS = ["inline-flex", "items-center", "max-sm:min-h-11", "touch-manipulation"];
+    const tokensOf = (el: El) =>
+      String(el.props?.className ?? "")
+        .split(/\s+/)
+        .filter(Boolean);
+
+    /** The <p> that holds the two links, plus its direct Link children. */
+    function linkRow() {
+      const els = collect(EmptyState({}));
+      const row = els.find(
+        (el) =>
+          el.type === "p" &&
+          collect(el.props?.children).filter((c) => typeof c.props?.href === "string").length === 2,
+      );
+      const links = collect(row?.props?.children).filter((c) => typeof c.props?.href === "string");
+      return { row, links };
+    }
+
+    it("both links keep their target and label", () => {
+      const { links } = linkRow();
+
+      expect(links.map((l) => [l.props?.href, textOf(l)])).toEqual([
+        ["/konu", "Konulara göz at"],
+        ["/", "Ana sayfada ara"],
+      ]);
+    });
+
+    it("both links carry the phone 44 px tokens", () => {
+      const { links } = linkRow();
+
+      expect(links).toHaveLength(2);
+      for (const l of links) expect(tokensOf(l)).toEqual(expect.arrayContaining(TOUCH_TOKENS));
+    });
+
+    it("keeps the dotted-underline style and never forces a min-height on desktop", () => {
+      const { links } = linkRow();
+
+      for (const l of links) {
+        const tokens = tokensOf(l);
+        expect(tokens).toEqual(
+          expect.arrayContaining(["underline", "decoration-dotted", "underline-offset-2", "hover:text-primary"]),
+        );
+        expect(tokens.filter((t) => /^min-h-/.test(t))).toEqual([]);
+      }
+    });
+
+    it("still renders both links inside the same <p>, separated by ' · '", () => {
+      const { row } = linkRow();
+
+      expect(row).toBeDefined();
+      expect(textOf(row)).toBe("Konulara göz at · Ana sayfada ara");
+      const markup = renderToStaticMarkup(<EmptyState />);
+      expect(markup).toMatch(
+        /<p class="text-sm"><a [^>]*href="\/konu"[^>]*>Konulara göz at<\/a> · <a [^>]*href="\/"[^>]*>Ana sayfada ara<\/a><\/p>/,
+      );
+    });
+
+    it("the rendered anchors carry the tokens too", () => {
+      const markup = renderToStaticMarkup(<EmptyState />);
+      const anchors = [...markup.matchAll(/<a [^>]*>/g)].map((m) => m[0]);
+
+      expect(anchors).toHaveLength(2);
+      for (const a of anchors) {
+        for (const t of TOUCH_TOKENS) expect(a).toContain(t);
+      }
+    });
+  });
 });
 
 describe("FollowSection -- gündem (entity hub) follow", () => {

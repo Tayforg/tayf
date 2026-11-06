@@ -103,8 +103,11 @@ const spectrumWrapClass =
 const spectrumHeadingClass = "text-sm font-semibold text-foreground";
 const pagerClass =
   "flex items-center justify-between gap-3 pt-2 text-sm";
+// Phones get the site's 44 px hit-area floor (max-sm:min-h-11); sm and up keep
+// the plain text-link height. pagerClass stays items-center so the taller phone
+// links line up with the "Sayfa N" label.
 const pagerLinkClass =
-  "font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary";
+  "inline-flex max-sm:min-h-11 items-center touch-manipulation font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary";
 const pagerMetaClass = "text-xs text-muted-foreground";
 
 const UNAVAILABLE_COPY =

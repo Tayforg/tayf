@@ -76,11 +76,20 @@ export function parseWeekKey(
   return { isoYear, week };
 }
 
+/** Whether `key` lies in [WEEK_ARCHIVE_FIRST, currentKey], both ends inclusive.
+ * A pure string compare that does NOT parse: callers reject a malformed key
+ * first (parseWeekKey), and `currentKey` is `weekKeyFromMs(<a clock read>)`
+ * taken by the caller. The compare is sound because a parsed key is always
+ * 'YYYY-Www' with fixed-width digits, so lexicographic order is chronological
+ * order. Shared by the /hafta/[hafta] page (404 and generateMetadata) and
+ * isServableWeekKey (the edge gate). */
+export function isArchiveWeekInRange(key: string, currentKey: string): boolean {
+  return key >= WEEK_ARCHIVE_FIRST && key <= currentKey;
+}
+
 /** Whether /hafta/[key] has anything to serve at `nowMs`: a well-formed key
  * from WEEK_ARCHIVE_FIRST through the current Istanbul week. Everything else
- * (garbage, W4, lower-case w, before launch, a future week) can never resolve.
- * The string compare is sound because a parsed key is always 'YYYY-Www' with
- * fixed-width digits, so lexicographic order is chronological order. */
+ * (garbage, W4, lower-case w, before launch, a future week) can never resolve. */
 export function isServableWeekKey(key: string, nowMs: number): boolean {
-  return parseWeekKey(key) !== null && key >= WEEK_ARCHIVE_FIRST && key <= weekKeyFromMs(nowMs);
+  return parseWeekKey(key) !== null && isArchiveWeekInRange(key, weekKeyFromMs(nowMs));
 }
