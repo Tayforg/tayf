@@ -121,7 +121,7 @@ curl -sS -X POST https://www.tayfhaber.com/api/admin \
 
 ### `GET /api/cron/headline`
 
-LLM-generates neutral Turkish headlines (`title_tr_neutral`) for clusters that still lack one. This is the **only** Vercel cron in the worker-stream architecture: ingestion, cluster fan-out, and og:image backfill all run on `pg_cron` schedules (`ingest-drain`, `cluster-drain`, `image-drain`) that `net.http_post` directly into the Supabase Edge Functions. The legacy `/api/cron/ingest` and `/api/cron/backfill-images` routes have been removed.
+LLM-generates neutral Turkish headlines (`title_tr_neutral`) for clusters that still lack one. This is one of the five Vercel crons in `vercel.ts` (headline `*/5 * * * *`, digest `0 6 * * 6`, fact-checks `23 * * * *`, social `*/20 5-20 * * *`, alerts-webhooks `*/10 * * * *`). Ingestion, cluster fan-out, and og:image backfill run on `pg_cron` schedules (`ingest-drain`, `cluster-drain`, `image-drain`) that `net.http_post` directly into the Supabase Edge Functions. The legacy `/api/cron/ingest` and `/api/cron/backfill-images` routes have been removed.
 
 **Headers**: `Authorization: Bearer <CRON_SECRET>` (required — the route is FAIL-CLOSED on a missing or empty `CRON_SECRET` in the runtime environment and returns 503 on every invocation in that case).
 

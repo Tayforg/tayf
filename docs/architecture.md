@@ -2,9 +2,9 @@
 
 ## System Overview
 
-Tayf is a Next.js 16 application that aggregates Turkish news from 144 RSS sources, clusters related articles, and presents bias analysis. Ingestion and clustering run as an **event-driven worker stream** on Supabase: a `pg_cron` `ingest-drain` job pokes the `ingest` Edge Function, an `AFTER INSERT` trigger pushes work onto `pgmq` queues, and parallel `pg_cron` `cluster-drain` / `image-drain` jobs drain those queues into co-located `cluster-consumer` and `image-consumer` Edge Functions. The previous tmux-based long-running workers (`scripts/rss-worker.mjs`, `scripts/cluster-worker.mjs`, `scripts/image-worker.mjs`) are decommissioned. The worker stream itself runs on `pg_cron`; the app side has five Vercel crons (`vercel.ts`): `/api/cron/headline` (`*/5 * * * *`), `/api/cron/digest` (`0 6 * * 6`), `/api/cron/fact-checks` (`23 * * * *`), `/api/cron/social` (`*/20 5-20 * * *`) and `/api/cron/alerts-webhooks` (`*/10 * * * *`).
+Tayf is a Next.js 16 application that aggregates Turkish news from the active RSS sources (118 of 144 registered on 2026-11-06), clusters related articles, and presents bias analysis. Ingestion and clustering run as an **event-driven worker stream** on Supabase: a `pg_cron` `ingest-drain` job pokes the `ingest` Edge Function, an `AFTER INSERT` trigger pushes work onto `pgmq` queues, and parallel `pg_cron` `cluster-drain` / `image-drain` jobs drain those queues into co-located `cluster-consumer` and `image-consumer` Edge Functions. The previous tmux-based long-running workers (`scripts/rss-worker.mjs`, `scripts/cluster-worker.mjs`, `scripts/image-worker.mjs`) are decommissioned. The worker stream itself runs on `pg_cron`; the app side has five Vercel crons (`vercel.ts`): `/api/cron/headline` (`*/5 * * * *`), `/api/cron/digest` (`0 6 * * 6`), `/api/cron/fact-checks` (`23 * * * *`), `/api/cron/social` (`*/20 5-20 * * *`) and `/api/cron/alerts-webhooks` (`*/10 * * * *`).
 
-For the full ADR (decision matrix, alternatives considered, audit findings addressed, migration plan), see [`adr/001-worker-stream-system.md`](adr/001-worker-stream-system.md). For operator cutover steps, see [`runbook.md`](runbook.md).
+For the full ADR (decision matrix, alternatives considered, audit findings addressed, migration plan), see [`adr/001-worker-stream-system.md`](adr/001-worker-stream-system.md). For operator cutover steps, see [`migration-guide.md`](migration-guide.md).
 
 ```mermaid
 graph TB
@@ -29,6 +29,7 @@ graph TB
         CL[(clusters / cluster_articles)]
         QC[(pgmq: cluster_work)]
         QI[(pgmq: image_backfill)]
+        QA[(pgmq: cluster_attach, shadow)]
         WM[(worker_metrics view)]
     end
 
@@ -36,10 +37,12 @@ graph TB
     INGEST -->|upsert| ART
     ART -.AFTER INSERT trigger.-> QC
     ART -.AFTER INSERT image_url IS NULL.-> QI
+    ART -.AFTER INSERT probe trigger.-> QA
     PGCRON_C -->|net.http_post| CLUSTER
     PGCRON_I -->|net.http_post| IMAGE
     CLUSTER -->|read+archive| QC
     CLUSTER -->|upsert| CL
+    CLUSTER -->|read, shadow only| QA
     IMAGE -->|read+archive| QI
     IMAGE -->|update image_url| ART
     HEADLINE_CRON -->|fill title_tr_neutral| CL
@@ -76,8 +79,8 @@ graph TB
 | Stage | Surface | Cadence | Responsibility |
 |---|---|---|---|
 | Ingest trigger | pg_cron `ingest-drain` → `net.http_post` | `*/3 * * * *` | Service-role-bearer-checked invocation of the `ingest` Edge Function, scheduled inside Postgres so the cron registry (`cron.job`) is the single source of truth for the worker stream's cadence |
-| Ingest | Supabase Edge Function `ingest` | per invocation | Fans out across 144 RSS sources with a concurrency-bounded pool, charset-aware decode (CP1254 / iso-8859-9 + UTF-8), unified sha1-of-shingles `content_hash`, idempotent upsert into `articles` |
-| Enqueue | Postgres trigger `AFTER INSERT ON articles` | per row | `pgmq.send('cluster_work', ...)` for politics articles; `pgmq.send('image_backfill', ...)` when `image_url IS NULL` |
+| Ingest | Supabase Edge Function `ingest` | per invocation | Fans out across the active RSS sources (118 of 144 registered on 2026-11-06) with a concurrency-bounded pool, charset-aware decode (CP1254 / iso-8859-9 + UTF-8), unified sha1-of-shingles `content_hash`, idempotent upsert into `articles` |
+| Enqueue | Postgres trigger `AFTER INSERT ON articles` | per row | `pgmq.send('cluster_work', ...)` for politics articles; `pgmq.send('image_backfill', ...)` when `image_url IS NULL`. The migration 151 trigger `articles_cluster_attach_probe` feeds `cluster_attach` with non-politics articles of an outlet or a wire, which `cluster-consumer` drains into `cluster_attach_shadow`, and nothing is clustered from it while `CLUSTER_ATTACH_MODE` is unset ([`cluster-attach-shadow-review.md`](cluster-attach-shadow-review.md)). |
 | Cluster drain | Edge Function `cluster-consumer`, scheduled by `pg_cron` | `* * * * *` | `pgmq.read(vt=60, qty=2)` in a loop bounded by a 30 s wall budget (`VT_SECONDS`, `BATCH_SIZE`, `MAX_INVOCATION_MS`) → run the ensemble scorer ([Clustering](#clustering-cluster-consumer)) → upsert into `clusters` + `cluster_articles` → `pgmq.archive` on success, and `pgmq.archive` (never delete, so the payload survives in `pgmq.a_cluster_work`) on permanent failure (a 4th read, `read_ct > MAX_READS`) |
 | Image drain | Edge Function `image-consumer`, scheduled by `pg_cron` | `*/5 * * * *` | Fetch first 50 KB of article URL, extract `og:image` / `twitter:image`, SSRF guard (RFC1918/169.254/loopback/IPv6 link-local), update `articles.image_url`. A miss bumps `image_backfill_attempts` and `image_backfill_attempted_at`; the Image requeue stage below re-sends it, and the 5th miss parks the row. A page the site answers with a Cloudflare challenge (403 + `cf-mitigated: challenge`) is a miss too but is counted apart (`blocked`, `blockedBySource` in the drain summary, slugs only), and `ops_health_report()` row 21 `image_coverage` warns when a source's image-less share jumps (migration 161) |
 | Image requeue | `pg_cron` job `image-backfill-requeue` calling `public.image_backfill_requeue(40)` | `2,17,32,47 * * * *` | Re-sends to the `image_backfill` queue the articles that are still image-less after 1 to 2 attempts (the second and third try), last tried over 2 h ago and created within 7 d, newest first, at most 40 per run (four runs an hour), skipping any already queued (so a backlog never doubles). Each message is sent with a visibility delay of 20 s per message already sent in the run (capped at 900 s), so a batch becomes visible one message per 20 s and does not starve the fresh articles behind it. Writes no article row. The `image-consumer` counts each miss and parks the row (`image_backfill_attempted_at` pushed 7 d ahead) on the 5th, but this job only re-sends rows with 1 or 2 attempts, so an article gets at most 2 re-sends. Migration 142 added the job (hourly, 150 messages); migration 154 made it four runs of 40 with the stagger. |
@@ -90,7 +93,7 @@ graph TB
 | Jev cluster audit | Edge Function `jev-shadow` (audit mode), scheduled by `pg_cron` `jev-cluster-audit` | `55 3 * * *` | Nightly accuracy audit: pokes `jev-shadow` with `{"mode":"audit"}`, sampling up to 500 pairs each for `pair_positive` and `pair_negative` against cluster membership rather than the live stream. Migration 063. |
 | Jev sinyalleri | Postgres SQL functions, scheduled by `pg_cron` `jev-signals-nightly` | `05 4 * * *` | SQL-only nightly job (no Edge Function, no HTTP): `jev_source_drift_compute()` writes per-source label drift against each source's trailing 14-day baseline into `source_drift_daily`, `jev_kap_canary_compute()` raises a `jev_alerts` row when the day's `kap_class` disagreement rate crosses 10%. Zero gateway calls. Failures surface only in `cron.job_run_details` -- no Sentry. Migration 065. |
 
-The pgmq queues give at-least-once delivery with visibility timeouts; the `worker_metrics` view feeds `/api/health` and `/api/metrics`. Cold-start risk on the Edge Functions is mitigated by the regular pg_cron cadence keeping the instances warm.
+The pgmq queues give at-least-once delivery with visibility timeouts; the `worker_metrics` view feeds `/api/health` and `/api/metrics` (it names `cluster_work` and `image_backfill` only; `cluster_attach` is left out on purpose, migration 153). Cold-start risk on the Edge Functions is mitigated by the regular pg_cron cadence keeping the instances warm.
 
 ### Jev live marginal verification (P3, migration 064)
 
@@ -339,17 +342,19 @@ Entity hubs (roadmap G2) give every curated person, party, institution or countr
 | `excludes` | Foreign or municipal cues that veto a non-trusted alias. The pattern is prefixed with a negative lookahead over the whole folded text (`^(?![\s\S]*(?:cue\|cue))[\s\S]*…`). Used by `meclis`, `aym` and `tcmb` |
 | `requires` | Cues of which at least one must appear anywhere in the text for a non-trusted alias to count (a positive lookahead placed after the exclude one). Used by `meclis` only: the bare "Meclis" needs `tbmm`, `genel kurul`, a party name and the like |
 | `quantityGuard` | Keeps single-word forms out of amounts such as "100 dolar" or "2,1 milyar dolarlık" (`dolar` only) |
+| `headlineOnly` | The hub regex runs on `title_tr` and `title_tr_neutral` only, ignoring the summary's first line (migration 170, sent as `p_headline_only`). Set on `akp` only |
 
 Cue phrases are folded lower-case ASCII and open-ended, except a single word of three letters or fewer, which takes a word boundary (`fed` never hits `federasyon`). A trusted alias stays bare, so a foreign cue elsewhere in the story cannot drop it.
 
-**RPCs.** Both are `SECURITY DEFINER` with an empty `search_path`, executable by `service_role` only (the Next.js server calls them through `createReaderClient()`, which aborts after `READER_TIMEOUT_MS`, 4 s; the anon key cannot reach them). They return `(id, total)`, where `total` is `count(*) over ()` evaluated before the `LIMIT`, so it is the full match count in the window. Both window on `clusters.updated_at` (default 14 days, never wider than 30; the app never passes `p_since`, so no clock is read in app code), keep only live clusters (`not is_archived`, `article_count >= 2`, `merged_into is null`) and clamp `p_limit` to 1..50.
+**RPCs.** All three are `SECURITY DEFINER` with an empty `search_path`, executable by `service_role` only (the Next.js server calls them through `createReaderClient()`, which aborts after `READER_TIMEOUT_MS`, 4 s; the anon key cannot reach them). They return `(id, total)`, where `total` is `count(*) over ()` evaluated before the `LIMIT`, so it is the full match count in the window. All three window on `clusters.updated_at` (default 14 days, never wider than 30; the app never passes `p_since`, so no clock is read in app code), keep only live clusters (`not is_archived`, `article_count >= 2`, `merged_into is null`) and clamp `p_limit` to 1..50.
 
 | RPC | Migration | Match | Order |
 |---|---|---|---|
 | `entity_cluster_ids(p_variants, p_since, p_limit)` | 123 | Three OR'd stemmed `websearch_to_tsquery` variants of the label against `clusters.search_tsv` (the block of `search_cluster_ids`, 083) | `updated_at desc, id` |
 | `entity_cluster_ids_v2(p_queries, p_patterns, p_since, p_limit)` | 125, 156 | Recall: the stemmed tsquery of `p_queries` (OR'd, first 12) on the same GIN index. Precision, ANDed: the folded title, neutral title and the summary's first line (156: the text before its first newline, so a related-news headline pasted under the article does not count) must match any of `p_patterns` (first 12, empty strings removed) with the `~` operator | `first_published desc, id` |
+| `entity_cluster_ids_v3(p_queries, p_patterns, p_since, p_limit, p_headline_only)` | 170 | Same as v2. When `p_headline_only` is true, the regex runs on the folded `title_tr` and `title_tr_neutral` only; false or null gives v2's text: title, neutral title and the summary's first line | `first_published desc, id` |
 
-123 alone lists every cluster whose *stem* matches, and the Turkish stemmer collapses unrelated words (`devam` under DEVA, `domuz` under Dolar), which is why 125 adds the literal-match guard. v2 orders by `first_published` because the cards print that age. `entity-hub-query.ts` calls v2 first and falls back to 123 only on `PGRST202` (125 not applied yet), so the app can deploy before the migration.
+123 alone lists every cluster whose *stem* matches, and the Turkish stemmer collapses unrelated words (`devam` under DEVA, `domuz` under Dolar), which is why 125 adds the literal-match guard. v2 orders by `first_published` because the cards print that age. `entity-hub-query.ts` calls v3 first, with `p_headline_only` taken from the hub spec (true for `akp` only; it is also part of the cache key). On `PGRST202` it retries the four-argument v2, and on `PGRST202` again it falls back to 123, so the app can deploy before either migration.
 
 **App constants** (`src/lib/entities/entity-hub.ts`): `ENTITY_HUB_WINDOW_DAYS` 14 (mirrors the SQL default), `ENTITY_HUB_LIMIT` 20 (clusters listed), `ENTITY_HUB_MIN_INDEXABLE` 3 (a hub with fewer clusters is thin and gets `noindex, follow`) and `ENTITY_HUB_MAX_TERMS` 12 (the most queries and patterns sent, mirroring the `[1:12]` slices in 125). The page note reads "Son 14 günde 422 küme · en yeni 20 tanesi listeleniyor".
 

@@ -15,17 +15,19 @@ import { currentTimeMs } from "@/lib/time";
 import {
   ENTITY_HUB_LIMIT,
   entityByKey,
+  entityHubHeadlineOnly,
   entityHubPatterns,
   entityHubQueries,
 } from "./entity-hub";
 
 // /gundem/[key] entity hub data. Mirrors src/lib/clusters/search-query.ts: the
-// entity's curated spellings are resolved to ids by migration 125's
-// `entity_cluster_ids_v2` RPC, then ONE `.in('id', ids)` embed select renders
-// just those ids (see 083's header for why ids-first beats an embedded select).
+// entity's curated spellings are resolved to ids by migration 170's
+// `entity_cluster_ids_v3` RPC (125's v2 plus a headline-only switch), then ONE
+// `.in('id', ids)` embed select renders just those ids (see 083's header for
+// why ids-first beats an embedded select).
 //
 // Precision: a stemmed tsquery alone lists "devam" under DEVA and "domuz" under
-// Dolar (the Turkish stemmer collapses them), so v2 takes two inputs.
+// Dolar (the Turkish stemmer collapses them), so v2 and v3 take two inputs.
 // `p_queries` (entityHubQueries) are the Turkish lexeme spellings of EVERY
 // curated form ("AK Parti" and "AKP", four spellings of Zelenski) and give
 // recall on the GIN index; `p_patterns` (entityHubPatterns) are word-boundary
@@ -33,10 +35,19 @@ import {
 // literally name the entity stay. Both lists are built from rising-entities.ts,
 // never from request input.
 //
-// Until 125 is applied PostgREST answers PGRST202 ("function not in the schema
-// cache"): only then the read falls back to migration 123's v1
-// `entity_cluster_ids` (label variants, stemmed only), so deploying the app
-// before the migration cannot break a hub, it just keeps the old imprecise list.
+// `p_headline_only` (migration 170, h56-entities-2) is the hub spec's
+// `headlineOnly`: true for akp alone, false for every other hub. True makes the
+// RPC run the regex on title_tr and title_tr_neutral only, ignoring the first
+// line of the summary, where akp's matches are mostly an epithet ("eski AK Parti
+// milletvekili ...") and not the party. The flag is a function of the hub key, and
+// it is also part of both cache keys: the `"use cache"` argument list and the
+// single-flight / last-good key of the resolver.
+//
+// Fallback chain, on PGRST202 only ("function not in the schema cache"): v3
+// (170) -> v2 (125/156, the same call without the flag, so akp's lead counts
+// again) -> migration 123's v1 `entity_cluster_ids` (label variants, stemmed
+// only). Deploying the app before a migration cannot break a hub, it just keeps
+// the older list. Any other error keeps the throw-and-retry path.
 //
 // Unlike the archive search this is a RECENCY list: the RPC windows on
 // updated_at (SQL default 14 days, never wider than 30) and orders by
@@ -77,7 +88,7 @@ interface EntityIdRow {
 // mirroring search-query.ts's fetch/cache split. Kept free of the "use cache"
 // directive so it can run twice: once (wrapped by `attemptCached`) inside the
 // cache boundary below, and once more, live, as `getEntityHub`'s retry.
-async function fetchEntityHub(key: string): Promise<EntityHub> {
+async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<EntityHub> {
   const asOfMs = currentTimeMs();
   const entity = entityByKey(key);
   if (entity === null) return { bundles: [], total: 0, asOfMs };
@@ -90,14 +101,25 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
 
   const supabase = createReaderClient();
 
-  let res = await supabase.rpc("entity_cluster_ids_v2", {
+  let res = await supabase.rpc("entity_cluster_ids_v3", {
     p_queries: queries,
     p_patterns: patterns,
     p_limit: ENTITY_HUB_LIMIT,
+    p_headline_only: headlineOnly,
   });
   // PGRST202 = the function is not in PostgREST's schema cache, i.e. migration
-  // 125 is not applied yet. Only then fall back to v1 (label variants, no
-  // precision guard); any other error keeps the throw-and-retry path below.
+  // 170 is not applied yet. Retry v2 with its old four arguments (the summary
+  // lead counts again for akp); any other error keeps the throw-and-retry path
+  // below.
+  if (res.error?.code === "PGRST202") {
+    res = await supabase.rpc("entity_cluster_ids_v2", {
+      p_queries: queries,
+      p_patterns: patterns,
+      p_limit: ENTITY_HUB_LIMIT,
+    });
+  }
+  // PGRST202 again = migration 125 is not applied either. Only then fall back
+  // to v1 (label variants, no precision guard).
   if (res.error?.code === "PGRST202") {
     const variants = turkishQueryVariants(entity.label);
     res = await supabase.rpc("entity_cluster_ids", {
@@ -161,7 +183,8 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
 // src/lib/cache-resilience.ts).
 //
 // Plain `"use cache"` (not remote): 62 keys, each tiny; an in-memory
-// per-instance entry is the right fit, same call as search-query.ts.
+// per-instance entry is the right fit, same call as search-query.ts. The
+// headline-only flag is an argument, so it is part of the cache key.
 //
 // Cache lifetime follows the outcome: a read keeps the `cluster-feed` window,
 // a failed attempt ({ ok: false }) is memoised for `minutes` only. Exactly one
@@ -172,10 +195,10 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
 // epoch ms of the database read, which fetchEntityHub already took), so a cache
 // HIT can be remembered as a last-good value without reading the clock on the
 // hit path (cache-resilience.ts, section 4). A failed attempt carries no stamp.
-async function cachedEntityHub(key: string) {
+async function cachedEntityHub(key: string, headlineOnly: boolean) {
   "use cache";
   cacheTag("clusters-entity");
-  const r = await attemptCached("clusters-entity", () => fetchEntityHub(key));
+  const r = await attemptCached("clusters-entity", () => fetchEntityHub(key, headlineOnly));
   if (r.ok) cacheLife("cluster-feed");
   else cacheLife("minutes");
   return r.ok ? { ...r, at: r.data.asOfMs } : r;
@@ -190,18 +213,24 @@ async function cachedEntityHub(key: string) {
  * hub this instance saw (under 60 min old) before resolving to null — the
  * page's honest "unavailable" state. Concurrent live retries for one hub share
  * one read and a failed one backs off for a few seconds (key
- * `clusters-entity:<key>`; the key is one of the 62 curated hub keys, so the
- * key space is bounded). That matters because /gundem and /trends now read up
+ * `clusters-entity:<key>:<headline|lead>`: one of the 62 curated hub keys plus
+ * its headline-only flag, so the key space is bounded). That matters because /gundem and /trends now read up
  * to 8 hubs per request, and without it every visitor would start its own
  * retries against a struggling reader. Never throws.
  */
 export async function getEntityHub(key: string): Promise<EntityHub | null> {
-  if (entityByKey(key) === null) return null;
+  const entity = entityByKey(key);
+  if (entity === null) return null;
 
+  // The hub's headline-only flag, read once and carried into every cache key.
+  const headlineOnly = entityHubHeadlineOnly(entity);
   return resolveCachedOrRetry<EntityHub | null>(
-    { label: "clusters-entity", key: `clusters-entity:${key}` },
-    () => cachedEntityHub(key),
-    () => fetchEntityHub(key),
+    {
+      label: "clusters-entity",
+      key: `clusters-entity:${key}:${headlineOnly ? "headline" : "lead"}`,
+    },
+    () => cachedEntityHub(key, headlineOnly),
+    () => fetchEntityHub(key, headlineOnly),
     null,
   );
 }

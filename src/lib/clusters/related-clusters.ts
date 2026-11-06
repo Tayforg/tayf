@@ -9,7 +9,6 @@ import {
   STEM_LENGTH,
   contentWords,
   sharedStemsExcluding,
-  stemsOf,
   titleAgreement,
   titleStemOverlap,
 } from "./summary-agreement";
@@ -386,7 +385,7 @@ export function entityKeysIn(title: string): string[] {
 // ---------------------------------------------------------------------------
 // Stems that must not count as "the shared word" (h37-clusters-1). Built once,
 // on first use, from curated data only (never from a title), through the same
-// folding every title goes through (summary-agreement's stemsOf).
+// folding every title goes through (summary-agreement's contentWords).
 // ---------------------------------------------------------------------------
 
 let entityStems: ReadonlyMap<string, ReadonlySet<string>> | null = null;
@@ -397,6 +396,12 @@ let genericWordTest: ((foldedWord: string) => boolean) | null = null;
  * tokens, and the hub's aliases and inflections (RISING_HUB_SPECS). So "AK
  * Parti" and "AKP" are one key and both spellings are the entity, and
  * "Merkez Bankası" and "TCMB" likewise.
+ *
+ * A word that isNonTopicalWord flags ("Cumhurbaşkanı", "dolar", "yeniden")
+ * contributes no stem: the verdict skips that word anyway, and its five-character
+ * stem belongs to other words too (`cumhu` is "Cumhuriyet" and "Cumhur"), which
+ * must still be able to back a shared entity. Names ("Recep", "Tayyip") are not
+ * flagged and keep their stems.
  */
 function stemsOfEntity(key: string): ReadonlySet<string> {
   if (entityStems === null) {
@@ -410,7 +415,10 @@ function stemsOfEntity(key: string): ReadonlySet<string> {
         ...(spec?.aliases ?? []),
         ...(spec?.inflections ?? []),
       ]) {
-        for (const stem of stemsOf(text)) stems.add(stem);
+        for (const word of contentWords(text)) {
+          if (isNonTopicalWord(word)) continue;
+          stems.add(word.slice(0, STEM_LENGTH));
+        }
       }
       built.set(entity.key, stems);
     }

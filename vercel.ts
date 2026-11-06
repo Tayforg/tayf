@@ -9,12 +9,14 @@ import type { VercelConfig } from "@vercel/config/v1";
  * -----
  * Ingestion, clustering and image backfill now run as an event-driven
  * stream out of Supabase: a pg_cron job pokes the `ingest` Edge Function,
- * an `AFTER INSERT ON articles` trigger fans work onto two `pgmq` queues
- * (`cluster_work`, `image_backfill`), and `pg_cron` drains them into the
- * co-located `cluster-consumer` and `image-consumer` Edge Functions. None
- * of those steps live on Vercel anymore.
+ * an `AFTER INSERT ON articles` trigger fans work onto the `pgmq` queues
+ * `cluster_work` and `image_backfill` (a second, probe trigger feeds the
+ * shadow-only `cluster_attach` queue, migration 151), and `pg_cron` drains
+ * them into the co-located `cluster-consumer` and `image-consumer` Edge
+ * Functions. None of those steps live on Vercel anymore.
  *
- * The single remaining Vercel cron is the neutral-headline rewriter:
+ * The Vercel crons are the neutral-headline rewriter and four app routes
+ * (digest, fact-checks, social, alerts-webhooks):
  *
  *   - `/api/cron/headline` — Walks clusters that still lack
  *     `title_tr_neutral` and asks the headline LLM for a tarafsız başlık.

@@ -264,7 +264,7 @@ describe("migration 125_entity_cluster_ids_v2.sql (SQL contract)", () => {
   });
 });
 
-describe("entity-hub-query.ts is the only caller of v2, with a PGRST202-only v1 fallback", () => {
+describe("entity-hub-query.ts is the only caller of v2, as the PGRST202 fallback of v3, with a PGRST202-only v1 fallback", () => {
   const path = resolve(REPO_ROOT, "src", "lib", "entities", "entity-hub-query.ts");
   const src = existsSync(path)
     ? read(path)
@@ -272,25 +272,41 @@ describe("entity-hub-query.ts is the only caller of v2, with a PGRST202-only v1 
         .replace(/(^|[^:])\/\/[^\n]*/gm, "$1")
     : "";
 
-  it("calls rpc('entity_cluster_ids_v2') with p_queries, p_patterns and p_limit, never p_since", () => {
+  it("calls rpc('entity_cluster_ids_v3') first (migration 170): p_queries, p_patterns, p_limit and p_headline_only, never p_since", () => {
     expect(existsSync(path), "entity-hub-query.ts must exist").toBe(true);
+    const call = src.match(/\.rpc\(\s*"entity_cluster_ids_v3"\s*,\s*\{([\s\S]*?)\}\s*\)/);
+    expect(call, "v3 rpc call not found").not.toBeNull();
+    expect(call![1]).toMatch(/p_queries/);
+    expect(call![1]).toMatch(/p_patterns/);
+    expect(call![1]).toMatch(/p_limit/);
+    expect(call![1]).toMatch(/p_headline_only/);
+    expect(call![1]).not.toMatch(/p_since/);
+    expect(src.match(/\.rpc\(\s*"entity_cluster_ids_v3"/g)).toHaveLength(1);
+  });
+
+  it("calls rpc('entity_cluster_ids_v2') with the old four arguments (p_queries, p_patterns, p_limit), never p_since or the flag", () => {
     const call = src.match(/\.rpc\(\s*"entity_cluster_ids_v2"\s*,\s*\{([\s\S]*?)\}\s*\)/);
     expect(call, "v2 rpc call not found").not.toBeNull();
     expect(call![1]).toMatch(/p_queries/);
     expect(call![1]).toMatch(/p_patterns/);
     expect(call![1]).toMatch(/p_limit/);
     expect(call![1]).not.toMatch(/p_since/);
+    expect(call![1]).not.toMatch(/p_headline_only/);
     expect(src.match(/\.rpc\(\s*"entity_cluster_ids_v2"/g)).toHaveLength(1);
   });
 
-  it("calls the v1 rpc only after a PGRST202 check, and PGRST202 is the only PostgREST code", () => {
+  it("falls back v3 -> v2 -> v1, each step only after a PGRST202 check, and PGRST202 is the only PostgREST code", () => {
+    const v3At = src.indexOf('.rpc("entity_cluster_ids_v3"');
+    const firstCodeAt = src.indexOf('"PGRST202"');
     const v2At = src.indexOf('.rpc("entity_cluster_ids_v2"');
-    const codeAt = src.indexOf('"PGRST202"');
+    const secondCodeAt = src.indexOf('"PGRST202"', firstCodeAt + 1);
     const v1At = src.indexOf('.rpc("entity_cluster_ids",');
-    expect(v2At).toBeGreaterThan(-1);
-    expect(codeAt).toBeGreaterThan(v2At);
-    expect(v1At).toBeGreaterThan(codeAt);
+    expect(v3At).toBeGreaterThan(-1);
+    expect(firstCodeAt).toBeGreaterThan(v3At);
+    expect(v2At).toBeGreaterThan(firstCodeAt);
+    expect(secondCodeAt).toBeGreaterThan(v2At);
+    expect(v1At).toBeGreaterThan(secondCodeAt);
     expect(src.match(/\.rpc\(\s*"entity_cluster_ids"/g)).toHaveLength(1);
-    expect(src.match(/PGRST\d+/g)).toEqual(["PGRST202"]);
+    expect(src.match(/PGRST\d+/g)).toEqual(["PGRST202", "PGRST202"]);
   });
 });
