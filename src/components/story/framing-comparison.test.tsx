@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
@@ -57,8 +57,12 @@ const SOZCU = mkSource("sozcu", "Sözcü", "opposition");
 const EN_TITLE = "Erdoğan visits Seoul with $15 billion trade goal";
 const TR_TITLE = "Erdoğan Seul ziyaretinde 15 milyar dolarlık ticaret hedefi açıkladı";
 
-function render(members: ClusterDetailMember[]): string {
-  return renderToStaticMarkup(<FramingComparison members={members} />);
+// h47-time-1: member ages are printed through <RelativeTime> against the page's
+// per-request stamp. Two hours after the fixtures' default publish time.
+const NOW_MS = Date.parse("2026-09-06T14:00:00.000Z");
+
+function render(members: ClusterDetailMember[], nowMs = NOW_MS): string {
+  return renderToStaticMarkup(<FramingComparison members={members} nowMs={nowMs} />);
 }
 
 /** Every `<li ...>...</li>` in the markup, found by scanning (the lists are not nested). */
@@ -227,5 +231,50 @@ describe("FramingComparison — lang on English outlet text (h23-a11y-1)", () =>
     expect(li).not.toContain("<img");
     expect(headlineSpan(li ?? "").openTag).toContain('lang="en"');
     expect(li).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+});
+
+// h47-time-1: every member row prints its age against the page's per-request
+// `nowMs` through <RelativeTime>, so a service-worker copy of the page re-bases
+// to the reader's clock after mount. The server text is what the plain
+// formatter printed before.
+describe("FramingComparison — member ages through RelativeTime (h47-time-1)", () => {
+  it("prints each row's age against nowMs as <time dateTime>, not against the real clock", () => {
+    // Default publish time is 2 h before NOW_MS; the real clock is later still,
+    // so the plain formatter would print a date here.
+    const html = render([mkMember("a1", DAILY_SABAH, EN_TITLE)]);
+    expect(html).toContain('<time dateTime="2026-09-06T12:00:00.000Z">2 saat önce</time>');
+  });
+
+  it("keeps the age in the same right-aligned 10px span as before", () => {
+    const html = render([mkMember("a1", DAILY_SABAH, EN_TITLE)]);
+    expect(html).toContain(
+      '<span class="ml-auto text-[10px] tabular-nums text-muted-foreground"><time dateTime="2026-09-06T12:00:00.000Z">2 saat önce</time></span>',
+    );
+  });
+
+  it("follows nowMs for every row, including the ones behind '+N başlık daha'", () => {
+    const members = Array.from({ length: 6 }, (_, i) =>
+      mkMember(`en-${i}`, DAILY_SABAH, `${EN_TITLE} ${i}`, "2026-09-06T13:00:00.000Z"),
+    );
+    const html = render(members, NOW_MS);
+    expect(html.split("1 saat önce</time>").length - 1).toBe(6);
+    const later = render(members, NOW_MS + 60_000 * 90);
+    expect(later.split("2 saat önce</time>").length - 1).toBe(6);
+  });
+
+  it("renders the same markup whatever the renderer's own clock says (no hidden clock read)", () => {
+    // Pin the renderer's clock to the stamp, then a month later: the markup must
+    // not move, because the age is measured against the nowMs prop alone.
+    try {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(NOW_MS);
+      const atStamp = render([mkMember("a1", DAILY_SABAH, EN_TITLE)]);
+      expect(atStamp).toContain("2 saat önce");
+      vi.setSystemTime(NOW_MS + 30 * 86_400_000);
+      expect(render([mkMember("a1", DAILY_SABAH, EN_TITLE)])).toBe(atStamp);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

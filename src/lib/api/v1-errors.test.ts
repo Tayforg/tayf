@@ -1,7 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
+// errors.ts imports the Sentry capture helper; apiUnavailable never calls it.
+vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
+
+import { apiUnavailable } from "@/lib/api/errors";
 import { V1_ERROR, V1_ERROR_ROWS } from "@/lib/api/v1-errors";
 
 // ---------------------------------------------------------------------------
@@ -12,7 +16,9 @@ import { V1_ERROR, V1_ERROR_ROWS } from "@/lib/api/v1-errors";
 //   (b) every error string the v1 code can send is covered by the row for its
 //       status (the docs cannot omit a message the API sends);
 //   (c) every catalog message is really emitted (the docs cannot promise one
-//       the API never sends).
+//       the API never sends);
+//   (d) the 503 outage answer, which the shared helper in src/lib/api/errors.ts
+//       emits for every keyed read, is catalogued with its code and Retry-After.
 // The v1 route files keep their literals (an error string is read in place);
 // this guard is what stops them drifting from the page.
 //
@@ -43,13 +49,17 @@ function walk(dir: string): string[] {
   return out;
 }
 
-/** The files whose error strings the catalog must cover. Never tests, never the catalog itself. */
+/**
+ * The files whose error strings the catalog must cover. Never tests, never the
+ * catalog itself. errors.ts is the shared helper every keyed route answers
+ * through (the 500 and, for a database outage, the 503), so it is scanned too.
+ */
 function scannedFiles(): string[] {
   const routes = walk(V1_ROUTES_DIR).filter((f) => path.basename(f) === "route.ts");
   const libs = readdirSync(API_LIB_DIR)
     .filter((n) => /^v1-[a-z-]+\.ts$/.test(n) && !n.endsWith(".test.ts") && n !== "v1-errors.ts")
     .map((n) => path.join(API_LIB_DIR, n));
-  return [...routes, ...libs, KEYS_FILE].sort();
+  return [...routes, ...libs, KEYS_FILE, ERRORS_FILE].sort();
 }
 
 interface Emitted {
@@ -190,6 +200,9 @@ describe("V1_ERROR_ROWS against the code that emits errors", () => {
       "404 Source not found",
       "404 Not found",
       "405 Method not allowed",
+      // From the shared helper src/lib/api/errors.ts (scanned since h47-reports-1).
+      "500 Internal server error",
+      "503 Service temporarily unavailable",
     ]) {
       // A validator message ("Invalid since: must be ...") counts by its prefix.
       expect(
@@ -197,7 +210,7 @@ describe("V1_ERROR_ROWS against the code that emits errors", () => {
         known,
       ).toBe(true);
     }
-    expect(EMITTED.length).toBeGreaterThanOrEqual(14);
+    expect(EMITTED.length).toBeGreaterThanOrEqual(16);
   });
 
   it("covers every emitted error string with the row for its status", () => {
@@ -229,11 +242,12 @@ describe("V1_ERROR_ROWS against the code that emits errors", () => {
         (m) => (V1_ERROR as Record<string, string>)[m[1]!],
       ),
     );
-    // 500 comes from the shared apiServerError helper in errors.ts, which the
-    // keyed routes call; scan that one file for the 500 literal too.
-    const errorsSrc = readFileSync(ERRORS_FILE, "utf8");
-    const fromHelper = scanEmitted(ERRORS_FILE, errorsSrc).filter((e) => e.status === 500);
-    expect(fromHelper.map((e) => e.message)).toContain(V1_ERROR.internal);
+    // 500 and 503 come from the shared apiServerError / apiUnavailable helpers
+    // in errors.ts, which the keyed routes call; EMITTED already scans that file.
+    const fromHelper = EMITTED.filter((e) => e.where.startsWith("src/lib/api/errors.ts:"));
+    expect(fromHelper.map((e) => `${e.status} ${e.message}`)).toEqual(
+      expect.arrayContaining([`500 ${V1_ERROR.internal}`, "503 Service temporarily unavailable"]),
+    );
 
     const unemitted: string[] = [];
     for (const row of V1_ERROR_ROWS) {
@@ -263,5 +277,43 @@ describe("V1_ERROR_ROWS against the code that emits errors", () => {
     expect(found.sort()).toEqual(
       ["400 Invalid limit", "400 Invalid thing", "401 Missing or invalid API key", "404 Gone", "409 Conflict"].sort(),
     );
+  });
+});
+
+describe("V1_ERROR_ROWS 503 upstream_unavailable row (h47-reports-1)", () => {
+  const row = V1_ERROR_ROWS.find((r) => r.status === 503);
+
+  it("has a 503 row between 500 and the end, with the wire message the helper sends", () => {
+    expect(row).toBeDefined();
+    expect(row!.messages).toEqual(["Service temporarily unavailable"]);
+    const statuses = V1_ERROR_ROWS.map((r) => r.status);
+    expect(statuses.indexOf(503)).toBe(statuses.indexOf(500) + 1);
+  });
+
+  it("is catalogued for exactly what apiUnavailable() answers: message, code upstream_unavailable, Retry-After 30", async () => {
+    const res = apiUnavailable("req-1");
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const body = (await res.json()) as { error: string; code: string; details: { request_id: string } };
+    expect(row!.messages).toContain(body.error);
+    expect(body.code).toBe("upstream_unavailable");
+    expect(body.details.request_id).toBe("req-1");
+  });
+
+  it("tells a partner client the code and the wait in Turkish (not a copy of the English wire text)", () => {
+    expect(row!.meaningTr).toContain("upstream_unavailable");
+    expect(row!.meaningTr).toContain("Retry-After: 30");
+    // The code is a body field and Retry-After a header: say so, and do not let
+    // a semicolon make the database the subject of "taşır".
+    expect(row!.meaningTr).toContain("Retry-After: 30 (saniye) başlığı");
+    expect(row!.meaningTr).not.toMatch(/yanıt vermiyor;\s*code:/);
+    expect(row!.messages).not.toContain(row!.meaningTr);
+  });
+
+  it("the helper source still carries the code and the 30-second header the row promises", () => {
+    const src = blankComments(readFileSync(ERRORS_FILE, "utf8"));
+    expect(src).toContain('code: "upstream_unavailable"');
+    expect(src).toContain('"Retry-After": "30"');
   });
 });

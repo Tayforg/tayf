@@ -109,7 +109,10 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
               <li key={`${p.sourceName}-${p.t}`}>
                 <TrackedLink
                   event="outbound"
-                  data={{ zone: p.zone, kind: "timeline" }}
+                  // h47-personal-4: /diyetim counts any outbound click that carries a
+                  // zone as a read. A toplayıcı / niş point is not counted on the
+                  // spectrum, so its link sends the analytics kind but NO zone.
+                  data={p.voting ? { zone: p.zone, kind: "timeline" } : { kind: "timeline-niche" }}
                   href={p.url}
                   target="_blank"
                   rel="noopener noreferrer"

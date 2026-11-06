@@ -135,7 +135,18 @@ export default async function SourceProfilePage({ params }: PageProps) {
   const profile = await getSourceProfile(slug);
   if (!profile) notFound();
 
-  const { source, articleCount7d, articles, zoneHistory } = profile;
+  const { source, articleCount7d, articles, zoneHistory, quarantined } = profile;
+
+  // h47-sources-1: a profile used to look the same whether the source is still
+  // monitored or not. `active` is the registry flag; `quarantined` is the feed
+  // verdict stamped when the profile was read (no clock here). An inactive
+  // source shows only the inactive line: a quarantine left over from before it
+  // was switched off says nothing true any more. The "articles below" clause of
+  // that line appears only when there are articles (most inactive sources never
+  // delivered one, and the empty list below says so itself). `=== false`, so a
+  // row that somehow lacks the column never reads as inactive.
+  const inactive = source.active === false;
+  const feedDown = !inactive && quarantined;
 
   // The four side lookups are independent - one round-trip, not four
   // sequential ones (each is capped at 4 s, so serial reads could stack).
@@ -225,6 +236,24 @@ export default async function SourceProfilePage({ params }: PageProps) {
               {new URL(source.url).hostname.replace(/^www\./, "")}
               <ExternalLink className="h-3 w-3" />
             </a>
+            {inactive ? (
+              <p className="text-xs text-muted-foreground">
+                {articles.length > 0
+                  ? "Bu kaynak artık izlenmiyor; aşağıdaki haberler izleme durdurulmadan önce toplandı."
+                  : "Bu kaynak artık izlenmiyor."}
+              </p>
+            ) : feedDown ? (
+              <p className="text-xs text-muted-foreground">
+                <Link
+                  href="/kaynaklar/durum"
+                  className="font-medium text-rose-800 dark:text-rose-300 underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                >
+                  Akış şu anda alınamıyor
+                </Link>
+                {" "}
+                — Tayf bu beslemeyi art arda çekemedi, bu yüzden geçici olarak atlıyor.
+              </p>
+            ) : null}
           </div>
         </div>
       </header>
@@ -258,7 +287,8 @@ export default async function SourceProfilePage({ params }: PageProps) {
       ) : null}
 
       {/* Recent articles list. Capped at 20 by the data layer; the empty
-          state covers brand-new sources or temporarily inactive feeds. */}
+          state covers brand-new sources, a feed in quarantine and (with its
+          own wording) a source that is no longer monitored. */}
       <section className="space-y-3">
         <div className="flex items-baseline justify-between">
           <h2 className="font-serif text-lg font-semibold tracking-tight">
@@ -271,7 +301,9 @@ export default async function SourceProfilePage({ params }: PageProps) {
 
         {articles.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border/60 bg-card/40 p-6 text-center text-sm text-muted-foreground">
-            Bu kaynaktan henüz haber görmedik.
+            {inactive
+              ? "Bu kaynaktan haber alınmıyor."
+              : "Bu kaynaktan henüz haber görmedik."}
           </p>
         ) : (
           <ul className="space-y-2">

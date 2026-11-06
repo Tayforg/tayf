@@ -290,6 +290,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
     summaryEn: "List news clusters",
     notesTr: [
       `Yalnızca üyelerinin en az %${Math.round(V1_POLITICS_THRESHOLD * 100)}'ı politika/son dakika kategorisinde olan kümeler döner; ekonomi ve spor kümeleri bu uç noktada yoktur.`,
+      "Tek haberden oluşan kümeler (article_count < 2) bu listede yer almaz; tek küme okuması (GET /api/v1/clusters/{id}) bu süzgeci uygulamaz.",
       `since, updated_at için alt sınırdır; ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir.`,
       "Her sayfa en çok 300 aday arasından süzülür, bu yüzden bir sayfa limit'ten az küme içerebilir. Devamı için yanıttaki next_cursor değerini before parametresiyle gönderin; next_cursor null ise liste bitmiştir.",
       "title, özgün başlığa geri düşebilir; bu durumda başlığın hakları ilgili yayın kuruluşuna aittir.",
@@ -472,8 +473,8 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       `"/ekonomi/[ticker]" sayfasındaki "Medyada yankı" panelinin anahtarlı yansımasıdır: her KAP bildirimi için, bildirimden sonraki ${PICKUP_WINDOW_HOURS} saat içinde hangi bölgeden (iktidar/bağımsız/muhalefet) ne kadar basın yankısı oluştuğunu döner.`,
       "Pencere kuralı harfiyendir: her bildirim, kendi [bildirim_zamanı, bildirim_zamanı+48s) penceresinde yayınlanan her haberi sayar; bildirimden önceki bir haber asla yankı sayılmaz. İki bildirim 48 saat içine düşerse aynı haber her ikisine de sayılabilir — bu, her kayıttaki overlapping_disclosures alanıyla görünür kılınır, sessizce tekilleştirilmez.",
       `relevance_filter: Jev'in ticker_relevance gölge modelinin ${TICKER_RELEVANCE_MIN_TR} altında puanladığı haberler dışlanır (ör. aynı adlı bir siyasi parti-hisse kodu çakışması); puanlanmamış haberler her zaman tutulur. İlgi puanı sorgusu başarısız olursa uç nokta 500 dönmek yerine relevance_filter.applied: false ile açık başarısız olur.`,
-      "disclosure_coverage görünümü asla sorgulanmaz (üretimde 60 saniyede zaman aşımına uğradı); sorgu her zaman kap_disclosures / article_tickers üzerinden hisse kodu ve zaman sınırlıdır.",
-      "`capped: true`: liste `limit` sınırına ulaştı; penceredeki daha eski bildirimler listede yok. `total_disclosures`: penceredeki tüm bildirimlerin sayısı (sayım başarısız olursa null). `truncated`: haber eşleşmelerinin sayfa sınırına ulaşıldı.",
+      "disclosure_coverage görünümü asla sorgulanmaz; sorgu her zaman kap_disclosures / article_tickers üzerinden hisse kodu ve zaman sınırlıdır.",
+      "capped: true ise liste limit sınırına ulaştı; penceredeki daha eski bildirimler listede yok. total_disclosures: penceredeki tüm bildirimlerin sayısı (sayım başarısız olursa null). truncated: true ise haber eşleşmelerinin sayfa sınırına ulaşıldı.",
     ],
     params: [TICKER_PARAM, PICKUP_SINCE_PARAM, PICKUP_LIMIT_PARAM],
     responses: [

@@ -79,6 +79,9 @@ function makeFakeClient() {
       : "2025-01-01T00:00:00Z";
   const rationaleAtOf = (slug: string) =>
     supabaseFixture.rationaleBySlug[slug] ?? null;
+  // h47-sources-1: fetch_quarantined_until is NULL unless a test sets it.
+  const quarantinedUntilOf = (slug: string) =>
+    supabaseFixture.quarantinedUntilBySlug[slug] ?? null;
   const sourceRows = [
     {
       id: "s-outlet",
@@ -94,6 +97,7 @@ function makeFakeClient() {
       latest: latestOf("s-outlet"),
       created_at: createdAtOf("s-outlet"),
       zone_rationale_at: rationaleAtOf("s-outlet"),
+      fetch_quarantined_until: quarantinedUntilOf("s-outlet"),
     },
     {
       id: "s-aggregator",
@@ -109,6 +113,7 @@ function makeFakeClient() {
       latest: latestOf("s-aggregator"),
       created_at: createdAtOf("s-aggregator"),
       zone_rationale_at: rationaleAtOf("s-aggregator"),
+      fetch_quarantined_until: quarantinedUntilOf("s-aggregator"),
     },
     {
       id: "s-wire",
@@ -124,12 +129,13 @@ function makeFakeClient() {
       latest: latestOf("s-wire"),
       created_at: createdAtOf("s-wire"),
       zone_rationale_at: rationaleAtOf("s-wire"),
+      fetch_quarantined_until: quarantinedUntilOf("s-wire"),
     },
   ];
   return createSupabaseFake({
     tables: {
       // Like PostgREST, return only the columns the query selects: a page that
-      // forgets `created_at, zone_rationale_at` in its select string must not
+      // forgets `created_at, zone_rationale_at, fetch_quarantined_until` in its select string must not
       // be rescued by a fake that hands them over anyway.
       sources: (state) => {
         if (supabaseFixture.sourcesError) {
@@ -141,7 +147,11 @@ function makeFakeClient() {
         return {
           data: sourceRows.map((row) => {
             const out: Record<string, unknown> = { ...row };
-            for (const column of ["created_at", "zone_rationale_at"]) {
+            for (const column of [
+              "created_at",
+              "zone_rationale_at",
+              "fetch_quarantined_until",
+            ]) {
               if (!selected.includes(column)) delete out[column];
             }
             return out;
@@ -193,6 +203,8 @@ const supabaseFixture = vi.hoisted(() => ({
   createdAtBySlug: {} as Record<string, string | null>,
   /** slug -> zone_rationale_at; an absent slug is NULL. */
   rationaleBySlug: {} as Record<string, string | null>,
+  /** slug -> fetch_quarantined_until (ISO); an absent slug is NULL (never quarantined). */
+  quarantinedUntilBySlug: {} as Record<string, string | null>,
   /** Rows of source_zone_history (the reader asks for the newest one). */
   history: [] as Array<{ changed_at: string }>,
   /** When set, the source_zone_history read resolves { data: null, error: { message } }. */
@@ -341,6 +353,7 @@ beforeEach(() => {
   // Old stamps on every row, one rationale: well before any date a test asserts.
   supabaseFixture.createdAtBySlug = {};
   supabaseFixture.rationaleBySlug = { "s-aggregator": "2025-06-15T00:00:00Z" };
+  supabaseFixture.quarantinedUntilBySlug = {};
   supabaseFixture.history = [];
   supabaseFixture.historyError = null;
   supabaseFixture.sourcesError = null;
@@ -1367,5 +1380,316 @@ describe("SourceDirectory -- renders lastSeenLabel", () => {
 
   it("renders no time line when the source has no label", () => {
     expect(TIME_LINE.test(render(null))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h47-sources-1: source status was invisible outside /kaynaklar/durum. Seven
+// active sources that had never delivered an article (all in feed quarantine)
+// rendered as ordinary cards with "son 7 günde 0 haber". The directory read now
+// selects fetch_quarantined_until and stamps `quarantined` on each row at cache
+// fill time, with the clock value the read already takes (`nowMs`): the page
+// body stays clock-free. A card for a quarantined source carries an
+// "Akış alınamıyor" marker linking to /kaynaklar/durum, and the header counts
+// them. The 118/96-style numbers do not move.
+// ---------------------------------------------------------------------------
+
+/** Every intrinsic <p> reachable through props.children and arrays (components are not expanded). */
+function intrinsicParagraphs(node: unknown, out: TreeElement[] = []): TreeElement[] {
+  if (Array.isArray(node)) {
+    for (const child of node) intrinsicParagraphs(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as TreeElement;
+    if (el.type === "p") out.push(el);
+    if (el.props?.children !== undefined) intrinsicParagraphs(el.props.children, out);
+  }
+  return out;
+}
+
+/** The intrinsic <p> elements whose own text contains `needle`. */
+async function paragraphsContaining(tree: unknown, needle: string): Promise<TreeElement[]> {
+  const hits: TreeElement[] = [];
+  for (const p of intrinsicParagraphs(tree)) {
+    if ((await collectText(p)).join("").includes(needle)) hits.push(p);
+  }
+  return hits;
+}
+
+describe("/sources page -- quarantined feeds are visible (h47-sources-1)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const inOneHour = new Date(NOW_MS + 3_600_000).toISOString();
+  const oneHourAgo = new Date(NOW_MS - 3_600_000).toISOString();
+
+  type QuarantineRow = { slug: string; quarantined: boolean };
+
+  async function groupedRows(): Promise<QuarantineRow[]> {
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    const grouped = child.props?.grouped as Record<string, QuarantineRow[]>;
+    return Object.values(grouped).flat();
+  }
+
+  async function fullText(): Promise<string> {
+    return (await collectText(await SourcesPage())).join("");
+  }
+
+  const MARKER = "Akış alınamıyor";
+  const HEADER_SENTENCE = "kaynağın beslemesi şu anda alınamıyor.";
+  const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+  it("stamps quarantined on each row at fill time: a future until is true; past, exactly now and NULL are false", async () => {
+    supabaseFixture.quarantinedUntilBySlug = {
+      "s-outlet": inOneHour,
+      "s-wire": new Date(NOW_MS).toISOString(),
+      // s-aggregator: NULL
+    };
+    const rows = await groupedRows();
+    const quarantinedOf = (slug: string) => rows.find((r) => r.slug === slug)?.quarantined;
+
+    expect(quarantinedOf("s-outlet")).toBe(true);
+    expect(quarantinedOf("s-wire")).toBe(false);
+    expect(quarantinedOf("s-aggregator")).toBe(false);
+
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": oneHourAgo, "s-wire": "not-a-date" };
+    const later = await groupedRows();
+    expect(later.every((r) => r.quarantined === false)).toBe(true);
+  });
+
+  it("one millisecond before the quarantine ends the row is still quarantined", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": new Date(NOW_MS + 1).toISOString() };
+    const rows = await groupedRows();
+    expect(rows.find((r) => r.slug === "s-outlet")?.quarantined).toBe(true);
+  });
+
+  it("renders the 'Akış alınamıyor' marker only on the quarantined card (a healthy directory renders none)", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour };
+    expect(countOf(await fullText(), MARKER)).toBe(1);
+
+    supabaseFixture.quarantinedUntilBySlug = {};
+    expect(await fullText()).not.toContain(MARKER);
+  });
+
+  it("an aggregator or niche source is marked too: the marker does not depend on the kind", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-aggregator": inOneHour };
+    expect(countOf(await fullText(), MARKER)).toBe(1);
+  });
+
+  it("the header adds '{k} kaynağın beslemesi şu anda alınamıyor.' with a /kaynaklar/durum link when k > 0", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour, "s-wire": inOneHour };
+
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join("");
+    expect(text).toContain(`2 ${HEADER_SENTENCE}`);
+
+    // The line itself carries the link: DenominatorNote and the cards link to
+    // /kaynaklar/durum as well, so look at the paragraph, not the whole page.
+    const headers = await paragraphsContaining(tree, HEADER_SENTENCE);
+    expect(headers).toHaveLength(1);
+    expect(await collectHrefs(headers[0])).toEqual(["/kaynaklar/durum"]);
+  });
+
+  it("k is the number of marked cards: one quarantined source reads '1 kaynağın ...'", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-wire": inOneHour };
+    const text = await fullText();
+    expect(text).toContain(`1 ${HEADER_SENTENCE}`);
+    expect(countOf(text, HEADER_SENTENCE)).toBe(1);
+  });
+
+  it("with k = 0 the header adds nothing", async () => {
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join("");
+
+    expect(text).not.toContain("beslemesi şu anda alınamıyor");
+    expect(text).not.toContain(MARKER);
+    expect(await paragraphsContaining(tree, "alınamıyor")).toEqual([]);
+  });
+
+  it("does not change the header numbers: the title count and the N/M pair ignore quarantine", async () => {
+    const baselineTree = await SourcesPage();
+    const baselineSubtitle = findPropString(baselineTree, "subtitle");
+    const baselineNote = findDenominatorNote(baselineTree)?.props;
+
+    supabaseFixture.quarantinedUntilBySlug = {
+      "s-outlet": inOneHour,
+      "s-aggregator": inOneHour,
+      "s-wire": inOneHour,
+    };
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join("");
+
+    expect(findPropString(tree, "subtitle")).toBe(baselineSubtitle);
+    expect(baselineSubtitle).toContain("Tayf 3 Türk haber kaynağını izliyor.");
+    expect(findDenominatorNote(tree)?.props).toEqual(baselineNote);
+    expect(findDenominatorNote(tree)?.props).toMatchObject({ delivering: 0, total: 2 });
+    expect(text).toContain("2/3");
+  });
+
+  function findDenominatorNote(node: unknown): TreeElement | null {
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = findDenominatorNote(child);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (node && typeof node === "object") {
+      const el = node as TreeElement;
+      if (el.type === DenominatorNote) return el;
+      if (el.props?.children !== undefined) return findDenominatorNote(el.props.children);
+    }
+    return null;
+  }
+
+  it("the marker is part of the cached rows: rendering ten hours later still shows the fill-time verdict", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour };
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    const props = child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+
+    vi.setSystemTime(NOW_MS + 10 * 3_600_000);
+    const markup = renderToStaticMarkup(
+      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber" }),
+    );
+
+    expect(countOf(markup, MARKER)).toBe(1);
+  });
+});
+
+describe("SourceDirectory -- the 'Akış alınamıyor' card marker (h47-sources-1)", () => {
+  const render = (quarantined: boolean | undefined) =>
+    renderToStaticMarkup(
+      createElement(SourceDirectory, {
+        grouped: {
+          pro_government: [{ ...GZT, quarantined }],
+        } as unknown as GroupedSources,
+        countLabel: "0 haber",
+      }),
+    );
+
+  const MARKER_LINK = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>Akış alınamıyor<\/a>/;
+
+  it("a quarantined card carries a link to /kaynaklar/durum named 'Akış alınamıyor'", () => {
+    expect(MARKER_LINK.test(render(true))).toBe(true);
+  });
+
+  it("the marker sits beside the profile link, never inside it (anchors cannot nest)", () => {
+    const markup = render(true);
+    const profileOpen = markup.indexOf('href="/source/gzt"');
+    const profileClose = markup.indexOf("</a>", profileOpen);
+    const marker = MARKER_LINK.exec(markup);
+
+    expect(profileOpen).toBeGreaterThan(-1);
+    expect(marker).not.toBeNull();
+    expect(marker!.index).toBeGreaterThan(profileClose);
+    // Still exactly one card link: the profile link text is unchanged.
+    expect(markup.match(/href="\/source\/gzt"/g)).toHaveLength(1);
+  });
+
+  it("the marker is a 24 px target (WCAG 2.5.8) with the AA-safe rose pill used on /kaynaklar/durum", () => {
+    const tag = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>/.exec(render(true))?.[0] ?? "";
+    const tokens = (/\bclass="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/);
+
+    for (const token of [
+      "inline-flex",
+      "items-center",
+      "min-h-6",
+      "text-rose-800",
+      "dark:text-rose-300",
+    ]) {
+      expect(tokens).toContain(token);
+    }
+  });
+
+  it("a healthy card (false, or a row that predates the field) renders no marker and no /kaynaklar/durum link", () => {
+    for (const quarantined of [false, undefined]) {
+      const markup = render(quarantined);
+      expect(markup).not.toContain("Akış alınamıyor");
+      expect(markup).not.toContain("/kaynaklar/durum");
+    }
+  });
+
+  it("a non-voting quarantined card fades the profile link, not the card or the status marker (contrast stays AA)", () => {
+    // The card wrapper used to carry `opacity-70` for non-voting kinds, which
+    // faded the rose pill too: rose-800 on rose-500/15 measured 3.94:1 in light
+    // mode (6.23:1 at full opacity), below WCAG 1.4.3's 4.5:1 for 11 px text.
+    const markup = renderToStaticMarkup(
+      createElement(SourceDirectory, {
+        grouped: {
+          pro_government: [{ ...GZT, kind: "aggregator", quarantined: true }],
+        } as unknown as GroupedSources,
+        countLabel: "0 haber",
+      }),
+    );
+    const classOf = (tag: string) =>
+      (/\bclass="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/).filter(Boolean);
+
+    // (a) the card wrapper no longer fades everything inside it.
+    const wrapperTag =
+      [...markup.matchAll(/<div\b[^>]*>/g)]
+        .map((m) => m[0])
+        .find((tag) => classOf(tag).includes("group") && classOf(tag).includes("relative")) ?? "";
+    expect(wrapperTag).not.toBe("");
+    expect(classOf(wrapperTag)).toContain("rounded-xl");
+    expect(classOf(wrapperTag)).not.toContain("opacity-70");
+
+    // (b) the non-voting card is still visually de-emphasised: profile link and
+    // the external arrow carry the fade.
+    const profileTag = /<a\b[^>]*\bhref="\/source\/gzt"[^>]*>/.exec(markup)?.[0] ?? "";
+    expect(classOf(profileTag)).toContain("opacity-70");
+    const externalTag = /<a\b[^>]*\bhref="https:\/\/example\.com\/gzt"[^>]*>/.exec(markup)?.[0] ?? "";
+    expect(classOf(externalTag)).toContain("opacity-70");
+
+    // (c) the status marker and its paragraph carry no opacity class at all.
+    const markerTag = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>/.exec(markup)?.[0] ?? "";
+    expect(markerTag).not.toBe("");
+    expect(classOf(markerTag).filter((t) => t.includes("opacity-"))).toEqual([]);
+    const markerPara = /<p\b[^>]*>(?=<a\b[^>]*\bhref="\/kaynaklar\/durum")/.exec(markup)?.[0] ?? "";
+    expect(markerPara).not.toBe("");
+    expect(classOf(markerPara).filter((t) => t.includes("opacity-"))).toEqual([]);
+  });
+
+  it("a voting card has no opacity-70 anywhere: the fade belongs to non-voting kinds only", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SourceDirectory, {
+        grouped: {
+          pro_government: [{ ...GZT, quarantined: true }],
+        } as unknown as GroupedSources,
+        countLabel: "0 haber",
+      }),
+    );
+    expect(markup).not.toContain("opacity-70");
+  });
+});
+
+describe("/sources page source -- quarantine is computed inside the cached reader (h47-sources-1)", () => {
+  const code = stripComments(PAGE_SOURCE);
+  const reader = functionSource(code, "readSourcesDirectory");
+
+  it("selects fetch_quarantined_until from sources", () => {
+    expect(reader).toMatch(/"[^"]*\bfetch_quarantined_until\b[^"]*"/);
+  });
+
+  it("derives the verdict with isRowQuarantined(<column>, nowMs), the fill-time anchor the read already takes", () => {
+    expect(reader).toMatch(/\bisRowQuarantined\([^)]*,\s*nowMs\s*\)/);
+    expect(code).toMatch(
+      /import\s*\{[^}]*\bisRowQuarantined\b[^}]*\}\s*from\s*"@\/lib\/sources\/feed-status"/,
+    );
+  });
+
+  it("adds no clock read of its own: the reader keeps its two Date.now() calls (7-day window, nowMs)", () => {
+    expect(reader.match(/\bDate\.now\s*\(/g)).toHaveLength(2);
+  });
+
+  it("keeps cacheLife as one literal per branch (no conditional argument)", () => {
+    expect(code).toMatch(/if \(r\.ok\) cacheLife\("source-directory"\);\s*else cacheLife\("minutes"\);/);
   });
 });

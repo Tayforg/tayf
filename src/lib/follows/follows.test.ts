@@ -501,6 +501,33 @@ describe("parseFollowItems", () => {
     const many = Array.from({ length: 14 }, () => good);
     expect(parseFollowItems({ items: many })).toHaveLength(10);
   });
+
+  // h47-personal-1: the server now sends countHead (sourceCountHead's wording).
+  // An old cached 200 body (s-maxage=300, swr=600) has none.
+  describe("countHead", () => {
+    const withHead = { ...good, countHead: "4 kaynak (3 sınıflandırılmış)" };
+
+    it("keeps a non-empty string countHead", () => {
+      expect(parseFollowItems({ items: [withHead] })).toEqual([withHead]);
+    });
+
+    it("an old body without countHead still parses, and the item carries no countHead", () => {
+      const out = parseFollowItems({ items: [good] });
+      expect(out).toHaveLength(1);
+      expect(out?.[0]).toEqual(good);
+      expect(out?.[0] && "countHead" in out[0]).toBe(false);
+    });
+
+    it("a non-string or empty countHead is treated as missing: the item is kept, not rejected", () => {
+      const hostile: unknown[] = [5, null, true, {}, ["x"], ""];
+      for (const countHead of hostile) {
+        const out = parseFollowItems({ items: [{ ...good, countHead }] });
+        expect(out, String(countHead)).toHaveLength(1);
+        expect(out?.[0] && "countHead" in out[0], String(countHead)).toBe(false);
+        expect(out?.[0]?.sourceCount).toBe(4);
+      }
+    });
+  });
 });
 
 describe("runWithConcurrency", () => {
@@ -666,6 +693,51 @@ describe("followRowMeta", () => {
     const meta = followRowMeta(bad, NOW_MS);
     expect(meta.startsWith("4 kaynak · ")).toBe(true);
     expect(meta.endsWith(ITEM.zoneLine)).toBe(true);
+  });
+
+  // h47-personal-1: the head is the site's sourceCountHead wording, built by
+  // the server, so the figures add up to the zone line next to it.
+  it("prints the server's countHead in front of the age and zone line", () => {
+    const item = {
+      sourceCount: 5,
+      countHead: "5 kaynak (4 sınıflandırılmış)",
+      firstPublished: "2026-10-22T10:00:00+00:00",
+      zoneLine: "İktidar 4 · Bağımsız 0 · Muhalefet 0",
+    };
+    expect(followRowMeta(item, NOW_MS)).toBe(
+      "5 kaynak (4 sınıflandırılmış) · 2 saat önce · İktidar 4 · Bağımsız 0 · Muhalefet 0",
+    );
+  });
+
+  it("falls back to '{n} kaynak' when there is no countHead (old cached body)", () => {
+    const { sourceCount, firstPublished, zoneLine } = ITEM;
+    expect(followRowMeta({ sourceCount, firstPublished, zoneLine }, NOW_MS)).toBe(
+      "4 kaynak · 3 saat önce · İktidar 1 · Bağımsız 2 · Muhalefet 1",
+    );
+  });
+
+  it("a parsed old body (no countHead) and a parsed new body render through the same function", () => {
+    const base = {
+      id: "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b",
+      title: "Başlık",
+      firstPublished: "2026-10-22T10:00:00+00:00",
+      updatedAt: "2026-10-22T11:50:00+00:00",
+      sourceCount: 5,
+      isBlindspot: false,
+      zoneLine: "İktidar 4 · Bağımsız 0 · Muhalefet 0",
+    };
+    const old = parseFollowItems({ items: [base] })?.[0] as FollowItem;
+    const fresh = parseFollowItems({
+      items: [{ ...base, countHead: "5 kaynak (4 sınıflandırılmış)" }],
+    })?.[0] as FollowItem;
+    const junk = parseFollowItems({ items: [{ ...base, countHead: 42 }] })?.[0] as FollowItem;
+    expect(followRowMeta(old, NOW_MS)).toBe(
+      "5 kaynak · 2 saat önce · İktidar 4 · Bağımsız 0 · Muhalefet 0",
+    );
+    expect(followRowMeta(fresh, NOW_MS)).toBe(
+      "5 kaynak (4 sınıflandırılmış) · 2 saat önce · İktidar 4 · Bağımsız 0 · Muhalefet 0",
+    );
+    expect(followRowMeta(junk, NOW_MS)).toBe(followRowMeta(old, NOW_MS));
   });
 });
 

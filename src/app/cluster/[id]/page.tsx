@@ -74,7 +74,9 @@ import {
   summaryAttribution,
 } from "@/lib/clusters/summary-attribution";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
-import { formatTurkishTimeAgo } from "@/lib/time";
+import { RelativeTime } from "@/components/story/relative-time";
+import { StaleCopyNotice } from "@/components/pwa/stale-copy-notice";
+import { currentTimeMs } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { clusterTextLang, sourceLang } from "@/lib/sources/source-language";
 import { buildTayfOrganization, serializeJsonLd } from "@/lib/seo/json-ld";
@@ -605,13 +607,29 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // Header age: the bare time-ago is the story's age (first_published). A
   // separate "Güncellendi" cue appears only when a member published
   // meaningfully later — `updated_at` alone moves on every recompute and used
-  // to make a 2-hour-old story read "30 dakika önce". Pure over the row
-  // values (no clock read in this file); JSON-LD dates below are unchanged.
+  // to make a 2-hour-old story read "30 dakika önce". The cue itself is pure
+  // over the row values; JSON-LD dates below are unchanged.
   const updateCue = clusterUpdateCue(
     cluster.first_published,
     cluster.updated_at,
     members.map((m) => m.article.published_at),
   );
+
+  // h47-time-1: the one clock read of this file (currentTimeMs() is the repo's
+  // Date.now() wrapper; react-hooks/purity forbids the direct call), and the
+  // instant this page was rendered. The service worker keeps story pages for
+  // up to 14 days and serves them offline, on a timeout or on a 5xx, so a saved
+  // copy would show ages frozen at render time. Every age below is a
+  // <RelativeTime> against this stamp (its server text is unchanged; after
+  // mount it re-bases to the reader's clock) and <StaleCopyNotice> compares it
+  // with the instant the document loaded to say "this is an old copy" past 30
+  // minutes.
+  // Taken here, in the per-request body after the data awaits above, and
+  // nowhere else: in a static PPR shell or a "use cache" body it would be the
+  // build or the cache fill, and every reader would be told a fresh page is an
+  // old copy (tests/guards/cluster-relative-time.test.ts). It never reaches the
+  // JSON-LD, the metadata or a cache key.
+  const renderNowMs = currentTimeMs();
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -679,6 +697,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
         <ArrowLeft className="h-4 w-4" strokeWidth={2.5} />
         <span>Haberler</span>
       </Link>
+
+      {/* h47-time-1: an empty, screen-reader-only live region on the server and
+          on the first client render; after mount it says so when this document
+          is a copy the service worker kept for more than 30 minutes
+          (src/components/pwa/stale-copy-notice.tsx). */}
+      <StaleCopyNotice renderedAtMs={renderNowMs} />
 
       {/* Hero — the cluster's "real" hero (R4 audit #4). Image on the left
           (or banner on mobile), title + meta + spectrum on the right. The
@@ -773,11 +797,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   its own, outside the link. */}
               <div className="flex flex-wrap items-center gap-2">
                 <div className="contents max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-center max-sm:gap-2 text-[12px] font-medium text-muted-foreground">
-                  <span>{formatTurkishTimeAgo(cluster.first_published)}</span>
+                  <span>
+                    <RelativeTime iso={cluster.first_published} nowMs={renderNowMs} />
+                  </span>
                   {updateCue && (
                     <span>
                       <span aria-hidden="true" className="mr-2">•</span>
-                      Güncellendi: {formatTurkishTimeAgo(updateCue)}
+                      Güncellendi: <RelativeTime iso={updateCue} nowMs={renderNowMs} />
                     </span>
                   )}
                   <span>
@@ -895,6 +921,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 must never become the "karşı taraf". */}
             <ReadAcrossSpectrum
               members={votingMembers}
+              nowMs={renderNowMs}
               isBlindspot={cluster.is_blindspot}
               feedDegraded={blindspotSuppressed}
               nonVotingZoneCounts={nonVotingZoneCounts}
@@ -979,7 +1006,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           empty three-column card would read as broken. */}
       {votingMembers.length > 0 && (
         <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 hover-lift animate-fade-up stagger-1">
-          <FramingComparison members={votingMembers} />
+          <FramingComparison members={votingMembers} nowMs={renderNowMs} />
         </div>
       )}
 

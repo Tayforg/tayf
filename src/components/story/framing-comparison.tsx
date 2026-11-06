@@ -6,7 +6,7 @@ import { TrackedLink } from "@/components/ui/tracked-link";
 import { groupMembersByZone } from "@/lib/clusters/framing";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { sourceLang } from "@/lib/sources/source-language";
-import { formatTurkishTimeAgo } from "@/lib/time";
+import { RelativeTime } from "@/components/story/relative-time";
 import type { MediaDnaZone } from "@/types";
 
 /**
@@ -17,17 +17,29 @@ import type { MediaDnaZone } from "@/types";
  * headlines for this story, newest first. The reader compares the actual
  * editorial voices side by side instead of decoding an abstract bias bar.
  *
- * Server Component (headline anchors are TrackedLink client islands): overflow beyond VISIBLE_PER_ZONE is
+ * Server Component (headline anchors are TrackedLink client islands, and each
+ * row's age a RelativeTime one): overflow beyond VISIBLE_PER_ZONE is
  * disclosed via native <details>/<summary>. An empty zone renders an
  * explicit "silence" state — on a bias-transparency site, the absence of
  * coverage IS content.
+ *
+ * h47-time-1: ages are measured against `nowMs`, the page's per-request render
+ * stamp, and RelativeTime re-bases them to the reader's clock after mount, so a
+ * service-worker copy of the page does not show frozen ages. The server text is
+ * the one the plain formatter printed.
  *
  * Replaces the degraded ClusterStance chip grid (which showed only source
  * names as outbound chips).
  */
 
 interface FramingComparisonProps {
+  // Voting members only: page.tsx passes `votingMembers` (partitionByVote), so
+  // every row's `zone` below is a real vote (/diyetim counts the click) and no
+  // toplayıcı / niş source can fill a column.
   members: ClusterDetailMember[];
+  // The instant the server rendered the page (epoch ms), taken once per request
+  // in page.tsx. Required: a caller that forgets it would print frozen ages.
+  nowMs: number;
 }
 
 // Spectrum order, matching the bias bar left-to-right.
@@ -49,9 +61,11 @@ const HOVER_DECORATION: Record<MediaDnaZone, string> = {
 function HeadlineEntry({
   member,
   zone,
+  nowMs,
 }: {
   member: ClusterDetailMember;
   zone: MediaDnaZone;
+  nowMs: number;
 }) {
   const meta = ZONE_META[zone];
   // WCAG 3.1.2: English outlets' names and headlines inside <html lang="tr">.
@@ -94,7 +108,7 @@ function HeadlineEntry({
             className="h-2.5 w-2.5 text-muted-foreground/50 opacity-0 transition-opacity group-hover/entry:opacity-100"
           />
           <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
-            {formatTurkishTimeAgo(member.article.published_at)}
+            <RelativeTime iso={member.article.published_at} nowMs={nowMs} />
           </span>
         </span>
         <span
@@ -108,7 +122,7 @@ function HeadlineEntry({
   );
 }
 
-export function FramingComparison({ members }: FramingComparisonProps) {
+export function FramingComparison({ members, nowMs }: FramingComparisonProps) {
   const byZone = groupMembersByZone(members);
   const total = members.length;
 
@@ -163,6 +177,7 @@ export function FramingComparison({ members }: FramingComparisonProps) {
                         key={member.article.id}
                         member={member}
                         zone={zone}
+                        nowMs={nowMs}
                       />
                     ))}
                   </ul>
@@ -184,6 +199,7 @@ export function FramingComparison({ members }: FramingComparisonProps) {
                             key={member.article.id}
                             member={member}
                             zone={zone}
+                            nowMs={nowMs}
                           />
                         ))}
                       </ul>

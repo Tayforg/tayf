@@ -20,6 +20,8 @@ import { FactCheckBox } from "@/components/story/fact-check-box";
 import { ThreadLink } from "@/components/story/thread-link";
 import { RelatedStories } from "@/components/story/related-stories";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
+import { RelativeTime } from "@/components/story/relative-time";
+import { StaleCopyNotice } from "@/components/pwa/stale-copy-notice";
 import { BalanceChip } from "@/components/story/balance-chip";
 import { ShareButton } from "@/components/story/share-button";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
@@ -136,7 +138,15 @@ import {
 
 import ClusterDetailPage, { generateMetadata } from "./page";
 
-/** Collects every string/number leaf under a React element tree. */
+/**
+ * Collects every string/number leaf under a React element tree.
+ *
+ * h47-time-1: the page prints its ages through <RelativeTime>, a client
+ * component the unexpanded page tree leaves as a childless element. Its server
+ * text is what the SSR HTML (and so a reader's first paint) carries, so it is
+ * expanded here through the real server render; every assertion on an age
+ * string below therefore still reads the text a reader sees.
+ */
 function collectText(node: unknown, out: string[] = []): string[] {
   if (typeof node === "string" || typeof node === "number") {
     out.push(String(node));
@@ -147,7 +157,11 @@ function collectText(node: unknown, out: string[] = []): string[] {
     return out;
   }
   if (node && typeof node === "object") {
-    const el = node as { props?: { children?: ReactNode } };
+    const el = node as { type?: unknown; props?: { children?: ReactNode } };
+    if (el.type === RelativeTime) {
+      out.push(renderToStaticMarkup(node as ReactElement).replace(/<[^>]+>/g, ""));
+      return out;
+    }
     if (el.props?.children !== undefined) collectText(el.props.children, out);
   }
   return out;
@@ -1075,6 +1089,164 @@ describe("ClusterDetailPage — header age", () => {
 
     expect(parsed.datePublished).toBe("2026-09-06T10:00:00.000Z");
     expect(parsed.dateModified).toBe("2026-09-06T12:00:00.000Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h47-time-1: the service worker keeps /cluster/<id> pages for up to 14 days and
+// serves them offline, on a timeout or on a 5xx. A copy carried plain server age
+// strings that never moved ("Güncellendi: 33 dakika önce") and nothing said it
+// was a copy. The page now takes ONE render stamp in its per-request body and
+// threads it into every age (<RelativeTime nowMs>, which re-bases after mount)
+// and into <StaleCopyNotice renderedAtMs>, which speaks up past 30 minutes.
+// The SSR text of every age is unchanged.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — ages and notice on service-worker copies (h47-time-1)", () => {
+  const RENDERED_AT = Date.parse("2026-09-06T12:30:00Z");
+  const FIRST = "2026-09-06T10:00:00.000Z";
+  const LATER = "2026-09-06T12:00:00.000Z";
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function twoMemberDetail(): ClusterDetail {
+    const s0 = makeSource({ id: "s0", slug: "s0", name: "Kaynak 0", bias: "pro_government" });
+    const s1 = makeSource({ id: "s1", slug: "s1", name: "Kaynak 1", bias: "opposition" });
+    const members = [makeMember("a0", s0, FIRST), makeMember("a1", s1, LATER)];
+    return {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [s0, s1],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: members.length,
+        memberCount: members.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  async function renderAt(nowMs: number): Promise<unknown> {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(nowMs);
+    getClusterDetail.mockResolvedValue(twoMemberDetail());
+    return ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+  }
+
+  const relativeTimes = (tree: unknown) =>
+    findAllElements(tree, (el) => el.type === RelativeTime);
+  const noticesOf = (tree: unknown) =>
+    findAllElements(tree, (el) => el.type === StaleCopyNotice);
+
+  it("prints the header age and the Güncellendi cue through RelativeTime on one shared nowMs", async () => {
+    const tree = await renderAt(RENDERED_AT);
+    const times = relativeTimes(tree);
+    expect(times.map((t) => t.props.iso)).toEqual([FIRST, LATER]);
+    expect(times.map((t) => t.props.nowMs)).toEqual([RENDERED_AT, RENDERED_AT]);
+  });
+
+  it("mounts one StaleCopyNotice stamped with that very nowMs", async () => {
+    const tree = await renderAt(RENDERED_AT);
+    const notices = noticesOf(tree);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.props.renderedAtMs).toBe(RENDERED_AT);
+    expect(notices[0]?.props.renderedAtMs).toBe(relativeTimes(tree)[0]?.props.nowMs);
+  });
+
+  it("threads the same nowMs into ReadAcrossSpectrum and FramingComparison", async () => {
+    const tree = await renderAt(RENDERED_AT);
+    const across = findAllElements(tree, (el) => el.type === ReadAcrossSpectrum);
+    const framing = findAllElements(tree, (el) => el.type === FramingComparison);
+    expect(across).toHaveLength(1);
+    expect(framing).toHaveLength(1);
+    expect(across[0]?.props.nowMs).toBe(RENDERED_AT);
+    expect(framing[0]?.props.nowMs).toBe(RENDERED_AT);
+  });
+
+  it("keeps the SSR age text byte-identical: '2 saat önce' and 'Güncellendi: 30 dakika önce'", async () => {
+    const tree = await renderAt(RENDERED_AT);
+    const [age, cue] = relativeTimes(tree);
+    expect(renderToStaticMarkup(age as unknown as ReactElement)).toBe(
+      `<time dateTime="${FIRST}">2 saat önce</time>`,
+    );
+    expect(renderToStaticMarkup(cue as unknown as ReactElement)).toBe(
+      `<time dateTime="${LATER}">30 dakika önce</time>`,
+    );
+    const row = findMetaRow(tree);
+    expect(collectText(row!.props.children).join("")).toBe(
+      "2 saat önce•Güncellendi: 30 dakika önce•2 kaynak",
+    );
+  });
+
+  it("renders no notice text on the server: only an empty, screen-reader-only live region until the document's load time says the copy is old", async () => {
+    const tree = await renderAt(RENDERED_AT);
+    const [notice] = noticesOf(tree);
+    expect(renderToStaticMarkup(notice as unknown as ReactElement)).toMatch(
+      /^<div [^>]*role="status"[^>]*class="sr-only"[^>]*><\/div>$/,
+    );
+    expect(collectText(tree).join("")).not.toContain("kayıtlı bir kopyasını");
+  });
+
+  it("takes the stamp per request: a later render carries a later nowMs, not a module constant", async () => {
+    const first = await renderAt(RENDERED_AT);
+    const later = await renderAt(RENDERED_AT + 3_600_000);
+    expect(noticesOf(first)[0]?.props.renderedAtMs).toBe(RENDERED_AT);
+    expect(noticesOf(later)[0]?.props.renderedAtMs).toBe(RENDERED_AT + 3_600_000);
+    expect(relativeTimes(later).map((t) => t.props.nowMs)).toEqual([
+      RENDERED_AT + 3_600_000,
+      RENDERED_AT + 3_600_000,
+    ]);
+  });
+
+  it("puts the notice near the top of the article, before the hero", async () => {
+    const tree = await renderAt(RENDERED_AT);
+    const ordered = findAllElements(
+      tree,
+      (el) => el.type === StaleCopyNotice || el.type === ClusterCardImage,
+    );
+    expect(ordered[0]?.type).toBe(StaleCopyNotice);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h47-personal-4: /diyetim counts an outbound click that carries a zone as a
+// read. FramingComparison and ReadAcrossSpectrum send `zone` on every link, which
+// is only right while they are fed voting members: an aggregator labelled
+// `center` must never fill the Bağımsız column or become the "karşı taraf". The
+// page is the single call site and filters with partitionByVote; this pins it.
+// (story-timeline.tsx, which does plot non-voting points, drops the zone itself.)
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — only voting members feed the zone-carrying links (h47-personal-4)", () => {
+  it("passes FramingComparison and ReadAcrossSpectrum no aggregator or niche member", async () => {
+    const gov = makeSource({ id: "s-gov", slug: "s-gov", name: "Gov", bias: "pro_government", kind: "outlet" });
+    const opp = makeSource({ id: "s-opp", slug: "s-opp", name: "Opp", bias: "opposition", kind: "outlet" });
+    const aggregator = makeSource({ id: "s-agg", slug: "s-agg", name: "Onedio", bias: "center", kind: "aggregator" });
+    const niche = makeSource({ id: "s-niche", slug: "s-niche", name: "Niş", bias: "opposition", kind: "niche" });
+    const members = [
+      makeMember("a-gov", gov),
+      makeMember("a-agg", aggregator),
+      makeMember("a-opp", opp),
+      makeMember("a-niche", niche),
+    ];
+    getClusterDetail.mockResolvedValue({
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [gov, opp, aggregator, niche],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 4, memberCount: 4 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    } satisfies ClusterDetail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    for (const type of [FramingComparison, ReadAcrossSpectrum]) {
+      const el = findElementOfType(tree, type);
+      expect(el, String(type)).not.toBeNull();
+      const slugs = (el?.props.members as ClusterDetailMember[]).map((m) => m.source.slug);
+      expect(slugs).toEqual(["s-gov", "s-opp"]);
+    }
   });
 });
 
@@ -2160,8 +2332,19 @@ describe("cluster/[id]/page.tsx source — optional widgets stay out of the arti
     expect(code.split("coalesce(").length - 1).toBe(1);
   });
 
-  it("related stories: the page file reads no clock", () => {
+  it("related stories: the clock is read once, in the per-request body, never in the slot", () => {
+    // h47-time-1: ClusterDetailPage stamps the instant it rendered (the ages and
+    // the stale-copy notice share it) through currentTimeMs(), the repo's
+    // Date.now() wrapper. The related slot still reads no clock: `coalesce`
+    // does, after its request-scope await.
     expect(code).not.toContain("Date.now(");
+    expect(code.split("currentTimeMs(").length - 1).toBe(1);
+    const pageAt = code.indexOf("export default async function ClusterDetailPage");
+    expect(pageAt).toBeGreaterThan(-1);
+    expect(code.indexOf("currentTimeMs(")).toBeGreaterThan(pageAt);
+    const slotStart = code.indexOf("async function ClusterRelatedSlot");
+    const slotBody = code.slice(slotStart, code.indexOf("\n}\n", slotStart) + 2);
+    expect(slotBody).not.toContain("currentTimeMs(");
   });
 });
 

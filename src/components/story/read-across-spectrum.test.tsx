@@ -9,6 +9,10 @@ import { ReadAcrossSpectrum } from "./read-across-spectrum";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import type { Source } from "@/types";
 
+// h47-time-1: the CTA's age is printed through <RelativeTime> against the
+// page's per-request stamp. A fixed stamp keeps these tests off the real clock.
+const NOW_MS = Date.parse("2026-07-01T12:00:00Z");
+
 // Fixture shape mirrors read-across.test.ts's mkSource/mkMember helpers.
 
 function mkSource(id: string, bias: Source["bias"]): Source {
@@ -49,6 +53,7 @@ describe("ReadAcrossSpectrum — feed-degraded empty state (Pack C item 8)", () 
   it("mentions unreachable sources when not a blindspot but the feed is degraded", () => {
     const markup = renderToStaticMarkup(
       <ReadAcrossSpectrum
+        nowMs={NOW_MS}
         members={ZERO_MUHALEFET_MEMBERS}
         isBlindspot={false}
         feedDegraded={true}
@@ -60,6 +65,7 @@ describe("ReadAcrossSpectrum — feed-degraded empty state (Pack C item 8)", () 
   it("does not mention unreachable sources for the same members when the feed is not degraded", () => {
     const markup = renderToStaticMarkup(
       <ReadAcrossSpectrum
+        nowMs={NOW_MS}
         members={ZERO_MUHALEFET_MEMBERS}
         isBlindspot={false}
         feedDegraded={false}
@@ -73,6 +79,7 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
   it("(a) names the non-voting writer count for a single-pole blindspot", () => {
     const markup = renderToStaticMarkup(
       <ReadAcrossSpectrum
+        nowMs={NOW_MS}
         members={ZERO_MUHALEFET_MEMBERS}
         isBlindspot={true}
         nonVotingZoneCounts={{ muhalefet: 1 }}
@@ -85,7 +92,7 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
 
   it("(b) omits the suffix entirely when no counts are given", () => {
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
     );
     expect(markup).toContain(
       "Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (Muhalefet)",
@@ -96,6 +103,7 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
   it("(c) leaves the non-blindspot empty copy unchanged, with the degraded suffix when set", () => {
     const plain = renderToStaticMarkup(
       <ReadAcrossSpectrum
+        nowMs={NOW_MS}
         members={ZERO_MUHALEFET_MEMBERS}
         isBlindspot={false}
         nonVotingZoneCounts={{ muhalefet: 1 }}
@@ -106,6 +114,7 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
 
     const degraded = renderToStaticMarkup(
       <ReadAcrossSpectrum
+        nowMs={NOW_MS}
         members={ZERO_MUHALEFET_MEMBERS}
         isBlindspot={false}
         feedDegraded={true}
@@ -117,16 +126,16 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
 
   it("(d) sums both poles' non-voting counts when both poles are empty", () => {
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={[]} isBlindspot={true} nonVotingZoneCounts={{ iktidar: 2, muhalefet: 3 }} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={[]} isBlindspot={true} nonVotingZoneCounts={{ iktidar: 2, muhalefet: 3 }} />,
     );
     expect(markup).toContain("İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı · 5 toplayıcı / niş kaynak yazdı (spektruma sayılmaz)");
   });
 
   it("(e) never renders 'İzlediğimiz'", () => {
     const cases = [
-      renderToStaticMarkup(<ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />),
-      renderToStaticMarkup(<ReadAcrossSpectrum members={[]} isBlindspot={true} />),
-      renderToStaticMarkup(<ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={false} />),
+      renderToStaticMarkup(<ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />),
+      renderToStaticMarkup(<ReadAcrossSpectrum nowMs={NOW_MS} members={[]} isBlindspot={true} />),
+      renderToStaticMarkup(<ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={false} />),
     ];
     for (const markup of cases) {
       expect(markup).not.toContain("İzlediğimiz");
@@ -150,7 +159,7 @@ describe("ReadAcrossSpectrum — CTA text contrast (WCAG 1.4.3, contrast-sweep)"
 
   it("renders the CTA anchor with its source line and relative time (not the empty state)", () => {
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={TIE_MEMBERS} isBlindspot={false} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={TIE_MEMBERS} isBlindspot={false} />,
     );
     expect(markup).toContain("Karşı tarafı oku");
     expect(markup).toContain("Source opp1");
@@ -162,7 +171,7 @@ describe("ReadAcrossSpectrum — CTA text contrast (WCAG 1.4.3, contrast-sweep)"
     ["iktidar CTA", IKTIDAR_CTA_MEMBERS],
   ] as const)("%s: no opacity-80 / opacity-70 text fading (hierarchy comes from 11px/10px sizes)", (_name, members) => {
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={[...members]} isBlindspot={false} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={[...members]} isBlindspot={false} />,
     );
     expect(markup).toContain("Karşı tarafı oku");
     expect(markup).not.toContain("opacity-80");
@@ -171,7 +180,7 @@ describe("ReadAcrossSpectrum — CTA text contrast (WCAG 1.4.3, contrast-sweep)"
 
   it("keeps the 11px source line and 10px timestamp sizes that carry the hierarchy", () => {
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={TIE_MEMBERS} isBlindspot={false} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={TIE_MEMBERS} isBlindspot={false} />,
     );
     expect(markup).toContain("text-[13px]");
     expect(markup).toContain("text-[11px]");
@@ -185,7 +194,7 @@ describe("ReadAcrossSpectrum — CTA accessible name (WCAG 2.5.3 label-in-name)"
     mkMember("opp1", "opposition", "2026-07-01T11:00:00Z"),
   ];
   const markup = renderToStaticMarkup(
-    <ReadAcrossSpectrum members={TIE_MEMBERS} isBlindspot={false} />,
+    <ReadAcrossSpectrum nowMs={NOW_MS} members={TIE_MEMBERS} isBlindspot={false} />,
   );
 
   it("has no aria-label on the anchor, so the visible text is the accessible name", () => {
@@ -252,7 +261,7 @@ describe("ReadAcrossSpectrum — lang on an English outlet's name (h23-a11y-1)",
       mkMember("opp2", "opposition", "2026-07-01T09:00:00Z"),
     ];
     const anchor = anchorOf(
-      renderToStaticMarkup(<ReadAcrossSpectrum members={members} isBlindspot={false} />),
+      renderToStaticMarkup(<ReadAcrossSpectrum nowMs={NOW_MS} members={members} isBlindspot={false} />),
     );
     expect(anchor).toContain("Karşı tarafı oku");
     expect(anchor).toContain('İktidar · <span lang="en">Daily Sabah</span>');
@@ -261,7 +270,7 @@ describe("ReadAcrossSpectrum — lang on an English outlet's name (h23-a11y-1)",
   it("tags a Daily Sabah pick on the muhalefet pole too (tie goes to muhalefet)", () => {
     const sabah = mkNamed("ds", "daily-sabah", "Daily Sabah", "opposition", "2026-07-01T11:00:00Z");
     const anchor = anchorOf(
-      renderToStaticMarkup(<ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />),
+      renderToStaticMarkup(<ReadAcrossSpectrum nowMs={NOW_MS} members={[GOV, sabah]} isBlindspot={false} />),
     );
     expect(anchor).toContain('Muhalefet · <span lang="en">Daily Sabah</span>');
   });
@@ -269,7 +278,7 @@ describe("ReadAcrossSpectrum — lang on an English outlet's name (h23-a11y-1)",
   it("puts lang only on the name: the heading, zone label and time-ago stay Turkish", () => {
     const sabah = mkNamed("ds", "daily-sabah", "Daily Sabah", "opposition", "2026-07-01T11:00:00Z");
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={[GOV, sabah]} isBlindspot={false} />,
     );
     expect(markup.split("lang=").length - 1).toBe(1);
     const anchorOpen = markup.slice(0, markup.indexOf(">") + 1);
@@ -280,7 +289,7 @@ describe("ReadAcrossSpectrum — lang on an English outlet's name (h23-a11y-1)",
   it("puts no lang on a Turkish pick", () => {
     const sozcu = mkNamed("sz", "sozcu", "Sözcü", "opposition", "2026-07-01T11:00:00Z");
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={[GOV, sozcu]} isBlindspot={false} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={[GOV, sozcu]} isBlindspot={false} />,
     );
     expect(markup).toContain("Sözcü");
     expect(markup).not.toContain("lang=");
@@ -289,7 +298,7 @@ describe("ReadAcrossSpectrum — lang on an English outlet's name (h23-a11y-1)",
   it("does not mistake the Turkish 'Sabah' for Daily Sabah", () => {
     const sabah = mkNamed("sb", "sabah", "Sabah", "opposition", "2026-07-01T11:00:00Z");
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={[GOV, sabah]} isBlindspot={false} />,
     );
     expect(markup).toContain("Sabah");
     expect(markup).not.toContain("lang=");
@@ -298,15 +307,52 @@ describe("ReadAcrossSpectrum — lang on an English outlet's name (h23-a11y-1)",
   it("renders no article title, so the source name is the only English text in the link", () => {
     const sabah = mkNamed("ds", "daily-sabah", "Daily Sabah", "opposition", "2026-07-01T11:00:00Z");
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={[GOV, sabah]} isBlindspot={false} />,
     );
     expect(markup).not.toContain("Headline ds");
   });
 
   it("never tags the empty-state copy", () => {
     const markup = renderToStaticMarkup(
-      <ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
     );
     expect(markup).not.toContain("lang=");
+  });
+});
+
+// h47-time-1: the CTA's age is printed against the page's per-request `nowMs`
+// (not the renderer's own clock) through <RelativeTime>, so a copy of the page
+// kept by the service worker re-bases to the reader's clock after mount. The
+// server text must not change: same words as the plain formatter printed.
+describe("ReadAcrossSpectrum — age through RelativeTime (h47-time-1)", () => {
+  const OPP_AT = "2026-07-01T11:00:00Z";
+  const MEMBERS: ClusterDetailMember[] = [
+    mkMember("gov1", "pro_government", "2026-07-01T10:00:00Z"),
+    mkMember("opp1", "opposition", OPP_AT),
+  ];
+
+  it("prints the age against nowMs as <time dateTime>, not against the real clock", () => {
+    // NOW_MS is 1 h after OPP_AT; the real clock is months later, which the
+    // plain formatter would have printed as a date.
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={MEMBERS} isBlindspot={false} />,
+    );
+    expect(markup).toContain(`<time dateTime="${OPP_AT}">1 saat önce</time>`);
+  });
+
+  it("keeps the age in the same 10px tabular span as before", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={MEMBERS} isBlindspot={false} />,
+    );
+    expect(markup).toContain(
+      `<span class="shrink-0 text-[10px] tabular-nums"><time dateTime="${OPP_AT}">1 saat önce</time></span>`,
+    );
+  });
+
+  it("follows nowMs: the same member reads '3 saat önce' against a later stamp", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS + 2 * 3_600_000} members={MEMBERS} isBlindspot={false} />,
+    );
+    expect(markup).toContain(`<time dateTime="${OPP_AT}">3 saat önce</time>`);
   });
 });

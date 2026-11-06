@@ -645,7 +645,7 @@ see *Paging* below).
       "first_published": "...",
       "updated_at": "...",
       "article_count": 6,
-      "bias_distribution": { "pro_government": 2, "opposition": 4 },
+      "bias_distribution": { "pro_government": 2, "gov_leaning": 0, "state_media": 0, "islamist_conservative": 0, "center": 0, "international": 0, "pro_kurdish": 0, "opposition_leaning": 0, "opposition": 4, "nationalist": 0 },
       "is_blindspot": false,
       "blindspot_side": null,
       "topic7": null,
@@ -656,10 +656,17 @@ see *Paging* below).
 ```
 
 Only clusters whose members are ≥60% `politika`/`son_dakika` are returned
-(same majority rule the home feed uses). `sources` lists every member source,
+(same majority rule the home feed uses). Clusters made of a single article
+(`article_count < 2`) are not listed; the single-cluster read
+(`GET /api/v1/clusters/{id}`) does not apply this filter. It is the same floor
+the site's home feed and timeline apply, and it sits in the database query
+itself, so it does not change paging: a single-article cluster takes no
+candidate slot. `sources` lists every member source,
 aggregator and niche sources included, while `bias_distribution` (and the
 `source_count` of `GET /api/v1/alerts/blindspots`) count outlet and wire
 sources only, so `sources` can be longer than the `bias_distribution` total.
+`bias_distribution` always carries all ten bias keys, zeros included (the
+example above is the real shape, not a trimmed one); read a missing key as 0.
 Per member, only `{slug, zone}` is
 ever surfaced — no article title, URL, image or description is present
 anywhere in the payload; the only URL in a cluster record is Tayf's own
