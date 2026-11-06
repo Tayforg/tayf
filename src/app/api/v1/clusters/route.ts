@@ -32,6 +32,13 @@ import { registryEnvelope } from "@/lib/sources/registry";
  * JS, then slice to the caller's requested `limit`. Never an unbounded
  * scan.
  *
+ * ARTICLE FLOOR: a one-article "cluster" is a single headline, not a
+ * comparison, so the candidate query floors `article_count` at 2, the same
+ * floor the home feed, timeline, hubs and /hafta apply. Without it singletons
+ * took ~70% of the default 150 candidates and the window covered only the
+ * newest ~7 h of a 24 h `since`. The floor is part of the query, so paging is
+ * unchanged. GET /api/v1/clusters/{id} does not apply it.
+ *
  * KEYSET PAGING: candidates are ordered (updated_at desc, id desc) and
  * `?before=<next_cursor>` continues strictly after the cursor row (see
  * v1-clusters.ts). `next_cursor` is:
@@ -78,6 +85,7 @@ export const GET = withApiErrors(async (request: Request) => {
     .from("clusters")
     .select(V1_CLUSTER_SELECT)
     .eq("is_archived", false)
+    .gte("article_count", 2)
     .gte("updated_at", since)
     .order("updated_at", { ascending: false })
     .order("id", { ascending: false });

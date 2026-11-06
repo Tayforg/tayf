@@ -365,6 +365,7 @@ describe("GET /api/takip -- gundem (entity hub) path", () => {
           sourceCount: 7,
           isBlindspot: true,
           zoneLine: "İktidar 1 · Bağımsız 1 · Muhalefet 2",
+          countHead: "7 kaynak (4 sınıflandırılmış)",
         },
       ],
     });
@@ -566,6 +567,7 @@ describe("GET /api/takip -- item shape", () => {
           sourceCount: 7,
           isBlindspot: true,
           zoneLine: "İktidar 1 · Bağımsız 1 · Muhalefet 2",
+          countHead: "7 kaynak (4 sınıflandırılmış)",
         },
       ],
     });
@@ -585,13 +587,15 @@ describe("GET /api/takip -- item shape", () => {
     });
     const res = await call("?q=seçim");
     const body = (await res.json()) as {
-      items: Array<{ zoneLine: string; sourceCount: number }>;
+      items: Array<{ zoneLine: string; sourceCount: number; countHead: string }>;
     };
     // The card's tally: 1 outlet (iktidar) + 1 wire (muhalefet). The
     // aggregator (x2) and the niche feed are listed on the card, never voted.
     expect(body.items[0]?.zoneLine).toBe("İktidar 1 · Bağımsız 0 · Muhalefet 1");
     // "N kaynak" is not a voting tally and stays the cluster's own count.
     expect(body.items[0]?.sourceCount).toBe(5);
+    // ...and the head says so: 5 members, 2 of them classified.
+    expect(body.items[0]?.countHead).toBe("5 kaynak (2 sınıflandırılmış)");
   });
 
   it("counts a source with a missing or null kind as voting (legacy rows)", async () => {
@@ -661,6 +665,274 @@ describe("GET /api/takip -- item shape", () => {
       items: Array<{ id: string; isBlindspot: boolean }>;
     };
     expect(body.items.map((i) => i.isBlindspot)).toEqual([false, false, true]);
+  });
+});
+
+// h47-personal-1: every other surface that prints a zone line puts
+// sourceCountHead(total, votingCounts) in front of it ("5 kaynak (4
+// sınıflandırılmış) · İktidar 4 ..."), so the figures add up. /takip printed a
+// bare "N kaynak" next to a voting-only zone line, and 18 of 30 live rows did
+// not add up. The route now sends the head beside sourceCount and zoneLine.
+describe("GET /api/takip -- countHead (all three paths)", () => {
+  type Bundle = ReturnType<typeof bundle>;
+  type Item = {
+    sourceCount: number;
+    zoneLine: string;
+    countHead?: string;
+  };
+  const paths: Array<[string, string, (bundles: Bundle[]) => void]> = [
+    [
+      "q",
+      "?q=seçim",
+      (bundles) => searchClustersMock.mockResolvedValue({ ok: true, bundles }),
+    ],
+    [
+      "konu",
+      "?konu=ekonomi",
+      (bundles) =>
+        getTopicClustersMock.mockResolvedValue({ bundles, hasMore: false, page: 1 }),
+    ],
+    [
+      "gundem",
+      "?gundem=deva",
+      (bundles) =>
+        getEntityHubMock.mockResolvedValue({ bundles, total: bundles.length, asOfMs: 1 }),
+    ],
+  ];
+
+  async function firstItem(search: string): Promise<Item> {
+    const res = await call(search);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Item[] };
+    expect(body.items).toHaveLength(1);
+    return body.items[0] as Item;
+  }
+
+  describe.each(paths)("%s path", (_name, search, serve) => {
+    it("qualifies the count when only some members vote: '5 kaynak (4 sınıflandırılmış)'", async () => {
+      serve([
+        bundle({
+          id: "h1",
+          articleCount: 9,
+          effectiveArticleCount: 5,
+          biases: [
+            "pro_government",
+            "pro_government",
+            "pro_government",
+            "pro_government",
+            "center",
+          ],
+          kinds: ["outlet", "outlet", "wire", "outlet", "aggregator"],
+        }),
+      ]);
+      const it1 = await firstItem(search);
+      expect(it1.sourceCount).toBe(5);
+      expect(it1.zoneLine).toBe("İktidar 4 · Bağımsız 0 · Muhalefet 0");
+      expect(it1.countHead).toBe("5 kaynak (4 sınıflandırılmış)");
+    });
+
+    it("keeps the bare count when the voting total equals it: '2 kaynak'", async () => {
+      serve([
+        bundle({
+          id: "h2",
+          articleCount: 2,
+          biases: ["pro_government", "opposition"],
+          kinds: ["outlet", "outlet"],
+        }),
+      ]);
+      const it2 = await firstItem(search);
+      expect(it2.zoneLine).toBe("İktidar 1 · Bağımsız 0 · Muhalefet 1");
+      expect(it2.countHead).toBe("2 kaynak");
+    });
+
+    it("keeps the bare count when the voting total exceeds the wire-collapsed count", async () => {
+      // 4 voting members on the wire but effectiveArticleCount collapsed to 2:
+      // sourceCountHead's voting >= total rule prints the bare '2 kaynak'.
+      serve([
+        bundle({
+          id: "h3",
+          articleCount: 4,
+          effectiveArticleCount: 2,
+          biases: ["pro_government", "pro_government", "center", "opposition"],
+          kinds: ["outlet", "outlet", "outlet", "outlet"],
+        }),
+      ]);
+      const it3 = await firstItem(search);
+      expect(it3.sourceCount).toBe(2);
+      expect(it3.zoneLine).toBe("İktidar 2 · Bağımsız 1 · Muhalefet 1");
+      expect(it3.countHead).toBe("2 kaynak");
+    });
+
+    it("falls back to the cluster's article_count when there is no effective count", async () => {
+      serve([
+        bundle({
+          id: "h4",
+          articleCount: 6,
+          biases: ["center", "center", "center", "center"],
+          kinds: ["outlet", "outlet", "outlet", "aggregator"],
+        }),
+      ]);
+      const it4 = await firstItem(search);
+      expect(it4.sourceCount).toBe(6);
+      expect(it4.countHead).toBe("6 kaynak (3 sınıflandırılmış)");
+    });
+
+    it("a bundle with no voting source reads '0 sınıflandırılmış'", async () => {
+      serve([
+        bundle({
+          id: "h5",
+          articleCount: 3,
+          biases: ["center", "center"],
+          kinds: ["aggregator", "niche"],
+        }),
+      ]);
+      const it5 = await firstItem(search);
+      expect(it5.zoneLine).toBe("İktidar 0 · Bağımsız 0 · Muhalefet 0");
+      expect(it5.countHead).toBe("3 kaynak (0 sınıflandırılmış)");
+    });
+  });
+});
+
+// h47-personal-2: the keyword caption says "En çok kaynaklı eşleşmeler ·
+// yeniden eskiye" (the most-corroborated matches, newest first). Since
+// migration 129 search_cluster_ids ranks by relevance (24 hits), so taking the
+// 10 newest of those 24 hid the 20-, 12-, 12-, 9- and 7-source stories. The q
+// path now picks a KEYWORD_POOL (12) by effective source count with a stable
+// sort, shows that pool newest first, then applies the 10-item cap. The konu
+// and gundem paths are untouched.
+describe("GET /api/takip -- q path: most-corroborated pool, newest first", () => {
+  type Row = { id: string; sourceCount: number };
+
+  // index -> day: a higher index is a NEWER story, so the RPC (relevance)
+  // order is not the recency order.
+  const day = (i: number) => new Date(Date.UTC(2026, 9, 1 + i)).toISOString();
+
+  it("keeps the 20-, 12-, 12-, 9- and 7-source stories out of a 24-hit relevance list, newest first, 10 items", async () => {
+    const heavy: Record<number, number> = { 18: 20, 5: 12, 6: 12, 19: 9, 22: 7 };
+    // Seven mid-corroborated fillers (4 sources) fill the rest of the 12-story
+    // pool; every other hit, including the newest ones, has 2.
+    const filler = new Set([0, 1, 2, 3, 4, 7, 8]);
+    const bundles = Array.from({ length: 24 }, (_, i) =>
+      bundle({
+        id: `r${i}`,
+        articleCount: heavy[i] ?? (filler.has(i) ? 4 : 2),
+        firstPublished: day(i),
+      }),
+    );
+    searchClustersMock.mockResolvedValue({ ok: true, bundles });
+
+    const res = await call(`?q=${encodeURIComponent("ara seçim")}`);
+    const body = (await res.json()) as { items: Row[] };
+    const ids = body.items.map((i) => i.id);
+
+    expect(body.items).toHaveLength(10);
+    for (const must of ["r18", "r5", "r6", "r19", "r22"]) {
+      expect(ids, must).toContain(must);
+    }
+    // The least corroborated and the newest hits (r20, r21, r23: 2 sources)
+    // are not in the pool, so recency alone no longer picks the list.
+    for (const out of ["r20", "r21", "r23"]) {
+      expect(ids, out).not.toContain(out);
+    }
+    // Newest first inside the pool; the cap then drops the two OLDEST pool
+    // members (r0, r1), never a heavily-sourced one.
+    expect(ids).toEqual(["r22", "r19", "r18", "r8", "r7", "r6", "r5", "r4", "r3", "r2"]);
+    expect(body.items.find((i) => i.id === "r18")?.sourceCount).toBe(20);
+  });
+
+  it("ties in effective count keep the RPC (relevance) order when choosing the pool (stable)", async () => {
+    // 14 hits: t13 is the only heavier one; t0..t12 all tie at 3 and the
+    // pool takes t13 plus the FIRST 11 ties in relevance order (t0..t10).
+    // Later ties (t11, t12) are newer but lose to earlier relevance.
+    const bundles = Array.from({ length: 14 }, (_, i) =>
+      bundle({
+        id: `t${i}`,
+        articleCount: i === 13 ? 5 : 3,
+        firstPublished: day(i),
+      }),
+    );
+    searchClustersMock.mockResolvedValue({ ok: true, bundles });
+
+    const res = await call("?q=seçim");
+    const ids = ((await res.json()) as { items: Row[] }).items.map((i) => i.id);
+
+    expect(ids).toEqual(["t13", "t10", "t9", "t8", "t7", "t6", "t5", "t4", "t3", "t2"]);
+    expect(ids).not.toContain("t11");
+    expect(ids).not.toContain("t12");
+  });
+
+  it("ranks the pool by the wire-collapsed effective count, not the raw article_count", async () => {
+    // w is the NEWEST hit and has article_count 30, but only 2 independent
+    // sources after wire collapse: twelve 3-source hits outrank it.
+    const bundles = [
+      ...Array.from({ length: 12 }, (_, i) =>
+        bundle({ id: `n${i}`, articleCount: 3, firstPublished: day(i) }),
+      ),
+      bundle({
+        id: "w",
+        articleCount: 30,
+        effectiveArticleCount: 2,
+        firstPublished: day(20),
+      }),
+    ];
+    searchClustersMock.mockResolvedValue({ ok: true, bundles });
+
+    const res = await call("?q=ajans");
+    const ids = ((await res.json()) as { items: Row[] }).items.map((i) => i.id);
+
+    expect(ids).not.toContain("w");
+    expect(ids[0]).toBe("n11");
+  });
+
+  it("does not mutate the cached bundle array while ranking the pool", async () => {
+    const bundles = [
+      bundle({ id: "m1", articleCount: 2, firstPublished: day(1) }),
+      bundle({ id: "m2", articleCount: 9, firstPublished: day(2) }),
+      bundle({ id: "m3", articleCount: 5, firstPublished: day(3) }),
+    ];
+    searchClustersMock.mockResolvedValue({ ok: true, bundles });
+    await call("?q=seçim");
+    expect(bundles.map((b) => b.cluster.id)).toEqual(["m1", "m2", "m3"]);
+    expect(bundles.map((b) => b.cluster.article_count)).toEqual([2, 9, 5]);
+  });
+
+  it("a short hit list (fewer than the pool) is just shown newest first", async () => {
+    searchClustersMock.mockResolvedValue({
+      ok: true,
+      bundles: [
+        bundle({ id: "s1", articleCount: 9, firstPublished: day(1) }),
+        bundle({ id: "s2", articleCount: 2, firstPublished: day(5) }),
+      ],
+    });
+    const res = await call("?q=seçim");
+    const ids = ((await res.json()) as { items: Row[] }).items.map((i) => i.id);
+    expect(ids).toEqual(["s2", "s1"]);
+  });
+
+  it("konu path: no corroboration re-rank, the reader's order and the plain 10 cap", async () => {
+    getTopicClustersMock.mockResolvedValue({
+      bundles: Array.from({ length: 14 }, (_, i) =>
+        bundle({ id: `k${i}`, articleCount: i === 13 ? 40 : 2, firstPublished: day(i) }),
+      ),
+      hasMore: false,
+      page: 1,
+    });
+    const res = await call("?konu=ekonomi");
+    const ids = ((await res.json()) as { items: Row[] }).items.map((i) => i.id);
+    expect(ids).toEqual(["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9"]);
+  });
+
+  it("gundem path: no corroboration re-rank, the hub's order and the plain 10 cap", async () => {
+    getEntityHubMock.mockResolvedValue({
+      bundles: Array.from({ length: 14 }, (_, i) =>
+        bundle({ id: `g${i}`, articleCount: i === 13 ? 40 : 2, firstPublished: day(i) }),
+      ),
+      total: 14,
+      asOfMs: 1,
+    });
+    const res = await call("?gundem=deva");
+    const ids = ((await res.json()) as { items: Row[] }).items.map((i) => i.id);
+    expect(ids).toEqual(["g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "g9"]);
   });
 });
 

@@ -85,4 +85,10 @@ export const V1_ERROR_ROWS: readonly V1ErrorRow[] = [
     messages: [V1_ERROR.internal],
     meaningTr: "Beklenmeyen sunucu hatası.",
   },
+  {
+    status: 503,
+    messages: ["Service temporarily unavailable"],
+    meaningTr:
+      "Veritabanı geçici olarak yanıt vermiyor. Yanıtta code: upstream_unavailable alanı ve Retry-After: 30 (saniye) başlığı bulunur; bir süre bekleyip yeniden deneyin.",
+  },
 ];

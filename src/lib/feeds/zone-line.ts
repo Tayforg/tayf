@@ -4,10 +4,12 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 // Shared "zone line" formatting for every user-facing source-mix line: the
 // per-topic RSS feeds (src/app/rss/[topic]/route.ts), the blindspots RSS
 // feed (src/lib/feeds/blindspots-feed.ts, which reads the bundle's own
-// votingZoneCounts) and the owned-channels auto-poster
-// (src/lib/social/compose.ts). All of them must describe the same cluster's
-// source mix identically, so the tally + formatting live here once instead
-// of being re-implemented per caller.
+// votingZoneCounts), the owned-channels auto-poster
+// (src/lib/social/compose.ts) and the /takip follow feed
+// (src/app/api/takip/route.ts, which sends the head as `countHead` for
+// src/lib/follows/follows.ts to print). All of them must describe the same
+// cluster's source mix identically, so the tally + formatting live here once
+// instead of being re-implemented per caller.
 //
 // The basis is the card's: only VOTING source kinds (outlet, wire) count.
 // Aggregators and niche feeds are listed on the card but never vote, so

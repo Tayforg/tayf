@@ -471,6 +471,35 @@ describe("SectionBody", () => {
     expect(markup).toContain(`href="/cluster/${row.id}"`);
   });
 
+  // h47-personal-1: the row prints the server's sourceCountHead wording, so the
+  // count and the voting-only zone line next to it add up.
+  it("a loaded row's text carries the countHead, '(4 sınıflandırılmış)' included", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-22T09:00:00.000Z"));
+    const row = item({
+      sourceCount: 5,
+      countHead: "5 kaynak (4 sınıflandırılmış)",
+      zoneLine: "İktidar 4 · Bağımsız 0 · Muhalefet 0",
+    });
+    const markup = renderToStaticMarkup(
+      <SectionBody kind="q" state={{ status: "ok", items: [row] }} label="“seçim”" />,
+    );
+    expect(markup).toContain("(4 sınıflandırılmış)");
+    expect(markup).toContain(
+      "<span>5 kaynak (4 sınıflandırılmış) · 2 saat önce · İktidar 4 · Bağımsız 0 · Muhalefet 0</span>",
+    );
+  });
+
+  it("a row from an old cached body (no countHead) still reads '{n} kaynak'", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-22T09:00:00.000Z"));
+    const markup = renderToStaticMarkup(
+      <SectionBody kind="konu" state={{ status: "ok", items: [item()] }} label="Ekonomi" />,
+    );
+    expect(markup).toContain("<span>3 kaynak · 2 saat önce · İktidar 1 · Bağımsız 1 · Muhalefet 1</span>");
+    expect(markup).not.toContain("sınıflandırılmış");
+  });
+
   it("marks a blindspot row", () => {
     const markup = renderToStaticMarkup(
       <SectionBody

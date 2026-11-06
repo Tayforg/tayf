@@ -326,8 +326,9 @@ export function followLabel(f: Pick<Follow, "kind" | "value">): string {
 /**
  * Empty-state copy for a follow whose read returned nothing. A topic read is
  * the last 7 days and a hub read the last 14; a keyword search has NO date
- * window (it ranks the whole archive by corroboration), so only the topic and
- * hub copy may say "son dönemde".
+ * window (it searches the whole archive and /api/takip keeps its 12
+ * best-corroborated hits), so only the topic and hub copy may say "son
+ * dönemde".
  */
 export function followEmptyText(kind: FollowKind): string {
   return kind === "q"
@@ -337,10 +338,13 @@ export function followEmptyText(kind: FollowKind): string {
 
 /**
  * One-line caption above a follow's list, or null when none is needed. A
- * keyword's matches are the most-corroborated stories the search returned
- * (shown newest first), NOT "the latest stories", and the server cannot see
- * a fresh story the search did not return -- so a keyword's "yeni" count is
- * a lower bound. The caption keeps that honest; a topic list needs none.
+ * keyword's matches are a pool: /api/takip takes the search's relevance-ranked
+ * hits (up to 24 since migration 129), keeps the 12 with the most sources
+ * (KEYWORD_POOL in the route; ties keep the search's order) and shows them
+ * newest first, capped at FOLLOW_ITEMS_MAX. They are NOT "the latest
+ * stories", and the server cannot see a fresh story the search did not return
+ * or that did not make the pool -- so a keyword's "yeni" count is a lower
+ * bound. The caption keeps that honest; a topic list needs none.
  */
 export function followListCaption(kind: FollowKind): string | null {
   return kind === "q" ? "En çok kaynaklı eşleşmeler · yeniden eskiye" : null;
@@ -380,6 +384,13 @@ export type FollowItem = {
   sourceCount: number;
   isBlindspot: boolean;
   zoneLine: string;
+  /**
+   * The site's sourceCountHead wording, built by the server: 'N kaynak' or 'N
+   * kaynak (M sınıflandırılmış)'. Optional because a cached 200 body from
+   * before the field existed has none (followRowMeta falls back to
+   * '{sourceCount} kaynak').
+   */
+  countHead?: string;
 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -394,7 +405,7 @@ function coerceItem(v: unknown): FollowItem | null {
   if (typeof o.sourceCount !== "number" || !Number.isFinite(o.sourceCount)) return null;
   if (typeof o.isBlindspot !== "boolean") return null;
   if (typeof o.zoneLine !== "string") return null;
-  return {
+  const item: FollowItem = {
     id: o.id,
     title: o.title,
     firstPublished: o.firstPublished,
@@ -403,24 +414,34 @@ function coerceItem(v: unknown): FollowItem | null {
     isBlindspot: o.isBlindspot,
     zoneLine: o.zoneLine,
   };
+  // Additive field: kept only as a non-empty string. Anything else (an old
+  // body without it, a number, null, "") is "missing", never a rejected row.
+  if (typeof o.countHead === "string" && o.countHead.length > 0) {
+    item.countHead = o.countHead;
+  }
+  return item;
 }
 
 /**
- * The meta line under a /takip row: '{n} kaynak · {time ago} · {zone line}'.
+ * The meta line under a /takip row: '{count head} · {time ago} · {zone line}'.
+ * The count head is the server's sourceCountHead ('5 kaynak (4
+ * sınıflandırılmış)' when only 4 of the 5 members vote, so the zone line adds
+ * up); a cached body without it reads '{n} kaynak'.
  * The age is measured from firstPublished -- the same instant ClusterCard
  * shows and countNew() compares against seenAt -- NOT from updatedAt, which
  * moves whenever a late article joins the cluster and would make an old story
  * read as fresh. `now` is injectable for tests; it defaults to the clock.
  */
 export function followRowMeta(
-  item: Pick<FollowItem, "sourceCount" | "firstPublished" | "zoneLine">,
+  item: Pick<FollowItem, "sourceCount" | "countHead" | "firstPublished" | "zoneLine">,
   now?: number,
 ): string {
   const ago = formatTurkishTimeAgo(
     item.firstPublished,
     now === undefined ? undefined : { now },
   );
-  return `${item.sourceCount} kaynak · ${ago} · ${item.zoneLine}`;
+  const head = item.countHead ?? `${item.sourceCount} kaynak`;
+  return `${head} · ${ago} · ${item.zoneLine}`;
 }
 
 /**

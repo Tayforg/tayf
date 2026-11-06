@@ -96,6 +96,7 @@ function ZoneColumn({
                     <TrackedLink
                       href={term.example.url}
                       event="outbound"
+                      // zone is safe: buildWeeklyDistinctiveWords keeps active, voting sources only (isVotingKind).
                       data={{ zone, kind: "weekly-words" }}
                       target="_blank"
                       rel="noopener noreferrer"

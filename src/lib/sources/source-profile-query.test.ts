@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
 // /source/[slug] data layer. The contract this suite pins:
@@ -244,6 +247,102 @@ describe("getSourceProfile found / missing", () => {
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("source-directory");
     expect(console.error).toHaveBeenCalled();
+  });
+});
+
+// h47-sources-1: /source/[slug] now says when a source is no longer monitored
+// (`active` = false) or its feed is in ingest quarantine. The read selects
+// fetch_quarantined_until and turns it into `quarantined` with the clock value
+// fetchSourceProfile already takes for its 7-day window (inside the cache scope):
+// no second Date.now(), and the page body stays clock-free.
+describe("getSourceProfile quarantine (h47-sources-1)", () => {
+  const NOW = Date.parse("2026-11-06T02:00:00.000Z");
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const withUntil = (until: string | null | undefined) => {
+    fixture.sources = [
+      { data: [{ ...SOURCE_ROW, fetch_quarantined_until: until }], error: null },
+    ];
+  };
+
+  it("selects the fetch_quarantined_until column", async () => {
+    await getSourceProfile("ornek-gazete");
+
+    expect(fixture.sourceSelects).toHaveLength(1);
+    expect(fixture.sourceSelects[0]?.split(",").map((c) => c.trim())).toContain(
+      "fetch_quarantined_until",
+    );
+  });
+
+  it("is quarantined while fetch_quarantined_until is in the future", async () => {
+    withUntil(new Date(NOW + 60 * 60 * 1000).toISOString());
+    expect((await getSourceProfile("ornek-gazete"))?.quarantined).toBe(true);
+  });
+
+  it("is not quarantined once it has passed, at the exact instant, when NULL, when absent or when unparseable", async () => {
+    for (const until of [
+      new Date(NOW - 60 * 1000).toISOString(),
+      new Date(NOW).toISOString(),
+      null,
+      undefined,
+      "not-a-date",
+    ]) {
+      withUntil(until);
+      expect((await getSourceProfile("ornek-gazete"))?.quarantined).toBe(false);
+      fixture.served = { sources: 0, count: 0, articles: 0, history: 0 };
+    }
+  });
+
+  it("the live retry after a failed cached attempt decides the verdict from its own read", async () => {
+    fixture.sources = [
+      TIMEOUT,
+      {
+        data: [
+          { ...SOURCE_ROW, fetch_quarantined_until: new Date(NOW + 1000).toISOString() },
+        ],
+        error: null,
+      },
+    ];
+
+    expect((await getSourceProfile("ornek-gazete"))?.quarantined).toBe(true);
+  });
+
+  it("hands the page both facts it renders: `active` and the quarantine verdict, for an inactive source too", async () => {
+    fixture.sources = [
+      {
+        data: [
+          {
+            ...SOURCE_ROW,
+            active: false,
+            fetch_quarantined_until: new Date(NOW + 1000).toISOString(),
+          },
+        ],
+        error: null,
+      },
+    ];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.source.active).toBe(false);
+    expect(profile?.quarantined).toBe(true);
+  });
+
+  it("reads the clock exactly once, the read the 7-day window already had (no second Date.now inside the cache scope)", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const code = readFileSync(resolve(here, "source-profile-query.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+
+    expect(code.match(/\bDate\.now\s*\(/g)).toHaveLength(1);
+    expect(code).not.toMatch(/\bnew Date\s*\(\s*\)/);
+    expect(code).toMatch(/\bisRowQuarantined\([^)]*,\s*nowMs\s*\)/);
   });
 });
 

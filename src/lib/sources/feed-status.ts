@@ -126,7 +126,10 @@ export interface SourceFeedStatus {
 // `supabase/functions/_shared/rss/quarantine.ts` (Deno-side code, not part
 // of this Next.js bundle's module graph). Same semantics as that module's
 // `isQuarantined`: an unparseable/absent `until` is never quarantined.
-function isRowQuarantined(until: string | null | undefined, nowMs: number): boolean {
+// Exported (h47-sources-1) so /sources and /source/[slug] show the same
+// verdict /kaynaklar/durum does, instead of each keeping a copy. Callers pass a
+// `nowMs` stamped inside their own cache fill; this function never reads the clock.
+export function isRowQuarantined(until: string | null | undefined, nowMs: number): boolean {
   if (until == null) return false;
   return Date.parse(until) > nowMs;
 }

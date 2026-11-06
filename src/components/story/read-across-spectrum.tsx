@@ -5,7 +5,7 @@ import { TrackedLink } from "@/components/ui/tracked-link";
 import { pickOtherSide } from "@/lib/clusters/read-across";
 import { sourceLang } from "@/lib/sources/source-language";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
-import { formatTurkishTimeAgo } from "@/lib/time";
+import { RelativeTime } from "@/components/story/relative-time";
 import type { MediaDnaZone } from "@/types";
 
 /**
@@ -19,12 +19,24 @@ import type { MediaDnaZone } from "@/types";
  * dominant-zone share under BLINDSPOT.dominantShare) doesn't meet the
  * product's blindspot definition.
  *
- * Server Component (the anchor is a tiny TrackedLink client island) — rendered in page.tsx directly under
+ * Server Component (the anchor is a tiny TrackedLink client island, and the
+ * article's age a tiny RelativeTime one) — rendered in page.tsx directly under
  * `<BiasSpectrum>` so it's above the fold.
+ *
+ * h47-time-1: the age is measured against `nowMs`, the page's per-request
+ * render stamp, and RelativeTime re-bases it to the reader's clock after mount,
+ * so a service-worker copy of the page does not show a frozen age. The server
+ * text is the one the plain formatter printed.
  */
 
 interface ReadAcrossSpectrumProps {
+  // Voting members only: page.tsx passes `votingMembers` (partitionByVote), so
+  // the link below never points at a toplayıcı / niş source and its `zone` is
+  // always a real vote (/diyetim counts it).
   members: ClusterDetailMember[];
+  // The instant the server rendered the page (epoch ms), taken once per request
+  // in page.tsx. Required: a caller that forgets it would print a frozen age.
+  nowMs: number;
   isBlindspot: boolean;
   // True when the feed-health gate withdrew this cluster's blindspot claim
   // for this render (see cluster-detail-query.ts's suppression block) —
@@ -57,6 +69,7 @@ const POLE_STYLE: Record<"iktidar" | "muhalefet", string> = {
 
 export function ReadAcrossSpectrum({
   members,
+  nowMs,
   isBlindspot,
   feedDegraded = false,
   nonVotingZoneCounts,
@@ -131,7 +144,7 @@ export function ReadAcrossSpectrum({
         </span>
       </span>
       <span className="shrink-0 text-[10px] tabular-nums">
-        {formatTurkishTimeAgo(member.article.published_at)}
+        <RelativeTime iso={member.article.published_at} nowMs={nowMs} />
       </span>
       <span className="sr-only"> (yeni sekmede açılır)</span>
     </TrackedLink>

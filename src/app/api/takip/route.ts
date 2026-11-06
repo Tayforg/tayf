@@ -5,7 +5,11 @@ import { searchClusters } from "@/lib/clusters/search-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import { getTopicClusters, isTopicSlug } from "@/lib/clusters/topic-query";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
-import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
+import {
+  formatZoneLine,
+  sourceCountHead,
+  votingZoneCounts,
+} from "@/lib/feeds/zone-line";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
   FOLLOW_ITEMS_MAX,
@@ -33,16 +37,21 @@ import {
  *
  * Ordering: a topic read already comes back newest-first (updated_at inside a
  * 7-day window), and so does a hub read (first_published desc inside the RPC's
- * 14-day window) -- both keep the reader's order. A keyword search does NOT --
- * search_cluster_ids ranks by article_count desc with no date window and
- * returns at most 12 ids -- so a keyword answer is re-ordered newest-first
- * (first_published) before the cap.
- * That surfaces the freshest of what the search returned, but it cannot add a
- * fresh low-corroboration story the search never returned: for a keyword follow
- * the client's "yeni" count is a lower bound, and the UI says the list is
- * "most-corroborated matches" rather than "latest". A truly recency-ordered
- * keyword read would need its own RPC (new migration); until then the copy
- * stays honest instead.
+ * 14-day window) -- both keep the reader's order. A keyword search is neither:
+ * since migration 129 search_cluster_ids ranks its (up to 24) hits by relevance
+ * (title literal, ts_rank, recency; article_count is only a tie-break) with no
+ * date window. The caption above a keyword list promises "the most-corroborated
+ * matches, newest first", so the route re-ranks the hits by effective source
+ * count into a KEYWORD_POOL (12) of stories, shows that pool newest-first
+ * (first_published), and only then applies the FOLLOW_ITEMS_MAX cap -- the cap
+ * drops the oldest of the pool, never the best-sourced story.
+ * The pool is chosen with a stable sort, so equal counts keep the RPC's
+ * relevance order. That surfaces the freshest of the best-corroborated hits,
+ * but it cannot add a fresh low-corroboration story the search never returned
+ * or ranked into the pool: for a keyword follow the client's "yeni" count is a
+ * lower bound, and the UI says the list is "most-corroborated matches" rather
+ * than "latest". A truly recency-ordered keyword read would need its own RPC
+ * (new migration); until then the copy stays honest instead.
  *
  * Caching: only the 200 is publicly cacheable (a follow's answer is the same
  * for every visitor, and both readers sit behind "use cache" anyway). Every
@@ -54,6 +63,15 @@ import {
 
 const OK_CACHE_CONTROL =
   "public, max-age=60, s-maxage=300, stale-while-revalidate=600";
+
+/**
+ * How many of a keyword search's hits make the pool that is shown newest-first.
+ * 12 is the pre-129 search page size ("ranks by article_count desc ... at most
+ * 12 ids") the caption "En çok kaynaklı eşleşmeler" was written for; migration
+ * 129 widened the RPC to 24 relevance-ranked hits, and this keeps the caption
+ * true by taking the 12 best-corroborated of them.
+ */
+const KEYWORD_POOL = 12;
 
 const takipGetLimit = createRateLimiter("takip-get", {
   capacity: 40,
@@ -92,23 +110,50 @@ function newestFirst(bundles: readonly ClusterBundle[]): ClusterBundle[] {
   });
 }
 
-function toItems(bundles: readonly ClusterBundle[]) {
-  return bundles.slice(0, FOLLOW_ITEMS_MAX).map((b) => ({
-    id: b.cluster.id,
-    title: b.cluster.title_tr,
-    firstPublished: b.cluster.first_published,
-    updatedAt: b.cluster.updated_at,
-    sourceCount: b.effectiveArticleCount ?? b.cluster.article_count,
-    isBlindspot: b.cluster.is_blindspot === true,
-    // Voting basis, like the card the reader clicks through to: aggregators and
-    // niche feeds are listed on it but never counted in its zone tally.
-    zoneLine: formatZoneLine(votingZoneCounts(b.sources)),
-  }));
+/** Source count printed on the row: wire-collapsed when the reader has it. */
+function effectiveCount(b: ClusterBundle): number {
+  return b.effectiveArticleCount ?? b.cluster.article_count;
 }
 
-function okResponse(bundles: readonly ClusterBundle[], opts: { recencySort: boolean }) {
+// The most-corroborated KEYWORD_POOL of a keyword search's hits, in no
+// particular display order (the caller sorts them newest-first). toSorted
+// copies -- the cached array is never mutated -- and is stable, so equal
+// counts keep the RPC's relevance order.
+function mostCorroborated(bundles: readonly ClusterBundle[]): ClusterBundle[] {
+  return bundles
+    .toSorted((a, b) => effectiveCount(b) - effectiveCount(a))
+    .slice(0, KEYWORD_POOL);
+}
+
+function toItems(bundles: readonly ClusterBundle[]) {
+  return bundles.slice(0, FOLLOW_ITEMS_MAX).map((b) => {
+    // Voting basis, like the card the reader clicks through to: aggregators and
+    // niche feeds are listed on it but never counted in its zone tally.
+    const counts = votingZoneCounts(b.sources);
+    const sourceCount = effectiveCount(b);
+    return {
+      id: b.cluster.id,
+      title: b.cluster.title_tr,
+      firstPublished: b.cluster.first_published,
+      updatedAt: b.cluster.updated_at,
+      sourceCount,
+      isBlindspot: b.cluster.is_blindspot === true,
+      zoneLine: formatZoneLine(counts),
+      // The head every other zone-line surface prints in front of it: 'N
+      // kaynak', or 'N kaynak (M sınıflandırılmış)' when only M of the N
+      // members vote, so the zone line next to it adds up.
+      countHead: sourceCountHead(sourceCount, counts),
+    };
+  });
+}
+
+function okResponse(bundles: readonly ClusterBundle[], opts: { keywordPool: boolean }) {
+  // keywordPool marks the keyword path only: pool by corroboration, then
+  // newest first, then (in toItems) the cap. Topic and hub reads keep the
+  // reader's own order.
+  const ordered = opts.keywordPool ? newestFirst(mostCorroborated(bundles)) : bundles;
   return NextResponse.json(
-    { items: toItems(opts.recencySort ? newestFirst(bundles) : bundles) },
+    { items: toItems(ordered) },
     { headers: { "Cache-Control": OK_CACHE_CONTROL } },
   );
 }
@@ -139,7 +184,7 @@ export const GET = withApiErrors(async (request: Request) => {
     if (hub === null) {
       return errorResponse(503, "Şu an yüklenemedi", { "Retry-After": "60" });
     }
-    return okResponse(hub.bundles, { recencySort: false });
+    return okResponse(hub.bundles, { keywordPool: false });
   }
 
   if (qAll.length === 1) {
@@ -151,7 +196,7 @@ export const GET = withApiErrors(async (request: Request) => {
     if (!result.ok) {
       return errorResponse(503, "Şu an yüklenemedi", { "Retry-After": "60" });
     }
-    return okResponse(result.bundles, { recencySort: true });
+    return okResponse(result.bundles, { keywordPool: true });
   }
 
   const slug = konuAll[0] as string;
@@ -161,5 +206,5 @@ export const GET = withApiErrors(async (request: Request) => {
   if (page === null) {
     return errorResponse(503, "Şu an yüklenemedi", { "Retry-After": "60" });
   }
-  return okResponse(page.bundles, { recencySort: false });
+  return okResponse(page.bundles, { keywordPool: false });
 });

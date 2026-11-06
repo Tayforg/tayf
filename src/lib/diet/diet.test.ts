@@ -137,6 +137,22 @@ describe("dietEntryFromTrack", () => {
     expect(dietEntryFromTrack("outbound", { kind: "factcheck" }, NOW)).toBeNull();
   });
 
+  // h47-personal-4: a click on a toplayıcı / niş point in the story timeline is
+  // sent as {kind:'timeline-niche'} with no zone, because those sources are not
+  // counted on the spectrum. The diet must read that as "not a read". This pins
+  // the contract between story-timeline.tsx and the diet.
+  it("ignores a non-voting (toplayıcı / niş) timeline click: kind only, no zone", () => {
+    expect(dietEntryFromTrack("outbound", { kind: "timeline-niche" }, NOW)).toBeNull();
+    expect(dietEntryFromTrack("cta_other_side", { kind: "timeline-niche" }, NOW)).toBeNull();
+  });
+
+  it("still counts a voting timeline click: zone plus kind 'timeline'", () => {
+    expect(dietEntryFromTrack("outbound", { zone: "bagimsiz", kind: "timeline" }, NOW)).toEqual({
+      t: NOW,
+      z: "bagimsiz",
+    });
+  });
+
   it("ignores share, bookmark and search regardless of props", () => {
     expect(dietEntryFromTrack("share", { zone: "iktidar" }, NOW)).toBeNull();
     expect(dietEntryFromTrack("bookmark", { zone: "iktidar" }, NOW)).toBeNull();

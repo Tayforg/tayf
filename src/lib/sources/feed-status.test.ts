@@ -124,6 +124,7 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import {
+  isRowQuarantined,
   toFeedStatusRows,
   toItemsPerDayMap,
   toItemsPerDayMapFromRpc,
@@ -310,6 +311,39 @@ describe("toFeedStatusRows", () => {
     expect(rows[0]!.slug).toBe("a");
     expect(rows[1]!.slug).toBe("b");
     expect(rows[1]!.silent).toBe(true);
+  });
+});
+
+// h47-sources-1: /sources and /source/[slug] now show the same quarantine verdict
+// /kaynaklar/durum does, so the check is exported instead of copied. Same rule as
+// supabase/functions/_shared/rss/quarantine.ts: an absent or unparseable `until`
+// is never quarantined, and only a moment strictly after `nowMs` counts.
+describe("isRowQuarantined", () => {
+  it("is false for null and for an absent (undefined) until", () => {
+    expect(isRowQuarantined(null, NOW)).toBe(false);
+    expect(isRowQuarantined(undefined, NOW)).toBe(false);
+  });
+
+  it("is false for an unparseable until, including the empty string", () => {
+    expect(isRowQuarantined("not-a-date", NOW)).toBe(false);
+    expect(isRowQuarantined("", NOW)).toBe(false);
+    expect(isRowQuarantined("2026-13-45", NOW)).toBe(false);
+  });
+
+  it("is true while until is in the future", () => {
+    expect(isRowQuarantined(new Date(NOW + 60 * 60 * 1000).toISOString(), NOW)).toBe(true);
+    expect(isRowQuarantined(new Date(NOW + 1).toISOString(), NOW)).toBe(true);
+  });
+
+  it("is false once until has passed, and at the exact instant (strict >)", () => {
+    expect(isRowQuarantined(new Date(NOW - 60 * 1000).toISOString(), NOW)).toBe(false);
+    expect(isRowQuarantined(new Date(NOW).toISOString(), NOW)).toBe(false);
+  });
+
+  it("compares instants, so a Postgres timestamptz offset and microseconds read correctly", () => {
+    // 2026-09-18T15:00:00+03:00 is 12:00:00Z, the NOW instant itself: not quarantined.
+    expect(isRowQuarantined("2026-09-18T15:00:00+03:00", NOW)).toBe(false);
+    expect(isRowQuarantined("2026-09-18T12:00:00.123456+00:00", NOW)).toBe(true);
   });
 });
 

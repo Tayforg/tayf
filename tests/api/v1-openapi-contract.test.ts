@@ -17,6 +17,7 @@ import { toRegistryRecord, type RegistrySourceRow } from "@/lib/sources/registry
 import { toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
 import { toV1SourceProfile } from "@/lib/api/v1-source-profile";
 import { toV1PickupBody } from "@/lib/api/v1-kap-pickup";
+import { BIAS_ORDER } from "@/lib/bias/config";
 import type { TickerPickup } from "@/lib/finance/kap-pickup-query";
 import {
   V1_PROFILE_MIN_CLUSTERS,
@@ -193,6 +194,50 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     expect(source).toContain("CANDIDATE_CAP = 300");
     expect(V1_CANDIDATE_MULTIPLIER).toBe(3);
     expect(V1_CANDIDATE_CAP).toBe(300);
+  });
+
+  // h47-reports-1: the list endpoint floors a cluster at article_count >= 2 (the
+  // same floor the home feed, timeline, hubs and /hafta use), so the route, the
+  // /gelistirici + OpenAPI note and docs/api.md must say the same thing.
+  it("pins the article_count floor: the clusters route filters it, the single-cluster route does not, and the notes say so", () => {
+    const listSource = readFileSync(path.join(V1_ROOT, "clusters/route.ts"), "utf8");
+    expect(listSource).toMatch(/\.gte\(\s*"article_count"\s*,\s*2\s*\)/);
+    // The floor sits on the candidate query, before the order and the limit.
+    expect(listSource.indexOf('.gte("article_count", 2)')).toBeLessThan(listSource.indexOf(".order("));
+    expect(listSource.indexOf('.gte("article_count", 2)')).toBeLessThan(listSource.indexOf(".limit("));
+
+    const detailSource = readFileSync(path.join(V1_ROOT, "clusters/[id]/route.ts"), "utf8");
+    expect(detailSource).not.toContain('"article_count"');
+
+    const FLOOR_NOTE =
+      "Tek haberden oluşan kümeler (article_count < 2) bu listede yer almaz; tek küme okuması (GET /api/v1/clusters/{id}) bu süzgeci uygulamaz.";
+    const get = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters");
+    expect(get?.notesTr).toContain(FLOOR_NOTE);
+    // The single-cluster endpoint is the one that does not floor, and its own note says no politics filter.
+    const one = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters/{id}");
+    expect(one?.notesTr.join(" ")).not.toContain("article_count");
+    // The same text reaches the machine-readable document.
+    const description = doc.paths["/api/v1/clusters"]?.get?.description ?? "";
+    expect(description).toContain("article_count < 2");
+  });
+
+  it("docs/api.md says the same: the floor sentence and a dense bias_distribution example", () => {
+    const md = readFileSync(path.join(process.cwd(), "docs/api.md"), "utf8");
+    const start = md.indexOf("### `GET /api/v1/clusters`");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = md.slice(start + 1);
+    const next = rest.search(/\n### /);
+    const section = next < 0 ? rest : rest.slice(0, next);
+
+    expect(section).toContain("article_count < 2");
+    expect(section).toContain("GET /api/v1/clusters/{id}");
+
+    // The 200 example shows every key (zeros included), as the API returns it.
+    const example = /"bias_distribution":\s*(\{[^}]*\})/.exec(section);
+    expect(example, "no bias_distribution example in the clusters section").not.toBeNull();
+    const shown = Object.keys(JSON.parse(example![1]!) as Record<string, number>).sort();
+    expect(shown).toEqual([...BIAS_ORDER].sort());
+    expect(section).toMatch(/sıfır|zero/i);
   });
 
   it("documents the clusters keyset paging: the before param, next_cursor and the 300-candidate note", () => {

@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
+import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { TrackedLink } from "@/components/ui/tracked-link";
 import { ZONE_META } from "@/lib/bias/config";
+import { dietEntryFromTrack } from "@/lib/diet/diet";
 import type { StoryTimeline as StoryTimelineData, StoryTimelinePoint } from "@/lib/clusters/story-timeline";
 import type { MediaDnaZone } from "@/types";
 
@@ -481,5 +484,80 @@ describe("StoryTimeline — lang on English outlet text (h23-a11y-1)", () => {
 
   it("emits no lang at all for an all-Turkish timeline", () => {
     expect(render(TIMELINE)).not.toContain("lang=");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h47-personal-4: /diyetim counts an `outbound` click that carries a valid
+// `data.zone` as a read of that zone. A toplayıcı / niş point is plotted for
+// context and labelled "(toplayıcı / niş)"; the legend says it is not counted
+// on the spectrum. Its link therefore must not carry a zone: an aggregator whose
+// bias is `center` was being stored as a Bağımsız read, MFA Turkey as İktidar and
+// İşçi Haber as Muhalefet. The analytics `kind` stays distinguishable.
+//
+// StoryTimeline is a hookless function, so it is called directly and the
+// TrackedLink elements of its tree are read (their `data` is a prop, not markup).
+// ---------------------------------------------------------------------------
+interface TreeNode {
+  type?: unknown;
+  props?: { children?: ReactNode; event?: unknown; data?: unknown; href?: unknown };
+}
+
+function trackedLinks(node: unknown, out: TreeNode[] = []): TreeNode[] {
+  if (Array.isArray(node)) {
+    for (const child of node) trackedLinks(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as TreeNode;
+    if (el.type === TrackedLink) out.push(el);
+    if (el.props?.children !== undefined) trackedLinks(el.props.children, out);
+  }
+  return out;
+}
+
+describe("StoryTimeline — analytics data of the 'Tüm sıra' links (h47-personal-4)", () => {
+  const DIET_NOW = Date.UTC(2026, 10, 6, 12, 0, 0);
+  const links = trackedLinks(StoryTimeline({ timeline: WITH_NON_VOTING }));
+
+  it("renders one outbound TrackedLink per point, in point order", () => {
+    expect(links).toHaveLength(WITH_NON_VOTING.points.length);
+    expect(links.map((l) => l.props?.href)).toEqual(WITH_NON_VOTING.points.map((p) => p.url));
+    for (const link of links) expect(link.props?.event).toBe("outbound");
+  });
+
+  it("keeps {zone, kind:'timeline'} on a voting point", () => {
+    WITH_NON_VOTING.points.forEach((p, i) => {
+      if (!p.voting) return;
+      expect(links[i]?.props?.data).toEqual({ zone: p.zone, kind: "timeline" });
+    });
+  });
+
+  it("gives a non-voting point {kind:'timeline-niche'} and no zone at all", () => {
+    const data = links[0]?.props?.data as Record<string, unknown>;
+    expect(WITH_NON_VOTING.points[0]?.voting).toBe(false);
+    expect(data).toEqual({ kind: "timeline-niche" });
+    expect("zone" in data).toBe(false);
+  });
+
+  it("feeds /diyetim for voting points only: the diet maps a niche click to nothing", () => {
+    WITH_NON_VOTING.points.forEach((p, i) => {
+      const link = links[i];
+      const entry = dietEntryFromTrack(
+        link?.props?.event as "outbound",
+        link?.props?.data as { zone?: "iktidar"; kind?: string },
+        DIET_NOW,
+      );
+      if (p.voting) expect(entry).toEqual({ t: DIET_NOW, z: p.zone });
+      else expect(entry).toBeNull();
+    });
+  });
+
+  it("gives every point of an all-voting timeline a zone", () => {
+    const all = trackedLinks(StoryTimeline({ timeline: TIMELINE }));
+    expect(all).toHaveLength(POINTS.length);
+    for (const link of all) {
+      expect((link.props?.data as { zone?: string }).zone).toBeTruthy();
+    }
   });
 });

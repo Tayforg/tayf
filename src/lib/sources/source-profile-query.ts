@@ -5,6 +5,7 @@ import { connection } from "next/server";
 import type { ZoneHistoryEntry } from "@/components/source/label-card";
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { attemptCached } from "@/lib/cache-resilience";
+import { isRowQuarantined } from "@/lib/sources/feed-status";
 import { createReaderClient } from "@/lib/supabase/server";
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import { isValidSourceSlug } from "@/lib/validation/source-input";
@@ -43,7 +44,12 @@ interface SourceRegistryFields {
   trustee_note: string | null;
 }
 
-export type SourceWithRegistry = Source & SourceRegistryFields;
+// Ingest quarantine end (migration 074) - not on the shared `Source` type either.
+interface SourceFeedFields {
+  fetch_quarantined_until: string | null;
+}
+
+export type SourceWithRegistry = Source & SourceRegistryFields & SourceFeedFields;
 
 export interface ZoneHistoryRow {
   old_bias: string | null;
@@ -55,6 +61,13 @@ export interface ZoneHistoryRow {
 
 export interface SourceProfile {
   source: SourceWithRegistry;
+  /**
+   * True while `fetch_quarantined_until` is still in the future, decided when the
+   * profile was read (cache fill time), so rendering it never touches the clock.
+   * Says nothing about `source.active`: an inactive source can carry a stale
+   * quarantine, and the page shows the inactive line for it.
+   */
+  quarantined: boolean;
   articleCount7d: number;
   articles: ArticleRow[];
   zoneHistory: ZoneHistoryEntry[];
@@ -69,7 +82,7 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   const { data: sourceRow, error: sourceError } = await supabase
     .from("sources")
     .select(
-      "id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note",
+      "id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note, fetch_quarantined_until",
     )
     .eq("slug", slug)
     .maybeSingle();
@@ -88,9 +101,10 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   // pulling row bodies; the recent-articles list is capped at 20 to keep
   // the payload small; the zone-history list is capped at 20, newest
   // first.
-  const sevenDaysAgo = new Date(
-    Date.now() - 7 * 24 * 60 * 60 * 1000,
-  ).toISOString();
+  // The one clock read of this module, inside the cache scope: it anchors the
+  // 7-day window and the quarantine verdict (h47-sources-1) alike.
+  const nowMs = Date.now();
+  const sevenDaysAgo = new Date(nowMs - 7 * 24 * 60 * 60 * 1000).toISOString();
 
   const [countResult, articlesResult, historyResult] = await Promise.all([
     supabase
@@ -142,6 +156,7 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
 
   return {
     source,
+    quarantined: isRowQuarantined(source.fetch_quarantined_until, nowMs),
     articleCount7d: countResult.count ?? 0,
     // Read-time repair of double-encoded feed residue ("&quot;", "&#39;"):
     // rows stored before the ingest fix still carry it. Pure and non-throwing,

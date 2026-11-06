@@ -27,7 +27,7 @@ import { SourceLogo } from "@/components/source/source-logo";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { countClassifiedSources } from "@/lib/sources/classification";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
-import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
+import { getSourceItemsPerDay, isRowQuarantined } from "@/lib/sources/feed-status";
 import { weeklyCountFromPerDay, sortGroupedByActivity } from "@/lib/sources/directory";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
@@ -90,6 +90,12 @@ interface SourceRow extends Source {
    * nothing in the read's 7-day window.
    */
   lastSeenLabel: string | null;
+  /**
+   * True while the source's feed is in ingest quarantine (`fetch_quarantined_until`
+   * still in the future), decided when the directory was read (cache fill time),
+   * so rendering it never touches the clock. The card shows "Akış alınamıyor".
+   */
+  quarantined: boolean;
 }
 
 type GroupedSources = Record<BiasCategory, SourceRow[]>;
@@ -184,6 +190,21 @@ export function deriveDirectoryStats(
   return { votingSources, votingDelivering };
 }
 
+/**
+ * h47-sources-1: how many cards carry the "Akış alınamıyor" marker, for the
+ * header line. Counts every kind (an aggregator's dead feed is as invisible as
+ * an outlet's) and is pure: the verdict was stamped on each row at fill time.
+ */
+export function countQuarantinedSources(grouped: Partial<GroupedSources>): number {
+  let count = 0;
+  for (const bias of BIAS_ORDER) {
+    for (const source of grouped[bias] ?? []) {
+      if (source.quarantined) count += 1;
+    }
+  }
+  return count;
+}
+
 // reader-queries G2: `stats:articles(count)` (the PERF-01 aggregate,
 // measured bimodal 177-4639ms — see feed-status.ts's own header) and its
 // `.gte("stats.published_at", ...)` are GONE from this select. The 7-day
@@ -224,7 +245,7 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
     supabase
       .from("sources")
       .select(
-        "id, name, slug, url, rss_url, bias, logo_url, active, kind, created_at, zone_rationale_at, latest:articles(published_at)",
+        "id, name, slug, url, rss_url, bias, logo_url, active, kind, created_at, zone_rationale_at, fetch_quarantined_until, latest:articles(published_at)",
       )
       .eq("active", true)
       .gte("latest.published_at", sevenDaysAgo)
@@ -245,6 +266,8 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
   type Row = Source & {
     created_at: string | null;
     zone_rationale_at: string | null;
+    /** Ingest quarantine end (migration 074); only turned into `quarantined` below. */
+    fetch_quarantined_until: string | null;
     latest: Array<{ published_at: string }>;
   };
   const sourceRows = (data ?? []) as unknown as Row[];
@@ -275,12 +298,14 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
   for (const source of sourceRows) {
     const bias = source.bias as BiasCategory;
     if (!(bias in grouped)) continue;
-    // created_at / zone_rationale_at only feed registryModifiedIso above; they
-    // are dropped here so SourceRow keeps the shape it always had.
+    // created_at / zone_rationale_at only feed registryModifiedIso above, and
+    // fetch_quarantined_until only becomes `quarantined`; they are dropped here
+    // so SourceRow carries no raw timestamps.
     const {
       latest,
       created_at: _createdAt,
       zone_rationale_at: _rationaleAt,
+      fetch_quarantined_until: quarantinedUntil,
       ...rest
     } = source;
     const lastPublishedAt = latest[0]?.published_at ?? null;
@@ -290,6 +315,8 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
       lastSeenLabel: lastPublishedAt
         ? formatTurkishTimeAgo(lastPublishedAt, { now: nowMs })
         : null,
+      // h47-sources-1: the same fill-time anchor as the label above, no new clock read.
+      quarantined: isRowQuarantined(quarantinedUntil, nowMs),
     });
   }
 
@@ -390,6 +417,10 @@ export default async function SourcesPage() {
     (bias) => (grouped[bias] ?? []).map((source) => source.slug),
   );
   const classifiedSources = countClassifiedSources(allSlugs);
+  // h47-sources-1: active sources whose feed is in ingest quarantine right now
+  // (stamped at fill time). Each carries the "Akış alınamıyor" marker below; the
+  // header says how many. The 118/96-style figures above do not change.
+  const quarantinedSources = countQuarantinedSources(grouped);
 
   // "tık tuzağı karnesi" (migration 078) — gated on CLICKBAIT_PRECISION_CHECK
   // (src/lib/sources/clickbait.ts). getClickbaitKarne() is only called when
@@ -435,6 +466,18 @@ export default async function SourcesPage() {
         </Link>
       </p>
       <DenominatorNote delivering={votingDelivering} total={votingSources} />
+      {quarantinedSources > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          <span className="font-mono">{quarantinedSources}</span>{" "}
+          kaynağın beslemesi şu anda alınamıyor.{" "}
+          <Link
+            href="/kaynaklar/durum"
+            className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            Kaynak durumu
+          </Link>
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">
         Doğruluk ve sahiplik etiketi girilen kaynak:{" "}
         <span className="font-mono">
@@ -536,9 +579,12 @@ export function SourceDirectory({
               {bucket.map((source, srcIdx) => {
                 const kind = sourceKindOf(source);
                 const voting = isVotingSource(source);
-                const cardClassName = voting
-                  ? `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6}`
-                  : `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6} opacity-70`;
+                // A non-voting card is de-emphasised on its profile link and its
+                // external arrow, not on the card wrapper: element opacity would
+                // also fade the "Akış alınamıyor" status marker, and the marker
+                // must stay at full opacity (rose-800 on the rose pill is 3.94:1
+                // in light mode at opacity-70, 6.23:1 at full opacity).
+                const cardClassName = `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6}`;
                 const label =
                   typeof countLabel === "string"
                     ? countLabel
@@ -547,7 +593,7 @@ export function SourceDirectory({
                   <div key={source.id} className={cardClassName}>
                   <Link
                     href={`/source/${source.slug}`}
-                    className="block max-sm:mr-7"
+                    className={voting ? "block max-sm:mr-7" : "block max-sm:mr-7 opacity-70"}
                   >
                     <div className="flex items-start gap-3">
                       <SourceLogo
@@ -584,12 +630,26 @@ export function SourceDirectory({
                       </div>
                     </div>
                   </Link>
+                  {/* h47-sources-1: a feed in ingest quarantine looks like any
+                      other card ("son 7 günde 0 haber"), so say it. A sibling of
+                      the profile link, not inside it: anchors cannot nest. */}
+                  {source.quarantined ? (
+                    <p className="mt-2">
+                      <Link
+                        href="/kaynaklar/durum"
+                        title="Besleme art arda çekilemediği için geçici olarak atlanıyor"
+                        className="inline-flex min-h-6 items-center whitespace-nowrap rounded-full border border-rose-500/30 bg-rose-500/15 px-2 text-[11px] font-medium text-rose-800 dark:text-rose-300 hover:underline"
+                      >
+                        Akış alınamıyor
+                      </Link>
+                    </p>
+                  ) : null}
                   <a
                     href={source.url}
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label={`${source.name} sitesini yeni sekmede aç`}
-                    className="absolute top-2 right-2 max-sm:top-0 max-sm:right-0 inline-flex min-h-6 min-w-6 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    className={`absolute top-2 right-2 max-sm:top-0 max-sm:right-0 inline-flex min-h-6 min-w-6 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground${voting ? "" : " opacity-70"}`}
                   >
                     <span aria-hidden="true">↗</span>
                   </a>

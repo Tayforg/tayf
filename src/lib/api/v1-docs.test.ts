@@ -111,6 +111,55 @@ describe("/api/v1/clusters is_blindspot notes (editorial-3)", () => {
   });
 });
 
+// h47-reports-1: GET /api/v1/clusters floors a cluster at article_count >= 2
+// (the site's own floor); the developer page has to say so, and say where the
+// floor does not apply.
+describe("/api/v1/clusters article_count floor note (h47-reports-1)", () => {
+  const clusters = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters");
+  const FLOOR_NOTE =
+    "Tek haberden oluşan kümeler (article_count < 2) bu listede yer almaz; tek küme okuması (GET /api/v1/clusters/{id}) bu süzgeci uygulamaz.";
+
+  it("carries the Turkish floor sentence exactly once", () => {
+    expect(clusters!.notesTr.filter((n) => n === FLOOR_NOTE)).toHaveLength(1);
+  });
+
+  it("sits right after the politics-majority note it qualifies", () => {
+    const notes = clusters!.notesTr;
+    const politics = notes.findIndex((n) => n.startsWith("Yalnızca üyelerinin en az %"));
+    expect(politics).toBeGreaterThanOrEqual(0);
+    expect(notes[politics + 1]).toBe(FLOOR_NOTE);
+  });
+});
+
+// The page renders each note as plain text, so a markdown backtick would show
+// as a raw character; and a note is for a partner, not an incident log.
+describe("Turkish strings of the v1 docs are plain text (h47-reports-1)", () => {
+  it("no Turkish string carries a backtick", () => {
+    const offenders = turkishStrings()
+      .filter((s) => s.text.includes("`"))
+      .map((s) => s.where);
+    expect(offenders, "write the field name bare; the page does not render markdown").toEqual([]);
+  });
+
+  it("the kap/pickup notes do not recite the internal production timeout", () => {
+    const pickup = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/kap/pickup")!;
+    const joined = pickup.notesTr.join(" ");
+    expect(joined).not.toContain("üretimde");
+    expect(joined).not.toContain("60 saniye");
+    // The behaviour that aside qualified is still documented.
+    expect(joined).toContain("disclosure_coverage görünümü asla sorgulanmaz;");
+  });
+
+  it("keeps the capped / total_disclosures / truncated explanation, without the backticks", () => {
+    const pickup = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/kap/pickup")!;
+    const note = pickup.notesTr.find((n) => n.startsWith("capped: true ise"));
+    expect(note).toBeDefined();
+    expect(note).toContain("liste limit sınırına ulaştı");
+    expect(note).toContain("total_disclosures:");
+    expect(note).toContain("truncated: true ise");
+  });
+});
+
 describe("Turkish strings of the v1 docs carry no ASCII decimal", () => {
   it("scans a plausible number of strings (not vacuous)", () => {
     const all = turkishStrings();

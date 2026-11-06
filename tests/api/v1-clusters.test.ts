@@ -162,7 +162,12 @@ const dbState = vi.hoisted(() => ({
   // When set, replaces CLUSTERS as the table contents (the paging suites).
   clusterRows: null as Array<Record<string, unknown>> | null,
   // Every clusters query that carried an .order() (i.e. the list query).
-  listQueries: [] as Array<{ or: string[]; order: FakeOrder[]; limit: number | null }>,
+  listQueries: [] as Array<{
+    or: string[];
+    order: FakeOrder[];
+    limit: number | null;
+    gte: Array<{ col: string; val: unknown }>;
+  }>,
 }));
 
 const KEYSET_OR_RE =
@@ -205,6 +210,7 @@ const supabaseFake = await vi.hoisted(async () => {
         const idEq = state.eq.find((e) => e.col === "id");
         const archivedEq = state.eq.find((e) => e.col === "is_archived");
         const gteUpdated = state.gte.find((g) => g.col === "updated_at");
+        const gteCount = state.gte.find((g) => g.col === "article_count");
         const inIds = state.in.find((i) => i.col === "id");
 
         if (state.order.length > 0) {
@@ -212,6 +218,7 @@ const supabaseFake = await vi.hoisted(async () => {
             or: [...state.or],
             order: [...state.order],
             limit: state.limit,
+            gte: state.gte.map((g) => ({ ...g })),
           });
         }
 
@@ -224,6 +231,10 @@ const supabaseFake = await vi.hoisted(async () => {
         }
         if (gteUpdated) {
           rows = rows.filter((r) => r.updated_at >= (gteUpdated.val as string));
+        }
+        // The article_count floor: a PostgREST `article_count=gte.N` filter.
+        if (gteCount) {
+          rows = rows.filter((r) => (r.article_count as number) >= (gteCount.val as number));
         }
         for (const filter of state.or) {
           const m = KEYSET_OR_RE.exec(filter);
@@ -430,14 +441,16 @@ describe("GET /api/v1/clusters", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     const ids = body.clusters.map((c: { id: string }) => c.id);
-    // C1 and C5 are both recent + politics-majority; C2 fails the
-    // majority filter, C3 fails the since window, C4 is archived.
-    expect(new Set(ids)).toEqual(new Set([CLUSTER_C1, CLUSTER_C5]));
+    // C1 is recent + politics-majority + multi-article; C2 fails the
+    // majority filter, C3 fails the since window, C4 is archived, C5 is a
+    // politics-majority single-article cluster (below the article_count floor).
+    expect(new Set(ids)).toEqual(new Set([CLUSTER_C1]));
     // Everything in the window was scanned, so there is no next page.
     expect(body).toHaveProperty("next_cursor", null);
     expect(ids).not.toContain(CLUSTER_C2); // non-political majority
     expect(ids).not.toContain(CLUSTER_C3); // outside the since window
     expect(ids).not.toContain(CLUSTER_C4); // archived
+    expect(ids).not.toContain(CLUSTER_C5); // article_count 1
   });
 
   it("free tier 429s on the 61st request within the minute and partner does not", async () => {
@@ -789,6 +802,123 @@ describe("GET /api/v1/clusters — keyset paging", () => {
     ]) {
       expect(decodeV1Cursor(encodeV1Cursor({ u, i: uuidN(9) })), u).toEqual({ u, i: uuidN(9) });
     }
+  });
+});
+
+// h47-reports-1: the home feed, timeline, hubs and /hafta all floor a cluster
+// at article_count >= 2; a one-article "cluster" is a single headline, not a
+// comparison. The list used to scan them (103 of the 150 default candidates on
+// 2026-11-06), so a page could be mostly singletons and the candidate window
+// covered only ~7 h of a 24 h `since`.
+describe("GET /api/v1/clusters — article_count floor", () => {
+  const single = (id: string, updatedAt: string, politics = true) => ({
+    ...pageCluster(id, updatedAt, politics),
+    article_count: 1,
+  });
+
+  it("the list query filters article_count >= 2 next to the since filter, and the candidate limit is unchanged", async () => {
+    dbState.clusterRows = [pageCluster(uuidN(1), rawTs(60_000))];
+    const res = await getPage();
+    expect(res.status).toBe(200);
+    expect(dbState.listQueries).toHaveLength(1);
+    const q = dbState.listQueries[0]!;
+    expect(q.gte).toContainEqual({ col: "article_count", val: 2 });
+    expect(q.gte.map((g) => g.col).sort()).toEqual(["article_count", "updated_at"]);
+    // Default limit 50 * CANDIDATE_MULTIPLIER 3: the floor changes the rows, not the window size.
+    expect(q.limit).toBe(150);
+  });
+
+  it("never returns a single-article cluster, even a politics-majority one, and keeps a two-article one", async () => {
+    const pair1 = pageCluster(uuidN(1), rawTs(1 * 60_000));
+    const pair2 = pageCluster(uuidN(2), rawTs(4 * 60_000));
+    const rows = [
+      single(uuidN(11), rawTs(2 * 60_000)),
+      single(uuidN(12), rawTs(3 * 60_000)),
+      { ...single(uuidN(13), rawTs(5 * 60_000)), article_count: 0 },
+      single(uuidN(14), rawTs(6 * 60_000)),
+      pair1,
+      pair2,
+    ];
+    dbState.clusterRows = rows;
+    const body = await (await getPage({ limit: "10" })).json();
+    expect(body.clusters.map((c: { id: string }) => c.id)).toEqual([pair1.id, pair2.id]);
+    expect(body.count).toBe(2);
+    for (const c of body.clusters) expect(c.article_count).toBeGreaterThanOrEqual(2);
+    expect(body.next_cursor).toBeNull();
+  });
+
+  it("singletons no longer fill the candidate window: 150 newer singletons do not hide the multi-article clusters behind them", async () => {
+    const singletons = Array.from({ length: 160 }, (_, k) =>
+      single(uuidN(1000 + k), rawTs((k + 1) * 1000)),
+    );
+    const pairs = [0, 1, 2].map((k) => pageCluster(uuidN(2000 + k), rawTs(200_000 + k * 1000)));
+    dbState.clusterRows = [...singletons, ...pairs];
+    // Default limit 50 -> 150 candidates. Before the floor those 150 were all singletons.
+    const body = await (await getPage()).json();
+    expect(dbState.listQueries[0]!.limit).toBe(150);
+    expect(body.clusters.map((c: { id: string }) => c.id)).toEqual(pairs.map((c) => c.id));
+    expect(body.count).toBe(3);
+    expect(body.next_cursor).toBeNull();
+  });
+
+  it("keyset paging is unchanged: the cursor is the last RETURNED row, each page carries the floor, and the walk visits every multi-article cluster once", async () => {
+    const a = pageCluster(uuidN(1), rawTs(1 * 60_000));
+    const b = pageCluster(uuidN(2), rawTs(3 * 60_000));
+    const c = pageCluster(uuidN(3), rawTs(5 * 60_000));
+    dbState.clusterRows = [
+      single(uuidN(21), rawTs(2 * 60_000)),
+      single(uuidN(22), rawTs(4 * 60_000)),
+      single(uuidN(23), rawTs(6 * 60_000)),
+      c,
+      a,
+      b,
+    ];
+    const seen: string[] = [];
+    const cursors: Array<string | null> = [];
+    let before: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const body = await (await getPage({ limit: "1", ...(before ? { before } : {}) })).json();
+      for (const row of body.clusters) seen.push(row.id);
+      cursors.push(body.next_cursor);
+      if (body.next_cursor === null) break;
+      before = body.next_cursor;
+    }
+    expect(seen).toEqual([a.id, b.id, c.id]);
+    // limit=1 -> 3 candidates per page. A page that returned its one row hands
+    // back that row's (updated_at, id), exactly as before the floor existed.
+    expect(decodeRawCursor(cursors[0]!)).toEqual({ u: a.updated_at, i: a.id });
+    expect(decodeRawCursor(cursors[1]!)).toEqual({ u: b.updated_at, i: b.id });
+    expect(cursors.at(-1)).toBeNull();
+    for (const q of dbState.listQueries) {
+      expect(q.gte).toContainEqual({ col: "article_count", val: 2 });
+      expect(q.limit).toBe(3);
+    }
+    // Pages after the first still use the same keyset filter.
+    expect(dbState.listQueries[1]!.or).toEqual([
+      `updated_at.lt."${a.updated_at}",and(updated_at.eq."${a.updated_at}",id.lt."${a.id}")`,
+    ]);
+  });
+
+  it("a scan that hits its candidate limit still hands back the last SCANNED candidate", async () => {
+    // 6 multi-article non-politics rows then 1 politics row, limit=1 -> 3 candidates:
+    // the first window holds no politics row, so the cursor is the 3rd scanned row.
+    const rows = Array.from({ length: 6 }, (_, k) =>
+      pageCluster(uuidN(3000 + k), rawTs((k + 1) * 60_000), false),
+    );
+    dbState.clusterRows = [...rows, pageCluster(uuidN(3100), rawTs(30 * 60_000))];
+    const body = await (await getPage({ limit: "1" })).json();
+    expect(body.count).toBe(0);
+    expect(decodeRawCursor(body.next_cursor)).toEqual({ u: rows[2]!.updated_at, i: rows[2]!.id });
+  });
+
+  it("GET /api/v1/clusters/[id] does not apply the floor: a single-article cluster is still readable", async () => {
+    const { GET } = await import("@/app/api/v1/clusters/[id]/route");
+    const res = await GET(detailRequest(CLUSTER_C5, { key: FREE_KEY }), paramsFor(CLUSTER_C5));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.cluster.id).toBe(CLUSTER_C5);
+    expect(body.cluster.article_count).toBe(1);
+    expect(dbState.listQueries).toHaveLength(0);
   });
 });
 
