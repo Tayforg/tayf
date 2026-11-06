@@ -1,5 +1,5 @@
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
-import { fightinWords, type FwDoc } from "@/lib/text/fightin-words";
+import { calibratedZCut, fightinWords, type FwDoc, type FwOptions } from "@/lib/text/fightin-words";
 import { headlineKey, headlineTerms, tokenizeHeadline } from "@/lib/text/tokenize-tr";
 import { BIAS_TO_ZONE, isVotingKind } from "@/lib/bias/config";
 import type { BiasCategory, MediaDnaZone } from "@/types";
@@ -42,6 +42,11 @@ export type WeeklyDistinctiveWords =
   | {
       status: "ok";
       sample: Record<MediaDnaZone, number>;
+      /**
+       * The z a term had to reach to be listed: the permutation-calibrated cut
+       * (the level shuffled zone labels rarely beat), never below FW_DEFAULTS.zMin.
+       */
+      zCut: number;
       zones: Record<MediaDnaZone, DistinctiveTerm[]>;
     }
   | {
@@ -172,12 +177,14 @@ function pickDisplay(surfaceCounts: Map<string, number>): string {
 
 /**
  * Pure aggregation: rows + sources -> the section's plain, serialisable
- * payload. `opts` forwards straight to `fightinWords`.
+ * payload. `opts` forwards to `calibratedZCut` and `fightinWords`; `zMin` is
+ * the floor of the calibrated cut, and `nullPermutations: 0` switches the
+ * calibration off (the cut is then `zMin`).
  */
 export function buildWeeklyDistinctiveWords(
   rows: readonly WeeklyWordsArticleRow[],
   sources: readonly WeeklyWordsSourceRow[],
-  opts?: Parameters<typeof fightinWords>[1],
+  opts?: Partial<FwOptions>,
 ): WeeklyDistinctiveWords {
   const sourceById = new Map<string, WeeklyWordsSourceRow>();
   for (const s of sources) sourceById.set(s.id, s);
@@ -241,7 +248,11 @@ export function buildWeeklyDistinctiveWords(
       });
     }
   }
-  const scored = fightinWords(fwDocs, opts);
+  // The cut comes from the same docs by shuffling the zone labels, so a week
+  // of pure noise lists nothing; a zone with fewer than minTermsToShow terms
+  // above it falls to an empty list (the component's EMPTY_ZONE_COPY).
+  const zCut = calibratedZCut(fwDocs, opts);
+  const scored = fightinWords(fwDocs, { ...opts, zMin: zCut });
 
   // 5 & 6. Display form + example, per zone.
   const zones: Record<MediaDnaZone, DistinctiveTerm[]> = {
@@ -276,5 +287,5 @@ export function buildWeeklyDistinctiveWords(
     }
   }
 
-  return { status: "ok", sample, zones };
+  return { status: "ok", sample, zCut, zones };
 }

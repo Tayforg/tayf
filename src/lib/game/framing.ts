@@ -111,8 +111,26 @@ export function pluralityVote(tally: FramingTally): FramingVote | null {
   return first.vote;
 }
 
+/**
+ * True when a headline's crowd tally is large enough to print as percentages or
+ * to compare a player's vote against: `n >= FRAMING_MIN_TALLY_N`. The ONE floor
+ * shared by the reveal line (`formatTallyLine`) and the round summary
+ * (`summariseFramingRound`), so one screen can never print "%100" for a
+ * headline the next screen calls too thin to compare. The tally the vote route
+ * returns already includes the caller's own vote, so n = 1 is usually only the
+ * player agreeing with themselves.
+ */
+export function hasComparableTally(tally: FramingTally): boolean {
+  return tally.n >= FRAMING_MIN_TALLY_N;
+}
+
 export function formatTallyLine(tally: FramingTally): string {
-  if (tally.n === 0) return "Henüz oy yok";
+  if (tally.n <= 0) return "Henüz oy yok";
+  // Below the floor: no percentages, only how far the headline is from having
+  // enough votes to show any.
+  if (!hasComparableTally(tally)) {
+    return `Bu başlık için henüz yeterli oy yok (${tally.n}/${FRAMING_MIN_TALLY_N}).`;
+  }
   // Largest-remainder rounding so the three shown percentages total 100
   // (independent Math.round gave 33/33/33 for 1/1/1 and 88/13/0 for 7/1/0).
   const [iktidar = 0, muhalefet = 0, none = 0] = roundPercents([
@@ -131,7 +149,7 @@ export function summariseFramingRound(entries: readonly FramingRoundEntry[]): {
   detail: string;
 } {
   const total = entries.length;
-  const eligibleEntries = entries.filter((entry) => entry.tally.n >= FRAMING_MIN_TALLY_N);
+  const eligibleEntries = entries.filter((entry) => hasComparableTally(entry.tally));
   const eligible = eligibleEntries.length;
   const agree = eligibleEntries.filter(
     (entry) => pluralityVote(entry.tally) === entry.vote,

@@ -152,7 +152,14 @@ export interface WeeklyClusterRead {
 export interface WeeklySummary {
   zoneCounts: Record<MediaDnaZone, number>;
   topClusters: WeeklyTopCluster[];
+  /** At most WEEKLY_LIST_SIZE rows, the biggest claims of each side: see `pickWeeklyBlindspots`. */
   blindspots: WeeklyBlindspot[];
+  /**
+   * Every public blindspot claim per side, counted after the health gate, the
+   * recall veto, the public delay and the title de-dup but before the list cut,
+   * so it states how many claims the list above was chosen from.
+   */
+  blindspotSideCounts: Record<MediaDnaZone, number>;
 }
 
 function emptyZoneCounts(): Record<MediaDnaZone, number> {
@@ -216,6 +223,97 @@ function sideShareOf(
   return { share, sharePct };
 }
 
+const byArticleCountDesc = <T extends { articleCount: number }>(a: T, b: T) =>
+  b.articleCount - a.articleCount;
+
+/**
+ * The order the sides take turns in when their largest claims tie: the same
+ * reading order the site uses elsewhere (İktidar, then Muhalefet, then Bağımsız),
+ * which is not ZONE_ORDER (that one lists bagimsiz second).
+ */
+const PICK_TIE_ORDER: readonly MediaDnaZone[] = [
+  "iktidar",
+  "muhalefet",
+  "bagimsiz",
+];
+
+/**
+ * browser-qa-15: Jev's clustering can split one real-world story into two
+ * clusters with cosmetically different headlines (case, punctuation, an added
+ * "!"). Sorting by rank BEFORE the de-dup makes "first" (kept) the
+ * higher-article-count duplicate. Stable, and never mutates its input.
+ */
+function rankedUniqueBlindspots(
+  claims: readonly WeeklyBlindspot[],
+): WeeklyBlindspot[] {
+  return dedupeByTitle([...claims].sort(byArticleCountDesc), (b) => b.title);
+}
+
+/** `rankedUniqueBlindspots` output in, side-balanced rows out: see `pickWeeklyBlindspots`. */
+function pickFromRanked(
+  ranked: readonly WeeklyBlindspot[],
+  size: number,
+): WeeklyBlindspot[] {
+  if (!(size >= 1)) return [];
+
+  const bySide = new Map<MediaDnaZone, WeeklyBlindspot[]>();
+  for (const claim of ranked) {
+    const group = bySide.get(claim.side);
+    if (group) group.push(claim);
+    else bySide.set(claim.side, [claim]);
+  }
+
+  // Largest claim first (the groups are already rank-ordered, so index 0 is
+  // each side's largest); a tie falls back to PICK_TIE_ORDER.
+  const sides = [...bySide.keys()].sort(
+    (a, b) =>
+      bySide.get(b)![0]!.articleCount - bySide.get(a)![0]!.articleCount ||
+      PICK_TIE_ORDER.indexOf(a) - PICK_TIE_ORDER.indexOf(b),
+  );
+
+  const picked: WeeklyBlindspot[] = [];
+  for (let round = 0; picked.length < size; round++) {
+    let tookAny = false;
+    for (const side of sides) {
+      if (picked.length >= size) break;
+      const claim = bySide.get(side)![round];
+      if (claim === undefined) continue;
+      picked.push(claim);
+      tookAny = true;
+    }
+    if (!tookAny) break;
+  }
+
+  // Stable: equal counts keep the order they were picked in.
+  return picked.sort(byArticleCountDesc);
+}
+
+/**
+ * The weekly "Kör noktalar" list (h52-weekly-2): the biggest claims of EACH
+ * side, not the `size` biggest overall. İktidar has more outlets than
+ * Muhalefet, so its claims are structurally bigger and a plain top-N by article
+ * count could never reach a Muhalefet-side claim (prod, 2026-11-06: 37 vs 9
+ * public claims, the largest Muhalefet claim 8 sources against an İktidar
+ * fifth of 15) — every weekly page showed only "stories Muhalefet missed".
+ *
+ *   1. Sort by article count desc and de-dup by folded title (the larger
+ *      duplicate wins, whatever its side).
+ *   2. Group by side and order the sides by their largest claim, desc; a tie
+ *      goes iktidar, muhalefet, bagimsiz.
+ *   3. Take one claim from each non-empty side in turn until `size` rows are
+ *      taken or every side is exhausted. A side with fewer claims than turns
+ *      simply drops out, so a one-sided week is exactly today's top `size`.
+ *   4. Return the picked rows by article count desc (ties keep pick order).
+ *
+ * Pure and non-mutating. `size` below 1 (or NaN) yields no rows.
+ */
+export function pickWeeklyBlindspots(
+  claims: readonly WeeklyBlindspot[],
+  size: number = WEEKLY_LIST_SIZE,
+): WeeklyBlindspot[] {
+  return pickFromRanked(rankedUniqueBlindspots(claims), size);
+}
+
 /**
  * Pure weekly aggregation. `health` is the read-path blindspot gate: a zone
  * whose feeds are degraded cannot be said to have *chosen* silence, so
@@ -275,24 +373,24 @@ export function summariseWeek(
     }
   }
 
-  const byArticleCountDesc = <T extends { articleCount: number }>(a: T, b: T) =>
-    b.articleCount - a.articleCount;
+  // The health gate, the recall veto and the public delay have all run above,
+  // so `publicClaims` is exactly the set a reader may be shown. The side tally
+  // counts all of it; the list is the side-balanced pick from it.
+  const publicClaims = rankedUniqueBlindspots(blindspots);
+  const blindspotSideCounts = emptyZoneCounts();
+  for (const claim of publicClaims) blindspotSideCounts[claim.side] += 1;
 
-  // browser-qa-15: Jev's clustering can split one real-world story into two
-  // clusters with cosmetically different headlines (case, punctuation, an
-  // added "!") — de-dupe by folded title AFTER sorting by rank, so "first"
-  // (kept) is always the higher-article-count duplicate, then re-slice to
-  // the list size from whatever real rows remain.
+  // browser-qa-15: de-dupe by folded title AFTER sorting by rank, so "first"
+  // (kept) is always the higher-article-count duplicate, then re-slice to the
+  // list size from whatever real rows remain.
   return {
     zoneCounts,
     topClusters: dedupeByTitle(
       topClusters.sort(byArticleCountDesc),
       (c) => c.title,
     ).slice(0, WEEKLY_LIST_SIZE),
-    blindspots: dedupeByTitle(
-      blindspots.sort(byArticleCountDesc),
-      (b) => b.title,
-    ).slice(0, WEEKLY_LIST_SIZE),
+    blindspots: pickFromRanked(publicClaims, WEEKLY_LIST_SIZE),
+    blindspotSideCounts,
   };
 }
 

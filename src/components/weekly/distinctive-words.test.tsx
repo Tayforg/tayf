@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { FW_DEFAULTS } from "@/lib/text/fightin-words";
 import type { WeeklyDistinctiveWords } from "@/lib/weekly/distinctive-words";
 
 import { DistinctiveWords } from "./distinctive-words";
@@ -9,7 +10,9 @@ import { DistinctiveWords } from "./distinctive-words";
 // renders a plain <a>, so renderToStaticMarkup is enough. The markup is only
 // inspected with includes()/indexOf() (never a regex over HTML tags).
 
-const LEGEND = "z: belirginlik puanı; 1,96 ve üstü istatistiksel olarak anlamlı sayılır.";
+// zCut 3.3 in okData(): the legend says what the list is filtered against and shows the cut.
+const LEGEND =
+  "z: belirginlik puanı. Aynı başlıkların bölge etiketleri rastgele karıştırıldığında bir bölgede çıkan en yüksek puan, denemelerin yüzde 95'inde eşiğin altında kalıyor; listeye yalnızca eşiği aşan kelimeler girer (eşik: z 3,3).";
 const INTRO_MARKER = "Bu bir sayımdır";
 
 const SAMPLE = { iktidar: 300, bagimsiz: 280, muhalefet: 260 };
@@ -18,6 +21,7 @@ function okData(): WeeklyDistinctiveWords {
   return {
     status: "ok",
     sample: SAMPLE,
+    zCut: 3.3,
     zones: {
       iktidar: [
         {
@@ -45,9 +49,15 @@ function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
+// renderToStaticMarkup escapes the ASCII apostrophe ("95'inde" -> "95&#x27;inde"), so exact-string checks on
+// the legend run on markup with that one entity decoded; a negative check on the escaped text would pass vacuously.
+function renderPlain(data: WeeklyDistinctiveWords | null): string {
+  return renderToStaticMarkup(<DistinctiveWords data={data} />).replaceAll("&#x27;", "'");
+}
+
 describe("DistinctiveWords z legend", () => {
   it("renders the legend exactly once, after the intro and before the first list", () => {
-    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+    const markup = renderPlain(okData());
 
     expect(countOccurrences(markup, LEGEND)).toBe(1);
 
@@ -85,19 +95,96 @@ describe("DistinctiveWords z legend", () => {
   });
 
   it("omits the legend when the data is null", () => {
-    const markup = renderToStaticMarkup(<DistinctiveWords data={null} />);
+    const markup = renderPlain(null);
 
     expect(markup.includes(LEGEND)).toBe(false);
+    expect(markup.includes("eşik")).toBe(false);
     expect(markup).toContain("Kelime karşılaştırması şu anda hesaplanamıyor.");
   });
 
   it("omits the legend when the sample is insufficient", () => {
-    const markup = renderToStaticMarkup(
-      <DistinctiveWords data={{ status: "insufficient", sample: SAMPLE }} />,
-    );
+    const markup = renderPlain({ status: "insufficient", sample: SAMPLE });
 
     expect(markup.includes(LEGEND)).toBe(false);
+    expect(markup.includes("eşik")).toBe(false);
     expect(markup).toContain("Son 7 günde kelime karşılaştırması için yeterli başlık yok.");
+  });
+
+  it("no longer claims 1,96 or statistical significance anywhere", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+
+    expect(markup.includes("1,96")).toBe(false);
+    expect(markup.includes("1.96")).toBe(false);
+    expect(markup.toLocaleLowerCase("tr-TR").includes("anlamlı")).toBe(false);
+    expect(markup.toLocaleLowerCase("tr-TR").includes("istatistiksel")).toBe(false);
+  });
+
+  it("shows the cut in the legend, formatted like the row scores (one decimal, tr-TR comma)", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+    expect(markup).toContain("(eşik: z 3,3)");
+
+    const other = { ...okData(), zCut: 3.26 } as WeeklyDistinctiveWords;
+    const otherMarkup = renderToStaticMarkup(<DistinctiveWords data={other} />);
+    expect(otherMarkup).toContain("(eşik: z 3,3)");
+
+    const high = { ...okData(), zCut: 4 } as WeeklyDistinctiveWords;
+    expect(renderToStaticMarkup(<DistinctiveWords data={high} />)).toContain("(eşik: z 4,0)");
+  });
+
+  it("explains the cut as a 95th-percentile threshold, not as 'above every shuffled maximum'", () => {
+    const markup = renderPlain(okData());
+
+    expect(markup).toContain("denemelerin yüzde 95'inde eşiğin altında kalıyor");
+    expect(markup).toContain("listeye yalnızca eşiği aşan kelimeler girer");
+    // The old wording claimed every listed word beats the highest shuffled score;
+    // the cut is the 95th percentile of the shuffled maxima, so that was false.
+    expect(markup.includes("en yüksek puanları aşan")).toBe(false);
+  });
+
+  it("keeps the 95 per cent in the legend in step with the quantile the cut is computed at", () => {
+    // If the null quantile changes, the legend's "yüzde 95" must change with it.
+    expect(FW_DEFAULTS.nullQuantile).toBe(0.95);
+  });
+
+  it("states the cut in the footnote too, replacing 'en az 1,96'", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+
+    expect(markup).toContain(
+      "belirginlik puanı (z), bölge etiketleri 20 kez rastgele karıştırılarak bulunan şans eşiğini (z 3,3) aşmalı.",
+    );
+    expect(markup.includes("en az 1,96")).toBe(false);
+    // The method sentence that follows is unchanged.
+    expect(markup).toContain("Yöntem: bilgilendirici Dirichlet önselli log-odds oranı");
+  });
+
+  it("shows the same cut in the legend and in the footnote", () => {
+    const data = { ...okData(), zCut: 2.84 } as WeeklyDistinctiveWords;
+    const markup = renderToStaticMarkup(<DistinctiveWords data={data} />);
+
+    expect(countOccurrences(markup, "z 2,8")).toBeGreaterThanOrEqual(2);
+    expect(markup).toContain("(eşik: z 2,8)");
+    expect(markup).toContain("şans eşiğini (z 2,8) aşmalı");
+  });
+
+  it("degrades without printing 'NaN' or 'undefined' when a cached payload predates zCut", () => {
+    const { zCut: _zCut, ...legacy } = okData() as Extract<WeeklyDistinctiveWords, { status: "ok" }>;
+    const markup = renderToStaticMarkup(
+      <DistinctiveWords data={legacy as unknown as WeeklyDistinctiveWords} />,
+    );
+
+    expect(markup).toContain("Bakan");
+    expect(markup.includes("NaN")).toBe(false);
+    expect(markup.includes("undefined")).toBe(false);
+    expect(markup.includes("eşik")).toBe(false);
+    expect(markup.includes("1,96")).toBe(false);
+    expect(markup).toContain("listeye yalnızca eşiği aşan kelimeler girer.");
+  });
+
+  it("renders a zone with no terms above the cut as the empty-zone copy", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+
+    // okData lists one term (iktidar); bagimsiz and muhalefet are empty.
+    expect(countOccurrences(markup, "Son 7 günde belirgin şekilde öne çıkan kelime yok.")).toBe(2);
   });
 
   it("never says 'bu hafta' (/hafta is a trailing 7-day window)", () => {

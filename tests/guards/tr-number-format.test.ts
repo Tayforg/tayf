@@ -96,24 +96,35 @@ describe("tr-TR percent / count formatting", () => {
     expect(code).not.toContain("Toplam ${totalArticles} haber.");
   });
 
-  it("/source/[slug] hides RSS boilerplate excerpts, headline echoes and style sheets", () => {
+  it("/source/[slug] hides RSS boilerplate excerpts, headline echoes, style sheets and feed residue", () => {
     const src = read("src/app/source/[slug]/page.tsx");
-    expect(
-      importsFrom(src, "@/lib/articles/description-boilerplate"),
-      "imports isBoilerplateDescription",
-    ).toBe(true);
-    expect(src).toMatch(/import\s*\{[^}]*\bisBoilerplateDescription\b[^}]*\}\s*from/);
-    expect(src).toMatch(/import\s*\{[^}]*\bisHeadlineEcho\b[^}]*\}\s*from/);
-    expect(src).toMatch(/import\s*\{[^}]*\bstripLeadingStyleRules\b[^}]*\}\s*from/);
-    // The excerpt paragraph is gated on them, not merely imported (h48-ingest-1):
-    // the rights gate, then the leading style sheet off, then the three checks.
+    // h52-sources-1: the page no longer composes the checks itself. It asks
+    // sourceExcerpt, which tidies the description like a cluster summary and
+    // returns "" when nothing should be shown.
+    expect(importsFrom(src, "@/lib/articles/source-excerpt"), "imports sourceExcerpt").toBe(true);
+    expect(src).toMatch(/import\s*\{[^}]*\bsourceExcerpt\b[^}]*\}\s*from/);
+    // The excerpt paragraph is gated on it, not merely imported: the rights
+    // gate, then sourceExcerpt, then "not empty".
     const code = stripComments(src);
     expect(code).toMatch(
-      /articleExcerptEligible\(article,\s*source\)\s*\?\s*stripLeadingStyleRules\(article\.description\)/,
+      /articleExcerptEligible\(article,\s*source\)\s*\?\s*sourceExcerpt\(article\.title,\s*article\.description\)/,
     );
-    expect(code).toMatch(
-      /excerpt\s*!==\s*""\s*&&\s*!isBoilerplateDescription\(excerpt\)\s*&&\s*!isHeadlineEcho\(article\.title,\s*excerpt\)/,
-    );
+    expect(code).toMatch(/showExcerpt\s*=\s*excerpt\s*!==\s*""/);
     expect(code).toMatch(/\{showExcerpt\s*\?/);
+
+    // sourceExcerpt composes the style-sheet strip (h48-ingest-1), the shared
+    // read-time tidy (h52-sources-1) and the two checks, and the checks run on
+    // the tidied text.
+    const mod = read("src/lib/articles/source-excerpt.ts");
+    expect(importsFrom(mod, "./description-boilerplate")).toBe(true);
+    expect(importsFrom(mod, "./summary-tidy")).toBe(true);
+    expect(mod).toMatch(/import\s*\{[^}]*\bisBoilerplateDescription\b[^}]*\}\s*from/);
+    expect(mod).toMatch(/import\s*\{[^}]*\bisHeadlineEcho\b[^}]*\}\s*from/);
+    expect(mod).toMatch(/import\s*\{[^}]*\bstripLeadingStyleRules\b[^}]*\}\s*from/);
+    expect(mod).toMatch(/import\s*\{[^}]*\btidySummaryText\b[^}]*\}\s*from/);
+    const modCode = stripComments(mod);
+    expect(modCode).toMatch(/tidySummaryText\(stripLeadingStyleRules\(description\)\)/);
+    expect(modCode).toMatch(/isBoilerplateDescription\(excerpt\)/);
+    expect(modCode).toMatch(/isHeadlineEcho\(title,\s*excerpt\)/);
   });
 });

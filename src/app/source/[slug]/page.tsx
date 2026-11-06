@@ -7,8 +7,7 @@ import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
-import { isBoilerplateDescription, isHeadlineEcho } from "@/lib/articles/description-boilerplate";
-import { stripLeadingStyleRules } from "@/lib/articles/summary-tidy";
+import { sourceExcerpt } from "@/lib/articles/source-excerpt";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { sourceLang } from "@/lib/sources/source-language";
 import { optimizedThumbSrcSet } from "@/lib/images/image-url";
@@ -321,21 +320,23 @@ export default async function SourceProfilePage({ params }: PageProps) {
               const thumb = articleImageEligible(article, source)
                 ? optimizedThumbSrcSet(article.image_url)
                 : null;
-              // The excerpt line (h48-ingest-1). Elips Haber's feed puts the
-              // sheet of its notice template in front of the notice, so the
-              // leading CSS rules go first. What is left is shown only when it
-              // is a summary: not empty, not an RSS call-to-action or
-              // "Ayrıntılar geliyor..." stub, not punctuation, and not the
-              // card's own headline again (Korkusuz ships the title as the
-              // description, CNN Türk half of the time). Read-time only; the
-              // stored description is untouched.
+              // The excerpt line (h48-ingest-1, h52-sources-1). sourceExcerpt
+              // runs the same read-time tidy as a cluster summary: the leading
+              // style sheet of Elips Haber's notices, then the feed residue
+              // ("Devamı için tıklayınız" on Sabah / A Haber / Yeni Asır, the
+              // "<headline> dd.mm.yyyy Diken" lead and "The post ... appeared
+              // first on" footer, Medyascope's echoed headline + site name,
+              // Serbestiyet's "yazısı ilk önce" footer, glued sentences). What
+              // is left is shown only when it is a summary: not empty, not an
+              // RSS call-to-action or "Ayrıntılar geliyor..." stub, not
+              // punctuation, and not the card's own headline again (Korkusuz
+              // ships the title as the description, CNN Türk half of the
+              // time); sourceExcerpt returns "" for all of those. Read-time
+              // only; the stored description is untouched.
               const excerpt = articleExcerptEligible(article, source)
-                ? stripLeadingStyleRules(article.description)
+                ? sourceExcerpt(article.title, article.description)
                 : "";
-              const showExcerpt =
-                excerpt !== "" &&
-                !isBoilerplateDescription(excerpt) &&
-                !isHeadlineEcho(article.title, excerpt);
+              const showExcerpt = excerpt !== "";
               return (
                 <li
                   key={article.id}

@@ -81,10 +81,13 @@ function isCappedClientOpts(opts: unknown): boolean {
 import { cacheLife, cacheTag } from "next/cache";
 import {
   WEEKLY_CLUSTER_LIMIT,
+  WEEKLY_LIST_SIZE,
   WEEK_MS,
   getWeeklyClusters,
   getWeeklyLabelChanges,
+  pickWeeklyBlindspots,
   summariseWeek,
+  type WeeklyBlindspot,
   type WeeklyClusterRow,
 } from "./weekly-query";
 import { zonePercents } from "@/lib/bias/zone-summary";
@@ -1094,5 +1097,381 @@ describe("summariseWeek — blindspots", () => {
 
     expect(summary.blindspots).toHaveLength(5);
     expect(summary.blindspots.map((b) => b.articleCount)).toEqual([9, 8, 6, 4, 3]);
+  });
+});
+
+// --- h52-weekly-2: a side-balanced blindspot list ---------------------------
+//
+// The weekly list used to be the five biggest claims by article count. İktidar
+// has more outlets than Muhalefet, so its claims are structurally bigger and a
+// Muhalefet-side claim could never reach the top five (prod, 2026-11-06: 37
+// İktidar-side vs 9 Muhalefet-side public claims, the largest Muhalefet claim
+// 8 sources against an İktidar fifth of 15). pickWeeklyBlindspots takes one
+// claim per side in turn instead, and summariseWeek reports the side tally.
+
+/** A claim as summariseWeek hands it to the picker. */
+function claim(
+  id: string,
+  side: MediaDnaZone,
+  articleCount: number,
+  title = `Kör nokta ${id}`,
+): WeeklyBlindspot {
+  return { id, title, articleCount, side, share: 1, sharePct: 100 };
+}
+
+/** n claims on one side, articleCounts start, start-1, ... */
+function claimsOf(side: MediaDnaZone, counts: number[]): WeeklyBlindspot[] {
+  return counts.map((n, i) => claim(`${side}-${i}-${n}`, side, n));
+}
+
+describe("pickWeeklyBlindspots", () => {
+  it("takes one claim per side in turn: 6 iktidar (20..15) + 2 muhalefet (8, 7) -> 3 iktidar + 2 muhalefet, sorted by count", () => {
+    const picked = pickWeeklyBlindspots([
+      ...claimsOf("iktidar", [20, 19, 18, 17, 16, 15]),
+      ...claimsOf("muhalefet", [8, 7]),
+    ]);
+
+    expect(picked).toHaveLength(5);
+    expect(picked.map((b) => [b.side, b.articleCount])).toEqual([
+      ["iktidar", 20],
+      ["iktidar", 19],
+      ["iktidar", 18],
+      ["muhalefet", 8],
+      ["muhalefet", 7],
+    ]);
+  });
+
+  it("is order independent: the same claims in any input order pick the same rows", () => {
+    const claims = [
+      ...claimsOf("iktidar", [20, 19, 18, 17, 16, 15]),
+      ...claimsOf("muhalefet", [8, 7]),
+    ];
+    const expected = pickWeeklyBlindspots(claims).map((b) => b.id);
+
+    expect(pickWeeklyBlindspots([...claims].reverse()).map((b) => b.id)).toEqual(expected);
+  });
+
+  it("only iktidar claims: exactly today's top five by article count (regression)", () => {
+    const picked = pickWeeklyBlindspots(claimsOf("iktidar", [3, 9, 7, 1, 8, 5, 2]));
+
+    expect(picked.map((b) => b.articleCount)).toEqual([9, 8, 7, 5, 3]);
+    expect(picked.every((b) => b.side === "iktidar")).toBe(true);
+  });
+
+  it("only muhalefet claims: the five biggest muhalefet claims", () => {
+    const picked = pickWeeklyBlindspots(claimsOf("muhalefet", [2, 6, 4, 3, 5, 9, 7]));
+
+    expect(picked.map((b) => b.articleCount)).toEqual([9, 7, 6, 5, 4]);
+  });
+
+  it("returns the very claim objects it was given, not copies", () => {
+    const only = claim("only", "muhalefet", 4);
+
+    expect(pickWeeklyBlindspots([only])[0]).toBe(only);
+  });
+
+  it("keeps the larger of two title duplicates and does not spend a slot on the smaller", () => {
+    const picked = pickWeeklyBlindspots([
+      claim("big", "iktidar", 20, "İhale iptal edildi"),
+      claim("dup", "iktidar", 19, "İhale İptal Edildi!"),
+      claim("m1", "muhalefet", 8),
+    ]);
+
+    expect(picked.map((b) => b.id)).toEqual(["big", "m1"]);
+  });
+
+  it("de-dups across sides too: the larger duplicate wins whatever its side", () => {
+    const picked = pickWeeklyBlindspots([
+      claim("i", "iktidar", 12, "Aynı haber"),
+      claim("m", "muhalefet", 8, "aynı haber"),
+    ]);
+
+    expect(picked.map((b) => b.id)).toEqual(["i"]);
+  });
+
+  it("the duplicate's slot goes to the next claim of that side instead", () => {
+    const picked = pickWeeklyBlindspots(
+      [
+        claim("i1", "iktidar", 20, "Aynı"),
+        claim("i2", "iktidar", 19, "AYNI"),
+        claim("i3", "iktidar", 18),
+        claim("m1", "muhalefet", 8),
+      ],
+      3,
+    );
+
+    expect(picked.map((b) => b.id)).toEqual(["i1", "i3", "m1"]);
+  });
+
+  it("orders the sides by their largest claim, so the biggest side starts the rotation", () => {
+    const claims = [
+      claim("i", "iktidar", 5),
+      claim("m", "muhalefet", 9),
+      claim("b", "bagimsiz", 7),
+    ];
+
+    expect(pickWeeklyBlindspots(claims, 1).map((b) => b.id)).toEqual(["m"]);
+    expect(pickWeeklyBlindspots(claims, 2).map((b) => b.id)).toEqual(["m", "b"]);
+  });
+
+  it("breaks a tie between sides in the order iktidar, muhalefet, bagimsiz", () => {
+    const claims = [
+      claim("b", "bagimsiz", 6),
+      claim("m", "muhalefet", 6),
+      claim("i", "iktidar", 6),
+    ];
+
+    expect(pickWeeklyBlindspots(claims, 1).map((b) => b.id)).toEqual(["i"]);
+    expect(pickWeeklyBlindspots(claims, 2).map((b) => b.id)).toEqual(["i", "m"]);
+    // Equal counts keep pick order in the result.
+    expect(pickWeeklyBlindspots(claims, 3).map((b) => b.id)).toEqual(["i", "m", "b"]);
+  });
+
+  it("rotates across all three sides: 4 iktidar + 3 muhalefet + 2 bagimsiz fill five as 2 / 2 / 1", () => {
+    const picked = pickWeeklyBlindspots([
+      ...claimsOf("iktidar", [30, 29, 28, 27]),
+      ...claimsOf("muhalefet", [20, 19, 18]),
+      ...claimsOf("bagimsiz", [10, 9]),
+    ]);
+
+    expect(picked.map((b) => [b.side, b.articleCount])).toEqual([
+      ["iktidar", 30],
+      ["iktidar", 29],
+      ["muhalefet", 20],
+      ["muhalefet", 19],
+      ["bagimsiz", 10],
+    ]);
+  });
+
+  it("an exhausted side stops contributing and the others fill the remaining rows", () => {
+    const picked = pickWeeklyBlindspots([
+      ...claimsOf("iktidar", [20, 19, 18, 17, 16]),
+      ...claimsOf("muhalefet", [8]),
+    ]);
+
+    expect(picked.map((b) => b.articleCount)).toEqual([20, 19, 18, 17, 8]);
+  });
+
+  it("returns every claim when there are fewer than the list size", () => {
+    const picked = pickWeeklyBlindspots([
+      claim("m", "muhalefet", 3),
+      claim("i", "iktidar", 4),
+    ]);
+
+    expect(picked.map((b) => b.id)).toEqual(["i", "m"]);
+  });
+
+  it("defaults the size to WEEKLY_LIST_SIZE, which stays five", () => {
+    expect(WEEKLY_LIST_SIZE).toBe(5);
+    expect(pickWeeklyBlindspots(claimsOf("iktidar", [9, 8, 7, 6, 5, 4, 3]))).toHaveLength(5);
+  });
+
+  it("honours an explicit size, including one smaller than the number of sides", () => {
+    const claims = [
+      ...claimsOf("iktidar", [9, 8]),
+      ...claimsOf("muhalefet", [7, 6]),
+      ...claimsOf("bagimsiz", [5, 4]),
+    ];
+
+    expect(pickWeeklyBlindspots(claims, 2).map((b) => b.side)).toEqual(["iktidar", "muhalefet"]);
+    expect(pickWeeklyBlindspots(claims, 4)).toHaveLength(4);
+    expect(pickWeeklyBlindspots(claims, 100)).toHaveLength(6);
+  });
+
+  it.each([
+    ["an empty list", [] as WeeklyBlindspot[], 5],
+    ["size 0", claimsOf("iktidar", [3]), 0],
+    ["a negative size", claimsOf("iktidar", [3]), -2],
+    ["a NaN size", claimsOf("iktidar", [3]), Number.NaN],
+  ])("returns [] for %s", (_label, claims, size) => {
+    expect(pickWeeklyBlindspots(claims, size)).toEqual([]);
+  });
+
+  it("does not mutate the input array", () => {
+    const claims = [
+      claim("m", "muhalefet", 2),
+      claim("i", "iktidar", 9),
+      claim("i2", "iktidar", 1, "Başka"),
+    ];
+    const before = claims.map((c) => c.id);
+
+    pickWeeklyBlindspots(claims);
+
+    expect(claims.map((c) => c.id)).toEqual(before);
+  });
+
+  it("sorts the result by article count desc even when a later round holds a bigger claim than an earlier one", () => {
+    // Round 1 picks iktidar 10 and muhalefet 9; round 2 picks iktidar 8 and
+    // muhalefet 7; the result is count-ordered, not round-ordered.
+    const picked = pickWeeklyBlindspots(
+      [
+        ...claimsOf("iktidar", [10, 8]),
+        ...claimsOf("muhalefet", [9, 7]),
+      ],
+      4,
+    );
+
+    expect(picked.map((b) => b.articleCount)).toEqual([10, 9, 8, 7]);
+  });
+
+  it("copes with 10,000 claims and still reaches the smaller side", () => {
+    const many = Array.from({ length: 10_000 }, (_, i) =>
+      claim(`i-${i}`, "iktidar", 10_000 - i),
+    );
+    const picked = pickWeeklyBlindspots([...many, claim("m", "muhalefet", 3)]);
+
+    expect(picked).toHaveLength(5);
+    expect(picked.some((b) => b.side === "muhalefet")).toBe(true);
+    expect(picked.map((b) => b.articleCount)).toEqual([10_000, 9_999, 9_998, 9_997, 3]);
+  });
+
+  it("is not thrown by unicode and emoji titles", () => {
+    const picked = pickWeeklyBlindspots([
+      claim("a", "iktidar", 5, "İSTANBUL 🚨 deprem"),
+      claim("b", "muhalefet", 4, "ığdır'da 🚨 sel"),
+    ]);
+
+    expect(picked.map((b) => b.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("summariseWeek — side-balanced blindspot list (h52-weekly-2)", () => {
+  const flaggedRow = (
+    id: string,
+    side: "pro_government" | "opposition" | "center",
+    articleCount: number,
+    extra: Partial<WeeklyClusterRow> = {},
+  ) =>
+    row({
+      id,
+      title_tr_neutral: null,
+      title_tr: `Kör nokta haberi ${id}`,
+      is_blindspot: true,
+      blindspot_side: side,
+      bias_distribution: dist({
+        [side]: articleCount,
+      }),
+      article_count: articleCount,
+      ...extra,
+    });
+
+  const iktidarRows = () =>
+    [20, 19, 18, 17, 16, 15].map((n) => flaggedRow(`i${n}`, "pro_government", n));
+  const muhalefetRows = () => [8, 7].map((n) => flaggedRow(`m${n}`, "opposition", n));
+
+  it("6 iktidar (20..15) + 2 muhalefet (8, 7) -> 5 rows: 3 iktidar (20, 19, 18) and 2 muhalefet, sorted by count", () => {
+    const summary = summariseWeek([...iktidarRows(), ...muhalefetRows()], null, NOW_MS);
+
+    expect(summary.blindspots.map((b) => [b.id, b.side, b.articleCount])).toEqual([
+      ["i20", "iktidar", 20],
+      ["i19", "iktidar", 19],
+      ["i18", "iktidar", 18],
+      ["m8", "muhalefet", 8],
+      ["m7", "muhalefet", 7],
+    ]);
+  });
+
+  it("reports blindspotSideCounts over every public claim, not just the five shown", () => {
+    const summary = summariseWeek([...iktidarRows(), ...muhalefetRows()], null, NOW_MS);
+
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 6, muhalefet: 2, bagimsiz: 0 });
+  });
+
+  it("only iktidar claims: today's top five and a tally of all of them (regression)", () => {
+    const summary = summariseWeek(iktidarRows(), null, NOW_MS);
+
+    expect(summary.blindspots.map((b) => b.articleCount)).toEqual([20, 19, 18, 17, 16]);
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 6, muhalefet: 0, bagimsiz: 0 });
+  });
+
+  it("counts a bagimsiz claim under bagimsiz", () => {
+    const summary = summariseWeek(
+      [flaggedRow("b1", "center", 5), flaggedRow("i1", "pro_government", 6)],
+      null,
+      NOW_MS,
+    );
+
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 1, muhalefet: 0, bagimsiz: 1 });
+    expect(summary.blindspots.map((b) => b.id)).toEqual(["i1", "b1"]);
+  });
+
+  it("a week without blindspots has an all-zero tally and an empty list", () => {
+    const summary = summariseWeek([row({ id: "plain" })], null, NOW_MS);
+
+    expect(summary.blindspots).toEqual([]);
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 0, muhalefet: 0, bagimsiz: 0 });
+  });
+
+  it("an empty window has an all-zero tally", () => {
+    expect(summariseWeek([], null, NOW_MS).blindspotSideCounts).toEqual({
+      iktidar: 0,
+      muhalefet: 0,
+      bagimsiz: 0,
+    });
+  });
+
+  it("a title duplicate keeps the larger row and is counted once", () => {
+    const summary = summariseWeek(
+      [
+        flaggedRow("big", "pro_government", 20, { title_tr: "İhale iptal edildi" }),
+        flaggedRow("dup", "pro_government", 19, { title_tr: "İhale İptal Edildi!" }),
+        flaggedRow("m1", "opposition", 8),
+      ],
+      null,
+      NOW_MS,
+    );
+
+    expect(summary.blindspots.map((b) => b.id)).toEqual(["big", "m1"]);
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 1, muhalefet: 1, bagimsiz: 0 });
+  });
+
+  it("a degraded muhalefet pole still suppresses iktidar-side claims before picking, and they are not counted", () => {
+    const summary = summariseWeek(
+      [...iktidarRows(), ...muhalefetRows()],
+      DEGRADED_MUHALEFET,
+      NOW_MS,
+    );
+
+    expect(summary.blindspots.map((b) => b.id)).toEqual(["m8", "m7"]);
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 0, muhalefet: 2, bagimsiz: 0 });
+  });
+
+  it("a recall-vetoed claim is neither listed nor counted", () => {
+    const summary = summariseWeek(
+      [
+        flaggedRow("kept", "opposition", 8),
+        flaggedRow("vetoed", "opposition", 9, { blindspot_recall_veto: true }),
+        flaggedRow("i", "pro_government", 12),
+      ],
+      null,
+      NOW_MS,
+    );
+
+    expect(summary.blindspots.map((b) => b.id)).toEqual(["i", "kept"]);
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 1, muhalefet: 1, bagimsiz: 0 });
+  });
+
+  it("a claim still inside the public delay is neither listed nor counted", () => {
+    const young = new Date(NOW_MS - 1 * HOUR_MS).toISOString();
+    const summary = summariseWeek(
+      [
+        flaggedRow("young", "opposition", 9, { first_published: young }),
+        flaggedRow("old", "opposition", 8),
+        flaggedRow("i", "pro_government", 12),
+      ],
+      null,
+      NOW_MS,
+    );
+
+    expect(summary.blindspots.map((b) => b.id)).toEqual(["i", "old"]);
+    expect(summary.blindspotSideCounts).toEqual({ iktidar: 1, muhalefet: 1, bagimsiz: 0 });
+  });
+
+  it("does not change the zone totals or the topClusters list", () => {
+    const rows = [...iktidarRows(), ...muhalefetRows()];
+    const summary = summariseWeek(rows, null, NOW_MS);
+
+    expect(summary.zoneCounts).toEqual(directZoneSum(rows));
+    expect(summary.topClusters).toEqual([]);
   });
 });
