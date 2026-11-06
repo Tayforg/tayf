@@ -4,7 +4,7 @@ import { BIAS_LABELS, ZONE_META } from "@/lib/bias/config";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import { zoneYieldDenominator, type ZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
-import { weekCopy, weekCopyFor } from "@/lib/weekly/week-copy";
+import { blindspotTallyLine, weekCopy, weekCopyFor } from "@/lib/weekly/week-copy";
 import {
   WEEKLY_CLUSTER_LIMIT,
   type WeeklyBlindspot,
@@ -226,10 +226,14 @@ export function Blindspots({
   const copy = variant === "rolling" ? weekCopyFor("rolling") : weekCopy(archive);
   const degraded =
     health !== null && ZONE_ORDER.some((zone) => health[zone].degraded);
+  // Per-side totals and how the rows were chosen (h52-weekly-2); null when the
+  // window holds no claim, and then only the empty-state copy shows.
+  const tally = blindspotTallyLine(summary.blindspotSideCounts);
 
   return (
     <section className={`${cardClass} space-y-3`}>
       <h2 className={sectionTitleClass}>Kör noktalar</h2>
+      {tally !== null ? <p className={metaClass}>{tally}</p> : null}
       {summary.blindspots.length === 0 ? (
         <p className={proseClass}>{copy.noBlindspot}</p>
       ) : (

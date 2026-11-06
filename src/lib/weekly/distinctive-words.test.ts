@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { FW_DEFAULTS } from "@/lib/text/fightin-words";
 import {
   buildWeeklyDistinctiveWords,
   EN_FUNCTION_WORDS,
@@ -649,8 +650,11 @@ describe("buildWeeklyDistinctiveWords: quoted headlines", () => {
     ];
   }
 
+  // These tests are about how quoted headlines are tokenised and counted, on
+  // fixtures of 12 to 21 headlines (z about 3.1). They pin the fixed 1.96 cut
+  // with nullPermutations 0; the calibrated cut is tested on its own below.
   function muhalefetTerm(rows: WeeklyWordsArticleRow[], term: string) {
-    const result = buildWeeklyDistinctiveWords(rows, SOURCES);
+    const result = buildWeeklyDistinctiveWords(rows, SOURCES, { nullPermutations: 0 });
     expect(result.status).toBe("ok");
     if (result.status !== "ok") throw new Error("expected an ok result");
     return { result, hit: result.zones.muhalefet.find((t) => t.term === term) };
@@ -723,5 +727,182 @@ describe("buildWeeklyDistinctiveWords: quoted headlines", () => {
     );
     expect(result.status).toBe("ok");
     expect(result.sample.muhalefet).toBe(MIN + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The z cut is calibrated by label permutation (h52-weekly-1): ~1,000 candidate
+// terms per zone make 1.96 a noise threshold, so the payload carries the cut
+// that shuffled zone labels rarely beat and a zone lists only terms above it.
+// ---------------------------------------------------------------------------
+
+/** Seeded uniform generator (mulberry32): the fixtures are identical on every run. */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const NOISE_ZONES: Array<{ ids: string[]; prefix: string }> = [
+  { ids: GOV_IDS, prefix: "gov" },
+  { ids: IND_IDS, prefix: "ind" },
+  { ids: OPP_IDS, prefix: "opp" },
+];
+
+/**
+ * A week of pure noise: `perZone` headlines per zone, each 8 draws from a
+ * 300-word Zipf vocabulary, outlet picked at random within the zone. The zone
+ * has no influence on the words. `decorate` may append words to chosen titles.
+ */
+function noiseWeek(
+  seed: number,
+  perZone = 250,
+  decorate: (zonePrefix: string, i: number) => string = () => "",
+): WeeklyWordsArticleRow[] {
+  const rand = seededRandom(seed);
+  const cumulative: number[] = [];
+  let total = 0;
+  for (let rank = 1; rank <= 300; rank++) {
+    total += 1 / rank;
+    cumulative.push(total);
+  }
+  const draw = (): string => {
+    const target = rand() * total;
+    let lo = 0;
+    let hi = cumulative.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cumulative[mid]! < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return `kelime${lo}`;
+  };
+
+  const rows: WeeklyWordsArticleRow[] = [];
+  for (const { ids, prefix } of NOISE_ZONES) {
+    for (let i = 0; i < perZone; i++) {
+      const words = Array.from({ length: 8 }, draw);
+      rows.push({
+        id: `${prefix}-${String(i).padStart(4, "0")}`,
+        title: `${words.join(" ")} ${decorate(prefix, i)}`.trim(),
+        url: `https://example.com/${prefix}-${i}`,
+        source_id: ids[Math.floor(rand() * ids.length)]!,
+        created_at: "2026-11-02T10:00:00.000Z",
+      });
+    }
+  }
+  return rows;
+}
+
+function okPayload(rows: WeeklyWordsArticleRow[], opts?: Parameters<typeof buildWeeklyDistinctiveWords>[2]) {
+  const result = buildWeeklyDistinctiveWords(rows, SOURCES, opts);
+  expect(result.status).toBe("ok");
+  if (result.status !== "ok") throw new Error("expected an ok result");
+  return result;
+}
+
+const NOISE_SEEDS = [101, 202, 303];
+const ZONE_KEYS = ["iktidar", "bagimsiz", "muhalefet"] as const;
+
+describe("buildWeeklyDistinctiveWords: calibrated z cut", () => {
+  it("carries zCut in the ok payload, a finite number never below FW_DEFAULTS.zMin", () => {
+    for (const rows of [baselineRows(), noiseWeek(101)]) {
+      const result = okPayload(rows);
+      expect(typeof result.zCut).toBe("number");
+      expect(Number.isFinite(result.zCut)).toBe(true);
+      expect(result.zCut).toBeGreaterThanOrEqual(FW_DEFAULTS.zMin);
+    }
+  });
+
+  it("on a noise week the cut is well above 1.96", () => {
+    for (const seed of NOISE_SEEDS) {
+      expect(okPayload(noiseWeek(seed)).zCut, `seed ${seed}`).toBeGreaterThan(2.5);
+    }
+  });
+
+  it("lists nothing on pure noise, where the fixed 1.96 cut lists chance words (control)", () => {
+    for (const seed of NOISE_SEEDS) {
+      const rows = noiseWeek(seed);
+      const calibrated = okPayload(rows);
+      for (const zone of ZONE_KEYS) expect(calibrated.zones[zone], `seed ${seed} ${zone}`).toEqual([]);
+
+      const fixed = okPayload(rows, { nullPermutations: 0 });
+      expect(ZONE_KEYS.some((zone) => fixed.zones[zone].length > 0), `seed ${seed} fixed cut`).toBe(true);
+    }
+  });
+
+  it("nullPermutations 0 turns the calibration off: the cut is zMin, and a caller's zMin is kept", () => {
+    const rows = noiseWeek(101);
+    expect(okPayload(rows, { nullPermutations: 0 }).zCut).toBe(FW_DEFAULTS.zMin);
+    expect(okPayload(rows, { nullPermutations: 0, zMin: 2.5 }).zCut).toBe(2.5);
+  });
+
+  it("with the calibration off it lists exactly what the fixed cut listed", () => {
+    const rows = noiseWeek(101);
+    const off = okPayload(rows, { nullPermutations: 0 });
+    // Every listed term clears 1.96 and the lists are longer than the calibrated ones.
+    for (const zone of ZONE_KEYS) {
+      for (const term of off.zones[zone]) expect(term.z).toBeGreaterThanOrEqual(FW_DEFAULTS.zMin);
+    }
+    const total = ZONE_KEYS.reduce((n, zone) => n + off.zones[zone].length, 0);
+    expect(total).toBeGreaterThan(0);
+  });
+
+  it("is deterministic: the same rows give the same payload, in any row order", () => {
+    const rows = noiseWeek(202);
+    const first = okPayload(rows);
+    expect(okPayload(rows)).toEqual(first);
+    expect(okPayload([...rows].reverse())).toEqual(first);
+    expect(okPayload(noiseWeek(202))).toEqual(first);
+  });
+
+  it("two planted words in 40 muhalefet headlines each (and 2 elsewhere) both surface there, above the cut", () => {
+    const rows = noiseWeek(303, 250, (prefix, i) => {
+      if (prefix === "opp" && i < 40) return "yolsuzluk";
+      if (prefix === "opp" && i >= 40 && i < 80) return "zamlar";
+      if ((prefix === "gov" || prefix === "ind") && i === 100) return "yolsuzluk zamlar";
+      return "";
+    });
+    const result = okPayload(rows);
+    const terms = result.zones.muhalefet.map((t) => t.term);
+    expect(terms).toEqual(expect.arrayContaining(["yolsuzluk", "zamlar"]));
+    expect(result.zones.iktidar).toEqual([]);
+    expect(result.zones.bagimsiz).toEqual([]);
+    for (const t of result.zones.muhalefet) expect(t.z).toBeGreaterThanOrEqual(result.zCut);
+    expect(result.zCut).toBeGreaterThan(FW_DEFAULTS.zMin);
+  });
+
+  it("a zone with fewer than minTermsToShow terms above the cut falls through to an empty list", () => {
+    const rows = noiseWeek(303, 250, (prefix, i) => (prefix === "opp" && i < 40 ? "yolsuzluk" : ""));
+    const one = okPayload(rows);
+    // One word clears the cut; two are needed to list a zone.
+    expect(one.zones.muhalefet).toEqual([]);
+    const lenient = okPayload(rows, { minTermsToShow: 1 });
+    expect(lenient.zones.muhalefet.map((t) => t.term)).toEqual(["yolsuzluk"]);
+    expect(lenient.zones.muhalefet[0]!.z).toBeGreaterThanOrEqual(lenient.zCut);
+  });
+
+  it("every listed term clears the payload's cut, in every zone", () => {
+    const rows = noiseWeek(101, 250, (prefix, i) => {
+      if (prefix === "gov" && i < 60) return "gözaltı kararı";
+      if (prefix === "opp" && i < 60) return "enflasyon zam";
+      return "";
+    });
+    const result = okPayload(rows);
+    expect(ZONE_KEYS.some((zone) => result.zones[zone].length > 0)).toBe(true);
+    for (const zone of ZONE_KEYS) {
+      for (const t of result.zones[zone]) expect(t.z).toBeGreaterThanOrEqual(result.zCut);
+    }
+  });
+
+  it("keeps the insufficient payload free of a cut (nothing was scored)", () => {
+    const result = buildWeeklyDistinctiveWords(fillerRows(10, GOV_IDS, "gov"), SOURCES);
+    expect(result.status).toBe("insufficient");
+    expect("zCut" in result).toBe(false);
   });
 });

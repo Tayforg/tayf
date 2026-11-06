@@ -354,3 +354,112 @@ describe("/source/[slug] excerpt line (h48-ingest-1)", () => {
     expect(text).not.toContain("Bu gerçek bir özet cümlesidir.");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h52-sources-1: the excerpt goes through the same feed-residue tidy as a
+// cluster summary (sourceExcerpt). The strings are live descriptions of
+// 2026-11-06; the tidy rules themselves are pinned in
+// src/lib/articles/source-excerpt.test.ts and summary-tidy.test.ts.
+// ---------------------------------------------------------------------------
+
+/** Every element under `node` for which `pick` is true. */
+function findAll(node: unknown, pick: (el: El) => boolean, out: El[] = []): El[] {
+  if (Array.isArray(node)) {
+    for (const child of node) findAll(child, pick, out);
+  } else if (node && typeof node === "object") {
+    const el = node as El;
+    if (pick(el)) out.push(el);
+    if (el.props?.children !== undefined) findAll(el.props.children, pick, out);
+  }
+  return out;
+}
+
+/** The excerpt paragraphs of the article cards (the <p> with the two-line clamp under the title). */
+function excerptParagraphs(tree: unknown): El[] {
+  return findAll(
+    tree,
+    (el) =>
+      el.type === "p" &&
+      typeof el.props?.className === "string" &&
+      el.props.className.includes("text-xs") &&
+      el.props.className.includes("line-clamp-2"),
+  );
+}
+
+describe("/source/[slug] excerpt line is tidied like a cluster summary (h52-sources-1)", () => {
+  const SABAH =
+    "Başkan Recep Tayyip Erdoğan'ın eşi Emine Erdoğan, AK Parti Genel Merkez Kadın Kolları Başkanlığı ev sahipliğinde düzenlenen '81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı'na ilişkin paylaşım...Devamı için tıklayınız";
+  const DIKEN_TITLE = "Melenchon, cumhurbaşkanı seçilirse Netanyahu'yu tutuklamayı vaat etti";
+  const DIKEN =
+    "Melenchon, cumhurbaşkanı seçilirse Netanyahu'yu tutuklamayı vaat etti 06.11.2026 DikenFransa'da cumhurbaşkanı adayı Jean-Luc Melenchon, seçilmesi halinde Uluslararası Ceza Mahkemesi'nin (UCM) İsrail Başbakanı Binyamin Netanyahu hakkındaki tutuklama emrini uygulamayı vaat etti.\nThe post Melenchon, cumhurbaşkanı seçilirse Netanyahu'yu tutuklamayı vaat etti appeared first on #site_linkat 06.11.2026 .";
+  const DIKEN_BODY =
+    "Fransa'da cumhurbaşkanı adayı Jean-Luc Melenchon, seçilmesi halinde Uluslararası Ceza Mahkemesi'nin (UCM) İsrail Başbakanı Binyamin Netanyahu hakkındaki tutuklama emrini uygulamayı vaat etti.";
+  const MEDYASCOPE_TITLE =
+    "Operasyonlar, erişim engelleri, COP31’de “genel ahlak” şartı: LGBTİ+ gündeminde bu hafta neler yaşandı?";
+  const MEDYASCOPE =
+    "İzmir’de trans kadınlara yönelik gözaltılar, flört uygulamalarına erişim engelleri ve COP31'de “genel ahlak” şartı haftanın gündemindeydi.\nOperasyonlar, erişim engelleri, COP31’de “genel ahlak” şartı: LGBTİ+ gündeminde bu hafta neler yaşandı? Medyascope";
+  const MEDYASCOPE_BODY =
+    "İzmir’de trans kadınlara yönelik gözaltılar, flört uygulamalarına erişim engelleri ve COP31'de “genel ahlak” şartı haftanın gündemindeydi.";
+
+  it("Sabah: the 'Devamı için tıklayınız' tail is gone from the card", async () => {
+    const tree = await render(
+      profileOf({ articles: articlesOf([{ title: "Emine Erdoğan sergi açılışına ilişkin paylaşım yaptı", description: SABAH }]) }),
+    );
+    const text = textOf(tree);
+    expect(text).not.toContain("Devamı için");
+    expect(text).toContain("Programı'na ilişkin paylaşım...");
+    expect(excerptParagraphs(tree)).toHaveLength(1);
+  });
+
+  it("Diken: the card shows the body sentence only, under the headline once", async () => {
+    const tree = await render(profileOf({ articles: articlesOf([{ title: DIKEN_TITLE, description: DIKEN }]) }));
+    const text = textOf(tree);
+    expect(text).toContain(DIKEN_BODY);
+    expect(text).not.toContain("06.11.2026");
+    expect(text).not.toContain("appeared first");
+    expect(text).not.toContain("The post");
+    expect(occurrences(text, DIKEN_TITLE)).toBe(1);
+    expect(excerptParagraphs(tree).map((p) => textOf(p))).toEqual([DIKEN_BODY]);
+  });
+
+  it("Medyascope: the echoed headline and the site name are gone, the first sentence stays", async () => {
+    const tree = await render(
+      profileOf({ articles: articlesOf([{ title: MEDYASCOPE_TITLE, description: MEDYASCOPE }]) }),
+    );
+    expect(textOf(tree)).not.toContain("Medyascope");
+    expect(excerptParagraphs(tree).map((p) => textOf(p))).toEqual([MEDYASCOPE_BODY]);
+  });
+
+  it.each([
+    ["only a CTA", "Devamı için tıklayınız"],
+    ["only a Diken footer", "The post Bir başlık appeared first on #site_linkat 06.11.2026 ."],
+    ["a body that is the headline again behind a Diken lead", "Bir başlık 06.11.2026 DikenBir başlık\nThe post Bir başlık appeared first on #site_linkat 06.11.2026 ."],
+  ])("an excerpt the tidy empties (%s) renders no paragraph at all", async (_name, description) => {
+    const tree = await render(profileOf({ articles: articlesOf([{ title: "Bir başlık", description }]) }));
+    expect(excerptParagraphs(tree)).toHaveLength(0);
+    const none = textOf(await render(profileOf({ articles: articlesOf([{ title: "Bir başlık", description: null }]) })));
+    expect(textOf(tree)).toBe(none);
+  });
+
+  it("every excerpt paragraph that is rendered has text", async () => {
+    const rows: Row[] = [
+      { title: "Sabah haberi", description: SABAH },
+      { title: DIKEN_TITLE, description: DIKEN },
+      { title: MEDYASCOPE_TITLE, description: MEDYASCOPE },
+      { title: "Boş", description: "Devamı için tıklayınız" },
+      { title: "Yok", description: null },
+    ];
+    const tree = await render(profileOf({ articles: articlesOf(rows) }));
+    const paragraphs = excerptParagraphs(tree);
+    expect(paragraphs).toHaveLength(3);
+    for (const p of paragraphs) expect(textOf(p).trim()).not.toBe("");
+  });
+
+  it("a source that has not allowed excerpts still shows none, residue or not", async () => {
+    const profile = profileOf({ articles: articlesOf([{ title: DIKEN_TITLE, description: DIKEN }]) });
+    profile.source.excerpt_allowed = false;
+    const tree = await render(profile);
+    expect(excerptParagraphs(tree)).toHaveLength(0);
+    expect(textOf(tree)).not.toContain(DIKEN_BODY);
+  });
+});

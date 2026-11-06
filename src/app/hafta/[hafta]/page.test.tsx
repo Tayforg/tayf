@@ -48,7 +48,26 @@ vi.mock("@/lib/weekly/weekly-query", () => ({
     return {
       zoneCounts: { iktidar: 6, bagimsiz: 3, muhalefet: 1 },
       topClusters: [],
-      blindspots: [],
+      // One row per side shown, the tally over all the week's public claims.
+      blindspots: [
+        {
+          id: "bs-i",
+          title: "İktidar tarafı kör noktası",
+          articleCount: 21,
+          side: "iktidar",
+          share: 1,
+          sharePct: 100,
+        },
+        {
+          id: "bs-m",
+          title: "Muhalefet tarafı kör noktası",
+          articleCount: 8,
+          side: "muhalefet",
+          share: 1,
+          sharePct: 100,
+        },
+      ],
+      blindspotSideCounts: { iktidar: 37, bagimsiz: 0, muhalefet: 9 },
     };
   },
 }));
@@ -183,6 +202,52 @@ describe("/hafta/[hafta] source status", () => {
     expect(text).not.toContain(UNKNOWN);
     // The archive copy is unchanged: it still states the percentage basis.
     expect(text).toContain("Yüzdeler o haftanın çok kaynaklı kümelerindeki 10 kaynak kaydı");
+  });
+});
+
+// h52-weekly-2: every week's blindspot list is side-balanced, and the line
+// under the heading gives the per-side totals and how the rows were chosen.
+describe("/hafta/[hafta] blindspot side tally", () => {
+  beforeAll(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  const current = weekKeyFromMs(NOW.getTime());
+  const closed = shiftWeek(current, -1) as string;
+  const TALLY =
+    "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9. Her taraftan en büyükleri gösteriliyor.";
+
+  beforeEach(() => {
+    mocks.summariseCalls = [];
+    mocks.getFeedStatusSummary.mockReset();
+    mocks.getFeedStatusSummary.mockResolvedValue({ delivering: 71, total: 96 });
+    mocks.getWeekArchiveClusters.mockReset();
+    mocks.getWeekArchiveClusters.mockResolvedValue({
+      rows: [{ id: "cl-1" }],
+      truncated: false,
+    });
+  });
+
+  it.each([
+    ["a closed week", () => closed],
+    ["the week in progress", () => current],
+  ])("%s prints the tally and a row from each side", async (_name, key) => {
+    const text = await renderWeek(key());
+
+    expect(text).toContain(TALLY);
+    expect(text).toContain("İktidar tarafı kör noktası");
+    expect(text).toContain("Muhalefet tarafı kör noktası");
+  });
+
+  it("a closed week's tally adds no 'Bu hafta' wording", async () => {
+    const text = await renderWeek(closed);
+
+    expect(text.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
   });
 });
 

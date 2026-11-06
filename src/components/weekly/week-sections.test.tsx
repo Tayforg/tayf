@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ZoneHealth } from "@/lib/clusters/feed-health";
+import type { MediaDnaZone } from "@/types";
 import type { WeeklyBlindspot, WeeklySummary } from "@/lib/weekly/weekly-query";
 
 vi.mock("next/cache", () => ({
@@ -46,11 +47,18 @@ function zoneHealth(delivering: number, total: number, degraded = false): ZoneHe
   };
 }
 
-function summaryWith(blindspots: WeeklyBlindspot[]): WeeklySummary {
+/** The side tally of the rows given, unless a test states its own. */
+function summaryWith(
+  blindspots: WeeklyBlindspot[],
+  blindspotSideCounts?: Record<MediaDnaZone, number>,
+): WeeklySummary {
+  const counts = blindspotSideCounts ?? { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+  if (!blindspotSideCounts) for (const b of blindspots) counts[b.side] += 1;
   return {
     zoneCounts: { iktidar: 6, bagimsiz: 3, muhalefet: 1 },
     topClusters: [],
     blindspots,
+    blindspotSideCounts: counts,
   };
 }
 
@@ -203,6 +211,95 @@ describe("<Blindspots>", () => {
 
     expect(html).toContain("%88 İktidar · 20 kaynak");
     expect(html).not.toContain("Sadece");
+  });
+});
+
+// h52-weekly-2: the list shows the biggest claims of each side, and the line
+// under the heading gives the per-side totals and says so.
+describe("<Blindspots> side tally (h52-weekly-2)", () => {
+  const TALLY =
+    "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9. Her taraftan en büyükleri gösteriliyor.";
+  const COUNTS = { iktidar: 37, bagimsiz: 0, muhalefet: 9 };
+  const rows = [
+    blindspot({ id: "i", title: "İktidar haberi", side: "iktidar", articleCount: 21 }),
+    blindspot({ id: "m", title: "Muhalefet haberi", side: "muhalefet", articleCount: 8 }),
+  ];
+
+  it("prints the tally under the heading and above the rows, as a metaClass paragraph", () => {
+    const html = renderToStaticMarkup(
+      <Blindspots summary={summaryWith(rows, COUNTS)} health={null} variant="rolling" />,
+    );
+
+    expect(html).toContain(`<p class="text-xs text-muted-foreground">${TALLY}</p>`);
+    const heading = html.indexOf("Kör noktalar</h2>");
+    const tally = html.indexOf(TALLY);
+    const list = html.indexOf("<ul");
+    expect(heading).toBeGreaterThan(-1);
+    expect(tally).toBeGreaterThan(heading);
+    expect(list).toBeGreaterThan(tally);
+  });
+
+  it("still lists a Muhalefet-side row next to the İktidar one", () => {
+    const html = renderToStaticMarkup(
+      <Blindspots summary={summaryWith(rows, COUNTS)} health={null} variant="rolling" />,
+    );
+
+    expect(html).toContain("İktidar haberi");
+    expect(html).toContain("Muhalefet haberi");
+    expect(html).toContain("Sadece Muhalefet tarafında · 8 kaynak");
+  });
+
+  it("derives the tally from the summary, with the Bağımsız segment when present", () => {
+    const html = renderToStaticMarkup(
+      <Blindspots
+        summary={summaryWith(rows, { iktidar: 3, bagimsiz: 2, muhalefet: 1 })}
+        health={null}
+      />,
+    );
+
+    expect(html).toContain(
+      "Toplam 6 kör nokta · İktidar tarafında 3 · Muhalefet tarafında 1 · Bağımsız tarafında 2. Her taraftan en büyükleri gösteriliyor.",
+    );
+  });
+
+  it("prints no tally and keeps the empty-state copy when the week has no blindspot", () => {
+    const html = renderToStaticMarkup(
+      <Blindspots summary={summaryWith([])} health={null} variant="rolling" />,
+    );
+
+    expect(html).not.toContain("Toplam");
+    expect(html).not.toContain("Her taraftan");
+    expect(html).toContain("Son 7 günde kör nokta yok.");
+  });
+
+  it.each([
+    ["rolling", { variant: "rolling" as const }],
+    ["live", {}],
+    ["closed", { archive: true }],
+  ])("%s: the tally line is identical and names no calendar week", (_label, props) => {
+    const html = renderToStaticMarkup(
+      <Blindspots summary={summaryWith(rows, COUNTS)} health={null} {...props} />,
+    );
+
+    expect(html).toContain(TALLY);
+    // The tally is the only copy this test adds; the rest of the section is
+    // week-copy's. On the rolling and closed pages no 'Bu hafta' may appear.
+    if (_label !== "live") expect(html.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
+  });
+
+  it("keeps the degraded caveat after the rows", () => {
+    const degraded = zoneHealth(2, 20, true);
+    const ok = zoneHealth(24, 36);
+    const html = renderToStaticMarkup(
+      <Blindspots
+        summary={summaryWith(rows, COUNTS)}
+        health={{ iktidar: ok, bagimsiz: ok, muhalefet: degraded }}
+        variant="rolling"
+      />,
+    );
+
+    expect(html).toContain(TALLY);
+    expect(html.indexOf("kör nokta listesi eksik olabilir")).toBeGreaterThan(html.indexOf("</ul>"));
   });
 });
 

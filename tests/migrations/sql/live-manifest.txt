@@ -58,6 +58,8 @@ run | 164-price-at-session-aware.test.ts | tests/migrations/sql/164-price-at-ses
 run | 161-image-coverage-by-source.test.ts | tests/migrations/sql/150-ops-queue-cron-liveness-dryrun.sql supabase/migrations/041_source_fetch_state.sql supabase/migrations/157_ingest_poll_stale.sql supabase/migrations/161_image_coverage_by_source.sql supabase/migrations/161_image_coverage_by_source.sql | - | 0
 # 167: the dry-run script builds the state itself (150's dry-run, 041, 157, then 161 as production has it, gated on its md5, and a baseline reading that shows the 3rd-read false warn) and applies 167 twice, so it is the setup. The pgmq archives are 150's stand-ins; every live case empties the four queue tables inside its own rolled-back transaction.
 run | 167-ops-queue-poison-contract.test.ts | tests/migrations/sql/167-ops-queue-poison-contract-dryrun.sql | - | 0
+# 168: the dry-run script builds the state itself (framing_votes of 068, the pool table of 105, then 105's draw as production has it, gated on its md5, and a baseline that shows a voted story's siblings coming back) and applies 168 twice (checking that the session_hash index exists exactly once), so it is the setup. Every live case runs inside its own rolled-back transaction.
+run | 168-framing-draw-one-per-event.test.ts | tests/migrations/sql/168-framing-draw-one-per-event-dryrun.sql | - | 0
 run | 151-cluster-attach-probe.test.ts | tests/migrations/sql/151-cluster-attach-probe-dryrun.sql | - | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql | TAYF_SHAPE=prod | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql | TAYF_SHAPE=chain | 0

@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import {
+  FRAMING_MIN_TALLY_N,
   FRAMING_VOTES,
+  hasComparableTally,
   isFramingVote,
   newSessionId,
   hashSessionId,
@@ -10,6 +15,7 @@ import {
   formatTallyLine,
   summariseFramingRound,
   type FramingRoundEntry,
+  type FramingTally,
 } from "./framing";
 
 // ---------------------------------------------------------------------------
@@ -115,6 +121,86 @@ describe("formatTallyLine", () => {
   });
 });
 
+describe("hasComparableTally (the one n >= FRAMING_MIN_TALLY_N floor)", () => {
+  it("is false below the floor and true from it on", () => {
+    expect(FRAMING_MIN_TALLY_N).toBe(3);
+    expect(hasComparableTally({ n: 0, iktidar: 0, muhalefet: 0, none: 0 })).toBe(false);
+    expect(hasComparableTally({ n: 1, iktidar: 1, muhalefet: 0, none: 0 })).toBe(false);
+    expect(hasComparableTally({ n: 2, iktidar: 1, muhalefet: 1, none: 0 })).toBe(false);
+    expect(hasComparableTally({ n: 3, iktidar: 1, muhalefet: 1, none: 1 })).toBe(true);
+    expect(hasComparableTally({ n: 4000, iktidar: 4000, muhalefet: 0, none: 0 })).toBe(true);
+  });
+
+  it("is derived from the constant, not from a literal 3 (the floor is written once)", () => {
+    const at = (n: number): FramingTally => ({ n, iktidar: n, muhalefet: 0, none: 0 });
+    expect(hasComparableTally(at(FRAMING_MIN_TALLY_N - 1))).toBe(false);
+    expect(hasComparableTally(at(FRAMING_MIN_TALLY_N))).toBe(true);
+    // comments are dropped first: the doc comment names the rule in prose
+    const src = readFileSync(resolve(__dirname, "framing.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    // one comparison against the constant (inside hasComparableTally); the summary and the tally line call that function
+    expect(src.split("n >= FRAMING_MIN_TALLY_N").length - 1).toBe(1);
+    expect(src.split("hasComparableTally(").length - 1).toBe(3); // the declaration, the tally line, the summary
+  });
+});
+
+describe("formatTallyLine below the n >= 3 floor", () => {
+  it("n = 1: no percentage at all, only the Turkish 'not enough votes yet' line with the n/3 progress", () => {
+    const line = formatTallyLine({ n: 1, iktidar: 1, muhalefet: 0, none: 0 });
+    expect(line).toBe("Bu başlık için henüz yeterli oy yok (1/3).");
+    expect(line).not.toContain("%");
+    expect(line).toContain("1/3");
+    expect(line).not.toContain("İktidar");
+  });
+
+  it("n = 2 likewise, whatever the split", () => {
+    for (const tally of [
+      { n: 2, iktidar: 2, muhalefet: 0, none: 0 },
+      { n: 2, iktidar: 1, muhalefet: 1, none: 0 },
+      { n: 2, iktidar: 0, muhalefet: 0, none: 2 },
+    ] satisfies FramingTally[]) {
+      const line = formatTallyLine(tally);
+      expect(line).toBe("Bu başlık için henüz yeterli oy yok (2/3).");
+      expect(line).not.toContain("%");
+    }
+  });
+
+  it("the progress is written from the constant: n/FRAMING_MIN_TALLY_N", () => {
+    expect(formatTallyLine({ n: 1, iktidar: 1, muhalefet: 0, none: 0 })).toBe(
+      `Bu başlık için henüz yeterli oy yok (1/${FRAMING_MIN_TALLY_N}).`,
+    );
+  });
+
+  it("n = 0 keeps 'Henüz oy yok'; n = 3 is today's largest-remainder percentage line, unchanged", () => {
+    expect(formatTallyLine({ n: 0, iktidar: 0, muhalefet: 0, none: 0 })).toBe("Henüz oy yok");
+    expect(formatTallyLine({ n: 3, iktidar: 3, muhalefet: 0, none: 0 })).toBe(
+      "3 oy · İktidar %100 · Muhalefet %0 · Tarafsız %0",
+    );
+    expect(formatTallyLine({ n: 3, iktidar: 1, muhalefet: 1, none: 1 })).toBe(
+      "3 oy · İktidar %34 · Muhalefet %33 · Tarafsız %33",
+    );
+  });
+
+  it("a percentage is printed if and only if the tally is comparable (one floor, n = 0 to 12)", () => {
+    for (let n = 0; n <= 12; n++) {
+      const tally: FramingTally = { n, iktidar: n, muhalefet: 0, none: 0 };
+      expect(formatTallyLine(tally).includes("%"), `n = ${n}`).toBe(hasComparableTally(tally));
+    }
+  });
+
+  it("a round of two single-vote headlines: neither reveal shows a percentage, and the summary says there is not enough data (one floor everywhere)", () => {
+    const entries: FramingRoundEntry[] = [
+      { vote: "iktidar", tally: { n: 1, iktidar: 1, muhalefet: 0, none: 0 } },
+      { vote: "muhalefet", tally: { n: 1, iktidar: 0, muhalefet: 1, none: 0 } },
+    ];
+    for (const entry of entries) expect(formatTallyLine(entry.tally)).not.toContain("%");
+    const result = summariseFramingRound(entries);
+    expect(result.eligible).toBe(0);
+    expect(result.line).toBe("Henüz karşılaştırmak için yeterli oy yok.");
+  });
+});
+
 describe("summariseFramingRound", () => {
   it("counts only headlines with at least 3 votes and names its denominator", () => {
     const entries: FramingRoundEntry[] = [
@@ -140,5 +226,19 @@ describe("summariseFramingRound", () => {
     expect(result.agree).toBe(0);
     expect(result.line).toBe("Henüz karşılaştırmak için yeterli oy yok.");
     expect(result.detail).toBe("Yeterli oyu olan 0 başlık üzerinden · bu turda 2 başlık oyladın.");
+  });
+});
+
+describe("summariseFramingRound at the floor", () => {
+  it("n = 2 is not eligible and n = 3 is, through the same hasComparableTally the reveal line uses", () => {
+    const two: FramingRoundEntry = { vote: "iktidar", tally: { n: 2, iktidar: 2, muhalefet: 0, none: 0 } };
+    const three: FramingRoundEntry = { vote: "iktidar", tally: { n: 3, iktidar: 3, muhalefet: 0, none: 0 } };
+    expect(summariseFramingRound([two]).eligible).toBe(0);
+    expect(summariseFramingRound([three]).eligible).toBe(1);
+    expect(summariseFramingRound([three]).agree).toBe(1);
+    for (const entry of [two, three]) {
+      expect(summariseFramingRound([entry]).eligible === 1).toBe(hasComparableTally(entry.tally));
+      expect(formatTallyLine(entry.tally).includes("%")).toBe(hasComparableTally(entry.tally));
+    }
   });
 });

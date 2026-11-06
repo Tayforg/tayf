@@ -26,6 +26,8 @@ type Summary = {
     share: number | null;
     sharePct: number | null;
   }>;
+  /** Public claims per side after the title de-dup (not just the rows shown). */
+  blindspotSideCounts: { iktidar: number; bagimsiz: number; muhalefet: number };
 };
 
 type WordsResult =
@@ -65,6 +67,7 @@ const mocks = vi.hoisted(() => ({
     zoneCounts: { iktidar: 6, bagimsiz: 3, muhalefet: 1 },
     topClusters: [],
     blindspots: [],
+    blindspotSideCounts: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
   } as Summary,
   health: null as Record<
     string,
@@ -225,6 +228,7 @@ const FULL_SUMMARY: Summary = {
       sharePct: 88,
     },
   ],
+  blindspotSideCounts: { iktidar: 37, bagimsiz: 0, muhalefet: 9 },
 };
 
 beforeEach(() => {
@@ -461,11 +465,25 @@ describe("WeeklyPage — data present", () => {
   });
 
   it("renders the honest empty copy when there are no blindspots", async () => {
-    mocks.summary = { ...FULL_SUMMARY, blindspots: [] };
+    mocks.summary = {
+      ...FULL_SUMMARY,
+      blindspots: [],
+      blindspotSideCounts: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+    };
 
     const text = collectText(await WeeklyPage()).join(" ");
 
     expect(text).toContain("Son 7 günde kör nokta yok.");
+    expect(text).not.toContain("Her taraftan");
+  });
+
+  it("states how the blindspot rows were chosen: the per-side totals and 'her taraftan en büyükleri' (h52-weekly-2)", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain(
+      "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9. Her taraftan en büyükleri gösteriliyor.",
+    );
+    expect(text.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
   });
 
   it("derives the silent-source count from the feed status summary", async () => {

@@ -1,4 +1,5 @@
 import { formatCountTr } from "@/lib/format/number-tr";
+import type { MediaDnaZone } from "@/types";
 
 // Reader-facing copy for the weekly sections (/hafta and /hafta/<week>).
 //
@@ -159,4 +160,43 @@ export function weekCopyFor(variant: WeekCopyVariant): WeekCopy {
  */
 export function weekCopy(closed: boolean): WeekCopy {
   return weekCopyFor(closed ? "closed" : "live");
+}
+
+/** A non-negative whole count; NaN, Infinity and negatives read as 0. */
+function tallyCount(n: number): number {
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * The line under "Kör noktalar" (h52-weekly-2): how many public blindspot
+ * claims each side has, and how the rows below were chosen (the biggest of
+ * each side, not the biggest overall — İktidar has more outlets, so its claims
+ * are larger and would crowd Muhalefet out of a plain top five).
+ *
+ *   "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9.
+ *    Her taraftan en büyükleri gösteriliyor."
+ *
+ * İktidar and Muhalefet are always named (a "Muhalefet tarafında 0" is a
+ * finding); Bağımsız only when it is above zero. `null` when there is no claim
+ * at all, so the section keeps its empty-state copy instead. The same line
+ * serves /hafta, the in-progress week and every closed week, so it names no
+ * time (tests/guards/week-archive-copy.test.ts keeps the section files free of
+ * week literals).
+ */
+export function blindspotTallyLine(
+  counts: Record<MediaDnaZone, number>,
+): string | null {
+  const iktidar = tallyCount(counts.iktidar);
+  const muhalefet = tallyCount(counts.muhalefet);
+  const bagimsiz = tallyCount(counts.bagimsiz);
+  const total = iktidar + muhalefet + bagimsiz;
+  if (total === 0) return null;
+
+  const parts = [
+    `Toplam ${formatCountTr(total)} kör nokta`,
+    `İktidar tarafında ${formatCountTr(iktidar)}`,
+    `Muhalefet tarafında ${formatCountTr(muhalefet)}`,
+  ];
+  if (bagimsiz > 0) parts.push(`Bağımsız tarafında ${formatCountTr(bagimsiz)}`);
+  return `${parts.join(" · ")}. Her taraftan en büyükleri gösteriliyor.`;
 }

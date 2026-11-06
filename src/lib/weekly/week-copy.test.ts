@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { weekCopy, weekCopyFor, type WeekCopy } from "./week-copy";
+import { blindspotTallyLine, weekCopy, weekCopyFor, type WeekCopy } from "./week-copy";
 
 // Reader-facing copy for the weekly sections. `weekCopy(false)` is the live
 // wording of the in-progress ISO week (/hafta/<current week>) and must stay
@@ -304,5 +304,75 @@ describe("weekCopy shape", () => {
     expect(weekCopy(false).percentBasis(Number.NaN)).toBe(
       "Yüzdeler bu haftanın çok kaynaklı kümelerindeki 0 kaynak kaydı üzerinden hesaplanır.",
     );
+  });
+});
+
+// h52-weekly-2: the blindspot list shows the biggest claims of each side, not
+// the five biggest overall, and the line under the heading says so. It is the
+// same line on every variant (/hafta, the live week, a closed week), so it is
+// a standalone function and not a WeekCopy field, and it names no time at all.
+describe("blindspotTallyLine", () => {
+  it("states the total, the İktidar and Muhalefet tallies and how the rows were chosen", () => {
+    expect(blindspotTallyLine({ iktidar: 37, muhalefet: 9, bagimsiz: 0 })).toBe(
+      "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9. Her taraftan en büyükleri gösteriliyor.",
+    );
+  });
+
+  it("returns null when there is no blindspot at all", () => {
+    expect(blindspotTallyLine({ iktidar: 0, muhalefet: 0, bagimsiz: 0 })).toBeNull();
+  });
+
+  it("adds the Bağımsız segment only when it is above zero", () => {
+    expect(blindspotTallyLine({ iktidar: 5, muhalefet: 2, bagimsiz: 3 })).toBe(
+      "Toplam 10 kör nokta · İktidar tarafında 5 · Muhalefet tarafında 2 · Bağımsız tarafında 3. Her taraftan en büyükleri gösteriliyor.",
+    );
+    expect(blindspotTallyLine({ iktidar: 5, muhalefet: 2, bagimsiz: 0 })).not.toContain("Bağımsız");
+  });
+
+  it("still prints a zero side, so 'Muhalefet tarafında 0' is stated, not hidden", () => {
+    expect(blindspotTallyLine({ iktidar: 4, muhalefet: 0, bagimsiz: 0 })).toBe(
+      "Toplam 4 kör nokta · İktidar tarafında 4 · Muhalefet tarafında 0. Her taraftan en büyükleri gösteriliyor.",
+    );
+  });
+
+  it("prints a Muhalefet-only week", () => {
+    expect(blindspotTallyLine({ iktidar: 0, muhalefet: 3, bagimsiz: 0 })).toBe(
+      "Toplam 3 kör nokta · İktidar tarafında 0 · Muhalefet tarafında 3. Her taraftan en büyükleri gösteriliyor.",
+    );
+  });
+
+  it("a Bağımsız-only week still prints, with the Bağımsız segment", () => {
+    expect(blindspotTallyLine({ iktidar: 0, muhalefet: 0, bagimsiz: 2 })).toBe(
+      "Toplam 2 kör nokta · İktidar tarafında 0 · Muhalefet tarafında 0 · Bağımsız tarafında 2. Her taraftan en büyükleri gösteriliyor.",
+    );
+  });
+
+  it("groups thousands the Turkish way", () => {
+    expect(blindspotTallyLine({ iktidar: 1234, muhalefet: 1000, bagimsiz: 0 })).toBe(
+      "Toplam 2.234 kör nokta · İktidar tarafında 1.234 · Muhalefet tarafında 1.000. Her taraftan en büyükleri gösteriliyor.",
+    );
+  });
+
+  it("formats non-finite counts as 0 instead of NaN, and returns null when nothing is left", () => {
+    expect(blindspotTallyLine({ iktidar: Number.NaN, muhalefet: 2, bagimsiz: 0 })).toBe(
+      "Toplam 2 kör nokta · İktidar tarafında 0 · Muhalefet tarafında 2. Her taraftan en büyükleri gösteriliyor.",
+    );
+    expect(blindspotTallyLine({ iktidar: Number.NaN, muhalefet: Number.NaN, bagimsiz: 0 })).toBeNull();
+  });
+
+  it("names no time: not 'bu hafta', not 'o hafta', not 'son 7 gün', not a 'haftanın' (it prints on every variant)", () => {
+    const line = blindspotTallyLine({ iktidar: 37, muhalefet: 9, bagimsiz: 4 })!.toLocaleLowerCase("tr-TR");
+
+    for (const term of ["bu hafta", "o hafta", "son 7", "haftanın", "hafta", "gün", "şu anda", "bugün"]) {
+      expect(line, term).not.toContain(term);
+    }
+  });
+
+  it("carries none of the closed-week jargon either", () => {
+    const line = blindspotTallyLine({ iktidar: 37, muhalefet: 9, bagimsiz: 4 })!.toLocaleLowerCase("tr-TR");
+
+    for (const term of ["payda", "veto", "72 saat", "sürüyor", "/kaynaklar/durum"]) {
+      expect(line, term).not.toContain(term);
+    }
   });
 });

@@ -680,9 +680,10 @@ describe("167 docs/migration-guide.md", () => {
     section = sectionOf(guide, "167");
   });
 
-  it("sits after section 166 and is the last section", () => {
+  it("sits after section 166, and the section ends at the next heading (168 follows it)", () => {
     expect(guide.indexOf("\n## 167")).toBeGreaterThan(guide.indexOf("\n## 166"));
-    expect(guide.indexOf("\n## ", guide.indexOf("\n## 167") + 1)).toBe(-1);
+    // 168 was appended after it: the section text must stop there, so nothing of 168 is read as 167's
+    expect(section).not.toContain("\n## 168");
   });
 
   it("has Why, What, an md5 table, Order, Verify and Rollback", () => {
