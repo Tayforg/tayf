@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import Link from "next/link";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -425,5 +426,179 @@ describe("/timeline", () => {
     // this wrapper; `relative` is its containing block and nothing else: no
     // margin, padding, gap or space utility that would gap an empty pill.
     expect(wrapper?.props?.className).toBe("relative");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h46-mobile-2: at 360 px the one-line row (time + headline + "N kaynak") left
+// the headline ~165 px, so 97% of rows hit the 2-line clamp. Below sm the row
+// now wraps: time and the source count share line one, the headline drops to
+// its own full-width line 2 with a 4-line clamp. From sm up nothing changes.
+// The change is class-only, so these tests pin the literal class tokens.
+// ---------------------------------------------------------------------------
+describe("/timeline row layout on phones (h46-mobile-2)", () => {
+  const classTokens = (el: El | undefined): string[] =>
+    String(el?.props?.className ?? "")
+      .split(/\s+/)
+      .filter(Boolean);
+
+  function findAll(tree: unknown, match: (el: El) => boolean): El[] {
+    const hits: El[] = [];
+    walk(tree, (el) => {
+      if (match(el)) hits.push(el);
+    });
+    return hits;
+  }
+
+  const rowItems = (tree: unknown) =>
+    findAll(tree, (el) => el.type === "li" && typeof el.props?.className === "string");
+  const headlineLinks = (tree: unknown) => findAll(tree, (el) => el.type === Link);
+  const countSpans = (tree: unknown) =>
+    findAll(
+      tree,
+      (el) => el.type === "span" && /kaynak$/.test(collectText(el.props?.children).join("")),
+    );
+  const times = (tree: unknown) => findAll(tree, (el) => el.type === "time");
+
+  async function renderThree() {
+    mocks.result = { rows: mkRows(3), total: 3 };
+    return TimelinePage();
+  }
+
+  it("every row <li> wraps below sm and keeps its desktop flex row", async () => {
+    const tree = await renderThree();
+
+    const items = rowItems(tree);
+    expect(items).toHaveLength(3);
+    for (const li of items) {
+      const tokens = classTokens(li);
+      expect(tokens).toContain("max-sm:flex-wrap");
+      // Desktop layout is unchanged.
+      for (const t of ["flex", "items-baseline", "gap-3", "px-3", "py-2", "rounded-lg"]) {
+        expect(tokens).toContain(t);
+      }
+    }
+  });
+
+  it("the headline link drops to its own full-width line below sm with a 4-line clamp", async () => {
+    const tree = await renderThree();
+
+    const links = headlineLinks(tree);
+    expect(links).toHaveLength(3);
+    for (const link of links) {
+      const tokens = classTokens(link);
+      expect(tokens).toContain("max-sm:order-last");
+      expect(tokens).toContain("max-sm:basis-full");
+      expect(tokens).toContain("max-sm:line-clamp-4");
+      // From sm up it is still the 2-line clamp, and only from sm up: a bare
+      // line-clamp-2 would also apply on phones and fight max-sm:line-clamp-4.
+      expect(tokens).toContain("sm:line-clamp-2");
+      expect(tokens).not.toContain("line-clamp-2");
+      // Desktop flex behaviour is unchanged.
+      for (const t of ["min-w-0", "flex-1", "text-sm", "font-medium", "leading-snug"]) {
+        expect(tokens).toContain(t);
+      }
+    }
+  });
+
+  it("the 'N kaynak' count rides the right edge of line one below sm", async () => {
+    const tree = await renderThree();
+
+    const counts = countSpans(tree);
+    expect(counts).toHaveLength(3);
+    for (const span of counts) {
+      const tokens = classTokens(span);
+      expect(tokens).toContain("max-sm:ml-auto");
+      expect(tokens).toContain("shrink-0");
+      expect(collectText(span.props?.children).join("")).toBe("2 kaynak");
+    }
+  });
+
+  it("the time stays unshrinkable on line one", async () => {
+    const tree = await renderThree();
+
+    const ts = times(tree);
+    expect(ts).toHaveLength(3);
+    for (const t of ts) {
+      const tokens = classTokens(t);
+      expect(tokens).toContain("shrink-0");
+      expect(tokens).not.toContain("max-sm:order-last");
+      expect(tokens).not.toContain("max-sm:basis-full");
+      expect(typeof t.props?.dateTime).toBe("string");
+    }
+  });
+
+  it("keeps DOM and reading order time, headline, count: only the visual order moves", async () => {
+    const tree = await renderThree();
+
+    const li = rowItems(tree)[0] as El;
+    const kids = li.props?.children as El[];
+    expect(kids.map((k) => k.type)).toEqual(["time", Link, "span"]);
+  });
+
+  it("keeps semantics and accessible names: headline text, href and the neutral title", async () => {
+    mocks.result = {
+      rows: [
+        {
+          id: "c1",
+          title_tr: "Ham başlık",
+          title_tr_neutral: "Nötr başlık",
+          article_count: 7,
+          first_published: "2026-09-18T10:05:00.000Z",
+        },
+        {
+          id: "c2",
+          title_tr: "Yalnız ham başlık",
+          title_tr_neutral: null,
+          article_count: 2,
+          first_published: "2026-09-18T10:40:00.000Z",
+        },
+      ],
+      total: 2,
+    };
+
+    const tree = await TimelinePage();
+
+    const links = headlineLinks(tree);
+    expect(links.map((l) => l.props?.href)).toEqual(["/cluster/c1", "/cluster/c2"]);
+    expect(links.map((l) => collectText(l.props?.children).join(""))).toEqual([
+      "Nötr başlık",
+      "Yalnız ham başlık",
+    ]);
+    expect(links.every((l) => l.props?.["aria-label"] === undefined)).toBe(true);
+    expect(countSpans(tree).map((s) => collectText(s.props?.children).join(""))).toEqual([
+      "7 kaynak",
+      "2 kaynak",
+    ]);
+  });
+
+  it("does not touch the rail padding the dot marker is positioned against", async () => {
+    const tree = await renderThree();
+
+    const rails = findAll(
+      tree,
+      (el) => el.type === "div" && classTokens(el).includes("border-l-2"),
+    );
+    expect(rails).toHaveLength(1);
+    const rail = classTokens(rails[0]);
+    expect(rail).toContain("pl-6");
+    expect(rail).toContain("ml-2");
+
+    const dots = findAll(
+      tree,
+      (el) => el.type === "div" && classTokens(el).includes("-left-[calc(1.5rem+5px)]"),
+    );
+    expect(dots.length).toBeGreaterThan(0);
+  });
+
+  it("uses literal class strings: no computed max-sm / sm class names", async () => {
+    const tree = await renderThree();
+
+    const all = [...rowItems(tree), ...headlineLinks(tree), ...countSpans(tree)].flatMap(classTokens);
+    for (const token of all) {
+      // A template hole left in a class (e.g. `max-sm:line-clamp-${n}`) would
+      // never reach Tailwind's scanner as a real class.
+      expect(token).not.toMatch(/undefined|\$\{|\[object/);
+    }
   });
 });

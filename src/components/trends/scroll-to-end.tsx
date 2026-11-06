@@ -55,7 +55,7 @@ export function ScrollHint() {
         aria-hidden="true"
         className="pointer-events-none absolute inset-y-0 left-0 w-10 bg-gradient-to-r from-background to-transparent"
       />
-      <p className="pointer-events-none absolute left-2 top-1 font-mono text-[10px] text-muted-foreground">
+      <p className="pointer-events-none absolute left-2 top-1 font-mono text-[11px] text-muted-foreground">
         <span aria-hidden="true">← </span>önceki günler
         <span className="sr-only"> (grafik yatay kaydırılabilir)</span>
       </p>

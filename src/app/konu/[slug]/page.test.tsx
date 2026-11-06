@@ -43,6 +43,8 @@ vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCard } from "@/components/story/cluster-card";
+import { PageHero } from "@/components/ui/page-hero";
+import { topicSubtitleTr } from "@/lib/clusters/topic-query";
 
 import TopicHubPage, { generateMetadata } from "./page";
 
@@ -618,6 +620,68 @@ describe("/konu/[slug] structured data", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h46-copy-1: the hub's subtitle and JSON-LD name come from the shared topic
+// helpers, so the genel hub never reads "Genel haberleri" / "Genel konusunda"
+// and a label in the middle of a sentence is lower-case.
+// ---------------------------------------------------------------------------
+
+function heroProps(tree: unknown): Record<string, unknown> | undefined {
+  let found: Record<string, unknown> | undefined;
+  walk(tree, (el) => {
+    if (el.type === PageHero) found = el.props;
+  });
+  return found;
+}
+
+describe("/konu/[slug] hero copy", () => {
+  it.each([
+    ["dunya", "Son 7 günde dünya konusunda kümelenen haberler."],
+    ["genel", "Son 7 günde genel gündemde kümelenen haberler."],
+  ])("%s: the subtitle is topicSubtitleTr(slug), the label stays capitalised in the title", async (slug, subtitle) => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 1 };
+
+    const tree = await TopicHubPage({
+      params: Promise.resolve({ slug }),
+      searchParams: Promise.resolve({}),
+    });
+    const hero = heroProps(tree);
+
+    expect(hero?.subtitle).toBe(subtitle);
+    expect(hero?.subtitle).toBe(topicSubtitleTr(slug as "dunya" | "genel"));
+    expect(hero?.title).toBe(slug === "dunya" ? "Dünya" : "Genel");
+  });
+
+  it("the subtitle is the same for an empty page 1 and a failed read (it does not depend on the data)", async () => {
+    for (const result of [null, { bundles: [], hasMore: false, page: 1 }]) {
+      mocks.result = result;
+      const tree = await TopicHubPage({
+        params: Promise.resolve({ slug: "genel" }),
+        searchParams: Promise.resolve({}),
+      });
+      expect(heroProps(tree)?.subtitle).toBe("Son 7 günde genel gündemde kümelenen haberler.");
+    }
+  });
+
+  it("genel: the CollectionPage name is 'Genel haberler' and 'Genel haberler — Sayfa 2' on page 2", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 1 };
+    const first = await TopicHubPage({
+      params: Promise.resolve({ slug: "genel" }),
+      searchParams: Promise.resolve({}),
+    });
+    const firstPayload = ldJsonPayload(ldJsonScripts(first)[0]) as Array<{ name?: string }>;
+    expect(firstPayload[0]?.name).toBe("Genel haberler");
+
+    mocks.result = { bundles: [bundle("c31")], hasMore: false, page: 2 };
+    const second = await TopicHubPage({
+      params: Promise.resolve({ slug: "genel" }),
+      searchParams: Promise.resolve({ sayfa: "2" }),
+    });
+    const secondPayload = ldJsonPayload(ldJsonScripts(second)[0]) as Array<{ name?: string }>;
+    expect(secondPayload[0]?.name).toBe("Genel haberler — Sayfa 2");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // generateMetadata: the share/canonical identity of each hub page. The real
 // topicMetadata runs (only the fetcher is mocked above), so this pins the
 // wiring: slug + parsed ?sayfa= -> canonical and og:url agree, and the RSS
@@ -651,6 +715,15 @@ describe("/konu/[slug] generateMetadata", () => {
     expect(m.title).toBe("Spor haberleri");
     expect(m.openGraph?.title).toBe("Spor haberleri — Tayf");
     expect(m.robots).toBeUndefined();
+  });
+
+  it("genel: the <title> is 'Genel haberler' (never 'Genel haberleri'), on page 1 and page 2", async () => {
+    const first = await meta("genel");
+    const paged = await meta("genel", "2");
+
+    expect(first.title).toBe("Genel haberler");
+    expect(first.openGraph?.title).toBe("Genel haberler — Tayf");
+    expect(paged.title).toBe("Genel haberler — Sayfa 2");
   });
 
   it("the description is the jargon-free copy on page 1 and on a paged URL alike", async () => {

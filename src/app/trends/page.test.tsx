@@ -72,6 +72,7 @@ import { MAX_ITEMS, type RisingItem, type RisingResult } from "@/lib/trends/risi
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { ZONE_META } from "@/lib/bias/config";
 import { ScrollToEnd } from "@/components/trends/scroll-to-end";
+import { formatCountTr } from "@/lib/format/number-tr";
 
 /** Collects every string/number leaf under a React element tree. */
 function collectText(node: unknown, out: string[] = []): string[] {
@@ -500,22 +501,31 @@ function attr(tag: string, name: string): number {
   return Number(m![1]);
 }
 
-/** Texts of the y-axis labels (text-anchor="end"); x labels are "middle". */
-function yLabels(markup: string): string[] {
-  return [...markup.matchAll(/<text[^>]*text-anchor="end"[^>]*>([^<]*)<\/text>/g)].map(
-    (m) => m[1]!,
-  );
+/**
+ * Texts of the y-axis tick labels. h46-mobile-3: they are aria-hidden HTML
+ * spans in a gutter beside the chart (not svg <text>), one per tick.
+ */
+async function yAxisLabels(buckets: Bucket[]): Promise<string[]> {
+  mockBuckets = buckets;
+  const tree = await TrendsPage();
+  return collectElements(tree)
+    .filter((el) => el.props?.["data-y-label"] !== undefined)
+    .map((el) => collectText(el.props?.children).join(""));
 }
 
 describe("/trends page — nice-number y-axis", () => {
   it("labels the axis 0 / 2.500 / 5.000 / 7.500 / 10.000 for a busiest day of 8791", async () => {
-    const markup = await chartMarkup(busiestDayBuckets());
-
-    expect(yLabels(markup)).toEqual(["0", "2.500", "5.000", "7.500", "10.000"]);
+    expect(await yAxisLabels(busiestDayBuckets())).toEqual([
+      "0",
+      "2.500",
+      "5.000",
+      "7.500",
+      "10.000",
+    ]);
   });
 
   it("never prints the raw quarter-of-the-maximum values (8791, 2198, 4396, 6593)", async () => {
-    const labels = yLabels(await chartMarkup(busiestDayBuckets()));
+    const labels = await yAxisLabels(busiestDayBuckets());
 
     for (const raw of ["8791", "8.791", "2198", "2.198", "4396", "6593"]) {
       expect(labels).not.toContain(raw);
@@ -554,9 +564,7 @@ describe("/trends page — nice-number y-axis", () => {
   });
 
   it("keeps a sane 0 / 1 axis for an empty month", async () => {
-    const markup = await chartMarkup(zeroBuckets());
-
-    expect(yLabels(markup)).toEqual(["0", "1"]);
+    expect(await yAxisLabels(zeroBuckets())).toEqual(["0", "1"]);
   });
 
   it("uses the shared tr-TR formatter and the niceScale ticks in the source", () => {
@@ -619,7 +627,7 @@ describe("/trends page — keyboard-reachable chart and data table (h17-a11y-1)"
     expect(String(svg?.props?.["aria-label"])).toContain("Toplam");
   });
 
-  it("renders exactly one <details>, a later sibling of the scroller", async () => {
+  it("renders exactly one <details>, a later sibling of the chart row that holds the scroller", async () => {
     mockBuckets = seededBuckets().buckets;
 
     const tree = await TrendsPage();
@@ -627,11 +635,16 @@ describe("/trends page — keyboard-reachable chart and data table (h17-a11y-1)"
     const details = tableDetails(tree);
     expect(details).toHaveLength(1);
     const scroller = collectElements(tree).find((el) => el.type === ScrollToEnd)!;
-    const parent = parentOf(tree, scroller);
-    expect(parent).not.toBeNull();
-    expect(parentOf(tree, details[0])).toBe(parent);
-    const kids = parent!.props!.children as unknown[];
-    expect(kids.indexOf(details[0])).toBeGreaterThan(kids.indexOf(scroller));
+    // h46-mobile-3: the scroller sits in a flex row next to the y-axis gutter,
+    // so the table follows that row rather than the scroller itself.
+    const chartRow = parentOf(tree, scroller);
+    expect(chartRow).not.toBeNull();
+    expect(chartRow!.props?.["data-trends-chart"]).toBeDefined();
+    const card = parentOf(tree, chartRow);
+    expect(card).not.toBeNull();
+    expect(parentOf(tree, details[0])).toBe(card);
+    const kids = card!.props!.children as unknown[];
+    expect(kids.indexOf(details[0])).toBeGreaterThan(kids.indexOf(chartRow));
   });
 
   it("the <details> has the Turkish summary and a caption", async () => {
@@ -743,11 +756,24 @@ describe("/trends page — keyboard-reachable chart and data table (h17-a11y-1)"
 
 const PARTIAL_BAR_SUFFIX = " (son gün, eksik)";
 
-// Mirrors of page.tsx's private chart geometry (900 wide, 48 left, 16 right, 4 gap).
-const PAD_LEFT_FOR_TEST = 48;
+// Mirrors of page.tsx's private chart geometry (900 wide, 4 left, 16 right, 4
+// gap). h46-mobile-3: the left padding is 4, not 48: the y labels live in an
+// HTML gutter beside the svg, so the plot starts at the svg's left edge.
+const CHART_W_FOR_TEST = 900;
+const CHART_H_FOR_TEST = 320;
+const PAD_LEFT_FOR_TEST = 4;
+const PAD_RIGHT_FOR_TEST = 16;
+const PAD_TOP_FOR_TEST = 16;
+const PAD_BOTTOM_FOR_TEST = 36;
 const BAR_GAP_FOR_TEST = 4;
 function barWidthForTest(): number {
-  return (900 - 48 - 16 - BAR_GAP_FOR_TEST * (WINDOW_DAYS - 1)) / WINDOW_DAYS;
+  return (
+    (CHART_W_FOR_TEST -
+      PAD_LEFT_FOR_TEST -
+      PAD_RIGHT_FOR_TEST -
+      BAR_GAP_FOR_TEST * (WINDOW_DAYS - 1)) /
+    WINDOW_DAYS
+  );
 }
 
 /** A month where the busiest day (8791) is the last, partial one. */
@@ -924,8 +950,9 @@ describe("/trends page — partial current day (h37-content-3)", () => {
     const withFlag = await chartMarkup(partialBusiestBuckets());
     const without = await chartMarkup(busiestDayBuckets());
 
-    expect(yLabels(withFlag)).toEqual(["0", "2.500", "5.000", "7.500", "10.000"]);
-    expect(yLabels(withFlag)).toEqual(yLabels(without));
+    const labelsWithFlag = await yAxisLabels(partialBusiestBuckets());
+    expect(labelsWithFlag).toEqual(["0", "2.500", "5.000", "7.500", "10.000"]);
+    expect(labelsWithFlag).toEqual(await yAxisLabels(busiestDayBuckets()));
 
     // Same geometry: the bars are scaled to the same axis, only styling differs.
     const geometry = (markup: string) =>
@@ -1120,5 +1147,335 @@ describe("/trends page: rising rows link only to indexable hubs", () => {
     expect(code).not.toMatch(/["']use cache/);
     expect(code).toMatch(/getEntityHub\(/);
     expect(code).toMatch(/withHubLinks\(/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h46-mobile-3: on a 360-390 px phone the chart opened scrolled right with the
+// value axis off-screen, and its labels (svg <text>, sized in viewBox units, so
+// 10 units in a 900-unit viewBox shown 640 px wide) rendered at about 7 px; the
+// day labels carried no month. The fix mirrors /kalite (h25-visual-2): every
+// label is HTML around the svg. The y labels sit in a fixed gutter BESIDE the
+// scroller (a sibling, so they never scroll away); the x labels sit over the
+// svg's blank bottom padding inside the scroller (so they scroll with the bars)
+// and carry the Turkish month on the first label and after a month change.
+// ---------------------------------------------------------------------------
+
+/** Thirty consecutive days, 2026-10-28 .. 2026-11-26: crosses a month boundary. */
+function octNovBuckets(): Bucket[] {
+  const t0 = Date.parse("2026-10-28T00:00:00Z");
+  return Array.from({ length: WINDOW_DAYS }, (_, i) => ({
+    day: new Date(t0 + i * 86_400_000).toISOString().slice(0, 10),
+    counts: { iktidar: i + 1, bagimsiz: 1, muhalefet: 1 },
+    total: i + 3,
+  }));
+}
+
+function withAttr(tree: unknown, name: string): Elementish[] {
+  return collectElements(tree).filter((el) => el.props?.[name] !== undefined);
+}
+
+function classTokens(el: Elementish): string[] {
+  return String(el.props?.className ?? "")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** The px size of a literal `text-[Npx]` class, or null when there is none. */
+function pxSize(el: Elementish): number | null {
+  const token = classTokens(el).find((t) => /^text-\[\d+(\.\d+)?px\]$/.test(t));
+  return token ? Number(token.slice(6, -3)) : null;
+}
+
+function styleOf(el: Elementish): { top?: string; left?: string; height?: string } {
+  return (el.props?.style ?? {}) as { top?: string; left?: string; height?: string };
+}
+
+const xLabelTexts = (labels: Elementish[]) =>
+  labels.map((el) => collectText(el.props?.children).join(""));
+
+async function chartParts(buckets: Bucket[]) {
+  mockBuckets = buckets;
+  const tree = await TrendsPage();
+  const scroller = collectElements(tree).find((el) => el.type === ScrollToEnd)!;
+  const gutter = withAttr(tree, "data-y-axis")[0];
+  return {
+    tree,
+    scroller,
+    gutter,
+    yLabels: withAttr(tree, "data-y-label"),
+    xLabels: withAttr(scroller.props?.children, "data-x-label"),
+  };
+}
+
+describe("/trends page — labels are HTML, not svg text (h46-mobile-3)", () => {
+  it("the chart svg contains no <text> element and nothing in the page carries a fontSize prop", async () => {
+    const { tree } = await chartParts(octNovBuckets());
+
+    const svg = collectElements(tree).find((el) => el.type === "svg")!;
+    expect(collectElements(svg.props?.children).some((el) => el.type === "text")).toBe(false);
+    expect(collectElements(tree).some((el) => el.props?.fontSize !== undefined)).toBe(false);
+    const markup = renderToStaticMarkup(svg as unknown as React.ReactElement);
+    expect(markup).not.toContain("<text");
+    expect(markup).not.toContain("font-size");
+  });
+
+  it("keeps the svg's role=img, aria-label, gridlines and bar <title>s", async () => {
+    const { tree } = await chartParts(octNovBuckets());
+
+    const svg = collectElements(tree).find((el) => el.type === "svg")!;
+    expect(svg.props?.role).toBe("img");
+    expect(String(svg.props?.["aria-label"])).toContain("Toplam");
+    const markup = renderToStaticMarkup(svg as unknown as React.ReactElement);
+    expect(markup.match(/<line\b/g)?.length).toBeGreaterThan(1);
+    expect(markup).toContain("<title>2026-11-26 · ");
+  });
+
+  it("plots from the svg's left edge: gridlines and the first bar start within 8 units of x=0", async () => {
+    const markup = await chartMarkup(octNovBuckets());
+
+    const x1s = [...markup.matchAll(/<line\b[^>]*>/g)].map((m) => attr(m[0], "x1"));
+    expect(x1s.length).toBeGreaterThan(1);
+    for (const x1 of x1s) expect(x1).toBe(PAD_LEFT_FOR_TEST);
+    const firstBarX = Math.min(...rectTags(markup).map((r) => attr(r, "x")));
+    expect(firstBarX).toBe(PAD_LEFT_FOR_TEST);
+    // The right padding still keeps the last bar inside the viewBox.
+    const lastBar = Math.max(...rectTags(markup).map((r) => attr(r, "x") + attr(r, "width")));
+    expect(lastBar).toBeCloseTo(CHART_W_FOR_TEST - PAD_RIGHT_FOR_TEST, 6);
+  });
+});
+
+describe("/trends page — y labels sit in a fixed gutter beside the scroller (h46-mobile-3)", () => {
+  it("the gutter is aria-hidden, before the scroller, and a sibling of it, never a descendant", async () => {
+    const { tree, scroller, gutter, yLabels } = await chartParts(busiestDayBuckets());
+
+    expect(gutter).toBeDefined();
+    expect(gutter!.props?.["aria-hidden"]).toBe("true");
+    expect(parentOf(tree, gutter)).not.toBeNull();
+    expect(parentOf(tree, gutter)).toBe(parentOf(tree, scroller));
+    const kids = parentOf(tree, scroller)!.props!.children as unknown[];
+    expect(kids.indexOf(gutter)).toBeLessThan(kids.indexOf(scroller));
+    // No y label inside the scrolling region: they cannot scroll away.
+    expect(withAttr(scroller.props?.children, "data-y-label")).toHaveLength(0);
+    expect(withAttr(scroller.props?.children, "data-y-axis")).toHaveLength(0);
+    // Every y label belongs to the gutter.
+    expect(withAttr(gutter!.props?.children, "data-y-label")).toHaveLength(yLabels.length);
+  });
+
+  it("the row is a fixed-gutter grid and sizes the gutter by container units", async () => {
+    const { tree, gutter } = await chartParts(busiestDayBuckets());
+
+    // A grid, not a flex row: the second column is minmax(0,1fr), so the 640 px
+    // box inside the scroller overflows the scroller instead of widening the page.
+    const row = withAttr(tree, "data-trends-chart")[0]!;
+    const tokens = classTokens(row);
+    expect(tokens).toContain("grid");
+    expect(tokens).toContain("@container");
+    const columns = tokens.find((t) => t.startsWith("grid-cols-["));
+    const gutterRem = columns?.match(/^grid-cols-\[(\d+(?:\.\d+)?)rem_minmax\(0,1fr\)\]$/)?.[1];
+    expect(gutterRem, `gutter column in ${columns}`).toBeDefined();
+    expect(classTokens(gutter!)).toContain("relative");
+    // The gutter is as tall as the svg box: max(640px, row width - gutter) at the
+    // viewBox aspect ratio, so the percentage tops line up with the gridlines
+    // whatever the scrollbar does to the scroller's own height.
+    const height = String(styleOf(gutter!).height);
+    expect(height).toContain("100cqw");
+    expect(height).toContain("max(640px");
+    expect(height).toContain(`${gutterRem}rem`);
+    expect(height).toContain(String(CHART_H_FOR_TEST / CHART_W_FOR_TEST).slice(0, 6));
+  });
+
+  it("the svg's box is at least 640 px wide and drops the inline-svg descender gap", async () => {
+    const { tree, scroller } = await chartParts(busiestDayBuckets());
+
+    const svg = collectElements(tree).find((el) => el.type === "svg")!;
+    const box = parentOf(scroller.props?.children, svg);
+    expect(box).not.toBeNull();
+    expect(classTokens(box!)).toContain("min-w-[640px]");
+    expect(classTokens(box!)).toContain("relative");
+    expect(classTokens(svg)).toContain("block");
+    expect(classTokens(svg)).toContain("w-full");
+  });
+
+  it("has one label per scale tick, formatted with formatCountTr, at text-[11px] or larger", async () => {
+    const { yLabels } = await chartParts(busiestDayBuckets());
+
+    expect(yLabels.map((el) => collectText(el.props?.children).join(""))).toEqual(
+      [0, 2500, 5000, 7500, 10000].map((t) => formatCountTr(t)),
+    );
+    for (const el of yLabels) {
+      expect(el.type).toBe("span");
+      expect(pxSize(el)).not.toBeNull();
+      expect(pxSize(el)!).toBeGreaterThanOrEqual(11);
+      expect(classTokens(el)).toContain("absolute");
+      expect(classTokens(el)).toContain("whitespace-nowrap");
+    }
+  });
+
+  it("puts each label at its gridline: top = (PAD_TOP + PLOT_H * (1 - t / max)) / CHART_H", async () => {
+    const buckets = busiestDayBuckets();
+    const { yLabels } = await chartParts(buckets);
+    const plotH = CHART_H_FOR_TEST - PAD_TOP_FOR_TEST - PAD_BOTTOM_FOR_TEST;
+    const ticks = [0, 2500, 5000, 7500, 10000];
+
+    const tops = yLabels.map((el) => parseFloat(String(styleOf(el).top)));
+    ticks.forEach((t, i) => {
+      const expected = ((PAD_TOP_FOR_TEST + plotH * (1 - t / 10000)) / CHART_H_FOR_TEST) * 100;
+      expect(tops[i]).toBeCloseTo(expected, 1);
+    });
+    // And they agree with the svg's own gridlines.
+    const markup = await chartMarkup(buckets);
+    const lineTops = [...markup.matchAll(/<line\b[^>]*>/g)].map(
+      (m) => (attr(m[0], "y1") / CHART_H_FOR_TEST) * 100,
+    );
+    expect(lineTops).toHaveLength(tops.length);
+    tops.forEach((top, i) => expect(top).toBeCloseTo(lineTops[i]!, 1));
+    // Lowest value is lowest on the page; every top is inside the svg box.
+    for (let i = 1; i < tops.length; i++) expect(tops[i]!).toBeLessThan(tops[i - 1]!);
+    for (const top of tops) {
+      expect(top).toBeGreaterThan(0);
+      expect(top).toBeLessThan(100);
+    }
+  });
+
+  it("keeps the 0 / 1 axis of an empty month in the gutter", async () => {
+    const { yLabels } = await chartParts(zeroBuckets());
+
+    expect(yLabels.map((el) => collectText(el.props?.children).join(""))).toEqual(["0", "1"]);
+  });
+
+  it("renders no gutter, no labels and no chart row on the unavailable branch", async () => {
+    mockBuckets = null;
+    const tree = await TrendsPage();
+
+    expect(withAttr(tree, "data-y-axis")).toHaveLength(0);
+    expect(withAttr(tree, "data-y-label")).toHaveLength(0);
+    expect(withAttr(tree, "data-x-label")).toHaveLength(0);
+    expect(withAttr(tree, "data-trends-chart")).toHaveLength(0);
+  });
+});
+
+describe("/trends page — the zone legend is at least 11 px (h46-mobile-3)", () => {
+  it("renders every legend item at text-[11px] or larger", async () => {
+    mockBuckets = octNovBuckets();
+    const tree = await TrendsPage();
+
+    const items = collectElements(tree).filter(
+      (el) => el.type === "li" && classTokens(el).includes("uppercase"),
+    );
+    expect(items).toHaveLength(3);
+    for (const li of items) expect(pxSize(li)!).toBeGreaterThanOrEqual(11);
+  });
+});
+
+describe("/trends page — x labels are HTML and carry the month (h46-mobile-3)", () => {
+  it("are aria-hidden HTML spans inside the scroller, so they scroll with the bars", async () => {
+    const { tree, scroller, xLabels } = await chartParts(octNovBuckets());
+
+    expect(xLabels).toHaveLength(7);
+    // Not in the gutter and not outside the scroller.
+    expect(withAttr(tree, "data-x-label")).toHaveLength(7);
+    const row = withAttr(scroller.props?.children, "data-x-axis")[0]!;
+    expect(row.props?.["aria-hidden"]).toBe("true");
+    expect(withAttr(row.props?.children, "data-x-label")).toHaveLength(7);
+    for (const el of xLabels) {
+      expect(el.type).toBe("span");
+      expect(pxSize(el)!).toBeGreaterThanOrEqual(11);
+      expect(classTokens(el)).toContain("whitespace-nowrap");
+    }
+  });
+
+  it("pins the Oct to Nov window: first '28 Eki', first after the change '02 Kas', the rest day-only", async () => {
+    const { xLabels } = await chartParts(octNovBuckets());
+
+    expect(xLabelTexts(xLabels)).toEqual(["28 Eki", "02 Kas", "07", "12", "17", "22", "26"]);
+  });
+
+  it("gives the first label its month inside a single month too", async () => {
+    const { xLabels } = await chartParts(zeroBuckets());
+
+    expect(xLabelTexts(xLabels)).toEqual(["01 Oca", "06", "11", "16", "21", "26", "30"]);
+  });
+
+  it("positions each label by percentage of the viewBox width, centred on its bar", async () => {
+    const { xLabels } = await chartParts(octNovBuckets());
+    const bw = barWidthForTest();
+    const centreOf = (idx: number) =>
+      ((PAD_LEFT_FOR_TEST + idx * (bw + BAR_GAP_FOR_TEST) + bw / 2) / CHART_W_FOR_TEST) * 100;
+
+    // idx 5, 10, ... 25 are plain centred labels.
+    [5, 10, 15, 20, 25].forEach((idx, i) => {
+      const el = xLabels[i + 1]!;
+      expect(parseFloat(String(styleOf(el).left))).toBeCloseTo(centreOf(idx), 1);
+      expect(classTokens(el)).toContain("-translate-x-1/2");
+    });
+    // Every label is a percentage inside the svg, strictly left to right.
+    const lefts = xLabels.map((el) => parseFloat(String(styleOf(el).left)));
+    for (const left of lefts) {
+      expect(left).toBeGreaterThan(0);
+      expect(left).toBeLessThan(100);
+    }
+    for (let i = 1; i < lefts.length; i++) expect(lefts[i]!).toBeGreaterThan(lefts[i - 1]!);
+  });
+
+  it("anchors the first label at its bar's left edge and the last at its right edge, so a month label never clips", async () => {
+    const { xLabels } = await chartParts(octNovBuckets());
+    const bw = barWidthForTest();
+    const first = xLabels[0]!;
+    const last = xLabels[xLabels.length - 1]!;
+
+    expect(parseFloat(String(styleOf(first).left))).toBeCloseTo(
+      (PAD_LEFT_FOR_TEST / CHART_W_FOR_TEST) * 100,
+      1,
+    );
+    expect(classTokens(first)).not.toContain("-translate-x-1/2");
+    expect(classTokens(first)).not.toContain("-translate-x-full");
+    expect(parseFloat(String(styleOf(last).left))).toBeCloseTo(
+      ((PAD_LEFT_FOR_TEST + (WINDOW_DAYS - 1) * (bw + BAR_GAP_FOR_TEST) + bw) / CHART_W_FOR_TEST) *
+        100,
+      1,
+    );
+    expect(classTokens(last)).toContain("-translate-x-full");
+  });
+
+  it("puts the labels in the blank padding under the bars, inside the svg's box", async () => {
+    const { xLabels } = await chartParts(octNovBuckets());
+    const baseline =
+      ((CHART_H_FOR_TEST - PAD_BOTTOM_FOR_TEST) / CHART_H_FOR_TEST) * 100;
+
+    for (const el of xLabels) {
+      const top = parseFloat(String(styleOf(el).top));
+      expect(top).toBeGreaterThan(baseline);
+      expect(top).toBeLessThan(100);
+      expect(classTokens(el)).toContain("-translate-y-1/2");
+    }
+  });
+
+  it("renders the labels for an all-zero month, none for the unavailable branch", async () => {
+    expect((await chartParts(zeroBuckets())).xLabels).toHaveLength(7);
+    mockBuckets = null;
+    expect(withAttr(await TrendsPage(), "data-x-label")).toHaveLength(0);
+  });
+
+  it("leaves the h17-a11y-1 scroller contract intact: name, class, one svg inside", async () => {
+    const { scroller } = await chartParts(octNovBuckets());
+
+    expect(scroller.props?.label).toBe("Son 30 gün grafiği (yatay kaydırılabilir)");
+    expect(scroller.props?.className).toBe("w-full overflow-x-auto spectrum-glow");
+    expect(
+      collectElements(scroller.props?.children).filter((el) => el.type === "svg"),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the chart data unchanged: same bars, same titles, same total", async () => {
+    const buckets = octNovBuckets();
+    mockBuckets = buckets;
+    const tree = await TrendsPage();
+
+    const titles = collectElements(tree).filter((el) => el.type === "title");
+    expect(titles).toHaveLength(WINDOW_DAYS * 3);
+    expect(titles[0]!.props?.children).toBe(`2026-10-28 · ${ZONE_META.iktidar.label}: 1`);
+    const sum = buckets.reduce((acc, b) => acc + b.total, 0);
+    expect(collectText(tree).join(" ")).toContain(formatCountTr(sum));
   });
 });

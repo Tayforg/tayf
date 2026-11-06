@@ -15,6 +15,7 @@ import {
 } from "./summary-agreement";
 import {
   isTopicSlug,
+  topicNounLowerTr,
   TOPIC_LABELS_TR,
   type TopicSlug,
 } from "./topic-query";
@@ -100,18 +101,23 @@ export function relatedFeedFor(topic7: unknown): RelatedFeed | null {
 /**
  * The hub link under the list. 'politika' links to '/': /konu/politika 308s
  * there, and the home feed already IS the politics feed.
+ *
+ * The topic follows "Tüm" mid-sentence, so it is lower-case, and a hub slug
+ * takes its noun phrase from topic-query (topicNounLowerTr), which owns the
+ * grammar: "Tüm dünya haberleri", "Tüm genel haberler" (h46-copy-1).
  */
 export function relatedHubLink(feed: RelatedFeed): { href: string; label: string } {
   if (feed.kind === "politika") {
-    return { href: "/", label: "Tüm Politika haberleri" };
+    return { href: "/", label: "Tüm politika haberleri" };
   }
   return {
     href: `/konu/${feed.slug}`,
-    label: `Tüm ${TOPIC_LABELS_TR[feed.slug]} haberleri`,
+    label: `Tüm ${topicNounLowerTr(feed.slug)}`,
   };
 }
 
-/** The Turkish topic name for the "<Konu> konusunda son haberler" line. */
+/** The Turkish topic name for the "<Konu> konusunda son haberler" line (genel's
+ *  line reads "Genel gündemde son haberler"; see related-stories.tsx). */
 export function relatedTopicLabel(feed: RelatedFeed): string {
   return feed.kind === "politika" ? "Politika" : TOPIC_LABELS_TR[feed.slug];
 }

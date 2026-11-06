@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Share2, Check } from "lucide-react";
+import { useId, useState } from "react";
+import { Share2, Check, ChevronDown } from "lucide-react";
 import { track } from "@/lib/track";
 import { buildChannelShareHref, buildShareUrl, SHARE_LINK_CHANNELS } from "@/lib/clusters/share";
 import { siteUrl } from "@/lib/site-url";
@@ -14,6 +14,20 @@ import { runNativeShare } from "@/lib/share/native-share";
 // Tailwind 4 requires literal class strings, no computed class names.
 const CHIP_CLASS =
   "inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center";
+
+// h46-mobile-1: below sm the secondary share options (Kartı indir, Sitenize
+// ekle, Gömme kodu, the channel group) sit behind a "Daha fazla" disclosure so
+// the share/save row stays at two lines and the bias spectrum is on the first
+// screen. Both wrapper classes and the toggle classes are literals (Tailwind 4
+// generates only classes it can read verbatim; see
+// tests/guards/cluster-actions-reflow.test.ts). `contents` keeps the wrapper
+// out of the box tree, so from sm up the chips lay out exactly as before and
+// the toggle (`sm:hidden`) takes no space. The toggle chip is CHIP_CLASS plus
+// `sm:hidden`, written out in full for the same literal-class reason.
+export const MORE_OPEN = "contents";
+export const MORE_CLOSED = "contents max-sm:hidden";
+const MORE_TOGGLE_CLASS =
+  "inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center sm:hidden";
 
 const CHANNEL_LABELS: Record<(typeof SHARE_LINK_CHANNELS)[number], string> = {
   whatsapp: "WhatsApp",
@@ -181,9 +195,49 @@ interface ShareButtonProps {
   // string rather than a helper import: this 'use client' file must not pull
   // story-card.ts and its server dependencies into the browser bundle.
   cardHref?: string | null;
+  // Initial state of the phone-only "Daha fazla" disclosure. Closed by default;
+  // a plain prop (never a window/matchMedia read), so the server and the client
+  // start from the same state and hydration cannot mismatch. It also lets the
+  // markup tests render the open state without a DOM.
+  initialMoreOpen?: boolean;
 }
 
-export function ShareButton({ clusterId, title, text, cardHref }: ShareButtonProps) {
+// The phone-only disclosure trigger. A real <button> (Enter/Space work natively),
+// the same element before and after a toggle (so focus stays on it), with the
+// 44 px phone floor from the shared chip classes. Exported so the click wiring
+// is unit-testable without a DOM.
+export function MoreShareToggle({
+  open,
+  controlsId,
+  onToggle,
+}: {
+  open: boolean;
+  controlsId: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-controls={controlsId}
+      onClick={onToggle}
+      className={MORE_TOGGLE_CLASS}
+    >
+      <ChevronDown className={open ? "h-3 w-3 rotate-180" : "h-3 w-3"} aria-hidden="true" />
+      <span>{open ? "Daha az" : "Daha fazla"}</span>
+    </button>
+  );
+}
+
+export function ShareButton({
+  clusterId,
+  title,
+  text,
+  cardHref,
+  initialMoreOpen = false,
+}: ShareButtonProps) {
+  const [moreOpen, setMoreOpen] = useState(initialMoreOpen);
+  const moreId = useId();
   const [copied, setCopied] = useState(false);
   const [embedCopied, setEmbedCopied] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
@@ -254,59 +308,68 @@ export function ShareButton({ clusterId, title, text, cardHref }: ShareButtonPro
         )}
         <span>{copied ? "Kopyalandı" : shareFailed ? "Kopyalanamadı" : "Paylaş"}</span>
       </button>
-      {cardLink && (
-        <a
-          href={cardLink}
-          // Explicit filename: the route answers `Content-Disposition:
-          // inline` (the card stays viewable at its own URL), and the URL's
-          // last segment is "kart" with no extension, so a valueless
-          // `download` would save an extensionless file. KART-06.
-          download="tayf-kart.png"
-          // The card is a Satori PNG render per cluster: a download for people,
-          // not a page for a crawler to queue (robots.txt disallows it too).
-          rel="nofollow"
-          className={CHIP_CLASS}
-        >
-          Kartı indir
-        </a>
-      )}
-      {canEmbed && (
-        <button
-          type="button"
-          onClick={handleEmbed}
-          title="Bu haberin yelpaze rozetini sitenize ekleyin"
-          className={CHIP_CLASS}
-        >
-          {embedCopied ? "Kod kopyalandı" : embedFailed ? "Kopyalanamadı" : "Sitenize ekle"}
-        </button>
-      )}
-      {canEmbedIframe && (
-        <button
-          type="button"
-          onClick={handleIframe}
-          title="Canlı yelpaze kutusunu (iframe) sitenize ekleyin"
-          className={CHIP_CLASS}
-        >
-          {iframeCopied ? "Kod kopyalandı" : iframeFailed ? "Kopyalanamadı" : "Gömme kodu"}
-        </button>
-      )}
-      <span className="inline-flex flex-wrap items-center gap-1 max-w-full" role="group" aria-label="Kanal ile paylaş">
-        {SHARE_LINK_CHANNELS.map((channel) => {
-          const label = CHANNEL_LABELS[channel];
-          return (
-            <a
-              key={channel}
-              href={buildChannelShareHref(channel, buildShareUrl(siteUrl(), clusterId, channel), body)}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label={`${label} ile paylaş`}
-              onClick={() => trackChannelShare(clusterId, channel)}
-              className={CHIP_CLASS}
-            >
-              {label}
-            </a>
-          );
-        })}
+      {/* The trigger comes right after the primary chip and before the
+          wrapper it controls, so Tab walks from it into the revealed options. */}
+      <MoreShareToggle
+        open={moreOpen}
+        controlsId={moreId}
+        onToggle={() => setMoreOpen((o) => !o)}
+      />
+      <span id={moreId} data-group="more-share" className={moreOpen ? MORE_OPEN : MORE_CLOSED}>
+        {cardLink && (
+          <a
+            href={cardLink}
+            // Explicit filename: the route answers `Content-Disposition:
+            // inline` (the card stays viewable at its own URL), and the URL's
+            // last segment is "kart" with no extension, so a valueless
+            // `download` would save an extensionless file. KART-06.
+            download="tayf-kart.png"
+            // The card is a Satori PNG render per cluster: a download for people,
+            // not a page for a crawler to queue (robots.txt disallows it too).
+            rel="nofollow"
+            className={CHIP_CLASS}
+          >
+            Kartı indir
+          </a>
+        )}
+        {canEmbed && (
+          <button
+            type="button"
+            onClick={handleEmbed}
+            title="Bu haberin yelpaze rozetini sitenize ekleyin"
+            className={CHIP_CLASS}
+          >
+            {embedCopied ? "Kod kopyalandı" : embedFailed ? "Kopyalanamadı" : "Sitenize ekle"}
+          </button>
+        )}
+        {canEmbedIframe && (
+          <button
+            type="button"
+            onClick={handleIframe}
+            title="Canlı yelpaze kutusunu (iframe) sitenize ekleyin"
+            className={CHIP_CLASS}
+          >
+            {iframeCopied ? "Kod kopyalandı" : iframeFailed ? "Kopyalanamadı" : "Gömme kodu"}
+          </button>
+        )}
+        <span className="inline-flex flex-wrap items-center gap-1 max-w-full" role="group" aria-label="Kanal ile paylaş">
+          {SHARE_LINK_CHANNELS.map((channel) => {
+            const label = CHANNEL_LABELS[channel];
+            return (
+              <a
+                key={channel}
+                href={buildChannelShareHref(channel, buildShareUrl(siteUrl(), clusterId, channel), body)}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`${label} ile paylaş`}
+                onClick={() => trackChannelShare(clusterId, channel)}
+                className={CHIP_CLASS}
+              >
+                {label}
+              </a>
+            );
+          })}
+        </span>
       </span>
       <span className="sr-only" role="status" aria-live="polite">
         {copied

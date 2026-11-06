@@ -2292,7 +2292,7 @@ describe("ClusterDetailPage — İlgili haberler", () => {
     expect(html).toContain("kaynak");
     // The hub link.
     expect(html).toContain('href="/konu/ekonomi"');
-    expect(html).toContain("Tüm Ekonomi haberleri");
+    expect(html).toContain("Tüm ekonomi haberleri");
   });
 
   it("topic7 genel: the 'latest' heading reads 'Genel gündemde son haberler' (not 'Genel gündeminde')", async () => {
@@ -2307,6 +2307,8 @@ describe("ClusterDetailPage — İlgili haberler", () => {
     expect(html).not.toContain("gündeminde");
     expect(html).not.toContain("İlgili haberler");
     expect(html).toContain('href="/konu/genel"');
+    expect(html).toContain("Tüm genel haberler");
+    expect(html).not.toContain("Genel haberleri");
   });
 
   it("politika: reads the home feed once, never the topic feed, and links the hub to '/'", async () => {
@@ -2333,7 +2335,7 @@ describe("ClusterDetailPage — İlgili haberler", () => {
     expect(html).toContain('href="/cluster/c-f"');
     expect(html).not.toContain('href="/cluster/c1"');
     expect(html).toContain('href="/"');
-    expect(html).toContain("Tüm Politika haberleri");
+    expect(html).toContain("Tüm politika haberleri");
     expect(html).not.toContain("/konu/politika");
   });
 

@@ -58,6 +58,47 @@ export const TOPIC_LABELS_TR: Record<TopicSlug, string> = {
   genel: "Genel",
 };
 
+// --- the topic noun phrase (h46-copy-1) --------------------------------------
+//
+// The ONE place a slug-keyed hub label becomes prose. The slug-keyed surfaces
+// (the <title>, the JSON-LD name, the hero subtitle, the RSS channel, the
+// cluster page's hub link, the meta description) go through these three
+// functions, so the grammar rule lives once. The cluster page's label-keyed
+// "İlgili haberler" heading and subline are not slug-keyed: they apply the same
+// genel rule in related-stories.tsx (GENEL_LABEL). The rule:
+//   * The noun labels form the compound "<Label> haberleri" (Dünya haberleri).
+//   * 'Genel' is an ADJECTIVE: "genel haberleri" (a possessive with no
+//     possessor) is not Turkish, so it reads "genel haberler", and it is not a
+//     subject area, so the subtitle says "genel gündemde", not "genel konusunda".
+//   * A label that starts a title keeps its capital (topicNounTr); a label in
+//     the middle of a sentence is lower-case with the Turkish locale ("Yaşam"
+//     -> "yaşam"; topicNounLowerTr, topicSubtitleTr).
+
+/** Hub labels that are adjectives, not subject nouns. */
+const ADJECTIVE_LABEL_SLUGS: ReadonlySet<TopicSlug> = new Set<TopicSlug>(["genel"]);
+
+/** Pure. The hub's noun phrase where it starts a title: "Dünya haberleri",
+ *  "Genel haberler". */
+export function topicNounTr(slug: TopicSlug): string {
+  const label = TOPIC_LABELS_TR[slug];
+  return ADJECTIVE_LABEL_SLUGS.has(slug) ? `${label} haberler` : `${label} haberleri`;
+}
+
+/** Pure. The same phrase in the middle of a sentence: "dünya haberleri",
+ *  "genel haberler". */
+export function topicNounLowerTr(slug: TopicSlug): string {
+  return topicNounTr(slug).toLocaleLowerCase("tr-TR");
+}
+
+/** Pure. The sentence under the hub's title (the /konu/[slug] hero and the RSS
+ *  channel description): "Son 7 günde dünya konusunda kümelenen haberler.",
+ *  "Son 7 günde genel gündemde kümelenen haberler." */
+export function topicSubtitleTr(slug: TopicSlug): string {
+  const lower = TOPIC_LABELS_TR[slug].toLocaleLowerCase("tr-TR");
+  const where = ADJECTIVE_LABEL_SLUGS.has(slug) ? `${lower} gündemde` : `${lower} konusunda`;
+  return `Son 7 günde ${where} kümelenen haberler.`;
+}
+
 export const TOPIC_PAGE_SIZE = 30;
 export const TOPIC_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /** Hard ceiling on ?sayfa= so the "use cache" key space stays finite. */
@@ -386,7 +427,7 @@ export async function getTopicCounts(): Promise<Record<
  *
  *  `page` (default 1, clamped like the route) makes the node describe the page
  *  the reader is on: pages 2+ carry `?sayfa=N` in the url, the same
- *  "<label> haberleri — Sayfa N" name as the <title>, and ListItem positions
+ *  "<noun phrase> — Sayfa N" name as the <title> (topicNounTr), and ListItem positions
  *  that continue after the previous page. Page 1 is byte-identical to the
  *  pre-paging output. */
 export function buildTopicCollectionPage(args: {
@@ -397,13 +438,13 @@ export function buildTopicCollectionPage(args: {
   const { slug, bundles } = args;
   const page = clampTopicPage(args.page ?? 1);
   const base = siteUrl();
-  const label = TOPIC_LABELS_TR[slug];
+  const noun = topicNounTr(slug);
   const offset = (page - 1) * TOPIC_PAGE_SIZE;
 
   return {
     "@context": "https://schema.org",
     "@type": "CollectionPage",
-    name: page === 1 ? `${label} haberleri` : `${label} haberleri — Sayfa ${page}`,
+    name: page === 1 ? noun : `${noun} — Sayfa ${page}`,
     url: page === 1 ? `${base}/konu/${slug}` : `${base}/konu/${slug}?sayfa=${page}`,
     isPartOf: {
       "@type": "WebSite",
@@ -431,14 +472,13 @@ export function buildTopicCollectionPage(args: {
  *  It also promises no more than the hub holds: only politics-gated articles
  *  are clustered, so a hub is "the topic's stories that meet the political
  *  agenda", not a topic feed (h44-topics-3; the old "Son 7 günün spor
- *  haberleri" did). The label is lowercased with the Turkish locale ("Yaşam"
- *  -> "yaşam"). The noun labels form the compound "<label> haberleri"; the one
- *  adjective label, genel, has no possessor for "-leri" and reads "genel
- *  haberler". The longest hub (teknoloji) comes to 137 characters, inside a
- *  155-character snippet. Paged hubs (?sayfa=N) share it. */
+ *  haberleri" did). The noun phrase is the shared one, lower-cased for the
+ *  middle of the sentence (topicNounLowerTr: "yaşam haberleri", and the
+ *  adjective label genel reads "genel haberler"). The longest hub (teknoloji)
+ *  comes to 137 characters, inside a 155-character snippet. Paged hubs
+ *  (?sayfa=N) share it. */
 export function topicDescription(slug: TopicSlug): string {
-  const lower = TOPIC_LABELS_TR[slug].toLocaleLowerCase("tr-TR");
-  const noun = slug === "genel" ? `${lower} haberler` : `${lower} haberleri`;
+  const noun = topicNounLowerTr(slug);
   return `Siyasi gündemle kesişen ${noun}, son 7 gün: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.`;
 }
 
@@ -457,19 +497,19 @@ export function topicDescription(slug: TopicSlug): string {
  *  caller passes the already-parsed page; it is clamped again here so a
  *  hand-built value can never mint an out-of-range canonical. */
 export function topicMetadata(slug: TopicSlug, page = 1): Metadata {
-  const label = TOPIC_LABELS_TR[slug];
+  const noun = topicNounTr(slug);
   const path = `/konu/${slug}`;
   const clamped = clampTopicPage(page);
 
   // Plain title — the root layout's `title.template = "%s — Tayf"` adds the
   // suffix automatically, rendering "Dünya haberleri — Tayf" (og:/twitter:
-  // titles get the suffix from staticPageMetadata itself). Pages 2+ name the
-  // page ("Dünya haberleri — Sayfa 3"): every ?sayfa=N is its own canonical,
+  // titles get the suffix from staticPageMetadata itself; genel reads "Genel
+  // haberler"). Pages 2+ name the page ("Dünya haberleri — Sayfa 3"): every
+  // ?sayfa=N is its own canonical,
   // and sharing page 1's title made them indistinguishable in search results
   // and share previews. The description stays page 1's.
   const meta = staticPageMetadata({
-    title:
-      clamped === 1 ? `${label} haberleri` : `${label} haberleri — Sayfa ${clamped}`,
+    title: clamped === 1 ? noun : `${noun} — Sayfa ${clamped}`,
     description: topicDescription(slug),
     path,
   });

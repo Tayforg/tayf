@@ -22,6 +22,17 @@ function latestHeading(topicLabel: string): string {
 }
 
 /**
+ * The line under the 'İlgili haberler' heading: "<Konu> konusunda son haberler".
+ * 'Genel' is an adjective, not a subject area, so the genel feed reads
+ * "Genel gündemde son haberler" instead of "Genel konusunda".
+ */
+function relatedSubline(topicLabel: string): string {
+  return topicLabel === GENEL_LABEL
+    ? `${GENEL_LABEL} gündemde son haberler`
+    : `${topicLabel} konusunda son haberler`;
+}
+
+/**
  * "İlgili haberler": a hookless server component at the end of an indexable
  * cluster page. Up to five other recent multi-article clusters (neutral title
  * plus "N kaynak") and a "Tüm <Konu> haberleri" hub link, so a crawler reaches
@@ -70,7 +81,7 @@ export function RelatedStories({
       </h2>
       {latest ? null : (
         <p className="mt-1 text-xs text-muted-foreground">
-          {topicLabel} konusunda son haberler
+          {relatedSubline(topicLabel)}
         </p>
       )}
       <ul className="mt-3 space-y-1">

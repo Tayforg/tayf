@@ -164,6 +164,15 @@ describe("<ScrollHint>", () => {
   it("keeps the hint text itself non-interactive", () => {
     expect(markup).toMatch(/<p class="pointer-events-none[^"]*">/);
   });
+
+  // h46-mobile-3: the /trends labels must all be at least 11 px on a phone; the
+  // hint only shows while the chart overflows, which is exactly the phone case.
+  it("is at least 11 px: no text-[10px] (or smaller) on the hint", () => {
+    const sizes = [...markup.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)].map((m) => Number(m[1]));
+
+    expect(sizes.length).toBeGreaterThan(0);
+    for (const px of sizes) expect(px).toBeGreaterThanOrEqual(11);
+  });
 });
 
 describe("scroll-to-end.tsx — source guard", () => {
