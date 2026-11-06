@@ -28,6 +28,13 @@
 //     province sets are disjoint ("Duzce'de ... kazada" vs "Bolu Dagi'nda ...
 //     kaza"), the same two lanes are capped at SUBJECT_VETO_CAP
 //     (h16-precision-1; see provinces.ts)
+//   counter veto: both headlines carry ordinal counters of the same recurring
+//     event ("104. duruşma" vs "105. duruşma", "2. tur", "5. gün"), name the
+//     same SET of counter nouns (a "3. duruşmada 3. gün" title is not compared
+//     with a bare "104. gün" one) and the numbers for a noun of that set are
+//     disjoint, so the pair is two instalments of one story, not one story: the
+//     same two lanes are capped at SUBJECT_VETO_CAP (h54-precision-1; see
+//     counterVetoFires())
 //   text floor: if the headline lane did not fire and tfidf < ENTITY_TEXT_FLOOR,
 //     the primary lane is capped just under MATCH_THRESHOLD (entities alone
 //     cannot join a pair that shares no text)
@@ -135,6 +142,10 @@ export interface ScoreComponents {
   // True when the incident province-conflict veto capped the pair (same
   // incident template, different provinces); see incidentVetoFires().
   incidentVeto: boolean;
+  // True when the ordinal-counter veto capped the pair (the same recurring
+  // event on a different instalment, "104. duruşma" vs "105. duruşma"); see
+  // counterVetoFires().
+  counterVeto: boolean;
 }
 
 export interface ScoreResult {
@@ -465,6 +476,152 @@ export function incidentVetoFires(aTitle: string, bTitle: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Ordinal counter veto (h54-precision-1)
+// ---------------------------------------------------------------------------
+
+// The words that carry an ordinal counter, folded the way foldTurkishWord folds
+// a title ("duruşması" -> "durusmasi"), each with the noun it counts. A closed
+// list of whole inflected words, not a prefix: on 30 days of prod titles a
+// "tur" prefix also read "N. Türk..." (39 hits) and "N. Türkiye..." (11) as
+// a round counter, and "gün" read "N. günlük". An inflection that is missing
+// here only means no veto for that pair.
+const COUNTER_FORMS: Readonly<Record<string, readonly string[]>> = {
+  durusma: [
+    "durusma", "durusmasi", "durusmasinda", "durusmasindan", "durusmasina",
+    "durusmasini", "durusmasinin", "durusmasindaki", "durusmanin", "durusmada",
+    "durusmadan", "durusmaya", "durusmayi", "durusmalar", "durusmalarda",
+  ],
+  oturum: [
+    "oturum", "oturumu", "oturumun", "oturumunda", "oturumundan", "oturumuna",
+    "oturumunu", "oturumda", "oturumdan", "oturuma", "oturumlar", "oturumlarda",
+  ],
+  celse: [
+    "celse", "celsesi", "celsesinde", "celsesinden", "celsesine", "celsesini",
+    "celsesinin", "celsenin", "celsede", "celseden", "celseye", "celseyi",
+    "celseler", "celselerde",
+  ],
+  gun: [
+    "gun", "gunu", "gunun", "gununde", "gununden", "gunune", "gununu", "gunde",
+    "gunden", "gune", "gundeki", "gunler", "gunlerde",
+  ],
+  tur: [
+    "tur", "turu", "turun", "turunda", "turundan", "turuna", "turunu", "turda",
+    "turdan", "tura", "turlar", "turlarda",
+  ],
+  hafta: [
+    "hafta", "haftanin", "haftasi", "haftasinda", "haftasindan", "haftasina",
+    "haftasini", "haftasinin", "haftasindaki", "haftada", "haftadan", "haftadaki",
+    "haftaya", "haftayi", "haftalar", "haftalarda",
+  ],
+};
+
+const COUNTER_NOUN_OF: ReadonlyMap<string, string> = new Map(
+  Object.entries(COUNTER_FORMS).flatMap(([noun, forms]) =>
+    forms.map((form): [string, string] => [form, noun])
+  ),
+);
+
+// "12345. gün" is not an ordinal; the longest counter is "9999. gün".
+const COUNTER_MAX_DIGITS = 4;
+
+function isDigitCode(c: number): boolean {
+  return c >= 48 && c <= 57;
+}
+
+// Exactly the characters of JavaScript's /\s/ class.
+function isSpaceCode(c: number): boolean {
+  return c === 32 || (c >= 9 && c <= 13) || c === 0xa0 || c === 0x1680 ||
+    (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 ||
+    c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+}
+
+// A letter of a folded title: a-z, or any other Unicode letter (so "tur" +
+// "ñ" is not read as the word "tur").
+function isLetterAt(s: string, i: number): boolean {
+  const c = s.charCodeAt(i);
+  if (c >= 97 && c <= 122) return true;
+  return c > 127 && /\p{L}/u.test(s[i]!);
+}
+
+/**
+ * The ordinal counters a headline names: counter noun -> the numbers written as
+ * "<1-4 digits> <optional spaces> . <optional spaces> <counter word>"
+ * ("104. duruşması", "2 . turunda", "5.gün"). One left-to-right pass: every
+ * character is scanned a constant number of times, so the cost is linear in the
+ * (already clipped) title, and there is no regular expression to backtrack.
+ */
+function countersOf(title: string): Map<string, Set<number>> {
+  const out = new Map<string, Set<number>>();
+  const s = foldTurkishWord(title.slice(0, HEADLINE_TITLE_MAX_CHARS));
+  const n = s.length;
+  let i = 0;
+  while (i < n) {
+    if (!isDigitCode(s.charCodeAt(i))) {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < n && isDigitCode(s.charCodeAt(i))) i++;
+    if (i - start > COUNTER_MAX_DIGITS) continue;
+    let j = i;
+    while (j < n && isSpaceCode(s.charCodeAt(j))) j++;
+    if (j >= n || s.charCodeAt(j) !== 46) continue; // "."
+    j++;
+    while (j < n && isSpaceCode(s.charCodeAt(j))) j++;
+    let k = j;
+    while (k < n && isLetterAt(s, k)) k++;
+    const noun = COUNTER_NOUN_OF.get(s.slice(j, k));
+    if (noun === undefined) continue;
+    const value = Number(s.slice(start, i)); // "05" and "5" are the same counter
+    const seen = out.get(noun);
+    if (seen) seen.add(value);
+    else out.set(noun, new Set([value]));
+  }
+  return out;
+}
+
+/**
+ * True when the two headlines count the same recurring event on different
+ * instalments: both (clipped to HEADLINE_TITLE_MAX_CHARS) name the SAME SET of
+ * counter nouns -- duruşma, oturum, celse, gün, tur or hafta -- and the numbers
+ * written for some noun of that set share no value ("104. duruşması sona erdi"
+ * vs "105. duruşması başladı"). A title without any counter, a different counter
+ * noun ("104. duruşma" vs "3. gün"), a bare count ("5 gün") and the same number
+ * on both sides never veto.
+ *
+ * Same noun set (correctness-2): a title that nests scopes ("3. duruşmada 3. gün",
+ * the hearing, then its day) is not compared with one that names only the outer
+ * count ("104. gün", the day of the whole trial). The two "gün" numbers are on
+ * different scales, so a disjoint pair is no evidence of two instalments: prod
+ * cluster 5893d4e5 holds odatv "İBB davası 104. gün: ..." and medyascope "İBB
+ * davasında 3. duruşmada 3. gün: ..." one hour apart, and the veto would have
+ * capped the pair in both directions. Accepted trade-off: a title that names a
+ * scope noun the other lacks ("104. duruşma" vs "105. duruşmanın 2. günü") no
+ * longer vetoes; the pair is left to the other lanes.
+ */
+export function counterVetoFires(aTitle: string, bTitle: string): boolean {
+  if (typeof aTitle !== "string" || typeof bTitle !== "string") return false;
+  const a = countersOf(aTitle);
+  if (a.size === 0) return false;
+  const b = countersOf(bTitle);
+  if (a.size !== b.size) return false;
+  for (const noun of a.keys()) if (!b.has(noun)) return false;
+  for (const [noun, na] of a) {
+    const nb = b.get(noun);
+    if (nb === undefined) continue;
+    let shared = false;
+    for (const v of na) {
+      if (nb.has(v)) {
+        shared = true;
+        break;
+      }
+    }
+    if (!shared) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // score()
 // ---------------------------------------------------------------------------
 
@@ -502,6 +659,7 @@ export function score(
         textFloorCapped: false,
         subjectVeto: false,
         incidentVeto: false,
+        counterVeto: false,
       },
     };
   }
@@ -594,8 +752,17 @@ export function score(
   // exemption as the subject veto, same cap.
   const incidentVeto = !headlineFired && !!aTitle && !!bTitle &&
     incidentVetoFires(aTitle, bTitle);
+  // Counter veto: the same recurring event on a different instalment ("104."
+  // vs "105. duruşma"). It caps the MinHash and primary lanes, which cannot see
+  // numerals, and has no headline exemption: the headline lane refuses
+  // different numerals itself. Known gap: its containment variant accepts a
+  // numeral that changes digit length ("9." -> "10. duruşma", numeralClassShift),
+  // so such a pair still matches on the headline lane with counterVeto true;
+  // headlineOnlyScore() (member headlines in attach.ts / the consumer) never
+  // sees titles either, so closing it needs those callers too.
+  const counterVeto = !!aTitle && !!bTitle && counterVetoFires(aTitle, bTitle);
   let jaccardForRaw = jaccardScore;
-  if (subjectVeto || incidentVeto) {
+  if (subjectVeto || incidentVeto || counterVeto) {
     primaryForRaw = Math.min(primaryForRaw, SUBJECT_VETO_CAP);
     jaccardForRaw = Math.min(jaccardScore, SUBJECT_VETO_CAP);
   }
@@ -629,6 +796,7 @@ export function score(
       textFloorCapped,
       subjectVeto,
       incidentVeto,
+      counterVeto,
     },
   };
 }

@@ -370,6 +370,118 @@ const LOADED_FOLDED: RegExp[] = [
   new RegExp(`${L}tarihi\\s+karşılama`, "u"),
 ];
 
+// Partisan epithets (hunt 54, h54-editorial-4). Seven multi-source titles of ten days carried them as the "neutral"
+// headline (f771e177 "İşgalci İsrail'in koalisyon kabusu: ...", 96915d56 "Siyonist lobinin musluğu kesiliyor: ...",
+// 4e89e31d "Katil Netanyahu seçim yenilgisini hazmedemedi", 7a26bbe9 "Soykırımcı Netanyahu'dan ...", 130a9e04
+// "Soykırımcı İsrail ...") and, with no entry in LOADED_FOLDED, the h42 'loaded' incumbent switch (it needs
+// loadedPenalty(inc) > 0) could never replace them. One unit per rule, like 'vurgun':
+//   (a) 'işgalci' and 'siyonist', left edge only (işgalcinin, siyonistlerin), tested on the title with its quoted
+//       spans removed, so an actor's own words stay free (b2d44624 "Eisenkot 'Siyonist askerlik hükümeti' ...",
+//       6d7faa51 "''Siyonist çoğunluk ...''");
+//   (b) an epithet in front of a name, 'Katil|Soykırımcı|İşgalci <Capital>' on the raw title (it needs the case) or
+//       'katil|soykırımcı israil|netanyahu' on the folded one (shouted titles). Not quote-stripped, as the rule is
+//       written: an epithet right after an opening quote is charged. 'Katil zanlısı', 'Eşini öldüren katil yakalandı'
+//       and 'katile ağırlaştırılmış müebbet' have no capital name behind the word, and the Title Case spelling of the
+//       suspect's label ('Katil Zanlısı', 'Katil Şüphelisi', 'Katil Sanığı') is excluded by name. In a Title Case
+//       title (isTitleCaseTitle: nearly every word capitalised) the capital behind the word is the style, not a name
+//       ('Eşini Öldüren Katil Yakalandı', 'Katil Koca Tutuklandı', 'Seri Katil Ted Bundy Belgeseli Yayında'), so the
+//       raw rule is not applied there (correctness-4): such a title relies on the folded israil|netanyahu rule and
+//       any other name behind the epithet is not charged;
+//   (c) a figurative '<noun> kabusu' ("koalisyon kabusu", "seçim kabusu"), the possessive only: a noun directly in
+//       front of it (the lookbehind keeps the scan linear: `\p{L}+\s+` would try every start of a long word).
+// The noun 'soykırım' ('soykırım davası') and a bare 'işgal' are not charged. Where every member carries an epithet
+// (4e89e31d) there is nothing clean to swap to and the stored title stays: the floor, as for any loaded cluster.
+const EPITHET_UNQUOTED: RegExp[] = [
+  new RegExp(`${L}[iı]şgalc[iı]`, "u"),
+  new RegExp(`${L}s[iı]yon[iı]st`, "u"),
+];
+const EPITHET_BEFORE_NAME_RAW =
+  /(?:^|[\s:"“])(?:Katil|Soykırımcı|İşgalci)\s+(?!Zanl|Şüphel|Sanık|Sanığ)\p{Lu}/u;
+const EPITHET_BEFORE_NAME_FOLDED = new RegExp(`${L}(?:katil|soykır[ıi]mc[ıi])\\s+(?:israil|netanyahu)`, "u");
+const NIGHTMARE_OF_NOUN = /(?<=\p{L})\s+kabusu(?!\p{L})/u;
+/**
+ * The raw epithet rule is skipped for a title isTitleCaseTitle reads as Title Case over at least this many words of
+ * three letters or more: three, so that 'Katil Koca Tutuklandı' (all three words capitalised) is judged, while the
+ * 80% share of isTitleCaseTitle keeps sentence-case headlines charged ('İşgalci İsrail'den El Halil'e askeri
+ * takviye': 3 of 5 words capitalised; 'Katil Putin Ukrayna'ya saldırdı': 3 of 4).
+ */
+const EPITHET_TITLE_CASE_MIN_WORDS = 3;
+
+/** Quote openers and the closer each one waits for. */
+const QUOTE_CLOSERS: ReadonlyMap<string, string> = new Map([
+  ["“", "”"],
+  ['"', '"'],
+  ["‘", "’"],
+  ["'", "'"],
+  ["«", "»"],
+]);
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+const WHITESPACE = /\s/u;
+
+/**
+ * A straight ' and a curly ’ are also the apostrophe of "İsrail'in" and "Gazze’de", so they only count as a quote
+ * where a quote can stand: an opening ' follows a non-letter and hugs the word after it, a closing ' or ’ hugs the
+ * word before it and is not followed by a letter. “ ” " ‘ « » always count.
+ */
+function canOpenQuote(t: string, at: number): boolean {
+  const ch = t.charAt(at);
+  if (ch !== "'") return true;
+  const next = t.charAt(at + 1);
+  return next !== "" && !WHITESPACE.test(next) && !LETTER_OR_DIGIT.test(t.charAt(at - 1) || " ");
+}
+
+function canCloseQuote(t: string, at: number): boolean {
+  const ch = t.charAt(at);
+  if (ch !== "'" && ch !== "’") return true;
+  return !WHITESPACE.test(t.charAt(at - 1)) && !LETTER_OR_DIGIT.test(t.charAt(at + 1) || " ");
+}
+
+/**
+ * The title with every matched quotation span (“ ”, " ", ‘ ’, ' ' and « », the marks included) replaced by one
+ * space. A quote that never closes hides nothing. One pass: an opener that finds no closer is never searched for
+ * again, so a hostile title of a million quotes costs a few scans, not a quadratic one.
+ */
+function withoutQuotedSpans(title: string): string {
+  const exhausted = new Set<string>();
+  const parts: string[] = [];
+  let kept = 0;
+  let i = 0;
+  while (i < title.length) {
+    const ch = title.charAt(i);
+    const closer = QUOTE_CLOSERS.get(ch);
+    if (closer !== undefined && !exhausted.has(ch) && canOpenQuote(title, i)) {
+      let j = i + 1;
+      while (j < title.length && !(title.charAt(j) === closer && canCloseQuote(title, j))) j++;
+      if (j < title.length) {
+        parts.push(title.slice(kept, i), " ");
+        kept = j + 1;
+        i = j + 1;
+        continue;
+      }
+      exhausted.add(ch);
+    }
+    i++;
+  }
+  if (kept === 0) return title;
+  parts.push(title.slice(kept));
+  return parts.join("");
+}
+
+/** The h54-editorial-4 rules (a), (b) and (c): 0 to 4 units. `folded` is foldTr(title). */
+function epithetPenalty(title: string, folded: string): number {
+  let n = 0;
+  let unquoted: string | null = null;
+  for (const re of EPITHET_UNQUOTED) {
+    if (!re.test(folded)) continue;
+    unquoted ??= foldTr(withoutQuotedSpans(title));
+    if (re.test(unquoted)) n++;
+  }
+  const rawEpithet = EPITHET_BEFORE_NAME_RAW.test(title) && !isTitleCaseTitle(title, EPITHET_TITLE_CASE_MIN_WORDS);
+  if (rawEpithet || EPITHET_BEFORE_NAME_FOLDED.test(folded)) n++;
+  if (NIGHTMARE_OF_NOUN.test(folded)) n++;
+  return n;
+}
+
 // Figurative 'darbe' (hunt 42, h42-titles-2): "Netanyahu'ya Ağır Darbe" (29c38a16), "Trump'a ara seçim
 // darbesi", "Netanyahu'ya kendi ülkesinden darbe" (5f761c9a). Two forms, both never before 'girişim' (a
 // coup attempt is reporting): an intensifier or 'seçim' directly before it, or a name in the dative
@@ -584,6 +696,7 @@ export function loadedPenalty(title: string): number {
   if (TSUNAMI.test(folded) && !TSUNAMI_LITERAL.test(folded)) n++;
   if (PRICE_CRASH.test(folded) && PRICE_MARKET.test(folded)) n++;
   if (sequelTeaser(title)) n++;
+  n += epithetPenalty(title, folded);
   return n;
 }
 

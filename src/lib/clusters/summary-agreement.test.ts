@@ -7,10 +7,12 @@ import {
   AGREEMENT_MIN_GAIN,
   AGREEMENT_MIN_TITLE_TOKENS,
   agreementSwitches,
+  carriesOutcome,
   contentWords,
   hasFiniteVerb,
   seedDisqualified,
   sharedStemsExcluding,
+  stageBehindTitle,
   stemsOf,
   summaryDefect,
   textOverlap,
@@ -780,5 +782,327 @@ describe("seedDisqualified (h34-reader-4)", () => {
     const start = Date.now();
     expect(seedDisqualified(text, text)).toBeNull();
     expect(Date.now() - start).toBeLessThan(1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h54-editorial-1: a headline that reports a LATER stage of the story than the
+// seed's summary. b34a5fe0 (21 kaynak): the H1 says "tutuklandı", the Özet says
+// "tutuklama talebiyle mahkemeye sevk edildi". The word-stem overlap folds
+// "tutuklama" and "tutuklandı" to "tutuk" and scores the seed 6/7, so the
+// agreement gate kept it.
+// ---------------------------------------------------------------------------
+describe("stageBehindTitle (h54-editorial-1: the text reports an earlier stage than the headline)", () => {
+  const TITLE = "Fon soruşturmasında Fatma Betül Sayan Kaya tutuklandı";
+  // The GZT seed of b34a5fe0, verbatim (the typo "Beyül" is the feed's).
+  const GZT_SEED =
+    "İstanbul Cumhuriyet Başsavcılığı tarafından yürütülen fon soruşturması kapsamında; Fatma Beyül Sayan Kaya tutuklama talebiyle mahkemeye sevk edildi Eski SPK Başkanı İbrahim Ömer Gönül ve İlyas Kaya adli kontrolle mahkemeye sevk edildi.";
+  const MEDYASCOPE_LEAD =
+    "Fon krizi soruşturması kapsamında yeniden ifade veren eski bakan Fatma Betül Sayan Kaya, tutuklanarak cezaevine gönderildi.";
+
+  it("b34a5fe0: 'tutuklandı' over 'tutuklama talebiyle ... sevk edildi' is a stage behind", () => {
+    expect(stageBehindTitle(TITLE, GZT_SEED)).toBe(true);
+    // The stem overlap alone cannot see it: the seed covers 6 of the 7 title stems.
+    expect(titleAgreement(TITLE, GZT_SEED)!).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+  });
+
+  it("is false for a text that reports the outcome", () => {
+    expect(stageBehindTitle(TITLE, MEDYASCOPE_LEAD)).toBe(false);
+    expect(stageBehindTitle(TITLE, "Fatma Betül Sayan Kaya fon soruşturmasında tutuklandı. İlyas Kaya serbest bırakıldı.")).toBe(false);
+  });
+
+  it("is false when the text has both the request and the outcome", () => {
+    expect(
+      stageBehindTitle(TITLE, "Kaya tutuklama talebiyle hakimliğe sevk edildi, hakimlik Kaya'nın tutuklandı kararını verdi."),
+    ).toBe(false);
+    // 'hakimliğe sevk edilen ... tutuklandı': the dispatch is history, the outcome is stated.
+    expect(
+      stageBehindTitle(TITLE, "Fon soruşturması kapsamında hakimliğe sevk edilen eski bakan Fatma Betül Sayan Kaya tutuklandı."),
+    ).toBe(false);
+  });
+
+  it("is false when the title itself is at the earlier stage", () => {
+    const requestTitle = "tutuklama istemiyle hakimliğe sevk edildi";
+    expect(stageBehindTitle(requestTitle, GZT_SEED)).toBe(false);
+    expect(stageBehindTitle("Fatma Betül Sayan Kaya tutuklama talebiyle sevk edildi", GZT_SEED)).toBe(false);
+    expect(stageBehindTitle("Fatma Betül Sayan Kaya gözaltına alındı", "Kaya tutuklama talebiyle sevk edildi")).toBe(false);
+  });
+
+  describe("arrest family", () => {
+    it.each([
+      ["tutuklama talebi", "Kaya tutuklama talebiyle hakimliğe sevk edildi."],
+      ["tutuklama istemi", "Savcılık Kaya hakkında tutuklama istemiyle hakimliğe başvurdu."],
+      ["tutuklanması talebi", "Kaya'nın tutuklanması talebiyle hakimliğe sevk edildi."],
+      ["tutuklanması istemi", "Kaya'nın tutuklanması istemiyle hakimliğe sevk edildi."],
+      ["sevk edildi", "Kaya adliyeye sevk edildi."],
+      ["gözaltına alındı", "Kaya sabah saatlerinde gözaltına alındı."],
+    ])("%s is an earlier stage than 'tutuklandı'", (_label, text) => {
+      expect(stageBehindTitle("Fatma Betül Sayan Kaya tutuklandı", text)).toBe(true);
+    });
+
+    it.each([
+      "Fatma Betül Sayan Kaya tutuklandı",
+      "Kaya tutuklanarak cezaevine gönderildi",
+      "Tutuklanan eski bakan Kaya cezaevine girdi",
+      "Kaya hakkında tutuklanmasına karar verildi",
+    ])("%j is an outcome", (title) => {
+      expect(stageBehindTitle(title, "Kaya gözaltına alındı.")).toBe(true);
+    });
+
+    it("the request noun 'tutuklanması talebi' is not an outcome (it holds the stem 'tutuklan')", () => {
+      expect(stageBehindTitle("Kaya tutuklandı", "Kaya'nın tutuklanması talebiyle hakimliğe sevk edildi.")).toBe(true);
+      expect(stageBehindTitle("Kaya tutuklandı", "Kaya'nın tutuklanması istemiyle hakimliğe sevk edildi, hakim tutuklanmasına karar verdi.")).toBe(false);
+    });
+
+    // correctness-1: a request is not an arrest. "tutuklanması talep edilen",
+    // "tutuklanmasını istedi" and "tutuklanması istendi" hold the stem "tutuklan"
+    // but report the request, so they are an earlier stage and never an outcome.
+    it.each([
+      "Kaya'nın tutuklanması talep edildi.",
+      "tutuklanması talep edilen Kaya hakimliğe sevk edildi.",
+      "Savcı Kaya'nın tutuklanmasını istedi.",
+      "Kaya'nın tutuklanması istendi.",
+    ])("the request form %j is not an outcome but an earlier stage", (text) => {
+      expect(carriesOutcome("Kaya tutuklandı", text)).toBe(false);
+      expect(stageBehindTitle("Kaya tutuklandı", text)).toBe(true);
+    });
+
+    it("a negation is not an arrest outcome: 'tutuklanmadı' does not carry 'tutuklandı'", () => {
+      expect(carriesOutcome("Kaya tutuklandı", "Kaya tutuklanmadı.")).toBe(false);
+      expect(carriesOutcome("Kaya tutuklandı", "Kaya hakkında tutuklanmayan kişi sayısı arttı.")).toBe(false);
+    });
+
+    it("a headline that negates the arrest states no outcome, so nothing is behind it", () => {
+      expect(stageBehindTitle("X tutuklanmadı", "X gözaltına alındı ve adliyeye sevk edildi")).toBe(false);
+      expect(stageBehindTitle("Kaya tutuklanması talep edilerek hakimliğe sevk edildi", GZT_SEED)).toBe(false);
+    });
+
+    it("the arrest outcomes stay outcomes: 'tutuklanmasına karar verildi', 'tutuklanarak', 'tutuklanan'", () => {
+      expect(carriesOutcome("Kaya tutuklandı", "Hakimlik Kaya'nın tutuklanmasına karar verdi.")).toBe(true);
+      expect(carriesOutcome("Kaya tutuklandı", "Kaya tutuklanarak cezaevine gönderildi.")).toBe(true);
+      expect(carriesOutcome("Kaya tutuklandı", "Tutuklanan Kaya cezaevine girdi.")).toBe(true);
+      expect(stageBehindTitle("Kaya tutuklandı", "Kaya'nın tutuklanmasına karar verildi, daha önce adliyeye sevk edilmişti.")).toBe(false);
+    });
+
+    it("is false when the title is not an arrest outcome", () => {
+      expect(stageBehindTitle("Fon soruşturmasında yeni gelişme", GZT_SEED)).toBe(false);
+      expect(stageBehindTitle("Fatma Betül Sayan Kaya'ya tutuklama talebi", GZT_SEED)).toBe(false);
+    });
+  });
+
+  describe("release family", () => {
+    it("a release over a release request is a stage behind", () => {
+      expect(
+        stageBehindTitle(
+          "İlyas Kaya adli kontrol şartıyla serbest bırakıldı",
+          "İlyas Kaya hakkında tahliye talebi hakimliğe iletildi, karar bekleniyor.",
+        ),
+      ).toBe(true);
+      expect(stageBehindTitle("Sanık tahliye edildi", "Sanığın avukatı tahliye istemiyle başvurdu.")).toBe(true);
+      expect(stageBehindTitle("Mahkeme tahliyesine karar verdi", "Sanığın tahliye talebi incelendi.")).toBe(true);
+    });
+
+    // correctness-1: "tahliye edilmedi" and "serbest bırakılmadı" hold the release
+    // words but report that it did not happen.
+    it("a negation is not a release outcome", () => {
+      expect(carriesOutcome("Sanık tahliye edildi", "Sanık tahliye edilmedi.")).toBe(false);
+      expect(carriesOutcome("Sanık serbest bırakıldı", "Sanık serbest bırakılmadı.")).toBe(false);
+      expect(carriesOutcome("Sanık serbest bırakıldı", "Serbest bırakılmayan sanık sayısı arttı.")).toBe(false);
+      expect(stageBehindTitle("Sanık tahliye edilmedi", "Sanığın avukatı tahliye talebiyle başvurdu.")).toBe(false);
+    });
+
+    it("a release request is not a release outcome but an earlier stage", () => {
+      for (const text of [
+        "Sanığın tahliye edilmesi talep edildi.",
+        "Avukat sanığın tahliye edilmesini istedi.",
+        "Sanığın serbest bırakılması talep edildi.",
+        "Savcı sanığın serbest bırakılmasını istedi.",
+      ]) {
+        expect(carriesOutcome("Sanık tahliye edildi", text), text).toBe(false);
+        expect(stageBehindTitle("Sanık tahliye edildi", text), text).toBe(true);
+      }
+    });
+
+    it("the release outcomes stay outcomes: 'serbest bırakılmasına karar verildi', 'tahliye edilmesine karar'", () => {
+      expect(carriesOutcome("Sanık serbest bırakıldı", "Mahkeme sanığın serbest bırakılmasına karar verdi.")).toBe(true);
+      expect(carriesOutcome("Sanık tahliye edildi", "Mahkeme sanığın tahliye edilmesine karar verdi.")).toBe(true);
+      expect(carriesOutcome("Sanık tahliye edildi", "Sanık tahliye edilerek cezaevinden çıktı.")).toBe(true);
+    });
+
+    it("is false when the text states the release too, or has no request", () => {
+      expect(
+        stageBehindTitle(
+          "İlyas Kaya adli kontrol şartıyla serbest bırakıldı",
+          "İlyas Kaya'nın tahliye talebi kabul edildi, Kaya serbest bırakıldı.",
+        ),
+      ).toBe(false);
+      expect(stageBehindTitle("İlyas Kaya serbest bırakıldı", "İlyas Kaya adli kontrol talep edildi.")).toBe(false);
+    });
+  });
+
+  describe("death family", () => {
+    it("'hayatını kaybetti' over 'ağır yaralandı' is a stage behind", () => {
+      expect(stageBehindTitle("Ahmet Yılmaz hayatını kaybetti", "Ahmet Yılmaz ağır yaralandı.")).toBe(true);
+      expect(stageBehindTitle("Ahmet Yılmaz yaşamını yitirdi", "Ahmet Yılmaz hastaneye kaldırıldı.")).toBe(true);
+      expect(stageBehindTitle("Ahmet Yılmaz öldü", "Ahmet Yılmaz yoğun bakımda tedavi ediliyor.")).toBe(true);
+      expect(stageBehindTitle("Ahmet Yılmaz hayatını kaybetti", "Ahmet Yılmaz ağır yaralı olarak kurtarıldı.")).toBe(true);
+    });
+
+    it("is false when the text states the death too", () => {
+      expect(stageBehindTitle("Ahmet Yılmaz hayatını kaybetti", "2 kişi öldü, 5 kişi yaralandı")).toBe(false);
+      expect(stageBehindTitle("Ahmet Yılmaz hayatını kaybetti", "Ahmet Yılmaz'ın hayatını kaybettiği kazada 3 kişi yaralandı.")).toBe(false);
+      expect(stageBehindTitle("Ahmet Yılmaz öldü", "Yılmaz yaşamını yitirdi, eşi yoğun bakımda.")).toBe(false);
+    });
+
+    // correctness-3: the headline's death words are not all spelled "hayatını
+    // kaybetti"; a text that says the same death another way is not a stage behind.
+    it.each([
+      "Kazada 3 kişi yaşamını kaybetti, 2 kişi yaralandı.",
+      "Kazada 3 kişi hayatını yitirdi, 2 kişi yaralandı.",
+      "Kazada 3 kişi öldürüldü, 2 kişi yaralandı.",
+      "Kazada 3 kişi can verdi, 2 kişi yaralandı.",
+      "Saldırıda 3 asker şehit oldu, 2 asker yaralandı.",
+      "Saldırıda 3 asker şehit düştü, 2 asker yaralandı.",
+    ])("a seed that states the death as %j is not a stage behind", (text) => {
+      expect(stageBehindTitle("Kazada 3 kişi hayatını kaybetti", text)).toBe(false);
+      expect(carriesOutcome("Kazada 3 kişi hayatını kaybetti", text)).toBe(true);
+    });
+
+    it.each([
+      "Kazada 3 kişi yaşamını kaybetti",
+      "Kazada 3 kişi hayatını yitirdi",
+      "Kazada 3 kişi öldürüldü",
+      "Kazada 3 kişi can verdi",
+      "Saldırıda 3 asker şehit oldu",
+      "Saldırıda 3 asker şehit düştü",
+    ])("the headline %j is a death outcome over 'yaralandı'", (title) => {
+      expect(stageBehindTitle(title, "Kazada 3 kişi yaralandı.")).toBe(true);
+    });
+
+    it("'can ver' needs a letter boundary: a name ending in -can does not read as a death", () => {
+      expect(
+        stageBehindTitle("Ahmet Yılmaz hayatını kaybetti", "Özcan verdiği ifadede Yılmaz'ın ağır yaralandığını söyledi."),
+      ).toBe(true);
+      expect(
+        stageBehindTitle("Ahmet Yılmaz hayatını kaybetti", "Ercan verdi, Yılmaz ağır yaralandı."),
+      ).toBe(true);
+      expect(carriesOutcome("Ahmet Yılmaz hayatını kaybetti", "Özcan verdiği ifadede Yılmaz'ı anlattı.")).toBe(false);
+      // A headline with the same shape is not a death either.
+      expect(stageBehindTitle("Özcan verdi cevabı", "Özcan ağır yaralandı.")).toBe(false);
+    });
+
+    it("'öldü' (died) is not 'oldu' (became): a headline with 'oldu' is no death", () => {
+      const title = "Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu";
+      expect(stageBehindTitle(title, "Sayed'in seçim gecesi bir destekçisi yaralandı.")).toBe(false);
+      // The same word with the dots is the outcome.
+      expect(stageBehindTitle("Sayed'in kardeşi öldü", "Sayed'in kardeşi yaralandı.")).toBe(true);
+      // A text that says 'oldu' did not say that he died.
+      expect(stageBehindTitle("Ahmet Yılmaz öldü", "Ahmet Yılmaz ağır yaralandı, durumu iyi oldu.")).toBe(true);
+      // 'öldü' only as a whole word: 'öldürdü' (killed) and 'ölümcül' are not it.
+      expect(stageBehindTitle("Saldırgan iki kişiyi öldürdü", "Bir kişi yaralandı.")).toBe(false);
+    });
+
+    it("is false for an unrelated pair", () => {
+      expect(stageBehindTitle("Ahmet Yılmaz hayatını kaybetti", "Yılmaz'ın ailesi açıklama yaptı.")).toBe(false);
+      expect(stageBehindTitle("Ahmet Yılmaz ağır yaralandı", "Ahmet Yılmaz hastaneye kaldırıldı.")).toBe(false);
+    });
+  });
+
+  describe("spelling", () => {
+    it("reads upper case, dotted and dotless I, and ASCII-only spelling like the rest of the module", () => {
+      expect(stageBehindTitle("FATMA BETÜL SAYAN KAYA TUTUKLANDI", "KAYA TUTUKLAMA TALEBİYLE HAKİMLİĞE SEVK EDİLDİ")).toBe(true);
+      expect(stageBehindTitle("Kaya tutuklandi", "Kaya tutuklama talebiyle sevk edildi")).toBe(true);
+      expect(stageBehindTitle("Kaya TUTUKLANMASI TALEBİYLE", "Kaya gözaltına alındı")).toBe(false);
+      expect(stageBehindTitle("Ahmet hayatini kaybetti", "Ahmet agir yaralandi")).toBe(true);
+      expect(stageBehindTitle("Sanık serbest birakildi", "Sanık için tahliye talebi verildi")).toBe(true);
+    });
+
+    it("reads a decomposed 'ö' and 'ü' (o and u with a combining diaeresis) like the composed letters", () => {
+      const decomposed = "Yılmaz öldü".normalize("NFD");
+      expect(stageBehindTitle(decomposed, "Yılmaz ağır yaralandı")).toBe(true);
+    });
+
+    it("tolerates blanks, tabs, non-breaking spaces and line breaks inside a phrase", () => {
+      expect(stageBehindTitle("Kaya tutuklandı", "Kaya tutuklama  talebiyle\nhakimliğe sevk edildi")).toBe(true);
+      expect(stageBehindTitle("Kaya tutuklandı", "Kaya tutuklama \t talebiyle hakimliğe başvurdu")).toBe(true);
+    });
+  });
+
+  describe("never throws, always a boolean", () => {
+    it.each([
+      [undefined, "Kaya tutuklama talebiyle sevk edildi"],
+      ["Kaya tutuklandı", undefined],
+      [null, null],
+      [42, {}],
+      ["", ""],
+      ["Kaya tutuklandı", ""],
+      ["", "Kaya tutuklama talebiyle sevk edildi"],
+    ])("stageBehindTitle(%j, %j)", (title, text) => {
+      const out = stageBehindTitle(title as unknown as string, text as unknown as string);
+      expect(out).toBe(false);
+    });
+
+    it("handles emoji, SQL characters and a lone surrogate", () => {
+      expect(stageBehindTitle("Kaya tutuklandı 🎉", "'; DROP TABLE x; -- tutuklama talebiyle \ud800 sevk edildi 🎉")).toBe(true);
+      expect(stageBehindTitle("🎉🎉🎉", "🎉🎉🎉")).toBe(false);
+    });
+  });
+
+  it("is linear: a 500k-word text is judged in well under a second, with and without a match", () => {
+    const filler = Array.from({ length: 500_000 }, (_, i) => `kelime${i}`).join(" ");
+    const start = Date.now();
+    expect(stageBehindTitle("Kaya tutuklandı", `${filler} tutuklama talebiyle sevk edildi`)).toBe(true);
+    expect(stageBehindTitle("Kaya tutuklandı", filler)).toBe(false);
+    expect(stageBehindTitle("Kaya tutuklandı", `${filler} tutuklandı`)).toBe(false);
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it("is linear on the hostile shapes of its own phrases (long runs of 'tutuklama ' and of blanks)", () => {
+    const start = Date.now();
+    expect(stageBehindTitle("Kaya tutuklandı", "tutuklama ".repeat(100_000))).toBe(false);
+    expect(stageBehindTitle("Kaya tutuklandı", `tutuklama${" ".repeat(200_000)}x`)).toBe(false);
+    expect(stageBehindTitle("Kaya tutuklandı", "tutuklanması ".repeat(100_000))).toBe(false);
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+});
+
+describe("carriesOutcome (h54-editorial-1: the text states the outcome the headline reports)", () => {
+  const TITLE = "Fon soruşturmasında Fatma Betül Sayan Kaya tutuklandı";
+
+  it("is true for a text that states the outcome of the family the headline triggered", () => {
+    expect(carriesOutcome(TITLE, "Kaya, tutuklanarak cezaevine gönderildi.")).toBe(true);
+    expect(carriesOutcome(TITLE, "Fon soruşturmasında tutuklanan Kaya cezaevine girdi.")).toBe(true);
+    expect(carriesOutcome("Ahmet Yılmaz hayatını kaybetti", "Yılmaz'ın hayatını kaybettiği kazada 3 kişi yaralandı.")).toBe(true);
+    expect(carriesOutcome("Sanık serbest bırakıldı", "Mahkeme sanığın tahliyesine karar verdi.")).toBe(true);
+  });
+
+  it("is false for a text at the earlier stage, or one that says nothing of the outcome", () => {
+    expect(carriesOutcome(TITLE, "Kaya tutuklama talebiyle mahkemeye sevk edildi.")).toBe(false);
+    expect(carriesOutcome(TITLE, "Kaya'nın tutuklanması talebiyle hakimliğe sevk edildi.")).toBe(false);
+    expect(carriesOutcome(TITLE, "Fon soruşturmasında Kaya hakkında karar bekleniyor.")).toBe(false);
+    expect(carriesOutcome("Ahmet Yılmaz hayatını kaybetti", "Ahmet Yılmaz ağır yaralandı.")).toBe(false);
+  });
+
+  it("is false for a headline that triggers no family (there is no outcome to carry)", () => {
+    expect(carriesOutcome("Fon soruşturmasında yeni gelişme", "Kaya tutuklandı.")).toBe(false);
+    expect(carriesOutcome("Kaya'ya tutuklama talebi", "Kaya tutuklandı.")).toBe(false);
+  });
+
+  it("a text with only another family's outcome does not carry this one", () => {
+    expect(carriesOutcome(TITLE, "İlyas Kaya serbest bırakıldı.")).toBe(false);
+  });
+
+  it("with a headline that triggers two families, the text must state both outcomes", () => {
+    const title = "Fatma Betül Sayan Kaya tutuklandı, İlyas Kaya serbest bırakıldı";
+    expect(carriesOutcome(title, "Kaya tutuklandı, eşi İlyas Kaya adli kontrolle serbest bırakıldı.")).toBe(true);
+    expect(carriesOutcome(title, "Kaya tutuklandı.")).toBe(false);
+    expect(carriesOutcome(title, "İlyas Kaya serbest bırakıldı.")).toBe(false);
+  });
+
+  it("never throws on odd input", () => {
+    expect(carriesOutcome(undefined as unknown as string, "tutuklandı")).toBe(false);
+    expect(carriesOutcome("Kaya tutuklandı", null as unknown as string)).toBe(false);
+    expect(carriesOutcome("", "")).toBe(false);
+    expect(carriesOutcome("Kaya tutuklandı", "")).toBe(false);
   });
 });

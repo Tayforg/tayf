@@ -430,18 +430,80 @@ describe("SavedEmptyState", () => {
 });
 
 describe("SavedList markup before hydration", () => {
-  // The server snapshot of useBookmarks has no ids, so the first paint is the
-  // empty state. The live region has to be there already: a region inserted
-  // together with its text is usually not announced.
+  // The server snapshot of useBookmarks has no ids, so the first paint used to be
+  // the empty state, told to every visitor including the ones who have saved
+  // stories (h54-personal-1). It is now the same neutral busy placeholder /takip
+  // ships. The live region has to be there already: a region inserted together
+  // with its text is usually not announced.
   const markup = renderToStaticMarkup(createElement(SavedList));
 
-  it("mounts the polite status region in the empty branch", () => {
+  it("mounts the polite status region, empty, around the placeholder", () => {
     expect(markup).toContain('<p role="status" aria-live="polite" class="sr-only"></p>');
+    expect(markup.indexOf('role="status"')).toBeLessThan(markup.indexOf('aria-busy="true"'));
   });
 
-  it("renders the empty-state heading with tabindex -1", () => {
-    expect(markup).toContain('tabindex="-1"');
-    expect(markup).toContain("Henüz kaydettiğiniz bir hikâye yok");
+  it("renders the neutral busy placeholder /takip uses (same box, so the two pages match)", () => {
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain('class="h-24 animate-pulse rounded-xl bg-card/60 ring-1 ring-border/60"');
+  });
+
+  it("hides the empty placeholder from assistive technology (it has no name to read)", () => {
+    expect(markup).toMatch(/<div aria-hidden="true" aria-busy="true"[^>]*><\/div>/);
+  });
+
+  it("does not tell the reader the list is empty", () => {
+    expect(markup).not.toContain("Henüz kaydettiğiniz bir hikâye yok");
+    expect(markup).not.toContain("yer imi simgesine");
+    expect(markup).not.toContain("<h2");
+    expect(markup).not.toContain('tabindex="-1"');
+  });
+
+  it("is exactly the frame around the placeholder, with nothing else to focus or read", () => {
+    expect(markup).toBe(
+      '<div><p role="status" aria-live="polite" class="sr-only"></p>' +
+        '<div aria-hidden="true" aria-busy="true" class="h-24 animate-pulse rounded-xl bg-card/60 ring-1 ring-border/60"></div></div>',
+    );
+    expect(markup).not.toMatch(/<(a|button)[\s>]/i);
+  });
+});
+
+describe("saved-list.tsx hydration gate (source guard: effects and hydration need a browser)", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+  const code = src.replace(/\/\/[^\n]*/g, "");
+  const component = code.slice(code.indexOf("export function SavedList"));
+
+  it("reads the hook once, next to useBookmarks, above every early return", () => {
+    expect(component.match(/\buseHydrated\(\)/g)).toHaveLength(1);
+    expect(component).toContain("const hydrated = useHydrated();");
+    expect(component.indexOf("useHydrated()")).toBeLessThan(component.indexOf("\n  if ("));
+  });
+
+  it("returns the placeholder inside the same SavedFrame, before the empty and loading branches", () => {
+    const gateAt = component.indexOf("  if (!hydrated) {");
+    const emptyAt = component.indexOf("  if (emptyNow) {");
+    const loadingAt = component.indexOf("  if (rows === null) {");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(gateAt).toBeLessThan(emptyAt);
+    expect(emptyAt).toBeLessThan(loadingAt);
+    const body = component.slice(gateAt, component.indexOf("\n  }\n", gateAt));
+    expect(body).toContain("<SavedFrame announcement={announcement}>");
+    expect(body).toContain('aria-busy="true"');
+    expect(body).toContain('aria-hidden="true"');
+    expect(body).toContain('className="h-24 animate-pulse rounded-xl bg-card/60 ring-1 ring-border/60"');
+    expect(body).not.toContain("SavedEmptyState");
+  });
+
+  it("renders SavedEmptyState on exactly one path, the post-hydration empty branch", () => {
+    expect(component.match(/<SavedEmptyState/g)).toHaveLength(1);
+    const emptyAt = component.indexOf("  if (emptyNow) {");
+    expect(component.indexOf("<SavedEmptyState")).toBeGreaterThan(emptyAt);
+  });
+
+  it("leaves the empty / loading / focus logic as it was", () => {
+    expect(component).toMatch(/const emptyNow\s*=\s*count === 0 \|\| \(rows !== null && !failed && rows\.length === 0\);/);
+    expect(component).not.toMatch(/hydrated\s*&&/);
+    expect(component).not.toMatch(/emptyNow[^\n]*hydrated/);
+    expect(component).not.toMatch(/shownSig[^\n]*hydrated/);
   });
 });
 
@@ -496,12 +558,12 @@ describe("saved-list.tsx focus handoff and announcements", () => {
       const t = line.trim();
       if (indent <= 4 && (t === "return (" || t.startsWith("return <"))) jsxReturns.push(i);
     });
-    // empty, loading and list; the failed branch returns SavedLoadFailed() (below).
-    expect(jsxReturns).toHaveLength(3);
+    // placeholder, empty, loading and list; the failed branch returns SavedLoadFailed() (below).
+    expect(jsxReturns).toHaveLength(4);
     for (const i of jsxReturns) {
       expect(`${lines[i]}\n${lines[i + 1]}`).toContain("<SavedFrame announcement={announcement}>");
     }
-    expect(component.match(/<SavedFrame/g)).toHaveLength(3);
+    expect(component.match(/<SavedFrame/g)).toHaveLength(4);
     expect(component).not.toMatch(/return null/);
   });
 
@@ -543,7 +605,7 @@ describe("saved-list.tsx focus handoff and announcements", () => {
     const firstReturn = component.indexOf("\n  if (");
     expect(firstReturn).toBeGreaterThan(-1);
     const before = component.slice(0, firstReturn);
-    for (const hook of ["useState(", "useRef(", "useEffect(", "useMemo(", "useBookmarks("]) {
+    for (const hook of ["useState(", "useRef(", "useEffect(", "useMemo(", "useBookmarks(", "useHydrated("]) {
       expect(component.lastIndexOf(hook), hook).toBeLessThan(firstReturn);
     }
     expect(before).toContain("pendingFocus");

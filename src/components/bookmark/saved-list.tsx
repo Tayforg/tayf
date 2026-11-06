@@ -18,6 +18,7 @@ import {
 } from "@/components/bookmark/bookmark-snapshots";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { focusTargetAfterRemove } from "@/lib/follows/follows";
+import { useHydrated } from "@/lib/hooks/use-hydrated";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // saved_clusters_v3 (migration 158; v2 from 124 and v1 from 116 have the same
@@ -127,6 +128,10 @@ export function SavedEmptyState({
 
 export function SavedList() {
   const { ids, count, toggle } = useBookmarks();
+  // false on the server and during hydration, when the bookmark store reads as
+  // empty for every visitor. Until then the page shows a neutral placeholder,
+  // not the empty state (h54-personal-1; /takip does the same).
+  const hydrated = useHydrated();
   const idList = useMemo(() => Array.from(ids), [ids]);
 
   // null = still loading (or first paint before the effect runs).
@@ -237,6 +242,22 @@ export function SavedList() {
     // re-runs for the shorter bookmark list.
     setRows((prev) => prev?.filter((r) => r.id !== row.id) ?? prev);
     toggle(row.id);
+  }
+
+  if (!hydrated) {
+    // Same SavedFrame as every later state, so the live region is mounted by the
+    // server markup and survives the switch. The box is empty and carries no
+    // name, so assistive technology skips it (aria-hidden); aria-busy mirrors
+    // the /takip placeholder.
+    return (
+      <SavedFrame announcement={announcement}>
+        <div
+          aria-hidden="true"
+          aria-busy="true"
+          className="h-24 animate-pulse rounded-xl bg-card/60 ring-1 ring-border/60"
+        />
+      </SavedFrame>
+    );
   }
 
   if (emptyNow) {

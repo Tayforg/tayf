@@ -111,6 +111,17 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * touches rows whose `title_neutral_at` IS NULL, and NEVER writes
  * `clusters.updated_at` (it orders the home feed: a healed title must not make
  * an old story look new).
+ * Three more branches joined the original three since 141: growth by half
+ * (migration 155), a stored title an outlet has since edited away (162) and,
+ * since migration 169, a stamped cluster that has grown by at least one member
+ * since its stamp while the stored title fails the length or '?' gate (more
+ * than 110 or fewer than 20 characters, or a '?': a first pick at 2 members
+ * keeps the floor title when no member passes, and the growth bar of 5 members
+ * would leave it live; d096acf8 203 characters, 442e0395 167, e0750c57 129).
+ * The route needs no change for it: the stamp above is article_count after
+ * every pick, so a title that still fails comes back only after further
+ * growth (no loop), and a gate-failing incumbent is not protected by
+ * pickNeutralTitle.
  * There is no backfill UPDATE anywhere: existing rows heal through this
  * loop at ~20 per run, newest first. An rpc failure is logged and the run
  * still answers 200 to Vercel, but it is recorded as 599 (see SUB-STEP

@@ -28,7 +28,8 @@ import type { SummaryMember } from "./summary-attribution";
 // candidate that carries 85% or more of a wire or aggregator member's stems (and
 // the other way round) is dropped (`textOverlap`, AGENCY_COPY_OVERLAP).
 //
-// What it does NOT catch: tone and meaning. A text that uses the headline's own
+// What it does NOT catch: tone and meaning, with one narrow exception (the stage
+// rule, h54-editorial-1, below). A text that uses the headline's own
 // words but frames the story in loaded terms (2441793c, 0.875) or says something
 // else (97589454, 1.0) is clean to every check here. On a healthy cluster the
 // seed-agrees gate keeps those out; behind a seed that disagrees with the
@@ -58,6 +59,42 @@ import type { SummaryMember } from "./summary-attribution";
 // is not a stub. A clean seed that covers half of the headline is still never
 // replaced, whatever the members say. RSS, the digest and the cards pass no title
 // and keep the seed, by design (summary-attribution.ts).
+//
+// h54-editorial-1: the same blindness, one level up. b34a5fe0 (21 kaynak) has the
+// headline "Fon soruşturmasında Fatma Betül Sayan Kaya tutuklandı" over the seed
+// "... tutuklama talebiyle mahkemeye sevk edildi": the story moved on and the seed
+// did not. "tutuklama" and "tutuklandı" are both the stem "tutuk", so the seed
+// covers 6 of the 7 title stems and was kept. `stageBehindTitle` reads the one
+// thing the stems fold away: three families of "this happened" against "this was
+// asked for or had just begun". A family is an OUTCOME the headline can state and
+// the EARLIER stages that lead up to it:
+//   - arrest:  "tutuklan..." over "tutuklama talebi/istemi", "tutuklanması talep
+//              edil.../istendi", "sevk edil...", "gözaltına alın...";
+//   - release: "serbest bırakıl...", "tahliye edil...", "tahliyesine karar" over
+//              "tahliye talebi/istemi", "tahliye edilmesi/serbest bırakılması
+//              talep edil.../istendi";
+//   - death:   "hayatını kaybet/yitir...", "yaşamını kaybet/yitir...", "can ver...",
+//              "şehit ol.../düş...", "öldü", "öldürüldü" over "yaralandı",
+//              "ağır yaralı", "hastaneye kaldırıldı", "yoğun bakım".
+// A REQUEST or a NEGATION is not an outcome, whatever stem it holds: the request
+// forms ("tutuklanması talep edildi/edilen", "tutuklanmasını istedi", "tutuklanması
+// istendi", and the same for "tahliye edilmesi" and "serbest bırakılması") and the
+// negations ("tutuklanmadı", "tahliye edilmedi", "serbest bırakılmadı") state that
+// the thing was asked for or did not happen. They are kept out of the outcome
+// patterns (the request forms count as the family's earlier stage instead), so a
+// request-stage text never stands in for a stale seed and a request-stage or
+// negated headline never makes a seed look stale (correctness-1).
+// The seed is stale when the headline states the outcome of a family, the seed
+// does not, and the seed holds one of that family's earlier stages. A stale seed is
+// treated like a malformed one: it counts as disagreeing, the gain over it is
+// waived and its own text is kept out. One thing is added for it, because the
+// stems cannot tell a replacement at the same stage from one that moved on: the
+// replacement must itself state the outcome (`carriesOutcome`) and must not be a
+// stage behind (`!stageBehindTitle`). Every other gate is unchanged. With no such
+// member the seed stays, never blank. Still lexical, still linear: a fixed list of
+// phrases, not a reading of the story. A story that moved on in a way these three
+// families do not name (an indictment over an investigation, a verdict over a
+// trial) is as invisible as before.
 
 /** A seed scoring below this disagrees with the title (exclusive: 0.5 is kept). */
 export const AGREEMENT_LOW = 0.5;
@@ -573,6 +610,137 @@ export function seedDisqualified(raw: string, shown: string): SeedDefect | null 
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// A headline that reports a later stage than the text (h54-editorial-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * One story arc: what the headline says once it has happened (`outcome`) and what
+ * a text says while it has only begun (`earlier`). Every pattern is written in the
+ * folded spelling `fold` returns (no diacritics, "ı" as "i"), so "bırakıl" is
+ * "birakil". No pattern has a nested quantifier: they are literal phrases with
+ * one-blank gaps, and the text's blanks are collapsed to one first, so a long run
+ * of blanks costs a pass, not a backtrack.
+ */
+interface StageFamily {
+  outcome: RegExp;
+  /**
+   * An outcome word that only its diacritics tell from another word, read on the
+   * lower-cased text with its diacritics kept: "öldü" (died) is "oldu" (became) once
+   * folded, and "oldu" is in half the headlines of the day. Null when the folded
+   * spelling is enough.
+   */
+  outcomeSpelled: RegExp | null;
+  earlier: RegExp;
+}
+
+const STAGE_FAMILIES: readonly StageFamily[] = [
+  {
+    // "tutuklanması talebiyle sevk edildi" holds "tutuklan" and is the REQUEST, not
+    // the arrest; so are "tutuklanması talep edilen/edildi", "tutuklanmasını istedi"
+    // and "tutuklanması istendi". "tutuklanmadı/tutuklanmayan/tutuklanmamış/
+    // tutuklanmaz" are negations (the participle "tutuklanmış" has no "ma" and
+    // stays an outcome). "tutuklanmasına karar verildi" is the arrest and stays one.
+    outcome: /tutuklan(?!ma(?:si|sini)? (?:tale[bp]|iste)|ma(?:di|yan|mis|z))/,
+    outcomeSpelled: null,
+    earlier:
+      /tutuklama (?:talebi|istemi)|tutuklanma(?:si|sini)? (?:tale[bp]|iste)|sevk edil|gozaltina alin/,
+  },
+  {
+    // "tahliye edilmesi talebiyle" and "serbest bırakılmasını istedi" are the
+    // request, as "tutuklanması talebiyle" is; "tahliye edilmedi" and "serbest
+    // bırakılmadı" say it did not happen.
+    outcome:
+      /serbest birakil(?!ma(?:di|yan|mis|z)|masi(?:ni)? (?:tale[bp]|iste))|tahliye edil(?!me(?:di|yen|mis|z)|mesi(?:ni)? (?:tale[bp]|iste))|tahliyesine karar/,
+    outcomeSpelled: null,
+    earlier:
+      /tahliye (?:talebi|istemi)|tahliye edilmesi(?:ni)? (?:tale[bp]|iste)|serbest birakilmasi(?:ni)? (?:tale[bp]|iste)/,
+  },
+  {
+    // "can ver" and "şehit ol/düş" are other ways to say the same death. The
+    // letter lookbehind keeps a name ending in -can ("Özcan verdiği", "Ercan
+    // verdi") from reading as one.
+    outcome:
+      /(?<![\p{L}])(?:hayatini (?:kaybet|yitir)|yasamini (?:kaybet|yitir)|can ver|sehit (?:ol|dus))/u,
+    // "öldü" (died) is "oldu" (became) once folded, so it is read with its
+    // diacritics. "öldürüldü" (was killed) is the passive of the same death and is
+    // spelled here too, so the folded form never collides with "oldu"; "öldürdü"
+    // (killed someone) is not matched.
+    outcomeSpelled: /(?<![\p{L}])öl(?:dü|dürüldü)(?![\p{L}])/u,
+    earlier: /yaralandi|agir yarali|hastaneye kaldirildi|yogun bakim/,
+  },
+];
+
+/** A text in the two spellings the stage patterns read, blanks collapsed to one. */
+interface StageView {
+  folded: string;
+  spelled: string;
+}
+
+function stageView(text: string): StageView {
+  const spaced = text.replace(/\s+/g, " ");
+  return { folded: fold(spaced), spelled: spaced.toLocaleLowerCase("tr-TR").normalize("NFC") };
+}
+
+function statesOutcome(family: StageFamily, view: StageView): boolean {
+  return family.outcome.test(view.folded) || (family.outcomeSpelled?.test(view.spelled) ?? false);
+}
+
+/** The families whose outcome the headline states. */
+function outcomeFamilies(title: unknown): readonly StageFamily[] {
+  if (typeof title !== "string" || title === "") return [];
+  const view = stageView(title);
+  return STAGE_FAMILIES.filter((family) => statesOutcome(family, view));
+}
+
+/** True when, for some family in `families`, the text does not state the outcome and holds an earlier stage. */
+function isBehind(families: readonly StageFamily[], text: unknown): boolean {
+  if (typeof text !== "string" || families.length === 0) return false;
+  const view = stageView(text);
+  return families.some((family) => !statesOutcome(family, view) && family.earlier.test(view.folded));
+}
+
+/** True when the text states the outcome of EVERY family in `families` (false for none: there is nothing to carry). */
+function statesAll(families: readonly StageFamily[], text: unknown): boolean {
+  if (typeof text !== "string" || families.length === 0) return false;
+  const view = stageView(text);
+  return families.every((family) => statesOutcome(family, view));
+}
+
+/**
+ * True when the headline reports a LATER stage of the story than `text` does
+ * (h54-editorial-1): for some family (arrest, release, death; see the header) the
+ * title states the outcome, the text does not, and the text holds one of the
+ * family's earlier stages. "Fon soruşturmasında Fatma Betül Sayan Kaya
+ * tutuklandı" over "... tutuklama talebiyle mahkemeye sevk edildi" is behind. Not
+ * behind: a text that states the outcome as well as the earlier stage ("hakimliğe
+ * sevk edilen ... tutuklandı"), a text that holds no earlier stage, and a title
+ * that is itself at the earlier stage ("tutuklama istemiyle hakimliğe sevk
+ * edildi"), which states no outcome.
+ *
+ * Both are read in the folded spelling of this module (case, diacritics and "ı"
+ * do not matter), blanks collapsed, except for the death family's "öldü", which is
+ * matched (with "öldürüldü") as a whole word with its diacritics so that "oldu"
+ * (became) never counts. One pass over each text. Never throws; false for a
+ * non-string.
+ */
+export function stageBehindTitle(title: string, text: string): boolean {
+  return isBehind(outcomeFamilies(title), text);
+}
+
+/**
+ * True when `text` states the outcome of the family the headline triggered (the
+ * pair of {@link stageBehindTitle}): "tutuklanarak cezaevine gönderildi" carries
+ * "tutuklandı", "tutuklama talebiyle sevk edildi" and "tutuklanması talebiyle"
+ * do not. A headline that triggers several families (it says "tutuklandı" and
+ * "serbest bırakıldı") needs a text that states every one. False when the headline
+ * triggers none: there is no outcome to carry. Never throws; false for a
+ * non-string.
+ */
+export function carriesOutcome(title: string, text: string): boolean {
+  return statesAll(outcomeFamilies(title), text);
+}
+
 /** The member that should replace the seed, with the text to show (its tidied description). */
 export interface AgreeingPick {
   member: SummaryMember;
@@ -600,13 +768,17 @@ function byNewest(a: Scored, b: Scored): number {
  * null to keep the seed. Pure, one pass over the members plus one sort of the
  * qualifiers.
  *
- * The seed must disagree with `title` ({@link AGREEMENT_LOW}) or be malformed
- * ({@link seedDisqualified}: a feed-cut stub, unbalanced quotes; h34-reader-4); a
- * title without enough content tokens, or a clean seed that agrees, returns null
- * before any other member is looked at. For a malformed seed the gain over the
- * seed is waived, and two more conditions hold: the member's text is not the
- * seed's own (raw or tidied, under another outlet's name) and has no unbalanced
- * quotes. A member qualifies when ALL of these hold:
+ * The seed must disagree with `title` ({@link AGREEMENT_LOW}), be malformed
+ * ({@link seedDisqualified}: a feed-cut stub, unbalanced quotes; h34-reader-4) or
+ * be a stage behind the title ({@link stageBehindTitle}: "tutuklandı" over
+ * "tutuklama talebiyle"; h54-editorial-1); a title without enough content tokens,
+ * or a clean seed that agrees and is not behind, returns null before any other
+ * member is looked at. For a malformed or stale seed the gain over the seed is
+ * waived, and two more conditions hold: the member's text is not the seed's own
+ * (raw or tidied, under another outlet's name) and has no unbalanced quotes. For a
+ * stale seed a third holds: the member's text states the outcome the title
+ * reports and is not itself a stage behind it ({@link carriesOutcome}). A member
+ * qualifies when ALL of these hold:
  *   - its source allows excerpts (`excerpt_allowed !== false`) and is not a wire
  *     or aggregator (`normalizeSourceKind`; a missing kind is an outlet);
  *   - it is written in the seed's language (`sourceLang`);
@@ -644,7 +816,13 @@ export function findAgreeingMember({
   if (stems === null) return null;
   const seedScore = coverage(stems, seedShown);
   const seedRaw = repairEntityResidue(seed.article.description ?? "").trim();
-  const malformed = seedDisqualified(seedRaw, seedShown) !== null;
+  // The title's outcome families, read once: the seed and every candidate are
+  // held against them.
+  const families = outcomeFamilies(title);
+  const stale = isBehind(families, seedShown);
+  // A malformed or a stale seed is replaced for what it is, not for what it covers:
+  // its score and the gain over it no longer apply.
+  const malformed = seedDisqualified(seedRaw, seedShown) !== null || stale;
   if (!malformed && !disagrees(seedScore)) return null;
 
   const texts = members.map((m) => repairEntityResidue(m.article.description ?? "").trim());
@@ -703,6 +881,11 @@ export function findAgreeingMember({
     // another outlet's name must be kept out here, and so must a text that is
     // malformed in the same way.
     if (malformed && (raw === seedRaw || shown === seedShown || unbalancedQuotes(shown))) return;
+    // Behind a stale seed the stems cannot tell a text at the seed's stage from one
+    // that moved on, so the candidate must say the outcome (`carriesOutcome`). A text
+    // that states every outcome the title reports is never a stage behind it
+    // (`!stageBehindTitle`), so that second test of the rule needs no call of its own.
+    if (stale && !statesAll(families, shown)) return;
     const score = coverage(stems, shown);
     if (!agreementSwitches(seedScore, score, malformed)) return;
     if (isAgencyCopy(shown)) return;
