@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { _INTERNAL_filterQueryParams, httpHeadersToSpanAttributes } from "@sentry/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SENTRY_DATA_COLLECTION } from "../../src/lib/sentry/data-collection";
 
@@ -37,6 +38,12 @@ import { SENTRY_DATA_COLLECTION } from "../../src/lib/sentry/data-collection";
 // `beforeSendSpan` (a plain StreamedSpanJSON -> StreamedSpanJSON function) is
 // the effective hook; `beforeSendTransaction` stays wired for
 // traceLifecycle "static". The browser init used to have no beforeSend at all.
+//
+// Query-string guard (h53-privacy-1): the reader's search text (/?q=...) and the
+// /takip follow keywords ride in the URL query, so `dataCollection.urlQueryParams`
+// is `false` (a deny-list would keep them) and every hook that copies a URL
+// verbatim (request.url, Referer, transaction and span names, breadcrumbs,
+// span attributes) strips the query in all three runtimes.
 //
 // Third guard (last block): `withSentryConfig` injects a `_sentryRouteManifest`
 // of every app route into the main client chunk when a DSN is set, so the
@@ -114,7 +121,12 @@ async function initOptionsOf(file: string): Promise<InitOptions> {
   return sentry.init.mock.calls[0]![0] as InitOptions;
 }
 
-/** Header names that can carry the visitor's address or a credential. */
+/**
+ * Header names that can carry the visitor's address, a credential or the reader's
+ * search text. `referer` is the last kind: a same-origin Referer holds the full
+ * /?q=<search text> URL, and the SDK copies it onto the root span as
+ * `http.request.header.referer`.
+ */
 const SENSITIVE_HEADER_SAMPLES = [
   "x-forwarded-for",
   "x-real-ip",
@@ -127,6 +139,7 @@ const SENSITIVE_HEADER_SAMPLES = [
   "x-client-ip",
   "cookie",
   "authorization",
+  "referer",
 ];
 
 /** Same rule as the SDK's shouldFilterDataKey for a `{ deny }` list: case-insensitive substring. */
@@ -178,15 +191,31 @@ describe.each(Object.keys(CONFIGS))("%s data collection", (file) => {
     expect(leaked, `request headers not covered by the deny list: ${leaked.join(", ")}`).toEqual([]);
   });
 
-  it("filters credential-like query parameters", () => {
-    const q = dc.urlQueryParams;
-    expect(q).not.toBe(true);
-    if (q !== false) {
-      const deny = (q as { deny?: string[] }).deny ?? [];
-      for (const term of ["token", "key", "secret"]) {
-        expect(denies(deny, term), `urlQueryParams deny list must cover "${term}"`).toBe(true);
-      }
-    }
+  it("makes the SDK's own span-attribute header filter replace the Referer (it holds the reader's ?q=)", () => {
+    // httpHeadersToSpanAttributes is what @sentry/nextjs 11 calls to copy request
+    // headers onto the root span. A header it does not deny is copied verbatim.
+    const attributes = httpHeadersToSpanAttributes(
+      { referer: "https://www.tayfhaber.com/?q=Ahmet", Referer: "https://www.tayfhaber.com/?q=Ahmet", "user-agent": "vitest" },
+      { httpHeaders: dc.httpHeaders, cookies: false } as unknown as Parameters<typeof httpHeadersToSpanAttributes>[1],
+    );
+    expect(attributes["http.request.header.referer"]).toEqual(["[Filtered]"]);
+    expect(JSON.stringify(attributes)).not.toContain("Ahmet");
+    // The non-identifying headers are still collected.
+    expect(attributes["http.request.header.user-agent"]).toEqual(["vitest"]);
+  });
+
+  it("collects no URL query string (a deny-list keeps ?q=<reader's search text>)", () => {
+    // h53-privacy-1: in @sentry/core 11 a { deny } list redacts only the named
+    // keys and sends every other parameter, including the search text of
+    // /?q=... and the follow keywords of /takip. Only `false` drops the query.
+    expect(dc.urlQueryParams).toBe(false);
+  });
+
+  it("makes the SDK's own query filter drop the whole query (a real ?q= is gone)", () => {
+    // _INTERNAL_filterQueryParams is the helper filterUrlQuery and the request
+    // data extractors call with this setting.
+    expect(_INTERNAL_filterQueryParams("q=Ahmet&page=2", dc.urlQueryParams as false)).toBeUndefined();
+    expect(_INTERNAL_filterQueryParams("token=abc", dc.urlQueryParams as false)).toBeUndefined();
   });
 });
 
@@ -332,6 +361,130 @@ describe.each(Object.keys(CONFIGS))("%s redacts /rapor/<token>", (file) => {
     const span = REDACTION_CASES[1]!.fixture();
     const result = options.beforeSendSpan!(span, {});
     expect(result).toBe(span);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// URL query strings (the reader's ?q= search text), per runtime.
+// ---------------------------------------------------------------------------
+
+const SEARCH_TEXT = "Ahmet";
+
+/** Fresh fixtures per call; every one carries ?q=Ahmet somewhere the SDK copies verbatim. */
+const QUERY_CASES: ReadonlyArray<{
+  hook: HookName;
+  label: string;
+  fixture: () => Record<string, unknown>;
+}> = [
+  {
+    hook: "beforeSend",
+    label: "an error event",
+    fixture: () => ({
+      request: {
+        url: "https://www.tayfhaber.com/?q=Ahmet",
+        query_string: "q=Ahmet",
+        headers: { referer: "https://www.tayfhaber.com/?q=Ahmet", "user-agent": "vitest" },
+      },
+      transaction: "GET /?q=Ahmet",
+      breadcrumbs: [
+        { category: "fetch", data: { url: "/api/takip?q=Ahmet" } },
+        { category: "navigation", data: { from: "/?q=Ahmet", to: "/takip?q=Ahmet" } },
+      ],
+      contexts: { trace: { data: { "url.full": "https://www.tayfhaber.com/?q=Ahmet", "url.query": "q=Ahmet" } } },
+    }),
+  },
+  {
+    hook: "beforeSendTransaction",
+    label: "a static transaction",
+    fixture: () => ({
+      type: "transaction",
+      transaction: "GET /?q=Ahmet",
+      request: { url: "https://www.tayfhaber.com/?q=Ahmet", query_string: "q=Ahmet" },
+      spans: [{ description: "GET /api/takip?q=Ahmet", data: { url: "/api/takip?q=Ahmet", "http.query": "?q=Ahmet" } }],
+    }),
+  },
+  {
+    hook: "beforeSendSpan",
+    label: "a streamed span",
+    fixture: () => ({
+      trace_id: "0".repeat(32),
+      span_id: "1".repeat(16),
+      name: "GET /?q=Ahmet",
+      start_timestamp: 1,
+      status: "ok",
+      is_segment: true,
+      attributes: {
+        "url.full": { value: "https://www.tayfhaber.com/?q=Ahmet", type: "string" },
+        "http.target": "/?q=Ahmet",
+        "url.query": { value: "q=Ahmet", type: "string" },
+      },
+    }),
+  },
+  {
+    // @sentry/nextjs 11 copies every non-denied request header onto the root
+    // span as `http.request.header.<name>` with a string[] value; a same-origin
+    // Referer is the FULL url (privacy-sentry-referer-span-attr).
+    hook: "beforeSendSpan",
+    label: "a streamed span's Referer header attribute",
+    fixture: () => ({
+      trace_id: "0".repeat(32),
+      span_id: "1".repeat(16),
+      name: "GET /",
+      start_timestamp: 1,
+      status: "ok",
+      is_segment: true,
+      attributes: {
+        "http.request.header.referer": {
+          value: ["https://www.tayfhaber.com/?q=Ahmet%20Y%C4%B1lmaz"],
+          type: "string[]",
+        },
+      },
+    }),
+  },
+  {
+    hook: "beforeSend",
+    label: "an error event's trace-context Referer header attribute",
+    fixture: () => ({
+      contexts: {
+        trace: { data: { "http.request.header.referer": ["https://www.tayfhaber.com/?q=Ahmet"] } },
+      },
+    }),
+  },
+  {
+    hook: "beforeBreadcrumb",
+    label: "a breadcrumb",
+    fixture: () => ({
+      category: "navigation",
+      data: { from: "/?q=Ahmet", to: "/takip?q=Ahmet", url: "https://www.tayfhaber.com/?q=Ahmet" },
+    }),
+  },
+];
+
+describe.each(Object.keys(CONFIGS))("%s drops URL query strings", (file) => {
+  let options: InitOptions;
+
+  beforeEach(async () => {
+    options = await initOptionsOf(file);
+  });
+
+  it.each(QUERY_CASES)("keeps the reader's search text out of $label ($hook)", async ({ hook, fixture }) => {
+    const fn = options[hook];
+    expect(fn, `${file} must set ${hook}`).toEqual(expect.any(Function));
+
+    const result = await fn!(fixture(), {});
+
+    expect(result, `${hook} must return the payload, never drop it`).toBeTruthy();
+    expect(JSON.stringify(result)).not.toContain(SEARCH_TEXT);
+  });
+
+  it("still returns the error event's route and user agent", async () => {
+    const result = (await options.beforeSend!(QUERY_CASES[0]!.fixture(), {})) as {
+      request: { url: string; headers: Record<string, string> };
+      transaction: string;
+    };
+    expect(result.request.url).toBe("https://www.tayfhaber.com/");
+    expect(result.request.headers["user-agent"]).toBe("vitest");
+    expect(result.transaction).toBe("GET /");
   });
 });
 

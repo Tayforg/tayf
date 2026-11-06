@@ -8,8 +8,9 @@ import {
 // Three-row band at the top of the /blindspots feed: per zone, how many of
 // the blindspot stories on the page that zone gave no coverage at all
 // (judged on voting sources only, see silence-digest.ts). Server-safe on
-// purpose (no 'use client', no hooks); the digest is derived in the page from
-// bundles it already loaded.
+// purpose (no 'use client', no hooks); the digest is derived in the blindspots
+// fetcher over every claim of the window, and its optional `scope` makes the
+// footnote say how many of those are shown as full cards.
 export function SilenceDigestBand({ digest }: { digest: SilenceDigest }) {
   if (digest.windowTotal === 0) return null;
 
@@ -40,7 +41,7 @@ export function SilenceDigestBand({ digest }: { digest: SilenceDigest }) {
         ))}
       </ul>
       <p className="text-[11px] text-muted-foreground">
-        {silenceFootnote(digest.windowTotal)}
+        {silenceFootnote(digest.windowTotal, digest.scope)}
       </p>
     </section>
   );

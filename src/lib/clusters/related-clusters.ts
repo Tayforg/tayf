@@ -45,7 +45,14 @@ import {
 //     (RELATED_GENERIC_WORDS: h37-clusters-1): "Erdoğan" in two Erdoğan
 //     headlines is the entity key, not also "the one shared word", so Emine
 //     Erdoğan's Korea post is not related to the Azerbaijan visit, and "İsrail"
-//     alone does not relate three Israel stories. Three different shared keys
+//     alone does not relate three Israel stories. A lone number ("11 ilde ... 230
+//     gözaltı" and "11 gözaltı daha") is not a shared stem either, and neither
+//     are the currency, the country, the months and the job titles and reporting
+//     verbs that RELATED_GENERIC_WORDS and RELATED_GENERIC_WHOLE_WORDS also list
+//     ("dolar", "Türkiye", "Kasım", "Başbakan", "görüştü": h53-related-1); the
+//     score still counts them, so the order of a block does not move. The
+//     h53-related-1 words are matched as WHOLE words, not on their five-character
+//     stem, so "hazırlık" is not "Haziran" and "Kasımpaşa" is not "Kasım". Three different shared keys
 //     ("ABD", "Çin", "Trump" in two trade headlines) are evidence on their own
 //     even when every word they share is an entity's. Near-duplicates are dropped
 //     first (a title that agrees >= RELATED_DUPLICATE_AGREEMENT, in either
@@ -203,8 +210,8 @@ export const RELATED_MIN_SCORE = 0.2;
  * (and bridges aliases the wording does not share) but never relates two
  * stories on its own, so "ABD" or "Erdoğan" in two headlines is not enough.
  * Nor are the entity's own words ever the shared stem that the entity is then
- * "backed by" (h37-clusters-1): see {@link RELATED_GENERIC_WORDS} and
- * isRelatedTitle.
+ * "backed by" (h37-clusters-1): see {@link RELATED_GENERIC_WORDS},
+ * {@link RELATED_GENERIC_WHOLE_WORDS} and isRelatedTitle.
  */
 export const RELATED_ENTITY_BONUS = 0.15;
 /** Two titles agreeing at least this much, in either direction, are one story (inclusive). */
@@ -218,8 +225,9 @@ export const RELATED_MIN_ITEMS = 2;
  * RELATED_MIN_SCORE on ONE shared word, and one ordinary word ("Cumhurbaşkanı",
  * "istifa", "edildi") says nothing about the story: it related a Rutte story to
  * an Erdoğan one, and a single such story kept a block under "İlgili haberler".
- * Only DISTINCT stems count: the words of a shared entity and the
- * RELATED_GENERIC_WORDS are left out of the count (h37-clusters-1).
+ * Only DISTINCT stems count: the words of a shared entity, the
+ * RELATED_GENERIC_WORDS and the RELATED_GENERIC_WHOLE_WORDS are left out of the
+ * count (h37-clusters-1, h53-related-1).
  */
 export const RELATED_MIN_SHARED_STEMS = 2;
 /**
@@ -249,7 +257,10 @@ export const RELATED_MIN_SHARED_KEYS = 3;
  * but NOT "Cumhuriyet" or "Cumhur" (same `cumhu`, a different word); "açıklama"
  * covers "açıklandı", "açıkladı" and "açıklaması" but not "açıklık"; "değerlendirme"
  * covers "değerlendirmeler" but not "değer" (value). The list is curated and
- * short on purpose: a topic word does not belong here.
+ * short on purpose: a topic word does not belong here. A listed word of seven
+ * characters or fewer is matched on its stem alone, which suits a verb stem
+ * ("etti", "geldi") but over-blocks a noun that shares it, so the h53-related-1
+ * words live in {@link RELATED_GENERIC_WHOLE_WORDS} instead.
  */
 export const RELATED_GENERIC_WORDS: readonly string[] = [
   "Cumhurbaşkanı",
@@ -274,6 +285,55 @@ export const RELATED_GENERIC_WORDS: readonly string[] = [
   "verdi",
   "milyon",
   "milyar",
+  // h53-related-1: a job title ("Irak Başbakanı ... görüştü" vs "Malezya Başbakan
+  // Yardımcısı ... görüştü"). Eight characters, so it keeps the stem-plus-prefix
+  // rule above and covers "Başbakanı" and "Başbakanlığı". The other h53 words are
+  // in RELATED_GENERIC_WHOLE_WORDS.
+  "Başbakan",
+];
+/**
+ * More words that say what KIND of headline it is, not what it is about, matched
+ * as WHOLE words (h53-related-1, review fix correctness-related-stem-overblock):
+ * a reporting verb ("görüştü"); the currency and the unit of an amount ("6,3
+ * milyar dolarlık", "yüzde"); the country every Turkish desk writes from
+ * ("Türkiye"); "yeni" and "ilk"; and the calendar months. Like
+ * {@link RELATED_GENERIC_WORDS}, they never count as a shared stem, entity or not.
+ *
+ * Why a second list: a listed word of seven characters or fewer is matched on its
+ * five-character stem alone, and these are short enough that the stem is a
+ * different word's: `hazir` is "Haziran" and "hazırlık" (COP31 hazırlıkları),
+ * `nisan` is "Nisan" and "Nişantaşı", `kasim` is "Kasım" and "Kasımpaşa", `gorus`
+ * is "görüştü" and "görüşme". A title word is on this list when it IS a listed
+ * word, or starts with one and is at most three characters longer (an inflection:
+ * "dolarlık", "Kasımda", "Türkiyede"; an apostrophe suffix is cut before this runs,
+ * so "Kasım'da" is just "Kasım"). "lira" does not cover "liralık" in the
+ * stem-only rule and "avro" does not cover "avroluk", so both spellings are
+ * listed. A lone number is skipped by isNonTopicalWord, not listed here.
+ */
+export const RELATED_GENERIC_WHOLE_WORDS: readonly string[] = [
+  "görüştü",
+  "dolar",
+  "lira",
+  "liralık",
+  "avro",
+  "avroluk",
+  "euro",
+  "yüzde",
+  "Türkiye",
+  "yeni",
+  "ilk",
+  "Ocak",
+  "Şubat",
+  "Mart",
+  "Nisan",
+  "Mayıs",
+  "Haziran",
+  "Temmuz",
+  "Ağustos",
+  "Eylül",
+  "Ekim",
+  "Kasım",
+  "Aralık",
 ];
 /** A candidate sharing at least this share of its articles with a kept cluster is a copy (inclusive). */
 export const RELATED_SHARED_MEMBERS = 0.5;
@@ -371,15 +431,19 @@ function commonPrefixLength(a: string, b: string): number {
 const GENERIC_STEM_ONLY_MAX = 7;
 /** A longer listed word is matched when the title word shares all but this many trailing characters. */
 const GENERIC_SUFFIX_ALLOWANCE = 2;
+/** A RELATED_GENERIC_WHOLE_WORDS entry also matches a title word that starts with it and is at most this many characters longer. */
+const GENERIC_WHOLE_WORD_SUFFIX_ALLOWANCE = 3;
 
 /**
  * Whether a folded title word (as summary-agreement's contentWords returns it)
- * is one of RELATED_GENERIC_WORDS: the same five-character stem as a listed word
- * and, for a listed word of more than GENERIC_STEM_ONLY_MAX characters, the same
- * leading characters up to GENERIC_SUFFIX_ALLOWANCE short of its length. Words
- * with one stem and different meanings stay apart: "Cumhuriyet" and
- * "Cumhurbaşkanı" are both `cumhu`. Built once, on first use, from curated data
- * only (never from a title).
+ * is generic. Either it is one of RELATED_GENERIC_WORDS: the same five-character
+ * stem as a listed word and, for a listed word of more than GENERIC_STEM_ONLY_MAX
+ * characters, the same leading characters up to GENERIC_SUFFIX_ALLOWANCE short of
+ * its length. Or it is one of RELATED_GENERIC_WHOLE_WORDS: that word, or that word
+ * plus at most GENERIC_WHOLE_WORD_SUFFIX_ALLOWANCE characters. Words with one stem
+ * and different meanings stay apart: "Cumhuriyet" and "Cumhurbaşkanı" are both
+ * `cumhu`, "Haziran" and "hazırlık" are both `hazir`. Built once, on first use,
+ * from curated data only (never from a title).
  */
 function genericWord(): (foldedWord: string) => boolean {
   if (genericWordTest === null) {
@@ -392,7 +456,18 @@ function genericWord(): (foldedWord: string) => boolean {
         else byStem.set(stem, [token]);
       }
     }
+    const wholeTokens: string[] = [];
+    for (const listed of RELATED_GENERIC_WHOLE_WORDS) wholeTokens.push(...contentWords(listed));
     genericWordTest = (word) => {
+      if (
+        wholeTokens.some(
+          (token) =>
+            word === token ||
+            (word.startsWith(token) && word.length - token.length <= GENERIC_WHOLE_WORD_SUFFIX_ALLOWANCE),
+        )
+      ) {
+        return true;
+      }
       const tokens = byStem.get(word.slice(0, STEM_LENGTH));
       if (!tokens) return false;
       return tokens.some(
@@ -403,6 +478,21 @@ function genericWord(): (foldedWord: string) => boolean {
     };
   }
   return genericWordTest;
+}
+
+/** A folded word made of digits only: "11", "2030", and the halves of "62,3" and "1.250". */
+const DIGITS_ONLY = /^\p{N}+$/u;
+
+/**
+ * Whether a folded title word can never be "the shared stem" that relates two
+ * stories (h53-related-1): a number on its own, or one of
+ * RELATED_GENERIC_WORDS or RELATED_GENERIC_WHOLE_WORDS. summary-agreement keeps
+ * a lone digit as a content word (a score and the near-duplicate test do use
+ * it), so the verdict, and only the verdict, skips it here. A word that merely holds digits ("G20", "F16", "S400")
+ * is a name and still counts.
+ */
+function isNonTopicalWord(foldedWord: string): boolean {
+  return DIGITS_ONLY.test(foldedWord) || genericWord()(foldedWord);
 }
 
 const NO_STEMS: ReadonlySet<string> = new Set<string>();
@@ -428,9 +518,9 @@ function scoreAgainst(currentTitle: string, currentKeys: readonly string[], titl
  *
  * The score counts every shared stem, so ordering is what it always was. The
  * verdict does not: a stem that belongs to a SHARED entity key (the words of
- * its label, tokens, aliases and inflections) or a word of
- * RELATED_GENERIC_WORDS is not a shared stem. The entity is already counted
- * once, as the key (and the bonus); counting its own word again as "the one
+ * its label, tokens, aliases and inflections), a word of RELATED_GENERIC_WORDS
+ * or RELATED_GENERIC_WHOLE_WORDS, or a number on its own, is not a shared stem.
+ * The entity is already counted once, as the key (and the bonus); counting its own word again as "the one
  * shared stem" made any two Erdoğan, ABD or İsrail headlines related
  * (h37-clusters-1). Several different shared keys, though, are several
  * different facts in common, so a third one relates two titles whose shared
@@ -448,7 +538,7 @@ function evidenceAgainst(
   const entity = sharedKeys.length > 0;
   const score = entity ? agreement + RELATED_ENTITY_BONUS : agreement;
   if (score < RELATED_MIN_SCORE - EPSILON) return { score, related: false };
-  const distinct = sharedStemsExcluding(currentTitle, title, excludedStems(sharedKeys), genericWord());
+  const distinct = sharedStemsExcluding(currentTitle, title, excludedStems(sharedKeys), isNonTopicalWord);
   const related =
     distinct >= RELATED_MIN_SHARED_STEMS ||
     (entity && distinct >= 1) ||
@@ -471,8 +561,8 @@ export function relatedScore(currentTitle: string, candidateTitle: string): numb
  * {@link relatedScore} is at least RELATED_MIN_SCORE (inclusive) and the two
  * share RELATED_MIN_SHARED_STEMS content stems, or an entity-hub key together
  * with at least one stem, or RELATED_MIN_SHARED_KEYS different entity-hub keys.
- * The words of a shared entity and the RELATED_GENERIC_WORDS are not shared
- * stems: two titles that only share "Erdoğan" (or "Cumhurbaşkanı ... ziyaret")
+ * The words of a shared entity, the RELATED_GENERIC_WORDS and the
+ * RELATED_GENERIC_WHOLE_WORDS are not shared stems: two titles that only share "Erdoğan" (or "Cumhurbaşkanı ... ziyaret")
  * are not related, and neither are two that share a person and his country or
  * party only (two keys). False for a non-string.
  */

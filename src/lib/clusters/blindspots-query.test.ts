@@ -73,11 +73,18 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 });
 
 import { cacheLife } from "next/cache";
-import { getBlindspots, getBlindspotsSafe } from "./blindspots-query";
+import {
+  BLINDSPOT_CANDIDATE_SAFETY_CAP,
+  BLINDSPOT_LIST_LOOKBACK_DAYS,
+  EMBED_BATCH_SIZE,
+  fetchEmbedBatch,
+  getBlindspots,
+  getBlindspotsSafe,
+} from "./blindspots-query";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 import { votingZoneCounts } from "@/lib/feeds/zone-line";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
-import type { BiasCategory, SourceKind } from "@/types";
+import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -182,22 +189,58 @@ afterEach(() => {
 });
 
 describe("getBlindspots query shape (Step A: lean candidate select)", () => {
-  it("excludes archived clusters and keeps the documented blindspot pre-filters", async () => {
-    await getBlindspots();
+  const HOUR = 3_600_000;
+  const DAY = 24 * HOUR;
+  const NOW = Date.parse("2026-11-06T12:00:00.000Z");
 
-    const state = fixture.lastIdState as BuilderState;
+  async function stepAState(): Promise<BuilderState> {
+    // Only Date is faked: Step A reads the clock for its two window bounds.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    try {
+      await getBlindspots();
+    } finally {
+      vi.useRealTimers();
+    }
+    return fixture.lastIdState as BuilderState;
+  }
+
+  it("excludes archived clusters and keeps the documented blindspot pre-filters", async () => {
+    const state = await stepAState();
     expect(state.table).toBe("clusters");
     expect(state.selectArgs[0]).toBe("id");
     expect(state.eq).toHaveLength(3);
     expect(state.eq).toContainEqual({ col: "is_blindspot", val: true });
     expect(state.eq).toContainEqual({ col: "is_archived", val: false });
     expect(state.eq).toContainEqual({ col: "blindspot_recall_veto", val: false });
-    expect(state.gte).toEqual([{ col: "article_count", val: 3 }]);
-    expect(state.lt[0]?.col).toBe("first_published");
+    expect(state.gte[0]).toEqual({ col: "article_count", val: 3 });
     expect(state.order).toEqual([
       { col: "updated_at", opts: { ascending: false } },
     ]);
-    expect(state.limit).toBe(200);
+  });
+
+  it("keeps the 24 h feed delay: first_published must be older than now - feedDelayHours", async () => {
+    const state = await stepAState();
+    expect(state.lt).toEqual([
+      { col: "first_published", val: new Date(NOW - 24 * HOUR).toISOString() },
+    ]);
+  });
+
+  it("h53-consistency-1: bounds the window below at now - 7 days (first_published), so every claim of the week is a candidate", async () => {
+    const state = await stepAState();
+    expect(state.gte).toContainEqual({
+      col: "first_published",
+      val: new Date(NOW - 7 * DAY).toISOString(),
+    });
+    expect(state.gte).toHaveLength(2);
+    expect(BLINDSPOT_LIST_LOOKBACK_DAYS).toBe(7);
+  });
+
+  it("h53-consistency-1: the safety cap is 150 ids (at most 3 embed batches), a bound and not a sample", async () => {
+    const state = await stepAState();
+    expect(state.limit).toBe(150);
+    expect(BLINDSPOT_CANDIDATE_SAFETY_CAP).toBe(150);
+    expect(Math.ceil(BLINDSPOT_CANDIDATE_SAFETY_CAP / EMBED_BATCH_SIZE)).toBe(3);
   });
 
   it("throws with the documented prefix on a Step-A error", async () => {
@@ -371,19 +414,50 @@ describe("getBlindspots Step B: batched embed", () => {
     expect(fixture.embedStates).toHaveLength(3);
   });
 
-  it("stops requesting batches once 30 bundles have already been produced", async () => {
-    // 60 valid blindspot candidates, all passing the contract — the first
-    // batch of 50 alone already exceeds DISPLAY_LIMIT (30), so only ONE
-    // embed call should happen.
-    const rows = Array.from({ length: 60 }, (_, i) =>
+  it("h53-consistency-1: never stops early at 30 bundles: 120 passing candidates request all 3 embed batches", async () => {
+    // Used to stop after the first batch of 50 once 30 bundles passed, which is
+    // how 20 public claims (7 of the 9 Muhalefet ones) never reached the page.
+    const rows = Array.from({ length: 120 }, (_, i) =>
       mkBlindspotClusterRow(`c${i}`, i % 2 === 0 ? "pro_government" : "opposition"),
     );
     seedRows(rows);
 
-    const { bundles } = await getBlindspots();
+    const result = await getBlindspots();
 
-    expect(fixture.embedStates).toHaveLength(1);
-    expect(bundles.length).toBeLessThanOrEqual(30);
+    expect(fixture.embedStates).toHaveLength(3);
+    expect(result.bundles).toHaveLength(30);
+    expect(result.claimCount).toBe(120);
+    expect(result.more).toHaveLength(90);
+  });
+
+  it("h53-consistency-1: the embed batches and the feed-health read are issued together (Promise.all), not one after another", async () => {
+    const rows = Array.from({ length: 120 }, (_, i) =>
+      mkBlindspotClusterRow(`c${i}`, "pro_government"),
+    );
+    seedRows(rows);
+    let releaseHealth!: (v: null) => void;
+    feedHealthMock.getZoneFeedHealth.mockImplementation(
+      () => new Promise<null>((resolve) => (releaseHealth = resolve)),
+    );
+
+    const pending = getBlindspots();
+    // Health is held open: if the batches waited for it, none would be asked.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    expect(fixture.embedStates).toHaveLength(3);
+
+    releaseHealth(null);
+    await expect(pending).resolves.toMatchObject({ claimCount: 120 });
+  });
+
+  it("keeps fetchEmbedBatch and EMBED_BATCH_SIZE exported for near-blindspots-query", async () => {
+    expect(EMBED_BATCH_SIZE).toBe(50);
+    const row = mkBlindspotClusterRow("near-1", "pro_government");
+    fixture.rowsById = new Map([["near-1", row]]);
+
+    const rows = await fetchEmbedBatch(["near-1"], "reader");
+
+    expect(rows.map((r) => r.id)).toEqual(["near-1"]);
   });
 
   it("fewer than 30 bundles from the first batch triggers a second batch", async () => {
@@ -903,11 +977,308 @@ describe("getBlindspots feed-health suppression", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h53-consistency-1: the list is every public claim of the trailing 7 days.
+// 30 side-balanced claims get a full card (`bundles`), every other passing
+// claim is a slim row (`more`), and the counts and the silence digest cover the
+// whole window. Prod, 2026-11-06: 41 Iktidar : 9 Muhalefet claims; the page
+// showed 28 : 2 and its "Bu listede kim yer vermedi?" box read 25 : 2.
+// ---------------------------------------------------------------------------
+
+const BIAS_OF_ZONE: Record<MediaDnaZone, BiasCategory> = {
+  iktidar: "pro_government",
+  bagimsiz: "center",
+  muhalefet: "opposition",
+};
+const OTHER_BIAS_OF_ZONE: Record<MediaDnaZone, BiasCategory> = {
+  iktidar: "center",
+  bagimsiz: "pro_government",
+  muhalefet: "center",
+};
+
+/** `inZone` voters of `zone` plus `outZone` voters from another zone, one outlet each. */
+function mkClaimRow(
+  id: string,
+  zone: MediaDnaZone,
+  inZone: number,
+  outZone: number,
+  updatedAt = "2026-11-05T12:00:00.000Z",
+) {
+  const members = [
+    ...Array.from({ length: inZone }, (_, i) => mkMember(id, i, BIAS_OF_ZONE[zone])),
+    ...Array.from({ length: outZone }, (_, i) =>
+      mkMember(id, inZone + i, OTHER_BIAS_OF_ZONE[zone]),
+    ),
+  ];
+  return {
+    ...mkBlindspotClusterRow(id, BIAS_OF_ZONE[zone]),
+    updated_at: updatedAt,
+    article_count: members.length,
+    cluster_articles: members,
+  };
+}
+
+/** 41 Iktidar claims (86-100%) and 9 Muhalefet claims (exactly 80%). */
+function seedWeek() {
+  const minute = 60_000;
+  const base = Date.parse("2026-11-05T12:00:00.000Z");
+  const iktidar = Array.from({ length: 41 }, (_, i) =>
+    mkClaimRow(
+      `ik-${String(i).padStart(2, "0")}`,
+      "iktidar",
+      6 + (i % 3),
+      i % 2,
+      new Date(base - i * minute).toISOString(),
+    ),
+  );
+  const muhalefet = Array.from({ length: 9 }, (_, i) =>
+    mkClaimRow(`mu-${i}`, "muhalefet", 4, 1, new Date(base - i * minute).toISOString()),
+  );
+  // Interleave so the Step-A (updated_at) order is not already side-sorted.
+  const rows = [];
+  for (let i = 0; i < 41; i += 1) {
+    rows.push(iktidar[i]!);
+    if (i < 9) rows.push(muhalefet[i]!);
+  }
+  seedRows(rows);
+  return rows;
+}
+
+describe("getBlindspots result: cards, compact rows, counts, digest (h53-consistency-1)", () => {
+  it("41 Iktidar : 9 Muhalefet gives 30 cards that hold all 9 Muhalefet claims", async () => {
+    seedWeek();
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(30);
+    expect(bundles.filter((b) => b.dominantZone === "muhalefet")).toHaveLength(9);
+    expect(bundles.filter((b) => b.dominantZone === "iktidar")).toHaveLength(21);
+  });
+
+  it("orders the cards by dominantPct descending, ties by updated_at descending", async () => {
+    seedWeek();
+
+    const { bundles } = await getBlindspots();
+
+    for (let i = 1; i < bundles.length; i += 1) {
+      const prev = bundles[i - 1]!;
+      const cur = bundles[i]!;
+      expect(prev.dominantPct).toBeGreaterThanOrEqual(cur.dominantPct);
+      if (prev.dominantPct === cur.dominantPct) {
+        expect(Date.parse(prev.cluster.updated_at)).toBeGreaterThanOrEqual(
+          Date.parse(cur.cluster.updated_at),
+        );
+      }
+    }
+  });
+
+  it("every other passing claim is a compact row, and no claim is lost or listed twice", async () => {
+    const rows = seedWeek();
+
+    const { bundles, more, claimCount } = await getBlindspots();
+
+    expect(more).toHaveLength(20);
+    expect(claimCount).toBe(bundles.length + more.length);
+    expect(claimCount).toBe(50);
+    const listed = [...bundles.map((b) => b.cluster.id), ...more.map((m) => m.id)];
+    expect(new Set(listed).size).toBe(50);
+    expect([...listed].sort()).toEqual(rows.map((r) => r.id).sort());
+  });
+
+  it("orders the compact rows like the cards (most lopsided first) and below the cards' Iktidar cut", async () => {
+    seedWeek();
+
+    const { bundles, more } = await getBlindspots();
+
+    for (let i = 1; i < more.length; i += 1) {
+      expect(more[i - 1]!.dominantPct).toBeGreaterThanOrEqual(more[i]!.dominantPct);
+    }
+    const cardIktidarFloor = Math.min(
+      ...bundles.filter((b) => b.dominantZone === "iktidar").map((b) => b.dominantPct),
+    );
+    for (const row of more) expect(row.dominantPct).toBeLessThanOrEqual(cardIktidarFloor);
+  });
+
+  it("a compact row is slim: id, title, zone, share, source count, first-published time and the voting tally", async () => {
+    const slim = {
+      ...mkClaimRow("slim", "iktidar", 6, 1, "2026-11-04T08:00:00.000Z"),
+      // Older than updated_at: the feed dates a compact row by this, as it dates a card.
+      first_published: "2026-11-02T06:30:00.000Z",
+      title_tr_neutral: "Nötr başlık",
+    };
+    seedRows([
+      // 30 claims at 100% take the 30 cards; the 86% claim is the one compact row.
+      ...Array.from({ length: 30 }, (_, i) =>
+        mkClaimRow(`ik-${i}`, "iktidar", 7, 0, `2026-11-05T12:${String(i).padStart(2, "0")}:00.000Z`),
+      ),
+      slim,
+    ]);
+
+    const { more } = await getBlindspots();
+
+    expect(more).toEqual([
+      {
+        id: "slim",
+        title: "Nötr başlık",
+        dominantZone: "iktidar",
+        dominantPct: 6 / 7,
+        sourceCount: 7,
+        firstPublished: "2026-11-02T06:30:00.000Z",
+        votingZoneCounts: { iktidar: 6, bagimsiz: 1, muhalefet: 0 },
+      },
+    ]);
+    expect(Object.keys(more[0]!).sort()).toEqual([
+      "dominantPct",
+      "dominantZone",
+      "firstPublished",
+      "id",
+      "sourceCount",
+      "title",
+      "votingZoneCounts",
+    ]);
+  });
+
+  it("sideCounts cover the whole window and sum to claimCount", async () => {
+    seedWeek();
+
+    const { sideCounts, claimCount } = await getBlindspots();
+
+    expect(sideCounts).toEqual({ iktidar: 41, bagimsiz: 0, muhalefet: 9 });
+    expect(sideCounts.iktidar + sideCounts.bagimsiz + sideCounts.muhalefet).toBe(claimCount);
+  });
+
+  it("counts a Bagimsiz-dominant claim on its own side", async () => {
+    seedRows([
+      mkClaimRow("ik", "iktidar", 5, 0),
+      mkClaimRow("bg", "bagimsiz", 5, 0),
+      mkClaimRow("mu", "muhalefet", 5, 0),
+    ]);
+
+    const { sideCounts, claimCount, bundles, more } = await getBlindspots();
+
+    expect(sideCounts).toEqual({ iktidar: 1, bagimsiz: 1, muhalefet: 1 });
+    expect(claimCount).toBe(3);
+    expect(bundles).toHaveLength(3);
+    expect(more).toEqual([]);
+  });
+
+  it("the digest is built over ALL claims, not the 30 cards, and says how many are cards", async () => {
+    seedWeek();
+
+    const { digest, bundles } = await getBlindspots();
+
+    expect(digest.windowTotal).toBe(50);
+    expect(digest.scope).toEqual({ windowDays: 7, shown: bundles.length });
+    // Muhalefet was silent on every one of the 41 Iktidar claims (all rows
+    // carry no Muhalefet voter), Iktidar on every one of the 9 Muhalefet ones.
+    const byZone = Object.fromEntries(digest.rows.map((r) => [r.zone, r.silentCount]));
+    expect(byZone.muhalefet).toBe(41);
+    expect(byZone.iktidar).toBe(9);
+    // Bagimsiz was silent only on the 21 even-numbered Iktidar claims (the odd
+    // ones and every Muhalefet claim carry one Bagimsiz voter).
+    expect(digest.rows.map((r) => r.byDominant)).toEqual([
+      [{ zone: "muhalefet", count: 9 }],
+      [{ zone: "iktidar", count: 21 }],
+      [{ zone: "iktidar", count: 41 }],
+    ]);
+  });
+
+  it("the cap warning fires when Step A returns the full 150, and not below it", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      fixture.candidateIds = Array.from({ length: 149 }, (_, i) => `c${i}`);
+      await getBlindspots();
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      __resetCacheResilienceForTests();
+      fixture.candidateIds = Array.from({ length: 150 }, (_, i) => `c${i}`);
+      await getBlindspots();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("candidate cap 150 reached"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("an empty window is a clean zero result, not an error", async () => {
+    const result = await getBlindspots();
+
+    expect(result.bundles).toEqual([]);
+    expect(result.more).toEqual([]);
+    expect(result.claimCount).toBe(0);
+    expect(result.sideCounts).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 0 });
+    expect(result.digest.windowTotal).toBe(0);
+    expect(result.digest.rows).toHaveLength(3);
+  });
+
+  it("candidates that fail the live contract are in neither bundles nor more nor the counts", async () => {
+    seedRows([
+      mkClaimRow("keep", "iktidar", 5, 0),
+      mkFailingCandidateRow("one-source"),
+      // 4 of 6 voters = 0.667: below the 0.8 dominant share.
+      mkClaimRow("diluted", "iktidar", 4, 2),
+    ]);
+
+    const result = await getBlindspots();
+
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["keep"]);
+    expect(result.more).toEqual([]);
+    expect(result.claimCount).toBe(1);
+    expect(result.digest.windowTotal).toBe(1);
+  });
+
+  it("a suppressed claim (degraded silent side) is in neither bundles nor more nor the counts", async () => {
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+    seedRows([
+      ...Array.from({ length: 33 }, (_, i) =>
+        mkClaimRow(`ik-${i}`, "iktidar", 5, 0, `2026-11-05T12:${String(i).padStart(2, "0")}:00.000Z`),
+      ),
+      mkClaimRow("mu-keep", "muhalefet", 5, 0),
+    ]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getBlindspots();
+
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["mu-keep"]);
+      expect(result.more).toEqual([]);
+      expect(result.claimCount).toBe(1);
+      expect(result.sideCounts).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 1 });
+      expect(result.digest.windowTotal).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("the cached payload stays small: compact rows carry no cluster, article or source objects", async () => {
+    seedWeek();
+
+    const result = await getBlindspots();
+
+    const bytes = JSON.stringify(result.more).length;
+    // 20 slim rows; a full bundle is several KB each.
+    expect(bytes).toBeLessThan(20 * 400);
+    for (const row of result.more) {
+      expect(row).not.toHaveProperty("cluster");
+      expect(row).not.toHaveProperty("articles");
+      expect(row).not.toHaveProperty("sources");
+    }
+  });
+});
+
 describe("getBlindspotsSafe", () => {
-  it("returns { ok: true, bundles } on success", async () => {
+  it("returns { ok: true, bundles, more, claimCount, sideCounts, digest } on success", async () => {
     seedRows([mkBlindspotClusterRow("c1", "pro_government")]);
     const result = await getBlindspotsSafe();
     expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.bundles).toHaveLength(1);
+    expect(result.more).toEqual([]);
+    expect(result.claimCount).toBe(1);
+    expect(result.sideCounts).toEqual({ iktidar: 1, bagimsiz: 0, muhalefet: 0 });
+    expect(result.digest.windowTotal).toBe(1);
   });
 
   it("returns { ok: false } and never throws on a Step-A error", async () => {

@@ -55,6 +55,18 @@ describe("SilenceDigestBand", () => {
     );
   });
 
+  it("h53-consistency-1: names the 7-day window and the card count when the digest carries a scope", () => {
+    const markup = renderToStaticMarkup(
+      <SilenceDigestBand
+        digest={{ ...DIGEST, windowTotal: 46, scope: { windowDays: 7, shown: 30 } }}
+      />,
+    );
+    expect(markup).toContain(
+      "Son 7 günün 46 kör nokta hikâyesi sayıldı; listede 30 tanesi kart olarak gösteriliyor.",
+    );
+    expect(markup).not.toContain("Bu sayfadaki");
+  });
+
   it("renders each row's sentence", () => {
     const markup = renderToStaticMarkup(<SilenceDigestBand digest={DIGEST} />);
     expect(markup).toContain(

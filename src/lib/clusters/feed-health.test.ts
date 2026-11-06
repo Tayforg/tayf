@@ -69,11 +69,13 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { cacheLife } from "next/cache";
+import { isVotingKind } from "@/lib/bias/config";
 import {
   degradedSilentZone,
   getZoneFeedHealth,
   isZoneDegraded,
   shouldSuppressBlindspot,
+  zoneVotingYieldDenominator,
   zoneYieldDenominator,
   FEED_HEALTH_MIN_SHARE,
   FEED_HEALTH_MAX_AGE_MS,
@@ -104,6 +106,10 @@ function row(opts: {
   /** `sources.fetch_fail_streak`. The key is left off the row entirely when
    * the test does not pass it, which is the legacy / test-double shape. */
   fetch_fail_streak?: number | null;
+  /** `sources.kind`. Like the streak, the key is left off the row entirely
+   * when the test does not pass it (legacy / test-double shape), which must
+   * read as a voting `outlet` (`isVotingKind`'s default). */
+  kind?: unknown;
 }) {
   recentSeq += 1;
   return {
@@ -112,6 +118,7 @@ function row(opts: {
     fetch_last_at: opts.fetch_last_at === undefined ? ago(0) : opts.fetch_last_at,
     recent: opts.recent ?? [{ id: `recent-${recentSeq}` }],
     ...("fetch_fail_streak" in opts ? { fetch_fail_streak: opts.fetch_fail_streak } : {}),
+    ...("kind" in opts ? { kind: opts.kind } : {}),
   };
 }
 
@@ -162,6 +169,14 @@ describe("getZoneFeedHealth query shape", () => {
     await getZoneFeedHealth();
     const state = fixture.lastState as BuilderState;
     expect(String(state.selectArgs[0])).toContain("fetch_fail_streak");
+  });
+
+  it("h53-consistency-2: selects the kind column (one more column, no extra query) so voting sources can be told apart", async () => {
+    await getZoneFeedHealth();
+    const state = fixture.lastState as BuilderState;
+    expect(String(state.selectArgs[0])).toMatch(/(^|[\s,])kind([\s,]|$)/);
+    // Still exactly one sources query: the kind split rides on the same select.
+    expect(tracker.calls.filter((c) => c.method === "select")).toHaveLength(1);
   });
 
   it("adds a 72h gte on recent.published_at and probes with limit(1, { referencedTable: 'recent' }) — same cheap-compute shape as active-count.ts", async () => {
@@ -227,6 +242,8 @@ describe("getZoneFeedHealth health computation", () => {
       fetchOk: 3,
       fetchOkShare: 1,
       delivering: 3,
+      // No row carries a kind: the legacy shape votes (isVotingKind default).
+      votingDelivering: 3,
       deliveringShare: 1,
       healthy: 3,
       healthyShare: 1,
@@ -414,6 +431,7 @@ describe("getZoneFeedHealth health computation", () => {
         fetchOk: 0,
         fetchOkShare: 0,
         delivering: 0,
+        votingDelivering: 0,
         deliveringShare: 0,
         healthy: 0,
         healthyShare: 0,
@@ -544,6 +562,154 @@ describe("getZoneFeedHealth yield axis (status AND yield)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h53-consistency-2: the voting basis. `delivering` stays the all-kinds count
+// (/hafta labels it "toplayıcı / niş dahil"); `votingDelivering` is the same
+// count restricted to the kinds that vote in bias_distribution (outlet, wire)
+// — the basis the Manşet Kartı numerator already uses.
+// ---------------------------------------------------------------------------
+
+describe("getZoneFeedHealth voting basis (h53-consistency-2)", () => {
+  /** n delivering rows of one kind in one bias. */
+  function kindRows(bias: string, kind: unknown, n: number) {
+    return Array.from({ length: n }, () => row({ bias, kind }));
+  }
+
+  it("20 outlet + 1 wire + 5 niche + 2 aggregator delivering rows: delivering 28, votingDelivering 21", async () => {
+    fixture.data = [
+      ...kindRows("center", "outlet", 20),
+      ...kindRows("center", "wire", 1),
+      ...kindRows("center", "niche", 5),
+      ...kindRows("center", "aggregator", 2),
+    ];
+    const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+    expect(health.bagimsiz.total).toBe(28);
+    expect(health.bagimsiz.delivering).toBe(28);
+    expect(health.bagimsiz.votingDelivering).toBe(21);
+  });
+
+  it("degraded, healthy and deliveringShare equal the kind-blind values for the same fixture", async () => {
+    const fixtureRows = (withKind: boolean) =>
+      [
+        ["outlet", 20],
+        ["wire", 1],
+        ["niche", 5],
+        ["aggregator", 2],
+      ].flatMap(([kind, n]) =>
+        Array.from({ length: n as number }, (_, i) =>
+          row({
+            bias: "center",
+            // A mix of fetch outcomes and silent feeds so every axis moves.
+            fetch_last_status: i % 4 === 0 ? 500 : 200,
+            recent: i % 5 === 0 ? [] : undefined,
+            ...(withKind ? { kind } : {}),
+          }),
+        ),
+      );
+
+    recentSeq = 0;
+    fixture.data = fixtureRows(false);
+    const blind = ((await getZoneFeedHealth()) as ZoneFeedHealth).bagimsiz;
+
+    recentSeq = 0;
+    fixture.data = fixtureRows(true);
+    const withKinds = ((await getZoneFeedHealth()) as ZoneFeedHealth).bagimsiz;
+
+    expect(withKinds.total).toBe(blind.total);
+    expect(withKinds.fetchOk).toBe(blind.fetchOk);
+    expect(withKinds.fetchOkShare).toBe(blind.fetchOkShare);
+    expect(withKinds.delivering).toBe(blind.delivering);
+    expect(withKinds.deliveringShare).toBe(blind.deliveringShare);
+    expect(withKinds.healthy).toBe(blind.healthy);
+    expect(withKinds.healthyShare).toBe(blind.healthyShare);
+    expect(withKinds.degraded).toBe(blind.degraded);
+    // ...while the kind split is real: strictly fewer voting than delivering.
+    expect(withKinds.votingDelivering).toBeLessThan(withKinds.delivering);
+    // And the kind-blind run (no kind key at all) votes everywhere.
+    expect(blind.votingDelivering).toBe(blind.delivering);
+  });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["an unknown string", "podcast"],
+    ["an empty string", ""],
+    ["a non-string", 7],
+  ])("a row whose kind is %s follows isVotingKind (it votes)", async (_label, kind) => {
+    fixture.data = [row({ bias: "center", kind })];
+    const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+    expect(isVotingKind(kind)).toBe(true);
+    expect(health.bagimsiz.delivering).toBe(1);
+    expect(health.bagimsiz.votingDelivering).toBe(1);
+  });
+
+  it("a non-delivering voting source adds to neither count", async () => {
+    fixture.data = [
+      row({ bias: "center", kind: "outlet", recent: [] }),
+      row({ bias: "center", kind: "outlet" }),
+    ];
+    const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+    expect(health.bagimsiz.total).toBe(2);
+    expect(health.bagimsiz.delivering).toBe(1);
+    expect(health.bagimsiz.votingDelivering).toBe(1);
+  });
+
+  it("a delivering non-voting source counts in delivering only, in its own zone", async () => {
+    fixture.data = [
+      row({ bias: "pro_government", kind: "aggregator" }),
+      row({ bias: "opposition", kind: "niche" }),
+    ];
+    const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+    expect(health.iktidar.delivering).toBe(1);
+    expect(health.iktidar.votingDelivering).toBe(0);
+    expect(health.muhalefet.delivering).toBe(1);
+    expect(health.muhalefet.votingDelivering).toBe(0);
+    expect(health.bagimsiz.votingDelivering).toBe(0);
+  });
+
+  it("votingDelivering never exceeds delivering, and is 0 on an empty read", async () => {
+    fixture.data = [];
+    const empty = (await getZoneFeedHealth()) as ZoneFeedHealth;
+    for (const zone of ["iktidar", "bagimsiz", "muhalefet"] as const) {
+      expect(empty[zone].votingDelivering).toBe(0);
+    }
+    fixture.data = [
+      ...kindRows("pro_government", "outlet", 3),
+      ...kindRows("pro_government", "niche", 4),
+      ...kindRows("opposition", "wire", 2),
+    ];
+    const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+    for (const zone of ["iktidar", "bagimsiz", "muhalefet"] as const) {
+      expect(health[zone].votingDelivering).toBeLessThanOrEqual(health[zone].delivering);
+    }
+  });
+
+  it("replays the 2026-11-06 17:25Z production counts: delivering 31/37/19, voting 28/24/18", async () => {
+    // outlet + wire + aggregator + niche delivering rows per zone, from the
+    // read-only SQL in the h53-consistency-2 evidence.
+    fixture.data = [
+      ...kindRows("pro_government", "outlet", 27),
+      ...kindRows("pro_government", "wire", 1),
+      ...kindRows("pro_government", "aggregator", 1),
+      ...kindRows("pro_government", "niche", 2),
+      ...kindRows("center", "outlet", 23),
+      ...kindRows("center", "wire", 1),
+      ...kindRows("center", "aggregator", 5),
+      ...kindRows("center", "niche", 8),
+      ...kindRows("opposition", "outlet", 17),
+      ...kindRows("opposition", "wire", 1),
+      ...kindRows("opposition", "niche", 1),
+    ];
+    const health = (await getZoneFeedHealth()) as ZoneFeedHealth;
+    expect([health.iktidar.delivering, health.bagimsiz.delivering, health.muhalefet.delivering]).toEqual([31, 37, 19]);
+    expect([
+      health.iktidar.votingDelivering,
+      health.bagimsiz.votingDelivering,
+      health.muhalefet.votingDelivering,
+    ]).toEqual([28, 24, 18]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fail-open error handling
 // ---------------------------------------------------------------------------
 
@@ -655,6 +821,7 @@ function mkHealth(overrides: Partial<Record<"iktidar" | "bagimsiz" | "muhalefet"
     fetchOk: 5,
     fetchOkShare: 1,
     delivering: 5,
+    votingDelivering: 4,
     deliveringShare: 1,
     healthy: 5,
     healthyShare: 1,
@@ -665,6 +832,7 @@ function mkHealth(overrides: Partial<Record<"iktidar" | "bagimsiz" | "muhalefet"
     fetchOk: 1,
     fetchOkShare: 0.2,
     delivering: 1,
+    votingDelivering: 0,
     deliveringShare: 0.2,
     healthy: 1,
     healthyShare: 0.2,
@@ -726,6 +894,46 @@ describe("zoneYieldDenominator", () => {
   it("reflects a degraded zone's (lower) delivering count too", () => {
     const health = mkHealth({ muhalefet: true });
     expect(zoneYieldDenominator(health, "muhalefet")).toBe(1);
+  });
+
+  it("h53-consistency-2: stays the ALL-kinds count (aggregator + niche included), the figure /hafta and /rapor label and divide as such", () => {
+    const health = mkHealth({});
+    // 5 delivering, of which only 4 vote: the all-kinds helper must not move.
+    expect(zoneYieldDenominator(health, "bagimsiz")).toBe(5);
+    expect(zoneYieldDenominator(health, "bagimsiz")).not.toBe(health.bagimsiz.votingDelivering);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// zoneVotingYieldDenominator (pure) — the one helper that gives the Manşet
+// Kartı (and any future "N / M kaynak" surface whose N counts voting
+// sources) a denominator on the same basis as its numerator.
+// ---------------------------------------------------------------------------
+
+describe("zoneVotingYieldDenominator", () => {
+  it("returns null when health is null (health unknown)", () => {
+    expect(zoneVotingYieldDenominator(null, "iktidar")).toBeNull();
+    expect(zoneVotingYieldDenominator(null, "bagimsiz")).toBeNull();
+    expect(zoneVotingYieldDenominator(null, "muhalefet")).toBeNull();
+  });
+
+  it("returns the zone's votingDelivering, not delivering, when health is present", () => {
+    const health = mkHealth({});
+    expect(zoneVotingYieldDenominator(health, "iktidar")).toBe(4);
+    expect(zoneVotingYieldDenominator(health, "iktidar")).toBe(health.iktidar.votingDelivering);
+    expect(zoneVotingYieldDenominator(health, "iktidar")).not.toBe(health.iktidar.delivering);
+  });
+
+  it("returns a real 0 (not null) for a zone with no delivering voting source", () => {
+    const health = mkHealth({ muhalefet: true });
+    expect(zoneVotingYieldDenominator(health, "muhalefet")).toBe(0);
+  });
+
+  it("reads the evidence fixture: Bağımsız 24 voting of 37 delivering", () => {
+    const health = mkHealth({});
+    health.bagimsiz = { ...health.bagimsiz, delivering: 37, votingDelivering: 24 };
+    expect(zoneVotingYieldDenominator(health, "bagimsiz")).toBe(24);
+    expect(zoneYieldDenominator(health, "bagimsiz")).toBe(37);
   });
 });
 

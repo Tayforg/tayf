@@ -59,7 +59,10 @@ function mkZoneHealth(overrides: Partial<ZoneHealth> = {}): ZoneHealth {
     total: 10,
     fetchOk: 9,
     fetchOkShare: 0.9,
-    delivering: 8,
+    // delivering (all kinds) deliberately differs from votingDelivering so a
+    // test that reads the wrong one cannot pass by coincidence.
+    delivering: 10,
+    votingDelivering: 8,
     deliveringShare: 0.8,
     healthy: 8,
     healthyShare: 0.8,
@@ -182,7 +185,7 @@ describe("selectStoryCard", () => {
     expect(card!.coverage.bagimsiz.count).toBe(1);
   });
 
-  it("computes the per-zone denominator from zoneYieldDenominator against the supplied health", () => {
+  it("computes the per-zone denominator from zoneVotingYieldDenominator against the supplied health", () => {
     const members: ClusterDetailMember[] = [
       mkMember(
         "a1",
@@ -198,8 +201,8 @@ describe("selectStoryCard", () => {
       ),
     ];
     const health = mkHealth({
-      iktidar: { delivering: 5 },
-      muhalefet: { delivering: 3 },
+      iktidar: { votingDelivering: 5 },
+      muhalefet: { votingDelivering: 3 },
     });
 
     const card = selectStoryCard(members, health);
@@ -208,6 +211,57 @@ describe("selectStoryCard", () => {
     expect(card!.coverage.iktidar.denominatorUnknown).toBe(false);
     expect(card!.coverage.muhalefet.denominator).toBe(3);
     expect(card!.coverage.bagimsiz.denominator).toBe(8); // mkZoneHealth default
+  });
+
+  // h53-consistency-2: the numerator counts VOTING members only, so the
+  // denominator must be the VOTING delivering count too. Before the fix the
+  // card printed "2 / 37" for Bağımsız where the voting basis was 24.
+  it("h53-consistency-2: the denominator is votingDelivering, never the all-kinds delivering count", () => {
+    const members: ClusterDetailMember[] = [
+      mkMember("a1", mkSource({ id: "c1", bias: "center" }), "Bütçe teklifi mecliste kabul edildi", "2026-09-10T08:00:00Z"),
+      mkMember("a2", mkSource({ id: "c2", bias: "international" }), "Bütçe görüşmelerinde uzlaşma arayışı", "2026-09-10T09:00:00Z"),
+      mkMember("a3", mkSource({ id: "n1", bias: "center", kind: "niche" }), "Niş kaynak başlığı", "2026-09-10T10:00:00Z"),
+    ];
+    const health = mkHealth({});
+    health.bagimsiz = { ...health.bagimsiz, delivering: 37, votingDelivering: 24 };
+
+    const card = selectStoryCard(members, health);
+
+    expect(card!.coverage.bagimsiz.count).toBe(2);
+    expect(card!.coverage.bagimsiz.denominator).toBe(24);
+    expect(card!.coverage.bagimsiz.denominator).toBe(health.bagimsiz.votingDelivering);
+    expect(card!.coverage.bagimsiz.denominator).not.toBe(health.bagimsiz.delivering);
+    // The niche member stays out of the count and is reported separately.
+    expect(card!.nonVotingCount).toBe(1);
+  });
+
+  it("every zone's denominator equals that zone's votingDelivering", () => {
+    const members: ClusterDetailMember[] = [
+      mkMember("a1", mkSource({ id: "gov1", bias: "pro_government" }), "Bütçe teklifi mecliste kabul edildi", "2026-09-10T08:00:00Z"),
+    ];
+    const health = mkHealth({
+      iktidar: { delivering: 31, votingDelivering: 28 },
+      bagimsiz: { delivering: 37, votingDelivering: 24 },
+      muhalefet: { delivering: 19, votingDelivering: 18 },
+    });
+
+    const card = selectStoryCard(members, health);
+
+    expect(
+      (["iktidar", "bagimsiz", "muhalefet"] as const).map((z) => card!.coverage[z].denominator),
+    ).toEqual([28, 24, 18]);
+  });
+
+  it("a zone with no delivering voting source has denominator 0 (a real zero), not null", () => {
+    const members: ClusterDetailMember[] = [
+      mkMember("a1", mkSource({ id: "gov1", bias: "pro_government" }), "Bütçe teklifi mecliste kabul edildi", "2026-09-10T08:00:00Z"),
+    ];
+    const health = mkHealth({ muhalefet: { delivering: 2, votingDelivering: 0 } });
+
+    const card = selectStoryCard(members, health);
+
+    expect(card!.coverage.muhalefet.denominator).toBe(0);
+    expect(card!.coverage.muhalefet.denominatorUnknown).toBe(false);
   });
 
   it("flags every zone's denominator unknown when health is null", () => {
