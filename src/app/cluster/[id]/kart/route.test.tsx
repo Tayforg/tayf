@@ -22,8 +22,8 @@ vi.mock("@/lib/clusters/cluster-detail-query", () => ({
 
 const getZoneFeedHealth = vi.fn();
 vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
-  // zoneYieldDenominator is a pure helper story-card.ts calls — keep the
-  // real one, mock only the network-backed fetcher.
+  // zoneVotingYieldDenominator is a pure helper story-card.ts calls — keep
+  // the real one, mock only the network-backed fetcher.
   const actual = await importOriginal<typeof import("@/lib/clusters/feed-health")>();
   return { ...actual, getZoneFeedHealth: () => getZoneFeedHealth() };
 });
@@ -103,7 +103,10 @@ function mkZoneHealth(overrides: Partial<ZoneHealth> = {}): ZoneHealth {
     total: 10,
     fetchOk: 9,
     fetchOkShare: 0.9,
-    delivering: 8,
+    // delivering (all kinds) deliberately differs from votingDelivering: the
+    // card's denominator must come from the voting count.
+    delivering: 10,
+    votingDelivering: 8,
     deliveringShare: 0.8,
     healthy: 8,
     healthyShare: 0.8,
@@ -316,7 +319,10 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("prints the yield denominator per zone when feed health is known", async () => {
     getZoneFeedHealth.mockResolvedValue(
-      mkHealth({ iktidar: { delivering: 5 }, muhalefet: { delivering: 3 } }),
+      mkHealth({
+        iktidar: { votingDelivering: 5 },
+        muhalefet: { votingDelivering: 3 },
+      }),
     );
     getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
@@ -332,6 +338,65 @@ describe("GET /cluster/[id]/kart", () => {
     expect(text).toContain("1 / 3 kaynak");
     expect(text).toContain("0 / 8 kaynak");
     expect(text).not.toContain("payda bilinmiyor");
+    // The all-kinds delivering figure (10 in every zone) is never printed.
+    expect(text).not.toContain("/ 10 kaynak");
+  });
+
+  // h53-consistency-2: a Bağımsız zone where 24 voting + 13 non-voting feeds
+  // delivered printed "2 / 37 kaynak" on the shareable image although the
+  // voting basis was 24. Numerator and denominator now share one basis.
+  it("h53-consistency-2: renders '2 / 24 kaynak' for a Bağımsız zone with 24 voting and 13 non-voting delivering feeds", async () => {
+    getZoneFeedHealth.mockResolvedValue(
+      mkHealth({ bagimsiz: { delivering: 37, votingDelivering: 24 } }),
+    );
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([
+        mkMember("a1", CENTER, CENTER_TITLE),
+        mkMember("a2", mkSource({ id: "c2", name: "Bağımsız Gazete", bias: "center" }), CENTER_TITLE),
+        mkMember(
+          "a3",
+          mkSource({ id: "niche1", name: "Niş Kaynak", bias: "center", kind: "niche" }),
+          "Niş kaynak başlığı",
+        ),
+      ]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("2 / 24 kaynak");
+    expect(text).not.toContain("2 / 37");
+    expect(text).not.toContain("37 kaynak");
+    // The non-voting disclosure line is unchanged.
+    expect(text).toContain("+1 toplayıcı / niş kaynak spektruma sayılmaz");
+    expect(text).not.toContain("Niş kaynak başlığı");
+  });
+
+  it("h53-consistency-2: all three zones print their voting denominator (28 / 24 / 18 replay)", async () => {
+    getZoneFeedHealth.mockResolvedValue(
+      mkHealth({
+        iktidar: { delivering: 31, votingDelivering: 28 },
+        bagimsiz: { delivering: 37, votingDelivering: 24 },
+        muhalefet: { delivering: 19, votingDelivering: 18 },
+      }),
+    );
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([
+        mkMember("a1", GOV, GOV_TITLE),
+        mkMember("a2", CENTER, CENTER_TITLE),
+        mkMember("a3", OPP, OPP_TITLE),
+      ]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("1 / 28 kaynak");
+    expect(text).toContain("1 / 24 kaynak");
+    expect(text).toContain("1 / 18 kaynak");
+    for (const allKinds of ["/ 31", "/ 37", "/ 19"]) {
+      expect(text).not.toContain(allKinds);
+    }
   });
 
   it("renders the silent-zone line for a zone with no members", async () => {
@@ -475,7 +540,10 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("refuses to print an impossible fraction when the count exceeds the yield denominator", async () => {
     getZoneFeedHealth.mockResolvedValue(
-      mkHealth({ iktidar: { delivering: 3 }, muhalefet: { delivering: 0 } }),
+      mkHealth({
+        iktidar: { votingDelivering: 3 },
+        muhalefet: { votingDelivering: 0 },
+      }),
     );
     getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([

@@ -10,20 +10,25 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 export const metadata: Metadata = staticPageMetadata({
   title: "Kör noktalar",
   description:
-    "Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Türk medyasındaki kör noktaları tek ekranda görün.",
+    "Bir tarafın haberi verdiği, diğer taraflardan az ya da hiç haber çıkmayan hikâyeler. Türk medyasındaki kör noktaları tek ekranda görün.",
   path: "/blindspots",
   alternateTypes: { "application/rss+xml": "/rss/kor-noktalar.xml" },
 });
 
+import Link from "next/link";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { NewsletterForm } from "@/components/newsletter/newsletter-form";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import { DenominatorNote } from "@/components/source/denominator-note";
-import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
+import {
+  NearBlindspotList,
+  nearBlindspotCountLabel,
+} from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
 import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
-import { buildSilenceDigest } from "@/lib/clusters/silence-digest";
+import { BLINDSPOT_LIST_LOOKBACK_DAYS } from "@/lib/clusters/blindspot-pick";
+import { blindspotCountLine } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
 import {
@@ -35,6 +40,7 @@ import { cardEnterClass } from "@/lib/ui/card-enter";
 import {
   getBlindspotsSafe,
   type BlindspotBundle,
+  type BlindspotMoreRow,
 } from "@/lib/clusters/blindspots-query";
 import { getFeedStatusSummary } from "@/lib/sources/feed-status";
 
@@ -59,7 +65,7 @@ export default function BlindspotsPage() {
       <PageHero
         kicker="Sadece bir tarafın gördüğü"
         title="Kör noktalar"
-        subtitle="Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Diğer kaynaklar neden susuyor?"
+        subtitle="Bir tarafın haberi verdiği, diğer taraflardan az ya da hiç haber çıkmayan hikâyeler. Bu bir yok sayma iddiası değil: yalnızca spektruma sayılan kaynaklar sayılır."
       />
 
       <p className="text-xs text-muted-foreground">
@@ -121,6 +127,13 @@ export async function BlindspotsFeed() {
 
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
+  const countLine = result.ok
+    ? blindspotCountLine(
+        result.claimCount,
+        result.sideCounts,
+        BLINDSPOT_LIST_LOOKBACK_DAYS,
+      )
+    : null;
 
   return (
     <>
@@ -158,9 +171,15 @@ export async function BlindspotsFeed() {
         </div>
       ) : (
         <>
-          {/* Derived from the bundles already loaded above (the whole page
-              is the window): no extra query, no clock read. */}
-          <SilenceDigestBand digest={buildSilenceDigest(result.bundles)} />
+          {/* h53-consistency-1: the list is every public claim of the trailing
+              7 days. The count line and the band below are counted by the
+              fetcher over ALL of them (no extra query, no clock read here);
+              only the first DISPLAY_LIMIT get a full card, the rest follow as
+              compact rows. */}
+          {countLine && (
+            <p className="text-sm text-muted-foreground">{countLine}</p>
+          )}
+          <SilenceDigestBand digest={result.digest} />
           <div className="space-y-4">
             {result.bundles.map((b, i) => {
               const hoursAgo =
@@ -184,6 +203,7 @@ export async function BlindspotsFeed() {
               );
             })}
           </div>
+          {result.more.length > 0 && <MoreBlindspotList rows={result.more} />}
         </>
       )}
 
@@ -237,6 +257,66 @@ async function BlindspotsDenominator() {
 export async function NearBlindspotsSection() {
   await connection();
   return <NearBlindspotList items={await getNearBlindspotsSafe()} />;
+}
+
+// "Diğer kör noktalar": the claims of the window that did not get one of the
+// full cards, one line each (title, "%P Taraf", "N kaynak"), no images. Same
+// shape as the "Kör noktaya yakın" rows. The percent comes from the row's
+// voting tally by largest remainder (dominantZonePercent), the very rule the
+// card's chip and bar use, so a row never prints a number its cluster page
+// disagrees with. The links do not prefetch: this list can hold a hundred
+// request-time cluster pages.
+function MoreBlindspotList({ rows }: { rows: BlindspotMoreRow[] }) {
+  return (
+    <section
+      aria-labelledby="diger-kor-noktalar"
+      className="space-y-3 rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5"
+    >
+      <h2 id="diger-kor-noktalar" className="font-serif text-sm font-semibold">
+        Diğer kör noktalar
+      </h2>
+      <p className="max-w-[65ch] text-xs text-muted-foreground leading-relaxed">
+        {`Son ${BLINDSPOT_LIST_LOOKBACK_DAYS} günün, kart olarak gösterilmeyen ${rows.length} kör noktası; en belirgin olandan başlıyor.`}
+      </p>
+      <ul className="divide-y divide-border/40">
+        {rows.map((row) => {
+          const meta = ZONE_META[row.dominantZone];
+          const pct = dominantZonePercent(row.votingZoneCounts, row.dominantZone);
+          const votingTotal =
+            row.votingZoneCounts.iktidar +
+            row.votingZoneCounts.bagimsiz +
+            row.votingZoneCounts.muhalefet;
+          return (
+            <li
+              key={row.id}
+              className="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+            >
+              <Link
+                href={`/cluster/${row.id}`}
+                prefetch={false}
+                className="min-w-0 font-serif text-sm font-medium text-foreground underline-offset-2 hover:underline"
+              >
+                {row.title}
+              </Link>
+              <div className="flex shrink-0 flex-wrap items-center gap-2 text-[11px]">
+                <span
+                  className={`inline-flex items-center rounded-full ${meta.chipBg} ${meta.chipBorder} border px-2.5 py-0.5 font-serif font-semibold ${meta.chipText}`}
+                >
+                  {`%${pct} ${meta.label}`}
+                </span>
+                <span
+                  className="text-muted-foreground"
+                  title="Toplayıcı ve niş kaynaklar spektruma sayılmaz."
+                >
+                  {nearBlindspotCountLabel(row.sourceCount, votingTotal)}
+                </span>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
 }
 
 interface BlindspotCardProps {

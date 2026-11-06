@@ -1,7 +1,7 @@
 import { zoneOf } from "@/lib/bias/config";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import {
-  zoneYieldDenominator,
+  zoneVotingYieldDenominator,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
@@ -29,7 +29,9 @@ export interface StoryCardZoneCoverage {
    *  the share bar and the "N / M kaynak" count even when no single
    *  headline from the zone was eligible to display. */
   count: number;
-  /** `zoneYieldDenominator(health, zone)` — null when health is unknown. */
+  /** `zoneVotingYieldDenominator(health, zone)` — the zone's delivering
+   *  VOTING sources (outlet / wire), the same basis as `count`, which also
+   *  leaves aggregator and niche members out. Null when health is unknown. */
   denominator: number | null;
   /** True when `health` was null, i.e. the denominator above is not a
    *  real number — callers must render the wording-without-numbers
@@ -150,7 +152,11 @@ export function selectStoryCard(
 
     const zoneCoverage = coverage[zone];
     zoneCoverage.count = zoneMembers.length;
-    zoneCoverage.denominator = zoneYieldDenominator(health, zone);
+    // Voting basis on both sides of the fraction: `count` above is voting
+    // members only, so the denominator must not include delivering
+    // aggregator / niche feeds (h53-consistency-2: "2 / 37" for a zone whose
+    // voting basis was 24).
+    zoneCoverage.denominator = zoneVotingYieldDenominator(health, zone);
     zoneCoverage.denominatorUnknown = health === null;
     zoneCoverage.degraded = health ? health[zone].degraded : false;
 

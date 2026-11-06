@@ -1,11 +1,32 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
-import type { BlindspotBundle } from "@/lib/clusters/blindspots-query";
+import type {
+  BlindspotBundle,
+  BlindspotMoreRow,
+} from "@/lib/clusters/blindspots-query";
 import {
   BLINDSPOTS_FEED_MAX_ITEMS,
+  blindspotMoreRssItem,
   blindspotRssItem,
+  blindspotsFeedResponse,
   buildBlindspotsRssXml,
 } from "./blindspots-feed";
+
+// blindspotsFeedResponse reads the query through getBlindspots(); the pure
+// builders below never touch it.
+const mocks = vi.hoisted(() => ({ result: null as unknown, throws: false }));
+vi.mock("@/lib/clusters/blindspots-query", () => ({
+  getBlindspots: vi.fn(async () => {
+    if (mocks.throws) throw new Error("boom");
+    return mocks.result;
+  }),
+}));
+vi.mock("@/lib/site-url", () => ({ siteUrl: () => "https://tayfhaber.com" }));
+
+beforeEach(() => {
+  mocks.result = null;
+  mocks.throws = false;
+});
 
 const BASE = "https://tayfhaber.com";
 
@@ -43,13 +64,34 @@ function bundle(
   } as unknown as BlindspotBundle;
 }
 
+/** A compact row as the query returns it: 11 of 13 voters in the dominant zone. */
+function moreRow(
+  id: string,
+  overrides: Partial<BlindspotMoreRow> = {},
+): BlindspotMoreRow {
+  return {
+    id,
+    title: `Kompakt ${id}`,
+    dominantZone: "iktidar",
+    dominantPct: 11 / 13,
+    sourceCount: 13,
+    firstPublished: "2026-09-19T08:00:00.000Z",
+    votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+    ...overrides,
+  };
+}
+
+function guids(xml: string): string[] {
+  return [...xml.matchAll(/<guid[^>]*>([^<]*)<\/guid>/g)].map((m) => m[1]!);
+}
+
 function count(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
 describe("BLINDSPOTS_FEED_MAX_ITEMS", () => {
-  it("is 30", () => {
-    expect(BLINDSPOTS_FEED_MAX_ITEMS).toBe(30);
+  it("is 60: the 30 cards plus up to 30 compact rows (h53-consistency-1)", () => {
+    expect(BLINDSPOTS_FEED_MAX_ITEMS).toBe(60);
   });
 });
 
@@ -199,17 +241,66 @@ describe("buildBlindspotsRssXml", () => {
     const xml = buildBlindspotsRssXml(BASE, [], "/blindspots/rss.xml");
     expect(xml).toContain("<title>Tayf — Kör noktalar</title>");
     expect(xml).toContain("<link>https://tayfhaber.com/blindspots</link>");
-    expect(xml).toContain(
-      "Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler.",
-    );
+  });
+
+  // h53-consistency-5: the channel description said the other sides "ignored"
+  // the story. It states the coverage and nothing about intent.
+  it("describes the coverage, never motive, on both feed paths", () => {
+    for (const path of ["/rss/kor-noktalar.xml", "/blindspots/rss.xml"]) {
+      const xml = buildBlindspotsRssXml(BASE, [], path);
+      expect(xml).toContain(
+        "<description>Bir tarafın haberi verdiği, diğer taraflardan az ya da hiç haber çıkmayan hikâyeler.</description>",
+      );
+      expect(xml).not.toMatch(/görmezden|susuyor/i);
+    }
   });
 
   it("caps the item count at BLINDSPOTS_FEED_MAX_ITEMS and keeps the first ones", () => {
-    const bundles = Array.from({ length: 40 }, (_, i) => bundle(`c${i}`));
+    const bundles = Array.from({ length: 70 }, (_, i) => bundle(`c${i}`));
     const xml = buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml");
     expect(count(xml, "<item>")).toBe(BLINDSPOTS_FEED_MAX_ITEMS);
-    expect(xml).toContain("/cluster/c29");
-    expect(xml).not.toContain("/cluster/c30");
+    expect(xml).toContain("/cluster/c59");
+    expect(xml).not.toContain("/cluster/c60");
+  });
+
+  // h53-consistency-1: the feed reaches every claim of the window, in the
+  // page's order: the cards first, then the compact rows.
+  it("lists the bundles first, then the compact rows, in the page's order", () => {
+    const bundles = [bundle("b1"), bundle("b2")];
+    const more = [moreRow("m1"), moreRow("m2"), moreRow("m3")];
+    const xml = buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml", more);
+    expect(guids(xml)).toEqual(
+      ["b1", "b2", "m1", "m2", "m3"].map((id) => `${BASE}/cluster/${id}`),
+    );
+  });
+
+  it("caps bundles + rows at 60 and keeps the bundles whole when the rows overflow", () => {
+    const bundles = Array.from({ length: 30 }, (_, i) => bundle(`b${i}`));
+    const more = Array.from({ length: 50 }, (_, i) => moreRow(`m${i}`));
+    const xml = buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml", more);
+    expect(count(xml, "<item>")).toBe(60);
+    expect(xml).toContain("/cluster/b29");
+    expect(xml).toContain("/cluster/m29");
+    expect(xml).not.toContain("/cluster/m30");
+  });
+
+  it("every <link> is unique, even when a claim is in both lists", () => {
+    const bundles = [bundle("dup"), bundle("b2")];
+    const more = [moreRow("dup"), moreRow("m1"), moreRow("m1")];
+    const xml = buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml", more);
+    const links = [...xml.matchAll(/<link>(https:\/\/tayfhaber\.com\/cluster\/[^<]*)<\/link>/g)].map(
+      (m) => m[1]!,
+    );
+    expect(links).toHaveLength(3);
+    expect(new Set(links).size).toBe(3);
+    expect(guids(xml)).toEqual(["dup", "b2", "m1"].map((id) => `${BASE}/cluster/${id}`));
+  });
+
+  it("without compact rows it is the feed it always was", () => {
+    const bundles = [bundle("c1"), bundle("c2")];
+    expect(buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml", [])).toBe(
+      buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml"),
+    );
   });
 
   it("emits no items and no lastBuildDate for an empty list", () => {
@@ -219,8 +310,114 @@ describe("buildBlindspotsRssXml", () => {
   });
 
   it("does not mutate the input array", () => {
-    const bundles = Array.from({ length: 40 }, (_, i) => bundle(`c${i}`));
-    buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml");
-    expect(bundles).toHaveLength(40);
+    const bundles = Array.from({ length: 70 }, (_, i) => bundle(`c${i}`));
+    const more = Array.from({ length: 5 }, (_, i) => moreRow(`m${i}`));
+    buildBlindspotsRssXml(BASE, bundles, "/blindspots/rss.xml", more);
+    expect(bundles).toHaveLength(70);
+    expect(more).toHaveLength(5);
+  });
+});
+
+describe("blindspotMoreRssItem (h53-consistency-1)", () => {
+  it("maps title, utm-tagged link, clean guid and the claim's first-published time", () => {
+    const item = blindspotMoreRssItem(BASE, moreRow("m9"));
+    expect(item.title).toBe("Kompakt m9");
+    expect(item.guid).toBe("https://tayfhaber.com/cluster/m9");
+    expect(item.pubDate).toBe("2026-09-19T08:00:00.000Z");
+    const url = new URL(item.link);
+    expect(url.origin + url.pathname).toBe("https://tayfhaber.com/cluster/m9");
+    expect(url.searchParams.get("utm_source")).toBe("rss");
+    expect(url.searchParams.get("utm_medium")).toBe("feed");
+    expect(url.searchParams.get("utm_campaign")).toBe("kor_nokta");
+  });
+
+  it("dates the item by the claim's first publication, never by a later update (review fix correctness-rss-more-pubdate)", () => {
+    // A claim's updated_at moves with every new member; first_published does not. A card
+    // is dated by first_published, so a compact row dated by updated_at would sort above
+    // every card in a date-sorted reader and jump back when it is promoted to a card.
+    const row = {
+      ...moreRow("m3", { firstPublished: "2026-09-18T06:00:00.000Z" }),
+      updatedAt: "2026-09-21T12:00:00.000Z",
+    } as BlindspotMoreRow;
+    expect(blindspotMoreRssItem(BASE, row).pubDate).toBe("2026-09-18T06:00:00.000Z");
+  });
+
+  it("dates a compact row exactly like the card of a claim published at the same time", () => {
+    const published = "2026-09-17T09:30:00.000Z";
+    const card = bundle("same", {
+      cluster: {
+        id: "same",
+        title_tr: "Başlık same",
+        article_count: 5,
+        first_published: published,
+        updated_at: "2026-09-22T09:30:00.000Z",
+      },
+    } as unknown as Partial<BlindspotBundle>);
+    expect(blindspotMoreRssItem(BASE, moreRow("same", { firstPublished: published })).pubDate).toBe(
+      blindspotRssItem(BASE, card).pubDate,
+    );
+  });
+
+  it("describes the row exactly as a card item: zone, largest-remainder percent (%84, not %85), count, zone line", () => {
+    expect(blindspotMoreRssItem(BASE, moreRow("m1")).description).toBe(
+      "Kör nokta: ağırlıkla İktidar kaynakları (%84). 13 kaynak · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+    );
+  });
+
+  it("marks the voting count when aggregators are among the members", () => {
+    const item = blindspotMoreRssItem(
+      BASE,
+      moreRow("m2", {
+        dominantZone: "muhalefet",
+        sourceCount: 10,
+        votingZoneCounts: { iktidar: 0, bagimsiz: 0, muhalefet: 8 },
+      }),
+    );
+    expect(item.description).toBe(
+      "Kör nokta: ağırlıkla Muhalefet kaynakları (%100). 10 kaynak (8 sınıflandırılmış) · İktidar 0 · Bağımsız 0 · Muhalefet 8",
+    );
+  });
+
+  it("gives the same description as the card item for the same claim", () => {
+    const card = bundle("same", {
+      dominantZone: "iktidar",
+      votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+      sources: Array.from({ length: 13 }, (_, i) => ({
+        id: `s${i}`,
+        name: `S${i}`,
+        bias: "pro_government",
+        kind: "outlet",
+      })),
+    } as unknown as Partial<BlindspotBundle>);
+    expect(blindspotMoreRssItem(BASE, moreRow("same")).description).toBe(
+      blindspotRssItem(BASE, card).description,
+    );
+  });
+});
+
+describe("blindspotsFeedResponse (h53-consistency-1)", () => {
+  it("serves the cards followed by the compact rows", async () => {
+    mocks.result = {
+      bundles: [bundle("b1")],
+      more: [moreRow("m1"), moreRow("m2")],
+    };
+    const res = await blindspotsFeedResponse("/rss/kor-noktalar.xml");
+    expect(res.status).toBe(200);
+    expect(guids(await res.text())).toEqual(
+      ["b1", "m1", "m2"].map((id) => `${BASE}/cluster/${id}`),
+    );
+  });
+
+  it("still serves a result that has no compact rows at all", async () => {
+    mocks.result = { bundles: [bundle("b1")] };
+    const res = await blindspotsFeedResponse("/blindspots/rss.xml");
+    expect(res.status).toBe(200);
+    expect(guids(await res.text())).toEqual([`${BASE}/cluster/b1`]);
+  });
+
+  it("answers 503 when the read fails, never an empty feed", async () => {
+    mocks.throws = true;
+    const res = await blindspotsFeedResponse("/rss/kor-noktalar.xml");
+    expect(res.status).toBe(503);
   });
 });

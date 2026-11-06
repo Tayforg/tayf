@@ -15,12 +15,21 @@ import {
   type EmbeddedArticle,
 } from "@/lib/clusters/blindspot-feed";
 import {
+  BLINDSPOT_LIST_LOOKBACK_DAYS,
+  pickBlindspotList,
+  sortBlindspotClaims,
+} from "@/lib/clusters/blindspot-pick";
+import {
   degradedSilentZone,
   getZoneFeedHealth,
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
 import type { BundleSource } from "@/lib/clusters/politics-query";
+import {
+  buildSilenceDigest,
+  type SilenceDigest,
+} from "@/lib/clusters/silence-digest";
 import { wireSignalOf } from "@/lib/clusters/wire";
 import {
   createReaderClient,
@@ -57,7 +66,7 @@ function logSuppression(
 // Fetcher for /blindspots — extracted out of the page component so the
 // cluster-page.test.ts-style unit tests can exercise it without rendering
 // JSX, and so other surfaces (e.g. the weekly digest cron) can reuse the
-// same "most lopsided" query.
+// same list.
 //
 // reader-queries fix: the previous single embedded select ran the
 // cluster_articles -> articles -> sources lateral JOIN for every one of up
@@ -68,10 +77,59 @@ function logSuppression(
 // a lean id-only Step A (cheap: the existing partial index) and a
 // Step-B embed fetch BATCHED over just those ids removes the full-embed
 // cost from every candidate this feed will never render.
+//
+// h53-consistency-1: the list is EVERY public claim of the trailing
+// BLINDSPOT_LIST_LOOKBACK_DAYS days, not "the 30 most lopsided of the 50 most
+// recently updated". Step A used to take the 200 most recently updated flagged
+// clusters (back to mid-October) and Step B stopped after the first batch of 50
+// once 30 bundles passed; the 30 were then cut by share alone. On 2026-11-06 the
+// week held 41 Iktidar and 9 Muhalefet claims and the page showed 28 : 2, its
+// "Bu listede kim yer vermedi?" box read 25 : 2, and /metodoloji's promise that
+// a story appears 24 hours after its first publication was broken for 20
+// claims. Now:
+//   - Step A is bounded below by first_published (the window) and above by
+//     BLINDSPOT_CANDIDATE_SAFETY_CAP, a safety bound and not a sample;
+//   - Step B embeds every candidate (at most CAP / EMBED_BATCH_SIZE = 3
+//     batches), concurrently with the feed-health read;
+//   - blindspot-pick.ts gives the 30 full cards (side-balanced round-robin);
+//   - every other passing claim comes back as a slim `more` row, and the
+//     counts and the silence digest are computed here over ALL claims, so the
+//     cached payload stays small (30 bundles + slim rows + two tiny objects).
+//
+// Step A plan -- `EXPLAIN (ANALYZE, BUFFERS)` against production, 2026-11-06,
+// read-only, with the window bound:
+//
+//   Limit (actual time=1.838..1.847 rows=46)
+//     -> Sort (Sort Key: updated_at DESC)
+//        -> Bitmap Heap Scan on clusters (rows=46, Rows Removed by Filter: 33)
+//           Recheck Cond: is_blindspot AND first_published < now() - 24 h
+//                         AND first_published >= now() - 7 days
+//           Filter: NOT blindspot_recall_veto AND NOT is_archived
+//                   AND article_count >= 3
+//           -> BitmapAnd
+//              -> Bitmap Index Scan on clusters_blindspot_checked_idx (rows=1248)
+//              -> Bitmap Index Scan on idx_clusters_first_published (rows=6118)
+//   Execution Time: 1.9 ms (cost 155; buffers: shared hit=133)
+//
+// The unbounded Step A it replaces took 13.4 ms (cost 222, 963 rows scanned for
+// the 200 returned), so the bound makes it cheaper, not dearer. That week had
+// 46 candidates, all of them live claims: the cap of 150 is about 3x headroom,
+// and it is a bound on embed work (3 batches), not a way to pick claims. When
+// it is reached the oldest-updated candidates fall off and a warning says so.
+// Step B for those 46 ids (an embed-shaped join) ran in about 116 ms.
 const PREFILTER_MIN_ARTICLE_COUNT = 3;
-const CANDIDATE_LIMIT = 200;
+// Trailing window of the list, in days (first_published >= now - this); defined
+// beside the pick so the page can name it without importing this module.
+export { BLINDSPOT_LIST_LOOKBACK_DAYS };
+/**
+ * Upper bound on Step A ids, hence on Step B work: 150 / EMBED_BATCH_SIZE = at
+ * most 3 embed batches. A safety bound, not a sample: a full week held 46.
+ */
+export const BLINDSPOT_CANDIDATE_SAFETY_CAP = 150;
+/** Full cards on the page; every other claim is a compact row. */
 const DISPLAY_LIMIT = 30;
 export const EMBED_BATCH_SIZE = 50;
+const DAY_MS = 24 * 3_600_000;
 
 type EmbeddedClusterArticle = {
   articles: EmbeddedArticle | null;
@@ -123,6 +181,47 @@ export interface BlindspotBundle {
   votingZoneCounts: Record<MediaDnaZone, number>;
   isWireRedistribution: boolean;
   effectiveArticleCount: number;
+}
+
+/**
+ * A claim that passes the blindspot contract but did not get one of the
+ * DISPLAY_LIMIT full cards. Slim on purpose: it is part of the cached payload
+ * and /blindspots renders it as one compact line (title link, "%P <Taraf>",
+ * "N kaynak"), so it carries no cluster, article or source objects. The voting
+ * tally rides along so the percent can come from the same largest-remainder
+ * rule as the card's chip and bar (dominantPct is only the sort key).
+ */
+export interface BlindspotMoreRow {
+  id: string;
+  /** title_tr_neutral ?? title_tr, as on the card. */
+  title: string;
+  dominantZone: MediaDnaZone;
+  dominantPct: number;
+  /** Every de-duplicated member, as the card's "N kaynak". */
+  sourceCount: number;
+  /**
+   * When the claim was first published (clusters.first_published), the date a
+   * card's feed item carries. Not updated_at: that moves with every new member,
+   * so a compact row dated by it would sort above every card in a date-sorted
+   * reader and move again when the row is promoted to a card. Its only consumer
+   * is the RSS feed.
+   */
+  firstPublished: string;
+  votingZoneCounts: Record<MediaDnaZone, number>;
+}
+
+/** Everything /blindspots, its feeds and the crons read from one fetch. */
+export interface BlindspotsData {
+  /** The full cards: DISPLAY_LIMIT claims, side-balanced, most lopsided first. */
+  bundles: BlindspotBundle[];
+  /** Every other passing claim of the window, most lopsided first. */
+  more: BlindspotMoreRow[];
+  /** bundles.length + more.length: every public claim of the window. */
+  claimCount: number;
+  /** Claims per dominant zone over the whole window; sums to claimCount. */
+  sideCounts: Record<MediaDnaZone, number>;
+  /** "Bu listede kim yer vermedi?", counted over ALL claims, not the cards. */
+  digest: SilenceDigest;
 }
 
 function normalizeDistribution(raw: unknown): BiasDistribution {
@@ -271,8 +370,12 @@ function clientFor(profile: ReadProfile) {
  * scales with the number of candidates that end up discarded. */
 async function fetchCandidateIds(profile: ReadProfile): Promise<string[]> {
   const supabase = clientFor(profile);
+  const now = Date.now();
   const blindspotCutoffIso = new Date(
-    Date.now() - BLINDSPOT.feedDelayHours * 3600 * 1000,
+    now - BLINDSPOT.feedDelayHours * 3600 * 1000,
+  ).toISOString();
+  const lookbackIso = new Date(
+    now - BLINDSPOT_LIST_LOOKBACK_DAYS * DAY_MS,
   ).toISOString();
 
   const { data, error } = await supabase
@@ -283,14 +386,21 @@ async function fetchCandidateIds(profile: ReadProfile): Promise<string[]> {
     .eq("blindspot_recall_veto", false)
     .eq("is_archived", false)
     .lt("first_published", blindspotCutoffIso)
+    .gte("first_published", lookbackIso)
     .order("updated_at", { ascending: false })
-    .limit(CANDIDATE_LIMIT)
+    .limit(BLINDSPOT_CANDIDATE_SAFETY_CAP)
     .returns<Array<{ id: string }>>();
 
   if (error) {
     throw new Error(`[blindspots] candidate select error: ${error.message}`);
   }
-  return (data ?? []).map((r) => r.id);
+  const ids = (data ?? []).map((r) => r.id);
+  if (ids.length >= BLINDSPOT_CANDIDATE_SAFETY_CAP) {
+    console.warn(
+      `[blindspots] candidate cap ${BLINDSPOT_CANDIDATE_SAFETY_CAP} reached; the oldest-updated claims of the ${BLINDSPOT_LIST_LOOKBACK_DAYS}-day window are not listed`,
+    );
+  }
+  return ids;
 }
 
 /** Step B: fetch the embed for one batch of ids (order/limit-free — the
@@ -312,47 +422,89 @@ export async function fetchEmbedBatch(
   return data ?? [];
 }
 
+function zeroSideCounts(): Record<MediaDnaZone, number> {
+  return { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+}
+
+/** The slim form of a claim that did not get a card. */
+function toMoreRow(b: BlindspotBundle): BlindspotMoreRow {
+  return {
+    id: b.cluster.id,
+    title: b.cluster.title_tr,
+    dominantZone: b.dominantZone,
+    dominantPct: b.dominantPct,
+    sourceCount: b.sources.length,
+    firstPublished: b.cluster.first_published,
+    votingZoneCounts: { ...b.votingZoneCounts },
+  };
+}
+
+/** The digest of `claims`, annotated with how many of them are full cards. */
+function scopedDigest(
+  claims: readonly BlindspotBundle[],
+  shown: number,
+): SilenceDigest {
+  return {
+    ...buildSilenceDigest(claims),
+    scope: { windowDays: BLINDSPOT_LIST_LOOKBACK_DAYS, shown },
+  };
+}
+
 // Internal (uncached) implementation. The exported `getBlindspots` wraps
 // this with `"use cache"` below.
-async function fetchBlindspots(
-  profile: ReadProfile,
-): Promise<{ bundles: BlindspotBundle[] }> {
+async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
   const ids = await fetchCandidateIds(profile);
-  if (ids.length === 0) return { bundles: [] };
-
-  const order = new Map(ids.map((id, i) => [id, i]));
-  const bundles: BlindspotBundle[] = [];
-  let health: ZoneFeedHealth | null = null;
-
-  for (let i = 0; i < ids.length && bundles.length < DISPLAY_LIMIT; i += EMBED_BATCH_SIZE) {
-    const batchIds = ids.slice(i, i + EMBED_BATCH_SIZE);
-    let rows: EmbeddedClusterRow[];
-    if (i === 0) {
-      // Fetch feed health once, alongside the FIRST batch only — every
-      // later batch reuses it.
-      const [fetchedHealth, batchRows] = await Promise.all([
-        getZoneFeedHealth({ profile }),
-        fetchEmbedBatch(batchIds, profile),
-      ]);
-      health = fetchedHealth;
-      rows = batchRows;
-    } else {
-      rows = await fetchEmbedBatch(batchIds, profile);
-    }
-
-    const sortedRows = [...rows].sort(
-      (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
-    );
-    for (const row of sortedRows) {
-      const bundle = toBlindspotBundle(row, health);
-      if (bundle) bundles.push(bundle);
-    }
+  if (ids.length === 0) {
+    return {
+      bundles: [],
+      more: [],
+      claimCount: 0,
+      sideCounts: zeroSideCounts(),
+      digest: scopedDigest([], 0),
+    };
   }
 
-  // Most lopsided first — a 100% iktidar cluster is a starker blindspot
-  // than a 86% one and deserves the top slot.
-  bundles.sort((a, b) => b.dominantPct - a.dominantPct);
-  return { bundles: bundles.slice(0, DISPLAY_LIMIT) };
+  const order = new Map(ids.map((id, i) => [id, i]));
+  const batches: string[][] = [];
+  for (let i = 0; i < ids.length; i += EMBED_BATCH_SIZE) {
+    batches.push(ids.slice(i, i + EMBED_BATCH_SIZE));
+  }
+
+  // Every candidate is embedded (no early stop at DISPLAY_LIMIT: the pick
+  // below needs ALL passing claims), the batches and the one feed-health read
+  // all in flight together. The cap keeps this to at most 3 batches.
+  const [health, batchRows] = await Promise.all([
+    getZoneFeedHealth({ profile }),
+    Promise.all(batches.map((batchIds) => fetchEmbedBatch(batchIds, profile))),
+  ]);
+
+  const rows = batchRows
+    .flat()
+    .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const claims: BlindspotBundle[] = [];
+  for (const row of rows) {
+    const bundle = toBlindspotBundle(row, health);
+    if (bundle) claims.push(bundle);
+  }
+
+  // Side-balanced cards, most lopsided first (a 100% cluster is a starker
+  // blindspot than an 86% one); everything else is a slim row in the same order.
+  const bundles = pickBlindspotList(claims, DISPLAY_LIMIT);
+  const carded = new Set(bundles.map((b) => b.cluster.id));
+  const more = sortBlindspotClaims(
+    claims.filter((c) => !carded.has(c.cluster.id)),
+  ).map(toMoreRow);
+
+  const sideCounts = zeroSideCounts();
+  for (const claim of claims) sideCounts[claim.dominantZone] += 1;
+
+  return {
+    bundles,
+    more,
+    claimCount: bundles.length + more.length,
+    sideCounts,
+    digest: scopedDigest(claims, bundles.length),
+  };
 }
 
 // Build-safety: `attemptCached` swallows whatever `fetchBlindspots` throws
@@ -408,7 +560,7 @@ async function getBlindspotsCached(profile: ReadProfile) {
 // live, which is safe because crons and route handlers already have one.
 export async function getBlindspots(
   opts?: { profile?: ReadProfile },
-): Promise<{ bundles: BlindspotBundle[] }> {
+): Promise<BlindspotsData> {
   const profile = opts?.profile ?? "reader";
   return resolveCachedOrThrow(
     {
@@ -420,9 +572,7 @@ export async function getBlindspots(
   );
 }
 
-export type BlindspotsResult =
-  | { ok: true; bundles: BlindspotBundle[] }
-  | { ok: false };
+export type BlindspotsResult = ({ ok: true } & BlindspotsData) | { ok: false };
 
 /**
  * Never-throw wrapper for /blindspots' page component — sits OUTSIDE the
@@ -431,8 +581,7 @@ export type BlindspotsResult =
  */
 export async function getBlindspotsSafe(): Promise<BlindspotsResult> {
   try {
-    const { bundles } = await getBlindspots();
-    return { ok: true, bundles };
+    return { ok: true, ...(await getBlindspots()) };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[blindspots] unavailable: ${message}`);

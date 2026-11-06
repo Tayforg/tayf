@@ -1,14 +1,20 @@
 import { ZONE_META } from "@/lib/bias/config";
 import type { BlindspotBundle } from "@/lib/clusters/blindspots-query";
+import { formatCountTr } from "@/lib/format/number-tr";
 import type { MediaDnaZone } from "@/types";
 
 // "Bu listede kim yer vermedi?" band on /blindspots. Pure derivation over the
-// bundles BlindspotsFeed already loaded: no query, no clock, no I/O.
+// claims the fetcher already loaded: no query, no clock, no I/O.
 //
-// WINDOW: every distinct bundle on the page. /blindspots only lists clusters
+// WINDOW: every distinct claim handed in. /blindspots only lists clusters
 // whose first_published is older than BLINDSPOT.feedDelayHours (24 h), so a
 // "last 24 hours" cut on updated_at left the band with 0-1 stories almost
-// always. The page itself is the window.
+// always. The list itself is the window.
+//
+// h53-consistency-1: the list is the trailing 7 days, of which only the 30
+// side-balanced claims get a full card and the rest are compact rows. The band
+// counts ALL of them (the fetcher passes every claim), so it never disagrees
+// with what the page lists; `SilenceDigest.scope` lets the footnote say so.
 //
 // SILENCE: judged on the VOTING tally (BlindspotBundle.votingZoneCounts, the
 // one dominantZone / dominantPct are built from), never on bundle.sources,
@@ -29,11 +35,25 @@ export interface SilenceRow {
   byDominant: Array<{ zone: MediaDnaZone; count: number }>;
 }
 
+/** What the counted stories span and how many of them are full cards. */
+export interface SilenceScope {
+  /** Length of the trailing window the stories were taken from, in days. */
+  windowDays: number;
+  /** How many of the counted stories are shown as full cards. */
+  shown: number;
+}
+
 export interface SilenceDigest {
-  /** De-duplicated page stories the rows were computed from. */
+  /** De-duplicated stories the rows were computed from. */
   windowTotal: number;
   /** Always exactly three rows, in ZONE_ROW_ORDER. */
   rows: SilenceRow[];
+  /**
+   * Set by the /blindspots fetcher, which counts a whole window but shows only
+   * part of it as cards; absent for any other caller (the footnote then says
+   * "Bu sayfadaki").
+   */
+  scope?: SilenceScope;
 }
 
 type DigestBundle = Pick<
@@ -116,6 +136,52 @@ export function formatSilenceRow(row: SilenceRow): string {
   return `${subject} ${row.silentCount} hikâyeye yer vermedi (${parts})`;
 }
 
-export function silenceFootnote(storyCount: number): string {
-  return `Bu sayfadaki ${storyCount} kör nokta hikâyesi sayıldı. Bir bölgedeki gazete, TV ve ajanslardan hiçbiri haberi yapmadıysa “yer vermedi” sayılır (toplayıcı ve niş siteler, kör nokta hesabında olduğu gibi, sayılmaz); bir hikâye birden fazla satırda sayılabilir.`;
+const SILENCE_RULE =
+  "Bir bölgedeki gazete, TV ve ajanslardan hiçbiri haberi yapmadıysa “yer vermedi” sayılır (toplayıcı ve niş siteler, kör nokta hesabında olduğu gibi, sayılmaz); bir hikâye birden fazla satırda sayılabilir.";
+
+/**
+ * The band's footnote. Without a scope it counts "the page" (any caller that
+ * hands in exactly what it lists); with one it names the window and how many of
+ * the counted stories are full cards, the rest being compact rows.
+ */
+export function silenceFootnote(
+  storyCount: number,
+  scope?: SilenceScope,
+): string {
+  if (!scope) {
+    return `Bu sayfadaki ${storyCount} kör nokta hikâyesi sayıldı. ${SILENCE_RULE}`;
+  }
+  const counted = `Son ${scope.windowDays} günün ${storyCount} kör nokta hikâyesi sayıldı`;
+  const cards =
+    scope.shown < storyCount
+      ? `; listede ${scope.shown} tanesi kart olarak gösteriliyor`
+      : "";
+  return `${counted}${cards}. ${SILENCE_RULE}`;
+}
+
+/**
+ * The count line above the /blindspots list:
+ *
+ *   "Son 7 günde 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9"
+ *
+ * İktidar and Muhalefet are always named (a "Muhalefet tarafında 0" is a
+ * finding); Bağımsız only when it is above zero. Same side wording as the
+ * weekly page's tally line (week-copy.ts). `null` when there is no claim, so
+ * the empty state speaks instead.
+ */
+export function blindspotCountLine(
+  claimCount: number,
+  sideCounts: Record<MediaDnaZone, number>,
+  windowDays: number,
+): string | null {
+  if (!(claimCount > 0)) return null;
+  const parts = [
+    `Son ${windowDays} günde ${formatCountTr(claimCount)} kör nokta`,
+    `İktidar tarafında ${formatCountTr(sideCounts.iktidar)}`,
+    `Muhalefet tarafında ${formatCountTr(sideCounts.muhalefet)}`,
+  ];
+  if (sideCounts.bagimsiz > 0) {
+    parts.push(`Bağımsız tarafında ${formatCountTr(sideCounts.bagimsiz)}`);
+  }
+  return parts.join(" · ");
 }

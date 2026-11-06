@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import * as silenceModule from "./silence-digest";
 import {
   ZONE_ROW_ORDER,
+  blindspotCountLine,
   buildSilenceDigest,
   capitalizeTr,
   formatSilenceRow,
@@ -411,6 +412,93 @@ describe("silenceFootnote", () => {
   });
 });
 
+// h53-consistency-1: the band used to count only the 30 cards on the page. It
+// now counts every public claim of the trailing 7 days, and the footnote says
+// how many of those are shown as full cards (the rest are compact rows below).
+describe("silenceFootnote with a scope (h53-consistency-1)", () => {
+  const RULE =
+    "Bir bölgedeki gazete, TV ve ajanslardan hiçbiri haberi yapmadıysa “yer vermedi” sayılır (toplayıcı ve niş siteler, kör nokta hesabında olduğu gibi, sayılmaz); bir hikâye birden fazla satırda sayılabilir.";
+
+  it("names the window, the counted stories and how many are cards", () => {
+    expect(silenceFootnote(46, { windowDays: 7, shown: 30 })).toBe(
+      `Son 7 günün 46 kör nokta hikâyesi sayıldı; listede 30 tanesi kart olarak gösteriliyor. ${RULE}`,
+    );
+  });
+
+  it("drops the card clause when every counted story is a card", () => {
+    expect(silenceFootnote(12, { windowDays: 7, shown: 12 })).toBe(
+      `Son 7 günün 12 kör nokta hikâyesi sayıldı. ${RULE}`,
+    );
+    expect(silenceFootnote(1, { windowDays: 7, shown: 1 })).not.toContain("kart olarak");
+  });
+
+  it("leaves the default wording exactly as it was for any caller without a scope", () => {
+    expect(silenceFootnote(2)).toBe(`Bu sayfadaki 2 kör nokta hikâyesi sayıldı. ${RULE}`);
+    expect(silenceFootnote(2, undefined)).toBe(silenceFootnote(2));
+  });
+
+  it("keeps the voting-kind rule and the multi-row caveat in the scoped wording", () => {
+    const text = silenceFootnote(46, { windowDays: 7, shown: 30 });
+    expect(text).toContain("toplayıcı ve niş siteler, kör nokta hesabında olduğu gibi, sayılmaz");
+    expect(text).toContain("bir hikâye birden fazla satırda sayılabilir");
+    expect(text).not.toContain("Bu sayfadaki");
+  });
+
+  it("buildSilenceDigest stays a function of the bundles alone", () => {
+    expect(buildSilenceDigest.length).toBe(1);
+  });
+});
+
+describe("buildSilenceDigest over a whole window (h53-consistency-1)", () => {
+  it("counts all 46 claims, not a page of 30", () => {
+    const claims = [
+      ...Array.from({ length: 37 }, (_, i) =>
+        mkBundle({ id: `ik-${i}`, dominantZone: "iktidar", voting: { iktidar: 5 } }),
+      ),
+      ...Array.from({ length: 9 }, (_, i) =>
+        mkBundle({ id: `mu-${i}`, dominantZone: "muhalefet", voting: { muhalefet: 5 } }),
+      ),
+    ];
+    const d = buildSilenceDigest(claims);
+    expect(d.windowTotal).toBe(46);
+    // Muhalefet was silent on all 37 Iktidar claims, Iktidar on all 9 Muhalefet ones.
+    expect(row(d, "muhalefet").silentCount).toBe(37);
+    expect(row(d, "iktidar").silentCount).toBe(9);
+  });
+});
+
+describe("blindspotCountLine", () => {
+  it("reads 'Son 7 günde N kör nokta · İktidar tarafında a · Muhalefet tarafında b'", () => {
+    expect(
+      blindspotCountLine(46, { iktidar: 37, bagimsiz: 0, muhalefet: 9 }, 7),
+    ).toBe("Son 7 günde 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9");
+  });
+
+  it("always names Iktidar and Muhalefet, even at 0 (a zero is a finding)", () => {
+    expect(
+      blindspotCountLine(3, { iktidar: 3, bagimsiz: 0, muhalefet: 0 }, 7),
+    ).toBe("Son 7 günde 3 kör nokta · İktidar tarafında 3 · Muhalefet tarafında 0");
+  });
+
+  it("adds Bağımsız only when it is above zero", () => {
+    expect(
+      blindspotCountLine(6, { iktidar: 3, bagimsiz: 2, muhalefet: 1 }, 7),
+    ).toBe(
+      "Son 7 günde 6 kör nokta · İktidar tarafında 3 · Muhalefet tarafında 1 · Bağımsız tarafında 2",
+    );
+  });
+
+  it("is null when there is no claim, so the empty state speaks instead", () => {
+    expect(blindspotCountLine(0, { iktidar: 0, bagimsiz: 0, muhalefet: 0 }, 7)).toBeNull();
+  });
+
+  it("groups thousands the Turkish way", () => {
+    expect(
+      blindspotCountLine(1234, { iktidar: 1000, bagimsiz: 0, muhalefet: 234 }, 7),
+    ).toBe("Son 7 günde 1.234 kör nokta · İktidar tarafında 1.000 · Muhalefet tarafında 234");
+  });
+});
+
 describe("copy policy", () => {
   it("no output string contains görmezden, sustu or gizledi", () => {
     const bundles = [
@@ -423,6 +511,9 @@ describe("copy policy", () => {
       ...d.rows.map((r) => formatSilenceRow({ ...r, silentCount: 0, byDominant: [] })),
       silenceFootnote(d.windowTotal),
       silenceFootnote(0),
+      silenceFootnote(46, { windowDays: 7, shown: 30 }),
+      silenceFootnote(12, { windowDays: 7, shown: 12 }),
+      blindspotCountLine(46, { iktidar: 37, bagimsiz: 2, muhalefet: 7 }, 7) ?? "",
     ];
     for (const s of strings) {
       expect(s).not.toContain("görmezden");

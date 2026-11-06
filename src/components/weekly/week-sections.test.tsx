@@ -40,6 +40,7 @@ function zoneHealth(delivering: number, total: number, degraded = false): ZoneHe
     fetchOk: total,
     fetchOkShare: 1,
     delivering,
+    votingDelivering: delivering,
     deliveringShare: total === 0 ? 0 : delivering / total,
     healthy: delivering,
     healthyShare: total === 0 ? 0 : delivering / total,

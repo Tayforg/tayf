@@ -12,6 +12,11 @@ import type { ReactNode } from "react";
 // resilience-1), not the bundle-rendering path (already covered by
 // blindspots-query.test.ts).
 //
+// h53-consistency-1: the fetch result is now { bundles, more, claimCount,
+// sideCounts, digest }. `okResult` builds one the way the fetcher does (real
+// buildSilenceDigest over every claim), so the page is tested against the
+// shape it really receives.
+//
 // reader-queries D2: the page's data-dependent body now lives in the inner
 // async `BlindspotsFeed` component, streamed behind a <Suspense> boundary —
 // `BlindspotsPage()` itself returns synchronously and never touches the
@@ -24,12 +29,17 @@ vi.mock("next/server", () => ({
   connection: vi.fn(async () => undefined),
 }));
 
-const getBlindspots = vi.fn(
-  async (): Promise<{ ok: true; bundles: unknown[] } | { ok: false }> => ({
-    ok: true,
-    bundles: [],
-  }),
-);
+type FeedResult =
+  | {
+      ok: true;
+      bundles: unknown[];
+      more: unknown[];
+      claimCount: number;
+      sideCounts: Record<MediaDnaZone, number>;
+      digest: SilenceDigest;
+    }
+  | { ok: false };
+const getBlindspots = vi.fn(async (): Promise<FeedResult> => ({ ok: false }));
 vi.mock("@/lib/clusters/blindspots-query", () => ({
   getBlindspotsSafe: () => getBlindspots(),
 }));
@@ -58,9 +68,37 @@ import { DenominatorNote } from "@/components/source/denominator-note";
 import { PageHero } from "@/components/ui/page-hero";
 import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
-import type { SilenceDigest } from "@/lib/clusters/silence-digest";
+import { buildSilenceDigest, type SilenceDigest } from "@/lib/clusters/silence-digest";
+import type { MediaDnaZone } from "@/types";
 
 const ORIGINAL_ENV = { ...process.env };
+
+/**
+ * A successful fetch result shaped like the fetcher's: `claims` is every
+ * passing claim (cards first, then compact rows), the digest is counted over
+ * all of them, the side counts add up to claimCount.
+ */
+function okResult(
+  bundles: unknown[],
+  more: unknown[] = [],
+  overrides: Partial<Extract<FeedResult, { ok: true }>> = {},
+): Extract<FeedResult, { ok: true }> {
+  const cards = bundles as Array<{ dominantZone: MediaDnaZone }>;
+  const rows = more as Array<{ dominantZone: MediaDnaZone }>;
+  const sideCounts: Record<MediaDnaZone, number> = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+  for (const c of [...cards, ...rows]) sideCounts[c.dominantZone] += 1;
+  return {
+    ok: true,
+    bundles,
+    more,
+    claimCount: bundles.length + more.length,
+    sideCounts,
+    digest: buildSilenceDigest(
+      bundles as Parameters<typeof buildSilenceDigest>[0],
+    ),
+    ...overrides,
+  };
+}
 
 // Order independence (vitest --sequence.shuffle): mockClear() only drops call
 // records, so an implementation swapped in by one test (PERF-01) or a
@@ -71,7 +109,7 @@ const ORIGINAL_ENV = { ...process.env };
 beforeEach(() => {
   delete process.env.RESEND_API_KEY; // isMailConfigured() -> false, no NewsletterForm
   getBlindspots.mockReset();
-  getBlindspots.mockImplementation(async () => ({ ok: true, bundles: [] }));
+  getBlindspots.mockImplementation(async () => okResult([]));
   getFeedStatusSummary.mockReset();
   getFeedStatusSummary.mockImplementation(async () => ({ delivering: 59, total: 96 }));
   getNearBlindspots.mockReset();
@@ -331,7 +369,7 @@ describe("/blindspots page — noindex on the failed feed state only (seo-error-
   });
 
   it("does not emit noindex on the ok-but-empty path", async () => {
-    getBlindspots.mockResolvedValueOnce({ ok: true, bundles: [] });
+    getBlindspots.mockResolvedValueOnce(okResult([]));
 
     const tree = await BlindspotsFeed();
 
@@ -372,11 +410,8 @@ describe("/blindspots page — silence digest band", () => {
     return collectElements(tree).filter((el) => el.type === SilenceDigestBand);
   }
 
-  it("renders one band, derived from the loaded bundles, when the feed has a bundle updated 1 h ago", async () => {
-    getBlindspots.mockResolvedValueOnce({
-      ok: true,
-      bundles: [mkBundle("c1", NOW - 3_600_000)],
-    });
+  it("renders one band, with the digest the fetcher built, when the feed has a bundle updated 1 h ago", async () => {
+    getBlindspots.mockResolvedValueOnce(okResult([mkBundle("c1", NOW - 3_600_000)]));
 
     const tree = await BlindspotsFeed();
 
@@ -392,10 +427,7 @@ describe("/blindspots page — silence digest band", () => {
   });
 
   it("renders the band whenever the feed is ok and has bundles: a story updated 5 days ago still counts", async () => {
-    getBlindspots.mockResolvedValueOnce({
-      ok: true,
-      bundles: [mkBundle("old", NOW - 5 * DAY)],
-    });
+    getBlindspots.mockResolvedValueOnce(okResult([mkBundle("old", NOW - 5 * DAY)]));
 
     const tree = await BlindspotsFeed();
 
@@ -406,20 +438,43 @@ describe("/blindspots page — silence digest band", () => {
     expect(digest.rows.map((r) => r.silentCount)).toEqual([0, 1, 1]);
   });
 
-  it("counts every distinct bundle on the page, fresh or stale", async () => {
-    getBlindspots.mockResolvedValueOnce({
-      ok: true,
-      bundles: [
+  it("counts every distinct bundle, fresh or stale", async () => {
+    getBlindspots.mockResolvedValueOnce(
+      okResult([
         mkBundle("fresh", NOW - 3_600_000),
         mkBundle("stale", NOW - 25 * 3_600_000),
         mkBundle("ancient", NOW - 40 * DAY),
-      ],
-    });
+      ]),
+    );
 
     const tree = await BlindspotsFeed();
 
     const digest = bands(tree)[0]?.props?.digest as SilenceDigest;
     expect(digest.windowTotal).toBe(3);
+  });
+
+  // h53-consistency-1: the box counted the 30 cards (25 : 2 against a week of
+  // 41 : 9). The page now hands the band the digest the fetcher counted over
+  // ALL claims; it must not recount from the cards it happens to show.
+  it("h53-consistency-1: hands the band the fetcher's whole-window digest, not a recount of the cards", async () => {
+    const wholeWindow: SilenceDigest = {
+      windowTotal: 46,
+      rows: [
+        { zone: "iktidar", silentCount: 9, byDominant: [{ zone: "muhalefet", count: 9 }] },
+        { zone: "bagimsiz", silentCount: 0, byDominant: [] },
+        { zone: "muhalefet", silentCount: 37, byDominant: [{ zone: "iktidar", count: 37 }] },
+      ],
+      scope: { windowDays: 7, shown: 1 },
+    };
+    getBlindspots.mockResolvedValueOnce(
+      okResult([mkBundle("only-card", NOW - 3_600_000)], [], { digest: wholeWindow }),
+    );
+
+    const tree = await BlindspotsFeed();
+
+    const found = bands(tree);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.props?.digest).toBe(wholeWindow);
   });
 
   it("does not render the band when the feed failed ({ ok: false })", async () => {
@@ -431,7 +486,7 @@ describe("/blindspots page — silence digest band", () => {
   });
 
   it("does not render the band on the ok-but-empty path", async () => {
-    getBlindspots.mockResolvedValueOnce({ ok: true, bundles: [] });
+    getBlindspots.mockResolvedValueOnce(okResult([]));
 
     const tree = await BlindspotsFeed();
 
@@ -505,15 +560,13 @@ describe("/blindspots page — Kör noktaya yakın section", () => {
   // revealed, so mounting the band as the LAST child of the feed (in every
   // state) means it streams in below already-laid-out content: no shift.
   it.each([
-    ["ok with one bundle", { ok: true, bundles: [BUNDLE_FIXTURE] }],
-    ["ok-empty", { ok: true, bundles: [] }],
-    ["failed", { ok: false }],
+    ["ok with one bundle", okResult([BUNDLE_FIXTURE])],
+    ["ok-empty", okResult([])],
+    ["failed", { ok: false } as FeedResult],
   ] as const)(
     "BlindspotsFeed (%s) ends with a null-fallback Suspense around NearBlindspotsSection",
     async (_label, state) => {
-      getBlindspots.mockResolvedValueOnce(
-        state as { ok: true; bundles: unknown[] } | { ok: false },
-      );
+      getBlindspots.mockResolvedValueOnce(state);
 
       const tree = (await BlindspotsFeed()) as Elementish;
 
@@ -545,21 +598,7 @@ describe("/blindspots page — Kör noktaya yakın section", () => {
   });
 
   it("BlindspotsFeed never reads the near-blindspot fetcher", async () => {
-    getBlindspots.mockResolvedValueOnce({
-      ok: true,
-      bundles: [
-        {
-          cluster: { id: "b1", updated_at: "2026-10-22T11:00:00.000Z" },
-          articles: [],
-          sources: [{ id: "b1-s", name: "Kaynak", bias: "pro_government" }],
-          dominantZone: "iktidar",
-          dominantPct: 1,
-          votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 0 },
-          isWireRedistribution: false,
-          effectiveArticleCount: 1,
-        },
-      ],
-    });
+    getBlindspots.mockResolvedValueOnce(okResult([BUNDLE_FIXTURE]));
 
     await BlindspotsFeed();
     await BlindspotsFeed(); // also on the empty path
@@ -571,9 +610,8 @@ describe("/blindspots page — Kör noktaya yakın section", () => {
 
   it("the SilenceDigestBand digest counts only the main bundles, never the near items", async () => {
     getNearBlindspots.mockResolvedValue([NEAR_ITEM, { ...NEAR_ITEM, id: "near-2" }]);
-    getBlindspots.mockResolvedValueOnce({
-      ok: true,
-      bundles: [
+    getBlindspots.mockResolvedValueOnce(
+      okResult([
         {
           cluster: { id: "only", updated_at: "2026-10-22T11:00:00.000Z" },
           articles: [],
@@ -584,8 +622,8 @@ describe("/blindspots page — Kör noktaya yakın section", () => {
           isWireRedistribution: false,
           effectiveArticleCount: 1,
         },
-      ],
-    });
+      ]),
+    );
 
     const tree = await BlindspotsFeed();
 
@@ -673,7 +711,7 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
   }
 
   async function renderCard(bundle: ReturnType<typeof cardBundle>) {
-    getBlindspots.mockResolvedValueOnce({ ok: true, bundles: [bundle] });
+    getBlindspots.mockResolvedValueOnce(okResult([bundle]));
     const tree = await BlindspotsFeed();
     const cards = collectElements(tree).filter(
       (el) => typeof el.type === "function" && el.props?.bundle === bundle,
@@ -882,5 +920,259 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
       expect(text).not.toContain("Sadece");
       expect(text).not.toContain("toplayıcı");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h53-consistency-5: the subtitle, the meta description (and its og/twitter
+// copies) said the other sides "ignored" the story and asked why they are
+// "silent". The site's own rule (compose.ts, docs/owned-channels.md,
+// /metodoloji, /kalite) is that absence can be a clustering split, so the copy
+// describes coverage and never motive. tests/guards/blindspot-copy.test.ts
+// keeps the motive words out of src; these pin the exact replacement text.
+// ---------------------------------------------------------------------------
+describe("/blindspots page — copy describes coverage, never motive (h53-consistency-5)", () => {
+  const DESCRIPTION =
+    "Bir tarafın haberi verdiği, diğer taraflardan az ya da hiç haber çıkmayan hikâyeler. Türk medyasındaki kör noktaları tek ekranda görün.";
+  const SUBTITLE =
+    "Bir tarafın haberi verdiği, diğer taraflardan az ya da hiç haber çıkmayan hikâyeler. Bu bir yok sayma iddiası değil: yalnızca spektruma sayılan kaynaklar sayılır.";
+
+  it("the meta description is the coverage sentence", () => {
+    expect(metadata.description).toBe(DESCRIPTION);
+  });
+
+  it("the og:description and twitter:description carry the same sentence", () => {
+    expect(metadata.openGraph?.description).toBe(DESCRIPTION);
+    expect(metadata.twitter?.description).toBe(DESCRIPTION);
+  });
+
+  it("the visible subtitle states the coverage and disclaims a claim of intent", () => {
+    const heroes = collectElements(BlindspotsPage()).filter((el) => el.type === PageHero);
+    expect(heroes).toHaveLength(1);
+    expect(heroes[0]?.props?.subtitle).toBe(SUBTITLE);
+  });
+
+  it("no motive wording survives in the metadata or on the page shell", () => {
+    const shell = JSON.stringify(metadata) + collectText(BlindspotsPage()).join(" ");
+    const hero = collectElements(BlindspotsPage()).find((el) => el.type === PageHero);
+    const everything = `${shell} ${String(hero?.props?.subtitle)}`;
+    expect(everything).not.toMatch(/görmezden|susuyor|sustu|gizledi/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h53-consistency-1: every public claim of the trailing 7 days is reachable.
+// 30 side-balanced cards, then the other claims as compact rows, and one count
+// line over the whole window.
+// ---------------------------------------------------------------------------
+describe("/blindspots page — the whole window is listed (h53-consistency-1)", () => {
+  const COUNTS = (iktidar: number, bagimsiz: number, muhalefet: number) => ({
+    iktidar,
+    bagimsiz,
+    muhalefet,
+  });
+
+  function cardFixture(id: string, zone: MediaDnaZone = "iktidar") {
+    return {
+      cluster: {
+        id,
+        title_tr: `Kart ${id}`,
+        summary_tr: "",
+        bias_distribution: {},
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        article_count: 5,
+        first_published: "2026-11-01T09:00:00.000Z",
+        updated_at: "2026-11-05T11:00:00.000Z",
+      },
+      articles: [],
+      sources: [],
+      dominantZone: zone,
+      dominantPct: 1,
+      votingZoneCounts: COUNTS(zone === "iktidar" ? 5 : 0, 0, zone === "muhalefet" ? 5 : 0),
+      isWireRedistribution: false,
+      effectiveArticleCount: 5,
+    };
+  }
+
+  function moreFixture(
+    id: string,
+    zone: MediaDnaZone,
+    counts: { iktidar: number; bagimsiz: number; muhalefet: number },
+    sourceCount: number,
+  ) {
+    return {
+      id,
+      title: `Kompakt ${id}`,
+      dominantZone: zone,
+      dominantPct: counts[zone] / (counts.iktidar + counts.bagimsiz + counts.muhalefet),
+      sourceCount,
+      firstPublished: "2026-11-04T10:00:00.000Z",
+      votingZoneCounts: counts,
+    };
+  }
+
+  const MORE = [
+    moreFixture("m-ik", "iktidar", COUNTS(11, 1, 1), 13),
+    moreFixture("m-mu", "muhalefet", COUNTS(0, 1, 4), 5),
+    // 8 voters among 10 members: the label names both numbers.
+    moreFixture("m-agg", "iktidar", COUNTS(8, 0, 0), 10),
+  ];
+
+  function countLines(tree: unknown): string[] {
+    return collectText(tree).filter((t) => t.startsWith("Son 7 günde "));
+  }
+
+  it("renders the count line over the whole window: 'Son 7 günde N kör nokta · İktidar tarafında a · Muhalefet tarafında b'", async () => {
+    getBlindspots.mockResolvedValueOnce(
+      okResult([cardFixture("c1"), cardFixture("c2", "muhalefet")], MORE, {
+        claimCount: 46,
+        sideCounts: COUNTS(37, 0, 9),
+      }),
+    );
+
+    const tree = await BlindspotsFeed();
+
+    expect(countLines(tree)).toEqual([
+      "Son 7 günde 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9",
+    ]);
+  });
+
+  it("adds Bağımsız to the count line only when it is above zero", async () => {
+    getBlindspots.mockResolvedValueOnce(
+      okResult([cardFixture("c1")], [], {
+        claimCount: 12,
+        sideCounts: COUNTS(7, 2, 3),
+      }),
+    );
+
+    const tree = await BlindspotsFeed();
+
+    expect(countLines(tree)).toEqual([
+      "Son 7 günde 12 kör nokta · İktidar tarafında 7 · Muhalefet tarafında 3 · Bağımsız tarafında 2",
+    ]);
+  });
+
+  it("renders no count line on the empty and failed paths", async () => {
+    getBlindspots.mockResolvedValueOnce(okResult([]));
+    expect(countLines(await BlindspotsFeed())).toEqual([]);
+
+    getBlindspots.mockResolvedValueOnce({ ok: false });
+    expect(countLines(await BlindspotsFeed())).toEqual([]);
+  });
+
+  function moreLists(tree: unknown): Elementish[] {
+    return collectElements(tree).filter(
+      (el) =>
+        typeof el.type === "function" &&
+        (el.type as { name?: string }).name === "MoreBlindspotList",
+    );
+  }
+
+  function renderMore(tree: unknown): string {
+    const lists = moreLists(tree);
+    expect(lists).toHaveLength(1);
+    const list = lists[0] as { type: React.FunctionComponent; props: object };
+    return renderToStaticMarkup(createElement(list.type, list.props));
+  }
+
+  it("renders a 'Diğer kör noktalar' list holding every `more` row: title link, '%P Taraf', 'N kaynak', no images", async () => {
+    getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], MORE));
+
+    const html = renderMore(await BlindspotsFeed());
+
+    expect(html).toContain("Diğer kör noktalar");
+    for (const row of MORE) {
+      expect(html).toContain(`href="/cluster/${row.id}"`);
+      expect(html).toContain(row.title);
+    }
+    expect(html.match(/<li[ >]/g)).toHaveLength(MORE.length);
+    // %P comes from the voting tally, largest remainder: 11/1/1 is 84, never 85.
+    expect(html).toContain("%84 İktidar");
+    expect(html).not.toContain("%85");
+    expect(html).toContain("%80 Muhalefet");
+    expect(html).toContain("%100 İktidar");
+    // N kaynak: bare when every member votes, both numbers when it differs.
+    expect(html).toContain("13 kaynak");
+    expect(html).toContain("5 kaynak");
+    expect(html).toContain("10 kaynak · 8 sayıldı");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<picture");
+  });
+
+  it("keeps the compact rows in the order the fetcher gave", async () => {
+    getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], MORE));
+
+    const html = renderMore(await BlindspotsFeed());
+
+    const at = (id: string) => html.indexOf(`/cluster/${id}"`);
+    expect(at("m-ik")).toBeGreaterThan(-1);
+    expect(at("m-ik")).toBeLessThan(at("m-mu"));
+    expect(at("m-mu")).toBeLessThan(at("m-agg"));
+  });
+
+  it("does not prefetch a hundred DB-backed cluster pages from the compact list", async () => {
+    getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], MORE));
+
+    const tree = await BlindspotsFeed();
+    const list = moreLists(tree)[0] as { type: (p: unknown) => unknown; props: unknown };
+    const links = collectElements(list.type(list.props)).filter(
+      (el) => typeof el.props?.href === "string" && String(el.props.href).startsWith("/cluster/"),
+    );
+
+    expect(links).toHaveLength(MORE.length);
+    for (const link of links) expect(link.props?.prefetch).toBe(false);
+  });
+
+  it("renders no compact list when every claim has a card", async () => {
+    getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], []));
+
+    const tree = await BlindspotsFeed();
+
+    expect(moreLists(tree)).toHaveLength(0);
+    expect(collectText(tree).join(" ")).not.toContain("Diğer kör noktalar");
+  });
+
+  it("no claim of the fixture is missing from the page: every card id and every compact id is rendered", async () => {
+    const cards = Array.from({ length: 30 }, (_, i) => cardFixture(`card-${i}`));
+    const rows = Array.from({ length: 16 }, (_, i) =>
+      moreFixture(`row-${i}`, "iktidar", COUNTS(7, 0, 0), 7),
+    );
+    getBlindspots.mockResolvedValueOnce(okResult(cards, rows));
+
+    const tree = await BlindspotsFeed();
+
+    const cardIds = collectElements(tree)
+      .filter((el) => typeof el.props?.bundle === "object")
+      .map((el) => (el.props?.bundle as { cluster: { id: string } }).cluster.id);
+    const compactHtml = renderMore(tree);
+    const rowIds = rows.filter((r) => compactHtml.includes(`/cluster/${r.id}"`)).map((r) => r.id);
+
+    expect([...cardIds, ...rowIds].sort()).toEqual(
+      [...cards.map((c) => c.cluster.id), ...rows.map((r) => r.id)].sort(),
+    );
+  });
+
+  it("puts the count line and the band above the cards, and the compact list after them", async () => {
+    getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], MORE));
+
+    const tree = (await BlindspotsFeed()) as Elementish;
+    const children = (tree.props?.children as unknown[]).flat(2) as Elementish[];
+    const nameOf = (el: Elementish | undefined) =>
+      typeof el?.type === "function" ? (el.type as { name?: string }).name : el?.type;
+
+    const flat = collectElements(tree);
+    const idxOf = (pred: (el: Elementish) => boolean) => flat.findIndex(pred);
+    const countAt = idxOf(
+      (el) => typeof el.props?.children === "string" && el.props.children.startsWith("Son 7 günde "),
+    );
+    const bandAt = idxOf((el) => el.type === SilenceDigestBand);
+    const cardAt = idxOf((el) => nameOf(el) === "BlindspotCard");
+    const moreAt = idxOf((el) => nameOf(el) === "MoreBlindspotList");
+    expect(children.length).toBeGreaterThan(0);
+    expect(countAt).toBeGreaterThanOrEqual(0);
+    expect(countAt).toBeLessThan(bandAt);
+    expect(bandAt).toBeLessThan(cardAt);
+    expect(cardAt).toBeLessThan(moreAt);
   });
 });

@@ -150,13 +150,13 @@ describe("GET /blindspots/rss.xml", () => {
     expect(count(body, "<item>")).toBe(4);
   });
 
-  it("caps items at 30", async () => {
+  it("caps items at 60 (the 30 cards plus up to 30 compact rows)", async () => {
     mocks.blindspots = {
-      bundles: Array.from({ length: 40 }, (_, i) => withTitle(`Başlık ${i}`, `c${i}`)),
+      bundles: Array.from({ length: 70 }, (_, i) => withTitle(`Başlık ${i}`, `c${i}`)),
     };
     const body = await (await callRoute()).text();
-    expect(count(body, "<item>")).toBe(30);
-    expect(count(body, "</item>")).toBe(30);
+    expect(count(body, "<item>")).toBe(60);
+    expect(count(body, "</item>")).toBe(60);
   });
 
   it("serves an empty but valid feed with no lastBuildDate when there are no blindspots", async () => {

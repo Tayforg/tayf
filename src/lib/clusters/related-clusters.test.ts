@@ -4,6 +4,7 @@ import pool from "./__fixtures__/h34-related-pool.json";
 import {
   RELATED_DUPLICATE_AGREEMENT,
   RELATED_ENTITY_BONUS,
+  RELATED_GENERIC_WHOLE_WORDS,
   RELATED_GENERIC_WORDS,
   RELATED_MAX,
   RELATED_MIN_ITEMS,
@@ -498,6 +499,40 @@ describe("constants", () => {
       "verdi",
       "milyon",
       "milyar",
+      // h53-related-1: a job title of more than seven characters, so it keeps the
+      // stem-plus-prefix rule ("Başbakanı", "Başbakanlığı").
+      "Başbakan",
+    ]);
+  });
+
+  // h53-related-1 (review fix correctness-related-stem-overblock): these match the
+  // WHOLE word (plus a suffix of at most three characters), not the five-character
+  // stem, so "hazırlık" is not "Haziran" and "Kasımpaşa" is not "Kasım".
+  it("pin the generic words that are matched whole", () => {
+    expect([...RELATED_GENERIC_WHOLE_WORDS]).toEqual([
+      "görüştü",
+      "dolar",
+      "lira",
+      "liralık",
+      "avro",
+      "avroluk",
+      "euro",
+      "yüzde",
+      "Türkiye",
+      "yeni",
+      "ilk",
+      "Ocak",
+      "Şubat",
+      "Mart",
+      "Nisan",
+      "Mayıs",
+      "Haziran",
+      "Temmuz",
+      "Ağustos",
+      "Eylül",
+      "Ekim",
+      "Kasım",
+      "Aralık",
     ]);
   });
 
@@ -902,6 +937,292 @@ describe("a shared entity's own words are never the shared stem (h37-clusters-1)
     );
     expect(out.mode).toBe("latest");
     expect(ids(out)).toEqual(["basin", "vance", "jp"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h53-related-1 (follow-up of h37-clusters-1 and h38-related-1): words that
+// say nothing about the story still related unrelated ones. A lone digit ("11
+// ilde ... 230 gözaltı" vs "11 gözaltı daha"), a currency ("dolar", "liralık"),
+// "Türkiye", a month name, a job title ("Başbakan") and a reporting verb
+// ("görüştü") each stood in for the second shared stem. Fixtures: the pairs the
+// adjudicator measured on the live pool of 2026-11-06 (12 of 13 bad pairs fixed,
+// 7 of 7 good pairs kept; the 13th, 9daf13db 'kurulacak' vs ad7a0b8c 'Kurulu', is
+// a stem collision and out of scope). Only the verdict moves: the score, and so
+// the order of a block, does not.
+// ---------------------------------------------------------------------------
+
+describe("non-topical shared tokens never relate two stories (h53-related-1)", () => {
+  const T = {
+    binance: "Binance'den 6,3 milyar dolarlık hırsızlık sonrası hamle: Para çekme işlemleri açılıyor",
+    bolat13: "Bakan Bolat: Türkiye yılda toplam 1.3 milyar dolar ihracat yapıyor",
+    bolat62: "Ticaret Bakanı Bolat, kadın çalışanların ihracata katkısını 62,3 milyar dolar açıkladı",
+    borsa: "Borsadaki 173 milyar dolarlık erimeyi bütçeyle karşılaştırdı: Türkiye'nin 4 aylık harcamasına denk",
+    ersoy9: "Bakan Ersoy 9 aylık turizm gelirinin 51 milyar 278 milyon dolara çıktığını açıkladı",
+    babacan: "Ali Babacan'dan 200 TL tepkisi: Türkiye'nin itibarını 4 dolarlık ettiniz",
+    korea: "Erdoğan: Güney Kore’yle ikili ticaret hedefi 15 milyar dolar",
+    kacir: "Bakan Kacır açıkladı: 2030'a kadar 30 milyar dolarlık teknoloji yatırımı hedefi",
+    ersoy65: "Bakan Ersoy'dan turizmde yıl sonu hedefi: 65 milyar dolar aşılacak",
+    icisleri: "İçişleri duyurdu. 11 ilde kaçakçılık ve siber suç operasyonları: 230 gözaltı",
+    sarigul: "Sarıgül soruşturmasında 11 gözaltı daha: Şişli MYO'ya kayyum atandı",
+    paraTrafigi: "19,9 milyar liralık para trafiği deşifre oldu. 11 il merkezli operasyon",
+    zeydiTrump: "Irak Başbakanı Zeydi, ABD Başkanı Trump ile görüştü",
+    zeydiBarrack: "Irak Başbakanı Zeydi, ABD'li Temsilci Barrack ile görüştü",
+    hamidi: "Cumhurbaşkanı Yardımcısı Yılmaz, Malezya Başbakan Yardımcısı Hamidi ile görüştü",
+    israil: "İsrail Başbakanlığı, yaklaşık 4 milyar dolarlık ABD yardımının kesileceğini doğruladı",
+    fed: "ABD'deki ara seçim sonuçları Fed beklentilerini değiştirdi",
+    yankilar: "Küresel piyasalarda ABD ara seçimlerinin yankıları hissediliyor",
+    zafer: "Demokratların ara seçim zaferi küresel piyasalarda dengeleri değiştirdi",
+    altin: "ABD seçimleri sonrası altın uçuşa geçti. Yeni hedef 7 bin lira",
+    afyon1: "Afyonkarahisar'da dehşet. Araç içinde 5 kişinin cansız bedeni bulundu",
+    afyon2: "Afyonkarahisar’da araçta 5 kişinin cesedi bulundu",
+    fidan1: "Dışişleri Bakanı Fidan, KKTC Cumhurbaşkanı Erhürman ile Lefkoşa'da görüştü",
+    fidan2: "Dışişleri Bakanı Fidan, KKTC Dışişleri Bakanı Ertuğruloğlu ile görüştü",
+  } as const;
+
+  const NOT_RELATED: readonly (readonly [string, string, string])[] = [
+    ["Binance hırsızlığı vs Bolat'ın 1.3 milyar dolar ihracatı", T.binance, T.bolat13],
+    ["Binance hırsızlığı vs Bolat'ın 62,3 milyar dolar açıklaması", T.binance, T.bolat62],
+    ["Borsadaki erime vs Bolat'ın 1.3 milyar dolar ihracatı", T.borsa, T.bolat13],
+    ["Borsadaki erime vs Ersoy'un turizm geliri", T.borsa, T.ersoy9],
+    ["Borsadaki erime vs Babacan'ın 200 TL tepkisi", T.borsa, T.babacan],
+    ["Erdoğan'ın Kore ticaret hedefi vs Bolat'ın 62,3 milyar dolar açıklaması", T.korea, T.bolat62],
+    ["Erdoğan'ın Kore ticaret hedefi vs Kacır'ın teknoloji yatırımı hedefi", T.korea, T.kacir],
+    ["Ersoy'un turizm hedefi vs Kacır'ın teknoloji yatırımı hedefi", T.ersoy65, T.kacir],
+    ["İçişleri'nin 11 il operasyonu vs Sarıgül soruşturmasında 11 gözaltı", T.icisleri, T.sarigul],
+    ["İçişleri'nin 11 il operasyonu vs 11 il merkezli para trafiği operasyonu", T.icisleri, T.paraTrafigi],
+    ["Zeydi–Trump görüşmesi vs Yılmaz–Hamidi görüşmesi", T.zeydiTrump, T.hamidi],
+    ["Zeydi–Trump görüşmesi vs İsrail Başbakanlığı'nın 4 milyar dolarlık yardım kararı", T.zeydiTrump, T.israil],
+  ];
+
+  const STAY_RELATED: readonly (readonly [string, string, string])[] = [
+    ["ABD ara seçimi: Fed beklentileri vs piyasaların yankıları", T.fed, T.yankilar],
+    ["ABD ara seçimi: Fed beklentileri vs Demokratların zaferi", T.fed, T.zafer],
+    ["ABD ara seçimi: piyasaların yankıları vs Demokratların zaferi", T.yankilar, T.zafer],
+    ["ABD ara seçimi: Fed beklentileri vs seçim sonrası altın", T.fed, T.altin],
+    ["Afyonkarahisar'da araçta 5 ceset", T.afyon1, T.afyon2],
+    ["Fidan'ın KKTC temasları", T.fidan1, T.fidan2],
+    ["Zeydi'nin Trump ve Barrack görüşmeleri", T.zeydiTrump, T.zeydiBarrack],
+    // review fix correctness-related-stem-overblock: a topical word that merely shares a
+    // five-character stem with a generic one ("hazırlık" / Haziran, "Nişantaşı" / Nisan,
+    // "Kasımpaşa" / Kasım) is a real shared stem. Production titles e9d36878 and 012dc68b
+    // were related before h53 and lost it to the stem-only match.
+    [
+      "COP31 hazırlıkları",
+      "COP31 için geri sayım! Antalya'da hazırlıkların yüzde 93'ü tamamlandı",
+      "Bakan Kurum, COP31 hazırlıkları için Avustralya ve BM temsilcileriyle görüştü",
+    ],
+    ["Nişantaşı saldırısı", "Nişantaşı'nda silahlı saldırı", "Nişantaşı'ndaki saldırıyla ilgili gözaltı"],
+    [
+      "Kasımpaşa-Galatasaray",
+      "Kasımpaşa, Galatasaray'ı konuk ediyor",
+      "Kasımpaşa-Galatasaray maçının ilk 11'leri belli oldu",
+    ],
+  ];
+
+  it.each(NOT_RELATED)("is not related: %s", (_label, a, b) => {
+    expect(isRelatedTitle(a, b)).toBe(false);
+    expect(isRelatedTitle(b, a)).toBe(false);
+  });
+
+  it.each(NOT_RELATED)("keeps the score the old rule gave, so ordering is unchanged: %s", (_label, a, b) => {
+    // The pair cleared the floor on shared digits, currencies, "Türkiye" or a job title; only the verdict moved.
+    expect(relatedScore(a, b)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+  });
+
+  it.each(STAY_RELATED)("stays related: %s", (_label, a, b) => {
+    expect(isRelatedTitle(a, b)).toBe(true);
+    expect(isRelatedTitle(b, a)).toBe(true);
+  });
+
+  // The one pair the adjudicator measured that this change does not fix: 'kurulacak'
+  // and 'Kurulu' share the stem `kurul`. A stem collision, not a non-topical token.
+  it("leaves the 'kurulacak' vs 'Kurulu' stem collision alone (out of scope)", () => {
+    expect(
+      isRelatedTitle(
+        "YENİ Parti’de genel başkanlık ön seçimi: 3 bin sandık kurulacak",
+        "Mekke Anlaşması TBMM Genel Kurulu'nda kabul edildi",
+      ),
+    ).toBe(true);
+  });
+
+  describe("each listed word is never the shared stem", () => {
+    const H53_WORDS = [
+      "Başbakan", "görüştü", "dolar", "lira", "liralık", "avro", "avroluk", "euro", "yüzde", "Türkiye", "yeni", "ilk",
+      "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
+    ];
+
+    // "dolar" is an entity-hub key when nothing quantifies it ("Dolar kuru ..."); the hub reads it as an
+    // amount, not the entity, after a quantity word ("100 dolar", "2,1 milyar dolarlık"), which is the
+    // form every pair above is in. So the dolar case is built in that form.
+    const inContext = (word: string) => (word === "dolar" ? "milyar dolar" : word);
+
+    it.each(H53_WORDS)("%s is generic: one real shared word beside it is not enough", (word) => {
+      const w = inContext(word);
+      expect(entityKeysIn(`${w} Kestane Lokanta Marmara`)).toEqual([]);
+      expect(isRelatedTitle(`${w} Kestane Lokanta Marmara`, `${w} Kestane Yonca Papaz`), word).toBe(false);
+    });
+
+    it("the entity route is untouched: a bare 'Dolar' headline pair is still related on the key plus one real stem", () => {
+      expect(entityKeysIn("Dolar Kestane Lokanta Marmara")).toEqual(["dolar"]);
+      expect(isRelatedTitle("Dolar Kestane Lokanta Marmara", "Dolar Kestane Yonca Papaz")).toBe(true);
+      // ... and the key alone is still not enough.
+      expect(isRelatedTitle("Dolar Kestane Lokanta Marmara", "Dolar Zeytin Yonca Papaz")).toBe(false);
+    });
+
+    it("the same pair with a topical word in the listed word's place is related (the construction is sound)", () => {
+      expect(isRelatedTitle("Zeytin Kestane Lokanta Marmara", "Zeytin Kestane Yonca Papaz")).toBe(true);
+    });
+
+    it("every listed word is in RELATED_GENERIC_WORDS or RELATED_GENERIC_WHOLE_WORDS", () => {
+      for (const word of H53_WORDS) {
+        expect([...RELATED_GENERIC_WORDS, ...RELATED_GENERIC_WHOLE_WORDS], word).toContain(word);
+      }
+    });
+
+    it("lists each h53 word exactly once across the two lists", () => {
+      const both = [...RELATED_GENERIC_WORDS, ...RELATED_GENERIC_WHOLE_WORDS];
+      for (const word of H53_WORDS) expect(both.filter((w) => w === word), word).toHaveLength(1);
+    });
+
+    // review fix correctness-related-stem-overblock: whole-word matching. Each topical
+    // word shares its first five characters with a listed word, and is NOT that word.
+    it.each(["hazırlık", "görüşme", "Kasımpaşa", "Nişantaşı"])(
+      "%s as the second shared word still relates a pair (a stem collision, not a generic word)",
+      (word) => {
+        expect(entityKeysIn(`${word} Kestane Lokanta Marmara`)).toEqual([]);
+        expect(isRelatedTitle(`${word} Kestane Lokanta Marmara`, `${word} Kestane Yonca Papaz`), word).toBe(true);
+        expect(isRelatedTitle(`${word} Kestane Yonca Papaz`, `${word} Kestane Lokanta Marmara`), word).toBe(true);
+      },
+    );
+
+    it.each(["Kasım'da", "Türkiye'deki", "Haziran", "Temmuz'da", "Kasımda", "Aralıkta", "Türkiyede", "görüştü", "yüzde"])(
+      "%s stays generic: one real shared word beside it is not enough",
+      (word) => {
+        expect(isRelatedTitle(`${word} Kestane Lokanta Marmara`, `${word} Kestane Yonca Papaz`), word).toBe(false);
+      },
+    );
+
+    // "dolar" is an entity key on its own, so the amount form ("milyar dolarlık") is the one that is a word.
+    it.each(["dolarlık", "dolara", "dolarlar"])("%s after an amount stays generic", (word) => {
+      const w = `milyar ${word}`;
+      expect(entityKeysIn(`${w} Kestane Lokanta Marmara`)).toEqual([]);
+      expect(isRelatedTitle(`${w} Kestane Lokanta Marmara`, `${w} Kestane Yonca Papaz`), word).toBe(false);
+    });
+
+    it("lira does not cover liralık (the stem is `liral`), nor avro avroluk: both spellings are listed", () => {
+      // Each pair shares only the inflected word and one real one.
+      expect(isRelatedTitle("Kestane Lokanta Marmara liralık", "Kestane Yonca Papaz liralık")).toBe(false);
+      expect(isRelatedTitle("Kestane Lokanta Marmara avroluk", "Kestane Yonca Papaz avroluk")).toBe(false);
+      expect(isRelatedTitle("Kestane Lokanta Marmara lira", "Kestane Yonca Papaz lira")).toBe(false);
+      expect(isRelatedTitle("Kestane Lokanta Marmara avro", "Kestane Yonca Papaz avro")).toBe(false);
+    });
+
+    it("dolar covers its inflections (dolara, dolarlık)", () => {
+      expect(isRelatedTitle("Kestane Lokanta Marmara milyar dolara", "Kestane Yonca Papaz milyar dolarlık")).toBe(false);
+      expect(isRelatedTitle("Kestane Lokanta Marmara milyar dolarlık", "Kestane Yonca Papaz milyar dolar")).toBe(false);
+    });
+
+    it("inflected month names and 'Türkiye' are the same word (apostrophe suffixes fold away)", () => {
+      expect(isRelatedTitle("Kasım'da Kestane Lokanta Marmara", "Kasım'da Kestane Yonca Papaz")).toBe(false);
+      expect(isRelatedTitle("Türkiye'de Kestane Lokanta Marmara", "Türkiye'nin Kestane Yonca Papaz")).toBe(false);
+      expect(isRelatedTitle("Başbakanı Kestane Lokanta Marmara", "Başbakanlığı Kestane Yonca Papaz")).toBe(false);
+    });
+
+    it("topical words next to them still count: two real shared words relate, whatever else is shared", () => {
+      expect(
+        isRelatedTitle("Dolar Türkiye Kasım Kestane Lokanta Marmara", "Dolar Türkiye Kasım Kestane Lokanta Papaz"),
+      ).toBe(true);
+    });
+  });
+
+  describe("a number is never the shared stem", () => {
+    it("two titles that share one real word and one number are not related", () => {
+      expect(isRelatedTitle("Kestane Lokanta 2030 hedefi", "Kestane Yonca 2030 programı")).toBe(false);
+      expect(isRelatedTitle("Kestane Yonca 2030 programı", "Kestane Lokanta 2030 hedefi")).toBe(false);
+    });
+
+    it("decimals and thousands separators fold to digit-only words and are skipped too", () => {
+      expect(isRelatedTitle("Kestane Lokanta 62,3 payı", "Kestane Yonca 62,3 oranı")).toBe(false);
+      expect(isRelatedTitle("Kestane Lokanta 1.250 payı", "Kestane Yonca 1.250 oranı")).toBe(false);
+    });
+
+    it("still scores the number (ordering does not move): the pair clears the floor", () => {
+      expect(relatedScore("Kestane Lokanta 2030 hedefi", "Kestane Yonca 2030 programı")).toBeCloseTo(0.5, 9);
+    });
+
+    it("a shared entity plus a number is not related (the entity-route needs a real stem)", () => {
+      const a = "ABD'de 11 eyalette sel alarmı";
+      const b = "ABD'de 11 şehirde grev başladı";
+      expect(entityKeysIn(a)).toContain("abd");
+      expect(entityKeysIn(b)).toContain("abd");
+      expect(isRelatedTitle(a, b)).toBe(false);
+    });
+
+    it("a word that merely contains digits is still a word (G20, F16, S400)", () => {
+      expect(isRelatedTitle("G20 Kestane Lokanta Marmara", "G20 Kestane Yonca Papaz")).toBe(true);
+      expect(isRelatedTitle("F16 Lokanta Marmara Nergis", "F16 Lokanta Yonca Papaz")).toBe(true);
+      expect(isRelatedTitle("S400 Kestane Marmara Nergis", "S400 Kestane Yonca Papaz")).toBe(true);
+    });
+
+    it("a number does not stop two real shared words from relating", () => {
+      expect(isRelatedTitle("Kestane Lokanta 11 kişi", "Kestane Lokanta 11 yaralı")).toBe(true);
+    });
+  });
+
+  describe("selects", () => {
+    it("the Zeydi page keeps the Barrack story and drops the Hamidi and İsrail ones", () => {
+      const out = select(
+        [
+          titled("hamidi", 1, T.hamidi, { topic7: "politika" }),
+          titled("israil", 2, T.israil, { topic7: "politika" }),
+          titled("barrack", 3, T.zeydiBarrack, { topic7: "politika" }),
+          titled("zeydi2", 4, "Irak Başbakanı Zeydi Bağdat'ta ABD heyetini kabul etti", { topic7: "politika" }),
+        ],
+        { currentId: "zeydi", currentTitle: T.zeydiTrump, topic: "politika" },
+      );
+      expect(out.mode).toBe("related");
+      expect(ids(out).sort()).toEqual(["barrack", "zeydi2"]);
+    });
+
+    it("falls back to 'latest' with the Barrack story leading when it is the only real one", () => {
+      const out = select(
+        [
+          titled("hamidi", 1, T.hamidi, { topic7: "politika" }),
+          titled("israil", 2, T.israil, { topic7: "politika" }),
+          titled("barrack", 3, T.zeydiBarrack, { topic7: "politika" }),
+        ],
+        { currentId: "zeydi", currentTitle: T.zeydiTrump, topic: "politika" },
+      );
+      expect(out.mode).toBe("latest");
+      expect(ids(out)[0]).toBe("barrack");
+    });
+
+    it("the US-midterm market page keeps its three stories and drops a dollar-amount decoy", () => {
+      const out = select(
+        [
+          titled("binance", 1, T.binance, { topic7: "ekonomi" }),
+          titled("zafer", 2, T.zafer, { topic7: "ekonomi" }),
+          titled("bolat", 3, T.bolat13, { topic7: "ekonomi" }),
+          titled("yankilar", 4, T.yankilar, { topic7: "ekonomi" }),
+          titled("altin", 5, T.altin, { topic7: "ekonomi" }),
+        ],
+        { currentId: "fed", currentTitle: T.fed, topic: "ekonomi" },
+      );
+      expect(out.mode).toBe("related");
+      expect(ids(out).sort()).toEqual(["altin", "yankilar", "zafer"]);
+    });
+
+    it("the 11-province page does not list the other '11' stories as related", () => {
+      const out = select(
+        [
+          titled("sarigul", 1, T.sarigul, { topic7: "politika" }),
+          titled("para", 2, T.paraTrafigi, { topic7: "politika" }),
+        ],
+        { currentId: "icisleri", currentTitle: T.icisleri, topic: "politika" },
+      );
+      expect(out.mode).toBe("latest");
+    });
   });
 });
 

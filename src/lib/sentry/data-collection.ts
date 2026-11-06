@@ -12,7 +12,8 @@
  *
  * tayf has no user accounts and no PII surface worth shipping, so the stance is
  * "metadata only": error, stack, route, release, and the non-identifying
- * request headers (user-agent, accept, ...) that 10.x kept.
+ * request headers (user-agent, accept, ...) that 10.x kept. No URL query
+ * strings either: the home page and /takip put reader-typed text in them.
  *
  * Plain constants, no imports: safe to bundle into the Edge runtime and the
  * browser. The SDK additionally always filters names containing auth, token,
@@ -44,11 +45,29 @@ export const SENTRY_DATA_COLLECTION = {
         "fastly-client-ip",
         "cookie",
         "authorization",
+        // The reader's search text. Referrer-Policy is strict-origin-when-cross-origin
+        // (src/lib/security/headers.ts), so a same-origin click sends the FULL
+        // referring url, /?q=<search text> included. @sentry/nextjs 11 copies every
+        // header not denied onto the root span as `http.request.header.referer`
+        // (a string[]), and onto the event's request.headers. Denied, the SDK
+        // writes ['[Filtered]'] there instead; redact.ts strips the query from
+        // the attribute as a second layer.
+        "referer",
       ],
     },
     response: false,
   },
-  urlQueryParams: { deny: ["token", "key", "secret"] },
+  // `false`, not a deny-list: the query string holds what the reader typed
+  // (/?q=<search text>) and the keywords they follow (/takip?q=a,b). In
+  // @sentry/core 11 a `{ deny }` list redacts only the named keys and sends
+  // every other parameter, so a deny-list would ship the search text with each
+  // server error. Only `false` drops the whole query. scrubSentryEvent /
+  // scrubSentrySpan / scrubSentryBreadcrumb (redact.ts) strip it from the
+  // URLs the SDK copies verbatim (location.href, breadcrumbs, span names). The
+  // Referer header is the one URL that arrives as a HEADER, so
+  // httpHeaders.request.deny above ("referer") is its control; the scrubbers
+  // only back that up.
+  urlQueryParams: false,
   graphQL: { document: false, variables: false },
   genAI: { inputs: false, outputs: false },
   mcp: { inputs: false, outputs: false },

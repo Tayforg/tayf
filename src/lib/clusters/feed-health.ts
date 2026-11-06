@@ -1,6 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
-import { zoneOf } from "@/lib/bias/config";
+import { isVotingKind, zoneOf } from "@/lib/bias/config";
 import {
   createReaderClient,
   createServerClient,
@@ -90,8 +90,16 @@ export type ZoneHealth = {
   /** Status 200/304 within `FEED_HEALTH_MAX_AGE_MS` with no fail streak (the old `healthy`). */
   fetchOk: number;
   fetchOkShare: number;
-  /** >=1 article published in the trailing `FEED_YIELD_WINDOW_MS`. */
+  /** >=1 article published in the trailing `FEED_YIELD_WINDOW_MS`, every
+   * source kind included (aggregator and niche feeds too — /hafta labels this
+   * count "toplayıcı / niş dahil"). Gates `degraded` via `deliveringShare`. */
   delivering: number;
+  /** The `delivering` subset whose kind votes in bias_distribution
+   * (`isVotingKind`: outlet and wire; a null, missing or unknown kind counts as
+   * outlet). The only denominator that shares a basis with a voting-members-only
+   * numerator such as the Manşet Kartı's per-zone count; reporting-only, it
+   * never feeds `degraded`. Always <= `delivering`. */
+  votingDelivering: number;
   deliveringShare: number;
   /** fetchOk AND delivering — the two-axis AND rule. */
   healthy: number;
@@ -103,6 +111,14 @@ export type ZoneFeedHealth = Record<MediaDnaZone, ZoneHealth>;
 
 type SourceHealthRow = {
   bias: BiasCategory;
+  /**
+   * `sources.kind`. `unknown` and optional for the same reason as `recent`
+   * (unchecked cast over raw PostgREST output; legacy rows and test doubles
+   * omit it): `isVotingKind` reads an absent, null or unrecognised value as a
+   * voting `outlet`, so a missing kind never drops a source from the voting
+   * count.
+   */
+  kind?: unknown;
   fetch_last_status: number | null;
   fetch_last_at: string | null;
   /**
@@ -127,6 +143,7 @@ function emptyZoneHealth(): ZoneHealth {
     fetchOk: 0,
     fetchOkShare: 0,
     delivering: 0,
+    votingDelivering: 0,
     deliveringShare: 0,
     healthy: 0,
     healthyShare: 0,
@@ -217,7 +234,7 @@ async function computeZoneFeedHealth(
     const { data, error } = await supabase
       .from("sources")
       .select(
-        "bias, fetch_last_status, fetch_last_at, fetch_fail_streak, recent:articles(id)",
+        "bias, kind, fetch_last_status, fetch_last_at, fetch_fail_streak, recent:articles(id)",
       )
       .eq("active", true)
       .not("rss_url", "is", null)
@@ -252,7 +269,14 @@ async function computeZoneFeedHealth(
       const fetchOk = isFetchOkRow(row, nowMs);
       const delivering = isDeliveringRow(row);
       if (fetchOk) bucket.fetchOk += 1;
-      if (delivering) bucket.delivering += 1;
+      if (delivering) {
+        bucket.delivering += 1;
+        // Same predicate every voting surface uses (zone-line.ts, the cluster
+        // page, bias_distribution): outlet and wire vote, aggregator and niche
+        // do not, a null / absent / unknown kind is an outlet. Counted inside
+        // the delivering branch so votingDelivering is always a subset.
+        if (isVotingKind(row.kind)) bucket.votingDelivering += 1;
+      }
       if (fetchOk && delivering) bucket.healthy += 1;
     }
 
@@ -322,16 +346,25 @@ export async function getZoneFeedHealth(opts?: {
 }
 
 /**
- * The per-zone yield denominator: how many active, RSS-backed sources in
- * `zone` actually delivered in the trailing `FEED_YIELD_WINDOW_MS`, per
- * `getZoneFeedHealth()`. Currently used only by this module's own test
- * suite (feed-health.test.ts) — despite an earlier version of this comment
- * claiming otherwise, /kaynaklar/durum and the /sources and /blindspots
- * share footnotes do NOT read the denominator from here; they compute
- * their own directory-wide (not per-zone) N/M pair via
- * `summariseFeedStatus()` / `getFeedStatusSummary()` in
- * src/lib/sources/feed-status.ts (verified by grep — nothing outside this
- * file's test imports `zoneYieldDenominator`).
+ * The per-zone ALL-KINDS yield count: how many active, RSS-backed sources in
+ * `zone` of ANY kind (aggregator and niche feeds included) actually delivered
+ * in the trailing `FEED_YIELD_WINDOW_MS`, per `getZoneFeedHealth()`.
+ *
+ * Callers: the /hafta zone rows (src/components/weekly/week-sections.tsx,
+ * which labels the figure "toplayıcı / niş dahil") and the /rapor coverage
+ * section (src/lib/reports/yelpaze.ts, whose numerator is likewise every
+ * member of the zone, whatever its kind). Both pair it with an all-kinds
+ * numerator, so its meaning must not change.
+ *
+ * Do NOT use it under a numerator that counts voting sources only (the Manşet
+ * Kartı's "N / M kaynak"): the two would not share a basis and the fraction
+ * is understated by every delivering aggregator and niche feed. Use
+ * `zoneVotingYieldDenominator` there.
+ *
+ * (/kaynaklar/durum and the /sources and /blindspots share footnotes read
+ * neither helper: they compute their own directory-wide, not per-zone, N/M
+ * pair via `summariseFeedStatus()` / `getFeedStatusSummary()` in
+ * src/lib/sources/feed-status.ts.)
  *
  * `null` when `health` is null (health unknown) — callers must render the
  * wording-without-numbers fallback rather than fabricate a figure.
@@ -342,6 +375,28 @@ export function zoneYieldDenominator(
 ): number | null {
   if (!health) return null;
   return health[zone].delivering;
+}
+
+/**
+ * The per-zone VOTING yield denominator: how many active, RSS-backed sources
+ * in `zone` whose kind votes in bias_distribution (outlet, wire — see
+ * `isVotingKind`) delivered in the trailing `FEED_YIELD_WINDOW_MS`. This is
+ * the denominator for any "N / M" whose N counts voting sources only, such as
+ * the Manşet Kartı (src/lib/cards/story-card.ts buckets voting members into
+ * zones and leaves aggregator and niche members out). Taking both from the
+ * voting set is what keeps the fraction honest: a Bağımsız zone with 24
+ * voting and 13 non-voting delivering feeds reads "2 / 24", not "2 / 37".
+ *
+ * `null` when `health` is null (health unknown); `0` is a real answer (no
+ * voting source in the zone delivered) and callers must tell it apart from
+ * null.
+ */
+export function zoneVotingYieldDenominator(
+  health: ZoneFeedHealth | null,
+  zone: MediaDnaZone,
+): number | null {
+  if (!health) return null;
+  return health[zone].votingDelivering;
 }
 
 // The two Medya DNA "pole" zones the blindspot contract cares about.

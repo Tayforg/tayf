@@ -308,7 +308,7 @@ Columns on `clusters`: `blindspot_recall_veto` (boolean, default `false`), `blin
 
 | Step | Rule | Constant |
 |---|---|---|
-| Candidate select (SQL) | `is_blindspot`, `NOT blindspot_recall_veto`, not archived, `article_count >= 3`, newest `updated_at` first, at most 200 candidates | `PREFILTER_MIN_ARTICLE_COUNT` 3, `CANDIDATE_LIMIT` 200 |
+| Candidate select (SQL) | `is_blindspot`, `NOT blindspot_recall_veto`, not archived, `article_count >= 3`, `first_published` within the trailing 7 days, newest `updated_at` first, at most 150 candidates (a safety bound, not a sample: a full week held 46) | `PREFILTER_MIN_ARTICLE_COUNT` 3, `BLINDSPOT_LIST_LOOKBACK_DAYS` 7, `BLINDSPOT_CANDIDATE_SAFETY_CAP` 150 |
 | Delay | `first_published` at least 24 h ago, so the absent side has time to catch up (time-lag artifact filter) | `BLINDSPOT.feedDelayHours` 24 |
 | Same-source dedupe | Earliest article per source, so one prolific outlet cannot inflate its zone | n/a |
 | Source floor | At least 5 distinct sources after dedupe | `BLINDSPOT.minSources` 5 |
@@ -318,7 +318,7 @@ Columns on `clusters`: `blindspot_recall_veto` (boolean, default `false`), `blin
 | Politics floor | At least 60 % of the deduped members are politics members (`politika` / `son_dakika`, or live-admitted) | `POLITICS_CATEGORY_SHARE_MIN` 0.6 |
 | Live re-tally | Voting sources at least 5 and dominant share at least 0.8 on the deduped members, so a stale flag never surfaces | `BLINDSPOT` |
 | Feed health | Dropped when a pole zone other than the dominant one has degraded feeds (`shouldSuppressBlindspot`): "silent" must not mean "we could not fetch that side" | `feed-health.ts` |
-| Output | Most lopsided first, at most 30, embeds fetched in batches of 50 | `DISPLAY_LIMIT` 30, `EMBED_BATCH_SIZE` 50 |
+| Output | Every candidate is embedded (batches of 50, at most 3, concurrently with the feed-health read). 30 full cards are picked side-balanced by `pickBlindspotList` (`blindspot-pick.ts`: round-robin across İktidar, Muhalefet and Bağımsız, then most lopsided first); every other passing claim is a slim `more` row, and the claim count, per-side counts and the "Bu listede kim yer vermedi?" digest cover the whole window. `bundles` keeps its type for the digest, social and alerts consumers; the social cron may now pick a Muhalefet-side claim | `DISPLAY_LIMIT` 30, `EMBED_BATCH_SIZE` 50 |
 
 The fetcher is `"use cache: remote"` with tags `clusters` and `clusters-politics`: the `cluster-feed` profile on success, `minutes` after a failed attempt. The public alerts API reuses it unchanged (see `GET /api/v1/alerts/blindspots` in [`api.md`](api.md)).
 
