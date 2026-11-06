@@ -26,7 +26,7 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 //     ("DEVA · 17 küme"); a thin hub (1-2 clusters, noindex) is still worth
 //     opening, it just is not in the sitemap;
 //   * a hub with none is plain text ("Hamas · son 14 günde küme yok"), no link.
-//     The hub counts only multi-source live clusters (entity_cluster_ids_v2:
+//     The hub counts only multi-source live clusters (entity_cluster_ids_v3, or v2 as its fallback:
 //     not archived, not merged, article_count >= 2, updated in the window), so
 //     "küme" is the honest unit; "haber yok" would deny the single-source
 //     stories that may exist. (Deliberately not the literal "haber yok" copy of

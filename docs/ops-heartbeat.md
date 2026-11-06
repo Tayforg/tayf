@@ -857,7 +857,7 @@ and one tiny `ops_archive_gap_days()` read per heartbeat run.
 
 Migration 136 adds one tiny RPC write per authenticated cron run (`vercel.ts`:
 headline every 5 minutes, alerts-webhooks every 10, social every 20 minutes from
-05:00 to 20:59 UTC, fact-checks hourly, digest weekly: about 500 rows a day, so
+05:00 to 20:40 UTC (`*/20 5-20`), fact-checks hourly, digest weekly: about 500 rows a day, so
 about 3.5k rows with the 7 day retention), and row 16 costs about 14 ms in
 `ops_health_report()` (a catalogue scan and `pg_total_relation_size` over 68
 public relations).

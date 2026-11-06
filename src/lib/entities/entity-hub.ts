@@ -181,6 +181,15 @@ export function entityHubNote(total: number, shown: number): string {
 // neutral title says "Almanya Dışişleri", "Dışişleri de sessiz kaldı" in an
 // Israeli story, "Başbakan Yardımcısı ve Dışişleri Bakanı" compounds) and
 // countries that are not in the list (Yemen, Küba, Norveç, Filistin, İsviçre).
+//
+// erdogan and akp (h56-entities-1 and h56-entities-2, 2026-11-06), measured read-only with the app's exact arrays, 14-day
+// window, live clusters; the JS twin and PostgreSQL agree on all 421 candidate rows of erdogan:
+//   erdogan  410 -> 370   42 dropped (16 Emine, 15 Bilal, 5 Fatih and Asuman, 2 Canan, 2 Yılmaz, 1 Filiz, 1 Meryem
+//                         Erdoğan), 2 added (the glued "Cumhurbaşkanı Erdoğanın"); none of the dropped rows carries
+//                         "cumhurbaşkanı erdoğan" or "recep tayyip erdoğan". The excludes veto the story, the notAfter
+//                         skips one occurrence; the two presidential forms are trusted.
+//   akp      303 -> 174   129 dropped, 0 added, by headlineOnly: the regex ignores the summary lead and runs on
+//                         title_tr + title_tr_neutral (migration 170, entity_cluster_ids_v3); every other hub keeps the lead.
 // ---------------------------------------------------------------------------
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {
@@ -209,6 +218,20 @@ const HUB_SPEC_BY_KEY: ReadonlyMap<string, RisingHubSpec> = new Map(
 /** The hub-only search data for an entity; `{}` (label, whole word) when none is curated. */
 export function entityHubSpec(entity: RisingEntity): RisingHubSpec {
   return HUB_SPEC_BY_KEY.get(entity.key) ?? {};
+}
+
+/**
+ * Whether the hub's regex runs on the headlines only (title_tr and
+ * title_tr_neutral, never the summary's first line): the spec's `headlineOnly`,
+ * the literal `true`, curated on akp alone (migration 170). `spec` defaults to
+ * the curated one; tests pass their own. It only picks a column of the RPC and
+ * never changes `entityHubQueries` or `entityHubPatterns`.
+ */
+export function entityHubHeadlineOnly(
+  entity: RisingEntity,
+  spec: RisingHubSpec = entityHubSpec(entity),
+): boolean {
+  return spec.headlineOnly === true;
 }
 
 /**

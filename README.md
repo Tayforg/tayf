@@ -20,13 +20,13 @@ Tayf (Turkish for "spectrum") is a real-time Turkish news media bias analyzer. I
 
 Tayf no longer runs long-lived Node workers. The new pipeline is an event-driven stream built entirely from Vercel and Supabase primitives:
 
-- **`pg_cron`** schedule `ingest-drain` (every 3 min) `net.http_post`s the **`ingest` Edge Function**, which fans out across the 144 RSS sources, normalizes items (charset-aware), and upserts into `articles`.
+- **`pg_cron`** schedule `ingest-drain` (every 3 min) `net.http_post`s the **`ingest` Edge Function**, which fans out across the active RSS sources (118 of 144 registered on 2026-11-06), normalizes items (charset-aware), and upserts into `articles`.
 - An **`AFTER INSERT` trigger** on `articles` enqueues each new politics article onto the **pgmq `cluster_work`** queue. New articles with `image_url IS NULL` are also enqueued onto **`image_backfill`**.
 - Parallel **`pg_cron`** schedules `cluster-drain` (every minute) and `image-drain` (every 5 min) drain the queues by invoking the **`cluster-consumer`** and **`image-consumer`** Edge Functions co-located with the database. Per-message visibility timeouts give at-least-once semantics; archival happens on success, permanent failures (>3 reads) are dropped.
 - **Vercel cron** runs five routes (`vercel.ts`): `/api/cron/headline` (`*/5 * * * *`) generates neutral Turkish titles for any cluster still missing one, `/api/cron/digest` (`0 6 * * 6`) sends the weekly digest, `/api/cron/fact-checks` (`23 * * * *`) pulls the fact-check publisher feeds, `/api/cron/social` (`*/20 5-20 * * *`) posts to the owned channels and `/api/cron/alerts-webhooks` (`*/10 * * * *`) delivers the alert webhooks.
 
 ```
-   144 RSS feeds ─▶  pg_cron ingest-drain  ─▶  Edge Function: ingest
+active RSS feeds ─▶  pg_cron ingest-drain  ─▶  Edge Function: ingest
                                                               │
                                                               ▼
                                                    Postgres: articles
@@ -90,7 +90,7 @@ To exercise the pipeline locally: run `supabase start`, apply migrations through
 
 - **`/`** — home; real-time political clusters grouped by story (`src/app/page.tsx`). Cards lead with bias-distribution bar + source count + blindspot pill.
 - **`/cluster/[id]`** — single story with hero, bias spectrum, `ClusterStance` (who-is-in-this-story by zone), `MediaDna` (all 144 outlets, this story's participants highlighted), and a `CrossSpectrumCaption` when an outlet breaks ranks (`src/app/cluster/[id]/page.tsx`).
-- **`/admin`** — dev tools: live stats, source CRUD, manual ingest/backfill triggers, nuke actions (`src/app/admin/page.tsx`).
+- **`/admin`** — dev tools: live stats, source CRUD, manual ingest/backfill triggers, nuke actions (`src/app/admin/(protected)/page.tsx`).
 
 ## Database schema
 

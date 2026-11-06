@@ -18,6 +18,7 @@ import {
   QUANTITY_GUARD,
   entityByKey,
   entityHubForms,
+  entityHubHeadlineOnly,
   entityHubNote,
   entityHubPatterns,
   entityHubQueries,
@@ -288,6 +289,12 @@ const DISISLERI_NOT_AFTER = [
   "avrupa",
 ] as const;
 
+/** The family members whose name vetoes the bare "Erdoğan" (folded; h56-entities-1, the spec restated). */
+const ERDOGAN_EXCLUDES = ["emine erdogan", "bilal erdogan", "sumeyye erdogan", "esra erdogan"] as const;
+
+/** The given names that make a following "Erdoğan" someone else (folded; h56-entities-1, the spec restated). */
+const ERDOGAN_NOT_AFTER = ["fatih", "yilmaz", "asuman", "canan", "meryem", "nehir", "filiz"] as const;
+
 /**
  * The guard in front of a non-trusted base: a negative lookahead over the
  * excludes, then a positive lookahead over the requires (each only when its
@@ -335,7 +342,16 @@ describe("entityHubForms", () => {
   });
 
   it("falls back to the label when there are no aliases", () => {
-    expect(entityHubForms(entityByKey("erdogan")!)).toEqual(["Erdoğan"]);
+    expect(entityHubForms(entityByKey("chp")!)).toEqual(["CHP"]);
+    expect(entityHubForms(entityByKey("ysk")!)).toEqual(["YSK"]);
+  });
+
+  it("erdogan: the bare name first, then the two presidential forms (h56-entities-1)", () => {
+    expect(entityHubForms(entityByKey("erdogan")!)).toEqual([
+      "Erdoğan",
+      "Cumhurbaşkanı Erdoğan",
+      "Recep Tayyip Erdoğan",
+    ]);
   });
 });
 
@@ -356,7 +372,14 @@ describe("entityHubPatterns (exact runtime values)", () => {
     ],
     // One fixed-length negative lookbehind per foreign-country word, right before the base word.
     disisleri: [`\\m${notAfterLookbehinds(DISISLERI_NOT_AFTER)}disisleri\\M`],
-    erdogan: ["\\merdogan\\M"],
+    // The bare 'Erdoğan' is vetoed by a family member named in the story and skips an occurrence that
+    // stands right behind a given name; the two presidential forms are trusted (bare) and carry only
+    // the notAfter lookbehinds (h56-entities-1).
+    erdogan: [
+      `${guardPrefix(ERDOGAN_EXCLUDES)}\\m${notAfterLookbehinds(ERDOGAN_NOT_AFTER)}erdogan\\M`,
+      `\\m${notAfterLookbehinds(ERDOGAN_NOT_AFTER)}cumhurbaskani\\s+erdogan`,
+      `\\m${notAfterLookbehinds(ERDOGAN_NOT_AFTER)}recep\\s+tayyip\\s+erdogan`,
+    ],
     chp: ["\\mchp\\M"],
     cin: ["\\mcin\\M"],
     "asgari-ucret": ["\\masgari\\s+ucret"],
@@ -901,6 +924,66 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
     expect(hubMatches("erdogan", "Cumhurbaşkanı ERDOĞAN açıkladı")).toBe(true);
     expect(hubMatches("erdogan", "Erdoğanlar köyü")).toBe(false);
   });
+
+  // h56-entities-1 (hunt 56): /gundem/erdogan listed 42 of 410 clusters about other Erdoğans.
+  it("erdogan: a family member or a namesake is not the President (the headlines of the 14-day replay)", () => {
+    for (const sample of [
+      "Emine Erdoğan'dan anlamlı mesaj: Kadınlar sanatın ve zanaatın atan kalbidir",
+      "Bilal Erdoğan 16 yaş öncesi sosyal medya kullanımında dünyada ortak prensibi savundu",
+      "İlim Yayma Vakfı Mütevelli Heyeti Başkanı Necmeddin Bilal Erdoğan: Güçlü bir gelecek için",
+      "Yılmaz Erdoğan kam davulu sahnesi için özür diledi",
+      "Müzisyen Filiz Erdoğan, mesanesinin delindiği iddiasıyla suç duyurusunda bulundu",
+      "Yüsra Geyik takside bekledi, Nehir Erdoğan arka kapıdan çıktı",
+      "Pasifik Holding yöneticileri Fatih Erdoğan ve Asuman Erdoğan'ın mal varlığına tedbir",
+      "Çocuklarını kurtaran Canan Erdoğan minibüsün altında kaldı",
+      "Meryem Erdoğan hayatını kaybetti",
+      "Sümeyye Erdoğan Bayraktar bir sergiyi gezdi",
+      "Esra Erdoğan'dan yeni açıklama",
+      "Erdoğanlar köyü",
+    ]) {
+      expect(hubMatches("erdogan", sample), sample).toBe(false);
+    }
+  });
+
+  it("erdogan: the President stays, by name alone, by title, or after a given name that a comma or a colon separates", () => {
+    for (const sample of [
+      "Cumhurbaşkanı Erdoğan, Malezya Başbakan Yardımcısı Hamidi'yi kabul etti",
+      "Erdoğan'dan Gazze tepkisi: İnsanlık trajedisini tribünden seyrediyorlar",
+      "Cumhurbaşkanı ERDOĞAN açıkladı",
+      "Özel'den Erdoğan'a fon krizi çıkışı",
+      "Cevdet Yılmaz, Cumhurbaşkanı Erdoğan'ın güçlü desteğiyle konuştu",
+      // notAfter skips one occurrence only: a comma between the given name and the surname breaks the pair.
+      "Cevdet Yılmaz, Erdoğan'ın talimatını açıkladı",
+      "Fatih Altaylı: Erdoğan'ın açıklaması",
+      "Erdoğan ile Putin telefonda görüştü",
+    ]) {
+      expect(hubMatches("erdogan", sample), sample).toBe(true);
+    }
+  });
+
+  it("erdogan: a trusted presidential form rescues a story that also names a family member", () => {
+    expect(hubMatches("erdogan", "Emine Erdoğan ile Cumhurbaşkanı Erdoğan Seul'de karşılandı")).toBe(true);
+    expect(hubMatches("erdogan", "Recep Tayyip Erdoğan, Bilal Erdoğan ile Japonya'da")).toBe(true);
+    expect(hubMatches("erdogan", "Bilal Erdoğan, Cumhurbaşkanı Erdoğan'ın yanında")).toBe(true);
+    // Without a trusted form the same pairs are out (the veto is the whole story's, wherever the name stands).
+    expect(hubMatches("erdogan", "Emine Erdoğan ve Erdoğan Seul'de karşılandı")).toBe(false);
+    expect(hubMatches("erdogan", "Erdoğan, eşi Emine Erdoğan ile karşılandı")).toBe(false);
+  });
+
+  it("erdogan: the lookbehind is the word's own neighbour, so a given name elsewhere in the story does not veto", () => {
+    // 'Fatih' in front of a different word, 'Yılmaz' as a surname before the President's full title.
+    expect(hubMatches("erdogan", "Fatih Belediyesi açıkladı, Erdoğan görüştü")).toBe(true);
+    expect(hubMatches("erdogan", "Nehir kenarında Erdoğan konuştu")).toBe(true);
+    // Both occurrences behind a given name: out.
+    expect(hubMatches("erdogan", "Nehir Erdoğan ve Canan Erdoğan")).toBe(false);
+    // Only the first occurrence is behind a given name: the second one is the President's.
+    expect(hubMatches("erdogan", "Filiz Erdoğan'ın avukatı ile Erdoğan'ın avukatı")).toBe(true);
+  });
+
+  it("erdogan: the glued 'Cumhurbaşkanı Erdoğanın' still matches the trusted form (open at the end, like every multi-word form)", () => {
+    expect(hubMatches("erdogan", "Cumhurbaşkanı Erdoğanın Malezya ziyareti")).toBe(true);
+    expect(hubMatches("erdogan", "Emine Erdoğan Cumhurbaşkanı Erdoğanın eşi olarak katıldı")).toBe(true);
+  });
 });
 
 describe("entityHubQueries", () => {
@@ -1093,8 +1176,11 @@ describe("invariants over every curated entity", () => {
       ["meclis repeated, cue at the end", fit("meclis ").slice(0, N - 5) + " tbmm"],
       ["dolar behind amounts", fit("100 dolar milyar dolar ")],
       ["digits", "1".repeat(N)],
+      ["erdogan blocked on every line", fit("fatih erdogan ")],
+      ["erdogan repeated, family name at the end", fit("erdogan ").slice(0, N - 14) + " emine erdogan"],
+      ["family name repeated, trusted form at the end", fit("emine erdogan ").slice(0, N - 22) + " cumhurbaskani erdogan"],
     ];
-    const keys = ["disisleri", "borsa", "meclis", "aym", "tcmb", "dolar"];
+    const keys = ["disisleri", "borsa", "meclis", "aym", "tcmb", "dolar", "erdogan"];
 
     it("builds every input at exactly 100k characters", () => {
       for (const [name, text] of inputs) expect(text.length, name).toBe(N);
@@ -1179,7 +1265,7 @@ describe("invariants over every curated entity", () => {
   it("only curates hub data for entities that exist, and returns {} for the rest", () => {
     const keys = new Set(RISING_ENTITIES.map((e) => e.key));
     for (const k of Object.keys(RISING_HUB_SPECS)) expect(keys.has(k), k).toBe(true);
-    expect(entityHubSpec(entityByKey("erdogan")!)).toEqual({});
+    expect(entityHubSpec(entityByKey("chp")!)).toEqual({});
     expect(entityHubSpec({ key: "__proto__", label: "x", tokens: [] })).toEqual({});
     expect(entityHubSpec({ key: "constructor", label: "x", tokens: [] })).toEqual({});
   });
@@ -1206,7 +1292,7 @@ describe("invariants over every curated entity", () => {
       RISING_ENTITIES.filter((e) => entityHubSpec(e).aliases !== undefined)
         .map((e) => e.key)
         .sort(),
-    ).toEqual(["akp", "aym", "borsa", "meclis", "tcmb", "yrp", "zelenski"]);
+    ).toEqual(["akp", "aym", "borsa", "erdogan", "meclis", "tcmb", "yrp", "zelenski"]);
   });
 });
 
@@ -1277,13 +1363,13 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("excludes is curated on exactly aym, borsa, meclis and tcmb; quantityGuard on dolar only", () => {
+  it("excludes is curated on exactly aym, borsa, erdogan, meclis and tcmb; quantityGuard on dolar only", () => {
     expect(
       specs
         .filter(([, s]) => s.excludes !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["aym", "borsa", "meclis", "tcmb"]);
+    ).toEqual(["aym", "borsa", "erdogan", "meclis", "tcmb"]);
     expect(
       specs
         .filter(([, s]) => s.quantityGuard !== undefined)
@@ -1303,13 +1389,13 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("notAfter is curated on exactly disisleri, as folded single ASCII words", () => {
+  it("notAfter is curated on exactly disisleri and erdogan, as folded single ASCII words", () => {
     expect(
       specs
         .filter(([, s]) => s.notAfter !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["disisleri"]);
+    ).toEqual(["disisleri", "erdogan"]);
     for (const [key, spec] of specs) {
       for (const w of spec.notAfter ?? []) {
         expect(w, `${key}: ${w}`).toBe(foldEntityText(w));
@@ -1350,6 +1436,89 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
         "kripto",
         "ticaret borsa",
       ],
+    });
+  });
+
+  it("the erdogan spec (h56-entities-1): the President by title is trusted, a family member vetoes the story, a given name skips one occurrence", () => {
+    expect(RISING_HUB_SPECS.erdogan).toEqual({
+      aliases: ["Erdoğan", "Cumhurbaşkanı Erdoğan", "Recep Tayyip Erdoğan"],
+      trusted: ["Cumhurbaşkanı Erdoğan", "Recep Tayyip Erdoğan"],
+      excludes: [...ERDOGAN_EXCLUDES],
+      notAfter: [...ERDOGAN_NOT_AFTER],
+    });
+    expect(entityHubSpec(entityByKey("erdogan")!)).toBe(RISING_HUB_SPECS.erdogan);
+    // The bare name is the only guarded form: the two trusted ones are emitted bare.
+    const patterns = entityHubPatterns(entityByKey("erdogan")!);
+    expect(patterns.map((p) => p.startsWith("^(?"))).toEqual([true, false, false]);
+    // No other field: no requires, no prefix matching, no quantity guard, no inflections.
+    expect(Object.keys(RISING_HUB_SPECS.erdogan!).sort()).toEqual(["aliases", "excludes", "notAfter", "trusted"]);
+  });
+
+  it("erdogan: the bare name's query variants sit inside the first ENTITY_HUB_MAX_TERMS queries, so the 12-term cap never drops them", () => {
+    const e = entityByKey("erdogan")!;
+    const queries = entityHubQueries(e);
+    expect(queries.length).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
+    const bare = turkishQueryVariants("Erdoğan");
+    expect(bare.length).toBeGreaterThan(0);
+    expect(queries.slice(0, ENTITY_HUB_MAX_TERMS)).toEqual(expect.arrayContaining(bare));
+    // The bare name leads: the presidential forms only ever add to the recall prefilter.
+    expect(queries.slice(0, bare.length)).toEqual(bare);
+    for (const v of [...turkishQueryVariants("Cumhurbaşkanı Erdoğan"), ...turkishQueryVariants("Recep Tayyip Erdoğan")]) {
+      expect(queries, v).toContain(v);
+    }
+  });
+
+  it("erdogan is not in the /trends rollup guards: its tokens stay [erdogan] (migration 163 guards only tcmb, aym, meclis)", () => {
+    expect(entityByKey("erdogan")).toEqual({ key: "erdogan", label: "Erdoğan", tokens: ["erdogan"] });
+  });
+
+  // h56-entities-2 (hunt 56): /gundem/akp listed 130 of 304 clusters that name the party only as an epithet in the
+  // summary lead ("eski AK Parti milletvekili", "AK Parti Samsun Milletvekili ... başkanlığında"). headlineOnly makes
+  // the hub regex run on title_tr + title_tr_neutral and ignore the lead, for akp only.
+  describe("headlineOnly (h56-entities-2)", () => {
+    it("is curated on exactly akp, and it is the literal true", () => {
+      expect(
+        Object.entries(RISING_HUB_SPECS)
+          .filter(([, s]) => s.headlineOnly !== undefined)
+          .map(([k]) => k),
+      ).toEqual(["akp"]);
+      expect(RISING_HUB_SPECS.akp?.headlineOnly).toBe(true);
+    });
+
+    it("keeps the rest of the akp spec as it was: both spellings, the two inflections, the same two patterns", () => {
+      expect(RISING_HUB_SPECS.akp).toEqual({
+        aliases: ["AK Parti", "AKP"],
+        inflections: ["AK Partili", "AK Partimize"],
+        headlineOnly: true,
+      });
+      expect(entityHubPatterns(entityByKey("akp")!)).toEqual(["\\mak\\s+parti", "\\makp\\M"]);
+    });
+
+    it("entityHubHeadlineOnly is true for akp and false for every other hub (the summary lead stays for them)", () => {
+      expect(entityHubHeadlineOnly(entityByKey("akp")!)).toBe(true);
+      for (const key of ["chp", "mhp", "erdogan", "ozgur-ozel", "israil", "abd", "iran", "ukrayna"]) {
+        expect(entityHubHeadlineOnly(entityByKey(key)!), key).toBe(false);
+      }
+      expect(RISING_ENTITIES.filter((e) => entityHubHeadlineOnly(e)).map((e) => e.key)).toEqual(["akp"]);
+    });
+
+    it("takes the spec as an argument, like the other helpers, and reads only the literal true", () => {
+      const e = { key: "x", label: "Xyz", tokens: [] as string[] };
+      expect(entityHubHeadlineOnly(e)).toBe(false);
+      expect(entityHubHeadlineOnly(e, {})).toBe(false);
+      expect(entityHubHeadlineOnly(e, { headlineOnly: true })).toBe(true);
+      expect(entityHubHeadlineOnly(e, { headlineOnly: false as unknown as true })).toBe(false);
+      expect(entityHubHeadlineOnly(e, { headlineOnly: 1 as unknown as true })).toBe(false);
+    });
+
+    it("does not touch the regex: the patterns of every hub are what they were without the flag", () => {
+      for (const e of RISING_ENTITIES) {
+        const withoutFlag: RisingHubSpec = { ...entityHubSpec(e) };
+        delete withoutFlag.headlineOnly;
+        expect(entityHubPatterns(e), e.key).toEqual(entityHubPatterns(e, withoutFlag));
+        expect(entityHubQueries(e), e.key).toEqual(entityHubQueries(e, withoutFlag));
+        expect(entityHubForms(e), e.key).toEqual(entityHubForms(e, withoutFlag));
+      }
     });
   });
 

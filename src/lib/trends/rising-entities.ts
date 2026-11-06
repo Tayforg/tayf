@@ -129,6 +129,20 @@ export type RisingHubSpec = {
    * where the story is about the sum and not the thing ("dolar").
    */
   quantityGuard?: true;
+  /**
+   * The hub regex runs on the headlines only (`title_tr` and `title_tr_neutral`)
+   * and ignores the first line of the summary that migration 156 added to the
+   * text. For a hub whose name is mostly an epithet in the lead sentence: "eski
+   * AK Parti milletvekili Ertan Aydın", "AK Parti Samsun Milletvekili ...
+   * başkanlığında" listed 129 of akp's 303 clusters (14 days, 2026-11-06) and
+   * most of them are not about the party. entity-hub-query.ts sends it as
+   * `p_headline_only` to `entity_cluster_ids_v3` (migration 170); until 170 is
+   * applied the read falls back to v2 and the lead counts again. Set on akp
+   * ONLY: for chp and mhp the lead mostly says "CHP lideri ..." or "MHP lideri
+   * Devlet Bahçeli", which is the party's own story, and the country and person
+   * hubs name their subject there. Part of the hub's cache key.
+   */
+  headlineOnly?: true;
 };
 
 /** Turkish letters (and circumflexed vowels) that fold to ASCII. */
@@ -212,7 +226,32 @@ export const RISING_ENTITIES: readonly RisingEntity[] = [
 
 /** Hub-only search data, keyed by RisingEntity.key. An entity without an entry is searched by its label, as a whole word. */
 export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
-  akp: { aliases: ["AK Parti", "AKP"], inflections: ["AK Partili", "AK Partimize"] },
+  // Headline only (h56-entities-2): 129 of 303 clusters named the party only in the summary lead.
+  akp: {
+    aliases: ["AK Parti", "AKP"],
+    inflections: ["AK Partili", "AK Partimize"],
+    headlineOnly: true,
+  },
+  // The President, not the other Erdoğans (h56-entities-1): the bare "Erdoğan"
+  // also names Emine and Bilal Erdoğan (31 of 42 clusters wrongly listed in the
+  // 14-day replay), Yılmaz the director, Fatih and Asuman of Pasifik Holding,
+  // Filiz, Canan, Nehir and Meryem. Two guards, split on purpose:
+  //   * excludes veto the WHOLE story when a family member is named, so "Emine
+  //     Erdoğan'dan mesaj" and "Bilal Erdoğan ... savundu" drop, unless a trusted
+  //     presidential form is in it too: "Emine Erdoğan ile Cumhurbaşkanı Erdoğan
+  //     Seul'de karşılandı" and "Recep Tayyip Erdoğan, Bilal Erdoğan ile ..." stay.
+  //   * notAfter skips ONE occurrence, the one standing right behind a given
+  //     name ("Yılmaz Erdoğan", "Fatih Erdoğan"), so "Cevdet Yılmaz, Erdoğan'ın
+  //     ..." (a comma between them) and "Erdoğan'dan Gazze tepkisi" stay.
+  // Only the bare name needs it: "Cumhurbaşkanı Erdoğan" and "Recep Tayyip
+  // Erdoğan" name the President on their own. /trends (migration 163) is
+  // untouched: erdogan is not one of its guarded keys, and `tokens` does not change.
+  erdogan: {
+    aliases: ["Erdoğan", "Cumhurbaşkanı Erdoğan", "Recep Tayyip Erdoğan"],
+    trusted: ["Cumhurbaşkanı Erdoğan", "Recep Tayyip Erdoğan"],
+    excludes: ["emine erdogan", "bilal erdogan", "sumeyye erdogan", "esra erdogan"],
+    notAfter: ["fatih", "yilmaz", "asuman", "canan", "meryem", "nehir", "filiz"],
+  },
   dem: { inflections: ["DEM Partili"] },
   "iyi-parti": { inflections: ["İYİ Partili"] },
   yrp: { aliases: ["Yeniden Refah", "YRP"] },

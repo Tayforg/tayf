@@ -858,10 +858,30 @@ describe("a shared entity's own words are never the shared stem (h37-clusters-1)
     expect(isRelatedTitle(a, b)).toBe(false);
   });
 
-  it.each(NOT_RELATED)("keeps the score the old rule gave, so ordering is unchanged: %s", (_label, a, b) => {
+  // h56-entities-1: the hub's erdogan pattern (which entityKeysIn reuses) no longer names Emine, Filiz or Yılmaz Erdoğan,
+  // so these three pairs stop sharing the entity key at all. The stem rule they were written for is not reached; they
+  // stay not related (the first test above), one step earlier.
+  const NAMESAKE_LABELS: ReadonlySet<string> = new Set([
+    "Erdoğan: Azerbaycan ziyareti vs Emine Erdoğan'ın Kore paylaşımı",
+    "Filiz Erdoğan'ın suç duyurusu vs Yılmaz Erdoğan'ın özrü",
+    "Filiz Erdoğan'ın suç duyurusu vs Emine Erdoğan'ın sergisi",
+  ]);
+  const STILL_SHARE_A_KEY = NOT_RELATED.filter(([label]) => !NAMESAKE_LABELS.has(label));
+  const NAMESAKES = NOT_RELATED.filter(([label]) => NAMESAKE_LABELS.has(label));
+
+  it("the namesake pairs are exactly the three that named another Erdoğan", () => {
+    expect(NAMESAKES).toHaveLength(NAMESAKE_LABELS.size);
+    expect(STILL_SHARE_A_KEY).toHaveLength(NOT_RELATED.length - NAMESAKE_LABELS.size);
+  });
+
+  it.each(STILL_SHARE_A_KEY)("keeps the score the old rule gave, so ordering is unchanged: %s", (_label, a, b) => {
     // The pair still shares an entity key and clears the floor; only the verdict moved.
     expect(entityKeysIn(a).some((k) => entityKeysIn(b).includes(k))).toBe(true);
     expect(relatedScore(a, b)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
+  });
+
+  it.each(NAMESAKES)("shares no entity key since the hub stopped naming the other Erdoğans: %s", (_label, a, b) => {
+    expect(entityKeysIn(a).some((k) => entityKeysIn(b).includes(k))).toBe(false);
   });
 
   it("stays related when the entity is backed by a stem of its own", () => {
@@ -876,6 +896,24 @@ describe("a shared entity's own words are never the shared stem (h37-clusters-1)
       ["Kestane Lokanta Marmara Nergis Orman", "Kestane Lokanta ruhsatı iptal edildi"],
     ];
     for (const [a, b] of pairs) expect(isRelatedTitle(a, b), `${a} <- ${b}`).toBe(true);
+  });
+
+  // h56 review fix correctness-related-cumhu-stem: the erdogan hub aliases now carry "Cumhurbaşkanı", "Recep" and
+  // "Tayyip". A generic word is skipped by the verdict itself, so its five-character stem must not also be struck
+  // from the shared-stem set: `cumhu` is "Cumhuriyet" and "Cumhur" too (RELATED_GENERIC_WORDS: Cumhurbaşkanı covers
+  // Cumhurbaşkanlığı but NOT Cumhuriyet). recep and tayyi are names, not generic words: they stay excluded.
+  it.each([
+    ["Cumhurbaşkanı Erdoğan Cumhuriyet resepsiyonunda", "Recep Tayyip Erdoğan Cumhuriyet Bayramı'nı kutladı"],
+    ["Erdoğan'dan 29 Ekim Cumhuriyet Bayramı mesajı", "Erdoğan Cumhuriyet resepsiyonunda konuştu"],
+  ])("an alias word the verdict already skips does not strike its stem: Cumhuriyet still backs a shared Erdoğan (%s)", (a, b) => {
+    expect(isRelatedTitle(a, b)).toBe(true);
+  });
+
+  it.each([
+    ["Cumhurbaşkanı", "Cumhurbaşkanı Erdoğan Azerbaycan'da", "Cumhurbaşkanı Erdoğan Kore'de"],
+    ["Recep Tayyip", "Recep Tayyip Erdoğan Azerbaycan'da", "Recep Tayyip Erdoğan Kore'de"],
+  ])("the alias words themselves still never relate two Erdoğan stories: %s stays out", (_word, a, b) => {
+    expect(isRelatedTitle(a, b)).toBe(false);
   });
 
   it("generic words (Cumhurbaşkanı, Başkan, ziyaret, mesaj, tepki ...) never count as the shared stem", () => {
