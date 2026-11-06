@@ -243,9 +243,14 @@ describe("165 framing_pool_politics_gate: the replaced function", () => {
   });
 
   it("documents the function in a comment that names 165", () => {
-    const comment = /comment on function public\.framing_candidate_pool_refresh\(\) is\s+((?:'(?:[^']|'')*'\s*)+);/i.exec(code165);
-    expect(comment, "a comment on function ... is '...'").not.toBeNull();
-    const text = (comment as RegExpExecArray)[1] as string;
+    // indexOf, not a regex: a quoted-literal pattern with nested repetition
+    // backtracks exponentially (CodeQL js/redos).
+    const head = "comment on function public.framing_candidate_pool_refresh() is";
+    const start = code165.toLowerCase().indexOf(head);
+    expect(start, "a comment on function ... is '...'").toBeGreaterThanOrEqual(0);
+    const end = code165.indexOf("';", start + head.length);
+    expect(end, "the comment literal ends with ';").toBeGreaterThan(start);
+    const text = code165.slice(start + head.length, end + 1);
     expect(text).toContain("165");
     expect(text).toMatch(/politics/i);
     expect(text).toMatch(/outlet/i);
