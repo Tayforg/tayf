@@ -3810,3 +3810,48 @@ select jobid, status, return_message, start_time, end_time from cron.job_run_det
 Then `GET /trends`: a "Yükselen Konular" row whose hub is thin (fewer than 3 clusters) links to `/?q=<label>`, and `GET /gundem` shows no link to a hub with no cluster in the last 14 days (for example `/gundem/hamas` while it is empty).
 
 **Rollback** (nothing else depends on 163; one transaction): re-run the function statements of `112_trends_entity_rollup.sql` (section 2: its `create or replace function`, `comment on function`, `revoke` and `grant`; it restores `md5(prosrc)` `b0a0dcce4dd8df781c35ed7a73af576e`, length 5937), then remove ledger row 163 (`delete from supabase_migrations.schema_migrations where version = '163';`). The ACL does not change in either direction. The next `:25` run recomputes today and yesterday unguarded again.
+
+## 164 — `price_at` reads the 5-minute bar until the daily close is final (session-aware): APPLY 164, no deploy-order constraint
+
+**Why:** 062's `price_at(p_ticker, p_ts)` preferred the daily close of the Istanbul day of `p_ts` whenever one existed, so a news timestamp inside today's session (or before 18:10, when the daily bar is still being written) was priced at a close that did not exist yet at that moment, and the "+%N haberden" chips on `/ekonomi` measured against the wrong base (h48).
+
+**What 164 does** (function-only, one transaction, safe to re-apply): `create or replace function public.price_at(...)` with 062's signature, volatility and grants. The latest 5-minute bar at or before `p_ts` (within 4 days) wins unless a daily close exists for a day whose 18:00 Istanbul close is after that bar; the daily close is only used for days that had closed (18:10 Istanbul) by `p_ts`. No table, index, cron or data change.
+
+| | md5(prosrc) | length |
+|---|---|---|
+| before 164 = the body of 062 | `57f79dbd2e2845d01d44bce6c67d4354` | 533 |
+| after 164 (applied 2026-11-06) | `062c2405345dd5e61a3bdb11f6474eb5` | 827 |
+
+**Rollback:** re-run only 062 section 2's function statement (restores md5 `57f79dbd…`), then `delete from supabase_migrations.schema_migrations where version = '164';`.
+
+## 165 — the framing candidate pool admits only political, outlet-kind, Turkish-language sources: APPLY 165, no deploy-order constraint
+
+**Why:** 130's `framing_candidate_pool_refresh()` pooled every article of a multi-source cluster, so the framing game drew agency wires, ministry feeds and English-language outlets next to political Turkish outlets (h48).
+
+**What 165 does** (function-only, `SECURITY DEFINER`, `search_path = ''`, one transaction, safe to re-apply): 130's body plus three gates: the article's category is political (or the source has `politics_admitted_at`), `coalesce(s.kind, 'outlet') = 'outlet'`, and the six `ENGLISH_SOURCE_SLUGS` (including `mfa-turkey`) are excluded. The next 5-minute refresh rebuilds the pool; on 2026-11-06 it held 2,545 rows with 0 non-outlet and 0 non-political.
+
+| | md5(prosrc) | length |
+|---|---|---|
+| before 165 = the body of 130 | `9d57360d0dc610c8c2d3c1d97ca6fc75` | 2093 |
+| after 165 (applied 2026-11-06) | `eca2c0c86cd141e01a6f4b141fa8b977` | 3022 |
+
+**Rollback:** re-run only 130 section 4's `create or replace function public.framing_candidate_pool_refresh()` statement (restores md5 `9d57360d…`), then delete ledger row 165. The next refresh rebuilds the old pool.
+
+## 166 — archive search stops filling its page with stem collisions (`search_cluster_ids` over-stem guard): APPLY 166, no deploy-order constraint
+
+**Why:** the Turkish snowball stemmer cuts some words to 2-4 letters (`burdur -> bur`, `ersan -> er`, `ilhan -> ilha`, `tarla -> tar`, `iğdir -> ik`), and 129's `cand` CTE takes every row holding any word with that stem; its literal word-start tier only re-orders, so `LIMIT 24` is filled from the stem-only tail. On 2026-11-06 (read-only) `/?q=burdur` showed 14 Bursa / Bulgaristan / "burun buruna" stories of 24, `ersan` 22 "erken seçim" / "sona erdi" rows, `ilhan` 11 İlham Aliyev rows, `tarla` 18 Tarım Bakanlığı rows (h50-search-1).
+
+**What 166 does** (function-only, `SECURITY DEFINER`, `search_path = ''`, grants re-issued to `service_role` only, one transaction, safe to re-apply): 129's body plus one guard. A typed word whose stem over-cuts it (stem shorter than the word and at most 4 letters) must also appear, by `left(word, max(4, len(stem)+1))`, at a word start in the title, the summary or the neutral title of every kept row. Exempt: a 3-4 letter folded root plus a case or plural suffix (`irakta`, `kirada`, `natonun`, `faize`, `zamlar`, `ilaci`); a 3-letter root needs a suffix of 3+ letters, so `tarla` and `putin` stay guarded. The guard is skipped for queries with `OR` or a negated phrase; negated words are never guards. A query with no guarded word runs exactly as 129 (same top 24 for `şişli`, `putin`, `erdoğan`, `chp`, `istanbul`, `iran`, `seçim`, the `akp` alias). 083's two-argument fallback and the app are untouched.
+
+| | md5(prosrc) | length |
+|---|---|---|
+| before 166 = the body of 129 (production, 2026-11-06) | `cb7fee8680c50e8f20bafab3e29fef39` | 3426 |
+| after 166 | `d7f4b4223730e06db8479f42776d8040` | 9680 |
+
+**Cost** (EXPLAIN ANALYZE on production, inline bodies, medians): `iran` 128 -> 165 ms (1.29x), `seçim` 129 -> 165 ms, `bakan` 156 -> 194 ms; guarded queries get cheaper (`burdur` 42 -> 30 ms, `ersan` 67 -> 42 ms). Known worst case above the 1.3x gate: a few-survivor query walks every candidate (`bakam` 152 -> 444 ms, `ayse` 145 -> 268 ms), close to the existing `-qwxz` worst case of about 382 ms.
+
+**Order:** apply `166_search_overstem_guard.sql` any time; no app deploy depends on it.
+
+**Verify** (read-only): `md5(prosrc), length(prosrc)` of `'public.search_cluster_ids(text[], text, integer)'::regprocedure` is `d7f4b4223730e06db8479f42776d8040`, 9680; `has_function_privilege('anon', …, 'execute')` false and `('service_role', …)` true; ledger row 166 present. Then `GET /?q=burdur` and `/?q=ersan` show no Bursa or erken-seçim cards, `/?q=irakta` still shows the Irak stories, `/?q=şişli` is unchanged.
+
+**Rollback:** re-run only the function statement of section 3 of `129_search_fold_rank.sql` (restores md5 `cb7fee86…`), then `delete from supabase_migrations.schema_migrations where version = '166'; notify pgrst, 'reload schema';`.

@@ -66,6 +66,10 @@ run | 154-image-requeue-stagger.test.ts | tests/migrations/sql/154-image-requeue
 # state (129 applied, those columns), so it is the setup.
 run | 135-cluster-title-key-idx.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql | - | 0
 run | 146-cluster-stem-probe.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql | - | 0
+# 166: the 139 dry-run leaves public.tayf_search_fold and clusters.summary_tr, but no search_tsv column (035), no 083 index and
+# no three-argument search_cluster_ids, which 166 replaces; the 166 setup file adds those (035's column, 083's index, then 129
+# itself) and leaves 129 applied, 166 NOT applied: the live block applies 166 (twice) and runs the function before and after.
+run | 166-search-overstem-guard.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql tests/migrations/sql/166-search-overstem-guard-setup.sql | - | 0
 # --- pending: not runnable in the harness yet -----------------------------------------------------
 pending | 128-delete-source-recompute.test.ts | setup 061+064+128 loads and 4 of 14 live tests pass, then 3 nested suites fail with: update or delete on table sources violates foreign key constraint articles_source_id_fkey on table articles (the stub FKs lack ON DELETE CASCADE as in production), which skips 10 tests
 pending | 024-028.test.ts | needs a full local Supabase stack (SUPABASE_LOCAL_URL)

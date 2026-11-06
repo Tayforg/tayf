@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
-// Harness copied from blindspots-query.test.ts: Step A is a lean
-// `select('id')`, Step B embeds in batches of EMBED_BATCH_SIZE (50) through
-// blindspots-query's exported fetchEmbedBatch. The shared fake's `clusters`
-// resolver branches on `state.selectArgs[0] === 'id'`.
+// Harness adapted from blindspots-query.test.ts: Step A is a lean
+// `select('id, bias_distribution')` (the stored distribution lets the share
+// band be tested BEFORE any cap), Step B embeds only the survivors in batches
+// of EMBED_BATCH_SIZE (50) through blindspots-query's exported fetchEmbedBatch.
+// The shared fake's `clusters` resolver branches on
+// `state.selectArgs[0] === 'id, bias_distribution'`.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -13,7 +15,8 @@ vi.mock("next/cache", () => ({
 }));
 
 const fixture = vi.hoisted(() => ({
-  candidateIds: [] as string[],
+  /** Step-A rows (id + stored bias_distribution), newest updated_at first. */
+  candidates: [] as Array<{ id: string; bias_distribution: unknown }>,
   candidateError: null as { message: string } | null,
   /** The first N Step-A calls fail, later ones succeed (live-retry healing). */
   candidateFailuresRemaining: 0,
@@ -35,14 +38,14 @@ const supabaseFake = await vi.hoisted(async () => {
           selectArgs: unknown[];
           in: Array<{ col: string; vals: unknown[] }>;
         };
-        if (s.selectArgs[0] === "id") {
+        if (s.selectArgs[0] === "id, bias_distribution") {
           fixture.idStates.push(state);
           if (fixture.candidateFailuresRemaining > 0) {
             fixture.candidateFailuresRemaining -= 1;
             return { data: null, error: { message: "transient blip" } };
           }
           if (fixture.candidateError) return { data: null, error: fixture.candidateError };
-          return { data: fixture.candidateIds.map((id) => ({ id })), error: null };
+          return { data: fixture.candidates, error: null };
         }
         fixture.embedStates.push(state);
         if (fixture.embedError) return { data: null, error: fixture.embedError };
@@ -80,6 +83,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 import { cacheLife, cacheTag } from "next/cache";
 import { balanceFromZoneCounts } from "@/lib/bias/balance";
 import { BLINDSPOT } from "@/lib/bias/config";
+import { NEAR_BLINDSPOT_CANDIDATE_SAFETY_CAP } from "./near-blindspot-rule";
 import { getNearBlindspotsSafe } from "./near-blindspots-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 import type { BiasCategory, SourceKind } from "@/types";
@@ -128,6 +132,26 @@ function mkMember(clusterId: string, index: number, spec: MemberSpec) {
   };
 }
 
+/**
+ * The stored bias_distribution cluster-consumer would have written for these
+ * members: VOTING kinds only (outlet, wire; aggregator and niche never vote),
+ * one count per member bias category.
+ */
+function storedDistOf(members: MemberSpec[]): Record<string, number> {
+  const dist: Record<string, number> = {};
+  for (const m of members) {
+    const kind = m.kind ?? "outlet";
+    if (kind !== "outlet" && kind !== "wire") continue;
+    dist[m.bias] = (dist[m.bias] ?? 0) + 1;
+  }
+  return dist;
+}
+
+/** iktidar / bagimsiz / muhalefet counts as a stored bias_distribution. */
+function zoneDist(iktidar: number, bagimsiz: number, muhalefet: number) {
+  return { pro_government: iktidar, center: bagimsiz, opposition: muhalefet };
+}
+
 function mkRow(
   id: string,
   members: MemberSpec[],
@@ -135,6 +159,8 @@ function mkRow(
     title_tr: string;
     title_tr_neutral: string | null;
     updated_at: string;
+    /** Stored bias_distribution; defaults to the voting tally of `members`. */
+    stored: unknown;
   }> = {},
 ) {
   return {
@@ -142,7 +168,7 @@ function mkRow(
     title_tr: overrides.title_tr ?? `Örnek başlık ${id}`,
     title_tr_neutral: overrides.title_tr_neutral ?? null,
     summary_tr: "Özet",
-    bias_distribution: {},
+    bias_distribution: (overrides.stored ?? storedDistOf(members)) as unknown,
     is_blindspot: false,
     blindspot_side: null,
     article_count: members.length,
@@ -166,14 +192,36 @@ function splitRow(
   );
 }
 
-/** A candidate that can never qualify (1 member), to fill batches cheaply. */
-function mkFailingRow(id: string) {
-  return mkRow(id, [{ bias: IKTIDAR }]);
+/**
+ * A candidate that survives the Step-A pre-filter (its stored distribution is
+ * in band) but can never qualify live (one member), to fill batches cheaply.
+ */
+function mkFailingRow(id: string, overrides: Parameters<typeof mkRow>[2] = {}) {
+  return mkRow(id, [{ bias: IKTIDAR }], { stored: zoneDist(7, 0, 3), ...overrides });
 }
 
-function seedRows(rows: Array<{ id: string }>) {
-  fixture.candidateIds = rows.map((r) => r.id);
+/**
+ * Seeds the fixture. Step A returns every row's id + stored distribution in
+ * the given (updated_at desc) order; `stepA` overrides the distribution Step A
+ * sees for one id, while the embedded row keeps its own members.
+ */
+function seedRows(
+  rows: Array<{ id: string; bias_distribution: unknown }>,
+  stepA: Record<string, unknown> = {},
+) {
+  fixture.candidates = rows.map((r) => ({
+    id: r.id,
+    bias_distribution: r.id in stepA ? stepA[r.id] : r.bias_distribution,
+  }));
   fixture.rowsById = new Map(rows.map((r) => [r.id, r]));
+}
+
+/** Every id the embed step asked for, across all batches, in request order. */
+function embeddedIds(): string[] {
+  return fixture.embedStates.flatMap((st) => {
+    const f = (st as BuilderState).in.find((x) => x.col === "id");
+    return (f?.vals ?? []) as string[];
+  });
 }
 
 /** A capped client is built with a custom `global.fetch`; a plain one is not. */
@@ -188,7 +236,7 @@ beforeEach(() => {
   // Only Date is faked: the fake client resolves via microtasks.
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW);
-  fixture.candidateIds = [];
+  fixture.candidates = [];
   fixture.candidateError = null;
   fixture.candidateFailuresRemaining = 0;
   fixture.rowsById = new Map();
@@ -223,7 +271,7 @@ describe("getNearBlindspotsSafe Step A: lean candidate select", () => {
 
     const state = fixture.idStates[0] as BuilderState;
     expect(state.table).toBe("clusters");
-    expect(state.selectArgs[0]).toBe("id");
+    expect(state.selectArgs[0]).toBe("id, bias_distribution");
 
     expect(state.eq).toHaveLength(2);
     expect(state.eq).toContainEqual({ col: "is_blindspot", val: false });
@@ -247,7 +295,18 @@ describe("getNearBlindspotsSafe Step A: lean candidate select", () => {
     ]);
 
     expect(state.order).toEqual([{ col: "updated_at", opts: { ascending: false } }]);
-    expect(state.limit).toBe(100);
+    // (e) A documented safety bound, not a sample: the band is pre-tested on
+    // the stored distribution, so the cap is far above any real window.
+    expect(state.limit).toBe(NEAR_BLINDSPOT_CANDIDATE_SAFETY_CAP);
+    expect(state.limit).toBe(1000);
+  });
+
+  it("(e) selects exactly the id and the stored bias_distribution", async () => {
+    await getNearBlindspotsSafe();
+
+    const state = fixture.idStates[0] as BuilderState;
+    expect(state.selectArgs[0]).toContain("bias_distribution");
+    expect(state.selectArgs[0]).toBe("id, bias_distribution");
   });
 
   it("with no candidates returns [] without an embed call and caches for cluster-feed", async () => {
@@ -343,11 +402,18 @@ describe("getNearBlindspotsSafe voting basis", () => {
 
   it("does not let 2 iktidar aggregators raise the share: 6 iktidar + 4 muhalefet outlets + 2 aggregators -> 0.6, excluded", async () => {
     seedRows([
-      mkRow("agg-high", [
-        ...repeat(6, { bias: IKTIDAR }),
-        ...repeat(4, { bias: MUHALEFET }),
-        ...repeat(2, { bias: IKTIDAR, kind: "aggregator" }),
-      ]),
+      mkRow(
+        "agg-high",
+        [
+          ...repeat(6, { bias: IKTIDAR }),
+          ...repeat(4, { bias: MUHALEFET }),
+          ...repeat(2, { bias: IKTIDAR, kind: "aggregator" }),
+        ],
+        // A legacy stored distribution that (wrongly) counted the aggregators
+        // (8/12 = 0.67) survives the pre-filter, so the LIVE voting tally is
+        // what excludes the row.
+        { stored: zoneDist(8, 0, 4) },
+      ),
     ]);
 
     expect(await ids()).toEqual([]);
@@ -385,6 +451,9 @@ describe("getNearBlindspotsSafe same-source dedupe", () => {
         },
       });
     }
+    // Stored as if the duplicates had been counted (10/14), so the row clears
+    // the pre-filter and only the live same-source dedupe rejects it.
+    row.bias_distribution = zoneDist(10, 0, 4);
     seedRows([row]);
 
     expect(await ids()).toEqual([]);
@@ -587,17 +656,20 @@ describe("getNearBlindspotsSafe ordering and limit", () => {
     expect(await ids()).toEqual(["new", "mid", "old"]);
   });
 
-  it("stops requesting batches once 10 items are collected", async () => {
-    // 100 qualifying candidates: the first batch of 50 already exceeds the limit.
-    seedRows(Array.from({ length: 100 }, (_, i) => splitRow(`c${i}`, 7, 3)));
+  it("processes every survivor batch (no early stop at 10): 120 qualifying candidates -> 3 batches, 10 shown, feed health fetched once", async () => {
+    seedRows(Array.from({ length: 120 }, (_, i) => splitRow(`c${i}`, 7, 3)));
 
     const items = (await getNearBlindspotsSafe()) ?? [];
 
     expect(items).toHaveLength(10);
-    expect(fixture.embedStates).toHaveLength(1);
+    expect(fixture.embedStates).toHaveLength(3);
+    expect(
+      fixture.embedStates.map((st) => (st as BuilderState).in[0]?.vals.length),
+    ).toEqual([50, 50, 20]);
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
   });
 
-  it("uses .in batches of at most 50 and walks every batch when nothing qualifies (100 candidates -> 2 batches)", async () => {
+  it("uses .in batches of at most 50 and walks every batch when nothing qualifies (100 survivors -> 2 batches)", async () => {
     seedRows(Array.from({ length: 100 }, (_, i) => mkFailingRow(`f${i}`)));
 
     const items = await getNearBlindspotsSafe();
@@ -611,12 +683,156 @@ describe("getNearBlindspotsSafe ordering and limit", () => {
     }
   });
 
-  it("fewer than 10 items from the first batch triggers a second batch", async () => {
+  it("a qualifying survivor beyond the first batch is still embedded and returned", async () => {
     const failing = Array.from({ length: 50 }, (_, i) => mkFailingRow(`f${i}`));
     seedRows([...failing, splitRow("late", 7, 3)]);
 
     expect(await ids()).toEqual(["late"]);
     expect(fixture.embedStates).toHaveLength(2);
+  });
+
+  it("(f) final order is share desc then updatedAt desc, sliced to 10, across batch boundaries", async () => {
+    // 60 candidates in updated_at-desc order (r0 newest). Ranks 0-49 sit at
+    // 0.70; the two strongest are in the SECOND batch (r55 = 15/4 = 0.789,
+    // r57 = 11/3 = 0.786), so only a global sort puts them first.
+    const at = (i: number) => ({
+      updated_at: new Date(NOW - 2 * HOUR - i * 60_000).toISOString(),
+    });
+    const rows = Array.from({ length: 60 }, (_, i) => {
+      if (i === 55) return splitRow(`r${i}`, 15, 4, at(i));
+      if (i === 57) return splitRow(`r${i}`, 11, 3, at(i));
+      return splitRow(`r${i}`, 7, 3, at(i));
+    });
+    seedRows(rows);
+
+    expect(await ids()).toEqual([
+      "r55",
+      "r57",
+      // the 0.70 ties: newest updatedAt first
+      "r0",
+      "r1",
+      "r2",
+      "r3",
+      "r4",
+      "r5",
+      "r6",
+      "r7",
+    ]);
+    expect(fixture.embedStates).toHaveLength(2);
+  });
+});
+
+describe("getNearBlindspotsSafe pre-cap band test (h50-biasmath-1)", () => {
+  it("(a) reaches qualifying stories far down the candidate list: 150 candidates, ranks 120/130/145 in band -> all three returned", async () => {
+    const at = (i: number) => ({
+      updated_at: new Date(NOW - 2 * HOUR - i * 60_000).toISOString(),
+    });
+    const inBand = (i: number): MemberSpec[] | null => {
+      if (i === 120) return [...repeat(7, { bias: IKTIDAR }), { bias: BAGIMSIZ }, { bias: MUHALEFET }]; // 7/1/1
+      if (i === 130) return [...repeat(5, { bias: IKTIDAR }), { bias: BAGIMSIZ }, { bias: MUHALEFET }]; // 5/1/1
+      if (i === 145) return [...repeat(2, { bias: BAGIMSIZ }), ...repeat(5, { bias: MUHALEFET })]; // 0/2/5
+      return null;
+    };
+    const rows = Array.from({ length: 150 }, (_, i) =>
+      // 9/0/0: one-sided, a blindspot-shaped distribution, far out of band.
+      mkRow(`k${i}`, inBand(i) ?? repeat(9, { bias: IKTIDAR }), at(i)),
+    );
+    seedRows(rows);
+
+    const items = (await getNearBlindspotsSafe()) ?? [];
+
+    // 7/9 = 0.778, then the two 5/7 = 0.714 ties broken by updatedAt desc.
+    expect(items.map((i) => i.id)).toEqual(["k120", "k130", "k145"]);
+    expect(items.map((i) => i.dominantZone)).toEqual(["iktidar", "iktidar", "muhalefet"]);
+    expect(items[0]?.dominantShare).toBeCloseTo(7 / 9, 10);
+    expect(items[1]?.dominantShare).toBeCloseTo(5 / 7, 10);
+    expect(items[2]?.dominantShare).toBeCloseTo(5 / 7, 10);
+  });
+
+  it("(b) never requests out-of-band candidates (9/0/0, 3/3/3) from the embed step", async () => {
+    seedRows([
+      mkRow("one-sided-1", repeat(9, { bias: IKTIDAR })),
+      splitRow("near-1", 7, 3),
+      mkRow("even-1", [
+        ...repeat(3, { bias: IKTIDAR }),
+        ...repeat(3, { bias: BAGIMSIZ }),
+        ...repeat(3, { bias: MUHALEFET }),
+      ]),
+      mkRow("one-sided-2", repeat(9, { bias: MUHALEFET })),
+      splitRow("near-2", 3, 8),
+      mkRow("even-2", [
+        ...repeat(3, { bias: IKTIDAR }),
+        ...repeat(3, { bias: BAGIMSIZ }),
+        ...repeat(3, { bias: MUHALEFET }),
+      ]),
+    ]);
+
+    const found = (await ids()).sort();
+
+    expect(found).toEqual(["near-1", "near-2"]);
+    // In updated_at (= candidate) order, survivors only.
+    expect(embeddedIds()).toEqual(["near-1", "near-2"]);
+  });
+
+  it("(c) still embeds a candidate whose bias_distribution is null or unparseable (fallback)", async () => {
+    const rows = ["null", "string", "empty", "junk"].map((k) => splitRow(`fb-${k}`, 7, 3));
+    seedRows(rows, {
+      "fb-null": null,
+      "fb-string": "not a distribution",
+      "fb-empty": {},
+      "fb-junk": { pro_government: "seven", opposition: null },
+    });
+
+    const found = (await ids()).sort();
+
+    expect(embeddedIds()).toEqual(["fb-null", "fb-string", "fb-empty", "fb-junk"]);
+    // The live re-tally (7/3) still qualifies every one of them.
+    expect(found).toEqual(["fb-empty", "fb-junk", "fb-null", "fb-string"]);
+  });
+
+  it("(d) drops a candidate whose stored distribution is in band but whose embedded members re-tally out of band", async () => {
+    // Stored 7/0/3 (0.70) survives the pre-filter; the live members are 6/4.
+    seedRows(
+      [splitRow("drifted", 6, 4), splitRow("steady", 7, 3)],
+      { drifted: zoneDist(7, 0, 3) },
+    );
+
+    expect(await ids()).toEqual(["steady"]);
+    expect(embeddedIds().sort()).toEqual(["drifted", "steady"]);
+  });
+
+  it("embeds a stored 0.65 candidate (tolerance) and rejects it on the live tally, but never requests a stored 0.60", async () => {
+    seedRows(
+      [splitRow("edge-in", 6, 4), splitRow("edge-out", 6, 4)],
+      { "edge-in": zoneDist(13, 0, 7), "edge-out": zoneDist(12, 0, 8) },
+    );
+
+    expect(await ids()).toEqual([]);
+    expect(embeddedIds()).toEqual(["edge-in"]);
+  });
+
+  it("caps the survivors at 200 (newest first): 250 survivors -> the first 200 are embedded in 4 batches", async () => {
+    seedRows(Array.from({ length: 250 }, (_, i) => mkFailingRow(`s${i}`)));
+
+    expect(await getNearBlindspotsSafe()).toEqual([]);
+
+    const requested = embeddedIds();
+    expect(requested).toHaveLength(200);
+    expect(requested[0]).toBe("s0");
+    expect(requested[199]).toBe("s199");
+    expect(requested).not.toContain("s200");
+    expect(fixture.embedStates).toHaveLength(4);
+  });
+
+  it("counts the cap on survivors, not on candidates: 400 one-sided candidates then 1 near story at rank 399 is still returned", async () => {
+    const rows = [
+      ...Array.from({ length: 399 }, (_, i) => mkRow(`o${i}`, repeat(9, { bias: IKTIDAR }))),
+      splitRow("deep", 7, 3),
+    ];
+    seedRows(rows);
+
+    expect(await ids()).toEqual(["deep"]);
+    expect(embeddedIds()).toEqual(["deep"]);
   });
 });
 

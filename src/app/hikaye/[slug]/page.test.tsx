@@ -55,6 +55,31 @@ describe("/hikaye/[slug]", () => {
     expect(html).not.toMatch(/kör nokta/i);
   });
 
+  // h50-biasmath-2: each day's bar is the SUM of that day's cluster
+  // distributions (timeline.ts addDistribution; the page says so under the bar),
+  // so one outlet counts once per cluster: the tooltip noun is 'kaynak kaydı'.
+  it("labels the summed day bar 'kaynak kaydı' in every spectrum title", async () => {
+    loadPublishedThreadBySlug.mockResolvedValue({
+      ...thread,
+      members: [
+        { id: "c1", title_tr: "Bir küme", title_tr_neutral: null, first_published: "2026-09-01T10:00:00Z", article_count: 4, bias_distribution: { pro_government: 1, opposition: 1 } },
+        { id: "c2", title_tr: "İki küme", title_tr_neutral: null, first_published: "2026-09-01T12:00:00Z", article_count: 3, bias_distribution: { pro_government: 1, center: 1 } },
+      ],
+    });
+    const html = renderToStaticMarkup(await StoryThreadPage({ params: Promise.resolve({ slug: thread.slug }) }));
+
+    const titles = [...html.matchAll(/ title="([^"]*)"/g)].map((m) => m[1]);
+    expect(titles).toEqual([
+      "İktidar: 2 kaynak kaydı (%50)",
+      "Bağımsız: 1 kaynak kaydı (%25)",
+      "Muhalefet: 1 kaynak kaydı (%25)",
+      "İktidar: 2 kaynak kaydı (%50)",
+      "Bağımsız: 1 kaynak kaydı (%25)",
+      "Muhalefet: 1 kaynak kaydı (%25)",
+    ]);
+    expect(html).not.toContain(" kaynak (");
+  });
+
   it("metadata: not found is noindex with no canonical", async () => {
     loadPublishedThreadBySlug.mockResolvedValue(null);
     const m = await generateMetadata({ params: Promise.resolve({ slug: "x-y-z" }) });

@@ -135,8 +135,14 @@ describe("src/app/page.tsx: the search result live region", () => {
     expect(homeFeed).toMatch(/searchStatusText\(\{[^}]*count: resultCount[^}]*capped: view\.archiveCappedTotal[^}]*unavailable: view\.archiveUnavailable[^}]*\}\)/);
   });
 
-  it("shows the same count on the visible results line", () => {
-    expect(homeFeed).toContain("için {formatCountTr(resultCount)} sonuç");
+  it("shows the same count on the visible results line, worded by the same helper as the live region", () => {
+    // h50-search-3: "en ilgili N sonuç" when the archive is capped, from
+    // resultCountPhrase (search-status.ts), like searchStatusText.
+    expect(homeFeed).toContain("için {resultPhrase}");
+    expect(homeFeed).toMatch(
+      /const resultPhrase = resultCountPhrase\(\s*resultCount,\s*view\.archiveCappedTotal && !view\.archiveUnavailable,?\s*\);/,
+    );
+    expect(homeFeed).not.toContain("formatCountTr(");
     expect(homeFeed).not.toContain("için sonuçlar");
   });
 
@@ -171,7 +177,7 @@ describe("search echo and the minimum query (h23-a11y-4, WCAG 1.4.10 + honest st
     expect(homeFeed).not.toBe("");
     expect(count(homeFeed, "<SearchEcho")).toBe(1);
     const echoAt = homeFeed.indexOf("<SearchEcho");
-    const countAt = homeFeed.indexOf("için {formatCountTr(resultCount)} sonuç");
+    const countAt = homeFeed.indexOf("için {resultPhrase}");
     expect(countAt).toBeGreaterThan(echoAt);
     // ...inside the <p> that can shrink and wrap.
     const pAt = homeFeed.lastIndexOf("<p", echoAt);

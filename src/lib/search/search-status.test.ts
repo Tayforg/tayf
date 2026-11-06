@@ -8,6 +8,7 @@ import {
   SEARCH_QUERY_DISPLAY_MAX,
   displayQuery,
   isTooShortQuery,
+  resultCountPhrase,
   searchStatusText,
   searchTitle,
 } from "./search-status";
@@ -20,6 +21,51 @@ import {
 const base = { q: "seçim", count: 0, capped: false, unavailable: false };
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+describe("resultCountPhrase (h50-search-3)", () => {
+  it("says 'en ilgili N sonuç' when the archive hit its cap", () => {
+    expect(resultCountPhrase(24, true)).toBe("en ilgili 24 sonuç");
+  });
+
+  it("says 'N sonuç' when it did not", () => {
+    expect(resultCountPhrase(2, false)).toBe("2 sonuç");
+    expect(resultCountPhrase(1, false)).toBe("1 sonuç");
+    expect(resultCountPhrase(0, false)).toBe("0 sonuç");
+  });
+
+  it("formats the count in tr-TR, capped or not (dot grouping via formatCountTr)", () => {
+    expect(resultCountPhrase(1234, true)).toBe("en ilgili 1.234 sonuç");
+    expect(resultCountPhrase(1234, false)).toBe("1.234 sonuç");
+    expect(resultCountPhrase(12_345, false)).toBe("12.345 sonuç");
+  });
+
+  it("treats a non-finite count like zero (formatCountTr does)", () => {
+    expect(resultCountPhrase(Number.NaN, false)).toBe("0 sonuç");
+    expect(resultCountPhrase(Number.POSITIVE_INFINITY, true)).toBe("en ilgili 0 sonuç");
+  });
+});
+
+describe("searchStatusText is built from resultCountPhrase (h50-search-3)", () => {
+  it.each([1, 2, 24, 1234, 12_345])("count %i: the capped, uncapped and unavailable sentences carry the same phrase", (count) => {
+    expect(searchStatusText({ ...base, count, capped: true })).toBe(
+      `“seçim” için ${resultCountPhrase(count, true)} gösteriliyor.`,
+    );
+    expect(searchStatusText({ ...base, count, capped: false })).toBe(
+      `“seçim” için ${resultCountPhrase(count, false)} bulundu.`,
+    );
+    expect(searchStatusText({ ...base, count, unavailable: true })).toBe(
+      `“seçim” için ${resultCountPhrase(count, false)} bulundu; arşiv araması şu an yanıt vermiyor.`,
+    );
+  });
+
+  it("formats the number in exactly one place: the helper", () => {
+    const source = readFileSync(resolve(here, "search-status.ts"), "utf8");
+    const calls = source.match(/formatCountTr\(/g) ?? [];
+    expect(calls).toHaveLength(1);
+    expect(source).toMatch(/export function resultCountPhrase\(/);
+    expect(source.match(/resultCountPhrase\(/g)?.length).toBeGreaterThanOrEqual(4);
+  });
+});
 
 describe("searchStatusText", () => {
   it.each([undefined, "", "   ", "\t\n "])("is empty when q is %j (nothing to announce)", (q) => {
@@ -194,6 +240,26 @@ describe("isTooShortQuery", () => {
       expect(isTooShortQuery(q)).toBe(false);
     },
   );
+
+  it.each(["O'Brien", "Kur'an", "L'Oréal", "Kur\u2019an", "Ma'in"])(
+    "is false for %j (an apostrophe in a name is not a suffix, h50-search-2)",
+    (q) => {
+      expect(isTooShortQuery(q)).toBe(false);
+    },
+  );
+
+  it("still judges a one-letter name plus a Turkish suffix as too short", () => {
+    expect(isTooShortQuery("a'ın")).toBe(true);
+    expect(isTooShortQuery("O'")).toBe(true);
+  });
+
+  it("cleans the Unicode first: a zero-width character is no character, full-width letters count", () => {
+    expect(isTooShortQuery("\u200ba")).toBe(true);
+    expect(isTooShortQuery("a\u200bb")).toBe(false);
+    expect(isTooShortQuery("\u200b")).toBe(true);
+    expect(isTooShortQuery("Ａ")).toBe(true);
+    expect(isTooShortQuery("ＡＢ")).toBe(false);
+  });
 
   it("judges the NORMALISED query, like searchClusters does", () => {
     // A control character becomes a space and is trimmed away; an apostrophe

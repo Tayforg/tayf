@@ -20,10 +20,12 @@ import {
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
 import {
-  NEAR_BLINDSPOT_CANDIDATE_LIMIT,
+  NEAR_BLINDSPOT_CANDIDATE_SAFETY_CAP,
   NEAR_BLINDSPOT_DISPLAY_LIMIT,
   NEAR_BLINDSPOT_LOOKBACK_DAYS,
+  NEAR_BLINDSPOT_SURVIVOR_CAP,
   isNearBlindspotTally,
+  storedDistributionMayBeNear,
 } from "@/lib/clusters/near-blindspot-rule";
 import { createReaderClient } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
@@ -34,12 +36,23 @@ import type { MediaDnaZone } from "@/types";
 // BLINDSPOT contract / its Deno mirror / the parity tests are not touched.
 //
 // Same two-step shape as blindspots-query.ts (see its header for why): a lean
-// id-only Step A, then the embed fetched in EMBED_BATCH_SIZE batches through
+// Step A, then the embed fetched in EMBED_BATCH_SIZE batches through
 // blindspots-query's own `fetchEmbedBatch`, so the embed select, the rights
 // columns and the error prefix stay in one place. Every live check mirrors
 // /blindspots (same-source dedupe, the feed quality filter, voting kinds only,
 // the 24 h feed delay, the feed-health suppression gate), only with the
 // share band swapped.
+//
+// h50-biasmath-1: the share band is tested BEFORE any cap. Step A used to take
+// the 100 most recently updated of ~377 candidates and only then re-tally, so
+// 26 of the 34 stories that qualified on 2026-11-06 (ranks 111-376 by
+// updated_at) were never embedded, and the section covered ~1.3 days of the 7
+// that /metodoloji promises. Step A now also selects the stored
+// `bias_distribution` (voting kinds only, written by cluster-consumer), the
+// band is tested on it in code (+-NEAR_BLINDSPOT_PREFILTER_TOLERANCE for
+// stored-vs-live drift), and only the survivors are embedded and re-tallied
+// live. Step A is bounded by NEAR_BLINDSPOT_CANDIDATE_SAFETY_CAP, a safety
+// bound rather than a sample.
 //
 // Step A plan -- `EXPLAIN` (no ANALYZE) against production, 2026-10-22:
 //
@@ -62,6 +75,25 @@ import type { MediaDnaZone } from "@/types";
 // a plain heap Filter: the plan with and without it is identical, so it adds
 // no index risk and is kept for its meaning (a story first published within
 // the lookback AND still updated within it).
+//
+// h50-biasmath-1 widened that select from `id` / limit 100 to
+// `id, bias_distribution` / limit NEAR_BLINDSPOT_CANDIDATE_SAFETY_CAP (the
+// filters and order are unchanged). EXPLAIN (ANALYZE, BUFFERS) against
+// production, 2026-11-06, read-only:
+//
+//   Limit (actual time=7.358..7.429 rows=376)
+//     -> Bitmap Heap Scan on clusters (rows=376, Rows Removed by Filter: 1226)
+//        Filter: NOT is_blindspot AND NOT is_archived AND article_count >= 5
+//        -> BitmapAnd
+//           -> Bitmap Index Scan on idx_clusters_active_updated_at (rows=1848)
+//           -> Bitmap Index Scan on idx_clusters_first_published (rows=6251)
+//   Execution Time: 7.6 ms warm (37 ms on the cold first run)
+//
+// The plan is the same bitmap plan the old `select id ... limit 100` gets
+// (identical cost, identical scan), so widening the select adds no index risk:
+// 376 rows of id + a small jsonb instead of 100 ids. The planner now ANDs
+// idx_clusters_first_published where October's plan above used
+// clusters_neutral_eligible_idx; the driving index is unchanged.
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -81,8 +113,13 @@ export type NearBlindspotItem = {
   updatedAt: string;
 };
 
-/** Step A: the lean id-only candidate select, newest activity first. */
-async function fetchCandidateIds(): Promise<string[]> {
+type Candidate = { id: string; bias_distribution: unknown };
+
+/**
+ * Step A: the lean candidate select, newest activity first, with the stored
+ * distribution so the share band can be tested before anything is capped.
+ */
+async function fetchCandidates(): Promise<Candidate[]> {
   const supabase = createReaderClient();
   const now = Date.now();
   const delayCutoffIso = new Date(
@@ -94,7 +131,7 @@ async function fetchCandidateIds(): Promise<string[]> {
 
   const { data, error } = await supabase
     .from("clusters")
-    .select("id")
+    .select("id, bias_distribution")
     .eq("is_blindspot", false)
     .eq("is_archived", false)
     .gte("article_count", BLINDSPOT.minSources)
@@ -102,13 +139,28 @@ async function fetchCandidateIds(): Promise<string[]> {
     .gte("first_published", lookbackIso)
     .gte("updated_at", lookbackIso)
     .order("updated_at", { ascending: false })
-    .limit(NEAR_BLINDSPOT_CANDIDATE_LIMIT)
-    .returns<Array<{ id: string }>>();
+    .limit(NEAR_BLINDSPOT_CANDIDATE_SAFETY_CAP)
+    .returns<Candidate[]>();
 
   if (error) {
     throw new Error(`[near-blindspots] candidate select error: ${error.message}`);
   }
-  return (data ?? []).map((r) => r.id);
+  return data ?? [];
+}
+
+/**
+ * The ids worth embedding, still in updated_at order: candidates whose stored
+ * distribution can sit in the band (tolerance included) or is unusable. Capped
+ * at NEAR_BLINDSPOT_SURVIVOR_CAP, newest first -- survivors are a few dozen,
+ * so the cap is only a bound on embed cost against a bad distribution write.
+ */
+function survivorIds(candidates: Candidate[]): string[] {
+  const ids: string[] = [];
+  for (const c of candidates) {
+    if (ids.length >= NEAR_BLINDSPOT_SURVIVOR_CAP) break;
+    if (storedDistributionMayBeNear(c.bias_distribution)) ids.push(c.id);
+  }
+  return ids;
 }
 
 /**
@@ -156,18 +208,17 @@ function toNearItem(
 
 // Internal (uncached) implementation; throws on any Supabase error.
 async function fetchNearBlindspots(): Promise<NearBlindspotItem[]> {
-  const ids = await fetchCandidateIds();
+  const ids = survivorIds(await fetchCandidates());
   if (ids.length === 0) return [];
 
   const order = new Map(ids.map((id, i) => [id, i]));
   const items: NearBlindspotItem[] = [];
   let health: ZoneFeedHealth | null = null;
 
-  for (
-    let i = 0;
-    i < ids.length && items.length < NEAR_BLINDSPOT_DISPLAY_LIMIT;
-    i += EMBED_BATCH_SIZE
-  ) {
+  // Every survivor is embedded: the display slice below takes the top
+  // NEAR_BLINDSPOT_DISPLAY_LIMIT by share across ALL of them, so an early stop
+  // at 10 collected items would drop a stronger story from a later batch.
+  for (let i = 0; i < ids.length; i += EMBED_BATCH_SIZE) {
     const batchIds = ids.slice(i, i + EMBED_BATCH_SIZE);
     let rows: EmbeddedClusterRow[];
     if (i === 0) {

@@ -140,26 +140,113 @@ export function foldTr(s: string): string {
 // aşımı") and a lone surrogate does not survive the JSON body either.
 const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
+// Format characters (Unicode category Cf): zero-width space / joiner /
+// non-joiner, word joiner, soft hyphen, byte order mark, bidi marks and
+// overrides. They are invisible, so a reader cannot see why 'trump' + U+200B
+// finds nothing, and they are not whitespace, so `\s` does not split on them.
+const FORMAT_CHARS = /\p{Cf}/gu;
+
+/**
+ * The Unicode cleanup every search-query path runs first (h50-search-2):
+ * delete format characters, THEN apply NFKC. NFKC composes a decomposed letter
+ * ('s' + U+0327 -> 'ş', 'I' + U+0307 -> 'İ') and folds full-width forms and
+ * ligatures to their plain spelling ('ＴＲＵＭＰ' -> 'TRUMP', 'ﬁ' -> 'fi', U+FF0D ->
+ * '-', U+FF07 -> "'"), which is what the stored titles and `matchKey` already
+ * use. The order matters for idempotence: NFKC never produces a format
+ * character, but deleting one AFTER normalising can leave a base letter next to
+ * a combining mark that the next pass would compose ('a' + U+200B + U+0301).
+ * Linear in the input.
+ */
+export function cleanQueryUnicode(s: string): string {
+  return s.replace(FORMAT_CHARS, "").normalize("NFKC");
+}
+
 // A Turkish case suffix is written after an apostrophe: Erdoğan'ın, Özel'den,
 // Bahçeli'nin. The stored titles carry the bare name (or the suffixed form
 // without the apostrophe), so the apostrophe and the suffix after a letter are
 // cut. The class covers ' (U+0027), ’ (U+2019), ʼ (U+02BC) and ‘ (U+2018).
-const APOSTROPHE_SUFFIX = /(?<=\p{L})['\u2019\u02bc\u2018]\p{L}*/gu;
+// A combining mark counts as part of the letter before it (it composes into that
+// letter), so cutting one apostrophe never changes whether the next is cut.
+//
+// h50-search-2: only a TURKISH suffix is cut. Every apostrophe tail used to go,
+// which turned "Kur'an" into 'kur' and refused "O'Brien" as one character long.
+// The match is a run of apostrophes plus the letters after it, so a stacked run
+// is cut or kept as one unit (a second pass finds nothing left to do), and no
+// quantifier can backtrack: the tail is greedy and nothing follows it.
+const APOSTROPHE_TAIL = /(?<=[\p{L}\p{M}])['\u2019\u02bc\u2018]+(\p{L}*)/gu;
+
+// The longest suffix chain the allowlist accepts, in UTF-16 units: the
+// glued plural + possessive + case forms ('lerinden', 'larımızdan') fit.
+const SUFFIX_TAIL_MAX_LENGTH = 12;
+
+// ı i u ü, the four-way vowel of Turkish suffixes.
+const V4 = "[ıiuü]";
+
+// The Turkish case, plural, possessive and copula suffixes a news headline puts
+// after the apostrophe of a proper name. Anchored on both ends, no nested
+// quantifier: each `\p{L}*` is last in its branch, so the match is linear.
+const SUFFIX_TAIL = new RegExp(
+  "^(?:" +
+    [
+      "y?[ae]", // dative: a e ya ye
+      "n[ae]", // dative after a possessive: na ne
+      `y?${V4}`, // accusative: ı i u ü yı yi yu yü
+      `n${V4}`, // accusative after a possessive: nı ni nu nü
+      `n?${V4}n`, // genitive: ın in un ün nın nin nun nün
+      "[dt][ae](?:n|k[iı](?:ler|lar)?)?", // locative / ablative / relative: da de dan den daki deki dekiler (Turkish lower-casing of ASCII KI gives kı)
+      "n[dt][ae](?:n|k[iı](?:ler|lar)?)?", // the same after a possessive: nda nde ndan nden ndaki ndekiler
+      "y?l[ae]", // instrumental: la le yla yle
+      "l[ae]r\\p{L}*", // plural and what follows: lar ler ların lerden ...
+      `l${V4}\\p{L}*`, // -lı -li -lik -liler ...
+      `${V4}n[dt][ae](?:n|k[iı](?:ler|lar)?)?`, // possessive + locative / ablative: ında inden ındaki
+      `${V4}n${V4}n`, // possessive + genitive: ının inin
+      `${V4}m${V4}z\\p{L}*`, // first person plural possessive: ımız imizin ...
+      "[cç][ae]", // ca ce ça çe
+      `[cç]${V4}\\p{L}*`, // cı ci cu cü çı çi çu çü and what follows: cüler, ciler
+      `[dt]${V4}r`, // dır dir dur dür tır tir tur tür
+      `s${V4}n?`, // third person possessive: sı si su sü sın sin
+    ].join("|") +
+    ")$",
+  "u",
+);
+
+/**
+ * True when `tail` (the letters after an apostrophe, without the apostrophe) is
+ * a Turkish case or possessive suffix: 'ın', 'dan', 'nin', 'ye', 'liler'. False
+ * for the tail of a name that happens to carry an apostrophe ('an' of Kur'an,
+ * 'brien' of O'Brien, 'oréal' of L'Oréal) and for the empty tail (the caller
+ * decides what a dangling apostrophe is). The length is checked first, so a long
+ * tail costs nothing; the tail is lower-cased with the Turkish rules, so 'NİN'
+ * and 'IN' match. Shared by `normaliseSearchQuery` and the in-feed matcher so
+ * the archive and the page cut the same words.
+ */
+export function isTurkishSuffixTail(tail: string): boolean {
+  if (tail.length === 0 || tail.length > SUFFIX_TAIL_MAX_LENGTH) return false;
+  return SUFFIX_TAIL.test(tail.toLocaleLowerCase("tr"));
+}
 
 /**
  * Cleans a reader-typed archive-search query before it is cached, folded or
  * sent to Postgres:
- *   1. control characters and lone surrogates become a space;
- *   2. an apostrophe suffix after a letter is dropped (Erdoğan'ın -> Erdoğan);
- *   3. whitespace runs collapse and the ends are trimmed.
+ *   1. format characters out and NFKC (`cleanQueryUnicode`);
+ *   2. control characters and lone surrogates become a space;
+ *   3. an apostrophe followed by a Turkish suffix, or by nothing, is dropped
+ *      after a letter (Erdoğan'ın -> Erdoğan); any other tail stays (Kur'an,
+ *      O'Brien, L'Oréal);
+ *   4. whitespace runs collapse and the ends are trimmed.
  * Double quotes (phrase search) and every other character are kept.
  * Applied only by `searchClusters`: `turkishQueryVariants` stays unchanged
  * because entity-hub passes curated apostrophe inflections through it.
  */
 export function normaliseSearchQuery(q: string): string {
-  return q
+  return cleanQueryUnicode(q)
     .replace(UNSAFE_CHARS, " ")
-    .replace(APOSTROPHE_SUFFIX, "")
+    .replace(APOSTROPHE_TAIL, (match, tail: string) =>
+      tail === "" || isTurkishSuffixTail(tail) ? "" : match,
+    )
+    // Cutting an apostrophe can leave a letter next to a combining mark that
+    // was behind it ('l' + ‘ + U+0327): compose again, or the next pass would.
+    .normalize("NFKC")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -216,10 +303,27 @@ function stripEdgePunctuation(term: string): string {
   return start === 0 && end === points.length ? term : points.slice(start, end).join("");
 }
 
+// A dash between words is a separator ('Erdoğan - Bahçeli', 'trump <-> iran'),
+// not websearch's NOT: Postgres reads 'erdoğan - bahçeli' as erdoğa & !bahçel
+// and the archive then shows stories that do NOT mention Bahçeli (h50-search-2).
+// '-' is kept at a term's edge for the attached negation ('-bahçeli'), so a term
+// of nothing but dashes is the one left over to drop. U+2010-U+2015 (hyphen to
+// horizontal bar) and U+2212 (minus) are punctuation or symbols that the edge
+// strip already removes; they are listed so the test does not depend on that.
+function isDashChar(ch: string): boolean {
+  return ch === "-" || (ch >= "\u2010" && ch <= "\u2015") || ch === "\u2212";
+}
+
+function isDashOnly(term: string): boolean {
+  if (term === "") return false;
+  for (const ch of term) if (!isDashChar(ch)) return false;
+  return true;
+}
+
 interface SearchTerm {
-  /** The word as the reader typed it (controls replaced, nothing else touched). */
+  /** The word as the reader typed it (Unicode cleaned, controls replaced, nothing else touched). */
   typed: string;
-  /** Its canonical form: apostrophe suffix cut, Turkish lower-case, edges stripped. */
+  /** Its canonical form: Turkish apostrophe suffix cut, Turkish lower-case, edges stripped. */
   term: string;
 }
 
@@ -231,16 +335,21 @@ interface SearchTerm {
  * `limit` terms, so the cost is linear in the input and never in the number of
  * words past the limit. The cleaning is `normaliseSearchQuery` applied word by
  * word, which is the same as applying it to the whole text first (a word holds
- * no whitespace and the apostrophe cut never reaches across one).
+ * no whitespace and the apostrophe cut never reaches across one). The Unicode
+ * cleanup runs on the whole text before the split, so a zero-width character or
+ * a full-width space cannot hide a word boundary or a leading '-'. A term of
+ * nothing but dashes is a separator and is skipped like bare punctuation.
  */
 function searchTerms(q: string, limit: number): SearchTerm[] {
   const out: SearchTerm[] = [];
-  for (const typed of q.replace(UNSAFE_CHARS, " ").split(/\s+/)) {
+  for (const typed of cleanQueryUnicode(q).replace(UNSAFE_CHARS, " ").split(/\s+/)) {
     if (typed === "") continue;
+    // Lower-casing can leave a pair the next pass would compose (Turkish 'İ'
+    // + U+0301 becomes 'i' + U+0301), so normalise once more after it.
     const term = stripEdgePunctuation(
-      normaliseSearchQuery(typed).toLocaleLowerCase("tr"),
+      normaliseSearchQuery(typed).toLocaleLowerCase("tr").normalize("NFKC"),
     );
-    if (term === "") continue;
+    if (term === "" || isDashOnly(term)) continue;
     out.push({ typed, term });
     if (out.length >= limit) break;
   }
@@ -249,13 +358,14 @@ function searchTerms(q: string, limit: number): SearchTerm[] {
 
 /**
  * The cache key and RPC input for a reader-typed archive-search query:
- *   1. `normaliseSearchQuery` (controls out, apostrophe suffix dropped,
- *      whitespace collapsed);
+ *   1. `normaliseSearchQuery` (format characters out, NFKC, controls out, a
+ *      Turkish apostrophe suffix dropped, whitespace collapsed);
  *   2. Turkish lower-casing ('IŞIK', 'Işık', 'ışık' -> 'ışık');
  *   3. punctuation and symbols cut off both edges of every term, so
  *      'ERDOĞAN!', '“Erdoğan”' and 'Erdoğan.' share a key; a leading '-' and
  *      the double quote of a phrase search are kept;
- *   4. terms left empty are dropped and only the first MAX_SEARCH_TERMS kept;
+ *   4. terms left empty, or made of dashes only ('Erdoğan - Bahçeli',
+ *      'trump <-> iran'), are dropped and only the first MAX_SEARCH_TERMS kept;
  *   5. the whole is cut to MAX_SEARCH_QUERY_LENGTH without leaving half a
  *      surrogate pair, and the cut term's edge is stripped again.
  * Pure, idempotent and linear in the input. '' means "nothing to search for".
@@ -273,7 +383,12 @@ export function canonicalSearchQuery(q: string): string {
   // the function idempotent.
   const cut = joined.slice(0, MAX_SEARCH_QUERY_LENGTH).replace(/[\ud800-\udbff]$/, "");
   const lastSpace = cut.lastIndexOf(" ");
-  return (cut.slice(0, lastSpace + 1) + stripEdgePunctuation(cut.slice(lastSpace + 1))).trim();
+  // The cut can also leave an apostrophe tail that is a suffix only now
+  // ("k’daİ" cut to "k’da"), so the apostrophe rule runs on that term again.
+  const lastTerm = stripEdgePunctuation(normaliseSearchQuery(cut.slice(lastSpace + 1)));
+  // A cut through '-bahçeli' leaves a lone '-': it would be a separator on the
+  // next pass, so it goes now and the function stays idempotent.
+  return (cut.slice(0, lastSpace + 1) + (isDashOnly(lastTerm) ? "" : lastTerm)).trim();
 }
 
 // ---------------------------------------------------------------------------

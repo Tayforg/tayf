@@ -102,7 +102,11 @@ export default async function StoryThreadPage({ params }: PageProps) {
                   Bu gün için sınıflandırılmış kaynak yok.
                 </p>
               ) : (
-                <BiasSpectrum distribution={day.distribution} compact />
+                <BiasSpectrum
+                  distribution={day.distribution}
+                  compact
+                  countUnit="kaynak kaydı"
+                />
               )}
               <p className="mt-1.5 text-[11px] text-muted-foreground">
                 Çubuk, o günkü kümelerdeki kaynak sayılarının toplamıdır.
