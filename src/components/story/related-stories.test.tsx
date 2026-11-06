@@ -134,10 +134,11 @@ describe("RelatedStories — mode 'latest'", () => {
     expect(html).toContain(">Genel gündemde son haberler</h2>");
   });
 
-  it("'İlgili haberler' mode still prints the 'Genel konusunda son haberler' line unchanged", () => {
+  it("'İlgili haberler' mode reads 'Genel gündemde son haberler' for the genel feed, never 'Genel konusunda'", () => {
     const html = render({ mode: "related", topicLabel: "Genel" });
     expect(html).toContain(">İlgili haberler</h2>");
-    expect(html).toContain("Genel konusunda son haberler");
+    expect(html).toContain("Genel gündemde son haberler");
+    expect(html).not.toContain("Genel konusunda");
   });
 
   it("escapes the topic label instead of injecting it", () => {

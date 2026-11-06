@@ -2,7 +2,8 @@ import { connection } from "next/server";
 
 import {
   getTopicClusters,
-  TOPIC_LABELS_TR,
+  topicNounTr,
+  topicSubtitleTr,
   TOPIC_SLUGS,
   type TopicSlug,
 } from "@/lib/clusters/topic-query";
@@ -104,16 +105,15 @@ export async function GET(
   const result = await getTopicClusters(topicSlug, 1);
   if (result === null) return rssUnavailableResponse();
 
-  const label = TOPIC_LABELS_TR[topicSlug];
   const items = result.bundles
     .slice(0, MAX_ITEMS)
     .map((b) => topicItem(base, topicSlug, b));
 
   const xml = buildRssXml({
-    title: `Tayf — ${label} haberleri`,
+    title: `Tayf — ${topicNounTr(topicSlug)}`,
     link: `${base}/konu/${topicSlug}`,
     selfUrl: `${base}/rss/${topicSlug}.xml`,
-    description: `Son 7 günde ${label} konusunda kümelenen haberler.`,
+    description: topicSubtitleTr(topicSlug),
     items,
   });
   return rssResponse(xml);

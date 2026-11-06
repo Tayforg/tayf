@@ -23,7 +23,7 @@ import {
   type RelatedFeed,
 } from "./related-clusters";
 import { titleAgreement, titleStemOverlap } from "./summary-agreement";
-import { TOPIC_LABELS_TR, TOPIC_SLUGS } from "./topic-query";
+import { TOPIC_SLUGS, topicNounLowerTr } from "./topic-query";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -112,24 +112,34 @@ describe("relatedFeedFor", () => {
 // ---------------------------------------------------------------------------
 
 describe("relatedHubLink", () => {
-  it("links dunya to its hub with the Turkish label", () => {
+  // The label sits after "Tüm" mid-sentence, so the topic is lower-case, and
+  // 'genel' (an adjective) reads "genel haberler" (h46-copy-1).
+  it("links dunya to its hub with the lower-case Turkish noun phrase", () => {
     expect(relatedHubLink({ kind: "topic", slug: "dunya" })).toEqual({
       href: "/konu/dunya",
-      label: "Tüm Dünya haberleri",
+      label: "Tüm dünya haberleri",
     });
   });
 
-  it("links politika to '/', because /konu/politika 308s there", () => {
+  it("links genel to its hub as 'Tüm genel haberler', never 'Tüm Genel haberleri'", () => {
+    expect(relatedHubLink({ kind: "topic", slug: "genel" })).toEqual({
+      href: "/konu/genel",
+      label: "Tüm genel haberler",
+    });
+  });
+
+  it("links politika to '/', because /konu/politika 308s there, with the same lower-case form", () => {
     expect(relatedHubLink({ kind: "politika" })).toEqual({
       href: "/",
-      label: "Tüm Politika haberleri",
+      label: "Tüm politika haberleri",
     });
   });
 
-  it.each(TOPIC_SLUGS)("every hub slug (%s) gets /konu/<slug> and its own label", (slug) => {
+  it.each(TOPIC_SLUGS)("every hub slug (%s) gets /konu/<slug> and the shared noun phrase", (slug) => {
     const link = relatedHubLink({ kind: "topic", slug });
     expect(link.href).toBe(`/konu/${slug}`);
-    expect(link.label).toBe(`Tüm ${TOPIC_LABELS_TR[slug]} haberleri`);
+    expect(link.label).toBe(`Tüm ${topicNounLowerTr(slug)}`);
+    expect(link.label).not.toContain("Genel haberleri");
   });
 });
 

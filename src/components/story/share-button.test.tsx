@@ -7,6 +7,9 @@ import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
 import {
   ShareButton,
   ManualCopyBox,
+  MoreShareToggle,
+  MORE_OPEN,
+  MORE_CLOSED,
   copyText,
   resolveEmbedCopy,
   resolveIframeCopy,
@@ -578,13 +581,15 @@ describe("ShareButton — mobile tap targets (h16-mobile-2)", () => {
   const desktopTokens = (tag: string | undefined) =>
     tokensOf(tag).filter((t) => !t.startsWith("max-sm:"));
 
-  it("renders all 3 buttons and 5 anchors for a uuid cluster", () => {
-    expect(tags.filter((t) => t.startsWith("<button"))).toHaveLength(3);
+  // 4 buttons since h46-mobile-1: Paylaş, the phone-only "Daha fazla" toggle,
+  // Sitenize ekle and Gömme kodu.
+  it("renders all 4 buttons and 5 anchors for a uuid cluster", () => {
+    expect(tags.filter((t) => t.startsWith("<button"))).toHaveLength(4);
     expect(tags.filter((t) => t.startsWith("<a"))).toHaveLength(5);
   });
 
   it("gives every <button> and <a> max-sm:min-h-11 and max-sm:justify-center", () => {
-    expect(tags).toHaveLength(8);
+    expect(tags).toHaveLength(9);
     for (const tag of tags) {
       const tokens = tokensOf(tag);
       expect(tokens, tag).toContain("max-sm:min-h-11");
@@ -645,8 +650,8 @@ describe("ShareButton — cardHref (h21-journeys-1)", () => {
     expect(html).not.toContain("Kartı indir");
     expect(html).not.toContain("/kart");
     expect(html).not.toContain("tayf-kart.png");
-    // 3 buttons (Paylaş, Sitenize ekle, Gömme kodu) + the 4 channel anchors.
-    expect(count(html, "<button")).toBe(3);
+    // 4 buttons (Paylaş, Daha fazla, Sitenize ekle, Gömme kodu) + the 4 channel anchors.
+    expect(count(html, "<button")).toBe(4);
     expect(count(html, "<a ")).toBe(4);
   });
 
@@ -669,7 +674,7 @@ describe("ShareButton — cardHref (h21-journeys-1)", () => {
     );
     const implicit = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
     expect(explicit).toBe(implicit);
-    expect(count(explicit, "<button")).toBe(3);
+    expect(count(explicit, "<button")).toBe(4);
     expect(count(explicit, "<a ")).toBe(5);
     expect(explicit).toContain(`href="/cluster/${UUID}/kart"`);
     expect(explicit).toContain('download="tayf-kart.png"');
@@ -831,5 +836,215 @@ describe("ShareButton — shareStory (h21-journeys-2)", () => {
     const body = src.slice(start, end);
     expect(body).toContain("shareStory(");
     expect(body).not.toContain("navigator.share(");
+  });
+});
+
+// h46-mobile-1: on a 360 px phone the 11 share/save chips filled 6 rows and
+// pushed the bias spectrum below the first screen. Below sm the secondary
+// share options (Kartı indir, Sitenize ekle, Gömme kodu, the channel group)
+// sit behind a "Daha fazla" disclosure; "Paylaş" stays visible and sm and up
+// is unchanged. Same SSR-markup convention as the suites above (no DOM here);
+// the open state is rendered through `initialMoreOpen` and the click wiring is
+// asserted on the toggle element's own onClick.
+describe("ShareButton — 'Daha fazla' disclosure on phones (h46-mobile-1)", () => {
+  const UUID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+  const closed = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
+  const opened = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" initialMoreOpen />);
+
+  const tokensOf = (tag: string | undefined) =>
+    (/\bclass="([^"]*)"/.exec(tag ?? "")?.[1] ?? "").split(/\s+/).filter(Boolean);
+  const attrOf = (tag: string | undefined, name: string) =>
+    new RegExp(`\\b${name}="([^"]*)"`).exec(tag ?? "")?.[1];
+
+  /** The whole <button>...</button> whose text mentions `label`. */
+  function buttonWith(html: string, label: string): string | undefined {
+    return (html.match(/<button\b[^>]*>[^]*?<\/button>/g) ?? []).find((b) => b.includes(label));
+  }
+  const openingTag = (el: string | undefined) => /^<[a-z]+\b[^>]*>/.exec(el ?? "")?.[0];
+
+  /** [start, end) of the <span> opened at `start`, counting nested spans. */
+  function spanRange(html: string, start: number): [number, number] {
+    let depth = 0;
+    let i = start;
+    while (i < html.length) {
+      const nextOpen = html.indexOf("<span", i);
+      const nextClose = html.indexOf("</span>", i);
+      if (nextClose === -1) break;
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        depth += 1;
+        i = nextOpen + "<span".length;
+      } else {
+        depth -= 1;
+        i = nextClose + "</span>".length;
+        if (depth === 0) return [start, i];
+      }
+    }
+    throw new Error("unbalanced <span>");
+  }
+  function moreGroup(html: string) {
+    const start = html.search(/<span\b[^>]*\bdata-group="more-share"/);
+    expect(start, "the more-share wrapper renders").toBeGreaterThan(-1);
+    const [from, to] = spanRange(html, start);
+    return { from, to, tag: openingTag(html.slice(from, to)), html: html.slice(from, to) };
+  }
+
+  it("exports the two wrapper classes as literals: closed hides below sm only, open is plain contents", () => {
+    expect(MORE_OPEN).toBe("contents");
+    expect(MORE_CLOSED).toBe("contents max-sm:hidden");
+  });
+
+  it("renders a real <button type=button> 'Daha fazla' with aria-expanded=false, closed by default", () => {
+    const toggle = buttonWith(closed, "Daha fazla");
+    expect(toggle, "Daha fazla button").toBeDefined();
+    const tag = openingTag(toggle)!;
+    expect(attrOf(tag, "type")).toBe("button");
+    expect(attrOf(tag, "aria-expanded")).toBe("false");
+    expect(toggle).toContain("Daha fazla");
+    expect(toggle).not.toContain("Daha az");
+  });
+
+  it("points aria-controls at the id of the wrapper that holds the secondary options", () => {
+    const tag = openingTag(buttonWith(closed, "Daha fazla"))!;
+    const controls = attrOf(tag, "aria-controls");
+    expect(controls).toBeTruthy();
+    const group = moreGroup(closed);
+    expect(attrOf(group.tag, "id")).toBe(controls);
+    // Also true when open.
+    const openTag = openingTag(buttonWith(opened, "Daha az"))!;
+    expect(attrOf(moreGroup(opened).tag, "id")).toBe(attrOf(openTag, "aria-controls"));
+  });
+
+  it("keeps the 44 px phone floor on the toggle and hides it from sm up", () => {
+    const tokens = tokensOf(openingTag(buttonWith(closed, "Daha fazla")));
+    for (const token of ["sm:hidden", "max-sm:min-h-11", "max-sm:min-w-11", "max-sm:justify-center"]) {
+      expect(tokens, token).toContain(token);
+    }
+  });
+
+  it("styles the toggle exactly like every other chip plus sm:hidden (no drift)", () => {
+    const channel = (closed.match(/<a\b[^>]*aria-label="X ile paylaş"[^>]*>/) ?? [])[0];
+    const chip = tokensOf(channel);
+    const toggle = tokensOf(openingTag(buttonWith(closed, "Daha fazla")));
+    expect([...toggle].sort()).toEqual([...chip, "sm:hidden"].sort());
+  });
+
+  it("wraps Kartı indir, Sitenize ekle, Gömme kodu and the Kanal ile paylaş group in one wrapper", () => {
+    const group = moreGroup(closed);
+    expect(group.html).toContain("Kartı indir");
+    expect(group.html).toContain("Sitenize ekle");
+    expect(group.html).toContain("Gömme kodu");
+    expect(group.html).toMatch(/<span\b[^>]*role="group"[^>]*aria-label="Kanal ile paylaş"|<span\b[^>]*aria-label="Kanal ile paylaş"[^>]*role="group"/);
+    for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
+      expect(group.html).toContain(`aria-label="${label} ile paylaş"`);
+    }
+    // Only one wrapper.
+    expect(closed.split('data-group="more-share"')).toHaveLength(2);
+  });
+
+  it("closed: the wrapper carries max-sm:hidden and stays displayed (contents) from sm up", () => {
+    expect(tokensOf(moreGroup(closed).tag)).toEqual(["contents", "max-sm:hidden"]);
+  });
+
+  it("open: aria-expanded=true, label 'Daha az', and the wrapper no longer carries max-sm:hidden", () => {
+    const toggle = buttonWith(opened, "Daha az");
+    expect(toggle, "Daha az button").toBeDefined();
+    expect(attrOf(openingTag(toggle), "aria-expanded")).toBe("true");
+    expect(opened).not.toContain("Daha fazla");
+    const tokens = tokensOf(moreGroup(opened).tag);
+    expect(tokens).toEqual(["contents"]);
+    expect(tokens).not.toContain("max-sm:hidden");
+  });
+
+  it("keeps Paylaş outside the wrapper and never hidden, in both states", () => {
+    for (const html of [closed, opened]) {
+      const group = moreGroup(html);
+      const share = html.indexOf("<span>Paylaş</span>");
+      expect(share).toBeGreaterThan(-1);
+      expect(share < group.from || share >= group.to, "Paylaş is not inside the wrapper").toBe(true);
+      const shareButton = buttonWith(html, "Paylaş")!;
+      expect(shareButton).not.toContain("Daha");
+      const tokens = tokensOf(openingTag(shareButton));
+      expect(tokens.filter((t) => t.includes("hidden"))).toEqual([]);
+    }
+  });
+
+  it("puts the toggle right after Paylaş and before the wrapper, so Tab reaches the revealed options in order", () => {
+    const group = moreGroup(closed);
+    const share = closed.indexOf("<span>Paylaş</span>");
+    const toggle = closed.indexOf("Daha fazla");
+    expect(share).toBeLessThan(toggle);
+    expect(toggle).toBeLessThan(group.from);
+  });
+
+  it("keeps the live region and the toggle outside the wrapper (status must stay announced when it is hidden)", () => {
+    for (const html of [closed, opened]) {
+      const group = moreGroup(html);
+      const status = html.indexOf('role="status"');
+      expect(status).toBeGreaterThan(-1);
+      expect(status).toBeGreaterThanOrEqual(group.to);
+      const toggle = html.search(/Daha (fazla|az)/);
+      expect(toggle < group.from || toggle >= group.to).toBe(true);
+    }
+  });
+
+  it("leaves desktop untouched: the wrapper adds no box and no non-max-sm token beyond contents", () => {
+    const desktop = (tag: string | undefined) => tokensOf(tag).filter((t) => !t.startsWith("max-sm:"));
+    expect(desktop(moreGroup(closed).tag)).toEqual(["contents"]);
+    expect(desktop(moreGroup(opened).tag)).toEqual(["contents"]);
+    // Same chips, same order, same count in both states: only the wrapper class
+    // and the toggle label/aria-expanded differ.
+    const chips = (html: string) => (html.match(/<(?:a|button)\b[^>]*>/g) ?? []).length;
+    expect(chips(opened)).toBe(chips(closed));
+  });
+
+  it("renders identically on every pass and without window (no hydration mismatch)", () => {
+    // Reference renders happen inside the test: the module-level ones above run
+    // before beforeEach sets NEXT_PUBLIC_SITE_URL, so their hrefs differ.
+    const refClosed = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
+    const refOpened = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" initialMoreOpen />);
+    expect(refClosed).toContain('aria-expanded="false"');
+    expect(refOpened).toContain('aria-expanded="true"');
+    const original = (globalThis as { window?: unknown }).window;
+    delete (globalThis as { window?: unknown }).window;
+    try {
+      expect(renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />)).toBe(refClosed);
+      expect(renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" initialMoreOpen />)).toBe(
+        refOpened,
+      );
+    } finally {
+      (globalThis as { window?: unknown }).window = original;
+    }
+  });
+
+  it("gives two ShareButtons on one page distinct wrapper ids (aria-controls never collides)", () => {
+    const html = renderToStaticMarkup(
+      <>
+        <ShareButton clusterId={UUID} title="a" />
+        <ShareButton clusterId={UUID} title="b" />
+      </>,
+    );
+    const ids = [...html.matchAll(/<span\b[^>]*\bid="([^"]+)"[^>]*\bdata-group="more-share"/g)].map(
+      (m) => m[1],
+    );
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("MoreShareToggle: a click calls onToggle once, and the markup follows the open flag", () => {
+    const onToggle = vi.fn();
+    const el = MoreShareToggle({ open: false, controlsId: "more-1", onToggle });
+    expect(el.type).toBe("button");
+    expect(el.props.type).toBe("button");
+    expect(el.props["aria-expanded"]).toBe(false);
+    expect(el.props["aria-controls"]).toBe("more-1");
+    el.props.onClick();
+    expect(onToggle).toHaveBeenCalledTimes(1);
+
+    const open = renderToStaticMarkup(
+      <MoreShareToggle open controlsId="more-1" onToggle={onToggle} />,
+    );
+    expect(open).toContain('aria-expanded="true"');
+    expect(open).toContain('aria-controls="more-1"');
+    expect(open).toContain("Daha az");
   });
 });

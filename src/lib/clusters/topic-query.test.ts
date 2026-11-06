@@ -129,6 +129,9 @@ import {
   buildTopicCollectionPage,
   topicDescription,
   topicMetadata,
+  topicNounLowerTr,
+  topicNounTr,
+  topicSubtitleTr,
   TOPIC_SLUGS,
   TOPIC_LABELS_TR,
   TOPIC_PAGE_SIZE,
@@ -737,6 +740,76 @@ describe("isTopicSlug", () => {
   });
 });
 
+// --- the shared topic noun phrase (h46-copy-1) -------------------------------
+//
+// One helper decides how a hub label is put into prose, so no surface prints
+// the ungrammatical "Genel haberleri" and a mid-sentence label is lower-case.
+
+describe("topicNounTr / topicNounLowerTr", () => {
+  it("noun labels form the '<Label> haberleri' compound with a capitalised head", () => {
+    expect(topicNounTr("dunya")).toBe("Dünya haberleri");
+    expect(topicNounTr("spor")).toBe("Spor haberleri");
+    expect(topicNounTr("ekonomi")).toBe("Ekonomi haberleri");
+    expect(topicNounTr("yasam")).toBe("Yaşam haberleri");
+    expect(topicNounTr("teknoloji")).toBe("Teknoloji haberleri");
+  });
+
+  it("'genel' is an adjective, so its phrase is 'Genel haberler', never 'Genel haberleri'", () => {
+    expect(topicNounTr("genel")).toBe("Genel haberler");
+  });
+
+  it("the lower-case form (for mid-sentence use) lowercases with the Turkish locale", () => {
+    expect(topicNounLowerTr("dunya")).toBe("dünya haberleri");
+    expect(topicNounLowerTr("yasam")).toBe("yaşam haberleri");
+    expect(topicNounLowerTr("genel")).toBe("genel haberler");
+  });
+
+  it.each(TOPIC_SLUGS)("'%s': the lower-case form is the capitalised form lowercased, and only genel drops the possessive", (slug) => {
+    expect(topicNounLowerTr(slug)).toBe(topicNounTr(slug).toLocaleLowerCase("tr-TR"));
+    expect(topicNounTr(slug).startsWith(TOPIC_LABELS_TR[slug])).toBe(true);
+    expect(topicNounTr(slug).endsWith(" haberleri")).toBe(slug !== "genel");
+    expect(topicNounTr(slug)).not.toContain("Genel haberleri");
+  });
+});
+
+describe("topicSubtitleTr", () => {
+  it("a noun label reads 'Son 7 günde <label> konusunda kümelenen haberler.' with the label in lower case", () => {
+    expect(topicSubtitleTr("dunya")).toBe("Son 7 günde dünya konusunda kümelenen haberler.");
+    expect(topicSubtitleTr("yasam")).toBe("Son 7 günde yaşam konusunda kümelenen haberler.");
+  });
+
+  it("'genel' is not a subject area, so it reads 'genel gündemde' instead of 'genel konusunda'", () => {
+    expect(topicSubtitleTr("genel")).toBe("Son 7 günde genel gündemde kümelenen haberler.");
+  });
+
+  it.each(TOPIC_SLUGS)("'%s': ends with a full stop and never capitalises the label mid-sentence", (slug) => {
+    const subtitle = topicSubtitleTr(slug);
+    expect(subtitle.startsWith("Son 7 günde ")).toBe(true);
+    expect(subtitle.endsWith("kümelenen haberler.")).toBe(true);
+    expect(subtitle).not.toContain(TOPIC_LABELS_TR[slug]);
+  });
+});
+
+describe("the genel hub never prints 'Genel haberleri'", () => {
+  it("page 1: <title> and JSON-LD name are 'Genel haberler'", () => {
+    expect(topicMetadata("genel").title).toBe("Genel haberler");
+    expect(topicMetadata("genel").openGraph?.title).toBe("Genel haberler — Tayf");
+    expect(buildTopicCollectionPage({ slug: "genel", bundles: [] }).name).toBe("Genel haberler");
+  });
+
+  it("page 2: 'Genel haberler — Sayfa 2' in both the <title> and the JSON-LD name", () => {
+    expect(topicMetadata("genel", 2).title).toBe("Genel haberler — Sayfa 2");
+    expect(buildTopicCollectionPage({ slug: "genel", bundles: [], page: 2 }).name).toBe(
+      "Genel haberler — Sayfa 2",
+    );
+  });
+
+  it("the meta description uses the same lower-case phrase as the helper", () => {
+    expect(topicDescription("genel")).toContain(`kesişen ${topicNounLowerTr("genel")},`);
+    expect(topicDescription("dunya")).toContain(`kesişen ${topicNounLowerTr("dunya")},`);
+  });
+});
+
 // --- static exports -----------------------------------------------------------
 
 describe("TOPIC_LABELS_TR / TOPIC_SLUGS", () => {
@@ -845,8 +918,8 @@ describe("topicMetadata", () => {
 
     it("og:title carries the brand suffix, og:description equals the meta description", () => {
       const meta = topicMetadata(slug);
-      expect(meta.title).toBe(`${label} haberleri`);
-      expect(meta.openGraph?.title).toBe(`${label} haberleri — Tayf`);
+      expect(meta.title).toBe(topicNounTr(slug));
+      expect(meta.openGraph?.title).toBe(`${topicNounTr(slug)} — Tayf`);
       expect(meta.openGraph?.description).toBe(meta.description);
     });
 
@@ -858,7 +931,7 @@ describe("topicMetadata", () => {
 
     it("sets twitter title and description to the same brand-suffixed copy", () => {
       const meta = topicMetadata(slug);
-      expect(meta.twitter?.title).toBe(`${label} haberleri — Tayf`);
+      expect(meta.twitter?.title).toBe(`${topicNounTr(slug)} — Tayf`);
       expect(meta.twitter?.description).toBe(meta.description);
     });
 

@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import {
+  TOPIC_SLUGS,
+  topicNounTr,
+  topicSubtitleTr,
+} from "@/lib/clusters/topic-query";
+
 // ---------------------------------------------------------------------------
 // /rss/[topic].xml — per-topic RSS feeds + /rss/kor-noktalar.xml.
 // ---------------------------------------------------------------------------
@@ -75,6 +81,36 @@ describe("GET /rss/[topic].xml", () => {
     expect(body).toContain("<rss");
     expect(body).toContain("Test başlık");
     expect(body).toContain("Tayf — Dünya haberleri");
+  });
+
+  // h46-copy-1: the channel title and description come from the shared topic
+  // helpers, so 'genel' (an adjective) is never "Genel haberleri" and a label
+  // in the middle of a sentence is lower-case.
+  it("the genel channel title is 'Tayf — Genel haberler', never 'Genel haberleri'", async () => {
+    const body = await (await callRoute("genel.xml")).text();
+    expect(body).toContain("<title>Tayf — Genel haberler</title>");
+    expect(body).not.toContain("Genel haberleri");
+  });
+
+  it("the channel description is topicSubtitleTr: lower-case label, 'genel gündemde' for genel", async () => {
+    const dunya = await (await callRoute("dunya.xml")).text();
+    expect(dunya).toContain(
+      "<description>Son 7 günde dünya konusunda kümelenen haberler.</description>",
+    );
+    expect(dunya).toContain("Tayf — Dünya haberleri");
+    expect(dunya).not.toContain("Son 7 günde Dünya konusunda");
+
+    const genel = await (await callRoute("genel.xml")).text();
+    expect(genel).toContain(
+      "<description>Son 7 günde genel gündemde kümelenen haberler.</description>",
+    );
+    expect(genel).not.toContain("Genel konusunda");
+  });
+
+  it.each(TOPIC_SLUGS)("%s: the channel title and description are the helpers' output", async (slug) => {
+    const body = await (await callRoute(`${slug}.xml`)).text();
+    expect(body).toContain(`<title>Tayf — ${topicNounTr(slug)}</title>`);
+    expect(body).toContain(`<description>${topicSubtitleTr(slug)}</description>`);
   });
 
   it("sets Cache-Control public max-age=300 s-maxage=300", async () => {

@@ -113,7 +113,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
                   href={p.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex min-h-[32px] items-center gap-2 rounded-sm text-[12px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="flex min-h-[32px] items-center gap-2 max-sm:flex-wrap max-sm:gap-y-0.5 max-sm:py-1 rounded-sm text-[12px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <span className={`${clockWidth} shrink-0 font-mono text-[10px] tabular-nums`}>
                     {p.clock}
@@ -138,7 +138,12 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
                     {p.sourceName}
                   </span>
                   {!p.voting && <span className="shrink-0 whitespace-nowrap text-[10px]">(toplayıcı / niş)</span>}
-                  <span lang={lang} className="min-w-0 truncate">{p.title}</span>
+                  <span
+                    lang={lang}
+                    className="min-w-0 sm:truncate max-sm:basis-full max-sm:line-clamp-2"
+                  >
+                    {p.title}
+                  </span>
                 </TrackedLink>
               </li>
             );

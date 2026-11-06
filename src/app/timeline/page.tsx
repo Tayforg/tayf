@@ -162,7 +162,7 @@ export default async function TimelinePage() {
                 {bucket.rows.map((row, rowIdx) => (
                   <li
                     key={row.id}
-                    className={`flex items-baseline gap-3 rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 px-3 py-2 transition-all animate-fade-up stagger-${rowIdx < 6 ? rowIdx + 1 : 6}`}
+                    className={`flex items-baseline gap-3 max-sm:flex-wrap max-sm:gap-y-1 rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 px-3 py-2 transition-all animate-fade-up stagger-${rowIdx < 6 ? rowIdx + 1 : 6}`}
                   >
                     <time
                       dateTime={row.first_published}
@@ -172,11 +172,11 @@ export default async function TimelinePage() {
                     </time>
                     <Link
                       href={`/cluster/${row.id}`}
-                      className="min-w-0 flex-1 text-sm font-medium leading-snug hover:text-foreground line-clamp-2"
+                      className="min-w-0 flex-1 text-sm font-medium leading-snug hover:text-foreground sm:line-clamp-2 max-sm:order-last max-sm:basis-full max-sm:line-clamp-4"
                     >
                       {row.title_tr_neutral ?? row.title_tr}
                     </Link>
-                    <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                    <span className="shrink-0 max-sm:ml-auto text-[11px] text-muted-foreground tabular-nums">
                       {row.article_count} kaynak
                     </span>
                   </li>

@@ -113,6 +113,92 @@ describe("cluster hero actions reflow at 320 px (h32-a11y-1)", () => {
     }
   });
 
+  // h46-mobile-1: on phones the secondary share options sit behind a "Daha
+  // fazla" disclosure. The channel group above must stay inside the wrapper
+  // that toggles (so it still reflows when opened), and both wrapper classes
+  // plus the toggle's own classes must stay string literals (Tailwind 4 only
+  // generates classes it can read verbatim from the source).
+  describe("'Daha fazla' disclosure wrapper (h46-mobile-1)", () => {
+    /** The string literal assigned to `const <name> = "..."`; null if not a plain literal. */
+    function constLiteral(src: string, name: string): string | null {
+      const head = `const ${name} =`;
+      const at = src.indexOf(head);
+      if (at === -1) return null;
+      let i = at + head.length;
+      while (src[i] === " " || src[i] === "\n") i += 1;
+      // Anything but a plain quoted string here (a template, a call, a name)
+      // is computed; the ";" check below also rejects `"a" + "b"`.
+      if (src[i] !== '"') return null;
+      const end = src.indexOf('"', i + 1);
+      if (end === -1) return null;
+      let j = end + 1;
+      while (src[j] === " " || src[j] === "\n") j += 1;
+      if (src[j] !== ";") return null;
+      return src.slice(i + 1, end);
+    }
+
+    /** Index just past the </span> that closes the <span> opened at `open`. */
+    function spanEnd(src: string, open: number): number {
+      let depth = 0;
+      let i = open;
+      while (i < src.length) {
+        const nextOpen = src.indexOf("<span", i);
+        const nextClose = src.indexOf("</span>", i);
+        if (nextClose === -1) return -1;
+        if (nextOpen !== -1 && nextOpen < nextClose) {
+          depth += 1;
+          i = nextOpen + "<span".length;
+        } else {
+          depth -= 1;
+          i = nextClose + "</span>".length;
+          if (depth === 0) return i;
+        }
+      }
+      return -1;
+    }
+
+    const src = readFileSync(SHARE_PATH, "utf8");
+
+    it("declares the open and closed wrapper classes as plain string literals", () => {
+      expect(constLiteral(src, "MORE_OPEN"), "MORE_OPEN is a literal").toBe("contents");
+      expect(constLiteral(src, "MORE_CLOSED"), "MORE_CLOSED is a literal").toBe(
+        "contents max-sm:hidden",
+      );
+    });
+
+    it("declares the toggle chip classes as a literal with sm:hidden and the 44 px floor", () => {
+      const toggle = constLiteral(src, "MORE_TOGGLE_CLASS");
+      expect(toggle, "MORE_TOGGLE_CLASS is a literal").not.toBeNull();
+      const tokens = toggle!.split(/\s+/).filter(Boolean);
+      for (const token of ["sm:hidden", "max-sm:min-h-11", "max-sm:min-w-11", "max-sm:justify-center"]) {
+        expect(tokens, `toggle ${token}`).toContain(token);
+      }
+    });
+
+    it("builds the wrapper className only from those two constants, and keeps the channel group inside it", () => {
+      const marker = src.indexOf('data-group="more-share"');
+      expect(marker, "share-button.tsx has the more-share wrapper").toBeGreaterThan(-1);
+      expect(src.indexOf('data-group="more-share"', marker + 1)).toBe(-1);
+
+      const open = src.lastIndexOf("<span", marker);
+      const tagEnd = openingTagEnd(src, open);
+      expect(tagEnd, "the wrapper tag closes").toBeGreaterThan(marker);
+      expect(src.slice(open, tagEnd)).toContain("className={moreOpen ? MORE_OPEN : MORE_CLOSED}");
+
+      const close = spanEnd(src, open);
+      expect(close, "the wrapper span closes").toBeGreaterThan(tagEnd);
+      const group = src.indexOf('aria-label="Kanal ile paylaş"');
+      expect(group, "the channel group is inside the wrapper").toBeGreaterThan(open);
+      expect(group).toBeLessThan(close);
+      // Everything that must stay visible when the wrapper is hidden lives outside it.
+      for (const outside of ['role="status"', "<ManualCopyBox", "onClick={handleShare}"]) {
+        const at = src.indexOf(outside);
+        expect(at, outside).toBeGreaterThan(-1);
+        expect(at < open || at >= close, `${outside} is outside the wrapper`).toBe(true);
+      }
+    });
+  });
+
   it("scans correctly: a computed className is reported as no literal", () => {
     const computed = '<span aria-label="x" className={cx("a", "b")}>';
     expect(classTokensIn(computed, 0, openingTagEnd(computed, 0))).toBeNull();

@@ -16,6 +16,7 @@ import {
   getTopicClusters,
   isTopicSlug,
   topicMetadata,
+  topicSubtitleTr,
   TOPIC_LABELS_TR,
   TOPIC_MAX_PAGE,
   TOPIC_NOTE_LINK_LABEL,
@@ -180,7 +181,7 @@ export default async function TopicHubPage({
       <PageHero
         kicker="Konu"
         title={label}
-        subtitle={`Son 7 günde ${label} konusunda kümelenen haberler.`}
+        subtitle={topicSubtitleTr(slug)}
       />
 
       <div className="flex flex-wrap items-center justify-between gap-3">

@@ -143,7 +143,11 @@ describe("StoryTimeline — 'Tüm sıra' list", () => {
     expect(tag?.[0]).not.toContain("aria-hidden");
   });
 
-  it("keeps every row on one line: no flex-wrap, title truncates", () => {
+  // h46-mobile-2: at 360 px the one-line row left the title 2-25 characters
+  // before its ellipsis. Below sm the row wraps: clock, dot, source name and the
+  // '(toplayıcı / niş)' tag stay on line one, the title takes its own full-width
+  // line 2 with a 2-line clamp. From sm up the row is still one truncating line.
+  it("wraps on phones, one truncating line from sm up: the title takes its own line below sm", () => {
     const rows = fullListRows(render(WITH_NON_VOTING));
     expect(rows).toHaveLength(WITH_NON_VOTING.points.length);
     rows.forEach((row, i) => {
@@ -152,19 +156,69 @@ describe("StoryTimeline — 'Tüm sıra' list", () => {
       const anchorClasses = (anchor?.[1] ?? "").split(/\s+/);
       expect(anchorClasses).toContain("flex");
       expect(anchorClasses).toContain("min-h-[32px]");
+      expect(anchorClasses).toContain("items-center");
+      expect(anchorClasses).toContain("gap-2");
+      expect(anchorClasses).toContain("max-sm:flex-wrap");
+      // Never a bare flex-wrap: from sm up the row stays one line.
       expect(anchorClasses).not.toContain("flex-wrap");
 
       const title = `${WITH_NON_VOTING.points[i]?.title}</span>`;
       const titleAt = row.indexOf(title);
       expect(titleAt, `row ${i} title`).toBeGreaterThan(-1);
-      expect(row).toContain(`<span class="min-w-0 truncate">${title}`);
+      const titleOpen = row.slice(row.lastIndexOf("<span", titleAt), titleAt);
+      const titleClasses = (titleOpen.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/);
+      expect(titleClasses).toContain("min-w-0");
+      expect(titleClasses).toContain("sm:truncate");
+      expect(titleClasses).toContain("max-sm:basis-full");
+      expect(titleClasses).toContain("max-sm:line-clamp-2");
+      // A bare `truncate` (white-space: nowrap) would also apply on phones.
+      expect(titleClasses).not.toContain("truncate");
     });
+  });
 
-    // The non-voting tag sits before the (truncating) title.
-    const nvRow = rows[0] ?? "";
+  it("keeps the '(toplayıcı / niş)' tag on line one: before the title, never full-width or reordered", () => {
+    const nvRow = fullListRows(render(WITH_NON_VOTING))[0] ?? "";
     const tagAt = nvRow.indexOf("(toplayıcı / niş)");
     expect(tagAt).toBeGreaterThan(-1);
-    expect(tagAt).toBeLessThan(nvRow.indexOf('<span class="min-w-0 truncate">'));
+    // Before the title in DOM order, so it sits on line one; the title is the
+    // only item that takes a full line.
+    expect(tagAt).toBeLessThan(nvRow.indexOf(`${NV_EARLY.title}</span>`));
+    const tag = nvRow.match(/<span class="([^"]*)">\(toplayıcı \/ niş\)<\/span>/);
+    const tagClasses = (tag?.[1] ?? "").split(/\s+/);
+    expect(tagClasses).toContain("shrink-0");
+    expect(tagClasses).toContain("whitespace-nowrap");
+    expect(tagClasses.filter((c) => /basis-|order-|line-clamp/.test(c))).toEqual([]);
+  });
+
+  it("keeps clock, zone label, source name and title in reading order, with the name unshrinkable", () => {
+    const rows = fullListRows(render(WITH_NON_VOTING));
+    rows.forEach((row, i) => {
+      const point = WITH_NON_VOTING.points[i];
+      const clockAt = row.indexOf(">09:12<");
+      const zoneAt = row.indexOf(
+        `<span class="sr-only">${ZONE_META[point?.zone ?? "iktidar"].label}</span>`,
+      );
+      const nameAt = row.indexOf(`${point?.sourceName}</span>`);
+      const titleAt = row.indexOf(`${point?.title}</span>`);
+      expect(clockAt, `row ${i} clock`).toBeGreaterThan(-1);
+      expect(clockAt).toBeLessThan(zoneAt);
+      expect(zoneAt).toBeLessThan(nameAt);
+      expect(nameAt).toBeLessThan(titleAt);
+      const nameOpen = row.slice(row.lastIndexOf("<span", nameAt), nameAt);
+      expect(nameOpen).toContain("shrink-0");
+      expect(nameOpen).not.toContain("max-sm:");
+    });
+  });
+
+  it("keeps the outbound link semantics: href, new tab, rel and no aria-label override", () => {
+    const rows = fullListRows(render(WITH_NON_VOTING));
+    rows.forEach((row, i) => {
+      const open = row.slice(row.indexOf("<a "), row.indexOf(">", row.indexOf("<a ")) + 1);
+      expect(open).toContain(`href="${WITH_NON_VOTING.points[i]?.url}"`);
+      expect(open).toContain('target="_blank"');
+      expect(open).toContain('rel="noopener noreferrer"');
+      expect(open).not.toContain("aria-label");
+    });
   });
 
   it("draws a non-voting row's dot hollow and a voting row's dot filled", () => {
@@ -345,7 +399,7 @@ describe("StoryTimeline — lang on English outlet text (h23-a11y-1)", () => {
     }
   }
   const nameSpan = (row: string) => spanWithClass(row, "uppercase");
-  const titleSpan = (row: string) => spanWithClass(row, "truncate");
+  const titleSpan = (row: string) => spanWithClass(row, "sm:truncate");
 
   const ENGLISH = point("Daily Sabah", "iktidar", 1_000, 0);
   const TURKISH = point("Sabah", "iktidar", 2_000, 50);

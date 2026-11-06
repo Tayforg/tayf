@@ -125,4 +125,157 @@ describe("OwnershipLine", () => {
     expect(text).not.toContain("çoğu Bağımsız");
     expect(text).toContain("çoğu bağımsız");
   });
+
+  // h46-copy-2: a qualifier is a claim about concentration, so it is only made
+  // when it is true. "çoğu" needs a strict majority, "yarısı" exactly half,
+  // and a tie for the top (two groups of the same size) names nobody.
+  describe("qualifier honesty (strict majority / exactly half / tie)", () => {
+    const text = (members: ClusterDetailMember[]) => {
+      const el = OwnershipLine({ members });
+      expect(el).not.toBeNull();
+      return collectText(el).join("");
+    };
+
+    it("(a) 3 independent of 6 tagged, the other three owners one source each: 'yarısı bağımsız', never 'çoğu'", () => {
+      const members = [
+        mkMember("t24"),
+        mkMember("sozcu"),
+        mkMember("birgun"), // independent x3
+        mkMember("yeni-safak"), // albayrak
+        mkMember("hurriyet"), // demiroren
+        mkMember("haberturk"), // can-holding
+      ];
+      const el = OwnershipLine({ members });
+      const out = collectText(el).join("");
+      expect(out).toBe(
+        "Künyesi bilinen 6 kaynak · 3 sahiplik grubu · 3 bağımsız — yarısı bağımsız",
+      );
+      expect(out).not.toContain("çoğu");
+      expect(el!.props.title).toBe(
+        "Bağımsız (3), Albayrak Grubu (1), Can Holding (TMSF kayyum, 11.09.2025) (1), Demirören Medya (1)",
+      );
+    });
+
+    it("(b) 4 independent of 6 tagged: '— çoğu bağımsız' (a strict majority keeps the word)", () => {
+      const out = text([
+        mkMember("t24"),
+        mkMember("sozcu"),
+        mkMember("birgun"),
+        mkMember("cumhuriyet"), // independent x4
+        mkMember("hurriyet"), // demiroren
+        mkMember("yeni-safak"), // albayrak
+      ]);
+      expect(out.endsWith("— çoğu bağımsız")).toBe(true);
+      expect(out).not.toContain("yarısı");
+    });
+
+    it("(c) 3 independent and 3 Demirören: a tie, so no qualifier and no named owner", () => {
+      const out = text([
+        mkMember("t24"),
+        mkMember("sozcu"),
+        mkMember("birgun"), // independent x3
+        mkMember("hurriyet"),
+        mkMember("milliyet"),
+        mkMember("cnn-turk"), // demiroren x3
+      ]);
+      expect(out).toBe("Künyesi bilinen 6 kaynak · 1 sahiplik grubu · 3 bağımsız");
+      expect(out).not.toContain("—");
+      expect(out).not.toContain("çoğu");
+      expect(out).not.toContain("yarısı");
+    });
+
+    it("(d) Albayrak 2 and Demirören 2: a tie, so no qualifier and neither label wins on alphabetical order", () => {
+      const out = text([
+        mkMember("yeni-safak"),
+        mkMember("star"), // albayrak x2
+        mkMember("hurriyet"),
+        mkMember("milliyet"), // demiroren x2
+      ]);
+      expect(out).toBe("Künyesi bilinen 4 kaynak · 2 sahiplik grubu");
+      expect(out).not.toContain("—");
+      expect(out).not.toContain("Albayrak Grubu");
+    });
+
+    it("(e) Demirören 3 of 4: '— çoğu Demirören Medya'", () => {
+      const out = text([
+        mkMember("hurriyet"),
+        mkMember("milliyet"),
+        mkMember("cnn-turk"),
+        mkMember("yeni-safak"),
+      ]);
+      expect(out.endsWith("— çoğu Demirören Medya")).toBe(true);
+    });
+
+    it("(f) Demirören 2 of 4 with two singletons: '— yarısı Demirören Medya', never 'çoğu'", () => {
+      const out = text([
+        mkMember("hurriyet"),
+        mkMember("milliyet"),
+        mkMember("yeni-safak"),
+        mkMember("haberturk"),
+      ]);
+      expect(out).toBe("Künyesi bilinen 4 kaynak · 3 sahiplik grubu — yarısı Demirören Medya");
+      expect(out).not.toContain("çoğu");
+    });
+
+    it("(g) every tagged source in one owner group: '— tümü <label>'", () => {
+      const out = text([mkMember("hurriyet"), mkMember("milliyet"), mkMember("cnn-turk")]);
+      expect(out.endsWith("— tümü Demirören Medya")).toBe(true);
+    });
+
+    it("(g) every tagged source independent: '— tümü bağımsız', not 'çoğu'", () => {
+      const out = text([mkMember("t24"), mkMember("sozcu"), mkMember("birgun")]);
+      expect(out).toBe("Künyesi bilinen 3 kaynak · 3 bağımsız — tümü bağımsız");
+      expect(out).not.toContain("çoğu");
+    });
+
+    it("a tie below 50% (2 + 2 of 6 tagged, two singletons) has no dominant group and no qualifier", () => {
+      const out = text([
+        mkMember("yeni-safak"),
+        mkMember("star"), // albayrak x2
+        mkMember("hurriyet"),
+        mkMember("milliyet"), // demiroren x2
+        mkMember("haberturk"), // can-holding
+        mkMember("sabah"), // turkuvaz
+      ]);
+      expect(out).not.toContain("—");
+    });
+
+    it("a lead of one is not a tie: 3 independent, 2 Demirören of 5 -> '— çoğu bağımsız'", () => {
+      const out = text([
+        mkMember("t24"),
+        mkMember("sozcu"),
+        mkMember("birgun"),
+        mkMember("hurriyet"),
+        mkMember("milliyet"),
+      ]);
+      expect(out.endsWith("— çoğu bağımsız")).toBe(true);
+    });
+
+    it("(h) the gate is unchanged: fewer than 3 tagged sources, or under 60% tagged, renders nothing", () => {
+      expect(OwnershipLine({ members: [mkMember("t24"), mkMember("sozcu")] })).toBeNull();
+      expect(
+        OwnershipLine({
+          members: [
+            mkMember("t24"),
+            mkMember("sozcu"),
+            mkMember("birgun"),
+            mkMember("untagged-1"),
+            mkMember("untagged-2"),
+          ],
+        }),
+      ).not.toBeNull(); // 3/5 = 0.6, exactly at the gate
+      expect(
+        OwnershipLine({
+          members: [
+            mkMember("t24"),
+            mkMember("sozcu"),
+            mkMember("birgun"),
+            mkMember("untagged-1"),
+            mkMember("untagged-2"),
+            mkMember("untagged-3"),
+          ],
+        }),
+      ).toBeNull(); // 3/6 = 0.5 < 0.6
+    });
+  });
 });
