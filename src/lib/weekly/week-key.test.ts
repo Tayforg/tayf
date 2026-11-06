@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 import {
   WEEK_ARCHIVE_FIRST,
+  isArchiveWeekInRange,
   isServableWeekKey,
   isoWeekKeyOf,
   parseWeekKey,
@@ -82,6 +83,47 @@ describe("isServableWeekKey", () => {
     expect(weekKeyFromMs(lateDec)).toBe("2026-W53");
     expect(isServableWeekKey("2026-W53", lateDec)).toBe(true);
     expect(isServableWeekKey("2026-W53", NOW)).toBe(false);
+  });
+});
+
+describe("isArchiveWeekInRange", () => {
+  const CURRENT = "2026-W44";
+
+  it("is false for a key before WEEK_ARCHIVE_FIRST", () => {
+    expect(isArchiveWeekInRange("2026-W37", CURRENT)).toBe(false);
+    expect(isArchiveWeekInRange("2025-W52", CURRENT)).toBe(false);
+  });
+
+  it("is false for a key after the current week", () => {
+    expect(isArchiveWeekInRange("2026-W45", CURRENT)).toBe(false);
+    expect(isArchiveWeekInRange("2099-W01", CURRENT)).toBe(false);
+  });
+
+  it("is true from WEEK_ARCHIVE_FIRST through the current week, both ends inclusive", () => {
+    for (const key of [WEEK_ARCHIVE_FIRST, "2026-W40", "2026-W43", CURRENT]) {
+      expect(isArchiveWeekInRange(key, CURRENT), key).toBe(true);
+    }
+  });
+
+  it("crosses a year boundary lexicographically (2026-W53 sits after 2026-W44, before 2027-W01)", () => {
+    expect(isArchiveWeekInRange("2026-W53", "2027-W01")).toBe(true);
+    expect(isArchiveWeekInRange("2027-W01", "2027-W01")).toBe(true);
+    expect(isArchiveWeekInRange("2027-W02", "2027-W01")).toBe(false);
+  });
+
+  it("is a pure string range check that does not parse: the caller rejects a malformed key first (parseWeekKey)", () => {
+    // "2026-W4" sorts between "2026-W38" and "2026-W44", so the range check alone
+    // says true; isServableWeekKey adds the shape check and says false.
+    expect(isArchiveWeekInRange("2026-W4", CURRENT)).toBe(true);
+    expect(isServableWeekKey("2026-W4", NOW)).toBe(false);
+  });
+
+  it("agrees with isServableWeekKey for every parsed key in a sweep around the window", () => {
+    const current = weekKeyFromMs(NOW);
+    for (let w = 30; w <= 50; w++) {
+      const key = `2026-W${String(w).padStart(2, "0")}`;
+      expect(isServableWeekKey(key, NOW), key).toBe(isArchiveWeekInRange(key, current));
+    }
   });
 });
 

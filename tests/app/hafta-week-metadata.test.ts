@@ -1,8 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 // The page module pulls the Supabase server client, feed-health and the
 // weekly query layer at import time; generateMetadata needs none of them, so
 // stub the heavy edges (same approach as tests/api/ekonomi-ticker.test.ts).
+// generateMetadata does read the week (h49-seo-1: noindex for a failed or empty
+// read), so the read is stubbed too: these tests are about a healthy week. The
+// robots verdicts for a failed or empty one live in src/app/hafta/[hafta]/page.test.tsx.
+const mocks = vi.hoisted(() => ({ getWeekArchiveClusters: vi.fn() }));
 vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 vi.mock("next/navigation", () => ({
   notFound: () => {
@@ -20,6 +24,10 @@ vi.mock("@/lib/supabase/server", () => ({
   createFinanceServerClient: vi.fn(),
 }));
 vi.mock("@/lib/clusters/feed-health", () => ({ getZoneFeedHealth: vi.fn() }));
+vi.mock("@/lib/weekly/week-archive", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/weekly/week-archive")>();
+  return { ...actual, getWeekArchiveClusters: mocks.getWeekArchiveClusters };
+});
 
 import { generateMetadata } from "@/app/hafta/[hafta]/page";
 
@@ -38,6 +46,11 @@ async function meta(hafta: string): Promise<Shape> {
 }
 
 describe("/hafta/[hafta] generateMetadata — share identity", () => {
+  beforeEach(() => {
+    mocks.getWeekArchiveClusters.mockReset();
+    mocks.getWeekArchiveClusters.mockResolvedValue({ rows: [{ id: "cl-1" }], truncated: false });
+  });
+
   it("unfurls as the week itself, not as the homepage", async () => {
     const m = await meta("2026-W43");
     expect(m.openGraph.url).toBe("/hafta/2026-W43");
@@ -64,7 +77,7 @@ describe("/hafta/[hafta] generateMetadata — share identity", () => {
     expect(m.twitter.images[0]?.url).toBe("/twitter-image");
   });
 
-  it("does not set robots (the week archive stays indexable)", async () => {
+  it("does not set robots for a week that has rows (the week archive stays indexable)", async () => {
     const m = await meta("2026-W43");
     expect("robots" in m).toBe(false);
   });

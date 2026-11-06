@@ -359,6 +359,112 @@ describe("/konu/[slug] pager on a page with clusters", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h49-browser-2: on phones every pager link has a 44 px hit area (the site's
+// mobile floor). 'Sonraki' was a 50x20 text link and the only way forward on a
+// ~16k px page. Desktop (sm and up) is untouched: max-sm:min-h-11 only bites
+// below the sm breakpoint. page.tsx cannot export the class constant (a Next
+// page may export only framework fields), so this pins the rendered anchors.
+// ---------------------------------------------------------------------------
+
+const PAGER_TOUCH_TOKENS = [
+  "inline-flex",
+  "items-center",
+  "max-sm:min-h-11",
+  "touch-manipulation",
+];
+
+/** className tokens of every <Link> inside the <nav aria-label="Sayfalar">, with its label. */
+function pagerLinkClasses(tree: unknown): Array<{ label: string; tokens: string[] }> {
+  const out: Array<{ label: string; tokens: string[] }> = [];
+  const navs: unknown[] = [];
+  walk(expandLocalPagers(tree), (el) => {
+    if (el.type === "nav" && el.props?.["aria-label"] === "Sayfalar") navs.push(el);
+  });
+  for (const nav of navs) {
+    walk(nav, (el) => {
+      if (el.type === Link) {
+        out.push({
+          label: collectText(el).join(""),
+          tokens: String(el.props?.className ?? "")
+            .split(/\s+/)
+            .filter(Boolean),
+        });
+      }
+    });
+  }
+  return out;
+}
+
+describe("/konu/[slug] pager touch targets (h49-browser-2)", () => {
+  it("page 1 with more: the only link, Sonraki, carries the 44 px phone tokens", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: true, page: 1 };
+
+    const links = pagerLinkClasses(await render());
+
+    expect(links.map((l) => l.label)).toEqual(["Sonraki"]);
+    for (const l of links) expect(l.tokens).toEqual(expect.arrayContaining(PAGER_TOUCH_TOKENS));
+  });
+
+  it("a middle page: both Önceki and Sonraki carry the tokens", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: true, page: 3 };
+
+    const links = pagerLinkClasses(await render(3));
+
+    expect(links.map((l) => l.label)).toEqual(["Önceki", "Sonraki"]);
+    for (const l of links) expect(l.tokens).toEqual(expect.arrayContaining(PAGER_TOUCH_TOKENS));
+  });
+
+  it("past the last page (known end): İlk sayfaya dön and Son sayfaya git carry the tokens", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 20, lastPage: 15 };
+
+    const links = pagerLinkClasses(await render(20));
+
+    expect(links.map((l) => l.label)).toEqual(["İlk sayfaya dön", "Son sayfaya git"]);
+    for (const l of links) expect(l.tokens).toEqual(expect.arrayContaining(PAGER_TOUCH_TOKENS));
+  });
+
+  it("past the last page (unknown end): İlk sayfaya dön and Önceki carry the tokens", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 16, lastPage: null };
+
+    const links = pagerLinkClasses(await render(16));
+
+    expect(links.map((l) => l.label)).toEqual(["İlk sayfaya dön", "Önceki"]);
+    for (const l of links) expect(l.tokens).toEqual(expect.arrayContaining(PAGER_TOUCH_TOKENS));
+  });
+
+  it("keeps the dotted-underline text style and never forces a min-height on desktop", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: true, page: 3 };
+
+    for (const { tokens } of pagerLinkClasses(await render(3))) {
+      expect(tokens).toEqual(
+        expect.arrayContaining([
+          "font-medium",
+          "text-foreground",
+          "underline",
+          "decoration-dotted",
+          "underline-offset-2",
+          "hover:text-primary",
+        ]),
+      );
+      // The floor is phone-only: a bare min-h-* would grow the desktop link.
+      expect(tokens.filter((t) => /^min-h-/.test(t))).toEqual([]);
+    }
+  });
+
+  it("the pager row keeps items-center so the taller phone links stay aligned with 'Sayfa N'", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: true, page: 3 };
+
+    const navs: Array<{ props?: Record<string, unknown> }> = [];
+    walk(expandLocalPagers(await render(3)), (el) => {
+      if (el.type === "nav" && el.props?.["aria-label"] === "Sayfalar") navs.push(el);
+    });
+
+    expect(navs).toHaveLength(1);
+    expect(String(navs[0]?.props?.className).split(/\s+/)).toContain("items-center");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Aggregate source-mix bar. The page sums the listed bundles' own
 // bias_distribution (voting kinds only, written by cluster-consumer), so no new
 // query: page N aggregates page N, and the heading says "Listelenen".

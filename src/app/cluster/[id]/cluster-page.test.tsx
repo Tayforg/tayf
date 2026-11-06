@@ -26,7 +26,9 @@ import { BalanceChip } from "@/components/story/balance-chip";
 import { ShareButton } from "@/components/story/share-button";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { SourceProfileLink } from "@/components/story/source-profile-link";
+import { SourceKunye, KUNYE_VISIBLE } from "@/components/story/source-kunye";
 import { SourceChips } from "@/components/source/source-chips";
+import { SOURCE_METADATA } from "@/lib/sources/factuality";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { CompareButton } from "@/components/compare/compare-button";
 import {
@@ -2958,6 +2960,19 @@ describe("generateMetadata — missing cluster hands the head to not-found.tsx (
 // B — mobile "Kaynak künyesi" clipping (browser-qa-6): the <li> and <ul>
 // under the "Kaynak künyesi" heading must wrap instead of overflowing.
 // ---------------------------------------------------------------------------
+
+/**
+ * The page's `<SourceKunye>` expanded one level. It is a synchronous, hookless
+ * server component, so calling it with the props the page gave it is exactly
+ * what React does; this keeps the künye assertions below on the page -> rows
+ * path even though the rows now live in src/components/story/source-kunye.tsx.
+ */
+function expandKunye(page: unknown): unknown {
+  const el = findElementOfType(page, SourceKunye);
+  expect(el).not.toBeNull();
+  return SourceKunye(el!.props as Parameters<typeof SourceKunye>[0]);
+}
+
 describe("ClusterDetailPage — Kaynak künyesi wrap (B)", () => {
   it("gives the <ul> min-w-0 and each <li> flex-wrap/min-w-0/max-w-full", async () => {
     // sabah is a known-tagged slug (see source-chips.test.ts).
@@ -2973,7 +2988,8 @@ describe("ClusterDetailPage — Kaynak künyesi wrap (B)", () => {
     };
     getClusterDetail.mockResolvedValue(detail);
 
-    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const page = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const tree = expandKunye(page);
 
     function findByType(node: unknown, type: string): { props?: Record<string, unknown> } | null {
       if (Array.isArray(node)) {
@@ -3059,7 +3075,8 @@ describe("ClusterDetailPage — Kaynak künyesi kaynak profiline bağlanır (h16
     };
     getClusterDetail.mockResolvedValue(detail);
 
-    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const page = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const tree = expandKunye(page);
     const kunyeUl = findAllElements(
       tree,
       (el) =>
@@ -3068,8 +3085,17 @@ describe("ClusterDetailPage — Kaynak künyesi kaynak profiline bağlanır (h16
         el.props.className.includes("gap-x-3") &&
         el.props.className.includes("min-w-0"),
     )[0];
-    return { tree, kunyeUl, nicheMember: members[3]! };
+    return { page, tree, kunyeUl, nicheMember: members[3]! };
   }
+
+  it("hands <SourceKunye> the deduped, rated-only sources in member order", async () => {
+    const { page } = await renderKunye();
+
+    const el = findElementOfType(page, SourceKunye);
+    expect(el).not.toBeNull();
+    const sources = el!.props.sources as Source[];
+    expect(sources.map((s) => s.slug)).toEqual(["sabah", "trt-haber"]);
+  });
 
   it("renders one SourceProfileLink per unique rated source, in künye order", async () => {
     const { tree } = await renderKunye();
@@ -3114,16 +3140,73 @@ describe("ClusterDetailPage — Kaynak künyesi kaynak profiline bağlanır (h16
   });
 
   it("leaves the niche member's outbound article link untouched", async () => {
-    const { tree, nicheMember } = await renderKunye();
+    const { page, nicheMember } = await renderKunye();
 
     const outbound = findAllElements(
-      tree,
+      page,
       (el) => el.type === "a" && el.props.href === nicheMember.article.url,
     );
     expect(outbound).toHaveLength(1);
     expect(outbound[0]!.props.href).toBe(nicheMember.article.url);
     expect(outbound[0]!.props.target).toBe("_blank");
     expect(outbound[0]!.props.rel).toBe("noopener noreferrer");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h49-browser-1 — the künye is capped: the page passes the whole rated list to
+// <SourceKunye>, which shows KUNYE_VISIBLE rows and folds the rest into a
+// native "Tüm künye (N kaynak)" <details>. The row/threshold detail is pinned in
+// src/components/story/source-kunye.test.tsx; this is the page wiring.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — Kaynak künyesi is capped (h49-browser-1)", () => {
+  async function pageWith(slugs: string[]) {
+    const sources = slugs.map((slug) => makeSource({ id: slug, slug, name: `Kaynak ${slug}` }));
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members: sources.map((s, i) => makeMember(`a${i}`, s)),
+      allSources: sources,
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: sources.length,
+        memberCount: sources.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+    return ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+  }
+
+  it("passes every rated source to <SourceKunye> and lets it fold the overflow", async () => {
+    const slugs = Object.keys(SOURCE_METADATA).slice(0, 9);
+    expect(slugs).toHaveLength(9);
+    const page = await pageWith(slugs);
+
+    const el = findElementOfType(page, SourceKunye);
+    expect(el).not.toBeNull();
+    expect((el!.props.sources as Source[]).map((s) => s.slug)).toEqual(slugs);
+
+    const html = renderToStaticMarkup(expandKunye(page) as ReactElement);
+    expect(html).toContain("Tüm künye (9 kaynak)");
+    expect(html.replace(/<details[\s\S]*<\/details>/, "").match(/<li[\s>]/g)).toHaveLength(
+      KUNYE_VISIBLE,
+    );
+  });
+
+  it("renders a 4-source story as before: four rows, no disclosure", async () => {
+    const page = await pageWith(Object.keys(SOURCE_METADATA).slice(0, 4));
+
+    const html = renderToStaticMarkup(expandKunye(page) as ReactElement);
+    expect(html.match(/<li[\s>]/g)).toHaveLength(4);
+    expect(html).not.toContain("<details");
+    expect(html).toContain("Kaynak künyesi");
+  });
+
+  it("renders no künye block when no member source is tagged", async () => {
+    const page = await pageWith(["untagged-a", "untagged-b"]);
+
+    expect(expandKunye(page)).toBeNull();
   });
 });
 

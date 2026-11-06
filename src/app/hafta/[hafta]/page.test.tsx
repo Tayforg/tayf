@@ -15,10 +15,14 @@ const mocks = vi.hoisted(() => ({
   getWeekArchiveClusters: vi.fn(),
   /** Every (rows, health, nowMs) call the page made to summariseWeek. */
   summariseCalls: [] as unknown[][],
+  /** Order of connection() and the week read, to pin the request-time contract. */
+  order: [] as string[],
 }));
 
 vi.mock("next/server", () => ({
-  connection: async () => {},
+  connection: async () => {
+    mocks.order.push("connection");
+  },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -68,7 +72,7 @@ vi.mock("@/lib/sources/feed-status", () => ({
 
 import { shiftWeek, weekKeyFromMs } from "@/lib/weekly/week-archive";
 
-import WeekArchivePage from "./page";
+import WeekArchivePage, { generateMetadata } from "./page";
 
 /** See src/app/kalite/page.test.tsx for the function-expansion rationale. */
 function collectText(node: unknown, out: string[] = []): string[] {
@@ -179,5 +183,119 @@ describe("/hafta/[hafta] source status", () => {
     expect(text).not.toContain(UNKNOWN);
     // The archive copy is unchanged: it still states the percentage basis.
     expect(text).toContain("Yüzdeler o haftanın çok kaynaklı kümelerindeki 10 kaynak kaydı");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateMetadata robots (h49-seo-1). This route is request-time
+// (connection()), so a failed or empty week read can be reported in the robots
+// meta of the same response; /konu does it with topicPageRobots(null). The read
+// is the page body's own cached call (same "use cache" key), so it adds no
+// round trip, and an out-of-range key never reaches it (no unbounded cache keys).
+// ---------------------------------------------------------------------------
+
+type MetaShape = {
+  title?: string;
+  alternates?: { canonical?: string };
+  openGraph?: { url?: string };
+  robots?: unknown;
+};
+
+async function metaFor(key: string): Promise<MetaShape> {
+  return (await generateMetadata({
+    params: Promise.resolve({ hafta: key }),
+  })) as unknown as MetaShape;
+}
+
+describe("/hafta/[hafta] generateMetadata robots", () => {
+  beforeAll(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  const current = weekKeyFromMs(NOW.getTime());
+  const closed = shiftWeek(current, -1) as string;
+
+  beforeEach(() => {
+    mocks.order = [];
+    mocks.getWeekArchiveClusters.mockReset();
+    mocks.getWeekArchiveClusters.mockImplementation(async () => {
+      mocks.order.push("read");
+      return { rows: [{ id: "cl-1" }], truncated: false };
+    });
+  });
+
+  it("noindexes (follow kept) when the week read failed (null) and keeps the share identity", async () => {
+    mocks.getWeekArchiveClusters.mockResolvedValue(null);
+
+    const m = await metaFor(closed);
+
+    expect(m.robots).toEqual({ index: false, follow: true });
+    expect(m.alternates?.canonical).toBe(`/hafta/${closed}`);
+    expect(m.openGraph?.url).toBe(`/hafta/${closed}`);
+    expect(m.title).toContain("Haftanın yelpazesi");
+  });
+
+  it("noindexes (follow kept) a week that was read fine but holds no rows", async () => {
+    mocks.getWeekArchiveClusters.mockResolvedValue({ rows: [], truncated: false });
+
+    expect((await metaFor(closed)).robots).toEqual({ index: false, follow: true });
+  });
+
+  it("leaves a normal week indexable: no robots key at all", async () => {
+    const m = await metaFor(closed);
+
+    expect("robots" in m).toBe(false);
+    expect(m.alternates?.canonical).toBe(`/hafta/${closed}`);
+  });
+
+  it("applies the same rule to the week still in progress", async () => {
+    mocks.getWeekArchiveClusters.mockResolvedValue(null);
+    expect((await metaFor(current)).robots).toEqual({ index: false, follow: true });
+
+    mocks.getWeekArchiveClusters.mockResolvedValue({ rows: [{ id: "cl-1" }], truncated: false });
+    expect("robots" in (await metaFor(current))).toBe(false);
+  });
+
+  it("reads the requested week exactly once, with the page body's own key (no extra round trip)", async () => {
+    await metaFor(closed);
+
+    expect(mocks.getWeekArchiveClusters).toHaveBeenCalledTimes(1);
+    expect(mocks.getWeekArchiveClusters).toHaveBeenCalledWith(closed);
+  });
+
+  it("awaits connection() before the read (the clock is read only at request time)", async () => {
+    await metaFor(closed);
+
+    expect(mocks.order).toEqual(["connection", "read"]);
+  });
+
+  it.each([
+    ["a far-future key", "2099-W01"],
+    ["next week", "2026-W46"],
+    ["a week before the archive began", "2026-W37"],
+  ])("%s: does NOT touch the read (no unbounded cache keys) and returns the base metadata", async (_name, key) => {
+    const m = await metaFor(key);
+
+    expect(mocks.getWeekArchiveClusters).not.toHaveBeenCalled();
+    expect("robots" in m).toBe(false);
+    expect(m.alternates?.canonical).toBe(`/hafta/${key}`);
+  });
+
+  it("returns {} for an unparseable key without reading", async () => {
+    expect(await metaFor("garbage")).toEqual({});
+    expect(await metaFor("2026-W99")).toEqual({});
+    expect(mocks.getWeekArchiveClusters).not.toHaveBeenCalled();
+  });
+
+  it("the first archive week is still in range (the lower bound is inclusive)", async () => {
+    mocks.getWeekArchiveClusters.mockResolvedValue(null);
+
+    expect((await metaFor("2026-W38")).robots).toEqual({ index: false, follow: true });
+    expect(mocks.getWeekArchiveClusters).toHaveBeenCalledWith("2026-W38");
   });
 });

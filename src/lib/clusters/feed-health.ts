@@ -44,7 +44,8 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
 // source counts as healthy only when BOTH axes are true.
 
 /** A zone counts as degraded below this share of feeds that answered
- * 200/304 within `FEED_HEALTH_MAX_AGE_MS` (the "fetch status" axis). */
+ * 200/304 (with `fetch_fail_streak` 0) within `FEED_HEALTH_MAX_AGE_MS` (the
+ * "fetch status" axis). */
 export const FEED_HEALTH_MIN_SHARE = 0.7;
 
 /** A feed's last successful fetch must be within this window to count as fetch-ok. */
@@ -86,7 +87,7 @@ export const FEED_HEALTH_MIN_YIELD_SHARE = 0.5;
 export type ZoneHealth = {
   /** Active, RSS-backed sources in the zone. */
   total: number;
-  /** Status 200/304 within `FEED_HEALTH_MAX_AGE_MS` (the old `healthy`). */
+  /** Status 200/304 within `FEED_HEALTH_MAX_AGE_MS` with no fail streak (the old `healthy`). */
   fetchOk: number;
   fetchOkShare: number;
   /** >=1 article published in the trailing `FEED_YIELD_WINDOW_MS`. */
@@ -104,6 +105,12 @@ type SourceHealthRow = {
   bias: BiasCategory;
   fetch_last_status: number | null;
   fetch_last_at: string | null;
+  /**
+   * `sources.fetch_fail_streak`. Optional at the type level for the same
+   * reason as `recent` (unchecked cast over raw PostgREST output; legacy rows
+   * and test doubles omit it): an absent or null value reads as 0.
+   */
+  fetch_fail_streak?: number | null;
   /**
    * Existence-probe embed: at most one row, never a count. Optional at the
    * type level — the value comes from an unchecked `as SourceHealthRow[]`
@@ -132,11 +139,21 @@ function emptyZoneHealth(): ZoneHealth {
  * that fetch happened within `FEED_HEALTH_MAX_AGE_MS` of now. A 200 from
  * three hours ago is stale — the feed may have died since — so it is
  * counted not-ok exactly like a 5xx would be.
+ *
+ * A 200/304 with `fetch_fail_streak > 0` is not fetch-ok either. ingest stores
+ * the 2xx status of an unparseable body (an HTML page instead of a feed) and
+ * counts it as a failure; only a parsed 2xx/304 resets the streak to 0. So a
+ * success code next to a positive streak means the last answer was refused.
+ * Without this check such a feed, quarantined and retried once a day, re-stamps
+ * `fetch_last_at` on every retry and inflates its zone's `fetchOkShare` for the
+ * next `FEED_HEALTH_MAX_AGE_MS`. A null or absent streak (legacy rows, test
+ * doubles) reads as 0.
  */
 function isFetchOkRow(row: SourceHealthRow, nowMs: number): boolean {
   if (row.fetch_last_status !== 200 && row.fetch_last_status !== 304) {
     return false;
   }
+  if ((row.fetch_fail_streak ?? 0) > 0) return false;
   if (!row.fetch_last_at) return false;
   const ageMs = nowMs - new Date(row.fetch_last_at).getTime();
   return ageMs <= FEED_HEALTH_MAX_AGE_MS;
@@ -199,7 +216,9 @@ async function computeZoneFeedHealth(
     const yieldSince = new Date(nowMs - FEED_YIELD_WINDOW_MS).toISOString();
     const { data, error } = await supabase
       .from("sources")
-      .select("bias, fetch_last_status, fetch_last_at, recent:articles(id)")
+      .select(
+        "bias, fetch_last_status, fetch_last_at, fetch_fail_streak, recent:articles(id)",
+      )
       .eq("active", true)
       .not("rss_url", "is", null)
       .gte("recent.published_at", yieldSince)

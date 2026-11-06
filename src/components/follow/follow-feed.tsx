@@ -328,14 +328,14 @@ export function EmptyState({
       <p className="text-sm">
         <Link
           href="/konu"
-          className="underline decoration-dotted underline-offset-2 hover:text-primary"
+          className="inline-flex max-sm:min-h-11 items-center touch-manipulation underline decoration-dotted underline-offset-2 hover:text-primary"
         >
           Konulara göz at
         </Link>
         {" · "}
         <Link
           href="/"
-          className="underline decoration-dotted underline-offset-2 hover:text-primary"
+          className="inline-flex max-sm:min-h-11 items-center touch-manipulation underline decoration-dotted underline-offset-2 hover:text-primary"
         >
           Ana sayfada ara
         </Link>

@@ -322,8 +322,8 @@ export function KaynakDurumBody({
                       <td className="py-2.5 pr-4 whitespace-nowrap text-muted-foreground">
                         {row.lastItemAt ? formatTurkishTimeAgo(row.lastItemAt) : "—"}
                       </td>
-                      <td className="py-2.5 pr-4 whitespace-nowrap font-mono text-muted-foreground">
-                        {httpStatusLabel(row.lastHttpStatus)}
+                      <td className="py-2.5 pr-4 sm:whitespace-nowrap font-mono text-muted-foreground">
+                        {httpStatusLabel(row.lastHttpStatus, { failStreak: row.failStreak })}
                       </td>
                       <td className="py-2.5 whitespace-nowrap font-mono text-muted-foreground">
                         <Suspense fallback={<span className="text-muted-foreground">…</span>}>

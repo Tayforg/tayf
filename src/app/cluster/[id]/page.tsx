@@ -20,9 +20,7 @@ import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption"
 import { ShareButton } from "@/components/story/share-button";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { CompareButton } from "@/components/compare/compare-button";
-import { SourceChips } from "@/components/source/source-chips";
-import { SourceBadge } from "@/components/story/source-badge";
-import { SourceProfileLink } from "@/components/story/source-profile-link";
+import { SourceKunye } from "@/components/story/source-kunye";
 import { OwnershipLine } from "@/components/story/ownership-line";
 import { StoryTimeline } from "@/components/story/story-timeline";
 import { FactCheckBox } from "@/components/story/fact-check-box";
@@ -959,26 +957,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 so stories covered only by untagged outlets won't get an empty
                 wrapper. Kept inside the hero section (below the summary) so
                 the chips read as part of the cluster's "at-a-glance" header
-                instead of colliding with the framing comparison below. */}
-            {uniqueRatedSources.length > 0 && (
-              <div className="space-y-1.5">
-                <div className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  Kaynak künyesi
-                </div>
-                <ul className="flex flex-wrap gap-x-3 gap-y-1.5 min-w-0">
-                  {uniqueRatedSources.map((source, i) => (
-                    <li
-                      key={source.id}
-                      className={`flex flex-wrap items-center gap-1.5 min-w-0 max-w-full animate-fade-up stagger-${i}`}
-                    >
-                      <SourceProfileLink slug={source.slug} name={source.name} />
-                      <SourceChips slug={source.slug} />
-                      <SourceBadge trusteeSince={source.trustee_since} />
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+                instead of colliding with the framing comparison below.
+                h49-browser-1: shows the first few rows and folds the rest
+                behind a native <details> (see <SourceKunye>). */}
+            <SourceKunye sources={uniqueRatedSources} />
           </div>
         </div>
       </section>
