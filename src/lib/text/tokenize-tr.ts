@@ -44,14 +44,86 @@ export interface HeadlineToken {
   surface: string;
 }
 
-const APOSTROPHE_SUFFIX_RE = /['’‘`´]\p{L}*/gu;
+/**
+ * Characters that write a Turkish apostrophe: ASCII ', right and left single
+ * quotation marks (U+2019, U+2018), modifier letter apostrophe (U+02BC),
+ * backtick and acute accent. The same set as summary-agreement.ts.
+ */
+const APOSTROPHES: ReadonlySet<string> = new Set([
+  "'",
+  "\u2019",
+  "\u2018",
+  "\u02bc",
+  "`",
+  "\u00b4",
+]);
+const LETTER_RE = /\p{L}/u;
+const LETTER_OR_DIGIT_RE = /[\p{L}\p{N}]/u;
 const SPLIT_RE = /[^\p{L}\p{N}]+/u;
 const ALL_DIGITS_RE = /^\p{N}+$/u;
 
 /**
+ * Marks that close a quotation, a parenthesis or an abbreviation: when one of
+ * them sits between a letter or digit and an apostrophe, the apostrophe still
+ * attaches a suffix to the word before the mark (M.B.’nin, (AKP)'nin).
+ */
+const SUFFIX_CLOSERS: ReadonlySet<string> = new Set([".", ")", "]", "”", '"', "»"]);
+
+/**
+ * True when the apostrophe at `chars[i]` (i > 0) starts a suffix: the previous
+ * character is a letter or digit, or it is a closing mark that itself follows a
+ * letter or digit.
+ */
+function startsSuffix(chars: string[], i: number): boolean {
+  const prev = chars[i - 1]!;
+  if (LETTER_OR_DIGIT_RE.test(prev)) return true;
+  return i >= 2 && SUFFIX_CLOSERS.has(prev) && LETTER_OR_DIGIT_RE.test(chars[i - 2]!);
+}
+
+/**
+ * Cuts the Turkish case/possessive suffix after an apostrophe: the apostrophe
+ * and the letters that follow it go (Erdoğan'dan → Erdoğan, 2026'da → 2026).
+ *
+ * Only an apostrophe whose previous character is a letter or digit starts a
+ * suffix. An apostrophe right after a closing mark or an abbreviation period
+ * (. ) ] ” " ») that itself follows a letter or digit also starts one: M.B.’nin,
+ * A.Ş.'deki, (AKP)'nin, “…”'nin. At the start of the text or after a space or
+ * other punctuation it is an opening quote ('AKP', ‘Yapay zekâ’, `darbe`): it
+ * is left in place, SPLIT_RE turns it into a separator, and the quoted word
+ * survives.
+ *
+ * A character walk over code points rather than a regex: one pass, constant
+ * work per character, no backtracking. "Previous character" is read from the
+ * original text, so a chain such as AKP'li'ler cuts both suffixes.
+ */
+function stripApostropheSuffixes(text: string): string {
+  const chars = Array.from(text);
+  const kept: string[] = [];
+  let i = 0;
+
+  while (i < chars.length) {
+    const ch = chars[i]!;
+    if (i > 0 && APOSTROPHES.has(ch) && startsSuffix(chars, i)) {
+      i += 1;
+      while (i < chars.length && LETTER_RE.test(chars[i]!)) i += 1;
+      continue;
+    }
+    kept.push(ch);
+    i += 1;
+  }
+
+  return kept.join("");
+}
+
+/**
  * Splits a headline into raw tokens, stripping Turkish possessive/case
  * apostrophe suffixes (Erdoğan'dan → Erdoğan) before splitting on
- * non-letter/non-digit runs.
+ * non-letter/non-digit runs. Only an apostrophe that directly follows a letter
+ * or digit starts a suffix, and so does one right after a closing mark or an
+ * abbreviation period (. ) ] ” " ») that itself follows a letter or digit
+ * (M.B.’nin, A.Ş.'deki, (AKP)'nin, “…”'nin): an opening quote ('İhmal'
+ * iddiası) is plain punctuation, so the quoted word stays a token. U+02BC
+ * counts as an apostrophe (Erdoğanʼdan → Erdoğan), as in summary-agreement.ts.
  *
  * NFC-normalizes first: a decomposed 'İ' (I + U+0307 COMBINING DOT ABOVE)
  * folds back into the precomposed İ so it round-trips through
@@ -60,7 +132,7 @@ const ALL_DIGITS_RE = /^\p{N}+$/u;
  */
 export function tokenizeHeadline(title: string): HeadlineToken[] {
   const normalized = title.normalize("NFC");
-  const stripped = normalized.replace(APOSTROPHE_SUFFIX_RE, "");
+  const stripped = stripApostropheSuffixes(normalized);
   const rawTokens = stripped.split(SPLIT_RE).filter((t) => t.length > 0);
 
   return rawTokens.map((raw) => ({

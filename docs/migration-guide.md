@@ -3217,7 +3217,7 @@ select s.slug, count(*) filter (where a.source_article_key is not null) keyed, c
 **What 150 does** (additive, one transaction, safe to re-apply):
 
 - adds `public.ops_cron_expected` (`jobname` primary key, `max_gap interval`, `note`): RLS on, no policy, readable by `service_role` only, nothing granted to `anon` or `authenticated`. It is seeded with the 20 jobs that tick all day (the note is the schedule; weekday-only and weekly jobs are not listed);
-- re-creates `ops_health_report()` with 145's text verbatim through row 17 and appends row 18 `queue_lag` (depth and age of the oldest visible message of `cluster_work` and `image_backfill`, plus messages archived in the last 24 hours with `read_ct >= 3`; warn at 300 s / 1800 s, fail at 900 s / 3600 s) and row 19 `cron_jobs_stalled` (every job in `ops_cron_expected` is scheduled, active and has started a run within its `max_gap`). The function returns 19 rows; the detail carries counts and job names only, never `cron.job.command`, a run's `return_message` or a message body;
+- re-creates `ops_health_report()` with 145's text verbatim through row 17 and appends row 18 `queue_lag` (depth and age of the oldest visible message of `cluster_work` and `image_backfill`, plus messages archived in the last 24 hours that count as poison (150 counted `read_ct` 3 or more; 167 corrected it to `read_ct > 3`, the 4th read, the consumers' own `MAX_READS` contract); warn at 300 s / 1800 s, fail at 900 s / 3600 s) and row 19 `cron_jobs_stalled` (every job in `ops_cron_expected` is scheduled, active and has started a run within its `max_gap`). The function returns 19 rows; the detail carries counts and job names only, never `cron.job.command`, a run's `return_message` or a message body;
 - adds, changes and unschedules no pg_cron job.
 
 **Order:** none. Apply 150 only (`supabase db push`). There is no Edge Function deploy and no app deploy; the next heartbeat run (30 minutes), or the next 10 minute snapshot (131), shows rows 18 and 19.
@@ -3232,8 +3232,9 @@ select check_name, status, observed, threshold, detail
   from public.ops_health_report()
   where check_name in ('queue_lag', 'cron_jobs_stalled');
 -- cron_jobs_stalled: pass / 0 / 1 / "20 iş izleniyor". queue_lag: pass, or warn while the detail says
--- "zehirli (24 sa): N" with N > 0 (messages archived with read_ct >= 3 in the last 24 hours; production
--- read warn with N = 3 on 2026-11-02). Look at the a_image_backfill / a_cluster_work counts by read_ct in
+-- "zehirli (24 sa): N" with N > 0 (messages archived with read_ct > 3, the 4th read, in the last 24 hours; with
+-- 150 to 161 it counted read_ct 3 or more and read warn with N = 3 on 2026-11-02 and N = 11 on 2026-11-06 for messages
+-- that were processed on their 3rd read; 167 fixed that). Look at the a_image_backfill / a_cluster_work counts by read_ct in
 -- Troubleshooting, "image_backfill queue is stuck".
 select count(*) from public.ops_cron_expected;      -- 20
 -- md5(prosrc) 2445cd7d15a23d4af88d42ddf79ac2ff, 38,876 characters (verified on production 2026-11-02)
@@ -3855,3 +3856,20 @@ Then `GET /trends`: a "Yükselen Konular" row whose hub is thin (fewer than 3 cl
 **Verify** (read-only): `md5(prosrc), length(prosrc)` of `'public.search_cluster_ids(text[], text, integer)'::regprocedure` is `d7f4b4223730e06db8479f42776d8040`, 9680; `has_function_privilege('anon', …, 'execute')` false and `('service_role', …)` true; ledger row 166 present. Then `GET /?q=burdur` and `/?q=ersan` show no Bursa or erken-seçim cards, `/?q=irakta` still shows the Irak stories, `/?q=şişli` is unchanged.
 
 **Rollback:** re-run only the function statement of section 3 of `129_search_fold_rank.sql` (restores md5 `cb7fee86…`), then `delete from supabase_migrations.schema_migrations where version = '166'; notify pgrst, 'reload schema';`.
+
+## 167 — `queue_lag` counts poison as the consumers define it (`read_ct > 3`, the 4th read; `ops_health_report` row 18): APPLY 167 only, no deploy
+
+**Why:** row 18 (`queue_lag`) counted a message as `zehirli` (poison) when it was archived in the last 24 hours with `read_ct` 3 or more. `image-consumer` and `cluster-consumer` archive a message as poison only when `read_ct > MAX_READS` (`MAX_READS = 3`), on the 4th read; a message processed and archived on its 3rd read is healthy. On 2026-11-06 the 11 `image_backfill` rows `msg_id` 182446-182456 (`haberport`, enqueued 06:51, archived by 07:05) all had `read_ct = 3` and every article had `image_url` set with `image_backfill_attempts = 0`, yet `ops_health_report()` read `queue_lag` warn with `zehirli (24 sa): 11`, for 24 hours after the archive. Across both archives, rows with `read_ct > 3` = 0 on every day since 2026-10-30. The report is not public, so this is an ops monitoring fix: no more false warn after a requeue flood, and a real poison message (a 4th read) is no longer masked by 3rd-read archives.
+
+**What 167 does** (function-only, `SECURITY DEFINER`, `search_path = ''`, grants re-issued to `service_role` only, one transaction with `lock_timeout = '5s'`, safe to re-apply): 161's body verbatim except the two `a.read_ct` comparisons of row 18 (now `a.read_ct > 3`) and the two sentences that describe them (the row-18 comment and the function comment, which also gains 167 in its migration list). The detail format (`zehirli (24 sa): N`), every limit and every other row are unchanged. `tests/migrations/167-ops-queue-poison-contract.test.ts` parses both Edge Functions, so the SQL limit and `MAX_READS` cannot drift apart. The `image-consumer` edit that ships with it fixes a wrong comment at the top of the per-message loop (an unprocessed tail was already counted by `pgmq.read`, and comes back after the visibility timeout; `READ_BUDGET_FLOOR_MS` limits how often); it is comment-only.
+
+| | md5(prosrc) | length |
+|---|---|---|
+| before 167 = the body of 161 (production, 2026-11-06) | `c1c2ff6c61daede5a5e8c8695547b445` | 47349 |
+| after 167 | `5a9f9e384da09a19df1cd73a3f8ba4a5` | 47439 |
+
+**Order:** APPLY 167 only (`supabase db push`). No Edge Function deploy and no app deploy: the `image-consumer` change is comment-only, so there is no redeploy; the next heartbeat run (30 minutes) or 10 minute snapshot (131) shows the new count.
+
+**Verify** (read-only): `select status, detail from public.ops_health_report() where check_name = 'queue_lag'` answers `pass` when the ages are normal, with a detail ending `zehirli (24 sa): 0` (it read `warn` and `zehirli (24 sa): 11` before); `select count(*) from pgmq.a_image_backfill where archived_at > now() - interval '24 hours' and read_ct > 3` is 0; `md5(prosrc), length(prosrc)` of `'public.ops_health_report()'::regprocedure` is `5a9f9e384da09a19df1cd73a3f8ba4a5`, 47439; `has_function_privilege('anon', …, 'execute')` and `('authenticated', …)` false, `('service_role', …)` true; `select version, name from supabase_migrations.schema_migrations where version = '167'` returns one row.
+
+**Rollback:** re-run only the `ops_health_report()` section of `161_image_coverage_by_source.sql` (from `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;`, which restores md5 `c1c2ff6c61daede5a5e8c8695547b445`, length 47349), then `delete from supabase_migrations.schema_migrations where version = '167';`. The false warn after a 3rd-read archive comes back with it.

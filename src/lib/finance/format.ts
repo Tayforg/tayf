@@ -25,9 +25,18 @@ export function fmtPct(n: number): string {
   return signedPercentTr(n, 2);
 }
 
-/** Ratio like relative volume: 2.4 -> "2,4x". */
+/** Ratio like relative volume, compact chip form: 2.4 -> "2,4x". */
 export function fmtX(n: number): string {
   return `${X.format(n)}x`;
+}
+
+/**
+ * The same ratio as a bare number for "... katı": 1.94 -> "1,9". Where the
+ * ratio follows a genitive the head noun "katı" must be written out; "1,9x"
+ * cannot stand in for it. The full phrase lives in rvolPhrase (session.ts).
+ */
+export function fmtKat(n: number): string {
+  return X.format(n);
 }
 
 /** Istanbul calendar day as YYYY-MM-DD. */

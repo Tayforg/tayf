@@ -14,6 +14,8 @@ import {
   quoteFreshness,
   rebaseQuoteOnStat,
   rvolLabel,
+  rvolParts,
+  rvolPhrase,
 } from "./session";
 
 // Every case passes an explicit nowMs: the module is pure and never reads the
@@ -521,5 +523,56 @@ describe("rebaseQuoteOnStat", () => {
   it("an unparsable asOf cannot name a session day: the quote is kept", () => {
     const q = quote({ asOf: "not-a-date", price: 295, prevClose: 291.25, changePct: 1.29 });
     expect(rebaseQuoteOnStat(q, stat({ lastDay: "2026-11-04", lastClose: 280 }))).toEqual(q);
+  });
+});
+
+describe("rvolPhrase (h51-morphology-2: the genitive 'ortalamanın' must be followed by 'katı')", () => {
+  it("reads as a complete phrase when the volume belongs to the session on screen", () => {
+    expect(rvolPhrase({ rvol: 1.9, dayLabel: null })).toBe("20 günlük ortalamanın 1,9 katı");
+  });
+
+  it("names the volume day when it differs from the session shown", () => {
+    expect(rvolPhrase({ rvol: 0.7, dayLabel: "05.11" })).toBe("20 günlük ortalamanın 0,7 katı · 05.11 seansı");
+  });
+
+  it("rounds the ratio to one decimal with the Turkish comma", () => {
+    expect(rvolPhrase({ rvol: 1.94, dayLabel: null })).toBe("20 günlük ortalamanın 1,9 katı");
+    expect(rvolPhrase({ rvol: 12, dayLabel: null })).toBe("20 günlük ortalamanın 12,0 katı");
+  });
+
+  it("never ends on a dangling genitive and never prints the 'x' form", () => {
+    for (const dayLabel of [null, "05.11"]) {
+      for (const rvol of [0, 0.7, 1.9, 2, 12.34]) {
+        const out = rvolPhrase({ rvol, dayLabel });
+        expect(out).not.toMatch(/\dx/);
+        expect(out).not.toMatch(/ortalamanın( ·|$)/);
+        expect(out).toContain(" katı");
+      }
+    }
+  });
+
+  it("takes the output of rvolLabel as is", () => {
+    const label = rvolLabel(stat(), "2026-11-02");
+    expect(label).not.toBeNull();
+    expect(rvolPhrase(label!)).toBe("20 günlük ortalamanın 1,3 katı · 30.10 seansı");
+  });
+});
+
+describe("rvolParts (the pieces the header colours separately)", () => {
+  it("joins back to exactly rvolPhrase, so the markup cannot drift from the string", () => {
+    for (const dayLabel of [null, "05.11"]) {
+      const v = { rvol: 1.9, dayLabel };
+      const p = rvolParts(v);
+      expect(`${p.basis} ${p.ratio}${p.day ? ` · ${p.day}` : ""}`).toBe(rvolPhrase(v));
+    }
+  });
+
+  it("splits the basis, the ratio and the day label", () => {
+    expect(rvolParts({ rvol: 1.9, dayLabel: "05.11" })).toEqual({
+      basis: "20 günlük ortalamanın",
+      ratio: "1,9 katı",
+      day: "05.11 seansı",
+    });
+    expect(rvolParts({ rvol: 1.9, dayLabel: null }).day).toBeNull();
   });
 });
