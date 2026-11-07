@@ -1,6 +1,7 @@
 import { ExternalLink } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
+import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
 import { SourceLogo } from "@/components/source/source-logo";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { groupMembersByZone } from "@/lib/clusters/framing";
@@ -21,7 +22,11 @@ import type { MediaDnaZone } from "@/types";
  * row's age a RelativeTime one): overflow beyond VISIBLE_PER_ZONE is
  * disclosed via native <details>/<summary>. An empty zone renders an
  * explicit "silence" state — on a bias-transparency site, the absence of
- * coverage IS content.
+ * coverage IS content. The state says only what the column shows: when a
+ * toplayıcı / niş source of that zone covered the story (`nonVotingZones`) the
+ * line is "spektruma sayılan kaynaklardan haber yok", the Manşet Kartı's wording
+ * (SPECTRUM_ABSENT_QUALIFIED), and only a zone nobody wrote in keeps "bu tarafta
+ * sessizlik" (h58-postship-2). Wording only: no count, vote or "N manşet" moves.
  *
  * h47-time-1: ages are measured against `nowMs`, the page's per-request render
  * stamp, and RelativeTime re-bases them to the reader's clock after mount, so a
@@ -40,6 +45,11 @@ interface FramingComparisonProps {
   // The instant the server rendered the page (epoch ms), taken once per request
   // in page.tsx. Required: a caller that forgets it would print frozen ages.
   nowMs: number;
+  // The zones a toplayıcı / niş (non-voting) member of this cluster sits in,
+  // from `nonVotingMembers` in page.tsx. Required, like nowMs, so no caller can
+  // forget it and print "sessizlik" over a column such a source covered. It only
+  // changes the words of an EMPTY column; nothing is counted from it.
+  nonVotingZones: ReadonlySet<MediaDnaZone>;
 }
 
 // Spectrum order, matching the bias bar left-to-right.
@@ -122,7 +132,11 @@ function HeadlineEntry({
   );
 }
 
-export function FramingComparison({ members, nowMs }: FramingComparisonProps) {
+export function FramingComparison({
+  members,
+  nowMs,
+  nonVotingZones,
+}: FramingComparisonProps) {
   const byZone = groupMembersByZone(members);
   const total = members.length;
 
@@ -166,7 +180,9 @@ export function FramingComparison({ members, nowMs }: FramingComparisonProps) {
               {zoneMembers.length === 0 ? (
                 <div className="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-6 text-center">
                   <span className="text-[11px] italic text-muted-foreground">
-                    — bu tarafta sessizlik —
+                    {nonVotingZones.has(zone)
+                      ? `— ${SPECTRUM_ABSENT_QUALIFIED} —`
+                      : "— bu tarafta sessizlik —"}
                   </span>
                 </div>
               ) : (

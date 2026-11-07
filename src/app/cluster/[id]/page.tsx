@@ -441,6 +441,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     const z = zoneOf(m.source.bias);
     nonVotingZoneCounts[z] += 1;
   }
+  // h58-postship-2: the same fact as a set, for the framing comparison. An empty
+  // column there says "bu tarafta sessizlik" only when no toplayıcı / niş source
+  // of that zone wrote either; otherwise it says what the spectrum shows. Words
+  // only: nothing here is a vote or a count.
+  const nonVotingZones = new Set<MediaDnaZone>(
+    nonVotingMembers.map((m) => zoneOf(m.source.bias)),
+  );
 
   // Derive inputs for the cross-spectrum surprise detector from only the
   // VOTING member list. `detectCrossSpectrum` also filters internally via
@@ -1001,12 +1008,20 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           outlets' own headlines side by side; replaces the old chip-only
           ClusterStance grid. Voting members only — an aggregator/niche
           member labelled center must never fill the Bağımsız column.
+          An empty column says "spektruma sayılan kaynaklardan haber yok"
+          instead of "bu tarafta sessizlik" when a toplayıcı / niş source of
+          that zone covered the story (nonVotingZones, h58-postship-2); they
+          stay out of the columns and the counts.
           Omitted entirely when no voting member exists — the spectrum
           caption already says only toplayıcı / niş sources wrote, and an
           empty three-column card would read as broken. */}
       {votingMembers.length > 0 && (
         <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 hover-lift animate-fade-up stagger-1">
-          <FramingComparison members={votingMembers} nowMs={renderNowMs} />
+          <FramingComparison
+            members={votingMembers}
+            nowMs={renderNowMs}
+            nonVotingZones={nonVotingZones}
+          />
         </div>
       )}
 

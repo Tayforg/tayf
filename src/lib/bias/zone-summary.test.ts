@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  SPECTRUM_ABSENT_QUALIFIED,
   dominantZonePercent,
   isOnlyZone,
   nonVotingOutsideZone,
@@ -410,5 +411,19 @@ describe("uniqueSources (h57-outbound-1)", () => {
     const members = [{ source: niche }, { source: niche }, { source: sourceOf("a", "outlet", "pro_government") }];
     expect(nonVotingOutsideZone(members.map((m) => m.source), "iktidar")).toBe(2);
     expect(nonVotingOutsideZone(uniqueSources(members), "iktidar")).toBe(1);
+  });
+});
+
+// h58-postship-2: one phrase for "this zone has no source the spectrum counts,
+// but a toplayıcı / niş source of it wrote", shared by the Manşet Kartı and the
+// cluster page's framing comparison so the two cannot word it differently.
+describe("SPECTRUM_ABSENT_QUALIFIED", () => {
+  it("is the Kart's qualified wording, verbatim and lower-case, without the dashes", () => {
+    expect(SPECTRUM_ABSENT_QUALIFIED).toBe("spektruma sayılan kaynaklardan haber yok");
+  });
+
+  it("carries no surrounding dash or space, so each surface frames it itself", () => {
+    expect(SPECTRUM_ABSENT_QUALIFIED).toBe(SPECTRUM_ABSENT_QUALIFIED.trim());
+    expect(SPECTRUM_ABSENT_QUALIFIED).not.toMatch(/[—–-]/);
   });
 });

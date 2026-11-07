@@ -526,6 +526,64 @@ describe("searchClusters alias expansion (AKP <-> AK Parti)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h58-postship-4: 'afyon', 'urfa' and 'antep' also search the official name, one
+// way only. On production (2026-11-07) 'afyon' returned 8 ids while the 79 live
+// multi-member clusters spelling 'Afyonkarahisar' were out of reach: FTS stems
+// 'afyon' to 'afyo' but leaves 'afyonkarahisar' whole, so there is no prefix match.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters one-way alias expansion (afyon / urfa / antep)", () => {
+  it.each([
+    ["afyon", "afyon or afyonkarahisar"],
+    ["Urfa", "urfa or sanliurfa"],
+    ["ANTEP", "antep or gaziantep"],
+    ["Afyon'da", "afyon or afyonkarahisar"],
+    ["afyon chp", "afyon chp or afyonkarahisar chp"],
+  ])("%j sends the websearch disjunction %j on both arms", async (q, expanded) => {
+    await searchClusters(q);
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants(expanded), p_folded: expanded, p_limit: 24 },
+    ]);
+  });
+
+  it("keeps the typed spelling first, so its own results still rank in the disjunction", async () => {
+    await searchClusters("afyon");
+    const args = fixture.rpcCalls[0] as { p_variants: string[]; p_folded: string };
+    expect(args.p_folded.split(" or ")).toEqual(["afyon", "afyonkarahisar"]);
+    expect(args.p_variants[0]!.split(" or ")).toEqual(["afyon", "afyonkarahisar"]);
+  });
+
+  it.each(["afyonkarahisar", "şanlıurfa", "gaziantep", "maraş", "kahramanmaraş", "afyonlu", '"afyon"', "afyon -chp", "afyon or urfa"])(
+    "%j is not expanded (arguments identical to the plain canonical query)",
+    async (q) => {
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      expect(fixture.rpcCalls).toEqual([
+        {
+          p_variants: turkishQueryVariants(canonical),
+          p_folded: foldTr(canonical),
+          p_limit: 24,
+        },
+      ]);
+    },
+  );
+
+  it("a phrase-making term keeps the folded arm as it was, the variants arm still expands", async () => {
+    await searchClusters("afyon covid_19");
+    const args = fixture.rpcCalls[0] as { p_variants: string[]; p_folded: string };
+    expect(args.p_folded).toBe("afyon covid_19");
+    expect(args.p_variants).toEqual(turkishQueryVariants("afyon covid_19 or afyonkarahisar covid_19"));
+  });
+
+  it("the AKP pair still sends the arguments it always did", async () => {
+    await searchClusters("AKP");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants('akp or "ak parti"'), p_folded: "akp or ak parti", p_limit: 24 },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // In-flight cap + single-flight (per instance). Cache entries are not modelled
 // by the vitest build ("use cache" is a no-op there), so every call that is not
 // de-duplicated by single-flight reaches the RPC; held RPCs make the overlap

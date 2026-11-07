@@ -1253,6 +1253,108 @@ describe("ClusterDetailPage — only voting members feed the zone-carrying links
 });
 
 // ---------------------------------------------------------------------------
+// h58-postship-2: the framing comparison said "— bu tarafta sessizlik —" over a
+// column a toplayıcı / niş source of that zone had covered (cluster 52f72744:
+// İşçi Haber, niche Muhalefet, and Dünya, niche Merkez, sit in the "Toplayıcı /
+// niş kaynaklar" block right below it). The page hands FramingComparison the
+// zones those non-voting members sit in, and it words the empty column like the
+// Manşet Kartı does (#219). Nothing is counted differently.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — framing comparison silence wording (h58-postship-2)", () => {
+  const QUALIFIED = "— spektruma sayılan kaynaklardan haber yok —";
+  const PLAIN = "— bu tarafta sessizlik —";
+
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+  /** Headline rows in the block: one <li> per voting member, never a non-voting one. */
+  const listItems = (html: string) => html.match(/<li[ >]/g) ?? [];
+
+  /** The `<section aria-label="LABEL" ...>` of one zone column of the block. */
+  function column(html: string, label: string): string {
+    const open = html.indexOf(`<section aria-label="${label}"`);
+    if (open === -1) throw new Error(`no column ${label}`);
+    return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
+  }
+
+  /** The framing block exactly as the page hands it to FramingComparison, as HTML. */
+  async function framingHtml(sources: Source[], pro = 0): Promise<{ html: string; props: Record<string, unknown> }> {
+    const members = sources.map((s) => makeMember(`a-${s.id}`, s));
+    const distribution = emptyDistribution();
+    distribution.pro_government = pro;
+    getClusterDetail.mockResolvedValue({
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members,
+      allSources: sources,
+      wire: { isWireRedistribution: false, effectiveArticleCount: members.length, memberCount: members.length },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    } satisfies ClusterDetail);
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, FramingComparison);
+    expect(el).not.toBeNull();
+    return {
+      html: renderToStaticMarkup(el as unknown as ReactElement),
+      props: (el as { props: Record<string, unknown> }).props,
+    };
+  }
+
+  const outlets = Array.from({ length: 5 }, (_, i) =>
+    makeSource({ id: `s-gov-${i}`, slug: `s-gov-${i}`, name: `Gazete ${i}`, bias: "pro_government", kind: "outlet" }),
+  );
+  const isciHaber = makeSource({ id: "s-isci", slug: "isci-haber", name: "İşçi Haber", bias: "opposition", kind: "niche" });
+  const dunya = makeSource({ id: "s-dunya", slug: "dunya", name: "Dünya", bias: "center", kind: "niche" });
+  const haberlerCom = makeSource({ id: "s-haberler", slug: "haberler-com", name: "Haberler.com", bias: "pro_government", kind: "aggregator" });
+
+  it("a 52f72744-shaped cluster: the qualified line in both the Bağımsız and the Muhalefet column, no 'bu tarafta sessizlik' anywhere", async () => {
+    const { html } = await framingHtml([...outlets, isciHaber, dunya, haberlerCom], 5);
+
+    expect(count(html, QUALIFIED)).toBe(2);
+    expect(column(html, "Bağımsız")).toContain(QUALIFIED);
+    expect(column(html, "Muhalefet")).toContain(QUALIFIED);
+    expect(count(html, "bu tarafta sessizlik")).toBe(0);
+    // The counts are the voting ones: five İktidar headlines, nothing else moved.
+    expect(column(html, "İktidar")).toContain("5 manşet");
+    expect(column(html, "Bağımsız")).toContain("0 manşet");
+    expect(column(html, "Muhalefet")).toContain("0 manşet");
+    expect(html).toContain("5 kaynağın kendi manşetleri");
+    // No non-voting source fills a column (">Dünya<" is the name as its own text
+    // node: a bare "Dünya" would match the heading "Farklı Dünyalar").
+    for (const name of ["İşçi Haber", "Dünya", "Haberler.com"]) {
+      expect(html).not.toContain(`>${name}<`);
+    }
+    expect(listItems(html)).toHaveLength(5);
+  });
+
+  it("passes the zones of the non-voting members, deduped, as a set (an aggregator in a voted zone adds that zone, harmlessly)", async () => {
+    const { props } = await framingHtml([...outlets, isciHaber, dunya, haberlerCom], 5);
+    expect(props.nonVotingZones).toBeInstanceOf(Set);
+    expect([...(props.nonVotingZones as Set<string>)].sort()).toEqual(["bagimsiz", "iktidar", "muhalefet"]);
+  });
+
+  it("a cluster with no non-voting member keeps '— bu tarafta sessizlik —' in both empty columns", async () => {
+    const { html, props } = await framingHtml(outlets, 5);
+    expect([...(props.nonVotingZones as Set<string>)]).toEqual([]);
+    expect(count(html, PLAIN)).toBe(2);
+    expect(html).not.toContain("spektruma sayılan kaynaklardan haber yok");
+  });
+
+  it("qualifies only the zone the non-voting source sits in: the other empty column still says 'sessizlik'", async () => {
+    const { html } = await framingHtml([...outlets, isciHaber], 5);
+    expect(column(html, "Muhalefet")).toContain(QUALIFIED);
+    expect(column(html, "Muhalefet")).not.toContain("sessizlik");
+    expect(column(html, "Bağımsız")).toContain(PLAIN);
+    expect(column(html, "Bağımsız")).not.toContain("spektruma sayılan");
+  });
+
+  it("two articles of the same niche source change nothing but the (deduped) set", async () => {
+    const { html, props } = await framingHtml([...outlets, isciHaber, isciHaber], 5);
+    expect([...(props.nonVotingZones as Set<string>)]).toEqual(["muhalefet"]);
+    expect(count(html, QUALIFIED)).toBe(1);
+    expect(count(html, PLAIN)).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // h16-mobile-2: the header's meta + action row was one flex-wrap row of ~28 px
 // pills and 11 px links. It is now a wrapper of two display:contents groups:
 // from sm up `contents` makes it the same single flex row as before; below sm
