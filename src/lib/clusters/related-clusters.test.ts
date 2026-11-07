@@ -809,6 +809,11 @@ describe("selectRelatedClusters — relatedness", () => {
     expect(isRelatedTitle(cur, viaAlias)).toBe(true);
     expect(isRelatedTitle(cur, aliasOnly)).toBe(false);
     expect(isRelatedTitle(cur, bankOnly)).toBe(false);
+    // The hub's tcmb `requires` cue keeps a foreign bank's key off (h61), but its
+    // stems stay excluded: "merkez" and "banka" are still the entity's own words.
+    expect(entityKeysIn(bankOnly)).toEqual([]);
+    expect(isRelatedTitle(cur, "Paraguay Merkez Bankası bankaya el koydu")).toBe(false);
+    expect(isRelatedTitle(cur, "Özbekistan Merkez Bankası yeni banknot bastı")).toBe(false);
     const out = select([titled("alias", 1, viaAlias), titled("also", 2, "Merkez Bankası rezervleri sabit kaldı")], {
       currentTitle: cur,
     });

@@ -1,4 +1,4 @@
-import { entityHubPatterns, foldEntityText } from "@/lib/entities/entity-hub";
+import { entityHubPatterns, entityHubSpec, foldEntityText } from "@/lib/entities/entity-hub";
 import { headlineLang, sourceLang } from "@/lib/sources/source-language";
 import { RISING_ENTITIES, RISING_HUB_SPECS } from "@/lib/trends/rising-entities";
 import {
@@ -357,15 +357,35 @@ interface EntityMatcher {
 }
 
 let entityMatchers: readonly EntityMatcher[] | null = null;
+let stemKeyMatchers: readonly EntityMatcher[] | null = null;
+
+function toRegExps(patterns: readonly string[]): RegExp[] {
+  return patterns.map((p) => new RegExp(p.replace(/\\[mM]/g, "\\b")));
+}
 
 function matchers(): readonly EntityMatcher[] {
   if (entityMatchers === null) {
     entityMatchers = RISING_ENTITIES.map((entity) => ({
       key: entity.key,
-      patterns: entityHubPatterns(entity).map((p) => new RegExp(p.replace(/\\[mM]/g, "\\b"))),
+      patterns: toRegExps(entityHubPatterns(entity)),
     }));
   }
   return entityMatchers;
+}
+
+/**
+ * The same matchers without the hub's `requires` cue (the excludes and every
+ * other guard stay). They decide only whose WORDS are excluded from the shared
+ * stems, never whether a title carries the entity key.
+ */
+function stemMatchers(): readonly EntityMatcher[] {
+  if (stemKeyMatchers === null) {
+    stemKeyMatchers = RISING_ENTITIES.map((entity) => ({
+      key: entity.key,
+      patterns: toRegExps(entityHubPatterns(entity, { ...entityHubSpec(entity), requires: undefined })),
+    }));
+  }
+  return stemKeyMatchers;
 }
 
 /**
@@ -380,6 +400,18 @@ export function entityKeysIn(title: string): string[] {
     .filter((m) => m.patterns.some((re) => re.test(folded)))
     .map((m) => m.key)
     .sort();
+}
+
+/**
+ * The keys whose words a title carries, ignoring the hub's `requires` cue: a
+ * superset of {@link entityKeysIn}. [] for an empty title and for a non-string.
+ */
+function stemKeysIn(title: string): string[] {
+  if (typeof title !== "string" || title === "") return [];
+  const folded = foldEntityText(title.slice(0, ENTITY_SCAN_CHARS));
+  return stemMatchers()
+    .filter((m) => m.patterns.some((re) => re.test(folded)))
+    .map((m) => m.key);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,7 +578,14 @@ function evidenceAgainst(
   const entity = sharedKeys.length > 0;
   const score = entity ? agreement + RELATED_ENTITY_BONUS : agreement;
   if (score < RELATED_MIN_SCORE - EPSILON) return { score, related: false };
-  const distinct = sharedStemsExcluding(currentTitle, title, excludedStems(sharedKeys), isNonTopicalWord);
+  // The entity's own words never count as the shared stem, even when the hub's
+  // `requires` cue is absent from a title and so withholds the key (h37-clusters-1
+  // vs the h61 tcmb requires: "Paraguay Merkez Bankası" carries no tcmb key, yet
+  // "merkez" and "banka" are still the bank's words, not a second shared fact).
+  const candidateStemKeys = stemKeysIn(title);
+  const stemKeys = new Set(sharedKeys);
+  for (const key of stemKeysIn(currentTitle)) if (candidateStemKeys.includes(key)) stemKeys.add(key);
+  const distinct = sharedStemsExcluding(currentTitle, title, excludedStems([...stemKeys]), isNonTopicalWord);
   const related =
     distinct >= RELATED_MIN_SHARED_STEMS ||
     (entity && distinct >= 1) ||

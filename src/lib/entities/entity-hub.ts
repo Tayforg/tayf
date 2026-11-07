@@ -40,8 +40,10 @@ export function isEntityKey(key: string): boolean {
   return typeof key === "string" && ENTITY_BY_KEY.has(key);
 }
 
-// Moved to @/lib/bias/sum-distributions (shared with /konu/[slug]); re-exported
-// so the /gundem/[key] page and its tests keep importing it from here.
+// Moved to @/lib/bias/sum-distributions (shared with /konu/[slug], which the
+// /gundem/[key] page now imports directly with distributionTotal and
+// SPECTRUM_EMPTY_COPY); re-exported so this module's tests keep importing it
+// from here.
 export { sumDistributions } from "@/lib/bias/sum-distributions";
 
 /**
@@ -79,7 +81,7 @@ export function entityHubNote(total: number, shown: number): string {
 //     Mahkemesi'ni bastı", "Avrupa Merkez Bankası" and "İsrail meclisi" are not
 //     the Turkish institutions. A trusted alias (AYM, TCMB, TBMM, Büyük Millet
 //     Meclisi) stays bare: it names the institution on its own.
-//   * requires (meclis): the same non-trusted form also needs one cue anywhere
+//   * requires (meclis, tcmb): the same non-trusted form also needs one cue anywhere
 //     in the text, a positive lookahead after the exclude one:
 //     `^(?![\s\S]*(?:<ex>))(?=[\s\S]*(?:<req>))[\s\S]*`. The bare "Meclis"
 //     counts only beside "TBMM", "genel kurul", "milletvekili", a party name and
@@ -190,6 +192,37 @@ export function entityHubNote(total: number, shown: number): string {
 //                         skips one occurrence; the two presidential forms are trusted.
 //   akp      303 -> 174   129 dropped, 0 added, by headlineOnly: the regex ignores the summary lead and runs on
 //                         title_tr + title_tr_neutral (migration 170, entity_cluster_ids_v3); every other hub keeps the lead.
+//
+// tcmb requires (h61-emptystates-2, 2026-11-07), measured read-only with the app's exact arrays (queries
+// 'merkez bankası', 'merkez bankasi', 'tcmb'): the bare "Merkez Bankası" is any country's, and the ten
+// foreign excludes only name the banks someone thought of. The non-trusted form now also needs one of 14
+// folded cues (tcmb, karahan, ppk, para politika, faiz, enflasyon, rezerv, turk lira, doviz, kur korumal,
+// turkiye cumhuriyet merkez, piyasa katilimci, tbmm, repo); 'TCMB' stays bare. The excludes, the trusted
+// form and the tokens are unchanged, so /trends (migration 163) is not touched: it never reads `requires`.
+//   14-day hub    1 -> 0    the only card was Paraguay's Ueno Bank crisis (c377938c); the /gundem chip
+//                           then reads "son 14 günde haber yok"
+//   30-day hub    4 -> 1    dropped: c377938c, the 15-arrest fund probe (49dbf40b, the bank only as a
+//                           suspect's former title) and the Tarakçı indictment (65a1e2e7, a bank
+//                           intervention named as a consequence); kept: the 22 October rate cut (7760be5f)
+//   120 days of every cluster that names the bank, archived and single-article ones too (230 old matches):
+//                 230 -> 183   the 47 dropped are foreign banks (Paraguay, Özbekistan, Bulgaristan, Kanada,
+//                           Güney Kore, Irak, Mısır, Suriye, G20 summaries) or stories where the bank is a
+//                           title, an epithet or a side mention; 7 Turkish stories that carry none of the
+//                           cues stay lost (a housing-data release, a deposits statistic, an opposition
+//                           statement)
+//   of those 230, the 24 with article_count >= 2 (what the hub lists): 17 stay, all Turkish central-bank
+//   stories (rate decisions, Karahan before the TBMM, liquidity measures, inflation expectations); the
+//   7 dropped are Paraguay, the two stories above, a Babacan fund-crisis statement, two G20 summaries
+//   and a Turkey-Palestine banking agreement.
+// "tbmm" and "repo" were added after that replay (three Turkish stories back, no foreign one); the
+// generic words ("faiz", "enflasyon", "rezerv", "doviz", "para politika") each let in about as many
+// Turkish stories as foreign ones and stay. JS twin and PostgreSQL agree on the 35 behaviour samples of
+// entity-hub.test.ts.
+// Residue: a generic word still lets a foreign bank in when no named exclude catches it. Read by title,
+// the 120-day sample holds 6 such single-article clusters (Iran's central bank governor on foreign
+// exchange, India's reserves, a Philippine rate rise, two Palestinian banking-sector statements); none
+// had two articles, so none reaches the hub. Closing them needs more foreign names in `excludes`, which
+// migration 163 mirrors word for word, so it is a migration and not an app-side change.
 // ---------------------------------------------------------------------------
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {

@@ -6,6 +6,7 @@ import type { ZoneHistoryEntry } from "@/components/source/label-card";
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { attemptCached } from "@/lib/cache-resilience";
 import { isRowQuarantined } from "@/lib/sources/feed-status";
+import { selectSourceRecentArticles } from "@/lib/sources/source-recent-filter";
 import { createReaderClient } from "@/lib/supabase/server";
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import { isValidSourceSlug } from "@/lib/validation/source-input";
@@ -73,6 +74,41 @@ export interface SourceProfile {
   zoneHistory: ZoneHistoryEntry[];
 }
 
+// h61-journey-3: 'Son haberler' hides an UNCLUSTERED article that matches the
+// site's private-individual filter (see source-recent-filter.ts), so the list
+// is read from a wider newest-first window and sliced back to
+// SOURCE_RECENT_LIMIT (20) after filtering. 40 is twice the page size: a source
+// whose newest 25 items are crime briefs still fills most of the list, and the
+// payload stays small.
+export const SOURCE_RECENT_FETCH = 40;
+
+// Which of `ids` sit in at least one cluster. Deliberately non-fatal: a failed
+// (or throwing) read is logged and answers "none", so the unclustered filter
+// then drops every flagged row (fail closed) while the profile still renders.
+// Throwing here would instead turn a secondary read into the error boundary.
+async function readClusteredIds(
+  supabase: ReturnType<typeof createReaderClient>,
+  ids: readonly string[],
+): Promise<ReadonlySet<string>> {
+  if (ids.length === 0) return new Set();
+  try {
+    const { data, error } = await supabase
+      .from("cluster_articles")
+      .select("article_id")
+      .in("article_id", ids as string[]);
+    if (error) {
+      console.error("[source-profile] cluster membership query failed", error);
+      return new Set();
+    }
+    return new Set(
+      ((data ?? []) as { article_id: string }[]).map((r) => r.article_id),
+    );
+  } catch (err) {
+    console.error("[source-profile] cluster membership query threw", err);
+    return new Set();
+  }
+}
+
 // Uncached implementation. THROWS on a source, count or articles query error
 // (never returns null for a failure); returns null only when no row matches
 // the slug. A zone-history failure is deliberately non-fatal.
@@ -98,9 +134,9 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
 
   // Three read-only fetches that depend only on source.id - fire in
   // parallel (one round-trip). The 7-day count uses head/exact to avoid
-  // pulling row bodies; the recent-articles list is capped at 20 to keep
-  // the payload small; the zone-history list is capped at 20, newest
-  // first.
+  // pulling row bodies; the recent-articles list reads a bounded window of
+  // SOURCE_RECENT_FETCH rows (filtered and cut to 20 below); the zone-history
+  // list is capped at 20, newest first.
   // The one clock read of this module, inside the cache scope: it anchors the
   // 7-day window and the quarantine verdict (h47-sources-1) alike.
   const nowMs = Date.now();
@@ -117,7 +153,7 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
       .select("id, title, description, url, image_url, published_at")
       .eq("source_id", source.id)
       .order("published_at", { ascending: false })
-      .limit(20),
+      .limit(SOURCE_RECENT_FETCH),
     supabase
       .from("source_zone_history")
       .select("old_bias, new_bias, reason, rater, changed_at")
@@ -154,17 +190,14 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
         changedAt: row.changed_at,
       }));
 
-  return {
-    source,
-    quarantined: isRowQuarantined(source.fetch_quarantined_until, nowMs),
-    articleCount7d: countResult.count ?? 0,
-    // Read-time repair of double-encoded feed residue ("&quot;", "&#39;"):
-    // rows stored before the ingest fix still carry it. Pure and non-throwing,
-    // so it is safe inside the "use cache" body.
-    // h24-feeds-3: the href gets the cleaned url (a literal '&#038;' decoded,
-    // utm_*/fbclid/gclid dropped); the stored url is the upsert key and is
-    // not touched.
-    articles: ((articlesResult.data ?? []) as ArticleRow[]).map((a) => ({
+  // Read-time repair of double-encoded feed residue ("&quot;", "&#39;"):
+  // rows stored before the ingest fix still carry it. Pure and non-throwing,
+  // so it is safe inside the "use cache" body.
+  // h24-feeds-3: the href gets the cleaned url (a literal '&#038;' decoded,
+  // utm_*/fbclid/gclid dropped); the stored url is the upsert key and is
+  // not touched.
+  const repaired: ArticleRow[] = ((articlesResult.data ?? []) as ArticleRow[]).map(
+    (a) => ({
       ...a,
       url: cleanOutboundUrl(a.url),
       title: repairEntityResidue(a.title),
@@ -172,7 +205,22 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
         typeof a.description === "string"
           ? repairEntityResidue(a.description)
           : null,
-    })),
+    }),
+  );
+  // h61-journey-3: judged on the repaired text the visitor would read, and
+  // only for articles outside every cluster (clustered ones are political and
+  // already public on their cluster page). No clock read: the 7-day count, the
+  // label card and the zone history above are untouched.
+  const clusteredIds = await readClusteredIds(
+    supabase,
+    repaired.map((a) => a.id),
+  );
+
+  return {
+    source,
+    quarantined: isRowQuarantined(source.fetch_quarantined_until, nowMs),
+    articleCount7d: countResult.count ?? 0,
+    articles: selectSourceRecentArticles(repaired, clusteredIds),
     zoneHistory,
   };
 }

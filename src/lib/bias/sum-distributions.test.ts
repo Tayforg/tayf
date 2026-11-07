@@ -2,7 +2,11 @@ import { describe, it, expect } from "vitest";
 
 import { BIAS_ORDER } from "@/lib/bias/config";
 
-import { distributionTotal, sumDistributions } from "./sum-distributions";
+import {
+  distributionTotal,
+  SPECTRUM_EMPTY_COPY,
+  sumDistributions,
+} from "./sum-distributions";
 
 // sumDistributions folds the per-cluster `bias_distribution` jsonb of a listed
 // page into one spectrum (the /gundem/[key] and /konu/[slug] bars).
@@ -132,5 +136,11 @@ describe("distributionTotal", () => {
     };
 
     expect(distributionTotal(d)).toBe(3);
+  });
+});
+
+describe("SPECTRUM_EMPTY_COPY", () => {
+  it("is the one Turkish note /gundem/[key] and /konu/[slug] show when no listed story has a voting source", () => {
+    expect(SPECTRUM_EMPTY_COPY).toBe("Listelenen haberlerde dağılıma sayılan kaynak yok.");
   });
 });
