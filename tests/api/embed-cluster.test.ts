@@ -35,6 +35,7 @@ function detail(over: {
   blindspotSide?: BiasCategory | null;
   mergedInto?: string | null;
   sourceCount?: number;
+  members?: { source: { slug: string; bias: BiasCategory; kind: string } }[];
 } = {}) {
   return {
     cluster: {
@@ -45,6 +46,7 @@ function detail(over: {
       blindspot_side: over.blindspotSide ?? null,
       merged_into: over.mergedInto ?? null,
     },
+    members: over.members ?? [],
     wire: { effectiveArticleCount: over.sourceCount ?? 4 },
   };
 }
@@ -165,6 +167,25 @@ describe("GET /embed/cluster/[id] — 200", () => {
       detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: dist({ pro_government: 6 }) }),
     );
     expect(await (await call(ID)).text()).toContain("Kör nokta: sadece iktidar yazdı");
+  });
+
+  // h57-outbound-1: a toplayıcı / niş source from another zone also carried the
+  // story, so "yazdı" would be false; the ribbon qualifies it as /blindspots does.
+  it("qualifies the ribbon when a non-voting source from another zone wrote the story", async () => {
+    getClusterDetailMock.mockResolvedValue(
+      detail({
+        isBlindspot: true,
+        blindspotSide: "pro_government",
+        distribution: dist({ pro_government: 6 }),
+        members: [
+          { source: { slug: "sabah", bias: "pro_government", kind: "outlet" } },
+          { source: { slug: "isci-haber", bias: "opposition", kind: "niche" } },
+        ],
+      }),
+    );
+    const body = await (await call(ID)).text();
+    expect(body).toContain("Kör nokta: spektrumda sadece iktidar");
+    expect(body).not.toContain("sadece iktidar yazdı");
   });
 
   it("links out to the cluster in a new tab with rel=noopener", async () => {

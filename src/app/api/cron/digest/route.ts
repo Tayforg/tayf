@@ -8,6 +8,7 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isMailConfigured, sendBatch } from "@/lib/email/resend";
 import { siteUrl } from "@/lib/site-url";
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
+import { nonVotingOutsideZone } from "@/lib/bias/zone-summary";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
 import { getRssSummaryMembers } from "@/lib/clusters/rss-summary-attribution";
 import { captureServerException } from "@/lib/sentry/server";
@@ -138,6 +139,9 @@ function toBlindspotItem(bundle: BlindspotBundle, summary: string): DigestBlinds
     biasDistribution: bundle.cluster.bias_distribution,
     dominantZone: bundle.dominantZone,
     dominantPct: bundle.dominantPct,
+    // h57-outbound-1: the same count /blindspots qualifies its chip with
+    // (`bundle.sources` is already de-duplicated per source).
+    nonVotingOutside: nonVotingOutsideZone(bundle.sources, bundle.dominantZone),
   };
 }
 

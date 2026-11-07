@@ -15,6 +15,7 @@ import {
   resolveIframeCopy,
   resolveShareCopy,
 } from "./share-button";
+import { buildShareUrl } from "@/lib/clusters/share";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -744,7 +745,8 @@ describe("ShareButton — shareStory (h21-journeys-2)", () => {
 
     expect(result).toEqual({ kind: "shared" });
     expect(share).toHaveBeenCalledTimes(1);
-    expect(share.mock.calls[0]![0]).toStrictEqual({ title: "t", text: "text", url: URL_ });
+    // h57-outbound-3: the headline rides in the text, exactly as in the chips.
+    expect(share.mock.calls[0]![0]).toStrictEqual({ title: "t", text: "t\ntext", url: URL_ });
     expect(writeText).not.toHaveBeenCalled();
     expect(trackMock).toHaveBeenCalledTimes(1);
     expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "native" });
@@ -773,9 +775,40 @@ describe("ShareButton — shareStory (h21-journeys-2)", () => {
     const result = await shareStory({ clusterId: CLUSTER_ID, title: "t", text: "text", url: URL_ });
 
     expect(result).toEqual({ kind: "copied" });
-    expect(writeText).toHaveBeenCalledWith(`text\n${URL_}`);
+    expect(writeText).toHaveBeenCalledWith(`t\ntext\n${URL_}`);
     expect(trackMock).toHaveBeenCalledTimes(1);
     expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "clipboard" });
+  });
+
+  // h57-outbound-3: the primary "Paylaş" button and the channel chips on the
+  // same row must hand the recipient the same words. The WhatsApp chip's href
+  // is `wa.me/?text=<body>\n<utm url>`; whatever precedes that url is the body.
+  it("the native share text and the clipboard copy equal the body inside the WhatsApp chip href", async () => {
+    const title = "Süleymaniye Tekkesi restore edilerek yeniden açıldı";
+    const text = "12 kaynak · 9 sınıflandırılmış: %100 iktidar · %0 bağımsız · %0 muhalefet";
+    const html = renderToStaticMarkup(<ShareButton clusterId={CLUSTER_ID} title={title} text={text} />);
+    const anchor = html.match(/<a[^>]*aria-label="WhatsApp ile paylaş"[^>]*>/);
+    expect(anchor).not.toBeNull();
+    const href = anchor![0].match(/href="([^"]*)"/)![1]!.replace(/&amp;/g, "&");
+    const decoded = decodeURIComponent(href.slice(href.indexOf("?text=") + "?text=".length));
+    const chipUrl = buildShareUrl("https://tayf.test", CLUSTER_ID, "whatsapp");
+    expect(decoded.endsWith(`\n${chipUrl}`)).toBe(true);
+    const chipBody = decoded.slice(0, decoded.length - chipUrl.length - 1);
+    expect(chipBody).toBe(`${title}\n${text}`);
+
+    // Native sheet path.
+    const { shareStory } = await load();
+    const share = vi.fn(async (_d: ShareData) => {});
+    vi.stubGlobal("navigator", { share, clipboard: { writeText: vi.fn(async (_v: string) => {}) } });
+    await shareStory({ clusterId: CLUSTER_ID, title, text, url: URL_ });
+    expect(share.mock.calls[0]![0].text).toBe(chipBody);
+    expect(share.mock.calls[0]![0].title).toBe(title);
+
+    // Clipboard fallback path.
+    const writeText = vi.fn(async (_v: string) => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    await shareStory({ clusterId: CLUSTER_ID, title, text, url: URL_ });
+    expect(writeText).toHaveBeenCalledWith(`${chipBody}\n${URL_}`);
   });
 
   it("copied: with no navigator.share the link is copied and tracked as a clipboard share", async () => {

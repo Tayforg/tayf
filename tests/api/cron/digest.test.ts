@@ -917,3 +917,73 @@ describe("GET /api/cron/digest: sub-step failures are recorded as 599, answered 
     expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "digest", p_status: 200 });
   });
 });
+
+// h57-outbound-1: toBlindspotItem hands the template the number of non-voting
+// sources outside the dominant zone, from the bundle's de-duplicated sources
+// (the helper /blindspots already uses), so the mail words "sadece" the same way.
+describe("blindspot item wording (h57-outbound-1)", () => {
+  type Src = { kind: string | null; bias: string };
+  const VOTING: Src[] = [
+    { kind: "outlet", bias: "pro_government" },
+    { kind: "outlet", bias: "gov_leaning" },
+    { kind: "wire", bias: "pro_government" },
+  ];
+
+  async function sentHtml(sources: Src[], distribution: Record<string, number>): Promise<string> {
+    process.env.CRON_SECRET = "shhh";
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+    ];
+    const { sendBatch } = await import("@/lib/email/resend");
+    (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+      list.map(() => ({ ok: true, id: "resend-id" })),
+    );
+    const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+    (getBlindspots as unknown as Mock).mockResolvedValueOnce({
+      bundles: [
+        {
+          cluster: {
+            id: "b1",
+            title_tr: "Tek taraflı haber",
+            summary_tr: "",
+            bias_distribution: {
+              pro_government: 0, gov_leaning: 0, state_media: 0, center: 0, opposition_leaning: 0,
+              opposition: 0, nationalist: 0, islamist_conservative: 0, pro_kurdish: 0, international: 0,
+              ...distribution,
+            },
+          },
+          sources,
+          dominantZone: "iktidar",
+          dominantPct: 1,
+        },
+      ],
+    });
+    const mod = await importRoute();
+    const res = await mod.GET(req("shhh"));
+    expect(res.status).toBe(200);
+    return (sendBatch as unknown as Mock).mock.calls[0]![0][0].html as string;
+  }
+
+  it("prints 'Spektrumda sadece İktidar' when a non-voting source from another zone is in the bundle", async () => {
+    const html = await sentHtml(
+      [...VOTING, { kind: "aggregator", bias: "center" }, { kind: "niche", bias: "opposition" }],
+      { pro_government: 2, gov_leaning: 1 },
+    );
+    expect(html).toContain("Spektrumda sadece İktidar");
+    expect(html).not.toContain("Sadece İktidar yazdı");
+  });
+
+  it("keeps 'Sadece İktidar yazdı' when the only non-voting source sits inside the zone", async () => {
+    const html = await sentHtml([...VOTING, { kind: "aggregator", bias: "gov_leaning" }], {
+      pro_government: 2,
+      gov_leaning: 1,
+    });
+    expect(html).toContain("Sadece İktidar yazdı");
+    expect(html).not.toContain("Spektrumda");
+  });
+
+  it("keeps 'Sadece İktidar yazdı' when the bundle has no sources at all", async () => {
+    const html = await sentHtml([], { pro_government: 3 });
+    expect(html).toContain("Sadece İktidar yazdı");
+  });
+});

@@ -84,6 +84,7 @@ import { siteUrl } from "@/lib/site-url";
 import { oembedDiscoveryHref } from "@/lib/embed/embed-snippet";
 import { balanceFromDistribution } from "@/lib/bias/balance";
 import { zoneOf } from "@/lib/bias/config";
+import { uniqueSources } from "@/lib/bias/zone-summary";
 import type { MediaDnaZone } from "@/types";
 import { isContentlessTitle } from "../../../../supabase/functions/_shared/rss/entities";
 
@@ -471,9 +472,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // votes in the spectrum), filtered to those we've hand-tagged in
   // `SOURCE_METADATA` — `<SourceChips>` no-ops for unknown slugs, so filtering
   // here just prevents empty `<li>` wrappers from bloating the markup.
-  const uniqueRatedSources = Array.from(
-    new Map(members.map((m) => [m.source.slug, m.source])).values(),
-  ).filter((s) => getSourceMetadata(s.slug) !== null);
+  const uniqueMemberSources = uniqueSources(members);
+  const uniqueRatedSources = uniqueMemberSources.filter(
+    (s) => getSourceMetadata(s.slug) !== null,
+  );
 
   // Hero image — pass the FULL list of candidate image URLs so the
   // client component can fall back in sequence when a CDN returns 404.
@@ -567,6 +569,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       isWireRedistribution: wire.isWireRedistribution,
       memberCount: wire.memberCount,
     },
+    // h57-outbound-1: one entry per source, so "sadece X yazdı" becomes
+    // "spektrumda sadece X" when a toplayıcı / niş source from another zone
+    // also carried the story (the very sources listed under "Toplayıcı / niş
+    // kaynaklar" below).
+    sources: uniqueMemberSources,
   });
 
   // Attributed cluster summary — see summary-attribution.ts. Null hides the

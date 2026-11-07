@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
 
-import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
+import type { ClusterDetail, ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
+import type { BiasCategory, SourceKind } from "@/types";
 
 // Mocked BEFORE importing the module under test so the dynamic
 // `getClusterDetailOrThrow` import inside opengraph-image.tsx resolves to this
@@ -58,6 +59,7 @@ function collectText(node: unknown, out: string[] = []): string[] {
 function mkDetail(
   overrides: Partial<ClusterDetail["cluster"]>,
   wireOverrides?: Partial<ClusterDetail["wire"]>,
+  members: ClusterDetailMember[] = [],
 ): ClusterDetail {
   const article_count = overrides.article_count ?? 4;
   return {
@@ -87,7 +89,7 @@ function mkDetail(
       is_archived: false,
       ...overrides,
     },
-    members: [],
+    members,
     allSources: [],
     wire: {
       isWireRedistribution: false,
@@ -120,6 +122,155 @@ describe("cluster opengraph-image", () => {
 
     const text = collectText(captured).join("");
     expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
+  });
+
+  // h57-outbound-1: the ribbon claimed "sadece İktidar yazdı" over a story an
+  // aggregator (Bağımsız) and a niche source (Muhalefet) also carried;
+  // /blindspots and the cluster timeline already qualify it.
+  describe("ribbon qualifier for non-voting sources from another zone (h57-outbound-1)", () => {
+    const member = (
+      slug: string,
+      kind: SourceKind | undefined,
+      bias: BiasCategory,
+      n = 1,
+    ): ClusterDetailMember => ({
+      source: {
+        id: slug,
+        name: slug,
+        slug,
+        url: `https://${slug}.example`,
+        rss_url: `https://${slug}.example/rss`,
+        bias,
+        logo_url: null,
+        active: true,
+        kind,
+        trustee_since: null,
+        trustee_note: null,
+      },
+      article: {
+        id: `${slug}-${n}`,
+        title: `${slug} başlığı ${n}`,
+        url: `https://${slug}.example/haber/${n}`,
+        published_at: "2026-07-01T10:00:00Z",
+        image_url: null,
+        content_hash: `hash-${slug}-${n}`,
+      },
+    });
+    // Shaped like cluster 0b127dc3-444a-48fb-a045-6d97086e4074: nine voting
+    // İktidar members, son-dakika (aggregator, center), isci-haber (niche,
+    // opposition) and haberler-com (aggregator, gov_leaning).
+    const voting9 = [
+      ...Array.from({ length: 5 }, (_, i) => member(`outlet-${i}`, "outlet", "pro_government")),
+      ...Array.from({ length: 3 }, (_, i) => member(`leaning-${i}`, "outlet", "gov_leaning")),
+      member("anadolu-ajansi", "wire", "pro_government"),
+    ];
+    const SON_DAKIKA = member("son-dakika", "aggregator", "center");
+    const ISCI_HABER = member("isci-haber", "niche", "opposition");
+    const HABERLER_COM = member("haberler-com", "aggregator", "gov_leaning");
+    const NINE: Partial<ClusterDetail["cluster"]> = {
+      article_count: 12,
+      bias_distribution: {
+        pro_government: 6,
+        gov_leaning: 3,
+        state_media: 0,
+        center: 0,
+        opposition_leaning: 0,
+        opposition: 0,
+        nationalist: 0,
+        islamist_conservative: 0,
+        pro_kurdish: 0,
+        international: 0,
+      },
+    };
+
+    async function ribbonText(detail: ClusterDetail): Promise<string> {
+      getClusterDetailOrThrow.mockResolvedValueOnce(detail);
+      const { default: Image } = await import("./opengraph-image");
+      await Image({ params: Promise.resolve({ id: VALID_ID }) });
+      return collectText(captured).join("");
+    }
+
+    it("prints 'KÖR NOKTA — spektrumda sadece İktidar' for the 0b127dc3-shaped fixture", async () => {
+      const text = await ribbonText(
+        mkDetail(NINE, undefined, [...voting9, SON_DAKIKA, ISCI_HABER, HABERLER_COM]),
+      );
+      expect(text).toContain("KÖR NOKTA — spektrumda sadece İktidar");
+      expect(text).not.toContain("yazdı");
+    });
+
+    it("keeps 'KÖR NOKTA — sadece İktidar yazdı' for the control (only haberler-com, inside the zone)", async () => {
+      const text = await ribbonText(mkDetail(NINE, undefined, [...voting9, HABERLER_COM]));
+      expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
+      expect(text).not.toContain("spektrumda");
+    });
+
+    it("keeps the old ribbon when the detail carries no members", async () => {
+      const text = await ribbonText(mkDetail(NINE));
+      expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
+    });
+
+    it("one non-voting outsider is enough, counted once however many articles it wrote", async () => {
+      const text = await ribbonText(
+        mkDetail(NINE, undefined, [...voting9, ISCI_HABER, member("isci-haber", "niche", "opposition", 2)]),
+      );
+      expect(text).toContain("KÖR NOKTA — spektrumda sadece İktidar");
+    });
+
+    it("qualifies the fallback zone (no blindspot_side) with its capitalised label", async () => {
+      const text = await ribbonText(
+        mkDetail(
+          {
+            blindspot_side: null,
+            article_count: 6,
+            bias_distribution: { ...NINE.bias_distribution!, pro_government: 0, gov_leaning: 0, opposition_leaning: 3, opposition: 2 },
+          },
+          undefined,
+          [member("a", "outlet", "opposition"), member("b", "outlet", "opposition_leaning"), member("c", "aggregator", "gov_leaning")],
+        ),
+      );
+      expect(text).toContain("KÖR NOKTA — spektrumda sadece Muhalefet");
+    });
+
+    it("voting members of other zones never qualify it", async () => {
+      const text = await ribbonText(
+        mkDetail(NINE, undefined, [...voting9, member("sozcu", "outlet", "opposition"), member("x", undefined, "center")]),
+      );
+      expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
+    });
+
+    it("leaves the %share ribbon alone, outsiders or not", async () => {
+      const text = await ribbonText(
+        mkDetail(
+          {
+            article_count: 5,
+            bias_distribution: { ...NINE.bias_distribution!, pro_government: 4, gov_leaning: 0, opposition: 1 },
+          },
+          undefined,
+          [ISCI_HABER, SON_DAKIKA],
+        ),
+      );
+      expect(text).toContain("KÖR NOKTA — %80 İktidar");
+      expect(text).not.toContain("spektrumda");
+    });
+
+    it("does not touch the zone tiles, the count chip or the percents", async () => {
+      const qualified = await ribbonText(
+        mkDetail(NINE, undefined, [...voting9, SON_DAKIKA, ISCI_HABER, HABERLER_COM]),
+      );
+      const plain = await ribbonText(mkDetail(NINE));
+      const strip = (t: string) =>
+        t.replace("KÖR NOKTA — spektrumda sadece İktidar", "").replace("KÖR NOKTA — sadece İktidar yazdı", "");
+      expect(strip(qualified)).toBe(strip(plain));
+      expect(qualified).toContain("%100 · 9");
+      expect(qualified).toContain("12 kaynak (9 sınıflandırılmış)");
+    });
+
+    it("prints no ribbon at all for a cluster that is not a blindspot", async () => {
+      const text = await ribbonText(
+        mkDetail({ ...NINE, is_blindspot: false, blindspot_side: null }, undefined, [...voting9, ISCI_HABER]),
+      );
+      expect(text).not.toContain("KÖR NOKTA");
+    });
   });
 
   it("omits the ribbon when the cluster is not a blindspot", async () => {

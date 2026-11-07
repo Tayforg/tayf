@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
-import type { BiasCategory, BiasDistribution } from "@/types";
+import type { ClusterDetail, ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
+import type { BiasCategory, BiasDistribution, SourceKind } from "@/types";
 import {
   EMBED_GENERIC_TITLE,
   EMBED_TITLE_MAX,
@@ -28,6 +28,7 @@ function detail(over: {
   isBlindspot?: boolean;
   blindspotSide?: BiasCategory | null;
   sourceCount?: number;
+  members?: ClusterDetailMember[];
 }): ClusterDetail {
   return {
     cluster: {
@@ -45,13 +46,55 @@ function detail(over: {
       is_archived: false,
       merged_into: null,
     },
-    members: [],
+    members: over.members ?? [],
     allSources: [],
     wire: { effectiveArticleCount: over.sourceCount ?? 4 } as ClusterDetail["wire"],
     blindspotSuppressed: false,
     blindspotRecallVetoed: false,
   };
 }
+
+function memberOf(slug: string, kind: SourceKind | undefined, bias: BiasCategory, n = 1): ClusterDetailMember {
+  return {
+    source: {
+      id: slug,
+      name: slug,
+      slug,
+      url: `https://${slug}.example`,
+      rss_url: `https://${slug}.example/rss`,
+      bias,
+      logo_url: null,
+      active: true,
+      kind,
+      trustee_since: null,
+      trustee_note: null,
+    },
+    article: {
+      id: `${slug}-${n}`,
+      title: `${slug} başlığı ${n}`,
+      url: `https://${slug}.example/haber/${n}`,
+      published_at: "2026-10-01T00:00:00Z",
+      image_url: null,
+      content_hash: `hash-${slug}-${n}`,
+    },
+  };
+}
+
+// Shaped like cluster 0b127dc3-444a-48fb-a045-6d97086e4074 (h57-outbound-1):
+// nine voting İktidar members, then son-dakika (aggregator, center: Bağımsız),
+// isci-haber (niche, opposition: Muhalefet) and haberler-com (aggregator,
+// gov_leaning: İktidar).
+const VOTING9: ClusterDetailMember[] = [
+  ...Array.from({ length: 5 }, (_, i) => memberOf(`outlet-${i}`, "outlet", "pro_government")),
+  ...Array.from({ length: 3 }, (_, i) => memberOf(`leaning-${i}`, "outlet", "gov_leaning")),
+  memberOf("anadolu-ajansi", "wire", "pro_government"),
+];
+const SON_DAKIKA = memberOf("son-dakika", "aggregator", "center");
+const ISCI_HABER = memberOf("isci-haber", "niche", "opposition");
+const HABERLER_COM = memberOf("haberler-com", "aggregator", "gov_leaning");
+const FIXTURE_MEMBERS = [...VOTING9, SON_DAKIKA, ISCI_HABER, HABERLER_COM];
+const CONTROL_MEMBERS = [...VOTING9, HABERLER_COM];
+const NINE_IKTIDAR = dist({ pro_government: 6, gov_leaning: 3 });
 
 describe("safeEmbedTitle", () => {
   it("passes an eligible title through", () => {
@@ -271,6 +314,103 @@ describe("buildEmbedModel", () => {
     it("falls back to iktidar when there is no tally at all", () => {
       const m = buildEmbedModel(detail({ isBlindspot: true, blindspotSide: null, distribution: dist() }), ORIGIN);
       expect(m.ribbon).toBe("Kör nokta: iktidar ağırlıklı");
+    });
+
+    // h57-outbound-1: the same qualifier /blindspots and the cluster timeline use.
+    describe("non-voting sources from another zone (h57-outbound-1)", () => {
+      const blindspot = (members: ClusterDetailMember[], over: Parameters<typeof detail>[0] = {}) =>
+        buildEmbedModel(
+          detail({
+            isBlindspot: true,
+            blindspotSide: "pro_government",
+            distribution: NINE_IKTIDAR,
+            sourceCount: 12,
+            members,
+            ...over,
+          }),
+          ORIGIN,
+        ).ribbon;
+
+      it("says 'spektrumda sadece iktidar' for the 0b127dc3-shaped fixture", () => {
+        expect(blindspot(FIXTURE_MEMBERS)).toBe("Kör nokta: spektrumda sadece iktidar");
+      });
+
+      it("keeps 'sadece iktidar yazdı' for the control (only haberler-com, inside the zone)", () => {
+        expect(blindspot(CONTROL_MEMBERS)).toBe("Kör nokta: sadece iktidar yazdı");
+      });
+
+      it("keeps 'sadece iktidar yazdı' when the detail carries no members", () => {
+        expect(blindspot([])).toBe("Kör nokta: sadece iktidar yazdı");
+      });
+
+      it("counts a source once however many articles it wrote, and still qualifies", () => {
+        expect(blindspot([...VOTING9, ISCI_HABER, memberOf("isci-haber", "niche", "opposition", 2)])).toBe(
+          "Kör nokta: spektrumda sadece iktidar",
+        );
+      });
+
+      it("ignores voting members of other zones (they are in the tally already)", () => {
+        expect(blindspot([...VOTING9, memberOf("sozcu", "outlet", "opposition"), memberOf("x", undefined, "center")])).toBe(
+          "Kör nokta: sadece iktidar yazdı",
+        );
+      });
+
+      it("leaves '… ağırlıklı' alone, with or without outsiders", () => {
+        const members = [...FIXTURE_MEMBERS];
+        const over = { distribution: dist({ pro_government: 9, opposition: 1 }), blindspotSide: "pro_government" as const };
+        expect(blindspot(members, over)).toBe("Kör nokta: iktidar ağırlıklı");
+        expect(blindspot([], over)).toBe("Kör nokta: iktidar ağırlıklı");
+        expect(blindspot(members, { distribution: dist({ pro_government: 250, center: 1 }) })).toBe(
+          "Kör nokta: iktidar ağırlıklı",
+        );
+      });
+
+      it("qualifies the fallback zone too when no side is recorded", () => {
+        expect(blindspot(FIXTURE_MEMBERS, { blindspotSide: null })).toBe("Kör nokta: spektrumda sadece iktidar");
+      });
+
+      it("uses the Turkish lower-case label for the other zones", () => {
+        const members = [memberOf("a", "outlet", "center"), memberOf("b", "niche", "opposition")];
+        expect(blindspot(members, { blindspotSide: "center", distribution: dist({ center: 5 }) })).toBe(
+          "Kör nokta: spektrumda sadece bağımsız",
+        );
+        const opp = [memberOf("a", "outlet", "opposition"), memberOf("b", "aggregator", "gov_leaning")];
+        expect(blindspot(opp, { blindspotSide: "opposition", distribution: dist({ opposition: 4 }) })).toBe(
+          "Kör nokta: spektrumda sadece muhalefet",
+        );
+      });
+
+      it("has no ribbon for a cluster that is not a blindspot, whatever its members", () => {
+        const m = buildEmbedModel(detail({ isBlindspot: false, members: FIXTURE_MEMBERS }), ORIGIN);
+        expect(m.ribbon).toBeNull();
+      });
+
+      it("changes nothing but the ribbon (counts, percents, total, source count, link)", () => {
+        const withMembers = buildEmbedModel(
+          detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 12, members: FIXTURE_MEMBERS }),
+          ORIGIN,
+        );
+        const without = buildEmbedModel(
+          detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 12, members: [] }),
+          ORIGIN,
+        );
+        expect({ ...withMembers, ribbon: null }).toEqual({ ...without, ribbon: null });
+        expect(withMembers.sourceCount).toBe(12);
+        expect(withMembers.total).toBe(9);
+      });
+
+      it("renders the qualified ribbon in the framed document, between the brand and the headline", () => {
+        const html = renderEmbedHtml(
+          buildEmbedModel(
+            detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 12, members: FIXTURE_MEMBERS }),
+            ORIGIN,
+          ),
+        );
+        expect(html).toContain('<div class="r">Kör nokta: spektrumda sadece iktidar</div>');
+        expect(html).not.toContain("sadece iktidar yazdı");
+        expect(html.indexOf("TAYF ·")).toBeLessThan(html.indexOf("spektrumda"));
+        expect(html.indexOf("spektrumda")).toBeLessThan(html.indexOf("<h1"));
+      });
     });
   });
 });

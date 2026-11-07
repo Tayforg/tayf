@@ -41,6 +41,14 @@ describe("fmtKat (h51-morphology-2: the ratio as a bare number, for '... katı')
     expect(fmtKat(1234.5)).toBe("1.234,5");
   });
 
+  // h57-ekonomi-1: pins the double-rounding hazard. Fed the true 1.84875 it
+  // reads "1,8"; fed the 2-dp rounded 1.85 it reads "1,9". The input must be
+  // the unrounded ratio (readQuoteStats divides the volumes itself).
+  it("rounds once: 1.84875 -> '1,8' but an already 2-dp-rounded 1.85 -> '1,9'", () => {
+    expect(fmtKat(1.84875)).toBe("1,8");
+    expect(fmtKat(1.85)).toBe("1,9");
+  });
+
   it("leaves the compact chip form fmtX as it was ('hacim 1,9x' has no genitive)", () => {
     expect(fmtX(1.94)).toBe("1,9x");
     expect(fmtX(12)).toBe("12,0x");

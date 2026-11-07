@@ -705,3 +705,239 @@ describe("GET /cluster/[id]/kart", () => {
     expect(res.status).toBe(200);
   });
 });
+
+// h57-outbound-1: "Bağımsız — bu tarafta haber yok" was printed over a story an
+// aggregator (son-dakika, Bağımsız) carried, and "Muhalefet — bu tarafta haber
+// yok" sat above the card's own footer naming a niche Muhalefet source. A zone
+// with no voting member but a non-voting one of that zone says what is true.
+describe("GET /cluster/[id]/kart non-voting sources in a silent zone (h57-outbound-1)", () => {
+  const QUALIFIED_SILENCE = "— spektruma sayılan kaynaklardan haber yok";
+  const PLAIN_SILENCE = "— bu tarafta haber yok";
+
+  const SON_DAKIKA = mkSource({ id: "son-dakika", name: "Son Dakika", bias: "center", kind: "aggregator" });
+  const ISCI_HABER = mkSource({ id: "isci-haber", name: "İşçi Haber", bias: "opposition", kind: "niche" });
+  const HABERLER_COM = mkSource({ id: "haberler-com", name: "Haberler.com", bias: "gov_leaning", kind: "aggregator" });
+
+  const countOf = (text: string, needle: string) => text.split(needle).length - 1;
+
+  beforeEach(() => {
+    captured = null;
+    capturedOptions = null;
+    vi.resetModules();
+    getClusterDetailOrThrow.mockReset();
+    getZoneFeedHealth.mockReset();
+    getZoneFeedHealth.mockResolvedValue(null);
+  });
+
+  it("prints the qualified line for both zones the 0b127dc3-shaped fixture leaves to non-voting sources", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([
+        mkMember("a1", GOV, GOV_TITLE),
+        mkMember("n1", SON_DAKIKA, "Son dakika başlığı"),
+        mkMember("n2", ISCI_HABER, "İşçi haber başlığı"),
+        mkMember("n3", HABERLER_COM, "Haberler toplayıcı başlığı"),
+      ]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(countOf(text, QUALIFIED_SILENCE)).toBe(2);
+    expect(text).not.toContain(PLAIN_SILENCE);
+    // The footer and every non-voting title are as before.
+    expect(text).toContain("+3 toplayıcı / niş kaynak spektruma sayılmaz");
+    for (const title of ["Son dakika başlığı", "İşçi haber başlığı", "Haberler toplayıcı başlığı"]) {
+      expect(text).not.toContain(title);
+    }
+  });
+
+  it("keeps '— bu tarafta haber yok' for a zone with no member of any kind", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, GOV_TITLE), mkMember("n2", ISCI_HABER, "İşçi haber başlığı")]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    // Muhalefet has the niche source, Bağımsız has nobody at all.
+    expect(countOf(text, QUALIFIED_SILENCE)).toBe(1);
+    expect(countOf(text, PLAIN_SILENCE)).toBe(1);
+    const bagimsizAt = text.indexOf("Bağımsız");
+    const muhalefetAt = text.indexOf("Muhalefet");
+    expect(text.indexOf(PLAIN_SILENCE)).toBeGreaterThan(bagimsizAt);
+    expect(text.indexOf(PLAIN_SILENCE)).toBeLessThan(muhalefetAt);
+    expect(text.indexOf(QUALIFIED_SILENCE)).toBeGreaterThan(muhalefetAt);
+  });
+
+  it("changes nothing for a cluster without non-voting sources (byte-identical silent line)", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail([mkMember("a1", GOV, GOV_TITLE)]));
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(countOf(text, PLAIN_SILENCE)).toBe(2);
+    expect(text).not.toContain("spektruma sayılan kaynaklardan haber yok");
+    expect(text).not.toContain("toplayıcı / niş kaynak");
+  });
+
+  it("does not use the qualified line for a non-voting source in a zone that has a voting member", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([
+        mkMember("a1", GOV, GOV_TITLE),
+        mkMember("a2", CENTER, CENTER_TITLE),
+        mkMember("n1", SON_DAKIKA, "Son dakika başlığı"),
+      ]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain(CENTER_TITLE);
+    // Only Muhalefet is silent, and nobody of any kind wrote there.
+    expect(countOf(text, PLAIN_SILENCE)).toBe(1);
+    expect(text).not.toContain(QUALIFIED_SILENCE);
+  });
+
+  it("keeps the degraded-feed caveat under the qualified line", async () => {
+    getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: { degraded: true } }));
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, GOV_TITLE), mkMember("n2", ISCI_HABER, "İşçi haber başlığı")]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain(QUALIFIED_SILENCE);
+    expect(countOf(text, "bazı kaynaklara ulaşılamıyor")).toBe(1);
+  });
+
+  it("keeps the PII line for a zone whose voting members were all filtered (not silent at all)", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([
+        mkMember("a1", GOV, GOV_TITLE),
+        mkMember("a2", CENTER, "17 yaşındaki çocuk kayboldu"),
+        mkMember("n1", SON_DAKIKA, "Son dakika başlığı"),
+      ]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("1 kaynak yazdı · başlık paylaşıma uygun değil");
+    expect(text).not.toContain(QUALIFIED_SILENCE);
+  });
+
+  it("does not change the counters, the share bar or the denominator", async () => {
+    getZoneFeedHealth.mockResolvedValue(mkHealth({ iktidar: { votingDelivering: 5 } }));
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, GOV_TITLE), mkMember("n2", ISCI_HABER, "İşçi haber başlığı")]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("1 / 5 kaynak");
+    expect(text).toContain("0 / 8 kaynak");
+    expect(text).not.toContain("1 / 8");
+  });
+});
+
+// h57-outbound-2: the card is the image readers download and post, so a column
+// that is the only thing a zone has is labelled the way the cluster page's
+// summary already labels it ('<Outlet> · köşe yazısı'); a zone with news never
+// shows the column at all.
+describe("GET /cluster/[id]/kart opinion columns (h57-outbound-2)", () => {
+  const HURRIYET = mkSource({ id: "hurriyet", name: "Hürriyet", bias: "pro_government" });
+  const TAKVIM = mkSource({ id: "takvim", name: "Takvim", bias: "pro_government" });
+  const COLUMN_TITLE = "Emir Sarıgül’den Özgür Özel’i yalanlayan etkin pişmanlık ifadesi";
+  const NEWS_TITLE = "Emir Sarıgül 3'üncü kez ifade verdi!";
+
+  const column = (): ClusterDetailMember => ({
+    ...mkMember("h1", HURRIYET, COLUMN_TITLE, "2026-11-07T03:04:00Z"),
+    article: {
+      ...mkMember("h1", HURRIYET, COLUMN_TITLE, "2026-11-07T03:04:00Z").article,
+      url: "https://www.hurriyet.com.tr/yazarlar/nedim-sener/emir-sarigul-43000001",
+    },
+  });
+  const news = (): ClusterDetailMember => ({
+    ...mkMember("t1", TAKVIM, NEWS_TITLE, "2026-11-07T04:00:00Z"),
+    article: {
+      ...mkMember("t1", TAKVIM, NEWS_TITLE, "2026-11-07T04:00:00Z").article,
+      url: "https://www.takvim.com.tr/guncel/2026/11/07/emir-sarigul-ifade-verdi",
+    },
+  });
+
+  beforeEach(() => {
+    captured = null;
+    capturedOptions = null;
+    vi.resetModules();
+    getClusterDetailOrThrow.mockReset();
+    getZoneFeedHealth.mockReset();
+    getZoneFeedHealth.mockResolvedValue(null);
+  });
+
+  it("renders 'Hürriyet · köşe yazısı' for a zone whose only member is a column", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail([column()]));
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("Hürriyet · köşe yazısı");
+    expect(text).toContain(COLUMN_TITLE);
+    // The outlet line is ONE text node (Satori renders fragments as separate runs).
+    expect(collectText(captured)).toContain("Hürriyet · köşe yazısı");
+  });
+
+  it("renders the plain outlet name for a news headline, never the column cue", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail([news()]));
+
+    await callGET(ID);
+
+    const texts = collectText(captured);
+    expect(texts).toContain("Takvim");
+    expect(texts.join(" ")).not.toContain("köşe yazısı");
+    expect(texts.join(" ")).toContain(NEWS_TITLE);
+  });
+
+  it("prints Takvim's news and no column cue when the zone has both (442e0395)", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail([column(), news()]));
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("Takvim");
+    expect(text).toContain(NEWS_TITLE);
+    expect(text).not.toContain(COLUMN_TITLE);
+    expect(text).not.toContain("Hürriyet");
+    expect(text).not.toContain("köşe yazısı");
+    // The count still includes the column.
+    expect(text).toContain("2 kaynak");
+  });
+
+  it("marks only the zone that fell back to a column", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([column(), mkMember("o1", OPP, OPP_TITLE)]),
+    );
+
+    await callGET(ID);
+
+    const texts = collectText(captured);
+    expect(texts.filter((t) => t.includes("köşe yazısı"))).toEqual(["Hürriyet · köşe yazısı"]);
+    expect(texts).toContain("Muhalif Gazete");
+  });
+
+  it("keeps the PII gate: a PII-filtered column is never printed, with or without the cue", async () => {
+    const filtered: ClusterDetailMember = {
+      ...column(),
+      article: { ...column().article, title: "17 yaşındaki çocuk kayboldu" },
+    };
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail([filtered]));
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).not.toContain("17 yaşındaki çocuk kayboldu");
+    expect(text).not.toContain("köşe yazısı");
+    expect(text).toContain("1 kaynak yazdı · başlık paylaşıma uygun değil");
+  });
+});

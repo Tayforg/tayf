@@ -25,7 +25,11 @@ export function fmtPct(n: number): string {
   return signedPercentTr(n, 2);
 }
 
-/** Ratio like relative volume, compact chip form: 2.4 -> "2,4x". */
+/**
+ * Ratio like relative volume, compact chip form: 2.4 -> "2,4x". The input must
+ * be the unrounded ratio (readQuoteStats divides the volumes itself); feeding
+ * an already 2-dp-rounded value rounds twice (1.84875 -> 1.85 -> "1,9").
+ */
 export function fmtX(n: number): string {
   return `${X.format(n)}x`;
 }
@@ -34,6 +38,7 @@ export function fmtX(n: number): string {
  * The same ratio as a bare number for "... katı": 1.94 -> "1,9". Where the
  * ratio follows a genitive the head noun "katı" must be written out; "1,9x"
  * cannot stand in for it. The full phrase lives in rvolPhrase (session.ts).
+ * Like fmtX, the input must be the unrounded ratio.
  */
 export function fmtKat(n: number): string {
   return X.format(n);

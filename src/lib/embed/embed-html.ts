@@ -1,5 +1,11 @@
 import { tallyZones, zoneOf } from "@/lib/bias/config";
-import { isOnlyZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import {
+  nonVotingOutsideZone,
+  onlyZoneClaim,
+  uniqueSources,
+  zoneCountsOf,
+  zonePercents,
+} from "@/lib/bias/zone-summary";
 import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
@@ -100,19 +106,29 @@ export function safeEmbedTitle(raw: string, fallback: string): string {
   return `${points.slice(0, EMBED_TITLE_MAX - 1).join("").trimEnd()}…`;
 }
 
-function ribbonOf(cluster: ClusterDetail["cluster"]): string | null {
+function ribbonOf(detail: ClusterDetail): string | null {
+  const { cluster, members } = detail;
   if (!cluster.is_blindspot) return null;
   // Same rule as buildShareText / the OG card: no recorded side falls back to
   // the tallied dominant zone, and "sadece" only holds when the other two
   // zones have no source at all (decided on the counts, not on a rounded 100;
-  // the DB flag fires from 80%).
+  // the DB flag fires from 80%). h57-outbound-1: when a toplayıcı / niş source
+  // from another zone also carried the story, "yazdı" would be false, so the
+  // ribbon says "spektrumda sadece X", as /blindspots does.
   const tally = tallyZones(cluster.bias_distribution);
   const zone: MediaDnaZone = cluster.blindspot_side
     ? zoneOf(cluster.blindspot_side)
     : (tally.dominantZone ?? "iktidar");
-  return isOnlyZone(zoneCountsOf(cluster.bias_distribution), zone)
+  const claim = onlyZoneClaim(
+    zoneCountsOf(cluster.bias_distribution),
+    zone,
+    nonVotingOutsideZone(uniqueSources(members), zone),
+  );
+  return claim === "only"
     ? `Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
-    : `Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
+    : claim === "spectrumOnly"
+      ? `Kör nokta: spektrumda sadece ${ZONE_LABEL_LOWER[zone]}`
+      : `Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
 }
 
 export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedModel {
@@ -125,7 +141,7 @@ export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedMod
     percents: zonePercents(counts),
     total: counts.iktidar + counts.bagimsiz + counts.muhalefet,
     sourceCount: wire.effectiveArticleCount,
-    ribbon: ribbonOf(cluster),
+    ribbon: ribbonOf(detail),
     href: `${base}/cluster/${cluster.id}?utm_source=embed&utm_medium=iframe&utm_campaign=cluster`,
   };
 }

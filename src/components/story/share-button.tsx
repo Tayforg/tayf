@@ -136,6 +136,15 @@ export function ManualCopyBox({ label, value }: { label: string; value: string }
   );
 }
 
+// The text every outbound share carries: the headline, then the statistics
+// line when there is one. The channel chips and the primary "Paylaş" button
+// (native sheet and clipboard copy) all use it, so a recipient who gets no
+// link preview (SMS, e-mail, plain text) still reads the story and not just
+// the numbers (h57-outbound-3).
+function shareBody(title: string, text?: string): string {
+  return text ? `${title}\n${text}` : title;
+}
+
 // What one click on "Paylaş" amounted to. `shared` and `aborted` change no
 // UI state (the label stays "Paylaş"); `copied` / `failed` drive the existing
 // "Kopyalandı" / "Kopyalanamadı" feedback.
@@ -170,14 +179,17 @@ export async function shareStory({
     typeof navigator !== "undefined" && typeof navigator.share === "function"
       ? (d: ShareData) => navigator.share(d)
       : undefined;
-  const outcome = await runNativeShare(shareFn, text ? { title, text, url } : { title, url });
+  // With no statistics line the payload stays {title, url} and the clipboard
+  // gets the bare link; with one, the text is the headline plus that line.
+  const body = text ? shareBody(title, text) : undefined;
+  const outcome = await runNativeShare(shareFn, body ? { title, text: body, url } : { title, url });
   if (outcome === "shared") {
     track("share", { clusterId, kind: "native" });
     return { kind: "shared" };
   }
   if (outcome === "aborted") return { kind: "aborted" };
   track("share", { clusterId, kind: "clipboard" });
-  const r = await resolveShareCopy(url, text);
+  const r = await resolveShareCopy(url, body);
   return r.ok ? { kind: "copied" } : { kind: "failed", manual: r.manual };
 }
 
@@ -186,8 +198,9 @@ interface ShareButtonProps {
   title: string;
   // Optional bias-argument line from `buildShareText` (src/lib/clusters/
   // share.ts) — e.g. "12 kaynak · %70 iktidar · ...". When present it
-  // rides along with both the native share sheet and the clipboard
-  // fallback so the story argues itself before the recipient clicks.
+  // rides along (after the headline, as `${title}\n${text}`) with the native
+  // share sheet, the clipboard fallback and the channel chips alike, so the
+  // story argues itself before the recipient clicks.
   text?: string;
   // Href of the "Kartı indir" link. Undefined keeps the default
   // `/cluster/<id>/kart`; null renders no link at all (the cluster page passes
@@ -250,7 +263,7 @@ export function ShareButton({
   const [iframeManual, setIframeManual] = useState<string | null>(null);
   const canEmbed = buildEmbedSnippet(siteUrl(), clusterId) !== null;
   const canEmbedIframe = buildIframeSnippet(siteUrl(), clusterId) !== null;
-  const body = text ? `${title}\n${text}` : title;
+  const body = shareBody(title, text);
   const cardLink = cardHref === undefined ? `/cluster/${clusterId}/kart` : cardHref;
 
   async function handleShare() {

@@ -4,6 +4,8 @@ import {
   dominantZonePercent,
   isOnlyZone,
   nonVotingOutsideZone,
+  onlyZoneClaim,
+  uniqueSources,
   zoneCountsOf,
   zonePercents,
 } from "./zone-summary";
@@ -290,5 +292,123 @@ describe("nonVotingOutsideZone", () => {
     }));
     expect(nonVotingOutsideZone(big, "iktidar")).toBe(5_000);
     expect(nonVotingOutsideZone(big, "muhalefet")).toBe(0);
+  });
+});
+
+// h57-outbound-1: the OG ribbon, the share text, the embed, the Manşet Kartı and
+// the digest decided "sadece X yazdı" on the voting counts alone, while
+// /blindspots and the cluster timeline already qualified it when a toplayıcı /
+// niş source from another zone carried the story. onlyZoneClaim is the one
+// decision all of them now read.
+describe("onlyZoneClaim (h57-outbound-1)", () => {
+  type Src = { kind?: SourceKind | null; bias: BiasCategory };
+
+  // Shaped like cluster 0b127dc3-444a-48fb-a045-6d97086e4074: nine voting
+  // İktidar members (outlets and the wire), plus son-dakika (aggregator,
+  // center: Bağımsız), isci-haber (niche, opposition: Muhalefet) and
+  // haberler-com (aggregator, gov_leaning: İktidar).
+  const voting9: Src[] = [
+    ...Array.from({ length: 5 }, (): Src => ({ kind: "outlet", bias: "pro_government" })),
+    ...Array.from({ length: 3 }, (): Src => ({ kind: "outlet", bias: "gov_leaning" })),
+    { kind: "wire", bias: "pro_government" },
+  ];
+  const cluster0b127: Src[] = [
+    ...voting9,
+    { kind: "aggregator", bias: "center" },
+    { kind: "niche", bias: "opposition" },
+    { kind: "aggregator", bias: "gov_leaning" },
+  ];
+  // The control keeps only haberler-com, which sits inside the İktidar zone.
+  const control: Src[] = [...voting9, { kind: "aggregator", bias: "gov_leaning" }];
+
+  const onlyIktidar = { iktidar: 9, bagimsiz: 0, muhalefet: 0 };
+
+  it("the 0b127dc3-shaped fixture has 2 outsiders for iktidar, the control 0", () => {
+    expect(nonVotingOutsideZone(cluster0b127, "iktidar")).toBe(2);
+    expect(nonVotingOutsideZone(control, "iktidar")).toBe(0);
+  });
+
+  it("is 'spectrumOnly' when the zone is the only voting zone and an outsider carried the story", () => {
+    const outside = nonVotingOutsideZone(cluster0b127, "iktidar");
+    expect(onlyZoneClaim(onlyIktidar, "iktidar", outside)).toBe("spectrumOnly");
+    expect(onlyZoneClaim(onlyIktidar, "iktidar", 1)).toBe("spectrumOnly");
+  });
+
+  it("is 'only' when the zone is the only voting zone and nobody else carried it (the control)", () => {
+    const outside = nonVotingOutsideZone(control, "iktidar");
+    expect(onlyZoneClaim(onlyIktidar, "iktidar", outside)).toBe("only");
+    expect(onlyZoneClaim(onlyIktidar, "iktidar", 0)).toBe("only");
+  });
+
+  it("is 'weighted' whenever isOnlyZone is false, whatever the outsider count", () => {
+    for (const outside of [0, 1, 5]) {
+      // 250/1/0 rounds to 100 but another zone has a voting source.
+      expect(onlyZoneClaim({ iktidar: 250, bagimsiz: 1, muhalefet: 0 }, "iktidar", outside)).toBe("weighted");
+      // The zone named has no source while another does.
+      expect(onlyZoneClaim(onlyIktidar, "muhalefet", outside)).toBe("weighted");
+      // Two other zones split.
+      expect(onlyZoneClaim({ iktidar: 3, bagimsiz: 0, muhalefet: 2 }, "iktidar", outside)).toBe("weighted");
+      // Nobody voted.
+      expect(onlyZoneClaim({ iktidar: 0, bagimsiz: 0, muhalefet: 0 }, "iktidar", outside)).toBe("weighted");
+    }
+  });
+
+  it("agrees with isOnlyZone on every table row (only/spectrumOnly iff isOnlyZone)", () => {
+    const table: Array<Record<MediaDnaZone, number>> = [
+      { iktidar: 5, bagimsiz: 0, muhalefet: 0 },
+      { iktidar: 0, bagimsiz: 1, muhalefet: 0 },
+      { iktidar: 0, bagimsiz: 0, muhalefet: 2 },
+      { iktidar: 250, bagimsiz: 1, muhalefet: 0 },
+      { iktidar: 3, bagimsiz: 0, muhalefet: 2 },
+      { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+    ];
+    for (const counts of table) {
+      for (const zone of ZONES) {
+        for (const outside of [0, 2]) {
+          expect(onlyZoneClaim(counts, zone, outside) !== "weighted").toBe(isOnlyZone(counts, zone));
+        }
+      }
+    }
+  });
+
+  it("is a pure function of its arguments: it never reads or changes the counts", () => {
+    const counts = { ...onlyIktidar };
+    onlyZoneClaim(counts, "iktidar", 2);
+    expect(counts).toEqual(onlyIktidar);
+  });
+});
+
+describe("uniqueSources (h57-outbound-1)", () => {
+  const mk = (slug: string, bias: BiasCategory = "center") => ({ slug, bias });
+
+  it("keeps one source per slug, first occurrence first", () => {
+    const a = mk("a");
+    const b = mk("b");
+    const out = uniqueSources([{ source: a }, { source: b }, { source: mk("a") }, { source: b }]);
+    expect(out).toEqual([a, b]);
+    expect(out[0]).toBe(a);
+  });
+
+  it("is empty for no members", () => {
+    expect(uniqueSources([])).toEqual([]);
+  });
+
+  it("does not collapse distinct slugs that merely share a bias", () => {
+    expect(uniqueSources([{ source: mk("a") }, { source: mk("b") }])).toHaveLength(2);
+  });
+
+  it("does not mutate its input", () => {
+    const input = [{ source: mk("a") }, { source: mk("a") }];
+    const before = JSON.stringify(input);
+    uniqueSources(input);
+    expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it("counts one outlet that wrote several articles once, so nonVotingOutsideZone does not double count", () => {
+    const sourceOf = (slug: string, kind: SourceKind, bias: BiasCategory) => ({ slug, kind, bias });
+    const niche = sourceOf("isci-haber", "niche", "opposition");
+    const members = [{ source: niche }, { source: niche }, { source: sourceOf("a", "outlet", "pro_government") }];
+    expect(nonVotingOutsideZone(members.map((m) => m.source), "iktidar")).toBe(2);
+    expect(nonVotingOutsideZone(uniqueSources(members), "iktidar")).toBe(1);
   });
 });

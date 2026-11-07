@@ -551,6 +551,13 @@ describe("rvolPhrase (h51-morphology-2: the genitive 'ortalamanın' must be foll
     }
   });
 
+  // h57-ekonomi-1: documents the contract. The header rounds once, at display,
+  // so it must be fed the unrounded ratio (GARAN: 43896321 / 23743772.6).
+  it("rounds an unrounded ratio once: 1.84875 reads '1,8 katı', not the double-rounded '1,9'", () => {
+    expect(rvolPhrase({ rvol: 1.84875, dayLabel: "06.11" })).toContain("1,8 katı");
+    expect(rvolPhrase({ rvol: 1.84875, dayLabel: "06.11" })).not.toContain("1,9");
+  });
+
   it("takes the output of rvolLabel as is", () => {
     const label = rvolLabel(stat(), "2026-11-02");
     expect(label).not.toBeNull();
@@ -574,5 +581,9 @@ describe("rvolParts (the pieces the header colours separately)", () => {
       day: "05.11 seansı",
     });
     expect(rvolParts({ rvol: 1.9, dayLabel: null }).day).toBeNull();
+  });
+
+  it("h57-ekonomi-1: the ratio of an unrounded 1.84875 is '1,8 katı'", () => {
+    expect(rvolParts({ rvol: 1.84875, dayLabel: null }).ratio).toBe("1,8 katı");
   });
 });
