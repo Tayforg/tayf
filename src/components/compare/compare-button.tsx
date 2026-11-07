@@ -50,13 +50,27 @@ interface CompareButtonViewProps {
 //    node because type and position are unchanged -- so focus stays on the
 //    button instead of falling back to <body> when a keyboard or screen-reader
 //    user activates "Karşılaştır" / "Vazgeç" / "Temizle".
-//  - ONE role="status" live region, mounted in every state (a region inserted
+//  - ONE live region (role=status), mounted in every state (a region inserted
 //    together with its text is usually not announced). Its text and whether it
 //    is visible come from compareHint(): a visible hint while the reader is
 //    building a pair (including the warning that a third pick evicts the
 //    first), screen-reader-only confirmations otherwise; when there is nothing
 //    to say it is present but empty.
-// Slots are fixed by position: [compare link | null] [status] [button].
+// Slots are fixed by position: [compare link | null] [button] [status].
+//
+// The button comes BEFORE the live region (h60-mobile-1). The visible hint
+// used to sit in front of the button in the same wrapping flex span, so on a
+// phone tapping "Karşılaştır" (and, after hydration, opening a second story)
+// wrapped the button ~41 px down and pushed the bias spectrum off the first
+// screen. Now, on phones only, the wrapper dissolves (max-sm:contents) and its
+// children become flex items of the cluster page's actions row; the visible
+// hint takes a full-width line at the end of that row (max-sm:order-last +
+// max-sm:basis-full), so the tapped control and "Düzeltme talebi" keep their
+// place. From sm up the wrapper is still the same inline-flex row (the hint
+// just sits to the right of the control instead of the left, as the slot order
+// is fixed). Both class strings must stay plain string literals so Tailwind 4's
+// source scan generates them; the guard in
+// tests/guards/cluster-actions-reflow.test.ts pins them and the slot order.
 //
 // Hook-free (the tray and notice come in as props) so every state can be
 // rendered without a browser; CompareButton below wires the real hook.
@@ -78,21 +92,13 @@ export function CompareButtonView({
   const hint = compareHint({ tray, id, notice });
 
   return (
-    <span className="inline-flex flex-wrap items-center gap-2">
+    <span className="inline-flex flex-wrap items-center gap-2 max-sm:contents">
       {href ? (
         <Link href={href} className={`${CHIP} ${CHIP_TARGET}`}>
           <Columns2 className="h-3 w-3" aria-hidden="true" />
           <span>Karşılaştır (2) →</span>
         </Link>
       ) : null}
-      <span
-        role="status"
-        aria-live="polite"
-        // A screen-reader-only region takes no flex gap when empty.
-        className={hint.srOnly ? "sr-only" : "text-[11px] text-muted-foreground"}
-      >
-        {hint.text}
-      </span>
       {inTray ? (
         <button
           type="button"
@@ -111,6 +117,19 @@ export function CompareButtonView({
           <span>Karşılaştır</span>
         </button>
       )}
+      <span
+        role="status"
+        aria-live="polite"
+        // A screen-reader-only region takes no flex gap when empty. The visible
+        // hint sits after the button and, on phones, on its own last line.
+        className={
+          hint.srOnly
+            ? "sr-only"
+            : "text-[11px] text-muted-foreground max-sm:order-last max-sm:basis-full"
+        }
+      >
+        {hint.text}
+      </span>
     </span>
   );
 }

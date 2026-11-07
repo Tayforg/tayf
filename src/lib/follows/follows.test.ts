@@ -31,6 +31,7 @@ import {
   isFollowTopicSlug,
   KEYWORD_MAX,
   KEYWORD_MIN,
+  keywordRejectReason,
   markSeen,
   MAX_FOLLOWS,
   normalizeFollowValue,
@@ -46,6 +47,7 @@ import {
   type FollowItem,
 } from "./follows";
 import { TOPIC_LABELS_TR, TOPIC_SLUGS } from "@/lib/clusters/topic-query";
+import { MAX_SEARCH_QUERY_LENGTH } from "@/lib/clusters/turkish-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
@@ -67,8 +69,15 @@ describe("constants", () => {
     expect(FOLLOWS_CHANGE_EVENT).toBe("tayf:follows-change");
     expect(MAX_FOLLOWS).toBe(20);
     expect(KEYWORD_MIN).toBe(2);
-    expect(KEYWORD_MAX).toBe(40);
     expect(RAW_MAX).toBe(200);
+  });
+
+  // follows.ts may not import turkish-query (client-bundle whitelist), so the
+  // two numbers are tied together here instead. A follow longer than the
+  // archive's own cut would silently search something else; a follow shorter
+  // than it hides "Takip et" for searches the archive really runs (h60-forms-3).
+  it("offers a follow for every search the archive actually runs (KEYWORD_MAX === MAX_SEARCH_QUERY_LENGTH)", () => {
+    expect(KEYWORD_MAX).toBe(MAX_SEARCH_QUERY_LENGTH);
   });
 
   it("mirrors topic-query's slugs and labels exactly (parity guard)", () => {
@@ -95,13 +104,23 @@ describe("normalizeKeyword", () => {
     expect(out).toBe("ücret".normalize("NFC"));
   });
 
-  it("counts code points, not UTF-16 units, against the 2..40 window", () => {
+  it("counts code points, not UTF-16 units, against the 2..KEYWORD_MAX window", () => {
     expect(normalizeKeyword("ab")).toBe("ab");
     expect(normalizeKeyword("🙂🙂")).toBe("🙂🙂"); // 2 code points, 4 units
     expect(normalizeKeyword("🙂")).toBeNull(); // 1 code point
-    expect(normalizeKeyword("a".repeat(40))).toBe("a".repeat(40));
-    expect(normalizeKeyword("🙂".repeat(40))).toBe("🙂".repeat(40));
-    expect(normalizeKeyword("🙂".repeat(41))).toBeNull();
+    expect(normalizeKeyword("a".repeat(KEYWORD_MAX))).toBe("a".repeat(KEYWORD_MAX));
+    expect(normalizeKeyword("🙂".repeat(KEYWORD_MAX))).toBe("🙂".repeat(KEYWORD_MAX));
+    expect(normalizeKeyword("🙂".repeat(KEYWORD_MAX + 1))).toBeNull();
+  });
+
+  it("accepts a 41..64 character search and rejects 65 (h60-forms-3)", () => {
+    const real = "Cumhurbaşkanı Erdoğan Azerbaycan'a gidecek";
+    expect([...real]).toHaveLength(42);
+    // tr-lower-cased: the capital C and E fold, "I"-less so no dotless-i trap.
+    expect(normalizeKeyword(real)).toBe("cumhurbaşkanı erdoğan azerbaycan'a gidecek");
+    expect(normalizeKeyword("a".repeat(41))).toBe("a".repeat(41));
+    expect(normalizeKeyword("a".repeat(64))).toBe("a".repeat(64));
+    expect(normalizeKeyword("a".repeat(65))).toBeNull();
   });
 
   it("rejects too short, too long, control characters and over-long raw input", () => {
@@ -109,7 +128,7 @@ describe("normalizeKeyword", () => {
     expect(normalizeKeyword("  a  ")).toBeNull();
     expect(normalizeKeyword("")).toBeNull();
     expect(normalizeKeyword("   ")).toBeNull();
-    expect(normalizeKeyword("a".repeat(41))).toBeNull();
+    expect(normalizeKeyword("a".repeat(KEYWORD_MAX + 1))).toBeNull();
     expect(normalizeKeyword("\u0000ab")).toBeNull();
     expect(normalizeKeyword("ab\u007f")).toBeNull();
     expect(normalizeKeyword("a".repeat(201))).toBeNull();
@@ -141,6 +160,53 @@ describe("normalizeKeyword", () => {
       expect(once).not.toBeNull();
       expect(normalizeKeyword(once)).toBe(once);
     }
+  });
+});
+
+describe("keywordRejectReason", () => {
+  it("is null exactly when normalizeKeyword accepts the input", () => {
+    for (const raw of [
+      "seçim",
+      "  İMAMOĞLU  ",
+      "ab",
+      "a".repeat(KEYWORD_MAX),
+      "🙂🙂",
+      "cumhurbaşkanı erdoğan azerbaycan'a gidecek",
+    ]) {
+      expect(normalizeKeyword(raw)).not.toBeNull();
+      expect(keywordRejectReason(raw)).toBeNull();
+    }
+  });
+
+  it("says 'too-long' above KEYWORD_MAX and for raw input over RAW_MAX", () => {
+    expect(keywordRejectReason("a".repeat(KEYWORD_MAX + 1))).toBe("too-long");
+    expect(keywordRejectReason("🙂".repeat(KEYWORD_MAX + 1))).toBe("too-long");
+    expect(keywordRejectReason("a".repeat(RAW_MAX + 1))).toBe("too-long");
+    // Padding that collapses away is not length: 200 raw chars, 2 kept.
+    expect(keywordRejectReason(`ab${" ".repeat(RAW_MAX - 2)}`)).toBeNull();
+  });
+
+  it("says 'too-short' below KEYWORD_MIN, including whitespace-only and empty input", () => {
+    expect(keywordRejectReason("a")).toBe("too-short");
+    expect(keywordRejectReason("  a  ")).toBe("too-short");
+    expect(keywordRejectReason("🙂")).toBe("too-short");
+    expect(keywordRejectReason("")).toBe("too-short");
+    expect(keywordRejectReason("   ")).toBe("too-short");
+  });
+
+  it("says 'invalid' for control characters, lone surrogates and non-strings", () => {
+    expect(keywordRejectReason("\u0000ab")).toBe("invalid");
+    expect(keywordRejectReason("ab\u007f")).toBe("invalid");
+    expect(keywordRejectReason("ab\ud800")).toBe("invalid");
+    expect(keywordRejectReason(123)).toBe("invalid");
+    expect(keywordRejectReason(null)).toBe("invalid");
+    expect(keywordRejectReason(undefined)).toBe("invalid");
+    expect(keywordRejectReason({})).toBe("invalid");
+  });
+
+  it("checks forbidden characters before length, like normalizeKeyword", () => {
+    // NUL is not whitespace, so it survives the collapse and is judged first.
+    expect(keywordRejectReason(`\u0000${"a".repeat(KEYWORD_MAX + 1)}`)).toBe("invalid");
   });
 });
 

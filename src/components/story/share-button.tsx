@@ -5,6 +5,7 @@ import { Share2, Check, ChevronDown } from "lucide-react";
 import { track } from "@/lib/track";
 import { buildChannelShareHref, buildShareUrl, SHARE_LINK_CHANNELS } from "@/lib/clusters/share";
 import { siteUrl } from "@/lib/site-url";
+import { NEW_TAB_NOTICE } from "@/components/ui/new-tab-hint";
 import { buildEmbedSnippet } from "@/lib/cards/badge-embed";
 import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
 import { runNativeShare } from "@/lib/share/native-share";
@@ -374,7 +375,7 @@ export function ShareButton({
                 href={buildChannelShareHref(channel, buildShareUrl(siteUrl(), clusterId, channel), body)}
                 target="_blank"
                 rel="noopener noreferrer"
-                aria-label={`${label} ile paylaş`}
+                aria-label={`${label} ile paylaş (${NEW_TAB_NOTICE})`}
                 onClick={() => trackChannelShare(clusterId, channel)}
                 className={CHIP_CLASS}
               >

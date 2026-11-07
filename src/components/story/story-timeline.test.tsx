@@ -224,6 +224,23 @@ describe("StoryTimeline — 'Tüm sıra' list", () => {
     });
   });
 
+  // h60-newtab-1 (WCAG G201): every row opens the article in a new tab, so its
+  // accessible name ends with the notice (voting or not). The row's visible
+  // text is unchanged: the hint is an sr-only span after the title.
+  it("ends every outbound row's accessible name with the sr-only new-tab notice", () => {
+    const rows = fullListRows(render(WITH_NON_VOTING));
+    expect(rows).toHaveLength(WITH_NON_VOTING.points.length);
+    rows.forEach((row, i) => {
+      const anchor = row.slice(row.indexOf("<a "), row.indexOf("</a>") + "</a>".length);
+      expect(anchor, `row ${i}`).toContain('target="_blank"');
+      expect(anchor, `row ${i}`).toContain('<span class="sr-only"> (yeni sekmede açılır)</span></a>');
+      // after the title span, so the spoken order is: clock, zone, source, title, notice
+      expect(anchor.indexOf(`${WITH_NON_VOTING.points[i]?.title}</span>`)).toBeLessThan(
+        anchor.indexOf("yeni sekmede açılır"),
+      );
+    });
+  });
+
   it("draws a non-voting row's dot hollow and a voting row's dot filled", () => {
     const rows = fullListRows(render(WITH_NON_VOTING));
     const hollow = rowDotClasses(rows[0]);

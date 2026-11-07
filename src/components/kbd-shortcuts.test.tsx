@@ -184,6 +184,78 @@ describe("kbd-shortcuts.tsx source", () => {
     expect(kbdCode).not.toContain("setTimeout");
   });
 
+  // h60-forms-4: "Ara /" is listed on every page, so "/" has to do something on
+  // every page. Where the search bar is mounted its own handler focuses the
+  // input (KbdShortcuts must not preventDefault, or SearchBar's isSearchShortcut
+  // sees a consumed event); everywhere else the reader is sent to "/#ara".
+  describe("the '/' search shortcut", () => {
+    /** The source of the `if (action === "search") { ... }` block. */
+    function searchBranch(): string {
+      const start = kbdCode.indexOf('if (action === "search")');
+      expect(start).toBeGreaterThan(-1);
+      const end = kbdCode.indexOf("\n      }\n", start);
+      expect(end).toBeGreaterThan(start);
+      return kbdCode.slice(start, end);
+    }
+
+    it('lets "/" through the early key filter next to "g" and "?"', () => {
+      expect(kbdCode).toMatch(
+        /if \(pending === null && key !== "g" && key !== "\?" && key !== "\/"\) return;/,
+      );
+    });
+
+    // react-kbd-activity-hidden-searchbar: Next keeps the home page hidden in
+    // <Activity> after a navigation. Its <input type="search"> is still in the
+    // DOM but SearchBar's listener was cleaned up, so a DOM probe says "the bar
+    // will handle it" when nothing will. Ask whether SearchBar is listening.
+    it("imports isSearchBarActive from the search-shortcut module", () => {
+      expect(kbdCode).toMatch(
+        /import \{[^}]*\bisSearchBarActive\b[^}]*\} from "@\/components\/filters\/search-shortcut";/,
+      );
+    });
+
+    it("checks whether the search bar is active before navigating", () => {
+      const branch = searchBranch();
+      const probe = branch.indexOf("if (isSearchBarActive()) return;");
+      const push = branch.indexOf('router.push("/#ara")');
+      expect(probe).toBeGreaterThan(-1);
+      expect(push).toBeGreaterThan(probe);
+    });
+
+    it("returns without preventDefault when the search bar is active", () => {
+      const branch = searchBranch();
+      const probe = /if \(isSearchBarActive\(\)\) return;/.exec(branch);
+      expect(probe).not.toBeNull();
+      // the early return comes before this branch's preventDefault
+      expect(branch.indexOf("e.preventDefault()")).toBeGreaterThan(
+        (probe?.index ?? Infinity) + (probe?.[0].length ?? 0),
+      );
+    });
+
+    it("no longer probes the DOM for a search input (a hidden Activity page keeps its DOM)", () => {
+      const branch = searchBranch();
+      expect(branch).not.toContain("document.querySelector(");
+      expect(branch).not.toContain('input[type="search"]');
+    });
+
+    it("prevents default and pushes /#ara when there is no search input", () => {
+      const branch = searchBranch();
+      expect(branch.indexOf("e.preventDefault()")).toBeLessThan(branch.indexOf('router.push("/#ara")'));
+    });
+
+    it("handles 'search' before the shared preventDefault, so the early return skips it", () => {
+      const branchAt = kbdCode.indexOf('if (action === "search")');
+      const sharedPrevent = kbdCode.indexOf("e.preventDefault();", branchAt + searchBranch().length);
+      expect(sharedPrevent).toBeGreaterThan(branchAt);
+      expect(kbdCode.indexOf('if (action === "help")')).toBeGreaterThan(sharedPrevent);
+    });
+
+    it("keeps the off switch in charge: the action still comes from resolveShortcut", () => {
+      expect(kbdCode.indexOf("readShortcutsEnabled()")).toBeGreaterThan(-1);
+      expect(kbdCode.indexOf("resolveShortcut(")).toBeLessThan(kbdCode.indexOf('if (action === "search")'));
+    });
+  });
+
   it("ignores key events that originate inside an open dialog", () => {
     expect(kbdCode).toContain("dialog[open]");
   });

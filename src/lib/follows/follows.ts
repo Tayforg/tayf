@@ -17,7 +17,14 @@ export const FOLLOWS_KEY = "tayf:follows";
 export const FOLLOWS_CHANGE_EVENT = "tayf:follows-change";
 export const MAX_FOLLOWS = 20;
 export const KEYWORD_MIN = 2;
-export const KEYWORD_MAX = 40;
+/**
+ * Equal to MAX_SEARCH_QUERY_LENGTH in src/lib/clusters/turkish-query.ts: /?q=
+ * and GET /api/takip (searchClusters) both cut a search at 64 characters, so a
+ * follow of that length runs exactly the search the reader sees. This module
+ * may not import turkish-query (client-bundle whitelist above); follows.test.ts
+ * holds the parity test. Follows stored at 40 characters or fewer stay valid.
+ */
+export const KEYWORD_MAX = 64;
 /** Hard cap on the RAW input, applied before any normalisation work. */
 export const RAW_MAX = 200;
 /** The API returns (and the client trusts) at most this many items per follow. */
@@ -81,18 +88,44 @@ const GUNDEM_LABELS: ReadonlyMap<string, string> = new Map(
 // throw while rendering the follow's link.
 const FORBIDDEN_CHARS = /[\p{Cc}\p{Cs}]/u;
 
-/** Canonical keyword form, or null when the input is not an acceptable keyword. */
-export function normalizeKeyword(raw: unknown): string | null {
-  if (typeof raw !== "string" || raw.length > RAW_MAX) return null;
+/** Why a keyword is not followable (see keywordRejectReason). */
+export type KeywordRejectReason = "too-long" | "too-short" | "invalid";
+
+type KeywordCheck =
+  | { ok: true; value: string }
+  | { ok: false; reason: KeywordRejectReason };
+
+// The ONE place the keyword rules live, so normalizeKeyword and
+// keywordRejectReason can never disagree about what is accepted.
+function checkKeyword(raw: unknown): KeywordCheck {
+  if (typeof raw !== "string") return { ok: false, reason: "invalid" };
+  if (raw.length > RAW_MAX) return { ok: false, reason: "too-long" };
   const s = raw
     .normalize("NFC")
     .replace(/\s+/gu, " ")
     .trim()
     .toLocaleLowerCase("tr");
-  if (FORBIDDEN_CHARS.test(s)) return null;
+  if (FORBIDDEN_CHARS.test(s)) return { ok: false, reason: "invalid" };
   const length = [...s].length;
-  if (length < KEYWORD_MIN || length > KEYWORD_MAX) return null;
-  return s;
+  if (length < KEYWORD_MIN) return { ok: false, reason: "too-short" };
+  if (length > KEYWORD_MAX) return { ok: false, reason: "too-long" };
+  return { ok: true, value: s };
+}
+
+/** Canonical keyword form, or null when the input is not an acceptable keyword. */
+export function normalizeKeyword(raw: unknown): string | null {
+  const check = checkKeyword(raw);
+  return check.ok ? check.value : null;
+}
+
+/**
+ * Why `raw` is not an acceptable keyword, or null when normalizeKeyword accepts
+ * it. Lets the follow button tell a reader that a search is over the limit
+ * instead of silently dropping the button.
+ */
+export function keywordRejectReason(raw: unknown): KeywordRejectReason | null {
+  const check = checkKeyword(raw);
+  return check.ok ? null : check.reason;
 }
 
 export function isFollowTopicSlug(v: unknown): v is FollowTopicSlug {

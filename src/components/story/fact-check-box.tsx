@@ -1,6 +1,7 @@
 import { ExternalLink } from "lucide-react";
 
 import { TrackedLink } from "@/components/ui/tracked-link";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import type { ClusterFactCheck } from "@/lib/fact-checks/cluster-fact-checks-query";
 
 /**
@@ -56,6 +57,7 @@ export function FactCheckBox({ items }: { items: ClusterFactCheck[] }) {
                 aria-hidden="true"
                 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
               />
+              <NewTabHint />
             </TrackedLink>
           </li>
         ))}

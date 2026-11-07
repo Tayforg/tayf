@@ -4,6 +4,7 @@ import { ZONE_META } from "@/lib/bias/config";
 import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
 import { SourceLogo } from "@/components/source/source-logo";
 import { TrackedLink } from "@/components/ui/tracked-link";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { groupMembersByZone } from "@/lib/clusters/framing";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import {
@@ -141,6 +142,7 @@ function HeadlineEntry({
         >
           {member.article.title}
         </span>
+        <NewTabHint />
       </TrackedLink>
     </li>
   );

@@ -10,6 +10,7 @@ import {
 import { PICKUP_LIMIT, getTickerPickupSafe } from "@/lib/finance/kap-pickup-query";
 import { disclosureWindowLabel, fmtWhen } from "@/lib/finance/format";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import type { MediaDnaZone } from "@/types";
 
 // "Medyada yankı" — for each of a ticker's KAP disclosures over the last 30
@@ -134,6 +135,7 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
                 className="text-foreground/90 hover:text-brand"
               >
                 {p.subject ?? "Bildirim"}
+                <NewTabHint />
               </a>
               <p className="text-[10px] text-muted-foreground">
                 <PickupRowStatus p={p} />

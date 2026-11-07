@@ -48,3 +48,37 @@ export function isSearchShortcut(e: SearchShortcutEvent, enabled?: boolean): boo
   }
   return enabled ?? readShortcutsEnabled();
 }
+
+// How many SearchBars are listening for "/" right now. SearchBar registers in
+// the effect that adds its keydown listener and releases in that effect's
+// cleanup. That cleanup runs on unmount AND when Next hides the page in
+// <Activity mode="hidden"> (the App Router keeps up to three previous pages
+// that way): the DOM, including the <input type="search">, stays in the
+// document with display:none while the listener is gone. KbdShortcuts asks
+// isSearchBarActive() rather than looking for the input in the DOM, so a hidden
+// home page does not make it believe the bar will handle the "/".
+let mountedSearchBars = 0;
+
+/** Marks one SearchBar as listening. Call the returned cleanup (idempotent) to release it. */
+export function registerSearchBar(): () => void {
+  mountedSearchBars += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    mountedSearchBars -= 1;
+  };
+}
+
+/** True while at least one SearchBar is mounted and visible to the router (not hidden in Activity). */
+export function isSearchBarActive(): boolean {
+  return mountedSearchBars > 0;
+}
+
+// "/" on a page that has no search bar (KbdShortcuts, site-wide) sends the
+// reader to "/#ara". SearchBar, which owns the element with id="ara", checks
+// the hash on mount with this predicate, focuses its input and strips the hash.
+// Exact match: "#ARA" or "#ara2" are ordinary anchors and must not steal focus.
+export function isSearchArrivalHash(hash: string): boolean {
+  return hash === "#ara";
+}

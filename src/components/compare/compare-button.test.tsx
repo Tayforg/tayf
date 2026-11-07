@@ -214,16 +214,42 @@ function buttonSlot(children: Array<El | null | false>): number {
   return children.findIndex((c) => c && c.type === "button");
 }
 
+function statusSlot(children: Array<El | null | false>): number {
+  return children.findIndex((c) => !!c && c.props?.role === "status");
+}
+
 describe("CompareButton — focus stays put across state changes", () => {
-  it("keeps the same slot count and the <button> at the same slot in every state", () => {
+  it("keeps the same slot count and the <button> and status at the same slots in every state", () => {
     const shapes = STATES.map(([, tray, notice]) => {
       override = fakeTray(tray);
       const children = rootChildren(treeFor(ID, notice));
-      return { length: children.length, button: buttonSlot(children) };
+      return {
+        length: children.length,
+        button: buttonSlot(children),
+        status: statusSlot(children),
+      };
     });
     const first = shapes[0];
     expect(first?.button).toBeGreaterThanOrEqual(0);
+    expect(first?.status).toBeGreaterThanOrEqual(0);
     for (const shape of shapes) expect(shape).toEqual(first);
+  });
+
+  // h60-mobile-1: the visible hint must come AFTER the control, never before
+  // it, so the hint appearing cannot push the tapped button to a new line.
+  // Slot order is [compare link | null] [button] [role=status] in EVERY state.
+  it("orders the slots [link | null] [button] [status] in every state", () => {
+    for (const [name, tray, notice] of STATES) {
+      override = fakeTray(tray);
+      const children = rootChildren(treeFor(ID, notice));
+      expect(children, name).toHaveLength(3);
+      expect(buttonSlot(children), `${name}: button slot`).toBe(1);
+      expect(statusSlot(children), `${name}: status slot`).toBe(2);
+      expect(buttonSlot(children)).toBeLessThan(statusSlot(children));
+      // Slot 0 is the compare link (two ids incl. current) or nothing at all.
+      const first = children[0];
+      if (first) expect(typeof first.props?.href, `${name}: slot 0 is the link`).toBe("string");
+    }
   });
 
   it("renders exactly one <button> in every state", () => {
@@ -278,13 +304,16 @@ describe("CompareButton — status is announced", () => {
     }
   });
 
-  it("keeps the live region at the same slot in every state", () => {
+  it("keeps the live region at the same slot in every state, after the button", () => {
     const slots = STATES.map(([, tray, notice]) => {
       override = fakeTray(tray);
-      return rootChildren(treeFor(ID, notice)).findIndex((c) => !!c && c.props?.role === "status");
+      const children = rootChildren(treeFor(ID, notice));
+      return { status: statusSlot(children), button: buttonSlot(children) };
     });
-    expect(slots[0]).toBeGreaterThanOrEqual(0);
-    expect(new Set(slots).size).toBe(1);
+    expect(slots[0]?.status).toBeGreaterThanOrEqual(0);
+    expect(new Set(slots.map((s) => s.status)).size).toBe(1);
+    expect(new Set(slots.map((s) => s.button)).size).toBe(1);
+    for (const s of slots) expect(s.button).toBeLessThan(s.status);
   });
 
   it("empty tray: region is present but empty and visually hidden", () => {
@@ -358,6 +387,91 @@ describe("CompareButton — status is announced", () => {
     const markup = renderToStaticMarkup(<CompareButton clusterId={ID} />);
     expect(markup).toContain('role="status"');
     expect(markup).toContain('aria-live="polite"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h60-mobile-1: on phones tapping "Karşılaştır" inserted the visible hint
+// BEFORE the button inside one inline-flex flex-wrap span, so the button (and
+// "Düzeltme talebi") wrapped ~41 px down and the bias spectrum left the first
+// screen. On phones the wrapper now dissolves (max-sm:contents) so its
+// children join the page's actions row, and the visible hint drops to its own
+// line at the END of that row. sm and up are unchanged.
+// ---------------------------------------------------------------------------
+
+describe("CompareButton — phone reflow (h60-mobile-1)", () => {
+  function hintClass(tray: readonly string[], notice = ""): string {
+    override = fakeTray(tray);
+    const status = rootChildren(treeFor(ID, notice)).find(
+      (c): c is El => !!c && c.props?.role === "status",
+    );
+    if (!status) throw new Error("no role=status element");
+    return String(status.props?.className);
+  }
+
+  it("the wrapper class is the literal that dissolves it on phones, in every state", () => {
+    for (const [name, tray, notice] of STATES) {
+      override = fakeTray(tray);
+      const root = treeFor(ID, notice) as El;
+      expect(String(root.props?.className), name).toBe(
+        "inline-flex flex-wrap items-center gap-2 max-sm:contents",
+      );
+    }
+  });
+
+  it.each([
+    ["[current]", [ID]],
+    ["[other]", [OTHER]],
+    ["[other, third]", [OTHER, THIRD]],
+  ] as Array<[string, readonly string[]]>)(
+    "%s: the visible hint drops to its own line at the end of the row on phones",
+    (_name, tray) => {
+      const cls = hintClass(tray);
+      expect(cls).toContain("max-sm:order-last");
+      expect(cls).toContain("max-sm:basis-full");
+      expect(cls).not.toContain("sr-only");
+      expect(cls).toBe("text-[11px] text-muted-foreground max-sm:order-last max-sm:basis-full");
+    },
+  );
+
+  it("the empty-tray region stays sr-only (and takes no phone layout classes)", () => {
+    const cls = hintClass([]);
+    expect(cls).toBe("sr-only");
+    expect(cls).not.toContain("max-sm:");
+  });
+
+  it("the screen-reader-only confirmations stay sr-only", () => {
+    expect(hintClass([OTHER, ID])).toBe("sr-only");
+    expect(hintClass([], CLEARED)).toBe("sr-only");
+    expect(hintClass([], WITHDRAWN)).toBe("sr-only");
+  });
+
+  it("keeps the 44 px targets on the button and the link", () => {
+    override = fakeTray([ID]);
+    expect(String(buttonWithText(treeFor(ID), "Vazgeç").props?.className)).toContain(
+      "min-h-[44px]",
+    );
+    override = fakeTray([OTHER, ID]);
+    const link = collectElements(treeFor(ID)).find((el) => typeof el.props?.href === "string");
+    expect(String(link?.props?.className)).toContain("min-h-[44px]");
+  });
+
+  it("markup: the button precedes the live region in every state", () => {
+    for (const [name, tray, notice] of STATES) {
+      const markup = renderToStaticMarkup(
+        <CompareButtonView
+          clusterId={ID}
+          tray={tray}
+          add={add}
+          remove={remove}
+          clear={clear}
+          notice={notice}
+        />,
+      );
+      expect(markup.indexOf("<button"), name).toBeGreaterThan(-1);
+      expect(markup.indexOf("<button"), name).toBeLessThan(markup.indexOf('role="status"'));
+      expect(markup, name).toContain("max-sm:contents");
+    }
   });
 });
 

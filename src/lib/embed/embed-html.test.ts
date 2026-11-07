@@ -566,6 +566,32 @@ describe("renderEmbedHtml", () => {
     );
   });
 
+  // h60-newtab-1 (WCAG G201): the link opens a new tab, and a framed document
+  // has no React and no shared component, so the hint is a literal span. The
+  // `.v` rule hides it visually without display:none (which would also hide it
+  // from a screen reader).
+  it("ends the new-tab link's accessible name with a visually hidden notice", () => {
+    expect(html).toMatch(
+      /<a [^>]*target="_blank"[^>]*>tayfhaber\.com'da oku →<span class="v"> \(yeni sekmede açılır\)<\/span><\/a>/,
+    );
+  });
+
+  it("styles .v as visually hidden: absolute, 1px, clipped, never display:none", () => {
+    const style = html.match(/<style>([\s\S]*?)<\/style>/)![1]!;
+    const v = style.match(/(?:^|\})\.v\{([^}]*)\}/)?.[1] ?? "";
+    for (const decl of [
+      "position:absolute",
+      "width:1px",
+      "height:1px",
+      "overflow:hidden",
+      "clip:rect(0,0,0,0)",
+      "white-space:nowrap",
+    ]) {
+      expect(v, decl).toContain(decl);
+    }
+    expect(v).not.toMatch(/display:\s*none|visibility:\s*hidden/);
+  });
+
   it("has no ribbon unless the model carries one", () => {
     expect(html).not.toContain("Kör nokta");
     const withRibbon = renderEmbedHtml(

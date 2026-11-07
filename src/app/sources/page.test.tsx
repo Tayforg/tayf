@@ -837,7 +837,7 @@ describe("SourceDirectory card -- accessible name and target size", () => {
   });
 
   it("(2.5.8) the external link is a 24 x 24 target in the corner, named for what it opens", () => {
-    expect(externalTag).toContain('aria-label="GZT sitesini yeni sekmede aç"');
+    expect(externalTag).toContain('aria-label="GZT sitesi (yeni sekmede açılır)"');
     expect(externalTag).toContain('target="_blank"');
     expect(externalTag).toContain('rel="noopener noreferrer"');
     const tokens = tokensOf(externalTag);

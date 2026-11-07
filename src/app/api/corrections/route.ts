@@ -11,6 +11,7 @@ import {
 } from "@/lib/api/errors";
 import { checkDbThrottle, THROTTLE_POLICY } from "@/lib/api/db-throttle";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { validateCorrection } from "@/lib/corrections/validate";
 
 // Corrections/objections: 5-token bucket refilling at 1 token / 12min (5/hour).
 // Mirrors the newsletter-post limiter shape so mutating routes share one
@@ -21,20 +22,6 @@ const correctionsPostLimit = createRateLimiter("corrections-post", {
   capacity: 5,
   refillPerSecond: 5 / 3600,
 });
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isValidUrl(value: string): boolean {
-  if (value.length === 0 || value.length > 512) return false;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 export const POST = withApiErrors(async (request: Request) => {
   const key = clientKey(request);
@@ -62,25 +49,20 @@ export const POST = withApiErrors(async (request: Request) => {
     return NextResponse.json({ ok: true }, { status: 200 });
   }
 
-  const url = typeof b.url === "string" ? b.url.trim() : "";
-  if (!isValidUrl(url)) {
-    return apiBadRequest("Invalid url");
+  // The same rules the correction form runs before it sends (the shared pure
+  // validator). They stay authoritative here; `details.field` is additive so
+  // the form can show its Turkish message next to the right input, and the
+  // English `error` strings are exactly what they always were.
+  const checked = validateCorrection({
+    url: b.url,
+    message: b.message,
+    email: b.email,
+    clusterId: b.clusterId,
+  });
+  if (!checked.ok) {
+    return apiBadRequest(checked.reason, { field: checked.field });
   }
-
-  const message = typeof b.message === "string" ? b.message.trim() : "";
-  if (message.length < 10 || message.length > 2000) {
-    return apiBadRequest("Message must be between 10 and 2000 characters");
-  }
-
-  const emailRaw = typeof b.email === "string" ? b.email.trim() : "";
-  if (emailRaw.length > 254 || (emailRaw.length > 0 && !EMAIL_RE.test(emailRaw))) {
-    return apiBadRequest("Invalid email address");
-  }
-
-  const clusterIdRaw = typeof b.clusterId === "string" ? b.clusterId.trim() : "";
-  if (clusterIdRaw.length > 0 && !UUID_RE.test(clusterIdRaw)) {
-    return apiBadRequest("Invalid clusterId");
-  }
+  const { url, message, email, clusterId } = checked.value;
 
   // Fleet-wide DB throttle (migration 118): 5 accepted submissions/hour per
   // client across every instance. It runs only after the honeypot and all
@@ -96,7 +78,6 @@ export const POST = withApiErrors(async (request: Request) => {
   }
 
   const supabase = createServerClient();
-  const email = emailRaw.length > 0 ? emailRaw : null;
   const insertRow = (clusterId: string | null) =>
     supabase.from("corrections").insert({
       url,
@@ -105,7 +86,6 @@ export const POST = withApiErrors(async (request: Request) => {
       cluster_id: clusterId,
     });
 
-  const clusterId = clusterIdRaw.length > 0 ? clusterIdRaw : null;
   let { error } = await insertRow(clusterId);
 
   // A well-formed but unknown `?cluster=` id (a cluster deleted or merged

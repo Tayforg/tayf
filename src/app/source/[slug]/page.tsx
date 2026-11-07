@@ -21,6 +21,7 @@ import { getSourceProfile } from "@/lib/sources/source-profile-query";
 import { getSourceAgreement } from "@/lib/game/agreement";
 import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
 import { isThinSource } from "@/lib/seo/thin-source";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { sourceMetaDescription } from "@/lib/sources/source-meta-description";
 import {
   CLICKBAIT_PRECISION_CHECK,
@@ -235,6 +236,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
             >
               {new URL(source.url).hostname.replace(/^www\./, "")}
               <ExternalLink className="h-3 w-3" />
+              <NewTabHint />
             </a>
             {inactive ? (
               <p className="text-xs text-muted-foreground">
@@ -387,6 +389,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
                         {formatTurkishTimeAgo(article.published_at)}
                       </p>
                     </div>
+                    <NewTabHint />
                   </a>
                 </li>
               );

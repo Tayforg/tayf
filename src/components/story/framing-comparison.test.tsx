@@ -496,3 +496,34 @@ describe("FramingComparison — all-English cluster (h59-english-1)", () => {
     expect(html).not.toContain(NOTE);
   });
 });
+
+// h60-newtab-1 (WCAG G201): a screen-reader user hears only the link text, so
+// each headline link that opens a new tab ends its accessible name with the
+// notice. The visible entry is unchanged: the hint is an sr-only span.
+describe("FramingComparison — new-tab notice (h60-newtab-1)", () => {
+  /** Every `<a ...target="_blank"...>...</a>` of the markup. */
+  function newTabAnchors(html: string): string[] {
+    return html.match(/<a [^>]*target="_blank"[^>]*>[\s\S]*?<\/a>/g) ?? [];
+  }
+
+  it("ends every headline link with the sr-only notice, in both the visible and the folded entries", () => {
+    // 8 opposition members: the first four are listed, the rest sit in <details>.
+    const members = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"].map((id) =>
+      mkMember(id, SOZCU, `${TR_TITLE} ${id}`),
+    );
+    const anchors = newTabAnchors(render(members));
+    expect(anchors).toHaveLength(members.length);
+    for (const a of anchors) {
+      expect(a).toContain('<span class="sr-only"> (yeni sekmede açılır)</span></a>');
+    }
+  });
+
+  it("keeps the visible headline and source name unchanged next to the notice", () => {
+    const [anchor] = newTabAnchors(render([mkMember("a1", DAILY_SABAH, EN_TITLE)]));
+    expect(anchor).toBeDefined();
+    expect(anchor).toContain(EN_TITLE);
+    expect(anchor).toContain("Daily Sabah");
+    // The notice is not inside a lang=en span: it is Turkish text.
+    expect(anchor).toMatch(/<\/span><span class="sr-only"> \(yeni sekmede açılır\)<\/span><\/a>$/);
+  });
+});
