@@ -78,8 +78,17 @@ import { RelativeTime } from "@/components/story/relative-time";
 import { StaleCopyNotice } from "@/components/pwa/stale-copy-notice";
 import { currentTimeMs } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
-import { clusterTextLang, sourceLang } from "@/lib/sources/source-language";
-import { buildTayfOrganization, serializeJsonLd } from "@/lib/seo/json-ld";
+import {
+  clusterTextLang,
+  headlineLang as memberHeadlineLang,
+  isLanguageIsolatedCluster,
+  sourceLang,
+} from "@/lib/sources/source-language";
+import {
+  buildTayfOrganization,
+  newsArticleInLanguage,
+  serializeJsonLd,
+} from "@/lib/seo/json-ld";
 import { siteUrl } from "@/lib/site-url";
 import { oembedDiscoveryHref } from "@/lib/embed/embed-snippet";
 import { balanceFromDistribution } from "@/lib/bias/balance";
@@ -96,23 +105,31 @@ import { isContentlessTitle } from "../../../../supabase/functions/_shared/rss/e
  * as-is. Non-voting (toplayıcı / niş) members are plotted for context but
  * never reach the floor, the first mover or the zone checks; `getMemberSeenAt`
  * already covers every cluster member, so they cost no extra query.
+ *
+ * `languageIsolated` (h59-english-1: every member an English-language outlet)
+ * words no zone as absent, so the feed-health read that only explains an absent
+ * zone is skipped too.
  */
 async function loadStoryTimeline(
   clusterId: string,
   votingMembers: Parameters<typeof timelineMembersFrom>[0],
   nonVotingMembers: Parameters<typeof timelineMembersFrom>[0],
+  languageIsolated: boolean,
 ): Promise<StoryTimelineData | null> {
   const members = timelineMembersFrom(votingMembers);
   if (votingSourceCount(members) < STORY_TIMELINE_MIN_SOURCES) return null;
   const [seenAt, health] = await Promise.all([
     getMemberSeenAt(clusterId),
-    missingZones(members).length > 0 ? getZoneFeedHealth() : Promise.resolve(null),
+    !languageIsolated && missingZones(members).length > 0
+      ? getZoneFeedHealth()
+      : Promise.resolve(null),
   ]);
   return buildStoryTimeline(
     members,
     seenAt,
     health,
     timelineMembersFrom(nonVotingMembers),
+    languageIsolated,
   );
 }
 
@@ -408,14 +425,38 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   const hasHeadline = !isContentlessTitle(cluster.title_tr);
   const headline = hasHeadline ? cluster.title_tr : NO_HEADLINE_FALLBACK;
 
-  // WCAG 3.1.2 (h23-a11y-1): 'en' only when EVERY member (voting or not) is an
-  // English outlet; one Turkish member could be the one whose title was picked,
-  // so a mixed cluster claims nothing. The h1 is skipped for the neutral LLM
-  // rewrite (title_method 'llm' is Turkish) and for the Turkish "Haber"
-  // fallback; the original-title disclosure is always the member's own text.
+  // WCAG 3.1.2 (h23-a11y-1): 'en' when EVERY member (voting or not) is an
+  // English outlet. The h1 is skipped for the neutral LLM rewrite (title_method
+  // 'llm' is Turkish) and for the Turkish "Haber" fallback. The original-title
+  // disclosure is the seed member's own title, so it takes the same member rule
+  // as the h1 (react-h59-1): `textLang`, else `memberHeadlineLang` over the
+  // members (`originalLang`). A mixed cluster's seed can be an English member's
+  // title while the h1 is the Turkish one.
+  // h59-english-2: a mixed cluster cannot claim the headline wholesale, but an
+  // extractive headline IS one member's title (749b0eea showed Daily Sabah's
+  // 'NATO chief visits Türkiye ahead of key summit' beside A Haber's Turkish
+  // one), so it takes the home card's rule: 'en' only when an English member's
+  // title is the headline and no Turkish member carries it too.
   const textLang = clusterTextLang(members.map((m) => m.source));
+  const memberLangs = members.map((m) => ({
+    title: m.article.title,
+    lang: sourceLang(m.source),
+  }));
   const headlineLang =
-    cluster.title_method === "llm" || !hasHeadline ? undefined : textLang;
+    cluster.title_method === "llm" || !hasHeadline
+      ? undefined
+      : (textLang ?? memberHeadlineLang(cluster.title_tr, memberLangs));
+  const originalLang = cluster.title_original
+    ? (textLang ?? memberHeadlineLang(cluster.title_original, memberLangs))
+    : undefined;
+  // h59-english-1: every member is an English-language outlet, i.e. `textLang`
+  // is 'en'. Such a story formed among English articles only, so no Bağımsız or
+  // Muhalefet outlet could have matched it. Computed once here and threaded
+  // into the timeline, the read-across slot (which prints the one English-only
+  // note) and the framing block (whose empty columns say "not compared"), all
+  // instead of a zone-absence claim, and into the JSON-LD language. Voting or
+  // not: the same members `textLang` looks at.
+  const languageIsolated = isLanguageIsolatedCluster(members.map((m) => m.source));
 
   // Toplayıcı / niş kaynaklar are cluster members but never vote — split
   // them out once here so every voting-sensitive computation below reads
@@ -506,11 +547,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     .filter((u): u is string => typeof u === "string" && u.length > 0);
   const heroSrc = heroCandidates[0] ?? null;
   const heroMember = imageEligible.find((m) => !!m.article.image_url) ?? null;
-  // The cluster headline, not the hero member's own article title: for a
-  // mixed cluster that is the Turkish headline, and for an all-English one the
-  // alt is exactly the <h1> text, so it takes the <h1>'s `headlineLang` (the
-  // `lang` prop on the hero below; WCAG 3.1.2, h23-a11y-1). The credit line
-  // still names the photo's outlet.
+  // The cluster headline, not the hero member's own article title: the alt is
+  // exactly the <h1> text, so it takes the <h1>'s `headlineLang` (the `lang`
+  // prop on the hero below; WCAG 3.1.2, h23-a11y-1): 'en' for an all-English
+  // cluster, or for a mixed one whose headline is an English member's own title
+  // (h59-english-2), nothing for a Turkish headline. The credit line still
+  // names the photo's outlet.
   const heroAlt = headline;
 
   // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the exact image
@@ -610,7 +652,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // "Kim önce yazdı?" — per-story first-mover timeline. Only voting members
   // can be first or make a zone "join" (an aggregator reposting first must
   // not); non-voting members are just plotted as hollow rings.
-  const storyTimeline = await loadStoryTimeline(id, votingMembers, nonVotingMembers);
+  const storyTimeline = await loadStoryTimeline(
+    id,
+    votingMembers,
+    nonVotingMembers,
+    languageIsolated,
+  );
   // The story-thread pill and the fact-check box are optional widgets: each is
   // read by its own async slot (ClusterThreadSlot / ClusterFactCheckSlot) inside
   // its own <Suspense fallback={null}>, so a slow or stalled read can delay or
@@ -653,6 +700,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     "@context": "https://schema.org",
     "@type": "NewsArticle",
     headline,
+    // h59-english-1: 'en' only for an all-English cluster whose <h1> is the
+    // English member headline; every other cluster is the site's 'tr-TR'.
+    inLanguage: newsArticleInLanguage({ languageIsolated, headlineLang }),
     datePublished: cluster.first_published,
     dateModified: cluster.updated_at,
     description: describeForMeta({
@@ -794,7 +844,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     <summary className="inline cursor-pointer list-none underline decoration-dotted underline-offset-2 hover:text-foreground">
                       Özgün başlık
                     </summary>
-                    <span lang={textLang} className="block mt-1">
+                    <span lang={originalLang} className="block mt-1">
                       {cluster.title_original}
                     </span>
                   </details>
@@ -951,6 +1001,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               isBlindspot={cluster.is_blindspot}
               feedDegraded={blindspotSuppressed}
               nonVotingZoneCounts={nonVotingZoneCounts}
+              languageIsolated={languageIsolated}
             />
 
             {/* Summary attribution (idea #7): clusters.summary_tr is one
@@ -1011,7 +1062,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           An empty column says "spektruma sayılan kaynaklardan haber yok"
           instead of "bu tarafta sessizlik" when a toplayıcı / niş source of
           that zone covered the story (nonVotingZones, h58-postship-2); they
-          stay out of the columns and the counts.
+          stay out of the columns and the counts. For an all-English cluster
+          (languageIsolated, h59-english-1) an empty column reads "Türkçe
+          kaynaklarla karşılaştırılmadı" and the read-across slot carries the one note.
           Omitted entirely when no voting member exists — the spectrum
           caption already says only toplayıcı / niş sources wrote, and an
           empty three-column card would read as broken. */}
@@ -1021,6 +1074,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             members={votingMembers}
             nowMs={renderNowMs}
             nonVotingZones={nonVotingZones}
+            languageIsolated={languageIsolated}
           />
         </div>
       )}

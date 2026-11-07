@@ -11,6 +11,10 @@ import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import {
+  ENGLISH_ONLY_KART_EMPTY_ZONE,
+  isLanguageIsolatedCluster,
+} from "@/lib/sources/source-language";
 import type { MediaDnaZone } from "@/types";
 
 // U-02 "Manşet Kartı" — the 9:16 (1080×1920) story card a reader can save
@@ -125,8 +129,14 @@ function outletLine(headline: NonNullable<StoryCard["headlines"][MediaDnaZone]>)
  *  which is false when a toplayıcı / niş source of that zone carried the story
  *  (the footer below counts it): then the line is scoped to the sources the
  *  spectrum counts, as /blindspots and the cluster timeline word it
- *  (h57-outbound-1). */
-function silentZoneLabel(coverage: StoryCard["coverage"][MediaDnaZone]): string {
+ *  (h57-outbound-1). It is just as false for a cluster written only by
+ *  English-language outlets, which never met the Turkish zones: there the line
+ *  says no comparison exists (h59-english-1). */
+function silentZoneLabel(
+  coverage: StoryCard["coverage"][MediaDnaZone],
+  languageIsolated: boolean,
+): string {
+  if (languageIsolated) return ENGLISH_ONLY_KART_EMPTY_ZONE;
   return coverage.nonVotingCount > 0
     ? `— ${SPECTRUM_ABSENT_QUALIFIED}`
     : "— bu tarafta haber yok";
@@ -140,11 +150,14 @@ function renderCard({
   id,
   title,
   dateLabel,
+  languageIsolated,
 }: {
   card: StoryCard;
   id: string;
   title: string;
   dateLabel: string;
+  /** Every member is an English-language outlet (h59-english-1). */
+  languageIsolated: boolean;
 }) {
   const totalCoverage = ZONES.reduce(
     (sum, zone) => sum + card.coverage[zone].count,
@@ -227,9 +240,11 @@ function renderCard({
                   }}
                 >
                   <div style={{ fontSize: 34, color: DIM }}>
-                    {silentZoneLabel(coverage)}
+                    {silentZoneLabel(coverage, languageIsolated)}
                   </div>
-                  {coverage.degraded ? (
+                  {/* The caveat explains a silence the card claims. An
+                      English-only cluster claims none (h59-english-1). */}
+                  {coverage.degraded && !languageIsolated ? (
                     <div style={{ fontSize: 26, color: WARN }}>
                       bazı kaynaklara ulaşılamıyor
                     </div>
@@ -366,6 +381,7 @@ export async function GET(
       id,
       title,
       dateLabel: formatDdMmYyyy(detail.cluster.first_published),
+      languageIsolated: isLanguageIsolatedCluster(detail.members.map((m) => m.source)),
     }),
     {
       width: 1080,

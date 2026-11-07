@@ -1115,6 +1115,190 @@ describe("breaking strip", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h59-english-1: all-English clusters stay off the home feed
+// ---------------------------------------------------------------------------
+
+describe("all-English clusters (h59-english-1)", () => {
+  // The embed carries the source NAME and no slug, so the gate matches names.
+  const english = (clusterId: string, names: string[], first = 10 * 60 * 1000) =>
+    mkCluster({
+      id: clusterId,
+      first_published: iso(first),
+      members: names.map((sourceName, i) => ({
+        id: `${clusterId}-${i}`,
+        sourceId: `${clusterId}-s${i}`,
+        sourceName,
+        category: "politika",
+        kind: "outlet",
+      })),
+    });
+
+  // Fixture A (fbb078b4): four English outlets, a fresh cluster that would
+  // otherwise rank and take a Son Dakika slot.
+  const FIXTURE_A = () =>
+    english("fbb078b4", ["Hürriyet Daily News", "TRT World", "Daily Sabah", "A News"]);
+  // Fixture B (26e8abf9).
+  const FIXTURE_B = () => english("26e8abf9", ["Daily Sabah", "Hürriyet Daily News", "A News"]);
+  // Controls: a mixed cluster and a Turkish 2-outlet pro-government cluster.
+  const MIXED = () => english("mixed", ["A Haber", "Daily Sabah"]);
+  const TURKISH = () => english("turkish", ["Sabah", "Yeni Şafak"]);
+
+  it("fixture A is absent from bundles AND breakingBundles", async () => {
+    response = { data: [FIXTURE_A(), MIXED()], error: null };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(bundles.map((b) => b.cluster.id)).not.toContain("fbb078b4");
+    expect(breakingBundles.map((b) => b.cluster.id)).not.toContain("fbb078b4");
+  });
+
+  it("fixture B is absent too, and the mixed control stays in both lists", async () => {
+    response = { data: [FIXTURE_B(), MIXED(), TURKISH()], error: null };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(bundles.map((b) => b.cluster.id).sort()).toEqual(["mixed", "turkish"]);
+    expect(breakingBundles.map((b) => b.cluster.id).sort()).toEqual(["mixed", "turkish"]);
+  });
+
+  it("matches the display name case-insensitively and by the ASCII spelling (name fallback)", async () => {
+    response = {
+      data: [english("ascii", ["HURRIYET DAILY NEWS", "mfa türkiye", "Türkiye Today"])],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(0);
+  });
+
+  it("one Turkish member, even a non-voting aggregator, keeps the cluster", async () => {
+    const withAggregator = mkCluster({
+      id: "with-agg",
+      first_published: iso(10 * 60 * 1000),
+      members: [
+        { id: "w1", sourceId: "w-s1", sourceName: "Daily Sabah", category: "politika", kind: "outlet" },
+        { id: "w2", sourceId: "w-s2", sourceName: "A News", category: "politika", kind: "outlet" },
+        { id: "w3", sourceId: "w-s3", sourceName: "Haberler.com", category: "politika", kind: "aggregator" },
+      ],
+    });
+    response = { data: [withAggregator], error: null };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles.map((b) => b.cluster.id)).toEqual(["with-agg"]);
+  });
+
+  it("an English cluster does not use up a ranked or breaking slot", async () => {
+    const turkish = Array.from({ length: 6 }, (_, i) =>
+      english(`tr-${i}`, [`Gazete ${i}a`, `Gazete ${i}b`], (i + 2) * 60 * 1000),
+    );
+    response = { data: [FIXTURE_A(), FIXTURE_B(), ...turkish], error: null };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(6);
+    expect(breakingBundles).toHaveLength(6);
+    expect(breakingBundles.map((b) => b.cluster.id)).toEqual(turkish.map((c) => c.id));
+  });
+
+  it("prefilterCount still counts every fetched row", async () => {
+    response = { data: [FIXTURE_A(), FIXTURE_B(), MIXED()], error: null };
+    const { prefilterCount } = await getPoliticsClusters();
+    expect(prefilterCount).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h59-homefeed-3: the Son Dakika strip needs two voting outlets
+// ---------------------------------------------------------------------------
+
+describe("breaking strip voting-source floor (h59-homefeed-3)", () => {
+  type Kind = "outlet" | "wire" | "aggregator" | "niche";
+  const fresh = (
+    clusterId: string,
+    ageMs: number,
+    sources: Array<[sourceId: string, kind: Kind]>,
+  ) =>
+    mkCluster({
+      id: clusterId,
+      first_published: iso(ageMs),
+      members: sources.map(([sourceId, kind], i) => ({
+        id: `${clusterId}-${i}`,
+        sourceId,
+        kind,
+        category: "politika",
+      })),
+    });
+  const MIN = 60 * 1000;
+  const ids = (bundles: Array<{ cluster: { id: string } }>) => bundles.map((b) => b.cluster.id);
+
+  it.each([
+    ["one outlet + a Haberler.com echo (c4a3448b)", [["haber-global", "outlet"], ["haberler-com", "aggregator"]]],
+    ["a niche outlet + a Haberler.com echo (8c55d258)", [["ekonomim", "niche"], ["haberler-com", "aggregator"]]],
+    ["an outlet + a niche source (bffa0f8e)", [["muhalif", "outlet"], ["isci-haber", "niche"]]],
+    ["only niche and aggregator sources", [["ekonomim", "niche"], ["isci-haber", "niche"], ["haberler-com", "aggregator"]]],
+    ["two articles from the same outlet", [["haber-global", "outlet"], ["haber-global", "outlet"]]],
+  ] as Array<[string, Array<[string, Kind]>]>)("takes no breaking slot: %s", async (_label, sources) => {
+    response = { data: [fresh("thin", 5 * MIN, sources)], error: null };
+    const { breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual([]);
+  });
+
+  it.each([
+    ["two outlets (yenicag + abc-haber)", [["yenicag", "outlet"], ["abc-haber", "outlet"]]],
+    ["a wire and an outlet (anadolu-ajansi + cnn-turk)", [["anadolu-ajansi", "wire"], ["cnn-turk", "outlet"]]],
+    ["two outlets plus an aggregator echo", [["yenicag", "outlet"], ["abc-haber", "outlet"], ["haberler-com", "aggregator"]]],
+  ] as Array<[string, Array<[string, Kind]>]>)("takes a breaking slot: %s", async (_label, sources) => {
+    response = { data: [fresh("ok", 5 * MIN, sources)], error: null };
+    const { breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual(["ok"]);
+  });
+
+  it("counts a source with no kind as voting, like isVotingKind", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "legacy",
+          first_published: iso(5 * MIN),
+          members: [
+            { id: "l1", sourceId: "s1", category: "politika" },
+            { id: "l2", sourceId: "s2", category: "politika" },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual(["legacy"]);
+  });
+
+  it("seven qualifiers give the 6 newest, newest first, skipping a newer thin cluster", async () => {
+    const qualifiers = Array.from({ length: 7 }, (_, i) =>
+      fresh(`q-${i}`, (i + 2) * MIN, [[`o-${i}a`, "outlet"], [`o-${i}b`, "outlet"]]),
+    );
+    // Newer than every qualifier, but one outlet plus an echo: not a qualifier.
+    const thin = fresh("thin-newest", 1 * MIN, [["haber-global", "outlet"], ["haberler-com", "aggregator"]]);
+    response = { data: [thin, ...qualifiers], error: null };
+    const { breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual(["q-0", "q-1", "q-2", "q-3", "q-4", "q-5"]);
+  });
+
+  it("a cluster left out of the strip still ranks in the main list", async () => {
+    response = {
+      data: [
+        fresh("thin", 5 * MIN, [["haber-global", "outlet"], ["haberler-com", "aggregator"]]),
+        fresh("ok", 6 * MIN, [["yenicag", "outlet"], ["abc-haber", "outlet"]]),
+      ],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual(["ok"]);
+    expect(ids(bundles).sort()).toEqual(["ok", "thin"]);
+  });
+
+  it("leaves the window alone: a 3 h old qualifier is ranked but in no strip", async () => {
+    response = {
+      data: [fresh("old-ok", 3 * 60 * MIN, [["yenicag", "outlet"], ["abc-haber", "outlet"]])],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(ids(bundles)).toEqual(["old-ok"]);
+    expect(breakingBundles).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // R1/R4 importance ranking
 // ---------------------------------------------------------------------------
 

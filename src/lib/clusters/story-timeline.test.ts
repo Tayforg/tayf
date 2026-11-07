@@ -810,3 +810,100 @@ describe("buildStoryTimeline — absent zone qualified by a non-voting point in 
     expect(t.summary).toContain("— Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok");
   });
 });
+
+// h59-english-1: a cluster whose every member is an English outlet has no
+// Turkish counterpart to compare with, so its zone-absence lines would be false
+// ("Bağımsız kaynaklardan bu kümede haber yok" while Turkish clusters on the same
+// event carry Bağımsız and Muhalefet outlets). With `languageIsolated` the
+// summary keeps the first mover and the joins and drops every absence line.
+describe("buildStoryTimeline — all-English cluster (h59-english-1)", () => {
+  // Fixture A: fbb078b4, 2026-11-02 (UTC). All four outlets are iktidar-zone.
+  const fixtureA = [
+    member("Hürriyet Daily News", "gov_leaning", "2026-11-02T06:18:00Z"),
+    member("A News", "pro_government", "2026-11-02T06:53:00Z"),
+    member("Daily Sabah", "pro_government", "2026-11-02T06:56:00Z"),
+    member("TRT World", "state_media", "2026-11-02T08:25:00Z"),
+  ];
+  // Fixture B: 26e8abf9.
+  const fixtureB = [
+    member("Daily Sabah", "pro_government", "2026-11-03T05:00:00Z"),
+    member("Hürriyet Daily News", "gov_leaning", "2026-11-03T05:20:00Z"),
+    member("A News", "pro_government", "2026-11-03T06:10:00Z"),
+  ];
+  const ABSENCE = ["bu kümede haber yok", "henüz haber yok", "sessizlik", "akışı şu an sorunlu"];
+
+  it("fixture A today prints both absence lines (the bug this fixes)", () => {
+    const t = buildStoryTimeline(fixtureA, null, health({}))!;
+    expect(t.summary).toBe(
+      "İlk: Hürriyet Daily News · 09:18 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet kaynaklarından bu kümede haber yok",
+    );
+  });
+
+  it("fixture A isolated: the summary is only the first mover, no absence wording", () => {
+    const t = buildStoryTimeline(fixtureA, null, health({}), [], true)!;
+    expect(t.summary).toBe("İlk: Hürriyet Daily News · 09:18");
+    for (const needle of ABSENCE) expect(t.summary).not.toContain(needle);
+  });
+
+  it("fixture B isolated: the summary is only the first mover, no absence wording", () => {
+    const t = buildStoryTimeline(fixtureB, null, health({}), [], true)!;
+    expect(t.summary).toBe("İlk: Daily Sabah · 08:00");
+    for (const needle of ABSENCE) expect(t.summary).not.toContain(needle);
+  });
+
+  it("a degraded feed never adds 'akışı şu an sorunlu' to an isolated cluster", () => {
+    const t = buildStoryTimeline(fixtureA, null, health({ bagimsiz: true, muhalefet: true }), [], true)!;
+    for (const needle of ABSENCE) expect(t.summary).not.toContain(needle);
+  });
+
+  it("an isolated cluster with a non-voting point drops the qualified absence line too", () => {
+    const mfa = member("MFA Turkey", "pro_government", "2026-11-02T06:00:00Z");
+    const t = buildStoryTimeline(fixtureA, null, health({}), [mfa], true)!;
+    expect(t.summary).not.toContain("Spektruma sayılan");
+    for (const needle of ABSENCE) expect(t.summary).not.toContain(needle);
+  });
+
+  it("keeps a real zone join in the summary when an English outlet sits in another zone", () => {
+    const turkiyeToday = member("Türkiye Today", "center", "2026-11-02T07:30:00Z");
+    const t = buildStoryTimeline([...fixtureA, turkiyeToday], null, health({}), [], true)!;
+    expect(t.summary).toBe(
+      "İlk: Hürriyet Daily News · 09:18 — Bağımsız 1 sa 12 dk sonra katıldı",
+    );
+  });
+
+  it("does not change what the timeline plots: points, joins and zone list are identical", () => {
+    const plain = buildStoryTimeline(fixtureA, null, health({}))!;
+    const isolated = buildStoryTimeline(fixtureA, null, health({}), [], true)!;
+    expect(isolated.points).toEqual(plain.points);
+    expect(isolated.zoneJoin).toEqual(plain.zoneJoin);
+    expect(isolated.zoneFirsts).toEqual(plain.zoneFirsts);
+    expect(isolated.zoneLine).toBe(plain.zoneLine);
+    expect(isolated.absentZones).toEqual(plain.absentZones);
+  });
+
+  it("controls: a mixed English + Turkish cluster keeps today's summary exactly", () => {
+    const mixed = [
+      member("A Haber", "pro_government", "2026-11-02T06:18:00Z"),
+      member("Daily Sabah", "pro_government", "2026-11-02T06:56:00Z"),
+      member("Sabah", "pro_government", "2026-11-02T07:10:00Z"),
+    ];
+    const expected =
+      "İlk: A Haber · 09:18 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet kaynaklarından bu kümede haber yok";
+    expect(buildStoryTimeline(mixed, null, health({}))!.summary).toBe(expected);
+    expect(buildStoryTimeline(mixed, null, health({}), [], false)!.summary).toBe(expected);
+  });
+
+  it("controls: a Turkish pro-government cluster keeps today's summary and degraded wording", () => {
+    const turkish = [
+      member("Sabah", "pro_government", "2026-11-02T06:18:00Z"),
+      member("A Haber", "pro_government", "2026-11-02T06:56:00Z"),
+      member("Yeni Şafak", "pro_government", "2026-11-02T07:10:00Z"),
+    ];
+    expect(buildStoryTimeline(turkish, null, health({}), [], false)!.summary).toBe(
+      "İlk: Sabah · 09:18 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet kaynaklarından bu kümede haber yok",
+    );
+    expect(
+      buildStoryTimeline(turkish, null, health({ bagimsiz: true }), [], false)!.summary,
+    ).toContain("— Bağımsız kaynakların akışı şu an sorunlu");
+  });
+});

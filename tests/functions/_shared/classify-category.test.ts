@@ -705,6 +705,228 @@ describe("hunt-44: another Erdoğan (Yılmaz, Nehir, Filiz) is not the president
 });
 
 // ---------------------------------------------------------------------------
+// hunt-59 (2026-11-07): the bare 'imamoglu' stem was a politika hit in the title
+// and in the description, so a crime story from the İmamoğlu DISTRICT of Adana
+// ('Adana İmamoğlu'nda iki evi kurşunlayan 5 şüpheliden 3'ü tutuklandı', cluster
+// c828192c: haberport 8814d25a, haberler-com bf4984fa and 28d3d5e5) was filed as
+// politika and showed up in the home Son Dakika strip. The rows below are real
+// (title, description and url as stored in `articles`; the haberport description
+// is cut by the publisher at 200 characters).
+//
+// The guard keys on DISTRICT CONTEXT, never on the locative suffix: "Söz
+// İmamoğlu'nda" and "Gözler İmamoğlu'nda" (the İBB trial, Ekrem İmamoğlu) carry
+// the very same "-nda".
+// ---------------------------------------------------------------------------
+
+describe("hunt-59: Adana's İmamoğlu district is not the politician", () => {
+  interface Row {
+    id: string;
+    title: string;
+    description: string | null;
+    url: string;
+  }
+
+  const DISTRICT_ROWS: Row[] = [
+    {
+      id: "haberport 8814d25a (title has no district word, the description does)",
+      title: "İmamoğlu'nda iki evi kurşunlayan zanlılar kamerayla tespit edilip yakalandı",
+      description:
+        "Olay hakkında:Adana'nın İmamoğlu ilçesinde, 24 Ekim-6 Kasım tarihleri arasında Hürriyet Mahallesi'nde iki ayrı evin kurşunlanması üzerine İlçe Emniyet Müdürlüğü ekipleri araştırma başlattı. Ekipler, o...",
+      url: "https://www.haberport.com/haber/imamoglunda-iki-evi-kursunlayan-zanlilar-kamerayla-tespit-edilip-yakalandi/64619",
+    },
+    {
+      id: "haberler-com bf4984fa ('Adana İmamoğlu'nda' in the title)",
+      title: "Adana İmamoğlu'nda iki evi kurşunlayan 5 şüpheliden 3'ü tutuklandı",
+      description:
+        "Adana'nın İmamoğlu ilçesinde 24 Ekim-6 Kasım tarihleri arasında Hürriyet Mahallesi'nde iki ayrı evin kurşunlanmasıyla ilgili gözaltına alınan 5 şüpheliden 3'ü tutuklandı. Polis ekipleri, onlarca saatlik kamera kaydını inceleyerek şüphelileri yakalamıştı.",
+      url: "https://www.sondakika.com/3-sayfa/haber-adana-imamoglu-nda-iki-evi-kursunlayan-5-suphelide-20405796/",
+    },
+    {
+      id: "haberler-com 28d3d5e5",
+      title: "Adana İmamoğlu'nda iki evin kurşunlanmasıyla ilgili 3 şüpheli tutuklandı",
+      description:
+        "Adana'nın İmamoğlu ilçesinde 24 Ekim-6 Kasım tarihleri arasında Hürriyet Mahallesi'nde iki ayrı evin kurşunlanmasıyla ilgili 5 şüpheli, polisin onlarca saatlik kamera kaydı incelemesi sonucu gözaltına alındı. Mahkemeye sevk edilen şüphelilerden 3'ü tutuklandı.",
+      url: "https://www.haberler.com/3-sayfa/adana-imamoglu-nda-iki-evin-kursunlanmasiyla-20405793-haberi/",
+    },
+  ];
+
+  const POLITICIAN_ROWS: Row[] = [
+    {
+      id: "odatv 089245ea 'Söz İmamoğlu'nda' (the bare locative is Ekrem)",
+      title: "İBB davası 98. gün: Söz İmamoğlu'nda",
+      description:
+        "İBB davasında tarihi gün. 98. duruşmada Ekrem İmamoğlu ilk kez savunma yapacak. Duruşmayı YENİ Parti lideri Özgür Özel de takip edecek.",
+      url: "https://www.odatv.com/siyaset/ibb-davasi-98-gun-120166597",
+    },
+    {
+      id: "cumhuriyet ef78ce57 'Gözler İmamoğlu'nda'",
+      title: "Cumhuriyet Silivri'den bildiriyor! İBB davasında 98. gün... Gözler İmamoğlu'nda: Savunması bugün başlıyor!",
+      description:
+        "Tutuklu İBB Başkanı Ekrem İmamoğlu'nun da aralarında bulunduğu 53'ü tutuklu 436 sanıklı İBB davası, 98. gününde devam ediyor.",
+      url: "https://www.cumhuriyet.com.tr/siyaset/cumhuriyet-silivri-den-bildiriyor-ibb-davasinda-98-gun-gozler-imamoglu-nda-savunmasi-bugun-basliyor-2546611",
+    },
+    {
+      id: "birgun 00990307 'İmamoğlu'ndan ... tepki'",
+      title: "İmamoğlu'ndan Hakan Bahçetepe'nin ev hapsi kararına tepki: Böyle adalet olmaz!",
+      description:
+        "Yaklaşık 17 aydır tutuklu bulunan Gaziosmanpaşa Belediye Başkanı Hakan Bahçetepe, ev hapsi şartıyla tahliye edildi. Savcılığın da tahliyesini istediği Bahçetepe’nin görevine dönememesine tepki gösteren Ekrem İmamoğlu, “Böyle adalet olmaz” dedi.",
+      url: "https://www.birgun.net/haber/imamoglu-ndan-hakan-bahcetepe-nin-ev-hapsi-kararina-tepki-boyle-adalet-olmaz-745115",
+    },
+    {
+      id: "dokuz8-haber 299fe5d4 'Dilek İmamoğlu'ndan'",
+      title: "Dilek İmamoğlu'ndan dayanışma teşekkürü",
+      description:
+        "Tutuklu Cumhurbaşkanı Adayı Ekrem İmamoğlu’nun eşi Dilek İmamoğlu, eşinin İBB davasındaki savunması sürerken Silivri’ye gelerek dayanışma gösteren siyasi parti temsilcilerine ve davayı takip edenlere teşekkür etti.",
+      url: "https://dokuz8haber.net/dilek-imamoglundan-dayanisma-tesekkuru",
+    },
+    {
+      id: "cumhuriyet 4401c72b 'Özgür Özel ve İmamoğlu'ndan'",
+      title: "Özgür Özel ve İmamoğlu'ndan YENİ Parti Diyarbakır İl Başkanlığı Kongresi'ne mesaj",
+      description:
+        "YENİ Parti lideri Özgür Özel ile tutuklu cumhurbaşkanı adayı ve İBB Başkanı Ekrem İmamoğlu, partilerinin Diyarbakır İl Kongresi’ne gönderdikleri mesajlarda demokrasi, örgütlenme ve iktidar hedefi vurgusu yaptı.",
+      url: "https://www.cumhuriyet.com.tr/turkiye/ozgur-ozel-ve-imamoglu-ndan-yeni-parti-diyarbakir-il-baskanligi-kongresi-ne-mesaj-2549537",
+    },
+    {
+      id: "odatv e48acd83 'Ekrem İmamoğlu'ndan istinafa başvuru'",
+      title: "Ekrem İmamoğlu'ndan istinafa başvuru",
+      description:
+        "Ekrem İmamoğlu'nun avukatları, Tuzla'da eski belediye başkanı Şadi Yazıcı ile davasında verilen 2 yıl 1 ay hapis cezasını istinafa taşıdı.",
+      url: "https://www.odatv.com/siyaset/ekrem-imamoglunun-tuzla-davasi-istinaf-mahkemesinde-120166486",
+    },
+    {
+      id: "evrensel dc805607 'Adana’da İmamoğlu protestoları' (Ekrem; Adana is only the place of the protests)",
+      title: "Adana’da İmamoğlu protestoları nedeniyle 3 kişiye dava açıldı",
+      description:
+        "Adana’da İmamoğlu’na destek eylemlerine katılan üç kişi hakkında dava açıldı. İlk duruşma 2 Şubat 2026’da görülecek. Aynı soruşturmada 22 kişi hakkında takipsizlik kararı verildi.",
+      url: "https://www.evrensel.net/haber/6005220/adanada-imamoglu-protestolari-nedeniyle-3-kisiye-dava-acildi",
+    },
+  ];
+
+  describe("the district rows leave the gate", () => {
+    it.each(DISTRICT_ROWS)("$id", (row) => {
+      const out = classifyCategory(row.title, row.description, row.url);
+      expect(out).not.toBe("politika");
+      expect(out).not.toBe("son_dakika");
+    });
+
+    it.each([
+      ["İmamoğlu ilçesinde kaza: 2 yaralı", "the district word right after the name"],
+      ["Adana İmamoğlu'nda yangın", "'Adana' right before the name"],
+      ["Adana'nın İmamoğlu'nda yangın", "'Adana' in the genitive right before the name"],
+      ["ADANA İMAMOĞLU'NDA YANGIN", "all capitals"],
+      ["Adana  İmamoğlu'nda yangın", "two blanks between"],
+      ["Adana\tİmamoğlu'nda yangın", "a tab between"],
+      ["Adana Imamoglu'nda yangin", "ASCII spelling"],
+      ["Adana’nın İmamoğlu ilçesinde yangın", "typographic apostrophe"],
+    ])("%s (%s)", (title) => {
+      const out = cls(title);
+      expect(out).not.toBe("politika");
+      expect(out).not.toBe("son_dakika");
+    });
+
+    it("the district marker may sit in the description only, for a title hit", () => {
+      expect(
+        cls("İmamoğlu'nda hırsızlık", "Adana'nın İmamoğlu ilçesinde bir iş yerinden hırsızlık yapıldı."),
+      ).not.toBe("politika");
+    });
+
+    it("the district marker may sit in the title only, for a description hit", () => {
+      expect(cls("Adana İmamoğlu'nda yangın", "Yangın İmamoğlu'nda çıktı, ekipler müdahale etti.")).not.toBe(
+        "politika",
+      );
+    });
+
+    it("a description-only hit leaves too: no 'imamoglu' in the title at all", () => {
+      expect(
+        cls("Evler kurşunlandı", "Adana'nın İmamoğlu ilçesinde iki ev kurşunlandı. Şüpheliler aranıyor."),
+      ).not.toBe("politika");
+    });
+
+    it("the breaking-news prefix keeps its own rule: a genel remainder is son_dakika, any other keeps its category", () => {
+      // The prefix path is unchanged: only the politika verdict of the remainder moved.
+      expect(cls("Son dakika | Adana İmamoğlu'nda iki evi kurşunlayan 5 şüpheli tutuklandı")).toBe("son_dakika");
+      expect(cls("SON DAKİKA! Adana İmamoğlu'nda yangın")).toBe("yasam");
+    });
+  });
+
+  describe("the politician rows stay politika", () => {
+    it.each(POLITICIAN_ROWS)("$id", (row) => {
+      expect(classifyCategory(row.title, row.description, row.url)).toBe("politika");
+    });
+
+    it.each([
+      "İmamoğlu'nda yeni gelişme",
+      "Söz İmamoğlu'nda",
+      "Gözler İmamoğlu'nda",
+      "İmamoğlu'ndan açıklama",
+      "İmamoğlu'na destek",
+      "İmamoğlu’nun duruşması ertelendi",
+      "İMAMOĞLU'NDAN AÇIKLAMA",
+      "Imamoglu'ndan aciklama",
+    ])("a bare locative or case suffix is never the district: %s", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+
+    it("known limit: with no district word anywhere, a district headline is not told apart", () => {
+      // The haberport headline alone (no description) carries no district
+      // marker, so it stays politika. The fix reads context, not the suffix.
+      expect(cls("İmamoğlu'nda iki evi kurşunlayan zanlılar kamerayla tespit edilip yakalandı")).toBe("politika");
+    });
+
+    it("the description path stays politika for the politician", () => {
+      expect(cls("Tahliye kararına tepki", "İmamoğlu karara sert tepki gösterdi.")).toBe("politika");
+    });
+  });
+
+  describe("an Ekrem / Dilek / İBB marker beats the district marker", () => {
+    it.each([
+      ["Adana İmamoğlu'nda miting", "Ekrem İmamoğlu Adana İmamoğlu'nda halka seslendi."],
+      ["Adana İmamoğlu'nda hazırlık", "Dilek İmamoğlu, Adana İmamoğlu'ndaki kadınlarla buluştu."],
+      ["İmamoğlu ilçesinde buluşma", "İBB Başkanı İmamoğlu ilçedeki temsilcilerle görüştü."],
+      ["İmamoğlu ilçe başkanları toplandı", "İstanbul Büyükşehir Belediyesi Başkanı İmamoğlu ilçe başkanlarıyla bir araya geldi."],
+      ["Adana İmamoğlu'nda destek", "Cumhurbaşkanı adayı İmamoğlu için Adana İmamoğlu'nda imza kampanyası başlatıldı."],
+      ["Adana’nın İmamoğlu ilçesi", "İBB davası sürerken ilçede bildiri okundu."],
+    ])("%s", (title, description) => {
+      expect(cls(title, description)).toBe("politika");
+    });
+
+    it("the marker is read in the title as well", () => {
+      expect(cls("Ekrem İmamoğlu Adana İmamoğlu'nda", "Yağmur nedeniyle etkinlik iptal edildi.")).toBe("politika");
+    });
+  });
+
+  describe("the locative 'Adana'da' is not the district", () => {
+    it.each([
+      ["Adana’da İmamoğlu protestoları nedeniyle 3 kişiye dava açıldı", null],
+      ["Adana'da İmamoğlu için imza kampanyası", null],
+      ["Adana'daki İmamoğlu mitingi", "Katılım yüksek oldu."],
+      ["Adana'dan İmamoğlu'na destek", null],
+    ])("%s", (title, description) => {
+      expect(cls(title, description)).toBe("politika");
+    });
+  });
+
+  // Known residuals, measured in the hunt-59 replay and pinned so that a later wave
+  // that closes one changes the row on purpose: a dash between the two names is not
+  // the district context, and two other people / things named İmamoğlu still admit.
+  describe("known residuals (other İmamoğlus and a dash)", () => {
+    it.each([
+      ["Adana - İmamoğlu'nda sağanak hayatı olumsuz etkiledi", "a dash between the names (c11be711)"],
+      ["Adana İl Müftülüğüne atanan Lütfü İmamoğlu için vefa ve veda programı düzenlendi", "the mufti Lütfü İmamoğlu (65e45f3d)"],
+      ["Silivri açıklarında batan Tuğberk İmamoğlu isimli geminin mürettebatı aranıyor", "the ship Tuğberk İmamoğlu (93d4f8d6)"],
+    ])("%s still admits (%s)", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+  });
+
+  describe("an unrelated politika marker still admits a district row", () => {
+    it("an 'AK Parti' headline that names the district stays politika through its own stem", () => {
+      expect(cls("AK Parti İmamoğlu ilçe başkanı istifa etti")).toBe("politika");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // foldForCategory
 // ---------------------------------------------------------------------------
 
@@ -3145,6 +3367,13 @@ describe("robustness", () => {
       ["100k yılmaz blanks erdoğan", "yılmaz" + " ".repeat(99_980) + "erdoğan"],
       ["100k blank runs between yılmaz and erdoğan", ("yılmaz" + " ".repeat(94) + "erdoğan ").repeat(1_000)],
       ["100k erdoğan near-misses", "yılmaz, erdoğan yılmazer erdoğan nehir. erdoğan ".repeat(2_100).slice(0, 100_000)],
+      // hunt-59: the İmamoğlu district guard
+      ["100k imamoğlu", "İmamoğlu ".repeat(11_000).slice(0, 100_000)],
+      ["100k adana imamoğlu pairs", "Adana İmamoğlu ".repeat(6_600).slice(0, 100_000)],
+      ["100k adana blanks imamoğlu", "adana" + " ".repeat(99_980) + "imamoğlu"],
+      ["100k imamoğlu blanks ilçe", "imamoğlu" + " ".repeat(99_980) + "ilçe"],
+      ["100k imamoğlu blank runs ilçe", ("imamoğlu" + " ".repeat(90) + "ilçe ").repeat(1_000)],
+      ["100k adana'nın near-misses", "adana'nın adana'da adana imamoğlu'nda adana ve ".repeat(2_300).slice(0, 100_000)],
     ];
 
     it.each(inputs)("%s classifies in under 50 ms", (_name, text) => {

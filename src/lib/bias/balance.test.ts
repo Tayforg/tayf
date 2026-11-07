@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import { BLINDSPOT, zoneOf } from "@/lib/bias/config";
+import { BLINDSPOT, SURPRISE, zoneOf } from "@/lib/bias/config";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
 import {
+  BALANCE_BALANCED_MAX_SHARE,
   BALANCE_BALANCED_MIN,
   BALANCE_INSUFFICIENT_LABEL,
   BALANCE_LABELS,
@@ -212,6 +213,139 @@ describe("balanceFromZoneCounts — İki tarafa dengeli tier", () => {
     expect(balanceFromZoneCounts(zones(7, 1, 0))?.score).toBe(34);
     expect(balanceFromZoneCounts(zones(3, 3, 3))?.score).toBe(100);
     expect(balanceFromZoneCounts(zones(9, 0, 0))?.score).toBe(0);
+  });
+});
+
+// hunt-59 homefeed-2: "Dengeli kapsama" used to print for stories where one
+// zone held 65-75% of the voting sources, on the same page where the Sürpriz
+// caption (cross-spectrum.ts, SURPRISE.dominantShare) calls that zone dominant.
+// A score of 67+ now earns the word only when no zone reaches that same share.
+// The score number itself never changes.
+describe("balanceFromZoneCounts — Dengeli kapsama needs no dominant zone", () => {
+  it("pins the cap to the surprise detector's dominantShare (0.65)", () => {
+    expect(BALANCE_BALANCED_MAX_SHARE).toBe(SURPRISE.dominantShare);
+    expect(BALANCE_BALANCED_MAX_SHARE).toBe(0.65);
+  });
+
+  it("flips 6 / 1 / 1 (score 67, share 75%) to Tek tarafa yakın", () => {
+    expect(balanceFromZoneCounts(zones(6, 1, 1))).toEqual({
+      score: 67,
+      tier: "yakin",
+      label: "Tek tarafa yakın",
+      total: 8,
+    });
+  });
+
+  it("flips 21 / 4 / 4 (cluster 691fff02: score 71, share 72%) to Tek tarafa yakın", () => {
+    expect(balanceFromZoneCounts(zones(21, 4, 4))).toEqual({
+      score: 71,
+      tier: "yakin",
+      label: "Tek tarafa yakın",
+      total: 29,
+    });
+  });
+
+  it("flips 5 / 1 / 1 (score 72, share 71%) to Tek tarafa yakın", () => {
+    const b = balanceFromZoneCounts(zones(5, 1, 1));
+    expect(b?.score).toBe(72);
+    expect(b?.tier).toBe("yakin");
+  });
+
+  it("flips the dominant zone no matter which zone it is", () => {
+    expect(balanceFromZoneCounts(zones(1, 6, 1))?.tier).toBe("yakin");
+    expect(balanceFromZoneCounts(zones(1, 1, 6))?.tier).toBe("yakin");
+  });
+
+  it("keeps 9 / 2 / 3 (score 81, share 64.3%) Dengeli kapsama", () => {
+    const b = balanceFromZoneCounts(zones(9, 2, 3));
+    expect(9 / 14).toBeLessThan(BALANCE_BALANCED_MAX_SHARE);
+    expect(b).toEqual({
+      score: 81,
+      tier: "dengeli",
+      label: "Dengeli kapsama",
+      total: 14,
+    });
+  });
+
+  it("keeps 4 / 3 / 1 (share 50%) Dengeli kapsama", () => {
+    const b = balanceFromZoneCounts(zones(4, 3, 1));
+    expect(b?.score).toBe(89);
+    expect(b?.tier).toBe("dengeli");
+  });
+
+  it("keeps an even three-way split (score 100, share 33%) Dengeli kapsama at any size", () => {
+    // 1 / 1 / 1 would be the smallest even split but N = 3 is under the floor.
+    expect(balanceFromZoneCounts(zones(1, 1, 1))).toBeNull();
+    expect(balanceFromZoneCounts(zones(2, 2, 2))?.tier).toBe("dengeli");
+    expect(balanceFromZoneCounts(zones(3, 3, 3))?.tier).toBe("dengeli");
+    expect(balanceFromZoneCounts(zones(2, 2, 2))?.score).toBe(100);
+  });
+
+  it("cuts at exactly the dominant share: 13 / 4 / 3 (65%) flips, 9 / 2 / 3 (64.3%) does not", () => {
+    // Same boundary as detectCrossSpectrum: `share >= dominantShare` is dominant.
+    const atCut = balanceFromZoneCounts(zones(13, 4, 3));
+    expect(13 / 20).toBe(BALANCE_BALANCED_MAX_SHARE);
+    expect(atCut?.score).toBeGreaterThanOrEqual(BALANCE_BALANCED_MIN);
+    expect(atCut?.tier).toBe("yakin");
+    expect(balanceFromZoneCounts(zones(9, 2, 3))?.tier).toBe("dengeli");
+  });
+
+  it("is scale invariant: doubling 6 / 1 / 1 and 9 / 2 / 3 keeps each side of the cut", () => {
+    expect(balanceFromZoneCounts(zones(12, 2, 2))?.tier).toBe("yakin");
+    expect(balanceFromZoneCounts(zones(18, 4, 6))?.tier).toBe("dengeli");
+  });
+
+  it("never changes a score: only the word moves", () => {
+    expect(balanceFromZoneCounts(zones(6, 1, 1))?.score).toBe(67);
+    expect(balanceFromZoneCounts(zones(21, 4, 4))?.score).toBe(71);
+    expect(balanceFromZoneCounts(zones(9, 2, 3))?.score).toBe(81);
+    expect(balanceFromZoneCounts(zones(6, 2, 0))?.score).toBe(51);
+  });
+
+  it("leaves Tek tarafa yakın at the same 75% share unchanged: 6 / 2 / 0 (score 51)", () => {
+    // The old inconsistency: (6,1,1) scored 67 "dengeli" while (6,2,0) scored
+    // 51 "yakin", both 75% in one zone.
+    const b = balanceFromZoneCounts(zones(6, 2, 0));
+    expect(b?.tier).toBe("yakin");
+    expect(b?.label).toBe("Tek tarafa yakın");
+    expect(balanceFromZoneCounts(zones(6, 1, 1))?.label).toBe(b?.label);
+  });
+
+  it("leaves the iki and tek rules alone", () => {
+    expect(balanceFromZoneCounts(zones(5, 5, 0))?.tier).toBe("iki");
+    expect(balanceFromZoneCounts(zones(4, 0, 4))?.tier).toBe("iki");
+    expect(balanceFromZoneCounts(zones(9, 1, 0))?.tier).toBe("tek");
+    expect(balanceFromZoneCounts(zones(9, 0, 0))?.tier).toBe("tek");
+  });
+
+  it("names the new tier in the aria text", () => {
+    expect(balanceAriaLabel(balanceFromZoneCounts(zones(21, 4, 4)))).toBe(
+      "Denge puanı 71/100: Tek tarafa yakın",
+    );
+  });
+
+  it("keeps balanceTier score-only: the share rule lives in balanceFromZoneCounts", () => {
+    expect(balanceTier(67)).toBe("dengeli");
+    expect(balanceTier(71)).toBe("dengeli");
+  });
+
+  it("reaches the same verdict through balanceFromDistribution (card and cluster page path)", () => {
+    // pro_government 10 + gov_leaning 9 + 2 more iktidar-zone categories = 21,
+    // center 4, opposition_leaning 4: the 691fff02 zone vector.
+    const d: BiasDistribution = {
+      ...emptyBiasDistribution(),
+      pro_government: 10,
+      gov_leaning: 9,
+      state_media: 2,
+      center: 4,
+      opposition_leaning: 4,
+    };
+    expect(balanceFromDistribution(d)).toEqual({
+      score: 71,
+      tier: "yakin",
+      label: "Tek tarafa yakın",
+      total: 29,
+    });
   });
 });
 

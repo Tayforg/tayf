@@ -9,6 +9,7 @@ import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
 import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
+import { isLanguageIsolatedCluster } from "@/lib/sources/source-language";
 import {
   createReaderClient,
   createServerClient,
@@ -99,14 +100,20 @@ const W_VELOCITY = 1.0;
 // score). Turkish news consumption skews heavily toward breaking-news
 // surfacing — without this a 30-minute-old 3-source cluster loses the
 // score race to a 9h cluster with 15 sources, so fresh stories never
-// reach the fold. Drawn from the same 2+-source politics-majority
-// candidate pool as `ranked`, so the DB-level quality floor still
-// applies.
+// reach the fold. Drawn from the same 2+-article politics-majority
+// candidate pool as `ranked`, and a candidate must also carry at least
+// BREAKING_MIN_VOTING_SOURCES distinct voting outlets (h59-homefeed-3): the
+// DB-level floor counts articles, so one outlet plus a Haberler.com echo, or
+// a pair of niche and aggregator sources, passed it and took a breaking slot
+// although the spectrum has nothing to show for it.
 //
 // Window: 2 hours. Cap: 6 slots so a major-event burst (e.g. earthquake
 // night, election night) doesn't drown out the rest of the feed.
 const BREAKING_WINDOW_MS = 2 * 60 * 60 * 1000;
 const BREAKING_LIMIT = 6;
+// h59-homefeed-3: the Son Dakika strip needs two voting outlets (kind outlet or
+// wire, isVotingKind), counted over distinct source ids.
+const BREAKING_MIN_VOTING_SOURCES = 2;
 
 /**
  * A card source plus its `kind`, so consumers outside the card (RSS and
@@ -362,6 +369,16 @@ async function fetchPoliticsClusters(
       const hits = members.filter((m) => isPoliticsMember(m)).length;
       if (hits / members.length < POLITICS_THRESHOLD) continue;
 
+      // h59-english-1: a cluster whose every member (voting or not) is an
+      // English-language outlet formed among English articles only, so it
+      // carries no Bağımsız or Muhalefet outlet because none could have matched
+      // it, not because none covered the event. It leaves the ranked list, the
+      // Son Dakika strip and every reader of this fetcher (feeds, digests,
+      // social). Search, source pages, cluster pages and sitemaps still list it.
+      // The embed has no slug, so the display name decides (sourceLang's
+      // name fallback). A member with no source row is unknown, not English.
+      if (isLanguageIsolatedCluster(members.map((m) => m.sources))) continue;
+
       const { bundle, dedupedMembers } = buildClusterBundle(c, members, health, nowMs);
 
       // Stash the deduped members on the bundle so the scorer below can
@@ -393,12 +410,15 @@ async function fetchPoliticsClusters(
     // first) because score order defeats the purpose here — the strip
     // is a recency guarantee, not a ranking. Capped at BREAKING_LIMIT
     // so a major-event burst doesn't push every other section below
-    // the fold.
+    // the fold. h59-homefeed-3: a candidate needs BREAKING_MIN_VOTING_SOURCES
+    // distinct voting sources; one left out can still rank in `bundles`, and
+    // then the page's breakingIds dedupe no longer removes it from the list.
     const breakingBundles = bundles
       .filter(
         (b) =>
           nowMs - new Date(b.cluster.first_published).getTime() <
-          BREAKING_WINDOW_MS
+            BREAKING_WINDOW_MS &&
+          countVotingSources(b.sources) >= BREAKING_MIN_VOTING_SOURCES
       )
       .sort(
         (a, b) =>
@@ -700,6 +720,17 @@ export function buildClusterBundle(
   };
 
   return { bundle, dedupedMembers };
+}
+
+// Distinct voting sources of a bundle (h59-homefeed-3). `bundle.sources` is
+// already deduped by source id; the Set keeps that true for any caller. A
+// missing kind counts as voting, exactly as isVotingKind decides it.
+function countVotingSources(sources: readonly BundleSource[]): number {
+  const voting = new Set<string>();
+  for (const s of sources) {
+    if (isVotingKind(s.kind)) voting.add(s.id);
+  }
+  return voting.size;
 }
 
 function normalizeDistribution(raw: unknown): BiasDistribution {

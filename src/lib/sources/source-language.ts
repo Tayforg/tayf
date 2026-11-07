@@ -28,11 +28,16 @@
 //   - Cluster page (src/app/cluster/[id]/page.tsx): the <h1> and the "Özgün
 //     başlık" disclosure when EVERY member is English (clusterTextLang; the
 //     <h1> is skipped when title_method is 'llm', because that neutral rewrite
-//     is Turkish), and the summary <p> by the seed outlet's display name. The
-//     hero image alt is the cluster headline (never a member's own title), so
-//     ClusterCardImage gets the <h1>'s lang: 'en' for an all-English cluster
-//     whose headline is extractive, nothing for a mixed cluster, the LLM
-//     rewrite or the "Haber" fallback.
+//     is Turkish), and the summary <p> by the seed outlet's display name. A
+//     mixed cluster's <h1> takes headlineLang, the home card's rule (h59-english-2).
+//     The disclosure is the seed member's own title, so it takes the same member
+//     rule as the <h1>: clusterTextLang, else headlineLang over the members
+//     (react-h59-1).
+//     The hero image alt is the cluster headline (never a member's own title),
+//     so ClusterCardImage gets the <h1>'s lang: 'en' for an all-English cluster
+//     whose headline is extractive or a mixed cluster whose headline is an
+//     English member's own title, nothing for the LLM rewrite, a Turkish
+//     headline or the "Haber" fallback.
 //   - src/components/story/framing-comparison.tsx: each entry's source name and
 //     headline, by slug. The name span is CSS-uppercased, and under lang=tr that
 //     turns 'Daily Sabah' into 'DAİLY SABAH'; lang="en" fixes the glyphs too.
@@ -45,6 +50,12 @@
 //     plain-text fallback (h25-visual-1).
 //   - The cluster page's "Toplayıcı / niş kaynaklar" list (the uppercase name
 //     span of each non-voting member), by slug.
+//   - h59-english-1: isLanguageIsolatedCluster (every member English) switches
+//     the zone-absence wording of the cluster page, the story timeline, the
+//     read-across slot, the framing block and the Manşet Kartı to the
+//     "not compared with Turkish sources" copy below, sets the NewsArticle
+//     inLanguage to 'en', and keeps the cluster off the home feed
+//     (politics-query.ts, by display name: the embed has no slug).
 //
 // NOT wired: the /timeline rows (src/app/timeline/page.tsx). Its ClusterRow
 // (src/lib/clusters/timeline-query.ts) carries no member sources, so
@@ -141,6 +152,45 @@ export function clusterTextLang(
   }
   return "en";
 }
+
+/**
+ * h59-english-1: true when EVERY member source of a cluster (voting or not) is
+ * an English-language outlet, i.e. `clusterTextLang(sources) === 'en'`. A mixed
+ * or Turkish cluster, an empty list and any null/unknown entry are not
+ * isolated. Never throws.
+ *
+ * Such a cluster formed among English articles only: the entity-text floor keeps
+ * English and Turkish articles about one event apart, so it carries no Bağımsız
+ * or Muhalefet outlet because none could have matched it, not because none
+ * covered the event (Turkish clusters on the same event carry both). The pages
+ * therefore must not print a zone-absence claim for it (cluster page, timeline,
+ * read-across, framing block, Manşet Kartı), and the home feed leaves it out.
+ * Callers hand it whatever source shape they hold: the cluster page has slugs,
+ * the PostgREST embed in politics-query.ts only has names (the name fallback of
+ * `sourceLang`).
+ */
+export function isLanguageIsolatedCluster(
+  sources: ReadonlyArray<
+    { slug?: string | null; name?: string | null } | null | undefined
+  >,
+): boolean {
+  return clusterTextLang(sources) === "en";
+}
+
+/**
+ * The one note an English-only cluster page prints where it would otherwise
+ * claim a zone has no coverage (the read-across slot; the framing columns print
+ * ENGLISH_ONLY_EMPTY_COLUMN).
+ */
+export const ENGLISH_ONLY_NOTE =
+  "Bu hikâyeyi yalnızca İngilizce yayın yapan kaynaklar yazdı. Türkçe haberlerle eşleşmediği için bölge karşılaştırması yapılamıyor.";
+
+/** An empty framing column of an English-only cluster. */
+export const ENGLISH_ONLY_EMPTY_COLUMN = "— Türkçe kaynaklarla karşılaştırılmadı —";
+
+/** An empty zone row of an English-only cluster's Manşet Kartı. */
+export const ENGLISH_ONLY_KART_EMPTY_ZONE =
+  "— karşılaştırma yok (yalnızca İngilizce kaynaklar)";
 
 /** Trims and collapses whitespace runs; anything that is not a string is "". */
 function normaliseTitle(title: unknown): string {

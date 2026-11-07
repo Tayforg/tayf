@@ -186,3 +186,23 @@ export function buildClusterCollectionPage(args: {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// h59-english-1 — NewsArticle.inLanguage of /cluster/[id].
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure. The NewsArticle `inLanguage` of a cluster page: `"en"` when every
+ * member is an English-language outlet (`languageIsolated`, from
+ * `isLanguageIsolatedCluster`) AND the page's <h1> is an English member
+ * headline (`headlineLang`, the page's existing decision: undefined for the
+ * Turkish LLM rewrite and the "Haber" fallback), otherwise `"tr-TR"`, the
+ * document's own language. A mixed cluster stays `"tr-TR"` even when its <h1>
+ * is English: the article as a whole is Turkish-site text.
+ */
+export function newsArticleInLanguage(args: {
+  languageIsolated: boolean;
+  headlineLang: "en" | undefined;
+}): "en" | "tr-TR" {
+  return args.languageIsolated && args.headlineLang === "en" ? "en" : "tr-TR";
+}

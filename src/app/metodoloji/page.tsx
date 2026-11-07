@@ -6,6 +6,7 @@ import type { MediaDnaZone } from "@/types";
 import { PageHero } from "@/components/ui/page-hero";
 import { CorrectionForm } from "@/components/story/correction-form";
 import {
+  BALANCE_BALANCED_MAX_SHARE,
   BALANCE_BALANCED_MIN,
   BALANCE_LABELS,
   BALANCE_MIN_SOURCES,
@@ -200,6 +201,9 @@ export default async function MethodologyPage() {
   const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
   const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
   const surpriseSharePct = Math.round(SURPRISE.dominantShare * 100);
+  // hunt-59 homefeed-2: "Dengeli kapsama" needs a score of BALANCE_BALANCED_MIN
+  // AND no zone at BALANCE_BALANCED_MAX_SHARE (= SURPRISE.dominantShare) or more.
+  const balancedMaxSharePct = Math.round(BALANCE_BALANCED_MAX_SHARE * 100);
   const nearBlindspotPct = Math.round(NEAR_BLINDSPOT_MIN_SHARE * 100);
   const wireRatioPct = Math.round(WIRE_UNIQUE_HASH_RATIO * 100);
   // Computed, not asserted, and over the ACTIVE sources only: /sources counts
@@ -430,7 +434,9 @@ export default async function MethodologyPage() {
           <dl className="grid gap-3 sm:grid-cols-2">
             <div className={ruleCard}>
               <dt className={ruleTerm}>{BALANCE_LABELS.dengeli}</dt>
-              <dd className={ruleDef}>Puan ≥ {BALANCE_BALANCED_MIN}</dd>
+              <dd className={ruleDef}>
+                {`Puan ≥ ${BALANCE_BALANCED_MIN} ve hiçbir bölge kaynakların %${balancedMaxSharePct}'ine ulaşmıyor`}
+              </dd>
             </div>
             <div className={ruleCard}>
               <dt className={ruleTerm}>{BALANCE_LABELS.iki}</dt>
@@ -445,7 +451,8 @@ export default async function MethodologyPage() {
               <dt className={ruleTerm}>{BALANCE_LABELS.yakin}</dt>
               <dd className={ruleDef}>
                 {BALANCE_ONE_SIDED_MAX + 1}–{BALANCE_BALANCED_MIN - 1} (iki
-                bölgeye dengeli bölünme hariç)
+                bölgeye dengeli bölünme hariç){" "}
+                {`(ya da puan ≥ ${BALANCE_BALANCED_MIN} iken bir bölge %${balancedMaxSharePct} ve üstü)`}
               </dd>
             </div>
             <div className={ruleCard}>

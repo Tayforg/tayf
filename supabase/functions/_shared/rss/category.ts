@@ -46,9 +46,11 @@
 //          other non-state electorate, in a title that is not sport), the
 //          presidency ('cumhurbaşkan' unless a sporting-event noun follows),
 //          a party office ('genel başkan' / 'il başkan') together with a party
-//          marker, a state senate, and the footballer 'Dervişoğlu' unless the
-//          title is sport. It beats sport.
-//        * text hit: POLITIKA_DESC_RE in the DESCRIPTION, a body (belediye /
+//          marker, a state senate, the politician 'İmamoğlu' unless the text
+//          names Adana's İmamoğlu district (politicianImamoglu, hunt-59), and
+//          the footballer 'Dervişoğlu' unless the title is sport. It beats sport.
+//        * text hit: POLITIKA_DESC_RE in the DESCRIPTION (and the same
+//          'İmamoğlu' guard), a body (belediye /
 //          İBB, a Turkish party acronym, a party office with a party word)
 //          together with an enforcement action, a coalition together with a
 //          party. It does NOT beat a sports title (SPOR_RE, a goal, or a
@@ -275,6 +277,47 @@
 //
 // Forward-only: it changes the category of NEW rows. `content_hash` does not
 // depend on the category, and nothing is re-enqueued.
+//
+// hunt-59 (2026-11-07) İmamoğlu, the district: the bare stem 'imamoglu' was a
+// politika hit in the title and in the description, so a crime story from Adana's
+// İmamoğlu ilçe ('Adana İmamoğlu'nda iki evi kurşunlayan 5 şüpheliden 3'ü
+// tutuklandı', cluster c828192c: haberport 8814d25a, haberler-com bf4984fa and
+// 28d3d5e5) was filed as politika and sat in the home Son Dakika strip. The stem is
+// IMAMOGLU_RE now, with a guard in the style of stateMeclis (politicianImamoglu, in
+// the title hit and in the text hit): a hit counts unless the whole text names the
+// district (IMAMOGLU_DISTRICT_RE: 'Adana' or 'Adana'nın' right before the name, or
+// 'ilçe' right after it) and carries no politician marker (IMAMOGLU_PERSON_RE:
+// 'Ekrem' / 'Dilek' before the name, 'İBB', 'büyükşehir', 'cumhurbaşkanı aday').
+// The guard reads context, NOT the locative: "İBB davası 98. gün: Söz İmamoğlu'nda"
+// and "Gözler İmamoğlu'nda" are Ekrem and carry the same '-nda'.
+//
+// The district marker takes 'Adana' bare or in the genitive ('Adana'nın İmamoğlu
+// ilçesinde'), not any apostrophe suffix: with every suffix ('Adana'da') the
+// replay below also drops 'Adana'da İmamoğlu protestoları nedeniyle 3 kişiye dava
+// açıldı' (dc805607, evrensel, stored son_dakika), which is Ekrem İmamoğlu's
+// supporters in court, and that one row is the only difference between the two.
+//
+// Replay, read-only: HEAD (376e79e) against this module over every stored row
+// published 2026-09-23 20:00Z .. 2026-11-07 20:00Z that names İmamoğlu in the title
+// or the description (2,227 rows). 22 rows change, all 22 leave politika (20 to
+// genel, 2 to teknoloji by an unrelated keyword) and so leave the gate; 0 rows
+// enter it, and the other 2,205 keep their category. All 22 are Adana İmamoğlu
+// district rows, read by hand: 16 rows of the 28-29 September storm and tornado
+// (20 thousand chicks died at the Ağzıkaraca farms), 'Adana'nın Kozan ve İmamoğlu
+// ilçelerinde 11 hükümlü ve 1 firari şüpheli yakalandı', the 6 October weapons
+// operation (2 rows, one of them 'İmamoğlu İlçe Emniyet Müdürlüğü'), and the 3 rows
+// of the 7 November shootings (the 30-day window holds only these 3).
+// Known residuals, pinned in the tests: 'Adana - İmamoğlu'nda sağanak hayatı
+// olumsuz etkiledi' (c11be711, a dash between the two names), 'Adana İl Müftülüğü
+// Lütfü İmamoğlu' and the ship 'Tuğberk İmamoğlu' (3 rows) are other İmamoğlus and
+// still admit, as they did before.
+//
+// Linear: every pattern starts at a literal word start; the only unbounded part is
+// one run of white space between two literals, and the runs of two hits are
+// disjoint. The 100k-character tests time the worst shapes (a blank run between
+// 'adana' and 'imamoğlu', and between 'imamoğlu' and 'ilçe').
+//
+// Forward-only, like the rest of this module: no stored row is re-categorised.
 
 export type NewsCategory =
   | "son_dakika"
@@ -395,7 +438,8 @@ const POLITIKA_STEMS = [
   // federations have deputy chairs too ('Galatasaray Sportif A.Ş.
   // Başkanvekili') and politika runs before spor.
   "grup baskanvekil", "grup baskan vekil",
-  "ozgur ozel", "imamoglu", "mansur yavas", "kilicdaroglu", "davutoglu",
+  // 'imamoglu' is IMAMOGLU_RE (hunt-59): Adana has a district of that name.
+  "ozgur ozel", "mansur yavas", "kilicdaroglu", "davutoglu",
   "bakirhan",
   // The Öcalan / İmralı process (hunt-20). A bare 'imrali' is NOT a stem: it
   // is also a place and a prison; 'buldan' and 'sancar' only as the full names
@@ -611,6 +655,23 @@ const NON_STATE_ELECTORATE_RE = new RegExp(
 // 'oy' and 'seçim' rules never reached. A word start, any suffix ('meclisi',
 // "Meclis'te", 'meclisinde').
 const MECLIS_RE = /\bmeclis/;
+// 'İmamoğlu' is the politician (Ekrem, Dilek) unless the text names Adana's
+// İmamoğlu DISTRICT and no Ekrem / Dilek / İBB marker (hunt-59: a crime story from
+// 'Adana'nın İmamoğlu ilçesinde' was filed as politika). It was a POLITIKA_STEMS
+// entry; a word start, any suffix. The district is read from context, never from
+// the locative: 'Söz İmamoğlu'nda' and 'Gözler İmamoğlu'nda' (the İBB trial) end in
+// the same '-nda'. The district context is 'Adana' (bare, or the genitive
+// 'Adana'nın', the only case a district story uses; the locative 'Adana'da
+// İmamoğlu protestoları' is the politician) right before the name, or the word
+// 'ilçe' (ilçesi, ilçesinde, ilçelerinde) right after it. The politician markers
+// are 'Ekrem' / 'Dilek' before the name, 'İBB', 'büyükşehir' (the İstanbul
+// Metropolitan Municipality) and 'cumhurbaşkanı aday'. Linear: no quantifier sits
+// inside a repeated group; each pattern starts at a literal word start and its
+// only unbounded part is one run of white space.
+const IMAMOGLU_RE = /\bimamoglu/;
+const IMAMOGLU_DISTRICT_RE = /\badana(?:'nin)?\s+imamoglu|\bimamoglu\s+ilce/;
+const IMAMOGLU_PERSON_RE =
+  /\b(?:ekrem|dilek)\s+imamoglu|\bibb\b|buyuksehir|cumhurbaskani\s+aday/;
 // The organisations whose 'meclis' is not the state's: ORG_ELECTORATE_RE plus İTO,
 // the Istanbul chamber's own acronym. Two of the ten İTO members of cluster
 // 00e97812 (Aydınlık, OdaTV) never write 'Oda' or 'TSO', only 'İTO'. 'İTO' is NOT
@@ -945,6 +1006,12 @@ function stateMeclis(text: string, hay: string): boolean {
   return MECLIS_RE.test(text) && !(MECLIS_ORG_RE.test(hay) && !STATE_ASSEMBLY_RE.test(hay));
 }
 
+// 'imamoglu' in the given text is the politician unless the whole text names
+// Adana's İmamoğlu district and no Ekrem / Dilek / İBB marker (see IMAMOGLU_RE).
+function politicianImamoglu(text: string, hay: string): boolean {
+  return IMAMOGLU_RE.test(text) && !(IMAMOGLU_DISTRICT_RE.test(hay) && !IMAMOGLU_PERSON_RE.test(hay));
+}
+
 // 'seçim' in the title is a state election unless the title is sport, the text
 // names a non-state electorate, or it is the choice sense (see SECIM_TITLE_RE).
 function secimInTitle(titleHay: string, hay: string, titleSport: boolean): boolean {
@@ -997,6 +1064,7 @@ function classifyBody(
     POLITIKA_TITLE_RE.test(titleHay) ||
     voteIn(titleHay, titleHay, hay) ||
     stateMeclis(titleHay, hay) ||
+    politicianImamoglu(titleHay, hay) ||
     secimInTitle(titleHay, hay, titleSport) ||
     cumhurbaskanInTitle(titleHay) ||
     (PARTY_OFFICE_TITLE_RE.test(titleHay) &&
@@ -1007,6 +1075,7 @@ function classifyBody(
     POLITIKA_DESC_RE.test(descHay) ||
     voteIn(descHay, titleHay, hay) ||
     stateMeclis(descHay, hay) ||
+    politicianImamoglu(descHay, hay) ||
     ((COMPOUND_BODY_RE.test(hay) ||
       COMPOUND_PARTY_RE.test(hay) ||
       TIP_MEMBER_RE.test(lower) ||

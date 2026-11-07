@@ -4706,3 +4706,317 @@ describe("ClusterDetailPage — blindspot share text qualifies 'sadece' (h57-out
     expect(String(findPropsOfType(tree, ShareButton)!.text)).toContain("spektrumda sadece iktidar");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h59-english-1: all-English clusters. fbb078b4 ('Erdoğan visits Seoul with $15
+// billion trade goal': hurriyet-daily-news, trt-world, daily-sabah, a-news) and
+// 26e8abf9 were written only by English-language outlets, so no Bağımsız or
+// Muhalefet outlet could have matched them. The page must not claim those zones
+// have no coverage; it prints one note, and the JSON-LD says inLanguage 'en'.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — all-English cluster (h59-english-1)", () => {
+  const NOTE =
+    "Bu hikâyeyi yalnızca İngilizce yayın yapan kaynaklar yazdı. Türkçe haberlerle eşleşmediği için bölge karşılaştırması yapılamıyor.";
+  const NOT_COMPARED = "— Türkçe kaynaklarla karşılaştırılmadı —";
+  const ABSENCE = [
+    "bu kümede haber yok",
+    "henüz haber yok",
+    "bu tarafta sessizlik",
+    "bu tarafta haber yok",
+    "spektruma sayılan kaynaklardan haber yok",
+    "akışı şu an sorunlu",
+  ];
+  const EN_HEADLINE = "Erdoğan visits Seoul with $15 billion trade goal";
+
+  // Real slugs, names and biases of fbb078b4's members (read-only prod, 2026-11-07).
+  const FIXTURE_A = [
+    { slug: "hurriyet-daily-news", name: "Hürriyet Daily News", bias: "gov_leaning" as const },
+    { slug: "a-news", name: "A News", bias: "pro_government" as const },
+    { slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government" as const },
+    { slug: "trt-world", name: "TRT World", bias: "state_media" as const },
+  ];
+  // 26e8abf9.
+  const FIXTURE_B = [
+    { slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government" as const },
+    { slug: "hurriyet-daily-news", name: "Hürriyet Daily News", bias: "gov_leaning" as const },
+    { slug: "a-news", name: "A News", bias: "pro_government" as const },
+  ];
+  // Controls: a mixed cluster (a-haber + daily-sabah + a Turkish outlet) and a Turkish pro-government cluster.
+  const MIXED = [
+    { slug: "a-haber", name: "A Haber", bias: "pro_government" as const },
+    { slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government" as const },
+    { slug: "sabah", name: "Sabah", bias: "pro_government" as const },
+  ];
+  const TURKISH = [
+    { slug: "sabah", name: "Sabah", bias: "pro_government" as const },
+    { slug: "yeni-safak", name: "Yeni Şafak", bias: "pro_government" as const },
+    { slug: "a-haber", name: "A Haber", bias: "pro_government" as const },
+  ];
+
+  function detailOf(
+    sources: Array<{ slug: string; name: string; bias: Source["bias"] }>,
+    over: { titleMethod?: ClusterDetail["cluster"]["title_method"]; english?: boolean } = {},
+  ): ClusterDetail {
+    const detail = langDetail({ sources, titleMethod: over.titleMethod ?? "extractive" });
+    if (over.english) detail.cluster.title_tr = EN_HEADLINE;
+    return detail;
+  }
+
+  /** Every text the cluster page prints for the three zone-wording surfaces, as HTML. */
+  async function surfaces(detail: ClusterDetail) {
+    const tree = await renderTree(detail);
+    const html = (type: unknown) => {
+      const el = findElementOfType(tree, type);
+      return el ? renderToStaticMarkup(el as unknown as ReactElement) : "";
+    };
+    return {
+      tree,
+      timeline: html(StoryTimeline),
+      readAcross: html(ReadAcrossSpectrum),
+      framing: html(FramingComparison),
+    };
+  }
+
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+  it.each([
+    ["A", FIXTURE_A],
+    ["B", FIXTURE_B],
+  ])("fixture %s: threads the isolation into the timeline, the read-across and the framing block", async (_label, sources) => {
+    const { tree } = await surfaces(detailOf(sources));
+    expect(findElementOfType(tree, ReadAcrossSpectrum)!.props.languageIsolated).toBe(true);
+    expect(findElementOfType(tree, FramingComparison)!.props.languageIsolated).toBe(true);
+    const timeline = findElementOfType(tree, StoryTimeline)!.props.timeline as StoryTimelineData;
+    expect(timeline.summary).not.toMatch(/haber yok|sorunlu/);
+  });
+
+  it.each([
+    ["A", FIXTURE_A],
+    ["B", FIXTURE_B],
+  ])("fixture %s: no surface prints a zone-absence claim, the one note shows once and the not-compared columns show", async (_label, sources) => {
+    const { timeline, readAcross, framing } = await surfaces(detailOf(sources));
+    for (const html of [timeline, readAcross, framing]) {
+      for (const needle of ABSENCE) expect(html).not.toContain(needle);
+    }
+    // The read-across slot carries the one note; the framing block only prints
+    // the not-compared column text (copy-2 / react-h59-3: it used to repeat it).
+    expect(readAcross).toContain(NOTE);
+    expect(framing).not.toContain(NOTE);
+    expect(count(timeline + readAcross + framing, NOTE)).toBe(1);
+    expect(count(framing, NOT_COMPARED)).toBe(2);
+    // The spectrum bar, the member lists and the zone headings stay.
+    expect(framing).toContain(`${sources.length} kaynağın kendi manşetleri`);
+    expect(framing).toContain('aria-label="İktidar"');
+  });
+
+  it("fixture A does not consult feed health: nothing is worded as an absence", async () => {
+    await surfaces(detailOf(FIXTURE_A));
+    expect(getZoneFeedHealth).not.toHaveBeenCalled();
+  });
+
+  it("fixture A keeps the MediaDna block with every member lit", async () => {
+    const { tree } = await surfaces(detailOf(FIXTURE_A));
+    const dna = findElementOfType(tree, MediaDna);
+    expect(dna).not.toBeNull();
+    expect([...(dna!.props.highlightSlugs as Set<string>)].sort()).toEqual(
+      ["a-news", "daily-sabah", "hurriyet-daily-news", "trt-world"],
+    );
+  });
+
+  it("fixture A: JSON-LD inLanguage is 'en' when the h1 is the English member headline", async () => {
+    const { tree } = await surfaces(detailOf(FIXTURE_A, { english: true }));
+    expect(JSON.parse(findJsonLd(tree)!).inLanguage).toBe("en");
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("fixture A: JSON-LD inLanguage stays 'tr-TR' when the headline is the Turkish LLM rewrite", async () => {
+    const { tree } = await surfaces(detailOf(FIXTURE_A, { titleMethod: "llm" }));
+    expect(JSON.parse(findJsonLd(tree)!).inLanguage).toBe("tr-TR");
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("controls: a mixed cluster keeps today's wording on every surface and inLanguage 'tr-TR'", async () => {
+    const { tree, timeline, readAcross, framing } = await surfaces(detailOf(MIXED));
+    expect(findElementOfType(tree, ReadAcrossSpectrum)!.props.languageIsolated).toBe(false);
+    expect(findElementOfType(tree, FramingComparison)!.props.languageIsolated).toBe(false);
+    expect(timeline).toContain("Bağımsız kaynaklardan bu kümede haber yok");
+    expect(timeline).toContain("Muhalefet kaynaklarından bu kümede haber yok");
+    expect(readAcross).toContain("Muhalefet tarafında henüz haber yok");
+    expect(count(framing, "— bu tarafta sessizlik —")).toBe(2);
+    for (const html of [timeline, readAcross, framing]) {
+      expect(html).not.toContain(NOTE);
+      expect(html).not.toContain(NOT_COMPARED);
+    }
+    expect(JSON.parse(findJsonLd(tree)!).inLanguage).toBe("tr-TR");
+  });
+
+  it("controls: a Turkish pro-government cluster keeps today's wording and inLanguage 'tr-TR'", async () => {
+    const { tree, timeline, readAcross, framing } = await surfaces(detailOf(TURKISH));
+    expect(findElementOfType(tree, ReadAcrossSpectrum)!.props.languageIsolated).toBe(false);
+    expect(findElementOfType(tree, FramingComparison)!.props.languageIsolated).toBe(false);
+    expect(timeline).toContain("bu kümede haber yok");
+    expect(readAcross).toContain("henüz haber yok");
+    expect(framing).toContain("bu tarafta sessizlik");
+    expect(JSON.parse(findJsonLd(tree)!).inLanguage).toBe("tr-TR");
+  });
+
+  it("controls: a mixed cluster still consults feed health for its absent zones", async () => {
+    await surfaces(detailOf(MIXED));
+    expect(getZoneFeedHealth).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h59-english-2: 11 live mixed Turkish + English clusters (749b0eea: 'NATO chief
+// visits Türkiye ahead of key summit', Daily Sabah + A Haber) show an English
+// member's headline as the <h1> with no lang attribute, because the page only set
+// it when EVERY member is English. A mixed cluster now tags the <h1> (and the hero
+// image alt, which is the same text) with the home card's rule: `headlineLang`,
+// 'en' only when an English member's title IS the headline and no Turkish member
+// carries it too.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — h1 lang for a mixed cluster (h59-english-2)", () => {
+  const NATO_EN = "NATO chief visits Türkiye ahead of key summit";
+  const NATO_TR = "NATO Genel Sekreteri Rutte Türkiye yolcusu: Başkan Erdoğan ile görüşecek";
+  const MIXED_SOURCES = [
+    { slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government" as const },
+    { slug: "a-haber", name: "A Haber", bias: "pro_government" as const },
+  ];
+
+  /** 749b0eea-shaped detail: member 0 is the English outlet, member 1 the Turkish one. */
+  function mixedDetail(over: {
+    titleTr: string;
+    enTitle?: string;
+    trTitle?: string;
+    titleMethod?: ClusterDetail["cluster"]["title_method"];
+    sources?: Array<{ slug: string; name: string; bias: Source["bias"]; kind?: Source["kind"] }>;
+    image?: boolean;
+  }): ClusterDetail {
+    const detail = langDetail({
+      sources: over.sources ?? MIXED_SOURCES,
+      titleMethod: over.titleMethod ?? "extractive",
+      imageUrlOnFirst: over.image ? "https://img.example/hero.jpg" : null,
+    });
+    detail.cluster.title_tr = over.titleTr;
+    detail.members[0]!.article.title = over.enTitle ?? NATO_EN;
+    if (detail.members[1]) detail.members[1].article.title = over.trTitle ?? NATO_TR;
+    return detail;
+  }
+
+  it("749b0eea: the h1 is lang=en when title_tr is the Daily Sabah member's title", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: NATO_EN }));
+    expect(findH1Text(tree)).toBe(NATO_EN);
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("the hero image shares the h1's language (its alt is the same English text)", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: NATO_EN, image: true }));
+    const hero = findPropsOfType(tree, ClusterCardImage);
+    expect(hero!.alt).toBe(NATO_EN);
+    expect(hero!.lang).toBe("en");
+  });
+
+  it("matches the headline once trimmed and whitespace-collapsed, like the home card", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: `  ${NATO_EN}  `, enTitle: NATO_EN.replace(" chief ", "  chief ") }));
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("no lang when a Turkish member has the identical title (the claim is vetoed)", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: NATO_EN, trTitle: NATO_EN }));
+    expect(h1Of(tree)).not.toBeNull();
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("no lang when the headline is a Turkish member's title", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: NATO_TR }));
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("no lang when the headline matches no member (the existing mixed-cluster case)", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: "Erdoğan Seul'de 15 milyar dolarlık ticaret hedefi açıkladı" }));
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("skipped for the Turkish LLM rewrite, even if the rewrite happens to equal an English member's title", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: NATO_EN, titleMethod: "llm" }));
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("skipped for the hero image too in the LLM case", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: NATO_EN, titleMethod: "llm", image: true }));
+    expect(findPropsOfType(tree, ClusterCardImage)!.lang).toBeUndefined();
+  });
+
+  it("skipped for the Turkish 'Haber' fallback of a headline-less cluster", async () => {
+    const detail = mixedDetail({ titleTr: "&nbsp" });
+    const tree = await renderTree(detail);
+    expect(findH1Text(tree)).toBe("Haber");
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("an English non-voting member counts like any member (the home card's rule is by title, not by vote)", async () => {
+    const tree = await renderTree(
+      mixedDetail({
+        titleTr: NATO_EN,
+        sources: [
+          { slug: "mfa-turkey", name: "MFA Turkey", bias: "pro_government" as const, kind: "niche" as const },
+          { slug: "a-haber", name: "A Haber", bias: "pro_government" as const },
+        ],
+      }),
+    );
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("the JSON-LD of a mixed cluster stays tr-TR even with an English h1", async () => {
+    const tree = await renderTree(mixedDetail({ titleTr: NATO_EN }));
+    expect(JSON.parse(findJsonLd(tree)!).inLanguage).toBe("tr-TR");
+  });
+
+  it("controls: an all-English cluster and a Turkish cluster are unchanged", async () => {
+    const english = await renderTree(
+      langDetail({ sources: FBB078B4_SOURCES, titleMethod: "extractive" }),
+    );
+    expect(h1Of(english)?.props.lang).toBe("en");
+    const turkish = await renderTree(
+      langDetail({ sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }] }),
+    );
+    expect(h1Of(turkish)?.props.lang).toBeUndefined();
+  });
+
+  // react-h59-1: the 'Özgün başlık' disclosure is the seed member's own title,
+  // so in a mixed cluster it takes the h1's member rule (headlineLang over the
+  // members), not the all-English `textLang`. 749b0eea stores the English seed in
+  // title_tr; once a re-pick selects the Turkish title, title_original becomes
+  // that English seed and the disclosure shows a full English sentence under
+  // html lang=tr (WCAG 3.1.2).
+  const originalSpan = (tree: unknown, text: string) =>
+    findElement(tree, (el) => el.type === "span" && el.props.children === text);
+
+  it("(a) tags the 'Özgün başlık' span lang=en when it is an English member's title and the h1 is the Turkish one", async () => {
+    const detail = mixedDetail({ titleTr: NATO_TR });
+    detail.cluster.title_original = NATO_EN;
+    const tree = await renderTree(detail);
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+    const span = originalSpan(tree, NATO_EN);
+    expect(span).not.toBeNull();
+    expect(span?.props.lang).toBe("en");
+  });
+
+  it("(b) control: no lang on the span when a Turkish member carries the same text (the claim is vetoed)", async () => {
+    const detail = mixedDetail({ titleTr: NATO_TR, trTitle: NATO_EN });
+    detail.cluster.title_original = NATO_EN;
+    const tree = await renderTree(detail);
+    const span = originalSpan(tree, NATO_EN);
+    expect(span).not.toBeNull();
+    expect(span?.props.lang).toBeUndefined();
+  });
+
+  it("(c) control: no lang on the span when the original is a Turkish member's title", async () => {
+    const detail = mixedDetail({ titleTr: NATO_EN });
+    detail.cluster.title_original = NATO_TR;
+    const tree = await renderTree(detail);
+    const span = originalSpan(tree, NATO_TR);
+    expect(span).not.toBeNull();
+    expect(span?.props.lang).toBeUndefined();
+  });
+});

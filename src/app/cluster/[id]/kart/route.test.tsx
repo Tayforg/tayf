@@ -941,3 +941,104 @@ describe("GET /cluster/[id]/kart opinion columns (h57-outbound-2)", () => {
     expect(text).toContain("1 kaynak yazdı · başlık paylaşıma uygun değil");
   });
 });
+
+// h59-english-1: fbb078b4 and 26e8abf9 were written only by English-language
+// outlets. "— bu tarafta haber yok" on their Bağımsız and Muhalefet rows claims
+// nobody on those sides covered the event, which the Turkish clusters on the same
+// event contradict. An isolated cluster's empty zone says no comparison exists.
+describe("GET /cluster/[id]/kart all-English cluster (h59-english-1)", () => {
+  const ISOLATED_LINE = "— karşılaştırma yok (yalnızca İngilizce kaynaklar)";
+  const PLAIN_SILENCE = "— bu tarafta haber yok";
+
+  const HDN = mkSource({ id: "hdn", slug: "hurriyet-daily-news", name: "Hürriyet Daily News", bias: "gov_leaning", kind: "outlet" });
+  const A_NEWS = mkSource({ id: "an", slug: "a-news", name: "A News", bias: "pro_government", kind: "outlet" });
+  const SABAH_EN = mkSource({ id: "ds", slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government", kind: "outlet" });
+  const TRT = mkSource({ id: "trt", slug: "trt-world", name: "TRT World", bias: "state_media", kind: "outlet" });
+  const A_HABER = mkSource({ id: "ah", slug: "a-haber", name: "A Haber", bias: "pro_government", kind: "outlet" });
+  const YENI_SAFAK = mkSource({ id: "ys", slug: "yeni-safak", name: "Yeni Şafak", bias: "pro_government", kind: "outlet" });
+
+  const countOf = (text: string, needle: string) => text.split(needle).length - 1;
+
+  const fixtureA = () => [
+    mkMember("a1", HDN, "Erdoğan visits Seoul with $15 billion trade goal", "2026-11-02T06:18:00Z"),
+    mkMember("a2", A_NEWS, "Erdoğan visits Seoul", "2026-11-02T06:53:00Z"),
+    mkMember("a3", SABAH_EN, "Erdoğan in Seoul", "2026-11-02T06:56:00Z"),
+    mkMember("a4", TRT, "Erdoğan lands in Seoul", "2026-11-02T08:25:00Z"),
+  ];
+
+  beforeEach(() => {
+    captured = null;
+    capturedOptions = null;
+    vi.resetModules();
+    getClusterDetailOrThrow.mockReset();
+    getZoneFeedHealth.mockReset();
+    getZoneFeedHealth.mockResolvedValue(null);
+  });
+
+  it("fixture A: both empty zones print the no-comparison line and never the plain silence", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail(fixtureA()));
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(countOf(text, ISOLATED_LINE)).toBe(2);
+    expect(text).not.toContain(PLAIN_SILENCE);
+    expect(text).not.toContain("spektruma sayılan kaynaklardan haber yok");
+    // The İktidar row still shows an outlet's own headline, and the counters stay.
+    expect(text).toContain("4 kaynak");
+    expect(text.toLowerCase()).toContain("seoul");
+  });
+
+  it("fixture B (three English outlets): both empty zones print the no-comparison line", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([
+        mkMember("b1", SABAH_EN, "Turkey signs deal", "2026-11-03T05:00:00Z"),
+        mkMember("b2", HDN, "Turkey signs a deal", "2026-11-03T05:20:00Z"),
+        mkMember("b3", A_NEWS, "Turkey agrees deal", "2026-11-03T06:10:00Z"),
+      ]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(countOf(text, ISOLATED_LINE)).toBe(2);
+    expect(text).not.toContain(PLAIN_SILENCE);
+  });
+
+  it("does not attach the degraded-feed caveat to a comparison that was never claimed", async () => {
+    getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: { degraded: true }, bagimsiz: { degraded: true } }));
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail(fixtureA()));
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(countOf(text, ISOLATED_LINE)).toBe(2);
+    expect(text).not.toContain("bazı kaynaklara ulaşılamıyor");
+  });
+
+  it("controls: a mixed cluster (a-haber + daily-sabah) keeps '— bu tarafta haber yok' on both empty zones", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("m1", A_HABER, GOV_TITLE), mkMember("m2", SABAH_EN, "Budget talks begin")]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(countOf(text, PLAIN_SILENCE)).toBe(2);
+    expect(text).not.toContain("karşılaştırma yok");
+  });
+
+  it("controls: a Turkish 2-outlet pro-government cluster keeps '— bu tarafta haber yok' and the degraded caveat", async () => {
+    getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: { degraded: true } }));
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("t1", A_HABER, GOV_TITLE), mkMember("t2", YENI_SAFAK, "Bütçe teklifi kabul edildi")]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(countOf(text, PLAIN_SILENCE)).toBe(2);
+    expect(countOf(text, "bazı kaynaklara ulaşılamıyor")).toBe(1);
+    expect(text).not.toContain("karşılaştırma yok");
+  });
+});

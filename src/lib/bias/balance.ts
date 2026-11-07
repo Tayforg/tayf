@@ -1,4 +1,4 @@
-import { BLINDSPOT, tallyZones } from "@/lib/bias/config";
+import { BLINDSPOT, SURPRISE, tallyZones } from "@/lib/bias/config";
 import type { BiasDistribution, MediaDnaZone } from "@/types";
 
 // Denge puanı ("balance score"): one 0-100 number for how evenly a cluster's
@@ -32,14 +32,35 @@ import type { BiasDistribution, MediaDnaZone } from "@/types";
 // sort orders and `balanceTier(score)` (which sees the score alone) are
 // unchanged.
 //
+// "Dengeli kapsama" also needs a spread with no dominant zone (hunt-59
+// homefeed-2). The entropy score alone gave (İktidar 6 / Bağımsız 1 /
+// Muhalefet 1) a 67 and the word "Dengeli kapsama" while 75% of the voters sit
+// in one zone, on the same page where the Sürpriz caption calls that zone
+// dominant (cross-spectrum.ts, SURPRISE.dominantShare). So a score of
+// BALANCE_BALANCED_MIN or more earns the word only while the largest zone
+// holds LESS than BALANCE_BALANCED_MAX_SHARE of the voters (the very line the
+// surprise detector uses, so no new magic number); otherwise the tier is
+// "yakin". Like "iki" this is a word rule in `balanceFromZoneCounts`: the
+// score number, the "iki" / "tek" rules and `balanceTier(score)` are unchanged.
+//
 // Below BALANCE_MIN_SOURCES voting sources no score is computed: with four
 // votes "one side ignored it" and "nobody has picked it up yet" cannot be told
 // apart -- the same floor the blindspot rule uses.
 
-/** Score at or above this is "Dengeli kapsama". */
+/**
+ * Score at or above this is "Dengeli kapsama", provided no zone holds
+ * BALANCE_BALANCED_MAX_SHARE or more of the voters (see below).
+ */
 export const BALANCE_BALANCED_MIN = 67;
 /** Score at or below this is "Tek tarafta". */
 export const BALANCE_ONE_SIDED_MAX = 33;
+/**
+ * A score at or above BALANCE_BALANCED_MIN reads "Dengeli kapsama" only while
+ * the largest zone holds less than this share of the voters. It is the share at
+ * which the cross-spectrum detector already calls a zone dominant, so the chip
+ * and the Sürpriz caption cannot contradict each other.
+ */
+export const BALANCE_BALANCED_MAX_SHARE = SURPRISE.dominantShare;
 /** Fewer voting sources than this and no score is computed. */
 export const BALANCE_MIN_SOURCES = BLINDSPOT.minSources;
 /**
@@ -75,7 +96,10 @@ const LN_3 = Math.log(3);
 
 /**
  * Tier from the score alone. Never returns "iki": that tier needs the zone
- * counts, see `balanceFromZoneCounts`.
+ * counts, see `balanceFromZoneCounts`. For the same reason it cannot apply the
+ * BALANCE_BALANCED_MAX_SHARE cap, so a score of BALANCE_BALANCED_MIN or more is
+ * always "dengeli" here; `balanceFromZoneCounts` demotes it to "yakin" when one
+ * zone is dominant.
  */
 export function balanceTier(score: number): BalanceTier {
   if (score >= BALANCE_BALANCED_MIN) return "dengeli";
@@ -109,13 +133,18 @@ export function balanceFromZoneCounts(
   // Math.max(0, ...) also normalises -0 (single-zone coverage: -(1 * ln 1)).
   const score = Math.min(100, Math.max(0, Math.round((100 * entropy) / LN_3)));
   const nonZero = clean.filter((c) => c > 0);
-  const tier: BalanceTier =
+  let tier: BalanceTier =
     score > BALANCE_ONE_SIDED_MAX &&
     score < BALANCE_BALANCED_MIN &&
     nonZero.length === 2 &&
     Math.min(...nonZero) / total >= BALANCE_TWO_ZONE_MIN_SHARE
       ? "iki"
       : balanceTier(score);
+  // Same comparison as detectCrossSpectrum: `share >= dominantShare` is a
+  // dominant zone, and a dominant zone is not "Dengeli kapsama".
+  if (tier === "dengeli" && Math.max(...clean) / total >= BALANCE_BALANCED_MAX_SHARE) {
+    tier = "yakin";
+  }
   return { score, tier, label: BALANCE_LABELS[tier], total };
 }
 

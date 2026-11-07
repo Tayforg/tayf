@@ -194,6 +194,17 @@
 // stored title is not re-offered because of this change alone. Readers that compute the first pick before
 // the cron has written one (display-headline.ts) hold no article URLs and still pick over every title.
 
+// h59-english-2 (still extractive-v6, NO model bump): a Turkish member is preferred over an English one. Eleven
+// live mixed Turkish + English clusters (749b0eea: Daily Sabah's 'NATO chief visits Türkiye ahead of key summit'
+// beside A Haber's Turkish headline) carry an English neutral title, because the picker saw titles only. A
+// MemberTitle flagged `english` (the headline cron sets it from the source slug, ENGLISH_SOURCE_SLUGS) is dropped
+// from the pick, its centrality, its sibling evidence and the incumbent's "does a member carry it" test, as long
+// as at least one non-English member with a usable title exists (`withoutEnglish`, applied after `withoutOpinion`).
+// An all-English cluster (fbb078b4) is picked as before; an English stored title in a mixed cluster is stale
+// (repickStale), so a re-pick for any other reason replaces it. There is no backfill and no model bump, so the
+// eleven stored English titles stay until a one-off re-pick. Readers that compute the first pick before the cron
+// has written one (display-headline.ts) hold titles only and still pick over every title.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
@@ -217,6 +228,14 @@ export interface MemberTitle {
    * as if none were flagged. Absent or false: a news article.
    */
   opinion?: boolean;
+  /**
+   * The article comes from one of the English-language outlets (ENGLISH_SOURCE_SLUGS in
+   * src/lib/sources/source-language.ts; the headline cron derives it from the source slug). Such a
+   * member is not a candidate while a non-English member with a usable title exists
+   * (`withoutEnglish`); an all-English cluster is picked as if none were flagged. Absent or false:
+   * a Turkish (or unknown) outlet.
+   */
+  english?: boolean;
 }
 
 const DIACRITICS: Record<string, string> = {
@@ -2351,6 +2370,25 @@ function withoutOpinion(members: MemberTitle[]): MemberTitle[] {
 }
 
 /**
+ * The members the pick chooses among, language side (h59-english-2): the English-outlet members
+ * (`english: true`) are dropped when at least one non-English member has a usable title, and kept when none
+ * has (an all-English cluster, or Turkish members that are all blank or placeholders, is picked as before).
+ * Applied to the output of `withoutOpinion`, so a Turkish column next to English news leaves the news, as
+ * h54-editorial-3 wants, and a column beside Turkish news and English news leaves the Turkish news. Returns
+ * the same array when nothing is flagged, a new one otherwise; never mutates.
+ */
+function withoutEnglish(members: MemberTitle[]): MemberTitle[] {
+  if (!members.some((m) => m.english === true)) return members;
+  const hasTurkish = members.some((m) => m.english !== true && isUsableTitle((m.title ?? "").trim()));
+  return hasTurkish ? members.filter((m) => m.english !== true) : members;
+}
+
+/** The members the pick may choose among and learn from: no opinion columns, no English outlets (when avoidable). */
+function pickableMembers(members: MemberTitle[]): MemberTitle[] {
+  return withoutEnglish(withoutOpinion(members));
+}
+
+/**
  * The member titles the pick works from: blank titles and placeholders ("Kısa haberler", a
  * live-blog lead-in) out, and a title that folds to the same text as an earlier one counted once.
  */
@@ -2428,12 +2466,17 @@ function repickStale(members: MemberTitle[], opts: PickOptions, incumbent: strin
  * Members flagged `opinion` (an opinion column by URL) are dropped first when a non-opinion member with a
  * usable title exists (`withoutOpinion`, h54-editorial-3): they are neither candidates nor evidence, and a
  * stored title that only a column carries counts as carried by no member (stale).
+ * Members flagged `english` (an English-language outlet, set by the headline cron from the source slug) are
+ * dropped next, the same way, when a non-English member with a usable title exists (`withoutEnglish`,
+ * h59-english-2): a stored title that only an English outlet carries is stale in a mixed cluster, and an
+ * all-English cluster is picked as before.
  * Whatever the result (a first pick, a floor pick, the stored title a re-pick keeps), a glued word join
  * in it gives way to a member title that is the same text without the join (preferUnglued, h35).
  */
 export function pickNeutralTitle(allMembers: MemberTitle[], opts: PickOptions = {}): string | null {
   // h54-editorial-3: an opinion column is not a candidate, nor does it carry the stored title.
-  const members = withoutOpinion(allMembers);
+  // h59-english-2: nor does an English outlet while a Turkish member exists.
+  const members = pickableMembers(allMembers);
   const inc = opts.incumbent?.trim() ?? "";
   const stale = inc !== "" && !incumbentIsMemberTitle(inc, members.map((m) => m.title ?? ""));
   const picked = stale ? repickStale(members, opts, opts.incumbent as string) : pickNeutralTitleCore(members, opts);
@@ -2449,7 +2492,7 @@ interface CoreOptions extends PickOptions {
 
 // The pick itself (extractive-v1 to v6); pickNeutralTitle adds the glued-twin tiebreak on top.
 function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string | null {
-  const items = usableItems(withoutOpinion(members));
+  const items = usableItems(pickableMembers(members));
   if (items.length === 0) return null;
 
   const toks = items.map((m) => tokens(m.title));

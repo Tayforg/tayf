@@ -5,9 +5,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   clusterTextLang,
+  ENGLISH_ONLY_EMPTY_COLUMN,
+  ENGLISH_ONLY_KART_EMPTY_ZONE,
+  ENGLISH_ONLY_NOTE,
   ENGLISH_SOURCE_NAMES,
   ENGLISH_SOURCE_SLUGS,
   headlineLang,
+  isLanguageIsolatedCluster,
   sourceLang,
 } from "./source-language";
 
@@ -273,6 +277,76 @@ describe("clusterTextLang", () => {
     const big = Array.from({ length: 10_000 }, () => ({ slug: "trt-world" }));
     expect(clusterTextLang(big)).toBe("en");
     expect(clusterTextLang([...big, { slug: "sozcu" }])).toBeUndefined();
+  });
+});
+
+// h59-english-1: a cluster whose EVERY member (voting or not) is an English
+// outlet cannot be compared with the Turkish zones, so the pages must not claim
+// that no Bağımsız / Muhalefet outlet covered the event. One helper decides.
+describe("isLanguageIsolatedCluster (h59-english-1)", () => {
+  // Fixture A: fbb078b4, 'Erdoğan visits Seoul with $15 billion trade goal'.
+  const FIXTURE_A = ["hurriyet-daily-news", "trt-world", "daily-sabah", "a-news"].map((slug) => ({ slug }));
+  // Fixture B: 26e8abf9.
+  const FIXTURE_B = ["daily-sabah", "hurriyet-daily-news", "a-news"].map((slug) => ({ slug }));
+
+  it("is true for fixture A and fixture B (every member an English outlet)", () => {
+    expect(isLanguageIsolatedCluster(FIXTURE_A)).toBe(true);
+    expect(isLanguageIsolatedCluster(FIXTURE_B)).toBe(true);
+  });
+
+  it("is true for a single English outlet and for all six together", () => {
+    expect(isLanguageIsolatedCluster([{ slug: "mfa-turkey" }])).toBe(true);
+    expect(isLanguageIsolatedCluster(ENGLISH_SLUGS.map((slug) => ({ slug })))).toBe(true);
+  });
+
+  it("is true for name-only English sources (the embed has no slug)", () => {
+    expect(isLanguageIsolatedCluster(PROD_NAMES.map((name) => ({ name })))).toBe(true);
+  });
+
+  it("is false for a mixed Turkish + English cluster (a-haber + daily-sabah)", () => {
+    expect(isLanguageIsolatedCluster([{ slug: "a-haber" }, { slug: "daily-sabah" }])).toBe(false);
+  });
+
+  it("is false for a Turkish-only cluster", () => {
+    expect(isLanguageIsolatedCluster([{ slug: "yenicag" }, { slug: "sozcu" }])).toBe(false);
+  });
+
+  it("counts non-voting members too: one Turkish aggregator breaks the isolation", () => {
+    expect(isLanguageIsolatedCluster([...FIXTURE_A, { slug: "haberler-com", name: "Haberler.com" }])).toBe(false);
+  });
+
+  it("is false for an empty list, null/undefined entries and a non-array", () => {
+    expect(isLanguageIsolatedCluster([])).toBe(false);
+    expect(isLanguageIsolatedCluster([{ slug: "daily-sabah" }, null])).toBe(false);
+    expect(isLanguageIsolatedCluster([undefined])).toBe(false);
+    expect(
+      isLanguageIsolatedCluster(null as unknown as Parameters<typeof isLanguageIsolatedCluster>[0]),
+    ).toBe(false);
+  });
+
+  it("agrees with clusterTextLang === 'en' on every input", () => {
+    for (const sources of [FIXTURE_A, FIXTURE_B, [], [{ slug: "sozcu" }], [{ slug: "daily-sabah" }, {}]]) {
+      expect(isLanguageIsolatedCluster(sources)).toBe(clusterTextLang(sources) === "en");
+    }
+  });
+});
+
+describe("English-only cluster copy (h59-english-1)", () => {
+  it("uses the spec's exact Turkish wording", () => {
+    expect(ENGLISH_ONLY_NOTE).toBe(
+      "Bu hikâyeyi yalnızca İngilizce yayın yapan kaynaklar yazdı. Türkçe haberlerle eşleşmediği için bölge karşılaştırması yapılamıyor.",
+    );
+    expect(ENGLISH_ONLY_EMPTY_COLUMN).toBe("— Türkçe kaynaklarla karşılaştırılmadı —");
+    expect(ENGLISH_ONLY_KART_EMPTY_ZONE).toBe("— karşılaştırma yok (yalnızca İngilizce kaynaklar)");
+  });
+
+  it("none of it contains a zone-absence claim", () => {
+    for (const copy of [ENGLISH_ONLY_NOTE, ENGLISH_ONLY_EMPTY_COLUMN, ENGLISH_ONLY_KART_EMPTY_ZONE]) {
+      expect(copy).not.toContain("bu kümede haber yok");
+      expect(copy).not.toContain("henüz haber yok");
+      expect(copy).not.toContain("bu tarafta sessizlik");
+      expect(copy).not.toContain("bu tarafta haber yok");
+    }
   });
 });
 

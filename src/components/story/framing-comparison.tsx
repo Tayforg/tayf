@@ -6,7 +6,10 @@ import { SourceLogo } from "@/components/source/source-logo";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { groupMembersByZone } from "@/lib/clusters/framing";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
-import { sourceLang } from "@/lib/sources/source-language";
+import {
+  ENGLISH_ONLY_EMPTY_COLUMN,
+  sourceLang,
+} from "@/lib/sources/source-language";
 import { RelativeTime } from "@/components/story/relative-time";
 import type { MediaDnaZone } from "@/types";
 
@@ -27,6 +30,13 @@ import type { MediaDnaZone } from "@/types";
  * line is "spektruma sayılan kaynaklardan haber yok", the Manşet Kartı's wording
  * (SPECTRUM_ABSENT_QUALIFIED), and only a zone nobody wrote in keeps "bu tarafta
  * sessizlik" (h58-postship-2). Wording only: no count, vote or "N manşet" moves.
+ *
+ * h59-english-1: when every member is an English-language outlet
+ * (`languageIsolated`) the story never met the Turkish zones, so an empty column
+ * is not a finding: it reads "— Türkçe kaynaklarla karşılaştırılmadı —"
+ * (ENGLISH_ONLY_EMPTY_COLUMN). Neither wording above applies then. This block
+ * prints no note of its own: the read-across slot above carries the one
+ * ENGLISH_ONLY_NOTE (copy-2 / react-h59-3), so the page says it exactly once.
  *
  * h47-time-1: ages are measured against `nowMs`, the page's per-request render
  * stamp, and RelativeTime re-bases them to the reader's clock after mount, so a
@@ -50,6 +60,10 @@ interface FramingComparisonProps {
   // forget it and print "sessizlik" over a column such a source covered. It only
   // changes the words of an EMPTY column; nothing is counted from it.
   nonVotingZones: ReadonlySet<MediaDnaZone>;
+  // h59-english-1: every member is an English-language outlet
+  // (`isLanguageIsolatedCluster`, computed once in page.tsx). Optional (false):
+  // the only caller is the cluster page, which always passes it.
+  languageIsolated?: boolean;
 }
 
 // Spectrum order, matching the bias bar left-to-right.
@@ -136,6 +150,7 @@ export function FramingComparison({
   members,
   nowMs,
   nonVotingZones,
+  languageIsolated = false,
 }: FramingComparisonProps) {
   const byZone = groupMembersByZone(members);
   const total = members.length;
@@ -180,9 +195,11 @@ export function FramingComparison({
               {zoneMembers.length === 0 ? (
                 <div className="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-6 text-center">
                   <span className="text-[11px] italic text-muted-foreground">
-                    {nonVotingZones.has(zone)
-                      ? `— ${SPECTRUM_ABSENT_QUALIFIED} —`
-                      : "— bu tarafta sessizlik —"}
+                    {languageIsolated
+                      ? ENGLISH_ONLY_EMPTY_COLUMN
+                      : nonVotingZones.has(zone)
+                        ? `— ${SPECTRUM_ABSENT_QUALIFIED} —`
+                        : "— bu tarafta sessizlik —"}
                   </span>
                 </div>
               ) : (

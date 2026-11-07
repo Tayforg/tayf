@@ -271,12 +271,21 @@ function firstMoverLabel(names: readonly string[]): string {
  * Clocks inside the summary / zone line follow the VOTING span's midnight
  * crossing (so a niche source can't rewrite them); the point clocks follow the
  * plotted axis's.
+ *
+ * `languageIsolated` (h59-english-1) is true when every member of the cluster is
+ * an English-language outlet (`isLanguageIsolatedCluster`). Such a cluster has no
+ * Turkish counterpart, so a zone with no member is not an absence worth stating:
+ * the summary keeps the first mover and the real zone joins and drops every
+ * "bu kümede haber yok" / "akışı şu an sorunlu" part. The page prints its one
+ * note instead (ENGLISH_ONLY_NOTE). Points, joins, `absentZones` and the zone
+ * list are unchanged.
  */
 export function buildStoryTimeline(
   members: readonly StoryTimelineMember[],
   seenAt: Readonly<Record<string, string>> | null,
   health: ZoneFeedHealth | null,
   nonVoting: readonly StoryTimelineMember[] = [],
+  languageIsolated = false,
 ): StoryTimeline | null {
   const votingOrdered = earliestPerSource(members, seenAt).sort(byTimeThenName);
   const votingFirst = votingOrdered[0];
@@ -371,6 +380,9 @@ export function buildStoryTimeline(
           ? `${label} aynı dakikada katıldı`
           : `${label} ${formatLag(join.lagMs)} sonra katıldı`,
       );
+    } else if (languageIsolated) {
+      // h59-english-1: no Turkish counterpart exists, so an empty zone is not a
+      // finding. Say nothing about it (the page's note explains why).
     } else if (degradedAbsentZones.includes(zone)) {
       parts.push(DEGRADED_TEXT[zone]);
     } else if (absentZones.includes(zone)) {
