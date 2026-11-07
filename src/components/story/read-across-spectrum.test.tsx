@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 // <p> and the CTA anchor render under renderToStaticMarkup without any
 // client-only mocking.
 import { ReadAcrossSpectrum } from "./read-across-spectrum";
+import { NEW_TAB_NOTICE } from "@/components/ui/new-tab-hint";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import type { Source } from "@/types";
 
@@ -211,7 +212,9 @@ describe("ReadAcrossSpectrum — CTA accessible name (WCAG 2.5.3 label-in-name)"
   });
 
   it("announces the new-tab behaviour through a trailing sr-only span", () => {
-    expect(markup).toContain('<span class="sr-only"> (yeni sekmede açılır)</span>');
+    // The shared <NewTabHint /> (src/components/ui/new-tab-hint.tsx).
+    expect(markup).toContain(`<span class="sr-only"> (${NEW_TAB_NOTICE})</span>`);
+    expect(NEW_TAB_NOTICE).toBe("yeni sekmede açılır");
     // It is the link's last child, after the visible time-ago span.
     expect(markup).toMatch(/\(yeni sekmede açılır\)<\/span><\/a>$/);
   });

@@ -283,6 +283,90 @@ describe("POST /api/corrections", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h60-forms-2: a 400 names the field that failed (details.field, additive) so
+// the correction form can show the Turkish message next to the right input.
+// The English `error` strings are unchanged. The rules themselves live in
+// src/lib/corrections/validate.ts, shared with the form.
+// ---------------------------------------------------------------------------
+
+describe("POST /api/corrections -- 400 names the failing field", () => {
+  const cases: Array<[string, Record<string, unknown>, string, string]> = [
+    ["an e-mail without a TLD ('ali@gmail')", { email: "ali@gmail" }, "email", "Invalid email address"],
+    ["a non-http(s) url", { url: "ftp://tayfhaber.com/x" }, "url", "Invalid url"],
+    ["a javascript: url", { url: "javascript:alert(1)" }, "url", "Invalid url"],
+    [
+      "a message that is only padding",
+      { message: "         x" },
+      "message",
+      "Message must be between 10 and 2000 characters",
+    ],
+    ["a malformed clusterId", { clusterId: "not-a-uuid" }, "clusterId", "Invalid clusterId"],
+  ];
+
+  it.each(cases)("%s -> 400 with details.field and the unchanged error string", async (_n, patch, field, error) => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest({ ...VALID_BODY, ...patch }, "192.0.2.10"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error, details: { field } });
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(0);
+    expect(throttleCalls()).toHaveLength(0);
+  });
+
+  it("names the first failing field when several are wrong (url, message, email, clusterId)", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(
+      makeRequest(
+        { url: "ftp://x", message: "x", email: "ali@gmail", clusterId: "nope" },
+        "192.0.2.11",
+      ),
+    );
+    expect((await res.json()).details.field).toBe("url");
+  });
+
+  it("a body that is not an object has no field to name", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest("just a string", "192.0.2.12"));
+    expect(res.status).toBe(400);
+    expect((await res.json()).details).toBeUndefined();
+  });
+
+  it("accepts 'ali@gmail.com' and still inserts the trimmed values", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(
+      makeRequest(
+        { ...VALID_BODY, email: "  ali@gmail.com ", message: `   ${VALID_BODY.message}  ` },
+        "192.0.2.13",
+      ),
+    );
+    expect(res.status).toBe(201);
+    const patch = supabaseFake.calls.insert("corrections").at(-1)?.patch as Record<string, unknown>;
+    expect(patch.email).toBe("ali@gmail.com");
+    expect(patch.message).toBe(VALID_BODY.message);
+  });
+
+  it("the honeypot still wins over validation: a filled trap with a bad e-mail is a silent 200", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(
+      makeRequest({ ...VALID_BODY, email: "ali@gmail", website: "http://spam.example" }, "192.0.2.14"),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(0);
+  });
+
+  it("limiter order is unchanged: invalid bodies still spend the in-memory token (6th request is a 429)", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const ip = "192.0.2.15";
+    for (let i = 0; i < 5; i++) {
+      const res = await mod.POST(makeRequest({ ...VALID_BODY, email: "ali@gmail" }, ip));
+      expect(res.status).toBe(400);
+    }
+    const res = await mod.POST(makeRequest(VALID_BODY, ip));
+    expect(res.status).toBe(429);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fleet-wide DB throttle (migration 118, web-2). The in-memory limiter above
 // is the first filter; behind it, 5 accepted submissions per hour per client
 // are enforced in Postgres so the cap holds across every Vercel instance. It

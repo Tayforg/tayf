@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { isSearchBarActive } from "@/components/filters/search-shortcut";
 import {
   PENDING_MS,
   SHORTCUTS,
@@ -12,8 +13,8 @@ import {
   writeShortcutsEnabled,
 } from "@/lib/a11y/shortcut-pref";
 
-// Site-wide single-key shortcuts (g h / g b / g s, ? for this help; "/" lives
-// in SearchBar) and the help dialog that also holds their off switch
+// Site-wide single-key shortcuts (g h / g b / g s, ? for this help, "/" for
+// search) and the help dialog that also holds their off switch
 // (h17-a11y-3: WCAG 2.1.4 Character Key Shortcuts, 4.1.2 Name Role Value,
 // 2.4.3 Focus Order).
 //
@@ -110,11 +111,11 @@ export function KbdShortcuts() {
         pendingRef.current !== null && Date.now() - pendingRef.current <= PENDING_MS ? "g" : null;
       pendingRef.current = null;
 
-      // Autofill can dispatch keydown events with no `key`. Only "g", "?" and
-      // the second key of a pending sequence can matter, so skip the storage
-      // read for everything else.
+      // Autofill can dispatch keydown events with no `key`. Only "g", "?", "/"
+      // and the second key of a pending sequence can matter, so skip the
+      // storage read for everything else.
       const key = typeof e.key === "string" ? e.key : "";
-      if (pending === null && key !== "g" && key !== "?") return;
+      if (pending === null && key !== "g" && key !== "?" && key !== "/") return;
 
       const target = e.target instanceof HTMLElement ? e.target : null;
       const action = resolveShortcut(
@@ -135,6 +136,19 @@ export function KbdShortcuts() {
       if (action === null) return;
       if (action === "pending-g") {
         pendingRef.current = Date.now();
+        return;
+      }
+      if (action === "search") {
+        // Where the search bar is active (the home page) its own "/" handler
+        // focuses the input. Leave the event alone so that handler still sees
+        // it unconsumed and nothing is handled twice. Ask whether SearchBar is
+        // ACTIVE, not whether its DOM exists: a home page that Next keeps
+        // hidden in <Activity> keeps its DOM but not its listener.
+        if (isSearchBarActive()) return;
+        // Everywhere else go to the bar: the push reveals the preserved home
+        // page, and SearchBar's arrival effect runs again on reveal.
+        e.preventDefault();
+        router.push("/#ara");
         return;
       }
       e.preventDefault();

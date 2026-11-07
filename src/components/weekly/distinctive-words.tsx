@@ -1,4 +1,5 @@
 import { TrackedLink } from "@/components/ui/tracked-link";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { ZONE_META } from "@/lib/bias/config";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { FW_DEFAULTS } from "@/lib/text/fightin-words";
@@ -120,6 +121,7 @@ function ZoneColumn({
                       className="underline decoration-dotted underline-offset-2 hover:text-foreground"
                     >
                       {term.example.title}
+                      <NewTabHint />
                     </TrackedLink>
                   ) : (
                     term.example.title

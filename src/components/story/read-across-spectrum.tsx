@@ -2,6 +2,7 @@ import { ExternalLink } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { pickOtherSide } from "@/lib/clusters/read-across";
 import { ENGLISH_ONLY_NOTE, sourceLang } from "@/lib/sources/source-language";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
@@ -164,7 +165,7 @@ export function ReadAcrossSpectrum({
       <span className="shrink-0 text-[10px] tabular-nums">
         <RelativeTime iso={member.article.published_at} nowMs={nowMs} />
       </span>
-      <span className="sr-only"> (yeni sekmede açılır)</span>
+      <NewTabHint />
     </TrackedLink>
   );
 }

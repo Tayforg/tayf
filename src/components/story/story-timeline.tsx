@@ -1,5 +1,6 @@
 import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { NON_VOTING_KIND_NOTE } from "@/lib/sources/kind";
 import { sourceLang } from "@/lib/sources/source-language";
 import type { StoryTimeline as StoryTimelineData } from "@/lib/clusters/story-timeline";
@@ -147,6 +148,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
                   >
                     {p.title}
                   </span>
+                  <NewTabHint />
                 </TrackedLink>
               </li>
             );

@@ -49,6 +49,7 @@ import { isThinTicker } from "@/lib/finance/ticker-index";
 import { errorShellMetadata, sharePageMetadata } from "@/lib/seo/page-metadata";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 import { currentTimeMs } from "@/lib/time";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { cn } from "@/lib/utils";
 
 // /ekonomi/[ticker] — one company: last price and five-session line, the
@@ -300,6 +301,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
       className="mt-0.5 block text-[11px] text-amber-400 hover:underline"
     >
       İşlem sırası kapatıldı · KAP {fmtDayClock(halt.publishedAt)}
+      <NewTabHint />
     </a>
   ) : null;
   const volume = halted ? null : rvolLabel(stat, intraday.day);
@@ -462,6 +464,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                   <span className="hidden truncate font-mono text-[11px] text-muted-foreground sm:block">{a.source?.name}</span>
                   <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-[13px] leading-snug hover:text-brand">
                     {a.title}
+                    <NewTabHint />
                   </a>
                 </li>
               ))}
@@ -486,6 +489,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                       className="text-foreground/90 hover:text-brand"
                     >
                       {d.subject ?? "Bildirim"}
+                      <NewTabHint />
                     </a>
                     {d.summary ? <p className="truncate text-[10px] text-muted-foreground">{d.summary}</p> : null}
                   </div>

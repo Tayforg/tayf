@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Image from "next/image";
 import { Newspaper } from "lucide-react";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 
 import {
   firstPartyLogoUrl,
@@ -481,6 +482,7 @@ export function ClusterCardImage({
             className="underline decoration-dotted underline-offset-2 hover:text-foreground"
           >
             {credit.name}
+            <NewTabHint />
           </a>{" "}
           sayfasından
         </p>

@@ -126,6 +126,19 @@ describe("GET /api/takip -- q (keyword) path", () => {
     expect(body.items.map((i) => i.id)).toEqual(["c1"]);
   });
 
+  // h60-forms-3: the archive (/?q=) searches up to 64 characters, so a follow
+  // of 41..64 characters must run exactly that search, not 400.
+  it.each([
+    ["a 42-character search", "cumhurbaşkanı erdoğan azerbaycan'a gidecek", 42],
+    ["exactly 64 characters", "a".repeat(64), 64],
+  ])("accepts %s and calls searchClusters once", async (_name, q, length) => {
+    expect([...q]).toHaveLength(length);
+    const res = await call(`?q=${encodeURIComponent(q)}`);
+    expect(res.status).toBe(200);
+    expect(searchClustersMock).toHaveBeenCalledTimes(1);
+    expect(searchClustersMock).toHaveBeenCalledWith(q);
+  });
+
   it("answers 200 with an empty items array when nothing matches", async () => {
     const res = await call("?q=seçim");
     expect(res.status).toBe(200);
@@ -249,13 +262,13 @@ describe("GET /api/takip -- ordering", () => {
 });
 
 describe("GET /api/takip -- validation (400)", () => {
-  const long41 = "a".repeat(41);
+  const long65 = "a".repeat(65);
   const raw201 = "a".repeat(201);
   const cases: Array<[string, string]> = [
     ["no params", ""],
     ["both q and konu", "?q=seçim&konu=ekonomi"],
     ["q too short", "?q=a"],
-    ["q 41 chars", `?q=${long41}`],
+    ["q 65 chars (one over the archive's 64-char cut)", `?q=${long65}`],
     ["q 201 raw chars", `?q=${raw201}`],
     ["q only whitespace", `?q=${encodeURIComponent("   ")}`],
     ["q with a control character", "?q=%00ab"],

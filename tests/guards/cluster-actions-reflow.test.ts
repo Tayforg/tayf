@@ -199,6 +199,84 @@ describe("cluster hero actions reflow at 320 px (h32-a11y-1)", () => {
     });
   });
 
+  // h60-mobile-1: on phones tapping "Karşılaştır" inserted a visible hint
+  // BEFORE the button in one inline-flex flex-wrap span, which wrapped the
+  // button (and "Düzeltme talebi") ~41 px down and pushed the bias spectrum off
+  // the first screen. Two literal class strings keep the control in place:
+  //   - the wrapper dissolves on phones (max-sm:contents), so its children join
+  //     the actions row above;
+  //   - the visible hint goes to its own line at the END of that row
+  //     (max-sm:order-last + max-sm:basis-full).
+  // Both must stay plain string literals in the source (Tailwind 4 only
+  // generates classes it can read verbatim), and the button must stay before
+  // the live region in the markup.
+  describe("compare button hint never moves the control on phones (h60-mobile-1)", () => {
+    const COMPARE_PATH = resolve(ROOT, "src/components/compare/compare-button.tsx");
+    const WRAPPER_CLASS = "inline-flex flex-wrap items-center gap-2 max-sm:contents";
+    const HINT_VISIBLE_CLASS =
+      "text-[11px] text-muted-foreground max-sm:order-last max-sm:basis-full";
+    const src = readFileSync(COMPARE_PATH, "utf8");
+
+    /** The opening tag (from `<span` to its closing `>`) that contains `marker`. */
+    function spanTagAround(marker: string): string {
+      const at = src.indexOf(marker);
+      expect(at, `compare-button.tsx has ${marker}`).toBeGreaterThan(-1);
+      // Exactly one: the guard would silently pin the wrong element otherwise.
+      expect(src.indexOf(marker, at + 1), `${marker} appears once`).toBe(-1);
+      const open = src.lastIndexOf("<span", at);
+      expect(open, `${marker} sits in a <span>`).toBeGreaterThan(-1);
+      const end = openingTagEnd(src, open);
+      expect(end, "the span tag closes").toBeGreaterThan(at);
+      return src.slice(open, end);
+    }
+
+    it("the wrapper carries the phone-dissolving class as a string literal", () => {
+      const wrapper = spanTagAround(WRAPPER_CLASS);
+      const tokens = classTokensIn(wrapper, 0, wrapper.length);
+      expect(tokens, "the wrapper has a literal className").not.toBeNull();
+      expect(tokens!.join(" ")).toBe(WRAPPER_CLASS);
+      for (const token of ["inline-flex", "flex-wrap", "items-center", "gap-2", "max-sm:contents"]) {
+        expect(tokens, `wrapper ${token}`).toContain(token);
+      }
+    });
+
+    it("the live region keeps both hint classes as quoted string literals", () => {
+      const status = spanTagAround('role="status"');
+      // Whitespace-normalised so a line break from the formatter cannot hide it.
+      const tag = status.split(/\s+/).filter(Boolean).join(" ");
+      expect(tag).toContain("hint.srOnly");
+      expect(tag).toContain('"sr-only"');
+      expect(tag).toContain(`"${HINT_VISIBLE_CLASS}"`);
+      for (const token of ["max-sm:order-last", "max-sm:basis-full"]) {
+        expect(HINT_VISIBLE_CLASS.split(" "), `hint ${token}`).toContain(token);
+      }
+    });
+
+    it("renders [link] [button] [role=status] in source order: the button precedes the live region", () => {
+      // Scan from the wrapper element on: the header comment above the
+      // component mentions <button> and a link in prose.
+      const from = src.indexOf(WRAPPER_CLASS);
+      expect(from, "the wrapper element").toBeGreaterThan(-1);
+      const link = src.indexOf("<Link", from);
+      const firstButton = src.indexOf("<button", from);
+      const lastButtonClose = src.lastIndexOf("</button>");
+      const status = src.indexOf('role="status"', from);
+      expect(link, "a <Link>").toBeGreaterThan(-1);
+      expect(firstButton, "a <button>").toBeGreaterThan(-1);
+      expect(status, "the live region").toBeGreaterThan(-1);
+      expect(link).toBeLessThan(firstButton);
+      // Both button branches (add / remove-or-clear) come before the region.
+      expect(lastButtonClose).toBeLessThan(status);
+      // One live region only.
+      expect(src.indexOf('role="status"', status + 1)).toBe(-1);
+    });
+
+    it("keeps the 44 px targets on the compare controls", () => {
+      expect(src).toContain('const CHIP_TARGET = "min-h-[44px] touch-manipulation";');
+      expect(src).toContain("inline-flex min-h-[44px] items-center px-1 touch-manipulation");
+    });
+  });
+
   it("scans correctly: a computed className is reported as no literal", () => {
     const computed = '<span aria-label="x" className={cx("a", "b")}>';
     expect(classTokensIn(computed, 0, openingTagEnd(computed, 0))).toBeNull();

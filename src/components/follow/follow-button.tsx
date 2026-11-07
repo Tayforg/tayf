@@ -7,6 +7,8 @@ import { Check, Plus } from "lucide-react";
 import { useFollows } from "@/components/follow/use-follows";
 import {
   followLabel,
+  KEYWORD_MAX,
+  keywordRejectReason,
   MAX_FOLLOWS,
   normalizeFollowValue,
   type FollowKind,
@@ -100,7 +102,19 @@ export function FollowButton({ kind, value, className }: FollowButtonProps) {
   // Server snapshot is always empty, so SSR / first paint renders "Takip et"
   // and the real state pops in after hydration (no hydration mismatch).
   const normalized = normalizeFollowValue(kind, value);
-  if (normalized === null) return null;
+  if (normalized === null) {
+    // A search the archive runs but a follow cannot hold (over KEYWORD_MAX):
+    // say so instead of silently dropping the button. Every other rejection
+    // (too short, control characters, a bad topic / hub value) stays hidden.
+    if (kind === "q" && keywordRejectReason(value) === "too-long") {
+      return (
+        <span className="text-[11px] text-muted-foreground">
+          {`Takip için arama en fazla ${KEYWORD_MAX} karakter olabilir`}
+        </span>
+      );
+    }
+    return null;
+  }
 
   return (
     <FollowButtonView

@@ -94,6 +94,7 @@ import { oembedDiscoveryHref } from "@/lib/embed/embed-snippet";
 import { balanceFromDistribution } from "@/lib/bias/balance";
 import { zoneOf } from "@/lib/bias/config";
 import { uniqueSources } from "@/lib/bias/zone-summary";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import type { MediaDnaZone } from "@/types";
 import { isContentlessTitle } from "../../../../supabase/functions/_shared/rss/entities";
 
@@ -1124,6 +1125,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   <span className="rounded-full border border-border/50 px-1.5 text-[10px]">
                     {SOURCE_KIND_META[sourceKindOf(m.source)].label}
                   </span>
+                  <NewTabHint />
                 </a>
               </li>
             ))}

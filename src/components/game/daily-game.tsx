@@ -33,6 +33,7 @@ import {
 } from "@/lib/game/daily-set";
 import { headlineAnnouncement } from "@/lib/game/headline-announcement";
 import { track } from "@/lib/track";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import type { MediaDnaZone } from "@/types";
 
 interface DailyGameProps {
@@ -425,6 +426,7 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
                   className="underline underline-offset-2 hover:text-foreground"
                 >
                   Habere git ↗
+                  <NewTabHint />
                 </a>
                 {h.clusterId && (
                   <Link

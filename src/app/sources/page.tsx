@@ -33,6 +33,7 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { createSlowReaderClient } from "@/lib/supabase/server";
 import { buildRegistryDataset, serializeJsonLd } from "@/lib/seo/json-ld";
+import { NEW_TAB_NOTICE } from "@/components/ui/new-tab-hint";
 import {
   CLICKBAIT_PRECISION_CHECK,
   getClickbaitKarne,
@@ -648,7 +649,7 @@ export function SourceDirectory({
                     href={source.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    aria-label={`${source.name} sitesini yeni sekmede aç`}
+                    aria-label={`${source.name} sitesi (${NEW_TAB_NOTICE})`}
                     className={`absolute top-2 right-2 max-sm:top-0 max-sm:right-0 inline-flex min-h-6 min-w-6 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground${voting ? "" : " opacity-70"}`}
                   >
                     <span aria-hidden="true">↗</span>

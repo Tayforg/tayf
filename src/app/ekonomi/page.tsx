@@ -20,6 +20,7 @@ import {
   type QuoteStat,
 } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { marketCueText, quoteFreshness, rebaseQuoteOnStat } from "@/lib/finance/session";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { currentTimeMs } from "@/lib/time";
@@ -156,6 +157,7 @@ export default async function EkonomiPage() {
                       className="block text-[13px] leading-snug text-foreground hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       {item.title}
+                      <NewTabHint />
                     </a>
                     <div className="flex min-w-0 flex-wrap gap-1">
                       {item.tickers.map((t) => {
@@ -230,6 +232,7 @@ export default async function EkonomiPage() {
                         className="text-foreground/90 hover:text-brand"
                       >
                         {d.subject ?? "Bildirim"}
+                        <NewTabHint />
                       </a>
                     </div>
                     {d.summary ? <p className="truncate text-[10px] text-muted-foreground">{d.summary}</p> : null}

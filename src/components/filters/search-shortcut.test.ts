@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SHORTCUT_PREF_KEY } from "@/lib/a11y/shortcut-pref";
-import { isSearchShortcut } from "./search-shortcut";
+import {
+  isSearchArrivalHash,
+  isSearchBarActive,
+  isSearchShortcut,
+  registerSearchBar,
+} from "./search-shortcut";
 
 // h10-a11y-2: the global "/" shortcut used to fire for any "/" keydown whose
 // activeElement was not an <input>, so it ate "/" typed into a textarea, a
@@ -136,5 +141,77 @@ describe("isSearchShortcut", () => {
       expect(getItem).toHaveBeenCalledTimes(1);
       expect(getItem).toHaveBeenCalledWith(SHORTCUT_PREF_KEY);
     });
+  });
+});
+
+// h60-forms-4: "/" on a page without the search bar sends the reader to "/#ara";
+// the home page's SearchBar recognises that hash on mount and focuses its input.
+describe("isSearchArrivalHash", () => {
+  it("is true for exactly '#ara'", () => {
+    expect(isSearchArrivalHash("#ara")).toBe(true);
+  });
+
+  it.each(["", "#", "#ar", "#ARA", "#Ara", "ara", "#ara ", " #ara", "#ara=1", "#arama", "##ara"])(
+    "is false for %j",
+    (hash) => {
+      expect(isSearchArrivalHash(hash)).toBe(false);
+    },
+  );
+});
+
+// react-kbd-activity-hidden-searchbar: Next keeps a page it navigated away from
+// in <Activity mode="hidden">. Its DOM stays (display:none) but its effects are
+// cleaned up, so the "/" listener of SearchBar is gone while the <input> is
+// still in the document. KbdShortcuts therefore asks "is a SearchBar listening
+// right now?" instead of "is a search input in the DOM?". Every test releases
+// what it registers, so the module-level counter is back at zero afterwards.
+describe("registerSearchBar / isSearchBarActive", () => {
+  it("is false before any search bar registered", () => {
+    expect(isSearchBarActive()).toBe(false);
+  });
+
+  it("is true after registerSearchBar() and false once its cleanup ran", () => {
+    const off = registerSearchBar();
+    expect(isSearchBarActive()).toBe(true);
+    off();
+    expect(isSearchBarActive()).toBe(false);
+  });
+
+  it("returns a cleanup function", () => {
+    const off = registerSearchBar();
+    expect(typeof off).toBe("function");
+    off();
+  });
+
+  it("decrements only once when the same cleanup runs twice", () => {
+    const first = registerSearchBar();
+    const second = registerSearchBar();
+    first();
+    first();
+    // the second bar is still listening: a double cleanup of the first must
+    // not have eaten its registration
+    expect(isSearchBarActive()).toBe(true);
+    second();
+    expect(isSearchBarActive()).toBe(false);
+  });
+
+  it("needs one cleanup per registration before it reads false", () => {
+    const a = registerSearchBar();
+    const b = registerSearchBar();
+    expect(isSearchBarActive()).toBe(true);
+    a();
+    expect(isSearchBarActive()).toBe(true);
+    b();
+    expect(isSearchBarActive()).toBe(false);
+  });
+
+  it("can register again after a cleanup (Activity hidden, then revealed)", () => {
+    const hidden = registerSearchBar();
+    hidden();
+    expect(isSearchBarActive()).toBe(false);
+    const revealed = registerSearchBar();
+    expect(isSearchBarActive()).toBe(true);
+    revealed();
+    expect(isSearchBarActive()).toBe(false);
   });
 });

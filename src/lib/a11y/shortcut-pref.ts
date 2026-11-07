@@ -71,7 +71,7 @@ export interface ShortcutInput {
   isContentEditable?: boolean;
 }
 
-export type ShortcutAction = "help" | "pending-g" | { href: string };
+export type ShortcutAction = "help" | "search" | "pending-g" | { href: string };
 
 const TYPING_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 
@@ -80,7 +80,12 @@ const TYPING_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
  * than PENDING_MS ago. Returns null for anything that is not a shortcut:
  * shortcuts turned off, a held Ctrl / Cmd / Alt (browser and OS shortcuts), an
  * IME composition, or a key typed into an input, textarea, select or
- * contenteditable element. Shift is not checked: "?" needs it on most layouts.
+ * contenteditable element. Shift is not checked: "?" needs it on most layouts,
+ * and "/" is Shift+7 on a Turkish Q keyboard.
+ *
+ * "search" is a bare "/" with no g pending. The caller decides how to honour it
+ * (KbdShortcuts: leave it to SearchBar's own handler where the bar is mounted,
+ * otherwise go to "/#ara"), so the help dialog's "Ara /" row is true on every page.
  */
 export function resolveShortcut(
   input: ShortcutInput,
@@ -105,6 +110,7 @@ export function resolveShortcut(
   }
 
   if (key === "?") return "help";
+  if (key === "/") return "search";
   if (key === "g") return "pending-g";
   return null;
 }

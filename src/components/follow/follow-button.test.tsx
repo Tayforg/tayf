@@ -90,8 +90,8 @@ describe("FollowButton -- server render", () => {
     ["q", "a"],
     ["q", ""],
     ["q", "   "],
-    ["q", "x".repeat(41)],
     ["q", "\u0000ab"],
+    ["q", "ab\ud800"],
     ["konu", "politika"],
     ["konu", "../x"],
     ["konu", "Ekonomi"],
@@ -102,6 +102,49 @@ describe("FollowButton -- server render", () => {
     ["gundem", "__proto__"],
   ] as const)("renders nothing for an invalid %s value %j", (kind, value) => {
     expect(renderToStaticMarkup(<FollowButton kind={kind} value={value} />)).toBe("");
+  });
+
+  // h60-forms-3: the archive searches up to 64 characters, so a 41..64
+  // character search is followable; only a longer one gets a reason.
+  it("offers 'Takip et' for a 42-character search the archive really runs", () => {
+    const value = "Cumhurbaşkanı Erdoğan Azerbaycan'a gidecek";
+    expect([...value]).toHaveLength(42);
+    const markup = renderToStaticMarkup(<FollowButton kind="q" value={value} />);
+    expect(markup).toContain("Takip et");
+    expect(markup).toContain("<button");
+    expect(markup).toContain(`aria-label="Takip et: “cumhurbaşkanı erdoğan azerbaycan&#x27;a gidecek”"`);
+    expect(markup).not.toContain("en fazla 64 karakter");
+  });
+
+  it("offers 'Takip et' at exactly 64 characters", () => {
+    const markup = renderToStaticMarkup(<FollowButton kind="q" value={"x".repeat(64)} />);
+    expect(markup).toContain("<button");
+    expect(markup).not.toContain("en fazla");
+  });
+
+  it("explains a search over the limit with a non-interactive note instead of vanishing", () => {
+    const markup = renderToStaticMarkup(<FollowButton kind="q" value={"x".repeat(70)} />);
+    expect(markup).toContain("en fazla 64 karakter");
+    expect(markup).toBe(
+      '<span class="text-[11px] text-muted-foreground">Takip için arama en fazla 64 karakter olabilir</span>',
+    );
+    expect(markup).not.toContain("<button");
+    expect(markup).not.toContain("<a ");
+    expect(markup).not.toContain("Takip et");
+  });
+
+  it("shows the limit note for a 65-character search (one over) but not for 64", () => {
+    expect(renderToStaticMarkup(<FollowButton kind="q" value={"x".repeat(65)} />)).toContain(
+      "en fazla 64 karakter",
+    );
+    expect(renderToStaticMarkup(<FollowButton kind="q" value={"x".repeat(64)} />)).not.toContain(
+      "en fazla 64 karakter",
+    );
+  });
+
+  it("keeps the note for 'q' only: other kinds with a long value still render nothing", () => {
+    expect(renderToStaticMarkup(<FollowButton kind="konu" value={"x".repeat(70)} />)).toBe("");
+    expect(renderToStaticMarkup(<FollowButton kind="gundem" value={"x".repeat(70)} />)).toBe("");
   });
 
   it("renders nothing for a non-string value instead of throwing", () => {

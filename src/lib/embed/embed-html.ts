@@ -189,6 +189,8 @@ const STYLE = [
   ".zi{background:#ef4444}.zb{background:#a1a1aa}.zm{background:#10b981}",
   ".l{flex:none;margin:0;font-size:12px;color:var(--mu);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3}",
   ".a{flex:none;max-width:100%;margin-top:auto;font-size:12px;font-weight:600;color:var(--fg);text-decoration:underline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+  // h60-newtab-1: visually hidden, still read (never display:none). Holds the new-tab notice inside .a.
+  ".v{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}",
   "@media (max-height:187px){.b{display:none}.c{padding:8px 12px;gap:4px}h1{font-size:15px;min-height:1.25em;-webkit-line-clamp:1;line-clamp:1}.l{-webkit-line-clamp:1;line-clamp:1}}",
   "@media (max-width:260px){.b{display:none}.c{padding:8px 10px;gap:4px}h1{font-size:15px}}",
 ].join("");
@@ -231,7 +233,7 @@ export function renderEmbedHtml(model: EmbedModel): string {
     `<h1>${e(model.title)}</h1>` +
     `<div class="bar" role="img" aria-label="${e(ariaLabelOf(model))}">${bar}</div>` +
     `<p class="l">${e(legendOf(model))}</p>` +
-    `<a class="a" href="${e(model.href)}" target="_blank" rel="noopener">tayfhaber.com'da oku →</a>` +
+    `<a class="a" href="${e(model.href)}" target="_blank" rel="noopener">tayfhaber.com'da oku →<span class="v"> (yeni sekmede açılır)</span></a>` +
     "</div></body></html>"
   );
 }

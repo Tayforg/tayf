@@ -110,7 +110,7 @@ describe("ShareButton — channel chips", () => {
 
     for (const { channel, label, host } of EXPECTED) {
       const re = new RegExp(
-        `<a[^>]*aria-label="${label} ile paylaş"[^>]*>${label}</a>`,
+        `<a[^>]*aria-label="${label} ile paylaş \\(yeni sekmede açılır\\)"[^>]*>${label}</a>`,
       );
       const match = html.match(re);
       expect(match, `missing chip for ${channel}`).not.toBeNull();
@@ -126,6 +126,44 @@ describe("ShareButton — channel chips", () => {
       expect(decoded).toContain("utm_campaign=cluster");
       expect(decoded).toContain(`/cluster/${CLUSTER_ID}?`);
     }
+  });
+});
+
+// h60-newtab-1 (WCAG G201 / 2.5.3): the chips open the share target in a new
+// tab. aria-label overrides their content, so the notice goes into the label
+// itself; the visible text stays the bare channel name, which the label starts
+// with (label in name).
+describe("ShareButton — channel chips announce the new tab (h60-newtab-1)", () => {
+  const html = renderToStaticMarkup(
+    <ShareButton clusterId="3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b" title="Başlık" />,
+  );
+  const newTabAnchors = html.match(/<a [^>]*target="_blank"[^>]*>[\s\S]*?<\/a>/g) ?? [];
+
+  it("gives each of the 4 new-tab chips an aria-label ending with the notice", () => {
+    expect(newTabAnchors).toHaveLength(4);
+    for (const anchor of newTabAnchors) {
+      expect(anchor).toMatch(/aria-label="[^"]+ ile paylaş \(yeni sekmede açılır\)"/);
+    }
+  });
+
+  it("names the examples exactly: 'WhatsApp ile paylaş (yeni sekmede açılır)'", () => {
+    expect(html).toContain('aria-label="WhatsApp ile paylaş (yeni sekmede açılır)"');
+    expect(html).toContain('aria-label="Bluesky ile paylaş (yeni sekmede açılır)"');
+  });
+
+  it("starts each label with the visible text and adds no visible words", () => {
+    for (const anchor of newTabAnchors) {
+      const label = /aria-label="([^"]+)"/.exec(anchor)?.[1] ?? "";
+      const visible = anchor.replace(/<[^>]*>/g, "");
+      expect(label.startsWith(visible)).toBe(true);
+      expect(anchor).not.toContain("sr-only");
+    }
+  });
+
+  it("leaves the same-tab 'Kartı indir' download link without the notice", () => {
+    const download = html.match(/<a [^>]*download=[^>]*>[^<]*<\/a>/)?.[0] ?? "";
+    expect(download).toContain("Kartı indir");
+    expect(download).not.toContain("yeni sekmede");
   });
 });
 
@@ -534,7 +572,7 @@ describe("ShareButton — channel group", () => {
     const anchors = group.match(/<a\s/g) ?? [];
     expect(anchors).toHaveLength(4);
     for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
-      expect(group).toContain(`aria-label="${label} ile paylaş"`);
+      expect(group).toContain(`aria-label="${label} ile paylaş (yeni sekmede açılır)"`);
     }
   });
 
@@ -600,14 +638,14 @@ describe("ShareButton — mobile tap targets (h16-mobile-2)", () => {
 
   it("gives every channel chip max-sm:min-w-11 as well", () => {
     for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
-      const tag = tags.find((t) => t.includes(`aria-label="${label} ile paylaş"`));
+      const tag = tags.find((t) => t.includes(`aria-label="${label} ile paylaş (yeni sekmede açılır)"`));
       expect(tag, label).toBeDefined();
       expect(tokensOf(tag), label).toContain("max-sm:min-w-11");
     }
   });
 
   it("keeps the Paylaş button and Kartı indir link on the exact shared chip classes (desktop unchanged)", () => {
-    const channel = tags.find((t) => t.includes('aria-label="X ile paylaş"'));
+    const channel = tags.find((t) => t.includes('aria-label="X ile paylaş (yeni sekmede açılır)"'));
     const share = tags.find((t) => t.startsWith("<button") && !t.includes("title="));
     const card = tags.find((t) => t.includes('download="tayf-kart.png"'));
     expect(share).toBeDefined();
@@ -664,7 +702,7 @@ describe("ShareButton — cardHref (h21-journeys-1)", () => {
     expect(html).toContain("Sitenize ekle");
     expect(html).toContain("Gömme kodu");
     for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
-      expect(html).toContain(`aria-label="${label} ile paylaş"`);
+      expect(html).toContain(`aria-label="${label} ile paylaş (yeni sekmede açılır)"`);
     }
     expect(count(html, 'role="status"')).toBe(1);
   });
@@ -787,7 +825,7 @@ describe("ShareButton — shareStory (h21-journeys-2)", () => {
     const title = "Süleymaniye Tekkesi restore edilerek yeniden açıldı";
     const text = "12 kaynak · 9 sınıflandırılmış: %100 iktidar · %0 bağımsız · %0 muhalefet";
     const html = renderToStaticMarkup(<ShareButton clusterId={CLUSTER_ID} title={title} text={text} />);
-    const anchor = html.match(/<a[^>]*aria-label="WhatsApp ile paylaş"[^>]*>/);
+    const anchor = html.match(/<a[^>]*aria-label="WhatsApp ile paylaş \(yeni sekmede açılır\)"[^>]*>/);
     expect(anchor).not.toBeNull();
     const href = anchor![0].match(/href="([^"]*)"/)![1]!.replace(/&amp;/g, "&");
     const decoded = decodeURIComponent(href.slice(href.indexOf("?text=") + "?text=".length));
@@ -955,7 +993,7 @@ describe("ShareButton — 'Daha fazla' disclosure on phones (h46-mobile-1)", () 
   });
 
   it("styles the toggle exactly like every other chip plus sm:hidden (no drift)", () => {
-    const channel = (closed.match(/<a\b[^>]*aria-label="X ile paylaş"[^>]*>/) ?? [])[0];
+    const channel = (closed.match(/<a\b[^>]*aria-label="X ile paylaş \(yeni sekmede açılır\)"[^>]*>/) ?? [])[0];
     const chip = tokensOf(channel);
     const toggle = tokensOf(openingTag(buttonWith(closed, "Daha fazla")));
     expect([...toggle].sort()).toEqual([...chip, "sm:hidden"].sort());
@@ -968,7 +1006,7 @@ describe("ShareButton — 'Daha fazla' disclosure on phones (h46-mobile-1)", () 
     expect(group.html).toContain("Gömme kodu");
     expect(group.html).toMatch(/<span\b[^>]*role="group"[^>]*aria-label="Kanal ile paylaş"|<span\b[^>]*aria-label="Kanal ile paylaş"[^>]*role="group"/);
     for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
-      expect(group.html).toContain(`aria-label="${label} ile paylaş"`);
+      expect(group.html).toContain(`aria-label="${label} ile paylaş (yeni sekmede açılır)"`);
     }
     // Only one wrapper.
     expect(closed.split('data-group="more-share"')).toHaveLength(2);

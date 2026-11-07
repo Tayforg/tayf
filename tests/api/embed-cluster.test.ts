@@ -197,6 +197,12 @@ describe("GET /embed/cluster/[id] — 200", () => {
     expect(a).toContain(`href="https://tayf.test/cluster/${ID}?utm_source=embed&amp;utm_medium=iframe&amp;utm_campaign=cluster"`);
   });
 
+  it("names the new tab for screen readers inside the link (h60-newtab-1)", async () => {
+    getClusterDetailMock.mockResolvedValue(detail());
+    const body = await (await call(ID)).text();
+    expect(body).toContain(`<span class="v"> (yeni sekmede açılır)</span></a>`);
+  });
+
   it("never fetches anything itself", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     getClusterDetailMock.mockResolvedValue(detail());

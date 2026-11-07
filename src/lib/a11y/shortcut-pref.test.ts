@@ -141,6 +141,59 @@ describe("resolveShortcut", () => {
     });
   });
 
+  // h60-forms-4: the help dialog lists "Ara /" on every page, but only the home
+  // page's SearchBar listened for "/". The resolver now maps it too, so
+  // KbdShortcuts can focus the bar where it is mounted and take the reader to
+  // it everywhere else, under the same guards as every other single-key shortcut.
+  describe("search", () => {
+    it("resolves a bare '/' to 'search'", () => {
+      expect(resolveShortcut({ key: "/" }, null, true)).toBe("search");
+    });
+
+    it("still resolves '/' with Shift held: on a Turkish Q keyboard it is Shift+7", () => {
+      expect(resolveShortcut({ key: "/", shiftKey: true }, null, true)).toBe("search");
+    });
+
+    it.each(["ctrlKey", "metaKey", "altKey"] as const)("returns null with %s held", (mod) => {
+      expect(resolveShortcut({ key: "/", [mod]: true }, null, true)).toBeNull();
+    });
+
+    it("returns null while an IME composition is in progress", () => {
+      expect(resolveShortcut({ key: "/", isComposing: true }, null, true)).toBeNull();
+    });
+
+    it("returns null when shortcuts are switched off (WCAG 2.1.4)", () => {
+      expect(resolveShortcut({ key: "/" }, null, false)).toBeNull();
+    });
+
+    it.each(["INPUT", "TEXTAREA", "SELECT", "input", "Textarea", "select"])(
+      "returns null when the target is <%s>",
+      (targetTag) => {
+        expect(resolveShortcut({ key: "/", targetTag }, null, true)).toBeNull();
+      },
+    );
+
+    it("returns null when the target is contenteditable", () => {
+      expect(
+        resolveShortcut({ key: "/", targetTag: "DIV", isContentEditable: true }, null, true),
+      ).toBeNull();
+    });
+
+    it.each(["A", "BUTTON", "BODY", null])("resolves on target %j", (targetTag) => {
+      expect(resolveShortcut({ key: "/", targetTag }, null, true)).toBe("search");
+    });
+
+    it("returns null for '/' as the second key of a g-sequence", () => {
+      expect(resolveShortcut({ key: "/" }, "g", true)).toBeNull();
+    });
+
+    it("does not treat other punctuation as search", () => {
+      for (const key of ["\\", "|", "?/", "//", "÷"]) {
+        expect(resolveShortcut({ key }, null, true)).not.toBe("search");
+      }
+    });
+  });
+
   describe("g-sequences", () => {
     it("starts a sequence on a lowercase 'g'", () => {
       expect(resolveShortcut({ key: "g" }, null, true)).toBe("pending-g");
@@ -180,7 +233,7 @@ describe("resolveShortcut", () => {
   });
 
   describe("unrelated keys", () => {
-    it.each(["a", "/", "Escape", "Enter", "Tab", " ", "1", "", "Dead"])(
+    it.each(["a", "Escape", "Enter", "Tab", " ", "1", "", "Dead", "\\"])(
       "returns null for key %j",
       (key) => {
         expect(resolveShortcut({ key }, null, true)).toBeNull();
