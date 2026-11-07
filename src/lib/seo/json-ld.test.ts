@@ -4,8 +4,10 @@ import {
   buildRegistryDataset,
   buildSiteJsonLd,
   buildTayfOrganization,
+  newsArticleInLanguage,
   serializeJsonLd,
 } from "./json-ld";
+import { isLanguageIsolatedCluster, sourceLang } from "@/lib/sources/source-language";
 
 const ORIGINAL_SITE_URL_ENV = process.env.NEXT_PUBLIC_SITE_URL;
 
@@ -225,6 +227,48 @@ describe("buildRegistryDataset", () => {
       expect(unknownFirst).not.toContain("2026-11-01");
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+// h59-english-1: NewsArticle.inLanguage is 'en' only when the whole cluster is
+// English-language AND the page's <h1> is the English member headline (the
+// existing headlineLang decision: not the Turkish LLM rewrite, not the "Haber"
+// fallback). Every other cluster stays 'tr-TR'.
+describe("newsArticleInLanguage (h59-english-1)", () => {
+  const FIXTURE_A = ["hurriyet-daily-news", "trt-world", "daily-sabah", "a-news"].map((slug) => ({ slug }));
+  const MIXED = [{ slug: "a-haber" }, { slug: "daily-sabah" }];
+  const TURKISH = [{ slug: "yenicag" }, { slug: "abc-haber" }];
+
+  // The page's two inputs, computed the way page.tsx computes them.
+  const inputs = (sources: Array<{ slug: string }>, h1Lang: "en" | undefined) => ({
+    languageIsolated: isLanguageIsolatedCluster(sources),
+    headlineLang: h1Lang,
+  });
+
+  it("is 'en' for fixture A when the h1 is English", () => {
+    expect(newsArticleInLanguage(inputs(FIXTURE_A, sourceLang(FIXTURE_A[0]))) ).toBe("en");
+  });
+
+  it("stays 'tr-TR' for an isolated cluster whose h1 is not English (LLM rewrite or the Haber fallback)", () => {
+    expect(newsArticleInLanguage(inputs(FIXTURE_A, undefined))).toBe("tr-TR");
+  });
+
+  it("stays 'tr-TR' for the mixed control, even if its h1 is English", () => {
+    expect(newsArticleInLanguage(inputs(MIXED, undefined))).toBe("tr-TR");
+    expect(newsArticleInLanguage(inputs(MIXED, "en"))).toBe("tr-TR");
+  });
+
+  it("stays 'tr-TR' for the Turkish control", () => {
+    expect(newsArticleInLanguage(inputs(TURKISH, undefined))).toBe("tr-TR");
+  });
+
+  it("is a plain schema.org language tag a crawler accepts", () => {
+    for (const lang of [
+      newsArticleInLanguage({ languageIsolated: true, headlineLang: "en" }),
+      newsArticleInLanguage({ languageIsolated: false, headlineLang: undefined }),
+    ]) {
+      expect(lang).toMatch(/^[a-z]{2}(-[A-Z]{2})?$/);
     }
   });
 });

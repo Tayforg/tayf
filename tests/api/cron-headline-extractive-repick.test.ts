@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
+import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
 
 // ---------------------------------------------------------------------------
 // Extractive mode of GET /api/cron/headline: the unchanged IS NULL pick plus
@@ -48,6 +48,10 @@ interface MemberTitle {
   published_at: string | null;
   /** The article url (h54-editorial-3). Absent on a row the fixture did not give one. */
   url?: string;
+  /** The source slug (h59-english-2). Absent on a row the fixture did not give one: no `sources` embed. */
+  sourceSlug?: string;
+  /** The raw `sources` embed, overriding `sourceSlug` (an array or null, the shapes PostgREST can hand back). */
+  sourcesRaw?: unknown;
 }
 
 interface RepickRow {
@@ -110,7 +114,18 @@ const supabaseFake = await vi.hoisted(async () => {
         }
         const members = (id ? dbState.membersByCluster[id] : undefined) ?? [];
         return {
-          data: members.map((m) => ({ articles: { title: m.title, published_at: m.published_at, url: m.url } })),
+          data: members.map((m) => ({
+            articles: {
+              title: m.title,
+              published_at: m.published_at,
+              url: m.url,
+              ...(m.sourcesRaw !== undefined
+                ? { sources: m.sourcesRaw }
+                : m.sourceSlug
+                  ? { sources: { slug: m.sourceSlug } }
+                  : {}),
+            },
+          })),
           error: null,
         };
       },
@@ -1076,5 +1091,122 @@ describe("opinion columns (h54-editorial-3)", () => {
     expect(body.repicked).toBe(1);
     const written = patchOf(updateFor("r1")!).title_tr_neutral;
     expect(TWO_GOOD).toContain(written);
+  });
+});
+
+// h59-english-2: 11 mixed Turkish + English clusters carry an English neutral title
+// (749b0eea 'NATO chief visits Türkiye ahead of key summit' beside A Haber's Turkish
+// headline). The cron now selects each article's source slug and flags the members of
+// the six English-language outlets, and the picker prefers a Turkish member.
+describe("headline cron: the English-language outlets are flagged for the picker (h59-english-2)", () => {
+  const NATO_EN = "NATO chief visits Türkiye ahead of key summit";
+  const NATO_TR = "NATO Genel Sekreteri Rutte Türkiye yolcusu: Başkan Erdoğan ile görüşecek";
+
+  function membersWithSources(id: string, rows: Array<{ title: string; sourceSlug?: string }>): void {
+    dbState.membersByCluster[id] = rows.map((r, i) => ({
+      title: r.title,
+      sourceSlug: r.sourceSlug,
+      published_at: new Date(Date.UTC(2026, 0, i + 1)).toISOString(),
+    }));
+  }
+
+  it("the member fetch selects the source slug next to the title, the date and the url, in both passes", async () => {
+    dbState.clusters = [cluster("c1")];
+    dbState.repickRows = [repickRow("r1")];
+    members("c1", TWO_GOOD);
+    members("r1", TWO_GOOD);
+
+    const { res } = await run("203.0.113.211");
+    expect(res.status).toBe(200);
+    expect(dbState.memberSelects).toHaveLength(2);
+    for (const select of dbState.memberSelects) {
+      expect(String(select[0])).toMatch(/title,\s*published_at,\s*url,\s*sources\s*\(\s*slug\s*\)/);
+    }
+  });
+
+  it("749b0eea: the first pick is the Turkish A Haber headline, not Daily Sabah's", async () => {
+    dbState.clusters = [cluster("c1", { article_count: 2 })];
+    membersWithSources("c1", [
+      { title: NATO_EN, sourceSlug: "daily-sabah" },
+      { title: NATO_TR, sourceSlug: "a-haber" },
+    ]);
+
+    const { res, body } = await run("203.0.113.212");
+    expect(res.status).toBe(200);
+    expect(body.rewrote).toBe(1);
+    const written = patchOf(updateFor("c1")!).title_tr_neutral;
+    expect(written).not.toBe(NATO_EN);
+    expect(String(written)).toContain("Rutte");
+  });
+
+  it("every one of the six English slugs is flagged (a-news, daily-sabah, hurriyet-daily-news, mfa-turkey, trt-world, turkiye-today)", async () => {
+    for (const [i, slug] of ["a-news", "daily-sabah", "hurriyet-daily-news", "mfa-turkey", "trt-world", "turkiye-today"].entries()) {
+      const id = `c-${i}`;
+      dbState.clusters.push(cluster(id, { article_count: 2 }));
+      membersWithSources(id, [
+        { title: NATO_EN, sourceSlug: slug },
+        { title: NATO_TR, sourceSlug: "a-haber" },
+      ]);
+    }
+    const { body } = await run("203.0.113.213");
+    expect(body.rewrote).toBe(6);
+    for (let i = 0; i < 6; i++) {
+      expect(String(patchOf(updateFor(`c-${i}`)!).title_tr_neutral)).toContain("Rutte");
+    }
+  });
+
+  it("an all-English cluster is titled as before (an English title, nothing else to choose)", async () => {
+    const titles = [
+      "Erdoğan visits Seoul with $15 billion trade goal",
+      "Turkish President Erdogan arrives in South Korea for official visit",
+      "Erdoğan begins South Korea visit, eyes new partnerships",
+    ];
+    dbState.clusters = [cluster("c1", { article_count: 2 })];
+    membersWithSources("c1", [
+      { title: titles[0]!, sourceSlug: "hurriyet-daily-news" },
+      { title: titles[1]!, sourceSlug: "a-news" },
+      { title: titles[2]!, sourceSlug: "daily-sabah" },
+    ]);
+
+    const { body } = await run("203.0.113.214");
+    expect(body.rewrote).toBe(1);
+    // The cron feeds the picker newest first (the fixture dates grow with the index).
+    const unflagged = pickNeutralTitle([...titles].reverse().map((title) => ({ title })), { floor: true });
+    expect(patchOf(updateFor("c1")!).title_tr_neutral).toBe(unflagged);
+    expect(titles).toContain(unflagged);
+  });
+
+  it("a re-pick replaces an English stored title once a Turkish member exists", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: NATO_EN, article_count: 4 })];
+    membersWithSources("r1", [
+      { title: NATO_EN, sourceSlug: "daily-sabah" },
+      { title: NATO_TR, sourceSlug: "a-haber" },
+    ]);
+
+    const { body } = await run("203.0.113.215");
+    expect(body.repicked).toBe(1);
+    const written = patchOf(updateFor("r1")!).title_tr_neutral;
+    expect(String(written)).toContain("Rutte");
+  });
+
+  it("a member row with no source embed (an old fixture shape) is a Turkish one: picked as before", async () => {
+    dbState.clusters = [cluster("c1")];
+    members("c1", TWO_GOOD);
+
+    await run("203.0.113.216");
+    expect(patchOf(updateFor("c1")!).title_tr_neutral).toBe(BEST_OF_TWO_GOOD);
+  });
+
+  it("accepts the embed as an array (the legacy shape of a to-one relation) and as null", async () => {
+    dbState.clusters = [cluster("c1", { article_count: 2 })];
+    dbState.membersByCluster["c1"] = [
+      { title: NATO_EN, published_at: "2026-01-01T00:00:00.000Z", sourcesRaw: [{ slug: "daily-sabah" }] },
+      { title: NATO_TR, published_at: "2026-01-02T00:00:00.000Z", sourcesRaw: null },
+    ];
+
+    const { res, body } = await run("203.0.113.217");
+    expect(res.status).toBe(200);
+    expect(body.rewrote).toBe(1);
+    expect(String(patchOf(updateFor("c1")!).title_tr_neutral)).toContain("Rutte");
   });
 });

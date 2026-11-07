@@ -3,7 +3,7 @@ import { ExternalLink } from "lucide-react";
 import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { pickOtherSide } from "@/lib/clusters/read-across";
-import { sourceLang } from "@/lib/sources/source-language";
+import { ENGLISH_ONLY_NOTE, sourceLang } from "@/lib/sources/source-language";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { RelativeTime } from "@/components/story/relative-time";
 import type { MediaDnaZone } from "@/types";
@@ -53,6 +53,15 @@ interface ReadAcrossSpectrumProps {
    * story, which is false when a niche/aggregator source did.
    */
   nonVotingZoneCounts?: Partial<Record<MediaDnaZone, number>>;
+  /**
+   * h59-english-1: every member of the cluster is an English-language outlet
+   * (`isLanguageIsolatedCluster`), so it never met the Turkish zones. An empty
+   * pole is then not a finding and the empty state prints the one
+   * ENGLISH_ONLY_NOTE instead of "tarafında henüz haber yok" / "kör nokta". A
+   * pole that does have a member keeps its link. Optional (false) so every
+   * other caller renders exactly as before.
+   */
+  languageIsolated?: boolean;
 }
 
 // Literal Tailwind class strings per pole, drawn from the same red /
@@ -73,9 +82,18 @@ export function ReadAcrossSpectrum({
   isBlindspot,
   feedDegraded = false,
   nonVotingZoneCounts,
+  languageIsolated = false,
 }: ReadAcrossSpectrumProps) {
   const { zone, member, counts } = pickOtherSide(members);
   const zoneLabel = ZONE_META[zone].label;
+
+  if (!member && languageIsolated) {
+    return (
+      <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground">
+        {ENGLISH_ONLY_NOTE}
+      </p>
+    );
+  }
 
   if (!member) {
     const bothPolesEmpty = counts.iktidar === 0 && counts.muhalefet === 0;

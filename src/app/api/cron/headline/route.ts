@@ -13,6 +13,7 @@ import {
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
+import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";
 import {
   EXTRACTIVE_MODEL_ID,
   isAcceptableNeutral,
@@ -237,7 +238,14 @@ interface ClusterCandidate {
 
 // PostgREST returns embedded selects as arrays when the FK is many-to-one;
 // the legacy worker treated it as a single object. Accept both shapes here.
-type ClusterArticleNested = { title: string | null; published_at: string | null; url: string | null };
+// `sources` is the to-one embed of the article's outlet; only its slug is read (h59-english-2).
+type SourceSlugNested = { slug: string | null };
+type ClusterArticleNested = {
+  title: string | null;
+  published_at: string | null;
+  url: string | null;
+  sources?: SourceSlugNested | SourceSlugNested[] | null;
+};
 interface ClusterArticleRow {
   articles: ClusterArticleNested | ClusterArticleNested[] | null;
 }
@@ -300,6 +308,11 @@ interface MemberItem {
   published_at: string | null;
   /** The article's URL is an opinion path (/yazarlar/..., isOpinionUrl): the picker leaves a column out while a news member exists. */
   opinion: boolean;
+  /**
+   * The article's outlet is one of the English-language outlets (ENGLISH_SOURCE_SLUGS, h59-english-2): the
+   * picker prefers a Turkish member while one has a usable title. Only the slug goes this far.
+   */
+  english: boolean;
 }
 
 /**
@@ -308,7 +321,10 @@ interface MemberItem {
  * title, so equal timestamps order the same on every run and the picker's
  * stable tie-break is deterministic. Each item carries `opinion`, derived from
  * the article URL (h54-editorial-3: 539e6666 was titled with a Hürriyet
- * columnist's insult); the URL itself goes no further.
+ * columnist's insult); the URL itself goes no further. It also carries `english`,
+ * derived from the outlet's slug (h59-english-2: 749b0eea was titled with Daily
+ * Sabah's English headline beside A Haber's Turkish one); a row with no source
+ * embed is a Turkish one.
  */
 async function fetchMemberItems(
   supabase: SupabaseClient,
@@ -316,7 +332,7 @@ async function fetchMemberItems(
 ): Promise<{ items: MemberItem[]; error: PostgrestError | null }> {
   const { data: memberRows, error } = await supabase
     .from("cluster_articles")
-    .select("articles ( title, published_at, url )")
+    .select("articles ( title, published_at, url, sources ( slug ) )")
     .eq("cluster_id", clusterId)
     .limit(MEMBER_FETCH_CAP);
   if (error) return { items: [], error };
@@ -325,7 +341,13 @@ async function fetchMemberItems(
   for (const r of (memberRows ?? []) as unknown as ClusterArticleRow[]) {
     const a = Array.isArray(r.articles) ? r.articles[0] : r.articles;
     if (!a || !a.title) continue;
-    items.push({ title: a.title, published_at: a.published_at, opinion: isOpinionUrl(a.url) });
+    const source = Array.isArray(a.sources) ? a.sources[0] : a.sources;
+    items.push({
+      title: a.title,
+      published_at: a.published_at,
+      opinion: isOpinionUrl(a.url),
+      english: typeof source?.slug === "string" && ENGLISH_SOURCE_SLUGS.has(source.slug),
+    });
   }
   // Newest-first so the LLM sees the freshest framings of the story.
   items.sort((a, b) => {

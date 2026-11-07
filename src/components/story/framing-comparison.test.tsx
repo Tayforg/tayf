@@ -396,3 +396,103 @@ describe("FramingComparison — empty zone covered only by non-voting sources (h
     expect(typeof forgotten).toBe("function");
   });
 });
+
+// h59-english-1: every member of fbb078b4 and 26e8abf9 is an English-language
+// outlet, so no Bağımsız or Muhalefet outlet could have matched them. The empty
+// columns must say the story was not compared with Turkish sources, never that
+// the zone is silent, and the note explains why.
+describe("FramingComparison — all-English cluster (h59-english-1)", () => {
+  const NOTE =
+    "Bu hikâyeyi yalnızca İngilizce yayın yapan kaynaklar yazdı. Türkçe haberlerle eşleşmediği için bölge karşılaştırması yapılamıyor.";
+  const NOT_COMPARED = "— Türkçe kaynaklarla karşılaştırılmadı —";
+  const ABSENCE = ["bu kümede haber yok", "henüz haber yok", "bu tarafta sessizlik", "spektruma sayılan kaynaklardan haber yok"];
+
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+  function section(html: string, label: string): string {
+    const open = html.indexOf(`<section aria-label="${label}"`);
+    if (open === -1) throw new Error(`no section for ${label}`);
+    return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
+  }
+
+  const HDN = mkSource("hurriyet-daily-news", "Hürriyet Daily News", "gov_leaning");
+  const A_NEWS = mkSource("a-news", "A News", "pro_government");
+  const TRT = mkSource("trt-world", "TRT World", "state_media");
+
+  // Fixture A: four members, every one an English outlet.
+  const FIXTURE_A = [
+    mkMember("a1", HDN, EN_TITLE, "2026-11-02T06:18:00Z"),
+    mkMember("a2", A_NEWS, EN_TITLE, "2026-11-02T06:53:00Z"),
+    mkMember("a3", DAILY_SABAH, EN_TITLE, "2026-11-02T06:56:00Z"),
+    mkMember("a4", TRT, EN_TITLE, "2026-11-02T08:25:00Z"),
+  ];
+  // Fixture B: three members.
+  const FIXTURE_B = [
+    mkMember("b1", DAILY_SABAH, "Turkey signs deal", "2026-11-03T05:00:00Z"),
+    mkMember("b2", HDN, "Turkey signs deal", "2026-11-03T05:20:00Z"),
+    mkMember("b3", A_NEWS, "Turkey signs deal", "2026-11-03T06:10:00Z"),
+  ];
+
+  function renderIsolated(members: ClusterDetailMember[], nonVotingZones: ReadonlySet<MediaDnaZone> = new Set()): string {
+    return renderToStaticMarkup(
+      <FramingComparison members={members} nowMs={NOW_MS} nonVotingZones={nonVotingZones} languageIsolated />,
+    );
+  }
+
+  it("today fixture A claims 'bu tarafta sessizlik' twice (the bug this fixes)", () => {
+    const html = render(FIXTURE_A);
+    expect(count(html, "— bu tarafta sessizlik —")).toBe(2);
+  });
+
+  it.each([
+    ["A", FIXTURE_A],
+    ["B", FIXTURE_B],
+  ])("fixture %s: both empty columns read the not-compared line and the block prints no note (the read-across slot owns it)", (_label, members) => {
+    const html = renderIsolated(members);
+    expect(count(html, NOT_COMPARED)).toBe(2);
+    expect(html).not.toContain(NOTE);
+    for (const needle of ABSENCE) expect(html).not.toContain(needle);
+  });
+
+  it("puts the not-compared line in the Bağımsız and Muhalefet columns, never in İktidar", () => {
+    const html = renderIsolated(FIXTURE_A);
+    expect(section(html, "Bağımsız")).toContain(NOT_COMPARED);
+    expect(section(html, "Muhalefet")).toContain(NOT_COMPARED);
+    expect(section(html, "İktidar")).not.toContain(NOT_COMPARED);
+  });
+
+  it("keeps the member lists, counts and the three zone headings", () => {
+    const html = renderIsolated(FIXTURE_A);
+    expect(html).toContain("4 kaynağın kendi manşetleri");
+    expect(section(html, "İktidar")).toContain("4 manşet");
+    expect(section(html, "Bağımsız")).toContain("0 manşet");
+    expect(section(html, "Muhalefet")).toContain("0 manşet");
+    expect(listItems(html)).toHaveLength(4);
+  });
+
+  it("a non-voting zone does not bring back the qualified absence wording", () => {
+    const html = renderIsolated(FIXTURE_A, new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]));
+    expect(count(html, NOT_COMPARED)).toBe(2);
+    expect(html).not.toContain("spektruma sayılan");
+  });
+
+  it("controls: a mixed cluster (a-haber + daily-sabah) is byte-identical with the flag false or absent", () => {
+    const A_HABER = mkSource("a-haber", "A Haber", "pro_government");
+    const mixed = [mkMember("m1", A_HABER, TR_TITLE), mkMember("m2", DAILY_SABAH, EN_TITLE)];
+    const today = render(mixed);
+    const flagged = renderToStaticMarkup(
+      <FramingComparison members={mixed} nowMs={NOW_MS} nonVotingZones={new Set()} languageIsolated={false} />,
+    );
+    expect(flagged).toBe(today);
+    expect(count(today, "— bu tarafta sessizlik —")).toBe(2);
+    expect(today).not.toContain(NOTE);
+    expect(today).not.toContain(NOT_COMPARED);
+  });
+
+  it("controls: a Turkish 2-outlet pro-government cluster keeps 'bu tarafta sessizlik'", () => {
+    const SABAH = mkSource("sabah", "Sabah", "pro_government");
+    const YENI_SAFAK = mkSource("yeni-safak", "Yeni Şafak", "pro_government");
+    const html = render([mkMember("t1", SABAH, TR_TITLE), mkMember("t2", YENI_SAFAK, TR_TITLE)]);
+    expect(count(html, "— bu tarafta sessizlik —")).toBe(2);
+    expect(html).not.toContain(NOTE);
+  });
+});

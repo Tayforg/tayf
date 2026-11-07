@@ -5755,3 +5755,123 @@ describe("h54-editorial-3: opinion columns are not candidates for the neutral ti
     expect(performance.now() - t0).toBeLessThan(5000);
   });
 });
+
+// h59-english-2: 11 live mixed Turkish + English clusters (749b0eea, b20349b3,
+// d70068ad ...) show a Daily Sabah or A News headline as their neutral title
+// although a Turkish member exists, because the picker had no language input. A
+// member flagged `english` (the headline cron sets it from the source slug) is
+// neither a candidate nor evidence while a non-English member with a usable title
+// exists; an all-English cluster is picked as before.
+describe("h59-english-2: a Turkish member is preferred over an English one for the neutral title", () => {
+  // 749b0eea: Daily Sabah (English) + A Haber (Turkish).
+  const NATO_EN = "NATO chief visits Türkiye ahead of key summit";
+  const NATO_TR = "NATO Genel Sekreteri Rutte Türkiye yolcusu: Başkan Erdoğan ile görüşecek";
+  // d70068ad: Daily Sabah + Gazete Pencere.
+  const D70_EN = "Ankara tightens security, preparations as NATO Summit approaches";
+  const D70_TR = "Türkiye soluna NATO operasyonu: 209 kişi gözaltında, aralarında Gazeteci Yıldız Tar da var!";
+  // b20349b3: Daily Sabah + A Haber.
+  const B20_EN = "Terror-free Türkiye law set to be drafted soon";
+  const B20_TR = "Terörsüz Türkiye yasasında yeni aşama: A Haber detaylara ulaştı: Yasa taslağı yarın Başkan Erdoğan ile değerlendirilecek";
+  // fbb078b4 and 26e8abf9: every member an English outlet.
+  const FBB = [
+    "Erdoğan visits Seoul with $15 billion trade goal",
+    "Turkish President Erdogan arrives in South Korea for official visit",
+    "Erdoğan begins South Korea visit, eyes new partnerships",
+    "Erdogan seeks $15B trade target and deeper strategic ties on South Korea visit",
+  ];
+  const E26 = [
+    "AK Party scores win as Turkish opposition stronghold's mayor joins",
+    "Mayor of main opposition CHP stronghold Izmir joins ruling AK Party",
+    "Erdoğan vows to deliver for İzmir as mayor joins AKP",
+  ];
+
+  const en = (title: string) => ({ title, english: true });
+  const tr = (title: string) => ({ title });
+
+  it.each([
+    ["749b0eea (a-haber + daily-sabah)", NATO_EN, NATO_TR],
+    ["d70068ad (gazete-pencere + daily-sabah)", D70_EN, D70_TR],
+    ["b20349b3 (a-haber + daily-sabah)", B20_EN, B20_TR],
+  ])("%s: the Turkish member is the pick, in either order, with or without the floor", (_label, enTitle, trTitle) => {
+    const turkishOnly = pickNeutralTitle([tr(trTitle)], { floor: true });
+    expect(turkishOnly).not.toBeNull();
+    for (const members of [[en(enTitle), tr(trTitle)], [tr(trTitle), en(enTitle)]]) {
+      expect(pickNeutralTitle(members, { floor: true })).toBe(turkishOnly);
+      expect(pickNeutralTitle(members)).toBe(pickNeutralTitle([tr(trTitle)]));
+    }
+    expect(turkishOnly).not.toBe(enTitle);
+  });
+
+  it("the flag is what changes it: the same two members unflagged still pick the English title", () => {
+    const unflagged = pickNeutralTitle([{ title: NATO_EN }, { title: NATO_TR }], { floor: true });
+    expect(unflagged).toBe(NATO_EN);
+  });
+
+  it("an English stored title is stale once a Turkish member exists, so it is re-picked", () => {
+    const members = [en(NATO_EN), tr(NATO_TR)];
+    const picked = pickNeutralTitle(members, { incumbent: NATO_EN });
+    expect(picked).toBe(pickNeutralTitle([tr(NATO_TR)]));
+    expect(picked).not.toBe(NATO_EN);
+    // Unflagged, the English incumbent is carried by an English member and stays.
+    expect(pickNeutralTitle([{ title: NATO_EN }, { title: NATO_TR }], { incumbent: NATO_EN })).toBe(NATO_EN);
+  });
+
+  it("a Turkish stored title that a Turkish member carries stays protected", () => {
+    const stored = pickNeutralTitle([tr(NATO_TR)], { floor: true })!;
+    expect(pickNeutralTitle([en(NATO_EN), tr(NATO_TR)], { incumbent: stored })).toBe(stored);
+  });
+
+  it("fbb078b4 and 26e8abf9 (all English): the pick is unchanged by the flag", () => {
+    for (const titles of [FBB, E26]) {
+      const flagged = titles.map(en);
+      const plain = titles.map((title) => ({ title }));
+      expect(pickNeutralTitle(flagged, { floor: true })).toBe(pickNeutralTitle(plain, { floor: true }));
+      expect(pickNeutralTitle(flagged)).toBe(pickNeutralTitle(plain));
+      expect(pickNeutralTitle(flagged, { floor: true })).not.toBeNull();
+    }
+    expect(FBB).toContain(pickNeutralTitle(FBB.map(en), { floor: true }));
+    expect(E26).toContain(pickNeutralTitle(E26.map(en), { floor: true }));
+  });
+
+  it("an all-English cluster keeps its English stored title", () => {
+    const members = FBB.map(en);
+    const stored = pickNeutralTitle(members, { floor: true })!;
+    expect(pickNeutralTitle(members, { incumbent: stored })).toBe(stored);
+  });
+
+  it("english: false and an absent flag are the same", () => {
+    const explicit = [{ title: NATO_EN, english: false }, { title: NATO_TR, english: false }];
+    expect(pickNeutralTitle(explicit, { floor: true })).toBe(pickNeutralTitle([{ title: NATO_EN }, { title: NATO_TR }], { floor: true }));
+  });
+
+  it("a Turkish member without a usable title does not count: a blank or a placeholder leaves the English one", () => {
+    expect(pickNeutralTitle([en(NATO_EN), tr("   ")], { floor: true })).toBe(NATO_EN);
+    expect(pickNeutralTitle([en(NATO_EN), tr("Kısa haberler")], { floor: true })).toBe(NATO_EN);
+    expect(pickNeutralTitle([en(NATO_EN), tr("")], { floor: true })).toBe(NATO_EN);
+  });
+
+  it("the English members are not evidence either: they leave centrality and the sibling check", () => {
+    const turkish = BAKIRKOY.map((title) => ({ title }));
+    const withEnglish = [...turkish, en("Turkish court jails 39 suspects in Bakirkoy municipality probe")];
+    expect(pickNeutralTitle(withEnglish, { floor: true })).toBe(pickNeutralTitle(turkish, { floor: true }));
+    expect(pickNeutralTitle(withEnglish, { floor: true })).not.toBeNull();
+  });
+
+  it("an opinion column is dropped first: a Turkish column next to English news leaves the English news", () => {
+    const column = { title: "Utanmazlık abidesi Sarıgül, Özgür Özel’i tehdit mi etti", opinion: true };
+    expect(pickNeutralTitle([column, en(NATO_EN)], { floor: true })).toBe(NATO_EN);
+  });
+
+  it("does not mutate the member list, and a roster at the fetch cap (200 members) with English among it is still cheap", () => {
+    const members = [en(NATO_EN), tr(NATO_TR)];
+    const before = JSON.stringify(members);
+    pickNeutralTitle(members, { floor: true });
+    expect(JSON.stringify(members)).toBe(before);
+
+    const big = [] as Array<{ title: string; english: boolean }>;
+    for (let i = 0; i < 200; i++) big.push({ title: `Bakırköy Belediyesi soruşturmasında ${i} şüpheli tutuklandı`, english: i % 5 === 0 });
+    const t0 = performance.now();
+    expect(pickNeutralTitle(big, { floor: true })).not.toBeNull();
+    expect(performance.now() - t0).toBeLessThan(5000);
+  });
+});

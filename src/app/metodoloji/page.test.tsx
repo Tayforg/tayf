@@ -37,6 +37,7 @@ import {
 } from "@/lib/bias/config";
 import { WRITABLE_SOURCE_BIAS } from "@/lib/validation/source-input";
 import {
+  BALANCE_BALANCED_MAX_SHARE,
   BALANCE_BALANCED_MIN,
   BALANCE_LABELS,
   BALANCE_MIN_SOURCES,
@@ -437,6 +438,30 @@ describe("/metodoloji page", () => {
 
       expect(text).toContain(
         `${BALANCE_ONE_SIDED_MAX + 1}–${BALANCE_BALANCED_MIN - 1} (iki bölgeye dengeli bölünme hariç)`,
+      );
+    });
+
+    // hunt-59 homefeed-2: the printed rule matches balanceFromZoneCounts, which
+    // refuses "Dengeli kapsama" when one zone reaches SURPRISE.dominantShare.
+    it("states the dominant-zone cap on Dengeli kapsama from the shared constant", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(BALANCE_BALANCED_MAX_SHARE).toBe(SURPRISE.dominantShare);
+      const pct = Math.round(BALANCE_BALANCED_MAX_SHARE * 100);
+      expect(pct).toBe(65);
+      expect(text).toContain(
+        `Puan ≥ ${BALANCE_BALANCED_MIN} ve hiçbir bölge kaynakların %${pct}'ine ulaşmıyor`,
+      );
+    });
+
+    it("tells the reader a 67+ score with a dominant zone reads Tek tarafa yakın", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+      const pct = Math.round(BALANCE_BALANCED_MAX_SHARE * 100);
+
+      expect(text).toContain(
+        `(ya da puan ≥ ${BALANCE_BALANCED_MIN} iken bir bölge %${pct} ve üstü)`,
       );
     });
 

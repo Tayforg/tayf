@@ -356,3 +356,93 @@ describe("ReadAcrossSpectrum — age through RelativeTime (h47-time-1)", () => {
     expect(markup).toContain(`<time dateTime="${OPP_AT}">3 saat önce</time>`);
   });
 });
+
+// h59-english-1: a cluster written only by English-language outlets has no
+// Turkish zones to compare with, so the empty "Karşı tarafı oku" slot must not
+// claim "Muhalefet tarafında henüz haber yok". It prints the one note instead.
+describe("ReadAcrossSpectrum — all-English cluster (h59-english-1)", () => {
+  const NOTE =
+    "Bu hikâyeyi yalnızca İngilizce yayın yapan kaynaklar yazdı. Türkçe haberlerle eşleşmediği için bölge karşılaştırması yapılamıyor.";
+
+  function enMember(slug: string, name: string, bias: Source["bias"], publishedAt: string): ClusterDetailMember {
+    const m = mkMember(slug, bias, publishedAt);
+    m.source = { ...m.source, slug, name };
+    return m;
+  }
+
+  // Fixture A (fbb078b4): four iktidar-zone English outlets, nobody on the Muhalefet pole.
+  const FIXTURE_A = [
+    enMember("hurriyet-daily-news", "Hürriyet Daily News", "gov_leaning", "2026-11-02T06:18:00Z"),
+    enMember("a-news", "A News", "pro_government", "2026-11-02T06:53:00Z"),
+    enMember("daily-sabah", "Daily Sabah", "pro_government", "2026-11-02T06:56:00Z"),
+    enMember("trt-world", "TRT World", "state_media", "2026-11-02T08:25:00Z"),
+  ];
+  // Fixture B (26e8abf9).
+  const FIXTURE_B = [
+    enMember("daily-sabah", "Daily Sabah", "pro_government", "2026-11-03T05:00:00Z"),
+    enMember("hurriyet-daily-news", "Hürriyet Daily News", "gov_leaning", "2026-11-03T05:20:00Z"),
+    enMember("a-news", "A News", "pro_government", "2026-11-03T06:10:00Z"),
+  ];
+  const ABSENCE = ["henüz haber yok", "bu kümede haber yok", "bu tarafta haber yok", "kör nokta", "iki kutupta"];
+
+  it("today fixture A prints the false 'henüz haber yok' line (the bug this fixes)", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={FIXTURE_A} isBlindspot={false} />,
+    );
+    expect(markup).toContain("Muhalefet tarafında henüz haber yok");
+  });
+
+  it.each([
+    ["A", FIXTURE_A],
+    ["B", FIXTURE_B],
+  ])("fixture %s: renders the note and no absence wording", (_label, members) => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={members} isBlindspot={false} languageIsolated />,
+    );
+    expect(markup).toContain(NOTE);
+    for (const needle of ABSENCE) expect(markup.toLowerCase()).not.toContain(needle);
+    expect(markup).not.toContain("Karşı tarafı oku");
+  });
+
+  it("the note beats the degraded-feed suffix and the blindspot wording", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum
+        nowMs={NOW_MS}
+        members={FIXTURE_A}
+        isBlindspot
+        feedDegraded
+        nonVotingZoneCounts={{ muhalefet: 2 }}
+        languageIsolated
+      />,
+    );
+    expect(markup).toContain(NOTE);
+    expect(markup).not.toContain("ulaşamıyoruz");
+    expect(markup).not.toContain("toplayıcı / niş");
+    for (const needle of ABSENCE) expect(markup.toLowerCase()).not.toContain(needle);
+  });
+
+  it("still links to a member of the other pole when there is one (no absence claim to replace)", () => {
+    const withOpposition = [...FIXTURE_A, mkMember("opp1", "opposition", "2026-11-02T09:00:00Z")];
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={withOpposition} isBlindspot={false} languageIsolated />,
+    );
+    expect(markup).toContain("Karşı tarafı oku");
+    expect(markup).not.toContain(NOTE);
+  });
+
+  it("controls: a mixed cluster (a-haber + daily-sabah) keeps today's output exactly", () => {
+    const mixed = [
+      enMember("a-haber", "A Haber", "pro_government", "2026-11-02T06:18:00Z"),
+      enMember("daily-sabah", "Daily Sabah", "pro_government", "2026-11-02T06:56:00Z"),
+    ];
+    const today = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={mixed} isBlindspot={false} />,
+    );
+    const flagged = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={mixed} isBlindspot={false} languageIsolated={false} />,
+    );
+    expect(flagged).toBe(today);
+    expect(today).toContain("Muhalefet tarafında henüz haber yok");
+    expect(today).not.toContain(NOTE);
+  });
+});
