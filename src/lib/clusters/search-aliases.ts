@@ -39,9 +39,22 @@
 // `variantsQuery` expands.
 //
 // SMALL ON PURPOSE. Only pairs that are the same thing under two spellings belong
-// here. The group below is the same pair as the hubs' `akp` aliases in
-// src/lib/trends/rising-entities.ts (h3-hubs-2). A new group needs its own check
-// against the live archive that both spellings are in use.
+// in SEARCH_ALIAS_GROUPS. The group below is the same pair as the hubs' `akp`
+// aliases in src/lib/trends/rising-entities.ts (h3-hubs-2). A new group needs its
+// own check against the live archive that both spellings are in use.
+//
+// ONE WAY (h58-postship-4). A short province name is not the same thing as the
+// official one in both directions, so SEARCH_ONE_WAY_ALIASES widens the short
+// spelling only. FTS stems 'afyon' to 'afyo' but leaves 'afyonkarahisar' whole, so
+// there is no prefix match between them. On production (2026-11-07) 'afyon' found 8
+// clusters while 'afyonkarahisar' hit the 24 cap and the archive held 79 live
+// multi-member clusters with an 'afyon...' word, among them the week's Afyonkarahisar
+// killing of 8 people; 'urfa' found 7 against a capped 'sanliurfa', 'antep' 5 against a
+// capped 'gaziantep'. 'afyon or afyonkarahisar', 'urfa or sanliurfa' and
+// 'antep or gaziantep' returned 24 of 24 rows carrying the word. The reverse stays off:
+// afyon is also opium and 'Antep fıstığı' is a product, so a reader who typed the
+// official name must not be handed those. 'maraş' and 'kahramanmaraş' are left out in
+// both directions: 'Kapalı Maraş' (Varosha) is a frequent KKTC topic, not Kahramanmaraş.
 
 import { MAX_SEARCH_TERMS, foldTr } from "./turkish-query";
 
@@ -57,6 +70,23 @@ type AliasGroup = readonly AliasForm[];
  * fold the archive's folded arm uses.
  */
 export const SEARCH_ALIAS_GROUPS: readonly AliasGroup[] = [[["akp"], ["ak", "parti"]]];
+
+/** A short spelling that also searches the official one, never the other way round. */
+interface OneWayAlias {
+  from: AliasForm;
+  to: AliasForm;
+}
+
+/**
+ * Province short names that also search the official name (h58-postship-4). Terms are
+ * ASCII-folded like the groups above. Only `from` triggers an expansion; a `to` form
+ * typed on its own is left exactly as the reader wrote it.
+ */
+export const SEARCH_ONE_WAY_ALIASES: readonly OneWayAlias[] = [
+  { from: ["afyon"], to: ["afyonkarahisar"] },
+  { from: ["urfa"], to: ["sanliurfa"] },
+  { from: ["antep"], to: ["gaziantep"] },
+];
 
 // '"' opens a phrase, a leading '-' negates and a standalone `or` joins: all
 // three are websearch syntax the archive RPC reads, so the reader is in charge.
@@ -84,18 +114,25 @@ interface AliasHit {
   length: number;
 }
 
-// The earliest occurrence of any form of any group. Terms are compared folded, so
-// a Turkish-letter spelling finds the ASCII alias; an occurrence that merely
-// contains the letters ('akparti', 'akşener') is a different term and never hits.
+// The earliest occurrence of any form of any group, or of the `from` form of a
+// one-way alias (its `to` form never triggers). Terms are compared folded, so a
+// Turkish-letter spelling finds the ASCII alias; an occurrence that merely
+// contains the letters ('akparti', 'akşener', 'afyonlu') is a different term and
+// never hits.
 function findFirstAlias(terms: readonly string[]): AliasHit | null {
   const folded = terms.map(foldTr);
+  const occursAt = (form: AliasForm, start: number) =>
+    form.every((term, j) => folded[start + j] === term);
   for (let start = 0; start < folded.length; start++) {
     for (const group of SEARCH_ALIAS_GROUPS) {
       for (const form of group) {
-        if (form.every((term, j) => folded[start + j] === term)) {
-          return { group, start, length: form.length };
-        }
+        if (occursAt(form, start)) return { group, start, length: form.length };
       }
+    }
+    // A one-way hit expands like a two-form group, [from, to], so everything downstream
+    // (the disjunction, the term cost bound, the in-feed term lists) is one code path.
+    for (const { from, to } of SEARCH_ONE_WAY_ALIASES) {
+      if (occursAt(from, start)) return { group: [from, to], start, length: from.length };
     }
   }
   return null;

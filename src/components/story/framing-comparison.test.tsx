@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
-import type { Source } from "@/types";
+import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
+import type { MediaDnaZone, Source } from "@/types";
 
 import { FramingComparison } from "./framing-comparison";
 
@@ -61,8 +62,17 @@ const TR_TITLE = "Erdoğan Seul ziyaretinde 15 milyar dolarlık ticaret hedefi a
 // per-request stamp. Two hours after the fixtures' default publish time.
 const NOW_MS = Date.parse("2026-09-06T14:00:00.000Z");
 
-function render(members: ClusterDetailMember[], nowMs = NOW_MS): string {
-  return renderToStaticMarkup(<FramingComparison members={members} nowMs={nowMs} />);
+// h58-postship-2: `nonVotingZones` is a required prop (like nowMs), so every
+// render names it. The default is the empty set: no toplayıcı / niş source, i.e.
+// the page as it rendered before the prop existed.
+function render(
+  members: ClusterDetailMember[],
+  nowMs = NOW_MS,
+  nonVotingZones: ReadonlySet<MediaDnaZone> = new Set(),
+): string {
+  return renderToStaticMarkup(
+    <FramingComparison members={members} nowMs={nowMs} nonVotingZones={nonVotingZones} />,
+  );
 }
 
 /** Every `<li ...>...</li>` in the markup, found by scanning (the lists are not nested). */
@@ -276,5 +286,113 @@ describe("FramingComparison — member ages through RelativeTime (h47-time-1)", 
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// h58-postship-2: the empty-zone line said "bu tarafta sessizlik" over a column
+// a toplayıcı / niş source of that very zone had covered (cluster 52f72744: İşçi
+// Haber, a niche Muhalefet source, sat in the "Toplayıcı / niş kaynaklar" block
+// right below). #219 qualified that claim on the Kart, the OG image, the embed
+// and the share text; this block missed it. A zone with no voting member but a
+// non-voting one now says what the spectrum shows, in the Kart's own words.
+describe("FramingComparison — empty zone covered only by non-voting sources (h58-postship-2)", () => {
+  const IKTIDAR_A = mkSource("sabah", "Sabah", "pro_government");
+  const IKTIDAR_B = mkSource("aksam", "Akşam", "pro_government");
+  const members = [
+    mkMember("g1", IKTIDAR_A, "Sabah başlığı"),
+    mkMember("g2", IKTIDAR_B, "Akşam başlığı", "2026-09-06T11:00:00.000Z"),
+  ];
+
+  const PLAIN_BOX =
+    '<div class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-6 text-center"><span class="text-[11px] italic text-muted-foreground">— bu tarafta sessizlik —</span></div>';
+  const QUALIFIED_LINE = `— ${SPECTRUM_ABSENT_QUALIFIED} —`;
+
+  /** The `<section aria-label="LABEL" ...>...</section>` of one zone column. */
+  function section(html: string, label: string): string {
+    const open = html.indexOf(`<section aria-label="${label}"`);
+    if (open === -1) throw new Error(`no section for ${label}`);
+    return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
+  }
+
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+  it("says 'spektruma sayılan kaynaklardan haber yok' in a zone only a non-voting source covered, and not 'sessizlik'", () => {
+    const html = render(members, NOW_MS, new Set<MediaDnaZone>(["muhalefet"]));
+    const muhalefet = section(html, "Muhalefet");
+    expect(muhalefet).toContain("spektruma sayılan kaynaklardan haber yok");
+    expect(muhalefet).toContain(QUALIFIED_LINE);
+    expect(muhalefet).not.toContain("bu tarafta sessizlik");
+  });
+
+  it("keeps '— bu tarafta sessizlik —' in an empty zone that is not in the set", () => {
+    const html = render(members, NOW_MS, new Set<MediaDnaZone>(["muhalefet"]));
+    const bagimsiz = section(html, "Bağımsız");
+    expect(bagimsiz).toContain("— bu tarafta sessizlik —");
+    expect(bagimsiz).not.toContain("spektruma sayılan");
+  });
+
+  it("changes no count: both empty zones still read '0 manşet' and the iktidar column is untouched", () => {
+    const html = render(members, NOW_MS, new Set<MediaDnaZone>(["muhalefet"]));
+    expect(section(html, "Bağımsız")).toContain("0 manşet");
+    expect(section(html, "Muhalefet")).toContain("0 manşet");
+    expect(section(html, "İktidar")).toContain("2 manşet");
+    expect(html).toContain("2 kaynağın kendi manşetleri");
+    expect(listItems(html)).toHaveLength(2);
+  });
+
+  it("qualifies both empty zones when both are in the set", () => {
+    const html = render(members, NOW_MS, new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]));
+    expect(count(html, QUALIFIED_LINE)).toBe(2);
+    expect(html).not.toContain("bu tarafta sessizlik");
+  });
+
+  it("renders the same markup as the empty set when the set names only zones that have voting members", () => {
+    const withSet = render(members, NOW_MS, new Set<MediaDnaZone>(["iktidar"]));
+    expect(withSet).toBe(render(members, NOW_MS, new Set()));
+    expect(count(withSet, PLAIN_BOX)).toBe(2);
+  });
+
+  it("with an empty set the silent line is byte-identical to today's: the same dashed box, twice", () => {
+    const html = render(members, NOW_MS, new Set());
+    expect(count(html, PLAIN_BOX)).toBe(2);
+    expect(html).not.toContain("spektruma sayılan");
+  });
+
+  it("only swaps the words: the qualified markup is the plain markup with that one line replaced (same dashed box and styling)", () => {
+    const plain = render(members, NOW_MS, new Set());
+    const qualified = render(members, NOW_MS, new Set<MediaDnaZone>(["muhalefet"]));
+    // Muhalefet is the last column, so its silent line is the last occurrence.
+    const at = plain.lastIndexOf("— bu tarafta sessizlik —");
+    expect(at).toBeGreaterThan(-1);
+    expect(qualified).toBe(
+      plain.slice(0, at) + QUALIFIED_LINE + plain.slice(at + "— bu tarafta sessizlik —".length),
+    );
+  });
+
+  it("emits no lang attribute for the qualified line either", () => {
+    const html = render(
+      [mkMember("a1", DAILY_SABAH, EN_TITLE)],
+      NOW_MS,
+      new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]),
+    );
+    expect(html.split("lang=").length - 1).toBe(2);
+  });
+
+  it("does not turn a populated zone into a silent one: a zone with voting members ignores the set", () => {
+    const html = render(members, NOW_MS, new Set<MediaDnaZone>(["iktidar", "muhalefet"]));
+    const iktidar = section(html, "İktidar");
+    expect(iktidar).not.toContain("spektruma sayılan");
+    expect(iktidar).not.toContain("sessizlik");
+    expect(iktidar).toContain("Sabah başlığı");
+  });
+
+  it("makes nonVotingZones a required prop, like nowMs, so no caller can forget it", () => {
+    // Compile-time check only (typecheck covers this file): the element is built
+    // but never rendered, because rendering it would read the missing prop.
+    const forgotten = () => (
+      // @ts-expect-error nonVotingZones is required
+      <FramingComparison members={members} nowMs={NOW_MS} />
+    );
+    expect(typeof forgotten).toBe("function");
   });
 });

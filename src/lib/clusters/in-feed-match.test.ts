@@ -6,6 +6,7 @@ import {
   searchTokens,
   titleMatchesTokens,
 } from "./in-feed-match";
+import { expandAliasQuery } from "./search-aliases";
 import { canonicalSearchQuery } from "./turkish-query";
 
 // In-feed filter for the home search: every query token must occur at a word
@@ -347,6 +348,104 @@ describe("alias matching in the feed (AKP <-> AK Parti)", () => {
   it("matches nothing for an empty or operator-only query (as before)", () => {
     expect(matchesAlt("", "AK Parti")).toBe(false);
     expect(matchesAlt("-akp", "AKP'den açıklama")).toBe(false);
+  });
+});
+
+// h58-postship-4: a short province name also finds the official name, one way only
+// (search-aliases.ts SEARCH_ONE_WAY_ALIASES). The in-feed filter expands exactly when
+// the archive does, or the cards would disagree with the archive section below them.
+describe("one-way province aliases in the feed (afyon / urfa / antep)", () => {
+  it("searchTokenAlternatives adds the official name after the typed one", () => {
+    expect(searchTokenAlternatives("afyon")).toEqual([["afyon"], ["afyonkarahisar"]]);
+    expect(searchTokenAlternatives("Urfa")).toEqual([["urfa"], ["sanliurfa"]]);
+    expect(searchTokenAlternatives("ANTEP")).toEqual([["antep"], ["gaziantep"]]);
+    expect(searchTokenAlternatives("afyon chp")).toEqual([
+      ["afyon", "chp"],
+      ["afyonkarahisar", "chp"],
+    ]);
+  });
+
+  it("the official name and the excluded places gain no alternative", () => {
+    expect(searchTokenAlternatives("afyonkarahisar")).toEqual([["afyonkarahisar"]]);
+    expect(searchTokenAlternatives("şanlıurfa")).toEqual([["sanliurfa"]]);
+    expect(searchTokenAlternatives("gaziantep")).toEqual([["gaziantep"]]);
+    expect(searchTokenAlternatives("maraş")).toEqual([["maras"]]);
+    expect(searchTokenAlternatives("kahramanmaraş")).toEqual([["kahramanmaras"]]);
+    expect(searchTokenAlternatives("afyonlu")).toEqual([["afyonlu"]]);
+  });
+
+  it("no alternative once the query uses quotes, a negation or 'or' (as for AKP)", () => {
+    expect(searchTokenAlternatives('"afyon"')).toEqual([["afyon"]]);
+    expect(searchTokenAlternatives("afyon -chp")).toEqual([["afyon"]]);
+    expect(searchTokenAlternatives("afyon or urfa")).toEqual([["afyon", "urfa"]]);
+  });
+
+  it("'afyon' still matches the title \"Afyonkarahisar'da ...\" (the prefix rule, unchanged)", () => {
+    const title = "Afyonkarahisar'da 8 kişinin ölümüne neden olan saldırgan tutuklandı";
+    expect(matches("afyon", title)).toBe(true);
+    expect(matchesAlt("afyon", title)).toBe(true);
+    expect(matchesAlt("Afyon", title)).toBe(true);
+  });
+
+  it("'antep' and 'urfa' now find the official name, which the word-start rule alone misses", () => {
+    expect(matches("antep", "Gaziantep'te patlama: 3 yaralı")).toBe(false);
+    expect(matchesAlt("antep", "Gaziantep'te patlama: 3 yaralı")).toBe(true);
+    expect(matches("urfa", "Şanlıurfa'da sağanak yağış etkili oldu")).toBe(false);
+    expect(matchesAlt("urfa", "Şanlıurfa'da sağanak yağış etkili oldu")).toBe(true);
+    expect(matchesAlt("urfa", "Urfa'da sağanak yağış etkili oldu")).toBe(true);
+  });
+
+  it("is one-way: the official name does not find the short spelling", () => {
+    expect(matchesAlt("gaziantep", "Antep'te fıstık hasadı başladı")).toBe(false);
+    expect(matchesAlt("şanlıurfa", "Urfa'da sağanak yağış etkili oldu")).toBe(false);
+    expect(matchesAlt("afyonkarahisar", "Afyon'da haşhaş ekimi")).toBe(false);
+    expect(matchesAlt("afyonkarahisar", "Afyonkarahisar'da 8 kişi öldü")).toBe(true);
+  });
+
+  it("does not touch the excluded places: 'maraş' does not find Kahramanmaraş, nor the reverse", () => {
+    expect(matchesAlt("maraş", "Kahramanmaraş'ta deprem anması")).toBe(false);
+    expect(matchesAlt("kahramanmaraş", "Kapalı Maraş'ta yeni gelişme")).toBe(false);
+    expect(matchesAlt("maraş", "Kapalı Maraş'ta yeni gelişme")).toBe(true);
+  });
+
+  it("carries the rest of the query across the alias", () => {
+    expect(matchesAlt("antep depremzede", "Gaziantep'te depremzede konutları teslim edildi")).toBe(true);
+    expect(matchesAlt("antep depremzede", "Gaziantep'te fıstık hasadı başladı")).toBe(false);
+  });
+
+  it("does not match an unrelated title", () => {
+    expect(matchesAlt("afyon", "Ankara'da yağış bekleniyor")).toBe(false);
+    expect(matchesAlt("antep", "Fıstık fiyatları düştü")).toBe(false);
+  });
+
+  it("agrees with the archive: alternatives exist exactly when the archive expands, and spell the same disjuncts", () => {
+    for (const q of [
+      "afyon",
+      "Urfa",
+      "antep",
+      "afyon chp",
+      "Antep'te",
+      "afyonkarahisar",
+      "şanlıurfa",
+      "gaziantep",
+      "maraş",
+      "afyonlu",
+      '"afyon"',
+      "afyon -chp",
+      "afyon or chp",
+      "akp",
+      "ak parti",
+    ]) {
+      const expansion = expandAliasQuery(canonicalSearchQuery(q));
+      const alternatives = searchTokenAlternatives(q);
+      expect(alternatives.length > 1, q).toBe(expansion !== null);
+      if (expansion !== null) {
+        // The same disjuncts; the feed lists the typed spelling first, the archive uses group order.
+        expect(alternatives.map((alt) => alt.join(" ")).sort(), q).toEqual(
+          expansion.foldedQuery.split(" or ").sort(),
+        );
+      }
+    }
   });
 });
 

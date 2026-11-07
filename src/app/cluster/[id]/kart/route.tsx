@@ -1,6 +1,7 @@
 import { ImageResponse } from "next/og";
 
 import { apiTooManyRequests } from "@/lib/api/errors";
+import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
 import {
   isStoryCardTitleEligible,
   selectStoryCard,
@@ -127,7 +128,7 @@ function outletLine(headline: NonNullable<StoryCard["headlines"][MediaDnaZone]>)
  *  (h57-outbound-1). */
 function silentZoneLabel(coverage: StoryCard["coverage"][MediaDnaZone]): string {
   return coverage.nonVotingCount > 0
-    ? "— spektruma sayılan kaynaklardan haber yok"
+    ? `— ${SPECTRUM_ABSENT_QUALIFIED}`
     : "— bu tarafta haber yok";
 }
 

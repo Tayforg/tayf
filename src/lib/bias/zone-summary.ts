@@ -10,6 +10,18 @@ import type { BiasCategory, BiasDistribution, MediaDnaZone, SourceKind } from "@
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
+/**
+ * What an empty zone says when it has no source the spectrum counts but a
+ * toplayıcı / niş source of that zone wrote about the story: the absence is
+ * scoped to the counted sources instead of claiming nobody wrote there
+ * (h57-outbound-1, h58-postship-2). The Manşet Kartı prints it as
+ * "— <this>" and the cluster page's framing comparison as "— <this> —"; both
+ * read this one constant so the wording cannot drift between them. Bare: each
+ * surface adds its own dashes. A zone nobody wrote in keeps its plain line
+ * ("bu tarafta haber yok" / "bu tarafta sessizlik").
+ */
+export const SPECTRUM_ABSENT_QUALIFIED = "spektruma sayılan kaynaklardan haber yok";
+
 export function zoneCountsOf(
   distribution: BiasDistribution,
 ): Record<MediaDnaZone, number> {
