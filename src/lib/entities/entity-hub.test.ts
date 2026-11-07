@@ -389,8 +389,10 @@ describe("entityHubPatterns (exact runtime values)", () => {
       "^(?![\\s\\S]*(?:\\mpolonya|\\mfederal\\s+anayasa|\\mkktc\\s+anayasa))[\\s\\S]*\\manayasa\\s+mahkemesi",
       "\\maym\\M",
     ],
+    // The bare 'Merkez Bankası' is vetoed by a foreign bank anywhere in the text and needs one monetary-policy
+    // cue (h61-emptystates-2); 'TCMB' is trusted and stays bare.
     tcmb: [
-      "^(?![\\s\\S]*(?:\\mavrupa\\s+merkez|\\mecb\\M|\\mfed\\M|\\mabd\\s+merkez|\\mamerikan\\s+merkez|\\misrail\\s+merkez|\\mingiltere\\s+merkez|\\mjaponya\\s+merkez|\\mrusya\\s+merkez|\\mcin\\s+merkez))[\\s\\S]*\\mmerkez\\s+bankasi",
+      "^(?![\\s\\S]*(?:\\mavrupa\\s+merkez|\\mecb\\M|\\mfed\\M|\\mabd\\s+merkez|\\mamerikan\\s+merkez|\\misrail\\s+merkez|\\mingiltere\\s+merkez|\\mjaponya\\s+merkez|\\mrusya\\s+merkez|\\mcin\\s+merkez))(?=[\\s\\S]*(?:\\mtcmb|\\mkarahan|\\mppk\\M|\\mpara\\s+politika|\\mfaiz|\\menflasyon|\\mrezerv|\\mturk\\s+lira|\\mdoviz|\\mkur\\s+korumal|\\mturkiye\\s+cumhuriyet\\s+merkez|\\mpiyasa\\s+katilimci|\\mtbmm|\\mrepo))[\\s\\S]*\\mmerkez\\s+bankasi",
       "\\mtcmb\\M",
     ],
     meclis: [
@@ -745,7 +747,86 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
     expect(hubMatches("tcmb", "ECB faizi sabit tuttu, Merkez Bankası")).toBe(false);
     expect(hubMatches("tcmb", "Merkez Bankası faizi sabit tuttu")).toBe(true);
     expect(hubMatches("tcmb", "TCMB rezervleri")).toBe(true);
-    expect(hubMatches("tcmb", "Federasyon başkanı Merkez Bankası'nı ziyaret etti")).toBe(true);
+    // 'fed' is a whole word, so 'Federasyon' does not veto; the monetary cue ('faiz') is still needed.
+    expect(hubMatches("tcmb", "Federasyon başkanı Merkez Bankası'nda faiz görüşmesi yaptı")).toBe(true);
+  });
+
+  // h61-emptystates-2. /gundem/tcmb listed one card, Paraguay's Ueno Bank crisis (c377938c): the bare
+  // "Merkez Bankası" is any country's, and only a few named foreign banks were in the excludes. The
+  // non-trusted form now also needs a Turkish monetary-policy cue anywhere in the title, neutral title
+  // or summary lead; the trusted "TCMB" stays bare.
+  describe("tcmb: the bare 'Merkez Bankası' needs a monetary-policy cue (h61-emptystates-2)", () => {
+    const PARAGUAY =
+      "Paraguay'da ülkenin en büyük bankalarından biri battı, Devlet Başkanı Pena istifa etti " +
+      "Ueno Bank'ın batmasının ardından Paraguay Devlet Başkanı Santiago Pena görevi bıraktı " +
+      "Paraguay'da yaklaşık 2,9 milyon müşterisi olan Ueno Bank'ın sermaye yeterlilik oranının zorunlu asgari " +
+      "seviyenin yüzde 50'sinin altına düştüğü tespit edildi. Merkez Bankası bankaya el koyup tasfiyeyi " +
+      "başlattı; kriz ortamında Devlet Başkanı Santiago Pena istifa etti.";
+
+    it("another country's central bank with no monetary cue is out (the Paraguay card)", () => {
+      expect(hubMatches("tcmb", PARAGUAY)).toBe(false);
+    });
+
+    it("a bare 'Merkez Bankası' alone is out; the same words with a cue are in", () => {
+      expect(hubMatches("tcmb", "Merkez Bankası")).toBe(false);
+      expect(hubMatches("tcmb", "Merkez Bankası bankaya el koydu")).toBe(false);
+      expect(hubMatches("tcmb", "Merkez Bankası faizi sabit tuttu")).toBe(true);
+    });
+
+    it("keeps the real Turkish central-bank stories", () => {
+      for (const sample of [
+        "Merkez Bankası faizi sabit tuttu",
+        "Merkez Bankası rezervleri 5 milyar dolar arttı",
+        "Merkez Bankası Başkanı Karahan sunum yaptı",
+        "9 ay sonra bir ilk: Merkez Bankası faizi indirdi Merkez Bankası faiz kararını açıkladı",
+        "Merkez Bankası enflasyon raporunu açıkladı",
+        "Merkez Bankası Para Politikası Kurulu toplandı",
+        "Merkez Bankası PPK kararını duyurdu",
+        "Merkez Bankası Piyasa Katılımcıları Anketi yayımlandı",
+        "Merkez Bankası'ndan Türk lirası hamlesi",
+        "Merkez Bankası'ndan döviz hamlesi",
+        "Merkez Bankası kur korumalı mevduat kararını açıkladı",
+        "Türkiye Cumhuriyet Merkez Bankası açıklama yaptı",
+        "TBMM'de bu hafta Kızılay kanun teklifi ve Merkez Bankası'nın sunumu ele alınacak",
+        "Merkez Bankası haftalık repo fonlamasını artırdı",
+      ]) {
+        expect(hubMatches("tcmb", sample), sample).toBe(true);
+      }
+    });
+
+    it("other countries' banks and a former title in a side story are out when no cue is in the text", () => {
+      for (const sample of [
+        "Güney Kore Merkez Bankası dijital para projesini durdurdu",
+        "Özbekistan'da Apple Pay kullanıma açıldı Merkez Bankası fintech reformlarını duyurdu",
+        "G20 maliye bakanları ve merkez bankası başkanları toplandı, ortak bildiri çıkmadı",
+        // The bank is only a person's former title: the story is the fund investigation.
+        "Fon soruşturmasında 15 tutuklama daha: eski Merkez Bankası Başkan Yardımcısı Taha Çakmak cezaevine gönderildi",
+      ]) {
+        expect(hubMatches("tcmb", sample), sample).toBe(false);
+      }
+    });
+
+    it("the trusted 'TCMB' stays bare: no cue needed", () => {
+      expect(hubMatches("tcmb", "TCMB açıkladı")).toBe(true);
+      expect(hubMatches("tcmb", "TCMB")).toBe(true);
+    });
+
+    it("the foreign cases stay out even with a monetary cue (the excludes are untouched)", () => {
+      for (const sample of [
+        "Avrupa Merkez Bankası faiz kararını açıkladı",
+        "ABD Merkez Bankası enflasyon verisini bekliyor",
+        "FED faizi sabit tuttu: Merkez Bankası Başkanı Powell konuştu",
+        "ECB faiz kararı, Merkez Bankası",
+        "Rusya Merkez Bankası politika faizini düşürdü",
+      ]) {
+        expect(hubMatches("tcmb", sample), sample).toBe(false);
+      }
+    });
+
+    it("a trusted TCMB mention wins over the missing cue, but not over a foreign cue", () => {
+      expect(hubMatches("tcmb", "TCMB ve Merkez Bankası")).toBe(true);
+      expect(hubMatches("tcmb", "TCMB ve FED faiz kararı")).toBe(true);
+    });
   });
 
   it("tcmb: 'TCMB' is trusted, so a foreign cue in the same story does not drop it", () => {
@@ -1531,13 +1612,60 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     expect(tokens("meclis")).toEqual(["meclis", "tbmm"]);
   });
 
-  it("requires is curated on exactly meclis", () => {
+  it("requires is curated on exactly meclis and tcmb", () => {
     expect(
       specs
         .filter(([, s]) => s.requires !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["meclis"]);
+    ).toEqual(["meclis", "tcmb"]);
+  });
+
+  // h61-emptystates-2. The cues are folded ASCII (the generic requires test checks that); the list is the
+  // Turkish monetary-policy vocabulary: the bank's name, its governor, the policy committee and rate,
+  // inflation, reserves, the lira, FX, the old FX-protected deposit, the market survey, the parliament
+  // week and the repo rate. 'repo' is last: the generic form-versus-cue test appends the last cue.
+  it("the tcmb cues: the bank's own vocabulary, none of them a bare foreign-country word", () => {
+    expect(RISING_HUB_SPECS.tcmb?.requires).toEqual([
+      "tcmb",
+      "karahan",
+      "ppk",
+      "para politika",
+      "faiz",
+      "enflasyon",
+      "rezerv",
+      "turk lira",
+      "doviz",
+      "kur korumal",
+      "turkiye cumhuriyet merkez",
+      "piyasa katilimci",
+      "tbmm",
+      "repo",
+    ]);
+  });
+
+  it("tcmb keeps what /trends mirrors (migration 163): the ten foreign excludes, the trusted TCMB, the aliases and the rollup tokens", () => {
+    expect(RISING_HUB_SPECS.tcmb?.excludes).toEqual([
+      "avrupa merkez",
+      "ecb",
+      "fed",
+      "abd merkez",
+      "amerikan merkez",
+      "israil merkez",
+      "ingiltere merkez",
+      "japonya merkez",
+      "rusya merkez",
+      "cin merkez",
+    ]);
+    expect(RISING_HUB_SPECS.tcmb?.trusted).toEqual(["TCMB"]);
+    expect(RISING_HUB_SPECS.tcmb?.aliases).toEqual(["Merkez Bankası", "TCMB"]);
+    expect(entityByKey("tcmb")!.tokens).toEqual(["tcmb", "merkez bankasi"]);
+    // Two patterns: the guarded bare form, then the bare trusted one. No cue is ever a trusted spelling.
+    const patterns = entityHubPatterns(entityByKey("tcmb")!);
+    expect(patterns).toHaveLength(2);
+    expect(patterns[0]!.startsWith("^(?![\\s\\S]*(?:\\mavrupa\\s+merkez")).toBe(true);
+    expect(patterns[0]!).toContain("))(?=[\\s\\S]*(?:\\mtcmb|");
+    expect(patterns[1]).toBe("\\mtcmb\\M");
   });
 
   it("the meclis cues: TBMM vocabulary, the parliamentary work, and the party names", () => {

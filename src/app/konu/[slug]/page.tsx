@@ -8,6 +8,7 @@ import { ClusterCard } from "@/components/story/cluster-card";
 import { PageHero } from "@/components/ui/page-hero";
 import {
   distributionTotal,
+  SPECTRUM_EMPTY_COPY,
   sumDistributions,
 } from "@/lib/bias/sum-distributions";
 import {
@@ -115,7 +116,6 @@ const UNAVAILABLE_COPY =
 const EMPTY_COPY = "Bu konuda son 7 günde küme oluşmadı.";
 const EMPTY_PAGE_COPY = "Bu sayfada küme yok.";
 const SPECTRUM_HEADING = "Listelenen haberlerin kaynak dağılımı";
-const SPECTRUM_EMPTY_COPY = "Listelenen haberlerde dağılıma sayılan kaynak yok.";
 
 export default async function TopicHubPage({
   params,

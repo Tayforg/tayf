@@ -7,12 +7,16 @@ import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { PageHero } from "@/components/ui/page-hero";
 import {
+  distributionTotal,
+  SPECTRUM_EMPTY_COPY,
+  sumDistributions,
+} from "@/lib/bias/sum-distributions";
+import {
   ENTITY_HUB_WINDOW_DAYS,
   entityByKey,
   entityHubNote,
   entityHubRobots,
   isEntityKey,
-  sumDistributions,
 } from "@/lib/entities/entity-hub";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import {
@@ -107,6 +111,14 @@ export default async function EntityHubPage({ params }: PageProps) {
   // tests/guards/static-page-clock.test.ts.
   const nowMs = result?.asOfMs ?? 0;
 
+  // Summed source mix of the listed clusters. A hub whose clusters are covered
+  // by aggregator or niche sources only sums to 0 (bias_distribution counts
+  // voting kinds only), and BiasSpectrum draws nothing for 0: the section then
+  // says so (h61-emptystates-1) instead of leaving a headed, empty region. Same
+  // rule as /konu/[slug].
+  const distribution = sumDistributions(result?.bundles ?? []);
+  const spectrumTotal = distributionTotal(distribution);
+
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-8">
       {result !== null && entityHubRobots(result) === undefined ? (
@@ -176,11 +188,15 @@ export default async function EntityHubPage({ params }: PageProps) {
             <h2 id="entity-spectrum-heading" className={spectrumHeadingClass}>
               Listelenen haberlerin kaynak dağılımı
             </h2>
-            <BiasSpectrum
-              distribution={sumDistributions(result.bundles)}
-              compact
-              countUnit="kaynak kaydı"
-            />
+            {spectrumTotal > 0 ? (
+              <BiasSpectrum
+                distribution={distribution}
+                compact
+                countUnit="kaynak kaydı"
+              />
+            ) : (
+              <p className={noteClass}>{SPECTRUM_EMPTY_COPY}</p>
+            )}
           </section>
 
           <div className={listClass}>

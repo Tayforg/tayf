@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
+
 // ---------------------------------------------------------------------------
 // /source/[slug] data layer. The contract this suite pins:
 //   - a read timeout is NEVER a 404: `null` means "no such source" and only
@@ -58,14 +60,24 @@ const fixture = vi.hoisted(() => ({
   count: [] as Envelope[],
   articles: [] as Envelope[],
   history: [] as Envelope[],
-  served: { sources: 0, count: 0, articles: 0, history: 0 },
+  /** cluster_articles membership reads (h61-journey-3); empty queue = no rows, no error. */
+  clusterArticles: [] as Envelope[],
+  served: { sources: 0, count: 0, articles: 0, history: 0, clusterArticles: 0 },
   /** The column list each `sources` query asked for. */
   sourceSelects: [] as string[],
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
+  /** Builder state of each recent-articles query (not the head/count one). */
+  articleStates: [] as BuilderState[],
+  /** Builder state of each cluster_articles membership query. */
+  clusterStates: [] as BuilderState[],
+  /** Make the cluster_articles read THROW instead of returning an envelope. */
+  clusterThrows: false,
 }));
 
-function take(kind: "sources" | "count" | "articles" | "history"): Envelope {
+function take(
+  kind: "sources" | "count" | "articles" | "history" | "clusterArticles",
+): Envelope {
   const queue = fixture[kind];
   const i = Math.min(fixture.served[kind], queue.length - 1);
   fixture.served[kind] += 1;
@@ -84,9 +96,15 @@ const supabaseFake = await vi.hoisted(async () => {
       articles: (state: unknown) => {
         const args = (state as { selectArgs: unknown[] }).selectArgs;
         const isCount = (args[1] as { head?: boolean } | undefined)?.head === true;
+        if (!isCount) fixture.articleStates.push(state as BuilderState);
         return take(isCount ? "count" : "articles") as never;
       },
       source_zone_history: () => take("history") as never,
+      cluster_articles: (state: unknown) => {
+        fixture.clusterStates.push(state as BuilderState);
+        if (fixture.clusterThrows) throw new Error("cluster_articles socket hang up");
+        return take("clusterArticles") as never;
+      },
     },
   });
 });
@@ -101,7 +119,7 @@ vi.mock("@supabase/supabase-js", () => ({
 
 import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
-import { getSourceProfile } from "./source-profile-query";
+import { SOURCE_RECENT_FETCH, getSourceProfile } from "./source-profile-query";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -169,9 +187,13 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   seedHappyPath();
-  fixture.served = { sources: 0, count: 0, articles: 0, history: 0 };
+  fixture.clusterArticles = [];
+  fixture.served = { sources: 0, count: 0, articles: 0, history: 0, clusterArticles: 0 };
   fixture.clientOpts = [];
   fixture.sourceSelects = [];
+  fixture.articleStates = [];
+  fixture.clusterStates = [];
+  fixture.clusterThrows = false;
   order.events = [];
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
@@ -296,7 +318,7 @@ describe("getSourceProfile quarantine (h47-sources-1)", () => {
     ]) {
       withUntil(until);
       expect((await getSourceProfile("ornek-gazete"))?.quarantined).toBe(false);
-      fixture.served = { sources: 0, count: 0, articles: 0, history: 0 };
+      fixture.served = { sources: 0, count: 0, articles: 0, history: 0, clusterArticles: 0 };
     }
   });
 
@@ -495,6 +517,198 @@ describe("getSourceProfile outbound article url (h24-feeds-3)", () => {
         published_at: "2026-01-02T00:00:00.000Z",
       },
     ]);
+  });
+});
+
+// h61-journey-3: 'Son haberler' must never show an UNCLUSTERED article whose
+// title or description matches the site's private-individual filter
+// (pii-filter.ts). Clustered articles are political and already public on
+// cluster pages, so they are always kept. To still fill 20 slots after the
+// filter, the query reads a bounded larger window (SOURCE_RECENT_FETCH) and the
+// pure selection (source-recent-filter.ts) slices the result back to 20.
+describe("getSourceProfile recent-articles privacy filter (h61-journey-3)", () => {
+  // Invented text: only the description trips the filter ("çocuk"); ZZMARKER
+  // lets a test prove the dropped row's text was not logged.
+  const DESC_ONLY_PII = {
+    id: "desc-pii",
+    title: "Bir ilçede eski eşine ateş açtı",
+    description: "Olay bir köyde yaşandı. Zanlı, 2 çocuk annesi eski eşine ateş etti. ZZMARKER",
+    url: "https://ornek.example/desc-pii",
+    image_url: null,
+    published_at: "2026-01-09T00:00:00.000Z",
+  };
+  const POLITICAL = {
+    id: "pol",
+    title: "Meclis'te bütçe görüşmeleri başladı",
+    description: "Genel Kurul'da komisyon raporu okundu.",
+    url: "https://ornek.example/pol",
+    image_url: null,
+    published_at: "2026-01-08T00:00:00.000Z",
+  };
+  const CLUSTERED_FLAGGED = {
+    id: "cl",
+    title: "Bakan: 17 yaşındaki gencin ölümü soruşturulacak",
+    description: null,
+    url: "https://ornek.example/cl",
+    image_url: null,
+    published_at: "2026-01-07T00:00:00.000Z",
+  };
+
+  /** n rows, newest first; row i carries a private-individual word when isFlagged(i). */
+  function manyRows(n: number, isFlagged: (i: number) => boolean) {
+    return Array.from({ length: n }, (_, i) => ({
+      id: `m${i}`,
+      title: isFlagged(i) ? `Olayda ${i} yaşındaki kişi yaralandı` : `Bütçe görüşmesi ${i}`,
+      description: null,
+      url: `https://ornek.example/m${i}`,
+      image_url: null,
+      published_at: new Date(Date.UTC(2026, 0, 31, 0, 0, 0) - i * 3_600_000).toISOString(),
+    }));
+  }
+
+  it("fetches a bounded window of SOURCE_RECENT_FETCH (40) newest articles, newest first", async () => {
+    await getSourceProfile("ornek-gazete");
+
+    expect(SOURCE_RECENT_FETCH).toBe(40);
+    expect(fixture.articleStates).toHaveLength(1);
+    const state = fixture.articleStates[0]!;
+    expect(state.limit).toBe(SOURCE_RECENT_FETCH);
+    expect(state.eq).toContainEqual({ col: "source_id", val: "src-1" });
+    expect(state.order).toEqual([{ col: "published_at", opts: { ascending: false } }]);
+  });
+
+  it("reads cluster_articles with select('article_id').in('article_id', ids) for the returned ids", async () => {
+    fixture.articles = [{ data: [POLITICAL, DESC_ONLY_PII], error: null }];
+
+    await getSourceProfile("ornek-gazete");
+
+    expect(fixture.clusterStates).toHaveLength(1);
+    const state = fixture.clusterStates[0]!;
+    expect(state.selectArgs).toEqual(["article_id"]);
+    expect(state.in).toEqual([{ col: "article_id", vals: ["pol", "desc-pii"] }]);
+  });
+
+  it("does not query cluster_articles when there are no articles", async () => {
+    fixture.articles = [{ data: [], error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles).toEqual([]);
+    expect(fixture.served.clusterArticles).toBe(0);
+    expect(fixture.clusterStates).toHaveLength(0);
+  });
+
+  it("drops an unclustered flagged row (title or description), keeps a clean one", async () => {
+    fixture.articles = [{ data: [DESC_ONLY_PII, POLITICAL], error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles.map((a) => a.id)).toEqual(["pol"]);
+  });
+
+  it("keeps a flagged row whose id is in cluster_articles, in newest-first order", async () => {
+    fixture.articles = [{ data: [DESC_ONLY_PII, POLITICAL, CLUSTERED_FLAGGED], error: null }];
+    fixture.clusterArticles = [{ data: [{ article_id: "cl" }], error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles.map((a) => a.id)).toEqual(["pol", "cl"]);
+  });
+
+  it("runs the filter on the repaired text and still cleans the outbound url", async () => {
+    // The stored text spells the matching word as double-encoded entity
+    // residue ("adl&amp;#305;" is "adlı" once repaired), so the raw string
+    // matches no pattern. The filter must therefore run on the repaired text.
+    fixture.articles = [
+      {
+        data: [
+          {
+            ...POLITICAL,
+            id: "res",
+            description: "Mehmet adl&amp;#305; vatandaş ifade verdi",
+          },
+          { ...POLITICAL, id: "ok", url: "https://ornek.example/ok?utm_source=rss" },
+        ],
+        error: null,
+      },
+    ];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles.map((a) => a.id)).toEqual(["ok"]);
+    expect(profile?.articles[0]?.url).toBe("https://ornek.example/ok");
+  });
+
+  it("returns at most 20 items from a 40-row window, newest first", async () => {
+    const rows = manyRows(40, () => false);
+    fixture.articles = [{ data: rows, error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles).toHaveLength(20);
+    expect(profile?.articles.map((a) => a.id)).toEqual(rows.slice(0, 20).map((r) => r.id));
+  });
+
+  it("refills from the wider window: 25 of 40 flagged leaves the 15 clean rows", async () => {
+    // Flag the 25 newest rows, so the unfiltered top 20 would be all private.
+    const rows = manyRows(40, (i) => i < 25);
+    fixture.articles = [{ data: rows, error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles.map((a) => a.id)).toEqual(rows.slice(25).map((r) => r.id));
+    expect(profile?.articles).toHaveLength(15);
+  });
+
+  it("leaves the 7-day count, the label card source and the zone history untouched", async () => {
+    fixture.articles = [{ data: [DESC_ONLY_PII, POLITICAL], error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articleCount7d).toBe(12);
+    expect(profile?.source.name).toBe("Örnek Gazete");
+    expect(profile?.zoneHistory).toHaveLength(1);
+    expect(profile?.zoneHistory[0]?.newBias).toBe("gov_leaning");
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a cluster_articles ERROR is logged and non-fatal: flagged rows are dropped (fail closed), the profile still resolves ok", async () => {
+    fixture.articles = [{ data: [DESC_ONLY_PII, POLITICAL, CLUSTERED_FLAGGED], error: null }];
+    fixture.clusterArticles = [{ data: null, error: { message: "cluster_articles unavailable" } }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile).not.toBeNull();
+    // Nothing can be proven clustered, so even the (really clustered) flagged
+    // row goes: failing closed beats leaking one private-individual excerpt.
+    expect(profile?.articles.map((a) => a.id)).toEqual(["pol"]);
+    expect(console.error).toHaveBeenCalled();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+    expect(connection).not.toHaveBeenCalled();
+  });
+
+  it("a cluster_articles read that THROWS is treated the same way (logged, flagged rows dropped, no rejection)", async () => {
+    fixture.articles = [{ data: [DESC_ONLY_PII, POLITICAL], error: null }];
+    fixture.clusterThrows = true;
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles.map((a) => a.id)).toEqual(["pol"]);
+    expect(console.error).toHaveBeenCalled();
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+    expect(connection).not.toHaveBeenCalled();
+  });
+
+  it("an error from the membership read does not log a dropped row's text (ids/messages only)", async () => {
+    fixture.articles = [{ data: [DESC_ONLY_PII], error: null }];
+    fixture.clusterArticles = [{ data: null, error: { message: "boom" } }];
+
+    await getSourceProfile("ornek-gazete");
+
+    const logged = JSON.stringify(vi.mocked(console.error).mock.calls);
+    expect(logged).not.toContain("ZZMARKER");
+    expect(logged).not.toContain("Bir ilçede eski eşine ateş açtı");
   });
 });
 

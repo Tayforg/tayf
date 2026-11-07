@@ -45,6 +45,16 @@ export function sumDistributions(
 }
 
 /**
+ * The note a source-mix section shows in place of the bar when the listed
+ * stories sum to nothing (distributionTotal() is 0): every cluster is covered by
+ * aggregator or niche sources only, which never vote. The section keeps its
+ * heading and says so, instead of an empty region. One string for
+ * /gundem/[key] and /konu/[slug].
+ */
+export const SPECTRUM_EMPTY_COPY =
+  "Listelenen haberlerde dağılıma sayılan kaynak yok.";
+
+/**
  * Total count across the BIAS_ORDER keys (finite values >= 0 only). Zero means
  * there is nothing to draw, so callers show an honest empty state instead of a
  * bar of nothing.

@@ -308,6 +308,18 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
     trusted: ["AYM"],
     excludes: ["polonya", "federal anayasa", "kktc anayasa"],
   },
+  // The Turkish central bank only (h61-emptystates-2): the bare "Merkez Bankası" is any country's
+  // ("Paraguay'da ... Merkez Bankası bankaya el koyup tasfiyeyi başlattı" was the whole 14-day hub), and
+  // the named foreign banks below are only the ones someone thought of. So the non-trusted form also
+  // needs one Turkish monetary-policy cue anywhere in the title, neutral title or summary lead; the
+  // trusted "TCMB" stays bare. Hub-only: /trends (migration 163) reads tokens, excludes and trusted of
+  // this entity and never `requires`, so its guard is untouched and the excludes list below must stay
+  // equal to the SQL one (tests/migrations/163).
+  // The cue list was finalised on a read-only replay (2026-11-07, 120 days of clusters that name the
+  // bank, 230 matched the old patterns): the generic monetary words ("faiz", "enflasyon", "rezerv",
+  // "doviz", "para politika") each let in about as many Turkish stories as foreign ones and stay;
+  // "tbmm" and "repo" were added because they bring back three Turkish stories (a TBMM agenda item with
+  // the bank's presentation, the 2027 budget week, the liquidity measures) and no foreign one.
   tcmb: {
     aliases: ["Merkez Bankası", "TCMB"],
     trusted: ["TCMB"],
@@ -322,6 +334,22 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "japonya merkez",
       "rusya merkez",
       "cin merkez",
+    ],
+    requires: [
+      "tcmb",
+      "karahan",
+      "ppk",
+      "para politika",
+      "faiz",
+      "enflasyon",
+      "rezerv",
+      "turk lira",
+      "doviz",
+      "kur korumal",
+      "turkiye cumhuriyet merkez",
+      "piyasa katilimci",
+      "tbmm",
+      "repo",
     ],
   },
   zelenski: { aliases: ["Zelenski", "Zelenskiy", "Zelensky", "Zelenskyy"] },

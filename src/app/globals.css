@@ -207,8 +207,13 @@
     );
   }
 
-  /* Ensure content sits above the vignette */
-  body > * {
+  /* Ensure content sits above the vignette. A top-layer <dialog> is excluded:
+     this author rule beats the UA's `dialog:modal { position: fixed }`, the
+     engine turns `relative` into `absolute`, and showModal() then lays the
+     KbdShortcuts dialog out at the document top and scrolls the page there
+     (closing leaves focus off-screen). :where() keeps the specificity at
+     (0,0,1). Pinned by tests/styles/dialog-top-layer.test.ts. */
+  body > :where(:not(dialog)) {
     position: relative;
     z-index: 1;
   }

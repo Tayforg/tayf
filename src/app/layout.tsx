@@ -4,6 +4,7 @@ import { DM_Serif_Display, Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/g
 import { Header, HeaderFallback } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { KbdShortcuts } from "@/components/kbd-shortcuts";
+import { RouteTitleAnnouncer } from "@/components/route-title-announcer";
 import { SwRegistrar } from "@/components/pwa/sw-registrar";
 import { WebAnalytics } from "@/components/analytics/web-analytics";
 import { siteUrl } from "@/lib/site-url";
@@ -159,6 +160,12 @@ export default function RootLayout({
         </main>
         <Footer />
         <KbdShortcuts />
+        {/* h61-journey-2: announces the new page title after a client-side
+            navigation and hides Next's own (wrong-page) announcer from AT.
+            useSearchParams needs a Suspense boundary under cacheComponents. */}
+        <Suspense fallback={null}>
+          <RouteTitleAnnouncer />
+        </Suspense>
         {/* Dev builds would load va.vercel-scripts.com, which the CSP script-src blocks. */}
         {process.env.NODE_ENV === "production" ? <WebAnalytics /> : null}
         {process.env.NODE_ENV === "production" ? <SwRegistrar /> : null}
