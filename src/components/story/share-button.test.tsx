@@ -154,7 +154,15 @@ describe("ShareButton — channel chips announce the new tab (h60-newtab-1)", ()
   it("starts each label with the visible text and adds no visible words", () => {
     for (const anchor of newTabAnchors) {
       const label = /aria-label="([^"]+)"/.exec(anchor)?.[1] ?? "";
-      const visible = anchor.replace(/<[^>]*>/g, "");
+      // Text outside tags, by a character walk (a regex tag strip trips CodeQL's
+      // js/incomplete-multi-character-sanitization even in tests).
+      let visible = "";
+      let inTag = false;
+      for (const ch of anchor) {
+        if (ch === "<") inTag = true;
+        else if (ch === ">") inTag = false;
+        else if (!inTag) visible += ch;
+      }
       expect(label.startsWith(visible)).toBe(true);
       expect(anchor).not.toContain("sr-only");
     }
