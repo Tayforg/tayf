@@ -5,7 +5,9 @@ import { wireBadgeShort } from "@/lib/clusters/wire";
 import { tallyZones, zoneOf } from "@/lib/bias/config";
 import {
   dominantZonePercent,
-  isOnlyZone,
+  nonVotingOutsideZone,
+  onlyZoneClaim,
+  uniqueSources,
   zoneCountsOf,
   zonePercents,
 } from "@/lib/bias/zone-summary";
@@ -181,7 +183,7 @@ export default async function Image({ params }: ImageProps) {
     );
   }
 
-  const { cluster, wire } = detail;
+  const { cluster, wire, members } = detail;
   const zones = zoneCountsOf(cluster.bias_distribution);
   const percents = zonePercents(zones);
   const zoneTotal = zones.iktidar + zones.bagimsiz + zones.muhalefet;
@@ -196,14 +198,19 @@ export default async function Image({ params }: ImageProps) {
   // that zone's own tile percent (largest remainder, the number printed in
   // the tile below: 11/1/1 reads 84, not Math.round's 85), and it says
   // "sadece {Zone} yazdı" only when the other two zones have no source at
-  // all (decided on the counts: 250/1/0 reads 100 but is not "only").
+  // all (decided on the counts: 250/1/0 reads 100 but is not "only"). When a
+  // toplayıcı / niş source from another zone also carried the story, "yazdı"
+  // would be false and the ribbon says "spektrumda sadece {Zone}" instead
+  // (h57-outbound-1, the wording /blindspots already uses).
   const ribbonZone: MediaDnaZone | null = cluster.is_blindspot
     ? cluster.blindspot_side
       ? zoneOf(cluster.blindspot_side)
       : (tallyZones(cluster.bias_distribution).dominantZone ?? "iktidar")
     : null;
   const ribbonShare = ribbonZone ? dominantZonePercent(zones, ribbonZone) : 0;
-  const ribbonOnly = ribbonZone ? isOnlyZone(zones, ribbonZone) : false;
+  const ribbonClaim = ribbonZone
+    ? onlyZoneClaim(zones, ribbonZone, nonVotingOutsideZone(uniqueSources(members), ribbonZone))
+    : "weighted";
 
   // Clamp the headline to the title box (h20-contracts-1). clampOgTitle cuts a
   // long Turkish headline at a word boundary (never "...Töreni'ne kat…") to 130
@@ -339,9 +346,11 @@ export default async function Image({ params }: ImageProps) {
               letterSpacing: "0.04em",
             }}
           >
-            {ribbonOnly
+            {ribbonClaim === "only"
               ? `KÖR NOKTA — sadece ${ZONE_STYLE[ribbonZone].label} yazdı`
-              : `KÖR NOKTA — %${ribbonShare} ${ZONE_STYLE[ribbonZone].label}`}
+              : ribbonClaim === "spectrumOnly"
+                ? `KÖR NOKTA — spektrumda sadece ${ZONE_STYLE[ribbonZone].label}`
+                : `KÖR NOKTA — %${ribbonShare} ${ZONE_STYLE[ribbonZone].label}`}
           </div>
         )}
 

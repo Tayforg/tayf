@@ -1,3 +1,4 @@
+import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { zoneOf } from "@/lib/bias/config";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import {
@@ -22,6 +23,12 @@ export interface StoryCardHeadline {
   zone: MediaDnaZone;
   outletName: string;
   title: string;
+  /** True when the headline is an opinion column (`isOpinionUrl` on the
+   *  article URL), picked only because the zone has no eligible news member.
+   *  Absent otherwise (never `false`), so a news headline keeps the exact
+   *  shape it always had. The card prints "<Outlet> · köşe yazısı"
+   *  (h57-outbound-2). */
+  opinion?: true;
 }
 
 export interface StoryCardZoneCoverage {
@@ -40,12 +47,21 @@ export interface StoryCardZoneCoverage {
   /** `health[zone].degraded` — always false (fail-open) when health is
    *  unknown; missing data must never read as a degraded feed. */
   degraded: boolean;
+  /** Distinct non-voting sources (aggregator, niche; by slug) whose own zone
+   *  (`zoneOf(source.bias)`) is this one. Never part of `count`, a share or a
+   *  denominator: it only lets the card word an empty zone for what it is
+   *  ("spektruma sayılan kaynaklardan haber yok" instead of "bu tarafta haber
+   *  yok") when a toplayıcı / niş source of that zone carried the story
+   *  (h57-outbound-1). */
+  nonVotingCount: number;
 }
 
 export interface StoryCard {
   /** One headline per zone — the earliest-published member in that zone
-   *  whose title clears the PII filter (`isGameEligibleTitle`), or `null`
-   *  when the zone has no members, or every member's title was filtered. */
+   *  whose title clears the PII filter (`isGameEligibleTitle`) and whose
+   *  article is not an opinion column; a column (marked `opinion: true`) only
+   *  when the zone has no such news member. `null` when the zone has no
+   *  members, or every member's title was filtered. */
   headlines: Record<MediaDnaZone, StoryCardHeadline | null>;
   coverage: Record<MediaDnaZone, StoryCardZoneCoverage>;
   /** Unique source slugs among members whose kind does not vote in
@@ -62,6 +78,7 @@ function emptyCoverage(): StoryCardZoneCoverage {
     denominator: null,
     denominatorUnknown: true,
     degraded: false,
+    nonVotingCount: 0,
   };
 }
 
@@ -122,6 +139,15 @@ export function selectStoryCard(
   const { voting, nonVoting } = partitionByVote(members);
 
   const nonVotingCount = new Set(nonVoting.map((m) => m.source.slug)).size;
+  // The same distinct sources, bucketed by their own zone (h57-outbound-1).
+  const nonVotingSlugsByZone: Record<MediaDnaZone, Set<string>> = {
+    iktidar: new Set(),
+    bagimsiz: new Set(),
+    muhalefet: new Set(),
+  };
+  for (const member of nonVoting) {
+    nonVotingSlugsByZone[zoneOf(member.source.bias)].add(member.source.slug);
+  }
 
   const byZone: Record<MediaDnaZone, ClusterDetailMember[]> = {
     iktidar: [],
@@ -159,19 +185,35 @@ export function selectStoryCard(
     zoneCoverage.denominator = zoneVotingYieldDenominator(health, zone);
     zoneCoverage.denominatorUnknown = health === null;
     zoneCoverage.degraded = health ? health[zone].degraded : false;
+    zoneCoverage.nonVotingCount = nonVotingSlugsByZone[zone].size;
 
     // Earliest-first eligible headline — mirrors the "prefer the outlet
     // with the earliest publication in that zone" instruction, skipping
     // any title the PII filter would exclude (KVKK: false negatives here
     // are acceptable, missing a real private-individual name is not).
-    const eligible = zoneMembers.find((member) =>
-      isGameEligibleTitle(member.article.title),
-    );
-    if (eligible) {
+    // h57-outbound-2: an opinion column is not news (#217), so the earliest
+    // eligible NEWS member wins even over an earlier column (442e0395: a
+    // Hürriyet columnist's piece at 03:04 over Takvim's news at 04:00). The
+    // earliest eligible column is the headline only when the zone has no news
+    // member to show, and is then marked so the card can say so.
+    let news: ClusterDetailMember | undefined;
+    let column: ClusterDetailMember | undefined;
+    for (const member of zoneMembers) {
+      if (!isGameEligibleTitle(member.article.title)) continue;
+      if (isOpinionUrl(member.article.url)) {
+        column ??= member;
+        continue;
+      }
+      news = member;
+      break;
+    }
+    const picked = news ?? column;
+    if (picked) {
       headlines[zone] = {
         zone,
-        outletName: eligible.source.name,
-        title: eligible.article.title,
+        outletName: picked.source.name,
+        title: picked.article.title,
+        ...(news ? {} : { opinion: true as const }),
       };
     }
   }

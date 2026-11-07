@@ -30,10 +30,14 @@ import type { MediaDnaZone } from "@/types";
 //     shared with the cluster page's "Kartı indir" link) to it below
 //     (G-PRIV-1) and 404s rather than rasterising a name into the card's
 //     largest text.
-//   * a zone with no printable headline says which of the two reasons
-//     applies — genuinely nobody wrote, or somebody wrote and the headline
-//     is not shareable — because the coverage counter beside it would
-//     otherwise contradict a blanket "no news here".
+//   * a zone with no printable headline says which of the three reasons
+//     applies — genuinely nobody wrote, only toplayıcı / niş sources of that
+//     zone wrote (the spectrum does not count them), or somebody wrote and the
+//     headline is not shareable — because the coverage counter beside it would
+//     otherwise contradict a blanket "no news here" (h57-outbound-1).
+//   * a zone's headline is news whenever the zone has any: an opinion column
+//     (the article URL's path, `isOpinionUrl`) is shown only when it is all the
+//     zone has, and is then labelled "<Outlet> · köşe yazısı" (h57-outbound-2).
 //   * every count carries its denominator (the zone yield), and an
 //     unknown, zero or count-exceeding denominator says so in words
 //     instead of printing an impossible fraction.
@@ -108,6 +112,25 @@ function counterLabel(coverage: StoryCard["coverage"][MediaDnaZone]): string {
   return `${count} / ${denominator} kaynak`;
 }
 
+/** The outlet line over a zone's headline: the plain outlet name, or
+ *  "<Outlet> · köşe yazısı" when the headline is an opinion column that is
+ *  all the zone has (h57-outbound-2) — the cue the cluster page's summary
+ *  already uses. One string, so it stays a single text node for Satori. */
+function outletLine(headline: NonNullable<StoryCard["headlines"][MediaDnaZone]>): string {
+  return headline.opinion ? `${headline.outletName} · köşe yazısı` : headline.outletName;
+}
+
+/** What an empty zone says. "bu tarafta haber yok" claims nobody wrote there,
+ *  which is false when a toplayıcı / niş source of that zone carried the story
+ *  (the footer below counts it): then the line is scoped to the sources the
+ *  spectrum counts, as /blindspots and the cluster timeline word it
+ *  (h57-outbound-1). */
+function silentZoneLabel(coverage: StoryCard["coverage"][MediaDnaZone]): string {
+  return coverage.nonVotingCount > 0
+    ? "— spektruma sayılan kaynaklardan haber yok"
+    : "— bu tarafta haber yok";
+}
+
 // A plain builder, not a React component: Satori renders the tree it is
 // handed, and building it eagerly keeps the whole card observable (and
 // therefore assertable) in the element `ImageResponse` receives.
@@ -179,7 +202,7 @@ function renderCard({
                   }}
                 >
                   <div style={{ fontSize: 30, color: FOREGROUND }}>
-                    {headline.outletName}
+                    {outletLine(headline)}
                   </div>
                   <div style={{ fontSize: 34, lineHeight: 1.25 }}>
                     {truncate(headline.title, HEADLINE_MAX)}
@@ -203,7 +226,7 @@ function renderCard({
                   }}
                 >
                   <div style={{ fontSize: 34, color: DIM }}>
-                    — bu tarafta haber yok
+                    {silentZoneLabel(coverage)}
                   </div>
                   {coverage.degraded ? (
                     <div style={{ fontSize: 26, color: WARN }}>

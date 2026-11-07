@@ -211,7 +211,7 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { cacheLife, cacheTag } from "next/cache";
-import { istToday } from "./format";
+import { fmtKat, istToday } from "./format";
 import {
   bucketLags,
   coverageStats,
@@ -2033,6 +2033,86 @@ describe("cached-failure-sweep: input normalisation and short-circuits live in t
         avgVolume20: 800,
         rvol: 1.25,
       },
+    });
+  });
+
+  // h57-ekonomi-1: the view stores round(volume / avg_volume_20, 2) and the UI
+  // rounds again to 1 dp, so 1.84875 -> 1.85 -> "1,9". The app divides the two
+  // volumes it already reads and rounds once, at display.
+  describe("h57-ekonomi-1: rvol is computed once, unrounded, from the volumes", () => {
+    function row(over: Record<string, unknown>) {
+      return {
+        ticker: "GARAN",
+        last_day: "2026-11-06",
+        last_close: "150.5",
+        prev_close: "149",
+        last_volume: 43896321,
+        avg_volume_20: "23743772.600000000000",
+        rvol: "1.85",
+        ...over,
+      };
+    }
+
+    it("GARAN: the true ratio 1.84875 wins over the stored 1.85, and displays as 1,8", async () => {
+      fixture.quoteStats = [row({})];
+      const r = await fetchQuoteStats(["GARAN"]);
+      expect(r.GARAN!.rvol).toBeCloseTo(1.84875, 5);
+      expect(r.GARAN!.rvol).not.toBe(1.85);
+      expect(fmtKat(r.GARAN!.rvol!)).toBe("1,8");
+    });
+
+    it("is the exact quotient of the two volumes the same QuoteStat carries", async () => {
+      fixture.quoteStats = [row({})];
+      const s = (await fetchQuoteStats(["GARAN"])).GARAN!;
+      expect(s.rvol).toBe(s.lastVolume! / s.avgVolume20!);
+    });
+
+    it("falls back to the stored rvol when last_volume is null", async () => {
+      fixture.quoteStats = [row({ last_volume: null, rvol: "1.40" })];
+      expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(1.4);
+    });
+
+    it("falls back to null when avg_volume_20 is 0 and the stored rvol is null", async () => {
+      fixture.quoteStats = [row({ avg_volume_20: "0", rvol: null })];
+      expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBeNull();
+    });
+
+    it("falls back to the stored rvol when avg_volume_20 is null", async () => {
+      fixture.quoteStats = [row({ avg_volume_20: null, rvol: "0.90" })];
+      expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(0.9);
+    });
+
+    it("falls back to the stored rvol when avg_volume_20 is 0 (never Infinity or NaN)", async () => {
+      fixture.quoteStats = [row({ avg_volume_20: "0", rvol: "1.10" })];
+      expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(1.1);
+    });
+
+    it("falls back when avg_volume_20 is negative", async () => {
+      fixture.quoteStats = [row({ avg_volume_20: "-5", rvol: "0.50" })];
+      expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(0.5);
+    });
+
+    it("keeps a genuine 0 volume as a 0 ratio (a number, not missing)", async () => {
+      fixture.quoteStats = [row({ last_volume: 0, rvol: "0.00" })];
+      expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(0);
+    });
+
+    it("falls back when a volume is not a finite number", async () => {
+      fixture.quoteStats = [row({ last_volume: "abc", rvol: "1.20" })];
+      expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(1.2);
+    });
+
+    it("rows on either side of the amber threshold keep their true side (SISE 2.0003, SMART 1.9907)", async () => {
+      fixture.quoteStats = [
+        row({ ticker: "SISE", last_volume: 20003, avg_volume_20: "10000", rvol: "2.00" }),
+        row({ ticker: "SMART", last_volume: 19907, avg_volume_20: "10000", rvol: "1.99" }),
+        row({ ticker: "EDGE", last_volume: 19960, avg_volume_20: "10000", rvol: "2.00" }),
+      ];
+      const r = await fetchQuoteStats(["SISE", "SMART", "EDGE"]);
+      expect(r.SISE!.rvol!).toBeGreaterThanOrEqual(2);
+      expect(r.SMART!.rvol!).toBeLessThan(2);
+      // stored 2.00 would have lit the amber class; the true 1.996 does not.
+      expect(r.EDGE!.rvol!).toBeLessThan(2);
     });
   });
 });

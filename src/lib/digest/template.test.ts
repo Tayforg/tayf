@@ -21,6 +21,7 @@ const BLINDSPOT: DigestBlindspotItem = {
   biasDistribution: dist({ pro_government: 9, opposition: 1 }),
   dominantZone: "iktidar",
   dominantPct: 0.9,
+  nonVotingOutside: 0,
 };
 
 const BASE = {
@@ -88,6 +89,64 @@ describe("buildDigestHtml", () => {
       blindspot: { ...BLINDSPOT, dominantPct: 0.5 },
     });
     expect(html).toContain("%90 İktidar");
+  });
+
+  // h57-outbound-1: "Sadece <zone> yazdı" is decided on the voting tally, so it
+  // printed over a story a toplayıcı / niş source from another zone also carried.
+  describe("blindspot line with non-voting sources from another zone (h57-outbound-1)", () => {
+    const ONLY_IKTIDAR = dist({ pro_government: 5 });
+
+    it("prints 'Spektrumda sadece <Label>' when the zone is the only voting one and an outsider carried the story", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        blindspot: { ...BLINDSPOT, biasDistribution: ONLY_IKTIDAR, dominantPct: 1, nonVotingOutside: 2 },
+      });
+      expect(html).toContain("Spektrumda sadece İktidar");
+      expect(html).not.toContain("Sadece İktidar yazdı");
+      expect(html).not.toMatch(/sadece \S+ yazdı/i);
+    });
+
+    it("keeps 'Sadece <Label> yazdı' byte-identical when nobody outside the zone carried it", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        blindspot: { ...BLINDSPOT, biasDistribution: ONLY_IKTIDAR, dominantPct: 1, nonVotingOutside: 0 },
+      });
+      expect(html).toContain("Sadece İktidar yazdı");
+      expect(html).not.toContain("Spektrumda");
+    });
+
+    it("leaves the %share line alone below 'only', whatever the outsider count", () => {
+      for (const nonVotingOutside of [0, 3]) {
+        const html = buildDigestHtml({ ...BASE, blindspot: { ...BLINDSPOT, nonVotingOutside } });
+        expect(html).toContain("%90 İktidar");
+        expect(html).not.toContain("Spektrumda");
+        expect(html).not.toMatch(/sadece İktidar/i);
+      }
+    });
+
+    it("leaves 250/1/0 on the %share line even with an outsider", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        blindspot: { ...BLINDSPOT, biasDistribution: dist({ pro_government: 250, center: 1 }), dominantPct: 250 / 251, nonVotingOutside: 1 },
+      });
+      expect(html).toContain("%100 İktidar");
+      expect(html).not.toContain("Spektrumda");
+    });
+
+    it("uses the dominant zone's label for the other zones", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        blindspot: { ...BLINDSPOT, biasDistribution: dist({ opposition: 4 }), dominantZone: "muhalefet", dominantPct: 1, nonVotingOutside: 1 },
+      });
+      expect(html).toContain("Spektrumda sadece Muhalefet");
+    });
+
+    it("changes only that line: the zone bar and the title are the same with and without outsiders", () => {
+      const blindspot = { ...BLINDSPOT, biasDistribution: ONLY_IKTIDAR, dominantPct: 1 };
+      const qualified = buildDigestHtml({ ...BASE, blindspot: { ...blindspot, nonVotingOutside: 2 } });
+      const plain = buildDigestHtml({ ...BASE, blindspot: { ...blindspot, nonVotingOutside: 0 } });
+      expect(qualified.replace("Spektrumda sadece İktidar", "Sadece İktidar yazdı")).toBe(plain);
+    });
   });
 
   it("omits the blindspot section when there is none", () => {

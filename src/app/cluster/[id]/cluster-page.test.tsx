@@ -4513,3 +4513,94 @@ describe("ClusterDetailPage — opinion columns (h54-editorial-3)", () => {
     expect(jsonLd.description).not.toContain("Hürriyet:");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h57-outbound-1: the share chips (WhatsApp, Telegram, X, Bluesky and the native
+// sheet all read ShareButton's `text`) said "Kör nokta: sadece iktidar yazdı"
+// for cluster 0b127dc3, whose page lists three toplayıcı / niş sources from other
+// zones (son-dakika, isci-haber, haberler-com). The page now hands buildShareText
+// its de-duplicated member sources.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — blindspot share text qualifies 'sadece' (h57-outbound-1)", () => {
+  const HEAD = "12 kaynak · 9 sınıflandırılmış: %100 iktidar · %0 bağımsız · %0 muhalefet";
+
+  function blindspotMembers(extra: ClusterDetailMember[]): ClusterDetailMember[] {
+    const voting = [
+      ...Array.from({ length: 6 }, (_, i) =>
+        makeMember(`v${i}`, makeSource({ id: `gov-${i}`, bias: "pro_government", kind: "outlet" })),
+      ),
+      ...Array.from({ length: 3 }, (_, i) =>
+        makeMember(`l${i}`, makeSource({ id: `lean-${i}`, bias: "gov_leaning", kind: "outlet" })),
+      ),
+    ];
+    return [...voting, ...extra];
+  }
+
+  function detailWith(members: ClusterDetailMember[]): ClusterDetail {
+    const distribution = emptyDistribution();
+    distribution.pro_government = 6;
+    distribution.gov_leaning = 3;
+    const cluster = makeCluster({ bias_distribution: distribution, article_count: 12 });
+    cluster.is_blindspot = true;
+    cluster.blindspot_side = "pro_government";
+    return {
+      cluster,
+      members,
+      allSources: [],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 12, memberCount: members.length },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  const SON_DAKIKA = makeSource({ id: "son-dakika", name: "Son Dakika", bias: "center", kind: "aggregator" });
+  const ISCI_HABER = makeSource({ id: "isci-haber", name: "İşçi Haber", bias: "opposition", kind: "niche" });
+  const HABERLER_COM = makeSource({ id: "haberler-com", name: "Haberler.com", bias: "gov_leaning", kind: "aggregator" });
+
+  async function shareTextOf(detail: ClusterDetail): Promise<string> {
+    getClusterDetail.mockResolvedValue(detail);
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const share = findPropsOfType(tree, ShareButton);
+    expect(share).not.toBeNull();
+    return String(share!.text);
+  }
+
+  it("hands ShareButton 'spektrumda sadece iktidar' for the 0b127dc3-shaped members", async () => {
+    const text = await shareTextOf(
+      detailWith(
+        blindspotMembers([
+          makeMember("n1", SON_DAKIKA),
+          makeMember("n2", ISCI_HABER),
+          makeMember("n3", HABERLER_COM),
+        ]),
+      ),
+    );
+    expect(text).toBe(`${HEAD} · Kör nokta: spektrumda sadece iktidar`);
+  });
+
+  it("keeps 'sadece iktidar yazdı' for the control (only haberler-com, inside the zone)", async () => {
+    const text = await shareTextOf(detailWith(blindspotMembers([makeMember("n3", HABERLER_COM)])));
+    expect(text).toBe(`${HEAD} · Kör nokta: sadece iktidar yazdı`);
+  });
+
+  it("keeps 'sadece iktidar yazdı' when every member votes", async () => {
+    const text = await shareTextOf(detailWith(blindspotMembers([])));
+    expect(text).toContain("Kör nokta: sadece iktidar yazdı");
+    expect(text).not.toContain("spektrumda");
+  });
+
+  it("counts a source once when it wrote several articles, and still qualifies", async () => {
+    const text = await shareTextOf(
+      detailWith(blindspotMembers([makeMember("n2", ISCI_HABER), makeMember("n2b", ISCI_HABER)])),
+    );
+    expect(text).toContain("Kör nokta: spektrumda sadece iktidar");
+  });
+
+  it("matches the page's own 'Toplayıcı / niş kaynaklar' row: the claim and the row cannot disagree", async () => {
+    const detail = detailWith(blindspotMembers([makeMember("n1", SON_DAKIKA), makeMember("n2", ISCI_HABER)]));
+    getClusterDetail.mockResolvedValue(detail);
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(collectText(tree).join("")).toContain("Toplayıcı / niş kaynaklar");
+    expect(String(findPropsOfType(tree, ShareButton)!.text)).toContain("spektrumda sadece iktidar");
+  });
+});

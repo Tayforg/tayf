@@ -671,20 +671,47 @@ interface QuoteStatRow {
   rvol: number | null;
 }
 
+/**
+ * Relative volume from the two volumes the row already carries, unrounded.
+ * The view stores round(volume / avg_volume_20, 2) and fmtX / fmtKat round to
+ * one decimal again, so a stored 1.85 (true 1.84875) read "1,9" where the
+ * single rounding of the true ratio reads "1,8" (h57-ekonomi-1). Dividing here
+ * leaves one rounding, at display, and lets the ">= 2" amber test see the true
+ * ratio. The stored value stays the fallback for a row without usable volumes.
+ */
+function relativeVolume(
+  lastVolume: number | null,
+  avgVolume20: number | null,
+  stored: number | null,
+): number | null {
+  if (
+    lastVolume != null &&
+    avgVolume20 != null &&
+    Number.isFinite(lastVolume) &&
+    Number.isFinite(avgVolume20) &&
+    avgVolume20 > 0
+  ) {
+    return lastVolume / avgVolume20;
+  }
+  return stored;
+}
+
 async function readQuoteStats(unique: string[]): Promise<Record<string, QuoteStat>> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase.from("bist_quote_stats").select("*").in("ticker", unique);
   if (error) throw new Error(`[finance] fetchQuoteStats: ${error.message}`);
   const out: Record<string, QuoteStat> = {};
   for (const r of (data ?? []) as QuoteStatRow[]) {
+    const lastVolume = r.last_volume == null ? null : Number(r.last_volume);
+    const avgVolume20 = r.avg_volume_20 == null ? null : Number(r.avg_volume_20);
     out[r.ticker] = {
       ticker: r.ticker,
       lastDay: String(r.last_day),
       lastClose: Number(r.last_close),
       prevClose: r.prev_close == null ? null : Number(r.prev_close),
-      lastVolume: r.last_volume == null ? null : Number(r.last_volume),
-      avgVolume20: r.avg_volume_20 == null ? null : Number(r.avg_volume_20),
-      rvol: r.rvol == null ? null : Number(r.rvol),
+      lastVolume,
+      avgVolume20,
+      rvol: relativeVolume(lastVolume, avgVolume20, r.rvol == null ? null : Number(r.rvol)),
     };
   }
   return out;

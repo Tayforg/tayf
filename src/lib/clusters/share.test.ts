@@ -7,7 +7,7 @@ import {
   SHARE_LINK_CHANNELS,
 } from "./share";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import type { BiasDistribution } from "@/types";
+import type { BiasCategory, BiasDistribution, SourceKind } from "@/types";
 
 function dist(partial: Partial<BiasDistribution>): BiasDistribution {
   return { ...emptyBiasDistribution(), ...partial };
@@ -276,6 +276,163 @@ describe("buildShareText", () => {
         "5 kaynak · %80 iktidar · %0 bağımsız · %20 muhalefet · 9 haber · 5 farklı metin",
       );
     });
+  });
+});
+
+// h57-outbound-1: "sadece iktidar yazdı" is decided on the voting tally, so it
+// printed over a story an aggregator (son-dakika, Bağımsız) and a niche source
+// (isci-haber, Muhalefet) from another zone also carried. /blindspots and the
+// cluster timeline already say so; the share text now does too.
+describe("buildShareText qualifies 'sadece' for non-voting sources (h57-outbound-1)", () => {
+  type Src = { kind?: SourceKind | null; bias: BiasCategory };
+
+  // Shaped like cluster 0b127dc3-444a-48fb-a045-6d97086e4074: nine voting
+  // İktidar members plus three non-voting ones (12 kaynak, 9 sınıflandırılmış).
+  const voting9: Src[] = [
+    ...Array.from({ length: 5 }, (): Src => ({ kind: "outlet", bias: "pro_government" })),
+    ...Array.from({ length: 3 }, (): Src => ({ kind: "outlet", bias: "gov_leaning" })),
+    { kind: "wire", bias: "pro_government" },
+  ];
+  const SON_DAKIKA: Src = { kind: "aggregator", bias: "center" };
+  const ISCI_HABER: Src = { kind: "niche", bias: "opposition" };
+  const HABERLER_COM: Src = { kind: "aggregator", bias: "gov_leaning" };
+  const fixture: Src[] = [...voting9, SON_DAKIKA, ISCI_HABER, HABERLER_COM];
+  const control: Src[] = [...voting9, HABERLER_COM];
+
+  const distribution = dist({ pro_government: 6, gov_leaning: 3 });
+  const HEAD = "12 kaynak · 9 sınıflandırılmış: %100 iktidar · %0 bağımsız · %0 muhalefet";
+  const base = {
+    articleCount: 12,
+    distribution,
+    isBlindspot: true,
+    blindspotSide: "pro_government" as BiasCategory,
+  };
+
+  it("ends in ' · Kör nokta: spektrumda sadece iktidar' for the 0b127dc3-shaped fixture", () => {
+    expect(buildShareText({ ...base, sources: fixture })).toBe(
+      `${HEAD} · Kör nokta: spektrumda sadece iktidar`,
+    );
+  });
+
+  it("is byte-identical to the old text for the control (only haberler-com, inside the zone)", () => {
+    expect(buildShareText({ ...base, sources: control })).toBe(
+      `${HEAD} · Kör nokta: sadece iktidar yazdı`,
+    );
+  });
+
+  it("is byte-identical to the old text when no sources are passed", () => {
+    expect(buildShareText(base)).toBe(`${HEAD} · Kör nokta: sadece iktidar yazdı`);
+    expect(buildShareText({ ...base, sources: [] })).toBe(`${HEAD} · Kör nokta: sadece iktidar yazdı`);
+    expect(buildShareText({ ...base, sources: undefined })).toBe(
+      `${HEAD} · Kör nokta: sadece iktidar yazdı`,
+    );
+  });
+
+  it("one non-voting outsider is enough", () => {
+    expect(buildShareText({ ...base, sources: [...voting9, ISCI_HABER] })).toContain(
+      "Kör nokta: spektrumda sadece iktidar",
+    );
+  });
+
+  it("voting sources from other zones never qualify it (they are in the tally already)", () => {
+    const text = buildShareText({
+      ...base,
+      sources: [...voting9, { kind: "outlet", bias: "opposition" }, { kind: null, bias: "center" }, { bias: "center" }],
+    });
+    expect(text).toBe(`${HEAD} · Kör nokta: sadece iktidar yazdı`);
+  });
+
+  it("leaves the 'ağırlıklı' branch unchanged whatever the sources are", () => {
+    const text = buildShareText({
+      articleCount: 5,
+      distribution: dist({ pro_government: 4, opposition: 1 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+      sources: [{ kind: "niche", bias: "center" }],
+    });
+    expect(text).toBe(
+      "5 kaynak · %80 iktidar · %0 bağımsız · %20 muhalefet · Kör nokta: iktidar ağırlıklı",
+    );
+  });
+
+  it("leaves 250/1/0 on 'ağırlıklı' even with an outsider", () => {
+    const text = buildShareText({
+      articleCount: 251,
+      distribution: dist({ pro_government: 250, center: 1 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+      sources: [{ kind: "niche", bias: "opposition" }],
+    });
+    expect(text).toContain("Kör nokta: iktidar ağırlıklı");
+    expect(text).not.toContain("sadece");
+  });
+
+  it("uses the same fallback zone as before when blindspot_side is null", () => {
+    const text = buildShareText({
+      articleCount: 6,
+      distribution: dist({ opposition: 5 }),
+      isBlindspot: true,
+      blindspotSide: null,
+      sources: [{ kind: "outlet", bias: "opposition" }, { kind: "aggregator", bias: "gov_leaning" }],
+    });
+    expect(text).toContain("Kör nokta: spektrumda sadece muhalefet");
+    expect(text).not.toContain("yazdı");
+  });
+
+  it("qualifies against the NAMED zone: a non-voting source inside it does not count", () => {
+    const text = buildShareText({
+      articleCount: 6,
+      distribution: dist({ opposition: 5 }),
+      isBlindspot: true,
+      blindspotSide: "opposition",
+      sources: [{ kind: "niche", bias: "opposition_leaning" }],
+    });
+    expect(text).toContain("Kör nokta: sadece muhalefet yazdı");
+  });
+
+  it("adds nothing when the cluster is not a blindspot, however many outsiders", () => {
+    const text = buildShareText({ ...base, isBlindspot: false, sources: fixture });
+    expect(text).toBe(HEAD);
+    expect(text).not.toContain("spektrumda");
+  });
+
+  it("keeps the wire suffix after the qualified blindspot suffix", () => {
+    const text = buildShareText({
+      ...base,
+      sources: fixture,
+      wire: { isWireRedistribution: true, memberCount: 14 },
+    });
+    expect(text).toBe(
+      `${HEAD} · Kör nokta: spektrumda sadece iktidar · 14 haber · 12 farklı metin`,
+    );
+  });
+
+  it("changes nothing but the blindspot suffix (counts, percents and the head)", () => {
+    const qualified = buildShareText({ ...base, sources: fixture });
+    const plain = buildShareText(base);
+    expect(qualified.replace(" · Kör nokta: spektrumda sadece iktidar", "")).toBe(
+      plain.replace(" · Kör nokta: sadece iktidar yazdı", ""),
+    );
+  });
+
+  it("does not mutate the sources it is given", () => {
+    const input = fixture.map((s) => ({ ...s }));
+    const before = JSON.stringify(input);
+    buildShareText({ ...base, sources: input });
+    expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it("reaches all four channel links (WhatsApp, Telegram, X, Bluesky) as the new wording", () => {
+    const body = buildShareText({ ...base, sources: fixture });
+    const url = buildShareUrl("https://tayf.test", "0b127dc3-444a-48fb-a045-6d97086e4074", "whatsapp");
+    const decoded = SHARE_LINK_CHANNELS.map(
+      (channel) => new URL(buildChannelShareHref(channel, url, body)).searchParams.get("text") ?? "",
+    );
+    expect(decoded).toHaveLength(4);
+    for (const text of decoded) {
+      expect(text).toContain("· Kör nokta: spektrumda sadece iktidar");
+      expect(text).not.toContain("yazdı");
+    }
   });
 });
 

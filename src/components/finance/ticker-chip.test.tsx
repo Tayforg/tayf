@@ -429,3 +429,39 @@ describe("TickerTape", () => {
     });
   });
 });
+
+// h57-ekonomi-1: readQuoteStats now hands the tape the unrounded ratio, so the
+// single 1-dp display rounding and the ">= 2" amber threshold act on the true
+// value. These pin that contract at the render boundary.
+describe("TickerTape relative volume on an unrounded ratio (h57-ekonomi-1)", () => {
+  const item: TickerAttention[] = [
+    { ticker: "GARAN", articles: 3, sources: 2, ratio: null, title: "Garanti" } as TickerAttention,
+  ];
+  const garanQuote: Quote = { ...quote, ticker: "GARAN", price: 150, prevClose: 149, changePct: 0.67 };
+  const withRvol = (rvol: number): Record<string, QuoteStat> => ({
+    GARAN: { ticker: "GARAN", lastDay: "2026-11-06", lastClose: 150, prevClose: 149, lastVolume: 1, avgVolume20: 1, rvol },
+  });
+  const hacimSpan = (rvol: number) => {
+    const el = TickerTape({ items: item, quotes: { GARAN: garanQuote }, stats: withRvol(rvol) });
+    return spans(collect(el)).find((n) => textOf(n.props.children).startsWith("hacim"));
+  };
+
+  it("1.84875 renders 'hacim 1,8x' and is not amber", () => {
+    const n = hacimSpan(1.84875);
+    expect(n).toBeDefined();
+    expect(textOf(n!.props.children)).toBe("hacim 1,8x");
+    expect(classOf(n!)).not.toContain("text-amber-400");
+  });
+
+  it("2.0003 is amber", () => {
+    const n = hacimSpan(2.0003);
+    expect(n).toBeDefined();
+    expect(classOf(n!)).toContain("text-amber-400");
+  });
+
+  it("1.996 is not amber (a stored 2.00 would have been)", () => {
+    const n = hacimSpan(1.996);
+    expect(n).toBeDefined();
+    expect(classOf(n!)).not.toContain("text-amber-400");
+  });
+});

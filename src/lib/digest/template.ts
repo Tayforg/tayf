@@ -1,6 +1,6 @@
 import {
   dominantZonePercent,
-  isOnlyZone,
+  onlyZoneClaim,
   zoneCountsOf,
   zonePercents,
 } from "@/lib/bias/zone-summary";
@@ -32,6 +32,13 @@ export interface DigestBlindspotItem {
    * digest route still sets it.
    */
   dominantPct: number;
+  /**
+   * `nonVotingOutsideZone(bundle.sources, dominantZone)`: how many toplayıcı /
+   * niş sources from another zone also carried the story. When "sadece" holds
+   * on the voting tally but this is above 0, the line says "Spektrumda sadece
+   * X" instead of "Sadece X yazdı" (h57-outbound-1).
+   */
+  nonVotingOutside: number;
 }
 
 export interface BuildDigestHtmlInput {
@@ -112,9 +119,13 @@ function blindspotBlock(item: DigestBlindspotItem, siteUrl: string): string {
   // two zones have no source at all (250/1/0 is %100 but not "only").
   const counts = zoneCountsOf(item.biasDistribution);
   const pct = dominantZonePercent(counts, item.dominantZone);
-  const zoneCopy = isOnlyZone(counts, item.dominantZone)
-    ? `Sadece ${zoneLabel} yazdı`
-    : `%${pct} ${zoneLabel}`;
+  const claim = onlyZoneClaim(counts, item.dominantZone, item.nonVotingOutside);
+  const zoneCopy =
+    claim === "only"
+      ? `Sadece ${zoneLabel} yazdı`
+      : claim === "spectrumOnly"
+        ? `Spektrumda sadece ${zoneLabel}`
+        : `%${pct} ${zoneLabel}`;
   return `
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:24px 0;background:#fafafa;border-radius:8px;">
     <tr>

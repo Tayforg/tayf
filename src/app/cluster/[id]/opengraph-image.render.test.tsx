@@ -2,7 +2,8 @@ import { deflateSync, inflateSync } from "node:zlib";
 
 import { describe, it, expect, vi } from "vitest";
 
-import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
+import type { ClusterDetail, ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
+import type { BiasCategory, SourceKind } from "@/types";
 
 // Companion to opengraph-image.test.tsx, which mocks `next/og` to inspect
 // the element tree. This file keeps ONE real Satori render in the suite so
@@ -461,4 +462,148 @@ describe("cluster opengraph-image bottom edge (real Satori render)", () => {
     },
     30_000,
   );
+});
+
+// ---------------------------------------------------------------------------
+// h57-outbound-1: "KÖR NOKTA — spektrumda sadece İktidar" is 5 characters longer
+// than "KÖR NOKTA — sadece İktidar yazdı" at fontSize 26. It must stay one line,
+// inside the 72 px side padding, and must not move the legend row (the
+// h20-contracts-1 contract above).
+// ---------------------------------------------------------------------------
+
+function nonVotingMember(slug: string, kind: SourceKind, bias: BiasCategory): ClusterDetailMember {
+  return {
+    source: {
+      id: slug,
+      name: slug,
+      slug,
+      url: `https://${slug}.example`,
+      rss_url: `https://${slug}.example/rss`,
+      bias,
+      logo_url: null,
+      active: true,
+      kind,
+      trustee_since: null,
+      trustee_note: null,
+    },
+    article: {
+      id: `${slug}-1`,
+      title: `${slug} başlığı`,
+      url: `https://${slug}.example/haber/1`,
+      published_at: "2026-07-01T10:00:00Z",
+      image_url: null,
+      content_hash: `hash-${slug}`,
+    },
+  };
+}
+
+/** Amber ribbon pixels (fill ~ (57,43,22), text (252,211,77)); the page gradient and the white title have r ~ b. */
+function ribbonBox(png: DecodedPng): { minX: number; maxX: number; minY: number; maxY: number } | null {
+  let minX = Infinity;
+  let maxX = -1;
+  let minY = Infinity;
+  let maxY = -1;
+  for (let y = 118; y < 215; y++) {
+    for (let x = 0; x < png.width; x++) {
+      const [r, , b] = pixelAt(png, x, y);
+      if (r - b >= 20) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  return maxX < 0 ? null : { minX, maxX, minY, maxY };
+}
+
+describe("cluster opengraph-image qualified ribbon (real Satori render, h57-outbound-1)", () => {
+  type Zone = "iktidar" | "muhalefet";
+  const cards = new Map<string, Promise<DecodedPng>>();
+  const renderRibbonCard = (title: string, zone: Zone, qualified: boolean): Promise<DecodedPng> => {
+    const key = `${zone}|${qualified}|${title}`;
+    let card = cards.get(key);
+    if (!card) {
+      card = (async () => {
+        const base = blindspotDetail();
+        const bias_distribution =
+          zone === "iktidar"
+            ? { ...base.cluster.bias_distribution }
+            : { ...base.cluster.bias_distribution, pro_government: 0, gov_leaning: 0, state_media: 0, opposition: 5, opposition_leaning: 2 };
+        // The outsider sits in another zone than the ribbon's, and does not vote.
+        const members = qualified
+          ? [
+              nonVotingMember("son-dakika", "aggregator", zone === "iktidar" ? "center" : "gov_leaning"),
+              nonVotingMember("isci-haber", "niche", zone === "iktidar" ? "opposition" : "pro_government"),
+            ]
+          : [];
+        getClusterDetailOrThrow.mockResolvedValueOnce({
+          ...base,
+          cluster: {
+            ...base.cluster,
+            title_tr: title,
+            bias_distribution,
+            blindspot_side: zone === "iktidar" ? "pro_government" : "opposition",
+          },
+          members,
+        });
+        const { default: Image } = await import("./opengraph-image");
+        const png = decodePng(await pngBytes(await Image({ params: Promise.resolve({ id: VALID_ID }) })));
+        expect(png.width).toBe(1200);
+        expect(png.height).toBe(630);
+        return png;
+      })();
+      cards.set(key, card);
+    }
+    return card;
+  };
+
+  it("draws a wider but still one-line ribbon, inside the 72 px side padding", async () => {
+    const plain = ribbonBox(await renderRibbonCard(TITLE_SHORT, "iktidar", false));
+    const qualified = ribbonBox(await renderRibbonCard(TITLE_SHORT, "iktidar", true));
+    expect(plain).not.toBeNull();
+    expect(qualified).not.toBeNull();
+    // Same left edge (alignSelf flex-start inside the 72 px padding) and the same height: one line.
+    expect(qualified!.minX).toBe(plain!.minX);
+    expect(Math.abs(qualified!.minY - plain!.minY)).toBeLessThanOrEqual(1);
+    expect(Math.abs(qualified!.maxY - plain!.maxY)).toBeLessThanOrEqual(1);
+    // The qualified text is longer, so the ribbon is wider, and still short of the right padding (x >= 1128).
+    expect(qualified!.maxX).toBeGreaterThan(plain!.maxX);
+    expect(qualified!.maxX).toBeLessThan(1128);
+  }, 30_000);
+
+  it("fits the widest zone label too: 'spektrumda sadece Muhalefet'", async () => {
+    const box = ribbonBox(await renderRibbonCard(TITLE_SHORT, "muhalefet", true));
+    const plain = ribbonBox(await renderRibbonCard(TITLE_SHORT, "muhalefet", false));
+    expect(box).not.toBeNull();
+    expect(box!.maxX).toBeLessThan(1128);
+    expect(box!.maxX).toBeGreaterThan(plain!.maxX);
+    expect(box!.maxY - box!.minY).toBeLessThanOrEqual(plain!.maxY - plain!.minY + 1);
+  }, 30_000);
+
+  it("keeps the legend row on the canvas under the qualified ribbon, whatever the title", async () => {
+    const ref = await renderRibbonCard(TITLE_SHORT, "iktidar", true);
+    // The hunt's probe: the page gradient at (250,629), not a legend box fill (32,32,35).
+    expectNear(pixelAt(ref, 250, LEGEND_PROBE_Y), [21, 21, 24], "reference at (250,629)");
+    for (const title of [TITLE_96_RIBBON, TITLE_200, TITLE_ALL_CAPS]) {
+      const card = await renderRibbonCard(title, "iktidar", true);
+      for (const x of LEGEND_PROBE_X) {
+        expectNear(
+          pixelAt(card, x, LEGEND_PROBE_Y),
+          pixelAt(ref, x, LEGEND_PROBE_Y),
+          `${title.slice(0, 24)}... at (${x},${LEGEND_PROBE_Y})`,
+        );
+      }
+    }
+  }, 60_000);
+
+  it("lays the qualified card out exactly like the unqualified ribbon card below the ribbon (same title box)", async () => {
+    const plain = await renderRibbonCard(TITLE_96_RIBBON, "iktidar", false);
+    const qualified = await renderRibbonCard(TITLE_96_RIBBON, "iktidar", true);
+    for (const x of [250, 950]) {
+      for (let y = 470; y < 630; y++) {
+        expectNear(pixelAt(qualified, x, y), pixelAt(plain, x, y), `legend column at (${x},${y})`);
+      }
+    }
+  }, 30_000);
 });

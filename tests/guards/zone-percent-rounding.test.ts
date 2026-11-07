@@ -237,8 +237,14 @@ describe("zone-percent-rounding guard: src sweep", () => {
   });
 
   it("the 'only one side' claim is counts-based (isOnlyZone) on every surface that makes it", () => {
+    // /blindspots reads isOnlyZone itself and qualifies it with
+    // nonVotingOutsideZone; every OUTBOUND surface (digest, OG ribbon, share
+    // text, embed) goes through onlyZoneClaim (h57-outbound-1), so the same
+    // story cannot be worded "yazdı" on one and "spektrumda sadece" on another.
+    expect(blankComments(files.find((f) => f.rel === "src/app/blindspots/page.tsx")?.src ?? "")).toContain(
+      "isOnlyZone(",
+    );
     for (const rel of [
-      "src/app/blindspots/page.tsx",
       "src/lib/digest/template.ts",
       "src/app/cluster/[id]/opengraph-image.tsx",
       "src/lib/clusters/share.ts",
@@ -246,7 +252,18 @@ describe("zone-percent-rounding guard: src sweep", () => {
     ]) {
       const file = files.find((f) => f.rel === rel);
       expect(file, `${rel} not found by the walk`).toBeDefined();
-      expect(blankComments(file?.src ?? ""), rel).toContain("isOnlyZone(");
+      const code = blankComments(file?.src ?? "");
+      expect(code, rel).toContain("onlyZoneClaim(");
+      // A bare isOnlyZone( here would skip the non-voting qualifier.
+      expect(code, rel).not.toContain("isOnlyZone(");
     }
+  });
+
+  it("onlyZoneClaim stays counts-based: it wraps isOnlyZone, never a rounded percent", () => {
+    const summary = files.find((f) => f.rel === "src/lib/bias/zone-summary.ts");
+    expect(summary, "zone-summary.ts not found by the walk").toBeDefined();
+    const code = blankComments(summary?.src ?? "");
+    const body = code.slice(code.indexOf("export function onlyZoneClaim("));
+    expect(body.slice(0, body.indexOf("\n}\n"))).toContain("isOnlyZone(");
   });
 });

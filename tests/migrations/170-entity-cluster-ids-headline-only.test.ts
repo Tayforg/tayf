@@ -251,10 +251,14 @@ describe("170 entity_cluster_ids_headline_only: the file, ledger and transaction
     expect(readdirSync(MIGRATIONS_DIR).filter((f) => f.startsWith("170_"))).toEqual([FILE_170]);
   });
 
-  it("sits after 156 and 125, and nothing sorts after it yet", () => {
+  it("sits after 156 and 125, and no later migration re-creates entity_cluster_ids_v3", () => {
     expect(FILE_170 > FILE_156 && FILE_156 > FILE_125).toBe(true);
+    // 171 and later files sort after 170 by design; what must not happen is a second definition of the function 170 creates.
     const later = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql") && f > FILE_170);
-    expect(later).toEqual([]);
+    const redefiners = later.filter((f) =>
+      collapse(stripComments(readFileSync(resolve(MIGRATIONS_DIR, f), "utf8"))).includes("create or replace function public.entity_cluster_ids_v3("),
+    );
+    expect(redefiners).toEqual([]);
   });
 
   it("runs in one transaction with a bounded lock wait", () => {

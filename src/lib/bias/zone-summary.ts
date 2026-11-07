@@ -97,3 +97,50 @@ export function nonVotingOutsideZone(
   }
   return outside;
 }
+
+/**
+ * What a "Kör nokta" line may say about the zone that wrote the story.
+ *   "only"         the zone is the only one with a voting source and nobody
+ *                  outside it carried the story: "sadece X yazdı".
+ *   "spectrumOnly" the zone is the only one with a voting source, but a
+ *                  toplayıcı / niş source from another zone carried it too:
+ *                  "spektrumda sadece X" (what the counted sources show), never
+ *                  "yazdı".
+ *   "weighted"     another zone has a voting source: "X ağırlıklı" / "%N X".
+ *
+ * The one decision every outbound surface reads (the OG ribbon, the share text,
+ * the embed, the digest; /blindspots and the Manşet Kartı decide the same way
+ * from `nonVotingOutsideZone`), so none of them can word it differently.
+ * Nothing here is a vote: the counts, the shares and the flag are untouched.
+ */
+export type OnlyZoneClaim = "only" | "spectrumOnly" | "weighted";
+
+/**
+ * `isOnlyZone` plus the non-voting qualifier. `nonVotingOutside` is
+ * `nonVotingOutsideZone(sources, zone)`; a caller that has no source list passes
+ * 0 and gets the unqualified wording it always had.
+ */
+export function onlyZoneClaim(
+  counts: Record<MediaDnaZone, number>,
+  zone: MediaDnaZone,
+  nonVotingOutside: number,
+): OnlyZoneClaim {
+  if (!isOnlyZone(counts, zone)) return "weighted";
+  return nonVotingOutside > 0 ? "spectrumOnly" : "only";
+}
+
+/**
+ * One source per slug, in first-seen order: a single outlet can appear as
+ * several members (one per article), and `nonVotingOutsideZone` counts what it
+ * is given. Works on `ClusterDetailMember[]` and on anything shaped like
+ * `{ source: { slug } }`.
+ */
+export function uniqueSources<S extends { slug: string }>(
+  members: readonly { source: S }[],
+): S[] {
+  const bySlug = new Map<string, S>();
+  for (const { source } of members) {
+    if (!bySlug.has(source.slug)) bySlug.set(source.slug, source);
+  }
+  return Array.from(bySlug.values());
+}

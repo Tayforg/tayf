@@ -1,7 +1,12 @@
 import { tallyZones, zoneOf } from "@/lib/bias/config";
-import { isOnlyZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import {
+  nonVotingOutsideZone,
+  onlyZoneClaim,
+  zoneCountsOf,
+  zonePercents,
+} from "@/lib/bias/zone-summary";
 import { wireBadgeShort } from "@/lib/clusters/wire";
-import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
+import type { BiasCategory, BiasDistribution, MediaDnaZone, SourceKind } from "@/types";
 
 // Lowercase Turkish zone labels for share text. `ZONE_META` labels
 // ("İktidar", "Bağımsız", "Muhalefet" in src/lib/bias/config.ts) are
@@ -24,6 +29,13 @@ const ZONE_LABEL_LOWER: Record<MediaDnaZone, string> = {
  * e.g. "10 kaynak · %70 iktidar · %20 bağımsız · %10 muhalefet", plus
  * " · Kör nokta: sadece iktidar yazdı" when the cluster is a blindspot.
  *
+ * "Sadece X yazdı" is decided on the voting tally. When `sources` (the cluster's
+ * members de-duplicated per source) holds a toplayıcı / niş source from another
+ * zone, "yazdı" would be false, so the suffix says what the spectrum shows:
+ * " · Kör nokta: spektrumda sadece iktidar" (h57-outbound-1, the wording
+ * /blindspots and the cluster timeline already use). Without `sources`, or with
+ * no such outsider, the text is exactly what it always was.
+ *
  * The percents are over the CLASSIFIED (voting) sources, while `articleCount`
  * also counts aggregator / niche members. When fewer sources voted than
  * `articleCount`, the head names the voting total so the text never sets one
@@ -42,8 +54,9 @@ export function buildShareText(input: {
   isBlindspot: boolean;
   blindspotSide: BiasCategory | null;
   wire?: { isWireRedistribution: boolean; memberCount: number };
+  sources?: readonly { kind?: SourceKind | null; bias: BiasCategory }[];
 }): string {
-  const { articleCount, distribution, isBlindspot, blindspotSide, wire } = input;
+  const { articleCount, distribution, isBlindspot, blindspotSide, wire, sources } = input;
   const counts = zoneCountsOf(distribution);
   const percents = zonePercents(counts);
 
@@ -79,10 +92,13 @@ export function buildShareText(input: {
     // still has a source).
     const tally = tallyZones(distribution);
     const zone = blindspotSide ? zoneOf(blindspotSide) : (tally.dominantZone ?? "iktidar");
+    const claim = onlyZoneClaim(counts, zone, sources ? nonVotingOutsideZone(sources, zone) : 0);
     text +=
-      isOnlyZone(counts, zone)
+      claim === "only"
         ? ` · Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
-        : ` · Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
+        : claim === "spectrumOnly"
+          ? ` · Kör nokta: spektrumda sadece ${ZONE_LABEL_LOWER[zone]}`
+          : ` · Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
   }
 
   if (wire?.isWireRedistribution) {

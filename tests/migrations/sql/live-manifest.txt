@@ -64,6 +64,8 @@ run | 168-framing-draw-one-per-event.test.ts | tests/migrations/sql/168-framing-
 run | 169-repick-gate-fail.test.ts | tests/migrations/sql/169-repick-gate-fail-dryrun.sql | - | 0
 # 170: the dry-run script builds the state itself (the stub's clusters gets summary_tr, merged_into, 035's generated search_tsv and 083's partial index, then 156 as production has it, gated on its md5, and a baseline that shows a cluster naming the party only in the summary lead being listed) and applies 170 twice, so it is the setup. Every live case runs inside its own rolled-back transaction.
 run | 170-entity-cluster-ids-headline-only.test.ts | tests/migrations/sql/170-entity-cluster-ids-headline-only-dryrun.sql | - | 0
+# 171: the dry-run script builds the state itself (bist_aliases of 049 with 052's enabled column, 049's fold, 062's finance regex, then 085 from its own file as production has it, gated on its md5, with 058's revoke and grant, and a baseline that shows FNCLL, TSGYO and TSKYO attaching to a Turkcell and a TSKB headline) and applies 171 twice, so it is the setup. Every live case runs inside its own rolled-back transaction.
+run | 171-ticker-alias-siblings.test.ts | tests/migrations/sql/171-ticker-alias-siblings-dryrun.sql | - | 0
 run | 151-cluster-attach-probe.test.ts | tests/migrations/sql/151-cluster-attach-probe-dryrun.sql | - | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql | TAYF_SHAPE=prod | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql | TAYF_SHAPE=chain | 0
