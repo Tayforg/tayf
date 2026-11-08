@@ -64,10 +64,10 @@ export interface LinearOptions {
   /** Most extra samples per rung taken when a pair looks super-linear (fewer when the rungs are slow: about a second of CPU in all). 0 turns confirmation off. Default 15. */
   confirmRuns?: number;
   /**
-   * When the TOP pair still looks super-linear after confirmation, time one more rung at twice the top size and pass
-   * only if that pair is linear again (and under the ceiling). A cache or memory-tier cliff is a one-off constant-factor
-   * step; an algorithm that is really super-linear keeps growing at every doubling, so it still fails. Skipped for a
-   * slow top rung and when `confirmRuns` is 0. A step below the top rung is never excused. Default true.
+   * Excuse ONE constant-factor step (a cache or memory-tier cliff): a single violating pair whose growth is at most twice
+   * the limit, when the cost grows linearly again after it (the next pair, or for the top pair one more rung timed at
+   * twice the top size, under the ceiling). A super-linear cost keeps growing at every later doubling and still fails.
+   * Off when `confirmRuns` is 0; never for a slow top rung. Default true.
    */
   extendTop?: boolean;
   /** Default "cpu": CPU time of the calling thread, immune to the scheduler preempting a loaded machine. */
@@ -192,49 +192,64 @@ export function expectLinear<I>(gen: Gen<I>, fn: (input: I) => unknown, o: Linea
   // hundreds of ms is already steady). A cost that is really super-linear is slow on every sample and still fails.
   const CONFIRM_BUDGET_MS = 1000;
 
-  for (let i = 1; i < sizes.length; i++) {
-    if (violatesAt(i) && confirmRuns > 0) {
+  // Confirm every suspicious pair. Extra samples only LOWER a rung, which can make the pair above it look worse, so a
+  // pair that starts violating after a lower pair's confirmation gets its own confirmation too (each pair once).
+  const confirmed = new Set<number>();
+  for (let pass = 0; pass < 2 && confirmRuns > 0; pass++) {
+    for (let i = 1; i < sizes.length; i++) {
+      if (confirmed.has(i) || !violatesAt(i)) continue;
+      confirmed.add(i);
       const extra = Math.min(confirmRuns, Math.floor(CONFIRM_BUDGET_MS / (lowerOf(i) + min[i]!)));
       for (let k = 0; k < extra; k++) {
         sample(i - 1);
         sample(i);
       }
     }
-    // h64-testhealth-1: on CI the top rung of a 25k .. 200k ladder sometimes steps up once (11 -> 46 ms, then 8 ->
-    // 28 ms on the next run) while the lower rungs double cleanly: the working set leaving the runner's cache. Time one
-    // more rung at twice the top size; a one-off step grows linearly again from there, a super-linear cost does not.
-    // Only a cheap top rung (at least three samples of the extended rung fit in the confirm budget) is extended.
-    const top = sizes.length - 1;
-    if (i === top && violatesAt(i) && extendTop && confirmRuns > 0 && min[i]! <= CONFIRM_BUDGET_MS / 6) {
-      const extSize = sizes[i]! * 2;
-      const extInput = gen(extSize); // built once, never timed
-      let extMin = Infinity;
-      const extSamples = Math.max(3, Math.min(confirmRuns, Math.floor(CONFIRM_BUDGET_MS / (2 * min[i]! || 1))));
-      for (let k = 0; k < extSamples; k++) {
-        sample(i);
-        const t = now();
-        fn(extInput);
-        extMin = Math.min(extMin, now() - t);
-        if (k === 0 && extMin > o.ceilingMs) {
-          throw new Error(`size ${extSize} took ${extMin.toFixed(1)} ms, over the ${o.ceilingMs} ms ceiling (${ladder()})`);
-        }
-      }
-      const lower = Math.max(min[i]!, floorMs);
-      const allowed = slack * 2;
-      // Written as "not linear" so an unusable reading (NaN) fails closed instead of passing.
-      if (!(extMin / lower <= allowed || extMin - allowed * lower < floorMs)) {
-        throw new Error(
-          `super-linear: ${sizes[i]} -> ${extSize} grew ${(extMin / lower).toFixed(2)}x after a ${sizes[i - 1]} -> ${sizes[i]} step of ${(min[i]! / lowerOf(i)).toFixed(2)}x, limit ${allowed.toFixed(2)}x (${ladder()}, ${extSize}: ${extMin.toFixed(1)} ms)`,
-        );
-      }
-      return { sizes, minMs: min };
+  }
+
+  const failAt = (i: number): never => {
+    const fromFloor = min[i - 1]! < floorMs ? `, measured from the ${floorMs} ms floor` : "";
+    throw new Error(
+      `super-linear: ${sizes[i - 1]} -> ${sizes[i]} grew ${(min[i]! / lowerOf(i)).toFixed(2)}x${fromFloor}, limit ${allowedAt(i).toFixed(2)}x (${ladder()})`,
+    );
+  };
+  const violating = sizes.map((_, i) => i).filter((i) => i > 0 && violatesAt(i));
+  if (violating.length === 0) return { sizes, minMs: min };
+
+  // h64-testhealth-1: on CI a 25k .. 200k ladder sometimes steps up ONCE while every other pair doubles cleanly
+  // (classify-category: 3 -> 11.9 -> 24 ms at 50k -> 100k -> 200k; 8 -> 28 ms and 11 -> 46 ms at the top): the working
+  // set leaving the runner's cache, a constant-factor step. A cost that is really super-linear (a + b*n^2, backtracking)
+  // grows FASTER at every later doubling, so once a pair violates every pair above it violates too. So one violating
+  // pair is excused when (a) it is the only one, (b) the step is at most twice the limit, and (c) the cost grows
+  // linearly again after it: the next pair passes (already known, it is not in `violating`), or, for the top pair, a
+  // rung at twice the top size, timed now. Two steps, a bigger step, or growth that continues still fail.
+  const i = violating[0]!;
+  const oneOff = extendTop && confirmRuns > 0 && violating.length === 1 && min[i]! / lowerOf(i) <= 2 * allowedAt(i);
+  if (!oneOff) return failAt(i);
+  const top = sizes.length - 1;
+  if (i < top) return { sizes, minMs: min };
+  // The top pair: only a cheap top rung is extended (at least three samples of the extended rung fit in the budget).
+  if (min[i]! > CONFIRM_BUDGET_MS / 6) return failAt(i);
+  const extSize = sizes[i]! * 2;
+  const extInput = gen(extSize); // built once, never timed
+  let extMin = Infinity;
+  const extSamples = Math.max(3, Math.min(confirmRuns, Math.floor(CONFIRM_BUDGET_MS / (2 * min[i]! || 1))));
+  for (let k = 0; k < extSamples; k++) {
+    sample(i);
+    const t = now();
+    fn(extInput);
+    extMin = Math.min(extMin, now() - t);
+    if (k === 0 && extMin > o.ceilingMs) {
+      throw new Error(`size ${extSize} took ${extMin.toFixed(1)} ms, over the ${o.ceilingMs} ms ceiling (${ladder()})`);
     }
-    if (violatesAt(i)) {
-      const fromFloor = min[i - 1]! < floorMs ? `, measured from the ${floorMs} ms floor` : "";
-      throw new Error(
-        `super-linear: ${sizes[i - 1]} -> ${sizes[i]} grew ${(min[i]! / lowerOf(i)).toFixed(2)}x${fromFloor}, limit ${allowedAt(i).toFixed(2)}x (${ladder()})`,
-      );
-    }
+  }
+  const lower = Math.max(min[i]!, floorMs);
+  const allowed = slack * 2;
+  // Written as "not linear" so an unusable reading (NaN) fails closed instead of passing.
+  if (!(extMin / lower <= allowed || extMin - allowed * lower < floorMs)) {
+    throw new Error(
+      `super-linear: ${sizes[i]} -> ${extSize} grew ${(extMin / lower).toFixed(2)}x after a ${sizes[i - 1]} -> ${sizes[i]} step of ${(min[i]! / lowerOf(i)).toFixed(2)}x, limit ${allowed.toFixed(2)}x (${ladder()}, ${extSize}: ${extMin.toFixed(1)} ms)`,
+    );
   }
   return { sizes, minMs: min };
 }

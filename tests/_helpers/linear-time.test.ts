@@ -239,7 +239,7 @@ describe("expectLinear with a scripted clock", () => {
     expect(quad.calls()).toBeGreaterThan(quadPlain.calls());
   });
 
-  describe("a one-off step at the top rung (a cache or memory-tier cliff) is checked one rung further", () => {
+  describe("one constant-factor step (a cache or memory-tier cliff) is excused only when the cost is linear after it", () => {
     // 2 -> 3 -> 8 -> 28 ms then linear: the CI ladder of PR #225 (classify-category, 100k -> 200k grew 3.49x).
     const cliff = (len: number) => (len <= 40_000 ? len / 5_000 : (len / 80_000) * 28);
 
@@ -263,9 +263,30 @@ describe("expectLinear with a scripted clock", () => {
       expect(message).toContain("160000");
     });
 
-    it("does not excuse a step below the top rung", () => {
+    it("excuses one step below the top when the next pair is linear again (the CI ladder 2 -> 3 -> 11.9 -> 24 ms)", () => {
+      const costs: Record<number, number> = { 10_000: 2, 20_000: 3, 40_000: 11.9, 80_000: 24 };
+      const s = scripted((len) => costs[len]!);
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).not.toThrow();
+      expect(s.sizesSeen).not.toContain(160_000); // the next pair already shows the cost is linear again
+      const off = scripted((len) => costs[len]!);
+      expect(() => expectLinear(gen, off.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, extendTop: false, clock: off.clock })).toThrow(
+        /super-linear: 20000 -> 40000/,
+      );
+    });
+
+    it("does not excuse two steps in one ladder", () => {
+      const costs: Record<number, number> = { 10_000: 4, 20_000: 16, 40_000: 32, 80_000: 120 };
+      const s = scripted((len) => costs[len]!);
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).toThrow(
+        /super-linear: 10000 -> 20000/,
+      );
+    });
+
+    it("does not excuse a step of more than twice the limit, even when the cost is linear after it", () => {
       const s = scripted((len) => (len <= 20_000 ? len / 5_000 : (len / 40_000) * 28));
-      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).toThrow(/super-linear/);
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).toThrow(
+        /super-linear: 20000 -> 40000/,
+      );
     });
 
     it("keeps today's verdict with extendTop: false or confirmRuns: 0", () => {
