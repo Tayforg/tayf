@@ -250,7 +250,35 @@ describe("src/components/home/new-since-last-visit.tsx: the status container sta
     expect(divAt).toBeGreaterThan(-1);
     const tag = openingTagFrom(code, divAt);
     expect(tag).toContain('aria-live="polite"');
-    expect(tag).toMatch(/count > 0 \? "" : "sr-only"/);
+  });
+
+  // h68-lcp-1: the container used to flip between `sr-only` and an in-flow block
+  // on `count > 0`, which pushed the feed down after hydration. The tree is now
+  // constant: the region sits in an always-rendered data-new-pill-slot wrapper
+  // and neither element carries a class that depends on the stamp (the sr-only
+  // geometry and the returning-reader reservation live in globals.css). Pinned in
+  // detail by tests/guards/new-pill-no-shift.test.ts.
+  it("renders the region unconditionally, inside the slot wrapper, with a constant (class-free) tag", () => {
+    const at = code.indexOf('role="status"');
+    const divAt = code.lastIndexOf("<div", at);
+    const tag = openingTagFrom(code, divAt);
+    expect(tag).not.toContain("className");
+    expect(tag).not.toContain("count");
+    expect(tag).not.toContain("sr-only");
+
+    // the wrapper is the opening tag right before the status div
+    const slotAt = code.lastIndexOf("<div", divAt - 1);
+    expect(slotAt).toBeGreaterThan(-1);
+    const slotTag = openingTagFrom(code, slotAt);
+    expect(slotTag).toContain("data-new-pill-slot");
+    expect(slotTag).not.toContain("className");
+    expect(slotTag).not.toContain("count");
+
+    // nothing conditional between `return (` and the wrapper: it is always rendered
+    const returnAt = code.lastIndexOf("return (", slotAt);
+    expect(returnAt).toBeGreaterThan(-1);
+    const prefix = code.slice(returnAt + "return (".length, slotAt);
+    expect(prefix.trim()).toBe("");
   });
 
   it("renders the pill only when there is something new", () => {
