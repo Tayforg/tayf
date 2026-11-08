@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import pool from "./__fixtures__/h34-related-pool.json";
 import {
   RELATED_DUPLICATE_AGREEMENT,
@@ -451,12 +452,28 @@ function agree(a: string, b: string): number {
   return Math.max(titleAgreement(a, b) ?? 0, titleAgreement(b, a) ?? 0);
 }
 
+/**
+ * Both directions: the SMALLER of the two shares (a null share counts as 0). The measure of the page-title rule of
+ * buildRelatedBlock (h76-stories-1); `agree` above is the measure of the rule between listed items.
+ */
+function agreeBoth(a: string, b: string): number {
+  return Math.min(titleAgreement(a, b) ?? 0, titleAgreement(b, a) ?? 0);
+}
+
 /** A cluster row with a title and an update time n minutes into the hour. */
 function titled(id: string, n: number, title: string, rest: ClusterOverrides = {}) {
   return cand(id, n, { title_tr: title, ...rest });
 }
 
 const CHP_CURRENT = "Korkuteli Belediye Başkanı Saniye Caran, CHP'den istifa etti";
+
+// The page for the Erdoğan-Korea twin tests below: related to every Korea headline of those tests and a near-duplicate of
+// none of them (the old page title, "... Güney Kore ziyaretini tamamladı", shares 0.67 of its stems with "... Güney
+// Kore'den ayrıldı" and that headline 0.80 of its own, so the page's own twin rule, which needs 0.6 in BOTH directions,
+// would have dropped it before the tests' subject, the twin rule BETWEEN listed items, could act). It also carries
+// "tamamlandı", which only the older of the two 'döndü' titles of the "newer one wins" test has, so that one still
+// scores higher than its newer twin.
+const KOREA_PAGE = "Erdoğan'ın Kore programı tamamlandı, sırada Azerbaycan ve Katar var";
 
 describe("constants", () => {
   it("pin the decisions of the brief", () => {
@@ -1214,12 +1231,23 @@ describe("non-topical shared tokens never relate two stories (h53-related-1)", (
   });
 
   describe("selects", () => {
+    // The live Barrack headline ("... ABD'li Temsilci Barrack ile görüştü") shares 5 of the page's 7 stems with the Trump
+    // headline: 0.71 each way, so the page's own twin rule (h76-stories-1, 0.6 in BOTH directions) drops it, see the last
+    // test of this block. The real related story of the two tests below is this meeting headline, which stays under the
+    // line (0.57 / 0.50).
+    const barrackMeeting = "Irak Başbakanı Zeydi, ABD'li Temsilci Barrack'la bir araya geldi";
+
+    it("premise: the Barrack meeting is related to the Zeydi-Trump page and not a near-duplicate of it", () => {
+      expect(isRelatedTitle(T.zeydiTrump, barrackMeeting)).toBe(true);
+      expect(agreeBoth(T.zeydiTrump, barrackMeeting)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    });
+
     it("the Zeydi page keeps the Barrack story and drops the Hamidi and İsrail ones", () => {
       const out = select(
         [
           titled("hamidi", 1, T.hamidi, { topic7: "politika" }),
           titled("israil", 2, T.israil, { topic7: "politika" }),
-          titled("barrack", 3, T.zeydiBarrack, { topic7: "politika" }),
+          titled("barrack", 3, barrackMeeting, { topic7: "politika" }),
           titled("zeydi2", 4, "Irak Başbakanı Zeydi Bağdat'ta ABD heyetini kabul etti", { topic7: "politika" }),
         ],
         { currentId: "zeydi", currentTitle: T.zeydiTrump, topic: "politika" },
@@ -1233,12 +1261,29 @@ describe("non-topical shared tokens never relate two stories (h53-related-1)", (
         [
           titled("hamidi", 1, T.hamidi, { topic7: "politika" }),
           titled("israil", 2, T.israil, { topic7: "politika" }),
-          titled("barrack", 3, T.zeydiBarrack, { topic7: "politika" }),
+          titled("barrack", 3, barrackMeeting, { topic7: "politika" }),
         ],
         { currentId: "zeydi", currentTitle: T.zeydiTrump, topic: "politika" },
       );
       expect(out.mode).toBe("latest");
       expect(ids(out)[0]).toBe("barrack");
+    });
+
+    // Recall cost of h76-stories-1, pinned so a change to it is a decision (as h37-clusters-1 pinned f85bc48e): two
+    // meetings of one prime minister with one headline template are 0.71 of each other in BOTH directions (the page
+    // rule's line is 0.6 each way), so the Barrack meeting is no longer listed on the Trump meeting's page.
+    it("recall cost: the live Zeydi-Barrack headline is a near-duplicate of the Zeydi-Trump page and is not listed", () => {
+      expect(agreeBoth(T.zeydiTrump, T.zeydiBarrack)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+      const out = select(
+        [
+          titled("barrack", 3, T.zeydiBarrack, { topic7: "politika" }),
+          titled("hamidi", 2, T.hamidi, { topic7: "politika" }),
+          titled("israil", 1, T.israil, { topic7: "politika" }),
+        ],
+        { currentId: "zeydi", currentTitle: T.zeydiTrump, topic: "politika" },
+      );
+      expect(ids(out)).not.toContain("barrack");
+      expect(out.mode).toBe("latest");
     });
 
     it("the US-midterm market page keeps its three stories and drops a dollar-amount decoy", () => {
@@ -1376,12 +1421,19 @@ describe("generic words match as words, not as bare stems", () => {
 });
 
 describe("selectRelatedClusters — near-duplicates", () => {
-  const cur = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretini tamamladı";
+  const cur = KOREA_PAGE;
   const left = "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı";
   const back = "Cumhurbaşkanı Erdoğan Güney Kore'deki temaslarının ardından yurda döndü";
 
   it("premise: the two Erdoğan-Korea headlines agree well over 60% (one direction is enough)", () => {
     expect(agree(left, back)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+  });
+
+  it("premise: the page is related to both and a near-duplicate of neither (h76-stories-1)", () => {
+    for (const title of [left, back]) {
+      expect(isRelatedTitle(cur, title)).toBe(true);
+      expect(agreeBoth(cur, title)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    }
   });
 
   it("yields only the newer of two near-duplicates, whichever order they arrive in", () => {
@@ -1478,6 +1530,293 @@ describe("selectRelatedClusters — near-duplicates", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h76-stories-1: the block listed a near-duplicate of the page's OWN story first
+// (the Aliyev-COP31 page led with the other Aliyev-COP31 cluster, the Eisenkot
+// page with the other Eisenkot cluster), so the reader saw the same story twice.
+// Only an exactly equal folded title was dropped against the current title; the
+// near-duplicate rule (RELATED_DUPLICATE_AGREEMENT, either direction) ran only
+// between the LISTED items. The twins have disjoint articles, so the shared-members
+// guard never caught them. A candidate is now also dropped against the current title,
+// but only when titleAgreement is at or above the line in BOTH directions (the rule
+// between listed items stays "either direction"): a one-sided pair, one title a long
+// rewording of a shorter one, stays, whether it is a sibling story or a copy. A read-only replay of
+// 177 live blocks (2026-11-08) with the "either direction" form changed 26 of them,
+// nine as collateral (the Erdoğan-Azerbaijan visit siblings were dropped), and turned
+// seven 'related' blocks into 'latest' ones with unrelated filler; "both directions"
+// changes 10 blocks and none of them flips. Seven of its ten drops are real twins
+// (Aliyev x2, Eisenkot x3, Cevdet Yılmaz x2). Three are different stories with templated
+// headlines (the departure cluster on the arrival and speech pages, the 4 Nov İçişleri
+// operation on the 2 Nov one), a recall cost pinned below.
+// ---------------------------------------------------------------------------
+
+describe("selectRelatedClusters — a near-duplicate of the page itself (h76-stories-1)", () => {
+  // The two Eisenkot clusters of 2026-11-08 (the second one uses typographic apostrophes).
+  const EISENKOT_A = "İsrail'de hükümeti kurma görevi Eisenkot'a verildi";
+  const EISENKOT_B = "İsrail’de muhalefet lideri Eisenkot’a hükümeti kurma görevi";
+  const ERAKCI = "İran Dışişleri Bakanı Erakçi: Şimdi seçim yapma sırası Beyaz Saray'da";
+  const TAJANI = "İtalya Dışişleri Bakanı Tajani, siber saldırıları G7 gündemine taşıyacak";
+  // The Aliyev-COP31 twins and the two Erdoğan-Azerbaijan stories that are NOT twins of them.
+  const ALIYEV_A = "Azerbaycan Cumhurbaşkanı Aliyev, Antalya'daki COP31 Zirvesi'ne katılacak";
+  const ALIYEV_B = "Azerbaycan Cumhurbaşkanı İlham Aliyev COP31'e katılacak";
+  const DINNER = "Cumhurbaşkanı Erdoğan, Azerbaycan'da onuruna verilen yemeğe katıldı";
+  const TETE = "Cumhurbaşkanı Erdoğan, Azerbaycan Cumhurbaşkanı Aliyev ile baş başa görüştü";
+  // Two stories no title of the above is related to.
+  const DOLAR = "Dolar kuru güne yükselişle başladı";
+  const MEKKE = "Mekke Anlaşması'nın ilk maddesi kabul edildi";
+
+  it("premise: each twin pair agrees at or above the duplicate line in BOTH directions; the Erdoğan pair does not", () => {
+    for (const [a, b] of [[EISENKOT_A, EISENKOT_B], [ALIYEV_A, ALIYEV_B]] as const) {
+      expect(titleAgreement(a, b) ?? 0).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+      expect(titleAgreement(b, a) ?? 0).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+      // The twin is also "related" to the page, which is how it used to lead the block.
+      expect(isRelatedTitle(a, b)).toBe(true);
+      expect(isRelatedTitle(b, a)).toBe(true);
+    }
+    expect(agree(DINNER, TETE)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+  });
+
+  it("(a) the Eisenkot twin is not listed, and the two other newest stories are", () => {
+    const out = select(
+      [
+        titled("twin", 9, EISENKOT_B, { article_count: 19 }),
+        titled("erakci", 8, ERAKCI),
+        titled("tajani", 7, TAJANI),
+      ],
+      { currentTitle: EISENKOT_A, topic: "dunya" },
+    );
+    expect(ids(out)).not.toContain("twin");
+    expect(ids(out)).toEqual(["erakci", "tajani"]);
+    expect(out.mode).toBe("latest");
+  });
+
+  it("(a) the mirror case: the titles swapped, the other cluster is the twin", () => {
+    const out = select(
+      [
+        titled("twin", 9, EISENKOT_A, { article_count: 7 }),
+        titled("erakci", 8, ERAKCI),
+        titled("tajani", 7, TAJANI),
+      ],
+      { currentTitle: EISENKOT_B, topic: "dunya" },
+    );
+    expect(ids(out)).not.toContain("twin");
+    expect(ids(out)).toEqual(["erakci", "tajani"]);
+    expect(out.mode).toBe("latest");
+  });
+
+  it("(b) the Aliyev twin is absent and the two stories that are not twins of it stay, as 'related'", () => {
+    const out = select(
+      [
+        titled("twin", 9, ALIYEV_B),
+        titled("dinner", 8, DINNER),
+        titled("tete", 7, TETE),
+      ],
+      { currentTitle: ALIYEV_A, topic: "politika" },
+    );
+    expect(ids(out)).not.toContain("twin");
+    expect([...ids(out)].sort()).toEqual(["dinner", "tete"]);
+    expect(out.mode).toBe("related");
+  });
+
+  it("(c) when the only related story is a twin of the page, the mode is 'latest' and the twin is not listed, not even as the lead", () => {
+    const out = select(
+      [
+        titled("twin", 1, ALIYEV_B), // the OLDER one: h38-related-1 would have led the list with it
+        titled("dolar", 2, DOLAR),
+        titled("mekke", 3, MEKKE),
+      ],
+      { currentTitle: ALIYEV_A, topic: "politika" },
+    );
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["mekke", "dolar"]);
+  });
+
+  it("(c) a twin that is the newest and the only related story does not lead the 'latest' list either", () => {
+    const out = select(
+      [titled("twin", 9, ALIYEV_B), titled("dolar", 2, DOLAR), titled("mekke", 1, MEKKE)],
+      { currentTitle: ALIYEV_A, topic: "politika" },
+    );
+    expect(out.mode).toBe("latest");
+    expect(ids(out)).toEqual(["dolar", "mekke"]);
+  });
+
+  it("the twin does not take a 'related' slot: with it and one real story the block is 'latest', not 'İlgili haberler'", () => {
+    const out = select([titled("twin", 9, ALIYEV_B), titled("tete", 8, TETE)], {
+      currentTitle: ALIYEV_A,
+      topic: "politika",
+    });
+    expect(ids(out)).toEqual(["tete"]);
+    expect(out.mode).toBe("latest");
+  });
+
+  it("drops at exactly 60% agreement with the page and keeps a title just under it (the line #195 applies between listed items)", () => {
+    const base = "Kestane Lokanta Marmara Nergis Orman";
+    const sixty = "Kestane Lokanta Marmara Zeytin Yonca"; // 3 of 5 either way
+    const forty = "Kestane Lokanta Zeytin Yonca Papaz"; // 2 of 5 either way
+    expect(agree(base, sixty)).toBeCloseTo(0.6, 10);
+    expect(agree(base, forty)).toBeCloseTo(0.4, 10);
+    const out = select([titled("sixty", 9, sixty), titled("forty", 3, forty)], { currentTitle: base });
+    expect(ids(out)).toEqual(["forty"]);
+  });
+
+  it("one-sided agreement is kept: a short title that the page's title fully carries is not dropped as a twin of the page", () => {
+    const page = "Kestane Lokanta Marmara Nergis Orman Zeytin Yonca"; // 7 stems
+    const short = "Kestane Lokanta Marmara"; // 3 stems, all in the page
+    expect(titleAgreement(page, short) ?? 0).toBeLessThan(RELATED_DUPLICATE_AGREEMENT); // 3/7 from the page's side
+    expect(titleAgreement(short, page) ?? 0).toBe(1); // but the page carries all of it
+    const out = select([titled("short", 9, short), titled("other", 3, "Zeytin Sedir Tunç Papaz")], {
+      currentTitle: page,
+    });
+    expect(ids(out)).toEqual(["short", "other"]);
+  });
+
+  it("one-sided agreement is kept in the other direction too: the page is the short title", () => {
+    const longer = "Kestane Lokanta Marmara Nergis Orman Zeytin Yonca"; // carries all 3 stems of the page
+    const page = "Kestane Lokanta Marmara";
+    expect(titleAgreement(page, longer) ?? 0).toBe(1);
+    expect(titleAgreement(longer, page) ?? 0).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    const out = select([titled("longer", 9, longer), titled("other", 3, "Zeytin Sedir Tunç Papaz")], {
+      currentTitle: page,
+    });
+    expect(ids(out)).toEqual(["longer", "other"]);
+  });
+
+  it("drops only when BOTH shares reach the line: 0.6 on one side and just under it on the other is kept, both at 0.6 is dropped", () => {
+    const page = "Kestane Lokanta Marmara Nergis Orman"; // 5 stems
+    const both60 = "Kestane Lokanta Marmara Zeytin Yonca"; // 3 of 5 each way
+    const oneSided = "Kestane Lokanta Marmara Zeytin Yonca Papaz Sedir"; // 3 of 7 from its side, 3 of 5 from the page's
+    expect(titleAgreement(page, both60)).toBeCloseTo(0.6, 10);
+    expect(titleAgreement(both60, page)).toBeCloseTo(0.6, 10);
+    expect(titleAgreement(page, oneSided)).toBeCloseTo(0.6, 10);
+    expect(titleAgreement(oneSided, page)).toBeCloseTo(3 / 7, 10);
+    const out = select([titled("both", 9, both60), titled("one", 8, oneSided)], { currentTitle: page });
+    expect(ids(out)).toEqual(["one"]);
+  });
+
+  // The live pairs the either-direction form of the rule dropped and this one keeps (replay of 2026-11-08): one headline
+  // is a long rewording of the other (0.67 / 0.44 and 0.70 / 0.44). Each pair is ONE event (the five bodies found in a car
+  // in Afyon on 2026-11-05; the 1 million TL fine for polyester sold as cotton), so these are known remaining page twins on
+  // four pages, kept on purpose.
+  it("the live Afyon and cotton pairs, one-sided copies at 0.67 / 0.44 and 0.70 / 0.44, are kept on purpose (known remaining twins)", () => {
+    const pairs: [string, string][] = [
+      ["Afyonkarahisar’da araçta 5 kişinin cesedi bulundu", "Afyonkarahisar'da dehşet. Araç içinde 5 kişinin cansız bedeni bulundu"],
+      [
+        "Pamuk diye sattılar: Polyester çıktı. Bakanlıktan 1 milyon liralık ceza",
+        "'Yüzde 100 pamuk' diye sattığı ürün polyester çıkan firmaya 1 milyon 83 bin 706 TL ceza",
+      ],
+    ];
+    for (const [page, other] of pairs) {
+      expect(agree(page, other)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+      expect(agreeBoth(page, other)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+      for (const [p, o] of [[page, other], [other, page]] as const) {
+        const out = select([titled("o", 9, o), titled("dolar", 2, DOLAR), titled("mekke", 1, MEKKE)], { currentTitle: p });
+        expect(ids(out)).toContain("o");
+      }
+    }
+  });
+
+  // Recall cost of the both-directions rule, pinned so a change to it is a decision (as the Zeydi-Barrack test above): three
+  // pairs of the 2026-11-08 replay are DIFFERENT events with templated headlines (Erdoğan arrives in Azerbaijan / leaves it /
+  // speaks there; the İçişleri operation of 2 Nov with 86 remands / the one of 4 Nov with 230 detentions). They share names
+  // and a title word, read alike in BOTH directions (0.60 or more each way), and so are not listed on each other's page.
+  // Tightening the twin rule (a shared non-entity stem, differing numbers) is a founder decision, not made here.
+  it("recall cost: different events with templated headlines (Erdoğan arrives in / leaves Azerbaijan, two İçişleri operations) read alike both ways and are not listed", () => {
+    const pairs: [string, string][] = [
+      ["Cumhurbaşkanı Erdoğan Azerbaycan'a gitti", "Cumhurbaşkanı Erdoğan, Azerbaycan'dan ayrıldı"],
+      ["Cumhurbaşkanı Erdoğan'dan Azerbaycan'da önemli açıklamalar", "Cumhurbaşkanı Erdoğan, Azerbaycan'dan ayrıldı"],
+      [
+        "İçişleri duyurdu... 11 ilde 'siber' operasyon: 86 tutuklama",
+        "İçişleri duyurdu. 11 ilde kaçakçılık ve siber suç operasyonları: 230 gözaltı",
+      ],
+    ];
+    for (const [page, cand] of pairs) {
+      expect(agreeBoth(page, cand)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+      expect(isRelatedTitle(page, cand)).toBe(true);
+      const out = select([titled("cand", 9, cand), titled("dolar", 2, DOLAR), titled("mekke", 1, MEKKE)], {
+        currentTitle: page,
+      });
+      expect(ids(out)).not.toContain("cand");
+      expect(out.mode).toBe("latest");
+    }
+  });
+
+  it("the rule between LISTED items is unchanged: one direction is enough there, so a one-sided pair is listed once", () => {
+    const [a, b] = [
+      "Afyonkarahisar’da araçta 5 kişinin cesedi bulundu",
+      "Afyonkarahisar'da dehşet. Araç içinde 5 kişinin cansız bedeni bulundu",
+    ];
+    expect(agree(a, b)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+    expect(agreeBoth(a, b)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    const out = select([titled("a", 9, a), titled("b", 8, b), titled("dolar", 2, DOLAR)], { currentTitle: MEKKE });
+    expect(ids(out)).toContain("a");
+    expect(ids(out)).not.toContain("b"); // the newer of the pair stays, the older is dropped
+  });
+
+  it("(d) a candidate whose agreement with the page is null in both directions (too few stems) is kept", () => {
+    expect(titleAgreement("Işık yandı", "Su kesildi")).toBeNull();
+    expect(titleAgreement("Su kesildi", "Işık yandı")).toBeNull();
+    const out = select([titled("short", 2, "Su kesildi"), titled("other", 1, "Elektrik geldi")], {
+      currentTitle: "Işık yandı",
+    });
+    expect(ids(out)).toEqual(["short", "other"]);
+  });
+
+  it("(d) a null agreement from the page's side (the page title is too short) counts as 0, so a candidate that agrees fully the other way is kept", () => {
+    const page = "Kestane Lokanta"; // two content stems: no agreement from its side
+    const cand3 = "Kestane Lokanta Marmara"; // both of the page's stems are 2 of its 3: 0.67
+    expect(titleAgreement(page, cand3)).toBeNull();
+    expect(titleAgreement(cand3, page)).toBeCloseTo(2 / 3, 10);
+    const out = select([titled("c", 1, cand3)], { currentTitle: page });
+    expect(ids(out)).toEqual(["c"]);
+  });
+
+  it("(d) a null agreement from the candidate's side counts as 0 too: the candidate is the short title", () => {
+    const page = "Kestane Lokanta Marmara";
+    const short = "Kestane Lokanta"; // fewer than 3 stems: null from its own side
+    expect(titleAgreement(short, page)).toBeNull();
+    expect(titleAgreement(page, short)).toBeCloseTo(2 / 3, 10);
+    const out = select([titled("short", 1, short)], { currentTitle: page });
+    expect(ids(out)).toEqual(["short"]);
+  });
+
+  it("an equal folded title is still dropped, including a title too short for titleAgreement", () => {
+    const out = select([titled("same", 9, "  IŞIK  Yandı "), titled("other", 1, "Su kesildi")], {
+      currentTitle: "Işık yandı",
+    });
+    expect(ids(out)).toEqual(["other"]);
+  });
+
+  it("is order independent: the twin is dropped whichever position it has in the feed, and nothing else moves", () => {
+    const rows = [
+      titled("erakci", 8, ERAKCI),
+      titled("twin", 9, EISENKOT_B, { article_count: 19 }),
+      titled("tajani", 7, TAJANI),
+    ];
+    for (const bundles of [rows, [...rows].reverse()]) {
+      expect(ids(select(bundles, { currentTitle: EISENKOT_A, topic: "dunya" }))).toEqual(["erakci", "tajani"]);
+    }
+  });
+
+  it("a story the page's twin is related to, but that is not a twin of the page itself, stays", () => {
+    // 'tete' and 'dinner' both share Aliyev-page stems; neither agrees 0.6 with the page.
+    expect(agree(ALIYEV_A, TETE)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    expect(agree(ALIYEV_A, DINNER)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+    const out = select([titled("dinner", 1, DINNER), titled("tete", 2, TETE)], {
+      currentTitle: ALIYEV_A,
+      topic: "politika",
+    });
+    expect(out.mode).toBe("related");
+    expect(ids(out)).toEqual(["tete", "dinner"]);
+  });
+
+  it("does not mutate its input", () => {
+    const bundles = [titled("twin", 9, EISENKOT_B), titled("erakci", 8, ERAKCI)];
+    const snapshot = JSON.stringify(bundles);
+    select(bundles, { currentTitle: EISENKOT_A, topic: "dunya" });
+    expect(JSON.stringify(bundles)).toBe(snapshot);
+  });
+});
+
 describe("selectRelatedClusters — 'latest' mode", () => {
   // Three content stems unique to i, none shared with any other i or with the CHP title.
   const distinct = (i: number) => `k${i}aaaa k${i}bbbb k${i}cccc`;
@@ -1505,7 +1844,7 @@ describe("selectRelatedClusters — 'latest' mode", () => {
   });
 
   it("counts two near-duplicate related candidates as one story, so it falls back to 'latest'", () => {
-    const cur = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretini tamamladı";
+    const cur = KOREA_PAGE;
     const out = select(
       [
         titled("left", 1, "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı"),
@@ -1670,7 +2009,7 @@ describe("selectRelatedClusters — a lone related story leads the 'latest' list
   });
 
   it("two near-duplicate related stories are still ONE story: the newer leads, the older stays out", () => {
-    const cur = "Cumhurbaşkanı Erdoğan Güney Kore ziyaretini tamamladı";
+    const cur = KOREA_PAGE;
     const out = select(
       [
         titled("left", 1, "Cumhurbaşkanı Erdoğan Güney Kore'den ayrıldı"),
@@ -1735,7 +2074,8 @@ describe("selectRelatedClusters — a lone related story leads the 'latest' list
   });
 
   it("two or more related stories: unchanged, mode 'related' with only the related ones", () => {
-    const two = "Kestane Lokanta Marmara festivali başladı"; // 3 shared stems
+    // 2 shared stems (a third would be a near-duplicate of the page: 3 of 5 is 0.6, h76-stories-1).
+    const two = "Marmara Nergis festivali başladı";
     const out = select([titled("a", 1, LONE), titled("b", 2, two), ...loneThenNewer(6).slice(1)], { currentTitle: CUR });
     expect(out.mode).toBe("related");
     expect(ids(out)).toEqual(["b", "a"]);
@@ -1808,6 +2148,31 @@ describe("selectRelatedClusters — the return value carries the mode", () => {
     const out = select(big, { currentTitle: CHP_CURRENT });
     expect(out.length).toBeLessThanOrEqual(RELATED_MAX);
     expect(out[0]?.id).toBe("id-04999");
+  });
+
+  // h76-stories-1: the page-title check (titleAgreement twice per candidate) runs on EVERY candidate, before the pool cap, so
+  // its cost must stay linear in the number of candidates and in the length of the page title.
+  it("cost is linear in the number of candidates (the page-title check runs before the pool cap)", () => {
+    expectLinear(
+      (n) =>
+        Array.from({ length: n }, (_, i) =>
+          cand(`id-${String(i).padStart(6, "0")}`, i % 60, {
+            title_tr: `${i}Alfa ${i}Beta ${i}Gama ${i}Delta CHP Korkuteli`,
+            updated_at: new Date(Date.UTC(2026, 10, 3, 0, 0, 0) + i * 1000).toISOString(),
+          }),
+        ),
+      (bundles) => select(bundles, { currentTitle: CHP_CURRENT }),
+      { n: 8_000, ceilingMs: 4_000 },
+    );
+  });
+
+  it("cost is linear in the length of the page title (30 candidates, the size of a feed)", () => {
+    const feed = Array.from({ length: 30 }, (_, i) => titled(`f${i}`, i, `Haber${i}Alfa Haber${i}Beta CHP Korkuteli istifa`));
+    expectLinear(
+      rep("Kestane Lokanta Marmara ", "Korkuteli CHP "),
+      (title) => select(feed, { currentTitle: title }),
+      { n: 100_000, ceilingMs: 4_000 },
+    );
   });
 
   it("survives junk rows and junk titles", () => {
@@ -1910,10 +2275,54 @@ describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
     // third. It is a story of the same trip, but it shares only the entity's own word ("Erdoğan")
     // with this headline (Seul is not "Güney Kore"), and the entity word is no longer the shared
     // stem. Recall cost of the fix, pinned so a change to it is a decision.
+    // h76-stories-1: d91ab2f1 ("... temaslarının ardından yurda döndü", the same trip's other cluster) carries 0.80 of
+    // this headline's stems but this headline carries only 0.50 of its own: one-sided, so it is not the page's twin
+    // (which needs 0.6 in BOTH directions) and stays listed, first.
     expect(got).toEqual(["d91ab2f1", "2408b41e"]);
     expect(got).not.toContain("f85bc48e");
     expect(got).not.toContain("9f18b020"); // Rutte / Kuzey Makedonya Cumhurbaşkanı
     expect(got).not.toContain("909f6421"); // Suriye Cumhurbaşkanı Şara
+  });
+
+  // h76-stories-1: every pair of the pool in which a row agrees 0.6 or more with a page's headline in BOTH directions, and so
+  // is the page's twin and is no longer listed on that page. Pinned from the fixture so adding or removing a pair is a
+  // decision. Only the Spanish train-crash resignation (85b2e468 <- 2e28dcf7, 0.67 / 0.60) is one: the other pairs of the
+  // pool that reach 0.6 in ONE direction stay listed. The one-sided pairs pinned in the test below are Korea leaves /
+  // returns (0.80 / 0.50, both pages) and the Hamaney message 78e56dca <- 16f038d3 (0.67 / 0.57). The 0.50 / 0.60 row
+  // 991f3a41 ("Kremlin'den seçim sonrası ABD mesajı", the Kremlin's message, not Hamaney's) is not dropped by the page
+  // rule, but it is not listed on 78e56dca either: it ranks outside the five-item block even when 16f038d3 is removed, so
+  // it is not pinned.
+  it("the live pool's twin pairs (the rows a page no longer lists) are exactly this one", () => {
+    const pairs: string[] = [];
+    for (const page of PAGES) {
+      const feed = relatedFeedFor(page.topic7);
+      if (!feed) continue;
+      const topic = feed.kind === "topic" ? feed.slug : "politika";
+      for (const r of POOLS[topic] ?? []) {
+        if (r.id !== page.id && agreeBoth(page.headline, r.title_tr) >= RELATED_DUPLICATE_AGREEMENT - 1e-9) {
+          pairs.push(`${page.id.slice(0, 8)} <- ${r.id.slice(0, 8)}`);
+        }
+      }
+    }
+    expect(pairs).toEqual(["85b2e468 <- 2e28dcf7"]);
+  });
+
+  it("the one-sided pairs of the live pool (0.6 or more one way, under it the other) are still listed on the page", () => {
+    // The Korea pair in both directions (0.80 / 0.50), and the Hamaney pair 78e56dca <- 16f038d3 (0.67 from the page's side,
+    // 0.57 from the row's; 16f038d3 is not a page of the fixture, so one direction only).
+    for (const [pagePrefix, rowPrefix] of [
+      ["2b8d3632", "d91ab2f1"],
+      ["d91ab2f1", "2b8d3632"],
+      ["78e56dca", "16f038d3"],
+    ] as const) {
+      const page = pageOf(pagePrefix);
+      const feed = relatedFeedFor(page.topic7);
+      const row = (POOLS[feed?.kind === "topic" ? feed.slug : "politika"] ?? []).find((r) => r.id.startsWith(rowPrefix));
+      if (!row) throw new Error(`fixture has no row ${rowPrefix}`);
+      expect(agree(page.headline, row.title_tr)).toBeGreaterThanOrEqual(RELATED_DUPLICATE_AGREEMENT);
+      expect(agreeBoth(page.headline, row.title_tr)).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+      expect(ids(blockFor(page) ?? [])).toContain(row.id);
+    }
   });
 
   it("every item of a 'related' block shares two content stems with the page or an entity key, and clears the floor", () => {
@@ -1947,6 +2356,8 @@ describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
     const page = pageOf("d91ab2f1");
     const out = blockFor(page) ?? [];
     expect(out.mode).toBe("related");
+    // h76-stories-1: the sibling cluster ("... Güney Kore'den ayrıldı") is 0.80 of this headline from its own side and
+    // 0.50 the other way round, so it is not the page's twin (0.6 in BOTH directions) and still leads.
     expect(out[0]?.id.startsWith("2b8d3632")).toBe(true);
     expect(out.length).toBeGreaterThanOrEqual(RELATED_MIN_ITEMS);
     for (const item of out) expect(relatedScore(page.headline, item.title)).toBeGreaterThanOrEqual(RELATED_MIN_SCORE);
@@ -1969,6 +2380,13 @@ describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
       }
       expect(out.length).toBeLessThanOrEqual(RELATED_MAX);
       expect(ids(out)).not.toContain(page.id);
+      // h76-stories-1: and no item is a near-duplicate of the page itself (0.6 in BOTH directions).
+      for (const item of out) {
+        expect(
+          agreeBoth(page.headline, item.title),
+          `${page.id.slice(0, 8)} <- ${item.title}`,
+        ).toBeLessThan(RELATED_DUPLICATE_AGREEMENT);
+      }
       for (let i = 0; i < out.length; i++) {
         for (let j = i + 1; j < out.length; j++) {
           expect(agree((out[i] as { title: string }).title, (out[j] as { title: string }).title)).toBeLessThan(
@@ -2008,7 +2426,13 @@ describe("selectRelatedClusters — the live pool of 2026-11-05", () => {
       const feed = relatedFeedFor(page.topic7);
       if (!feed) continue;
       const topic = feed.kind === "topic" ? feed.slug : "politika";
-      const related = (POOLS[topic] ?? []).filter((r) => r.id !== page.id && isRelatedTitle(page.headline, r.title_tr));
+      // A near-duplicate of the page is not listed, so it is not "the one related story" either (h76-stories-1).
+      const related = (POOLS[topic] ?? []).filter(
+        (r) =>
+          r.id !== page.id &&
+          isRelatedTitle(page.headline, r.title_tr) &&
+          agreeBoth(page.headline, r.title_tr) < RELATED_DUPLICATE_AGREEMENT,
+      );
       if (related.length !== 1) continue;
       lone++;
       const out = blockFor(page) ?? [];
