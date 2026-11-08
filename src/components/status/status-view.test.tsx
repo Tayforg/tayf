@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import { ZONE_META } from "@/lib/bias/config";
 import {
-  STATUS_CLUSTER_FAIL_MIN,
-  STATUS_CLUSTER_WARN_MIN,
+  STATUS_CLUSTER_POISON_WINDOW_HOURS,
+  STATUS_CLUSTER_QUEUE_DEPTH_WARN,
+  STATUS_CLUSTER_QUEUE_FAIL_SEC,
+  STATUS_CLUSTER_QUEUE_WARN_SEC,
   STATUS_INGEST_FAIL_MIN,
   STATUS_INGEST_WARN_MIN,
   STATUS_LABELLING_FAIL_MIN,
@@ -77,6 +79,18 @@ const STATES: Record<string, StatusViewModel | null> = {
     }),
   ),
   "feeds at the fail share": buildStatusView(snap({ feeds: { ok: true, active: 100, silent: 55 } })),
+  "idle night: old last update, empty queue": buildStatusView(
+    snap({ clustering: { ok: true, lastAt: ago(63), queueDepth: 0, queueOldestSec: 0 } }),
+  ),
+  "queue backlog 400 s": buildStatusView(
+    snap({ clustering: { ok: true, lastAt: ago(1), queueDepth: 9, queueOldestSec: 400 } }),
+  ),
+  "queue stalled 1000 s": buildStatusView(
+    snap({ clustering: { ok: true, lastAt: ago(1), queueDepth: 40, queueOldestSec: 1000 } }),
+  ),
+  "empty queue, 2 poison messages in the last hour": buildStatusView(
+    snap({ clustering: { ok: true, lastAt: ago(63), queueDepth: 0, queueOldestSec: 0, queuePoisonRecent: 2 } }),
+  ),
   null: null,
 };
 
@@ -215,12 +229,176 @@ describe("StatusView sections", () => {
   });
 });
 
+describe("StatusView Kümeleme card with the cluster_work queue rule (h71-transparency-3)", () => {
+  const badgeOf = (html: string, label: string) =>
+    [...html.matchAll(new RegExp(`<span[^>]*>${label}</span>`, "g"))].length;
+
+  it("idle night: an old last update with an empty queue reads Normal and says nothing is waiting", () => {
+    const html = render(STATES["idle night: old last update, empty queue"]!);
+    const t = text(html);
+    expect(t).toContain("Son küme güncellemesi 63 dk önce · kuyrukta bekleyen haber yok");
+    expect(t).toContain("Sistem durumu: Çalışıyor");
+    expect(badgeOf(html, "Normal")).toBe(6);
+    expect(t).not.toContain("Kuyruktaki en eski haber");
+    expect(html).not.toContain("bg-amber-500");
+  });
+
+  it("no cluster update in the whole lookback and an empty queue is still Normal", () => {
+    const v = buildStatusView(snap({ clustering: { ok: true, lastAt: null, queueDepth: 0, queueOldestSec: 0 } }));
+    const t = text(render(v));
+    expect(t).toContain("Son 6 saatte küme güncellemesi yok · kuyrukta bekleyen haber yok");
+    expect(t).toContain("Sistem durumu: Çalışıyor");
+  });
+
+  it("a backlog prints the wait of the oldest message, rounded UP so the number never sits below the threshold it tripped", () => {
+    const html = render(STATES["queue backlog 400 s"]!);
+    const t = text(html);
+    expect(t).toContain("Son küme güncellemesi 1 dk önce");
+    expect(t).toContain("Kuyruktaki en eski haber 7 dk bekliyor");
+    expect(t).not.toContain("kuyrukta bekleyen haber yok");
+    expect(badgeOf(html, "Gecikmeli")).toBe(1);
+    expect(t).toContain("Sistem durumu: Gecikmeli");
+    // 301 s is the first amber second: it must read 6 dk, not 5 dk
+    const edge = buildStatusView(snap({ clustering: { ok: true, lastAt: ago(1), queueDepth: 2, queueOldestSec: 301 } }));
+    expect(text(render(edge))).toContain("Kuyruktaki en eski haber 6 dk bekliyor");
+    const flat = buildStatusView(snap({ clustering: { ok: true, lastAt: ago(1), queueDepth: 2, queueOldestSec: 300 } }));
+    expect(text(render(flat))).toContain("Kuyruktaki en eski haber 5 dk bekliyor");
+    expect(badgeOf(render(flat), "Normal")).toBe(6);
+  });
+
+  it("a stalled queue is Sorunlu even though the last cluster update is a minute old", () => {
+    const html = render(STATES["queue stalled 1000 s"]!);
+    const t = text(html);
+    expect(t).toContain("Son küme güncellemesi 1 dk önce");
+    expect(t).toContain("Kuyruktaki en eski haber 17 dk bekliyor");
+    expect(badgeOf(html, "Sorunlu")).toBe(1);
+    expect(t).toContain("Sistem durumu: Sorunlu");
+  });
+
+  it("a sub-minute wait says so instead of printing 0 dk", () => {
+    const v = buildStatusView(snap({ clustering: { ok: true, lastAt: ago(0.2), queueDepth: 3, queueOldestSec: 42 } }));
+    const t = text(render(v));
+    expect(t).toContain("Son küme güncellemesi 1 dakikadan kısa süre önce");
+    expect(t).toContain("Kuyruktaki en eski haber 1 dakikadan kısa süredir bekliyor");
+    expect(t).not.toContain("0 dk");
+    expect(t).toContain("Sistem durumu: Çalışıyor");
+  });
+
+  it("messages that are all in flight (depth above 0, nothing visible and waiting) read as nothing waiting", () => {
+    const v = buildStatusView(snap({ clustering: { ok: true, lastAt: ago(2), queueDepth: 4, queueOldestSec: 0 } }));
+    const t = text(render(v));
+    expect(t).toContain("Son küme güncellemesi 2 dk önce · kuyrukta bekleyen haber yok");
+    expect(t).not.toContain("Kuyruktaki en eski haber");
+  });
+
+  it("poison messages (a failing consumer archives each on its 4th read) print a count line, never the empty-queue line", () => {
+    const html = render(STATES["empty queue, 2 poison messages in the last hour"]!);
+    const t = text(html);
+    expect(t).toContain("Son 1 saatte işlenemeyen haber: 2");
+    expect(t).toContain("Son küme güncellemesi 63 dk önce");
+    expect(t).not.toContain("kuyrukta bekleyen haber yok");
+    expect(t).not.toContain("Kuyruktaki en eski haber");
+    expect(badgeOf(html, "Gecikmeli")).toBe(1);
+    expect(t).toContain("Sistem durumu: Gecikmeli");
+    // the line carries the count only: no queue name, message id or error text
+    expect(html).not.toMatch(/cluster_work|pgmq|msg_id|queue_|poison/i);
+  });
+
+  it("the poison line is worded from the window constant and the count", () => {
+    const one = buildStatusView(
+      snap({ clustering: { ok: true, lastAt: ago(2), queueDepth: 0, queueOldestSec: 0, queuePoisonRecent: 1 } }),
+    );
+    expect(text(render(one))).toContain(`Son ${STATUS_CLUSTER_POISON_WINDOW_HOURS} saatte işlenemeyen haber: 1`);
+    const many = buildStatusView(
+      snap({ clustering: { ok: true, lastAt: ago(2), queueDepth: 0, queueOldestSec: 0, queuePoisonRecent: 1234 } }),
+    );
+    expect(text(render(many))).toContain("Son 1 saatte işlenemeyen haber: 1234");
+  });
+
+  it("zero poison keeps the empty-queue line and prints no poison line", () => {
+    const v = buildStatusView(
+      snap({ clustering: { ok: true, lastAt: ago(63), queueDepth: 0, queueOldestSec: 0, queuePoisonRecent: 0 } }),
+    );
+    const t = text(render(v));
+    expect(t).toContain("Son küme güncellemesi 63 dk önce · kuyrukta bekleyen haber yok");
+    expect(t).not.toContain("işlenemeyen haber:");
+    expect(t).toContain("Sistem durumu: Çalışıyor");
+  });
+
+  it("poison on top of a backlog prints the wait and the poison count together", () => {
+    const v = buildStatusView(
+      snap({ clustering: { ok: true, lastAt: ago(1), queueDepth: 9, queueOldestSec: 400, queuePoisonRecent: 3 } }),
+    );
+    const t = text(render(v));
+    expect(t).toContain("Kuyruktaki en eski haber 7 dk bekliyor");
+    expect(t).toContain("Son 1 saatte işlenemeyen haber: 3");
+    expect(t).not.toContain("kuyrukta bekleyen haber yok");
+  });
+
+  it("a depth over the line with nothing visible waiting is Gecikmeli and says how many are queued, not that nothing waits", () => {
+    const v = buildStatusView(
+      snap({
+        clustering: { ok: true, lastAt: ago(1), queueDepth: STATUS_CLUSTER_QUEUE_DEPTH_WARN + 100, queueOldestSec: 0 },
+      }),
+    );
+    const html = render(v);
+    const t = text(html);
+    expect(t).toContain("Kuyrukta bekleyen haber sayısı: 400");
+    expect(t).not.toContain("kuyrukta bekleyen haber yok");
+    expect(t).not.toContain("Kuyruktaki en eski haber");
+    expect(badgeOf(html, "Gecikmeli")).toBe(1);
+    // at the line itself nothing changes
+    const flat = buildStatusView(
+      snap({ clustering: { ok: true, lastAt: ago(1), queueDepth: STATUS_CLUSTER_QUEUE_DEPTH_WARN, queueOldestSec: 0 } }),
+    );
+    expect(text(render(flat))).toContain("kuyrukta bekleyen haber yok");
+    expect(text(render(flat))).not.toContain("Kuyrukta bekleyen haber sayısı");
+  });
+
+  it("an unmeasured Kümeleme card never prints queue text", () => {
+    // the footnote names the rule on every page, so only the card lines are checked
+    const t = text(render(STATES["every section unknown"]!));
+    expect(t).not.toContain("kuyrukta bekleyen haber yok");
+    expect(t).not.toContain("Kuyruktaki en eski haber");
+    expect(t).toContain("Bu adımın durumu şu anda ölçülemedi.");
+  });
+
+  it("the legacy line is unchanged when the snapshot has no queue number", () => {
+    const t = text(render(STATES.calisiyor!));
+    expect(t).toContain("Son küme güncellemesi: 5 dakika önce");
+    expect(t).not.toContain("kuyrukta bekleyen haber yok");
+    expect(t).not.toContain("Kuyruktaki en eski haber");
+  });
+
+  it("prints no queue name, message id or payload", () => {
+    for (const name of ["idle night: old last update, empty queue", "queue backlog 400 s", "queue stalled 1000 s"]) {
+      expect(render(STATES[name]!), name).not.toMatch(/cluster_work|pgmq|msg_id|queue_/i);
+    }
+  });
+});
+
 describe("StatusView footnote", () => {
   it("is built from the threshold constants and states the refresh cadence", () => {
     const t = text(render(STATES.calisiyor!));
     expect(t).toContain(
-      `Sayılar yaklaşık dakikada bir yenilenir; süreler “Ölçüm” saatine göre hesaplanır. Haber toplamada ${STATUS_INGEST_WARN_MIN} dakikadan uzun sessizlik “Gecikmeli”, ${STATUS_INGEST_FAIL_MIN} dakikadan uzunu “Sorunlu” sayılır (kümeleme ${STATUS_CLUSTER_WARN_MIN}/${STATUS_CLUSTER_FAIL_MIN}, sınıflandırma ${STATUS_LABELLING_WARN_MIN}/${STATUS_LABELLING_FAIL_MIN} dakika). Bu sayfa yalnızca özet sayılar gösterir.`,
+      `Sayılar yaklaşık dakikada bir yenilenir; süreler “Ölçüm” saatine göre hesaplanır. Haber toplamada ${STATUS_INGEST_WARN_MIN} dakikadan uzun sessizlik “Gecikmeli”, ${STATUS_INGEST_FAIL_MIN} dakikadan uzunu “Sorunlu” sayılır (sınıflandırma ${STATUS_LABELLING_WARN_MIN}/${STATUS_LABELLING_FAIL_MIN} dakika; kümeleme: kuyrukta 5 dakikadan uzun bekleyen haber “Gecikmeli”, 15 dakikadan uzunu “Sorunlu”; kuyrukta ${STATUS_CLUSTER_QUEUE_DEPTH_WARN} haberden fazla birikmesi ya da son ${STATUS_CLUSTER_POISON_WINDOW_HOURS} saatte işlenemeyen haber de “Gecikmeli”). Bu sayfa yalnızca özet sayılar gösterir.`,
     );
+  });
+
+  it("states the clustering queue rule in minutes derived from the 300 s / 900 s constants", () => {
+    expect(STATUS_CLUSTER_QUEUE_WARN_SEC / 60).toBe(5);
+    expect(STATUS_CLUSTER_QUEUE_FAIL_SEC / 60).toBe(15);
+    const t = text(render(STATES.calisiyor!));
+    expect(t).toContain(
+      "kümeleme: kuyrukta 5 dakikadan uzun bekleyen haber “Gecikmeli”, 15 dakikadan uzunu “Sorunlu”",
+    );
+    // the old clustering clause (minutes since the last update) is gone from the page
+    expect(t).not.toContain("kümeleme 45/90");
+  });
+
+  it("states the poison rule and the depth line of the clustering rule", () => {
+    const t = text(render(STATES.calisiyor!));
+    expect(t).toContain("kuyrukta 300 haberden fazla birikmesi ya da son 1 saatte işlenemeyen haber de “Gecikmeli”");
   });
 });
 

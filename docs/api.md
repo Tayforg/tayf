@@ -33,7 +33,8 @@ Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "st
 ```
 
 - `unhealthy` (503): database or env failure, or a **read-path error** (`checks.readPath.error` present: the probe errored, was aborted, or timed out at 2s)
-- `degraded` (200): the read path **succeeded but took longer than 1500 ms** (`readPath.ok` false, no `error`), ingestion stale (>10 min since last article), clustering stale (>15 min), queue alarm (per-queue depth bound — `cluster_work` >500, `image_backfill` >100 — or oldest message >30 min), or a malformed `worker_metrics` row (NULL / non-numeric `queue_length`)
+- `degraded` (200): the read path **succeeded but took longer than 1500 ms** (`readPath.ok` false, no `error`), ingestion stale (>10 min since last article), clustering stale (>15 min) while `cluster_work` has pending messages, queue alarm (per-queue depth bound — `cluster_work` >500, `image_backfill` >100 — or oldest message >30 min), or a malformed `worker_metrics` row (NULL / non-numeric `queue_length`)
+- `clustering.idle`: when the newest `clusters.updated_at` is older than 15 min but `cluster_work` has no messages (a quiet night: nothing was waiting to be clustered), the probe reports `{ "ok": true, "lastClusterAgeSec": 3780, "idle": true }` and the status stays `healthy`. Every error path is unchanged: a clusters query error, no clusters at all, a failed or malformed `worker_metrics` read, and any pending `cluster_work` message keep a stale reading `degraded` (a stuck consumer leaves messages in the queue)
 - `401`: `Authorization` header present but token mismatch
 - `503` + error envelope: `Authorization` header present but `CRON_SECRET` not configured (FAIL-CLOSED)
 - `429`: anonymous rate limit exhausted. Canonical error envelope `{ "error": "Too many requests", "details": { "retryAfterMs": 640 } }` with `Retry-After: <whole seconds, >= 1>` and `Cache-Control: no-store`

@@ -24,10 +24,12 @@ import type { MediaDnaZone } from "@/types";
 // the trailing 72 h, not the full active-source count. This page lists
 // every active source — kind, last item, last HTTP status, 7-day rate, and
 // a silent flag — so the denominator is never just a number a reader has
-// to trust. The top-of-page totals below use the `all` tally (every active
-// source, matching every row this page lists) — the VOTING-only tally that
-// DenominatorNote uses elsewhere lives behind the `kind` column so a
-// reader can see which listed rows actually count toward a share (A-H1).
+// to trust. The zone cards and the totals sentence use the `all` tally (every
+// active source, matching every row this page lists) and say so; the VOTING-only
+// pair DenominatorNote prints elsewhere (e.g. 71/96) is printed here too, in the
+// same wording, above the totals and per zone, so the number every footnote
+// links to is on the page that is its evidence (h71-transparency-2). The `kind`
+// column still shows which listed rows count toward a share (A-H1).
 //
 // PERF-01: `rows` (the table's name/zone/kind/last-item/last-status/silent
 // columns) comes from the cheap `getSourceFeedStatuses()` core query so the
@@ -119,7 +121,7 @@ export function KaynakDurumBody({
   rows: NonNullable<Awaited<ReturnType<typeof getSourceFeedStatuses>>>;
   itemsPerDayPromise: ItemsPerDayPromise;
 }) {
-  const { all: summary } = summariseFeedStatus(rows);
+  const { all: summary, voting } = summariseFeedStatus(rows);
   const quarantinedCount = rows.filter((r) => r.quarantined).length;
 
   // Silent-first, then alphabetical (the underlying query already sorts by
@@ -136,6 +138,7 @@ export function KaynakDurumBody({
         {ZONE_ORDER.map((zone) => {
           const meta = ZONE_META[zone];
           const bucket = summary.byZone[zone];
+          const votingBucket = voting.byZone[zone];
           return (
             <div
               key={zone}
@@ -149,7 +152,23 @@ export function KaynakDurumBody({
                 <span className="font-mono text-foreground">
                   {bucket.delivering}
                 </span>{" "}
-                tanesi son 72 saatte yayın yaptı.
+                tanesi son 72 saatte yayın yaptı (toplayıcı ve niş dahil).
+              </p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {votingBucket.total > 0 ? (
+                  <>
+                    Paya sayılan:{" "}
+                    <span className="font-mono text-foreground">
+                      {votingBucket.delivering}
+                    </span>
+                    /
+                    <span className="font-mono text-foreground">
+                      {votingBucket.total}
+                    </span>
+                  </>
+                ) : (
+                  "Paya sayılan kaynak yok"
+                )}
               </p>
             </div>
           );
@@ -157,7 +176,29 @@ export function KaynakDurumBody({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Toplam <span className="font-mono">{summary.total}</span> aktif
+        {/* The denominator every "N/M kaynak" footnote shows: voting kinds
+            only, same wording and the same 0-total fallback as
+            DenominatorNote (A-M1), never a "0/0". */}
+        {voting.total > 0 ? (
+          <>
+            Paylar, yanlılık dağılımına sayılan ve son 72 saatte en az bir
+            haber veren <span className="font-mono">{voting.delivering}</span>/
+            <span className="font-mono">{voting.total}</span> kaynak üzerinden
+            hesaplanır (haber siteleri ve ajanslar; toplayıcı ve niş kaynaklar
+            paya sayılmaz).
+          </>
+        ) : (
+          <>
+            Paylar, yanlılık dağılımına sayılan ve son 72 saatte en az bir
+            haber veren kaynaklar üzerinden hesaplanır (haber siteleri ve
+            ajanslar; toplayıcı ve niş kaynaklar paya sayılmaz).
+          </>
+        )}
+      </p>
+
+      <p className="text-xs text-muted-foreground">
+        Toplayıcı ve niş kaynaklar dahil toplam{" "}
+        <span className="font-mono">{summary.total}</span> aktif
         kaynaktan <span className="font-mono">{summary.delivering}</span>{" "}
         tanesi son 72 saatte en az bir haber verdi;{" "}
         <span className="font-mono">{summary.silent}</span> kaynak bu

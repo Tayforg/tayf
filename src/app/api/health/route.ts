@@ -120,6 +120,11 @@ interface HealthChecks {
   clustering: {
     ok: boolean;
     lastClusterAgeSec?: number;
+    /** `true` when `clusters.updated_at` is older than the staleness bound but
+     * `cluster_work` is empty: nothing was waiting to be clustered, so the
+     * pipeline is idle rather than stuck (h71-transparency-3). `ok` is then
+     * `true`. Absent on every other outcome. */
+    idle?: boolean;
     error?: string;
   };
   queues: { ok: boolean; metrics?: QueueMetric[]; error?: string };
@@ -155,6 +160,11 @@ const STALE_INGESTION_THRESHOLD_SEC = 600; // 10 minutes — see AGENTS.md
 // not just the first time each cluster was inserted; under steady-state
 // traffic many minutes can pass with no NEW clusters formed even while
 // the consumer is happily ack-ing messages.
+// h71-transparency-3: a stale `updated_at` alone is NOT a stuck consumer. On a
+// quiet night nothing politika/son_dakika arrives, no cluster is touched, and
+// the age passes 15 minutes with nothing to cluster (two such gaps, 66 and 51
+// minutes, on 2026-11-08). The probe therefore only counts as stale while the
+// `cluster_work` queue has pending messages; see the queues step below.
 const STALE_CLUSTERING_THRESHOLD_SEC = 15 * 60;
 // B8: queue-depth alarms, sized per queue because consumer throughputs
 // differ by an order of magnitude. The cluster_work consumer batches 50
@@ -487,7 +497,10 @@ export const GET = withApiErrors(async (request: Request) => {
   //    visibility-timeout exhaustion, Deno panic, etc.) or (b) no
   //    articles are being ingested — and (b) is already reflected in the
   //    ingestion check above. We keep the two signals separate so an
-  //    alert can tell us WHICH side of the pipeline is broken.
+  //    alert can tell us WHICH side of the pipeline is broken. Case (b)
+  //    also covers a quiet stretch where articles arrive but none is
+  //    clusterable: the age check below is waived for it once the queues
+  //    probe shows cluster_work is empty (h71-transparency-3).
   const clusteringResult = await safeProbe(async () => {
     const supabase = createServerClient();
     const { data, error } = await supabase
@@ -606,6 +619,29 @@ export const GET = withApiErrors(async (request: Request) => {
     checks.queues = queuesResult.value;
   } else {
     checks.queues = { ok: false, error: queuesResult.error };
+  }
+
+  // 5b. Idle clustering (h71-transparency-3). `checks.clustering` above failed
+  //     ONLY on age (a reading, no `error`) and the cluster_work queue is
+  //     empty: nothing was waiting to be clustered, so the pipeline is idle,
+  //     not stuck (a stuck consumer leaves messages in the queue, and that
+  //     case keeps reporting degraded). Every error path stays as it was: a
+  //     clusters query error, "no clusters", a failed or malformed queues
+  //     probe (no `cluster_work` metric to read) and any non-empty queue all
+  //     leave `checks.clustering` untouched.
+  const clusterWork = checks.queues.metrics?.find((m) => m.queue === "cluster_work");
+  if (
+    !checks.clustering.ok &&
+    checks.clustering.error === undefined &&
+    checks.clustering.lastClusterAgeSec !== undefined &&
+    clusterWork !== undefined &&
+    clusterWork.queueLength === 0
+  ) {
+    checks.clustering = {
+      ok: true,
+      lastClusterAgeSec: checks.clustering.lastClusterAgeSec,
+      idle: true,
+    };
   }
 
   // 6. Sources check (ingest-health) — AUTHED CALLERS ONLY. Anonymous

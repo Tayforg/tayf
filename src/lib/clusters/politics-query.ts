@@ -15,6 +15,7 @@ import {
   createServerClient,
   type ReadProfile,
 } from "@/lib/supabase/server";
+import { WEEK_MS } from "@/lib/weekly/weekly-query";
 import type {
   BiasCategory,
   BiasDistribution,
@@ -66,6 +67,18 @@ const POLITICS_THRESHOLD = 0.6;
 // Üsküdar, 98 YSK ara seçim) sat just below the cut.
 const CANDIDATE_LIMIT = 200;
 const DISPLAY_LIMIT = 30;
+// h71-timebounds-1: the weekly digest keeps its top 5 (route.ts) out of the 40
+// biggest clusters of the trailing week. The politics gate drops few of them
+// (the week's biggest stories are political), so 40 leaves a wide margin over 5.
+// The read has two steps, ids first and then the embed for those ids only,
+// because one `order by article_count desc, id limit 40` over the embed made
+// Postgres join and aggregate the members of EVERY window cluster before it
+// could sort (EXPLAIN ANALYZE on prod, 2026-11-08: 1,700 clusters in the window,
+// about 8,300 article rows touched, 4,319 ms partly cold and 335 ms warm,
+// against the 8 s batch statement_timeout, and growing with the week's volume).
+// The ids-only select with the same filters took about 13 ms, and the embed then
+// reads only the 40 chosen clusters.
+const DIGEST_CANDIDATE_LIMIT = 40;
 
 // R1 importance score weights — see scoreCluster() below for the formula.
 // All terms are tuned so they fall in roughly the same numeric range
@@ -357,29 +370,11 @@ async function fetchPoliticsClusters(
     const scoringMembers = new WeakMap<ClusterBundle, EmbeddedArticle[]>();
 
     for (const c of clusterRows) {
-      // Flatten nested cluster_articles → articles into a plain member
-      // list, dropping any null joins (should not happen but defensive).
-      const members = flattenClusterMembers(c);
-      if (members.length === 0) continue;
-
-      // Politics majority filter — must match the old behaviour exactly
-      // (≥60% politika/son_dakika members). Runs on the RAW (pre-dedupe)
-      // member list, same as before extracting buildClusterBundle below —
-      // search-query.ts has no equivalent gate, it searches all clusters.
-      const hits = members.filter((m) => isPoliticsMember(m)).length;
-      if (hits / members.length < POLITICS_THRESHOLD) continue;
-
-      // h59-english-1: a cluster whose every member (voting or not) is an
-      // English-language outlet formed among English articles only, so it
-      // carries no Bağımsız or Muhalefet outlet because none could have matched
-      // it, not because none covered the event. It leaves the ranked list, the
-      // Son Dakika strip and every reader of this fetcher (feeds, digests,
-      // social). Search, source pages, cluster pages and sitemaps still list it.
-      // The embed has no slug, so the display name decides (sourceLang's
-      // name fallback). A member with no source row is unknown, not English.
-      if (isLanguageIsolatedCluster(members.map((m) => m.sources))) continue;
-
-      const { bundle, dedupedMembers } = buildClusterBundle(c, members, health, nowMs);
+      // Per-row admission (politics majority, English isolation) and bundle
+      // assembly live in admitPoliticsRow, shared with the weekly digest read.
+      const admitted = admitPoliticsRow(c, health, nowMs);
+      if (!admitted) continue;
+      const { bundle, dedupedMembers } = admitted;
 
       // Stash the deduped members on the bundle so the scorer below can
       // reach published_at + sources.bias without re-flattening. We use a
@@ -722,6 +717,46 @@ export function buildClusterBundle(
   return { bundle, dedupedMembers };
 }
 
+/**
+ * The per-row admission every politics reader of the `clusters` embed applies
+ * (h71-timebounds-1: extracted verbatim from fetchPoliticsClusters's loop, so
+ * the home feed and the weekly digest cannot drift apart): flatten the nested
+ * join, drop an empty cluster, drop a cluster below the politics majority,
+ * drop an English-only cluster, then assemble the ClusterBundle. `null` means
+ * "not admitted"; callers own which rows they fetch and how they rank them.
+ *
+ * `health` and `nowMs` are passed straight to buildClusterBundle (see there).
+ */
+function admitPoliticsRow(
+  c: EmbeddedClusterRow,
+  health: ZoneFeedHealth | null | undefined,
+  nowMs: number,
+): ClusterBundleBuildResult | null {
+  // Flatten nested cluster_articles → articles into a plain member
+  // list, dropping any null joins (should not happen but defensive).
+  const members = flattenClusterMembers(c);
+  if (members.length === 0) return null;
+
+  // Politics majority filter — must match the old behaviour exactly
+  // (≥60% politika/son_dakika members). Runs on the RAW (pre-dedupe)
+  // member list, same as before extracting buildClusterBundle above —
+  // search-query.ts has no equivalent gate, it searches all clusters.
+  const hits = members.filter((m) => isPoliticsMember(m)).length;
+  if (hits / members.length < POLITICS_THRESHOLD) return null;
+
+  // h59-english-1: a cluster whose every member (voting or not) is an
+  // English-language outlet formed among English articles only, so it
+  // carries no Bağımsız or Muhalefet outlet because none could have matched
+  // it, not because none covered the event. It leaves the ranked list, the
+  // Son Dakika strip and every reader of this fetcher (feeds, digests,
+  // social). Search, source pages, cluster pages and sitemaps still list it.
+  // The embed has no slug, so the display name decides (sourceLang's
+  // name fallback). A member with no source row is unknown, not English.
+  if (isLanguageIsolatedCluster(members.map((m) => m.sources))) return null;
+
+  return buildClusterBundle(c, members, health, nowMs);
+}
+
 // Distinct voting sources of a bundle (h59-homefeed-3). `bundle.sources` is
 // already deduped by source id; the Set keeps that true for any caller. A
 // missing kind counts as voting, exactly as isVotingKind decides it.
@@ -980,4 +1015,111 @@ export async function getPoliticsClusters(
     () => getPoliticsClustersCached(profile),
     () => fetchPoliticsClusters(profile),
   );
+}
+
+/**
+ * The weekly digest's content read (h71-timebounds-1). The digest used to take
+ * its top 5 from getPoliticsClusters, the home-feed pool of the 200 most
+ * recently UPDATED clusters (about the last 25 hours), so on a Saturday none of
+ * Monday to Thursday's biggest stories could be in a mail titled "Tayf
+ * Haftalık Bülteni". This reads the week itself, the same window /hafta uses:
+ * unarchived clusters with 2+ articles whose first_published is inside
+ * [nowMs - 7 days, nowMs], the DIGEST_CANDIDATE_LIMIT biggest by article_count
+ * (ties by id, so the order is deterministic).
+ *
+ * Two steps (see DIGEST_CANDIDATE_LIMIT for the measurement): step 1 selects
+ * only the ids with every filter, both orders and the limit; step 2 embeds
+ * exactly those ids. `.in()` returns rows in no order, so the JS sort below is
+ * load-bearing: article_count desc, then id asc.
+ *
+ * Every row goes through the same admission as the home feed
+ * (admitPoliticsRow: 60% politics majority, English isolation, bundle
+ * assembly), and the result is ordered by the row's article_count, then id, with
+ * no home score, velocity or decay: a week's biggest story must not lose to a
+ * fresher, smaller one. The callers slice what they render.
+ *
+ * Not cached (a weekly cron has no use for a cache entry) and "batch" only: the
+ * plain client keeps the 8 s statement_timeout instead of the 4 s reader cap.
+ * Feed health is not read (health `null` means no blindspot suppression): the
+ * digest renders title, summary, article count and spectrum of these bundles,
+ * never their blindspot flag. `nowMs` is the caller's one clock read; it bounds
+ * the window and ages the blindspot claim like fetchPoliticsClusters does.
+ *
+ * Each step is run at most twice. The home readers get a live retry from
+ * resolveCachedOrThrow when their cached attempt fails; this read has no cache,
+ * so it carries its own: a first error logs one warning and the identical query
+ * runs once more, live (no `use cache`, no last-good value). A weekly cron has
+ * no second chance for seven days.
+ *
+ * THROWS when a step errors twice, like fetchPoliticsClusters: the cron must
+ * not send a digest built from an empty read.
+ */
+export async function getWeeklyDigestClusters(opts: {
+  nowMs: number;
+  profile: "batch";
+}): Promise<ClusterBundle[]> {
+  const { nowMs } = opts;
+  const supabase = createServerClient();
+
+  // Step 1: ids only. The same filters the embedded read used to carry.
+  const idRows = await selectWithLiveRetry(() =>
+    supabase
+      .from("clusters")
+      .select("id")
+      .eq("is_archived", false)
+      .gte("article_count", 2)
+      .gte("first_published", new Date(nowMs - WEEK_MS).toISOString())
+      // Upper bound: a source-controlled future first_published must not pin a
+      // cluster into the digest (same guard as /hafta's window).
+      .lte("first_published", new Date(nowMs).toISOString())
+      // Unique per row: equal article_count tiers are broken by id.
+      .order("article_count", { ascending: false })
+      .order("id", { ascending: true })
+      .limit(DIGEST_CANDIDATE_LIMIT)
+      .returns<Array<{ id: string }>>(),
+  );
+  const candidateIds = (idRows ?? []).map((r) => r.id);
+  // Nothing in the window: no second chain, and never an empty `.in()`.
+  if (candidateIds.length === 0) return [];
+
+  // Step 2: the embed for exactly those clusters, in step 1's order.
+  const data = await selectWithLiveRetry(() =>
+    supabase
+      .from("clusters")
+      .select(CLUSTER_EMBED_SELECT)
+      .in("id", candidateIds)
+      .returns<EmbeddedClusterRow[]>(),
+  );
+
+  const admitted: Array<{ bundle: ClusterBundle; articleCount: number; id: string }> = [];
+  for (const c of data ?? []) {
+    const row = admitPoliticsRow(c, null, nowMs);
+    if (!row) continue;
+    admitted.push({ bundle: row.bundle, articleCount: c.article_count, id: c.id });
+  }
+
+  // `.in()` gives no order, so this sort IS the contract: article_count desc,
+  // then id asc, for any reader of the result.
+  return admitted
+    .sort((a, b) => b.articleCount - a.articleCount || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((entry) => entry.bundle);
+}
+
+/**
+ * Runs one Supabase select, and once more when the first attempt returns an
+ * error (ts-2): one `console.warn` line, then the identical query again, live.
+ * `build` is called per attempt so each attempt gets a fresh query builder.
+ * Throws only when the second attempt also errors, with that second error.
+ */
+async function selectWithLiveRetry<T>(
+  build: () => PromiseLike<{ data: T | null; error: { message: string } | null }>,
+): Promise<T | null> {
+  const first = await build();
+  if (!first.error) return first.data;
+  console.warn(`[clusters] weekly digest select failed, retrying live: ${first.error.message}`);
+  const second = await build();
+  if (second.error) {
+    throw new Error(`[clusters] weekly digest select error: ${second.error.message}`);
+  }
+  return second.data;
 }
