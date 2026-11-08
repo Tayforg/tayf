@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
+/** Escapes every RegExp metacharacter, backslash included. */
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // ---------------------------------------------------------------------------
 // Runbook guard for hunt 63, finding h63-clusterintegrity-1.
 //
@@ -298,7 +301,7 @@ describe("h63 runbook: the apply commands", () => {
   it("the last command runs from the end of the dated chunks up to tomorrow (a placeholder), so no day is left out", () => {
     const dated = commands().filter((c) => c.apply);
     const lastTo = (dated[dated.length - 1] as Cmd).to;
-    expect(section).toMatch(new RegExp(`${SCRIPT.replace(/\./g, "\\.")} --from ${lastTo} --to <tomorrow[^>]*> --apply`));
+    expect(section).toMatch(new RegExp(`${escapeRegExp(SCRIPT)} --from ${lastTo} --to <tomorrow[^>]*> --apply`));
   });
 
   it("dry-runs the live range (read-only) before the first apply, so the live pages are warmed and the October pair is counted", () => {
