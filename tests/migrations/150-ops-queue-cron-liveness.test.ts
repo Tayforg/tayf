@@ -1099,9 +1099,9 @@ describe("150 docs/ops-heartbeat.md", () => {
     expect(title).toContain("145, 150");
     expect(doc).toContain("migrations 077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150");
     // 157 appended a twentieth row and 161 a twenty-first, and they moved these counts (tests/migrations/161-image-coverage-by-source.test.ts pins 21)
-    expect(doc).toMatch(/(19|20|21) fixed-order rows/);
+    expect(doc).toMatch(/(19|20|21|22) fixed-order rows/);
     expect(doc).not.toContain("17 fixed-order rows");
-    expect(doc).toMatch(/always returns exactly\n(19|20|21) rows/);
+    expect(doc).toMatch(/always returns exactly\n(19|20|21|22) rows/);
   });
 
   it("the table has rows 18 and 19 with their thresholds and baselines", () => {

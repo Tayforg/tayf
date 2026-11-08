@@ -5,6 +5,7 @@ import {
 } from "@/lib/feeds/zone-line";
 import { withUtm } from "@/lib/feeds/rss-builder";
 import { ZONE_META } from "@/lib/bias/config";
+import { cutAtWord } from "@/lib/seo/og-title";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 // Pure text composition for the owned-channels auto-poster. Telegram gets
@@ -103,15 +104,32 @@ function countZonesCovered(counts: Record<MediaDnaZone, number>): number {
   return (Object.values(counts) as number[]).filter((c) => c > 0).length;
 }
 
-/** Truncates `title` to fit within `maxGraphemes` total (title + '…' +
- * separator budget is the caller's job); uses Intl.Segmenter('tr',
- * {granularity: 'grapheme'}) so multi-codepoint emoji and Turkish
- * combining marks are never split mid-grapheme. */
-function truncateGraphemes(text: string, maxGraphemes: number): string {
+/** Cuts `text` to fit within `maxGraphemes` total (title + '…' + separator
+ * budget is the caller's job) at a word boundary, never inside a word
+ * (h64-ogcards-2: cutAtWord, as the OG card, the kart and the embed cut).
+ *
+ * cutAtWord counts code points, and a text of at most `max` code points never
+ * has more than `max` graphemes, so the limit holds. The cut text is then
+ * checked against Intl.Segmenter('tr', {granularity: 'grapheme'}): a word cut
+ * lands on a blank, but the hard cut for a blank-free tail can fall inside a
+ * multi-codepoint emoji, a flag or a letter with combining marks, and that is
+ * pulled back to the whole grapheme before it. */
+function cutAtWordWholeGraphemes(text: string, maxGraphemes: number): string {
+  const cut = cutAtWord(text, maxGraphemes);
+  if (cut === text) return text;
+  // cutAtWord keeps a prefix of `text` and appends one "…" (a single code unit).
+  const keptLength = cut.length - 1;
   const segmenter = new Intl.Segmenter("tr", { granularity: "grapheme" });
-  const graphemes = Array.from(segmenter.segment(text), (s) => s.segment);
-  if (graphemes.length <= maxGraphemes) return text;
-  return graphemes.slice(0, Math.max(0, maxGraphemes - 1)).join("") + "…";
+  let boundary = 0;
+  for (const { index } of segmenter.segment(text)) {
+    if (index > keptLength) break;
+    boundary = index;
+  }
+  if (boundary === keptLength) return cut;
+  // Not a new fixed-count cut: cutAtWord's own cut, moved back to the whole
+  // grapheme before it (`boundary` is always under `keptLength` here).
+  const whole = text.slice(0, boundary);
+  return `${whole}…`;
 }
 
 function graphemeLength(text: string): number {
@@ -136,13 +154,13 @@ function buildBlueskyText(lines: string[], titleIndex: number): string {
   const titleBudget = Math.max(0, BLUESKY_MAX_GRAPHEMES - othersLength);
 
   candidateLines = candidateLines.map((line, i) =>
-    i === titleIndex ? truncateGraphemes(line, titleBudget) : line,
+    i === titleIndex ? cutAtWordWholeGraphemes(line, titleBudget) : line,
   );
   text = candidateLines.join("\n");
 
   // Final safety clamp in case rounding still overshoots.
   if (graphemeLength(text) > BLUESKY_MAX_GRAPHEMES) {
-    text = truncateGraphemes(text, BLUESKY_MAX_GRAPHEMES);
+    text = cutAtWordWholeGraphemes(text, BLUESKY_MAX_GRAPHEMES);
   }
   return text;
 }

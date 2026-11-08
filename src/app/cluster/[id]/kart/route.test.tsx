@@ -630,6 +630,53 @@ describe("GET /cluster/[id]/kart", () => {
     expect(text).not.toContain("B".repeat(111));
   });
 
+  // h64-ogcards-2. The İktidar line of cluster 790d2354-48f1-434b-815d-0ba8f4f84e74
+  // read '...32 binden fazla bu…' (a hard cut inside 'buluntu'), and the d26a31d4
+  // title '...hesaba çekilme…' (a noun, for the stored 'çekilmeli'). Both lines
+  // are cut at a word now. Titles pinned as stored on 2026-11-08.
+  it("cuts a long headline at a word, never inside one: '…32 binden fazla…'", async () => {
+    const headline =
+      "Bakan Ersoy, Kültür ve Turizm Bakanlığı'nın 2027 yılı bütçesini sundu | Geleceğe miras ile 32 binden fazla buluntu gün yüzüne çıkarıldı";
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, headline)]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("32 binden fazla…");
+    expect(text).not.toContain("bu…");
+    expect(text).not.toContain("buluntu");
+  });
+
+  it("cuts a long title at a word, never inside one: '…de hesaba…'", async () => {
+    const title =
+      "AKP’li isim Fatma Betül’ün sevk yazısındaki gerekçeye dikkat çekti: ‘Biliniyordu… İhmali veya kastı olan kamu görevlileri de hesaba çekilmeli’";
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, GOV_TITLE)], { title_tr: title }),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("kamu görevlileri de hesaba…");
+    expect(text).not.toContain("çekilme");
+  });
+
+  it("trims a padded headline before it is cut", async () => {
+    const padded = `   ${"kelime ".repeat(40)}   `;
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, padded)]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    // HEADLINE_MAX is 110: 15 whole words (104 characters) fit before '…'.
+    expect(text).toContain(`${"kelime ".repeat(14)}kelime…`);
+    expect(text).not.toContain("kelime  ");
+  });
+
   it("renders at 1080×1920 with a cacheable inline-PNG disposition", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)]),

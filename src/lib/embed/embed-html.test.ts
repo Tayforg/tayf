@@ -14,6 +14,7 @@ import {
   renderEmbedMessageHtml,
   safeEmbedTitle,
 } from "./embed-html";
+import { escapeHtml } from "./embed-snippet";
 
 const ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
 const ORIGIN = "https://tayf.test";
@@ -155,6 +156,66 @@ describe("safeEmbedTitle", () => {
 
   it.each(["a", "2025", "Gol!", "R&D"])("keeps the short real headline %j", (raw) => {
     expect(safeEmbedTitle(raw, "yedek")).toBe(raw);
+  });
+});
+
+// h64-ogcards-2. The embed heading and the oEmbed title cut at a hard 139 code
+// points ('…hesaba çekilme…', which turns the stored 'çekilmeli' into a noun).
+// safeEmbedTitle() now cuts like the OG card: at a word, never inside one. The
+// title is the real neutral title of cluster d26a31d4-5627-49b4-bef0-e68d60eccde5
+// (142 code points, pinned because the cluster gets re-titled).
+const NEUTRAL_D26A31D4 =
+  "AKP’li isim Fatma Betül’ün sevk yazısındaki gerekçeye dikkat çekti: ‘Biliniyordu… İhmali veya kastı olan kamu görevlileri de hesaba çekilmeli’";
+
+describe("safeEmbedTitle word-boundary cut", () => {
+  it("cuts the d26a31d4 neutral title after 'hesaba', not inside 'çekilmeli'", () => {
+    expect(Array.from(NEUTRAL_D26A31D4).length).toBeGreaterThan(EMBED_TITLE_MAX);
+    const out = safeEmbedTitle(NEUTRAL_D26A31D4, "yedek");
+    expect(out.endsWith("hesaba…")).toBe(true);
+    expect(out).not.toContain("çekilme");
+    expect(Array.from(out).length).toBeLessThanOrEqual(EMBED_TITLE_MAX);
+  });
+
+  it("trims first, then cuts at a word (surrounding whitespace never eats the budget)", () => {
+    const out = safeEmbedTitle(`   ${NEUTRAL_D26A31D4}  \n`, "yedek");
+    expect(out.endsWith("hesaba…")).toBe(true);
+    expect(out.startsWith("AKP’li")).toBe(true);
+  });
+
+  it("keeps the KVKK fallback: a rejected long title is still replaced, never cut", () => {
+    expect(safeEmbedTitle(`17 yaşındaki genç tutuklandı ${"kelime ".repeat(40)}`, "yedek")).toBe("yedek");
+    expect(safeEmbedTitle("SANIK hakkında karar", "yedek")).toBe("yedek");
+  });
+
+  it("keeps the order of the filters: empty -> fallback, contentless -> 'Haber', then the cut", () => {
+    expect(safeEmbedTitle("   ", "yedek")).toBe("yedek");
+    expect(safeEmbedTitle("&nbsp", "yedek")).toBe("Haber");
+    expect(safeEmbedTitle("…", "yedek")).toBe("Haber");
+  });
+
+  it("a blank-free title is still a hard cut of exactly EMBED_TITLE_MAX code points", () => {
+    const out = safeEmbedTitle("u".repeat(500), "yedek");
+    expect(out).toBe(`${"u".repeat(EMBED_TITLE_MAX - 1)}…`);
+  });
+
+  it("cuts first and escapes after: the raw characters are counted and no entity is split", () => {
+    // 'a&' x 100 has no blank: a hard cut at 139 raw characters (the escaped form
+    // is far longer). Escaping the cut text keeps every '&amp;' whole.
+    const m = buildEmbedModel(detail({ title: "a&".repeat(100) }), ORIGIN);
+    expect(Array.from(m.title)).toHaveLength(EMBED_TITLE_MAX);
+    const html = renderEmbedHtml(m);
+    expect(html).toContain(`<h1>${escapeHtml(m.title)}</h1>`);
+    // Every '&' in the heading starts a whole '&amp;': nothing is cut mid-entity.
+    const h1 = /<h1>([\s\S]*?)<\/h1>/.exec(html)?.[1] ?? "";
+    expect(h1.replace(/&amp;/g, "")).not.toContain("&");
+    expect(h1.endsWith("…")).toBe(true);
+  });
+
+  it("the framed heading and the document <title> both show the word cut", () => {
+    const m = buildEmbedModel(detail({ title: NEUTRAL_D26A31D4 }), ORIGIN);
+    const html = renderEmbedHtml(m);
+    expect(html).toContain("hesaba…</h1>");
+    expect(html).toContain("hesaba… · Tayf</title>");
   });
 });
 

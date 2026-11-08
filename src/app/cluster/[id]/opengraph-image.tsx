@@ -14,11 +14,13 @@ import {
 import { displayHeadline } from "@/lib/embed/embed-html";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { formatPctTr } from "@/lib/format/number-tr";
+import { ogSpectrumState } from "@/lib/seo/og-spectrum";
 import {
   OG_TITLE_LINE_HEIGHT,
   OG_TITLE_MAX_LINES,
   clampOgTitle,
 } from "@/lib/seo/og-title";
+import { partitionByVote } from "@/lib/sources/kind";
 import type { MediaDnaZone } from "@/types";
 
 // File-route OG card for /cluster/[id].
@@ -95,6 +97,13 @@ const ZONE_STYLE: Record<
   bagimsiz: { label: "Bağımsız", bar: "#a1a1aa", text: "#e4e4e7" },
   muhalefet: { label: "Muhalefet", bar: "#10b981", text: "#a7f3d0" },
 };
+
+// Outer height of a zone tile in px, border and padding included: 1 px border +
+// 16 px padding around a 22 px label row, an 8 px gap and a 32 px value row,
+// measured off the rendered card (y 454..566, sitting on the 64 px bottom
+// padding). The empty-spectrum box below takes the same height so the canvas
+// does not move; opengraph-image.render.test.tsx pins the box to the tiles' rows.
+const OG_ZONE_TILE_HEIGHT = 112;
 
 export default async function Image({ params }: ImageProps) {
   const { id } = await params;
@@ -190,6 +199,19 @@ export default async function Image({ params }: ImageProps) {
   // Guard against div-by-zero on a freshly clustered row whose
   // bias_distribution hasn't been backfilled yet.
   const safeTotal = zoneTotal > 0 ? zoneTotal : 1;
+
+  // h64-ogcards-3: with nothing voting the bar and the three "%0 · 0" tiles say
+  // nothing, so the card prints one line where the tiles were, in the words the
+  // cluster page already uses. The non-voting count is the page's own partition
+  // (`partitionByVote`, as `nonVotingMembers` in page.tsx), one per source, and
+  // only when no voting source is among the members: the page prints "yalnızca
+  // toplayıcı / niş kaynaklar yazdı" only then (`spectrumCaption`), and so does
+  // this card. The pill (`sourceCountHead`) is not touched.
+  const { voting: votingMembers, nonVoting: nonVotingMembers } =
+    partitionByVote(members);
+  const nonVotingSourceCount =
+    votingMembers.length === 0 ? uniqueSources(nonVotingMembers).length : 0;
+  const spectrum = ogSpectrumState(zones, nonVotingSourceCount);
 
   // Blindspot ribbon zone + share: prefer the reported `blindspot_side`; a
   // freshly-flagged row without one yet falls back to whichever zone
@@ -396,34 +418,36 @@ export default async function Image({ params }: ImageProps) {
             width: "100%",
           }}
         >
-          <div
-            style={{
-              display: "flex",
-              width: "100%",
-              height: 18,
-              borderRadius: 999,
-              overflow: "hidden",
-              background: "rgba(250,250,250,0.08)",
-            }}
-          >
-            {(["iktidar", "bagimsiz", "muhalefet"] as MediaDnaZone[]).map(
-              (zone) => {
-                const pct = (zones[zone] / safeTotal) * 100;
-                if (pct <= 0) return null;
-                return (
-                  <div
-                    key={zone}
-                    style={{
-                      display: "flex",
-                      width: `${pct}%`,
-                      height: "100%",
-                      background: ZONE_STYLE[zone].bar,
-                    }}
-                  />
-                );
-              },
-            )}
-          </div>
+          {spectrum.kind === "tiles" && (
+            <div
+              style={{
+                display: "flex",
+                width: "100%",
+                height: 18,
+                borderRadius: 999,
+                overflow: "hidden",
+                background: "rgba(250,250,250,0.08)",
+              }}
+            >
+              {(["iktidar", "bagimsiz", "muhalefet"] as MediaDnaZone[]).map(
+                (zone) => {
+                  const pct = (zones[zone] / safeTotal) * 100;
+                  if (pct <= 0) return null;
+                  return (
+                    <div
+                      key={zone}
+                      style={{
+                        display: "flex",
+                        width: `${pct}%`,
+                        height: "100%",
+                        background: ZONE_STYLE[zone].bar,
+                      }}
+                    />
+                  );
+                },
+              )}
+            </div>
+          )}
           <div
             style={{
               display: "flex",
@@ -443,75 +467,98 @@ export default async function Image({ params }: ImageProps) {
               tayfhaber.com/metodoloji
             </div>
           </div>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginTop: 12,
-              gap: 16,
-            }}
-          >
-            {(["iktidar", "bagimsiz", "muhalefet"] as MediaDnaZone[]).map(
-              (zone) => {
-                const pct = percents[zone];
-                return (
-                  <div
-                    key={zone}
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      flex: 1,
-                      padding: "16px 20px",
-                      borderRadius: 12,
-                      background: "rgba(250,250,250,0.05)",
-                      border: "1px solid rgba(250,250,250,0.12)",
-                    }}
-                  >
+          {spectrum.kind === "tiles" ? (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginTop: 12,
+                gap: 16,
+              }}
+            >
+              {(["iktidar", "bagimsiz", "muhalefet"] as MediaDnaZone[]).map(
+                (zone) => {
+                  const pct = percents[zone];
+                  return (
                     <div
+                      key={zone}
                       style={{
                         display: "flex",
-                        alignItems: "center",
-                        gap: 10,
+                        flexDirection: "column",
+                        flex: 1,
+                        padding: "16px 20px",
+                        borderRadius: 12,
+                        background: "rgba(250,250,250,0.05)",
+                        border: "1px solid rgba(250,250,250,0.12)",
                       }}
                     >
                       <div
                         style={{
                           display: "flex",
-                          width: 12,
-                          height: 12,
-                          borderRadius: 999,
-                          background: ZONE_STYLE[zone].bar,
-                        }}
-                      />
-                      <div
-                        style={{
-                          display: "flex",
-                          fontSize: 22,
-                          fontWeight: 600,
-                          color: ZONE_STYLE[zone].text,
+                          alignItems: "center",
+                          gap: 10,
                         }}
                       >
-                        {ZONE_STYLE[zone].label}
+                        <div
+                          style={{
+                            display: "flex",
+                            width: 12,
+                            height: 12,
+                            borderRadius: 999,
+                            background: ZONE_STYLE[zone].bar,
+                          }}
+                        />
+                        <div
+                          style={{
+                            display: "flex",
+                            fontSize: 22,
+                            fontWeight: 600,
+                            color: ZONE_STYLE[zone].text,
+                          }}
+                        >
+                          {ZONE_STYLE[zone].label}
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          fontSize: 32,
+                          fontWeight: 800,
+                          color: "#fafafa",
+                          marginTop: 8,
+                        }}
+                      >
+                        {/* A single string child (not "{pct}% · {n}" fragments)
+                            keeps the tile one text node for Satori. */}
+                        {`${formatPctTr(pct)} · ${zones[zone]}`}
                       </div>
                     </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        fontSize: 32,
-                        fontWeight: 800,
-                        color: "#fafafa",
-                        marginTop: 8,
-                      }}
-                    >
-                      {/* A single string child (not "{pct}% · {n}" fragments)
-                          keeps the tile one text node for Satori. */}
-                      {`${formatPctTr(pct)} · ${zones[zone]}`}
-                    </div>
-                  </div>
-                );
-              },
-            )}
-          </div>
+                  );
+                },
+              )}
+            </div>
+          ) : (
+            <div
+              style={{
+                display: "flex",
+                flexShrink: 0,
+                alignItems: "center",
+                width: "100%",
+                height: OG_ZONE_TILE_HEIGHT,
+                marginTop: 12,
+                padding: "16px 20px",
+                borderRadius: 12,
+                background: "rgba(250,250,250,0.05)",
+                border: "1px solid rgba(250,250,250,0.12)",
+                fontSize: 22,
+                fontWeight: 600,
+                color: "#e4e4e7",
+              }}
+            >
+              {/* A single string child keeps the box one text node for Satori. */}
+              {spectrum.line}
+            </div>
+          )}
         </div>
       </div>
     ),

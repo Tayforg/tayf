@@ -14,6 +14,11 @@
 // Pure: no I/O, no Date, no regex over the title. Every count is in code points
 // (an emoji is one), and the scan reads at most OG_TITLE_MAX_CHARS.plain + 1 of
 // them, so a megabyte of input costs the same as a sentence.
+//
+// Hunt 64, h64-ogcards-2. The cut itself is cutAtWord(), exported: the Manşet
+// Kartı, the embed / oEmbed title and the Bluesky post cut a headline at a hard
+// count ('…32 binden fazla bu…', '…hesaba çekilme…') while only this card cut at
+// a word. Every share surface now calls it (tests/guards/no-hard-title-cut).
 
 /** Longest headline, in code points, including the closing "…". */
 export const OG_TITLE_MAX_CHARS = { plain: 130, ribbon: 95 } as const;
@@ -81,14 +86,70 @@ function fontSizeFor(codePoints: number, ribbon: boolean): number {
 }
 
 /**
+ * Cuts `text` to at most `max` code points at a word boundary, with "…".
+ *
+ * Text of `max` code points or fewer is returned unchanged (the same string). A
+ * longer one keeps its first `max - 1` code points, trimmed back to the last
+ * blank among them (or to the end of that run when the next character is a
+ * blank); trailing blanks and `, ; : - – —` are dropped and "…" is appended, so
+ * the result is never longer than `max`. When the only blank is earlier than 60%
+ * of `max` (one very long word) the cut is a hard cut at `max - 1` code points
+ * instead. Counts are in code points, so a surrogate pair is never split.
+ *
+ * A `max` under 1 (or NaN) leaves nothing, not even the "…". A non-integer `max`
+ * is floored. The caller trims: leading and trailing blanks of the input count
+ * towards `max`.
+ *
+ * Scans at most `max + 1` code points, so the cost does not grow with the input.
+ */
+export function cutAtWord(text: string, max: number): string {
+  if (!(max >= 1)) return "";
+  const cap = Math.floor(max);
+
+  // One pass over at most cap + 1 code points (`cap` is `max` floored, so the
+  // `===` tests below can match). `keep` is the UTF-16 length of the first
+  // cap - 1 code points; `blankAt` is the UTF-16 offset and `blankIndex` the code
+  // point index of the last blank among them; `nextIsBlank` says whether the code
+  // point right after them (index cap - 1) is a blank.
+  let count = 0;
+  let units = 0;
+  let keep = 0;
+  let blankAt = -1;
+  let blankIndex = -1;
+  let nextIsBlank = false;
+  let tooLong = false;
+  for (const ch of text) {
+    if (count === cap) {
+      tooLong = true;
+      break;
+    }
+    if (count === cap - 1) {
+      keep = units;
+      nextIsBlank = isBlank(ch);
+    } else if (isBlank(ch)) {
+      blankAt = units;
+      blankIndex = count;
+    }
+    units += ch.length;
+    count++;
+  }
+
+  if (!tooLong) return text;
+
+  let cut = keep;
+  if (!nextIsBlank && blankAt >= 0 && blankIndex * 100 >= cap * WORD_CUT_MIN_SHARE_PERCENT) {
+    cut = blankAt;
+  }
+  const head = text.slice(0, cut);
+  const body = stripTail(head) ?? head;
+  return body + ELLIPSIS;
+}
+
+/**
  * The text and font size for the card's headline.
  *
- * A title within the cap is returned unchanged. A longer one is cut: the first
- * `max - 1` code points are kept and trimmed back to the last blank among them
- * (or to the end of that run when the next character is a blank), trailing
- * blanks and `, ; : - – —` are dropped, and "…" is appended, so the result is
- * never longer than `max`. When the only blank is earlier than 60% of the cap
- * (one very long word) the cut is a hard cut at `max - 1` code points instead.
+ * A title within the cap is returned unchanged; a longer one is cut by
+ * cutAtWord() at the cap (130 code points, 95 under the blindspot ribbon).
  *
  * The size comes from the length of the text that is finally drawn: up to 80
  * code points 64 px (56 px under the ribbon), up to 100 52 px, beyond that 44 px.
@@ -101,42 +162,8 @@ export function clampOgTitle(
   const ribbon = opts.ribbon;
   const max = ribbon ? OG_TITLE_MAX_CHARS.ribbon : OG_TITLE_MAX_CHARS.plain;
   const source = typeof title === "string" ? title : "";
-
-  // One pass over at most max + 1 code points. `keep` is the UTF-16 length of the
-  // first max - 1 code points; `blankAt` is the UTF-16 offset and `blankIndex` the
-  // code point index of the last blank among them; `nextIsBlank` says whether the
-  // code point right after them (index max - 1) is a blank.
-  let count = 0;
-  let units = 0;
-  let keep = 0;
-  let blankAt = -1;
-  let blankIndex = -1;
-  let nextIsBlank = false;
-  let tooLong = false;
-  for (const ch of source) {
-    if (count === max) {
-      tooLong = true;
-      break;
-    }
-    if (count === max - 1) {
-      keep = units;
-      nextIsBlank = isBlank(ch);
-    } else if (isBlank(ch)) {
-      blankAt = units;
-      blankIndex = count;
-    }
-    units += ch.length;
-    count++;
-  }
-
-  if (!tooLong) return { text: source, fontSize: fontSizeFor(count, ribbon) };
-
-  let cut = keep;
-  if (!nextIsBlank && blankAt >= 0 && blankIndex * 100 >= max * WORD_CUT_MIN_SHARE_PERCENT) {
-    cut = blankAt;
-  }
-  const head = source.slice(0, cut);
-  const body = stripTail(head) ?? head;
-  const text = body + ELLIPSIS;
-  return { text, fontSize: fontSizeFor(Array.from(body).length + 1, ribbon) };
+  // The cut text is at most `max` code points, so counting it is cheap whatever
+  // the length of the source.
+  const text = cutAtWord(source, max);
+  return { text, fontSize: fontSizeFor(Array.from(text).length, ribbon) };
 }

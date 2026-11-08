@@ -588,10 +588,11 @@ describe("161 docs/ops-heartbeat.md", () => {
   });
 
   it("counts 21 rows everywhere it counts rows, and credits row 21 to migration 161", () => {
-    expect(doc).toContain("21 fixed-order rows");
+    // 173 appended a twenty-second row and moved these counts (tests/migrations/173-ops-sources-dark-persistent.test.ts pins 22)
+    expect(doc).toMatch(/(21|22) fixed-order rows/);
     expect(doc).toContain("the twenty-first by migration 161");
-    expect(doc).toContain("on top of the 21:");
-    expect(doc).toContain("exactly\n21 rows.");
+    expect(doc).toMatch(/on top of the (21|22):/);
+    expect(doc).toMatch(/exactly\n(21|22) rows\./);
     expect(doc).not.toContain("20 fixed-order rows");
   });
 

@@ -11,6 +11,7 @@ import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { cutAtWord } from "@/lib/seo/og-title";
 import {
   ENGLISH_ONLY_KART_EMPTY_ZONE,
   isLanguageIsolatedCluster,
@@ -85,15 +86,13 @@ const WARN = "#fbbf24";
 const TITLE_MAX = 140;
 const HEADLINE_MAX = 110;
 
-/** Hard character cap with an ellipsis — Satori has no line clamping, so
- *  overflow has to be prevented in the data, not in CSS. Slices by code
- *  point (not UTF-16 code unit) so a cut at the cap cannot emit a lone
+/** Character cap with an ellipsis — Satori has no line clamping, so
+ *  overflow has to be prevented in the data, not in CSS. The cut is
+ *  cutAtWord's (h64-ogcards-2): at a word boundary, never inside one
+ *  ('…32 binden fazla bu…'), counted in code points so it cannot emit a lone
  *  surrogate into the SVG Satori rasterises. */
 function truncate(value: string, max: number): string {
-  const trimmed = value.trim();
-  const points = Array.from(trimmed);
-  if (points.length <= max) return trimmed;
-  return `${points.slice(0, max - 1).join("")}…`;
+  return cutAtWord(value.trim(), max);
 }
 
 /** "3 / 12 kaynak", or a wording-only form whenever the fraction would be

@@ -566,9 +566,9 @@ describe("157 docs/ops-heartbeat.md", () => {
     expect(doc.slice(0, doc.indexOf("\n"))).toContain("150, 157");
     expect(doc).toContain("migrations 077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150 and 157");
     // 161 appended a twenty-first row and moved these counts (tests/migrations/161-image-coverage-by-source.test.ts pins 21)
-    expect(doc).toMatch(/(20|21) fixed-order rows/);
+    expect(doc).toMatch(/(20|21|22) fixed-order rows/);
     expect(doc).not.toContain("19 fixed-order rows");
-    expect(doc).toMatch(/always returns exactly\n(20|21) rows/);
+    expect(doc).toMatch(/always returns exactly\n(20|21|22) rows/);
   });
 
   it("the table has row 20 after row 19, with its predicate, thresholds and the readout", () => {

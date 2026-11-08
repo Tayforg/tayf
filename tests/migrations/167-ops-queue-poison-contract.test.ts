@@ -667,7 +667,8 @@ describe("167 docs/ops-heartbeat.md", () => {
   });
 
   it("keeps the 21-row count of 161", () => {
-    expect(doc).toContain("21 fixed-order rows");
+    // 173 appended a twenty-second row and moved the count (tests/migrations/173-ops-sources-dark-persistent.test.ts pins 22)
+    expect(doc).toMatch(/(21|22) fixed-order rows/);
     expect(doc).toContain("the twenty-first by migration 161");
   });
 });

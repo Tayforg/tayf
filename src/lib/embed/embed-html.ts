@@ -9,6 +9,7 @@ import {
 import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
+import { cutAtWord } from "@/lib/seo/og-title";
 import type { MediaDnaZone } from "@/types";
 
 import { isContentlessTitle } from "../../../supabase/functions/_shared/rss/entities";
@@ -93,17 +94,18 @@ export function displayHeadline(raw: string): string {
  * here (the rozet badge shows no titles at all). An empty title or one the
  * filter rejects becomes `fallback`; a title with no letter or digit
  * ('&nbsp', '-') becomes NO_HEADLINE_TITLE rather than an empty heading; an
- * accepted one is trimmed and cut BY CODE POINT (never through a surrogate
- * pair) to EMBED_TITLE_MAX characters including the ellipsis.
+ * accepted one is trimmed and cut by cutAtWord (h64-ogcards-2) to
+ * EMBED_TITLE_MAX code points including the ellipsis: at a word, never inside
+ * one ('…hesaba çekilme…' for the stored 'çekilmeli'), never through a
+ * surrogate pair. The cut comes first and the escaping after (renderEmbedHtml),
+ * so the raw characters are counted and no entity is ever split.
  */
 export function safeEmbedTitle(raw: string, fallback: string): string {
   const trimmed = raw.trim();
   if (trimmed === "") return fallback;
   if (isContentlessTitle(trimmed)) return NO_HEADLINE_TITLE;
   if (!isGameEligibleTitle(trimmed)) return fallback;
-  const points = Array.from(trimmed);
-  if (points.length <= EMBED_TITLE_MAX) return trimmed;
-  return `${points.slice(0, EMBED_TITLE_MAX - 1).join("").trimEnd()}…`;
+  return cutAtWord(trimmed, EMBED_TITLE_MAX);
 }
 
 function ribbonOf(detail: ClusterDetail): string | null {
