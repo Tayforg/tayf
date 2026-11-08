@@ -9,12 +9,14 @@ import { ZONE_META } from "@/lib/bias/config";
 // Zone bar segment widths as literal-percentage inline styles (never
 // computed Tailwind class names — Tailwind 4's JIT needs literal classes,
 // so only `ZONE_META[z].dot` (a config.ts literal) is used for color).
+//
+// The bar is aria-hidden: DietSummary prints the same three counts as a visible
+// line right below it, under the "Bu hafta (son 7 gün)" heading, so that line is
+// the one text alternative (h67-landmarks-2).
 function ZoneBar({ counts, total }: { counts: Record<DietZone, number>; total: number }) {
-  const label = DIET_ZONES.map((z) => `${ZONE_META[z].label} ${counts[z]}`).join(", ");
   return (
     <div
-      role="img"
-      aria-label={`Bu hafta: ${label}`}
+      aria-hidden="true"
       className="flex h-3 w-full overflow-hidden rounded-full bg-muted"
     >
       {DIET_ZONES.map((z) => {

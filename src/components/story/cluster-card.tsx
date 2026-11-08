@@ -108,6 +108,14 @@ interface ClusterCardProps {
    * may omit it and keep the plain server string.
    */
   nowMs?: number;
+  /**
+   * Level of the card's headline element: 2 (default) or 3. A feed whose
+   * section labels are themselves <h2>s (home: "Son Dakika", "Bugün", "Dün";
+   * /blindspots) passes 3, so the outline reads h1 page, h2 section, h3 story
+   * instead of every story sitting level with its group label
+   * (h67-landmarks-1). Every other caller keeps the 2.
+   */
+  headingLevel?: 2 | 3;
 }
 
 const MAX_VISIBLE_ARTICLES = 4;
@@ -320,7 +328,12 @@ export function ClusterCard({
   isWireRedistribution,
   effectiveArticleCount,
   nowMs,
+  headingLevel = 2,
 }: ClusterCardProps) {
+  // The headline's tag. The id, lang and className below are written once, so
+  // the two levels cannot drift apart (h1-h3 share one rule in globals.css, so
+  // an h3 headline looks exactly like the h2 one).
+  const Heading = headingLevel === 3 ? "h3" : "h2";
   const sourceById = new Map(sources.map((s) => [s.id, s]));
 
   const resolved = articles
@@ -387,7 +400,7 @@ export function ClusterCard({
   const banner = mobileBannerImageProps(index);
 
   // The card link is named by its own visible headline: the Link points at
-  // the h2 through aria-labelledby (see the comment below). Per cluster, so the
+  // the headline through aria-labelledby (see the comment below). Per cluster, so the
   // ids stay unique across a feed.
   const headingId = `kart-baslik-${cluster.id}`;
 
@@ -407,8 +420,8 @@ export function ClusterCard({
   // name from an <article> descendant (name-from-content skips the role), so
   // the old <a><article>…</article></a> was a nameless link for voice control,
   // the links list and UIA clients (h10-a11y-1). The name instead comes from
-  // the h2 via aria-labelledby={headingId}. If the same cluster renders twice
-  // on one page the id repeats, but both h2s read the same headline text, so
+  // the headline via aria-labelledby={headingId}. If the same cluster renders twice
+  // on one page the id repeats, but both headlines read the same text, so
   // the resolved name is identical and harmless. The thumbnails are decorative
   // (alt="": the headline is right beside them) and the member rows carry a
   // screen-reader-only ": " so a source and its title do not run together.
@@ -470,9 +483,9 @@ export function ClusterCard({
                   </span>
                 </div>
               )}
-              <h2 id={headingId} lang={headlineLangAttr} className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
+              <Heading id={headingId} lang={headlineLangAttr} className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
                 {cluster.title_tr}
-              </h2>
+              </Heading>
               <ClusterMetaBadges
                 articleCount={cluster.article_count}
                 firstPublished={cluster.first_published}

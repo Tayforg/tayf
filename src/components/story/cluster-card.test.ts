@@ -403,21 +403,21 @@ describe("card link accessible name (h10-a11y-1)", () => {
     expect(linkBody).not.toContain("<section");
   });
 
-  it("names the link from the visible h2 via aria-labelledby", () => {
+  it("names the link from the visible headline (h2 or h3, see h67-landmarks-1) via aria-labelledby", () => {
     expect(src).toContain("const headingId = `kart-baslik-${cluster.id}`");
 
     const linkTags = openingTagsOf(src, "<Link");
     expect(linkTags).toHaveLength(1);
     expect(linkTags[0]).toContain("aria-labelledby={headingId}");
 
-    const h2Tags = openingTagsOf(src, "<h2");
-    expect(h2Tags).toHaveLength(1);
-    expect(h2Tags[0]).toContain("id={headingId}");
+    const headingTags = openingTagsOf(src, "<Heading");
+    expect(headingTags).toHaveLength(1);
+    expect(headingTags[0]).toContain("id={headingId}");
 
     // The id sits on the card's own headline, inside the link it names.
-    const h2At = src.indexOf("<h2");
-    expect(h2At).toBeGreaterThan(linkOpen);
-    expect(h2At).toBeLessThan(linkClose);
+    const headingAt = src.indexOf("<Heading");
+    expect(headingAt).toBeGreaterThan(linkOpen);
+    expect(headingAt).toBeLessThan(linkClose);
   });
 
   it("gives both thumbnails alt=\"\" (the headline is adjacent) and drops heroAlt", () => {
@@ -542,17 +542,17 @@ describe("cluster-card.tsx English headline language (h17-a11y-2, WCAG 3.1.2)", 
     expect(src.indexOf("const headlineLangAttr")).toBeGreaterThan(src.indexOf("const resolved = articles"));
   });
 
-  it("the card's h2 carries lang={headlineLangAttr} next to id={headingId}", () => {
-    const h2Tags = openingTagsOf(src, "<h2");
-    expect(h2Tags).toHaveLength(1);
-    expect(h2Tags[0]).toContain("lang={headlineLangAttr}");
-    expect(h2Tags[0]).toContain("id={headingId}");
+  it("the card's headline (one <Heading>, h2 or h3) carries lang={headlineLangAttr} next to id={headingId}", () => {
+    const headingTags = openingTagsOf(src, "<Heading");
+    expect(headingTags).toHaveLength(1);
+    expect(headingTags[0]).toContain("lang={headlineLangAttr}");
+    expect(headingTags[0]).toContain("id={headingId}");
     expect(count(src, "lang={headlineLangAttr}")).toBe(1);
-    // The h2 still renders the cluster headline.
-    expect(src).toMatch(/<h2\b[^>]*>\s*\{cluster\.title_tr\}\s*<\/h2>/);
+    // The headline still renders the cluster title.
+    expect(src).toMatch(/<Heading\b[^>]*>\s*\{cluster\.title_tr\}\s*<\/Heading>/);
   });
 
-  it("no other lang= appears in the file: the article title span and the h2 only (source name and chrome stay Turkish)", () => {
+  it("no other lang= appears in the file: the article title span and the headline only (source name and chrome stay Turkish)", () => {
     expect(src.match(/\blang=/g)).toHaveLength(2);
   });
 });
@@ -680,5 +680,66 @@ describe("cluster-card.tsx source-count pill (h66-statsparity-1)", () => {
       "<BiasSpectrum distribution={cluster.bias_distribution} compact />",
     );
     expect(src).toContain("balance={balanceFromDistribution(cluster.bias_distribution)}");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h67-landmarks-1: every card headline was an <h2>, level with the section
+// labels it sits in ("Son Dakika", "Bugün", "Dün"; "Diğer kör noktalar"), so
+// heading navigation could not tell a group from a story. The card takes an
+// optional `headingLevel` (2 by default, so /konu, /gundem and every other
+// caller are untouched) and the home feed and /blindspots pass 3. One element,
+// `Heading`, so the id, lang and className are written once for both levels.
+// ---------------------------------------------------------------------------
+
+describe("cluster-card.tsx headline level (h67-landmarks-1)", () => {
+  /** Body of `export interface ClusterCardProps { ... }`. */
+  function propsBody(): string {
+    const start = src.indexOf("interface ClusterCardProps");
+    expect(start).toBeGreaterThan(-1);
+    const open = src.indexOf("{", start);
+    const close = src.indexOf("\n}", open);
+    expect(close).toBeGreaterThan(open);
+    return src.slice(open, close);
+  }
+
+  it("declares the optional prop headingLevel?: 2 | 3", () => {
+    expect(propsBody()).toMatch(/\bheadingLevel\?:\s*2\s*\|\s*3\s*;/);
+  });
+
+  it("defaults the level to 2 in the destructured props", () => {
+    const start = src.indexOf("export function ClusterCard(");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("}: ClusterCardProps)", start);
+    expect(end).toBeGreaterThan(start);
+    expect(src.slice(start, end)).toMatch(/\bheadingLevel\s*=\s*2\b/);
+  });
+
+  it("picks h3 for level 3 and h2 otherwise, as literal tag names", () => {
+    expect(src).toMatch(
+      /const Heading = headingLevel === 3 \? "h3" : "h2";/,
+    );
+  });
+
+  it("renders the headline through <Heading> only: no bare <h2> or <h3> literal is left in the card", () => {
+    expect(count(src, "<Heading")).toBe(1);
+    expect(count(src, "</Heading>")).toBe(1);
+    expect(src).not.toMatch(/<h[1-6][\s>]/);
+  });
+
+  it("keeps the headline's classes exactly as they were (no visual change, literal Tailwind string)", () => {
+    const [tag] = openingTagsOf(src, "<Heading");
+    expect(tag).toContain(
+      'className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3"',
+    );
+    expect(tag).not.toMatch(/className=\{/);
+  });
+
+  it("never computes the class name from the level", () => {
+    const open = src.indexOf("<Heading");
+    const close = src.indexOf("</Heading>");
+    expect(open).toBeGreaterThan(-1);
+    expect(close).toBeGreaterThan(open);
+    expect(src.slice(open, close)).not.toContain("headingLevel");
   });
 });

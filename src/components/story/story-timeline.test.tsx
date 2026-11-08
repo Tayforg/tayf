@@ -578,3 +578,61 @@ describe("StoryTimeline — analytics data of the 'Tüm sıra' links (h47-person
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// h67-landmarks-2: the dot line was `role="img" aria-label={summary}` and the
+// same summary sentence is printed as a <p> right below it, so a screen reader
+// announced it twice. The dot line is now aria-hidden and the visible <p> is the
+// one text alternative; the dots keep their `title` tooltips for mouse users.
+// ---------------------------------------------------------------------------
+describe("StoryTimeline — one announcement of the summary (h67-landmarks-2)", () => {
+  /** Opening tag of the dot-line container (the only element with `relative h-5`). */
+  function dotLineOpenTag(html: string): string {
+    const m = html.match(/<div[^>]*class="relative h-5"[^>]*>/);
+    expect(m, "dot-line container").not.toBeNull();
+    return m?.[0] ?? "";
+  }
+
+  function occurrences(html: string, needle: string): number {
+    return html.split(needle).length - 1;
+  }
+
+  it("drops role=\"img\" and every aria-label from the dot line, and from the whole markup", () => {
+    for (const timeline of [TIMELINE, WITH_NON_VOTING]) {
+      const html = render(timeline);
+      const tag = dotLineOpenTag(html);
+      expect(tag).not.toContain("role=");
+      expect(tag).not.toContain("aria-label");
+      expect(html).not.toContain('role="img"');
+      expect(html).not.toContain(`aria-label="${timeline.summary}"`);
+    }
+  });
+
+  it("hides the dot line from assistive tech with aria-hidden=\"true\"", () => {
+    for (const timeline of [TIMELINE, WITH_NON_VOTING]) {
+      expect(dotLineOpenTag(render(timeline))).toContain('aria-hidden="true"');
+    }
+  });
+
+  it("prints the summary sentence exactly once: the visible <p>", () => {
+    const html = render(TIMELINE);
+    expect(occurrences(html, TIMELINE.summary)).toBe(1);
+    expect(html).toContain(`<p class="text-[12px] leading-relaxed text-muted-foreground">${TIMELINE.summary}</p>`);
+  });
+
+  it("keeps the title tooltip on every dot, voting and non-voting", () => {
+    const html = render(WITH_NON_VOTING);
+    const dotLine = html.slice(html.indexOf('class="relative h-5"'), html.indexOf("<p class=\"text-[12px] leading-relaxed"));
+    expect(occurrences(dotLine, "<span title=")).toBe(WITH_NON_VOTING.points.length);
+    for (const p of WITH_NON_VOTING.points) {
+      expect(dotLine).toContain(`${p.sourceName} · ${ZONE_META[p.zone].label} · ${p.clock}`);
+    }
+    expect(dotLine).toContain("toplayıcı / niş, spektruma sayılmaz");
+  });
+
+  it("keeps the section named by its visible heading", () => {
+    const html = render(TIMELINE);
+    expect(html).toContain('aria-labelledby="kim-once-yazdi"');
+    expect(html).toContain("Kim önce yazdı?");
+  });
+});

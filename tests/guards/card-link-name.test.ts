@@ -163,7 +163,8 @@ describe("links never wrap an <article> or <section> (h10-a11y-1)", () => {
     expect(links).toHaveLength(1);
     // It is the card link: it points at /cluster/{id} and holds the headline.
     expect(links[0]!.text).toContain("/cluster/${cluster.id}");
-    expect(links[0]!.text).toContain("<h2");
+    // h67-landmarks-1: the headline is `<Heading>` (an h2, or an h3 in the feeds).
+    expect(links[0]!.text).toContain("<Heading");
   });
 
   it("has no src .tsx file where a <Link> or <a> contains an <article> or <section>", () => {

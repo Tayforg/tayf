@@ -121,6 +121,27 @@ describe("SourceKunye - thresholds", () => {
       expect(html).toContain("Kaynak künyesi");
     }
   });
+
+  // h67-landmarks-1: the label was a <div>, so heading navigation skipped the
+  // strip. It is an <h2> (a sibling of "Aynı Haber, Farklı Dünyalar") with the
+  // classes the <div> had.
+  it("renders 'Kaynak künyesi' as the one <h2>, in both modes (h67-landmarks-1)", () => {
+    for (const n of [3, 21]) {
+      const html = render(makeSources(n));
+      const headings = html.match(/<h[1-6][\s>][\s\S]*?<\/h[1-6]>/g) ?? [];
+      expect(headings).toHaveLength(1);
+      expect(headings[0]).toMatch(/^<h2[\s>]/);
+      expect(headings[0]).toContain("Kaynak künyesi");
+      expect(html).not.toMatch(/<div[^>]*>\s*Kaynak künyesi\s*<\/div>/);
+    }
+  });
+
+  it("keeps the heading's classes: no visual change from the old <div> (h67-landmarks-1)", () => {
+    const html = render(makeSources(3));
+    expect(html).toContain(
+      '<h2 class="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Kaynak künyesi</h2>',
+    );
+  });
 });
 
 describe("SourceKunye - 21 sources", () => {
@@ -218,7 +239,7 @@ describe("SourceKunye - row markup is unchanged", () => {
       );
     });
     expect(html).toContain(`<ul class="${UL_CLASS}">`);
-    expect(html).toContain(">Kaynak künyesi</div>");
+    expect(html).toContain(">Kaynak künyesi</h2>");
   });
 });
 

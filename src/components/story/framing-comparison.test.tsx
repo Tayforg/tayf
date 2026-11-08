@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { ZONE_META } from "@/lib/bias/config";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
 import type { MediaDnaZone, Source } from "@/types";
@@ -73,6 +74,25 @@ function render(
   return renderToStaticMarkup(
     <FramingComparison members={members} nowMs={nowMs} nonVotingZones={nonVotingZones} />,
   );
+}
+
+/**
+ * h67-landmarks-1: the zone column is named by its own <h3> (aria-labelledby),
+ * no longer by an aria-label. `section()` finds the column through the h3 with
+ * that title, so a column that lost its link to its heading fails the lookup.
+ */
+function zoneHeading(html: string, label: string): { id: string; tag: string } {
+  const m = new RegExp(`<h3 id="([^"]+)"[^>]*>${label}</h3>`).exec(html);
+  if (!m) throw new Error(`no <h3> for ${label}`);
+  return { id: m[1]!, tag: m[0] };
+}
+
+/** The `<section aria-labelledby="ID" ...>...</section>` of the zone column titled `label`. */
+function section(html: string, label: string): string {
+  const { id } = zoneHeading(html, label);
+  const open = html.indexOf(`<section aria-labelledby="${id}"`);
+  if (open === -1) throw new Error(`no section for ${label}`);
+  return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
 }
 
 /** Every `<li ...>...</li>` in the markup, found by scanning (the lists are not nested). */
@@ -307,13 +327,6 @@ describe("FramingComparison — empty zone covered only by non-voting sources (h
     '<div class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-6 text-center"><span class="text-[11px] italic text-muted-foreground">— bu tarafta sessizlik —</span></div>';
   const QUALIFIED_LINE = `— ${SPECTRUM_ABSENT_QUALIFIED} —`;
 
-  /** The `<section aria-label="LABEL" ...>...</section>` of one zone column. */
-  function section(html: string, label: string): string {
-    const open = html.indexOf(`<section aria-label="${label}"`);
-    if (open === -1) throw new Error(`no section for ${label}`);
-    return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
-  }
-
   const count = (html: string, needle: string) => html.split(needle).length - 1;
 
   it("says 'spektruma sayılan kaynaklardan haber yok' in a zone only a non-voting source covered, and not 'sessizlik'", () => {
@@ -408,11 +421,6 @@ describe("FramingComparison — all-English cluster (h59-english-1)", () => {
   const ABSENCE = ["bu kümede haber yok", "henüz haber yok", "bu tarafta sessizlik", "spektruma sayılan kaynaklardan haber yok"];
 
   const count = (html: string, needle: string) => html.split(needle).length - 1;
-  function section(html: string, label: string): string {
-    const open = html.indexOf(`<section aria-label="${label}"`);
-    if (open === -1) throw new Error(`no section for ${label}`);
-    return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
-  }
 
   const HDN = mkSource("hurriyet-daily-news", "Hürriyet Daily News", "gov_leaning");
   const A_NEWS = mkSource("a-news", "A News", "pro_government");
@@ -525,5 +533,82 @@ describe("FramingComparison — new-tab notice (h60-newtab-1)", () => {
     expect(anchor).toContain("Daily Sabah");
     // The notice is not inside a lang=en span: it is Turkish text.
     expect(anchor).toMatch(/<\/span><span class="sr-only"> \(yeni sekmede açılır\)<\/span><\/a>$/);
+  });
+});
+
+// h67-landmarks-1: the three zone titles were <span>s inside <section
+// aria-label>, so heading navigation saw "Aynı Haber, Farklı Dünyalar" and then
+// nothing. Each title is now an <h3> under that <h2>, and its <section> is named
+// by it through aria-labelledby (the aria-label is gone). The h3 keeps the
+// span's classes and adds font-sans tracking-normal: globals.css gives every
+// h1-h3 the serif heading font and -0.02em tracking, which the span never had.
+describe("FramingComparison — zone titles are headings (h67-landmarks-1)", () => {
+  const ZONES = [
+    { zone: "iktidar", label: "İktidar" },
+    { zone: "bagimsiz", label: "Bağımsız" },
+    { zone: "muhalefet", label: "Muhalefet" },
+  ] as const;
+
+  // One voting member (Sözcü, Muhalefet) only: two of the three columns are
+  // empty, and each must still carry its heading.
+  const html = render([mkMember("h1", SOZCU, TR_TITLE)]);
+  const allZones = render([
+    mkMember("z1", DAILY_SABAH, EN_TITLE),
+    mkMember("z2", SOZCU, TR_TITLE),
+  ]);
+
+  it("renders three <h3>, in spectrum order, titled İktidar, Bağımsız and Muhalefet", () => {
+    for (const markup of [html, allZones]) {
+      const titles = [...markup.matchAll(/<h3[\s>][^>]*>([^<]*)<\/h3>/g)].map((m) => m[1]);
+      expect(titles).toEqual(["İktidar", "Bağımsız", "Muhalefet"]);
+    }
+  });
+
+  it("keeps 'Aynı Haber, Farklı Dünyalar' the one <h2> ahead of the three <h3>", () => {
+    const h2s = html.match(/<h2[\s>][^>]*>[^<]*<\/h2>/g) ?? [];
+    expect(h2s).toHaveLength(1);
+    expect(h2s[0]).toContain("Aynı Haber, Farklı Dünyalar");
+    expect(html.indexOf("<h2")).toBeLessThan(html.indexOf("<h3"));
+    expect(html).not.toMatch(/<h[14-6][\s>]/);
+  });
+
+  it.each(ZONES)("names the $zone section by its own <h3>: aria-labelledby equals the h3 id", ({ label }) => {
+    const { id } = zoneHeading(html, label);
+    expect(id).not.toBe("");
+    const col = section(html, label);
+    expect(col.startsWith(`<section aria-labelledby="${id}"`)).toBe(true);
+    expect(col).toContain(`<h3 id="${id}"`);
+  });
+
+  it("gives the three headings three distinct ids, one per zone key", () => {
+    const ids = ZONES.map(({ label }) => zoneHeading(html, label).id);
+    expect(new Set(ids).size).toBe(3);
+    for (const [i, { zone }] of ZONES.entries()) expect(ids[i]).toContain(zone);
+  });
+
+  it("leaves no section with an aria-label (the heading names it)", () => {
+    for (const markup of [html, allZones]) {
+      expect(markup).not.toMatch(/<section[^>]*\baria-label=/);
+      expect(markup.match(/<section[\s>]/g)).toHaveLength(3);
+      expect(markup.match(/<section aria-labelledby="/g)).toHaveLength(3);
+    }
+  });
+
+  it.each(ZONES)("keeps the $zone title's classes plus font-sans tracking-normal (no visual change)", ({ zone, label }) => {
+    const { tag } = zoneHeading(html, label);
+    const classes = /class="([^"]*)"/.exec(tag)?.[1]?.split(" ") ?? [];
+    for (const token of ["text-sm", "font-semibold", "font-sans", "tracking-normal", ...ZONE_META[zone].zoneLabel.split(" ")]) {
+      expect(classes).toContain(token);
+    }
+    // The old <span> had exactly the first three classes plus the zone colours.
+    expect(classes).toHaveLength(4 + ZONE_META[zone].zoneLabel.split(" ").length);
+  });
+
+  it("keeps the manşet count and the zone description beside the heading", () => {
+    const muhalefet = section(html, "Muhalefet");
+    expect(muhalefet).toContain("1 manşet");
+    expect(muhalefet).toContain(ZONE_META.muhalefet.description);
+    expect(section(html, "İktidar")).toContain("0 manşet");
+    expect(section(html, "Bağımsız")).toContain("0 manşet");
   });
 });

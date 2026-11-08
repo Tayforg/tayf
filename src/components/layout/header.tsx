@@ -65,11 +65,12 @@ export function Header() {
             <span className="font-serif text-xl font-normal tracking-tight">
               Tayf
             </span>
-            {/* Plain span, not the client <Separator> primitive (h13-weight-2).
-                Zero-width today, exactly as before: no w-px. */}
+            {/* Plain aria-hidden span, not the client <Separator> primitive
+                (h13-weight-2). Zero-width today, exactly as before: no w-px.
+                Decoration only (h67-landmarks-3): a separator role inside the
+                logo link split its reading in browse mode. */}
             <span
-              role="separator"
-              aria-orientation="vertical"
+              aria-hidden="true"
               className="h-3.5 mx-0 hidden sm:block shrink-0 bg-border/40"
             />
             <span className="text-[11px] font-medium tracking-wide text-muted-foreground hidden sm:inline uppercase">

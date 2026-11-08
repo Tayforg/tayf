@@ -70,6 +70,17 @@ interface FramingComparisonProps {
 // Spectrum order, matching the bias bar left-to-right.
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
+// h67-landmarks-1: each zone's title is an <h3> under "Aynı Haber, Farklı
+// Dünyalar" and names its <section> (aria-labelledby). The id is a prefix plus
+// the zone key, so it is stable and unique per column; the component is a
+// server one (no useId) and the cluster page renders exactly one of it, so the
+// three ids cannot repeat on a page. globals.css gives every h1-h3 the serif
+// heading font and -0.02em tracking, which the old <span> never had:
+// `font-sans tracking-normal` on the h3 keeps the label looking as it did.
+function zoneHeadingId(zone: MediaDnaZone): string {
+  return `framing-zone-${zone}`;
+}
+
 // Headlines shown per zone before the <details> disclosure takes over.
 // Keeps 100+ member mega-clusters from turning the page into a wall.
 const VISIBLE_PER_ZONE = 4;
@@ -179,13 +190,16 @@ export function FramingComparison({
           return (
             <section
               key={zone}
-              aria-label={meta.label}
+              aria-labelledby={zoneHeadingId(zone)}
               className={`border-t-2 ${meta.zoneBorder} pt-2.5 min-w-0`}
             >
               <div className="flex items-baseline justify-between gap-2">
-                <span className={`text-sm font-semibold ${meta.zoneLabel}`}>
+                <h3
+                  id={zoneHeadingId(zone)}
+                  className={`font-sans text-sm font-semibold tracking-normal ${meta.zoneLabel}`}
+                >
                   {meta.label}
-                </span>
+                </h3>
                 <span className="text-[10px] tabular-nums text-muted-foreground">
                   {zoneMembers.length} manşet
                 </span>

@@ -327,6 +327,79 @@ describe("NavLinks — current-page cue is not colour or tint alone (h41-a11y-1)
   });
 });
 
+describe("Header — decorative dividers are hidden from assistive tech (h67-landmarks-3)", () => {
+  // The 0 px dividers between the Ana menü links (and the one inside the logo
+  // link) draw nothing, but as separator-role elements a screen reader announced
+  // "separator" between nav items and split the logo link's reading in browse
+  // mode. They are kept (their margin sets the spacing) but are aria-hidden
+  // decoration, with the same literal classes, so the layout does not move.
+  const NAV_DIVIDER_CLASS = "h-3 mx-0.5 shrink-0 bg-border";
+  const LOGO_DIVIDER_CLASS = "h-3.5 mx-0 hidden sm:block shrink-0 bg-border/40";
+
+  /** Attribute strings of every empty <span> in the markup that carries `cls` as its class attribute. */
+  const dividerAttrs = (markup: string, cls: string): string[] =>
+    [...markup.matchAll(/<span\b([^>]*)><\/span>/g)]
+      .map((m) => m[1]!)
+      .filter((attrs) => attrs.includes(`class="${cls}"`));
+  const linkCount = (markup: string): number => (markup.match(/<a\b/g) ?? []).length;
+
+  it.each([
+    ["/", false, 4],
+    ["/", true, 5],
+    [null, false, 4],
+    [null, true, 5],
+  ] as const)(
+    "nav at pathname %s (showAdmin %s, %i links): one aria-hidden divider between each pair, no separator role",
+    (pathname, showAdmin, links) => {
+      const markup = renderToStaticMarkup(NavLinksView({ pathname, showAdmin }));
+
+      expect(markup).not.toContain('role="separator"');
+      expect(markup).not.toContain("aria-orientation");
+      expect(linkCount(markup)).toBe(links);
+
+      const dividers = dividerAttrs(markup, NAV_DIVIDER_CLASS);
+      expect(dividers).toHaveLength(links - 1);
+      for (const attrs of dividers) {
+        expect(attrs).toContain('aria-hidden="true"');
+        expect(attrs).not.toContain("role=");
+      }
+    },
+  );
+
+  it("the live nav (NavLinks) renders the same hidden dividers", () => {
+    const markup = renderToStaticMarkup(NavLinks({ showAdmin: true }));
+
+    expect(markup).not.toContain('role="separator"');
+    expect(dividerAttrs(markup, NAV_DIVIDER_CLASS)).toHaveLength(4);
+  });
+
+  it("the header shell (logo, skip link, nav fallback) has no separator role anywhere", () => {
+    const markup = renderToStaticMarkup(<Header />);
+
+    expect(markup).not.toContain('role="separator"');
+    expect(markup).not.toContain("aria-orientation");
+    // Logo divider + the 3 dividers of the Suspense-fallback nav.
+    expect(dividerAttrs(markup, LOGO_DIVIDER_CLASS)).toHaveLength(1);
+    expect(dividerAttrs(markup, NAV_DIVIDER_CLASS)).toHaveLength(3);
+  });
+
+  it("hides the divider inside the logo link, keeping the sm+ divider classes and the two text spans", () => {
+    const logo = findByHref(Header(), "/");
+    expect(logo).toBeDefined();
+
+    const [divider, ...others] = collectByClassSubstring(logo!.props!.children, "bg-border/40");
+    expect(others).toEqual([]);
+    expect(divider?.type).toBe("span");
+    expect(divider?.props?.["aria-hidden"]).toBe("true");
+    expect(divider?.props?.role).toBeUndefined();
+    expect(divider?.props?.["aria-orientation"]).toBeUndefined();
+    expect(divider?.props?.className).toBe(LOGO_DIVIDER_CLASS);
+
+    // The link's name is unchanged: the brand and the tagline.
+    expect(collectText(logo!.props!.children).join("")).toBe("TayfHaber Analizi");
+  });
+});
+
 describe("SearchBar — labelled search input (best effort)", () => {
   it("renders role=search and a label wired to the input via id/htmlFor", async () => {
     const { SearchBar } = await import("@/components/filters/search-bar");
