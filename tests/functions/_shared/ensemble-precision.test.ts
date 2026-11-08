@@ -1,11 +1,15 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import {
+  actorMismatchFires,
   counterVetoFires,
   headlineLane,
+  headlineOnlyScore,
   isMatch,
   score,
+  subjectVetoFires,
   type ScoreResult,
 } from "../../../supabase/functions/_shared/cluster/ensemble.ts";
+import { expectLinear, rep } from "../../_helpers/linear-time";
 import { extractEntities } from "../../../supabase/functions/_shared/cluster/entities.ts";
 import {
   fingerprint,
@@ -313,13 +317,29 @@ describe("ensemble precision: subject veto mechanism", () => {
     expect(score(noFp, noFp, [], [], 0.6, 1).components.subjectVeto).toBe(false);
   });
 
-  it("does not fire when the headline lane fired", () => {
+  it("does not fire when the headline lane is in effect (the headlines agree on the actor)", () => {
     const a = "Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü";
-    const b = "Lavrov, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü";
+    const b = "Bakan Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü";
     const r = run(a, b, 0.3, 0.5);
     expect(r.components.headlineLane).toBe(true);
+    expect(r.components.actorVeto).toBe(false);
     expect(r.components.subjectVeto).toBe(false);
     expect(r.score).toBeGreaterThan(MATCH_THRESHOLD);
+  });
+
+  // h70-mergequality-3 changed this pair: it used to be exempt ("the headlines already
+  // agree") because the headline lane fired on the shared template. A lane match across
+  // actors is now withdrawn (components.actorVeto), and the subject veto then judges
+  // the pair like any other.
+  it("a headline-lane match across two different comma subjects is withdrawn, and the subject veto applies (h70-mergequality-3)", () => {
+    const a = "Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü";
+    const b = "Lavrov, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü";
+    expect(headlineLane(headlineTokens(a), headlineTokens(b), 0.5).fired).toBe(true);
+    const r = run(a, b, 0.3, 0.5);
+    expect(r.components.actorVeto).toBe(true);
+    expect(r.components.headlineLane).toBe(false);
+    expect(r.components.subjectVeto).toBe(true);
+    expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
   });
 
   it("does not touch the strict-fingerprint auto-accept", () => {
@@ -1489,6 +1509,437 @@ describe("ensemble precision: ordinal counter veto (h54-precision-1)", () => {
       const old = legacy.score(same, same, [], [], TFIDF, HOURS, { aTitle: ISTIKLAL, bTitle: YENI_SAFAK });
       expect(port.components.counterVeto).toBe(false);
       expect(old.components.counterVeto).toBe(false);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h70-mergequality-3: a headline-lane match must not cross actors.
+//
+// Prod cluster 6e585787 ("AK Parti Sozcusu Celik Karabag Zaferi'nin 6. yilini
+// kutladi", is_blindspot) took anadolu-ajansi "Cumhurbaskani Erdogan, Karabag
+// Zaferi'nin 6. yilini kutladi" and then TRT's Erdogan message through the
+// headline lane: the subject veto never applies when the lane fired, and it
+// needs a comma on both sides (aksam's member title has none). The lane now
+// withdraws itself when the two titles name different actors.
+// ---------------------------------------------------------------------------
+describe("actor mismatch: the headline lane does not cross actors (h70-mergequality-3)", () => {
+  const AA = "Cumhurbaşkanı Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı";
+  const AKSAM = "AK Parti Sözcüsü Çelik Karabağ Zaferi'nin 6. yılını kutladı";
+  const POSTA = "AK Parti Sözcüsü Çelik, Karabağ Zaferi'nin 6. yılını kutladı";
+
+  describe("actorMismatchFires", () => {
+    const TRUE_CASES: ReadonlyArray<readonly [string, string, string]> = [
+      ["comma subject vs a comma-less member that leads with another named actor", AA, AKSAM],
+      ["comma subject on both sides, disjoint (the old subject veto)", AA, POSTA],
+      [
+        "a single whitelisted name still counts as another actor",
+        "Erdoğan, CHP'nin kurultay davası hakkında açıklama yaptı",
+        "Bahçeli CHP'nin kurultay davası hakkında açıklama yaptı",
+      ],
+    ];
+    it.each(TRUE_CASES)("true: %s", (_name, a, b) => {
+      expect(actorMismatchFires(a, b)).toBe(true);
+      // Symmetric: the member may be either side.
+      expect(actorMismatchFires(b, a)).toBe(true);
+    });
+
+    const FALSE_CASES: ReadonlyArray<readonly [string, string, string]> = [
+      [
+        "Zelenskiy: the bare title and the long form name the same actor",
+        "Erdoğan, Zelenskiy'i kabul etti",
+        "Cumhurbaşkanı Erdoğan Ukrayna Devlet Başkanı Zelenskiy'i kabul etti",
+      ],
+      [
+        "Fidan: a role plus a name is still Fidan",
+        "Bakan Fidan, Arakçi ile görüştü",
+        "Dışişleri Bakanı Hakan Fidan İranlı mevkidaşı Arakçi ile görüştü",
+      ],
+      [
+        "Trump vs 'ABD Başkanı': a role with no name is never a different actor",
+        "Trump, Venezuela'ya ek gümrük vergisi getirdi",
+        "ABD Başkanı Venezuela'ya ek gümrük vergisi getirdi",
+      ],
+      [
+        "Sarıgüller vs Sarıgül: inflection of one name (5-letter prefix)",
+        "Sarıgüller soruşturmasında 11 gözaltı daha: Şişli Meslek Yüksekokulu'na operasyon",
+        "Sarıgül ailesi soruşturması: 11 yeni gözaltı, Şişli Meslek Yüksekokulu'na operasyon",
+      ],
+      [
+        "a sentence-initial capital is not a name: 'Beklenen açıklama: ...'",
+        "Erdoğan, Kabine Toplantısı'nın ardından emekliye zam açıklaması yaptı",
+        "Beklenen açıklama: Kabine Toplantısı'nın ardından emekliye zam",
+      ],
+      [
+        "an organisation plus a role with no name after it: 'MHP Lideri ...'",
+        "Bahçeli, CHP'nin kurultay davası hakkında açıklama yaptı",
+        "MHP Lideri CHP'nin kurultay davası hakkında açıklama yaptı",
+      ],
+      [
+        "an organisation plus a role with no name after it: 'MHP Genel Başkanı ...'",
+        "Bahçeli, CHP'nin kurultay davası hakkında açıklama yaptı",
+        "MHP Genel Başkanı CHP'nin kurultay davası hakkında açıklama yaptı",
+      ],
+      [
+        "a possessive role is a role: 'Cumhurbaşkanımız ...'",
+        "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı",
+        "Cumhurbaşkanımız Karabağ Zaferi'nin 6. yılını kutladı",
+      ],
+      [
+        "a qualifier before a role with no name after it: 'TC Cumhurbaşkanı ...'",
+        "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı",
+        "TC Cumhurbaşkanı Karabağ Zaferi'nin 6. yılını kutladı",
+      ],
+      [
+        "a qualifier before a role with no name after it: 'İBB Başkanı ...'",
+        "İmamoğlu, Silivri'den yeni mektup gönderdi",
+        "İBB Başkanı Silivri'den yeni mektup gönderdi",
+      ],
+      [
+        "a locative place word is not an actor: 'Beştepe'de ...'",
+        "Erdoğan, Kabine Toplantısı sonrası millete sesleniş konuşması yaptı",
+        "Beştepe'de Kabine Toplantısı sonrası millete sesleniş konuşması",
+      ],
+      [
+        "a sentence-initial capital is not a name: 'Ümmetin lideri ...'",
+        "Erdoğan, cuma namazını Hz. Ali Camisi'nde kıldı",
+        "Ümmetin lideri cuma namazını Hz. Ali Camisi'nde kıldı",
+      ],
+    ];
+    it.each(FALSE_CASES)("false: %s", (_name, a, b) => {
+      expect(actorMismatchFires(a, b)).toBe(false);
+      expect(actorMismatchFires(b, a)).toBe(false);
+    });
+
+    // product-2: the same actor under two names must not read as two actors.
+    const ALIAS_CASES: ReadonlyArray<readonly [string, string, string]> = [
+      [
+        "AKP vs AK Parti (acronym alias)",
+        "AKP, yeni vergi paketini Meclis'e sundu",
+        "AK Parti, yeni vergi paketini Meclis'e sundu",
+      ],
+      [
+        "MSB vs Milli Savunma Bakanlığı (acronym alias)",
+        "MSB, Irak'ın kuzeyinde 5 teröristin etkisiz hale getirildiğini duyurdu",
+        "Milli Savunma Bakanlığı, Irak'ın kuzeyinde 5 teröristin etkisiz hale getirildiğini duyurdu",
+      ],
+      [
+        "Memişoğlu vs 'Sağlık Bakanı' (a role-only comma subject is no named actor)",
+        "Memişoğlu, hastanelerde yeni randevu düzenlemesini açıkladı",
+        "Sağlık Bakanı, hastanelerde yeni randevu düzenlemesini açıkladı",
+      ],
+    ];
+    it.each(ALIAS_CASES)("alias, no mismatch: %s", (_name, a, b) => {
+      expect(actorMismatchFires(a, b)).toBe(false);
+      expect(actorMismatchFires(b, a)).toBe(false);
+      expect(subjectVetoFires(a, b)).toBe(false);
+      expect(subjectVetoFires(b, a)).toBe(false);
+    });
+
+    it("a role plus a name keeps the name: 'Dışişleri Bakanı Fidan,' vs 'Lavrov,' is still a mismatch", () => {
+      expect(
+        actorMismatchFires(
+          "Dışişleri Bakanı Fidan, Japon mevkidaşıyla görüştü",
+          "Lavrov, Japon mevkidaşıyla görüştü",
+        ),
+      ).toBe(true);
+      expect(
+        subjectVetoFires(
+          "Dışişleri Bakanı Fidan, Japon mevkidaşıyla görüştü",
+          "Lavrov, Japon mevkidaşıyla görüştü",
+        ),
+      ).toBe(true);
+    });
+
+    it("an acronym that does not spell the other side's name is still a different actor", () => {
+      expect(
+        actorMismatchFires(
+          "MSB, yeni vergi paketini Meclis'e sundu",
+          "AK Parti, yeni vergi paketini Meclis'e sundu",
+        ),
+      ).toBe(true);
+    });
+
+    it("'AK Parti Sözcüsü Çelik ...' still yields Çelik after a terminal-role check", () => {
+      // The qualifier before the role is kept when a name follows the role.
+      expect(
+        actorMismatchFires(
+          "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı",
+          "AK Parti Sözcüsü Çelik Karabağ Zaferi'nin 6. yılını kutladı",
+        ),
+      ).toBe(true);
+    });
+
+    it("is a superset of the subject veto: whenever subjectVetoFires, so does it", () => {
+      expect(subjectVetoFires(AA, POSTA)).toBe(true);
+      expect(actorMismatchFires(AA, POSTA)).toBe(true);
+      // ... and the one-sided rule adds the pair the subject veto cannot see.
+      expect(subjectVetoFires(AA, AKSAM)).toBe(false);
+      expect(actorMismatchFires(AA, AKSAM)).toBe(true);
+    });
+
+    it("never fires when neither side has a comma subject (no actor is named)", () => {
+      expect(actorMismatchFires(AKSAM, "Karabağ Zaferi'nin 6. yılı kutlandı")).toBe(false);
+      expect(actorMismatchFires("", "")).toBe(false);
+      expect(actorMismatchFires("", AA)).toBe(false);
+      expect(actorMismatchFires(AA, "")).toBe(false);
+    });
+
+    it("does not fire when the comma-less side leads with the comma side's own subject word", () => {
+      // Same actor on both sides, one side without a comma.
+      expect(actorMismatchFires(AA, "Erdoğan Karabağ Zaferi'nin 6. yılını kutladı")).toBe(false);
+      expect(actorMismatchFires(AA, "Cumhurbaşkanı Erdoğan Karabağ Zaferi'nin 6. yılını kutladı")).toBe(false);
+      // The comma side's subject appears later in the comma-less title.
+      expect(actorMismatchFires(AA, "Karabağ Zaferi'nin 6. yılında Erdoğan mesaj verdi")).toBe(false);
+    });
+
+    it("does not fire when the comma-less side has no leading named actor (stop words, generic entities, lower case)", () => {
+      // Role words only.
+      expect(actorMismatchFires(AA, "Bakan Genel Başkan Karabağ Zaferi'nin 6. yılını kutladı")).toBe(false);
+      // A generic entity (erdogan, abd, ...) does not count as a named actor.
+      expect(actorMismatchFires("Çelik, Karabağ Zaferi'nin 6. yılını kutladı", "Erdoğan Karabağ Zaferi'nin 6. yılını kutladı")).toBe(false);
+      // The run stops at the first lower-case word: nothing before it names an actor.
+      expect(actorMismatchFires(AA, "bugün Karabağ Zaferi'nin 6. yılı kutlandı")).toBe(false);
+    });
+
+    it("clips to HEADLINE_TITLE_MAX_CHARS and the first SUBJECT_SPAN_MAX_WORDS words", () => {
+      // The comma sits in word 7, past the span: no subject on that side, so no one-sided veto from it.
+      const late = "Cumhurbaşkanı Başkan Bakan Genel Eski Lideri Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı";
+      expect(SUBJECT_SPAN_MAX_WORDS).toBeLessThan(7);
+      expect(actorMismatchFires(late, AKSAM)).toBe(false);
+      // A leading actor past the clip is not seen either.
+      const pad = "x ".repeat(HEADLINE_TITLE_MAX_CHARS / 2);
+      expect(actorMismatchFires(AA, `${pad}AK Parti Sözcüsü Çelik Karabağ Zaferi'nin 6. yılını kutladı`)).toBe(false);
+    });
+
+    it("is total over special characters, emoji and injection-looking text", () => {
+      for (const t of [
+        "🚨 Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı 🔥",
+        "'; DROP TABLE articles;-- , x",
+        "Çelik​, Karabağ",
+        "İİİİ, ıııı",
+        ", , ,",
+      ]) {
+        expect(() => actorMismatchFires(t, AKSAM)).not.toThrow();
+        expect(() => actorMismatchFires(AKSAM, t)).not.toThrow();
+        expect(typeof actorMismatchFires(t, AKSAM)).toBe("boolean");
+      }
+    });
+
+    it("fires on maximum-length titles of the same pair", () => {
+      const long = `Cumhurbaşkanı Erdoğan, ${"Karabağ Zaferi'nin yılını kutladı ".repeat(12)}`;
+      const other = `AK Parti Sözcüsü Çelik ${"Karabağ Zaferi'nin yılını kutladı ".repeat(12)}`;
+      expect(long.length).toBeGreaterThan(HEADLINE_TITLE_MAX_CHARS);
+      expect(actorMismatchFires(long, other)).toBe(true);
+    });
+
+    it("costs the same for a 12 KB title as for a 100 KB one: the clip bounds the work (CPU time, not wall clock)", () => {
+      // Titles are clipped to HEADLINE_TITLE_MAX_CHARS before anything is split or folded.
+      expectLinear(
+        rep("Karabağ Zaferi'nin yılını kutladı ", "AK Parti Sözcüsü Çelik "),
+        (other) => {
+          expect(actorMismatchFires("Cumhurbaşkanı Erdoğan, Karabağ Zaferi'nin yılını kutladı", other)).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+  });
+
+  describe("headlineOnlyScore", () => {
+    const HOURS = 3.5;
+    const a = headlineTokens(AA);
+    const b = headlineTokens(AKSAM);
+
+    it("without titles it is unchanged (backward compatible): the lane still fires", () => {
+      expect(headlineOnlyScore(a, b, HOURS)).toBeGreaterThan(0);
+      expect(headlineOnlyScore(a, b, HOURS, { aSourceSlug: "anadolu-ajansi", bSourceSlug: "aksam" })).toBeGreaterThan(0);
+    });
+
+    it("with both titles and an actor mismatch it is 0", () => {
+      expect(headlineOnlyScore(a, b, HOURS, { aTitle: AA, bTitle: AKSAM })).toBe(0);
+      expect(headlineOnlyScore(b, a, HOURS, { aTitle: AKSAM, bTitle: AA })).toBe(0);
+    });
+
+    it("with both titles and no mismatch it equals the title-less score", () => {
+      const same = headlineTokens("Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı");
+      const plain = headlineOnlyScore(a, same, HOURS);
+      expect(plain).toBeGreaterThan(0);
+      expect(
+        headlineOnlyScore(a, same, HOURS, { aTitle: AA, bTitle: "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı" }),
+      ).toBe(plain);
+    });
+
+    it("with only one title (or an empty one) it does not veto", () => {
+      expect(headlineOnlyScore(a, b, HOURS, { aTitle: AA })).toBeGreaterThan(0);
+      expect(headlineOnlyScore(a, b, HOURS, { bTitle: AKSAM })).toBeGreaterThan(0);
+      expect(headlineOnlyScore(a, b, HOURS, { aTitle: AA, bTitle: "" })).toBeGreaterThan(0);
+      expect(headlineOnlyScore(a, b, HOURS, { aTitle: null, bTitle: null })).toBeGreaterThan(0);
+    });
+  });
+
+  describe("score()", () => {
+    const NO_FP = { strict: null, signature: null };
+    const run = (aTitle: string, bTitle: string, tfidf: number, hours = 1) =>
+      score(NO_FP, NO_FP, [], [], tfidf, hours, { aTitle, bTitle });
+
+    it("control: without the veto the pair would take the headline lane and match", () => {
+      // The pair really is a headline-lane pair when only the lane is asked.
+      const lane = headlineLane(headlineTokens(AA), headlineTokens(POSTA), 1);
+      expect(lane.fired).toBe(true);
+      expect(lane.kind).toBe("containment");
+    });
+
+    it("posta-like (comma on both sides, tf-idf 0.37): below MATCH_THRESHOLD, actorVeto true, headlineLane false", () => {
+      const r = run(AA, POSTA, 0.37);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD);
+      expect(r.components.actorVeto).toBe(true);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.subjectVeto).toBe(true);
+      // The near-miss stays visible.
+      expect(r.components.headlineContainment).toBeGreaterThan(0.85);
+    });
+
+    it("haberler-com-like (tf-idf 0.71): the primary lane is capped at SUBJECT_VETO_CAP by the subject veto", () => {
+      const r = run(AA, POSTA, 0.71);
+      expect(r.components.actorVeto).toBe(true);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.subjectVeto).toBe(true);
+      expect(r.components.primary).toBeGreaterThan(SUBJECT_VETO_CAP);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
+    });
+
+    it("aksam-like (comma-less, one-sided mismatch, low tf-idf): no headline lane, below MATCH_THRESHOLD", () => {
+      const r = run(AA, AKSAM, 0.3);
+      expect(r.components.actorVeto).toBe(true);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.subjectVeto).toBe(false);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD);
+    });
+
+    it("correctness-1: 'Cumhurbaşkanımız ...' vs 'Erdoğan, ...' keeps the lane: actorVeto false, headlineLane true, score above MATCH_THRESHOLD", () => {
+      const r = run(
+        "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı",
+        "Cumhurbaşkanımız Karabağ Zaferi'nin 6. yılını kutladı",
+        0.3,
+      );
+      expect(r.components.actorVeto).toBe(false);
+      expect(r.components.headlineLane).toBe(true);
+      expect(r.score).toBeGreaterThan(MATCH_THRESHOLD);
+    });
+
+    it("product-2: 'AKP, ...' vs 'AK Parti, ...' keeps the lane: actorVeto false, score at or above MATCH_THRESHOLD", () => {
+      const r = run(
+        "AKP, yeni vergi paketini Meclis'e sundu",
+        "AK Parti, yeni vergi paketini Meclis'e sundu",
+        0.5,
+      );
+      expect(r.components.actorVeto).toBe(false);
+      expect(r.score).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
+    });
+
+    it("the lane is intact for the same actor (control): actorVeto false, headlineLane true, score at or above the lane score", () => {
+      const r = run(AA, "Cumhurbaşkanı Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı!", 0.1);
+      expect(r.components.actorVeto).toBe(false);
+      expect(r.components.headlineLane).toBe(true);
+      expect(r.score).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
+    });
+
+    it("pairs the lane did not fire for keep their old result: no actor veto is reported or applied", () => {
+      const r = run("Hava bugün parçalı bulutlu geçecek", "Borsa güne yükselişle başladı", 0.05);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.actorVeto).toBe(false);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD);
+    });
+
+    it("the exact-title lane and the strict fingerprint are untouched: an auto-accept never carries the veto", () => {
+      const same = { strict: "d".repeat(40), signature: null };
+      const r = score(same, same, [], [], 0.1, 1, { aTitle: AA, bTitle: AKSAM });
+      expect(r.components.autoAccept).toBe(true);
+      expect(r.components.actorVeto).toBe(false);
+      expect(r.score).toBe(1);
+    });
+
+    it("without titles there is no veto at all", () => {
+      const r = score(NO_FP, NO_FP, [], [], 0.37, 1);
+      expect(r.components.actorVeto).toBe(false);
+    });
+  });
+
+  describe("parity with scripts/lib/cluster (.mjs twin)", () => {
+    interface MjsSide {
+      score: (
+        a: unknown,
+        b: unknown,
+        ea: Iterable<string>,
+        eb: Iterable<string>,
+        tfidf: number,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => { score: number; components: Record<string, unknown> };
+      headlineOnlyScore: (
+        a: unknown,
+        b: unknown,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => number;
+    }
+    let legacy: MjsSide;
+    beforeAll(async () => {
+      legacy = (await import("../../../scripts/lib/cluster/ensemble.mjs")) as unknown as MjsSide;
+    });
+
+    const NO_FP = { strict: null, signature: null };
+    const PAIRS: ReadonlyArray<readonly [string, string]> = [
+      [AA, AKSAM],
+      [AKSAM, AA],
+      [AA, POSTA],
+      [AA, "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı"],
+      ["Erdoğan, Zelenskiy'i kabul etti", "Cumhurbaşkanı Erdoğan Ukrayna Devlet Başkanı Zelenskiy'i kabul etti"],
+      ["Bakan Fidan, Arakçi ile görüştü", "Dışişleri Bakanı Hakan Fidan İranlı mevkidaşı Arakçi ile görüştü"],
+      ["Trump, Venezuela'ya ek gümrük vergisi getirdi", "ABD Başkanı Venezuela'ya ek gümrük vergisi getirdi"],
+      // h70 review fixes (correctness-1, product-2): role / place / sentence-case / alias rules.
+      ["Erdoğan, Kabine Toplantısı'nın ardından emekliye zam açıklaması yaptı", "Beklenen açıklama: Kabine Toplantısı'nın ardından emekliye zam"],
+      ["Bahçeli, CHP'nin kurultay davası hakkında açıklama yaptı", "MHP Lideri CHP'nin kurultay davası hakkında açıklama yaptı"],
+      ["Bahçeli, CHP'nin kurultay davası hakkında açıklama yaptı", "MHP Genel Başkanı CHP'nin kurultay davası hakkında açıklama yaptı"],
+      ["Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı", "Cumhurbaşkanımız Karabağ Zaferi'nin 6. yılını kutladı"],
+      ["Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı", "TC Cumhurbaşkanı Karabağ Zaferi'nin 6. yılını kutladı"],
+      ["İmamoğlu, Silivri'den yeni mektup gönderdi", "İBB Başkanı Silivri'den yeni mektup gönderdi"],
+      ["Erdoğan, Kabine Toplantısı sonrası millete sesleniş konuşması yaptı", "Beştepe'de Kabine Toplantısı sonrası millete sesleniş konuşması"],
+      ["Erdoğan, cuma namazını Hz. Ali Camisi'nde kıldı", "Ümmetin lideri cuma namazını Hz. Ali Camisi'nde kıldı"],
+      ["Erdoğan, CHP'nin kurultay davası hakkında açıklama yaptı", "Bahçeli CHP'nin kurultay davası hakkında açıklama yaptı"],
+      ["AKP, yeni vergi paketini Meclis'e sundu", "AK Parti, yeni vergi paketini Meclis'e sundu"],
+      ["AKP, yeni vergi paketini Meclis'e sundu", "AK Parti yeni vergi paketini Meclis'e sundu"],
+      ["MSB, Irak'ın kuzeyinde 5 teröristin etkisiz hale getirildiğini duyurdu", "Milli Savunma Bakanlığı, Irak'ın kuzeyinde 5 teröristin etkisiz hale getirildiğini duyurdu"],
+      ["Memişoğlu, hastanelerde yeni randevu düzenlemesini açıkladı", "Sağlık Bakanı, hastanelerde yeni randevu düzenlemesini açıkladı"],
+      ["Dışişleri Bakanı Fidan, Japon mevkidaşıyla görüştü", "Lavrov, Japon mevkidaşıyla görüştü"],
+      ["MSB, yeni vergi paketini Meclis'e sundu", "AK Parti, yeni vergi paketini Meclis'e sundu"],
+      ["Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı", "AK Parti Sözcüsü Çelik Karabağ Zaferi'nin 6. yılını kutladı"],
+    ];
+
+    it("score and every component are identical (===) to the .mjs twin, and actorVeto is a component of both", () => {
+      for (const [a, b] of PAIRS) {
+        for (const tfidf of [0.05, 0.37, 0.71]) {
+          const port = score(NO_FP, NO_FP, [], [], tfidf, 1, { aTitle: a, bTitle: b });
+          const old = legacy.score(NO_FP, NO_FP, [], [], tfidf, 1, { aTitle: a, bTitle: b });
+          expect(port.score, `${a} | ${b} @${tfidf}`).toBe(old.score);
+          expect(Object.keys(port.components).sort()).toEqual(Object.keys(old.components).sort());
+          expect(Object.keys(port.components)).toContain("actorVeto");
+          for (const k of Object.keys(port.components)) {
+            expect((port.components as Record<string, unknown>)[k], `${a} | ${b} @${tfidf}: ${k}`).toBe(old.components[k]);
+          }
+        }
+      }
+    });
+
+    it("headlineOnlyScore with titles is identical to the .mjs twin", () => {
+      for (const [a, b] of PAIRS) {
+        const ha = headlineTokens(a);
+        const hb = headlineTokens(b);
+        expect(headlineOnlyScore(ha, hb, 3.5, { aTitle: a, bTitle: b }), `${a} | ${b}`).toBe(
+          legacy.headlineOnlyScore(ha, hb, 3.5, { aTitle: a, bTitle: b }),
+        );
+      }
     });
   });
 });

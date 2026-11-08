@@ -50,7 +50,9 @@ import {
 import { extractEntities } from "../_shared/cluster/entities.ts";
 import { bandKeys, LSH_BANDS } from "../_shared/cluster/lsh.ts";
 import { TfidfIndex, type TfidfQuery } from "../_shared/cluster/tfidf.ts";
+import { centroidCosine, centroidGuard, centroidGuardEnabled } from "../_shared/cluster/centroid.ts";
 import {
+  actorMismatchFires,
   headlineLane,
   headlineOnlyScore,
   incidentVetoFires,
@@ -58,6 +60,8 @@ import {
   subjectVetoFires,
 } from "../_shared/cluster/ensemble.ts";
 import {
+  CENTROID_GUARD_ENV,
+  CENTROID_MAX_MEMBERS,
   CONTEXT_STICKY_HOURS,
   CONTEXT_STICKY_MAX,
   CONTEXT_STICKY_MIN_ARTICLES,
@@ -306,6 +310,11 @@ interface HeadlineMember {
   // The member's stored strict fingerprint (null when it never had one): the
   // attach probe's second kind of evidence.
   fingerprint: string | null;
+  // The raw description, kept by reference only like `title`. The centroid guard
+  // (h70-mergequality-2) builds the member's tf-idf text from the two
+  // (memberTfidfText) when -- and only when -- a candidate reaches the guard, so
+  // nothing is cleaned or tokenised at context build.
+  description: string | null;
 }
 
 interface ClusterContext {
@@ -391,6 +400,12 @@ const DESCRIPTION_SWAP_SAMPLE_MAX = 3;
 // own, i.e. the twins the skip would have prevented. Reset at the top of every
 // drainQueue() next to descriptionSwapSuspects.
 let sameSourceUpdateShadow = 0;
+// h70-mergequality-2: candidates the centroid guard passed over in live drains (a
+// dry run is not counted), plus up to CENTROID_SKIP_SAMPLE_MAX {clusterId, cos}
+// samples. Reset at the top of every drainQueue() next to sameSourceUpdateShadow.
+let centroidSkipCount = 0;
+let centroidSkipSamples: Array<{ clusterId: string; cos: number }> = [];
+const CENTROID_SKIP_SAMPLE_MAX = 5;
 // h40-clusters-1: at most this many {article_id, top_cluster_id, top_score}
 // samples of created_with_floor_candidate in one drain summary.
 const CREATED_FLOOR_SAMPLE_MAX = 3;
@@ -834,6 +849,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
         title: art.title,
         tokens: headlineTokens(art.title),
         fingerprint: art.fingerprint ?? null,
+        description: art.description ?? null,
       })),
     );
   }
@@ -911,6 +927,8 @@ function addMemberToIndices(
     source_id: string | null;
     fingerprint: string | null;
     title: string;
+    // Only the centroid guard reads it (HeadlineMember.description).
+    description?: string | null;
     entities: string[] | null;
     signature?: Uint32Array | null;
   },
@@ -929,6 +947,7 @@ function addMemberToIndices(
     title: article.title,
     tokens: headlineTokens(article.title),
     fingerprint: article.fingerprint ?? null,
+    description: article.description ?? null,
   });
   if (article.fingerprint) {
     const list = idx.byFingerprint.get(article.fingerprint) || [];
@@ -1672,7 +1691,11 @@ function sameSourceUpdateMember(
 // of the cluster (sameSourceMembers) and returns the strongest evidence found, or
 // null when nothing ties the article to one of them. Priority: exact-title, then
 // the headline lane, then (h45-clusters-1) same-source-update. Exact-title wins
-// over the lane when different members of the source give both.
+// over the lane when different members of the source give both. A lane match
+// across actors ("Cumhurbaskani Erdogan, ..." against "AK Parti Sozcusu Celik ...")
+// is not identity evidence: the lane is withdrawn everywhere else it counts
+// (score(), the member scan, the attach probe), so it is here too
+// (h70-mergequality-3, actorMismatchFires()).
 function sameSourceDupEvidence(
   ctx: ClusterContext,
   clusterId: string,
@@ -1698,7 +1721,8 @@ function sameSourceDupEvidence(
       evidence === null &&
       Number.isFinite(articleMs) &&
       Number.isFinite(m.ms) &&
-      headlineLane(articleHeadline, m.tokens, Math.abs(articleMs - m.ms) / 3_600_000).fired
+      headlineLane(articleHeadline, m.tokens, Math.abs(articleMs - m.ms) / 3_600_000).fired &&
+      !actorMismatchFires(article.title, m.title)
     ) {
       evidence = "headline-lane";
     }
@@ -1724,6 +1748,13 @@ function fallbackEligibleScore(res: {
     typeof c.raw === "number" && typeof c.jaccardScore === "number" &&
     c.raw > c.jaccardScore;
   return carriedByCappedLane && res.score < MATCH_THRESHOLD ? 0 : res.score;
+}
+
+// True when the full scorer's headline lane is in effect for the result (h70-mergequality-2:
+// a lane the actor veto withdrew reports headlineLane false). Structural, like
+// fallbackEligibleScore, so a partial result is read the same way.
+function headlineLaneFired(res: { components?: Partial<{ headlineLane: boolean }> }): boolean {
+  return res.components?.headlineLane === true;
 }
 
 async function addArticleToCluster(
@@ -2124,7 +2155,11 @@ async function clusterArticle(
   // `score` ranks candidates and feeds Jev's bands. `fallbackScore` is what the
   // fallback loop below may join on: the best result that is NOT carried by the
   // text-floor-capped entity/tfidf lane (see fallbackEligibleScore).
-  type Scored = { clusterId: string; score: number; fallbackScore: number };
+  //
+  // `headlineHit` (h70-mergequality-2): the headline lane carried some part of the
+  // candidate's result -- the full scorer's lane against the seed or the latest, or a
+  // member headline of the scan. Such a candidate is exempt from the centroid guard.
+  type Scored = { clusterId: string; score: number; fallbackScore: number; headlineHit: boolean };
   const scored: Scored[] = [];
 
   // Scores one candidate cluster against the incoming article: the full
@@ -2162,6 +2197,7 @@ async function clusterArticle(
 
     let bestScore = seedRes.score;
     let fallbackScore = fallbackEligibleScore(seedRes);
+    let headlineHit = headlineLaneFired(seedRes);
     const latest = latestByCluster.get(clusterId);
     if (latest) {
       const hoursDeltaLatest = hoursBetween(article.published_at, latest.published_at);
@@ -2187,6 +2223,7 @@ async function clusterArticle(
         );
         if (latestRes.score > bestScore) bestScore = latestRes.score;
         fallbackScore = Math.max(fallbackScore, fallbackEligibleScore(latestRes));
+        if (headlineLaneFired(latestRes)) headlineHit = true;
       }
     }
 
@@ -2213,14 +2250,18 @@ async function clusterArticle(
           {
             aSourceSlug,
             bSourceSlug: m.sourceId ? sourceLookup.get(m.sourceId)?.slug ?? null : null,
+            // h70-mergequality-3: a headline-lane match must not cross actors.
+            aTitle: article.title,
+            bTitle: m.title,
           },
         );
         if (memberScore > bestScore) bestScore = memberScore;
         if (memberScore > fallbackScore) fallbackScore = memberScore;
+        if (memberScore > 0) headlineHit = true;
       }
     }
 
-    return { clusterId, score: bestScore, fallbackScore };
+    return { clusterId, score: bestScore, fallbackScore, headlineHit };
   };
 
   for (const clusterId of candidateIds) {
@@ -2253,6 +2294,102 @@ async function clusterArticle(
   if (!dryRun) await recordTwinBridges(article.id, ranked);
 
   const primary = ranked[0];
+
+  // ---------------------------------------------------------------------
+  // Centroid guard (h70-mergequality-2). Seed and latest are the only members the
+  // full scorer sees, so an off-topic article that shares a person's name with one
+  // of them used to join a big cluster with no check against the cluster as a whole
+  // (centroid.ts, constants.ts CENTROID_*). Before joining a candidate of
+  // CENTROID_MIN_MEMBERS or more members on non-headline evidence the article's
+  // tf-idf vector must reach CENTROID_FLOOR with the centroid of the cluster's
+  // seed and its CENTROID_MAX_MEMBERS newest scan members. A candidate the guard
+  // passes over is skipped, not blocked: the walk goes on to the next candidate and,
+  // with none left, the article opens its own cluster. The vectors are built lazily,
+  // only for a candidate that reaches the guard, and the cosine is kept per
+  // cluster for this article. CLUSTER_CENTROID_GUARD=off turns it off.
+  //
+  // The guard sits before the Jev live band below, not only in the join loop: Jev sees
+  // just the seed headline and the latest headline, the same blind spot, and its "join"
+  // answer is executed on its own path (pendingJoin). A guard-failing primary therefore
+  // makes no gateway call and never reaches that join; the verdict is memoised per
+  // cluster, so a cluster evaluated here and again by the join loop is logged and
+  // counted once per article.
+  // ---------------------------------------------------------------------
+  const centroidOn = centroidGuardEnabled(Deno.env.get(CENTROID_GUARD_ENV) ?? undefined);
+  const centroidCosines = new Map<string, number>();
+  const centroidVerdicts = new Map<string, boolean>();
+  const memberCountOf = (clusterId: string): number =>
+    Math.max(
+      Number(ctx.clusters.find((c) => c.id === clusterId)?.article_count) || 0,
+      ctx.sourceIdsByCluster.get(clusterId)?.size ?? 0,
+    );
+  // The article's cosine with the centroid of the cluster's seed and newest scan
+  // members (not the article itself, whose own text would flatter the cluster);
+  // 1 when there is nothing to compare with.
+  const centroidCosineFor = (clusterId: string): number => {
+    const cached = centroidCosines.get(clusterId);
+    if (cached !== undefined) return cached;
+    const texts: string[] = [];
+    const seen = new Set<string>();
+    const add = (m: { id: string; title: string; description: string | null }) => {
+      if (m.id === article.id || seen.has(m.id)) return;
+      seen.add(m.id);
+      texts.push(memberTfidfText(m));
+    };
+    const seed = seedByCluster.get(clusterId);
+    if (seed) add(seed);
+    let scanned = 0;
+    for (const m of headlinesByCluster.get(clusterId) ?? []) {
+      if (scanned >= CENTROID_MAX_MEMBERS) break;
+      scanned += 1;
+      add(m);
+    }
+    const cos = texts.length === 0
+      ? 1
+      : centroidCosine(`${article.title || ""} ${article.clusteringDescription || ""}`, texts, ctx.tfidf);
+    centroidCosines.set(clusterId, cos);
+    return cos;
+  };
+  // Evaluates the guard for `cand`: true when it passes the candidate over (logged and,
+  // in a live drain, counted).
+  const evaluateCentroidGuard = (cand: Scored): boolean => {
+    const seed = seedByCluster.get(cand.clusterId);
+    const latest = latestByCluster.get(cand.clusterId);
+    const scan = headlinesByCluster.get(cand.clusterId) ?? [];
+    const fp = article.fingerprint;
+    const verdict = centroidGuard({
+      enabled: centroidOn,
+      memberCount: memberCountOf(cand.clusterId),
+      headlineHit: cand.headlineHit,
+      exactTitleProbeHit: probeSet.has(cand.clusterId),
+      strictFingerprintMatch: Boolean(fp) &&
+        (seed?.fingerprint === fp || latest?.fingerprint === fp || scan.some((m) => m.fingerprint === fp)),
+      alreadyMember: seed?.id === article.id || latest?.id === article.id || scan.some((m) => m.id === article.id),
+      cosine: () => centroidCosineFor(cand.clusterId),
+    });
+    if (!verdict.blocked) return false;
+    const cos = verdict.cosine ?? 0;
+    console.log(
+      `[cluster-consumer] centroid-guard skip article=${article.id} cluster=${cand.clusterId} cos=${cos.toFixed(3)}${dryRun ? " dry-run" : ""}`,
+    );
+    if (!dryRun) {
+      centroidSkipCount += 1;
+      if (centroidSkipSamples.length < CENTROID_SKIP_SAMPLE_MAX) {
+        centroidSkipSamples.push({ clusterId: cand.clusterId, cos: Math.round(cos * 1000) / 1000 });
+      }
+    }
+    return true;
+  };
+  // True when the guard passes `cand` over. Evaluated once per cluster for this article
+  // (the Jev live band and the join loop may both ask), so it is logged and counted once.
+  const centroidBlocks = (cand: Scored): boolean => {
+    if (!centroidOn) return false;
+    const memo = centroidVerdicts.get(cand.clusterId);
+    if (memo !== undefined) return memo;
+    const verdict = evaluateCentroidGuard(cand);
+    centroidVerdicts.set(cand.clusterId, verdict);
+    return verdict;
+  };
 
   // ---------------------------------------------------------------------
   // P3 live marginal verification (migration 064, JEV_LIVE_PAIRS flag).
@@ -2292,7 +2429,7 @@ async function clusterArticle(
     inputTokens: number;
   } | null = null;
 
-  if (jevLive.enabled && primary && band !== "none" && !dryRun) {
+  if (jevLive.enabled && primary && band !== "none" && !dryRun && !centroidBlocks(primary)) {
     // Budget is gated on ATTEMPTS, not successes -- jevLiveAttempts is
     // bumped immediately before the gateway call below regardless of
     // outcome, so a gateway outage (timeouts/5xx on every call) still
@@ -2439,28 +2576,47 @@ async function clusterArticle(
   // The join loop, shared by the context candidates below and by the stem-probe
   // hits further down: walks `cands` in ranking order and hands the article to
   // the first cluster that takes it. A candidate below `bar` ends the walk; one
-  // whose fallbackScore is below `bar` is passed over. In a dry run it reports
+  // whose fallbackScore is below `bar` is passed over, and so is one the centroid
+  // guard above rejects. In a dry run it reports
   // "would_match" instead of writing. Clusters that already hold the article's
   // source are added to `blocked` (and, with evidence, to dupBlock via
   // noteDupBlock). Returns the outcome of the join, or null when nothing took the
   // article.
+  //
+  // A centroid-guard skip of a candidate at or above MATCH_THRESHOLD withdraws the
+  // "primary is a match" premise, exactly as a Jev reject does (see fallbackBar
+  // below): from then on the bar is at least MATCH_THRESHOLD, so the loop cannot
+  // fall into a sub-threshold candidate the ensemble would never have joined on its
+  // own. A duplicate-source skip of an at-or-above-threshold candidate keeps the
+  // premise (the story is matched, its cluster merely holds the source), so once one
+  // has happened the bar stays as given (h70-mergequality-2).
   const joinFirstAvailable = async (
     cands: readonly Scored[],
     bar: number,
     blocked: Set<string>,
   ): Promise<ProcessOutcome | null> => {
+    let guardSkippedMatch = false;
+    let dupSkippedMatch = false;
     for (const cand of cands) {
       if (blocked.has(cand.clusterId)) continue;
-      if (cand.score < bar) break;
+      const effBar = guardSkippedMatch && !dupSkippedMatch ? Math.max(bar, MATCH_THRESHOLD) : bar;
+      if (cand.score < effBar) break;
       // The text floor caps the entity/tfidf lane at MATCH_THRESHOLD - 0.01,
       // inside [FALLBACK_FLOOR, MATCH_THRESHOLD). A candidate whose only
       // results in that window rest on the capped lane is a pair joined by
       // entities alone; it may still be reviewed by Jev's low band above, but
       // must not join here when the primary was skipped as a duplicate-source.
-      if (cand.fallbackScore < bar) continue;
+      if (cand.fallbackScore < effBar) continue;
+      // h70-mergequality-2: the centroid guard. Skipped, not blocked: a later
+      // candidate is still tried, and the cluster is not recorded as a duplicate.
+      if (centroidBlocks(cand)) {
+        if (cand.score >= MATCH_THRESHOLD) guardSkippedMatch = true;
+        continue;
+      }
       if (dryRun) {
         if (wouldDuplicate(ctx, cand.clusterId, article)) {
           blocked.add(cand.clusterId);
+          if (cand.score >= MATCH_THRESHOLD) dupSkippedMatch = true;
           noteDupBlock(
             cand.clusterId,
             cand.score,
@@ -2479,6 +2635,7 @@ async function clusterArticle(
       if (result.skipped) {
         blocked.add(cand.clusterId);
         if (result.reason === "duplicate-source") {
+          if (cand.score >= MATCH_THRESHOLD) dupSkippedMatch = true;
           // probeSet holds only exact-title probe hits; a stem-probe hit is never
           // in it (its id was not in ctx.clusters yet), so it gets probeHit false.
           noteDupBlock(
@@ -2511,6 +2668,11 @@ async function clusterArticle(
     // Without this, a band-high reject (primary in [0.40, 0.44)) could
     // fall through into a genuinely sub-threshold join in [FALLBACK_FLOOR,
     // MATCH_THRESHOLD) -- a join the ensemble alone would never make.
+    // A centroid-guard skip of an at-or-above-threshold candidate withdraws
+    // the same premise, and joinFirstAvailable raises its own bar to
+    // MATCH_THRESHOLD from then on -- unless an above-threshold candidate
+    // was skipped as a duplicate-source, whose premise (the story matches)
+    // is intact, so the old sub-threshold fallback stays (h70-mergequality-2).
     const fallbackBar = marginalRejectedClusterId ? MATCH_THRESHOLD : FALLBACK_FLOOR;
     const joined = await joinFirstAvailable(ranked, fallbackBar, blocked);
     if (joined) return joined;
@@ -2864,6 +3026,7 @@ async function processAttach(
       source_id: raw.source_id,
       fingerprint,
       title: raw.title || "",
+      description: raw.description,
       entities: null,
       signature: null,
     });
@@ -3025,6 +3188,11 @@ interface InvocationSummary {
   // have been skipped with SAME_SOURCE_UPDATE_ENFORCE on and opened a cluster
   // instead. Always 0 once the constant is true (they are skipped, not counted).
   sameSourceUpdateShadow: number;
+  // h70-mergequality-2: candidate clusters the centroid guard passed over (live drains
+  // only) -- the article did not join them because its text does not fit the cluster as
+  // a whole -- and up to CENTROID_SKIP_SAMPLE_MAX {clusterId, cos} samples (ids and a
+  // cosine, never a title). Watch it after a deploy: more than ~2% of joins deserves a look.
+  centroidSkips: { count: number; samples: Array<{ clusterId: string; cos: number }> };
   // h40-clusters-1 (diagnostics, counts and ids only -- never a title or a URL).
   // Whole minutes from now to the oldest updated_at among the newest-
   // CONTEXT_CLUSTER_CAP clusters of the context this drain used (null when that
@@ -3188,6 +3356,8 @@ async function drainQueue(): Promise<InvocationSummary> {
   descriptionSwapSuspects = 0;
   descriptionSwapSamples = [];
   sameSourceUpdateShadow = 0;
+  centroidSkipCount = 0;
+  centroidSkipSamples = [];
 
   // Migration 089 ("ADMIT"): read the flag inside drainQueue (not at module
   // load) so the Deno-env polyfill test harness keeps working, same
@@ -3210,6 +3380,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     descriptionSwapSuspects: 0,
     descriptionSwapSamples: [],
     sameSourceUpdateShadow: 0,
+    centroidSkips: { count: 0, samples: [] },
     ctx_window_min: null,
     created_with_floor_candidate: 0,
     created_with_floor_candidate_samples: [],
@@ -3484,6 +3655,7 @@ async function drainQueue(): Promise<InvocationSummary> {
   summary.descriptionSwapSuspects = descriptionSwapSuspects;
   summary.descriptionSwapSamples = [...descriptionSwapSamples];
   summary.sameSourceUpdateShadow = sameSourceUpdateShadow;
+  summary.centroidSkips = { count: centroidSkipCount, samples: centroidSkipSamples.map((x) => ({ ...x })) };
   // h40-clusters-1: the age of the window of the context the drain ended with
   // (windowOldestUpdatedMs is set once per context build, so this is the window
   // the last message was scored against).
