@@ -1,4 +1,8 @@
-import { getSourceMetadata, type Factuality } from "@/lib/sources/factuality";
+import {
+  FACTUALITY_LABELS,
+  getSourceMetadata,
+  type Factuality,
+} from "@/lib/sources/factuality";
 import {
   isClassifiedSource,
   UNCLASSIFIED_LABEL_TR,
@@ -35,12 +39,6 @@ import { cn } from "@/lib/utils";
  *     not bias signals, and we don't want them to compete visually with
  *     the bias chip already on the card.
  */
-
-const FACTUALITY_LABELS: Record<Factuality, string> = {
-  high: "Yüksek doğruluk",
-  mixed: "Karışık doğruluk",
-  low: "Düşük doğruluk",
-};
 
 const FACTUALITY_CLASSES: Record<Factuality, string> = {
   high: "bg-emerald-500/10 text-emerald-800 border-emerald-500/20 dark:text-emerald-400",

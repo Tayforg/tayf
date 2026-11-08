@@ -4,12 +4,14 @@ import { resolve } from "node:path";
 import {
   selectGameHeadlines,
   sampleHeadlines,
+  MAX_HEADLINES_PER_OUTLET,
   type GameClusterRow,
   type GameHeadline,
 } from "./headline-pool";
 import { GAME_ROUND_SIZE, GAME_SESSION_SIZE } from "./round-size";
+import { THROTTLE_POLICY } from "@/lib/api/db-throttle";
 import { zoneOf } from "@/lib/bias/config";
-import type { BiasCategory } from "@/types";
+import type { BiasCategory, MediaDnaZone } from "@/types";
 
 const NOW_MS = new Date("2026-09-18T12:00:00.000Z").getTime();
 const HOUR_MS = 3_600_000;
@@ -23,6 +25,7 @@ function makeRow(overrides: {
   articleCount?: number;
   publishedAt?: string;
   sourceId?: string;
+  sourceName?: string;
   sourceSlug?: string;
   sourceKind?: "outlet" | "aggregator" | "wire" | "niche" | null;
   sourceActive?: boolean;
@@ -47,7 +50,7 @@ function makeRow(overrides: {
           source_id: sourceId,
           sources: {
             id: sourceId,
-            name: `Kaynak ${sourceSeq}`,
+            name: overrides.sourceName ?? `Kaynak ${sourceSeq}`,
             slug: overrides.sourceSlug ?? `kaynak-${sourceSeq}`,
             bias: overrides.bias ?? "center",
             kind: overrides.sourceKind === undefined ? "outlet" : overrides.sourceKind,
@@ -113,15 +116,112 @@ describe("selectGameHeadlines", () => {
     expect(result[0]?.articleId).toBe(active.cluster_articles![0]!.articles!.id);
   });
 
-  it("collapses two headlines from the same outlet to one", () => {
+  it("collapses two headlines from the same outlet to one within one cluster", () => {
     const sameOutlet = "source-shared";
-    const first = makeRow({ sourceId: sameOutlet });
-    const second = makeRow({ sourceId: sameOutlet });
+    const cluster: GameClusterRow = {
+      id: "cluster-one",
+      article_count: 3,
+      cluster_articles: [
+        makeRow({ clusterId: "cluster-one", sourceId: sameOutlet }),
+        makeRow({ clusterId: "cluster-one", sourceId: sameOutlet }),
+      ].flatMap((row) => row.cluster_articles ?? []),
+    };
 
-    const result = selectGameHeadlines([first, second]);
+    const result = selectGameHeadlines([cluster]);
 
     const fromSharedOutlet = result.filter((h) => h.sourceId === sameOutlet);
     expect(fromSharedOutlet).toHaveLength(1);
+    // The first article of the outlet in that cluster is the one kept.
+    expect(fromSharedOutlet[0]?.articleId).toBe(cluster.cluster_articles![0]!.articles!.id);
+  });
+
+  it("keeps an outlet's headline in every cluster it appears in: outlet X in cluster 1 and cluster 2 gives 2 candidates", () => {
+    const first = makeRow({ clusterId: "cluster-1", sourceId: "source-x" });
+    const second = makeRow({ clusterId: "cluster-2", sourceId: "source-x" });
+
+    const result = selectGameHeadlines([first, second]);
+
+    expect(result).toHaveLength(2);
+    expect(result.map((h) => h.clusterId)).toEqual(["cluster-1", "cluster-2"]);
+    expect(new Set(result.map((h) => h.sourceId))).toEqual(new Set(["source-x"]));
+  });
+
+  it("the per-cluster outlet rule leaves the other rules in force: a stale, small or PII cluster of the same outlet adds nothing", () => {
+    const fresh = makeRow({ clusterId: "cluster-1", sourceId: "source-x" });
+    const stale = makeRow({
+      clusterId: "cluster-2",
+      sourceId: "source-x",
+      publishedAt: new Date(NOW_MS - 49 * HOUR_MS).toISOString(),
+    });
+    const small = makeRow({ clusterId: "cluster-3", sourceId: "source-x", articleCount: 2 });
+    const pii = makeRow({
+      clusterId: "cluster-4",
+      sourceId: "source-x",
+      title: "17 yaşındaki genç kazada hayatını kaybetti",
+    });
+
+    const result = selectGameHeadlines([fresh, stale, small, pii]);
+
+    expect(result.map((h) => h.clusterId)).toEqual(["cluster-1"]);
+  });
+
+  it("drops a headline that names its own outlet, and keeps the same title for another outlet", () => {
+    const title = "CNN TÜRK Azerbaycan’da | Karabağ Zaferi’nin Yıldönümü!";
+    const own = makeRow({ clusterId: "cluster-1", sourceName: "CNN Türk", title });
+    const other = makeRow({ clusterId: "cluster-1", sourceName: "Halk TV", title });
+    const cluster: GameClusterRow = {
+      id: "cluster-1",
+      article_count: 3,
+      cluster_articles: [own, other].flatMap((row) => row.cluster_articles ?? []),
+    };
+
+    const result = selectGameHeadlines([cluster]);
+
+    expect(result.map((h) => h.sourceName)).toEqual(["Halk TV"]);
+  });
+
+  it("an outlet-name leak does not use up the outlet's slot in the cluster: its later, clean headline stays", () => {
+    const leaking = makeRow({
+      clusterId: "cluster-1",
+      sourceId: "source-cnn",
+      sourceName: "CNN Türk",
+      title: "Trump'ın eski kurul üyesi CNN TÜRK'te: açıklamalar",
+    });
+    const clean = makeRow({
+      clusterId: "cluster-1",
+      sourceId: "source-cnn",
+      sourceName: "CNN Türk",
+      title: "Trump'ın eski kurul üyesi açıklamalarda bulundu",
+    });
+    const cluster: GameClusterRow = {
+      id: "cluster-1",
+      article_count: 3,
+      cluster_articles: [leaking, clean].flatMap((row) => row.cluster_articles ?? []),
+    };
+
+    const result = selectGameHeadlines([cluster]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.articleId).toBe(clean.cluster_articles![0]!.articles!.id);
+  });
+
+  it("keeps a headline whose words merely overlap the outlet name (Cumhuriyet Halk Partisi, Yeni Parti)", () => {
+    const cumhuriyet = makeRow({
+      sourceName: "Cumhuriyet",
+      title: "Cumhuriyet Halk Partisi açıklama yaptı",
+    });
+    const yeniSafak = makeRow({
+      sourceName: "Yeni Şafak",
+      title: "Yeni Parti'den istifa etti",
+    });
+    const turkiye = makeRow({
+      sourceName: "Türkiye Gazetesi",
+      title: "Türkiye ile Azerbaycan arasında anlaşma",
+    });
+
+    const result = selectGameHeadlines([cumhuriyet, yeniSafak, turkiye]);
+
+    expect(result).toHaveLength(3);
   });
 
   it("drops a PII-matching headline even when everything else passes", () => {
@@ -332,14 +432,14 @@ describe("selectGameHeadlines -- cluster id", () => {
     expect(new Set(result.map((h) => h.sourceId)).size).toBe(3);
   });
 
-  it("still lets an outlet appear once across clusters (the outlet rule is unchanged)", () => {
+  it("lets an outlet appear in each cluster it covers (the outlet rule is per cluster)", () => {
     const first = makeRow({ clusterId: "cluster-a", sourceId: "source-shared" });
     const second = makeRow({ clusterId: "cluster-b", sourceId: "source-shared" });
 
     const result = selectGameHeadlines([first, second]);
 
-    expect(result).toHaveLength(1);
-    expect(result[0]?.clusterId).toBe("cluster-a");
+    expect(result).toHaveLength(2);
+    expect(result.map((h) => h.clusterId)).toEqual(["cluster-a", "cluster-b"]);
   });
 });
 
@@ -392,10 +492,10 @@ describe("round and session sizes", () => {
   });
 });
 
-// A round must never hold two headlines of the same story. The pool keeps
-// every outlet's headline (outlet rule only), so the one-per-cluster rule is
-// applied per draw, on a uniform shuffle: which outlet represents a cluster
-// is random and no zone gets extra weight.
+// A draw must never hold two headlines of the same story. The pool keeps every
+// outlet's headline in every cluster (the outlet rule is per cluster), so the
+// one-per-cluster rule is applied per draw: which outlet represents a cluster is
+// random, and the zone rotation (below) keeps any zone from getting extra weight.
 describe("sampleHeadlines -- at most one headline per cluster", () => {
   function pool(clusterX: number, singles: number): GameHeadline[] {
     return selectGameHeadlines([
@@ -483,8 +583,400 @@ describe("sampleHeadlines -- at most one headline per cluster", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Zone balance. With the outlet rule per cluster, one random member per cluster
+// weights each zone by how many of its outlets cover the story: the live pool
+// (23 iktidar, 22 bağımsız, 15 muhalefet outlets) drew 46.5 / 23.0 / 30.5 %.
+// The sampler therefore rotates over the zones instead of shuffling the pool.
+// ---------------------------------------------------------------------------
+
+/** Deterministic rng (mulberry32), so the statistical tests below cannot flake. */
+function seededRng(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+const ZONE_NAMES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
+const OUTLETS_PER_ZONE: readonly number[] = [23, 22, 15];
+
+/** Builds one candidate; `outletKey` is the outlet's id within the fixture. */
+function candidate(
+  clusterId: string,
+  zone: MediaDnaZone,
+  outletKey: string,
+  index: number,
+): GameHeadline {
+  return {
+    articleId: `article-${clusterId}-${index}`,
+    clusterId,
+    sourceId: outletKey,
+    title: `Başlık ${clusterId} ${index}`,
+    sourceName: outletKey,
+    sourceSlug: outletKey,
+    bias: zone === "iktidar" ? "pro_government" : zone === "muhalefet" ? "opposition" : "center",
+    zone,
+  };
+}
+
+/**
+ * 60 clusters with 1..4 candidates each (sizes cycle 1,2,4,3,2 = 12 per 5
+ * clusters, 144 candidates). `zonePattern` deals the 144 candidate slots to the
+ * three zones in a 4-slot cycle, so the zone totals are exactly 2:1:1 for
+ * [0,1,0,2] and 1:2:1 for [1,0,1,2]. Each zone rotates through 23 / 22 / 15
+ * distinct outlets; a cluster never holds one outlet twice.
+ */
+function zoneFixture(zonePattern: readonly number[]): GameHeadline[] {
+  const sizes = [1, 2, 4, 3, 2];
+  const perZoneCounter = [0, 0, 0];
+  const out: GameHeadline[] = [];
+  let slot = 0;
+  for (let c = 0; c < 60; c++) {
+    const size = sizes[c % sizes.length] as number;
+    for (let i = 0; i < size; i++) {
+      const z = zonePattern[slot % zonePattern.length] as number;
+      const outlet = perZoneCounter[z] as number;
+      perZoneCounter[z] = outlet + 1;
+      out.push(
+        candidate(
+          `cluster-${c}`,
+          ZONE_NAMES[z] as MediaDnaZone,
+          `outlet-${ZONE_NAMES[z]}-${outlet % (OUTLETS_PER_ZONE[z] as number)}`,
+          i,
+        ),
+      );
+      slot++;
+    }
+  }
+  return out;
+}
+
+function zoneCounts(items: readonly GameHeadline[]): Record<MediaDnaZone, number> {
+  const counts: Record<MediaDnaZone, number> = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+  for (const item of items) counts[item.zone] += 1;
+  return counts;
+}
+
+describe("sampleHeadlines -- zone balance", () => {
+  const FIXTURES: ReadonlyArray<readonly [string, readonly number[], readonly number[]]> = [
+    ["2:1:1", [0, 1, 0, 2], [72, 36, 36]],
+    ["1:2:1", [1, 0, 1, 2], [36, 72, 36]],
+  ];
+
+  it.each(FIXTURES)(
+    "fixture %s: 60 clusters of 1-4 candidates, 23/22/15 outlets, zone totals in the stated ratio",
+    (_name, pattern, expectedTotals) => {
+      const fixture = zoneFixture(pattern);
+
+      expect(new Set(fixture.map((h) => h.clusterId)).size).toBe(60);
+      const perCluster = new Map<string, number>();
+      for (const h of fixture) perCluster.set(h.clusterId, (perCluster.get(h.clusterId) ?? 0) + 1);
+      expect(Math.min(...perCluster.values())).toBe(1);
+      expect(Math.max(...perCluster.values())).toBe(4);
+      const totals = zoneCounts(fixture);
+      expect([totals.iktidar, totals.bagimsiz, totals.muhalefet]).toEqual([...expectedTotals]);
+      for (const [z, zone] of ZONE_NAMES.entries()) {
+        const outlets = new Set(fixture.filter((h) => h.zone === zone).map((h) => h.sourceId));
+        expect(outlets.size).toBe(OUTLETS_PER_ZONE[z]);
+      }
+      // No cluster holds one outlet twice (the shape selectGameHeadlines returns).
+      const pairs = new Set(fixture.map((h) => `${h.clusterId}|${h.sourceId}`));
+      expect(pairs.size).toBe(fixture.length);
+    },
+  );
+
+  it.each(FIXTURES)(
+    "fixture %s: 2,000 draws of 30 all have length 30 and each zone holds 0.30-0.37 of the first 10 headlines",
+    (_name, pattern) => {
+      const fixture = zoneFixture(pattern);
+      const rng = seededRng(20261108);
+      const firstTen: Record<MediaDnaZone, number> = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+      const session: Record<MediaDnaZone, number> = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+      const DRAWS = 2000;
+
+      for (let draw = 0; draw < DRAWS; draw++) {
+        const result = sampleHeadlines(fixture, 30, rng);
+        expect(result).toHaveLength(30);
+        for (const h of result.slice(0, 10)) firstTen[h.zone] += 1;
+        for (const h of result) session[h.zone] += 1;
+      }
+
+      for (const zone of ZONE_NAMES) {
+        const share = firstTen[zone] / (DRAWS * 10);
+        expect(share, `${zone} share of the first 10`).toBeGreaterThanOrEqual(0.3);
+        expect(share, `${zone} share of the first 10`).toBeLessThanOrEqual(0.37);
+        // The whole 30-headline session is balanced too.
+        const sessionShare = session[zone] / (DRAWS * 30);
+        expect(sessionShare, `${zone} share of the session`).toBeGreaterThanOrEqual(0.3);
+        expect(sessionShare, `${zone} share of the session`).toBeLessThanOrEqual(0.37);
+      }
+    },
+  );
+
+  it("the zone at position 0 varies across draws", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+    const rng = seededRng(7);
+    const first = new Set<MediaDnaZone>();
+    for (let draw = 0; draw < 1000; draw++) {
+      first.add((sampleHeadlines(fixture, 30, rng)[0] as GameHeadline).zone);
+    }
+    expect(first).toEqual(new Set(ZONE_NAMES));
+  });
+
+  it("the draw is shuffled at the end: zones do not follow the rotation order", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+    const rng = seededRng(13);
+    let sameZoneNeighbours = 0;
+    const patterns = new Set<string>();
+    for (let draw = 0; draw < 300; draw++) {
+      const result = sampleHeadlines(fixture, 30, rng);
+      if (result[0]?.zone === result[1]?.zone) sameZoneNeighbours += 1;
+      patterns.add(result.slice(0, 6).map((h) => h.zone[0]).join(""));
+    }
+    // A strict rotation never puts two neighbours in one zone and has only 6
+    // possible 6-long zone patterns; a shuffle of 10/10/10 does neither.
+    expect(sameZoneNeighbours).toBeGreaterThan(50);
+    expect(patterns.size).toBeGreaterThan(6);
+  });
+
+  it("a draw of 10 is balanced too: zone counts differ by at most one", () => {
+    // limit 10 = 4/3/3 in some order: the rotation, not the pool shares, decides.
+    const fixture = zoneFixture([0, 1, 0, 2]);
+    const rng = seededRng(99);
+    for (let draw = 0; draw < 500; draw++) {
+      const counts = zoneCounts(sampleHeadlines(fixture, 10, rng));
+      const values = Object.values(counts);
+      expect(Math.max(...values) - Math.min(...values)).toBeLessThanOrEqual(1);
+      expect(values.reduce((a, b) => a + b, 0)).toBe(10);
+    }
+  });
+});
+
+describe("sampleHeadlines -- invariants over 1,000 draws", () => {
+  it("no clusterId appears twice and no outlet more than MAX_HEADLINES_PER_OUTLET times", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+    const rng = seededRng(31337);
+
+    for (let draw = 0; draw < 1000; draw++) {
+      const result = sampleHeadlines(fixture, 30, rng);
+
+      expect(new Set(result.map((h) => h.clusterId)).size).toBe(result.length);
+      const perOutlet = new Map<string, number>();
+      for (const h of result) perOutlet.set(h.sourceId, (perOutlet.get(h.sourceId) ?? 0) + 1);
+      expect(Math.max(...perOutlet.values())).toBeLessThanOrEqual(MAX_HEADLINES_PER_OUTLET);
+    }
+  });
+
+  it("MAX_HEADLINES_PER_OUTLET is 1", () => {
+    expect(MAX_HEADLINES_PER_OUTLET).toBe(1);
+  });
+
+  it("three 30-headline loads a day stay under /api/oyun's per-outlet throttle (3 guesses per client per outlet per day)", () => {
+    // The throttle silently drops a guess past THROTTLE_POLICY.oyunSourceLimit,
+    // so a player who reloads the game must not be served one outlet more often
+    // than that: MAX per load x 3 loads has to fit the limit.
+    expect(MAX_HEADLINES_PER_OUTLET * 3).toBeLessThanOrEqual(THROTTLE_POLICY.oyunSourceLimit);
+  });
+
+  it("the outlet cap binds: 3 zones x 2 outlets x 20 clusters gives 3 x 2 x MAX_HEADLINES_PER_OUTLET headlines, exactly MAX per outlet, never padded", () => {
+    const fixture: GameHeadline[] = [];
+    for (const zone of ZONE_NAMES) {
+      for (let c = 0; c < 20; c++) {
+        fixture.push(candidate(`cluster-${zone}-${c}`, zone, `outlet-${zone}-${c % 2}`, 0));
+      }
+    }
+    const rng = seededRng(5);
+
+    for (let draw = 0; draw < 1000; draw++) {
+      const result = sampleHeadlines(fixture, 30, rng);
+
+      expect(result).toHaveLength(3 * 2 * MAX_HEADLINES_PER_OUTLET);
+      const perOutlet = new Map<string, number>();
+      for (const h of result) perOutlet.set(h.sourceId, (perOutlet.get(h.sourceId) ?? 0) + 1);
+      expect(perOutlet.size).toBe(6);
+      for (const count of perOutlet.values()) expect(count).toBe(MAX_HEADLINES_PER_OUTLET);
+    }
+  });
+
+  it("fewer usable clusters than the limit: a shorter list, never padded with a second headline of a cluster", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]).filter((h) => {
+      const n = Number(h.clusterId.replace("cluster-", ""));
+      return n < 7;
+    });
+    expect(new Set(fixture.map((h) => h.clusterId)).size).toBe(7);
+    const rng = seededRng(11);
+
+    for (let draw = 0; draw < 1000; draw++) {
+      const result = sampleHeadlines(fixture, 30, rng);
+
+      expect(result).toHaveLength(7);
+      expect(new Set(result.map((h) => h.clusterId)).size).toBe(7);
+    }
+  });
+
+  it("a zone with a single cluster still appears, exactly once per draw", () => {
+    const fixture: GameHeadline[] = [];
+    for (let c = 0; c < 40; c++) {
+      fixture.push(candidate(`ik-${c}`, "iktidar", `ik-outlet-${c % 20}`, 0));
+      fixture.push(candidate(`bg-${c}`, "bagimsiz", `bg-outlet-${c % 20}`, 0));
+    }
+    // The lone muhalefet cluster is covered by three outlets: one of them is drawn.
+    fixture.push(candidate("mh-only", "muhalefet", "mh-outlet-a", 0));
+    fixture.push(candidate("mh-only", "muhalefet", "mh-outlet-b", 1));
+    fixture.push(candidate("mh-only", "muhalefet", "mh-outlet-c", 2));
+    const rng = seededRng(21);
+
+    const seenOutlets = new Set<string>();
+    for (let draw = 0; draw < 1000; draw++) {
+      const result = sampleHeadlines(fixture, 30, rng);
+
+      expect(result).toHaveLength(30);
+      const muhalefet = result.filter((h) => h.zone === "muhalefet");
+      expect(muhalefet).toHaveLength(1);
+      seenOutlets.add((muhalefet[0] as GameHeadline).sourceId);
+    }
+    expect(seenOutlets.size).toBe(3);
+  });
+
+  it("a single zone is enough: the draw is just that zone's clusters, one per cluster", () => {
+    const fixture = Array.from({ length: 12 }, (_, c) =>
+      candidate(`only-${c}`, "bagimsiz", `outlet-${c}`, 0),
+    );
+
+    const result = sampleHeadlines(fixture, 10, seededRng(3));
+
+    expect(result).toHaveLength(10);
+    expect(new Set(result.map((h) => h.zone))).toEqual(new Set(["bagimsiz"]));
+  });
+
+  it("keeps the `clusterId || articleId` fallback key: candidates without a clusterId dedupe per article", () => {
+    const base = zoneFixture([0, 1, 0, 2]).map((h) => ({ ...h, clusterId: "" }));
+    const rng = seededRng(41);
+
+    for (let draw = 0; draw < 200; draw++) {
+      const result = sampleHeadlines(base, 30, rng);
+
+      expect(result).toHaveLength(30);
+      expect(new Set(result.map((h) => h.articleId)).size).toBe(30);
+    }
+  });
+
+  it("an empty clusterId does not collapse the pool to one headline", () => {
+    const stale = [
+      candidate("", "iktidar", "outlet-a", 0),
+      candidate("", "bagimsiz", "outlet-b", 1),
+      candidate("", "muhalefet", "outlet-c", 2),
+    ];
+
+    expect(sampleHeadlines(stale, 30, seededRng(1))).toHaveLength(3);
+  });
+
+  it("limit 0 and an empty pool return an empty list", () => {
+    expect(sampleHeadlines(zoneFixture([0, 1, 0, 2]), 0, seededRng(1))).toEqual([]);
+    expect(sampleHeadlines([], 30, seededRng(1))).toEqual([]);
+  });
+
+  it("does not mutate or reorder the candidate list", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+    const before = fixture.map((h) => h.articleId);
+    const frozen = Object.freeze([...fixture]);
+
+    sampleHeadlines(frozen, 30, seededRng(2));
+
+    expect(fixture.map((h) => h.articleId)).toEqual(before);
+  });
+
+  it("returns only candidates it was given, each at most once", () => {
+    const fixture = zoneFixture([1, 0, 1, 2]);
+    const ids = new Set(fixture.map((h) => h.articleId));
+
+    const result = sampleHeadlines(fixture, 30, seededRng(8));
+
+    expect(new Set(result.map((h) => h.articleId)).size).toBe(result.length);
+    for (const h of result) expect(ids.has(h.articleId)).toBe(true);
+  });
+});
+
+describe("sampleHeadlines -- rng parameter", () => {
+  it("defaults to Math.random: the two-argument call keeps working and varies", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+
+    const draws = new Set<string>();
+    for (let i = 0; i < 20; i++) {
+      draws.add(
+        sampleHeadlines(fixture, 30)
+          .map((h) => h.articleId)
+          .join(","),
+      );
+    }
+
+    expect(draws.size).toBeGreaterThan(1);
+  });
+
+  it("uses the injected rng for every random choice and never touches Math.random", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+    const spy = vi.spyOn(Math, "random");
+    try {
+      sampleHeadlines(fixture, 30, seededRng(4));
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("the same seed gives the same draw; another seed gives another", () => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+    const ids = (seed: number) =>
+      sampleHeadlines(fixture, 30, seededRng(seed)).map((h) => h.articleId);
+
+    expect(ids(123)).toEqual(ids(123));
+    expect(ids(123)).not.toEqual(ids(124));
+  });
+
+  it.each([0, 0.5, 0.999999999])("a constant rng of %s still returns a valid, full draw", (value) => {
+    const fixture = zoneFixture([0, 1, 0, 2]);
+
+    const result = sampleHeadlines(fixture, 30, () => value);
+
+    expect(result).toHaveLength(30);
+    expect(new Set(result.map((h) => h.clusterId)).size).toBe(30);
+  });
+
+  it("handles a large pool (12,000 candidates in 4,000 clusters) in one call", () => {
+    const big: GameHeadline[] = [];
+    for (let c = 0; c < 4000; c++) {
+      for (let k = 0; k < 3; k++) {
+        const z = (c + k) % 3;
+        big.push(candidate(`big-${c}`, ZONE_NAMES[z] as MediaDnaZone, `o-${z}-${(c * 3 + k) % 40}`, k));
+      }
+    }
+
+    const result = sampleHeadlines(big, 30, seededRng(77));
+
+    expect(result).toHaveLength(30);
+    expect(new Set(result.map((h) => h.clusterId)).size).toBe(30);
+  });
+});
+
 describe("headline-pool source guard", () => {
   const source = readFileSync(resolve(__dirname, "headline-pool.ts"), "utf8");
+
+  it("uses the shared outlet-name rule from outlet-leak.ts, after the PII check", () => {
+    expect(source).toContain('import { titleNamesOutlet } from "./outlet-leak";');
+    expect(source).toContain("if (titleNamesOutlet(article.title, source)) continue;");
+    expect(source.indexOf("isGameEligibleTitle(article.title)")).toBeLessThan(
+      source.indexOf("titleNamesOutlet(article.title, source)"),
+    );
+    // The daily mode's substring rule must not be used for the practice pool.
+    expect(source).not.toContain("titleLeaksOutlet");
+    expect(source).not.toContain("daily-set");
+  });
+
 
   it("the clusters select starts with `id, article_count`", () => {
     const selectAt = source.indexOf(".select(");

@@ -5,7 +5,9 @@ import { connection } from "next/server";
 import type { ZoneHistoryEntry } from "@/components/source/label-card";
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { attemptCached } from "@/lib/cache-resilience";
+import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { isRowQuarantined } from "@/lib/sources/feed-status";
+import { classifySilence } from "@/lib/sources/silence-reason";
 import { selectSourceRecentArticles } from "@/lib/sources/source-recent-filter";
 import { createReaderClient } from "@/lib/supabase/server";
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
@@ -50,7 +52,21 @@ interface SourceFeedFields {
   fetch_quarantined_until: string | null;
 }
 
-export type SourceWithRegistry = Source & SourceRegistryFields & SourceFeedFields;
+// Fetch state columns the frozen-feed verdict reads (migrations 074 and 119),
+// the same four /kaynaklar/durum reads in feed-status.ts. Optional on purpose:
+// a row (or a test fixture) that lacks them reads as "status unknown", which
+// `classifySilence` answers with 'erişim yok', never with 'akış donmuş'.
+interface SourceFeedStateFields {
+  fetch_last_status?: number | null;
+  fetch_fail_streak?: number | null;
+  fetch_newest_item_at?: string | null;
+  fetch_items_count?: number | null;
+}
+
+export type SourceWithRegistry = Source &
+  SourceRegistryFields &
+  SourceFeedFields &
+  SourceFeedStateFields;
 
 export interface ZoneHistoryRow {
   old_bias: string | null;
@@ -69,6 +85,24 @@ export interface SourceProfile {
    * quarantine, and the page shows the inactive line for it.
    */
   quarantined: boolean;
+  /**
+   * h74-sourcepages-3: the feed answers (2xx or 304, no failure streak, not
+   * quarantined) but is frozen: it holds no items, or its newest item is more
+   * than 72 h old. Exactly the sources /kaynaklar/durum labels 'akış donmuş':
+   * the status page's silent gate is applied first (the newest stored article
+   * published at or before now is missing or older than FEED_YIELD_WINDOW_MS; a
+   * source that still delivers is never classified), then `classifySilence`
+   * decides, with the same `nowMs` as `quarantined`, so it never touches the
+   * clock at render time. Always false for a quarantined source (that is
+   * `quarantined`'s state, not this one). Like `quarantined` it says nothing
+   * about `source.active`: the page shows the inactive line first.
+   */
+  feedFrozen: boolean;
+  /**
+   * `sources.fetch_newest_item_at` as stored: the newest item date the feed
+   * reported at its last parse, or null (never measured, empty or undated feed).
+   */
+  newestFeedItemAt: string | null;
   articleCount7d: number;
   articles: ArticleRow[];
   zoneHistory: ZoneHistoryEntry[];
@@ -118,7 +152,7 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   const { data: sourceRow, error: sourceError } = await supabase
     .from("sources")
     .select(
-      "id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note, fetch_quarantined_until",
+      "id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note, fetch_quarantined_until, fetch_last_status, fetch_fail_streak, fetch_newest_item_at, fetch_items_count",
     )
     .eq("slug", slug)
     .maybeSingle();
@@ -216,9 +250,41 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
     repaired.map((a) => a.id),
   );
 
+  // h74-sourcepages-3: the quarantine and frozen-feed verdicts share the one
+  // clock read above. `classifySilence` is the rule behind /kaynaklar/durum's
+  // 'akış donmuş', so the profile and the status page agree; a quarantined
+  // source classifies as 'erişim yok' there, hence never frozen here.
+  // The status page classifies only a SILENT source: its newest stored article
+  // with published_at <= now (its `.lte("latest.published_at", now)` embed; a
+  // future-dated pubDate never counts as delivering) is missing or more than
+  // FEED_YIELD_WINDOW_MS old (strict, a last item exactly at the edge still
+  // delivers). `repaired` is the articles read newest first, before the
+  // private-individual filter, so its first row at or before now is that embed.
+  const quarantined = isRowQuarantined(source.fetch_quarantined_until, nowMs);
+  const newestFeedItemAt = source.fetch_newest_item_at ?? null;
+  const newestStoredMs = repaired
+    .map((a) => Date.parse(a.published_at))
+    .find((ms) => Number.isFinite(ms) && ms <= nowMs);
+  const silent =
+    newestStoredMs === undefined || nowMs - newestStoredMs > FEED_YIELD_WINDOW_MS;
+  const feedFrozen =
+    silent &&
+    classifySilence(
+      {
+        lastHttpStatus: source.fetch_last_status ?? null,
+        failStreak: source.fetch_fail_streak ?? 0,
+        quarantined,
+        newestFeedItemAt,
+        feedItemsCount: source.fetch_items_count ?? null,
+      },
+      nowMs,
+    ) === "akis_donmus";
+
   return {
     source,
-    quarantined: isRowQuarantined(source.fetch_quarantined_until, nowMs),
+    quarantined,
+    feedFrozen,
+    newestFeedItemAt,
     articleCount7d: countResult.count ?? 0,
     articles: selectSourceRecentArticles(repaired, clusteredIds),
     zoneHistory,

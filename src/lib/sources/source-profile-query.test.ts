@@ -119,6 +119,7 @@ vi.mock("@supabase/supabase-js", () => ({
 
 import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
+import { toFeedStatusRows } from "./feed-status";
 import { SOURCE_RECENT_FETCH, getSourceProfile } from "./source-profile-query";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -365,6 +366,276 @@ describe("getSourceProfile quarantine (h47-sources-1)", () => {
     expect(code.match(/\bDate\.now\s*\(/g)).toHaveLength(1);
     expect(code).not.toMatch(/\bnew Date\s*\(\s*\)/);
     expect(code).toMatch(/\bisRowQuarantined\([^)]*,\s*nowMs\s*\)/);
+  });
+});
+
+// h74-sourcepages-3: a third source state next to inactive and feedDown. The feed
+// answers (2xx or 304, no failure streak, not quarantined) but is frozen: it
+// holds no items or its newest item is older than 72 h. The verdict is
+// `classifySilence` of silence-reason.ts (the rule /kaynaklar/durum labels
+// 'akış donmuş' with), decided with the same `nowMs` as the quarantine verdict.
+describe("getSourceProfile frozen feed (h74-sourcepages-3)", () => {
+  const NOW = Date.parse("2026-11-07T16:28:00.000Z");
+  const HOUR = 60 * 60 * 1000;
+  const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A source row carrying the four feed columns; `over` overrides any of them. */
+  const withFeed = (over: Record<string, unknown>) => {
+    fixture.sources = [
+      {
+        data: [
+          {
+            ...SOURCE_ROW,
+            fetch_quarantined_until: null,
+            fetch_last_status: 200,
+            fetch_fail_streak: 0,
+            fetch_newest_item_at: iso(10 * HOUR),
+            fetch_items_count: 20,
+            ...over,
+          },
+        ],
+        error: null,
+      },
+    ];
+    fixture.served = { sources: 0, count: 0, articles: 0, history: 0, clusterArticles: 0 };
+  };
+
+  it("selects the four feed columns feed-status.ts reads", async () => {
+    await getSourceProfile("ornek-gazete");
+
+    const cols = (fixture.sourceSelects[0] ?? "").split(",").map((c) => c.trim());
+    for (const c of [
+      "fetch_last_status",
+      "fetch_fail_streak",
+      "fetch_newest_item_at",
+      "fetch_items_count",
+    ]) {
+      expect(cols).toContain(c);
+    }
+    // The quarantine column stays selected.
+    expect(cols).toContain("fetch_quarantined_until");
+  });
+
+  it("answering feed (200, streak 0, not quarantined) whose newest item is 5 days old is frozen, newest passed through", async () => {
+    const newest = iso(5 * 24 * HOUR);
+    withFeed({ fetch_newest_item_at: newest });
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.feedFrozen).toBe(true);
+    expect(profile?.newestFeedItemAt).toBe(newest);
+    expect(profile?.quarantined).toBe(false);
+  });
+
+  it("a 304 with an empty feed (fetch_items_count 0) is frozen, with no newest date", async () => {
+    withFeed({ fetch_last_status: 304, fetch_items_count: 0, fetch_newest_item_at: null });
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.feedFrozen).toBe(true);
+    expect(profile?.newestFeedItemAt).toBeNull();
+  });
+
+  it("a newest item 10 h old is not frozen", async () => {
+    withFeed({ fetch_newest_item_at: iso(10 * HOUR) });
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.feedFrozen).toBe(false);
+    expect(profile?.newestFeedItemAt).toBe(iso(10 * HOUR));
+  });
+
+  it("the 72 h edge is strict: exactly 72 h old is not frozen, one millisecond older is", async () => {
+    withFeed({ fetch_newest_item_at: iso(72 * HOUR) });
+    expect((await getSourceProfile("ornek-gazete"))?.feedFrozen).toBe(false);
+
+    withFeed({ fetch_newest_item_at: iso(72 * HOUR + 1) });
+    expect((await getSourceProfile("ornek-gazete"))?.feedFrozen).toBe(true);
+  });
+
+  // The status page only labels a source silent when its newest STORED article
+  // (published_at <= now) is missing or older than FEED_YIELD_WINDOW_MS, and only a
+  // silent source is classified at all. The profile applies the same gate, so a
+  // feed that looks frozen on its own columns but still delivers stored articles
+  // is not 'akış donmuş' here either.
+  const storedArticle = (msAgo: number) => ({
+    id: "a-stored",
+    title: "Haber",
+    description: null,
+    url: "https://ornek.example/stored",
+    image_url: null,
+    published_at: iso(msAgo),
+  });
+
+  it("an empty feed (0 items, no newest date) is not frozen while a stored article is 2 h old", async () => {
+    withFeed({ fetch_items_count: 0, fetch_newest_item_at: null });
+    fixture.articles = [{ data: [storedArticle(2 * HOUR)], error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.feedFrozen).toBe(false);
+  });
+
+  it("a newest feed item 5 days old: frozen only once the newest stored article is past 72 h", async () => {
+    withFeed({ fetch_newest_item_at: iso(5 * 24 * HOUR) });
+
+    fixture.articles = [{ data: [storedArticle(71 * HOUR)], error: null }];
+    expect((await getSourceProfile("ornek-gazete"))?.feedFrozen).toBe(false);
+
+    fixture.articles = [{ data: [storedArticle(73 * HOUR)], error: null }];
+    expect((await getSourceProfile("ornek-gazete"))?.feedFrozen).toBe(true);
+  });
+
+  it("the stored-article edge is strict: exactly 72 h old still delivers, one millisecond older is silent", async () => {
+    withFeed({ fetch_newest_item_at: iso(5 * 24 * HOUR) });
+
+    fixture.articles = [{ data: [storedArticle(72 * HOUR)], error: null }];
+    expect((await getSourceProfile("ornek-gazete"))?.feedFrozen).toBe(false);
+
+    fixture.articles = [{ data: [storedArticle(72 * HOUR + 1)], error: null }];
+    expect((await getSourceProfile("ornek-gazete"))?.feedFrozen).toBe(true);
+  });
+
+  it("a future-dated stored article does not count as delivering (mirrors the status page's .lte now)", async () => {
+    withFeed({ fetch_newest_item_at: iso(5 * 24 * HOUR) });
+    fixture.articles = [{ data: [storedArticle(-HOUR)], error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.feedFrozen).toBe(true);
+  });
+
+  it("skips a future-dated row and reads the newest past one: a 2 h old article behind it still delivers", async () => {
+    withFeed({ fetch_newest_item_at: iso(5 * 24 * HOUR) });
+    fixture.articles = [
+      { data: [storedArticle(-HOUR), storedArticle(2 * HOUR)], error: null },
+    ];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.feedFrozen).toBe(false);
+  });
+
+  it("a quarantined source is not frozen (feedDown wins), however old its newest item", async () => {
+    withFeed({
+      fetch_quarantined_until: new Date(NOW + HOUR).toISOString(),
+      fetch_newest_item_at: iso(5 * 24 * HOUR),
+    });
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.quarantined).toBe(true);
+    expect(profile?.feedFrozen).toBe(false);
+  });
+
+  it("an unreachable feed is not frozen: a failure streak, a 403, status 0 and a never-fetched source are 'erişim yok'", async () => {
+    for (const over of [
+      { fetch_fail_streak: 3 },
+      { fetch_last_status: 403 },
+      { fetch_last_status: 0 },
+      { fetch_last_status: null },
+    ]) {
+      withFeed({ ...over, fetch_newest_item_at: iso(5 * 24 * HOUR) });
+      expect((await getSourceProfile("ornek-gazete"))?.feedFrozen).toBe(false);
+    }
+  });
+
+  it("a row without the feed columns (undefined) or never measured (null count and date) is not frozen", async () => {
+    // Pre-119 shape: the columns are absent. The status is unknown, so never frozen.
+    fixture.sources = [{ data: [{ ...SOURCE_ROW }], error: null }];
+    const bare = await getSourceProfile("ornek-gazete");
+    expect(bare?.feedFrozen).toBe(false);
+    expect(bare?.newestFeedItemAt).toBeNull();
+
+    // Reachable but never measured: 'sessiz', not frozen.
+    withFeed({ fetch_newest_item_at: null, fetch_items_count: null });
+    const unmeasured = await getSourceProfile("ornek-gazete");
+    expect(unmeasured?.feedFrozen).toBe(false);
+    expect(unmeasured?.newestFeedItemAt).toBeNull();
+  });
+
+  it("agrees with /kaynaklar/durum: the same row is 'akis_donmus' there exactly when feedFrozen here", async () => {
+    const rows: Record<string, unknown>[] = [
+      { fetch_newest_item_at: iso(5 * 24 * HOUR) },
+      { fetch_newest_item_at: iso(10 * HOUR) },
+      { fetch_last_status: 304, fetch_items_count: 0, fetch_newest_item_at: null },
+      { fetch_newest_item_at: iso(72 * HOUR) },
+      { fetch_newest_item_at: iso(72 * HOUR + 1) },
+      { fetch_fail_streak: 2, fetch_newest_item_at: iso(5 * 24 * HOUR) },
+      { fetch_last_status: 503, fetch_newest_item_at: iso(5 * 24 * HOUR) },
+      { fetch_quarantined_until: new Date(NOW + HOUR).toISOString(), fetch_items_count: 0 },
+      { fetch_items_count: null, fetch_newest_item_at: null },
+    ];
+    // Both stored-article situations: none at all (the source reads as silent on
+    // the status page, which is when it shows a reason), and one delivered 2 h ago
+    // (not silent there: no reason, so never 'akış donmuş').
+    const situations: { name: string; latest: { published_at: string }[] }[] = [
+      { name: "no stored article", latest: [] },
+      { name: "stored article 2 h old", latest: [{ published_at: iso(2 * HOUR) }] },
+    ];
+    for (const over of rows) {
+      for (const situation of situations) {
+        withFeed(over);
+        fixture.articles = [
+          {
+            data: situation.latest.map((l) => ({
+              id: "a-parity",
+              title: "Haber",
+              description: null,
+              url: "https://ornek.example/parity",
+              image_url: null,
+              published_at: l.published_at,
+            })),
+            error: null,
+          },
+        ];
+        const profile = await getSourceProfile("ornek-gazete");
+        const durum = toFeedStatusRows(
+          [
+            {
+              slug: "ornek-gazete",
+              name: "Örnek Gazete",
+              bias: "center",
+              kind: "outlet",
+              fetch_last_status: 200,
+              fetch_last_at: null,
+              fetch_fail_streak: 0,
+              fetch_quarantined_until: null,
+              fetch_newest_item_at: iso(10 * HOUR),
+              fetch_items_count: 20,
+              ...over,
+              latest: situation.latest,
+            },
+          ],
+          NOW,
+        )[0];
+        expect(
+          profile?.feedFrozen,
+          `${situation.name}: ${JSON.stringify(over)}`,
+        ).toBe(durum?.silenceReason === "akis_donmus");
+      }
+    }
+  });
+
+  it("reuses the shared frozen-feed rule instead of keeping its own threshold", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const code = readFileSync(resolve(here, "source-profile-query.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+
+    expect(code).toMatch(/\bclassifySilence\(/);
+    expect(code).toMatch(/["']akis_donmus["']/);
+    // No private 72 h arithmetic: the threshold lives in silence-reason.ts.
+    expect(code).not.toMatch(/\b72\b/);
+    expect(code).not.toMatch(/\bFROZEN_FEED_MS\b/);
   });
 });
 

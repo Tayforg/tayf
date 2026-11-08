@@ -1,8 +1,35 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { LabelCard, type ZoneHistoryEntry } from "./label-card";
 import type { ReaderAgreement } from "@/lib/game/agreement";
 import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
-import { getSourceMetadata } from "@/lib/sources/factuality";
+import {
+  FACTUALITY_LABELS,
+  SOURCE_METADATA,
+  getSourceMetadata,
+} from "@/lib/sources/factuality";
+
+// Two fixture slugs the real metadata map has no entry shaped like (no tagged
+// source has `factuality: null` today). Every other slug falls through to the
+// real map, so the rest of this file still reads the shipped data.
+vi.mock("@/lib/sources/factuality", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/sources/factuality")>();
+  const fixtures: Record<string, import("@/lib/sources/factuality").SourceFactualityMetadata> = {
+    "test-null-factuality": {
+      factuality: null,
+      ownership: "Test Sahibi",
+      ownerGroup: "independent",
+    },
+    "test-factuality-only": {
+      factuality: "low",
+      ownership: null,
+      ownerGroup: null,
+    },
+  };
+  return {
+    ...actual,
+    getSourceMetadata: (slug: string) => fixtures[slug] ?? actual.getSourceMetadata(slug),
+  };
+});
 
 // LabelCard is a synchronous Server Component (plain-data props, no
 // Supabase, no hooks) so — same approach as source-chips.test.ts — it can
@@ -393,11 +420,14 @@ describe("LabelCard — reader agreement", () => {
   });
 
   it("never uses the word 'doğruluk' in either state", () => {
+    // An untagged slug: a tagged one prints its hand-tagged factuality label
+    // ("... doğruluk") in its own line, which is not the agreement sentence.
+    const untagged = { ...BASE_PROPS, slug: "bilinmeyen-kaynak-xyz" };
     const withData = collectText(
-      LabelCard({ ...BASE_PROPS, readerAgreement: { n: 120, share: 0.51 } }),
+      LabelCard({ ...untagged, readerAgreement: { n: 120, share: 0.51 } }),
     ).join(" ");
     const without = collectText(
-      LabelCard({ ...BASE_PROPS, readerAgreement: null }),
+      LabelCard({ ...untagged, readerAgreement: null }),
     ).join(" ");
     expect(withData.toLocaleLowerCase("tr-TR")).not.toContain("doğruluk");
     expect(without.toLocaleLowerCase("tr-TR")).not.toContain("doğruluk");
@@ -479,5 +509,134 @@ describe("LabelCard — non-voting kinds", () => {
 
     expect(aggregator.filter((t) => t !== NOTE_AGGREGATOR)).toEqual(voting);
     expect(collectText(LabelCard(BASE_PROPS))).toEqual(voting);
+  });
+});
+
+// h74-sourcepages-1: /sources cards and every story's Kaynak künyesi print the
+// hand-tagged factuality label; the profile used to drop it. The wording says
+// in the open that it is an editorial label, and links to /metodoloji.
+describe("LabelCard — factuality line", () => {
+  const FACTUALITY_HREF = "/metodoloji#guvenilirlik";
+
+  function factualityOf(slug: string) {
+    return getSourceMetadata(slug)?.factuality ?? null;
+  }
+
+  it("renders the label of a high-factuality slug, derived from the metadata map", () => {
+    const factuality = factualityOf("anadolu-ajansi");
+    expect(factuality).toBe("high");
+
+    const texts = collectText(LabelCard({ ...BASE_PROPS, slug: "anadolu-ajansi" }));
+
+    expect(texts).toContain(FACTUALITY_LABELS[factuality!]);
+    expect(texts).toContain("Yüksek doğruluk");
+  });
+
+  it("renders 'Karışık doğruluk' for sozcu", () => {
+    const factuality = factualityOf("sozcu");
+    expect(factuality).toBe("mixed");
+
+    const texts = collectText(LabelCard({ ...BASE_PROPS, slug: "sozcu", bias: "opposition_leaning" }));
+
+    expect(texts).toContain(FACTUALITY_LABELS[factuality!]);
+    expect(texts).toContain("Karışık doğruluk");
+    expect(texts).not.toContain("Yüksek doğruluk");
+  });
+
+  it("pins the three label strings the chips and the profile share", () => {
+    expect(FACTUALITY_LABELS).toEqual({
+      high: "Yüksek doğruluk",
+      mixed: "Karışık doğruluk",
+      low: "Düşük doğruluk",
+    });
+  });
+
+  it("renders the label of every hand-tagged source, and only that one", () => {
+    let checked = 0;
+    for (const [slug, meta] of Object.entries(SOURCE_METADATA)) {
+      if (meta.factuality === null) continue;
+      checked += 1;
+      const texts = collectText(LabelCard({ ...BASE_PROPS, slug }));
+      const labels = Object.values(FACTUALITY_LABELS);
+      expect(texts.filter((t) => labels.includes(t)), slug).toEqual([
+        FACTUALITY_LABELS[meta.factuality],
+      ]);
+    }
+    expect(checked).toBeGreaterThan(30);
+  });
+
+  it("renders no 'doğruluk' text for an untagged slug (haber3)", () => {
+    expect(getSourceMetadata("haber3")).toBeNull();
+
+    const text = collectText(LabelCard({ ...BASE_PROPS, slug: "haber3" })).join(" ");
+
+    expect(text.toLocaleLowerCase("tr-TR")).not.toContain("doğruluk");
+    expect(text).not.toContain("nasıl belirleniyor?");
+    expect(
+      findAll(LabelCard({ ...BASE_PROPS, slug: "haber3" }), (n) => n.props?.href === FACTUALITY_HREF),
+    ).toHaveLength(0);
+  });
+
+  it("renders no 'doğruluk' text for a tagged entry whose factuality is null", () => {
+    // Precondition: the fixture is tagged (the owner line shows) but unrated.
+    expect(getSourceMetadata("test-null-factuality")).toEqual({
+      factuality: null,
+      ownership: "Test Sahibi",
+      ownerGroup: "independent",
+    });
+
+    const el = LabelCard({ ...BASE_PROPS, slug: "test-null-factuality" });
+    const texts = collectText(el);
+
+    expect(texts.some((t) => t.startsWith("Sahiplik: "))).toBe(true);
+    expect(texts.join(" ").toLocaleLowerCase("tr-TR")).not.toContain("doğruluk");
+    expect(findAll(el, (n) => n.props?.href === FACTUALITY_HREF)).toHaveLength(0);
+  });
+
+  it("renders the line even when the entry has no owner group (factuality only)", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, slug: "test-factuality-only" }));
+
+    expect(texts).toContain("Düşük doğruluk");
+    expect(texts.some((t) => t.startsWith("Sahiplik: "))).toBe(false);
+  });
+
+  it("links to /metodoloji#guvenilirlik with 'nasıl belirleniyor?'", () => {
+    const links = findAll(
+      LabelCard({ ...BASE_PROPS, slug: "anadolu-ajansi" }),
+      (n) => n.props?.href === FACTUALITY_HREF,
+    );
+
+    expect(links).toHaveLength(1);
+    expect(collectText(links[0]).join("")).toBe("nasıl belirleniyor?");
+  });
+
+  it("says it is a hand-entered label and not an independent rating", () => {
+    const text = collectText(LabelCard({ ...BASE_PROPS, slug: "anadolu-ajansi" })).join("");
+
+    expect(text).toContain(
+      "Yüksek doğruluk · elle girilen etiket, bağımsız bir derecelendirme değil · nasıl belirleniyor?",
+    );
+  });
+
+  it("sits right above the Sahiplik line and after the rationale", () => {
+    const texts = collectText(
+      LabelCard({
+        ...BASE_PROPS,
+        slug: "anadolu-ajansi",
+        zoneRationale: "Resmi ajans.",
+      }),
+    );
+    const rationale = texts.indexOf("Resmi ajans.");
+    const factuality = texts.indexOf("Yüksek doğruluk");
+    const owner = texts.findIndex((t) => t.startsWith("Sahiplik: "));
+
+    expect(rationale).toBeGreaterThanOrEqual(0);
+    expect(factuality).toBeGreaterThan(rationale);
+    expect(owner).toBeGreaterThan(factuality);
+    // Nothing but the line's own clause, link text and spacing in between.
+    expect(texts.slice(factuality + 1, owner)).toEqual([
+      " · elle girilen etiket, bağımsız bir derecelendirme değil · ",
+      "nasıl belirleniyor?",
+    ]);
   });
 });

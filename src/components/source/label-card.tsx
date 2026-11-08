@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { BiasCategory, SourceKind } from "@/types";
 import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
-import { getSourceMetadata } from "@/lib/sources/factuality";
+import { FACTUALITY_LABELS, getSourceMetadata } from "@/lib/sources/factuality";
 import { nonVotingNote } from "@/lib/sources/kind";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { ownerLineParts } from "@/lib/sources/owner-line";
@@ -79,6 +79,7 @@ export function LabelCard({
   const rationale = zoneRationale && zoneRationale.trim().length > 0 ? zoneRationale.trim() : null;
   const meta = getSourceMetadata(slug);
   const ownerGroup = meta?.ownerGroup ?? null;
+  const factuality = meta?.factuality ?? null;
   // "" for an unparseable/unexpected trusteeSince — the whole badge is
   // gated on this rather than trusteeSince alone, so an unparseable value
   // can never render as the undated, dangling "Kayyum yönetiminde — "
@@ -150,6 +151,24 @@ export function LabelCard({
           {EMPTY_RATIONALE}
         </p>
       )}
+
+      {/* 2b. Hand-tagged factuality (h74-sourcepages-1) — the same label
+          /sources and every Kaynak künyesi print via <SourceChips>, only for a
+          source that carries one (nothing for untagged or unrated slugs). It
+          says in the open that the label is entered by hand and is not an
+          outside rating, the way /metodoloji#guvenilirlik does. */}
+      {factuality !== null ? (
+        <p className="text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">{FACTUALITY_LABELS[factuality]}</span>
+          {" · elle girilen etiket, bağımsız bir derecelendirme değil · "}
+          <Link
+            href="/metodoloji#guvenilirlik"
+            className="hover:text-foreground transition-colors brand-underline"
+          >
+            nasıl belirleniyor?
+          </Link>
+        </p>
+      ) : null}
 
       {/* 3. Owner group — only for tagged slugs (~21/144 today). Render
           nothing (not 'bilinmiyor'/'sınıflandırılmamış') for the rest, same

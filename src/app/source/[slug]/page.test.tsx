@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
-// /source/[slug] -- source status lines (h47-sources-1).
+// /source/[slug] -- source status lines (h47-sources-1, h74-sourcepages-3).
 //
 // The page rendered a dead source like a live one: bigpara (active = false)
 // listed April articles with no note, and t24 (active, feed in ingest
@@ -48,6 +48,10 @@ const INACTIVE_EMPTY = "Bu kaynaktan haber alınmıyor.";
 const DEFAULT_EMPTY = "Bu kaynaktan henüz haber görmedik.";
 const FEED_DOWN = "Akış şu anda alınamıyor";
 const STATUS_HREF = "/kaynaklar/durum";
+const FEED_FROZEN = "Akış donmuş";
+const FEED_FROZEN_DATED =
+  "besleme yanıt veriyor ama yeni haber gelmiyor (beslemedeki en yeni öğe: 02.10.2026).";
+const FEED_FROZEN_EMPTY = "besleme yanıt veriyor ama içinde haber yok.";
 
 const ARTICLES: SourceProfile["articles"] = [
   {
@@ -63,6 +67,8 @@ const ARTICLES: SourceProfile["articles"] = [
 function profileOf(opts: {
   active?: boolean;
   quarantined?: boolean;
+  feedFrozen?: boolean;
+  newestFeedItemAt?: string | null;
   articles?: SourceProfile["articles"];
   articleCount7d?: number;
 }): SourceProfile {
@@ -86,6 +92,8 @@ function profileOf(opts: {
       fetch_quarantined_until: null,
     },
     quarantined: opts.quarantined ?? false,
+    feedFrozen: opts.feedFrozen ?? false,
+    newestFeedItemAt: opts.newestFeedItemAt ?? null,
     articleCount7d: opts.articleCount7d ?? 0,
     articles: opts.articles ?? ARTICLES,
     zoneHistory: [],
@@ -203,6 +211,7 @@ describe("/source/[slug] -- a healthy active source is unchanged", () => {
     expect(text).not.toContain(FEED_DOWN);
     expect(text).not.toContain("alınamıyor");
     expect(text).not.toContain("izlenmiyor");
+    expect(text).not.toContain("donmuş");
     expect(linksTo(tree, STATUS_HREF)).toEqual([]);
     expect(text).toContain("son 7 günde 12 haber");
     expect(text).toContain("Nisan haberi");
@@ -216,6 +225,158 @@ describe("/source/[slug] -- a healthy active source is unchanged", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h74-sourcepages-3: the third source state. An active, unquarantined source
+// whose feed answers but is frozen (profile.feedFrozen, decided by the data
+// layer with the rule /kaynaklar/durum labels 'akış donmuş' with) said nothing:
+// ayandon listed 2 Ekim articles with no hint the feed had been dead for weeks.
+// ---------------------------------------------------------------------------
+
+describe("/source/[slug] -- an active source whose feed is frozen (h74-sourcepages-3)", () => {
+  const NEWEST = "2026-10-02T14:41:30Z";
+
+  it("renders 'Akış donmuş' as a link to /kaynaklar/durum, with the newest feed item date as dd.mm.yyyy", async () => {
+    const tree = await render(profileOf({ feedFrozen: true, newestFeedItemAt: NEWEST }));
+    const links = linksTo(tree, STATUS_HREF);
+
+    expect(links).toHaveLength(1);
+    expect(textOf(links[0])).toBe(FEED_FROZEN);
+    const text = textOf(tree);
+    expect(text).toContain(`${FEED_FROZEN} — ${FEED_FROZEN_DATED}`);
+    expect(text).toContain("02.10.2026");
+    expect(text).not.toContain(FEED_DOWN);
+    expect(text).not.toContain(INACTIVE_LINE);
+  });
+
+  it("the link carries the same dotted-underline styling as the feedDown link", async () => {
+    const down = linksTo(await render(profileOf({ quarantined: true })), STATUS_HREF)[0];
+    const frozen = linksTo(
+      await render(profileOf({ feedFrozen: true, newestFeedItemAt: NEWEST })),
+      STATUS_HREF,
+    )[0];
+
+    expect(typeof frozen?.props?.className).toBe("string");
+    expect(frozen?.props?.className).toBe(down?.props?.className);
+  });
+
+  it("with a null newest item it renders the empty-feed variant, no date", async () => {
+    const tree = await render(profileOf({ feedFrozen: true, newestFeedItemAt: null }));
+    const text = textOf(tree);
+
+    expect(textOf(linksTo(tree, STATUS_HREF)[0])).toBe(FEED_FROZEN);
+    expect(text).toContain(`${FEED_FROZEN} — ${FEED_FROZEN_EMPTY}`);
+    expect(text).not.toContain("yeni haber gelmiyor");
+    expect(text).not.toContain("en yeni öğe");
+  });
+
+  it("an unparseable newest value never prints 'Invalid Date': it falls back to the empty-feed variant", async () => {
+    const text = textOf(await render(profileOf({ feedFrozen: true, newestFeedItemAt: "not-a-date" })));
+
+    expect(text).toContain(FEED_FROZEN_EMPTY);
+    expect(text).not.toContain("Invalid");
+    expect(text).not.toContain("en yeni öğe");
+  });
+
+  it("the date is the Istanbul calendar day, not the UTC one", async () => {
+    const text = textOf(
+      await render(profileOf({ feedFrozen: true, newestFeedItemAt: "2026-10-02T22:30:00Z" })),
+    );
+
+    expect(text).toContain("en yeni öğe: 03.10.2026");
+  });
+
+  it("an inactive source with feedFrozen shows the inactive line only", async () => {
+    const tree = await render(
+      profileOf({ active: false, feedFrozen: true, newestFeedItemAt: NEWEST }),
+    );
+    const text = textOf(tree);
+
+    expect(text).toContain(INACTIVE_LINE);
+    expect(text).not.toContain(FEED_FROZEN);
+    expect(text).not.toContain("yeni haber gelmiyor");
+    expect(linksTo(tree, STATUS_HREF)).toEqual([]);
+  });
+
+  it("a quarantined source shows 'Akış şu anda alınamıyor' only, even if feedFrozen leaked through (feedDown wins)", async () => {
+    const tree = await render(
+      profileOf({ quarantined: true, feedFrozen: true, newestFeedItemAt: NEWEST }),
+    );
+    const links = linksTo(tree, STATUS_HREF);
+
+    expect(links).toHaveLength(1);
+    expect(textOf(links[0])).toBe(FEED_DOWN);
+    expect(textOf(tree)).not.toContain(FEED_FROZEN);
+    expect(textOf(tree)).not.toContain("yeni haber gelmiyor");
+  });
+
+  it("keeps listing the articles and the existing empty line next to the status", async () => {
+    const withArticles = textOf(await render(profileOf({ feedFrozen: true, newestFeedItemAt: NEWEST })));
+    expect(withArticles).toContain(FEED_FROZEN);
+    expect(withArticles).toContain("Nisan haberi");
+
+    const empty = textOf(
+      await render(profileOf({ feedFrozen: true, newestFeedItemAt: null, articles: [] })),
+    );
+    expect(empty).toContain(FEED_FROZEN);
+    expect(empty).toContain(DEFAULT_EMPTY);
+    expect(empty).not.toContain(INACTIVE_EMPTY);
+  });
+
+  it("a healthy profile (feedFrozen false) with a recent newest date shows no status line", async () => {
+    const tree = await render(
+      profileOf({ feedFrozen: false, newestFeedItemAt: "2026-11-07T10:00:00Z", articleCount7d: 4 }),
+    );
+
+    expect(textOf(tree)).not.toContain("donmuş");
+    expect(textOf(tree)).not.toContain("yeni haber gelmiyor");
+    expect(linksTo(tree, STATUS_HREF)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h74-sourcepages-4: the outlet name in the <h1> was `truncate`d, so
+// 'Türkiye Haber Ajansı' read 'Türkiye Haber Ajan...' at 360 px and nine names
+// were cut at 320 px (WCAG 1.4.10). The parent is `min-w-0 flex-1`, so the name
+// may wrap onto a second line instead.
+// ---------------------------------------------------------------------------
+
+describe("/source/[slug] <h1> wraps a long source name instead of cutting it (h74-sourcepages-4)", () => {
+  async function h1Of(name: string): Promise<El> {
+    const profile = profileOf({});
+    profile.source.name = name;
+    const tree = await render(profile);
+    const found = findAll(tree, (el) => el.type === "h1");
+    expect(found).toHaveLength(1);
+    return found[0] as El;
+  }
+
+  const tokens = (el: El) => String(el.props?.className ?? "").split(/\s+/).filter(Boolean);
+
+  it("renders the full source name as the heading text", async () => {
+    const h1 = await h1Of("Türkiye Haber Ajansı");
+    expect(textOf(h1)).toBe("Türkiye Haber Ajansı");
+  });
+
+  it("has no `truncate` token and carries `break-words` and `text-balance`", async () => {
+    const t = tokens(await h1Of("Independent Türkçe"));
+
+    expect(t).not.toContain("truncate");
+    expect(t).not.toContain("overflow-hidden");
+    expect(t).not.toContain("text-ellipsis");
+    expect(t).not.toContain("whitespace-nowrap");
+    expect(t).toContain("break-words");
+    expect(t).toContain("text-balance");
+  });
+
+  it("keeps the existing heading size and typography", async () => {
+    const t = tokens(await h1Of("Hürriyet Daily News"));
+
+    for (const keep of ["font-serif", "text-2xl", "sm:text-3xl", "font-bold", "tracking-tight", "leading-tight"]) {
+      expect(t).toContain(keep);
+    }
+  });
+});
+
 describe("/source/[slug] generateMetadata keeps the existing noindex rule", () => {
   const meta = async (profile: SourceProfile) => {
     vi.mocked(getSourceProfile).mockResolvedValue(profile);
@@ -223,14 +384,14 @@ describe("/source/[slug] generateMetadata keeps the existing noindex rule", () =
   };
 
   it("a thin source (no article in 7 days) is noindex whatever its status", async () => {
-    for (const status of [{}, { active: false }, { quarantined: true }]) {
+    for (const status of [{}, { active: false }, { quarantined: true }, { feedFrozen: true }]) {
       const m = await meta(profileOf({ ...status, articleCount7d: 0 }));
       expect(m.robots).toEqual({ index: false, follow: true });
     }
   });
 
   it("a source with recent articles stays indexable even when its status line shows", async () => {
-    for (const status of [{}, { active: false }, { quarantined: true }]) {
+    for (const status of [{}, { active: false }, { quarantined: true }, { feedFrozen: true }]) {
       const m = await meta(profileOf({ ...status, articleCount7d: 5 }));
       expect(m.robots).toBeUndefined();
       expect(m.alternates?.canonical).toBe("/source/ornek-gazete");
