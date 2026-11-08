@@ -22,6 +22,7 @@ import {
   NOT_CIRCUIT_BREAKER_OR,
   tickerDisclosureOr,
 } from "@/lib/finance/disclosure-filter";
+import { repairKapApostrophe } from "../../../supabase/functions/_shared/kap-text";
 
 // Read side of the finance substrate (migrations 049-051) for the
 // /ekonomi pages and /admin/ekonomi. Every fetcher still THROWS on a Supabase
@@ -537,8 +538,10 @@ function toDisclosure(r: DisclosureRow): Disclosure {
     kapTitle: r.kap_title,
     // h11-finance-1: a notice tagged only in related_stocks shows those as its chips.
     stockCodes: codes.length > 0 ? codes : (r.related_stocks ?? []),
-    subject: r.subject,
-    summary: r.summary ?? null,
+    // h81-textclean-1: KAP's feed loses a suffix apostrophe ("Limanı?nda"); repaired here at read
+    // time, so the stored row (and Jev's input) stays verbatim and old rows heal without a backfill.
+    subject: repairKapApostrophe(r.subject),
+    summary: repairKapApostrophe(r.summary ?? null),
     disclosureClass: r.disclosure_class,
   };
 }

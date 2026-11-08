@@ -371,6 +371,14 @@ function isTeaser(shown: string): boolean {
 // "İSTANBUL (Medyascope) – ...", "ANKARA (AA) - ...", "GÜNEY KORE, (DHA) - ...",
 // "Melih Kiram GEDİK, (DHA) - ...", "Ankara, 4 Kasım (AA) - ...": a short lead, a
 // parenthesised agency that starts with a letter, a dash.
+//
+// h81-textclean-2: these two patterns are the DETECTOR (a member that carries a
+// lead never stands in for the seed) and they stay as loose as they were.
+// `stripDatelineLead` in summary-tidy.ts is the STRIPPER, deliberately stricter
+// (a known agency or an all-caps lead, at least 20 characters left, ...), and it
+// removes the lead from the tidied text. Because of that the detector reads the
+// RAW text as well as the shown one in {@link summaryDefect}: `shown` no longer
+// carries the lead.
 const AGENCY_DATELINE = /^[^()\n]{0,40}\(\p{L}[^()\n]{0,29}\)\s*[-–—]/u;
 // "HABER MERKEZİ - ...", "ANKARA – ...": nothing but capitals up to a dash. At
 // least four letters, so "ABD-İran gerilimi" is not a dateline.
@@ -404,7 +412,9 @@ function isRunOn(shown: string): boolean {
  * (`tidySummaryText`). Checked in this order, the first that applies is returned:
  *   - "stub": a feed cut it ("..." or "…" at the end, raw or tidied);
  *   - "teaser": a question mark anywhere, or a sentence that opens with Peki/İşte;
- *   - "dateline": an agency or all-caps place lead ("İSTANBUL (Medyascope) –");
+ *   - "dateline": an agency or all-caps place lead ("İSTANBUL (Medyascope) –") in
+ *     the shown text or in the raw one (the tidy step strips most leads from
+ *     `shown`, h81-textclean-2, so the raw text is what still carries it);
  *   - "run-on": its first five words come again later (a title glued to the body).
  * Never throws.
  */
@@ -412,7 +422,7 @@ export function summaryDefect(raw: string, shown: string): SummaryDefect | null 
   if (typeof raw !== "string" || typeof shown !== "string") return null;
   if (endsCut(raw) || endsCut(shown)) return "stub";
   if (isTeaser(shown)) return "teaser";
-  if (hasDatelineLead(shown)) return "dateline";
+  if (hasDatelineLead(shown) || hasDatelineLead(raw.trim())) return "dateline";
   if (isRunOn(shown)) return "run-on";
   return null;
 }
