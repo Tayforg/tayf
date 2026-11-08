@@ -32,6 +32,17 @@
 
 export type Factuality = "high" | "mixed" | "low";
 
+/**
+ * The reader-facing wording of each factuality level. Shared by the
+ * `<SourceChips>` chip (/sources, Kaynak künyesi) and the Etiket kartı line on
+ * /source/[slug], so the same source never reads differently on two surfaces.
+ */
+export const FACTUALITY_LABELS: Record<Factuality, string> = {
+  high: "Yüksek doğruluk",
+  mixed: "Karışık doğruluk",
+  low: "Düşük doğruluk",
+};
+
 export interface SourceFactualityMetadata {
   /** Editorial fact-checking track record. `null` = not yet rated. */
   factuality: Factuality | null;

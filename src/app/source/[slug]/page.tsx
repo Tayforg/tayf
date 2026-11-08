@@ -7,6 +7,7 @@ import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
+import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { sourceExcerpt } from "@/lib/articles/source-excerpt";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { sourceLang } from "@/lib/sources/source-language";
@@ -45,6 +46,11 @@ import {
 // null ONLY for "no such source"; a sustained read failure throws, so a cold
 // database renders the root error boundary (noindex, "Tekrar dene") and
 // never a 404 for a real source.
+
+// The /kaynaklar/durum link of the two feed-state lines (feedDown, feedFrozen).
+// One literal string, so Tailwind sees every class.
+const STATUS_LINK_CLASS =
+  "font-medium text-rose-800 dark:text-rose-300 underline decoration-dotted underline-offset-2 hover:decoration-solid";
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise.
@@ -136,7 +142,15 @@ export default async function SourceProfilePage({ params }: PageProps) {
   const profile = await getSourceProfile(slug);
   if (!profile) notFound();
 
-  const { source, articleCount7d, articles, zoneHistory, quarantined } = profile;
+  const {
+    source,
+    articleCount7d,
+    articles,
+    zoneHistory,
+    quarantined,
+    feedFrozen: feedFrozenVerdict,
+    newestFeedItemAt,
+  } = profile;
 
   // h47-sources-1: a profile used to look the same whether the source is still
   // monitored or not. `active` is the registry flag; `quarantined` is the feed
@@ -148,6 +162,14 @@ export default async function SourceProfilePage({ params }: PageProps) {
   // row that somehow lacks the column never reads as inactive.
   const inactive = source.active === false;
   const feedDown = !inactive && quarantined;
+  // h74-sourcepages-3: the third state. The feed answers but is frozen (the
+  // `classifySilence` verdict the data layer stamped, the same rule
+  // /kaynaklar/durum labels 'akış donmuş' with). Inactive and feedDown win, so
+  // a profile shows exactly one status line. The date is the newest item the
+  // feed itself reports; none (an empty feed, or a date that does not parse)
+  // reads as "içinde haber yok".
+  const feedFrozen = !inactive && !feedDown && feedFrozenVerdict;
+  const frozenNewest = newestFeedItemAt ? formatDdMmYyyy(newestFeedItemAt) : "";
 
   // The four side lookups are independent - one round-trip, not four
   // sequential ones (each is capped at 4 s, so serial reads could stack).
@@ -222,7 +244,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
           />
 
           <div className="min-w-0 flex-1 space-y-2">
-            <h1 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight leading-tight truncate">
+            <h1 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight leading-tight text-balance break-words">
               {source.name}
             </h1>
             <div className="flex flex-wrap items-center gap-3">
@@ -249,14 +271,21 @@ export default async function SourceProfilePage({ params }: PageProps) {
               </p>
             ) : feedDown ? (
               <p className="text-xs text-muted-foreground">
-                <Link
-                  href="/kaynaklar/durum"
-                  className="font-medium text-rose-800 dark:text-rose-300 underline decoration-dotted underline-offset-2 hover:decoration-solid"
-                >
+                <Link href="/kaynaklar/durum" className={STATUS_LINK_CLASS}>
                   Akış şu anda alınamıyor
                 </Link>
                 {" "}
                 — Tayf bu beslemeyi art arda çekemedi, bu yüzden geçici olarak atlıyor.
+              </p>
+            ) : feedFrozen ? (
+              <p className="text-xs text-muted-foreground">
+                <Link href="/kaynaklar/durum" className={STATUS_LINK_CLASS}>
+                  Akış donmuş
+                </Link>
+                {" "}
+                {frozenNewest
+                  ? `— besleme yanıt veriyor ama yeni haber gelmiyor (beslemedeki en yeni öğe: ${frozenNewest}).`
+                  : "— besleme yanıt veriyor ama içinde haber yok."}
               </p>
             ) : null}
           </div>
