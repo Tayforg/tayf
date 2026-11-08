@@ -60,8 +60,21 @@ export const contentType = "image/png";
 // normalises case on read, but a literal `"Cache-Control"` key next to a
 // lower-case one here would be visually misleading and this repo standardises
 // on lower-case for every header record it authors).
+//
+// The window is BOUNDED: s-maxage 600 + stale-while-revalidate 300 = 900 s, the
+// same ceiling the embed and the kart card keep (300 + 600). Nothing purges an
+// image CDN entry when a cluster changes (no revalidatePath), so with the old
+// stale-while-revalidate=86400 a copy past its s-maxage was handed to a social
+// crawler once more (live: STALE at age 1109 showing the old 11-source card), and
+// the platform then froze it in its own unfurl cache. Now a crawler is never
+// handed a CDN copy rendered more than 15 minutes ago; the counts inside it can
+// lag by a further cluster-feed window (getClusterDetailOrThrow, up to 60 min),
+// as docs/architecture.md states. The hashed og:image URL (?<build hash>)
+// and the unhashed JSON-LD URL are separate CDN keys that carry this same policy.
+// s-maxage stays 600 so the 1-5 s Satori render rate does not rise; only the
+// stale tail shrinks. Pinned by tests/guards/share-surface-cache-window.test.ts.
 export const OG_CACHE_HEADERS = {
-  "cache-control": "public, s-maxage=600, stale-while-revalidate=86400",
+  "cache-control": "public, s-maxage=600, stale-while-revalidate=300",
 };
 // The read FAILED (sustained database outage): the cluster is not gone, we just
 // cannot see it. Serve the generic brand card so a crawler still unfurls

@@ -602,12 +602,14 @@ export function SourceDirectory({
             <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
               {bucket.map((source, srcIdx) => {
                 const kind = sourceKindOf(source);
-                const voting = isVotingSource(source);
-                // A non-voting card is de-emphasised on its profile link and its
-                // external arrow, not on the card wrapper: element opacity would
-                // also fade the "Akış alınamıyor" status marker, and the marker
-                // must stay at full opacity (rose-800 on the rose pill is 3.94:1
-                // in light mode at opacity-70, 6.23:1 at full opacity).
+                // h79-markup-1: no card is faded, voting or not. Element opacity
+                // on the 10 px muted text (post count, kind pill, zone badge, age
+                // line) measured 3.09:1 light / 3.15:1 dark against the 4.5:1 AA
+                // floor (5.91 / 5.24 at the full token), and on the wrapper it
+                // would also drag the "Akış alınamıyor" marker down (rose-800 on
+                // the rose pill: 3.94:1 faded, 6.23:1 at full strength). The
+                // "Toplayıcı" / "Niş" pill below already marks a source that
+                // does not vote, so the cue stays without the fade.
                 const cardClassName = `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6}`;
                 const label =
                   typeof countLabel === "string"
@@ -617,7 +619,7 @@ export function SourceDirectory({
                   <div key={source.id} className={cardClassName}>
                   <Link
                     href={`/source/${source.slug}`}
-                    className={voting ? "block max-sm:mr-7" : "block max-sm:mr-7 opacity-70"}
+                    className="block max-sm:mr-7"
                   >
                     <div className="flex items-start gap-3">
                       <SourceLogo
@@ -673,7 +675,7 @@ export function SourceDirectory({
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label={`${source.name} sitesi (${NEW_TAB_NOTICE})`}
-                    className={`absolute top-2 right-2 max-sm:top-0 max-sm:right-0 inline-flex min-h-6 min-w-6 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground${voting ? "" : " opacity-70"}`}
+                    className="absolute top-2 right-2 max-sm:top-0 max-sm:right-0 inline-flex min-h-6 min-w-6 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                   >
                     <span aria-hidden="true">↗</span>
                   </a>

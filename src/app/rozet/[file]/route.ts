@@ -21,9 +21,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const NOT_FOUND_HEADERS = { "cache-control": "public, s-maxage=300" };
 const UNAVAILABLE_HEADERS = { "cache-control": "no-store", "retry-after": "60" };
+// The 200 window is bounded to 900 s (s-maxage 600 + stale-while-revalidate 300),
+// like the cluster share card, the embed and the kart card: nothing purges the CDN
+// copy when a cluster changes, so the stale tail must stay short. Pinned by
+// tests/guards/share-surface-cache-window.test.ts.
 const OK_HEADERS = {
   "content-type": "image/svg+xml; charset=utf-8",
-  "cache-control": "public, s-maxage=600, stale-while-revalidate=86400",
+  "cache-control": "public, s-maxage=600, stale-while-revalidate=300",
   "x-content-type-options": "nosniff",
   "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
   "x-robots-tag": "noindex",

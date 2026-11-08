@@ -306,6 +306,22 @@ Snippet (the "Gömme kodu" chip on the cluster page copies this; the older "Site
 
 ---
 
+### `GET /cluster/{id}/opengraph-image`, `/cluster/{id}/twitter-image` and `/rozet/{id}.svg`
+
+The share surfaces of a cluster. `/cluster/{id}/opengraph-image` is the 1200 x 630 PNG card a social platform unfurls for the cluster page (`og:image`); `/cluster/{id}/twitter-image` re-exports the same handler, so X gets an explicit route and the two cards cannot drift. `/rozet/{id}.svg` is the static "Yelpaze rozeti" SVG (counts and fixed strings only, never a title or an outlet name). `id` is a cluster UUID, validated before any read. The card's `og:image` URL carries a build hash (`?<hash>`), which is a different CDN key from the plain URL in the page's JSON-LD; both are served with the same policy below.
+
+| Status | Meaning | `Cache-Control` |
+| --- | --- | --- |
+| `200` | the card (or, for `/rozet/{id}.svg`, the badge) | `public, s-maxage=600, stale-while-revalidate=300` |
+| `200` | `/cluster/{id}/opengraph-image` and `/twitter-image` only: a well-formed id that names no cluster gets the "bulunamadı" fallback card, not a `404`, so a platform does not pin a missing image | `public, s-maxage=300` |
+| `200` | `/cluster/{id}/opengraph-image` and `/twitter-image` only: the read failed (sustained outage); the generic Tayf brand card, so the unfurl still shows something | `no-store` |
+| `404` | a malformed id (not a UUID), or, for `/rozet/{id}.svg`, an unknown cluster; empty body (card) or plain text `Not found` (badge) | `public, s-maxage=300` |
+| `503` | `/rozet/{id}.svg` only: the read failed (sustained outage); plain text `Service unavailable`, `Retry-After: 60` | `no-store` |
+
+The `200` window is bounded: a CDN copy is served for at most `s-maxage` + `stale-while-revalidate` = 600 + 300 = 900 seconds, the same 15-minute ceiling as `/embed/cluster/{id}` (300 + 600) and the kart card. Nothing purges an image CDN entry when a cluster changes, so the stale tail bounds how old a CDN copy a crawler can be handed (at most 900 s since it was rendered); the counts inside a render come from the cluster detail cache (`cluster-feed`: revalidate 300 s, expire 3600 s), so they can lag by up to that window on top, as docs/architecture.md says; the platform's own unfurl cache can keep what it fetched for longer than that. `s-maxage` stays at 600 so the render rate (a Satori render takes 1 to 5 seconds) is no higher than before. Vercel strips `s-maxage` and `stale-while-revalidate` from the response a client sees (it receives `public, max-age=...`), so check the window in the route's own headers, not with `curl`; `tests/guards/share-surface-cache-window.test.ts` pins it.
+
+---
+
 ### `GET /api/oembed`
 
 [oEmbed 1.0](https://oembed.com) provider for cluster URLs, JSON only. Public, unkeyed, CORS-open.

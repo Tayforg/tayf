@@ -275,7 +275,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
     const res = await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     expect(res.headers.get("cache-control")).toBe(
-      "public, s-maxage=600, stale-while-revalidate=86400",
+      "public, s-maxage=600, stale-while-revalidate=300",
     );
   });
 

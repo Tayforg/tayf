@@ -302,6 +302,7 @@ import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
 import { BIAS_LABELS } from "@/lib/bias/config";
+import { SOURCE_KIND_META } from "@/lib/sources/kind";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { formatTurkishTimeAgo } from "@/lib/time";
 
@@ -1821,22 +1822,27 @@ describe("SourceDirectory -- the 'Akış alınamıyor' card marker (h47-sources-
     }
   });
 
-  it("a non-voting quarantined card fades the profile link, not the card or the status marker (contrast stays AA)", () => {
+  it("a non-voting card fades nothing: the kind pill is the cue and the text stays at the full token (WCAG 1.4.3)", () => {
     // The card wrapper used to carry `opacity-70` for non-voting kinds, which
-    // faded the rose pill too: rose-800 on rose-500/15 measured 3.94:1 in light
-    // mode (6.23:1 at full opacity), below WCAG 1.4.3's 4.5:1 for 11 px text.
-    const markup = renderToStaticMarkup(
-      createElement(SourceDirectory, {
-        grouped: {
-          pro_government: [{ ...GZT, kind: "aggregator", quarantined: true }],
-        } as unknown as GroupedSources,
-        countLabel: "0 haber",
-      }),
-    );
+    // faded the rose pill too (rose-800 on rose-500/15 measured 3.94:1 in light
+    // mode, 6.23:1 at full opacity). h79-markup-1: the same element opacity on
+    // the profile link and the external arrow took the 10 px muted text
+    // (post count, kind pill, zone badge, age line) down to 3.09:1 light /
+    // 3.15:1 dark against the 4.5:1 floor, so nothing on a card is faded now.
     const classOf = (tag: string) =>
       (/\bclass="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/).filter(Boolean);
+    const renderCard = (kind: "aggregator" | "niche") =>
+      renderToStaticMarkup(
+        createElement(SourceDirectory, {
+          grouped: {
+            pro_government: [{ ...GZT, kind, quarantined: true }],
+          } as unknown as GroupedSources,
+          countLabel: "0 haber",
+        }),
+      );
 
-    // (a) the card wrapper no longer fades everything inside it.
+    // (a) the card wrapper does not fade everything inside it.
+    const markup = renderCard("aggregator");
     const wrapperTag =
       [...markup.matchAll(/<div\b[^>]*>/g)]
         .map((m) => m[0])
@@ -1845,12 +1851,26 @@ describe("SourceDirectory -- the 'Akış alınamıyor' card marker (h47-sources-
     expect(classOf(wrapperTag)).toContain("rounded-xl");
     expect(classOf(wrapperTag)).not.toContain("opacity-70");
 
-    // (b) the non-voting card is still visually de-emphasised: profile link and
-    // the external arrow carry the fade.
-    const profileTag = /<a\b[^>]*\bhref="\/source\/gzt"[^>]*>/.exec(markup)?.[0] ?? "";
-    expect(classOf(profileTag)).toContain("opacity-70");
-    const externalTag = /<a\b[^>]*\bhref="https:\/\/example\.com\/gzt"[^>]*>/.exec(markup)?.[0] ?? "";
-    expect(classOf(externalTag)).toContain("opacity-70");
+    // (b) the profile link and the external arrow carry no opacity class, the
+    // markup has no opacity-70 anywhere, and the kind pill (the only cue left
+    // that the card does not vote) is still rendered inside the profile link.
+    for (const kind of ["aggregator", "niche"] as const) {
+      const cardMarkup = renderCard(kind);
+      const profileTag = /<a\b[^>]*\bhref="\/source\/gzt"[^>]*>/.exec(cardMarkup)?.[0] ?? "";
+      expect(profileTag, `${kind}: profile link rendered`).not.toBe("");
+      expect(classOf(profileTag).filter((t) => t.includes("opacity-")), `${kind}: profile link`).toEqual([]);
+      const externalTag =
+        /<a\b[^>]*\bhref="https:\/\/example\.com\/gzt"[^>]*>/.exec(cardMarkup)?.[0] ?? "";
+      expect(externalTag, `${kind}: external link rendered`).not.toBe("");
+      expect(classOf(externalTag).filter((t) => t.includes("opacity-")), `${kind}: external link`).toEqual([]);
+      expect(cardMarkup, `${kind}: no opacity-70`).not.toContain("opacity-70");
+
+      const profileOpen = cardMarkup.indexOf('href="/source/gzt"');
+      const profileInner = cardMarkup.slice(profileOpen, cardMarkup.indexOf("</a>", profileOpen));
+      expect(profileInner, `${kind}: kind pill inside the profile link`).toContain(
+        SOURCE_KIND_META[kind].label,
+      );
+    }
 
     // (c) the status marker and its paragraph carry no opacity class at all.
     const markerTag = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>/.exec(markup)?.[0] ?? "";
@@ -1861,7 +1881,7 @@ describe("SourceDirectory -- the 'Akış alınamıyor' card marker (h47-sources-
     expect(classOf(markerPara).filter((t) => t.includes("opacity-"))).toEqual([]);
   });
 
-  it("a voting card has no opacity-70 anywhere: the fade belongs to non-voting kinds only", () => {
+  it("a voting card has no opacity-70 anywhere either (no card is faded, h79-markup-1)", () => {
     const markup = renderToStaticMarkup(
       createElement(SourceDirectory, {
         grouped: {
