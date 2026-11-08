@@ -691,6 +691,9 @@ psql "$DATABASE_URL" -f supabase/migrations/032_blindspot_contract_recompute.sql
 **Verification:**
 
 ```sql
+-- HISTORICAL: run once at the 032 rollout. Do not re-run after the 132 / h63
+-- legacy repair: it would flag the 153 never-recall-checked clusters (132 step 5)
+-- and rewrite ~21 sides.
 select public.recompute_blindspot_flags();
 -- Expect: 0. If it returns non-zero here, 032 hasn't actually finished
 -- backfilling everything — re-run once more and confirm 0.
@@ -727,6 +730,9 @@ select public.recompute_blindspot_flags();
 3. **Re-run both recompute functions third.** Between step 1 and step 2, the still-deployed *old* consumer kept writing all-sources distributions (it has no notion of `kind` yet) for every cluster it touched — so the migration's own one-time backfill (which ran as part of step 1, before the redeploy) is now stale for that window. Re-run and confirm both return 0 on a second call:
 
    ```sql
+   -- HISTORICAL: run once at the 032/034 rollout. Do not re-run this pair after
+   -- the 132 / h63 legacy repair: the flag pass would flag the 153
+   -- never-recall-checked clusters (132 step 5) and rewrite ~21 sides.
    select public.recompute_bias_distribution(now() - interval '48 hours');
    select public.recompute_blindspot_flags();
    -- Expect: 0 the second time you run this pair. If either returns
@@ -735,14 +741,77 @@ select public.recompute_blindspot_flags();
    -- more and confirm both settle at 0.
    ```
 
-Clusters last touched more than 48h before you run step 3 keep their pre-034 (all-sources) `bias_distribution` **by design** — the 48h window matches 031/032's convention and keeps the recompute cheap. A full rebuild is available for an off-peak run:
-
-```sql
-select public.recompute_bias_distribution('1970-01-01');
-select public.recompute_blindspot_flags();
-```
+Clusters last touched more than 48h before you run step 3 keep their pre-034 (all-sources) `bias_distribution`, which is why 215 of them still wear a public "Kör nokta" flag that fails the rule (measured 2026-11-08). The one-shot rebuild this paragraph used to offer (`recompute_bias_distribution('1970-01-01')` followed by `recompute_blindspot_flags()`) is **superseded: do not run it on production.** Neither call has an upper bound, and `recompute_blindspot_flags()` scans every cluster (265,023 rows) in one statement (through PostgREST it hits the 8 s limit; in psql as postgres there is no statement timeout, so it runs to completion). Finishing is the danger, not the limit: the flag pass would also newly flag 153 old clusters that were never recall-checked (071, 126), so it is not offered at all after the h63 repair. The chunked, dry-run-first repair is the subsection "Legacy bias_distribution repair (h63)" at the end of this section.
 
 `supabase/seed_sources.sql` now carries a `kind` column for every seeded row, so a fresh environment (`supabase db reset`, or a new project seeded from scratch) gets the correct source kinds without needing this migration's slug-keyed UPDATE at all — the seed file is the source of truth for new installs, 034's VALUES list is the backfill for the existing production database.
+
+### Legacy bias_distribution repair (h63)
+
+**Why.** 034 re-derived `clusters.bias_distribution` for the last 48 hours only, so older clusters still store the all-member distribution (aggregator and niche votes included), and 032 derived the public "Kör nokta" flag from it. Measured read-only on 2026-11-08: of 1,164 flagged clusters (`is_blindspot`, not archived, `article_count >= 2`), **215 fail the rule** of at least 5 voting articles with one zone holding at least 0.8 of them (209 have fewer than 5 voting articles, 6 have a top-zone share below 0.8). The newest of them was last updated on 2026-09-04 13:55Z, so the set is bounded and legacy. Among clusters first published from 2026-08-01 up to (not including) 2026-08-15, 689 of 1,258 store a total that differs from their outlet and wire member count. Example: `/cluster/861b4249-f553-41b7-be98-45544008b1bc` stores `{center 4, gov_leaning 1}`, but its only `gov_leaning` member is the aggregator `haberler-com`, which the page itself says is listed but not counted ("toplayıcı / niş kaynaklar kümelerde listelenir ama yanlılık dağılımına sayılmaz"); the four voting members are all `center`. Two October clusters lost a late vote the same way (`e0c1324a-c47e-4952-beed-c37f858a15e3` stores `opposition_leaning 3` for 4 voters; `52823177-3a62-4b56-8312-18cd3f07b53e` stores 3 votes for 4 voters); their `updated_at` is after 2026-09-05, so the live-range chunks below repair them too.
+
+**No new migration, no deploy.** The tools already exist and are applied in production: migration 132 (section "132" below) ships `recompute_bias_distribution_range`, `clear_false_blindspots_range` and `legacy_bias_voter_dists` (windows of at most 31 days, dry run by default, one operator at a time, a re-check that skips a cluster the live consumer re-stamped during the call), and `scripts/recompute-legacy-bias.mjs` drives them. This subsection is the order in which to run them and the read-only counts that prove the result. The tools never write `updated_at` and never set a flag: they only withdraw flags that fail the rule.
+
+**Who runs it, and when.** This is a founder-run production write. The worker, CI and the agents never run it (`--apply` is the only write, and nothing in the repository passes it). Run it off-peak, in chunks of at most 31 days, oldest first, with a read-only count before and after.
+
+1. **Count before (read-only).** Paste into psql or the SQL editor. It takes about 7 s, close to the 8 s limit; if it stops with `57014`, run it in psql inside `begin read only; set local statement_timeout = '60s'; ...; commit;`. Expect today `flagged 1164, failing 215` (`flagged` moves as new flags are set, `failing` can only fall):
+
+   ```sql
+   with b as (select id, updated_at from clusters where is_blindspot and not is_archived and article_count>=2), v as (select b.id, s.bias from b join cluster_articles ca on ca.cluster_id=b.id join articles a on a.id=ca.article_id join sources s on s.id=a.source_id where s.kind in ('outlet','wire')), z as (select id, case when bias in ('pro_government','gov_leaning','state_media','islamist_conservative','nationalist') then 'i' when bias in ('center','international','pro_kurdish') then 'b' else 'm' end zone, count(*) n from v group by 1,2), t as (select b.id, coalesce(sum(z.n),0) total, coalesce(max(z.n),0) top from b left join z on z.id=b.id group by 1) select count(*) flagged, count(*) filter (where total<5 or top::numeric/nullif(total,0)<0.8) failing from t;
+   ```
+
+   Then the per-window mismatch count, stored total against the outlet and wire member count. It is windowed on `first_published`, never on `updated_at`: an `updated_at` window over this many clusters hits `57014`. Two weeks take about 5 s; shrink the window if it times out. Expect `visible 1258, mismatching 689` for this window:
+
+   ```sql
+   with c as (
+     select id, (select coalesce(sum(e.value::int), 0) from jsonb_each_text(bias_distribution) e) stored
+       from clusters
+      where not is_archived and article_count >= 2
+        and first_published >= '2026-08-01' and first_published < '2026-08-15'),
+   v as (
+     select c.id, count(*) filter (where s.kind in ('outlet', 'wire')) voting
+       from c
+       join cluster_articles ca on ca.cluster_id = c.id
+       join articles a on a.id = ca.article_id
+       join sources s on s.id = a.source_id
+      group by 1)
+   select count(*) visible, count(*) filter (where c.stored <> coalesce(v.voting, 0)) mismatching
+     from c left join v on v.id = c.id;
+   ```
+
+   Last, the tool's own dry run (132 step 1, `p_dry_run` true, writes nothing): `node scripts/recompute-legacy-bias.mjs --from 2026-04-01 --to 2026-09-05` prints `would_change` and `would_clear` per window and a `TOTAL` line whose `would_clear` is 215 (it can only fall).
+
+   Then the live range: `node scripts/recompute-legacy-bias.mjs --from 2026-09-05 --to <tomorrow, YYYY-MM-DD>` (expect would_change about 2, the October pair e0c1324a / 52823177, and would_clear 0). It also warms the pages before the apply.
+
+2. **Snapshot** the rows that will change, per month, with the read-only `\copy` of 132 step 2, plus the live range the apply below also covers: `2026-09-05..2026-10-05`, `2026-10-05..2026-11-05` and `2026-11-05..<tomorrow>` (31 days at most each; change the dates and the file name in the 132 `\copy`). Do this before the first `--apply`: the CSVs are the only undo, and the October pair (e0c1324a, 52823177) is only in the live windows.
+
+3. **Apply**, oldest first, each chunk at most 31 days (the script walks 7-day windows inside a chunk; the SQL clamps a call to 31 days either way). The 183 stray rows older than 2026-04-01 are not part of this repair (22 would change, none would clear; see 132). Stop at the first non-zero exit: the script prints the command that resumes it, every window is idempotent, and `55P03` means another 132 call holds the lock (wait a minute and rerun). The last command runs up to tomorrow's date (`YYYY-MM-DD`); if more than 31 days have passed since 2026-11-05, split it:
+
+   ```bash
+   node scripts/recompute-legacy-bias.mjs --from 2026-04-01 --to 2026-05-01 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-05-01 --to 2026-06-01 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-06-01 --to 2026-07-01 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-07-01 --to 2026-08-01 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-08-01 --to 2026-09-01 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-09-01 --to 2026-09-05 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-09-05 --to 2026-10-05 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-10-05 --to 2026-11-05 --apply
+   node scripts/recompute-legacy-bias.mjs --from 2026-11-05 --to <tomorrow> --apply
+   ```
+
+4. **Count after (read-only).** Re-run the three counts of step 1. `failing 0` is the pass condition; `mismatching` is 0 for the window above (a cluster the live consumer touched in between is recomputed by the consumer under the same rule, so it stays 0); every `would_change` and `would_clear` of the dry run is 0 (`would_newly_flag` stays 153, see below). Then the spot checks:
+
+   ```sql
+   select is_blindspot, blindspot_side, bias_distribution from public.clusters where id = '861b4249-f553-41b7-be98-45544008b1bc';  -- expect f, null, center 4 and every other key 0
+   select id, bias_distribution from public.clusters where id in ('e0c1324a-c47e-4952-beed-c37f858a15e3', '52823177-3a62-4b56-8312-18cd3f07b53e');  -- e0c1324a: opposition 1 and opposition_leaning 3; 52823177: center 2, gov_leaning 1, opposition_leaning 1
+   ```
+
+   Once the page cache refreshes (the tools revalidate nothing; pages follow their normal `cacheLife`), `/cluster/861b4249-f553-41b7-be98-45544008b1bc` shows no "Kör nokta" ribbon, Merkez %100 and "Spektrum 4 sınıflandırılmış kaynaktan oluşturuldu · 1 toplayıcı / niş kaynak sayılmadı", and `e0c1324a` shows a Muhalefet tally of 4. The detail page already shows that recount once the read-path change is deployed (it counts voting members itself), so the page check proves the deploy and the SQL spot checks above prove the data repair.
+
+**Expected effect.** About 9.3k bars change (the 9,368 clusters with `article_count >= 2` among the roughly 66k stored distributions that differ, 132 header); about 215 "Kör nokta" pills drop; closed `/hafta` weeks for April to September shift slightly. The repair never sets a flag, so the 153 old clusters that would newly pass the rule stay unflagged: they were never recall-checked by 071 and 126, and flagging one is a founder decision (132 step 5). The repair changes stored data only and no UI copy.
+
+**Not part of this repair.** 12 same-source duplicate clusters from 15 to 21 October (for example `1998389c` with yeni-safak twice, `3e33e11e` with aydinlik twice, `5955ca0e` with haberport twice) keep a double vote, because voting counts per article. That is a data decision, not part of this change.
+
+**Rollback.** There is no function to roll back (nothing here adds one). The data is restored from the CSV snapshots of step 2, per file and only for clusters nobody re-stamped since: see the 132 rollback.
 
 ---
 
@@ -1408,7 +1477,7 @@ Before declaring the migration complete:
 - [ ] No `node scripts/*-worker.mjs` processes running anywhere
 - [ ] At least one cluster created in the last 15 minutes (`select count(*) from clusters where created_at > now() - interval '15 minutes'`)
 - [ ] At least one image backfilled in the last 15 minutes (`select count(*) from articles where image_url is not null and updated_at > now() - interval '15 minutes'`)
-- [ ] Migration 034 applied, `cluster-consumer` redeployed, and both `select public.recompute_bias_distribution(now() - interval '48 hours');` / `select public.recompute_blindspot_flags();` return 0 on a second call
+- [ ] Migration 034 applied and `cluster-consumer` redeployed (the 034 step 3 recompute pair was a one-time rollout step; do not re-run it after the h63 repair). After the h63 repair, the read-only 132 dry run `node scripts/recompute-legacy-bias.mjs --from 2026-04-01 --to 2026-09-05` shows would_clear 0
 - [ ] `select kind, count(*) from sources group by kind order by kind;` shows non-zero `aggregator`, `wire`, and `niche` counts alongside `outlet`
 - [ ] Migration 039 applied before this branch was deployed to Vercel AND before `ingest` was redeployed (`GET /api/metrics` reads `cluster_quality_snapshots`/`ingest_cycles` unconditionally); `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set as GitHub Actions repository secrets; `select count(*) from public.ingest_cycles;` is non-zero after the next `ingest-drain` tick
 

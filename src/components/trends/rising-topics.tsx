@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { dayLabelTr } from "@/lib/trends/day-label";
 import type { RisingResult } from "@/lib/trends/rising";
 
 // "Yükselen Konular" card at the top of /trends (migration 112). Pure
@@ -8,6 +9,12 @@ import type { RisingResult } from "@/lib/trends/rising";
 // "could not compute" line, so a failed read never takes the chart down.
 // Text colours use the full muted-foreground / brand tokens only (WCAG 1.4.3,
 // tests/guards/text-contrast-tokens.test.ts).
+//
+// The ranked day is named by its date ("7 Kasım"), never "Bugün"/"Dün": the
+// result sits in a cache entry served up to an hour (longer after an idle
+// spell) past Istanbul midnight, so a relative word would label the finished
+// day "Bugün" (h63-timezones-1). The date is derived from `data.day` and so is
+// always true of the count printed next to it.
 
 export function RisingTopics({ data }: { data: RisingResult | null }) {
   return (
@@ -32,7 +39,9 @@ export function RisingTopics({ data }: { data: RisingResult | null }) {
           Yükselen konular için yeterli geçmiş veri henüz yok.
         </p>
       ) : data.items.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Bugün belirgin bir yükseliş yok.</p>
+        <p className="text-sm text-muted-foreground">
+          {`${dayLabelTr(data.day)} sayımında belirgin bir yükseliş yok.`}
+        </p>
       ) : (
         <ol className="grid gap-2 sm:grid-cols-2">
           {data.items.map((item) => (
@@ -48,7 +57,7 @@ export function RisingTopics({ data }: { data: RisingResult | null }) {
                 {item.label}
               </Link>
               <span className="block text-[12px] text-muted-foreground">
-                {`${data.dayLabel} ${item.count.toLocaleString("tr-TR")} haber · ${
+                {`${dayLabelTr(data.day)}: ${item.count.toLocaleString("tr-TR")} haber · ${
                   item.isNew
                     ? "geçen hafta neredeyse hiç yoktu"
                     : `7 günlük ortalamanın ${item.ratioIsLowerBound ? "en az " : ""}${item.ratioLabel} katı`

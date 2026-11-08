@@ -6,12 +6,18 @@ import { cache } from "react";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
+import {
+  distributionsEqual,
+  holdsBlindspotRule,
+  votingDistribution,
+} from "@/lib/bias/voting-recount";
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import {
   attemptCached,
   resolveCachedOrRetry,
   resolveCachedOrThrow,
 } from "@/lib/cache-resilience";
+import { POSTGREST_MAX_ROWS } from "@/lib/db/paging";
 import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
   degradedSilentZone,
@@ -47,6 +53,17 @@ function logSuppression(
   const stats = health[silentZone];
   console.log(
     `[feed-health] suppressed blindspot for cluster ${clusterId} (silent zone ${silentZone}: ${stats.healthy}/${stats.total} feeds healthy)`,
+  );
+}
+
+// One line per detail read whose stored bias_distribution disagrees with the
+// voting recount of the cluster's own members (a pre-034 row, or a lost update
+// of the consumer). Cluster id only, same style as logRecallVeto, so the
+// backlog of rows the SQL runbook has not repaired yet can be counted from the
+// logs without any counts or member names in them.
+function logVotingRecountMismatch(clusterId: string): void {
+  console.info(
+    `[voting-recount] stored distribution differs from the voting recount for cluster ${clusterId}`,
   );
 }
 
@@ -400,52 +417,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     }
 
     const clusterRow = clusterRes.data;
-    const distribution = normalizeDistribution(clusterRow.bias_distribution);
-
-    // Read-path-only suppression, mirroring /blindspots: a shared link must
-    // never show a blindspot claim the feed has already withdrawn. This
-    // never writes clusters.is_blindspot — only the value returned here.
-    // Only pay for the health fetch when the DB already flagged the
-    // cluster (the common case is not a blindspot at all).
-    //
-    // Migration 071 recall veto runs FIRST: a vetoed cluster skips the
-    // feed-health fetch entirely (the veto is a matching fact, not a feed
-    // outage, so blindspotSuppressed stays false).
-    //
-    // h37-content-1: the claim also waits BLINDSPOT.feedDelayHours after
-    // first_published, like /blindspots, so the page, share card, embed and
-    // oEmbed show no "Kör nokta" for a story still inside that wait. A held-back
-    // claim is not a recall withdrawal (blindspotRecallVetoed stays false) and
-    // never shows a pill, but it still asks the feed-health gate: a feed outage
-    // is a current event, so the clusters it touches are mostly younger than the
-    // delay, and "bazı kaynaklara şu an ulaşamıyoruz" (feedDegraded on the page,
-    // the 'suppressed' section of the weekly report) must survive the wait. A
-    // pending claim whose silent pole is degraded therefore reads as it did
-    // before the wait existed: blindspotSuppressed true, no claim, no side.
-    // ONE clock read: this fetcher only runs inside the "use cache: remote"
-    // attempt or after the request scope on the live retry, never in an
-    // uncached render.
-    const veto = publicBlindspotClaim(clusterRow, Date.now());
-    if (veto.vetoed) logRecallVeto(id);
-    let isBlindspot = veto.isBlindspot;
-    let blindspotSide = veto.blindspotSide;
-    let blindspotSuppressed = false;
-    if (isBlindspot || veto.pending) {
-      const dominantZone = dominantZoneOf(distribution);
-      if (dominantZone) {
-        const health = await getZoneFeedHealth();
-        if (shouldSuppressBlindspot(dominantZone, health)) {
-          isBlindspot = false;
-          // Mirror the DB invariant (migration 032): blindspot_side is
-          // non-null only when is_blindspot is true. politics-query.ts's
-          // buildClusterBundle nulls both together for the same reason —
-          // a withdrawn claim must not still expose the side it withdrew.
-          blindspotSide = null;
-          blindspotSuppressed = true;
-          logSuppression(id, dominantZone, health);
-        }
-      }
-    }
+    const storedDistribution = normalizeDistribution(clusterRow.bias_distribution);
 
     // Normalize the embedded shape to the ClusterDetailMember contract.
     // Drop rows where the embedded article or its source is null —
@@ -506,6 +478,91 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           description: article.description ?? null,
         },
       });
+    }
+
+    // h63-clusterintegrity-1: clusters last counted before migration 034 store
+    // a bias_distribution (and an is_blindspot flag) that include aggregator and
+    // niche members, while the page's own note says those kinds are not counted.
+    // When the member list is complete, recount the votes from it and show that:
+    // voting kinds only, one vote per article (PRE-dedupe `members`, exactly as
+    // migration 034's recompute_bias_distribution counts), so a modern cluster's
+    // recount equals its stored value. Complete means the embed came back below
+    // PostgREST's row cap (a capped list is a sample, not the members) and holds at
+    // least one usable member (an empty list is no evidence, and must not replace a
+    // stored number with zeros). Otherwise the stored value stands. A members
+    // error already threw above. Read path only: nothing is written.
+    const memberRowCount = membersRes.data?.length ?? 0;
+    const recount =
+      memberRowCount < POSTGREST_MAX_ROWS && members.length > 0
+        ? votingDistribution(members)
+        : null;
+    if (recount && !distributionsEqual(recount, storedDistribution)) {
+      // Cluster id only: no counts and no member names in the log line.
+      logVotingRecountMismatch(id);
+    }
+    const distribution = recount ?? storedDistribution;
+
+    // Read-path-only suppression, mirroring /blindspots: a shared link must
+    // never show a blindspot claim the feed has already withdrawn. This
+    // never writes clusters.is_blindspot — only the value returned here.
+    // Only pay for the health fetch when the DB already flagged the
+    // cluster (the common case is not a blindspot at all).
+    //
+    // Migration 071 recall veto runs FIRST: a vetoed cluster skips the
+    // feed-health fetch entirely (the veto is a matching fact, not a feed
+    // outage, so blindspotSuppressed stays false).
+    //
+    // h37-content-1: the claim also waits BLINDSPOT.feedDelayHours after
+    // first_published, like /blindspots, so the page, share card, embed and
+    // oEmbed show no "Kör nokta" for a story still inside that wait. A held-back
+    // claim is not a recall withdrawal (blindspotRecallVetoed stays false) and
+    // never shows a pill, but it still asks the feed-health gate: a feed outage
+    // is a current event, so the clusters it touches are mostly younger than the
+    // delay, and "bazı kaynaklara şu an ulaşamıyoruz" (feedDegraded on the page,
+    // the 'suppressed' section of the weekly report) must survive the wait. A
+    // pending claim whose silent pole is degraded therefore reads as it did
+    // before the wait existed: blindspotSuppressed true, no claim, no side.
+    // ONE clock read: this fetcher only runs inside the "use cache: remote"
+    // attempt or after the request scope on the live retry, never in an
+    // uncached render.
+    const veto = publicBlindspotClaim(clusterRow, Date.now());
+    if (veto.vetoed) logRecallVeto(id);
+    let isBlindspot = veto.isBlindspot;
+    let blindspotSide = veto.blindspotSide;
+    let claimPending = veto.pending;
+    let blindspotSuppressed = false;
+    // h63-clusterintegrity-1: the stored flag was derived from the stored
+    // distribution. When the voting recount no longer satisfies the same rule
+    // (migration 032: BLINDSPOT.minSources voting members and a top-zone share of
+    // at least BLINDSPOT.dominantShare), the stored claim rested on aggregator or
+    // niche members the page does not count, so withdraw it, side included (no
+    // blindspot => no side). It runs after the recall veto and the feed delay and
+    // BEFORE the feed-health fetch, so a failed recount skips that fetch and
+    // neither blindspotSuppressed nor blindspotRecallVetoed is set: this is not a
+    // feed outage and not a recall match. The gate only ever withdraws: it is
+    // entered only when the stored flag already made a claim (isBlindspot or
+    // claimPending both derive from `is_blindspot` being true), so a passing
+    // recount never creates one the DB did not make.
+    if (recount && (isBlindspot || claimPending) && !holdsBlindspotRule(recount)) {
+      isBlindspot = false;
+      blindspotSide = null;
+      claimPending = false;
+    }
+    if (isBlindspot || claimPending) {
+      const dominantZone = dominantZoneOf(distribution);
+      if (dominantZone) {
+        const health = await getZoneFeedHealth();
+        if (shouldSuppressBlindspot(dominantZone, health)) {
+          isBlindspot = false;
+          // Mirror the DB invariant (migration 032): blindspot_side is
+          // non-null only when is_blindspot is true. politics-query.ts's
+          // buildClusterBundle nulls both together for the same reason —
+          // a withdrawn claim must not still expose the side it withdrew.
+          blindspotSide = null;
+          blindspotSuppressed = true;
+          logSuppression(id, dominantZone, health);
+        }
+      }
     }
 
     // Sort by published_at ASC FIRST so the dedupe pass below

@@ -356,7 +356,6 @@ describe("/trends page — SVG <title> is a single string", () => {
 
 const RISING_OK: RisingResult = {
   status: "ok",
-  dayLabel: "Bugün",
   day: "2026-10-23",
   items: [
     {
@@ -1021,7 +1020,7 @@ function risingRow(key: string, label: string): RisingItem {
 }
 
 function okRising(items: RisingItem[]): RisingResult {
-  return { status: "ok", dayLabel: "Bugün", day: "2026-11-05", items };
+  return { status: "ok", day: "2026-11-05", items };
 }
 
 /** The data prop the page hands to <RisingTopics>. */

@@ -162,7 +162,8 @@ describe("computeRising: thresholds", () => {
   it("baseline 3/day and today 15 rises with ratio 5,0", () => {
     const rows = [...baselineRows("erdogan", 3), todayRow("erdogan", 15)];
     const r = computeRising(rows, TODAY);
-    expect(r).toMatchObject({ status: "ok", dayLabel: "Bugün", day: TODAY });
+    // No relative-day word in the cached value: h63-timezones-1.
+    expect(r).toEqual({ status: "ok", day: TODAY, items: expect.any(Array) });
     const [item] = okItems(r);
     expect(item).toMatchObject({
       key: "erdogan",
@@ -370,7 +371,7 @@ describe("computeRising: unknown keys", () => {
 describe("computeRising: yesterday fallback", () => {
   const YESTERDAY = shiftDayKey(TODAY, -1);
 
-  it("an empty today with a spiking yesterday ranks yesterday ('Dün')", () => {
+  it("an empty today with a spiking yesterday ranks yesterday", () => {
     const rows = [
       // baseline of yesterday: D-2 .. D-8 of today
       ...baselineRows("erdogan", 3, YESTERDAY),
@@ -378,7 +379,10 @@ describe("computeRising: yesterday fallback", () => {
       { day: TODAY, entity: "erdogan", count: 0 },
     ];
     const r = computeRising(rows, TODAY);
-    expect(r).toMatchObject({ status: "ok", dayLabel: "Dün", day: YESTERDAY });
+    // h63-timezones-1: no relative-day word in the cached value (it would go
+    // stale past Istanbul midnight); the card prints the date of `day`.
+    expect(r).toEqual({ status: "ok", day: YESTERDAY, items: expect.any(Array) });
+    expect(Object.keys(r).sort()).toEqual(["day", "items", "status"]);
     const [item] = okItems(r);
     expect(item).toMatchObject({ key: "erdogan", count: 15, baseline: 3, ratioLabel: "5,0" });
   });
@@ -390,10 +394,11 @@ describe("computeRising: yesterday fallback", () => {
       { day: TODAY, entity: "erdogan", count: 20 },
     ];
     const r = computeRising(rows, TODAY);
-    expect(r).toMatchObject({ status: "ok", dayLabel: "Bugün", day: TODAY });
+    expect(r).toEqual({ status: "ok", day: TODAY, items: expect.any(Array) });
+    expect(Object.keys(r).sort()).toEqual(["day", "items", "status"]);
   });
 
-  it("nothing rising today or yesterday is ok with no items, labelled 'Bugün'", () => {
+  it("nothing rising today or yesterday is ok with no items, on today's key", () => {
     const rows = [
       ...baselineRows("erdogan", 3, YESTERDAY),
       { day: YESTERDAY, entity: "erdogan", count: 3 },
@@ -401,7 +406,6 @@ describe("computeRising: yesterday fallback", () => {
     ];
     expect(computeRising(rows, TODAY)).toEqual({
       status: "ok",
-      dayLabel: "Bugün",
       day: TODAY,
       items: [],
     });
@@ -416,7 +420,7 @@ describe("computeRising: yesterday fallback", () => {
     expect(computeRising(rows, TODAY)).toEqual({ status: "insufficient" });
   });
 
-  it("yesterday with too little history is skipped, leaving an empty 'Bugün'", () => {
+  it("yesterday with too little history is skipped, leaving an empty result on today's key", () => {
     // Today has 6 present baseline days (D-1..D-6); yesterday's baseline
     // D-2..D-8 has only D-2..D-6 = 5 present -> insufficient -> not ranked.
     const rows = [
@@ -424,7 +428,7 @@ describe("computeRising: yesterday fallback", () => {
       { day: YESTERDAY, entity: "erdogan", count: 50 },
     ];
     const r = computeRising(rows, TODAY);
-    expect(r).toEqual({ status: "ok", dayLabel: "Bugün", day: TODAY, items: [] });
+    expect(r).toEqual({ status: "ok", day: TODAY, items: [] });
   });
 });
 

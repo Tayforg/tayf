@@ -119,7 +119,8 @@ describe("getRisingEntities: results", () => {
 
     const r = await getRisingEntities();
 
-    expect(r).toMatchObject({ status: "ok", dayLabel: "Bugün", day: TODAY });
+    expect(r).toMatchObject({ status: "ok", day: TODAY });
+    expect(r).not.toHaveProperty("dayLabel");
     if (r?.status !== "ok") throw new Error("expected ok");
     expect(r.items).toHaveLength(1);
     expect(r.items[0]).toMatchObject({ key: "erdogan", count: 15, ratioLabel: "5,0" });
