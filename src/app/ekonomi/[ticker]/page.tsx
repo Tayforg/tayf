@@ -323,12 +323,12 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
 
   return (
     <div className="mx-auto w-full max-w-[1600px] px-4 py-6 space-y-3">
-      <nav className="font-mono text-[11px] text-muted-foreground">
+      <nav aria-label="Gezinti yolu" className="font-mono text-[11px] text-muted-foreground">
         <Link href="/ekonomi" className="hover:text-foreground">
           Ekonomi
         </Link>
         <span className="mx-2 text-foreground/40">/</span>
-        <span className="text-brand">{ticker}</span>
+        <span aria-current="page" className="text-brand">{ticker}</span>
       </nav>
 
       <header className="grid gap-4 border border-border bg-black/25 px-4 py-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">

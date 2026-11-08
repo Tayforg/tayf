@@ -191,9 +191,12 @@ export default async function SourceProfilePage({ params }: PageProps) {
         dangerouslySetInnerHTML={{ __html: serializeJsonLd(breadcrumbs) }}
       />
       <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
-      {/* Back nav — keeps the user grounded inside Tayf when they arrived
-          via a source chip on a cluster or via /sources. */}
-      <nav>
+      {/* Back link — keeps the user grounded inside Tayf when they arrived
+          via a source chip on a cluster or via /sources. A plain div, not a
+          navigation landmark: one back link is not a navigation region, and
+          an unnamed landmark would sit next to the named "Ana menü" and
+          "Alt menü". */}
+      <div>
         <Link
           href="/sources"
           className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
@@ -201,7 +204,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
           <ArrowLeft className="h-3.5 w-3.5" />
           Tüm kaynaklar
         </Link>
-      </nav>
+      </div>
 
       {/* Header card: logo, name, bias, 7-day count, and an outbound link to
           the publisher's homepage. Mirrors the visual rhythm of the cluster
