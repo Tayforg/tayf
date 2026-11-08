@@ -176,6 +176,7 @@ export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedMod
 //   clamped to 3 lines) +16.2+20 = ~167px <= 200.
 // The ribbon and the link never wrap: they ellipsize. The link is left
 // stretched to the full width (no align-self) so its tap target stays wide.
+// The forced-colors rule (last entry) gives the bar a 1px border, but box-sizing:border-box keeps the bar at 10px, so none of the budgets above change.
 const STYLE = [
   ":root{--fg:#18181b;--mu:#52525b;--bg:#ffffff;--bd:#e4e4e7;--rb:#fef3c7;--rf:#92400e}",
   "@media (prefers-color-scheme: dark){:root{--fg:#fafafa;--mu:#a1a1aa;--bg:#0a0a0a;--bd:#27272a;--rb:#422006;--rf:#fcd34d}}",
@@ -195,6 +196,9 @@ const STYLE = [
   ".v{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}",
   "@media (max-height:187px){.b{display:none}.c{padding:8px 12px;gap:4px}h1{font-size:15px;min-height:1.25em;-webkit-line-clamp:1;line-clamp:1}.l{-webkit-line-clamp:1;line-clamp:1}}",
   "@media (max-width:260px){.b{display:none}.c{padding:8px 10px;gap:4px}h1{font-size:15px}}",
+  // h70-embed-3: forced colors (Windows High Contrast) repaints background-color to Canvas, which
+  // erased the three segments and the ribbon. Keep their own colours and outline the bar in a system colour.
+  "@media (forced-colors: active){.bar,.bar span,.r{forced-color-adjust:none}.bar{border:1px solid CanvasText}}",
 ].join("");
 
 const HEAD_META =
@@ -215,6 +219,10 @@ function legendOf(model: EmbedModel): string {
 }
 
 function ariaLabelOf(model: EmbedModel): string {
+  // h70-embed-3: nothing classified yet -> no zone list. Reading 'İktidar %0,
+  // Bağımsız %0, Muhalefet %0' next to a legend that says there is no
+  // classified source is false precision (legendOf has the same branch).
+  if (model.total === 0) return "Sınıflandırılmış kaynak yok";
   return ZONES.map((z) => `${ZONE_LABEL[z]} %${model.percents[z]}`).join(", ");
 }
 

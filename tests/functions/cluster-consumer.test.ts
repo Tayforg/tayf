@@ -23,7 +23,7 @@ import {
 } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
 import { cleanDescription } from "../../supabase/functions/_shared/cluster/description-clean.ts";
 import { extractEntities } from "../../supabase/functions/_shared/cluster/entities.ts";
-import { incidentVetoFires, subjectVetoFires } from "../../supabase/functions/_shared/cluster/ensemble.ts";
+import { actorMismatchFires, incidentVetoFires, subjectVetoFires } from "../../supabase/functions/_shared/cluster/ensemble.ts";
 
 // h45-clusters-1: SAME_SOURCE_UPDATE_ENFORCE is a code constant (a PR turns it on,
 // no dashboard switch), so the tests flip it through a mock of the constants module.
@@ -1787,6 +1787,18 @@ describe("cluster-consumer Edge Function", () => {
     // carried the primary lane, MinHash contributed nothing.
     const CAPPED = { textFloorCapped: true, raw: 0.39, jaccardScore: 0, primary: 0.45 };
 
+    // These tests replace the stubbed scorer and nothing put it back, so under a shuffled order the
+    // next test of another describe ran against this one's stub (the h40 "an article that joins its
+    // candidate does not count" test failed on `--sequence.shuffle --sequence.seed=2`). Same default
+    // as the vi.mock factory above.
+    afterEach(() => {
+      vi.mocked(scoreMock).mockImplementation(() => ({
+        score: 0.82,
+        components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
+        isMatch: true,
+      }));
+    });
+
     function seedClusters(opts: { bHasLatest?: boolean } = {}) {
       const now = new Date().toISOString();
       const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
@@ -2840,6 +2852,80 @@ describe("cluster-consumer Edge Function", () => {
       expect(linked[0]).toBeTruthy();
       expect(linked[1]).toBe(linked[0]);
     });
+
+    // h70-mergequality-3: cluster 6e585787 (AK Parti Sozcusu Celik) took
+    // anadolu-ajansi "Cumhurbaskani Erdogan, Karabag Zaferi'nin 6. yilini kutladi"
+    // through the headline lane of the member scan: aksam's comma-less member title
+    // is neither seed nor latest, so only the scan saw it, and the subject veto
+    // (comma on both sides) cannot see it. The scan now passes both titles.
+    describe("actor mismatch: a member headline naming another actor does not attract the article (h70-mergequality-3)", () => {
+      const AA_TITLE = "Cumhurbaşkanı Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı";
+      const AKSAM_TITLE = "AK Parti Sözcüsü Çelik Karabağ Zaferi'nin 6. yılını kutladı";
+      const KARABAG_SEED = "Karabağ Zaferi'nin yıl dönümünde Bakü'de tören düzenlendi";
+      const KARABAG_LATEST = "Azerbaycan'da Karabağ Zaferi kutlamaları sürüyor";
+
+      function seedKarabag(midTitle: string) {
+        addCluster(CL, 3);
+        addMember(CL, "hl-seed", KARABAG_SEED, 3);
+        addMember(CL, "hl-mid", midTitle, 2);
+        addMember(CL, "hl-latest", KARABAG_LATEST, 1);
+      }
+
+      it("premise: the aksam-like headline matches the article on the headline lane alone", () => {
+        const lane = headlineLane(headlineTokens(AA_TITLE), headlineTokens(AKSAM_TITLE), 2);
+        expect(lane.fired).toBe(true);
+      });
+
+      it("a cluster whose scan list holds the aksam headline (not seed, not latest) gets no score from it: the article opens its own cluster", async () => {
+        seedKarabag(AKSAM_TITLE);
+        queueIncoming(2901, "art-aa", AA_TITLE, 0, "src-wire");
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([]);
+        // The aksam headline was reached only by the scan (it is neither seed nor latest) ...
+        const comparedWith = vi.mocked(scoreMock).mock.calls.map(
+          (c) => (c[6] as { bTitle?: string }).bTitle,
+        );
+        expect(comparedWith).not.toContain(AKSAM_TITLE);
+        // ... which handed both titles to headlineOnlyScore, and got 0 back.
+        const calls = vi.mocked(headlineOnlyScoreMock).mock.calls;
+        const at = calls.findIndex((c) => (c[3] as { bTitle?: string } | undefined)?.bTitle === AKSAM_TITLE);
+        expect(at).toBeGreaterThanOrEqual(0);
+        expect(calls[at]![3]).toMatchObject({ aTitle: AA_TITLE, bTitle: AKSAM_TITLE });
+        expect(vi.mocked(headlineOnlyScoreMock).mock.results[at]!.value).toBe(0);
+      });
+
+      it("control: the same cluster with a same-actor member headline in the middle does take the article", async () => {
+        seedKarabag("Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı");
+        queueIncoming(2902, "art-aa", AA_TITLE, 0, "src-wire");
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual([CL]);
+      });
+
+      it("an actor-mismatched member does not hide a same-actor one in the same cluster", async () => {
+        addCluster(CL, 4);
+        addMember(CL, "hl-seed", KARABAG_SEED, 3.5);
+        addMember(CL, "hl-mid1", AKSAM_TITLE, 2.5);
+        addMember(CL, "hl-mid2", "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı", 2);
+        addMember(CL, "hl-latest", KARABAG_LATEST, 1);
+        queueIncoming(2903, "art-aa", AA_TITLE, 0, "src-wire");
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(linkedClusters()).toEqual([CL]);
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -3306,6 +3392,8 @@ describe("cluster-consumer Edge Function", () => {
       // h45-clusters-1: articles whose same-source follow-up evidence was only logged (shadow).
       sameSourceUpdateShadow: number;
       admission: { would_create: number; would_match: number };
+      // h70-mergequality-2: candidates the centroid guard passed over in live drains.
+      centroidSkips: { count: number; samples: Array<{ clusterId: string; cos: number }> };
     }
     async function drain(): Promise<DrainBody> {
       const handler = await importHandler();
@@ -4687,6 +4775,10 @@ describe("cluster-consumer Edge Function", () => {
               fp: `fp-c1f${i}`,
               ageMs: (4 * 60 - i * 3) * MIN,
               title: `Dolgu${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))} haberi sürüyor`,
+              // The headlines stay unrelated (only the seed row may carry the evidence), but the cluster is one
+              // story: the centroid guard (h70-mergequality-2) reads the newest members' text, and a
+              // 52-member cluster whose members share nothing with the article would be passed over by it.
+              description: "İspanya'da 69 kişinin öldüğü tren kazası sonrası Ulaştırma Bakanı Puente istifa etti.",
             })),
           ];
           seedCluster("c1", 52, members, { title: SPAIN_MEMBER });
@@ -5551,6 +5643,722 @@ describe("cluster-consumer Edge Function", () => {
           expect(linkedClusters()[0]).toBe("c2");
         });
       }
+    });
+
+    // ---- h70-mergequality-3: a lane match across actors is no duplicate evidence ----
+    //
+    // sameSourceDupEvidence took a raw headline-lane hit against a same-source member as
+    // proof that the article is that source's own duplicate. The lane does not cross
+    // actors anywhere else (score(), the member scan, the attach probe), so a
+    // template-sharing article about another actor must not be skipped as a duplicate
+    // either: it opens its own cluster. A 2-member cluster, so the centroid guard (3+
+    // members) does not apply.
+    describe("h70-mergequality-3: a headline-lane match across actors is no same-source duplicate evidence", () => {
+      const WIRE_TITLE = "Cumhurbaşkanı Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı";
+      const CELIK_TITLE = "AK Parti Sözcüsü Çelik Karabağ Zaferi'nin 6. yılını kutladı";
+      const ERDOGAN_TITLE = "Erdoğan Karabağ Zaferi'nin 6. yılını kutladı";
+      const MINUTE = 60_000;
+
+      // src-wire plays the wire member, src-outlet the same-source member the lane fires on.
+      function seedKarabag() {
+        seedCluster(
+          "c-karabag",
+          2,
+          [
+            { id: "ck-wire", sourceId: "src-wire", fp: "fp-ck-seed", ageMs: 50 * MINUTE, title: WIRE_TITLE, description: "Anadolu metni: tören ve konuşma." },
+            { id: "ck-outlet", sourceId: "src-outlet", fp: "fp-ck-latest", ageMs: 40 * MINUTE, title: WIRE_TITLE, description: "Akşam metni: tören ve konuşma." },
+          ],
+          { title: WIRE_TITLE },
+        );
+      }
+      const skipLogWrites = () => supabaseFakeCalls.forTable("cluster_skip_log");
+      const skipLogRows = () =>
+        supabaseFakeCalls
+          .upsert("cluster_skip_log")
+          .flatMap((m) => m.patch as Array<Record<string, unknown>>);
+
+      it("premise: the lane fires for both pairs, and only the Çelik title crosses actors", () => {
+        expect(headlineLane(headlineTokens(CELIK_TITLE), headlineTokens(WIRE_TITLE), 0.2).fired).toBe(true);
+        expect(headlineLane(headlineTokens(ERDOGAN_TITLE), headlineTokens(WIRE_TITLE), 0.2).fired).toBe(true);
+        expect(normalizeTurkish(CELIK_TITLE)).not.toBe(normalizeTurkish(WIRE_TITLE));
+        expect(actorMismatchFires(CELIK_TITLE, WIRE_TITLE)).toBe(true);
+        expect(actorMismatchFires(ERDOGAN_TITLE, WIRE_TITLE)).toBe(false);
+      });
+
+      it("the template-sharing article about another actor opens its own cluster: not skipped, nothing logged", async () => {
+        seedKarabag();
+        queueIncoming({ id: "art-celik", sourceId: "src-outlet", title: CELIK_TITLE, description: "Farklı bir açıklama: Çelik'in basın toplantısı.", msgId: 4901 });
+        scoreBy({ "fp-ck-seed": 0.82, "fp-ck-latest": 0.82 });
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(body.skipped).toBe(0);
+        expect(body.matched).toBe(0);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+        expect(linkedClusters()).toEqual([]);
+        expect(skipLogWrites()).toHaveLength(0);
+        expect(pgmqState.archived).toContain(4901);
+      });
+
+      it("control: the same actor's re-wording is still skipped as same-source-duplicate with headline-lane evidence", async () => {
+        seedKarabag();
+        queueIncoming({ id: "art-erdogan", sourceId: "src-outlet", title: ERDOGAN_TITLE, description: "Farklı bir açıklama: Erdoğan'ın mesajı.", msgId: 4902 });
+        scoreBy({ "fp-ck-seed": 0.82, "fp-ck-latest": 0.82 });
+
+        const body = await drain();
+
+        expect(body.skipped).toBe(1);
+        expect(body.created).toBe(0);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+        expect(linkedClusters()).toEqual([]);
+        expect(pgmqState.archived).toContain(4902);
+        const rows = skipLogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          article_id: "art-erdogan",
+          cluster_id: "c-karabag",
+          reason: "same-source-duplicate/headline-lane",
+        });
+      });
+    });
+
+    // ---- h70-mergequality-2: the centroid guard -------------------------------
+    //
+    // A candidate of 3 or more members was scored against its seed and latest only, so
+    // one off-topic article sharing a person's name joined it (Kilicdaroglu's CHP group
+    // speech in the 17-member Bahceli condolence cluster 412f60a9, a TRT forum remark in
+    // the Friday prayer cluster cab3575f). Before such a join on non-headline evidence
+    // the article's tf-idf vector must reach cosine 0.25 with the centroid of the
+    // cluster's members. The stubbed scorer plays the shared-name match: it scores the
+    // seed and the latest 0.82 whatever the text says.
+    describe("h70-mergequality-2: the centroid guard", () => {
+      const KARAHAN_SEED = "Merkez Bankası Başkanı Fatih Karahan faiz kararını açıkladı";
+      const KARAHAN_MID = "Faiz kararı sonrası dolar ve borsa güne karışık başladı";
+      const KARAHAN_LATEST = "Politika faizi sabit: Merkez Bankası enflasyon uyarısı yaptı";
+      const FAIZ_DESC_SEED =
+        "Merkez Bankası Para Politikası Kurulu politika faizini yüzde 40 seviyesinde sabit tuttu. Karar metninde enflasyon görünümüne ve sıkı para politikasına vurgu yapıldı.";
+      const FAIZ_DESC_MID =
+        "Politika faizinin sabit tutulmasının ardından dolar kuru ve Borsa İstanbul endeksi güne karışık bir seyirle başladı.";
+      const FAIZ_DESC_LATEST =
+        "Para Politikası Kurulu kararında enflasyonla mücadele vurgusu öne çıktı. Politika faizi yüzde 40 olarak korundu.";
+
+      // Off topic, shares only the person's name (Fatih Karahan) with the faiz cluster's seed.
+      const WEDDING_TITLE = "Fatih Karahan'ın kızı evlendi: düğün İstanbul'da yapıldı";
+      const WEDDING_DESC = "Düğüne ailelerin yakınları ve dostları katıldı. Çift nikâhın ardından misafirleri ağırladı.";
+      // On topic for the faiz cluster.
+      const FAIZ_TITLE = "Fatih Karahan'dan faiz açıklaması: Merkez Bankası enflasyonla mücadele edecek";
+      const FAIZ_DESC = "Merkez Bankası Başkanı Fatih Karahan, politika faizini sabit tutan Para Politikası Kurulu kararını değerlendirdi.";
+
+      /** A 3-member faiz cluster; seed and latest are scored through their fingerprints. */
+      function seedFaiz(id = "cg1", articleCount = 3, sources = ["src-agg", "src-wire", "src-posta"]) {
+        seedCluster(
+          id,
+          articleCount,
+          [
+            { id: `${id}-seed`, sourceId: sources[0]!, fp: `fp-${id}-seed`, ageMs: 50 * 60_000, title: KARAHAN_SEED, description: FAIZ_DESC_SEED },
+            { id: `${id}-mid`, sourceId: sources[1]!, fp: `fp-${id}-mid`, ageMs: 40 * 60_000, title: KARAHAN_MID, description: FAIZ_DESC_MID },
+            { id: `${id}-latest`, sourceId: sources[2]!, fp: `fp-${id}-latest`, ageMs: 30 * 60_000, title: KARAHAN_LATEST, description: FAIZ_DESC_LATEST },
+          ].slice(0, sources.length),
+          { title: KARAHAN_SEED },
+        );
+      }
+      const wedding = (over: Partial<Parameters<typeof queueIncoming>[0]> = {}) =>
+        queueIncoming({ id: "art-wedding", sourceId: "src-outlet", title: WEDDING_TITLE, description: WEDDING_DESC, ...over });
+      const guardLogs = () =>
+        logSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("centroid-guard skip"));
+
+      beforeEach(() => {
+        delete process.env.CLUSTER_CENTROID_GUARD;
+      });
+      afterEach(() => {
+        delete process.env.CLUSTER_CENTROID_GUARD;
+      });
+
+      it("a guard-failing primary candidate is skipped; with no other candidate the article opens its own cluster", async () => {
+        seedFaiz();
+        wedding();
+        scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+        expect(body.centroidSkips.count).toBe(1);
+        expect(body.centroidSkips.samples).toHaveLength(1);
+        expect(body.centroidSkips.samples[0]!.clusterId).toBe("cg1");
+        expect(body.centroidSkips.samples[0]!.cos).toBeLessThan(0.25);
+        expect(body.centroidSkips.samples[0]!.cos).toBeGreaterThanOrEqual(0);
+        // Logged with the article and the cluster, never a title.
+        const logs = guardLogs();
+        expect(logs).toHaveLength(1);
+        expect(String(logs[0]?.[0])).toContain("art-wedding");
+        expect(String(logs[0]?.[0])).toContain("cg1");
+        expect(String(logs[0]?.[0])).not.toContain("Karahan");
+      });
+
+      it("control: an on-topic article joins the same cluster on the same stubbed score", async () => {
+        seedFaiz();
+        queueIncoming({ id: "art-faiz", sourceId: "src-outlet", title: FAIZ_TITLE, description: FAIZ_DESC });
+        scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual(["cg1"]);
+        expect(body.centroidSkips.count).toBe(0);
+        expect(body.centroidSkips.samples).toEqual([]);
+      });
+
+      it("the article joins the next ranked candidate when the primary one fails the guard", async () => {
+        seedFaiz("cg1");
+        // A wedding cluster the article does belong to: it shares title tokens (düğün, İstanbul, yapıldı).
+        seedCluster(
+          "cg2",
+          3,
+          [
+            { id: "cg2-seed", sourceId: "src-cnn-turk", fp: "fp-cg2-seed", ageMs: 60 * 60_000, title: "Ünlü isimlerin katıldığı düğün İstanbul'da yapıldı", description: "İstanbul'da düzenlenen düğüne ünlü isimler katıldı. Gelin ve damat misafirleri ağırladı." },
+            { id: "cg2-mid", sourceId: "src-wire", fp: "fp-cg2-mid", ageMs: 55 * 60_000, title: "Düğün töreninde gelin ve damat misafirleri ağırladı", description: "Nikâhın ardından düzenlenen düğünde aileler ve dostlar bir araya geldi." },
+            { id: "cg2-latest", sourceId: "src-agg", fp: "fp-cg2-latest", ageMs: 45 * 60_000, title: "Nikâh ve düğün sonrası çift ilk kez konuştu", description: "Evlenen çift düğünün ardından misafirlere teşekkür etti. Aileler düğünden memnun kaldı." },
+          ],
+          { title: "Ünlü isimlerin katıldığı düğün İstanbul'da yapıldı" },
+        );
+        wedding();
+        // cg1 ranks first (0.9 against 0.7 -- 0.2 apart, outside the size tie-break margin).
+        scoreBy({ "fp-cg1-seed": 0.9, "fp-cg1-latest": 0.9, "fp-cg2-seed": 0.7, "fp-cg2-latest": 0.7 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual(["cg2"]);
+        expect(body.centroidSkips.count).toBe(1);
+        expect(body.centroidSkips.samples[0]!.clusterId).toBe("cg1");
+      });
+
+      it("a skipped candidate is not blocked: the same article's later candidate is still tried, and a clean article is unaffected", async () => {
+        seedFaiz("cg1");
+        wedding();
+        queueIncoming({ id: "art-faiz", sourceId: "src-cnn-turk", title: FAIZ_TITLE, description: FAIZ_DESC });
+        scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+        const body = await drain();
+
+        // The wedding article was passed over (a new cluster); the faiz article of the same drain joined.
+        expect(body.created).toBe(1);
+        expect(body.matched).toBe(1);
+        expect(linkedClusters()).toEqual(["cg1"]);
+        expect(body.centroidSkips.count).toBe(1);
+      });
+
+      describe("exemptions", () => {
+        it("a headline-lane hit against a member of the scan list exempts the candidate (the lane carries the join)", async () => {
+          seedFaiz("cg1");
+          // The middle member's headline IS the incoming headline: the member scan fires the lane on it.
+          fakeArticles["cg1-mid"] = { ...(fakeArticles["cg1-mid"] as object), title: WEDDING_TITLE };
+          wedding();
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(body.created).toBe(0);
+          expect(linkedClusters()).toEqual(["cg1"]);
+          expect(body.centroidSkips.count).toBe(0);
+        });
+
+        it("a headline-lane result of the full scorer against the seed or the latest exempts it as well", async () => {
+          seedFaiz("cg1");
+          wedding();
+          vi.mocked(scoreMock).mockImplementation(() => ({
+            score: 0.82,
+            components: { headlineLane: true },
+            isMatch: true,
+          }));
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["cg1"]);
+          expect(body.centroidSkips.count).toBe(0);
+        });
+
+        it("control for the two above: without the lane hit the same article is skipped", async () => {
+          seedFaiz("cg1");
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(0);
+          expect(body.centroidSkips.count).toBe(1);
+        });
+
+        it("a cluster of fewer than 3 members is exempt (two prior members are no centroid)", async () => {
+          seedFaiz("cg1", 2, ["src-agg", "src-wire"]);
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["cg1"]);
+          expect(body.centroidSkips.count).toBe(0);
+        });
+
+        it("exactly 3 members is guarded", async () => {
+          seedFaiz("cg1", 3);
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(0);
+          expect(body.centroidSkips.count).toBe(1);
+        });
+
+        it("the member count is the larger of article_count and the sources loaded (a stale row count does not exempt a 3-source cluster)", async () => {
+          seedFaiz("cg1", 1, ["src-agg", "src-wire", "src-posta"]);
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(0);
+          expect(body.centroidSkips.count).toBe(1);
+        });
+
+        it("a stale small source list does not exempt a big cluster either (article_count 18, one member loaded)", async () => {
+          seedCluster("cg1", 18, [{ id: "cg1-seed", sourceId: "src-agg", fp: "fp-cg1-seed", title: KARAHAN_SEED, description: FAIZ_DESC_SEED }], { title: KARAHAN_SEED });
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(0);
+          expect(body.created).toBe(1);
+          expect(body.centroidSkips.count).toBe(1);
+        });
+
+        describe("an exact-title probe hit", () => {
+          // The probed cluster's seed carries the article's headline, so the exact-title probe returns it.
+          const PROBED_TITLE = "Karahan'dan flaş açıklama geldi";
+          function seedProbed(inContext: boolean) {
+            seedCluster(
+              "cg-probe",
+              3,
+              [
+                { id: "cg-probe-seed", sourceId: "src-agg", fp: "fp-cg-probe-seed", ageMs: 50 * 60_000, title: PROBED_TITLE, description: FAIZ_DESC_SEED },
+                { id: "cg-probe-mid", sourceId: "src-wire", fp: "fp-cg-probe-mid", ageMs: 40 * 60_000, title: KARAHAN_MID, description: FAIZ_DESC_MID },
+                { id: "cg-probe-latest", sourceId: "src-posta", fp: "fp-cg-probe-latest", ageMs: 30 * 60_000, title: KARAHAN_LATEST, description: FAIZ_DESC_LATEST },
+              ],
+              { title: PROBED_TITLE, updatedAgoMs: 30 * 60_000, inContext },
+            );
+          }
+          const probeRow = () => ({
+            id: "cg-probe",
+            title_tr: PROBED_TITLE,
+            title_tr_neutral: null,
+            first_published: ago(50 * 60_000),
+            updated_at: ago(30 * 60_000),
+            article_count: 3,
+          });
+
+          it("is exempt: the identical headline joins although the text is off topic", async () => {
+            seedProbed(false);
+            rpcFixtures.cluster_title_probe = () => ({ data: [probeRow()], error: null });
+            queueIncoming({ id: "art-probed", sourceId: "src-outlet", title: PROBED_TITLE, description: WEDDING_DESC });
+            scoreBy({ "fp-cg-probe-seed": 0.9, "fp-cg-probe-latest": 0.9 });
+
+            const body = await drain();
+
+            expect(probeCalls()).toHaveLength(1);
+            expect(body.matched).toBe(1);
+            expect(linkedClusters()).toEqual(["cg-probe"]);
+            expect(body.centroidSkips.count).toBe(0);
+          });
+
+          it("control: the same cluster reached through the context, not the probe, is guarded", async () => {
+            seedProbed(true);
+            queueIncoming({ id: "art-probed", sourceId: "src-outlet", title: PROBED_TITLE, description: WEDDING_DESC });
+            scoreBy({ "fp-cg-probe-seed": 0.9, "fp-cg-probe-latest": 0.9 });
+
+            const body = await drain();
+
+            expect(body.matched).toBe(0);
+            expect(body.created).toBe(1);
+            expect(body.centroidSkips.count).toBe(1);
+          });
+        });
+
+        it("a strict-fingerprint equality with a scan member exempts the candidate", async () => {
+          // The article's source already sits in the cluster, so the fast path (which also sees the equal
+          // fingerprint) is blocked as a duplicate source and the ensemble path runs: with the equality the
+          // guard stays out of the way (the join is tried and refused by the source rule); without it the
+          // guard passes the cluster over.
+          const article = { title: WEDDING_TITLE, description: WEDDING_DESC };
+          seedFaiz("cg1");
+          fakeArticles["cg1-mid"] = {
+            ...(fakeArticles["cg1-mid"] as object),
+            fingerprint: strictFingerprint(article.title, cleanDescription(article.description) || ""),
+          };
+          wedding({ sourceId: "src-agg" }); // src-agg is the seed's source
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.centroidSkips.count).toBe(0);
+          expect(body.matched).toBe(0);
+          expect(linkedClusters()).toEqual([]);
+          // The same-source skip is the outcome it always was, not a twin cluster.
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+        });
+
+        it("control for the fingerprint exemption: with a different member fingerprint the guard skips that cluster", async () => {
+          seedFaiz("cg1");
+          wedding({ sourceId: "src-agg" });
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.centroidSkips.count).toBe(1);
+          expect(body.matched).toBe(0);
+          expect(body.skipped).toBe(0);
+          expect(body.created).toBe(1);
+        });
+
+        it("an article that is already a member of the candidate (a re-delivered message) is exempt", async () => {
+          seedFaiz("cg1");
+          // The wedding article is already in the cluster (cluster_articles row + article row, stored fingerprint missing).
+          clusterArticleRows.push({ cluster_id: "cg1", article_id: "art-wedding" });
+          queueIncoming({ id: "art-wedding", sourceId: "src-outlet", title: WEDDING_TITLE, description: WEDDING_DESC });
+          fakeArticles["art-wedding"] = {
+            ...(fakeArticles["art-wedding"] as object),
+            fingerprint: null,
+            entities: [],
+            minhash_sig: null,
+            minhash_version: null,
+          };
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          // Not passed over by the guard, so the old same-source handling decides (the cluster already holds
+          // this very article's source): a skip, as before, and not a twin cluster of itself.
+          expect(body.centroidSkips.count).toBe(0);
+          expect(body.created).toBe(0);
+          expect(body.skipped).toBe(1);
+        });
+      });
+
+      describe("CLUSTER_CENTROID_GUARD", () => {
+        it("off disables the guard: the off-topic article joins on the stubbed score", async () => {
+          process.env.CLUSTER_CENTROID_GUARD = "off";
+          seedFaiz("cg1");
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["cg1"]);
+          expect(body.centroidSkips.count).toBe(0);
+          expect(guardLogs()).toHaveLength(0);
+        });
+
+        it("any other value keeps it on", async () => {
+          process.env.CLUSTER_CENTROID_GUARD = "on";
+          seedFaiz("cg1");
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(0);
+          expect(body.centroidSkips.count).toBe(1);
+        });
+      });
+
+      describe("dry run (admission shadow)", () => {
+        it("reports the same outcome: no would_match for a skipped candidate", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          seedFaiz("cg1");
+          wedding({ category: "ekonomi", admit: "shadow" });
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.admission.would_match).toBe(0);
+          expect(body.admission.would_create).toBe(1);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(linkedClusters()).toEqual([]);
+          // A dry run writes nothing and is not counted.
+          expect(body.centroidSkips.count).toBe(0);
+        });
+
+        it("control: the on-topic article is would_match", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          seedFaiz("cg1");
+          queueIncoming({ id: "art-faiz", sourceId: "src-outlet", title: FAIZ_TITLE, description: FAIZ_DESC, category: "ekonomi", admit: "shadow" });
+          scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.admission.would_match).toBe(1);
+          expect(body.admission.would_create).toBe(0);
+        });
+      });
+
+      describe("stem probe", () => {
+        const STEM_TITLE = "Mutlu bir yuva önceliğimdi";
+        it("a stem-probe hit that fails the guard is not joined: the article opens its own cluster", async () => {
+          seedCluster(
+            "cg-stem",
+            3,
+            [
+              { id: "cg-stem-seed", sourceId: "src-agg", fp: "fp-cg-stem-seed", ageMs: 4 * H, title: STEM_TITLE, description: FAIZ_DESC_SEED },
+              { id: "cg-stem-mid", sourceId: "src-wire", fp: "fp-cg-stem-mid", ageMs: 3.9 * H, title: KARAHAN_MID, description: FAIZ_DESC_MID },
+              { id: "cg-stem-latest", sourceId: "src-posta", fp: "fp-cg-stem-latest", ageMs: 3.8 * H, title: KARAHAN_LATEST, description: FAIZ_DESC_LATEST },
+            ],
+            { title: STEM_TITLE, updatedAgoMs: 3.8 * H, inContext: false },
+          );
+          rpcFixtures.cluster_stem_probe = () => ({
+            data: [{ id: "cg-stem", title_tr: STEM_TITLE, title_tr_neutral: null, first_published: ago(4 * H), updated_at: ago(3.8 * H), article_count: 3 }],
+            error: null,
+          });
+          // The '"' changes the exact-title key, so only the stem probe finds the cluster.
+          queueIncoming({ id: "art-stem", sourceId: "src-outlet", title: `"${STEM_TITLE}"`, description: WEDDING_DESC });
+          scoreBy({ "fp-cg-stem-seed": 0.82, "fp-cg-stem-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_stem_probe")).toHaveLength(1);
+          expect(body.matched).toBe(0);
+          expect(body.created).toBe(1);
+          expect(linkedClusters()).toEqual([]);
+          expect(body.centroidSkips.count).toBe(1);
+          expect(body.centroidSkips.samples[0]!.clusterId).toBe("cg-stem");
+        });
+
+        it("control: the same hit with an on-topic description joins (stem-probe join unchanged)", async () => {
+          seedCluster(
+            "cg-stem",
+            3,
+            [
+              { id: "cg-stem-seed", sourceId: "src-agg", fp: "fp-cg-stem-seed", ageMs: 4 * H, title: STEM_TITLE, description: FAIZ_DESC_SEED },
+              { id: "cg-stem-mid", sourceId: "src-wire", fp: "fp-cg-stem-mid", ageMs: 3.9 * H, title: KARAHAN_MID, description: FAIZ_DESC_MID },
+              { id: "cg-stem-latest", sourceId: "src-posta", fp: "fp-cg-stem-latest", ageMs: 3.8 * H, title: KARAHAN_LATEST, description: FAIZ_DESC_LATEST },
+            ],
+            { title: STEM_TITLE, updatedAgoMs: 3.8 * H, inContext: false },
+          );
+          rpcFixtures.cluster_stem_probe = () => ({
+            data: [{ id: "cg-stem", title_tr: STEM_TITLE, title_tr_neutral: null, first_published: ago(4 * H), updated_at: ago(3.8 * H), article_count: 3 }],
+            error: null,
+          });
+          queueIncoming({ id: "art-stem", sourceId: "src-outlet", title: `"${STEM_TITLE}"`, description: FAIZ_DESC });
+          scoreBy({ "fp-cg-stem-seed": 0.82, "fp-cg-stem-latest": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["cg-stem"]);
+          expect(body.centroidSkips.count).toBe(0);
+        });
+      });
+
+      it("the drain summary reports at most 5 samples while counting every skip", async () => {
+        for (let i = 0; i < 7; i++) {
+          seedFaiz(`cgm${i}`);
+          queueIncoming({ id: `art-w${i}`, sourceId: "src-outlet", title: `${WEDDING_TITLE} ${i}`, description: WEDDING_DESC });
+        }
+        const byFp: Record<string, number> = {};
+        for (let i = 0; i < 7; i++) {
+          byFp[`fp-cgm${i}-seed`] = 0.82;
+          byFp[`fp-cgm${i}-latest`] = 0.82;
+        }
+        scoreBy(byFp);
+
+        const body = await drain();
+
+        expect(body.centroidSkips.count).toBeGreaterThanOrEqual(7);
+        expect(body.centroidSkips.samples).toHaveLength(5);
+        for (const s of body.centroidSkips.samples) {
+          expect(typeof s.clusterId).toBe("string");
+          expect(Number.isFinite(s.cos)).toBe(true);
+        }
+      });
+
+      it("the counters are per drain: a second drain starts from zero", async () => {
+        seedFaiz("cg1");
+        wedding();
+        scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+        const first = await drain();
+        expect(first.centroidSkips.count).toBe(1);
+
+        const second = await drain();
+        expect(second.centroidSkips).toEqual({ count: 0, samples: [] });
+      });
+
+      // The Jev live band (JEV_LIVE_PAIRS) joins a sub-threshold or marginal primary on its own
+      // path, before the join loop. Jev sees only the seed headline and the latest headline, the
+      // same blind spot the guard was written for, so the guard runs before the gateway call: a
+      // guard-failing primary costs no call and never reaches the Jev join.
+      describe("the Jev live band is guarded too (JEV_LIVE_PAIRS=1)", () => {
+        type JevDrainBody = DrainBody & { jev_live: { calls: number; joined_by_jev: number } };
+        const jevJoin = () =>
+          new Response(
+            JSON.stringify({ answers: { p1: { type: "boolean", probability: 0.9 } }, usage: { inputTokens: 12, outputTokens: 3 } }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        const drainJev = async () => (await drain()) as JevDrainBody;
+
+        beforeEach(() => {
+          process.env.JEV_LIVE_PAIRS = "1";
+          process.env.AI_GATEWAY_API_KEY = "test-gateway-key";
+        });
+        afterEach(() => {
+          delete process.env.JEV_LIVE_PAIRS;
+          delete process.env.AI_GATEWAY_API_KEY;
+        });
+
+        it("a low-band (0.38) guard-failing primary makes no gateway call and is not joined by Jev: the article opens its own cluster", async () => {
+          seedFaiz("cg1");
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.38, "fp-cg1-latest": 0.38 });
+          const fetchMock = vi.fn(async () => jevJoin());
+          vi.stubGlobal("fetch", fetchMock);
+
+          const body = await drainJev();
+
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(body.jev_live.calls).toBe(0);
+          expect(body.jev_live.joined_by_jev).toBe(0);
+          expect(body.created).toBe(1);
+          expect(body.matched).toBe(0);
+          expect(linkedClusters()).toEqual([]);
+          expect(body.centroidSkips.count).toBe(1);
+        });
+
+        it("control: the on-topic article at the same 0.38 still calls the gateway once and joins through Jev", async () => {
+          seedFaiz("cg1");
+          queueIncoming({ id: "art-faiz", sourceId: "src-outlet", title: FAIZ_TITLE, description: FAIZ_DESC });
+          scoreBy({ "fp-cg1-seed": 0.38, "fp-cg1-latest": 0.38 });
+          const fetchMock = vi.fn(async () => jevJoin());
+          vi.stubGlobal("fetch", fetchMock);
+
+          const body = await drainJev();
+
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          expect(body.jev_live.calls).toBe(1);
+          expect(body.jev_live.joined_by_jev).toBe(1);
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["cg1"]);
+          expect(body.centroidSkips.count).toBe(0);
+        });
+
+        it("a high-band (0.42) guard-failing primary is skipped without a gateway call and counted in centroidSkips exactly once", async () => {
+          seedFaiz("cg1");
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.42, "fp-cg1-latest": 0.42 });
+          const fetchMock = vi.fn(async () => jevJoin());
+          vi.stubGlobal("fetch", fetchMock);
+
+          const body = await drainJev();
+
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(body.jev_live.calls).toBe(0);
+          expect(body.created).toBe(1);
+          expect(body.matched).toBe(0);
+          expect(linkedClusters()).toEqual([]);
+          // Evaluated before Jev and again by the join loop, logged and counted once.
+          expect(body.centroidSkips.count).toBe(1);
+          expect(body.centroidSkips.samples).toHaveLength(1);
+          expect(guardLogs()).toHaveLength(1);
+        });
+      });
+
+      // A guard skip of a candidate at or above MATCH_THRESHOLD withdraws the "primary is a match"
+      // premise, as a Jev reject does: the join loop may then reach only a candidate the ensemble
+      // would have joined on its own, never a sub-threshold one behind it -- unless an
+      // above-threshold candidate was skipped as a duplicate-source, whose premise is intact.
+      describe("a guard skip raises the fallback bar like a Jev reject (product-1)", () => {
+        const SMALL_WEDDING_TITLE = "Ünlü isimlerin katıldığı düğün İstanbul'da yapıldı";
+        const SMALL_WEDDING_DESC = "İstanbul'da düzenlenen düğüne ünlü isimler katıldı. Gelin ve damat misafirleri ağırladı.";
+        /** A 2-member wedding cluster (exempt from the guard) that shares title tokens with the wedding article. */
+        function seedSmallWedding(id: string, sources: [string, string]) {
+          seedCluster(
+            id,
+            2,
+            [
+              { id: `${id}-seed`, sourceId: sources[0], fp: `fp-${id}-seed`, ageMs: 60 * 60_000, title: SMALL_WEDDING_TITLE, description: SMALL_WEDDING_DESC },
+              { id: `${id}-latest`, sourceId: sources[1], fp: `fp-${id}-latest`, ageMs: 45 * 60_000, title: "Düğün töreninde gelin ve damat misafirleri ağırladı", description: "Nikâhın ardından düzenlenen düğünde aileler ve dostlar bir araya geldi." },
+            ],
+            { title: SMALL_WEDDING_TITLE },
+          );
+        }
+
+        it("a guard-failing 0.9 primary followed by a sub-threshold 0.37 candidate: the article opens its own cluster, not cg2", async () => {
+          seedFaiz("cg1");
+          seedSmallWedding("cg2", ["src-cnn-turk", "src-agg"]);
+          wedding();
+          scoreBy({ "fp-cg1-seed": 0.9, "fp-cg1-latest": 0.9, "fp-cg2-seed": 0.37, "fp-cg2-latest": 0.37 });
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(body.matched).toBe(0);
+          expect(linkedClusters()).toEqual([]);
+          expect(body.centroidSkips.count).toBe(1);
+          expect(body.centroidSkips.samples[0]!.clusterId).toBe("cg1");
+        });
+
+        it("control: the same cg2 at 0.37 is a normal sub-threshold fallback when the primary is skipped as a duplicate-source (no guard involved)", async () => {
+          // cg1 is on topic for the article (the guard passes it) but holds the article's own source.
+          seedFaiz("cg1", 3, ["src-outlet", "src-wire", "src-posta"]);
+          seedCluster(
+            "cg2",
+            2,
+            [
+              { id: "cg2-seed", sourceId: "src-cnn-turk", fp: "fp-cg2-seed", ageMs: 60 * 60_000, title: "Merkez Bankası faiz açıklaması sonrası piyasalarda hareketlilik", description: "Faiz açıklaması sonrası piyasalar karışık seyretti." },
+              { id: "cg2-latest", sourceId: "src-agg", fp: "fp-cg2-latest", ageMs: 45 * 60_000, title: "Merkez Bankası faiz kararı ve enflasyon değerlendirmesi", description: "Faiz kararı ve enflasyon değerlendirmesi öne çıktı." },
+            ],
+            { title: "Merkez Bankası faiz açıklaması sonrası piyasalarda hareketlilik" },
+          );
+          queueIncoming({ id: "art-faiz", sourceId: "src-outlet", title: FAIZ_TITLE, description: FAIZ_DESC });
+          scoreBy({ "fp-cg1-seed": 0.9, "fp-cg1-latest": 0.9, "fp-cg2-seed": 0.37, "fp-cg2-latest": 0.37 });
+
+          const body = await drain();
+
+          expect(body.centroidSkips.count).toBe(0);
+          expect(body.created).toBe(0);
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["cg2"]);
+        });
+
+        it("a duplicate-source skip of an above-threshold candidate keeps the old bar even after a guard skip", async () => {
+          seedFaiz("cg1");
+          // cg0 holds the article's own source (src-outlet), is small (exempt from the guard) and is skipped as a duplicate-source.
+          seedSmallWedding("cg0", ["src-outlet", "src-wire"]);
+          seedSmallWedding("cg2", ["src-cnn-turk", "src-agg"]);
+          wedding();
+          scoreBy({
+            "fp-cg1-seed": 0.9, "fp-cg1-latest": 0.9,
+            "fp-cg0-seed": 0.95, "fp-cg0-latest": 0.95,
+            "fp-cg2-seed": 0.37, "fp-cg2-latest": 0.37,
+          });
+
+          const body = await drain();
+
+          expect(body.centroidSkips.count).toBe(1);
+          expect(body.centroidSkips.samples[0]!.clusterId).toBe("cg1");
+          expect(linkedClusters()).toEqual(["cg2"]);
+          expect(body.matched).toBe(1);
+        });
+      });
     });
   });
 });

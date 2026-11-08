@@ -214,6 +214,45 @@ export const HEADLINE_CONTAIN_BLOCK_PREFIXES: readonly string[] = [
 // once per context build (754 -> 884 titles, ~0.6 ms).
 export const HEADLINE_MEMBER_SCAN_MAX = 48;
 
+// Centroid guard (h70-mergequality-2). The consumer scores a candidate cluster
+// against its seed and latest member only (the member scan is headline-lane
+// only), so one off-topic article that shares a person's name with the seed or
+// the latest joins a big cluster with no check against the cluster as a whole:
+//   412f60a9 (17 members, the Bahceli condolence visits) took elips-haber
+//            'Kemal Kilicdaroglu: Siyaset kirlilikten arinmalidir' and yenicag
+//            'Kemal Kilicdaroglu: Dolandirici siyasetcilerin dokunulmazligi
+//            kaldirilsin', both the CHP group-meeting speech;
+//   cab3575f (6 members, is_blindspot, the Friday prayer) took trt-haber
+//            'Cumhurbaskani Erdogan: TRT, 62 senedir cizgisini bozmadan yoluna
+//            devam ediyor' (a TRT forum remark).
+// Before an article joins a candidate of CENTROID_MIN_MEMBERS or more members
+// on non-headline evidence, its tf-idf vector must reach cosine CENTROID_FLOOR
+// with the centroid (the normalised sum of the unit vectors) of the cluster's
+// seed and its CENTROID_MAX_MEMBERS newest scan members (centroid.ts).
+// Measured on the members of the clusters above and 40 recent clusters, in join
+// order: the known-bad members score 0.132 (elips-haber), 0.195 (yenicag) and
+// 0.141 (trt-haber); 20800ac6 yeni-safak 0.244; legitimate members under 0.25
+// without a headline-lane hit were 2 of 510 (haber-com 0.248 in 46fbd50d,
+// ekonomim 0.17 in 12993013, both inside twin clusters). At 0.25 only one of the
+// nine Kurultay articles of the bridge case 20800ac6 is caught (haberport 0.252
+// and posta 0.253 are above it). A cluster of fewer than CENTROID_MIN_MEMBERS has
+// no centroid worth the name: 2caa0ad3 anadolu-ajansi (0.233, a legitimate member)
+// joined as the 3rd member, with two prior ones, and stays admissible. Not caught
+// by design: eb39a5fa haberler-com (0.54, a Pakistan call that shares the whole
+// template) and the 2caa0ad3 Kalibaf chain (a drift that every member follows).
+// An article carried by the headline lane, an exact-title probe hit or an equal
+// strict fingerprint is exempt; the env flag below turns the guard off.
+// The Jev live band (JEV_LIVE_PAIRS) is guarded too: Jev sees only the seed and the
+// latest headline, the same blind spot, so a guard-failing primary makes no gateway
+// call and is never joined on Jev's answer (cluster-consumer, centroidBlocks()). A
+// guard skip of a candidate at or above MATCH_THRESHOLD also raises the join loop's
+// bar to MATCH_THRESHOLD, like a Jev reject: no sub-threshold fallback behind it.
+export const CENTROID_FLOOR = 0.25;
+export const CENTROID_MIN_MEMBERS = 3;
+export const CENTROID_MAX_MEMBERS = HEADLINE_MEMBER_SCAN_MAX;
+// The Edge Function secret that disables the guard: the exact string "off".
+export const CENTROID_GUARD_ENV = "CLUSTER_CENTROID_GUARD";
+
 // (2) Entity-driven false joins. Cluster dd5535a7 was seeded by an entity-
 //     heavy ceremony story (10 entities); an unrelated 3-entity article
 //     shared 3 of them, scored 3 / max(3, min(3, 10)) = 1.0 on the entity
@@ -296,8 +335,10 @@ export const GENERIC_ENTITY_WEIGHT = 0.6;
 //     doing the same thing, and the primary and MinHash lanes are capped at
 //     SUBJECT_VETO_CAP. The cap sits under the consumer's fallback floor
 //     (MATCH_THRESHOLD * 0.9 = 0.36), so a vetoed pair is neither a join nor a
-//     fallback join nor a Jev band candidate. A headline lane that fired is
-//     never vetoed: the headlines already agree.
+//     fallback join nor a Jev band candidate. A headline lane that fired is not
+//     vetoed by it: the headlines already agree -- unless they name different
+//     actors, in which case the lane is withdrawn first (h70-mergequality-3,
+//     actorMismatchFires() in ensemble.ts) and the veto judges the pair again.
 //     A colon is NOT a subject break. Measured over every pair of the 458
 //     distinct replay articles within 48 h (about 100k): with ',' and ':' the veto
 //     removed 51 pairs that scored >= 0.40, nearly all of them one story

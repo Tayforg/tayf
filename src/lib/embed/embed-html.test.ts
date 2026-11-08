@@ -673,6 +673,91 @@ describe("renderEmbedHtml", () => {
     expect(empty).not.toContain("İktidar %0 ·");
   });
 
+  // h70-embed-3 (merged with h70-embed-4): the legend already says there is no
+  // classified source, but the bar's aria-label used to read 'İktidar %0,
+  // Bağımsız %0, Muhalefet %0' to a screen reader next to it.
+  describe("bar aria-label with no classified source (h70-embed-3)", () => {
+    const emptyHtml = renderEmbedHtml(buildEmbedModel(detail({ distribution: dist(), sourceCount: 2 }), ORIGIN));
+    const ariaOf = (doc: string) => /<div class="bar" role="img" aria-label="([^"]*)">/.exec(doc)?.[1];
+
+    it("labels the bar exactly 'Sınıflandırılmış kaynak yok' when every zone count is 0", () => {
+      expect(emptyHtml).toContain('<div class="bar" role="img" aria-label="Sınıflandırılmış kaynak yok">');
+      expect(ariaOf(emptyHtml)).toBe("Sınıflandırılmış kaynak yok");
+    });
+
+    it("never reads a percent to assistive tech for an empty distribution", () => {
+      expect(ariaOf(emptyHtml)).not.toContain("%");
+      expect(emptyHtml).not.toContain("İktidar %0, Bağımsız %0, Muhalefet %0");
+    });
+
+    it("keeps the visible legend sentence unchanged", () => {
+      expect(emptyHtml).toContain('<p class="l">Bu haberde henüz sınıflandırılmış kaynak yok · 2 kaynak</p>');
+    });
+
+    it("keeps the three zone-list label for a classified cluster (percentages stay)", () => {
+      const classified = renderEmbedHtml(buildEmbedModel(detail({ sourceCount: 12 }), ORIGIN));
+      expect(ariaOf(classified)).toBe("İktidar %50, Bağımsız %25, Muhalefet %25");
+    });
+
+    it("keeps the zone list when a single zone is classified (total 1, other zones 0)", () => {
+      const one = renderEmbedHtml(buildEmbedModel(detail({ distribution: dist({ opposition: 1 }) }), ORIGIN));
+      expect(ariaOf(one)).toBe("İktidar %0, Bağımsız %0, Muhalefet %100");
+    });
+
+    it("decides on the model's total, not on the percents", () => {
+      const m = buildEmbedModel(detail({}), ORIGIN);
+      const zeroTotal = renderEmbedHtml({ ...m, total: 0 });
+      expect(ariaOf(zeroTotal)).toBe("Sınıflandırılmış kaynak yok");
+    });
+  });
+
+  // h70-embed-3: in Windows High Contrast (forced-colors) the UA repaints every
+  // background-color to Canvas, which erased the three segments and the ribbon.
+  describe("forced-colors (Windows High Contrast) support (h70-embed-3)", () => {
+    const style = html.match(/<style>([\s\S]*?)<\/style>/)![1]!;
+    const FORCED_RULE =
+      "@media (forced-colors: active){.bar,.bar span,.r{forced-color-adjust:none}.bar{border:1px solid CanvasText}}";
+
+    it("ships a forced-colors media query that opts the bar, its segments and the ribbon out of the repaint", () => {
+      expect(html).toContain("@media (forced-colors: active)");
+      expect(html).toContain("forced-color-adjust:none");
+      expect(style).toContain(FORCED_RULE);
+    });
+
+    it("draws a system-colour outline around the bar so it stays visible", () => {
+      expect(style).toContain(".bar{border:1px solid CanvasText}");
+    });
+
+    it("comes after the two layout media queries (the layout blocks stay untouched)", () => {
+      const heightAt = style.indexOf("@media (max-height:187px){");
+      const widthAt = style.indexOf("@media (max-width:260px){");
+      const forcedAt = style.indexOf("@media (forced-colors: active)");
+      expect(widthAt).toBeGreaterThan(heightAt);
+      expect(forcedAt).toBeGreaterThan(widthAt);
+      // the narrow block still ends right before the forced-colors block
+      expect(style.slice(widthAt, forcedAt)).toBe("@media (max-width:260px){.b{display:none}.c{padding:8px 10px;gap:4px}h1{font-size:15px}}");
+    });
+
+    it("keeps the three segment colours and adds no script or external resource", () => {
+      expect(style).toContain(".zi{background:#ef4444}.zb{background:#a1a1aa}.zm{background:#10b981}");
+      expect(html).not.toMatch(/<script/i);
+      expect(html).not.toMatch(/url\(/i);
+    });
+
+    it("does not change the 10px bar height (border-box keeps the border inside it)", () => {
+      expect(style).toMatch(/(?:^|\})\*\{box-sizing:border-box\}/);
+      expect(style).toMatch(/(?:^|\})\.bar\{[^}]*height:10px/);
+      // the forced-colors rule must not set a height or a margin on the bar
+      const forcedAt = style.indexOf("@media (forced-colors: active)");
+      expect(forcedAt).toBeGreaterThan(-1);
+      expect(style.slice(forcedAt)).not.toMatch(/height|margin|padding/);
+    });
+
+    it("is shipped by the status document too (same STYLE)", () => {
+      expect(renderEmbedMessageHtml("Haber bulunamadı")).toContain(FORCED_RULE);
+    });
+  });
+
   it("escapes a hostile title in both <title> and <h1>", () => {
     const evil = renderEmbedHtml(buildEmbedModel(detail({ title: '"><script>alert(1)</script>' }), ORIGIN));
     expect(evil).not.toMatch(/<script/i);

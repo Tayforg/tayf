@@ -527,3 +527,56 @@ describe("planAttachRead: the attach queue must never starve cluster_work", () =
     expect(ATTACH_MAX_PER_DRAIN).toBeGreaterThan(peakPerMinute * 3);
   });
 });
+
+// h70-mergequality-3: the headline lane must not cross actors. Cluster 6e585787
+// (AK Parti Sozcusu Celik) took anadolu-ajansi "Cumhurbaskani Erdogan, Karabag
+// Zaferi'nin 6. yilini kutladi" through the headline lane against aksam's comma-less
+// member title, which the subject veto cannot see. The attach probe uses the same
+// lane, so it shares the rule.
+describe("attachDecision: the headline lane does not cross actors (h70-mergequality-3)", () => {
+  const AA_TITLE = "Cumhurbaşkanı Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı";
+  const AKSAM_TITLE = "AK Parti Sözcüsü Çelik Karabağ Zaferi'nin 6. yılını kutladı";
+  const AA_ROW: FixtureMember = ["aaaaaaaa-0000-4000-8000-0000000000b1", "anadolu-ajansi", AA_TITLE, "2026-11-08T11:06:00Z", null];
+  const AKSAM_ROW: FixtureMember = ["bbbbbbbb-0000-4000-8000-0000000000b1", "aksam", AKSAM_TITLE, "2026-11-08T08:00:00Z", null];
+  const KARABAG_ID = "6e585787-0000-4000-8000-000000000001";
+
+  it("control: the lane itself fires for the pair, so a missing match below is the actor rule", () => {
+    const a = article(AA_ROW);
+    const m = toMember(AKSAM_ROW);
+    const hours = Math.abs(a.publishedMs - m.publishedMs) / 3_600_000;
+    expect(headlineLane(a.tokens, m.tokens, hours).fired).toBe(true);
+    expect(headlineOnlyScore(a.tokens, m.tokens, hours)).toBeGreaterThan(0);
+  });
+
+  it("an AA-like article against an aksam-like member yields no headline evidence", () => {
+    const decision = attachDecision(article(AA_ROW), [candidate(KARABAG_ID, [AKSAM_ROW])]);
+    expect(decision).toEqual({ reason: "no-match" });
+  });
+
+  it("the same refusal holds when the member has a comma subject of its own (the old subject veto pair)", () => {
+    const posta: FixtureMember = ["cccccccc-0000-4000-8000-0000000000b1", "posta", "AK Parti Sözcüsü Çelik, Karabağ Zaferi'nin 6. yılını kutladı", "2026-11-08T08:30:00Z", null];
+    expect(attachDecision(article(AA_ROW), [candidate(KARABAG_ID, [posta])])).toEqual({ reason: "no-match" });
+  });
+
+  it("one actor-mismatched member does not hide a genuine one: a same-actor member of the same cluster still attaches", () => {
+    const sameActor: FixtureMember = ["dddddddd-0000-4000-8000-0000000000b1", "trt-haber", "Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı", "2026-11-08T09:00:00Z", null];
+    const decision = attachDecision(article(AA_ROW), [candidate(KARABAG_ID, [AKSAM_ROW, sameActor])]);
+    expect(decision).toMatchObject({ clusterId: KARABAG_ID, lane: "headline" });
+    expect((decision as { score: number }).score).toBeGreaterThan(0);
+  });
+
+  it("a same-actor pair with one comma-less title (no mismatch) keeps its evidence", () => {
+    const withComma: FixtureMember = ["eeeeeeee-0000-4000-8000-0000000000b1", "posta", "AK Parti Sözcüsü Çelik, Karabağ Zaferi'nin 6. yılını kutladı", "2026-11-08T11:00:00Z", null];
+    const decision = attachDecision(article(["ffffffff-0000-4000-8000-0000000000b1", "milliyet", AKSAM_TITLE, "2026-11-08T11:10:00Z", null]), [candidate(KARABAG_ID, [withComma])]);
+    expect(decision).toMatchObject({ clusterId: KARABAG_ID });
+  });
+
+  it("the exact-title and fingerprint evidence are untouched by the rule", () => {
+    const sameTitle: FixtureMember = ["12121212-0000-4000-8000-0000000000b1", "haberturk", AA_TITLE, "2026-11-08T11:00:00Z", null];
+    expect(attachDecision(article(AA_ROW), [candidate(KARABAG_ID, [sameTitle])])).toMatchObject({ lane: "exact-title", score: 1 });
+    const fp = "0123456789abcdef0123456789abcdef01234567";
+    const withFp: FixtureMember = ["34343434-0000-4000-8000-0000000000b1", "aksam", AKSAM_TITLE, "2026-11-08T10:00:00Z", fp];
+    const a = article(["56565656-0000-4000-8000-0000000000b1", "anadolu-ajansi", AA_TITLE, "2026-11-08T11:06:00Z", fp]);
+    expect(attachDecision(a, [candidate(KARABAG_ID, [withFp])])).toEqual({ clusterId: KARABAG_ID, score: 1, lane: "fingerprint" });
+  });
+});

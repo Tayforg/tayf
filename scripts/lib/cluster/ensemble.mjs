@@ -81,6 +81,17 @@
 //     noun of that set are disjoint, so the pair is two instalments of one
 //     story: the same two lanes are capped at SUBJECT_VETO_CAP (see
 //     counterVetoFires()).
+//   - Actor veto (h70-mergequality-3): a headline-lane match must not cross
+//     actors. When the lane fired but the two headlines name different actors
+//     (comma subjects that are disjoint, or one comma subject against a
+//     comma-less headline that leads with another named actor; see
+//     actorMismatchFires()), the lane is withdrawn and the pair is judged as if
+//     it had not fired: the text floor and the subject / incident vetoes apply
+//     again. A role with no name ("MHP Lideri ...", "Cumhurbaskanimiz ..."), a
+//     place word ("Bestepe'de ..."), a sentence-case label ("Beklenen aciklama:
+//     ...") and one actor under its acronym ("AKP," vs "AK Parti,") are not
+//     different actors (leadRun()). headlineOnlyScore() takes the same titles for
+//     the member scan.
 //
 //   - Entity-sparse pairs (h19-recall-1): when either side has no whitelist
 //     entity, primary = clip01(tfidf * ENTITY_SPARSE_TEXT_FACTOR) instead of
@@ -143,6 +154,7 @@ import {
   jaccardFromSignatures,
   fingerprint as buildFingerprint,
 } from "./fingerprint.mjs";
+import { extractEntities } from "./entities.mjs";
 import { hasIncidentWord, provincesIn } from "./provinces.mjs";
 
 // ---------------------------------------------------------------------------
@@ -415,12 +427,18 @@ export function headlineLane(ha, hb, hoursDelta) {
  * @param {{tokens: Set<string>, numbers: Set<string>, liveKey?: string|null}} ha
  * @param {{tokens: Set<string>, numbers: Set<string>, liveKey?: string|null}} hb
  * @param {number} hoursDelta
- * @param {{aSourceSlug?: string|null, bSourceSlug?: string|null}} [opts]
+ * @param {{aSourceSlug?: string|null, bSourceSlug?: string|null, aTitle?: string|null, bTitle?: string|null}} [opts]
+ *        With both `aTitle` and `bTitle` the result is 0 when the two titles
+ *        name different actors (actorMismatchFires), exactly as score()
+ *        withdraws the lane for such a pair.
  * @returns {number}
  */
 export function headlineOnlyScore(ha, hb, hoursDelta, opts = {}) {
   const lane = headlineLane(ha, hb, hoursDelta);
   if (!lane.fired) return 0;
+  if (opts?.aTitle && opts?.bTitle && actorMismatchFires(opts.aTitle, opts.bTitle)) {
+    return 0;
+  }
   return (
     lane.score *
     timeDecayFor(hoursDelta) *
@@ -434,6 +452,94 @@ export function headlineOnlyScore(ha, hb, hoursDelta, opts = {}) {
 
 const SUBJECT_STOP = new Set(SUBJECT_STOP_WORDS);
 const GENERIC_ENTITY_SET = new Set(GENERIC_ENTITIES);
+
+// ---------------------------------------------------------------------------
+// Roles, names and acronyms (shared by the subject veto and the actor mismatch)
+// ---------------------------------------------------------------------------
+
+// Folded stems of role words, matched by PREFIX so possessive and derived forms
+// count too ("cumhurbaskanimiz", "liderimiz", "bakanligi"). A role is never
+// collected as a name.
+const ROLE_PREFIXES = [
+  "cumhurbaskan",
+  "bakan",
+  "baskan",
+  "lider",
+  "sozcu",
+  "vali",
+  "milletvekil",
+  "yardimci",
+];
+
+function isRolePiece(piece) {
+  for (const r of ROLE_PREFIXES) if (piece.startsWith(r)) return true;
+  return false;
+}
+
+// The folded pieces collected so far from a run of capitalised words, plus the
+// bookkeeping of the "terminal role" rule: the qualifier pieces before a role
+// word ("MHP" in "MHP Lideri", "Saglik" in "Saglik Bakani") are dropped when no
+// name follows that role. { entries: [{ piece, word }], segStart, pending }:
+// `segStart` is the index into `entries` where the qualifier since the last role
+// word begins; `pending` is { start, end } (entries[start, end) is the qualifier
+// of the latest role phrase; revocable until a name follows it) or null.
+function newNameRun() {
+  return { entries: [], segStart: 0, pending: null };
+}
+
+// Feeds the folded pieces of one capitalised word (word index `word`). A role
+// piece opens (or, right after another role piece, extends) a pending role
+// phrase; a stop word is filler and changes nothing; any other piece is a name
+// that closes the pending phrase (the qualifier stays) and is collected unless
+// it is a generic entity and `skipGeneric` is set.
+function feedPieces(run, pieces, word, skipGeneric) {
+  for (const p of pieces) {
+    if (isRolePiece(p)) {
+      if (!(run.pending && run.entries.length === run.pending.end)) {
+        run.pending = { start: run.segStart, end: run.entries.length };
+      }
+      run.segStart = run.entries.length;
+    } else if (SUBJECT_STOP.has(p)) {
+      // Filler ("genel", "eski", "disisleri"): neither a name nor a name after a role.
+    } else {
+      run.pending = null;
+      if (!(skipGeneric && GENERIC_ENTITY_SET.has(p))) run.entries.push({ piece: p, word });
+    }
+  }
+}
+
+// Ends the run. A role still pending was terminal (nothing but the end of the
+// run followed it): its qualifier pieces are dropped.
+function finishRun(run) {
+  if (run.pending) run.entries.splice(run.pending.start, run.pending.end - run.pending.start);
+  run.pending = null;
+  return run.entries;
+}
+
+// An all-caps token of 2+ letters ("MSB", "AKP", "TBMM", "AK").
+function isAcronym(word) {
+  let letters = 0;
+  for (const ch of word) if (/\p{L}/u.test(ch)) letters++;
+  return letters >= 2 && word === word.toLocaleUpperCase("tr");
+}
+
+// True when `acronym` is the concatenation, over `raws`, of each all-caps word
+// whole and the first letter of every other word ("AKP" = AK + Parti, "MSB" =
+// Milli Savunma Bakanligi, "TBMM" = Turkiye Buyuk Millet Meclisi).
+function spellsAcronym(acronym, raws) {
+  let spelled = "";
+  for (const w of raws) spelled += isAcronym(w) ? w : ([...w][0] ?? "");
+  return spelled.toLocaleUpperCase("tr") === acronym.toLocaleUpperCase("tr");
+}
+
+// One side's subject is a single all-caps token that spells the other side's
+// capitalised words: the same actor under its short and long name.
+function acronymAlias(aRaw, bRaw) {
+  return (
+    (aRaw.length === 1 && isAcronym(aRaw[0]) && spellsAcronym(aRaw[0], bRaw)) ||
+    (bRaw.length === 1 && isAcronym(bRaw[0]) && spellsAcronym(bRaw[0], aRaw))
+  );
+}
 
 // The comma that closes a subject ("Lavrov, Japon mevkidasi ..."): not the
 // decimal comma between two digits ("2,5 saat"). A colon is deliberately NOT a
@@ -452,50 +558,189 @@ function subjectBreakIndex(word) {
   return -1;
 }
 
-// { span, words }: `span` holds the folded, capitalised, non-stop words before
-// the first ',' (only when that falls within the first SUBJECT_SPAN_MAX_WORDS
-// words); `words` every folded word of the (clipped) title.
+// { span, words, raw }: `span` holds the folded, capitalised, non-stop words
+// before the first ',' (only when that falls within the first
+// SUBJECT_SPAN_MAX_WORDS words), minus the qualifier of a terminal role ("Saglik
+// Bakani," names no actor: empty span); `words` every folded word of the
+// (clipped) title; `raw` the raw (case kept, apostrophe suffix dropped)
+// capitalised words of the subject before any stop-word or role removal, which
+// the acronym-alias check spells ("AK Parti" -> AKP).
 function subjectOf(title) {
   const clipped = title.slice(0, HEADLINE_TITLE_MAX_CHARS);
   const words = new Set();
   for (const w of foldTurkishWord(clipped).split(/[^a-z0-9]+/)) {
     if (w) words.add(w);
   }
-  const span = new Set();
+  const run = newNameRun();
+  const raw = [];
   const raws = clipped.split(/\s+/).filter(Boolean);
   for (let i = 0; i < raws.length && i < SUBJECT_SPAN_MAX_WORDS; i++) {
-    const raw = raws[i];
-    const brk = subjectBreakIndex(raw);
+    const rawWord = raws[i];
+    const brk = subjectBreakIndex(rawWord);
     // The word the break is attached to still contributes its leading part.
-    const head = brk === -1 ? raw : raw.slice(0, brk);
+    const head = brk === -1 ? rawWord : rawWord.slice(0, brk);
     // Strip an apostrophe suffix ("ABD'deki" -> "ABD"), keep capitalised words.
     const stem = head.split(/['’]/)[0] ?? "";
-    const first = [...stem][0] ?? "";
-    if (/\p{L}/u.test(first) && first !== first.toLocaleLowerCase("tr")) {
+    if (startsCapitalised(stem)) {
+      raw.push(stem);
       // Same word boundaries as `words`: "Antalya-Alanya" is two words.
-      for (const piece of foldTurkishWord(stem).split(/[^a-z0-9]+/)) {
-        if (piece && !SUBJECT_STOP.has(piece)) span.add(piece);
-      }
+      feedPieces(run, foldTurkishWord(stem).split(/[^a-z0-9]+/).filter(Boolean), i, false);
     }
-    if (brk !== -1) return { span, words };
+    if (brk !== -1) {
+      // A subject whose last capitalised word is a role ("Saglik Bakani,",
+      // "MHP Lideri,") names no actor: the qualifier before it is dropped.
+      return { span: new Set(finishRun(run).map((e) => e.piece)), words, raw };
+    }
   }
   // No ',' inside the first SUBJECT_SPAN_MAX_WORDS words: no subject.
-  return { span: new Set(), words };
+  return { span: new Set(), words, raw: [] };
 }
 
 /**
  * True when the two headlines name different actors for the same template:
- * both have a non-empty subject span, the spans are disjoint, and no subject
- * word of either side occurs anywhere in the other headline ("Lavrov, Japon
- * mevkidasi ..." vs "Fidan, Atlanta'da Japon mevkidasiyla ...").
+ * both have a non-empty subject span, the spans are disjoint, no subject word
+ * of either side occurs anywhere in the other headline ("Lavrov, Japon
+ * mevkidasi ..." vs "Fidan, Atlanta'da Japon mevkidasiyla ..."), and the two
+ * subjects are not one actor under a short and a long name (a single all-caps
+ * subject that spells the other side's words: "AKP," vs "AK Parti,"). A subject
+ * whose last capitalised word is a role ("Saglik Bakani,", "MHP Lideri,") has an
+ * empty span: a role is not a named actor. "Disisleri Bakani Fidan," keeps Fidan.
  */
 function subjectVetoFires(aTitle, bTitle) {
-  const a = subjectOf(aTitle);
-  const b = subjectOf(bTitle);
+  return subjectsDisjoint(subjectOf(aTitle), subjectOf(bTitle));
+}
+
+function subjectsDisjoint(a, b) {
   if (a.span.size === 0 || b.span.size === 0) return false;
   for (const w of a.span) if (b.words.has(w)) return false;
   for (const w of b.span) if (a.words.has(w)) return false;
-  return true;
+  return !acronymAlias(a.raw, b.raw);
+}
+
+// ---------------------------------------------------------------------------
+// Actor mismatch (h70-mergequality-3)
+// ---------------------------------------------------------------------------
+
+// Words are compared by their first ACTOR_PREFIX_LEN folded letters, so one name
+// in two inflections ("Sarigul" / "Sarigüller") is one actor.
+const ACTOR_PREFIX_LEN = 5;
+
+// Closing punctuation of a word of a title ("Celik," -> "Celik").
+const TRAILING_PUNCTUATION = /[,:;!?"“”‘’'.]+$/;
+
+function prefixesOf(words) {
+  const out = new Set();
+  for (const w of words) out.add(w.slice(0, ACTOR_PREFIX_LEN));
+  return out;
+}
+
+// The capitalisation test subjectOf() and leadRun() apply to a word's stem.
+function startsCapitalised(stem) {
+  const first = [...stem][0] ?? "";
+  return /\p{L}/u.test(first) && first !== first.toLocaleLowerCase("tr");
+}
+
+// A place word: the apostrophe suffix of a locative, ablative or dative
+// ("Bestepe'de", "Silivri'den", "Meclis'e", "Ankara'ya"), folded: de da te ta
+// den dan ten tan e a ye ya ne na.
+const PLACE_SUFFIX = /^(?:[dt][ae]n?|[ny]?[ae])$/;
+
+/**
+ * The named actor a comma-less headline leads with: walks the first
+ * SUBJECT_SPAN_MAX_WORDS words of `title` (clipped to HEADLINE_TITLE_MAX_CHARS)
+ * and collects the folded pieces of the capitalised words that are neither a
+ * role, a SUBJECT_STOP_WORDS filler word nor a GENERIC_ENTITIES word ("AK Parti
+ * Sozcusu Celik Karabag ..." -> ak, parti, celik). `raw` holds the words the walk
+ * passed, case kept, for the acronym-alias check.
+ *
+ * The walk ends, without collecting the word, at
+ *   - the first word that has a piece sharing its ACTOR_PREFIX_LEN-letter prefix
+ *     with `otherPrefixes` (the other headline's words: from there on the two
+ *     titles agree),
+ *   - the first word that is not capitalised, and
+ *   - a place word: a word whose apostrophe suffix is a locative, ablative or
+ *     dative ("Bestepe'de ...", "Silivri'den ...", "Meclis'e ...").
+ * Three rules keep a title that merely opens with a label from naming an actor:
+ *   - Roles by prefix (cumhurbaskan, bakan, baskan, lider, sozcu, vali,
+ *     milletvekil, yardimci, so "Cumhurbaskanimiz" and "Liderimiz" count) are
+ *     never collected, and nor are the stop words.
+ *   - A terminal role drops its qualifier: when the walk ends right after a
+ *     role (or runs out of words) with no name in between, the capitalised pieces
+ *     before that role are discarded ("MHP Lideri CHP'nin ...", "IBB Baskani
+ *     Silivri'den ...", "TC Cumhurbaskani Karabag ..." yield nothing), while a
+ *     name after the role keeps them ("AK Parti Sozcusu Celik Karabag ..." ->
+ *     ak, parti, celik).
+ *   - A sentence-case capital is not a name: a run made only of word 0, with
+ *     word 1 not capitalised ("Beklenen aciklama: ...", "Ummetin lideri ..."),
+ *     counts only when word 0 is an all-caps token of 2+ letters ("MHP") or
+ *     extractEntities() finds a non-generic whitelisted entity in it ("Bahceli").
+ * By construction no collected piece shares a prefix with the other headline.
+ * Returns { names: Set, raw: string[] }.
+ */
+function leadRun(title, otherPrefixes) {
+  const raws = title.slice(0, HEADLINE_TITLE_MAX_CHARS).split(/\s+/).filter(Boolean);
+  const stemOf = (rawWord) =>
+    (rawWord ?? "").replace(TRAILING_PUNCTUATION, "").split(/['’]/)[0] ?? "";
+  const run = newNameRun();
+  const raw = [];
+  for (let i = 0; i < raws.length && i < SUBJECT_SPAN_MAX_WORDS; i++) {
+    const parts = raws[i].replace(TRAILING_PUNCTUATION, "").split(/['’]/);
+    const stem = parts[0] ?? "";
+    const pieces = foldTurkishWord(stem).split(/[^a-z0-9]+/).filter(Boolean);
+    if (pieces.some((p) => otherPrefixes.has(p.slice(0, ACTOR_PREFIX_LEN)))) break;
+    if (!startsCapitalised(stem)) break;
+    if (parts.length > 1 && PLACE_SUFFIX.test(foldTurkishWord(parts[1]))) break;
+    raw.push(stem);
+    feedPieces(run, pieces, i, true);
+  }
+  const entries = finishRun(run);
+  if (entries.length > 0 && entries.every((e) => e.word === 0) && !startsCapitalised(stemOf(raws[1]))) {
+    // Sentence-case capital: only an acronym or a whitelisted name counts.
+    const first = raw[0] ?? "";
+    const named = isAcronym(first) || extractEntities(first).some((e) => !GENERIC_ENTITY_SET.has(e));
+    if (!named) return { names: new Set(), raw };
+  }
+  return { names: new Set(entries.map((e) => e.piece)), raw };
+}
+
+// `a` has a comma subject, `b` has none, and `b` leads with a named actor that
+// is not `a`'s: none of a's subject words occurs in b (by prefix), b's leading
+// run of names (stopping where the titles meet) is non-empty, and it is not a's
+// acronym spelled out ("AKP," vs "AK Parti ...").
+function oneSidedActorMismatch(a, b, bTitle) {
+  if (a.span.size === 0 || b.span.size !== 0) return false;
+  const bPrefixes = prefixesOf(b.words);
+  for (const w of a.span) if (bPrefixes.has(w.slice(0, ACTOR_PREFIX_LEN))) return false;
+  const lead = leadRun(bTitle, prefixesOf(a.words));
+  return lead.names.size > 0 && !acronymAlias(a.raw, lead.raw);
+}
+
+/**
+ * True when the two headlines name different actors: the subject veto
+ * (subjectVetoFires: comma subjects on both sides) or its one-sided form, where
+ * only one headline has a comma subject and the other leads with a different
+ * named actor (leadRun). "Cumhurbaskani Erdogan, Karabag Zaferi'nin 6. yilini
+ * kutladi" and "AK Parti Sozcusu Celik Karabag Zaferi'nin 6. yilini kutladi" share
+ * every word but the actor. Not an actor mismatch:
+ *   - the same actor under a role: "Erdogan, Zelenskiy'i kabul etti" vs
+ *     "Cumhurbaskani Erdogan Ukrayna Devlet Baskani Zelenskiy'i kabul etti";
+ *   - a role with no name, with or without a qualifier: "Trump, ..." vs "ABD
+ *     Baskani ...", "Bahceli, ..." vs "MHP Lideri ...", "Erdogan, ..." vs
+ *     "Cumhurbaskanimiz ..." or "TC Cumhurbaskani ..." (the terminal-role rule);
+ *   - a place or a sentence-case label: "Bestepe'de ...", "Beklenen aciklama: ...";
+ *   - one actor under its acronym: "AKP," vs "AK Parti,", "MSB," vs "Milli Savunma
+ *     Bakanligi,"; a role-only comma subject ("Saglik Bakani,") names no actor.
+ * A single whitelisted name ("Erdogan, ..." vs "Bahceli ...") does count.
+ * Symmetric.
+ */
+export function actorMismatchFires(aTitle, bTitle) {
+  const a = subjectOf(aTitle);
+  const b = subjectOf(bTitle);
+  return (
+    subjectsDisjoint(a, b) ||
+    oneSidedActorMismatch(a, b, bTitle) ||
+    oneSidedActorMismatch(b, a, aTitle)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +991,7 @@ export function score(
         subjectVeto: false,
         incidentVeto: false,
         counterVeto: false,
+        actorVeto: false,
       },
     };
   }
@@ -833,6 +1079,16 @@ export function score(
     headlineFired = lane.fired;
     headlineScore = lane.score;
   }
+  // Actor veto (h70-mergequality-3): a headline-lane match must not cross
+  // actors. When the lane fired but the titles name different actors it is
+  // withdrawn: its score is dropped, and the pair is judged as if the lane had
+  // not fired, so the text floor and the subject / incident vetoes below
+  // apply to it again. Evaluated only for a pair the lane fired for (the
+  // subject veto already covers the other pairs).
+  const actorVeto =
+    headlineFired && !!aTitle && !!bTitle && actorMismatchFires(aTitle, bTitle);
+  const headlineEffective = headlineFired && !actorVeto;
+  if (!headlineEffective) headlineScore = 0;
 
   // -----------------------------------------------------------------------
   // 6. Combine.
@@ -849,18 +1105,18 @@ export function score(
   const primary = entitySparse
     ? clip01(tfidfScore * ENTITY_SPARSE_TEXT_FACTOR)
     : TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
-  const textFloorCapped = !headlineFired && tfidfScore < ENTITY_TEXT_FLOOR;
+  const textFloorCapped = !headlineEffective && tfidfScore < ENTITY_TEXT_FLOOR;
   let primaryForRaw = textFloorCapped
     ? Math.min(primary, MATCH_THRESHOLD - 0.01)
     : primary;
   // Subject veto: different actors, same template. Never overrides a headline
-  // lane that fired (the headlines already agree).
+  // lane that is in effect (the headlines already agree on the actor).
   const subjectVeto =
-    !headlineFired && !!aTitle && !!bTitle && subjectVetoFires(aTitle, bTitle);
+    !headlineEffective && !!aTitle && !!bTitle && subjectVetoFires(aTitle, bTitle);
   // Incident veto: the same incident template in different provinces. Same
   // exemption as the subject veto, same cap.
   const incidentVeto =
-    !headlineFired && !!aTitle && !!bTitle && incidentVetoFires(aTitle, bTitle);
+    !headlineEffective && !!aTitle && !!bTitle && incidentVetoFires(aTitle, bTitle);
   // Counter veto: the same recurring event on a different instalment ("104."
   // vs "105. duruşma"). It caps the MinHash and primary lanes, which cannot see
   // numerals, and has no headline exemption: the headline lane refuses
@@ -903,13 +1159,14 @@ export function score(
       sourcePenalty,
       headlineSim,
       headlineShared,
-      headlineLane: headlineFired,
+      headlineLane: headlineEffective,
       headlineKind,
       headlineContainment,
       textFloorCapped,
       subjectVeto,
       incidentVeto,
       counterVeto,
+      actorVeto,
     },
   };
 }

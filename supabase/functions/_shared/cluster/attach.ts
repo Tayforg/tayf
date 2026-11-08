@@ -17,7 +17,8 @@
 //   headline      the headline lane fires against a member (Jaccard or
 //                 containment, >= HEADLINE_LANE_MIN_SHARED shared tokens, numerals
 //                 consistent, size guard on containment), scored by
-//                 headlineOnlyScore.
+//                 headlineOnlyScore -- which is 0 for a pair whose two headlines name
+//                 different actors (actorMismatchFires), so that pair is no evidence.
 // All three need the member to be within HEADLINE_LANE_MAX_HOURS of the article.
 // The live-title variant ("CANLI | ...") and the short-identical variant (fewer
 // than HEADLINE_LANE_MIN_SHARED shared tokens) are NOT evidence here.
@@ -152,7 +153,13 @@ function memberEvidence(
   // headline lane, minus the variants that are too thin to attach on.
   const lane = headlineLane(article.tokens, member.tokens, hours);
   if (!lane.fired || lane.kind === "live-title" || lane.shared < HEADLINE_LANE_MIN_SHARED) return null;
-  const score = headlineOnlyScore(article.tokens, member.tokens, hours);
+  // With both titles headlineOnlyScore is 0 for a pair that names different actors
+  // (h70-mergequality-3: "Erdogan, Karabag Zaferi'nin ..." against a comma-less
+  // "AK Parti Sozcusu Celik Karabag Zaferi'nin ..."): no headline evidence then.
+  const score = headlineOnlyScore(article.tokens, member.tokens, hours, {
+    aTitle: article.title,
+    bTitle: member.title,
+  });
   return score > 0 ? { score, lane: "headline" } : null;
 }
 

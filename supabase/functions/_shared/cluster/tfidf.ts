@@ -158,12 +158,7 @@ export class TfidfIndex {
   cosineQuery(q: TfidfQuery, id: string): number {
     const d = this.docs.get(id);
     if (!d) return 0;
-    const self = q.selfId !== undefined ? this.docs.get(q.selfId) : undefined;
-    const N = this.docs.size + (self ? 0 : 1);
-    const idfOf = (t: string): number =>
-      Math.log(
-        (N + 1) / ((this.df.get(t) || 0) - (self?.has(t) ? 1 : 0) + (q.tf.has(t) ? 1 : 0) + 1),
-      ) + 1;
+    const idfOf = this.queryIdf(q);
 
     const qw = new Map<string, number>();
     let nQ = 0;
@@ -190,6 +185,34 @@ export class TfidfIndex {
     nD = Math.sqrt(nD);
     if (nQ === 0 || nD === 0) return 0;
     return this.cosineOf(qw, nQ, dw, nD);
+  }
+
+  // The idf of a term as seen by a one-off query: the query is scored as if it
+  // were momentarily added to the corpus (N' = docs + 1, df' bumped by 1 for
+  // the terms it contains), or, when `q.selfId` is already indexed, as a replace
+  // (N unchanged, that doc's own df contribution backed out first). Shared by
+  // cosineQuery() and queryWeights() so both weigh a term identically.
+  private queryIdf(q: TfidfQuery): (term: string) => number {
+    const self = q.selfId !== undefined ? this.docs.get(q.selfId) : undefined;
+    const N = this.docs.size + (self ? 0 : 1);
+    return (t: string): number =>
+      Math.log(
+        (N + 1) / ((this.df.get(t) || 0) - (self?.has(t) ? 1 : 0) + (q.tf.has(t) ? 1 : 0) + 1),
+      ) + 1;
+  }
+
+  // The tf * idf weight of every term of a one-off query (term -> weight, in the
+  // query's term order), with the idf cosineQuery() uses. Pure: it does not touch
+  // docs, df or finalized. Callers that need a cosine between several free texts
+  // (centroid.ts) normalise these weights themselves.
+  queryWeights(q: TfidfQuery): Map<string, number> {
+    const idfOf = this.queryIdf(q);
+    const weights = new Map<string, number>();
+    for (const [term, count] of q.tf.entries()) {
+      const w = count * idfOf(term);
+      if (w !== 0) weights.set(term, w);
+    }
+    return weights;
   }
 
   size(): number {
