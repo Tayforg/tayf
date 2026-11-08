@@ -230,6 +230,7 @@ import {
   haltNoticeToShow,
   latestTradingHalt,
   rankAttention,
+  recentWindowDays,
   toFeedItem,
   type Disclosure,
 } from "./queries";
@@ -435,6 +436,60 @@ describe("finance query transforms", () => {
       expect(one(9, 2)).toBeNull(); // baseline just under
       expect(one(3, 3)).not.toBeNull(); // both at the floor
       expect(one(3, 3)).toBe(3);
+    });
+  });
+
+  // h66-statsparity-2: the recent window runs from `splitDay` 00:00 +03 to now,
+  // so it is `days - 1` full days plus the part of today that has elapsed, not
+  // a flat `days`. Dividing by `days` understated "ilgi N×" by elapsed/days.
+  describe("recentWindowDays: the elapsed length of the recent window (h66-statsparity-2)", () => {
+    it("09:45 Istanbul on 11-08 is 33.75 h into the window that opened 11-07 00:00 +03", () => {
+      expect(recentWindowDays(Date.parse("2026-11-08T06:45:00Z"), "2026-11-07", 2)).toBe(1.40625);
+    });
+
+    it("23:59 Istanbul on 11-08 is just under the full 2 days", () => {
+      expect(recentWindowDays(Date.parse("2026-11-08T20:59:00Z"), "2026-11-07", 2)).toBeCloseTo(1.99931, 5);
+    });
+
+    it("never exceeds `days`, even when the clock reads past the window (a retry after midnight)", () => {
+      expect(recentWindowDays(Date.parse("2026-11-08T21:30:00Z"), "2026-11-07", 2)).toBe(2);
+    });
+
+    it("30 s after Istanbul midnight it floors at days - 1 + 1/24, not at ~1 day", () => {
+      // 2026-11-07T21:00:30Z is 00:00:30 on 11-08 in Istanbul, so istDate(-1) is 11-07.
+      expect(recentWindowDays(Date.parse("2026-11-07T21:00:30Z"), "2026-11-07", 2)).toBeCloseTo(1 + 1 / 24, 10);
+    });
+
+    it("days = 1 with splitDay = today floors at 1/24, never 0 (no divide-by-zero)", () => {
+      const nowMs = Date.parse("2026-11-07T21:00:30Z");
+      const out = recentWindowDays(nowMs, "2026-11-08", 1);
+      expect(out).toBeCloseTo(1 / 24, 10);
+      expect(out).toBeGreaterThan(0);
+    });
+
+    it("days = 1 mid-afternoon is the elapsed fraction of today", () => {
+      // 09:00Z is 12:00 Istanbul, 12 h into the day.
+      expect(recentWindowDays(Date.parse("2026-11-08T09:00:00Z"), "2026-11-08", 1)).toBe(0.5);
+    });
+  });
+
+  describe("rankAttention: a fractional recent window (h66-statsparity-2)", () => {
+    it("15 recent articles over 1.40625 days vs 12 baseline over 6 days is 5.333x, not 3.75x", () => {
+      const [t] = rankAttention(
+        [
+          { ticker: "TERA", day: "2026-11-07", articles: 9, sources: 3, sourceIds: ["a", "b", "c"] },
+          { ticker: "TERA", day: "2026-11-08", articles: 6, sources: 2, sourceIds: ["a", "b"] },
+          { ticker: "TERA", day: "2026-11-03", articles: 12, sources: 4, sourceIds: ["a", "b", "c", "d"] },
+        ],
+        new Map(),
+        10,
+        "2026-11-07",
+        1.40625,
+        6,
+        new Set(["TERA"]),
+      );
+      expect(t).toMatchObject({ articles: 15, sources: 3 });
+      expect(t!.ratio).toBeCloseTo(5.333, 2);
     });
   });
 
@@ -1752,6 +1807,41 @@ describe("h11-finance-4: the tape ranks traded tickers only", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe("h66-statsparity-2: fetchTopTickers rates the recent window by its elapsed length", () => {
+  const rows = (ticker: string, count: number, day: string, hourZ: number, prefix: string) =>
+    Array.from({ length: count }, (_, i) => ({
+      ticker,
+      article_id: `${prefix}${i}`,
+      published_at: `${day}T${String(hourZ).padStart(2, "0")}:00:00Z`,
+      source_id: "s1",
+    }));
+
+  function seed(nowIso: string) {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(nowIso));
+    fixture.articleTickers = [
+      ...rows("TERA", 9, "2026-11-07", 8, "y"), // yesterday (Istanbul)
+      ...rows("TERA", 6, "2026-11-08", 3, "t"), // today so far (06:00 Istanbul)
+      ...rows("TERA", 12, "2026-11-03", 8, "b"), // baseline
+    ];
+    fixture.bistCompanies = [{ tickers: ["TERA"], title: "TERA YATIRIM", shares_traded: true }];
+  }
+
+  it("09:45 Istanbul: 15 recent over 1.40625 days vs 12 baseline over 6 days is 5.333x (was 3.75x over a flat 2)", async () => {
+    seed("2026-11-08T06:45:00Z");
+    const [tera] = await fetchTopTickers(2, 10);
+    expect(tera).toMatchObject({ ticker: "TERA", articles: 15 });
+    expect(tera!.ratio).toBeCloseTo(5.333, 2);
+  });
+
+  it("23:59 Istanbul the window is nearly the full 2 days, so the ratio is nearly the old flat-2 value", async () => {
+    seed("2026-11-08T20:59:00Z");
+    const [tera] = await fetchTopTickers(2, 10);
+    // (15 / 1.99931) / (12 / 6) = 3.7513
+    expect(tera!.ratio).toBeCloseTo(3.7513, 3);
   });
 });
 

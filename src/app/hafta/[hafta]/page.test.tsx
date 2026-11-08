@@ -57,6 +57,7 @@ vi.mock("@/lib/weekly/weekly-query", () => ({
           side: "iktidar",
           share: 1,
           sharePct: 100,
+          counts: { iktidar: 21, bagimsiz: 0, muhalefet: 0 },
         },
         {
           id: "bs-m",
@@ -65,6 +66,7 @@ vi.mock("@/lib/weekly/weekly-query", () => ({
           side: "muhalefet",
           share: 1,
           sharePct: 100,
+          counts: { iktidar: 0, bagimsiz: 0, muhalefet: 8 },
         },
       ],
       blindspotSideCounts: { iktidar: 37, bagimsiz: 0, muhalefet: 9 },

@@ -4,6 +4,7 @@ import {
   zoneCountsOf,
   zonePercents,
 } from "@/lib/bias/zone-summary";
+import { sourceCountHead } from "@/lib/feeds/zone-line";
 import type { BiasDistribution, MediaDnaZone } from "@/types";
 
 // Pure HTML renderer for the weekly digest email (GET /api/cron/digest).
@@ -15,6 +16,11 @@ export interface DigestClusterItem {
   id: string;
   title: string;
   summary: string;
+  /**
+   * Every member of the cluster. The zone bar above the count is drawn from
+   * `biasDistribution` (voting sources only), so the line prints both through
+   * `sourceCountHead`: "16 kaynak (10 sınıflandırılmış)" (h66-statsparity-1).
+   */
   articleCount: number;
   biasDistribution: BiasDistribution;
 }
@@ -105,7 +111,7 @@ function storyBlock(item: DigestClusterItem, siteUrl: string): string {
         }
         ${zoneBar(item.biasDistribution)}
         <p style="margin:2px 0 0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
-          ${item.articleCount} kaynak
+          ${sourceCountHead(item.articleCount, zoneCountsOf(item.biasDistribution))}
         </p>
       </td>
     </tr>`;

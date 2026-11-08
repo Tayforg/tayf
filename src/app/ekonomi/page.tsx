@@ -194,7 +194,7 @@ export default async function EkonomiPage() {
                     {t.title ? <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{t.title}</span> : null}
                   </span>
                   <span className="tabular-nums text-muted-foreground">
-                    {t.articles} haber <span className="text-foreground/40">/</span> {t.sources} kaynak
+                    {t.articles} haber <span className="text-muted-foreground">/</span> {t.sources} kaynak
                   </span>
                 </li>
               ))}

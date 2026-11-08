@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ZoneHealth } from "@/lib/clusters/feed-health";
+import { sourceCountHead } from "@/lib/feeds/zone-line";
 import type { MediaDnaZone } from "@/types";
 import type { WeeklyBlindspot, WeeklySummary } from "@/lib/weekly/weekly-query";
 
@@ -17,19 +18,27 @@ import {
   WidestSpectrum,
   ZoneShares,
   blindspotShareText,
+  weeklySourceCount,
 } from "./week-sections";
 
 // The sections are plain synchronous components, so renderToStaticMarkup is
 // enough: no async server-component machinery, no mocked data layer.
 
+/**
+ * A row whose voting counts equal its member count (every member voted), the
+ * shape that keeps the bare "N kaynak"; tests of the marker state `counts`.
+ */
 function blindspot(overrides: Partial<WeeklyBlindspot> = {}): WeeklyBlindspot {
+  const side = overrides.side ?? "iktidar";
+  const articleCount = overrides.articleCount ?? 13;
   return {
     id: "bs-1",
     title: "İhale iptali",
-    articleCount: 13,
-    side: "iktidar",
+    articleCount,
+    side,
     share: 1,
     sharePct: 100,
+    counts: { iktidar: 0, bagimsiz: 0, muhalefet: 0, [side]: articleCount },
     ...overrides,
   };
 }
@@ -101,6 +110,112 @@ describe("blindspotShareText", () => {
       blindspotShareText(blindspot({ side: "bagimsiz", articleCount: 1500, share: 0.8, sharePct: 80 })),
     ).toBe("%80 Bağımsız · 1.500 kaynak");
   });
+
+  // h66-statsparity-1: article_count is every member; the share is over the
+  // voting sources. The row says so with the wording every other surface uses.
+  describe("voting basis marker (h66-statsparity-1)", () => {
+    const TEN_VOTERS = { iktidar: 9, bagimsiz: 1, muhalefet: 0 };
+
+    it("16 members, 10 voters: '%90 İktidar · 16 kaynak (10 sınıflandırılmış)'", () => {
+      expect(
+        blindspotShareText(
+          blindspot({ side: "iktidar", share: 0.9, sharePct: 90, articleCount: 16, counts: TEN_VOTERS }),
+        ),
+      ).toBe("%90 İktidar · 16 kaynak (10 sınıflandırılmış)");
+    });
+
+    it("share exactly 1 with 13 members and 10 voters keeps 'Sadece' and adds the marker", () => {
+      expect(
+        blindspotShareText(
+          blindspot({
+            side: "iktidar",
+            share: 1,
+            sharePct: 100,
+            articleCount: 13,
+            counts: { iktidar: 10, bagimsiz: 0, muhalefet: 0 },
+          }),
+        ),
+      ).toBe("Sadece İktidar tarafında · 13 kaynak (10 sınıflandırılmış)");
+    });
+
+    it("no zone evidence (null share) still marks the voting count of the counts it has", () => {
+      expect(
+        blindspotShareText(
+          blindspot({ side: "iktidar", share: null, sharePct: null, articleCount: 16, counts: TEN_VOTERS }),
+        ),
+      ).toBe("İktidar tarafında · 16 kaynak (10 sınıflandırılmış)");
+    });
+
+    it("no distribution at all (all-zero counts) reads '(0 sınıflandırılmış)', the helper's own rule", () => {
+      expect(
+        blindspotShareText(
+          blindspot({
+            side: "iktidar",
+            share: null,
+            sharePct: null,
+            articleCount: 3,
+            counts: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+          }),
+        ),
+      ).toBe("İktidar tarafında · 3 kaynak (0 sınıflandırılmış)");
+    });
+
+    it("counts that add up to articleCount leave every existing string unchanged", () => {
+      expect(
+        blindspotShareText(blindspot({ articleCount: 16, share: 0.9, sharePct: 90, counts: { iktidar: 14, bagimsiz: 2, muhalefet: 0 } })),
+      ).toBe("%90 İktidar · 16 kaynak");
+      expect(
+        blindspotShareText(blindspot({ articleCount: 13, share: 1, sharePct: 100 })),
+      ).toBe("Sadece İktidar tarafında · 13 kaynak");
+    });
+
+    it("a stale tally above the member count is not qualified (voting >= total keeps the bare count)", () => {
+      expect(
+        blindspotShareText(
+          blindspot({ articleCount: 4, share: 1, sharePct: 100, counts: { iktidar: 6, bagimsiz: 0, muhalefet: 0 } }),
+        ),
+      ).toBe("Sadece İktidar tarafında · 4 kaynak");
+    });
+
+    it("groups both numbers the Turkish way past a thousand", () => {
+      expect(
+        blindspotShareText(
+          blindspot({
+            articleCount: 1500,
+            share: 1100 / 1400,
+            sharePct: 79,
+            side: "bagimsiz",
+            counts: { iktidar: 100, bagimsiz: 1100, muhalefet: 200 },
+          }),
+        ),
+      ).toBe("%79 Bağımsız · 1.500 kaynak (1.400 sınıflandırılmış)");
+    });
+  });
+});
+
+describe("weeklySourceCount (h66-statsparity-1)", () => {
+  const CASES: Array<[number, Record<MediaDnaZone, number>]> = [
+    [10, { iktidar: 8, bagimsiz: 0, muhalefet: 0 }],
+    [7, { iktidar: 4, bagimsiz: 2, muhalefet: 1 }],
+    [3, { iktidar: 0, bagimsiz: 0, muhalefet: 0 }],
+    [2, { iktidar: 4, bagimsiz: 1, muhalefet: 0 }],
+    [53, { iktidar: 30, bagimsiz: 6, muhalefet: 10 }],
+    [999, { iktidar: 500, bagimsiz: 100, muhalefet: 200 }],
+  ];
+
+  it.each(CASES)("prints exactly what sourceCountHead prints for %i members (below 1.000)", (total, counts) => {
+    expect(weeklySourceCount(total, counts)).toBe(sourceCountHead(total, counts));
+  });
+
+  it("only differs from sourceCountHead by the Turkish thousands grouping", () => {
+    expect(weeklySourceCount(1200, { iktidar: 600, bagimsiz: 100, muhalefet: 100 })).toBe(
+      "1.200 kaynak (800 sınıflandırılmış)",
+    );
+    expect(sourceCountHead(1200, { iktidar: 600, bagimsiz: 100, muhalefet: 100 })).toBe(
+      "1200 kaynak (800 sınıflandırılmış)",
+    );
+    expect(weeklySourceCount(1500, { iktidar: 600, bagimsiz: 500, muhalefet: 400 })).toBe("1.500 kaynak");
+  });
 });
 
 describe("<ZoneShares> zone rows (h18-numbers-1)", () => {
@@ -162,6 +277,35 @@ describe("<WidestSpectrum> (h18-numbers-1)", () => {
     expect(html).not.toContain("9 haber");
   });
 
+  // h66-statsparity-1: the member count beside zonesCovered (a voting figure).
+  it("marks the voting count when fewer sources voted than the row counts: '53 kaynak (46 sınıflandırılmış) · 3 bölge'", () => {
+    const summary: WeeklySummary = {
+      ...summaryWith([]),
+      topClusters: [
+        {
+          id: "8507ec54",
+          title: "Çok kaynaklı hikaye",
+          articleCount: 53,
+          zonesCovered: 3,
+          zoneCounts: { iktidar: 30, bagimsiz: 6, muhalefet: 10 },
+        },
+        {
+          id: "all-voted",
+          title: "Hepsi oy kullandı",
+          articleCount: 9,
+          zonesCovered: 3,
+          zoneCounts: { iktidar: 4, bagimsiz: 3, muhalefet: 2 },
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<WidestSpectrum summary={summary} variant="rolling" />);
+
+    expect(html).toContain("53 kaynak (46 sınıflandırılmış) · 3 bölge");
+    expect(html).toContain("9 kaynak · 3 bölge");
+    expect(html).not.toContain("9 kaynak (");
+    expect(html).not.toContain("53 kaynak · 3 bölge");
+  });
+
   it("groups four-digit counts the Turkish way", () => {
     const summary: WeeklySummary = {
       ...summaryWith([]),
@@ -199,6 +343,30 @@ describe("<Blindspots>", () => {
     expect(html).toContain("İktidar tarafında · 4 kaynak");
     // "Sadece" appears exactly once: on the 100% row.
     expect(html.match(/Sadece/g) ?? []).toHaveLength(1);
+  });
+
+  it("prints the voting count on the rows that need it (f1837ee1: 16 members, 10 voters)", () => {
+    const html = renderToStaticMarkup(
+      <Blindspots
+        summary={summaryWith([
+          blindspot({
+            id: "f1837ee1",
+            title: "Altı toplayıcı",
+            articleCount: 16,
+            share: 0.9,
+            sharePct: 90,
+            counts: { iktidar: 9, bagimsiz: 1, muhalefet: 0 },
+          }),
+          blindspot({ id: "all", title: "Hepsi oy kullandı", articleCount: 13, share: 1, sharePct: 100 }),
+        ])}
+        health={null}
+        variant="rolling"
+      />,
+    );
+
+    expect(html).toContain("%90 İktidar · 16 kaynak (10 sınıflandırılmış)");
+    expect(html).toContain("Sadece İktidar tarafında · 13 kaynak<");
+    expect(html.match(/sınıflandırılmış/g) ?? []).toHaveLength(1);
   });
 
   it("uses the same row text on a closed week (archive)", () => {

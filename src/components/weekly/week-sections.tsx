@@ -160,6 +160,29 @@ export function BasisNote({
   );
 }
 
+/**
+ * A row's source count: "N kaynak", or "N kaynak (M sınıflandırılmış)" when
+ * only M of the N members vote (h66-statsparity-1). `total` is every member of
+ * the cluster; `counts` the voting tally the row's zones and share come from.
+ *
+ * Same rule and same wording as `sourceCountHead` (src/lib/feeds/zone-line.ts:
+ * the OG card, embed, rozet, RSS, Telegram and /takip), including "voting >=
+ * total keeps the bare count". It is spelled out here, not called, only
+ * because that helper prints bare digits and /hafta groups them the Turkish
+ * way (1.200); below a thousand the two are identical, and
+ * week-sections.test.tsx pins that parity so the wording cannot drift.
+ */
+export function weeklySourceCount(
+  total: number,
+  counts: Record<MediaDnaZone, number>,
+): string {
+  const voting = ZONE_ORDER.reduce((sum, zone) => sum + counts[zone], 0);
+  const head = `${formatCountTr(total)} kaynak`;
+  return voting >= total
+    ? head
+    : `${head} (${formatCountTr(voting)} sınıflandırılmış)`;
+}
+
 export function WidestSpectrum({
   summary,
   archive = false,
@@ -184,7 +207,7 @@ export function WidestSpectrum({
                 {cluster.title}
               </Link>
               <span className={metaClass}>
-                {`${formatCountTr(cluster.articleCount)} kaynak · ${cluster.zonesCovered} bölge`}
+                {`${weeklySourceCount(cluster.articleCount, cluster.zoneCounts)} · ${cluster.zonesCovered} bölge`}
               </span>
             </li>
           ))}
@@ -203,7 +226,7 @@ export function WidestSpectrum({
  */
 export function blindspotShareText(blindspot: WeeklyBlindspot): string {
   const zone = ZONE_META[blindspot.side].label;
-  const count = `${formatCountTr(blindspot.articleCount)} kaynak`;
+  const count = weeklySourceCount(blindspot.articleCount, blindspot.counts);
 
   if (blindspot.share === 1) return `Sadece ${zone} tarafında · ${count}`;
   if (blindspot.share === null || blindspot.sharePct === null) {

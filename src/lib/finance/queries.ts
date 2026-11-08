@@ -343,6 +343,20 @@ function istDate(offsetDays = 0): string {
 }
 
 /**
+ * h66-statsparity-2: the length in days of the recent window that opened at
+ * `splitDay` 00:00 +03 and closes at `nowMs`. It is `days - 1` full Istanbul
+ * days plus the part of today that has elapsed, so a flat `days` divisor
+ * understated the `ratio` by elapsed/days all day (x0.5 just after midnight).
+ * Floored at `days - 1 + 1/24` so the first hour of a day is not a near-zero
+ * divisor (and `days = 1` never divides by 0), and capped at `days` for a
+ * clock read that runs past the window (a cache retry after midnight).
+ */
+export function recentWindowDays(nowMs: number, splitDay: string, days: number): number {
+  const elapsed = (nowMs - Date.parse(`${splitDay}T00:00:00+03:00`)) / 86_400_000;
+  return Math.min(days, Math.max(days - 1 + 1 / 24, elapsed));
+}
+
+/**
  * h11-finance-4: a `ratio` ("ilgi 6,0x") is a rate over a rate. With two
  * recent articles against one old one it is arithmetic noise ("BOYNR 2 haber,
  * ilgi 6,0x"), so it needs a real count on BOTH sides.
@@ -447,6 +461,9 @@ function scoreMapFromLowRows(rows: Array<{ subject_id: string; jev_prob: unknown
 async function readTopTickers(days: number, limit: number): Promise<TickerAttention[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const splitDay = istDate(-(days - 1));
+  // h66-statsparity-2: the same clock read istDate makes (inside the cached
+  // remote scope); the recent window is elapsed time, not a flat `days`.
+  const recentDays = recentWindowDays(Date.now(), splitDay, days);
   const sinceIso = `${istDate(-(days - 1 + BASELINE_DAYS))}T00:00:00+03:00`;
   // Notice ids are fetched in parallel with the main read; the lookup is
   // fail-open (empty set), so it can never turn into a thrown error here.
@@ -477,7 +494,7 @@ async function readTopTickers(days: number, limit: number): Promise<TickerAttent
       }
     }
   }
-  return rankAttention(rows, titles, limit, splitDay, days, BASELINE_DAYS, traded);
+  return rankAttention(rows, titles, limit, splitDay, recentDays, BASELINE_DAYS, traded);
 }
 
 async function fetchTopTickersCached(days: number, limit: number) {

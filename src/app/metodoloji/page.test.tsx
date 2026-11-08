@@ -766,14 +766,20 @@ describe("/metodoloji page: besleme sağlığı and Kör Noktalar listesi (h62-m
     expect(text).toContain(`%${pct(BLINDSPOT_LIST_FILTERS.minUniqueHashRatio)}'den azı`);
     expect(text).toContain(`%${pct(BLINDSPOT_LIST_FILTERS.maxDunyaShare)}'sinden fazlası`);
     expect(text).toContain(`%${pct(BLINDSPOT_LIST_FILTERS.minPoliticsShare)}'ından azı`);
-    // The three shares as the reader sees them: %50, %50 and %60.
+    // h66-dupes-1: the copy_dedup clause, right after the hash clause, quoting its
+    // own constant. Voting members only, and one headline counts as one text.
+    expect(text).toContain(
+      `içerik özetlerinin %${pct(BLINDSPOT_LIST_FILTERS.minUniqueHashRatio)}'den azı birbirinden farklı olanlar; spektruma sayılan kaynakların metinlerinin (aynı içerik özeti ya da aynı başlık tek metin sayılır) %${pct(BLINDSPOT_LIST_FILTERS.minIndependentTextRatio)}'den azı birbirinden farklı olanlar; haberlerinin %`,
+    );
+    // The four shares as the reader sees them: %50, %50, %50 and %60.
     expect(
       [
         BLINDSPOT_LIST_FILTERS.minUniqueHashRatio,
+        BLINDSPOT_LIST_FILTERS.minIndependentTextRatio,
         BLINDSPOT_LIST_FILTERS.maxDunyaShare,
         BLINDSPOT_LIST_FILTERS.minPoliticsShare,
       ].map((share) => `%${pct(share)}`),
-    ).toEqual(["%50", "%50", "%60"]);
+    ).toEqual(["%50", "%50", "%50", "%60"]);
     // The SEO-explainer examples the spec allows (the pattern list itself is not described).
     expect(text).toContain("kimdir");
     expect(text).toContain("nedir?");

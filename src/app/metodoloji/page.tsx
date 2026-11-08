@@ -264,6 +264,7 @@ export default async function MethodologyPage() {
   const feedYieldSharePct = Math.round(FEED_HEALTH_MIN_YIELD_SHARE * 100);
   const feedYieldWindowHours = FEED_YIELD_WINDOW_MS / 3_600_000;
   const listHashPct = Math.round(BLINDSPOT_LIST_FILTERS.minUniqueHashRatio * 100);
+  const listTextPct = Math.round(BLINDSPOT_LIST_FILTERS.minIndependentTextRatio * 100);
   const listDunyaPct = Math.round(BLINDSPOT_LIST_FILTERS.maxDunyaShare * 100);
   const listPoliticsPct = Math.round(BLINDSPOT_LIST_FILTERS.minPoliticsShare * 100);
   // Computed, not asserted, and over the ACTIVE sources only: /sources counts
@@ -444,7 +445,7 @@ export default async function MethodologyPage() {
             Kör Noktalar listesi
           </h3>
           <p className={proseClass}>
-            {`Kör Noktalar listesi son ${BLINDSPOT_LIST_LOOKBACK_DAYS} günün haberlerini kapsar ve en fazla ${DEFAULT_PICK_SIZE} haberi kart olarak gösterir. Kalanlar “Diğer kör noktalar” bölümünde birer satır olarak listelenir. Her kaynaktan yalnızca ilk haber sayılır; şu haberler listeye alınmaz: başlığı “kimdir”, “nedir?”, “canlı izle” gibi bir arama açıklaması olanlar; içerik özetlerinin %${listHashPct}'den azı birbirinden farklı olanlar; haberlerinin %${listDunyaPct}'sinden fazlası Dünya kategorisinde olanlar; haberlerinin %${listPoliticsPct}'ından azı politika ya da son dakika olanlar. Bu haberler kartta ve haber sayfasında kör nokta etiketini yine taşıyabilir.`}
+            {`Kör Noktalar listesi son ${BLINDSPOT_LIST_LOOKBACK_DAYS} günün haberlerini kapsar ve en fazla ${DEFAULT_PICK_SIZE} haberi kart olarak gösterir. Kalanlar “Diğer kör noktalar” bölümünde birer satır olarak listelenir. Her kaynaktan yalnızca ilk haber sayılır; şu haberler listeye alınmaz: başlığı “kimdir”, “nedir?”, “canlı izle” gibi bir arama açıklaması olanlar; içerik özetlerinin %${listHashPct}'den azı birbirinden farklı olanlar; spektruma sayılan kaynakların metinlerinin (aynı içerik özeti ya da aynı başlık tek metin sayılır) %${listTextPct}'den azı birbirinden farklı olanlar; haberlerinin %${listDunyaPct}'sinden fazlası Dünya kategorisinde olanlar; haberlerinin %${listPoliticsPct}'ından azı politika ya da son dakika olanlar. Bu haberler kartta ve haber sayfasında kör nokta etiketini yine taşıyabilir.`}
           </p>
           <h3
             id="kor-noktaya-yakin"
