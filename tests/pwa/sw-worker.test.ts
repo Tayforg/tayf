@@ -583,16 +583,21 @@ describe("navigation: allowlisted cluster pages", () => {
   });
 
   it("slow network + cached copy -> cached now; the network keeps running and updates the cache", async () => {
+    // The slow network is a deferred promise the test releases itself: the order of
+    // events is fixed by the test, not by a race between sleep() and a clock.
+    let releaseNetwork!: () => void;
+    const networkGate = new Promise<void>((resolve) => {
+      releaseNetwork = resolve;
+    });
     const w = load(async () => {
-      await sleep(100);
+      await networkGate;
       return pageRes(ID, page("Gec gelen"));
     });
     await seedPages(w, ID, "OLD");
-    const t0 = Date.now();
     const d = w.dispatchFetch(nav());
     expect(await bodyOf(await d.responded)).toBe("OLD");
-    expect(Date.now() - t0).toBeLessThan(90);
-    expect(await w.caches.text(CACHE_NAMES.pages, urlOf(ID))).toBe("OLD"); // not yet
+    expect(await w.caches.text(CACHE_NAMES.pages, urlOf(ID))).toBe("OLD"); // network not released yet
+    releaseNetwork();
     await d.settled();
     expect(await w.caches.text(CACHE_NAMES.pages, urlOf(ID))).toContain("Gec gelen");
     expect(d.waits.length).toBeGreaterThan(0);

@@ -12,6 +12,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:gate": "vitest run --maxWorkers=4",
     "test:watch": "vitest",
     "test:ui": "vitest --ui"
   },

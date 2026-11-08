@@ -16,6 +16,7 @@ import {
 } from "@/lib/clusters/blindspot-feed";
 import {
   BLINDSPOT_LIST_LOOKBACK_DAYS,
+  DEFAULT_PICK_SIZE,
   pickBlindspotList,
   sortBlindspotClaims,
 } from "@/lib/clusters/blindspot-pick";
@@ -126,8 +127,8 @@ export { BLINDSPOT_LIST_LOOKBACK_DAYS };
  * most 3 embed batches. A safety bound, not a sample: a full week held 46.
  */
 export const BLINDSPOT_CANDIDATE_SAFETY_CAP = 150;
-/** Full cards on the page; every other claim is a compact row. */
-const DISPLAY_LIMIT = 30;
+/** Full cards on the page; every other claim is a compact row. The same binding /metodoloji quotes. */
+const DISPLAY_LIMIT = DEFAULT_PICK_SIZE;
 export const EMBED_BATCH_SIZE = 50;
 const DAY_MS = 24 * 3_600_000;
 

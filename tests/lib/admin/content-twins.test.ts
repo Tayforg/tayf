@@ -621,7 +621,9 @@ describe("rescoreContentPairs", () => {
     }));
     const out = rescoreContentPairs(rows);
     expect(out).toHaveLength(10_000);
-  });
+    // Pure CPU over 10,000 pairs: well under the global 10 s alone, but several times slower on a
+    // busy machine, so this one test gets a 30 s timeout.
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { findInlineImgSrc } from "../../../supabase/functions/_shared/rss/inline-image.ts";
+import { expectCpuUnder, expectLinear, rep } from "../../_helpers/linear-time";
+import type { Gen } from "../../_helpers/linear-time";
 
 // ---------------------------------------------------------------------------
 // h26-security-2 (review round 2): findInlineImgSrc replaces
@@ -181,61 +183,61 @@ describe("findInlineImgSrc: picks what the bounded regex picked", () => {
 
 describe("findInlineImgSrc: linear time on hostile bodies", () => {
   const CAP = 50_000;
-  // 10 bodies per case: 0.1-7 ms locally (~35 ms on a shared CI runner at the
-  // worst). The bounded regex this scanner replaced needed 140-170 ms for the same
-  // 10 bodies, so 100 ms keeps ~3x CI headroom and still fails the regression; the
-  // whole-feed budget in normalize.test.ts is the hard guard (22 s+ pre-fix).
-  const BUDGET_MS = 100;
+  // Load-robust (tests/_helpers/linear-time.ts): the guard is how CPU time GROWS over
+  // a body-size ladder (6k .. 50 KB), 10 bodies per timed call, not a wall-clock
+  // number. The 2000 ms ceiling is 20x the old 100 ms budget; the bounded regex
+  // this scanner replaced needed 140-170 ms for the same 10 bodies at the top rung.
+  // The whole-feed budget in normalize.test.ts is the hard guard (22 s+ pre-fix).
+  const BODIES_PER_CALL = 10;
 
-  function timed<T>(fn: () => T): { value: T; ms: number } {
-    const t0 = performance.now();
-    const value = fn();
-    return { value, ms: performance.now() - t0 };
-  }
+  const tenBodies = (body: string): void => {
+    for (let i = 0; i < BODIES_PER_CALL; i++) findInlineImgSrc(body, CAP);
+  };
 
-  const HOSTILE: ReadonlyArray<readonly [string, string]> = [
-    ["12,500 x '<img'", "<img".repeat(12_500)],
-    ["10,000 x '<img '", "<img ".repeat(10_000)],
-    ["8,000 x '<img a'", "<img a".repeat(8_000)],
-    ["5,000 x '<img src=\"'", '<img src="'.repeat(5_000)],
-    ["8,000 x '<img src='", "<img src=".repeat(8_000)],
-    ["'<img ' + 12,000 x 'src='", "<img " + "src=".repeat(12_000)],
-    ["'<img' + 49 KB of '='", "<img" + "=".repeat(49_000)],
-    ["'<img a' + 49 KB of '<'", "<img a" + "<".repeat(49_000)],
-    ["49 KB of '<' then '<img src=\"x\"' without '>'", "<".repeat(49_000) + '<img src="x"'],
-    ["25,000 x 'src=\"'", 'src="'.repeat(10_000)],
-    ["10,000 x '<img src=\"a\"' no '>'", '<img src="a"'.repeat(3_800)],
+  // [label, generator, top rung]. The three "49 KB" rows keep their old size: their affix
+  // ('<img src="x"' after the run of '<') must stay inside the first CAP characters,
+  // otherwise findInlineImgSrc slices the hostile tail off and the top rung measures nothing.
+  const HOSTILE: ReadonlyArray<readonly [string, Gen, number]> = [
+    ["12,500 x '<img'", rep("<img"), CAP],
+    ["10,000 x '<img '", rep("<img "), CAP],
+    ["8,000 x '<img a'", rep("<img a"), CAP],
+    ["5,000 x '<img src=\"'", rep('<img src="'), CAP],
+    ["8,000 x '<img src='", rep("<img src="), CAP],
+    ["'<img ' + 12,000 x 'src='", rep("src=", "<img "), CAP],
+    ["'<img' + 49 KB of '='", rep("=", "<img"), 49_000],
+    ["'<img a' + 49 KB of '<'", rep("<", "<img a"), 49_000],
+    ["49 KB of '<' then '<img src=\"x\"' without '>'", rep("<", "", '<img src="x"'), 49_000],
+    ["25,000 x 'src=\"'", rep('src="'), CAP],
+    ["10,000 x '<img src=\"a\"' no '>'", rep('<img src="a"'), CAP],
   ];
 
-  for (const [label, body] of HOSTILE) {
-    it(`${label} costs < ${BUDGET_MS} ms per 50 KB body`, () => {
-      findInlineImgSrc(body, CAP); // warm up
-      const { ms } = timed(() => {
-        for (let i = 0; i < 10; i++) findInlineImgSrc(body, CAP);
-      });
-      // 10 bodies in the budget => < 10 ms per body; the regex needed 14-17 ms.
-      expect(ms).toBeLessThan(BUDGET_MS);
+  for (const [label, gen, n] of HOSTILE) {
+    it(`${label} scales linearly per 50 KB body`, () => {
+      expectLinear(gen, tenBodies, { n, ceilingMs: 2_000 });
     });
   }
+
+  it("the tail row's top input keeps its hostile tail inside the cap", () => {
+    const top = rep("<", "", '<img src="x"')(49_000);
+    expect(top.length).toBeLessThanOrEqual(CAP);
+    expect(top.endsWith('<img src="x"')).toBe(true);
+  });
 
   it("the 160-item feed total stays far below the 2 s isolate limit", () => {
     const body = "<img".repeat(12_500);
-    const { ms } = timed(() => {
+    // CPU time, not wall time: the isolate limit is a CPU limit too.
+    expectCpuUnder(() => {
       for (let i = 0; i < 160; i++) findInlineImgSrc(body, CAP);
-    });
-    expect(ms).toBeLessThan(150);
+    }, 150);
   });
 
-  it("scales linearly: 8x the input costs far less than 64x the time", () => {
-    const small = "<img ".repeat(1_000);
-    const large = "<img ".repeat(8_000);
-    findInlineImgSrc(small, 1_000_000);
-    const a = timed(() => {
-      for (let i = 0; i < 20; i++) findInlineImgSrc(small, 1_000_000);
-    }).ms;
-    const b = timed(() => {
-      for (let i = 0; i < 20; i++) findInlineImgSrc(large, 1_000_000);
-    }).ms;
-    expect(b).toBeLessThan(Math.max(a * 30, 30));
+  it("scales linearly: 8x the input (5 KB to 40 KB, no cap in the way) costs about 8x the CPU time", () => {
+    expectLinear(
+      rep("<img "),
+      (body) => {
+        for (let i = 0; i < 20; i++) findInlineImgSrc(body, 1_000_000);
+      },
+      { n: 40_000, ceilingMs: 2_000 },
+    );
   });
 });
