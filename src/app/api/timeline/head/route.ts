@@ -17,12 +17,19 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
  * first_published of the newest 50 clusters, nothing else: titles and counts
  * stay out of this public, CDN-cached answer.
  *
- * It reuses `getRecentClusters()`, the SAME "use cache" entry (tag `clusters`,
- * cacheLife `cluster-feed`) that renders the page, called with NO argument.
- * Polling therefore adds zero database reads beyond the page's own
- * revalidation, and the head can never show a cluster the refreshed page
- * cannot. This handler never reads the URL for the same reason as
- * /api/sources: a `?cb=<random>` cache-buster must not mint a cache entry.
+ * It reuses `getRecentClusters()`, the SAME "use cache" entry (tags `clusters`
+ * and `timeline`, cacheLife `cluster-feed`: revalidate 300 s) that feeds the
+ * page, called with NO argument. Polling therefore adds zero database reads
+ * beyond that entry's own revalidation. The head and the page's ISR copy have
+ * independent lifecycles, though: this dynamic route re-reads the entry on every
+ * CDN miss (and each open tab's poll keeps it fresh), while the ISR copy is only
+ * rebuilt when someone requests /timeline after its window, and that request is
+ * itself served the old copy. So the head can show a cluster a just-refreshed
+ * page does not have yet; the pill compensates with one automatic retry (see
+ * src/components/timeline/new-clusters-pill.tsx). This handler never reads the
+ * URL for the same reason as /api/sources: a `?cb=<random>` cache-buster must not
+ * mint a cache entry. It outputs ids and dates only, so the display title the
+ * entry now carries never leaves it.
  *
  * Cache-Control is set on the response (60 s at the CDN, 60 s stale) rather than
  * through a segment config export, which cacheComponents does not allow. A failed

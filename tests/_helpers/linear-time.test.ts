@@ -445,7 +445,9 @@ describe("expectLinear with the real CPU clock", { timeout: 60_000 }, () => {
   it("passes a linear loop", () => {
     const report = expectLinear((n) => n, linear, { n: 16_000, sizes: realSizes, ceilingMs: 20_000, floorMs: 1 });
     expect(report.minMs).toHaveLength(4);
-    expect(report.minMs.every((ms) => ms > 0)).toBe(true);
+    // CPU time of the smallest rung can round to 0 ms on a fast runner (PR #237 CI):
+    // only a negative or non-finite timing is wrong here.
+    expect(report.minMs.every((ms) => Number.isFinite(ms) && ms >= 0)).toBe(true);
   });
 
   it("fails a loop that is over the absolute ceiling", () => {

@@ -19,6 +19,33 @@ export const TIMELINE_POLL_MAX_MS = 960_000;
 /** No delay is ever shorter than this, whatever a header or counter says. */
 export const TIMELINE_POLL_MIN_MS = 60_000;
 
+/**
+ * Wait before the pill's one automatic retry of an unchanged refresh
+ * (h76-timeline-1). A click that lands on a stale ISR copy is served the old
+ * page, and that request starts the rebuild in the background; the next request
+ * after the rebuild gets the new copy. Observed 2026-11-08: stale at 18:41:53Z,
+ * rebuilt by 18:42:12Z (an upper bound; the rebuild time itself was not
+ * measured). 4 s is a pause for the rebuild to land that still reads as one
+ * click. If it has not landed, the pill says so ("unchanged") and the reader
+ * clicks again. A single retry, never a loop.
+ */
+export const TIMELINE_REFRESH_RETRY_MS = 4000;
+
+/** How long the pill's outcome text ("Liste güncellendi" / "Liste henüz güncellenmedi") stays up. */
+export const PILL_STATUS_MS = 6000;
+
+/**
+ * Time left until `deadlineAt`, for re-arming a timer that was cleared while the
+ * page sat in a hidden <Activity> boundary (react-L1): `deadlineAt - now` while
+ * the deadline has not passed (0 exactly at it), and `null` once it has, so the
+ * caller drops the action instead of firing it late. `null` too when either
+ * input is not a finite number: no clock reading, no wait.
+ */
+export function remainingMs(deadlineAt: number, now: number): number | null {
+  if (!Number.isFinite(deadlineAt) || !Number.isFinite(now)) return null;
+  return now <= deadlineAt ? deadlineAt - now : null;
+}
+
 /** The only two fields the public head endpoint exposes. */
 export type TimelineHeadRow = { id: string; first_published: string };
 
@@ -95,6 +122,45 @@ export function countNewClusters(
     fresh.add(row.id);
   }
   return fresh.size;
+}
+
+/**
+ * A fingerprint of what the rendered page shows, for telling whether a
+ * router.refresh() actually brought a different page: the newest
+ * first_published, how many ids, and the ids themselves (the first <= 50 rows,
+ * newest first). A new cluster lands at the top, so it changes the first id, the
+ * length and usually the newest; anything that does not change the list leaves
+ * the string alone. `null` (an empty page) is its own value, and the length sits
+ * between the fields so one id list can never run into another. Pure; does not
+ * mutate `knownIds`.
+ */
+export function pageSignature(
+  newestPublished: string | null,
+  knownIds: readonly string[],
+): string {
+  const newest = newestPublished === null ? "null" : `s:${newestPublished}`;
+  return `${newest}#${knownIds.length}#${knownIds.join(",")}`;
+}
+
+/** What a finished refresh amounts to: `changed`, worth retrying once (`retry`), or `unchanged` for good. */
+export type RefreshOutcome = "changed" | "retry" | "unchanged";
+
+/**
+ * Verdict on a finished router.refresh(), from the page signature before the
+ * click and after the refresh settled. A different signature is `changed`. The
+ * same one on the first attempt is `retry` (the stale ISR copy was served once
+ * and is rebuilding); the same one on the retry is `unchanged`, which the pill
+ * must say out loud instead of confirming a list that did not move. A NaN or
+ * negative `attempt` counts as 0.
+ */
+export function refreshOutcome(
+  before: string,
+  after: string,
+  attempt: number,
+): RefreshOutcome {
+  if (before !== after) return "changed";
+  const n = Number.isNaN(attempt) || attempt < 0 ? 0 : attempt;
+  return n >= 1 ? "unchanged" : "retry";
 }
 
 /** "7 yeni küme", capped at "50+ yeni küme" (the head holds 50 rows). */

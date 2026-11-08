@@ -4,7 +4,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // getRecentClusters was extracted out of src/app/timeline/page.tsx into this
 // module. Harness mirrors search-query.test.ts. The fake `clusters` resolver
 // tells the two reads apart by the select string: `"id"` is the head/exact
-// count read, anything else is the row read.
+// count read, anything else is the row read. The fake `cluster_articles`
+// resolver is the member read of h76-timeline-2 (display titles for clusters
+// whose neutral title is not stored yet); it records every read it receives.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -25,6 +27,12 @@ const fixture = vi.hoisted(() => ({
   countState: null as unknown,
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
+  /** Rows the member read (cluster_articles) returns. */
+  members: [] as unknown[],
+  membersError: null as { message: string } | null,
+  membersThrows: false,
+  /** Builder state of EVERY member read, in order (empty = none was issued). */
+  memberStates: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -42,6 +50,14 @@ const supabaseFake = await vi.hoisted(async () => {
         }
         fixture.lastState = state;
         return { data: fixture.data, error: fixture.error };
+      },
+      cluster_articles: (state) => {
+        fixture.memberStates.push(state);
+        if (fixture.membersThrows) throw new Error("members boom");
+        if (fixture.membersError) {
+          return { data: null, error: fixture.membersError };
+        }
+        return { data: fixture.members, error: null };
       },
     },
   });
@@ -61,6 +77,8 @@ function isCappedClientOpts(opts: unknown): boolean {
 }
 
 import { cacheLife, cacheTag } from "next/cache";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { getRecentClusters, TIMELINE_LIMIT } from "./timeline-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -76,6 +94,17 @@ function mkRow(id: string, firstPublished = "2026-09-18T10:00:00.000Z") {
   };
 }
 
+/**
+ * What a row becomes once the display title is attached: no stored neutral
+ * title and no members, so the title is `title_tr`.
+ */
+function withTitles(rows: unknown[]) {
+  return (rows as Array<{ title_tr: string }>).map((r) => ({
+    ...r,
+    title: r.title_tr,
+  }));
+}
+
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -87,6 +116,10 @@ beforeEach(() => {
   fixture.lastState = null;
   fixture.countState = null;
   fixture.clientOpts = [];
+  fixture.members = [];
+  fixture.membersError = null;
+  fixture.membersThrows = false;
+  fixture.memberStates = [];
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -167,8 +200,11 @@ describe("getRecentClusters result + cache lifetime", () => {
 
     const result = await getRecentClusters();
 
-    expect(result).toEqual({ rows: fixture.data, total: 234 });
-    expect(cacheTag).toHaveBeenCalledWith("clusters");
+    expect(result).toEqual({ rows: withTitles(fixture.data), total: 234 });
+    // h76-timeline-2: the dedicated "timeline" tag lets the headline cron bust
+    // this entry without busting "clusters" (which also tags every per-cluster
+    // story-timeline seenAt entry).
+    expect(cacheTag).toHaveBeenCalledWith("clusters", "timeline");
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
   });
@@ -187,7 +223,7 @@ describe("getRecentClusters result + cache lifetime", () => {
 
     const result = await getRecentClusters();
 
-    expect(result).toEqual({ rows: fixture.data, total: null });
+    expect(result).toEqual({ rows: withTitles(fixture.data), total: null });
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
   });
@@ -198,7 +234,7 @@ describe("getRecentClusters result + cache lifetime", () => {
 
     const result = await getRecentClusters();
 
-    expect(result).toEqual({ rows: fixture.data, total: null });
+    expect(result).toEqual({ rows: withTitles(fixture.data), total: null });
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
   });
@@ -208,7 +244,7 @@ describe("getRecentClusters result + cache lifetime", () => {
     fixture.count = null;
 
     await expect(getRecentClusters()).resolves.toEqual({
-      rows: fixture.data,
+      rows: withTitles(fixture.data),
       total: null,
     });
   });
@@ -264,5 +300,334 @@ describe("getRecentClusters result + cache lifetime", () => {
     // One fetch = one createReaderClient() = one createClient(), shared by
     // the row read and the count read.
     expect(fixture.clientOpts).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h76-timeline-2: /timeline printed the raw outlet headline ("KABİNE'NİN
+// GÜNDEMİ YOĞUN") for a cluster whose neutral title the headline cron had not
+// written yet, and kept printing it after the cron wrote the neutral one. The
+// h42-latency-1 display title (clusterDisplayTitle) had only reached the home
+// feed and the detail page. `row.title` is now that display title, computed
+// inside the `use cache` scope from ONE member read that covers only the rows
+// with no stored neutral title.
+// ---------------------------------------------------------------------------
+
+const KABINE_ID = "37ba6f63-08d2-431f-aee6-51e80e3dd6fa";
+const TAJANI_ID = "757608d3-9d06-41bf-8651-64ebc282fa16";
+const KABINE_RAW = "KABİNE'NİN GÜNDEMİ YOĞUN";
+const TAJANI_RAW =
+  "İtalya Dışişleri Bakanı Tajani: Bilgisayar korsanlarının Rusya yanlısı olduğu açık";
+// What the headline cron stored for them (production, 2026-11-08).
+const KABINE_NEUTRAL =
+  "Kabine’nin gündemi yoğun. Emekli zammı ve fon soruşturması masada";
+const TAJANI_NEUTRAL =
+  "İtalya Dışişleri Bakanı Tajani, siber saldırıları G7 gündemine taşıyacak";
+
+function mkClusterRow(
+  id: string,
+  titleTr: string,
+  neutral: string | null,
+  firstPublished = "2026-11-08T18:30:00.000Z",
+) {
+  return {
+    id,
+    title_tr: titleTr,
+    title_tr_neutral: neutral,
+    article_count: 2,
+    first_published: firstPublished,
+  };
+}
+
+function member(clusterId: string, title: string | null, publishedAt: string) {
+  return {
+    cluster_id: clusterId,
+    articles: { title, published_at: publishedAt },
+  };
+}
+
+// The real members of the two clusters. Deliberately oldest-first: the reader
+// has to order them as the cron does (newest first).
+const KABINE_MEMBERS = [
+  member(KABINE_ID, KABINE_RAW, "2026-11-08T17:46:15Z"),
+  member(
+    KABINE_ID,
+    "Kabine’nin gündemi yoğun! Emekli zammı ve fon soruşturması masada",
+    "2026-11-08T18:28:00Z",
+  ),
+];
+const TAJANI_MEMBERS = [
+  member(TAJANI_ID, TAJANI_RAW, "2026-11-08T18:14:00Z"),
+  member(
+    TAJANI_ID,
+    "İtalya Dışişleri Bakanı Tajani, siber saldırıları G7 gündemine taşıyacak",
+    "2026-11-08T18:14:45Z",
+  ),
+];
+
+function titlesOf(result: Awaited<ReturnType<typeof getRecentClusters>>) {
+  return (result?.rows ?? []).map((r) => r.title);
+}
+
+describe("getRecentClusters display title: stored neutral titles", () => {
+  it("every row has a stored neutral title: title is that title verbatim and NO member read is issued", async () => {
+    fixture.data = [
+      mkClusterRow("c1", "HAM BAŞLIK 1!", "Nötr başlık bir"),
+      mkClusterRow("c2", "HAM BAŞLIK 2!", "Nötr başlık iki"),
+    ];
+    fixture.count = 2;
+
+    const result = await getRecentClusters();
+
+    expect(titlesOf(result)).toEqual(["Nötr başlık bir", "Nötr başlık iki"]);
+    expect(fixture.memberStates).toHaveLength(0);
+    expect(fixture.clientOpts).toHaveLength(1);
+  });
+
+  it("an empty window issues no member read either", async () => {
+    fixture.data = [];
+    fixture.count = 0;
+
+    await getRecentClusters();
+
+    expect(fixture.memberStates).toHaveLength(0);
+  });
+
+  it("keeps every original column on the row and adds title next to them", async () => {
+    fixture.data = [mkClusterRow("c1", "Ham", "Nötr")];
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows[0]).toEqual({
+      id: "c1",
+      title_tr: "Ham",
+      title_tr_neutral: "Nötr",
+      article_count: 2,
+      first_published: "2026-11-08T18:30:00.000Z",
+      title: "Nötr",
+    });
+  });
+});
+
+describe("getRecentClusters display title: no stored neutral title", () => {
+  it("37ba6f63: its 2 real members give the title the cron stored, not the raw ALL-CAPS one", async () => {
+    fixture.data = [mkClusterRow(KABINE_ID, KABINE_RAW, null)];
+    fixture.members = KABINE_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(titlesOf(result)).toEqual([KABINE_NEUTRAL]);
+    expect(result?.rows[0]?.title).not.toBe(KABINE_RAW);
+    // The stored column itself is untouched: nothing is written back.
+    expect(result?.rows[0]?.title_tr_neutral).toBeNull();
+    expect(fixture.memberStates).toHaveLength(1);
+  });
+
+  it("757608d3: its 2 real members give the title the cron stored", async () => {
+    fixture.data = [mkClusterRow(TAJANI_ID, TAJANI_RAW, null)];
+    fixture.members = TAJANI_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(titlesOf(result)).toEqual([TAJANI_NEUTRAL]);
+  });
+
+  it("both clusters come back in ONE read; members of each are grouped by cluster_id", async () => {
+    fixture.data = [
+      mkClusterRow(TAJANI_ID, TAJANI_RAW, null, "2026-11-08T18:34:00.000Z"),
+      mkClusterRow(KABINE_ID, KABINE_RAW, null, "2026-11-08T17:46:15.000Z"),
+    ];
+    // Interleaved on purpose.
+    fixture.members = [
+      TAJANI_MEMBERS[0],
+      KABINE_MEMBERS[0],
+      TAJANI_MEMBERS[1],
+      KABINE_MEMBERS[1],
+    ];
+
+    const result = await getRecentClusters();
+
+    expect(titlesOf(result)).toEqual([TAJANI_NEUTRAL, KABINE_NEUTRAL]);
+    expect(fixture.memberStates).toHaveLength(1);
+  });
+
+  it("a whitespace-only neutral title counts as missing and goes through the member read", async () => {
+    fixture.data = [mkClusterRow(KABINE_ID, KABINE_RAW, "  ")];
+    fixture.members = KABINE_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(titlesOf(result)).toEqual([KABINE_NEUTRAL]);
+    expect(fixture.memberStates).toHaveLength(1);
+  });
+
+  it("an empty-string neutral title counts as missing too", async () => {
+    fixture.data = [mkClusterRow(KABINE_ID, KABINE_RAW, "")];
+    fixture.members = KABINE_MEMBERS;
+
+    expect(titlesOf(await getRecentClusters())).toEqual([KABINE_NEUTRAL]);
+  });
+
+  it("a mixed page: stored rows keep their title, only the missing ones are computed", async () => {
+    fixture.data = [
+      mkClusterRow("c-stored", "HAM", "Saklı nötr başlık"),
+      mkClusterRow(KABINE_ID, KABINE_RAW, null),
+    ];
+    fixture.members = KABINE_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(titlesOf(result)).toEqual(["Saklı nötr başlık", KABINE_NEUTRAL]);
+  });
+
+  it("fewer than 2 usable members: the cron would not title it, so the row keeps title_tr", async () => {
+    fixture.data = [mkClusterRow(KABINE_ID, KABINE_RAW, null)];
+    fixture.members = [KABINE_MEMBERS[0], member(KABINE_ID, null, "2026-11-08T18:00:00Z")];
+
+    expect(titlesOf(await getRecentClusters())).toEqual([KABINE_RAW]);
+  });
+
+  it("a cluster the member read returned nothing for keeps title_tr", async () => {
+    fixture.data = [mkClusterRow(KABINE_ID, KABINE_RAW, null)];
+    fixture.members = [];
+
+    expect(titlesOf(await getRecentClusters())).toEqual([KABINE_RAW]);
+  });
+
+  it("tolerates a null article embed and an array-shaped embed", async () => {
+    fixture.data = [mkClusterRow(KABINE_ID, KABINE_RAW, null)];
+    fixture.members = [
+      { cluster_id: KABINE_ID, articles: null },
+      { cluster_id: KABINE_ID, articles: [KABINE_MEMBERS[0]?.articles] },
+      { cluster_id: KABINE_ID, articles: KABINE_MEMBERS[1]?.articles },
+    ];
+
+    expect(titlesOf(await getRecentClusters())).toEqual([KABINE_NEUTRAL]);
+  });
+
+  it("ignores member rows of a cluster it did not ask about", async () => {
+    fixture.data = [mkClusterRow("c1", "Ham c1", null)];
+    fixture.members = [...KABINE_MEMBERS];
+
+    expect(titlesOf(await getRecentClusters())).toEqual(["Ham c1"]);
+  });
+});
+
+describe("getRecentClusters member read shape", () => {
+  function lastMemberState(): BuilderState {
+    return fixture.memberStates[0] as BuilderState;
+  }
+
+  it("filters .in('cluster_id', ids) on exactly the null or blank-neutral ids, in row order", async () => {
+    fixture.data = [
+      mkClusterRow("c1", "a", null),
+      mkClusterRow("c2", "b", "Saklı"),
+      mkClusterRow("c3", "c", "   "),
+      mkClusterRow("c4", "d", null),
+    ];
+
+    await getRecentClusters();
+
+    expect(fixture.memberStates).toHaveLength(1);
+    const state = lastMemberState();
+    expect(state.table).toBe("cluster_articles");
+    expect(state.in).toEqual([{ col: "cluster_id", vals: ["c1", "c3", "c4"] }]);
+  });
+
+  it("embeds the member article's title and published_at next to cluster_id", async () => {
+    fixture.data = [mkClusterRow("c1", "a", null)];
+
+    await getRecentClusters();
+
+    const select = String(lastMemberState().selectArgs[0]);
+    expect(select).toMatch(/\bcluster_id\b/);
+    expect(select).toMatch(/articles\s*\(\s*title\s*,\s*published_at\s*\)/);
+  });
+
+  it("has a row cap: 50 per asked cluster", async () => {
+    fixture.data = [mkClusterRow("c1", "a", null), mkClusterRow("c2", "b", null)];
+
+    await getRecentClusters();
+
+    expect(lastMemberState().limit).toBe(100);
+  });
+
+  it("caps the member read at 1000 rows however many clusters are missing a title", async () => {
+    fixture.data = Array.from({ length: 30 }, (_, i) => mkClusterRow(`c${i}`, `t${i}`, null));
+
+    await getRecentClusters();
+
+    expect(lastMemberState().limit).toBe(1000);
+    expect((lastMemberState().in[0]?.vals ?? []).length).toBe(30);
+  });
+
+  it("reuses the page's capped reader client (no second client for the member read)", async () => {
+    fixture.data = [mkClusterRow("c1", "a", null)];
+    fixture.count = 1;
+
+    await getRecentClusters();
+
+    expect(fixture.memberStates).toHaveLength(1);
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+});
+
+describe("getRecentClusters member read failure", () => {
+  it("an error from the member read keeps every row, falls back to title_tr and logs; never null", async () => {
+    fixture.data = [
+      mkClusterRow("c1", "Ham bir", null),
+      mkClusterRow("c2", "Ham iki", "Saklı nötr"),
+      mkClusterRow("c3", "Ham üç", null),
+    ];
+    fixture.count = 3;
+    fixture.membersError = { message: "members timed out" };
+
+    const result = await getRecentClusters();
+
+    expect(result).not.toBeNull();
+    expect(result?.rows).toHaveLength(3);
+    expect(result?.total).toBe(3);
+    expect(titlesOf(result)).toEqual(["Ham bir", "Saklı nötr", "Ham üç"]);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("members timed out"),
+    );
+    // The rows are still the page: cached for the normal window, once.
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a member read that throws is contained the same way", async () => {
+    fixture.data = [mkClusterRow("c1", "Ham bir", null), mkClusterRow("c2", "Ham iki", null)];
+    fixture.membersThrows = true;
+
+    const result = await getRecentClusters();
+
+    expect(result).not.toBeNull();
+    expect(titlesOf(result)).toEqual(["Ham bir", "Ham iki"]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("members boom"));
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+  });
+
+  it("a row-read error still wins: null, and no member read is attempted", async () => {
+    fixture.error = { message: "relation missing" };
+    fixture.data = [mkClusterRow("c1", "a", null)];
+
+    await expect(getRecentClusters()).resolves.toBeNull();
+    expect(fixture.memberStates).toHaveLength(0);
+  });
+});
+
+describe("/timeline page renders the display title (source guard)", () => {
+  const page = readFileSync(resolve(__dirname, "../../app/timeline/page.tsx"), "utf8");
+
+  it("no longer coalesces title_tr_neutral and title_tr on its own", () => {
+    expect(page).not.toContain("title_tr_neutral ?? row.title_tr");
+    expect(page).not.toMatch(/row\.title_tr\b/);
+  });
+
+  it("renders row.title as the headline link text", () => {
+    expect(page).toMatch(/\{row\.title\}/);
   });
 });

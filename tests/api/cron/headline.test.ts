@@ -432,10 +432,19 @@ describe("GET /api/cron/headline", () => {
     expect((patch.title_tr_neutral as string).length).toBeGreaterThan(0);
 
     // Cache invalidation: one cluster-detail tag per rewrote cluster, plus
-    // clusters-politics once, both on the "max" cache profile.
+    // clusters-politics and timeline once each, all on the "max" cache profile.
+    // h76-timeline-2: "timeline" is the dedicated tag of the /timeline feed's
+    // `use cache` entry. "clusters" itself is NOT revalidated: it also tags every
+    // per-cluster story-timeline entry, and busting it would add reads on
+    // cluster pages.
     expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:c1", "max");
     expect(revalidateTagMock).toHaveBeenCalledWith("clusters-politics", "max");
-    expect(revalidateTagMock).toHaveBeenCalledTimes(2);
+    expect(revalidateTagMock).toHaveBeenCalledWith("timeline", "max");
+    expect(revalidateTagMock).not.toHaveBeenCalledWith("clusters", "max");
+    expect(revalidateTagMock).toHaveBeenCalledTimes(3);
+    expect(
+      revalidateTagMock.mock.calls.filter((c) => c[0] === "timeline"),
+    ).toHaveLength(1);
     // Happy path: nothing errored, so no Sentry capture.
     expect(captureServerExceptionMock).not.toHaveBeenCalled();
   });
@@ -474,6 +483,9 @@ describe("GET /api/cron/headline", () => {
     expect(body.errored).toBe(1);
     expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
     expect(captureServerExceptionMock).toHaveBeenCalledWith(expect.anything(), { clusterId: "c1", mode: "llm" });
+    // Nothing was written, so nothing is invalidated, /timeline included.
+    expect(revalidateTagMock).not.toHaveBeenCalledWith("timeline", "max");
+    expect(revalidateTagMock).not.toHaveBeenCalled();
   });
 
   it("captures the LLM failure via captureServerException and returns the generic error tag", async () => {
@@ -509,6 +521,7 @@ describe("GET /api/cron/headline", () => {
     );
     expect(res.status).toBe(200);
     expect(revalidateTagMock).not.toHaveBeenCalled();
+    expect(revalidateTagMock).not.toHaveBeenCalledWith("timeline", "max");
   });
 
   it("HEADLINE_PAUSED kill switch: returns {skipped:true, reason:'paused'} and touches no DB", async () => {
