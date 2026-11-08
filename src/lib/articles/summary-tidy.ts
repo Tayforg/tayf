@@ -38,6 +38,8 @@ import {
 //   - a leading "Son dakika |" / "Son dakika haberi:" / "Son dakika haberine
 //     göre," / "Son dakika gelişmesi..." / "Son dakika haberleri..." / "Son dakika
 //     İzmir haberleri..." ticker and a leading list marker ("- ", "• ", "▪️ ")
+//   - a newswire / byline dateline lead: "HABER MERKEZİ- ", "MADRİD (AA) - ",
+//     "BİRLEŞMİŞ MİLLETLER (BM) - ", "İSTANBUL (DHA) –" (h81-textclean-2)
 //   - a trailing "Detaylar haberimizde..." / "İşte ayrıntılar..." sentence
 //   - a "coming soon" placeholder instead of a summary: "Ayrıntılar geliyor..."
 //     / "Detaylar gelecek...", alone or as the first line of a text that goes on
@@ -662,6 +664,170 @@ function stripLeadingNoise(s: string): string {
   return tickers > 0 ? capitalizeFirstWord(out) : out;
 }
 
+// ---------------------------------------------------------------------------
+// Newswire / byline dateline lead (h81-textclean-2). An agency or a desk opens
+// the description with its own dateline, "HABER MERKEZİ- Milli Savunma
+// Bakanlığı, ...", "MADRİD (AA) - İspanya hükümeti, ...", "BİRLEŞMİŞ MİLLETLER
+// (BM) - Türkiye'nin ...", "İSTANBUL (Medyascope) – Abdul El Sayed, ...", and the
+// seed's text reached the cluster Özet and the meta/og description with it
+// (0f44dd5d, 73e7018e, abdfa19a, 74ce1fbf, 2c7591c4, c8d82805; 25 of 10,585
+// multi-member clusters in 36 days, the biggest stories among them).
+//
+// {@link stripDatelineLead} is deliberately STRICTER than the detector in
+// clusters/summary-agreement.ts (AGENCY_DATELINE / CAPITALS_DATELINE, which only
+// decides that a member must not stand in for the seed): a headline word that
+// merely looks like a lead must survive ("ABD-İran gerilimi", "NATO-Rusya hattında",
+// "TÜSİAD-YASED ortak açıklaması", "Fenerbahçe (FB) - Galatasaray (GS) derbisi",
+// "CHP - MHP görüşmesi"). It looks at the very start of the text only, strips at
+// most ONE lead, and takes it in two shapes:
+//
+//   Agency form  "<lead> (<agency>) - ": a lead of at most 40 characters with no
+//     parenthesis, a parenthesised name of 1 to 30 characters that starts with a
+//     letter, a dash. Stripped when the lead has no lower-case letter and at least
+//     two letters ("MADRİD", "BİRLEŞMİŞ MİLLETLER", "İSTANBUL"), or when the
+//     parenthesised name is one of {@link KNOWN_AGENCIES} (compared locale-neutral,
+//     I, İ and ı all folded to i), whatever the lead ("Ankara, 4 Kasım (AA) - ", "Melih
+//     Kiram GEDİK, (DHA) - "). An all-caps lead with a name that is NOT a known agency
+//     needs an agency-like name too: one with no lower-case letter or at most four
+//     characters ("BERLİN (dpa) - ", "BİRLEŞMİŞ MİLLETLER (BM) - "); "AB (Avrupa Birliği) - ",
+//     "PSG (Fransa) - ", "CHP (Cumhuriyet Halk Partisi) - " are a subject and its gloss,
+//     text. "Fenerbahçe (FB) - " has a lower-case lead and an unknown name: text.
+//     A lead that starts with a quotation mark or a blank, or holds a quotation mark,
+//     is a quotation and stays.
+//   Capitals form  "<CAPITALS> - ": an upper-case run (capitals, blanks, ". , ' ’")
+//     of at least four letters, then a dash (one, or two in a row) or a slash.
+//     Stripped when the run has an internal blank (two or more words: "HABER
+//     MERKEZİ- ", "BBC TÜRKÇE – ", "HABER MERKEZİ/"; the dash may be tight, a slash
+//     too), or when the run is ONE word and the separator is an en or em dash with a
+//     blank on both sides ("ANKARA – "), and what follows is not an acronym ("TÜSİAD – YASED"
+//     is a pair). A single word with a tight dash ("NATO-Rusya", "TÜSİAD-YASED"), with a
+//     slash ("ANKARA/İstanbul"), with a blank on one side only or with an ASCII hyphen
+//     ("LASK - Slovan Bratislava", "TRABZONSPOR - Beşiktaş": a fixture; "ANKARA -
+//     İstanbul": a route) is text. A separator with no blank behind it must be
+//     followed by a capitalised word (a capital and a lower-case letter): "HABER
+//     MERKEZİ-Türkiye" goes, "YEKA GES-2026", "BAKIR MADEN-DER" and "İBB, D-100" are
+//     compounds and stay.
+//
+// Known gap: a spaced en dash after ONE capitals word, followed by a capitalised word
+// ("NATO – Rusya ..."), looks exactly like "ANKARA – Bakan ..." and cannot be told
+// apart lexically, so it is stripped like a dateline. Live data (30 days) only holds
+// ANKARA, DW and EVRENSEL in that shape. When the word after the dash is an acronym
+// ("TÜSİAD – YASED") it is a pair and stays; the price is that a rare "ANKARA –
+// ABD’nin ..." dateline is left in place, which is the safe failure.
+//
+// Either way what is left, trimmed, must be at least 20 characters: a lead followed
+// by nothing of substance is the whole text ("HABER MERKEZİ - kısa") and stays. A
+// lower-case first word of the remainder is capitalised ({@link capitalizeFirstWord}).
+// Both patterns are anchored, every quantifier is bounded or sits on a single
+// character class, and the capitals run is at most 41 characters, so the match is
+// linear. The detector keeps flagging the RAW text (summaryDefect), so a
+// dateline-led member still never stands in for the seed.
+// ---------------------------------------------------------------------------
+
+/**
+ * News agencies whose name in a parenthesis in front of a dash makes the lead a
+ * dateline whatever the text in front of it ("Ankara, 4 Kasım (AA) - "). Compared
+ * case-insensitively and locale-neutral, with I, İ and ı all folded to i, so "(aa)",
+ * "(İha)", "(IHA)" and "(XINHUA)" count. "AP" is not listed: it strips only behind an
+ * all-caps lead ("WASHINGTON (AP) - "), not after a mixed-case subject ("Avrupa
+ * Parlamentosu (AP) - ").
+ */
+export const KNOWN_AGENCIES: readonly string[] = [
+  "AA", "DHA", "İHA", "ANKA", "Xinhua", "AFP", "Reuters", "Sputnik", "Medyascope", "BBC", "EFE",
+];
+
+/** `name` folded for the agency comparison: I, İ and ı become i, the rest is lower-cased. */
+function foldAgencyName(name: string): string {
+  return name.replace(/[İIı]/gu, "i").toLowerCase();
+}
+
+const KNOWN_AGENCIES_FOLDED: ReadonlySet<string> = new Set(KNOWN_AGENCIES.map(foldAgencyName));
+
+// The separator is one dash or a doubled one ("(Xinhua) -- Çin Başbakan", f35cc458),
+// never three: the lookahead keeps "---" from leaving a "- " behind.
+const AGENCY_LEAD = /^([^()\n]{0,40})\((\p{L}[^()\n]{0,29})\)\s*[-–—]{1,2}(?![-–—])\s*/u;
+const CAPITALS_LEAD = /^(\p{Lu}[\p{Lu}\s.,'’]{1,40}?)(\s*)([-–—]{1,2}(?![-–—])|\/)(\s*)/u;
+const LOWER_CASE_LETTER = /\p{Ll}/u;
+/** A lead of the agency form starts with a letter or a digit ("MADRİD", "4 Kasım"), never a quote or a bracket. */
+const LEAD_START = /^[\p{L}\p{N}]/u;
+/** A quotation mark inside a lead means the text starts with a quotation, not a dateline. */
+const QUOTE_MARK = /["“”«»‘„]/u;
+const ANY_LETTER_G = /\p{L}/gu;
+/** One or two en or em dashes, no ASCII hyphen. */
+const TYPOGRAPHIC_DASHES = /^[–—]+$/u;
+/** A capital letter and a lower-case one: the start of a capitalised word. */
+const CAPITALISED_WORD_START = /^\p{Lu}\p{Ll}/u;
+/** A capitals run needs this many letters: "ABD-İran" and "CHP - MHP" are not leads. */
+const MIN_CAPITALS_LETTERS = 4;
+/** An all-caps lead in front of a parenthesised agency needs this many letters. */
+const MIN_AGENCY_LEAD_LETTERS = 2;
+/** An unknown parenthesised name with lower-case letters counts as an agency up to this length ("dpa"). */
+const MAX_SHORT_AGENCY_NAME = 4;
+/** What is left after a lead must be at least this long (trimmed), or the lead stays. */
+const MIN_DATELINE_REMAINDER = 20;
+
+/** The number of letters in a short string (a lead is at most 41 characters). */
+function letterCount(s: string): number {
+  return s.match(ANY_LETTER_G)?.length ?? 0;
+}
+
+/** What follows the dateline lead of `s`, or null when `s` does not start with one. */
+function afterDatelineLead(s: string): string | null {
+  const agency = AGENCY_LEAD.exec(s);
+  if (agency !== null) {
+    const lead = agency[1] ?? "";
+    if (lead !== "" && (!LEAD_START.test(lead) || QUOTE_MARK.test(lead))) return null;
+    const rawName = (agency[2] ?? "").trim();
+    const known = KNOWN_AGENCIES_FOLDED.has(foldAgencyName(rawName));
+    const capitalsLead = !LOWER_CASE_LETTER.test(lead) && letterCount(lead) >= MIN_AGENCY_LEAD_LETTERS;
+    // An unknown name behind an all-caps lead must look like an agency ("dpa", "BM"):
+    // "AB (Avrupa Birliği) - " and "PSG (Fransa) - " are a subject and its gloss.
+    const agencyLikeName = !LOWER_CASE_LETTER.test(rawName) || rawName.length <= MAX_SHORT_AGENCY_NAME;
+    if (!known && !(capitalsLead && agencyLikeName)) return null;
+    return s.slice(agency[0].length);
+  }
+
+  const caps = CAPITALS_LEAD.exec(s);
+  if (caps === null) return null;
+  const run = (caps[1] ?? "").trim();
+  if (letterCount(run) < MIN_CAPITALS_LETTERS) return null;
+  const separator = caps[3] ?? "";
+  const blankBefore = (caps[2] ?? "") !== "";
+  const blankAfter = (caps[4] ?? "") !== "";
+  // One word ("ANKARA – ") needs a typographic dash with a blank on both sides: an
+  // ASCII hyphen after one capitals word is a fixture ("LASK - Slovan Bratislava",
+  // "TRABZONSPOR - Beşiktaş"), a route or a compound.
+  const manyWords = /\s/.test(run);
+  const typographicSpacedDash = blankBefore && blankAfter && TYPOGRAPHIC_DASHES.test(separator);
+  if (!manyWords && !typographicSpacedDash) return null;
+  const rest = s.slice(caps[0].length);
+  // An acronym right after ONE capitals word is a pair ("TÜSİAD – YASED"): the safe
+  // failure is a rare "ANKARA – ABD’nin ..." dateline left in place.
+  if (!manyWords && /^\p{Lu}{2}/u.test(rest)) return null;
+  // A separator glued to the next word must be followed by a capitalised word
+  // ("HABER MERKEZİ-Türkiye"); a digit, an acronym or a lower-case word makes it a
+  // compound ("YEKA GES-2026", "BAKIR MADEN-DER", "İBB, D-100").
+  if (!blankAfter && !CAPITALISED_WORD_START.test(rest)) return null;
+  return rest;
+}
+
+/**
+ * `s` without a newswire / byline dateline lead at its very start ("HABER
+ * MERKEZİ- ", "MADRİD (AA) - ", "BİRLEŞMİŞ MİLLETLER (BM) - ", "İSTANBUL
+ * (Medyascope) – ", "Ankara, 4 Kasım (AA) - ", "BBC TÜRKÇE – "), or `s` itself.
+ * At most one lead is stripped. Stricter than the detector in summary-agreement.ts:
+ * see the block comment above for the two shapes, the {@link KNOWN_AGENCIES} list
+ * and the 20-character floor on what is left. A lower-case first word of the
+ * remainder is capitalised with the tr-TR rules ({@link capitalizeFirstWord}).
+ * Pure and linear; a non-string comes back as it is.
+ */
+export function stripDatelineLead(s: string): string {
+  if (typeof s !== "string") return s;
+  const rest = afterDatelineLead(s);
+  if (rest === null || rest.trim().length < MIN_DATELINE_REMAINDER) return s;
+  return capitalizeFirstWord(rest);
+}
+
 /** `s` without a trailing ":" (and the blanks around it), left by a stripped CTA. */
 function dropDanglingColon(s: string): string {
   let end = s.length;
@@ -1180,6 +1346,13 @@ export function stripLeadingStyleRules(description: string): string {
  *      (at most {@link MAX_MARKER_PASSES} in total), in either order; after a
  *      stripped ticker a lower-case first word is capitalised
  *      ({@link capitalizeFirstWord});
+ *   2c. strip a newswire / byline dateline lead at the very start ("HABER MERKEZİ-
+ *      ", "MADRİD (AA) - ", "BİRLEŞMİŞ MİLLETLER (BM) - ", "BBC TÜRKÇE – "), at most
+ *      one, with {@link stripDatelineLead} (h81-textclean-2): an all-caps place or
+ *      desk (optionally with a parenthesised agency) or a known agency in
+ *      parentheses, then a dash; "ABD-İran gerilimi", "NATO-Rusya", "CHP - MHP" and a
+ *      lead with under 20 characters behind it are text. The detector in
+ *      summary-agreement.ts keeps reading the RAW text;
  *   3. strip a trailing "Devamı için tıklayınız" / "Read more »" /
  *      "Detaylar haberimizde" / "İşte ayrıntılar" / "İşte merak edilen tüm
  *      detaylar" / "Ayrıntılar birazdan" style CTA, repeatedly (at most
@@ -1216,7 +1389,8 @@ export function stripLeadingStyleRules(description: string): string {
  * Returns "" when nothing but residue was there (a footer-only text included);
  * the caller then hides the summary. Idempotent for any input with at most
  * {@link MAX_CTA_PASSES} stacked CTAs, {@link MAX_TICKER_PASSES} stacked
- * tickers and {@link MAX_MARKER_PASSES} stacked list markers, whose footer, if
+ * tickers, {@link MAX_MARKER_PASSES} stacked list markers and one dateline lead
+ * (a second one is stripped by the next call), whose footer, if
  * any, is not followed by a CTA (a footer is recognised only at the very end of
  * the text), and which has no Diken-style header after its first line (the
  * header is found before the newlines are collapsed, so such a line is a header
@@ -1277,6 +1451,11 @@ export function tidySummaryText(s: string): string {
 
   // 2b. Leading "Son dakika |" / "Son dakika haberi:" ticker and "- " marker.
   out = stripLeadingNoise(out);
+
+  // 2c. A newswire / byline dateline lead ("HABER MERKEZİ- ", "MADRİD (AA) - ";
+  //     h81-textclean-2), after the ticker so that "Son dakika | ANKARA (AA) - ..."
+  //     is handled too. At most one lead.
+  out = stripDatelineLead(out);
 
   // 3. Trailing CTA, to a fixed point. "Gelişmeler şöyle: Detaylar haberimizde"
   //    would otherwise keep its colon.

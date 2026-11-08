@@ -7,6 +7,8 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 import { cleanDescription, stripTrailingTeasers } from "../../../supabase/functions/_shared/cluster/description-clean";
 import {
   backOffOpenQuote,
+  KNOWN_AGENCIES,
+  stripDatelineLead,
   stripLeadingStyleRules,
   tidySummaryText,
   trimDanglingEnd,
@@ -1258,7 +1260,8 @@ describe("tidySummaryText ordinals and title abbreviations at a clamp (h23-live-
   it("dec5e1a6: does not end on '(TDT) 13.'; it ends at the previous real sentence end", () => {
     const out = tidySummaryText(RAW_DEC5);
     expect(out).not.toMatch(/\d{1,3}\.$/);
-    expect(out).toBe("HABER MERKEZİ - Başkent Ankara, Türk Devletleri Teşkilatı'nın (TDT) 13. zirvesine ev sahipliği yapıyor. Cumhurbaşkanı Erdoğan'ın \"Türk dünyası olarak sarsılmaz kardeşliğimize dinamit koymak isteyenlerin karşısına inanıyorum ki yine birlik ve beraberlikle dikileceğiz.\" sözleriyle dikkat çektiği Türk Devletleri Teşkilatı 13. Zirvesi'ne katılacak liderler Türkiye'ye geldi.");
+    // h81-textclean-2: the "HABER MERKEZİ - " dateline is no longer shown.
+    expect(out).toBe("Başkent Ankara, Türk Devletleri Teşkilatı'nın (TDT) 13. zirvesine ev sahipliği yapıyor. Cumhurbaşkanı Erdoğan'ın \"Türk dünyası olarak sarsılmaz kardeşliğimize dinamit koymak isteyenlerin karşısına inanıyorum ki yine birlik ve beraberlikle dikileceğiz.\" sözleriyle dikkat çektiği Türk Devletleri Teşkilatı 13. Zirvesi'ne katılacak liderler Türkiye'ye geldi.");
     expect(out.endsWith("liderler Türkiye'ye geldi.")).toBe(true);
   });
 
@@ -1688,7 +1691,7 @@ describe("tidySummaryText h23 idempotence and robustness", () => {
   const OUTPUT_FIXTURES: readonly string[] = [
     "Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu. Konuşmasına katılımcıları selamlayarak başlayan Erdoğan, \"Dün Cumhuriyetimizin 103'üncü yıl dönümünü sizlerin katılımıyla…",
     "Cumhurbaşkanı Recep Tayyip Erdoğan, Beştepe Millet Sergi Salonu'nda 29 Ekim Cumhuriyet Bayramı ve TDT Zirvesi dolayısıyla konuk devlet başkanlarını ağırladı. Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları: Mustafa Kemal Atatürk başta olmak üzere milli mücadeleyi sevk ve idare eden tüm kadroları, tüm şehitlerimizi, gazilerimizi, Meclisimizin o dönemdeki muhterem mensuplarını rahmetle, minnetle yâd ediyorum.",
-    "HABER MERKEZİ - Başkent Ankara, Türk Devletleri Teşkilatı'nın (TDT) 13. zirvesine ev sahipliği yapıyor. Cumhurbaşkanı Erdoğan'ın \"Türk dünyası olarak sarsılmaz kardeşliğimize dinamit koymak isteyenlerin karşısına inanıyorum ki yine birlik ve beraberlikle dikileceğiz.\" sözleriyle dikkat çektiği Türk Devletleri Teşkilatı 13. Zirvesi'ne katılacak liderler Türkiye'ye geldi.",
+    "Başkent Ankara, Türk Devletleri Teşkilatı'nın (TDT) 13. zirvesine ev sahipliği yapıyor. Cumhurbaşkanı Erdoğan'ın \"Türk dünyası olarak sarsılmaz kardeşliğimize dinamit koymak isteyenlerin karşısına inanıyorum ki yine birlik ve beraberlikle dikileceğiz.\" sözleriyle dikkat çektiği Türk Devletleri Teşkilatı 13. Zirvesi'ne katılacak liderler Türkiye'ye geldi.",
     "Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪\uFE0F Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî Trump…",
     "\"Kadınların toplum hayatında güçlü ve etkin konumları olması, medeniyet coğrafyamıza yabancı bir tecrübe değildir. Yapmamız gereken, bu tecrübeyi toplumlarımızın kültürel hassasiyetleriyle, öncelikleriyle ve sosyal gerçeklikleriyle örtüşen, Türk dünyasına özgü bir perspektife dönüştürmektir\" \"Konseyimizin kalıcı bir işbirliği zemini olmasını hedefliyoruz. Bugün Ankara'da Konseyimizin ilk adımlarını sizlerle birlikte atmış olduk.",
     "Partiden yapılan açıklamaya göre, AK Parti Kültür ve Sanat Politikaları Başkanlığı ile Teşkilat Başkanlığı işbirliğinde \"Kuruluşunun 25. İktidara Gelişinin 24. Yılında AK Parti\" paneli yapılacak. AK Parti Genel Merkezi'nde 3 Kasım Salı günü gerçekleştirilecek panelin moderatörlüğünü Genel Başkan Yardımcısı ve Kültür ve Sanat Politikaları Başkanı Hüseyin Yayman üstlenecek.",
@@ -4484,5 +4487,414 @@ describe("stripLeadingStyleRules (h48-ingest-1, Elips Haber)", () => {
     stripLeadingStyleRules("a { " + ";".repeat(100_000) + " } Metin");
     stripLeadingStyleRules("a { " + "x".repeat(100_000));
     expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe("tidySummaryText dateline lead (h81-textclean-2)", () => {
+  // Real shapes from the cluster Özet of 2026-11-08 (0f44dd5d, 73e7018e, abdfa19a,
+  // 74ce1fbf, 2c7591c4, c8d82805) and the Medyascope fixture of h31-reader-3.
+  it.each<readonly [string, string, string]>([
+    [
+      "an all-caps desk glued to a dash",
+      "HABER MERKEZİ- Milli Savunma Bakanlığı, askerlik görevini yerine getirecek yükümlülerin sınıflandırma sonuçlarını açıkladı.",
+      "Milli Savunma Bakanlığı, askerlik görevini yerine getirecek yükümlülerin sınıflandırma sonuçlarını açıkladı.",
+    ],
+    [
+      "an all-caps desk with the dash glued to the text",
+      "HABER MERKEZİ-Türkiye ile Güney Kore arasında ticaret hacmini artıracak yeni bir anlaşma imzalandı.",
+      "Türkiye ile Güney Kore arasında ticaret hacmini artıracak yeni bir anlaşma imzalandı.",
+    ],
+    [
+      "an all-caps desk with a spaced dash",
+      "HABER MERKEZİ - Cumhurbaşkanı Başdanışmanı Mehmet Uçum, yeni anayasa tartışmalarına ilişkin açıklamalarda bulundu.",
+      "Cumhurbaşkanı Başdanışmanı Mehmet Uçum, yeni anayasa tartışmalarına ilişkin açıklamalarda bulundu.",
+    ],
+    [
+      "a city and the agency",
+      "MADRİD (AA) - İspanya hükümeti, ülkenin güneyindeki orman yangınlarına karşı olağanüstü hal ilan etti.",
+      "İspanya hükümeti, ülkenin güneyindeki orman yangınlarına karşı olağanüstü hal ilan etti.",
+    ],
+    [
+      "a two-word place and a parenthesised abbreviation that is no known agency",
+      "BİRLEŞMİŞ MİLLETLER (BM) - Türkiye'nin BM Daimi Temsilcisi, Gazze'deki insani durumun kötüleştiğini söyledi.",
+      "Türkiye'nin BM Daimi Temsilcisi, Gazze'deki insani durumun kötüleştiğini söyledi.",
+    ],
+    [
+      "a city and Medyascope with an en dash",
+      "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ABD'de Senato'ya seçilen ilk Müslüman oldu.",
+      "Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ABD'de Senato'ya seçilen ilk Müslüman oldu.",
+    ],
+    [
+      "a mixed-case place, a date and a known agency",
+      "Ankara, 4 Kasım (AA) - Bakan Yılmaz, yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı.",
+      "Bakan Yılmaz, yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı.",
+    ],
+    [
+      "a two-word desk and an en dash",
+      "BBC TÜRKÇE – ABD ara seçimlerinde Demokratlar Temsilciler Meclisi'nde çoğunluğu kazandı.",
+      "ABD ara seçimlerinde Demokratlar Temsilciler Meclisi'nde çoğunluğu kazandı.",
+    ],
+    [
+      "an all-caps desk and a slash",
+      "HABER MERKEZİ/Yaz aylarında artan elektrik tüketimi nedeniyle olası kesintilere karşı uyarı yapıldı.",
+      "Yaz aylarında artan elektrik tüketimi nedeniyle olası kesintilere karşı uyarı yapıldı.",
+    ],
+    [
+      "a place with the İHA agency",
+      "İSTANBUL (İHA) – Sarıyer'de sabah saatlerinde çıkan yangın itfaiye ekiplerinin müdahalesiyle söndürüldü.",
+      "Sarıyer'de sabah saatlerinde çıkan yangın itfaiye ekiplerinin müdahalesiyle söndürüldü.",
+    ],
+    [
+      "a place, a comma and the agency",
+      "GÜNEY KORE, (DHA) - CUMHURBAŞKANI Recep Tayyip Erdoğan'ın eşi Emine Erdoğan açılışı yaptı ve konuştu.",
+      "CUMHURBAŞKANI Recep Tayyip Erdoğan'ın eşi Emine Erdoğan açılışı yaptı ve konuştu.",
+    ],
+    [
+      "a byline before the agency",
+      "Melih Kiram GEDİK, (DHA) - ESKİ ABD Başkanı Barack Obama, Kongre ara seçimlerinin ardından konuştu.",
+      "ESKİ ABD Başkanı Barack Obama, Kongre ara seçimlerinin ardından konuştu.",
+    ],
+    [
+      "one single-word place with a spaced dash on both sides",
+      "ANKARA – Demokrat Parti'nin Michigan adayı Abdul el-Sayed seçimleri kazanarak Senato'ya seçildi.",
+      "Demokrat Parti'nin Michigan adayı Abdul el-Sayed seçimleri kazanarak Senato'ya seçildi.",
+    ],
+    [
+      "the agency name in lower case still counts as the agency",
+      "Ankara, 4 Kasım (aa) - Bakan Yılmaz, yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı.",
+      "Bakan Yılmaz, yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı.",
+    ],
+    [
+      "a ticker in front of the lead: 'Son dakika | ' goes first, then the dateline",
+      "Son dakika | ANKARA (AA) - Bakan Yılmaz, yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı.",
+      "Bakan Yılmaz, yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı.",
+    ],
+    [
+      "a byline, a slash and an agency (DHA, no blank anywhere)",
+      "Emre ÖNCEL/SAMSUN, (DHA)-Samsun'un Atakum ilçesinde sabah saatlerinde çıkan yangında 3 kişi dumandan etkilendi.",
+      "Samsun'un Atakum ilçesinde sabah saatlerinde çıkan yangında 3 kişi dumandan etkilendi.",
+    ],
+    [
+      "two bylines joined by a hyphen, a slash and an agency",
+      "Aliekber METE-Muhammet BAYRAM/ANKARA, (DHA)-Cumhurbaşkanı Erdoğan, Güney Kore ziyaretini tamamlayarak yurda döndü.",
+      "Cumhurbaşkanı Erdoğan, Güney Kore ziyaretini tamamlayarak yurda döndü.",
+    ],
+    [
+      "a place glued to the agency in parentheses",
+      "DÜZCE(İHA) – Düzce'nin Akçakoca ilçesinde sağanak nedeniyle dere taştı, bazı yollar ulaşıma kapandı.",
+      "Düzce'nin Akçakoca ilçesinde sağanak nedeniyle dere taştı, bazı yollar ulaşıma kapandı.",
+    ],
+    [
+      "an author in capitals and a slash (Evrensel, Açık Gazete)",
+      "MEHTAP GÖKDEMİR / Yeni Parti kaynakları, iddiaların tamamen asılsız olduğunu belirterek açıklama yaptı bugün.",
+      "Yeni Parti kaynakları, iddiaların tamamen asılsız olduğunu belirterek açıklama yaptı bugün.",
+    ],
+    [
+      "an author in capitals and a spaced hyphen",
+      "MELTEM GÜNEŞ - Eğitim-Sen, yeni müfredatın öğretmenlerin görüşü alınmadan hazırlandığını söyleyerek tepki gösterdi.",
+      "Eğitim-Sen, yeni müfredatın öğretmenlerin görüşü alınmadan hazırlandığını söyleyerek tepki gösterdi.",
+    ],
+    [
+      "a Xinhua lead with a city, a date and a double hyphen",
+      "SHANGHAİ, 3 Kasım (Xinhua) -- Çin'in Şanghay kentinde düzenlenen fuara 150'den fazla ülke ve bölgeden firma katıldı.",
+      "Çin'in Şanghay kentinde düzenlenen fuara 150'den fazla ülke ve bölgeden firma katıldı.",
+    ],
+    [
+      "a single capitals word with an en dash on both sides",
+      "EVRENSEL – Türkiye, Pakistan ve Suudi Arabistan arasında imzalanan Mekke Anlaşması, TBMM Genel Kurulu'nda tartışıldı.",
+      "Türkiye, Pakistan ve Suudi Arabistan arasında imzalanan Mekke Anlaşması, TBMM Genel Kurulu'nda tartışıldı.",
+    ],
+    [
+      "a double hyphen (Xinhua, f35cc458: the dash must not leave a '- ' behind)",
+      "BEİJİNG, 7 Kasım (Xinhua) -- Çin Başbakan Yardımcısı ve Çin'in ABD ile ekonomi ve ticaret alanındaki başmüzakerecisi görüştü.",
+      "Çin Başbakan Yardımcısı ve Çin'in ABD ile ekonomi ve ticaret alanındaki başmüzakerecisi görüştü.",
+    ],
+    [
+      "a double hyphen after a desk",
+      "HABER MERKEZİ -- Milli Savunma Bakanlığı, askerlik görevini yerine getirecek yükümlülerin sonuçlarını açıkladı.",
+      "Milli Savunma Bakanlığı, askerlik görevini yerine getirecek yükümlülerin sonuçlarını açıkladı.",
+    ],
+    [
+      "a lower-case first word after the lead gets its capital (tr-TR)",
+      "ANKARA (AA) - ilk yerli elektrikli otomobil için seri üretim hattı bu yıl devreye alınacak.",
+      "İlk yerli elektrikli otomobil için seri üretim hattı bu yıl devreye alınacak.",
+    ],
+  ])("strips the lead: %s", (_label, raw, expected) => {
+    expect(tidySummaryText(raw)).toBe(expected);
+    // Idempotent: the result carries no second lead.
+    expect(tidySummaryText(expected)).toBe(expected);
+  });
+
+  it("strips the lead from a text with line breaks too (the lines are joined first)", () => {
+    expect(
+      tidySummaryText(
+        "HABER MERKEZİ- Milli Savunma Bakanlığı, sınıflandırma sonuçlarını açıkladı.\nYükümlüler sonuçlara e-Devlet üzerinden bakabilecek.",
+      ),
+    ).toBe(
+      "Milli Savunma Bakanlığı, sınıflandırma sonuçlarını açıkladı. Yükümlüler sonuçlara e-Devlet üzerinden bakabilecek.",
+    );
+  });
+
+  // Shapes that are NOT a dateline: they must come out exactly as the text without
+  // this step would (here every one of them is already tidy, so unchanged).
+  it.each<readonly [string, string]>([
+    ["an acronym pair with a tight dash", "ABD-İran gerilimi sürüyor ve iki ülke arasındaki müzakereler yeniden askıya alındı."],
+    ["NATO-Rusya with a tight dash", "NATO-Rusya hattında yeni gerilim yaşanıyor, ittifak doğu kanadındaki varlığını artırıyor."],
+    ["two acronyms with a tight dash", "TÜSİAD-YASED ortak açıklaması yapıldı, iş dünyası yeni ekonomik programdan beklentilerini sıraladı."],
+    ["two clubs with their abbreviations", "Fenerbahçe (FB) - Galatasaray (GS) derbisi bu akşam oynanacak, iki takımın kadrosu belli oldu."],
+    ["a three-letter acronym and a spaced dash", "CHP - MHP görüşmesi sona erdi, iki parti yeni anayasa konusunda ortak açıklama yapmadı."],
+    ["a lead whose remainder is shorter than 20 characters", "HABER MERKEZİ - kısa"],
+    ["a sentence that starts with a capitalised word", "Ankara - İstanbul hızlı tren hattında seferler yeniden başladı ve yolcular bilet alabiliyor."],
+    ["an all-caps acronym used as the subject", "AK Parti Genel Başkanı yeni anayasa çalışmalarının Meclis'te sürdüğünü ve hızlanacağını söyledi."],
+    ["a quotation that starts the text", '"HABER MERKEZİ - Bakanlık açıklaması" başlıklı haber sosyal medyada hızla yayıldı ve tartışıldı.'],
+    ["a dash after lower-case words", "Bakan açıkladı - yeni karar bugün Resmi Gazete'de yayımlanarak yürürlüğe girdi ve uygulanacak."],
+    ["a parenthesised age", "Mehmet Yılmaz (74) - uzun yıllardır görev yaptığı kurumdan emekli oldu ve veda konuşması yaptı."],
+    ["a parenthesis with no dash", "Türk Devletleri Teşkilatı (TDT) gözlemci üyelik için başvuru koşullarını açıkladı ve duyurdu."],
+    ["a single capitals word with a tight dash and a slash", "ANKARA/İstanbul hattında çalışan yüksek hızlı trenlerin seferleri bu hafta sonu iptal edildi."],
+    ["a single capitals word with no space after the dash", "ANKARA –Demokrat Parti'nin Michigan adayı seçimleri kazanarak Senato'ya seçildi ve konuştu."],
+    ["a single capitals word with no space before the dash", "ANKARA- Demokrat Parti'nin Michigan adayı seçimleri kazanarak Senato'ya seçildi ve konuştu."],
+    ["a lower-case lead and an unknown abbreviation", "Bakan Yılmaz (FB) - Galatasaray derbisi öncesinde takımları ziyaret edip başarılar diledi."],
+    ["a parenthesised word with no place in front of it", "(Video) - Bakan Yılmaz yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı bugün."],
+    ["an acronym with a tight slash", "TBMM/AB ilişkileri yeniden gündemde, komisyon üyeleri Brüksel'de temaslarda bulunacak."],
+    // Real rows of the 12-day replay (2026-10-28 to 2026-11-08) that the first cut of the capitals form took for a
+    // lead: a club in front of its fixture, a programme name and an association glued to a number or an acronym.
+    ["a club in front of its fixture (LASK)", "LASK - Slovan Bratislava karşılaşmasında LASK, 48. dakikada Samuel Adeniran ile golü buldu. Bu golle fark ikiye çıktı."],
+    ["a club in front of its fixture (TRABZONSPOR)", "TRABZONSPOR - Beşiktaş arasında 22 Ekim’de oynanan futbol maçında oğlu Kuzey Aydın ile Trabzonspor formasıyla sahada yer aldı."],
+    ["a three-letter club in front of its fixture (PSV)", "PSV - Club Brugge karşılaşmasında Club Brugge, 65. dakikada Hans Vanaken ile golü buldu ve öne geçti."],
+    ["a programme name glued to its year (YEKA GES-2026)", "YEKA GES-2026 yarışmalarında 785 MWe kapasiteli 11 proje için en iyi teklifleri veren firmalar belli oldu."],
+    ["an association glued to a union (BAKIR MADEN-DER)", "BAKIR MADEN-DER Başkanı Süleyman Deniz Seyrek, 2024'te tescillenen Elazığ Maden'deki Eski Sordar Köprüsü için açıklama yaptı."],
+    ["a motorway number after a comma (İBB, D-100)", "İBB, D-100 İncirli Köprüsü’nde depreme karşı güçlendirme, Marmaray hattı üzerindeki köprüde ise yenileme çalışması yapacak."],
+    ["a two-word run glued to an acronym", "HABER MERKEZİ-ABD'nin yeni yaptırımları sonrasında piyasalarda hareketlilik yaşandı ve kurlar yükseldi."],
+    ["a two-word run glued to a digit", "HABER MERKEZİ-3 kişinin öldüğü kazada sürücü tutuklandı, kazanın nedeni araştırılıyor ve rapor bekleniyor."],
+    ["a single capitals word with an ASCII hyphen on both sides", "ANKARA - İstanbul hızlı tren hattında seferler yeniden başladı ve yolcular bilet alabiliyor bugün."],
+    // A parenthesised word that is a name, a country or a gloss, not an agency, after an all-caps subject, and a
+    // spaced en dash between two acronyms: the sentence subject must stay in the Özet.
+    ["an acronym and its expansion in a parenthesis (AB)", "AB (Avrupa Birliği) - Türkiye ilişkilerinde yeni dönem başlıyor."],
+    ["a club and its country in a parenthesis (PSG)", "PSG (Fransa) - Bayern Münih (Almanya) maçı bu akşam oynanacak."],
+    ["a club and its country in a parenthesis (LASK)", "LASK (Avusturya) - Slovan Bratislava (Slovakya) maçı bu akşam oynanacak."],
+    ["a party and its expansion in a parenthesis (CHP)", "CHP (Cumhuriyet Halk Partisi) - MHP görüşmesi bugün gerçekleşti."],
+    ["a mixed-case subject and AP as an abbreviation", "Avrupa Parlamentosu (AP) - Türkiye Karma Parlamento Komisyonu toplandı."],
+    ["two acronyms with a spaced en dash (TÜSİAD – YASED)", "TÜSİAD – YASED ortak açıklaması bugün yayımlandı ve sektör bekliyor."],
+  ])("leaves %s alone", (_label, raw) => {
+    expect(tidySummaryText(raw)).toBe(raw);
+  });
+
+  it("strips at most one lead per call: a second one is left for the next call", () => {
+    // At most ONE lead per call (the documented exception to idempotence).
+    expect(stripDatelineLead("HABER MERKEZİ - ANKARA - Bakan Yılmaz yeni yatırım teşvik paketini açıkladı.")).toBe(
+      "ANKARA - Bakan Yılmaz yeni yatırım teşvik paketini açıkladı.",
+    );
+    // The agency form may hold a dash in its lead, so it takes "<desk> - <place> (AA) - " as one lead.
+    expect(stripDatelineLead("BBC TÜRKÇE - İSTANBUL (AA) - Bakan Yılmaz yeni yatırım teşvik paketini açıkladı.")).toBe(
+      "Bakan Yılmaz yeni yatırım teşvik paketini açıkladı.",
+    );
+  });
+});
+
+describe("stripDatelineLead (h81-textclean-2)", () => {
+  const BODY = "Bakan Yılmaz, yeni yatırım teşvik paketinin ayrıntılarını kamuoyuyla paylaştı.";
+
+  it("exports the known agencies the spec lists", () => {
+    expect([...KNOWN_AGENCIES]).toEqual([
+      "AA", "DHA", "İHA", "ANKA", "Xinhua", "AFP", "Reuters", "Sputnik", "Medyascope", "BBC", "EFE",
+    ]);
+  });
+
+  it.each(KNOWN_AGENCIES.map((a) => [a] as const))("a lower-case place and %s: the agency form strips", (agency) => {
+    expect(stripDatelineLead(`Ankara, 4 Kasım (${agency}) - ${BODY}`)).toBe(BODY);
+  });
+
+  // The comparison is locale-neutral: I, İ and ı all fold to i, so an agency written in capitals
+  // ("IHA" lower-cases to "ıha" under tr-TR, "XINHUA" to "xınhua") is still the listed agency.
+  it.each(["IHA", "XINHUA", "SPUTNIK", "REUTERS", "İHA", "iha", "Xinhua"])(
+    "a lower-case place and the agency spelled %s in any case: the agency form strips",
+    (agency) => {
+      expect(stripDatelineLead(`Düzce, 4 Kasım (${agency}) - ${BODY}`)).toBe(BODY);
+    },
+  );
+
+  it("an all-caps lead needs an agency-like name: a short one or one with no lower-case letter, or a known agency", () => {
+    // Controls that keep stripping.
+    expect(stripDatelineLead(`WASHINGTON (AP) - ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`BERLİN (dpa) - ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`BİRLEŞMİŞ MİLLETLER (BM) - ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`ANKARA – ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`EVRENSEL – ${BODY}`)).toBe(BODY);
+    // A long mixed-case name is an expansion or a country, not an agency.
+    for (const name of ["Avrupa Birliği", "Fransa", "Avusturya", "Cumhuriyet Halk Partisi"]) {
+      const raw = `AB (${name}) - ${BODY}`;
+      expect(stripDatelineLead(raw)).toBe(raw);
+    }
+    // AP is no longer a known agency: it strips only behind an all-caps lead.
+    expect(stripDatelineLead(`Avrupa Parlamentosu (AP) - ${BODY}`)).toBe(`Avrupa Parlamentosu (AP) - ${BODY}`);
+  });
+
+  it("an acronym after a single capitals word is a pair: TÜSİAD – YASED stays, ANKARA – Bakan goes", () => {
+    const pair = "TÜSİAD – YASED ortak açıklaması bugün yayımlandı ve sektör bekliyor.";
+    expect(stripDatelineLead(pair)).toBe(pair);
+    expect(stripDatelineLead(`NATO — ABD ve Türkiye arasındaki görüşme bugün yapıldı ve sürdü.`)).toBe(
+      `NATO — ABD ve Türkiye arasındaki görüşme bugün yapıldı ve sürdü.`,
+    );
+    expect(stripDatelineLead(`ANKARA – ${BODY}`)).toBe(BODY);
+    // A run of two words is still a dateline in front of an acronym.
+    expect(stripDatelineLead(`HABER MERKEZİ – ABD'nin yeni yaptırımları sonrasında piyasalarda hareketlilik yaşandı.`)).toBe(
+      "ABD'nin yeni yaptırımları sonrasında piyasalarda hareketlilik yaşandı.",
+    );
+  });
+
+  it("an agency that is not on the list needs a lead without lower-case letters", () => {
+    expect(stripDatelineLead(`BERLİN (dpa) - ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`Berlin (dpa) - ${BODY}`)).toBe(`Berlin (dpa) - ${BODY}`);
+    expect(stripDatelineLead(`Melih Kiram GEDİK (dpa) - ${BODY}`)).toBe(`Melih Kiram GEDİK (dpa) - ${BODY}`);
+  });
+
+  it("an agency in front of the dash with no place at all is a lead too, a plain parenthesised word is not", () => {
+    expect(stripDatelineLead(`(AA) - ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`(Video) - ${BODY}`)).toBe(`(Video) - ${BODY}`);
+    expect(stripDatelineLead(`A (BM) - ${BODY}`)).toBe(`A (BM) - ${BODY}`);
+  });
+
+  it("a single capitals word needs an en or em dash with a blank on both sides: an ASCII hyphen is a fixture, a pair or a compound", () => {
+    expect(stripDatelineLead(`ANKARA – ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`ANKARA — ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`ANKARA - ${BODY}`)).toBe(`ANKARA - ${BODY}`);
+    expect(stripDatelineLead(`ANKARA -- ${BODY}`)).toBe(`ANKARA -- ${BODY}`);
+    expect(stripDatelineLead(`LASK - ${BODY}`)).toBe(`LASK - ${BODY}`);
+    expect(stripDatelineLead(`TRABZONSPOR - ${BODY}`)).toBe(`TRABZONSPOR - ${BODY}`);
+    // A run of two words keeps the ASCII hyphen: "HABER MERKEZİ - ", "MELTEM GÜNEŞ - ".
+    expect(stripDatelineLead(`HABER MERKEZİ - ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`MELTEM GÜNEŞ - ${BODY}`)).toBe(BODY);
+  });
+
+  it("a separator glued to the next word needs a capitalised word behind it: a digit or an acronym makes a compound", () => {
+    expect(stripDatelineLead(`HABER MERKEZİ-Türkiye ile Güney Kore arasında yeni anlaşma imzalandı.`)).toBe(
+      "Türkiye ile Güney Kore arasında yeni anlaşma imzalandı.",
+    );
+    expect(stripDatelineLead(`HABER MERKEZİ -Türkiye ile Güney Kore arasında yeni anlaşma imzalandı.`)).toBe(
+      "Türkiye ile Güney Kore arasında yeni anlaşma imzalandı.",
+    );
+    expect(stripDatelineLead(`HABER MERKEZİ/İstanbul'da bugün sağanak yağış etkili oldu ve trafik durdu.`)).toBe(
+      "İstanbul'da bugün sağanak yağış etkili oldu ve trafik durdu.",
+    );
+    for (const glued of [
+      "YEKA GES-2026 yarışmalarında 785 MWe kapasiteli 11 proje için teklifler belli oldu.",
+      "BAKIR MADEN-DER Başkanı Süleyman Deniz Seyrek açıklama yaptı ve basına konuştu bugün.",
+      "İBB, D-100 İncirli Köprüsü'nde depreme karşı güçlendirme çalışması yapacak, dedi.",
+      "HABER MERKEZİ-ABD'nin yeni yaptırımları sonrasında piyasalarda hareketlilik yaşandı.",
+      "HABER MERKEZİ-3 kişinin öldüğü kazada sürücü tutuklandı ve kazanın nedeni araştırılıyor.",
+      "HABER MERKEZİ-bakan açıkladı ve yeni düzenlemenin ayrıntıları kamuoyuyla paylaşıldı bugün.",
+      'HABER MERKEZİ-"Bakan açıkladı" ve yeni düzenlemenin ayrıntıları kamuoyuyla paylaşıldı bugün.',
+    ]) {
+      expect(stripDatelineLead(glued)).toBe(glued);
+    }
+    // With a blank behind the separator the next word may be anything.
+    expect(stripDatelineLead(`HABER MERKEZİ - 3 kişinin öldüğü kazada sürücü tutuklandı ve kazanın nedeni araştırılıyor.`)).toBe(
+      "3 kişinin öldüğü kazada sürücü tutuklandı ve kazanın nedeni araştırılıyor.",
+    );
+    expect(stripDatelineLead(`HABER MERKEZİ- ABD'nin yeni yaptırımları sonrasında piyasalarda hareketlilik yaşandı.`)).toBe(
+      "ABD'nin yeni yaptırımları sonrasında piyasalarda hareketlilik yaşandı.",
+    );
+  });
+
+  it("a doubled dash is one separator; three are not", () => {
+    expect(stripDatelineLead(`BEİJİNG, 7 Kasım (Xinhua) -- ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`MADRİD (AA) –– ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`ANKARA –– ${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`HABER MERKEZİ--${BODY}`)).toBe(BODY);
+    expect(stripDatelineLead(`MADRİD (AA) --- ${BODY}`)).toBe(`MADRİD (AA) --- ${BODY}`);
+    expect(stripDatelineLead(`HABER MERKEZİ --- ${BODY}`)).toBe(`HABER MERKEZİ --- ${BODY}`);
+  });
+
+  it("all three dash characters work in both forms", () => {
+    for (const dash of ["-", "–", "—"]) {
+      expect(stripDatelineLead(`MADRİD (AA) ${dash} ${BODY}`)).toBe(BODY);
+      expect(stripDatelineLead(`HABER MERKEZİ ${dash} ${BODY}`)).toBe(BODY);
+    }
+    for (const dash of ["–", "—"]) expect(stripDatelineLead(`ANKARA ${dash} ${BODY}`)).toBe(BODY);
+  });
+
+  it("the capitals form needs four letters: ABD, CHP and VAN with a spaced dash stay, RİZE goes", () => {
+    expect(stripDatelineLead(`ABD - ${BODY}`)).toBe(`ABD - ${BODY}`);
+    expect(stripDatelineLead(`CHP - ${BODY}`)).toBe(`CHP - ${BODY}`);
+    expect(stripDatelineLead(`VAN – ${BODY}`)).toBe(`VAN – ${BODY}`);
+    expect(stripDatelineLead(`RİZE – ${BODY}`)).toBe(BODY);
+  });
+
+  it("a two-word run with no letters to spare (A B) stays: four letters are needed", () => {
+    expect(stripDatelineLead(`A B - ${BODY}`)).toBe(`A B - ${BODY}`);
+    expect(stripDatelineLead(`AB CD - ${BODY}`)).toBe(BODY);
+  });
+
+  it("a slash counts only for a run of two or more words", () => {
+    expect(stripDatelineLead(`ANKARA/${BODY}`)).toBe(`ANKARA/${BODY}`);
+    expect(stripDatelineLead(`ANKARA / ${BODY}`)).toBe(`ANKARA / ${BODY}`);
+    expect(stripDatelineLead(`HABER MERKEZİ / ${BODY}`)).toBe(BODY);
+  });
+
+  it("the remainder must be at least 20 characters once trimmed", () => {
+    expect(stripDatelineLead("HABER MERKEZİ - 123456789012345678")).toBe("HABER MERKEZİ - 123456789012345678");
+    expect(stripDatelineLead("HABER MERKEZİ - 1234567890123456789")).toBe("HABER MERKEZİ - 1234567890123456789");
+    expect(stripDatelineLead("HABER MERKEZİ - 12345678901234567890")).toBe("12345678901234567890");
+    expect(stripDatelineLead("HABER MERKEZİ - 12345678901234567890   ")).toBe("12345678901234567890   ");
+    expect(stripDatelineLead("MADRİD (AA) - kısa bir cümle")).toBe("MADRİD (AA) - kısa bir cümle");
+  });
+
+  it("a lower-case first word after the lead is capitalised with the tr-TR rules; other starts stay as they are", () => {
+    expect(stripDatelineLead(`MADRİD (AA) - ilk yerli otomobil için seri üretim hattı devreye alınıyor.`)).toBe(
+      "İlk yerli otomobil için seri üretim hattı devreye alınıyor.",
+    );
+    expect(stripDatelineLead(`MADRİD (AA) - ısrarlı bir kuraklık nedeniyle barajlardaki doluluk oranı düştü.`)).toBe(
+      "Israrlı bir kuraklık nedeniyle barajlardaki doluluk oranı düştü.",
+    );
+    expect(stripDatelineLead(`MADRİD (AA) - iPhone 17 satışları ilk haftada rekor düzeyine ulaştı bugün.`)).toBe(
+      "iPhone 17 satışları ilk haftada rekor düzeyine ulaştı bugün.",
+    );
+    expect(stripDatelineLead(`MADRİD (AA) - 12 kişi yaralandı, yaralıların durumu ciddiyetini koruyor bugün.`)).toBe(
+      "12 kişi yaralandı, yaralıların durumu ciddiyetini koruyor bugün.",
+    );
+  });
+
+  it("returns '' and short or odd input unchanged, and never throws", () => {
+    expect(stripDatelineLead("")).toBe("");
+    expect(stripDatelineLead("   ")).toBe("   ");
+    expect(stripDatelineLead("-")).toBe("-");
+    expect(stripDatelineLead("(")).toBe("(");
+    expect(stripDatelineLead("🎉".repeat(200))).toBe("🎉".repeat(200));
+    expect(stripDatelineLead(undefined as unknown as string)).toBe(undefined as unknown as string);
+    expect(stripDatelineLead(null as unknown as string)).toBe(null as unknown as string);
+  });
+
+  it("a text that does not start with the lead is never touched: the lead must be at the very start", () => {
+    expect(stripDatelineLead(` HABER MERKEZİ - ${BODY}`)).toBe(` HABER MERKEZİ - ${BODY}`);
+    expect(stripDatelineLead(` MADRİD (AA) - ${BODY}`)).toBe(` MADRİD (AA) - ${BODY}`);
+    expect(stripDatelineLead(`"MADRİD (AA) - ${BODY}`)).toBe(`"MADRİD (AA) - ${BODY}`);
+    expect(stripDatelineLead(`“MADRİD (AA) - ${BODY}`)).toBe(`“MADRİD (AA) - ${BODY}`);
+    expect(stripDatelineLead(`« MADRİD (AA) - ${BODY}`)).toBe(`« MADRİD (AA) - ${BODY}`);
+    expect(stripDatelineLead(`MADRİD "(AA) - ${BODY}`)).toBe(`MADRİD "(AA) - ${BODY}`);
+    expect(stripDatelineLead(`"HABER MERKEZİ - ${BODY}`)).toBe(`"HABER MERKEZİ - ${BODY}`);
+    expect(stripDatelineLead(`${BODY} MADRİD (AA) - ${BODY}`)).toBe(`${BODY} MADRİD (AA) - ${BODY}`);
+  });
+
+  it("a lead longer than the bounds is not a dateline", () => {
+    const longPlace = "A".repeat(45);
+    expect(stripDatelineLead(`${longPlace} (AA) - ${BODY}`)).toBe(`${longPlace} (AA) - ${BODY}`);
+    expect(stripDatelineLead(`${"HABER ".repeat(10)}- ${BODY}`)).toBe(`${"HABER ".repeat(10)}- ${BODY}`);
+    expect(stripDatelineLead(`MADRİD (${"A".repeat(31)}) - ${BODY}`)).toBe(`MADRİD (${"A".repeat(31)}) - ${BODY}`);
+  });
+
+  it("stays linear on hostile input", () => {
+    const gens: Array<[string, Gen]> = [
+      ["spaces after a capital", rep(" ", "A")],
+      ["capitals and spaces, no dash", rep("A ", "", "x")],
+      ["capitals only", rep("A")],
+      ["open parentheses", rep("(")],
+      ["a capital run then a long blank run then a dash", (n) => "HABER MERKEZİ" + " ".repeat(n) + "- " + "x".repeat(30)],
+      ["a lead then a long blank run", (n) => "MADRİD (AA) -" + " ".repeat(n) + "x"],
+      ["dashes", rep("-")],
+      ["a dash, a capital and blanks, repeated", rep("- A ")],
+    ];
+    for (const [label, gen] of gens) {
+      expect(() => expectLinear(gen, (s) => stripDatelineLead(s), { n: 100_000, ceilingMs: 2_000 }), label).not.toThrow();
+    }
   });
 });

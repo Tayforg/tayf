@@ -415,6 +415,47 @@ describe("summaryDefect", () => {
     ])("is not flagged: %s", (_label, text) => {
       expect(summaryDefect(text, text)).toBeNull();
     });
+
+    // h81-textclean-2: tidySummaryText now strips a dateline lead, so the tidied text
+    // no longer carries it and the raw text is what tells a dateline-led member apart.
+    describe("the lead is stripped from the shown text (h81-textclean-2)", () => {
+      it.each([
+        ["Medyascope", "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ABD'de Senato'ya seçilen ilk Müslüman oldu."],
+        ["AA", "ANKARA (AA) - Cumhurbaşkanı Erdoğan, Güney Kore ziyaretini tamamlayarak yurda döndü ve açıklama yaptı."],
+        ["a desk", "HABER MERKEZİ- Milli Savunma Bakanlığı, askerlik görevini yerine getirecek yükümlülerin sınıflandırma sonuçlarını açıkladı."],
+        ["a two-word place", "BİRLEŞMİŞ MİLLETLER (BM) - Türkiye'nin BM Daimi Temsilcisi, Gazze'deki insani durumun kötüleştiğini söyledi."],
+        ["a place and a date", "Ankara, 4 Kasım (AA) - Dışişleri Bakanlığı, Avrupa Komisyonu raporuna sert tepki gösterdi ve açıkladı."],
+      ])("%s: the tidied text is clean but the raw lead still makes it a dateline", (_label, raw) => {
+        const shown = tidySummaryText(raw);
+        expect(shown.length).toBeLessThan(raw.length);
+        expect(raw.endsWith(shown)).toBe(true);
+        expect(summaryDefect(shown, shown)).toBeNull();
+        expect(summaryDefect(raw, shown)).toBe("dateline");
+      });
+
+      it("the raw text is trimmed before the lead is looked for", () => {
+        const raw = "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ABD'de Senato'ya seçilen ilk Müslüman oldu.";
+        expect(summaryDefect(`  \n${raw}  `, tidySummaryText(raw))).toBe("dateline");
+      });
+
+      it("a lead the tidy step would NOT strip (a short remainder) is still a dateline by the detector", () => {
+        const raw = "HABER MERKEZİ - kısa bir metin";
+        expect(tidySummaryText(raw)).toBe(raw);
+        expect(summaryDefect(raw, tidySummaryText(raw))).toBe("dateline");
+      });
+
+      it("a raw text with no lead stays clean once tidied", () => {
+        const raw = "Dışişleri Bakanlığı, Avrupa Komisyonu raporuna sert tepki gösterdi ve resmi bir açıklama yaptı.";
+        expect(summaryDefect(raw, tidySummaryText(raw))).toBeNull();
+      });
+
+      it("a stub, a teaser and a run-on still win or lose in the documented order", () => {
+        const stub = "ANKARA (AA) - Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu ve tarihe geç...";
+        expect(summaryDefect(stub, tidySummaryText(stub))).toBe("stub");
+        const teaser = "ANKARA (AA) - Abdul El Sayed Senato'ya seçilen ilk Müslüman oldu, kimdir?";
+        expect(summaryDefect(teaser, tidySummaryText(teaser))).toBe("teaser");
+      });
+    });
   });
 
   describe("run-on: the opening repeated inside the text", () => {

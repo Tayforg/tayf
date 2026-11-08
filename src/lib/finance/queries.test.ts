@@ -979,6 +979,52 @@ describe("finance query transforms", () => {
     const b = bucketLags([-3000, -100, -5, 10, 200, 900, 5000]);
     expect(b.map((x) => x.count)).toEqual([1, 1, 1, 1, 1, 1, 1]);
   });
+
+  // h81-textclean-1: KAP's feed drops the apostrophe of a Turkish suffix and leaves a literal '?'
+  // ("Limanı?nda"). toDisclosure repairs it at read time, so stored rows heal without a backfill.
+  describe("toDisclosure repairs KAP's lost suffix apostrophe (h81-textclean-1)", () => {
+    const kapRow = (over: Record<string, unknown>) => ({
+      disclosure_index: 1693366,
+      published_at: "2026-11-06T07:00:03Z",
+      kap_title: "DOĞUŞ OTOMOTİV",
+      stock_codes: ["DOAS"],
+      subject: "Diğer",
+      disclosure_class: null,
+      ...over,
+    });
+
+    it("maps a summary of 'Limanı?nda Yeni Terminal' to 'Limanı’nda Yeni Terminal'", async () => {
+      fixture.kapDisclosures = [kapRow({ summary: "Limanı?nda Yeni Terminal" })];
+      const [d] = await fetchRecentDisclosures(10);
+      expect(d?.summary).toBe("Limanı’nda Yeni Terminal");
+    });
+
+    it("repairs the subject as well and leaves a real question mark in either field", async () => {
+      fixture.kapDisclosures = [
+        kapRow({ subject: "Irak Cumhuriyeti?ndeki Satış", summary: "Ne oldu? ABD?deki İştirak" }),
+        kapRow({ disclosure_index: 1693367, subject: "Neden?", summary: "Pay işlem sırası kapatılması?" }),
+      ];
+      const rows = await fetchRecentDisclosures(10);
+      expect(rows.map((r) => [r.subject, r.summary])).toEqual([
+        ["Irak Cumhuriyeti’ndeki Satış", "Ne oldu? ABD’deki İştirak"],
+        ["Neden?", "Pay işlem sırası kapatılması?"],
+      ]);
+    });
+
+    it("keeps a null subject and a null summary null", async () => {
+      fixture.kapDisclosures = [kapRow({ subject: null, summary: null })];
+      const [d] = await fetchRecentDisclosures(10);
+      expect(d?.subject).toBeNull();
+      expect(d?.summary).toBeNull();
+    });
+
+    it("maps a row with summary undefined (the narrow circuit-breaker select) to null", async () => {
+      fixture.kapDisclosures = [kapRow({ subject: "Devre Kesici" })];
+      const [d] = await fetchCircuitBreakers();
+      expect(d?.summary).toBeNull();
+      expect(d?.subject).toBe("Devre Kesici");
+    });
+  });
 });
 
 describe("finance query fetchers (live Supabase shape)", () => {
