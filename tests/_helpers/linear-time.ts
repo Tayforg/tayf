@@ -192,40 +192,46 @@ export function expectLinear<I>(gen: Gen<I>, fn: (input: I) => unknown, o: Linea
   // hundreds of ms is already steady). A cost that is really super-linear is slow on every sample and still fails.
   const CONFIRM_BUDGET_MS = 1000;
 
-  // Confirm every suspicious pair. Extra samples only LOWER a rung, which can make the pair above it look worse, so a
-  // pair that starts violating after a lower pair's confirmation gets its own confirmation too (each pair once).
-  const confirmed = new Set<number>();
-  for (let pass = 0; pass < 2 && confirmRuns > 0; pass++) {
-    for (let i = 1; i < sizes.length; i++) {
-      if (confirmed.has(i) || !violatesAt(i)) continue;
-      confirmed.add(i);
-      const extra = Math.min(confirmRuns, Math.floor(CONFIRM_BUDGET_MS / (lowerOf(i) + min[i]!)));
-      for (let k = 0; k < extra; k++) {
-        sample(i - 1);
-        sample(i);
-      }
-    }
-  }
-
   const failAt = (i: number): never => {
     const fromFloor = min[i - 1]! < floorMs ? `, measured from the ${floorMs} ms floor` : "";
     throw new Error(
       `super-linear: ${sizes[i - 1]} -> ${sizes[i]} grew ${(min[i]! / lowerOf(i)).toFixed(2)}x${fromFloor}, limit ${allowedAt(i).toFixed(2)}x (${ladder()})`,
     );
   };
-  const violating = sizes.map((_, i) => i).filter((i) => i > 0 && violatesAt(i));
-  if (violating.length === 0) return { sizes, minMs: min };
+
+  // One confirmation budget for the whole call, so a real quadratic fails in about a second of extra CPU however many
+  // of its pairs look wrong.
+  let budgetMs = CONFIRM_BUDGET_MS;
+  const confirm = (i: number) => {
+    if (confirmRuns <= 0) return;
+    const perRound = lowerOf(i) + min[i]!;
+    const extra = Math.min(confirmRuns, Math.floor(budgetMs / perRound));
+    for (let k = 0; k < extra; k++) {
+      sample(i - 1);
+      sample(i);
+    }
+    budgetMs -= extra * perRound;
+  };
 
   // h64-testhealth-1: on CI a 25k .. 200k ladder sometimes steps up ONCE while every other pair doubles cleanly
   // (classify-category: 3 -> 11.9 -> 24 ms at 50k -> 100k -> 200k; 8 -> 28 ms and 11 -> 46 ms at the top): the working
   // set leaving the runner's cache, a constant-factor step. A cost that is really super-linear (a + b*n^2, backtracking)
   // grows FASTER at every later doubling, so once a pair violates every pair above it violates too. So one violating
   // pair is excused when (a) it is the only one, (b) the step is at most twice the limit, and (c) the cost grows
-  // linearly again after it: the next pair passes (already known, it is not in `violating`), or, for the top pair, a
-  // rung at twice the top size, timed now. Two steps, a bigger step, or growth that continues still fail.
-  const i = violating[0]!;
-  const oneOff = extendTop && confirmRuns > 0 && violating.length === 1 && min[i]! / lowerOf(i) <= 2 * allowedAt(i);
-  if (!oneOff) return failAt(i);
+  // linearly again after it: the next pair passes, or, for the top pair, a rung at twice the top size timed now. Pairs
+  // are judged in ascending order and the first proof of super-linearity fails at once.
+  let candidate = -1;
+  for (let i = 1; i < sizes.length; i++) {
+    if (!violatesAt(i)) continue;
+    confirm(i);
+    if (!violatesAt(i)) continue;
+    if (candidate >= 0) return failAt(candidate); // a second step: the growth continues
+    const oneOff = extendTop && confirmRuns > 0 && min[i]! / lowerOf(i) <= 2 * allowedAt(i);
+    if (!oneOff) return failAt(i);
+    candidate = i;
+  }
+  if (candidate < 0) return { sizes, minMs: min };
+  const i = candidate;
   const top = sizes.length - 1;
   if (i < top) return { sizes, minMs: min };
   // The top pair: only a cheap top rung is extended (at least three samples of the extended rung fit in the budget).
