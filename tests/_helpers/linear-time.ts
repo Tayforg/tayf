@@ -63,6 +63,13 @@ export interface LinearOptions {
   floorMs?: number;
   /** Most extra samples per rung taken when a pair looks super-linear (fewer when the rungs are slow: about a second of CPU in all). 0 turns confirmation off. Default 15. */
   confirmRuns?: number;
+  /**
+   * When the TOP pair still looks super-linear after confirmation, time one more rung at twice the top size and pass
+   * only if that pair is linear again (and under the ceiling). A cache or memory-tier cliff is a one-off constant-factor
+   * step; an algorithm that is really super-linear keeps growing at every doubling, so it still fails. Skipped for a
+   * slow top rung and when `confirmRuns` is 0. A step below the top rung is never excused. Default true.
+   */
+  extendTop?: boolean;
   /** Default "cpu": CPU time of the calling thread, immune to the scheduler preempting a loaded machine. */
   clock?: Clock;
 }
@@ -120,6 +127,7 @@ export function expectLinear<I>(gen: Gen<I>, fn: (input: I) => unknown, o: Linea
   const slack = o.slack ?? 1.5;
   const floorMs = o.floorMs ?? 2;
   const confirmRuns = o.confirmRuns ?? 15;
+  const extendTop = o.extendTop ?? true;
   const now = pickClock(o.clock ?? "cpu");
 
   if (!(floorMs > 0) && typeof o.clock !== "function") {
@@ -191,6 +199,35 @@ export function expectLinear<I>(gen: Gen<I>, fn: (input: I) => unknown, o: Linea
         sample(i - 1);
         sample(i);
       }
+    }
+    // h64-testhealth-1: on CI the top rung of a 25k .. 200k ladder sometimes steps up once (11 -> 46 ms, then 8 ->
+    // 28 ms on the next run) while the lower rungs double cleanly: the working set leaving the runner's cache. Time one
+    // more rung at twice the top size; a one-off step grows linearly again from there, a super-linear cost does not.
+    // Only a cheap top rung (at least three samples of the extended rung fit in the confirm budget) is extended.
+    const top = sizes.length - 1;
+    if (i === top && violatesAt(i) && extendTop && confirmRuns > 0 && min[i]! <= CONFIRM_BUDGET_MS / 6) {
+      const extSize = sizes[i]! * 2;
+      const extInput = gen(extSize); // built once, never timed
+      let extMin = Infinity;
+      const extSamples = Math.max(3, Math.min(confirmRuns, Math.floor(CONFIRM_BUDGET_MS / (2 * min[i]! || 1))));
+      for (let k = 0; k < extSamples; k++) {
+        sample(i);
+        const t = now();
+        fn(extInput);
+        extMin = Math.min(extMin, now() - t);
+        if (k === 0 && extMin > o.ceilingMs) {
+          throw new Error(`size ${extSize} took ${extMin.toFixed(1)} ms, over the ${o.ceilingMs} ms ceiling (${ladder()})`);
+        }
+      }
+      const lower = Math.max(min[i]!, floorMs);
+      const allowed = slack * 2;
+      // Written as "not linear" so an unusable reading (NaN) fails closed instead of passing.
+      if (!(extMin / lower <= allowed || extMin - allowed * lower < floorMs)) {
+        throw new Error(
+          `super-linear: ${sizes[i]} -> ${extSize} grew ${(extMin / lower).toFixed(2)}x after a ${sizes[i - 1]} -> ${sizes[i]} step of ${(min[i]! / lowerOf(i)).toFixed(2)}x, limit ${allowed.toFixed(2)}x (${ladder()}, ${extSize}: ${extMin.toFixed(1)} ms)`,
+        );
+      }
+      return { sizes, minMs: min };
     }
     if (violatesAt(i)) {
       const fromFloor = min[i - 1]! < floorMs ? `, measured from the ${floorMs} ms floor` : "";
