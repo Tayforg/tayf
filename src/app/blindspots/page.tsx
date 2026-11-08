@@ -79,6 +79,15 @@ export default function BlindspotsPage() {
         >
           RSS
         </a>
+        {" · "}
+        {/* h72-newreader-1: the definition link. A plain <a> like the RSS link
+            above: /metodoloji is static, so a prefetch buys nothing. */}
+        <a
+          href="/metodoloji#kor-nokta"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          Kör nokta nasıl belirleniyor?
+        </a>
       </p>
 
       <Suspense fallback={<BlindspotsSkeleton />}>

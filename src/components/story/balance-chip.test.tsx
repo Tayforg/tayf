@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   BALANCE_LABELS,
+  BALANCE_SHORT_LABELS,
   balanceFromZoneCounts,
   type BalanceScore,
 } from "@/lib/bias/balance";
@@ -44,6 +45,11 @@ function render(
   return renderToStaticMarkup(<BalanceChip balance={balance} variant={variant} />);
 }
 
+/** Text nodes only (static markup from our own component; not a sanitizer). */
+function visibleText(markup: string): string {
+  return [...markup.matchAll(/>([^<]+)</g)].map((m) => m[1]).join("");
+}
+
 describe("BalanceChip — compact", () => {
   it("renders an accessible image pill with the short score", () => {
     const markup = render(DENGELI, "compact");
@@ -51,7 +57,7 @@ describe("BalanceChip — compact", () => {
     expect(markup).toContain('role="img"');
     expect(markup).toContain('aria-label="Denge puanı 72/100: Dengeli kapsama"');
     expect(markup).toContain('title="Denge puanı 72/100: Dengeli kapsama"');
-    expect(markup).toContain("Denge 72");
+    expect(markup).toContain("Denge 72 · dengeli");
     expect(markup).toContain("text-sky-800");
   });
 
@@ -70,11 +76,33 @@ describe("BalanceChip — compact", () => {
     expect(render(DENGELI, "compact")).toContain('aria-hidden="true"');
   });
 
-  it("does not repeat the tier label in the short text", () => {
-    const markup = render(DENGELI, "compact");
-    // Text nodes only (static markup from our own component; not a sanitizer).
-    const visible = [...markup.matchAll(/>([^<]+)</g)].map((m) => m[1]).join("");
-    expect(visible).toBe("Denge 72");
+  // h72-newreader-2: the verdict used to live in colour plus title only
+  // (WCAG 1.4.1), so on one page "Denge 75" (Tek tarafa yakın) read as better
+  // than "Denge 72" (Dengeli kapsama). The visible text now carries the tier.
+  it.each([
+    [{ score: 75, tier: "yakin", label: BALANCE_LABELS.yakin, total: 8 }, "Denge 75 · tek tarafa yakın"],
+    [{ score: 72, tier: "dengeli", label: BALANCE_LABELS.dengeli, total: 8 }, "Denge 72 · dengeli"],
+    [{ score: 63, tier: "iki", label: BALANCE_LABELS.iki, total: 8 }, "Denge 63 · iki tarafa dengeli"],
+    [{ score: 30, tier: "tek", label: BALANCE_LABELS.tek, total: 10 }, "Denge 30 · tek tarafta"],
+  ] as Array<[BalanceScore, string]>)(
+    "prints the tier word in the visible text (%j)",
+    (balance, expected) => {
+      expect(visibleText(render(balance, "compact"))).toBe(expected);
+    },
+  );
+
+  it("keeps the full accessible name on the compact chip", () => {
+    const markup = render({ score: 75, tier: "yakin", label: BALANCE_LABELS.yakin, total: 8 }, "compact");
+    expect(markup).toContain('aria-label="Denge puanı 75/100: Tek tarafa yakın"');
+    expect(markup).toContain('title="Denge puanı 75/100: Tek tarafa yakın"');
+  });
+
+  it("every tier's compact text includes its short tier word", () => {
+    for (const balance of [DENGELI, IKI, YAKIN, TEK]) {
+      expect(visibleText(render(balance, "compact"))).toBe(
+        `Denge ${balance.score} · ${BALANCE_SHORT_LABELS[balance.tier]}`,
+      );
+    }
   });
 });
 

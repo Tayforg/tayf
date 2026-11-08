@@ -93,6 +93,31 @@ describe("NearBlindspotList", () => {
     expect(markup).toContain('title="Toplayıcı ve niş kaynaklar spektruma sayılmaz."');
   });
 
+  it("caps the chip block at half the row from sm up so the tier word cannot starve the headline", () => {
+    // A near-blindspot row sits in the yakin band: the compact chip prints "Denge 45 · tek tarafa yakın" (the tier word makes
+    // it ~110px wider). The meta block is `shrink-0`, so its own flex-wrap never wraps; it needs a cap or the min-w-0 headline
+    // column gets only what is left.
+    const item = mkItem({ balance: { score: 45, tier: "yakin", label: "Tek tarafa yakın", total: 10 } });
+    const markup = renderToStaticMarkup(<NearBlindspotList items={[item]} />);
+    expect(markup).toContain("Denge 45 · tek tarafa yakın");
+
+    // The meta block is the parent div of the share chip, the BalanceChip and the count span.
+    const shareAt = markup.indexOf(`%70 ${ZONE_META.iktidar.label}`);
+    expect(shareAt).toBeGreaterThan(-1);
+    const divStart = markup.lastIndexOf("<div", shareAt);
+    const tagEnd = markup.indexOf(">", divStart);
+    const openTag = markup.slice(divStart, tagEnd + 1);
+    const block = markup.slice(divStart, markup.indexOf("</div>", divStart));
+    expect(block).toContain("Denge 45 · tek tarafa yakın");
+    expect(block).toContain("10 kaynak");
+
+    const className = /class="([^"]*)"/.exec(openTag)?.[1] ?? "";
+    expect(className).toContain("sm:max-w-[50%]");
+    expect(className).toContain("sm:justify-end");
+    expect(className).toContain("flex-wrap");
+    expect(className).toContain("shrink-0");
+  });
+
   it("omits the balance chip when the cluster has no score", () => {
     const markup = renderToStaticMarkup(
       <NearBlindspotList items={[mkItem({ balance: null })]} />,

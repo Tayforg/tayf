@@ -222,7 +222,7 @@ describe("/hafta/[hafta] blindspot side tally", () => {
   const current = weekKeyFromMs(NOW.getTime());
   const closed = shiftWeek(current, -1) as string;
   const TALLY =
-    "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9. Her taraftan en büyükleri gösteriliyor.";
+    "Toplam 46 kör nokta · İktidar ağırlıklı 37 · Muhalefet ağırlıklı 9. Her taraftan en büyükleri gösteriliyor.";
 
   beforeEach(() => {
     mocks.summariseCalls = [];

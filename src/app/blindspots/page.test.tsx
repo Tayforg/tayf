@@ -660,6 +660,27 @@ describe("/blindspots page — Kör noktaya yakın section", () => {
     expect(rss[0]?.props?.type).toBe("application/rss+xml");
   });
 
+  // h72-newreader-1: no page linked the definition of a kör nokta. A plain <a>
+  // like the RSS link: /metodoloji is static, so a prefetch buys nothing.
+  it("links the kör nokta definition at /metodoloji#kor-nokta from the hero, as a plain <a>", () => {
+    const defs = collectElements(BlindspotsPage()).filter(
+      (el) => el.props?.href === "/metodoloji#kor-nokta",
+    );
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0]?.type).toBe("a");
+    expect(collectText(defs[0]).join("")).toBe("Kör nokta nasıl belirleniyor?");
+    expect(String(defs[0]?.props?.className)).toBe(
+      "underline decoration-dotted underline-offset-2 hover:text-foreground",
+    );
+  });
+
+  it("keeps exactly one RSS link next to the definition link", () => {
+    const hrefs = collectElements(BlindspotsPage()).map((el) => el.props?.href);
+
+    expect(hrefs.filter((h) => h === "/rss/kor-noktalar.xml")).toHaveLength(1);
+  });
+
   it("BlindspotsFeed never reads the near-blindspot fetcher", async () => {
     getBlindspots.mockResolvedValueOnce(okResult([BUNDLE_FIXTURE]));
 
@@ -823,7 +844,10 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
 
     expect(text).toContain("%100 İktidar");
     expect(text).not.toContain("Sadece");
-    expect(text).not.toContain("tek tarafta");
+    // The share chip's own claim. The compact Denge chip beside it now prints
+    // its tier word ("Denge 2 · tek tarafta", h72-newreader-2), which is the
+    // balance tier of a 250/1/0 score and not a share claim.
+    expect(text).not.toContain("%100 tek tarafta");
   });
 
   // h43-blindspots-1: the flag rule is vote-only by design, so "Sadece İktidar
@@ -1086,18 +1110,18 @@ describe("/blindspots page — the whole window is listed (h53-consistency-1)", 
     return collectText(tree).filter((t) => t.startsWith("Son 7 günde "));
   }
 
-  it("renders the count line over the whole window: 'Son 7 günde N kör nokta · İktidar tarafında a · Muhalefet tarafında b'", async () => {
+  it("renders the count line over the whole window: 'Son 7 günde N kör nokta · İktidar ağırlıklı a · Muhalefet ağırlıklı b'", async () => {
     getBlindspots.mockResolvedValueOnce(
       okResult([cardFixture("c1"), cardFixture("c2", "muhalefet")], MORE, {
         claimCount: 46,
-        sideCounts: COUNTS(37, 0, 9),
+        sideCounts: COUNTS(38, 0, 8),
       }),
     );
 
     const tree = await BlindspotsFeed();
 
     expect(countLines(tree)).toEqual([
-      "Son 7 günde 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9",
+      "Son 7 günde 46 kör nokta · İktidar ağırlıklı 38 · Muhalefet ağırlıklı 8",
     ]);
   });
 
@@ -1112,7 +1136,7 @@ describe("/blindspots page — the whole window is listed (h53-consistency-1)", 
     const tree = await BlindspotsFeed();
 
     expect(countLines(tree)).toEqual([
-      "Son 7 günde 12 kör nokta · İktidar tarafında 7 · Muhalefet tarafında 3 · Bağımsız tarafında 2",
+      "Son 7 günde 12 kör nokta · İktidar ağırlıklı 7 · Muhalefet ağırlıklı 3 · Bağımsız ağırlıklı 2",
     ]);
   });
 

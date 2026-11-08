@@ -468,23 +468,27 @@ describe("buildSilenceDigest over a whole window (h53-consistency-1)", () => {
 });
 
 describe("blindspotCountLine", () => {
-  it("reads 'Son 7 günde N kör nokta · İktidar tarafında a · Muhalefet tarafında b'", () => {
+  // h72-newreader-1: "İktidar tarafında 38" read as "the government side's
+  // blind spot" while it counts the stories İktidar WROTE. The line now names
+  // the writing (dominant) side with "ağırlıklı", the wording the band rows
+  // below it already use ("8 muhalefet ağırlıklı").
+  it("reads 'Son 7 günde N kör nokta · İktidar ağırlıklı a · Muhalefet ağırlıklı b'", () => {
     expect(
-      blindspotCountLine(46, { iktidar: 37, bagimsiz: 0, muhalefet: 9 }, 7),
-    ).toBe("Son 7 günde 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9");
+      blindspotCountLine(46, { iktidar: 38, bagimsiz: 0, muhalefet: 8 }, 7),
+    ).toBe("Son 7 günde 46 kör nokta · İktidar ağırlıklı 38 · Muhalefet ağırlıklı 8");
   });
 
   it("always names Iktidar and Muhalefet, even at 0 (a zero is a finding)", () => {
     expect(
       blindspotCountLine(3, { iktidar: 3, bagimsiz: 0, muhalefet: 0 }, 7),
-    ).toBe("Son 7 günde 3 kör nokta · İktidar tarafında 3 · Muhalefet tarafında 0");
+    ).toBe("Son 7 günde 3 kör nokta · İktidar ağırlıklı 3 · Muhalefet ağırlıklı 0");
   });
 
   it("adds Bağımsız only when it is above zero", () => {
     expect(
       blindspotCountLine(6, { iktidar: 3, bagimsiz: 2, muhalefet: 1 }, 7),
     ).toBe(
-      "Son 7 günde 6 kör nokta · İktidar tarafında 3 · Muhalefet tarafında 1 · Bağımsız tarafında 2",
+      "Son 7 günde 6 kör nokta · İktidar ağırlıklı 3 · Muhalefet ağırlıklı 1 · Bağımsız ağırlıklı 2",
     );
   });
 
@@ -495,7 +499,13 @@ describe("blindspotCountLine", () => {
   it("groups thousands the Turkish way", () => {
     expect(
       blindspotCountLine(1234, { iktidar: 1000, bagimsiz: 0, muhalefet: 234 }, 7),
-    ).toBe("Son 7 günde 1.234 kör nokta · İktidar tarafında 1.000 · Muhalefet tarafında 234");
+    ).toBe("Son 7 günde 1.234 kör nokta · İktidar ağırlıklı 1.000 · Muhalefet ağırlıklı 234");
+  });
+
+  it("never says 'X tarafında N' (that names the silent side to a Turkish reader)", () => {
+    const line =
+      blindspotCountLine(12, { iktidar: 7, bagimsiz: 2, muhalefet: 3 }, 7) ?? "";
+    expect(line).not.toContain("tarafında");
   });
 });
 

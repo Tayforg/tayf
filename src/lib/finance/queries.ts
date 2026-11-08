@@ -98,7 +98,9 @@ import {
 // `legal_notice_articles` for their window (in parallel with the main reads)
 // and drop those rows before aggregating. The /ekonomi feed and the
 // per-ticker article list keep their `isLegalNotice` title filter as well; the
-// per-ticker list additionally drops the id set.
+// per-ticker list additionally drops the id set. The coverage section obeys the
+// same two gates (h72-kap-1, filterCoverageRows): the disclosure_coverage view
+// is a raw join and stays raw for its other readers.
 //
 // ekonomi-coverage: PostgREST truncates EVERY response at 1,000 rows whatever
 // `.limit()` asks for, so any read here that can exceed that pages through
@@ -945,6 +947,30 @@ interface CoverageRow {
   article_id: string;
 }
 
+/**
+ * h72-kap-1: the coverage rows the page may count, under the SAME gate as the
+ * article list and "Medyada yankı" beside it. disclosure_coverage is a raw join
+ * (kap_disclosures x article_tickers x articles) that knows neither Jev's
+ * ticker_relevance score nor the legal-notice set, so on a ticker whose matches
+ * are string accidents the section read "basında yer bulan 2, ilk haber medyan 2
+ * gün sonra" while the list showed "Haberler 0". A row goes when its article is a
+ * legal notice (`legalIds`) or its score at relevanceKey(article_id, ticker) is
+ * below TICKER_HIDE_BELOW (0.2, `isHiddenMatch`). An unscored article stays
+ * (fail-open, like isHiddenMatch): a failed or partial relevance read gives an
+ * empty or short `scores` map and so the old, ungated behaviour. Pure; rows are
+ * not changed, and the disclosure_coverage view stays raw for its other readers.
+ */
+export function filterCoverageRows<T extends { article_id: string }>(
+  rows: readonly T[],
+  ticker: string,
+  scores: ReadonlyMap<string, number>,
+  legalIds: ReadonlySet<string>,
+): T[] {
+  return rows.filter(
+    (r) => !legalIds.has(r.article_id) && !isHiddenMatch(scores.get(relevanceKey(r.article_id, ticker))),
+  );
+}
+
 /** ticker_articles' page size; a full page means older articles exist. */
 const TICKER_ARTICLES_LIMIT = 60;
 /** Display cap of the per-ticker disclosure list (and of the "Medyada yankı" panel). */
@@ -983,8 +1009,14 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const since30 = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
 
-  // The attention window is 30 Istanbul days; the notice-id lookup covers the same span.
+  // The attention window is 30 Istanbul days.
   const attentionSinceIso = `${istDate(-29)}T00:00:00+03:00`;
+  // h72-kap-1: the notice-id lookup starts 2 days earlier. The disclosure_coverage
+  // view reaches 2 days before a filing, so a coverage article can predate the
+  // attention window, and the same set now gates those rows too (filterCoverageRows).
+  // The set is only ever tested for membership, so the wider window changes neither
+  // the attention series nor the article list.
+  const legalSinceIso = `${istDate(-31)}T00:00:00+03:00`;
 
   const [companyRes, attentionRes, articlesRes, { disclosuresRes, coverageRes, totalDisclosures30d }, legalIds] = await Promise.all([
     supabase.from("bist_companies").select("kap_member_oid,tickers,title,city,shares_traded").contains("tickers", [ticker]).limit(1),
@@ -1059,7 +1091,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
       return { disclosuresRes, coverageRes, totalDisclosures30d };
     })(),
     // ticker-legal-notices (107): fail-open, so it stays out of the throwing loop below.
-    fetchLegalNoticeIdsSince(supabase, attentionSinceIso),
+    fetchLegalNoticeIdsSince(supabase, legalSinceIso),
   ]);
   // attention and coverage are paged through readAllPages, which throws by itself.
   for (const [name, res] of [["company", companyRes], ["articles", articlesRes], ["disclosures", disclosuresRes]] as const) {
@@ -1077,9 +1109,15 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
     source_id: r.source_id,
   }));
   const articleRows = (articlesRes.data ?? []) as TickerArticleRow[];
+  // h72-kap-1: the coverage rows' articles are scored with the rest, in the same
+  // lookup. Most are in the attention series already; the Set keeps each key once,
+  // so the extra cost is the few articles from the 2 days before the window.
   const relevanceKeys = [
-    ...attentionRaw.map((r) => relevanceKey(r.article_id, ticker)),
-    ...articleRows.map((r) => relevanceKey(r.id, ticker)),
+    ...new Set([
+      ...attentionRaw.map((r) => relevanceKey(r.article_id, ticker)),
+      ...articleRows.map((r) => relevanceKey(r.id, ticker)),
+      ...coverageRes.rows.map((r) => relevanceKey(r.article_id, ticker)),
+    ]),
   ];
   const scores = await fetchRelevanceScores(supabase, relevanceKeys);
   const attention = aggregateAttention(attentionRaw, scores, legalIds).map((d) => ({ day: d.day, articles: d.articles, sources: d.sources }));
@@ -1108,7 +1146,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
     disclosures,
     totalDisclosures30d,
     coverage: coverageStats(
-      coverageRes.rows,
+      filterCoverageRows(coverageRes.rows, ticker, scores, legalIds),
       disclosures.filter((d) => issuerIndexes.has(d.disclosureIndex)),
       baselineDaily,
     ),

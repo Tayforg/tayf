@@ -2,6 +2,7 @@ import { Scale } from "lucide-react";
 
 import {
   BALANCE_INSUFFICIENT_LABEL,
+  BALANCE_SHORT_LABELS,
   balanceAriaLabel,
   type BalanceScore,
   type BalanceTier,
@@ -37,7 +38,8 @@ interface BalanceChipProps {
   /** `null` = too few classified sources to score. */
   balance: BalanceScore | null;
   /**
-   * `compact` is the card pill ("Denge 72"; renders nothing without a score so
+   * `compact` is the card pill ("Denge 72 · dengeli", the number plus the tier
+   * word so the verdict is not colour-only; renders nothing without a score so
    * thin clusters don't grow a chip on every card). `full` is the cluster-page
    * chip, which also explains a missing score.
    */
@@ -54,7 +56,7 @@ export function BalanceChip({ balance, variant }: BalanceChipProps) {
   if (balance === null) {
     text = `Denge puanı yok · ${BALANCE_INSUFFICIENT_LABEL}`;
   } else if (variant === "compact") {
-    text = `Denge ${balance.score}`;
+    text = `Denge ${balance.score} · ${BALANCE_SHORT_LABELS[balance.tier]}`;
   } else {
     text = `Denge puanı ${balance.score}/100 · ${balance.label}`;
   }

@@ -50,6 +50,12 @@ const ZERO_MUHALEFET_MEMBERS: ClusterDetailMember[] = [
   mkMember("gov2", "pro_government", "2026-07-01T09:00:00Z"),
 ];
 
+// The mirror case: only muhalefet writers, so the silent pole is iktidar.
+const ZERO_IKTIDAR_MEMBERS: ClusterDetailMember[] = [
+  mkMember("opp1", "opposition", "2026-07-01T10:00:00Z"),
+  mkMember("opp2", "opposition", "2026-07-01T09:00:00Z"),
+];
+
 describe("ReadAcrossSpectrum — feed-degraded empty state (Pack C item 8)", () => {
   it("mentions unreachable sources when not a blindspot but the feed is degraded", () => {
     const markup = renderToStaticMarkup(
@@ -87,7 +93,7 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
       />,
     );
     expect(markup).toContain(
-      "Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (Muhalefet) · 1 toplayıcı / niş kaynak yazdı (spektruma sayılmaz)",
+      "Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok (kör nokta) · 1 toplayıcı / niş kaynak yazdı (spektruma sayılmaz)",
     );
   });
 
@@ -96,9 +102,27 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
       <ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
     );
     expect(markup).toContain(
-      "Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (Muhalefet)",
+      "Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok (kör nokta)",
     );
     expect(markup).not.toContain("toplayıcı / niş kaynak yazdı");
+  });
+
+  // h72-newreader-1: "kör nokta (Muhalefet)" put the SILENT zone in brackets,
+  // while /blindspots counts a story under the side that WROTE it ("İktidar
+  // ağırlıklı"). The caption now names the silent zone in the sentence and
+  // leaves nothing in brackets after "kör nokta".
+  it("(b2) names the silent zone in the sentence and never brackets a zone after 'kör nokta'", () => {
+    const muhalefet = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
+    );
+    expect(muhalefet).toContain("Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok (kör nokta)");
+    expect(muhalefet).not.toContain("kör nokta (");
+
+    const iktidar = renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_IKTIDAR_MEMBERS} isBlindspot={true} />,
+    );
+    expect(iktidar).toContain("Spektruma sayılan İktidar kaynaklarından bu kümede haber yok (kör nokta)");
+    expect(iktidar).not.toContain("kör nokta (");
   });
 
   it("(c) leaves the non-blindspot empty copy unchanged, with the degraded suffix when set", () => {

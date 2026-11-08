@@ -173,10 +173,14 @@ function tallyCount(n: number): number {
  * each side, not the biggest overall — İktidar has more outlets, so its claims
  * are larger and would crowd Muhalefet out of a plain top five).
  *
- *   "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9.
+ *   "Toplam 48 kör nokta · İktidar ağırlıklı 40 · Muhalefet ağırlıklı 8.
  *    Her taraftan en büyükleri gösteriliyor."
  *
- * İktidar and Muhalefet are always named (a "Muhalefet tarafında 0" is a
+ * Each claim is counted under the side that WROTE it, named with "ağırlıklı"
+ * (h72-newreader-1): "İktidar tarafında 40" read as the government side's own
+ * blind spot, the opposite of what is counted.
+ *
+ * İktidar and Muhalefet are always named (a "Muhalefet ağırlıklı 0" is a
  * finding); Bağımsız only when it is above zero. `null` when there is no claim
  * at all, so the section keeps its empty-state copy instead. The same line
  * serves /hafta, the in-progress week and every closed week, so it names no
@@ -194,9 +198,9 @@ export function blindspotTallyLine(
 
   const parts = [
     `Toplam ${formatCountTr(total)} kör nokta`,
-    `İktidar tarafında ${formatCountTr(iktidar)}`,
-    `Muhalefet tarafında ${formatCountTr(muhalefet)}`,
+    `İktidar ağırlıklı ${formatCountTr(iktidar)}`,
+    `Muhalefet ağırlıklı ${formatCountTr(muhalefet)}`,
   ];
-  if (bagimsiz > 0) parts.push(`Bağımsız tarafında ${formatCountTr(bagimsiz)}`);
+  if (bagimsiz > 0) parts.push(`Bağımsız ağırlıklı ${formatCountTr(bagimsiz)}`);
   return `${parts.join(" · ")}. Her taraftan en büyükleri gösteriliyor.`;
 }

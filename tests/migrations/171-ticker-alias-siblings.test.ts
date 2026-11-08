@@ -316,7 +316,7 @@ describe("171 ticker_alias_siblings: the file, ledger and transaction", () => {
   it("sits after 085, the migration whose body it starts from", () => {
     expect(FILE_171 > FILE_085).toBe(true);
     const redefiners = readdirSync(MIGRATIONS_DIR)
-      .filter((n) => n.endsWith(".sql") && n > FILE_085)
+      .filter((n) => n.endsWith(".sql") && n > FILE_085 && n <= FILE_171)
       .filter((n) => collapse(stripComments(readFileSync(resolve(MIGRATIONS_DIR, n), "utf8"))).includes(`create or replace function ${FN}(`));
     expect(redefiners, "no migration between 085 and 171 re-creates the resolver (085's body is still production's)").toEqual([FILE_171]);
   });
