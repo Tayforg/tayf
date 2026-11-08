@@ -1,16 +1,19 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Copy } from "lucide-react";
 
+import { RemoveSideLink } from "@/components/compare/remove-side-link";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import { ZONE_META } from "@/lib/bias/config";
+import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
 import {
   getClusterDetailOrThrow,
   type ClusterDetail,
 } from "@/lib/clusters/cluster-detail-query";
+import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import {
   compareHref,
   parseCompareParams,
@@ -41,6 +44,14 @@ export const metadata: Metadata = noindexPageMetadata({
 type SearchParams = { a?: string | string[]; b?: string | string[] };
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
+
+// An empty zone line that a toplayıcı / niş source of that zone covered: the
+// cluster page's own SPECTRUM_ABSENT_QUALIFIED wording (h57/h58), sentence-cased
+// because here it stands alone instead of between dashes. It scopes the absence
+// to the sources the spectrum counts rather than claiming nobody wrote there.
+const SPECTRUM_ABSENT_SENTENCE =
+  SPECTRUM_ABSENT_QUALIFIED.charAt(0).toLocaleUpperCase("tr-TR") +
+  SPECTRUM_ABSENT_QUALIFIED.slice(1);
 
 // Static shell. Reading `searchParams` is request-time data, so under
 // cacheComponents it has to sit inside <Suspense>; the shell (container,
@@ -260,6 +271,19 @@ function SideColumn({
 
           <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
             <span>{meta}</span>
+            {/* Same violet badge, helpers and copy as the cluster page header:
+                the count above is the distinct-text number, so a wire cluster
+                must say it is one (h78-compare-1). Violet, not amber: amber
+                is reserved for the Kör nokta pill. */}
+            {view.wire.isWire && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-800 dark:text-violet-400 font-medium"
+                title={wireBadgeTitle(view.wire.uniqueTexts)}
+              >
+                <Copy className="h-3 w-3" />
+                {wireBadgeLabel(view.wire.memberCount, view.wire.uniqueTexts)}
+              </span>
+            )}
             {view.isBlindspot && (
               <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-800 dark:text-amber-400">
                 <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.5} />
@@ -296,7 +320,9 @@ function SideColumn({
                   </p>
                 ) : (
                   <p className="text-[13px] text-muted-foreground">
-                    Bu bölgeden kaynak yok
+                    {view.nonVotingZones.includes(zone)
+                      ? SPECTRUM_ABSENT_SENTENCE
+                      : "Bu bölgeden kaynak yok"}
                   </p>
                 )}
               </div>
@@ -311,13 +337,17 @@ function SideColumn({
             <div aria-hidden="true" className="hidden md:block" />
           )}
 
-          <Link
+          {/* A client link: it also drops this story from the compare tray
+              (h78-compare-2). The page stays a server component and the link
+              still works without JavaScript. */}
+          <RemoveSideLink
             href={compareHref(otherId)}
+            removeId={view.id}
             aria-label={`Bu tarafı kaldır: ${view.title}`}
             className="inline-flex min-h-[44px] items-center self-start justify-self-start touch-manipulation text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
           >
             Bu tarafı kaldır
-          </Link>
+          </RemoveSideLink>
         </article>
       );
     }

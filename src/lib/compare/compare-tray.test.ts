@@ -12,6 +12,7 @@ import {
   removeFromTray,
   trayHref,
 } from "./compare-tray";
+import { compareHref } from "./compare-params";
 
 const A = "aaaaaaaa-1111-4111-8111-bbbbbbbbbbbb";
 const B = "cccccccc-2222-4222-8222-dddddddddddd";
@@ -192,5 +193,41 @@ describe("compareHint", () => {
     expect(compareHint({ tray: [B, C], id: A, notice: NOTICE }).text).toBe(
       "2 haber seçili · eklerseniz ilk seçim çıkar",
     );
+  });
+});
+
+// h78-compare-2: "Bu tarafı kaldır" on /karsilastir removes the side from the
+// tray too (RemoveSideLink -> useCompareTray().remove -> removeFromTray). These
+// pin the sequence the reader then sees on the next cluster page.
+describe("removing a side on /karsilastir, then picking another story", () => {
+  it("removes the dropped side and keeps the one the reader kept", () => {
+    expect(removeFromTray([A, B], B)).toEqual([A]);
+    expect(removeFromTray([A, B], A)).toEqual([B]);
+  });
+
+  it("pairs the next pick with the kept story: [A] + C gives [A, C] and its compare link", () => {
+    const next = addToTray(removeFromTray([A, B], B), C);
+    expect(next).toEqual([A, C]);
+    expect(trayHref(next)).toBe(compareHref(A, C));
+    expect(trayHref(next)).toBe(`/karsilastir?a=${A}&b=${C}`);
+  });
+
+  it("without the removal the old tray evicts the kept story: [A, B] + C gives [B, C]", () => {
+    // The pre-fix behaviour, kept as documentation of why the remove must reach the tray.
+    expect(addToTray([A, B], C)).toEqual([B, C]);
+    expect(trayHref(addToTray([A, B], C))).toBe(compareHref(B, C));
+  });
+
+  it("the cluster-page hint after the removal says the reader has one story selected", () => {
+    const tray = removeFromTray([A, B], B);
+    expect(compareHint({ tray, id: C })).toEqual({
+      text: "1 haber seçili · bunu ikinci olarak ekleyin",
+      srOnly: false,
+    });
+  });
+
+  it("removing a side that is not in the tray leaves a reader's own tray alone (shared-link arrival)", () => {
+    expect(removeFromTray([C], B)).toEqual([C]);
+    expect(removeFromTray([], B)).toEqual([]);
   });
 });

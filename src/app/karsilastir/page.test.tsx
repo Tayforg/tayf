@@ -7,6 +7,7 @@ import type {
   ClusterDetail,
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
+import type { WireSignal } from "@/lib/clusters/wire";
 import type { BiasDistribution, Source } from "@/types";
 
 const getClusterDetailOrThrow = vi.fn();
@@ -18,6 +19,7 @@ import KarsilastirPage, { CompareBody, metadata } from "./page";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ZONE_META } from "@/lib/bias/config";
+import { RemoveSideLink } from "@/components/compare/remove-side-link";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 
@@ -85,6 +87,10 @@ function makeDetail(
     aggregator?: boolean;
     /** true leaves bias_distribution all zero (BiasSpectrum then renders null). */
     zeroDistribution?: boolean;
+    /** Replaces the default gov / opposition / aggregator members. */
+    members?: ClusterDetailMember[];
+    /** Merged over the default non-wire signal. */
+    wire?: Partial<WireSignal>;
   } = {},
 ): ClusterDetail {
   const distribution = emptyDistribution();
@@ -92,7 +98,7 @@ function makeDetail(
     distribution.pro_government = 1;
     distribution.opposition = 1;
   }
-  const members = [
+  const members = extra.members ?? [
     makeMember(makeSource(`gov-${id}`, "Hükümet Gazetesi", "pro_government")),
     makeMember(makeSource(`opp-${id}`, "Muhalif Gazete", "opposition")),
     ...(extra.aggregator === false
@@ -117,7 +123,12 @@ function makeDetail(
     },
     members,
     allSources: [],
-    wire: { isWireRedistribution: false, effectiveArticleCount: 3, memberCount: 3 },
+    wire: {
+      isWireRedistribution: false,
+      effectiveArticleCount: 3,
+      memberCount: 3,
+      ...extra.wire,
+    },
     blindspotSuppressed: false,
     blindspotRecallVetoed: false,
   };
@@ -274,7 +285,11 @@ describe("CompareBody — fetching", () => {
     expect(text).toContain("14:05");
     expect(text).toContain("Hükümet Gazetesi");
     expect(text).toContain("Muhalif Gazete");
-    expect(text).toContain("Bu bölgeden kaynak yok");
+    // The aggregator is the only Bağımsız source, so that zone is qualified
+    // rather than claiming nobody wrote there (h78-compare-1); İktidar and
+    // Muhalefet each have a voting source, so the plain line appears nowhere.
+    expect(text).toContain("Spektruma sayılan kaynaklardan haber yok");
+    expect(text).not.toContain("Bu bölgeden kaynak yok");
     expect(text).toContain("Toplayıcı / niş (spektruma sayılmaz): Haber Toplayıcı");
     // Kör nokta pill only on the blindspot side.
     expect(text.split("Kör nokta")).toHaveLength(2);
@@ -328,13 +343,28 @@ describe("CompareBody — fetching", () => {
   });
 
   it("renders the empty-zone note at full text contrast (no /opacity muted text)", async () => {
+    // No aggregator: Bağımsız has no source of any kind, so the plain line shows.
     getClusterDetailOrThrow.mockImplementation(async (id: string) =>
-      makeDetail(id, id),
+      makeDetail(id, id, { aggregator: false }),
     );
     const tree = await render({ a: A, b: B });
     const note = collectElements(tree).find(
       (el) => collectText(el.props?.children).join("") === "Bu bölgeden kaynak yok",
     );
+    expect(note?.props?.className).toBe("text-[13px] text-muted-foreground");
+  });
+
+  it("renders the qualified empty-zone note at the same full text contrast", async () => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      makeDetail(id, id),
+    );
+    const tree = await render({ a: A, b: B });
+    const note = collectElements(tree).find(
+      (el) =>
+        collectText(el.props?.children).join("") ===
+        "Spektruma sayılan kaynaklardan haber yok",
+    );
+    expect(note?.type).toBe("p");
     expect(note?.props?.className).toBe("text-[13px] text-muted-foreground");
   });
 
@@ -436,6 +466,266 @@ describe("CompareBody — fetching", () => {
       }
     }
     expect(hrefs).toContain(`/cluster/${A}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h78-compare-1: /karsilastir says what the cluster page says. An empty zone
+// that a toplayıcı / niş source of that zone covered is qualified (the same
+// SPECTRUM_ABSENT_QUALIFIED words, sentence-cased) instead of "Bu bölgeden
+// kaynak yok", and a wire cluster carries the violet wire badge next to its
+// distinct-text count instead of a bare "1 kaynak".
+// ---------------------------------------------------------------------------
+
+describe("CompareBody — qualifiers shared with the cluster page", () => {
+  const QUALIFIED = "Spektruma sayılan kaynaklardan haber yok";
+  const PLAIN = "Bu bölgeden kaynak yok";
+  const ZONE_ORDER = ["iktidar", "bagimsiz", "muhalefet"] as const;
+
+  /** Direct children of an element: arrays flattened, null / false dropped. */
+  function kidsOf(el: Elementish | undefined): Elementish[] {
+    const out: Elementish[] = [];
+    const walk = (node: unknown) => {
+      if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === "object") out.push(node as Elementish);
+    };
+    walk(el?.props?.children);
+    return out;
+  }
+
+  const textOf = (node: unknown) => collectText(node).join("");
+
+  /** The three zone rows' note lines (the <p> under each zone label), by zone. */
+  function zoneNotes(article: Elementish | undefined) {
+    const kids = kidsOf(article);
+    return Object.fromEntries(
+      ZONE_ORDER.map((zone, i) => {
+        const note = kidsOf(kids[3 + i])[1];
+        return [zone, { type: note?.type, text: textOf(note), className: note?.props?.className }];
+      }),
+    ) as Record<(typeof ZONE_ORDER)[number], { type: unknown; text: string; className: unknown }>;
+  }
+
+  async function renderSide(
+    extra: Parameters<typeof makeDetail>[2],
+    other: Parameters<typeof makeDetail>[2] = {},
+  ) {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      id === A ? makeDetail(id, "Birinci hikâye", extra) : makeDetail(id, "İkinci hikâye", other),
+    );
+    const tree = await render({ a: A, b: B });
+    const articles = collectElements(tree).filter((el) => el.type === "article");
+    expect(articles).toHaveLength(2);
+    return { tree, first: articles[0]!, second: articles[1]! };
+  }
+
+  describe("empty zone with a non-voting source of that zone", () => {
+    const govOnlyPlusNiche = () => [
+      makeMember(makeSource("gov-1", "Hükümet Gazetesi", "pro_government")),
+      makeMember(makeSource("nic-1", "Niş Merkez", "center", "niche")),
+    ];
+
+    it("qualifies that zone and keeps the plain line for a zone nobody wrote in", async () => {
+      const { first } = await renderSide({ members: govOnlyPlusNiche() });
+      const notes = zoneNotes(first);
+      expect(notes.iktidar.text).toBe("Hükümet Gazetesi");
+      expect(notes.bagimsiz.text).toBe(QUALIFIED);
+      expect(notes.muhalefet.text).toBe(PLAIN);
+    });
+
+    it("uses the same <p> element and classes for both empty-zone lines (row order holds)", async () => {
+      const { first } = await renderSide({ members: govOnlyPlusNiche() });
+      const notes = zoneNotes(first);
+      expect(notes.bagimsiz.type).toBe("p");
+      expect(notes.muhalefet.type).toBe("p");
+      expect(notes.bagimsiz.className).toBe(notes.muhalefet.className);
+      expect(kidsOf(first)).toHaveLength(8);
+    });
+
+    it("derives the line from SPECTRUM_ABSENT_QUALIFIED, first letter upper-cased", async () => {
+      const { SPECTRUM_ABSENT_QUALIFIED } = await import("@/lib/bias/zone-summary");
+      expect(QUALIFIED).toBe(
+        SPECTRUM_ABSENT_QUALIFIED.charAt(0).toLocaleUpperCase("tr-TR") +
+          SPECTRUM_ABSENT_QUALIFIED.slice(1),
+      );
+      const { first } = await renderSide({ members: govOnlyPlusNiche() });
+      expect(zoneNotes(first).bagimsiz.text).toBe(QUALIFIED);
+    });
+
+    it("qualifies each side from its own roster (the other side keeps the plain line)", async () => {
+      const { first, second } = await renderSide(
+        { members: govOnlyPlusNiche() },
+        { aggregator: false },
+      );
+      expect(zoneNotes(first).bagimsiz.text).toBe(QUALIFIED);
+      expect(zoneNotes(second).bagimsiz.text).toBe(PLAIN);
+    });
+
+    it("qualifies every zone a non-voting source covered (niche iktidar and muhalefet)", async () => {
+      const { first } = await renderSide({
+        members: [
+          makeMember(makeSource("ctr", "Merkez Haber", "center")),
+          makeMember(makeSource("nic-gov", "Niş İktidar", "pro_government", "niche")),
+          makeMember(makeSource("agg-opp", "Toplayıcı Muhalif", "opposition", "aggregator")),
+        ],
+      });
+      const notes = zoneNotes(first);
+      expect(notes.iktidar.text).toBe(QUALIFIED);
+      expect(notes.bagimsiz.text).toBe("Merkez Haber");
+      expect(notes.muhalefet.text).toBe(QUALIFIED);
+    });
+
+    it("leaves the toplayıcı / niş footnote untouched", async () => {
+      const { first } = await renderSide({ members: govOnlyPlusNiche() });
+      const note = kidsOf(first)[6]!;
+      expect(note.type).toBe("p");
+      expect(textOf(note)).toBe("Toplayıcı / niş (spektruma sayılmaz): Niş Merkez");
+    });
+
+    it("never prints the plain line for a zone with a voting source", async () => {
+      const { first } = await renderSide({
+        members: [
+          makeMember(makeSource("ctr", "Merkez Haber", "center")),
+          makeMember(makeSource("nic", "Niş Merkez", "center", "niche")),
+        ],
+      });
+      expect(zoneNotes(first).bagimsiz.text).toBe("Merkez Haber");
+    });
+  });
+
+  describe("wire badge beside the distinct-text count", () => {
+    const metaRow = (article: Elementish) => kidsOf(article)[1]!;
+
+    it("single-text wire: keeps '1 kaynak', adds the badge with the shared label and title", async () => {
+      const { tree, first } = await renderSide({
+        wire: { isWireRedistribution: true, memberCount: 3, effectiveArticleCount: 1 },
+      });
+      const text = textOf(metaRow(first));
+      expect(text).toContain("1 kaynak · İlk yayın");
+      expect(text).toContain("Tek kaynaktan dağıtıldı · 3 kopya");
+      expect(
+        collectElements(first).some(
+          (el) => el.props?.title === "Bu kümedeki haberlerin tamamı aynı ajans metninin kopyası",
+        ),
+      ).toBe(true);
+      // Only the wire side carries it.
+      expect(textOf(tree).split("Tek kaynaktan dağıtıldı")).toHaveLength(2);
+    });
+
+    it("several-text wire (4 members, 2 texts) uses the 'Ajans ağırlıklı' wording and its own title", async () => {
+      const { first } = await renderSide({
+        wire: { isWireRedistribution: true, memberCount: 4, effectiveArticleCount: 2 },
+      });
+      const text = textOf(metaRow(first));
+      expect(text).toContain("2 kaynak · İlk yayın");
+      expect(text).toContain("Ajans ağırlıklı · 4 haber, 2 farklı metin");
+      expect(text).not.toContain("Tek kaynaktan dağıtıldı");
+      expect(
+        collectElements(first).some(
+          (el) =>
+            el.props?.title ===
+            "Bu kümedeki haberlerin en az yarısı başka bir haberin birebir kopyası",
+        ),
+      ).toBe(true);
+    });
+
+    it("keeps the meta text byte-identical and orders: meta, wire badge, Kör nokta pill", async () => {
+      const { first } = await renderSide({
+        is_blindspot: true,
+        wire: { isWireRedistribution: true, memberCount: 3, effectiveArticleCount: 1 },
+      });
+      const kids = kidsOf(metaRow(first));
+      expect(kids).toHaveLength(3);
+      expect(kids[0]!.type).toBe("span");
+      expect(textOf(kids[0])).toBe("1 kaynak · İlk yayın: 22 Ekim 2026 14:05");
+      expect(textOf(kids[1])).toBe("Tek kaynaktan dağıtıldı · 3 kopya");
+      expect(textOf(kids[2])).toContain("Kör nokta");
+    });
+
+    it("uses the cluster page's violet badge classes", async () => {
+      const { first } = await renderSide({
+        wire: { isWireRedistribution: true, memberCount: 3, effectiveArticleCount: 1 },
+      });
+      const badge = kidsOf(metaRow(first))[1]!;
+      expect(badge.type).toBe("span");
+      const tokens = String(badge.props?.className).split(/\s+/);
+      for (const token of [
+        "inline-flex",
+        "rounded-full",
+        "bg-violet-500/15",
+        "border-violet-500/30",
+        "text-violet-800",
+        "dark:text-violet-400",
+      ]) {
+        expect(tokens).toContain(token);
+      }
+    });
+
+    it("a non-wire side shows neither 'kopya' nor 'farklı metin' and no wire title", async () => {
+      const { tree } = await renderSide({}, {});
+      const text = textOf(tree);
+      expect(text).not.toContain("kopya");
+      expect(text).not.toContain("farklı metin");
+      expect(text).not.toContain("Ajans ağırlıklı");
+      expect(
+        collectElements(tree).some((el) => String(el.props?.title ?? "").includes("kopyası")),
+      ).toBe(false);
+    });
+
+    it("leaves the count number alone (wire.effectiveArticleCount, as before)", async () => {
+      const { first, second } = await renderSide(
+        { wire: { isWireRedistribution: true, memberCount: 9, effectiveArticleCount: 3 } },
+        { wire: { effectiveArticleCount: 5, memberCount: 5 } },
+      );
+      expect(textOf(metaRow(first))).toContain("3 kaynak · İlk yayın");
+      expect(textOf(metaRow(second))).toContain("5 kaynak · İlk yayın");
+    });
+
+    it("a wire side still has eight direct children", async () => {
+      const { first } = await renderSide({
+        wire: { isWireRedistribution: true, memberCount: 3, effectiveArticleCount: 1 },
+      });
+      expect(kidsOf(first)).toHaveLength(8);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h78-compare-2: removing a side must also leave it in the compare tray, so
+// the next "Karşılaştır" pick pairs with the story the reader kept.
+// ---------------------------------------------------------------------------
+
+describe("CompareBody — remove control updates the tray", () => {
+  it("renders each remover as a RemoveSideLink for the side it removes, linking to the other side", async () => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) => makeDetail(id, id));
+    const tree = await render({ a: A, b: B });
+    const removers = collectElements(tree).filter((el) => el.type === RemoveSideLink);
+    expect(removers).toHaveLength(2);
+
+    const forB = removers.find((el) => el.props?.["aria-label"] === `Bu tarafı kaldır: ${B}`);
+    expect(forB?.type).toBe(RemoveSideLink);
+    expect(forB?.props?.removeId).toBe(B);
+    expect(forB?.props?.href).toBe(`/karsilastir?a=${A}`);
+
+    const forA = removers.find((el) => el.props?.["aria-label"] === `Bu tarafı kaldır: ${A}`);
+    expect(forA?.props?.removeId).toBe(A);
+    expect(forA?.props?.href).toBe(`/karsilastir?a=${B}`);
+  });
+
+  it("keeps the remover's children text and 44px / touch classes", async () => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) => makeDetail(id, id));
+    const tree = await render({ a: A, b: B });
+    for (const el of collectElements(tree).filter((e) => e.type === RemoveSideLink)) {
+      expect(collectText(el.props?.children).join("")).toBe("Bu tarafı kaldır");
+      expect(String(el.props?.className)).toContain("min-h-[44px]");
+      expect(String(el.props?.className)).toContain("touch-manipulation");
+    }
+  });
+
+  it("keeps the page a server component", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    expect(src).not.toMatch(/^\s*["']use client["']/);
+    expect(src).not.toContain("useCompareTray");
   });
 });
 
