@@ -26,6 +26,45 @@ export interface ServerClientOptions {
 const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
 
 /**
+ * How far past its deadline a timeout may fire before it counts as a STALLED
+ * timer (a frozen or blocked event loop) rather than a slow request. 1.5 s is
+ * well above the few ms of ordinary timer jitter and well below the 6 s to
+ * 267 s of the late timers seen in production (h83-runtimeerrors-1).
+ */
+export const STALLED_TIMER_SLACK_MS = 1500;
+
+/**
+ * True when a timeout that was armed for `timeoutMs` fired only after
+ * `elapsedMs`, more than `STALLED_TIMER_SLACK_MS` late. Pure: the clock is the
+ * caller's. A NaN or negative elapsed is never stalled.
+ */
+export function isStalledTimeout(elapsedMs: number, timeoutMs: number): boolean {
+  return elapsedMs > timeoutMs + STALLED_TIMER_SLACK_MS;
+}
+
+/** Test seam for `withFetchTimeout`: the monotonic clock. */
+export interface FetchTimeoutDeps {
+  /** Milliseconds on a monotonic clock. Defaults to `performance.now()`. */
+  now?: () => number;
+}
+
+/**
+ * Whether a request may be issued a second time after its first attempt was
+ * aborted by a stalled timer: GET or HEAD only (the method is `init.method`,
+ * else the `Request`'s own, else GET; compared case-insensitively) and with no
+ * body anywhere, so no body stream can be consumed twice. A GET/HEAD cannot
+ * legally carry one, so the body checks are a guard, not a limitation.
+ */
+function isReplayableRead(input: RequestInfo | URL, init: RequestInit | undefined): boolean {
+  const request = input instanceof Request ? input : undefined;
+  const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return false;
+  if (init?.body != null) return false;
+  if (request && (request.body !== null || request.bodyUsed)) return false;
+  return true;
+}
+
+/**
  * Wrap `fetch` so a request that outlives `timeoutMs` is aborted.
  *
  * Capped clients (`createServerClient({ timeoutMs })`) are built with
@@ -77,62 +116,110 @@ const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
  * Next 16 cacheComponents treats `Date.now()` as prerender IO and fails the
  * build when an uncached prerender path reads it; `performance.now()` is the
  * monotonic interval clock the Next docs point to for measuring durations.
+ *
+ * STALLED TIMERS (h83-runtimeerrors-1). Most `request exceeded 4000 ms` lines in
+ * production carried an elapsed far past the timer (6 s to 267 s), not ~4 s:
+ * the event loop was frozen or blocked, and Node runs expired timers before I/O
+ * callbacks, so the abort can win even when the response has already arrived.
+ * A late timer means the request was PROBABLY stalled, not proven: a genuinely
+ * slow query that is still running while the loop is blocked for more than
+ * `STALLED_TIMER_SLACK_MS` is classified the same way and re-issued once, and
+ * the first statement keeps running in Postgres until it finishes or hits
+ * `statement_timeout`. In a `use cache: remote` entry such a failure was stored
+ * as a failed read for every instance. `isStalledTimeout(elapsed, timeoutMs)`
+ * (elapsed more than `STALLED_TIMER_SLACK_MS` past the budget) separates the
+ * two as a heuristic:
+ *   - HEADER phase, stalled, and a GET/HEAD with no body (`isReplayableRead`):
+ *     log ONE line `[supabase] stalled timer (phase: headers, elapsed: <n> ms,
+ *     timeout: <t> ms), retrying once` and issue the request exactly once more,
+ *     with a fresh `AbortSignal.timeout(timeoutMs)` combined with the caller's
+ *     signal through `AbortSignal.any`, a fresh clock reading and the same body
+ *     wrapping. A `Request` input is cloned for the retry. The first attempt's
+ *     timer has already fired, so nothing of it is left running. If the retry
+ *     also times out it is relabelled exactly as above (the `request exceeded`
+ *     line and the `AbortError`), and there is never a third attempt.
+ *   - HEADER phase on a POST (rpc) or any request with a body, or an on-time
+ *     timeout: unchanged, whatever the elapsed.
+ *   - BODY phase, stalled: no retry (part of the body may already be consumed);
+ *     the log line is `[supabase] stalled timer (phase: body, elapsed: <n> ms,
+ *     timeout: <t> ms)` instead of the `request exceeded` one, and the stream
+ *     errors with the same relabelled `AbortError`, so `isUpstreamUnavailable`
+ *     and the callers are unchanged.
+ * `deps.now` is a test seam (default `performance.now()`, never `Date.now()`);
+ * it is read once when an attempt starts and once when that attempt's timeout is
+ * observed. Elapsed is per attempt, so a retry is judged by its own clock.
  */
-export function withFetchTimeout(timeoutMs: number): typeof fetch {
+export function withFetchTimeout(timeoutMs: number, deps: FetchTimeoutDeps = {}): typeof fetch {
+  const now = deps.now ?? (() => performance.now());
+
   return async (input, init) => {
-    const t = AbortSignal.timeout(timeoutMs);
-    const signal = init?.signal ? AbortSignal.any([init.signal, t]) : t;
-    const startedAt = performance.now();
-    /** True when the abort came from OUR timer, not from the caller. */
-    const isOurTimeout = () => t.aborted && !init?.signal?.aborted;
-    const relabel = (phase: "headers" | "body") => {
-      console.warn(
-        "[supabase] request exceeded " +
-          timeoutMs +
-          " ms (phase: " +
-          phase +
-          ", elapsed: " +
-          Math.round(performance.now() - startedAt) +
-          " ms)",
+    const callerSignal = init?.signal ?? undefined;
+    const replayable = isReplayableRead(input, init);
+
+    /** One attempt. `canRetry` is false on the retry itself: never a third. */
+    const attempt = async (attemptInput: RequestInfo | URL, canRetry: boolean): Promise<Response> => {
+      const t = AbortSignal.timeout(timeoutMs);
+      const signal = callerSignal ? AbortSignal.any([callerSignal, t]) : t;
+      const startedAt = now();
+      /** True when the abort came from OUR timer, not from the caller. */
+      const isOurTimeout = () => t.aborted && !callerSignal?.aborted;
+      /** Elapsed ms of THIS attempt, read once per observed timeout. */
+      const elapsedMs = () => now() - startedAt;
+      const relabel = (phase: "headers" | "body", elapsed: number) => {
+        const ms = Math.round(elapsed);
+        console.warn(
+          phase === "body" && isStalledTimeout(elapsed, timeoutMs)
+            ? `[supabase] stalled timer (phase: body, elapsed: ${ms} ms, timeout: ${timeoutMs} ms)`
+            : `[supabase] request exceeded ${timeoutMs} ms (phase: ${phase}, elapsed: ${ms} ms)`,
+        );
+        return new DOMException(`Supabase request exceeded ${timeoutMs} ms`, "AbortError");
+      };
+
+      let res: Response;
+      try {
+        res = await globalThis.fetch(attemptInput, { ...init, signal });
+      } catch (err) {
+        if (!isOurTimeout()) throw err;
+        const elapsed = elapsedMs();
+        if (canRetry && replayable && isStalledTimeout(elapsed, timeoutMs)) {
+          console.warn(
+            `[supabase] stalled timer (phase: headers, elapsed: ${Math.round(elapsed)} ms, timeout: ${timeoutMs} ms), retrying once`,
+          );
+          return attempt(attemptInput instanceof Request ? attemptInput.clone() : attemptInput, false);
+        }
+        throw relabel("headers", elapsed);
+      }
+
+      if (res.body === null || NULL_BODY_STATUSES.has(res.status)) return res;
+
+      const reader = res.body.getReader();
+      const wrapped = new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            let chunk: ReadableStreamReadResult<Uint8Array>;
+            try {
+              chunk = await reader.read();
+            } catch (err) {
+              controller.error(isOurTimeout() ? relabel("body", elapsedMs()) : err);
+              return;
+            }
+            if (chunk.done) controller.close();
+            else controller.enqueue(chunk.value);
+          },
+          cancel(reason) {
+            return reader.cancel(reason);
+          },
+        },
+        { highWaterMark: 0 },
       );
-      return new DOMException(`Supabase request exceeded ${timeoutMs} ms`, "AbortError");
+      return new Response(wrapped, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      });
     };
 
-    let res: Response;
-    try {
-      res = await globalThis.fetch(input, { ...init, signal });
-    } catch (err) {
-      if (isOurTimeout()) throw relabel("headers");
-      throw err;
-    }
-
-    if (res.body === null || NULL_BODY_STATUSES.has(res.status)) return res;
-
-    const reader = res.body.getReader();
-    const wrapped = new ReadableStream<Uint8Array>(
-      {
-        async pull(controller) {
-          let chunk: ReadableStreamReadResult<Uint8Array>;
-          try {
-            chunk = await reader.read();
-          } catch (err) {
-            controller.error(isOurTimeout() ? relabel("body") : err);
-            return;
-          }
-          if (chunk.done) controller.close();
-          else controller.enqueue(chunk.value);
-        },
-        cancel(reason) {
-          return reader.cancel(reason);
-        },
-      },
-      { highWaterMark: 0 },
-    );
-    return new Response(wrapped, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers,
-    });
+    return attempt(input, true);
   };
 }
 
@@ -148,9 +235,13 @@ function createRealServerClient(opts?: ServerClientOptions): SupabaseClient {
   }
 
   if (opts?.timeoutMs !== undefined) {
-    // `retry: false`: a capped client fails fast. The caller's own retry
-    // (resolveCachedOrRetry's one live retry, the "Tekrar dene" button) is the
-    // only retry; postgrest-js's 3 x (1/2/4 s) loop would multiply the cap.
+    // `retry: false`: a capped client fails fast; postgrest-js's 3 x (1/2/4 s)
+    // loop would multiply the cap. The only in-client retry is
+    // withFetchTimeout's single re-issue of a bodyless GET/HEAD whose
+    // header-phase timer fired more than STALLED_TIMER_SLACK_MS late (see
+    // STALLED TIMERS in the withFetchTimeout doc). Otherwise the caller's own
+    // retry (resolveCachedOrRetry's one live retry, the "Tekrar dene" button)
+    // is the only retry.
     return createClient(supabaseUrl, supabaseServiceKey, {
       db: { retry: false },
       global: { fetch: withFetchTimeout(opts.timeoutMs) },
@@ -187,7 +278,7 @@ export type ReadProfile = "reader" | "batch";
  * is aborted after `READER_TIMEOUT_MS` so a cold read fails fast and the
  * caller's retry/fallback path can run.
  *
- * Capped clients never retry inside the client (`db: { retry: false }`): a
+ * Capped clients skip postgrest-js's retry loop (`db: { retry: false }`): a
  * 503, a 520 or a connection failure surfaces as a single `error` straight
  * away. The one retry per request comes from `resolveCachedOrRetry`'s live
  * retry (src/lib/cache-resilience.ts) or the page's "Tekrar dene" path, so a
@@ -195,6 +286,13 @@ export type ReadProfile = "reader" | "batch";
  * finance readers (`createFinanceServerClient({ timeoutMs })`) and
  * cron-route-outcome's capped RPC inherit `retry: false`; RPC POSTs were never
  * retried by postgrest-js in the first place.
+ *
+ * The one exception is the stalled-timer re-issue of a bodyless GET/HEAD (see
+ * STALLED TIMERS in the `withFetchTimeout` doc), at most once per call: POST/rpc
+ * and writes are never re-issued by the wrapper. A stalled read can therefore
+ * cost about 2 x the cap per call (about 8 s for the reader, 18 s for the slow
+ * reader), and with `resolveCachedOrRetry`'s live retry up to 4 HTTP requests
+ * for one logical read.
  *
  * Crons, admin pages, webhooks and RPC writers must keep plain
  * `createServerClient()`: a write that is aborted client-side may still
@@ -210,7 +308,8 @@ export type ReadProfile = "reader" | "batch";
  * SCOPE: the cap is per HTTP request, not per route. A page with k
  * sequential reads can still take about k x 4 s, so do not promise an
  * end-to-end ~4.5 s worst case for a route without counting its sequential
- * awaits.
+ * awaits. The per-request cap can also be paid twice when the stalled-timer
+ * GET/HEAD re-issue runs.
  *
  * Now capped: the feed, search, politics, blindspots, game pool, trends
  * timeline, sitemaps and finance read pages above, plus the source profile
