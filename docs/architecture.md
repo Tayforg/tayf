@@ -317,6 +317,7 @@ Columns on `clusters`: `blindspot_recall_veto` (boolean, default `false`), `blin
 | Source floor | At least 5 distinct sources after dedupe | `BLINDSPOT.minSources` 5 |
 | SEO titles | Title must not match `kimdir`, `kaç yaşında`, `nedir?`, `ne zaman`, `kaç bin`, `kaç tl`, `son dakika …:`, `canlı`, `ne dedi` | `SEO_PATTERN` |
 | Wire filter | Distinct content hashes at least 50 % of the deduped members | `WIRE_UNIQUE_HASH_RATIO` 0.5 |
+| Copy filter (`copy_dedup`, h66-dupes-1) | Over the deduped *voting* members only, a shared content hash or a shared headline (`headlineKey`: case, quotes and punctuation ignored, a title under 25 characters and 4 tokens never folds) counts as one text, and the independent texts must be at least 50 % of those voters (strict `<`, so 4 texts behind 8 voters passes). The wire filter cannot see an aggregator's extra hash or an outlet that appends its own description to a dispatch; this one is read time only and shared by the list, the near band and both Kör nokta RSS feeds | `BLINDSPOT_LIST_FILTERS.minIndependentTextRatio` 0.5 |
 | Foreign affairs | `dunya` category share of the deduped members at most 50 % | `DUNYA_CATEGORY_SHARE_LIMIT` 0.5 |
 | Politics floor | At least 60 % of the deduped members are politics members (`politika` / `son_dakika`, or live-admitted) | `POLITICS_CATEGORY_SHARE_MIN` 0.6 |
 | Live re-tally | Voting sources at least 5 and dominant share at least 0.8 on the deduped members, so a stale flag never surfaces | `BLINDSPOT` |

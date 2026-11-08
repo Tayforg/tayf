@@ -1,4 +1,5 @@
 import { BLINDSPOT, isPoliticsMember, isVotingKind, tallyZones } from "@/lib/bias/config";
+import { countIndependentHeadlines } from "./wire";
 import type { ZoneTally } from "../../../supabase/functions/_shared/cluster/blindspot";
 import type { BiasCategory, NewsCategory, SourceKind } from "@/types";
 
@@ -45,7 +46,13 @@ type FeedCluster = {
 
 type FeedFilterResult = {
   ok: boolean;
-  reason?: "min_sources" | "seo_pattern" | "wire_dedup" | "dunya_share" | "politics_share";
+  reason?:
+    | "min_sources"
+    | "seo_pattern"
+    | "wire_dedup"
+    | "copy_dedup"
+    | "dunya_share"
+    | "politics_share";
 };
 
 // A5 fix #3 (rewritten for h13-biasdata-4): "kimdir / kaç yaşında / nedir? / ne zaman ...? /
@@ -112,7 +119,7 @@ export function isSeoExplainerTitle(title: string): boolean {
 }
 
 /**
- * The three shares `passesFeedFilters` tests, exported so /metodoloji can quote
+ * The four shares `passesFeedFilters` tests, exported so /metodoloji can quote
  * them (h62-methodology-1). They apply to the members deduped by source, on
  * /blindspots and its "Kör noktaya yakın" band only; the label on a card or a
  * story page does not depend on them.
@@ -120,6 +127,15 @@ export function isSeoExplainerTitle(title: string): boolean {
  * - `minUniqueHashRatio` (A5 fix #4): the cluster fails when its share of
  *   distinct content_hashes is BELOW this (`<`), because it is then one wire
  *   copy amplified by N outlets. Exactly this share passes.
+ * - `minIndependentTextRatio` (h66-dupes-1, reason `copy_dedup`): the cluster
+ *   fails when the share of independent texts among its VOTING members is
+ *   BELOW this (`<`). Voting members only (`outlet` / `wire`: an aggregator's
+ *   own hash must not dilute the count), deduped by source, and a text is a
+ *   shared content_hash OR a shared `headlineKey` (the fold the cluster page
+ *   prints as "bağımsız başlık", see `countIndependentHeadlines`). The hash
+ *   check above cannot see an outlet that appends its own description to a
+ *   dispatch (new hash, same text), nor an aggregator's extra hash. Exactly
+ *   this share passes.
  * - `maxDunyaShare` (A5 fix #5): the cluster fails when its dunya share is ABOVE
  *   this (`>`), because the substance is then foreign affairs, not domestic
  *   politics. Exactly this share passes.
@@ -132,6 +148,7 @@ export function isSeoExplainerTitle(title: string): boolean {
  */
 export const BLINDSPOT_LIST_FILTERS = {
   minUniqueHashRatio: 0.5,
+  minIndependentTextRatio: 0.5,
   maxDunyaShare: 0.5,
   minPoliticsShare: 0.6,
 } as const;
@@ -164,6 +181,20 @@ export function passesFeedFilters(
   ).size;
   if (distinctHashes / deduped.length < BLINDSPOT_LIST_FILTERS.minUniqueHashRatio) {
     return { ok: false, reason: "wire_dedup" };
+  }
+
+  // h66-dupes-1: the same question as wire_dedup, asked of the members that
+  // actually vote and with the evidence the cluster page prints (a shared hash
+  // OR a shared headline). One dispatch reprinted by most voters fails here
+  // even when aggregators and appended descriptions give it many hashes.
+  const voting = deduped.filter((m) => m.sources !== null && isVotingKind(m.sources.kind));
+  if (voting.length > 0) {
+    const independentTexts = countIndependentHeadlines(
+      voting.map((m) => ({ id: m.id, content_hash: m.content_hash, title: m.title })),
+    );
+    if (independentTexts / voting.length < BLINDSPOT_LIST_FILTERS.minIndependentTextRatio) {
+      return { ok: false, reason: "copy_dedup" };
+    }
   }
 
   const dunyaCount = deduped.filter((m) => m.category === "dunya").length;

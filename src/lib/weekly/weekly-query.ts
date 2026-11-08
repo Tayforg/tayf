@@ -108,16 +108,30 @@ export interface WeeklyLabelChange {
 export interface WeeklyTopCluster {
   id: string;
   title: string;
+  /** Every member of the cluster, aggregator and niche feeds included. */
   articleCount: number;
   zonesCovered: number;
+  /**
+   * The VOTING sources per zone (the stored `bias_distribution`), so their sum
+   * can be smaller than `articleCount`: the row prints both through
+   * `sourceCountHead` (h66-statsparity-1).
+   */
   zoneCounts: Record<MediaDnaZone, number>;
 }
 
 export interface WeeklyBlindspot {
   id: string;
   title: string;
+  /** Every member of the cluster, aggregator and niche feeds included. */
   articleCount: number;
   side: MediaDnaZone;
+  /**
+   * The VOTING sources per zone: the very counts `share` and `sharePct` are
+   * computed from, so their sum can be smaller than `articleCount`. All zeros
+   * when the row has no distribution. The row prints both through
+   * `sourceCountHead` (h66-statsparity-1).
+   */
+  counts: Record<MediaDnaZone, number>;
   /**
    * The stored side's share of the row's zone-attributed articles, 0..1; `null`
    * when the row has no zone evidence at all (a stored side with no
@@ -366,6 +380,7 @@ export function summariseWeek(
           title: titleOf(row),
           articleCount: row.article_count,
           side,
+          counts,
           share,
           sharePct,
         });

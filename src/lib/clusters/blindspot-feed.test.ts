@@ -173,15 +173,18 @@ describe("passesFeedFilters", () => {
   });
 });
 
-// h62-methodology-1: the three list thresholds are one exported object so
+// h62-methodology-1: the list thresholds are one exported object so
 // /metodoloji can quote them; the comparators stay exactly as they were.
+// h66-dupes-1 added the fourth, minIndependentTextRatio.
 describe("BLINDSPOT_LIST_FILTERS", () => {
-  it("holds the three list thresholds", () => {
+  it("holds the four list thresholds", () => {
     expect(BLINDSPOT_LIST_FILTERS).toEqual({
       minUniqueHashRatio: 0.5,
+      minIndependentTextRatio: 0.5,
       maxDunyaShare: 0.5,
       minPoliticsShare: 0.6,
     });
+    expect(BLINDSPOT_LIST_FILTERS.minIndependentTextRatio).toBe(0.5);
   });
 
   // `n` deduped members, one per source, all politika with a unique hash unless
@@ -244,6 +247,189 @@ describe("BLINDSPOT_LIST_FILTERS", () => {
 
     const below = members(5, (i) => (i < 2 ? {} : { category: "spor" }));
     expect(passesFeedFilters(title, below)).toEqual({ ok: false, reason: "politics_share" });
+  });
+});
+
+// h66-dupes-1: the wire_dedup guard counts distinct content_hash over EVERY
+// deduped member, so an aggregator's own hash and an outlet that appends its own
+// description to a dispatch both hide a reprint. copy_dedup judges the VOTING
+// members only and folds a shared content_hash OR a shared headline (the
+// cluster page's "bağımsız başlık" rule) into one text. Production shapes of
+// 2026-11-08: 60765023 (7 voters, 3 texts), 87bcc51b (5 voters, 2 texts),
+// 7c57724b (8 voters, exactly 4 texts, stays listed).
+describe("passesFeedFilters: copy_dedup (h66-dupes-1)", () => {
+  const title = { title_tr: "Bakanlıktan açıklama" };
+  // 46 characters, 6 tokens: well past headlineKey's 25-char / 4-token gate.
+  const SAME_HEADLINE = "Bakanlık yeni düzenlemeyi bugün resmen duyurdu";
+
+  // One voting outlet (or another kind) with its own hash and its own headline;
+  // `over` swaps in a shared hash or a shared headline.
+  function member(
+    i: number,
+    over: Partial<EmbeddedArticle> = {},
+    kind: SourceKind = "outlet",
+  ): EmbeddedArticle {
+    return {
+      ...article({
+        id: `m${i}`,
+        source_id: `m${i}`,
+        sources: source(`m${i}`, "pro_government", kind),
+        content_hash: `hash-${i}`,
+        title: `Muhabir ${i} sahadan ayrı bir haber yazdı bugün`,
+        category: "politika",
+      }),
+      ...over,
+    };
+  }
+  const aggregator = (i: number, over: Partial<EmbeddedArticle> = {}) =>
+    member(i, over, "aggregator");
+
+  // The hash ratio wire_dedup computes over every deduped member.
+  const hashRatio = (deduped: EmbeddedArticle[]) =>
+    new Set(deduped.map((m) => m.content_hash)).size / deduped.length;
+
+  it("87bcc51b shape: 5 voters fold to 2 texts (a shared hash, a shared headline) behind 2 aggregators -> copy_dedup", () => {
+    const deduped = [
+      member(0, { content_hash: "dispatch-a" }),
+      member(1, { content_hash: "dispatch-a" }),
+      member(2, { title: SAME_HEADLINE }),
+      member(3, { title: SAME_HEADLINE }),
+      member(4, { title: SAME_HEADLINE }),
+      aggregator(5),
+      aggregator(6),
+    ];
+    // The existing guard lets it through: 6 distinct hashes over 7 members.
+    expect(hashRatio(deduped)).toBeGreaterThanOrEqual(BLINDSPOT_LIST_FILTERS.minUniqueHashRatio);
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: false, reason: "copy_dedup" });
+  });
+
+  it("60765023 shape: 7 voters fold to 3 texts behind 2 aggregators -> copy_dedup", () => {
+    const deduped = [
+      member(0, { content_hash: "dispatch-a" }),
+      member(1, { content_hash: "dispatch-a" }),
+      member(2, { content_hash: "dispatch-a" }),
+      member(3, { title: SAME_HEADLINE }),
+      member(4, { title: SAME_HEADLINE }),
+      member(5, { content_hash: "dispatch-c" }),
+      member(6, { content_hash: "dispatch-c" }),
+      aggregator(7),
+      aggregator(8),
+    ];
+    expect(hashRatio(deduped)).toBeGreaterThanOrEqual(BLINDSPOT_LIST_FILTERS.minUniqueHashRatio);
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: false, reason: "copy_dedup" });
+  });
+
+  it("7 voters with 4 texts pass (4/7 is above 0.5)", () => {
+    const deduped = [
+      member(0, { content_hash: "dispatch-a" }),
+      member(1, { content_hash: "dispatch-a" }),
+      member(2, { title: SAME_HEADLINE }),
+      member(3, { title: SAME_HEADLINE }),
+      member(4, { content_hash: "dispatch-b" }),
+      member(5, { content_hash: "dispatch-b" }),
+      member(6),
+    ];
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: true });
+  });
+
+  it("is strict '<': 8 voters with exactly 4 texts pass (7c57724b), 9 voters with 4 texts fail", () => {
+    // Four pairs, each printing one headline under two different hashes, so the
+    // hash ratio (all distinct) cannot be what this case is testing.
+    const pairs = (voters: number) =>
+      Array.from({ length: voters }, (_, i) =>
+        member(i, { title: `${SAME_HEADLINE} ${Math.min(Math.floor(i / 2), 3)}` }),
+      );
+    const eight = pairs(8);
+    expect(hashRatio(eight)).toBe(1);
+    expect(passesFeedFilters(title, eight)).toEqual({ ok: true });
+
+    const nine = pairs(9);
+    expect(passesFeedFilters(title, nine)).toEqual({ ok: false, reason: "copy_dedup" });
+  });
+
+  it("does not fold identical titles below headlineKey's 25-char / 4-token gate", () => {
+    const deduped = Array.from({ length: 5 }, (_, i) => member(i, { title: "Erdoğan konuştu" }));
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: true });
+  });
+
+  it("folds case, quote and punctuation variants of one headline, as the cluster page does", () => {
+    const variants = [
+      "Bakan Kurum: “Tüm dünyayı Antalya'da ağırlayacağız”",
+      "BAKAN KURUM: TÜM DÜNYAYI ANTALYA’DA AĞIRLAYACAĞIZ!",
+      "Son dakika Bakan Kurum: Tüm dünyayı Antalya'da ağırlayacağız",
+      "Bakan Kurum - Tüm dünyayı Antalya'da ağırlayacağız…",
+      "bakan kurum tüm dünyayı antalyada ağırlayacağız",
+    ];
+    const deduped = variants.map((t, i) => member(i, { title: t }));
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: false, reason: "copy_dedup" });
+  });
+
+  it("judges voters only: aggregators that print one headline never count against them", () => {
+    const deduped = [
+      ...Array.from({ length: 5 }, (_, i) => member(i)),
+      ...Array.from({ length: 8 }, (_, i) => aggregator(5 + i, { title: SAME_HEADLINE })),
+    ];
+    // Over every member the text ratio would be 6/13 < 0.5, over the voters 5/5.
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: true });
+  });
+
+  it("a member with no source is not a voter", () => {
+    const deduped = [
+      ...Array.from({ length: 5 }, (_, i) => member(i)),
+      ...Array.from({ length: 8 }, (_, i) =>
+        member(5 + i, { sources: null, title: SAME_HEADLINE }),
+      ),
+    ];
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: true });
+  });
+
+  it("does not divide by zero when no member votes (the live re-tally rejects that later)", () => {
+    const deduped = Array.from({ length: 5 }, (_, i) =>
+      aggregator(i, { title: SAME_HEADLINE }),
+    );
+    expect(passesFeedFilters(title, deduped)).toEqual({ ok: true });
+  });
+
+  it("keeps the gate order: min_sources, seo_pattern, wire_dedup, copy_dedup, dunya_share, politics_share", () => {
+    // Every fixture below also fails copy_dedup: five voters, one headline, five hashes.
+    const copies = (over: Partial<EmbeddedArticle> = {}) =>
+      Array.from({ length: 5 }, (_, i) => member(i, { title: SAME_HEADLINE, ...over }));
+
+    expect(passesFeedFilters(title, copies())).toEqual({ ok: false, reason: "copy_dedup" });
+
+    expect(passesFeedFilters(title, copies().slice(0, 4))).toEqual({
+      ok: false,
+      reason: "min_sources",
+    });
+    expect(passesFeedFilters({ title_tr: "Ali Koç kimdir?" }, copies())).toEqual({
+      ok: false,
+      reason: "seo_pattern",
+    });
+    expect(passesFeedFilters(title, copies({ content_hash: "wire" }))).toEqual({
+      ok: false,
+      reason: "wire_dedup",
+    });
+    expect(passesFeedFilters(title, copies({ category: "dunya" }))).toEqual({
+      ok: false,
+      reason: "copy_dedup",
+    });
+    expect(passesFeedFilters(title, copies({ category: "spor" }))).toEqual({
+      ok: false,
+      reason: "copy_dedup",
+    });
+  });
+
+  it("still reports dunya_share and politics_share when the voters are independent", () => {
+    const independent = (over: Partial<EmbeddedArticle>) =>
+      Array.from({ length: 5 }, (_, i) => member(i, over));
+    expect(passesFeedFilters(title, independent({ category: "dunya" }))).toEqual({
+      ok: false,
+      reason: "dunya_share",
+    });
+    expect(passesFeedFilters(title, independent({ category: "spor" }))).toEqual({
+      ok: false,
+      reason: "politics_share",
+    });
   });
 });
 

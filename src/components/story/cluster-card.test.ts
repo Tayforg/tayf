@@ -4,7 +4,16 @@ import { fileURLToPath } from "node:url";
 import { getImageProps } from "next/image";
 import { describe, expect, it } from "vitest";
 
-import { MOBILE_BANNER_SIZES, mobileBannerImageProps } from "./cluster-card";
+import { emptyBiasDistribution } from "@/lib/bias/analyzer";
+import type { BiasDistribution } from "@/types";
+
+import {
+  MOBILE_BANNER_SIZES,
+  SOURCE_COUNT_QUALIFIED_TITLE,
+  cardSourceCountLabel,
+  cardSourceCountTitle,
+  mobileBannerImageProps,
+} from "./cluster-card";
 
 // Source guard (repo convention: no render tests of server components --
 // ClusterCard is an async-data Server Component). Pins the image-priority
@@ -545,5 +554,131 @@ describe("cluster-card.tsx English headline language (h17-a11y-2, WCAG 3.1.2)", 
 
   it("no other lang= appears in the file: the article title span and the h2 only (source name and chrome stay Turkish)", () => {
     expect(src.match(/\blang=/g)).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h66-statsparity-1: the card's pill printed the bare member count ("17
+// kaynak") next to a bar drawn from the VOTING-only bias_distribution (14
+// voters), while the OG card, embed, rozet, RSS, Telegram, share text and
+// /takip already print "N kaynak (M sınıflandırılmış)". The pill now goes
+// through the same sourceCountHead; the marker (and a title that explains it)
+// shows only when fewer sources voted than the pill counts.
+// ---------------------------------------------------------------------------
+
+function dist(overrides: Partial<BiasDistribution> = {}): BiasDistribution {
+  return { ...emptyBiasDistribution(), ...overrides };
+}
+
+describe("cardSourceCountLabel (h66-statsparity-1)", () => {
+  it("17 members, 14 voters (10 iktidar / 1 bağımsız / 3 muhalefet): marks the voting count", () => {
+    const distribution = dist({
+      gov_leaning: 5,
+      pro_government: 5,
+      center: 1,
+      opposition: 1,
+      opposition_leaning: 2,
+    });
+
+    expect(cardSourceCountLabel(17, distribution)).toBe("17 kaynak (14 sınıflandırılmış)");
+  });
+
+  it("every member voted: the bare count, no marker", () => {
+    expect(cardSourceCountLabel(3, dist({ pro_government: 1, center: 1, opposition: 1 }))).toBe(
+      "3 kaynak",
+    );
+  });
+
+  it("a wire card (2 distinct dispatches, 6 voters) keeps the bare count: voting >= total", () => {
+    const distribution = dist({ pro_government: 3, center: 1, opposition: 2 });
+
+    expect(cardSourceCountLabel(2, distribution)).toBe("2 kaynak");
+  });
+
+  it("nobody voted: says so with the helper's own rule", () => {
+    expect(cardSourceCountLabel(3, dist())).toBe("3 kaynak (0 sınıflandırılmış)");
+  });
+
+  it("matches sourceCountHead over the same zone counts, so every surface words it alike", async () => {
+    const { sourceCountHead } = await import("@/lib/feeds/zone-line");
+    const { zoneCountsOf } = await import("@/lib/bias/zone-summary");
+    const distribution = dist({ pro_government: 9, center: 1 });
+
+    expect(cardSourceCountLabel(16, distribution)).toBe(
+      sourceCountHead(16, zoneCountsOf(distribution)),
+    );
+  });
+});
+
+describe("cardSourceCountTitle (h66-statsparity-1)", () => {
+  it("uses the /blindspots row wording", () => {
+    expect(SOURCE_COUNT_QUALIFIED_TITLE).toBe("Toplayıcı ve niş kaynaklar spektruma sayılmaz.");
+  });
+
+  it("is set exactly when the marker shows", () => {
+    const fourteen = dist({ gov_leaning: 5, pro_government: 5, center: 1, opposition: 1, opposition_leaning: 2 });
+    const three = dist({ pro_government: 1, center: 1, opposition: 1 });
+
+    expect(cardSourceCountTitle(17, fourteen)).toBe(SOURCE_COUNT_QUALIFIED_TITLE);
+    expect(cardSourceCountTitle(3, dist())).toBe(SOURCE_COUNT_QUALIFIED_TITLE);
+    expect(cardSourceCountTitle(3, three)).toBeUndefined();
+    expect(cardSourceCountTitle(2, dist({ pro_government: 3, center: 1, opposition: 2 }))).toBeUndefined();
+  });
+
+  it("agrees with the label for every total around the voter count", () => {
+    const distribution = dist({ pro_government: 4, center: 2, opposition: 2 });
+    for (const total of [0, 1, 7, 8, 9, 20]) {
+      const marked = cardSourceCountLabel(total, distribution).includes("sınıflandırılmış");
+      expect(cardSourceCountTitle(total, distribution) !== undefined).toBe(marked);
+    }
+  });
+});
+
+describe("cluster-card.tsx source-count pill (h66-statsparity-1)", () => {
+  const badgesStart = src.indexOf("function ClusterMetaBadges");
+  const cardStart = src.indexOf("export function ClusterCard(");
+
+  it("imports sourceCountHead and zoneCountsOf from the shared modules", () => {
+    expect(src).toMatch(
+      /import\s*\{[^}]*\bsourceCountHead\b[^}]*\}\s*from\s*["']@\/lib\/feeds\/zone-line["']/,
+    );
+    expect(src).toMatch(
+      /import\s*\{[^}]*\bzoneCountsOf\b[^}]*\}\s*from\s*["']@\/lib\/bias\/zone-summary["']/,
+    );
+  });
+
+  it("builds the pill from cardSourceCountLabel(effectiveArticleCount ?? articleCount, distribution), once", () => {
+    expect(count(src, "cardSourceCountLabel(effectiveArticleCount ?? articleCount, distribution)")).toBe(1);
+    const at = src.indexOf("cardSourceCountLabel(effectiveArticleCount ?? articleCount, distribution)");
+    expect(at).toBeGreaterThan(badgesStart);
+    expect(at).toBeLessThan(cardStart);
+  });
+
+  it("holds no bare '{... ?? articleCount} kaynak' pill any more", () => {
+    expect(src).not.toMatch(/\}\s*kaynak\s*</);
+    expect(src).not.toMatch(/\{effectiveArticleCount \?\? articleCount\} kaynak/);
+  });
+
+  it("puts the explanatory title on the pill from cardSourceCountTitle, not an unconditional literal", () => {
+    expect(count(src, "cardSourceCountTitle(effectiveArticleCount ?? articleCount, distribution)")).toBe(1);
+    expect(src).toMatch(/<span\s+className="[^"]*"\s+title=\{countTitle\}\s*>\s*<Users/);
+    // The wording lives in one constant, not repeated inline.
+    expect(count(src, "Toplayıcı ve niş kaynaklar spektruma sayılmaz.")).toBe(1);
+  });
+
+  it("ClusterMetaBadges takes a distribution prop and ClusterCard hands it cluster.bias_distribution", () => {
+    const props = src.slice(
+      src.indexOf("interface ClusterMetaBadgesProps"),
+      src.indexOf("function ClusterMetaBadges("),
+    );
+    expect(props).toMatch(/\bdistribution:\s*BiasDistribution\b/);
+    expect(src).toMatch(/<ClusterMetaBadges[^>]*\bdistribution=\{cluster\.bias_distribution\}/s);
+  });
+
+  it("leaves the bar and the balance chip on the same distribution (percentages unchanged)", () => {
+    expect(src).toContain(
+      "<BiasSpectrum distribution={cluster.bias_distribution} compact />",
+    );
+    expect(src).toContain("balance={balanceFromDistribution(cluster.bias_distribution)}");
   });
 });

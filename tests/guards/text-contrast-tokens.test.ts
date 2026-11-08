@@ -1485,8 +1485,26 @@ describe("form-control boundary contrast (WCAG 1.4.11, h10-a11y-3)", () => {
         "src/components/ui/select.tsx",
         "src/components/story/correction-form.tsx",
         "src/components/newsletter/newsletter-form.tsx",
+        // h66-contrast-2: the home search field (border-border/60 composited to
+        // 1.09:1) and the share ManualCopyBox textarea were missed by h10-a11y-3.
+        "src/components/filters/search-bar.tsx",
+        "src/components/story/share-button.tsx",
       ]) {
         expect(read(file), file).toMatch(/(?<![\w:-])border-input(?![\w-])/);
+      }
+    });
+
+    it("no longer draws the search field and the manual-copy box with the 1.09:1 border-border/60", () => {
+      for (const file of ["src/components/filters/search-bar.tsx", "src/components/story/share-button.tsx"]) {
+        const lines = read(file).split("\n");
+        // Only the <input> and the <textarea> are form-control boxes; the aria-hidden
+        // kbd hint in search-bar.tsx legitimately keeps its faint border.
+        const fieldLines = lines.filter((line) => line.includes("rounded-full bg-muted/50") || line.includes("bg-muted/30 p-2"));
+        expect(fieldLines.length, `${file}: field box line not found`).toBeGreaterThan(0);
+        for (const line of fieldLines) {
+          expect(line, `${file}: ${line.trim()}`).not.toMatch(/(?<![\w:-])border-border\/60(?![\w-])/);
+          expect(line, `${file}: ${line.trim()}`).toMatch(/(?<![\w:-])border-input(?![\w-])/);
+        }
       }
     });
   });
@@ -1512,5 +1530,144 @@ describe("form-control boundary contrast (WCAG 1.4.11, h10-a11y-3)", () => {
       const ratio = contrastRatio(placeholder(), fill);
       expect(ratio, `placeholder on a bg-input/30 fill would be ${ratio.toFixed(2)}:1`).toBeLessThan(4.5);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Eighth guard (h66-contrast-2, WCAG 1.4.3): `text-foreground/NN` with NN <= 50.
+// The opacity ban at the top of this file covers text-muted-foreground and
+// text-brand only, because --foreground is far brighter; the Medya DNA block
+// measures /80 for that reason. But the claim has a floor. The two slash
+// separators on /ekonomi ("24 haber / 23 kaynak") and /ekonomi/[ticker] (the
+// breadcrumb "/") were `text-foreground/40`, which composites to 3.3:1 here
+// (3.2:1 as measured in the browser) at 11 px against the 4.5:1 text
+// requirement, and the existing ban could not see them.
+//
+// This guard bans text-foreground at 50 % or less anywhere under src/ (every
+// non-test .tsx, any variant prefix such as `hover:` or `placeholder:`), and
+// measures the cut on the dark theme (the html element is forced dark), over
+// the card and the page background:
+//   /40 3.3   /49 4.40   /50 4.53   /60 6.0   /80 9.9-10.4   /90 12.3-13.1
+// The pass/fail crossover sits at about 49.7 %, so /50 clears 4.5:1 by 0.03
+// only: the ban stops at the first whole-percent step with no margin, not at a
+// measured failure. /80 (and /90) clear 4.5:1 on both surfaces, which keeps the
+// existing /80 and /90 uses legal. Use the full token or text-muted-foreground
+// for a faded delimiter; hierarchy comes from size and weight, never from
+// opacity.
+// ---------------------------------------------------------------------------
+
+/** `text-foreground/NN` with a numeric suffix, behind any variant prefix (group 1 = NN). */
+const FOREGROUND_ALPHA = /\btext-foreground\/(\d+)\b/g;
+
+/** Opacities at or below this fail 4.5:1 on the dark card (see the measured test below). */
+const MAX_BANNED_FOREGROUND_PERCENT = 50;
+
+/** `file:line  match` for every text-foreground/NN (NN <= 50) in one source file. */
+function fadedForegroundOffenders(file: string, src: string): string[] {
+  const offenders: string[] = [];
+  src.split("\n").forEach((line, i) => {
+    for (const match of line.matchAll(FOREGROUND_ALPHA)) {
+      if (Number(match[1]) <= MAX_BANNED_FOREGROUND_PERCENT) {
+        offenders.push(`${repoPath(file)}:${i + 1}  ${match[0]}`);
+      }
+    }
+  });
+  return offenders;
+}
+
+describe("text-foreground opacity floor (WCAG 1.4.3, h66-contrast-2)", () => {
+  it("scans the two files that carried the /40 separators (not vacuous)", () => {
+    expect(files).toContain(join(ROOT, "src/app/ekonomi/page.tsx"));
+    expect(files).toContain(join(ROOT, "src/app/ekonomi/[ticker]/page.tsx"));
+    expect(files.some((f) => /\.test\./.test(f))).toBe(false);
+  });
+
+  it("uses no text-foreground/NN with NN <= 50 in any non-test .tsx under src/", () => {
+    const offenders = [...sources].flatMap(([file, src]) => fadedForegroundOffenders(file, src));
+    expect(
+      offenders,
+      `text-foreground at 50% or less fails or has no margin on 4.5:1 (/40 is 3.3:1 on the dark card); use text-muted-foreground (or the full token) and aria-hidden="true" for a decorative delimiter:\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("flags the offending forms (the guard itself works)", () => {
+    const hit = (s: string) => fadedForegroundOffenders(join(SRC_DIR, "fixture.tsx"), s).length;
+    for (const bad of [
+      "text-foreground/40",
+      "text-foreground/50",
+      "text-foreground/5",
+      "text-foreground/05",
+      "hover:text-foreground/30",
+      "dark:text-foreground/50",
+      "placeholder:text-foreground/10",
+      'className="mx-2 text-foreground/40"',
+    ]) {
+      expect(hit(bad), bad).toBe(1);
+    }
+  });
+
+  it("lets the legal forms and the unrelated utilities through", () => {
+    const hit = (s: string) => fadedForegroundOffenders(join(SRC_DIR, "fixture.tsx"), s).length;
+    for (const ok of [
+      "text-foreground/80",
+      "text-foreground/90",
+      "text-foreground/100",
+      "text-foreground",
+      "text-muted-foreground",
+      "text-muted-foreground/40", // governed by the text-muted-foreground ban above
+      "bg-foreground/10",
+      "border-foreground/40",
+      "ring-foreground/30",
+      "text-foreground-muted/40",
+      "context-foreground/40",
+    ]) {
+      expect(hit(ok), ok).toBe(0);
+    }
+  });
+
+  it("reports offenders as file:line with the line of the hit", () => {
+    const file = join(SRC_DIR, "fixture.tsx");
+    const src = 'const a = "text-foreground/80";\nconst b = "x text-foreground/40";\n';
+    expect(fadedForegroundOffenders(file, src)).toEqual(["src/fixture.tsx:2  text-foreground/40"]);
+  });
+
+  describe("measured on the dark theme (the cut and the existing legal uses)", () => {
+    const foreground = darkToken("foreground");
+
+    it.each(["card", "background"] as const)(
+      "foreground at alpha 0.4 over the dark %s is below 4.5:1 (the /40 slashes, about 3.3:1)",
+      (surface) => {
+        const base = darkToken(surface);
+        const ratio = contrastRatio(composite(foreground, base, 0.4), base);
+        expect(ratio, `text-foreground/40 on the dark ${surface} is ${ratio.toFixed(2)}:1`).toBeLessThan(4.5);
+        expect(ratio).toBeGreaterThan(3);
+      },
+    );
+
+    it("the crossover sits at about 50 %: alpha 0.49 fails over the dark card and alpha 0.5 clears 4.5:1 by under 0.1 (no margin)", () => {
+      const card = darkToken("card");
+      const at49 = contrastRatio(composite(foreground, card, 0.49), card);
+      const at50 = contrastRatio(composite(foreground, card, 0.5), card);
+      expect(at49, `/49 on the dark card is ${at49.toFixed(2)}:1`).toBeLessThan(4.5);
+      expect(at50, `/50 on the dark card is ${at50.toFixed(2)}:1`).toBeLessThan(4.6);
+    });
+
+    it.each(["card", "background"] as const)(
+      "foreground at alpha 0.8 over the dark %s is at least 4.5:1 (keeps the /80 and /90 uses legal)",
+      (surface) => {
+        const base = darkToken(surface);
+        const ratio = contrastRatio(composite(foreground, base, 0.8), base);
+        expect(ratio, `text-foreground/80 on the dark ${surface} is ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+      },
+    );
+
+    it.each(["card", "background"] as const)(
+      "foreground at alpha 0.9 over the dark %s is at least 4.5:1",
+      (surface) => {
+        const base = darkToken(surface);
+        const ratio = contrastRatio(composite(foreground, base, 0.9), base);
+        expect(ratio, `text-foreground/90 on the dark ${surface} is ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+      },
+    );
   });
 });

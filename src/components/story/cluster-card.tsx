@@ -8,7 +8,9 @@ import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { RelativeTime } from "@/components/story/relative-time";
 import { SourceLogo } from "@/components/source/source-logo";
 import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
+import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
+import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { headlineLang, sourceLang } from "@/lib/sources/source-language";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution } from "@/types";
@@ -173,6 +175,48 @@ export function mobileBannerImageProps(index?: number): {
 }
 
 // ---------------------------------------------------------------------------
+// Source-count pill basis (h66-statsparity-1)
+// ---------------------------------------------------------------------------
+//
+// The pill counts every member of the cluster, aggregators and niche feeds
+// included, while the bar beside it (and the Denge puanı chip) is drawn from
+// the stored, voting-only `bias_distribution`. So the two numbers can differ
+// (17 members, 14 voters). The pill prints the same head every other surface
+// does (OG card, embed, rozet, RSS, Telegram, share text, /takip):
+// "N kaynak", or "N kaynak (M sınıflandırılmış)" when fewer sources voted than
+// the pill counts. Nothing here is a vote: the bar, the chip and every sort
+// order are untouched.
+
+/** Tooltip on a qualified pill: the /blindspots row wording. */
+export const SOURCE_COUNT_QUALIFIED_TITLE =
+  "Toplayıcı ve niş kaynaklar spektruma sayılmaz.";
+
+/**
+ * The pill text. `total` is the member count the card shows (the distinct
+ * dispatch count for a wire card), `distribution` the one the bar draws.
+ */
+export function cardSourceCountLabel(
+  total: number,
+  distribution: BiasDistribution,
+): string {
+  return sourceCountHead(total, zoneCountsOf(distribution));
+}
+
+/**
+ * The pill's tooltip: set exactly when `cardSourceCountLabel` carries the
+ * "(M sınıflandırılmış)" marker (fewer voters than members), `undefined`
+ * otherwise so a bare pill renders no `title` attribute.
+ */
+export function cardSourceCountTitle(
+  total: number,
+  distribution: BiasDistribution,
+): string | undefined {
+  const counts = zoneCountsOf(distribution);
+  const voting = counts.iktidar + counts.bagimsiz + counts.muhalefet;
+  return voting < total ? SOURCE_COUNT_QUALIFIED_TITLE : undefined;
+}
+
+// ---------------------------------------------------------------------------
 // ClusterMetaBadges (inlined from former cluster-meta-badges.tsx)
 // ---------------------------------------------------------------------------
 //
@@ -191,6 +235,11 @@ interface ClusterMetaBadgesProps {
   isWireRedistribution?: boolean;
   effectiveArticleCount?: number;
   /**
+   * The distribution the card's bar is drawn from (voting sources only):
+   * the source-count pill compares its member count with it.
+   */
+  distribution: BiasDistribution;
+  /**
    * Balance score of the cluster's coverage across the 3 Medya DNA zones.
    * `null`/omitted (too few classified sources) renders no chip.
    */
@@ -205,14 +254,20 @@ function ClusterMetaBadges({
   isBlindspot,
   isWireRedistribution,
   effectiveArticleCount,
+  distribution,
   balance,
   nowMs,
 }: ClusterMetaBadgesProps) {
+  const countTitle = cardSourceCountTitle(effectiveArticleCount ?? articleCount, distribution);
+
   return (
     <div className="flex flex-wrap items-center gap-2 text-[11px]">
-      <span className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground">
+      <span
+        className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground"
+        title={countTitle}
+      >
         <Users className="h-3 w-3" />
-        {effectiveArticleCount ?? articleCount} kaynak
+        {cardSourceCountLabel(effectiveArticleCount ?? articleCount, distribution)}
       </span>
 
       <span className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground">
@@ -425,6 +480,7 @@ export function ClusterCard({
                 isBlindspot={false}
                 isWireRedistribution={isWireRedistribution}
                 effectiveArticleCount={effectiveArticleCount}
+                distribution={cluster.bias_distribution}
                 balance={balanceFromDistribution(cluster.bias_distribution)}
                 nowMs={nowMs}
               />

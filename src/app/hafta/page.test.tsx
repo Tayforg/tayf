@@ -25,6 +25,8 @@ type Summary = {
     side: "iktidar" | "bagimsiz" | "muhalefet";
     share: number | null;
     sharePct: number | null;
+    /** Voting sources per zone (h66-statsparity-1). */
+    counts: { iktidar: number; bagimsiz: number; muhalefet: number };
   }>;
   /** Public claims per side after the title de-dup (not just the rows shown). */
   blindspotSideCounts: { iktidar: number; bagimsiz: number; muhalefet: number };
@@ -218,6 +220,7 @@ const FULL_SUMMARY: Summary = {
       side: "muhalefet",
       share: 1,
       sharePct: 100,
+      counts: { iktidar: 0, bagimsiz: 0, muhalefet: 4 },
     },
     {
       id: "bs-2",
@@ -226,6 +229,8 @@ const FULL_SUMMARY: Summary = {
       side: "iktidar",
       share: 15 / 17,
       sharePct: 88,
+      // 20 members, 17 voters: the row says so (h66-statsparity-1).
+      counts: { iktidar: 15, bagimsiz: 1, muhalefet: 1 },
     },
   ],
   blindspotSideCounts: { iktidar: 37, bagimsiz: 0, muhalefet: 9 },
@@ -337,8 +342,20 @@ describe("WeeklyPage — data present", () => {
     mocks.summary = {
       ...FULL_SUMMARY,
       zoneCounts: { iktidar: 1000, bagimsiz: 200, muhalefet: 34 },
-      topClusters: [{ ...FULL_SUMMARY.topClusters[0]!, articleCount: 1500 }],
-      blindspots: [{ ...FULL_SUMMARY.blindspots[0]!, articleCount: 1200 }],
+      topClusters: [
+        {
+          ...FULL_SUMMARY.topClusters[0]!,
+          articleCount: 1500,
+          zoneCounts: { iktidar: 600, bagimsiz: 500, muhalefet: 400 },
+        },
+      ],
+      blindspots: [
+        {
+          ...FULL_SUMMARY.blindspots[0]!,
+          articleCount: 1200,
+          counts: { iktidar: 0, bagimsiz: 0, muhalefet: 1200 },
+        },
+      ],
     };
 
     const tree = await WeeklyPage();
@@ -410,7 +427,7 @@ describe("WeeklyPage — data present", () => {
     const text = collectText(await WeeklyPage()).join(" ");
 
     expect(text).toContain("Kısmi kör nokta haberi");
-    expect(text).toContain("%88 İktidar · 20 kaynak");
+    expect(text).toContain("%88 İktidar · 20 kaynak (17 sınıflandırılmış)");
     expect(text).not.toContain("Sadece İktidar");
     expect(text.match(/Sadece/g) ?? []).toHaveLength(1);
   });

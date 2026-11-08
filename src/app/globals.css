@@ -277,17 +277,19 @@
     box-shadow: 0 8px 30px oklch(0 0 0 / 20%), 0 2px 8px oklch(0 0 0 / 12%);
   }
 
-  /* Brand accent underline for links */
+  /* Brand accent underline for links. A real text-decoration at rest: the old
+     hover-only gradient left in-sentence links with no cue for touch and
+     keyboard users (WCAG 1.4.1) and vanished in forced-colors mode. Hover only
+     thickens it. */
   .brand-underline {
-    text-decoration: none;
-    background-image: linear-gradient(oklch(0.76 0.12 75), oklch(0.76 0.12 75));
-    background-size: 0% 2px;
-    background-position: 0% 100%;
-    background-repeat: no-repeat;
-    transition: background-size 0.3s ease;
+    text-decoration-line: underline;
+    text-decoration-color: oklch(0.76 0.12 75);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+    transition: text-decoration-thickness 0.2s ease;
   }
   .brand-underline:hover {
-    background-size: 100% 2px;
+    text-decoration-thickness: 2px;
   }
 
   /* Subtle shimmer for loading states */

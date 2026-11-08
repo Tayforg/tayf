@@ -327,7 +327,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         <Link href="/ekonomi" className="hover:text-foreground">
           Ekonomi
         </Link>
-        <span className="mx-2 text-foreground/40">/</span>
+        <span aria-hidden="true" className="mx-2 text-muted-foreground">/</span>
         <span aria-current="page" className="text-brand">{ticker}</span>
       </nav>
 

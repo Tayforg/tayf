@@ -768,6 +768,88 @@ describe("summariseWeek — topClusters", () => {
   });
 });
 
+// h66-statsparity-1: article_count is every member (aggregator and niche
+// included); the zone counts are the VOTING sources only. Rows now expose the
+// counts their share is computed from, so a renderer can print
+// "N kaynak (M sınıflandırılmış)" with the same wording as every other surface.
+describe("summariseWeek — voting counts beside article_count (h66-statsparity-1)", () => {
+  const sum = (c: Record<MediaDnaZone, number>) => c.iktidar + c.bagimsiz + c.muhalefet;
+
+  it("a blindspot row with 16 members and 10 voters exposes counts that sum to 10", () => {
+    const summary = summariseWeek(
+      [
+        row({
+          id: "f1837ee1",
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: dist({ pro_government: 9, center: 1 }),
+          article_count: 16,
+        }),
+      ],
+      null,
+      NOW_MS,
+    );
+    const b = summary.blindspots[0];
+
+    expect(b?.articleCount).toBe(16);
+    expect(b?.counts).toEqual({ iktidar: 9, bagimsiz: 1, muhalefet: 0 });
+    expect(sum(b!.counts)).toBe(10);
+  });
+
+  it("the blindspot counts are the very counts sharePct is computed from", () => {
+    const b = summariseWeek(
+      [
+        row({
+          id: "bs",
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: dist({ pro_government: 15, center: 1, opposition: 1 }),
+          article_count: 20,
+        }),
+      ],
+      null,
+      NOW_MS,
+    ).blindspots[0]!;
+
+    expect(b.counts).toEqual({ iktidar: 15, bagimsiz: 1, muhalefet: 1 });
+    expect(b.share).toBeCloseTo(b.counts.iktidar / sum(b.counts), 10);
+    expect(b.sharePct).toBe(zonePercents(b.counts).iktidar);
+  });
+
+  it("a stored side with no distribution has all-zero counts (nothing voted)", () => {
+    const malformed = row({
+      id: "bs",
+      is_blindspot: true,
+      blindspot_side: "pro_government",
+      article_count: 3,
+    });
+    (malformed as { bias_distribution: unknown }).bias_distribution = null;
+
+    const b = summariseWeek([malformed], null, NOW_MS).blindspots[0];
+
+    expect(b?.counts).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 0 });
+    expect(b?.articleCount).toBe(3);
+  });
+
+  it("a top cluster with 16 members and 10 voters exposes zoneCounts that sum to 10", () => {
+    const top = summariseWeek(
+      [
+        row({
+          id: "wide",
+          bias_distribution: dist({ pro_government: 6, center: 2, opposition: 2 }),
+          article_count: 16,
+        }),
+      ],
+      null,
+      NOW_MS,
+    ).topClusters[0]!;
+
+    expect(top.articleCount).toBe(16);
+    expect(top.zoneCounts).toEqual({ iktidar: 6, bagimsiz: 2, muhalefet: 2 });
+    expect(sum(top.zoneCounts)).toBe(10);
+  });
+});
+
 describe("summariseWeek — blindspots", () => {
   it("derives the side from blindspot_side via zoneOf", () => {
     const summary = summariseWeek(
@@ -785,7 +867,15 @@ describe("summariseWeek — blindspots", () => {
     );
 
     expect(summary.blindspots).toEqual([
-      { id: "bs", title: "Nötr başlık", articleCount: 5, side: "muhalefet", share: 1, sharePct: 100 },
+      {
+        id: "bs",
+        title: "Nötr başlık",
+        articleCount: 5,
+        side: "muhalefet",
+        share: 1,
+        sharePct: 100,
+        counts: { iktidar: 0, bagimsiz: 0, muhalefet: 5 },
+      },
     ]);
   });
 
@@ -1116,7 +1206,15 @@ function claim(
   articleCount: number,
   title = `Kör nokta ${id}`,
 ): WeeklyBlindspot {
-  return { id, title, articleCount, side, share: 1, sharePct: 100 };
+  return {
+    id,
+    title,
+    articleCount,
+    side,
+    share: 1,
+    sharePct: 100,
+    counts: { iktidar: 0, bagimsiz: 0, muhalefet: 0, [side]: articleCount },
+  };
 }
 
 /** n claims on one side, articleCounts start, start-1, ... */

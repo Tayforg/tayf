@@ -149,6 +149,71 @@ describe("buildDigestHtml", () => {
     });
   });
 
+  // h66-statsparity-1: the story line under the zone bar printed every member
+  // ("16 kaynak") while the bar above it is drawn from the voting sources only.
+  describe("story source count under the zone bar (h66-statsparity-1)", () => {
+    it("16 members, 10 voters: '16 kaynak (10 sınıflandırılmış)'", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        clusters: [
+          { ...CLUSTER, articleCount: 16, biasDistribution: dist({ pro_government: 9, center: 1 }) },
+        ],
+      });
+
+      expect(html).toContain("16 kaynak (10 sınıflandırılmış)");
+    });
+
+    it("every member voted: the bare '16 kaynak', no marker", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        clusters: [
+          { ...CLUSTER, articleCount: 16, biasDistribution: dist({ pro_government: 9, center: 4, opposition: 3 }) },
+        ],
+      });
+
+      expect(html).toContain("16 kaynak");
+      expect(html).not.toContain("sınıflandırılmış");
+    });
+
+    it("the default fixture (7 members, 3 + 4 voters) stays '7 kaynak'", () => {
+      const html = buildDigestHtml(BASE);
+
+      expect(html).toMatch(/>\s*7 kaynak\s*</);
+      expect(html).not.toContain("sınıflandırılmış");
+    });
+
+    it("qualifies each story on its own distribution", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        clusters: [
+          { ...CLUSTER, id: "a", articleCount: 12, biasDistribution: dist({ pro_government: 8 }) },
+          { ...CLUSTER, id: "b", articleCount: 5, biasDistribution: dist({ pro_government: 3, opposition: 2 }) },
+        ],
+      });
+
+      expect(html).toContain("12 kaynak (8 sınıflandırılmış)");
+      expect(html).toContain("5 kaynak");
+      expect(html).not.toContain("5 kaynak (");
+    });
+
+    it("leaves the zone bar and the blindspot line alone", () => {
+      const marked = buildDigestHtml({
+        ...BASE,
+        clusters: [{ ...CLUSTER, articleCount: 16 }],
+      });
+      const bare = buildDigestHtml({
+        ...BASE,
+        clusters: [{ ...CLUSTER, articleCount: 7 }],
+      });
+
+      // Same distribution, so the same bar cells; only the count line differs.
+      expect(marked).toContain('width="43%"');
+      expect(marked).toContain('width="57%"');
+      expect(marked).toContain("%90");
+      expect(marked.replace("16 kaynak (7 sınıflandırılmış)", "7 kaynak")).toBe(bare);
+    });
+  });
+
   it("omits the blindspot section when there is none", () => {
     const html = buildDigestHtml({ ...BASE, blindspot: null });
     expect(html).not.toContain("Kör Nokta");

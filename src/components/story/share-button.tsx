@@ -131,7 +131,7 @@ export function ManualCopyBox({ label, value }: { label: string; value: string }
         value={value}
         rows={3}
         onFocus={(e) => e.currentTarget.select()}
-        className="w-full rounded-md border border-border/60 bg-muted/30 p-2 font-mono text-[11px] text-foreground"
+        className="w-full rounded-md border border-input bg-muted/30 p-2 font-mono text-[11px] text-foreground"
       />
     </span>
   );
