@@ -127,7 +127,7 @@ describe("LeastReadNudge at and above the floor", () => {
     expect(markup).toContain('href="/cluster/muhalefet-1"');
     expect(markup).not.toContain('href="/cluster/muhalefet-2"');
     expect(markup).not.toContain('href="/cluster/iktidar-');
-    expect(markup).toContain("3 Bağımsız haberi · toplam 5 haber");
+    expect(markup).toContain("3 Bağımsız haber · toplam 5 haber");
     expect(markup).toContain("3 Muhalefet haberi · toplam 5 haber");
   });
 
@@ -167,6 +167,119 @@ describe("LeastReadNudge at and above the floor", () => {
   });
 });
 
+// h79-locale-1: "Bağımsız" is an adjective, so the zone name stays in front of
+// the noun ("Bağımsız kaynakların ağırlıkta", "3 Bağımsız haber"). It used to
+// be rendered as "Bağımsız kaynaklarının" and "3 Bağımsız haberi" because the
+// copy was ZONE_META label + a noun suffix. İktidar and Muhalefet are nouns and
+// keep their possessive forms. Every branch and every zone is pinned below.
+describe("LeastReadNudge Turkish zone grammar (h79-locale-1)", () => {
+  const TAIL =
+    "birden çok kaynağın yazdığı güncel hikâyeler; sayfada diğer tarafların başlıkları da yan yana.";
+
+  it("single side Bağımsız (6 iktidar, 6 muhalefet): adjective before the noun, in the paragraph and the rows", () => {
+    useDiet([...clicks("iktidar", 6), ...clicks("muhalefet", 6)]);
+    const markup = render(lists());
+    expect(markup).toContain("Bu hafta en az okuduğunuz taraftan 3 güncel başlık");
+    expect(markup).toContain(
+      `En az okuduğunuz taraf: Bağımsız (0 tıklama). Bağımsız kaynakların ağırlıkta olduğu, ${TAIL}`,
+    );
+    expect(markup).toContain("3 Bağımsız haber · toplam 5 haber");
+    expect(markup).not.toContain("Bağımsız kaynaklarının");
+    expect(markup).not.toContain("Bağımsız haberi");
+    expect(markup).not.toContain("<h3");
+    expect(markup).not.toContain("iki taraftan");
+  });
+
+  it("single side İktidar (6 bagimsiz, 6 muhalefet): keeps the possessive forms", () => {
+    useDiet([...clicks("bagimsiz", 6), ...clicks("muhalefet", 6)]);
+    const markup = render(lists());
+    expect(markup).toContain(
+      `En az okuduğunuz taraf: İktidar (0 tıklama). İktidar kaynaklarının ağırlıkta olduğu, ${TAIL}`,
+    );
+    expect(markup).toContain("3 İktidar haberi · toplam 5 haber");
+    expect(markup).not.toContain("İktidar kaynakların ağırlıkta");
+    expect(markup).not.toContain("3 İktidar haber ·");
+  });
+
+  it("single side Muhalefet (6 iktidar, 4 bagimsiz): keeps the possessive forms", () => {
+    useDiet([...clicks("iktidar", 6), ...clicks("bagimsiz", 4)]);
+    const markup = render(lists());
+    expect(markup).toContain(
+      `En az okuduğunuz taraf: Muhalefet (0 tıklama). Muhalefet kaynaklarının ağırlıkta olduğu, ${TAIL}`,
+    );
+    expect(markup).toContain("3 Muhalefet haberi · toplam 5 haber");
+    expect(markup).not.toContain("Muhalefet kaynakların ağırlıkta");
+    expect(markup).not.toContain("3 Muhalefet haber ·");
+  });
+
+  it("single side with a nonzero count keeps the adjective form (8 iktidar, 6 muhalefet, 4 bagimsiz)", () => {
+    useDiet([...clicks("iktidar", 8), ...clicks("muhalefet", 6), ...clicks("bagimsiz", 4)]);
+    const markup = render(lists());
+    expect(markup).toContain(
+      `En az okuduğunuz taraf: Bağımsız (4 tıklama). Bağımsız kaynakların ağırlıkta olduğu, ${TAIL}`,
+    );
+    expect(markup).toContain("3 Bağımsız haber · toplam 5 haber");
+  });
+
+  it("single side Bağımsız with a 1-item list still uses the adjective form", () => {
+    useDiet([...clicks("iktidar", 6), ...clicks("muhalefet", 6)]);
+    const markup = render(lists({ bagimsiz: 1 }));
+    expect(markup).toContain("Bu hafta en az okuduğunuz taraftan 1 güncel başlık");
+    expect(markup).toContain("Bağımsız kaynakların ağırlıkta olduğu");
+    expect(markup).toContain("3 Bağımsız haber · toplam 5 haber");
+  });
+
+  it("two sides (10 iktidar clicks): Bağımsız rows read as an adjective, Muhalefet rows keep the possessive", () => {
+    useDiet(clicks("iktidar", 10));
+    const markup = render(lists());
+    expect(markup).toContain("3 Bağımsız haber · toplam 5 haber");
+    expect(markup).toContain("3 Muhalefet haberi · toplam 5 haber");
+    expect(markup).not.toContain("Bağımsız haberi");
+    expect(markup).not.toContain("Bağımsız kaynaklarının");
+  });
+
+  it("two sides (10 muhalefet clicks): İktidar rows keep the possessive, Bağımsız rows the adjective", () => {
+    useDiet(clicks("muhalefet", 10));
+    const markup = render(lists());
+    expect(markup).toContain("3 İktidar haberi · toplam 5 haber");
+    expect(markup).toContain("3 Bağımsız haber · toplam 5 haber");
+    expect(markup).not.toContain("Bağımsız haberi");
+  });
+
+  it("two sides (10 bagimsiz clicks): İktidar and Muhalefet rows keep the possessive", () => {
+    useDiet(clicks("bagimsiz", 10));
+    const markup = render(lists());
+    expect(markup).toContain("3 İktidar haberi · toplam 5 haber");
+    expect(markup).toContain("3 Muhalefet haberi · toplam 5 haber");
+    expect(markup).not.toContain("Bağımsız");
+  });
+
+  it("falls back to the single-side Bağımsız wording when dedupe empties the other side", () => {
+    useDiet(clicks("muhalefet", 10));
+    const markup = render({
+      iktidar: [{ id: "shared", title: "shared başlığı", zoneCount: 2, totalCount: 7 }],
+      bagimsiz: [
+        { id: "shared", title: "shared başlığı", zoneCount: 4, totalCount: 7 },
+        { id: "bagimsiz-1", title: "bagimsiz-1 başlığı", zoneCount: 3, totalCount: 7 },
+      ],
+      muhalefet: [],
+    });
+    expect(markup).toContain(
+      `En az okuduğunuz taraf: Bağımsız (0 tıklama). Bağımsız kaynakların ağırlıkta olduğu, ${TAIL}`,
+    );
+    expect(markup).toContain("4 Bağımsız haber · toplam 7 haber");
+    expect(markup).toContain("3 Bağımsız haber · toplam 7 haber");
+    expect(markup).not.toContain("<h3");
+  });
+
+  it("keeps the two-side paragraph byte-identical", () => {
+    useDiet(clicks("iktidar", 10));
+    expect(render(lists())).toContain(
+      "En az okuduğunuz taraflar: Bağımsız ve Muhalefet (ikisi de 0 tıklama). Her taraf için o tarafın kaynaklarının ağırlıkta olduğu, birden çok kaynağın yazdığı güncel hikâyeler; sayfada diğer tarafların başlıkları da yan yana.",
+    );
+  });
+});
+
 describe("LeastReadNudge with a story listed under both tied sides", () => {
   const SHARED_HREF = 'href="/cluster/shared"';
 
@@ -188,7 +301,7 @@ describe("LeastReadNudge with a story listed under both tied sides", () => {
     expect(occurrences(markup, SHARED_HREF)).toBe(1);
     expect(markup.indexOf(SHARED_HREF)).toBeGreaterThan(markup.indexOf("Muhalefet</h3>"));
     expect(markup).toContain("4 Muhalefet haberi · toplam 7 haber");
-    expect(markup).not.toContain("2 Bağımsız haberi · toplam 7 haber");
+    expect(markup).not.toContain("2 Bağımsız haber · toplam 7 haber");
     expect(occurrences(markup, "<h3")).toBe(2);
     expect(markup).toContain('href="/cluster/bagimsiz-1"');
     expect(markup).toContain('href="/cluster/muhalefet-1"');
@@ -218,7 +331,7 @@ describe("LeastReadNudge with a story listed under both tied sides", () => {
     });
     expect(occurrences(markup, SHARED_HREF)).toBe(1);
     expect(markup.indexOf(SHARED_HREF)).toBeLessThan(markup.indexOf("Muhalefet</h3>"));
-    expect(markup).toContain("3 Bağımsız haberi · toplam 7 haber");
+    expect(markup).toContain("3 Bağımsız haber · toplam 7 haber");
     expect(markup.slice(markup.indexOf("Muhalefet</h3>"))).not.toContain(SHARED_HREF);
     expect(markup).toContain('href="/cluster/muhalefet-1"');
     expect(occurrences(markup, "<h3")).toBe(2);
@@ -275,5 +388,12 @@ describe("least-read-nudge.tsx source", () => {
 
   it("no longer hard-codes a literal '3 güncel başlık'", () => {
     expect(src).not.toContain("taraftan 3 güncel başlık");
+  });
+
+  it("takes the zone phrases from zone-copy, not from ZONE_META label plus a suffix", () => {
+    expect(src).toContain("ZONE_SOURCES_GENITIVE[first.zone]");
+    expect(src).toContain("zoneNewsCount(item.zoneCount, zone)");
+    expect(src).not.toContain("{label} kaynaklarının");
+    expect(src).not.toContain("{label} haberi");
   });
 });

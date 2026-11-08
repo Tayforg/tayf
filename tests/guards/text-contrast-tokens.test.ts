@@ -26,21 +26,30 @@ import { BIAS_COLORS, ZONE_META } from "@/lib/bias/config";
 // This was originally limited to src/components/story/ plus the cluster page;
 // the sweep widened it so a new page cannot reintroduce the pattern.
 //
-// Second guard (qa-wave-i, story-chips): the same arithmetic applies to the
-// element-level `opacity-NN` utility, which fades the text AND its background
-// tint together. The Medya DNA chips used opacity-50 / opacity-30 and the kind
-// label opacity-70, which measured 2.0-3.25:1. Under src/components/story/
-// no class may carry a bare `opacity-5`..`opacity-99` or `opacity-[x]`.
-// `opacity-0` / `opacity-100` (show / hide toggles) and variant forms such as
-// `hover:`, `disabled:`, `group-hover/x:` and `data-*:` (state affordances
-// that do not rest on screen) are not matched. The one exception is the
-// logo-tier <img> source badge, allow-listed below; it is not text.
+// Second guard (qa-wave-i, story-chips; widened by h79-markup-1): the same
+// arithmetic applies to the element-level `opacity-NN` utility, which fades the
+// text AND its background tint together. The Medya DNA chips used opacity-50 /
+// opacity-30 and the kind label opacity-70, which measured 2.0-3.25:1; the
+// /sources non-voting cards faded their 10 px muted text with opacity-70 and
+// measured 3.09:1 light / 3.15:1 dark (5.91 / 5.24 at the full token). The
+// scope is the PUBLIC tree: every non-test .tsx under src/app and
+// src/components, minus src/app/admin/ and src/components/admin/ (operator
+// screens, not public; a disabled-row fade there is a different case). No
+// class in that tree may carry a bare `opacity-5`..`opacity-99` or
+// `opacity-[x]`. `opacity-0` / `opacity-100` (show / hide toggles) and variant
+// forms such as `hover:`, `disabled:`, `group-hover/x:` and `data-*:` (state
+// affordances that do not rest on screen) are not matched. The one exception
+// is the logo-tier <img> source badge, allow-listed below; it is not text.
+// The scan reads comments too, so a comment must not spell the banned class.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(here, "../..");
 const SRC_DIR = join(ROOT, "src");
 const STORY_DIR = join(ROOT, "src/components/story");
+// Element-opacity guard scope: the public tree (see the second-guard comment).
+const PUBLIC_DIRS = [join(ROOT, "src/app"), join(ROOT, "src/components")];
+const ADMIN_DIRS = [join(ROOT, "src/app/admin"), join(ROOT, "src/components/admin")];
 const CLUSTER_PAGE = join(ROOT, "src/app/cluster/[id]/page.tsx");
 
 // Any numeric opacity suffix except `/100` (which is the full token).
@@ -84,8 +93,8 @@ const ALLOWED_ICON_CLASSES: ReadonlyArray<{ file: string; classes: string; why: 
 ];
 
 /**
- * Element-opacity class strings that stay under src/components/story/ because
- * the element is not text. Each entry is the exact class string as written in
+ * Element-opacity class strings that stay in the public tree because the
+ * element is not text. Each entry is the exact class string as written in
  * `file` (repo-relative); the list is stripped per file, so one file's entry
  * can never excuse another file. Two tests keep it honest:
  *  - staleness: the string must still exist in THAT file;
@@ -264,21 +273,34 @@ describe("text-contrast tokens (a11y-2)", () => {
   });
 });
 
-describe("no bare element opacity in story components (qa-wave-i, WCAG 1.4.3)", () => {
-  const storyFiles = [...sources.keys()].filter((f) => f.startsWith(STORY_DIR + sep));
+describe("no bare element opacity in the public tree (qa-wave-i, h79-markup-1, WCAG 1.4.3)", () => {
+  const inDir = (file: string, dir: string) => file.startsWith(dir + sep);
+  const publicFiles = [...sources.keys()].filter(
+    (f) => PUBLIC_DIRS.some((d) => inDir(f, d)) && !ADMIN_DIRS.some((d) => inDir(f, d)),
+  );
 
-  it("scans the non-test .tsx files under src/components/story/ (media-dna included)", () => {
-    expect(storyFiles).toContain(join(STORY_DIR, "media-dna.tsx"));
-    expect(storyFiles).toContain(join(STORY_DIR, "cluster-card-image.tsx"));
-    expect(storyFiles.some((f) => /\.test\./.test(f))).toBe(false);
-    expect(storyFiles.length).toBeGreaterThan(10);
+  it("scans the non-test .tsx files under src/app and src/components (sources page and media-dna included)", () => {
+    expect(publicFiles).toContain(join(ROOT, "src/app/sources/page.tsx"));
+    expect(publicFiles).toContain(join(STORY_DIR, "media-dna.tsx"));
+    expect(publicFiles).toContain(join(STORY_DIR, "cluster-card-image.tsx"));
+    expect(publicFiles).toContain(CLUSTER_PAGE);
+    expect(publicFiles.some((f) => /\.test\./.test(f))).toBe(false);
+    expect(publicFiles.length).toBeGreaterThan(100);
+  });
+
+  it("leaves the operator screens (src/app/admin, src/components/admin) out of scope", () => {
+    for (const dir of ADMIN_DIRS) {
+      // Non-vacuous: the directory has scanned-source files that the filter drops.
+      expect([...sources.keys()].some((f) => inDir(f, dir)), `${repoPath(dir)} has no .tsx`).toBe(true);
+      expect(publicFiles.some((f) => inDir(f, dir)), `${repoPath(dir)} must not be scanned`).toBe(false);
+    }
   });
 
   it("uses no opacity-5..opacity-99 / opacity-[x] class (fading text fails 1.4.3)", () => {
-    const offenders = storyFiles.flatMap((f) => bareOpacityOffenders(f, sources.get(f) ?? ""));
+    const offenders = publicFiles.flatMap((f) => bareOpacityOffenders(f, sources.get(f) ?? ""));
     expect(
       offenders,
-      `Do not fade story components with element opacity; use a dashed border, a transparent background or a full-strength token instead:\n${offenders.join("\n")}`,
+      `Do not fade public components or pages with element opacity; use a pill, a dashed border, a transparent background or a full-strength token instead:\n${offenders.join("\n")}`,
     ).toEqual([]);
   });
 
@@ -324,7 +346,7 @@ describe("no bare element opacity in story components (qa-wave-i, WCAG 1.4.3)", 
       "still exists in its own file: %s",
       (_why, file, classes) => {
         const abs = join(ROOT, file);
-        expect(storyFiles, `${file} is not a scanned story .tsx file`).toContain(abs);
+        expect(publicFiles, `${file} is not a scanned public .tsx file`).toContain(abs);
         expect(
           sources.get(abs)?.includes(classes),
           `Allow-listed class string "${classes}" no longer appears in ${file}; remove it from ALLOWED_BARE_OPACITY.`,
@@ -1670,4 +1692,61 @@ describe("text-foreground opacity floor (WCAG 1.4.3, h66-contrast-2)", () => {
       },
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Seventh guard (h79-markup-1, /sources cards): the 10 px muted text of a
+// source card (post count, kind pill, age line) sits on `bg-card/60` over the
+// page background (`hover:bg-card/80` on hover), and the kind pill adds its own
+// `bg-muted/40`. Non-voting cards used to fade the profile link with element
+// opacity (alpha 0.7), which no longer ships. This block measures both the
+// full token (what ships, must clear 4.5:1) and the faded form (what was
+// removed, must stay below it), in both themes, so the card tones cannot drift
+// under the text unnoticed. The card classes are read from the page source.
+// ---------------------------------------------------------------------------
+
+describe("/sources card text keeps AA contrast without a fade (WCAG 1.4.3, h79-markup-1)", () => {
+  const pageSource = readFileSync(join(ROOT, "src/app/sources/page.tsx"), "utf8");
+  const themes = [
+    { theme: "light", token: lightToken },
+    { theme: "dark", token: darkToken },
+  ] as const;
+  const CARD_ALPHA = { rest: 0.6, hover: 0.8 } as const;
+  const PILL_ALPHA = 0.4;
+  const FADE_ALPHA = 0.7;
+
+  /** The card tile over the page background at the given card alpha. */
+  const cardTile = (token: (name: string) => Rgb, alpha: number): Rgb =>
+    composite(token("card"), token("background"), alpha);
+
+  it("measures the tones the page really uses (bg-card/60, hover:bg-card/80, bg-muted/40)", () => {
+    expect(pageSource).toContain("bg-card/60 hover:bg-card/80");
+    expect(pageSource).toContain("bg-muted/40");
+    expect(CARD_ALPHA).toEqual({ rest: 0.6, hover: 0.8 });
+    expect(PILL_ALPHA).toBe(0.4);
+  });
+
+  for (const { theme, token } of themes) {
+    for (const state of ["rest", "hover"] as const) {
+      const alpha = CARD_ALPHA[state];
+
+      it(`text-muted-foreground at the full token clears 4.5:1 on the ${theme} card (${state}) and on its kind pill`, () => {
+        const tile = cardTile(token, alpha);
+        const pill = composite(token("muted"), tile, PILL_ALPHA);
+        const text = token("muted-foreground");
+        const onCard = contrastRatio(text, tile);
+        const onPill = contrastRatio(text, pill);
+        expect(onCard, `${theme} ${state}: muted-foreground on the card is ${onCard.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+        expect(onPill, `${theme} ${state}: muted-foreground on the pill is ${onPill.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+      });
+
+      it(`the removed element fade (alpha 0.7) measured below 4.5:1 on the ${theme} card (${state})`, () => {
+        const tile = cardTile(token, alpha);
+        const faded = composite(token("muted-foreground"), tile, FADE_ALPHA);
+        const ratio = contrastRatio(faded, tile);
+        expect(ratio, `${theme} ${state}: faded muted-foreground is ${ratio.toFixed(2)}:1`).toBeLessThan(4.5);
+        expect(ratio).toBeGreaterThan(2.5);
+      });
+    }
+  }
 });

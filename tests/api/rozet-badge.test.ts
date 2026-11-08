@@ -77,7 +77,7 @@ describe("GET /rozet/[file]", () => {
     expect(getClusterDetailMock).toHaveBeenCalledWith(ID);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/svg+xml; charset=utf-8");
-    expect(res.headers.get("cache-control")).toBe("public, s-maxage=600, stale-while-revalidate=86400");
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=600, stale-while-revalidate=300");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'");
     expect(res.headers.get("x-robots-tag")).toBe("noindex");

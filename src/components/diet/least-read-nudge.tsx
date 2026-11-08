@@ -6,6 +6,7 @@ import { useReadingDiet } from "./use-reading-diet";
 import { ZONE_META } from "@/lib/bias/config";
 import { nudgeZones, type DietZone } from "@/lib/diet/diet";
 import type { DietSuggestion, ZoneSuggestions } from "@/lib/diet/suggestions";
+import { ZONE_SOURCES_GENITIVE, zoneNewsCount } from "@/lib/diet/zone-copy";
 
 interface LeastReadNudgeProps {
   lists: ZoneSuggestions | null;
@@ -19,6 +20,10 @@ interface LeastReadNudgeProps {
 // floor (DietSummary's "Az veri var" line is the only guidance there), every
 // side that is still tied instead of whichever comes first on the spectrum,
 // and nothing when all three sides are level.
+//
+// Zone phrases come from zone-copy, never ZONE_META label plus a suffix:
+// "Bağımsız" is an adjective ("Bağımsız kaynakların", "3 Bağımsız haber"), see
+// src/lib/weekly/zone-media-label.ts.
 export function LeastReadNudge({ lists }: LeastReadNudgeProps) {
   const { hydrated, available, summary } = useReadingDiet();
 
@@ -65,8 +70,8 @@ export function LeastReadNudge({ lists }: LeastReadNudgeProps) {
             {`Bu hafta en az okuduğunuz taraftan ${items.length} güncel başlık`}
           </h2>
           <p className="text-sm text-muted-foreground">
-            En az okuduğunuz taraf: {label} ({clickCount} tıklama). {label} kaynaklarının ağırlıkta
-            olduğu, birden çok kaynağın yazdığı güncel hikâyeler; sayfada diğer tarafların
+            En az okuduğunuz taraf: {label} ({clickCount} tıklama). {ZONE_SOURCES_GENITIVE[first.zone]}{" "}
+            ağırlıkta olduğu, birden çok kaynağın yazdığı güncel hikâyeler; sayfada diğer tarafların
             başlıkları da yan yana.
           </p>
         </div>
@@ -100,8 +105,6 @@ export function LeastReadNudge({ lists }: LeastReadNudgeProps) {
 }
 
 function HeadlineList({ zone, items }: { zone: DietZone; items: readonly DietSuggestion[] }) {
-  const label = ZONE_META[zone].label;
-
   return (
     <ul className="space-y-2">
       {items.map((item) => (
@@ -113,7 +116,7 @@ function HeadlineList({ zone, items }: { zone: DietZone; items: readonly DietSug
             {item.title}
           </Link>
           <p className="text-[12px] text-muted-foreground">
-            {item.zoneCount} {label} haberi · toplam {item.totalCount} haber
+            {zoneNewsCount(item.zoneCount, zone)} · toplam {item.totalCount} haber
           </p>
         </li>
       ))}

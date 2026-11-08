@@ -686,11 +686,34 @@ describe("cluster opengraph-image", () => {
     await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     expect(OG_CACHE_HEADERS).toEqual({
-      "cache-control": "public, s-maxage=600, stale-while-revalidate=86400",
+      "cache-control": "public, s-maxage=600, stale-while-revalidate=300",
     });
     const headers = capturedOptions?.headers as Record<string, string>;
     expect(headers).toEqual(OG_CACHE_HEADERS);
     expect(headers["Cache-Control"]).toBeUndefined();
+  });
+
+  it("twitter-image re-export sends the real card with the same bounded cache-control (h79-cachecoherence-1)", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail({}));
+    const tw = await import("./twitter-image");
+    const { OG_CACHE_HEADERS } = await import("./opengraph-image");
+
+    const res = await tw.default({ params: Promise.resolve({ id: VALID_ID }) });
+
+    expect(res.status).toBe(200);
+    // Header read off the Response (what Vercel receives), not off the options object.
+    expect(res.headers.get("cache-control")).toBe(OG_CACHE_HEADERS["cache-control"]);
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=600, stale-while-revalidate=300");
+  });
+
+  it("bounds the real card's CDN window to 900 s: s-maxage plus stale-while-revalidate (h79-cachecoherence-1)", async () => {
+    const { OG_CACHE_HEADERS } = await import("./opengraph-image");
+    const value = OG_CACHE_HEADERS["cache-control"];
+    const sMaxage = Number(/s-maxage=(\d+)/.exec(value)?.[1]);
+    const swr = Number(/stale-while-revalidate=(\d+)/.exec(value)?.[1]);
+    expect(sMaxage).toBeGreaterThan(0);
+    expect(swr).toBeGreaterThan(0);
+    expect(sMaxage + swr).toBeLessThanOrEqual(900);
   });
 
   it("falls back to a 200 PNG when the cluster no longer exists, CDN-cacheable like the 404 (h30-abuse-2)", async () => {
