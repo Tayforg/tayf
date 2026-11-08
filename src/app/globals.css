@@ -235,6 +235,49 @@
     letter-spacing: -0.02em;
     text-wrap: balance;
   }
+
+  /* h68-lcp-1: the home "N yeni haber" pill's slot
+     (src/components/home/new-since-last-visit.tsx). By default it has the
+     sr-only geometry, so the always-mounted live region inside it adds no
+     height and no gap to the feed's space-y flow. The inline script in
+     layout.tsx (src/lib/returning-reader-script.ts) puts data-rv on <html>
+     before the feed is parsed when this browser holds a last-visit stamp; the
+     second rule then makes the slot an in-flow block of the pill's exact height
+     (h-6.5 = 1.625rem) at first paint, so filling it after hydration moves
+     nothing. A first-time reader has no data-rv and no blank row. The slot also
+     needs data-reserve, which the component sets from the server-known
+     timestamps.length > 0 (this render shows clusters): the outage shell,
+     EmptyClusters and a search with no in-feed matches pass no timestamps, the
+     count is always 0 there, and reserving a row would push their card down.
+     When timestamps is non-empty the slot is reserved even if nothing turns out
+     to be new (a returning reader with 0 new items sees an empty slot:
+     collapsing it later would be a layout shift).
+     Both rules stay in @layer base on purpose: the feed section's space-y-5
+     margin is a utility and must keep winning over `margin: 0`, so the 20 px
+     gap below the slot is the same before and after hydration. Pinned by
+     tests/guards/new-pill-no-shift.test.ts. */
+  [data-new-pill-slot] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  html[data-rv] [data-new-pill-slot][data-reserve] {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+    min-height: 1.625rem;
+  }
 }
 
 /* =========================================================================

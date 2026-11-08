@@ -9,6 +9,7 @@ import { SwRegistrar } from "@/components/pwa/sw-registrar";
 import { WebAnalytics } from "@/components/analytics/web-analytics";
 import { siteUrl } from "@/lib/site-url";
 import { buildSiteJsonLd, serializeJsonLd } from "@/lib/seo/json-ld";
+import { RETURNING_READER_SCRIPT } from "@/lib/returning-reader-script";
 import "./globals.css";
 
 // Editorial serif for headlines — authoritative, warm character.
@@ -126,8 +127,21 @@ export default function RootLayout({
     <html
       lang="tr"
       className={`${serif.variable} ${sans.variable} ${mono.variable} h-full antialiased dark`}
+      suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col">
+        {/* h68-lcp-1: first child of <body>, so it runs before the feed is
+            parsed. When this browser holds a last-visit stamp it sets
+            data-rv on <html>, and globals.css reserves the home "N yeni haber"
+            pill's slot (html[data-rv] [data-new-pill-slot][data-reserve])
+            before first paint instead of the pill pushing the feed down after
+            hydration.
+            suppressHydrationWarning on <html> covers that attribute (React
+            ignores it one level deep only, so nothing else is silenced). The
+            CSP's script-src has 'unsafe-inline' (src/lib/security/headers.ts),
+            and no cookie is involved: the server HTML is the same for every
+            reader, so the page stays cacheable. */}
+        <script dangerouslySetInnerHTML={{ __html: RETURNING_READER_SCRIPT }} />
         {/* seo-4/seo-5: sitewide Organization + WebSite graph, once per
             page load — gives every page a stable entity to hang
             NewsArticle.publisher (cluster/[id]/page.tsx) off of, and lets
