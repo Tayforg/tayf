@@ -468,7 +468,9 @@ describe("the CPU clock reads the calling thread only", () => {
 describe("expectCpuUnder", () => {
   it("returns the best CPU time of the runs when under the ceiling", () => {
     const best = expectCpuUnder(() => linear(500), 5_000);
-    expect(best).toBeGreaterThan(0);
+    // A per-thread CPU clock can read 0 for a run this short (coarse on Linux CI).
+    expect(Number.isFinite(best)).toBe(true);
+    expect(best).toBeGreaterThanOrEqual(0);
     expect(best).toBeLessThan(5_000);
   });
 
