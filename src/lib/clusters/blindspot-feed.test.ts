@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BLINDSPOT_LIST_FILTERS,
   dedupeBySource,
   isSeoExplainerTitle,
   passesFeedFilters,
@@ -169,6 +170,80 @@ describe("passesFeedFilters", () => {
       ok: false,
       reason: "dunya_share",
     });
+  });
+});
+
+// h62-methodology-1: the three list thresholds are one exported object so
+// /metodoloji can quote them; the comparators stay exactly as they were.
+describe("BLINDSPOT_LIST_FILTERS", () => {
+  it("holds the three list thresholds", () => {
+    expect(BLINDSPOT_LIST_FILTERS).toEqual({
+      minUniqueHashRatio: 0.5,
+      maxDunyaShare: 0.5,
+      minPoliticsShare: 0.6,
+    });
+  });
+
+  // `n` deduped members, one per source, all politika with a unique hash unless
+  // `at(i)` overrides them. Six members make 0.5 reachable for the hash ratio
+  // and the dunya share, five make 0.6 reachable for the politics share.
+  function members(
+    n: number,
+    at: (i: number) => Partial<EmbeddedArticle> = () => ({}),
+  ): EmbeddedArticle[] {
+    // The overrides are spread AFTER article(): that helper drops
+    // politics_admitted_at, which the dunya fixture below needs.
+    return Array.from({ length: n }, (_, i) => ({
+      ...article({
+        id: `b${i}`,
+        source_id: `b${i}`,
+        sources: source(`b${i}`, i % 2 === 0 ? "pro_government" : "opposition"),
+        content_hash: `unique-${i}`,
+        category: "politika",
+      }),
+      ...at(i),
+    }));
+  }
+  const title = { title_tr: "Bakanlıktan açıklama" };
+
+  it("wire check is strict '<': exactly 0.5 distinct hashes passes, just below fails", () => {
+    const half = members(6, (i) => ({ content_hash: `pair-${Math.floor(i / 2)}` }));
+    expect(new Set(half.map((m) => m.content_hash)).size / half.length).toBe(
+      BLINDSPOT_LIST_FILTERS.minUniqueHashRatio,
+    );
+    expect(passesFeedFilters(title, half)).toEqual({ ok: true });
+
+    const below = members(7, (i) => ({ content_hash: `h-${i % 3}` }));
+    expect(passesFeedFilters(title, below)).toEqual({ ok: false, reason: "wire_dedup" });
+  });
+
+  it("dunya check is strict '>': exactly 0.5 dunya passes, just above fails", () => {
+    // Admitted dunya members count as politics (migration 089), so the 0.6
+    // politics floor does not mask the dunya comparator in this fixture.
+    const admitted = "2026-09-28T00:00:00.000Z";
+    const half = members(6, (i) =>
+      i < 3 ? { category: "dunya", politics_admitted_at: admitted } : {},
+    );
+    expect(half.filter((m) => m.category === "dunya").length / half.length).toBe(
+      BLINDSPOT_LIST_FILTERS.maxDunyaShare,
+    );
+    expect(passesFeedFilters(title, half)).toEqual({ ok: true });
+
+    const above = members(7, (i) =>
+      i < 4 ? { category: "dunya", politics_admitted_at: admitted } : {},
+    );
+    expect(passesFeedFilters(title, above)).toEqual({ ok: false, reason: "dunya_share" });
+  });
+
+  it("politics check is strict '<': exactly 0.6 politics passes, just below fails", () => {
+    const sixty = members(5, (i) => (i < 3 ? {} : { category: "spor" }));
+    expect(sixty.filter((m) => m.category === "politika").length / sixty.length).toBe(
+      BLINDSPOT_LIST_FILTERS.minPoliticsShare,
+    );
+    expect(passesFeedFilters(title, sixty)).toEqual({ ok: true });
+
+    const below = members(5, (i) => (i < 2 ? {} : { category: "spor" }));
+    expect(passesFeedFilters(title, below)).toEqual({ ok: false, reason: "politics_share" });
   });
 });
 

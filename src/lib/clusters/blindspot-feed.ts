@@ -111,14 +111,30 @@ export function isSeoExplainerTitle(title: string): boolean {
   return false;
 }
 
-// A5 fix #4: below this share of distinct content_hashes, the cluster is one wire copy amplified by N outlets.
-const WIRE_UNIQUE_HASH_RATIO = 0.5;
-
-// A5 fix #5: above this dunya share, the substance is foreign affairs, not domestic politics.
-const DUNYA_CATEGORY_SHARE_LIMIT = 0.5;
-
-// Soft topical floor: majority of deduped members must be politics/breaking-news.
-const POLITICS_CATEGORY_SHARE_MIN = 0.6;
+/**
+ * The three shares `passesFeedFilters` tests, exported so /metodoloji can quote
+ * them (h62-methodology-1). They apply to the members deduped by source, on
+ * /blindspots and its "Kör noktaya yakın" band only; the label on a card or a
+ * story page does not depend on them.
+ *
+ * - `minUniqueHashRatio` (A5 fix #4): the cluster fails when its share of
+ *   distinct content_hashes is BELOW this (`<`), because it is then one wire
+ *   copy amplified by N outlets. Exactly this share passes.
+ * - `maxDunyaShare` (A5 fix #5): the cluster fails when its dunya share is ABOVE
+ *   this (`>`), because the substance is then foreign affairs, not domestic
+ *   politics. Exactly this share passes.
+ * - `minPoliticsShare`: soft topical floor, the cluster fails when its politics
+ *   (politika / son_dakika / live-admitted) share is BELOW this (`<`). Exactly
+ *   this share passes.
+ *
+ * wire.ts keeps its own `WIRE_UNIQUE_HASH_RATIO` (<=, every member, no dedupe by
+ * source): a different denominator, deliberately not aligned here.
+ */
+export const BLINDSPOT_LIST_FILTERS = {
+  minUniqueHashRatio: 0.5,
+  maxDunyaShare: 0.5,
+  minPoliticsShare: 0.6,
+} as const;
 
 // Earliest article per source, so a single prolific outlet can't inflate its own zone's share.
 export function dedupeBySource(members: EmbeddedArticle[]): EmbeddedArticle[] {
@@ -146,19 +162,19 @@ export function passesFeedFilters(
   const distinctHashes = new Set(
     deduped.map((m) => m.content_hash ?? `__null__:${m.id}`)
   ).size;
-  if (distinctHashes / deduped.length < WIRE_UNIQUE_HASH_RATIO) {
+  if (distinctHashes / deduped.length < BLINDSPOT_LIST_FILTERS.minUniqueHashRatio) {
     return { ok: false, reason: "wire_dedup" };
   }
 
   const dunyaCount = deduped.filter((m) => m.category === "dunya").length;
-  if (dunyaCount / deduped.length > DUNYA_CATEGORY_SHARE_LIMIT) {
+  if (dunyaCount / deduped.length > BLINDSPOT_LIST_FILTERS.maxDunyaShare) {
     return { ok: false, reason: "dunya_share" };
   }
 
   // Migration 089 ("ADMIT"): isPoliticsMember counts a live-admitted member
   // toward politics_share too. The dunya_share gate above is unaffected.
   const politicsHits = deduped.filter((m) => isPoliticsMember(m)).length;
-  if (politicsHits / deduped.length < POLITICS_CATEGORY_SHARE_MIN) {
+  if (politicsHits / deduped.length < BLINDSPOT_LIST_FILTERS.minPoliticsShare) {
     return { ok: false, reason: "politics_share" };
   }
 

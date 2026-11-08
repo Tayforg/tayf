@@ -18,6 +18,8 @@ import {
   stripFeedWrappers,
   stripTrailingTeasers,
 } from "../../../supabase/functions/_shared/cluster/description-clean.ts";
+import { expectLinear, rep } from "../../_helpers/linear-time";
+import type { Gen } from "../../_helpers/linear-time";
 import { GENERIC_ENTITIES } from "../../../supabase/functions/_shared/cluster/constants.ts";
 import { extractEntities } from "../../../supabase/functions/_shared/cluster/entities.ts";
 import {
@@ -921,22 +923,23 @@ describe("stripFeedWrappers (h19-ingest-2)", () => {
     );
   });
 
-  it("a 100k-character adversarial input finishes in under 100 ms", () => {
-    const inputs = [
-      "The post ".repeat(11_200),
-      `${"The post ".repeat(5_000)}${" ".repeat(55_000)}appeared first on`,
-      `The post ${" ".repeat(100_000)} appeared first on x`,
-      " yazısı ilk önce ".repeat(6_000),
-      `x yazısı ilk önce ${" ".repeat(100_000)} adresinde yayınlanmıştır.`,
-      "01.01.2026 Diken ".repeat(6_000),
-      `${" ".repeat(100_000)}01.01.2026 Diken`,
-      `\n${"a".repeat(100_000)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
-    ];
-    for (const s of inputs) {
-      const start = performance.now();
-      stripFeedWrappers(s);
-      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(100);
-    }
+  // Load-robust (tests/_helpers/linear-time.ts): the guard is how CPU time GROWS over
+  // a size ladder (12.5k .. 100k characters), not a wall-clock number. The 2000 ms
+  // ceiling is 20x the old 100 ms budget.
+  it.each([
+    ["'The post ' repeated", rep("The post ")],
+    [
+      "'The post ' x 5000, 55000 blanks, 'appeared first on'",
+      (n: number) => `${"The post ".repeat(Math.round(n / 20))}${" ".repeat(Math.round(n * 0.55))}appeared first on`,
+    ],
+    ["'The post ', 100000 blanks, ' appeared first on x'", rep(" ", "The post ", " appeared first on x")],
+    ["' yazısı ilk önce ' repeated", rep(" yazısı ilk önce ")],
+    ["'x yazısı ilk önce ', 100000 blanks, ' adresinde yayınlanmıştır.'", rep(" ", "x yazısı ilk önce ", " adresinde yayınlanmıştır.")],
+    ["'01.01.2026 Diken ' repeated", rep("01.01.2026 Diken ")],
+    ["100000 blanks, '01.01.2026 Diken'", rep(" ", "", "01.01.2026 Diken")],
+    ["'a' x 100000 behind a newline, then the Serbestiyet marker", rep("a", "\n", " yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.")],
+  ] as Array<[string, Gen]>)("a 100k-character adversarial input scales linearly: %s", (_name, gen) => {
+    expectLinear(gen, (s) => stripFeedWrappers(s), { n: 100_000, ceilingMs: 2_000 });
   });
 });
 
@@ -1162,24 +1165,20 @@ describe("stripFeedWrappers: trailing WordPress excerpt marker (h20-live-4)", ()
     expect(out).toContain("“J.P. Morgan…” Bankanın kurucusu… Dizide");
   });
 
-  it("is linear: 100k blanks then 'x', 100k '[' and other long inputs finish in under 50 ms", () => {
-    const inputs = [
-      `${" ".repeat(100_000)}x`,
-      `x${" ".repeat(100_000)}`,
-      "[".repeat(100_000),
-      `${"[".repeat(100_000)}…]`,
-      `[…]${" ".repeat(100_000)}`,
-      `${" ".repeat(100_000)}[…]`,
-      "[…]".repeat(33_000),
-      "[…] ".repeat(25_000),
-      `${"a".repeat(100_000)} [&hellip;]`,
-      `${"[&#8230".repeat(14_000)}`,
-    ];
-    for (const s of inputs) {
-      const start = performance.now();
-      stripFeedWrappers(s);
-      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(50);
-    }
+  // Ceiling 1000 ms = 20x the old 50 ms budget (CPU time over a 12.5k .. 100k ladder).
+  it.each([
+    ["100000 blanks, then 'x'", rep(" ", "", "x")],
+    ["'x', then 100000 blanks", rep(" ", "x")],
+    ["'[' x 100000", rep("[")],
+    ["'[' x 100000, then '…]'", rep("[", "", "…]")],
+    ["'[…]', then 100000 blanks", rep(" ", "[…]")],
+    ["100000 blanks, then '[…]'", rep(" ", "", "[…]")],
+    ["'[…]' x 33000", rep("[…]")],
+    ["'[…] ' x 25000", rep("[…] ")],
+    ["'a' x 100000, then ' [&hellip;]'", rep("a", "", " [&hellip;]")],
+    ["'[&#8230' x 14000", rep("[&#8230")],
+  ] as Array<[string, Gen]>)("is linear: stripFeedWrappers on %s", (_name, gen) => {
+    expectLinear(gen, (s) => stripFeedWrappers(s), { n: 100_000, ceilingMs: 1_000 });
   });
 });
 
@@ -1446,21 +1445,20 @@ describe("cutAppendedTicker (h23-live-2)", () => {
   });
 
   describe("robustness", () => {
-    it("100k-character adversarial inputs finish in under 50 ms each", () => {
-      const inputs = [
-        "\nSon dakika...".repeat(7_200),
-        "\nx".repeat(50_000),
-        "x\n".repeat(50_000) + "Son dakika...",
-        "\n".repeat(100_000) + "Son dakika... x",
-        ("\n" + " ".repeat(50_000)).repeat(2) + "\nSon dakika... x",
-        "a.\nr\n".repeat(20_000) + "Son dakika... x",
-        "\r\n".repeat(50_000) + "Son dakika... x",
-      ];
-      for (const s of inputs) {
-        const start = performance.now();
-        cutAppendedTicker(s);
-        expect(performance.now() - start, `${s.length} chars`).toBeLessThan(50);
-      }
+    // Ceiling 1000 ms = 20x the old 50 ms budget (CPU time over a 12.5k .. 100k ladder).
+    it.each([
+      ["'\\nSon dakika...' repeated", rep("\nSon dakika...")],
+      ["'\\nx' repeated", rep("\nx")],
+      ["'x\\n' repeated, then 'Son dakika...'", rep("x\n", "", "Son dakika...")],
+      ["100000 newlines, then 'Son dakika... x'", rep("\n", "", "Son dakika... x")],
+      [
+        "two newline + 50000 blank runs, then 'Son dakika... x'",
+        (n: number) => ("\n" + " ".repeat(Math.round(n / 2))).repeat(2) + "\nSon dakika... x",
+      ],
+      ["'a.\\nr\\n' repeated, then 'Son dakika... x'", rep("a.\nr\n", "", "Son dakika... x")],
+      ["'\\r\\n' repeated, then 'Son dakika... x'", rep("\r\n", "", "Son dakika... x")],
+    ] as Array<[string, Gen]>)("100k-character adversarial input scales linearly: %s", (_name, gen) => {
+      expectLinear(gen, (s) => cutAppendedTicker(s), { n: 100_000, ceilingMs: 1_000 });
     });
 
     it("never throws on odd input", () => {
@@ -1645,23 +1643,19 @@ describe("stripFeedWrappers: site-name footer (h24-feeds-2)", () => {
     }
   });
 
-  it("linear time: adversarial inputs of 100k to 200k characters finish in under 100 ms", () => {
-    const inputs = [
-      "\n" + "a ".repeat(100_000) + " Medyascope",
-      "x\n" + "a ".repeat(100_000) + " Medyascope",
-      "x\n" + " ".repeat(200_000) + "Medyascope",
-      "\n".repeat(100_000) + "x Medyascope",
-      "x\n".repeat(50_000) + "Medyascope",
-      "Medyascope ".repeat(18_000),
-      "\nMedyascope".repeat(18_000),
-      "x\n" + "a".repeat(200_000) + " Medyascope",
-      FOOT_BODY + "\n" + " ".repeat(150_000) + "Medyascope",
-    ];
-    for (const s of inputs) {
-      const start = performance.now();
-      stripFeedWrappers(s);
-      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(100);
-    }
+  // 100k to 200k characters; ceiling 2000 ms = 20x the old 100 ms budget (CPU time over a size ladder).
+  it.each([
+    ["newline, 'a ' x 100000, ' Medyascope'", rep("a ", "\n", " Medyascope"), 200_000],
+    ["'x\\n', 'a ' x 100000, ' Medyascope'", rep("a ", "x\n", " Medyascope"), 200_000],
+    ["'x\\n', 200000 blanks, 'Medyascope'", rep(" ", "x\n", "Medyascope"), 200_000],
+    ["100000 newlines, 'x Medyascope'", rep("\n", "", "x Medyascope"), 100_000],
+    ["'x\\n' x 50000, 'Medyascope'", rep("x\n", "", "Medyascope"), 100_000],
+    ["'Medyascope ' repeated", rep("Medyascope "), 200_000],
+    ["'\\nMedyascope' repeated", rep("\nMedyascope"), 200_000],
+    ["'x\\n', 'a' x 200000, ' Medyascope'", rep("a", "x\n", " Medyascope"), 200_000],
+    ["the body, a newline, 150000 no-break spaces, 'Medyascope'", rep("\u00a0", FOOT_BODY + "\n", "Medyascope"), 150_000],
+  ] as Array<[string, Gen, number]>)("linear time: stripFeedWrappers on %s", (_name, gen, n) => {
+    expectLinear(gen, (s) => stripFeedWrappers(s), { n, ceilingMs: 2_000 });
   });
 });
 
@@ -1988,24 +1982,22 @@ describe("stripTrailingTeasers: properties", () => {
     }
   });
 
-  it("100k-character adversarial inputs finish in under 50 ms each (no backtracking, no quadratic scan)", () => {
-    const inputs = [
-      "x\n".repeat(50_000) + "Volkswagen kriz sürüyor!",
-      "Giriş cümlesi burada.\n" + "Gündem hareketli! Piyasalar duyurdu\n".repeat(3_000),
-      "Giriş cümlesi burada.\n" + "!".repeat(100_000),
-      "Giriş cümlesi burada.\n" + "A! ".repeat(33_000),
-      "Giriş cümlesi burada.\n" + "a".repeat(100_000) + "!",
-      "Giriş cümlesi burada.\n" + " ".repeat(100_000) + "Başlık duyuruldu! Gündem",
-      "Giriş cümlesi burada.\n" + "...".repeat(33_000),
-      "\n".repeat(100_000) + "Başlık duyuruldu! Gündem",
-      "Giriş. ".repeat(14_000) + "\nBaşlık duyuruldu! Gündem hareketli",
-      ("a b c d e f ".repeat(30) + "!\n").repeat(8_000),
-    ];
-    for (const s of inputs) {
-      const start = performance.now();
-      stripTrailingTeasers(s);
-      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(50);
-    }
+  // No backtracking, no quadratic scan: CPU time over a size ladder (12.5k .. 100k characters,
+  // 250k for the 2.9 MB line-heavy shape); ceiling 1000 ms = 20x the old 50 ms budget.
+  const INTRO = "Giriş cümlesi burada.\n";
+  it.each([
+    ["'x\\n' x 50000, then a headline", rep("x\n", "", "Volkswagen kriz sürüyor!"), 100_000],
+    ["an intro, then 'Gündem hareketli! Piyasalar duyurdu\\n' x 3000", rep("Gündem hareketli! Piyasalar duyurdu\n", INTRO), 100_000],
+    ["an intro, then '!' x 100000", rep("!", INTRO), 100_000],
+    ["an intro, then 'A! ' x 33000", rep("A! ", INTRO), 100_000],
+    ["an intro, then 'a' x 100000 and '!'", rep("a", INTRO, "!"), 100_000],
+    ["an intro, then 100000 blanks and a headline", rep(" ", INTRO, "Başlık duyuruldu! Gündem"), 100_000],
+    ["an intro, then '...' x 33000", rep("...", INTRO), 100_000],
+    ["100000 newlines, then a headline", rep("\n", "", "Başlık duyuruldu! Gündem"), 100_000],
+    ["'Giriş. ' x 14000, then a headline line", rep("Giriş. ", "", "\nBaşlık duyuruldu! Gündem hareketli"), 100_000],
+    ["'a b c d e f ' x 30 + '!\\n', repeated to 250k characters (the old 2.9 MB shape)", rep("a b c d e f ".repeat(30) + "!\n"), 250_000],
+  ] as Array<[string, Gen, number]>)("100k-character adversarial input scales linearly: stripTrailingTeasers on %s", (_name, gen, n) => {
+    expectLinear(gen, (s) => stripTrailingTeasers(s), { n, ceilingMs: 1_000 });
   });
 });
 

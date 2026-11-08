@@ -8,6 +8,8 @@ import {
   foldForCategory,
 } from "../../../supabase/functions/_shared/rss/category.ts";
 import type { NewsCategory } from "../../../supabase/functions/_shared/rss/category.ts";
+import { expectCpuUnder, expectLinear, rep } from "../../_helpers/linear-time";
+import type { Gen } from "../../_helpers/linear-time";
 
 // ---------------------------------------------------------------------------
 // hunt-19 (2026-11-02): the ingest category classifier decides what reaches
@@ -3340,74 +3342,75 @@ describe("robustness", () => {
   });
 
   describe("linear time on large inputs (ingest CPU)", () => {
-    const BUDGET_MS = 50;
-    const inputs: Array<[string, string]> = [
-      ["100k letters, one word", "a".repeat(100_000)],
-      ["100k letters ending in spor", "a".repeat(99_996) + "spor"],
-      ["100k typical words", "Erdoğan'ın açıklaması sonrası piyasalar karıştı ve dolar yükseldi. ".repeat(1_600).slice(0, 100_000)],
-      ["100k of one stem", "belediye ".repeat(11_200).slice(0, 100_000)],
-      ["100k keyword-free words", "Kış lastiği zorunluluğu başladı ve sürücüler hazırlık yaptı. ".repeat(1_700).slice(0, 100_000)],
-      ["100k newlines", "\n".repeat(100_000)],
-      ["100k blanks after a newline", "x\n" + " ".repeat(99_990) + "y"],
-      ["100k blanks and newlines", "\n ".repeat(50_000)],
-      ["100k tickers", "x\nSon dakika... ".repeat(6_400).slice(0, 100_000)],
-      ["100k dotted capitals", "İ".repeat(100_000)],
-      ["100k apostrophes", "'’‘ʼ".repeat(25_000)],
-      ["100k near-misses", "so dakika sonn dakika kaz gol- çi ira ".repeat(2_700).slice(0, 100_000)],
+    // Load-robust: the guard is how CPU time GROWS over a size ladder (12.5k ..
+    // 100k characters), not a wall-clock number (tests/_helpers/linear-time.ts).
+    // A backtracking or quadratic regression grows faster than the input; the
+    // 1000 ms ceiling is 20x the old 50 ms budget.
+    const inputs: Array<[string, Gen]> = [
+      ["100k letters, one word", rep("a")],
+      ["100k letters ending in spor", rep("a", "", "spor")],
+      ["100k typical words", rep("Erdoğan'ın açıklaması sonrası piyasalar karıştı ve dolar yükseldi. ")],
+      ["100k of one stem", rep("belediye ")],
+      ["100k keyword-free words", rep("Kış lastiği zorunluluğu başladı ve sürücüler hazırlık yaptı. ")],
+      ["100k newlines", rep("\n")],
+      ["100k blanks after a newline", rep(" ", "x\n", "y")],
+      ["100k blanks and newlines", rep("\n ")],
+      ["100k tickers", rep("x\nSon dakika... ")],
+      ["100k dotted capitals", rep("İ")],
+      ["100k apostrophes", rep("'’‘ʼ")],
+      ["100k near-misses", rep("so dakika sonn dakika kaz gol- çi ira ")],
       // wave AY: the Korea lookbehind and the party-office gate
-      ["100k blanks", " ".repeat(100_000)],
-      ["100k blanks before an işçi parti", " ".repeat(99_980) + "isci parti"],
-      ["100k kore işçi", "Kore İşçi ".repeat(10_000)],
-      ["100k kore blanks", "kore" + " ".repeat(99_980) + "işçi parti"],
-      ["100k genel başkan", "Genel Başkan ".repeat(7_700).slice(0, 100_000)],
-      ["100k il başkan with a near-miss marker", "il başkan partizan ".repeat(5_300).slice(0, 100_000)],
+      ["100k blanks", rep(" ")],
+      ["100k blanks before an işçi parti", rep(" ", "", "isci parti")],
+      ["100k kore işçi", rep("Kore İşçi ")],
+      ["100k kore blanks", rep(" ", "kore", "işçi parti")],
+      ["100k genel başkan", rep("Genel Başkan ")],
+      ["100k il başkan with a near-miss marker", rep("il başkan partizan ")],
       // hunt-44: the given-name lookbehind on the 'erdogan' entry
-      ["100k yılmaz erdoğan", "Yılmaz Erdoğan ".repeat(6_700).slice(0, 100_000)],
-      ["100k blanks before an erdoğan", " ".repeat(99_990) + "erdoğan"],
-      ["100k yılmaz blanks erdoğan", "yılmaz" + " ".repeat(99_980) + "erdoğan"],
-      ["100k blank runs between yılmaz and erdoğan", ("yılmaz" + " ".repeat(94) + "erdoğan ").repeat(1_000)],
-      ["100k erdoğan near-misses", "yılmaz, erdoğan yılmazer erdoğan nehir. erdoğan ".repeat(2_100).slice(0, 100_000)],
+      ["100k yılmaz erdoğan", rep("Yılmaz Erdoğan ")],
+      ["100k blanks before an erdoğan", rep(" ", "", "erdoğan")],
+      ["100k yılmaz blanks erdoğan", rep(" ", "yılmaz", "erdoğan")],
+      ["100k blank runs between yılmaz and erdoğan", rep("yılmaz" + " ".repeat(94) + "erdoğan ")],
+      ["100k erdoğan near-misses", rep("yılmaz, erdoğan yılmazer erdoğan nehir. erdoğan ")],
       // hunt-59: the İmamoğlu district guard
-      ["100k imamoğlu", "İmamoğlu ".repeat(11_000).slice(0, 100_000)],
-      ["100k adana imamoğlu pairs", "Adana İmamoğlu ".repeat(6_600).slice(0, 100_000)],
-      ["100k adana blanks imamoğlu", "adana" + " ".repeat(99_980) + "imamoğlu"],
-      ["100k imamoğlu blanks ilçe", "imamoğlu" + " ".repeat(99_980) + "ilçe"],
-      ["100k imamoğlu blank runs ilçe", ("imamoğlu" + " ".repeat(90) + "ilçe ").repeat(1_000)],
-      ["100k adana'nın near-misses", "adana'nın adana'da adana imamoğlu'nda adana ve ".repeat(2_300).slice(0, 100_000)],
+      ["100k imamoğlu", rep("İmamoğlu ")],
+      ["100k adana imamoğlu pairs", rep("Adana İmamoğlu ")],
+      ["100k adana blanks imamoğlu", rep(" ", "adana", "imamoğlu")],
+      ["100k imamoğlu blanks ilçe", rep(" ", "imamoğlu", "ilçe")],
+      ["100k imamoğlu blank runs ilçe", rep("imamoğlu" + " ".repeat(90) + "ilçe ")],
+      ["100k adana'nın near-misses", rep("adana'nın adana'da adana imamoğlu'nda adana ve ")],
     ];
 
-    it.each(inputs)("%s classifies in under 50 ms", (_name, text) => {
-      // Warm the JIT so the measurement is the steady-state cost.
-      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
-      // Best of three: a full-suite run on a shared CI runner can stall one
-      // call past the budget (70 ms seen); a backtracking regression is slow
-      // on every run, so the minimum still catches it.
-      let elapsed = Infinity;
-      for (let run = 0; run < 3; run++) {
-        const started = performance.now();
-        const out = classifyCategory(text, text, NEUTRAL_URL);
-        elapsed = Math.min(elapsed, performance.now() - started);
-        expect(ALL.has(out)).toBe(true);
-      }
-      expect(elapsed).toBeLessThan(BUDGET_MS);
+    it.each(inputs)("%s scales linearly", (_name, gen) => {
+      expectLinear(
+        gen,
+        (text) => {
+          expect(ALL.has(classifyCategory(text, text, NEUTRAL_URL))).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 1_000 },
+      );
     });
 
-    it("a very long URL costs nothing either", () => {
-      const url = `https://x.test/${"a/".repeat(50_000)}`;
-      const started = performance.now();
-      expect(classifyCategory("Bir başlık", null, url)).toBe("genel");
-      expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+    it("a very long URL scales linearly", () => {
+      expectLinear(
+        rep("a/", "https://x.test/"),
+        (url) => {
+          expect(classifyCategory("Bir başlık", null, url)).toBe("genel");
+        },
+        { n: 100_000, ceilingMs: 1_000 },
+      );
     });
 
-    it("10 000 realistic rows classify in well under a second", () => {
-      const started = performance.now();
+    it("10 000 realistic rows classify within the CPU ceiling", () => {
       let politika = 0;
-      for (let i = 0; i < 10_000; i++) {
-        const r = GOLDEN[i % GOLDEN.length]!;
-        if (classifyCategory(r.title, r.description, r.url) === "politika") politika++;
-      }
+      expectCpuUnder(() => {
+        politika = 0;
+        for (let i = 0; i < 10_000; i++) {
+          const r = GOLDEN[i % GOLDEN.length]!;
+          if (classifyCategory(r.title, r.description, r.url) === "politika") politika++;
+        }
+      }, 1_500);
       expect(politika).toBeGreaterThan(0);
-      expect(performance.now() - started).toBeLessThan(1500);
     });
   });
 });
@@ -4169,44 +4172,45 @@ describe("wave AZ (hunt-22)", () => {
   });
 
   describe("linear time on large inputs (the new lookbehind and venue guard)", () => {
-    const BUDGET_MS = 50;
-    const inputs: Array<[string, string]> = [
-      ["100k blanks after hava, then muhalefet", "hava" + " ".repeat(99_980) + "muhalefet"],
-      ["100k blanks and a trailing hava", " ".repeat(99_990) + "hava"],
-      ["100k 'hava ' repeated", "hava ".repeat(20_000)],
-      ["100k 'hava muhalefet' repeated", "hava muhalefet ".repeat(6_700).slice(0, 100_000)],
-      ["100k 'erdoğan kongre' repeated", "erdoğan kongre ".repeat(6_700).slice(0, 100_000)],
-      ["100k 'erdoğan' + blanks + 'kongre ve kültür'", "erdoğan" + " ".repeat(99_950) + "kongre ve kültür"],
-      ["100k 'cumhurbaşkan' repeated", "cumhurbaşkan ".repeat(7_700).slice(0, 100_000)],
-      ["100k 'seçim' repeated", "seçim ".repeat(16_600).slice(0, 100_000)],
-      ["100k 'oda' repeated", "oda ".repeat(25_000)],
-      ["100k 'ürün' blanks 'seçim'", "ürün" + " ".repeat(99_990) + "seçim"],
-      ["100k 'parti' repeated", "parti ".repeat(16_600).slice(0, 100_000)],
-      ["'parti' then 100k blanks", "parti" + " ".repeat(99_990)],
-      ["'parti' then 100k blanks then 'uye'", "parti" + " ".repeat(99_980) + "uye"],
-      ["100k 'partisi ' repeated", "partisi ".repeat(12_500)],
-      ["100k 'partiiiii' letters", "p" + "arti".repeat(1) + "i".repeat(99_990)],
-      ["100k 'tip ' repeated", "tip ".repeat(25_000)],
-      ["'tip' then 100k blanks then 'uye'", "tip" + " ".repeat(99_980) + "uye"],
+    // Title and description each take the text once; the ceiling is 20x the old
+    // 2 x 50 ms budget. See tests/_helpers/linear-time.ts.
+    const inputs: Array<[string, Gen]> = [
+      ["100k blanks after hava, then muhalefet", rep(" ", "hava", "muhalefet")],
+      ["100k blanks and a trailing hava", rep(" ", "", "hava")],
+      ["100k 'hava ' repeated", rep("hava ")],
+      ["100k 'hava muhalefet' repeated", rep("hava muhalefet ")],
+      ["100k 'erdoğan kongre' repeated", rep("erdoğan kongre ")],
+      ["100k 'erdoğan' + blanks + 'kongre ve kültür'", rep(" ", "erdoğan", "kongre ve kültür")],
+      ["100k 'cumhurbaşkan' repeated", rep("cumhurbaşkan ")],
+      ["100k 'seçim' repeated", rep("seçim ")],
+      ["100k 'oda' repeated", rep("oda ")],
+      ["100k 'ürün' blanks 'seçim'", rep(" ", "ürün", "seçim")],
+      ["100k 'parti' repeated", rep("parti ")],
+      ["'parti' then 100k blanks", rep(" ", "parti")],
+      ["'parti' then 100k blanks then 'uye'", rep(" ", "parti", "uye")],
+      ["100k 'partisi ' repeated", rep("partisi ")],
+      ["100k 'partiiiii' letters", rep("i", "parti")],
+      ["100k 'tip ' repeated", rep("tip ")],
+      ["'tip' then 100k blanks then 'uye'", rep(" ", "tip", "uye")],
       // the 'rusya federasyon' lookbehind runs only where 'seçim' or 'oy' matched
-      ["'seçim' then 100k blanks", "seçim" + " ".repeat(99_990)],
-      ["'oy' then 100k blanks", "oy" + " ".repeat(99_990)],
-      ["'seçim rusya' then 100k blanks then 'federasyon'", "seçim rusya" + " ".repeat(99_950) + "federasyon"],
-      ["100k 'seçim rusya ' repeated", "seçim rusya ".repeat(8_400).slice(0, 100_000)],
-      ["100k 'oy ' repeated", "oy ".repeat(33_300).slice(0, 100_000)],
-      ["'ve' then 100k blanks then 'siyasetçi'", "ve" + " ".repeat(99_980) + "siyasetçi"],
-      ["100k 've siyasetçi ' repeated", "ve siyasetçi ".repeat(7_700).slice(0, 100_000)],
+      ["'seçim' then 100k blanks", rep(" ", "seçim")],
+      ["'oy' then 100k blanks", rep(" ", "oy")],
+      ["'seçim rusya' then 100k blanks then 'federasyon'", rep(" ", "seçim rusya", "federasyon")],
+      ["100k 'seçim rusya ' repeated", rep("seçim rusya ")],
+      ["100k 'oy ' repeated", rep("oy ")],
+      ["'ve' then 100k blanks then 'siyasetçi'", rep(" ", "ve", "siyasetçi")],
+      ["100k 've siyasetçi ' repeated", rep("ve siyasetçi ")],
     ];
 
-    it.each(inputs)("%s classifies in under 50 ms", (_name, text) => {
-      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
-      const started = performance.now();
-      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
-      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
-      const elapsed = performance.now() - started;
-      expect(ALL.has(viaTitle)).toBe(true);
-      expect(ALL.has(viaDescription)).toBe(true);
-      expect(elapsed).toBeLessThan(BUDGET_MS * 2);
+    it.each(inputs)("%s scales linearly", (_name, gen) => {
+      expectLinear(
+        gen,
+        (text) => {
+          expect(ALL.has(classifyCategory(text, null, NEUTRAL_URL))).toBe(true);
+          expect(ALL.has(classifyCategory("Başlık", text, NEUTRAL_URL))).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 2_000 },
+      );
     });
   });
 });
@@ -4781,39 +4785,42 @@ describe("wave BD (hunt-25): named politicians and the İBB trial in the headlin
   });
 
   describe("linear time on large inputs (200k characters)", () => {
-    const BUDGET_MS = 100;
-    const inputs: Array<[string, string]> = [
-      ["200k 'cevdet yılmaz' repeated", "cevdet yılmaz ".repeat(14_300).slice(0, 200_000)],
-      ["200k 'hakan fidan' repeated", "hakan fidan ".repeat(16_700).slice(0, 200_000)],
-      ["200k 'sinirlioğlu' repeated", "sinirlioğlu ".repeat(18_200).slice(0, 200_000)],
-      ["200k 'ibb davası' repeated", "ibb davası ".repeat(18_200).slice(0, 200_000)],
-      ["200k 'cevdet ' repeated (no surname)", "cevdet ".repeat(28_600).slice(0, 200_000)],
-      ["200k 'hakan ' repeated (no surname)", "hakan ".repeat(33_400).slice(0, 200_000)],
-      ["200k 'ibb ' repeated (no trial)", "ibb ".repeat(50_000)],
-      ["'cevdet' then 200k blanks then 'yılmaz'", "cevdet" + " ".repeat(199_980) + "yılmaz"],
-      ["'hakan' then 200k blanks then 'fidan'", "hakan" + " ".repeat(199_980) + "fidan"],
-      ["'ibb' then 200k blanks then 'davası'", "ibb" + " ".repeat(199_980) + "davası"],
-      ["'cevdet' then 200k blanks", "cevdet" + " ".repeat(199_990)],
-      ["200k 'cevdet yılmaz' with NBSP", "cevdet yılmaz ".repeat(14_300).slice(0, 200_000)],
-      ["200k letters, one word", "a".repeat(200_000)],
+    // Ceiling 4000 ms = 20x the old 2 x 100 ms budget; the ladder runs 25k .. 200k.
+    const inputs: Array<[string, Gen]> = [
+      ["200k 'cevdet yılmaz' repeated", rep("cevdet yılmaz ")],
+      ["200k 'hakan fidan' repeated", rep("hakan fidan ")],
+      ["200k 'sinirlioğlu' repeated", rep("sinirlioğlu ")],
+      ["200k 'ibb davası' repeated", rep("ibb davası ")],
+      ["200k 'cevdet ' repeated (no surname)", rep("cevdet ")],
+      ["200k 'hakan ' repeated (no surname)", rep("hakan ")],
+      ["200k 'ibb ' repeated (no trial)", rep("ibb ")],
+      ["'cevdet' then 200k blanks then 'yılmaz'", rep(" ", "cevdet", "yılmaz")],
+      ["'hakan' then 200k blanks then 'fidan'", rep(" ", "hakan", "fidan")],
+      ["'ibb' then 200k blanks then 'davası'", rep(" ", "ibb", "davası")],
+      ["'cevdet' then 200k blanks", rep(" ", "cevdet")],
+      ["200k 'cevdet yılmaz' with NBSP", rep("cevdet\u00a0yılmaz\u00a0")],
+      ["200k letters, one word", rep("a")],
     ];
 
-    it.each(inputs)("%s classifies in under 100 ms", (_name, text) => {
-      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
-      const started = performance.now();
-      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
-      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
-      const elapsed = performance.now() - started;
-      expect(ALL.has(viaTitle)).toBe(true);
-      expect(ALL.has(viaDescription)).toBe(true);
-      expect(elapsed).toBeLessThan(BUDGET_MS * 2);
+    it.each(inputs)("%s scales linearly", (_name, gen) => {
+      expectLinear(
+        gen,
+        (text) => {
+          expect(ALL.has(classifyCategory(text, null, NEUTRAL_URL))).toBe(true);
+          expect(ALL.has(classifyCategory("Başlık", text, NEUTRAL_URL))).toBe(true);
+        },
+        { n: 200_000, ceilingMs: 4_000 },
+      );
     });
 
-    it("a 200k-character title that names the person is politika", () => {
-      const title = "cevdet yılmaz ".repeat(14_300).slice(0, 200_000);
-      const started = performance.now();
-      expect(classifyCategory(title, null, NEUTRAL_URL)).toBe("politika");
-      expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+    it("a 200k-character title that names the person is politika and scales linearly", () => {
+      expectLinear(
+        rep("cevdet yılmaz "),
+        (title) => {
+          expect(classifyCategory(title, null, NEUTRAL_URL)).toBe("politika");
+        },
+        { n: 200_000, ceilingMs: 2_000 },
+      );
     });
   });
 
@@ -5220,28 +5227,28 @@ describe("wave BL (hunt-31): politics gate precision", () => {
     // letters a + ' muhalefet' 9.8; 'kanuna' + blanks + 'muhalefet' 2.6; 'meclis
     // odası' repeated 13.6; 'iş ve siyaset dünyası' repeated 11.9; 'is ve' + 200k
     // blanks + 'siyaset dünyası' 3.7; 'siyaset' + 200k blanks + 'dünyası' 2.6. The
-    // worst is 13.6 ms for the two calls (the old classifier: 8.4 ms), so the
-    // 2 x 50 ms below is more than 7 times the measurement.
-    const BUDGET_MS = 50;
-    const inputs: Array<[string, string]> = [
-      ["'kanununa muhalefet ' repeated", "kanununa muhalefet ".repeat(10_500).slice(0, 200_000)],
-      ["'kanun' + 199 990 letters a + ' muhalefet'", "kanun" + "a".repeat(199_990) + " muhalefet"],
-      ["'kanuna' + 199 980 blanks + 'muhalefet'", "kanuna" + " ".repeat(199_980) + "muhalefet"],
-      ["'meclis odası ' repeated", "meclis odası ".repeat(15_400).slice(0, 200_000)],
-      ["'iş ve siyaset dünyası ' repeated", "iş ve siyaset dünyası ".repeat(9_100).slice(0, 200_000)],
-      ["'is ve' + 200k blanks + 'siyaset dünyası'", "is ve" + " ".repeat(200_000) + "siyaset dünyası"],
-      ["'siyaset' + 200k blanks + 'dünyası'", "siyaset" + " ".repeat(200_000) + "dünyası"],
+    // worst is 13.6 ms for the two calls. The guard is the growth of CPU time over
+    // a 25k .. 200k ladder (tests/_helpers/linear-time.ts); the 2000 ms ceiling is
+    // 20x the old 2 x 50 ms budget.
+    const inputs: Array<[string, Gen]> = [
+      ["'kanununa muhalefet ' repeated", rep("kanununa muhalefet ")],
+      ["'kanun' + 199 990 letters a + ' muhalefet'", rep("a", "kanun", " muhalefet")],
+      ["'kanuna' + 199 980 blanks + 'muhalefet'", rep(" ", "kanuna", "muhalefet")],
+      ["'meclis odası ' repeated", rep("meclis odası ")],
+      ["'iş ve siyaset dünyası ' repeated", rep("iş ve siyaset dünyası ")],
+      ["'is ve' + 200k blanks + 'siyaset dünyası'", rep(" ", "is ve", "siyaset dünyası")],
+      ["'siyaset' + 200k blanks + 'dünyası'", rep(" ", "siyaset", "dünyası")],
     ];
 
-    it.each(inputs)("%s classifies in under the budget", (_name, text) => {
-      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
-      const started = performance.now();
-      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
-      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
-      const elapsed = performance.now() - started;
-      expect(ALL.has(viaTitle)).toBe(true);
-      expect(ALL.has(viaDescription)).toBe(true);
-      expect(elapsed).toBeLessThan(BUDGET_MS * 2);
+    it.each(inputs)("%s scales linearly", (_name, gen) => {
+      expectLinear(
+        gen,
+        (text) => {
+          expect(ALL.has(classifyCategory(text, null, NEUTRAL_URL))).toBe(true);
+          expect(ALL.has(classifyCategory("Başlık", text, NEUTRAL_URL))).toBe(true);
+        },
+        { n: 200_000, ceilingMs: 2_000 },
+      );
     });
   });
 });
@@ -5781,34 +5788,32 @@ describe("wave BO (h32-livebl-1): dünya idioms", () => {
     // 'dünyaevine ' + 200k keyword-free words (reaches FOREIGN_RE) 41.7; 'dünyaca
     // ünlü ' + 200k keyword-free words 25.4; 'dünya şampiyonası ' repeated 71.9. The
     // medians are 3.5 .. 36 ms, and doubling the input from 50k to 400k doubles
-    // the time. The old classifier on the same inputs: 28.9 ms worst on a quiet
-    // run, 96.9 ms under load. The bound is max(100, ceil(3 x 71.9)) = 216 ms for
-    // the two calls: a quadratic scan would cost seconds on these inputs.
-    const PAIR_BUDGET_MS = 216;
-    const filler = "alfa beta gama delta ".repeat(10_000);
-    const inputs: Array<[string, string]> = [
-      ["'dünyaya ' repeated", "dünyaya ".repeat(25_100).slice(0, 200_000)],
-      ["'dünya' + 199 990 letters a", "dünya" + "a".repeat(199_990)],
-      ["'dünya ' + 199 990 letters a", "dünya " + "a".repeat(199_990)],
-      ["'dünya ab cd ' repeated", "dünya ab cd ".repeat(16_700).slice(0, 200_000)],
-      ["'dünyanın a b ' repeated", "dünyanın a b ".repeat(15_400).slice(0, 200_000)],
-      ["'iş dünyası ' repeated", "iş dünyası ".repeat(18_200).slice(0, 200_000)],
-      ["'is' + 200k blanks + 'dünyası'", "is" + " ".repeat(200_000) + "dünyası"],
-      ["'gözlerini' + 200k blanks + 'dünyaya'", "gözlerini" + " ".repeat(200_000) + "dünyaya"],
-      ["'dünyaevine ' + 200k keyword-free words", "dünyaevine " + filler.slice(0, 200_000)],
-      ["'dünyaca ünlü ' + 200k keyword-free words", "dünyaca ünlü " + filler.slice(0, 200_000)],
-      ["'dünya şampiyonası ' repeated", "dünya şampiyonası ".repeat(11_100).slice(0, 200_000)],
+    // the time. The guard is that doubling law, measured on CPU time over a
+    // 25k .. 200k ladder (tests/_helpers/linear-time.ts); the 4320 ms ceiling is
+    // 20x the old 216 ms budget. A quadratic scan would cost seconds on these inputs.
+    const inputs: Array<[string, Gen]> = [
+      ["'dünyaya ' repeated", rep("dünyaya ")],
+      ["'dünya' + 199 990 letters a", rep("a", "dünya")],
+      ["'dünya ' + 199 990 letters a", rep("a", "dünya ")],
+      ["'dünya ab cd ' repeated", rep("dünya ab cd ")],
+      ["'dünyanın a b ' repeated", rep("dünyanın a b ")],
+      ["'iş dünyası ' repeated", rep("iş dünyası ")],
+      ["'is' + 200k blanks + 'dünyası'", rep(" ", "is", "dünyası")],
+      ["'gözlerini' + 200k blanks + 'dünyaya'", rep(" ", "gözlerini", "dünyaya")],
+      ["'dünyaevine ' + 200k keyword-free words", rep("alfa beta gama delta ", "dünyaevine ")],
+      ["'dünyaca ünlü ' + 200k keyword-free words", rep("alfa beta gama delta ", "dünyaca ünlü ")],
+      ["'dünya şampiyonası ' repeated", rep("dünya şampiyonası ")],
     ];
 
-    it.each(inputs)("%s classifies in under the budget", (_name, text) => {
-      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
-      const started = performance.now();
-      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
-      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
-      const elapsed = performance.now() - started;
-      expect(ALL.has(viaTitle)).toBe(true);
-      expect(ALL.has(viaDescription)).toBe(true);
-      expect(elapsed).toBeLessThan(PAIR_BUDGET_MS);
+    it.each(inputs)("%s scales linearly", (_name, gen) => {
+      expectLinear(
+        gen,
+        (text) => {
+          expect(ALL.has(classifyCategory(text, null, NEUTRAL_URL))).toBe(true);
+          expect(ALL.has(classifyCategory("Başlık", text, NEUTRAL_URL))).toBe(true);
+        },
+        { n: 200_000, ceilingMs: 4_320 },
+      );
     });
   });
 });

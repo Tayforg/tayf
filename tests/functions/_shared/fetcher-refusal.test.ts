@@ -568,7 +568,9 @@ describe("a DOCTYPE head cannot steer the scan past the real declaration", () =>
     }
     // The property is not vacuous: plenty of the shapes really expand.
     expect(expanded).toBeGreaterThan(500);
-  });
+    // 100,000 documents through the real parser: pure CPU, ~1-2 s alone and several times that on a
+    // busy machine, so this one test gets a 30 s timeout instead of the global 10 s.
+  }, 30_000);
 });
 
 describe("hasDeclaredEntity", () => {

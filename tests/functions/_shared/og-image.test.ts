@@ -10,6 +10,8 @@ import {
   fetchOgImageResult,
   isValidImageUrl,
 } from "../../../supabase/functions/_shared/og-image.ts";
+import { expectLinear, rep } from "../../_helpers/linear-time";
+import type { Gen } from "../../_helpers/linear-time";
 
 // ---------------------------------------------------------------------------
 // ingest-hygiene: og:image values pass through normalizeImageUrl so a
@@ -484,7 +486,9 @@ describe("hostile pages: no super-linear backtracking", () => {
   // Wall-clock budget, sized for a shared CI runner (~5x slower than a laptop,
   // where every case below costs < 10 ms except the JSON-LD x 20k page at ~25 ms)
   // and at least 3x below the pre-fix cost of the cheapest regression it guards
-  // (the 1.6 KB page: 1.1 s; the 5,000-space pages: 18-52 s).
+  // (the 1.6 KB page: 1.1 s; the 5,000-space pages: 18-52 s). The hostile-page
+  // ladders below take 20x this as their CPU-time ceiling (growth is the real
+  // guard); the "still finds a valid image" tests still time against it.
   const BUDGET_MS = 300;
   // The JSON-LD x 20k page is the one case that costs ~25 ms locally (~125 ms on
   // CI) and whose pre-fix cost is only 1.3 s, so it gets the widest window that
@@ -500,34 +504,49 @@ describe("hostile pages: no super-linear backtracking", () => {
     return { value, ms: performance.now() - t0 };
   }
 
-  const hostile: Array<readonly [string, string]> = [
-    ["meta + 5000 spaces then <title>", "<html><head><meta" + " ".repeat(5000) + "<title>x</title>"],
-    ["content-first meta + 5000 spaces", '<html><head><meta content="x"' + " ".repeat(5000)],
-    ["content-first meta + 1600 spaces (the 1.6 KB page)", '<html><head><meta content="x"' + " ".repeat(1600)],
-    ["meta + 1600 spaces", "<html><head><meta" + " ".repeat(1600)],
-    ["non-meta tag with content= + 5000 spaces", '<div content="x"' + " ".repeat(5000)],
-    ["link + 5000 spaces", "<link" + " ".repeat(5000)],
-    ["link rel=image_src + 5000 spaces", '<link rel="image_src"' + " ".repeat(5000)],
-    ["200 KB of '<meta ' with no '>'", "<meta ".repeat(Math.ceil(200_000 / 6))],
-    ["200 KB of '<link ' with no '>'", "<link ".repeat(Math.ceil(200_000 / 6))],
-    ["200 KB of '<meta property=\"og:image\" ' with no '>'", '<meta property="og:image" '.repeat(8_000)],
-    ["JSON-LD '\"image\":{' + 100k spaces", '"image":{' + " ".repeat(100_000)],
-    ["JSON-LD '\"image\":{' x 20k", '"image":{'.repeat(20_000)],
-    ["tag with a 100k unterminated quote", '<meta property="og:image" content="' + "a".repeat(100_000)],
-    ["a 100 KB attribute run inside one tag", "<meta " + "a=1 ".repeat(25_000) + ">"],
+  // [label, generator(n), n]: n is the size the old page had (the number of blanks, or the
+  // body length for the repeated-tag pages). The guard is how CPU time GROWS over an
+  // n/8 .. n ladder (tests/_helpers/linear-time.ts); the ceiling is 20x the old wall budget,
+  // capped at 8000 ms. The pre-fix regressions were polynomial: 1.1 s on the 1.6 KB page,
+  // 18-52 s on the 5,000-space pages, so doubling the page multiplied the cost by 8 or more.
+  const hostile: Array<readonly [string, Gen, number]> = [
+    ["meta + 5000 spaces then <title>", rep(" ", "<html><head><meta", "<title>x</title>"), 5000],
+    ["content-first meta + 5000 spaces", rep(" ", '<html><head><meta content="x"'), 5000],
+    ["content-first meta + 1600 spaces (the 1.6 KB page)", rep(" ", '<html><head><meta content="x"'), 1600],
+    ["meta + 1600 spaces", rep(" ", "<html><head><meta"), 1600],
+    ["non-meta tag with content= + 5000 spaces", rep(" ", '<div content="x"'), 5000],
+    ["link + 5000 spaces", rep(" ", "<link"), 5000],
+    ["link rel=image_src + 5000 spaces", rep(" ", '<link rel="image_src"'), 5000],
+    ["200 KB of '<meta ' with no '>'", rep("<meta "), 200_000],
+    ["200 KB of '<link ' with no '>'", rep("<link "), 200_000],
+    ["200 KB of '<meta property=\"og:image\" ' with no '>'", rep('<meta property="og:image" '), 216_000],
+    ["JSON-LD '\"image\":{' + 100k spaces", rep(" ", '"image":{'), 100_000],
+    ["JSON-LD '\"image\":{' x 20k", rep('"image":{'), 180_000],
+    ["tag with a 100k unterminated quote", rep("a", '<meta property="og:image" content="'), 100_000],
+    ["a 100 KB attribute run inside one tag", rep("a=1 ", "<meta ", ">"), 100_000],
   ];
 
-  for (const [label, html] of hostile) {
-    it(`extractHeroImageFromHtml returns null in < ${budgetFor(label)} ms: ${label}`, () => {
-      const { value, ms } = timed(() => extractHeroImageFromHtml(html));
-      expect(value).toBeNull();
-      expect(ms).toBeLessThan(budgetFor(label));
+  const ceilingFor = (label: string): number => Math.min(20 * budgetFor(label), 8_000);
+
+  for (const [label, gen, n] of hostile) {
+    it(`extractHeroImageFromHtml returns null and scales linearly: ${label}`, () => {
+      expectLinear(
+        gen,
+        (html) => {
+          expect(extractHeroImageFromHtml(html)).toBeNull();
+        },
+        { n, ceilingMs: ceilingFor(label) },
+      );
     });
 
-    it(`extractOgImage returns null in < ${budgetFor(label)} ms: ${label}`, () => {
-      const { value, ms } = timed(() => extractOgImage(html));
-      expect(value).toBeNull();
-      expect(ms).toBeLessThan(budgetFor(label));
+    it(`extractOgImage returns null and scales linearly: ${label}`, () => {
+      expectLinear(
+        gen,
+        (html) => {
+          expect(extractOgImage(html)).toBeNull();
+        },
+        { n, ceilingMs: ceilingFor(label) },
+      );
     });
   }
 
@@ -573,14 +592,9 @@ describe("hostile pages: no super-linear backtracking", () => {
     expect(extractHeroImageFromHtml(html)).toBe(GOOD);
   });
 
-  it("scales linearly: 8x the input costs far less than 64x the time", () => {
-    const small = "<meta ".repeat(5_000) + ">";
-    const large = "<meta ".repeat(40_000) + ">";
-    // Warm the JIT so the ratio is not dominated by compilation.
-    extractHeroImageFromHtml(small);
-    const a = timed(() => extractHeroImageFromHtml(small)).ms;
-    const b = timed(() => extractHeroImageFromHtml(large)).ms;
-    expect(b).toBeLessThan(Math.max(a * 40, 30));
+  it("scales linearly: 8x the input (30 KB to 240 KB) costs about 8x the CPU time", () => {
+    // This was a wall-clock ratio of two single calls, which a busy machine broke (34 ms against a 30 ms bound).
+    expectLinear(rep("<meta ", "", ">"), (html) => extractHeroImageFromHtml(html), { n: 240_000, ceilingMs: 6_000 });
   });
 });
 

@@ -30,6 +30,8 @@ import {
   siblingCapitalForms,
 } from "./neutral-title";
 import { foldTr as searchFoldTr } from "./turkish-query";
+import { expectCpuUnder, expectLinear, rep } from "../../../tests/_helpers/linear-time";
+import type { Gen } from "../../../tests/_helpers/linear-time";
 
 // Member titles are real prod headlines from the Sept-2026 replay corpus and
 // the hunt-15 (2026-11-01) fixtures: Bakırköy (e67ede66), Hakkari (d0a4e6ae),
@@ -2762,15 +2764,26 @@ describe("hunt 31 (h31-reader-2)", () => {
       expect(loadedPenalty("Gazze'nin tanığı cerrah da seçimi kazandı, hezimete uğrattı")).toBe(2);
     });
 
-    it("a 2 MB title is read only up to its first five words", () => {
-      const t0 = performance.now();
-      expect(loadedPenalty(`kasadaki ${"x ".repeat(1_000_000)}`)).toBe(0);
-      expect(loadedPenalty(`${"da ".repeat(700_000)}`)).toBe(0);
-      // A 2 MB lower-case first word is still "a lower-case word before the particle".
-      expect(loadedPenalty(`${"x".repeat(2_000_000)} da`)).toBe(1);
-      // A token of nothing but quotes trims to an empty word: no teaser.
-      expect(loadedPenalty(`${'"'.repeat(2_000_000)} da`)).toBe(0);
-      expect(performance.now() - t0).toBeLessThan(1500);
+    it("a long title is read only up to its first five words (250k characters, four shapes, scales linearly)", () => {
+      // Load-robust (tests/_helpers/linear-time.ts): CPU time over a 31k .. 250k
+      // ladder; the old test timed 2 MB shapes against a 1500 ms wall budget.
+      expectLinear(
+        (n) => ({
+          lead: rep("x ", "kasadaki ")(n),
+          particles: rep("da ")(n),
+          word: rep("x", "", " da")(n),
+          quotes: rep('"', "", " da")(n),
+        }),
+        (t) => {
+          expect(loadedPenalty(t.lead)).toBe(0);
+          expect(loadedPenalty(t.particles)).toBe(0);
+          // A very long lower-case first word is still "a lower-case word before the particle".
+          expect(loadedPenalty(t.word)).toBe(1);
+          // A token of nothing but quotes trims to an empty word: no teaser.
+          expect(loadedPenalty(t.quotes)).toBe(0);
+        },
+        { n: 250_000, ceilingMs: 8_000 },
+      );
     });
   });
 
@@ -4712,50 +4725,69 @@ describe("h42-titles-2: the guards of the no-margin rules (live clusters of the 
 });
 
 describe("h42-titles-2: hostile input stays cheap", () => {
-  it("loadedPenalty, framingPenalty, carriesHedge, carriesWideHedge and numsOf on a 1 MB title of every shape", () => {
-    const shapes = [
-      "a".repeat(1_000_000),
-      "a'a ".repeat(250_000),
-      "Netanyahu'ya ".repeat(80_000),
-      "1 ".repeat(500_000),
-      "14'er ".repeat(160_000),
-      "ağır darbe ".repeat(90_000),
-      "ç".repeat(1_000_000),
-      // The review's body-part, market and number patterns (bounded quantifiers, no nested backtracking).
-      "başı".repeat(250_000),
-      "baş ağır darbe ".repeat(66_000),
-      "hisse çakıl çakıldı ".repeat(50_000),
-      "COP31 F-16 R4 ".repeat(70_000),
-      "a1".repeat(500_000),
-    ];
-    const t0 = performance.now();
-    for (const shape of shapes) {
-      loadedPenalty(shape);
-      framingPenalty(shape);
-      carriesHedge(shape);
-      carriesWideHedge(shape);
-      numsOf(shape);
-    }
-    expect(performance.now() - t0).toBeLessThan(5000);
+  // Load-robust (tests/_helpers/linear-time.ts): the guard is how CPU time GROWS
+  // over a size ladder (31k .. 250k characters), one ladder per hostile shape; the
+  // 8000 ms ceiling is the cap on 20x the old 5000 ms wall budget.
+  const longTitleShapes: Array<[string, Gen]> = [
+    ["'a' repeated", rep("a")],
+    ["\"a'a \" repeated", rep("a'a ")],
+    ["\"Netanyahu'ya \" repeated", rep("Netanyahu'ya ")],
+    ["\"1 \" repeated", rep("1 ")],
+    ["\"14'er \" repeated", rep("14'er ")],
+    ["\"ağır darbe \" repeated", rep("ağır darbe ")],
+    ["'ç' repeated", rep("ç")],
+    // The review's body-part, market and number patterns (bounded quantifiers, no nested backtracking).
+    ["\"başı\" repeated", rep("başı")],
+    ["\"baş ağır darbe \" repeated", rep("baş ağır darbe ")],
+    ["\"hisse çakıl çakıldı \" repeated", rep("hisse çakıl çakıldı ")],
+    ["\"COP31 F-16 R4 \" repeated", rep("COP31 F-16 R4 ")],
+    ["\"a1\" repeated", rep("a1")],
+  ];
+
+  it.each(longTitleShapes)("loadedPenalty, framingPenalty, carriesHedge, carriesWideHedge and numsOf scale linearly on a long title: %s", (_name, gen) => {
+    expectLinear(
+      gen,
+      (shape) => {
+        loadedPenalty(shape);
+        framingPenalty(shape);
+        carriesHedge(shape);
+        carriesWideHedge(shape);
+        numsOf(shape);
+      },
+      { n: 250_000, ceilingMs: 8_000 },
+    );
   });
 
-  it("a stale re-pick whose stored title and members hold long runs of glued digits and body-part words stays cheap", () => {
-    const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
-    titles[10] = `Merkez Bankası faizi COP31 ${"F-16 R4 a1 ".repeat(8_000)}sabit tuttu`;
-    titles[20] = `Başına ${"baş kafa göğs ".repeat(8_000)}ağır darbe aldı`;
-    const t0 = performance.now();
-    pickNeutralTitle(asMembers(titles), { incumbent: `Merkez Bankası faizi ${"COP31 F-16 ".repeat(5_000)}sabit tuttu` });
-    pickNeutralTitle(asMembers(titles), { incumbent: titles[10] });
-    expect(performance.now() - t0).toBeLessThan(5000);
+  it("a stale re-pick whose stored title and members hold long runs of glued digits and body-part words scales linearly", () => {
+    // The ladder grows the two runs (8000 repeats at the top, as before); the 200 members stay.
+    expectLinear(
+      (n) => {
+        const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
+        titles[10] = `Merkez Bankası faizi COP31 ${"F-16 R4 a1 ".repeat(n)}sabit tuttu`;
+        titles[20] = `Başına ${"baş kafa göğs ".repeat(n)}ağır darbe aldı`;
+        return { titles, incumbent: `Merkez Bankası faizi ${"COP31 F-16 ".repeat(Math.round((n * 5) / 8))}sabit tuttu` };
+      },
+      ({ titles, incumbent }) => {
+        pickNeutralTitle(asMembers(titles), { incumbent });
+        pickNeutralTitle(asMembers(titles), { incumbent: titles[10] });
+      },
+      { n: 8_000, ceilingMs: 8_000 },
+    );
   });
 
-  it("a re-pick over 200 members with a 100 KB title among them", () => {
-    const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
-    titles[100] = `Netanyahu'ya ${"ağır ".repeat(20_000)}darbe`;
-    const t0 = performance.now();
-    pickNeutralTitle(asMembers(titles), { incumbent: titles[0] });
-    pickNeutralTitle(asMembers(titles), { incumbent: "Merkez Bankası faizi sabit tuttu ve karar metnini yayımladı" });
-    expect(performance.now() - t0).toBeLessThan(5000);
+  it("a re-pick over 200 members with a 100 KB title among them scales linearly in that title", () => {
+    expectLinear(
+      (n) => {
+        const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
+        titles[100] = `Netanyahu'ya ${"ağır ".repeat(n)}darbe`;
+        return titles;
+      },
+      (titles) => {
+        pickNeutralTitle(asMembers(titles), { incumbent: titles[0] });
+        pickNeutralTitle(asMembers(titles), { incumbent: "Merkez Bankası faizi sabit tuttu ve karar metnini yayımladı" });
+      },
+      { n: 20_000, ceilingMs: 8_000 },
+    );
   });
 });
 
@@ -5614,25 +5646,26 @@ describe("h54-editorial-4: pickNeutralTitle over the live clusters", () => {
 });
 
 describe("h54-editorial-4: hostile input stays cheap", () => {
-  it("loadedPenalty on a 1 MB title of every quoting and epithet shape", () => {
-    const shapes = [
-      "'".repeat(1_000_000),
-      '"'.repeat(1_000_000),
-      "' ".repeat(500_000),
-      "'a".repeat(500_000),
-      "“".repeat(1_000_000),
-      "‘a ".repeat(330_000),
-      "siyonist '".repeat(100_000),
-      "Katil ".repeat(160_000),
-      "Katil" + " ".repeat(1_000_000),
-      "a".repeat(1_000_000) + " kabusu",
-      "a ".repeat(500_000) + "kabusu",
-      "işgalci ".repeat(120_000),
-      "İsrail'in 'Siyonist ".repeat(50_000),
-    ];
-    const t0 = performance.now();
-    for (const shape of shapes) loadedPenalty(shape);
-    expect(performance.now() - t0).toBeLessThan(5000);
+  // Load-robust (tests/_helpers/linear-time.ts): one CPU-time ladder per shape,
+  // 31k .. 250k characters, 8000 ms ceiling (the old wall budget was 5000 ms).
+  const quoteShapes: Array<[string, Gen]> = [
+    ["\"'\" repeated", rep("'")],
+    ["'\"' repeated", rep('"')],
+    ["\"' \" repeated", rep("' ")],
+    ["\"'a\" repeated", rep("'a")],
+    ["'“' repeated", rep("“")],
+    ["\"‘a \" repeated", rep("‘a ")],
+    ["\"siyonist '\" repeated", rep("siyonist '")],
+    ["\"Katil \" repeated", rep("Katil ")],
+    ["'Katil' then blanks", rep(" ", "Katil")],
+    ["'a' repeated then ' kabusu'", rep("a", "", " kabusu")],
+    ["\"a \" repeated then 'kabusu'", rep("a ", "", "kabusu")],
+    ["\"işgalci \" repeated", rep("işgalci ")],
+    ["\"İsrail'in 'Siyonist \" repeated", rep("İsrail'in 'Siyonist ")],
+  ];
+
+  it.each(quoteShapes)("loadedPenalty scales linearly on a long title of a quoting or epithet shape: %s", (_name, gen) => {
+    expectLinear(gen, (shape) => loadedPenalty(shape), { n: 250_000, ceilingMs: 8_000 });
   });
 });
 
@@ -5750,9 +5783,11 @@ describe("h54-editorial-3: opinion columns are not candidates for the neutral ti
 
     const big = [] as Array<{ title: string; opinion: boolean }>;
     for (let i = 0; i < 200; i++) big.push({ title: `Bakırköy Belediyesi soruşturmasında ${i} şüpheli tutuklandı`, opinion: i % 7 === 0 });
-    const t0 = performance.now();
-    expect(pickNeutralTitle(big, { floor: true })).not.toBeNull();
-    expect(performance.now() - t0).toBeLessThan(5000);
+    // pickNeutralTitle is quadratic in the member count (200 members: ~7 ms, 5000: ~1.3 s), so
+    // the guard is a CPU-time ceiling at the fetch cap, not a linear ladder over members.
+    expectCpuUnder(() => {
+      expect(pickNeutralTitle(big, { floor: true })).not.toBeNull();
+    }, 5_000);
   });
 });
 
@@ -5870,8 +5905,9 @@ describe("h59-english-2: a Turkish member is preferred over an English one for t
 
     const big = [] as Array<{ title: string; english: boolean }>;
     for (let i = 0; i < 200; i++) big.push({ title: `Bakırköy Belediyesi soruşturmasında ${i} şüpheli tutuklandı`, english: i % 5 === 0 });
-    const t0 = performance.now();
-    expect(pickNeutralTitle(big, { floor: true })).not.toBeNull();
-    expect(performance.now() - t0).toBeLessThan(5000);
+    // See the roster test above: quadratic in the member count, so a CPU-time ceiling at the fetch cap.
+    expectCpuUnder(() => {
+      expect(pickNeutralTitle(big, { floor: true })).not.toBeNull();
+    }, 5_000);
   });
 });

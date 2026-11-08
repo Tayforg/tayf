@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import h26Fixtures from "../../../tests/fixtures/summary-tidy-h26.json";
+import { expectCpuUnder, expectLinear, rep } from "../../../tests/_helpers/linear-time";
+import type { Gen } from "../../../tests/_helpers/linear-time";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
 import { cleanDescription, stripTrailingTeasers } from "../../../supabase/functions/_shared/cluster/description-clean";
 import {
@@ -498,40 +500,39 @@ describe("tidySummaryText feed wrappers (h19-ingest-2)", () => {
   });
 
   describe("robustness", () => {
-    const BUDGET_MS = 100;
+    // Load-robust: the guard is how CPU time GROWS over a size ladder (12.5k ..
+    // 100k characters), not a wall-clock number (tests/_helpers/linear-time.ts).
+    // The 2000 ms ceiling is 20x the old 100 ms budget.
+    const postShapes: Array<[string, Gen]> = [
+      ["'The post ' repeated", rep("The post ")],
+      [
+        "'The post ' x 5000, 55000 blanks, 'appeared first on'",
+        (n) => `${"The post ".repeat(Math.round(n / 20))}${" ".repeat(Math.round(n * 0.55))}appeared first on`,
+      ],
+      [
+        "'The post x' x 5000, ' appeared first on ', 50000 blanks",
+        (n) => `${"The post x".repeat(Math.round(n / 20))} appeared first on ${" ".repeat(Math.round(n / 2))}`,
+      ],
+      ["'The post ', 100000 blanks, ' appeared first on x'", rep(" ", "The post ", " appeared first on x")],
+      ["50000 blanks, 'The post ', 50000 blanks", (n) => `${" ".repeat(Math.round(n / 2))}The post ${" ".repeat(Math.round(n / 2))}`],
+    ];
 
-    it("a 100k-character 'The post ' input with space runs finishes in under 100 ms", () => {
-      const inputs = [
-        "The post ".repeat(11_200),
-        `${"The post ".repeat(5_000)}${" ".repeat(55_000)}appeared first on`,
-        `${"The post x".repeat(5_000)} appeared first on ${" ".repeat(50_000)}`,
-        `The post ${" ".repeat(100_000)} appeared first on x`,
-        `${" ".repeat(50_000)}The post ${" ".repeat(50_000)}`,
-      ];
-      for (const s of inputs) {
-        const start = performance.now();
-        tidySummaryText(s);
-        const elapsed = performance.now() - start;
-        expect(elapsed, `${s.length} chars`).toBeLessThan(BUDGET_MS);
-      }
+    it.each(postShapes)("a 100k-character 'The post ' input with space runs scales linearly: %s", (_name, gen) => {
+      expectLinear(gen, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
     });
 
-    it("100k characters of the Serbestiyet and Diken markers finish in under 100 ms", () => {
-      const inputs = [
-        " yazısı ilk önce ".repeat(6_000),
-        `${" yazısı ilk önce x adresinde yayınlanmıştır".repeat(2_500)}`,
-        `x yazısı ilk önce ${" ".repeat(100_000)} adresinde yayınlanmıştır.`,
-        "01.01.2026 Diken ".repeat(6_000),
-        `${" ".repeat(100_000)}01.01.2026 Diken`,
-        `\n${"a".repeat(100_000)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
-        `${"a. ".repeat(33_000)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
-      ];
-      for (const s of inputs) {
-        const start = performance.now();
-        tidySummaryText(s);
-        const elapsed = performance.now() - start;
-        expect(elapsed, `${s.length} chars`).toBeLessThan(BUDGET_MS);
-      }
+    const markerShapes: Array<[string, Gen]> = [
+      ["' yazısı ilk önce ' repeated", rep(" yazısı ilk önce ")],
+      ["' yazısı ilk önce x adresinde yayınlanmıştır' repeated", rep(" yazısı ilk önce x adresinde yayınlanmıştır")],
+      ["'x yazısı ilk önce ', 100000 blanks, ' adresinde yayınlanmıştır.'", rep(" ", "x yazısı ilk önce ", " adresinde yayınlanmıştır.")],
+      ["'01.01.2026 Diken ' repeated", rep("01.01.2026 Diken ")],
+      ["100000 blanks, '01.01.2026 Diken'", rep(" ", "", "01.01.2026 Diken")],
+      ["'a' x 100000 behind a newline, then the Serbestiyet marker", rep("a", "\n", " yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.")],
+      ["'a. ' x 33000, then the Serbestiyet marker", rep("a. ", "", " yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.")],
+    ];
+
+    it.each(markerShapes)("100k characters of the Serbestiyet and Diken markers scale linearly: %s", (_name, gen) => {
+      expectLinear(gen, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
     });
   });
 });
@@ -605,18 +606,13 @@ describe("tidySummaryText trailing WordPress excerpt marker (h20-live-4)", () =>
     }
   });
 
-  it("a 100k-character input with a trailing marker finishes in under 100 ms", () => {
-    const inputs = [
-      `${"a. ".repeat(33_000)} […]`,
-      `${" ".repeat(100_000)} […]`,
-      `[…]${" ".repeat(100_000)}`,
-      "[…] ".repeat(25_000),
-    ];
-    for (const s of inputs) {
-      const start = performance.now();
-      tidySummaryText(s);
-      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(100);
-    }
+  it.each([
+    ["'a. ' x 33000, then ' […]'", rep("a. ", "", " […]")],
+    ["100000 blanks, then ' […]'", rep(" ", "", " […]")],
+    ["'[…]' then 100000 blanks", rep(" ", "[…]")],
+    ["'[…] ' repeated", rep("[…] ")],
+  ] as Array<[string, Gen]>)("a 100k-character input with a trailing marker scales linearly: %s", (_name, gen) => {
+    expectLinear(gen, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
   });
 });
 
@@ -2472,10 +2468,19 @@ describe("tidySummaryText clamp repair and open quotes (h25-live-1, e5d77d31)", 
 
   it("a 500-character text of quotation marks only finishes at once and stays non-empty", () => {
     const raw = clamp('"“«‘'.repeat(125));
-    const start = performance.now();
-    const out = tidySummaryText(raw);
-    expect(performance.now() - start).toBeLessThan(100);
-    expect(out).not.toBe("");
+    expectCpuUnder(() => {
+      expect(tidySummaryText(raw)).not.toBe("");
+    }, 100);
+  });
+
+  it("a text of quotation marks only scales linearly and stays non-empty", () => {
+    expectLinear(
+      rep('"“«‘'),
+      (raw) => {
+        expect(tidySummaryText(raw)).not.toBe("");
+      },
+      { n: 50_000, ceilingMs: 2_000 },
+    );
   });
 });
 
@@ -3078,14 +3083,15 @@ describe("tidySummaryText clamp repair: abbreviation dots, glued final sentence,
     });
 
     it.each([
-      ["'a' x 100000 + 'B'", () => "a".repeat(100_000) + "B"],
-      ["'aB' x 50000", () => "aB".repeat(50_000)],
-      ["a 500-character clamp of 'x.Y' repeats", () => clamp("x.Y".repeat(170))],
-    ])("%s finishes in under 100 ms", (_name, make) => {
-      const input = make();
-      const start = performance.now();
-      tidySummaryText(input);
-      expect(performance.now() - start).toBeLessThan(100);
+      ["'a' x 100000 + 'B'", rep("a", "", "B")],
+      ["'aB' x 50000", rep("aB")],
+    ] as Array<[string, Gen]>)("%s scales linearly", (_name, gen) => {
+      expectLinear(gen, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
+    });
+
+    it("a 500-character clamp of 'x.Y' repeats stays within the CPU ceiling", () => {
+      const input = clamp("x.Y".repeat(170));
+      expectCpuUnder(() => tidySummaryText(input), 100);
     });
   });
 });
@@ -3333,27 +3339,28 @@ describe("backOffOpenQuote (h29-regress-1)", () => {
   });
 
   describe("linear time on 100k characters", () => {
+    // Load-robust (tests/_helpers/linear-time.ts): CPU time over a size ladder,
+    // 2000 ms ceiling = 20x the old 100 ms budget. The ladder runs up to 120k
+    // characters so the quote counts keep the old 30000 / 30001 parity: an even
+    // number of '"a. ' units is balanced, an odd one leaves a quote open.
+    const balanced = (tail: string): Gen => (n) => '"a. '.repeat(2 * Math.floor(n / 8)) + tail;
+    const quoteOpen = (tail: string): Gen => (n) => '"a. '.repeat(2 * Math.floor(n / 8) + 1) + tail;
+
     it.each([
-      ["'“' x 100000 + '…'", () => "“".repeat(100_000) + "…"],
-      ["'\"a. ' x 30000 + '…' (balanced)", () => '"a. '.repeat(30_000) + "…"],
-      ["'\"a. ' x 30001 + '…' (one quote open)", () => '"a. '.repeat(30_001) + "…"],
-      ["'Aa. ' x 25000 + ' “Biz…'", () => "Aa. ".repeat(25_000) + " “Biz…"],
-    ])("%s finishes in under 100 ms", (_name, make) => {
-      const input = make();
-      const start = performance.now();
-      backOffOpenQuote(input);
-      expect(performance.now() - start).toBeLessThan(100);
+      ["'“' x 100000 + '…'", rep("“", "", "…")],
+      ["'\"a. ' x 30000 + '…' (balanced)", balanced("…")],
+      ["'\"a. ' x 30001 + '…' (one quote open)", quoteOpen("…")],
+      ["'Aa. ' x 25000 + ' “Biz…'", rep("Aa. ", "", " “Biz…")],
+    ] as Array<[string, Gen]>)("backOffOpenQuote of %s scales linearly", (_name, gen) => {
+      expectLinear(gen, (s) => backOffOpenQuote(s), { n: 120_000, ceilingMs: 2_000 });
     });
 
     it.each([
-      ["'“' x 100000 + ' […]'", () => "“".repeat(100_000) + " […]"],
-      ["'\"a. ' x 30000 + ' […]'", () => '"a. '.repeat(30_000) + " […]"],
-      ["'\"a. ' x 30001 + ' […]'", () => '"a. '.repeat(30_001) + " […]"],
-    ])("tidySummaryText of %s finishes in under 100 ms", (_name, make) => {
-      const input = make();
-      const start = performance.now();
-      tidySummaryText(input);
-      expect(performance.now() - start).toBeLessThan(100);
+      ["'“' x 100000 + ' […]'", rep("“", "", " […]")],
+      ["'\"a. ' x 30000 + ' […]'", balanced(" […]")],
+      ["'\"a. ' x 30001 + ' […]'", quoteOpen(" […]")],
+    ] as Array<[string, Gen]>)("tidySummaryText of %s scales linearly", (_name, gen) => {
+      expectLinear(gen, (s) => tidySummaryText(s), { n: 120_000, ceilingMs: 2_000 });
     });
   });
 });

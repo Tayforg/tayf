@@ -20,6 +20,17 @@ import {
   SURPRISE,
   ZONE_META,
 } from "@/lib/bias/config";
+import { BLINDSPOT_LIST_FILTERS } from "@/lib/clusters/blindspot-feed";
+import {
+  BLINDSPOT_LIST_LOOKBACK_DAYS,
+  DEFAULT_PICK_SIZE,
+} from "@/lib/clusters/blindspot-pick";
+import {
+  FEED_HEALTH_MAX_AGE_MS,
+  FEED_HEALTH_MIN_SHARE,
+  FEED_HEALTH_MIN_YIELD_SHARE,
+  FEED_YIELD_WINDOW_MS,
+} from "@/lib/clusters/feed-health";
 import {
   NEAR_BLINDSPOT_DISPLAY_LIMIT,
   NEAR_BLINDSPOT_LOOKBACK_DAYS,
@@ -36,6 +47,7 @@ import {
 } from "@/lib/sources/karne";
 import { countClassifiedSources } from "@/lib/sources/classification";
 import { getSourceMetadata, type Factuality } from "@/lib/sources/factuality";
+import { ENGLISH_ONLY_EMPTY_COLUMN } from "@/lib/sources/source-language";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { getActiveSourceSlugs } from "@/lib/sources/registry-query";
 import {
@@ -65,14 +77,36 @@ export const metadata: Metadata = staticPageMetadata({
   path: "/metodoloji",
 });
 
+// hunt-59 homefeed-2: "Dengeli kapsama" needs a score of BALANCE_BALANCED_MIN
+// AND no zone at BALANCE_BALANCED_MAX_SHARE (= SURPRISE.dominantShare) or more.
+// Module scope: the CHANGELOG below quotes it as well as the Denge puanı card.
+const balancedMaxSharePct = Math.round(BALANCE_BALANCED_MAX_SHARE * 100);
+
+// The empty framing column of an all-English cluster, without its dashes
+// ("— Türkçe kaynaklarla karşılaştırılmadı —"), so the Kaynaklar note quotes the
+// very string the cluster page prints.
+const englishOnlyEmptyColumn = ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—$/g, "");
+
 // Per-entry dates recovered from git history (git log -S on the distinctive
 // substring of each line, src/app/metodoloji/page.tsx), newest first. The
 // "Son güncelleme" footer reads CHANGELOG[0].date, so keep the newest entry
 // on top (pinned by page.test.tsx).
 const CHANGELOG = [
   {
+    date: "2026-11-07",
+    text: `Denge puanı: “${BALANCE_LABELS.dengeli}” etiketi artık yalnızca puanı ${BALANCE_BALANCED_MIN} veya üzeri olan ve hiçbir bölgenin oy veren kaynakların %${balancedMaxSharePct}'ine ulaşmadığı kümelere veriliyor; bir bölge %${balancedMaxSharePct} veya üzerindeyse etiket “${BALANCE_LABELS.yakin}” oluyor. Türkçe ve İngilizce haberlerin karıştığı kümelerde Türkçe başlık seçiliyor; yalnızca İngilizce kaynaklardan oluşan kümeler bölgeler arasında karşılaştırılmıyor.`,
+  },
+  {
+    date: "2026-11-06",
+    text: "Köşe yazıları: kümede en az bir haber varsa başlık bir köşe yazısından seçilmiyor; özet de uygun başka bir üye varken köşe yazısından alınmıyor, köşe yazısından gelen özet “köşe yazısı” diye belirtiliyor.",
+  },
+  {
     date: "2026-11-05",
     text: `Kör nokta etiketi artık kartlarda, haber sayfasında ve haftalık özette de ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünüyor; daha önce bu bekleme yalnızca Kör Noktalar listesi içindi.`,
+  },
+  {
+    date: "2026-11-02",
+    text: "Kör nokta doğrulaması genişledi: karşı tarafta aynı olayı hiçbir kümeye girmeyen bir haberle (ör. dünya ya da genel kategorisinde) veren kaynaklar da artık sayıma ekleniyor; baskınlık eşiği bu yüzden tutmuyorsa kör nokta işareti gösterilmiyor.",
   },
   {
     date: "2026-11-01",
@@ -188,6 +222,26 @@ function countFactuality(slugs: readonly string[], level: Factuality): number {
   return slugs.filter((slug) => getSourceMetadata(slug)?.factuality === level).length;
 }
 
+/**
+ * "Şu anda N kaynak etiketli: …": N counts sources with a factuality OR an
+ * ownership tag (the number /sources prints); the three levels are counted
+ * separately, and a source with an ownership tag only is named as the remainder
+ * instead of being folded into "geri kalan" next to Yüksek/Düşük, which made the
+ * Karışık sources read as unrated (h62-methodology-2).
+ */
+function buildTaggedSentence(slugs: readonly string[]): string {
+  const n = countClassifiedSources(slugs);
+  const high = countFactuality(slugs, "high");
+  const mixed = countFactuality(slugs, "mixed");
+  const low = countFactuality(slugs, "low");
+  const rest = n - high - mixed - low;
+  return (
+    `Şu anda ${n} kaynak etiketli: ${high} tanesi Yüksek, ${mixed} tanesi Karışık, ${low} tanesi Düşük güvenilirlik notu taşıyor` +
+    (rest > 0 ? `; ${rest} kaynakta yalnızca sahiplik bilgisi var` : "") +
+    `. Etiketsiz kaynaklar henüz derecelendirilmemiştir.`
+  );
+}
+
 export default async function MethodologyPage() {
   // Honesty gate (Pack B): the status line below must never claim
   // AI-neutralization without live evidence. getNeutralizedStatus() never
@@ -201,11 +255,17 @@ export default async function MethodologyPage() {
   const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
   const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
   const surpriseSharePct = Math.round(SURPRISE.dominantShare * 100);
-  // hunt-59 homefeed-2: "Dengeli kapsama" needs a score of BALANCE_BALANCED_MIN
-  // AND no zone at BALANCE_BALANCED_MAX_SHARE (= SURPRISE.dominantShare) or more.
-  const balancedMaxSharePct = Math.round(BALANCE_BALANCED_MAX_SHARE * 100);
   const nearBlindspotPct = Math.round(NEAR_BLINDSPOT_MIN_SHARE * 100);
   const wireRatioPct = Math.round(WIRE_UNIQUE_HASH_RATIO * 100);
+  // h62-methodology-1: the feed-health gate (feed-health.ts) and the /blindspots
+  // list filters (blindspot-feed.ts), printed from the constants they run on.
+  const feedHealthSharePct = Math.round(FEED_HEALTH_MIN_SHARE * 100);
+  const feedHealthMaxAgeHours = FEED_HEALTH_MAX_AGE_MS / 3_600_000;
+  const feedYieldSharePct = Math.round(FEED_HEALTH_MIN_YIELD_SHARE * 100);
+  const feedYieldWindowHours = FEED_YIELD_WINDOW_MS / 3_600_000;
+  const listHashPct = Math.round(BLINDSPOT_LIST_FILTERS.minUniqueHashRatio * 100);
+  const listDunyaPct = Math.round(BLINDSPOT_LIST_FILTERS.maxDunyaShare * 100);
+  const listPoliticsPct = Math.round(BLINDSPOT_LIST_FILTERS.minPoliticsShare * 100);
   // Computed, not asserted, and over the ACTIVE sources only: /sources counts
   // the same slugs through countClassifiedSources, so both pages print the same
   // number (registry keys of inactive outlets must not inflate this one). When
@@ -213,7 +273,7 @@ export default async function MethodologyPage() {
   const taggedSentence =
     activeSlugs === null
       ? "Etiketlenmemiş kaynaklar henüz derecelendirilmemiştir."
-      : `Şu anda ${countClassifiedSources(activeSlugs)} kaynak etiketli, ${countFactuality(activeSlugs, "high")} tanesi Yüksek, ${countFactuality(activeSlugs, "low")} tanesi Düşük; geri kalan kaynaklar henüz derecelendirilmemiştir.`;
+      : buildTaggedSentence(activeSlugs);
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-10">
@@ -315,6 +375,9 @@ export default async function MethodologyPage() {
             </Link>{" "}
             sayfasında işaretlidir.
           </p>
+          <p className={noteClass}>
+            {`Köşe yazıları ayrı bir kaynak türü sayılmaz: bir yayın kuruluşunun köşe yazısı, kümede o kaynağın haberi gibi yanlılık dağılımına, kör nokta ve denge hesaplarına katılır. Tayf bir yazıyı adresindeki yol bölümünden (ör. /yazarlar/, /kose-yazilari/, /opinion/) köşe yazısı olarak tanır; adresi bu kalıpta olmayan köşe yazıları haber gibi işlem görür. Yalnızca İngilizce yayın yapan kaynakların (ör. Daily Sabah, TRT World) oluşturduğu kümeler Türkçe haberlerle eşleşmediği için bölgeler arasında karşılaştırılmaz: ana sayfada listelenmez ve küme sayfasında boş bir bölge “bu tarafta sessizlik” yerine “${englishOnlyEmptyColumn}” diye gösterilir.`}
+          </p>
         </div>
       </section>
 
@@ -362,8 +425,26 @@ export default async function MethodologyPage() {
           </p>
           <p className={proseClass}>
             {`Aynı olay bazen neredeyse aynı başlıkla ikinci bir kümeye düşer.`}{" "}
-            {`Bu yüzden ${SIBLING_VETO.windowHours} saat içindeki diğer kümelerde başlığı büyük ölçüde örtüşen haberler de aranır: iki başlığın kelime kökleri karşılaştırılır (${SIBLING_VETO.tokenMinLen} harften kısa kelimeler sayılmaz, kök = kelimenin ilk ${SIBLING_VETO.stemLen} harfi); ortak köklerin sayısı en az ${SIBLING_VETO.minShared} olmalı ve iki başlıktaki tüm köklerin (ortak olanlar bir kez sayılır) en az yarısını oluşturmalı.`}{" "}
+            {`Bu yüzden ${SIBLING_VETO.windowHours} saat içinde yayımlanmış oy veren kaynak (haber kuruluşu ya da ajans) haberleri arasında, başka bir kümede yer alanlar da hiçbir kümeye girmemiş olanlar da dahil, başlığı büyük ölçüde örtüşenler de aranır (kümeleyici yalnızca politika ve son dakika haberlerini aldığından, karşı tarafın dünya, genel ya da yaşam kategorisinde verdiği haber çoğu zaman hiçbir kümede değildir): iki başlığın kelime kökleri karşılaştırılır (${SIBLING_VETO.tokenMinLen} harften kısa kelimeler sayılmaz, kök = kelimenin ilk ${SIBLING_VETO.stemLen} harfi); ortak köklerin sayısı en az ${SIBLING_VETO.minShared} olmalı ve iki başlıktaki tüm köklerin (ortak olanlar bir kez sayılır) en az yarısını oluşturmalı.`}{" "}
             {`Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.`}
+          </p>
+          <h3
+            id="besleme-sagligi"
+            className="font-serif text-base font-semibold tracking-tight"
+          >
+            Besleme sağlığı
+          </h3>
+          <p className={proseClass}>
+            {`Bir bölgenin sessizliği, o bölgenin beslemeleri çalışmıyorsa bir yayın tercihi sayılamaz. Bu yüzden baskın bölge dışındaki İktidar ya da Muhalefet bölgesinde aktif RSS beslemelerinin %${feedHealthSharePct}'inden azı son ${feedHealthMaxAgeHours} saat içinde hatasız yanıt verdiyse ya da kaynakların %${feedYieldSharePct}'sinden azı son ${feedYieldWindowHours} saatte en az bir haber yayımladıysa, kör nokta işareti kartlarda, haber sayfasında, haftalık özette ve Kör Noktalar listesinde gösterilmez. Besleme durumu okunamazsa işaret gösterilmeye devam eder.`}
+          </p>
+          <h3
+            id="kor-noktalar-listesi"
+            className="font-serif text-base font-semibold tracking-tight"
+          >
+            Kör Noktalar listesi
+          </h3>
+          <p className={proseClass}>
+            {`Kör Noktalar listesi son ${BLINDSPOT_LIST_LOOKBACK_DAYS} günün haberlerini kapsar ve en fazla ${DEFAULT_PICK_SIZE} haberi kart olarak gösterir. Kalanlar “Diğer kör noktalar” bölümünde birer satır olarak listelenir. Her kaynaktan yalnızca ilk haber sayılır; şu haberler listeye alınmaz: başlığı “kimdir”, “nedir?”, “canlı izle” gibi bir arama açıklaması olanlar; içerik özetlerinin %${listHashPct}'den azı birbirinden farklı olanlar; haberlerinin %${listDunyaPct}'sinden fazlası Dünya kategorisinde olanlar; haberlerinin %${listPoliticsPct}'ından azı politika ya da son dakika olanlar. Bu haberler kartta ve haber sayfasında kör nokta etiketini yine taşıyabilir.`}
           </p>
           <h3
             id="kor-noktaya-yakin"
@@ -372,7 +453,15 @@ export default async function MethodologyPage() {
             Kör noktaya yakın
           </h3>
           <p className={proseClass}>
-            {`Eşiğe ulaşmayan ama tek bir bölgenin ağırlıkta olduğu haberler Kör Noktalar sayfasında ayrı bir “Kör noktaya yakın” bölümünde listelenir: en az ${BLINDSPOT.minSources} oy veren kaynak ve en büyük bölgenin payı %${nearBlindspotPct} ile %${dominantSharePct} arasında (%${dominantSharePct} hariç). Aynı ${BLINDSPOT.feedDelayHours} saatlik bekleme, kalite filtreleri ve besleme sağlığı kuralı uygulanır; son ${NEAR_BLINDSPOT_LOOKBACK_DAYS} günden en fazla ${NEAR_BLINDSPOT_DISPLAY_LIMIT} haber gösterilir. Bu haberler kör nokta sayılmaz; kör nokta sayımlarına ve “Bu listede kim yer vermedi?” özetine katılmaz.`}
+            {`Eşiğe ulaşmayan ama tek bir bölgenin ağırlıkta olduğu haberler Kör Noktalar sayfasında ayrı bir “Kör noktaya yakın” bölümünde listelenir: en az ${BLINDSPOT.minSources} oy veren kaynak ve en büyük bölgenin payı %${nearBlindspotPct} ile %${dominantSharePct} arasında (%${dominantSharePct} hariç). Aynı ${BLINDSPOT.feedDelayHours} saatlik bekleme, yukarıdaki `}
+            <a href="#besleme-sagligi" className={brandLink}>
+              besleme sağlığı kuralı
+            </a>
+            {" ve "}
+            <a href="#kor-noktalar-listesi" className={brandLink}>
+              liste filtreleri
+            </a>
+            {` uygulanır; son ${NEAR_BLINDSPOT_LOOKBACK_DAYS} günden en fazla ${NEAR_BLINDSPOT_DISPLAY_LIMIT} haber gösterilir. Bu haberler kör nokta sayılmaz; kör nokta sayımlarına ve “Bu listede kim yer vermedi?” özetine katılmaz.`}
           </p>
         </div>
       </section>
@@ -404,6 +493,11 @@ export default async function MethodologyPage() {
               </dd>
             </div>
           </dl>
+          <p className={proseClass}>
+            Karşıt bölge, İktidar için Muhalefet, Muhalefet için
+            İktidar&apos;dır; Bağımsız bölgenin karşıtı yoktur, bu yüzden
+            Bağımsız ağırlıklı bir küme sürpriz kesişim sayılmaz.
+          </p>
           <p className={proseClass}>
             Alt eşik (marj {SURPRISE.minMargin}), 4&apos;e-2 veya 3&apos;e-1
             gibi ufak çoğunluk farklarının gerçek bir sürpriz yerine gürültü
@@ -583,8 +677,8 @@ export default async function MethodologyPage() {
           <p className={proseClass}>
             Kaynak sayfalarındaki göstergeler Tayf’ın gördüğü yayın akışından
             hesaplanan sayılardır; bir doğruluk ya da kalite notu değildir ve
-            hiçbir sıralamayı değiştirmez. Örnek sayısı yetersizse gösterge
-            gizlenir.
+            hiçbir sıralamayı değiştirmez. Örnek sayısı yetersizse gösterge yerine
+            “Yeterli örnek yok” notu ve örnek sayısı gösterilir.
           </p>
           <dl className="grid gap-3 sm:grid-cols-2">
             <div className={ruleCard}>
@@ -655,7 +749,14 @@ export default async function MethodologyPage() {
             Erdoğan&quot; gibi ev stili) temizlenir. Bu bir sentez değildir
             ve yapay zekâ kullanmaz; küme sayfasında &quot;Kaynak
             başlıklarından seçildi&quot; olarak etiketlenir ve yukarıdaki
-            sayıma dahil edilmez.
+            sayıma dahil edilmez. Başlık seçiminde köşe yazıları haberin yerine geçmez: kümede en az
+            bir haber varsa köşe yazısının başlığı seçilmez; yalnızca köşe
+            yazılarından oluşan kümede başlık yine seçilir ve küme sayfasında
+            “Köşe yazısı” etiketi görünür. Özet de, başlığa uygun başka bir
+            üyenin açıklaması varken köşe yazısından alınmaz; yoksa köşe
+            yazısının özeti kalır ve “köşe yazısı” diye belirtilir. Türkçe ve
+            İngilizce kaynakların karıştığı kümelerde Türkçe başlık İngilizce
+            başlığa tercih edilir.
           </p>
           <details className="group rounded-lg ring-1 ring-border/50 bg-muted/20">
             <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground list-none [&::-webkit-details-marker]:hidden hover:text-foreground">
