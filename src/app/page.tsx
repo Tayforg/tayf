@@ -513,7 +513,7 @@ export async function HomeFeed({
                   <div className="flex items-center gap-3">
                     <div className="flex items-center gap-2">
                       <span
-                        className="h-2 w-2 animate-pulse rounded-full bg-red-600 dark:bg-red-500"
+                        className="h-2 w-2 rounded-full bg-red-600 dark:bg-red-500"
                         aria-hidden="true"
                       />
                       <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-red-600 dark:text-red-400">

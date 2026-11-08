@@ -171,7 +171,7 @@ describe("GET /rss.xml", () => {
     mockMembers = {};
   }
 
-  it("sets Cache-Control with stale-while-revalidate (F2)", async () => {
+  it("sets Cache-Control with the stale-while-revalidate window bounded to 60 s (F2, h75-freshness-1)", async () => {
     singleClusterBundle();
     mockNeutralStatus = { neutralized: 0, eligible: 10 };
 
@@ -179,7 +179,7 @@ describe("GET /rss.xml", () => {
     const res = await GET();
 
     expect(res.headers.get("Cache-Control")).toBe(
-      "public, max-age=300, s-maxage=300, stale-while-revalidate=3600",
+      "public, max-age=300, s-maxage=300, stale-while-revalidate=60",
     );
   });
 
@@ -590,7 +590,7 @@ describe("GET /rss.xml hardening", () => {
   });
 
   describe("success response", () => {
-    it("keeps the public + stale-while-revalidate Cache-Control and the RSS content type", async () => {
+    it("keeps the public Cache-Control with the stale-while-revalidate window bounded to 60 s, and the RSS content type", async () => {
       mockBundles = [titled("h1", "Başlık")];
 
       const { GET } = await import("@/app/rss.xml/route");
@@ -598,7 +598,7 @@ describe("GET /rss.xml hardening", () => {
 
       expect(res.status).toBe(200);
       expect(res.headers.get("Cache-Control")).toBe(
-        "public, max-age=300, s-maxage=300, stale-while-revalidate=3600",
+        "public, max-age=300, s-maxage=300, stale-while-revalidate=60",
       );
       expect(res.headers.get("Content-Type")).toBe(
         "application/rss+xml; charset=utf-8",

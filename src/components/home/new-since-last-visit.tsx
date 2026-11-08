@@ -92,7 +92,7 @@ export function NewSinceLastVisit({ timestamps, stamp }: NewSinceLastVisitProps)
       <div role="status" aria-live="polite">
         {count > 0 && (
           <p className="flex h-6.5 w-fit items-center gap-1.5 rounded-full border border-brand/30 bg-brand/10 px-3 py-1 text-[11px] leading-4 font-medium text-brand">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" aria-hidden="true" />
+            <span className="h-1.5 w-1.5 rounded-full bg-brand" aria-hidden="true" />
             {count} yeni haber
           </p>
         )}
