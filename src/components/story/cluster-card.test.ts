@@ -743,3 +743,46 @@ describe("cluster-card.tsx headline level (h67-landmarks-1)", () => {
     expect(src.slice(open, close)).not.toContain("headingLevel");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h75-motion-1: the "Kör nokta" icon on every blindspot card used to carry
+// `animate-pulse`, an opacity blink that runs forever with no pause control
+// (WCAG 2.2.2, Level A) and ran in sync on up to 30 cards of /blindspots. The
+// label next to it already says what it means, so the icon is decoration. The
+// repo-wide rule lives in tests/guards/no-endless-pulse.test.ts.
+// ---------------------------------------------------------------------------
+describe("Kör nokta icon does not pulse forever (h75-motion-1)", () => {
+  /** From the `cluster.is_blindspot &&` guard up to the "Kör nokta" label it renders. */
+  function blindspotLabelBlock(): string {
+    const guard = src.indexOf("cluster.is_blindspot &&");
+    expect(guard).toBeGreaterThan(-1);
+    const label = src.indexOf("Kör nokta", guard);
+    expect(label).toBeGreaterThan(guard);
+    return src.slice(guard, label + "Kör nokta".length);
+  }
+
+  it("has no animate-pulse between the is_blindspot guard and the label", () => {
+    expect(/animate-pulse/.test(blindspotLabelBlock()), "animate-pulse in the Kör nokta block").toBe(false);
+  });
+
+  it("keeps the icon's size and amber colour as literal classes, and the label copy", () => {
+    const block = blindspotLabelBlock();
+    const tag = openingTagAt(block, "<AlertTriangle");
+
+    expect(tag).toContain('className="h-3.5 w-3.5 text-amber-500"');
+    expect(tag).not.toMatch(/className=\{/);
+    expect(block).toMatch(/>\s*Kör nokta$/);
+  });
+
+  it("leaves the icon decorative: no aria-*, role or title prop, so lucide keeps emitting aria-hidden=\"true\"", () => {
+    const tag = openingTagAt(blindspotLabelBlock(), "<AlertTriangle");
+
+    expect(tag).not.toMatch(/\saria-/);
+    expect(tag).not.toMatch(/\srole=/);
+    expect(tag).not.toMatch(/\stitle=/);
+  });
+
+  it("no card element pulses at all (the card has no loading placeholder of its own)", () => {
+    expect(/animate-pulse/.test(src), "animate-pulse in cluster-card.tsx").toBe(false);
+  });
+});

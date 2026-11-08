@@ -147,7 +147,7 @@ export async function GET(): Promise<Response> {
     headers: {
       "Content-Type": "application/rss+xml; charset=utf-8",
       "Cache-Control":
-        "public, max-age=300, s-maxage=300, stale-while-revalidate=3600",
+        "public, max-age=300, s-maxage=300, stale-while-revalidate=60",
     },
   });
 }

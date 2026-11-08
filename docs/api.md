@@ -242,7 +242,7 @@ The Çerçeve ("Framing") game: one political headline at a time, outlet hidden,
 
 ### `GET /rss.xml`
 
-RSS 2.0 feed of the top 30 politics clusters. Cached 5 minutes.
+RSS 2.0 feed of the top 30 politics clusters. Cached 5 minutes at the CDN (`Cache-Control: public, max-age=300, s-maxage=300, stale-while-revalidate=60`): after 300 seconds the CDN may still serve its copy for up to 60 seconds while it refreshes it in the background, so the CDN never hands out a copy built more than about 6 minutes earlier. The cluster read behind the feed is itself cached (the `cluster-feed` profile: refreshed in the background after 300 s, kept up to 3600 s), so the clusters in a just-built copy can be older than that, by up to about an hour after a quiet spell.
 
 ---
 
@@ -261,7 +261,7 @@ Every item has the headline as `title`, the cluster page as `link` (with the UTM
 The source count counts every member of the cluster, aggregator and niche sources included, but the three zones count outlet and wire sources only (the sources that vote on the card's spectrum). When aggregator or niche members are present, the count carries the number of counted sources in parentheses, `{N} kaynak ({M} sınıflandırılmış)`, and the zones add up to `M`: `10 kaynak (8 sınıflandırılmış) · İktidar 8 · Bağımsız 0 · Muhalefet 0`. When every member counts there are no parentheses and the zones add up to `N`. The parenthesis is part of the first ` · ` part, so the part count does not change. The `/rss/kor-noktalar.xml` description puts the `Kör nokta: ağırlıkla {zone} kaynakları (%N). ` prefix in front of that same text.
 
 - **Item cap**: 30 per topic feed. The two kör-nokta URLs carry up to 60 items: the `/blindspots` page's cards first, then its compact rows.
-- **Cache**: `Cache-Control: public, max-age=300, s-maxage=300` on a `200` (5 minutes; unlike `/rss.xml` there is no `stale-while-revalidate`).
+- **Cache**: `Cache-Control: public, max-age=300, s-maxage=300` on a `200` (5 minutes; `/rss.xml` adds a 60-second `stale-while-revalidate`).
 - **`503`**: the read failed (database error or timeout). The body is the plain text `Service unavailable` with `Retry-After: 300` and `Cache-Control: no-store`, never a `200` with an empty feed that a reader would take as "the publisher deleted everything". `/rss.xml` answers a read failure the same way. A read that succeeded but found no matching cluster is a normal `200` feed with no items.
 - **`404`**: `/rss/{topic}.xml` with a topic that is not listed above (including `politika`, which the site redirects but has no feed of its own: use `/rss.xml`), or a name that does not end in `.xml`. Plain text `Not found` (`Content-Type: text/plain; charset=utf-8`); the handler sets no `Cache-Control`.
 - **`400`**: a malformed percent-encoding in the topic segment (`/rss/%ff.xml`). The edge middleware answers it before the route runs: plain text `Bad request: malformed URL encoding`, `Content-Type: text/plain; charset=utf-8`, `Cache-Control: no-store`, `X-Robots-Tag: noindex`. `/blindspots/rss.xml` has no dynamic segment, so it has no such case.
