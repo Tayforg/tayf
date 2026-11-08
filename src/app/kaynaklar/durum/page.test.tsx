@@ -58,6 +58,7 @@ import { SOURCE_KIND_META } from "@/lib/sources/kind";
 import { SILENCE_REASON_LABEL } from "@/lib/sources/silence-reason";
 import { ZONE_META } from "@/lib/bias/config";
 import {
+  summariseFeedStatus,
   toFeedStatusRows,
   type SourceFeedStatusRawRow,
 } from "@/lib/sources/feed-status";
@@ -1088,5 +1089,293 @@ describe("KaynakDurumPage cross-link to /durum", () => {
     fixture.error = { message: "canceling statement due to statement timeout" };
     const down = collectText(await KaynakDurumPage()).join(" ");
     expect(down).toContain("Haber akışının genel durumu için");
+  });
+});
+
+// h71-transparency-2: every "N/M kaynak" footnote (DenominatorNote on /sources
+// and /blindspots) links here as its evidence, but the page printed only the
+// all-kinds tally (e.g. 88/118) and threw `.voting` away. The page now prints
+// the voting pair in DenominatorNote's own wording, per zone as well, and
+// labels the all-kinds numbers as including aggregators and niche sources.
+describe("KaynakDurumBody voting denominator (h71-transparency-2)", () => {
+  const HOUR = 60 * 60 * 1000;
+  const stale = [{ published_at: new Date(NOW - 96 * HOUR).toISOString() }];
+
+  type El = { type?: unknown; key?: unknown; props?: Record<string, unknown> };
+
+  /** Every element under the tree (depth first), expanding no components. */
+  function elements(node: unknown, out: El[] = []): El[] {
+    if (Array.isArray(node)) {
+      for (const child of node) elements(child, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as El;
+      out.push(el);
+      const children = el.props?.children;
+      if (children !== undefined) elements(children, out);
+    }
+    return out;
+  }
+
+  const textOf = (node: unknown) => collectText(node).join("");
+  const classOf = (el: El | undefined): string => String(el?.props?.className);
+
+  function body(raw: SourceFeedStatusRawRow[]) {
+    return KaynakDurumBody({
+      rows: toFeedStatusRows(raw, NOW),
+      itemsPerDayPromise: Promise.resolve({}),
+    });
+  }
+
+  /**
+   * 3 outlets (2 delivering), 1 wire (delivering), 2 aggregators (1
+   * delivering), 1 niche (silent), spread over the three zones so that the
+   * per-zone voting pair differs from the per-zone all-kinds pair:
+   *   voting    iktidar 2/2   bagimsiz 0/1   muhalefet 1/1   total 3/4
+   *   all kinds iktidar 2/3   bagimsiz 1/2   muhalefet 1/2   total 4/7
+   */
+  const votingFixture = (): SourceFeedStatusRawRow[] => [
+    rawRow({ slug: "ik-bir", name: "İktidar Bir", kind: "outlet", bias: "pro_government" }),
+    rawRow({ slug: "ik-iki", name: "İktidar İki", kind: "outlet", bias: "pro_government" }),
+    rawRow({
+      slug: "bg-sessiz",
+      name: "Bağımsız Sessiz",
+      kind: "outlet",
+      bias: "center",
+      latest: stale,
+    }),
+    rawRow({ slug: "mu-ajans", name: "Muhalefet Ajans", kind: "wire", bias: "opposition" }),
+    rawRow({ slug: "bg-toplayici", name: "Bağımsız Toplayıcı", kind: "aggregator", bias: "center" }),
+    rawRow({
+      slug: "ik-toplayici",
+      name: "İktidar Toplayıcı",
+      kind: "aggregator",
+      bias: "pro_government",
+      latest: stale,
+    }),
+    rawRow({
+      slug: "mu-nis",
+      name: "Muhalefet Niş",
+      kind: "niche",
+      bias: "opposition",
+      latest: [],
+    }),
+  ];
+
+  /** Only aggregator and niche sources: nothing votes. */
+  const nonVotingOnly = (): SourceFeedStatusRawRow[] => [
+    rawRow({ slug: "toplayici", name: "Toplayıcı Bir", kind: "aggregator", bias: "center" }),
+    rawRow({ slug: "nis", name: "Niş Bir", kind: "niche", bias: "opposition", latest: stale }),
+  ];
+
+  const VOTING_PREFIX = "Paylar, yanlılık dağılımına sayılan";
+  const CLAUSE = "(haber siteleri ve ajanslar; toplayıcı ve niş kaynaklar paya sayılmaz).";
+
+  function votingParagraph(tree: unknown): El | undefined {
+    return elements(tree).find((e) => e.type === "p" && textOf(e).startsWith(VOTING_PREFIX));
+  }
+
+  function totalsParagraph(tree: unknown): El | undefined {
+    return elements(tree).find((e) => e.type === "p" && textOf(e).includes("aktif kaynaktan"));
+  }
+
+  function zoneCard(tree: unknown, zone: keyof typeof ZONE_META): El {
+    const card = elements(tree).find((e) => e.type === "div" && e.key === zone);
+    if (!card) throw new Error(`no zone card for ${zone}`);
+    return card;
+  }
+
+  describe("the voting pair in DenominatorNote's wording", () => {
+    it("prints 'yanlılık dağılımına sayılan' and the voting pair '3/4 kaynak üzerinden hesaplanır'", () => {
+      const text = textOf(body(votingFixture()));
+      expect(text).toContain("yanlılık dağılımına sayılan");
+      expect(text).toContain("3/4 kaynak üzerinden hesaplanır");
+    });
+
+    it("the paragraph reads in full, with the kinds clause, and is a muted text-xs paragraph", () => {
+      const p = votingParagraph(body(votingFixture()));
+      expect(p, "voting paragraph").toBeDefined();
+      expect(textOf(p)).toBe(
+        `${VOTING_PREFIX} ve son 72 saatte en az bir haber veren 3/4 kaynak üzerinden hesaplanır ${CLAUSE}`,
+      );
+      expect(classOf(p)).toBe("text-xs text-muted-foreground");
+    });
+
+    it("prints exactly the pair summariseFeedStatus().voting computes, so the page and DenominatorNote cannot drift", () => {
+      const rows = toFeedStatusRows(votingFixture(), NOW);
+      const { voting } = summariseFeedStatus(rows);
+      const text = textOf(body(votingFixture()));
+      expect(`${voting.delivering}/${voting.total}`).toBe("3/4");
+      expect(text).toContain(`${voting.delivering}/${voting.total} kaynak üzerinden hesaplanır`);
+      // and it is not the all-kinds pair, which stays on its own line
+      const { all } = summariseFeedStatus(rows);
+      expect(`${all.delivering}/${all.total}`).not.toBe(`${voting.delivering}/${voting.total}`);
+      expect(votingParagraph(body(votingFixture()))).toBeDefined();
+      expect(textOf(votingParagraph(body(votingFixture())))).not.toContain(
+        `${all.delivering}/${all.total}`,
+      );
+    });
+
+    it("both numbers are font-mono spans", () => {
+      const p = votingParagraph(body(votingFixture()))!;
+      const monos = elements(p)
+        .filter((e) => e.type === "span" && classOf(e) === "font-mono")
+        .map((e) => textOf(e));
+      expect(monos).toEqual(["3", "4"]);
+    });
+
+    it("renders exactly one voting paragraph, directly above the all-kinds totals paragraph and below the zone cards", () => {
+      const tree = body(votingFixture()) as El;
+      const children = (tree.props?.children as unknown[]).filter(Boolean);
+      const voting = children.find(
+        (c) => (c as El).type === "p" && textOf(c).startsWith(VOTING_PREFIX),
+      );
+      const totals = children.find(
+        (c) => (c as El).type === "p" && textOf(c).includes("aktif kaynaktan"),
+      );
+      const grid = children.find(
+        (c) => (c as El).type === "div" && classOf(c as El).includes("grid"),
+      );
+      expect(voting, "voting paragraph").toBeDefined();
+      expect(totals, "totals paragraph").toBeDefined();
+      expect(grid, "zone grid").toBeDefined();
+      expect(children.indexOf(totals)).toBe(children.indexOf(voting) + 1);
+      expect(children.indexOf(voting)).toBeGreaterThan(children.indexOf(grid));
+      expect(elements(tree).filter((e) => e.type === "p" && textOf(e).startsWith(VOTING_PREFIX)))
+        .toHaveLength(1);
+    });
+
+    it("a zero voting total gives the wording without numbers, never '0/0'", () => {
+      const tree = body(nonVotingOnly());
+      const p = votingParagraph(tree);
+      expect(p, "voting paragraph").toBeDefined();
+      expect(textOf(p)).toBe(
+        `${VOTING_PREFIX} ve son 72 saatte en az bir haber veren kaynaklar üzerinden hesaplanır ${CLAUSE}`,
+      );
+      expect(elements(p).filter((e) => e.type === "span")).toHaveLength(0);
+      expect(textOf(tree)).not.toContain("0/0");
+      expect(textOf(tree)).not.toMatch(/\d+\/\d+ kaynak üzerinden/);
+    });
+
+    it("an empty list gives the wording without numbers too", () => {
+      const tree = KaynakDurumBody({ rows: [], itemsPerDayPromise: Promise.resolve({}) });
+      const p = votingParagraph(tree);
+      expect(p, "voting paragraph").toBeDefined();
+      expect(textOf(p)).toContain("haber veren kaynaklar üzerinden hesaplanır");
+      expect(textOf(tree)).not.toContain("0/0");
+    });
+  });
+
+  describe("per-zone voting pair on the zone cards", () => {
+    it("each card gets a second line 'Paya sayılan: d/t' with its own voting pair", () => {
+      const tree = body(votingFixture());
+      const expected = { iktidar: "2/2", bagimsiz: "0/1", muhalefet: "1/1" } as const;
+      for (const zone of ["iktidar", "bagimsiz", "muhalefet"] as const) {
+        expect(textOf(zoneCard(tree, zone)), zone).toContain(`Paya sayılan: ${expected[zone]}`);
+      }
+    });
+
+    it("the pair per zone is the one summariseFeedStatus().voting.byZone computes", () => {
+      const rows = toFeedStatusRows(votingFixture(), NOW);
+      const { voting } = summariseFeedStatus(rows);
+      const tree = body(votingFixture());
+      for (const zone of ["iktidar", "bagimsiz", "muhalefet"] as const) {
+        const z = voting.byZone[zone];
+        expect(textOf(zoneCard(tree, zone)), zone).toContain(
+          `Paya sayılan: ${z.delivering}/${z.total}`,
+        );
+      }
+    });
+
+    it("keeps the all-kinds line, suffixed '(toplayıcı ve niş dahil)'", () => {
+      const tree = body(votingFixture());
+      const expected = { iktidar: [3, 2], bagimsiz: [2, 1], muhalefet: [2, 1] } as const;
+      for (const zone of ["iktidar", "bagimsiz", "muhalefet"] as const) {
+        const [total, delivering] = expected[zone];
+        const text = textOf(zoneCard(tree, zone));
+        expect(text, zone).toContain(
+          `${total} kaynaktan ${delivering} tanesi son 72 saatte yayın yaptı (toplayıcı ve niş dahil)`,
+        );
+        expect(text, zone).toContain(ZONE_META[zone].label);
+      }
+    });
+
+    it("the voting line comes after the all-kinds line in each card, with font-mono numbers", () => {
+      const card = zoneCard(body(votingFixture()), "iktidar");
+      const text = textOf(card);
+      expect(text.indexOf("Paya sayılan")).toBeGreaterThan(text.indexOf("yayın yaptı"));
+      const voting = elements(card).find(
+        (e) => e.type === "p" && textOf(e).startsWith("Paya sayılan"),
+      );
+      expect(voting, "voting line").toBeDefined();
+      const monos = elements(voting)
+        .filter((e) => e.type === "span" && classOf(e).split(/\s+/).includes("font-mono"))
+        .map((e) => textOf(e));
+      expect(monos).toEqual(["2", "2"]);
+    });
+
+    it("a zone with no voting source says so instead of printing '0/0'", () => {
+      const tree = body(nonVotingOnly());
+      for (const zone of ["iktidar", "bagimsiz", "muhalefet"] as const) {
+        const text = textOf(zoneCard(tree, zone));
+        expect(text, zone).toContain("Paya sayılan kaynak yok");
+        expect(text, zone).not.toContain("0/0");
+      }
+    });
+  });
+
+  describe("regression: the all-kinds sentence, quarantine and ordering", () => {
+    it("the totals sentence says it includes aggregators and niche sources and keeps the rest unchanged", () => {
+      const p = totalsParagraph(body(votingFixture()));
+      expect(p, "totals paragraph").toBeDefined();
+      expect(textOf(p)).toBe(
+        "Toplayıcı ve niş kaynaklar dahil toplam 7 aktif kaynaktan 4 tanesi son 72 saatte en az bir haber verdi; 3 kaynak bu pencerede sessiz.",
+      );
+      expect(classOf(p)).toBe("text-xs text-muted-foreground");
+    });
+
+    it("the totals sentence still carries the quarantine sentence when a feed is quarantined", () => {
+      const raw = votingFixture();
+      raw.push(
+        rawRow({
+          slug: "karantina",
+          name: "Karantina Haber",
+          latest: stale,
+          fetch_fail_streak: 21,
+          fetch_quarantined_until: new Date(NOW + 6 * HOUR).toISOString(),
+        }),
+      );
+      const text = textOf(totalsParagraph(body(raw)));
+      expect(text).toContain("1 besleme karantinada");
+      expect(text).toContain("1 saat, 6 saat, sonra günde bir yeniden denenir");
+      // the quarantined row is an outlet: it also counts in the voting pair (3/5)
+      expect(textOf(body(raw))).toContain("3/5 kaynak üzerinden hesaplanır");
+    });
+
+    it("rows stay silent-first, then alphabetical (Turkish collation)", () => {
+      const tree = body(votingFixture());
+      const slugs = elements(tree)
+        .filter((e) => e.type === "tr" && e.key !== null && e.key !== undefined)
+        .map((e) => String(e.key));
+      // silent: bg-sessiz (Bağımsız Sessiz), ik-toplayici (İktidar Toplayıcı), mu-nis
+      // (Muhalefet Niş); delivering: ik-bir, ik-iki, bg-toplayici, mu-ajans
+      expect(slugs).toEqual([
+        "bg-sessiz",
+        "ik-toplayici",
+        "mu-nis",
+        "bg-toplayici",
+        "ik-bir",
+        "ik-iki",
+        "mu-ajans",
+      ]);
+    });
+
+    it("the legend for silent sources still follows the totals paragraph", () => {
+      const text = collectText(body(votingFixture())).join(" ");
+      expect(text.indexOf("Sessiz kaynakların yanındaki etiket")).toBeGreaterThan(
+        text.indexOf("bu pencerede sessiz"),
+      );
+    });
   });
 });

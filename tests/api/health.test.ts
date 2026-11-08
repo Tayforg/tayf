@@ -463,21 +463,163 @@ describe("GET /api/health", () => {
     );
   });
 
-  it("returns 200 degraded when clustering is stale beyond the 15-minute threshold", async () => {
+  // h71-transparency-3: a stale `clusters.updated_at` alone cannot tell an idle
+  // pipeline (a quiet night: nothing politika/son_dakika arrived, so no cluster
+  // was touched) from a stuck consumer. It is degraded only while cluster_work
+  // has pending messages; an empty cluster_work is idle, not degraded.
+  const metricsWith = (clusterWorkLength: number | string | null) => async () => ({
+    data: [
+      { queue_name: "cluster_work", queue_length: clusterWorkLength, oldest_msg_age_sec: null },
+      { queue_name: "image_backfill", queue_length: 0, oldest_msg_age_sec: null },
+    ],
+    error: null,
+  });
+  const staleClusters = (minutes: number) => async () => ({
+    data: { updated_at: new Date(Date.now() - minutes * 60 * 1000).toISOString() },
+    error: null,
+  });
+
+  it("returns 200 degraded when clustering is stale beyond the 15-minute threshold while cluster_work has pending messages", async () => {
     // 20 minutes ago is clearly past 15-min staleness.
-    const staleIso = new Date(Date.now() - 20 * 60 * 1000).toISOString();
-    responders.clustersMaybeSingle = async () => ({
-      data: { updated_at: staleIso },
-      error: null,
-    });
+    responders.clustersMaybeSingle = staleClusters(20);
+    responders.workerMetricsSelect = metricsWith(5);
     const { status, body } = await callGet();
     expect(status).toBe(200);
     expect(body.status).toBe("degraded");
     expect(body.checks.clustering.ok).toBe(false);
+    expect(body.checks.clustering.idle).toBeUndefined();
     expect(body.checks.clustering.lastClusterAgeSec).toBeGreaterThan(15 * 60);
     // DB + ingestion remain green: this is a clustering-only degradation.
     expect(body.checks.database.ok).toBe(true);
     expect(body.checks.ingestion.ok).toBe(true);
+  });
+
+  it("stale clusters with an EMPTY cluster_work is idle, not degraded: clustering ok + idle, overall healthy", async () => {
+    // The 2026-11-08 quiet night: last cluster update 63 minutes old, nothing to cluster.
+    responders.clustersMaybeSingle = staleClusters(63);
+    responders.workerMetricsSelect = metricsWith(0);
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.status).toBe("healthy");
+    expect(body.checks.clustering.ok).toBe(true);
+    expect(body.checks.clustering.idle).toBe(true);
+    expect(body.checks.clustering.error).toBeUndefined();
+    expect(body.checks.clustering.lastClusterAgeSec).toBeGreaterThan(15 * 60);
+    expect(body.checks.queues.ok).toBe(true);
+  });
+
+  it("an anonymous caller sees healthy for the same idle night (and still only {status, timestamp})", async () => {
+    responders.clustersMaybeSingle = staleClusters(63);
+    responders.workerMetricsSelect = metricsWith(0);
+    const { status, body } = await callGet(new Request("http://localhost/api/health"));
+    expect(status).toBe(200);
+    expect(body.status).toBe("healthy");
+    expect(Object.keys(body).sort()).toEqual(["status", "timestamp"]);
+  });
+
+  it("a fresh cluster is plain ok: the idle flag is set only when staleness was waived", async () => {
+    responders.workerMetricsSelect = metricsWith(0);
+    const { body } = await callGet();
+    expect(body.checks.clustering.ok).toBe(true);
+    expect(body.checks.clustering.idle).toBeUndefined();
+  });
+
+  it("stale clusters with one pending cluster_work message is degraded", async () => {
+    responders.clustersMaybeSingle = staleClusters(16);
+    responders.workerMetricsSelect = metricsWith(1);
+    const { body } = await callGet();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.clustering.ok).toBe(false);
+  });
+
+  it("stale clusters with a cluster_work backlog over its depth bound is degraded twice over, never idle", async () => {
+    responders.clustersMaybeSingle = staleClusters(40);
+    responders.workerMetricsSelect = metricsWith(750);
+    const { body } = await callGet();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.clustering.ok).toBe(false);
+    expect(body.checks.queues.ok).toBe(false);
+  });
+
+  it("the waiver only reads cluster_work: an empty image_backfill with a busy cluster_work stays degraded", async () => {
+    responders.clustersMaybeSingle = staleClusters(30);
+    responders.workerMetricsSelect = async () => ({
+      data: [
+        { queue_name: "image_backfill", queue_length: 0, oldest_msg_age_sec: null },
+        { queue_name: "cluster_work", queue_length: 3, oldest_msg_age_sec: 12 },
+      ],
+      error: null,
+    });
+    const { body } = await callGet();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.clustering.ok).toBe(false);
+  });
+
+  it("every error path is unchanged: a failed queues probe keeps stale clusters degraded", async () => {
+    responders.clustersMaybeSingle = staleClusters(63);
+    responders.workerMetricsSelect = async () => ({ data: null, error: { message: "view missing" } });
+    const { body } = await callGet();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.queues.ok).toBe(false);
+    expect(body.checks.clustering.ok).toBe(false);
+    expect(body.checks.clustering.idle).toBeUndefined();
+  });
+
+  it("every error path is unchanged: no cluster_work row in the metrics keeps stale clusters degraded", async () => {
+    responders.clustersMaybeSingle = staleClusters(63);
+    responders.workerMetricsSelect = async () => ({
+      data: [{ queue_name: "image_backfill", queue_length: 0, oldest_msg_age_sec: null }],
+      error: null,
+    });
+    const { body } = await callGet();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.clustering.ok).toBe(false);
+  });
+
+  it("every error path is unchanged: a malformed cluster_work length (NULL or text) never counts as an empty queue", async () => {
+    for (const bad of [null, "not-a-number"]) {
+      responders.clustersMaybeSingle = staleClusters(63);
+      responders.workerMetricsSelect = metricsWith(bad);
+      const { body } = await callGet();
+      expect(body.status, String(bad)).toBe("degraded");
+      expect(body.checks.clustering.ok, String(bad)).toBe(false);
+      expect(body.checks.clustering.idle, String(bad)).toBeUndefined();
+    }
+  });
+
+  it("every error path is unchanged: a clusters query error keeps its message and is degraded even with an empty queue", async () => {
+    responders.clustersMaybeSingle = async () => ({ data: null, error: { message: "boom" } });
+    responders.workerMetricsSelect = metricsWith(0);
+    const { body } = await callGet();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.clustering).toEqual({ ok: false, error: "boom" });
+  });
+
+  it("every error path is unchanged: no clusters at all is degraded even with an empty queue", async () => {
+    responders.clustersMaybeSingle = async () => ({ data: null, error: null });
+    responders.workerMetricsSelect = metricsWith(0);
+    const { body } = await callGet();
+    expect(body.status).toBe("degraded");
+    expect(body.checks.clustering).toEqual({ ok: false, error: "no clusters" });
+  });
+
+  it("an empty queue does not mask other failures: stale ingestion stays degraded and a database error stays 503", async () => {
+    responders.clustersMaybeSingle = staleClusters(63);
+    responders.workerMetricsSelect = metricsWith(0);
+    responders.articlesMaybeSingle = async () => ({
+      data: { created_at: new Date(Date.now() - 30 * 60 * 1000).toISOString() },
+      error: null,
+    });
+    const stale = await callGet();
+    expect(stale.body.status).toBe("degraded");
+    expect(stale.body.checks.ingestion.ok).toBe(false);
+    expect(stale.body.checks.clustering.ok).toBe(true);
+
+    responders.articlesMaybeSingle = async () => ({ data: { created_at: new Date().toISOString() }, error: null });
+    responders.sourcesSelect = async () => ({ data: null, error: { message: "db down" } });
+    const down = await callGet();
+    expect(down.status).toBe(503);
+    expect(down.body.status).toBe("unhealthy");
   });
 
   it("returns 200 degraded when a queue exceeds the depth threshold", async () => {

@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { BIAS_TO_ZONE } from "@/lib/bias/config";
 import {
   STATUS_CLUSTER_FAIL_MIN,
+  STATUS_CLUSTER_POISON_WINDOW_HOURS,
+  STATUS_CLUSTER_QUEUE_DEPTH_WARN,
+  STATUS_CLUSTER_QUEUE_FAIL_SEC,
+  STATUS_CLUSTER_QUEUE_WARN_SEC,
   STATUS_CLUSTER_WARN_MIN,
   STATUS_FEEDS_FAIL_SILENT_SHARE,
   STATUS_FEEDS_WARN_SILENT_SHARE,
@@ -14,6 +18,7 @@ import {
   VERDICT_LABELS,
   ageMinutes,
   buildStatusView,
+  clusterQueueLevel,
   feedsLevel,
   formatAge,
   levelForAge,
@@ -64,6 +69,17 @@ describe("thresholds (each carries its source in verdict.ts)", () => {
   it("clustering follows the ops 077 convention (Step 0: max 7-day gap 51 min)", () => {
     expect(STATUS_CLUSTER_FAIL_MIN).toBe(Math.max(90, Math.ceil(1.5 * 51)));
     expect(STATUS_CLUSTER_WARN_MIN).toBe(Math.ceil(STATUS_CLUSTER_FAIL_MIN / 2));
+  });
+
+  it("the clustering queue rule is ops row 18 queue_lag (migration 150): 300 s warn, 900 s fail", () => {
+    expect(STATUS_CLUSTER_QUEUE_WARN_SEC).toBe(300);
+    expect(STATUS_CLUSTER_QUEUE_FAIL_SEC).toBe(900);
+    expect(STATUS_CLUSTER_QUEUE_WARN_SEC).toBeLessThan(STATUS_CLUSTER_QUEUE_FAIL_SEC);
+  });
+
+  it("the queue depth line and the poison window are ops row 18's: depth > 300, poison counted over the last hour", () => {
+    expect(STATUS_CLUSTER_QUEUE_DEPTH_WARN).toBe(300);
+    expect(STATUS_CLUSTER_POISON_WINDOW_HOURS).toBe(1);
   });
 
   it("every warn threshold is strictly below its fail threshold", () => {
@@ -308,6 +324,262 @@ describe("buildStatusView", () => {
   });
 });
 
+describe("clusterQueueLevel (strict >, as in ops row 18)", () => {
+  it.each([
+    [0, "ok"],
+    [60, "ok"],
+    [300, "ok"],
+    [300.01, "gecikmeli"],
+    [900, "gecikmeli"],
+    [900.01, "sorunlu"],
+    [86_400, "sorunlu"],
+  ] as const)("oldest visible message %s s -> %s", (sec, expected) => {
+    expect(clusterQueueLevel(sec)).toBe(expected);
+  });
+});
+
+describe("clustering follows the cluster_work queue lag, not the age of the last cluster update (h71-transparency-3)", () => {
+  /** 2026-11-08 02:30Z: the quiet night. Nothing politika/son_dakika arrived from 01:27 to 02:33Z, so no cluster was touched. */
+  const QUIET_NIGHT = "2026-11-08T02:30:00.000Z";
+  const quiet = (clustering: PublicStatusSnapshot["clustering"]): PublicStatusSnapshot => ({
+    generatedAt: QUIET_NIGHT,
+    ingest: {
+      ok: true,
+      lastByBias: {
+        pro_government: "2026-11-08T02:28:00.000Z",
+        center: "2026-11-08T02:27:00.000Z",
+        opposition: "2026-11-08T02:29:00.000Z",
+      },
+    },
+    clustering,
+    labelling: { ok: true, lastAt: "2026-11-08T02:25:00.000Z", paused: false },
+    feeds: { ok: true, active: 118, silent: 26 },
+  });
+  const rawQuiet = (clustering: Record<string, unknown>) => ({
+    generated_at: "2026-11-08T02:30:00+00:00",
+    ingest: {
+      ok: true,
+      last_by_bias: {
+        pro_government: "2026-11-08T02:28:00+00:00",
+        center: "2026-11-08T02:27:00+00:00",
+        opposition: "2026-11-08T02:29:00+00:00",
+      },
+    },
+    clustering,
+    labelling: { ok: true, last_at: "2026-11-08T02:25:00+00:00", paused: false },
+    feeds: { ok: true, active: 118, silent: 26 },
+  });
+
+  it("REPLAY: last cluster update 63 min old but an empty queue reads Normal and the page reads Çalışıyor (was Gecikmeli)", () => {
+    const v = buildStatusView(
+      quiet({ ok: true, lastAt: "2026-11-08T01:27:04.000Z", queueDepth: 0, queueOldestSec: 0 }),
+    );
+    expect(v.clustering.level).toBe("ok");
+    expect(v.overall).toBe("calisiyor");
+    // the age stays as informational text
+    expect(v.clustering.ageMin).toBeCloseTo(62.93, 1);
+  });
+
+  it("REPLAY through the parser: the raw document the new function returns on the quiet night", () => {
+    const s = toPublicStatusSnapshot(
+      rawQuiet({ ok: true, last_at: "2026-11-08T01:27:04+00:00", queue_depth: 0, queue_oldest_sec: 0 }),
+    );
+    expect(s).not.toBeNull();
+    const v = buildStatusView(s!);
+    expect(v.clustering.level).toBe("ok");
+    expect(v.overall).toBe("calisiyor");
+  });
+
+  it("the same idle night on a database WITHOUT migration 176 is still Gecikmeli (the baseline this fixes)", () => {
+    const s = toPublicStatusSnapshot(rawQuiet({ ok: true, last_at: "2026-11-08T01:27:04+00:00" }));
+    const v = buildStatusView(s!);
+    expect(v.clustering.level).toBe("gecikmeli");
+    expect(v.overall).toBe("gecikmeli");
+  });
+
+  it("a queue wait of 400 s is gecikmeli and 1000 s is sorunlu, whatever the last update age", () => {
+    const at = (sec: number, lastAt: string | null) =>
+      buildStatusView(quiet({ ok: true, lastAt, queueDepth: 7, queueOldestSec: sec }));
+    expect(at(400, "2026-11-08T02:29:00.000Z").clustering.level).toBe("gecikmeli");
+    expect(at(400, "2026-11-08T02:29:00.000Z").overall).toBe("gecikmeli");
+    expect(at(1000, "2026-11-08T02:29:00.000Z").clustering.level).toBe("sorunlu");
+    expect(at(1000, "2026-11-08T02:29:00.000Z").overall).toBe("sorunlu");
+    expect(at(400, null).clustering.level).toBe("gecikmeli");
+  });
+
+  it("a stuck consumer is still detected: last update 1 min old, oldest message 1000 s -> sorunlu", () => {
+    const v = buildStatusView(
+      quiet({ ok: true, lastAt: "2026-11-08T02:29:00.000Z", queueDepth: 12, queueOldestSec: 1000 }),
+    );
+    expect(v.clustering.ageMin).toBe(1);
+    expect(v.clustering.level).toBe("sorunlu");
+    expect(v.overall).toBe("sorunlu");
+  });
+
+  it("boundaries are strict: 300 s and 900 s sit on the lower side", () => {
+    const at = (sec: number) =>
+      buildStatusView(quiet({ ok: true, lastAt: null, queueDepth: 1, queueOldestSec: sec })).clustering.level;
+    expect(at(300)).toBe("ok");
+    expect(at(300.5)).toBe("gecikmeli");
+    expect(at(900)).toBe("gecikmeli");
+    expect(at(900.5)).toBe("sorunlu");
+  });
+
+  it("no cluster update in the whole lookback is Normal while the queue is empty (the old rule said Sorunlu)", () => {
+    const v = buildStatusView(quiet({ ok: true, lastAt: null, queueDepth: 0, queueOldestSec: 0 }));
+    expect(v.clustering).toMatchObject({ level: "ok", ageMin: null });
+    expect(v.overall).toBe("calisiyor");
+  });
+
+  it("an unmeasured clustering section stays bilinmiyor even if queue numbers ride along", () => {
+    const v = buildStatusView(quiet({ ok: false, lastAt: null, queueDepth: 0, queueOldestSec: 0 }));
+    expect(v.clustering.level).toBe("bilinmiyor");
+    expect(v.clustering.queueOldestSec).toBeUndefined();
+  });
+
+  it("the view model carries the queue numbers only when the queue rule applies", () => {
+    const withQueue = buildStatusView(quiet({ ok: true, lastAt: "2026-11-08T02:20:00.000Z", queueDepth: 3, queueOldestSec: 42 }));
+    expect(withQueue.clustering).toEqual({ level: "ok", ageMin: 10, queueDepth: 3, queueOldestSec: 42 });
+    const without = buildStatusView(quiet({ ok: true, lastAt: "2026-11-08T02:20:00.000Z" }));
+    expect(without.clustering).toEqual({ level: "ok", ageMin: 10 });
+    const explicitNull = buildStatusView(
+      quiet({ ok: true, lastAt: "2026-11-08T02:20:00.000Z", queueDepth: null, queueOldestSec: null }),
+    );
+    expect(explicitNull.clustering).toEqual({ level: "ok", ageMin: 10 });
+  });
+
+  describe("poison and depth lines of ops row 18 (a failing consumer archives each message on its 4th read, so the oldest visible wait stays short)", () => {
+    const QUIET_LAST_UPDATE = "2026-11-08T01:27:04.000Z";
+    const level = (clustering: Partial<PublicStatusSnapshot["clustering"]>) =>
+      buildStatusView(quiet({ ok: true, lastAt: QUIET_LAST_UPDATE, queueDepth: 0, queueOldestSec: 0, ...clustering }));
+
+    it("an empty queue with 2 messages archived as poison in the last hour is gecikmeli and the page is not Çalışıyor", () => {
+      const v = level({ queuePoisonRecent: 2 });
+      expect(v.clustering.level).toBe("gecikmeli");
+      expect(v.overall).not.toBe("calisiyor");
+      expect(v.overall).toBe("gecikmeli");
+      expect(v.clustering.queuePoisonRecent).toBe(2);
+    });
+
+    it("one poison message is enough (ops row 18: q_poison >= 1)", () => {
+      expect(level({ queuePoisonRecent: 1 }).clustering.level).toBe("gecikmeli");
+    });
+
+    it("zero poison keeps the idle-night replay Normal, and so does an absent or null key", () => {
+      for (const clustering of [
+        { queuePoisonRecent: 0 },
+        {},
+        { queuePoisonRecent: undefined },
+        { queuePoisonRecent: null },
+      ] as const) {
+        const v = level(clustering);
+        expect(v.clustering.level, JSON.stringify(clustering)).toBe("ok");
+        expect(v.overall, JSON.stringify(clustering)).toBe("calisiyor");
+      }
+    });
+
+    it("a stale last update, an empty queue and poison >= 1 is never ok (the page cannot say Çalışıyor)", () => {
+      for (const lastAt of [QUIET_LAST_UPDATE, null]) {
+        const v = level({ lastAt, queueDepth: 0, queueOldestSec: 0, queuePoisonRecent: 3 });
+        expect(v.clustering.level).not.toBe("ok");
+        expect(v.overall).not.toBe("calisiyor");
+      }
+    });
+
+    it("poison never lowers sorunlu: poison 1 with a 1000 s wait stays sorunlu", () => {
+      const v = level({ queueDepth: 5, queueOldestSec: 1000, queuePoisonRecent: 1 });
+      expect(v.clustering.level).toBe("sorunlu");
+      expect(v.overall).toBe("sorunlu");
+    });
+
+    it("poison on top of a 400 s wait stays gecikmeli, and 0 poison with a 400 s wait is gecikmeli too", () => {
+      expect(level({ queueDepth: 5, queueOldestSec: 400, queuePoisonRecent: 4 }).clustering.level).toBe("gecikmeli");
+      expect(level({ queueDepth: 5, queueOldestSec: 400, queuePoisonRecent: 0 }).clustering.level).toBe("gecikmeli");
+    });
+
+    it("a depth of 301 with a 10 s wait is gecikmeli; 300 is still ok (ops row 18: qc_depth > 300)", () => {
+      expect(level({ queueDepth: 301, queueOldestSec: 10 }).clustering.level).toBe("gecikmeli");
+      expect(level({ queueDepth: 301, queueOldestSec: 10 }).overall).toBe("gecikmeli");
+      expect(level({ queueDepth: 300, queueOldestSec: 10 }).clustering.level).toBe("ok");
+      expect(level({ queueDepth: 5000, queueOldestSec: 0 }).clustering.level).toBe("gecikmeli");
+    });
+
+    it("a depth over 300 never lowers sorunlu", () => {
+      expect(level({ queueDepth: 301, queueOldestSec: 1000 }).clustering.level).toBe("sorunlu");
+    });
+
+    it("a null depth cannot raise the level", () => {
+      expect(level({ queueDepth: null, queueOldestSec: 10, queuePoisonRecent: null }).clustering.level).toBe("ok");
+    });
+
+    it("hand-built garbage (NaN, negative, fractional, Infinity) in the poison or depth field is ignored, not trusted", () => {
+      for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+        const v = level({ queueDepth: 0, queueOldestSec: 0, queuePoisonRecent: bad });
+        expect(v.clustering.level, String(bad)).toBe("ok");
+        expect(v.clustering.queuePoisonRecent, String(bad)).toBeUndefined();
+        expect(level({ queueDepth: bad, queueOldestSec: 5 }).clustering.level, String(bad)).toBe("ok");
+      }
+    });
+
+    it("the view model exposes queuePoisonRecent only when it is a valid count", () => {
+      expect(level({ queuePoisonRecent: 0 }).clustering).toMatchObject({ queuePoisonRecent: 0 });
+      expect(level({}).clustering).not.toHaveProperty("queuePoisonRecent");
+      expect(level({ queuePoisonRecent: null }).clustering).not.toHaveProperty("queuePoisonRecent");
+    });
+
+    it("an unmeasured clustering section stays bilinmiyor even if poison rides along", () => {
+      const v = buildStatusView(quiet({ ok: false, lastAt: null, queueDepth: 0, queueOldestSec: 0, queuePoisonRecent: 9 }));
+      expect(v.clustering.level).toBe("bilinmiyor");
+      expect(v.clustering).not.toHaveProperty("queuePoisonRecent");
+    });
+
+    it("REPLAY through the parser: the 176 document with poison 2 reads Gecikmeli, with poison 0 Çalışıyor", () => {
+      const doc = (poison: number) =>
+        rawQuiet({
+          ok: true,
+          last_at: "2026-11-08T01:27:04+00:00",
+          queue_depth: 0,
+          queue_oldest_sec: 0,
+          queue_poison_recent: poison,
+        });
+      const bad = buildStatusView(toPublicStatusSnapshot(doc(2))!);
+      expect(bad.clustering.level).toBe("gecikmeli");
+      expect(bad.overall).toBe("gecikmeli");
+      const good = buildStatusView(toPublicStatusSnapshot(doc(0))!);
+      expect(good.clustering.level).toBe("ok");
+      expect(good.overall).toBe("calisiyor");
+    });
+  });
+
+  describe("back-compat: queueOldestSec absent or null keeps the 45/90 updated_at rule byte for byte", () => {
+    const at = (min: number, queue: Partial<PublicStatusSnapshot["clustering"]> = {}) =>
+      buildStatusView(snap({ clustering: { ok: true, lastAt: ago(min), ...queue } })).clustering;
+
+    it.each([
+      [STATUS_CLUSTER_WARN_MIN, "ok"],
+      [STATUS_CLUSTER_WARN_MIN + 1, "gecikmeli"],
+      [STATUS_CLUSTER_FAIL_MIN, "gecikmeli"],
+      [STATUS_CLUSTER_FAIL_MIN + 1, "sorunlu"],
+    ] as const)("age %s min -> %s with the key absent, undefined or null", (min, expected) => {
+      const absent = at(min);
+      expect(absent).toEqual({ level: expected, ageMin: min });
+      expect(at(min, { queueOldestSec: null })).toEqual(absent);
+      expect(at(min, { queueOldestSec: undefined, queueDepth: undefined })).toEqual(absent);
+      expect(at(min, { queueDepth: 5, queueOldestSec: null })).toEqual(absent);
+    });
+
+    it("a null last update with no queue number is still sorunlu", () => {
+      expect(buildStatusView(snap({ clustering: { ok: true, lastAt: null } })).clustering.level).toBe("sorunlu");
+    });
+
+    it("a hand-built snapshot with a non-finite or negative queue number falls back to the old rule", () => {
+      for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+        expect(at(66, { queueOldestSec: bad }).level).toBe("gecikmeli");
+      }
+    });
+  });
+});
+
 describe("formatAge", () => {
   it.each([
     [0, "1 dakikadan kısa süre önce"],
@@ -454,5 +726,135 @@ describe("toPublicStatusSnapshot (allow-list parser for the rpc payload)", () =>
     expect(s?.feeds).toEqual({ ok: false, active: null, silent: null });
     expect(s?.clustering).toEqual({ ok: false, lastAt: null });
     expect(s?.ingest).toEqual({ ok: false, lastByBias: {} });
+  });
+
+  describe("clustering.queue_depth / queue_oldest_sec (migration 176)", () => {
+    const withClustering = (clustering: Record<string, unknown>) => ({ ...rawOk(), clustering });
+
+    it("keeps a well-formed pair, including the zero of an empty queue and a fractional wait", () => {
+      expect(
+        toPublicStatusSnapshot(withClustering({ ok: true, last_at: null, queue_depth: 0, queue_oldest_sec: 0 }))
+          ?.clustering,
+      ).toEqual({ ok: true, lastAt: null, queueDepth: 0, queueOldestSec: 0 });
+      expect(
+        toPublicStatusSnapshot(withClustering({ ok: true, last_at: null, queue_depth: 14, queue_oldest_sec: 12.345678 }))
+          ?.clustering,
+      ).toEqual({ ok: true, lastAt: null, queueDepth: 14, queueOldestSec: 12.345678 });
+    });
+
+    it("maps a string, a negative number, NaN, Infinity, a boolean, an object or null to null", () => {
+      for (const bad of ["300", "", -1, -0.001, Number.NaN, Number.POSITIVE_INFINITY, true, {}, [], null]) {
+        const s = toPublicStatusSnapshot(withClustering({ ok: true, last_at: null, queue_oldest_sec: bad }));
+        expect(s, JSON.stringify(bad)).not.toBeNull();
+        expect(s!.clustering.queueOldestSec, JSON.stringify(bad)).toBeNull();
+      }
+    });
+
+    it("maps a non-count queue_depth (string, negative, fractional, NaN) to null", () => {
+      for (const bad of ["3", -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, null, {}]) {
+        const s = toPublicStatusSnapshot(withClustering({ ok: true, last_at: null, queue_depth: bad, queue_oldest_sec: 5 }));
+        expect(s!.clustering.queueDepth, JSON.stringify(bad)).toBeNull();
+        expect(s!.clustering.queueOldestSec).toBe(5);
+      }
+    });
+
+    it("absent keys mean null: a pre-176 payload parses to the old shape and the readers see null", () => {
+      const s = toPublicStatusSnapshot(withClustering({ ok: true, last_at: "2026-10-22T09:55:00+00:00" }));
+      expect(s?.clustering).toEqual({ ok: true, lastAt: "2026-10-22T09:55:00+00:00" });
+      expect(s?.clustering.queueOldestSec ?? null).toBeNull();
+      expect(s?.clustering.queueDepth ?? null).toBeNull();
+    });
+
+    it("one key present is enough to mark the payload as 176-shaped: the other reads null", () => {
+      const s = toPublicStatusSnapshot(withClustering({ ok: true, last_at: null, queue_oldest_sec: 7 }));
+      expect(s?.clustering).toEqual({ ok: true, lastAt: null, queueDepth: null, queueOldestSec: 7 });
+    });
+
+    describe("queue_poison_recent", () => {
+      const parse = (clustering: Record<string, unknown>) =>
+        toPublicStatusSnapshot(withClustering({ ok: true, last_at: null, queue_depth: 0, queue_oldest_sec: 0, ...clustering }));
+
+      it("keeps a non-negative integer, zero included", () => {
+        for (const good of [0, 1, 2, 417]) {
+          expect(parse({ queue_poison_recent: good })?.clustering.queuePoisonRecent, String(good)).toBe(good);
+        }
+        expect(parse({ queue_poison_recent: 2 })?.clustering).toEqual({
+          ok: true,
+          lastAt: null,
+          queueDepth: 0,
+          queueOldestSec: 0,
+          queuePoisonRecent: 2,
+        });
+      });
+
+      it("maps -1, 1.5, '2', NaN, Infinity, booleans, objects and null to null (present but invalid)", () => {
+        for (const bad of [-1, 1.5, "2", "", Number.NaN, Number.POSITIVE_INFINITY, true, {}, [], null]) {
+          const s = parse({ queue_poison_recent: bad });
+          expect(s, JSON.stringify(bad)).not.toBeNull();
+          expect(s!.clustering.queuePoisonRecent, JSON.stringify(bad)).toBeNull();
+          // the other queue numbers are untouched by a bad poison value
+          expect(s!.clustering.queueOldestSec).toBe(0);
+        }
+      });
+
+      it("a payload without the key parses as before: no queuePoisonRecent property", () => {
+        const s = parse({});
+        expect(s?.clustering).toEqual({ ok: true, lastAt: null, queueDepth: 0, queueOldestSec: 0 });
+        expect(s?.clustering).not.toHaveProperty("queuePoisonRecent");
+        const pre176 = toPublicStatusSnapshot(withClustering({ ok: true, last_at: "2026-10-22T09:55:00+00:00" }));
+        expect(pre176?.clustering).toEqual({ ok: true, lastAt: "2026-10-22T09:55:00+00:00" });
+      });
+
+      it("the key alone marks the payload as 176-shaped: the other queue numbers read null", () => {
+        const s = toPublicStatusSnapshot(withClustering({ ok: true, last_at: null, queue_poison_recent: 3 }));
+        expect(s?.clustering).toEqual({
+          ok: true,
+          lastAt: null,
+          queueDepth: null,
+          queueOldestSec: null,
+          queuePoisonRecent: 3,
+        });
+      });
+
+      it("accepts the document PG produces: bigint count as a JSON integer", () => {
+        const s = toPublicStatusSnapshot(
+          JSON.parse(
+            '{"generated_at":"2026-11-08T02:30:00.123456+00:00","ingest":{"ok":true,"last_by_bias":{}},"clustering":{"ok":true,"last_at":null,"queue_depth":0,"queue_oldest_sec":0,"queue_poison_recent":0},"labelling":{"ok":true,"last_at":null,"paused":false},"feeds":{"ok":true,"active":1,"silent":0}}',
+          ),
+        );
+        expect(s?.clustering.queuePoisonRecent).toBe(0);
+      });
+    });
+
+    it("still drops every unknown key next to the queue keys (allow-list)", () => {
+      const s = toPublicStatusSnapshot(
+        withClustering({
+          ok: true,
+          last_at: null,
+          queue_depth: 2,
+          queue_oldest_sec: 30,
+          queue_name: "cluster_work",
+          msg_id: 991,
+          message: { article_id: "6f1c1b52-2f0f-4d52-a9f2-3a3c0d3a6c11" },
+          queue_oldest_msg: "secret",
+        }),
+      );
+      expect(Object.keys(s!.clustering).sort()).toEqual(["lastAt", "ok", "queueDepth", "queueOldestSec"]);
+      expect(JSON.stringify(s)).not.toMatch(/cluster_work|msg_id|6f1c1b52|secret|article_id/);
+    });
+
+    it("accepts the document PG produces: numeric epoch seconds with microseconds", () => {
+      const s = toPublicStatusSnapshot(
+        JSON.parse(
+          '{"generated_at":"2026-11-08T02:30:00.123456+00:00","ingest":{"ok":true,"last_by_bias":{}},"clustering":{"ok":true,"last_at":"2026-11-08T01:27:04.467008+00:00","queue_depth":0,"queue_oldest_sec":0},"labelling":{"ok":true,"last_at":null,"paused":false},"feeds":{"ok":true,"active":1,"silent":0}}',
+        ),
+      );
+      expect(s?.clustering).toEqual({
+        ok: true,
+        lastAt: "2026-11-08T01:27:04.467008+00:00",
+        queueDepth: 0,
+        queueOldestSec: 0,
+      });
+    });
   });
 });

@@ -7,7 +7,7 @@ import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/db/paging";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isMailConfigured, sendBatch } from "@/lib/email/resend";
 import { siteUrl } from "@/lib/site-url";
-import { getPoliticsClusters } from "@/lib/clusters/politics-query";
+import { getWeeklyDigestClusters } from "@/lib/clusters/politics-query";
 import { nonVotingOutsideZone } from "@/lib/bias/zone-summary";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
 import { getRssSummaryMembers } from "@/lib/clusters/rss-summary-attribution";
@@ -44,13 +44,13 @@ if (process.env.NODE_ENV === "production" && !isMailConfigured()) {
 /**
  * Vercel cron — weekly newsletter digest.
  *
- * Runs Saturday 09:00 TRT (see `vercel.ts`). Picks the top 5 politics
- * clusters by article count and the most lopsided blindspot, renders one
- * HTML email per due subscriber (confirmed, not sent to in the last 6
- * days), and sends the batch via Resend. `last_sent_at` is stamped only
- * for subscribers whose send actually succeeded, so a Resend outage or a
- * missing API key leaves them due again on the next tick instead of
- * silently skipping a week.
+ * Runs Saturday 09:00 TRT (see `vercel.ts`). Picks the
+ * top 5 politics clusters first published in the last 7 days, by article count,
+ * and the most lopsided blindspot, renders one HTML email per due subscriber
+ * (confirmed, not sent to in the last 6 days), and sends the batch via Resend.
+ * `last_sent_at` is stamped only for subscribers whose send actually
+ * succeeded, so a Resend outage or a missing API key leaves them due again on
+ * the next tick instead of silently skipping a week.
  *
  * AUTH: gated by `requireCronBearer` — same fail-closed 503 / 401 contract
  * as `/api/cron/headline`.
@@ -236,14 +236,17 @@ export const GET = withCronOutcome("digest", withApiErrors(async (request: Reque
   // "batch": a weekly job must not abort at the 4 s user-facing reader cap
   // on a cold database -- the 8 s statement_timeout would have let it finish,
   // and a failed run means no mail until next Saturday.
-  const [politicsResult, blindspotResult] = await Promise.all([
-    getPoliticsClusters({ profile: "batch" }),
+  // h71-timebounds-1: the stories come from the trailing week itself
+  // (first_published inside the last 7 days, biggest article_count first), not
+  // from the home feed's pool of the most recently updated clusters, which
+  // reaches back about 25 hours and could never hold Monday's story.
+  const [weekClusters, blindspotResult] = await Promise.all([
+    getWeeklyDigestClusters({ nowMs: Date.now(), profile: "batch" }),
     getBlindspots({ profile: "batch" }),
   ]);
 
-  const topClusterBundles = [...politicsResult.bundles]
-    .sort((a, b) => b.cluster.article_count - a.cluster.article_count)
-    .slice(0, TOP_CLUSTER_COUNT);
+  // Already ordered article_count desc, id asc by the reader: the route only cuts.
+  const topClusterBundles = weekClusters.slice(0, TOP_CLUSTER_COUNT);
 
   const topBlindspotBundle = blindspotResult.bundles[0] ?? null;
 

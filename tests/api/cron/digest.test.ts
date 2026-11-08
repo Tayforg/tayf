@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Mock } from "vitest";
 
@@ -74,28 +77,28 @@ vi.mock("next/server", async (importOriginal) => {
 // Digest content: fixed fixtures. What actually renders into HTML is the
 // template module's job (template.test.ts); this file just needs a
 // non-empty, deterministic payload so buildDigestHtml doesn't throw.
+// h71-timebounds-1: the digest reads the trailing week through
+// getWeeklyDigestClusters (a plain ClusterBundle[] in article_count order),
+// not the home-feed pool; the window itself is covered by
+// src/lib/clusters/politics-query.weekly-digest.test.ts.
 vi.mock("@/lib/clusters/politics-query", () => ({
-  getPoliticsClusters: vi.fn(async () => ({
-    bundles: [
-      {
-        cluster: {
-          id: "c1",
-          title_tr: "Test cluster",
-          summary_tr: "Test summary",
-          bias_distribution: {},
-          is_blindspot: false,
-          blindspot_side: null,
-          article_count: 5,
-          first_published: "2026-01-01T00:00:00Z",
-          updated_at: "2026-01-01T00:00:00Z",
-        },
-        articles: [{}, {}, {}, {}, {}],
-        sources: [],
+  getWeeklyDigestClusters: vi.fn(async () => [
+    {
+      cluster: {
+        id: "c1",
+        title_tr: "Test cluster",
+        summary_tr: "Test summary",
+        bias_distribution: {},
+        is_blindspot: false,
+        blindspot_side: null,
+        article_count: 5,
+        first_published: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
       },
-    ],
-    breakingBundles: [],
-    prefilterCount: 1,
-  })),
+      articles: [{}, {}, {}, {}, {}],
+      sources: [],
+    },
+  ]),
 }));
 
 vi.mock("@/lib/clusters/blindspots-query", () => ({
@@ -424,16 +427,164 @@ describe("GET /api/cron/digest", () => {
     (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
       list.map(() => ({ ok: true, id: "resend-id" })),
     );
-    const { getPoliticsClusters } = await import("@/lib/clusters/politics-query");
+    const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
     const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
-    (getPoliticsClusters as unknown as Mock).mockClear();
+    (getWeeklyDigestClusters as unknown as Mock).mockClear();
     (getBlindspots as unknown as Mock).mockClear();
 
     const mod = await importRoute();
     const res = await mod.GET(req("shhh"));
     expect(res.status).toBe(200);
-    expect(getPoliticsClusters).toHaveBeenCalledWith({ profile: "batch" });
+    expect(getWeeklyDigestClusters).toHaveBeenCalledWith(
+      expect.objectContaining({ profile: "batch" }),
+    );
     expect(getBlindspots).toHaveBeenCalledWith({ profile: "batch" });
+  });
+
+  describe("weekly content window (h71-timebounds-1)", () => {
+    function storyBundle(id: string, title: string, articleCount: number) {
+      return {
+        cluster: {
+          id,
+          title_tr: title,
+          summary_tr: "",
+          bias_distribution: {},
+          is_blindspot: false,
+          blindspot_side: null,
+          article_count: articleCount,
+          first_published: "2026-11-03T10:00:00Z",
+          updated_at: "2026-11-03T10:00:00Z",
+        },
+        articles: Array.from({ length: articleCount }, () => ({})),
+        sources: [],
+      };
+    }
+
+    async function runDigest() {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "never@example.com", unsubscribe_token: "t1", last_sent_at: null },
+      ];
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      return { res, sendBatch: sendBatch as unknown as Mock };
+    }
+
+    it("reads the week once, with the batch profile and the request-time clock as nowMs", async () => {
+      const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
+      (getWeeklyDigestClusters as unknown as Mock).mockClear();
+
+      // Only Date is faked (timers and promises stay real). The route module
+      // loads at T_LOAD and the request lands at T_REQUEST: nowMs must be the
+      // second, i.e. read per request, never captured at module load.
+      const T_LOAD = Date.parse("2026-11-07T05:59:00Z");
+      const T_REQUEST = Date.parse("2026-11-07T06:00:00Z");
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(T_LOAD);
+        process.env.CRON_SECRET = "shhh";
+        supabaseFake.state.subscribers = [
+          { id: "s1", email: "never@example.com", unsubscribe_token: "t1", last_sent_at: null },
+        ];
+        const { sendBatch } = await import("@/lib/email/resend");
+        (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+          list.map(() => ({ ok: true, id: "resend-id" })),
+        );
+        const mod = await importRoute();
+        vi.setSystemTime(T_REQUEST);
+        const res = await mod.GET(req("shhh"));
+        expect(res.status).toBe(200);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(getWeeklyDigestClusters).toHaveBeenCalledTimes(1);
+      expect(getWeeklyDigestClusters).toHaveBeenCalledWith({
+        nowMs: T_REQUEST,
+        profile: "batch",
+      });
+    });
+
+    it("no longer reads the home-feed pool: route.ts never mentions the home fetcher", () => {
+      const src = readFileSync(
+        resolve(dirname(fileURLToPath(import.meta.url)), "../../../src/app/api/cron/digest/route.ts"),
+        "utf8",
+      );
+      expect(src).not.toContain("getPoliticsClusters");
+      expect(src).toContain("getWeeklyDigestClusters");
+    });
+
+    it("renders the first five stories in the reader's order and leaves the sixth out", async () => {
+      const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
+      // Ascending article counts on purpose: a route that re-sorted by count
+      // would reverse this order, and the sixth must still be cut by position.
+      (getWeeklyDigestClusters as unknown as Mock).mockResolvedValueOnce([
+        storyBundle("w1", "Birinci Hikaye", 2),
+        storyBundle("w2", "Ikinci Hikaye", 3),
+        storyBundle("w3", "Ucuncu Hikaye", 4),
+        storyBundle("w4", "Dorduncu Hikaye", 5),
+        storyBundle("w5", "Besinci Hikaye", 6),
+        storyBundle("w6", "Altinci Hikaye", 7),
+      ]);
+
+      const { res, sendBatch } = await runDigest();
+      expect(res.status).toBe(200);
+
+      const html = sendBatch.mock.calls[0]![0][0].html as string;
+      const positions = [
+        "Birinci Hikaye",
+        "Ikinci Hikaye",
+        "Ucuncu Hikaye",
+        "Dorduncu Hikaye",
+        "Besinci Hikaye",
+      ].map((title) => html.indexOf(title));
+      expect(positions.every((p) => p >= 0)).toBe(true);
+      expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+      expect(html).not.toContain("Altinci Hikaye");
+    });
+
+    it("hands getRssSummaryMembers exactly the five clusters it renders", async () => {
+      const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
+      (getWeeklyDigestClusters as unknown as Mock).mockResolvedValueOnce(
+        Array.from({ length: 8 }, (_, i) => storyBundle(`w${i + 1}`, `Hikaye ${i + 1}`, 10 - i)),
+      );
+      const { getRssSummaryMembers } = await import("@/lib/clusters/rss-summary-attribution");
+      (getRssSummaryMembers as unknown as Mock).mockClear();
+
+      await runDigest();
+      expect((getRssSummaryMembers as unknown as Mock).mock.calls[0]![0]).toEqual([
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5",
+      ]);
+    });
+
+    it("an empty week still sends the template's empty-state copy rather than failing", async () => {
+      const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
+      (getWeeklyDigestClusters as unknown as Mock).mockResolvedValueOnce([]);
+
+      const { res, sendBatch } = await runDigest();
+      expect(res.status).toBe(200);
+      const html = sendBatch.mock.calls[0]![0][0].html as string;
+      expect(html).toContain("Bu hafta öne çıkan bir hikâye yok.");
+    });
+
+    it("a failed week read is a 500, never a mail built from nothing", async () => {
+      const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
+      (getWeeklyDigestClusters as unknown as Mock).mockRejectedValueOnce(
+        new Error("[clusters] weekly digest select error: statement timeout"),
+      );
+
+      const { res, sendBatch } = await runDigest();
+      expect(res.status).toBe(500);
+      expect(sendBatch).not.toHaveBeenCalled();
+    });
   });
 
   it("looks up the rights-gated summary members through the uncapped batch profile too", async () => {

@@ -5,10 +5,22 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
 // clock reads: every age is measured against the snapshot's own
 // `generatedAt`, so the same snapshot always renders the same page.
 //
-// The numbers below are the SAME thresholds the ops heartbeat pages on
-// (public.ops_health_report(), migrations 077/103/108), so the public page can
-// never say "fine" while ops says "fail". Comparisons are strict `>` for
-// ages (as in ops) and `>=` for the silent-feed share (as in dead_feeds).
+// The ingest, labelling and feed numbers below are the SAME thresholds the ops
+// heartbeat pages on (public.ops_health_report(), migrations 077/103/108), so
+// the public page can never say "fine" while ops says "fail". Ops has no
+// cluster-FRESHNESS row (a quiet night with nothing to cluster is not a fault),
+// so clustering mirrors ops row 18 `queue_lag` (migrations 150 and 167): the age
+// of the oldest visible cluster_work message (warn > 300 s, fail > 900 s), the
+// queue depth (warn > 300) and the poison count (warn when one or more messages
+// were archived after more than 3 reads; the page counts the last hour, ops the
+// last 24). The age line alone cannot see a consumer that fails every message:
+// it archives each one on its 4th read (about 3-7 min after enqueue), so the
+// oldest visible wait never passes 900 s and the queue stays short; the poison
+// count is what surfaces that outage. The older "minutes since the newest
+// clusters.updated_at" rule (45/90) survives only as the fallback for a database
+// that does not have migration 176 yet.
+// Comparisons are strict `>` for ages (as in ops) and `>=` for the silent-feed
+// share (as in dead_feeds).
 //
 // What the page is allowed to say: the snapshot carries safe aggregates only
 // (timestamps, a bias->timestamp map, counts). `toPublicStatusSnapshot` is an
@@ -32,13 +44,39 @@ export const STATUS_LOOKBACK_HOURS = 6;
 export const STATUS_INGEST_WARN_MIN = 79;
 export const STATUS_INGEST_FAIL_MIN = 158;
 
-/** Clustering freshness, minutes since the newest clusters.updated_at.
+/** FALLBACK clustering rule, used only when the snapshot carries no queue
+ * number (a database before migration 176): minutes since the newest
+ * clusters.updated_at. It cannot tell an idle pipeline from a stuck consumer
+ * (a night with nothing to cluster touches no cluster), which is why 176 added
+ * the queue numbers below.
  * Source: 110 Step 0 (read-only prod, 2026-10-22): max gap between
  * consecutive cluster updates over 7 days = 51 min (10,990 intervals), so
  * fail = max(90, ceil(1.5 x 51) = 77) = 90 and warn = ceil(fail / 2) = 45 (the
  * ops 077 convention: warn is half of fail, floor of 90 min). */
 export const STATUS_CLUSTER_WARN_MIN = 45;
 export const STATUS_CLUSTER_FAIL_MIN = 90;
+
+/** Clustering lag, seconds the oldest VISIBLE cluster_work message has waited
+ * (migration 176 reads it as `clustering.queue_oldest_sec`). Source: ops row 18
+ * `queue_lag`, migration 150: warn when cluster_work's oldest visible message
+ * is over 300 s, fail over 900 s (strict `>`). Measured 2026-11-08 over 48 h
+ * (3,016 messages): wait p95 63.7 s, max 83.4 s, none over 300 s. */
+export const STATUS_CLUSTER_QUEUE_WARN_SEC = 300;
+export const STATUS_CLUSTER_QUEUE_FAIL_SEC = 900;
+
+/** Clustering backlog, messages in cluster_work (`clustering.queue_depth`).
+ * Source: ops row 18 `queue_lag`, migration 150/167: warn when the depth is
+ * over 300 (strict `>`), whatever the wait. It never reaches "sorunlu" on its
+ * own, as in ops (only the wait fails). */
+export const STATUS_CLUSTER_QUEUE_DEPTH_WARN = 300;
+
+/** Clustering poison, messages archived with read_ct > 3 (the consumer's
+ * MAX_READS = 3: it archives a message on its 4th failed read) inside this
+ * window (`clustering.queue_poison_recent`, migration 176 reads
+ * pgmq.a_cluster_work). Source: ops row 18's `q_poison >= 1` warn line,
+ * migration 167, whose window is 24 h; the public page uses 1 h so a recovered
+ * pipeline stops reading amber within the hour. One or more is "gecikmeli". */
+export const STATUS_CLUSTER_POISON_WINDOW_HOURS = 1;
 
 /** Labelling (jev-shadow) freshness, minutes since the last finished run that
  * did work. Source: ops check 5 `jev_shadow_last_run_min` (migration 108:
@@ -73,7 +111,19 @@ export interface PublicStatusSnapshot {
   /** ISO timestamp of the measurement (database clock). */
   generatedAt: string;
   ingest: { ok: boolean; lastByBias: Partial<Record<BiasCategory, string>> };
-  clustering: { ok: boolean; lastAt: string | null };
+  /** `queueDepth` / `queueOldestSec` / `queuePoisonRecent` come from migration
+   * 176 (cluster_work messages, seconds the oldest visible one has waited, and
+   * messages archived as poison in the last hour). They are absent on a pre-176
+   * payload and null when the queue could not be read; null `queueOldestSec`
+   * means "no queue number", and the verdict then falls back to the 45/90
+   * rule. */
+  clustering: {
+    ok: boolean;
+    lastAt: string | null;
+    queueDepth?: number | null;
+    queueOldestSec?: number | null;
+    queuePoisonRecent?: number | null;
+  };
   labelling: { ok: boolean; lastAt: string | null; paused: boolean };
   feeds: { ok: boolean; active: number | null; silent: number | null };
 }
@@ -88,7 +138,18 @@ export interface StatusViewModel {
   generatedAt: string;
   overall: OverallVerdict;
   zones: ZoneStatusRow[];
-  clustering: { level: StatusLevel; ageMin: number | null };
+  /** `ageMin` is the age of the last cluster update (informational once the
+   * queue rule applies). `queueDepth` / `queueOldestSec` are present only when
+   * the level was decided by the queue rule (`queueOldestSec` is then a finite
+   * number >= 0). `queuePoisonRecent` is present only under the queue rule and
+   * only when the snapshot carried a valid count (0 included). */
+  clustering: {
+    level: StatusLevel;
+    ageMin: number | null;
+    queueDepth?: number | null;
+    queueOldestSec?: number;
+    queuePoisonRecent?: number | null;
+  };
   labelling: { level: StatusLevel | "duraklatildi"; ageMin: number | null };
   feeds: { level: StatusLevel; active: number | null; silent: number | null };
 }
@@ -134,6 +195,11 @@ function isCount(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v) && v >= 0;
 }
 
+/** A queue wait in seconds: a finite number >= 0, else null (null for NaN, Infinity, negatives and every non-number). */
+function queueSecondsOrNull(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 function isoOrNull(v: unknown): { ok: true; value: string | null } | { ok: false } {
   if (v === null) return { ok: true, value: null };
   if (isIsoTimestamp(v)) return { ok: true, value: v };
@@ -144,7 +210,12 @@ function isoOrNull(v: unknown): { ok: true; value: string | null } | { ok: false
  * Copies ONLY the known keys of the `public_status_snapshot()` payload.
  * Unknown keys (at any level) are dropped; `last_by_bias` keeps an entry only
  * when its key is a real bias (BIAS_TO_ZONE) and its value is an ISO
- * timestamp. Returns null when the payload is not an object, `generated_at`
+ * timestamp. `clustering.queue_oldest_sec` is kept when it is a finite number
+ * >= 0, `queue_depth` and `queue_poison_recent` when they are non-negative
+ * integers; a present key with anything else becomes null, and a payload with
+ * none of the keys (a database before migration 176) parses to the old shape.
+ * A payload with the two older queue keys but no `queue_poison_recent` parses
+ * without `queuePoisonRecent`. Returns null when the payload is not an object, `generated_at`
  * is not a valid timestamp, or a section is missing or malformed, so the page
  * shows "alınamıyor" instead of guessing a verdict from a broken payload.
  */
@@ -174,6 +245,13 @@ export function toPublicStatusSnapshot(raw: unknown): PublicStatusSnapshot | nul
   if (typeof clusteringRaw.ok !== "boolean") return null;
   const clusterAt = isoOrNull(clusteringRaw.last_at);
   if (!clusterAt.ok) return null;
+  // migration 176: the queue numbers are optional and never make the payload invalid
+  const hasPoisonKey = Object.hasOwn(clusteringRaw, "queue_poison_recent");
+  const hasQueueKeys =
+    Object.hasOwn(clusteringRaw, "queue_depth") || Object.hasOwn(clusteringRaw, "queue_oldest_sec") || hasPoisonKey;
+  const queueDepth = isCount(clusteringRaw.queue_depth) ? clusteringRaw.queue_depth : null;
+  const queueOldestSec = queueSecondsOrNull(clusteringRaw.queue_oldest_sec);
+  const queuePoisonRecent = isCount(clusteringRaw.queue_poison_recent) ? clusteringRaw.queue_poison_recent : null;
 
   // labelling
   if (typeof labellingRaw.ok !== "boolean" || typeof labellingRaw.paused !== "boolean") return null;
@@ -189,7 +267,13 @@ export function toPublicStatusSnapshot(raw: unknown): PublicStatusSnapshot | nul
   return {
     generatedAt: raw.generated_at,
     ingest: { ok: ingestRaw.ok, lastByBias },
-    clustering: { ok: clusteringRaw.ok, lastAt: clusterAt.value },
+    clustering: {
+      ok: clusteringRaw.ok,
+      lastAt: clusterAt.value,
+      ...(hasQueueKeys
+        ? { queueDepth, queueOldestSec, ...(hasPoisonKey ? { queuePoisonRecent } : {}) }
+        : {}),
+    },
     labelling: { ok: labellingRaw.ok, lastAt: labelAt.value, paused: labellingRaw.paused },
     feeds: { ok: feedsRaw.ok, active, silent },
   };
@@ -215,6 +299,17 @@ export function levelForAge(age: number | null, warn: number, fail: number): Sta
   if (age === null) return "sorunlu";
   if (age > fail) return "sorunlu";
   if (age > warn) return "gecikmeli";
+  return "ok";
+}
+
+/** Clustering level from the age in seconds of the oldest visible cluster_work
+ * message (ops row 18 `queue_lag`, migration 150): > 900 s sorunlu, > 300 s
+ * gecikmeli, otherwise ok. Strict `>`, as in ops. An empty queue is 0 s. The
+ * depth and poison lines of the same row are applied on top of this in
+ * buildStatusView (they can only raise ok to gecikmeli). */
+export function clusterQueueLevel(oldestSec: number): StatusLevel {
+  if (oldestSec > STATUS_CLUSTER_QUEUE_FAIL_SEC) return "sorunlu";
+  if (oldestSec > STATUS_CLUSTER_QUEUE_WARN_SEC) return "gecikmeli";
   return "ok";
 }
 
@@ -284,6 +379,29 @@ export function overallVerdict(inputs: VerdictInputs): OverallVerdict {
 // View model
 // ---------------------------------------------------------------------------
 
+/** The clustering view model when a queue wait is known (ops row 18's three lines). */
+function queueClustering(
+  c: PublicStatusSnapshot["clustering"],
+  queueOldestSec: number,
+  ageMin: number | null,
+): StatusViewModel["clustering"] {
+  const queueDepth = isCount(c.queueDepth) ? c.queueDepth : null;
+  const queuePoisonRecent = isCount(c.queuePoisonRecent) ? c.queuePoisonRecent : null;
+  let level = clusterQueueLevel(queueOldestSec);
+  if (level === "ok") {
+    const backlog = queueDepth !== null && queueDepth > STATUS_CLUSTER_QUEUE_DEPTH_WARN;
+    const poisoned = queuePoisonRecent !== null && queuePoisonRecent >= 1;
+    if (backlog || poisoned) level = "gecikmeli";
+  }
+  return {
+    level,
+    ageMin,
+    queueDepth: c.queueDepth ?? null,
+    queueOldestSec,
+    ...(queuePoisonRecent !== null ? { queuePoisonRecent } : {}),
+  };
+}
+
 export function buildStatusView(s: PublicStatusSnapshot): StatusViewModel {
   const ingestAges = zoneIngestAges(s);
   const zones: ZoneStatusRow[] = STATUS_ZONE_ORDER.map((zone) => {
@@ -292,13 +410,25 @@ export function buildStatusView(s: PublicStatusSnapshot): StatusViewModel {
     return { zone, level: levelForAge(ageMin, STATUS_INGEST_WARN_MIN, STATUS_INGEST_FAIL_MIN), ageMin };
   });
 
+  // Clustering: when the snapshot carries the cluster_work queue lag (migration
+  // 176) the level is the queue rule and the age of the last cluster update is
+  // informational only (an idle night leaves it old without any backlog). The
+  // rule is ops row 18: the oldest visible wait decides gecikmeli/sorunlu, and
+  // a depth over 300 or one or more messages archived as poison in the last
+  // hour raise an otherwise-ok level to gecikmeli (a consumer that fails every
+  // message archives each on its 4th read, so the wait alone never shows it).
+  // They never lower sorunlu. With no queue number the old updated_at rule
+  // (45/90) decides, unchanged.
   const clusterAge = s.clustering.ok ? ageMinutes(s.generatedAt, s.clustering.lastAt) : null;
-  const clustering = {
-    level: s.clustering.ok
-      ? levelForAge(clusterAge, STATUS_CLUSTER_WARN_MIN, STATUS_CLUSTER_FAIL_MIN)
-      : ("bilinmiyor" as const),
-    ageMin: clusterAge,
-  };
+  const queueOldestSec = s.clustering.ok ? queueSecondsOrNull(s.clustering.queueOldestSec) : null;
+  const clustering: StatusViewModel["clustering"] = !s.clustering.ok
+    ? { level: "bilinmiyor", ageMin: null }
+    : queueOldestSec !== null
+      ? queueClustering(s.clustering, queueOldestSec, clusterAge)
+      : {
+          level: levelForAge(clusterAge, STATUS_CLUSTER_WARN_MIN, STATUS_CLUSTER_FAIL_MIN),
+          ageMin: clusterAge,
+        };
 
   const labelAge = s.labelling.ok ? ageMinutes(s.generatedAt, s.labelling.lastAt) : null;
   let labelLevel: StatusViewModel["labelling"]["level"];
