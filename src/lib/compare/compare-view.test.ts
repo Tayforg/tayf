@@ -4,6 +4,7 @@ import type {
   ClusterDetail,
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
+import type { WireSignal } from "@/lib/clusters/wire";
 import type { BiasDistribution, Source } from "@/types";
 
 import type { ParsedSide } from "./compare-params";
@@ -71,6 +72,7 @@ function makeDetail(
     merged_into?: string | null;
     members?: ClusterDetailMember[];
     is_blindspot?: boolean;
+    wire?: Partial<WireSignal>;
   } = {},
 ): ClusterDetail {
   const distribution = emptyDistribution();
@@ -101,6 +103,7 @@ function makeDetail(
       isWireRedistribution: false,
       effectiveArticleCount: 7,
       memberCount: members.length,
+      ...overrides.wire,
     },
     blindspotSuppressed: false,
     blindspotRecallVetoed: false,
@@ -186,6 +189,56 @@ describe("toSideState", () => {
     expect(state.view.distribution.pro_government).toBe(2);
     expect(state.view.roster.iktidar).toEqual(["Alfa"]);
     expect(state.view.nonVoting).toEqual([]);
+    expect(state.view.nonVotingZones).toEqual([]);
+    expect(state.view.wire).toEqual({ isWire: false, memberCount: 1, uniqueTexts: 7 });
+  });
+
+  it("carries the zones of the non-voting members through to the view", () => {
+    const state = toSideState(ID_SIDE, {
+      status: "fulfilled",
+      value: makeDetail({
+        members: [
+          makeMember(makeSource("gov", "Hükümet", "pro_government")),
+          makeMember(makeSource("nic", "Niş Merkez", "center", "niche")),
+        ],
+      }),
+    });
+    expect(state.kind).toBe("ok");
+    if (state.kind !== "ok") return;
+    expect(state.view.roster.bagimsiz).toEqual([]);
+    expect(state.view.nonVoting).toEqual(["Niş Merkez"]);
+    expect(state.view.nonVotingZones).toEqual(["bagimsiz"]);
+  });
+
+  it("exposes the wire signal without changing the source count", () => {
+    const state = toSideState(ID_SIDE, {
+      status: "fulfilled",
+      value: makeDetail({
+        members: [
+          makeMember(makeSource("a", "Anadolu", "state_media", "wire"), 1),
+          makeMember(makeSource("e", "Elips", "pro_government"), 2),
+          makeMember(makeSource("m", "Milat", "pro_government"), 3),
+        ],
+        wire: { isWireRedistribution: true, memberCount: 3, effectiveArticleCount: 1 },
+      }),
+    });
+    expect(state.kind).toBe("ok");
+    if (state.kind !== "ok") return;
+    expect(state.view.wire).toEqual({ isWire: true, memberCount: 3, uniqueTexts: 1 });
+    expect(state.view.sourceCount).toBe(1);
+  });
+
+  it("exposes a several-texts wire cluster (4 members, 2 texts)", () => {
+    const state = toSideState(ID_SIDE, {
+      status: "fulfilled",
+      value: makeDetail({
+        wire: { isWireRedistribution: true, memberCount: 4, effectiveArticleCount: 2 },
+      }),
+    });
+    expect(state.kind).toBe("ok");
+    if (state.kind !== "ok") return;
+    expect(state.view.wire).toEqual({ isWire: true, memberCount: 4, uniqueTexts: 2 });
+    expect(state.view.sourceCount).toBe(2);
   });
 });
 
@@ -243,6 +296,60 @@ describe("rosterByZone", () => {
     expect(rosterByZone([makeMember(agg, 1), makeMember(agg, 2)]).nonVoting).toEqual([
       "Toplayıcı",
     ]);
+  });
+
+  it("lists the zone of a niche member next to voting members of other zones", () => {
+    const { roster, nonVoting, nonVotingZones } = rosterByZone([
+      makeMember(makeSource("gov", "Hükümet Gazetesi", "pro_government")),
+      makeMember(makeSource("nic", "Niş Merkez", "center", "niche")),
+    ]);
+    expect(roster.bagimsiz).toEqual([]);
+    expect(nonVoting).toEqual(["Niş Merkez"]);
+    expect(nonVotingZones).toEqual(["bagimsiz"]);
+  });
+
+  it("returns no non-voting zones when no member is non-voting", () => {
+    expect(
+      rosterByZone([
+        makeMember(makeSource("gov", "Hükümet Gazetesi", "pro_government")),
+        makeMember(makeSource("ctr", "Merkez Haber", "center")),
+      ]).nonVotingZones,
+    ).toEqual([]);
+    expect(rosterByZone([]).nonVotingZones).toEqual([]);
+  });
+
+  it("dedupes non-voting zones and orders them iktidar, bagimsiz, muhalefet", () => {
+    const { nonVotingZones } = rosterByZone([
+      makeMember(makeSource("n1", "Niş Bir", "center", "niche")),
+      makeMember(makeSource("agg", "Toplayıcı", "gov_leaning", "aggregator")),
+      makeMember(makeSource("n2", "Niş İki", "center", "niche")),
+    ]);
+    expect(nonVotingZones).toEqual(["iktidar", "bagimsiz"]);
+  });
+
+  it("orders all three zones regardless of member order", () => {
+    const { nonVotingZones } = rosterByZone([
+      makeMember(makeSource("n3", "Niş Muhalif", "opposition", "niche")),
+      makeMember(makeSource("n2", "Niş Merkez", "center", "niche")),
+      makeMember(makeSource("n1", "Niş İktidar", "pro_government", "niche")),
+    ]);
+    expect(nonVotingZones).toEqual(["iktidar", "bagimsiz", "muhalefet"]);
+  });
+
+  it("still lists a zone that also has a voting member (the page only reads it for empty zones)", () => {
+    const { roster, nonVotingZones } = rosterByZone([
+      makeMember(makeSource("ctr", "Merkez Haber", "center")),
+      makeMember(makeSource("nic", "Niş Merkez", "center", "niche")),
+    ]);
+    expect(roster.bagimsiz).toEqual(["Merkez Haber"]);
+    expect(nonVotingZones).toEqual(["bagimsiz"]);
+  });
+
+  it("maps a non-voting member to its zone through zoneOf (international is bagimsiz)", () => {
+    expect(
+      rosterByZone([makeMember(makeSource("n", "Niş Dış", "international", "niche"))])
+        .nonVotingZones,
+    ).toEqual(["bagimsiz"]);
   });
 
   it("sorts names with Turkish collation", () => {

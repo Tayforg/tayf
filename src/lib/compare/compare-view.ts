@@ -12,6 +12,14 @@ import type { BiasDistribution, MediaDnaZone } from "@/types";
 
 import { COMPARE_UUID_RE, type ParsedSide } from "./compare-params";
 
+/** The wire facts the cluster page prints as its violet badge. */
+export interface SideWire {
+  isWire: boolean;
+  memberCount: number;
+  /** Distinct texts: the cluster's `effectiveArticleCount`. */
+  uniqueTexts: number;
+}
+
 export interface SideView {
   id: string;
   title: string;
@@ -21,6 +29,13 @@ export interface SideView {
   firstPublished: string;
   roster: Record<MediaDnaZone, string[]>;
   nonVoting: string[];
+  /**
+   * Zones a toplayıcı / niş member sits in, deduped, in ZONES order. Words
+   * only: an empty roster reads "no source the spectrum counts" for these
+   * instead of "no source" (h78-compare-1).
+   */
+  nonVotingZones: MediaDnaZone[];
+  wire: SideWire;
 }
 
 export type SideState =
@@ -31,6 +46,8 @@ export type SideState =
   | { kind: "unavailable" }
   | { kind: "merged"; survivorId: string }
   | { kind: "ok"; view: SideView };
+
+const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
 function sortedNames(names: Iterable<string>): string[] {
   return Array.from(names).sort((x, y) => x.localeCompare(y, "tr"));
@@ -51,10 +68,16 @@ function uniqueNames(
  * Voting sources grouped by Medya DNA zone (via `zoneOf(source.bias)`, not a
  * second bias-to-zone mapping), plus the toplayıcı / niş names that never
  * vote. Both lists are deduped by slug and sorted with Turkish collation.
+ * `nonVotingZones` is the same fact as the cluster page's set: the zones those
+ * non-voting members belong to, in ZONES order.
  */
 export function rosterByZone(
   members: readonly Pick<ClusterDetailMember, "source">[],
-): { roster: Record<MediaDnaZone, string[]>; nonVoting: string[] } {
+): {
+  roster: Record<MediaDnaZone, string[]>;
+  nonVoting: string[];
+  nonVotingZones: MediaDnaZone[];
+} {
   const { voting, nonVoting } = partitionByVote(members);
 
   const byZone: Record<MediaDnaZone, Map<string, string>> = {
@@ -69,6 +92,10 @@ export function rosterByZone(
     }
   }
 
+  const nonVotingZoneSet = new Set<MediaDnaZone>(
+    nonVoting.map((m) => zoneOf(m.source.bias)),
+  );
+
   return {
     roster: {
       iktidar: sortedNames(byZone.iktidar.values()),
@@ -76,6 +103,7 @@ export function rosterByZone(
       muhalefet: sortedNames(byZone.muhalefet.values()),
     },
     nonVoting: uniqueNames(nonVoting),
+    nonVotingZones: ZONES.filter((zone) => nonVotingZoneSet.has(zone)),
   };
 }
 
@@ -99,7 +127,7 @@ export function toSideState(
       : { kind: "not_found" };
   }
 
-  const { roster, nonVoting } = rosterByZone(members);
+  const { roster, nonVoting, nonVotingZones } = rosterByZone(members);
   return {
     kind: "ok",
     view: {
@@ -111,6 +139,12 @@ export function toSideState(
       firstPublished: cluster.first_published,
       roster,
       nonVoting,
+      nonVotingZones,
+      wire: {
+        isWire: wire.isWireRedistribution,
+        memberCount: wire.memberCount,
+        uniqueTexts: wire.effectiveArticleCount,
+      },
     },
   };
 }
