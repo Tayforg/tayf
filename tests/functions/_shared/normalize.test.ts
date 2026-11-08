@@ -575,6 +575,94 @@ describe("normalize.ts db-4 ingest half: placeholder images are never stored as 
   });
 });
 
+// h73-ingestquality-1 (2026-11-08): five more stand-ins found in the trailing
+// 7 days of prod rows (aksam t25_ thumbnail 15 titles, star on
+// imgs.stargazete.com 15, cumhuriyet noimage 9, haberler-com son-dakika_sd 4,
+// ilke-tv default-1 2). The item is stored with a NULL image_url, which is what
+// queues the og:image backfill. Controls are real photos from the same replay.
+describe("normalize.ts h73-ingestquality-1: five more placeholder stand-ins are dropped at ingest", () => {
+  const STAND_INS: ReadonlyArray<readonly [string, string]> = [
+    ["aksam t25_", "https://img3.aksam.com.tr/imgsdisk/2026/01/01/t25_210220191220255418101.jpg"],
+    [
+      "star imgs.stargazete.com",
+      "https://imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg",
+    ],
+    ["cumhuriyet noimage", "https://media.cumhuriyet.com.tr/cumhuriyet-noimage.jpg"],
+    ["haberler-com son-dakika_sd", "https://foto.sondakika.com/crop/1210x0/haber/2026/07/03/son-dakika_sd.jpg"],
+    ["ilke-tv default-1", "https://ilketv.com.tr/wp-content/uploads/2024/06/ilketv-default-1.jpg"],
+  ];
+  const REAL_PHOTO = "https://cdn.test/photos/2026/11/08/real-photo.jpg";
+
+  it.each(STAND_INS)("returns null image_url when the only enclosure is the %s stand-in", (_label, url) => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/h73-enc",
+      enclosure: { url, type: "image/jpeg" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it.each(STAND_INS)("returns null image_url when the only media:content is the %s stand-in", (_label, url) => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/h73-media",
+      mediaContent: { $: { url } },
+    });
+    expect(row!.image_url).toBeNull();
+  });
+
+  it.each(STAND_INS)("returns null image_url when the only itemImage is the %s stand-in", (_label, url) => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/h73-item",
+      itemImage: url,
+    });
+    expect(row!.image_url).toBeNull();
+  });
+
+  it.each(STAND_INS)("skips the %s stand-in enclosure and uses a real media:thumbnail", (_label, url) => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/h73-fall",
+      enclosure: { url, type: "image/jpeg" },
+      mediaThumbnail: { $: { url: REAL_PHOTO } },
+    });
+    expect(row!.image_url).toBe(REAL_PHOTO);
+  });
+
+  it("returns null when an item carries every stand-in at once", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/h73-all",
+      enclosure: { url: STAND_INS[0]![1] },
+      mediaContent: { $: { url: STAND_INS[2]![1] } },
+      mediaThumbnail: { $: { url: STAND_INS[3]![1] } },
+      itemImage: STAND_INS[4]![1],
+      content: `<img src="${STAND_INS[1]![1]}">`,
+    });
+    expect(row!.image_url).toBeNull();
+  });
+
+  it.each([
+    ["aksam", "https://img3.aksam.com.tr/imgsdisk/2026/11/08/yunanistanin-plani-ankara-519_2.jpg"],
+    ["star", "https://imgs.stargazete.com/imgsdisk/2026/11/08/bddk-3-daire-baskani-bila-480_2-41.jpg"],
+    ["cumhuriyet", "https://media.cumhuriyet.com.tr/Archive/ffc7daff-7ab5-4b0f-afe6-974d2559a31e.jpg"],
+    [
+      "haberler-com",
+      "https://foto.sondakika.com/crop/1210x0/haber/2026/11/06/1-lig-in-14-haftasinda-antalyaspor-sahasinda-2-20403402_sd.jpg",
+    ],
+    ["ilke-tv", "https://ilketv.com.tr/wp-content/uploads/2026/11/yildiz-cakar.jpg"],
+  ])("keeps a real %s photo as the stored image_url", (_label, url) => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/h73-real",
+      enclosure: { url, type: "image/jpeg" },
+    });
+    expect(row!.image_url).toBe(url);
+  });
+});
+
 describe("normalize.ts ingest-hygiene: legal-notice filter", () => {
   it("returns null for a court notice title", () => {
     const row = mod!.normalizeItem(source, {

@@ -85,7 +85,7 @@ export function NavLinksView({
       >
         <Telescope className="h-3.5 w-3.5" />
         <span className="sr-only sm:hidden">Haberler</span>
-        <span className="hidden sm:inline">Haberler</span>
+        <span className="hidden sm:inline whitespace-nowrap">Haberler</span>
       </Link>
       <span aria-hidden="true" className="h-3 mx-0.5 shrink-0 bg-border" />
       <Link
@@ -95,7 +95,7 @@ export function NavLinksView({
       >
         <Eye className="h-3.5 w-3.5" />
         <span className="sr-only sm:hidden">Kör noktalar</span>
-        <span className="hidden sm:inline">Kör noktalar</span>
+        <span className="hidden sm:inline whitespace-nowrap">Kör noktalar</span>
       </Link>
       <span aria-hidden="true" className="h-3 mx-0.5 shrink-0 bg-border" />
       <Link
@@ -105,7 +105,7 @@ export function NavLinksView({
       >
         <TrendingUp className="h-3.5 w-3.5" />
         <span className="sr-only sm:hidden">Ekonomi</span>
-        <span className="hidden sm:inline">Ekonomi</span>
+        <span className="hidden sm:inline whitespace-nowrap">Ekonomi</span>
       </Link>
       <span aria-hidden="true" className="h-3 mx-0.5 shrink-0 bg-border" />
       <Link
@@ -115,7 +115,7 @@ export function NavLinksView({
       >
         <Bookmark className="h-3.5 w-3.5" />
         <span className="sr-only sm:hidden">Kaydedilenler</span>
-        <span className="hidden sm:inline">Kaydedilenler</span>
+        <span className="hidden sm:inline whitespace-nowrap">Kaydedilenler</span>
       </Link>
       {showAdmin && (
         <>

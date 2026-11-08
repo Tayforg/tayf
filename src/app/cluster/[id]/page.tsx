@@ -767,13 +767,23 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       <StaleCopyNotice renderedAtMs={renderNowMs} />
 
       {/* Hero — the cluster's "real" hero (R4 audit #4). Image on the left
-          (or banner on mobile), title + meta + spectrum on the right. The
+          (or banner below md), title + meta + spectrum on the right. The
           image reuses ClusterCardImage at a larger fixed size; the meta row
           repeats the home-card pattern (time-ago • source count • blindspot
-          pill) so context carries over from the list. */}
+          pill) so context carries over from the list.
+          h73-breakpoints-1: the row stays stacked below md (768 px) and goes
+          side by side from md, with a 288 px photo column (md:w-72) that grows
+          to 384 px from lg (lg:w-96). From sm it used to be 384 px, which left
+          the headline a 174-234 px column at 640-767 px. The photo box stays
+          4:3 like the width=768/height=576 props (288x216 at md via md:h-54,
+          384x288 from lg via lg:h-72), so a 4:3 photo is painted at exactly
+          the column width the `sizes` slot declares; a square 288x288 md box
+          would paint it 384 px wide and the 288 px slot would upscale it.
+          CLUSTER_HERO_SIZES (cluster-card.tsx) and the loading skeleton follow
+          the same switch. */}
       <section className="rounded-xl border border-border/60 bg-card/40 overflow-hidden">
-        <div className="flex flex-col sm:flex-row">
-          <div className="sm:shrink-0 w-full sm:w-96">
+        <div className="flex flex-col md:flex-row">
+          <div className="w-full md:w-72 md:shrink-0 lg:w-96">
             {/* Credit line (deck TOP-3 / quick win): rendered by
                 ClusterCardImage itself, keyed off the same `idx`/
                 `candidates[idx]` state that drives the visible image (see
@@ -814,7 +824,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               minIntrinsicWidth={320}
               priority
               fetchPriority="high"
-              className="h-44 sm:h-72 w-full object-cover"
+              className="h-44 sm:h-60 md:h-54 lg:h-72 w-full object-cover"
             />
           </div>
 

@@ -11,7 +11,7 @@ export default function SourcesLoading() {
       {Array.from({ length: 3 }, (_, i) => (
         <div key={i} className="space-y-3">
           <div className="h-6 w-40 rounded bg-muted/60 animate-pulse" />
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
             {Array.from({ length: 4 }, (_, j) => (
               <div
                 key={j}

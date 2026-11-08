@@ -605,7 +605,7 @@ function stripComments(source: string): string {
 const here = dirname(fileURLToPath(import.meta.url));
 const PAGE_SOURCE = readFileSync(resolve(here, "page.tsx"), "utf8");
 const DIRECTORY_GRID_CLASSES =
-  "grid grid-cols-1 min-[480px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3";
+  "grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3";
 
 describe("/sources page — Suspense fallback is a light skeleton", () => {
   it("has exactly one Suspense; its fallback is the skeleton and its child still streams the counted directory", async () => {

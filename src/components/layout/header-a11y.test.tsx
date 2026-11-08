@@ -334,7 +334,9 @@ describe("Header — decorative dividers are hidden from assistive tech (h67-lan
   // mode. They are kept (their margin sets the spacing) but are aria-hidden
   // decoration, with the same literal classes, so the layout does not move.
   const NAV_DIVIDER_CLASS = "h-3 mx-0.5 shrink-0 bg-border";
-  const LOGO_DIVIDER_CLASS = "h-3.5 mx-0 hidden sm:block shrink-0 bg-border/40";
+  // `md:` since h73-breakpoints-2: the tagline beside it moved to md so the nav
+  // fits on one line from 640 px (tests/guards/header-nowrap.test.ts).
+  const LOGO_DIVIDER_CLASS = "h-3.5 mx-0 hidden md:block shrink-0 bg-border/40";
 
   /** Attribute strings of every empty <span> in the markup that carries `cls` as its class attribute. */
   const dividerAttrs = (markup: string, cls: string): string[] =>
@@ -383,7 +385,7 @@ describe("Header — decorative dividers are hidden from assistive tech (h67-lan
     expect(dividerAttrs(markup, NAV_DIVIDER_CLASS)).toHaveLength(3);
   });
 
-  it("hides the divider inside the logo link, keeping the sm+ divider classes and the two text spans", () => {
+  it("hides the divider inside the logo link, keeping the md+ divider classes and the two text spans", () => {
     const logo = findByHref(Header(), "/");
     expect(logo).toBeDefined();
 
