@@ -2,7 +2,9 @@
 
 import { useEffect } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { AlertTriangle } from "lucide-react";
+import { StoredCopyLink } from "@/components/pwa/stored-copy-link";
 import { RetryButton } from "@/components/ui/retry-button";
 
 export default function ClusterError({
@@ -17,6 +19,11 @@ export default function ClusterError({
   useEffect(() => {
     console.error("[cluster-error]", error);
   }, [error]);
+
+  // This boundary is the only place that sees a database brownout (the route sends its 200 before the read),
+  // so it is also where a copy stored on this device is offered.
+  const rawId = useParams<{ id?: string | string[] }>()?.id;
+  const clusterId = Array.isArray(rawId) ? rawId[0] : rawId;
 
   return (
     <div
@@ -47,6 +54,7 @@ export default function ClusterError({
             Tüm haberler
           </Link>
         </div>
+        {clusterId ? <StoredCopyLink clusterId={clusterId} /> : null}
       </div>
     </div>
   );

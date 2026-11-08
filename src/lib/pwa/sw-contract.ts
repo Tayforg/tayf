@@ -8,7 +8,7 @@
 // The worker never claims clients, so a first visit stays uncontrolled until its next navigation.
 export const SW_URL = "/sw.js";
 export const SW_SCOPE = "/";
-export const SW_VERSION = "v2";
+export const SW_VERSION = "v3";
 // How long the page waits for registration.active on an uncontrolled first visit (ready never settles without a registration).
 export const SW_READY_TIMEOUT_MS = 10_000;
 export const SW_KILL: boolean = false;
@@ -19,8 +19,17 @@ export const CACHE_NAMES = {
   pages: `tayf-pages-${SW_VERSION}`,
   shell: `tayf-shell-${SW_VERSION}`,
   saved: "tayf-saved-v1", // own format version: survives SW_VERSION bumps so pins are not wiped
+  savedAssets: "tayf-saved-assets-v1", // static files the pinned pages reference; same durability as saved, so also unversioned
   meta: `tayf-meta-${SW_VERSION}`, // "could not pin" markers (key = cluster url, value = cached-at stamp only)
+  // One-shot "the reader clicked Kayıtlı kopyayı aç" marks. Key = normalized cluster url; value = empty body plus
+  // HEADER_CACHED_AT. Written by the same-origin error boundary (markStoredCopyOpen), taken (deleted) by the worker
+  // on the first ?kopya=1 navigation. Being in CACHE_NAMES it survives activate; a version bump just drops stale marks.
+  openCopy: `tayf-open-copy-${SW_VERSION}`,
 } as const;
+// Query parameter of the "open the copy stored on this device" link the cluster error boundary renders
+// (/cluster/<id>?kopya=1). Only a navigation carrying it AND a fresh one-shot mark (CACHE_NAMES.openCopy) is answered
+// from Cache Storage before the network; a reload, Back/Forward or a link from another site takes the usual path.
+export const STORED_COPY_PARAM = "kopya";
 export const HEADER_CACHED_AT = "x-tayf-cached-at";
 export const HEADER_TITLE = "x-tayf-title"; // encodeURIComponent(title)
 export const SYNC_MAX_IDS = 500;

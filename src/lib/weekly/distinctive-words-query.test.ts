@@ -762,7 +762,9 @@ describe("fetchWeeklyDistinctiveWords: precomputed sample table", () => {
 // migration 143, and both read paths must return the same thing.
 // ---------------------------------------------------------------------------
 
-describe("fetchWeeklyDistinctiveWords: output parity with the pure builder", () => {
+// The 350-row-per-zone-day fixture is fixed CPU work (0.6-1.0 s per parity test alone), and testTimeout is
+// wall clock: 60 s keeps the slack on a busy machine. ROWS_PER_ZONE_PER_DAY must stay above the 300-row cap.
+describe("fetchWeeklyDistinctiveWords: output parity with the pure builder", { timeout: 60_000 }, () => {
   const DAY_MS = 24 * 60 * 60 * 1000;
   const NOW_MS = Date.parse("2026-11-01T12:00:00.000Z");
   const DAY_KEYS = istanbulDayKeys(NOW_MS, WEEKLY_WORDS_DAYS);

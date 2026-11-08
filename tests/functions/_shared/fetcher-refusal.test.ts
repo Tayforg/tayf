@@ -435,8 +435,10 @@ describe("markup cannot hide a DOCTYPE entity from the refusal", () => {
     expect(() => parseFeed(xml)).toThrow(/DOCTYPE entity declarations/);
   });
 
-  it("agrees with the real parser on 30,000 random markup mixes", () => {
-    const next = makeRng(0x2f6e2b1);
+  // 30,000 mixes in 6 chunks of 5,000 (about 220 ms each): testTimeout is wall clock, so one 1.3 s test had
+  // 7.5x slack and timed out on a busy machine. Chunk 0 replays the first 5,000 mixes of the old single test.
+  it.each([0, 1, 2, 3, 4, 5])("agrees with the real parser on 5,000 random markup mixes (chunk %i of 6)", (chunk) => {
+    const next = makeRng((0x2f6e2b1 + chunk * 0x9e3779b1) >>> 0);
     const tokens = [
       "<![CDATA[",
       "]]>",
@@ -477,7 +479,7 @@ describe("markup cannot hide a DOCTYPE entity from the refusal", () => {
       '<!X a="',
     ];
     let expanded = 0;
-    for (let n = 0; n < 30_000; n++) {
+    for (let n = 0; n < 5_000; n++) {
       const parts: string[] = ["<rss>"];
       const count = 3 + next(10);
       for (let k = 0; k < count; k++) parts.push(tokens[next(tokens.length)] as string);
@@ -488,8 +490,9 @@ describe("markup cannot hide a DOCTYPE entity from the refusal", () => {
       expect(hasDeclaredEntity(xml), `document ${n} expands an entity but was not refused: ${xml}`).toBe(true);
       expect(() => parseFeed(xml)).toThrow(/DOCTYPE entity declarations/);
     }
-    // The property is not vacuous: plenty of the mixes really expand.
-    expect(expanded).toBeGreaterThan(100);
+    // The property is not vacuous: plenty of the mixes really expand. The seeds are fixed, so each chunk's
+    // count is too: 34, 35, 35, 24, 23, 26 (smallest 23); the floor is half of the smallest, rounded down.
+    expect(expanded).toBeGreaterThan(11);
   });
 });
 
@@ -538,8 +541,8 @@ describe("a DOCTYPE head cannot steer the scan past the real declaration", () =>
     expect(parseFeed(`<?xml version="1.0"?>${doctype}<rss><channel><item><title>x</title></item></channel></rss>`)).toHaveLength(1);
   });
 
-  it("agrees with the real parser on 100,000 random DOCTYPE shapes", () => {
-    const next = makeRng(0x51ed270b);
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])("agrees with the real parser on 10,000 random DOCTYPE shapes (chunk %i of 10)", (chunk) => {
+    const next = makeRng((0x51ed270b + chunk * 0x9e3779b1) >>> 0);
     const pick = (list: string[]): string => list[next(list.length)] as string;
     // <!DOCTYPE head [ subset ]> where every part is chosen to confuse a scan
     // that reads the head differently from the parser's DOCTYPE reader.
@@ -555,7 +558,7 @@ describe("a DOCTYPE head cannot steer the scan past the real declaration", () =>
       }
     };
     let expanded = 0;
-    for (let n = 0; n < 100_000; n++) {
+    for (let n = 0; n < 10_000; n++) {
       const parts: string[] = ["<rss>", pick(openers)];
       for (let k = next(4); k > 0; k--) parts.push(pick(headParts));
       if (next(5) > 0) parts.push("[");
@@ -566,10 +569,11 @@ describe("a DOCTYPE head cannot steer the scan past the real declaration", () =>
       expanded++;
       expect(hasDeclaredEntity(xml), `document ${n} expands an entity but was not refused: ${xml}`).toBe(true);
     }
-    // The property is not vacuous: plenty of the shapes really expand.
-    expect(expanded).toBeGreaterThan(500);
-    // 100,000 documents through the real parser: pure CPU, ~1-2 s alone and several times that on a
-    // busy machine, so this one test gets a 30 s timeout instead of the global 10 s.
+    // The property is not vacuous: plenty of the shapes really expand. The seeds are fixed, so each chunk's
+    // count is too: 329, 320, 350, 325, 351, 362, 329, 335, 356, 334 (smallest 320); the floor is half of it.
+    expect(expanded).toBeGreaterThan(160);
+    // 10,000 documents through the real parser: pure CPU, about 300 ms alone and several times that on a
+    // busy machine. 100,000 documents run as 10 chunks, each with its own 30 s wall-clock timeout.
   }, 30_000);
 });
 

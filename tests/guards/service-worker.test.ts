@@ -164,6 +164,9 @@ describe("contract", () => {
     expect(CACHE_NAMES.shell).toContain(SW_VERSION);
     expect(CACHE_NAMES.meta).toContain(SW_VERSION); // failure markers reset on a version bump
     expect(CACHE_NAMES.saved).toBe("tayf-saved-v1");
+    // h69-pwa-3: the static files of pinned pages are as durable as the pins, so a version bump must not wipe them.
+    expect(CACHE_NAMES.savedAssets).toBe("tayf-saved-assets-v1");
+    expect(CACHE_NAMES.savedAssets).not.toContain(SW_VERSION);
   });
 
   it("sw-contract.ts and sw-policy.ts stay client-safe (no framework or server imports)", () => {

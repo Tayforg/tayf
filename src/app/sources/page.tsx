@@ -135,12 +135,15 @@ function emptyGrouped(): GroupedSources {
 /**
  * When the source registry last changed: the latest of the given timestamps,
  * as an ISO string. Callers pass every active source's `created_at` and
- * `zone_rationale_at` plus the newest `source_zone_history.changed_at` (that
+ * `zone_rationale_at`, the newest `source_zone_history.changed_at` (that
  * table is append-only, one origin row per source plus one per bias change —
- * migration 055 — so it is what captures a changed label; `sources` itself has
- * no updated_at). Null, undefined and unparseable values are skipped; null
- * when nothing usable is left. Pure: it never reads the clock, so the same
- * rows give the same answer however often the cache is refilled.
+ * migration 055 — so it is what captures a changed label) and the newest
+ * `sources.registry_changed_at` (migration 175: a trigger stamps it when a
+ * registry column changes — kind, kayyum status, rights flags, name, URL,
+ * active ... — which none of the other inputs record; ingest's `fetch_*`
+ * writes never move it). Null, undefined and unparseable values are skipped;
+ * null when nothing usable is left. Pure: it never reads the clock, so the
+ * same rows give the same answer however often the cache is refilled.
  */
 export function registryModifiedAt(
   values: ReadonlyArray<string | null | undefined>,
@@ -240,9 +243,10 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
     Date.now() - 7 * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  // The newest zone-history row rides along in parallel: one row of a tiny
-  // append-only table, so it adds no round-trip of its own.
-  const [{ data, error }, history] = await Promise.all([
+  // The newest zone-history row and the newest registry stamp ride along in
+  // parallel: one row each (a tiny append-only table, and a 144-row sort), so
+  // they add no round-trip of their own.
+  const [{ data, error }, history, registryChange] = await Promise.all([
     supabase
       .from("sources")
       .select(
@@ -257,6 +261,15 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
       .from("source_zone_history")
       .select("changed_at")
       .order("changed_at", { ascending: false })
+      .limit(1),
+    // h69-jsonld-1: the newest sources.registry_changed_at (migration 175).
+    // NOT filtered by `active`: deactivating a source is a registry change,
+    // and the directory read above lists active sources only, so a stamp read
+    // from its rows would miss it.
+    supabase
+      .from("sources")
+      .select("registry_changed_at")
+      .order("registry_changed_at", { ascending: false })
       .limit(1),
   ]);
 
@@ -274,18 +287,28 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
   const sourceRows = (data ?? []) as unknown as Row[];
 
   // dateModified: the latest of every active row's created_at and
-  // zone_rationale_at and the newest zone-history change. An unreadable history
-  // is NOT fatal (the directory is still worth rendering) but it does void the
-  // value: a max over the rows alone would understate the change time, and a
-  // too-early date is worse than none.
+  // zone_rationale_at, the newest zone-history change and the newest
+  // registry_changed_at (the only input that sees a changed kind, kayyum
+  // status, rights flag, name, URL or active flag). An unreadable history or
+  // registry stamp is NOT fatal (the directory is still worth rendering) but
+  // it does void the value: a max over the remaining inputs would understate
+  // the change time, and a too-early date is worse than none.
   let registryModifiedIso: string | null = null;
   if (history.error) {
     console.warn(`[sources] zone history unreadable: ${history.error.message}`);
-  } else {
+  }
+  if (registryChange.error) {
+    console.warn(
+      `[sources] registry change stamp unreadable: ${registryChange.error.message}`,
+    );
+  }
+  if (!history.error && !registryChange.error) {
     registryModifiedIso = registryModifiedAt([
       ...sourceRows.map((row) => row.created_at),
       ...sourceRows.map((row) => row.zone_rationale_at),
       (history.data as Array<{ changed_at: string | null }> | null)?.[0]?.changed_at,
+      (registryChange.data as Array<{ registry_changed_at: string | null }> | null)?.[0]
+        ?.registry_changed_at,
     ]);
   }
 

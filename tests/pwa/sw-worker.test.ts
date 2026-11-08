@@ -8,6 +8,7 @@ import {
   CACHE_NAMES,
   HEADER_CACHED_AT,
   HEADER_TITLE,
+  STORED_COPY_PARAM,
   SYNC_MAX_IDS,
   clusterPath,
 } from "@/lib/pwa/sw-contract";
@@ -200,6 +201,19 @@ describe("runtime parity with sw-policy.ts", () => {
     }
   });
 
+  it("wantsStoredCopy", () => {
+    for (const u of [
+      `${urlOf(ID)}?kopya=1`, `${urlOf(ID.toUpperCase())}?kopya=1`, `${urlOf(ID)}?utm=1&kopya=1`,
+      `${urlOf(ID)}?kopya=1#x`, `${urlOf(ID)}/?kopya=1`, urlOf(ID), `${urlOf(ID)}?`, `${urlOf(ID)}?kopya=0`,
+      `${urlOf(ID)}?kopya=`, `${urlOf(ID)}?kopya`, `${urlOf(ID)}?kopya=0&kopya=1`, `${urlOf(ID)}?KOPYA=1`,
+      `${urlOf(ID)}#kopya=1`, `${ORIGIN}/?kopya=1`, `${ORIGIN}/offline?kopya=1`, `${urlOf(ID)}/kart?kopya=1`,
+      `${ORIGIN}/cluster/nope?kopya=1`, `https://evil.test/cluster/${ID}?kopya=1`, "garbage?kopya=1", "",
+    ]) {
+      expect(call("wantsStoredCopy", u, ORIGIN), u).toBe(twin(policy.wantsStoredCopy, u, ORIGIN));
+    }
+    expect(call("wantsStoredCopy", `${urlOf(ID)}?kopya=1`, "https://other.test")).toBe(false);
+  });
+
   it("isCacheableResponse", () => {
     const targets = ["static", "page", "shell"] as const;
     const urls = [
@@ -332,6 +346,7 @@ describe("runtime parity with sw-policy.ts", () => {
     expect(w.evaluate("CONTRACT.headerTitle")).toBe(HEADER_TITLE);
     expect(w.evaluate("JSON.parse(JSON.stringify(CONTRACT.copiedHeaders))")).toEqual([...policy.COPIED_PAGE_HEADERS]);
     expect(w.evaluate("CONTRACT.fallbackTitle")).toBe(policy.FALLBACK_TITLE);
+    expect(w.evaluate("CONTRACT.storedCopyParam")).toBe(STORED_COPY_PARAM);
     expect(w.evaluate("CONFIG.syncMaxIds")).toBe(SYNC_MAX_IDS);
   });
 
@@ -682,6 +697,331 @@ describe("navigation: allowlisted cluster pages", () => {
     expect(await bodyOf(await w.dispatchFetch(nav()).responded)).toBe("PINNED-OLD");
   });
 
+  // h69-pwa-1: the PPR shell answers 200 before the database read, so neither the 3 s timer nor the 5xx branch can
+  // see a brownout; the cluster error boundary links to ?kopya=1 and only that request is answered from storage.
+  //
+  // The stored-first answer is ONE-SHOT. It needs a mark in the tayf-open-copy cache that the same-origin error
+  // boundary writes when the reader clicks "Kayıtlı kopyayı aç" (markStoredCopyOpen). The worker takes the mark
+  // (deletes it) on the first kopya=1 navigation, so a reload of the address bar, Back/Forward, session restore and a
+  // link from another site all take the normal network-first path: no reload trap, and no way for another site to
+  // learn from timing which stories this device holds (it cannot write this origin's Cache Storage).
+  describe("explicit stored copy (?kopya=1)", () => {
+    const liveFetch = async () => pageRes(ID, page("Canli"));
+    // The mark's own delete is part of the contract (asserted in (i)); every other write would be a regression.
+    const writesOf = (w: LoadedWorker) =>
+      w.caches.writes().filter((op) => (op.op === "put" || op.op === "delete") && op.cache !== CACHE_NAMES.openCopy);
+    const seedMark = (w: LoadedWorker, id = ID, cachedAt = iso(0)) =>
+      w.caches.seed(CACHE_NAMES.openCopy, urlOf(id), fakeResponse(null, { headers: { [HEADER_CACHED_AT]: cachedAt } }));
+    const kopya = (id = ID, extra = "") => nav(id, `?${STORED_COPY_PARAM}=1${extra}`);
+
+    it("the mark lifetime is 30 seconds, in the policy and in the shipped worker config", () => {
+      expect(policy.SW_CONFIG.storedCopyMarkMs).toBe(30_000);
+      expect(load().evaluate("CONFIG.storedCopyMarkMs")).toBe(30_000);
+    });
+
+    it("answers a pages copy from Cache Storage and never starts a fetch (a)", async () => {
+      const w = load(liveFetch);
+      await seedPages(w, ID, "STORED-PAGES", iso(2 * DAY));
+      await seedMark(w);
+      w.caches.clearLog();
+      const d = w.dispatchFetch(kopya());
+      expect(await bodyOf(await d.responded)).toBe("STORED-PAGES");
+      await d.settled();
+      expect(w.fetch).not.toHaveBeenCalled();
+      expect(writesOf(w)).toEqual([]); // no write-back either
+      expect(d.waits).toHaveLength(0);
+      expect(w.pendingTimers()).toBe(0);
+    });
+
+    it("answers a copy seeded at the edge of the window: 13 days old", async () => {
+      const w = load(liveFetch);
+      await seedPages(w, ID, "STORED-13D", iso(13 * DAY));
+      await seedMark(w);
+      const d = w.dispatchFetch(nav(ID, "?kopya=1"));
+      expect(await bodyOf(await d.responded)).toBe("STORED-13D");
+      expect(w.fetch).not.toHaveBeenCalled();
+    });
+
+    it("hands back the stored headers (CSP, content type), not a fresh response", async () => {
+      const w = load(liveFetch);
+      await w.caches.seed(
+        CACHE_NAMES.pages,
+        urlOf(ID),
+        stored("STORED", { [HEADER_CACHED_AT]: iso(HOUR), "content-security-policy": CSP }),
+      );
+      await seedMark(w);
+      const res = (await w.dispatchFetch(nav(ID, "?kopya=1")).responded) as Response;
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      expect(res.headers.get("content-security-policy")).toBe(CSP);
+    });
+
+    it("matches an upper-case id and a trailing-slash url to the same stored key and the same mark", async () => {
+      const w = load(liveFetch);
+      await seedPages(w, ID, "STORED", iso(HOUR));
+      await seedMark(w); // the mark key is the normalized lower-case url, whatever spelling the click navigates to
+      expect(await bodyOf(await w.dispatchFetch(nav(ID.toUpperCase(), "?kopya=1")).responded)).toBe("STORED");
+      await seedMark(w);
+      expect(await bodyOf(await w.dispatchFetch(fakeRequest(`${urlOf(ID)}/?kopya=1&utm_source=x`)).responded)).toBe("STORED");
+      expect(w.fetch).not.toHaveBeenCalled();
+    });
+
+    it("a saved copy wins over a pages copy (b)", async () => {
+      const w = load(liveFetch);
+      await seedPages(w, ID, "PAGES", iso(HOUR));
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      await seedMark(w);
+      const d = w.dispatchFetch(nav(ID, "?kopya=1"));
+      expect(await bodyOf(await d.responded)).toBe("PINNED");
+      await d.settled();
+      expect(w.fetch).not.toHaveBeenCalled();
+    });
+
+    it("a saved copy is served however old it is", async () => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED-OLD", iso(400 * DAY));
+      await seedMark(w);
+      expect(await bodyOf(await w.dispatchFetch(nav(ID, "?kopya=1")).responded)).toBe("PINNED-OLD");
+      expect(w.fetch).not.toHaveBeenCalled();
+    });
+
+    it("answers once per mark: the mark is deleted, and the reload of the same url goes to the network (i)", async () => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED-OLD", iso(400 * DAY));
+      await seedMark(w);
+      w.caches.clearLog();
+
+      const first = w.dispatchFetch(kopya());
+      expect(await bodyOf(await first.responded)).toBe("PINNED-OLD");
+      await first.settled();
+      expect(w.fetch).not.toHaveBeenCalled();
+      expect(w.caches.urls(CACHE_NAMES.openCopy)).toEqual([]);
+      expect(w.caches.writes().filter((op) => op.cache === CACHE_NAMES.openCopy && op.op !== "open")).toEqual([
+        { op: "delete", cache: CACHE_NAMES.openCopy, url: urlOf(ID) },
+      ]);
+
+      // The reader presses reload (or the browser restores the session, or Back/Forward lands here): same request.
+      const reload = w.dispatchFetch(kopya());
+      expect(await bodyOf(await reload.responded)).toContain("Canli");
+      await reload.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["default", "reload", "no-cache"] as const)("a %s-mode reload after the click is answered by the network, not by storage", async (cache) => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      await seedMark(w);
+      await bodyOf(await w.dispatchFetch(kopya()).responded); // the click
+      const reload = w.dispatchFetch(fakeRequest(`${urlOf(ID)}?kopya=1`, { cache }));
+      expect(await bodyOf(await reload.responded)).toContain("Canli");
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("a stored copy but no mark: the network answers, and nothing opens the marks cache (ii)", async () => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      w.caches.clearLog();
+      const d = w.dispatchFetch(kopya());
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await d.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+      expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.openCopy);
+      expect(w.caches.writes().filter((op) => op.cache === CACHE_NAMES.openCopy)).toEqual([]);
+    });
+
+    // security-1: a page on another site can open this url in a popup, but it cannot write tayfhaber.com's Cache
+    // Storage, so without the mark it gets exactly the network-first behaviour (no timing difference to measure).
+    it.each([
+      ["a pinned copy", (w: LoadedWorker) => seedSaved(w, ID, "PINNED", iso(HOUR))],
+      ["a visited (pages) copy", (w: LoadedWorker) => seedPages(w, ID, "VISITED", iso(HOUR))],
+    ])("a cross-site popup to ?kopya=1&r=123 with %s and no mark is network-first (security)", async (_n, seed) => {
+      const w = load(liveFetch);
+      await seed(w);
+      const d = w.dispatchFetch(fakeRequest(`${urlOf(ID)}?kopya=1&r=123`));
+      expect(await bodyOf(await d.responded)).toContain("Canli"); // well inside navTimeoutMs: the fetch is immediate
+      await d.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+      expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.openCopy);
+    });
+
+    it("a mark older than storedCopyMarkMs does not unlock, and is deleted when it is found (iii)", async () => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      await seedMark(w, ID, iso(policy.SW_CONFIG.storedCopyMarkMs + 1000));
+      const d = w.dispatchFetch(kopya());
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await d.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+      expect(w.caches.urls(CACHE_NAMES.openCopy)).toEqual([]);
+    });
+
+    it("a mark just inside storedCopyMarkMs still unlocks", async () => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      await seedMark(w, ID, iso(policy.SW_CONFIG.storedCopyMarkMs - 5000));
+      expect(await bodyOf(await w.dispatchFetch(kopya()).responded)).toBe("PINNED");
+      expect(w.fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["no stamp", null],
+      ["an unparseable stamp", "yesterday-ish"],
+    ])("a mark with %s counts as expired", async (_n, stamp) => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      await w.caches.seed(
+        CACHE_NAMES.openCopy,
+        urlOf(ID),
+        fakeResponse(null, { headers: stamp === null ? {} : { [HEADER_CACHED_AT]: stamp } }),
+      );
+      expect(await bodyOf(await w.dispatchFetch(kopya()).responded)).toContain("Canli");
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("a mark for another story does not unlock this one, and stays for its own story (iv)", async () => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      await seedMark(w, ID2);
+      const d = w.dispatchFetch(kopya(ID));
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await d.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+      expect(w.caches.urls(CACHE_NAMES.openCopy)).toEqual([urlOf(ID2)]);
+    });
+
+    it("a plain navigation never creates the marks cache, with or without a stored copy (v)", async () => {
+      const w = load(liveFetch);
+      await seedSaved(w, ID, "PINNED", iso(DAY));
+      const d = w.dispatchFetch(nav());
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await d.settled();
+      expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.openCopy);
+      expect(w.caches.writes().filter((op) => op.cache === CACHE_NAMES.openCopy)).toEqual([]);
+
+      const bare = load(liveFetch);
+      const e = bare.dispatchFetch(nav(ID2));
+      await e.responded;
+      await e.settled();
+      expect(bare.caches.cacheNames()).not.toContain(CACHE_NAMES.openCopy);
+    });
+
+    it("a mark that cannot be read or deleted fails closed: the network answers", async () => {
+      const unreadable = load(liveFetch);
+      await seedSaved(unreadable, ID, "PINNED", iso(DAY));
+      await seedMark(unreadable);
+      vi.spyOn(await unreadable.caches.open(CACHE_NAMES.openCopy), "match").mockRejectedValue(new Error("boom"));
+      expect(await bodyOf(await unreadable.dispatchFetch(kopya()).responded)).toContain("Canli");
+
+      // If the mark cannot be consumed the answer cannot be made one-shot, so it is not given.
+      const undeletable = load(liveFetch);
+      await seedSaved(undeletable, ID, "PINNED", iso(DAY));
+      await seedMark(undeletable);
+      vi.spyOn(await undeletable.caches.open(CACHE_NAMES.openCopy), "delete").mockRejectedValue(new Error("boom"));
+      expect(await bodyOf(await undeletable.dispatchFetch(kopya()).responded)).toContain("Canli");
+    });
+
+    it("with no copy at all it falls through to today's path: the network answer, written back by the usual rules (c)", async () => {
+      const w = load(liveFetch);
+      await seedMark(w);
+      const d = w.dispatchFetch(nav(ID, "?kopya=1"));
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await d.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+      expect(await w.caches.text(CACHE_NAMES.pages, urlOf(ID))).toContain("Canli");
+    });
+
+    it("with a pages copy older than pagesMaxAgeMs it falls through: the network answer, the stale entry replaced (c)", async () => {
+      const w = load(liveFetch);
+      await seedPages(w, ID, "STALE", iso(policy.SW_CONFIG.pagesMaxAgeMs + HOUR));
+      await seedMark(w);
+      const d = w.dispatchFetch(nav(ID, "?kopya=1"));
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await d.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+      expect(await w.caches.text(CACHE_NAMES.pages, urlOf(ID))).toContain("Canli");
+    });
+
+    it("a pages copy with no cached-at stamp is not served on request either", async () => {
+      const w = load(liveFetch);
+      await w.caches.seed(CACHE_NAMES.pages, urlOf(ID), stored("NOSTAMP"));
+      await seedMark(w);
+      expect(await bodyOf(await w.dispatchFetch(nav(ID, "?kopya=1")).responded)).toContain("Canli");
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("no copy and the origin down: the /offline shell, exactly as for a plain visit", async () => {
+      const w = load(reject);
+      await seedShell(w);
+      await seedMark(w);
+      expect(await bodyOf(await w.dispatchFetch(nav(ID, "?kopya=1")).responded)).toContain("OFFLINE SHELL");
+    });
+
+    it("the network 5xx and slow-network paths are unchanged when there is no copy", async () => {
+      const five = load(async () => pageRes(ID, "ERR", { status: 503 }));
+      await seedMark(five);
+      const res = (await five.dispatchFetch(nav(ID, "?kopya=1")).responded) as Response;
+      expect(res.status).toBe(503);
+
+      const slow = load(async () => {
+        await sleep(100);
+        return pageRes(ID, page("Yavas"));
+      });
+      await seedMark(slow);
+      expect(await bodyOf(await slow.dispatchFetch(nav(ID, "?kopya=1")).responded)).toContain("Yavas");
+    });
+
+    it("a broken cache never breaks a ?kopya=1 visit: it falls through to the network", async () => {
+      const w = load(liveFetch);
+      await seedMark(w);
+      vi.spyOn(w.caches, "open").mockRejectedValue(new Error("boom"));
+      const d = w.dispatchFetch(nav(ID, "?kopya=1"));
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await expect(d.settled()).resolves.toBeUndefined();
+    });
+
+    it.each([
+      ["no query", ""],
+      ["kopya=0", "?kopya=0"],
+      ["an empty kopya", "?kopya="],
+      ["kopya=true", "?kopya=true"],
+      ["only a tracking query", "?utm_source=x"],
+      ["the first kopya being 0", "?kopya=0&kopya=1"],
+    ])("a plain visit with %s still goes to the network first, copy and mark or not (d)", async (_n, query) => {
+      const w = load(liveFetch);
+      await seedPages(w, ID, "STORED", iso(HOUR));
+      await seedSaved(w, ID, "PINNED", iso(HOUR));
+      await seedMark(w);
+      const d = w.dispatchFetch(nav(ID, query));
+      expect(await bodyOf(await d.responded)).toContain("Canli");
+      await d.settled();
+      expect(w.fetch).toHaveBeenCalledTimes(1);
+      expect(w.caches.urls(CACHE_NAMES.openCopy)).toEqual([urlOf(ID)]); // only a kopya=1 request takes the mark
+    });
+
+    it("an error shell the network answers for a plain visit is still shown (the :718 behaviour stays)", async () => {
+      const w = load(async () => pageRes(ID, ERROR_SHELL));
+      await seedPages(w, ID, "STORED", iso(HOUR));
+      expect(await bodyOf(await w.dispatchFetch(nav()).responded)).toBe(ERROR_SHELL);
+    });
+
+    it("does not answer for another story or a sub-page", async () => {
+      const w = load(async (input) => fakeResponse("net:" + urlString(input), { url: urlString(input), headers: { "content-type": "text/html" } }));
+      await seedPages(w, ID, "STORED", iso(HOUR));
+      await seedMark(w);
+      expect(await bodyOf(await w.dispatchFetch(nav(ID2, "?kopya=1")).responded)).toContain("net:");
+      expect(await bodyOf(await w.dispatchFetch(fakeRequest(`${urlOf(ID)}/kart?kopya=1`)).responded)).toContain("net:");
+    });
+
+    it("never answers a cross-origin or non-GET request (bypass happens before the copy lookup)", async () => {
+      const w = load(liveFetch);
+      await seedPages(w, ID, "STORED", iso(HOUR));
+      await seedMark(w);
+      expect(w.dispatchFetch(fakeRequest(`https://evil.test/cluster/${ID}?kopya=1`)).responded).toBeNull();
+      expect(w.dispatchFetch(fakeRequest(`${urlOf(ID)}?kopya=1`, { method: "POST" })).responded).toBeNull();
+      expect(w.caches.urls(CACHE_NAMES.openCopy)).toEqual([urlOf(ID)]);
+    });
+  });
+
   describe("write-back", () => {
     it("keeps CSP, adds cached-at and drops vary/content-encoding/cache-control", async () => {
       const w = load(async () =>
@@ -952,15 +1292,39 @@ describe("activate", () => {
     const w = load();
     for (const name of [
       "tayf-static-v0", "tayf-pages-v0", "tayf-shell-v0", "tayf-meta-v0", CACHE_NAMES.static, CACHE_NAMES.pages,
-      CACHE_NAMES.shell, CACHE_NAMES.meta, "tayf-saved-v1", "other-lib",
+      CACHE_NAMES.shell, CACHE_NAMES.meta, CACHE_NAMES.openCopy, "tayf-open-copy-v0", "tayf-saved-v1",
+      "tayf-saved-assets-v1", "other-lib",
     ]) {
       await w.caches.seed(name, `${ORIGIN}/x`, fakeResponse("x"));
     }
     await w.dispatchActivate();
     expect(w.caches.cacheNames().sort()).toEqual(
-      [CACHE_NAMES.static, CACHE_NAMES.pages, CACHE_NAMES.shell, CACHE_NAMES.meta, "tayf-saved-v1", "other-lib"].sort(),
+      [
+        CACHE_NAMES.static, CACHE_NAMES.pages, CACHE_NAMES.shell, CACHE_NAMES.meta, CACHE_NAMES.openCopy,
+        "tayf-saved-v1", "tayf-saved-assets-v1", "other-lib",
+      ].sort(),
     );
     expect(w.claim).not.toHaveBeenCalled();
+  });
+
+  it("keeps the current one-shot open-copy marks cache and drops an older version's", async () => {
+    const w = load();
+    await w.caches.seed(CACHE_NAMES.openCopy, urlOf(ID), stored("", { [HEADER_CACHED_AT]: iso(0) }));
+    await w.caches.seed("tayf-open-copy-v0", urlOf(ID), stored("", { [HEADER_CACHED_AT]: iso(0) }));
+    await w.dispatchActivate();
+    expect(w.caches.cacheNames()).toContain(CACHE_NAMES.openCopy);
+    expect(w.caches.cacheNames()).not.toContain("tayf-open-copy-v0");
+    expect(w.caches.urls(CACHE_NAMES.openCopy)).toEqual([urlOf(ID)]);
+  });
+
+  // h69-pwa-3: the saved-assets cache is as precious as the saved cache (the page copies it serves depend on it).
+  it("keeps the saved-assets cache, whatever SW_VERSION is: every CACHE_NAMES value survives activation (f)", async () => {
+    const w = load();
+    for (const name of Object.values(CACHE_NAMES)) await w.caches.seed(name, `${ORIGIN}/x`, fakeResponse("x"));
+    await w.dispatchActivate();
+    expect(w.caches.cacheNames().sort()).toEqual(Object.values(CACHE_NAMES).sort());
+    expect(w.caches.cacheNames()).toContain(CACHE_NAMES.savedAssets);
+    expect(CACHE_NAMES.savedAssets).toBe("tayf-saved-assets-v1");
   });
 
   it("still resolves, and still does not claim, when listing caches fails", async () => {
@@ -1350,6 +1714,503 @@ describe("messages", () => {
     expect(w.fetch).not.toHaveBeenCalled();
     expect(w.caches.writes()).toEqual([]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Pinned stories keep their static assets (h69-pwa-3)
+// ---------------------------------------------------------------------------
+//
+// A pin used to store the document only. Its route chunks (the StaleCopyNotice island among them) lived in no
+// worker cache, and the shared css / runtime chunks sat in the shell cache, which precacheShell empties of
+// everything the newest /offline page does not list. So a pinned story depended on the evictable HTTP cache.
+
+describe("pinned stories keep their static assets", () => {
+  const A_JS = `${ORIGIN}/_next/static/chunks/route-a.js`;
+  const X_CSS = `${ORIGIN}/_next/static/css/x.css`;
+  const S_JS = `${ORIGIN}/_next/static/chunks/s.js?dpl=dpl_9`;
+  const B_JS = `${ORIGIN}/_next/static/chunks/b-only.js`;
+  const rel = (url: string) => url.slice(ORIGIN.length);
+  const tag = (url: string) =>
+    url.includes(".css") ? `<link rel="stylesheet" href="${rel(url)}"/>` : `<script src="${rel(url)}" async></script>`;
+  const story = (title: string, ...assets: string[]) => page(title, assets.map(tag).join(""));
+  const idOf = (input: string | Request) => urlString(input).split("/").pop() as string;
+  const fetched = (w: LoadedWorker) => w.fetch.mock.calls.map((c) => urlString(c[0]));
+  const staticReq = (url: string) => fakeRequest(url, { mode: "no-cors" });
+  const reject = async () => {
+    throw new TypeError("offline");
+  };
+  const assetBody = (url: string) => "asset:" + url;
+  const big = { savedMaxEntries: 20 };
+
+  /** Cluster urls answer with the story html registered for the id; /_next/static answers unless overridden; /offline as shellAwareFetch. */
+  function router(
+    htmlById: Record<string, string>,
+    overrides: Record<string, (init?: RequestInit) => Response | Promise<Response>> = {},
+  ): FetchImpl {
+    const base = shellAwareFetch();
+    return async (input, init) => {
+      const url = urlString(input);
+      if (url.startsWith(`${ORIGIN}/cluster/`)) {
+        const id = idOf(input);
+        return pageRes(id, htmlById[id] ?? page("Bos"));
+      }
+      const over = overrides[url];
+      if (over) return over(init);
+      return base(input, init);
+    };
+  }
+  const pin = (w: LoadedWorker, id = ID) => w.dispatchMessage({ type: "tayf:pin", id });
+
+  it("stores the page's static assets at pin time and serves them with the network gone (a)", async () => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS, X_CSS) }));
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([urlOf(ID)]);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([A_JS, X_CSS].sort());
+    // none of them was in the static or shell cache, and the worker has not put them there
+    expect(w.caches.urls(CACHE_NAMES.static)).toEqual([]);
+    expect(w.caches.urls(CACHE_NAMES.shell)).toEqual([]);
+
+    w.fetch.mockImplementation(reject);
+    w.fetch.mockClear();
+    const d = w.dispatchFetch(staticReq(A_JS));
+    expect(await bodyOf(await d.responded)).toBe(assetBody(A_JS));
+    await d.settled();
+    expect(w.fetch).not.toHaveBeenCalled();
+    const css = w.dispatchFetch(staticReq(X_CSS));
+    expect(await bodyOf(await css.responded)).toBe(assetBody(X_CSS));
+    expect(w.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the query of a skew-protected asset url (?dpl=) as the key", async () => {
+    const w = load(router({ [ID]: story("Hikaye", S_JS) }));
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([S_JS]);
+    w.fetch.mockImplementation(reject);
+    expect(await bodyOf(await w.dispatchFetch(staticReq(S_JS)).responded)).toBe(assetBody(S_JS));
+  });
+
+  it("fetches each asset once, with the page, and nothing from another origin or path", async () => {
+    const html = page("Hikaye", tag(A_JS) + tag(A_JS) + '<script src="https://cdn.test/_next/static/chunks/evil.js"></script><img src="/logo.png"/>');
+    const w = load(router({ [ID]: html }));
+    await pin(w);
+    expect(fetched(w)).toEqual([urlOf(ID), A_JS]);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([A_JS]);
+  });
+
+  it("does not fetch assets that the static or shell cache already holds, and keeps its own copy of them (b)", async () => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS, X_CSS, B_JS) }));
+    await w.caches.seed(CACHE_NAMES.static, A_JS, fakeResponse("static-a", { url: A_JS, headers: { "content-type": "text/javascript" } }));
+    await w.caches.seed(CACHE_NAMES.shell, X_CSS, fakeResponse("shell-x", { url: X_CSS, headers: { "content-type": "text/css" } }));
+    await pin(w);
+    expect(fetched(w)).toEqual([urlOf(ID), B_JS]); // only the page and the one asset nobody had
+    // Deviation from the spec's literal "skip on a hit": a copy is taken from the cache that has it (no network),
+    // because the shell and static caches lose entries (precacheShell, the 300 trim) while the pin lives on.
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([A_JS, B_JS, X_CSS].sort());
+    expect(await w.caches.text(CACHE_NAMES.savedAssets, A_JS)).toBe("static-a");
+    expect(await w.caches.text(CACHE_NAMES.savedAssets, X_CSS)).toBe("shell-x");
+  });
+
+  it("does not fetch again an asset the saved-assets cache already holds", async () => {
+    const w = load(router({ [ID]: story("A", A_JS, S_JS), [ID2]: story("B", S_JS, B_JS) }));
+    await pin(w, ID);
+    w.fetch.mockClear();
+    await pin(w, ID2);
+    expect(fetched(w)).toEqual([urlOf(ID2), B_JS]);
+  });
+
+  it("a pin without static references opens no saved-assets cache", async () => {
+    const w = load(router({ [ID]: page("Duz") }));
+    await pin(w);
+    expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.savedAssets);
+    expect(fetched(w)).toEqual([urlOf(ID)]);
+  });
+
+  it("a static request does not create the saved-assets cache for a reader who never pinned", async () => {
+    const w = load(router({}));
+    const d = w.dispatchFetch(staticReq(A_JS));
+    await d.responded;
+    await d.settled();
+    expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.savedAssets);
+  });
+
+  it("serves a stored asset to every page that needs it, after the static cache is trimmed or the shell is emptied", async () => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS) }));
+    await w.caches.seed(CACHE_NAMES.shell, A_JS, fakeResponse("shell-a", { url: A_JS }));
+    await pin(w);
+    await w.caches.delete(CACHE_NAMES.shell); // what a shell refresh does to the entries it no longer lists
+    w.fetch.mockImplementation(reject);
+    expect(await bodyOf(await w.dispatchFetch(staticReq(A_JS)).responded)).toBe("shell-a");
+  });
+
+  it("still serves assets that are in the shell cache, static cache or saved-assets cache, in that order", async () => {
+    const w = load(router({}));
+    await w.caches.seed(CACHE_NAMES.savedAssets, A_JS, fakeResponse("kept"));
+    expect(await bodyOf(await w.dispatchFetch(staticReq(A_JS)).responded)).toBe("kept");
+    await w.caches.seed(CACHE_NAMES.shell, A_JS, fakeResponse("shell"));
+    expect(await bodyOf(await w.dispatchFetch(staticReq(A_JS)).responded)).toBe("shell");
+    await w.caches.seed(CACHE_NAMES.static, A_JS, fakeResponse("static"));
+    expect(await bodyOf(await w.dispatchFetch(staticReq(A_JS)).responded)).toBe("static");
+    expect(w.fetch).not.toHaveBeenCalled();
+  });
+
+  it("a static hit in the saved-assets cache is never written to the static cache", async () => {
+    const w = load(router({}));
+    await w.caches.seed(CACHE_NAMES.savedAssets, A_JS, fakeResponse("kept"));
+    const d = w.dispatchFetch(staticReq(A_JS));
+    await d.responded;
+    await d.settled();
+    expect(w.caches.urls(CACHE_NAMES.static)).toEqual([]);
+  });
+
+  it("unpin then sync with the remaining ids drops only the assets nobody else references (c)", async () => {
+    const w = load(router({ [ID]: story("A", S_JS, A_JS), [ID2]: story("B", S_JS, B_JS) }), big);
+    await seedShell(w);
+    await pin(w, ID);
+    await pin(w, ID2);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([A_JS, B_JS, S_JS].sort());
+
+    await w.dispatchMessage({ type: "tayf:unpin", id: ID });
+    w.fetch.mockClear();
+    await w.dispatchMessage({ type: "tayf:sync", ids: [ID2] });
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([B_JS, S_JS].sort()); // a.js gone, s.js kept
+    expect(w.fetch).not.toHaveBeenCalled(); // pruning never touches the network
+  });
+
+  it("sync with no bookmarks empties the saved-assets cache", async () => {
+    const w = load(router({ [ID]: story("A", A_JS, X_CSS) }), big);
+    await seedShell(w);
+    await pin(w);
+    await w.dispatchMessage({ type: "tayf:sync", ids: [] });
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([]);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([]);
+  });
+
+  it("sync keeps every asset of a pin that is still wanted, and does not refetch it", async () => {
+    const w = load(router({ [ID]: story("A", A_JS, X_CSS) }), big);
+    await seedShell(w);
+    await pin(w);
+    w.fetch.mockClear();
+    await w.dispatchMessage({ type: "tayf:sync", ids: [ID] });
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([A_JS, X_CSS].sort());
+    expect(w.fetch).not.toHaveBeenCalled();
+  });
+
+  it("sync removes assets that no saved page references any more (an old deploy's hashes)", async () => {
+    const w = load(router({}), big);
+    await seedShell(w);
+    await w.caches.seed(CACHE_NAMES.saved, urlOf(ID), stored(story("A", X_CSS), { [HEADER_CACHED_AT]: iso(DAY) }));
+    await w.caches.seed(CACHE_NAMES.savedAssets, X_CSS, fakeResponse("x"));
+    await w.caches.seed(CACHE_NAMES.savedAssets, A_JS, fakeResponse("old-a"));
+    await w.dispatchMessage({ type: "tayf:sync", ids: [ID] });
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([X_CSS]);
+  });
+
+  it("a sync that has no saved-assets cache does not create one", async () => {
+    const w = load(router({}), big);
+    await seedShell(w);
+    await w.dispatchMessage({ type: "tayf:sync", ids: [ID] });
+    expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.savedAssets);
+  });
+
+  it("when a saved page cannot be read, sync deletes no asset (it cannot tell what is referenced)", async () => {
+    const w = load(router({}), big);
+    await seedShell(w);
+    await w.caches.seed(CACHE_NAMES.saved, urlOf(ID), stored(story("A", X_CSS), { [HEADER_CACHED_AT]: iso(DAY) }));
+    await w.caches.seed(CACHE_NAMES.savedAssets, A_JS, fakeResponse("old-a"));
+    const saved = await w.caches.open(CACHE_NAMES.saved);
+    vi.spyOn(saved, "match").mockRejectedValue(new Error("boom"));
+    await expect(w.dispatchMessage({ type: "tayf:sync", ids: [ID] })).resolves.toBeUndefined();
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([A_JS]);
+  });
+
+  it("a broken saved-assets cache does not fail the sync", async () => {
+    const w = load(router({}), big);
+    await seedShell(w);
+    await w.caches.seed(CACHE_NAMES.savedAssets, A_JS, fakeResponse("old-a"));
+    const realOpen = w.caches.open.bind(w.caches);
+    vi.spyOn(w.caches, "open").mockImplementation(async (name: string) => {
+      if (name === CACHE_NAMES.savedAssets) throw new Error("boom");
+      return realOpen(name);
+    });
+    await expect(w.dispatchMessage({ type: "tayf:sync", ids: [] })).resolves.toBeUndefined();
+  });
+
+  it("assets of a pin that the precache refresh no longer lists are still served offline (d)", async () => {
+    const w = load(router({ [ID]: story("Hikaye", X_CSS) }));
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([X_CSS]);
+
+    // Install runs precacheShell: the /offline page now lists a.css and b.js only, so x.css is not in the new set.
+    await w.dispatchInstall();
+    expect(w.caches.urls(CACHE_NAMES.shell)).not.toContain(X_CSS);
+    expect(w.caches.urls(CACHE_NAMES.shell)).toContain(ASSET_A);
+
+    w.fetch.mockImplementation(reject);
+    w.fetch.mockClear();
+    expect(await bodyOf(await w.dispatchFetch(staticReq(X_CSS)).responded)).toBe(assetBody(X_CSS));
+    expect(w.fetch).not.toHaveBeenCalled();
+  });
+
+  it("the same holds for an asset the shell held when the story was pinned (shared css and runtime chunks)", async () => {
+    const w = load(router({ [ID]: story("Hikaye", X_CSS) }));
+    await w.caches.seed(CACHE_NAMES.shell, X_CSS, fakeResponse(assetBody(X_CSS), { url: X_CSS, headers: { "content-type": "text/css" } }));
+    await pin(w);
+    expect(fetched(w)).toEqual([urlOf(ID)]);
+
+    await w.dispatchInstall(); // precacheShell drops every shell key outside the new /offline list
+    expect(w.caches.urls(CACHE_NAMES.shell)).not.toContain(X_CSS);
+
+    w.fetch.mockImplementation(reject);
+    expect(await bodyOf(await w.dispatchFetch(staticReq(X_CSS)).responded)).toBe(assetBody(X_CSS));
+  });
+
+  it.each([
+    ["a 404", (url: string) => fakeResponse("nope", { status: 404, url, headers: { "content-type": "text/css" } })],
+    ["a redirect", (url: string) => fakeResponse("moved", { redirected: true, url, headers: { "content-type": "text/css" } })],
+    ["an opaque response", (url: string) => fakeResponse("", { type: "opaque", url, headers: { "content-type": "text/css" } })],
+    ["a no-store response", (url: string) => fakeResponse("x", { url, headers: { "content-type": "text/css", "cache-control": "no-store" } })],
+    ["a response from another origin", () => fakeResponse("x", { url: "https://cdn.test/x.css", headers: { "content-type": "text/css" } })],
+    ["a 500", (url: string) => fakeResponse("boom", { status: 500, url, headers: { "content-type": "text/css" } })],
+  ])("does not store %s, and the pin itself still succeeds (e)", async (_n, make) => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS, X_CSS) }, { [X_CSS]: () => make(X_CSS) }));
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([urlOf(ID)]);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([A_JS]);
+    expect(w.caches.urls(CACHE_NAMES.meta)).toEqual([]); // no "could not pin" marker for an asset problem
+  });
+
+  it("an asset fetch that rejects does not fail the pin or the other assets", async () => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS, X_CSS) }, { [X_CSS]: () => Promise.reject(new TypeError("reset")) }));
+    await expect(pin(w)).resolves.toBeUndefined();
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([urlOf(ID)]);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([A_JS]);
+  });
+
+  it("a quota error while storing an asset does not fail the pin", async () => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS) }));
+    const assets = await w.caches.open(CACHE_NAMES.savedAssets);
+    vi.spyOn(assets, "put").mockRejectedValue(new Error("QuotaExceededError"));
+    await expect(pin(w)).resolves.toBeUndefined();
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([urlOf(ID)]);
+  });
+
+  it("a broken saved-assets cache does not fail the pin", async () => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS) }));
+    const realOpen = w.caches.open.bind(w.caches);
+    vi.spyOn(w.caches, "open").mockImplementation(async (name: string) => {
+      if (name === CACHE_NAMES.savedAssets) throw new Error("boom");
+      return realOpen(name);
+    });
+    await expect(pin(w)).resolves.toBeUndefined();
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([urlOf(ID)]);
+  });
+
+  it("a page that is not a story stores neither a copy nor assets", async () => {
+    const w = load(async (input) => pageRes(idOf(input), page("Hata", "").replace('content="article"', 'content="website"') + tag(A_JS)));
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([]);
+    expect(fetched(w)).toEqual([urlOf(ID)]);
+    expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.savedAssets);
+  });
+
+  it("opening a pinned story online warms the assets of the refreshed html (g)", async () => {
+    const w = load(router({ [ID]: story("Yeni", A_JS, X_CSS) }));
+    await seedSavedPin(w, ID, "OLD PINNED, NO ASSETS");
+    const d = w.dispatchFetch(fakeRequest(urlOf(ID)));
+    await d.responded;
+    await d.settled();
+    expect(await w.caches.text(CACHE_NAMES.saved, urlOf(ID))).toContain("Yeni");
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([A_JS, X_CSS].sort());
+    expect(w.caches.urls(CACHE_NAMES.pages)).toEqual([]);
+
+    w.fetch.mockImplementation(reject);
+    expect(await bodyOf(await w.dispatchFetch(staticReq(A_JS)).responded)).toBe(assetBody(A_JS));
+  });
+
+  it("opening a pinned story again does not fetch the assets it already holds; it only moves them to newest", async () => {
+    const w = load(router({ [ID]: story("Yeni", A_JS, X_CSS) }));
+    await seedSavedPin(w, ID, "OLD");
+    const first = w.dispatchFetch(fakeRequest(urlOf(ID)));
+    await first.responded;
+    await first.settled();
+    w.fetch.mockClear();
+    w.caches.clearLog();
+    const second = w.dispatchFetch(fakeRequest(urlOf(ID)));
+    await second.responded;
+    await second.settled();
+    expect(fetched(w)).toEqual([urlOf(ID)]);
+    // A held asset is re-put from its own stored response (h69-pwa-3 FIFO fix), never refetched and never deleted.
+    const ops = w.caches.writes().filter((op) => op.cache === CACHE_NAMES.savedAssets && op.op !== "open");
+    expect(ops.filter((op) => op.op === "delete")).toEqual([]);
+    expect(ops.map((op) => op.url).sort()).toEqual([A_JS, X_CSS].sort());
+    expect(await w.caches.text(CACHE_NAMES.savedAssets, A_JS)).toBe(assetBody(A_JS));
+    expect(await w.caches.text(CACHE_NAMES.savedAssets, X_CSS)).toBe(assetBody(X_CSS));
+  });
+
+  it("opening a story that is not pinned stores no assets and fetches none", async () => {
+    const w = load(router({ [ID]: story("Yeni", A_JS) }));
+    const d = w.dispatchFetch(fakeRequest(urlOf(ID)));
+    await d.responded;
+    await d.settled();
+    expect(w.caches.urls(CACHE_NAMES.pages)).toEqual([urlOf(ID)]);
+    expect(fetched(w)).toEqual([urlOf(ID)]);
+    expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.savedAssets);
+  });
+
+  it.each(SHELLS)("a 200 %s for a pinned story leaves the assets alone", async (_n, shell) => {
+    const w = load(router({ [ID]: shell + tag(A_JS) }));
+    await seedSavedPin(w, ID, "PINNED-GOOD");
+    const d = w.dispatchFetch(fakeRequest(urlOf(ID)));
+    await d.responded;
+    await d.settled();
+    expect(await w.caches.text(CACHE_NAMES.saved, urlOf(ID))).toBe("PINNED-GOOD");
+    expect(fetched(w)).toEqual([urlOf(ID)]);
+    expect(w.caches.cacheNames()).not.toContain(CACHE_NAMES.savedAssets);
+  });
+
+  it("the page the browser receives is not held up by the asset warm-up (the fetch handler answers first)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const w = load(router({ [ID]: story("Yeni", A_JS) }, { [A_JS]: async () => { await gate; return fakeResponse("late", { url: A_JS, headers: { "content-type": "text/javascript" } }); } }));
+    await seedSavedPin(w, ID, "OLD");
+    const d = w.dispatchFetch(fakeRequest(urlOf(ID)));
+    expect(await bodyOf(await d.responded)).toContain("Yeni");
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([]); // still waiting for the asset
+    release();
+    await d.settled();
+    expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([A_JS]);
+  });
+
+  it("trims the saved-assets cache to savedAssetsMaxEntries, oldest first (h)", async () => {
+    const w = load(router({ [ID]: story("Yeni", A_JS, X_CSS) }), { savedAssetsMaxEntries: 3 });
+    const old = (n: number) => `${ORIGIN}/_next/static/chunks/old${n}.js`;
+    for (const n of [1, 2, 3]) await w.caches.seed(CACHE_NAMES.savedAssets, old(n), fakeResponse("old" + n));
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([old(3), A_JS, X_CSS].sort());
+  });
+
+  // The cap evicts the OLDEST insertion first. A shared asset (runtime chunk, css) that an older pin put in first is
+  // the oldest entry of all, so pinning a new story that references it must move it to newest or the trim deletes a
+  // file the page just pinned needs.
+  it("pinning moves an asset the cache already holds to newest, so the trim evicts an older pin's asset, not the shared one (FIFO)", async () => {
+    const C = `${ORIGIN}/_next/static/chunks/shared-c.js`;
+    const N = `${ORIGIN}/_next/static/chunks/new-n.js`;
+    const O1 = `${ORIGIN}/_next/static/chunks/old-1.js`;
+    const O2 = `${ORIGIN}/_next/static/chunks/old-2.js`;
+    const w = load(router({ [ID]: story("Yeni", C, N) }), { savedAssetsMaxEntries: 3 });
+    for (const [url, body] of [[C, "seeded-c"], [O1, "o1"], [O2, "o2"]]) {
+      await w.caches.seed(CACHE_NAMES.savedAssets, url, fakeResponse(body));
+    }
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([O2, C, N].sort());
+    expect(await w.caches.text(CACHE_NAMES.savedAssets, C)).toBe("seeded-c"); // kept, not refetched
+    expect(fetched(w)).toEqual([urlOf(ID), N]);
+  });
+
+  it("opening a pinned story online refreshes its held assets to newest as well", async () => {
+    const C = `${ORIGIN}/_next/static/chunks/shared-c.js`;
+    const N = `${ORIGIN}/_next/static/chunks/new-n.js`;
+    const O1 = `${ORIGIN}/_next/static/chunks/old-1.js`;
+    const O2 = `${ORIGIN}/_next/static/chunks/old-2.js`;
+    const w = load(router({ [ID]: story("Yeni", C, N) }), { savedAssetsMaxEntries: 3 });
+    await seedSavedPin(w, ID, "OLD");
+    for (const [url, body] of [[C, "seeded-c"], [O1, "o1"], [O2, "o2"]]) {
+      await w.caches.seed(CACHE_NAMES.savedAssets, url, fakeResponse(body));
+    }
+    const d = w.dispatchFetch(fakeRequest(urlOf(ID)));
+    await d.responded;
+    await d.settled();
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([O2, C, N].sort());
+    expect(await w.caches.text(CACHE_NAMES.savedAssets, C)).toBe("seeded-c");
+  });
+
+  // pinCluster bounds its page fetch with AbortSignal.timeout(pinTimeoutMs); the asset fetches it starts afterwards
+  // must be bounded the same way, or one stalled file holds up every remaining pin and the shell refresh of a sync.
+  describe("an asset fetch that never answers", () => {
+    const stalled = (init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    const config = { pinTimeoutMs: 50, savedMaxEntries: 20 };
+
+    it("is aborted after pinTimeoutMs, so sync still pins the other stories and refreshes the /offline shell", async () => {
+      const w = load(router({ [ID]: story("A", A_JS), [ID2]: story("B", A_JS) }, { [A_JS]: stalled }), config);
+      await seedShell(w, iso(30 * DAY)); // expired: sync has to refetch it
+      const outcome = await Promise.race([
+        w.dispatchMessage({ type: "tayf:sync", ids: [ID, ID2] }).then(() => "done"),
+        sleep(1500).then(() => "stuck"),
+      ]);
+      expect(outcome).toBe("done");
+      const urls = fetched(w);
+      expect(urls).toContain(urlOf(ID));
+      expect(urls).toContain(urlOf(ID2));
+      expect(urls).toContain(`${ORIGIN}/offline`);
+      expect(w.caches.urls(CACHE_NAMES.savedAssets)).not.toContain(A_JS);
+      const assetCalls = w.fetch.mock.calls.filter((c) => urlString(c[0]) === A_JS);
+      expect(assetCalls.length).toBeGreaterThan(0);
+      for (const call of assetCalls) expect(call[1]?.signal).toBeInstanceOf(AbortSignal);
+      expect(w.caches.urls(CACHE_NAMES.saved).sort()).toEqual([urlOf(ID), urlOf(ID2)].sort());
+    });
+
+    it("a single pin still resolves, with the page stored and the stalled asset not", async () => {
+      const w = load(router({ [ID]: story("A", A_JS, X_CSS) }, { [A_JS]: stalled }), config);
+      const outcome = await Promise.race([pin(w).then(() => "done"), sleep(1500).then(() => "stuck")]);
+      expect(outcome).toBe("done");
+      expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([urlOf(ID)]);
+      expect(w.caches.urls(CACHE_NAMES.savedAssets)).toEqual([X_CSS]);
+    });
+
+    it("the asset fetch carries a signal that is not aborted before the timeout elapses", async () => {
+      const w = load(router({ [ID]: story("A", X_CSS) }), { pinTimeoutMs: 5000, savedMaxEntries: 20 });
+      await pin(w);
+      const call = w.fetch.mock.calls.find((c) => urlString(c[0]) === X_CSS);
+      expect(call?.[1]?.signal).toBeInstanceOf(AbortSignal);
+      expect((call?.[1]?.signal as AbortSignal).aborted).toBe(false);
+    });
+  });
+
+  it("the shipped cap is 400 entries and 80 assets per page", () => {
+    expect(policy.SW_CONFIG.savedAssetsMaxEntries).toBe(400);
+    expect(policy.SW_CONFIG.savedAssetsPerPage).toBe(80);
+    expect(load().evaluate("CONFIG.savedAssetsMaxEntries")).toBe(400);
+    expect(load().evaluate("CONFIG.savedAssetsPerPage")).toBe(80);
+  });
+
+  it("takes at most savedAssetsPerPage assets from one page", async () => {
+    const urls = Array.from({ length: 6 }, (_, i) => `${ORIGIN}/_next/static/chunks/p${i}.js`);
+    const w = load(router({ [ID]: story("Cok", ...urls) }), { savedAssetsPerPage: 2 });
+    await pin(w);
+    expect(fetched(w)).toEqual([urlOf(ID), urls[0], urls[1]]);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([urls[0], urls[1]].sort());
+  });
+
+  it("a per-page cap of 0 stores no assets", async () => {
+    const w = load(router({ [ID]: story("Hikaye", A_JS) }), { savedAssetsPerPage: 0 });
+    await pin(w);
+    expect(w.caches.urls(CACHE_NAMES.saved)).toEqual([urlOf(ID)]);
+    expect(fetched(w)).toEqual([urlOf(ID)]);
+  });
+
+  it("sync still warms at most syncWarmMax pages, and each of them brings its own assets only", async () => {
+    const ids = [ID, ID2, ID3, ID4, ID5];
+    const w = load(router(Object.fromEntries(ids.map((id, i) => [id, story("S" + i, `${ORIGIN}/_next/static/chunks/q${i}.js`)]))), big);
+    await seedShell(w);
+    await w.dispatchMessage({ type: "tayf:sync", ids });
+    const pages = fetched(w).filter((u) => u.includes("/cluster/"));
+    expect(pages).toEqual([urlOf(ID5), urlOf(ID4), urlOf(ID3)]);
+    expect(w.caches.urls(CACHE_NAMES.savedAssets).sort()).toEqual([2, 3, 4].map((i) => `${ORIGIN}/_next/static/chunks/q${i}.js`).sort());
+  });
+
+  /** A pinned copy as the worker stored it, with the title header, so storePage takes its pinned branch. */
+  function seedSavedPin(w: LoadedWorker, id: string, body: string) {
+    return w.caches.seed(
+      CACHE_NAMES.saved,
+      urlOf(id),
+      stored(body, { [HEADER_CACHED_AT]: iso(DAY), [HEADER_TITLE]: encodeURIComponent("Eski") }),
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

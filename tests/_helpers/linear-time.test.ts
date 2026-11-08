@@ -432,7 +432,10 @@ function linear(n: number): void {
   sink ^= acc;
 }
 
-describe("expectLinear with the real CPU clock", () => {
+// vitest's testTimeout is wall clock, while this fixture burns CPU on a size ladder (about 1 s alone,
+// 4.8 s on a loaded CI runner, 13.4 s once, which timed out at 10 s): 60 s is 4.5x the worst run seen.
+// Sizes, ceilings and assertions are unchanged.
+describe("expectLinear with the real CPU clock", { timeout: 60_000 }, () => {
   const realSizes = [2_000, 4_000, 8_000, 16_000];
 
   it("fails a deliberately quadratic loop with /super-linear/", () => {

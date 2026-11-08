@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -30,10 +30,13 @@ vi.mock("react", async (importOriginal) => {
   return { ...actual, useEffect: () => undefined };
 });
 
-// The boundaries render <RetryButton>, which reads the router. renderToStaticMarkup
-// has no app router, so give it an inert one.
+// The boundaries render <RetryButton>, which reads the router, and the cluster
+// boundary reads its route id (h69-pwa-1). renderToStaticMarkup has no app
+// router, so give it an inert one.
+const routeParams = vi.hoisted(() => ({ value: { id: "0f8fad5b-d9cb-469f-a165-70867728950e" } as Record<string, string | string[]> }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
+  useParams: () => routeParams.value,
 }));
 
 vi.mock("next/link", () => ({
@@ -52,6 +55,7 @@ vi.mock("next/link", () => ({
 }));
 
 import { RetryButton } from "@/components/ui/retry-button";
+import { StoredCopyLink } from "@/components/pwa/stored-copy-link";
 import GlobalError from "./error";
 import EkonomiError from "./ekonomi/error";
 import ClusterError from "./cluster/[id]/error";
@@ -207,6 +211,55 @@ describe.each(BOUNDARIES)("%s", (_label, Boundary) => {
     expect(props.className).toContain("rounded-full");
     expect(props.className).toContain("bg-foreground");
     expect(props.className).toContain("aria-disabled:opacity-60");
+  });
+});
+
+// h69-pwa-1: the cluster route answers 200 and flushes its headers before the database read, so a read failure
+// reaches the client boundary and nothing else. Only the boundary can offer the copy this device holds.
+describe("src/app/cluster/[id]/error.tsx stored copy", () => {
+  const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const props = { error: withDigest("d1"), reset: () => {}, retry: () => {} };
+
+  afterEach(() => {
+    routeParams.value = { id: ID };
+  });
+
+  it("renders <StoredCopyLink> for the id of the route, after the existing buttons", () => {
+    const tree = ClusterError(props);
+    const links = findElements(tree, (el) => el.type === StoredCopyLink);
+    expect(links).toHaveLength(1);
+    expect((links[0]?.props as { clusterId?: string }).clusterId).toBe(ID);
+
+    const order: string[] = [];
+    const walk = (node: ReactNode) => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!isValidElement(node)) return;
+      const el = node as ReactElement;
+      if (el.type === RetryButton) order.push("retry");
+      if (el.type === StoredCopyLink) order.push("copy");
+      childrenOf(el).forEach(walk);
+    };
+    walk(tree);
+    expect(order).toEqual(["retry", "copy"]);
+  });
+
+  it("takes the first value when the router hands the id over as an array", () => {
+    routeParams.value = { id: [ID, "x"] };
+    const links = findElements(ClusterError(props), (el) => el.type === StoredCopyLink);
+    expect((links[0]?.props as { clusterId?: string }).clusterId).toBe(ID);
+  });
+
+  it("renders no link without a route id", () => {
+    routeParams.value = {};
+    expect(findElements(ClusterError(props), (el) => el.type === StoredCopyLink)).toHaveLength(0);
+  });
+
+  it("still renders the failed state first-pass markup unchanged: no copy offer before mount", () => {
+    const markup = renderToStaticMarkup(<ClusterError {...props} />);
+    expect(markup).toContain("Hikâye yüklenemedi");
+    expect(markup).toContain("Tekrar dene");
+    expect(markup).toContain("Tüm haberler");
+    expect(markup).not.toContain("kopya");
   });
 });
 

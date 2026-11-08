@@ -21,7 +21,7 @@
 // enforces the first group. The site CSP doubles as this worker's CSP and
 // already allows same-origin fetch.
 
-import { CLUSTER_ID_RE, HEADER_CACHED_AT, HEADER_TITLE } from "./sw-contract";
+import { CLUSTER_ID_RE, HEADER_CACHED_AT, HEADER_TITLE, STORED_COPY_PARAM } from "./sw-contract";
 import {
   COPIED_PAGE_HEADERS,
   FALLBACK_TITLE,
@@ -130,6 +130,12 @@ function pageCacheKey(url, origin) {
   const m = PAGE_RE.exec(u.pathname);
   if (m === null) return null;
   return origin + "/cluster/" + m[1].toLowerCase();
+}
+
+function wantsStoredCopy(url, origin) {
+  if (pageCacheKey(url, origin) === null) return false;
+  const u = parseUrl(url);
+  return u !== null && u.searchParams.get(CONTRACT.storedCopyParam) === "1";
 }
 
 function isCacheableResponse(res, origin, target) {
@@ -362,8 +368,10 @@ async function offlineFallback() {
 }
 
 async function matchStatic(url) {
-  const names = [CONFIG.caches.static, CONFIG.caches.shell];
+  const names = [CONFIG.caches.static, CONFIG.caches.shell, CONFIG.caches.savedAssets];
   for (let i = 0; i < names.length; i++) {
+    // The saved-assets cache only exists once a story was pinned: a static miss must not create it.
+    if (names[i] === CONFIG.caches.savedAssets && !(await caches.has(names[i]))) continue;
     const cache = await caches.open(names[i]);
     const hit = await cache.match(url, { ignoreVary: true });
     if (hit) return hit;
@@ -375,6 +383,77 @@ async function storeStatic(url, res) {
   const cache = await caches.open(CONFIG.caches.static);
   await cache.put(url, res);
   await trimCache(cache, CONFIG.staticMaxEntries);
+}
+
+// A request init that gives up after pinTimeoutMs (where AbortSignal.timeout exists). The signal also aborts a body
+// that stalls while it is being read into a cache, so neither a pin nor the asset warm-up behind it can hang a sync.
+function boundedInit(extra) {
+  const init = extra || {};
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    init.signal = AbortSignal.timeout(CONFIG.pinTimeoutMs);
+  }
+  return init;
+}
+
+// A pinned page has to stay readable with a cold HTTP cache and across deploys, so every static file its stored
+// html references is kept in the saved-assets cache for as long as the pin lives (syncSaved prunes it). A file the
+// static or shell cache already holds is copied from there without the network: precacheShell empties the shell of
+// everything the newest offline page does not list, and the static cache trims its oldest entries, while the pin
+// stays. A file this cache already holds is not refetched but put again: Cache.put appends, so a re-used asset is
+// refreshed to newest and the oldest-first trim evicts the assets of older pins, never a shared one that the page
+// just stored needs. Best effort and bounded: it never throws, takes at most savedAssetsPerPage files per page,
+// aborts a fetch after pinTimeoutMs and trims the cache to savedAssetsMaxEntries.
+async function keepSavedAsset(keep, url) {
+  const held = await keep.match(url, { ignoreVary: true });
+  if (held) {
+    await keep.put(url, held);
+    return;
+  }
+  let asset = await matchStatic(url);
+  if (!asset) {
+    asset = await fetch(url, boundedInit());
+    if (!isCacheableResponse(asset, ORIGIN, "static")) return;
+  }
+  await keep.put(url, asset);
+}
+
+async function warmSavedAssets(html) {
+  try {
+    const urls = extractShellAssets(html, ORIGIN, CONFIG.savedAssetsPerPage);
+    if (urls.length === 0) return;
+    const keep = await caches.open(CONFIG.caches.savedAssets);
+    await Promise.allSettled(
+      urls.map(function (url) {
+        return keepSavedAsset(keep, url);
+      })
+    );
+    await trimCache(keep, CONFIG.savedAssetsMaxEntries);
+  } catch (e) {}
+}
+
+// Drops saved-assets entries that no saved page references any more (unbookmarked stories, an old deploy's hashes).
+// The held keys are listed BEFORE the saved pages are read: a pin stores its page first and its assets afterwards,
+// so an asset that is listed here always has its page in the read below, and one stored later is never judged.
+// If anything cannot be read, nothing is deleted.
+async function pruneSavedAssets() {
+  try {
+    if (!(await caches.has(CONFIG.caches.savedAssets))) return;
+    const assets = await caches.open(CONFIG.caches.savedAssets);
+    const held = await assets.keys();
+    if (held.length === 0) return;
+    const saved = await caches.open(CONFIG.caches.saved);
+    const referenced = new Set();
+    const pages = await saved.keys();
+    for (let i = 0; i < pages.length; i++) {
+      const hit = await saved.match(pages[i].url, { ignoreVary: true });
+      if (!hit) continue;
+      const refs = extractShellAssets(await hit.text(), ORIGIN, CONFIG.savedAssetsPerPage);
+      for (let j = 0; j < refs.length; j++) referenced.add(refs[j]);
+    }
+    for (let i = 0; i < held.length; i++) {
+      if (!referenced.has(held[i].url)) await assets.delete(held[i].url);
+    }
+  } catch (e) {}
 }
 
 async function handleStatic(event) {
@@ -441,6 +520,7 @@ async function storePage(key, res) {
   const pinned = await saved.match(key, { ignoreVary: true });
   if (pinned) {
     await saved.put(key, storedResponse(buf, res.headers, extractTitle(html)));
+    await warmSavedAssets(html);
     return;
   }
   const pages = await caches.open(CONFIG.caches.pages);
@@ -457,7 +537,33 @@ function startWriteBack(key, res) {
   }
 }
 
+// The one-shot mark the same-origin error boundary writes when the reader clicks the stored-copy link (key = the
+// cluster url, value = a cached-at stamp). It is taken, i.e. deleted, whenever it is found, so one click unlocks
+// exactly one navigation: a reload, Back/Forward, a restored session or a link from another site (which cannot write
+// this origin's Cache Storage) finds no mark and takes the normal network-first path. True only for a fresh mark.
+// Fail closed: when anything cannot be read or the mark cannot be deleted the answer is false. A plain navigation
+// never reaches this, and a missing marks cache is never created.
+async function takeOpenCopyMark(key) {
+  try {
+    if (!(await caches.has(CONFIG.caches.openCopy))) return false;
+    const marks = await caches.open(CONFIG.caches.openCopy);
+    const hit = await marks.match(key, { ignoreVary: true });
+    if (!hit) return false;
+    await marks.delete(key);
+    return !isExpired(hit.headers.get(CONTRACT.headerCachedAt), Date.now(), CONFIG.storedCopyMarkMs);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function handleCluster(event, key) {
+  // The reader clicked the stored-copy link in the error boundary: that click left a fresh one-shot mark, so answer
+  // from storage once and start no fetch and no write-back. Without the mark (a reload, Back/Forward, an outside
+  // link) or without a usable copy this falls through to the unchanged network-first path.
+  if (wantsStoredCopy(event.request.url, ORIGIN) && (await takeOpenCopyMark(key))) {
+    const stored = await lookupCached(key);
+    if (stored) return stored;
+  }
   let network;
   try {
     network = Promise.resolve(fetch(event.request));
@@ -583,11 +689,7 @@ async function pinCluster(id) {
   if (path === null) return false;
   const key = pageCacheKey(ORIGIN + path, ORIGIN);
   if (key === null) return false;
-  const init = { credentials: "same-origin", headers: { accept: "text/html" } };
-  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-    init.signal = AbortSignal.timeout(CONFIG.pinTimeoutMs);
-  }
-  const res = await fetch(key, init);
+  const res = await fetch(key, boundedInit({ credentials: "same-origin", headers: { accept: "text/html" } }));
   let stored = false;
   if (isCacheableResponse(res, ORIGIN, "page")) {
     const buf = await res.arrayBuffer();
@@ -596,6 +698,7 @@ async function pinCluster(id) {
       const saved = await caches.open(CONFIG.caches.saved);
       await saved.put(key, storedResponse(buf, res.headers, extractTitle(html)));
       await trimCache(saved, CONFIG.savedMaxEntries);
+      await warmSavedAssets(html);
       stored = true;
     }
   }
@@ -629,6 +732,7 @@ async function syncSaved(allIds) {
     if (wanted.has(url)) have.add(url);
     else await saved.delete(url);
   }
+  await pruneSavedAssets();
   await pruneMisses(wanted);
   // One at a time and capped: each warm renders a cluster page on the server. Newest bookmark first, and an id
   // that failed recently is skipped without using a slot, so dead ids cannot starve the live ones.
@@ -718,6 +822,7 @@ export function buildServiceWorkerSource(opts: BuildOptions = {}): string {
     copiedHeaders: [...COPIED_PAGE_HEADERS],
     idPattern: CLUSTER_ID_RE.source,
     pagePattern: PAGE_PATH_PATTERN,
+    storedCopyParam: STORED_COPY_PARAM,
     fallbackTitle: FALLBACK_TITLE,
     titleMaxChars: TITLE_MAX_CHARS,
   };
