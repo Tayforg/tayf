@@ -68,6 +68,30 @@ import {
 // cluster (a stale pre-merge copy in a cached feed) is never listed. In today's
 // data an article belongs to one cluster, so that guard is a safety net.
 //
+// h76-stories-1: a near-duplicate test also runs against the PAGE'S OWN title
+// (pageTwinTitle), before scoring. Only an exactly equal folded title used to be
+// dropped, so a twin cluster of the page's own story (disjoint articles, so the
+// shared-members guard never saw it; the Aliyev-COP31 and the Eisenkot pairs of
+// 2026-11-08) scored highest and led the block: the reader saw the same story
+// twice. Against the page the line is stricter than between listed items:
+// RELATED_DUPLICATE_AGREEMENT must be reached in BOTH directions (a null
+// agreement counts as 0). A one-sided pair (a long rewording of a short
+// headline) is kept on purpose, whether it is a sibling story or a copy (the
+// live Afyon five-bodies pair and the cotton/polyester fine pair are copies and
+// still list each other): the "either direction" form dropped the
+// Erdoğan-Azerbaijan visit siblings and turned seven 'related' blocks of a
+// 177-page replay into 'latest' ones with unrelated filler. Known cost: two
+// stories that read alike both ways (Zeydi meets Trump / Zeydi meets Barrack,
+// 0.71 each) no longer list each other. In the 2026-11-08 replay, 3 of the 10
+// drops were different events with templated headlines that share only names
+// and a title word: the Erdoğan-Azerbaijan departure "Cumhurbaşkanı Erdoğan,
+// Azerbaycan'dan ayrıldı", dropped on the arrival page (0.75 / 0.75) and the
+// speech page (0.60 / 0.75), and the İçişleri 4 Nov operation ("... 230
+// gözaltı"), dropped on the 2 Nov operation's page ("... 86 tutuklama", 0.75 /
+// 0.60). The other 7 drops are real twins. The both-directions form keeps 6 of
+// the 8 departure-cluster drops the either-direction form made, not all of
+// them.
+//
 // Imports are constants, types and pure helpers (topic-query's slug list and
 // labels, the entity helpers the page already uses, the language helpers the
 // cards use, the title-agreement scorer, the entity hub's pattern builder), so
@@ -656,6 +680,24 @@ function nearDuplicate(a: Kept, b: Kept): boolean {
   return best >= RELATED_DUPLICATE_AGREEMENT - EPSILON;
 }
 
+/**
+ * A candidate title that is a twin of the PAGE'S own title (h76-stories-1): the
+ * folded titles are equal, or titleAgreement reaches RELATED_DUPLICATE_AGREEMENT
+ * in BOTH directions. Stricter than {@link nearDuplicate}, which needs one
+ * direction between two listed items: against the page, a one-sided pair (a long
+ * headline that carries a short one) can be a sibling story or a copy; it is
+ * kept on purpose, a precision trade-off that avoids turning related blocks into
+ * latest filler. A title with too few content stems has a null agreement from its own side, which
+ * counts as 0, so it can never be a twin by agreement (only by equal folded
+ * title). Linear in the two titles; the second agreement is skipped when the
+ * first one already misses.
+ */
+function pageTwinTitle(pageTitle: string, pageFolded: string, title: string, folded: string): boolean {
+  if (pageFolded === folded) return true;
+  if ((titleAgreement(pageTitle, title) ?? 0) < RELATED_DUPLICATE_AGREEMENT - EPSILON) return false;
+  return (titleAgreement(title, pageTitle) ?? 0) >= RELATED_DUPLICATE_AGREEMENT - EPSILON;
+}
+
 /** Newest first (an unparseable date last), equal dates by id descending: the order fetchTopicClusters uses. */
 function byRecency(a: Kept, b: Kept): number {
   const aBad = Number.isNaN(a.ms);
@@ -688,7 +730,8 @@ function dedupe(list: readonly Kept[], stopAt = Infinity): Kept[] {
  *
  * Drops, in this order: the page's own cluster, anything under two articles,
  * archived and merged clusters, a different `topic7`, a contentless title, a
- * title equal to the current one (a duplicate-looking story), a repeated id
+ * title equal to or a twin of the current one (a duplicate-looking story:
+ * RELATED_DUPLICATE_AGREEMENT in BOTH directions, h76-stories-1), a repeated id
  * (the first occurrence wins) and a story that shares at least half of its
  * articles with the current cluster (when the current cluster is in the pool).
  * Then, on the newest POOL_CAP of what is left, in recency order (`updated_at`
@@ -743,7 +786,8 @@ export function buildRelatedBlock(args: {
     const title = repairEntityResidue(cluster.title_tr).trim();
     if (isContentlessTitle(title)) continue;
     const folded = foldTitle(title);
-    if (folded === currentFolded) continue;
+    // The page's own twin (h76-stories-1): agreement at the line in both directions, not dedupe()'s either one.
+    if (pageTwinTitle(currentTitle, currentFolded, title, folded)) continue;
 
     if (seen.has(key)) continue;
     seen.add(key);
