@@ -5,6 +5,8 @@ import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
 import type { Quote } from "@/lib/finance/quotes";
 import { cn } from "@/lib/utils";
 
+import { StripFocusReveal } from "./strip-focus-reveal";
+
 // Inline ticker with its last price, the day move and, when known, the
 // move since the headline it sits under. Colour is spent only on moves;
 // the code itself is brand amber because it is the link. A price at the
@@ -89,7 +91,10 @@ export function TickerChip({
 // (drawn inside the link); the standalone chip has no clipping ancestor and
 // keeps its outside ring. The strip is positioned (`relative`) so absolutely
 // positioned descendants (the sr-only move text) are contained and clipped by
-// the scroller instead of widening the page.
+// the scroller instead of widening the page. The root is StripFocusReveal (a
+// thin "use client" div): on a keyboard Tab it scrolls a partly clipped chip
+// fully into view, which Blink does not do once 32 px of it show
+// (h65-keyboard-1). TickerTape itself stays a server component.
 //
 // `staleTickers` are the tickers whose last trade is too old to call a move
 // (the page's isStale). Like the chip, the tape then keeps the price but shows
@@ -108,7 +113,7 @@ export function TickerTape({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="tayf-scroll-x relative flex overflow-x-auto border border-border bg-foreground/[0.03] font-mono text-[11px] leading-none">
+    <StripFocusReveal className="tayf-scroll-x relative flex overflow-x-auto border border-border bg-foreground/[0.03] font-mono text-[11px] leading-none">
       {items.map((t) => {
         const q = quotes[t.ticker];
         const s = stats[t.ticker];
@@ -143,6 +148,6 @@ export function TickerTape({
           </Link>
         );
       })}
-    </div>
+    </StripFocusReveal>
   );
 }

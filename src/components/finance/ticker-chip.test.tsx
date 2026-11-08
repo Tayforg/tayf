@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { describe, expect, it } from "vitest";
 import { TickerChip, TickerTape } from "./ticker-chip";
+import { StripFocusReveal } from "./strip-focus-reveal";
 import type { Quote } from "@/lib/finance/quotes";
 import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
 import { rebaseQuoteOnStat } from "@/lib/finance/session";
@@ -211,7 +212,8 @@ describe("TickerTape", () => {
 
     it("the strip div is positioned (relative) as well as overflow-x-auto and tayf-scroll-x", () => {
       const root = collect(TickerTape({ items, quotes: { OZATD: { ...quote, hasBaseline: false } }, stats }))[0]!;
-      expect(root.type).toBe("div");
+      // The strip root became StripFocusReveal (a client div) in h65-keyboard-1; it renders the same className on a div.
+      expect(root.type).toBe(StripFocusReveal);
       const cls = tokens(root);
       expect(cls).toContain("relative");
       expect(cls).toContain("overflow-x-auto");
@@ -243,7 +245,7 @@ describe("TickerTape", () => {
         TERA: { ...quote, ticker: "TERA", hasBaseline: false },
       };
       const nodes = collect(TickerTape({ items: three, quotes, stats }));
-      const strips = nodes.filter((n) => n.type === "div" && tokens(n).includes("tayf-scroll-x"));
+      const strips = nodes.filter((n) => n.type === StripFocusReveal && tokens(n).includes("tayf-scroll-x"));
       expect(strips).toHaveLength(1);
       expect(tokens(strips[0]!)).toContain("relative");
       expect(spans(nodes).filter((n) => n.props.children === "değişim bilinmiyor")).toHaveLength(2);
@@ -255,6 +257,41 @@ describe("TickerTape", () => {
       );
       expect(links).toHaveLength(1);
       expect(tokens(links[0]!)).not.toContain("relative");
+    });
+  });
+
+  // h65-keyboard-1: Blink does not scroll a chip that is at least 32 px visible
+  // into view on focus, so a Tab onto a chip at the strip's right edge left it
+  // partly clipped. The strip root is now the small client wrapper that scrolls
+  // the focused chip into view; TickerTape itself stays a server component.
+  describe("keyboard focus reveal (h65-keyboard-1)", () => {
+    const tokens = (n: Node) => classOf(n).split(/\s+/).filter(Boolean);
+
+    it("the strip root is StripFocusReveal, still carrying tayf-scroll-x, relative and overflow-x-auto", () => {
+      const root = collect(TickerTape({ items, quotes: { OZATD: quote }, stats }))[0]!;
+      expect(root.type).toBe(StripFocusReveal);
+      const cls = tokens(root);
+      expect(cls).toContain("tayf-scroll-x");
+      expect(cls).toContain("relative");
+      expect(cls).toContain("overflow-x-auto");
+    });
+
+    it("the chips are still plain links, direct children of that one root", () => {
+      const two: TickerAttention[] = [
+        { ticker: "OZATD", articles: 3, sources: 2, ratio: null, title: "Özata" } as TickerAttention,
+        { ticker: "TURSG", articles: 2, sources: 2, ratio: null, title: "Sigorta" } as TickerAttention,
+      ];
+      const el = TickerTape({ items: two, quotes: { OZATD: quote }, stats }) as unknown as {
+        type: unknown;
+        props: { children: Array<{ type: unknown; props: { href: string } }> };
+      };
+      expect(el.type).toBe(StripFocusReveal);
+      expect(el.props.children.map((c) => c.type)).toEqual([Link, Link]);
+      expect(el.props.children.map((c) => c.props.href)).toEqual(["/ekonomi/OZATD", "/ekonomi/TURSG"]);
+    });
+
+    it("an empty strip still renders nothing", () => {
+      expect(TickerTape({ items: [], quotes: {}, stats })).toBeNull();
     });
   });
 
