@@ -1,7 +1,15 @@
 // Reads the stories the service worker saved for offline reading
 // (cache "tayf-saved-v1", one entry per bookmarked cluster). Client-safe; used
-// by the /offline page. Total: any cache error degrades to an empty list.
-import { CACHE_NAMES, HEADER_CACHED_AT, HEADER_TITLE, clusterPath } from "./sw-contract";
+// by the /offline page and the cluster error boundary. Total: any cache error
+// degrades to an empty list / no copy.
+import {
+  CACHE_NAMES,
+  HEADER_CACHED_AT,
+  HEADER_TITLE,
+  STORED_COPY_PARAM,
+  clusterPath,
+} from "./sw-contract";
+import { SW_CONFIG, isExpired } from "./sw-policy";
 
 export interface OfflineItem {
   id: string;
@@ -17,12 +25,21 @@ export interface HeadersLike {
 
 export interface CacheLike {
   keys(): Promise<ReadonlyArray<Request>>;
-  match(request: Request): Promise<{ headers: HeadersLike } | undefined>;
+  match(request: Request | string): Promise<{ headers: HeadersLike } | undefined>;
 }
 
 export interface CacheStorageLike {
   has(name: string): Promise<boolean>;
   open(name: string): Promise<CacheLike>;
+}
+
+/** The one write the page makes into Cache Storage: a put of a prepared Response. */
+export interface PutCacheLike {
+  put(request: Request | string, response: Response): Promise<void>;
+}
+
+export interface PutCacheStorageLike {
+  open(name: string): Promise<PutCacheLike>;
 }
 
 const FALLBACK_TITLE = "Kaydedilen hikâye";
@@ -55,13 +72,17 @@ export function toOfflineItem(url: string, headers: HeadersLike): OfflineItem | 
   const href = clusterPath(segment);
   if (href === null) return null;
 
-  const stamp = headers.get(HEADER_CACHED_AT);
   return {
     id: segment.toLowerCase(),
     href,
     title: decodeTitle(headers.get(HEADER_TITLE)),
-    cachedAt: stamp !== null && !Number.isNaN(Date.parse(stamp)) ? stamp : null,
+    cachedAt: parseableStamp(headers.get(HEADER_CACHED_AT)),
   };
+}
+
+/** The worker's cached-at stamp when it parses as a date, else null. */
+function parseableStamp(stamp: string | null): string | null {
+  return stamp !== null && !Number.isNaN(Date.parse(stamp)) ? stamp : null;
 }
 
 /** Newest copy first, undated copies last; ties keep their input order. */
@@ -99,5 +120,77 @@ export async function readOfflineItems(
     return sortOfflineItems(found.filter((item): item is OfflineItem => item !== null));
   } catch {
     return [];
+  }
+}
+
+export interface StoredCopy {
+  /** Same-origin link the service worker answers from Cache Storage: /cluster/<id>?kopya=1. */
+  href: string;
+  /** When the worker stored the copy; null when the stamp is missing or unparseable. */
+  cachedAt: string | null;
+}
+
+/**
+ * The copy of one story this device could show right now, or null. Mirrors the worker's own lookup (saved copy
+ * first, never expiring; then a pages copy, only inside the 14-day window), so a link is only offered when the
+ * worker will actually serve it. Both caches are asked for with `has` before either is opened, so this never
+ * creates one; any cache error, an invalid id or a missing CacheStorage is simply "no copy".
+ */
+export async function findStoredCopy(
+  cs: CacheStorageLike | undefined,
+  origin: string,
+  clusterId: string,
+  nowMs: number,
+): Promise<StoredCopy | null> {
+  if (cs === undefined) return null;
+  const path = clusterPath(clusterId);
+  if (path === null) return null;
+  try {
+    const hasSaved = await cs.has(CACHE_NAMES.saved);
+    const hasPages = await cs.has(CACHE_NAMES.pages);
+    const key = origin + path;
+    const lookups = [
+      { name: CACHE_NAMES.saved, exists: hasSaved, expires: false },
+      { name: CACHE_NAMES.pages, exists: hasPages, expires: true },
+    ];
+    for (const { name, exists, expires } of lookups) {
+      if (!exists) continue;
+      const hit = await (await cs.open(name)).match(key);
+      if (!hit) continue;
+      const stamp = hit.headers.get(HEADER_CACHED_AT);
+      if (expires && isExpired(stamp, nowMs, SW_CONFIG.pagesMaxAgeMs)) continue;
+      return { href: `${path}?${STORED_COPY_PARAM}=1`, cachedAt: parseableStamp(stamp) };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Leaves the one-shot "the reader clicked Kayıtlı kopyayı aç" mark the worker looks for before it answers
+ * /cluster/<id>?kopya=1 from storage (key = the normalized cluster url, value = empty body + a cached-at stamp).
+ * Only code on this origin can write it, which is the point: another site cannot unlock the stored-first answer,
+ * and a reload (no mark any more) takes the normal network-first path. Never throws; with no CacheStorage or an
+ * invalid id it does nothing, and a failed write simply means the worker answers network-first.
+ */
+export async function markStoredCopyOpen(
+  cs: PutCacheStorageLike | undefined,
+  origin: string,
+  clusterId: string,
+  nowMs: number,
+): Promise<void> {
+  if (cs === undefined) return;
+  const path = clusterPath(clusterId);
+  if (path === null) return;
+  try {
+    await (
+      await cs.open(CACHE_NAMES.openCopy)
+    ).put(
+      origin + path,
+      new Response(null, { status: 200, headers: { [HEADER_CACHED_AT]: new Date(nowMs).toISOString() } }),
+    );
+  } catch {
+    // best effort: without the mark the worker answers network-first, which is always safe
   }
 }

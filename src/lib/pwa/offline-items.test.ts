@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { readOfflineItems, sortOfflineItems, toOfflineItem, type OfflineItem } from "./offline-items";
+import {
+  findStoredCopy,
+  markStoredCopyOpen,
+  readOfflineItems,
+  sortOfflineItems,
+  toOfflineItem,
+  type OfflineItem,
+} from "./offline-items";
+import { CACHE_NAMES } from "./sw-contract";
+import { SW_CONFIG } from "./sw-policy";
 
 const ID_A = "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b";
 const ID_B = "a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d";
@@ -176,5 +185,254 @@ describe("readOfflineItems", () => {
       }),
     };
     await expect(readOfflineItems(keysBoom)).resolves.toEqual([]);
+  });
+});
+
+// h69-pwa-1: the cluster error boundary asks whether this device holds a copy of the story.
+describe("findStoredCopy", () => {
+  const NOW = Date.parse("2026-11-08T12:00:00.000Z");
+  const DAY = 24 * 60 * 60 * 1000;
+  const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+  const KEY = `${ORIGIN}/cluster/${ID_A}`;
+
+  type Stores = { saved?: Record<string, string | null>; pages?: Record<string, string | null> };
+
+  /** `Record<url, cachedAt | null>` per cache; an absent record means the cache does not exist. */
+  function fake(stores: Stores) {
+    const calls: string[] = [];
+    const byName = new Map<string, Record<string, string | null>>();
+    if (stores.saved) byName.set("tayf-saved-v1", stores.saved);
+    if (stores.pages) byName.set(SW_CONFIG.caches.pages, stores.pages);
+    const storage = {
+      has: vi.fn(async (name: string) => {
+        calls.push(`has:${name}`);
+        return byName.has(name);
+      }),
+      open: vi.fn(async (name: string) => {
+        calls.push(`open:${name}`);
+        const entries = byName.get(name) ?? {};
+        return {
+          keys: async () => [] as Request[],
+          match: async (request: Request | string) => {
+            const url = typeof request === "string" ? request : request.url;
+            calls.push(`match:${name}:${url}`);
+            if (!(url in entries)) return undefined;
+            const at = entries[url];
+            return { headers: headers(at === null || at === undefined ? {} : { at }) };
+          },
+        };
+      }),
+    };
+    return { storage, calls };
+  }
+
+  it("asks the saved and the pages cache whether they exist before opening either, so it never creates one", async () => {
+    const f = fake({});
+    await expect(findStoredCopy(f.storage, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+    expect(f.calls).toEqual([`has:tayf-saved-v1`, `has:${SW_CONFIG.caches.pages}`]);
+    expect(f.storage.open).not.toHaveBeenCalled();
+
+    const g = fake({ pages: { [KEY]: iso(DAY) } });
+    await findStoredCopy(g.storage, ORIGIN, ID_A, NOW);
+    const firstOpen = g.calls.findIndex((c) => c.startsWith("open:"));
+    expect(g.calls.slice(0, firstOpen)).toEqual([`has:tayf-saved-v1`, `has:${SW_CONFIG.caches.pages}`]);
+    expect(g.calls).not.toContain("open:tayf-saved-v1"); // that one does not exist
+  });
+
+  it("finds a saved copy under origin + /cluster/<lower-cased id> and links to it with ?kopya=1", async () => {
+    const at = iso(3 * DAY);
+    const f = fake({ saved: { [KEY]: at } });
+    await expect(findStoredCopy(f.storage, ORIGIN, ID_A.toUpperCase(), NOW)).resolves.toEqual({
+      href: `/cluster/${ID_A}?kopya=1`,
+      cachedAt: at,
+    });
+    expect(f.calls).toContain(`match:tayf-saved-v1:${KEY}`);
+  });
+
+  it("finds a pages copy that is inside the 14-day window", async () => {
+    const at = iso(13 * DAY);
+    const f = fake({ pages: { [KEY]: at } });
+    await expect(findStoredCopy(f.storage, ORIGIN, ID_A, NOW)).resolves.toEqual({
+      href: `/cluster/${ID_A}?kopya=1`,
+      cachedAt: at,
+    });
+  });
+
+  it("prefers the saved copy and does not even read pages then", async () => {
+    const f = fake({ saved: { [KEY]: iso(DAY) }, pages: { [KEY]: iso(0) } });
+    const out = await findStoredCopy(f.storage, ORIGIN, ID_A, NOW);
+    expect(out?.cachedAt).toBe(iso(DAY));
+    expect(f.calls.some((c) => c.startsWith(`match:${SW_CONFIG.caches.pages}`))).toBe(false);
+  });
+
+  it("a saved copy never expires, however old", async () => {
+    const f = fake({ saved: { [KEY]: iso(400 * DAY) } });
+    await expect(findStoredCopy(f.storage, ORIGIN, ID_A, NOW)).resolves.not.toBeNull();
+  });
+
+  it("an expired pages copy is not offered (the worker would not serve it either)", async () => {
+    const f = fake({ pages: { [KEY]: iso(SW_CONFIG.pagesMaxAgeMs + 1) } });
+    await expect(findStoredCopy(f.storage, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+  });
+
+  it("a pages copy exactly at the limit is still fresh, one millisecond over is not", async () => {
+    const edge = fake({ pages: { [KEY]: iso(SW_CONFIG.pagesMaxAgeMs) } });
+    await expect(findStoredCopy(edge.storage, ORIGIN, ID_A, NOW)).resolves.not.toBeNull();
+    const over = fake({ pages: { [KEY]: iso(SW_CONFIG.pagesMaxAgeMs + 1) } });
+    await expect(findStoredCopy(over.storage, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+  });
+
+  it("a pages copy without a usable stamp counts as expired; a saved one without a stamp is offered with cachedAt null", async () => {
+    const pages = fake({ pages: { [KEY]: null } });
+    await expect(findStoredCopy(pages.storage, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+    const badPages = fake({ pages: { [KEY]: "yesterday-ish" } });
+    await expect(findStoredCopy(badPages.storage, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+
+    const saved = fake({ saved: { [KEY]: null } });
+    await expect(findStoredCopy(saved.storage, ORIGIN, ID_A, NOW)).resolves.toEqual({
+      href: `/cluster/${ID_A}?kopya=1`,
+      cachedAt: null,
+    });
+    const badSaved = fake({ saved: { [KEY]: "yesterday-ish" } });
+    await expect(findStoredCopy(badSaved.storage, ORIGIN, ID_A, NOW)).resolves.toEqual({
+      href: `/cluster/${ID_A}?kopya=1`,
+      cachedAt: null,
+    });
+  });
+
+  it("a saved copy still wins when the pages copy of the same story is expired", async () => {
+    const f = fake({ saved: { [KEY]: iso(DAY) }, pages: { [KEY]: iso(30 * DAY) } });
+    const out = await findStoredCopy(f.storage, ORIGIN, ID_A, NOW);
+    expect(out?.cachedAt).toBe(iso(DAY));
+  });
+
+  it("is null for another story's copy", async () => {
+    const f = fake({ saved: { [`${ORIGIN}/cluster/${ID_B}`]: iso(0) } });
+    await expect(findStoredCopy(f.storage, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+  });
+
+  it("is null for an invalid id and touches no cache API", async () => {
+    for (const id of ["", "not-a-uuid", "../admin", `${ID_A}/x`, `${ID_A}?x=1`, undefined as unknown as string, null as unknown as string]) {
+      const f = fake({ saved: { [KEY]: iso(0) } });
+      await expect(findStoredCopy(f.storage, ORIGIN, id, NOW), String(id)).resolves.toBeNull();
+      expect(f.calls, String(id)).toEqual([]);
+    }
+  });
+
+  it("is null when there is no CacheStorage", async () => {
+    await expect(findStoredCopy(undefined, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+  });
+
+  it("is null, not a rejection, when the cache API throws", async () => {
+    const hasBoom = { has: async () => Promise.reject(new Error("x")), open: vi.fn() };
+    await expect(findStoredCopy(hasBoom, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+    const openBoom = { has: async () => true, open: async () => Promise.reject(new Error("x")) };
+    await expect(findStoredCopy(openBoom, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+    const matchBoom = {
+      has: async () => true,
+      open: async () => ({
+        keys: async () => [] as Request[],
+        match: async () => {
+          throw new Error("x");
+        },
+      }),
+    };
+    await expect(findStoredCopy(matchBoom, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+  });
+
+  it("builds the key from the origin it is given", async () => {
+    const f = fake({ saved: { [`https://www.tayfhaber.com/cluster/${ID_A}`]: iso(0) } });
+    await expect(findStoredCopy(f.storage, ORIGIN, ID_A, NOW)).resolves.toBeNull();
+    await expect(findStoredCopy(f.storage, "https://www.tayfhaber.com", ID_A, NOW)).resolves.not.toBeNull();
+  });
+
+  it("reads the cache names the worker writes (guards a rename)", () => {
+    expect(SW_CONFIG.caches.saved).toBe("tayf-saved-v1");
+    expect(SW_CONFIG.caches.pages).toMatch(/^tayf-pages-/);
+  });
+});
+
+// security-1 / sw-kopya-reload-trap: the "Kayıtlı kopyayı aç" click leaves a one-shot mark in Cache Storage; the
+// worker answers the next ?kopya=1 navigation from storage only when it finds (and takes) that mark. Only code
+// running on this origin can write it.
+describe("markStoredCopyOpen", () => {
+  const NOW = Date.parse("2026-11-08T12:00:00.000Z");
+  const KEY = `${ORIGIN}/cluster/${ID_A}`;
+
+  function recorder() {
+    const puts: Array<{ cache: string; key: string; status: number; stamp: string | null; body: string | null }> = [];
+    const storage = {
+      has: vi.fn(async () => true),
+      open: vi.fn(async (name: string) => ({
+        keys: async () => [] as Request[],
+        match: async () => undefined,
+        put: async (request: Request | string, response: Response) => {
+          puts.push({
+            cache: name,
+            key: typeof request === "string" ? request : request.url,
+            status: response.status,
+            stamp: response.headers.get("x-tayf-cached-at"),
+            body: await response.text(),
+          });
+        },
+      })),
+    };
+    return { storage, puts };
+  }
+
+  it("writes the normalized lower-case cluster url into the open-copy cache, with a cached-at stamp and an empty body", async () => {
+    const r = recorder();
+    await markStoredCopyOpen(r.storage, ORIGIN, ID_A.toUpperCase(), NOW);
+    expect(r.puts).toEqual([
+      { cache: CACHE_NAMES.openCopy, key: KEY, status: 200, stamp: new Date(NOW).toISOString(), body: "" },
+    ]);
+    expect(CACHE_NAMES.openCopy).toMatch(/^tayf-open-copy-/);
+  });
+
+  it("builds the key from the origin it is given", async () => {
+    const r = recorder();
+    await markStoredCopyOpen(r.storage, "https://www.tayfhaber.com", ID_B, NOW);
+    expect(r.puts.map((p) => p.key)).toEqual([`https://www.tayfhaber.com/cluster/${ID_B}`]);
+  });
+
+  it("does nothing, and resolves, when there is no CacheStorage", async () => {
+    await expect(markStoredCopyOpen(undefined, ORIGIN, ID_A, NOW)).resolves.toBeUndefined();
+  });
+
+  it("does nothing for an invalid id and touches no cache API", async () => {
+    for (const id of ["", "not-a-uuid", "../admin", `${ID_A}/x`, `${ID_A}?x=1`, undefined as unknown as string, null as unknown as string]) {
+      const r = recorder();
+      await expect(markStoredCopyOpen(r.storage, ORIGIN, id, NOW), String(id)).resolves.toBeUndefined();
+      expect(r.storage.open, String(id)).not.toHaveBeenCalled();
+      expect(r.puts, String(id)).toEqual([]);
+    }
+  });
+
+  it("never rejects: a throwing open() or put() is swallowed", async () => {
+    const openBoom = { has: async () => true, open: vi.fn(async () => Promise.reject(new Error("SecurityError"))) };
+    await expect(markStoredCopyOpen(openBoom, ORIGIN, ID_A, NOW)).resolves.toBeUndefined();
+    expect(openBoom.open).toHaveBeenCalledTimes(1);
+
+    const putBoom = {
+      has: async () => true,
+      open: async () => ({
+        keys: async () => [] as Request[],
+        match: async () => undefined,
+        put: async () => {
+          throw new Error("QuotaExceededError");
+        },
+      }),
+    };
+    await expect(markStoredCopyOpen(putBoom, ORIGIN, ID_A, NOW)).resolves.toBeUndefined();
+  });
+
+  it("a synchronous throw from open() is swallowed too", async () => {
+    const syncBoom = {
+      has: async () => true,
+      open: () => {
+        throw new Error("sync");
+      },
+    };
+    await expect(markStoredCopyOpen(syncBoom, ORIGIN, ID_A, NOW)).resolves.toBeUndefined();
   });
 });

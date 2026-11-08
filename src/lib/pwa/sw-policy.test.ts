@@ -4,6 +4,7 @@ import {
   CACHE_NAMES,
   HEADER_CACHED_AT,
   HEADER_TITLE,
+  STORED_COPY_PARAM,
   SYNC_MAX_IDS,
 } from "./sw-contract";
 import {
@@ -21,6 +22,7 @@ import {
   pageCacheKey,
   parseMessage,
   planTrim,
+  wantsStoredCopy,
 } from "./sw-policy";
 
 const ORIGIN = "https://tayf.test";
@@ -53,7 +55,7 @@ function res(over: Record<string, unknown> = {}, h: Record<string, string> = {})
 describe("SW_CONFIG", () => {
   it("carries the documented limits", () => {
     expect(SW_CONFIG).toMatchObject({
-      version: "v2",
+      version: "v3",
       cachePrefix: "tayf-",
       offlinePath: "/offline",
       swUrl: "/sw.js",
@@ -63,6 +65,9 @@ describe("SW_CONFIG", () => {
       pagesMaxAgeMs: 14 * DAY,
       staticMaxEntries: 300,
       savedMaxEntries: 100,
+      savedAssetsMaxEntries: 400,
+      savedAssetsPerPage: 80,
+      storedCopyMarkMs: 30_000,
       shellMaxAssets: 60,
       shellMaxAgeMs: 7 * DAY,
       syncWarmMax: 3,
@@ -185,6 +190,54 @@ describe("pageCacheKey", () => {
     "",
   ])("is null for %s", (url) => {
     expect(pageCacheKey(url, ORIGIN)).toBeNull();
+  });
+});
+
+describe("wantsStoredCopy", () => {
+  // h69-pwa-1: the cluster error boundary links to /cluster/<id>?kopya=1 when this device holds a copy; only that
+  // explicit request makes the worker answer from Cache Storage before the network.
+  it("names the query parameter the error boundary link uses", () => {
+    expect(STORED_COPY_PARAM).toBe("kopya");
+  });
+
+  it.each([
+    `${ORIGIN}/cluster/${ID}?kopya=1`,
+    `${ORIGIN}/cluster/${ID_UPPER}?kopya=1`,
+    `${ORIGIN}/cluster/${ID}?utm_source=x&kopya=1`,
+    `${ORIGIN}/cluster/${ID}?kopya=1&utm_source=x`,
+    `${ORIGIN}/cluster/${ID}?kopya=1#yorumlar`,
+    `${ORIGIN}/cluster/${ID}/?kopya=1`, // same allowlist as pageCacheKey
+  ])("is true for %s", (url) => {
+    expect(wantsStoredCopy(url, ORIGIN)).toBe(true);
+  });
+
+  it.each([
+    ["no query", `${ORIGIN}/cluster/${ID}`],
+    ["an empty query", `${ORIGIN}/cluster/${ID}?`],
+    ["kopya=0", `${ORIGIN}/cluster/${ID}?kopya=0`],
+    ["an empty kopya", `${ORIGIN}/cluster/${ID}?kopya=`],
+    ["a bare kopya", `${ORIGIN}/cluster/${ID}?kopya`],
+    ["kopya=true", `${ORIGIN}/cluster/${ID}?kopya=true`],
+    ["kopya=11", `${ORIGIN}/cluster/${ID}?kopya=11`],
+    ["the first kopya being 0", `${ORIGIN}/cluster/${ID}?kopya=0&kopya=1`],
+    ["a different parameter name", `${ORIGIN}/cluster/${ID}?copy=1`],
+    ["a differently cased parameter name", `${ORIGIN}/cluster/${ID}?KOPYA=1`],
+    ["the parameter in the hash only", `${ORIGIN}/cluster/${ID}#kopya=1`],
+    ["the home page", `${ORIGIN}/?kopya=1`],
+    ["the offline shell", `${ORIGIN}/offline?kopya=1`],
+    ["a sub-page", `${ORIGIN}/cluster/${ID}/kart?kopya=1`],
+    ["a non-uuid id", `${ORIGIN}/cluster/not-a-uuid?kopya=1`],
+    ["an id with a suffix", `${ORIGIN}/cluster/${ID}x?kopya=1`],
+    ["another origin", `https://evil.test/cluster/${ID}?kopya=1`],
+    ["an embed path", `${ORIGIN}/embed/cluster/${ID}?kopya=1`],
+    ["a malformed url", "not a url?kopya=1"],
+    ["an empty url", ""],
+  ])("is false for %s", (_name, url) => {
+    expect(wantsStoredCopy(url, ORIGIN)).toBe(false);
+  });
+
+  it("is false when the origin argument does not match", () => {
+    expect(wantsStoredCopy(`${ORIGIN}/cluster/${ID}?kopya=1`, "https://other.test")).toBe(false);
   });
 });
 

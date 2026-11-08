@@ -28,6 +28,7 @@ import {
   HEADER_CACHED_AT,
   HEADER_TITLE,
   OFFLINE_PATH,
+  STORED_COPY_PARAM,
   SW_URL,
   SW_VERSION,
   SYNC_MAX_IDS,
@@ -50,6 +51,12 @@ export interface SwConfig {
   pagesMaxAgeMs: number;
   staticMaxEntries: number;
   savedMaxEntries: number;
+  /** Cap of the saved-assets cache (static files of pinned pages), oldest entries first out. */
+  savedAssetsMaxEntries: number;
+  /** Most static assets taken from one pinned page. */
+  savedAssetsPerPage: number;
+  /** How long a one-shot "open the stored copy" mark (CACHE_NAMES.openCopy) stays valid after the click. */
+  storedCopyMarkMs: number;
   shellMaxAssets: number;
   shellMaxAgeMs: number;
   syncWarmMax: number;
@@ -70,6 +77,9 @@ export const SW_CONFIG: SwConfig = {
   pagesMaxAgeMs: 14 * DAY_MS,
   staticMaxEntries: 300,
   savedMaxEntries: 100,
+  savedAssetsMaxEntries: 400,
+  savedAssetsPerPage: 80,
+  storedCopyMarkMs: 30_000,
   shellMaxAssets: 60,
   shellMaxAgeMs: 7 * DAY_MS,
   syncWarmMax: 3,
@@ -143,6 +153,20 @@ export function pageCacheKey(url: string, origin: string): string | null {
   const m = new RegExp(PAGE_PATH_PATTERN, "i").exec(u.pathname);
   if (m === null) return null;
   return origin + "/cluster/" + (m[1] as string).toLowerCase();
+}
+
+/**
+ * True for a navigation that explicitly asks for the copy stored on this device: an allowlisted /cluster/<uuid>
+ * url (same rule as pageCacheKey) whose query starts with kopya=1. The cluster error boundary links here: the
+ * route answers 200 before its database read, so a brownout reaches the reader as the error shell and neither
+ * the navigation timer nor the 5xx branch can substitute the copy. Everything else keeps the network-first path.
+ * The url alone never unlocks the stored-first answer: the worker also needs the one-shot mark the click wrote
+ * (CACHE_NAMES.openCopy, storedCopyMarkMs), so a reload or a link from another site stays network-first.
+ */
+export function wantsStoredCopy(url: string, origin: string): boolean {
+  if (pageCacheKey(url, origin) === null) return false;
+  const u = parseUrl(url);
+  return u !== null && u.searchParams.get(STORED_COPY_PARAM) === "1";
 }
 
 export function isCacheableResponse(

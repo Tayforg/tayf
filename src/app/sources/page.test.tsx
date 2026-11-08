@@ -138,6 +138,53 @@ function makeFakeClient() {
       // forgets `created_at, zone_rationale_at, fetch_quarantined_until` in its select string must not
       // be rescued by a fake that hands them over anyway.
       sources: (state) => {
+        // h69-jsonld-1: the newest registry_changed_at stamp, a separate one-row read of the
+        // same table. Mirrors the query it is given (ordered when asked, cut to `.limit(n)`)
+        // and records every filter, so a test can show it is not narrowed to active rows.
+        if (String(state.selectArgs[0] ?? "") === "registry_changed_at") {
+          supabaseFixture.registryChangedQueries.push({
+            select: String(state.selectArgs[0] ?? ""),
+            order: state.order.map((o) => ({
+              col: o.col,
+              ascending:
+                (o.opts as { ascending?: boolean } | undefined)?.ascending ?? true,
+            })),
+            limit: state.limit,
+            filters: [
+              ...state.eq.map((f) => `eq ${f.col}`),
+              ...state.neq.map((f) => `neq ${f.col}`),
+              ...state.in.map((f) => `in ${f.col}`),
+              ...state.is.map((f) => `is ${f.col}`),
+              ...state.not.map((f) => `not ${f.col}`),
+              ...state.or.map((f) => `or ${f}`),
+              ...state.gt.map((f) => `gt ${f.col}`),
+              ...state.gte.map((f) => `gte ${f.col}`),
+              ...state.lt.map((f) => `lt ${f.col}`),
+              ...state.lte.map((f) => `lte ${f.col}`),
+            ],
+          });
+          if (supabaseFixture.registryChangedError) {
+            return {
+              data: null,
+              error: { message: supabaseFixture.registryChangedError },
+            };
+          }
+          let rows = supabaseFixture.registryChangedAt.map((at) => ({
+            registry_changed_at: at,
+          }));
+          const byStamp = state.order.find((o) => o.col === "registry_changed_at");
+          if (byStamp) {
+            const ascending =
+              (byStamp.opts as { ascending?: boolean } | undefined)?.ascending ?? true;
+            rows = rows.sort(
+              (a, b) =>
+                (Date.parse(a.registry_changed_at) - Date.parse(b.registry_changed_at)) *
+                (ascending ? 1 : -1),
+            );
+          }
+          if (state.limit !== null) rows = rows.slice(0, state.limit);
+          return { data: rows, error: null };
+        }
         if (supabaseFixture.sourcesError) {
           return { data: null, error: { message: supabaseFixture.sourcesError } };
         }
@@ -211,6 +258,17 @@ const supabaseFixture = vi.hoisted(() => ({
   historyError: null as string | null,
   /** When set, the sources directory read resolves { data: null, error: { message } }. */
   sourcesError: null as string | null,
+  /** sources.registry_changed_at stamps (migration 175): every row of the table, active or not. */
+  registryChangedAt: [] as string[],
+  /** When set, the registry_changed_at read resolves { data: null, error: { message } }. */
+  registryChangedError: null as string | null,
+  /** What each registry_changed_at query asked for (select, order, limit, filters). */
+  registryChangedQueries: [] as Array<{
+    select: string;
+    order: Array<{ col: string; ascending: boolean }>;
+    limit: number | null;
+    filters: string[];
+  }>,
   /** What each source_zone_history query asked for (select, order, limit). */
   historyQueries: [] as Array<{
     select: string;
@@ -357,6 +415,9 @@ beforeEach(() => {
   supabaseFixture.history = [];
   supabaseFixture.historyError = null;
   supabaseFixture.sourcesError = null;
+  supabaseFixture.registryChangedAt = [];
+  supabaseFixture.registryChangedError = null;
+  supabaseFixture.registryChangedQueries.length = 0;
   supabaseFixture.historyQueries.length = 0;
   supabaseFixture.calls.length = 0;
   clickbaitFixture.public = false;
@@ -1287,6 +1348,149 @@ describe("/sources page -- clock values are stamped when the directory is read",
     const dataset = jsonLdOf(await SourcesPage());
 
     expect(dataset.dateModified).toBe("2026-10-20T08:00:00.000Z");
+  });
+
+  // h69-jsonld-1: created_at, zone_rationale_at and the zone history do not move when a source's
+  // kind, kayyum (trustee) status, rights flags, name, URL or active flag change, so dateModified
+  // sat at the day the registry was created. sources.registry_changed_at (migration 175) is
+  // stamped by a trigger on exactly those edits; the page reads its newest value in the same
+  // Promise.all as the directory and the zone history.
+  it("(e) the newest sources.registry_changed_at is dateModified when every other input is older", async () => {
+    vi.setSystemTime(Date.parse("2026-11-10T09:30:00.000Z"));
+    supabaseFixture.createdAtBySlug = { "s-outlet": "2026-04-06T14:20:11.360Z" };
+    supabaseFixture.rationaleBySlug = { "s-aggregator": "2026-10-05T00:00:00Z" };
+    supabaseFixture.history = [{ changed_at: "2026-10-20T08:00:00.000Z" }];
+    supabaseFixture.registryChangedAt = ["2026-11-09T00:00:00Z"];
+
+    const dataset = jsonLdOf(await SourcesPage());
+
+    expect(dataset.dateModified).toBe("2026-11-09T00:00:00.000Z");
+  });
+
+  it("(e) the page takes the newest of the stamps the database returns, not the first", async () => {
+    supabaseFixture.registryChangedAt = [
+      "2026-09-06T22:16:36Z",
+      "2026-11-09T00:00:00Z",
+      "2026-10-01T00:00:00Z",
+    ];
+
+    const dataset = jsonLdOf(await SourcesPage());
+
+    expect(dataset.dateModified).toBe("2026-11-09T00:00:00.000Z");
+  });
+
+  it("(e) an older registry_changed_at never lowers dateModified: it is one more input to the maximum", async () => {
+    supabaseFixture.history = [{ changed_at: "2026-10-20T08:00:00.000Z" }];
+    supabaseFixture.registryChangedAt = ["2026-08-01T00:00:00Z"];
+
+    const dataset = jsonLdOf(await SourcesPage());
+
+    expect(dataset.dateModified).toBe("2026-10-20T08:00:00.000Z");
+  });
+
+  it("(e) a registry_changed_at alone is enough when every other stamp is NULL and the history is empty", async () => {
+    supabaseFixture.createdAtBySlug = {
+      "s-outlet": null,
+      "s-aggregator": null,
+      "s-wire": null,
+    };
+    supabaseFixture.rationaleBySlug = {};
+    supabaseFixture.history = [];
+    supabaseFixture.registryChangedAt = ["2026-11-09T00:00:00Z"];
+
+    const dataset = jsonLdOf(await SourcesPage());
+
+    expect(dataset.dateModified).toBe("2026-11-09T00:00:00.000Z");
+  });
+
+  it("(e) the stamp read is one row of the newest stamp and is NOT filtered, so deactivating a source counts", async () => {
+    supabaseFixture.registryChangedAt = ["2026-11-09T00:00:00Z"];
+
+    await SourcesPage();
+
+    // No eq/neq/in/is/not/or/range filter at all: in particular none on `active`. The directory
+    // read lists active sources only, a deactivated one would otherwise drop out of the maximum.
+    expect(supabaseFixture.registryChangedQueries).toEqual([
+      {
+        select: "registry_changed_at",
+        order: [{ col: "registry_changed_at", ascending: false }],
+        limit: 1,
+        filters: [],
+      },
+    ]);
+  });
+
+  it("(e) the stamp is read once per directory read, never per source", async () => {
+    supabaseFixture.registryChangedAt = ["2026-11-09T00:00:00Z"];
+
+    await SourcesPage();
+    await SourcesPage();
+
+    // The "use cache" directive is a no-op under Vitest, so each render is one directory read; three sources, one query.
+    expect(supabaseFixture.registryChangedQueries).toHaveLength(2);
+  });
+
+  it("(e) two renders under different system clocks report the same registry-based dateModified", async () => {
+    supabaseFixture.registryChangedAt = ["2026-11-09T00:00:00Z"];
+
+    vi.setSystemTime(Date.parse("2026-11-10T09:30:00.000Z"));
+    const first = jsonLdOf(await SourcesPage());
+    vi.setSystemTime(Date.parse("2026-11-10T09:30:20.000Z"));
+    const second = jsonLdOf(await SourcesPage());
+
+    expect(first.dateModified).toBe("2026-11-09T00:00:00.000Z");
+    expect(second.dateModified).toBe(first.dateModified);
+  });
+
+  it("(f) an unreadable registry_changed_at leaves dateModified out but still renders the directory", async () => {
+    supabaseFixture.registryChangedError = 'column sources.registry_changed_at does not exist';
+    // A partial max (the other inputs only) would understate the change time: it must not be used.
+    supabaseFixture.createdAtBySlug = { "s-outlet": "2026-09-01T00:00:00Z" };
+    supabaseFixture.history = [{ changed_at: "2026-10-20T08:00:00.000Z" }];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const tree = await SourcesPage();
+    const dataset = jsonLdOf(tree);
+    const text = (await collectText(tree)).join(" ");
+    const hrefs = await collectHrefs(tree);
+
+    expect("dateModified" in dataset).toBe(false);
+    expect(dataset["@type"]).toBe("Dataset");
+    expect(text).toContain("Yanlılık dağılımına sayılan");
+    expect(text).not.toContain("Kaynak listesi şu an yüklenemedi");
+    expect(findElementProps(tree, "meta")).toBeNull();
+    expect(hrefs.filter((h) => h.startsWith("/source/"))).toHaveLength(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("[sources] registry change stamp unreadable");
+    expect(String(warn.mock.calls[0]?.[0])).toContain("registry_changed_at does not exist");
+  });
+
+  it("(f) both side reads failing warns once for each and still omits dateModified", async () => {
+    supabaseFixture.registryChangedError = "statement timeout";
+    supabaseFixture.historyError = "statement timeout";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const tree = await SourcesPage();
+    const dataset = jsonLdOf(tree);
+
+    expect("dateModified" in dataset).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(2);
+    const messages = warn.mock.calls.map((c) => String(c[0]));
+    expect(messages.some((m) => m.includes("[sources] zone history unreadable"))).toBe(true);
+    expect(messages.some((m) => m.includes("[sources] registry change stamp unreadable"))).toBe(true);
+  });
+
+  it("(f) a failing directory read is still the error state, whatever the registry stamp says", async () => {
+    supabaseFixture.sourcesError = "canceling statement due to statement timeout";
+    supabaseFixture.registryChangedAt = ["2026-11-09T00:00:00Z"];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join(" ");
+
+    expect(text).toContain("Kaynak listesi şu an yüklenemedi");
+    expect(findElementProps(tree, "meta")).toMatchObject({ name: "robots", content: "noindex" });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[sources] unavailable"));
   });
 
   it("a failing directory read is still the error state, whatever the history says", async () => {
