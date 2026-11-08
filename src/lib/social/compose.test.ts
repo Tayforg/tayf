@@ -257,6 +257,67 @@ describe("composeBlueskyBlindspot", () => {
   });
 });
 
+// h64-ogcards-2. A title that has to be cut to fit the 300-grapheme post was cut
+// at a hard grapheme count (mid-word); it is cut at a word now, like the OG card.
+// The count is still graphemes: a cut never lands inside a ZWJ emoji or a flag.
+describe("Bluesky title cut (h64-ogcards-2)", () => {
+  const segmenter = new Intl.Segmenter("tr", { granularity: "grapheme" });
+  const graphemes = (s: string): string[] => Array.from(segmenter.segment(s), (x) => x.segment);
+  const FAMILY = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}";
+
+  it("a long blindspot title is cut at a whole word, never inside one", () => {
+    const { text } = composeBlueskyBlindspot({
+      title: "kelime ".repeat(80).trimEnd(),
+      clusterUrl: "https://tayfhaber.com/cluster/c1",
+      dominantZone: "iktidar",
+      sources: SOURCES_MIXED,
+    });
+    const titleLine = text.split("\n")[1] ?? "";
+    expect(titleLine).toMatch(/^(?:kelime )*kelime…$/);
+    expect(graphemes(text).length).toBeLessThanOrEqual(300);
+    // Most of the room is used: the cut did not fall back to a few words.
+    expect(titleLine.length).toBeGreaterThan(100);
+  });
+
+  it("a long top-story title is cut at a whole word, never inside one", () => {
+    const { text } = composeBlueskyTopStory({
+      title: "kelime ".repeat(80).trimEnd(),
+      clusterUrl: "https://tayfhaber.com/cluster/c2",
+      sources: SOURCES_MIXED,
+    });
+    const titleLine = text.split("\n")[1] ?? "";
+    expect(titleLine).toMatch(/^(?:kelime )*kelime…$/);
+    expect(graphemes(text).length).toBeLessThanOrEqual(300);
+  });
+
+  it("a title that fits is posted whole", () => {
+    const title = "Deprem yönetmeliği değişti";
+    const { text } = composeBlueskyTopStory({
+      title,
+      clusterUrl: "https://tayfhaber.com/cluster/c2",
+      sources: SOURCES_MIXED,
+    });
+    expect(text.split("\n")[1]).toBe(title);
+  });
+
+  it("never cuts inside a ZWJ emoji or a flag when the title has no blank to cut at", () => {
+    for (const unit of [FAMILY, "\u{1F1F9}\u{1F1F7}", "i\u0307"]) {
+      const { text } = composeBlueskyBlindspot({
+        title: unit.repeat(400),
+        clusterUrl: "https://tayfhaber.com/cluster/c1",
+        dominantZone: "iktidar",
+        sources: SOURCES_MIXED,
+      });
+      const titleLine = text.split("\n")[1] ?? "";
+      expect(titleLine.endsWith("…")).toBe(true);
+      const body = graphemes(titleLine.slice(0, -1));
+      expect(body.length).toBeGreaterThan(0);
+      expect(body.every((g) => g === unit), JSON.stringify(unit)).toBe(true);
+      expect(graphemes(text).length).toBeLessThanOrEqual(300);
+    }
+  });
+});
+
 describe("composeBlueskyTopStory", () => {
   it("has no URL line; embed carries the utm url", () => {
     const { text, embed } = composeBlueskyTopStory({

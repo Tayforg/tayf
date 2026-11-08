@@ -5,6 +5,7 @@ import {
   OG_TITLE_MAX_CHARS,
   OG_TITLE_MAX_LINES,
   clampOgTitle,
+  cutAtWord,
 } from "./og-title";
 
 // Hunt 20, h20-contracts-1. The cluster OG card (1200x630) cut a long headline
@@ -344,5 +345,198 @@ describe("clampOgTitle robustness", () => {
     expect(plain.fontSize).toBe(44);
     expect(cp(ribbon.text)).toBeGreaterThan(80);
     expect(ribbon.fontSize).toBe(52);
+  });
+});
+
+// h64-ogcards-2. The Manşet Kartı, the embed and oEmbed cut a headline at a hard
+// code-point count, mid-word ('…32 binden fazla bu…', '…hesaba çekilme…' - which
+// turns the 'çekilmeli' ("should be held to account") of the stored title into a
+// noun). cutAtWord() is the cut clampOgTitle() always used, exported so every
+// share surface cuts the same way. Both fixtures are the real stored titles of
+// 2026-11-08, pinned because the clusters get re-titled.
+
+/** Cluster 790d2354-48f1-434b-815d-0ba8f4f84e74, the İktidar line of the kart (Hürriyet, 135 code points). */
+const HURRIYET_HEADLINE =
+  "Bakan Ersoy, Kültür ve Turizm Bakanlığı'nın 2027 yılı bütçesini sundu | Geleceğe miras ile 32 binden fazla buluntu gün yüzüne çıkarıldı";
+
+/** Cluster d26a31d4-5627-49b4-bef0-e68d60eccde5, the neutral title (142 code points). */
+const NEUTRAL_D26A31D4 =
+  "AKP’li isim Fatma Betül’ün sevk yazısındaki gerekçeye dikkat çekti: ‘Biliniyordu… İhmali veya kastı olan kamu görevlileri de hesaba çekilmeli’";
+
+describe("cutAtWord", () => {
+  it("cuts the Hürriyet headline at 110 after 'fazla', never inside 'buluntu'", () => {
+    expect(cp(HURRIYET_HEADLINE)).toBe(135);
+    const out = cutAtWord(HURRIYET_HEADLINE, 110);
+    expect(out.endsWith("fazla…")).toBe(true);
+    expect(out).not.toContain("bu…");
+    expect(out).toBe("Bakan Ersoy, Kültür ve Turizm Bakanlığı'nın 2027 yılı bütçesini sundu | Geleceğe miras ile 32 binden fazla…");
+    expect(cp(out)).toBeLessThanOrEqual(110);
+  });
+
+  it("cuts the d26a31d4 neutral title at 140 after 'hesaba', not as the noun 'çekilme'", () => {
+    expect(cp(NEUTRAL_D26A31D4)).toBeGreaterThan(140);
+    const out = cutAtWord(NEUTRAL_D26A31D4, 140);
+    expect(out.endsWith("hesaba…")).toBe(true);
+    expect(out).not.toContain("çekilme");
+    expect(cp(out)).toBeLessThanOrEqual(140);
+    // A whole-word prefix: the original goes on with a blank after the kept text.
+    const body = out.slice(0, -1);
+    expect(NEUTRAL_D26A31D4.startsWith(body)).toBe(true);
+    expect(NEUTRAL_D26A31D4.charAt(body.length)).toBe(" ");
+  });
+
+  it("one long blank-free word gets a hard cut of exactly max code points", () => {
+    const word = "x".repeat(300);
+    const out = cutAtWord(word, 140);
+    expect(out).toBe(`${"x".repeat(139)}…`);
+    expect(cp(out)).toBe(140);
+  });
+
+  it("a blank earlier than 60% of max is not worth cutting at: the cut is a hard cut", () => {
+    const title = `${"a".repeat(10)} ${"b".repeat(150)}`;
+    expect(cutAtWord(title, 100)).toBe(`${title.slice(0, 99)}…`);
+    // Index 60 is inclusive: a blank there is used.
+    const at60 = `${"a".repeat(60)} ${"b".repeat(150)}`;
+    expect(cutAtWord(at60, 100)).toBe(`${"a".repeat(60)}…`);
+    const at59 = `${"a".repeat(59)} ${"b".repeat(150)}`;
+    expect(cutAtWord(at59, 100)).toBe(`${at59.slice(0, 99)}…`);
+  });
+
+  it("keeps the whole last word when the next code point after the kept run is a blank", () => {
+    const title = `${"a".repeat(139)} ${"b".repeat(30)}`;
+    expect(cutAtWord(title, 140)).toBe(`${"a".repeat(139)}…`);
+  });
+
+  it("never splits an emoji at the boundary, hard cut or word cut", () => {
+    // Emoji is the last kept code point (index 138): kept whole.
+    const atEdge = `${"a".repeat(138)}😀${"b".repeat(30)}`;
+    const kept = cutAtWord(atEdge, 140);
+    expect(kept).toBe(`${"a".repeat(138)}😀…`);
+    expect(Array.from(kept)).toHaveLength(140);
+    expect(hasLoneSurrogate(kept)).toBe(false);
+    // Emoji is the first dropped code point (index 139): dropped whole.
+    const justPast = `${"a".repeat(139)}😀${"b".repeat(30)}`;
+    const dropped = cutAtWord(justPast, 140);
+    expect(dropped).toBe(`${"a".repeat(139)}…`);
+    expect(hasLoneSurrogate(dropped)).toBe(false);
+    // Word cut between emoji words.
+    const words = `${"😀 ".repeat(100)}end`;
+    const out = cutAtWord(words, 140);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(Array.from(out.slice(0, -1)).every((c) => c === "😀" || c === " ")).toBe(true);
+    expect(cp(out)).toBeLessThanOrEqual(140);
+  });
+
+  it("returns an input of max code points or fewer unchanged, the very same string", () => {
+    const exact = wordsOfLength(140);
+    expect(cutAtWord(exact, 140)).toBe(exact);
+    const shorter = "Merkez Bankası faizi sabit tuttu";
+    expect(cutAtWord(shorter, 140)).toBe(shorter);
+    expect(cutAtWord("", 140)).toBe("");
+    // Counted in code points: 70 emoji are 140 UTF-16 units but 70 code points.
+    const emoji = "😀".repeat(70);
+    expect(cutAtWord(emoji, 70)).toBe(emoji);
+    expect(cutAtWord(emoji, 69)).toBe(`${"😀".repeat(68)}…`);
+    // The existing ellipsis and Turkish letters pass through untouched.
+    const t = "İstanbul'da “ğüşiöç” İĞÜŞÖÇ… 100% 3,5 milyar ₺";
+    expect(cutAtWord(t, 140)).toBe(t);
+  });
+
+  it("one code point over max is cut", () => {
+    const over = wordsOfLength(141);
+    const out = cutAtWord(over, 140);
+    expect(out).not.toBe(over);
+    expect(out.endsWith("…")).toBe(true);
+    expect(cp(out)).toBeLessThanOrEqual(140);
+  });
+
+  it("drops a trailing ',' (and the other dangling marks and blanks) left at the cut", () => {
+    for (const mark of [",", ";", ":", "-", "–", "—"]) {
+      const title = `${"a".repeat(70)}${mark} ${"b".repeat(60)}`;
+      expect(cutAtWord(title, 100), mark).toBe(`${"a".repeat(70)}…`);
+    }
+    const stacked = `${"a".repeat(70)} , - ; ${"b".repeat(60)}`;
+    expect(cutAtWord(stacked, 100)).toBe(`${"a".repeat(70)}…`);
+    // A sentence mark stays: it ends the thought honestly.
+    for (const mark of [".", "!", "?"]) {
+      const title = `${"a".repeat(70)}${mark} ${"b".repeat(60)}`;
+      expect(cutAtWord(title, 100), mark).toBe(`${"a".repeat(70)}${mark}…`);
+    }
+  });
+
+  it("keeps the cut text when stripping the marks would leave nothing", () => {
+    expect(cutAtWord("-".repeat(200), 95)).toBe(`${"-".repeat(94)}…`);
+  });
+
+  it("is the cut clampOgTitle applies: byte-identical at both of its caps, for every length 0-400", () => {
+    for (let n = 0; n <= 400; n++) {
+      const title = wordsOfLength(n);
+      expect(cutAtWord(title, 130), `n=${n} plain`).toBe(clampOgTitle(title, { ribbon: false }).text);
+      expect(cutAtWord(title, 95), `n=${n} ribbon`).toBe(clampOgTitle(title, { ribbon: true }).text);
+    }
+    for (const t of [HURRIYET_HEADLINE, NEUTRAL_D26A31D4, TITLE_96_RIBBON, TITLE_110]) {
+      expect(cutAtWord(t, 130)).toBe(clampOgTitle(t, { ribbon: false }).text);
+      expect(cutAtWord(t, 95)).toBe(clampOgTitle(t, { ribbon: true }).text);
+    }
+  });
+
+  it("never exceeds max and never leaves a lone surrogate, for several caps and mixed text", () => {
+    const samples = [
+      wordsOfLength(500),
+      "😀 ".repeat(200),
+      "😀".repeat(300),
+      `${"ab".repeat(40)}😀 ${"çğ".repeat(60)}`,
+      HURRIYET_HEADLINE,
+      NEUTRAL_D26A31D4,
+    ];
+    for (const max of [1, 2, 3, 10, 59, 60, 61, 95, 110, 130, 140]) {
+      for (const sample of samples) {
+        const out = cutAtWord(sample, max);
+        expect(cp(out), `max=${max}`).toBeLessThanOrEqual(max);
+        expect(hasLoneSurrogate(out), `max=${max}`).toBe(false);
+        if (cp(sample) > max) expect(out.endsWith("…")).toBe(true);
+      }
+    }
+  });
+
+  it("a cap of 1 leaves just the ellipsis; a cap under 1 (or NaN) leaves nothing and never throws", () => {
+    expect(cutAtWord("abc def", 1)).toBe("…");
+    expect(cutAtWord("abc", 0)).toBe("");
+    expect(cutAtWord("abc", -5)).toBe("");
+    expect(cutAtWord("abc", Number.NaN)).toBe("");
+    expect(cutAtWord("", 0)).toBe("");
+  });
+
+  it("floors a non-integer cap, so the result is never longer than the cap", () => {
+    // A cap of 5.5 behaves as 5, and 1.5 as 1 (the stop test used to compare with
+    // `===`, which a non-integer never matched, so the whole text came back).
+    expect(cutAtWord("abcdefghij klmnop", 5.5)).toBe("abcd…");
+    expect(cutAtWord("abcdefghij klmnop", 5.5)).toBe(cutAtWord("abcdefghij klmnop", 5));
+    expect(cutAtWord("abcdefghij", 1.5)).toBe("…");
+    expect(cutAtWord("abcdefghij", 1.5)).toBe(cutAtWord("abcdefghij", 1));
+    // The keep test (`count === cap - 1`) needs the floored cap as well: a blank
+    // right after the first cap - 1 code points ends the run there.
+    expect(cutAtWord("abcd efghij", 5.9)).toBe(cutAtWord("abcd efghij", 5));
+    expect(cutAtWord("abc defghij", 8.4)).toBe(cutAtWord("abc defghij", 8));
+    // An integer-valued cap and a cap that fits the text are untouched.
+    expect(cutAtWord("abc", 3.5)).toBe("abc");
+    expect(cutAtWord("abcd", 3.9)).toBe("ab…");
+  });
+
+  it("an infinite cap never cuts", () => {
+    expect(cutAtWord("abc def", Number.POSITIVE_INFINITY)).toBe("abc def");
+  });
+
+  it("is pure: the same input gives the same output, call after call", () => {
+    const first = cutAtWord(NEUTRAL_D26A31D4, 140);
+    cutAtWord("başka bir başlık".repeat(20), 30);
+    expect(cutAtWord(NEUTRAL_D26A31D4, 140)).toBe(first);
+  });
+
+  it("scans only the head of a huge title (a megabyte is cut like a sentence)", () => {
+    const huge = "kelime ".repeat(150_000);
+    const out = cutAtWord(huge, 95);
+    expect(cp(out)).toBeLessThanOrEqual(95);
+    expect(out.endsWith("kelime…")).toBe(true);
   });
 });

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167).
+// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -46,6 +46,11 @@ import { fileURLToPath } from "node:url";
 // 167 (h51-pipeline-1) changes only row 18's poison count: messages archived in the last 24 hours with read_ct > 3 (the
 // consumers' MAX_READS contract, the 4th read), not read_ct >= 3 (tests/migrations/167-ops-queue-poison-contract.test.ts pins
 // the byte identity of everything else against 161).
+// 173 (h64-backendops-1) appended row 22 (`sources_dark_persistent`, an active outlet/wire source outside
+// public.ops_dark_source_baseline whose newest article is over 72 hours old and that has at least 300 articles published in the
+// 60 days up to that newest article; warn only): the newest version carries it LAST, after image_coverage, and keeps rows 1-21 as 167
+// wrote them (tests/migrations/173-ops-sources-dark-persistent.test.ts pins that byte identity). It exists because row 13 forgets
+// a source that stays dark after 14 days and row 8 only counts.
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -62,7 +67,8 @@ const SIZE_CHECK = "db_size_mb";
 const ANON_CHECK = "anon_surface";
 const QUEUE_CHECK = "queue_lag";
 const CRON_CHECK = "cron_jobs_stalled";
-const LAST_CHECK = "image_coverage";
+const IMAGE_CHECK = "image_coverage";
+const LAST_CHECK = "sources_dark_persistent";
 const STALE_CHECK = "feed_poll_stale";
 const MIGRATION_145 = resolve(MIGRATIONS_DIR, "145_ops_anon_surface_check.sql");
 const CREATE_LINE = "create or replace function public.ops_health_report()";
@@ -127,10 +133,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(16);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(17);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -210,9 +216,9 @@ describe("ops_health_report(): the newest version", () => {
     expect(after).toMatch(/\|\|\s*v\.reason/);
   });
 
-  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${CRON_CHECK} (migration 150), ${STALE_CHECK} (migration 157), ${LAST_CHECK} (migration 161) in that order, ${LAST_CHECK} LAST`, () => {
-    expect(newest.num).toBeGreaterThanOrEqual(161);
-    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, CRON_CHECK, STALE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
+  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${CRON_CHECK} (migration 150), ${STALE_CHECK} (migration 157), ${IMAGE_CHECK} (migration 161), ${LAST_CHECK} (migration 173) in that order, ${LAST_CHECK} LAST`, () => {
+    expect(newest.num).toBeGreaterThanOrEqual(173);
+    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, CRON_CHECK, STALE_CHECK, IMAGE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
     expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
     expect(newest.names.indexOf(GAPS_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
     expect(newest.names.indexOf(ROUTE_CHECK)).toBeGreaterThan(newest.names.indexOf(GAPS_CHECK));
@@ -221,7 +227,9 @@ describe("ops_health_report(): the newest version", () => {
     expect(newest.names.indexOf(QUEUE_CHECK)).toBeGreaterThan(newest.names.indexOf(ANON_CHECK));
     expect(newest.names.indexOf(CRON_CHECK)).toBeGreaterThan(newest.names.indexOf(QUEUE_CHECK));
     expect(newest.names.indexOf(STALE_CHECK)).toBeGreaterThan(newest.names.indexOf(CRON_CHECK));
-    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(STALE_CHECK));
+    expect(newest.names.indexOf(IMAGE_CHECK)).toBeGreaterThan(newest.names.indexOf(STALE_CHECK));
+    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(IMAGE_CHECK));
+    expect(newest.names.indexOf(LAST_CHECK)).toBe(newest.names.length - 1);
   });
 
   it("keeps rows 1-17 byte for byte as 145 wrote them (raw text, comments included) and appends the queue_lag marker right after row 17", () => {
@@ -241,7 +249,7 @@ describe("ops_health_report(): the newest version", () => {
     // the executable create line is in the file once (comments are stripped before counting)
     expect(newest.code.indexOf(CREATE_LINE)).toBeGreaterThanOrEqual(0);
     expect(newest.code.indexOf(CREATE_LINE, newest.code.indexOf(CREATE_LINE) + 1), "the create line is executable once").toBe(-1);
-    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20, 161 appended row 21; everything else is 145's text
+    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20, 161 appended row 21, 167 changed row 18's poison count and 173 appended row 22 after row 21; rows 1-17 are still 145's text
     const expected = newest.num >= 158 ? withSixthAnonRpc(rows145) : rows145;
     expect(rawNewest.slice(at, at + expected.length)).toBe(expected);
     // the next non-blank line is the row-18 marker comment
@@ -486,7 +494,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("image_coverage (161) compares each outlet/wire source's 24 hour image-less share (newest hour skipped) with its own 14 days before, and can warn and answer unknown but never fail", () => {
-    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    const seg = slice(IMAGE_CHECK).replace(/\s+/g, " ");
     expect(seg).toContain("threshold := 1");
     expect(seg).toContain("s.kind in ('outlet', 'wire')");
     expect(seg).toContain("a.created_at >= v_now - interval '25 hours' and a.created_at < v_now - interval '1 hour'");
@@ -499,7 +507,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("image_coverage only reads, bounds every scan of public.articles on created_at, and reads no url, title or body column", () => {
-    const outside = wordsOf(blankLiterals(slice(LAST_CHECK)));
+    const outside = wordsOf(blankLiterals(slice(IMAGE_CHECK)));
     for (const w of ["insert", "update", "delete", "truncate", "drop", "alter", "create", "perform", "execute"]) {
       expect(outside, w).not.toContain(w);
     }
@@ -507,9 +515,45 @@ describe("ops_health_report(): the newest version", () => {
       expect(outside, w).not.toContain(w);
     }
     expect(outside).toContain("image_url");
-    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    const seg = slice(IMAGE_CHECK).replace(/\s+/g, " ");
     expect(seg.split("from public.articles a").length - 1).toBe(2);
     expect(seg.split("a.created_at >= v_now - interval").length - 1).toBe(2);
+  });
+
+  it("sources_dark_persistent (173) names active outlet/wire sources outside the baseline whose newest article is over 72 hours old and that has at least 300 articles published in the 60 days up to that newest article, and warns, passes or answers unknown but never fails", () => {
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    expect(seg).toContain("threshold := 1");
+    expect(seg).toContain("s.active and s.kind in ('outlet', 'wire')");
+    expect(seg).toContain("not exists (select 1 from public.ops_dark_source_baseline b where b.slug = s.slug)");
+    expect(seg).toContain("a.published_at <= v_now");
+    expect(seg).toContain("v.last_at is null or v.last_at < v_now - interval '72 hours'");
+    // the window is anchored at the newest article (published_at), not at the clock: it must not roll off while the source stays dark
+    expect(seg).toContain(
+      "a.published_at > coalesce(v.last_at, v_now) - interval '60 days' and a.published_at <= coalesce(v.last_at, 'infinity'::timestamptz)",
+    );
+    expect(seg).not.toContain("interval '63 days'");
+    expect(seg).toContain("prior_n >= 300");
+    expect(seg).toContain("status := case when d_hit >= 1 then 'warn' else 'pass' end;");
+    expect(seg).not.toMatch(/'fail'/i);
+    expect(seg).toMatch(/status\s*:=\s*'unknown'/i);
+    expect(seg).toContain("kalıcı susan kaynak yok");
+  });
+
+  it("sources_dark_persistent only reads, counts the candidates only (one scalar subquery each, never every source), and reads no url, title or feed address", () => {
+    const outside = wordsOf(blankLiterals(slice(LAST_CHECK)));
+    for (const w of ["insert", "update", "delete", "truncate", "drop", "alter", "create", "perform", "execute"]) {
+      expect(outside, w).not.toContain(w);
+    }
+    for (const w of ["url", "rss_url", "title", "summary", "description", "content", "content_hash", "fetch_etag"]) {
+      expect(outside, w).not.toContain(w);
+    }
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    // the newest-article lookup and the window count are the only two reads of public.articles; the window count is per candidate id and bounded on published_at, with no created_at range and no id-array scan
+    expect(seg.split("from public.articles a").length - 1).toBe(2);
+    expect(seg.split("a.published_at > coalesce(v.last_at, v_now) - interval '60 days'").length - 1).toBe(1);
+    expect(seg).toContain("where a.source_id = v.id and a.published_at >");
+    expect(seg).not.toContain("a.created_at");
+    expect(seg).not.toContain("any (array(");
   });
 
   it("revokes from public, anon and authenticated, and grants execute only to service_role", () => {

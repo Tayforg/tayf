@@ -822,4 +822,228 @@ describe("cluster opengraph-image", () => {
       errSpy.mockRestore();
     }
   });
+
+  // h64-ogcards-3: a cluster whose sources are all toplayıcı / niş has an
+  // all-zero bias_distribution. The card drew an empty bar and three "%0 · 0"
+  // tiles for it while the page, the embed, the rozet and the share text say
+  // "sınıflandırılmış kaynak yok". It now draws ONE box with that line where the
+  // tiles were.
+  describe("empty spectrum (h64-ogcards-3)", () => {
+    const ZERO_DIST = {
+      pro_government: 0,
+      gov_leaning: 0,
+      state_media: 0,
+      center: 0,
+      opposition_leaning: 0,
+      opposition: 0,
+      nationalist: 0,
+      islamist_conservative: 0,
+      pro_kurdish: 0,
+      international: 0,
+    };
+    const NON_VOTING_LINE =
+      "Bu kümede sınıflandırılan kaynak yok — yalnızca toplayıcı / niş kaynaklar yazdı";
+    const UNCLASSIFIED_LINE = "Bu kümede henüz sınıflandırılan kaynak yok";
+    const ZONE_BAR_COLORS = ["#ef4444", "#a1a1aa", "#10b981"];
+
+    const member = (
+      slug: string,
+      kind: SourceKind | undefined,
+      bias: BiasCategory,
+    ): ClusterDetailMember => ({
+      source: {
+        id: slug,
+        name: slug,
+        slug,
+        url: `https://${slug}.example`,
+        rss_url: `https://${slug}.example/rss`,
+        bias,
+        logo_url: null,
+        active: true,
+        kind,
+        trustee_since: null,
+        trustee_note: null,
+      },
+      article: {
+        id: `${slug}-1`,
+        title: `${slug} başlığı`,
+        url: `https://${slug}.example/haber/1`,
+        published_at: "2026-07-01T10:00:00Z",
+        image_url: null,
+        content_hash: `hash-${slug}`,
+      },
+    });
+    // Shaped like cluster 4b5cd9f5-b4cc-46a8-9d15-c9cd55aaac39: two members,
+    // an aggregator (gov_leaning) and a niche source (center), nobody voting.
+    const HABERLER_COM = member("haberler-com", "aggregator", "gov_leaning");
+    const EKONOMIM = member("ekonomim", "niche", "center");
+
+    type Styled = { props?: { style?: Record<string, unknown>; children?: unknown } };
+    function findElements(node: unknown, pred: (el: Styled) => boolean, out: Styled[] = []): Styled[] {
+      if (Array.isArray(node)) {
+        for (const child of node) findElements(child, pred, out);
+        return out;
+      }
+      if (node && typeof node === "object") {
+        const el = node as Styled;
+        if (pred(el)) out.push(el);
+        if (el.props?.children !== undefined) findElements(el.props.children, pred, out);
+      }
+      return out;
+    }
+    const withBackground = (colors: string[]) => (el: Styled) =>
+      typeof el.props?.style?.background === "string" && colors.includes(el.props.style.background);
+    const isBar = (el: Styled) => el.props?.style?.height === 18 && el.props?.style?.overflow === "hidden";
+    const isTile = (el: Styled) =>
+      el.props?.style?.flex === 1 &&
+      typeof el.props?.style?.border === "string" &&
+      el.props.style.borderRadius === 12;
+
+    async function render(detail: ClusterDetail): Promise<{ text: string; tree: ReactElement | null }> {
+      getClusterDetailOrThrow.mockResolvedValueOnce(detail);
+      const { default: Image } = await import("./opengraph-image");
+      await Image({ params: Promise.resolve({ id: VALID_ID }) });
+      return { text: collectText(captured).join(""), tree: captured };
+    }
+    const zeroCluster: Partial<ClusterDetail["cluster"]> = {
+      article_count: 2,
+      is_blindspot: false,
+      blindspot_side: null,
+      bias_distribution: ZERO_DIST,
+    };
+
+    it("prints the non-voting line, and no '%0 · 0' tile, for a cluster of two toplayıcı / niş sources", async () => {
+      const { text } = await render(mkDetail(zeroCluster, undefined, [HABERLER_COM, EKONOMIM]));
+
+      expect(text).toContain(NON_VOTING_LINE);
+      expect(text).not.toContain("%0 · 0");
+      expect(text).not.toContain("%0");
+      for (const label of ["İktidar", "Bağımsız", "Muhalefet"]) expect(text).not.toContain(label);
+      expect(text).not.toContain(UNCLASSIFIED_LINE);
+    });
+
+    it("keeps the pill, the title and the methodology row exactly as before", async () => {
+      const { text } = await render(
+        mkDetail({ ...zeroCluster, title_tr: "Dolar günü yükselişle kapattı" }, undefined, [HABERLER_COM, EKONOMIM]),
+      );
+
+      expect(text).toContain("2 kaynak (0 sınıflandırılmış)");
+      expect(text).toContain("Dolar günü yükselişle kapattı");
+      expect(text).toContain("tayfhaber.com/metodoloji");
+      expect(text).not.toContain("KÖR NOKTA");
+    });
+
+    it("draws no bar and no zone-coloured element: the stacked bar, its segments and the tile dots are gone", async () => {
+      const { tree } = await render(mkDetail(zeroCluster, undefined, [HABERLER_COM, EKONOMIM]));
+
+      expect(findElements(tree, isBar)).toHaveLength(0);
+      expect(findElements(tree, withBackground(ZONE_BAR_COLORS))).toHaveLength(0);
+      expect(findElements(tree, isTile)).toHaveLength(0);
+    });
+
+    it("draws ONE box with the line as its single text node, in the tile's own border and background tokens", async () => {
+      const empty = await render(mkDetail(zeroCluster, undefined, [HABERLER_COM, EKONOMIM]));
+      const boxes = findElements(empty.tree, (el) => el.props?.children === NON_VOTING_LINE);
+      expect(boxes).toHaveLength(1);
+      const box = boxes[0]!.props!.style!;
+      // One string child (not "{a} {b}" fragments) keeps it one text node for Satori.
+      expect(typeof boxes[0]!.props!.children).toBe("string");
+      expect(box.display).toBe("flex");
+
+      // The tile of a non-empty card is the reference for the tokens.
+      const filled = await render(mkDetail({ ...zeroCluster, article_count: 4, bias_distribution: { ...ZERO_DIST, pro_government: 4 } }));
+      const tile = findElements(filled.tree, isTile)[0]!.props!.style!;
+      expect(box.background).toBe(tile.background);
+      expect(box.border).toBe(tile.border);
+      expect(box.borderRadius).toBe(tile.borderRadius);
+    });
+
+    it("sets the line at the tile label size (22 px), not the tile value size", async () => {
+      const empty = await render(mkDetail(zeroCluster, undefined, [HABERLER_COM, EKONOMIM]));
+      const line = findElements(empty.tree, (el) => el.props?.children === NON_VOTING_LINE)[0]!.props!.style!;
+
+      const filled = await render(
+        mkDetail({ article_count: 4, bias_distribution: { ...ZERO_DIST, pro_government: 4 } }),
+      );
+      const label = findElements(filled.tree, (el) => el.props?.children === "İktidar")[0]!.props!.style!;
+
+      expect(line.fontSize).toBe(22);
+      expect(line.fontSize).toBe(label.fontSize);
+    });
+
+    it("says 'henüz' when nobody is known to have written: no members, all-zero distribution", async () => {
+      const { text } = await render(mkDetail(zeroCluster));
+
+      expect(text).toContain(UNCLASSIFIED_LINE);
+      expect(text).not.toContain(NON_VOTING_LINE);
+      expect(text).not.toContain("%0 · 0");
+    });
+
+    it("does not claim 'yalnızca toplayıcı / niş kaynaklar yazdı' when a voting source is among the members", async () => {
+      // A voting member with a not-yet-backfilled (zero) distribution: the page's
+      // own caption stays silent here (votingMembers.length > 0), and a "yalnızca"
+      // line would be false.
+      const { text } = await render(
+        mkDetail(zeroCluster, undefined, [member("sozcu", "outlet", "opposition"), HABERLER_COM]),
+      );
+
+      expect(text).toContain(UNCLASSIFIED_LINE);
+      expect(text).not.toContain("yalnızca");
+    });
+
+    it("counts a member with no kind as a voting source (kind normalises to outlet), like the page", async () => {
+      const { text } = await render(
+        mkDetail(zeroCluster, undefined, [member("eski-kaynak", undefined, "center"), HABERLER_COM]),
+      );
+
+      expect(text).toContain(UNCLASSIFIED_LINE);
+      expect(text).not.toContain("yalnızca");
+    });
+
+    it("says the non-voting line for a single non-voting source", async () => {
+      const { text } = await render(mkDetail({ ...zeroCluster, article_count: 1 }, undefined, [EKONOMIM]));
+
+      expect(text).toContain(NON_VOTING_LINE);
+      expect(text).toContain("1 kaynak");
+    });
+
+    it("keeps the bar and the three '%N · n' tiles for every cluster with a classified source", async () => {
+      const { text, tree } = await render(
+        mkDetail({ article_count: 7, is_blindspot: false, blindspot_side: null, bias_distribution: { ...ZERO_DIST, pro_government: 7 } }),
+      );
+
+      expect(text).toContain("%100 · 7");
+      expect(text).toContain("%0 · 0");
+      for (const label of ["İktidar", "Bağımsız", "Muhalefet"]) expect(text).toContain(label);
+      expect(text).not.toContain(NON_VOTING_LINE);
+      expect(text).not.toContain(UNCLASSIFIED_LINE);
+      expect(findElements(tree, isBar)).toHaveLength(1);
+      expect(findElements(tree, isTile)).toHaveLength(3);
+    });
+
+    it("keeps the tiles at a total of one source, even when non-voting sources also wrote", async () => {
+      const { text, tree } = await render(
+        mkDetail(
+          { article_count: 3, is_blindspot: false, blindspot_side: null, bias_distribution: { ...ZERO_DIST, center: 1 } },
+          undefined,
+          [member("bianet", "outlet", "center"), HABERLER_COM, EKONOMIM],
+        ),
+      );
+
+      expect(text).toContain("%100 · 1");
+      expect(text).not.toContain("yalnızca");
+      expect(findElements(tree, isTile)).toHaveLength(3);
+    });
+
+    it("serves the same empty-state card through the twitter-image re-export", async () => {
+      getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail(zeroCluster, undefined, [HABERLER_COM, EKONOMIM]));
+      const tw = await import("./twitter-image");
+
+      await tw.default({ params: Promise.resolve({ id: VALID_ID }) });
+
+      const text = collectText(captured).join("");
+      expect(text).toContain(NON_VOTING_LINE);
+      expect(text).not.toContain("%0 · 0");
+    });
+  });
 });

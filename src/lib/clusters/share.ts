@@ -6,6 +6,7 @@ import {
   zonePercents,
 } from "@/lib/bias/zone-summary";
 import { wireBadgeShort } from "@/lib/clusters/wire";
+import { cutAtWord } from "@/lib/seo/og-title";
 import type { BiasCategory, BiasDistribution, MediaDnaZone, SourceKind } from "@/types";
 
 // Lowercase Turkish zone labels for share text. `ZONE_META` labels
@@ -145,10 +146,13 @@ export function buildShareUrl(
 
 const CHANNEL_TEXT_LIMIT = 240;
 
-/** Appends "…" once `body` exceeds `max` characters — X and Bluesky both
- *  have a hard character cap on the composed post. */
+/** Cuts `body` at a word to at most `max` code points, "…" included, once it is
+ *  longer — X and Bluesky both have a hard character cap on the composed post.
+ *  The body is a headline, so it is cut like every other share surface
+ *  (cutAtWord, tests/guards/no-hard-title-cut); a surrogate pair is never split,
+ *  which a plain `slice` could do and make `encodeURIComponent` throw. */
 function truncate(body: string, max: number): string {
-  return body.length > max ? `${body.slice(0, max)}…` : body;
+  return cutAtWord(body, max);
 }
 
 /**

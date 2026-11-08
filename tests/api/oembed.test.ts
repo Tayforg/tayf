@@ -275,6 +275,19 @@ describe("GET /api/oembed — title", () => {
     expect(eligibleMock).toHaveBeenCalledWith("Başlık Z");
   });
 
+  it("cuts a long title at a word: the d26a31d4 title ends 'hesaba…', not 'çekilme…' (h64-ogcards-2)", async () => {
+    getClusterDetailMock.mockResolvedValue(
+      found({
+        title:
+          "AKP’li isim Fatma Betül’ün sevk yazısındaki gerekçeye dikkat çekti: ‘Biliniyordu… İhmali veya kastı olan kamu görevlileri de hesaba çekilmeli’",
+      }),
+    );
+    const body = await (await call({ url: clusterUrl() })).json();
+    expect((body.title as string).endsWith("hesaba…")).toBe(true);
+    expect(body.title).not.toContain("çekilme");
+    expect(Array.from(body.title as string).length).toBeLessThanOrEqual(140);
+  });
+
   it("truncates a very long title by code point", async () => {
     getClusterDetailMock.mockResolvedValue(found({ title: "x".repeat(600) }));
     const body = await (await call({ url: clusterUrl() })).json();

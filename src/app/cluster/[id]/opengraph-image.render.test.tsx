@@ -607,3 +607,223 @@ describe("cluster opengraph-image qualified ribbon (real Satori render, h57-outb
     }
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// h64-ogcards-3: a cluster whose sources are all toplayıcı / niş (cluster
+// 4b5cd9f5: haberler-com + ekonomim) has an all-zero bias_distribution. The card
+// drew an empty bar and three "%0 · 0" tiles; it now draws ONE box with the
+// "sınıflandırılan kaynak yok" line where the tiles were. Satori must accept the
+// layout, the box must sit exactly where the tiles sit, the line must stay on one
+// line inside the box's padding, and the bottom padding row must stay background.
+// ---------------------------------------------------------------------------
+
+function emptySpectrumDetail(title: string): ClusterDetail {
+  const base = blindspotDetail();
+  return {
+    ...base,
+    cluster: {
+      ...base.cluster,
+      title_tr: title,
+      article_count: 2,
+      bias_distribution: {
+        pro_government: 0,
+        gov_leaning: 0,
+        state_media: 0,
+        center: 0,
+        opposition_leaning: 0,
+        opposition: 0,
+        nationalist: 0,
+        islamist_conservative: 0,
+        pro_kurdish: 0,
+        international: 0,
+      },
+      is_blindspot: false,
+      blindspot_side: null,
+    },
+    members: [
+      nonVotingMember("haberler-com", "aggregator", "gov_leaning"),
+      nonVotingMember("ekonomim", "niche", "center"),
+    ],
+    wire: { isWireRedistribution: false, effectiveArticleCount: 2, memberCount: 2 },
+  };
+}
+
+/** Sum of the three channels: a cheap brightness for "differs from the page gradient". */
+function lumaSum(rgb: Rgb): number {
+  return rgb[0] + rgb[1] + rgb[2];
+}
+
+/**
+ * Rows in [from, to) where column `x` is lighter than the bottom padding row of
+ * the same column (the page gradient): the tile/box fill (+11 per channel) and
+ * its border are above the margin, the gradient's own drift over 190 rows is not.
+ */
+function boxRows(png: DecodedPng, x: number, from: number, to: number): { minY: number; maxY: number } | null {
+  const bg = lumaSum(pixelAt(png, x, LEGEND_PROBE_Y));
+  let minY = Infinity;
+  let maxY = -1;
+  for (let y = from; y < to; y++) {
+    if (lumaSum(pixelAt(png, x, y)) - bg >= 15) {
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  return maxY < 0 ? null : { minY, maxY };
+}
+
+/**
+ * The left and right edge of the box/tile row at row `y`: the first x that jumps
+ * up in brightness from the pixel two to its left (the 1 px border, +28 per
+ * channel, on a gradient that drifts under 1 per 10 px) and the last x that drops
+ * back down to the pixel two to its right.
+ */
+function boxColumns(png: DecodedPng, y: number): { minX: number; maxX: number } | null {
+  let minX = Infinity;
+  let maxX = -1;
+  for (let x = 2; x < png.width - 2; x++) {
+    const here = lumaSum(pixelAt(png, x, y));
+    if (here - lumaSum(pixelAt(png, x - 2, y)) >= 24 && x < minX) minX = x;
+    if (here - lumaSum(pixelAt(png, x + 2, y)) >= 24) maxX = x;
+  }
+  return maxX < 0 ? null : { minX, maxX };
+}
+
+/** Bright text pixels (the line is #e4e4e7) inside the rows/columns given. */
+function textBounds(
+  png: DecodedPng,
+  box: { minY: number; maxY: number },
+): { minX: number; maxX: number; minY: number; maxY: number; count: number } | null {
+  let minX = Infinity;
+  let maxX = -1;
+  let minY = Infinity;
+  let maxY = -1;
+  let count = 0;
+  for (let y = box.minY + 2; y < box.maxY - 1; y++) {
+    for (let x = 76; x < 1124; x++) {
+      if (pixelAt(png, x, y)[0] >= 110) {
+        count += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  return count === 0 ? null : { minX, maxX, minY, maxY, count };
+}
+
+describe("cluster opengraph-image empty spectrum (real Satori render, h64-ogcards-3)", () => {
+  const cards = new Map<string, Promise<DecodedPng>>();
+  const emptyCard = (title: string): Promise<DecodedPng> => {
+    let card = cards.get(title);
+    if (!card) {
+      card = (async () => {
+        getClusterDetailOrThrow.mockResolvedValueOnce(emptySpectrumDetail(title));
+        const { default: Image } = await import("./opengraph-image");
+        const png = decodePng(await pngBytes(await Image({ params: Promise.resolve({ id: VALID_ID }) })));
+        expect(png.width).toBe(1200);
+        expect(png.height).toBe(630);
+        return png;
+      })();
+      cards.set(title, card);
+    }
+    return card;
+  };
+  /** A plain card with a classified source: the tiles are the reference for where the box goes. */
+  const tilesCard = (): Promise<DecodedPng> => cardFor("tiles-reference", TITLE_SHORT);
+  const refs = new Map<string, Promise<DecodedPng>>();
+  const cardFor = (key: string, title: string): Promise<DecodedPng> => {
+    let card = refs.get(key);
+    if (!card) {
+      card = renderCard(title, false);
+      refs.set(key, card);
+    }
+    return card;
+  };
+
+  it("renders the empty-state card to a 1200x630 PNG, and the bottom padding row stays the page gradient", async () => {
+    const card = await emptyCard(TITLE_SHORT);
+    const ref = await tilesCard();
+    // The hunt's probe: the page gradient at (250,629), not a box fill (32,32,35).
+    expectNear(pixelAt(card, 250, LEGEND_PROBE_Y), [21, 21, 24], "empty card at (250,629)");
+    for (const x of LEGEND_PROBE_X) {
+      expectNear(pixelAt(card, x, LEGEND_PROBE_Y), pixelAt(ref, x, LEGEND_PROBE_Y), `vs the tiles card at (${x},${LEGEND_PROBE_Y})`);
+    }
+  }, 30_000);
+
+  it("puts the box exactly where the tiles were: same top, same bottom, same left and right edge", async () => {
+    const card = await emptyCard(TITLE_SHORT);
+    const ref = await tilesCard();
+
+    // Column 80 is inside the first tile's left padding (the dot starts at 93) and inside the box.
+    const tile = boxRows(ref, 80, 440, LEGEND_PROBE_Y);
+    const box = boxRows(card, 80, 440, LEGEND_PROBE_Y);
+    expect(tile).not.toBeNull();
+    expect(box).not.toBeNull();
+    // The hunt measured the tiles at y 454..566 (112 px) with the 64 px bottom padding below.
+    expect(tile!.maxY).toBeGreaterThanOrEqual(564);
+    expect(tile!.maxY).toBeLessThanOrEqual(566);
+    expect(Math.abs(box!.minY - tile!.minY)).toBeLessThanOrEqual(1);
+    expect(Math.abs(box!.maxY - tile!.maxY)).toBeLessThanOrEqual(1);
+
+    const row = Math.round((tile!.minY + tile!.maxY) / 2);
+    const tileCols = boxColumns(ref, row);
+    const boxCols = boxColumns(card, row);
+    expect(tileCols).not.toBeNull();
+    expect(boxCols).not.toBeNull();
+    expect(Math.abs(boxCols!.minX - tileCols!.minX)).toBeLessThanOrEqual(1);
+    expect(Math.abs(boxCols!.maxX - tileCols!.maxX)).toBeLessThanOrEqual(1);
+    // Inside the 72 px side padding.
+    expect(boxCols!.minX).toBeGreaterThanOrEqual(72);
+    expect(boxCols!.maxX).toBeLessThan(1128);
+  }, 30_000);
+
+  it("draws no bar: the 18 px bar's rows above the methodology row are the page gradient", async () => {
+    const card = await emptyCard(TITLE_SHORT);
+    const ref = await tilesCard();
+    // The bar spans x 72..1128, 18 px tall, ~14 + 19 + 12 px above the tiles. Its
+    // track is rgba(250,250,250,0.08) over the gradient: lighter than the page.
+    const tile = boxRows(ref, 80, 440, LEGEND_PROBE_Y)!;
+    const barBottom = tile.minY - 12 - 19 - 14;
+    const barTop = barBottom - 18;
+    const withBar = boxRows(ref, 600, barTop - 4, barBottom + 4);
+    const withoutBar = boxRows(card, 600, barTop - 4, barBottom + 4);
+    expect(withBar).not.toBeNull();
+    expect(withoutBar).toBeNull();
+  }, 30_000);
+
+  it("keeps the line on one line, readable, inside the box's own padding", async () => {
+    const card = await emptyCard(TITLE_SHORT);
+    const box = boxRows(card, 80, 440, LEGEND_PROBE_Y)!;
+    const text = textBounds(card, box);
+
+    expect(text).not.toBeNull();
+    // Something legible was drawn (a 22 px, 79-character line is thousands of bright pixels).
+    expect(text!.count).toBeGreaterThan(1_000);
+    // Inside the box's 1 px border + 20 px padding on both sides (a pixel of side bearing allowed).
+    expect(text!.minX).toBeGreaterThanOrEqual(72 + 1 + 20 - 2);
+    expect(text!.maxX).toBeLessThanOrEqual(1128 - 1 - 20 + 2);
+    // Inside the 16 px vertical padding too: nothing touches the border.
+    expect(text!.minY).toBeGreaterThanOrEqual(box.minY + 1 + 16 - 2);
+    expect(text!.maxY).toBeLessThanOrEqual(box.maxY - 1 - 16 + 2);
+  }, 30_000);
+
+  it.each([
+    ["a 110-character title", TITLE_110],
+    ["a 200-character title", TITLE_200],
+    ["a 126-character run of wide 'W' words", TITLE_WIDE_WORDS],
+    ["a 130-character all-caps headline", TITLE_ALL_CAPS],
+  ] as const)("keeps the box and the bottom row where they are under %s", async (label, title) => {
+    const ref = await emptyCard(TITLE_SHORT);
+    const card = await emptyCard(title);
+    for (const x of LEGEND_PROBE_X) {
+      expectNear(pixelAt(card, x, LEGEND_PROBE_Y), pixelAt(ref, x, LEGEND_PROBE_Y), `${label} at (${x},${LEGEND_PROBE_Y})`);
+    }
+    // The whole column below the title is the reference's: the box has not moved a pixel.
+    for (const x of [250, 950]) {
+      for (let y = 470; y < 630; y++) {
+        expectNear(pixelAt(card, x, y), pixelAt(ref, x, y), `${label} at (${x},${y})`);
+      }
+    }
+  }, 30_000);
+});

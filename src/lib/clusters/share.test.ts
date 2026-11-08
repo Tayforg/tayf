@@ -496,16 +496,56 @@ describe("buildChannelShareHref", () => {
     expect(parsed.searchParams.get("text")).toBe(`${body} ${url}`);
   });
 
-  it("truncates x/bluesky text at 240 characters and appends an ellipsis", () => {
-    const longBody = "a".repeat(300);
-    const xHref = buildChannelShareHref("x", url, longBody);
-    const xText = new URL(xHref).searchParams.get("text")!;
-    expect(xText).toBe(`${"a".repeat(240)}…`);
-    expect(xText.length).toBe(241);
+  // h64: the cut is cutAtWord() (src/lib/seo/og-title.ts), so the text is at most
+  // 240 code points INCLUDING the "…", it ends at a word, and a surrogate pair is
+  // never split (a lone surrogate made encodeURIComponent throw URIError).
+  const hasLoneSurrogate = (s: string): boolean =>
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
+  const textParam = (href: string): string => new URL(href).searchParams.get("text")!;
 
-    const bskyHref = buildChannelShareHref("bluesky", url, longBody);
-    const bskyText = new URL(bskyHref).searchParams.get("text")!;
-    expect(bskyText).toBe(`${"a".repeat(240)}… ${url}`);
+  it("truncates x/bluesky text to 240 code points (including the ellipsis)", () => {
+    const longBody = "a".repeat(300);
+    const xText = textParam(buildChannelShareHref("x", url, longBody));
+    expect(xText).toBe(`${"a".repeat(239)}…`);
+    expect(Array.from(xText).length).toBe(240);
+
+    const bskyText = textParam(buildChannelShareHref("bluesky", url, longBody));
+    expect(bskyText).toBe(`${"a".repeat(239)}… ${url}`);
+  });
+
+  it("leaves an x/bluesky body of exactly 240 code points whole", () => {
+    const exact = "a".repeat(240);
+    expect(textParam(buildChannelShareHref("x", url, exact))).toBe(exact);
+    expect(textParam(buildChannelShareHref("bluesky", url, exact))).toBe(`${exact} ${url}`);
+  });
+
+  it("cuts a long x/bluesky body at a blank: ends with the ellipsis, no partial word", () => {
+    const wordy = "kelime ".repeat(50).trim(); // 349 code points
+    for (const channel of ["x", "bluesky"] as const) {
+      const text = textParam(buildChannelShareHref(channel, url, wordy));
+      const body = channel === "bluesky" ? text.slice(0, -(url.length + 1)) : text;
+      expect(body.endsWith("kelime…"), channel).toBe(true);
+      expect(Array.from(body).length, channel).toBeLessThanOrEqual(240);
+      const words = body.slice(0, -1).split(" ");
+      expect(new Set(words), channel).toEqual(new Set(["kelime"]));
+      if (channel === "bluesky") expect(text.endsWith(` ${url}`)).toBe(true);
+    }
+  });
+
+  it("does not throw on an emoji that straddles the 240 cut, and leaves no lone surrogate", () => {
+    // "a" x 239, then an astral character (two UTF-16 units: 239 and 240), then
+    // more text: the old slice(0, 240) kept the high surrogate alone.
+    const straddle = `${"a".repeat(239)}\u{1F600}${"b".repeat(20)}`;
+    for (const channel of ["x", "bluesky"] as const) {
+      let href = "";
+      expect(() => {
+        href = buildChannelShareHref(channel, url, straddle);
+      }, channel).not.toThrow();
+      const text = textParam(href);
+      expect(hasLoneSurrogate(text), channel).toBe(false);
+      expect(text.includes("…"), channel).toBe(true);
+    }
+    expect(textParam(buildChannelShareHref("x", url, straddle))).toBe(`${"a".repeat(239)}…`);
   });
 
   it("does not truncate whatsapp/telegram bodies", () => {
