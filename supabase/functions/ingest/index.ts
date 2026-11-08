@@ -15,7 +15,11 @@
 //   3. Normalises each item in two phases (`prepareArticles`, then
 //      `completeArticles` for the items whose url is not already stored under
 //      the same headline), which produce the canonical sha1-of-shingles
-//      `content_hash` (audit T7 P1-21 fix).
+//      `content_hash` (audit T7 P1-21 fix). An item whose link host is the host
+//      of a DIFFERENT active source is left to that source before either phase
+//      continues (h63-clusterintegrity-2, `foreignHostSkipped`): the url upsert
+//      gives a url to whichever source polls first, so a feed that carries
+//      another outlet's stream would otherwise take its rows and starve it.
 //   4. Upserts every produced row in batches of 500 with
 //      `on_conflict=url&ignore_duplicates=true`, after dropping rows that
 //      repeat a (source_id, content_hash) pair already seen this chunk or
@@ -82,6 +86,7 @@ import {
   prepareArticles,
 } from "../_shared/rss/normalize.ts";
 import { sourceArticleKeyFor } from "../_shared/rss/article-key.ts";
+import { buildHostOwners, foreignHostOwner } from "../_shared/rss/host-owner.ts";
 import {
   TITLE_TWIN_MIN_JACCARD,
   jaccardOfSets,
@@ -479,6 +484,13 @@ interface CycleStats {
   // away instead of storing them as stories. Summary line and HTTP JSON only,
   // no `ingest_cycles` column, like the twins counters. Normally 0.
   contentlessTitlesDropped: number;
+  // `foreignHostSkipped` (h63-clusterintegrity-2): items left to another source
+  // because their link host is the host of a different active source (an
+  // aggregator feed carrying a registered outlet's stream: haberler.com's feed
+  // with sondakika.com links, from 2026-11-06). They are not stored for this
+  // source and register no twin key; the owning source claims the url on its own
+  // poll. Normally 0. Summary line and HTTP JSON only, no `ingest_cycles` column.
+  foreignHostSkipped: number;
   // Parse budget: changed feeds this cycle refused a parse because the cycle
   // already used its MAX_PARSES_PER_CYCLE / PARSE_BUDGET_BYTES. Not failures:
   // they are retried first next cycle. Summary line, HTTP JSON and, since
@@ -1509,6 +1521,7 @@ async function runCycle(): Promise<CycleStats> {
     twinsKeptDistinct: 0,
     twinsKeyCapped: 0,
     contentlessTitlesDropped: 0,
+    foreignHostSkipped: 0,
     parseDeferred: 0,
     parseDeferredMaxStreak: 0,
     parsedBytes: 0,
@@ -1578,6 +1591,13 @@ async function runCycleBody(
     console.log("[ingest] cycle", JSON.stringify({ ...stats }));
     return stats;
   }
+
+  // h63-clusterintegrity-2: which active source owns which link host, built once
+  // per cycle from EVERY active source (a quarantined one still owns its host;
+  // `url` is part of SOURCES_SELECT_LEGACY, so both selects carry it). A host
+  // that two active sources claim is left out, so an ambiguous host never skips
+  // an item. Read in the feed loop below.
+  const hostOwners = buildHostOwners(liveSources);
 
   // Skip sources still inside their quarantine backoff window (migration
   // 074, §4) -- 23 dead feeds cost ~11,000 failed fetches/day; a
@@ -1909,9 +1929,36 @@ async function runCycleBody(
       const normalizeCounters = { contentlessTitles: 0 };
       // Phase 1 (hunt-11): the cheap half of the normalisation for every item.
       // A bootstrap whose body is the stored one prepares nothing.
-      const prepared = bootstrapUnchanged
+      const preparedAll = bootstrapUnchanged
         ? []
         : prepareArticles(source, result.items, normalizeCounters);
+      // h63-clusterintegrity-2: an item whose link host is the host of a DIFFERENT
+      // active source is left to that source. The url upsert (`onConflict: "url"`,
+      // `ignoreDuplicates`) gives a url to whichever source polls first, so
+      // haberler.com's feed (which carried the sondakika.com stream from
+      // 2026-11-06) took 2,014 of Son Dakika's rows and starved it. This is the
+      // one place every row of the cycle passes through before the stored-url
+      // lookup, the heavy normalisation, the twin bookkeeping and `allRows.push`,
+      // so a skipped item costs none of them and registers no twin key; the
+      // owner claims the url on its own poll. Filtering here also keeps
+      // `isKnown` / `toComplete` / `completed` aligned with one list below.
+      const leftToOwner = new Map<string, number>();
+      const prepared =
+        hostOwners.size === 0
+          ? preparedAll
+          : preparedAll.filter((p) => {
+              const owner = foreignHostOwner(p.url, source.id, hostOwners);
+              if (owner === null) return true;
+              leftToOwner.set(owner.slug, (leftToOwner.get(owner.slug) ?? 0) + 1);
+              stats.foreignHostSkipped++;
+              return false;
+            });
+      for (const [ownerSlug, count] of leftToOwner) {
+        // Slugs and a count only: never a url or a headline.
+        console.log(
+          `[ingest] ${source.slug}: ${count} item(s) left to ${ownerSlug} (link host belongs to that source)`,
+        );
+      }
       if (normalizeCounters.contentlessTitles > 0) {
         stats.contentlessTitlesDropped += normalizeCounters.contentlessTitles;
         // Slug and count only: never a url or a headline.

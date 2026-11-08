@@ -204,8 +204,16 @@ describe("chart-table.ts — source guard", () => {
     expect(code).not.toMatch(/\bIntl\b/);
   });
 
-  it("keeps its own month table instead of importing from the weekly files", () => {
-    expect(code).toContain("MONTHS_TR");
+  // h63-timezones-1: the label helper moved to ./day-label (shared with the
+  // "Yükselen Konular" card); its own month table and purity are pinned in
+  // day-label.test.ts. This file only has to keep using the shared helper and
+  // must not grow a second month table or reach into the weekly files.
+  it("labels days through the shared day-label helper", () => {
+    expect(code).toMatch(
+      /import\s*\{\s*dayLabelTr\s*\}\s*from\s*["'](?:\.\/|@\/lib\/trends\/)day-label["']/,
+    );
+    expect(code).not.toMatch(/function dayLabelTr/);
+    expect(code).not.toContain("MONTHS_TR");
     expect(code).not.toMatch(/from\s+["'][^"']*weekly/);
   });
 });

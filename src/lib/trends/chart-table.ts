@@ -1,9 +1,11 @@
 import type { DayBucket } from "@/lib/trends/daily-zones";
+import { dayLabelTr } from "@/lib/trends/day-label";
 
 // h17-a11y-1: rows for the /trends "tablo olarak göster" data table, the
 // text alternative to the stacked-bar chart (WCAG 1.1.1 / 1.3.1). Pure on
 // purpose: no Date and no Intl, so the labels are identical on the server,
-// in every browser and in tests, whatever the ICU build.
+// in every browser and in tests, whatever the ICU build. The day label itself
+// lives in ./day-label (shared with the "Yükselen Konular" card).
 
 export type ChartTableRow = {
   /** Day key in YYYY-MM-DD form, as in DayBucket. */
@@ -16,35 +18,6 @@ export type ChartTableRow = {
   /** iktidar + bagimsiz + muhalefet, recomputed from the counts. */
   total: number;
 };
-
-// Local copy on purpose: src/lib/weekly has its own MONTHS_TR and is edited
-// by another branch; importing it would couple this helper to those files.
-const MONTHS_TR = [
-  "Ocak",
-  "Şubat",
-  "Mart",
-  "Nisan",
-  "Mayıs",
-  "Haziran",
-  "Temmuz",
-  "Ağustos",
-  "Eylül",
-  "Ekim",
-  "Kasım",
-  "Aralık",
-] as const;
-
-const DAY_KEY = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-/** "2026-10-04" -> "4 Ekim". A key that is not a valid YYYY-MM-DD stays as is. */
-function dayLabelTr(day: string): string {
-  const m = DAY_KEY.exec(day);
-  if (!m) return day;
-  const month = MONTHS_TR[Number(m[2]) - 1];
-  const dayOfMonth = Number(m[3]);
-  if (month === undefined || dayOfMonth < 1 || dayOfMonth > 31) return day;
-  return `${dayOfMonth} ${month}`;
-}
 
 /**
  * Appended to the label of the last, still-filling day (h37-content-3). It

@@ -126,24 +126,26 @@ describe("expectLinear with a scripted clock", () => {
   });
 
   it("flags a pair as soon as the growth out of a rung at the floor is real", () => {
+    // The pair rule alone (extendTop: false): these ladders define no rung past the top.
     // Rungs cost 0.5, 1.5 (both under 2 ms) then 3, 12: the 3 -> 12 step is x4.
     const costs: Record<number, number> = { 10_000: 0.5, 20_000: 1.5, 40_000: 3, 80_000: 12 };
     const s = scripted((len) => costs[len]!);
-    expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).toThrow(/super-linear: 40000 -> 80000/);
+    expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, extendTop: false, clock: s.clock })).toThrow(/super-linear: 40000 -> 80000/);
   });
 
   it("flags a pair only when its cost beyond the linear allowance is more than timer noise (floorMs)", () => {
+    // The pair rule alone (extendTop: false): these ladders define no rung past the top.
     // 2.0 ms -> 6.2 ms is 3.1x, over the 3.0x limit, but only 0.2 ms over the allowance: noise, not a regression.
     const costs: Record<number, number> = { 62_500: 2, 125_000: 6.2 };
     const noisy = scripted((len) => costs[len]!);
-    expect(() => expectLinear(gen, noisy.fn, { n: 125_000, sizes: [62_500, 125_000], ceilingMs: 5_000, clock: noisy.clock })).not.toThrow();
+    expect(() => expectLinear(gen, noisy.fn, { n: 125_000, sizes: [62_500, 125_000], ceilingMs: 5_000, extendTop: false, clock: noisy.clock })).not.toThrow();
     // 20 ms -> 66 ms is the same 3.3x but 6 ms over the allowance: real.
     const real = scripted((len) => (len === 62_500 ? 20 : 66));
-    expect(() => expectLinear(gen, real.fn, { n: 125_000, sizes: [62_500, 125_000], ceilingMs: 5_000, clock: real.clock })).toThrow(/super-linear/);
+    expect(() => expectLinear(gen, real.fn, { n: 125_000, sizes: [62_500, 125_000], ceilingMs: 5_000, extendTop: false, clock: real.clock })).toThrow(/super-linear/);
     // A caller can tighten the noise level with floorMs: at 0.1 the 0.2 ms excess counts again.
     const tight = scripted((len) => costs[len]!);
     expect(() =>
-      expectLinear(gen, tight.fn, { n: 125_000, sizes: [62_500, 125_000], ceilingMs: 5_000, floorMs: 0.1, clock: tight.clock }),
+      expectLinear(gen, tight.fn, { n: 125_000, sizes: [62_500, 125_000], ceilingMs: 5_000, floorMs: 0.1, extendTop: false, clock: tight.clock }),
     ).toThrow(/super-linear/);
   });
 
@@ -157,13 +159,14 @@ describe("expectLinear with a scripted clock", () => {
   });
 
   it("measures the growth out of a sub-floor rung against the floor, not against the rung", () => {
+    // The pair rule alone (extendTop: false): these ladders define no rung past the top.
     // 0.2 ms -> 3 ms: x15 against the rung, but only 1.5x against the 2 ms floor: noise, not a regression.
     const costs: Record<number, number> = { 10_000: 0.2, 20_000: 3 };
     const s = scripted((len) => costs[len]!);
-    expect(() => expectLinear(gen, s.fn, { n: 20_000, sizes: [10_000, 20_000], ceilingMs: 2_000, clock: s.clock })).not.toThrow();
+    expect(() => expectLinear(gen, s.fn, { n: 20_000, sizes: [10_000, 20_000], ceilingMs: 2_000, extendTop: false, clock: s.clock })).not.toThrow();
     // 0.2 ms -> 30 ms is 15x the floor and 24 ms over the allowance: real.
     const big = scripted((len) => (len === 10_000 ? 0.2 : 30));
-    expect(() => expectLinear(gen, big.fn, { n: 20_000, sizes: [10_000, 20_000], ceilingMs: 2_000, clock: big.clock })).toThrow(
+    expect(() => expectLinear(gen, big.fn, { n: 20_000, sizes: [10_000, 20_000], ceilingMs: 2_000, extendTop: false, clock: big.clock })).toThrow(
       /super-linear: 10000 -> 20000 grew 15\.00x/,
     );
   });
@@ -188,10 +191,11 @@ describe("expectLinear with a scripted clock", () => {
   });
 
   it("still takes every pass, and confirms, when the top rung of a sub-floor ladder looks like a cliff", () => {
+    // The pair rule alone (extendTop: false): these ladders define no rung past the top.
     // 0.5, 1, 1.5 ms then 12 ms: 12 / 2 = 6x over the floor, so the early return must not fire.
     const costs: Record<number, number> = { 10_000: 0.5, 20_000: 1, 40_000: 1.5, 80_000: 12 };
     const s = scripted((len) => costs[len]!);
-    expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, runs: 5, clock: s.clock })).toThrow(
+    expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, runs: 5, extendTop: false, clock: s.clock })).toThrow(
       /super-linear: 40000 -> 80000/,
     );
     expect(s.calls()).toBeGreaterThan(1 + SIZES.length);
@@ -233,6 +237,83 @@ describe("expectLinear with a scripted clock", () => {
     ).toThrow(/super-linear/);
     // The confirmation really took more samples than the plain ladder does.
     expect(quad.calls()).toBeGreaterThan(quadPlain.calls());
+  });
+
+  describe("one constant-factor step (a cache or memory-tier cliff) is excused only when the cost is linear after it", () => {
+    // 2 -> 3 -> 8 -> 28 ms then linear: the CI ladder of PR #225 (classify-category, 100k -> 200k grew 3.49x).
+    const cliff = (len: number) => (len <= 40_000 ? len / 5_000 : (len / 80_000) * 28);
+
+    it("passes when the rung after the step grows linearly again", () => {
+      const s = scripted(cliff);
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).not.toThrow();
+      // The extension built and sampled a 160k rung (at least three times).
+      expect(s.sizesSeen.filter((len) => len === 160_000).length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("still fails a cost that keeps growing super-linearly past the top rung", () => {
+      // Linear at the bottom, then a quadratic term that dominates from 80k on: the step is not one-off.
+      const s = scripted((len) => len / 5_000 + (len > 40_000 ? (len / 40_000) ** 2 * 8 : 0));
+      let message = "";
+      try {
+        expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock });
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toMatch(/super-linear/);
+      expect(message).toContain("160000");
+    });
+
+    it("excuses one step below the top when the next pair is linear again (the CI ladder 2 -> 3 -> 11.9 -> 24 ms)", () => {
+      const costs: Record<number, number> = { 10_000: 2, 20_000: 3, 40_000: 11.9, 80_000: 24 };
+      const s = scripted((len) => costs[len]!);
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).not.toThrow();
+      expect(s.sizesSeen).not.toContain(160_000); // the next pair already shows the cost is linear again
+      const off = scripted((len) => costs[len]!);
+      expect(() => expectLinear(gen, off.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, extendTop: false, clock: off.clock })).toThrow(
+        /super-linear: 20000 -> 40000/,
+      );
+    });
+
+    it("does not excuse two steps in one ladder", () => {
+      const costs: Record<number, number> = { 10_000: 4, 20_000: 16, 40_000: 32, 80_000: 120 };
+      const s = scripted((len) => costs[len]!);
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).toThrow(
+        /super-linear: 10000 -> 20000/,
+      );
+    });
+
+    it("does not excuse a step of more than twice the limit, even when the cost is linear after it", () => {
+      const s = scripted((len) => (len <= 20_000 ? len / 5_000 : (len / 40_000) * 28));
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: s.clock })).toThrow(
+        /super-linear: 20000 -> 40000/,
+      );
+    });
+
+    it("keeps today's verdict with extendTop: false or confirmRuns: 0", () => {
+      const a = scripted(cliff);
+      expect(() => expectLinear(gen, a.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, extendTop: false, clock: a.clock })).toThrow(
+        /super-linear/,
+      );
+      expect(a.sizesSeen).not.toContain(160_000);
+      const b = scripted(cliff);
+      expect(() => expectLinear(gen, b.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, confirmRuns: 0, clock: b.clock })).toThrow(
+        /super-linear/,
+      );
+      expect(b.sizesSeen).not.toContain(160_000);
+    });
+
+    it("fails with the ceiling message when the extended rung is over the ceiling", () => {
+      const s = scripted((len) => (len <= 40_000 ? len / 5_000 : len <= 80_000 ? 28 : 500));
+      expect(() => expectLinear(gen, s.fn, { n: 80_000, sizes: SIZES, ceilingMs: 400, clock: s.clock })).toThrow(/ceiling/);
+    });
+
+    it("does not extend a slow top rung (hundreds of ms is already steady)", () => {
+      const s = scripted((len) => 300 * (len / 10_000) ** 2);
+      expect(() => expectLinear(gen, s.fn, { n: 20_000, sizes: [10_000, 20_000], ceilingMs: 50_000, clock: s.clock })).toThrow(
+        /super-linear/,
+      );
+      expect(s.sizesSeen).not.toContain(40_000);
+    });
   });
 
   it("takes no confirmation samples on a pair that passes, nor on a pair of slow rungs", () => {

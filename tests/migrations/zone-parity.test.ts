@@ -619,6 +619,84 @@ describe("zone-parity: migration 132 (legacy bias range tools) matches the contr
   });
 });
 
+// ---------------------------------------------------------------------------
+// Hunt 63 (h63-clusterintegrity-1): the 034 section of docs/migration-guide.md
+// quotes a read-only dry-run query that counts the flagged clusters failing the
+// 5-voting-source rule (expected 215 before the legacy repair, 0 after). It is
+// the one hand-written SQL copy of the zone map that lives in a document and not
+// in a migration, so it is pinned against the same contracts here: the zone
+// CASE (letters i / b / m for iktidar / bagimsiz / muhalefet), the voting kinds
+// and the 5 / 0.8 thresholds. No migration carries a copy for h63: the repair
+// tools are 132's (see the 132 block above).
+// ---------------------------------------------------------------------------
+
+const GUIDE_PATH = resolve(__dirname, "..", "..", "docs", "migration-guide.md");
+const ZONE_LETTER: Record<string, string> = { iktidar: "i", bagimsiz: "b", muhalefet: "m" };
+
+describe("zone-parity: docs/migration-guide.md h63 dry-run query matches the contracts", () => {
+  let query = "";
+  beforeAll(() => {
+    const guide = readFileSync(GUIDE_PATH, "utf8");
+    const heading = guide.indexOf("### Legacy bias_distribution repair (h63)");
+    expect(heading, "the h63 subsection must exist").toBeGreaterThanOrEqual(0);
+    const rest = guide.slice(heading);
+    // The fence sits inside a numbered list item, so it is indented in the markdown.
+    const open = rest.search(/```sql\n\s*with b as \(select id, updated_at from clusters where is_blindspot/);
+    expect(open, "the dry-run query block must exist in the h63 subsection").toBeGreaterThanOrEqual(0);
+    const bodyStart = rest.indexOf("\n", open) + 1;
+    query = rest.slice(bodyStart, rest.indexOf("```", bodyStart)).trim();
+    expect(query.length).toBeGreaterThan(0);
+  });
+
+  it("its explicit zone lists plus the `else` branch deep-equal BIAS_TO_ZONE", () => {
+    const parsed: Record<string, string> = {};
+    const re = /when\s+bias\s+in\s*\(([^)]+)\)\s+then\s+'([a-z])'/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(query)) !== null) {
+      const letter = m[2] as string;
+      const itemRe = /'([a-z_]+)'/g;
+      let im: RegExpExecArray | null;
+      while ((im = itemRe.exec(m[1] as string)) !== null) parsed[im[1] as string] = letter;
+    }
+    const elseLetter = /else\s+'([a-z])'\s+end\s+zone/i.exec(query)?.[1];
+    expect(elseLetter, "the CASE needs an else branch").toBeDefined();
+    // The else branch carries every remaining BIAS_KEY (the muhalefet keys).
+    for (const key of BIAS_KEYS) {
+      if (!(key in parsed)) parsed[key] = elseLetter as string;
+    }
+    const expected: Record<string, string> = {};
+    for (const key of BIAS_KEYS) expected[key] = ZONE_LETTER[BIAS_TO_ZONE[key]] as string;
+    expect(parsed).toEqual(expected);
+  });
+
+  it("the explicit lists name only known bias keys, each once", () => {
+    const seen: string[] = [];
+    const re = /when\s+bias\s+in\s*\(([^)]+)\)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(query)) !== null) {
+      const itemRe = /'([a-z_]+)'/g;
+      let im: RegExpExecArray | null;
+      while ((im = itemRe.exec(m[1] as string)) !== null) seen.push(im[1] as string);
+    }
+    expect(seen.length).toBeGreaterThan(0);
+    expect(new Set(seen).size).toBe(seen.length);
+    for (const key of seen) expect(BIAS_KEYS as readonly string[]).toContain(key);
+  });
+
+  it("its voting filter equals VOTING_SOURCE_KINDS", () => {
+    const lists = extractInLists(query).filter((l) => l.some((k) => (SOURCE_KINDS as readonly string[]).includes(k)));
+    expect(lists).toHaveLength(1);
+    expect(new Set(lists[0])).toEqual(new Set(VOTING_SOURCE_KINDS));
+  });
+
+  it("contains the BLINDSPOT.minSources / dominantShare literals, anchored to the real expressions (not hardcoded here)", () => {
+    expect(query).toMatch(new RegExp(`total\\s*<\\s*${BLINDSPOT.minSources}\\b`));
+    expect(query).toMatch(
+      new RegExp(`nullif\\(total,\\s*0\\)\\s*<\\s*${BLINDSPOT.dominantShare.toString().replace(".", "\\.")}\\b`),
+    );
+  });
+});
+
 // Type-only assertions so this file also breaks if the contract's exported
 // shapes change in ways the runtime checks above wouldn't catch.
 function _typeCheck(k: BiasKey): MediaDnaZone {

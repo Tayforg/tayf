@@ -79,8 +79,11 @@ export type RisingItem = {
 export type RisingResult =
   | {
       status: "ok";
-      dayLabel: "Bugün" | "Dün";
-      /** The ranked Istanbul day, YYYY-MM-DD. */
+      /**
+       * The ranked Istanbul day, YYYY-MM-DD. The card names it by date
+       * (dayLabelTr), never as "Bugün"/"Dün": this value is cached for an hour
+       * or more and can be served after Istanbul midnight (h63-timezones-1).
+       */
       day: string;
       items: RisingItem[];
     }
@@ -199,16 +202,16 @@ export function computeRising(
   const today = rankDay(byDay, todayKey);
   if (!today.sufficient) return { status: "insufficient" };
   if (today.items.length > 0) {
-    return { status: "ok", dayLabel: "Bugün", day: todayKey, items: today.items };
+    return { status: "ok", day: todayKey, items: today.items };
   }
 
   const yesterdayKey = shiftDayKey(todayKey, -1);
   const yesterday = rankDay(byDay, yesterdayKey);
   if (yesterday.sufficient && yesterday.items.length > 0) {
-    return { status: "ok", dayLabel: "Dün", day: yesterdayKey, items: yesterday.items };
+    return { status: "ok", day: yesterdayKey, items: yesterday.items };
   }
 
-  return { status: "ok", dayLabel: "Bugün", day: todayKey, items: [] };
+  return { status: "ok", day: todayKey, items: [] };
 }
 
 /**
