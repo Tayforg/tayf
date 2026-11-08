@@ -162,9 +162,16 @@ export function silenceFootnote(
 /**
  * The count line above the /blindspots list:
  *
- *   "Son 7 günde 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9"
+ *   "Son 7 günde 46 kör nokta · İktidar ağırlıklı 38 · Muhalefet ağırlıklı 8"
  *
- * İktidar and Muhalefet are always named (a "Muhalefet tarafında 0" is a
+ * `sideCounts` tallies each claim under the side that WROTE it (the dominant
+ * zone), so the line names that side with "ağırlıklı", the word the band rows
+ * below it use ("8 muhalefet ağırlıklı"). "İktidar tarafında 38" counted the
+ * same stories but read as the government side's own blind spot, the opposite
+ * of what is counted (h72-newreader-1; tests/guards/kor-nokta-side-wording).
+ * The word order also keeps Turkish case suffixes off the numbers.
+ *
+ * İktidar and Muhalefet are always named (a "Muhalefet ağırlıklı 0" is a
  * finding); Bağımsız only when it is above zero. Same side wording as the
  * weekly page's tally line (week-copy.ts). `null` when there is no claim, so
  * the empty state speaks instead.
@@ -177,11 +184,11 @@ export function blindspotCountLine(
   if (!(claimCount > 0)) return null;
   const parts = [
     `Son ${windowDays} günde ${formatCountTr(claimCount)} kör nokta`,
-    `İktidar tarafında ${formatCountTr(sideCounts.iktidar)}`,
-    `Muhalefet tarafında ${formatCountTr(sideCounts.muhalefet)}`,
+    `İktidar ağırlıklı ${formatCountTr(sideCounts.iktidar)}`,
+    `Muhalefet ağırlıklı ${formatCountTr(sideCounts.muhalefet)}`,
   ];
   if (sideCounts.bagimsiz > 0) {
-    parts.push(`Bağımsız tarafında ${formatCountTr(sideCounts.bagimsiz)}`);
+    parts.push(`Bağımsız ağırlıklı ${formatCountTr(sideCounts.bagimsiz)}`);
   }
   return parts.join(" · ");
 }

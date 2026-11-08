@@ -74,6 +74,10 @@ run | 170-entity-cluster-ids-headline-only.test.ts | tests/migrations/sql/170-en
 run | 171-ticker-alias-siblings.test.ts | tests/migrations/sql/171-ticker-alias-siblings-dryrun.sql | - | 0
 # 172: the dry-run script builds the state itself (166's setup file, which carries search_tsv, 083's index and 129, then 166 from its own file, gated on its production md5, and a baseline that shows the stem collisions of miller, bartin and saniye ranking above the real rows) and applies 172 twice, so it is the setup. Every live case runs inside its own rolled-back transaction.
 run | 172-search-exempt-word-tier.test.ts | tests/migrations/sql/172-search-exempt-word-tier-dryrun.sql | - | 0
+# 177: the dry-run script builds the state itself by running 171's dry-run (the alias table of 049 with 052's enabled column, 049's fold, 062's finance regex, then 085 from its own file, then 171 twice), shows on 171's body (gated on its production md5) a Babacan story filed under ekonomi attaching DEVA, and applies 177 twice, so it is the setup. Every live case runs inside its own rolled-back transaction.
+run | 177-ticker-code-stoplist-gate.test.ts | tests/migrations/sql/177-ticker-code-stoplist-gate-dryrun.sql | - | 0
+# 178: the dry-run script builds the state itself by running 177's dry-run (which runs 171's: the alias table of 049, 049's fold, 062's finance regex, 085 from its own file, 171 twice, then 177 twice), shows on 177's body (gated on its md5) BIMAS attaching to a BİM catalog story and ARZUM and SOKM to a Şok catalog headline, and applies 178 twice, so it is the setup. Every live case runs inside its own rolled-back transaction.
+run | 178-retail-catalog-ticker-gate.test.ts | tests/migrations/sql/178-retail-catalog-ticker-gate-dryrun.sql | - | 0
 run | 151-cluster-attach-probe.test.ts | tests/migrations/sql/151-cluster-attach-probe-dryrun.sql | - | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql | TAYF_SHAPE=prod | 0
 run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql | TAYF_SHAPE=chain | 0
@@ -88,6 +92,8 @@ run | 146-cluster-stem-probe.test.ts | tests/migrations/sql/139-content-twin-can
 # no three-argument search_cluster_ids, which 166 replaces; the 166 setup file adds those (035's column, 083's index, then 129
 # itself) and leaves 129 applied, 166 NOT applied: the live block applies 166 (twice) and runs the function before and after.
 run | 166-search-overstem-guard.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql tests/migrations/sql/166-search-overstem-guard-setup.sql | - | 0
+# 179: the dry-run script builds the state itself (bist_aliases of 049 with 052's enabled column, jev_shadow_predictions of 061 with the columns the report reads; the stub already has articles and article_tickers) and applies 179 twice, so it is the setup. Every live case runs inside its own rolled-back transaction.
+run | 179-alias-precision-report.test.ts | tests/migrations/sql/179-alias-precision-report-dryrun.sql | - | 0
 # --- pending: not runnable in the harness yet -----------------------------------------------------
 pending | 128-delete-source-recompute.test.ts | setup 061+064+128 loads and 4 of 14 live tests pass, then 3 nested suites fail with: update or delete on table sources violates foreign key constraint articles_source_id_fkey on table articles (the stub FKs lack ON DELETE CASCADE as in production), which skips 10 tests
 pending | 024-028.test.ts | needs a full local Supabase stack (SUPABASE_LOCAL_URL)

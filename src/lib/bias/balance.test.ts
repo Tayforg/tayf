@@ -11,7 +11,9 @@ import {
   BALANCE_LABELS,
   BALANCE_MIN_SOURCES,
   BALANCE_ONE_SIDED_MAX,
+  BALANCE_SHORT_LABELS,
   BALANCE_TWO_ZONE_MIN_SHARE,
+  type BalanceTier,
   balanceAriaLabel,
   balanceFromDistribution,
   balanceFromZoneCounts,
@@ -46,6 +48,31 @@ describe("balance constants", () => {
       tek: "Tek tarafta",
     });
     expect(BALANCE_INSUFFICIENT_LABEL).toBe("Az kaynak");
+  });
+
+  // h72-newreader-2: the compact card chip printed only "Denge 75", so a
+  // higher number labelled "Tek tarafa yakın" read as better than "Denge 72".
+  // The chip now appends this lower-case tier word to its visible text.
+  it("keeps the compact chip's lower-case tier words exact, one per tier", () => {
+    expect(BALANCE_SHORT_LABELS).toEqual({
+      dengeli: "dengeli",
+      iki: "iki tarafa dengeli",
+      yakin: "tek tarafa yakın",
+      tek: "tek tarafta",
+    });
+  });
+
+  it("has a short label for every tier and no extra key", () => {
+    const tiers = Object.keys(BALANCE_LABELS) as BalanceTier[];
+    expect(Object.keys(BALANCE_SHORT_LABELS).sort()).toEqual([...tiers].sort());
+    for (const tier of tiers) {
+      expect(BALANCE_SHORT_LABELS[tier].length).toBeGreaterThan(0);
+      // The short word is the full label in lower case (Turkish rules),
+      // minus a trailing "kapsama" on the first tier.
+      expect(BALANCE_LABELS[tier].toLocaleLowerCase("tr")).toContain(
+        BALANCE_SHORT_LABELS[tier],
+      );
+    }
   });
 });
 

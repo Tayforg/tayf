@@ -47,6 +47,10 @@ const fixture = vi.hoisted(() => ({
   coverageStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
   coverageError: null as string | null,
   jevRows: [] as Array<{ subject_id: string; jev_prob: number; created_at: string }>,
+  // h72-kap-1: the `.in('subject_id', ...)` batches fetchRelevanceScores sent (one
+  // entry per request) and a switch that makes that read fail.
+  jevInBatches: [] as string[][],
+  jevError: null as string | null,
   bistCompanies: [] as Array<{ tickers: string[]; title: string; shares_traded?: boolean }>,
   // Builder state of every bist_companies read, and an error switch for it.
   companyStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
@@ -151,6 +155,8 @@ const supabaseFake = await vi.hoisted(async () => {
         const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
         const inFilter = s.in.find((i) => i.col === "subject_id");
         if (inFilter) {
+          fixture.jevInBatches.push([...(inFilter.vals as string[])]);
+          if (fixture.jevError) return { data: null, error: { message: fixture.jevError } };
           const wanted = new Set(inFilter.vals as string[]);
           return { data: fixture.jevRows.filter((r) => wanted.has(r.subject_id)), error: null };
         }
@@ -227,6 +233,7 @@ import {
   fetchSignals,
   fetchTickerPage,
   fetchTopTickers,
+  filterCoverageRows,
   haltNoticeToShow,
   latestTradingHalt,
   rankAttention,
@@ -235,6 +242,7 @@ import {
   type Disclosure,
 } from "./queries";
 import { tickerDisclosureOr } from "./disclosure-filter";
+import { relevanceKey } from "./ticker-relevance";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -258,6 +266,8 @@ beforeEach(() => {
   fixture.coverageStates = [];
   fixture.coverageError = null;
   fixture.jevRows = [];
+  fixture.jevInBatches = [];
+  fixture.jevError = null;
   fixture.bistCompanies = [];
   fixture.companyStates = [];
   fixture.companyError = null;
@@ -647,6 +657,225 @@ describe("finance query transforms", () => {
         expect(out.events).toBeLessThanOrEqual(out.disclosures);
         expect(out.pressAhead).toBeLessThanOrEqual(out.events);
       }
+    });
+
+    describe("coverage rows obey the page relevance gate (h72-kap-1)", () => {
+      const TICKER = "GWIND";
+      const key = (articleId: string, ticker = TICKER) => relevanceKey(articleId, ticker);
+      const ids = (rows: ReadonlyArray<{ article_id: string }>) => rows.map((r) => r.article_id);
+
+      describe("filterCoverageRows", () => {
+        it("drops a row scored 0.02, keeps a row scored exactly 0.2 and keeps an unscored row (fail-open)", () => {
+          const rows = [row(1, 30, "low"), row(1, 40, "edge"), row(1, 50, "unscored")];
+          const scores = new Map([
+            [key("low"), 0.02],
+            [key("edge"), 0.2],
+          ]);
+          expect(ids(filterCoverageRows(rows, TICKER, scores, new Set()))).toEqual(["edge", "unscored"]);
+        });
+
+        it("reads the score under THIS ticker's key only", () => {
+          const rows = [row(1, 30, "a1")];
+          const scores = new Map([[key("a1", "OTHER"), 0.01]]);
+          expect(ids(filterCoverageRows(rows, TICKER, scores, new Set()))).toEqual(["a1"]);
+        });
+
+        it("drops a row whose article is a legal notice, whatever its score", () => {
+          const rows = [row(1, 30, "n1"), row(1, 40, "n2"), row(1, 50, "ok")];
+          const scores = new Map([[key("n2"), 0.9]]);
+          expect(ids(filterCoverageRows(rows, TICKER, scores, new Set(["n1", "n2"])))).toEqual(["ok"]);
+        });
+
+        it("drops every row of a hidden article, under each filing it was joined to", () => {
+          const rows = [row(1, 30, "low"), row(2, 10, "low"), row(2, 20, "ok")];
+          const scores = new Map([[key("low"), 0.05]]);
+          expect(filterCoverageRows(rows, TICKER, scores, new Set())).toEqual([row(2, 20, "ok")]);
+        });
+
+        it("returns [] for no rows and does not mutate its input", () => {
+          expect(filterCoverageRows([], TICKER, new Map(), new Set())).toEqual([]);
+          const rows = [row(1, 30, "low"), row(1, 40, "ok")];
+          const copy = [...rows];
+          filterCoverageRows(rows, TICKER, new Map([[key("low"), 0.0]]), new Set());
+          expect(rows).toEqual(copy);
+        });
+
+        it("scores of exactly 0 and just under the floor hide; 0.2 and above show", () => {
+          const rows = [row(1, 1, "zero"), row(1, 2, "just"), row(1, 3, "at"), row(1, 4, "high")];
+          const scores = new Map([
+            [key("zero"), 0],
+            [key("just"), 0.1999],
+            [key("at"), 0.2],
+            [key("high"), 0.97],
+          ]);
+          expect(ids(filterCoverageRows(rows, TICKER, scores, new Set()))).toEqual(["at", "high"]);
+        });
+      });
+
+      describe("coverageStats over filtered rows", () => {
+        it("a filing whose only post-filing rows are scored 0.02 is an event with no coverage", () => {
+          const rows = [row(1, 120, "q1"), row(1, 300, "q2")];
+          const scores = new Map([
+            [key("q1"), 0.02],
+            [key("q2"), 0.02],
+          ]);
+          // Control: the raw view rows claim the filing was covered, 2 hours later.
+          expect(coverageStats(rows, [disc(1, 0)], 0.2)).toMatchObject({ covered: 1, medianLagMinutes: 120 });
+          expect(coverageStats(filterCoverageRows(rows, TICKER, scores, new Set()), [disc(1, 0)], 0.2)).toEqual({
+            disclosures: 1,
+            events: 1,
+            covered: 0,
+            medianLagMinutes: null,
+            pressAhead: 0,
+          });
+        });
+
+        it("two pre-filing rows scored 0.03 no longer produce an olağandışı ön ilgi", () => {
+          const rows = [row(1, -300, "p1"), row(1, -200, "p2")];
+          const scores = new Map([
+            [key("p1"), 0.03],
+            [key("p2"), 0.03],
+          ]);
+          expect(coverageStats(rows, [disc(1, 0)], 0.2).pressAhead).toBe(1);
+          expect(coverageStats(filterCoverageRows(rows, TICKER, scores, new Set()), [disc(1, 0)], 0.2).pressAhead).toBe(0);
+        });
+
+        it("a visible article keeps the event covered, with its own lag rather than a hidden one's", () => {
+          const rows = [row(1, 30, "hidden"), row(1, 90, "shown")];
+          const scores = new Map([[key("hidden"), 0.02]]);
+          const out = coverageStats(filterCoverageRows(rows, TICKER, scores, new Set()), [disc(1, 0)], 0.2);
+          expect(out).toMatchObject({ covered: 1, medianLagMinutes: 90 });
+        });
+
+        it("one visible pre-filing article is not enough once its partner is hidden", () => {
+          const rows = [row(1, -300, "p1"), row(1, -200, "p2")];
+          const scores = new Map([[key("p2"), 0.04]]);
+          expect(coverageStats(filterCoverageRows(rows, TICKER, scores, new Set()), [disc(1, 0)], 0.2).pressAhead).toBe(0);
+        });
+      });
+
+      describe("fetchTickerPage", () => {
+        const NOW = "2026-09-13T12:00:00Z";
+        const FILED = "2026-09-10T08:00:00Z";
+
+        function filing(index: number, publishedAt: string) {
+          return {
+            disclosure_index: index,
+            published_at: publishedAt,
+            kap_title: "GWIND ENERJİ A.Ş.",
+            stock_codes: [TICKER],
+            related_stocks: [] as string[],
+            subject: "Özel Durum Açıklaması (Genel)",
+            summary: null,
+            disclosure_class: "ODA",
+          };
+        }
+        const cov = (disclosure_index: number, lag_minutes: number, article_id: string) => ({
+          ticker: TICKER,
+          disclosure_index,
+          lag_minutes,
+          article_id,
+        });
+        const jev = (articleId: string, prob: number, ticker = TICKER) => ({
+          subject_id: relevanceKey(articleId, ticker),
+          jev_prob: prob,
+          created_at: NOW,
+        });
+
+        beforeEach(() => {
+          vi.useFakeTimers();
+          vi.setSystemTime(new Date(NOW));
+        });
+
+        it("a filing whose only coverage is below the relevance floor reads as uncovered, with no lag and no ön ilgi", async () => {
+          fixture.kapDisclosures = [filing(1, FILED)];
+          fixture.coverageRows = [cov(1, -300, "p1"), cov(1, -200, "p2"), cov(1, 120, "q1")];
+          fixture.jevRows = [jev("p1", 0.03), jev("p2", 0.03), jev("q1", 0.02)];
+
+          const page = await fetchTickerPage(TICKER);
+
+          expect(page.coverage).toEqual({ disclosures: 1, events: 1, covered: 0, medianLagMinutes: null, pressAhead: 0 });
+        });
+
+        it("coverage-view article ids reach the relevance lookup once each, one key per (article, ticker)", async () => {
+          fixture.kapDisclosures = [filing(1, FILED), filing(2, "2026-09-10T09:00:00Z")];
+          // p1 is joined to both filings of the event; q1 is the one article after them.
+          fixture.coverageRows = [cov(1, -300, "p1"), cov(2, -360, "p1"), cov(1, 120, "q1"), cov(2, 60, "q1")];
+          fixture.jevRows = [jev("p1", 0.03), jev("q1", 0.02)];
+
+          await fetchTickerPage(TICKER);
+
+          const sent = fixture.jevInBatches.flat();
+          expect(sent.filter((k) => k === key("p1"))).toHaveLength(1);
+          expect(sent.filter((k) => k === key("q1"))).toHaveLength(1);
+          expect(new Set(sent).size).toBe(sent.length);
+        });
+
+        it("an article both in the 30-day attention series and in the coverage view is looked up once", async () => {
+          fixture.kapDisclosures = [filing(1, FILED)];
+          fixture.articleTickers = [{ ticker: TICKER, article_id: "q1", published_at: "2026-09-10T10:00:00Z", source_id: "s1" }];
+          fixture.coverageRows = [cov(1, 120, "q1")];
+          fixture.jevRows = [jev("q1", 0.02)];
+
+          const page = await fetchTickerPage(TICKER);
+
+          const sent = fixture.jevInBatches.flat();
+          expect(sent.filter((k) => k === key("q1"))).toHaveLength(1);
+          expect(page.attention).toEqual([]);
+          expect(page.coverage.covered).toBe(0);
+        });
+
+        it("hidden articles do not count but a visible one in the same view does", async () => {
+          fixture.kapDisclosures = [filing(1, FILED)];
+          fixture.coverageRows = [cov(1, 30, "hidden"), cov(1, 90, "shown"), cov(1, 200, "unscored")];
+          fixture.jevRows = [jev("hidden", 0.02), jev("shown", 0.9)];
+
+          const page = await fetchTickerPage(TICKER);
+
+          expect(page.coverage).toMatchObject({ covered: 1, medianLagMinutes: 90 });
+        });
+
+        it("a legal notice older than the 30-day attention window still stops counting as ön ilgi (2-day reach of the view)", async () => {
+          // Filed 2026-08-14 13:00Z (inside the 30-day window); both articles ran just before it,
+          // 2026-08-14 03:00Z and 01:20Z: before the attention window starts (2026-08-15 +03).
+          fixture.kapDisclosures = [filing(1, "2026-08-14T13:00:00Z")];
+          fixture.coverageRows = [cov(1, -600, "n1"), cov(1, -700, "p2")];
+          fixture.legalNotices = [{ article_id: "n1", published_at: "2026-08-14T03:00:00Z" }];
+
+          const page = await fetchTickerPage(TICKER);
+          expect(page.coverage.pressAhead).toBe(0);
+
+          // Control: without the notice row the same two articles are an abnormal build-up.
+          fixture.legalNotices = [];
+          expect((await fetchTickerPage(TICKER)).coverage.pressAhead).toBe(1);
+        });
+
+        it("fails open when the relevance lookup errors: every coverage row counts, as before", async () => {
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          try {
+            fixture.kapDisclosures = [filing(1, FILED)];
+            fixture.coverageRows = [cov(1, -300, "p1"), cov(1, -200, "p2"), cov(1, 120, "q1")];
+            fixture.jevRows = [jev("p1", 0.03), jev("p2", 0.03), jev("q1", 0.02)];
+            fixture.jevError = "jev boom";
+
+            const page = await fetchTickerPage(TICKER);
+
+            expect(page.coverage).toEqual({ disclosures: 1, events: 1, covered: 1, medianLagMinutes: 120, pressAhead: 1 });
+            expect(warn).toHaveBeenCalledWith(expect.stringContaining("jev boom"));
+          } finally {
+            warn.mockRestore();
+          }
+        });
+
+        it("a ticker with no coverage rows makes no extra relevance request for the coverage view", async () => {
+          fixture.kapDisclosures = [filing(1, FILED)];
+
+          const page = await fetchTickerPage(TICKER);
+
+          expect(fixture.jevInBatches).toEqual([]);
+          expect(page.coverage).toEqual({ disclosures: 1, events: 1, covered: 0, medianLagMinutes: null, pressAhead: 0 });
+        });
+      });
     });
   });
 
@@ -1302,7 +1531,7 @@ describe("ticker-legal-notices (migration 107): BİK notices do not count as tic
     expect(page.attention.reduce((s, d) => s + d.articles, 0)).toBe(1);
   });
 
-  it("fetchTickerPage looks notices up over its 30-day attention window", async () => {
+  it("fetchTickerPage looks notices up over its 30-day attention window plus the coverage view's 2-day reach", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
     fixture.articleTickers = topTickerRows();
@@ -1312,7 +1541,10 @@ describe("ticker-legal-notices (migration 107): BİK notices do not count as tic
 
     const state = fixture.lastLegalState as BuilderState;
     expect(state.table).toBe("legal_notice_articles");
-    expect(state.gte).toEqual([{ col: "published_at", val: "2026-08-15T00:00:00+03:00" }]);
+    // h72-kap-1: the notice set also gates the coverage rows, and the disclosure_coverage
+    // view reaches 2 days before a filing, so the lookup starts 2 days before the 30-day
+    // attention window (2026-08-15): 2026-08-13.
+    expect(state.gte).toEqual([{ col: "published_at", val: "2026-08-13T00:00:00+03:00" }]);
     expect(state.limit).toBe(5000);
   });
 

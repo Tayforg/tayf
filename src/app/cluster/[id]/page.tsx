@@ -822,12 +822,22 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             <div className="space-y-2">
               {/* A4 polish: promote "Kör nokta" to a full ribbon ABOVE the
                   title (mirrors U1's home-card pattern) so the brand feature
-                  reads as the dominant affordance instead of meta filler. */}
+                  reads as the dominant affordance instead of meta filler.
+                  h72-newreader-1: the ribbon links the definition (the rule
+                  these counts come from lives at /metodoloji#kor-nokta); it
+                  is not nested in another link, and keeps its amber pill. */}
               {cluster.is_blindspot && (
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-800 dark:text-amber-400">
-                  <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.5} />
-                  Kör nokta
-                </div>
+                <Link
+                  href="/metodoloji#kor-nokta"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-800 dark:text-amber-400 hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <AlertTriangle
+                    className="h-3.5 w-3.5"
+                    strokeWidth={2.5}
+                    aria-hidden="true"
+                  />
+                  Kör nokta · Bu ne demek?
+                </Link>
               )}
               <h1
                 lang={headlineLang}

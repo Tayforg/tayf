@@ -116,12 +116,16 @@ export function ReadAcrossSpectrum({
       isBlindspot && nonVotingCount > 0
         ? ` · ${nonVotingCount} toplayıcı / niş kaynak yazdı (spektruma sayılmaz)`
         : "";
+    // h72-newreader-1: the blindspot caption names the SILENT zone inside the
+    // sentence and leaves nothing in brackets after "kör nokta": a bracketed
+    // zone read as the zone that owns the blind spot, while /blindspots counts
+    // a story under the side that WROTE it ("İktidar ağırlıklı").
     const emptyText = bothPolesEmpty
       ? isBlindspot
         ? `İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı${nonVotingSuffix}`
         : "İki kutupta da henüz haber yok"
       : isBlindspot
-        ? `Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (${zoneLabel})${nonVotingSuffix}`
+        ? `Spektruma sayılan ${zoneLabel} kaynaklarından bu kümede haber yok (kör nokta)${nonVotingSuffix}`
         : `${zoneLabel} tarafında henüz haber yok${degradedSuffix}`;
     return (
       <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground">

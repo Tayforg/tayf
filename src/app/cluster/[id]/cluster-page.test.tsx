@@ -3613,6 +3613,56 @@ describe("ClusterDetailPage — Denge puanı chip", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h72-newreader-1: the "Kör nokta" ribbon was a bare div, and no page linked the
+// definition. It is now an anchor to /metodoloji#kor-nokta.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — kör nokta ribbon links the definition (h72-newreader-1)", () => {
+  function ribbonDetail(isBlindspot: boolean): ClusterDetail {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak", kind: "outlet" });
+    const distribution = emptyDistribution();
+    distribution.pro_government = 5;
+    const cluster = makeCluster({ bias_distribution: distribution, article_count: 5 });
+    cluster.is_blindspot = isBlindspot;
+    cluster.blindspot_side = isBlindspot ? "pro_government" : null;
+    return {
+      cluster,
+      members: [makeMember("a1", source)],
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 5, memberCount: 1 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  it("renders the ribbon as an anchor to /metodoloji#kor-nokta reading 'Kör nokta · Bu ne demek?'", async () => {
+    getClusterDetail.mockResolvedValue(ribbonDetail(true));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const ribbons = findAllElements(tree, (el) => el.props.href === "/metodoloji#kor-nokta");
+
+    expect(ribbons).toHaveLength(1);
+    const ribbon = ribbons[0]!;
+    expect(collectText(ribbon).join("")).toBe("Kör nokta · Bu ne demek?");
+    // Same amber pill as before, as one literal class string.
+    expect(String(ribbon.props.className)).toContain(
+      "inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-800 dark:text-amber-400",
+    );
+    // The icon stays decorative.
+    const icon = findAllElements(ribbon, (el) => el.props["aria-hidden"] === "true");
+    expect(icon.length).toBeGreaterThan(0);
+  });
+
+  it("renders no ribbon and no definition link on a story that is not a blindspot", async () => {
+    getClusterDetail.mockResolvedValue(ribbonDetail(false));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(collectHrefs(tree)).not.toContain("/metodoloji#kor-nokta");
+    expect(collectText(tree).join("")).not.toContain("Bu ne demek?");
+  });
+});
+
 describe("cluster/[id]/page.tsx — contrast sweep", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const pageSource = readFileSync(join(here, "page.tsx"), "utf8");

@@ -365,7 +365,7 @@ describe("WeeklyPage — data present", () => {
     expect(text).toContain("Yüzdeler son 7 günün çok kaynaklı kümelerindeki 1.234 kaynak kaydı üzerinden hesaplanır");
     expect(text).toContain("1.000 kaynak kaydı");
     expect(text).toContain("1.500 kaynak · 3 bölge");
-    expect(text).toContain("tarafında · 1.200 kaynak");
+    expect(text).toContain("Spektrumda yalnızca Muhalefet · 1.200 kaynak");
     expect(text).not.toMatch(/\b(1234|1000|1500|1200) (haber|kaynak)\b/);
   });
 
@@ -420,16 +420,16 @@ describe("WeeklyPage — data present", () => {
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("İhale iptali");
-    expect(text).toContain("Sadece Muhalefet tarafında · 4 kaynak");
+    expect(text).toContain("Spektrumda yalnızca Muhalefet · 4 kaynak");
   });
 
-  it("says 'Sadece' only for a 100% blindspot and states the share below that (15 / 1 / 1 -> %88)", async () => {
+  it("says 'Spektrumda yalnızca' only for a 100% blindspot and states the share below that (15 / 1 / 1 -> %88)", async () => {
     const text = collectText(await WeeklyPage()).join(" ");
 
     expect(text).toContain("Kısmi kör nokta haberi");
     expect(text).toContain("%88 İktidar · 20 kaynak (17 sınıflandırılmış)");
-    expect(text).not.toContain("Sadece İktidar");
-    expect(text.match(/Sadece/g) ?? []).toHaveLength(1);
+    expect(text).not.toContain("Spektrumda yalnızca İktidar");
+    expect(text.match(/Spektrumda yalnızca/g) ?? []).toHaveLength(1);
   });
 
   it("adds the degraded caveat only when a zone's feeds are degraded", async () => {
@@ -498,7 +498,7 @@ describe("WeeklyPage — data present", () => {
     const text = collectText(await WeeklyPage()).join(" ");
 
     expect(text).toContain(
-      "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9. Her taraftan en büyükleri gösteriliyor.",
+      "Toplam 46 kör nokta · İktidar ağırlıklı 37 · Muhalefet ağırlıklı 9. Her taraftan en büyükleri gösteriliyor.",
     );
     expect(text.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
   });

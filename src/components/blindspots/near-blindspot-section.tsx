@@ -61,7 +61,10 @@ export function NearBlindspotList({ items }: { items: NearBlindspotItem[] | null
               >
                 {item.title}
               </Link>
-              <div className="flex shrink-0 flex-wrap items-center gap-2 text-[11px]">
+              {/* shrink-0 sizes this block at its max-content width, so its own flex-wrap never wraps: from sm up the
+                  cap keeps the chips wrapping under each other and leaves the min-w-0 headline at least half the row
+                  (the compact balance chip prints the tier word, ~110px wider). */}
+              <div className="flex shrink-0 flex-wrap items-center gap-2 text-[11px] sm:max-w-[50%] sm:justify-end">
                 <span
                   className={`inline-flex items-center rounded-full ${meta.chipBg} ${meta.chipBorder} border px-2.5 py-0.5 font-serif font-semibold ${meta.chipText}`}
                 >

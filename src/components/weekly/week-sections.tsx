@@ -218,19 +218,21 @@ export function WidestSpectrum({
 }
 
 /**
- * The meta line of one blindspot row. "Sadece" is a claim that no other side
- * covered the story, so it is printed only at an exact 100% share; below that
- * the row states the share ("%88 İktidar"), and a row with no zone evidence
- * (a stored side but no distribution) names the side without either claim.
- * The OG image, the embed and the /blindspots chip already follow this rule.
+ * The meta line of one blindspot row. "Spektrumda yalnızca X" is a claim that
+ * no other side covered the story, so it is printed only at an exact 100%
+ * share; below that the row states the share ("%88 İktidar"), and a row with no
+ * zone evidence (a stored side but no distribution) names the writing side
+ * with "ağırlıklı", without either claim. "X tarafında" is not used: it read as
+ * the side that was left out (h72-newreader-1). The OG image, the embed and the
+ * /blindspots chip follow the same 100% rule.
  */
 export function blindspotShareText(blindspot: WeeklyBlindspot): string {
   const zone = ZONE_META[blindspot.side].label;
   const count = weeklySourceCount(blindspot.articleCount, blindspot.counts);
 
-  if (blindspot.share === 1) return `Sadece ${zone} tarafında · ${count}`;
+  if (blindspot.share === 1) return `Spektrumda yalnızca ${zone} · ${count}`;
   if (blindspot.share === null || blindspot.sharePct === null) {
-    return `${zone} tarafında · ${count}`;
+    return `${zone} ağırlıklı · ${count}`;
   }
   return `${formatPctTr(blindspot.sharePct)} ${zone} · ${count}`;
 }

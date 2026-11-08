@@ -78,6 +78,22 @@ export const BALANCE_LABELS: Record<BalanceTier, string> = {
   tek: "Tek tarafta",
 };
 
+/**
+ * The tier word the compact card chip prints after the number
+ * ("Denge 75 · tek tarafa yakın"). Lower case, so it reads as a continuation of
+ * the chip; `BALANCE_LABELS` stays the capitalised full label used by the
+ * cluster page chip, the aria-label and the title. The number and the tier can
+ * disagree by design (a 75 with a dominant zone is demoted to "yakin", see the
+ * BALANCE_BALANCED_MAX_SHARE rule above), so the card has to say the word and
+ * not leave the verdict to colour alone (h72-newreader-2, WCAG 1.4.1).
+ */
+export const BALANCE_SHORT_LABELS: Record<BalanceTier, string> = {
+  dengeli: "dengeli",
+  iki: "iki tarafa dengeli",
+  yakin: "tek tarafa yakın",
+  tek: "tek tarafta",
+};
+
 /** Label for a cluster with too few classified sources to score. */
 export const BALANCE_INSUFFICIENT_LABEL = "Az kaynak";
 

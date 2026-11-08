@@ -73,38 +73,51 @@ function summaryWith(
 }
 
 describe("blindspotShareText", () => {
-  it("share exactly 1 keeps the 'Sadece' claim, copy unchanged", () => {
+  it("share exactly 1 keeps the 'Spektrumda yalnızca' claim, copy unchanged", () => {
     expect(blindspotShareText(blindspot({ side: "iktidar", articleCount: 13, share: 1, sharePct: 100 }))).toBe(
-      "Sadece İktidar tarafında · 13 kaynak",
+      "Spektrumda yalnızca İktidar · 13 kaynak",
     );
   });
 
-  it("share below 1 states the percentage instead (15 / 1 / 1 reads %88, never 'Sadece')", () => {
+  // h72-newreader-1: "İktidar tarafında" named the writing side but read as the
+  // side that was left out. "Spektrumda yalnızca X" says who covered it; the
+  // no-evidence row says "X ağırlıklı". Neither uses "tarafında".
+  it("never says 'tarafında' on any branch (it read as the silent side)", () => {
+    const texts = [
+      blindspotShareText(blindspot({ side: "iktidar", articleCount: 13, share: 1, sharePct: 100 })),
+      blindspotShareText(blindspot({ side: "iktidar", articleCount: 13, share: null, sharePct: null })),
+      blindspotShareText(blindspot({ side: "iktidar", articleCount: 20, share: 15 / 17, sharePct: 88 })),
+    ];
+
+    for (const text of texts) expect(text).not.toContain("tarafında");
+  });
+
+  it("share below 1 states the percentage instead (15 / 1 / 1 reads %88, never 'Spektrumda yalnızca')", () => {
     const text = blindspotShareText(
       blindspot({ side: "iktidar", articleCount: 20, share: 15 / 17, sharePct: 88 }),
     );
 
     expect(text).toBe("%88 İktidar · 20 kaynak");
-    expect(text).not.toContain("Sadece");
+    expect(text).not.toContain("Spektrumda yalnızca");
   });
 
-  it("a clamped near-total share reads %99, not 'Sadece' and not %100", () => {
+  it("a clamped near-total share reads %99, not 'Spektrumda yalnızca' and not %100", () => {
     const text = blindspotShareText(blindspot({ share: 0.995, sharePct: 99, articleCount: 200 }));
 
     expect(text).toBe("%99 İktidar · 200 kaynak");
   });
 
-  it("a stored side with no zone evidence makes no 'Sadece' and no percentage claim", () => {
+  it("a stored side with no zone evidence makes no 'Spektrumda yalnızca' and no percentage claim", () => {
     const text = blindspotShareText(blindspot({ side: "iktidar", articleCount: 13, share: null, sharePct: null }));
 
-    expect(text).toBe("İktidar tarafında · 13 kaynak");
-    expect(text).not.toContain("Sadece");
+    expect(text).toBe("İktidar ağırlıklı · 13 kaynak");
+    expect(text).not.toContain("Spektrumda yalnızca");
     expect(text).not.toContain("%");
   });
 
   it("names the other zones from ZONE_META and groups four-digit counts the Turkish way", () => {
     expect(blindspotShareText(blindspot({ side: "muhalefet", articleCount: 1200 }))).toBe(
-      "Sadece Muhalefet tarafında · 1.200 kaynak",
+      "Spektrumda yalnızca Muhalefet · 1.200 kaynak",
     );
     expect(
       blindspotShareText(blindspot({ side: "bagimsiz", articleCount: 1500, share: 0.8, sharePct: 80 })),
@@ -124,7 +137,7 @@ describe("blindspotShareText", () => {
       ).toBe("%90 İktidar · 16 kaynak (10 sınıflandırılmış)");
     });
 
-    it("share exactly 1 with 13 members and 10 voters keeps 'Sadece' and adds the marker", () => {
+    it("share exactly 1 with 13 members and 10 voters keeps 'Spektrumda yalnızca' and adds the marker", () => {
       expect(
         blindspotShareText(
           blindspot({
@@ -135,7 +148,7 @@ describe("blindspotShareText", () => {
             counts: { iktidar: 10, bagimsiz: 0, muhalefet: 0 },
           }),
         ),
-      ).toBe("Sadece İktidar tarafında · 13 kaynak (10 sınıflandırılmış)");
+      ).toBe("Spektrumda yalnızca İktidar · 13 kaynak (10 sınıflandırılmış)");
     });
 
     it("no zone evidence (null share) still marks the voting count of the counts it has", () => {
@@ -143,7 +156,7 @@ describe("blindspotShareText", () => {
         blindspotShareText(
           blindspot({ side: "iktidar", share: null, sharePct: null, articleCount: 16, counts: TEN_VOTERS }),
         ),
-      ).toBe("İktidar tarafında · 16 kaynak (10 sınıflandırılmış)");
+      ).toBe("İktidar ağırlıklı · 16 kaynak (10 sınıflandırılmış)");
     });
 
     it("no distribution at all (all-zero counts) reads '(0 sınıflandırılmış)', the helper's own rule", () => {
@@ -157,7 +170,7 @@ describe("blindspotShareText", () => {
             counts: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
           }),
         ),
-      ).toBe("İktidar tarafında · 3 kaynak (0 sınıflandırılmış)");
+      ).toBe("İktidar ağırlıklı · 3 kaynak (0 sınıflandırılmış)");
     });
 
     it("counts that add up to articleCount leave every existing string unchanged", () => {
@@ -166,7 +179,7 @@ describe("blindspotShareText", () => {
       ).toBe("%90 İktidar · 16 kaynak");
       expect(
         blindspotShareText(blindspot({ articleCount: 13, share: 1, sharePct: 100 })),
-      ).toBe("Sadece İktidar tarafında · 13 kaynak");
+      ).toBe("Spektrumda yalnızca İktidar · 13 kaynak");
     });
 
     it("a stale tally above the member count is not qualified (voting >= total keeps the bare count)", () => {
@@ -174,7 +187,7 @@ describe("blindspotShareText", () => {
         blindspotShareText(
           blindspot({ articleCount: 4, share: 1, sharePct: 100, counts: { iktidar: 6, bagimsiz: 0, muhalefet: 0 } }),
         ),
-      ).toBe("Sadece İktidar tarafında · 4 kaynak");
+      ).toBe("Spektrumda yalnızca İktidar · 4 kaynak");
     });
 
     it("groups both numbers the Turkish way past a thousand", () => {
@@ -326,7 +339,7 @@ describe("<WidestSpectrum> (h18-numbers-1)", () => {
 });
 
 describe("<Blindspots>", () => {
-  it("renders each row's own claim: only the 100% row says 'Sadece'", () => {
+  it("renders each row's own claim: only the 100% row says 'Spektrumda yalnızca'", () => {
     const html = renderToStaticMarkup(
       <Blindspots
         summary={summaryWith([
@@ -338,11 +351,11 @@ describe("<Blindspots>", () => {
       />,
     );
 
-    expect(html).toContain("Sadece İktidar tarafında · 13 kaynak");
+    expect(html).toContain("Spektrumda yalnızca İktidar · 13 kaynak");
     expect(html).toContain("%88 İktidar · 20 kaynak");
-    expect(html).toContain("İktidar tarafında · 4 kaynak");
-    // "Sadece" appears exactly once: on the 100% row.
-    expect(html.match(/Sadece/g) ?? []).toHaveLength(1);
+    expect(html).toContain("İktidar ağırlıklı · 4 kaynak");
+    // "Spektrumda yalnızca" appears exactly once: on the 100% row.
+    expect(html.match(/Spektrumda yalnızca/g) ?? []).toHaveLength(1);
   });
 
   it("prints the voting count on the rows that need it (f1837ee1: 16 members, 10 voters)", () => {
@@ -365,7 +378,7 @@ describe("<Blindspots>", () => {
     );
 
     expect(html).toContain("%90 İktidar · 16 kaynak (10 sınıflandırılmış)");
-    expect(html).toContain("Sadece İktidar tarafında · 13 kaynak<");
+    expect(html).toContain("Spektrumda yalnızca İktidar · 13 kaynak<");
     expect(html.match(/sınıflandırılmış/g) ?? []).toHaveLength(1);
   });
 
@@ -379,7 +392,7 @@ describe("<Blindspots>", () => {
     );
 
     expect(html).toContain("%88 İktidar · 20 kaynak");
-    expect(html).not.toContain("Sadece");
+    expect(html).not.toContain("Spektrumda yalnızca");
   });
 });
 
@@ -387,7 +400,7 @@ describe("<Blindspots>", () => {
 // under the heading gives the per-side totals and says so.
 describe("<Blindspots> side tally (h52-weekly-2)", () => {
   const TALLY =
-    "Toplam 46 kör nokta · İktidar tarafında 37 · Muhalefet tarafında 9. Her taraftan en büyükleri gösteriliyor.";
+    "Toplam 46 kör nokta · İktidar ağırlıklı 37 · Muhalefet ağırlıklı 9. Her taraftan en büyükleri gösteriliyor.";
   const COUNTS = { iktidar: 37, bagimsiz: 0, muhalefet: 9 };
   const rows = [
     blindspot({ id: "i", title: "İktidar haberi", side: "iktidar", articleCount: 21 }),
@@ -415,7 +428,7 @@ describe("<Blindspots> side tally (h52-weekly-2)", () => {
 
     expect(html).toContain("İktidar haberi");
     expect(html).toContain("Muhalefet haberi");
-    expect(html).toContain("Sadece Muhalefet tarafında · 8 kaynak");
+    expect(html).toContain("Spektrumda yalnızca Muhalefet · 8 kaynak");
   });
 
   it("derives the tally from the summary, with the Bağımsız segment when present", () => {
@@ -427,7 +440,7 @@ describe("<Blindspots> side tally (h52-weekly-2)", () => {
     );
 
     expect(html).toContain(
-      "Toplam 6 kör nokta · İktidar tarafında 3 · Muhalefet tarafında 1 · Bağımsız tarafında 2. Her taraftan en büyükleri gösteriliyor.",
+      "Toplam 6 kör nokta · İktidar ağırlıklı 3 · Muhalefet ağırlıklı 1 · Bağımsız ağırlıklı 2. Her taraftan en büyükleri gösteriliyor.",
     );
   });
 
