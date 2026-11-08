@@ -948,6 +948,11 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
     }
     if (rewroteIds.length > 0 || repickedIds.length > 0) {
       revalidateTag("clusters-politics", "max");
+      // /timeline's feed entry (getRecentClusters, h76-timeline-2). Its own tag:
+      // "clusters" also tags every per-cluster story-timeline entry, so
+      // revalidating that one would add reads on cluster pages. A later re-pick
+      // reaches /timeline through the same call.
+      revalidateTag("timeline", "max");
     }
   } catch (err) {
     console.error("[headline-cron] revalidateTag failed", err);

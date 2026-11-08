@@ -569,7 +569,9 @@ describe("extractive re-pick: what is written", () => {
     });
     expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:r1", "max");
     expect(revalidateTagMock).toHaveBeenCalledWith("clusters-politics", "max");
-    expect(revalidateTagMock).toHaveBeenCalledTimes(2);
+    // h76-timeline-2: a later re-pick reaches /timeline too.
+    expect(revalidateTagMock).toHaveBeenCalledWith("timeline", "max");
+    expect(revalidateTagMock).toHaveBeenCalledTimes(3);
   });
 
   it("an unchanged title writes only the model and the stamp, and revalidates nothing", async () => {

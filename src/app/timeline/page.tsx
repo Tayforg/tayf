@@ -34,9 +34,21 @@ export const metadata: Metadata = staticPageMetadata({
 // off the `first_published` timestamp (@/lib/clusters/timeline-buckets), then
 // rendered as a list of <section> blocks — one per hour, newest first.
 //
-// Cached at the route segment with `revalidate = 60` so the wall feels
-// near-live without slamming Supabase on every navigation. The
-// TIMELINE_LIMIT (200) row cap keeps the payload bounded even on a busy news
+// Headlines: each row prints `row.title`, the display title getRecentClusters
+// attaches: the stored neutral title, or, while the headline cron has not
+// written one yet, the cron's own first pick over the member titles
+// (h76-timeline-2). A fresh cluster is therefore never listed under its raw
+// ALL-CAPS outlet headline, and the list agrees with the cluster page's H1.
+//
+// Caching: the route is static (cacheComponents allows no segment `revalidate`).
+// Its data comes from the "use cache" entry in getRecentClusters: cacheLife
+// "cluster-feed" (revalidate 300 s, then served stale once while it
+// regenerates), tags "clusters" and "timeline" (the headline cron revalidates
+// "timeline" when it writes a title). The page's own ISR copy has a separate
+// lifecycle: after an idle spell the first request is served the old copy and
+// triggers the rebuild, and the next request gets the new one.
+//
+// The TIMELINE_LIMIT (200) row cap keeps the payload bounded even on a busy news
 // day; a busy day mints more qualifying clusters than that, so the subtitle
 // names the real total (a separate head/exact count) whenever the list is
 // capped, instead of presenting the capped length as the day's count. The cap
@@ -46,13 +58,17 @@ export const metadata: Metadata = staticPageMetadata({
 //
 // Realtime-lite: <NewClustersPill> (client) polls /api/timeline/head every ~2
 // min while the tab is visible and offers "N yeni küme · Yenile" (router.refresh)
-// when the head holds clusters this page does not. The route reuses the same
-// getRecentClusters() "use cache" entry, so polling adds no DB read. The page
-// hands the pill the newest first_published and the ids of the first
-// TIMELINE_HEAD_LIMIT rows (the head's own window) to diff against. It is not
-// rendered when the read failed (rows === null). The hero and the pill share a
-// `relative` wrapper (a positioning context, no spacing): the pill is absolutely
-// placed in the 32 px space-y-8 gap below it, so it never moves the list (CLS 0).
+// when the head holds clusters this page does not. The head reads the same
+// getRecentClusters() entry, so polling adds no DB read, but the head and this
+// page's ISR copy do NOT share a lifecycle: the head can already list a cluster
+// that a stale page copy lacks. The pill compensates: it compares the page before
+// and after the refresh, retries once on its own, and only then says the list has
+// not updated yet (h76-timeline-1). The page hands the pill the newest
+// first_published and the ids of the first TIMELINE_HEAD_LIMIT rows (the head's
+// own window) to diff against. It is not rendered when the read failed
+// (rows === null). The hero and the pill share a `relative` wrapper (a
+// positioning context, no spacing): the pill is absolutely placed in the 32 px
+// space-y-8 gap below it, so it never moves the list (CLS 0).
 
 // Format an ISO timestamp as `HH:MM` in the Europe/Istanbul wall clock —
 // Tayf is a Türk news product so every visible time stamp is local TR time.
@@ -174,7 +190,7 @@ export default async function TimelinePage() {
                       href={`/cluster/${row.id}`}
                       className="min-w-0 flex-1 text-sm font-medium leading-snug hover:text-foreground sm:line-clamp-2 max-sm:order-last max-sm:basis-full max-sm:line-clamp-4"
                     >
-                      {row.title_tr_neutral ?? row.title_tr}
+                      {row.title}
                     </Link>
                     <span className="shrink-0 max-sm:ml-auto text-[11px] text-muted-foreground tabular-nums">
                       {row.article_count} kaynak

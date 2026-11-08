@@ -1,19 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  PILL_STATUS_MS,
   TIMELINE_HEAD_LIMIT,
   TIMELINE_POLL_MAX_MS,
   TIMELINE_POLL_MIN_MS,
   TIMELINE_POLL_MS,
+  TIMELINE_REFRESH_RETRY_MS,
   countNewClusters,
   newClustersLabel,
   nextPollDelay,
+  pageSignature,
   parseTimelineHead,
   readHeadResponse,
+  refreshOutcome,
+  remainingMs,
   startHeadPolling,
   toTimelineHead,
   type HeadFetchResult,
   type HeadPollingDeps,
+  type RefreshOutcome,
   type TimelineHeadRow,
 } from "./timeline-head";
 
@@ -38,6 +44,256 @@ describe("constants", () => {
     expect(TIMELINE_POLL_MS).toBe(120_000);
     expect(TIMELINE_POLL_MAX_MS).toBe(960_000);
     expect(TIMELINE_POLL_MIN_MS).toBe(60_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h76-timeline-1: a pill click can be answered with the page's STALE ISR copy
+// (the head, a dynamic route, re-reads the 'cluster-feed' entry; the page copy
+// is only rebuilt when someone requests it after its window, and that request
+// is itself served the old copy). The pill used to hide itself and announce
+// "Liste güncellendi" anyway. These helpers let it compare the page before and
+// after the refresh. Pure: the component only wires them to React.
+// ---------------------------------------------------------------------------
+
+describe("pageSignature", () => {
+  const NEWEST = "2026-11-08T18:14:00.000Z";
+
+  it("is deterministic: identical inputs give identical strings", () => {
+    expect(pageSignature(NEWEST, ["a", "b", "c"])).toBe(
+      pageSignature(NEWEST, ["a", "b", "c"]),
+    );
+    expect(typeof pageSignature(NEWEST, ["a"])).toBe("string");
+  });
+
+  it("differs when the newest first_published differs", () => {
+    expect(pageSignature(NEWEST, ["a", "b"])).not.toBe(
+      pageSignature("2026-11-08T18:27:09.000Z", ["a", "b"]),
+    );
+  });
+
+  it("differs when the first id differs", () => {
+    expect(pageSignature(NEWEST, ["a", "b"])).not.toBe(pageSignature(NEWEST, ["z", "b"]));
+  });
+
+  it("differs when an id is prepended (the length changes)", () => {
+    expect(pageSignature(NEWEST, ["a", "b"])).not.toBe(
+      pageSignature(NEWEST, ["new", "a", "b"]),
+    );
+  });
+
+  it("differs when only the order of the ids differs", () => {
+    expect(pageSignature(NEWEST, ["a", "b"])).not.toBe(pageSignature(NEWEST, ["b", "a"]));
+  });
+
+  it("does not let two different id lists run together into one string", () => {
+    expect(pageSignature(NEWEST, ["a", "bc"])).not.toBe(pageSignature(NEWEST, ["ab", "c"]));
+    expect(pageSignature(NEWEST, ["a,b"])).not.toBe(pageSignature(NEWEST, ["a", "b"]));
+  });
+
+  it("differs between a null newest (empty page) and a string newest", () => {
+    expect(pageSignature(null, [])).not.toBe(pageSignature(NEWEST, []));
+    expect(pageSignature(null, ["a"])).not.toBe(pageSignature(NEWEST, ["a"]));
+    expect(pageSignature(null, [])).toBe(pageSignature(null, []));
+  });
+
+  it("an empty page and a page whose first id is empty text are not confused", () => {
+    expect(pageSignature(null, [])).not.toBe(pageSignature(null, [""]));
+  });
+
+  it("does not mutate knownIds", () => {
+    const ids = Object.freeze(["a", "b", "c"]) as readonly string[];
+    expect(() => pageSignature(NEWEST, ids)).not.toThrow();
+    expect([...ids]).toEqual(["a", "b", "c"]);
+  });
+
+  it("handles a full 50-id page", () => {
+    const ids = Array.from({ length: 50 }, (_, i) => `id-${i}`);
+    expect(pageSignature(NEWEST, ids)).toBe(pageSignature(NEWEST, [...ids]));
+    expect(pageSignature(NEWEST, ids)).not.toBe(pageSignature(NEWEST, ids.slice(1)));
+  });
+});
+
+describe("refreshOutcome", () => {
+  it("a different signature is 'changed' on the first and on the second attempt", () => {
+    expect(refreshOutcome("before", "after", 0)).toBe("changed");
+    expect(refreshOutcome("before", "after", 1)).toBe("changed");
+  });
+
+  it("the same signature on the first attempt is 'retry' (the stale ISR copy was served once)", () => {
+    expect(refreshOutcome("same", "same", 0)).toBe("retry");
+  });
+
+  it("the same signature on the retry is 'unchanged' (say so, never a false confirmation)", () => {
+    expect(refreshOutcome("same", "same", 1)).toBe("unchanged");
+    expect(refreshOutcome("same", "same", 2)).toBe("unchanged");
+    expect(refreshOutcome("same", "same", 50)).toBe("unchanged");
+  });
+
+  it("a NaN or negative attempt count counts as 0", () => {
+    expect(refreshOutcome("same", "same", Number.NaN)).toBe("retry");
+    expect(refreshOutcome("same", "same", -1)).toBe("retry");
+    expect(refreshOutcome("same", "same", -100)).toBe("retry");
+    expect(refreshOutcome("before", "after", Number.NaN)).toBe("changed");
+    expect(refreshOutcome("before", "after", -3)).toBe("changed");
+  });
+
+  it("an infinite attempt count is treated as 'already retried'", () => {
+    expect(refreshOutcome("same", "same", Infinity)).toBe("unchanged");
+  });
+
+  it("only ever returns one of the three outcomes", () => {
+    const allowed: RefreshOutcome[] = ["changed", "retry", "unchanged"];
+    for (const [b, a] of [["x", "x"], ["x", "y"], ["", ""]] as const) {
+      for (const attempt of [Number.NaN, -1, 0, 1, 2, 9]) {
+        expect(allowed).toContain(refreshOutcome(b, a, attempt));
+      }
+    }
+  });
+
+  it("composes with pageSignature: an unchanged page is 'retry', a page with a new first row is 'changed'", () => {
+    const newest = "2026-11-08T18:14:00.000Z";
+    const before = pageSignature(newest, ["a", "b"]);
+    expect(refreshOutcome(before, pageSignature(newest, ["a", "b"]), 0)).toBe("retry");
+    expect(
+      refreshOutcome(before, pageSignature("2026-11-08T18:27:09.000Z", ["new", "a", "b"]), 0),
+    ).toBe("changed");
+  });
+});
+
+// The sequence observed live on 2026-11-08 (18:41:52Z-18:42:12Z): the head already
+// listed 42fbd3e6, a pill click got the stale ISR copy without it (STALE, age
+// 463), and a request 19 s later got the rebuilt copy with it first.
+describe("refresh replay: stale ISR copy, then the rebuilt copy (h76-timeline-1)", () => {
+  const head: TimelineHeadRow[] = [
+    { id: "42fbd3e6-202f-445f-9296-e477993fb9db", first_published: "2026-11-08T18:27:09+00:00" },
+    { id: "ed39dd51-b8da-4e17-bd7d-92df89794593", first_published: "2026-11-08T18:16:02+00:00" },
+    { id: "757608d3-9d06-41bf-8651-64ebc282fa16", first_published: "2026-11-08T18:14:00+00:00" },
+    { id: "37ba6f63-08d2-431f-aee6-51e80e3dd6fa", first_published: "2026-11-08T17:46:15+00:00" },
+  ];
+  const stalePage = {
+    newest: "2026-11-08T18:14:00+00:00",
+    ids: [head[2]!.id, head[3]!.id],
+  };
+  const freshPage = {
+    newest: "2026-11-08T18:27:09+00:00",
+    ids: head.map((r) => r.id),
+  };
+
+  it("the head makes the pill count the new clusters against the stale page, and none against the rebuilt one", () => {
+    expect(
+      countNewClusters(head, {
+        newestPublished: stalePage.newest,
+        knownIds: new Set(stalePage.ids),
+      }),
+    ).toBe(2);
+    expect(
+      countNewClusters(head, {
+        newestPublished: freshPage.newest,
+        knownIds: new Set(freshPage.ids),
+      }),
+    ).toBe(0);
+  });
+
+  it("first click lands on the stale copy: 'retry'; the retry gets the rebuilt copy: 'changed' (never a false confirmation)", () => {
+    const before = pageSignature(stalePage.newest, stalePage.ids);
+    const afterClick = pageSignature(stalePage.newest, stalePage.ids); // STALE served again
+    const afterRetry = pageSignature(freshPage.newest, freshPage.ids); // HIT, new date
+
+    expect(refreshOutcome(before, afterClick, 0)).toBe("retry");
+    expect(refreshOutcome(before, afterRetry, 1)).toBe("changed");
+  });
+
+  it("if the rebuild has not landed by the retry either, the verdict is 'unchanged', not 'changed'", () => {
+    const before = pageSignature(stalePage.newest, stalePage.ids);
+    expect(refreshOutcome(before, before, 0)).toBe("retry");
+    expect(refreshOutcome(before, before, 1)).toBe("unchanged");
+  });
+
+  it("a click that already gets the fresh copy is 'changed' at once, with no retry", () => {
+    const before = pageSignature(stalePage.newest, stalePage.ids);
+    expect(
+      refreshOutcome(before, pageSignature(freshPage.newest, freshPage.ids), 0),
+    ).toBe("changed");
+  });
+});
+
+describe("TIMELINE_REFRESH_RETRY_MS", () => {
+  it("is long enough for the stale serve's background rebuild to land and short enough to feel like one click", () => {
+    expect(TIMELINE_REFRESH_RETRY_MS).toBeGreaterThanOrEqual(3000);
+    expect(TIMELINE_REFRESH_RETRY_MS).toBeLessThanOrEqual(6000);
+    expect(Number.isInteger(TIMELINE_REFRESH_RETRY_MS)).toBe(true);
+  });
+});
+
+describe("PILL_STATUS_MS", () => {
+  it("is the six seconds the pill's outcome text stays up", () => {
+    expect(PILL_STATUS_MS).toBe(6000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// react-L1: the pill's two timers (the automatic retry and the status text) are
+// cleared when /timeline sits in a hidden <Activity> boundary (cacheComponents
+// keeps the page while a cluster is open) and re-armed when it is revealed. The
+// pill therefore pins an absolute DEADLINE per outcome and, on every (re-)arm,
+// waits only for what is left. remainingMs is that subtraction; null means the
+// moment has passed (or a clock was not a number), so the caller drops the
+// action instead of firing it late.
+// ---------------------------------------------------------------------------
+
+describe("remainingMs", () => {
+  it("returns the time left before the deadline", () => {
+    expect(remainingMs(10_000, 4_000)).toBe(6_000);
+    expect(remainingMs(T0 + 4000, T0)).toBe(4000);
+    expect(remainingMs(10_000, 9_999)).toBe(1);
+  });
+
+  it("returns 0 exactly at the deadline (still due, not expired)", () => {
+    expect(remainingMs(10_000, 10_000)).toBe(0);
+    expect(remainingMs(0, 0)).toBe(0);
+  });
+
+  it("returns null once the deadline has passed", () => {
+    expect(remainingMs(10_000, 10_001)).toBeNull();
+    expect(remainingMs(T0, T0 + 60_000)).toBeNull();
+    expect(remainingMs(-1, 0)).toBeNull();
+  });
+
+  it("returns null for NaN in either input", () => {
+    expect(remainingMs(Number.NaN, 1)).toBeNull();
+    expect(remainingMs(1, Number.NaN)).toBeNull();
+    expect(remainingMs(Number.NaN, Number.NaN)).toBeNull();
+  });
+
+  it("returns null for Infinity in either input (never an unbounded wait)", () => {
+    expect(remainingMs(Number.POSITIVE_INFINITY, 1)).toBeNull();
+    expect(remainingMs(Number.NEGATIVE_INFINITY, 1)).toBeNull();
+    expect(remainingMs(1, Number.POSITIVE_INFINITY)).toBeNull();
+    expect(remainingMs(1, Number.NEGATIVE_INFINITY)).toBeNull();
+    expect(remainingMs(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("never returns a negative number", () => {
+    for (const [at, now] of [
+      [0, 1],
+      [5, 50],
+      [-10, -5],
+      [10, 10],
+      [10, 0],
+    ] as const) {
+      const left = remainingMs(at, now);
+      expect(left === null || left >= 0).toBe(true);
+    }
+  });
+
+  it("a hidden boundary replay: a 4 s deadline re-armed at 1 s waits 3 s, re-armed at 5 s is dropped", () => {
+    const deadlineAt = T0 + TIMELINE_REFRESH_RETRY_MS;
+    expect(remainingMs(deadlineAt, T0 + 1000)).toBe(TIMELINE_REFRESH_RETRY_MS - 1000);
+    expect(remainingMs(deadlineAt, T0 + 5000)).toBeNull();
+    const statusAt = T0 + PILL_STATUS_MS;
+    expect(remainingMs(statusAt, T0 + 2500)).toBe(PILL_STATUS_MS - 2500);
+    expect(remainingMs(statusAt, T0 + PILL_STATUS_MS + 1)).toBeNull();
   });
 });
 

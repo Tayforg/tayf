@@ -11,6 +11,44 @@ vi.mock("next/navigation", () => ({
 
 import { NewClustersPill } from "./new-clusters-pill";
 
+// Source-guard helpers. `code` below is the file with comments blanked.
+
+/** Index of the bracket that closes the one opened at `openAt` (or -1). */
+function closeOf(text: string, openAt: number): number {
+  const open = text[openAt];
+  const close = open === "(" ? ")" : open === "{" ? "}" : "";
+  if (close === "") return -1;
+  let depth = 0;
+  for (let i = openAt; i < text.length; i++) {
+    if (text[i] === open) depth++;
+    else if (text[i] === close && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** `text` with every `name(...)` call (balanced parentheses) cut out. */
+function stripCalls(text: string, name: string): string {
+  let out = "";
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(`${name}(`, from);
+    if (at === -1) return out + text.slice(from);
+    const end = closeOf(text, at + name.length);
+    if (end === -1) return out + text.slice(from);
+    out += text.slice(from, at);
+    from = end + 1;
+  }
+}
+
+/** The `{ ... }` block that follows the first `head` in `text` (without braces). */
+function blockAfter(text: string, head: RegExp): string | null {
+  const m = head.exec(text);
+  if (m === null) return null;
+  const open = text.indexOf("{", m.index + m[0].length - 1);
+  const close = open === -1 ? -1 : closeOf(text, open);
+  return close === -1 ? null : text.slice(open + 1, close);
+}
+
 // ---------------------------------------------------------------------------
 // The pill is client-only state: the server (and the first client render) must
 // agree on an EMPTY live region, so there is nothing to hydrate-mismatch. The
@@ -110,8 +148,7 @@ describe("NewClustersPill -- source guard", () => {
     expect(code).toMatch(/\bmin-h-8\b/);
   });
 
-  it("clears the count before refreshing, inside a transition", () => {
-    expect(code).toMatch(/setHit\(null\)/);
+  it("refreshes inside a transition", () => {
     expect(code).toMatch(/startTransition\(\s*\(\)\s*=>\s*(\{\s*)?router\.refresh\(\)/);
   });
 
@@ -122,7 +159,9 @@ describe("NewClustersPill -- source guard", () => {
   it("never uses the `disabled` attribute on the button (aria-disabled + early return)", () => {
     expect(code).not.toMatch(/(?<![-\w])disabled\s*=/);
     expect(code).toMatch(/aria-disabled=\{/);
-    expect(code).toMatch(/if\s*\(\s*pending\s*\)\s*return\b/);
+    // Ignored while a refresh runs OR while the automatic retry is waiting.
+    expect(code).toMatch(/if\s*\(\s*busy\s*\)\s*return\b/);
+    expect(code).toMatch(/const\s+busy\s*=\s*pending\s*\|\|\s*settled\.kind\s*===\s*["']retrying["']/);
   });
 
   it("hands focus to the status region when the refresh settles, without scrolling", () => {
@@ -161,5 +200,282 @@ describe("NewClustersPill -- source guard", () => {
     expect('className="flex mt-4"').toMatch(margin);
     expect('className="flex min-h-8 text-xs"').not.toMatch(margin);
     expect('className="flex smt-4"').not.toMatch(margin);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h76-timeline-1: a click that gets the STALE ISR copy back used to clear the
+// count, hide the pill and announce "Liste güncellendi" over an unchanged list.
+// The logic is in timeline-head.ts (pageSignature, refreshOutcome); the repo has
+// no jsdom, so the component's wiring is pinned with source guards.
+// ---------------------------------------------------------------------------
+
+describe("NewClustersPill -- the refresh is verified, not assumed (source guard)", () => {
+  const source = readFileSync(
+    resolve(__dirname, "new-clusters-pill.tsx"),
+    "utf8",
+  );
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p1: string) => p1 + " ".repeat(m.length - p1.length));
+
+  /** The body of the button's onClick, up to the className that follows it. */
+  const handler = /onClick=\{([\s\S]*?)\}\s*className=/.exec(code)?.[1] ?? "";
+
+  it("finds the click handler (so the guards below are not vacuous)", () => {
+    expect(handler).toMatch(/startTransition\(/);
+    expect(handler).toMatch(/router\.refresh\(\)/);
+  });
+
+  it("(a) the click handler no longer clears the count: an unchanged page keeps it", () => {
+    expect(handler).not.toMatch(/setHit\s*\(/);
+  });
+
+  it("the click snapshots the page signature and starts at attempt 0", () => {
+    expect(handler).toMatch(/pageSignature\(/);
+    expect(handler).toMatch(/attempt:\s*0/);
+  });
+
+  it("(b) imports pageSignature, refreshOutcome and TIMELINE_REFRESH_RETRY_MS from timeline-head", () => {
+    const imp = /import\s*\{([^}]*)\}\s*from\s*["']@\/lib\/clusters\/timeline-head["']/.exec(code)?.[1] ?? "";
+    expect(imp).toMatch(/\bpageSignature\b/);
+    expect(imp).toMatch(/\brefreshOutcome\b/);
+    expect(imp).toMatch(/\bTIMELINE_REFRESH_RETRY_MS\b/);
+  });
+
+  it("(c) says so when the list did not update: 'Liste henüz güncellenmedi'", () => {
+    expect(code).toContain("Liste henüz güncellenmedi");
+    expect(code).toContain("tekrar deneyin");
+  });
+
+  it("(d) 'Liste güncellendi' is shown from exactly one place, and only for the 'changed' outcome", () => {
+    expect(source.match(/Liste güncellendi/g) ?? []).toHaveLength(1);
+    expect(code.match(/Liste güncellendi/g) ?? []).toHaveLength(1);
+    expect(code).toMatch(/["']changed["']/);
+    expect(code).toMatch(/outcome\s*===\s*["']changed["']/);
+  });
+
+  it("handles all three outcomes of refreshOutcome", () => {
+    expect(code).toMatch(/["']retry["']/);
+    expect(code).toMatch(/["']unchanged["']/);
+    expect(code).toMatch(/refreshOutcome\(/);
+  });
+
+  it("the settled-state compare reads the CURRENT props through pageSignature", () => {
+    expect(code).toMatch(/refreshOutcome\([^)]*pageSignature\(\s*newestPublished\s*,\s*knownIds\s*\)/);
+  });
+
+  it("the automatic retry waits out a TIMELINE_REFRESH_RETRY_MS deadline, refreshes once more and clears its timer", () => {
+    // The wait is pinned as an absolute deadline (react-L1) and the timer is armed
+    // with what is LEFT of it, so the constant now sits in the deadline, not in the
+    // setTimeout call.
+    expect(code).toMatch(/at:\s*\w+\(\)\s*\+\s*TIMELINE_REFRESH_RETRY_MS\b/);
+    expect(code).toMatch(/window\.setTimeout\([\s\S]*?,\s*left\s*\)/);
+    expect(code).toMatch(/window\.clearTimeout\(/);
+    expect(code.match(/router\.refresh\(\)/g) ?? []).toHaveLength(2);
+    expect(code).toMatch(/attempt:\s*1/);
+  });
+
+  it("keeps the button up as 'Yenileniyor…' (aria-disabled) while it retries", () => {
+    expect(code).toContain("Yenileniyor…");
+    expect(code).toMatch(/aria-disabled=\{busy\}/);
+  });
+
+  it("stays render-pure: no setInterval, no ref read for the outcome, no setState-in-effect body", () => {
+    expect(code).not.toMatch(/\bsetInterval\b/);
+    // The effect that arms the retry only schedules a timer; its setState calls
+    // live in the timer callback.
+    const retryEffect =
+      /useEffect\(\(\)\s*=>\s*\{\s*if\s*\(settled\.kind\s*!==\s*["']retrying["']\)\s*return;([\s\S]*?)\},\s*\[/.exec(code)?.[1] ?? "";
+    expect(retryEffect).not.toBe("");
+    expect(retryEffect).toMatch(/window\.setTimeout\(/);
+    const outsideTimer = stripCalls(retryEffect, "window.setTimeout");
+    expect(outsideTimer).not.toMatch(/\bset[A-Z]\w*\(/);
+  });
+
+  it("every status text sits in the one h-8 region as a single text-xs line with literal classes", () => {
+    const paragraphs = code.match(/<p\b[^>]*>/g) ?? [];
+    expect(paragraphs.length).toBeGreaterThanOrEqual(2);
+    for (const tag of paragraphs) {
+      expect(tag).toMatch(/className="[^"{}$`]*\btext-xs\b[^"{}$`]*"/);
+    }
+  });
+
+  it("the longest status text fits a 360 px viewport at text-xs (about 6.5 px a character)", () => {
+    const text = /Liste henüz güncellenmedi[^<{"]*/.exec(code)?.[0] ?? "";
+    expect(text.length).toBeGreaterThan(0);
+    expect(text.length * 6.5).toBeLessThan(360 - 32);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// react-L1: cacheComponents keeps /timeline mounted in a hidden <Activity> while
+// a cluster is open, and React runs effect cleanups on hide and re-runs the
+// effects on reveal. The retry timer and the 6 s status timer are cleared on
+// hide, but `settled` and `cycle` survive, so a plain re-arm would bring back a
+// "Yenileniyor…" button and an unrequested router.refresh() 4 s later (or move
+// focus again and repeat the old message for another 6 s). Every settle outcome
+// therefore has an identity (seq) and a pinned deadline; a re-run waits only for
+// what is left, an expired retry is dropped without refreshing, and focus moves
+// on the first run only. No jsdom here, so this is pinned with source guards.
+// ---------------------------------------------------------------------------
+
+describe("NewClustersPill -- survives a hidden Activity boundary (react-L1, source guard)", () => {
+  const source = readFileSync(
+    resolve(__dirname, "new-clusters-pill.tsx"),
+    "utf8",
+  );
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p1: string) => p1 + " ".repeat(m.length - p1.length));
+
+  const COMPARE = "deadline.current?.seq !== ";
+
+  it("the guard helpers find balanced calls and blocks (so the guards below are not vacuous)", () => {
+    expect(stripCalls("a(b(c)) x f(1) y", "f")).toBe("a(b(c)) x  y");
+    expect(stripCalls("a x(1) b x(2(3)) c", "x")).toBe("a  b  c");
+    expect(blockAfter("if (a === null) { go(); { deep } } else { no }", /if\s*\(a\s*===\s*null\)\s*\{/)).toBe(
+      " go(); { deep } ",
+    );
+    expect(blockAfter("nothing here", /if\s*\(/)).toBeNull();
+  });
+
+  it("imports remainingMs and PILL_STATUS_MS from timeline-head", () => {
+    const imp = /import\s*\{([^}]*)\}\s*from\s*["']@\/lib\/clusters\/timeline-head["']/.exec(code)?.[1] ?? "";
+    expect(imp).toMatch(/\bremainingMs\b/);
+    expect(imp).toMatch(/\bPILL_STATUS_MS\b/);
+    expect(imp).toMatch(/\bTIMELINE_REFRESH_RETRY_MS\b/);
+  });
+
+  it("no timer is armed with a fixed delay any more", () => {
+    expect(code).not.toContain("}, TIMELINE_REFRESH_RETRY_MS);");
+    expect(code).not.toContain("}, 6000);");
+    expect(code).not.toMatch(/\b6000\b/);
+    expect(code).not.toMatch(/window\.setTimeout\([\s\S]*?,\s*(TIMELINE_REFRESH_RETRY_MS|PILL_STATUS_MS)\s*\)/);
+  });
+
+  it("settled carries an identity: { kind, seq }, and every transition bumps seq", () => {
+    expect(code).toMatch(/type\s+SettledState\s*=\s*\{\s*kind:\s*Settled;\s*seq:\s*number\s*\}/);
+    expect(code).toMatch(/useState<SettledState>\(\s*\{\s*kind:\s*["']none["']\s*,\s*seq:\s*0\s*\}\s*\)/);
+    // The three transitions out of a finished refresh, in the render-phase derivation.
+    const derivation = /if\s*\(pending\s*!==\s*pendingSeen\)\s*\{([\s\S]*?)\n  \}\n/.exec(code)?.[1] ?? "";
+    expect(derivation).not.toBe("");
+    for (const kind of ["updated", "retrying", "unchanged"]) {
+      expect(derivation).toMatch(
+        new RegExp(`setSettled\\(\\s*\\{\\s*kind:\\s*["']${kind}["']\\s*,\\s*seq:\\s*settled\\.seq\\s*\\+\\s*1\\s*\\}\\s*\\)`),
+      );
+    }
+    // No bare string state is left behind.
+    expect(code).not.toMatch(/setSettled\(\s*["']/);
+    expect(code).not.toMatch(/settled\s*[!=]==\s*["']/);
+  });
+
+  it("keeps the deadline in a ref, and the click handler resets it (an event handler may write a ref)", () => {
+    expect(code).toMatch(
+      /const\s+deadline\s*=\s*useRef<\{\s*seq:\s*number;\s*at:\s*number\s*\}\s*\|\s*null>\(\s*null\s*\)/,
+    );
+    const handler = /onClick=\{([\s\S]*?)\}\s*className=/.exec(code)?.[1] ?? "";
+    expect(handler).toMatch(/deadline\.current\s*=\s*null\s*;/);
+  });
+
+  it("the clock is read only inside effects (never while rendering)", () => {
+    expect(code).not.toMatch(/Date\.now\(\)[^;\n]*\bsettled\b/);
+    // Cut the effects and the click handler out: what is left is the render body.
+    const render = stripCalls(code, "useEffect").replace(/onClick=\{[\s\S]*?\}\s*className=/, "className=");
+    // The only mention of the clock left is its one-line definition.
+    const calls = render.match(/\b(?:Date\.now|readClock)\(/g) ?? [];
+    expect(calls).toHaveLength(1);
+    expect(render).toMatch(/const\s+readClock\s*=\s*\(\)\s*=>\s*Date\.now\(\)/);
+  });
+
+  // The two effects, cut out by their guard line.
+  const retryEffect =
+    /useEffect\(\(\)\s*=>\s*\{\s*if\s*\(settled\.kind\s*!==\s*["']retrying["']\)\s*return;([\s\S]*?)\},\s*\[([^\]]*)\]/.exec(code);
+  const statusEffect =
+    /useEffect\(\(\)\s*=>\s*\{\s*if\s*\(settled\.kind\s*!==\s*["']updated["']\s*&&\s*settled\.kind\s*!==\s*["']unchanged["']\)\s*return;([\s\S]*?)\},\s*\[([^\]]*)\]/.exec(code);
+
+  it("finds both effects (so the guards below are not vacuous)", () => {
+    expect(retryEffect?.[1] ?? "").toMatch(/router\.refresh\(\)/);
+    expect(statusEffect?.[1] ?? "").toMatch(/setSettled\(/);
+  });
+
+  it("both effects re-run on the outcome's identity, not just its kind", () => {
+    const deps = (m: RegExpExecArray | null) =>
+      (m?.[2] ?? "").split(",").map((d) => d.trim()).filter(Boolean);
+    expect(deps(retryEffect)).toEqual(
+      expect.arrayContaining(["settled.kind", "settled.seq", "router", "startTransition"]),
+    );
+    expect(deps(statusEffect)).toEqual(expect.arrayContaining(["settled.kind", "settled.seq"]));
+    expect(deps(statusEffect)).not.toContain("settled");
+    expect(deps(retryEffect)).not.toContain("settled");
+  });
+
+  it("the retry effect pins a deadline once per outcome and re-arms with what is left", () => {
+    const body = retryEffect?.[1] ?? "";
+    expect(body).toContain(COMPARE);
+    expect(body).toMatch(/deadline\.current\s*=\s*\{\s*seq\s*,\s*at:\s*\w+\(\)\s*\+\s*TIMELINE_REFRESH_RETRY_MS\s*\}/);
+    expect(body).toMatch(/remainingMs\(\s*deadline\.current\.at\s*,\s*\w+\(\)\s*\)/);
+    expect(body).toMatch(/window\.setTimeout\([\s\S]*?,\s*left\s*\)/);
+    expect(body).toMatch(/window\.clearTimeout\(/);
+  });
+
+  it("an expired retry is dropped: it clears the cycle and settles to none, and never refreshes", () => {
+    const body = retryEffect?.[1] ?? "";
+    const expired = blockAfter(body, /if\s*\(\s*left\s*===\s*null\s*\)\s*\{/);
+    expect(expired).not.toBeNull();
+    expect(expired).toMatch(/setCycle\(\s*null\s*\)/);
+    expect(expired).toMatch(/setSettled\(\s*\{\s*kind:\s*["']none["']\s*,\s*seq\s*\}\s*\)/);
+    expect(expired).not.toMatch(/router\.refresh/);
+    expect(expired).not.toMatch(/startTransition/);
+    // Its state calls run in a timer callback (delay 0), not in the effect body.
+    expect(expired).toMatch(/window\.setTimeout\([\s\S]*,\s*0\s*\)/);
+    expect(stripCalls(expired ?? "", "window.setTimeout")).not.toMatch(/\bset[A-Z]\w*\(/);
+    expect(expired).toMatch(/return\b/);
+  });
+
+  it("the single refresh stays in the live branch of the retry effect", () => {
+    const body = retryEffect?.[1] ?? "";
+    expect(body.match(/router\.refresh\(\)/g) ?? []).toHaveLength(1);
+    const expiredAt = body.search(/if\s*\(\s*left\s*===\s*null\s*\)/);
+    expect(expiredAt).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf("router.refresh()")).toBeGreaterThan(expiredAt);
+  });
+
+  it("the status effect pins a deadline of PILL_STATUS_MS and re-arms with what is left (0 if past)", () => {
+    const body = statusEffect?.[1] ?? "";
+    expect(body).toContain(COMPARE);
+    expect(body).toMatch(/deadline\.current\s*=\s*\{\s*seq\s*,\s*at:\s*\w+\(\)\s*\+\s*PILL_STATUS_MS\s*\}/);
+    expect(body).toMatch(/remainingMs\(\s*deadline\.current\.at\s*,\s*\w+\(\)\s*\)\s*\?\?\s*0/);
+    expect(body).toMatch(/window\.setTimeout\([\s\S]*?,\s*left\s*\)/);
+    expect(body).toMatch(/setSettled\(\s*\{\s*kind:\s*["']none["']\s*,\s*seq\s*\}\s*\)/);
+    expect(body).toMatch(/window\.clearTimeout\(/);
+  });
+
+  it("focus moves only after a `deadline.current?.seq !== ` comparison, inside its first-run block", () => {
+    const focusAt: number[] = [];
+    for (let i = code.indexOf(".focus("); i !== -1; i = code.indexOf(".focus(", i + 1)) focusAt.push(i);
+    expect(focusAt.length).toBeGreaterThan(0);
+    for (const at of focusAt) {
+      const compareAt = code.lastIndexOf(COMPARE, at);
+      expect(compareAt).toBeGreaterThanOrEqual(0);
+      // The focus call sits inside the `{ ... }` of that comparison's `if`.
+      const open = code.indexOf("{", compareAt);
+      expect(open).toBeGreaterThan(compareAt);
+      const close = closeOf(code, open);
+      expect(open).toBeLessThan(at);
+      expect(close).toBeGreaterThan(at);
+    }
+    // And that block is the status effect's, not the retry effect's.
+    expect(statusEffect?.[1] ?? "").toContain(".focus(");
+    expect(retryEffect?.[1] ?? "").not.toContain(".focus(");
+  });
+
+  it("focus is not moved by the re-arm path: it runs before the remaining-time read", () => {
+    const body = statusEffect?.[1] ?? "";
+    expect(body.indexOf(".focus(")).toBeLessThan(body.indexOf("remainingMs("));
+    // The block that moves focus is closed before the re-arm.
+    const block = blockAfter(body, /if\s*\(\s*deadline\.current\?\.seq\s*!==\s*seq\s*\)\s*\{/) ?? "";
+    expect(block).toContain(".focus(");
+    expect(block).not.toMatch(/window\.setTimeout/);
   });
 });
