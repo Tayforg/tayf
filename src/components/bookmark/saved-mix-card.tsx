@@ -42,9 +42,10 @@ export function SavedMixCard({ rows }: { rows: ReadonlyArray<SavedMixRow> }) {
       <p className="text-[12px] text-muted-foreground">
         {`Kaydettiğiniz ${stories} hikâyeyi yazan ${total} sınıflandırılmış kaynağın dağılımı`}
       </p>
+      {/* Decoration for assistive tech: the legend <p> below prints the same
+          percents, so it is the one text alternative (h67-landmarks-2). */}
       <div
-        role="img"
-        aria-label={legend.join(", ")}
+        aria-hidden="true"
         className="flex h-2.5 w-full gap-px overflow-hidden rounded-full bg-muted"
       >
         {ZONES.filter((z) => counts[z] > 0).map((z) => (

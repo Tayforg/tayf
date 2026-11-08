@@ -137,12 +137,14 @@ interface ClusterCardImageProps {
    */
   alt: string;
   /**
-   * BCP 47 language of `alt` / the logo caption, for the rare caller whose
-   * accessible name is not in the document's language (the cluster page hero,
-   * when the extractive headline is an English outlet's own title; WCAG 3.1.2,
-   * h23-a11y-1). Forwarded to the <img> (tier 1) and to the role="img" wrapper
-   * (tiers 2 and 3), which also covers the logo's own alt and caption. Omit it
-   * (the default) and no `lang` attribute is emitted.
+   * BCP 47 language of `alt` / the logo caption, for a caller whose accessible
+   * name is not in the document's language (WCAG 3.1.2). Forwarded to the
+   * <img> (tier 1) and to the image wrapper (tiers 2 and 3), which also covers
+   * the logo's own alt and caption. It only matters when `alt` is non-empty or
+   * the logo caption is exposed: with `alt=""` every tier is either
+   * <img alt=""> or `aria-hidden`, so `lang` has no effect for assistive tech
+   * (it merely tags the aria-hidden logo caption). Omit it (the default) and no
+   * `lang` attribute is emitted.
    */
   lang?: string;
   className?: string;

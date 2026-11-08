@@ -187,6 +187,10 @@ export async function BlindspotsFeed() {
             <p className="text-sm text-muted-foreground">{countLine}</p>
           )}
           <SilenceDigestBand digest={result.digest} />
+          {/* h67-landmarks-1: the cards are <h3>s (BlindspotCard), so they need
+              an <h2> parent. The band's own h2 ("Bu listede kim yer vermedi?")
+              names the band, not the list. Screen-reader only: nothing moves. */}
+          <h2 className="sr-only">Kör nokta haberleri</h2>
           <div className="space-y-4">
             {result.bundles.map((b, i) => {
               const hoursAgo =
@@ -396,6 +400,7 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
         isAging={isAging}
         isWireRedistribution={bundle.isWireRedistribution}
         effectiveArticleCount={bundle.effectiveArticleCount}
+        headingLevel={3}
       />
     </div>
   );

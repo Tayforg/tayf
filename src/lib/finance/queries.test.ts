@@ -2172,6 +2172,19 @@ describe("cached-failure-sweep: input normalisation and short-circuits live in t
       expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(0.9);
     });
 
+    // h67-edgefns-1 (migration 174): the view nulls avg_volume_20 AND rvol together when the 20-session window is not in one
+    // unit or not real volumes (MERCN across its 3.00004-for-1 split, DUNYH's zero-volume placeholders). The row still carries
+    // the last session's volume; it must map to a null ratio, not 0 and not a fallback, so rvolLabel / the chip hide the line.
+    it("h67-edgefns-1: a row with last_volume but avg_volume_20 null and rvol null maps to rvol null (the unit guard of 174)", async () => {
+      fixture.quoteStats = [
+        row({ ticker: "MERCN", last_close: "2.72", prev_close: "2.81", last_volume: 8841503, avg_volume_20: null, rvol: null }),
+      ];
+      const s = (await fetchQuoteStats(["MERCN"])).MERCN!;
+      expect(s.lastVolume).toBe(8841503);
+      expect(s.avgVolume20).toBeNull();
+      expect(s.rvol).toBeNull();
+    });
+
     it("falls back to the stored rvol when avg_volume_20 is 0 (never Infinity or NaN)", async () => {
       fixture.quoteStats = [row({ avg_volume_20: "0", rvol: "1.10" })];
       expect((await fetchQuoteStats(["GARAN"])).GARAN!.rvol).toBe(1.1);

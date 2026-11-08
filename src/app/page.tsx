@@ -136,6 +136,9 @@ export async function generateMetadata({
 // `nowMs` is passed in because Next.js 16's `react-hooks/purity` rule
 // forbids `Date.now()` in a Server Component render body — the page
 // captures it once per request.
+// Every call site sits inside a section whose label is an <h2> ("Son Dakika",
+// the day buckets, the archive), so the card headline is an <h3>
+// (h67-landmarks-1): h1 page, h2 section, h3 story.
 function renderClusterCard(
   bundle: ClusterBundle,
   idx: number,
@@ -156,6 +159,7 @@ function renderClusterCard(
         isAging={hoursAgo > 48}
         isWireRedistribution={bundle.isWireRedistribution}
         effectiveArticleCount={bundle.effectiveArticleCount}
+        headingLevel={3}
       />
     </div>
   );

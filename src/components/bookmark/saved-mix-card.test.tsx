@@ -59,9 +59,23 @@ describe("SavedMixCard ok state", () => {
     expect(out).toContain("İktidar %29 · Bağımsız %14 · Muhalefet %57");
   });
 
-  it("carries all three percents in the bar's aria-label", () => {
-    expect(out).toContain('role="img"');
-    expect(out).toContain('aria-label="İktidar %29, Bağımsız %14, Muhalefet %57"');
+  // h67-landmarks-2: the bar was role="img" named with the legend printed right
+  // below it, so a screen reader announced the three percents twice. The bar is
+  // now aria-hidden and the visible legend <p> is the one text alternative.
+  it("hides the bar from assistive tech: no role=\"img\", no aria-label, aria-hidden=\"true\"", () => {
+    expect(out).not.toContain('role="img"');
+    expect(out).not.toContain("aria-label=");
+    const bar = out.match(/<div[^>]*class="flex h-2\.5 w-full[^"]*"[^>]*>/);
+    expect(bar, "the zone bar").not.toBeNull();
+    expect(bar?.[0]).toContain('aria-hidden="true"');
+    expect(bar?.[0]).not.toContain("role=");
+  });
+
+  it("announces the percents once: the visible legend, not a second aria-label copy", () => {
+    const legend = "İktidar %29 · Bağımsız %14 · Muhalefet %57";
+    expect(out.split(legend).length - 1).toBe(1);
+    expect(out).toContain(`<p class="text-[12px] text-foreground">${legend}</p>`);
+    expect(out).not.toContain("İktidar %29, Bağımsız %14, Muhalefet %57");
   });
 
   it("draws one proportional segment per non-zero zone with the zone dot classes", () => {

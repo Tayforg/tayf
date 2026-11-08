@@ -48,7 +48,10 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
         Kim önce yazdı?
       </h2>
 
-      <div role="img" aria-label={summary} className="relative h-5">
+      {/* The dot line is decoration for assistive tech: the <p> below prints the
+          same summary sentence, so it is the one text alternative (h67-landmarks-2).
+          The dots keep their `title` tooltips for mouse users. */}
+      <div aria-hidden="true" className="relative h-5">
         <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border" />
         {points.map((p) =>
           p.voting ? (

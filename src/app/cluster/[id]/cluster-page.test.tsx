@@ -1269,9 +1269,14 @@ describe("ClusterDetailPage — framing comparison silence wording (h58-postship
   /** Headline rows in the block: one <li> per voting member, never a non-voting one. */
   const listItems = (html: string) => html.match(/<li[ >]/g) ?? [];
 
-  /** The `<section aria-label="LABEL" ...>` of one zone column of the block. */
+  /**
+   * The `<section aria-labelledby="ID" ...>` of one zone column of the block,
+   * found through the <h3 id="ID"> that reads LABEL (h67-landmarks-1: the
+   * section used to carry aria-label={label}).
+   */
   function column(html: string, label: string): string {
-    const open = html.indexOf(`<section aria-label="${label}"`);
+    const id = new RegExp(`<h3 id="([^"]+)"[^>]*>${label}</h3>`).exec(html)?.[1];
+    const open = id === undefined ? -1 : html.indexOf(`<section aria-labelledby="${id}"`);
     if (open === -1) throw new Error(`no column ${label}`);
     return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
   }
@@ -3814,14 +3819,15 @@ describe("ClusterDetailPage — headline-less title (hunt-10 C-entity-only-title
     },
   );
 
-  it("the hero image alt falls back to 'Haber', not the entity, when no member title is available", async () => {
+  it("the hero image is decorative (alt=\"\") and never carries the entity, when no member title is available", async () => {
     getClusterDetail.mockResolvedValue(headlessDetail("&nbsp"));
 
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
 
     const hero = findPropsOfType(tree, ClusterCardImage);
     expect(hero).not.toBeNull();
-    expect(hero!.alt).toBe("Haber");
+    // h67-landmarks-2: the <h1> beside the photo is its text alternative.
+    expect(hero!.alt).toBe("");
   });
 
   it("keeps a normal title on ShareButton and BookmarkButton", async () => {
@@ -4033,8 +4039,14 @@ describe("ClusterDetailPage — h1 lang for an all-English cluster (h23-a11y-1)"
   });
 });
 
-describe("ClusterDetailPage — hero image alt is the cluster headline (h23-a11y-1)", () => {
-  it("(d) uses the Turkish cluster headline, not a member's English article title", async () => {
+// h67-landmarks-2 (INTENDED FLIP of h23-a11y-1): the hero's alt used to be the
+// cluster headline, exactly the <h1> text beside it, so a screen reader read the
+// headline twice. The photo is now decorative (alt="" like ClusterCard's
+// thumbnails); the credit line still names the outlet. `lang` still mirrors the
+// <h1> (kept for when the hero is named again), but while alt is empty it is
+// inert for assistive tech.
+describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h23-a11y-1, h67-landmarks-2)", () => {
+  it("(d) passes an empty alt, never the headline or a member's English article title", async () => {
     const detail = langDetail({
       sources: FBB078B4_SOURCES,
       imageUrlOnFirst: "https://img.example/hero.jpg",
@@ -4043,17 +4055,18 @@ describe("ClusterDetailPage — hero image alt is the cluster headline (h23-a11y
     const hero = findPropsOfType(tree, ClusterCardImage);
     expect(hero).not.toBeNull();
     expect(hero!.src).toBe("https://img.example/hero.jpg");
-    expect(hero!.alt).toBe(detail.cluster.title_tr);
+    expect(hero!.alt).toBe("");
+    expect(hero!.alt).not.toBe(detail.cluster.title_tr);
     expect(hero!.alt).not.toBe(detail.members[0]!.article.title);
   });
 
-  it("(d) the alt is the headline for a Turkish cluster with an image as well", async () => {
+  it("(d) the alt is empty for a Turkish cluster with an image as well", async () => {
     const detail = langDetail({
       sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }],
       imageUrlOnFirst: "https://img.example/hero.jpg",
     });
     const tree = await renderTree(detail);
-    expect(findPropsOfType(tree, ClusterCardImage)!.alt).toBe(detail.cluster.title_tr);
+    expect(findPropsOfType(tree, ClusterCardImage)!.alt).toBe("");
   });
 
   it("(f) tags the hero image lang=en for an all-English extractive cluster with a hero photo (fbb078b4)", async () => {
@@ -4067,13 +4080,13 @@ describe("ClusterDetailPage — hero image alt is the cluster headline (h23-a11y
     const tree = await renderTree(detail);
     const hero = findPropsOfType(tree, ClusterCardImage);
     expect(hero).not.toBeNull();
-    expect(hero!.alt).toBe("Erdoğan visits Seoul with $15 billion trade goal");
+    expect(hero!.alt).toBe("");
     expect(hero!.lang).toBe("en");
-    // The image shares the <h1>'s language: both carry the same English text.
+    // lang still mirrors the <h1>, although the empty alt exposes no text.
     expect(h1Of(tree)?.props.lang).toBe("en");
   });
 
-  it("(f) tags the hero image lang=en with no photo too (the logo / placeholder tiers name the image)", async () => {
+  it("(f) tags the hero image lang=en with no photo too (lang still mirrors the h1 for the logo / placeholder tiers)", async () => {
     const detail = langDetail({ sources: FBB078B4_SOURCES, titleMethod: "extractive" });
     const tree = await renderTree(detail);
     const hero = findPropsOfType(tree, ClusterCardImage);
@@ -4109,18 +4122,18 @@ describe("ClusterDetailPage — hero image alt is the cluster headline (h23-a11y
     detail.cluster.title_tr = "&nbsp";
     const tree = await renderTree(detail);
     const hero = findPropsOfType(tree, ClusterCardImage);
-    expect(hero!.alt).toBe("Haber");
+    expect(hero!.alt).toBe("");
     expect(hero!.lang).toBeUndefined();
   });
 
-  it("(d) still falls back to 'Haber' for a headline-less cluster that has an image", async () => {
+  it("(d) keeps the alt empty for a headline-less cluster that has an image", async () => {
     const detail = langDetail({
       sources: FBB078B4_SOURCES,
       imageUrlOnFirst: "https://img.example/hero.jpg",
     });
     detail.cluster.title_tr = "&nbsp";
     const tree = await renderTree(detail);
-    expect(findPropsOfType(tree, ClusterCardImage)!.alt).toBe("Haber");
+    expect(findPropsOfType(tree, ClusterCardImage)!.alt).toBe("");
   });
 });
 
@@ -4806,7 +4819,8 @@ describe("ClusterDetailPage — all-English cluster (h59-english-1)", () => {
     expect(count(framing, NOT_COMPARED)).toBe(2);
     // The spectrum bar, the member lists and the zone headings stay.
     expect(framing).toContain(`${sources.length} kaynağın kendi manşetleri`);
-    expect(framing).toContain('aria-label="İktidar"');
+    // h67-landmarks-1: the zone title is an <h3> (it was an aria-label on the section).
+    expect(framing).toContain(">İktidar</h3>");
   });
 
   it("fixture A does not consult feed health: nothing is worded as an absence", async () => {
@@ -4909,10 +4923,10 @@ describe("ClusterDetailPage — h1 lang for a mixed cluster (h59-english-2)", ()
     expect(h1Of(tree)?.props.lang).toBe("en");
   });
 
-  it("the hero image shares the h1's language (its alt is the same English text)", async () => {
+  it("the hero image shares the h1's language (its logo / placeholder tiers inherit lang; the alt is empty)", async () => {
     const tree = await renderTree(mixedDetail({ titleTr: NATO_EN, image: true }));
     const hero = findPropsOfType(tree, ClusterCardImage);
-    expect(hero!.alt).toBe(NATO_EN);
+    expect(hero!.alt).toBe("");
     expect(hero!.lang).toBe("en");
   });
 

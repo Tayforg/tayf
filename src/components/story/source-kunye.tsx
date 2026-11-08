@@ -74,9 +74,13 @@ export function SourceKunye({ sources }: { sources: readonly SourceKunyeSource[]
 
   return (
     <div className="space-y-1.5">
-      <div className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      {/* h67-landmarks-1: a heading, not a <div>, so heading navigation finds
+          the strip. Same classes: h1-h3 get the serif heading font from
+          globals.css (font-serif is already here) and tracking-wide overrides
+          the heading letter-spacing, so the label looks as it did. */}
+      <h2 className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Kaynak künyesi
-      </div>
+      </h2>
       <ul className={LIST_CLASS}>
         {visible.map((source, i) => kunyeRow(source, rowClass(i, true)))}
       </ul>

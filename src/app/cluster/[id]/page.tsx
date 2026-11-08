@@ -548,13 +548,6 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     .filter((u): u is string => typeof u === "string" && u.length > 0);
   const heroSrc = heroCandidates[0] ?? null;
   const heroMember = imageEligible.find((m) => !!m.article.image_url) ?? null;
-  // The cluster headline, not the hero member's own article title: the alt is
-  // exactly the <h1> text, so it takes the <h1>'s `headlineLang` (the `lang`
-  // prop on the hero below; WCAG 3.1.2, h23-a11y-1): 'en' for an all-English
-  // cluster, or for a mixed one whose headline is an English member's own title
-  // (h59-english-2), nothing for a Turkish headline. The credit line still
-  // names the photo's outlet.
-  const heroAlt = headline;
 
   // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the exact image
   // URL rather than tied to `heroMember`/`heroSrc` alone, so the credit
@@ -788,7 +781,18 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 actually on screen, including after the client-side
                 fallback chain advances past `heroSrc`. Only appears for
                 the tier-1 real-photo branch; never for the logo or
-                placeholder tiers. */}
+                placeholder tiers.
+
+                The photo is decorative for assistive tech (alt=""): the
+                headline is the adjacent <h1>, so naming the photo with it
+                would make a screen reader read the same text twice (as
+                ClusterCard's thumbnails do; h67-landmarks-2). The credit line
+                above still identifies the photo. `lang={headlineLang}` is kept
+                so the hero gets the right language if it is ever named again
+                ('en' for an all-English cluster or a mixed one whose headline
+                is an English member's own title (h59-english-2), nothing for a
+                Turkish headline); while alt="" it has no effect for assistive
+                tech, since it only tags the aria-hidden logo caption. */}
             <ClusterCardImage
               src={heroSrc}
               srcs={heroCandidates.slice(1)}
@@ -801,7 +805,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 heroMember?.source.name ?? members[0]?.source.name ?? "Kaynak"
               }
               credits={heroCredits}
-              alt={heroAlt}
+              alt=""
               lang={headlineLang}
               width={768}
               height={576}
