@@ -150,14 +150,16 @@ export const MOBILE_BANNER_SIZES =
 // on a phone its box is the viewport minus the 2rem gutters, while the old
 // `100vw` asked for 1170 px at DPR3 (the 1200w candidate, q=75, ~61 KB). With
 // the gutter in the slot the pick is 1080w, and quality 50 (allowed by
-// `images.qualities`) matches the home hero. From sm up the hero sits in a
-// fixed 384 px column. Lives in this SERVER module on purpose: a
+// `images.qualities`) matches the home hero. Below md the hero stays a stacked
+// full-width banner (the calc slot); from md the hero sits in a 288 px column,
+// from lg in 384 px (h73-breakpoints-1). Lives in this SERVER module on purpose: a
 // non-component export of cluster-card-image.tsx ('use client') would only be
 // a client reference on the server. tests/guards/cluster-hero-sizes.test.ts
 // pins both values and that the page uses them.
 
 /** next/image `sizes` for the cluster page's LCP hero. */
-export const CLUSTER_HERO_SIZES = "(min-width: 640px) 384px, calc(100vw - 2rem)";
+export const CLUSTER_HERO_SIZES =
+  "(min-width: 1024px) 384px, (min-width: 768px) 288px, calc(100vw - 2rem)";
 
 /** next/image `quality` for the cluster page's LCP hero (must be in `images.qualities`). */
 export const CLUSTER_HERO_QUALITY = 50;

@@ -6,8 +6,8 @@ export default function Loading() {
 
       {/* Hero skeleton */}
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 space-y-4">
-        <div className="flex flex-col sm:flex-row gap-4">
-          <div className="h-48 sm:h-56 w-full sm:w-80 rounded-lg bg-muted/50 animate-shimmer shrink-0" />
+        <div className="flex flex-col md:flex-row gap-4">
+          <div className="h-48 sm:h-56 w-full md:w-72 lg:w-96 rounded-lg bg-muted/50 animate-shimmer shrink-0" />
           <div className="flex-1 space-y-3">
             <div className="font-serif h-8 w-full rounded bg-muted/70 animate-shimmer" />
             <div className="font-serif h-8 w-4/5 rounded bg-muted/70 animate-shimmer" />

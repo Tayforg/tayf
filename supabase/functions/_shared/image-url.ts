@@ -281,7 +281,7 @@ export function isOptimizableImageUrl(u: string | null | undefined): boolean {
  * stand-in that the publisher attaches to unrelated stories; the reuse count
  * is the number of DISTINCT titles that carried the URL in a read-only prod
  * sample (articles published in the trailing 48 h, 2026-10-23, threshold
- * >= 10 titles).
+ * >= 10 titles; a row added later names its own window in its comment).
  *
  * Add a row only after the same query shows it reused across >= 10 titles at
  * a verified source. Names that follow the 'son dakika' / default-photo shape
@@ -297,10 +297,17 @@ export const PLACEHOLDER_IMAGE_ASSETS: ReadonlySet<string> = new Set([
   // normalisation PRODUCES, or it can never match (the old `imgsdisk2026` key
   // let the 16 rows stored under the real spelling through).
   "img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg",
+  // aksam: the `t25_` thumbnail of the same stand-in (the file above is its `_2`
+  // variant), 15 distinct titles in 7 days, 2026-11-08 (h73-ingestquality-1).
+  "img3.aksam.com.tr/imgsdisk/2026/01/01/t25_210220191220255418101.jpg",
   // diken: "gunun" (of the day) card, 22 distinct titles.
   "www.diken.com.tr/wp-content/uploads/2021/10/gunun_11.jpg",
   // star: generic Star stand-in photo, 22 distinct titles.
   "imgs.star.com.tr/imgsdisk/2026/10/02/1138373167528_2-15012019114103500.jpg",
+  // star: the same stand-in after the feed moved it to the imgs.stargazete.com
+  // host (with a `-41` suffix), 15 distinct titles in 7 days, 2026-11-08
+  // (h73-ingestquality-1). The old imgs.star.com.tr key is kept.
+  "imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg",
   // gzt: GZT 'son dakika' card, 15 distinct titles.
   "img.piri.net/resim/imagecrop/2018/04/20/06/49/resized_9641d-8b15395cgztsondakika.jpg",
   // haber-global: Haber Global 'son dakika' card, 13 distinct titles.
@@ -337,15 +344,32 @@ const PLACEHOLDER_BASENAME =
 //   muhalif           3712-muhalif-default-cover
 //   takvim            tkv-default-1754911321840 (also behind the ?u= resizer)
 //   cgtn-turk, tele1  placeholder        (assets/images/placeholder.png)
+//
+// h73-ingestquality-1 (2026-11-08, 7-day replay of stored image_url values) adds
+// three shapes, each anchored to the whole basename with bounded quantifiers:
+//
+//   cumhuriyet        cumhuriyet-noimage     (media.cumhuriyet.com.tr, 9 titles)
+//                     -> `no[-_]?image` as the whole name or the tail after a
+//                        `-` / `_`
+//   ilke-tv           ilketv-default-1       (ilketv.com.tr uploads, 2 titles)
+//                     -> `default[-_]<1-2 digits>` as the whole name or the tail
+//                        after a `-` / `_` (the existing `default-<6+ digits>`
+//                        rule keeps its own, longer digit run)
+//   haberler-com      son-dakika_sd          (foto.sondakika.com, 4 titles; the
+//                     sibling of son-dakika_amp). Real photos on that host end
+//                     in `_sd` too (`<slug>-20403402_sd`), so only the bare
+//                     `son-dakika_sd` name is a stand-in.
 // A slug that merely contains 'default' or 'son-dakika' does not match: the
 // word has to be the whole name, or the whole tail after a `-` / `_`.
 const PLACEHOLDER_BASENAME_EXTRA: readonly RegExp[] = [
   /^(?:tr[_-]?)?son[_-]?dakika(?:\d{2,4}x\d{2,4})?[a-z]{0,8}(?:jpe?g|png|webp)(?:-[A-Za-z0-9_-]{16,32})?$/i,
   /^logo(?:jpe?g|png|webp)(?:-[A-Za-z0-9_-]{16,32})?$/i,
-  /^son[_-]?dakika_amp$/i,
+  /^son[_-]?dakika_(?:amp|sd)$/i,
   /^default(?:[-_]cover)?$/i,
   /(?:^|[-_])default[-_]cover$/i,
   /(?:^|[-_])default[-_]\d{6,}$/i,
+  /(?:^|[-_])no[-_]?image$/i,
+  /(?:^|[-_])default[-_]\d{1,2}$/i,
   /^placeholder$/i,
 ];
 

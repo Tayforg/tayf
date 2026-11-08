@@ -10,6 +10,7 @@ import {
   upgradeImageVariant,
 } from "../../../supabase/functions/_shared/image-url.ts";
 import { isAllowedRemoteImageUrl } from "../../../src/lib/images/remote-image-hosts";
+import { expectCpuUnder } from "../../_helpers/linear-time";
 
 // ---------------------------------------------------------------------------
 // ingest-hygiene: one shared normaliser for image URLs. haber7 (and a few
@@ -836,7 +837,8 @@ describe("isPlaceholderImageUrl: son-dakika cards with a glued extension and CMS
       `sondakika${"9".repeat(150)}x`,
       `logojpg-${"-".repeat(150)}`,
       `x-default-${"1".repeat(150)}x`,
-      `${"-default-".repeat(22)}1`,
+      // Ends in `x`, not a bare `-default-1`: that tail is a placeholder since h73.
+      `${"-default-".repeat(22)}1x`,
       `default${"-cover".repeat(30)}x`,
       `${"son-dakika".repeat(19)}!`,
     ]) {
@@ -1076,5 +1078,224 @@ describe("isIconLikeImageUrl (h15-images-3)", () => {
     expect(isIconLikeImageUrl(`https://cdn.test/${"logo-".repeat(20000)}x.png`)).toBe(false);
     expect(isIconLikeImageUrl(`https://cdn.test/${"-".repeat(20000)}.png`)).toBe(false);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h73-ingestquality-1 (2026-11-08): five publisher 'SON DAKIKA' / logo cards
+// that the placeholder filter missed. Read-only prod replay (articles of the
+// trailing 7 days, DISTINCT titles per image_url):
+//
+//   aksam         img3.aksam.com.tr/imgsdisk/2026/01/01/t25_210220191220255418101.jpg   15 / 15
+//   star          imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg   15 / 15
+//   cumhuriyet    media.cumhuriyet.com.tr/cumhuriyet-noimage.jpg                         9 / 9
+//   haberler-com  foto.sondakika.com/crop/1210x0/haber/2026/07/03/son-dakika_sd.jpg      4 / 4
+//   ilke-tv       ilketv.com.tr/wp-content/uploads/2024/06/ilketv-default-1.jpg          2 / 2
+//
+// The aksam and star cards are the t25_ thumbnail / the imgs.stargazete.com
+// host of stand-ins that were already keyed under another spelling, so they are
+// exact assets. The other three share a basename SHAPE (noimage, default-<n>,
+// son-dakika_sd). The controls below are real photos pulled from the same
+// replay (one single-title image_url per host), pasted as literals.
+// ---------------------------------------------------------------------------
+
+describe("isPlaceholderImageUrl: five stand-ins that slipped through (h73-ingestquality-1)", () => {
+  const STORED: ReadonlyArray<readonly [string, string]> = [
+    ["aksam t25_ thumbnail", "https://img3.aksam.com.tr/imgsdisk/2026/01/01/t25_210220191220255418101.jpg"],
+    [
+      "star on imgs.stargazete.com (-41)",
+      "https://imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg",
+    ],
+    ["cumhuriyet noimage", "https://media.cumhuriyet.com.tr/cumhuriyet-noimage.jpg"],
+    [
+      "haberler-com son-dakika_sd",
+      "https://foto.sondakika.com/crop/1210x0/haber/2026/07/03/son-dakika_sd.jpg",
+    ],
+    ["ilke-tv default-1", "https://ilketv.com.tr/wp-content/uploads/2024/06/ilketv-default-1.jpg"],
+  ];
+
+  it.each(STORED)("is true for the stored URL: %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(url)).toBe(true);
+  });
+
+  it.each(STORED)("is true with a query string: %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(`${url}?v=1`)).toBe(true);
+  });
+
+  it.each(STORED)("is true with a doubled leading path slash: %s", (_label, url) => {
+    const doubled = url.replace(/^(https:\/\/[^/]+)\//, "$1//");
+    expect(doubled).not.toBe(url);
+    expect(isPlaceholderImageUrl(doubled)).toBe(true);
+  });
+
+  it.each(STORED)("is true for the protocol-relative, http and upper-case-host spellings: %s", (_label, url) => {
+    const rest = url.slice("https://".length);
+    const host = rest.slice(0, rest.indexOf("/"));
+    expect(isPlaceholderImageUrl(`//${rest}`)).toBe(true);
+    expect(isPlaceholderImageUrl(`http://${rest}`)).toBe(true);
+    expect(isPlaceholderImageUrl(url.replace(host, host.toUpperCase()))).toBe(true);
+  });
+
+  it("keeps every pre-existing asset key and adds exactly the two new exact keys", () => {
+    for (const k of [
+      "image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg",
+      "img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg",
+      "www.diken.com.tr/wp-content/uploads/2021/10/gunun_11.jpg",
+      "imgs.star.com.tr/imgsdisk/2026/10/02/1138373167528_2-15012019114103500.jpg",
+      "img.piri.net/resim/imagecrop/2018/04/20/06/49/resized_9641d-8b15395cgztsondakika.jpg",
+      "i.haberglobal.com/storage/files/images/2021/09/23/haberglobal-sondakika-1jxM.png",
+      "iahbr.tmgrup.com.tr/Defaults/Upload/ahbr-default-1754911102530.png",
+    ]) {
+      expect(PLACEHOLDER_IMAGE_ASSETS.has(k)).toBe(true);
+    }
+    expect(PLACEHOLDER_IMAGE_ASSETS.has("img3.aksam.com.tr/imgsdisk/2026/01/01/t25_210220191220255418101.jpg")).toBe(true);
+    expect(
+      PLACEHOLDER_IMAGE_ASSETS.has("imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg"),
+    ).toBe(true);
+    expect(PLACEHOLDER_IMAGE_ASSETS.size).toBe(9);
+  });
+
+  it("the two new exact keys are already in normalised form", () => {
+    for (const k of [
+      "img3.aksam.com.tr/imgsdisk/2026/01/01/t25_210220191220255418101.jpg",
+      "imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg",
+    ]) {
+      expect(normalizeImageUrl("https://" + k)).toBe("https://" + k);
+    }
+  });
+
+  it("the broken aksam /imgsdisk2026/ spelling of the t25_ thumbnail is caught after repair", () => {
+    expect(
+      isPlaceholderImageUrl("https://img3.aksam.com.tr/imgsdisk2026/01/01/t25_210220191220255418101.jpg"),
+    ).toBe(true);
+  });
+
+  it("the still-old star host and the old aksam _2 stand-in stay placeholders", () => {
+    expect(
+      isPlaceholderImageUrl("https://imgs.star.com.tr/imgsdisk/2026/10/02/1138373167528_2-15012019114103500.jpg"),
+    ).toBe(true);
+    expect(
+      isPlaceholderImageUrl("https://img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg"),
+    ).toBe(true);
+  });
+
+  describe("controls: real photos from the same replay stay false", () => {
+    // One single-title image_url per host, 7-day replay of 2026-11-08.
+    it.each([
+      ["aksam", "https://img3.aksam.com.tr/imgsdisk/2026/11/08/yunanistanin-plani-ankara-519_2.jpg"],
+      ["star", "https://imgs.stargazete.com/imgsdisk/2026/11/08/bddk-3-daire-baskani-bila-480_2-41.jpg"],
+      ["cumhuriyet", "https://media.cumhuriyet.com.tr/Archive/ffc7daff-7ab5-4b0f-afe6-974d2559a31e.jpg"],
+      [
+        "haberler-com (real photos also end in _sd)",
+        "https://foto.sondakika.com/crop/1210x0/haber/2026/11/06/1-lig-in-14-haftasinda-antalyaspor-sahasinda-2-20403402_sd.jpg",
+      ],
+      ["ilke-tv", "https://ilketv.com.tr/wp-content/uploads/2026/11/yildiz-cakar.jpg"],
+      ["ilke-tv Yeni-Proje-5", "https://ilketv.com.tr/wp-content/uploads/2026/11/Yeni-Proje-5.png"],
+      ["cumhuriyet columnist cover", "https://media.cumhuriyet.com.tr/Archive/yazarlar/sabit/yazar75_cover.jpeg"],
+    ])("is false for the %s photo", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    });
+
+    it.each([
+      ["no-image in the middle of a slug", "https://cdn.x/2026/11/no-image-policy-debate.jpg"],
+      ["default-<word>-<digits>", "https://cdn.x/2026/11/default-gateway-123.jpg"],
+      ["default-cover inside a long slug", "https://cdn.x/2026/11/chp-default-cover-story-2026.jpg"],
+      ["a son-dakika slug with an sd word and a long id", "https://cdn.x/2026/11/son-dakika-sd-kart-18123456.jpg"],
+      ["a word that merely ends in 'no' before image", "https://cdn.x/2026/11/casino-image.jpg"],
+      ["noimage inside a longer word", "https://cdn.x/2026/11/knoimage.jpg"],
+      ["noimage followed by more words", "https://cdn.x/2026/11/noimage-haberi-gundem.jpg"],
+      ["default-<3 digits>", "https://cdn.x/2026/11/foto-default-123.jpg"],
+      ["default-<digit>-<word>", "https://cdn.x/2026/11/default-1-karar.jpg"],
+      ["default followed by a 3-digit year-like run", "https://cdn.x/2026/11/default-2026.jpg"],
+      ["a yeni-son-dakika_sd suffix on a real slug", "https://cdn.x/yeni-son-dakika_sd.jpg"],
+      ["son-dakika-sd with a dash instead of an underscore", "https://cdn.x/son-dakika-sd.jpg"],
+      ["a /noimage/ directory holding a real photo", "https://cdn.x/noimage/2026/11/foto-123.jpg"],
+      ["a /default-1/ directory holding a real photo", "https://cdn.x/default-1/2026/11/foto-123.jpg"],
+    ])("is false for %s", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    });
+
+    it("is false for a placeholder-shaped name that only appears in the query", () => {
+      expect(isPlaceholderImageUrl("https://cdn.x/a.jpg?name=cumhuriyet-noimage.jpg")).toBe(false);
+      expect(isPlaceholderImageUrl("https://cdn.x/a.jpg?f=ilketv-default-1.jpg")).toBe(false);
+    });
+  });
+
+  describe("basename shapes: noimage, default-<1-2 digits>, son-dakika_sd", () => {
+    it.each([
+      "https://cdn.x/img/noimage.jpg",
+      "https://cdn.x/img/no-image.png",
+      "https://cdn.x/img/no_image.webp",
+      "https://cdn.x/img/NoImage.JPG",
+      "https://cdn.x/img/NO-IMAGE.jpg",
+      "https://cdn.x/img/site-noimage.jpg",
+      "https://cdn.x/img/site_no-image.jpg",
+      "https://cdn.x/img/cumhuriyet-noimage.jpg?w=100",
+      "https://cdn.x/img/default-1.jpg",
+      "https://cdn.x/img/default_1.png",
+      "https://cdn.x/img/default-12.jpg",
+      "https://cdn.x/img/Default_12.JPG",
+      "https://cdn.x/img/ilketv-default-1.jpg",
+      "https://cdn.x/img/foo_default_7.jpg",
+      "https://cdn.x/img/son-dakika_sd.jpg",
+      "https://cdn.x/img/son_dakika_sd.jpg",
+      "https://cdn.x/img/sondakika_sd.jpg",
+      "https://cdn.x/img/SON-DAKIKA_SD.JPG",
+      "https://cdn.x/img/son-dakika_amp.jpg",
+      "https://cdn.x/img/no%2Dimage.jpg",
+    ])("is true for %s", (url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(true);
+    });
+
+    it("applies the new shapes to the wrapped origin of a u= resizer URL", () => {
+      expect(
+        isPlaceholderImageUrl("https://r.x/c1/1/1?u=https://media.cumhuriyet.com.tr/cumhuriyet-noimage.jpg"),
+      ).toBe(true);
+      expect(isPlaceholderImageUrl("https://r.x/c1/1/1?u=https://ilketv.com.tr/a/ilketv-default-1.jpg")).toBe(true);
+      expect(isPlaceholderImageUrl("https://r.x/c1/1/1?u=https://cdn.x/2026/11/real-photo.jpg")).toBe(false);
+    });
+  });
+
+  it("a long run of -default- units that ends in -default-<1-2 digits> is a placeholder, in linear time", () => {
+    // Was a false case of the hunt-15 adversarial test while only `default-<6+ digits>` existed.
+    // CPU time, not a wall-clock budget (tests/guards/no-wall-clock-budget.test.ts).
+    expectCpuUnder(() => {
+      expect(isPlaceholderImageUrl(`https://cdn.x/${"-default-".repeat(22)}1.jpg`)).toBe(true);
+      expect(isPlaceholderImageUrl(`https://cdn.x/${"-default-".repeat(21)}12.jpg`)).toBe(true);
+    }, 8000);
+  });
+
+  it("does not loosen the pre-existing rules: the old false cases still hold", () => {
+    for (const url of [
+      "https://cdn.x/2026/11/mahkeme-default-karari-aciklandi-18123456.jpg",
+      "https://cdn.x/default-karar-haberi.jpg",
+      "https://cdn.x/foto-default-123.jpg",
+      "https://cdn.x/yeni-son-dakika_amp.jpg",
+      "https://cdn.x/placeholder-haber.jpg",
+    ]) {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    }
+  });
+
+  it("stays linear on adversarial basenames of the new rules", () => {
+    const names = [
+      // Over MAX_BASENAME_LENGTH: refused before any pattern runs.
+      `${"no-image".repeat(2000)}x`,
+      `x-default-${"1".repeat(20000)}x`,
+      `son-dakika_sd${"_sd".repeat(5000)}x`,
+      // Within the 200-character budget: the patterns really run.
+      `${"no-image".repeat(24)}x`,
+      `no${"-".repeat(150)}imagex`,
+      `${"-default-".repeat(21)}12x`,
+      `x-default-${"1".repeat(150)}x`,
+      `son-dakika_sd${"_sd".repeat(50)}x`,
+      `${"noimage_".repeat(24)}!`,
+    ];
+    // CPU time, not a wall-clock budget (tests/guards/no-wall-clock-budget.test.ts).
+    expectCpuUnder(() => {
+      for (const name of names) {
+        expect(isPlaceholderImageUrl(`https://cdn.x/${name}.jpg`)).toBe(false);
+      }
+    }, 8000);
   });
 });

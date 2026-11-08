@@ -209,6 +209,59 @@ describe("sourceExcerpt: what it must keep or hide as before (h48-ingest-1)", ()
   });
 });
 
+// h73-ingestquality-3: Yeni Asır opens many descriptions "Son dakika haberleri..."
+// or "Son dakika İzmir haberleri..." (33 of the last 72 hours of rows), the
+// ellipsis glued to the first word; Sabah has the same shape. The excerpt must
+// start at the story.
+describe("sourceExcerpt: the plural 'Son dakika (şehir) haberleri...' lead-in (h73-ingestquality-3)", () => {
+  const YENI_ASIR_TITLE = "Erdoğan Azerbaycan'da";
+
+  it("a bare 'Son dakika haberleri...' glued to the first word is stripped", () => {
+    const out = sourceExcerpt(
+      "Başlık",
+      "Son dakika haberleri...Karabağ Zaferi 6’ncı yılında Azerbaycan’a giden Başkan",
+    );
+    expect(out.startsWith("Karabağ Zaferi")).toBe(true);
+    expect(out).toBe("Karabağ Zaferi 6’ncı yılında Azerbaycan’a giden Başkan");
+  });
+
+  it("a one-word city qualifier is stripped too", () => {
+    expect(
+      sourceExcerpt(
+        YENI_ASIR_TITLE,
+        "Son dakika İzmir haberleri... İzmir Büyükşehir Belediye Başkanı Cemil Tugay konuştu",
+      ),
+    ).toBe("İzmir Büyükşehir Belediye Başkanı Cemil Tugay konuştu");
+  });
+
+  it("an upper-case ticker followed by a lower-case word gets its first letter capitalised", () => {
+    expect(sourceExcerpt("Başlık", "SON DAKİKA HABERLERİ: zam geldi")).toBe("Zam geldi");
+  });
+
+  it("the ticker is gone before the echo check: a lead-in plus the title is an echo", () => {
+    expect(sourceExcerpt(YENI_ASIR_TITLE, `Son dakika İzmir haberleri... ${YENI_ASIR_TITLE}`)).toBe("");
+  });
+
+  it("a lead-in and nothing else shows nothing", () => {
+    expect(sourceExcerpt("Başlık", "Son dakika haberleri...")).toBe("");
+    expect(sourceExcerpt("Başlık", "Son dakika İzmir haberleri:")).toBe("");
+  });
+
+  it("a lead-in followed by the 'Devamı için tıklayınız' tail loses both", () => {
+    expect(
+      sourceExcerpt("Başlık", "Son dakika haberleri... Deprem sonrası hasar tespiti sürüyor...Devamı için tıklayınız"),
+    ).toBe("Deprem sonrası hasar tespiti sürüyor...");
+  });
+
+  it.each([
+    "Son dakika haberleri yayınlandı.",
+    "Son dakika haberleri, kentte yangın",
+    "Son dakikada gelen golle Galatasaray kazandı",
+  ])("text that only begins with similar words (%j) is kept as it is", (description) => {
+    expect(sourceExcerpt("Başlık", description)).toBe(description);
+  });
+});
+
 describe("sourceExcerpt: empty and odd input", () => {
   it.each([null, undefined, "", "   ", "\n\n", "\t"])("%j gives ''", (description) => {
     expect(sourceExcerpt("Bir başlık", description)).toBe("");

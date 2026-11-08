@@ -801,6 +801,23 @@ describe("tidySummaryText leading ticker (h22-editorial-2)", () => {
     ["  Son dakika | Deprem oldu", "Deprem oldu"],
     // Two stacked tickers.
     ["Son dakika | Son dakika! Deprem oldu", "Deprem oldu"],
+    // h73-ingestquality-3: the plural "haberleri", bare or behind a one-word
+    // qualifier (Yeni Asır: "Son dakika İzmir haberleri...", Sabah).
+    ["Son dakika haberleri... Deprem oldu", "Deprem oldu"],
+    [
+      "Son dakika haberleri...Karabağ Zaferi 6’ncı yılında",
+      "Karabağ Zaferi 6’ncı yılında",
+    ],
+    [
+      "Son Dakika Haberleri... Türkiye, Pakistan ile anlaştı",
+      "Türkiye, Pakistan ile anlaştı",
+    ],
+    [
+      "Son dakika İzmir haberleri... İzmir Büyükşehir Belediye Başkanı konuştu",
+      "İzmir Büyükşehir Belediye Başkanı konuştu",
+    ],
+    ["SON DAKİKA HABERLERİ: zam geldi", "Zam geldi"],
+    ["Son dakika spor haberleri | Galatasaray kazandı", "Galatasaray kazandı"],
   ];
 
   const TICKER_UNCHANGED: readonly string[] = [
@@ -812,6 +829,11 @@ describe("tidySummaryText leading ticker (h22-editorial-2)", () => {
     "Galatasaray son dakika | tartışma çıktı",
     "Deprem oldu. Son dakika: yeni gelişme",
     "Son dakika",
+    // h73-ingestquality-3: no separator right after the plural, or a comma (text,
+    // exactly as for "haberi").
+    "Son dakika haberleri yayınlandı.",
+    "Son dakika haberleri, kentte yangın",
+    "Son dakika İzmir haberleri yayınlandı",
   ];
 
   it.each(TICKER_CHANGES)("rewrites %j -> %j", (input, expected) => {
@@ -935,6 +957,13 @@ describe("tidySummaryText h22 residue robustness", () => {
       "Son dakika | ".repeat(8_000),
       "Son dakika".concat(" ".repeat(100_000), "x"),
       "Son dakika".concat("!".repeat(100_000)),
+      // h73-ingestquality-3: the plural and the one-word qualifier.
+      "Son dakika haberleri | ".repeat(8_000),
+      "Son dakika İzmir haberleri | ".repeat(8_000),
+      "Son dakika".concat(" ".repeat(100_000), "haberleri x"),
+      "Son dakika İzmir".concat(" ".repeat(100_000), "haberleri x"),
+      "Son dakika ".concat("a".repeat(100_000), " haberleri x"),
+      "Son dakika ".concat("ab ".repeat(40_000), "haberleri"),
       "a. ".concat("İşte detaylar ".repeat(8_000)),
       "a. ".concat("İşte detaylar. ".repeat(8_000), "Detaylar haberimizde"),
       " ".repeat(497) + "...",
@@ -1396,6 +1425,83 @@ describe("tidySummaryText leading ticker with 'haber' and list markers (h23-live
     it("a ticker and nothing else gives ''", () => {
       expect(tidySummaryText("Son dakika haberi...")).toBe("");
       expect(tidySummaryText("SON DAKİKA HABERİNE GÖRE;")).toBe("");
+    });
+
+    // h73-ingestquality-3: "Son dakika haberleri..." (Yeni Asır, Sabah) and
+    // "Son dakika <şehir> haberleri..." (Yeni Asır "Son dakika İzmir haberleri...").
+    describe("plural 'haberleri' (h73-ingestquality-3)", () => {
+      it.each([
+        ["Son dakika haberleri... AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika haberleri: AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika haberleri! AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika haberleri | AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika haberleri. AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika haberleri… AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika haberleri; AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika haberleri:\nAFAD açıkladı", "AFAD açıkladı"],
+        ["Son  dakika   haberleri  ... AFAD açıkladı", "AFAD açıkladı"],
+        ["SON DAKİKA HABERLERİ... AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika İzmir haberleri...AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika izmir haberleri: AFAD açıkladı", "AFAD açıkladı"],
+        ["SON DAKİKA İZMİR HABERLERİ | AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika Çanakkale haberleri… AFAD açıkladı", "AFAD açıkladı"],
+        // Stacked with another ticker, either way round (at most two peel).
+        ["Son dakika haberleri... Son dakika | AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika: Son dakika İzmir haberleri... AFAD açıkladı", "AFAD açıkladı"],
+        // A list marker in front.
+        ["- Son dakika haberleri: AFAD açıkladı", "AFAD açıkladı"],
+        // The qualifier is 2 to 15 letters.
+        ["Son dakika ab haberleri: AFAD açıkladı", "AFAD açıkladı"],
+        ["Son dakika abcdefghijklmno haberleri: AFAD açıkladı", "AFAD açıkladı"],
+      ])("rewrites %j -> %j", (input, expected) => {
+        expect(tidySummaryText(input)).toBe(expected);
+      });
+
+      it.each([
+        "Son dakika haberleri yayınlandı.",
+        "Son dakika haberleri, kentte yangın",
+        "Son dakika haberleri geldi",
+        "Son dakika haberleri",
+        "Son dakika İzmir haberleri, kentte yangın",
+        "Son dakika İzmir haberleri geldi",
+        "Son dakika haberlerinde yer aldı: deprem",
+        "Son dakika haberleriyle ilgili açıklama: deprem",
+        "Son dakika haberlerimiz: deprem",
+        "Son dakikada haberleri okuyun: deprem",
+        // The qualifier is one word of 2 to 15 letters: a 1-letter, a 16-letter
+        // one, a digit run and two words are not a ticker.
+        "Son dakika a haberleri: deprem",
+        "Son dakika abcdefghijklmnop haberleri: deprem",
+        "Son dakika 2026 haberleri: deprem",
+        "Son dakika İzmir spor haberleri: deprem",
+        // Not in front.
+        "Deprem oldu. Son dakika haberleri: yeni gelişme",
+        "Galatasaray son dakika haberleri | tartışma çıktı",
+      ])("leaves %j untouched", (input) => {
+        expect(tidySummaryText(input)).toBe(input);
+      });
+
+      it("peels at most two tickers in total, plural or not", () => {
+        expect(
+          tidySummaryText("Son dakika haberleri: Son dakika İzmir haberleri: Son dakika! Deprem oldu"),
+        ).toBe("Son dakika! Deprem oldu");
+      });
+
+      it("a plural ticker and nothing else gives ''", () => {
+        expect(tidySummaryText("Son dakika haberleri...")).toBe("");
+        expect(tidySummaryText("SON DAKİKA İZMİR HABERLERİ:")).toBe("");
+      });
+
+      it("the stripped text is idempotent", () => {
+        for (const raw of [
+          "Son dakika haberleri...Karabağ Zaferi 6’ncı yılında Azerbaycan'a giden Başkan",
+          "Son dakika İzmir haberleri... İzmir Büyükşehir Belediye Başkanı konuştu",
+        ]) {
+          const once = tidySummaryText(raw);
+          expect(once).not.toMatch(/^son dakika/i);
+          expect(tidySummaryText(once)).toBe(once);
+        }
+      });
     });
   });
 

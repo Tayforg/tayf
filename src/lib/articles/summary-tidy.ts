@@ -36,8 +36,8 @@ import {
 //   - a heading line on top of the body ("Genel provanın akışı\nSinop'ta 29
 //     Ekim ..."), which the newline collapse would run on into the first sentence
 //   - a leading "Son dakika |" / "Son dakika haberi:" / "Son dakika haberine
-//     göre," / "Son dakika gelişmesi..." ticker and a leading list marker
-//     ("- ", "• ", "▪️ ")
+//     göre," / "Son dakika gelişmesi..." / "Son dakika haberleri..." / "Son dakika
+//     İzmir haberleri..." ticker and a leading list marker ("- ", "• ", "▪️ ")
 //   - a trailing "Detaylar haberimizde..." / "İşte ayrıntılar..." sentence
 //   - a "coming soon" placeholder instead of a summary: "Ayrıntılar geliyor..."
 //     / "Detaylar gelecek...", alone or as the first line of a text that goes on
@@ -554,19 +554,25 @@ export function backOffOpenQuote(
 }
 
 // ---------------------------------------------------------------------------
-// Leading noise (h22-editorial-2, h23-live-1, h24): a ticker ("Son dakika | X",
-// "Son dakika! X", "Son dakika... X", "SON DAKİKA: X", "Son dakika haberi: X",
-// "Son dakika gelişmesi... X", "Son dakika haberine göre; X", "Son dakika
+// Leading noise (h22-editorial-2, h23-live-1, h24, h73-ingestquality-3): a
+// ticker ("Son dakika | X", "Son dakika! X", "Son dakika... X", "SON DAKİKA: X",
+// "Son dakika haberi: X", "Son dakika gelişmesi... X", "Son dakika haberleri...X",
+// "Son dakika İzmir haberleri... X", "Son dakika haberine göre; X", "Son dakika
 // haberine göre, X") and a list marker ("- X", "• X", "▪️ X"). The ticker is
-// matched on the tr-TR fold (so "SON DAKİKA" folds to "son dakika") and cut from
-// the original by the match length, which is only valid while the fold kept the
-// length. A separator is required: "Son dakika golüyle ...", "Son dakikada ...",
-// "Son dakika haberi olarak duyuruldu", "Son dakika gelişmesi olarak ..." and
-// "Son dakika haberine göre kentte ..." are sentences. A comma is a separator
-// after "haberine göre" only ("Son dakika, X" and "Son dakika haberi, X" are
-// text). Same shape as TICKER_LINE in _shared/cluster/description-clean.ts,
-// anchored at the start. A marker needs blanks after it: "-5 derece" and
-// "•madde" are text.
+// matched on the tr-TR fold (so "SON DAKİKA" folds to "son dakika" and "İzmir"
+// to "izmir") and cut from the original by the match length, which is only valid
+// while the fold kept the length. The plural "haberleri" may carry one word of
+// 2 to 15 letters in front of it (a city or a desk: "Son dakika İzmir haberleri",
+// "Son dakika spor haberleri"; Yeni Asır, Sabah). A separator is required: "Son
+// dakika golüyle ...", "Son dakikada ...", "Son dakika haberi olarak duyuruldu",
+// "Son dakika haberleri yayınlandı", "Son dakika gelişmesi olarak ..." and "Son
+// dakika haberine göre kentte ..." are sentences. A comma is a separator after
+// "haberine göre" only ("Son dakika, X", "Son dakika haberi, X" and "Son dakika
+// haberleri, X" are text). Same shape as TICKER_LINE in
+// _shared/cluster/description-clean.ts (which cuts a ticker block that follows
+// the first line, a different rule), anchored at the start. A marker needs
+// blanks after it: "-5 derece" and "•madde" are text. Every quantifier is
+// bounded or sits on a single character class, so the match is linear.
 //
 // A ticker leaves a sentence that began after a comma or a colon, so its first
 // word may be lower case ("Son dakika haberine göre, kentte yangın" -> "kentte
@@ -575,7 +581,7 @@ export function backOffOpenQuote(
 // ---------------------------------------------------------------------------
 
 const LEADING_TICKER =
-  /^son\s+dak[iı]ka(?:\s+haberine\s+g[öo]re(?![\p{L}\p{N}])\s*(?:\||!+|:|;|,|[.…]+)|(?:\s+(?:haberi|geli[şs]mesi))?(?![\p{L}\p{N}])\s*(?:\||!+|:|;|[.…]+))\s*/u;
+  /^son\s+dak[iı]ka(?:\s+haberine\s+g[öo]re(?![\p{L}\p{N}])\s*(?:\||!+|:|;|,|[.…]+)|(?:\s+(?:haberi|geli[şs]mesi|haberleri|\p{L}{2,15}\s+haberleri))?(?![\p{L}\p{N}])\s*(?:\||!+|:|;|[.…]+))\s*/u;
 const ANY_LETTER = /^\p{L}$/u;
 const LOWER_LETTER = /^\p{Ll}$/u;
 /** What glues a word to the next one: "e-devlet", "tayfhaber.com", "iphone17", a combining mark. */

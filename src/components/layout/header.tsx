@@ -71,9 +71,9 @@ export function Header() {
                 logo link split its reading in browse mode. */}
             <span
               aria-hidden="true"
-              className="h-3.5 mx-0 hidden sm:block shrink-0 bg-border/40"
+              className="h-3.5 mx-0 hidden md:block shrink-0 bg-border/40"
             />
-            <span className="text-[11px] font-medium tracking-wide text-muted-foreground hidden sm:inline uppercase">
+            <span className="text-[11px] font-medium tracking-wide text-muted-foreground hidden md:inline whitespace-nowrap uppercase">
               Haber Analizi
             </span>
           </div>
