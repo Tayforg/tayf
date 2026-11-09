@@ -434,16 +434,41 @@ function linear(n: number): void {
 
 // vitest's testTimeout is wall clock, while this fixture burns CPU on a size ladder (about 1 s alone,
 // 4.8 s on a loaded CI runner, 13.4 s once, which timed out at 10 s): 60 s is 4.5x the worst run seen.
-// Sizes, ceilings and assertions are unchanged.
+// The sizes, ceiling and assertion of the quadratic loop (the one that burns that CPU) are unchanged.
+//
+// Which of these can flake on a shared runner (h89-flaky-1), and how each is kept steady:
+//   - quadratic loop must throw: runner noise only makes a rung slower, which reads as MORE super-linear, so it
+//     cannot turn the expected throw into a pass. Left as it was.
+//   - linear loop must pass: the old real-clock verdict over 2000 .. 16000 could flake. It is now a smoke test of
+//     the real CPU clock. Every rung is far under a 10 ms floor, so the detector returns after the warm-up and one
+//     sample per rung (the sub-floor early return) and never reaches the later passes, confirmation or the top
+//     extension. It does not measure real-clock false positives: it would pass a quadratic loop at these sizes too.
+//   - absolute ceiling must throw: noise only raises the reading above a 0.001 ms ceiling. Left as it was.
+//   - wall clock / injected clock: the wall part used to assert a verdict on real wall time. It now asserts that a
+//     sleep shows up in the wall clock, a lower bound that load can only widen.
+//   - asleep: asserts the CPU readings directly instead of running the detector over a long real-CPU ladder.
 describe("expectLinear with the real CPU clock", { timeout: 60_000 }, () => {
   const realSizes = [2_000, 4_000, 8_000, 16_000];
+  const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
   it("fails a deliberately quadratic loop with /super-linear/", () => {
     expect(() => expectLinear((n) => n, quadratic, { n: 16_000, sizes: realSizes, ceilingMs: 20_000, floorMs: 1 })).toThrow(/super-linear/);
   });
 
-  it("passes a linear loop", () => {
-    const report = expectLinear((n) => n, linear, { n: 16_000, sizes: realSizes, ceilingMs: 20_000, floorMs: 1 });
+  it("passes a linear loop under the noise floor (real-clock smoke test)", () => {
+    // A small ladder, every rung far under a 10 ms noise floor: about 0.15, 0.3, 0.6 and 1.2 ms of CPU per call here
+    // (1.5 ms for the top rung on the CI runner of PR #245). The old ladder (2000 .. 16000, floorMs 1, about 10 ms a
+    // call at the top) failed on that runner when the machine slowed down for seconds, 1.6x on one rung and 13x on
+    // the 32000 extension rung, which no number of samples can average out. Now a linear loop reads as super-linear
+    // only if the top rung reads 40 ms or more (3 x the floor, plus the floor), 25x or more its own cost, on every
+    // sample. What this checks is that the real CPU clock gives finite readings and that a ladder under the floor is
+    // accepted after pass 0 (the warm-up and one sample per rung). It is not evidence about real-clock false
+    // positives. At these sizes it would pass a quadratic loop too (about 0.02 .. 1 ms per call), and the later
+    // passes, confirmation and top extension never run. How the verdict scales with size is proven with a scripted
+    // clock above and with the quadratic loop below.
+    const sizes = [250, 500, 1_000, 2_000];
+    const report = expectLinear((n) => n, linear, { n: 2_000, sizes, ceilingMs: 20_000, floorMs: 10 });
+    expect(report.sizes).toEqual(sizes);
     expect(report.minMs).toHaveLength(4);
     // CPU time of the smallest rung can round to 0 ms on a fast runner (PR #237 CI):
     // only a negative or non-finite timing is wrong here.
@@ -455,25 +480,38 @@ describe("expectLinear with the real CPU clock", { timeout: 60_000 }, () => {
   });
 
   it("accepts the wall clock and an injected clock function", () => {
-    expect(() => expectLinear((n) => n, linear, { n: 800, sizes: [200, 400, 800], ceilingMs: 20_000, clock: "wall" })).not.toThrow();
+    // The wall clock counts time spent asleep, which is what tells it apart from the CPU clock: a 30 ms sleep reads at
+    // least half of it (a timer never fires early, the margin is for rounding; load only adds to it). One rung, so
+    // the verdict is only the ceiling and does not depend on how noisy the machine is.
+    const asleep = expectLinear((n) => n, () => sleep(30), { n: 1, sizes: [1], ceilingMs: 20_000, clock: "wall" });
+    expect(asleep.minMs).toHaveLength(1);
+    expect(asleep.minMs[0]).toBeGreaterThanOrEqual(15);
     let calls = 0;
     const report = expectLinear((n) => n, () => undefined, { n: 4, sizes: [1, 2, 4], ceilingMs: 100, clock: () => ++calls });
     expect(report.minMs.every((ms) => ms === 1)).toBe(true);
   });
 
   it("ignores time spent asleep: a quadratic wall-time cost on top of linear CPU work still passes", () => {
-    // Sleeping adds wall time (quadratic in n) but no CPU time, like a descheduled process.
-    const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-    expect(() =>
-      expectLinear(
-        (n) => n,
-        (n: number) => {
-          linear(n);
-          sleep((n / 2_000) ** 2);
-        },
-        { n: 16_000, sizes: realSizes, ceilingMs: 20_000, floorMs: 1 },
-      ),
-    ).not.toThrow();
+    // Every call sleeps 40, 160 and 640 ms (quadratic in n) on top of microseconds of linear CPU work. Sleeping adds
+    // wall time but no CPU time, like a descheduled process, so the CPU clock must read the work only. The signal is
+    // the readings themselves: each rung must read a small fraction of its own sleep. (This used to run the detector
+    // over 2000 .. 16000 plus a 32000 extension rung of real CPU, where a runner slowdown made a linear loop read
+    // 323 ms: PR #245.) The CPU readings are about 0.1 ms, so a slowdown would have to inflate them about 70x (the
+    // readings check) or 400x (the detector, floorMs 10) before either noticed. On a wall clock every rung reads at
+    // least its sleep and the ladder is quadratic, so the detector throws and the readings check fails (the
+    // wall-clock test above is the control that this sleep really is visible to a wall clock).
+    const sizes = [2_000, 4_000, 8_000];
+    const sleepMs = (n: number) => 40 * (n / 2_000) ** 2;
+    const report = expectLinear(
+      (n) => n,
+      (n: number) => {
+        linear(n / 100);
+        sleep(sleepMs(n));
+      },
+      { n: 8_000, sizes, ceilingMs: 20_000, floorMs: 10 },
+    );
+    expect(report.sizes).toEqual(sizes);
+    sizes.forEach((n, i) => expect(report.minMs[i], `rung ${n}`).toBeLessThan(sleepMs(n) / 5));
   });
 });
 
