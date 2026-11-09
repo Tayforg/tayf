@@ -697,7 +697,7 @@ export default async function MethodologyPage() {
             <div className={ruleCard}>
               <dt className={ruleTerm}>Başka kaynaklarla aynı başlık ve özet</dt>
               <dd className={ruleDef}>
-                {`Kaynağın kümelenen haberlerinden, ajans dağıtımı sayılan kümelerde (kaynak başına bir haber alındığında en az 3 haber ve farklı içerik parmak izi oranı en fazla %${wireRatioPct}) başlığı ve özeti başka bir kaynakla aynı olanların payı. Karşılaştırma başlık ve özetin parmak iziyle yapılır; haber gövdesi karşılaştırılmaz. Yön belirtmez: başlık ve özeti ilk yayımlayan da aynen kullanan da sayılır; ajans haberi kullanmak olağan bir yayıncılık pratiğidir. En az ${KARNE_MIN_CLUSTERS} haber kümesi gerekir.`}
+                {`Kaynağın yer aldığı haber kümelerinden, ilk haberinin başlığı ve özeti başka bir kaynağın haberiyle birebir aynı (aynı parmak izi) olanların payı. Küme büyüklüğü aranmaz; toplayıcı siteler sayılmaz. Karşılaştırma başlık ve özetin parmak iziyle yapılır; haber gövdesi karşılaştırılmaz. Yön belirtmez: başlık ve özeti ilk yayımlayan da aynen kullanan da sayılır; ajans haberi kullanmak olağan bir yayıncılık pratiğidir. En az ${KARNE_MIN_CLUSTERS} haber kümesi gerekir.`}
               </dd>
             </div>
             <div className={ruleCard}>

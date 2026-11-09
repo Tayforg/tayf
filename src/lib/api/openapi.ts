@@ -465,10 +465,15 @@ function buildSchemas(): Record<string, unknown> {
       { $ref: "#/components/schemas/Envelope" },
       {
         type: "object",
-        required: ["since", "count", "alerts"],
+        required: ["since", "count", "alerts", "truncated"],
         properties: {
           since: { type: "string", format: "date-time" },
           count: { type: "integer" },
+          truncated: {
+            type: "boolean",
+            description:
+              "True when the one_zone_silent candidate pull hit its cap of 1000 clusters (newest updated_at first), so older alerts of the since window may be missing. The 30-blindspot cap is not part of this flag.",
+          },
           alerts: {
             type: "array",
             items: { $ref: "#/components/schemas/V1Alert" },

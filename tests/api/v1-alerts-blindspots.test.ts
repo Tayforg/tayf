@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import crypto from "node:crypto";
 
+import { buildAlertRss, toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
+
 // ---------------------------------------------------------------------------
 // GET /api/v1/alerts/blindspots — keyed alert feed (JSON + RSS).
 // getBlindspots and getZoneFeedHealth are mocked; api_key_touch is driven by a
@@ -310,6 +312,87 @@ describe("GET /api/v1/alerts/blindspots", () => {
     const body = await (await get(req("?limit=2"))).json();
     expect(body.count).toBe(2);
     expect(body.alerts.map((a: { cluster_id: string }) => a.cluster_id)).toEqual(["a", "b"]);
+  });
+
+  describe("truncated flag (h103-apiv1-1)", () => {
+    /** Candidate rows the SQL returns but the one-zone-silent rule rejects (4 voting sources). */
+    const fillers = (n: number): Row[] =>
+      Array.from({ length: n }, (_, i) =>
+        mk(`f${i}`, { bias_distribution: { pro_government: 2, center: 2 }, updated_at: iso(2 * H + i * 1000) }),
+      );
+
+    it("the JSON envelope carries truncated:false for a normal pull, next to since/count/alerts", async () => {
+      db.bundles = [bundle("b1")];
+      db.rows = [mk("s1")];
+      const body = await (await get(req())).json();
+      expect(body.truncated).toBe(false);
+      expect(body.count).toBe(2);
+      for (const k of ["since", "count", "alerts", "truncated"]) expect(body).toHaveProperty(k);
+    });
+
+    it("carries truncated:false even when nothing matches", async () => {
+      const body = await (await get(req())).json();
+      expect(body.truncated).toBe(false);
+      expect(body.alerts).toEqual([]);
+    });
+
+    it("is truncated:true when the silent candidate pull comes back full (1000 rows)", async () => {
+      db.rows = [mk("s1"), ...fillers(999)];
+      const body = await (await get(req())).json();
+      expect(db.lastState).toMatchObject({ limit: 1000 });
+      expect(body.truncated).toBe(true);
+      expect(body.alerts.map((a: { cluster_id: string }) => a.cluster_id)).toEqual(["s1"]);
+      expect(body.count).toBe(1);
+    });
+
+    it("stays truncated:false at 999 candidate rows", async () => {
+      db.rows = [mk("s1"), ...fillers(998)];
+      const body = await (await get(req())).json();
+      expect(body.truncated).toBe(false);
+    });
+
+    it("is additive: every key the envelope had before is still there", async () => {
+      db.rows = [mk("s1")];
+      const body = await (await get(req())).json();
+      expect(Object.keys(body).sort()).toEqual(
+        ["alerts", "attribution", "count", "generated_at", "licence", "methodology", "since", "truncated"].sort(),
+      );
+    });
+
+    it("the JSON top-level keys equal the AlertListResponse schema's required list", async () => {
+      const { buildOpenApiDocument } = await import("@/lib/api/openapi");
+      const schema = buildOpenApiDocument("https://x.test").components.schemas.AlertListResponse as {
+        allOf: Array<{ required?: string[]; properties?: Record<string, unknown> }>;
+      };
+      const own = schema.allOf.find((p) => p.required)!;
+      db.rows = [mk("s1")];
+      const body = await (await get(req())).json();
+      expect(Object.keys(own.properties!).sort()).toEqual(["alerts", "count", "since", "truncated"]);
+      for (const k of own.required!) expect(body).toHaveProperty(k);
+    });
+
+    it("RSS bytes are unchanged: no truncated element, and a truncated pull prints exactly the same feed", async () => {
+      const row = mk("s1");
+      db.rows = [row];
+      const plain = await (await get(req("?format=rss"))).text();
+      db.rows = [row, ...fillers(999)];
+      const capped = await (await get(req("?format=rss"))).text();
+      expect(capped).toBe(plain);
+      expect(plain).not.toMatch(/truncated/i);
+      const item: AlertItem = {
+        type: "one_zone_silent",
+        clusterId: "s1",
+        title: row.title_tr,
+        firstPublished: row.first_published,
+        updatedAt: row.updated_at,
+        alertAt: row.updated_at,
+        sourceCount: 5,
+        zoneCounts: { iktidar: 3, bagimsiz: 2, muhalefet: 0 },
+        dominantZone: null,
+        silentZones: ["muhalefet"],
+      };
+      expect(plain).toBe(buildAlertRss([toV1AlertRecord(item)]));
+    });
   });
 
   it("has no ?key= parameter: a key in the query string does not authenticate", async () => {

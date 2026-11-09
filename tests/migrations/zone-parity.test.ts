@@ -508,6 +508,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "173_ops_sources_dark_persistent.sql",
       // 180 repeats 148's function body verbatim (its VALUES-list copy of BIAS_TO_ZONE in zmap) except two CTEs, one join and the HAVING of `pairs` (the rare-stem tier); pinned by tests/migrations/180-blindspot-sibling-rare-tier.test.ts
       "180_blindspot_sibling_rare_tier.sql",
+      // 189 repeats 111's source_reliability_refresh_source() body verbatim (its VALUES-list copy of BIAS_TO_ZONE in zmap) except the `wire` CTE (gone) and `copies` (any cluster size, aggregator partners excluded); its zmap text is pinned equal to 111's by tests/migrations/189-source-reliability-copy.test.ts, and 111's against BIAS_TO_ZONE by tests/migrations/111-source-reliability.test.ts
+      "189_source_reliability_copy_any_cluster.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

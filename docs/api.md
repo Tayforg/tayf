@@ -951,7 +951,13 @@ and per-day metering as every other `/api/v1` route.
   cluster first published at least 6h ago, vetoed by neither rule
   (`blindspot_recall_veto` false), not archived. Dropped
   when the silent zone's feeds are degraded; when feed health cannot be read
-  the pull feed fails open (the push webhook fails closed).
+  the pull feed fails open (the push webhook fails closed). **Candidate
+  cap**: the pull reads at most the 1000 newest candidate clusters by
+  `updated_at` (`SILENT_CANDIDATE_LIMIT`; PostgREST's own row cap is also 1000)
+  before the `alert_at` filter. A 7-day window holds about 400 candidates today
+  (2026-11-09), so every qualifying alert of the window is read with
+  about 2.5x headroom. If the pull ever comes back full, the oldest alerts of a
+  long `since` window may be missing and `truncated` (below) is `true`.
 
 "Silent" means **Tayf could not match a story from that zone**, never that
 the zone chose not to cover it. The copy avoids accusatory wording.
@@ -962,6 +968,7 @@ the zone chose not to cover it. The copy avoids accusatory wording.
   "licence": "...", "attribution": "...", "methodology": "...", "generated_at": "...",
   "since": "2026-09-28T12:00:00.000Z",
   "count": 1,
+  "truncated": false,
   "alerts": [{
     "id": "one_zone_silent:<cluster uuid>",
     "type": "one_zone_silent",
@@ -976,6 +983,11 @@ the zone chose not to cover it. The copy avoids accusatory wording.
   }]
 }
 ```
+`truncated` is always present: `true` when the `one_zone_silent` candidate
+pull returned its full 1000 rows, so older `one_zone_silent` alerts of the
+`since` window may be missing (narrow `since`, or poll more often, and read
+again); `false` otherwise. The 30-blindspot cap above is documented and is not
+part of `truncated`. RSS has no such field and its output is unchanged.
 `dominant_zone` is set for `blindspot` only. `updated_at` is the cluster's own
 last update; `alert_at` is the moment the alert qualified (formulas above) and
 is what `since` and the ordering use. If a cluster is updated after it became

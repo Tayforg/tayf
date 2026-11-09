@@ -65,23 +65,44 @@ import {
 // later run waits only for what is left (remainingMs), and a retry whose time
 // passed while hidden is dropped without refreshing.
 //
+// What counts as new (h103-timeline-1): a head row the page lacks whose
+// first_published is strictly after `floorPublished`, the page's 50th row (null
+// below 50 rows: everything unknown counts). A cluster becomes visible when its
+// second source arrives, ~39 min after first_published, so it often sorts BELOW
+// the page's newest row; only the 50th-row floor still counts it while telling it
+// from page row 51+ moving up after an archive. See countNewClusters.
+//
 // Hydration: the server and the first client render both emit the empty region
 // (the count is 0 until the poller has run in an effect), so nothing can
 // mismatch. The poll schedule, the "what is new" diff and the refresh verdict
 // live in @/lib/clusters/timeline-head, where they are unit-tested.
 
 interface NewClustersPillProps {
-  /** Newest first_published the server rendered; null when the page was empty. */
+  /**
+   * Newest first_published the server rendered; null when the page was empty.
+   * Part of the page signature (the h76 refresh verdict), not of the count.
+   */
   newestPublished: string | null;
+  /**
+   * first_published of the page's 50th row (TIMELINE_HEAD_LIMIT) when it rendered
+   * at least that many rows, else null. The count floor (h103-timeline-1): a head
+   * row the page lacks is new only when it is strictly after this; with null
+   * every unknown head row is new.
+   */
+  floorPublished: string | null;
   /** Ids of the first <= 50 rows the server rendered (the head's own window). */
   knownIds: string[];
 }
 
-// The count is tied to the page it was computed against. After a refresh that
-// really changed the page the props change, `hit.newest` no longer matches, and
-// the shown count falls back to 0 on its own; the settle step also clears it
-// explicitly. A click does NOT clear it: an unchanged page keeps its count.
-type Hit = { newest: string | null; count: number };
+// The count is tied to the page it was computed against, by the page's signature
+// (pageSignature: newest, how many ids, the ids). After a refresh that really
+// changed the page, the signature changes, `hit.sig` no longer matches, and the
+// shown count falls back to 0 on its own; the settle step also clears it
+// explicitly. The signature, not the newest row alone, because a refresh can
+// insert late rows (older than the newest) without changing the newest, and the
+// count of the old page must not outlive it. A click does NOT clear the count: an
+// unchanged page keeps it.
+type Hit = { sig: string; count: number };
 
 // One click's refresh: the page signature taken at the click, and how many
 // refreshes of it have already come back unchanged (0 = the click, 1 = the one
@@ -104,6 +125,7 @@ const readClock = () => Date.now();
 
 export function NewClustersPill({
   newestPublished,
+  floorPublished,
   knownIds,
 }: NewClustersPillProps) {
   const router = useRouter();
@@ -149,9 +171,9 @@ export function NewClustersPill({
 
   // The poller starts once; it reads the latest props through this ref so a
   // refresh does not restart it (which would also reset its cadence).
-  const latest = useRef({ newestPublished, knownIds });
+  const latest = useRef({ newestPublished, floorPublished, knownIds });
   useEffect(() => {
-    latest.current = { newestPublished, knownIds };
+    latest.current = { newestPublished, floorPublished, knownIds };
   });
 
   useEffect(() => {
@@ -162,15 +184,17 @@ export function NewClustersPill({
           headers: { accept: "application/json" },
         }).then(readHeadResponse),
       onRows: (rows) => {
-        const { newestPublished: newest, knownIds: known } = latest.current;
+        const { newestPublished: newest, floorPublished: floor, knownIds: known } =
+          latest.current;
         const count = countNewClusters(rows, {
-          newestPublished: newest,
+          floorPublished: floor,
           knownIds: new Set(known),
         });
+        const sig = pageSignature(newest, known);
         setHit((prev) =>
-          prev !== null && prev.newest === newest && prev.count === count
+          prev !== null && prev.sig === sig && prev.count === count
             ? prev
-            : { newest, count },
+            : { sig, count },
         );
       },
       isVisible: () => document.visibilityState === "visible",
@@ -234,7 +258,10 @@ export function NewClustersPill({
     return () => window.clearTimeout(timer);
   }, [settled.kind, settled.seq]);
 
-  const count = hit !== null && hit.newest === newestPublished ? hit.count : 0;
+  const count =
+    hit !== null && hit.sig === pageSignature(newestPublished, knownIds)
+      ? hit.count
+      : 0;
   const showButton = busy || (count > 0 && settled.kind !== "unchanged");
 
   return (

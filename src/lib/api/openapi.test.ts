@@ -123,4 +123,15 @@ describe("buildOpenApiDocument", () => {
     ) as { schema: { enum: string[] } };
     expect(format.schema.enum).toEqual(["json", "rss"]);
   });
+
+  it("AlertListResponse always carries a boolean truncated next to since/count/alerts (h103-apiv1-1)", () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    const schema = doc.components.schemas.AlertListResponse as {
+      allOf: Array<{ required?: string[]; properties?: Record<string, { type?: string; description?: string }> }>;
+    };
+    const own = schema.allOf.find((part) => part.required);
+    expect(own?.required).toEqual(["since", "count", "alerts", "truncated"]);
+    expect(own?.properties?.truncated?.type).toBe("boolean");
+    expect(own?.properties?.truncated?.description).toMatch(/1000/);
+  });
 });

@@ -183,13 +183,13 @@ describe("refresh replay: stale ISR copy, then the rebuilt copy (h76-timeline-1)
   it("the head makes the pill count the new clusters against the stale page, and none against the rebuilt one", () => {
     expect(
       countNewClusters(head, {
-        newestPublished: stalePage.newest,
+        floorPublished: null, // both pages hold fewer than 50 rows: no floor
         knownIds: new Set(stalePage.ids),
       }),
     ).toBe(2);
     expect(
       countNewClusters(head, {
-        newestPublished: freshPage.newest,
+        floorPublished: null,
         knownIds: new Set(freshPage.ids),
       }),
     ).toBe(0);
@@ -402,61 +402,202 @@ describe("parseTimelineHead", () => {
   });
 });
 
-describe("countNewClusters", () => {
-  const newest = new Date(T0).toISOString();
+// ---------------------------------------------------------------------------
+// h103-timeline-1: a cluster enters the feed when it reaches article_count >= 2,
+// i.e. when its second source is ingested (median 39 min after first_published).
+// So a newly visible cluster usually has a first_published OLDER than the page's
+// newest row, and the old "at or after the newest row" floor skipped it: about
+// half of all new clusters (49 of 91 in 14 h) appeared silently inside closed
+// hour sections. The floor is now the page's 50th row (the last row the head's
+// 50-row window can hold): an unknown head row newer than that is new, an older
+// one is page row 51+ moving up after an archive. Pages shorter than 50 rows
+// have no floor at all.
+// ---------------------------------------------------------------------------
 
-  it("counts unknown rows published at or after the newest the page shows", () => {
-    const head = [row(1, -5), row(2, -1), row(0, 0)];
-    // c0 is the one the page already shows; c1 and c2 are newer.
-    expect(
-      countNewClusters(head, { newestPublished: newest, knownIds: new Set(["c0"]) }),
-    ).toBe(2);
+describe("countNewClusters", () => {
+  // The page's newest row is T0; its 50th row (the floor) is 60 min before it.
+  const floor = new Date(T0 - 60 * 60_000).toISOString();
+
+  /** A head row `minutes` before T0 (negative = after it). */
+  const at = (id: string, minutes: number): TimelineHeadRow => ({
+    id,
+    first_published: new Date(T0 - minutes * 60_000).toISOString(),
   });
 
-  it("counts a tie (same first_published, unknown id) as new", () => {
-    const head = [{ id: "tie", first_published: newest }];
+  it("(a) counts a late-visible cluster: first_published older than the page's newest row but newer than its 50th", () => {
+    const head = [at("late", 20)];
     expect(
-      countNewClusters(head, { newestPublished: newest, knownIds: new Set() }),
+      countNewClusters(head, { floorPublished: floor, knownIds: new Set() }),
     ).toBe(1);
   });
 
-  it("does not count known ids, even if they are newer", () => {
-    const head = [row(1, -10)];
+  it("(a) still counts rows newer than the page's newest row", () => {
+    const head = [at("n1", -5), at("n2", -1), at("seen", 0)];
     expect(
-      countNewClusters(head, { newestPublished: newest, knownIds: new Set(["c1"]) }),
+      countNewClusters(head, { floorPublished: floor, knownIds: new Set(["seen"]) }),
+    ).toBe(2);
+  });
+
+  it("(b) does not count an unknown row older than the floor (page row 51+ surfacing after an archive)", () => {
+    const head = [at("older", 90)];
+    expect(
+      countNewClusters(head, { floorPublished: floor, knownIds: new Set() }),
     ).toBe(0);
   });
 
-  it("does not count older unknown rows (a cluster that fell out of the page)", () => {
-    const head = [row(7, 30), row(8, 60)];
+  it("(b) an archived page row: row 51 moves into the head's window and is not announced", () => {
+    // 50 page rows, one minute apart; the 50th (c49) is the floor. c10 is archived,
+    // so the head is c0..c9, c11..c49 and c50 (page row 51, unknown to the page).
+    const pageRows = Array.from({ length: 50 }, (_, i) => row(i));
+    const ids = new Set(pageRows.map((r) => r.id));
+    const headRows = [
+      ...pageRows.filter((r) => r.id !== "c10"),
+      row(50),
+    ];
+    expect(headRows).toHaveLength(50);
     expect(
-      countNewClusters(head, { newestPublished: newest, knownIds: new Set() }),
+      countNewClusters(headRows, {
+        floorPublished: pageRows[49]!.first_published,
+        knownIds: ids,
+      }),
     ).toBe(0);
   });
 
-  it("when the page is empty (newest null) every unknown row counts", () => {
+  it("(c) does not count an unknown row exactly at the floor (it may be page row 51)", () => {
+    const head = [{ id: "tie", first_published: floor }];
+    expect(
+      countNewClusters(head, { floorPublished: floor, knownIds: new Set() }),
+    ).toBe(0);
+  });
+
+  it("(c) counts a row one millisecond after the floor", () => {
+    const head = [{ id: "just", first_published: new Date(T0 - 60 * 60_000 + 1).toISOString() }];
+    expect(
+      countNewClusters(head, { floorPublished: floor, knownIds: new Set() }),
+    ).toBe(1);
+  });
+
+  it("(d) with no floor (a page shorter than 50 rows) every unknown row counts, old ones included", () => {
+    const head = [at("new", -5), at("late", 20), at("old", 600), at("ancient", 1400)];
+    expect(
+      countNewClusters(head, { floorPublished: null, knownIds: new Set() }),
+    ).toBe(4);
+  });
+
+  it("(d) when the page rendered empty every unknown row counts", () => {
     const head = [row(1), row(2), row(3)];
     expect(
-      countNewClusters(head, { newestPublished: null, knownIds: new Set(["c2"]) }),
+      countNewClusters(head, { floorPublished: null, knownIds: new Set(["c2"]) }),
     ).toBe(2);
+  });
+
+  it("(e) returns 0 rather than a false pill when the floor is unparseable", () => {
+    expect(
+      countNewClusters([at("x", -5)], { floorPublished: "garbage", knownIds: new Set() }),
+    ).toBe(0);
+    expect(
+      countNewClusters([at("x", -5)], { floorPublished: "", knownIds: new Set() }),
+    ).toBe(0);
+  });
+
+  it("(f) never counts a known id, even a newer one", () => {
+    const head = [at("c1", -10)];
+    expect(
+      countNewClusters(head, { floorPublished: floor, knownIds: new Set(["c1"]) }),
+    ).toBe(0);
+    expect(
+      countNewClusters(head, { floorPublished: null, knownIds: new Set(["c1"]) }),
+    ).toBe(0);
+  });
+
+  it("(f) counts an id once even if the head repeats it", () => {
+    const dup = at("dup", 5);
+    expect(
+      countNewClusters([dup, dup], { floorPublished: floor, knownIds: new Set() }),
+    ).toBe(1);
+    expect(
+      countNewClusters([dup, dup], { floorPublished: null, knownIds: new Set() }),
+    ).toBe(1);
   });
 
   it("returns 0 for an empty head", () => {
-    expect(countNewClusters([], { newestPublished: newest, knownIds: new Set() })).toBe(0);
-    expect(countNewClusters([], { newestPublished: null, knownIds: new Set() })).toBe(0);
+    expect(countNewClusters([], { floorPublished: floor, knownIds: new Set() })).toBe(0);
+    expect(countNewClusters([], { floorPublished: null, knownIds: new Set() })).toBe(0);
   });
 
-  it("returns 0 rather than a false pill when the page timestamp is unparseable", () => {
+  it("skips a head row whose own date is unparseable (parseTimelineHead rejects these upstream)", () => {
+    const head = [{ id: "bad", first_published: "nope" }, at("ok", 5)];
     expect(
-      countNewClusters([row(1, -5)], { newestPublished: "garbage", knownIds: new Set() }),
-    ).toBe(0);
-  });
-
-  it("counts an id once even if the head repeats it", () => {
-    const dup = row(1, -5);
-    expect(
-      countNewClusters([dup, dup], { newestPublished: newest, knownIds: new Set() }),
+      countNewClusters(head, { floorPublished: floor, knownIds: new Set() }),
     ).toBe(1);
+    expect(
+      countNewClusters(head, { floorPublished: null, knownIds: new Set() }),
+    ).toBe(1);
+  });
+
+  it("does not mutate the head or the known set", () => {
+    const head = [at("a", 5), at("b", 10)];
+    const known = new Set(["k"]);
+    countNewClusters(head, { floorPublished: floor, knownIds: known });
+    expect(head).toHaveLength(2);
+    expect([...known]).toEqual(["k"]);
+  });
+
+  // The live pair of GETs on 2026-11-09 (09:43:30Z and 09:57:44Z): the page's
+  // newest row was 07:59Z and its 50th row 05:10Z; hour sections 06:00/08:00/10:00
+  // went from 2/6/8 to 3/7/11 rows. Between the two reads 28 clusters became
+  // visible: 25 newer than the page's newest and three late ones (07:33Z, 07:30Z,
+  // 07:00:12Z) that the newest-row floor could not see.
+  describe("(g) replay of the 09:57Z case", () => {
+    const iso = (hhmm: string) => `2026-11-09T${hhmm}Z`;
+    const ms = (s: string) => Date.parse(s);
+
+    // 50 page rows from 07:59Z down to 05:10Z, evenly spaced.
+    const first = ms(iso("07:59:00"));
+    const last = ms(iso("05:10:00"));
+    const pageRows: TimelineHeadRow[] = Array.from({ length: 50 }, (_, i) => ({
+      id: `page-${i}`,
+      first_published: new Date(first - ((first - last) * i) / 49).toISOString(),
+    }));
+    const lateRows: TimelineHeadRow[] = [
+      { id: "late-0733", first_published: iso("07:33:00") },
+      { id: "late-0730", first_published: iso("07:30:00") },
+      { id: "late-070012", first_published: iso("07:00:12") },
+    ];
+    const newerRows: TimelineHeadRow[] = Array.from({ length: 25 }, (_, i) => ({
+      id: `new-${i}`,
+      first_published: new Date(ms(iso("08:00:00")) + i * 4 * 60_000).toISOString(),
+    }));
+    // The head is the first 50 rows of the new entry, newest first: the 28 new
+    // ones plus the 22 newest page rows.
+    const head = [...newerRows, ...lateRows, ...pageRows]
+      .sort((a, b) => ms(b.first_published) - ms(a.first_published))
+      .slice(0, TIMELINE_HEAD_LIMIT);
+    const knownIds = new Set(pageRows.map((r) => r.id));
+
+    it("the fixture is the shape the spec describes", () => {
+      expect(pageRows[0]?.first_published).toBe("2026-11-09T07:59:00.000Z");
+      expect(pageRows[49]?.first_published).toBe("2026-11-09T05:10:00.000Z");
+      expect(head).toHaveLength(TIMELINE_HEAD_LIMIT);
+      expect(head.filter((r) => !knownIds.has(r.id))).toHaveLength(28);
+    });
+
+    it("counts all 28 newly visible clusters, the three late ones included", () => {
+      expect(
+        countNewClusters(head, {
+          floorPublished: pageRows[49]!.first_published,
+          knownIds,
+        }),
+      ).toBe(28);
+    });
+
+    it("the old newest-row floor would have announced only the 25 newer ones", () => {
+      const newestMs = ms(pageRows[0]!.first_published);
+      const oldLogic = head.filter(
+        (r) => !knownIds.has(r.id) && ms(r.first_published) >= newestMs,
+      );
+      expect(oldLogic).toHaveLength(25);
+    });
   });
 });
 

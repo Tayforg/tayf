@@ -186,8 +186,22 @@ export function pct(num: number, den: number): number | null {
   return Math.round((100 * num) / den);
 }
 
-function share(num: number, den: number): string {
-  return `%${pct(num, den) ?? 0} (${formatCountTr(num)}/${formatCountTr(den)})`;
+/**
+ * "%12 (12/100)": the rounded whole percent with the counts it came from. The
+ * percentage never contradicts the counts (h103-sourcescores-1): a non-zero
+ * share is never printed as %0 ("<%1") and a partial share never as %100
+ * (">%99"), the same rule as the cadence row's "<0,1". No denominator prints
+ * "%0 (0/0)". Shared by the karne card and the reliability card; `pct` stays
+ * the plain rounded percent.
+ */
+export function formatShare(num: number, den: number): string {
+  const p = pct(num, den);
+  let head: string;
+  if (p === null) head = "%0";
+  else if (p === 0 && num > 0) head = "<%1";
+  else if (p === 100 && num < den) head = ">%99";
+  else head = `%${p}`;
+  return `${head} (${formatCountTr(num)}/${formatCountTr(den)})`;
 }
 
 export interface KarneZoneRow {
@@ -238,7 +252,7 @@ export function buildKarneView(
       ? ZONE_ROWS.map(({ zone, label }) => ({
           zone,
           label,
-          text: share(k.co[zone], k.nMulti),
+          text: formatShare(k.co[zone], k.nMulti),
         }))
       : null;
 
@@ -249,8 +263,8 @@ export function buildKarneView(
 
   return {
     state: "ok",
-    multiText: share(k.nMulti, k.nClusters),
-    soloText: share(k.nSolo, k.nClusters),
+    multiText: formatShare(k.nMulti, k.nClusters),
+    soloText: formatShare(k.nSolo, k.nClusters),
     zones,
     zoneHeader: `Aynı haberi yazan diğer kaynakların bölgesi (${formatCountTr(k.nMulti)} çok kaynaklı haber)`,
     zoneNote:
