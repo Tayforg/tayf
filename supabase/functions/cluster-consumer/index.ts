@@ -14,9 +14,9 @@
 //   4. cap total wall-clock work at MAX_INVOCATION_MS so we never hit the
 //      Edge Functions 400s limit
 //      (h101-e2elatency-1, migration 188) in the minutes where ingest-drain runs
-//      (UTC minute % 3 === 0) the FIRST read is a long poll, so the invocation
-//      waits for ingest's insert instead of leaving at :02 and letting the
-//      messages wait for the next minute (see planClusterWorkPoll)
+//      (UTC minute % 3 === 0) the FIRST read was meant to be a long poll (see
+//      planClusterWorkPoll); h102-pollregression-1 switched that OFF (POLL_ENABLED
+//      is false, see its comment): the plain read below is the only read
 //   5. (hunt-25 W3, migration 151) once cluster_work ran dry, read at most
 //      ATTACH_MAX_PER_DRAIN messages of the separate `cluster_attach` queue and
 //      run the deterministic, attach-only probe on them (see processAttach)
@@ -187,6 +187,29 @@ const READ_BUDGET_FLOOR_MS = 5_000;
 // of the messages waited 40-65 s for the NEXT minute's consumer. In ingest's
 // minutes the first read waits for the insert instead. Other minutes keep the
 // plain read and spend no idle wall time.
+//
+// SWITCHED OFF on 2026-11-09 (h102-pollregression-1, PR #252 regression). Measured on
+// production after cluster-consumer v51 (deployed 09:50:34Z): ingest_cycles.started_at,
+// seconds of the minute, were :00-:09 in every ingest minute before (09:33:00, 09:36:00,
+// 09:39:00, 09:42:02, 09:45:02, 09:48:00) and :13-:19 after it, or :00-:01 in the minutes
+// ingest won the race (09:51:14, 09:54:00, 09:57:13, 10:00:19, 10:03:14, 10:06:01,
+// 10:09:14). pg_net 0.20.0 sends the queued requests in batches, so the cluster-drain
+// request, held open about 13 s by two 6 s polls, keeps the ingest-drain request queued
+// behind it. When ingest wins the race the poll finds its messages in 1.3 s, which the
+// old consumer achieved in the same race anyway (it then waited behind ingest: 1.3-2.2 s
+// at 09:09, 09:12, 09:21, 09:24, 09:36, 09:39); when cluster-drain wins, its polls find
+// nothing because ingest cannot start before they end, so the messages still wait for the
+// next minute (enqueued at :17-:22, read at :00-:02).
+// Net: attach time unchanged, ingest started up to 19 s later, one PostgREST connection held
+// about 13 s in every ingest minute. The `wait` metric's fall (54.8 -> 44.6 s p50) was only
+// the enqueue moving later. Polling must stay OFF until the consumer no longer holds the
+// pg_net request open while it waits (respond first and poll inside EdgeRuntime.waitUntil,
+// or a separate trigger): a design change for a later hunt, not a flag flip. While it is
+// false the drain is call for call the pre-#252 drain (one plain readBatch per loop turn)
+// and `summary.polls` stays 0; planClusterWorkPoll, readBatchPoll and isPollRpcMissing stay
+// exported and unit-tested, and migration 188's RPC stays (service_role only, unused).
+// tests/functions/cluster-consumer.test.ts asserts this value.
+const POLL_ENABLED = false;
 const POLL_MINUTE_MODULUS = 3;              // ingest-drain's minutes: 0, 3, 6, ... of every hour (UTC)
 const POLL_SECONDS = 6;                     // one call: PostgREST's authenticator cancels a statement after 8 s (the RPC clamps to 6 as well)
 const POLL_INTERVAL_MS = 250;               // how often the database re-reads while it waits
@@ -3226,8 +3249,8 @@ interface InvocationSummary {
     top_cluster_id: string;
     top_score: number;
   }>;
-  // h101-e2elatency-1: long-poll reads of cluster_work made this invocation (0 outside
-  // ingest-drain's minutes, never more than POLL_MAX_CALLS).
+  // h101-e2elatency-1: long-poll reads of cluster_work made this invocation (never more
+  // than POLL_MAX_CALLS). Always 0 while POLL_ENABLED is false (h102-pollregression-1).
   polls: number;
   duration_ms: number;
   budgeted_out: boolean;
@@ -3365,7 +3388,8 @@ async function recordAdmission(
 
 // Seconds the NEXT cluster_work read may wait for a message (a long poll), or 0 for
 // the plain read. Pure: the clock is a parameter, so the minute rule and the budget
-// are tested without waiting.
+// are tested without waiting. Not consulted while POLL_ENABLED is false
+// (h102-pollregression-1); kept exported and unit-tested for the redesign.
 //   * only an invocation that STARTED in a UTC minute with minute % 3 === 0 polls
 //     (ingest-drain's minutes); every other minute answers 0;
 //   * at most POLL_MAX_CALLS polls per invocation; the second only while less than
@@ -3483,11 +3507,13 @@ async function drainQueue(): Promise<InvocationSummary> {
   // gate for the attach phase. A read error, the deadline or the budget leave it false.
   let clusterWorkEmpty = false;
 
-  // h101-e2elatency-1 (migration 188): in an ingest minute the first reads are long
+  // h101-e2elatency-1 (migration 188): in an ingest minute the first reads were long
   // polls. `polling` is true until a poll finds a message, the plan says stop, or the
   // RPC turns out not to exist; the plain read below is the same read as always and
   // always follows the last empty poll. Nothing here sleeps: the wait is inside the
-  // database call.
+  // database call. h102-pollregression-1: POLL_ENABLED is false, so the plan is never
+  // asked, `polling` is cleared by the first turn, and the loop below is the pre-#252
+  // loop: one readBatch per turn, `summary.polls` 0.
   let polling = true;
 
   while (true) {
@@ -3502,7 +3528,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     }
     let messages: PgmqMessage<QueueMessage>[];
     try {
-      const pollSeconds = polling
+      const pollSeconds = POLL_ENABLED && polling
         ? planClusterWorkPoll({ startedAtMs: startedAt, nowMs: Date.now(), pollsMade: summary.polls })
         : 0;
       if (pollSeconds > 0) {
