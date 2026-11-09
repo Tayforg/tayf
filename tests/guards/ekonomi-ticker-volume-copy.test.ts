@@ -59,6 +59,21 @@ describe("/ekonomi/<ticker> header volume line", () => {
   });
 });
 
+// h99-financenumbers-1: a ticker with no 5-minute bars has no intraday.day, so the header read
+// Friday's volume with no day while the quote was today's. The page falls back to the quote's own
+// session day, which makes rvolLabel name the volume's day.
+describe("/ekonomi/<ticker> header volume day (h99-financenumbers-1)", () => {
+  const page = readFileSync(PAGE, "utf8");
+
+  it("calls rvolLabel with the intraday day, falling back to quoteSessionDay(quote?.asOf)", () => {
+    expect(page).toMatch(/rvolLabel\(\s*stat\s*,\s*intraday\.day\s*\?\?\s*quoteSessionDay\(\s*quote\?\.asOf\s*\)\s*\)/);
+  });
+
+  it("imports quoteSessionDay from the session module", () => {
+    expect(page).toMatch(/import\s*\{[^}]*\bquoteSessionDay\b[^}]*\}\s*from\s*"@\/lib\/finance\/session"/);
+  });
+});
+
 describe("the 20-day volume wording has one source", () => {
   it("'20 günlük ortalamanın' appears in src/lib/finance/session.ts and nowhere else outside tests", () => {
     const offenders = walk(SRC)

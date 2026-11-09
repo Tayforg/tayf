@@ -42,6 +42,7 @@ import {
   intradayPanelMeta,
   priceEmptyLabel,
   quoteFreshness,
+  quoteSessionDay,
   rebaseQuoteOnStat,
   rvolLabel,
   rvolParts,
@@ -306,7 +307,10 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
       <NewTabHint />
     </a>
   ) : null;
-  const volume = halted ? null : rvolLabel(stat, intraday.day);
+  // h99-financenumbers-1: a ticker with no 5-minute bars has no intraday.day, so its volume was shown with no
+  // day beside a quote from a later session. The quote's own session day is the fallback: during a session the
+  // header then reads "... · 06.11 seansı" for the previous session's volume.
+  const volume = halted ? null : rvolLabel(stat, intraday.day ?? quoteSessionDay(quote?.asOf));
   // h51-morphology-2: the volume wording comes from session.ts only.
   const volumeParts = volume ? rvolParts(volume) : null;
   const metaLine = companyMetaLine(page.company);
@@ -379,9 +383,12 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                 {volume && volumeParts ? (
                   <div
                     title={`hacim ${rvolPhrase(volume)}`}
-                    className={cn("mt-0.5 text-[11px] tabular-nums", volume.rvol >= 2 ? "text-amber-400" : "text-muted-foreground")}
+                    className={cn("mt-0.5 text-[11px] tabular-nums", volume.rvol >= 2 && !volume.dayLabel ? "text-amber-400" : "text-muted-foreground")}
                   >
-                    {/* textContent: "hacim " + rvolPhrase(volume). The ratio keeps the outer (amber) colour. */}
+                    {/* textContent: "hacim " + rvolPhrase(volume). The ratio keeps the outer colour. Amber (rvol >= 2)
+                        applies only to the volume of the session on screen; a volume that carries a day label is
+                        another session's, not today's signal, so it stays muted like TickerTape
+                        (h99-financenumbers-1). */}
                     hacim <span className="text-muted-foreground">{volumeParts.basis}</span> {volumeParts.ratio}
                     {volumeParts.day ? <span className="text-muted-foreground">{` · ${volumeParts.day}`}</span> : null}
                   </div>
@@ -428,7 +435,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         <Panel title="Basın ilgisi" meta="son 30 gün, günlük haber sayısı">
           <AttentionBars days={page.attention} today={istToday()} />
         </Panel>
-        <Panel title="KAP ile basın arası" meta={windowLabel}>
+        <Panel title="KAP ile basın arası" meta={`${windowLabel} · bildirimden sonraki 48 saat`}>
           <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-5">
             <div>
               <dt className="text-muted-foreground">bildirim</dt>
@@ -452,7 +459,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
             </div>
           </dl>
           <p className="border-t border-border/70 px-3 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
-            Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. İlk haber, olaydaki ilk bildirimden sonra çıkan ilk habere göre ölçülür. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. {coverageScopeNote(page.disclosures.length, page.coverage.disclosures)}
+            Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. Basında yer bulan ve ilk haber, olaydaki ilk bildirimden sonraki 48 saat içinde çıkan haberlere göre ölçülür; daha geç haberler sayılmaz. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. {coverageScopeNote(page.disclosures.length, page.coverage.disclosures)}
           </p>
         </Panel>
       </div>

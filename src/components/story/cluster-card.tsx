@@ -11,6 +11,7 @@ import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
+import { pickHeroCandidates } from "@/lib/images/hero-candidates";
 import { headlineLang, sourceLang } from "@/lib/sources/source-language";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution } from "@/types";
@@ -390,13 +391,16 @@ export function ClusterCard({
   //   2) first article with any image
   // The politics query already pre-sorts members newest-first, so
   // `resolved[0]` is the newest.
-  // Build the FULL list of candidate hero images. The client
+  // Build the list of candidate hero images. The client
   // `ClusterCardImage` walks this array on each `onError` so a single
   // broken CDN URL doesn't collapse to the placeholder when the card
-  // has 14 other working images.
-  const heroCandidates = resolved
-    .map((a) => a.image_url)
-    .filter((u): u is string => typeof u === "string" && u.length > 0);
+  // has 14 other working images. Only the first HERO_CANDIDATE_CAP USABLE
+  // URLs are passed (h99-clientjs-1): every one is serialised into the RSC
+  // payload, a 44-member cluster used to ship 44, and the client drops the
+  // unusable ones anyway. pickHeroCandidates normalises, filters and
+  // de-duplicates exactly like ClusterCardImage does, so the hero and the
+  // fallback order within the cap are what they were.
+  const heroCandidates = pickHeroCandidates(resolved.map((a) => a.image_url));
   const heroSrc = heroCandidates[0] ?? null;
   const heroFallbacks = heroCandidates.slice(1);
   const banner = mobileBannerImageProps(index);

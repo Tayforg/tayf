@@ -14,6 +14,7 @@ import {
   marketOpen,
   priceEmptyLabel,
   quoteFreshness,
+  quoteSessionDay,
   rebaseQuoteOnStat,
   rvolLabel,
   rvolParts,
@@ -271,6 +272,53 @@ describe("rvolLabel", () => {
 
   it("keeps a zero rvol (it is a number, not missing)", () => {
     expect(rvolLabel(stat({ rvol: 0 }), "2026-10-30")).toEqual({ rvol: 0, dayLabel: null });
+  });
+});
+
+// h99-financenumbers-1: during a session the quote is today's but bist_quote_stats still
+// holds the previous session (the daily bar lands about 19:33 Istanbul), so the tape and the
+// header of a ticker with no 5-minute bars printed Friday's relative volume with no day.
+// quoteSessionDay is the session day the quote belongs to; rvolLabel then names the volume's day.
+describe("quoteSessionDay", () => {
+  it("is the Istanbul calendar day of a quote's last trade", () => {
+    expect(quoteSessionDay("2026-11-09T07:20:00Z")).toBe("2026-11-09");
+  });
+
+  it("rolls over at midnight Istanbul, not midnight UTC (21:30Z is 00:30 the next day)", () => {
+    expect(quoteSessionDay("2026-11-08T21:30:00Z")).toBe("2026-11-09");
+    expect(quoteSessionDay("2026-11-08T20:59:59Z")).toBe("2026-11-08");
+    expect(quoteSessionDay("2026-11-08T21:00:00Z")).toBe("2026-11-09");
+  });
+
+  it("reads an offset timestamp as the instant it is", () => {
+    expect(quoteSessionDay("2026-11-09T00:30:00+03:00")).toBe("2026-11-09");
+    expect(quoteSessionDay("2026-11-08T23:30:00+03:00")).toBe("2026-11-08");
+  });
+
+  it("is null for an unparsable value, null and undefined, and never throws", () => {
+    expect(quoteSessionDay("garbage")).toBeNull();
+    expect(quoteSessionDay("")).toBeNull();
+    expect(quoteSessionDay(undefined)).toBeNull();
+    expect(quoteSessionDay(null)).toBeNull();
+    expect(() => quoteSessionDay(12345 as unknown as string)).not.toThrow();
+  });
+
+  it("feeds rvolLabel: Friday's volume next to a Monday quote carries the day, a same-day pair does not", () => {
+    const friday = stat({ lastDay: "2026-11-06", rvol: 2.7 });
+    expect(rvolLabel(friday, quoteSessionDay("2026-11-09T07:20:00Z"))).toEqual({ rvol: 2.7, dayLabel: "06.11" });
+    expect(rvolLabel(friday, quoteSessionDay("2026-11-06T15:05:00Z"))).toEqual({ rvol: 2.7, dayLabel: null });
+  });
+
+  it("with no quote the volume stays unlabelled (null session day), as before", () => {
+    expect(rvolLabel(stat({ lastDay: "2026-11-06", rvol: 2.7 }), quoteSessionDay(undefined))).toEqual({
+      rvol: 2.7,
+      dayLabel: null,
+    });
+  });
+
+  it("reads 'hacim 20 günlük ortalamanın 3,0 katı · 06.11 seansı' for ACSEL during a session", () => {
+    const label = rvolLabel(stat({ ticker: "ACSEL", lastDay: "2026-11-06", rvol: 3.03 }), quoteSessionDay("2026-11-09T07:20:00Z"));
+    expect(label && rvolPhrase(label)).toBe("20 günlük ortalamanın 3,0 katı · 06.11 seansı");
   });
 });
 

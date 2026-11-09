@@ -34,9 +34,9 @@ describe("toMediaDnaSources", () => {
   const rows = Array.from({ length: 118 }, (_, i) => row(i));
   const out = toMediaDnaSources(rows);
 
-  it("keeps only id, name, slug, bias and kind on every row", () => {
+  it("keeps only name, slug, bias and kind on every row (the id was only ever a React key)", () => {
     for (const x of out) {
-      expect(Object.keys(x).sort()).toEqual(["bias", "id", "kind", "name", "slug"]);
+      expect(Object.keys(x).sort()).toEqual(["bias", "kind", "name", "slug"]);
     }
   });
 
@@ -45,7 +45,6 @@ describe("toMediaDnaSources", () => {
     out.forEach((x, i) => {
       const src = rows[i]!;
       expect(x).toEqual({
-        id: src.id,
         name: src.name,
         slug: src.slug,
         bias: src.bias,
@@ -56,6 +55,10 @@ describe("toMediaDnaSources", () => {
 
   it("serialises without any trace of the dropped columns", () => {
     const json = JSON.stringify(out);
+    // h99-clientjs-2: 118 source UUIDs used to ride the RSC payload (2.5 KB br)
+    // for a React key that the unique slug already provides.
+    expect(json).not.toContain('"id"');
+    expect(json).not.toContain("id-1");
     expect(json).not.toContain("rss_url");
     expect(json).not.toContain("logo_url");
     expect(json).not.toContain('"url"');
@@ -90,6 +93,13 @@ describe("media-dna-sources.ts module", () => {
     expect(src).not.toMatch(/["']use client["']/);
   });
 
+  it("no longer projects the id (the chart keys its chips by the unique slug)", () => {
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
+    expect(code).not.toMatch(/\bid\b/);
+  });
+
   it("copies keys explicitly instead of spreading the row", () => {
     expect(src).not.toMatch(/\.\.\.\s*s\b|\.\.\.\s*source\b|\.\.\.\s*row\b/);
   });
@@ -98,7 +108,7 @@ describe("media-dna-sources.ts module", () => {
 describe("MediaDna props", () => {
   it("takes the narrowed MediaDnaSource[] projection, not full Source rows", () => {
     expectTypeOf<ComponentProps<typeof MediaDna>["sources"]>().toEqualTypeOf<MediaDnaSource[]>();
-    expectTypeOf<MediaDnaSource>().toEqualTypeOf<Pick<Source, "id" | "name" | "slug" | "bias" | "kind">>();
+    expectTypeOf<MediaDnaSource>().toEqualTypeOf<Pick<Source, "name" | "slug" | "bias" | "kind">>();
   });
 
   it("media-dna.tsx no longer imports the Source type", () => {

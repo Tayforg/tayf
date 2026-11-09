@@ -3,6 +3,7 @@ import Link from "next/link";
 import { fmtPct, fmtPrice, fmtX, limitFlag, moveClass } from "@/lib/finance/format";
 import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
 import type { Quote } from "@/lib/finance/quotes";
+import { quoteSessionDay, rvolLabel } from "@/lib/finance/session";
 import { cn } from "@/lib/utils";
 
 import { StripFocusReveal } from "./strip-focus-reveal";
@@ -120,6 +121,10 @@ export function TickerTape({
         const stale = staleTickers?.has(t.ticker) ?? false;
         const knownMove = q != null && q.hasBaseline !== false && !stale;
         const limit = q && knownMove ? limitFlag(q.changePct, q.prevClose, q.price) : null;
+        // h99-financenumbers-1: the stat is the daily bar of stat.lastDay. During a session that is the
+        // PREVIOUS session next to today's price and move, so its volume names its day (muted, never amber:
+        // yesterday's volume is not today's signal). Without a quote there is no day to compare with.
+        const vol = s && !stale ? rvolLabel(s, quoteSessionDay(q?.asOf)) : null;
         return (
           <Link
             key={t.ticker}
@@ -141,8 +146,15 @@ export function TickerTape({
               ) : null}
               <span className="tabular-nums">{t.articles} haber</span>
               {t.ratio != null && t.ratio >= 2 ? <span className="tabular-nums text-amber-400">ilgi {fmtX(t.ratio)}</span> : null}
-              {s?.rvol != null && !stale ? (
-                <span className={cn("tabular-nums", s.rvol >= 2 ? "text-amber-400" : "")}>hacim {fmtX(s.rvol)}</span>
+              {vol ? (
+                vol.dayLabel ? (
+                  <span title={`${vol.dayLabel} seansının hacmi`} className="tabular-nums">
+                    hacim {fmtX(vol.rvol)}
+                    <span className="text-muted-foreground"> · {vol.dayLabel}</span>
+                  </span>
+                ) : (
+                  <span className={cn("tabular-nums", vol.rvol >= 2 ? "text-amber-400" : "")}>hacim {fmtX(vol.rvol)}</span>
+                )
               ) : null}
             </span>
           </Link>

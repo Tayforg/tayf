@@ -844,13 +844,13 @@ describe("honest window labels (h11-finance-3)", () => {
       totalDisclosures30d: 102,
       coverage: { disclosures: 60, events: 9, covered: 8, medianLagMinutes: 1932, pressAhead: 2 },
     });
-    expect(panelMeta(els, "KAP ile basın arası")).toBe("son 60 bildirim (30 günde 102)");
+    expect(panelMeta(els, "KAP ile basın arası")).toBe("son 60 bildirim (30 günde 102) · bildirimden sonraki 48 saat");
     expect(panelMeta(els, "KAP bildirimleri")).toBe("son 60 bildirim (30 günde 102)");
   });
 
   it("a short list keeps 'son 30 gün'", async () => {
     const els = await renderTicker("ISMEN", { disclosures: disclosures(12), totalDisclosures30d: 12 });
-    expect(panelMeta(els, "KAP ile basın arası")).toBe("son 30 gün");
+    expect(panelMeta(els, "KAP ile basın arası")).toBe("son 30 gün · bildirimden sonraki 48 saat");
     expect(panelMeta(els, "KAP bildirimleri")).toBe("son 30 gün");
   });
 
@@ -874,7 +874,7 @@ describe("honest window labels (h11-finance-3)", () => {
 
     const footnote = els.find((e) => e.type === "p" && textOfNode(e.props.children).startsWith("Aynı 24 saat"));
     expect(textOfNode(footnote?.props.children)).toBe(
-      "Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. İlk haber, olaydaki ilk bildirimden sonra çıkan ilk habere göre ölçülür. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. Bu bölüm yalnızca şirketin kendi bildirimleri üzerinden hesaplanır.",
+      "Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. Basında yer bulan ve ilk haber, olaydaki ilk bildirimden sonraki 48 saat içinde çıkan haberlere göre ölçülür; daha geç haberler sayılmaz. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. Bu bölüm yalnızca şirketin kendi bildirimleri üzerinden hesaplanır.",
     );
   });
 
@@ -1286,5 +1286,140 @@ describe("a session whose 5-minute bars were cut short (h92-marketclock-1)", () 
 
     expect(chartOf(els)).toBeUndefined();
     expect(panelMeta(els, "Seans içi")).toBe("5 dakikalık veri henüz yok");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h99-financenumbers-1: during a live session bist_quote_stats still holds the
+// previous session (the daily bar lands about 19:33 Istanbul). A ticker with no
+// 5-minute bars has no intraday day to compare the volume's day with, so the
+// header read Friday's relative volume with no day next to today's quote
+// (ACSEL "92,70 +%1,87 bugun hacim 20 gunluk ortalamanin 3,0 kati"). The page
+// falls back to the quote's own session day.
+// ---------------------------------------------------------------------------
+
+describe("the header volume line of a ticker with no 5-minute bars (h99-financenumbers-1)", () => {
+  const params = () => Promise.resolve({ ticker: "ACSEL" });
+  const acselQuote = (asOf: string) => ({
+    ACSEL: { ticker: "ACSEL", price: 92.7, prevClose: 91, changePct: 1.87, hasBaseline: true, closes: [94.05, 91, 92.7], currency: "TRY", asOf },
+  });
+  const acselStat = (lastDay: string) => ({
+    ACSEL: { ticker: "ACSEL", lastDay, lastClose: 91, prevClose: 94.05, lastVolume: 1, avgVolume20: 1, rvol: 3.03 },
+  });
+  const volumeTitle = (els: El[]) =>
+    els.map((e) => e.props.title).find((t): t is string => typeof t === "string" && t.startsWith("hacim "));
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+    stubRenderableTickerPage();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const render = async () => collectEls(await TickerPage({ params: params() }));
+
+  it("Monday 10:28 Istanbul: today's quote beside Friday's volume names the day: '... · 06.11 seansı'", async () => {
+    vi.setSystemTime(new Date("2026-11-09T07:28:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-11-09T07:20:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-06"));
+
+    const els = await render();
+
+    expect(volumeTitle(els)).toBe("hacim 20 günlük ortalamanın 3,0 katı · 06.11 seansı");
+  });
+
+  it("after the daily bar lands (the stat is today's) there is no day suffix", async () => {
+    vi.setSystemTime(new Date("2026-11-09T16:40:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-11-09T15:00:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-09"));
+
+    expect(volumeTitle(await render())).toBe("hacim 20 günlük ortalamanın 3,0 katı");
+  });
+
+  it("on the weekend the quote and the stat are the same Friday: no day suffix", async () => {
+    vi.setSystemTime(new Date("2026-11-08T09:32:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-11-06T15:00:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-06"));
+
+    expect(volumeTitle(await render())).toBe("hacim 20 günlük ortalamanın 3,0 katı");
+  });
+
+  it("a ticker WITH 5-minute bars still takes the bars' day (unchanged)", async () => {
+    vi.setSystemTime(new Date("2026-11-09T07:28:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-11-09T07:20:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-06"));
+    fetchIntradayMock.mockResolvedValue({
+      day: "2026-11-09",
+      bars: [
+        { ts: "2026-11-09T07:00:00.000Z", close: 92.5, volume: 10 },
+        { ts: "2026-11-09T07:05:00.000Z", close: 92.7, volume: 12 },
+      ],
+    });
+
+    expect(volumeTitle(await render())).toBe("hacim 20 günlük ortalamanın 3,0 katı · 06.11 seansı");
+  });
+
+  it("a halted quote (last trade days old) shows no volume at all", async () => {
+    vi.setSystemTime(new Date("2026-11-09T07:28:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-10-27T15:00:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-10-27"));
+
+    expect(volumeTitle(await render())).toBeUndefined();
+  });
+
+  it("no quote: the volume is shown for neither (no header block), and nothing throws", async () => {
+    vi.setSystemTime(new Date("2026-11-09T07:28:00Z"));
+    getQuotesMock.mockResolvedValue({});
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-06"));
+
+    expect(volumeTitle(await render())).toBeUndefined();
+  });
+
+  // The amber flag means "today's volume is unusual". It follows TickerTape: a
+  // volume read from another session (it carries a day label) is not today's
+  // signal, so the header keeps it muted (rvol 3.03 would otherwise be amber).
+  const volumeEl = (els: El[]) => els.find((e) => typeof e.props.title === "string" && e.props.title.startsWith("hacim "));
+
+  it("Monday 10:28 Istanbul: Friday's volume (it carries a day label) is not amber", async () => {
+    vi.setSystemTime(new Date("2026-11-09T07:28:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-11-09T07:20:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-06"));
+
+    const el = volumeEl(await render());
+
+    expect(el).toBeDefined();
+    expect(String(el!.props.className)).not.toContain("text-amber-400");
+    expect(String(el!.props.className)).toContain("text-muted-foreground");
+  });
+
+  it("after the daily bar lands (the stat is today's) an rvol of 2 or more stays amber", async () => {
+    vi.setSystemTime(new Date("2026-11-09T16:40:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-11-09T15:00:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-09"));
+
+    const el = volumeEl(await render());
+
+    expect(el).toBeDefined();
+    expect(String(el!.props.className)).toContain("text-amber-400");
+  });
+
+  it("a ticker WITH 5-minute bars but a stat from the previous session is not amber either", async () => {
+    vi.setSystemTime(new Date("2026-11-09T07:28:00Z"));
+    getQuotesMock.mockResolvedValue(acselQuote("2026-11-09T07:20:00Z"));
+    fetchQuoteStatsMock.mockResolvedValue(acselStat("2026-11-06"));
+    fetchIntradayMock.mockResolvedValue({
+      day: "2026-11-09",
+      bars: [
+        { ts: "2026-11-09T07:00:00.000Z", close: 92.5, volume: 10 },
+        { ts: "2026-11-09T07:05:00.000Z", close: 92.7, volume: 12 },
+      ],
+    });
+
+    const el = volumeEl(await render());
+
+    expect(el).toBeDefined();
+    expect(String(el!.props.className)).not.toContain("text-amber-400");
   });
 });

@@ -17,7 +17,7 @@ import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/ki
  *
  * Default view: only the sources in `highlightSlugs` (the outlets that
  * actually covered this cluster) — typically 3-20 chips. A toggle button
- * underneath flips to "show all 144" mode, in which non-participating
+ * underneath flips to "show the whole directory" mode, in which non-participating
  * sources keep their text and border but lose the zone tint (transparent
  * background), so the directory still reads as background context.
  *
@@ -44,9 +44,10 @@ import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/ki
 
 interface MediaDnaProps {
   /**
-   * The full source directory (all 144 outlets), narrowed to the fields this
-   * chart reads. The server page builds it with `toMediaDnaSources` so the
-   * RSC payload does not carry url / rss_url / logo_url / active.
+   * The whole source directory, narrowed to the fields this chart reads. The
+   * server page builds it with `toMediaDnaSources` so the RSC payload does not
+   * carry id / url / rss_url / logo_url / active. Chips are keyed by `slug`,
+   * which is unique per source.
    */
   sources: MediaDnaSource[];
   /** Slugs of sources that covered this cluster. Undefined → highlight all. */
@@ -97,8 +98,8 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
   const hasFilter = highlightSlugs !== undefined && highlightSlugs.size > 0;
   const [showAll, setShowAll] = useState(!hasFilter);
 
-  // Bucket every source into its zone. Done at render time — with 144
-  // sources this is cheap and we want both views (collapsed + expanded) to
+  // Bucket every source into its zone. Done at render time — over the whole
+  // directory this is cheap and we want both views (collapsed + expanded) to
   // share the same totals for the top bar and the per-zone counts.
   const byZone: Record<MediaDnaZone, MediaDnaSource[]> = {
     muhalefet: [],
@@ -146,7 +147,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
         </p>
       </div>
 
-      {/* Proportional 3-segment top bar — always reflects ALL 144 sources. */}
+      {/* Proportional 3-segment top bar — always reflects the WHOLE directory. */}
       <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-muted">
         {ZONE_ORDER.map((zone) => {
           const count = byZone[zone].length;
@@ -221,7 +222,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                     highlightSlugs.has(source.slug);
                   return (
                     <span
-                      key={source.id}
+                      key={source.slug}
                       title={`${source.name} — ${biasLabel}${
                         isVoting ? "" : ` · ${kindLabel} · yanlılık dağılımına sayılmaz`
                       }`}

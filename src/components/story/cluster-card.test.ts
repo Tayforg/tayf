@@ -5,9 +5,13 @@ import { getImageProps } from "next/image";
 import { describe, expect, it } from "vitest";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
+import { GENERATED_IMAGE_HOSTS } from "@/lib/images/remote-image-hosts.data";
 import type { BiasDistribution } from "@/types";
 
+import { ClusterCardImage } from "./cluster-card-image";
 import {
+  ClusterCard,
+  type ClusterCardArticle,
   MOBILE_BANNER_SIZES,
   SOURCE_COUNT_QUALIFIED_TITLE,
   cardSourceCountLabel,
@@ -784,5 +788,115 @@ describe("Kör nokta icon does not pulse forever (h75-motion-1)", () => {
 
   it("no card element pulses at all (the card has no loading placeholder of its own)", () => {
     expect(/animate-pulse/.test(src), "animate-pulse in cluster-card.tsx").toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h99-clientjs-1: the card used to pass EVERY member's image URL to its two
+// ClusterCardImage instances (up to 44 on the home page), all of it serialised
+// into the RSC payload although the client component normalises, filters and
+// never walks that far. The card now hands over pickHeroCandidates(...) only.
+// ClusterCard is a plain function (no hooks), so the element tree it returns is
+// inspected here without rendering anything.
+// ---------------------------------------------------------------------------
+describe("ClusterCard hero payload (h99-clientjs-1)", () => {
+  const HOST = GENERATED_IMAGE_HOSTS.find((h) => !h.includes("*"));
+  if (HOST === undefined) throw new Error("no exact host in the generated list");
+  const photo = (n: number) => `https://${HOST}/foto/${n}.jpg`;
+
+  function article(i: number, imageUrl: string | null): ClusterCardArticle {
+    return {
+      id: `a-${i}`,
+      title: `Haber ${i}`,
+      url: `https://example.com/a-${i}`,
+      image_url: imageUrl,
+      published_at: "2026-11-09T06:00:00.000Z",
+      source_id: `s-${i}`,
+      source_name: `Kaynak ${i}`,
+    };
+  }
+
+  const cluster = {
+    id: "c1",
+    title_tr: "Başlık",
+    summary_tr: "Özet",
+    bias_distribution: emptyBiasDistribution(),
+    is_blindspot: false,
+    blindspot_side: null,
+    article_count: 20,
+    first_published: "2026-11-09T05:00:00.000Z",
+    updated_at: "2026-11-09T06:00:00.000Z",
+  };
+
+  type ImageProps = { src?: string | null; srcs?: Array<string | null | undefined> };
+
+  /** Every ClusterCardImage element's props, in document order. */
+  function imagesOf(node: unknown, out: ImageProps[] = []): ImageProps[] {
+    if (Array.isArray(node)) {
+      for (const child of node) imagesOf(child, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as { type?: unknown; props?: { children?: unknown } & ImageProps };
+      if (el.type === ClusterCardImage) out.push(el.props as ImageProps);
+      if (el.props?.children !== undefined) imagesOf(el.props.children, out);
+    }
+    return out;
+  }
+
+  function cardImages(urls: Array<string | null>): ImageProps[] {
+    const articles = urls.map((u, i) => article(i, u));
+    return imagesOf(ClusterCard({ cluster, articles, sources: [] }));
+  }
+
+  it("20 members with allowed images: both instances (banner and thumbnail) get 7 srcs, and src is the first", () => {
+    const urls = Array.from({ length: 20 }, (_, i) => photo(i));
+    const images = cardImages(urls);
+
+    expect(images).toHaveLength(2);
+    for (const props of images) {
+      expect(props.src).toBe(urls[0]);
+      expect(props.srcs).toHaveLength(7);
+      expect(props.srcs).toEqual(urls.slice(1, 8));
+    }
+  });
+
+  it("drops URLs the client would drop anyway BEFORE the cap, so they never use a slot", () => {
+    const good = Array.from({ length: 10 }, (_, i) => photo(i));
+    const urls = [
+      `https://${HOST}/placeholder.gif`,
+      "https://not-listed.example/a.jpg",
+      null,
+      ...good,
+    ];
+    for (const props of cardImages(urls)) {
+      expect(props.src).toBe(good[0]);
+      expect(props.srcs).toEqual(good.slice(1, 8));
+    }
+  });
+
+  it("keeps the same hero and fallback order as before within the cap, normalised and de-duplicated", () => {
+    const a = photo(1);
+    const b = photo(2);
+    const urls = [`//${HOST}/foto/1.jpg`, a, `https://${HOST}//foto/2.jpg`, b];
+    for (const props of cardImages(urls)) {
+      expect(props.src).toBe(a);
+      expect(props.srcs).toEqual([b]);
+    }
+  });
+
+  it("a card with no usable image passes a null src and no fallbacks", () => {
+    for (const props of cardImages([null, "", `https://${HOST}/x.gif`])) {
+      expect(props.src).toBeNull();
+      expect(props.srcs).toEqual([]);
+    }
+  });
+
+  it("the serialised props are far smaller than the old every-member list", () => {
+    const urls = Array.from({ length: 44 }, (_, i) => photo(i));
+    const [banner] = cardImages(urls);
+    const now = JSON.stringify([banner?.src, banner?.srcs]).length;
+    const before = JSON.stringify([urls[0], urls.slice(1)]).length;
+    expect(now).toBeLessThan(before / 4);
   });
 });

@@ -276,6 +276,26 @@ export function rebaseQuoteOnStat(quote: Quote, stat: QuoteStat | null | undefin
 }
 
 /**
+ * The Istanbul calendar day (YYYY-MM-DD) a quote's last trade belongs to, or
+ * null for null, undefined or a value that is not a parsable instant. Never
+ * throws. This is the "session on screen" for a quote with no 5-minute bars
+ * (h99-financenumbers-1): during a session the quote is today's, while
+ * bist_quote_stats still describes the previous session until the daily bar
+ * lands (about 19:33 Istanbul), so the relative volume has to name its own day
+ * (rvolLabel(stat, quoteSessionDay(quote?.asOf))). Same day rule as
+ * rebaseQuoteOnStat.
+ */
+export function quoteSessionDay(asOf: string | null | undefined): string | null {
+  if (typeof asOf !== "string") return null;
+  const ms = Date.parse(asOf);
+  if (!Number.isFinite(ms)) return null;
+  const shifted = new Date(ms + IST_OFFSET_MS);
+  if (Number.isNaN(shifted.getTime())) return null;
+  const day = shifted.toISOString().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
+/**
  * Relative volume plus, when the volume belongs to a different day than the
  * session on screen, that day as dd.MM ("hacim 20 günlük ortalamanın 1,3 katı ·
  * 30.10 seansı"; the wording is built by rvolPhrase / rvolParts).
