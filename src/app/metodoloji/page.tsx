@@ -82,6 +82,11 @@ export const metadata: Metadata = staticPageMetadata({
 // Module scope: the CHANGELOG below quotes it as well as the Denge puanı card.
 const balancedMaxSharePct = Math.round(BALANCE_BALANCED_MAX_SHARE * 100);
 
+// h85-blindspotprecision-1 (migration 180): the sibling veto's rare-stem tier, quoted from SIBLING_VETO.
+// The Jaccard floor is a whole percent; the rare share (0.25 percent) is formatted for tr-TR ("0,25").
+const looseJaccardPct = Math.round(SIBLING_VETO.looseMinJaccard * 100);
+const rareSharePct = (SIBLING_VETO.rareMaxDocShare * 100).toLocaleString("tr-TR");
+
 // The empty framing column of an all-English cluster, without its dashes
 // ("— Türkçe kaynaklarla karşılaştırılmadı —"), so the Kaynaklar note quotes the
 // very string the cluster page prints.
@@ -427,6 +432,7 @@ export default async function MethodologyPage() {
           <p className={proseClass}>
             {`Aynı olay bazen neredeyse aynı başlıkla ikinci bir kümeye düşer.`}{" "}
             {`Bu yüzden ${SIBLING_VETO.windowHours} saat içinde yayımlanmış oy veren kaynak (haber kuruluşu ya da ajans) haberleri arasında, başka bir kümede yer alanlar da hiçbir kümeye girmemiş olanlar da dahil, başlığı büyük ölçüde örtüşenler de aranır (kümeleyici yalnızca politika ve son dakika haberlerini aldığından, karşı tarafın dünya, genel ya da yaşam kategorisinde verdiği haber çoğu zaman hiçbir kümede değildir): iki başlığın kelime kökleri karşılaştırılır (${SIBLING_VETO.tokenMinLen} harften kısa kelimeler sayılmaz, kök = kelimenin ilk ${SIBLING_VETO.stemLen} harfi); ortak köklerin sayısı en az ${SIBLING_VETO.minShared} olmalı ve iki başlıktaki tüm köklerin (ortak olanlar bir kez sayılır) en az yarısını oluşturmalı.`}{" "}
+            {`Ortak köklerin payı yarıdan azsa da en az %${looseJaccardPct} ise ve iki başlık, aranan haberlerin başlıklarının en çok %${rareSharePct}'inde geçen en az ${SIBLING_VETO.rareMinShared} seyrek kökü paylaşıyorsa (ortak köklerin sayısı yine en az ${SIBLING_VETO.looseMinShared} olmalı) haberler yine aynı olay sayılır.`}{" "}
             {`Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.`}
           </p>
           <h3

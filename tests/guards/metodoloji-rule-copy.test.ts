@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { siblingTitlesMatch, SIBLING_VETO } from "@/lib/clusters/sibling-veto";
+import { siblingTitlesMatch, siblingTitlesMatchRare, SIBLING_VETO } from "@/lib/clusters/sibling-veto";
 import {
   EXTRACTIVE_MIN_ARTICLE_COUNT,
   HEADLINE_MIN_ARTICLE_COUNT,
@@ -19,6 +19,17 @@ import {
 //    (src/lib/clusters/sibling-veto.ts), not "half of the words". The copy must
 //    talk about stems ("kök"), name the word-length and stem-length cut-offs and
 //    the shared-stem floor, and render all of them from SIBLING_VETO.
+// 3. Rare-stem tier (h85-blindspotprecision-1, migration 180). The sibling veto
+//    gained a second tier; its sentence must render the Jaccard floor, the rare
+//    share, the rare-stem floor and the shared-stem floor from SIBLING_VETO (the
+//    share through toLocaleString("tr-TR"), so it reads "0,25"), never as digits.
+//    "aranan haberler" in that sentence is the voting-source (haber kuruluşu ya da
+//    ajans) pool published within windowHours either side of the headline being
+//    checked, the one the sentence before it names: the SQL's wdf and wlim carry
+//    exactly that window and the voting-kind filter, and
+//    tests/migrations/180-blindspot-sibling-rare-tier.test.ts ("the base of the rare
+//    line is the voting-source pool in both CTEs") is the source of truth for it.
+//    The base is not the whole refresh window and does not depend on p_since.
 //
 // How: the page source is read as text (the repo does not render-test server
 // components for copy). Whitespace is collapsed first, because JSX wraps lines
@@ -56,6 +67,9 @@ const extractiveParagraph = between(headlines, "LLM kapalıyken ara bir adım ç
 
 // The sibling-veto sentence: the template literal that opens with the window.
 const siblingSentence = between(page, "{`Bu yüzden ${SIBLING_VETO.windowHours} saat", "`}");
+
+// The rare-tier sentence: the template literal that opens with "Ortak köklerin payı yarıdan azsa".
+const rareSentence = between(page, "{`Ortak köklerin payı yarıdan azsa", "`}");
 
 describe("/metodoloji Başlıklar paragraphs count articles, not sources", () => {
   it("finds the Başlıklar section and both rule paragraphs (non-vacuous)", () => {
@@ -116,6 +130,77 @@ describe("/metodoloji sibling-veto sentence describes the stem-set rule", () => 
 
   it("the word \"yarısı\" is minJaccard (0.5): change the constant and this copy must change with it", () => {
     expect(SIBLING_VETO.minJaccard).toBe(0.5);
+  });
+});
+
+describe("/metodoloji rare-tier sentence describes the rare-stem rule", () => {
+  it("finds the sentence (non-vacuous) and keeps it apart from the strict-tier sentence", () => {
+    expect(rareSentence).not.toBe("");
+    expect(siblingSentence).not.toBe("");
+    expect(rareSentence).not.toBe(siblingSentence);
+    expect(siblingSentence).not.toContain("seyrek");
+  });
+
+  it("renders the Jaccard floor, the rare share, the rare-stem floor and the shared-stem floor from SIBLING_VETO", () => {
+    expect(rareSentence).toContain("%${looseJaccardPct}");
+    expect(rareSentence).toContain("%${rareSharePct}'inde");
+    expect(rareSentence).toContain("${SIBLING_VETO.rareMinShared}");
+    expect(rareSentence).toContain("${SIBLING_VETO.looseMinShared}");
+  });
+
+  it("derives the two percentages from SIBLING_VETO, the share through toLocaleString(\"tr-TR\")", () => {
+    expect(page).toContain("const looseJaccardPct = Math.round(SIBLING_VETO.looseMinJaccard * 100);");
+    expect(page).toContain(
+      'const rareSharePct = (SIBLING_VETO.rareMaxDocShare * 100).toLocaleString("tr-TR");',
+    );
+  });
+
+  it("carries no digit literal: every number in the sentence is an interpolation", () => {
+    expect(withoutInterpolations(rareSentence)).not.toMatch(/\d/);
+  });
+
+  it('names the stems as "seyrek kök" and says the veto stays on ("aynı olay sayılır")', () => {
+    expect(rareSentence).toContain("seyrek kökü");
+    expect(rareSentence).toContain("aynı olay sayılır");
+  });
+
+  it("the numbers behind the words: 30 percent, 0,25 percent, 2 rare stems, 3 shared stems", () => {
+    expect(Math.round(SIBLING_VETO.looseMinJaccard * 100)).toBe(30);
+    expect((SIBLING_VETO.rareMaxDocShare * 100).toLocaleString("tr-TR")).toBe("0,25");
+    expect(SIBLING_VETO.rareMinShared).toBe(2);
+    expect(SIBLING_VETO.looseMinShared).toBe(3);
+  });
+});
+
+describe("the rare-tier copy is true of the code it quotes", () => {
+  // "en az %30", "en az 2 seyrek kök", "en çok %0,25'inde", "ortak köklerin sayısı yine en az 3".
+  // 3 shared + 3 own stems against 3 shared + 4 own: Jaccard exactly 0.3, strict tier false.
+  const A = "alfa beta gama delta kappa sigma";
+  const B = "alfa beta gama omega theta iota lambda";
+  const rareDf = (alfa: number, beta: number) => new Map([["alfa", alfa], ["beta", beta], ["gama", 900]]);
+
+  it("a Jaccard share under half but at least the floor matches when two shared stems are rare", () => {
+    expect(siblingTitlesMatch(A, B)).toBe(false);
+    expect(siblingTitlesMatchRare(A, B, rareDf(1, 1), 100_000)).toBe(true);
+  });
+
+  it("one rare shared stem is not enough, two are (\"en az 2 seyrek kök\")", () => {
+    expect(siblingTitlesMatchRare(A, B, rareDf(1, 900), 100_000)).toBe(false);
+    expect(siblingTitlesMatchRare(A, B, rareDf(1, 1), 100_000)).toBe(true);
+  });
+
+  it("a stem is rare up to 0,25 percent of the window's titles, inclusive (10 of 4,000, not 11)", () => {
+    expect(siblingTitlesMatchRare(A, B, rareDf(10, 10), 4000)).toBe(true);
+    expect(siblingTitlesMatchRare(A, B, rareDf(11, 11), 4000)).toBe(false);
+  });
+
+  it("the shared-stem floor stays 3 under the rare tier too (2 shared rare stems, Jaccard 0.5)", () => {
+    expect(siblingTitlesMatchRare("alfa beta gama", "alfa beta delta", rareDf(1, 1), 100_000)).toBe(false);
+  });
+
+  it("a Jaccard share just under the floor does not match (3 of 11)", () => {
+    const wide = "alfa beta gama omega theta iota lambda upsil";
+    expect(siblingTitlesMatchRare(A, wide, rareDf(1, 1), 100_000)).toBe(false);
   });
 });
 
