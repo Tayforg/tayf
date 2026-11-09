@@ -169,8 +169,11 @@ describe("/gundem index page source", () => {
   const src = read("src/app/gundem/page.tsx");
   const code = blankComments(src);
 
-  it("reads the hubs only through readAllEntityHubs (no query module, no Supabase, no cache directive)", () => {
-    expect(code).toContain("readAllEntityHubs(");
+  it("reads the hubs only through readAllEntityHubSummaries (no query module, no Supabase, no cache directive, never the full hub read)", () => {
+    expect(code).toContain("readAllEntityHubSummaries(");
+    // h94-slowroutes-1: the index prints only totals; the embed-backed full hub
+    // read is /gundem/[key]'s alone.
+    expect(code).not.toMatch(/\bgetEntityHub\b|\breadAllEntityHubs\b/);
     expect(code).not.toMatch(/supabase/i);
     expect(code).not.toMatch(/-query["']/);
     expect(code).not.toContain("next/cache");
@@ -211,11 +214,13 @@ describe("sitemap", () => {
     expect(sitemaps).not.toMatch(/RISING_ENTITIES|getEntityHub|entityHubRobots|entity-hub/);
   });
 
-  it("hub-sitemap.ts reads each hub and filters by the page's own robots predicate, uncached", () => {
-    expect(hubSitemap).toContain("getEntityHub(");
+  it("hub-sitemap.ts reads each hub's summary and filters by the page's own robots predicate, uncached", () => {
+    expect(hubSitemap).toContain("getEntityHubSummary(");
     expect(hubSitemap).toContain("entityHubRobots(");
-    // getEntityHub is a resolveCachedOrRetry getter: it must never run inside a
-    // "use cache" body (tests/guards/cache-retry-prerender.test.ts).
+    // h94-slowroutes-1: never the embed-backed full read (getEntityHub).
+    expect(hubSitemap).not.toMatch(/\bgetEntityHub\s*\(/);
+    // getEntityHubSummary is a resolveCachedOrRetry getter: it must never run
+    // inside a "use cache" body (tests/guards/cache-retry-prerender.test.ts).
     expect(hubSitemap).not.toContain("use cache");
   });
 
@@ -264,6 +269,10 @@ vi.mock("@/lib/entities/entity-hub-query", () => ({
     mocks.calls.push(key);
     return Promise.resolve(mocks.result);
   },
+  // The /gundem index reads the light summaries (h94-slowroutes-1). Always null
+  // here: the index tests below pin the fail-open list; page.test.tsx next to the
+  // page covers the counts.
+  getEntityHubSummary: () => Promise.resolve(null),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -611,8 +620,8 @@ describe("/gundem index body", () => {
     expect(indexMetadata.alternates?.canonical).toBe("/gundem");
   });
 
-  // The mocked hub read is null here (beforeEach), so this is the fail-open list:
-  // every hub a plain link, no counts. src/app/gundem/page.test.tsx covers the counts.
+  // The mocked summary read is null here, so this is the fail-open list: every
+  // hub a plain link, no counts. src/app/gundem/page.test.tsx covers the counts.
   it("renders the hero and one prefetch-off chip per entity, in vocabulary order", async () => {
     const tree = await GundemIndexPage();
     const text = pageText(tree);

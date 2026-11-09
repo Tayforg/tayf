@@ -1,6 +1,7 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
-import { tidySummaryText } from "@/lib/articles/summary-tidy";
+import { isHeadlineEcho } from "@/lib/articles/description-boilerplate";
+import { isUnmarkedClamp, tidySummaryText } from "@/lib/articles/summary-tidy";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { sourceLang } from "@/lib/sources/source-language";
 import type { SummaryMember } from "./summary-attribution";
@@ -109,6 +110,38 @@ import type { SummaryMember } from "./summary-attribution";
 //   - an OPINION MEMBER is never a replacement, for any seed: a Sabah or A Haber
 //     mirror of the same column covers the headline as well as the original does.
 // Lexical and linear like the rest: the URL path is the outlet's own word for it.
+//
+// h95-summaries-1: the seed's FORM, second pass. Five more shapes were kept because
+// they were never looked at, and a sixth because the bar for the replacement was set
+// for a seed that is fine:
+//   - a LIVE-BLOG LINE ("Cumhurbaşkanı Erdoğan, TRT World Forum 2026 Resmi Açılış
+//     Töreni'nde açıklamalarda bulunuyor.": 11 of 985 clusters of a week, 29 sources
+//     under the biggest): one sentence that says someone is speaking and nothing of
+//     what they said (`isLiveLine`). A seed that is one is 'live'; a member that is one
+//     never stands in for the seed ('live' in `summaryDefect`: 459a7b61 had swapped to
+//     Haber7's line);
+//   - a TEASER seed: the text opens with "Peki" / "İşte" and the tidy step has nothing
+//     in front of it to end the text on ('teaser');
+//   - an ECHO: the description is the member's own headline (Korkusuz ships the title as
+//     its description) or the cluster's title again ('echo'). A candidate that is one is
+//     never picked, for any seed;
+//   - a SURNAME that hid a stub: `hasFiniteVerb` read "Kurtulmuş" as a reported past
+//     ("kurtul-muş") and called dd5535a7's cut sentence complete, so a capitalised word
+//     that does not open a sentence is no longer a verb;
+//   - a CUT WITH NO ELLIPSIS (a text of exactly 400 or 500 characters that ends in a
+//     letter or a comma, ABC Haber: "... yeni kanun hazırlığı h"): the tidy step backs
+//     it off to a sentence end like the marked clamp, and when no sentence end exists it
+//     is cut at a word with "…" and is a stub (`isUnmarkedClamp`);
+//   - THE FLOOR. Every clean replacement had to score AGREEMENT_HIGH (0.75), also when
+//     the seed was thrown out for its form. On a live line the other members' texts are
+//     as short as the seed's and score alike (b04edded: seed 0.33, Aydınlık 0.67; dd5535a7:
+//     0.0 against 0.67; f1837ee1: 0.6 against 0.7), so none could pass. For a seed that is
+//     a form defect (stub, quotes, live, teaser, echo) a replacement needs
+//     AGREEMENT_FORM_DEFECT_MIN (0.6) instead; an opinion or a stale seed keeps 0.75, as
+//     the gate for those two is about what they say, not how they look. 85ef184c (29
+//     sources, every candidate 0.4) stays as it is: the documented residual. With no
+//     qualifying member the seed stays, never blank.
+// A clean seed that scores 0.5 or more is still never replaced.
 
 /** A seed scoring below this disagrees with the title (exclusive: 0.5 is kept). */
 export const AGREEMENT_LOW = 0.5;
@@ -116,6 +149,16 @@ export const AGREEMENT_LOW = 0.5;
 export const AGREEMENT_HIGH = 0.75;
 /** A replacement must beat the seed by at least this much (inclusive). */
 export const AGREEMENT_MIN_GAIN = 0.3;
+/**
+ * A replacement must score at least this (inclusive) when the seed is a form defect
+ * ({@link SeedDefect}: a stub, unbalanced quotes, a live line, a teaser or an echo)
+ * instead of {@link AGREEMENT_HIGH}. In the replay of the 1,600 newest clusters of 3
+ * members or more, the clean replacements behind a live line scored 0.6 to 0.7 against
+ * the headline (the live lines of the other outlets carry the same words and are not
+ * candidates), and none reached 0.75. 0.6 is three of five title stems, the smallest
+ * share that is more than half; a judgement, not a measured boundary.
+ */
+export const AGREEMENT_FORM_DEFECT_MIN = 0.6;
 /** A title with fewer content tokens carries no signal: the seed is kept. */
 export const AGREEMENT_MIN_TITLE_TOKENS = 3;
 /** A replacement's tidied text must be at least this long (no stubs, no headlines). */
@@ -329,21 +372,28 @@ function disagrees(seedScore: number): boolean {
  *
  * `seedMalformed` (h34-reader-4: the seed is a feed-cut stub or has unbalanced
  * quotes, see {@link seedDisqualified}) takes the seed's score out of it: only the
- * candidate's {@link AGREEMENT_HIGH} is left. The seed is replaced for its form,
- * so its ceiling and the gain over it no longer apply. Default false.
+ * candidate's `floor` is left. The seed is replaced for its form, so its ceiling and
+ * the gain over it no longer apply. Default false.
+ *
+ * `floor` (h95-summaries-1) is the least the candidate may score, inclusive; the
+ * default is {@link AGREEMENT_HIGH}. The caller passes
+ * {@link AGREEMENT_FORM_DEFECT_MIN} for a seed that is a form defect. A floor applies
+ * to a well-formed seed too (the ceiling and the gain still do), but the caller never
+ * lowers it for one.
  */
 export function agreementSwitches(
   seedScore: number | null,
   candidateScore: number | null,
   seedMalformed = false,
+  floor = AGREEMENT_HIGH,
 ): boolean {
   if (seedScore === null || candidateScore === null) return false;
-  if (candidateScore < AGREEMENT_HIGH - EPSILON) return false;
+  if (candidateScore < floor - EPSILON) return false;
   if (seedMalformed) return true;
   return disagrees(seedScore) && candidateScore - seedScore >= AGREEMENT_MIN_GAIN - EPSILON;
 }
 
-export type SummaryDefect = "stub" | "teaser" | "dateline" | "run-on";
+export type SummaryDefect = "stub" | "teaser" | "dateline" | "run-on" | "live";
 
 const CLOSERS = new Set(['"', "”", "»", "’", "'", ")", "]"]);
 
@@ -406,6 +456,77 @@ function isRunOn(shown: string): boolean {
   return false;
 }
 
+// A live-blog line (h95-summaries-1): "Cumhurbaşkanı Erdoğan, TRT World Forum 2026
+// Resmi Açılış Töreni'nde açıklamalarda bulunuyor." Folded spelling (no diacritics,
+// "ı" as "i"). The predicate is the END of the line: "açıklamalarda bulunuyor" /
+// "açıklama yapıyor" (either optionally "önemli"), "konuşuyor", "konuşma yapıyor",
+// "yanıtlıyor" / "cevaplıyor" (optionally "soruları"). A past tense ("konuştu") is a
+// report, not a live line.
+const LIVE_PREDICATE =
+  /(?:^|\s)(?:(?:onemli\s+)?(?:aciklamalarda\s+bulunuyor|aciklama\s+yapiyor)|konusuyor|konusma\s+yapiyor|(?:sorulari\s+)?(?:yanitliyor|cevapliyor))$/u;
+/** A live line is one short sentence: at most this many characters (inclusive). */
+const LIVE_MAX_CHARS = 160;
+const TRAILING_LIVE_MARKS = /[\s.!…]+$/u;
+// An event's name is not what is said at it: a quoted name whose closing mark is
+// glued to a case suffix ('"12. Türk Tıp Dünyası Kurultayı ... Töreni"nde', "'...
+// Töreni'nde", “...”nde), a year ("TRT World Forum 2026") and an ordinal ("12. Türk").
+// The opener must not follow a letter or a digit (an apostrophe in a word is no quote).
+// A quotation that is followed by a blank, a comma or "diyerek" is a speaker's words
+// and stays, so the check for a quote mark below still fails it.
+const QUOTED_EVENT_NAME = /(?<![\p{L}\p{N}])["“«„'‘][^"“”«»„‘’]{1,120}?["”»’'](?=\p{L})/gu;
+const YEAR = /(?<![\p{N}])(?:19|20)\d{2}(?![\p{N}])/gu;
+const ORDINAL = /(?<![\p{N}.,])\d{1,3}\.(?=\s+\p{Lu})/gu;
+const QUOTE_MARKS = /["“”«»„‘]/u;
+const ANY_DIGIT = /\p{N}/u;
+/** Clause separators that open a second statement. */
+const SECOND_CLAUSE_MARKS = /[;:]/u;
+
+/** True when `text` holds a sentence end (". ! ? …" and closing marks, then a blank) that is not an abbreviation's, an initial's or an ordinal's dot. */
+function hasSentenceEnd(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (!SENTENCE_END_MARKS.has(text.charAt(i))) continue;
+    let end = i + 1;
+    while (end < text.length && CLOSERS.has(text.charAt(end))) end++;
+    if (end >= text.length || text.charAt(end).trim() !== "") continue;
+    if (text.charAt(i) === "." && isNonSentenceDot(text, i)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * True for a live-blog line (h95-summaries-1): ONE sentence of at most 160 characters
+ * whose final predicate says someone is speaking and nothing of what is said:
+ * "açıklamalarda bulunuyor", "açıklama yapıyor" (both optionally "önemli"),
+ * "konuşuyor", "konuşma yapıyor", "(soruları) yanıtlıyor" or "cevaplıyor", with a
+ * trailing "." / "..." / "…" or none. Not a live line: a past tense, a second sentence
+ * or clause (a ";" or ":", or a finite verb in front of the predicate: "toplantıyı açtı
+ * ve konuşuyor"), a question, a figure, a quotation that is not an event's name, a cut
+ * inside the predicate. `shown` is the tidied text.
+ *
+ * The three things that read as a figure or a quotation and are not: a year ("TRT World
+ * Forum 2026"), an ordinal ("12. Türk Tıp Dünyası Kurultayı") and a quoted event name
+ * whose closing mark is glued to its suffix ("... Töreni"nde konuşuyor"), are taken
+ * out before the digit and quote-mark test, so the lines of 85ef184c and b04edded are
+ * live lines; "yüzde 30" and `"enflasyon düşecek" diyerek` are not. Lexical, one pass
+ * plus one regular expression per step, no nested quantifier. Never throws.
+ */
+export function isLiveLine(shown: string): boolean {
+  if (typeof shown !== "string") return false;
+  const text = shown.trim();
+  if (text === "" || text.length > LIVE_MAX_CHARS) return false;
+  const core = text.replace(TRAILING_LIVE_MARKS, "");
+  const named = core.replace(QUOTED_EVENT_NAME, " ").replace(YEAR, " ").replace(ORDINAL, " ");
+  if (ANY_DIGIT.test(named) || QUOTE_MARKS.test(named) || SECOND_CLAUSE_MARKS.test(named)) return false;
+  const folded = fold(named);
+  // The index of the predicate in `named` is the index in `folded` only when the fold kept the length.
+  if (folded.length !== named.length) return false;
+  const predicate = LIVE_PREDICATE.exec(folded);
+  if (predicate === null) return false;
+  if (hasSentenceEnd(named)) return false;
+  return !hasFiniteVerb(named.slice(0, predicate.index));
+}
+
 /**
  * Why a description is not fit to stand in for the seed, or null. `raw` is the
  * member's repaired, trimmed description and `shown` its tidied form
@@ -415,8 +536,11 @@ function isRunOn(shown: string): boolean {
  *   - "dateline": an agency or all-caps place lead ("İSTANBUL (Medyascope) –") in
  *     the shown text or in the raw one (the tidy step strips most leads from
  *     `shown`, h81-textclean-2, so the raw text is what still carries it);
- *   - "run-on": its first five words come again later (a title glued to the body).
- * Never throws.
+ *   - "run-on": its first five words come again later (a title glued to the body);
+ *   - "live": a live-blog line ({@link isLiveLine}, h95-summaries-1): it says that
+ *     someone is speaking and nothing of what is said.
+ * An echo of a headline needs the headlines and is checked by the caller
+ * ({@link findAgreeingMember}). Never throws.
  */
 export function summaryDefect(raw: string, shown: string): SummaryDefect | null {
   if (typeof raw !== "string" || typeof shown !== "string") return null;
@@ -424,6 +548,7 @@ export function summaryDefect(raw: string, shown: string): SummaryDefect | null 
   if (isTeaser(shown)) return "teaser";
   if (hasDatelineLead(shown) || hasDatelineLead(raw.trim())) return "dateline";
   if (isRunOn(shown)) return "run-on";
+  if (isLiveLine(shown)) return "live";
   return null;
 }
 
@@ -527,15 +652,42 @@ function isFiniteVerbForm(word: string): boolean {
   return false;
 }
 
+// The words of a text with the marks that open a sentence or a clause (h95-summaries-1).
+const WORD_OR_OPENING_MARK = /[\p{L}\p{N}\p{M}]+|[.!?…:"“«‘„]/gu;
+const STARTS_WITH_WORD = /^[\p{L}\p{N}\p{M}]/u;
+const STARTS_UPPER = /^\p{Lu}/u;
+const HAS_LOWER = /\p{Ll}/u;
+
 /**
  * True when some word of `text` ends in a Turkish finite verb form (past,
  * reported past, progressive, future, necessity, possibility, copula, "var/yok").
  * Lexical and one pass: see {@link FINITE_ENDINGS} for what it takes and leaves.
  * Never throws; false for a non-string.
+ *
+ * h95-summaries-1: a CAPITALISED word that does not open a sentence is a name, never
+ * a verb: dd5535a7's cut sentence "..., TBMM Numan Kurtulmuş, Cumhurbaşkanı Yardımcısı
+ * Cevdet Yılmaz, Yeni Parti Genel Başkanı..." held "Kurtulmuş" ("kurtul-muş", a
+ * reported past) and passed for a complete sentence. A word opens a sentence at the
+ * start of the text and after ". ! ? …", and opens a clause after ":" or an opening
+ * quotation mark, so "Bakan Yılmaz: Kazandık" still has its verb. A word counts as
+ * capitalised when it starts with a capital and has a lower-case letter in it: an
+ * ALL-CAPS headline ("ERDOĞAN GÜNEY KORE'DEN AYRILDI") has no names to tell apart and
+ * keeps being read whole.
  */
 export function hasFiniteVerb(text: string): boolean {
   if (typeof text !== "string") return false;
-  for (const w of words(text)) if (isFiniteVerbForm(w)) return true;
+  let opens = true;
+  for (const m of text.replace(APOSTROPHE_SUFFIX, " ").matchAll(WORD_OR_OPENING_MARK)) {
+    const token = m[0];
+    if (!STARTS_WITH_WORD.test(token)) {
+      opens = true;
+      continue;
+    }
+    const name = !opens && STARTS_UPPER.test(token) && HAS_LOWER.test(token);
+    opens = false;
+    if (name) continue;
+    if (isFiniteVerbForm(fold(token))) return true;
+  }
   return false;
 }
 
@@ -590,10 +742,16 @@ function lastSentence(shown: string): string {
  * verb. Not a stub: a tidied text that no longer ends in a cut (the 500-character
  * clamp the tidy step cut back to a sentence end), or a sentence that is complete
  * and only trails off (`... hedefliyoruz"…`).
+ *
+ * h95-summaries-1: a 400 or 500 character raw text with no ellipsis that ends in a
+ * letter or a comma ({@link isUnmarkedClamp}) was cut by its outlet. The tidy step
+ * backs it off to a sentence end when there is one (no cut is left to see); when none
+ * exists it ends in "…" after a word cut, and that text is a stub whatever its last
+ * sentence holds: the verb in it belongs to a sentence the cut took the end of.
  */
 function isCutStub(raw: string, shown: string): boolean {
   if (!endsCut(shown)) return false;
-  return isFeedCapCut(raw) || !hasFiniteVerb(lastSentence(shown));
+  return isFeedCapCut(raw) || isUnmarkedClamp(raw) || !hasFiniteVerb(lastSentence(shown));
 }
 
 /**
@@ -614,23 +772,44 @@ function unbalancedQuotes(s: string): boolean {
   return straight % 2 === 1 || curly !== 0;
 }
 
-export type SeedDefect = "stub" | "quotes";
+export type SeedDefect = "stub" | "quotes" | "live" | "teaser" | "echo";
+
+/** A text that opens with "Peki" or "İşte" as a whole word (the folded COME_ON rule, anchored at the start). */
+const OPENS_WITH_COME_ON = /^(?:peki|iste)(?![\p{L}\p{N}])/u;
+
+/** The headlines a seed's shown text may only be repeating: its own article's, and the cluster's (h95-summaries-1). */
+export interface SeedTitles {
+  memberTitle?: string | null;
+  clusterTitle?: string | null;
+}
 
 /**
  * Why a seed is not fit to stay on the page whatever it covers of the headline, or
- * null (h34-reader-4). `raw` is the seed's repaired, trimmed description and
- * `shown` its tidied form (`tidySummaryText`), which is what the page would show.
- * Checked in this order, the first that applies is returned:
+ * null (h34-reader-4, h95-summaries-1). `raw` is the seed's repaired, trimmed
+ * description and `shown` its tidied form (`tidySummaryText`), which is what the page
+ * would show. Checked in this order, the first that applies is returned:
  *   - "stub": a feed cut it (see {@link isCutStub}): the shown text ends in "..."
- *     or "…" and the raw text is a known feed-cap cut or the last sentence has no
- *     finite verb ({@link hasFiniteVerb});
- *   - "quotes": the shown text has an odd number of straight " or unequal “ and ”.
- * Never throws.
+ *     or "…" and the raw text is a known feed-cap cut, an unmarked 400 / 500
+ *     character cut or the last sentence has no finite verb ({@link hasFiniteVerb});
+ *   - "quotes": the shown text has an odd number of straight " or unequal “ and ”;
+ *   - "live": a live-blog line ({@link isLiveLine});
+ *   - "teaser": the shown text OPENS with Peki / İşte (the tidy step cuts a come-on
+ *     that has a complete sentence in front of it, so what is left is one with nothing
+ *     to cut);
+ *   - "echo": the shown text only repeats a headline: the seed article's own
+ *     (`titles.memberTitle`) or the cluster's (`titles.clusterTitle`), compared with
+ *     `isHeadlineEcho` (case, blanks, trailing marks and a cut-off "…" do not matter).
+ *     Without `titles` there is nothing to echo.
+ * Every one of them is a form defect: the replacement needs
+ * {@link AGREEMENT_FORM_DEFECT_MIN}, not {@link AGREEMENT_HIGH}. Never throws.
  */
-export function seedDisqualified(raw: string, shown: string): SeedDefect | null {
+export function seedDisqualified(raw: string, shown: string, titles: SeedTitles = {}): SeedDefect | null {
   if (typeof raw !== "string" || typeof shown !== "string") return null;
   if (isCutStub(raw, shown)) return "stub";
   if (unbalancedQuotes(shown)) return "quotes";
+  if (isLiveLine(shown)) return "live";
+  if (OPENS_WITH_COME_ON.test(fold(shown.trimStart()))) return "teaser";
+  if (isHeadlineEcho(titles.memberTitle, shown) || isHeadlineEcho(titles.clusterTitle, shown)) return "echo";
   return null;
 }
 
@@ -817,9 +996,14 @@ function byNewest(a: Scored, b: Scored): number {
  *     near copy of one either ({@link AGENCY_COPY_OVERLAP}: a phrase dropped, a
  *     word changed, a CTA tail added still leave the agency's words);
  *   - its tidied text is at least {@link AGREEMENT_MIN_CHARS} long and has no
- *     {@link summaryDefect};
- *   - its score passes {@link agreementSwitches}. Behind a clean seed a copy of the
- *     seed's text scores what the seed scores, so it can never pass.
+ *     {@link summaryDefect} (a live-blog line included, h95-summaries-1);
+ *   - its tidied text is not an echo of a headline: its own article's title
+ *     (`member.article.title`, absent on a lighter projection) or the cluster title
+ *     (`isHeadlineEcho`, h95-summaries-1);
+ *   - its score passes {@link agreementSwitches}, with the floor of the seed's defect:
+ *     {@link AGREEMENT_FORM_DEFECT_MIN} behind a stub, quotes, a live line, a teaser or an
+ *     echo ({@link seedDisqualified}), {@link AGREEMENT_HIGH} otherwise. Behind a clean
+ *     seed a copy of the seed's text scores what the seed scores, so it can never pass.
  * Among the qualifiers the highest score wins and a tie goes to the newest; the
  * outlet name, ascending in Turkish order, settles the same instant, so the pick
  * never depends on the member order. Members with the same text count once and
@@ -851,8 +1035,15 @@ export function findAgreeingMember({
   // (h54-editorial-3): it is replaced for what it is, whatever it covers.
   const opinionSeed = isOpinionUrl(seed.article.url);
   // A malformed, an opinion or a stale seed is replaced for what it is, not for what
-  // it covers: its score and the gain over it no longer apply.
-  const malformed = seedDisqualified(seedRaw, seedShown) !== null || stale || opinionSeed;
+  // it covers: its score and the gain over it no longer apply. A form defect (stub,
+  // quotes, live, teaser, echo) also lowers the bar for the replacement (h95-
+  // summaries-1); an opinion or a stale seed keeps AGREEMENT_HIGH.
+  const defect = seedDisqualified(seedRaw, seedShown, {
+    memberTitle: seed.article.title,
+    clusterTitle: title,
+  });
+  const malformed = defect !== null || stale || opinionSeed;
+  const floor = defect !== null ? AGREEMENT_FORM_DEFECT_MIN : AGREEMENT_HIGH;
   if (!malformed && !disagrees(seedScore)) return null;
 
   const texts = members.map((m) => repairEntityResidue(m.article.description ?? "").trim());
@@ -910,6 +1101,9 @@ export function findAgreeingMember({
     const shown = tidySummaryText(raw);
     if (shown.length < AGREEMENT_MIN_CHARS) return;
     if (summaryDefect(raw, shown) !== null) return;
+    // A description that is only a headline says nothing the page does not (h95-
+    // summaries-1): the member's own, or the cluster's, for every seed.
+    if (isHeadlineEcho(m.article.title, shown) || isHeadlineEcho(title, shown)) return;
     // A malformed seed is not held back by the gain, so its own words under
     // another outlet's name must be kept out here, and so must a text that is
     // malformed in the same way.
@@ -920,7 +1114,7 @@ export function findAgreeingMember({
     // (`!stageBehindTitle`), so that second test of the rule needs no call of its own.
     if (stale && !statesAll(families, shown)) return;
     const score = coverage(stems, shown);
-    if (!agreementSwitches(seedScore, score, malformed)) return;
+    if (!agreementSwitches(seedScore, score, malformed, floor)) return;
     if (isAgencyCopy(shown)) return;
 
     const t = Date.parse(m.article.published_at);

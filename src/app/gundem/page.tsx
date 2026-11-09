@@ -10,7 +10,7 @@ import {
   buildClusterCollectionPage,
   serializeJsonLd,
 } from "@/lib/seo/json-ld";
-import { readAllEntityHubs } from "@/lib/seo/hub-sitemap";
+import { readAllEntityHubSummaries } from "@/lib/seo/hub-sitemap";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
@@ -19,9 +19,9 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 // h43-entities-3. The index used to link all 62 hubs from the static
 // vocabulary, but 8 of them were noindex and 4 were empty ("Son 14 günde bu
 // konuda küme yok."), so a reader (and a crawler) was sent to dead ends. It now
-// reads every hub through readAllEntityHubs (the 62 per-key cache entries the
-// hubs share with /gundem/[key] and the hubs sitemap, so a warm page costs no
-// extra query):
+// reads every hub through readAllEntityHubSummaries (the 62 per-key summary
+// cache entries it shares with the hubs sitemap, so a warm page costs no extra
+// query):
 //   * a hub with at least one cluster stays a link and shows the count
 //     ("DEVA · 17 küme"); a thin hub (1-2 clusters, noindex) is still worth
 //     opening, it just is not in the sitemap;
@@ -35,8 +35,15 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 //     today's static list of 62 plain links, so a reader outage can never
 //     hide a hub that has news. "Failed" is never read as "empty".
 // The reads happen at page level, outside any "use cache" function
-// (tests/guards/cache-retry-prerender.test.ts): getEntityHub's live retry awaits
-// connection(), which fails `next build` inside a cache body.
+// (tests/guards/cache-retry-prerender.test.ts): getEntityHubSummary's live retry
+// awaits connection(), which fails `next build` inside a cache body.
+//
+// h94-slowroutes-1. The index prints only `hub.total`, but it used to build all
+// 62 FULL hubs (the entity_cluster_ids_v3 RPC plus a CLUSTER_EMBED_SELECT of up to
+// 20 clusters each): cold builds took 4.4-6.4 s and every Googlebot request
+// waited 1.3-4.1 s. It now reads getEntityHubSummary, the same RPC and the same
+// `total` with one lean member-count read instead of the embed, so the page
+// output is unchanged. /gundem/[key] keeps the full getEntityHub.
 //
 // The CollectionPage JSON-LD lists the hubs the page links (all 62 on the
 // fail-open list), so the structured data never names a page the visible list
@@ -66,9 +73,9 @@ const emptyChipClass =
  * the first batch holding a failure) counts as failed too.
  */
 async function readHubTotals(): Promise<ReadonlyMap<string, number> | null> {
-  let hubs: Awaited<ReturnType<typeof readAllEntityHubs>>;
+  let hubs: Awaited<ReturnType<typeof readAllEntityHubSummaries>>;
   try {
-    hubs = await readAllEntityHubs();
+    hubs = await readAllEntityHubSummaries();
   } catch (err) {
     // Fail open on a data error, but never swallow Next's own control flow
     // (a prerender postponement, for one).

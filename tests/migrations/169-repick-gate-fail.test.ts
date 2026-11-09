@@ -492,13 +492,14 @@ describe("169 neutral_title_repick_gate_fail: additive, no data is written", () 
     expect(inserts).toEqual([LEDGER_STMT.slice(0, -1)]);
   });
 
-  it("does not bump EXTRACTIVE_MODEL_ID (the v6 heal is running) and the cron is unchanged apart from comments", () => {
+  it("does not bump EXTRACTIVE_MODEL_ID (the v6 heal is running) and the cron still re-picks with the stored title as the incumbent", () => {
     const ts = readFileSync(NEUTRAL_TITLE_TS, "utf8");
     expect(ts).toContain('export const EXTRACTIVE_MODEL_ID = "extractive-v6";');
     const route = readFileSync(HEADLINE_ROUTE, "utf8");
-    // the call and the incumbent are the ones 141/155/162 rely on
+    // the call and the incumbent are the ones 141/155/162 rely on (migration 184 adds { floor } for a gate-failing
+    // stored title: tests/migrations/184-repick-young-shout.test.ts pins the call)
     expect(route).toContain('"neutral_title_repick_candidates"');
-    expect(route).toContain("pickNeutralTitle(items, { incumbent: r.title_tr_neutral })");
+    expect(route).toContain("pickNeutralTitle(items, { incumbent: r.title_tr_neutral, floor: storedFailsGate })");
     expect(route).toContain("title_neutral_member_count: memberCountStamp(r.article_count)");
   });
 

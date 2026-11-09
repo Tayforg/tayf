@@ -2,12 +2,14 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  ATTRIBUTION_LOSS_PENALTY,
   EXTRACTIVE_MODEL_ID,
   FULL_LENGTH_TITLE_CHARS,
   HEDGE_LOSS_PENALTY,
   QUALIFIER_LOSS_PENALTY,
   REPICK_MARGIN,
   REPICK_MARGIN_FULL_LENGTH,
+  UNATTRIBUTED_VOICE_PENALTY,
   carriesHedge,
   carriesWideHedge,
   cleanHeadline,
@@ -20,6 +22,7 @@ import {
   isGenericTitle,
   isQuestionTitle,
   isTitleCaseTitle,
+  isUnattributedVoice,
   loadedPenalty,
   lowerCaseSourced,
   lowercaseLeak,
@@ -28,6 +31,7 @@ import {
   preferUnglued,
   recaseFromSiblings,
   siblingCapitalForms,
+  titleCasedAcronym,
 } from "./neutral-title";
 import { foldTr as searchFoldTr } from "./turkish-query";
 import { expectCpuUnder, expectLinear, rep } from "../../../tests/_helpers/linear-time";
@@ -537,7 +541,8 @@ describe("pickNeutralTitle loaded wording", () => {
   it("loaded words only count as whole words", () => {
     const picked = pickNeutralTitle([
       { title: "Meclis'te işteşlik kuralları değişti Gazze ateşkesi" },
-      { title: "Meclis'te Gazze ateşkesi kuralları değişti iddiası" },
+      // Not 'iddiası': since h94-neutraltitles-2 one hedging title decides a pair, and this test is about 'işte'.
+      { title: "Meclis'te Gazze ateşkesi kuralları değişti kararı" },
     ]);
     // 'işteşlik' contains 'işte' but is a different word: no penalty, first wins.
     expect(picked).toBe("Meclis'te işteşlik kuralları değişti Gazze ateşkesi");
@@ -1226,11 +1231,15 @@ describe("pickNeutralTitle hedge loss (h22-editorial-3)", () => {
     },
   );
 
-  it("needs three deduplicated members: two are not enough", () => {
-    expect(pickNeutralTitle(asMembers([M1, M2]))).toBe(M1);
-    // A duplicate counts once, so [M1, M2, M2] is two members.
-    expect(pickNeutralTitle(asMembers([M1, M2, M2]))).toBe(M1);
-    expect(pickNeutralTitle(asMembers([M1, M2, "Kısa haberler"]))).toBe(M1);
+  it("the 40% share needs three deduplicated members; exactly two are hedged by one hedging title (h94-neutraltitles-2)", () => {
+    // Two members: one hedging title is enough. (Before h94-neutraltitles-2 two were not enough and M1, which leads on
+    // token overlap alone, stayed.)
+    expect(pickNeutralTitle(asMembers([M1, M2]))).toBe(M2);
+    // A duplicate counts once, so [M1, M2, M2] is still two members, and so is a pair beside a placeholder.
+    expect(pickNeutralTitle(asMembers([M1, M2, M2]))).toBe(M2);
+    expect(pickNeutralTitle(asMembers([M1, M2, "Kısa haberler"]))).toBe(M2);
+    // From three members the share rule applies: one hedge in three (33%) charges nobody.
+    expect(pickNeutralTitle(asMembers([M1, M2, `${BASE} açıklandı`]))).toBe(M1);
   });
 
   it("needs 40% of the members to carry a hedge", () => {
@@ -5909,5 +5918,802 @@ describe("h59-english-2: a Turkish member is preferred over an English one for t
     expectCpuUnder(() => {
       expect(pickNeutralTitle(big, { floor: true })).not.toBeNull();
     }, 5_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h94-neutraltitles-2 and h94-neutraltitles-3 (hunt 95; still extractive-v6, NO model bump).
+// Ten live clusters, members read-only 2026-11-09 (public news headlines), newest first, in
+// src/lib/clusters/__fixtures__/h94-attribution.json: six for -2 (a hedge or a speaker label a
+// two-member pick dropped, a quote-stripped first-person sentence) and four for -3 (one outlet's
+// sentence casing or stray single quote copied into the H1).
+// ---------------------------------------------------------------------------
+
+interface H94Cluster {
+  cid: string;
+  id: string;
+  finding: string;
+  stored: string;
+  model: string;
+  article_count: number;
+  titles: string[];
+  sources: string[];
+  why: string;
+}
+
+const H94: H94Cluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h94-attribution.json"), "utf8"),
+) as H94Cluster[];
+
+const h94 = (cid: string): H94Cluster => {
+  const c = H94.find((x) => x.cid === cid);
+  if (!c) throw new Error(`h94 fixture cluster ${cid} missing`);
+  return c;
+};
+/** The members as the cron fetches them (newest first); `reversed` flips the order, which decides a tie at n = 2. */
+const h94Members = (cid: string, reversed = false) => {
+  const titles = [...h94(cid).titles];
+  if (reversed) titles.reverse();
+  return asMembers(titles);
+};
+const h94Title = (cid: string, from: string): string => {
+  const t = h94(cid).titles.find((x) => x.startsWith(from));
+  if (t === undefined) throw new Error(`h94 ${cid}: no member title starts with ${from}`);
+  return t;
+};
+const BOTH_ORDERS = [false, true] as const;
+
+describe("h94-neutraltitles-2 / -3: the fixture", () => {
+  it("holds the ten live clusters, each stamped v6, with a title and a source per article", () => {
+    expect(H94.map((c) => c.cid)).toEqual([
+      "fa08b570",
+      "50571fc6",
+      "c7286eee",
+      "bcf7907d",
+      "ce409843",
+      "759001a8",
+      "588c58ce",
+      "f5012836",
+      "59a68086",
+      "9fb11250",
+    ]);
+    for (const c of H94) {
+      expect(c.model, c.cid).toBe("extractive-v6");
+      expect(c.id.startsWith(c.cid), c.cid).toBe(true);
+      expect(c.titles, c.cid).toHaveLength(c.article_count);
+      expect(c.sources, c.cid).toHaveLength(c.titles.length);
+      expect(["h94-neutraltitles-2", "h94-neutraltitles-3"], c.cid).toContain(c.finding);
+      expect(c.why.length, c.cid).toBeGreaterThan(10);
+    }
+  });
+});
+
+describe("h94-neutraltitles-2 (1): the hedge vocabulary", () => {
+  it("fa08b570: haberler-com's passive 'öne sürüldü' carries the hedge, and so does the wide set derived from it", () => {
+    const attributed = h94Title("fa08b570", "GKRY'nin");
+    expect(carriesHedge(attributed)).toBe(true);
+    expect(carriesWideHedge(attributed)).toBe(true);
+    expect(carriesHedge(h94Title("fa08b570", "GKRY'den"))).toBe(false);
+  });
+
+  it.each([
+    "Kulislerde ‘prestij kaybettik’ itirafı",
+    "Kulis: Bakanlıkta yeni atama hazırlığı var",
+    "Kulislere göre kabine toplantısı ertelendi",
+    "KULİSLERDE ANKARA’DA GÜNDEM YOĞUN",
+    "Eski bakanın görevden alındığı öne sürülüyor",
+    "Bu zammın gizlice yapıldığı öne sürüldü",
+    "Valinin olaydan haberdar olduğu ileri sürüldü",
+    "Muhalefet hükümetin zam yaptığını ileri sürdü",
+  ])("carries the hedge (narrow and wide): %s", (title) => {
+    expect(carriesHedge(title)).toBe(true);
+    expect(carriesWideHedge(title)).toBe(true);
+  });
+
+  it.each([
+    "Muhalif yazar sürgüne sürüldü",
+    "Kulüp başkanı yeni transferi açıkladı",
+    "Kulübün kasasında para kalmadı",
+    "Otoyola ileri sürat kamerası yerleştirildi",
+    "Kulübe giriş kartları yarın dağıtılacak",
+  ])("stays free of the hedge: %s", (title) => {
+    expect(carriesHedge(title)).toBe(false);
+  });
+
+  it("the stems the allegation set already had still match", () => {
+    expect(carriesHedge("Emir Sarıgül'den Özgür Özel iddiası")).toBe(true);
+    expect(carriesHedge("Bakanın istifa edeceğini öne sürdü")).toBe(true);
+    expect(carriesHedge("Şüphelinin ifadesi ortaya çıktı")).toBe(true);
+    expect(carriesHedge("Merkez Bankası faizi sabit tuttu")).toBe(false);
+  });
+
+  // h95 review (correctness-2): since the n = 2 rule one hedging member decides a pair, so a false positive in the
+  // vocabulary now costs a sibling 0.15. 'iddianame' (indictment) and 'ifade özgürlüğü' (freedom of expression) are
+  // not hedges; 'iddia', 'ifade' as testimony and 'kulis' stay.
+  it.each([
+    "Serkan Topal 80 gündür iddianamesiz tutuklu",
+    "İddianame kabul edildi",
+    "İfade özgürlüğü raporu yayımlandı",
+  ])("(a) an indictment or freedom of expression is not a hedge: %s", (title) => {
+    expect(carriesHedge(title), title).toBe(false);
+  });
+
+  it.each([
+    "Özel'in iddiası",
+    "İddianın ardından açıklama",
+    "Bakan ifade verdi",
+    "Tanık ifadesi açıklandı",
+    "Ankara kulislerinde erken seçim konuşuluyor",
+  ])("(b) the allegation and testimony stems still carry the hedge: %s", (title) => {
+    expect(carriesHedge(title), title).toBe(true);
+  });
+});
+
+describe("h94-neutraltitles-2 (2): two members, one of them hedges", () => {
+  const B = "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı";
+  const C = "Bakırköy Belediyesine yönelik soruşturmada 39 şüpheli tutuklandı";
+  const A = "Bakırköy Belediyesi soruşturmasında 39 kişinin tutuklandığı iddia edildi";
+
+  it("fa08b570 returns the cleaned haberler-com title, in either order, first pick and floor", () => {
+    const attributed = cleanHeadline(h94Title("fa08b570", "GKRY'nin"));
+    for (const reversed of BOTH_ORDERS) {
+      expect(pickNeutralTitle(h94Members("fa08b570", reversed), { floor: true }), `reversed=${reversed}`).toBe(attributed);
+      expect(pickNeutralTitle(h94Members("fa08b570", reversed)), `reversed=${reversed}`).toBe(attributed);
+    }
+  });
+
+  it("50571fc6 returns a title for which carriesHedge is true, in either order", () => {
+    for (const reversed of BOTH_ORDERS) {
+      const picked = pickNeutralTitle(h94Members("50571fc6", reversed), { floor: true });
+      expect(picked, `reversed=${reversed}`).not.toBeNull();
+      expect(carriesHedge(picked!), `reversed=${reversed}: ${picked}`).toBe(true);
+    }
+  });
+
+  it("the hedging member wins a pair whichever comes first", () => {
+    expect(pickNeutralTitle(asMembers([B, A]), { floor: true })).toBe(A);
+    expect(pickNeutralTitle(asMembers([A, B]), { floor: true })).toBe(A);
+  });
+
+  it("counts deduplicated members: a hedged title and a copy of it beside one other title is still a pair", () => {
+    expect(pickNeutralTitle(asMembers([B, A, A]), { floor: true })).toBe(A);
+    expect(pickNeutralTitle(asMembers([B, A, A.toUpperCase()]), { floor: true })).toBe(A);
+  });
+
+  it("(c) h95 review: 'iddianamesiz' in one of two titles is not a hedge, so it does not outrank its sibling", () => {
+    const first = "CHP'li eski vekil 80 gündür tutuklu. Özgür Özel sorgudaki 10 sorunun sekizini açıkladı";
+    const second = "Özgür Özel, 'iftira atmam' dediği mektubunu okumuştu: Serkan Topal 80 gündür iddianamesiz tutuklu";
+    expect(pickNeutralTitle([{ title: first }, { title: second }], { floor: true })).toBe(first);
+  });
+
+  it("negative pin: a pair where neither title has a hedge or a label is unchanged", () => {
+    expect(pickNeutralTitle(asMembers([B, C]), { floor: true })).toBe(B);
+    expect(pickNeutralTitle(asMembers([C, B]), { floor: true })).toBe(C);
+  });
+
+  it("negative pin: a pair where both titles hedge is unchanged", () => {
+    const A2 = "Bakırköy Belediyesi soruşturmasında 40 kişinin tutuklandığı iddia ediliyor";
+    expect(pickNeutralTitle(asMembers([A, A2]), { floor: true })).toBe(A);
+    expect(pickNeutralTitle(asMembers([A2, A]), { floor: true })).toBe(A2);
+  });
+
+  it("negative pin: from three members the share rule still applies (one hedge in three charges nobody)", () => {
+    expect(pickNeutralTitle(asMembers([B, C, A]), { floor: true })).toBe(B);
+    expect(pickNeutralTitle(asMembers([A, B, C]), { floor: true })).toBe(B);
+  });
+
+  it("negative pin: the wide set stays out of scoring (d5a6d9ab's lesson): a modal verb in one of two titles charges nobody", () => {
+    const modal = "Bakırköy Belediyesi soruşturmasında 39 kişinin tutuklanması bekleniyor";
+    expect(carriesWideHedge(modal)).toBe(true);
+    expect(carriesHedge(modal)).toBe(false);
+    expect(pickNeutralTitle(asMembers([B, modal]), { floor: true })).toBe(B);
+  });
+});
+
+describe("h94-neutraltitles-2 (3): a title that drops the label a sibling carries pays ATTRIBUTION_LOSS_PENALTY", () => {
+  const REST = "Hükümet yeni vergi düzenlemesini meclise sundu";
+  const THREE = `Bakan Yardımcısı Memişoğlu: ${REST}`;
+  const FOUR = `Maliye Bakan Yardımcısı Memişoğlu: ${REST}`;
+  const L2 = "Sağlık Bakanı Memişoğlu: Toplum sağlığını tehdit eden alışkanlıklarla mücadele sürüyor";
+  const NEAR2 = "Toplum sağlığını tehdit eden alışkanlıklarla mücadele artık sürüyor";
+
+  it("is 0.15, the size of the hedge-loss penalty", () => {
+    expect(ATTRIBUTION_LOSS_PENALTY).toBe(0.15);
+    expect(ATTRIBUTION_LOSS_PENALTY).toBe(HEDGE_LOSS_PENALTY);
+  });
+
+  it("c7286eee returns AA's 'Sağlık Bakanı Memişoğlu: ...' over haberturk's quote-wrapped copy, in either order", () => {
+    const labelled = h94Title("c7286eee", "Sağlık Bakanı Memişoğlu:");
+    for (const reversed of BOTH_ORDERS) {
+      expect(pickNeutralTitle(h94Members("c7286eee", reversed), { floor: true }), `reversed=${reversed}`).toBe(labelled);
+      expect(pickNeutralTitle(h94Members("c7286eee", reversed)), `reversed=${reversed}`).toBe(labelled);
+    }
+  });
+
+  it("bcf7907d returns TRT's 'Emine Erdoğan: ...' over yeni-asir's unlabelled restatement, in either order", () => {
+    const labelled = h94Title("bcf7907d", "Emine Erdoğan:");
+    for (const reversed of BOTH_ORDERS) {
+      expect(pickNeutralTitle(h94Members("bcf7907d", reversed), { floor: true }), `reversed=${reversed}`).toBe(labelled);
+    }
+  });
+
+  it("a restatement that is not word for word (token overlap 0.8 or more) pays too", () => {
+    for (const members of [[NEAR2, L2], [L2, NEAR2]]) {
+      expect(pickNeutralTitle(asMembers(members), { floor: true })).toBe(L2);
+    }
+  });
+
+  it("the label may have up to three capitalised words (LABEL_MAX_WORDS); a fourth makes it a sentence, not a label", () => {
+    expect(pickNeutralTitle(asMembers([REST, THREE]), { floor: true })).toBe(THREE);
+    expect(pickNeutralTitle(asMembers([THREE, REST]), { floor: true })).toBe(THREE);
+    // Four capitalised words before the colon: not a label, so the plain restatement is not charged.
+    expect(pickNeutralTitle(asMembers([REST, FOUR]), { floor: true })).toBe(REST);
+  });
+
+  it("a short stored unlabelled title is charged too: the charge, not its length alone, replaces it", () => {
+    // 42 characters: the length term alone (0.024) stays under REPICK_MARGIN (0.05), the 0.15 charge takes it over.
+    const stored = "Toplum sağlığı için mücadele artık sürüyor";
+    expect(stored.length).toBe(42);
+    const labelled = `Bakan Memişoğlu: ${stored}`;
+    expect(pickNeutralTitle(asMembers([labelled, stored]), { incumbent: stored })).toBe(labelled);
+    expect(pickNeutralTitle(asMembers([stored, labelled]), { incumbent: stored })).toBe(labelled);
+    // The labelled title itself is kept: nothing is charged to a title that names its speaker.
+    expect(pickNeutralTitle(asMembers([labelled, stored]), { incumbent: labelled })).toBe(labelled);
+  });
+
+  it("negative pin: a labelled sibling against a differently worded unlabelled title (overlap under 0.8) adds no penalty", () => {
+    const L1 = "Sağlık Bakanı Memişoğlu: Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz";
+    const U1 = "Bakanlık toplum sağlığını tehdit eden alışkanlıklara karşı yeni dönem başlatıyor";
+    for (const members of [[L1, U1], [U1, L1]]) {
+      expect(pickNeutralTitle(asMembers(members), { floor: true })).toBe(U1);
+    }
+  });
+
+  it("negative pin: a candidate with a quote mark of its own is not charged", () => {
+    const L1 = "Sağlık Bakanı Memişoğlu: Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz";
+    const inner = 'Toplum sağlığını "tehdit eden" alışkanlıklarla mücadelemizi sürdürüyoruz';
+    for (const members of [[L1, inner], [inner, L1]]) {
+      expect(pickNeutralTitle(asMembers(members), { floor: true })).toBe(inner);
+    }
+  });
+
+  it("negative pin: a candidate that carries a label of its own is never charged, whatever its sibling's rest says", () => {
+    // Same rest, two labels. The shorter one wins on the length term in either order; if a labelled title were charged
+    // for "dropping" the other's label it would lose.
+    const rest = "Toplum sağlığını tehdit eden alışkanlıklarla mücadele ve önleme çalışmaları sürüyor";
+    const long = `Sağlık Bakanı Memişoğlu: ${rest}`;
+    const shorter = `Bakan Memişoğlu: ${rest}`;
+    for (const members of [[long, shorter], [shorter, long]]) {
+      expect(pickNeutralTitle(asMembers(members), { floor: true })).toBe(shorter);
+    }
+  });
+
+  it("negative pin: a bulletin tag before the colon ('Haberi:', 'FLAŞ HABER:', 'Video:') is no speaker, so nothing is charged", () => {
+    for (const tag of ["Haberi", "HABERİ", "Video", "FLAŞ HABER"]) {
+      // The plain title comes first and ties the tagged one on every other term: it keeps the pick unless it is charged.
+      const tagged = `${tag}: ${REST}`;
+      expect(pickNeutralTitle(asMembers([REST, tagged]), { floor: true }), tag).toBe(REST);
+    }
+  });
+
+  it("negative pin: with no labelled member nothing is charged", () => {
+    const B = "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı";
+    const C = "Bakırköy Belediyesine yönelik soruşturmada 39 şüpheli tutuklandı";
+    expect(pickNeutralTitle(asMembers([B, C, B.replace("şüpheli", "kişi")]), { floor: true })).toBe(B);
+  });
+});
+
+describe("h94-neutraltitles-2 (4): cleanHeadline keeps the quotes around a first-person sentence", () => {
+  it.each([
+    '"Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz"',
+    "'Ayasofya’nın yer altındaki mekânlarını ziyarete açmayı hedefliyoruz'",
+    "‘Bu yıl sonuna kadar bütün köprüleri tamamlayacağız’",
+    "“Sorunu en kısa sürede çözeceğiz”",
+    "“Bu işin peşini bırakmayacağım”",
+    "“Gelecek yıl daha fazla yatırım yapacağım”",
+    "“Her türlü işbirliğine açığız ve bunu sürdürüyorum”",
+    '"Vatandaşlar sakin olun"',
+    '"Hırsızlara karşı gerekli tedbiri edin"',
+  ])("keeps the wrapping quotes: %s", (title) => {
+    expect(cleanHeadline(title)).toBe(title);
+  });
+
+  it("the same wrapping quotes are still stripped when the sentence is not first person", () => {
+    expect(cleanHeadline('"Terörsüz Türkiye ilk asrın en büyük projesidir"')).toBe("Terörsüz Türkiye ilk asrın en büyük projesidir");
+    expect(cleanHeadline("“Bu bir deneme başlığıdır”")).toBe("Bu bir deneme başlığıdır");
+    expect(cleanHeadline("'Kırmızı alarm verildi'")).toBe("Kırmızı alarm verildi");
+  });
+
+  it("'olun' and 'edin' are whole words: a word that merely ends in them does not keep the quotes", () => {
+    expect(cleanHeadline('"Köyün yolun"')).toBe("Köyün yolun");
+    expect(cleanHeadline('"Futbolcunun kolun"')).toBe("Futbolcunun kolun");
+    expect(cleanHeadline('"Savunma Bakanı Edin Dzeko ile görüştü"')).toBe("Savunma Bakanı Edin Dzeko ile görüştü");
+  });
+
+  it("trailing punctuation inside the quotes does not hide the verb", () => {
+    expect(cleanHeadline('"Mücadelemizi sürdürüyoruz."')).toBe('"Mücadelemizi sürdürüyoruz."');
+  });
+
+  it("a title with no wrapping quotes is not touched by the rule", () => {
+    expect(cleanHeadline("Toplum sağlığı için mücadelemizi sürdürüyoruz")).toBe("Toplum sağlığı için mücadelemizi sürdürüyoruz");
+  });
+
+  it("ce409843's result keeps the quote marks or is the a-haber title, never the bare first-person sentence", () => {
+    const aHaber = cleanHeadline(h94Title("ce409843", "Ayasofya’nın tarihi"));
+    const bare = "Ayasofya’nın yer altındaki mekânlarını ziyarete açmayı hedefliyoruz";
+    for (const reversed of BOTH_ORDERS) {
+      const picked = pickNeutralTitle(h94Members("ce409843", reversed), { floor: true });
+      expect(picked, `reversed=${reversed}`).not.toBeNull();
+      expect(picked, `reversed=${reversed}`).not.toBe(bare);
+      expect(/^["'“‘]/.test(picked!) || picked === aHaber, `reversed=${reversed}: ${picked}`).toBe(true);
+    }
+  });
+
+  // h95 review (correctness-1): outlets mix straight and curly quote marks. A mismatched pair around a first-person
+  // sentence used to lose its quotes at HEAD; kept as written it leaves one dangling mark, which the
+  // unbalanced-quote gate rejects. The pair is rewritten as “…”, so the attribution survives and the gate accepts it.
+  describe("a mismatched wrapping pair around a first-person sentence (h95 review, correctness-1)", () => {
+    const SENTENCE = "Mücadelemizi kararlılıkla sürdürüyoruz";
+    const CURLY = `“${SENTENCE}”`;
+    const MISMATCHED = [
+      `"${SENTENCE}”`,
+      `'${SENTENCE}”`,
+      `“${SENTENCE}"`,
+      `"${SENTENCE}'`,
+    ];
+
+    it.each(MISMATCHED)("(a) is rewritten as a curly pair the gate accepts: %s", (title) => {
+      const cleaned = cleanHeadline(title);
+      expect(cleaned).toBe(CURLY);
+      expect(isAcceptableNeutral(cleaned, [])).toBe(true);
+    });
+
+    it.each([`"${SENTENCE}"`, CURLY, `'${SENTENCE}'`, `‘${SENTENCE}’`])(
+      "(b) a matched pair comes back unchanged: %s",
+      (title) => {
+        expect(cleanHeadline(title)).toBe(title);
+      },
+    );
+
+    it("(c) pickNeutralTitle ships the curly pair, with the floor and without it", () => {
+      const members = [{ title: `"${SENTENCE}”` }];
+      expect(pickNeutralTitle(members, { floor: true })).toBe(CURLY);
+      expect(pickNeutralTitle(members)).not.toBeNull();
+    });
+
+    it("a mismatched pair around a sentence that is not first person is still stripped", () => {
+      expect(cleanHeadline('"Terörsüz Türkiye ilk asrın en büyük projesidir”')).toBe("Terörsüz Türkiye ilk asrın en büyük projesidir");
+      expect(cleanHeadline("'Kırmızı alarm verildi”")).toBe("Kırmızı alarm verildi");
+    });
+  });
+});
+
+describe("h94-neutraltitles-2 (5): an unattributed first-person title pays UNATTRIBUTED_VOICE_PENALTY", () => {
+  it("is 0.12", () => {
+    expect(UNATTRIBUTED_VOICE_PENALTY).toBe(0.12);
+  });
+
+  it.each([
+    "Diplomatik çözüm için çalışıyoruz",
+    "Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz",
+    "Ayasofya’nın yer altındaki mekânlarını ziyarete açmayı hedefliyoruz",
+    "Bu konuda her türlü desteği veriyorum",
+    "Yeni köprüyü yıl sonunda açacağız",
+    "Sorunu en kısa sürede çözeceğiz.",
+    "Bu işin peşini bırakmayacağım",
+    "Her şeyi yeniden değerlendireceğim",
+    "Yarın sabah erkenden yola çıkmaya hazır olun",
+    "Sahte ilanlara karşı gerekli tedbiri edin",
+    "OLAĞANÜSTÜ HALDE KARARLILIKLA ÇALIŞIYORUZ",
+  ])("is an unattributed voice: %s", (title) => {
+    expect(isUnattributedVoice(title)).toBe(true);
+  });
+
+  it.each([
+    "Erdoğan Trump ile telefonda görüştü",
+    "Erdoğan: Diplomatik çözüm için çalışıyoruz",
+    "Bakan Memişoğlu açıkladı: mücadelemizi sürdürüyoruz",
+    '"Toplum sağlığı için mücadelemizi sürdürüyoruz"',
+    "'Toplum sağlığı için mücadelemizi sürdürüyoruz'",
+    "Bakan: “Mücadelemizi sürdürüyoruz” dedi",
+    "Köyün yolun",
+    "Futbolcular yeni sezonda kolun",
+    "Çalışıyoruz diyen bakan istifa etti",
+    "",
+  ])("is not: %s", (title) => {
+    expect(isUnattributedVoice(title)).toBe(false);
+  });
+
+  it("759001a8 with {incumbent: stored} returns 'Erdoğan Trump ile telefonda görüştü', in either order", () => {
+    const c = h94("759001a8");
+    expect(c.stored).toBe("Diplomatik çözüm için çalışıyoruz");
+    for (const reversed of BOTH_ORDERS) {
+      expect(pickNeutralTitle(h94Members("759001a8", reversed), { incumbent: c.stored }), `reversed=${reversed}`).toBe(
+        "Erdoğan Trump ile telefonda görüştü",
+      );
+    }
+  });
+
+  it("a bare first-person title loses a pair to a statement whichever comes first", () => {
+    const first = "Toplum sağlığını tehdit eden alışkanlıklarla mücadeleyi sürdürüyoruz";
+    const statement = "Sağlık Bakanlığı yeni alkol düzenlemesini açıkladı";
+    expect(pickNeutralTitle(asMembers([first, statement]), { floor: true })).toBe(statement);
+    expect(pickNeutralTitle(asMembers([statement, first]), { floor: true })).toBe(statement);
+  });
+
+  it("a lone first-person title is still the pick: the penalty ranks, it does not reject", () => {
+    expect(pickNeutralTitle(asMembers(["Diplomatik çözüm için çalışıyoruz"]), { floor: true })).toBe(
+      "Diplomatik çözüm için çalışıyoruz",
+    );
+  });
+
+  it("negative pin: a first-person title behind a speaker label is not charged", () => {
+    const labelled = "Erdoğan: Diplomatik çözüm için çalışıyoruz";
+    const statement = "Erdoğan Trump ile telefonda görüştü";
+    expect(pickNeutralTitle(asMembers([labelled, statement]), { floor: true })).toBe(labelled);
+    expect(pickNeutralTitle(asMembers([statement, labelled]), { floor: true })).toBe(labelled);
+  });
+
+  it("negative pin: a stored first-person title that carries quotes or a label is kept", () => {
+    const members = h94Members("759001a8");
+    expect(pickNeutralTitle(members, { incumbent: '"Diplomatik çözüm için çalışıyoruz"' })).toBe('"Diplomatik çözüm için çalışıyoruz"');
+    expect(pickNeutralTitle(asMembers(["Erdoğan Trump ile telefonda görüştü", "Erdoğan: Diplomatik çözüm için çalışıyoruz"]), {
+      incumbent: "Erdoğan: Diplomatik çözüm için çalışıyoruz",
+    })).toBe("Erdoğan: Diplomatik çözüm için çalışıyoruz");
+  });
+
+  it("the 'voice' switch needs a swap target at least as central as the stored title", () => {
+    // The stored first-person title is the centre of its cluster (three siblings share its words); the one title that
+    // is not first person shares almost nothing with the rest, so the switch would trade the centre for an outlier.
+    const stored = "Sağlık Bakanlığı alkol düzenlemesi taslağı için çalışıyoruz";
+    const members = asMembers([
+      stored,
+      "Sağlık Bakanlığı alkol düzenlemesi taslağı hazırlığı sürüyor",
+      "Sağlık Bakanlığı alkol düzenlemesi taslağını meclise sundu",
+      "Sağlık Bakanlığı alkol düzenlemesi taslağında yeni madde",
+      "Maliye bakanlığı vergi paketinin ayrıntılarını duyurdu",
+    ]);
+    expect(pickNeutralTitle(members, { incumbent: stored })).toBe(stored);
+  });
+});
+
+describe("h94-neutraltitles-3 (1): a title-cased acronym is the odd one out", () => {
+  const CLEAN = "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi";
+  const CASED = "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü";
+  const TBMM_CASED = "Tbmm başkanı Kurtulmuş: terörsüz Türkiye hedefine kararlılıkla yürüyoruz";
+  const TBMM_CLEAN = "TBMM Başkanı Kurtulmuş: Terör bütün unsurlarıyla Türkiye'nin gündeminden kalkacak";
+
+  describe("titleCasedAcronym", () => {
+    it("is true for a token such as 'Kktc' whose upper form a sibling writes as a whole token", () => {
+      expect(titleCasedAcronym(CASED, [CLEAN])).toBe(true);
+      expect(titleCasedAcronym(TBMM_CASED, [TBMM_CLEAN])).toBe(true);
+    });
+
+    it("reads the token without its apostrophe suffix, and anywhere in the title, the first word included", () => {
+      expect(titleCasedAcronym("Tbmm'de yeni dönem başladı bugün", ["TBMM'de görüşmeler sürüyor"])).toBe(true);
+      expect(titleCasedAcronym("Yeni dönem Tbmm'de başladı bugün", ["TBMM'de görüşmeler sürüyor"])).toBe(true);
+    });
+
+    it("finds the sibling's upper form in any position, its first word included", () => {
+      expect(titleCasedAcronym(CASED, ["KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi"])).toBe(true);
+      expect(titleCasedAcronym(TBMM_CASED, ["TBMM Başkanı Kurtulmuş: Süreci başarıyla sonlandıracağız dedi"])).toBe(true);
+      expect(titleCasedAcronym("Bddk yeni bir karar aldı bugün", ["Piyasalara yeni adım: BDDK karar aldı"])).toBe(true);
+    });
+
+    it("counts only a spelling with no vowel or a known acronym: a shouted ordinary word is emphasis, not an abbreviation", () => {
+      // The 150-cluster corpus held 'Yeni Parti' beside 'YENİ Parti', 'Kasım' beside 'KASIM', 'Enka' beside 'ENKA'.
+      expect(titleCasedAcronym("Yeni Parti’nin ilk olağan kurultayı yapılacak", ["Bakan YENİ Parti’ye geçenlere seslendi"])).toBe(false);
+      expect(titleCasedAcronym("Depremler. 1 Kasım 2026 nerede oldu", ["Deprem listesi: DEPREM 1 KASIM! Bugün AFAD listesi"])).toBe(false);
+      expect(titleCasedAcronym("Yat Yarışları'nın şampiyonu Enka oldu bugün", ["Yarışlarda bugün ENKA kazandı"])).toBe(false);
+      expect(titleCasedAcronym("İzmir'de elektrik kesintisi bugün", ["Kesinti uyarısı İZMİR için yapıldı"])).toBe(false);
+      // A known acronym with a vowel is evidence.
+      expect(titleCasedAcronym("Nato zirvesi bugün Ankara'da başladı", ["Zirve: NATO liderleri Ankara'da"])).toBe(true);
+    });
+
+    it("drops a spelling a sibling also writes with one capital or in lower case, a run of shouted words and a shouted title", () => {
+      expect(titleCasedAcronym("Tcmb faizi sabit tuttu bugün", ["TCMB faiz kararını açıkladı bugün", "Tcmb başkanı konuştu bugün"])).toBe(false);
+      expect(titleCasedAcronym("Tcmb faizi sabit tuttu bugün", ["TCMB faiz kararını açıkladı bugün"])).toBe(true);
+      expect(titleCasedAcronym("Tcmb faizi sabit tuttu bugün", ["TCMB FAİZ KARARI AÇIKLANDI"])).toBe(false);
+      expect(titleCasedAcronym("Tcmb faizi sabit tuttu bugün", ["MERKEZ BANKASI TCMB karar verdi bugün"])).toBe(false);
+    });
+
+    it("reads the siblings' cleaned titles (a lead-in is not a name)", () => {
+      expect(titleCasedAcronym(CASED, ["SON DAKİKA | Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı ile görüştü"])).toBe(true);
+    });
+
+    it("is false for a title that already writes the acronym in capitals", () => {
+      expect(titleCasedAcronym(CLEAN, [CASED, "Bakan Bak KKTC Başbakan Yardımcısı ile görüştü"])).toBe(false);
+    });
+
+    it("is false when no sibling writes the upper form ('Bak' beside sentence-case siblings)", () => {
+      expect(titleCasedAcronym(CLEAN, [CASED])).toBe(false);
+      expect(titleCasedAcronym(CLEAN, ["Bakan Bak, Dostluk Kupası öncesi görüşme yaptı", "Dostluk Kupası öncesi görüşme sürüyor"])).toBe(false);
+    });
+
+    it("is false when the upper form only appears in an all-caps sibling (a shouted title has lost its case)", () => {
+      expect(titleCasedAcronym("Tbmm başkanı Kurtulmuş bugün açıklama yaptı", ["TBMM BAŞKANI KURTULMUŞ BUGÜN AÇIKLAMA YAPTI"])).toBe(false);
+    });
+
+    it("is false for a word of more than five letters, a bulletin cue or a stop word", () => {
+      expect(titleCasedAcronym("Numan Kurtulmuş açıklama yaptı bugün", ["Numan KURTULMUŞ açıklama yaptı bugün"])).toBe(false);
+      expect(titleCasedAcronym("Şok iddialar ortaya çıktı bugün", ["ŞOK iddialar ortaya çıktı bugün"])).toBe(false);
+      expect(titleCasedAcronym("Dev yatırım açıklandı bugün", ["DEV yatırım açıklandı bugün"])).toBe(false);
+    });
+
+    it("is false for a missing or non-string input", () => {
+    expect(titleCasedAcronym(undefined as unknown as string, [CLEAN])).toBe(false);
+    expect(titleCasedAcronym(CASED, [undefined as unknown as string, null as unknown as string])).toBe(false);
+    expect(isUnattributedVoice(undefined as unknown as string)).toBe(false);
+    expect(isUnattributedVoice(null as unknown as string)).toBe(false);
+  });
+
+  it("is false for no siblings, a blank title or a title with no such token", () => {
+      expect(titleCasedAcronym(CASED, [])).toBe(false);
+      expect(titleCasedAcronym("", [CLEAN])).toBe(false);
+      expect(titleCasedAcronym("Meclis yeni haftaya yoğun gündemle başladı", [CLEAN])).toBe(false);
+    });
+  });
+
+  it("588c58ce returns a title that holds 'KKTC' and 'Ataoğlu' and not 'Kktc', in either order", () => {
+    for (const reversed of BOTH_ORDERS) {
+      const picked = pickNeutralTitle(h94Members("588c58ce", reversed), { floor: true });
+      expect(picked, `reversed=${reversed}`).not.toBeNull();
+      expect(picked, `reversed=${reversed}`).toContain("KKTC");
+      expect(picked, `reversed=${reversed}`).toContain("Ataoğlu");
+      expect(picked, `reversed=${reversed}`).not.toContain("Kktc");
+    }
+  });
+
+  it("588c58ce: the odd-one-out is repaired from its sibling, not dropped: the same words come back with their capitals", () => {
+    // Two members only: the sentence-cased isci-haber title and the clean one.
+    const members = asMembers([h94Title("588c58ce", "Bakan bak"), h94Title("588c58ce", "Bakan Bak")]);
+    expect(pickNeutralTitle(members, { floor: true })).toBe("Bakan Bak, KKTC Başbakan Yardımcısı Ataoğlu ile görüştü");
+  });
+
+  it("588c58ce with {incumbent: stored} does not keep the sentence-cased title", () => {
+    const c = h94("588c58ce");
+    for (const reversed of BOTH_ORDERS) {
+      const picked = pickNeutralTitle(h94Members("588c58ce", reversed), { incumbent: c.stored });
+      expect(picked, `reversed=${reversed}`).not.toContain("Kktc");
+      expect(picked, `reversed=${reversed}`).toContain("KKTC");
+    }
+  });
+
+  it("f5012836 (15 members) with {incumbent: stored} returns a title without 'Tbmm'", () => {
+    const c = h94("f5012836");
+    expect(c.stored).toContain("Tbmm");
+    for (const reversed of BOTH_ORDERS) {
+      const picked = pickNeutralTitle(h94Members("f5012836", reversed), { incumbent: c.stored });
+      expect(picked, `reversed=${reversed}`).not.toBeNull();
+      expect(picked, `reversed=${reversed}`).not.toContain("Tbmm");
+      expect(picked!.length, `reversed=${reversed}`).toBeGreaterThanOrEqual(30);
+      expect(picked, `reversed=${reversed}`).toContain("Kurtulmuş");
+    }
+  });
+
+  it("f5012836: a first pick never carries 'Tbmm' either, and a stored 'TBMM' title is kept", () => {
+    expect(pickNeutralTitle(h94Members("f5012836"), { floor: true })).not.toContain("Tbmm");
+    const clean = "TBMM Başkanı Kurtulmuş: Terörsüz Türkiye, ilk asrın en büyük projesidir";
+    expect(pickNeutralTitle(h94Members("f5012836"), { incumbent: clean })).toBe(clean);
+  });
+
+  it("a stored title with such a token gives way to a title that has none, with no margin (the 'case' rule)", () => {
+    // Both are members; the stored one is sentence-cased. A margin of 0.20 would have kept it.
+    const stored = "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü";
+    const picked = pickNeutralTitle(asMembers([CLEAN, stored]), { incumbent: stored });
+    expect(picked).not.toContain("Kktc");
+  });
+
+  it("negative pin: 'Bakan Bak' next to sentence-case siblings is unchanged", () => {
+    const sibling = "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile görüştü";
+    for (const members of [[CLEAN, sibling], [sibling, CLEAN]]) {
+      const picked = pickNeutralTitle(asMembers(members), { floor: true });
+      expect(members).toContain(picked);
+    }
+    const [first] = [CLEAN];
+    expect(pickNeutralTitle(asMembers([first, "Bakan Bak, Dostluk Kupası öncesi görüşme yaptı"]), { floor: true })).toContain("Bakan Bak,");
+  });
+
+  it("negative pin: a token whose upper form appears only in an all-caps sibling is ignored", () => {
+    const cased = "Tbmm başkanı Kurtulmuş bugün açıklama yaptı";
+    const shouted = "TBMM BAŞKANI KURTULMUŞ YENİ ANAYASA ÇAĞRISI YAPTI";
+    for (const members of [[cased, shouted], [shouted, cased]]) {
+      expect(pickNeutralTitle(asMembers(members), { floor: true })).toBe(cased);
+    }
+  });
+});
+
+describe("h94-neutraltitles-3 (2): a leading stray single quote is dropped", () => {
+  it("cleanHeadline drops a leading ' or ‘ when the quote marks that sit between no two letters are odd in number", () => {
+    expect(cleanHeadline("'Kaşif Kozinoğlu'nun ATK raporu gönderildi: 'Ölüm nedeni' açıklandı")).toBe(
+      "Kaşif Kozinoğlu'nun ATK raporu gönderildi: 'Ölüm nedeni' açıklandı",
+    );
+    expect(cleanHeadline("‘Kaşif Kozinoğlu’nun ATK raporu gönderildi")).toBe("Kaşif Kozinoğlu’nun ATK raporu gönderildi");
+    expect(cleanHeadline("'Terörsüz Türkiye'ye destek sürüyor")).toBe("Terörsüz Türkiye'ye destek sürüyor");
+  });
+
+  it("keeps a leading quote that is closed (an even count)", () => {
+    expect(cleanHeadline("'Ölüm nedeni' açıklandı: Başsavcılık itiraz edecek")).toBe("'Ölüm nedeni' açıklandı: Başsavcılık itiraz edecek");
+    expect(cleanHeadline("‘Ölüm nedeni’ açıklandı: Başsavcılık itiraz edecek")).toBe("‘Ölüm nedeni’ açıklandı: Başsavcılık itiraz edecek");
+    expect(cleanHeadline("'Ankara'da' dediler ve yola çıktılar")).toBe("'Ankara'da' dediler ve yola çıktılar");
+  });
+
+  it("an apostrophe between two letters is no quote: it neither opens nor closes the span", () => {
+    // One leading mark and two apostrophes inside words: odd, so the lead goes; the apostrophes stay.
+    expect(cleanHeadline("'Kılıçdaroğlu'nun Özel'e yanıtı belli oldu")).toBe("Kılıçdaroğlu'nun Özel'e yanıtı belli oldu");
+  });
+
+  it("an apostrophe after a digit is no quote either (\"10'luk\")", () => {
+    expect(cleanHeadline("'Yüzde 10'luk artış' dedi")).toBe("'Yüzde 10'luk artış' dedi");
+    expect(cleanHeadline("'Yüzde 10'luk artış gelecek")).toBe("Yüzde 10'luk artış gelecek");
+  });
+
+  it("only a leading ' or ‘ is dropped: a double quote or a mid-title mark is left alone", () => {
+    expect(cleanHeadline('"Kaşif Kozinoğlu raporu gönderildi: Başsavcılık itiraz edecek')).toBe(
+      '"Kaşif Kozinoğlu raporu gönderildi: Başsavcılık itiraz edecek',
+    );
+    expect(cleanHeadline("Bahçeli'den 'Terörsüz Türkiye'ye destek")).toBe("Bahçeli'den 'Terörsüz Türkiye'ye destek");
+  });
+
+  it("59a68086: no member title yields a title that starts with a quote mark", () => {
+    for (const title of h94("59a68086").titles) {
+      expect(cleanHeadline(title), title).not.toMatch(/^["'“‘’”]/);
+    }
+    for (const reversed of BOTH_ORDERS) {
+      const picked = pickNeutralTitle(h94Members("59a68086", reversed), { floor: true });
+      expect(picked, `reversed=${reversed}`).not.toBeNull();
+      expect(picked, `reversed=${reversed}`).not.toMatch(/^["'“‘’”]/);
+    }
+  });
+
+  it("59a68086 with {incumbent: stored} replaces the stored title that starts with the stray quote", () => {
+    const c = h94("59a68086");
+    expect(c.stored.startsWith("'")).toBe(true);
+    for (const reversed of BOTH_ORDERS) {
+      const picked = pickNeutralTitle(h94Members("59a68086", reversed), { incumbent: c.stored });
+      expect(picked, `reversed=${reversed}`).not.toBeNull();
+      expect(picked, `reversed=${reversed}`).not.toMatch(/^["'“‘’”]/);
+    }
+  });
+
+  it("a stored title that opens with a closed quote is kept", () => {
+    const stored = "'Ölüm nedeni' açıklandı: Başsavcılık rapora itiraz edecek";
+    const members = asMembers([
+      "Kaşif Kozinoğlu’nun ölüm nedeni belli oldu: Başsavcılık rapora itiraz edecek",
+      stored,
+    ]);
+    expect(pickNeutralTitle(members, { incumbent: stored })).toBe(stored);
+  });
+});
+
+describe("h94-neutraltitles-3 (3): the quote twin", () => {
+  const STRAY = "Kılıçdaroğlu'ndan 'adaylık açıklaması";
+  const CLEAN = "Kılıçdaroğlu’ndan adaylık açıklaması";
+
+  it("preferUnglued returns the member title that differs only in quote marks and has fewer that sit between no two letters", () => {
+    expect(preferUnglued(STRAY, [STRAY, CLEAN])).toBe(CLEAN);
+    expect(preferUnglued(STRAY, [CLEAN, STRAY])).toBe(CLEAN);
+    expect(preferUnglued(STRAY, [CLEAN])).toBe(CLEAN);
+  });
+
+  it("the twin may differ from the chosen title in any of ' ‘ ’ \" “ ”, with fewer such marks between no two letters", () => {
+    expect(preferUnglued("Bakan ‘Sıfır Atık Projesi başladı", ["Bakan Sıfır Atık Projesi başladı"])).toBe("Bakan Sıfır Atık Projesi başladı");
+    expect(preferUnglued("Bakan 'Sıfır Atık' ‘Projesi başladı", ["Bakan “Sıfır Atık” Projesi başladı"])).toBe(
+      "Bakan “Sıfır Atık” Projesi başladı",
+    );
+  });
+
+  it("the member title is read cleaned: an outlet lead-in does not hide the twin", () => {
+    expect(preferUnglued(STRAY, ["SON DAKİKA | Kılıçdaroğlu’ndan adaylık açıklaması"])).toBe(CLEAN);
+  });
+
+  it("keeps the chosen title when the twin has as many marks or more, or the text differs", () => {
+    expect(preferUnglued(STRAY, ["Kılıçdaroğlu'ndan 'adaylık açıklaması"])).toBe(STRAY);
+    expect(preferUnglued(STRAY, ["Kılıçdaroğlu’ndan ‘adaylık' açıklaması"])).toBe(STRAY);
+    expect(preferUnglued(STRAY, ["Kılıçdaroğlu’ndan adaylık açıklaması geldi"])).toBe(STRAY);
+    // Case is part of 'identical': a twin that differs in the case of a letter is a different text.
+    expect(preferUnglued(STRAY, ["Kılıçdaroğlu’ndan Adaylık açıklaması"])).toBe(STRAY);
+  });
+
+  it("a chosen title whose quotes pair up is somebody's quotation and is kept, whatever twin exists", () => {
+    const quoted = 'TDT 13. Liderler Zirvesi "Türk Yüzyılı" temasıyla başlıyor';
+    expect(preferUnglued(quoted, [quoted, "TDT 13. Liderler Zirvesi Türk Yüzyılı temasıyla başlıyor"])).toBe(quoted);
+    const single = "Bakan Göktaş'tan 'Sıfır Atık Kadın Elçiliği' daveti";
+    expect(preferUnglued(single, [single, "Bakan Göktaş’tan Sıfır Atık Kadın Elçiliği daveti"])).toBe(single);
+    // A stored first-person quote keeps its quotes next to its bare twin (the voice rule would otherwise be undone).
+    const sentence = '"Diplomatik çözüm için çalışıyoruz"';
+    expect(preferUnglued(sentence, ["Diplomatik çözüm için çalışıyoruz", sentence])).toBe(sentence);
+  });
+
+  it("prefers the twin with the fewest such marks, the first in member order on a tie", () => {
+    const three = "Kılıçdaroğlu’ndan 'adaylık' 'açıklaması";
+    const one = "Kılıçdaroğlu’ndan 'adaylık açıklaması";
+    expect(preferUnglued(three, [one, CLEAN])).toBe(CLEAN);
+    expect(preferUnglued(three, [one])).toBe(one);
+    expect(preferUnglued(three, [CLEAN, "Kılıçdaroğlu'ndan adaylık açıklaması"])).toBe(CLEAN);
+    expect(preferUnglued(three, ["Kılıçdaroğlu'ndan adaylık açıklaması", CLEAN])).toBe("Kılıçdaroğlu'ndan adaylık açıklaması");
+  });
+
+  it("only a twin that passes the gate is taken", () => {
+    // A bare twin of under 20 characters is no headline (isAcceptableNeutral), so the chosen title stays.
+    expect(preferUnglued("Ali 'nın 'ada", ["Ali nın ada"])).toBe("Ali 'nın 'ada");
+  });
+
+  it("still swaps a glued join for its twin", () => {
+    const glued = "Tel AvivWashington'dan 'ilişki açıklaması";
+    const members = ["Tel Aviv-Washington’dan ilişki açıklaması", glued];
+    expect(preferUnglued(glued, members)).toBe("Tel Aviv-Washington’dan ilişki açıklaması");
+  });
+
+  it("9fb11250 returns hurriyet's 'Kılıçdaroğlu’ndan adaylık açıklaması', in either order, first pick, floor and re-pick", () => {
+    const c = h94("9fb11250");
+    for (const reversed of BOTH_ORDERS) {
+      expect(pickNeutralTitle(h94Members("9fb11250", reversed), { floor: true }), `reversed=${reversed}`).toBe(CLEAN);
+      expect(pickNeutralTitle(h94Members("9fb11250", reversed)), `reversed=${reversed}`).toBe(CLEAN);
+      expect(pickNeutralTitle(h94Members("9fb11250", reversed), { incumbent: c.stored }), `reversed=${reversed}`).toBe(CLEAN);
+    }
+  });
+
+  it.each([
+    'AKP’de “Fatma Betül Sayan Kaya” itirafı: "Prestij kaybettik"',
+    "Bakan Göktaş'tan 'Sıfır Atık Kadın Elçiliği' daveti",
+    "Bahçeli'den 'Terörsüz Türkiye'ye destek",
+  ])("negative pin: %s is unchanged", (title) => {
+    expect(cleanHeadline(title)).toBe(title);
+    expect(preferUnglued(title, [title])).toBe(title);
+    expect(pickNeutralTitle(asMembers([title]), { floor: true })).toBe(title);
+  });
+});
+
+describe("h94-neutraltitles-2 / -3: hostile input stays cheap", () => {
+  it("cleanHeadline, isUnattributedVoice and titleCasedAcronym scale linearly on a long title", () => {
+    const shapes: Array<[string, Gen]> = [
+      ["quotes and apostrophes", rep("a'a ' ")],
+      ["a leading quote then marks", rep("'a ", "'")],
+      ["first-person endings", rep("çalışıyoruz olun ")],
+      ["title-cased tokens", rep("Kktc Tbmm ")],
+      ["upper tokens", rep("KKTC TBMM ")],
+      ["colons", rep("Bakan Bak: ")],
+    ];
+    for (const [name, gen] of shapes) {
+      expectLinear(
+        gen,
+        (shape) => {
+          cleanHeadline(shape);
+          isUnattributedVoice(shape);
+          titleCasedAcronym(shape, [shape]);
+        },
+        { n: 250_000, ceilingMs: 8_000 },
+      );
+      void name;
+    }
+  });
+
+  it("a roster at the fetch cap whose members are mostly labelled restatements of one another stays cheap", () => {
+    const titles: string[] = [];
+    for (let i = 0; i < 200; i++) {
+      const rest = `Hükümet yeni vergi düzenlemesini ${i % 7} maddelik paketle meclise sundu`;
+      titles.push(i % 2 === 0 ? `Bakan Memişoğlu: ${rest}` : rest);
+    }
+    expectCpuUnder(() => {
+      expect(pickNeutralTitle(asMembers(titles), { floor: true })).not.toBeNull();
+      expect(pickNeutralTitle(asMembers(titles), { incumbent: titles[1] })).not.toBeNull();
+    }, 5_000);
+  });
+
+  it("a 100 KB label-shaped member among 200 does not make the pick super-linear in it", () => {
+    expectLinear(
+      (n) => {
+        const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
+        titles[50] = `${"Bakan ".repeat(n)}: Merkez Bankası faiz kararını açıkladı`;
+        titles[60] = `${"Kktc Tbmm ".repeat(n)}faiz kararı`;
+        return titles;
+      },
+      (titles) => {
+        pickNeutralTitle(asMembers(titles), { floor: true });
+        pickNeutralTitle(asMembers(titles), { incumbent: titles[0] });
+      },
+      { n: 20_000, ceilingMs: 8_000 },
+    );
   });
 });

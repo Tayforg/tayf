@@ -7,6 +7,7 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 import { cleanDescription, stripTrailingTeasers } from "../../../supabase/functions/_shared/cluster/description-clean";
 import {
   backOffOpenQuote,
+  isUnmarkedClamp,
   KNOWN_AGENCIES,
   stripDatelineLead,
   stripLeadingStyleRules,
@@ -638,7 +639,6 @@ const C2A9_STORED =
 
 const F097_STORED =
   "Kasım ara tatili için geri sayım başladı. Birinci ve ikinci ara tatil tarihleri Milli Eğitim Bakanlığı (MEB) 2026-2027 takvimi ile belli oldu. Milyonlarca öğrenci ve veli ara tatil başlangıç ve bitiş tarihlerini sorguluyor. Ara tatil ile öğrenciler dinlenme fırsatı bulacak. Peki kasım ara tatili ne zaman? 1. ve 2. ara tatil hangi tarihte yapılacak? Detaylar haberimizde...";
-const F097_TIDY = F097_STORED.slice(0, F097_STORED.indexOf(" Detaylar haberimizde"));
 
 const A65F_STORED =
   "BDDK Başkanı Şahap Kavcıoğlu'nun Emre Tezmen’den 20 milyar TL talep ettiği iddialarını gündeme getiren AKP'li Savcı Sayan'dan yeni paylaşım geldi. İşte ayrıntılar...";
@@ -868,9 +868,12 @@ describe("tidySummaryText leading ticker (h22-editorial-2)", () => {
 });
 
 describe("tidySummaryText trailing CTA sentence (h22-editorial-2)", () => {
-  it("f097fa3e: 'Detaylar haberimizde...' goes, the question before it stays", () => {
-    expect(tidySummaryText(F097_STORED)).toBe(F097_TIDY);
-    expect(F097_TIDY.endsWith("hangi tarihte yapılacak?")).toBe(true);
+  it("f097fa3e: 'Detaylar haberimizde...' goes, and so does the 'Peki ...' run in front of it (h95-summaries-1)", () => {
+    // Before h95-summaries-1 the two questions stayed ("... hangi tarihte yapılacak?");
+    // a complete sentence of 60 characters or more stands in front of "Peki", so the run is cut.
+    expect(tidySummaryText(F097_STORED)).toBe(F097_STORED.slice(0, F097_STORED.indexOf(" Peki kasım")));
+    expect(tidySummaryText(F097_STORED).endsWith("dinlenme fırsatı bulacak.")).toBe(true);
+    expect(tidySummaryText(F097_STORED)).not.toMatch(/Peki|Detaylar/);
   });
 
   it("a65f404a: 'İşte ayrıntılar...' goes", () => {
@@ -1569,8 +1572,10 @@ describe("tidySummaryText CTA sentences and the placeholder (h23-live-1)", () =>
 
   it("869ffc17: the WHOLE sentence 'KYK burs ve kredi başvurularına dair detaylar haberimizde.' goes", () => {
     const out = tidySummaryText(RAW_869F);
-    expect(out).toBe(before(RAW_869F, " KYK burs ve kredi başvurularına"));
-    expect(out.endsWith("açıklanacak?")).toBe(true);
+    // h95-summaries-1: the "Peki, ... açıklanacak?" question in front of the CTA sentence goes too.
+    expect(out).toBe(before(RAW_869F, " Peki, 2026 KYK"));
+    expect(out.endsWith("tarihe çevrildi.")).toBe(true);
+    expect(out).not.toContain("Peki");
     expect(out).not.toContain("başvurularına");
     expect(out).not.toContain("dair");
     expect(out).not.toContain("haberimizde");
@@ -4895,6 +4900,230 @@ describe("stripDatelineLead (h81-textclean-2)", () => {
     ];
     for (const [label, gen] of gens) {
       expect(() => expectLinear(gen, (s) => stripDatelineLead(s), { n: 100_000, ceilingMs: 2_000 }), label).not.toThrow();
+    }
+  });
+});
+
+// h95-summaries-1 (hunt 95, 2026-11-09): two seed shapes the tidy step used to
+// leave in the Özet.
+//   - a trailing come-on: 6ef586c4's Özet ended "... Peki, Ümit Kocasakal kimdir?
+//     İstanbul Barosu başkan adayı Ümit Kocasakal nereli, kaç yaşında, evli mi?";
+//     the run from the first sentence that opens with Peki / İşte is cut when a
+//     complete sentence of 60 characters or more stands in front of it;
+//   - a cut that left no "...": ABC Haber (400 characters) and Karar / F5 Haber
+//     (500) end mid-word with no ellipsis ("... yeni kanun hazırlığı h"), so
+//     neither the clamp repair nor a stub check saw them.
+describe("tidySummaryText: a trailing Peki / İşte come-on is cut (h95-summaries-1)", () => {
+  // 6ef586c4 (Haberler.com), verbatim.
+  const KOCASAKAL =
+    "İstanbul Barosu başkanlık seçimlerinde adaylar arasında yer alan eski başkan Ümit Kocasakal, yeniden gündeme geldi. Hukukçu ve akademisyen kimliğiyle tanınan Kocasakal'ın yaşamı, mesleki kariyeri ve özel hayatı araştırılıyor. Peki, Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit Kocasakal nereli, kaç yaşında, evli mi? Detaylar haberimizde.";
+  // 8e1a8c91 (Haberler.com), verbatim: a real sentence follows the come-on.
+  const SAMLIOGLU =
+    "TBMM Başkanı Numan Kurtulmuş, Meclis Genel Sekreterliğine Kemal Şamlıoğlu'nu atadı. 1978'de Rize'de doğan Şamlıoğlu daha önce Milli Eğitim Bakan Yardımcılığı ve Ankara Hacı Bayram Veli Üniversitesi Genel Sekreterliği yaptı. Peki, Kemal Şamlıoğlu kimdir, hangi görevlerde bulundu? Yeni genel sekreter şu an Samsun Üniversitesinde profesör.";
+  const LEAD = "Bakan Yılmaz yeni konut kredisi paketini açıkladı ve faiz oranlarını sabit tuttu.";
+
+  it("the fixtures are what the cases below assume", () => {
+    expect(LEAD.length).toBeGreaterThanOrEqual(60);
+    expect(tidySummaryText(LEAD)).toBe(LEAD);
+  });
+
+  it("6ef586c4: the shown text ends at the last sentence in front of 'Peki' (and its CTA tail goes too)", () => {
+    expect(tidySummaryText(KOCASAKAL)).toBe(
+      "İstanbul Barosu başkanlık seçimlerinde adaylar arasında yer alan eski başkan Ümit Kocasakal, yeniden gündeme geldi. Hukukçu ve akademisyen kimliğiyle tanınan Kocasakal'ın yaşamı, mesleki kariyeri ve özel hayatı araştırılıyor.",
+    );
+  });
+
+  it("8e1a8c91: the run goes to the end of the text, a real sentence behind the come-on included", () => {
+    expect(tidySummaryText(SAMLIOGLU)).toBe(
+      "TBMM Başkanı Numan Kurtulmuş, Meclis Genel Sekreterliğine Kemal Şamlıoğlu'nu atadı. 1978'de Rize'de doğan Şamlıoğlu daha önce Milli Eğitim Bakan Yardımcılığı ve Ankara Hacı Bayram Veli Üniversitesi Genel Sekreterliği yaptı.",
+    );
+  });
+
+  it("'İşte' opens a come-on as well, in every spelling of the İ", () => {
+    for (const word of ["İşte", "İŞTE", "Işte", "işte"]) {
+      expect(tidySummaryText(`${LEAD} ${word} paketin içeriği: ilk konut için 10 yıl vade.`), word).toBe(LEAD);
+    }
+  });
+
+  it("the cut starts at the FIRST such sentence and takes every sentence behind it", () => {
+    expect(tidySummaryText(`${LEAD} Peki, ne değişecek? Bunu bilmeyen kalmadı. İşte cevaplar.`)).toBe(LEAD);
+  });
+
+  it("any complete sentence of 60 characters or more in front is enough, wherever it stands", () => {
+    expect(tidySummaryText(`Son durum. ${LEAD} Peki, şimdi ne olacak?`)).toBe(`Son durum. ${LEAD}`);
+  });
+
+  it("never empties the text: a text that opens with the come-on is left as it is", () => {
+    const opens = "Peki, İstanbul Barosu'nun yeni başkanı kim oldu? İşte seçim sonuçları ve ayrıntılar.";
+    expect(tidySummaryText(opens)).toBe(opens);
+    expect(tidySummaryText("Peki, bu iş nasıl bitecek?")).toBe("Peki, bu iş nasıl bitecek?");
+  });
+
+  it("needs a complete sentence of 60 characters or more in front: a shorter lead keeps the text", () => {
+    const short = "Bakan konuştu. Peki, şimdi ne olacak? Bunu bilen yok.";
+    expect(tidySummaryText(short)).toBe(short);
+    const lead59 = `${"a".repeat(58)}.`;
+    expect(lead59).toHaveLength(59);
+    expect(tidySummaryText(`${lead59} Peki, ne oldu?`)).toBe(`${lead59} Peki, ne oldu?`);
+    const lead60 = `${"a".repeat(59)}.`;
+    expect(lead60).toHaveLength(60);
+    expect(tidySummaryText(`${lead60} Peki, ne oldu?`)).toBe(lead60);
+  });
+
+  it("never cuts a quoted question: a 'Peki' inside an open quotation stays", () => {
+    const quoted = `${LEAD} Başkan kürsüden şunu söyledi: "Hepimiz buradayız. Peki bu iş nasıl bitecek?" Salon alkışladı.`;
+    expect(tidySummaryText(quoted)).toBe(quoted);
+    const curly = `${LEAD} Başkan kürsüden şunu söyledi: “Hepimiz buradayız. Peki bu iş nasıl bitecek?” Salon alkışladı.`;
+    expect(tidySummaryText(curly)).toBe(curly);
+  });
+
+  it("a 'Peki' behind a CLOSED quotation is a sentence start again", () => {
+    expect(tidySummaryText(`${LEAD} Başkan "yarın açıklayacağız" dedi. Peki, ne zaman?`)).toBe(
+      `${LEAD} Başkan "yarın açıklayacağız" dedi.`,
+    );
+  });
+
+  it("only a sentence that OPENS with the word counts, and only as a whole word", () => {
+    for (const text of [
+      `${LEAD} Bunu peki kim yapacak, henüz bilinmiyor.`,
+      `${LEAD} Ahmet işte bunu açıkladı.`,
+      `${LEAD} Pekiştirme çalışmaları sürüyor.`,
+      `${LEAD} Pekin ile ilişkiler gelişiyor.`,
+      `${LEAD} İştah açıcı bir gelişme yaşandı.`,
+    ]) {
+      expect(tidySummaryText(text), text).toBe(text);
+    }
+  });
+
+  it("an abbreviation, an initial or an ordinal does not start a sentence", () => {
+    const text = `${LEAD} Bunu Prof. Peki söyledi, 14. İşte de duydu.`;
+    expect(tidySummaryText(text)).toBe(text);
+  });
+
+  it("is a fixed point, and what is left ends in a sentence mark", () => {
+    for (const input of [KOCASAKAL, SAMLIOGLU, `${LEAD} Peki, ne değişecek? İşte cevaplar.`]) {
+      const once = tidySummaryText(input);
+      expect(tidySummaryText(once)).toBe(once);
+      expect(once).toMatch(/[.!?]$/);
+    }
+  });
+
+  it("stays linear on a long run of come-on sentences, cut or not", () => {
+    const cut: Gen = (n) => `${LEAD} ${"Peki, ne oldu? ".repeat(Math.ceil(n / 15))}`;
+    const kept: Gen = (n) => "Peki, ne oldu? ".repeat(Math.ceil(n / 15));
+    expectLinear(cut, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
+    expectLinear(kept, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
+  });
+});
+
+describe("tidySummaryText: a 400 or 500 character cut without an ellipsis is a clamp (h95-summaries-1)", () => {
+  // 37b2fd17 (ABC Haber, 400 characters), verbatim: ends mid-word, no ellipsis.
+  const ABC =
+    "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, emekli aylıklarına yönelik yeni bir refah düzenlemesi üzerinde çalışıldığını açıkladı. Farklı seçeneklerin değerlendirildiğini belirten Yılmaz, düzenlemenin yılbaşından önce TBMM'ye sunulmasının hedeflendiğini söyledi. NTV yayınında asgari ücret, enflasyon, fon tasfiyesi, yatırımcılara yapılacak ödemeler ve sermaye piyasalarına yönelik yeni kanun hazırlığı h";
+  const ABC_KEPT =
+    "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, emekli aylıklarına yönelik yeni bir refah düzenlemesi üzerinde çalışıldığını açıkladı. Farklı seçeneklerin değerlendirildiğini belirten Yılmaz, düzenlemenin yılbaşından önce TBMM'ye sunulmasının hedeflendiğini söyledi.";
+
+  // Complete sentences (the head, 330 characters or more), then one the cut leaves open.
+  let head = "";
+  while (head.length < 330) head += "Bu cümle tamamlandı ve sonuçlar açıklandı. ";
+  /** Exactly `n` UTF-16 units: the head, then an open sentence that ends in `last`. */
+  const cutText = (n: number, last: string): string =>
+    head + "yarım kalan cümle ".repeat(40).slice(0, n - head.length - last.length) + last;
+
+  it("the fixtures are what the cases below assume", () => {
+    expect(ABC).toHaveLength(400);
+    expect(ABC.endsWith(" h")).toBe(true);
+    for (const n of [400, 500]) expect(cutText(n, "x")).toHaveLength(n);
+  });
+
+  it("37b2fd17: ends at the last sentence end, '…hedeflendiğini söyledi.'", () => {
+    const out = tidySummaryText(ABC);
+    expect(out).toBe(ABC_KEPT);
+    expect(out.endsWith("hedeflendiğini söyledi.")).toBe(true);
+  });
+
+  it("a 500-character cut that ends in a letter backs off to the last sentence end", () => {
+    expect(tidySummaryText(cutText(500, "x"))).toBe(head.trimEnd());
+    expect(tidySummaryText(cutText(400, "x"))).toBe(head.trimEnd());
+  });
+
+  it("a cut that ends in a comma is a clamp too", () => {
+    expect(tidySummaryText(cutText(500, ","))).toBe(head.trimEnd());
+  });
+
+  it("no sentence end to back off to: the text is cut at a word boundary and ends in '…'", () => {
+    const raw = `${"kelimeler ".repeat(60).slice(0, 499)}k`;
+    expect(raw).toHaveLength(500);
+    const out = tidySummaryText(raw);
+    expect(out.endsWith("kelimeler…")).toBe(true);
+    expect(out).not.toContain("kelimelerk");
+    expect(out.length).toBeLessThan(500);
+  });
+
+  it("only exactly 400 or 500 characters: 399, 401, 499 and 501 are text", () => {
+    for (const n of [399, 401, 499, 501]) {
+      const raw = cutText(n, "x");
+      expect(raw).toHaveLength(n);
+      expect(tidySummaryText(raw), `${n}`).toBe(raw);
+    }
+  });
+
+  it("only a letter or a comma at the end: a full stop, a digit or a closing mark is not a cut", () => {
+    for (const end of [".", "!", "?", "5", ")", '"', "…"]) {
+      const raw = cutText(500, end);
+      expect(raw).toHaveLength(500);
+      expect(tidySummaryText(raw), end).toBe(raw);
+    }
+  });
+
+  it("a text that ends in a blank is not a cut, even at 500 characters", () => {
+    const raw = cutText(500, " ");
+    expect(tidySummaryText(raw)).toBe(raw.trim());
+  });
+
+  it("the marked clamp (500 characters ending '...') still works as before", () => {
+    const raw = `${cutText(500, "x").slice(0, 497)}...`;
+    expect(raw).toHaveLength(500);
+    expect(tidySummaryText(raw)).toBe(head.trimEnd());
+  });
+
+  describe("isUnmarkedClamp", () => {
+    it.each([
+      ["400 characters ending in a letter", cutText(400, "x")],
+      ["500 characters ending in a letter", cutText(500, "x")],
+      ["500 characters ending in a Turkish letter", cutText(500, "ğ")],
+      ["500 characters ending in an upper-case letter", cutText(500, "İ")],
+      ["400 characters ending in a comma", cutText(400, ",")],
+      ["the real ABC Haber text", ABC],
+    ])("is true for %s", (_label, raw) => {
+      expect(isUnmarkedClamp(raw)).toBe(true);
+    });
+
+    it.each([
+      ["399 characters", cutText(399, "x")],
+      ["401 characters", cutText(401, "x")],
+      ["500 characters ending in a full stop", cutText(500, ".")],
+      ["500 characters ending in a digit", cutText(500, "5")],
+      ["500 characters ending in a semicolon", cutText(500, ";")],
+      ["500 characters ending in a blank", cutText(500, " ")],
+      ["500 characters ending in the ellipsis character", cutText(500, "…")],
+      ["the marked clamp: 500 characters ending '...'", `${cutText(500, "x").slice(0, 497)}...`],
+      ["empty", ""],
+    ])("is false for %s", (_label, raw) => {
+      expect(isUnmarkedClamp(raw)).toBe(false);
+    });
+
+    it("never throws on a non-string", () => {
+      expect(isUnmarkedClamp(undefined as unknown as string)).toBe(false);
+      expect(isUnmarkedClamp(null as unknown as string)).toBe(false);
+      expect(isUnmarkedClamp(400 as unknown as string)).toBe(false);
+    });
+  });
+
+  it("is a fixed point", () => {
+    for (const raw of [ABC, cutText(500, "x"), cutText(500, ","), `${"kelimeler ".repeat(60).slice(0, 499)}k`]) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once)).toBe(once);
     }
   });
 });

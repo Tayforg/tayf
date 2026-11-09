@@ -1,6 +1,7 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { backOffOpenQuote, tidySummaryText, trimDanglingEnd } from "@/lib/articles/summary-tidy";
+import { normalizeSourceKind } from "@/lib/bias/config";
 import { findAgreeingMember } from "./summary-agreement";
 import type { WireSignal } from "./wire";
 import type { BiasCategory, SourceKind } from "@/types";
@@ -23,7 +24,7 @@ import type { BiasCategory, SourceKind } from "@/types";
 // Read-time tidy for feed residue (glued sentences, "Devamı için tıklayınız"
 // tails, widget heading lines, raw newlines): `tidySummaryText` is applied
 // ONLY to the `text` placed in the returned SummaryAttribution. Matching
-// (`matchingCandidates`, `findSeedMember`), the BL-13 rights gate and the wire
+// (`holdersOf`, `findSeedMember`), the BL-13 rights gate and the wire
 // majority check all compare the repaired but UNTIDIED text, because that is
 // what a member's stored description looks like; comparing tidied text would
 // let a rights-blocked or wire-copied description slip past those checks.
@@ -53,6 +54,23 @@ import type { BiasCategory, SourceKind } from "@/types";
 // and the cluster page labels it with `summaryLabel` ("Özet — Hürriyet · köşe
 // yazısı"). The flag is present only when true, so every other result is unchanged.
 // A member without a `url` (the RSS members) is never an opinion member.
+//
+// Who is credited (h95-summaries-2): the text is matched against member descriptions,
+// and several members often hold the SAME words (Anadolu Ajansı's lead, copied by an
+// aggregator that stamped it nine minutes earlier). The earliest stamp used to win
+// whatever the source was, so "Özet — Haberler.com" stood over a state agency's lead
+// (27 of 1,591 clusters). Among members with the identical text the credit now goes by
+// source kind first: a wire, then an outlet or a niche source (a missing kind reads as an
+// outlet), then an aggregator; the earliest stamp settles members of one rank. The BL-13
+// rights gate is unchanged (a member with `excerpt_allowed === false` is skipped, and
+// when every holder is blocked the Özet is hidden). Only the CREDIT moves: whether the
+// text is hidden as a wire copy is still decided on the earliest-published member that
+// holds it and may be shown (`inTimeOrder`, today's seed), and the choice of a
+// replacement by title agreement (`findAgreeingMember`) keeps that member as its seed.
+//
+// h95-summaries-1 also moves the tidy step (a Peki / İşte tail and an unmarked 400 / 500
+// character cut, summary-tidy.ts), so the text itself differs from what was stored for
+// those two shapes with or without `agreeWithTitle`.
 
 // Structural subset of ClusterDetailMember (cluster-detail-query.ts): the
 // cluster page's members satisfy this shape as-is, and lighter callers
@@ -75,13 +93,19 @@ export interface SummaryMember {
      * BL-13 per-source rights flag (migration 047): `false` when this
      * outlet has asked Tayf not to reuse its article text. `undefined`
      * (a fixture/caller predating the column) is treated as `true`
-     * (allowed) — see `matchingCandidates` below.
+     * (allowed) — see `findSeedMember` below.
      */
     excerpt_allowed?: boolean;
   };
   article: {
     published_at: string;
     content_hash: string | null;
+    /**
+     * The article's headline, read only by the title-agreement choice to tell a
+     * description that merely repeats it (an echo, h95-summaries-1) from a summary.
+     * Absent on lighter projections (the RSS members): a missing title is never an echo.
+     */
+    title?: string | null;
     description?: string | null;
     /**
      * The article's URL, read only to tell an opinion column from news
@@ -93,30 +117,60 @@ export interface SummaryMember {
 }
 
 /**
- * Members whose article description equals the summary text after both have
- * been through `repairEntityResidue` (`text` is expected to be repaired
- * already), sorted earliest-first (ties broken by publish time). Internal helper —
- * both `findSeedMember` (rights-eligible pick) and `summaryAttribution`
- * (rights-blocked-entirely detection) need the full matching set.
+ * Credit order of the members that hold the same text (h95-summaries-2): a wire
+ * agency first (its own dispatch), then an outlet or a niche source (a missing kind is
+ * an outlet), then an aggregator (it republishes). Lower is credited first.
  */
-function matchingCandidates(
-  members: SummaryMember[],
-  text: string,
-): SummaryMember[] {
-  return members
-    .filter(
-      (m) => repairEntityResidue(m.article.description ?? "").trim() === text,
-    )
-    .sort(
-      (a, b) =>
-        new Date(a.article.published_at).getTime() -
-        new Date(b.article.published_at).getTime(),
-    );
+function creditRank(m: SummaryMember): number {
+  const kind = normalizeSourceKind(m.source.kind);
+  if (kind === "wire") return 0;
+  if (kind === "aggregator") return 2;
+  return 1;
+}
+
+function publishedAtMs(m: SummaryMember): number {
+  return new Date(m.article.published_at).getTime();
 }
 
 /**
- * Member whose article description equals the summary, earliest on ties;
- * null otherwise.
+ * Members whose article description equals the summary text after both have
+ * been through `repairEntityResidue` (`text` is expected to be repaired
+ * already), in the members' own order. Internal helper: the rights-blocked-entirely
+ * detection of `summaryAttribution` reads the whole set, and the two orders below
+ * are made from it.
+ */
+function holdersOf(members: SummaryMember[], text: string): SummaryMember[] {
+  return members.filter((m) => repairEntityResidue(m.article.description ?? "").trim() === text);
+}
+
+/**
+ * The holders in credit order (h95-summaries-2): source kind first ({@link creditRank}:
+ * wire, outlet or niche, aggregator), then earliest-published (equal stamps keep the
+ * members' order; `Array.prototype.sort` is stable).
+ */
+function inCreditOrder(holders: readonly SummaryMember[]): SummaryMember[] {
+  return [...holders].sort((a, b) => creditRank(a) - creditRank(b) || publishedAtMs(a) - publishedAtMs(b));
+}
+
+/**
+ * The holders earliest-published first, equal stamps in the members' order: the order
+ * the credit followed before h95-summaries-2. Today's seed (the member the cluster's
+ * summary came from) is the first of these that may be shown, so the wire-majority
+ * hide and the title agreement keep deciding on exactly the member they decided on.
+ */
+function inTimeOrder(holders: readonly SummaryMember[]): SummaryMember[] {
+  return [...holders].sort((a, b) => publishedAtMs(a) - publishedAtMs(b));
+}
+
+/** True for a member whose source has not asked Tayf to keep its text (`undefined`, a legacy row without the column, is allowed). */
+function mayShowExcerpt(m: SummaryMember): boolean {
+  return m.source.excerpt_allowed !== false;
+}
+
+/**
+ * Member whose article description equals the summary, in credit order: a wire
+ * agency before an outlet or a niche source before an aggregator, the earliest stamp
+ * within a rank (h95-summaries-2); null otherwise.
  *
  * BL-13 rights gate: a member whose source has `excerpt_allowed === false`
  * is skipped in favor of the next matching member — that outlet's text
@@ -129,8 +183,7 @@ export function findSeedMember(
 ): SummaryMember | null {
   const text = repairEntityResidue(summary).trim();
   if (text.length === 0) return null;
-  const candidates = matchingCandidates(members, text);
-  return candidates.find((m) => m.source.excerpt_allowed !== false) ?? null;
+  return inCreditOrder(holdersOf(members, text)).find(mayShowExcerpt) ?? null;
 }
 
 /** Non-null content_hash counts among members — for finding the wire dispatch's hash. */
@@ -221,7 +274,7 @@ export function summaryAttribution({
   // instead. When there's no literal match at all (the common case —
   // `summary` wasn't copied verbatim from any current member), this does
   // not apply; that's the pre-existing "attribute to no one" path below.
-  const literalMatches = matchingCandidates(members, text);
+  const literalMatches = holdersOf(members, text);
   if (
     literalMatches.length > 0 &&
     literalMatches.every((m) => m.source.excerpt_allowed === false)
@@ -229,7 +282,12 @@ export function summaryAttribution({
     return null;
   }
 
-  const seedMember = findSeedMember(members, text);
+  // h95-summaries-2: whose words the text is (`credited`: a wire before an earlier
+  // outlet before an earlier aggregator) is not which article seeded the cluster
+  // (`seedMember`: the earliest-published match that may be shown, as before). The hide
+  // below and the title agreement go by the seed; only the label goes by the credit.
+  const credited = inCreditOrder(literalMatches).find(mayShowExcerpt) ?? null;
+  const seedMember = inTimeOrder(literalMatches).find(mayShowExcerpt) ?? null;
 
   const majorityHashes = wireMajorityHashes(members, wire);
   if (seedMember) {
@@ -253,7 +311,7 @@ export function summaryAttribution({
     });
     if (better) return attributedTo(better.text, better.member);
   }
-  return attributedTo(shown, seedMember);
+  return attributedTo(shown, credited);
 }
 
 const ELLIPSIS = "…";

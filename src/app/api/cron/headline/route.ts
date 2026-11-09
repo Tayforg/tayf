@@ -130,10 +130,25 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * than 110 or fewer than 20 characters, or a '?': a first pick at 2 members
  * keeps the floor title when no member passes, and the growth bar of 5 members
  * would leave it live; d096acf8 203 characters, 442e0395 167, e0750c57 129).
- * The route needs no change for it: the stamp above is article_count after
+ * The route needed no change for it: the stamp above is article_count after
  * every pick, so a title that still fails comes back only after further
  * growth (no loop), and a gate-failing incumbent is not protected by
  * pickNeutralTitle.
+ * Migration 184 adds two more branches: a cluster stamped at 2 or fewer members
+ * that has grown to 3 or more (a stamp of 2 used to wait for 5 members: 209
+ * clusters sat in that window, 23 of their titles would change) and a stored
+ * title in all capitals, letters and no lower case ('NEV'İN MİRASI GÜNDEM
+ * OLDU', 09f152ec; stamp and count were both 2, so no growth rule could ever
+ * offer it). This one changes the route: the re-pick used to run without
+ * { floor }, and shouting is a gate defect, so with no acceptable member the
+ * picker answered null and the cron kept and stamped the shouted title. The
+ * pick now carries { floor } when the stored title itself fails the gate
+ * (isAcceptableNeutral on the stored title and the member titles), which
+ * returns the sentence-cased member title and so takes the row out of the
+ * all-capitals branch (no loop); a stored title that passes the gate is picked
+ * exactly as before. The one residue is a shouted title with no usable member
+ * title at all: the pick is null, the row is stamped and kept, and it stays in
+ * the branch until it leaves the 14-day window.
  * There is no backfill UPDATE anywhere: existing rows heal through this
  * loop at ~20 per run, newest first. An rpc failure is logged and the run
  * still answers 200 to Vercel, but it is recorded as 599 (see SUB-STEP
@@ -877,9 +892,17 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
           // A pick that throws is treated like one that finds nothing: stamp
           // and keep the stored title. Not stamping would offer the same
           // newest rows every run and starve the rest of the set.
+          //
+          // The floor (migration 184) is for a stored title that itself fails the
+          // acceptance gate: all capitals (shouting is a gate defect, so with no
+          // acceptable member the picker answered null and the shouted title
+          // stayed for good), a long or '?' title. The pick is then a member's own
+          // wording, sentence-cased when it shouts. An acceptable stored title is
+          // picked without it, exactly as before (the margin rules of hunt 16).
           let next: string | null = null;
           try {
-            next = pickNeutralTitle(items, { incumbent: r.title_tr_neutral });
+            const storedFailsGate = !isAcceptableNeutral(r.title_tr_neutral ?? "", items.map((i) => i.title));
+            next = pickNeutralTitle(items, { incumbent: r.title_tr_neutral, floor: storedFailsGate });
           } catch (err) {
             console.error("[headline-cron] repick pick failed", r.id, err);
             captureServerException(err, { clusterId: r.id, mode });

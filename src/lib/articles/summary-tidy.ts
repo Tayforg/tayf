@@ -28,7 +28,9 @@ import {
 //     etti"), which a plain blank would run on into one sentence
 //   - a text the ingest clamp cut mid-word (500 characters ending "...") or an
 //     outlet's own feed cap cut mid-word (Haberport 202/203, Sözcü 123, Daily
-//     Sabah 183 characters ending "...")
+//     Sabah 183 characters ending "..."), and a text an outlet cut at exactly 400
+//     or 500 characters with no "..." at all ("... yeni kanun hazırlığı h", ABC
+//     Haber; h95-summaries-1)
 //   - a repaired cut that would end inside an open quotation, and a text a feed
 //     cut inside a quotation before its trailing "[…]" (h29-regress-1)
 //   - a sub-heading glued onto the body ("odaklı ziyaretİçişleri Bakanı",
@@ -40,7 +42,9 @@ import {
 //     İzmir haberleri..." ticker and a leading list marker ("- ", "• ", "▪️ ")
 //   - a newswire / byline dateline lead: "HABER MERKEZİ- ", "MADRİD (AA) - ",
 //     "BİRLEŞMİŞ MİLLETLER (BM) - ", "İSTANBUL (DHA) –" (h81-textclean-2)
-//   - a trailing "Detaylar haberimizde..." / "İşte ayrıntılar..." sentence
+//   - a trailing "Detaylar haberimizde..." / "İşte ayrıntılar..." sentence, and a
+//     run of sentences that starts with "Peki, X kimdir?" / "İşte ..." behind a
+//     complete sentence (h95-summaries-1)
 //   - a "coming soon" placeholder instead of a summary: "Ayrıntılar geliyor..."
 //     / "Detaylar gelecek...", alone or as the first line of a text that goes on
 //     with another story's headline (a72f9464); the whole summary is hidden
@@ -412,6 +416,34 @@ function hasClampSignature(raw: string): boolean {
 }
 
 /**
+ * Lengths at which an outlet cuts its own description and adds NO "..." (h95-
+ * summaries-1). Eight days of `articles` (2026-11-02 to 2026-11-09): abc-haber 400
+ * (6 rows, every one ending mid-word: "... yeni kanun hazırlığı h"), karar 500 (2) and
+ * f5-haber 500 (1) end in a letter; the only other rows of exactly 400 or 500
+ * characters without "..." end in a full stop or a question mark and are whole
+ * texts. The 500-character rows that DO end in "..." are the ingest clamp.
+ */
+const UNMARKED_CLAMP_LENGTHS: readonly number[] = [400, 500];
+
+/**
+ * True for a raw description an outlet cut with no ellipsis: exactly 400 or 500
+ * characters whose last character is a letter or a comma (a full stop, a digit, a
+ * closing mark or a blank is a text that happens to be that long). Exported for the
+ * stub check of the seed (summary-agreement.ts).
+ */
+export function isUnmarkedClamp(raw: string): boolean {
+  if (typeof raw !== "string" || !UNMARKED_CLAMP_LENGTHS.includes(raw.length)) return false;
+  const last = raw.charAt(raw.length - 1);
+  return last === "," || ANY_LETTER.test(last);
+}
+
+/** The text a clamp cut, without its "..." when it has one, or null when `raw` is not a clamp. */
+function clampBody(raw: string): string | null {
+  if (hasClampSignature(raw)) return raw.slice(0, raw.length - CLAMP_SUFFIX.length);
+  return isUnmarkedClamp(raw) ? raw : null;
+}
+
+/**
  * Repair a text the ingest clamp or an outlet feed cap cut ({@link
  * hasClampSignature}). When the clamped text holds an appended
  * ticker ({@link cutAppendedTicker}: another story's headline, never ours) the
@@ -437,10 +469,15 @@ function hasClampSignature(raw: string): boolean {
  * headline): the few words of the next paragraph are not a sentence.
  * Returns null when the text is not a clamp or nothing can be cut (a single long
  * word).
+ *
+ * h95-summaries-1: a raw text of exactly 400 or 500 characters that ends in a letter
+ * or a comma with no "..." ({@link isUnmarkedClamp}) is a clamp too and is repaired
+ * the same way, from its whole text: the last sentence end when it keeps 60% or more,
+ * else a word cut with one "…" (the partial last word dropped).
  */
 function repairClamp(raw: string): string | null {
-  if (!hasClampSignature(raw)) return null;
-  const body = raw.slice(0, raw.length - CLAMP_SUFFIX.length);
+  const body = clampBody(raw);
+  if (body === null) return null;
 
   const withoutTicker = cutAppendedTicker(body);
   if (withoutTicker !== body && withoutTicker.trim() !== "") return withoutTicker.trimEnd();
@@ -826,6 +863,79 @@ export function stripDatelineLead(s: string): string {
   const rest = afterDatelineLead(s);
   if (rest === null || rest.trim().length < MIN_DATELINE_REMAINDER) return s;
   return capitalizeFirstWord(rest);
+}
+
+// ---------------------------------------------------------------------------
+// Trailing come-on (h95-summaries-1). 6ef586c4's Özet ended "... araştırılıyor.
+// Peki, Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit Kocasakal nereli,
+// kaç yaşında, evli mi?": an outlet's search-bait question stood where the summary
+// of the story should end (9 of 985 live clusters of a week; the same shape is the
+// "İşte ..." tail). A sentence that OPENS with "Peki" or "İşte" starts a come-on,
+// and the run of sentences from the first such one to the end of the text is cut,
+// provided that
+//   - a complete sentence of {@link MIN_SENTENCE_BEFORE_COME_ON} characters or more
+//     stands in front of it (any one of the sentences in front: the text is never
+//     emptied, and a come-on behind a short lead is left to the stub / teaser checks
+//     of summary-agreement.ts);
+//   - it does not start inside an open quotation (a quoted question is the
+//     speaker's, never cut: `Başkan şunu söyledi: "Hepimiz buradayız. Peki bu iş
+//     nasıl bitecek?"`).
+// "Peki" and "İşte" count as whole words in either case and either spelling of the
+// İ ("İşte", "İŞTE", "Işte"); "peki" in the middle of a sentence, "Pekin", "Pekiştirme"
+// and "İştah" are text. A sentence ends at ". ! ? …" (and its closing marks) followed
+// by a blank, except an abbreviation's, an initial's or an ordinal's dot
+// ({@link isNonSentenceDot}). One forward pass and one balance table: linear.
+// ---------------------------------------------------------------------------
+
+/** A sentence in front of a come-on must be at least this long (code units, closing marks included). */
+const MIN_SENTENCE_BEFORE_COME_ON = 60;
+/** "peki" and "iste" are four letters: a longer or shorter run of letters is another word. */
+const COME_ON_WORD_LENGTH = 4;
+
+/** `word` in the folded spelling the come-on test reads: tr-TR lower case, "ı" as "i", "ş" as "s". */
+function foldComeOnWord(word: string): string {
+  return word.toLocaleLowerCase("tr-TR").replace(/ı/g, "i").replace(/ş/g, "s");
+}
+
+/** True when the word at `start` is exactly "Peki" or "İşte" (any case, either İ), not a prefix of a longer word. */
+function startsComeOn(s: string, start: number): boolean {
+  let end = start;
+  while (end < s.length && end - start <= COME_ON_WORD_LENGTH && isLetterOrDigit(s.charAt(end))) end++;
+  if (end - start !== COME_ON_WORD_LENGTH) return false;
+  const word = foldComeOnWord(s.slice(start, end));
+  return word === "peki" || word === "iste";
+}
+
+/**
+ * `s` (trimmed, blanks collapsed) without the run of sentences that starts at the
+ * first Peki / İşte sentence, or `s` itself when there is none that may be cut: see
+ * the section header for the three conditions. Never returns "" for a non-empty
+ * text, and a text it did not cut comes back as the same string.
+ */
+function cutTrailingComeOn(s: string): string {
+  if (s.length < MIN_SENTENCE_BEFORE_COME_ON) return s;
+  let balanced: ((end: number) => boolean) | null = null;
+  let sentenceStart = 0;
+  let longest = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (!SENTENCE_MARKS.has(s.charAt(i))) continue;
+    let end = i + 1;
+    while (end < s.length && CLOSERS.has(s.charAt(end))) end++;
+    if (end >= s.length) return s;
+    if (!isBlankChar(s.charAt(end))) continue;
+    if (isNonSentenceDot(s, i)) continue;
+    longest = Math.max(longest, end - sentenceStart);
+    let next = end;
+    while (next < s.length && isBlankChar(s.charAt(next))) next++;
+    sentenceStart = next;
+    if (longest < MIN_SENTENCE_BEFORE_COME_ON || !startsComeOn(s, next)) continue;
+    // The balances are built on first use: most texts never reach this point.
+    balanced ??= quoteBalance(s);
+    if (balanced(next)) return s.slice(0, end);
+    // A come-on inside an open quotation is left alone; the next sentence start is looked at.
+    i = next - 1;
+  }
+  return s;
 }
 
 /** `s` without a trailing ":" (and the blanks around it), left by a stripped CTA. */
@@ -1378,7 +1488,12 @@ export function stripLeadingStyleRules(description: string): string {
  *      sentence mark ("tamamlandıDevamını oku"), so step 3 runs again when 4c
  *      changed the text;
  *   4b. collapse every whitespace run to one space;
- *   5. trim.
+ *   5. trim;
+ *   6. cut a trailing come-on ({@link cutTrailingComeOn}, h95-summaries-1): the run of
+ *      sentences from the first one that opens with "Peki" or "İşte", when a complete
+ *      sentence of 60 characters or more stands in front of it and it does not start
+ *      inside an open quotation ("... araştırılıyor. Peki, X kimdir? ..." ends at
+ *      "araştırılıyor."). Never empties the text.
  *
  * Step 0 repairs a clamp with {@link cutAppendedTicker} first: foreign text is
  * never kept, so a clamped text that holds a ticker line ends where the ticker
@@ -1473,5 +1588,9 @@ export function tidySummaryText(s: string): string {
   out = out.replace(/\s+/g, " ");
 
   // 5.
-  return out.trim();
+  out = out.trim();
+
+  // 6. A trailing "Peki, X kimdir? ..." / "İşte ..." run (h95-summaries-1), on the
+  //    final text: every earlier step has put its sentence marks in place.
+  return cutTrailingComeOn(out);
 }
