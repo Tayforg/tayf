@@ -82,6 +82,18 @@ function makeFakeClient() {
   // h47-sources-1: fetch_quarantined_until is NULL unless a test sets it.
   const quarantinedUntilOf = (slug: string) =>
     supabaseFixture.quarantinedUntilBySlug[slug] ?? null;
+  // h103-sourcescores-2: the four ingest columns classifySilence reads. A slug a
+  // test does not touch is a healthy feed (200, no failures, nothing measured),
+  // which classifies as 'sessiz', never 'akış donmuş'.
+  const feedColumnsOf = (slug: string) => {
+    const f = supabaseFixture.feedBySlug[slug] ?? {};
+    return {
+      fetch_last_status: "status" in f ? (f.status ?? null) : 200,
+      fetch_fail_streak: "failStreak" in f ? (f.failStreak ?? null) : 0,
+      fetch_newest_item_at: f.newest ?? null,
+      fetch_items_count: "items" in f ? (f.items ?? null) : null,
+    };
+  };
   const sourceRows = [
     {
       id: "s-outlet",
@@ -98,6 +110,7 @@ function makeFakeClient() {
       created_at: createdAtOf("s-outlet"),
       zone_rationale_at: rationaleAtOf("s-outlet"),
       fetch_quarantined_until: quarantinedUntilOf("s-outlet"),
+      ...feedColumnsOf("s-outlet"),
     },
     {
       id: "s-aggregator",
@@ -114,6 +127,7 @@ function makeFakeClient() {
       created_at: createdAtOf("s-aggregator"),
       zone_rationale_at: rationaleAtOf("s-aggregator"),
       fetch_quarantined_until: quarantinedUntilOf("s-aggregator"),
+      ...feedColumnsOf("s-aggregator"),
     },
     {
       id: "s-wire",
@@ -130,12 +144,24 @@ function makeFakeClient() {
       created_at: createdAtOf("s-wire"),
       zone_rationale_at: rationaleAtOf("s-wire"),
       fetch_quarantined_until: quarantinedUntilOf("s-wire"),
+      ...feedColumnsOf("s-wire"),
     },
+    // h103-sourcescores-2: extra directory rows for the header-count tests; empty by default.
+    ...supabaseFixture.extraRows.map((row) => ({
+      stats: [{ count: 2 }],
+      latest: latestOf(String(row.slug)),
+      created_at: createdAtOf(String(row.slug)),
+      zone_rationale_at: rationaleAtOf(String(row.slug)),
+      fetch_quarantined_until: quarantinedUntilOf(String(row.slug)),
+      ...feedColumnsOf(String(row.slug)),
+      ...row,
+    })),
   ];
   return createSupabaseFake({
     tables: {
       // Like PostgREST, return only the columns the query selects: a page that
-      // forgets `created_at, zone_rationale_at, fetch_quarantined_until` in its select string must not
+      // forgets `created_at, zone_rationale_at, fetch_quarantined_until` (or one of the four fetch_*
+      // columns the frozen-feed verdict reads) in its select string must not
       // be rescued by a fake that hands them over anyway.
       sources: (state) => {
         // h69-jsonld-1: the newest registry_changed_at stamp, a separate one-row read of the
@@ -198,6 +224,10 @@ function makeFakeClient() {
               "created_at",
               "zone_rationale_at",
               "fetch_quarantined_until",
+              "fetch_last_status",
+              "fetch_fail_streak",
+              "fetch_newest_item_at",
+              "fetch_items_count",
             ]) {
               if (!selected.includes(column)) delete out[column];
             }
@@ -252,6 +282,22 @@ const supabaseFixture = vi.hoisted(() => ({
   rationaleBySlug: {} as Record<string, string | null>,
   /** slug -> fetch_quarantined_until (ISO); an absent slug is NULL (never quarantined). */
   quarantinedUntilBySlug: {} as Record<string, string | null>,
+  /**
+   * slug -> the ingest columns classifySilence reads (h103-sourcescores-2). A key that is absent
+   * keeps the healthy default (status 200, fail streak 0, no newest item, no item count); an
+   * explicit null models a NULL column.
+   */
+  feedBySlug: {} as Record<
+    string,
+    {
+      status?: number | null;
+      failStreak?: number | null;
+      newest?: string | null;
+      items?: number | null;
+    }
+  >,
+  /** Extra active source rows appended to the three fixed ones (empty by default). */
+  extraRows: [] as Array<Record<string, unknown> & { slug: string }>,
   /** Rows of source_zone_history (the reader asks for the newest one). */
   history: [] as Array<{ changed_at: string }>,
   /** When set, the source_zone_history read resolves { data: null, error: { message } }. */
@@ -293,6 +339,7 @@ vi.mock("@/lib/supabase/server", () => ({
 import SourcesPage, {
   SourceDirectory,
   SourceDirectoryWithCounts,
+  countFrozenSources,
   deriveDirectoryStats,
   registryModifiedAt,
 } from "./page";
@@ -413,6 +460,8 @@ beforeEach(() => {
   supabaseFixture.createdAtBySlug = {};
   supabaseFixture.rationaleBySlug = { "s-aggregator": "2025-06-15T00:00:00Z" };
   supabaseFixture.quarantinedUntilBySlug = {};
+  supabaseFixture.feedBySlug = {};
+  supabaseFixture.extraRows = [];
   supabaseFixture.history = [];
   supabaseFixture.historyError = null;
   supabaseFixture.sourcesError = null;
@@ -1914,6 +1963,483 @@ describe("/sources page source -- quarantine is computed inside the cached reade
   });
 
   it("keeps cacheLife as one literal per branch (no conditional argument)", () => {
+    expect(code).toMatch(/if \(r\.ok\) cacheLife\("source-directory"\);\s*else cacheLife\("minutes"\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h103-sourcescores-2: /kaynaklar/durum and the source profile call a feed that
+// answers but delivers nothing new "akış donmuş", yet /sources gave Ayandon,
+// Investing.com TR and Platform 24 no marker at all ("son 7 günde 0 haber"
+// next to a bare card) and its header counted only the quarantined feeds. The
+// directory read now also selects fetch_last_status, fetch_fail_streak,
+// fetch_newest_item_at and fetch_items_count and stamps `feedFrozen` on each
+// row at cache fill time with the same `nowMs` it already uses for
+// `quarantined` (classifySilence, unchanged): the page body stays clock-free.
+// A frozen card carries an amber "Akış donmuş" marker linking to
+// /kaynaklar/durum (a quarantined card keeps only "Akış alınamıyor"), and the
+// header gains "{m} kaynağın beslemesi donmuş: ..." in the same paragraph.
+// ---------------------------------------------------------------------------
+
+describe("/sources page -- frozen feeds are visible (h103-sourcescores-2)", () => {
+  const FROZEN_NOW = Date.parse("2026-11-09T11:00:00.000Z");
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(FROZEN_NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const FROZEN_NEWEST = "2026-10-02T14:41:30Z";
+  const inOneHour = new Date(FROZEN_NOW + 3_600_000).toISOString();
+  const MARKER = "Akış donmuş";
+  const QUARANTINE_MARKER = "Akış alınamıyor";
+  const FROZEN_SENTENCE = "kaynağın beslemesi donmuş: yanıt veriyor ama yeni haber gelmiyor.";
+  const QUARANTINE_SENTENCE = "kaynağın beslemesi şu anda alınamıyor.";
+  const MARKER_LINK = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>Akış donmuş<\/a>/;
+  const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+  type FrozenRow = { slug: string; feedFrozen: boolean; quarantined: boolean } & Record<
+    string,
+    unknown
+  >;
+
+  async function groupedProps() {
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    return (child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0]).grouped;
+  }
+  async function groupedRows(): Promise<FrozenRow[]> {
+    return Object.values(await groupedProps()).flat() as unknown as FrozenRow[];
+  }
+  const frozenOf = (rows: FrozenRow[], slug: string) => rows.find((r) => r.slug === slug)?.feedFrozen;
+  async function fullText(): Promise<string> {
+    return (await collectText(await SourcesPage())).join("");
+  }
+  async function cardsMarkup(): Promise<string> {
+    return renderToStaticMarkup(
+      createElement(SourceDirectory, { grouped: await groupedProps(), countLabel: "0 haber" }),
+    );
+  }
+
+  it("(a) status 200, fail streak 0, newest item 2026-10-02, not quarantined: feedFrozen is true and the card says 'Akış donmuş' linking to /kaynaklar/durum", async () => {
+    supabaseFixture.feedBySlug = {
+      "s-outlet": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+    };
+    const rows = await groupedRows();
+    expect(frozenOf(rows, "s-outlet")).toBe(true);
+    expect(frozenOf(rows, "s-aggregator")).toBe(false);
+    expect(frozenOf(rows, "s-wire")).toBe(false);
+
+    const markup = await cardsMarkup();
+    expect(MARKER_LINK.test(markup)).toBe(true);
+    expect(countOf(markup, MARKER)).toBe(1);
+    expect(countOf(await fullText(), MARKER)).toBe(1);
+  });
+
+  it("(b) status 304 with an item count of 0 is frozen, whatever the newest item says (an empty feed)", async () => {
+    supabaseFixture.feedBySlug = { "s-wire": { status: 304, failStreak: 0, newest: null, items: 0 } };
+    const rows = await groupedRows();
+    expect(frozenOf(rows, "s-wire")).toBe(true);
+    expect(countOf(await cardsMarkup(), MARKER)).toBe(1);
+  });
+
+  it("(c) a feed item 10 h old is not frozen and the card renders no marker", async () => {
+    supabaseFixture.feedBySlug = {
+      "s-outlet": {
+        status: 200,
+        failStreak: 0,
+        newest: new Date(FROZEN_NOW - 10 * 3_600_000).toISOString(),
+        items: 40,
+      },
+    };
+    const rows = await groupedRows();
+    expect(rows.every((r) => r.feedFrozen === false)).toBe(true);
+    const markup = await cardsMarkup();
+    expect(markup).not.toContain(MARKER);
+    expect(markup).not.toContain("/kaynaklar/durum");
+    expect(await fullText()).not.toContain(MARKER);
+  });
+
+  it("the 72 h edge is strict, as in classifySilence: exactly 72 h old still delivers, one millisecond older is frozen", async () => {
+    const at = (ageMs: number) => new Date(FROZEN_NOW - ageMs).toISOString();
+    const seventyTwoHours = 72 * 3_600_000;
+    supabaseFixture.feedBySlug = {
+      "s-outlet": { status: 200, failStreak: 0, newest: at(seventyTwoHours), items: 3 },
+      "s-wire": { status: 200, failStreak: 0, newest: at(seventyTwoHours + 1), items: 3 },
+    };
+    const rows = await groupedRows();
+    expect(frozenOf(rows, "s-outlet")).toBe(false);
+    expect(frozenOf(rows, "s-wire")).toBe(true);
+  });
+
+  it("(d) a quarantined row with a stale newest item is not frozen: feedFrozen false and only 'Akış alınamıyor' renders", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour };
+    supabaseFixture.feedBySlug = {
+      "s-outlet": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+    };
+    const rows = await groupedRows();
+    const row = rows.find((r) => r.slug === "s-outlet")!;
+    expect(row.quarantined).toBe(true);
+    expect(row.feedFrozen).toBe(false);
+
+    const markup = await cardsMarkup();
+    expect(countOf(markup, QUARANTINE_MARKER)).toBe(1);
+    expect(markup).not.toContain(MARKER);
+    const text = await fullText();
+    expect(countOf(text, QUARANTINE_MARKER)).toBe(1);
+    expect(text).not.toContain(MARKER);
+    expect(text).not.toContain(FROZEN_SENTENCE);
+  });
+
+  it("(e) a failure streak of 2 with status 200 is not frozen (erişim yok), and neither is a 4xx/5xx or a never-fetched feed", async () => {
+    supabaseFixture.feedBySlug = {
+      "s-outlet": { status: 200, failStreak: 2, newest: FROZEN_NEWEST, items: 12 },
+      "s-aggregator": { status: 403, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+      "s-wire": { status: null, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+    };
+    const rows = await groupedRows();
+    expect(rows.every((r) => r.feedFrozen === false)).toBe(true);
+    expect(await cardsMarkup()).not.toContain(MARKER);
+  });
+
+  it("a NULL fail streak reads as 0 (the `?? 0` of the profile query), a NULL newest with a NULL count is never frozen", async () => {
+    supabaseFixture.feedBySlug = {
+      "s-outlet": { status: 200, failStreak: null, newest: FROZEN_NEWEST, items: 12 },
+      "s-wire": { status: 200, failStreak: 0, newest: null, items: null },
+    };
+    const rows = await groupedRows();
+    expect(frozenOf(rows, "s-outlet")).toBe(true);
+    expect(frozenOf(rows, "s-wire")).toBe(false);
+  });
+
+  it("an aggregator's frozen feed is marked too: the marker does not depend on the kind", async () => {
+    supabaseFixture.feedBySlug = {
+      "s-aggregator": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 5 },
+    };
+    expect(frozenOf(await groupedRows(), "s-aggregator")).toBe(true);
+    expect(countOf(await cardsMarkup(), MARKER)).toBe(1);
+  });
+
+  it("(f) with 2 quarantined and 3 frozen sources the header prints both sentences in ONE paragraph with one /kaynaklar/durum link", async () => {
+    supabaseFixture.extraRows = [
+      {
+        id: "s-extra-a",
+        name: "Ekstra A",
+        slug: "s-extra-a",
+        url: "https://example.com/a",
+        rss_url: "https://example.com/a/rss",
+        bias: "opposition",
+        logo_url: null,
+        active: true,
+        kind: "outlet",
+      },
+      {
+        id: "s-extra-b",
+        name: "Ekstra B",
+        slug: "s-extra-b",
+        url: "https://example.com/b",
+        rss_url: "https://example.com/b/rss",
+        bias: "opposition",
+        logo_url: null,
+        active: true,
+        kind: "niche",
+      },
+    ];
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour, "s-extra-a": inOneHour };
+    const frozen = { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 7 };
+    supabaseFixture.feedBySlug = {
+      "s-aggregator": frozen,
+      "s-wire": frozen,
+      "s-extra-b": frozen,
+      // a quarantined source's feed columns are stale too, and must not be counted twice
+      "s-outlet": frozen,
+      "s-extra-a": frozen,
+    };
+
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join("");
+    expect(text).toContain(`2 ${QUARANTINE_SENTENCE}`);
+    expect(text).toContain(`3 ${FROZEN_SENTENCE}`);
+    expect(text.indexOf(`2 ${QUARANTINE_SENTENCE}`)).toBeLessThan(text.indexOf(`3 ${FROZEN_SENTENCE}`));
+
+    const headers = await paragraphsContaining(tree, FROZEN_SENTENCE);
+    expect(headers).toHaveLength(1);
+    expect((await collectText(headers[0])).join("")).toContain(QUARANTINE_SENTENCE);
+    expect(await collectHrefs(headers[0])).toEqual(["/kaynaklar/durum"]);
+    expect(countOf(await cardsMarkup(), MARKER)).toBe(3);
+    expect(countOf(await cardsMarkup(), QUARANTINE_MARKER)).toBe(2);
+  });
+
+  it("(f) with 0 frozen sources the header prints only the existing quarantine sentence, unchanged", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour, "s-wire": inOneHour };
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join("");
+    expect(text).toContain(`2 ${QUARANTINE_SENTENCE}`);
+    expect(text).not.toContain("donmuş");
+    const headers = await paragraphsContaining(tree, QUARANTINE_SENTENCE);
+    expect(headers).toHaveLength(1);
+    expect(await collectHrefs(headers[0])).toEqual(["/kaynaklar/durum"]);
+  });
+
+  it("(f) with frozen sources but nothing quarantined the header still appears: the frozen sentence and the Kaynak durumu link", async () => {
+    supabaseFixture.feedBySlug = {
+      "s-aggregator": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 7 },
+    };
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join("");
+    expect(text).toContain(`1 ${FROZEN_SENTENCE}`);
+    expect(text).not.toContain("şu anda alınamıyor");
+    const headers = await paragraphsContaining(tree, FROZEN_SENTENCE);
+    expect(headers).toHaveLength(1);
+    expect(await collectHrefs(headers[0])).toEqual(["/kaynaklar/durum"]);
+    expect((await collectText(headers[0])).join("")).toContain("Kaynak durumu");
+  });
+
+  it("with m = 0 and k = 0 the header adds nothing at all", async () => {
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join("");
+    expect(text).not.toContain("donmuş");
+    expect(text).not.toContain("alınamıyor");
+    expect(await paragraphsContaining(tree, "beslemesi")).toEqual([]);
+  });
+
+  it("(g) a SourceRow exposes no raw fetch_* key, only the two booleans", async () => {
+    supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour };
+    supabaseFixture.feedBySlug = {
+      "s-wire": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+    };
+    const rows = await groupedRows();
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(Object.keys(row).filter((k) => k.startsWith("fetch_"))).toEqual([]);
+      expect(typeof row.feedFrozen).toBe("boolean");
+      expect(typeof row.quarantined).toBe("boolean");
+    }
+  });
+
+  it("does not change the header numbers: the title count and the N/M pair ignore frozen feeds", async () => {
+    const baseline = findPropString(await SourcesPage(), "subtitle");
+    supabaseFixture.feedBySlug = {
+      "s-outlet": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+      "s-wire": { status: 304, failStreak: 0, newest: null, items: 0 },
+    };
+    const tree = await SourcesPage();
+    expect(findPropString(tree, "subtitle")).toBe(baseline);
+    expect((await collectText(tree)).join("")).toContain("0/3");
+  });
+
+  it("the verdict is part of the cached rows: rendering ten hours later still shows the fill-time marker", async () => {
+    supabaseFixture.feedBySlug = {
+      "s-outlet": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+    };
+    const grouped = await groupedProps();
+    vi.setSystemTime(FROZEN_NOW + 10 * 3_600_000);
+    const markup = renderToStaticMarkup(createElement(SourceDirectory, { grouped, countLabel: "0 haber" }));
+    expect(countOf(markup, MARKER)).toBe(1);
+  });
+
+  it("a read that omitted any of the four fetch_* columns from its select would not mark anything (the fake returns only selected columns)", async () => {
+    // The fake mirrors PostgREST: a column that is not in the select string is not on the row, so
+    // a reader that forgot one of the four could never reach 'akis_donmus'. The positive cases
+    // above would fail; this pins the select string itself.
+    const reader = functionSource(stripComments(PAGE_SOURCE), "readSourcesDirectory");
+    for (const column of [
+      "fetch_last_status",
+      "fetch_fail_streak",
+      "fetch_newest_item_at",
+      "fetch_items_count",
+    ]) {
+      expect(reader, column).toMatch(new RegExp(`"[^"]*\\b${column}\\b[^"]*"`));
+    }
+  });
+
+  // correctness-1: only a SILENT source is classified, exactly as on
+  // /kaynaklar/durum (toFeedStatusRows) and the profile (source-profile-query).
+  // A source with a stored article inside FEED_YIELD_WINDOW_MS counts as
+  // delivering in the DenominatorNote, so it is never also "akış donmuş".
+  describe("a source with a recent stored article is delivering, never frozen (correctness-1)", () => {
+    const HOUR = 3_600_000;
+    const storedAgo = (ageMs: number) => new Date(FROZEN_NOW - ageMs).toISOString();
+
+    it("(1) an empty poll (items 0, no newest item) with a stored article 1 h old is not frozen: no marker, no header sentence", async () => {
+      supabaseFixture.feedBySlug = {
+        "s-outlet": { status: 200, failStreak: 0, newest: null, items: 0 },
+      };
+      supabaseFixture.latestBySlug = { "s-outlet": storedAgo(HOUR) };
+      const rows = await groupedRows();
+      expect(frozenOf(rows, "s-outlet")).toBe(false);
+      expect(await cardsMarkup()).not.toContain(MARKER);
+      expect(await fullText()).not.toContain(FROZEN_SENTENCE);
+    });
+
+    it("(2) a stale fetch_newest_item_at with 12 items and a stored article 1 h old is not frozen", async () => {
+      supabaseFixture.feedBySlug = {
+        "s-outlet": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+      };
+      supabaseFixture.latestBySlug = { "s-outlet": storedAgo(HOUR) };
+      const rows = await groupedRows();
+      expect(frozenOf(rows, "s-outlet")).toBe(false);
+      expect(await cardsMarkup()).not.toContain(MARKER);
+      expect(await fullText()).not.toContain(FROZEN_SENTENCE);
+    });
+
+    it("(3) the delivering edge is strict: a stored article exactly 72 h old is delivering, 72 h + 1 ms is frozen, none at all stays frozen", async () => {
+      const stale = { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 };
+      supabaseFixture.feedBySlug = {
+        "s-outlet": stale,
+        "s-wire": stale,
+        "s-aggregator": stale,
+      };
+      supabaseFixture.latestBySlug = {
+        "s-outlet": storedAgo(72 * HOUR),
+        "s-wire": storedAgo(72 * HOUR + 1),
+        // s-aggregator: no stored article in the window
+      };
+      const rows = await groupedRows();
+      expect(frozenOf(rows, "s-outlet")).toBe(false);
+      expect(frozenOf(rows, "s-wire")).toBe(true);
+      expect(frozenOf(rows, "s-aggregator")).toBe(true);
+    });
+
+    it("a future-dated stored article does not count as delivering (the same guard as deriveDirectoryStats), so the frozen verdict stands", async () => {
+      supabaseFixture.feedBySlug = {
+        "s-outlet": { status: 200, failStreak: 0, newest: FROZEN_NEWEST, items: 12 },
+      };
+      supabaseFixture.latestBySlug = { "s-outlet": new Date(FROZEN_NOW + HOUR).toISOString() };
+      expect(frozenOf(await groupedRows(), "s-outlet")).toBe(true);
+    });
+  });
+});
+
+describe("countFrozenSources (h103-sourcescores-2)", () => {
+  const row = (feedFrozen: boolean | undefined, quarantined = false) =>
+    ({ ...GZT, feedFrozen, quarantined }) as unknown as GroupedSources["pro_government"][number];
+
+  it("counts the rows stamped feedFrozen across every bias bucket, of every kind", () => {
+    const grouped = {
+      pro_government: [row(true), row(false), { ...row(true), kind: "aggregator" }],
+      opposition: [{ ...row(true), kind: "niche" }, row(undefined)],
+    } as unknown as GroupedSources;
+    expect(countFrozenSources(grouped)).toBe(3);
+  });
+
+  it("is zero for an empty or partial grouping and for rows that predate the field", () => {
+    expect(countFrozenSources({})).toBe(0);
+    expect(countFrozenSources({ center: [] } as unknown as GroupedSources)).toBe(0);
+    expect(countFrozenSources({ center: [row(undefined)] } as unknown as GroupedSources)).toBe(0);
+  });
+});
+
+describe("SourceDirectory -- the 'Akış donmuş' card marker (h103-sourcescores-2)", () => {
+  const render = (row: Record<string, unknown>) =>
+    renderToStaticMarkup(
+      createElement(SourceDirectory, {
+        grouped: { pro_government: [{ ...GZT, ...row }] } as unknown as GroupedSources,
+        countLabel: "0 haber",
+      }),
+    );
+  const MARKER_LINK = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>Akış donmuş<\/a>/;
+  const classOf = (tag: string) =>
+    (/\bclass="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/).filter(Boolean);
+
+  it("a frozen card carries a link to /kaynaklar/durum named 'Akış donmuş' with the explanatory title", () => {
+    const markup = render({ feedFrozen: true });
+    expect(MARKER_LINK.test(markup)).toBe(true);
+    const tag = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>/.exec(markup)?.[0] ?? "";
+    expect(tag).toContain('title="Besleme yanıt veriyor ama yeni haber gelmiyor"');
+  });
+
+  it("the marker sits beside the profile link, never inside it (anchors cannot nest)", () => {
+    const markup = render({ feedFrozen: true });
+    const profileOpen = markup.indexOf('href="/source/gzt"');
+    const profileClose = markup.indexOf("</a>", profileOpen);
+    const marker = MARKER_LINK.exec(markup);
+    expect(profileOpen).toBeGreaterThan(-1);
+    expect(marker).not.toBeNull();
+    expect(marker!.index).toBeGreaterThan(profileClose);
+    expect(markup.match(/href="\/source\/gzt"/g)).toHaveLength(1);
+  });
+
+  it("the marker is a 24 px target (WCAG 2.5.8) with the amber pill, one-line, and no rose styling", () => {
+    const tag = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>/.exec(render({ feedFrozen: true }))?.[0] ?? "";
+    const tokens = classOf(tag);
+    for (const token of [
+      "inline-flex",
+      "items-center",
+      "min-h-6",
+      "whitespace-nowrap",
+      "rounded-full",
+      "border-amber-500/30",
+      "bg-amber-500/15",
+      "text-amber-900",
+      "dark:text-amber-300",
+    ]) {
+      expect(tokens).toContain(token);
+    }
+    expect(tokens.filter((t) => t.includes("rose"))).toEqual([]);
+    expect(tokens.filter((t) => t.includes("opacity-"))).toEqual([]);
+  });
+
+  it("a card that is both quarantined and frozen shows only 'Akış alınamıyor', never both markers", () => {
+    const markup = render({ quarantined: true, feedFrozen: true });
+    expect(markup).toContain("Akış alınamıyor");
+    expect(markup).not.toContain("Akış donmuş");
+    expect(markup.match(/href="\/kaynaklar\/durum"/g)).toHaveLength(1);
+  });
+
+  it("a healthy card (false, or a row that predates the field) renders no marker and no /kaynaklar/durum link", () => {
+    for (const feedFrozen of [false, undefined]) {
+      const markup = render({ feedFrozen, quarantined: false });
+      expect(markup).not.toContain("Akış donmuş");
+      expect(markup).not.toContain("/kaynaklar/durum");
+    }
+  });
+});
+
+describe("/sources page source -- the frozen verdict is computed inside the cached reader (h103-sourcescores-2)", () => {
+  const code = stripComments(PAGE_SOURCE);
+  const reader = functionSource(code, "readSourcesDirectory");
+
+  it("derives feedFrozen with classifySilence from the shared module, fed the same fill-time nowMs and the row's quarantine verdict", () => {
+    expect(code).toMatch(
+      /import\s*\{[^}]*\bclassifySilence\b[^}]*\}\s*from\s*"@\/lib\/sources\/silence-reason"/,
+    );
+    expect(reader).toMatch(/\bclassifySilence\(/);
+    expect(reader).toMatch(/\bnowMs,?\s*\)\s*===\s*"akis_donmus"/);
+    expect(reader).toMatch(/!\s*quarantined\b/);
+  });
+
+  it("classifies only a silent source: the same delivering predicate as deriveDirectoryStats gates feedFrozen (correctness-1)", () => {
+    expect(reader).toMatch(/!\s*delivering\b/);
+    expect(reader).toMatch(/\bnowMs\s*-\s*lastMs\s*<=\s*FEED_YIELD_WINDOW_MS\b/);
+    expect(reader).toMatch(/\blastMs\s*<=\s*nowMs\b/);
+  });
+
+  it("drops the four raw fetch_* columns from the row, like fetch_quarantined_until", () => {
+    // The destructure that feeds `rest` renames every raw column (`column: local`), so none is
+    // spread into SourceRow. Only that statement is searched: the row type also names the columns.
+    const destructure = /const\s*\{([^}]*)\}\s*=\s*source\s*;/.exec(reader)?.[1] ?? "";
+    expect(destructure).toMatch(/\.\.\.rest\b/);
+    for (const column of [
+      "fetch_quarantined_until",
+      "fetch_last_status",
+      "fetch_fail_streak",
+      "fetch_newest_item_at",
+      "fetch_items_count",
+    ]) {
+      expect(destructure, column).toMatch(new RegExp(`\\b${column}\\s*:\\s*\\w+`));
+    }
+  });
+
+  it("adds no clock read of its own: the reader keeps its two Date.now() calls and the body none", () => {
+    expect(reader.match(/\bDate\.now\s*\(/g)).toHaveLength(2);
+    const body = code.replace(reader, "");
+    expect(body.match(/\bDate\.now\s*\(|\bnew Date\(\s*\)/g)).toBeNull();
+  });
+
+  it("keeps cacheLife as one literal per branch (untouched)", () => {
     expect(code).toMatch(/if \(r\.ok\) cacheLife\("source-directory"\);\s*else cacheLife\("minutes"\);/);
   });
 });

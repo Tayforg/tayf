@@ -1026,12 +1026,16 @@ describe("/metodoloji page: Kaynak göstergeleri", () => {
     expect(text).toContain(
       `Son ${W} günde yayımlanan haber sayısının ${W}’a bölümü; etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati).`,
     );
+    // h103-sourcescores-1: the share counts every cluster the source is in, not
+    // only the ones the wire gate flags, so the definition carries no gate.
     expect(text).toContain(
-      `(kaynak başına bir haber alındığında en az 3 haber ve farklı içerik parmak izi oranı en fazla %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)})`,
+      "Kaynağın yer aldığı haber kümelerinden, ilk haberinin başlığı ve özeti başka bir kaynağın haberiyle birebir aynı (aynı parmak izi) olanların payı. Küme büyüklüğü aranmaz; toplayıcı siteler sayılmaz.",
     );
     expect(text).toContain(
-      "başlığı ve özeti başka bir kaynakla aynı olanların payı. Karşılaştırma başlık ve özetin parmak iziyle yapılır; haber gövdesi karşılaştırılmaz.",
+      "Karşılaştırma başlık ve özetin parmak iziyle yapılır; haber gövdesi karşılaştırılmaz.",
     );
+    expect(text).not.toContain("kaynak başına bir haber alındığında en az 3 haber");
+    expect(text).not.toContain("ajans dağıtımı sayılan kümelerde");
     expect(text).toContain(
       `Yön belirtmez: başlık ve özeti ilk yayımlayan da aynen kullanan da sayılır; ajans haberi kullanmak olağan bir yayıncılık pratiğidir. En az ${KARNE_MIN_CLUSTERS} haber kümesi gerekir.`,
     );

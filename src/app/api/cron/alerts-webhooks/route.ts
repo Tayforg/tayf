@@ -170,7 +170,7 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
   const nowMs = Date.now();
   let items: AlertItem[];
   try {
-    items = await getAlertItems({
+    const result = await getAlertItems({
       sinceIso: new Date(nowMs - ALERT_WINDOW_MS).toISOString(),
       limit: ALERT_LIMIT,
       health,
@@ -178,6 +178,15 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
       // use the full 8 s statement_timeout instead of aborting the tick.
       profile: "batch",
     });
+    items = result.items;
+    if (result.truncated) {
+      // No data in the message. The 24 h window holds about 40 candidates
+      // against the 1000-row cap (2026-11-09), so this firing means the
+      // candidate pull outgrew it, not a normal tick.
+      console.warn(
+        "[alerts-webhooks] silent candidate pull truncated at its row cap; older one_zone_silent alerts of this window may be missing this tick",
+      );
+    }
   } catch (err) {
     return apiServerError(err);
   }

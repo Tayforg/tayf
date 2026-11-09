@@ -59,7 +59,11 @@ function blockAfter(text: string, head: RegExp): string | null {
 
 describe("NewClustersPill -- server render", () => {
   const markup = renderToStaticMarkup(
-    <NewClustersPill newestPublished="2026-09-18T10:00:00.000Z" knownIds={[]} />,
+    <NewClustersPill
+      newestPublished="2026-09-18T10:00:00.000Z"
+      floorPublished={null}
+      knownIds={[]}
+    />,
   );
 
   it("renders a polite status live region", () => {
@@ -80,7 +84,7 @@ describe("NewClustersPill -- server render", () => {
 
   it("renders the same empty region when the page has no rows at all", () => {
     const empty = renderToStaticMarkup(
-      <NewClustersPill newestPublished={null} knownIds={[]} />,
+      <NewClustersPill newestPublished={null} floorPublished={null} knownIds={[]} />,
     );
     expect(empty).toContain('role="status"');
     expect(empty).not.toContain("<button");
@@ -477,5 +481,125 @@ describe("NewClustersPill -- survives a hidden Activity boundary (react-L1, sour
     const block = blockAfter(body, /if\s*\(\s*deadline\.current\?\.seq\s*!==\s*seq\s*\)\s*\{/) ?? "";
     expect(block).toContain(".focus(");
     expect(block).not.toMatch(/window\.setTimeout/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h103-timeline-1: the pill used to skip every unknown head row older than the
+// page's newest row, but a cluster becomes visible when its SECOND source is
+// ingested (median 39 min after first_published), so about half of all new
+// clusters landed below the newest row and appeared silently. The count now uses
+// a floor at the page's 50th row (`floorPublished`), and the poll result is keyed
+// by the page signature so a refresh that only inserts late rows cannot keep an
+// old count. The counting itself is tested in timeline-head.test.ts; no jsdom
+// here, so the wiring is pinned with source guards.
+// ---------------------------------------------------------------------------
+
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p1: string) => p1 + " ".repeat(m.length - p1.length));
+}
+
+describe("NewClustersPill -- counts against the page's 50th row, not its newest (h103-timeline-1, source guard)", () => {
+  const code = stripComments(
+    readFileSync(resolve(__dirname, "new-clusters-pill.tsx"), "utf8"),
+  );
+  const pageCode = stripComments(
+    readFileSync(resolve(__dirname, "../../app/timeline/page.tsx"), "utf8"),
+  );
+
+  /** The call `countNewClusters( ... )` inside the poller's onRows. */
+  const countCall = (() => {
+    const at = code.indexOf("countNewClusters(");
+    if (at === -1) return "";
+    const end = closeOf(code, at + "countNewClusters".length);
+    return end === -1 ? "" : code.slice(at, end + 1);
+  })();
+
+  it("finds the countNewClusters call (so the guards below are not vacuous)", () => {
+    expect(countCall).not.toBe("");
+    expect(countCall).toMatch(/knownIds/);
+  });
+
+  it("the pill takes a floorPublished prop: string | null", () => {
+    expect(code).toMatch(/floorPublished:\s*string\s*\|\s*null\s*;/);
+    // Destructured from the props, next to the other two.
+    expect(code).toMatch(
+      /export function NewClustersPill\(\{[^}]*\bfloorPublished\b[^}]*\}: NewClustersPillProps\)/,
+    );
+  });
+
+  it("holds floorPublished in the `latest` ref the poller reads", () => {
+    const refInit = /const latest = useRef\(\{([^}]*)\}\)/.exec(code)?.[1] ?? "";
+    expect(refInit).toMatch(/\bfloorPublished\b/);
+    expect(refInit).toMatch(/\bnewestPublished\b/);
+    expect(refInit).toMatch(/\bknownIds\b/);
+    const assign = /latest\.current\s*=\s*\{([^}]*)\}/.exec(code)?.[1] ?? "";
+    expect(assign).toMatch(/\bfloorPublished\b/);
+  });
+
+  it("passes floorPublished (not newestPublished) to countNewClusters", () => {
+    expect(countCall).toMatch(/\bfloorPublished\b/);
+    expect(countCall).not.toMatch(/\bnewestPublished\b/);
+    expect(countCall).not.toMatch(/\bnewest\b/);
+  });
+
+  it("Hit carries the page signature: { sig: string; count: number }", () => {
+    expect(code).toMatch(/type\s+Hit\s*=\s*\{\s*sig:\s*string;\s*count:\s*number\s*\}/);
+    expect(code).not.toMatch(/\bhit\.newest\b/);
+    expect(code).not.toMatch(/\bprev\.newest\b/);
+  });
+
+  it("the poll result is stamped with pageSignature of the props it was counted against", () => {
+    const onRows = /onRows:\s*\(rows\)\s*=>\s*\{([\s\S]*?)\n\s{6}\},/.exec(code)?.[1] ?? "";
+    expect(onRows).not.toBe("");
+    expect(onRows).toMatch(/pageSignature\(/);
+    expect(onRows).toMatch(/setHit\(/);
+    expect(onRows).toMatch(/\bsig\b/);
+  });
+
+  it("the visible count compares hit.sig with pageSignature(newestPublished, knownIds)", () => {
+    expect(code).toMatch(
+      /const count =\s*hit !== null && hit\.sig === pageSignature\(\s*newestPublished\s*,\s*knownIds\s*\)\s*\?\s*hit\.count\s*:\s*0/,
+    );
+  });
+
+  // page.tsx -----------------------------------------------------------------
+
+  const pillElement = /<NewClustersPill\b([\s\S]*?)\/>/.exec(pageCode)?.[1] ?? "";
+
+  it("finds the <NewClustersPill> element in page.tsx", () => {
+    expect(pillElement).not.toBe("");
+    expect(pillElement).toMatch(/newestPublished=/);
+    expect(pillElement).toMatch(/knownIds=/);
+  });
+
+  it("page.tsx passes floorPublished derived from rows[TIMELINE_HEAD_LIMIT - 1], null for a shorter page", () => {
+    expect(pillElement).toMatch(
+      /floorPublished=\{\s*rows\[\s*TIMELINE_HEAD_LIMIT\s*-\s*1\s*\]\?\.first_published\s*\?\?\s*null\s*\}/,
+    );
+  });
+
+  it("page.tsx still passes the first TIMELINE_HEAD_LIMIT ids and the newest row, and never all 200 ids", () => {
+    expect(pillElement).toMatch(/knownIds=\{\s*rows\.slice\(\s*0\s*,\s*TIMELINE_HEAD_LIMIT\s*\)/);
+    expect(pillElement).toMatch(/newestPublished=\{\s*rows\[0\]\?\.first_published\s*\?\?\s*null\s*\}/);
+  });
+
+  it("the floor expression yields the 50th row's first_published, and null below 50 rows", () => {
+    // The expression as page.tsx writes it, evaluated on arrays of both sizes.
+    const expr = /floorPublished=\{([^}]*)\}/.exec(pillElement)?.[1] ?? "";
+    expect(expr).not.toBe("");
+    const evaluate = new Function(
+      "rows",
+      "TIMELINE_HEAD_LIMIT",
+      `return ${expr};`,
+    ) as (rows: Array<{ first_published: string }>, limit: number) => string | null;
+    const mk = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ first_published: `t${i}` }));
+    expect(evaluate(mk(200), 50)).toBe("t49");
+    expect(evaluate(mk(50), 50)).toBe("t49");
+    expect(evaluate(mk(49), 50)).toBeNull();
+    expect(evaluate(mk(0), 50)).toBeNull();
   });
 });

@@ -646,16 +646,30 @@ describe("buildReliabilityView", () => {
       expect(row.label).toBe("Başka kaynaklarla aynı başlık ve özet");
       expect(row.how).toContain("başlığı ve özeti");
       expect(row.how).toContain("haber gövdesi karşılaştırılmaz");
-      expect(`${row.label} ${row.how}`).not.toMatch(/birebir|aynı metin/i);
+      // "birebir aynı" describes the title + summary fingerprint; the article
+      // text itself is never claimed to be identical.
+      expect(`${row.label} ${row.how}`).not.toMatch(/aynı metin|birebir metin|birebir aynı metin/i);
     });
 
-    it("is the wire-copy share of clusters", () => {
+    it("is the any-cluster copy share: no wire gate in the label, the copy or the value", () => {
       const row = byKey(buildReliabilityView(rel(), karneRow())).wire!;
       expect(row.value).toBe("%12 (12/100)");
       expect(row.note).toBeNull();
       expect(row.how).toBe(
-        "Ajans dağıtımı sayılan kümelerde başlığı ve özeti başka bir kaynakla aynı olan haberlerin payı (haber gövdesi karşılaştırılmaz); yön belirtmez.",
+        "Kaynağın yer aldığı haber kümelerinden, ilk haberinin başlığı ve özeti başka bir kaynağın haberiyle birebir aynı (aynı parmak izi) olanların payı. Toplayıcı siteler sayılmaz; haber gövdesi karşılaştırılmaz; kimin kimden aldığını belirtmez.",
       );
+      expect(row.how).not.toMatch(/Ajans dağıtımı/);
+      expect(row.how).toContain("Toplayıcı siteler sayılmaz");
+    });
+
+    it("prints the value through formatShare: a non-zero share is never %0, a partial one never %100", () => {
+      const wire = (nClusters: number, nWireCopy: number) =>
+        byKey(buildReliabilityView(rel({ nClusters, nWireCopy }), karneRow())).wire!;
+      expect(wire(2233, 1).value).toBe("<%1 (1/2.233)");
+      expect(wire(1165, 8).value).toBe("%1 (8/1.165)");
+      expect(wire(2233, 2232).value).toBe(">%99 (2.232/2.233)");
+      expect(wire(50, 0).value).toBe("%0 (0/50)");
+      expect(wire(50, 50).value).toBe("%100 (50/50)");
     });
 
     it("is gated below 20 clusters and open at 20", () => {
@@ -686,6 +700,12 @@ describe("buildReliabilityView", () => {
       expect(row.how).toBe(
         "Kaynağın yer aldığı haber kümelerinden kör nokta olarak işaretlenenlerin payı (Kapsama karnesiyle aynı sayım).",
       );
+    });
+
+    it("prints the share through formatShare as well (a non-zero count is never %0)", () => {
+      const k = karneRow({ n_clusters: 2233, n_multi: 100, co_iktidar: 10, co_bagimsiz: 10, co_muhalefet: 10, n_blindspot: 1, n_blindspot_same_side: 0 });
+      const row = byKey(buildReliabilityView(rel(), k)).blindspot!;
+      expect(row.value).toBe("<%1 (1/2.233)");
     });
 
     it("explains a missing karne row", () => {

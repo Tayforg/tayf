@@ -10,8 +10,8 @@ import {
   KARNE_WINDOW_DAYS,
   clusterCountLine,
   formatAsOfTr,
+  formatShare,
   karneFreshness,
-  pct,
   type SourceKarne,
   type SourceKarneFreshness,
 } from "@/lib/sources/karne";
@@ -34,13 +34,16 @@ import {
 //     number of dates the stored window touches, never clamped down to
 //     windowDays, so a source that skipped a whole interior day cannot read
 //     30/30. The rate stays n_articles / windowDays.
-//   - Wire copy: per cluster, members deduped to the earliest article per
-//     source (dedupeBySource); the cluster is wire per detectWireRedistribution
-//     (>= 3 members, distinct hashes / members <= WIRE_UNIQUE_HASH_RATIO, a
-//     NULL hash unique per article). n_wire_copy = the source's clusters that
-//     are wire AND where its own member's content_hash equals another source's
-//     member hash. Direction-neutral; an independent report inside a wire
-//     cluster is never counted.
+//   - Copy (column n_wire_copy, migration 189): per cluster, members deduped to
+//     the earliest article per source (dedupeBySource; ties by id).
+//     n_wire_copy = the source's in-window clusters, of ANY size, where its own
+//     member has a non-null content_hash equal to the content_hash of the
+//     deduped member of ANOTHER source whose kind is not 'aggregator'. 111
+//     counted only the clusters that pass detectWireRedistribution (>= 3
+//     members, distinct hashes / members <= WIRE_UNIQUE_HASH_RATIO), which
+//     almost never fired while n_clusters counted all of them, so every outlet
+//     printed 0-2 %; 189 drops that gate. content_hash is the fingerprint of
+//     title + RSS summary; the article body is not compared. Direction-neutral.
 //   - Zone mix: per cluster, voting-source counts per zone from
 //     clusters.bias_distribution; clusters with >= BALANCE_MIN_SOURCES votes
 //     are kept as [iktidar, bagimsiz, muhalefet, nClusters] triples. The
@@ -197,10 +200,6 @@ export function reliabilityCountLine(rel: SourceReliability): string {
 
 const RATE_FORMAT = new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 1 });
 
-function share(num: number, den: number): string {
-  return `%${pct(num, den) ?? 0} (${formatCountTr(num)}/${formatCountTr(den)})`;
-}
-
 /** Exported for the unit test: no live row can reach a four-digit n below a floor. */
 export function insufficient(n: number, min: number): string {
   return `Yeterli örnek yok (n = ${formatCountTr(n)}, en az ${formatCountTr(min)}).`;
@@ -292,9 +291,9 @@ export function buildReliabilityView(
   const wire: ReliabilityRow = {
     key: "wire",
     label: "Başka kaynaklarla aynı başlık ve özet",
-    value: wireOpen ? share(rel.nWireCopy, rel.nClusters) : null,
+    value: wireOpen ? formatShare(rel.nWireCopy, rel.nClusters) : null,
     note: wireOpen ? null : insufficient(rel.nClusters, RELIABILITY_MIN_CLUSTERS),
-    how: "Ajans dağıtımı sayılan kümelerde başlığı ve özeti başka bir kaynakla aynı olan haberlerin payı (haber gövdesi karşılaştırılmaz); yön belirtmez.",
+    how: "Kaynağın yer aldığı haber kümelerinden, ilk haberinin başlığı ve özeti başka bir kaynağın haberiyle birebir aynı (aynı parmak izi) olanların payı. Toplayıcı siteler sayılmaz; haber gövdesi karşılaştırılmaz; kimin kimden aldığını belirtmez.",
     basis: null,
   };
 
@@ -305,7 +304,7 @@ export function buildReliabilityView(
   } else if (karne.nClusters < RELIABILITY_MIN_CLUSTERS) {
     blindspotNote = insufficient(karne.nClusters, RELIABILITY_MIN_CLUSTERS);
   } else {
-    blindspotValue = share(karne.nBlindspot, karne.nClusters);
+    blindspotValue = formatShare(karne.nBlindspot, karne.nClusters);
   }
   const blindspot: ReliabilityRow = {
     key: "blindspot",

@@ -99,26 +99,43 @@ export function parseTimelineHead(json: unknown): TimelineHeadRow[] | null {
 }
 
 /**
- * How many head rows the rendered page does not have: ids outside `knownIds`
- * whose first_published is at or after the newest the page shows (a tie counts:
- * a sibling minted in the same instant is still new). With no newest (the page
- * rendered empty) every unknown row counts. An unparseable `newestPublished`
- * counts nothing -- better no pill than a false one.
+ * How many head rows the rendered page does not have: unique ids outside
+ * `knownIds` whose first_published is STRICTLY after `floorPublished`.
+ *
+ * `floorPublished` is the page's 50th row (the last row the head's 50-row window
+ * can hold) when the page rendered at least TIMELINE_HEAD_LIMIT rows, and null
+ * otherwise; with no floor every unknown head row counts.
+ *
+ * Why the 50th row and not the newest one (h103-timeline-1): a cluster enters the
+ * feed when it reaches article_count >= 2, that is when its SECOND source is
+ * ingested, a median of 39 min after its first_published. A newly visible cluster
+ * therefore usually carries a first_published older than a cluster that is
+ * already on the page, and a floor at the page's newest row skipped it (about half
+ * of all new clusters): it appeared silently inside a closed hour section. The
+ * head and the page read the same 24 h entry, so an unknown head row can only be
+ *   - a newly minted or newly visible cluster: counts, or
+ *   - page row 51+ moving up into the head's 50-row window after a row above it
+ *     was archived: never newer than the page's 50th row, so it does not count.
+ * The floor tells these apart; the newest row does not. The tie rule moved with
+ * it: a row at exactly the floor is not counted, because it may be page row 51.
+ *
+ * An unparseable `floorPublished` counts nothing -- better no pill than a false
+ * one.
  */
 export function countNewClusters(
   head: ReadonlyArray<TimelineHeadRow>,
-  ctx: { newestPublished: string | null; knownIds: ReadonlySet<string> },
+  ctx: { floorPublished: string | null; knownIds: ReadonlySet<string> },
 ): number {
   let floor = Number.NEGATIVE_INFINITY;
-  if (ctx.newestPublished !== null) {
-    floor = Date.parse(ctx.newestPublished);
+  if (ctx.floorPublished !== null) {
+    floor = Date.parse(ctx.floorPublished);
     if (!Number.isFinite(floor)) return 0;
   }
   const fresh = new Set<string>();
   for (const row of head) {
     if (ctx.knownIds.has(row.id)) continue;
     const t = Date.parse(row.first_published);
-    if (!Number.isFinite(t) || t < floor) continue;
+    if (!Number.isFinite(t) || t <= floor) continue;
     fresh.add(row.id);
   }
   return fresh.size;

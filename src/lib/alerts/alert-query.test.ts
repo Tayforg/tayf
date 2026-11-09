@@ -18,7 +18,11 @@ const fake = await vi.hoisted(async () => {
     tables: {
       clusters: (st) => {
         captured.states.push(st);
-        return { data: state.silentRows, error: state.silentError };
+        // Like PostgREST: the rows come back already cut by .range() / .limit().
+        let rows = state.silentRows;
+        if (st.range) rows = rows.slice(st.range.from, st.range.to + 1);
+        else if (st.limit !== null) rows = rows.slice(0, st.limit);
+        return { data: rows, error: state.silentError };
       },
     },
   });
@@ -39,6 +43,11 @@ import { getAlertItems } from "@/lib/alerts/alert-query";
 import { SILENT_MIN_AGE_H } from "@/lib/alerts/alert-feed";
 import { BLINDSPOT } from "@/lib/bias/config";
 import type { ZoneFeedHealth } from "@/lib/clusters/feed-health";
+
+/** The items only; the `truncated` flag has its own tests below. */
+async function itemsOf(input: Parameters<typeof getAlertItems>[0]) {
+  return (await getAlertItems(input)).items;
+}
 
 const H = 3600 * 1000;
 const MIN = 60 * 1000;
@@ -103,14 +112,14 @@ beforeEach(() => {
 
 describe("getAlertItems read profile", () => {
   it("reads blindspots through the capped reader profile by default (the public alerts API)", async () => {
-    await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
     expect(state.blindspotCalls).toHaveLength(1);
     const opts = state.blindspotCalls[0]![0] as { profile?: string } | undefined;
     expect(opts?.profile ?? "reader").toBe("reader");
   });
 
   it("forwards the batch profile (the alerts-webhooks cron) so its read is uncapped", async () => {
-    await getAlertItems({
+    await itemsOf({
       sinceIso: SINCE,
       limit: 50,
       health: null,
@@ -126,7 +135,7 @@ describe("getAlertItems", () => {
     const fp = at(NOW, 40 * H);
     const upd = at(NOW, 4 * H);
     state.bundles = [bundle("b1", fp, upd)];
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       type: "blindspot",
@@ -146,7 +155,7 @@ describe("getAlertItems", () => {
     const fp = new Date(fpMs).toISOString();
     state.bundles = [bundle("b-new", fp, at(NOW, 24.4 * H))];
     const since = at(NOW, 1 * H);
-    const items = await getAlertItems({ sinceIso: since, limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: since, limit: 50, health: null, nowMs: NOW });
     expect(items.map((i) => i.clusterId)).toEqual(["b-new"]);
     expect(items[0]!.alertAt).toBe(new Date(fpMs + DELAY_MS).toISOString());
     // The record still reports the cluster's own updated_at.
@@ -155,14 +164,14 @@ describe("getAlertItems", () => {
 
   it("(b) excludes a blindspot that qualified 6 h ago when since is 1 h ago", async () => {
     state.bundles = [bundle("b-old", at(NOW, 30 * H), at(NOW, 29 * H))];
-    const items = await getAlertItems({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
     expect(items).toEqual([]);
   });
 
   it("(c) a blindspot updated after it qualified is included with alertAt = updated_at", async () => {
     const upd = at(NOW, 10 * MIN);
     state.bundles = [bundle("b-upd", at(NOW, 40 * H), upd)];
-    const items = await getAlertItems({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
     expect(items).toHaveLength(1);
     expect(items[0]!.alertAt).toBe(upd);
   });
@@ -171,12 +180,12 @@ describe("getAlertItems", () => {
     const fpMs = NOW - 30 * H;
     state.bundles = [bundle("b-edge", new Date(fpMs).toISOString(), at(NOW, 29 * H))];
     const since = new Date(fpMs + DELAY_MS).toISOString();
-    const items = await getAlertItems({ sinceIso: since, limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: since, limit: 50, health: null, nowMs: NOW });
     expect(items.map((i) => i.clusterId)).toEqual(["b-edge"]);
   });
 
   it("issues ONE lean silent query with the exact filters (no bare updated_at gte)", async () => {
-    await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
     expect(captured.states).toHaveLength(1);
     const q = captured.states[0]!;
     expect(q.selectArgs[0]).toBe(
@@ -195,18 +204,19 @@ describe("getAlertItems", () => {
       { col: "first_published", val: new Date(NOW - SILENT_MS).toISOString() },
     ]);
     expect(q.order).toEqual([{ col: "updated_at", opts: { ascending: false } }]);
-    expect(q.limit).toBe(200);
+    expect(q.limit).toBe(1000);
+    expect(q.range).toBeNull();
   });
 
   it("(d) the silent query ORs updated_at >= since with first_published >= since - SILENT_MIN_AGE_H", async () => {
-    await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
     const q = captured.states[0]!;
     const floor = new Date(Date.parse(SINCE) - SILENT_MS).toISOString();
     expect(q.or).toEqual([`updated_at.gte.${SINCE},first_published.gte.${floor}`]);
   });
 
   it("(d) re-serialises since to a canonical ISO value inside the .or() logic tree", async () => {
-    await getAlertItems({ sinceIso: "2026-09-28T12:00:00Z", limit: 50, health: null, nowMs: NOW });
+    await itemsOf({ sinceIso: "2026-09-28T12:00:00Z", limit: 50, health: null, nowMs: NOW });
     const q = captured.states[0]!;
     const floor = new Date(Date.parse(SINCE) - SILENT_MS).toISOString();
     expect(q.or).toEqual([`updated_at.gte.${SINCE},first_published.gte.${floor}`]);
@@ -215,7 +225,7 @@ describe("getAlertItems", () => {
   it("(d) includes a silent row that turned 6 h old inside the window; alertAt = first_published + 6 h", async () => {
     const fpMs = NOW - 6.5 * H;
     state.silentRows = [silentRow("s-new", new Date(fpMs).toISOString(), at(NOW, 6.4 * H))];
-    const items = await getAlertItems({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       type: "one_zone_silent",
@@ -227,7 +237,7 @@ describe("getAlertItems", () => {
 
   it("drops a silent row whose alertAt is before since even if the query returned it", async () => {
     state.silentRows = [silentRow("s-stale", at(NOW, 20 * H), at(NOW, 19 * H))];
-    const items = await getAlertItems({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
     expect(items).toEqual([]);
   });
 
@@ -235,7 +245,7 @@ describe("getAlertItems", () => {
     state.silentRows = [
       silentRow("s1", at(NOW, 12 * H), at(NOW, 3 * H), { pro_government: 3, center: 2 }, "Nötr başlık"),
     ];
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 50, health: health({}), nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: health({}), nowMs: NOW });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       type: "one_zone_silent",
@@ -249,20 +259,20 @@ describe("getAlertItems", () => {
 
   it("drops a silent item whose silent zone feeds are degraded", async () => {
     state.silentRows = [silentRow("s1", at(NOW, 12 * H), at(NOW, 3 * H))];
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 50, health: health({ muhalefet: true }), nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: health({ muhalefet: true }), nowMs: NOW });
     expect(items).toEqual([]);
   });
 
   it("does not drop when a DIFFERENT zone is degraded", async () => {
     state.silentRows = [silentRow("s1", at(NOW, 12 * H), at(NOW, 3 * H))];
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 50, health: health({ iktidar: true }), nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: health({ iktidar: true }), nowMs: NOW });
     expect(items).toHaveLength(1);
   });
 
   it("fails open when health is null or undefined", async () => {
     state.silentRows = [silentRow("s1", at(NOW, 12 * H), at(NOW, 3 * H))];
-    expect(await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW })).toHaveLength(1);
-    expect(await getAlertItems({ sinceIso: SINCE, limit: 50, nowMs: NOW })).toHaveLength(1);
+    expect(await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW })).toHaveLength(1);
+    expect(await itemsOf({ sinceIso: SINCE, limit: 50, nowMs: NOW })).toHaveLength(1);
   });
 
   it("filters rows that are not exactly-one-zone-silent (malformed, 4 sources, two silent)", async () => {
@@ -273,7 +283,7 @@ describe("getAlertItems", () => {
       silentRow("f", fp, upd, { pro_government: 2, center: 2 }),
       silentRow("t", fp, upd, { pro_government: 9 }),
     ];
-    expect(await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW })).toEqual([]);
+    expect(await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW })).toEqual([]);
   });
 
   it("(e) merges both lists, sorts by alertAt desc and slices to the limit", async () => {
@@ -282,9 +292,9 @@ describe("getAlertItems", () => {
       silentRow("s-new", at(NOW, 20 * H), at(NOW, 2 * H)),
       silentRow("s-old", at(NOW, 20 * H), at(NOW, 11 * H)),
     ];
-    const all = await getAlertItems({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW });
+    const all = await itemsOf({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW });
     expect(all.map((i) => i.clusterId)).toEqual(["s-new", "b-mid", "s-old"]);
-    const two = await getAlertItems({ sinceIso: SINCE, limit: 2, health: null, nowMs: NOW });
+    const two = await itemsOf({ sinceIso: SINCE, limit: 2, health: null, nowMs: NOW });
     expect(two.map((i) => i.clusterId)).toEqual(["s-new", "b-mid"]);
   });
 
@@ -292,7 +302,7 @@ describe("getAlertItems", () => {
     // b-fresh qualified 30 min ago (updated_at is a day old); s-upd was updated 2 h ago.
     state.bundles = [bundle("b-fresh", at(NOW, 24.5 * H), at(NOW, 24.4 * H))];
     state.silentRows = [silentRow("s-upd", at(NOW, 20 * H), at(NOW, 2 * H))];
-    const items = await getAlertItems({ sinceIso: at(NOW, 3 * H), limit: 10, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: at(NOW, 3 * H), limit: 10, health: null, nowMs: NOW });
     expect(items.map((i) => i.clusterId)).toEqual(["b-fresh", "s-upd"]);
   });
 
@@ -301,7 +311,7 @@ describe("getAlertItems", () => {
     const upd = at(NOW, 2 * H);
     state.bundles = [bundle("b-z", fp, upd), bundle("b-a", fp, upd)];
     state.silentRows = [silentRow("s-m", at(NOW, 20 * H), upd)];
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW });
     expect(items.map((i) => i.clusterId)).toEqual(["b-a", "b-z", "s-m"]);
   });
 
@@ -311,7 +321,7 @@ describe("getAlertItems", () => {
       bundle("b-old2", at(NOW, 40 * H), at(NOW, 8 * H)),
     ];
     state.silentRows = [silentRow("s-top", at(NOW, 20 * H), at(NOW, 1 * H))];
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 1, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 1, health: null, nowMs: NOW });
     expect(items.map((i) => i.clusterId)).toEqual(["s-top"]);
   });
 
@@ -319,7 +329,7 @@ describe("getAlertItems", () => {
     state.bundles = Array.from({ length: 40 }, (_, i) =>
       bundle(`b${i}`, at(NOW, 40 * H), at(NOW, 4 * H)),
     );
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 100, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 100, health: null, nowMs: NOW });
     expect(items).toHaveLength(30);
   });
 
@@ -333,6 +343,95 @@ describe("getAlertItems", () => {
       getAlertItems({ sinceIso: "not-a-date", limit: 5, health: null, nowMs: NOW }),
     ).rejects.toThrow(/sinceIso/);
     expect(captured.states).toHaveLength(0);
+  });
+});
+
+describe("getAlertItems silent candidate cap (h103-apiv1-1)", () => {
+  /** A candidate row the SQL returns but `oneZoneSilentOf` rejects (4 voting sources). */
+  const filler = (i: number) =>
+    silentRow(`f${i}`, at(NOW, 20 * H), at(NOW, 2 * H + i * 1000), { pro_government: 2, center: 2 });
+
+  it("(a) the silent select asks for 1000 candidates, not 200", async () => {
+    await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(captured.states).toHaveLength(1);
+    expect(captured.states[0]!.limit).toBe(1000);
+  });
+
+  it("(b) reports truncated=true when the candidate pull returns exactly 1000 rows", async () => {
+    state.silentRows = Array.from({ length: 1000 }, (_, i) => filler(i));
+    const res = await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(res.truncated).toBe(true);
+    // The flag reflects the pull, not what was kept: none of the 1000 qualified.
+    expect(res.items).toEqual([]);
+  });
+
+  it("(b) reports truncated=false for 999 rows, for an empty pull and for a plain pull", async () => {
+    state.silentRows = Array.from({ length: 999 }, (_, i) => filler(i));
+    expect((await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW })).truncated).toBe(false);
+    state.silentRows = [];
+    expect((await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW })).truncated).toBe(false);
+    state.silentRows = [silentRow("s1", at(NOW, 12 * H), at(NOW, 3 * H))];
+    const res = await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(res.truncated).toBe(false);
+    expect(res.items.map((i) => i.clusterId)).toEqual(["s1"]);
+  });
+
+  it("(b) always returns the { items, truncated } shape with a boolean flag", async () => {
+    const res = await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(Object.keys(res).sort()).toEqual(["items", "truncated"]);
+    expect(typeof res.truncated).toBe("boolean");
+    expect(Array.isArray(res.items)).toBe(true);
+  });
+
+  it("(b) the blindspot cap of 30 is not part of truncated", async () => {
+    state.bundles = Array.from({ length: 40 }, (_, i) => bundle(`b${i}`, at(NOW, 40 * H), at(NOW, 4 * H)));
+    const res = await getAlertItems({ sinceIso: SINCE, limit: 100, health: null, nowMs: NOW });
+    expect(res.items).toHaveLength(30);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("(b) a full silent pull stays truncated=true when the limit slice or the health filter drops rows afterwards", async () => {
+    state.silentRows = Array.from({ length: 1000 }, (_, i) =>
+      silentRow(`s${i}`, at(NOW, 20 * H), at(NOW, 2 * H + i * 1000)),
+    );
+    const res = await getAlertItems({ sinceIso: SINCE, limit: 5, health: health({}), nowMs: NOW });
+    expect(res.items).toHaveLength(5);
+    expect(res.truncated).toBe(true);
+    const degraded = await getAlertItems({ sinceIso: SINCE, limit: 5, health: health({ muhalefet: true }), nowMs: NOW });
+    expect(degraded.items).toEqual([]);
+    expect(degraded.truncated).toBe(true);
+  });
+
+  it("(c) a qualifying row at rank 230 by updated_at, behind 229 non-qualifying candidates, is returned (no 200 cut left)", async () => {
+    const rows = Array.from({ length: 229 }, (_, i) => filler(i));
+    rows.push(silentRow("s-rank-230", at(NOW, 20 * H), at(NOW, 2 * H + 500 * 1000)));
+    expect(rows).toHaveLength(230);
+    state.silentRows = rows;
+    const res = await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(res.items.map((i) => i.clusterId)).toEqual(["s-rank-230"]);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("(c) keeps every qualifying row of a 7-day pull beyond the old 200 cut (64 qualify among 402 candidates)", async () => {
+    const SEVEN_DAYS = 7 * 24 * H;
+    // 402 candidates in updated_at-descending order; every ~6th qualifies, as on prod.
+    const rows = Array.from({ length: 402 }, (_, i) => {
+      const updatedAgo = 2 * H + Math.floor((i * (SEVEN_DAYS - 3 * H)) / 402);
+      return i % 6 === 0 && i < 384
+        ? silentRow(`q${i}`, at(NOW, updatedAgo + 3 * H), at(NOW, updatedAgo))
+        : silentRow(`n${i}`, at(NOW, updatedAgo + 3 * H), at(NOW, updatedAgo), { pro_government: 2, center: 2 });
+    });
+    state.silentRows = rows;
+    const expected = rows.filter((r) => r.id.startsWith("q")).length;
+    expect(expected).toBe(64);
+    const res = await getAlertItems({
+      sinceIso: at(NOW, SEVEN_DAYS),
+      limit: 100,
+      health: null,
+      nowMs: NOW,
+    });
+    expect(res.items.filter((i) => i.type === "one_zone_silent")).toHaveLength(64);
+    expect(res.truncated).toBe(false);
   });
 });
 
@@ -350,7 +449,7 @@ describe("getAlertItems incremental poller", () => {
       // getBlindspots only returns a bundle once first_published < now - 24 h.
       state.bundles =
         Date.parse(fp) < now - DELAY_MS ? [bundle("b-late", fp, upd)] : [];
-      const items = await getAlertItems({
+      const items = await itemsOf({
         sinceIso: new Date(prev).toISOString(),
         limit: 50,
         health: null,
@@ -368,12 +467,12 @@ describe("getAlertItems incremental poller", () => {
     const quiet = at(NOW, 30 * H);
     state.bundles = [bundle("b1", fp, quiet)];
     expect(
-      await getAlertItems({ sinceIso: at(NOW, 10 * MIN), limit: 50, health: null, nowMs: NOW }),
+      await itemsOf({ sinceIso: at(NOW, 10 * MIN), limit: 50, health: null, nowMs: NOW }),
     ).toEqual([]);
 
     const bumped = at(NOW, 5 * MIN);
     state.bundles = [bundle("b1", fp, bumped)];
-    const items = await getAlertItems({ sinceIso: at(NOW, 10 * MIN), limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: at(NOW, 10 * MIN), limit: 50, health: null, nowMs: NOW });
     expect(items.map((i) => i.clusterId)).toEqual(["b1"]);
     expect(items[0]!.alertAt).toBe(bumped);
   });
@@ -389,7 +488,7 @@ describe("getAlertItems incremental poller", () => {
     for (const now of polls) {
       // The SQL: first_published <= now - 6 h; the OR on updated_at / first_published >= since - 6 h.
       state.silentRows = fpMs <= now - SILENT_MS ? [silentRow("s-late", fp, upd)] : [];
-      const items = await getAlertItems({
+      const items = await itemsOf({
         sinceIso: new Date(prev).toISOString(),
         limit: 50,
         health: null,
@@ -409,7 +508,7 @@ describe("getAlertItems unparsable timestamps", () => {
     const fpMs = NOW - 30 * H;
     state.bundles = [bundle("b-bad-upd", new Date(fpMs).toISOString(), "garbage")];
     state.silentRows = [silentRow("s-bad-upd", at(NOW, 6.5 * H), "garbage")];
-    const items = await getAlertItems({ sinceIso: at(NOW, 12 * H), limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: at(NOW, 12 * H), limit: 50, health: null, nowMs: NOW });
     const byId = new Map(items.map((i) => [i.clusterId, i]));
     expect(byId.get("b-bad-upd")?.alertAt).toBe(new Date(fpMs + DELAY_MS).toISOString());
     expect(byId.get("s-bad-upd")?.alertAt).toBe(
@@ -420,7 +519,7 @@ describe("getAlertItems unparsable timestamps", () => {
   it("(g) an item with both timestamps unparsable is dropped, never thrown on", async () => {
     state.bundles = [bundle("b-bad", "nope", "garbage")];
     state.silentRows = [silentRow("s-bad", "nope", "garbage")];
-    const items = await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
     expect(items).toEqual([]);
   });
 });

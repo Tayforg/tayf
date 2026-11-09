@@ -28,6 +28,7 @@ import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/ki
 import { countClassifiedSources } from "@/lib/sources/classification";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { getSourceItemsPerDay, isRowQuarantined } from "@/lib/sources/feed-status";
+import { classifySilence } from "@/lib/sources/silence-reason";
 import { weeklyCountFromPerDay, sortGroupedByActivity } from "@/lib/sources/directory";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
@@ -97,6 +98,20 @@ interface SourceRow extends Source {
    * so rendering it never touches the clock. The card shows "Akış alınamıyor".
    */
   quarantined: boolean;
+  /**
+   * h103-sourcescores-2: the feed answers (2xx or 304, no failure streak, not
+   * quarantined) but holds no items or its newest item is more than 72 hours
+   * old: `classifySilence` says 'akis_donmus', the rule behind /kaynaklar/durum's
+   * "akış donmuş" and the source profile's frozen line. Only a SILENT source is
+   * classified: no stored article at or before now within FEED_YIELD_WINDOW_MS
+   * (strict; an article exactly at the edge still delivers), the same as
+   * /kaynaklar/durum (toFeedStatusRows) and the profile (source-profile-query.ts),
+   * so a source the DenominatorNote counts as delivering is never frozen. Decided
+   * at cache fill time with the same `nowMs` as `quarantined`, so rendering never
+   * touches the clock; never true together with `quarantined`. The card shows
+   * "Akış donmuş".
+   */
+  feedFrozen: boolean;
 }
 
 type GroupedSources = Record<BiasCategory, SourceRow[]>;
@@ -209,6 +224,22 @@ export function countQuarantinedSources(grouped: Partial<GroupedSources>): numbe
   return count;
 }
 
+/**
+ * h103-sourcescores-2: how many cards carry the "Akış donmuş" marker, for the
+ * header line. Every kind counts, and it is pure like countQuarantinedSources:
+ * the verdict was stamped on each row at fill time. A quarantined source is
+ * never frozen, so the two header counts never overlap.
+ */
+export function countFrozenSources(grouped: Partial<GroupedSources>): number {
+  let count = 0;
+  for (const bias of BIAS_ORDER) {
+    for (const source of grouped[bias] ?? []) {
+      if (source.feedFrozen) count += 1;
+    }
+  }
+  return count;
+}
+
 // reader-queries G2: `stats:articles(count)` (the PERF-01 aggregate,
 // measured bimodal 177-4639ms — see feed-status.ts's own header) and its
 // `.gte("stats.published_at", ...)` are GONE from this select. The 7-day
@@ -250,7 +281,7 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
     supabase
       .from("sources")
       .select(
-        "id, name, slug, url, rss_url, bias, logo_url, active, kind, created_at, zone_rationale_at, fetch_quarantined_until, latest:articles(published_at)",
+        "id, name, slug, url, rss_url, bias, logo_url, active, kind, created_at, zone_rationale_at, fetch_quarantined_until, fetch_last_status, fetch_fail_streak, fetch_newest_item_at, fetch_items_count, latest:articles(published_at)",
       )
       .eq("active", true)
       .gte("latest.published_at", sevenDaysAgo)
@@ -282,6 +313,11 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
     zone_rationale_at: string | null;
     /** Ingest quarantine end (migration 074); only turned into `quarantined` below. */
     fetch_quarantined_until: string | null;
+    /** h103-sourcescores-2: the ingest columns classifySilence reads; only turned into `feedFrozen` below. */
+    fetch_last_status: number | null;
+    fetch_fail_streak: number | null;
+    fetch_newest_item_at: string | null;
+    fetch_items_count: number | null;
     latest: Array<{ published_at: string }>;
   };
   const sourceRows = (data ?? []) as unknown as Row[];
@@ -322,25 +358,56 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
   for (const source of sourceRows) {
     const bias = source.bias as BiasCategory;
     if (!(bias in grouped)) continue;
-    // created_at / zone_rationale_at only feed registryModifiedIso above, and
-    // fetch_quarantined_until only becomes `quarantined`; they are dropped here
-    // so SourceRow carries no raw timestamps.
+    // created_at / zone_rationale_at only feed registryModifiedIso above,
+    // fetch_quarantined_until only becomes `quarantined` and the four other
+    // fetch_* columns only become `feedFrozen`; they are dropped here so
+    // SourceRow carries no raw timestamps or ingest counters.
     const {
       latest,
       created_at: _createdAt,
       zone_rationale_at: _rationaleAt,
       fetch_quarantined_until: quarantinedUntil,
+      fetch_last_status: lastHttpStatus,
+      fetch_fail_streak: failStreak,
+      fetch_newest_item_at: newestFeedItemAt,
+      fetch_items_count: feedItemsCount,
       ...rest
     } = source;
     const lastPublishedAt = latest[0]?.published_at ?? null;
+    // h47-sources-1: the same fill-time anchor as the label below, no new clock read.
+    const quarantined = isRowQuarantined(quarantinedUntil, nowMs);
+    // correctness-1: the delivering predicate of deriveDirectoryStats, on the
+    // same fill-time anchor. Only a SILENT source is classified (as on
+    // /kaynaklar/durum and the profile), so one the DenominatorNote counts as
+    // delivering is never also "Akış donmuş".
+    const lastMs = lastPublishedAt ? new Date(lastPublishedAt).getTime() : null;
+    const delivering =
+      lastMs !== null && lastMs <= nowMs && nowMs - lastMs <= FEED_YIELD_WINDOW_MS;
     grouped[bias].push({
       ...rest,
       lastPublishedAt,
       lastSeenLabel: lastPublishedAt
         ? formatTurkishTimeAgo(lastPublishedAt, { now: nowMs })
         : null,
-      // h47-sources-1: the same fill-time anchor as the label above, no new clock read.
-      quarantined: isRowQuarantined(quarantinedUntil, nowMs),
+      quarantined,
+      // h103-sourcescores-2: /kaynaklar/durum's own rule on the same anchor. A
+      // quarantined feed classifies as 'erisim_yok' there, so it is never frozen
+      // here and its card keeps the one "Akış alınamıyor" marker. A source with a
+      // stored article inside FEED_YIELD_WINDOW_MS is not silent, so it is never
+      // frozen either (toFeedStatusRows and source-profile-query gate the same way).
+      feedFrozen:
+        !delivering &&
+        !quarantined &&
+        classifySilence(
+          {
+            lastHttpStatus,
+            failStreak: failStreak ?? 0,
+            quarantined,
+            newestFeedItemAt,
+            feedItemsCount,
+          },
+          nowMs,
+        ) === "akis_donmus",
     });
   }
 
@@ -445,6 +512,9 @@ export default async function SourcesPage() {
   // (stamped at fill time). Each carries the "Akış alınamıyor" marker below; the
   // header says how many. The 118/96-style figures above do not change.
   const quarantinedSources = countQuarantinedSources(grouped);
+  // h103-sourcescores-2: feeds that answer but hold nothing new (classifySilence
+  // 'akis_donmus', stamped at fill time). Never overlaps the quarantined count.
+  const frozenSources = countFrozenSources(grouped);
 
   // "tık tuzağı karnesi" (migration 078) — gated on CLICKBAIT_PRECISION_CHECK
   // (src/lib/sources/clickbait.ts). getClickbaitKarne() is only called when
@@ -490,10 +560,20 @@ export default async function SourcesPage() {
         </Link>
       </p>
       <DenominatorNote delivering={votingDelivering} total={votingSources} />
-      {quarantinedSources > 0 ? (
+      {quarantinedSources > 0 || frozenSources > 0 ? (
         <p className="text-xs text-muted-foreground">
-          <span className="font-mono">{quarantinedSources}</span>{" "}
-          kaynağın beslemesi şu anda alınamıyor.{" "}
+          {quarantinedSources > 0 ? (
+            <>
+              <span className="font-mono">{quarantinedSources}</span>{" "}
+              kaynağın beslemesi şu anda alınamıyor.{" "}
+            </>
+          ) : null}
+          {frozenSources > 0 ? (
+            <>
+              <span className="font-mono">{frozenSources}</span>{" "}
+              kaynağın beslemesi donmuş: yanıt veriyor ama yeni haber gelmiyor.{" "}
+            </>
+          ) : null}
           <Link
             href="/kaynaklar/durum"
             className="underline decoration-dotted underline-offset-2 hover:text-foreground"
@@ -667,6 +747,19 @@ export function SourceDirectory({
                         className="inline-flex min-h-6 items-center whitespace-nowrap rounded-full border border-rose-500/30 bg-rose-500/15 px-2 text-[11px] font-medium text-rose-800 dark:text-rose-300 hover:underline"
                       >
                         Akış alınamıyor
+                      </Link>
+                    </p>
+                  ) : source.feedFrozen ? (
+                    /* h103-sourcescores-2: the feed answers but nothing new comes in
+                       ("akış donmuş" on /kaynaklar/durum and the profile). Only one
+                       marker per card: a quarantined feed shows the one above. */
+                    <p className="mt-2">
+                      <Link
+                        href="/kaynaklar/durum"
+                        title="Besleme yanıt veriyor ama yeni haber gelmiyor"
+                        className="inline-flex min-h-6 items-center whitespace-nowrap rounded-full border border-amber-500/30 bg-amber-500/15 px-2 text-[11px] font-medium text-amber-900 dark:text-amber-300 hover:underline"
+                      >
+                        Akış donmuş
                       </Link>
                     </p>
                   ) : null}

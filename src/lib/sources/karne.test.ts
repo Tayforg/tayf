@@ -47,6 +47,7 @@ import {
   buildKarneView,
   clusterCountLine,
   formatAsOfTr,
+  formatShare,
   getSourceKarne,
   karneFreshness,
   pct,
@@ -241,6 +242,40 @@ describe("pct", () => {
   });
 });
 
+// h103-sourcescores-1: a non-zero share is never printed as %0 and a partial
+// share never as %100 (the same rule as cadenceValue's "<0,1"), so the count in
+// the brackets and the percentage cannot tell two different stories.
+describe("formatShare", () => {
+  it.each([
+    [8, 1165, "%1 (8/1.165)"],
+    [1, 2233, "<%1 (1/2.233)"],
+    [2232, 2233, ">%99 (2.232/2.233)"],
+    [0, 50, "%0 (0/50)"],
+    [50, 50, "%100 (50/50)"],
+    [0, 0, "%0 (0/0)"],
+  ])("formatShare(%i, %i) is %s", (num, den, expected) => {
+    expect(formatShare(num, den)).toBe(expected);
+  });
+
+  it("switches at the rounding boundaries: 0.4 percent is <%1, 0.5 percent is %1", () => {
+    expect(formatShare(4, 1000)).toBe("<%1 (4/1.000)");
+    expect(formatShare(5, 1000)).toBe("%1 (5/1.000)");
+    expect(formatShare(994, 1000)).toBe("%99 (994/1.000)");
+    expect(formatShare(995, 1000)).toBe(">%99 (995/1.000)");
+  });
+
+  it("keeps ordinary shares as the rounded whole percent and groups four-digit counts", () => {
+    expect(formatShare(1, 3)).toBe("%33 (1/3)");
+    expect(formatShare(2, 3)).toBe("%67 (2/3)");
+    expect(formatShare(1055, 1749)).toBe("%60 (1.055/1.749)");
+  });
+
+  it("is built on pct, which stays an unchanged rounded percent", () => {
+    expect(pct(1, 2233)).toBe(0);
+    expect(pct(2232, 2233)).toBe(100);
+  });
+});
+
 describe("buildKarneView", () => {
   it("is insufficient at 19 and ok at 20", () => {
     expect(buildKarneView(karne({ nClusters: 19, nMulti: 5, nSolo: 14 }))).toEqual({
@@ -367,6 +402,24 @@ describe("buildKarneView", () => {
       expect(v.blindspotText).toBe(
         "Kör nokta işaretli haberler: 1.048 · 1.002 tanesinde haberi ağırlıkla yazan bölgedeydi",
       );
+    });
+
+    it("never prints a non-zero share as %0 or a partial share as %100 (multi, solo and zone texts)", () => {
+      const edge = karne({
+        nClusters: 2233,
+        nMulti: 2232,
+        nSolo: 1,
+        co: { iktidar: 1, bagimsiz: 2232, muhalefet: 0 },
+      });
+      const v = buildKarneView(edge);
+      if (v.state !== "ok") throw new Error("expected ok");
+      expect(v.multiText).toBe(">%99 (2.232/2.233)");
+      expect(v.soloText).toBe("<%1 (1/2.233)");
+      expect(v.zones!.map((z) => z.text)).toEqual([
+        "<%1 (1/2.232)",
+        "%100 (2.232/2.232)",
+        "%0 (0/2.232)",
+      ]);
     });
 
     it("keeps counts below 1.000 ungrouped", () => {

@@ -64,11 +64,16 @@ export const metadata: Metadata = staticPageMetadata({
 // that a stale page copy lacks. The pill compensates: it compares the page before
 // and after the refresh, retries once on its own, and only then says the list has
 // not updated yet (h76-timeline-1). The page hands the pill the newest
-// first_published and the ids of the first TIMELINE_HEAD_LIMIT rows (the head's
-// own window) to diff against. It is not rendered when the read failed
-// (rows === null). The hero and the pill share a `relative` wrapper (a
-// positioning context, no spacing): the pill is absolutely placed in the 32 px
-// space-y-8 gap below it, so it never moves the list (CLS 0).
+// first_published, the ids of the first TIMELINE_HEAD_LIMIT rows (the head's own
+// window) to diff against, and `floorPublished`: the first_published of row
+// TIMELINE_HEAD_LIMIT (the 50th) when the page has that many rows, else null.
+// That floor is what makes a head row "new" (h103-timeline-1): a cluster becomes
+// visible when its second source arrives, so it often sorts below the page's
+// newest row, but never below a row that was already in the page's first 50.
+// The pill is not rendered when the read failed (rows === null). The hero and
+// the pill share a `relative` wrapper (a positioning context, no spacing): the
+// pill is absolutely placed in the 32 px space-y-8 gap below it, so it never
+// moves the list (CLS 0).
 
 // Format an ISO timestamp as `HH:MM` in the Europe/Istanbul wall clock —
 // Tayf is a Türk news product so every visible time stamp is local TR time.
@@ -147,6 +152,7 @@ export default async function TimelinePage() {
         {rows !== null && (
           <NewClustersPill
             newestPublished={rows[0]?.first_published ?? null}
+            floorPublished={rows[TIMELINE_HEAD_LIMIT - 1]?.first_published ?? null}
             knownIds={rows.slice(0, TIMELINE_HEAD_LIMIT).map((r) => r.id)}
           />
         )}

@@ -38,6 +38,8 @@ const fx = vi.hoisted(() => ({
   tablesTouched: [] as string[],
   upsertOpts: [] as Array<{ table: string; opts: unknown }>,
   items: [] as unknown[],
+  /** The `truncated` flag the mocked getAlertItems reports (the silent candidate pull hit its cap). */
+  truncated: false,
   health: {} as unknown,
   getAlertItemsCalls: [] as unknown[],
   postResults: [] as unknown[],
@@ -116,7 +118,7 @@ vi.mock("@supabase/supabase-js", () => ({
 vi.mock("@/lib/alerts/alert-query", () => ({
   getAlertItems: async (input: unknown) => {
     fx.getAlertItemsCalls.push(input);
-    return fx.items;
+    return { items: fx.items, truncated: fx.truncated };
   },
 }));
 
@@ -223,6 +225,7 @@ beforeEach(() => {
   fx.tablesTouched = [];
   fx.upsertOpts = [];
   fx.items = [];
+  fx.truncated = false;
   fx.health = HEALTHY;
   fx.getAlertItemsCalls = [];
   healthMock.mockReset();
@@ -332,6 +335,43 @@ describe("GET /api/cron/alerts-webhooks", () => {
     // would have let finish.
     expect(call.profile).toBe("batch");
     expect(Math.abs(Date.parse(call.sinceIso) - (Date.now() - 24 * H))).toBeLessThan(60_000);
+  });
+
+  it("consumes the .items of the { items, truncated } result and enqueues them (h103-apiv1-1)", async () => {
+    fx.items = [item("one_zone_silent", IDS), item("one_zone_silent", ID2)];
+    const body = await (await run()).json();
+    const rows = supabaseFake.calls.upsert("api_key_webhook_deliveries")[0]!.patch as Array<{ alert_id: string }>;
+    expect(rows.map((r) => r.alert_id)).toEqual([`one_zone_silent:${IDS}`, `one_zone_silent:${ID2}`]);
+    expect(body.enqueued).toBeGreaterThanOrEqual(0);
+    expect(body.ok).toBe(true);
+  });
+
+  it("console.warns (counts only) when the silent candidate pull was truncated, and still enqueues what it has", async () => {
+    fx.items = [item("one_zone_silent", IDS)];
+    fx.truncated = true;
+    const res = await run();
+    const body = await res.json();
+    const warned = spies.flatMap((s) => s.mock.calls).map((c) => String(c[0]));
+    expect(warned.some((m) => m.startsWith("[alerts-webhooks]") && /silent candidate pull/.test(m) && /truncated/.test(m))).toBe(true);
+    // A truncation notice is not a swallowed database failure.
+    expect(body.ok).toBe(true);
+    expect(body.substepErrors).toBe(0);
+    expect(res.headers.get("x-cron-substep-errors")).toBeNull();
+    const rows = supabaseFake.calls.upsert("api_key_webhook_deliveries")[0]!.patch as Array<{ alert_id: string }>;
+    expect(rows.map((r) => r.alert_id)).toEqual([`one_zone_silent:${IDS}`]);
+    // The warning carries no URL, secret or payload.
+    for (const m of warned) {
+      expect(m).not.toContain(HOOK_URL);
+      expect(m).not.toContain(SECRET_A);
+    }
+  });
+
+  it("does not warn about truncation when the candidate pull was not truncated", async () => {
+    fx.items = [item("one_zone_silent", IDS)];
+    fx.truncated = false;
+    await run();
+    const warned = spies.flatMap((s) => s.mock.calls).map((c) => String(c[0]));
+    expect(warned.some((m) => /truncated/.test(m))).toBe(false);
   });
 
   it("never enqueues a blindspot that is suspect, unchecked, vetoed, archived, no longer flagged or unknown", async () => {

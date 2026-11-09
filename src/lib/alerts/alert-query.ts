@@ -35,11 +35,26 @@ import type { MediaDnaZone } from "@/types";
  *     admits `updated_at >= since OR first_published >= since - 6 h` (bounded
  *     by `first_published <= now - 6 h` and the candidate limit), so a cluster
  *     that merely turned 6 h old inside the window is a candidate too.
+ *
+ * The candidate pull is cut by `updated_at` (newest first) BEFORE the alertAt
+ * filter, so a cap that is too small silently drops the OLDEST qualifying
+ * alerts of a long `since` window (at 200 a 7-day pull lost 31 of 64 on
+ * 2026-11-09). `getAlertItems` therefore returns `{ items, truncated }`:
+ * `truncated` is true when the pull came back with exactly
+ * SILENT_CANDIDATE_LIMIT rows, i.e. older candidates may not have been read.
+ * The 30-blindspot cap is documented and is not part of `truncated`.
  */
 
 const SILENT_SELECT =
   "id,title_tr,title_tr_neutral,bias_distribution,article_count,first_published,updated_at";
-const SILENT_CANDIDATE_LIMIT = 200;
+/**
+ * Row cap of the one-zone-silent candidate pull (newest `updated_at` first).
+ * Today a 7-day window (the `since` clamp) holds about 400 candidates (401 on
+ * 2026-11-09), so 1000 leaves about 2.5x headroom. It is also PostgREST's own
+ * `max_rows` on Supabase, so the cap cannot silently be lower than the number
+ * asked for. The select stays lean (7 columns).
+ */
+export const SILENT_CANDIDATE_LIMIT = 1000;
 /** Same cap as /blindspots (blindspots-query DISPLAY_LIMIT), re-applied defensively. */
 const BLINDSPOT_CAP = 30;
 
@@ -79,7 +94,17 @@ function byAlertAtDescThenId(a: AlertItem, b: AlertItem): number {
   return a.clusterId < b.clusterId ? -1 : a.clusterId > b.clusterId ? 1 : 0;
 }
 
-export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]> {
+export interface AlertQueryResult {
+  items: AlertItem[];
+  /**
+   * The one_zone_silent candidate pull returned exactly SILENT_CANDIDATE_LIMIT
+   * rows, so older candidates of the window may not have been read. The
+   * blindspot cap (30) is deliberately not part of this flag.
+   */
+  truncated: boolean;
+}
+
+export async function getAlertItems(input: AlertQueryInput): Promise<AlertQueryResult> {
   const { sinceIso, limit, health, profile = "reader" } = input;
   const nowMs = input.nowMs ?? Date.now();
   const sinceMs = Date.parse(sinceIso);
@@ -127,7 +152,10 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
     .returns<SilentRow[]>();
   if (error) throw new Error(`[alerts] silent candidate select error: ${error.message}`);
 
-  for (const row of data ?? []) {
+  const candidates = data ?? [];
+  const truncated = candidates.length === SILENT_CANDIDATE_LIMIT;
+
+  for (const row of candidates) {
     const alertAt = alertAtOf("one_zone_silent", row.first_published, row.updated_at);
     if (alertAt === null || Date.parse(alertAt) < sinceMs) continue;
     const silent = oneZoneSilentOf(row.bias_distribution);
@@ -148,5 +176,5 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
   }
 
   items.sort(byAlertAtDescThenId);
-  return items.slice(0, limit);
+  return { items: items.slice(0, limit), truncated };
 }

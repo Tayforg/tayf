@@ -186,7 +186,7 @@ describe("SourceReliabilityCard", () => {
       "Son 30 günün haber sayısı 30’a bölünür. Etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati); 30 günlük pencere 31 takvim gününe yayılır, ilk ve son gün kısmidir.",
     );
     expect(t).toContain(
-      "Ajans dağıtımı sayılan kümelerde başlığı ve özeti başka bir kaynakla aynı olan haberlerin payı (haber gövdesi karşılaştırılmaz); yön belirtmez.",
+      "Kaynağın yer aldığı haber kümelerinden, ilk haberinin başlığı ve özeti başka bir kaynağın haberiyle birebir aynı (aynı parmak izi) olanların payı. Toplayıcı siteler sayılmaz; haber gövdesi karşılaştırılmaz; kimin kimden aldığını belirtmez.",
     );
     expect(t).toContain(
       "Kaynağın yer aldığı haber kümelerinden kör nokta olarak işaretlenenlerin payı (Kapsama karnesiyle aynı sayım).",

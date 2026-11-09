@@ -21,6 +21,10 @@ import { registryEnvelope } from "@/lib/sources/registry";
  * as every v1 route; there is deliberately NO `?key=` parameter (a key in a
  * URL ends up in logs and referrers). RSS is chosen by `?format=rss`, or by
  * an `Accept: application/rss+xml` header when `format` is absent.
+ *
+ * The JSON envelope always carries `truncated`: true when the one_zone_silent
+ * candidate pull hit its row cap, so older alerts of a long `since` window
+ * may be missing (see SILENT_CANDIDATE_LIMIT). RSS output has no such field.
  */
 export const GET = withApiErrors(async (request: Request) => {
   const auth = await requireApiKey(request);
@@ -49,10 +53,12 @@ export const GET = withApiErrors(async (request: Request) => {
   const { since } = sinceResult;
 
   let alerts;
+  let truncated: boolean;
   try {
     const health = await getZoneFeedHealth();
-    const items = await getAlertItems({ sinceIso: since, limit: limitResult, health });
-    alerts = items.map(toV1AlertRecord);
+    const result = await getAlertItems({ sinceIso: since, limit: limitResult, health });
+    alerts = result.items.map(toV1AlertRecord);
+    truncated = result.truncated;
   } catch (err) {
     return withApiV1Headers(apiServerError(err), auth.tier);
   }
@@ -68,7 +74,7 @@ export const GET = withApiErrors(async (request: Request) => {
     });
   }
 
-  return NextResponse.json(registryEnvelope({ since, count: alerts.length, alerts }), {
+  return NextResponse.json(registryEnvelope({ since, count: alerts.length, truncated, alerts }), {
     headers: { ...apiV1Headers(auth.tier), Vary: "Origin, Authorization, Accept" },
   });
 });
