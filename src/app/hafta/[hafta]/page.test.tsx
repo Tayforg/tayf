@@ -253,6 +253,99 @@ describe("/hafta/[hafta] blindspot side tally", () => {
   });
 });
 
+// h92-weeklyarchive-1: closed weeks before 2026-W44 were never judged by both
+// the Jev recall check and the sibling-headline veto (W38: 39 of 41 flags never
+// recall-checked), so their "Toplam N kör nokta" is not comparable with later
+// weeks. Those pages say so under the note; W44 on, and the week in progress,
+// print no caveat. Nothing else changes: same tally, same rows.
+describe("/hafta/[hafta] filter-coverage caveat", () => {
+  beforeAll(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  const CAVEAT =
+    "O haftanın kör noktaları, sonradan eklenen doğrulama süzgeçlerinin hepsinden geçmedi; toplamlar sonraki haftalarla birebir karşılaştırılamaz.";
+  const NOTE =
+    "Kör noktalar o hafta işaretlenen haberlerdir; sonradan geri alınan işaretler listede yer almaz.";
+  const TALLY =
+    "Toplam 46 kör nokta · İktidar ağırlıklı 37 · Muhalefet ağırlıklı 9. Her taraftan en büyükleri gösteriliyor.";
+
+  beforeEach(() => {
+    mocks.summariseCalls = [];
+    mocks.getFeedStatusSummary.mockReset();
+    mocks.getFeedStatusSummary.mockResolvedValue({ delivering: 71, total: 96 });
+    mocks.getWeekArchiveClusters.mockReset();
+    mocks.getWeekArchiveClusters.mockResolvedValue({
+      rows: [{ id: "cl-1" }],
+      truncated: false,
+    });
+  });
+
+  it("derives the keys from the frozen clock (guards the fixture)", () => {
+    expect(weekKeyFromMs(NOW.getTime())).toBe("2026-W45");
+  });
+
+  it.each(["2026-W38", "2026-W43"])(
+    "%s (closed, before the first covered week) prints the caveat",
+    async (key) => {
+      const text = await renderWeek(key);
+
+      expect(text).toContain(CAVEAT);
+    },
+  );
+
+  it.each([
+    ["2026-W44", "the first covered week"],
+    ["2026-W45", "the week in progress"],
+  ])("%s (%s) prints no caveat", async (key) => {
+    const text = await renderWeek(key);
+
+    expect(text).not.toContain(CAVEAT);
+    expect(text).not.toContain("birebir karşılaştırılamaz");
+  });
+
+  it("places the caveat right after the closed-week note, before any section", async () => {
+    const text = await renderWeek("2026-W38");
+
+    const note = text.indexOf(NOTE);
+    const caveat = text.indexOf(CAVEAT);
+    const firstSection = text.indexOf("O hafta kim neyi öne çıkardı");
+    expect(note).toBeGreaterThanOrEqual(0);
+    expect(caveat).toBeGreaterThan(note);
+    expect(firstSection).toBeGreaterThan(caveat);
+    // Directly after the note: nothing but the separator between them.
+    expect(text.slice(note + NOTE.length, caveat).trim()).toBe("");
+  });
+
+  it("changes no count and removes no row: the tally and both sides' rows still print", async () => {
+    const withCaveat = await renderWeek("2026-W38");
+    const without = await renderWeek("2026-W44");
+
+    for (const text of [withCaveat, without]) {
+      expect(text).toContain(TALLY);
+      expect(text).toContain("İktidar tarafı kör noktası");
+      expect(text).toContain("Muhalefet tarafı kör noktası");
+      expect(text).toContain(NOTE);
+    }
+    // The summary the page builds is read the same way either side of the cut-off.
+    expect(mocks.summariseCalls).toHaveLength(2);
+    expect(mocks.summariseCalls[0]![0]).toEqual(mocks.summariseCalls[1]![0]);
+  });
+
+  it("still prints the caveat when the week read failed or is empty (the note prints then too)", async () => {
+    mocks.getWeekArchiveClusters.mockResolvedValue(null);
+    expect(await renderWeek("2026-W38")).toContain(CAVEAT);
+
+    mocks.getWeekArchiveClusters.mockResolvedValue({ rows: [], truncated: false });
+    expect(await renderWeek("2026-W38")).toContain(CAVEAT);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // generateMetadata robots (h49-seo-1). This route is request-time
 // (connection()), so a failed or empty week read can be reported in the robots

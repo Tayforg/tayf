@@ -7,6 +7,7 @@ import {
   DAILY_MAX_PER_ZONE,
   DAILY_POLITICS_GATE_FROM,
   DAILY_TITLE_MAX,
+  DAILY_TWIN_GATE_FROM,
   ISTANBUL_OFFSET_MS,
   addDays,
   dailyHash,
@@ -533,6 +534,51 @@ describe("isDailyEligible", () => {
   });
 });
 
+describe("isDailyEligible -- twin gate (opts.twinGate)", () => {
+  const GATED = { twinGate: true } as const;
+
+  it("rejects a candidate flagged crossZoneTwin when the gate is on", () => {
+    expect(isDailyEligible(candidate({ crossZoneTwin: true }), WINDOW, GATED)).toBe(false);
+  });
+
+  it("accepts the same candidate when the gate is off or absent (past puzzles keep their rules)", () => {
+    const twin = candidate({ crossZoneTwin: true });
+    expect(isDailyEligible(twin, WINDOW)).toBe(true);
+    expect(isDailyEligible(twin, WINDOW, {})).toBe(true);
+    expect(isDailyEligible(twin, WINDOW, { twinGate: false })).toBe(true);
+  });
+
+  it("accepts a candidate that is not a twin (false or no flag) when the gate is on", () => {
+    expect(isDailyEligible(candidate({ crossZoneTwin: false }), WINDOW, GATED)).toBe(true);
+    expect(isDailyEligible(candidate(), WINDOW, GATED)).toBe(true);
+  });
+
+  it("composes with the other gates: every rule applies together", () => {
+    const all = { politicsGate: true, englishGate: true, twinGate: true } as const;
+    expect(isDailyEligible(candidate({ crossZoneTwin: true }), WINDOW, all)).toBe(false);
+    expect(isDailyEligible(candidate({ category: "ekonomi" }), WINDOW, all)).toBe(false);
+    expect(isDailyEligible(candidate({ crossZoneTwin: false }), WINDOW, all)).toBe(true);
+  });
+});
+
+describe("DAILY_TWIN_GATE_FROM", () => {
+  it("is a valid date key", () => {
+    expect(isDateKey(DAILY_TWIN_GATE_FROM)).toBe(true);
+  });
+
+  // It must be a puzzle key no player has seen when this deploys: every key up
+  // to today is replayable and recomputes from a cold cache, so a gate on or
+  // before today would silently rewrite a puzzle that was already played. The
+  // PR merges on 2026-11-09 (Istanbul), so the first unseen key is 2026-11-10.
+  it("is not earlier than 2026-11-10, a key nobody has seen at deploy time", () => {
+    expect(DAILY_TWIN_GATE_FROM >= "2026-11-10").toBe(true);
+  });
+
+  it("comes after the English gate, so the gates keep their order", () => {
+    expect(DAILY_TWIN_GATE_FROM > DAILY_ENGLISH_GATE_FROM).toBe(true);
+  });
+});
+
 describe("DAILY_POLITICS_GATE_FROM", () => {
   it("is a valid date key", () => {
     expect(isDateKey(DAILY_POLITICS_GATE_FROM)).toBe(true);
@@ -853,6 +899,72 @@ describe("pickDailySet -- english gate", () => {
       (c) => c.source.bias !== "opposition" || ENGLISH_SOURCE_SLUGS.has(c.source.slug),
     );
     expect(pickDailySet(preKey, preFiltered)).not.toBeNull();
+  });
+});
+
+describe("pickDailySet -- twin gate", () => {
+  /**
+   * `pool(key, 12)` with the dailyHash-first candidate flagged a cross-zone
+   * twin. It is the first of its zone in hash order, so a pick that may use it
+   * always does.
+   */
+  function poolWithHashFirstTwin(key: string): { all: DailyCandidate[]; twinId: string } {
+    const all = pool(key, 12);
+    const twin = [...all].sort((a, b) => dailyHash(key, a.articleId) - dailyHash(key, b.articleId))[0]!;
+    return {
+      all: all.map((c) => (c.articleId === twin.articleId ? { ...c, crossZoneTwin: true } : c)),
+      twinId: twin.articleId,
+    };
+  }
+
+  it.each([0, 1, 5])("excludes a twin candidate on and after the gate (+%i days)", (offset) => {
+    const key = addDays(DAILY_TWIN_GATE_FROM, offset);
+    const { all, twinId } = poolWithHashFirstTwin(key);
+
+    const result = pickDailySet(key, all);
+
+    expect(result).not.toBeNull();
+    expect(result).toHaveLength(DAILY_GAME_SIZE);
+    expect(result!.some((h) => h.articleId === twinId)).toBe(false);
+  });
+
+  it("includes the same twin candidate the day before the gate (the sets players saw do not move)", () => {
+    const key = addDays(DAILY_TWIN_GATE_FROM, -1);
+    expect(key < DAILY_TWIN_GATE_FROM).toBe(true);
+    const { all, twinId } = poolWithHashFirstTwin(key);
+
+    const result = pickDailySet(key, all);
+
+    expect(result).not.toBeNull();
+    expect(result!.some((h) => h.articleId === twinId)).toBe(true);
+  });
+
+  it("a pre-gate puzzle is byte-identical with and without the twin flag", () => {
+    for (let back = 1; back <= 7; back++) {
+      const key = addDays(DAILY_TWIN_GATE_FROM, -back);
+      const { all } = poolWithHashFirstTwin(key);
+      const unflagged = all.map(({ crossZoneTwin: _flag, ...rest }) => rest);
+
+      expect(pickDailySet(key, all)).toEqual(pickDailySet(key, unflagged));
+    }
+  });
+
+  it("a gated day equals the pick from the pool without the twin candidates", () => {
+    const key = DAILY_TWIN_GATE_FROM;
+    const { all } = poolWithHashFirstTwin(key);
+    const withoutTwins = all.filter((c) => c.crossZoneTwin !== true);
+
+    expect(pickDailySet(key, all)).toEqual(pickDailySet(key, withoutTwins));
+  });
+
+  it("returns null on a gated day when twins leave a zone empty, but not on the day before", () => {
+    const key = DAILY_TWIN_GATE_FROM;
+    const flagMuhalefet = (candidates: DailyCandidate[]) =>
+      candidates.map((c) => (c.source.bias === "opposition" ? { ...c, crossZoneTwin: true } : c));
+
+    expect(pickDailySet(key, flagMuhalefet(pool(key, 12)))).toBeNull();
+    const preKey = addDays(key, -1);
+    expect(pickDailySet(preKey, flagMuhalefet(pool(preKey, 12)))).not.toBeNull();
   });
 });
 

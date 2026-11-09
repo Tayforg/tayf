@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
+  BLINDSPOT_VETO_COVERED_FROM,
   WEEK_ARCHIVE_FIRST,
   isArchiveWeekInRange,
+  isBlindspotVetoCovered,
   isServableWeekKey,
   isoWeekKeyOf,
   parseWeekKey,
@@ -123,6 +125,47 @@ describe("isArchiveWeekInRange", () => {
     for (let w = 30; w <= 50; w++) {
       const key = `2026-W${String(w).padStart(2, "0")}`;
       expect(isServableWeekKey(key, NOW), key).toBe(isArchiveWeekInRange(key, current));
+    }
+  });
+});
+
+// h92-weeklyarchive-1: W38 was never recall-checked and no week before W44 has
+// the sibling-headline veto, so a closed week before the first covered week
+// prints counts under a weaker withdrawal standard. The constant is the first
+// ISO week judged by both filters; the predicate is a lexical compare because
+// keys are zero-padded 'YYYY-Www'.
+describe("isBlindspotVetoCovered", () => {
+  it("pins the first week judged by both the recall check and the sibling-headline veto", () => {
+    expect(BLINDSPOT_VETO_COVERED_FROM).toBe("2026-W44");
+  });
+
+  it("starts inside the archive window (an earlier constant would hide nothing)", () => {
+    expect(isArchiveWeekInRange(BLINDSPOT_VETO_COVERED_FROM, "2026-W45")).toBe(true);
+    expect(BLINDSPOT_VETO_COVERED_FROM > WEEK_ARCHIVE_FIRST).toBe(true);
+  });
+
+  it.each([
+    ["2026-W38", false], // the archive's first week: 39 of 41 flags never recall-checked
+    ["2026-W43", false], // last week before the sibling-headline veto
+    ["2026-W44", true], // the first covered week, inclusive
+    ["2026-W45", true],
+    ["2027-W01", true], // a year boundary sorts after every 2026 key
+  ])("%s -> %s", (key, covered) => {
+    expect(isBlindspotVetoCovered(key)).toBe(covered);
+  });
+
+  it("is a lexical compare that stays chronological across the year boundary", () => {
+    // Zero-padded 'YYYY-Www': '2026-W09' < '2026-W44', '2025-W52' < '2026-W44',
+    // and a long year's W53 sits between 2026-W44 and 2027-W01.
+    expect(isBlindspotVetoCovered("2026-W09")).toBe(false);
+    expect(isBlindspotVetoCovered("2025-W52")).toBe(false);
+    expect(isBlindspotVetoCovered("2026-W53")).toBe(true);
+  });
+
+  it("agrees with the constant for every week of 2026 (a sweep, not a spot check)", () => {
+    for (let w = 1; w <= 53; w++) {
+      const key = `2026-W${String(w).padStart(2, "0")}`;
+      expect(isBlindspotVetoCovered(key), key).toBe(w >= 44);
     }
   });
 });

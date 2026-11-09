@@ -14,7 +14,7 @@ import {
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { sharePageMetadata } from "@/lib/seo/page-metadata";
 import { getFeedStatusSummary } from "@/lib/sources/feed-status";
-import { weekCopy } from "@/lib/weekly/week-copy";
+import { weekCopy, weekCoverageCaveat } from "@/lib/weekly/week-copy";
 import {
   getWeekArchiveClusters,
   parseWeekKey,
@@ -99,6 +99,11 @@ export default async function WeekArchivePage({ params }: PageProps) {
   // A closed week has no live source health and reads as a finished record;
   // every line that differs comes from week-copy (see its header).
   const copy = weekCopy(!isCurrentWeek);
+  // A closed week before the first week judged by both withdrawal filters says
+  // its counts are not comparable with later weeks (h92-weeklyarchive-1). Copy
+  // only: the counts and rows below are untouched. null for the week in
+  // progress and for every week from the cut-off on.
+  const coverageCaveat = isCurrentWeek ? null : weekCoverageCaveat(copy, hafta);
 
   const [read, health, feedStatus] = await Promise.all([
     getWeekArchiveClusters(hafta),
@@ -134,6 +139,7 @@ export default async function WeekArchivePage({ params }: PageProps) {
       />
 
       <p className={`${proseClass}`}>{copy.note}</p>
+      {coverageCaveat ? <p className={proseClass}>{coverageCaveat}</p> : null}
 
       {rows === null ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">

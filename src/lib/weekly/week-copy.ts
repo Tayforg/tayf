@@ -1,4 +1,5 @@
 import { formatCountTr } from "@/lib/format/number-tr";
+import { isBlindspotVetoCovered } from "@/lib/weekly/week-key";
 import type { MediaDnaZone } from "@/types";
 
 // Reader-facing copy for the weekly sections (/hafta and /hafta/<week>).
@@ -66,6 +67,14 @@ export interface WeekCopy {
    * unit as `percentBasis` ("kaynak kaydı").
    */
   zoneRowTotal(total: number): string;
+  /**
+   * Caveat for a closed week whose blindspot claims were not judged by both
+   * withdrawal filters (the recall check and the sibling-headline veto), so its
+   * "Toplam N kör nokta" is not comparable with later weeks (h92-weeklyarchive-1).
+   * Whether a given week needs it is `weekCoverageCaveat`'s call; `null` for the
+   * rolling window and the week in progress, which always run every filter.
+   */
+  vetoCoverageCaveat: string | null;
 }
 
 const UNAVAILABLE =
@@ -100,6 +109,7 @@ const ROLLING: WeekCopy = Object.freeze<WeekCopy>({
   latestLinkText: LATEST_LINK_TEXT,
   labelUnchanged: "Son 7 günde etiket değişmedi.",
   zoneRowTotal: (total) => `(son 7 günün ${formatCountTr(total)} kaynak kaydı içinde)`,
+  vetoCoverageCaveat: null,
 });
 
 const LIVE: WeekCopy = Object.freeze<WeekCopy>({
@@ -122,6 +132,7 @@ const LIVE: WeekCopy = Object.freeze<WeekCopy>({
   latestLinkText: LATEST_LINK_TEXT,
   labelUnchanged: "Bu hafta etiket değişmedi.",
   zoneRowTotal: (total) => `(haftanın ${formatCountTr(total)} kaynak kaydı içinde)`,
+  vetoCoverageCaveat: null,
 });
 
 const CLOSED: WeekCopy = Object.freeze<WeekCopy>({
@@ -140,6 +151,11 @@ const CLOSED: WeekCopy = Object.freeze<WeekCopy>({
   latestLinkText: LATEST_LINK_TEXT,
   labelUnchanged: "O hafta etiket değişmedi.",
   zoneRowTotal: (total) => `(haftanın ${formatCountTr(total)} kaynak kaydı içinde)`,
+  // "O haftanın", not "Bu haftanın": the closed variant reads as a finished
+  // record and week-copy.test.ts bans "bu hafta" in every closed string. It
+  // names no week or number; the cut-off is BLINDSPOT_VETO_COVERED_FROM.
+  vetoCoverageCaveat:
+    "O haftanın kör noktaları, sonradan eklenen doğrulama süzgeçlerinin hepsinden geçmedi; toplamlar sonraki haftalarla birebir karşılaştırılamaz.",
 });
 
 const BY_VARIANT: Readonly<Record<WeekCopyVariant, WeekCopy>> = Object.freeze({
@@ -160,6 +176,20 @@ export function weekCopyFor(variant: WeekCopyVariant): WeekCopy {
  */
 export function weekCopy(closed: boolean): WeekCopy {
   return weekCopyFor(closed ? "closed" : "live");
+}
+
+/**
+ * The filter-coverage caveat to print on /hafta/<weekKey>, or `null` for none
+ * (h92-weeklyarchive-1): the copy's own caveat, unless `weekKey` is at or after
+ * BLINDSPOT_VETO_COVERED_FROM, where both withdrawal filters judged the claims.
+ * The live and rolling copies carry no caveat, so they stay `null` for any key.
+ *
+ * The page asks this instead of reading `copy.vetoCoverageCaveat` itself:
+ * tests/guards/week-archive-copy.test.ts bans the substring "veto" anywhere in
+ * the page file, identifiers included.
+ */
+export function weekCoverageCaveat(copy: WeekCopy, weekKey: string): string | null {
+  return isBlindspotVetoCovered(weekKey) ? null : copy.vetoCoverageCaveat;
 }
 
 /** A non-negative whole count; NaN, Infinity and negatives read as 0. */

@@ -111,7 +111,23 @@ function istMinutes(iso: string): number {
 
 const PRICE_TAG_CLASS = "absolute left-full ml-1 -translate-y-1/2 font-mono text-[10px] tabular-nums";
 
-export function IntradayChart({ bars, markers, prevClose }: { bars: Bar5m[]; markers: ChartMarker[]; prevClose?: number | null }) {
+/**
+ * `closeOverride` (h92-marketclock-1) is the settled daily close of a session whose bars were cut short
+ * (bist_intraday_targets dropped the ticker mid-session, so the newest bar is not where the day ended). When it is
+ * finite, the colour, the last-price tag (its text and its level) and the aria-label follow it instead of the last
+ * bar; the path is still the bars. Absent or not finite, the output is what it always was.
+ */
+export function IntradayChart({
+  bars,
+  markers,
+  prevClose,
+  closeOverride,
+}: {
+  bars: Bar5m[];
+  markers: ChartMarker[];
+  prevClose?: number | null;
+  closeOverride?: number | null;
+}) {
   if (bars.length < 2) return null;
   const closes = bars.map((b) => b.close);
   const lo = Math.min(...closes, prevClose ?? Infinity);
@@ -122,19 +138,22 @@ export function IntradayChart({ bars, markers, prevClose }: { bars: Bar5m[]; mar
   const y = (v: number) => PAD.top + (1 - (v - lo) / span) * plotH;
   const path = bars.map((b, i) => `${i ? "L" : "M"}${x(b.ts).toFixed(1)},${y(b.close).toFixed(1)}`).join(" ");
   const last = bars[bars.length - 1]!;
-  const up = prevClose != null ? last.close >= prevClose : last.close >= bars[0]!.close;
+  const settled = typeof closeOverride === "number" && Number.isFinite(closeOverride) ? closeOverride : null;
+  const lastClose = settled ?? last.close;
+  const up = prevClose != null ? lastClose >= prevClose : lastClose >= bars[0]!.close;
   const inSession = markers.filter((m) => {
     const mins = istMinutes(m.ts);
     return mins >= SESSION_START_MIN - 30 && mins <= SESSION_END_MIN;
   });
-  const tops = priceTagTops(y(last.close), prevClose != null ? y(prevClose) : null, H, PRICE_TAG_PHONE_GAP);
+  const tops = priceTagTops(y(lastClose), prevClose != null ? y(prevClose) : null, H, PRICE_TAG_PHONE_GAP);
+  const ariaLabel = settled != null ? `Seans içi fiyat, kapanış ${fmtPrice(settled)}, gün içi veri eksik` : `Seans içi fiyat, son ${fmtPrice(last.close)}`;
 
   return (
     <figure className="px-3 py-2">
       {/* pr-16 is the gutter the price tags sit in (left-full of the plot box). */}
       <div className="pr-16">
         <div className="relative">
-          <svg viewBox={`0 0 ${W} ${H}`} className="block h-auto w-full" role="img" aria-label={`Seans içi fiyat, son ${fmtPrice(last.close)}`}>
+          <svg viewBox={`0 0 ${W} ${H}`} className="block h-auto w-full" role="img" aria-label={ariaLabel}>
             {AXIS_HOURS.map((h) => {
               const xx = xAt(h * 60);
               return <line key={h} x1={xx} x2={xx} y1={PAD.top} y2={H - PAD.bottom} className="stroke-foreground/10" strokeWidth="0.5" />;
@@ -164,7 +183,7 @@ export function IntradayChart({ bars, markers, prevClose }: { bars: Bar5m[]; mar
             className={`${PRICE_TAG_CLASS} ${up ? "text-emerald-400" : "text-red-400"}`}
             style={{ top: `${tops.last.toFixed(2)}%` }}
           >
-            {fmtPrice(last.close)}
+            {fmtPrice(lastClose)}
           </span>
         </div>
         <div className="relative h-4 font-mono text-[10px] text-muted-foreground">

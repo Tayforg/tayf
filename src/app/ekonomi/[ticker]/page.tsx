@@ -37,7 +37,9 @@ import { getQuotes } from "@/lib/finance/quotes";
 import {
   chartBaseline,
   companyMetaLine,
+  intradayCutShort,
   intradayEmptyCopy,
+  intradayPanelMeta,
   priceEmptyLabel,
   quoteFreshness,
   rebaseQuoteOnStat,
@@ -314,6 +316,12 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // true while it is not full.
   const windowLabel = disclosureWindowLabel(page.disclosures.length, page.totalDisclosures30d, DISCLOSURE_CAP);
   const sessionDay = intraday.day;
+  // h92-marketclock-1: a session whose bars stop before 17:30 although its daily bar is in (the ticker left
+  // bist_intraday_targets mid-session and quotes-ingest never back-fills) would draw its last price, colour and
+  // aria-label from a stale bar and contradict the header. The chart is then given the settled close, and the
+  // panel meta says where the data stops.
+  const lastBar = intraday.bars.at(-1) ?? null;
+  const cut = intradayCutShort({ lastBar, intradayDay: sessionDay, stat, nowMs });
   const markers = sessionDay
     ? [
         ...page.articles.filter((a) => istToday(new Date(a.publishedAt).getTime()) === sessionDay).map((a) => ({ ts: a.publishedAt, label: a.title })),
@@ -394,7 +402,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         title="Seans içi"
         meta={
           sessionDay
-            ? `${sessionDay.split("-").reverse().join(".")}, 5 dakikalık kapanışlar, haberler işaretli`
+            ? intradayPanelMeta(sessionDay, cut && lastBar ? lastBar.ts : null)
             : intradayRead.failed
               ? "5 dakikalık veri yüklenemedi"
               : "5 dakikalık veri henüz yok"
@@ -406,6 +414,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           <IntradayChart
             bars={intraday.bars}
             markers={markers}
+            closeOverride={cut && stat ? stat.lastClose : null}
             prevClose={chartBaseline({
               stat,
               intradayDay: intraday.day,

@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 
-import { blindspotTallyLine, weekCopy, weekCopyFor, type WeekCopy } from "./week-copy";
+import {
+  blindspotTallyLine,
+  weekCopy,
+  weekCopyFor,
+  weekCoverageCaveat,
+  type WeekCopy,
+} from "./week-copy";
 
 // Reader-facing copy for the weekly sections. `weekCopy(false)` is the live
 // wording of the in-progress ISO week (/hafta/<current week>) and must stay
@@ -35,8 +41,15 @@ function allStrings(copy: WeekCopy): string[] {
   push(copy.latestLinkText);
   push(copy.labelUnchanged);
   push(copy.zoneRowTotal(1234));
+  push(copy.vetoCoverageCaveat);
   return out;
 }
+
+// h92-weeklyarchive-1. Closed weeks wording: "O haftanın ...", never "Bu
+// haftanın ...": the closed variant is a finished record and the jargon sweep
+// below bans "bu hafta" in every closed string.
+const VETO_COVERAGE_CAVEAT =
+  "O haftanın kör noktaları, sonradan eklenen doğrulama süzgeçlerinin hepsinden geçmedi; toplamlar sonraki haftalarla birebir karşılaştırılamaz.";
 
 describe("weekCopy(false) — live wording is unchanged", () => {
   const live = weekCopy(false);
@@ -82,6 +95,10 @@ describe("weekCopy(false) — live wording is unchanged", () => {
     expect(live.showStatusLink).toBe(true);
   });
 
+  it("has no filter-coverage caveat: the week in progress is judged by every filter", () => {
+    expect(live.vetoCoverageCaveat).toBeNull();
+  });
+
   it("names the current-summary link in reader language", () => {
     expect(live.latestLinkText).toBe("Güncel haftalık özet");
   });
@@ -112,6 +129,19 @@ describe("weekCopy(true) — closed week reads as a finished record", () => {
     expect(closed.note).toBe(
       "Kör noktalar o hafta işaretlenen haberlerdir; sonradan geri alınan işaretler listede yer almaz.",
     );
+  });
+
+  it("carries the filter-coverage caveat for weeks the later withdrawal filters never judged", () => {
+    expect(closed.vetoCoverageCaveat).toBe(VETO_COVERAGE_CAVEAT);
+  });
+
+  it("the caveat names no week number or date (the cut-off lives in BLINDSPOT_VETO_COVERED_FROM only)", () => {
+    expect(closed.vetoCoverageCaveat).not.toMatch(/\d/);
+  });
+
+  it("does not claim the recall check was skipped (W39-W43 were all recall-checked in prod)", () => {
+    expect(closed.vetoCoverageCaveat).not.toContain("geri çağırma");
+    expect(closed.vetoCoverageCaveat).toContain("hepsinden");
   });
 
   it("shares the unavailable line with live weeks", () => {
@@ -199,6 +229,10 @@ describe('weekCopyFor("rolling") — /hafta is a trailing 7-day window', () => {
     );
   });
 
+  it("has no filter-coverage caveat (a trailing window is always recent)", () => {
+    expect(rolling.vetoCoverageCaveat).toBeNull();
+  });
+
   it("keeps the live source-health affordances of /hafta", () => {
     const live = weekCopy(false);
     expect(rolling.showSourceCounts).toBe(true);
@@ -282,6 +316,7 @@ describe("weekCopy shape", () => {
     "showStatusLink",
     "sourceBasis",
     "unavailable",
+    "vetoCoverageCaveat",
     "zoneHeading",
     "zoneRowTotal",
   ].sort();
@@ -304,6 +339,36 @@ describe("weekCopy shape", () => {
     expect(weekCopy(false).percentBasis(Number.NaN)).toBe(
       "Yüzdeler bu haftanın çok kaynaklı kümelerindeki 0 kaynak kaydı üzerinden hesaplanır.",
     );
+  });
+});
+
+// h92-weeklyarchive-1: the /hafta/<week> page asks one question, "does this
+// week need the filter-coverage caveat?", and gets the string or null. Weeks
+// before BLINDSPOT_VETO_COVERED_FROM (2026-W44) were not judged by both the
+// recall check and the sibling-headline veto; the week-key predicate decides,
+// the closed variant supplies the words, live and rolling supply none.
+describe("weekCoverageCaveat", () => {
+  const closed = weekCopy(true);
+
+  it.each(["2026-W38", "2026-W39", "2026-W43"])(
+    "prints the caveat on closed week %s, before the first covered week",
+    (key) => {
+      expect(weekCoverageCaveat(closed, key)).toBe(VETO_COVERAGE_CAVEAT);
+    },
+  );
+
+  it.each(["2026-W44", "2026-W45", "2027-W01"])(
+    "prints nothing on closed week %s, from the first covered week on",
+    (key) => {
+      expect(weekCoverageCaveat(closed, key)).toBeNull();
+    },
+  );
+
+  it("prints nothing for the live and rolling variants, whatever the key", () => {
+    for (const copy of [weekCopy(false), weekCopyFor("rolling")]) {
+      expect(weekCoverageCaveat(copy, "2026-W38")).toBeNull();
+      expect(weekCoverageCaveat(copy, "2026-W43")).toBeNull();
+    }
   });
 });
 

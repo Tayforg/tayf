@@ -1,5 +1,7 @@
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { priceTagTops, sessionAxisTicks } from "./intraday-chart";
+import type { Bar5m } from "@/lib/finance/queries";
+import { IntradayChart, priceTagTops, sessionAxisTicks } from "./intraday-chart";
 
 // The chart labels are HTML positioned over the SVG (an SVG <text> shrinks
 // with the viewBox: about 3 px on a 390 px phone). Their horizontal and
@@ -117,5 +119,88 @@ describe("priceTagTops", () => {
   it("clamps a single tag that falls outside the viewBox", () => {
     expect(priceTagTops(-10, null, H).last).toBe(0);
     expect(priceTagTops(400, null, H).last).toBe(100);
+  });
+});
+
+// h92-marketclock-1: when bist_intraday_targets dropped a ticker mid-session the newest
+// bar is not where the day settled (VKING: last bar 12:05 Istanbul at 11,53, the daily
+// close 12,09). The page then passes the settled close as closeOverride: the colour, the
+// last-price tag and the aria-label follow it; the path stays the bars.
+describe("IntradayChart closeOverride (h92-marketclock-1)", () => {
+  // VKING's shape: down from 11,67 to 11,53 by 12:05, while the day closed at 12,09.
+  const bars: Bar5m[] = [
+    { ts: "2026-11-06T07:00:00.000Z", close: 11.8, volume: 100 },
+    { ts: "2026-11-06T07:30:00.000Z", close: 11.62, volume: 80 },
+    { ts: "2026-11-06T08:30:00.000Z", close: 11.7, volume: 60 },
+    { ts: "2026-11-06T09:05:00.000Z", close: 11.53, volume: 0 },
+  ];
+  const PREV = 11.67;
+  const render = (extra: { closeOverride?: number | null; prevClose?: number | null } = {}) =>
+    renderToStaticMarkup(IntradayChart({ bars, markers: [], prevClose: PREV, ...extra }));
+  const pathOf = (html: string) => /<path d="([^"]+)"/.exec(html)?.[1];
+  const ariaOf = (html: string) => /aria-label="([^"]+)"/.exec(html)?.[1];
+  /** The last-price tag: the data-chart-label span coloured emerald or red. */
+  const lastTag = (html: string) =>
+    /<span aria-hidden="true" data-chart-label="true" class="[^"]*text-(emerald|red)-400" style="top:([\d.]+)%">([^<]+)<\/span>/.exec(html);
+
+  it("without the prop, with null, with undefined and with a non-finite value the markup is identical", () => {
+    const plain = render();
+    expect(render({ closeOverride: null })).toBe(plain);
+    expect(render({ closeOverride: undefined })).toBe(plain);
+    expect(render({ closeOverride: Number.NaN })).toBe(plain);
+    expect(render({ closeOverride: Number.POSITIVE_INFINITY })).toBe(plain);
+  });
+
+  it("without the prop it still reads the last bar: 'son 11,53', red against the previous close", () => {
+    const html = render();
+    expect(ariaOf(html)).toBe("Seans içi fiyat, son 11,53");
+    expect(html).toContain("stroke-red-400");
+    expect(lastTag(html)?.[1]).toBe("red");
+    expect(lastTag(html)?.[3]).toBe("11,53");
+  });
+
+  it("with the settled close: the aria-label says it and that the intraday data is incomplete", () => {
+    expect(ariaOf(render({ closeOverride: 12.09 }))).toBe("Seans içi fiyat, kapanış 12,09, gün içi veri eksik");
+  });
+
+  it("with the settled close above the previous close the line and the tag are green and the tag prints 12,09", () => {
+    const html = render({ closeOverride: 12.09 });
+    expect(html).toContain("stroke-emerald-400");
+    expect(html).not.toContain("stroke-red-400");
+    expect(lastTag(html)?.[1]).toBe("emerald");
+    expect(lastTag(html)?.[3]).toBe("12,09");
+    expect(html).not.toContain("11,53");
+  });
+
+  it("with a settled close below the previous close everything stays red", () => {
+    const html = render({ closeOverride: 11.4 });
+    expect(html).toContain("stroke-red-400");
+    expect(lastTag(html)?.[1]).toBe("red");
+    expect(lastTag(html)?.[3]).toBe("11,40");
+  });
+
+  it("the path is the bars' path, whatever the override", () => {
+    expect(pathOf(render({ closeOverride: 12.09 }))).toBe(pathOf(render()));
+  });
+
+  it("the tag moves to the settled close's level (higher on the chart), through priceTagTops, inside 0-100", () => {
+    const before = Number(lastTag(render())?.[2]);
+    const after = Number(lastTag(render({ closeOverride: 12.09 }))?.[2]);
+    expect(after).toBeLessThan(before);
+    expect(after).toBeGreaterThanOrEqual(0);
+    expect(after).toBeLessThanOrEqual(100);
+  });
+
+  it("with no previous close the override is compared with the first bar's close", () => {
+    const up = render({ prevClose: null, closeOverride: 12.09 });
+    expect(up).toContain("stroke-emerald-400");
+    expect(lastTag(up)?.[1]).toBe("emerald");
+    const down = render({ prevClose: null, closeOverride: 11.0 });
+    expect(down).toContain("stroke-red-400");
+    expect(lastTag(down)?.[1]).toBe("red");
+  });
+
+  it("still draws nothing for fewer than two bars", () => {
+    expect(IntradayChart({ bars: bars.slice(0, 1), markers: [], prevClose: PREV, closeOverride: 12.09 })).toBeNull();
   });
 });
