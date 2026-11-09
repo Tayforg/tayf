@@ -11,6 +11,29 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
+// A scripted `useState` (same device as framing-game.test.tsx): while `scripted.values` is set, the form's useState
+// calls (in declaration order, named from the source) return those values, so the real JSX of the "submitting" state
+// can be rendered with renderToStaticMarkup. With `scripted.values === null` every call is the real useState.
+const scripted = vi.hoisted(() => ({
+  values: null as Record<string, unknown> | null,
+  names: [] as string[],
+  calls: 0,
+}));
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useState: ((initial: unknown) => {
+      if (scripted.values !== null) {
+        const name = scripted.names[scripted.calls++];
+        if (name !== undefined && name in scripted.values) return [scripted.values[name], () => undefined];
+      }
+      return (actual.useState as (i: unknown) => unknown)(initial);
+    }) as typeof actual.useState,
+  };
+});
+
 import { CorrectionForm, FieldErrorMessage, fieldAria, fieldErrorSummary } from "./correction-form";
 
 /** The serialised opening tag of the <input>/<textarea> carrying `attr="value"`. */
@@ -298,5 +321,103 @@ describe("CorrectionForm -- every failed attempt is announced", () => {
 
   it("renders no alert and no key warning on first paint", () => {
     expect(renderToStaticMarkup(<CorrectionForm />)).not.toContain('role="alert"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h90-livearia-3: the submit button used `disabled={status === "submitting"}`.
+// Setting `disabled` on the focused button drops focus to <body> (Chrome), and the
+// 429 / generic / network errors never restored it. aria-disabled keeps the button
+// focusable, so focus never leaves; the submit handler ignores a submit that
+// arrives while one is in flight (Enter inside an input still submits implicitly,
+// and a button that is only aria-disabled does not block that).
+// ---------------------------------------------------------------------------
+
+/** The useState names of the form, in declaration order (read from the source, so a new state cannot shift the script). */
+const STATE_NAMES = [...SOURCE.matchAll(/const \[(\w+), set\w+\] = useState/g)].map((m) => m[1] as string);
+
+/** Renders the real form with the given scripted state. */
+function renderWithState(values: Record<string, unknown>): string {
+  scripted.values = values;
+  scripted.names = STATE_NAMES;
+  scripted.calls = 0;
+  try {
+    return renderToStaticMarkup(<CorrectionForm />);
+  } finally {
+    scripted.values = null;
+  }
+}
+
+/** The serialised opening tag of the one <button> in the form. */
+function submitTag(markup: string): string {
+  const tags = markup.match(/<button\b[^>]*>/g) ?? [];
+  expect(tags, "exactly one button in the form").toHaveLength(1);
+  return tags[0] as string;
+}
+
+/** True when the tag carries the native boolean `disabled` attribute (not aria-disabled, not a disabled: class). */
+function hasNativeDisabled(tag: string): boolean {
+  return /\sdisabled(?=[\s=>])/.test(tag);
+}
+
+describe("CorrectionForm -- the submit button keeps focus while submitting [h90-livearia-3]", () => {
+  it("the state script names the states it expects (the harness is not vacuous)", () => {
+    expect(STATE_NAMES).toEqual(["status", "errorMessage", "fieldError", "failedAttempts"]);
+  });
+
+  it("idle: the button carries aria-disabled=\"false\" and no native disabled attribute", () => {
+    const tag = submitTag(renderToStaticMarkup(<CorrectionForm />));
+    expect(attrValue(tag, "type")).toBe("submit");
+    expect(attrValue(tag, "aria-disabled")).toBe("false");
+    expect(hasNativeDisabled(tag)).toBe(false);
+  });
+
+  it("submitting: aria-disabled=\"true\", still no native disabled attribute, 'Gönderiliyor...' and aria-busy on the form", () => {
+    const markup = renderWithState({ status: "submitting" });
+    const tag = submitTag(markup);
+    expect(attrValue(tag, "aria-disabled")).toBe("true");
+    expect(hasNativeDisabled(tag)).toBe(false);
+    expect(markup).toContain("Gönderiliyor...");
+    expect(markup).toMatch(/<form\b[^>]*\baria-busy="true"/);
+  });
+
+  it("the button is in the markup in the error state too, enabled again and with the alert beside it", () => {
+    const markup = renderWithState({ status: "error", errorMessage: "Bir bağlantı hatası oluştu. Lütfen tekrar deneyin." });
+    const tag = submitTag(markup);
+    expect(attrValue(tag, "aria-disabled")).toBe("false");
+    expect(hasNativeDisabled(tag)).toBe(false);
+    expect(markup).toContain('role="alert"');
+  });
+
+  it("styles the pending state with aria-disabled: variants, no disabled: variants left", () => {
+    const tag = submitTag(renderToStaticMarkup(<CorrectionForm />));
+    const cls = attrValue(tag, "class") ?? "";
+    expect(cls).toContain("aria-disabled:pointer-events-none");
+    expect(cls).toContain("aria-disabled:opacity-50");
+    expect(cls).not.toMatch(/(?<![\w-])disabled:/);
+    expect(SOURCE).not.toMatch(/(?<![\w-])disabled:/);
+  });
+
+  it("the source drives the attribute from the status: aria-disabled={status === \"submitting\"}, never disabled={...}", () => {
+    expect(CODE).toContain('aria-disabled={status === "submitting"}');
+    expect(CODE).not.toMatch(/\sdisabled=\{/);
+  });
+
+  it("handleSubmit returns early while a submit is in flight, right after preventDefault and before it touches any state", () => {
+    const body = handleSubmitSource();
+    const prevent = body.indexOf("event.preventDefault();");
+    const guard = body.indexOf('if (status === "submitting") return;');
+    const firstState = body.indexOf("setErrorMessage(null);");
+    expect(prevent).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(prevent);
+    expect(firstState).toBeGreaterThan(guard);
+    expect(body.indexOf("validateCorrection(")).toBeGreaterThan(guard);
+    expect(body.indexOf("fetch(")).toBeGreaterThan(guard);
+  });
+
+  it("keeps the honeypot, the validate-before-send order and the focus-restoring effects intact", () => {
+    expect(SOURCE).toContain("website,");
+    expect(CODE).toMatch(/if \(status === "success"\) successRef\.current\?\.focus\(\)/);
+    expect(CODE).toMatch(/document\.getElementById\(`correction-\$\{fieldError\.field\}`\)\?\.focus\(\)/);
   });
 });

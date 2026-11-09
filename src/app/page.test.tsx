@@ -54,6 +54,7 @@ vi.mock("@/lib/time", async (importOriginal) => {
 });
 
 import HomePage, { HomeFeed, generateMetadata } from "./page";
+import { ClearSearchLink } from "@/components/home/clear-search-link";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { FollowButton } from "@/components/follow/follow-button";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
@@ -148,6 +149,15 @@ function visibleText(node: unknown): string {
     return visibleText(el.props?.children);
   }
   return "";
+}
+
+/**
+ * The "Aramayı temizle" links the empty card offers. The link is a client
+ * component with hooks (ClearSearchLink owns its label), so it is found as an
+ * element rather than read as text.
+ */
+function clearSearchLinks(tree: unknown): Elementish[] {
+  return collectRendered(tree, new Set(["EmptySearch"])).filter((e) => e.type === ClearSearchLink);
 }
 
 /** The live region's text (SearchStatus's `text` prop). */
@@ -594,7 +604,9 @@ describe("HomeFeed: a one-character query (no search ran)", () => {
     expect(text).not.toContain("Hiç haber bulunamadı");
     expect(text).not.toContain("Farklı bir kelime deneyin");
     // The reader has to type more, so the way out is still offered.
-    expect(text).toContain("Aramayı temizle");
+    const links = clearSearchLinks(tree);
+    expect(links).toHaveLength(1);
+    expect(links[0]?.props?.targetId).toBe("haber-akisi");
   });
 
   it("announces the same hint in the live region, not 'sonuç bulunamadı'", async () => {
@@ -649,7 +661,7 @@ describe("HomeFeed: a punctuation-only query (no search ran)", () => {
     expect(text).toContain("En az 2 karakter yazın.");
     expect(text).not.toContain("için sonuç yok");
     expect(text).not.toContain("Hiç haber bulunamadı");
-    expect(text).toContain("Aramayı temizle");
+    expect(clearSearchLinks(tree)).toHaveLength(1);
     expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
     expect(collectElements(tree).some((e) => e.type === FollowButton)).toBe(false);
   });

@@ -137,6 +137,27 @@ export function ManualCopyBox({ label, value }: { label: string; value: string }
   );
 }
 
+// What the sr-only status says after a copy attempt. A failure also says WHERE
+// the text is: the manual-copy box that appears for it sits outside the live
+// region, so without the pointer a screen-reader user hears "Kopyalanamadı" and
+// never learns a box with the text exists (h90-livearia-2). The chip labels keep
+// the short "Kopyalanamadı"; this sentence is for the status only.
+export const COPY_FAILED_STATUS = "Kopyalanamadı. Metin aşağıdaki kutuda; seçip kopyalayın.";
+
+export function copyStatusText(flags: {
+  copied: boolean;
+  embedCopied: boolean;
+  iframeCopied: boolean;
+  shareFailed: boolean;
+  embedFailed: boolean;
+  iframeFailed: boolean;
+}): string {
+  if (flags.copied) return "Kopyalandı";
+  if (flags.embedCopied || flags.iframeCopied) return "Kod kopyalandı";
+  if (flags.shareFailed || flags.embedFailed || flags.iframeFailed) return COPY_FAILED_STATUS;
+  return "";
+}
+
 // The text every outbound share carries: the headline, then the statistics
 // line when there is one. The channel chips and the primary "Paylaş" button
 // (native sheet and clipboard copy) all use it, so a recipient who gets no
@@ -386,13 +407,7 @@ export function ShareButton({
         </span>
       </span>
       <span className="sr-only" role="status" aria-live="polite">
-        {copied
-          ? "Kopyalandı"
-          : embedCopied || iframeCopied
-            ? "Kod kopyalandı"
-            : shareFailed || embedFailed || iframeFailed
-              ? "Kopyalanamadı"
-              : ""}
+        {copyStatusText({ copied, embedCopied, iframeCopied, shareFailed, embedFailed, iframeFailed })}
       </span>
       {shareManual && <ManualCopyBox label="Paylaşım bağlantısı" value={shareManual} />}
       {embedManual && <ManualCopyBox label="Gömme kodu" value={embedManual} />}

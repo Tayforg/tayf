@@ -10,12 +10,71 @@ import {
   MoreShareToggle,
   MORE_OPEN,
   MORE_CLOSED,
+  COPY_FAILED_STATUS,
+  copyStatusText,
   copyText,
   resolveEmbedCopy,
   resolveIframeCopy,
   resolveShareCopy,
 } from "./share-button";
 import { buildShareUrl } from "@/lib/clusters/share";
+
+// A hook runtime for the "failed copy is spoken" suite at the bottom of the
+// file (h90-livearia-2). It is only installed through vi.doMock inside that
+// suite, on freshly imported modules, so nothing above this line runs on it.
+const rt = vi.hoisted(() => {
+  interface Slot {
+    value?: unknown;
+  }
+
+  class Runtime {
+    /** Every committed output, one entry per render pass. */
+    readonly outputs: unknown[] = [];
+    private readonly slots: Slot[] = [];
+    private cursor = 0;
+    private dirty = false;
+    private flushing = false;
+
+    constructor(private readonly component: () => unknown) {}
+
+    render(): void {
+      this.flushing = true;
+      try {
+        do {
+          this.dirty = false;
+          this.cursor = 0;
+          const outer = state.current;
+          state.current = this;
+          try {
+            this.outputs.push(this.component());
+          } finally {
+            state.current = outer;
+          }
+        } while (this.dirty);
+      } finally {
+        this.flushing = false;
+      }
+    }
+
+    useState(initial: unknown): [unknown, (next: unknown) => void] {
+      const slot = (this.slots[this.cursor] ??= {
+        value: typeof initial === "function" ? (initial as () => unknown)() : initial,
+      });
+      this.cursor++;
+      const set = (next: unknown) => {
+        const value = typeof next === "function" ? (next as (prev: unknown) => unknown)(slot.value) : next;
+        if (Object.is(value, slot.value)) return;
+        slot.value = value;
+        if (this.flushing) this.dirty = true;
+        else this.render();
+      };
+      return [slot.value, set];
+    }
+  }
+
+  const state: { current: Runtime | null } = { current: null };
+  return { state, Runtime };
+});
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -1125,5 +1184,191 @@ describe("ShareButton — 'Daha fazla' disclosure on phones (h46-mobile-1)", () 
     expect(open).toContain('aria-expanded="true"');
     expect(open).toContain('aria-controls="more-1"');
     expect(open).toContain("Daha az");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h90-livearia-2: when copying fails the status says where the text is
+// ---------------------------------------------------------------------------
+
+const FAILED = "Kopyalanamadı. Metin aşağıdaki kutuda; seçip kopyalayın.";
+
+describe("copyStatusText", () => {
+  const none = {
+    copied: false,
+    embedCopied: false,
+    iframeCopied: false,
+    shareFailed: false,
+    embedFailed: false,
+    iframeFailed: false,
+  };
+
+  it("is empty until something happened", () => {
+    expect(copyStatusText(none)).toBe("");
+  });
+
+  it("keeps the success texts as they were", () => {
+    expect(copyStatusText({ ...none, copied: true })).toBe("Kopyalandı");
+    expect(copyStatusText({ ...none, embedCopied: true })).toBe("Kod kopyalandı");
+    expect(copyStatusText({ ...none, iframeCopied: true })).toBe("Kod kopyalandı");
+  });
+
+  it.each(["shareFailed", "embedFailed", "iframeFailed"] as const)(
+    "%s says the text is in the box below, in Turkish",
+    (flag) => {
+      const text = copyStatusText({ ...none, [flag]: true });
+      expect(text).toBe(FAILED);
+      expect(text).toContain("aşağıdaki kutuda");
+    },
+  );
+
+  it("exports the failure sentence verbatim", () => {
+    expect(COPY_FAILED_STATUS).toBe(FAILED);
+  });
+
+  it("a success wins over a stale failure flag", () => {
+    expect(copyStatusText({ ...none, copied: true, embedFailed: true })).toBe("Kopyalandı");
+  });
+});
+
+describe("ShareButton — failure status wiring (source)", () => {
+  const src = readFileSync(resolve(__dirname, "share-button.tsx"), "utf8");
+
+  it("the sr-only status is fed by copyStatusText, with all six flags", () => {
+    const at = src.indexOf('<span className="sr-only" role="status" aria-live="polite">');
+    expect(at).toBeGreaterThan(-1);
+    const body = src.slice(at, src.indexOf("</span>", at));
+    expect(body).toContain("copyStatusText({");
+    for (const flag of ["copied", "embedCopied", "iframeCopied", "shareFailed", "embedFailed", "iframeFailed"]) {
+      expect(body, flag).toContain(flag);
+    }
+  });
+
+  it("the chip labels keep the short 'Kopyalanamadı' (the sentence is for the status only)", () => {
+    expect(src).toContain('copied ? "Kopyalandı" : shareFailed ? "Kopyalanamadı" : "Paylaş"');
+  });
+});
+
+// The real component, clicked: the failure reaches the live region and the manual box.
+describe("ShareButton — a failed copy is spoken and the text offered (behaviour)", () => {
+  const CID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+  type El = { type?: unknown; props?: Record<string, unknown> };
+
+  const textOf = (node: unknown): string =>
+    Array.isArray(node)
+      ? node.map(textOf).join("")
+      : typeof node === "string" || typeof node === "number"
+        ? String(node)
+        : node && typeof node === "object"
+          ? textOf((node as El).props?.children)
+          : "";
+
+  function findAll(node: unknown, pred: (el: El) => boolean, out: El[] = []): El[] {
+    if (Array.isArray(node)) {
+      for (const child of node) findAll(child, pred, out);
+    } else if (node && typeof node === "object") {
+      const el = node as El;
+      if (el.type !== undefined && pred(el)) out.push(el);
+      findAll(el.props?.children, pred, out);
+    }
+    return out;
+  }
+
+  /** A fresh share-button module on the hook runtime, with track() replaced. */
+  async function load() {
+    vi.resetModules();
+    vi.doMock("@/lib/track", () => ({ track: vi.fn() }));
+    vi.doMock("react", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("react")>();
+      return {
+        ...actual,
+        default: actual,
+        useState: (initial: unknown) =>
+          rt.state.current ? rt.state.current.useState(initial) : actual.useState(initial as never),
+        useId: () => (rt.state.current ? "id" : actual.useId()),
+      };
+    });
+    const mod = await import("./share-button");
+    const app = new rt.Runtime(() => mod.ShareButton({ clusterId: CID, title: "Başlık" }));
+    app.render();
+    const tree = () => app.outputs[app.outputs.length - 1];
+    const button = (label: RegExp) => findAll(tree(), (el) => el.type === "button" && label.test(textOf(el)))[0]!;
+    return {
+      mod,
+      status: () => textOf(findAll(tree(), (el) => el.props?.role === "status")[0]),
+      boxes: () => findAll(tree(), (el) => el.type === mod.ManualCopyBox).map((el) => el.props),
+      click: (label: RegExp) => (button(label).props!.onClick as () => Promise<void>)(),
+      label: (label: RegExp) => textOf(button(label)),
+    };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.doUnmock("react");
+    vi.doUnmock("@/lib/track");
+    vi.resetModules();
+  });
+
+  function stubBrowser(writeText: (value: string) => Promise<void>) {
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("window", { location: { origin: "https://tayf.test" } });
+  }
+
+  const denied = () =>
+    vi.fn(async (_value: string) => {
+      throw new Error("denied");
+    });
+
+  it("'Paylaş' with a denied clipboard: the status gives the extended failure text and the box appears", async () => {
+    stubBrowser(denied());
+    const view = await load();
+    expect(view.status()).toBe("");
+    await view.click(/Paylaş/);
+    expect(view.status()).toBe(FAILED);
+    expect(view.status()).toContain("aşağıdaki kutuda");
+    expect(view.label(/Kopyalanamadı/)).toBe("Kopyalanamadı");
+    expect(view.boxes()).toEqual([{ label: "Paylaşım bağlantısı", value: `https://tayf.test/cluster/${CID}` }]);
+  });
+
+  it("the status goes quiet after 2 s but the manual box stays", async () => {
+    stubBrowser(denied());
+    const view = await load();
+    await view.click(/Paylaş/);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(view.status()).toBe("");
+    expect(view.boxes()).toHaveLength(1);
+  });
+
+  it("'Sitenize ekle' with a denied clipboard: same extended text, snippet in the box", async () => {
+    stubBrowser(denied());
+    const view = await load();
+    await view.click(/Sitenize ekle/);
+    expect(view.status()).toBe(FAILED);
+    expect(view.boxes()).toHaveLength(1);
+    expect(view.boxes()[0]?.label).toBe("Gömme kodu");
+  });
+
+  it("'Gömme kodu' with a denied clipboard: same extended text, snippet in the box", async () => {
+    stubBrowser(denied());
+    const view = await load();
+    await view.click(/Gömme kodu/);
+    expect(view.status()).toBe(FAILED);
+    expect(view.boxes()[0]?.label).toBe("iframe gömme kodu");
+  });
+
+  it("success texts are unchanged: 'Kopyalandı' for the link, 'Kod kopyalandı' for the snippets", async () => {
+    stubBrowser(vi.fn(async (_value: string) => {}));
+    const view = await load();
+    await view.click(/Paylaş/);
+    expect(view.status()).toBe("Kopyalandı");
+    expect(view.boxes()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2000);
+    await view.click(/Sitenize ekle/);
+    expect(view.status()).toBe("Kod kopyalandı");
   });
 });

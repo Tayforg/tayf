@@ -129,9 +129,11 @@ vi.mock("react", async (importOriginal) => {
 
 import {
   RouteTitleAnnouncer,
+  SEARCH_CLEARED_ANNOUNCEMENT,
   firstVisibleHeadingText,
   hideNextRouteAnnouncer,
   routeKey,
+  searchWasCleared,
   startTitlePoll,
   stripSiteSuffix,
   type HeadingNode,
@@ -686,6 +688,223 @@ describe("RouteTitleAnnouncer", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h90-livearia-1: clearing a search by link, logo, 'Haberler', g h or Back
+// ---------------------------------------------------------------------------
+
+// The literal copy, pinned here on purpose (the export is checked against it).
+const CLEARED = "Arama temizlendi. Tüm haberler gösteriliyor.";
+
+describe("searchWasCleared", () => {
+  it("is true only for a non-empty query that became empty on the same pathname", () => {
+    expect(searchWasCleared({ pathname: "/", query: "ankara" }, { pathname: "/", query: "" })).toBe(true);
+    expect(searchWasCleared({ pathname: "/konu/x", query: "a" }, { pathname: "/konu/x", query: "" })).toBe(true);
+  });
+
+  it("is false for typing, for a first query, for no query at all and for a pathname change", () => {
+    expect(searchWasCleared({ pathname: "/", query: "a" }, { pathname: "/", query: "b" })).toBe(false);
+    expect(searchWasCleared({ pathname: "/", query: "" }, { pathname: "/", query: "a" })).toBe(false);
+    expect(searchWasCleared({ pathname: "/", query: "" }, { pathname: "/", query: "" })).toBe(false);
+    expect(searchWasCleared({ pathname: "/", query: "a" }, { pathname: "/konu/dunya", query: "" })).toBe(false);
+  });
+
+  it("exports the Turkish announcement verbatim", () => {
+    expect(SEARCH_CLEARED_ANNOUNCEMENT).toBe(CLEARED);
+  });
+});
+
+describe("RouteTitleAnnouncer: clearing the search", () => {
+  function mountOnSearch(q: string, extra = "") {
+    doc.title = `“${q}” araması — Tayf`;
+    nav.pathname = "/";
+    nav.search = extra ? `q=${q}&${extra}` : `q=${q}`;
+    return mount();
+  }
+
+  it("/?q=ankara -> / announces that the search was cleared, politely, once", () => {
+    const view = mountOnSearch("ankara");
+    doc.title = "Tayf — Türkiye Haber Analizi";
+    view.navigate("/", "");
+    vi.advanceTimersByTime(10_000);
+    expect(view.text()).toBe(CLEARED);
+    expect(view.announced()).toEqual([CLEARED]);
+    // It speaks through the one existing region, which stays polite.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("sets the text through the already-mounted region: it renders '' first, then the text", () => {
+    const view = mountOnSearch("ankara");
+    view.navigate("/", "");
+    expect(view.text()).toBe("");
+    vi.advanceTimersByTime(10_000);
+    expect(view.text()).toBe(CLEARED);
+  });
+
+  it("clearing a search that sat on page 2 (/?q=a&page=2 -> /) announces it too", () => {
+    const view = mountOnSearch("ankara", "page=2");
+    view.navigate("/", "");
+    vi.advanceTimersByTime(10_000);
+    expect(view.announced()).toEqual([CLEARED]);
+  });
+
+  it("does not poll the title: the clear text is the whole announcement", () => {
+    const view = mountOnSearch("ankara");
+    doc.title = "Tayf — Türkiye Haber Analizi";
+    view.navigate("/", "");
+    vi.advanceTimersByTime(10_000);
+    expect(view.announced()).not.toContain("Tayf — Türkiye Haber Analizi");
+  });
+
+  it("/?q=a -> /?q=b stays silent (SearchStatus speaks the new result line)", () => {
+    const view = mountOnSearch("a");
+    doc.title = "“b” araması — Tayf";
+    view.navigate("/", "q=b");
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10_000);
+    expect(view.text()).toBe("");
+    expect(view.announced()).toEqual([]);
+  });
+
+  it("/ -> /?q=a (the first query) stays silent", () => {
+    nav.pathname = "/";
+    nav.search = "";
+    const view = mount();
+    view.navigate("/", "q=a");
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10_000);
+    expect(view.announced()).toEqual([]);
+  });
+
+  it("a repeat clear later is spoken again: /?q=a -> / -> /?q=c -> /", () => {
+    const view = mountOnSearch("a");
+    view.navigate("/", "");
+    vi.advanceTimersByTime(1000);
+    expect(view.text()).toBe(CLEARED);
+
+    // A new search empties the region, so the next identical text is a change.
+    view.navigate("/", "q=c");
+    expect(view.text()).toBe("");
+    vi.advanceTimersByTime(10_000);
+    expect(view.text()).toBe("");
+
+    view.navigate("/", "");
+    vi.advanceTimersByTime(1000);
+    expect(view.text()).toBe(CLEARED);
+    expect(view.announced()).toEqual([CLEARED, CLEARED]);
+  });
+
+  it("a title announced on the way to / is not restored by a later clear: /konu/dunya -> / -> /?q=a -> /", () => {
+    // ?q is not part of the route key, so an announcement stored for "/?" used to
+    // match again once the query came back to ''. Any query change empties it.
+    doc.title = "Dünya haberleri — Tayf";
+    nav.pathname = "/konu/dunya";
+    nav.search = "";
+    const view = mount();
+
+    doc.title = "Tayf — Türkiye Haber Analizi";
+    view.navigate("/", "");
+    vi.advanceTimersByTime(5000);
+    expect(view.text()).toBe("Tayf — Türkiye Haber Analizi");
+
+    view.navigate("/", "q=a");
+    vi.advanceTimersByTime(5000);
+    expect(view.text()).toBe("");
+
+    view.navigate("/", "");
+    // At the commit the region reads '' (not the stale page title) ...
+    expect(view.text()).toBe("");
+    // ... and the clear text follows after its delay.
+    vi.advanceTimersByTime(100);
+    expect(view.text()).toBe(SEARCH_CLEARED_ANNOUNCEMENT);
+    expect(view.announced()).toEqual(["Tayf — Türkiye Haber Analizi", SEARCH_CLEARED_ANNOUNCEMENT]);
+  });
+
+  it("an earlier clear text does not skip the delay or the keystroke cancel: /?q=a -> / -> /?q=c -> /", () => {
+    const view = mountOnSearch("a");
+    view.navigate("/", "");
+    vi.advanceTimersByTime(1000);
+    expect(view.text()).toBe(CLEARED);
+
+    view.navigate("/", "q=c");
+    view.navigate("/", "");
+    // The first clear text must not come back at the commit.
+    expect(view.text()).toBe("");
+    vi.advanceTimersByTime(10);
+    // Typing again inside the delay cancels this second clear.
+    view.navigate("/", "q=d");
+    vi.advanceTimersByTime(10_000);
+    expect(view.announced()).toEqual([CLEARED]);
+  });
+
+  it("typing again before the text is set cancels the announcement", () => {
+    const view = mountOnSearch("a");
+    view.navigate("/", "");
+    vi.advanceTimersByTime(10);
+    expect(vi.getTimerCount()).toBe(1);
+    view.navigate("/", "q=c");
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10_000);
+    expect(view.announced()).toEqual([]);
+  });
+
+  it("a stale clear text does not come back when the reader returns to / from another page", () => {
+    const view = mountOnSearch("a");
+    view.navigate("/", "");
+    vi.advanceTimersByTime(1000);
+    expect(view.text()).toBe(CLEARED);
+
+    doc.title = "Dünya haberleri — Tayf";
+    view.navigate("/konu/dunya");
+    vi.advanceTimersByTime(1000);
+    expect(view.text()).toBe("Dünya haberleri");
+
+    doc.title = "";
+    view.navigate("/", "");
+    expect(view.text()).toBe("");
+    doc.title = "Tayf — Türkiye Haber Analizi";
+    vi.advanceTimersByTime(1000);
+    expect(view.announced()).toEqual([CLEARED, "Dünya haberleri", "Tayf — Türkiye Haber Analizi"]);
+  });
+
+  it("unmount cancels a pending clear announcement", () => {
+    const view = mountOnSearch("a");
+    view.navigate("/", "");
+    expect(vi.getTimerCount()).toBe(1);
+    view.app.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10_000);
+    expect(view.announced()).toEqual([]);
+  });
+
+  it("first load, ?bulten and a ?sayfa change keep behaving as before", () => {
+    // First load on a query: silent.
+    const first = mountOnSearch("a");
+    vi.advanceTimersByTime(10_000);
+    expect(first.announced()).toEqual([]);
+    first.app.unmount();
+
+    // /?bulten=ok -> /: silent.
+    nav.pathname = "/";
+    nav.search = "bulten=ok";
+    const banner = mount();
+    banner.navigate("/", "");
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10_000);
+    expect(banner.announced()).toEqual([]);
+    banner.app.unmount();
+
+    // ?sayfa change on a topic page still re-announces the title.
+    doc.title = "Dünya haberleri — Tayf";
+    nav.pathname = "/konu/dunya";
+    nav.search = "";
+    const topic = mount();
+    doc.title = "Dünya haberleri — Sayfa 2 — Tayf";
+    topic.navigate("/konu/dunya", "sayfa=2");
+    vi.advanceTimersByTime(1000);
+    expect(topic.announced()).toEqual(["Dünya haberleri — Sayfa 2"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Source pins
 // ---------------------------------------------------------------------------
 
@@ -730,6 +949,13 @@ function withoutJsxComments(src: string): string {
 describe("wiring", () => {
   it("is a client component", () => {
     expect(componentSrc.trimStart().startsWith('"use client"')).toBe(true);
+  });
+
+  it("keeps ONE polite status region, always mounted, for page names and the clear text alike", () => {
+    const live = code(componentSrc);
+    expect(live.split('role="status"')).toHaveLength(2);
+    expect(live).toContain('aria-live="polite"');
+    expect(live).not.toContain("assertive");
   });
 
   it("never writes into Next's shadow DOM (React owns that text node)", () => {

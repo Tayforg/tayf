@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { formatCountTr } from "@/lib/format/number-tr";
 import { dayLabelTr } from "@/lib/trends/day-label";
 import type { RisingResult } from "@/lib/trends/rising";
 
@@ -15,6 +16,13 @@ import type { RisingResult } from "@/lib/trends/rising";
 // spell) past Istanbul midnight, so a relative word would label the finished
 // day "Bugün" (h63-timezones-1). The date is derived from `data.day` and so is
 // always true of the count printed next to it.
+//
+// Scope (h90-trends-1, migration 182). The count behind a row is politika and
+// son_dakika headlines only, the same scope as the /gundem hub the row links to
+// (isPoliticsMember), so the caption says so. The vocabulary is not only people,
+// institutions and countries (enflasyon, faiz, dolar, borsa, asgari ücret are in
+// it), hence "konular". The count goes through formatCountTr, never a bare
+// toLocaleString("tr-TR") (some ICU builds print "1234").
 
 export function RisingTopics({ data }: { data: RisingResult | null }) {
   return (
@@ -26,8 +34,9 @@ export function RisingTopics({ data }: { data: RisingResult | null }) {
         Yükselen Konular
       </h2>
       <p className="text-xs text-muted-foreground">
-        Başlıklarda son 7 günün ortalamasından belirgin biçimde fazla geçen kişi, kurum ve
-        ülkeler · yalnızca spektruma sayılan kaynaklar · saatte bir güncellenir
+        Siyaset ve son dakika başlıklarında son 7 günün ortalamasından belirgin biçimde fazla
+        geçen kişi, kurum, ülke ve konular · yalnızca spektruma sayılan kaynaklar · saatte bir
+        güncellenir
       </p>
 
       {data === null ? (
@@ -57,7 +66,7 @@ export function RisingTopics({ data }: { data: RisingResult | null }) {
                 {item.label}
               </Link>
               <span className="block text-[12px] text-muted-foreground">
-                {`${dayLabelTr(data.day)}: ${item.count.toLocaleString("tr-TR")} haber · ${
+                {`${dayLabelTr(data.day)}: ${formatCountTr(item.count)} haber · ${
                   item.isNew
                     ? "geçen hafta neredeyse hiç yoktu"
                     : `7 günlük ortalamanın ${item.ratioIsLowerBound ? "en az " : ""}${item.ratioLabel} katı`

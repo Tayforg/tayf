@@ -4095,3 +4095,58 @@ Then `GET /trends`: a "Yükselen Konular" row whose hub is thin (fewer than 3 cl
 180 is a `create or replace function` of `blindspot_recall_veto_refresh(interval, numeric)` with no backfill, no cron change (148's `statement_timeout = '120s'` command stays) and no data write: 148's body plus two materialized CTEs (`wdf`, `wlim`), two joins and a wider `having` in `pairs`. Two titles that share fewer stems than 148's Jaccard 0.5 now also match when they share at least 3 stems, Jaccard at least 0.3 and at least 2 stems that are rare in the member article's own window: the voting-source (`outlet` / `wire`) articles published within 24 hours either side of that member, a stem being rare when it is in at most 0.25 percent of them. The line therefore depends on the member alone, never on `p_since`, on the refresh scope or on other clusters' member dates. Apply with `supabase db push`; there is no deploy order, but ship the `/metodoloji` sentence (a Vercel deploy) after the apply so the page describes a rule that is live. The EXPLAIN numbers (first run 3.02 s, warm 1.7 s against 1.1 s for 148), the replay and the PG15 dry-run are in the header of `180_blindspot_sibling_rare_tier.sql`.
 
 **Founder step (a production write, not part of 180):** after any change to the sibling rule (126, 148, 180), run `begin; set local statement_timeout = '120s'; select public.blindspot_recall_veto_refresh(interval '16 days'); commit;` once, because the cron's 26-hour call re-scores only blindspots updated in the last 26 hours and freezes a stored `sibling_headline` veto once its cluster is older than 48 hours. A cluster gets the same verdict from the cron's scope and from the 16-day call (read-only replay 2026-11-09: all 14 clusters in both scopes agree, under 148 and under 180), so the call applies the cron's rule to 198 blindspots instead of 14: 11 public claims are vetoed that 148 left standing (7 the same event, 2 the same story but another news item, 2 a different event: 87bcc51b and 4c8e7533, the "badge hidden" direction) and one goes the other way, 48e267ee, whose veto the call lifts (a voter of the dominant zone from a different event lifts the share to exactly 0.80; the share test of 126 and 148 is the cause, not the title rule). 30b3b262 and f1837ee1 flip; bb8f5ea3 and 23132be4 do not. The call is not needed for 180 to work on new blindspots.
+
+## 182 — "Yükselen Konular" counts only the headlines the hubs can show (`trends_daily_entity_counts_ist_refresh` politics scope): APPLY 182 FIRST, THEN DEPLOY the app
+
+**Why:** 112 and 163 count every outlet/wire headline whose title carries a vocabulary token, whatever its feed category, but each row of the card links to a `/gundem/<key>` hub that lists politics clusters only (the clusterer admits `politika` and `son_dakika` articles, or one with `politics_admitted_at`: `isPoliticsMember`, `supabase/functions/_shared/cluster/politics-admission.ts`). On 2026-11-09 (read-only) `/trends` read "BDDK 8 Kasım: 36 haber · 7 günlük ortalamanın 5,2 katı" and linked `/gundem/bddk`, whose newest card was from 2 Kasım ("Son 14 günde 9 küme"). The 36 BDDK titles of the Istanbul day 2026-11-08 were genel 13, ekonomi 12, teknoloji 10 and politika 1: 35 sit in categories no hub can show (h90-trends-1).
+
+**What 182 does** (function-only, one transaction, safe to re-apply): `create or replace function public.trends_daily_entity_counts_ist_refresh(p_days integer default 2)` with 163's **signature, `SECURITY DEFINER`, `search_path = ''`, `plan_cache_mode = force_custom_plan`, advisory lock, exception handler and grants** (revoke from public, anon, authenticated; execute to `service_role`), the comment restated (mentions 163 and 182), and 163's body **byte for byte except two places**: the two inner index-range selects of `day_articles` also project `category` and `politics_admitted_at`, and its `where` clause gains a marked block (`-- 182 politics scope begin` .. `-- 182 politics scope end`) holding `and (a.category in ('politika', 'son_dakika') or a.politics_admitted_at is not null)`. The `emap` vocabulary and 163's `guard_map` are unchanged. It creates, drops, alters and deletes nothing else, schedules no cron job and writes no row. `tests/migrations/182-trends-entity-rollup-politics-scope.test.ts` pins the body to 163's, the category list to `POLITICS_CATEGORIES`, `emap` and `guard_map` to 163's, and the header's no-backfill statement.
+
+**No backfill.** The hourly `trends-rollup-refresh` run (`:25`) recomputes the last 2 Istanbul days (and any day within 10 days that received a late-ingested row) with the new body, so today and yesterday are right one run after applying. Every older rollup row keeps its all-category basis and leaves the 7-day baseline within 8 days. During that week the baseline is inflated by all-category counts while the ranked day is counted politics-only, so ratios are deflated: fewer items rise, none rises falsely. Entities that are mostly politics (`erdogan`, `akp`, `meclis`, `ozgur-ozel`) barely change; world and economy entities (`iran`, `abd`, `trump`, `bddk`, `gazze`, `rusya`) can be hidden for a few days.
+
+**Function fingerprint** (`md5(prosrc)`, `length(prosrc)`):
+
+| | md5 | length |
+|---|---|---|
+| production before 182 (read-only, 2026-11-09) = the body of 163 | `dc1e1d4780b3b8d2e9c0a4ac8c64caf8` | 7590 |
+| after 182 | `045d9ee0610f00467d1b2da1474911cc` | 8247 |
+
+**Read-only replay before shipping** (the per-day statement of 163/182 without its `insert`, as a plain SELECT for the Istanbul day 2026-11-08, run through the read-only SQL console; the 163 text reproduces the stored rollup for all 62 entities):
+
+| entity | 163 (now) | 182 |
+|---|---|---|
+| `erdogan` | 209 | 208 |
+| `iran` | 120 | 14 |
+| `abd` | 100 | 21 |
+| `trump` | 74 | 13 |
+| `israil` | 71 | 44 |
+| `akp` | 43 | 43 |
+| `bddk` | 36 | 1 |
+| `gazze` | 36 | 1 |
+| `rusya` | 36 | 4 |
+| `meclis` | 33 | 33 |
+
+`yargitay` 30 -> 2. 35 of 62 entities change (entity hits 1086 -> 542). With the stored baseline of 2026-11-01 .. 2026-11-07 the card would have ranked `bddk` and `yargitay` on the 163 text and nothing on the 182 text. 2026-10-30 (the deepest day the function can touch) ran in 0.46 s against 1.02 s for 163's text (whole console call; fewer rows to tokenize).
+
+**Order:** apply `182_trends_entity_rollup_politics_scope.sql` (`supabase db push`, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/182_trends_entity_rollup_politics_scope.sql`; operator) FIRST, then DEPLOY the app: the new `/trends` caption says the count is of "Siyaset ve son dakika" headlines, which is true only from the first `:25` run after the migration. The migration depends on no app build. No Edge Function deploy.
+
+**Verify** (read-only):
+
+```sql
+select md5(prosrc), length(prosrc), prosecdef, proconfig::text, proacl::text
+  from pg_proc where oid = 'public.trends_daily_entity_counts_ist_refresh(integer)'::regprocedure;
+-- 045d9ee0610f00467d1b2da1474911cc, 8247, t, {"search_path=\"\"",plan_cache_mode=force_custom_plan}, {postgres=X/postgres,service_role=X/postgres}
+select has_function_privilege('anon', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute'),
+       has_function_privilege('service_role', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute');   -- f, f, t
+select version, name from supabase_migrations.schema_migrations where version = '182';   -- 1 row
+-- after the next :25 run: today's politics-scope counts (updated_at later than the apply)
+select entity, count, updated_at from public.trends_daily_entity_counts_ist_rollup
+ where day = (now() at time zone 'Europe/Istanbul')::date and entity in ('bddk', 'yargitay', 'iran', 'abd') order by entity;
+select jobid, status, return_message, start_time, end_time from cron.job_run_details
+ where jobid = (select jobid from cron.job where jobname = 'trends-rollup-refresh') order by runid desc limit 3;
+```
+
+Then `GET /trends`: every "Yükselen Konular" row points to a destination that lists clusters from the ranked day, and the caption starts "Siyaset ve son dakika başlıklarında".
+
+**Rollback** (nothing else depends on 182; one transaction): re-run the function statements of `163_trends_entity_rollup_guards.sql` (section 1: its `create or replace function`, `comment on function`, `revoke` and `grant`; it restores `md5(prosrc)` `dc1e1d4780b3b8d2e9c0a4ac8c64caf8`, length 7590), then remove ledger row 182 (`delete from supabase_migrations.schema_migrations where version = '182';`). The ACL does not change in either direction. The next `:25` run recomputes today and yesterday on the all-category basis again.

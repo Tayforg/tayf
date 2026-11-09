@@ -33,6 +33,7 @@ import {
 } from "@/lib/game/daily-set";
 import { headlineAnnouncement } from "@/lib/game/headline-announcement";
 import { track } from "@/lib/track";
+import { ManualCopyBox } from "@/components/story/share-button";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
 import type { MediaDnaZone } from "@/types";
 
@@ -89,6 +90,22 @@ export function resolveFinalMarks({
 }): boolean[] {
   return openedAlreadyPlayed && storedMarks ? [...storedMarks] : localMarks;
 }
+
+/**
+ * The sentence the live region speaks after a copy attempt. The failure text
+ * says where the share text is, because the manual-copy box that appears for it
+ * sits outside the region and would otherwise be found by chance.
+ */
+export function copyOutcomeAnnouncement(ok: boolean): string {
+  return ok ? "Kopyalandı" : "Kopyalanamadı. Paylaşım metni aşağıdaki kutuda; seçip kopyalayın.";
+}
+
+/**
+ * An identical message ("Kopyalanamadı..." twice in a row) is only re-spoken if
+ * the region changes in between, so it is emptied first and the text follows
+ * after this delay.
+ */
+const ANNOUNCE_DELAY_MS = 50;
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 // Own event name (not zone-guess-game.tsx's BEST_SCORE_CHANGE_EVENT) so the
@@ -173,6 +190,9 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
   const [guessedZone, setGuessedZone] = useState<MediaDnaZone | null>(null);
   const [copied, setCopied] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  // The share text, kept while the clipboard refused it so the reader can select
+  // and copy it by hand. A later successful copy clears it.
+  const [manualShare, setManualShare] = useState<string | null>(null);
 
   const phase = resolveDailyPhase({
     hasStoredResult: Boolean(existingResult),
@@ -193,6 +213,7 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
   const nextRef = useRef<HTMLButtonElement | null>(null);
   const firstZoneRef = useRef<HTMLButtonElement | null>(null);
   const shareRef = useRef<HTMLButtonElement | null>(null);
+  const announceTimerRef = useRef<number | undefined>(undefined);
 
   // Keyboard-only play: move focus to the control that matters for the
   // phase just entered, since each phase swaps in a different button
@@ -219,6 +240,20 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
     localMarks: marks,
   });
   const score = finalMarks.filter(Boolean).length;
+
+  // Says the outcome of a copy through the always-mounted region, from the click
+  // handler's side (never from an effect). Emptied first and set after a beat so
+  // an identical repeat message is spoken again; the timer is cleared on unmount.
+  const announceCopy = useCallback((ok: boolean) => {
+    window.clearTimeout(announceTimerRef.current);
+    setAnnouncement("");
+    announceTimerRef.current = window.setTimeout(
+      () => setAnnouncement(copyOutcomeAnnouncement(ok)),
+      ANNOUNCE_DELAY_MS,
+    );
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(announceTimerRef.current), []);
 
   const handleStart = useCallback(() => {
     setIndex(0);
@@ -300,19 +335,31 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
     setLocalPhase("playing");
   }, [index, headlines, finishRound, marks]);
 
-  const copyToClipboard = useCallback((text: string) => {
-    try {
-      navigator.clipboard
-        .writeText(text)
-        .then(() => {
-          setCopied(true);
-          window.setTimeout(() => setCopied(false), 2000);
-        })
-        .catch(() => {});
-    } catch {
-      // Clipboard API unavailable — nothing more to do.
-    }
-  }, []);
+  const copyToClipboard = useCallback(
+    (text: string) => {
+      // Every way the copy can fail (a rejected write, no navigator.clipboard in
+      // an insecure context, a throw) ends here: the text is offered in a box and
+      // the failure is spoken, so the button never just stays "Paylaş".
+      const failed = () => {
+        setManualShare(text);
+        announceCopy(false);
+      };
+      try {
+        navigator.clipboard
+          .writeText(text)
+          .then(() => {
+            setCopied(true);
+            setManualShare(null);
+            window.setTimeout(() => setCopied(false), 2000);
+            announceCopy(true);
+          })
+          .catch(failed);
+      } catch {
+        failed();
+      }
+    },
+    [announceCopy],
+  );
 
   const handleShare = useCallback(() => {
     if (!puzzle) return;
@@ -402,6 +449,11 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
           >
             {copied ? "Kopyalandı" : "Paylaş"}
           </button>
+          {manualShare && (
+            <div className="text-left">
+              <ManualCopyBox label="Paylaşım metni" value={manualShare} />
+            </div>
+          )}
           <div className="flex items-center justify-center gap-1 text-lg" aria-hidden="true">
             {finalMarks.map((m, i) => (
               <span key={i}>{m ? "✅" : "❌"}</span>

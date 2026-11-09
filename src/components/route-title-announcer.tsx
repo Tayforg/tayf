@@ -28,6 +28,13 @@ import { usePathname, useSearchParams } from "next/navigation";
 // therefore left out of the route key. A pathname change always announces, also
 // when it arrives with a query ("/konu/dunya" to "/?q=a").
 //
+// The one exception is the query going from non-empty to '' on the same pathname
+// (h90-livearia-1): the search box, "Aramayı temizle", the logo, "Haberler", g h
+// and Back all land there. SearchStatus empties itself (there is no query left to
+// describe), so without this the reader hears nothing and the page changed under
+// them. The region says SEARCH_CLEARED_ANNOUNCEMENT, politely, once. A query that
+// becomes another non-empty one stays silent, SearchStatus speaks the new result.
+//
 // The logic lives in small exported functions so it can be tested without a DOM
 // library (see route-title-announcer.test.tsx).
 
@@ -37,6 +44,16 @@ const POLL_MS = 100;
 const STABLE_POLLS = 3;
 /** After this long without a settled title, use the first visible h1 instead. */
 const GIVE_UP_MS = 4000;
+
+/** What the region says when a search is cleared (the home feed is back, in full). */
+export const SEARCH_CLEARED_ANNOUNCEMENT = "Arama temizlendi. Tüm haberler gösteriliyor.";
+/**
+ * The clear text is set this long after the navigation commits, not inside the
+ * effect: SearchStatus empties in the same commit, and a delayed write keeps the
+ * two regions from changing in one frame. It also lets a keystroke that follows
+ * at once cancel it.
+ */
+const CLEARED_ANNOUNCE_MS = 100;
 
 const SITE_NAME = "Tayf";
 const EM_DASH = "—";
@@ -80,6 +97,17 @@ export function routeKey(pathname: string, search: string): string {
   const params = new URLSearchParams(search);
   for (const name of UI_CHATTER_PARAMS) params.delete(name);
   return `${pathname}?${params.toString()}`;
+}
+
+/**
+ * True when the visitor stayed on the same pathname and the query went from
+ * non-empty to ''. A pathname change is a page change and has its own rule.
+ */
+export function searchWasCleared(
+  before: { pathname: string; query: string },
+  now: { pathname: string; query: string },
+): boolean {
+  return before.pathname === now.pathname && before.query !== "" && now.query === "";
 }
 
 /** The slice of an Element the heading fallback reads (a structural type so tests can fake it). */
@@ -199,6 +227,12 @@ export function hideNextRouteAnnouncer<Root extends { querySelectorAll(selectors
 
 interface Announcement {
   key: string;
+  /**
+   * The search the text was made for. The key leaves ?q out, so the component
+   * empties the region whenever the query changes; a later return to the same
+   * query ('') cannot restore an older text.
+   */
+  query: string;
   text: string;
 }
 
@@ -209,6 +243,18 @@ export function RouteTitleAnnouncer() {
   const key = routeKey(pathname, searchParams.toString());
 
   const [announced, setAnnounced] = useState<Announcement | null>(null);
+  // ?q is not part of the route key, so an announcement stored for "/?" would
+  // match again when the query returns to '' ("/konu/dunya" to "/" to "/?q=a" to
+  // "/"): the region would read the old page title at the clear commit, with no
+  // delay and no keystroke cancel. Any query change therefore empties the region,
+  // adjusted during render (React's "adjust state when a prop changes" pattern, as
+  // follow-feed.tsx does for seenSnapshot) because a synchronous setState in an
+  // effect is a react-hooks/set-state-in-effect error.
+  const [searchSeen, setSearchSeen] = useState(query);
+  if (searchSeen !== query) {
+    setSearchSeen(query);
+    setAnnounced(null);
+  }
   // The URL the page loaded on: no announcement for it, a screen reader reads
   // a fresh page load by itself.
   const previous = useRef({ key, pathname, query });
@@ -218,6 +264,14 @@ export function RouteTitleAnnouncer() {
   useEffect(() => {
     const before = previous.current;
     previous.current = { key, pathname, query };
+    // First, because ?q is not part of the key: "/?q=x" to "/" leaves it unchanged.
+    if (searchWasCleared(before, { pathname, query })) {
+      const timer = setTimeout(
+        () => setAnnounced({ key, query, text: SEARCH_CLEARED_ANNOUNCEMENT }),
+        CLEARED_ANNOUNCE_MS,
+      );
+      return () => clearTimeout(timer);
+    }
     if (before.key === key) return;
     // The same pathname with a different query is the search box talking, also
     // when search-nav dropped ?page on the way ("/?page=2" to "/?q=a").
@@ -225,14 +279,18 @@ export function RouteTitleAnnouncer() {
     return startTitlePoll({
       readTitle: () => document.title,
       readFallback: () => firstVisibleHeadingText(document, (el) => getComputedStyle(el as Element)),
-      onSettled: (text) => setAnnounced({ key, text }),
+      onSettled: (text) => setAnnounced({ key, query, text }),
     });
   }, [key, pathname, query]);
 
-  // The announcement belongs to the URL it was made for. After a navigation the
-  // region therefore reads '' until the new title settles, so a title that
-  // repeats (?sayfa=2 then ?sayfa=3) still changes the live region's content.
-  const text = announced !== null && announced.key === key ? announced.text : "";
+  // The announcement belongs to the URL and the search it was made for. After a
+  // navigation the region therefore reads '' until the new title settles, so a
+  // title that repeats (?sayfa=2 then ?sayfa=3) still changes the live region's
+  // content. The same goes for the clear text: the region is emptied whenever the
+  // query changes (the render-time reset above), so a later return to '' cannot
+  // restore old text and clearing again later is a change, spoken again.
+  const text =
+    announced !== null && announced.key === key && announced.query === query ? announced.text : "";
 
   return (
     <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">

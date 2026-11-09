@@ -11,7 +11,7 @@ import {
   type FramingTally,
   type FramingVote,
 } from "@/lib/game/framing";
-import { FramingGame } from "./framing-game";
+import { FramingGame, drawFailureAnnouncement } from "./framing-game";
 
 // A scripted `useState` for the reveal tests at the end of this file: while `scripted.values` is set, the component's
 // useState calls (in declaration order, named from the source) return those values instead of the initial ones, so the
@@ -414,5 +414,143 @@ describe("FramingGame — reveal below the n >= 3 floor [h52-game-2]", () => {
     expect(source).toContain("const tally = normalizeTally(payload.totals);");
     // the floor lives in framing.ts only
     expect(source).not.toContain("FRAMING_MIN_TALLY_N");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h90-livearia-3: the loading phase used to be silent and to drop focus to <body>
+// (the focused Başla / Sonraki / Tekrar dene button unmounts for the whole draw,
+// up to 8 s plus a 503 retry), and every failed draw set the SAME text, so React
+// left the live region untouched and a second failure was never announced.
+// ---------------------------------------------------------------------------
+
+/** Renders the loading phase of the real component (scripted state, like renderRevealed). */
+function renderLoading(): string {
+  scripted.values = { phase: "loading" };
+  scripted.names = stateNames;
+  scripted.calls = 0;
+  try {
+    return renderToStaticMarkup(<FramingGame />);
+  } finally {
+    scripted.values = null;
+  }
+}
+
+describe("drawFailureAnnouncement [h90-livearia-3]", () => {
+  it("the first failure reads 'Başlık yüklenemedi.'", () => {
+    expect(drawFailureAnnouncement(1)).toBe("Başlık yüklenemedi.");
+  });
+
+  it("the second and every later consecutive failure reads 'Başlık hâlâ yüklenemedi.'", () => {
+    expect(drawFailureAnnouncement(2)).toBe("Başlık hâlâ yüklenemedi.");
+    expect(drawFailureAnnouncement(3)).toBe("Başlık hâlâ yüklenemedi.");
+    expect(drawFailureAnnouncement(50)).toBe("Başlık hâlâ yüklenemedi.");
+  });
+
+  it("the first and the repeat text differ, so the live region really changes between two failures", () => {
+    expect(drawFailureAnnouncement(1)).not.toBe(drawFailureAnnouncement(2));
+  });
+
+  it("a nonsense count (0, negative, NaN) falls back to the first-failure text instead of throwing", () => {
+    for (const bad of [0, -1, Number.NaN]) {
+      expect(drawFailureAnnouncement(bad)).toBe("Başlık yüklenemedi.");
+    }
+  });
+});
+
+describe("FramingGame — the loading phase is announced and keeps focus [h90-livearia-3]", () => {
+  const drawStart = source.indexOf("const drawHeadline = useCallback(");
+  const drawEnd = source.indexOf("const handleStart = useCallback(");
+  const drawBody = source.slice(drawStart, drawEnd);
+
+  it("drawHeadline passes 'Başlık yükleniyor…' to setAnnouncement right after it sets phase 'loading', before the fetch", () => {
+    expect(drawStart).toBeGreaterThan(-1);
+    expect(drawEnd).toBeGreaterThan(drawStart);
+    const phaseAt = drawBody.indexOf('setPhase("loading");');
+    const announceAt = drawBody.indexOf('setAnnouncement("Başlık yükleniyor…");');
+    const fetchAt = drawBody.indexOf("fetchDrawResponse(");
+    expect(phaseAt).toBeGreaterThan(-1);
+    expect(announceAt).toBeGreaterThan(phaseAt);
+    expect(fetchAt).toBeGreaterThan(announceAt);
+  });
+
+  it("the loading <p> is script-focusable: tabIndex={-1} and a ref, in the loading branch", () => {
+    const start = source.indexOf('phase === "loading") {\n    content = (');
+    const end = source.indexOf('phase === "error") {', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+    expect(body).toContain("ref={loadingRef}");
+    expect(body).toContain("tabIndex={-1}");
+    expect(body).toContain("Başlık yükleniyor...");
+    expect(source).toContain("const loadingRef = useRef<HTMLParagraphElement | null>(null);");
+  });
+
+  it("renders the loading <p> with tabindex=\"-1\" and its visible text, inside the always-mounted live region frame", () => {
+    const html = renderLoading();
+    expect(html).toMatch(/<p [^>]*tabindex="-1"[^>]*>Başlık yükleniyor\.\.\.<\/p>/);
+    expect(html).toContain('role="status"');
+    // no control is rendered while loading: nothing else to land on
+    expect(html.match(/<button\b/g) ?? []).toHaveLength(0);
+  });
+
+  it("an effect focuses the loading <p> only when focus fell to <body> (activeElement null or body)", () => {
+    const effect = useEffectCalls(source).find((call) => call.includes("loadingRef.current"));
+    expect(effect, "no effect touches loadingRef").toBeDefined();
+    const body = effect as string;
+    expect(body).toContain('phase !== "loading"');
+    expect(body).toContain("document.activeElement");
+    expect(body).toContain("document.body");
+    expect(body).toContain("loadingRef.current?.focus()");
+    expect(body).toContain("[phase]");
+    // an effect must not set state here (set-state-in-effect is a lint error)
+    expect(body).not.toMatch(/\bset[A-Z]\w*\(/);
+    // the guard comes before the focus call
+    expect(body.indexOf("document.activeElement")).toBeLessThan(body.indexOf("loadingRef.current?.focus()"));
+  });
+
+  it("keeps the live region permanently mounted and the one 'Tekrar dene' in the error branch", () => {
+    expect(source).toContain('<div className="sr-only" role="status" aria-live="polite">');
+    expect(source.split("Tekrar dene").length - 1).toBe(1);
+  });
+});
+
+describe("FramingGame — a repeat draw failure changes the live region [h90-livearia-3]", () => {
+  const drawStart = source.indexOf("const drawHeadline = useCallback(");
+  const drawEnd = source.indexOf("const handleStart = useCallback(");
+  const drawBody = source.slice(drawStart, drawEnd);
+  const errorBranchAt = drawBody.indexOf('// outcome.kind === "error"');
+  const errorBranch = drawBody.slice(errorBranchAt);
+
+  it("keeps a consecutive-failure counter in a ref (no new state, so the scripted-state order is unchanged)", () => {
+    expect(source).toContain("const failureCountRef = useRef(0);");
+    expect(stateNames).not.toContain("failureCount");
+  });
+
+  it("the error branch counts the failure and announces drawFailureAnnouncement(count), not a literal", () => {
+    expect(errorBranchAt).toBeGreaterThan(-1);
+    const countAt = errorBranch.indexOf("failureCountRef.current += 1;");
+    const announceAt = errorBranch.indexOf("setAnnouncement(drawFailureAnnouncement(failureCountRef.current));");
+    expect(countAt).toBeGreaterThan(-1);
+    expect(announceAt).toBeGreaterThan(countAt);
+    expect(source).not.toContain('setAnnouncement("Başlık yüklenemedi.")');
+  });
+
+  it("resets the counter on a successful draw and in handleStart", () => {
+    const headlineBranch = drawBody.slice(
+      drawBody.indexOf('outcome.kind === "headline"'),
+      drawBody.indexOf('outcome.kind === "pool-empty"'),
+    );
+    expect(headlineBranch).toContain("failureCountRef.current = 0;");
+    const startAt = source.indexOf("const handleStart = useCallback(");
+    const endAt = source.indexOf("// Single round-long countdown");
+    expect(source.slice(startAt, endAt)).toContain("failureCountRef.current = 0;");
+  });
+
+  it("the sequence 'yüklenemedi' -> 'yükleniyor…' -> 'hâlâ yüklenemedi' never repeats a text back to back", () => {
+    // what the region reads over two rejected draws, evaluated through the real helper
+    const timeline = [drawFailureAnnouncement(1), "Başlık yükleniyor…", drawFailureAnnouncement(2)];
+    for (let i = 1; i < timeline.length; i++) expect(timeline[i]).not.toBe(timeline[i - 1]);
+    expect(timeline).toEqual(["Başlık yüklenemedi.", "Başlık yükleniyor…", "Başlık hâlâ yüklenemedi."]);
   });
 });

@@ -175,8 +175,11 @@ function snapshot(overrides: Partial<NonNullable<typeof mockSnapshots.value>[num
   };
 }
 
+// h90-kalite-1: labels for cluster pairs do not exist yet (jev_gold_labels is
+// empty and holds article-level labels, not pairs), so the sentence says that
+// instead of promising a "300 haberlik altın set".
 const PRECISION_RECALL_SENTENCE =
-  "Kesinlik ve duyarlılık henüz ölçülmedi: 300 haberlik altın set etiketlenince burada yayımlanacak.";
+  "Kesinlik ve duyarlılık henüz ölçülmedi: bunun için elle etiketlenmiş bir küme çifti seti gerekiyor ve bu set henüz yok.";
 
 describe("metadata", () => {
   it('title is "Küme kalitesi" (root layout template appends "— Tayf")', () => {
@@ -422,14 +425,14 @@ describe("QualityPage — data present", () => {
     expect(text).toContain(PRECISION_RECALL_SENTENCE);
   });
 
-  it("explains what a singleton is and why the rate is high (agency copy, strong-similarity-only merges)", async () => {
+  it("explains what a singleton is and why the rate is high (aggregator republishing, stories no other source wrote)", async () => {
     mockSnapshots.value = [snapshot()];
 
     const tree = await QualityPage();
     const text = collectText(tree).join(" ");
 
     expect(text).toMatch(/tek(il)? küme|singleton/i);
-    expect(text).toMatch(/ajans|kendi (url|adres)/i);
+    expect(text).toMatch(/toplayıcı/i);
   });
 });
 
@@ -719,5 +722,172 @@ describe("gap note: missing measurement days are stated, not collapsed", () => {
 
     // 3 rows over 3 days, but 10-13 has none.
     expect(text).toContain("Bu aralıkta 1 gün ölçüm yok.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h90-kalite-1: the explanations must match what the numbers actually count.
+// Re-verified read-only against prod (snapshot 61 window, politika and
+// son_dakika, 2026-11-09): articles outlet 2,050 / aggregator 749 / niche 149 /
+// wire 108; 1,188 of 1,580 clusters are singletons, 444 of them aggregator-only
+// (434 haberler-com) and 29 wire-only; the DHA and İHA sources have never
+// supplied an article; and jev_gold_labels (article-level labels, no cluster
+// pairs) is empty.
+// ---------------------------------------------------------------------------
+
+/** Text of the Definitions box whose <dt> is exactly `term`. */
+function definitionBox(tree: unknown, term: string): string {
+  const dt = allElements(tree).find(
+    ({ el }) => el.type === "dt" && collectText(el.props.children).join("") === term,
+  );
+  expect(dt, `definition term "${term}" is rendered`).toBeDefined();
+  return collectText(dt!.parent!.props.children).join(" ");
+}
+
+/** Text of the whole Definitions <dl>. */
+function definitionsText(tree: unknown): string {
+  const dl = allElements(tree).find(({ el }) => el.type === "dl");
+  expect(dl, "the Definitions <dl> is rendered").toBeDefined();
+  return collectText(dl!.el.props.children).join(" ");
+}
+
+/** Text of the precision/recall card (the <p> that starts with its sentence). */
+function precisionText(tree: unknown): string {
+  const p = allElements(tree).find(
+    ({ el }) =>
+      el.type === "p" &&
+      collectText(el.props.children).join("").startsWith("Kesinlik ve duyarlılık"),
+  );
+  expect(p, "the precision/recall sentence is rendered").toBeDefined();
+  return collectText(p!.el.props.children).join("");
+}
+
+describe("explanation copy matches what the numbers count (h90-kalite-1)", () => {
+  const states: Array<[string, () => typeof mockSnapshots.value]> = [
+    ["data present", () => [snapshot()]],
+    ["unavailable (null)", () => null],
+    ["empty ([])", () => []],
+  ];
+
+  describe.each(states)("%s", (_name, make) => {
+    it("Kapsam says aggregator and niche sources are counted and that /trends is not comparable", async () => {
+      mockSnapshots.value = make();
+
+      const box = definitionBox(await QualityPage(), "Kapsam");
+
+      expect(box).toContain("politika ve son dakika");
+      expect(box).toContain("toplayıcı ve niş");
+      expect(box).toContain("Haberler.com");
+      expect(box).toContain("/trends");
+      expect(box).toContain("doğrudan karşılaştırılamaz");
+      expect(box).toContain("tek haberli kümeler de dahildir");
+      // The old claim: only the category differs, so these counts are smaller.
+      expect(box).not.toContain("küçüktür");
+    });
+
+    it("Tekil küme names the 48 h window and the aggregator/no-other-source causes, never DHA or İHA", async () => {
+      mockSnapshots.value = make();
+
+      const box = definitionBox(await QualityPage(), "Tekil küme (singleton)");
+
+      expect(box).toContain("Son 48 saatlik pencerede");
+      expect(box).toContain("pencereden önceki eski üyeleri sayılmaz");
+      expect(box).toContain("toplayıcı kaynakların");
+      expect(box).toContain("başka hiçbir kaynağın yazmadığı");
+      expect(box).toContain("aynı ajans metnini kopyalayan haberler ise genellikle birleşir");
+      expect(box).toContain(
+        "\"Tek kaynak\" her zaman \"diğerleri görmezden geldi\" anlamına gelmez.",
+      );
+      expect(box).not.toContain("Sadece bir makaleden");
+    });
+
+    it("the Kör nokta tutarsızlık oranı definition says vetoed blindspot claims do not enter the rate", async () => {
+      mockSnapshots.value = make();
+
+      const box = definitionBox(await QualityPage(), "Kör nokta tutarsızlık oranı");
+
+      expect(box).toContain("Veto kurallarıyla geri çekilen kör nokta iddiaları bu orana girmez");
+      expect(box).toContain(
+        "oran yalnızca saklanan bayrağın yeniden hesaplamayla uyuşup uyuşmadığını ölçer",
+      );
+      // The existing definition is kept, the veto sentence is appended.
+      expect(box).toContain("En az beş üyeli kümelerde");
+      expect(box).toContain("bayrağın yeniden hesaplanmadığı anlamına gelir");
+    });
+
+    it("never blames DHA, İHA or 'ajans (AA' anywhere on the page, and never mentions a 300-article gold set", async () => {
+      mockSnapshots.value = make();
+
+      const text = collectText(await QualityPage()).join(" ");
+
+      expect(text).toContain("toplayıcı ve niş");
+      expect(text).toContain("Son 48 saatlik pencerede");
+      expect(text).toContain("Veto kurallarıyla");
+      expect(text).not.toContain("DHA");
+      expect(text).not.toContain("İHA");
+      expect(text).not.toContain("ajans (AA");
+      expect(text).not.toContain("altın set");
+      expect(text).not.toContain("300 haber");
+    });
+
+    it("the precision sentence says a labelled cluster-pair set is needed and does not exist yet", async () => {
+      mockSnapshots.value = make();
+
+      const sentence = precisionText(await QualityPage());
+
+      expect(sentence).toBe(PRECISION_RECALL_SENTENCE);
+      expect(sentence).toContain("küme çifti");
+      expect(sentence).toContain("henüz yok");
+      expect(sentence).not.toContain("300");
+    });
+  });
+
+  it("takes the window length from the snapshot rather than a literal (a 24 h audit says 24)", async () => {
+    mockSnapshots.value = [snapshot({ windowHours: 24 })];
+
+    const box = definitionBox(await QualityPage(), "Tekil küme (singleton)");
+
+    expect(box).toContain("Son 24 saatlik pencerede");
+    expect(box).not.toContain("48");
+  });
+
+  it("falls back to the clusterer's own 48 h window when the snapshot has no usable window length", async () => {
+    mockSnapshots.value = [snapshot({ windowHours: 0 })];
+
+    const box = definitionBox(await QualityPage(), "Tekil küme (singleton)");
+
+    expect(box).toContain("Son 48 saatlik pencerede");
+  });
+
+  it("keeps the h41-derived-1 scope and timing copy", async () => {
+    mockSnapshots.value = [snapshot()];
+
+    const text = collectText(await QualityPage()).join(" ");
+
+    expect(text).toContain("politika ve son dakika");
+    expect(text).toContain("günde bir kez");
+    expect(text).toContain("Siyaset haberi (48 saat)");
+    expect(text).toContain("Küme sayısı (tek haberliler dahil)");
+    expect(text).toContain("Tekil küme oranı");
+    expect(text).toContain("Kaynak çeşitliliği");
+    expect(text).toContain("Kör nokta tutarsızlık oranı");
+    expectNoNightlyClaims(text);
+  });
+
+  it("the Definitions list holds exactly the five terms, in order", async () => {
+    mockSnapshots.value = [snapshot()];
+
+    const dts = allElements(await QualityPage())
+      .filter(({ el }) => el.type === "dt")
+      .map(({ el }) => collectText(el.props.children).join(""));
+
+    expect(dts).toEqual([
+      "Kapsam",
+      "Tekil küme (singleton)",
+      "Küme (cluster)",
+      "Kaynak çeşitliliği",
+      "Kör nokta tutarsızlık oranı",
+    ]);
+    expect(definitionsText(await QualityPage())).toContain("Küme (cluster)");
   });
 });
