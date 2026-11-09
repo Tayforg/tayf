@@ -23,6 +23,16 @@ const PII_ROW = vi.hoisted(() => ({
   article_id: "22222222-2222-2222-2222-222222222222",
   title: "17 yaşındaki şüpheli gözaltına alındı",
 }));
+// A headline that names the outlet that published it, and one that names ANOTHER
+// outlet. The route looks the source up per drawn row (outlet-name rule).
+const CNN_ROW = vi.hoisted(() => ({
+  article_id: "33333333-3333-3333-3333-333333333333",
+  title: "Erdoğan ve Aliyev CNN TÜRK'e konuştu",
+}));
+const POSTA_ROW = vi.hoisted(() => ({
+  article_id: "44444444-4444-4444-4444-444444444444",
+  title: "Bakan Yumaklı CNN TÜRK'e konuştu!",
+}));
 const TOTALS_ROW = vi.hoisted(() => ({ n: 10, iktidar: 5, muhalefet: 3, neutral_n: 2 }));
 
 const cerceveState = vi.hoisted(() => ({
@@ -42,6 +52,20 @@ const cerceveState = vi.hoisted(() => ({
   // failure that escapes postgrest-js' own try/catch).
   nextThrow: null as unknown,
   forceUpsertError: false,
+  // The `articles` source lookup the outlet-name rule makes per drawn row:
+  // article id -> the embedded source (`null` = an article without one). An id
+  // that is not listed resolves to NO row at all.
+  sourceByArticle: {} as Record<string, { name: string; slug: string } | null>,
+  // Every lookup's accumulated builder state (table, eq predicates, select).
+  lookups: [] as Array<{
+    table: string;
+    eq: Array<{ col: string; val: unknown }>;
+    selectArgs: unknown[];
+  }>,
+  // When set, the lookup resolves `{ data: null, error }`.
+  lookupError: null as { message: string; code?: string } | null,
+  // When set, the lookup THROWS this instead of resolving an envelope.
+  lookupThrow: null as unknown,
   // Set to a Postgres error code (e.g. "23503") to make the upsert fail
   // with that specific code instead of the generic "upsert boom" message.
   forceUpsertErrorCode: null as string | null,
@@ -59,6 +83,16 @@ const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
   return helper.createSupabaseFake({
     tables: {
+      articles: (state) => {
+        cerceveState.lookups.push(state);
+        if (cerceveState.lookupThrow !== null) throw cerceveState.lookupThrow;
+        if (cerceveState.lookupError) return { data: null, error: cerceveState.lookupError };
+        const id = String(state.eq.find((e) => e.col === "id")?.val);
+        const sources = cerceveState.sourceByArticle[id];
+        return sources === undefined
+          ? { data: [], error: null }
+          : { data: [{ id, sources }], error: null };
+      },
       framing_votes: () => {
         if (cerceveState.forceUpsertErrorCode) {
           return {
@@ -121,6 +155,10 @@ beforeEach(() => {
   supabaseFake.calls.rpc.length = 0;
   cerceveState.nextQueue = [];
   cerceveState.nextThrow = null;
+  cerceveState.sourceByArticle = {};
+  cerceveState.lookups = [];
+  cerceveState.lookupError = null;
+  cerceveState.lookupThrow = null;
   cerceveState.forceUpsertError = false;
   cerceveState.forceUpsertErrorCode = null;
   cerceveState.throttle = "allow";
@@ -492,6 +530,274 @@ describe("GET /api/oyun/cerceve/next", () => {
     expect(res.headers.get("retry-after")).toBe(
       String(Math.max(1, Math.ceil(body.details.retryAfterMs / 1000))),
     );
+  });
+});
+
+/**
+ * Wraps a fake PostgREST builder so every `.abortSignal(signal)` call anywhere in
+ * the chain is recorded. The shared fake accepts the call but keeps no record of
+ * it on table builders (it does for `.rpc()`), and the lookup must carry the
+ * draw's deadline.
+ */
+function recordAbortSignals(builder: unknown, sink: AbortSignal[]): unknown {
+  return new Proxy(builder as object, {
+    get(target, prop) {
+      const value = (target as Record<string | symbol, unknown>)[prop];
+      if (typeof prop !== "string" || typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        if (prop === "abortSignal") sink.push(args[0] as AbortSignal);
+        const out = (value as (...a: unknown[]) => unknown)(...args);
+        return typeof out === "object" && out !== null && !(out instanceof Promise)
+          ? recordAbortSignals(out, sink)
+          : out;
+      };
+    },
+  });
+}
+
+describe("GET /api/oyun/cerceve/next -- outlet-name rule", () => {
+  const CNN_TURK = { name: "CNN Türk", slug: "cnn-turk" };
+  const POSTA = { name: "Posta", slug: "posta" };
+  const SOZCU = { name: "Sözcü", slug: "sozcu" };
+  const draws = () => supabaseFake.calls.rpc.filter((c) => c.name === "framing_next_headline");
+
+  async function draw(ip: string): Promise<Response> {
+    const mod = await import("@/app/api/oyun/cerceve/next/route");
+    return mod.GET(makeGetRequest(ip));
+  }
+
+  it("discards a headline that names its own outlet and redraws: the clean row is returned, the RPC is called twice", async () => {
+    cerceveState.sourceByArticle = {
+      [CNN_ROW.article_id]: CNN_TURK,
+      [ELIGIBLE_ROW.article_id]: SOZCU,
+    };
+    cerceveState.nextQueue = [
+      { data: [CNN_ROW], error: null },
+      { data: [ELIGIBLE_ROW], error: null },
+    ];
+
+    const res = await draw("198.51.100.60");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ article_id: ELIGIBLE_ROW.article_id, title: ELIGIBLE_ROW.title });
+    expect(draws()).toHaveLength(2);
+  });
+
+  it("looks the source up by primary key, selecting only its name and slug", async () => {
+    cerceveState.sourceByArticle = { [ELIGIBLE_ROW.article_id]: SOZCU };
+
+    await draw("198.51.100.61");
+
+    expect(cerceveState.lookups).toHaveLength(1);
+    const lookup = cerceveState.lookups[0]!;
+    expect(lookup.table).toBe("articles");
+    expect(lookup.eq).toEqual([{ col: "id", val: ELIGIBLE_ROW.article_id }]);
+    const selected = String(lookup.selectArgs[0]);
+    expect(selected).toContain("sources");
+    expect(selected).toContain("name");
+    expect(selected).toContain("slug");
+  });
+
+  it("accepts a headline that names ANOTHER outlet (a Posta row naming CNN TÜRK is not a leak)", async () => {
+    cerceveState.sourceByArticle = { [POSTA_ROW.article_id]: POSTA };
+    cerceveState.nextQueue = [{ data: [POSTA_ROW], error: null }];
+
+    const res = await draw("198.51.100.62");
+
+    expect(await res.json()).toEqual({ article_id: POSTA_ROW.article_id, title: POSTA_ROW.title });
+    expect(draws()).toHaveLength(1);
+  });
+
+  it("accepts a row whose source is null: there is no name to leak", async () => {
+    cerceveState.sourceByArticle = { [CNN_ROW.article_id]: null };
+    cerceveState.nextQueue = [{ data: [CNN_ROW], error: null }];
+
+    const res = await draw("198.51.100.63");
+
+    expect(await res.json()).toEqual({ article_id: CNN_ROW.article_id, title: CNN_ROW.title });
+    expect(draws()).toHaveLength(1);
+  });
+
+  it("accepts a row whose article the lookup does not find (nothing to compare against)", async () => {
+    cerceveState.nextQueue = [{ data: [CNN_ROW], error: null }];
+
+    const res = await draw("198.51.100.64");
+
+    expect(await res.json()).toEqual({ article_id: CNN_ROW.article_id, title: CNN_ROW.title });
+  });
+
+  it("answers { article_id: null, title: null } with 200 when every attempt leaks, after exactly three draws", async () => {
+    const rows = [0, 1, 2].map((i) => ({
+      article_id: `33333333-3333-3333-3333-33333333333${i}`,
+      title: `CNN TÜRK ekranında ${i}. röportaj yayımlandı`,
+    }));
+    cerceveState.sourceByArticle = Object.fromEntries(rows.map((r) => [r.article_id, CNN_TURK]));
+    cerceveState.nextQueue = rows.map((row) => ({ data: [row], error: null }));
+
+    const res = await draw("198.51.100.65");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ article_id: null, title: null });
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(draws()).toHaveLength(3);
+    expect(cerceveState.lookups).toHaveLength(3);
+  });
+
+  it("makes no lookup for a row the PII filter already rejected, nor when the RPC has no row", async () => {
+    cerceveState.sourceByArticle = { [ELIGIBLE_ROW.article_id]: SOZCU };
+    cerceveState.nextQueue = [
+      { data: [PII_ROW], error: null },
+      { data: [ELIGIBLE_ROW], error: null },
+    ];
+    await draw("198.51.100.66");
+    expect(cerceveState.lookups).toHaveLength(1);
+    expect(cerceveState.lookups[0]!.eq).toEqual([{ col: "id", val: ELIGIBLE_ROW.article_id }]);
+
+    cerceveState.lookups = [];
+    cerceveState.nextQueue = [{ data: [], error: null }];
+    await draw("198.51.100.67");
+    expect(cerceveState.lookups).toHaveLength(0);
+  });
+
+  it("a redraw after an outlet-name discard still ends in a PII-clean title", async () => {
+    cerceveState.sourceByArticle = {
+      [CNN_ROW.article_id]: CNN_TURK,
+      [PII_ROW.article_id]: SOZCU,
+      [ELIGIBLE_ROW.article_id]: SOZCU,
+    };
+    cerceveState.nextQueue = [
+      { data: [CNN_ROW], error: null },
+      { data: [PII_ROW], error: null },
+      { data: [ELIGIBLE_ROW], error: null },
+    ];
+
+    const body = await (await draw("198.51.100.68")).json();
+
+    expect(body).toEqual({ article_id: ELIGIBLE_ROW.article_id, title: ELIGIBLE_ROW.title });
+  });
+
+  describe("a failed lookup takes the same branch as a failed RPC", () => {
+    beforeEach(() => {
+      cerceveState.nextQueue = [{ data: [ELIGIBLE_ROW], error: null }];
+    });
+
+    it.each([
+      ["a Postgres statement timeout (57014)", { message: "canceling statement due to statement timeout", code: "57014" }],
+      ["an aborted fetch", { message: "AbortError: The user aborted a request.", code: "" }],
+      ["the draw deadline", { message: "TimeoutError: The operation was aborted due to timeout", code: "" }],
+    ])("%s is a retryable 503 with Retry-After", async (_label, error) => {
+      cerceveState.lookupError = error;
+
+      const res = await draw("198.51.100.70");
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("5");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(await res.json()).toEqual({
+        error: "Service unavailable",
+        details: { retryAfterMs: 5000 },
+      });
+    });
+
+    it("any other error is a 500 (no Retry-After, never a silent empty or unchecked payload)", async () => {
+      cerceveState.lookupError = { message: "lookup boom" };
+
+      const res = await draw("198.51.100.71");
+
+      expect(res.status).toBe(500);
+      expect(res.headers.get("retry-after")).toBeNull();
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const text = await res.text();
+      expect(JSON.parse(text)).not.toEqual({ article_id: null, title: null });
+      expect(text).not.toContain(ELIGIBLE_ROW.title);
+    });
+
+    it("a THROWN abort-like error is a 503 and any other THROWN error a 500", async () => {
+      cerceveState.lookupThrow = Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+      expect((await draw("198.51.100.72")).status).toBe(503);
+
+      cerceveState.nextQueue = [{ data: [ELIGIBLE_ROW], error: null }];
+      cerceveState.lookupThrow = new Error("socket hang up");
+      expect((await draw("198.51.100.73")).status).toBe(500);
+    });
+
+    it("a lookup timeout on a REDRAW is also a 503, never a partial 200", async () => {
+      cerceveState.sourceByArticle = { [CNN_ROW.article_id]: CNN_TURK };
+      cerceveState.nextQueue = [
+        { data: [CNN_ROW], error: null },
+        { data: [ELIGIBLE_ROW], error: null },
+      ];
+      // The first lookup answers; the second one times out.
+      const realFrom = supabaseFake.client.from;
+      let articleCalls = 0;
+      vi.spyOn(supabaseFake.client, "from").mockImplementation((table: string) => {
+        if (table === "articles") {
+          articleCalls += 1;
+          if (articleCalls === 2) cerceveState.lookupError = { message: "AbortError: aborted", code: "" };
+        }
+        return realFrom(table);
+      });
+
+      const res = await draw("198.51.100.74");
+
+      expect(res.status).toBe(503);
+      expect(draws()).toHaveLength(2);
+    });
+  });
+
+  it("chains the draw's ONE deadline signal onto every lookup, the RPCs included", async () => {
+    const signals: AbortSignal[] = [];
+    const realFrom = supabaseFake.client.from;
+    vi.spyOn(supabaseFake.client, "from").mockImplementation((table: string) =>
+      table === "articles" ? recordAbortSignals(realFrom(table), signals) : realFrom(table),
+    );
+    cerceveState.sourceByArticle = {
+      [CNN_ROW.article_id]: CNN_TURK,
+      [ELIGIBLE_ROW.article_id]: SOZCU,
+    };
+    cerceveState.nextQueue = [
+      { data: [CNN_ROW], error: null },
+      { data: [ELIGIBLE_ROW], error: null },
+    ];
+
+    const res = await draw("198.51.100.75");
+
+    expect(res.status).toBe(200);
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(signals[1]).toBe(signals[0]);
+    const rpcSignals = draws().map((c) => c.signal);
+    expect(rpcSignals).toHaveLength(2);
+    for (const signal of rpcSignals) expect(signal).toBe(signals[0]);
+  });
+
+  it("never logs the title or the source name", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    cerceveState.sourceByArticle = {
+      [CNN_ROW.article_id]: CNN_TURK,
+      [ELIGIBLE_ROW.article_id]: SOZCU,
+    };
+    cerceveState.nextQueue = [
+      { data: [CNN_ROW], error: null },
+      { data: [ELIGIBLE_ROW], error: null },
+    ];
+    await draw("198.51.100.76");
+    cerceveState.nextQueue = [{ data: [ELIGIBLE_ROW], error: null }];
+    cerceveState.lookupError = { message: "canceling statement due to statement timeout", code: "57014" };
+    await draw("198.51.100.77");
+
+    for (const args of [...warn.mock.calls, ...error.mock.calls, ...log.mock.calls]) {
+      for (const arg of args) {
+        const serialized = JSON.stringify(arg) ?? "";
+        expect(serialized).not.toContain(CNN_ROW.title);
+        expect(serialized).not.toContain(ELIGIBLE_ROW.title);
+        expect(serialized).not.toContain("CNN");
+      }
+    }
   });
 });
 

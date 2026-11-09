@@ -12,7 +12,7 @@
 
 ### `GET /api/health`
 
-Health check. Returns subsystem status for database, the homepage read path, environment, ingestion freshness, clustering freshness, and queue depth.
+Health check. Returns subsystem status for database, the homepage read path, environment, ingestion freshness, clustering freshness, and queue depth; bearer callers also get a `sources` check naming the silent feeds.
 
 Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "status", "timestamp" }` and are rate-limited (5-token bucket, 1 token/sec refill; the limiter is process-local, so the cap applies per serverless instance, not globally). Callers presenting `Authorization: Bearer <CRON_SECRET>` get the full per-check breakdown and bypass the rate limit; the bearer gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`) — case-insensitive scheme, constant-time compare, FAIL-CLOSED 503 when `CRON_SECRET` is unset/empty, 401 on a mismatched token.
 
@@ -27,7 +27,8 @@ Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "st
     "env": { "ok": true, "missing": [] },
     "ingestion": { "ok": true, "lastArticleAgeSec": 120 },
     "clustering": { "ok": true, "lastClusterAgeSec": 300 },
-    "queues": { "ok": true, "metrics": [{ "queue": "cluster_work", "queueLength": 0, "oldestMsgAgeSec": null }, { "queue": "image_backfill", "queueLength": 0, "oldestMsgAgeSec": null }] }
+    "queues": { "ok": true, "metrics": [{ "queue": "cluster_work", "queueLength": 0, "oldestMsgAgeSec": null }, { "queue": "image_backfill", "queueLength": 0, "oldestMsgAgeSec": null }] },
+    "sources": { "ok": true, "active": 148, "silent": 2, "votingActive": 120, "votingSilent": 1, "silentSources": [{ "slug": "example-outlet", "kind": "outlet", "lastItemAt": "2026-04-12T08:12:00.000Z", "never": false, "lastHttpStatus": 200, "failStreak": 0, "quarantined": false }, { "slug": "example-niche", "kind": "niche", "lastItemAt": null, "never": true, "lastHttpStatus": 404, "failStreak": 12, "quarantined": true }] }
   }
 }
 ```
@@ -35,6 +36,7 @@ Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "st
 - `unhealthy` (503): database or env failure, or a **read-path error** (`checks.readPath.error` present: the probe errored, was aborted, or timed out at 2s)
 - `degraded` (200): the read path **succeeded but took longer than 1500 ms** (`readPath.ok` false, no `error`), ingestion stale (>10 min since last article), clustering stale (>15 min) while `cluster_work` has pending messages, queue alarm (per-queue depth bound — `cluster_work` >500, `image_backfill` >100 — or oldest message >30 min), or a malformed `worker_metrics` row (NULL / non-numeric `queue_length`)
 - `clustering.idle`: when the newest `clusters.updated_at` is older than 15 min but `cluster_work` has no messages (a quiet night: nothing was waiting to be clustered), the probe reports `{ "ok": true, "lastClusterAgeSec": 3780, "idle": true }` and the status stays `healthy`. Every error path is unchanged: a clusters query error, no clusters at all, a failed or malformed `worker_metrics` read, and any pending `cluster_work` message keep a stale reading `degraded` (a stuck consumer leaves messages in the queue)
+- `checks.sources`: bearer-only (the anonymous body never carries it and never runs its query) and informational: it never changes `status`, so silent feeds alone cannot turn `healthy` into `degraded`. `active` counts the active sources, `silent` those with no item in the last 72 h (or none at all), and `votingActive` / `votingSilent` the same two counts over the `outlet` and `wire` kinds that vote. `silentSources` names each silent source with `slug`, `kind`, `lastItemAt` (`null` and `never: true` when it never delivered an item), `lastHttpStatus`, `failStreak` and `quarantined`, never-delivered ones first, then the oldest `lastItemAt`. `ok` is true when at least one voting source is active and fewer than half of them are silent (`votingSilent / votingActive < 0.5`). When the probe errors or times out, `ok` is false, the counts are `0`, `silentSources` is empty and `error` carries the message
 - `401`: `Authorization` header present but token mismatch
 - `503` + error envelope: `Authorization` header present but `CRON_SECRET` not configured (FAIL-CLOSED)
 - `429`: anonymous rate limit exhausted. Canonical error envelope `{ "error": "Too many requests", "details": { "retryAfterMs": 640 } }` with `Retry-After: <whole seconds, >= 1>` and `Cache-Control: no-store`
@@ -407,7 +409,7 @@ The public, unkeyed source registry: every **active** source, ordered by name, a
 | --- | --- | --- |
 | `200` | the registry | `public, s-maxage=3600, stale-while-revalidate=86400` |
 | `429` | the per-client limiter is empty: `{"error":"Too many requests","details":{"retryAfterMs":...}}` with `Retry-After` (whole seconds, at least 1) | `no-store` |
-| `503` | the database is unavailable (a timeout or abort, `PGRST000`-`PGRST003`, `57014`, a gateway `502`/`503`/`504`): `{"error":"Service temporarily unavailable","code":"upstream_unavailable","details":{"request_id":"..."}}` with `Retry-After: 30`. Retry after that many seconds; it is an outage, not a bug in the request | `no-store` |
+| `503` | the database is unavailable (a timeout or abort, `PGRST000`-`PGRST003`, `57014`, a gateway `502`/`503`/`504` or `520`-`524` (Cloudflare origin errors)): `{"error":"Service temporarily unavailable","code":"upstream_unavailable","details":{"request_id":"..."}}` with `Retry-After: 30`. Retry after that many seconds; it is an outage, not a bug in the request | `no-store` |
 | `500` | the registry could not be read for any other reason: `{"error":"Internal server error","details":{"request_id":"..."}}`. A sustained read failure is a `503` or a `500`, never a `200` with an empty `sources` list that a CDN would then hold for an hour | not set |
 
 Rate limit: a 60-token bucket per client, refilling one token per second (about 60 requests per minute sustained; in-memory, so per server instance); the bucket is shared with `GET /api/sources/{slug}`. The query string is never read, so a cache-busting `?cb=<random>` neither mints a cache entry nor costs a database read. The response is not CORS-enabled for browsers by this route; use the keyed `/api/v1/sources` for that.
@@ -572,8 +574,9 @@ non-2xx):
   resolved (a route's own query) and absent when it happened while resolving
   the key (the key lookup or the usage count failed).
 - `503`: the database is temporarily unavailable (a timeout or abort,
-  `PGRST000`-`PGRST003`, `57014`, a gateway `502`/`503`/`504`), whether while
-  resolving the key or in a route's own query. Body:
+  `PGRST000`-`PGRST003`, `57014`, a gateway `502`/`503`/`504` or `520`-`524`
+  (Cloudflare origin errors)), whether while resolving the key or in a route's
+  own query. Body:
   `{"error":"Service temporarily unavailable","code":"upstream_unavailable","details":{"request_id":"..."}}`:
   the stable `code` and a `details.request_id` to quote when you report it, and
   nothing else (never a raw database error). Always carries
@@ -629,10 +632,13 @@ no CORS headers, and a browser will not follow a redirect on a preflight, so
 `fetch('/api/v1/clusters/', { headers: { Authorization } })` fails with an
 opaque CORS error. Call the slash-less path.
 
-**Envelope**: every response body is wrapped by the same
-`registryEnvelope()` `/api/sources` uses — `licence` (`CC BY-SA 4.0 —
-Tayf'a göre`), `attribution`, `methodology`, `generated_at` — plus the
-endpoint's own payload keys.
+**Envelope**: every `2xx` body except the `200` of `GET /api/v1/openapi.json`
+(the bare OpenAPI document shown in its section) is wrapped by the same
+`registryEnvelope()` `/api/sources` uses — `licence` (`CC BY-SA 4.0 — Tayf'a göre`),
+`attribution`, `methodology`, `generated_at` — plus the endpoint's own payload
+keys. Every non-2xx body, the `301` "Cluster merged" body included, is the bare
+`{error, code?, details?}` envelope described under *Response codes*: it
+carries no `licence`, `attribution`, `methodology` or `generated_at`.
 
 ---
 

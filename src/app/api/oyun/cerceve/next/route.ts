@@ -8,6 +8,7 @@ import {
   withApiErrors,
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { titleNamesOutlet } from "@/lib/game/outlet-leak";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import {
   FRAMING_SESSION_COOKIE,
@@ -28,6 +29,18 @@ import { mintSignedSession, readSignedSessionCookie } from "@/lib/game/framing-s
  * copy of a rule whose failure mode is a KVKK problem. So this route
  * discards any RPC row the filter rejects and re-draws (up to 3 times)
  * rather than trusting the RPC's own candidate pool to already be clean.
+ *
+ * WHY THE OUTLET-NAME RULE RUNS HERE TOO: the mode promises the outlet is hidden,
+ * and a headline that names its own outlet ("Erdoğan ve Aliyev CNN TÜRK'e
+ * konuştu", from CNN TÜRK) breaks that promise. The rule is outlet-leak.ts's
+ * `titleNamesOutlet`, the same one the Bölge pool applies, and it needs the
+ * source's name: `framing_next_headline` returns only (article_id, title), so
+ * each row that passes the PII filter costs one primary-key lookup of its
+ * source. A row whose source is missing is accepted (there is no name to leak),
+ * and another outlet's name in a title is not a leak. Both rules discard the row
+ * and redraw, against the same MAX_DRAW_ATTEMPTS and the same deadline; a failed
+ * lookup is answered like a failed draw. Neither the title nor the source name is
+ * ever logged.
  *
  * COOKIE: `tayf_cerceve_sid` is `<random 32-hex id>.<hmac>` (see
  * framing-session.ts), minted here only when absent, unsigned or failing
@@ -94,6 +107,30 @@ const noStore = (res: Response): Response => {
   return res;
 };
 
+/**
+ * The response for a draw step (the RPC or the source lookup) that failed: a
+ * retryable 503 with Retry-After for a timeout, `apiServerError` for anything
+ * else.
+ */
+function failedDraw(error: unknown): Response {
+  if (isDrawTimeout(error)) {
+    // Never log the session hash, the raw cookie or the title.
+    console.warn("[oyun/cerceve] draw timed out", {
+      code: (error as { code?: unknown }).code ?? null,
+    });
+    // Retryable, not an application error. No cookie is set: the client
+    // retries with the same (or no) cookie and mints on success.
+    const res = noStore(
+      apiError(503, "Service unavailable", {
+        details: { retryAfterMs: RETRY_AFTER_SECONDS * 1000 },
+      }),
+    );
+    res.headers.set("Retry-After", String(RETRY_AFTER_SECONDS));
+    return res;
+  }
+  return noStore(apiServerError(error));
+}
+
 export const GET = withApiErrors(async (request: Request) => {
   const key = clientKey(request);
   const rl = cerceveNextLimit(key);
@@ -141,24 +178,7 @@ export const GET = withApiErrors(async (request: Request) => {
       error = e;
     }
 
-    if (error) {
-      if (isDrawTimeout(error)) {
-        // Never log the session hash, the raw cookie or the title.
-        console.warn("[oyun/cerceve] draw timed out", {
-          code: (error as { code?: unknown }).code ?? null,
-        });
-        // Retryable, not an application error. No cookie is set: the client
-        // retries with the same (or no) cookie and mints on success.
-        const res = noStore(
-          apiError(503, "Service unavailable", {
-            details: { retryAfterMs: RETRY_AFTER_SECONDS * 1000 },
-          }),
-        );
-        res.headers.set("Retry-After", String(RETRY_AFTER_SECONDS));
-        return res;
-      }
-      return noStore(apiServerError(error));
-    }
+    if (error) return failedDraw(error);
 
     const row = (Array.isArray(data) ? data[0] : data) as
       | CerceveHeadlineRow
@@ -173,6 +193,32 @@ export const GET = withApiErrors(async (request: Request) => {
 
     if (!isGameEligibleTitle(row.title)) {
       // Discard and redraw. Never log the rejected title.
+      continue;
+    }
+
+    // Outlet-name rule: one primary-key lookup of the row's source. The deadline
+    // is the draw's own, so the lookups share the 3 s budget with the RPCs.
+    // `.abortSignal` sits before `.maybeSingle()` because postgrest-js's
+    // `maybeSingle()` returns a builder that no longer has it.
+    let lookup: unknown;
+    let lookupError: unknown;
+    try {
+      ({ data: lookup, error: lookupError } = await supabase
+        .from("articles")
+        .select("id, sources ( name, slug )")
+        .eq("id", row.article_id)
+        .abortSignal(deadline)
+        .maybeSingle());
+    } catch (e) {
+      lookup = null;
+      lookupError = e;
+    }
+    if (lookupError) return failedDraw(lookupError);
+
+    const source = (lookup as { sources?: { name: string; slug: string } | null } | null)?.sources;
+    if (source && titleNamesOutlet(row.title, source)) {
+      // Discard and redraw, counted against MAX_DRAW_ATTEMPTS like the PII
+      // redraw. Never log the title or the source name.
       continue;
     }
 

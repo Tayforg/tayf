@@ -134,6 +134,77 @@ export function chartBaseline(args: {
   return null;
 }
 
+/**
+ * A last 5-minute bar earlier than this (Istanbul minutes of the day, 17:30) is
+ * not a normal end of session: the continuous session runs to 18:00 and the
+ * closing auction prints the 17:55 bar. A bar that ends before it, once the
+ * session is over, means the bars stopped coming (h92-marketclock-1).
+ */
+const CUT_BAR_BEFORE_MIN = 17 * 60 + 30;
+
+/** Relative gap between the last bar's close and the settled close that is worth correcting (0.5 %). */
+const CUT_CLOSE_GAP = 0.005;
+
+/**
+ * Whether the newest 5-minute session on screen was cut short, so that its last
+ * bar is not where the day settled (h92-marketclock-1).
+ *
+ * bist_intraday_targets used to select news tickers over a rolling 7 x 24 hours,
+ * so a ticker left the target list at the minute its last mention turned 7 days
+ * old, in the middle of a session, and quotes-ingest never back-filled the rest.
+ * VKING 2026-11-06: bars to 12:05 Istanbul, the last at 11,53, the daily close
+ * 12,09. The chart drew its last price, colour and aria-label from that bar and
+ * contradicted the header. This is true only when ALL of these hold:
+ *  1. there is a last bar and a session day;
+ *  2. the stat is the daily bar of that same day and has a usable settled close;
+ *  3. the session is over: a later Istanbul day, or the same day after 18:15;
+ *  4. the last bar is before 17:30 Istanbul;
+ *  5. the last bar's close is more than 0.5 % away from the settled close.
+ * Anything unreadable is false: a normal day, a half day (its bars end near
+ * 12:30 and agree with the settle) and an open session all keep the chart as it
+ * is. The chart's settled close is stat.lastClose, the header's own number.
+ */
+export function intradayCutShort(a: {
+  lastBar: { ts: string; close: number } | null;
+  intradayDay: string | null;
+  stat: QuoteStat | null | undefined;
+  nowMs: number;
+}): boolean {
+  const { lastBar, intradayDay, stat, nowMs } = a;
+  if (!lastBar || !intradayDay) return false;
+  if (!stat || dayKey(stat.lastDay) !== dayKey(intradayDay)) return false;
+  if (!Number.isFinite(stat.lastClose) || !(stat.lastClose > 0)) return false;
+
+  if (!Number.isFinite(nowMs)) return false;
+  const now = new Date(nowMs + IST_OFFSET_MS);
+  const today = now.toISOString().slice(0, 10);
+  const session = dayKey(intradayDay);
+  const nowMinute = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const over = today > session || (today === session && nowMinute > SESSION_CLOSE_MIN);
+  if (!over) return false;
+
+  const barMs = Date.parse(lastBar.ts);
+  if (!Number.isFinite(barMs)) return false;
+  const bar = new Date(barMs + IST_OFFSET_MS);
+  if (bar.getUTCHours() * 60 + bar.getUTCMinutes() >= CUT_BAR_BEFORE_MIN) return false;
+
+  return Math.abs(lastBar.close / stat.lastClose - 1) > CUT_CLOSE_GAP;
+}
+
+/**
+ * The "Seans içi" panel meta: the session day as dd.MM.yyyy plus, when the
+ * session was cut (see intradayCutShort), the Istanbul time its bars stop at.
+ * Without a usable `cutAtTs` it is the original line, unchanged.
+ */
+export function intradayPanelMeta(day: string, cutAtTs: string | null): string {
+  const date = day.split("-").reverse().join(".");
+  const cutMs = cutAtTs == null ? Number.NaN : Date.parse(cutAtTs);
+  if (!Number.isFinite(cutMs)) return `${date}, 5 dakikalık kapanışlar, haberler işaretli`;
+  const cut = new Date(cutMs + IST_OFFSET_MS);
+  const clock = `${two(cut.getUTCHours())}:${two(cut.getUTCMinutes())}`;
+  return `${date}, 5 dakikalık kapanışlar, ${clock} sonrası veri eksik, haberler işaretli`;
+}
+
 /** Sub-kurus slack for comparing a price with a band limit (float noise only). */
 const BAND_EPSILON = 1e-6;
 

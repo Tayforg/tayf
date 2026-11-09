@@ -147,8 +147,10 @@ const UPSTREAM_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
 // 521 (origin down), 522 (connection timed out), 523 (origin unreachable) and
 // 524 (timeout). A gateway answer has an HTML or empty body, which postgrest-js
 // turns into `{ message: <body> }` with NO PostgREST code, so the status is
-// the only signal.
-const UPSTREAM_UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([
+// the only signal. Exported only so tests/guards/api-docs-contract.test.ts can
+// pin the statuses docs/api.md names for the 503 `upstream_unavailable` answer
+// to this set; nothing else should import it.
+export const UPSTREAM_UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([
   502, 503, 504, 520, 521, 522, 523, 524,
 ]);
 // How many `cause` links are followed (the error itself is depth 0).

@@ -12,20 +12,22 @@ import { isGameEligibleTitle } from "./pii-filter";
 // imports, because the client game needs GAME_ROUND_SIZE and must not pull this
 // file (next/cache, "use cache") into the client bundle. Import them from there.
 import { GAME_ROUND_SIZE } from "./round-size";
+import { crossZoneTwinKeys, twinKey } from "./title-twin";
 
 // /oyun's headline pool — the pick. Mirrors the embedded-select shape
 // blindspots-query.ts / politics-query.ts already use (clusters →
 // cluster_articles → articles → sources in one round-trip) rather than
 // inventing a different query shape for this one surface.
 //
-// All SEVEN filter rules (48h window, article_count >= 3, one headline per
+// All EIGHT filter rules (48h window, article_count >= 3, one headline per
 // outlet per cluster, outlet-only sources, Turkish-language sources, PII
-// filter, no headline that names its own outlet) live in the pure
+// filter, no headline that names its own outlet, no headline whose text an
+// outlet or wire of another zone ran too) live in the pure
 // `selectGameHeadlines` below — same "fetch broad, filter in JS" split
 // blindspots-query.ts uses, so this is unit-testable without Supabase and
 // the async wrapper stays a thin fetch + delegate.
 //
-// Three of those rules are what make the question fair. /oyun asks "which camp
+// Four of those rules are what make the question fair. /oyun asks "which camp
 // is this outlet in?", which is only a real question for an outlet whose zone
 // is an editorial call: an aggregator or niche source carries a placeholder
 // zone and a wire source republishes someone else's copy, so only
@@ -33,8 +35,12 @@ import { GAME_ROUND_SIZE } from "./round-size";
 // English-language outlet gives its zone away through its language alone, so
 // the slugs in ENGLISH_SOURCE_SLUGS are dropped too. And a headline that names
 // its own outlet ("CNN TÜRK'te ...") gives the answer away by name, so
-// outlet-leak.ts's `titleNamesOutlet` drops it. These rules shrink the pool;
-// GAME_ROUND_SIZE is deliberately NOT lowered to compensate.
+// outlet-leak.ts's `titleNamesOutlet` drops it. Last, a headline whose text an
+// outlet or wire of ANOTHER zone ran word for word in the same story has two
+// correct answers ("İlke TV", "Aydınlık" and AA all ran "Cumhurbaşkanı Erdoğan,
+// ABD Başkanı Trump ile telefonda görüştü"), so title-twin.ts's `twinKey` drops
+// it, on both sides. These rules shrink the pool; GAME_ROUND_SIZE is
+// deliberately NOT lowered to compensate.
 //
 // The outlet rule is per cluster: an outlet keeps ONE headline in each cluster
 // it covers, not one in the whole window. A pool-wide rule left the pool with
@@ -106,12 +112,33 @@ const CANDIDATE_LIMIT = 200;
 export const MAX_HEADLINES_PER_OUTLET = 1;
 
 /**
+ * The members of `cluster` that count as evidence for the twin-text rule: every
+ * article whose source is present and an outlet or a wire (`sourceKindOf`, so a
+ * legacy null kind is an outlet), with the zone of that source. No window,
+ * `active` or language rule here.
+ */
+function* twinEvidence(
+  cluster: GameClusterRow,
+): Generator<{ title: string; zone: MediaDnaZone }> {
+  for (const clusterArticle of cluster.cluster_articles ?? []) {
+    const article = clusterArticle.articles;
+    const source = article?.sources;
+    if (!article || !source) continue;
+    const kind = sourceKindOf({ kind: source.kind ?? undefined });
+    if (kind !== "outlet" && kind !== "wire") continue;
+    yield { title: article.title, zone: zoneOf(source.bias) };
+  }
+}
+
+/**
  * PURE. Applies every /oyun eligibility rule — 48h window, article_count >=
  * 3, source.active, outlet-only kind (aggregator, niche and wire are
  * excluded), Turkish-language sources only (ENGLISH_SOURCE_SLUGS are
  * excluded), one headline per outlet PER CLUSTER, the PII filter (per
- * pii-filter.ts's "before sampling" ordering rule), and the outlet-name rule
- * (a headline that names its own outlet is dropped) — and
+ * pii-filter.ts's "before sampling" ordering rule), the outlet-name rule
+ * (a headline that names its own outlet is dropped), and the twin-text rule
+ * (a headline whose text an outlet or wire of another zone ran in the same
+ * cluster is dropped) — and
  * returns the FULL eligible candidate list, unshuffled and uncapped. No
  * Supabase dependency, so it's unit-testable with plain fixtures.
  *
@@ -120,6 +147,16 @@ export const MAX_HEADLINES_PER_OUTLET = 1;
  * an outlet that covers two clusters has a candidate in each. The rule is NOT
  * pool-wide: that kept one headline per outlet across the whole 48 h window
  * and shrank the pool to about 20 candidates.
+ *
+ * The twin-text rule compares texts within ONE cluster, against EVERY member
+ * whose source is an outlet or a wire, whatever its age, its `active` flag or
+ * its language: the zone a reader would name for the text is not unique as soon
+ * as such a member of another zone ran it, even if that member is not itself a
+ * candidate (a wire never is). Aggregator and niche members are never evidence:
+ * they republish and carry a placeholder zone. Two outlets of ONE zone with the
+ * same text are not twins. The twin check runs before the outlet is marked seen,
+ * so an outlet whose first headline is a twin can still offer a later, clean
+ * one.
  *
  * Deliberately does NOT shuffle or cap: this runs inside the cached
  * `getGameHeadlines` call graph (5-minute `cacheLife`), so randomising here
@@ -135,6 +172,12 @@ export function selectGameHeadlines(
 
   for (const cluster of rows) {
     if (cluster.article_count < 3) continue;
+
+    // Texts that members of two or more zones ran in this cluster. Built from
+    // every outlet or wire member (before any window, active or language rule),
+    // because those rules choose candidates, not what a reader has already seen
+    // the other camp print.
+    const twins = crossZoneTwinKeys(twinEvidence(cluster));
 
     // One outlet, one headline, per cluster.
     const seenSourceIds = new Set<string>();
@@ -168,6 +211,10 @@ export function selectGameHeadlines(
       // before the outlet is marked seen, so a later clean headline of the
       // same outlet in this cluster still counts.
       if (titleNamesOutlet(article.title, source)) continue;
+
+      // Another zone's outlet or wire ran the same text: the question would
+      // have two right answers. Also dropped before the outlet is marked seen.
+      if (twins.has(twinKey(article.title))) continue;
 
       seenSourceIds.add(source.id);
       candidates.push({
@@ -340,7 +387,7 @@ async function fetchGameHeadlinePool(): Promise<GameHeadline[] | null> {
 }
 
 // Cached entry point. Caches the ELIGIBLE POOL (every candidate that passes
-// `selectGameHeadlines`'s seven rules: one headline per outlet per cluster),
+// `selectGameHeadlines`'s eight rules: one headline per outlet per cluster),
 // not the game's final list. The per-request sample (which headlines, in which
 // order; zone-balanced, one per cluster, at most MAX_HEADLINES_PER_OUTLET per
 // outlet, never padded) is drawn by the caller via `sampleHeadlines`, so it

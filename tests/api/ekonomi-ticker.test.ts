@@ -1150,3 +1150,141 @@ describe("optional reads degrade instead of throwing (h41-resilience-3)", () => 
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// h92-marketclock-1: bist_intraday_targets used a rolling 7-day news window, so a
+// ticker could leave the target list mid-session and its 5-minute bars stopped
+// there. VKING 2026-11-06: bars to 12:05 Istanbul (09:05Z), the last at 11,53; the
+// daily close 12,09 and the header 12,09. The chart's last price, colour and
+// aria-label contradicted the header. When the session is over, the bars end before
+// 17:30 and the last bar is more than 0.5 % off the settled close, the page hands
+// the settled close to the chart and says in the panel meta where the data stops.
+// ---------------------------------------------------------------------------
+
+describe("a session whose 5-minute bars were cut short (h92-marketclock-1)", () => {
+  const params = () => Promise.resolve({ ticker: "VKING" });
+  const CUT_META = "06.11.2026, 5 dakikalık kapanışlar, 12:05 sonrası veri eksik, haberler işaretli";
+  const PLAIN_META = "06.11.2026, 5 dakikalık kapanışlar, haberler işaretli";
+
+  const vkingQuote = () => ({
+    VKING: {
+      ticker: "VKING",
+      price: 12.09,
+      prevClose: 11.67,
+      changePct: 3.6,
+      hasBaseline: true,
+      closes: [11.4, 11.52, 11.67, 12.09],
+      currency: "TRY",
+      asOf: "2026-11-06T15:00:00.000Z",
+    },
+  });
+  const vkingStat = (over: Record<string, unknown> = {}) => ({
+    VKING: {
+      ticker: "VKING",
+      lastDay: "2026-11-06",
+      lastClose: 12.09,
+      prevClose: 11.67,
+      lastVolume: 307202,
+      avgVolume20: 250000,
+      rvol: 1.2,
+      ...over,
+    },
+  });
+  const cutBars = () => [
+    { ts: "2026-11-06T06:55:00.000Z", close: 11.7, volume: 90 },
+    { ts: "2026-11-06T08:00:00.000Z", close: 11.62, volume: 40 },
+    { ts: "2026-11-06T09:05:00.000Z", close: 11.53, volume: 0 },
+  ];
+  const fullBars = () => [
+    { ts: "2026-11-06T06:55:00.000Z", close: 11.7, volume: 90 },
+    { ts: "2026-11-06T11:00:00.000Z", close: 11.9, volume: 40 },
+    { ts: "2026-11-06T14:55:00.000Z", close: 12.09, volume: 700 },
+  ];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Monday 05:30 Istanbul: the 06.11 session is long over.
+    vi.setSystemTime(new Date("2026-11-09T02:30:00Z"));
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+    stubRenderableTickerPage();
+    getQuotesMock.mockResolvedValue(vkingQuote());
+    fetchQuoteStatsMock.mockResolvedValue(vkingStat());
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const render = async () => collectEls(await TickerPage({ params: params() }));
+  const chartOf = (els: El[]) => els.find((e) => e.type === IntradayChart);
+
+  it("VKING: the chart gets the settled close 12,09 and the panel meta says the data stops after 12:05", async () => {
+    fetchIntradayMock.mockResolvedValue({ day: "2026-11-06", bars: cutBars() });
+
+    const els = await render();
+
+    expect(chartOf(els)?.props.closeOverride).toBe(12.09);
+    expect(panelMeta(els, "Seans içi")).toBe(CUT_META);
+    // the chart still draws the bars it has and the baseline stays the stat's previous close
+    expect(chartOf(els)?.props.bars).toEqual(cutBars());
+    expect(chartOf(els)?.props.prevClose).toBe(11.67);
+  });
+
+  it("a full session (last bar is the 17:55 closing auction): no override and today's meta", async () => {
+    fetchIntradayMock.mockResolvedValue({ day: "2026-11-06", bars: fullBars() });
+
+    const els = await render();
+
+    expect(chartOf(els)?.props.closeOverride).toBeNull();
+    expect(panelMeta(els, "Seans içi")).toBe(PLAIN_META);
+  });
+
+  it("the same bars while the session is still open (Friday 13:00 Istanbul): no override", async () => {
+    vi.setSystemTime(new Date("2026-11-06T10:00:00Z"));
+    fetchIntradayMock.mockResolvedValue({ day: "2026-11-06", bars: cutBars() });
+
+    const els = await render();
+
+    expect(chartOf(els)?.props.closeOverride).toBeNull();
+    expect(panelMeta(els, "Seans içi")).toBe(PLAIN_META);
+  });
+
+  it("no stat for the ticker: nothing to settle against, no override", async () => {
+    fetchQuoteStatsMock.mockResolvedValue({});
+    fetchIntradayMock.mockResolvedValue({ day: "2026-11-06", bars: cutBars() });
+
+    const els = await render();
+
+    expect(chartOf(els)?.props.closeOverride).toBeNull();
+    expect(panelMeta(els, "Seans içi")).toBe(PLAIN_META);
+  });
+
+  it("a stat read that failed: no override (the header has no settled close either)", async () => {
+    fetchQuoteStatsMock.mockRejectedValue(new Error("[finance] fetchQuoteStats: statement timeout"));
+    fetchIntradayMock.mockResolvedValue({ day: "2026-11-06", bars: cutBars() });
+
+    const els = await render();
+
+    expect(chartOf(els)?.props.closeOverride).toBeNull();
+    expect(panelMeta(els, "Seans içi")).toBe(PLAIN_META);
+  });
+
+  it("a stat of another day (the daily bar is newer than the bars): no override", async () => {
+    fetchQuoteStatsMock.mockResolvedValue(vkingStat({ lastDay: "2026-11-09" }));
+    fetchIntradayMock.mockResolvedValue({ day: "2026-11-06", bars: cutBars() });
+
+    const els = await render();
+
+    expect(chartOf(els)?.props.closeOverride).toBeNull();
+    expect(panelMeta(els, "Seans içi")).toBe(PLAIN_META);
+  });
+
+  it("no bars at all: no chart, the old empty-state meta, and the guard never throws", async () => {
+    fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
+
+    const els = await render();
+
+    expect(chartOf(els)).toBeUndefined();
+    expect(panelMeta(els, "Seans içi")).toBe("5 dakikalık veri henüz yok");
+  });
+});

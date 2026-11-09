@@ -7,7 +7,9 @@ import { limitFlag } from "./format";
 import {
   chartBaseline,
   companyMetaLine,
+  intradayCutShort,
   intradayEmptyCopy,
+  intradayPanelMeta,
   marketCueText,
   marketOpen,
   priceEmptyLabel,
@@ -585,5 +587,133 @@ describe("rvolParts (the pieces the header colours separately)", () => {
 
   it("h57-ekonomi-1: the ratio of an unrounded 1.84875 is '1,8 katı'", () => {
     expect(rvolParts({ rvol: 1.84875, dayLabel: null }).ratio).toBe("1,8 katı");
+  });
+});
+
+// h92-marketclock-1: bist_intraday_targets used a rolling 7-day news window, so a
+// ticker left the target list mid-session and its 5-minute bars stopped there
+// (VKING 2026-11-06: last bar 12:05 Istanbul, close 11.53, the daily close 12.09).
+// intradayCutShort says when the newest session's bars end before the close and the
+// last bar is not where the day settled; the chart then prints the settled close.
+describe("intradayCutShort (h92-marketclock-1)", () => {
+  const stat = (over: Partial<QuoteStat> = {}): QuoteStat => ({
+    ticker: "VKING",
+    lastDay: "2026-11-06",
+    lastClose: 12.09,
+    prevClose: 11.67,
+    lastVolume: 307202,
+    avgVolume20: 250000,
+    rvol: 1.2,
+    ...over,
+  });
+  // VKING: the newest bar is 09:05Z = 12:05 Istanbul, 11.53 against a 12.09 settle; read on Monday 05:30 Istanbul.
+  const vking = () => ({
+    lastBar: { ts: "2026-11-06T09:05:00Z", close: 11.53 },
+    intradayDay: "2026-11-06" as string | null,
+    stat: stat() as QuoteStat | null | undefined,
+    nowMs: at("2026-11-09T02:30:00Z"),
+  });
+
+  it("VKING 2026-11-06 read on Monday: true", () => {
+    expect(intradayCutShort(vking())).toBe(true);
+  });
+
+  it("a full session whose last bar is the 17:55 closing auction, 1 % off the settle: false", () => {
+    expect(
+      intradayCutShort({
+        ...vking(),
+        lastBar: { ts: "2026-11-06T14:55:00Z", close: 12.21 },
+      }),
+    ).toBe(false);
+  });
+
+  it("the 17:30 Istanbul bar is not before 17:30: false; the 17:25 bar is: true", () => {
+    expect(intradayCutShort({ ...vking(), lastBar: { ts: "2026-11-06T14:30:00Z", close: 11.53 } })).toBe(false);
+    expect(intradayCutShort({ ...vking(), lastBar: { ts: "2026-11-06T14:25:00Z", close: 11.53 } })).toBe(true);
+  });
+
+  it("the half day 2026-10-28 (last bar 12:35 Istanbul, close equal to the settle): false", () => {
+    expect(
+      intradayCutShort({
+        lastBar: { ts: "2026-10-28T09:35:00Z", close: 12.09 },
+        intradayDay: "2026-10-28",
+        stat: stat({ lastDay: "2026-10-28" }),
+        nowMs: at("2026-10-29T08:00:00Z"),
+      }),
+    ).toBe(false);
+  });
+
+  it("the same day while the session is open (13:00 Istanbul): false, the bars are still coming", () => {
+    expect(intradayCutShort({ ...vking(), nowMs: at("2026-11-06T10:00:00Z") })).toBe(false);
+  });
+
+  it("the same day right after the close: 18:15 Istanbul is still the session, 18:16 is over", () => {
+    expect(intradayCutShort({ ...vking(), nowMs: at("2026-11-06T15:15:00Z") })).toBe(false);
+    expect(intradayCutShort({ ...vking(), nowMs: at("2026-11-06T15:16:00Z") })).toBe(true);
+  });
+
+  it("the next Istanbul day counts as over even before the open (00:30 Istanbul on Saturday)", () => {
+    expect(intradayCutShort({ ...vking(), nowMs: at("2026-11-06T21:30:00Z") })).toBe(true);
+  });
+
+  it("a stat of another day describes another session: false (earlier and later)", () => {
+    expect(intradayCutShort({ ...vking(), stat: stat({ lastDay: "2026-11-05" }) })).toBe(false);
+    expect(intradayCutShort({ ...vking(), stat: stat({ lastDay: "2026-11-07" }) })).toBe(false);
+  });
+
+  it("a stat day with a time part still lines up with the session day", () => {
+    expect(intradayCutShort({ ...vking(), stat: stat({ lastDay: "2026-11-06T00:00:00+00:00" }) })).toBe(true);
+  });
+
+  it("no stat (null or undefined): false", () => {
+    expect(intradayCutShort({ ...vking(), stat: null })).toBe(false);
+    expect(intradayCutShort({ ...vking(), stat: undefined })).toBe(false);
+  });
+
+  it("an unusable settle (0, negative, NaN, Infinity): false", () => {
+    for (const lastClose of [0, -12.09, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(intradayCutShort({ ...vking(), stat: stat({ lastClose }) }), `lastClose ${lastClose}`).toBe(false);
+    }
+  });
+
+  it("no last bar or no session day: false", () => {
+    expect(intradayCutShort({ ...vking(), lastBar: null })).toBe(false);
+    expect(intradayCutShort({ ...vking(), intradayDay: null })).toBe(false);
+  });
+
+  it("an unparsable bar time or clock: false", () => {
+    expect(intradayCutShort({ ...vking(), lastBar: { ts: "not a time", close: 11.53 } })).toBe(false);
+    expect(intradayCutShort({ ...vking(), nowMs: Number.NaN })).toBe(false);
+  });
+
+  it("a last bar within 0.5 % of the settle: false (the cut cost nothing visible); 0.6 % either way: true", () => {
+    const base = { ...vking(), stat: stat({ lastClose: 100 }) };
+    expect(intradayCutShort({ ...base, lastBar: { ts: "2026-11-06T09:05:00Z", close: 100.4 } })).toBe(false);
+    expect(intradayCutShort({ ...base, lastBar: { ts: "2026-11-06T09:05:00Z", close: 99.6 } })).toBe(false);
+    expect(intradayCutShort({ ...base, lastBar: { ts: "2026-11-06T09:05:00Z", close: 100.6 } })).toBe(true);
+    expect(intradayCutShort({ ...base, lastBar: { ts: "2026-11-06T09:05:00Z", close: 99.4 } })).toBe(true);
+  });
+
+  it("a last bar with a NaN close: false (never trips on garbage)", () => {
+    expect(intradayCutShort({ ...vking(), lastBar: { ts: "2026-11-06T09:05:00Z", close: Number.NaN } })).toBe(false);
+  });
+});
+
+describe("intradayPanelMeta (h92-marketclock-1)", () => {
+  it("is today's string, unchanged, when the session is not cut", () => {
+    expect(intradayPanelMeta("2026-11-06", null)).toBe("06.11.2026, 5 dakikalık kapanışlar, haberler işaretli");
+  });
+
+  it("names the Istanbul time the data stops at when the session is cut", () => {
+    expect(intradayPanelMeta("2026-11-06", "2026-11-06T09:05:00Z")).toBe(
+      "06.11.2026, 5 dakikalık kapanışlar, 12:05 sonrası veri eksik, haberler işaretli",
+    );
+    expect(intradayPanelMeta("2026-11-06", "2026-11-06T14:25:00Z")).toBe(
+      "06.11.2026, 5 dakikalık kapanışlar, 17:25 sonrası veri eksik, haberler işaretli",
+    );
+  });
+
+  it("falls back to the plain string for a cut time it cannot read", () => {
+    expect(intradayPanelMeta("2026-11-06", "garbage")).toBe("06.11.2026, 5 dakikalık kapanışlar, haberler işaretli");
   });
 });

@@ -12,6 +12,20 @@
  * that looks like a bug rather than "before launch". */
 export const WEEK_ARCHIVE_FIRST = "2026-W38";
 
+/** The first ISO week whose blindspot claims were judged by BOTH withdrawal
+ * filters: the Jev recall check and the sibling-headline veto. Closed weeks
+ * before it print "Toplam N kör nokta" under a weaker standard, so the archive
+ * page adds a caveat there and the counts are not comparable across the cut-off
+ * (h92-weeklyarchive-1: 2026-W38 was never recall-checked, 39 of its 41 flags;
+ * no week before 2026-W43 has a sibling-headline veto, and W43 has 2 where
+ * W44 has 16, so W44 is the first week the veto speaks for in full).
+ *
+ * Copy and a constant only: no count changes. Lower it, in a follow-up, only
+ * after a founder re-score of the older flags (h85-blindspotprecision-2) with
+ * the full 30-day interval, to the first week whose sibling_headline count is
+ * no longer 0. */
+export const BLINDSPOT_VETO_COVERED_FROM = "2026-W44";
+
 /** Türkiye has run permanent +03 (no DST) since 2016. */
 export const ISTANBUL_OFFSET_MS = 3 * 60 * 60 * 1000;
 export const DAY_MS = 24 * 60 * 60 * 1000;
@@ -85,6 +99,15 @@ export function parseWeekKey(
  * isServableWeekKey (the edge gate). */
 export function isArchiveWeekInRange(key: string, currentKey: string): boolean {
   return key >= WEEK_ARCHIVE_FIRST && key <= currentKey;
+}
+
+/** Whether `key` is at or after BLINDSPOT_VETO_COVERED_FROM, i.e. its blindspot
+ * claims went through both withdrawal filters. A pure string compare that does
+ * not parse, valid for the same reason as isArchiveWeekInRange: a parsed key is
+ * always zero-padded 'YYYY-Www' (fixed-width digits), so lexicographic order is
+ * chronological order. Callers reject a malformed key first (parseWeekKey). */
+export function isBlindspotVetoCovered(key: string): boolean {
+  return key >= BLINDSPOT_VETO_COVERED_FROM;
 }
 
 /** Whether /hafta/[key] has anything to serve at `nowMs`: a well-formed key

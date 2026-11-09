@@ -443,6 +443,233 @@ describe("selectGameHeadlines -- cluster id", () => {
   });
 });
 
+/**
+ * ONE cluster row from per-member specs: the embedded-select shape for a story
+ * several outlets (and wires, aggregators ...) covered, each member with its own
+ * text, zone and kind. Every member is fresh and in window unless it says
+ * otherwise.
+ */
+interface TwinMember {
+  sourceId?: string;
+  sourceSlug?: string;
+  sourceKind?: "outlet" | "aggregator" | "wire" | "niche" | null;
+  sourceActive?: boolean;
+  bias: BiasCategory;
+  title: string;
+  publishedAt?: string;
+}
+
+function clusterOf(clusterId: string, members: readonly TwinMember[]): GameClusterRow {
+  const rows = members.map((member) => makeRow({ clusterId, ...member }));
+  return {
+    id: clusterId,
+    article_count: Math.max(3, members.length),
+    cluster_articles: rows.flatMap((row) => row.cluster_articles ?? []),
+  };
+}
+
+describe("selectGameHeadlines -- cross-zone twin text", () => {
+  const TEXT = "Meclis'te bütçe görüşmeleri yarın başlıyor";
+  // Same words, different case, different apostrophe, a final full stop.
+  const TEXT_LOUD = "MECLİS’TE BÜTÇE GÖRÜŞMELERİ YARIN BAŞLIYOR.";
+
+  it("drops an iktidar outlet and a bagimsiz outlet that ran the same text (punctuation and case differ)", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-twin", [
+        { bias: "pro_government", title: TEXT },
+        { bias: "center", title: TEXT_LOUD },
+      ]),
+    ]);
+
+    expect(result).toEqual([]);
+  });
+
+  it("drops the twin on BOTH sides, but keeps a third outlet of the story that wrote its own text", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-twin", [
+        { bias: "pro_government", title: TEXT },
+        { bias: "opposition", title: TEXT_LOUD },
+        { bias: "center", title: "Bütçe için Genel Kurul yarın toplanıyor" },
+      ]),
+    ]);
+
+    expect(result.map((h) => h.title)).toEqual(["Bütçe için Genel Kurul yarın toplanıyor"]);
+  });
+
+  it("keeps two iktidar outlets that ran the same text (one zone: one correct answer)", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-same-zone", [
+        { bias: "pro_government", title: TEXT },
+        { bias: "gov_leaning", title: TEXT_LOUD },
+      ]),
+    ]);
+
+    expect(result).toHaveLength(2);
+    expect(new Set(result.map((h) => h.zone))).toEqual(new Set(["iktidar"]));
+  });
+
+  it("drops a bagimsiz outlet whose text an AA-like wire of another zone ran (the wire is evidence, not a candidate)", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-wire", [
+        { bias: "center", title: TEXT },
+        { bias: "pro_government", sourceKind: "wire", sourceSlug: "anadolu-ajansi", title: TEXT_LOUD },
+      ]),
+    ]);
+
+    expect(result).toEqual([]);
+  });
+
+  it("keeps a bagimsiz outlet when only an aggregator of another zone ran the same text", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-aggregator", [
+        { bias: "center", title: TEXT },
+        { bias: "pro_government", sourceKind: "aggregator", title: TEXT },
+      ]),
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.zone).toBe("bagimsiz");
+  });
+
+  it("keeps a bagimsiz outlet when only a niche source of another zone ran the same text", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-niche", [
+        { bias: "center", title: TEXT },
+        { bias: "opposition", sourceKind: "niche", title: TEXT },
+      ]),
+    ]);
+
+    expect(result).toHaveLength(1);
+  });
+
+  it("keeps the same text in two DIFFERENT clusters (the rule is per cluster)", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-a", [
+        { bias: "pro_government", title: TEXT },
+        { bias: "center", title: "Bütçe için Genel Kurul yarın toplanıyor" },
+      ]),
+      clusterOf("cluster-b", [{ bias: "center", title: TEXT_LOUD }]),
+    ]);
+
+    expect(result.map((h) => h.clusterId).sort()).toEqual(["cluster-a", "cluster-a", "cluster-b"]);
+    expect(result.some((h) => h.clusterId === "cluster-a" && h.title === TEXT)).toBe(true);
+    expect(result.some((h) => h.clusterId === "cluster-b" && h.title === TEXT_LOUD)).toBe(true);
+  });
+
+  it("gives an outlet whose FIRST headline is a twin its SECOND, clean headline of the cluster", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-second", [
+        { sourceId: "source-bagimsiz", bias: "center", title: TEXT },
+        { sourceId: "source-bagimsiz", bias: "center", title: "Bütçe için Genel Kurul yarın toplanıyor" },
+        { bias: "pro_government", title: TEXT_LOUD },
+      ]),
+    ]);
+
+    expect(result.map((h) => [h.sourceId, h.title])).toEqual([
+      ["source-bagimsiz", "Bütçe için Genel Kurul yarın toplanıyor"],
+    ]);
+  });
+
+  it("counts a sibling outside the 48 h window, an inactive sibling and an English-language sibling as evidence", () => {
+    const stale = new Date(NOW_MS - 100 * HOUR_MS).toISOString();
+    const outsideWindow = selectGameHeadlines([
+      clusterOf("cluster-stale", [
+        { bias: "center", title: TEXT },
+        { bias: "pro_government", title: TEXT_LOUD, publishedAt: stale },
+      ]),
+    ]);
+    const inactive = selectGameHeadlines([
+      clusterOf("cluster-inactive", [
+        { bias: "center", title: TEXT },
+        { bias: "opposition", title: TEXT_LOUD, sourceActive: false },
+      ]),
+    ]);
+    const english = selectGameHeadlines([
+      clusterOf("cluster-english", [
+        { bias: "center", title: TEXT },
+        { bias: "pro_government", title: TEXT_LOUD, sourceSlug: "daily-sabah" },
+      ]),
+    ]);
+
+    expect(outsideWindow).toEqual([]);
+    expect(inactive).toEqual([]);
+    expect(english).toEqual([]);
+  });
+
+  it("treats a legacy null kind as an outlet, so it counts as evidence", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-legacy", [
+        { bias: "center", title: TEXT },
+        { bias: "opposition", sourceKind: null, title: TEXT_LOUD },
+      ]),
+    ]);
+
+    expect(result).toEqual([]);
+  });
+
+  it("sees through a breaking-news prefix", () => {
+    const result = selectGameHeadlines([
+      clusterOf("cluster-prefix", [
+        { bias: "center", title: `SON DAKİKA: ${TEXT}` },
+        { bias: "pro_government", title: TEXT },
+      ]),
+    ]);
+
+    expect(result).toEqual([]);
+  });
+
+  it("a member without a source or an article is no evidence and does not throw", () => {
+    const cluster = clusterOf("cluster-holes", [
+      { bias: "center", title: TEXT },
+      { bias: "pro_government", title: "Başka bir haber metni burada" },
+    ]);
+    cluster.cluster_articles = [
+      ...(cluster.cluster_articles ?? []),
+      { articles: null },
+      {
+        articles: {
+          id: "article-no-source",
+          title: TEXT_LOUD,
+          published_at: new Date(NOW_MS - HOUR_MS).toISOString(),
+          source_id: "source-missing",
+          sources: null,
+        },
+      },
+    ];
+
+    expect(selectGameHeadlines([cluster]).map((h) => h.title)).toEqual([
+      TEXT,
+      "Başka bir haber metni burada",
+    ]);
+  });
+
+  it("an empty-looking title is never a twin of another empty-looking title", () => {
+    // The PII and outlet-name rules do not look at empty titles; the key must not
+    // turn two of them into a twin pair that removes a real candidate.
+    const result = selectGameHeadlines([
+      clusterOf("cluster-empty", [
+        { bias: "center", title: "!!!" },
+        { bias: "pro_government", title: "..." },
+      ]),
+    ]);
+
+    expect(result).toHaveLength(2);
+  });
+
+  it("the pool stays most of its size on a realistic mix: only the twin pair of a story is lost", () => {
+    const clusters = Array.from({ length: 10 }, (_, i) =>
+      clusterOf(`cluster-${i}`, [
+        { bias: "pro_government", title: `Birinci kaynağın ${i}. özgün başlığı budur` },
+        { bias: "center", title: `İkinci kaynağın ${i}. özgün başlığı budur` },
+        { bias: "opposition", title: i === 0 ? `Birinci kaynağın 0. özgün başlığı budur` : `Üçüncü kaynağın ${i}. özgün başlığı budur` },
+      ]),
+    );
+
+    // Cluster 0 loses the iktidar and muhalefet twin pair; the other nine keep all three.
+    expect(selectGameHeadlines(clusters)).toHaveLength(1 + 9 * 3);
+  });
+});
+
 // MF-09: randomisation must not run inside the cached `getGameHeadlines`
 // call graph (one draw would be reused by every visitor for the whole
 // cache window). `sampleHeadlines` is the per-request piece that does the
@@ -537,14 +764,16 @@ describe("sampleHeadlines -- at most one headline per cluster", () => {
   });
 
   it("which outlet represents a cluster is random: every outlet of a 3-zone cluster gets drawn", () => {
+    // Each zone words the story its own way: three outlets of three zones with
+    // one text are twins and none would be a candidate (see the twin-text tests).
     const candidates = selectGameHeadlines([
       {
         id: "cluster-zones",
         article_count: 3,
         cluster_articles: [
-          makeRow({ bias: "pro_government" }),
-          makeRow({ bias: "center" }),
-          makeRow({ bias: "opposition" }),
+          makeRow({ bias: "pro_government", title: "Hükümet bütçe teklifini Meclis'e sundu" }),
+          makeRow({ bias: "center", title: "Bütçe teklifi Meclis Başkanlığına verildi" }),
+          makeRow({ bias: "opposition", title: "Muhalefet yeni bütçeyi eleştirdi" }),
         ].flatMap((row) => row.cluster_articles ?? []),
       },
     ]);
@@ -977,6 +1206,14 @@ describe("headline-pool source guard", () => {
     expect(source).not.toContain("daily-set");
   });
 
+
+  it("applies the twin-text rule after the PII and outlet-name checks and BEFORE the outlet is marked seen", () => {
+    expect(source).toContain('import { crossZoneTwinKeys, twinKey } from "./title-twin";');
+    const twinAt = source.indexOf("if (twins.has(twinKey(article.title))) continue;");
+    expect(twinAt).toBeGreaterThan(-1);
+    expect(source.indexOf("if (titleNamesOutlet(article.title, source)) continue;")).toBeLessThan(twinAt);
+    expect(twinAt).toBeLessThan(source.indexOf("seenSourceIds.add(source.id)"));
+  });
 
   it("the clusters select starts with `id, article_count`", () => {
     const selectAt = source.indexOf(".select(");

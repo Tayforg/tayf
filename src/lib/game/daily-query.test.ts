@@ -18,9 +18,13 @@ const fixture = vi.hoisted(() => ({
   articleRows: [] as unknown[],
   articlesError: null as { message: string } | null,
   versionRows: [] as Array<{ article_id: string }>,
+  /** cluster_articles rows, served by `.range()` so paging is exercised for real. */
+  siblingRows: [] as unknown[],
+  siblingError: null as { message: string } | null,
   predictionCalls: [] as unknown[],
   articleCalls: [] as unknown[],
   versionCalls: [] as unknown[],
+  siblingCalls: [] as unknown[],
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
 }));
@@ -43,6 +47,13 @@ const supabaseFake = await vi.hoisted(async () => {
         fixture.versionCalls.push(state);
         return { data: fixture.versionRows, error: null };
       },
+      cluster_articles: (state) => {
+        fixture.siblingCalls.push(state);
+        if (fixture.siblingError) return { data: null, error: fixture.siblingError };
+        const from = state.range?.from ?? 0;
+        const to = state.range?.to ?? fixture.siblingRows.length - 1;
+        return { data: fixture.siblingRows.slice(from, to + 1), error: null };
+      },
     },
   });
 });
@@ -57,7 +68,8 @@ vi.mock("@supabase/supabase-js", () => ({
 import { cacheLife } from "next/cache";
 
 const { fetchDailyPuzzleCached, getDailyPuzzle } = await import("./daily-query");
-const { DAILY_POLITICS_GATE_FROM, dailyHash, puzzleWindow } = await import("./daily-set");
+const { DAILY_POLITICS_GATE_FROM, DAILY_TWIN_GATE_FROM, addDays, dailyHash, puzzleWindow } =
+  await import("./daily-set");
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const DATE_KEY = "2026-10-05";
@@ -118,9 +130,12 @@ beforeEach(() => {
   fixture.articleRows = [];
   fixture.articlesError = null;
   fixture.versionRows = [];
+  fixture.siblingRows = [];
+  fixture.siblingError = null;
   fixture.predictionCalls = [];
   fixture.articleCalls = [];
   fixture.versionCalls = [];
+  fixture.siblingCalls = [];
   fixture.clientOpts = [];
   vi.mocked(cacheLife).mockClear();
 });
@@ -282,6 +297,272 @@ describe("daily puzzle — politics gate", () => {
     expect(attempt.ok).toBe(true);
     if (!attempt.ok) return;
     expect(attempt.data.headlines.some((h) => h.articleId === hashFirst)).toBe(true);
+  });
+});
+
+describe("daily puzzle — cross-zone twin gate", () => {
+  const GATE_KEY = DAILY_TWIN_GATE_FROM;
+  const ZONES: Array<keyof typeof ZONE_BIAS> = [
+    "iktidar",
+    "bagimsiz",
+    "muhalefet",
+    "iktidar",
+    "bagimsiz",
+    "muhalefet",
+    "iktidar",
+  ];
+  const IDS = ZONES.map((_, i) => `article-${i}`);
+  const TWIN_TEXT = "Cumhurbaşkanı Erdoğan, ABD Başkanı Trump ile telefonda görüştü";
+
+  /** A cluster_articles row, the shape of the embedded select. */
+  function member(
+    clusterId: string,
+    title: string,
+    bias: string,
+    kind: string | null,
+    publishedAt: string,
+  ) {
+    return {
+      cluster_id: clusterId,
+      articles: { title, published_at: publishedAt, sources: { bias, kind } },
+    };
+  }
+
+  /** A bias of a zone other than `zone`'s. */
+  const otherZoneBias = (zone: keyof typeof ZONE_BIAS) =>
+    zone === "iktidar" ? "opposition_leaning" : "pro_government";
+
+  /**
+   * 7 politika articles inside `key`'s window; the dailyHash-first one carries
+   * `TWIN_TEXT` (it is the first of its zone in hash order, so a pick that may
+   * use it always does).
+   */
+  function setup(key: string) {
+    const window = puzzleWindow(key);
+    const hashFirst = [...IDS].sort((a, b) => dailyHash(key, a) - dailyHash(key, b))[0]!;
+    const index = IDS.indexOf(hashFirst);
+    const zone = ZONES[index]!;
+    const rows = ZONES.map((z, i) =>
+      articleRow(i, z, {
+        published_at: window.startIso,
+        created_at: window.startIso,
+        ...(i === index ? { title: TWIN_TEXT } : {}),
+      }),
+    );
+    fixture.predictionRows = IDS.map((article_id) => ({ article_id }));
+    fixture.articleRows = rows;
+    const clusterId = `cluster-${index}`;
+    const during = new Date(Date.parse(window.endIso) - 3_600_000).toISOString();
+    return { window, hashFirst, index, zone, clusterId, during, row: rows[index]! };
+  }
+
+  /** The İlke TV / Aydınlık / AA shape: the same text from another zone's outlet and wire. */
+  function twinSiblings(s: ReturnType<typeof setup>, publishedAt = s.during) {
+    const bias = otherZoneBias(s.zone);
+    return [
+      member(s.clusterId, TWIN_TEXT, ZONE_BIAS[s.zone], "outlet", s.during), // the candidate itself
+      member(s.clusterId, TWIN_TEXT.toLocaleUpperCase("tr-TR"), bias, "outlet", publishedAt),
+      member(s.clusterId, `${TWIN_TEXT}.`, "pro_government", "wire", publishedAt),
+    ];
+  }
+
+  async function build(key: string) {
+    const attempt = await fetchDailyPuzzleCached(key);
+    expect(attempt.ok).toBe(true);
+    if (!attempt.ok) throw new Error("unreachable");
+    return attempt.data.headlines.map((h) => h.articleId);
+  }
+
+  it("the gate date is a key no player has seen, and every test below runs on or after it", () => {
+    expect(GATE_KEY >= "2026-11-10").toBe(true);
+  });
+
+  it("leaves a candidate out when another zone's outlet and a wire ran the same text before the window closed", async () => {
+    const s = setup(GATE_KEY);
+    fixture.siblingRows = twinSiblings(s);
+
+    const picked = await build(GATE_KEY);
+
+    expect(picked).toHaveLength(5);
+    expect(picked).not.toContain(s.hashFirst);
+  });
+
+  it("keeps the same candidate when the twin was published after window.endIso (a later copy must not change a closed day)", async () => {
+    const s = setup(GATE_KEY);
+    const after = new Date(Date.parse(s.window.endIso) + 60_000).toISOString();
+    fixture.siblingRows = twinSiblings(s, after);
+
+    expect(await build(GATE_KEY)).toContain(s.hashFirst);
+  });
+
+  it("treats a twin published exactly at window.endIso as outside the window (the end is exclusive)", async () => {
+    const s = setup(GATE_KEY);
+    fixture.siblingRows = twinSiblings(s, s.window.endIso);
+
+    expect(await build(GATE_KEY)).toContain(s.hashFirst);
+  });
+
+  it("keeps the candidate when only members of ITS OWN zone ran the same text", async () => {
+    const s = setup(GATE_KEY);
+    fixture.siblingRows = [
+      member(s.clusterId, TWIN_TEXT, ZONE_BIAS[s.zone], "outlet", s.during),
+      member(s.clusterId, TWIN_TEXT, ZONE_BIAS[s.zone], "outlet", s.during),
+    ];
+
+    expect(await build(GATE_KEY)).toContain(s.hashFirst);
+  });
+
+  it("keeps the candidate when only an aggregator or niche source of another zone ran the same text", async () => {
+    const s = setup(GATE_KEY);
+    const bias = otherZoneBias(s.zone);
+    fixture.siblingRows = [
+      member(s.clusterId, TWIN_TEXT, bias, "aggregator", s.during),
+      member(s.clusterId, TWIN_TEXT, bias, "niche", s.during),
+    ];
+
+    expect(await build(GATE_KEY)).toContain(s.hashFirst);
+  });
+
+  it("treats a sibling with a null kind as an outlet (the legacy default)", async () => {
+    const s = setup(GATE_KEY);
+    fixture.siblingRows = [member(s.clusterId, TWIN_TEXT, otherZoneBias(s.zone), null, s.during)];
+
+    expect(await build(GATE_KEY)).not.toContain(s.hashFirst);
+  });
+
+  it("ignores a sibling without an article or without a source", async () => {
+    const s = setup(GATE_KEY);
+    fixture.siblingRows = [
+      { cluster_id: s.clusterId, articles: null },
+      {
+        cluster_id: s.clusterId,
+        articles: { title: TWIN_TEXT, published_at: s.during, sources: null },
+      },
+    ];
+
+    expect(await build(GATE_KEY)).toContain(s.hashFirst);
+  });
+
+  it("does not treat the same text in a DIFFERENT cluster as a twin", async () => {
+    const s = setup(GATE_KEY);
+    fixture.siblingRows = twinSiblings(s).map((row) => ({ ...row, cluster_id: "cluster-elsewhere" }));
+
+    expect(await build(GATE_KEY)).toContain(s.hashFirst);
+  });
+
+  it("counts the candidate itself as evidence, even when its own published_at is after the window (a future pubDate)", async () => {
+    const s = setup(GATE_KEY);
+    const future = new Date(Date.parse(s.window.endIso) + 3_600_000).toISOString();
+    fixture.articleRows = fixture.articleRows.map((r) =>
+      (r as { id: string }).id === s.hashFirst ? { ...(r as object), published_at: future } : r,
+    );
+    // Only the other zone's copy is in the sibling read: the candidate's own row is
+    // outside the window, so without the self member the key would carry one zone.
+    fixture.siblingRows = [
+      member(s.clusterId, TWIN_TEXT, otherZoneBias(s.zone), "outlet", s.during),
+      member(s.clusterId, TWIN_TEXT, ZONE_BIAS[s.zone], "outlet", future),
+    ];
+
+    expect(await build(GATE_KEY)).not.toContain(s.hashFirst);
+  });
+
+  it("reads an article chunk's siblings with ONE paged cluster_articles read: distinct non-null cluster ids, a stable order, the capped range", async () => {
+    const s = setup(GATE_KEY);
+    // A candidate with no cluster contributes no id.
+    fixture.articleRows = fixture.articleRows.map((r) =>
+      (r as { id: string }).id === "article-6" ? { ...(r as object), cluster_articles: [] } : r,
+    );
+    fixture.siblingRows = twinSiblings(s);
+
+    await build(GATE_KEY);
+
+    expect(fixture.siblingCalls).toHaveLength(1);
+    const state = fixture.siblingCalls[0] as BuilderState;
+    const ids = state.in[0]?.vals as string[];
+    expect(state.in[0]?.col).toBe("cluster_id");
+    expect([...ids].sort()).toEqual(
+      ["article-0", "article-1", "article-2", "article-3", "article-4", "article-5"]
+        .map((id) => `cluster-${id.split("-")[1]}`)
+        .sort(),
+    );
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(state.range).toEqual({ from: 0, to: 999 });
+    expect(state.order).toContainEqual({ col: "cluster_id", opts: { ascending: true } });
+    expect(state.order).toContainEqual({ col: "article_id", opts: { ascending: true } });
+    const selected = String(state.selectArgs[0]);
+    expect(selected).toContain("cluster_id");
+    expect(selected).toContain("title");
+    expect(selected).toContain("published_at");
+    expect(selected).toContain("bias");
+    expect(selected).toContain("kind");
+  });
+
+  it("pages past PostgREST's 1,000-row cap: a twin on the second page still counts", async () => {
+    const s = setup(GATE_KEY);
+    const filler = Array.from({ length: 1000 }, (_, i) =>
+      member("cluster-filler", `Başka bir kümenin ${i}. haberi burada`, "center", "outlet", s.during),
+    );
+    fixture.siblingRows = [...filler, ...twinSiblings(s)];
+
+    const picked = await build(GATE_KEY);
+
+    expect(fixture.siblingCalls.length).toBeGreaterThanOrEqual(2);
+    const second = fixture.siblingCalls[1] as BuilderState;
+    expect(second.range).toEqual({ from: 1000, to: 1999 });
+    expect(picked).not.toContain(s.hashFirst);
+  });
+
+  it("makes no cluster read at all when no candidate has a cluster", async () => {
+    setup(GATE_KEY);
+    fixture.articleRows = fixture.articleRows.map((r) => ({ ...(r as object), cluster_articles: [] }));
+
+    expect(await build(GATE_KEY)).toHaveLength(5);
+    expect(fixture.siblingCalls).toHaveLength(0);
+  });
+
+  it("a sibling read error is a failed attempt ({ ok: false }), never a puzzle built without the twin check", async () => {
+    setup(GATE_KEY);
+    fixture.siblingError = { message: "canceling statement due to statement timeout" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const attempt = await fetchDailyPuzzleCached(GATE_KEY);
+
+    expect(attempt.ok).toBe(false);
+    if (!attempt.ok) expect(attempt.error).toContain("canceling statement due to statement timeout");
+    await expect(getDailyPuzzle(GATE_KEY)).resolves.toBeNull();
+    // A failure is memoised for minutes only.
+    expect(cacheLife).toHaveBeenLastCalledWith("minutes");
+    errSpy.mockRestore();
+  });
+
+  it("two builds from the same data give the identical puzzle (the twin flag is deterministic)", async () => {
+    const s = setup(GATE_KEY);
+    fixture.siblingRows = twinSiblings(s);
+
+    const first = await build(GATE_KEY);
+    const second = await build(GATE_KEY);
+
+    expect(second).toEqual(first);
+  });
+
+  it("the day BEFORE the gate: the twin candidate is still picked and no cluster_articles request is made (replays stay byte-identical)", async () => {
+    const preKey = addDays(GATE_KEY, -1);
+    expect(preKey < GATE_KEY).toBe(true);
+    const s = setup(preKey);
+    fixture.siblingRows = twinSiblings(s);
+
+    const picked = await build(preKey);
+
+    expect(picked).toContain(s.hashFirst);
+    expect(fixture.siblingCalls).toHaveLength(0);
+  });
+
+  it("a pre-gate puzzle does not fail when the cluster_articles read would (it is never made)", async () => {
+    const preKey = addDays(GATE_KEY, -1);
+    setup(preKey);
+    fixture.siblingError = { message: "boom" };
+
+    expect(await build(preKey)).toHaveLength(5);
   });
 });
 

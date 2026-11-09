@@ -58,6 +58,15 @@ export const DAILY_POLITICS_GATE_FROM = "2026-11-04";
 // replayable and recomputes from a cold cache): bump it before merge if the
 // deploy date is on or after it.
 export const DAILY_ENGLISH_GATE_FROM = "2026-11-05";
+// From this puzzle date onward the daily set draws no headline whose text an
+// outlet or wire of ANOTHER zone ran too in the same story (title-twin.ts): the
+// question "which camp is this outlet in?" then has two right answers (puzzle
+// #42: İlke TV, Aydınlık and AA ran one text). Same replay contract as the two
+// gates above: gated on the puzzle key, never on the clock, so every EARLIER key
+// keeps the pre-gate rules and recomputes byte-identically. It is the first
+// Istanbul date strictly after the PR merged (2026-11-09), a key no player has
+// seen at deploy time; bump it before merge if the deploy date is on or after it.
+export const DAILY_TWIN_GATE_FROM = "2026-11-10";
 export const DAILY_MAX_PER_ZONE = 2;
 export const DAILY_TITLE_MIN = 25;
 export const DAILY_TITLE_MAX = 180;
@@ -93,6 +102,13 @@ export interface DailyCandidate {
   category: string | null;
   /** articles.politics_admitted_at: a live Jev politics admission stamp, or null. */
   politicsAdmittedAt: string | null;
+  /**
+   * True when an outlet or wire of another zone, published before the puzzle
+   * window closed, ran the same text in this candidate's cluster
+   * (`crossZoneTwinKeys`). Set by daily-query.ts for gated keys only; absent or
+   * false means no twin (or not looked up, for a key before the gate).
+   */
+  crossZoneTwin?: boolean;
   source: DailyCandidateSource;
 }
 
@@ -372,6 +388,12 @@ function isWithinWindow(candidate: DailyCandidate, window: PuzzleWindow): boolea
  * their language gives the zone away. Also per-candidate, so also
  * prefix-consistent; it is an opt-in so earlier puzzles recompute unchanged.
  *
+ * `opts.twinGate` (on for keys >= DAILY_TWIN_GATE_FROM) additionally rejects a
+ * candidate flagged `crossZoneTwin`: another zone's outlet or wire ran the same
+ * text, so the zone question has two answers. The flag is a property of the
+ * candidate's cluster, not of the other candidates, so the rule is per-candidate
+ * and prefix-consistent too.
+ *
  * Does NOT check the article_title_versions ("edited headline") exclusion
  * or the jev_prob threshold — both are applied earlier, at the query
  * layer (daily-query.ts), before a row ever becomes a `DailyCandidate`.
@@ -379,7 +401,7 @@ function isWithinWindow(candidate: DailyCandidate, window: PuzzleWindow): boolea
 export function isDailyEligible(
   candidate: DailyCandidate,
   window: PuzzleWindow,
-  opts?: { politicsGate?: boolean; englishGate?: boolean },
+  opts?: { politicsGate?: boolean; englishGate?: boolean; twinGate?: boolean },
 ): boolean {
   const { source } = candidate;
   if (!source.active) return false;
@@ -399,6 +421,7 @@ export function isDailyEligible(
   ) {
     return false;
   }
+  if (opts?.twinGate && candidate.crossZoneTwin === true) return false;
   return true;
 }
 
@@ -415,8 +438,9 @@ function zoneOfCandidate(candidate: DailyCandidate): MediaDnaZone {
  *
  * 1. Filters `candidates` to the eligible subset (`isDailyEligible`) for
  *    `key`'s window; from DAILY_POLITICS_GATE_FROM onward that includes the
- *    politics-member requirement, and from DAILY_ENGLISH_GATE_FROM onward the
- *    no-English-outlet requirement (earlier keys are filtered exactly as
+ *    politics-member requirement, from DAILY_ENGLISH_GATE_FROM onward the
+ *    no-English-outlet requirement, and from DAILY_TWIN_GATE_FROM onward the
+ *    no-cross-zone-twin requirement (earlier keys are filtered exactly as
  *    before each gate existed, so past puzzles recompute identically).
  * 2. Sorts that subset ascending by `dailyHash(key, articleId)` (ties
  *    broken by articleId so the sort is a strict total order).
@@ -447,8 +471,9 @@ export function pickDailySet(
   const window = puzzleWindow(key);
   const politicsGate = key >= DAILY_POLITICS_GATE_FROM;
   const englishGate = key >= DAILY_ENGLISH_GATE_FROM;
+  const twinGate = key >= DAILY_TWIN_GATE_FROM;
   const eligible = candidates.filter((c) =>
-    isDailyEligible(c, window, { politicsGate, englishGate }),
+    isDailyEligible(c, window, { politicsGate, englishGate, twinGate }),
   );
 
   const sorted = [...eligible].sort((a, b) => {
