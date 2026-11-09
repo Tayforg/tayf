@@ -1159,6 +1159,7 @@ describe("politika", () => {
   it("'oy' counts only as a whole word", () => {
     expect(cls("Oy kullanma saatleri uzatıldı")).toBe("politika");
     expect(cls("Oy birliğiyle kabul edildi")).toBe("politika");
+    expect(cls("Oy sayımı başladı")).toBe("politika");
     expect(cls("Karaköy'de yangın", null, "https://x.test/karakoyde-yangin")).toBe("yasam");
     expect(cls("Boyoz festivali başladı")).toBe("genel");
     expect(cls("Bakırköy'de hırsızlık")).toBe("genel");
@@ -5803,6 +5804,483 @@ describe("wave BO (h32-livebl-1): dünya idioms", () => {
       ["'dünyaevine ' + 200k keyword-free words", rep("alfa beta gama delta ", "dünyaevine ")],
       ["'dünyaca ünlü ' + 200k keyword-free words", rep("alfa beta gama delta ", "dünyaca ünlü ")],
       ["'dünya şampiyonası ' repeated", rep("dünya şampiyonası ")],
+    ];
+
+    it.each(inputs)("%s scales linearly", (_name, gen) => {
+      expectLinear(
+        gen,
+        (text) => {
+          expect(ALL.has(classifyCategory(text, null, NEUTRAL_URL))).toBe(true);
+          expect(ALL.has(classifyCategory("Başlık", text, NEUTRAL_URL))).toBe(true);
+        },
+        { n: 200_000, ceilingMs: 4_320 },
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-96 (h96-politicsgate-1): title-only markers for the fund scandal
+// ---------------------------------------------------------------------------
+//
+// The week's biggest political-judicial story (the 'fon' investigation: Hakan
+// Bahçetepe, Fatma Betül Sayan Kaya, the Usca arrest wave) was filed genel /
+// ekonomi whenever the HEADLINE named only the person or the scandal and no office
+// word: read-only SQL of 2026-11-09, about 700 rows in 7 days outside the gate and
+// the 27-row Usca arrest wave with no cluster at all. The four folded tokens are
+// POLITIKA_TITLE_RE stems now, next to 'cevdet yilmaz' and 'hakan fidan': title
+// only, because in a description 'fon soruşturması' decorates an investor story
+// ('Fon soruşturması sonrası yatırımcılar tedirgin').
+describe("hunt-96 fon/Sayan Kaya/Bahçetepe title markers", () => {
+  const URL96 = "https://example.com/x";
+  const c96 = (title: string, description: string | null = "", url: string = URL96): NewsCategory =>
+    classifyCategory(title, description, url);
+
+  describe("headlines that name the person or the scandal are politika", () => {
+    it.each([
+      "Hakan Bahçetepe tahliye oldu",
+      "Hakan Bahçetepe’ye ev hapsiyle tahliye",
+      "Fon soruşturmasında yeni gelişme! Enver Usca dahil 4 şüpheli tutuklandı",
+      "Fatma Betül Sayan Kaya cezaevinde tek kişilik odada kalıyor",
+      "Mustafa Çiftçi'den Fatma Betül Sayan Kaya açıklaması",
+      "Murat Emir: Fon vurgununun kilit ismi nihayet gözaltında",
+      "Fatma Betül Sayan Kaya bitti: Fon soruşturmasında yeni hedef Taner Yıldız",
+    ])("%s", (title) => {
+      expect(c96(title)).toBe("politika");
+    });
+
+    it.each([
+      ["Sayan Kaya", "fatma betül sayan kaya ifade verdi"],
+      ["Bahçetepe", "BAHÇETEPE İÇİN TUTUKLAMA TALEBİ"],
+      ["fon soruşturması", "Fon soruşturması genişliyor"],
+      ["fon vurgun", "FON VURGUNU: 7 gözaltı"],
+      ["ASCII spelling", "Hakan Bahcetepe tahliye oldu"],
+      ["ASCII spelling of the fund", "Fon sorusturmasinda yeni gozalti"],
+      ["a run of blanks inside the pair", "Fatma Betül Sayan   Kaya hakkında karar"],
+      ["a tab inside the pair", "Fon\tsoruşturması büyüyor"],
+    ])("%s: %s", (_name, title) => {
+      expect(c96(title)).toBe("politika");
+    });
+
+    it("a stored genel / ekonomi row of the replay is politika now, even with a description of its own", () => {
+      expect(
+        c96(
+          "Fatma Betül Sayan Kaya bitti: Fon soruşturmasında yeni hedef Taner Yıldız",
+          "Yatırım fonlarına yönelik soruşturmada yeni gelişme.",
+          "https://www.example.com/ekonomi/fon-sorusturmasi",
+        ),
+      ).toBe("politika");
+    });
+
+    it("beats a sports reading of the same title (a title hit beats sport)", () => {
+      expect(c96("Fon soruşturmasında spor kulübü başkanına gözaltı", "", "https://example.com/spor/x")).toBe("politika");
+    });
+
+    it("a breaking-news prefix keeps the row in the gate through the unchanged son_dakika mapping", () => {
+      expect(c96("Son dakika | Hakan Bahçetepe tahliye oldu")).toBe("son_dakika");
+      expect(c96("SON DAKİKA! Fon vurgununda yeni gözaltı kararı")).toBe("son_dakika");
+    });
+  });
+
+  describe("the tokens are read in the title alone", () => {
+    it("a description that names the scandal does not admit a neutral headline", () => {
+      const out = c96("Birikimi değerlendirmek istedik", "Fon soruşturması sonrası yatırımcılar tedirgin");
+      expect(out).not.toBe("politika");
+      expect(out).not.toBe("son_dakika");
+    });
+
+    it.each([
+      "Fatma Betül Sayan Kaya ifade verdi",
+      "Hakan Bahçetepe hakkında tutuklama talebi",
+      "Fon vurgunu soruşturmasında yeni detaylar",
+      "Fon soruşturması genişliyor",
+    ])("a description-only mention of '%s' never admits", (text) => {
+      const out = c96("Piyasalarda sakin gün", text);
+      expect(out).not.toBe("politika");
+      expect(out).not.toBe("son_dakika");
+    });
+  });
+
+  describe("the Seçil Erzan bank-fraud trial shares the 'fon' vocabulary and is not politics", () => {
+    // Real rows of the 7-day replay (2026-11-06, dirilispostasi and takvim): a
+    // Denizbank branch manager's fake investment-fund fraud, retried after an
+    // appeal. 'fon vurgunu' is how two outlets call it; the trial has 43 titled rows
+    // in the replay window and none of them may enter the gate through the fund words.
+    it.each([
+      [
+        "Milyonluk fon vurgunu davasında Seçil Erzan için istenen ceza açıklandı",
+        "30'dan fazla kişiyi dolandırmakla suçlanan Seçil Erzan hakkında 56 yıldan 211 yıla kadar hapis cezası istendi.",
+        "https://www.dirilispostasi.com/milyonluk-fon-vurgunu-davasinda-secil-erzan-icin-istenen-ceza-aciklandi",
+        "genel",
+      ],
+      [
+        "Seçil Erzan'ın fon vurgununda yeni mütalaa: Savcı 211 yıl 9 ay hapis cezası istedi!",
+        "Türkiye'nin aylarca konuştuğu futbol dünyasının ünlü isimlerinin karıştığı fon dolandırıcılığı vurgununda Seçil Erzan için yeni mütalaa açıklandı.",
+        "https://www.takvim.com.tr/guncel/2026/11/06/secil-erzanin-fon-vurgununda-yeni-mutalaa",
+        "spor",
+      ],
+      ["Seçil Erzan fon soruşturmasında tutuklu kalmaya devam ediyor", "", URL96, "genel"],
+    ])("%s", (title, description, url, expected) => {
+      expect(c96(title, description, url)).toBe(expected);
+    });
+
+    it("a headline that also names the scandal's own person stays politika", () => {
+      expect(c96("Seçil Erzan'dan sonra Fatma Betül Sayan Kaya: fon vurgununda yeni iddianame")).toBe("politika");
+    });
+
+    it("the veto reads the word start only ('Merzan' is not 'Erzan')", () => {
+      expect(c96("Merzan Bey fon soruşturmasında ifade verdi")).toBe("politika");
+    });
+  });
+
+  describe("investment-fund and place headlines are not the scandal", () => {
+    it.each([
+      "Paraguay'da fon krizi büyüyor",
+      "Yatırım fonları ekimde yüzde 4 kazandırdı",
+      "Emeklilik fonlarında yeni dönem",
+      "Fonlardan altına rekor giriş",
+      "Hayvan sağlığı için fon desteği açıklandı",
+    ])("%s", (title) => {
+      const out = c96(title);
+      expect(out).not.toBe("politika");
+      expect(out).not.toBe("son_dakika");
+    });
+
+    it("the exact fund / investor guard titles keep their chain category", () => {
+      expect(c96("Yatırım fonları ekimde yüzde 4 kazandırdı")).toBe("genel");
+      expect(c96("Paraguay'da fon krizi büyüyor")).toBe("genel");
+    });
+  });
+
+  describe("linear time on large inputs (200k characters)", () => {
+    // The four tokens are literal stems in the existing alternation, so the new
+    // cost is one literal per word start; the pairs carry one run of white space
+    // between two literals. The guard is the doubling law of tests/_helpers.
+    const inputs: Array<[string, Gen]> = [
+      ["'sayan' + 200k blanks + 'kaya'", rep(" ", "sayan", "kaya")],
+      ["'fon' + 200k blanks + 'soruşturma'", rep(" ", "fon", "soruşturma")],
+      ["'fon' + 200k blanks + 'vurgun'", rep(" ", "fon", "vurgun")],
+      ["'fon ' repeated", rep("fon ")],
+      ["'sayan ' repeated", rep("sayan ")],
+      ["'bahçetepe ' repeated", rep("bahçetepe ")],
+    ];
+
+    it.each(inputs)("%s scales linearly", (_name, gen) => {
+      expectLinear(
+        gen,
+        (text) => {
+          expect(ALL.has(classifyCategory(text, null, NEUTRAL_URL))).toBe(true);
+          expect(ALL.has(classifyCategory("Başlık", text, NEUTRAL_URL))).toBe(true);
+        },
+        { n: 200_000, ceilingMs: 4_320 },
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-96 (h96-politicsgate-2): narrow, replay-proven precision rules
+// ---------------------------------------------------------------------------
+//
+//   1. a consumer-product recall passed on the word 'Bakanlık' alone (the home card
+//      'Bakanlıktan güvensiz okul forması için toplatma kararı', 9 outlets, and
+//      the toy / baby-chair / bicycle recalls of the same days);
+//   2. DROPPED from this wave: 'oy birliğiyle' / 'oy çokluğuyla' in a court or senate
+//      text read as a state vote. The replay of the rule moved 12 political rows out
+//      of the gate (a Kavala retrial ruling, a municipal budget vote, a ruling-party
+//      congress, the eastern Libyan parliament's ratification), and the spec's bar
+//      is zero political leavers. VOTE_RE keeps its plain \boy\b; the describe below
+//      pins those stored rows as politika and the court / senate rows as a known
+//      residual. Re-propose only after a replay of at least 30 days with no political
+//      leaver;
+//   3. 'Erdoğan Demirören Golf Cup' (the late publisher's name) was politika.
+//
+// Every row below is a stored article (title, description and URL as stored,
+// read-only SELECTs of 2026-11-09 over the replay window).
+describe("hunt-96 politics-gate precision (h96-politicsgate-2)", () => {
+  const URL96B = "https://example.com/x";
+  const c96 = (title: string, description: string | null = "", url: string = URL96B): NewsCategory =>
+    classifyCategory(title, description, url);
+  const inGate = (c: NewsCategory) => c === "politika" || c === "son_dakika";
+
+  describe("1. a consumer-product recall with only the ministry word is not politics", () => {
+    const RECALL_ROWS: Array<[string, string, string, NewsCategory]> = [
+      [
+        "Bakanlıktan 'güvensiz okul forması' için toplatma kararı",
+        "Ticaret Bakanlığı, çocuklara yönelik bir okul formasının boğulma, yanık ve yaralanma riski taşıdığının tespit edildiğini açıkladı. Ürünün piyasaya arzı yasaklanırken, piyasadaki ürünlerin toplatılmasına karar verildi.",
+        "https://www.cumhuriyet.com.tr/turkiye/bakanliktan-guvensiz-okul-formasi-icin-toplatma-karari-2554559",
+        "ekonomi",
+      ],
+      [
+        "Bakanlık piyasadan toplatıyor: Bu oyuncak artık satılamayacak",
+        "Ticaret Bakanlığı, çocukların sağlığını tehdit eden bir oyuncak için yasaklama ve toplatma kararı aldı. Güvensiz Ürün Bilgi Sistemi üzerinden yayımlanan duyuruda, popüler ördek figürlü oyuncak setinin güvenlik standartlarını karşı",
+        "https://www.dunya.com/gundem/bakanlik-piyasadan-toplatiyor-bu-oyuncak-artik-satilamayacak-haberi-846831",
+        "ekonomi",
+      ],
+      [
+        "Bakanlıktan kritik karar: O mama sandalyesi için toplatma emri verildi",
+        "Ticaret Bakanlığı, güvenlik standartlarına uymadığı ve düşme riski taşıdığı belirlenen bir mama sandalyesi modelinin satışını yasaklayarak piyasadan...",
+        "https://www.muhalif.com.tr/haberler/bakanliktan-kritik-karar-o-mama-sandalyesi-icin-toplatma-emri-verildi/747804",
+        "ekonomi",
+      ],
+      [
+        "Ticaret Bakanlığı standart dışı mama sandalyesinde toplatma kararı aldı",
+        "Ticaret Bakanlığı, güvenlik barı ile bacak açıklığı arasındaki mesafenin standartların altında olduğu belirlenen mama sandalyesi için piyasaya arz yasağı ve toplatma kararı aldı.",
+        "https://www.haberler.com/yerel/ticaret-bakanligi-standart-disi-mama-sandalyesinde-toplatma-karari-aldi-20399907-haberi/",
+        "ekonomi",
+      ],
+      [
+        "Bakanlık satışını yasakladı: Ünlü markanın bisikleti piyasadan toplatılıyor",
+        "Ticaret Bakanlığı, 'Güvensiz Ürün Bilgi Sistemi' üzerinden sağlık riski barındıran yeni ürünleri kamuoyuna açıkladı. İlgili listede bir çocuk bisikletinin satışı yasaklanırken, piyasadan da toplatılmasına karar verildi.",
+        "https://www.ekonomim.com/ekonomi/bakanlik-satisini-yasakladi-unlu-markanin-bisikleti-piyasadan-toplatiliyor-haberi-928703",
+        "ekonomi",
+      ],
+      [
+        "Bakanlıktan bir oyuncak için daha toplatma kararı",
+        "Ticaret Bakanlığı, piyasa gözetimi ve denetimleri kapsamında bir oyuncak markasına ait çocuk bisikletinde boğulma ve mekanik yaralanma riski tespit edildiğini açıkladı.",
+        "https://ekonomi.haber7.com/ekonomi/haber/3673886-bakanliktan-bir-oyuncak-icin-daha-toplatma-karari",
+        "ekonomi",
+      ],
+    ];
+
+    it.each(RECALL_ROWS)("%s leaves the gate", (title, description, url, expected) => {
+      const out = c96(title, description, url);
+      expect(inGate(out)).toBe(false);
+      expect(out).toBe(expected);
+    });
+
+    it("the three recall nouns each carry the rule ('toplat', 'geri çağır', 'satışı yasak')", () => {
+      expect(inGate(c96("Bakanlık hatalı ürünü toplattı"))).toBe(false);
+      expect(inGate(c96("Bakanlık kusurlu araçları geri çağırdı"))).toBe(false);
+      expect(inGate(c96("Bakanlık kusurlu araçların geri çağırılmasını istedi"))).toBe(false);
+      expect(inGate(c96("Bakanlıktan satışı yasak ürünler listesi"))).toBe(false);
+    });
+
+    it("the typed case, ASCII spelling and an apostrophe suffix of the ministry are the same row", () => {
+      expect(inGate(c96("BAKANLIK PİYASADAN TOPLATIYOR: O OYUNCAK ARTIK SATILAMAYACAK"))).toBe(false);
+      expect(inGate(c96("Bakanlik piyasadan toplatiyor"))).toBe(false);
+      expect(inGate(c96("Ticaret Bakanlığı'ndan toplatma kararı"))).toBe(false);
+    });
+
+    it("an office holder with a state assembly, a party or a minister's name is still politika", () => {
+      expect(c96("Bakan Bolat: toplatılan ürünler için yasa değişikliği Meclis'e geliyor")).toBe("politika");
+      expect(c96("CHP'li vekil okul forması toplatma kararını eleştirdi")).toBe("politika");
+      expect(c96("İçişleri Bakanı toplatma kararını açıkladı")).toBe("politika");
+      expect(c96("Cumhurbaşkanı Erdoğan, toplatma kararı sonrası Bakanlık yetkilileriyle görüştü")).toBe("politika");
+      expect(c96("Ticaret Bakanlığı toplatma kararı için hükümet harekete geçti")).toBe("politika");
+    });
+
+    it("an office holder's own recall headline is still politika ('Bakan' is the person, 'Bakanlık' the ministry)", () => {
+      // Only the ministry noun ('bakanlık', 'bakanlığı', "bakanlığı'ndan") is stripped for the
+      // second look; the word 'Bakan' (the minister) is political evidence on its own.
+      expect(c96("Bakan Fidan: İsrail'deki büyükelçimizi istişare için geri çağırdık")).toBe("politika");
+      expect(c96("Bakan Güler: Askerlerimizi geri çağırmayacağız")).toBe("politika");
+      expect(c96("Bakan Memişoğlu duyurdu: Okullarda enerji içeceği satışı yasaklanıyor")).toBe("politika");
+      // the ministry noun alone still leaves
+      expect(inGate(c96("Bakanlıktan güvensiz okul forması için toplatma kararı"))).toBe(false);
+      expect(inGate(c96("Bakanlık kusurlu araçları geri çağırdı"))).toBe(false);
+      expect(inGate(c96("Ticaret Bakanlığı oyuncakları toplatıyor"))).toBe(false);
+    });
+
+    it("evidence in the description (a local body with an enforcement action) keeps the row", () => {
+      expect(c96("Bakanlıktan toplatma kararı", "Belediye hakkında soruşturma başlatıldı.")).toBe("politika");
+    });
+
+    it("known residuals, pinned: the possessive 'satışını yasakladı' and the passive 'geri çağrıl' have no recall noun", () => {
+      // 10 rows of the 7-day replay ('Çocuğuna bisiklet alan aileler dikkat! Bakanlık
+      // satışını yasakladı') stay politika: CONSUMER_RECALL_RE reads 'satışı yasak', not
+      // 'satışını yasak'. 'çağır' loses its ı before the passive ('geri çağrılması').
+      expect(c96("Çocuğuna bisiklet alan aileler dikkat! Bakanlık satışını yasakladı")).toBe("politika");
+      expect(c96("Bakanlık kusurlu araçların geri çağrılmasına karar verdi")).toBe("politika");
+    });
+
+    it("a ministry headline with no recall noun is untouched", () => {
+      expect(c96("Ticaret Bakanlığı yeni düzenlemeyi açıkladı")).toBe("politika");
+      expect(c96("Bakanlıktan okul formasına ilişkin açıklama")).toBe("politika");
+    });
+
+    it("the breaking-news prefix keeps the row in the gate through the unchanged son_dakika mapping", () => {
+      // the remainder is genel, and the prefix path maps politika AND genel to son_dakika
+      expect(c96("Son dakika | Bakanlık bu oyuncağı toplatıyor")).toBe("son_dakika");
+    });
+  });
+
+  describe("2. 'oy birliğiyle' / 'oy çokluğuyla' stays a state vote (rule dropped from this wave)", () => {
+    // Stored rows (title, description and URL as stored, read-only SELECTs of
+    // 2026-11-09, all stored as politika between 2026-10-13 and 2026-10-31) that the
+    // dropped lookahead VOTE_RE = /\boy\b(?!\s+(?:birlig|coklug))/ took out of the
+    // gate: the replay's political leavers. Each is political news and must stay in.
+    it.each([
+      [
+        "f1efb2aa Kavala retrial ruling",
+        "Osman Kavala'nın yeniden yargılanma talebi reddedildi",
+        "İstanbul 13. Ağır Ceza Mahkemesi, Osman Kavala'nın avukatlarının Avrupa İnsan Hakları Mahkemesi Büyük Dairesinin kararına dayanarak yaptığı yeniden yargılama, infazın durdurulması ve tahliye taleplerini oy birliğiyle reddederek mevcut hükmün infazının devamına karar verdi.",
+        "https://www.ekonomim.com/gundem/osman-kavalanin-yeniden-yargilanma-talebi-reddedildi-haberi-924469",
+      ],
+      [
+        "cafb19cc Ayvalık municipal budget vote",
+        "Ayvalık Belediyesi'nin 2027 yılı bütçesi oy birliğiyle kabul edildi",
+        "Ayvalık Belediyesi'nin 2027 yılı bütçesi oy birliğiyle kabul edildi",
+        "https://www.cnnturk.com/yerel-haberler/balikesir/ayvalik/ayvalik-belediyesinin-2027-yili-butcesi-oy-birligiyle-kabul-edildi-3483092",
+      ],
+      [
+        "77879639 SNS ruling-party congress",
+        "SNS Ana Komitesi, Vucic'i 13 Aralık'ta kurultayda aday gösterme önerisini kabul etti",
+        "SNS Genel Başkanı Vucevic, 13 Aralık'ta olağanüstü kurultay toplanmasını ve eski Cumhurbaşkanı Vucic'in genel başkanlığa dönmesini önerdi. 657 Ana Komite üyesi öneriyi oy birliğiyle kabul ederken Vucic, teklife doğrudan yanıt vermedi.",
+        "https://www.haberler.com/guncel/sns-ana-komitesi-vucic-i-13-aralik-ta-kurultayda-20383866-haberi/",
+      ],
+      [
+        "e8e4e14e Libya ratification of the Turkey maritime deal",
+        "Yunanistan’da Libya’nın Türkiye anlaşmasını onaylaması manşetlerde: Bu ulusal bir felaket!",
+        "Doğu Libya Parlamentosu’nun Türkiye ile imzalanan deniz yetki anlaşmasını oy birliğiyle onaylaması Yunanistan’da büyük bir çalkantıya yol açtı. Atina’nın bölgesel politikalarını sert bir dille eleştiren Yunan jeopolitik analisti Stavros Kalenderidis, Ankara’nın Hafter’le kurduğu güçlü diplomasinin Yunanistan’ın Doğu Akdeniz’deki varlığına ağır bir darbe vurduğunu söyleyip. “Bu ulusal bir felaket” dedi.",
+        "https://www.yeniakit.com.tr/haber/yunanistanda-libyanin-turkiye-anlasmasini-onaylamasi-mansetlerde-bu-ulusal-bir-felaket-2029811.html",
+      ],
+    ])("%s stays politika", (_id, title, description, url) => {
+      expect(c96(title, description, url)).toBe("politika");
+    });
+
+    // Known residual, pinned: the court, senate and board rows the dropped rule was
+    // written for ('Yargıtay ... kararı oy birliğiyle onadı') are not political but
+    // stay in the gate through the plain 'oy'. They can leave only with a rule that
+    // also keeps the four rows above in; this wave has none.
+    it.each([
+      [
+        "Bankadan pes dedirten talimat... Tuvalet molasına bile karıştılar",
+        "Çalışanlarına e-postayla “Sık tuvalete gitmeyin, sakın ishal olmayın” talimatı gönderen banka, 13 yıllık çalışanına mobbing uyguladığı gerekçesiyle manevi tazminata mahkum edildi. Yargıtay, baskıyı üst yönetime bildirdikten sonra işten çıkarılan bankacı lehine verilen kararı oy birliğiyle onadı.",
+        "https://www.aksam.com.tr/trend/bankadan-pes-dedirten-talimat-tuvalet-molasina-bile-karistilar/haber-1712820",
+      ],
+      [
+        "Banka müdüründen pes dedirten talimat: “Sakın ishal olmayın” dedi, Yargıtay tazminat kararı verdi",
+        "Yargıtay, bankada 13 yıl çalışan personelin mobbing davasında manevi tazminata hükmeden mahkeme kararını oy birliğiyle onadı.",
+        "https://www.kamudanhaber.net/banka-mudurunden-pes-dedirten-talimat-sakin-ishal-olmayin-dedi-yargitay-tazminat-karari-verdi",
+      ],
+      [
+        "Yargıtay'dan emsal nitelikte boşanma kararı: Evin ihtiyaçları için borçlanan kadın kusurlu sayılmadı",
+        "Yargıtay 2. Hukuk Dairesi, eşinin evin ihtiyaçlarını karşılamaması nedeniyle markete ve tuhafiye dükkanına borç yapan kadının bu davranışının boşanmada kusur sayılamayacağına hükmetti. Yüksek Mahkeme, kadın lehine nafaka ve tazminat miktarlarının artırılmasına ilişkin kararı oy birliğiyle onadı.",
+        "https://www.cumhuriyet.com.tr/turkiye/yargitay-dan-emsal-nitelikte-bosanma-karari-evin-ihtiyaclari-icin-borclanan-kadin-kusurlu-sayilmadi-2554118",
+      ],
+      [
+        "Çankırı Karatekin Üniversitesi Senatosu'ndan karar",
+        "Çankırı Karatekin Üniversitesi Senatosu, üniversitenin kuruluş yılının 1235 olduğunu oy birliğiyle kabul etti.",
+        "https://www.birgun.net/haber/cankiri-karatekin-universitesi-senatosundan-karar",
+      ],
+      [
+        "2007 yılında kurulan Çankırı Karatekin Üniversitesi Senatosu'ndan karar: \"Üniversitemizin kuruluş tarihi 1235 olarak kabul edilmiştir\"",
+        "Çankırı'da 2007 yılında kurulan Çankırı Karatekin Üniversitesi Senatosu, üniversitenin kuruluş yılının 1235 olduğunu oy birliğiyle kabul etti. Üniversitenin rektörü \"Sekiz asır öncesiyle günümüzü, bu Senato toplantısıyla bilim ve eğitim anlamında ilk defa bu kadar güçlü bir şekilde buluşturduk. Bugün üniversitemiz adına tarihî b",
+        "https://www.birgun.net/haber/2007-yilinda-kurulan-cankiri-karatekin-universitesi-senatosu-ndan-karar-universitemizin-kurulus-tarihi-1235-olarak-kabul-edilmistir-745179",
+      ],
+      [
+        "Mahkeme kararı oy çokluğuyla onandı",
+        "İstinaf dairesi, tazminat davasında verilen kararı oy çokluğuyla onadı.",
+        URL96B,
+      ],
+    ])("known residual, pinned: %s stays in the gate", (title, description, url) => {
+      const out = c96(title, description, url);
+      expect(inGate(out)).toBe(true);
+      expect(out).toBe("politika");
+    });
+
+    it("an assembly or a party in the same text still admits the vote", () => {
+      expect(c96("Meclis Genel Kurulu'nda teklif oy çokluğuyla kabul edildi")).toBe("politika");
+      expect(c96("Teklif TBMM Genel Kurulu'nda oy birliğiyle kabul edildi")).toBe("politika");
+      expect(c96("Belediye meclisi bütçeyi oy birliğiyle kabul etti")).toBe("politika");
+      expect(c96("Yeni düzenleme", "Teklif Meclis'te oy çokluğuyla kabul edildi.")).toBe("politika");
+      expect(c96("Kanun teklifi görüşüldü", "AK Parti ve MHP milletvekilleri oy birliğiyle destek verdi.")).toBe("politika");
+    });
+
+    it("a vote that is not 'oy birliği' / 'oy çokluğu' is still a state vote", () => {
+      expect(c96("Seçmenler sandık başında oy kullandı")).toBe("politika");
+      expect(c96("Oy verme işlemi başladı")).toBe("politika");
+      expect(c96("Oy sayımında son durum")).toBe("politika");
+      expect(c96("Oy oranı yüzde 51 oldu")).toBe("politika");
+      expect(c96("Seçim sonuçları", "Oy birliği sağlanamadı, ikinci tur yapılacak.")).toBe("politika");
+    });
+
+    it("an election, a party closure and a constitutional-court ruling on a party stay politika", () => {
+      expect(c96("AYM parti kapatma davasında oy birliğiyle karar verdi")).toBe("politika");
+      expect(c96("Yüksek Seçim Kurulu oy çokluğuyla karar verdi")).toBe("politika");
+      expect(c96("Anayasa Mahkemesi oy birliğiyle iptal etti")).toBe("politika");
+    });
+
+    it("a party-closure headline is politika through its own words, not through the vote", () => {
+      // POLITIKA_TITLE_RE: 'parti kapatma', 'partinin / partisinin kapatılması' (0 rows in the
+      // 7-day replay, so it moves nothing; they only admit rows, and keep a party-closure
+      // headline in the gate whatever a later vote rule does with 'oy birliğiyle')
+      expect(c96("Parti kapatma davasında karar günü")).toBe("politika");
+      expect(c96("Partinin kapatılması istemiyle dava açıldı")).toBe("politika");
+      expect(c96("Partisinin kapatılması için başvuru yapıldı")).toBe("politika");
+      expect(c96("Evdeki parti kapatıldı")).not.toBe("politika");
+      expect(c96("Doğum günü partisi kapattı sokağı")).not.toBe("politika");
+    });
+
+    it("a chamber or club election keeps leaving the gate for the 'oy' that is a plain vote", () => {
+      // the pre-existing non-state electorate rule is unchanged
+      expect(inGate(c96("Ticaret Odası seçiminde oy kullanıldı"))).toBe(false);
+    });
+  });
+
+  describe("3. 'Erdoğan Demirören' is the late publisher, not the president", () => {
+    it("the Golf Cup row under a /spor/ section is spor", () => {
+      expect(
+        c96(
+          "Erdoğan Demirören Golf Cup 2026’da anlamlı buluşma",
+          "Türk iş dünyasının önde gelen isimlerinden, Demirören Holding’in Kurucusu ve Kemer Country Club Başkanı merhum Erdoğan Demirören’in anısını yaşatmak amacıyla düzenlenen Erdoğan Demirören Golf Cup 2026, 6-8 Kasım tarihleri arasında 216 golfçünün katılımıyla gerçekleştirildi.",
+          "https://www.cnnturk.com/spor/erdogan-demiroren-golf-cup-2026da-anlamli-bulusma-3490662",
+        ),
+      ).toBe("spor");
+      expect(c96("Erdoğan Demirören Golf Cup 2026'da anlamlı buluşma", "", "https://www.cnnturk.com/spor/x")).toBe("spor");
+    });
+
+    it("the other Golf Cup rows leave the gate", () => {
+      expect(
+        inGate(
+          c96(
+            "Erdoğan Demirören Golf Cup'ta final heyecanı",
+            "Erdoğan Demirören anısına düzenlenen Erdoğan Demirören Golf Cup 2026, İstanbul Kemer Country Club'da golf tutkunlarını bir araya getirdi.",
+            "https://www.cnnturk.com/video/turkiye/erdogan-demiroren-golf-cupta-final-heyecani-3490463",
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        inGate(
+          c96(
+            "Erdoğan Demirören Golf Cup 2026 Kemer Country Club'da düzenlendi",
+            "Merhum Erdoğan Demirören anısına düzenlenen turnuva, 6-8 Kasım tarihleri arasında Kemer Country Club’da 216 golfçünün katılımıyla gerçekleştirildi.",
+            "https://www.example.com/haber/erdogan-demiroren-golf-cup",
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it("the president still admits next to the family or the group", () => {
+      expect(c96("Cumhurbaşkanı Erdoğan, Demirören ailesini kabul etti")).toBe("politika");
+      expect(c96("Erdoğan, Demirören Holding yöneticileriyle görüştü")).toBe("politika");
+      expect(c96("Erdoğan'dan Demirören açıklaması")).toBe("politika");
+      expect(c96("Demirören Medya", "Erdoğan konuştu: Demirören ile görüşme.")).toBe("politika");
+    });
+
+    it("the white-space and case variants of the pair are the same row", () => {
+      expect(inGate(c96("ERDOĞAN DEMİRÖREN GOLF CUP BAŞLADI"))).toBe(false);
+      expect(inGate(c96("Erdoğan   Demirören anıldı"))).toBe(false);
+      expect(inGate(c96("Erdogan Demiroren anildi"))).toBe(false);
+    });
+  });
+
+  describe("linear time on large inputs (200k characters)", () => {
+    // New patterns: CONSUMER_RECALL_RE (three word-start literals, one run of white
+    // space between two of them) and the 'bakan' strip (a word start and one run of
+    // word characters). The 'oy' inputs guard the plain VOTE_RE against a regression.
+    const inputs: Array<[string, Gen]> = [
+      ["'toplatma bakanlık ' repeated", rep("toplatma bakanlık ")],
+      ["'bakan' + 200k letters a", rep("a", "bakan")],
+      ["'bakan ' repeated with a recall noun", rep("bakan ", "toplat ")],
+      ["'geri' + 200k blanks + 'çağır'", rep(" ", "geri", "çağır")],
+      ["'satışı' + 200k blanks + 'yasak'", rep(" ", "satışı", "yasak")],
+      ["'oy' + 200k blanks + 'birliği'", rep(" ", "oy", "birliği")],
+      ["'oy ' repeated", rep("oy ")],
+      ["'oy birliği ' repeated", rep("oy birliği ")],
+      ["'erdoğan' + 200k blanks + 'demirören'", rep(" ", "erdoğan", "demirören")],
+      ["'erdoğan demirören ' repeated", rep("erdoğan demirören ")],
     ];
 
     it.each(inputs)("%s scales linearly", (_name, gen) => {

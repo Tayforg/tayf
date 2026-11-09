@@ -39,6 +39,12 @@ const fixture = vi.hoisted(() => ({
   throwOnQuery: false,
   lastState: null as unknown,
   rpcIds: [] as string[],
+  // When set, the Nth search_cluster_ids call (0-based, in call order, a PGRST202
+  // fallback call counts) returns the Nth list; a missing entry is an empty result.
+  // null: every call returns `rpcIds`.
+  rpcIdsPerCall: null as string[][] | null,
+  // An error returned ONLY to the calls whose 0-based index is listed (the sibling call).
+  rpcErrorAtCalls: null as { indexes: number[]; error: { message: string; code?: string } } | null,
   rpcError: null as { message: string; code?: string } | null,
   // Error returned ONLY to the 3-arg call (the one carrying p_folded), so a
   // test can model "migration 129 not applied yet" without failing the
@@ -88,8 +94,14 @@ const supabaseFake = await vi.hoisted(async () => {
           return { data: null, error: fixture.rpcErrorThreeArg };
         }
         if (fixture.rpcError) return { data: null, error: fixture.rpcError };
+        if (fixture.rpcErrorAtCalls?.indexes.includes(fixture.rpcCalls.length - 1)) {
+          return { data: null, error: fixture.rpcErrorAtCalls.error };
+        }
+        const ids = fixture.rpcIdsPerCall
+          ? (fixture.rpcIdsPerCall[fixture.rpcCalls.length - 1] ?? [])
+          : fixture.rpcIds;
         return {
-          data: fixture.rpcIds.map((id) => ({ id })),
+          data: ids.map((id) => ({ id })),
           error: null,
         };
       },
@@ -109,6 +121,7 @@ import {
 } from "./search-query";
 import {
   MAX_SEARCH_QUERY_LENGTH,
+  MAX_QUERY_VARIANTS,
   MAX_SEARCH_TERMS,
   canonicalSearchQuery,
   foldTr,
@@ -133,6 +146,8 @@ beforeEach(() => {
   fixture.throwOnQuery = false;
   fixture.lastState = null;
   fixture.rpcIds = [];
+  fixture.rpcIdsPerCall = null;
+  fixture.rpcErrorAtCalls = null;
   fixture.rpcError = null;
   fixture.rpcErrorThreeArg = null;
   fixture.rpcThrows = false;
@@ -580,6 +595,251 @@ describe("searchClusters one-way alias expansion (afyon / urfa / antep)", () => 
     expect(fixture.rpcCalls).toEqual([
       { p_variants: turkishQueryVariants('akp or "ak parti"'), p_folded: "akp or ak parti", p_limit: 24 },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h96-search-1: the headline form of an everyday noun. 'elektrik zammı' found
+// nothing on production (2026-11-09) while 'elektrik zam' found 9 stories, because
+// the Turkish stemmer gives 'zammı' and 'vergisi' their own lexemes.
+//
+// The sibling spellings are NEVER merged into the typed call: migration 172 reads
+// p_variants[1..3] and ORs them with equal rank, so a merged call let unrelated
+// 'kara' rows push real 'karasu' rows off the page (CORR-2). The typed call goes
+// first with at most three variants; only when it leaves slots of the page empty
+// (fewer than SEARCH_LIMIT ids) does a second call ask for the sibling's spellings,
+// and its new ids are appended after the typed ids. p_folded is the typed words in
+// both calls, and the cache key stays canonical.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters sibling variants (h96-search-1)", () => {
+  type RpcArgs = { p_variants: string[]; p_folded?: string; p_limit: number };
+  const argsOf = (i: number) => fixture.rpcCalls[i] as RpcArgs;
+  const ids = (n: number, prefix: string) =>
+    Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+
+  it("'elektrik zammı' with no typed hit: typed call, then the sibling's spellings in a second call, p_folded unchanged", async () => {
+    await searchClusters("elektrik zammı");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["elektrik zammı", "elektrik zammi"], p_folded: "elektrik zammi", p_limit: 24 },
+      { p_variants: ["elektrik zam"], p_folded: "elektrik zammi", p_limit: 24 },
+    ]);
+  });
+
+  it.each([
+    ["emlak vergisi", ["emlak vergisi"], ["emlak vergi"], "emlak vergisi"],
+    ["doğal gaz zammı", ["doğal gaz zammı", "doğal gaz zammi"], ["doğal gaz zam"], "dogal gaz zammi"],
+    ["Asgari Ücret Zammı", ["asgari ücret zammı", "asgari ücret zammi"], ["asgari ücret zam"], "asgari ucret zammi"],
+    ["trafik cezası", ["trafik cezası", "trafik cezasi"], ["trafik ceza"], "trafik cezasi"],
+  ])("%j with no typed hit sends %j, then %j, with p_folded %j both times", async (q, typed, sibling, folded) => {
+    await searchClusters(q);
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: typed, p_folded: folded, p_limit: 24 },
+      { p_variants: sibling, p_folded: folded, p_limit: 24 },
+    ]);
+  });
+
+  it("a full typed page (24 ids): 'trafik cezası' makes exactly one call, so the sibling never displaces a typed hit", async () => {
+    fixture.rpcIdsPerCall = [ids(24, "t")];
+    fixture.data = ids(24, "t").map((id) => mkRow({ id, members: [{ id: `a-${id}`, sourceId: "s1" }] }));
+    const result = await searchClusters("trafik cezası");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["trafik cezası", "trafik cezasi"], p_folded: "trafik cezasi", p_limit: 24 },
+    ]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.capped).toBe(true);
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(ids(24, "t"));
+  });
+
+  it("a short typed page (2 ids): a second call follows with ['trafik ceza']; typed ids first, then the new sibling ids, deduplicated", async () => {
+    fixture.rpcIdsPerCall = [["t1", "t2"], ["s1", "t2", "s2", "t1", "s1"]];
+    fixture.data = [
+      mkRow({ id: "s2", members: [{ id: "a-s2", sourceId: "s3" }] }),
+      mkRow({ id: "t2", members: [{ id: "a-t2", sourceId: "s2" }] }),
+      mkRow({ id: "s1", members: [{ id: "a-s1", sourceId: "s1" }] }),
+      mkRow({ id: "t1", members: [{ id: "a-t1", sourceId: "s1" }] }),
+    ];
+    const result = await searchClusters("trafik cezası");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["trafik cezası", "trafik cezasi"], p_folded: "trafik cezasi", p_limit: 24 },
+      { p_variants: ["trafik ceza"], p_folded: "trafik cezasi", p_limit: 24 },
+    ]);
+    const state = fixture.lastState as BuilderState;
+    expect(state.in).toEqual([{ col: "id", vals: ["t1", "t2", "s1", "s2"] }]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["t1", "t2", "s1", "s2"]);
+    expect(result.capped).toBe(false);
+  });
+
+  it("the merged page never exceeds SEARCH_LIMIT: 20 typed ids, then only the first 4 new sibling ids, and capped is true", async () => {
+    fixture.rpcIdsPerCall = [ids(20, "t"), [...ids(2, "t"), ...ids(10, "s")]];
+    const result = await searchClusters("trafik cezası");
+    const state = fixture.lastState as BuilderState;
+    const expected = [...ids(20, "t"), ...ids(4, "s")];
+    expect(expected).toHaveLength(SEARCH_LIMIT);
+    expect(state.in).toEqual([{ col: "id", vals: expected }]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.capped).toBe(true);
+  });
+
+  it("a sibling call that adds nothing new leaves the typed result exactly as it was", async () => {
+    fixture.rpcIdsPerCall = [["t1", "t2"], ["t2", "t1"]];
+    fixture.data = [
+      mkRow({ id: "t1", members: [{ id: "a-t1", sourceId: "s1" }] }),
+      mkRow({ id: "t2", members: [{ id: "a-t2", sourceId: "s2" }] }),
+    ];
+    const result = await searchClusters("emlak vergisi");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["t1", "t2"]);
+    expect(result.capped).toBe(false);
+  });
+
+  it("'karasu' has no sibling: one call with ['karasu'] (the -su compound is not a possessive)", async () => {
+    await searchClusters("karasu");
+    expect(fixture.rpcCalls).toEqual([{ p_variants: ["karasu"], p_folded: "karasu", p_limit: 24 }]);
+  });
+
+  it.each(["kayısı", "sarısu", "ılısu", "Karasu"])(
+    "%j has no sibling: exactly one call, the typed arguments",
+    async (q) => {
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      expect(fixture.rpcCalls).toEqual([
+        { p_variants: turkishQueryVariants(canonical), p_folded: foldTr(canonical), p_limit: 24 },
+      ]);
+    },
+  );
+
+  it("p_folded is foldTr of the typed query in every call, never of the sibling", async () => {
+    for (const q of ["elektrik zammı", "emlak vergisi", "hakkı", "Soruşturması"]) {
+      fixture.rpcCalls = [];
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      expect(fixture.rpcCalls.length, q).toBe(2);
+      expect(argsOf(0).p_folded, q).toBe(foldTr(canonical));
+      expect(argsOf(1).p_folded, q).toBe(foldTr(canonical));
+      expect(argsOf(0).p_variants, q).toEqual(turkishQueryVariants(canonical));
+    }
+  });
+
+  it("every call carries at most three variants: a word with three typed and three sibling spellings sends them in two calls", async () => {
+    await searchClusters("ışık vergisi");
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(argsOf(0).p_variants).toEqual(turkishQueryVariants("ışık vergisi"));
+    expect(argsOf(1).p_variants).toEqual(turkishQueryVariants("ışık vergi"));
+    expect(argsOf(0).p_variants).toHaveLength(MAX_QUERY_VARIANTS);
+    expect(argsOf(1).p_variants).toHaveLength(MAX_QUERY_VARIANTS);
+  });
+
+  it("no call carries more than three variants or a repeat, whatever the query", async () => {
+    for (const q of [
+      "IŞIK VERGİSİ",
+      "ışık zammı",
+      "Işık Cezası",
+      "vergisi zammı cezası hakkı affı sırrı",
+      "ışık işık vergisi zammı",
+    ]) {
+      fixture.rpcCalls = [];
+      await searchClusters(q);
+      for (const call of fixture.rpcCalls as RpcArgs[]) {
+        expect(call.p_variants.length, q).toBeLessThanOrEqual(MAX_QUERY_VARIANTS);
+        expect(new Set(call.p_variants).size, q).toBe(call.p_variants.length);
+      }
+    }
+  });
+
+  it("every variant of both calls keeps the term count and the 64-character bound of the canonical query", async () => {
+    await searchClusters("emlak vergisi zammı trafik cezası yeni");
+    expect(fixture.rpcCalls).toHaveLength(2);
+    for (const call of fixture.rpcCalls as RpcArgs[]) {
+      for (const v of call.p_variants) {
+        expect(v.split(" ")).toHaveLength(6);
+        expect(v.length).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+      }
+    }
+    expect(argsOf(1).p_variants).toEqual(["emlak vergi zam trafik ceza yeni"]);
+  });
+
+  it.each(["Erdoğan", "messi", "burdur", "miller", "elektrik zam", "emlak vergi", "seçim", "iran", "zammına"])(
+    "%j has no sibling: one call, the arguments are exactly what they were before",
+    async (q) => {
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      expect(fixture.rpcCalls).toEqual([
+        {
+          p_variants: turkishQueryVariants(canonical),
+          p_folded: foldTr(canonical),
+          p_limit: 24,
+        },
+      ]);
+    },
+  );
+
+  it.each(['"emlak vergisi"', "-vergisi", "emlak -vergisi", "vergisi or zammı", "akp or chp"])(
+    "%j uses websearch syntax: no sibling, one call with the plain canonical query",
+    async (q) => {
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      expect(fixture.rpcCalls).toEqual([
+        {
+          p_variants: turkishQueryVariants(canonical),
+          p_folded: foldTr(canonical),
+          p_limit: 24,
+        },
+      ]);
+    },
+  );
+
+  it("an alias query ('AKP vergisi') is expanded as before and gets no sibling call", async () => {
+    await searchClusters("AKP vergisi");
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_variants: turkishQueryVariants('akp vergisi or "ak parti" vergisi'),
+        p_folded: "akp vergisi or ak parti vergisi",
+        p_limit: 24,
+      },
+    ]);
+  });
+
+  it("the cache key stays canonical: spellings of one query run one search, typed call then sibling call", async () => {
+    fixture.hold = true;
+    const a = searchClusters("elektrik zammı");
+    const b = searchClusters("ELEKTRİK ZAMMI!");
+    const c = searchClusters(" Elektrik Zammı ");
+    await tick();
+    expect(fixture.rpcCalls).toHaveLength(1);
+    expect(argsOf(0).p_variants).not.toContain("elektrik zam");
+    fixture.hold = false;
+    for (const d of fixture.deferreds) d.succeed();
+    await Promise.all([a, b, c]);
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(argsOf(1).p_variants).toEqual(["elektrik zam"]);
+  });
+
+  it("falls back to 083's two-argument function for both calls (it reads the first three variants)", async () => {
+    fixture.rpcErrorThreeArg = { message: "not found", code: "PGRST202" };
+    await searchClusters("elektrik zammı");
+    const typed = ["elektrik zammı", "elektrik zammi"];
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: typed, p_folded: "elektrik zammi", p_limit: 24 },
+      { p_variants: typed, p_limit: 24 },
+      { p_variants: ["elektrik zam"], p_limit: 24 },
+    ]);
+  });
+
+  it("an error on the sibling call fails the attempt like any RPC error: the live retry runs both calls again", async () => {
+    fixture.rpcErrorAtCalls = { indexes: [1], error: { message: "statement timeout" } };
+    const result = await searchClusters("elektrik zammı");
+    // attempt: typed (ok), sibling (error); live retry: typed (ok), sibling (ok)
+    expect(fixture.rpcCalls).toHaveLength(4);
+    expect(result.ok).toBe(true);
+  });
+
+  it("a persistent error on the sibling call is { ok: false }", async () => {
+    fixture.rpcErrorAtCalls = { indexes: [1, 3], error: { message: "statement timeout" } };
+    const result = await searchClusters("elektrik zammı");
+    expect(fixture.rpcCalls).toHaveLength(4);
+    expect(result.ok).toBe(false);
   });
 });
 

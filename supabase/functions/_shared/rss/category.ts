@@ -318,6 +318,64 @@
 // 'adana' and 'imamoğlu', and between 'imamoğlu' and 'ilçe').
 //
 // Forward-only, like the rest of this module: no stored row is re-categorised.
+//
+// hunt-96 (2026-11-09) the fund scandal in, two non-political shapes out
+// (h96-politicsgate-1 and h96-politicsgate-2).
+//
+//   * IN: 'sayan kaya', 'bahcetepe' (POLITIKA_TITLE_RE) and 'fon sorusturma', 'fon
+//     vurgun' (FUND_SCANDAL_TITLE_RE), all title-only. The week's biggest
+//     political-judicial story was genel / ekonomi whenever the headline named only
+//     the person or the scandal. A title that names Seçil Erzan does not count
+//     through the two generic words (ERZAN_TRIAL_RE).
+//   * OUT 1, a consumer-product recall that passes on the word 'Bakanlık' alone: a
+//     title with a recall noun (CONSUMER_RECALL_RE) whose ONLY evidence is a word
+//     that starts with 'bakanl' (the ministry noun: bakanlık, bakanlığı) and with no
+//     text hit is not politics (titleEvidence asked a second time on the title
+//     without those words, see classifyBody). The office holder 'Bakan' stays
+//     evidence: 'Bakan Fidan: ... büyükelçimizi geri çağırdık' is politika.
+//   * OUT 2, 'demiroren' joins the venue lookahead of the 'erdogan' entry ('Erdoğan
+//     Demirören Golf Cup 2026', the late publisher's memorial tournament).
+//   * Not in this wave: a vote rule that would have taken 'oy birliğiyle' / 'oy
+//     çokluğuyla' out of VOTE_RE for court and senate texts. Its replay moved 12
+//     political rows out of the gate (a Kavala retrial ruling, a municipal budget
+//     vote, a ruling-party congress, the eastern Libyan parliament's ratification),
+//     so VOTE_RE keeps its plain 'oy' word. Re-propose only after a replay of at
+//     least 30 days with zero political leavers.
+//
+// Replay, read-only: main (c48aaea) against this module over every stored row
+// created 2026-11-02 05:30Z .. 2026-11-09 05:15Z (70,741 rows, 0 duplicate ids; the
+// gate, politika | son_dakika, goes from 12,601 rows to 13,164). 620 rows enter, 57
+// leave, 0 rows change inside the gate and every other row keeps its category. The
+// 72-hour slice of the same replay (created 2026-11-06 05:15Z on): 242 enter, 28
+// leave.
+//   * The 620 that enter, by title token (a row can carry two): 'fon sorusturma'
+//     393, 'sayan kaya' 225, 'fon vurgun' 52, 'bahcetepe' 23; they come from genel
+//     306, ekonomi 292 (7 of them through the son_dakika prefix), teknoloji 15,
+//     dunya 5, yasam 2. Every title was read by hand: all are the fund
+//     investigation, Fatma Betül Sayan Kaya (a former minister) or Hakan Bahçetepe
+//     (the Gaziosmanpaşa mayor). The first cut let two non-political rows in, the
+//     Seçil Erzan fraud retrial ('Milyonluk fon vurgunu davasında Seçil Erzan için
+//     istenen ceza açıklandı'); the veto removes them.
+//   * The 57 that leave, by rule: 52 recall rows and 5 Demirören rows. The 52 are
+//     Ticaret Bakanlığı product recalls (a school uniform, toys, a stress ball,
+//     bicycles, a teether, a scooter, a baby chair); every title carries 'bakanl' and
+//     a recall noun. The 5: four Golf Cup rows and the Zorlu funeral row ('Erdoğan
+//     Demirören' in the list of mourners). All 57 were read: none is political. The
+//     26 rows of the dropped vote rule (court and senate rulings) stay in the gate.
+// Known residuals, pinned in the tests: 'Bakanlık satışını yasakladı' (10 rows of the
+// same replay; CONSUMER_RECALL_RE reads 'satışı yasak', not the possessive) and the
+// passive 'geri çağrıl*' stay as they were. A recall-noun headline of an office
+// holder ('Bakan Fidan: ... büyükelçimizi geri çağırdık') is politika: only the
+// ministry noun is stripped, not 'Bakan'.
+//
+// Linear: the new patterns are plain literals (the stems of the fund scandal and the
+// party closure), one run of white space between two literals ('sayan kaya', 'geri
+// çağır', 'satışı yasak'), a lookahead of literals on the 'erdogan' entry, and a word
+// start with one run of word characters (the 'bakanl' strip). The runs of two hits
+// are disjoint. The 200k character tests of the hunt-96 describes time the worst
+// shapes.
+//
+// Forward-only: no stored row is re-categorised and nothing is re-enqueued.
 
 export type NewsCategory =
   | "son_dakika"
@@ -494,7 +552,15 @@ const POLITIKA_RAW = [
   // hits are disjoint. It sees only the word right before the surname: 'Yılmaz,
   // Erdoğan'a', 'Yılmaz ve Erdoğan' and 'Erdoğan Yılmaz'ı kabul etti' stay the
   // president. The same entry feeds the title and the description pattern.
-  `\\berdogan${NON_PRESIDENT_ERDOGAN_LOOKBEHIND}(?!\\s+(?:stad|univ|millet\\s+bahce|parki|bulvari|caddesi|kongre\\s+(?:ve\\s+kultur\\s+)?merkez|kultur\\s+merkez|hastanesi|camii|kulliyesi|spor\\s+salon|lisesi))`,
+  //
+  // hunt-96 (h96-politicsgate-2): 'demiroren' is a second non-president use of the
+  // surname-as-given-name, the other way round: 'Erdoğan Demirören' (1925-2018) was
+  // the Demirören Holding and Kemer Country Club chairman, and 'Erdoğan Demirören
+  // Golf Cup 2026' (his memorial tournament, three stored rows) was politika. It
+  // sits in the same lookahead as the venue words (one literal, no quantifier),
+  // so 'Cumhurbaşkanı Erdoğan, Demirören ailesini kabul etti' (a comma between the
+  // two) and "Erdoğan'dan Demirören açıklaması" are still the president.
+  `\\berdogan${NON_PRESIDENT_ERDOGAN_LOOKBEHIND}(?!\\s+(?:stad|univ|millet\\s+bahce|parki|bulvari|caddesi|kongre\\s+(?:ve\\s+kultur\\s+)?merkez|kultur\\s+merkez|hastanesi|camii|kulliyesi|spor\\s+salon|lisesi|demiroren))`,
   // 'hava muhalefeti' (adverse weather, the excuse of a power cut) is not the
   // opposition, and neither is the legal phrase 'kanuna muhalefet' (hunt-31:
   // "Siber Güvenlik Kanununa muhalefet" is a charge, the İçişleri fraud
@@ -590,6 +656,15 @@ const POLITIKA_DESC_RE = compile(
 //     Şimşek' already admits through 'bakan'; 'Şimşekspor' is a club and 'Vali
 //     Yılmaz Şimşek' a governor). The 7-day replay (stored rows, read-only) put
 //     every entering row on a political story and moved none out.
+//   * the fund scandal (hunt-96, h96-politicsgate-1): 'sayan kaya' (Fatma Betül
+//     Sayan Kaya, a former minister) and 'bahcetepe' (Hakan Bahçetepe, the
+//     Gaziosmanpaşa mayor). The week's biggest political-judicial story was filed
+//     genel / ekonomi whenever the headline named only the person and no office
+//     word. They are title-only like 'cevdet yilmaz': a probe that also read the
+//     description admitted about 30 non-political rows ('İşsizlik dalga dalga
+//     geliyor'). The scandal's own words ('fon sorusturma', 'fon vurgun') are
+//     FUND_SCANDAL_TITLE_RE below, with a veto. See 'hunt-96' in the header
+//     for the replay numbers.
 const POLITIKA_TITLE_RE = compile(
   [],
   [
@@ -599,8 +674,34 @@ const POLITIKA_TITLE_RE = compile(
     "belediye baskan", "icisleri", "disisleri", "kabine",
     "sarigul",
     "cevdet yilmaz", "hakan fidan", "sinirlioglu", "ibb davas",
+    "sayan kaya", "bahcetepe",
+    // A party-closure case (hunt-96, h96-politicsgate-2): 'AYM parti kapatma
+    // davasında karar verdi' is politika through its own words, whatever a later
+    // vote rule does with 'oy birliğiyle' (a rule that took it out of VOTE_RE is not
+    // in this wave, see the hunt-96 header). They only admit rows: 0 rows of the
+    // 7-day replay. Title-only. The three forms are fixed phrases: a bare
+    // 'parti kapat*' would also take an event party that the police closed
+    // ('Evdeki parti kapatıldı').
+    "parti kapatma", "partinin kapatilma", "partisinin kapatilma",
   ],
 );
+
+// The fund scandal's own words in the TITLE (hunt-96, h96-politicsgate-1): 'Fon
+// soruşturmasında yeni gelişme! Enver Usca dahil 4 şüpheli tutuklandı', 'Murat
+// Emir: Fon vurgununun kilit ismi nihayet gözaltında'. 7-day replay (70,741 stored
+// rows): 374 of the 622 rows that enter the gate carry only these two words, and
+// every one of them was read by hand. Title-only, like the names above: 'Fon
+// soruşturması sonrası yatırımcılar tedirgin' in a description is an investor
+// story, and the investment-fund headlines ('Yatırım fonları ekimde yüzde 4
+// kazandırdı', "Paraguay'da fon krizi büyüyor") carry neither word.
+//
+// The one non-political pair of the replay is the Seçil Erzan trial (a Denizbank
+// branch manager's 'yüksek kârlı gizli fon' fraud, retried after an appeal; two of
+// its 43 titled rows say 'fon vurgunu'), so a title that names Erzan does not count
+// through these two words (ERZAN_TRIAL_RE). The veto sits on the generic words
+// only: a headline that names Sayan Kaya or Bahçetepe is still the scandal.
+const FUND_SCANDAL_TITLE_RE = compile([], ["fon sorusturma", "fon vurgun"]);
+const ERZAN_TRIAL_RE = /\berzan/;
 
 // 'secim' and 'cumhurbaskan' left the list above in hunt-22 because each is
 // also the vocabulary of a non-political story, and a title hit beats sport:
@@ -692,6 +793,25 @@ const VOTE_RE = /\boy\b/;
 const CUMHURBASKAN_TITLE_RE = /\bcumhurbaskan/;
 const SPORT_EVENT_AFTER_RE =
   /\b(?:yat\s+yaris|yelken|kupa|turnuva|bisiklet|maraton|ralli|kosusu|golf|satranc|atletizm)/;
+
+// A consumer-product recall (hunt-96, h96-politicsgate-2). The Ticaret Bakanlığı
+// announces them through the 'Güvensiz Ürün Bilgi Sistemi' every few days
+// ('Bakanlıktan güvensiz okul forması için toplatma kararı', 9 outlets; a toy, a
+// baby chair, a bicycle, a scooter), and the word 'Bakanlık' in the headline was
+// the only politics evidence of every one: POLITIKA_TITLE_RE reads 'bakan' with
+// any suffix. In a headline the recall noun carries the signal ('toplat*',
+// 'geri çağır*', 'satışı yasak*'), so a row whose ONLY title evidence is the
+// ministry noun (a word that starts with 'bakanl') is not politics (classifyBody).
+// The office holder 'Bakan' is not stripped: 'Bakan Fidan: İsrail'deki büyükelçimizi
+// geri çağırdık' and 'Bakan Memişoğlu duyurdu: ... satışı yasaklanıyor' stay
+// politika. Three word-start literals, one run of white space between two of them:
+// linear.
+const CONSUMER_RECALL_RE = /\btoplat|\bgeri\s+cagir|\bsatisi\s+yasak/;
+// The ministry noun, cut out of the title before the second look for evidence:
+// 'bakanlik', 'bakanligi', "bakanligi'ndan". 'bakan' / 'bakani' (the minister) and
+// 'basbakan' keep their evidence: the first two are not matched by 'bakanl', and
+// 'basbakan' has no word boundary before 'bakan'.
+const BAKAN_WORD_RE = /\bbakanl\w*/g;
 
 // 'genel başkan' / 'il başkan' are the office of every association, federation,
 // chamber and union ('Tüketici Hakları Derneği Genel Başkanı' was politika
@@ -1023,6 +1143,12 @@ function secimInTitle(titleHay: string, hay: string, titleSport: boolean): boole
   );
 }
 
+// 'fon soruşturma' / 'fon vurgun' in the title is the fund scandal unless the
+// title names the Seçil Erzan bank-fraud trial (see FUND_SCANDAL_TITLE_RE).
+function fundScandalInTitle(titleHay: string): boolean {
+  return FUND_SCANDAL_TITLE_RE.test(titleHay) && !ERZAN_TRIAL_RE.test(titleHay);
+}
+
 // 'cumhurbaşkan' in the title is the presidency unless a sporting-event noun
 // follows it in the title (see CUMHURBASKAN_TITLE_RE).
 function cumhurbaskanInTitle(titleHay: string): boolean {
@@ -1038,6 +1164,34 @@ function dunyaIn(titleHay: string, hay: string, lower: string): boolean {
   if (DUNYA_MARKER_RE.test(hay) || CIN_RE.test(lower) || IRAK_RE.test(lower)) return true;
   if (!DUNYA_STEM_RE.test(hay)) return false;
   return DUNYA_PLAIN_RE.test(hay) || FOREIGN_RE.test(titleHay);
+}
+
+// Politics evidence in the HEADLINE (it beats sport): the office and process words,
+// the named people and bodies, a state election, a state vote or assembly, the
+// presidency, a party office with a party marker, a state senate. `titleHay` is
+// the folded title, `hay` the folded title + description, `lower` the unfolded
+// lowercase view. A function so that the recall rule can ask it a second time
+// about the title WITHOUT its ministry words.
+function titleEvidence(
+  titleHay: string,
+  hay: string,
+  lower: string,
+  titleSport: boolean,
+): boolean {
+  return (
+    POLITIKA_RE.test(titleHay) ||
+    POLITIKA_TITLE_RE.test(titleHay) ||
+    fundScandalInTitle(titleHay) ||
+    voteIn(titleHay, titleHay, hay) ||
+    stateMeclis(titleHay, hay) ||
+    politicianImamoglu(titleHay, hay) ||
+    secimInTitle(titleHay, hay, titleSport) ||
+    cumhurbaskanInTitle(titleHay) ||
+    (PARTY_OFFICE_TITLE_RE.test(titleHay) &&
+      (PARTY_MARKER_RE.test(hay) || TIP_ACRONYM_RE.test(lower))) ||
+    (SENATO_RE.test(titleHay) && !UNIVERSITY_RE.test(hay)) ||
+    (!titleSport && TITLE_UNLESS_SPORT_RE.test(titleHay))
+  );
 }
 
 // The chain after the breaking-news prefix: politika, the URL section, spor,
@@ -1059,18 +1213,7 @@ function classifyBody(
     SPOR_RE.test(titleHay) || GOL_RE.test(titleLower) || section === "spor";
 
   // Evidence in the headline beats sport; evidence only in the text does not.
-  const titleHit =
-    POLITIKA_RE.test(titleHay) ||
-    POLITIKA_TITLE_RE.test(titleHay) ||
-    voteIn(titleHay, titleHay, hay) ||
-    stateMeclis(titleHay, hay) ||
-    politicianImamoglu(titleHay, hay) ||
-    secimInTitle(titleHay, hay, titleSport) ||
-    cumhurbaskanInTitle(titleHay) ||
-    (PARTY_OFFICE_TITLE_RE.test(titleHay) &&
-      (PARTY_MARKER_RE.test(hay) || TIP_ACRONYM_RE.test(lower))) ||
-    (SENATO_RE.test(titleHay) && !UNIVERSITY_RE.test(hay)) ||
-    (!titleSport && TITLE_UNLESS_SPORT_RE.test(titleHay));
+  const titleHit = titleEvidence(titleHay, hay, lower, titleSport);
   const textHit =
     POLITIKA_DESC_RE.test(descHay) ||
     voteIn(descHay, titleHay, hay) ||
@@ -1082,7 +1225,16 @@ function classifyBody(
       (PARTY_OFFICE_TITLE_RE.test(hay) && PARTY_MARKER_RE.test(hay))) &&
       COMPOUND_ACTION_RE.test(hay)) ||
     (COALITION_RE.test(hay) && PARTY_RE.test(hay));
-  if (titleHit || (textHit && !titleSport)) return "politika";
+  if (titleHit || (textHit && !titleSport)) {
+    // A consumer-product recall whose only politics evidence is the ministry word
+    // of the headline (see CONSUMER_RECALL_RE) is not politics: the chain goes on.
+    const recallOnly =
+      titleHit &&
+      !textHit &&
+      CONSUMER_RECALL_RE.test(titleHay) &&
+      !titleEvidence(titleHay.replace(BAKAN_WORD_RE, " "), hay, lower, titleSport);
+    if (!recallOnly) return "politika";
+  }
 
   if (section) return section;
 
