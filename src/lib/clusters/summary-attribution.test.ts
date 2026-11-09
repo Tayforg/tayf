@@ -10,15 +10,18 @@ import {
 import type { ClusterDetailMember } from "./cluster-detail-query";
 import {
   AGENCY_COPY_OVERLAP,
+  AGREEMENT_FORM_DEFECT_MIN,
   AGREEMENT_HIGH,
   AGREEMENT_LOW,
+  isLiveLine,
   seedDisqualified,
   summaryDefect,
   textOverlap,
   titleAgreement,
 } from "./summary-agreement";
+import { isHeadlineEcho } from "@/lib/articles/description-boilerplate";
 import { tidySummaryText } from "@/lib/articles/summary-tidy";
-import type { Source } from "@/types";
+import type { Source, SourceKind } from "@/types";
 
 const T0 = "2026-09-06T10:00:00.000Z";
 function src(id: string): Source {
@@ -1442,8 +1445,12 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
   // predicates keep it out.
   const STUB_TEXT =
     "Michigan'da Senato seçimini kazanan Abdul El Sayed, ABD'de Senato'ya seçilen ilk Müslüman oldu ve tarihe geç...";
+  // h95-summaries-1: the come-on OPENS the text. Behind a complete sentence of 60 characters or
+  // more the tidy step now cuts it ("... ilk Müslüman oldu. Peki, Abdul El Sayed kimdir? ..." shows
+  // "... ilk Müslüman oldu."), which leaves nothing to keep out; only a text that opens with it,
+  // and so has nothing in front of it to end on, is still a teaser.
   const TEASER_TEXT =
-    "ABD'deki senato seçimlerinde Demokrat Parti adayı Abdul El Sayed, Michigan’daki seçimleri resmen kazanarak Senato’ya seçilen ilk Müslüman oldu. Peki, Abdul El Sayed kimdir? Kaç yaşında, aslen nereli?";
+    "Peki, Abdul El Sayed kimdir? Kaç yaşında, aslen nereli? ABD'deki senato seçimlerinde Demokrat Parti adayı Abdul El Sayed, Michigan’daki seçimleri resmen kazanarak Senato’ya seçilen ilk Müslüman oldu.";
   const DATELINE_TEXT =
     "İSTANBUL (Medyascope) – Abdul El Sayed, Michigan'daki Senato yarışını kazanarak ABD'de Senato'ya seçilen ilk Müslüman oldu.";
   const RUN_ON_TEXT =
@@ -2274,12 +2281,20 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       expect(description).not.toContain("“");
     });
 
-    it("2. without Akşam the next member at or above 0.75 is chosen; without both, the seed stays", () => {
-      const { members, dirilis, seed } = vanceMembers();
+    it("2. without Akşam the next member at or above 0.6 is chosen; with none left, the seed stays", () => {
+      const { members, dirilis, cumhuriyet, seed } = vanceMembers();
       const noAksam = members.filter((m) => m.source.slug !== "aksam");
       expect(withTitle(noAksam, VANCE_TITLE, VANCE_SEED)).toStrictEqual({ text: VANCE_DIRILIS, source: dirilis.source });
       const neither = noAksam.filter((m) => m.source.slug !== "dirilis-postasi");
+      // h95-summaries-1: behind a form defect the bar is AGREEMENT_FORM_DEFECT_MIN, and Cumhuriyet's
+      // 5 of 7 (0.71, under 0.75) now clears it.
+      expect(titleAgreement(VANCE_TITLE, VANCE_CUMHURIYET)!).toBeGreaterThanOrEqual(AGREEMENT_FORM_DEFECT_MIN);
       expect(withTitle(neither, VANCE_TITLE, VANCE_SEED)).toStrictEqual({
+        text: VANCE_CUMHURIYET,
+        source: cumhuriyet.source,
+      });
+      const none = neither.filter((m) => m.source.slug !== "cumhuriyet");
+      expect(withTitle(none, VANCE_TITLE, VANCE_SEED)).toStrictEqual({
         text: tidySummaryText(VANCE_SEED),
         source: seed.source,
       });
@@ -2311,7 +2326,7 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       }
     });
 
-    describe("the gain over the seed is waived, the candidate's 0.75 is not (an 8-token title)", () => {
+    describe("the gain over the seed is waived, the candidate's floor is not: 0.6 behind a form defect (an 8-token title)", () => {
       const WORDS = ["elma", "armut", "kiraz", "üzüm", "incir", "çilek", "muz", "nar"];
       const TITLE8 = WORDS.join(" ");
       const sentence = (hits: number) =>
@@ -2344,9 +2359,14 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
         expect(r.out?.source).toBe(r.candidate.source);
       });
 
-      it("below 0.75 the candidate does not qualify: 5/8 leaves the stub", () => {
-        const r = run(stub(6), sentence(5));
+      it("below 0.6 the candidate does not qualify: 4/8 leaves the stub", () => {
+        const r = run(stub(6), sentence(4));
         expect(r.out?.source).toBe(r.seed.source);
+      });
+
+      it("h95-summaries-1: from 0.6 up it does (5/8 is 0.625, 0.75 is no longer the bar behind a form defect)", () => {
+        const r = run(stub(6), sentence(5));
+        expect(r.out?.source).toBe(r.candidate.source);
       });
 
       it("the same texts with a clean seed at 0.75: the seed is kept whatever the candidate", () => {
@@ -2653,7 +2673,8 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       expect(withTitle([seed, wire], KAYA_TITLE, KAYA_SEED)).toStrictEqual(stays);
       const aggregator = outlet("Agg", "agg", "2026-11-05T22:59:00.000Z", KAYA_MEDYASCOPE, { kind: "aggregator" });
       expect(withTitle([seed, aggregator], KAYA_TITLE, KAYA_SEED)).toStrictEqual(stays);
-      const teaser = outlet("Tuzak", "tuzak", "2026-11-05T22:59:00.000Z", `${KAYA_MEDYASCOPE} Peki, Kaya kimdir? Kaç yaşında?`);
+      // The come-on opens the text (h95-summaries-1: behind a complete sentence the tidy step cuts it).
+      const teaser = outlet("Tuzak", "tuzak", "2026-11-05T22:59:00.000Z", `Peki, Kaya kimdir? Kaç yaşında? ${KAYA_MEDYASCOPE}`);
       expect(withTitle([seed, teaser], KAYA_TITLE, KAYA_SEED)).toStrictEqual(stays);
       // A wire dispatch's hash is not a candidate's either.
       const dispatch = outlet("Medyascope", "medyascope", "2026-11-05T22:59:00.000Z", KAYA_MEDYASCOPE, { hash: "dispatch" });
@@ -3046,5 +3067,569 @@ describe("h54-editorial-3: opinion members and the summary", () => {
     const out = withTitle(members);
     expect(Date.now() - start).toBeLessThan(2000);
     expect(out?.source?.slug).toBe("yeni-akit");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h95-summaries-1 and h95-summaries-2 (hunt 95, 2026-11-09)
+//
+// summaries-1: the Özet kept a bad seed (a live-blog line, a Peki / İşte teaser, an
+// echo of the headline, a stub that a surname hid, a cut with no ellipsis), and every
+// clean replacement still needed 0.75. summaries-2: among members with an identical
+// description the earliest stamp won whatever the source kind, so an aggregator was
+// credited with the state agency's lead.
+//
+// The members below are the real outlet texts of the live clusters (dumped read-only
+// 2026-11-09), trimmed to the members each case needs.
+// ---------------------------------------------------------------------------
+
+function fx(name: string, slug: string, kind: SourceKind, at: string, description: string, title: string): ClusterDetailMember {
+  return {
+    source: { ...src(slug), name, kind },
+    article: { id: `${slug}@${at}`, title, url: `https://example.com/${slug}`, published_at: at, image_url: null, content_hash: `h-${slug}`, description },
+  };
+}
+
+const NOT_WIRE = { isWireRedistribution: false };
+
+function resolve(title: string, summary: string, members: ClusterDetailMember[]) {
+  return summaryAttribution({ summary, members, wire: NOT_WIRE, agreeWithTitle: title });
+}
+
+function byName(members: ClusterDetailMember[], name: string): ClusterDetailMember {
+  const m = members.find((x) => x.source.name === name);
+  if (!m) throw new Error(`no member ${name}`);
+  return m;
+}
+
+/** What the page shows for a member's own description. */
+function shownOf(m: ClusterDetailMember): string {
+  return tidySummaryText(m.article.description ?? "");
+}
+
+// 459a7b61: neutral title "Cumhurbaşkanı Erdoğan'dan Azerbaycan'da önemli açıklamalar"
+const H45_TITLE = "Cumhurbaşkanı Erdoğan'dan Azerbaycan'da önemli açıklamalar";
+const H45_SUMMARY = "HABER MERKEZİ- İşte Erdoğan'ın açıklamalarından öne çıkan satır başları:";
+const H45_MEMBERS = [
+  fx("Milliyet", "milliyet", "outlet", "2026-11-08T11:56:47Z", "HABER MERKEZİ- İşte Erdoğan'ın açıklamalarından öne çıkan satır başları:", "Son dakika... Cumhurbaşkanı Erdoğan: Bakü'nün sevinci Ankara'nın sevincidir"),
+  fx("Akşam", "aksam", "outlet", "2026-11-08T11:58:00Z", "Şuşa'da Azerbaycan Cumhurbaşkanı İlham Aliyev ile ortak basın toplantısı düzenleyen Başkan Erdoğan, Karabağ Zafer Günü'nü 6.yılını kutlayarak, \" Şanlı zafer Azerbaycan'ın haklı davasıdır. Beraberliğimiz her zaman daim olacak. Bakü'nün sevinci Ankara'nın sevincidir\" dedi.", "Bir millet iki devlet! Başkan Erdoğan: Bakü'nün sevinci Ankara'nın sevincidir"),
+  fx("A Haber", "a-haber", "outlet", "2026-11-08T11:59:19Z", "Başkan Recep Tayyip Erdoğan Azerbaycan Cumhurbaşkanı İlham Aliyev ile ortak basın toplantısında açıklamalarda bulunuyor. Azerbaycan Cumhurbaşkanı İlham Aliyev, Başkan Recep Tayyip Erdoğan'ın...Devamı için tıklayınız", "Erdoğan ve Aliyev'den Şuşu'da net mesaj: Kardeşliğimiz daim olacak"),
+  fx("Haber7", "haber7", "outlet", "2026-11-08T12:05:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan Cumhurbaşkanı Aliyev ile yaptığı ortak toplantıda açıklamalarda bulunuyor.", "Cumhurbaşkanı Erdoğan'dan Azerbaycan'da önemli açıklamalar"),
+];
+
+// b04edded: neutral title "Cumhurbaşkanı Erdoğan: Vizyonumuz sağlıklı Türkiye Yüzyılı"
+const B04_TITLE = "Cumhurbaşkanı Erdoğan: Vizyonumuz sağlıklı Türkiye Yüzyılı";
+const B04_SUMMARY = "Cumhurbaşkanı Erdoğan, İstanbul'da \"12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni\"nde konuşuyor.";
+const B04_MEMBERS = [
+  fx("TRT Haber", "trt-haber", "outlet", "2026-10-31T10:26:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni'nde konuşuyor.", "Cumhurbaşkanı Erdoğan: Değerlerimiz yaşatmak üzerine kurulu"),
+  fx("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-10-31T10:58:30Z", "Cumhurbaşkanı Erdoğan, Rixos Tersane İstanbul'da düzenlenen 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni'nde konuşuyor.", "CANLI: Cumhurbaşkanı Erdoğan konuşuyor"),
+  fx("Haber Global", "haber-global", "outlet", "2026-10-31T11:24:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, 12. Türk Tıp Dünyası Kurultayı'nda konuşuyor.", "Cumhurbaşkanı Erdoğan'dan açıklamalar"),
+  fx("Star", "star", "outlet", "2026-10-31T11:26:00Z", "Cumhurbaşkanı Erdoğan, İstanbul'da \"12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni\"nde konuşuyor.", "Türkiye Yüzyılı için yeni hedef! Cumhurbaşkanı Erdoğan: Sağlıkta da destan yazacağız"),
+  fx("Hürriyet", "hurriyet", "outlet", "2026-10-31T11:26:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, Rixos Tersane İstanbul'da düzenlenen 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni'nde konuşuyor.", "Cumhurbaşkanı Erdoğan'dan önemli açıklamalar"),
+  fx("Yeni Şafak", "yeni-safak", "outlet", "2026-10-31T11:27:07Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, Rixos Tersane İstanbul'da düzenlenen 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni'nde önemli açıklamalarda bulunuyor.", "Cumhurbaşkanı Erdoğan konuşuyor"),
+  fx("F5 Haber", "f5-haber", "aggregator", "2026-10-31T11:31:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Ödül Töreni’nde yaptığı konuşmada, Türkiye’nin sağlık teknolojileri ve tıbbi cihaz üretiminde attığı adımlara değindi. Erdoğan, yerli üretimin artırılması ve dışa bağımlılığın azaltılmasının önemini vurguladı.", "Cumhurbaşkanı Erdoğan'dan sağlıkta yeni dönem mesajı! Yerli üretim vurgusu"),
+  fx("İşçi Haber", "isci-haber", "niche", "2026-10-31T12:05:49Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, Rixos Tersane İstanbul'da gerçekleştirilen 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni'nde önemli açıklamalarda bulundu. Erdoğan, sağlık sektöründe devreye alınan yerli üretim modeli sayesinde kritik tıbbi cihaz ve ekipmanların artık Türkiye'de üretildiğini duyurdu.", "Cumhurbaşkanı Erdoğan'dan Sağlık Sektöründe Yerli Üretim Vurgusu"),
+  fx("Aydınlık", "aydinlik", "outlet", "2026-10-31T12:16:39Z", "Cumhurbaşkanı Erdoğan, 12. Türk Tıp Dünyası Kurultayı'nda yaptığı konuşmada sağlıkta yerli üretimin stratejik önemine vurgu yaptı. Tıbbi cihazların artık Türkiye'de üretilip ihraç edildiğini belirten Erdoğan, savunma sanayisindeki başarıyı sağlık sektöründe de yakalayacaklarını söyledi.", "Savunma sanayisinden sonra sıra sağlıkta! Cumhurbaşkanı Erdoğan açıkladı"),
+  fx("Dijital Gaste", "dijital-gaste", "outlet", "2026-10-31T12:30:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, İstanbul’da düzenlenen 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni’nde, sağlıkta yerli üretimin önemini vurguladı. Tıbbi cihaz ve ekipmanları artık Türkiye’de ürettiklerini belirten Erdoğan, \"Savunma sanayisinde nasıl destan yazdıysak sağlık sektöründe de aynı başarıyı elde edeceğiz.\" dedi.", "Cumhurbaşkanı Erdoğan: \"Sağlıkta zirveye oynamayı sürdüreceğiz\""),
+  fx("BHA", "bha", "wire", "2026-10-31T12:33:48Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, 12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni’nde yaptığı konuşmada, “Savunma sanayiinde nasıl destan yazdıysak aynı başarıları sağlık sektöründe de elde edeceğiz” dedi.", "Cumhurbaşkanı Erdoğan: Sağlık sektöründe de savunma sanayiindeki başarıları elde edeceğiz"),
+];
+
+// 85ef184c: neutral title "Cumhurbaşkanı Erdoğan: İsrail'e iltimas geçiliyor"
+const R85_TITLE = "Cumhurbaşkanı Erdoğan: İsrail'e iltimas geçiliyor";
+const R85_SUMMARY = "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 Resmi Açılış Töreni'nde açıklamalarda bulunuyor.";
+const R85_MEMBERS = [
+  fx("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-11-06T09:53:13Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, İstanbul Kongre Merkezi'nde, \"TRT World Forum 2026 Resmi Açılış Töreni\"nde konuşuyor.", "CANLI: Cumhurbaşkanı Erdoğan konuşuyor"),
+  fx("Star", "star", "outlet", "2026-11-06T12:27:00Z", "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 Resmi Açılış Töreni'nde açıklamalarda bulunuyor.", "Cumhurbaşkanı Erdoğan'dan reform vurgusu: Dünya sancılı bir dönemden geçiyor"),
+  fx("Hürriyet", "hurriyet", "outlet", "2026-11-06T12:28:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, İstanbul Kongre Merkezi'nde TRT World Forum 2026 etkinliğinde konuştu.", "'İsrail'e iltimas geçiliyor' Cumhurbaşkanı Erdoğan: Uluslararası sistem iflas etti"),
+  fx("Türkiye Gazetesi", "turkiye-gazetesi", "outlet", "2026-11-06T12:28:34Z", "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 etkinliğinde açıklamalarda bulunuyor.", "Cumhurbaşkanı Erdoğan'dan önemli açıklamalar"),
+  fx("Milliyet", "milliyet", "outlet", "2026-11-06T12:31:54Z", "Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle;İki gün boyunca önemli konuların ele alınacağı forumun ülkelerimiz ve tüm insanlık için hayırlara vesile olmasını diliyorum.", "Son dakika... Cumhurbaşkanı Erdoğan: Algı operasyonlarına boyun eğmeyiz"),
+  fx("Haber7", "haber7", "outlet", "2026-11-06T12:32:00Z", "Son dakika haberi... Cumhurbaşkanı Erdoğan, İstanbul Kongre Merkezi'nde \"TRT World Forum 2026 Resmi Açılış Töreni\"nde konuşuyor.", "Erdoğan'dan son dakika açıklamalar"),
+  fx("Habertürk", "haberturk", "outlet", "2026-11-06T12:32:21Z", "Son dakika... Cumhurbaşkanı Erdoğan, TRT World Forum 2026 etkinliğinde açıklamalarda bulunuyor", "Cumhurbaşkanı Erdoğan'dan açıklamalar"),
+  fx("OdaTV", "odatv", "outlet", "2026-11-06T12:42:59Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, TRT World Forum 2026 etkinliğinde sistem eleştirisi yaptı. Dünyanın sancılı bir süreçten geçtiğini vurgulayan Cumhurbaşkanı Erdoğan, \"Eskinin ölmekte olduğu, yeninin ise henüz doğamadığı yapısal bir krizi hep beraber tecrübe ediyoruz\" ifadelerini kullandı.", "TRT World Forum 2026'da Cumhurbaşkanı Erdoğan'dan sistem eleştirisi... \"Eski öldü, yeni henüz doğamadı\""),
+  fx("Haber.com", "haber-com", "outlet", "2026-11-06T13:06:55Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, İstanbul Kongre Merkezi'nde bu yıl onuncusu düzenlenen TRT World Forum 2026'nın açılışında uluslararası kamuoyuna ve küresel karar alıcılara sert eleştiriler yöneltti.", "Cumhurbaşkanı Erdoğan TRT World Forum'da Konuştu: \"Küresel Sistem İflas Bayrağını Çekti, Dünün Reçeteleri Çare Olmuyor\""),
+  fx("Dünya", "dunya", "niche", "2026-11-06T13:09:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, TRT World Forum 2026'da konuştu. Cumhurbaşkanı Erdoğan \"Bizim de imzalanmasına katkı verdiğimiz Gazze Barış Anlaşması ne yazık ki uygulanmıyor. Uluslararası ilişkilerin temeli olan 'ahde vefa' ilkesi hayata geçirilemiyor. Bu şekilde hiçbir sorunun çözülemeyeceğini herkes anlamalıdır. Uluslararası sistem iflas etti\" dedi.", "Erdoğan: Uluslararası sistem iflas etti"),
+  fx("Yeniçağ", "yenicag", "outlet", "2026-11-06T14:01:16Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, İstanbul Kongre Merkezi'nde TRT World Forum 2026 etkinliğinde konuştu.", "Cumhurbaşkanı Erdoğan TRT World Forum 2026'da konuştu: Sistem iflas bayrağını çekti"),
+];
+
+// dd5535a7: neutral title "Bahçeli ile Kol Kola Yürümüştü: Dervişoğlu'ndan Açıklama"
+const DD5_TITLE = "Bahçeli ile Kol Kola Yürümüştü: Dervişoğlu'ndan Açıklama";
+const DD5_SUMMARY = "Ankara'da ilk tören Anıtkabir'de yapıldı. Başkan Recep Tayyip Erdoğan'ın liderliğindeki Aslanlı Yol'daki kortejde, TBMM Numan Kurtulmuş, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, Yeni Parti Genel Başkanı...Devamı için tıklayınız";
+const DD5_MEMBERS = [
+  fx("Yeni Asır", "yeni-asir", "outlet", "2026-10-30T03:50:20Z", "Ankara'da ilk tören Anıtkabir'de yapıldı. Başkan Recep Tayyip Erdoğan'ın liderliğindeki Aslanlı Yol'daki kortejde, TBMM Numan Kurtulmuş, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, Yeni Parti Genel Başkanı...Devamı için tıklayınız", "\"Türkiye Yüzyılı milli davamız\""),
+  fx("Milliyet", "milliyet", "outlet", "2026-10-30T04:01:45Z", "Anıtkabir’deki tören, devlet erkanının Aslanlı Yol’da yürüyüşüyle başladı. Cumhurbaşkanı Recep Tayyip Erdoğan’ın başkanlığındaki kortejde, TBMM Başkanı Numan Kurtulmuş, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, Yeni Parti Genel Başkanı Özgür Özel, MHP Genel Başkanı Devlet Bahçeli, CHP Genel Başkanı Kemal Kılıçdaroğlu, İYİ Parti Genel Başkanı Müsavat Dervişoğlu, Cumhurbaşkanlığı Kabinesi üyeleri, yüksek yargı organlarının başkanları, Genelkurmay Başkanı Orgeneral Selçuk Bayraktaroğlu, kuvvet kom...", "Devlet erkanı Anıtkabir’i ziyaret etti | Farklı cephelerde mücadele ediyoruz"),
+  fx("Haber7", "haber7", "outlet", "2026-10-30T04:23:00Z", "Anıtkabir'deki 29 Ekim töreni sonrası MHP lider Devlet Bahçeli ile kol kola yürüyen İYİ Parti Genel Başkanı Müsavat Dervişoğlu, siyasetteki kutuplaşmaya değinerek, insani ilişkilerin dahi tartışma konusu haline getirildiğini söyledi.", "Bahçeli'yle kol kola girdi: Parti içinden tepki! Dervişoğlu'ndan açıklama"),
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-10-30T04:51:31Z", "İYİ Parti Genel Başkanı Müsavat Dervişoğlu, 29 Ekim töreninde MHP lideri Devlet Bahçeli ile kol kola yürümesine partisinden gelen tepkilerin ardından açıklama yaptı. Ortada izaha muhtaç bir durum olmadığını belirten Dervişoğlu, siyasetteki kutuplaşma nedeniyle insani ilişkilerin bile tartışma konusu haline getirildiğini söyledi. Erhan Usta'nın tepkisine ilişkin değerlendirmesini ise ertesi güne bıraktı.", "Anıtkabir'deki olay görüntü sonrası Dervişoğlu'ndan ilk açıklama"),
+  fx("Independent Türkçe", "indyturk", "outlet", "2026-10-30T06:06:28Z", "İYİ Parti Genel Başkanı Müsavat Dervişoğlu, 29 Ekim Cumhuriyet Bayramı dolayısıyla Anıtkabir'de düzenlenen törenin ardından MHP Genel Başkanı Devlet Bahçeli'nin koluna girerek merdivenlerden inmesine yönelik tepkilere ilişkin değerlendirmede bulundu. Siyasi kutuplaşma nedeniyle insani ilişkilerin dahi tartışma konusu yapıldığını belirten Dervişoğlu, \"Siyasette sorumlu bir makamdayım diye karakterimi değiştiremem\" dedi.\n\nDervişoğlu'nun, Cumhuriyet'in 103. yıl dönümü dolayısıyla Anıtkabir'de dü...", "Dervişoğlu: Siyasette sorumlu bir makamdayım diye karakterimi değiştiremem"),
+  fx("Cumhuriyet", "cumhuriyet", "outlet", "2026-10-30T06:20:00Z", "İYİ Parti Genel Başkanı Müsavat Dervişoğlu, MHP lideri Devlet Bahçeli'nin koluna girdiği anlarla ilgili gelen eleştiriler üzerine \"Bütün bu olup bitenleri anlayışla yaklaşıyorum. Siyasette sorumlu bir makamdayım diye karakterimi değiştiremem\" dedi.", "Müsavat Dervişoğlu'ndan Bahçeli'nin koluna girdiği görüntülere ilişkin açıklama: 'İnsani ilişkiler bile siyasette tartışma konusu yapılabiliyor'"),
+  fx("Ekonomim", "ekonomim", "niche", "2026-10-30T06:21:00Z", "İYİ Parti Genel Başkanı Müsavat Dervişoğlu, Anıtkabir’de MHP lideri Devlet Bahçeli’nin koluna girmesine yönelik tepkilere yanıt verdi. Dervişoğlu, siyasette kutuplaşmanın insani ilişkileri de tartışma konusu haline getirdiğini belirterek konuyla ilgili bugün açıklama yapacağını söyledi.", "Müsavat Dervişoğlu'ndan Bahçeli açıklaması: İzaha muhtaç bir durum yok"),
+  fx("Elips Haber", "elips-haber", "outlet", "2026-10-30T06:22:00Z", "Anıtkabir'deki 29 Ekim töreni sonrası MHP lider Devlet Bahçeli ile kol kola yürüyen İYİ Parti Genel Başkanı Müsavat Dervişoğlu, siyasetteki kutuplaşmaya değinerek, insani ilişkilerin dahi tartışma konusu haline getirildiğini söyledi.", "Bahçeli’nin koluna giren Dervişoğlu’ndan eleştirilere yanıt!"),
+  fx("Haber.com", "haber-com", "outlet", "2026-10-30T07:18:19Z", "İYİ Parti Lideri Müsavat Dervişoğlu, 29 Ekim Anıtkabir töreninde MHP lideri Devlet Bahçeli ile kol kola görüntülenmişti.", "Bahçeli ile Kol Kola Yürümüştü: Dervişoğlu'ndan Açıklama"),
+  fx("Gazete Oksijen", "gazete-oksijen", "outlet", "2026-10-30T07:22:00Z", "Antıkabir'de düzenlenen törende MHP lideri Devlet Bahçeli'nin koluna girmesi eleştirilen İyi Parti Genel Başkanı Müsavat Dervişoğlu, konuyu değerlendirdi", "Dervişoğlu'ndan Bahçeli ile olan görüntüsüne dair açıklama: Sorumlu bir makamdayım diye karakterimi değişemem"),
+  fx("Evrensel", "evrensel", "outlet", "2026-10-30T08:17:00Z", "İYİP Genel Başkanı Müsavat Dervişoğlu, Anıtkabir'de MHP lideri Devlet Bahçeli'nin koluna girmesine yönelik eleştirilere yanıt verdi. Dervişoğlu, \"Konuyla ilgili yarın bir açıklama yapacağım. Aslında izaha muhtaç bir durum yok ortada\" dedi.", "Bahçeli'yle kol kola yürüyen Dervişoğlu'ndan açıklama: İzaha muhtaç bir durum yok"),
+  fx("BirGün", "birgun", "outlet", "2026-10-30T09:22:00Z", "ANıtkabir'de MHP Lideri Bahçeli'nin koluna girdiği için partisinden ve kamuoyundan eleştiri alan İYİ Parti Lideri Müsavat Dervişoğlu \"Bugün olsa yine aynısını yaparım\" dedi.", "İYİ Parti’den tepki gelmişti: Bahçeli'nin koluna girdiği için eleştirilen Müsavat Dervişoğlu'ndan açıklama"),
+  fx("Dijital Gaste", "dijital-gaste", "outlet", "2026-10-30T11:04:00Z", "İYİ Parti Genel Başkanı Müsavat Dervişoğlu, MHP lideri Devlet Bahçeli ile Anıtkabir'de kol kola yürüdüğü görüntülere yönelik eleştirilere, “Koluna girdiğim kişi Devlet Bahçeli olduğu için bu tartışmalar yaşanıyor.” sözleriyle yanıt verdi.", "Müsavat Dervişoğlu, Anıtkabir'deki görüntülere ilişkin konuştu: “Söyleyecek lafı olan gitsin, Bahçeli'ye söylesin”"),
+  fx("İşçi Haber", "isci-haber", "niche", "2026-10-30T11:22:12Z", "İYİ Parti Genel Başkanı Müsavat Dervişoğlu, Anıtkabir'de MHP lideri Devlet Bahçeli'nin koluna girmesine yönelik eleştirilere net bir yanıt verdi. Davranışının siyasi nezaket çerçevesinde gerçekleştiğini belirten Dervişoğlu, bugün benzer bir durum yaşanması halinde yine aynı hareketi yapacağını vurguladı.", "Müsavat Dervişoğlu'ndan Devlet Bahçeli Açıklaması"),
+];
+
+// 181cd879: neutral title "Cumhurbaşkanı Erdoğan'dan 'fon' açıklaması: Hiç ummadığınız insanlar işin içine girmişler"
+const K18_TITLE = "Cumhurbaşkanı Erdoğan'dan 'fon' açıklaması: Hiç ummadığınız insanlar işin içine girmişler";
+const K18_SUMMARY = "Son  dakika... Cumhurbaşkanı Recep Tayyip Erdoğan, fon soruşturmasına ilişkin yürütülen süreçte hiçbir şekilde taviz ver...";
+const K18_MEMBERS = [
+  fx("Haber7", "haber7", "outlet", "2026-11-05T09:00:00Z", "SON DAKİKA... Cumhurbaşkanı Recep Tayyip Erdoğan, fon soruşturmasına ilişkin yürütülen süreçte hiçbir şekilde taviz verilmeyeceğini belirterek, rüşvet, usulsüzlük ve suistimallerin tek tek ortaya çıkarılacağını söyledi.", "SON DAKİKA: Cumhurbaşkanı Erdoğan: Haksız kazanç sağlayan herkes hesabını verecek!"),
+  fx("Sözcü", "sozcu", "outlet", "2026-11-05T09:04:56Z", "Son  dakika... Cumhurbaşkanı Recep Tayyip Erdoğan, fon soruşturmasına ilişkin yürütülen süreçte hiçbir şekilde taviz ver...", "Cumhurbaşkanı Erdoğan'dan 'fon' açıklaması: Hiç ummadığınız insanlar işin içine girmişler"),
+  fx("Onedio", "onedio", "aggregator", "2026-11-05T09:11:07Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, Güney Kore Ziyareti Dönüşünde Gazetecilerin sorularını yanıtladı. Erdoğan'a son günlerin gündeminde yer alan 'fon vurgusu'na dair 'Bundan sonra süreç nasıl işleyecek? Son durum nedir?' sorusu yöneltildi.Erdoğan'ın açıklamasından öne çıkan kısımlar aşağıdaki gibidir:'Bu konuda gerekli yol haritasını oluşturduk, gerekli talimatları verdik. Yol haritasına göre her kurum kendi görevini yerine getiriyor. Yani buradan daha önce yaptığım açıklamalarda da söylediği...", "Cumhurbaşkanı Erdoğan'dan 'Fon Vurgunu' Açıklaması: \"Hiç Ummadığınız İnsanlar İşin İçine Girmişler\""),
+  fx("Cumhuriyet", "cumhuriyet", "outlet", "2026-11-05T09:18:00Z", "Son dakika... AKP'li Cumhurbaşkanı Recep Tayyip Erdoğan, fon soruşturmasına ilişkin yürütülen süreçte hiçbir şekilde taviz verilmeyeceğini belirterek, rüşvet, usulsüzlük ve suistimallerin tek tek ortaya çıkarılacağını söyledi.", "Son Dakika... Erdoğan'dan 'fon vurgunu' açıklaması: 'Hiç ummadığınız insanlar işin içine girmişler'"),
+  fx("Elips Haber", "elips-haber", "outlet", "2026-11-05T09:23:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, fon soruşturmasına ilişkin yürütülen süreçte hiçbir şekilde taviz verilmeyeceğini belirterek, rüşvet, usulsüzlük ve suistimallerin tek tek ortaya çıkarılacağını söyledi.", "Erdoğan'dan fon soruşturmasına ilişkin dikkat çeken açıklama!"),
+  fx("Habervakti", "habervakti", "outlet", "2026-11-05T09:41:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, fon soruşturmasına ilişkin yürütülen süreçte hiçbir şekilde taviz verilmeyeceğini belirterek, rüşvet, usulsüzlük ve suistimallerin tek tek ortaya çıkarılacağını söyledi.", "Erdoğan: Haksız kazanç sağlayan herkes hesabını verecek!"),
+  fx("Korkusuz", "korkusuz", "outlet", "2026-11-05T10:01:26Z", "Erdoğan'dan fon açıklaması: Hiç ummadığınız insanlar işin içine girmişler", "Erdoğan'dan fon açıklaması: Hiç ummadığınız insanlar işin içine girmişler"),
+  fx("İlke TV", "ilke-tv", "outlet", "2026-11-05T10:53:14Z", "Cumhurbaşkanı Erdoğan, Güney Kore'deki temaslarının ardından uçakta gündeme ilişkin soruları yanıtladı. Meclis'te alt komisyonların kurulmasıyla somut adımların atılmasının beklendiği sürece ilişkin de konuşan Erdoğan, \"Silah bırakmanın tam anlamıyla gerçekleşmesi, tespit ve teyit süreçlerinin tamamlanması ile yeni aşamaya geçeceğiz\" dedi.", "Cumhurbaşkanı Erdoğan’dan ‘fon’ açıklaması: ‘Hiç ummadığınız insanlar işin içine girmişler’"),
+  fx("Dokuz8 Haber", "dokuz8-haber", "outlet", "2026-11-05T11:00:50Z", "Cumhurbaşkanı Erdoğan, Güney Kore dönüşü uçakta yaptığı açıklamada fon soruşturmasına ilişkin yargının gereğini yaptığını belirterek, kamu kaynağı kullanılmadan tasfiye sürecinin yürütüldüğünü ve silah bırakmanın teyit edilmesiyle yeni aşamaya geçileceğini söyledi.", "Erdoğan'dan fon açıklaması: Hiç ummadığınız insanlar işin içine girmişler"),
+  fx("F5 Haber", "f5-haber", "aggregator", "2026-11-05T11:03:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, fon soruşturmasında hiçbir şekilde taviz verilmeyeceğini açıkladı. Rüşvet, usulsüzlük ve suistimallerin tek tek ortaya çıkarıldığını belirten Erdoğan, \"Hiç ummadığınız insanlar, bu işlerin içerisine girmişler\" dedi.", "Erdoğan'dan fon soruşturmasında çarpıcı sözler: Hiç ummadığınız insanlar işin içinde"),
+  fx("10Haber", "on-haber", "outlet", "2026-11-05T13:28:01Z", "Cumhurbaşkanı Recep Tayyip Erdoğan, Güney Kore’ye yaptığı ziyaret sonrası uçakta kendisini izleyen gazetecilerin sorularını yanıtladı. Erdoğan fon soygunuyla ilgili bir soruya “Rüşvet, usulsüzlük, suistimal, bütün bunlar tek tek ortaya çıkartılıyor. Tabii bir gerçek var? Nedir bu gerçek? Bakıyorsunuz hiç ummadığınız insanlar, bu işlerin içerisine girmişler. Yargı bunları tespit ediyor ve gerekeni yapıyor” cevabını verdi. “Terörsüz […]", "Fon soygunu… Erdoğan: Bakıyorsunuz hiç ummadığınız kişiler bu işlere girmişler"),
+  fx("Yeni Şafak", "yeni-safak", "outlet", "2026-11-06T01:00:00Z", "Cumhurbaşkanı Erdoğan, fon soruşturmasından taviz verilme-yeceğini söyledi. Rüşvet, usulsüzlük ve suistimalin tek tek ortaya çıkartıldığını belirten Erdoğan, “Tabii bir gerçek var? Nedir bu gerçek? Bakıyorsunuz hiç ummadığınız insanlar, bu işlerin içerisine girmişler. Yargı bunları tespit ediyor ve gerekeni yapıyor” dedi.", "Ummadığımız kişiler bu işe girmiş"),
+  fx("Hürriyet", "hurriyet", "outlet", "2026-11-06T04:00:00Z", "Cumhurbaşkanı Tayyip Erdoğan, fon soruşturmasına ilişkin “Rüşvet, usulsüzlük, suiistimal, bütün bunlar tek tek ortaya çıkartılıyor. Tabii bir gerçek var.\u00a0 Bakıyorsunuz hiç ummadığınız insanlar, bu işlerin içerisine girmişler. Yargı bunları tespit ediyor ve gerekeni yapıyor” dedi.", "Erdoğan’dan fon açıklamaları: Tek tek ortaya çıkartılıyor"),
+];
+
+// 8e1a8c91: neutral title "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı"
+const S8E_TITLE = "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı";
+const S8E_SUMMARY = "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı.";
+const S8E_MEMBERS = [
+  fx("Son Dakika", "son-dakika", "aggregator", "2026-11-02T13:54:50Z", "TBMM Başkanı Numan Kurtulmuş, TBMM Genel Sekreterliği görevine Kemal Şamlıoğlu'nu atadı.", "Numan Kurtulmuş, TBMM Genel Sekreterliğine Kemal Şamlıoğlu'nu atadı"),
+  fx("Akşam", "aksam", "outlet", "2026-11-02T14:09:00Z", "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı.", "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı"),
+  fx("Milliyet", "milliyet", "outlet", "2026-11-02T14:13:06Z", "1978'de Rize'de doğan Şamlıoğlu, Milli Eğitim Bakanlığı Özel Öğretim Kurumları Genel Müdürlüğü, Ankara Hacı Bayram Veli Üniversitesi Genel Sekreterliği, Cumhurbaşkanlığı Eğitim ve Öğretim Politikaları Kurulu Üyeliği ve Milli Eğitim Bakan Yardımcılığı görevlerinde bulundu.\nSamsun Üniversitesinde profesör olarak görev yapan Şamlıoğlu, üst politika belgelerinin hazırlanması, mevzuat çalışmaları, stratejik planlama, bütçe yönetimi ve yasama süreçlerinde sorumluluklar üstlendi.", "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı"),
+  fx("Star", "star", "outlet", "2026-11-02T14:26:00Z", "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı.", "Kemal Şamlıoğlu, TBMM Genel Sekreterliğine getirildi"),
+  fx("BirGün", "birgun", "outlet", "2026-11-02T14:27:00Z", "TBMM'de Genel Sekreterlik görevine Kemal Şamlıoğlu'nun atandığı öğrenildi.", "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı"),
+  fx("Muhalif", "muhalif", "outlet", "2026-11-02T14:28:01Z", "Millî Eğitim Bakan Yardımcılığı ve Cumhurbaşkanlığı Eğitim ve Öğretim Politikaları Kurulu üyeliği görevlerinde bulunan Şamlıoğlu'nun yeni görevi belli oldu.", "TBMM Genel Sekreterliği görevine Prof. Dr. Kemal Şamlıoğlu atandı"),
+  fx("Elips Haber", "elips-haber", "outlet", "2026-11-02T14:44:00Z", "Türkiye Büyük Millet Meclisi (TBMM) Genel Sekreterliği görevine Kemal Şamlıoğlu getirildi. Atamanın, TBMM Başkanı Numan Kurtulmuş tarafından yapıldığı öğrenildi.", "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı"),
+  fx("Cumhuriyet", "cumhuriyet", "outlet", "2026-11-02T14:55:00Z", "TBMM Genel Sekreterliği görevine TBMM Başkanı Numan Kurtulmuş tarafından Kemal Şamlıoğlu getirildi.", "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı"),
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-02T15:04:02Z", "TBMM Başkanı Numan Kurtulmuş, Meclis Genel Sekreterliğine Kemal Şamlıoğlu'nu atadı. 1978'de Rize'de doğan Şamlıoğlu daha önce Milli Eğitim Bakan Yardımcılığı ve Ankara Hacı Bayram Veli Üniversitesi Genel Sekreterliği yaptı. Peki, Kemal Şamlıoğlu kimdir, hangi görevlerde bulundu? Yeni genel sekreter şu an Samsun Üniversitesinde profesör.", "Kemal Şamlıoğlu kimdir? Bakan yardımcılığından TBMM Genel Sekreterliğine"),
+  fx("Haber7", "haber7", "outlet", "2026-11-02T16:58:00Z", "TBMM Genel Başkanı Kurtulmuş, Prof. Dr. Kemal Şamlıoğlu'nu TBMM Genel Sekreterliğine atadı.", "Kemal Şamlıoğlu, TBMM Genel Sekreterliğine atandı"),
+  fx("BHA", "bha", "wire", "2026-11-02T17:35:28Z", "Türkiye Büyük Millet Meclisi (TBMM) Genel Sekreterliği görevine, eski Millî Eğitim Bakan Yardımcısı Prof. Dr. Kemal Şamlıoğlu getirildi. Rize’nin Ardeşen ilçesinde doğan Şamlıoğlu, eğitim ve kamu yönetimi alanlarında çeşitli üst düzey görevlerde bulundu.", "Prof. Dr. Kemal Şamlıoğlu TBMM Genel Sekreterliğine atandı"),
+];
+
+// f1837ee1: neutral title "Bakan Bayraktar yeni yol haritasını duyurdu: 2040'ta enerjide bağımsız olacağız"
+const F18_TITLE = "Bakan Bayraktar yeni yol haritasını duyurdu: 2040'ta enerjide bağımsız olacağız";
+const F18_SUMMARY = "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, enerjinin yeni yol haritası programında açıklamalarda bulunuyor.";
+const F18_MEMBERS = [
+  fx("CNN Türk", "cnn-turk", "outlet", "2026-11-05T08:18:04Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, enerjinin yeni yol haritası programında açıklamalarda bulunuyor.", "SON DAKİKA | Bakan Bayraktar: 2040'ta enerjide bağımsız olacağız"),
+  fx("Takvim", "takvim", "outlet", "2026-11-05T08:25:54Z", "2017 yılında dönemin Enerji ve Tabii Kaynaklar Bakanı Berat Albayrak tarafından temelleri atılan milli enerji politikasının Milli Enerji 2040 vizyonu açıklanıyor. Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, lansmanda açıklamalarda bulunuyor.", "Bakan Bayraktar Milli Enerji 2040 vizyonunu açıkladı! Sinop ve Trakya'da nükleer için tarih verdi... 500 milyar dolarlık hedef"),
+  fx("A Haber", "a-haber", "outlet", "2026-11-05T08:27:21Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, Milli Enerji 2040 Lansmanı'nda önemli açıklamalarda bulunuyor.Devamı için tıklayınız", "\"Milli Enerji\" de Türkiye'nin yol haritası ne? Bakan Bayraktar açıkladı: 2040'ta enerjide bağımsız olacağız"),
+  fx("TRT Haber", "trt-haber", "outlet", "2026-11-05T08:28:00Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, İstanbulda \"Milli Enerji 2040 Lansmanı\"nda konuşuyor.", "Enerji ve Tabii Kaynaklar Bakanı Bayraktar konuşuyor"),
+  fx("Haber Global", "haber-global", "outlet", "2026-11-05T08:28:00Z", "Milli Enerji 2040 Lansmanı'nda konuşan Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, enerji dışa bağımlılığının yüzde 68'den yüzde 5'e çekilmesi takdirde cari açığın sıfırlanabileceğini söyledi.", "Bakan Bayraktar: Enerjide dışa bağımlılığı yüzde 50'e çekersek dış açık sıfırlanıyor"),
+  fx("Haber7", "haber7", "outlet", "2026-11-05T08:30:00Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, Milli Enerji 2040 Lansmanı programında açıklamalarda bulunuyor.", "Son Dakika: Bakan Bayraktar Milli Enerji 2040 vizyonunu açıkladı!"),
+  fx("Akşam", "aksam", "outlet", "2026-11-05T08:33:00Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, Milli Enerji 2040 Lansman Programı'nda yaptığı açıklamalarda, \"2040'ta enerjide bağımsız olacağız\" ifadelerini kullandı.", "Bakan Bayraktar yeni yol haritasını duyurdu: 2040'ta enerjide bağımsız olacağız"),
+  fx("Ajans Haber", "ajans-haber", "aggregator", "2026-11-05T08:38:06Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, Milli Enerji 2040 Lansman Programı'nda konuşuyor.", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar konuşuyor"),
+  fx("Star", "star", "outlet", "2026-11-05T08:39:00Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, \"Enerjide bağımsız Türkiye olarak öne çıkıyoruz. 2040'ta enerjide bağımsız olacağız. Hedefimiz petrol ve doğal gazda üreten Türkiye.\" dedi.", "Bakan Bayraktar yeni yol haritasını açıkladı: 2040'ta enerjide bağımsız olacağız"),
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-05T08:40:19Z", "Enerji Bakanı Alparslan Bayraktar: \"Türkiye 2040 itibarıyla 175 bin megavatlık rüzgar ve güneş kurulu gücüne ulaşacak.", "Enerji Bakanı Alparslan Bayraktar: \"Türkiye 2040 itibarıyla 175 bin megavatlık rüzgar ve güneş kurulu gücüne ulaşacak. Yatırım tutarı yaklaşık 100 milyar dolar\""),
+  fx("Haber.com", "haber-com", "outlet", "2026-11-05T08:41:15Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, Milli Enerji 2040 Planı’nda önemli açıklamalarda bulundu.", "Bakan Bayraktar: \"2040’ta Enerjide Bağımsız Olunacak\""),
+  fx("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-11-05T08:43:47Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, \"Türkiye 2040 itibarıyla 175 bin megavatlık rüzgar ve güneş kurulu gücüne ulaşacak. Yatırım tutarı yaklaşık 100 milyar dolar.\" dedi.", "Bakan Bayraktar: Türkiye 2040 itibarıyla 175 bin megavatlık rüzgar ve güneş kurulu gücüne ulaşacak"),
+  fx("Bloomberg HT", "bloomberg-ht", "niche", "2026-11-05T08:51:04Z", "Milli Enerji 2040 lansmanında konuşan Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, \"2024 yılına kadar 100 milyar dolar yatırımla 175 GW/RES kurulu güç hedefliyoruz\" dedi.", "Bakan Bayraktar: Türkiye artık ekonomisini elektrikleştirecek"),
+  fx("Son Dakika", "son-dakika", "aggregator", "2026-11-05T08:52:12Z", "Bakan Bayraktar, enerjinin ekonominin en önemli itici gücü olduğunu belirterek Türkiye ekonomisinin 2040'ta yüzde 36 elektrikleşeceğini söyledi. Bayraktar, 2040'ta 175 GW rüzgar ve güneş enerjisi gücüne ulaşmayı hedeflediklerini ifade etti.", "Bakan Bayraktar, 2040'ta 175 GW rüzgar ve güneş enerjisi hedefini açıkladı"),
+  fx("Beyaz Gazete", "beyaz-gazete", "aggregator", "2026-11-05T09:10:34Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, enerjide bağımsızlık hedefini vurgulayarak, yeni dönemde nükleer enerjinin de Türkiye'nin enerji sepetine dahil edilmesi gerektiğini söyledi.", "Enerjide Tam Bağımsızlık Hedefi! Bakan Bayraktar Açıkladı"),
+  fx("Ekonomim", "ekonomim", "niche", "2026-11-05T09:41:00Z", "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, Milli Enerji 2040 programı kapsamında Türkiye'nin uzun vadeli enerji stratejisini açıkladı. Yeni yol haritasında enerji arz güvenliğinin güçlendirilmesi, enerji ithalatının azaltılması ve iklim değişikliğiyle mücadele öncelikli başlıklar arasında yer aldı.", "Bakan Bayraktar: Türkiye'yi enerjide bağımsız kılacak adımları atacağız"),
+];
+
+// 6ef586c4: neutral title "İstanbul Barosu Başkanı Ümit Kocasakal oldu"
+const K6E_TITLE = "İstanbul Barosu Başkanı Ümit Kocasakal oldu";
+const K6E_SUMMARY = "İstanbul Barosu başkanlık seçimlerinde adaylar arasında yer alan eski başkan Ümit Kocasakal, yeniden gündeme geldi. Hukukçu ve akademisyen kimliğiyle tanınan Kocasakal'ın yaşamı, mesleki kariyeri ve özel hayatı araştırılıyor. Peki, Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit Kocasakal nereli, kaç yaşında, evli mi? Detaylar haberimizde.";
+const K6E_MEMBERS = [
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-10-25T15:03:39Z", "İstanbul Barosu başkanlık seçimlerinde adaylar arasında yer alan eski başkan Ümit Kocasakal, yeniden gündeme geldi. Hukukçu ve akademisyen kimliğiyle tanınan Kocasakal'ın yaşamı, mesleki kariyeri ve özel hayatı araştırılıyor. Peki, Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit Kocasakal nereli, kaç yaşında, evli mi? Detaylar haberimizde.", "Ümit Kocasakal kimdir? İstanbul Barosu yeni başkanı Ümit Kocasakal nereli, kaç yaşında, evli mi?"),
+  fx("Ekonomim", "ekonomim", "niche", "2026-10-25T15:11:00Z", "İstanbul Barosu'nun başkanlık seçimlerinde Cumhuriyetçi Güç Birliği'nin adayı olarak yarışan Prof. Dr. Ümit Kocasakal, resmi olmayan sonuçlara göre başkan seçildi. Kocasakal'ın yeniden başkan olmasıyla \"Ümit Kocasakal hangi partili, kaç yaşında, nereli? İstanbul Barosu Başkanı Ümit Kocasakal kimdir?\" sorularının yanıtı merak konusu oldu.", "Ümit Kocasakal hangi partili, kaç yaşında, nereli? İstanbul Barosu Başkanı Ümit Kocasakal kimdir?"),
+  fx("İşçi Haber", "isci-haber", "niche", "2026-10-25T15:13:47Z", "İstanbul Barosu başkanlık seçimlerinde yeniden aday olan Ümit Kocasakal'ın yaşamı ve kariyeri merak ediliyor.", "Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit Kocasakal nereli, kaç yaşında, evli mi?"),
+  fx("Onedio", "onedio", "aggregator", "2026-10-25T15:22:14Z", "İstanbul Barosu'nun 128. Olağan Genel Kurulu'nda yapılan başkanlık seçiminin ardından gözler yeni başkana çevrildi. İstanbul Barosu'nun yeni başkanı Ümit Kocasakal kimdir, kaç yaşında ve nereli? Ümit Kocasakal hangi lise ve üniversiteden mezun oldu, akademik kariyeri nerede şekillendi? Daha önce İstanbul Barosu Başkanlığı yaptı mı ve bu seçimde hangi adaylarla yarıştı?", "Ümit Kocasakal Kimdir, Kaç Yaşında ve Nereli? İstanbul Barosu'nun Yeni Başkanı Ümit Kocasakal Kimdir?"),
+  fx("Cumhuriyet", "cumhuriyet", "outlet", "2026-10-25T15:24:00Z", "İstanbul Barosu Genel Kurulu’nda Cumhuriyetçi Güç Birliği Grubu’nun adayı Ümit Kocasakal, resmi olmayan sonuçlara göre seçimi kazanarak baronun yeni başkanı oldu. Peki, Ümit Kocasakal kimdir? İstanbul Barosu Başkanı Ümit Kocasakal kaç yaşında, nereli?", "Ümit Kocasakal kimdir? İstanbul Barosu Başkanı Ümit Kocasakal kaç yaşında, nereli?"),
+  fx("Karar", "karar", "outlet", "2026-10-25T15:30:48Z", "Tartışmalı geçen İstanbul Barosu 128. Olağan Genel Kurulu’nda resmi olmayan sonuçlara göre, Cumhuriyetçi Güç Birliği Grubu adayı Prof. Dr. Ümit Kocasakal seçimi kazanarak başkan seçildi.", "İstanbul Barosu Başkanı Ümit Kocasakal  oldu"),
+  fx("Haber7", "haber7", "outlet", "2026-10-25T15:40:00Z", "Son dakika haberi... İstanbul Barosunun 128'nci Olağan Genel Kurulu'nda resmi olmayan sonuçlara göre başkanlık seçimini Cumhuriyetçi Güç Birliği Grubu adayı Ümit Kocasakal kazandı.", "İstanbul Barosunun yeni başkanı Ümit Kocasakal oldu"),
+  fx("Aykırı", "aykiri", "outlet", "2026-10-25T15:49:25Z", "İstanbul Barosu’nun 128. Olağan Genel Kurulu’nda yapılan başkanlık seçimini, eski başkan Prof. Dr. Ümit Kocasakal kazandı.", "İstanbul Barosu'nda \"Türkiyelilik\" dönemi kapandı!"),
+];
+
+// 37b2fd17: neutral title "Cevdet Yılmaz'dan emekliye refah düzenlemesiyle ilgili açıklama"
+const Y37_TITLE = "Cevdet Yılmaz'dan emekliye refah düzenlemesiyle ilgili açıklama";
+const Y37_SUMMARY = "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, NTV'de gündeme ilişkin açıklamalarda bulunuyor.";
+const Y37_MEMBERS = [
+  fx("Haber7", "haber7", "outlet", "2026-11-06T16:12:00Z", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, NTV'de gündeme ilişkin açıklamalarda bulunuyor.", "Cevdet Yılmaz'dan emekliye refah düzenlemesiyle ilgili açıklama"),
+  fx("GZT", "gzt", "outlet", "2026-11-06T16:18:15Z", "NTV'ye konuşan Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, fon soruşturması kapsamında TMSF bünyesinde açılan \"gönüllü iade\" hesaplarına 31,5 milyar TL'nin iade edildiğini açıkladı.", "Cevdet Yılmaz açıkladı: Fonlarda ara ödemeler için yeni tarih belli oldu"),
+  fx("Yeni Şafak", "yeni-safak", "outlet", "2026-11-06T16:18:55Z", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz gündeme ilişkin açıklamalarda bulunuyor.", "Cumhurbaşkanı Yardımcısı Yılmaz'dan emekli zammı açıklaması: Enflasyonun üzerinde artış olacak"),
+  fx("Star", "star", "outlet", "2026-11-06T16:26:00Z", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz: Serbest fonların içinde hisse senetleri var. Bazı hisse senetleri üzerinden çok ciddi pay oluşturulmuş. Manipüle edilerek fiyatı şişirilmiş. Sanal bir değer gösterilerek kredi oluştururmuş. Bu bir döngü içinde devam etmiş. Bundan çeşitli kişiler ve şirketler haksız kazanç elde etmişler.", "Borsa ve fon vurgunu! Cumhurbaşkanı Yardımcısı Yılmaz: Serbest fonlar üzerinde sanal değer oluşturuldu"),
+  fx("Ekonomim", "ekonomim", "niche", "2026-11-06T16:43:00Z", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, NTV canlı yayınında gündeme ilişkin değerlendirmelerde bulundu. Fon soruşturması, tasfiye süreci, yatırımcılara yapılan ödemeler ve sermaye piyasalarında yeni düzenlemelere ilişkin açıklamalar yaptı. Cevdet Yılmaz, kanuni hazırlıkların yapıldığını söyledi.", "Cevdet Yılmaz canlı yayında açıkladı: Fon tasfiyesinde yeni ödeme için hazırlık yapıyoruz"),
+  fx("İstiklal", "istiklal", "outlet", "2026-11-06T16:44:10Z", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, yatırım fonlarında tespit edilen manipülasyonlara ilişkin yürütülen süreci değerlendirdi. Hukuk dışı kazançlara karşı mücadelenin süreceğini belirten Yılmaz, tasfiyedeki fonlar için yeni ödeme takvimini de açıkladı.", "Cevdet Yılmaz'dan Fon Açıklaması: \"Hukuk ve Ahlak Dışı Kazançlar Var\""),
+  fx("Onedio", "onedio", "aggregator", "2026-11-06T16:56:36Z", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, fon soruşturmasına ilişkin son rakamları paylaştı. Yılmaz, soruşturmada 444 şüpheliden 113'ünün tutuklandığını ve yatırımcılara yeni bir ödeme yapılacağını duyurdu. Enflasyon, asgari ücret ve emekli düzenlemesi de konuşulan başlıklar arasında yer aldı.Kaynak - NTV", "Cevdet Yılmaz'dan Fon Soruşturması, Enflasyon ve Emekli Düzenlemesi Açıklaması"),
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-06T17:00:46Z", "Milyonlarca emeklinin merakla beklediği 2027 emekli maaşı zammına ilişkin Cumhurbaşkanı Yardımcısı Cevdet Yılmaz'dan önemli açıklamalar geldi. Enflasyon farkı, refah payı ve seyyanen zam seçeneklerinin değerlendirildiği süreçte Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, emeklilere enflasyonun üzerinde artış yapılacağını duyurdu. Düzenlemenin yıl sonuna kadar hazırlanacağını belirten Yılmaz, bütçe görüşmelerinin ardından ve yılbaşından önce kanun çalışmasının TBMM'ye sunulacağını açıkladı.", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz'dan emeklilere zam müjdesi"),
+  fx("ABC Haber", "abc-haber", "outlet", "2026-11-06T20:02:00Z", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, emekli aylıklarına yönelik yeni bir refah düzenlemesi üzerinde çalışıldığını açıkladı. Farklı seçeneklerin değerlendirildiğini belirten Yılmaz, düzenlemenin yılbaşından önce TBMM'ye sunulmasının hedeflendiğini söyledi. NTV yayınında asgari ücret, enflasyon, fon tasfiyesi, yatırımcılara yapılacak ödemeler ve sermaye piyasalarına yönelik yeni kanun hazırlığı h", "Cevdet Yılmaz’dan emeklilere müjde: Yıl sonuna kadar yeni refah düzenlemesi yapılacağını duyurdu"),
+  fx("Aykırı", "aykiri", "outlet", "2026-11-06T21:05:06Z", "Emeklilere yönelik refah düzenlemesi hakkında konuşan Cumhurbaşkanı Yardımcısı Yılmaz, farklı alternatiflerin değerlendirildiğini belirterek, Yıl sonuna kadar...", "Hükümetten, emekliye refah düzenlemesiyle ilgili açıklama!"),
+];
+
+// 6ce3490f: neutral title "Emine Erdoğan'dan '81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı'na ilişkin paylaşım"
+const E6C_SUMMARY = "Cumhurbaşkanı Recep Tayyip Erdoğan'ın eşi Emine Erdoğan, \"81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı\"na ilişkin paylaşımda bulundu.";
+const E6C_MEMBERS = [
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-07T07:58:08Z", "Cumhurbaşkanı Recep Tayyip Erdoğan'ın eşi Emine Erdoğan, \"81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı\"na ilişkin paylaşımda bulundu.", "Emine Erdoğan'dan \"81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı\"na ilişkin paylaşım"),
+  fx("Milliyet", "milliyet", "outlet", "2026-11-07T08:01:32Z", "Emine Erdoğan, NSosyal hesabından yaptığı paylaşımda, \"Anadolu'da kadınlar yalnızca sanatlarını değil, birbirlerinin emeğini, sabrını ve zamanını da paylaşarak nice eserler meydana getirmiştir. Bugün bu dayanışma ruhu, sanatkar ve zanaatkar kadınlarımızın hünerli ellerinde yaşamaya devam ediyor.\" ifadesini kullandı.\nPaylaşımda Rami Kütüphanesi'nde gerçekleştirilen programdan görüntüler de yer aldı.\nAnadolu’da kadınlar yalnızca sanatlarını değil; birbirlerinin emeğini, sabrını ve zamanını da p...", "Emine Erdoğan'dan '81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı'na ilişkin paylaşım"),
+  fx("Star", "star", "outlet", "2026-11-07T08:06:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan'ın eşi Emine Erdoğan, Rami Kütüphanei'nde düzenlenen \"81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı\"na ilişkin paylaşımda bulundu. Erdoğan, paylaşımında \"Anadolu'da kadınlar yalnızca sanatlarını değil; birbirlerinin emeğini, sabrını ve zamanını da paylaşarak nice eserler meydana getirmiştir. Bugün bu dayanışma ruhu, sanatkâr ve zanaatkâr kadınlarımızın hünerli ellerinde yaşamaya devam ediyor.\" ifadelerini kullandı.", "Rami Kütüphanesi'nde \"Bize Özgü\" sergisi! Emine Erdoğan: Dayanışma ruhu, kadınlarımızın hünerli ellerinde yaşıyor"),
+  fx("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-11-07T08:07:21Z", "Cumhurbaşkanı Recep Tayyip Erdoğan'ın eşi Emine Erdoğan, \"81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı\"na ilişkin paylaşımda bulundu.", "Emine Erdoğan'dan \"81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı\"na ilişkin paylaşım"),
+  fx("Akşam", "aksam", "outlet", "2026-11-07T08:14:00Z", "Emine Erdoğan, \"81 İl, 81 Kadın, 81 Hikaye: Bize Özgü Sergisi Açılış Programı\"na ilişkin paylaşımda bulundu.", "Emine Erdoğan paylaştı: \"81 İl, 81 Kadın, 81 Hikaye\" sergisi kapılarını açtı"),
+  fx("İşçi Haber", "isci-haber", "niche", "2026-11-07T10:49:16Z", "Cumhurbaşkanı Recep Tayyip Erdoğan'ın eşi Emine Erdoğan, Türkiye'nin kültürel zenginliklerini yansıtan 81 İl, 81 Kadın, 81 Hikaye sergisinin açılışına dair önemli bir mesaj yayınladı. Paylaşımında kadın emeğinin ve yöresel değerlerin önemine dikkat çeken Erdoğan, projeyi desteklediğini ifade etti.", "Emine Erdoğan'dan 81 il 81 kadın sergisine destek"),
+];
+
+// 31342903: neutral title "Bakan Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü"
+const J31_SUMMARY = "Dışişleri Bakanı Hakan Fidan, Ankara'da Hırvatistan Meclis Başkanı Gordan Jandrokovic ile bir araya geldi.";
+const J31_MEMBERS = [
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-05T15:59:37Z", "Dışişleri Bakanı Hakan Fidan, Ankara'da Hırvatistan Meclis Başkanı Gordan Jandrokovic ile bir araya geldi.", "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü"),
+  fx("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-11-05T16:02:48Z", "Dışişleri Bakanı Hakan Fidan, Ankara'da Hırvatistan Meclis Başkanı Gordan Jandrokovic ile bir araya geldi.", "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü"),
+  fx("Akşam", "aksam", "outlet", "2026-11-05T16:03:00Z", "Dışişleri Bakanı Hakan Fidan, Ankara'da Hırvatistan Meclis Başkanı Gordan Jandrokovic ile bir araya geldi.", "Bakan Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü"),
+  fx("Sabah", "sabah", "outlet", "2026-11-05T16:11:54Z", "Dışişleri Bakanı Hakan Fidan, Hırvatistan Parlamento Başkanı Gordan Jandroković ile bir araya geldi.Devamı için tıklayınız", "Bakan Fidan, Hırvatistan Parlamento Başkanı ile görüştü!"),
+  fx("Star", "star", "outlet", "2026-11-05T16:26:00Z", "Dışişleri Bakanı Hakan Fidan, Hırvatistan Parlamento Başkanı Gordan Jandrokovi ile bir araya geldi.", "Dışişleri Bakanı Fidan Hırvatistan Parlamento Başkanı Gordan Jandrokovi ile görüştü"),
+  fx("Ajans Haber", "ajans-haber", "aggregator", "2026-11-05T16:35:00Z", "Dışişleri Bakanı Hakan Fidan, Ankara’da Hırvatistan Meclis Başkanı Gordan Jandrokovic ile bir araya geldi.", "Dışişleri Bakanı Hakan Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü"),
+];
+
+describe("h95-summaries-1: a live-blog seed is replaced by a clean member from 0.6 up", () => {
+  it("b04edded: the live line gives way to a 0.67 member (Aydınlık is one of four), the newest of the tie", () => {
+    const seedMember = byName(B04_MEMBERS, "Star");
+    expect(seedDisqualified(B04_SUMMARY, shownOf(seedMember), { memberTitle: seedMember.article.title, clusterTitle: B04_TITLE })).toBe("live");
+    const aydinlik = byName(B04_MEMBERS, "Aydınlık");
+    const dijital = byName(B04_MEMBERS, "Dijital Gaste");
+    // Neither reaches 0.75, which is what every replacement needed before; both reach 0.6.
+    for (const m of [aydinlik, dijital]) {
+      expect(titleAgreement(B04_TITLE, shownOf(m)), m.source.name).toBeCloseTo(2 / 3, 9);
+    }
+    // The hunter's finding names Aydınlık; Dijital Gaste, published 13 minutes later, scores the same and
+    // is clean too, so the unchanged tie rule (the newest wins) picks it. Both are the outlets' own words.
+    const res = resolve(B04_TITLE, B04_SUMMARY, B04_MEMBERS);
+    expect(["Aydınlık", "Dijital Gaste", "İşçi Haber"]).toContain(res?.source?.name);
+    expect(res?.source?.name).toBe("Dijital Gaste");
+    expect(res?.text).toBe(shownOf(dijital));
+    expect(resolve(B04_TITLE, B04_SUMMARY, B04_MEMBERS.filter((m) => m !== dijital))?.source?.name).toBe("Aydınlık");
+  });
+
+  it("f1837ee1: the live line (0.6 against its own title) becomes Ekonomim (0.7)", () => {
+    const res = resolve(F18_TITLE, F18_SUMMARY, F18_MEMBERS);
+    expect(res?.source?.name).toBe("Ekonomim");
+    expect(res?.text).toBe(shownOf(byName(F18_MEMBERS, "Ekonomim")));
+  });
+
+  it("85ef184c, the documented residual: no candidate reaches 0.6, so the live line stays (never blank)", () => {
+    const seedMember = byName(R85_MEMBERS, "Star");
+    const shown = shownOf(seedMember);
+    expect(isLiveLine(shown)).toBe(true);
+    for (const m of R85_MEMBERS) {
+      if (m === seedMember || m.source.kind === "wire" || m.source.kind === "aggregator") continue;
+      expect(titleAgreement(R85_TITLE, shownOf(m)) ?? 0, m.source.name).toBeLessThan(AGREEMENT_FORM_DEFECT_MIN);
+    }
+    const res = resolve(R85_TITLE, R85_SUMMARY, R85_MEMBERS);
+    expect(res).toEqual({ text: shown, source: seedMember.source });
+  });
+
+  it("459a7b61: Haber7's live line no longer takes the Özet over from the teaser seed", () => {
+    const haber7 = byName(H45_MEMBERS, "Haber7");
+    expect(summaryDefect(haber7.article.description ?? "", shownOf(haber7))).toBe("live");
+    const res = resolve(H45_TITLE, H45_SUMMARY, H45_MEMBERS);
+    expect(res).not.toBeNull();
+    expect(res?.text).not.toBe(shownOf(haber7));
+    expect(res?.source?.name).not.toBe("Haber7");
+    expect(isLiveLine(res?.text ?? "")).toBe(false);
+  });
+
+  it("a live seed is replaced by a score at the floor (0.6, inclusive) and not below it", () => {
+    // Five title stems: cumhu, erdog, azerb, forum, konus.
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda konuştu";
+    const live = fx("Canlı", "canli", "outlet", "2026-11-08T10:00:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan forumunda konuşuyor.", "x");
+    const three = fx("Üç", "uc", "outlet", "2026-11-08T10:05:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan ziyaretinde yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+    const two = fx("İki", "iki", "outlet", "2026-11-08T10:06:00Z", "Cumhurbaşkanı Erdoğan, bugün yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+    expect(titleAgreement(title, shownOf(three))).toBeCloseTo(0.6, 9);
+    expect(titleAgreement(title, shownOf(two))).toBeCloseTo(0.4, 9);
+    expect(resolve(title, live.article.description ?? "", [live, three, two])?.source?.name).toBe("Üç");
+    expect(resolve(title, live.article.description ?? "", [live, two])?.source?.name).toBe("Canlı");
+  });
+
+  it("opinion seeds keep the 0.75 bar: a 0.6 member does not replace a column, a 0.8 one does", () => {
+    // Five title stems: cumhu, erdog, azerb, forum, konus.
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda konuştu";
+    const column = fx("Sütun", "sutun", "outlet", "2026-11-08T10:00:00Z", "Cumhurbaşkanı Erdoğan Azerbaycan forumunda konuştu diye yazıyor köşe yazarı.", "x");
+    column.article.url = "https://example.com/yazarlar/biri/yazi";
+    const three = fx("Üç", "uc", "outlet", "2026-11-08T10:05:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan ziyaretinde yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+    const four = fx("Dört", "dort", "outlet", "2026-11-08T10:06:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan forumunda yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+    expect(titleAgreement(title, shownOf(three))).toBeCloseTo(0.6, 9);
+    expect(titleAgreement(title, shownOf(four))).toBeCloseTo(0.8, 9);
+    const kept = resolve(title, column.article.description ?? "", [column, three]);
+    expect(kept?.source?.name).toBe("Sütun");
+    expect(kept?.opinion).toBe(true);
+    expect(resolve(title, column.article.description ?? "", [column, three, four])?.source?.name).toBe("Dört");
+  });
+
+  it("a live line is only replaced when the title is asked for: without agreeWithTitle the seed stays", () => {
+    const res = summaryAttribution({ summary: B04_SUMMARY, members: B04_MEMBERS, wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Star");
+  });
+});
+
+describe("h95-summaries-1: a stub that a surname hid, and a teaser seed", () => {
+  it("dd5535a7: the cut seed that 'Kurtulmuş' made look complete becomes one of the 0.67 Dervişoğlu leads", () => {
+    const seedMember = byName(DD5_MEMBERS, "Yeni Asır");
+    const raw = seedMember.article.description ?? "";
+    expect(seedDisqualified(raw, tidySummaryText(raw), { memberTitle: seedMember.article.title, clusterTitle: DD5_TITLE })).toBe("stub");
+    const res = resolve(DD5_TITLE, DD5_SUMMARY, DD5_MEMBERS);
+    expect(["Elips Haber", "Haber7", "Dijital Gaste"]).toContain(res?.source?.name);
+    expect(res?.text).toBe(shownOf(byName(DD5_MEMBERS, res?.source?.name ?? "")));
+    expect(titleAgreement(DD5_TITLE, res?.text ?? "")).toBeCloseTo(2 / 3, 9);
+  });
+
+  it("6ef586c4: the Özet no longer ends in the 'Peki … kimdir?' teaser, and stays Haberler.com's", () => {
+    const res = resolve(K6E_TITLE, K6E_SUMMARY, K6E_MEMBERS);
+    expect(res?.source?.name).toBe("Haberler.com");
+    expect(res?.text.endsWith("özel hayatı araştırılıyor.")).toBe(true);
+    expect(res?.text).not.toMatch(/Peki|kimdir|evli mi/);
+    const withoutTitle = summaryAttribution({ summary: K6E_SUMMARY, members: K6E_MEMBERS, wire: NOT_WIRE });
+    expect(withoutTitle?.text.endsWith("özel hayatı araştırılıyor.")).toBe(true);
+  });
+
+  it("459a7b61: a seed that opens with 'İşte' and has nothing to cut is a teaser", () => {
+    const shown = tidySummaryText(H45_SUMMARY);
+    expect(shown.startsWith("İşte")).toBe(true);
+    expect(seedDisqualified(H45_SUMMARY, shown)).toBe("teaser");
+  });
+});
+
+describe("h95-summaries-1: an echo of the headline is not an Özet", () => {
+  it("181cd879: Korkusuz's description is its own headline, so Hürriyet (0.7) takes the cut stub's place", () => {
+    const korkusuz = byName(K18_MEMBERS, "Korkusuz");
+    expect(isHeadlineEcho(korkusuz.article.title, shownOf(korkusuz))).toBe(true);
+    const res = resolve(K18_TITLE, K18_SUMMARY, K18_MEMBERS);
+    expect(res?.source?.name).toBe("Hürriyet");
+    expect(res?.text).toBe(shownOf(byName(K18_MEMBERS, "Hürriyet")));
+  });
+
+  it("8e1a8c91: an Özet that is the cluster title again gives way to a member that says more", () => {
+    const akşam = byName(S8E_MEMBERS, "Akşam");
+    expect(shownOf(akşam)).toBe("TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı.");
+    const res = resolve(S8E_TITLE, S8E_SUMMARY, S8E_MEMBERS);
+    expect(res).not.toBeNull();
+    expect(res?.source?.name).not.toBe("Akşam");
+    expect(isHeadlineEcho(S8E_TITLE, res?.text)).toBe(false);
+    expect(res?.text).toBe(shownOf(byName(S8E_MEMBERS, res?.source?.name ?? "")));
+  });
+
+  it("with no better member the echo stays (never blank)", () => {
+    const only = [byName(S8E_MEMBERS, "Akşam"), byName(S8E_MEMBERS, "Star")];
+    const res = resolve(S8E_TITLE, S8E_SUMMARY, only);
+    expect(res?.text).toBe("TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı.");
+    expect(res?.source?.name).toBe("Akşam");
+  });
+
+  it("a candidate that echoes the cluster title is never picked, and neither is one that echoes its own headline", () => {
+    // Seed 'disagrees' with the title (0.2); every candidate is an echo of something.
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda hazırlıkları anlattı";
+    const seed = fx("Tohum", "tohum", "outlet", "2026-11-08T10:00:00Z", "Bugün Ankara'da hava parçalı bulutlu ve rüzgarlı geçecek.", "x");
+    const ownEcho = fx("Kendi", "kendi", "outlet", "2026-11-08T10:05:00Z", "Cumhurbaşkanı Erdoğan Azerbaycan'da forumda hazırlıkları anlattı.", "Cumhurbaşkanı Erdoğan Azerbaycan'da forumda hazırlıkları anlattı");
+    const titleEcho = fx("Başlık", "baslik", "outlet", "2026-11-08T10:06:00Z", `${title}.`, "başka bir başlık");
+    expect(resolve(title, seed.article.description ?? "", [seed, ownEcho, titleEcho])?.source?.name).toBe("Tohum");
+    // The same description under a headline that does not echo it is a candidate.
+    const fine = fx("Kendi", "kendi", "outlet", "2026-11-08T10:05:00Z", ownEcho.article.description ?? "", "Forumda önemli açıklamalar");
+    expect(resolve(title, seed.article.description ?? "", [seed, fine])?.source?.name).toBe("Kendi");
+  });
+
+  it("a member without a title (a lighter projection) is never an echo", () => {
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda hazırlıkları anlattı";
+    const seed = fx("Tohum", "tohum", "outlet", "2026-11-08T10:00:00Z", "Bugün Ankara'da hava parçalı bulutlu ve rüzgarlı geçecek.", "x");
+    const light = fx("Hafif", "hafif", "outlet", "2026-11-08T10:05:00Z", "Cumhurbaşkanı Erdoğan Azerbaycan'da forumda hazırlıkları anlattı.", "x");
+    delete (light.article as { title?: string }).title;
+    expect(resolve(title, seed.article.description ?? "", [seed, light])?.source?.name).toBe("Hafif");
+  });
+});
+
+describe("h95-summaries-1: a cut with no ellipsis (37b2fd17)", () => {
+  it("the swap pick, ABC Haber's 400-character cut, now ends at '…hedeflendiğini söyledi.'", () => {
+    const abc = byName(Y37_MEMBERS, "ABC Haber");
+    expect(abc.article.description).toHaveLength(400);
+    const res = resolve(Y37_TITLE, Y37_SUMMARY, Y37_MEMBERS);
+    expect(res?.source?.name).toBe("ABC Haber");
+    expect(res?.text.endsWith("hedeflendiğini söyledi.")).toBe(true);
+    expect(res?.text).not.toMatch(/ h$/);
+  });
+});
+
+describe("h95-summaries-1: negative pins", () => {
+  it("a clean seed that scores 0.5 or more is never replaced, whatever the members say", () => {
+    // f1837ee1 with Ekonomim's text as the seed: clean, 0.7. Live lines and stubs are around it.
+    const ekonomim = byName(F18_MEMBERS, "Ekonomim");
+    const res = resolve(F18_TITLE, ekonomim.article.description ?? "", F18_MEMBERS);
+    expect(res).toEqual({ text: shownOf(ekonomim), source: ekonomim.source });
+    // dd5535a7 with Haber7's text as the seed: clean, 0.67, level with Elips Haber and Dijital Gaste.
+    const haber7 = byName(DD5_MEMBERS, "Haber7");
+    const res2 = resolve(DD5_TITLE, haber7.article.description ?? "", DD5_MEMBERS);
+    expect(res2).toEqual({ text: shownOf(haber7), source: haber7.source });
+  });
+
+  it("every cluster of the fixtures yields a non-empty Özet", () => {
+    const all: Array<[string, string, ClusterDetailMember[]]> = [
+      [H45_TITLE, H45_SUMMARY, H45_MEMBERS],
+      [B04_TITLE, B04_SUMMARY, B04_MEMBERS],
+      [R85_TITLE, R85_SUMMARY, R85_MEMBERS],
+      [DD5_TITLE, DD5_SUMMARY, DD5_MEMBERS],
+      [K18_TITLE, K18_SUMMARY, K18_MEMBERS],
+      [S8E_TITLE, S8E_SUMMARY, S8E_MEMBERS],
+      [F18_TITLE, F18_SUMMARY, F18_MEMBERS],
+      [K6E_TITLE, K6E_SUMMARY, K6E_MEMBERS],
+      [Y37_TITLE, Y37_SUMMARY, Y37_MEMBERS],
+    ];
+    for (const [title, summary, members] of all) {
+      const res = resolve(title, summary, members);
+      expect(res, title).not.toBeNull();
+      expect(res?.text.length ?? 0, title).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("h95-summaries-2: identical text is credited to the wire, then the outlet, then the aggregator", () => {
+  // 6ce3490f: Haberler.com 07:58:08 and Anadolu Ajansı 08:07:21 hold the identical description.
+  const haberler = byName(E6C_MEMBERS, "Haberler.com");
+  const aa = byName(E6C_MEMBERS, "Anadolu Ajansı");
+
+  it("the fixtures are what the cases below assume", () => {
+    expect(haberler.source.kind).toBe("aggregator");
+    expect(aa.source.kind).toBe("wire");
+    expect(haberler.article.description).toBe(aa.article.description);
+    expect(new Date(haberler.article.published_at).getTime()).toBeLessThan(new Date(aa.article.published_at).getTime());
+  });
+
+  it("(a) 6ce3490f: Haberler.com stamped earlier, yet the attribution source is Anadolu Ajansı", () => {
+    const res = summaryAttribution({ summary: E6C_SUMMARY, members: E6C_MEMBERS, wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Anadolu Ajansı");
+    expect(res?.text).toBe(shownOf(aa));
+    expect(summaryLabel(res!)).toBe("Özet — Anadolu Ajansı");
+    expect(findSeedMember(E6C_MEMBERS, E6C_SUMMARY)).toBe(aa);
+  });
+
+  it("(a) 31342903: the same credit, in the other live cluster the hunter named", () => {
+    const res = summaryAttribution({ summary: J31_SUMMARY, members: J31_MEMBERS, wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Anadolu Ajansı");
+  });
+
+  it("(a) the text shown does not change, only whose it is", () => {
+    const res = summaryAttribution({ summary: E6C_SUMMARY, members: E6C_MEMBERS, wire: NOT_WIRE });
+    expect(res?.text).toBe(shownOf(haberler));
+  });
+
+  it("(b) BL-13: Anadolu Ajansı has excerpt_allowed = false, so Haberler.com is credited", () => {
+    const blocked = E6C_MEMBERS.map((m) => (m === aa ? { ...m, source: { ...m.source, excerpt_allowed: false } } : m));
+    const res = summaryAttribution({ summary: E6C_SUMMARY, members: blocked, wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Haberler.com");
+    expect(findSeedMember(blocked, E6C_SUMMARY)?.source.name).toBe("Haberler.com");
+  });
+
+  it("(b) BL-13: every member holding the text is rights-blocked, so the Özet is hidden as before", () => {
+    const blocked = E6C_MEMBERS.map((m) =>
+      m === aa || m === haberler ? { ...m, source: { ...m.source, excerpt_allowed: false } } : m,
+    );
+    expect(summaryAttribution({ summary: E6C_SUMMARY, members: blocked, wire: NOT_WIRE })).toBeNull();
+  });
+
+  it("(c) two outlets with the identical text: the earliest wins, as before", () => {
+    const text = "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı ile Ankara'da bir araya geldi.";
+    const late = fx("Geç", "gec", "outlet", "2026-11-08T10:10:00Z", text, "x");
+    const early = fx("Erken", "erken", "outlet", "2026-11-08T10:00:00Z", text, "x");
+    expect(summaryAttribution({ summary: text, members: [late, early], wire: NOT_WIRE })?.source?.name).toBe("Erken");
+    expect(findSeedMember([late, early], text)).toBe(early);
+  });
+
+  it("(c) an outlet and a niche source rank alike: the earliest wins, and a missing kind reads as an outlet", () => {
+    const text = "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı ile Ankara'da bir araya geldi.";
+    const niche = fx("Niş", "nis", "niche", "2026-11-08T10:00:00Z", text, "x");
+    const outlet = fx("Dış", "dis", "outlet", "2026-11-08T10:05:00Z", text, "x");
+    const bare = fx("Yalın", "yalin", "outlet", "2026-11-08T09:55:00Z", text, "x");
+    delete (bare.source as { kind?: SourceKind }).kind;
+    expect(findSeedMember([outlet, niche], text)).toBe(niche);
+    expect(findSeedMember([outlet, niche, bare], text)).toBe(bare);
+  });
+
+  it("an outlet is credited before an earlier aggregator, and the wire before an earlier outlet", () => {
+    const text = "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı ile Ankara'da bir araya geldi.";
+    const aggregator = fx("Toplayıcı", "toplayici", "aggregator", "2026-11-08T10:00:00Z", text, "x");
+    const outlet = fx("Dış", "dis", "outlet", "2026-11-08T10:05:00Z", text, "x");
+    const wire = fx("Ajans", "ajans", "wire", "2026-11-08T10:10:00Z", text, "x");
+    expect(findSeedMember([aggregator, outlet], text)).toBe(outlet);
+    expect(findSeedMember([aggregator, outlet, wire], text)).toBe(wire);
+    // Among the wires the earliest wins, among the aggregators too.
+    const wire2 = fx("Ajans 2", "ajans-2", "wire", "2026-11-08T10:07:00Z", text, "x");
+    expect(findSeedMember([wire, wire2], text)).toBe(wire2);
+    const aggregator2 = fx("Toplayıcı 2", "toplayici-2", "aggregator", "2026-11-08T09:00:00Z", text, "x");
+    expect(findSeedMember([aggregator, aggregator2], text)).toBe(aggregator2);
+  });
+
+  it("the opinion flag follows the member that is credited", () => {
+    const text = "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı ile Ankara'da bir araya geldi.";
+    const column = fx("Köşe", "kose", "outlet", "2026-11-08T10:00:00Z", text, "x");
+    column.article.url = "https://example.com/yazarlar/biri/yazi";
+    const wire = fx("Ajans", "ajans", "wire", "2026-11-08T10:10:00Z", text, "x");
+    const res = summaryAttribution({ summary: text, members: [column, wire], wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Ajans");
+    expect(res?.opinion).toBeUndefined();
+  });
+
+  describe("(d) the wire-majority hide is still decided on the earliest-published match, today's seed", () => {
+    const text = "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı ile Ankara'da bir araya geldi.";
+    const WIRE = { isWireRedistribution: true };
+    const other = (n: number): ClusterDetailMember =>
+      fx(`Başka ${n}`, `baska-${n}`, "outlet", `2026-11-08T11:0${n}:00Z`, "Farklı bir metin.", "x");
+    const withHash = (m: ClusterDetailMember, hash: string): ClusterDetailMember => ({ ...m, article: { ...m.article, content_hash: hash } });
+
+    it("the earliest match carries the majority hash: hidden, although the credited wire does not", () => {
+      const early = withHash(fx("Toplayıcı", "toplayici", "aggregator", "2026-11-08T10:00:00Z", text, "x"), "MAJ");
+      const aa = withHash(fx("Ajans", "ajans", "wire", "2026-11-08T10:10:00Z", text, "x"), "OTHER");
+      const members = [early, aa, withHash(other(1), "MAJ"), withHash(other(2), "MAJ")];
+      expect(summaryAttribution({ summary: text, members, wire: WIRE })).toBeNull();
+    });
+
+    it("the earliest match is not in the majority: shown, and credited to the wire even though its hash is", () => {
+      const early = withHash(fx("Toplayıcı", "toplayici", "aggregator", "2026-11-08T10:00:00Z", text, "x"), "SOLO");
+      const aa = withHash(fx("Ajans", "ajans", "wire", "2026-11-08T10:10:00Z", text, "x"), "MAJ");
+      const members = [early, aa, withHash(other(1), "MAJ"), withHash(other(2), "MAJ")];
+      const res = summaryAttribution({ summary: text, members, wire: WIRE });
+      expect(res?.source?.name).toBe("Ajans");
+      expect(res?.text).toBe(text);
+    });
+
+    it("members stamped at the same instant: the seed is the first in the members' order, as before the credit order existed", () => {
+      const at = "2026-11-08T10:00:00Z";
+      const agg = withHash(fx("Toplayıcı", "toplayici", "aggregator", at, text, "x"), "MAJ");
+      const aa = withHash(fx("Ajans", "ajans", "wire", at, text, "x"), "OTHER");
+      const rest = [withHash(other(1), "MAJ"), withHash(other(2), "MAJ")];
+      // The aggregator comes first in the list, so it is today's seed: its hash is the majority, so the text is hidden.
+      expect(summaryAttribution({ summary: text, members: [agg, aa, ...rest], wire: WIRE })).toBeNull();
+      // The wire comes first, so it is the seed: its hash is not the majority, so the text is shown, credited to the wire.
+      const res = summaryAttribution({ summary: text, members: [aa, agg, ...rest], wire: WIRE });
+      expect(res?.source?.name).toBe("Ajans");
+    });
+
+    it("without a wire redistribution nothing is hidden, as before", () => {
+      const early = withHash(fx("Toplayıcı", "toplayici", "aggregator", "2026-11-08T10:00:00Z", text, "x"), "MAJ");
+      const aa = withHash(fx("Ajans", "ajans", "wire", "2026-11-08T10:10:00Z", text, "x"), "MAJ");
+      expect(summaryAttribution({ summary: text, members: [early, aa], wire: NOT_WIRE })?.source?.name).toBe("Ajans");
+    });
+  });
+
+  describe("(e) the title-agreement choice is unchanged", () => {
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda hazırlıkları anlattı";
+    const seedText = "Bugün Ankara'da hava parçalı bulutlu ve rüzgarlı geçecek.";
+    const good = "Cumhurbaşkanı Erdoğan, Azerbaycan'daki forumda hazırlıkları anlattı ve bilgi verdi.";
+
+    it("wire and aggregator candidates are never picked", () => {
+      const seed = fx("Tohum", "tohum", "outlet", "2026-11-08T10:00:00Z", seedText, "x");
+      const aa = fx("Ajans", "ajans", "wire", "2026-11-08T10:01:00Z", good, "y");
+      const agg = fx("Toplayıcı", "toplayici", "aggregator", "2026-11-08T10:02:00Z", `${good} Ayrıntılar sürüyor.`, "z");
+      expect(resolve(title, seedText, [seed, aa, agg])?.source?.name).toBe("Tohum");
+    });
+
+    it("an outlet's text that an agency also holds is the agency's, so it is not picked either", () => {
+      const seed = fx("Tohum", "tohum", "outlet", "2026-11-08T10:00:00Z", seedText, "x");
+      const aa = fx("Ajans", "ajans", "wire", "2026-11-08T10:01:00Z", good, "y");
+      const copy = fx("Kopya", "kopya", "outlet", "2026-11-08T10:10:00Z", good, "y1");
+      expect(resolve(title, seedText, [seed, aa, copy])?.source?.name).toBe("Tohum");
+    });
+
+    it("identical texts among the outlets are credited to the earliest", () => {
+      const seed = fx("Tohum", "tohum", "outlet", "2026-11-08T10:00:00Z", seedText, "x");
+      const late = fx("Geç", "gec", "outlet", "2026-11-08T10:20:00Z", good, "y1");
+      const early = fx("Erken", "erken", "outlet", "2026-11-08T10:10:00Z", good, "y2");
+      expect(resolve(title, seedText, [seed, late, early])?.source?.name).toBe("Erken");
+    });
   });
 });

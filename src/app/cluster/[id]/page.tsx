@@ -334,7 +334,11 @@ export async function generateMetadata({
   // ~160 char SERP cap on its own. `agreeWithTitle` (h31-reader-3 v2) is the
   // same on both summaryAttribution calls of this file (here and in the page
   // body, whose result the JSON-LD reuses), so the meta description, the JSON-LD
-  // and the page never disagree about whose words the summary is.
+  // and the page never disagree about whose words the summary is. `members` goes
+  // in whole: every member keeps its `article.title`, which the title-agreement
+  // choice reads to keep a description that only repeats its own headline out of
+  // the Özet (SummaryMember.article.title, h95-summaries-1); the body call below
+  // passes the same list.
   const description = describeForMeta({
     count: wire.effectiveArticleCount,
     attribution: summaryAttribution({

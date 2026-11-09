@@ -5,10 +5,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 // /gundem (index of the entity hubs). h43-entities-3: the index used to link all
 // 62 hubs from the static vocabulary, 8 of them noindex and 4 of them empty
 // ("Son 14 günde bu konuda küme yok."). It now reads every hub through the
-// shared readAllEntityHubs, so a hub with at least one cluster stays a link and
-// shows its count, a hub with none is plain text, and ANY failed read puts the
-// old static list back (fail open). getEntityHub is mocked: its Supabase
-// round-trips and cache window are covered by entity-hub-query.test.ts.
+// shared readAllEntityHubSummaries, so a hub with at least one cluster stays a
+// link and shows its count, a hub with none is plain text, and ANY failed read
+// puts the old static list back (fail open).
+//
+// h94-slowroutes-1: the index prints only each hub's `total`, yet it built all 62
+// full hubs (the RPC plus a CLUSTER_EMBED_SELECT of up to 20 clusters each; cold
+// builds of 4.4-6.4 s). It now reads getEntityHubSummary, the light twin with the
+// same `total`, and never the full getEntityHub; the page output is unchanged.
+// Both are mocked here: their Supabase round-trips and cache window are covered by
+// entity-hub-query.test.ts.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -18,24 +24,26 @@ vi.mock("next/cache", () => ({
 
 const mocks = vi.hoisted(() => ({
   getEntityHub: vi.fn(),
+  getEntityHubSummary: vi.fn(),
 }));
 
 vi.mock("@/lib/entities/entity-hub-query", () => ({
   getEntityHub: mocks.getEntityHub,
+  getEntityHubSummary: mocks.getEntityHubSummary,
 }));
 
 import { ENTITY_HUB_WINDOW_DAYS } from "@/lib/entities/entity-hub";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 import GundemIndexPage, { metadata } from "./page";
 
-/** A hub read with `total` clusters (only `total` is read by the index). */
+/** A hub summary with `total` clusters (only `total` is read by the index). */
 function hub(total: number): unknown {
-  return { bundles: [], total, asOfMs: 0 };
+  return { total, indexableCount: 0, newestFirstPublished: null, asOfMs: 0 };
 }
 
-/** Routes getEntityHub by key; every key not listed resolves to `fallback`. */
+/** Routes getEntityHubSummary by key; every key not listed resolves to `fallback`. */
 function serve(byKey: Record<string, unknown>, fallback: unknown = hub(5)): void {
-  mocks.getEntityHub.mockImplementation((key: string) =>
+  mocks.getEntityHubSummary.mockImplementation((key: string) =>
     Promise.resolve(key in byKey ? byKey[key] : fallback),
   );
 }
@@ -68,6 +76,7 @@ function jsonLdPaths(html: string): string[] {
 
 beforeEach(() => {
   mocks.getEntityHub.mockReset();
+  mocks.getEntityHubSummary.mockReset();
 });
 
 describe("/gundem index: every read succeeded", () => {
@@ -128,14 +137,26 @@ describe("/gundem index: every read succeeded", () => {
     expect(text("akp")).toBe(`${label("akp")} · 999 küme`);
   });
 
-  it("reads the hub of every curated key, once", async () => {
+  it("reads the summary of every curated key, once", async () => {
     serve({});
 
     await render();
 
-    expect(mocks.getEntityHub.mock.calls.map((c) => c[0])).toEqual(
+    expect(mocks.getEntityHubSummary.mock.calls.map((c) => c[0])).toEqual(
       RISING_ENTITIES.map((e) => e.key),
     );
+  });
+
+  // The point of h94-slowroutes-1: no full hub (and so no embed select) is built
+  // for a page that prints a count per hub.
+  it("never reads a full hub: getEntityHub is not called, on success or on a failed read", async () => {
+    serve({});
+    await render();
+    expect(mocks.getEntityHub).not.toHaveBeenCalled();
+
+    serve({ deva: null });
+    await render();
+    expect(mocks.getEntityHub).not.toHaveBeenCalled();
   });
 
   it("the CollectionPage JSON-LD lists the linked hubs only, so it matches the visible links", async () => {
@@ -154,8 +175,8 @@ describe("/gundem index: every read succeeded", () => {
 describe("/gundem index: a failed read puts today's static list back (fail open)", () => {
   async function staticReference(): Promise<string> {
     // Every key unreadable: the static list, whatever the individual reads were.
-    mocks.getEntityHub.mockReset();
-    mocks.getEntityHub.mockResolvedValue(null);
+    mocks.getEntityHubSummary.mockReset();
+    mocks.getEntityHubSummary.mockResolvedValue(null);
     return render();
   }
 
@@ -203,7 +224,7 @@ describe("/gundem index: a failed read puts today's static list back (fail open)
   });
 
   it("a rejected read fails open too", async () => {
-    mocks.getEntityHub.mockRejectedValue(new Error("boom"));
+    mocks.getEntityHubSummary.mockRejectedValue(new Error("boom"));
 
     const html = await render();
 

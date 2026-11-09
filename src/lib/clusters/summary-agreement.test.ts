@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   AGENCY_COPY_OVERLAP,
+  AGREEMENT_FORM_DEFECT_MIN,
   AGREEMENT_HIGH,
   AGREEMENT_LOW,
   AGREEMENT_MIN_CHARS,
@@ -10,6 +11,7 @@ import {
   carriesOutcome,
   contentWords,
   hasFiniteVerb,
+  isLiveLine,
   seedDisqualified,
   sharedStemsExcluding,
   stageBehindTitle,
@@ -20,6 +22,8 @@ import {
   titleStemOverlap,
 } from "./summary-agreement";
 import { tidySummaryText } from "@/lib/articles/summary-tidy";
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
+import type { Gen } from "../../../tests/_helpers/linear-time";
 
 describe("thresholds (h31-reader-3 v2)", () => {
   it("are the documented values", () => {
@@ -1145,5 +1149,293 @@ describe("carriesOutcome (h54-editorial-1: the text states the outcome the headl
     expect(carriesOutcome("Kaya tutuklandı", null as unknown as string)).toBe(false);
     expect(carriesOutcome("", "")).toBe(false);
     expect(carriesOutcome("Kaya tutuklandı", "")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h95-summaries-1 (hunt 95, 2026-11-09): the seed's FORM, second pass. A live-blog
+// line ("X açıklamalarda bulunuyor."), a Peki / İşte teaser, an echo of the
+// headline and a stub that a surname hides were all kept, and every clean
+// replacement still needed 0.75.
+// ---------------------------------------------------------------------------
+
+describe("isLiveLine (h95-summaries-1)", () => {
+  it.each([
+    // 85ef184c (Star): a year in the event name.
+    ["85ef184c, Star", "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 Resmi Açılış Töreni'nde açıklamalarda bulunuyor."],
+    // b04edded (Star): a quoted event name with an ordinal, the closing quote glued to its suffix.
+    [
+      "b04edded, Star",
+      'Cumhurbaşkanı Erdoğan, İstanbul\'da "12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni"nde konuşuyor.',
+    ],
+    // f1837ee1 (CNN Türk).
+    [
+      "f1837ee1, CNN Türk",
+      "Enerji ve Tabii Kaynaklar Bakanı Alparslan Bayraktar, enerjinin yeni yol haritası programında açıklamalarda bulunuyor.",
+    ],
+    // 459a7b61 (Haber7).
+    [
+      "459a7b61, Haber7",
+      "Cumhurbaşkanı Erdoğan, Azerbaycan Cumhurbaşkanı Aliyev ile yaptığı ortak toplantıda açıklamalarda bulunuyor.",
+    ],
+    // 772a5a49 (Yeniçağ).
+    ["772a5a49, Yeniçağ", "İYİ Parti lideri Müsavat Dervişoğlu partisinin grup toplantısında konuşuyor."],
+    ["abdfa19a-style: sorularını yanıtlıyor", "Cumhurbaşkanı Başdanışmanı Mehmet Uçum, Tarafsız Bölge programında Ahmet Hakan'ın sorularını yanıtlıyor."],
+    ["soruları yanıtlıyor", "Bakan Yılmaz, gazetecilerin soruları yanıtlıyor."],
+    ["yanıtlıyor", "Bakan Yılmaz gazetecilerin sorularını yanıtlıyor."],
+    ["cevaplıyor", "Bakan Yılmaz gazetecilerin sorularını cevaplıyor."],
+    ["konuşma yapıyor", "Bakan Yılmaz grup toplantısında konuşma yapıyor."],
+    ["açıklama yapıyor", "Bakan Yılmaz Meclis'te açıklama yapıyor."],
+    ["önemli açıklamalarda bulunuyor", "Bakan Yılmaz, Milli Enerji 2040 Lansmanı'nda önemli açıklamalarda bulunuyor."],
+    ["no full stop (the feed dropped it)", "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 etkinliğinde açıklamalarda bulunuyor"],
+    ["dots after the predicate (CGTN Türk, İstiklal)", "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 etkinliğinde konuşuyor..."],
+    ["an abbreviation does not end the sentence", "Prof. Dr. Ali Yılmaz, kongrede konuşuyor."],
+    ["upper case", "BAKAN YILMAZ KONGREDE KONUŞUYOR."],
+  ])("is true for %s", (_label, text) => {
+    expect(isLiveLine(text)).toBe(true);
+  });
+
+  it.each([
+    ["a past tense: the event is over", "Erdoğan, TRT World Forum'da konuştu: 'İsrail'e iltimas geçiliyor' dedi."],
+    ["a clause behind a semicolon, a figure in it", "Bakan X grup toplantısında konuşuyor; enflasyonun yüzde 30'a ineceğini söyledi."],
+    ["the predicate is not last", "Cumhurbaşkanı Erdoğan konuşuyor ve yeni vergi paketini duyurdu."],
+    ["a second sentence", "Cumhurbaşkanı Erdoğan konuşuyor. Yeni vergi paketini duyurdu."],
+    ["a second clause with a finite verb in front of the predicate", "Bakan Yılmaz toplantıyı açtı ve konuşuyor."],
+    ["a colon opens the substance", "Bakan Yılmaz, konuşuyor: vergi paketi geliyor."],
+    ["a figure that is not a year or an ordinal", "Bakan Yılmaz, yüzde 30 oranında açıklama yapıyor."],
+    ["a quotation that is not an event name", 'Bakan Yılmaz, "enflasyon düşecek" diyerek açıklamalarda bulunuyor.'],
+    ["a curly quotation that is not an event name", "Bakan Yılmaz, “enflasyon düşecek” diyerek açıklamalarda bulunuyor."],
+    ["longer than 160 characters", `Bakan Yılmaz, ${"çok uzun bir etkinlik adının ".repeat(6)}açıklamalarda bulunuyor.`],
+    ["a stub that is cut inside the predicate", "Cumhurbaşkanı Erdoğan, TRT World Forum etkinliğinde konuşu..."],
+    ["a question", "Bakan Yılmaz neden konuşuyor?"],
+    ["two sentences, the first one a question", "Bakan Yılmaz kimdir? Meclis'te konuşuyor."],
+    ["a plain news sentence", "Cumhurbaşkanı Erdoğan, Azerbaycan'daki temaslarının ardından yurda döndü."],
+    ["'konuşuyor' as part of a longer word", "Bakan Yılmaz'ın konuşuyorlar dediği şey."],
+    ["empty", ""],
+    ["blank", "   "],
+  ])("is false for %s", (_label, text) => {
+    expect(isLiveLine(text)).toBe(false);
+  });
+
+  it("the 160-character limit is inclusive", () => {
+    const tail = " açıklamalarda bulunuyor.";
+    const head = "Bakan Yılmaz,";
+    const filler = (n: number): string => ` ${"a".repeat(n - 1)}`;
+    const at160 = head + filler(160 - head.length - tail.length) + tail;
+    expect(at160).toHaveLength(160);
+    expect(isLiveLine(at160)).toBe(true);
+    const at161 = head + filler(161 - head.length - tail.length) + tail;
+    expect(at161).toHaveLength(161);
+    expect(isLiveLine(at161)).toBe(false);
+  });
+
+  it("a character whose folding changes the text's length makes the verdict 'no' rather than a guess", () => {
+    // A Hangul syllable decomposes to three jamo under NFD, so the predicate's index would not line up.
+    expect(isLiveLine("Bakan Yılmaz 한 konuşuyor.")).toBe(false);
+  });
+
+  it("an apostrophe in a name is not a quotation: 'D'Arcy' and a Turkish suffix are fine", () => {
+    expect(isLiveLine("Bakan Yılmaz, Meclis'te konuşuyor.")).toBe(true);
+    expect(isLiveLine("Bakan D'Arcy Meclis'te konuşuyor.")).toBe(true);
+    expect(isLiveLine("Bakan Yılmaz, Meclis’te konuşuyor.")).toBe(true);
+  });
+
+  it("an event name in single quotes with the closing mark glued to its suffix is an event name (Türkiye Gazetesi)", () => {
+    expect(
+      isLiveLine("Cumhurbaşkanı Erdoğan, İstanbul'da '12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni'nde konuşuyor."),
+    ).toBe(true);
+    expect(
+      isLiveLine("Cumhurbaşkanı Erdoğan, İstanbul’da “12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni”nde konuşuyor."),
+    ).toBe(true);
+  });
+
+  it("never throws on a non-string", () => {
+    expect(isLiveLine(undefined as unknown as string)).toBe(false);
+    expect(isLiveLine(null as unknown as string)).toBe(false);
+    expect(isLiveLine(42 as unknown as string)).toBe(false);
+  });
+
+  it("stays linear on hostile input (a long text is refused by its length before any pattern runs)", () => {
+    const gens: Array<[string, Gen]> = [
+      ["a long blank run", (n) => `Bakan${" ".repeat(n)}konuşuyor.`],
+      ["quote openers", rep('"')],
+      ["quote openers and letters", rep('"a')],
+      ["dots", rep(".")],
+      ["digits and dots", rep("1.")],
+    ];
+    for (const [label, gen] of gens) {
+      expect(() => expectLinear(gen, (s) => isLiveLine(s), { n: 100_000, ceilingMs: 2_000 }), label).not.toThrow();
+    }
+  });
+});
+
+describe("summaryDefect: a live line is a defect for a candidate (h95-summaries-1)", () => {
+  const HABER7 =
+    "Cumhurbaşkanı Erdoğan, Azerbaycan Cumhurbaşkanı Aliyev ile yaptığı ortak toplantıda açıklamalarda bulunuyor.";
+
+  it("459a7b61: Haber7's line is 'live'", () => {
+    expect(summaryDefect(HABER7, HABER7)).toBe("live");
+  });
+
+  it("the same line in the past tense is a sentence, not a defect", () => {
+    const done = "Cumhurbaşkanı Erdoğan, Azerbaycan Cumhurbaşkanı Aliyev ile yaptığı ortak toplantıda açıklamalarda bulundu.";
+    expect(summaryDefect(done, done)).toBeNull();
+  });
+
+  it("the earlier labels keep their order: a cut, a teaser, a dateline and a run-on come first", () => {
+    const cut = "Cumhurbaşkanı Erdoğan, TRT World Forum etkinliğinde konuşuyor...";
+    expect(summaryDefect(cut, cut)).toBe("stub");
+    const dateline = "HABER MERKEZİ - Cumhurbaşkanı Erdoğan, TRT World Forum etkinliğinde konuşuyor.";
+    expect(summaryDefect(dateline, dateline)).toBe("dateline");
+  });
+});
+
+describe("hasFiniteVerb ignores a capitalised word that does not open a sentence (h95-summaries-1)", () => {
+  it("dd5535a7: 'Kurtulmuş' is a surname, not a reported past", () => {
+    expect(
+      hasFiniteVerb("Başkan Recep Tayyip Erdoğan'ın liderliğindeki Aslanlı Yol'daki kortejde, TBMM Numan Kurtulmuş, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, Yeni Parti Genel Başkanı"),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["a lower-case 'kurtulmuş' is the verb", "Fon sanığı cezadan kurtulmuş"],
+    ["a capital at the start of the text opens a sentence", "Kurtulmuş"],
+    ["a capital after a full stop opens a sentence", "Bakan Yılmaz. Açıkladı"],
+    ["a capital after a colon opens a clause", "Bakan Yılmaz: Kazandık"],
+    ["a capital after an opening quote opens a clause", 'Bakan "Kazandık'],
+    ["an ALL-CAPS headline still has its verb", "ERDOĞAN GÜNEY KORE'DEN AYRILDI"],
+    ["a lower-case verb behind capitalised names", "Numan Kurtulmuş ve Cevdet Yılmaz toplantıya katıldı"],
+  ])("%s", (_label, text) => {
+    expect(hasFiniteVerb(text)).toBe(true);
+  });
+
+  it.each([
+    ["capitalised names only", "TBMM Başkanı Numan Kurtulmuş, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz"],
+    ["Suudi Arabistan stays a noun", "Suudi Arabistan ve Hindi kedi"],
+  ])("%s", (_label, text) => {
+    expect(hasFiniteVerb(text)).toBe(false);
+  });
+});
+
+describe("seedDisqualified: live, teaser, echo and the surname stub (h95-summaries-1)", () => {
+  // dd5535a7 (Yeni Asır, 226 characters), verbatim: the feed cut it and the CTA followed.
+  const DD5_RAW =
+    "Ankara'da ilk tören Anıtkabir'de yapıldı. Başkan Recep Tayyip Erdoğan'ın liderliğindeki Aslanlı Yol'daki kortejde, TBMM Numan Kurtulmuş, Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, Yeni Parti Genel Başkanı...Devamı için tıklayınız";
+  const LIVE = "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 Resmi Açılış Töreni'nde açıklamalarda bulunuyor.";
+  const CLEAN = "Abdul El Sayed, Michigan'da Senato seçimini kazanarak ABD Senatosu'na seçilen ilk Müslüman oldu.";
+
+  it("a live line is 'live'", () => {
+    expect(seedDisqualified(LIVE, LIVE)).toBe("live");
+  });
+
+  it("a text that opens with Peki / İşte, with nothing in front to cut, is 'teaser'", () => {
+    const peki = "Peki, İstanbul Barosu'nun yeni başkanı kim oldu? Seçim sonuçları belli oldu.";
+    expect(seedDisqualified(peki, tidySummaryText(peki))).toBe("teaser");
+    const iste = "İşte Erdoğan'ın açıklamalarından öne çıkan satır başları:";
+    expect(seedDisqualified(iste, tidySummaryText(iste))).toBe("teaser");
+  });
+
+  it("a text whose come-on the tidy step cut is clean again", () => {
+    const raw =
+      "İstanbul Barosu başkanlık seçimlerinde adaylar arasında yer alan eski başkan Ümit Kocasakal, yeniden gündeme geldi. Peki, Ümit Kocasakal kimdir?";
+    const shown = tidySummaryText(raw);
+    expect(shown.endsWith("gündeme geldi.")).toBe(true);
+    expect(seedDisqualified(raw, shown)).toBeNull();
+  });
+
+  describe("echo", () => {
+    const TITLE = "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı";
+
+    it("8e1a8c91: the shown text is the cluster title again", () => {
+      const shown = "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı.";
+      expect(seedDisqualified(shown, shown, { clusterTitle: TITLE })).toBe("echo");
+    });
+
+    it("181cd879: the shown text is the member's own headline (Korkusuz ships the title as the description)", () => {
+      const headline = "Erdoğan'dan fon açıklaması: Hiç ummadığınız insanlar işin içine girmişler";
+      expect(seedDisqualified(headline, headline, { memberTitle: headline })).toBe("echo");
+      expect(seedDisqualified(headline, headline, { memberTitle: null, clusterTitle: headline })).toBe("echo");
+    });
+
+    it("case, blanks and a trailing mark do not matter", () => {
+      const shown = "tbmm genel  sekreterliğine kemal şamlıoğlu ATANDI!";
+      expect(seedDisqualified(shown, shown, { clusterTitle: TITLE })).toBe("echo");
+    });
+
+    it("a description that goes on after the title is a summary, not an echo", () => {
+      const shown = "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı. Atama Meclis'in resmi sitesinde yayımlandı.";
+      expect(seedDisqualified(shown, shown, { clusterTitle: TITLE })).toBeNull();
+    });
+
+    it("without titles there is nothing to echo", () => {
+      const shown = "TBMM Genel Sekreterliğine Kemal Şamlıoğlu atandı.";
+      expect(seedDisqualified(shown, shown)).toBeNull();
+      expect(seedDisqualified(shown, shown, {})).toBeNull();
+      expect(seedDisqualified(shown, shown, { memberTitle: "", clusterTitle: null })).toBeNull();
+    });
+  });
+
+  it("dd5535a7: the cut that 'Kurtulmuş' hid is a stub", () => {
+    const shown = tidySummaryText(DD5_RAW);
+    expect(shown.endsWith("Yeni Parti Genel Başkanı...")).toBe(true);
+    expect(seedDisqualified(DD5_RAW, shown)).toBe("stub");
+  });
+
+  it("a 400 or 500 character cut with no sentence end ('…' after the word cut) is a stub whatever it holds", () => {
+    // A finite verb sits in the last sentence, which the old rule read as a complete one.
+    const raw = `${"Bakan açıklama yaptı ve toplantı sürdü ".repeat(13).slice(0, 499)}k`;
+    expect(raw).toHaveLength(500);
+    const shown = tidySummaryText(raw);
+    expect(shown.endsWith("…")).toBe(true);
+    expect(seedDisqualified(raw, shown)).toBe("stub");
+  });
+
+  it("a live line that only trails off is a sentence with its verb, so it is 'live', not a stub", () => {
+    const trailing = "Cumhurbaşkanı Erdoğan, TRT World Forum 2026 etkinliğinde konuşuyor...";
+    expect(seedDisqualified(trailing, trailing)).toBe("live");
+  });
+
+  it("the earlier verdicts keep their order: unbalanced quotes come before live", () => {
+    const quote = "“Cumhurbaşkanı Erdoğan konuşuyor.";
+    expect(seedDisqualified(quote, quote)).toBe("quotes");
+  });
+
+  it("a clean sentence stays clean, whatever the titles say", () => {
+    expect(seedDisqualified(CLEAN, CLEAN, { memberTitle: "Başka bir başlık", clusterTitle: "Michigan seçimi" })).toBeNull();
+  });
+});
+
+describe("agreementSwitches takes the floor of the replacement (h95-summaries-1)", () => {
+  it("AGREEMENT_FORM_DEFECT_MIN is 0.6", () => {
+    expect(AGREEMENT_FORM_DEFECT_MIN).toBe(0.6);
+  });
+
+  it("the default floor is still AGREEMENT_HIGH", () => {
+    expect(agreementSwitches(0.2, 0.7, true)).toBe(false);
+    expect(agreementSwitches(0.2, 0.75, true)).toBe(true);
+    expect(agreementSwitches(0.2, 0.7, true, AGREEMENT_HIGH)).toBe(false);
+  });
+
+  it("a lower floor lets a malformed seed be replaced by a score at or above it (inclusive)", () => {
+    expect(agreementSwitches(0.2, 0.6, true, AGREEMENT_FORM_DEFECT_MIN)).toBe(true);
+    expect(agreementSwitches(0.2, 0.67, true, AGREEMENT_FORM_DEFECT_MIN)).toBe(true);
+    expect(agreementSwitches(0.2, 0.5999, true, AGREEMENT_FORM_DEFECT_MIN)).toBe(false);
+    expect(agreementSwitches(3 / 5, 3 / 5, true, AGREEMENT_FORM_DEFECT_MIN)).toBe(true);
+  });
+
+  it("a malformed seed's own score does not matter, the floor does", () => {
+    expect(agreementSwitches(0.9, 0.6, true, AGREEMENT_FORM_DEFECT_MIN)).toBe(true);
+    expect(agreementSwitches(0.9, 0.55, true, AGREEMENT_FORM_DEFECT_MIN)).toBe(false);
+  });
+
+  it("the floor never applies to a well-formed seed: the ceiling and the gain still do", () => {
+    expect(agreementSwitches(0.5, 0.9, false, AGREEMENT_FORM_DEFECT_MIN)).toBe(false);
+    expect(agreementSwitches(0.4, 0.6, false, AGREEMENT_FORM_DEFECT_MIN)).toBe(false);
+    expect(agreementSwitches(0.2, 0.6, false, AGREEMENT_FORM_DEFECT_MIN)).toBe(true);
+  });
+
+  it("a null score never switches, whatever the floor", () => {
+    expect(agreementSwitches(null, 1, true, 0)).toBe(false);
+    expect(agreementSwitches(0.1, null, true, 0)).toBe(false);
   });
 });

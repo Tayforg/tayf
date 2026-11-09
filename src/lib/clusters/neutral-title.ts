@@ -205,6 +205,26 @@
 // eleven stored English titles stay until a one-off re-pick. Readers that compute the first pick before the cron
 // has written one (display-headline.ts) hold titles only and still pick over every title.
 
+// h94-neutraltitles-2 and h94-neutraltitles-3 (hunt 95; still extractive-v6, NO model bump: new picks, and stored
+// titles when they are re-offered).
+// -2, attribution. A two-member cluster dropped what a sibling carried, because at n = 2 centrality is symmetric and
+// the length term let the shorter, unlabelled restatement win: the hedge ('GKRY ... girişim yürüttüğü öne sürüldü',
+// 'Emir Sarıgül'den Özgür Özel iddiası') and the speaker ('Sağlık Bakanı Memişoğlu: ...', 'Emine Erdoğan: ...').
+//   1. HEDGE_ALLEGATION also reads the passive 'öne sürül...', 'ileri sürd... / sürül...' and the stem 'kulis'.
+//   2. At exactly two deduplicated usable members one hedging member is enough for ctx.hedged (the narrow set only).
+//   3. ATTRIBUTION_LOSS_PENALTY: a title that no label and no quote mark of its own attributes, which restates (same
+//      folded text, or token overlap 0.8) what another member says behind a '<Label>:' pays 0.15.
+//   4. cleanHeadline keeps the quotes around a first-person sentence ('... mücadelemizi sürdürüyoruz'): without them
+//      the H1 speaks in the site's own voice.
+//   5. UNATTRIBUTED_VOICE_PENALTY: a title that ends in such a form and has no ':' and no quote mark pays 0.12, and the
+//      stored one gives way to a title that does not ('voice' switch rule).
+// -3, case and quotes. The picker copied one outlet's sentence casing and stray single quotes into the H1 although a
+// sibling had the clean form ('Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü'): a title-cased acronym ('Kktc',
+// 'Tbmm') whose upper form a sibling writes is the odd one out and is recased from the siblings (titleCasedAcronym);
+// a stored title with one, or one that opens with an unpaired single quote, gives way ('case' switch rule);
+// cleanHeadline drops a leading ' or ‘ the title never closes; and preferUnglued also swaps a title for its member twin
+// that differs only in quote marks and has fewer of them between no two letters.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
@@ -575,7 +595,15 @@ const PRICE_MARKET = new RegExp(
 // when the wide set fed the existing paths too, d5a6d9ab ("Yavuzyılmaz, ... zam yapılacağını öne sürdü",
 // a stored title that attributes) turned into a defect and was traded for "gizli elektrik zammı
 // uyarısı: ... zam gelebilir", losing the 2027 and 82-104 figures (h42 review, editorial-3).
-const HEDGE_ALLEGATION = String.raw`${L}(?:iddia|öne\s+sürd|ifade)`;
+// h94-neutraltitles-2 adds the passive and its synonym ('öne sürüldü', 'ileri sürdü / sürüldü': fa08b570's haberler-com
+// title was read as unhedged) and the stem 'kulis' ('Kulislerde ...', 'kulislere göre': a report from the corridors, not a
+// statement). 'sürgüne sürüldü' (banished) and 'Kulüp' (club) do not match: the first word of each phrase carries the left
+// edge, and 'kulis' is not a prefix of 'kulüp'.
+// 'iddianame' (indictment: 'iddianamesiz tutuklu') and 'ifade özgürlüğü' (freedom of expression) are not hedges, and
+// since the n = 2 rule (HEDGED_PAIR_SIZE) a single member carrying either decides the pair, so they are carved out of
+// 'iddia' and 'ifade' (h95 review, correctness-2). 'ifade' as testimony ('tanık ifadesi', 'ifade verdi') attributes
+// by design and stays; so does 'kulis' in every sense a headline uses it (the corridor rumour).
+const HEDGE_ALLEGATION = String.raw`${L}(?:iddia(?!n[aâ]me)|öne\s+sürd|öne\s+sürül|ileri\s+sür(?:d|ül)|kulis|ifade(?!\s+özgürl))`;
 const HEDGE = new RegExp(HEDGE_ALLEGATION, "u");
 const HEDGE_WIDE = new RegExp(
   `${HEDGE_ALLEGATION}|\\p{L}[ae]bil(?:ir|ece)|${L}(?:bekleniyor|muhtemel|olas[ıi]|olmazsa|sinyal|düşünüyor)`,
@@ -592,6 +620,12 @@ const HEDGE_WIDE = new RegExp(
 export const HEDGE_LOSS_PENALTY = 0.15;
 const HEDGED_MIN_MEMBERS = 3;
 const HEDGED_SHARE = 0.4;
+/**
+ * At exactly this many deduplicated usable members one hedging member is enough for ctx.hedged (h94-neutraltitles-2).
+ * A pair has no majority to wait for: fa08b570 and 50571fc6 each had one member that attributed and one that asserted,
+ * and the share rule (three members) never fired. The narrow set only: the wide one stays out of scoring.
+ */
+const HEDGED_PAIR_SIZE = 2;
 
 /** True when the title attributes what it says as an allegation (see HEDGE); exported for tests. Pure. */
 export function carriesHedge(title: string): boolean {
@@ -930,6 +964,85 @@ function trimTrailingPunctuation(t: string): string {
   return end === t.length ? t : t.slice(0, end);
 }
 
+// ---------------------------------------------------------------------------
+// First-person voice and stray single quotes (h94-neutraltitles-2 and -3).
+// ---------------------------------------------------------------------------
+
+// The endings of a sentence in the first person, or an imperative to the reader, tested on the Turkish-lower-cased text
+// with trailing punctuation and quotes read past: '-iyoruz', '-iyorum' (with the ı / u / ü vowels), '-acağız',
+// '-eceğiz', '-acağım', '-eceğim', and the whole words 'olun' and 'edin' (the left edge keeps 'yolun', 'kolun' and the
+// name 'Edin' out). A headline that speaks like this with no speaker named ("mücadelemizi sürdürüyoruz") is read as the
+// site's own voice.
+const FIRST_PERSON_ENDING = new RegExp(
+  `(?:[iıuü]yor(?:uz|um)|[ae]ca[gğ][ıi][zm]|[ae]ce[gğ]i[zm]|${L}(?:olun|edin))$`,
+  "u",
+);
+/** Only the last characters of a title are tested: the longest ending is six letters and the one before it a word edge. */
+const FIRST_PERSON_TAIL_CHARS = 16;
+const VOICE_TRAILING_NOISE: ReadonlySet<string> = new Set([
+  ".", ",", ";", ":", "!", "?", "…", "-", "–", "—", '"', "'", "“", "”", "‘", "’", "«", "»", "(", ")", "[", "]",
+]);
+
+/**
+ * Whether the text ends in a first-person form or an imperative (FIRST_PERSON_ENDING), with trailing punctuation and
+ * quote marks read past. A right-to-left scan of the noise and a bounded tail, so a long title costs a pass, not a
+ * regular expression over it.
+ */
+function endsInFirstPerson(text: string): boolean {
+  let end = text.length;
+  while (end > 0) {
+    const ch = text.charAt(end - 1);
+    if (!VOICE_TRAILING_NOISE.has(ch) && !/\s/.test(ch)) break;
+    end--;
+  }
+  if (end === 0) return false;
+  return FIRST_PERSON_ENDING.test(foldTr(text.slice(Math.max(0, end - FIRST_PERSON_TAIL_CHARS), end)));
+}
+
+const SINGLE_QUOTE_MARKS: ReadonlySet<string> = new Set(["'", "‘", "’"]);
+/** Every mark the quote twin ignores: ' ‘ ’ " “ ”. */
+const TWIN_QUOTE_MARKS: ReadonlySet<string> = new Set(["'", "‘", "’", '"', "“", "”"]);
+
+function isWordCharAt(t: string, at: number): boolean {
+  return at >= 0 && at < t.length && WORD_CHAR.test(t.charAt(at));
+}
+
+/**
+ * How many of `marks` sit between no two letters or digits. A mark inside a word ("Kılıçdaroğlu’ndan", "Özel'e",
+ * "10'luk") is the apostrophe of a suffix and not a quotation; one at a word edge opens or closes a quote. One pass.
+ */
+function marksOutsideWords(t: string, marks: ReadonlySet<string>): number {
+  let n = 0;
+  for (let i = 0; i < t.length; i++) {
+    if (!marks.has(t.charAt(i))) continue;
+    if (isWordCharAt(t, i - 1) && isWordCharAt(t, i + 1)) continue;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Drops a leading ' or ‘ when the title's single-quote marks that sit between no two letters are odd in number: the
+ * quote opens and nothing closes it (59a68086: "'Kaşif Kozinoğlu'nun ATK raporu ...: 'Ölüm nedeni' açıklandı", what
+ * is left after cumhuriyet's "Son Dakika..." lead-in goes). A closed lead quote ("'Ölüm nedeni' açıklandı") has an even
+ * count and stays. Pure; the title is cleaned otherwise.
+ */
+function dropStrayLeadingQuote(t: string): string {
+  return hasStrayLeadingQuote(t) ? t.slice(1) : t;
+}
+
+/** The title opens with ' or ‘ and its single-quote marks outside words are odd in number (see dropStrayLeadingQuote). */
+function hasStrayLeadingQuote(t: string): boolean {
+  const first = t.charAt(0);
+  if (first !== "'" && first !== "‘") return false;
+  return marksOutsideWords(t, SINGLE_QUOTE_MARKS) % 2 === 1;
+}
+
+/** The quotes cleanHeadline strips from around a whole headline. */
+const WRAPPING_QUOTES = /^["'“‘](.+)["'”’]$/;
+/** The closing mark that pairs with each opening mark WRAPPING_QUOTES accepts. */
+const WRAPPING_CLOSE: Readonly<Record<string, string>> = { '"': '"', "'": "'", "“": "”", "‘": "’" };
+
 export function cleanHeadline(title: string): string {
   let t = title.trim();
   // Outlet prefixes ("Halk TV | ...") and "Son dakika" lead-ins, repeatedly:
@@ -950,8 +1063,16 @@ export function cleanHeadline(title: string): string {
   t = breakTeaserPauses(t);
   // Trailing ellipsis / colon / dash.
   t = trimTrailingPunctuation(t);
-  // Wrapping quotes around the whole headline.
-  t = t.replace(/^["'“‘](.+)["'”’]$/, "$1");
+  // Wrapping quotes around the whole headline, unless it is a first-person sentence: a quote that loses its quotes
+  // speaks in the site's own voice ('"... mücadelemizi sürdürüyoruz"', h94-neutraltitles-2). A matched pair stays as
+  // written. A mismatched one ('"..."' opened straight and closed curly, h95 review correctness-1) is rewritten as “…”:
+  // kept as written it leaves a dangling mark that the unbalanced-quote gate rejects, so the attribution is lost anyway.
+  t = t.replace(WRAPPING_QUOTES, (whole: string, inner: string) => {
+    if (!endsInFirstPerson(inner)) return inner;
+    return WRAPPING_CLOSE[whole.charAt(0)] === whole.charAt(whole.length - 1) ? whole : `“${inner}”`;
+  });
+  // A lead quote nothing closes (h94-neutraltitles-3).
+  t = dropStrayLeadingQuote(t);
   t = t.replace(/\s{2,}/g, " ").trim();
   if (t.length > 0) t = t[0]!.toLocaleUpperCase("tr") + t.slice(1);
   return t;
@@ -1630,8 +1751,9 @@ export function siblingCapitalForms(others: readonly string[]): Map<string, stri
   return capitalFormsFrom(others.map(caseEvidence));
 }
 
-function recaseWith(forms: ReadonlyMap<string, string>, text: string): string {
-  if (forms.size === 0 || text === "" || text.length > EVIDENCE_MAX_CHARS) return text;
+function recaseWith(forms: ReadonlyMap<string, string>, text: string, acronyms?: ReadonlySet<string>): string {
+  const known = acronyms !== undefined && acronyms.size > 0 ? acronyms : null;
+  if ((forms.size === 0 && known === null) || text === "" || text.length > EVIDENCE_MAX_CHARS) return text;
   const parts = text.split(WORD_JOINERS_KEPT);
   let seenWord = false;
   // Even indices are words, odd ones the separators that were kept.
@@ -1639,11 +1761,19 @@ function recaseWith(forms: ReadonlyMap<string, string>, text: string): string {
     const token = parts[i]!;
     const [a, b] = coreRange(token);
     if (a >= b) continue;
-    if (!seenWord) {
-      seenWord = true; // the first word: cleanHeadline already capitalised it
-      continue;
-    }
     const [stem, suffix] = splitSuffix(token.slice(a, b));
+    const first = !seenWord;
+    seenWord = true;
+    // A title-cased acronym ('Kktc', 'Tbmm') takes the capitals a sibling writes, the first word included
+    // (h94-neutraltitles-3).
+    if (known !== null && CASED_ACRONYM.test(stem)) {
+      const upper = stem.toLocaleUpperCase("tr");
+      if (known.has(upper)) {
+        parts[i] = token.slice(0, a) + upper + suffix + token.slice(b);
+        continue;
+      }
+    }
+    if (first) continue; // the first word: cleanHeadline already capitalised it
     if (letterCount(stem) === 0 || stem !== stem.toLocaleLowerCase("tr")) continue;
     const form = forms.get(stem);
     if (form === undefined) continue;
@@ -1765,11 +1895,24 @@ function startsLowerCase(title: string): boolean {
 export function lowerCaseSourced(rawTitle: string): boolean {
   const title = rawTitle.trim().slice(0, EVIDENCE_MAX_CHARS);
   if (startsLowerCase(title)) return true;
+  const parts = splitSpeakerLabel(title);
+  return parts !== null && startsLowerCase(parts.rest);
+}
+
+/**
+ * The speaker label of a title and what follows it: the text before the first ':' when that sits at index 1 to
+ * LABEL_MAX_CHARS and holds 1 to LABEL_MAX_WORDS words that all start with a capital ("Bilal Erdoğan: ...",
+ * "Sağlık Bakanı Memişoğlu: ..."); null for any other title ("Vali yardımcısının ölümünde yeni iddia: başsavcı ..."
+ * has a lower-case word before the colon). The title is read up to EVIDENCE_MAX_CHARS characters. The one definition
+ * lowerCaseSourced and the attribution rule (h94-neutraltitles-2) share.
+ */
+function splitSpeakerLabel(rawTitle: string): { label: string; rest: string } | null {
+  const title = rawTitle.trim().slice(0, EVIDENCE_MAX_CHARS);
   const colon = title.indexOf(":");
-  if (colon < 1 || colon > LABEL_MAX_CHARS) return false;
-  const label = title.slice(0, colon).split(WORD_JOINERS).filter((w) => w !== "");
-  if (label.length < 1 || label.length > LABEL_MAX_WORDS || !label.every(startsUpper)) return false;
-  return startsLowerCase(title.slice(colon + 1));
+  if (colon < 1 || colon > LABEL_MAX_CHARS) return null;
+  const words = title.slice(0, colon).split(WORD_JOINERS).filter((w) => w !== "");
+  if (words.length < 1 || words.length > LABEL_MAX_WORDS || !words.every(startsUpper)) return null;
+  return { label: title.slice(0, colon), rest: title.slice(colon + 1) };
 }
 
 /**
@@ -1785,6 +1928,228 @@ export function lowerCaseSourced(rawTitle: string): boolean {
  */
 function isOddOneOut(forms: ReadonlyMap<string, string>, rawTitle: string, cleaned: string): boolean {
   return lowerCaseSourced(rawTitle) && disagreements(forms, cleaned) >= 1;
+}
+
+// ---------------------------------------------------------------------------
+// The title-cased acronym (extractive-v6, hunt 95, h94-neutraltitles-3).
+// ---------------------------------------------------------------------------
+//
+// One outlet sentence-cases a headline word for word ("Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü",
+// "Tbmm başkanı Kurtulmuş: ...") and the picker copied it into the H1 although two other outlets wrote "KKTC" and ten
+// wrote "TBMM". isOddOneOut needs lowerCaseSourced, which a title that opens with a capital never is. A word of two
+// to five letters with one capital and the rest lower case ("Kktc", "Tbmm") whose upper form some sibling writes as a
+// whole token is that outlet's casing, not a name: the title is the odd one out, recaseWith repairs it from the sibling
+// forms (the acronym itself included) and leaksWith still guards what it cannot restore.
+
+/** A word the sentence-casing lost the capitals of: one capital, one to four lower-case letters ("Kktc", "Tbmm", "Ak"). */
+const CASED_ACRONYM = /^\p{Lu}\p{Ll}{1,4}$/u;
+/** An acronym as a sibling writes it: two to five capitals and nothing else. */
+const UPPER_ACRONYM = /^\p{Lu}{2,5}$/u;
+
+/** What one cleaned title says about acronyms: the upper-case spellings it writes, and the words it writes in any other case. */
+interface AcronymEvidence {
+  upper: Set<string>;
+  /** Tr-lower-cased words the title writes in lower case or with one capital ('kasım' in "1 Kasım 2026"). */
+  notUpper: Set<string>;
+}
+
+/** A vowel of the Turkish alphabet in capitals: a word has one, an abbreviation such as KKTC, TBMM or BDDK need not. */
+const UPPER_VOWEL = /[AEIİOÖUÜÂÎÛ]/u;
+
+/**
+ * Reads one cleaned title. `upper` holds the whole-token acronyms ("TBMM'de" -> "TBMM": two to five capitals) a title
+ * can be trusted to mean as acronyms, with the guards the existing suites needed:
+ *   - only a spelling with no vowel (KKTC, TBMM, BDDK, EPDK: no Turkish word is spelled without one) or one of the
+ *     ACRONYMS counts. A shouted ordinary word is emphasis or a styled name, not evidence: 'YENİ' ("YENİ Parti"), 'KASIM'
+ *     ("DEPREM 1 KASIM!"), 'ENKA' ("... Kazanan ENKA Oldu") and 'İZMİR' must not turn a member's 'Yeni', 'Kasım', 'Enka'
+ *     or 'İzmir' into capitals (the h26 and h27 pins; two corpus titles said 'Yeni Parti' and another outlet 'YENİ Parti');
+ *   - a shouted title (all capitals) or one with a run of shouted words (hasShoutedRun) has lost its case and
+ *     contributes nothing;
+ *   - a bulletin cue ('ŞOK', 'FLAŞ', 'SON': a stop word, a framing or a loaded word) is emphasis, not an acronym.
+ * `notUpper` lists every other word of two or more letters (lower case, one capital, mixed), so evidence a title
+ * contradicts is dropped: a sibling that also writes 'Tcmb' shows 'TCMB' is not settled.
+ */
+function acronymEvidenceOf(cleaned: string): AcronymEvidence {
+  const evidence: AcronymEvidence = { upper: new Set(), notUpper: new Set() };
+  const text = cleaned.trim().slice(0, EVIDENCE_MAX_CHARS);
+  if (text === "" || isAllCaps(text) || hasShoutedRun(text)) return evidence;
+  for (const word of text.split(WORD_JOINERS).slice(0, EVIDENCE_MAX_TOKENS)) {
+    const stem = stemOf(word);
+    if (letterCount(stem) < 2) continue;
+    const lowered = stem.toLocaleLowerCase("tr");
+    if (!UPPER_ACRONYM.test(stem)) {
+      if (stem !== stem.toLocaleUpperCase("tr")) evidence.notUpper.add(lowered);
+      continue;
+    }
+    if (UPPER_VOWEL.test(stem) && !ACRONYMS.has(stem)) continue;
+    if (STOP.has(asciiLower(stem)) || framingPenalty(lowered) > 0 || loadedPenalty(lowered) > 0) continue;
+    evidence.upper.add(stem);
+  }
+  return evidence;
+}
+
+/** The acronym spellings the evidence supports: written in capitals by some title and contradicted by none. */
+function supportedAcronyms(list: readonly AcronymEvidence[]): Set<string> {
+  const upper = new Set<string>();
+  const notUpper = new Set<string>();
+  for (const e of list) {
+    for (const u of e.upper) upper.add(u);
+    for (const w of e.notUpper) notUpper.add(w);
+  }
+  const out = new Set<string>();
+  for (const u of upper) if (!notUpper.has(u.toLocaleLowerCase("tr"))) out.add(u);
+  return out;
+}
+
+/** True when a token of the cleaned title (its apostrophe suffix removed) is a CASED_ACRONYM whose upper form is in `acronyms`. */
+function hasCasedAcronymToken(cleaned: string, acronyms: ReadonlySet<string>): boolean {
+  if (acronyms.size === 0) return false;
+  for (const token of cleaned.trim().slice(0, EVIDENCE_MAX_CHARS).split(WORD_JOINERS).slice(0, EVIDENCE_MAX_TOKENS)) {
+    const stem = stemOf(token);
+    if (CASED_ACRONYM.test(stem) && acronyms.has(stem.toLocaleUpperCase("tr"))) return true;
+  }
+  return false;
+}
+
+/** The acronym spellings the given titles support (cleaned inside, each read up to EVIDENCE_MAX_CHARS). */
+function acronymEvidence(titles: readonly string[]): Set<string> {
+  const list: AcronymEvidence[] = [];
+  for (const raw of titles) {
+    if (typeof raw === "string") list.push(acronymEvidenceOf(cleanHeadline(raw.slice(0, EVIDENCE_MAX_CHARS))));
+  }
+  return supportedAcronyms(list);
+}
+
+/**
+ * True when the cleaned title holds a title-cased acronym ("Kktc", "Tbmm'de") whose upper form ("KKTC", "TBMM") a
+ * sibling title writes as a whole token. The token is judged without its apostrophe suffix, anywhere in the title.
+ * A sibling that is all capitals (or has a run of shouted words) is not evidence (it has lost its case), nor is a
+ * bulletin cue ('ŞOK'), a word of more than five letters, a shouted word that has a vowel and is no known acronym
+ * ('YENİ', 'KASIM': emphasis, not an abbreviation), or a spelling some sibling also writes in lower case or with one
+ * capital. `siblings` are the cluster's other titles, raw or cleaned. Pure.
+ */
+export function titleCasedAcronym(title: string, siblings: readonly string[]): boolean {
+  if (typeof title !== "string" || title === "") return false;
+  return hasCasedAcronymToken(title, acronymEvidence(siblings));
+}
+
+// ---------------------------------------------------------------------------
+// Attribution and voice (extractive-v6, hunt 95, h94-neutraltitles-2).
+// ---------------------------------------------------------------------------
+//
+// At two members the centrality of both titles is the same, so the length term decided: 'Sağlık Bakanı Memişoğlu:
+// Toplum sağlığını ... mücadelemizi sürdürüyoruz' (AA) lost to haberturk's quote-wrapped copy of the same sentence, whose
+// quotes cleanHeadline stripped, and the H1 read as the site's own claim. scoreTitle had no term for attribution lost.
+// Two terms now: a restatement of what a sibling says behind a speaker label pays ATTRIBUTION_LOSS_PENALTY, and a
+// title that speaks in the first person with no speaker named, no colon and no quote pays UNATTRIBUTED_VOICE_PENALTY.
+
+/**
+ * What a title pays for restating, without its label, what another member says behind a '<Label>:' (the label parsed as
+ * lowerCaseSourced parses it: at most LABEL_MAX_WORDS words, all capitalised): the folded texts are equal or the
+ * token overlap is ATTRIBUTION_MIN_OVERLAP or more, and the title has no label and no quote mark of its own. The same
+ * size as HEDGE_LOSS_PENALTY: dropping who said it and dropping that it is only said are the same kind of loss.
+ */
+export const ATTRIBUTION_LOSS_PENALTY = 0.15;
+const ATTRIBUTION_MIN_OVERLAP = 0.8;
+
+/**
+ * What a title pays when it ends in a first-person form or an imperative ('mücadelemizi sürdürüyoruz', 'hazır olun':
+ * FIRST_PERSON_ENDING) and has no ':' and no quote mark: nobody is speaking but the site (h94-neutraltitles-2, 759001a8's
+ * bare 'Diplomatik çözüm için çalışıyoruz'). A quote, or a title with a label, is somebody's voice and pays nothing.
+ */
+export const UNATTRIBUTED_VOICE_PENALTY = 0.12;
+
+/** Every mark that makes a title a quotation, the guillemets included. */
+const ANY_QUOTE_MARKS: ReadonlySet<string> = new Set([...TWIN_QUOTE_MARKS, "«", "»"]);
+
+/** True when one of `marks` sits between no two letters or digits (a quote, not a suffix apostrophe). Stops at the first. */
+function hasMarkOutsideWords(t: string, marks: ReadonlySet<string>): boolean {
+  for (let i = 0; i < t.length; i++) {
+    if (marks.has(t.charAt(i)) && !(isWordCharAt(t, i - 1) && isWordCharAt(t, i + 1))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the title speaks in the first person (or gives the reader an order) with nobody speaking: it ends in a
+ * FIRST_PERSON_ENDING form, holds no ':' and no quote mark. Exported for tests. Pure; false for a non-string.
+ */
+export function isUnattributedVoice(title: string): boolean {
+  if (typeof title !== "string" || !endsInFirstPerson(title)) return false;
+  if (title.includes(":")) return false;
+  return !hasMarkOutsideWords(title, ANY_QUOTE_MARKS);
+}
+
+/** The other members' words behind a label: `index` is the member, `folded` and `toks` the folded rest and its tokens. */
+interface LabelledRest {
+  index: number;
+  folded: string;
+  toks: Set<string>;
+}
+
+/** Single words an outlet puts before a colon that name a kind of item, not a speaker ('Haberi: ...', 'Video: ...'). Tr-lower-cased. */
+const NON_SPEAKER_LABELS: ReadonlySet<string> = new Set([
+  "haber", "haberi", "haberler", "video", "foto", "fotoğraf", "galeri", "analiz", "özet", "canlı", "flaş",
+]);
+
+/**
+ * A label that names no speaker: capitals longer than an acronym ('FLAŞ HABER', 'HABERİ': what is left of a bulletin
+ * tag once the lead-in is stripped) or one of NON_SPEAKER_LABELS ('Haberi', 'Video'). A short upper-case label ('CHP',
+ * 'AKP', 'DEM Parti') is a speaker.
+ */
+function isBulletinTag(label: string): boolean {
+  return (isAllCaps(label) && letterCount(label) > ACRONYM_MAX_LETTERS) || NON_SPEAKER_LABELS.has(foldTr(label.trim()));
+}
+
+/** The members that carry a speaker label, with the folded text and tokens of what follows it. Cleaned titles in, member order kept. */
+function labelledRests(cleanedTitles: readonly string[]): LabelledRest[] {
+  const out: LabelledRest[] = [];
+  cleanedTitles.forEach((cleaned, index) => {
+    const parts = splitSpeakerLabel(cleaned);
+    if (parts === null || isBulletinTag(parts.label)) return;
+    const folded = fold(parts.rest);
+    if (folded === "") return;
+    out.push({ index, folded, toks: tokens(parts.rest) });
+  });
+  return out;
+}
+
+/** The title without the one pair of quotes cleanHeadline strips from around a whole headline (kept for a first-person sentence). */
+function withoutWrappingQuotes(cleaned: string): string {
+  return WRAPPING_QUOTES.exec(cleaned)?.[1] ?? cleaned;
+}
+
+/** What a title pays for attribution (see ATTRIBUTION_LOSS_PENALTY and UNATTRIBUTED_VOICE_PENALTY). */
+interface AttributionCost {
+  /** It restates a labelled member without the label. */
+  dropped: boolean;
+  /** It speaks in the first person with no speaker. */
+  voice: boolean;
+}
+
+/**
+ * Whether the cleaned title restates, without the label, what a labelled member (other than member `selfIndex`, -1 for
+ * the stored title) says: it carries no label of its own and no quote mark (a wrapping pair around the whole of it does
+ * not count: it is the quote-wrapped copy of the sentence the label names), and its folded text equals the rest of a
+ * labelled member's or overlaps its tokens by ATTRIBUTION_MIN_OVERLAP or more.
+ */
+function attributionDropped(cleaned: string, labelled: readonly LabelledRest[], selfIndex: number): boolean {
+  if (labelled.length === 0 || (labelled.length === 1 && labelled[0]!.index === selfIndex)) return false;
+  if (splitSpeakerLabel(cleaned) !== null) return false;
+  const body = withoutWrappingQuotes(cleaned);
+  if (hasMarkOutsideWords(body, ANY_QUOTE_MARKS)) return false;
+  const folded = fold(body);
+  if (folded === "") return false;
+  const toks = tokens(body);
+  for (const other of labelled) {
+    if (other.index === selfIndex) continue;
+    if (folded === other.folded || jaccard(toks, other.toks) >= ATTRIBUTION_MIN_OVERLAP) return true;
+  }
+  return false;
+}
+
+function attributionCost(cleaned: string, labelled: readonly LabelledRest[], selfIndex: number): AttributionCost {
+  return { dropped: attributionDropped(cleaned, labelled, selfIndex), voice: isUnattributedVoice(cleaned) };
 }
 
 export interface PickOptions {
@@ -1826,14 +2191,17 @@ interface ScoreContext {
 }
 
 // One formula for a member candidate and for the stored title it competes with.
-// The title is the text as written (a member's raw title, the stored title).
-function scoreTitle(title: string, centrality: number, ctx: ScoreContext): number {
+// The title is the text as written (a member's raw title, the stored title); `attribution` is read off its
+// cleaned form and the labelled members (attributionCost, h94-neutraltitles-2).
+function scoreTitle(title: string, centrality: number, ctx: ScoreContext, attribution: AttributionCost): number {
   return (
     centrality -
     0.12 * framingPenalty(title) -
     0.25 * loadedPenalty(title) -
     (ctx.hedged && !carriesHedge(title) ? HEDGE_LOSS_PENALTY : 0) -
     (ctx.qualified && !carriesQualifier(title) ? QUALIFIER_LOSS_PENALTY : 0) -
+    (attribution.dropped ? ATTRIBUTION_LOSS_PENALTY : 0) -
+    (attribution.voice ? UNATTRIBUTED_VOICE_PENALTY : 0) -
     0.002 * Math.max(0, title.length - 90) -
     0.008 * Math.max(0, FULL_LENGTH_TITLE_CHARS - title.length)
   );
@@ -2174,7 +2542,7 @@ function titleCaseIncumbent(inc: string, best: string, memberTitles: readonly st
   return titleCase(inc) && !titleCase(best);
 }
 
-type SwitchRule = "loaded" | "hedge" | "number" | "titleCase";
+type SwitchRule = "loaded" | "voice" | "hedge" | "number" | "titleCase" | "case";
 
 /**
  * The hedge, number and Title Case rules repair a wording of the SAME story ("14'er yıl" for "14 yıl 10 ay"),
@@ -2201,13 +2569,17 @@ function hedgedWide(items: readonly MemberTitle[]): boolean {
 }
 
 /**
- * Which h42-titles-2 rule makes the stored title `inc` give way to the best candidate `best` with no
- * margin, or null when none does: (1) the stored title is loaded and the best one is not and at least as
- * central as the stored one, (2) the cluster hedges in the wide vocabulary, the stored title does not and the
- * best one does, (3) the stored title lacks a number that half of the other members carry and the best one has
- * it, (4) the stored title is Title Case and the best one is not. Checked in that order; the first that holds
- * names the rule. No rule swaps to a title with more framing or to a Title Case title
- * (SWITCH_TARGET_TITLE_CASE_WORDS), and rules (2) to (4) need a best title that restates the stored one
+ * Which h42-titles-2 rule (or h94-neutraltitles-2 and -3 rule) makes the stored title `inc` give way to the best
+ * candidate `best` with no margin, or null when none does: (1) the stored title is loaded and the best one is not and
+ * at least as central as the stored one, (1b, 'voice') the stored title is an unattributed first-person sentence
+ * (isUnattributedVoice) and the best one is not, under the same centrality guard (h94-neutraltitles-2: 759001a8's bare
+ * 'Diplomatik çözüm için çalışıyoruz' beside 'Erdoğan Trump ile telefonda görüştü'), (2) the cluster hedges in the
+ * wide vocabulary, the stored title does not and the best one does, (3) the stored title lacks a number that half of
+ * the other members carry and the best one has it, (4) the stored title is Title Case and the best one is not,
+ * (5, 'case') the stored title holds a title-cased acronym a sibling writes in capitals ('Tbmm' beside 'TBMM') or opens
+ * with a single quote nothing closes, and the best one does neither (h94-neutraltitles-3). Checked in that order; the
+ * first that holds names the rule. No rule swaps to a title with more framing or to a Title Case title
+ * (SWITCH_TARGET_TITLE_CASE_WORDS), and rules (2) to (5) need a best title that restates the stored one
  * (SAME_STORY_MIN_OVERLAP).
  *
  * The centrality guard of (1) (h42 review, editorial-6): ad76f79a's stored "...perde arkası" title is a member
@@ -2224,14 +2596,53 @@ function incumbentSwitchRule(
   bestCentrality: () => number,
 ): SwitchRule | null {
   if (isTitleCaseTitle(best, SWITCH_TARGET_TITLE_CASE_WORDS)) return null;
-  // No rule trades toward more framing: d1ed614b swapped "fon vurgunu tepkisi" for "olay çağrı" in the replay.
-  if (framingPenalty(best) > framingPenalty(inc)) return null;
+  // No rule trades toward more framing: d1ed614b swapped "fon vurgunu tepkisi" for "olay çağrı" in the replay. The 'case'
+  // rule has its own version of this guard: the acronym it restores ('KKTC', 'TBMM') is a shouted word to framingPenalty.
+  if (framingPenalty(best) > framingPenalty(inc)) return caseDefectIncumbent(inc, best, memberTitles) ? "case" : null;
   if (loadedPenalty(inc) > 0 && loadedPenalty(best) === 0 && bestCentrality() >= incCentrality) return "loaded";
+  // The stored title speaks for the site and the best one does not: no margin, behind the loaded rule's guard.
+  if (isUnattributedVoice(inc) && !isUnattributedVoice(best) && bestCentrality() >= incCentrality) return "voice";
   if (jaccard(tokens(inc), tokens(best)) < SAME_STORY_MIN_OVERLAP) return null;
   if (hedgedWide(items) && !carriesWideHedge(inc) && carriesWideHedge(best)) return "hedge";
   if (lacksMajorityNumber(inc, best, items)) return "number";
   if (titleCaseIncumbent(inc, best, memberTitles)) return "titleCase";
+  if (caseDefectIncumbent(inc, best, memberTitles)) return "case";
   return null;
+}
+
+/**
+ * framingPenalty with the sibling-supported acronyms ('KKTC', 'TBMM': four capitals read as a shouted word) written
+ * with one capital, so a title that carries the correct acronym is not "more framed" than one that does not.
+ */
+function framingWithoutAcronyms(title: string, acronyms: ReadonlySet<string>): number {
+  if (acronyms.size === 0) return framingPenalty(title);
+  const softened = title
+    .split(/(\s+)/)
+    .map((token) => {
+      const stem = stemOf(token);
+      return acronyms.has(stem) ? token.replace(stem, stem.charAt(0) + stem.slice(1).toLocaleLowerCase("tr")) : token;
+    })
+    .join("");
+  return framingPenalty(softened);
+}
+
+/**
+ * The stored title carries one outlet's casing or a stray quote and the best candidate does not (h94-neutraltitles-3):
+ * (a) it holds a title-cased acronym whose upper form a sibling (a member title that is not a copy of the stored one)
+ * writes as a whole token ('Tbmm başkanı Kurtulmuş: ...' while ten members write 'TBMM'), or (b) it opens with a ' or ‘
+ * that nothing closes ("'Kaşif Kozinoğlu'nun ATK raporu ...", what cleanHeadline now drops from a fresh pick). The best
+ * candidate is a fresh pick, so it has neither unless every member does. Like the h42 rules it needs a best title that
+ * restates the stored one (SAME_STORY_MIN_OVERLAP) and none that is more framed (the acronym itself not counted).
+ */
+function caseDefectIncumbent(inc: string, best: string, memberTitles: readonly string[]): boolean {
+  if (jaccard(tokens(inc), tokens(best)) < SAME_STORY_MIN_OVERLAP) return false;
+  const strayQuote = hasStrayLeadingQuote(inc);
+  const incFold = fold(inc);
+  const siblings = memberTitles.filter((t) => fold(t) !== incFold && fold(cleanHeadline(t.slice(0, EVIDENCE_MAX_CHARS))) !== incFold);
+  const acronyms = acronymEvidence(siblings);
+  if (framingWithoutAcronyms(best, acronyms) > framingWithoutAcronyms(inc, acronyms)) return false;
+  if (strayQuote) return !hasStrayLeadingQuote(best);
+  return hasCasedAcronymToken(inc, acronyms) && !hasCasedAcronymToken(best, acronyms);
 }
 
 // ---------------------------------------------------------------------------
@@ -2271,14 +2682,30 @@ function twinKey(title: string): string {
 }
 
 /**
+ * The twin tiebreaks of the final result: the glued-twin one (preferUngluedJoin), then the quote twin
+ * (preferFewerStrayQuotes, h94-neutraltitles-3).
+ *
  * The glued-twin tiebreak: when `chosen` holds a glued join (see gluedJoinCount) and a
  * member title, cleaned, is the same text with strictly fewer joins (identical letters and
  * digits in the same case, only the separators differ) and passes isAcceptableNeutral, that
  * member's cleaned title is returned instead; of several, the one with the fewest joins, the
- * first in member order on a tie. Any other `chosen` is returned as passed, and a member
- * that is not a twin is never considered. Pure; the members are the cluster's raw titles.
+ * first in member order on a tie.
+ *
+ * The quote-twin tiebreak: when `chosen` has a single quote nothing closes (an odd number of ' ‘ ’ between no two
+ * letters: "Kılıçdaroğlu'ndan 'adaylık açıklaması", the ' before 'adaylık' opens a quote nobody closes) and a member title, cleaned, is
+ * the same text after ' ‘ ’ " “ ” are removed from both and has fewer of those marks, and passes
+ * isAcceptableNeutral, the member's cleaned title is returned instead ("Kılıçdaroğlu’ndan adaylık
+ * açıklaması", hurriyet's); of several, the one with the fewest, the first in member order on a tie.
+ *
+ * Any other `chosen` is returned as passed, and a member that is not a twin is never considered.
+ * Pure; the members are the cluster's raw titles.
  */
 export function preferUnglued(chosen: string, memberTitles: readonly string[]): string {
+  return preferFewerStrayQuotes(preferUngluedJoin(chosen, memberTitles), memberTitles);
+}
+
+/** The glued-twin half of preferUnglued: see there. */
+function preferUngluedJoin(chosen: string, memberTitles: readonly string[]): string {
   let bestJoins = gluedJoinCount(chosen);
   if (bestJoins === 0) return chosen;
   const key = twinKey(chosen);
@@ -2293,6 +2720,38 @@ export function preferUnglued(chosen: string, memberTitles: readonly string[]): 
     if (!isAcceptableNeutral(cleaned, memberTitles.filter((_, j) => j !== i))) continue;
     best = cleaned;
     bestJoins = joins;
+  }
+  return best;
+}
+
+// What two quote twins share: the text with every ' ‘ ’ " “ ” removed. Case and every other character are kept, so
+// the two differ in quote marks and nothing else.
+const TWIN_QUOTE_STRIP = /['‘’"“”]/g;
+
+function quoteTwinKey(title: string): string {
+  return title.replace(TWIN_QUOTE_STRIP, "");
+}
+
+/** The quote-twin half of preferUnglued: see there. */
+function preferFewerStrayQuotes(chosen: string, memberTitles: readonly string[]): string {
+  // Only a chosen title with a single quote nothing closes is a candidate for the swap (an odd number of ' ‘ ’ that sit
+  // between no two letters; unbalancedDoubleQuotes ignores them by design). A title whose quotes pair up ('"Türk
+  // Yüzyılı" temasıyla', "'Sıfır Atık Kadın Elçiliği' daveti") is somebody's quotation and stays as chosen.
+  if (marksOutsideWords(chosen, SINGLE_QUOTE_MARKS) % 2 === 0) return chosen;
+  let bestMarks = marksOutsideWords(chosen, TWIN_QUOTE_MARKS);
+  const key = quoteTwinKey(chosen);
+  let best = chosen;
+  for (let i = 0; i < memberTitles.length; i++) {
+    const raw = (memberTitles[i] ?? "").trim();
+    if (raw === "") continue;
+    const cleaned = cleanHeadline(raw);
+    if (cleaned === "" || quoteTwinKey(cleaned) !== key) continue;
+    const marks = marksOutsideWords(cleaned, TWIN_QUOTE_MARKS);
+    if (marks >= bestMarks) continue;
+    if (LEAD_IN.test(foldTr(cleaned))) continue;
+    if (!isAcceptableNeutral(cleaned, memberTitles.filter((_, j) => j !== i))) continue;
+    best = cleaned;
+    bestMarks = marks;
   }
   return best;
 }
@@ -2497,14 +2956,21 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
 
   const toks = items.map((m) => tokens(m.title));
   const outliers = numeralOutliers(items.map((m) => numsOf(m.title)));
+  const hedgingMembers = items.filter((m) => carriesHedge(m.title)).length;
   const ctx: ScoreContext = {
     hedged:
-      items.length >= HEDGED_MIN_MEMBERS &&
-      items.filter((m) => carriesHedge(m.title)).length / items.length >= HEDGED_SHARE,
+      items.length === HEDGED_PAIR_SIZE
+        ? hedgingMembers >= 1
+        : items.length >= HEDGED_MIN_MEMBERS && hedgingMembers / items.length >= HEDGED_SHARE,
     qualified:
       items.length >= QUALIFIED_MIN_MEMBERS &&
       items.filter((m) => carriesQualifier(m.title)).length / items.length >= QUALIFIED_SHARE,
   };
+
+  // The cleaned titles, and the members that name a speaker (h94-neutraltitles-2): a title that restates what a
+  // labelled member says without the label pays ATTRIBUTION_LOSS_PENALTY.
+  const cleanedItems = items.map((m) => cleanHeadline(m.title));
+  const labelled = labelledRests(cleanedItems);
 
   const scored: Array<{ index: number; score: number }> = [];
   for (let i = 0; i < items.length; i++) {
@@ -2512,7 +2978,10 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
     let sim = 0;
     for (let j = 0; j < items.length; j++) if (j !== i) sim += jaccard(toks[i]!, toks[j]!);
     const centrality = items.length > 1 ? sim / (items.length - 1) : 0;
-    scored.push({ index: i, score: scoreTitle(items[i]!.title, centrality, ctx) });
+    scored.push({
+      index: i,
+      score: scoreTitle(items[i]!.title, centrality, ctx, attributionCost(cleanedItems[i]!, labelled, i)),
+    });
   }
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
 
@@ -2520,6 +2989,8 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
   // is reached (h27-copy-2). Sibling evidence comes from the cleaned titles, so
   // an outlet prefix or a "SON DAKİKA" lead-in is not mistaken for a name.
   let evidence: CaseEvidence[] | null = null;
+  // What each cleaned title says about acronyms, read the same way (h94-neutraltitles-3).
+  let acronymReads: AcronymEvidence[] | null = null;
 
   let best: { cleaned: string; score: number } | null = null;
   // The first-pick floor, best first: a statement with no hard defect, then a
@@ -2529,7 +3000,7 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
   let floorQuestion: string | null = null;
   let floorAny: string | null = null;
   for (const { index, score } of scored) {
-    const cleaned = cleanHeadline(items[index]!.title);
+    const cleaned = cleanedItems[index]!;
     // A lead-in that survived cleaning (an odd Unicode case) must not ship.
     if (cleaned === "" || LEAD_IN.test(foldTr(cleaned))) continue;
     const others = items.filter((_, j) => j !== index).map((m) => m.title);
@@ -2538,8 +3009,14 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
     // eligible for a normal pick, but can still be a floor candidate.
     evidence ??= items.map((m) => caseEvidence(cleanHeadline(m.title.slice(0, EVIDENCE_MAX_CHARS))));
     const forms = capitalFormsFrom(evidence.filter((_, j) => j !== index));
-    const oddOneOut = forms.size > 0 && isOddOneOut(forms, items[index]!.title, cleaned);
-    const shown = oddOneOut ? recaseWith(forms, cleaned) : cleaned;
+    // A title-cased acronym ('Kktc', 'Tbmm') that a sibling writes in capitals is one outlet's casing: the title is
+    // the odd one out whether or not it opens in lower case, and takes the siblings' forms (h94-neutraltitles-3).
+    acronymReads ??= cleanedItems.map(acronymEvidenceOf);
+    const acronyms = supportedAcronyms(acronymReads.filter((_, j) => j !== index));
+    const oddOneOut =
+      hasCasedAcronymToken(cleaned, acronyms) ||
+      (forms.size > 0 && isOddOneOut(forms, items[index]!.title, cleaned));
+    const shown = oddOneOut ? recaseWith(forms, cleaned, acronyms) : cleaned;
     if (
       !(oddOneOut && leaksWith(forms, shown)) &&
       isAcceptableNeutral(shown, others) &&
@@ -2581,7 +3058,7 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
         n++;
       }
       const incCentrality = n > 0 ? sim / n : 0;
-      const incScore = scoreTitle(inc, incCentrality, ctx);
+      const incScore = scoreTitle(inc, incCentrality, ctx, attributionCost(cleanHeadline(inc), labelled, -1));
       // The best candidate's centrality, the same mean against the members that are not the candidate itself
       // (raw, cleaned or as shown): asked only by the loaded rule.
       const bestCentrality = (): number => {

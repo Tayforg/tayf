@@ -16,7 +16,11 @@ import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-ti
 //     REPICK_MARGIN_FULL_LENGTH (45 and up). A kept title stamps the model and
 //     the member count only,
 //   * never writes updated_at (it orders the home feed) and never touches a
-//     row whose title_neutral_at is set (an LLM title).
+//     row whose title_neutral_at is set (an LLM title),
+//   * passes { floor } to the picker only when the stored title itself fails the
+//     acceptance gate (migration 184: an all-capitals floor title never healed
+//     because the re-pick ran without it); an acceptable stored title is picked
+//     without it, so its margin behaviour is exactly the one of hunt 16.
 // A database read or write that failed and was swallowed (the re-pick rpc, a
 // member fetch, a title write) leaves the run at HTTP 200 for Vercel, but the
 // route marks it with an internal header and withCronOutcome records status 599
@@ -31,6 +35,23 @@ const { captureServerExceptionMock } = vi.hoisted(() => ({
   captureServerExceptionMock: vi.fn(),
 }));
 vi.mock("@/lib/sentry/server", () => ({ captureServerException: captureServerExceptionMock }));
+
+/**
+ * The options of every pickNeutralTitle call the route makes (migration 184: { floor } depends on the stored title).
+ * The wrapper calls the real picker, so every other case in this file runs against the real thing; the array is
+ * hoisted because vi.resetModules() builds a fresh wrapper for each import of the route.
+ */
+const pickCalls = vi.hoisted(() => [] as Array<{ incumbent?: string | null; floor?: boolean }>);
+vi.mock("@/lib/clusters/neutral-title", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/neutral-title")>();
+  return {
+    ...actual,
+    pickNeutralTitle: (...args: Parameters<typeof actual.pickNeutralTitle>) => {
+      pickCalls.push({ ...(args[1] ?? {}) });
+      return actual.pickNeutralTitle(...args);
+    },
+  };
+});
 
 /** Callbacks handed to after() by withCronOutcome (the outcome write), in order. */
 const hoistedAfter = vi.hoisted(() => [] as Array<() => unknown>);
@@ -182,6 +203,7 @@ beforeEach(() => {
 
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
+  pickCalls.length = 0;
   hoistedAfter.length = 0;
   revalidateTagMock.mockClear();
   captureServerExceptionMock.mockClear();
@@ -274,6 +296,8 @@ const SUBSTEP_HEADER = "x-cron-substep-errors";
 
 const clusterUpdates = () => supabaseFake.calls.update("clusters");
 const repickCalls = () => supabaseFake.calls.rpc.filter((c) => c.name === "neutral_title_repick_candidates");
+/** The picker calls of the re-pick pass: the ones that carry the stored title as the incumbent. */
+const repickPickCalls = () => pickCalls.filter((c) => c.incumbent !== undefined);
 const patchOf = (u: { patch: unknown }) => u.patch as Record<string, unknown>;
 const updateFor = (id: string) => clusterUpdates().find((u) => u.state.eq.some((e) => e.col === "id" && e.val === id));
 
@@ -590,11 +614,11 @@ describe("extractive re-pick: what is written", () => {
   });
 
   it("a null pick (nothing acceptable) stamps only and keeps the stored title", async () => {
-    // The stored title is a member's own wording that fails the gate (a question): not stale (h42-titles-1),
-    // nothing passes the gate, the pick is null and the stored title stays.
-    dbState.repickRows = [
-      repickRow("r1", { title_tr_neutral: "100 il olacak mı, hangi ilçeler il olacak?", article_count: 2 }),
-    ];
+    // The stored title passes the gate and is a member's own wording (the shouting member, sentence-cased): not stale
+    // (h42-titles-1). The other member is a question and the shouting one fails the gate, so nothing passes, the pick is
+    // null and the stored title stays. (Until migration 184 this fixture stored the question itself; a stored title that
+    // fails the gate now gets the floor, see "extractive re-pick (migration 184)" below.)
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Polis bile şaşkına döndü", article_count: 2 })];
     members("r1", ["100 il olacak mı, hangi ilçeler il olacak?", "POLİS BİLE ŞAŞKINA DÖNDÜ"]);
 
     const { body } = await run("203.0.113.63");
@@ -602,6 +626,7 @@ describe("extractive re-pick: what is written", () => {
     const patch = patchOf(updateFor("r1")!);
     expect(patch).toEqual({ title_neutral_model: EXTRACTIVE_MODEL_ID, title_neutral_member_count: 2 });
     expect(revalidateTagMock).not.toHaveBeenCalled();
+    expect(repickPickCalls()).toEqual([{ incumbent: "Polis bile şaşkına döndü", floor: false }]);
   });
 
   it("h42 review (sec-db-1): a stored title that fails the gate and that no member carries is replaced by the floor pick, so migration 162's stale set does not offer it again", async () => {
@@ -838,6 +863,142 @@ describe("extractive re-pick (hunt 16): the stored title is the incumbent", () =
       title_neutral_model: EXTRACTIVE_MODEL_ID,
       title_neutral_member_count: 6,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 184 (h94-neutraltitles-1). Two kinds of row the re-pick used to leave alone now come back:
+//   * a cluster stamped at 2 members that has grown to 3 or 4 (209 of them on 2026-11-09), and
+//   * a stored title in capitals only (09f152ec 'NEV'İN MİRASI GÜNDEM OLDU', fe2c6725 'PENDİK VERGİ DAİRESİ ...').
+// The second one never healed because the re-pick called the picker without { floor }: no member passes the gate while
+// shouting is a gate defect, so the picker answered null and the cron kept (and stamped) the stored title. The route now
+// passes { floor } when the stored title fails the gate, so the pick is the sentence-cased member title and the row leaves
+// the shout branch. A stored title that passes the gate is picked exactly as before (no floor).
+// ---------------------------------------------------------------------------
+
+const SHOUT_09F152EC = "NEV'İN MİRASI GÜNDEM OLDU";
+const MEMBERS_09F152EC = [
+  SHOUT_09F152EC,
+  "Nev’in ağabeyi miras için harekete mi geçti? Avukatından sert yanıt: 'Küslük söz konusu değil'",
+];
+const SHOUT_FE2C6725 = "PENDİK VERGİ DAİRESİ MÜDÜRLÜĞÜ PENDİK VERGİ DAİRESİ";
+const MEMBERS_FE2C6725 = [SHOUT_FE2C6725, "PENDİK VERGİ DAİRESİ MÜDÜRLÜĞÜ"];
+const LOWER_TR = /[a-zçğıöşüâîû]/;
+
+describe("extractive re-pick (migration 184): the floor for a stored title that fails the gate", () => {
+  it("09f152ec: an all-capitals stored title with no acceptable member is written as the sentence-cased floor title", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: SHOUT_09F152EC, article_count: 2, title_neutral_member_count: 2 })];
+    members("r1", MEMBERS_09F152EC);
+
+    const { res, body } = await run("203.0.113.120");
+    expect(res.status).toBe(200);
+    expect(body.clusters!.r1).toEqual({ status: "repicked" });
+    expect(patchOf(updateFor("r1")!)).toEqual({
+      title_tr_neutral: "Nev'in mirası gündem oldu",
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: 2,
+    });
+    expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:r1", "max");
+    expect(repickPickCalls()).toEqual([{ incumbent: SHOUT_09F152EC, floor: true }]);
+  });
+
+  it("fe2c6725: a stored title whose members are all in capitals is written with lower case in it, and leaves the shout branch", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: SHOUT_FE2C6725, article_count: 2, title_neutral_member_count: 2 })];
+    members("r1", MEMBERS_FE2C6725);
+
+    const { body } = await run("203.0.113.121");
+    expect(body.clusters!.r1).toEqual({ status: "repicked" });
+    const written = patchOf(updateFor("r1")!).title_tr_neutral as string;
+    expect(written).not.toBe(SHOUT_FE2C6725);
+    expect(written).toMatch(LOWER_TR);
+    expect(written).toBe(written.charAt(0).toLocaleUpperCase("tr") + written.slice(1));
+    expect(repickPickCalls()).toEqual([{ incumbent: SHOUT_FE2C6725, floor: true }]);
+  });
+
+  it("without the floor the same row would be kept shouting (the defect this migration closes)", () => {
+    const items = MEMBERS_09F152EC.map((title) => ({ title }));
+    expect(pickNeutralTitle(items, { incumbent: SHOUT_09F152EC })).toBeNull();
+    expect(pickNeutralTitle(items, { incumbent: SHOUT_09F152EC, floor: true })).toBe("Nev'in mirası gündem oldu");
+  });
+
+  it("an acceptable stored title is still picked without the floor: its margin behaviour is unchanged", async () => {
+    dbState.repickRows = [
+      repickRow("r1", { title_tr_neutral: BEST_OF_TWO_GOOD, article_count: 3, title_neutral_member_count: 2 }),
+      repickRow("r2", { title_tr_neutral: "Eski başlık burada duruyor", article_count: 3, title_neutral_member_count: 2 }),
+    ];
+    members("r1", TWO_GOOD);
+    members("r2", TWO_GOOD);
+
+    const { body } = await run("203.0.113.122");
+    expect(body.clusters!.r1).toEqual({ status: "repick-kept" });
+    expect(body.clusters!.r2).toEqual({ status: "repicked" });
+    expect(repickPickCalls()).toEqual([
+      { incumbent: BEST_OF_TWO_GOOD, floor: false },
+      { incumbent: "Eski başlık burada duruyor", floor: false },
+    ]);
+  });
+
+  it("the floor decision reads the stored title against the member titles: a stored title that fails the gate (a question) gets it, one that passes does not", async () => {
+    dbState.repickRows = [
+      repickRow("r1", { title_tr_neutral: "Dolar rekor kırdı mı?", article_count: 3, title_neutral_member_count: 2 }),
+      repickRow("r2", { title_tr_neutral: "Dolar yeni rekor seviyesine çıktı", article_count: 3, title_neutral_member_count: 2 }),
+    ];
+    members("r1", ["Dolar rekor kırdı mı?", "Dolar yeni zirveyi gördü, rekor kırdı"]);
+    members("r2", ["Dolar rekor kırdı mı?", "Dolar yeni zirveyi gördü, rekor kırdı"]);
+
+    await run("203.0.113.123");
+    expect(repickPickCalls()).toEqual([
+      { incumbent: "Dolar rekor kırdı mı?", floor: true },
+      { incumbent: "Dolar yeni rekor seviyesine çıktı", floor: false },
+    ]);
+  });
+
+  it("169's residue: a stored question that a member carries and no member passes now gets the floor pick, a statement before a question", async () => {
+    // Before 184 this row was kept (the pick was null: no member passes the gate) and stamped, and came back only after
+    // further growth. The floor ranks a statement below no question, so the shouting member, sentence-cased, wins.
+    dbState.repickRows = [
+      repickRow("r1", { title_tr_neutral: "100 il olacak mı, hangi ilçeler il olacak?", article_count: 3, title_neutral_member_count: 2 }),
+    ];
+    members("r1", ["100 il olacak mı, hangi ilçeler il olacak?", "POLİS BİLE ŞAŞKINA DÖNDÜ"]);
+
+    const { body } = await run("203.0.113.127");
+    expect(body.clusters!.r1).toEqual({ status: "repicked" });
+    expect(patchOf(updateFor("r1")!)).toEqual({
+      title_tr_neutral: "Polis bile şaşkına döndü",
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: 3,
+    });
+    expect(repickPickCalls()).toEqual([{ incumbent: "100 il olacak mı, hangi ilçeler il olacak?", floor: true }]);
+  });
+
+  it("a young cluster (stamp 2, now 3) is stamped with its current count, so it leaves the young branch whatever the pick", async () => {
+    dbState.repickRows = [
+      repickRow("kept", { title_tr_neutral: BEST_OF_TWO_GOOD, article_count: 3, title_neutral_member_count: 2 }),
+      repickRow("changed", { title_tr_neutral: "Eski başlık", article_count: 4, title_neutral_member_count: 2 }),
+    ];
+    members("kept", TWO_GOOD);
+    members("changed", TWO_GOOD);
+
+    await run("203.0.113.124");
+    expect(patchOf(updateFor("kept")!).title_neutral_member_count).toBe(3);
+    expect(patchOf(updateFor("changed")!).title_neutral_member_count).toBe(4);
+  });
+
+  it("residue: an all-capitals stored title with no usable member title is stamped and kept (the pick is null)", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: SHOUT_09F152EC, article_count: 2, title_neutral_member_count: 2 })];
+    members("r1", []);
+
+    const { body } = await run("203.0.113.125");
+    expect(body.clusters!.r1).toEqual({ status: "repick-kept" });
+    expect(patchOf(updateFor("r1")!)).toEqual({ title_neutral_model: EXTRACTIVE_MODEL_ID, title_neutral_member_count: 2 });
+  });
+
+  it("the first pick is unchanged: an IS NULL cluster is picked with the floor and no incumbent", async () => {
+    dbState.clusters = [cluster("c1", { article_count: 3 })];
+    members("c1", TWO_GOOD);
+
+    await run("203.0.113.126");
+    expect(pickCalls).toEqual([{ floor: true }]);
   });
 });
 

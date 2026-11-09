@@ -34,15 +34,35 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 });
 
 // Mutable fixture the `clusters` table resolver reads on every query. The
-// resolver distinguishes the embedded list query (selectArgs[0] is the
-// long CLUSTER_EMBED_SELECT string) from a head/exact count query
-// (selectArgs[0] === "id") so one fixture object serves both
-// getTopicClusters and getTopicCounts.
+// resolver tells THREE reads apart so one fixture object serves both
+// getTopicClusters and getTopicCounts (h94-slowroutes-1, two-step read):
+//   * a head/exact count query (selectArgs[1].head === true): the counts and the
+//     last-page lookup;
+//   * the ids-first query (selectArgs[0] === "id", no head option): step 1 of
+//     getTopicClusters, which carries the filters, both orders and the range;
+//   * the embed query (any other select, the long CLUSTER_EMBED_SELECT string):
+//     step 2, which carries only `.in("id", ids)`.
+// `fixture.clusters` is the "database": the ids step answers with its ids (in
+// the recorded order when applyRecordedOrder is on), the embed step answers with
+// the rows whose id was asked for.
 const fixture = vi.hoisted(() => ({
   clusters: [] as unknown[],
-  clustersError: null as { message: string } | null,
+  /** Error of the ids step (step 1). */
+  clustersError: null as { message: string; code?: string } | null,
+  /** Throw from the ids step (step 1). */
   clustersThrows: false,
+  /** The ids step's builder state (filters, orders, range). */
   clusterState: null as unknown,
+  /** Every ids-step state, in call order. */
+  idStates: [] as unknown[],
+  /** Every embed-step state, in call order. */
+  embedStates: [] as unknown[],
+  /** Error of the embed step (step 2). */
+  embedError: null as { message: string; code?: string } | null,
+  /** Throw from the embed step (step 2). */
+  embedThrows: false,
+  /** Hand the embed rows back reversed, as `.in()` gives no order guarantee. */
+  embedReverse: false,
   countStates: [] as unknown[],
   countsBySlug: {} as Record<string, number>,
   countError: null as { message: string } | null,
@@ -67,7 +87,8 @@ const supabaseFake = await vi.hoisted(async () => {
   return helper.createSupabaseFake({
     tables: {
       clusters: (state) => {
-        const isCountQuery = state.selectArgs[0] === "id";
+        const isCountQuery =
+          (state.selectArgs[1] as { head?: boolean } | undefined)?.head === true;
         if (isCountQuery) {
           fixture.countStates.push(state);
           if (fixture.countThrows) throw new Error("count boom");
@@ -81,27 +102,42 @@ const supabaseFake = await vi.hoisted(async () => {
           }
           return { data: null, error: null, count: fixture.countsBySlug[slug] ?? 0 };
         }
-        fixture.clusterState = state;
-        if (fixture.clustersThrows) throw new Error("boom");
-        if (fixture.clustersError) return { data: null, error: fixture.clustersError };
-        if (fixture.applyRecordedOrder) {
-          const keys = state.order.map((o) => ({
-            col: o.col,
-            sign: (o.opts as { ascending?: boolean } | undefined)?.ascending === false ? -1 : 1,
-          }));
-          const sorted = [...(fixture.clusters as Array<Record<string, unknown>>)].sort(
-            (a, b) => {
+
+        const rows = fixture.clusters as Array<Record<string, unknown>>;
+
+        if (String(state.selectArgs[0]) === "id") {
+          // Step 1: ids only.
+          fixture.clusterState = state;
+          fixture.idStates.push(state);
+          if (fixture.clustersThrows) throw new Error("boom");
+          if (fixture.clustersError) return { data: null, error: fixture.clustersError };
+          let ordered = rows;
+          if (fixture.applyRecordedOrder) {
+            const keys = state.order.map((o) => ({
+              col: o.col,
+              sign: (o.opts as { ascending?: boolean } | undefined)?.ascending === false ? -1 : 1,
+            }));
+            ordered = [...rows].sort((a, b) => {
               for (const { col, sign } of keys) {
                 const x = String(a[col]);
                 const y = String(b[col]);
                 if (x !== y) return x < y ? -sign : sign;
               }
               return 0;
-            },
-          );
-          return { data: sorted, error: null };
+            });
+          }
+          return { data: ordered.map((r) => ({ id: r.id })), error: null };
         }
-        return { data: fixture.clusters, error: null };
+
+        // Step 2: the embed, restricted to the ids it was asked for.
+        fixture.embedStates.push(state);
+        if (fixture.embedThrows) throw new Error("embed boom");
+        if (fixture.embedError) return { data: null, error: fixture.embedError };
+        const wanted = new Set(
+          (state.in.find((i) => i.col === "id")?.vals ?? []).map(String),
+        );
+        const embedded = rows.filter((r) => wanted.has(String(r.id)));
+        return { data: fixture.embedReverse ? [...embedded].reverse() : embedded, error: null };
       },
     },
   });
@@ -154,6 +190,11 @@ beforeEach(() => {
   fixture.clustersError = null;
   fixture.clustersThrows = false;
   fixture.clusterState = null;
+  fixture.idStates = [];
+  fixture.embedStates = [];
+  fixture.embedError = null;
+  fixture.embedThrows = false;
+  fixture.embedReverse = false;
   fixture.countStates = [];
   fixture.countsBySlug = {};
   fixture.countError = null;
@@ -228,9 +269,12 @@ describe("getTopicClusters", () => {
     await getTopicClusters("dunya", 1);
     const after = Date.now();
 
+    // Step 1 of the two-step read (h94-slowroutes-1): the filtered, ordered,
+    // ranged read selects the id only; the embed is step 2 (see the describe
+    // below), so the embed aggregates never run for the whole 7-day window.
     const state = fixture.clusterState as BuilderState;
     expect(state.table).toBe("clusters");
-    expect(String(state.selectArgs[0])).toBe(CLUSTER_EMBED_SELECT);
+    expect(state.selectArgs).toEqual(["id"]);
     expect(state.eq).toContainEqual({ col: "is_archived", val: false });
     expect(state.eq).toContainEqual({ col: "topic7", val: "dunya" });
     // h44-time-2: ordered by the age each card prints (first_published), then
@@ -316,6 +360,264 @@ describe("getTopicClusters", () => {
     expect(result).not.toBeNull();
     expect(result?.bundles).toEqual([]);
     expect(result?.hasMore).toBe(false);
+  });
+});
+
+// --- ids first, then the embed (h94-slowroutes-1) ----------------------------
+//
+// The window index is (topic7, updated_at), so ONE select carrying the
+// cluster -> cluster_articles -> articles -> sources embed ran its aggregates for
+// every window row (313 for dunya, about 16,000 buffers) before the top-30 sort.
+// The read is now two steps, the shape getEntityHub, politics-query's digest and
+// /blindspots already use: step 1 selects `id` with the filters, both orders and
+// the range; step 2 embeds just those ids with `.in('id', ids)` and the result is
+// put back into step 1's order in JS, because `.in()` gives no order.
+
+describe("getTopicClusters: ids first, then the embed (h94-slowroutes-1)", () => {
+  const pad = (i: number) => String(i).padStart(2, "0");
+  /** `n` ids c00, c01, ... in the order the database would answer step 1. */
+  const idList = (n: number) => Array.from({ length: n }, (_, i) => `c${pad(i)}`);
+  const seed = (n: number) => {
+    fixture.clusters = idList(n).map((id) => mkRow({ id }));
+  };
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  it("step 1 selects the id only (never the embed), with the page's filters, both orders and the PAGE_SIZE + 1 range", async () => {
+    seed(3);
+
+    await getTopicClusters("dunya", 2);
+
+    expect(fixture.idStates).toHaveLength(1);
+    const ids = fixture.idStates[0] as BuilderState;
+    expect(ids.table).toBe("clusters");
+    expect(ids.selectArgs).toEqual(["id"]);
+    expect(String(ids.selectArgs[0])).not.toContain("cluster_articles");
+    expect(ids.eq).toEqual([
+      { col: "is_archived", val: false },
+      { col: "topic7", val: "dunya" },
+    ]);
+    expect(ids.gte).toContainEqual({ col: "article_count", val: 2 });
+    expect(ids.gte.filter((g) => g.col === "updated_at")).toHaveLength(1);
+    expect(ids.order).toEqual([
+      { col: "first_published", opts: { ascending: false } },
+      { col: "id", opts: { ascending: false } },
+    ]);
+    expect(ids.range).toEqual({ from: TOPIC_PAGE_SIZE, to: TOPIC_PAGE_SIZE * 2 });
+    expect(ids.in).toEqual([]);
+  });
+
+  it("(a) step 2 is CLUSTER_EMBED_SELECT with .in('id', ids) and no order, range or limit", async () => {
+    seed(5);
+
+    await getTopicClusters("dunya", 1);
+
+    expect(fixture.embedStates).toHaveLength(1);
+    const embed = fixture.embedStates[0] as BuilderState;
+    expect(embed.table).toBe("clusters");
+    expect(String(embed.selectArgs[0])).toBe(CLUSTER_EMBED_SELECT);
+    expect(embed.in).toEqual([{ col: "id", vals: idList(5) }]);
+    expect(embed.order).toEqual([]);
+    expect(embed.range).toBeNull();
+    expect(embed.limit).toBeNull();
+  });
+
+  it("issues exactly two cluster reads for a page that has rows: one ids read, one embed", async () => {
+    seed(4);
+
+    await getTopicClusters("dunya", 1);
+
+    expect(fixture.idStates).toHaveLength(1);
+    expect(fixture.embedStates).toHaveLength(1);
+    expect(fixture.countStates).toHaveLength(0);
+  });
+
+  it("(b) the output order is step 1's order even when the embed returns the rows shuffled", async () => {
+    // Fixture order a, b, c, d. Step 1 (first_published desc, id desc) answers
+    // d, a, c, b: a and d share a first_published, the id tiebreaker puts d first.
+    fixture.clusters = [
+      mkRow({ id: "a", first_published: "2026-11-05T10:00:00.000Z" }),
+      mkRow({ id: "b", first_published: "2026-11-02T09:00:00.000Z" }),
+      mkRow({ id: "c", first_published: "2026-11-05T08:00:00.000Z" }),
+      mkRow({ id: "d", first_published: "2026-11-05T10:00:00.000Z" }),
+    ];
+    fixture.applyRecordedOrder = true;
+    fixture.embedReverse = true; // the embed answers d, c, b, a
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect((fixture.embedStates[0] as BuilderState).in).toEqual([
+      { col: "id", vals: ["d", "a", "c", "b"] },
+    ]);
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["d", "a", "c", "b"]);
+  });
+
+  it("(b) a full page of shuffled embed rows still comes back in step 1's order", async () => {
+    seed(TOPIC_PAGE_SIZE);
+    fixture.embedReverse = true;
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(idList(TOPIC_PAGE_SIZE));
+  });
+
+  it("(c) the PAGE_SIZE + 1st id still sets hasMore, but is neither embedded nor listed", async () => {
+    seed(TOPIC_PAGE_SIZE + 1);
+
+    const result = await getTopicClusters("dunya", 1);
+
+    const extra = `c${pad(TOPIC_PAGE_SIZE)}`;
+    expect(result?.hasMore).toBe(true);
+    expect(result?.bundles).toHaveLength(TOPIC_PAGE_SIZE);
+    expect(result?.bundles.map((b) => b.cluster.id)).not.toContain(extra);
+    // Step 2 embeds the page's TOPIC_PAGE_SIZE ids, not the lookahead one.
+    const embedded = (fixture.embedStates[0] as BuilderState).in[0]!.vals;
+    expect(embedded).toEqual(idList(TOPIC_PAGE_SIZE));
+    expect(embedded).not.toContain(extra);
+  });
+
+  it("(c) exactly PAGE_SIZE ids is a full last page: hasMore false, all of them embedded", async () => {
+    seed(TOPIC_PAGE_SIZE);
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect(result?.hasMore).toBe(false);
+    expect(result?.bundles).toHaveLength(TOPIC_PAGE_SIZE);
+    expect((fixture.embedStates[0] as BuilderState).in[0]!.vals).toHaveLength(TOPIC_PAGE_SIZE);
+  });
+
+  it("still skips an id whose embed row has no member article, and one the embed no longer returns", async () => {
+    fixture.clusters = [
+      mkRow({ id: "c00" }),
+      mkRow({ id: "c01", memberCount: 0 }),
+      mkRow({ id: "c02" }),
+    ];
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["c00", "c02"]);
+    expect(result?.hasMore).toBe(false);
+  });
+
+  it("(d) zero ids on page 1 is an empty page with no embed call and no lastPage key", async () => {
+    fixture.clusters = [];
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect(result).toEqual({ bundles: [], hasMore: false, page: 1 });
+    expect(result).not.toHaveProperty("lastPage");
+    expect(fixture.idStates).toHaveLength(1);
+    expect(fixture.embedStates).toHaveLength(0);
+    expect(fixture.countStates).toHaveLength(0);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("(d) zero ids past page 1 still resolves lastPage and still makes no embed call", async () => {
+    fixture.clusters = [];
+    fixture.countsBySlug = { dunya: 61 };
+
+    const result = await getTopicClusters("dunya", 3);
+
+    expect(result).toEqual({ bundles: [], hasMore: false, page: 3, lastPage: 3 });
+    expect(fixture.embedStates).toHaveLength(0);
+    expect(fixture.countStates).toHaveLength(1);
+  });
+
+  it("(e) an error in step 1 gives the logged null and never reaches the embed", async () => {
+    fixture.clustersError = { message: "ids timeout", code: "57014" };
+
+    await expect(getTopicClusters("dunya", 1)).resolves.toBeNull();
+
+    expect(fixture.embedStates).toHaveLength(0);
+    expect(console.error).toHaveBeenCalledWith(
+      "[konu] clusters unavailable:",
+      expect.objectContaining({ message: "ids timeout", code: "57014" }),
+    );
+  });
+
+  it("(e) an error in step 2 gives the same logged null", async () => {
+    seed(3);
+    fixture.embedError = { message: "embed timeout", code: "57014" };
+
+    await expect(getTopicClusters("dunya", 1)).resolves.toBeNull();
+
+    expect(fixture.embedStates.length).toBeGreaterThanOrEqual(1);
+    expect(console.error).toHaveBeenCalledWith(
+      "[konu] clusters unavailable:",
+      expect.objectContaining({ message: "embed timeout", code: "57014" }),
+    );
+  });
+
+  it("(e) a throw in step 1 or in step 2 gives the logged null, never a rejection", async () => {
+    seed(3);
+    fixture.clustersThrows = true;
+    await expect(getTopicClusters("dunya", 1)).resolves.toBeNull();
+    expect(console.error).toHaveBeenCalledWith("[konu] clusters unavailable: boom");
+
+    fixture.clustersThrows = false;
+    fixture.embedThrows = true;
+    await expect(getTopicClusters("dunya", 1)).resolves.toBeNull();
+    expect(console.error).toHaveBeenCalledWith("[konu] clusters unavailable: embed boom");
+  });
+
+  it("(e) a failure in either step is cached for 'minutes' only, exactly once per cached call", async () => {
+    seed(3);
+    fixture.embedError = { message: "embed timeout" };
+
+    await getTopicClusters("dunya", 1);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("starts the feed-health read together with step 1, not before it", async () => {
+    seed(2);
+    let release!: (value: unknown) => void;
+    feedHealth.getZoneFeedHealth.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    const pending = getTopicClusters("dunya", 1);
+    await tick();
+
+    // The health read has not settled, yet the ids query is already out.
+    expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    expect(fixture.idStates).toHaveLength(1);
+
+    release(null);
+    const result = await pending;
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["c00", "c01"]);
+  });
+
+  it("a rejected feed-health read still gives the logged null", async () => {
+    seed(2);
+    feedHealth.getZoneFeedHealth.mockRejectedValue(new Error("health down"));
+
+    await expect(getTopicClusters("dunya", 1)).resolves.toBeNull();
+
+    expect(console.error).toHaveBeenCalledWith("[konu] clusters unavailable: health down");
+  });
+
+  it("threads the feed health through to the bundles (a degraded pole zone withdraws the blindspot)", async () => {
+    const healthy = { total: 10, healthy: 10, healthyShare: 1, degraded: false };
+    const degraded = { total: 10, healthy: 2, healthyShare: 0.2, degraded: true };
+    feedHealth.getZoneFeedHealth.mockResolvedValue({
+      iktidar: healthy,
+      bagimsiz: healthy,
+      muhalefet: degraded,
+    });
+    fixture.clusters = [
+      {
+        ...mkRow({ id: "c00", memberCount: 2, is_blindspot: true }),
+        bias_distribution: { pro_government: 9, opposition: 1 },
+      },
+    ];
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect(result?.bundles[0]?.cluster.is_blindspot).toBe(false);
+    expect(result?.bundles[0]?.cluster.blindspot_side).toBeNull();
   });
 });
 

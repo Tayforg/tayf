@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
@@ -12,6 +13,7 @@ import {
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
 import { createReaderClient } from "@/lib/supabase/server";
 import { currentTimeMs } from "@/lib/time";
+import type { RisingEntity } from "@/lib/trends/rising-entities";
 import {
   ENTITY_HUB_LIMIT,
   entityByKey,
@@ -62,6 +64,17 @@ import {
 // The route key reaches this module only after `entityByKey` accepts it, so
 // the text that goes into the RPC is always one of the curated labels or
 // aliases in rising-entities.ts, never request-controlled.
+//
+// Two readers share the id step (`readEntityIds`: the RPC, its PGRST202 fallbacks
+// and the total):
+//   * getEntityHub: the full hub of /gundem/[key], ids, then the embed.
+//   * getEntityHubSummary (h94-slowroutes-1): what the /gundem index and
+//     /sitemaps/hubs.xml need, and nothing more. The index prints only `total`;
+//     the sitemap needs only whether the full page would be indexable
+//     (entityHubRobots over the bundles) and the newest first_published. Both
+//     used to build all 62 full hubs. The summary replaces the embed by ONE lean
+//     `clusters(id, first_published, cluster_articles!inner(article_id))` read of
+//     the same ids, so it reads no articles, no sources and no feed health.
 
 export interface EntityHub {
   bundles: ClusterBundle[];
@@ -84,23 +97,56 @@ interface EntityIdRow {
   total: number | string | null;
 }
 
-// Internal, UNCACHED implementation. THROWS on a Supabase error/exception —
-// mirroring search-query.ts's fetch/cache split. Kept free of the "use cache"
-// directive so it can run twice: once (wrapped by `attemptCached`) inside the
-// cache boundary below, and once more, live, as `getEntityHub`'s retry.
-async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<EntityHub> {
-  const asOfMs = currentTimeMs();
-  const entity = entityByKey(key);
-  if (entity === null) return { bundles: [], total: 0, asOfMs };
+/**
+ * The light read of one hub (h94-slowroutes-1): the figures the /gundem index
+ * and the hubs sitemap take from a full {@link EntityHub}, and nothing else.
+ */
+export interface EntityHubSummary {
+  /** Same as EntityHub.total: the full match count in the window. */
+  total: number;
+  /**
+   * Listed clusters that have at least one member article: equals
+   * `getEntityHub(key).bundles.length` (a bundle exists exactly for those), so
+   * `entityHubRobots({ bundles: <that many> })` answers as the full page does.
+   */
+  indexableCount: number;
+  /**
+   * The newest `first_published` among those clusters, compared by Date.parse and
+   * returned as the original string; null when none parses. The sitemap's
+   * lastmod.
+   */
+  newestFirstPublished: string | null;
+  /** When this result was read (epoch ms); see EntityHub.asOfMs. */
+  asOfMs: number;
+}
 
-  const queries = entityHubQueries(entity);
-  const patterns = entityHubPatterns(entity);
-  if (queries.length === 0 || patterns.length === 0) {
-    return { bundles: [], total: 0, asOfMs };
-  }
+/** The lean read of {@link EntityHubSummary}: no CLUSTER_EMBED_SELECT. `!inner`
+ *  keeps only clusters with a member row, which is what a bundle needs. */
+export const ENTITY_HUB_SUMMARY_SELECT =
+  "id, first_published, cluster_articles!inner(article_id)";
 
-  const supabase = createReaderClient();
+interface EntitySummaryRow {
+  id: string;
+  first_published?: unknown;
+  cluster_articles?: unknown[] | null;
+}
 
+interface EntityIdRead {
+  ids: string[];
+  /** Full match count, never below ids.length; 0 when there are no ids. */
+  total: number;
+}
+
+// The id step both readers share, so the RPC arguments, the PGRST202 fallbacks
+// and the total can never drift between the full hub and its summary. THROWS on a
+// Supabase error.
+async function readEntityIds(
+  supabase: SupabaseClient,
+  entity: RisingEntity,
+  queries: string[],
+  patterns: string[],
+  headlineOnly: boolean,
+): Promise<EntityIdRead> {
   let res = await supabase.rpc("entity_cluster_ids_v3", {
     p_queries: queries,
     p_patterns: patterns,
@@ -135,7 +181,7 @@ async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<Entit
 
   const rows = (data ?? []) as EntityIdRow[];
   const ids = rows.map((r) => r.id);
-  if (ids.length === 0) return { bundles: [], total: 0, asOfMs };
+  if (ids.length === 0) return { ids, total: 0 };
 
   // `count(*) over ()` repeats the full match count on every row, so the first
   // row's value is the total. A missing / non-numeric / impossibly small value
@@ -144,6 +190,27 @@ async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<Entit
   const reported = Number(rows[0]?.total);
   const total =
     Number.isFinite(reported) && reported >= ids.length ? reported : ids.length;
+  return { ids, total };
+}
+
+// Internal, UNCACHED implementation. THROWS on a Supabase error/exception —
+// mirroring search-query.ts's fetch/cache split. Kept free of the "use cache"
+// directive so it can run twice: once (wrapped by `attemptCached`) inside the
+// cache boundary below, and once more, live, as `getEntityHub`'s retry.
+async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<EntityHub> {
+  const asOfMs = currentTimeMs();
+  const entity = entityByKey(key);
+  if (entity === null) return { bundles: [], total: 0, asOfMs };
+
+  const queries = entityHubQueries(entity);
+  const patterns = entityHubPatterns(entity);
+  if (queries.length === 0 || patterns.length === 0) {
+    return { bundles: [], total: 0, asOfMs };
+  }
+
+  const supabase = createReaderClient();
+  const { ids, total } = await readEntityIds(supabase, entity, queries, patterns, headlineOnly);
+  if (ids.length === 0) return { bundles: [], total: 0, asOfMs };
 
   // Same feed-health gate as the home feed and the search results, fetched
   // once per hub and in parallel with the embed read: neither depends on the
@@ -214,8 +281,9 @@ async function cachedEntityHub(key: string, headlineOnly: boolean) {
  * page's honest "unavailable" state. Concurrent live retries for one hub share
  * one read and a failed one backs off for a few seconds (key
  * `clusters-entity:<key>:<headline|lead>`: one of the 62 curated hub keys plus
- * its headline-only flag, so the key space is bounded). That matters because /gundem and /trends now read up
- * to 8 hubs per request, and without it every visitor would start its own
+ * its headline-only flag, so the key space is bounded). That matters because /trends reads up
+ * to 8 hubs per request (the /gundem index and the hubs sitemap read the lighter
+ * getEntityHubSummary below), and without it every visitor would start its own
  * retries against a struggling reader. Never throws.
  */
 export async function getEntityHub(key: string): Promise<EntityHub | null> {
@@ -231,6 +299,117 @@ export async function getEntityHub(key: string): Promise<EntityHub | null> {
     },
     () => cachedEntityHub(key, headlineOnly),
     () => fetchEntityHub(key, headlineOnly),
+    null,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The summary reader (h94-slowroutes-1), same layering as the full hub above:
+// an uncached THROWING fetch, a "use cache" attempt, and a never-throwing getter
+// whose live retry runs outside any cache body.
+// ---------------------------------------------------------------------------
+
+// Internal, UNCACHED implementation; THROWS on a Supabase error/exception, like
+// fetchEntityHub. The embed is replaced by one lean read of the same ids; the
+// feed-health read is not made (a summary carries no blindspot badge).
+async function fetchEntityHubSummary(
+  key: string,
+  headlineOnly: boolean,
+): Promise<EntityHubSummary> {
+  const asOfMs = currentTimeMs();
+  const empty: EntityHubSummary = {
+    total: 0,
+    indexableCount: 0,
+    newestFirstPublished: null,
+    asOfMs,
+  };
+  const entity = entityByKey(key);
+  if (entity === null) return empty;
+
+  const queries = entityHubQueries(entity);
+  const patterns = entityHubPatterns(entity);
+  if (queries.length === 0 || patterns.length === 0) return empty;
+
+  const supabase = createReaderClient();
+  const { ids, total } = await readEntityIds(supabase, entity, queries, patterns, headlineOnly);
+  if (ids.length === 0) return empty;
+
+  const { data, error } = await supabase
+    .from("clusters")
+    .select(ENTITY_HUB_SUMMARY_SELECT)
+    .in("id", ids)
+    .returns<EntitySummaryRow[]>();
+
+  if (error) {
+    throw new Error(`[clusters] entity-hub summary error: ${error.message}`);
+  }
+
+  // A cluster counts when it has at least one member row: exactly the clusters
+  // the full read turns into a bundle (flattenClusterMembers drops only a null
+  // article join, which the cluster_articles.article_id foreign key rules out).
+  // `!inner` already filters, the length check keeps the rule in code too.
+  let indexableCount = 0;
+  let newest: { ms: number; raw: string } | null = null;
+  for (const row of data ?? []) {
+    if (!Array.isArray(row.cluster_articles) || row.cluster_articles.length === 0) continue;
+    indexableCount += 1;
+
+    const raw = row.first_published;
+    if (typeof raw !== "string") continue;
+    const ms = Date.parse(raw);
+    if (Number.isNaN(ms)) continue;
+    if (newest === null || ms > newest.ms) newest = { ms, raw };
+  }
+
+  return {
+    total,
+    indexableCount,
+    newestFirstPublished: newest === null ? null : newest.raw,
+    asOfMs,
+  };
+}
+
+// Same build-safety and lifetime rules as cachedEntityHub: plain `"use cache"`
+// (never remote: 62 tiny keys, an in-memory per-instance entry fits, and a remote
+// write of this read was rejected, h83-rejected-1), `attemptCached` so a throw
+// never crosses the cache boundary, `cacheTag("clusters-entity")` first (the
+// membership mutations that revalidate the full hub revalidate this too), and
+// exactly one literal `cacheLife` per invocation AFTER the attempt
+// (tests/guards/cache-life-literal.test.ts, cache-life-after-attempt.test.ts).
+// The `at` stamp makes a cache HIT eligible as a last-good value without a clock
+// read on the hit path.
+async function cachedEntityHubSummary(key: string, headlineOnly: boolean) {
+  "use cache";
+  cacheTag("clusters-entity");
+  const r = await attemptCached("clusters-entity-summary", () =>
+    fetchEntityHubSummary(key, headlineOnly),
+  );
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r.ok ? { ...r, at: r.data.asOfMs } : r;
+}
+
+/**
+ * The light read of one hub for the /gundem index and /sitemaps/hubs.xml. Same
+ * contract as {@link getEntityHub}: an unknown key resolves to null without
+ * touching Supabase or the cache; a failed cached attempt retries live once
+ * (single-flight per key), then serves the last good summary (under 60 min old),
+ * then resolves to null. Never throws. The key space is its own
+ * (`clusters-entity-summary:<key>:<headline|lead>`), so a summary and a full hub
+ * never serve each other's last-good value.
+ */
+export async function getEntityHubSummary(key: string): Promise<EntityHubSummary | null> {
+  const entity = entityByKey(key);
+  if (entity === null) return null;
+
+  const headlineOnly = entityHubHeadlineOnly(entity);
+  return resolveCachedOrRetry<EntityHubSummary | null>(
+    {
+      label: "clusters-entity-summary",
+      key: `clusters-entity-summary:${key}:${headlineOnly ? "headline" : "lead"}`,
+    },
+    () => cachedEntityHubSummary(key, headlineOnly),
+    () => fetchEntityHubSummary(key, headlineOnly),
     null,
   );
 }

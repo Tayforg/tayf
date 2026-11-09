@@ -227,6 +227,11 @@ async function fetchTopicLastPage(
   }
 }
 
+/** Step 1's row: the id alone, in the page's order. */
+interface TopicIdRow {
+  id: string;
+}
+
 async function fetchTopicClusters(
   slug: TopicSlug,
   page: number,
@@ -241,62 +246,97 @@ async function fetchTopicClusters(
     const sinceIso = new Date(nowMs - TOPIC_WINDOW_MS).toISOString();
     const from = (clampedPage - 1) * TOPIC_PAGE_SIZE;
 
-    // Blindspot badges on a hub can never disagree with the home feed —
-    // same feed-health gate, fetched once per page build.
-    const health = await getZoneFeedHealth();
+    // Two steps, the shape getEntityHub, politics-query's digest and
+    // /blindspots use (h94-slowroutes-1). The window index is
+    // (topic7, updated_at), so ONE select carrying the cluster_articles ->
+    // articles -> sources embed ran its aggregates for every window row (314
+    // for dunya: about 16,000 buffers, 100 ms warm) before the top-30 sort.
+    // Step 1 sorts and pages the bare ids (about 840 buffers, 4 ms); step 2
+    // embeds just those 30 ids (about 1,380 buffers, 12 ms).
+    //
+    // Blindspot badges on a hub can never disagree with the home feed — same
+    // feed-health gate, fetched once per page build, in parallel with step 1:
+    // neither depends on the other.
+    const [idsRes, health] = await Promise.all([
+      applyTopicFilters(supabase.from("clusters").select("id"), slug, sinceIso)
+        // The window above is on updated_at, but the ORDER is first_published:
+        // each card prints its first_published age, and ordering by updated_at
+        // put a story first published days ago (and refreshed since) above one
+        // published this morning, so the ages read 13 saat, 1 gün, 3 Kasım,
+        // 1 gün, ... (h44-time-2). Same split entity-hub-query.ts:41-44 made
+        // for the /gundem hubs. The RSS feed reads this same page, so its items
+        // come out newest-first by pubDate. Served by clusters_topic7_updated_idx
+        // (topic7, updated_at desc): the window is an index range of at most a
+        // few hundred rows (344 for the largest hub, dunya) and the sort is a
+        // top-N heapsort, so no extra index is needed.
+        .order("first_published", { ascending: false })
+        // Tiebreaker: first_published is an article's published_at (the seed's
+        // at creation, cluster-consumer createCluster), so two clusters can
+        // share one. Without a unique second key, OFFSET pagination over ties
+        // can duplicate one cluster on the next page while hiding another.
+        // clusters.id is the uuid primary key (003_create_clusters.sql:2).
+        .order("id", { ascending: false })
+        // PAGE_SIZE + 1 rows: the extra one IS hasMore.
+        .range(from, from + TOPIC_PAGE_SIZE)
+        .returns<TopicIdRow[]>(),
+      getZoneFeedHealth(),
+    ]);
 
-    const { data, error } = await applyTopicFilters(
-      supabase.from("clusters").select(CLUSTER_EMBED_SELECT),
-      slug,
-      sinceIso,
-    )
-      // The window above is on updated_at, but the ORDER is first_published:
-      // each card prints its first_published age, and ordering by updated_at
-      // put a story first published days ago (and refreshed since) above one
-      // published this morning, so the ages read 13 saat, 1 gün, 3 Kasım,
-      // 1 gün, ... (h44-time-2). Same split entity-hub-query.ts:41-44 made
-      // for the /gundem hubs. The RSS feed reads this same page, so its items
-      // come out newest-first by pubDate. Served by clusters_topic7_updated_idx
-      // (topic7, updated_at desc): the window is an index range of at most a
-      // few hundred rows (344 for the largest hub, dunya) and the sort is a
-      // top-N heapsort, so no extra index is needed.
-      .order("first_published", { ascending: false })
-      // Tiebreaker: first_published is an article's published_at (the seed's
-      // at creation, cluster-consumer createCluster), so two clusters can
-      // share one. Without a unique second key, OFFSET pagination over ties
-      // can duplicate one cluster on the next page while hiding another.
-      // clusters.id is the uuid primary key (003_create_clusters.sql:2).
-      .order("id", { ascending: false })
-      // PAGE_SIZE + 1 rows: the extra one IS hasMore.
-      .range(from, from + TOPIC_PAGE_SIZE)
-      .returns<EmbeddedClusterRow[]>();
-
-    if (error) {
+    if (idsRes.error) {
       console.error("[konu] clusters unavailable:", {
-        message: error.message,
-        code: error.code,
-        details: error.details,
-        hint: error.hint,
+        message: idsRes.error.message,
+        code: idsRes.error.code,
+        details: idsRes.error.details,
+        hint: idsRes.error.hint,
       });
       return null;
     }
 
-    const rows = data ?? [];
-    const hasMore = rows.length > TOPIC_PAGE_SIZE;
-    const pageRows = hasMore ? rows.slice(0, TOPIC_PAGE_SIZE) : rows;
+    const ids = (idsRes.data ?? []).map((r) => r.id);
+    const hasMore = ids.length > TOPIC_PAGE_SIZE;
+    // The extra id only answers hasMore: it is never embedded or listed.
+    const pageIds = hasMore ? ids.slice(0, TOPIC_PAGE_SIZE) : ids;
+
+    // Past the end (a page > 1 with no rows at all): tell the page where the
+    // list really stops, so it can link there instead of to an empty N-1. No
+    // ids, no embed call.
+    if (pageIds.length === 0) {
+      if (clampedPage > 1) {
+        const lastPage = await fetchTopicLastPage(supabase, slug, sinceIso);
+        return { bundles: [], hasMore, page: clampedPage, lastPage };
+      }
+      return { bundles: [], hasMore, page: clampedPage };
+    }
+
+    const embedRes = await supabase
+      .from("clusters")
+      .select(CLUSTER_EMBED_SELECT)
+      .in("id", pageIds)
+      .returns<EmbeddedClusterRow[]>();
+
+    if (embedRes.error) {
+      console.error("[konu] clusters unavailable:", {
+        message: embedRes.error.message,
+        code: embedRes.error.code,
+        details: embedRes.error.details,
+        hint: embedRes.error.hint,
+      });
+      return null;
+    }
+
+    // `.in('id', ids)` does not preserve the IN-list order: put the rows back
+    // into step 1's order (first_published desc, id desc) before building
+    // bundles. An id the embed no longer returns is skipped.
+    const byId = new Map<string, EmbeddedClusterRow>();
+    for (const row of embedRes.data ?? []) byId.set(row.id, row);
 
     const bundles: ClusterBundle[] = [];
-    for (const row of pageRows) {
+    for (const id of pageIds) {
+      const row = byId.get(id);
+      if (row === undefined) continue;
       const members = flattenClusterMembers(row);
       if (members.length === 0) continue;
       bundles.push(buildClusterBundle(row, members, health, nowMs).bundle);
-    }
-
-    // Past the end (a page > 1 with no rows at all): tell the page where the
-    // list really stops, so it can link there instead of to an empty N-1.
-    if (rows.length === 0 && clampedPage > 1) {
-      const lastPage = await fetchTopicLastPage(supabase, slug, sinceIso);
-      return { bundles, hasMore, page: clampedPage, lastPage };
     }
 
     return { bundles, hasMore, page: clampedPage };

@@ -1,0 +1,208 @@
+[
+ {
+  "cid": "fa08b570",
+  "id": "fa08b570-ef8d-4011-bb94-633589be729d",
+  "finding": "h94-neutraltitles-2",
+  "stored": "GKRY'den Feridun Sinirlioğlu'na karşı operasyon: Önünü kesmek için harekete geçtiler",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "GKRY'den Feridun Sinirlioğlu'na karşı operasyon: Önünü kesmek için harekete geçtiler",
+   "GKRY'nin Sinirlioğlu'nun BM Genel Sekreter adaylığına karşı girişim yürüttüğü öne sürüldü"
+  ],
+  "sources": [
+   "haber7",
+   "haberler-com"
+  ],
+  "why": "hedge: haberler-com's passive 'öne sürüldü' is the attributed wording and haber7's restatement asserts it; at two members centrality is symmetric, so the newest title (haber7) won the tie and no term saw the hedge"
+ },
+ {
+  "cid": "50571fc6",
+  "id": "50571fc6-1592-43fe-b6c8-43b230410d25",
+  "finding": "h94-neutraltitles-2",
+  "stored": "Özgür Özel’e Londradan binlerce sterlin değerinde VİSKİ. Emir Sarıgül her şeyi anlattı",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Özgür Özel’e Londradan binlerce sterlin değerinde VİSKİ! Emir Sarıgül her şeyi anlattı",
+   "Emir Sarıgül'den Özgür Özel iddiası! Londra'dan TBMM'ye viski sevkiyatı"
+  ],
+  "sources": [
+   "yeni-akit",
+   "haber7"
+  ],
+  "why": "hedge: haber7's 'iddiası' carries the hedge and yeni-akit's rewrite asserts the story; two members never reached HEDGED_MIN_MEMBERS, so the unhedged title was not charged"
+ },
+ {
+  "cid": "c7286eee",
+  "id": "c7286eee-a766-4da9-ac47-b77d9c6efb1d",
+  "finding": "h94-neutraltitles-2",
+  "stored": "Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "\"Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz\"",
+   "Sağlık Bakanı Memişoğlu: Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz"
+  ],
+  "sources": [
+   "haberturk",
+   "anadolu-ajansi"
+  ],
+  "why": "speaker: AA's 'Sağlık Bakanı Memişoğlu: ...' against haberturk's quote-wrapped copy whose quotes cleanHeadline strips"
+ },
+ {
+  "cid": "bcf7907d",
+  "id": "bcf7907d-fe80-4cb0-8494-7c8b579dfebf",
+  "finding": "h94-neutraltitles-2",
+  "stored": "Dayanışma ruhu hünerli ellerde yaşamaya devam ediyor",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Dayanışma ruhu hünerli ellerde yaşamaya devam ediyor",
+   "Emine Erdoğan: Dayanışma ruhu hünerli ellerde yaşamaya devam ediyor"
+  ],
+  "sources": [
+   "yeni-asir",
+   "trt-haber"
+  ],
+  "why": "speaker: TRT Haber's 'Emine Erdoğan: ...' against yeni-asir's unlabelled restatement"
+ },
+ {
+  "cid": "ce409843",
+  "id": "ce409843-1020-472e-9e88-4c0e192cfd59",
+  "finding": "h94-neutraltitles-2",
+  "stored": "Ayasofya’nın yer altındaki mekânlarını ziyarete açmayı hedefliyoruz",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "'Ayasofya’nın yer altındaki mekânlarını ziyarete açmayı hedefliyoruz'",
+   "Ayasofya’nın tarihi yer altı tünelleri gün yüzüne çıkıyor!"
+  ],
+  "sources": [
+   "haberturk",
+   "a-haber"
+  ],
+  "why": "voice: haberturk's quote-wrapped first-person sentence lost its quotes and speaks in the site's own voice ('hedefliyoruz')"
+ },
+ {
+  "cid": "759001a8",
+  "id": "759001a8-21be-48d3-9e24-77d8157b31f4",
+  "finding": "h94-neutraltitles-2",
+  "stored": "Diplomatik çözüm için çalışıyoruz",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Diplomatik çözüm için çalışıyoruz",
+   "Erdoğan Trump ile telefonda görüştü"
+  ],
+  "sources": [
+   "yeni-safak",
+   "sabah"
+  ],
+  "why": "voice: the stored bare 'Diplomatik çözüm için çalışıyoruz' is first person with no speaker; sabah's title is a statement"
+ },
+ {
+  "cid": "588c58ce",
+  "id": "588c58ce-e91f-44aa-b0d8-4636a5073717",
+  "finding": "h94-neutraltitles-3",
+  "stored": "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü",
+  "model": "extractive-v6",
+  "article_count": 3,
+  "titles": [
+   "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü",
+   "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi",
+   "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi"
+  ],
+  "sources": [
+   "isci-haber",
+   "haberler-com",
+   "tele1"
+  ],
+  "why": "case: isci-haber's sentence-cased 'Kktc başbakan yardımcısı ataoğlu' against two outlets' clean 'KKTC Başbakan Yardımcısı Ataoğlu'"
+ },
+ {
+  "cid": "f5012836",
+  "id": "f5012836-68e2-487d-8b45-a011e281dfac",
+  "finding": "h94-neutraltitles-3",
+  "stored": "Tbmm başkanı Kurtulmuş: terörsüz Türkiye hedefine kararlılıkla yürüyoruz",
+  "model": "extractive-v6",
+  "article_count": 15,
+  "titles": [
+   "TBMM Başkanı Numan Kurtulmuş: “Terörsüz Türkiye, ilk asrın en büyük projesidir”",
+   "TBMM Başkanı Kurtulmuş: ‘Terörsüz Türkiye ilk asrın en büyük projesi’",
+   "\"Türkiye'nin ilk asrının en büyük projesi\"",
+   "TBMM Başkanı Kurtulmuş'tan Terörsüz Türkiye mesajı: Türkiye'nin ilk asrının en büyük projesidir",
+   "Numan Kurtulmuş: Terörsüz Türkiye Türkiye'nin ilk asrının en büyük projesi",
+   "TBMM Başkanı Kurtulmuş: Terör bütün unsurlarıyla Türkiye'nin gündeminden kalkacak",
+   "TBMM Başkanı Kurtulmuş'tan \"terörsüz Türkiye\" vurgusu: Başarıyla sonlandıracağız",
+   "Numan Kurtulmuş: 'Terörsüz Türkiye sürecini başarıyla sonlandıracağız'",
+   "TBMM Başkanı Kurtulmuş: \"Terörsüz Türkiye hedefiyle başlattığımız bu süreci başarıyla sürdürüyoruz, başarıyla da sonlandıracağız\"",
+   "TBMM Başkanı Kurtulmuş'tan Terörsüz Türkiye mesajı: Süreci başarıyla sürdürüyoruz",
+   "Numan Kurtulmuş’tan Terörsüz Türkiye açıklaması",
+   "Tbmm başkanı Kurtulmuş: terörsüz Türkiye hedefine kararlılıkla yürüyoruz",
+   "TBMM Başkanı Kurtulmuş: \"Terörsüz Türkiye hedefiyle başlattığımız bu süreci başarıyla sürdürüyoruz, başarıyla da sonlandıracağız\"",
+   "TBMM Başkanı Kurtulmuş: Terör, Türkiye'nin gündeminden çıkacak",
+   "TBMM Başkanı Kurtulmuş: Terörsüz Türkiye, ilk asrın en büyük projesidir"
+  ],
+  "sources": [
+   "ajans-haber",
+   "aydinlik",
+   "haberturk",
+   "milliyet",
+   "trt-haber",
+   "anadolu-ajansi",
+   "star",
+   "isci-haber",
+   "sabah",
+   "aksam",
+   "ekonomim",
+   "haberport",
+   "haberler-com",
+   "hurriyet",
+   "haber7"
+  ],
+  "why": "case: haberport's 'Tbmm başkanı ...' stored as the H1 while ten members write 'TBMM Başkanı'"
+ },
+ {
+  "cid": "59a68086",
+  "id": "59a68086-eccc-405f-ad25-f96b8cff5ff6",
+  "finding": "h94-neutraltitles-3",
+  "stored": "'Kaşif Kozinoğlu'nun ATK raporu gönderildi: 'Ölüm nedeni' açıklandı",
+  "model": "extractive-v6",
+  "article_count": 6,
+  "titles": [
+   "SON DAKİKA | Kaşif Kozinoğlu'nun ölüm nedeni belli oldu",
+   "Son dakika: Kaşif Kozinoğlu'nun ölüm nedeni belli oldu",
+   "SON DAKİKA HABERİ: Kaşif Kozinoğlu neden öldü? İşte adli tıp raporu",
+   "Kaşif Kozinoğlu’nun ölüm nedeni belli oldu: Başsavcılık rapora itiraz edecek",
+   "Son dakika : Kaşif Kozinoğlu’nun ölüm nedeni belli oldu",
+   "Son Dakika... 'Kaşif Kozinoğlu'nun ATK raporu gönderildi: 'Ölüm nedeni' açıklandı! Başsavcılık itiraz edecek"
+  ],
+  "sources": [
+   "cnn-turk",
+   "haber7",
+   "milliyet",
+   "gzt",
+   "hurriyet",
+   "cumhuriyet"
+  ],
+  "why": "quote: the leading stray ' left over after cleanHeadline strips cumhuriyet's 'Son Dakika...' lead-in"
+ },
+ {
+  "cid": "9fb11250",
+  "id": "9fb11250-1666-4032-b617-e8aefc1248e2",
+  "finding": "h94-neutraltitles-3",
+  "stored": "Kılıçdaroğlu'ndan 'adaylık açıklaması",
+  "model": "extractive-v6",
+  "article_count": 2,
+  "titles": [
+   "Kılıçdaroğlu'ndan 'adaylık açıklaması",
+   "Kılıçdaroğlu’ndan adaylık açıklaması"
+  ],
+  "sources": [
+   "odatv",
+   "hurriyet"
+  ],
+  "why": "quote twin: odatv's \"'adaylık açıklaması\" against hurriyet's clean copy that differs only in quote marks"
+ }
+]
