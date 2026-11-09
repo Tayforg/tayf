@@ -98,6 +98,16 @@ export type RisingHubSpec = {
    */
   excludes?: readonly string[];
   /**
+   * Vetoes that only the hub applies: the same shape and the same open/closed
+   * word rule as `excludes`, but /trends never reads them. `excludes` of tcmb, aym
+   * and meclis is mirrored word for word by the SQL guard of migration 163
+   * (tests/migrations/163 fails if the two drift), so a veto that is not in that
+   * migration lives here, and growing it needs no migration. entity-hub.ts emits
+   * it as a second negative lookahead right behind the `excludes` one, so the
+   * first lookahead stays equal to the SQL list. A trusted alias skips it too.
+   */
+  hubExcludes?: readonly string[];
+  /**
    * Cues a non-trusted alias needs: at least ONE of them must appear anywhere
    * in the same folded text, or the alias does not count (the bare "Meclis"
    * needs "tbmm", "genel kurul" or a party name, so an İTO, municipal or
@@ -252,6 +262,50 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
     excludes: ["emine erdogan", "bilal erdogan", "sumeyye erdogan", "esra erdogan"],
     notAfter: ["fatih", "yilmaz", "asuman", "canan", "meryem", "nehir", "filiz"],
   },
+  // Ministers and ministries by their titles too (h96-entityhubs-1, 2026-11-09). The label alone ("Mehmet
+  // Şimşek", "Hakan Fidan", "MEB", "MSB") missed every headline that prints the title and the surname:
+  // /gundem/simsek omitted "Bakan Şimşek: Tasfiyedeki fonlarda ..." (19 articles) and "Bakan Şimşek çalışmayı
+  // duyurdu" (17), /gundem/meb every "Milli Eğitim Bakanı (Yusuf) Tekin" story, msb and fidan the "Bakanı"
+  // headlines. 'Bakan Şimşek' and 'Bakanı Fidan' are as unambiguous as the full name (Berhan and Hülya
+  // Şimşek, Yılmaz Şimşek the governor and Şimşekspor never follow "Bakan"), so these two carry no guard.
+  // Hub-only: the rollup tokens (migration 112's emap) are untouched.
+  simsek: { aliases: ["Mehmet Şimşek", "Bakan Şimşek", "Bakanı Şimşek"] },
+  fidan: { aliases: ["Hakan Fidan", "Bakan Fidan", "Bakanı Fidan"] },
+  // "MEB" and "MSB" name the Turkish ministry on their own (trusted), the long forms are vetoed by another
+  // country's ministry that uses the same words: "KKTC Milli Eğitim Bakanlığı" (the Turkish minister signing a
+  // protocol with it stays in through MEB), "Fransa Milli Eğitim Bakanı Edouard Geffray", "Suriye Milli Eğitim
+  // Bakanlığı" (13d5948d, 2 articles in the 14-day replay). The foreign phrases are the ones a year of clusters
+  // holds (2026-11-09): kktc, fransa and suriye before "milli egitim", polonya before "milli savunma".
+  // The official spelling is "Millî" with a circumflex. The folded regex reads it as "milli", but the Turkish
+  // stemmer keeps the lexemes 'millî' and 'milli' apart, so the prefilter missed 3 of the 48 matching clusters
+  // (the school calendar, a joint MEB and MSB painting contest) until both spellings were queried.
+  meb: {
+    aliases: ["MEB", "Milli Eğitim Bakanlığı", "Milli Eğitim Bakanı"],
+    inflections: ["Millî Eğitim Bakanlığı", "Millî Eğitim Bakanı"],
+    trusted: ["MEB"],
+    excludes: ["kktc milli egitim", "fransa milli egitim", "suriye milli egitim"],
+  },
+  msb: {
+    aliases: ["MSB", "Milli Savunma Bakanlığı", "Milli Savunma Bakanı"],
+    inflections: ["Millî Savunma Bakanlığı", "Millî Savunma Bakanı"],
+    trusted: ["MSB"],
+    excludes: ["polonya milli savunma"],
+  },
+  // The politician, not Adana's İmamoğlu district or the Tuğberk İmamoğlu ship (h96-entityhubs-1): "Adana
+  // İmamoğlu'nda iki evi kurşunlayan 5 şüpheliden 3'ü tutuklandı" (lead "Adana'nın İmamoğlu ilçesinde ...")
+  // was the 5th card of /gundem/imamoglu and a story about the lost ship named it in the lead. The same two
+  // guards as IMAMOGLU_DISTRICT_RE in supabase/functions/_shared/rss/category.ts (hunt-59), split on purpose:
+  //   * excludes veto the WHOLE story when it says "İmamoğlu ilçe..." or "Tuğberk İmamoğlu", unless the
+  //     trusted "Ekrem İmamoğlu" is in it too (hunt-59's person marker), so a story that names both stays.
+  //   * notAfter skips ONE occurrence, the one standing right behind "Adana" or "Tuğberk" ("Adana İmamoğlu'nda"),
+  //     so "Adana'da İmamoğlu protestoları" (an apostrophe between) and "Söz İmamoğlu'nda" stay.
+  // The genitive "Adana'nın İmamoğlu'nda" without "ilçe" is not caught: a guard cannot see an apostrophe.
+  imamoglu: {
+    aliases: ["İmamoğlu", "Ekrem İmamoğlu"],
+    trusted: ["Ekrem İmamoğlu"],
+    excludes: ["imamoglu ilce", "tugberk imamoglu"],
+    notAfter: ["adana", "tugberk"],
+  },
   dem: { inflections: ["DEM Partili"] },
   "iyi-parti": { inflections: ["İYİ Partili"] },
   yrp: { aliases: ["Yeniden Refah", "YRP"] },
@@ -282,7 +336,30 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "meclis uyes",
       "arnavutluk",
     ],
-    // The bare "Meclis" counts only beside a TBMM or Turkish-politics cue.
+    // Party, foreign, municipal and NGO councils (h96-entityhubs-2, 2026-11-09). 4 of the 20 cards on page 1
+    // and about 19 of the 252 clusters of the 14-day hub were not the TBMM: a party's "Parti Meclisi" (YENİ
+    // Parti's kurultay, DEM Parti's PM meetings and an obituary), the KKTC "Meclis Başkanı" and election,
+    // Croatia's Speaker, Germany's "Federal Meclis" (Bundestag), the "İBB Meclisi", an AK Parti "Danışma
+    // Meclisi", the DEM Parti "Kadın Meclisi", the "Barış Anneleri Meclisi" and the "İSİG Meclisi".
+    // "parti meclisi" is exact on purpose: "parti meclis" would also veto "DEM Parti Meclis Grubu", a TBMM
+    // group. No bare "almanya": a TBMM delegation story that mentions Berlin is still the parliament. They are
+    // hub-only (see hubExcludes): `excludes` above is what migration 163 mirrors for /trends.
+    hubExcludes: [
+      "parti meclisi",
+      "kktc",
+      "cumhuriyet meclisi",
+      "hirvatistan",
+      "federal meclis",
+      "bundestag",
+      "ibb meclis",
+      "danisma meclis",
+      "kadin meclis",
+      "baris anneleri",
+      "isig meclis",
+    ],
+    // The bare "Meclis" counts only beside a TBMM or Turkish-politics cue. "meclis baskan" was a cue until
+    // h96-entityhubs-2: it is the matched phrase's own neighbour ("KKTC Meclis Başkanı", "Gaziantep Ticaret
+    // Borsası Meclis Başkanı"), so it satisfied itself. "kurtulmus" still covers the Speaker.
     requires: [
       "tbmm",
       "genel kurul",
@@ -290,7 +367,6 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "kanun teklif",
       "yasa teklif",
       "grup toplanti",
-      "meclis baskan",
       "kurtulmus",
       "komisyon",
       "butce gorusme",

@@ -20,6 +20,8 @@
 // / `toLocaleLowerCase('tr')` (which DO know the Turkish casing rules) and
 // then folding ASCII/Turkish "I" variants the same way Postgres's en_US
 // lower() would, via `pgLower`.
+import { hasSearchOperator } from "./search-aliases";
+
 export const MAX_QUERY_VARIANTS = 3;
 
 /**
@@ -435,4 +437,119 @@ export function searchedWordsAsTyped(q: string): string {
   return searchTerms(q, MAX_SEARCH_TERMS)
     .map((t) => t.typed)
     .join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// Sibling query: the headline form of an everyday noun (h96-search-1).
+//
+// The Turkish snowball stemmer gives two shapes of everyday noun their own
+// lexeme, so the form a reader types never meets the form a headline carries:
+//
+//   zam -> zam, but zammı -> zammı, zammına -> zamm          (doubled consonant)
+//   vergi -> vergi, but vergisi -> vergis, vergisinde -> vergi (possessive)
+//   ceza -> ceza, but cezası -> cezas; belediye -> beledi, but belediyesi -> belediyes
+//
+// On production (2026-11-09) 'elektrik zammı', 'emlak vergisi', 'doğal gaz zammı'
+// and 'asgari ücret zammı' found nothing while 'elektrik zam' found 9 stories,
+// 'emlak vergi' 2, 'doğal gaz zam' 4 and 'asgari ücret zam' 6; 'trafik cezası' found
+// 18 against 34 for 'trafik ceza'.
+//
+// `searchSiblingQuery` rewrites those two shapes to the root. The archive search
+// (search-query.ts) searches the typed spellings FIRST, with at most three
+// `p_variants`, and only when that call leaves slots of the page empty makes a
+// SECOND call with the sibling's spellings, appending the ids it adds after the
+// typed ones. The sibling is never merged into the typed call: migration 172 ORs
+// `p_variants[1..3]` with equal rank, so a merged call let unrelated 'kara' rows
+// push real 'karasu' rows off the page. `p_folded` stays the typed words in both
+// calls, so 166's over-stem guard and 172's tier read what the reader typed.
+//
+// Two narrow rules, both anchored on the whole term and with one quantifier each,
+// so the match is linear. Terms are compared Turkish-lower-cased and ASCII-folded
+// where it matters, so 'vergisi' and 'VERGİSİ' and 'zammi' all qualify.
+//
+//   (A) possessive after a vowel, the -sı / -si ending only:
+//       <2+ letters><vowel>s<ı i> -> <letters><vowel>
+//       vergisi -> vergi, cezası -> ceza, soruşturması -> soruşturma,
+//       belediyesi -> belediye. The -su / -sü ending is NOT a possessive of these
+//       nouns: it is a compound name (Karasu, Sarısu, Ilısu, Akarsu) whose 'root'
+//       ('kara', 'sarı') is another word and would flood the page. The fruit
+//       'kayısı' fits the shape but its 'root' 'kayı' is unrelated, so a small
+//       folded deny set (NO_SIBLING_TERMS) is checked before the rule.
+//   (B) a CLOSED allowlist of doubled stems (GEMINATE_ROOTS): the doubled stem plus
+//       one of ı i u ü -> the root. zammı -> zam, hakkı -> hak, affı -> af.
+//       The allowlist is closed on purpose: a general doubled-consonant rule turns
+//       'messi' into 'mes'. Add a root only after checking it against the live archive.
+//
+// Not covered (on purpose): the other possessive and case endings. A rule is added
+// only with the live counts that justify it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Doubled stems whose bare vowel forms (zammı, hakkı, affı ...) the stemmer
+ * leaves whole. Key: the doubled stem. Value: the root that headlines also use.
+ * Reviewed against the live archive; closed on purpose (see above).
+ */
+export const GEMINATE_ROOTS: ReadonlyMap<string, string> = new Map([
+  ["zamm", "zam"],
+  ["hakk", "hak"],
+  ["aff", "af"],
+  ["hiss", "his"],
+  ["hatt", "hat"],
+  ["sırr", "sır"],
+  ["redd", "ret"],
+]);
+
+// Compared folded, so 'sırrı' and 'sirri' both reach the root.
+const GEMINATE_BY_FOLD: ReadonlyMap<string, string> = new Map(
+  [...GEMINATE_ROOTS].map(([doubled, root]) => [foldTr(doubled), root]),
+);
+
+// Terms that fit rule A's shape and are not a possessive of their 'root': 'kayısı' is the
+// fruit, 'kayı' is something else. Compared folded, so 'kayısı' and 'kayisi' are one entry.
+// Add a word only with a live example of the wrong sibling.
+const NO_SIBLING_TERMS: ReadonlySet<string> = new Set(["kayisi"]);
+
+// Rule A. One unbounded quantifier, anchored on both ends: linear. The -sı / -si ending
+// only (a -su / -sü word is a compound name, see the header). ASCII 'i' is in both
+// classes, so an ASCII-typed term ('vergisi', 'cezasi') qualifies.
+const POSSESSIVE_AFTER_VOWEL = /^(\p{L}{2,}[aeıioöuü])s[ıi]$/u;
+
+/** The root of one term under rule B then rule A (after the deny set), or null. The term is not cased yet. */
+function siblingTerm(term: string): string | null {
+  // A canonical query holds terms of at most MAX_SEARCH_QUERY_LENGTH characters;
+  // a longer one is not a word and is never examined, so the cost per term is bounded.
+  if (term.length < 3 || term.length > MAX_SEARCH_QUERY_LENGTH) return null;
+  const low = term.toLocaleLowerCase("tr");
+  const vowel = low.slice(-1);
+  if (vowel === "ı" || vowel === "i" || vowel === "u" || vowel === "ü") {
+    const root = GEMINATE_BY_FOLD.get(foldTr(low.slice(0, -1)));
+    if (root !== undefined) return root;
+  }
+  if (NO_SIBLING_TERMS.has(foldTr(low))) return null;
+  const match = POSSESSIVE_AFTER_VOWEL.exec(low);
+  return match === null ? null : (match[1] as string);
+}
+
+/**
+ * The same query with every term that is a possessive-after-a-vowel or a listed
+ * doubled-stem form replaced by its root ('elektrik zammı' -> 'elektrik zam',
+ * 'emlak vergisi' -> 'emlak vergi'); the other terms are kept as typed. Null when
+ * the query uses websearch syntax (`hasSearchOperator`: the reader is in charge)
+ * or when no term changes, so applying it to its own output gives null. The term
+ * count never changes, so the 6-term and 64-character bound of the canonical
+ * query holds for the sibling too.
+ */
+export function searchSiblingQuery(q: string): string | null {
+  if (hasSearchOperator(q)) return null;
+  let changed = false;
+  const terms = q
+    .split(/\s+/)
+    .filter((t) => t !== "")
+    .map((t) => {
+      const root = siblingTerm(t);
+      if (root === null) return t;
+      changed = true;
+      return root;
+    });
+  return changed ? terms.join(" ") : null;
 }

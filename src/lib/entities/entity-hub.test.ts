@@ -295,20 +295,34 @@ const ERDOGAN_EXCLUDES = ["emine erdogan", "bilal erdogan", "sumeyye erdogan", "
 /** The given names that make a following "Erdoğan" someone else (folded; h56-entities-1, the spec restated). */
 const ERDOGAN_NOT_AFTER = ["fatih", "yilmaz", "asuman", "canan", "meryem", "nehir", "filiz"] as const;
 
+/** The foreign ministries whose 'Milli Eğitim' / 'Milli Savunma' is not Turkey's (folded; h96-entityhubs-1, the spec restated). */
+const MEB_EXCLUDES = ["kktc milli egitim", "fransa milli egitim", "suriye milli egitim"] as const;
+const MSB_EXCLUDES = ["polonya milli savunma"] as const;
+
+/** The Adana district and the Tuğberk İmamoğlu ship, which are not the politician (folded; h96-entityhubs-1, the spec restated). */
+const IMAMOGLU_EXCLUDES = ["imamoglu ilce", "tugberk imamoglu"] as const;
+const IMAMOGLU_NOT_AFTER = ["adana", "tugberk"] as const;
+
 /**
  * The guard in front of a non-trusted base: a negative lookahead over the
- * excludes, then a positive lookahead over the requires (each only when its
- * list is non-empty), then `[\s\S]*`. A requires phrase follows the same
- * open/closed rule as an exclude.
+ * excludes, a second one over the hub-only excludes, then a positive lookahead
+ * over the requires (each only when its list is non-empty), then `[\s\S]*`. A
+ * requires phrase follows the same open/closed rule as an exclude. The hub-only
+ * excludes get a lookahead of their own so the first one stays word for word the
+ * list migration 163 mirrors.
  */
-function guardPrefix(excludes: readonly string[], requires?: readonly string[]): string {
-  const neg =
-    excludes.length > 0 ? `(?![\\s\\S]*(?:${excludes.map(excludeAlt).join("|")}))` : "";
+function guardPrefix(
+  excludes: readonly string[],
+  requires?: readonly string[],
+  hubExcludes?: readonly string[],
+): string {
+  const neg = (list: readonly string[]) =>
+    list.length > 0 ? `(?![\\s\\S]*(?:${list.map(excludeAlt).join("|")}))` : "";
   const pos =
     requires !== undefined && requires.length > 0
       ? `(?=[\\s\\S]*(?:${requires.map(excludeAlt).join("|")}))`
       : "";
-  return `^${neg}${pos}[\\s\\S]*`;
+  return `^${neg(excludes)}${neg(hubExcludes ?? [])}${pos}[\\s\\S]*`;
 }
 
 /**
@@ -380,6 +394,27 @@ describe("entityHubPatterns (exact runtime values)", () => {
       `\\m${notAfterLookbehinds(ERDOGAN_NOT_AFTER)}cumhurbaskani\\s+erdogan`,
       `\\m${notAfterLookbehinds(ERDOGAN_NOT_AFTER)}recep\\s+tayyip\\s+erdogan`,
     ],
+    // The ministers are searched by their titles too (h96-entityhubs-1). No guard: 'Bakan Şimşek' and 'Bakanı Fidan'
+    // are as unambiguous as the full name.
+    simsek: ["\\mmehmet\\s+simsek", "\\mbakan\\s+simsek", "\\mbakani\\s+simsek"],
+    fidan: ["\\mhakan\\s+fidan", "\\mbakan\\s+fidan", "\\mbakani\\s+fidan"],
+    // MEB and MSB are trusted (bare); the two long forms carry the foreign-ministry veto.
+    meb: [
+      "\\mmeb\\M",
+      `${guardPrefix(MEB_EXCLUDES)}\\mmilli\\s+egitim\\s+bakanligi`,
+      `${guardPrefix(MEB_EXCLUDES)}\\mmilli\\s+egitim\\s+bakani`,
+    ],
+    msb: [
+      "\\mmsb\\M",
+      `${guardPrefix(MSB_EXCLUDES)}\\mmilli\\s+savunma\\s+bakanligi`,
+      `${guardPrefix(MSB_EXCLUDES)}\\mmilli\\s+savunma\\s+bakani`,
+    ],
+    // The bare name is vetoed by the district and the ship and skips an occurrence right behind 'Adana' or
+    // 'Tuğberk'; 'Ekrem İmamoğlu' is trusted (bare) and carries only the notAfter lookbehinds.
+    imamoglu: [
+      `${guardPrefix(IMAMOGLU_EXCLUDES)}\\m${notAfterLookbehinds(IMAMOGLU_NOT_AFTER)}imamoglu\\M`,
+      `\\m${notAfterLookbehinds(IMAMOGLU_NOT_AFTER)}ekrem\\s+imamoglu`,
+    ],
     chp: ["\\mchp\\M"],
     cin: ["\\mcin\\M"],
     "asgari-ucret": ["\\masgari\\s+ucret"],
@@ -396,7 +431,7 @@ describe("entityHubPatterns (exact runtime values)", () => {
       "\\mtcmb\\M",
     ],
     meclis: [
-      "^(?![\\s\\S]*(?:\\mtemsilciler\\s+meclisi|\\mknesset|\\misrail|\\miran|\\mlibya|\\mbelediye\\s+meclis|\\mil\\s+genel\\s+meclis|\\milce\\s+meclis|\\mmahalle\\s+meclis|\\mulusal\\s+meclis|\\mrum\\s+meclis|\\mgkry|\\mticaret\\s+odas|\\msanayi\\s+odas|\\mito\\M|\\mmto\\M|\\matso|\\mbelediyesi\\s+meclis|\\mbuyuksehir\\s+meclis|\\mmeclis\\s+uyes|\\marnavutluk))(?=[\\s\\S]*(?:\\mtbmm|\\mgenel\\s+kurul|\\mmilletvekil|\\mkanun\\s+teklif|\\myasa\\s+teklif|\\mgrup\\s+toplanti|\\mmeclis\\s+baskan|\\mkurtulmus|\\mkomisyon|\\mbutce\\s+gorusme|\\mchp\\M|\\makp\\M|\\mak\\s+parti|\\mmhp\\M|\\mdem\\s+parti|\\miyi\\s+parti|\\myeniden\\s+refah))[\\s\\S]*\\mmeclis",
+      "^(?![\\s\\S]*(?:\\mtemsilciler\\s+meclisi|\\mknesset|\\misrail|\\miran|\\mlibya|\\mbelediye\\s+meclis|\\mil\\s+genel\\s+meclis|\\milce\\s+meclis|\\mmahalle\\s+meclis|\\mulusal\\s+meclis|\\mrum\\s+meclis|\\mgkry|\\mticaret\\s+odas|\\msanayi\\s+odas|\\mito\\M|\\mmto\\M|\\matso|\\mbelediyesi\\s+meclis|\\mbuyuksehir\\s+meclis|\\mmeclis\\s+uyes|\\marnavutluk))(?![\\s\\S]*(?:\\mparti\\s+meclisi|\\mkktc|\\mcumhuriyet\\s+meclisi|\\mhirvatistan|\\mfederal\\s+meclis|\\mbundestag|\\mibb\\s+meclis|\\mdanisma\\s+meclis|\\mkadin\\s+meclis|\\mbaris\\s+anneleri|\\misig\\s+meclis))(?=[\\s\\S]*(?:\\mtbmm|\\mgenel\\s+kurul|\\mmilletvekil|\\mkanun\\s+teklif|\\myasa\\s+teklif|\\mgrup\\s+toplanti|\\mkurtulmus|\\mkomisyon|\\mbutce\\s+gorusme|\\mchp\\M|\\makp\\M|\\mak\\s+parti|\\mmhp\\M|\\mdem\\s+parti|\\miyi\\s+parti|\\myeniden\\s+refah))[\\s\\S]*\\mmeclis",
       "\\mtbmm",
       "\\mbuyuk\\s+millet\\s+meclisi",
     ],
@@ -1067,6 +1102,261 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h96-entityhubs-1 (hunt 96, 2026-11-09). Person and ministry hubs that searched one spelling:
+// /gundem/simsek missed every "Bakan Şimşek" headline (19 and 17 articles among them), /gundem/meb
+// every "Milli Eğitim Bakanı Tekin" story, msb and fidan the "Bakanı" headlines, and /gundem/imamoglu
+// listed Adana's İmamoğlu district and the Tuğberk İmamoğlu ship. The stories below are verbatim
+// production text, read-only through sbq.py: title_tr, title_tr_neutral and the first line of
+// summary_tr, which entity_cluster_ids_v3 joins with single spaces into the text the regex sees.
+// ---------------------------------------------------------------------------
+const H96_STORIES: Readonly<Record<string, readonly [title: string, neutral: string, lead: string]>> = {
+  "4e006e95": ["Bakan Şimşek: Körfez'deki savaşın bölgeyi temelden değiştireceğini düşünüyorum", "Bakan Şimşek: Körfez'deki savaşın bölgeyi temelden değiştireceğini düşünüyorum", "Bakanı Şimşek, Körfez'deki savaşın bölgeyi temelden değiştireceğini, bölgesel aktörler arasında rekabetin azalacağı ve işbirliğinin artacağını belirterek, \"Türkiye'nin de bütün bu gelişmelerden önemli ölçüde fayda sağlaması oldukça muhtemel.\" dedi."],
+  "3b041b3c": ["Bakan Şimşek: Tasfiyedeki fonlarda 614 bin 874 hesaba 130,2 milyar lira ödeme yapıldı", "Bakan Şimşek: Tasfiyedeki fonlarda 614 bin 874 hesaba 130,2 milyar lira ödeme yapıldı", "Hazine ve Maliye Bakanı Şimşek: \"Tasfiyedeki fonlarda 614 bin 874 hesaba 130,2 milyar lira ödeme yapıldı, 179 bin 449 kişi net yatırım tutarının tamamını aldı\""],
+  "71110c3b": ["Bakan Şimşek çalışmayı duyurdu... Emeklilere destek programı masada", "Emekli maaşı düzenlemesinin detayları belli oldu: Bakan Şimşek duyurdu", "Bakan Şimşek: 2027 yılında emeklilerimizin desteklenmesi amacıyla yürüttüğümüz teknik bir çalışma var, çalışma henüz tamamlanmadı. Düzenleme tüm emeklilerimizi kapsayacaktır. Herkese aynı değil, yaşa ve prime göre farklılık gösterecek bir çalışma yürütülüyor."],
+  "758e72ad": ["Memur ve emeklilerin beklediği talepler Bakan Şimşek'e iletildi: 3600 ek gösterge masada", "Memur-Sen, Bakan Şimşek’e taleplerini iletti: Talepler dört başlıkta toplandı", "Memur-Sen, Bakan Şimşek'e 3600 ek gösterge, emeklilere seyyanen ödeme, personel sistemi reformu ve koruyucu giyim yardımı taleplerini iletti."],
+  "1edc2e33": ["Bakan Şimşek'ten enflasyon açıklaması", "Bakan Şimşek'ten enflasyon açıklaması: 'Yıllık oran bir yılda 3,1 puan geriledi'", "Hazine ve Maliye Bakanı Şimşek, Önümüzdeki dönemde ekonomik aktivitenin dengeli seyri, enerji ve emtia fiyatlarında öngörülen gerileme, beklentilerde iyileşme ve hizmet enflasyonunda ataletin azalması enflasyondaki düşüşü destekleyecektir."],
+  "c05ed0eb": ["Dışişleri Bakanı Fidan: Politik anlaşmazlıklar global ekonomileri sürdüren sistemleri paralize etmemeli", "Bakan Fidan: Türkiye, bölgesel sahipliği korumaya çalışıyor", "Bakan Fidan, \"Rotalar korunmalı, çatışmalar kısıtlanmalıdır. Politik anlaşmazlıklar global ekonomileri sürdüren sistemleri paralize etmemelidir. Türkiye sürdürülebilir diplomasi sağlamaya, bölgesel sahipliği korumaya çalışıyor.\" dedi."],
+  "e3262ca6": ["Dışişleri Bakanı Fidan'dan G20 sonrası önemli mesajlar: Beş yıllık savaş artık taşınamaz", "Bakan Fidan: Rusya ve Ukrayna anlaşmaya varmak zorunda", "- \"(Rusya-Ukrayna Savaşı) Yaklaşık 5 yıl olmuş bu savaş başlayalı. Artık bu savaş taşınamaz. Dolayısıyla Rusya ve Ukrayna, büyük bir fedakarlıkta bulunarak bir anlaşmaya varmak zorundalar\""],
+  "b8a84cf2": ["Milli Eğitim Bakanı Tekin, Karabağ Zaferi'nin 6. yılını kutladı", "Bakan Tekin’den Karabağ Zaferi’nin 6. yılına kutlama mesajı", "Milli Eğitim Bakanı Yusuf Tekin, Azerbaycan'ın Karabağ Zaferi dolayısıyla kutlanan 8 Kasım Zafer Günü'nü tebrik etti."],
+  "457bf390": ["Milli Eğitim Bakanı Yusuf Tekin: 28 Şubat Türkiye'de mesleki eğitimi olumsuz etkiledi", "Milli Eğitim Bakanı Yusuf Tekin: 28 Şubat Türkiye'de mesleki eğitimi olumsuz etkiledi", "Milli Eğitim Bakanı Yusuf Tekin, 28 Şubat sürecinde alınan kararların mesleki eğitime büyük zarar verdiğini ifade etti."],
+  "57ef49ea": ["Milli Eğitim Bakanı Tekin, Yahya Kemal Beyatlı'yı 68. yıl dönümünde andı", "Milli Eğitim Bakanı Tekin, vefatının 68. yılında Yahya Kemal Beyatlı'yı andı", "Milli Eğitim Bakanı Yusuf Tekin, vefatının 68. yılında Yahya Kemal Beyatlı'yı NSosyal hesabından paylaştığı mesajla andı. Tekin, mesajında Beyatlı'nın mısralarında Türkçemizin zarafetini, tarihimizin sesini ve medeniyetimizin inceliklerini bulduğumuzu belirtti."],
+  "14d78e3c": ["Milli Savunma Bakanı Güler, Ukraynalı mevkidaşı Khmara ile güvenlik konusunu görüştü", "Milli Savunma Bakanı Güler, Ukraynalı mevkidaşıyla görüştü", "Milli Savunma Bakanı Yaşar Güler, Ukrayna Savunma Bakanı Yevgeni Khmara ile telefon görüşmesi yaptı. Görüşmede ikili ve bölgesel savunma ile güvenlik konularında görüş alışverişinde bulunuldu."],
+  "14c5e96f": ["'İmamoğlu çıkar amaçlı suç örgütü' davasında 104. duruşma sona erdi: Tanık Selman Narman'dan çarpıcı ihale iddiaları", "'İmamoğlu çıkar amaçlı suç örgütü' davasında 104. duruşma sona erdi. Tanık Selman Narman'dan çarpıcı ihale iddiaları", "İstanbul 33. Ağır Ceza Mahkemesince Marmara Kapalı Ceza İnfaz Kurumu karşısındaki salonda yapılan duruşmada dinlenen tanık Furkan Yalçınkaya, organizasyon şirketi sahibi tutuksuz sanık Ahmet Çiçek'le 3-4 sene önce tanıştığını söyledi."],
+  "81c805d1": ["Ekrem İmamoğlu: \"Cesur nesillere, gençlere kaybedeceksiniz\"", "Ekrem İmamoğlu: \"Cesur nesillere, gençlere kaybedeceksiniz\"", "Tutuklu cumhurbaşkanı adayı ve İBB Başkanı Ekrem İmamoğlu, Bakan Yusuf Tekin'in Kadıköy Lisesi ziyareti öncesinde 'Yusuf Tekin istifa' pankartı açan TİP üyesi iki öğrencinin gözaltına alınmasına tepki gösterdi. İmamoğlu, 'Korkma' diyenlere ve gençlere 'kaybedeceksiniz' dedi."],
+  "c828192c": ["Adana İmamoğlu'nda iki evi kurşunlayan 5 şüpheliden 3'ü tutuklandı", "İmamoğlu'nda iki evi kurşunlayan zanlılar kamerayla tespit edilip yakalandı", "Adana'nın İmamoğlu ilçesinde 24 Ekim-6 Kasım tarihleri arasında Hürriyet Mahallesi'nde iki ayrı evin kurşunlanmasıyla ilgili gözaltına alınan 5 şüpheliden 3'ü tutuklandı. Polis ekipleri, onlarca saatlik kamera kaydını inceleyerek şüphelileri yakalamıştı."],
+  "848f51b2": ["Silivri'de batan gemideki denizcilerin ailelerinden yeni çağrı: İki gemi birlikte çalışsın", "Silivri'de batan gemideki denizcilerin ailelerinden çağrı: Bütün imkanlar birleştirilsin", "Silivri açıklarında 2 Eylül'de batan Tuğberk İmamoğlu gemisinde görevli personeli arama çalışmaları sürüyor. Aileler biraraya gelerek arama çalışmalarının hızlandırılmasını istedi. Açıklamayı Tuğberk İmamoğlu gemisinde aşçı olarak görev yapan Abdülbaki Mirzaoğlu'nun kardeşi Nusret Mirzaoğlu yaptı."],
+  "1662ce5a": ["Berhan Şimşek, CHP MYK'dan istifa etti", "CHP'li Berhan Şimşek istifa etti", "Berhan Şimşek, CHP MYK'dan istifa etti 04.09.2026 DikenŞiddet görüntüleriyle gündemde olan Berhan Şimşek, hakkındaki davalar sonuçlanana kadar CHP MYK üyeliğinden istifa etti."],
+  "6f99a6aa": ["‘Şapkalılar Suç Örgütü’ soruşturması… Bakırköy Belediye Meclis üyesi Hülya Şimşek tutuklandı", "CHP'li Sultangazi Belediye Meclis üyesi tutuklandı", "Bakırköy Cumhuriyet Başsavcılığı, sosyal medya ve farklı numaralar üzerinden “Şapkalılar Suç Örgütü” tarafından tehdit edilerek para talep edildiği belirtilen olayın azmettiricisi olduğu değerlendirilen Bakırköy Belediye Meclis üyesi ve avukat Hülya Şimşek’in tutuklandığını açıkladı."],
+  "61bc5710": ["Bakan Bak, KKTC'li mevkidaşıyla Lefkoşa ve Girne'de öğrenci yurdu protokolü imzaladı", "", "Lefkoşa ve Girne'de öğrenci yurtları yapılması için Türkiye ile KKTC arasında iş birliği protokolü imzalandı. Gençlik ve Spor Bakanı Osman Aşkın Bak, KKTC Milli Eğitim Bakanı Nazım Çavuşoğlu ile imzalanan protokolün gençlerin geleceği için hayırlı olmasını diledi."],
+  "0ad80814": ["Fransa'da liseliler kazandı", "", "Fransa Milli Eğitim Bakanı Edouard Geffray, sosyal medya hesabından yaptığı açıklamada, liselilerin talepleri doğrultusunda sendikalarla ve öğrenci temsilcileriyle yürüttükleri görüşmelerin ardından bazı kararlar aldıklarını duyurdu."],
+  "13d5948d": ["Suriye'nin yeni müfredatında Osmanlı anlatısı değişti", "Suriye'nin yeni müfredatında Osmanlı anlatısı değişti", "Suriye Milli Eğitim Bakanlığının yenilediği ders kitaplarında Osmanlı Devleti, Arap İsyanı ve milli kimliğe ilişkin anlatımlar değiştirildi. Eski müfredattaki “Osmanlı işgali” ve “Türklerin zulmü” ifadeleri kaldırılırken, Arap milliyetçiliği vurgusunun yerini İslam medeniyeti ve ümmet kavramları aldı. Suriye haritasından İskenderun çıkarılırken, ders kitaplarına İslam tarihinden yeni isimler ve Filistin mücadelesine ilişkin içerikler eklendi."],
+  "1f9ebac9": ["15 tatil ne zaman başlayacak, bitecek? Ara tatil ne zaman?", "9 günlük ara tatil ne zaman? 2026 Kasım ara tatili ne zaman, ne zaman başlıyor?", "2026-2027 eğitim-öğretim yılında öğrencilerin ara tatil ve yarıyıl tatili tarihleri merak ediliyor. Millî Eğitim Bakanlığının çalışma takvimine göre ilk ara tatil kasım ayında, sömestr tatili ise ocak ayında başlayacak. Peki, 15 tatil ne zaman başlayacak, bitecek? Ara tatil ne zaman? İşte detaylar…"],
+  // h96-entityhubs-2 (the meclis hub, same read, same day): party, foreign and municipal councils, and the TBMM rows around them.
+  "01cbab9a": ["Özgür Özel, kurultayda Parti Meclisi'ni 150 kişiye çıkaracaklarını açıkladı", "Özgür Özel, kurultayda Parti Meclisi'ni 150 kişiye çıkaracaklarını açıkladı", "YENİ Parti Genel Başkanı Özgür Özel, önümüzdeki hafta yapılacak 1'inci Olağan Kurultay'da seçilecek Parti Meclisi'ni 150 kişiye çıkaracaklarını açıkladı. Meclisin 80'i milletvekili, 40'ı il-ilçe örgütlerinden, 30'u akademisyen ve siyasetçilerden olacak."],
+  "430bacd3": ["DEM Parti Lideri Bakırhan’dan İktidara ‘Süreç’ Çağrısı", "DEM Parti Lideri Bakırhan’dan İktidara ‘Süreç’ Çağrısı", "Halkların Eşitlik ve Demokrasi Partisi (DEM Parti) Eş Genel Başkanı Tuncer Bakırhan, partisinin Genel Merkezinde toplanan Parti Meclisi (PM) açılışında Türkiye'nin iç barış arayışları ve \"Terörsüz Türkiye\" tartışmalarına ilişkin kapsamlı değerlendirmelerde bulundu."],
+  "e04f9346": ["Tuncer Bakırhan: ‘Kürt meselesi bir güvenlik dosyası değil’", "Tuncer Bakırhan: ‘Kürt meselesi bir güvenlik dosyası değil’", "DEM Parti Eş Genel Başkanı Tuncer Bakırhan, Parti Meclisi toplantısının açılışında yaptığı konuşmada çözüm sürecinin Türkiye için bir çıkış yolu olduğunu belirterek iktidara adım atma çağrısında bulundu. Tedavi gördüğü hastanede yaşamını yitiren hasta tutuklu Tuncer Sağlam’ı da anan Bakırhan, “Hasta tutuklular neden hâlâ içeride?” diye sordu."],
+  "53c4123b": ["DEM Parti eski PM üyesi Nesrin Aslan hayatını kaybetti", "DEM Parti eski PM üyesi Nesrin Aslan hayatını kaybetti", "Eski DEM Parti Parti Meclisi üyesi Nesrin Aslan yaşamını yitirdi. DEM Parti Eş Genel Başkanı Tuncer Bakırhan, “Nesrin Aslan’ı emeği ve yoldaşlığıyla her zaman hatırlayacak, anısına bağlı kalacağız” dedi."],
+  "b9601948": ["Genelkurmay Başkanı Bayraktaroğlu, KKTC Meclis Başkanı Öztürkler ile görüştü", "Lefkoşa'da askeri ve parlamenter temas: Selçuk Bayraktaroğlu, Ziya Öztürkler ile görüştü", "Genelkurmay Başkanı Orgeneral Selçuk Bayraktaroğlu, KKTC temasları kapsamında Lefkoşa'da Cumhuriyet Meclisi Başkanı Ziya Öztürkler ile bir araya geldi. Görüşmede Bayraktaroğlu'na Kıbrıs Türk Barış Kuvvetleri ve Güvenlik Kuvvetleri komutanları eşlik etti."],
+  "d448df20": ["KKTC'de 6 Aralık'ta 50 milletvekili ve 18 belediye başkanı seçilecek", "KKTC, 6 Aralık'ta sandığa gidiyor: Meclis ve yerel yönetimler belirlenecek", "KKTC'de seçmenler 6 Aralık'ta 50 milletvekili, 18 belediye başkanı ve yerel yönetimleri belirlemek için sandığa gidecek. Yaklaşık 225 bin seçmenin bulunduğu ülkede 8 partinin 400 geçici adayı ve 8 bağımsız aday yarışacak."],
+  "31342903": ["Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü", "Bakan Fidan, Hırvatistan Meclis Başkanı Jandrokovic ile görüştü", "Dışişleri Bakanı Hakan Fidan, Ankara'da Hırvatistan Meclis Başkanı Gordan Jandrokovic ile bir araya geldi."],
+  "2a7e585a": ["Üç Deniz Girişimi'ni hatırlattı: Hırvatistan'dan Ankara'ya stratejik mesaj", "Üç Deniz Girişimi'ni hatırlattı: Hırvatistan'dan Ankara'ya stratejik mesaj", "Hırvatistan Meclis Başkanı Gordan Jandrokovic, ülkesinin Türkiye ile ilişkilerinin çok iyi seviyede olduğunu bir kez daha teyit ettiklerini söyledi."],
+  "048a9b43": ["Almanya'da milletvekillerinin telefonlarına casus yazılım saldırı girişimi doğrulandı", "Almanya'da milletvekillerinin telefonlarına casus yazılım saldırı girişimi doğrulandı", "Almanya Dijital Bakanı Wildberger, Federal Meclis üyeleri ve hükümet üyelerinin telefonlarına yönelik siber saldırı girişimini doğruladı. BSI'nın 30 Ekim'deki bilgilendirmesiyle olası etkilenenlere güvenlik önlemleri bildirildi; saldırının boyutu soruşturmayla netleşecek."],
+  "095d29d1": ["Almanya'da siber casusluk alarmı: Milletvekilleri ve hükümet yetkililerinin telefonları hedef alındı", "Almanya'da siber casusluk alarmı: Milletvekilleri ve hükümet yetkililerinin telefonları hedef alındı", "Almanya'da Federal Meclis (Bundestag) üyeleri ve hükümet yetkililerinin cep telefonlarının gelişmiş casus yazılımlarla hedef alındığı ortaya çıktı. Apple'ın iPhone kullanıcılarına gönderdiği güvenlik uyarılarının ardından Alman makamları harekete geçti. Yetkililer, saldırıların başarılı olup olmadığının henüz belirlenemediğini açıkladı."],
+  "4b46258c": ["\"İBB'deki dengelerin değişmesini istemiyoruz\"", "DEM Parti Grup Başkanvekili Temelli: İBB Meclisi’ndeki dengelerin değişmesini istemiyoruz", "DEM Parti Grup Başkanvekili Sezai Temelli, \"kent uzlaşısı\" kararı hakkında, \"İstanbul halkının tercihiyle oluşmuş olan dengeler ancak yine İstanbul halkının tercihiyle değişebilir. Transferlerle, müdahalelerle olacak dengeleri kabul etmiyoruz\" diye konuştu"],
+  "4cc69420": ["İBB Meclisi'nde dengeler değişiyor: YENİ Parti'ye geçen üye sayısı 84'e ulaştı", "İBB Meclisi'nde dengeler değişiyor: Yeni Parti'ye geçen üye sayısı 84'e ulaştı", "İBB Meclisi'nde CHP'den ayrılarak Yeni Parti'ye katıldığını açıklayan üyelerin sayısı 84'e ulaştı. Mecliste siyasi dengeler değişirken, 23 üyenin oy kullanamayacağı hesaplandı. Parti değişikliklerinin resmi kayıtlara yansımasıyla yeni sandalye dağılımı netleşecek."],
+  "0f16f0f5": ["Bakan Bayraktar: Milli Enerji 2040, yaklaşık 250 bin kişiye dolaylı iş sağlayacak", "Bakan Bayraktar: Milli Enerji 2040, yaklaşık 250 bin kişiye dolaylı iş sağlayacak", "Bakan Bayraktar, çeşitli temaslarda bulunmak üzere Mersin’e bir ziyaret gerçekleştirdi. Mersin Valiliğini ziyaret eden Bakan Bayraktar, daha sonra AK Parti İl Danışma Meclisi Toplantısına iştirak etti."],
+  "f5b282b7": ["Hüseyin Yayman'dan fon açıklaması: \"Partimiz bu kişilerle yolunu ayıracaktır\"", "Hüseyin Yayman'dan fon açıklaması: \"Partimiz bu kişilerle yolunu ayıracaktır\"", "AKP Genel Başkan Yardımcısı Hüseyin Yayman, Aksaray İl Danışma Meclisi Toplantısı'nda yaptığı konuşmada fon meselesine değinerek, beytülmala ve milletin hukukuna dokunan kim olursa olsun gerekli cezaları alacağını ve partinin bu kişilerle yolunu ayıracağını söyledi."],
+  "278eb682": ["DEM Partili Türkoğlu: AİHM kararları uygulanmıyor", "DEM Partili Türkoğlu: AİHM kararları uygulanmıyor", "DEM Parti Kadın Meclisi Sözcüsü Halide Türkoğlu, 4 Kasım 2016'da aralarında eski HDP Eş Genel Başkanları Selahattin Demirtaş ve Figen Yüksekdağ'ın da bulunduğu HDP milletvekillerinin tutuklanmasının 10'uncu yıl dönümü nedeniyle Sincan Cezaevi önünde açıklama yaptı."],
+  "892a7e64": ["Ankara’ya ulaşan Barış Anneleri’nin nöbet tuttuğu çadırı su bastı", "Barış Anneleri’nin Ankara’daki çadırını su bastı", "24 farklı kentten Ankara’ya gelen 300’ü aşkın Barış Anneleri Meclisi üyesinin Kurtuluş Parkı’nda kurduğu çadırları sağanak yağış nedeniyle su bastı. Nöbeti önce parka bulunan salona, ardından DEM Parti Genel Merkezi’ne taşıyan annelerin Meclis’te siyasi parti temsilcileriyle görüşmesi bekleniyor."],
+  "7b66c93b": ["İSİG: ‘Çocuk işçiliği sermayenin ihtiyaçları doğrultusunda devlet eliyle yaygınlaştırılıyor’", "İSİG Meclisi: 13 yılda en az 862 çocuk işçi yaşamını yitirdi", "İSİG Meclisi İstanbul Sözcüsü Serpil Ünal, AK Parti iktidarı döneminde uygulanan politikaların “çocukları işçileştirdiğini” vurguladı. Ünal “13 yılda en az 862 çocuk çalışırken yaşamını yitirdi. Çocuk işçiliği sermayenin ihtiyaçları doğrultusunda devlet eliyle yaygınlaştırılıyor” dedi."],
+  "2c54476c": ["GTB başkanlarından Cumhuriyetin 103. yılı kutlama mesajı", "GTB başkanlarından cumhuriyetin 103. yılına birlik ve üretim vurgusu", "Gaziantep Ticaret Borsası (GTB) Meclis Başkanı Ahmet Tiryakioğlu ve Yönetim Kurulu Başkanı Mehmet Akıncı, 29 Ekim Cumhuriyet Bayramı dolayısıyla kutlama mesajı yayımladı."],
+  "0b2e6dc8": ["Kriz bitmiyor! Yeni Parti'ye geçen belediyede CHP'ye tuvalet yanında oda", "Rozeti çıkardı, ilk icraatı oldu. YP'li Başkandan CHP'ye tuvalet yanında oda", "CHP'den ayrılarak Yeni Parti'ye geçen Kadıköy Belediye Başkanı Mesut Kösedağı'nın talimatıyla CHP Meclis Grubu'na tuvaletlerin bitişiğinde, penceresi ve havalandırması bulunmayan bir oda ayrıldığı ortaya çıktı."],
+  "fd7720a1": ["Mecliste bu hafta: Bütçe mesaisi... Erken seçim tartışmasında kritik takvim", "Mecliste kritik hafta: 2027 bütçesi ve erken seçim takvimi mercek altında", "Mecliste bu hafta dört bakanlığın 2027 bütçesi görüşülecek. Odatv yazarı Hürrem Elmasçı'nın erken seçim tartışmalarında bütçeyi işaret etmesinin ardından gözler komisyonda. Adalet Bakanlığının bütçesiyle başlayacak haftada Kızılay ve Booking düzenlemeleri de gündemde."],
+  "f4642327": ["DEM Parti Sözcüsü Ayşegül Doğan: Meclis İzleme Komisyonu'na dair kuruluş çalışmaları artık tamamlanmalı", "Ayşegül Doğan: Meclis İzleme Komisyonu'na dair kuruluş çalışmaları artık tamamlanmalı", "DEM Parti Sözcüsü Ayşegül Doğan, \"Çerçeve yasanın öngördüğü Meclis İzleme Komisyonu'na dair kuruluş çalışmalarını hem toplum hem de siyasi partiler bekliyor. Bu çalışmalar artık tamamlanmalı. Beklentimiz, önümüzdeki hafta Meclis Başkanı Sayın Kurtulmuş'un siyasi partilerle yapılması gereken görüşmeleri tamamlaması ve ardından kuruluş çalışmalarına ilişkin takvimin hızlandırılmasıdır. Meclis Komisyonu'nun ortak raporunda yer alan demokratikleşme önerileri somut yasa tekliflerine dönüştürülmeli..."],
+  "cd9d067d": ["DEM Parti’den Adalet Bakanlığı önünde 4 Kasım açıklaması: Siyasi tutukluluklara son verilsin", "DEM Parti, Adalet Bakanlığı önünde: 'Siyasi tutukluluklara son verilsin'", "DEM Parti Meclis Grubu, eski HDP Eş Genel Başkanları Selahattin Demirtaş ve Figen Yüksekdağ'ın da aralarında bulunduğu siyasetçilerin tutuklanmasının 10'uncu yılında Adalet Bakanlığı önünde açıklama yaptı."],
+  "41d9139c": ["Ertuğrul Kaya istifa etti, Meclis'te Yeni Yol grubu düştü", "Ertuğrul Kaya istifa etti, Meclis'te Yeni Yol grubu düştü", "Gaziantep Milletvekili Ertuğrul Kaya'nın DEVA Partisi'nden istifasıyla Meclis'te Yeni Yol grubu düştü."],
+  "d94a58d4": ["Meclis Başkanlığının 2027 yılı bütçesi kabul edildi", "Meclis Başkanlığının 2027 yılı bütçesi kabul edildi", "TBMM Plan ve Bütçe Komisyonu, AK Parti Samsun Milletvekili Mehmet Muş başkanlığında toplandı. TBMM Başkanı Numan Kurtulmuş, komisyonda, Meclis Başkanlığının 2027 yılı bütçesine ilişkin sunum yaptı. Komisyonda, milletvekilleri söz alarak bütçeye ilişkin değerlendirmelerde bulundu. Değerlendirmelerin ardından Kurtulmuş milletvekillerinin 2027 yılı bütçe teklifinin geneline ilişkin sorularını yanıtladı. Milletvekilleri danışmanları ve Meclis personellerinin hakları hakkındaki sorulara ilişkin Ku..."],
+  "5ca6f9a3": ["Hangi parti ne oy verdi? | Mekke Anlaşması Meclis’te kabul edildi", "Mekke Anlaşması Meclis'te kabul edildi: Hangi parti ne oy verdi", "Türkiye, Pakistan ve Suudi Arabistan arasında imzalanan Mekke Ortak Savunma Anlaşması’nın onaylanmasına ilişkin kanun teklifi Meclis'te kabul edildi. Oylamada partilerin verdikleri oylar belli oldu."],
+  "0cf5badd": ["Kurtulmuş'tan Balkanlar mesajı: \"Her gelişmeyi yakından takip ediyoruz\"", "Kurtulmuş'tan Balkanlar mesajı: \"Her gelişmeyi yakından takip ediyoruz\"", "TBMM Başkanı Numan Kurtulmuş, Hırvatistan Meclis Başkanı Gordan Jandrokovi ile gerçekleştirdiği görüşmenin ardından yaptığı açıklamada, Balkanlar'da istikrar, güven ve refahın önemine dikkat çekti....Devamı için tıklayınız"],
+};
+
+/** hubMatches on one stored story: its title, neutral title and summary lead, joined like the RPC's guard text. */
+function storyMatches(key: string, id: string): boolean {
+  const story = H96_STORIES[id];
+  if (story === undefined) throw new Error(`no stored story ${id}`);
+  return hubMatches(key, story.join(" "));
+}
+
+describe("person and ministry hubs (h96-entityhubs-1)", () => {
+  it("simsek: 'Bakan Şimşek' and 'Bakanı Şimşek' name the minister, whatever the summary calls him", () => {
+    // 4e006e95 (5 articles), 3b041b3c (19), 71110c3b (17), 758e72ad (2) and 1edc2e33 (9): all live, none listed before.
+    for (const id of ["4e006e95", "3b041b3c", "71110c3b", "758e72ad", "1edc2e33"]) {
+      expect(storyMatches("simsek", id), id).toBe(true);
+    }
+    expect(hubMatches("simsek", "Mehmet Şimşek açıkladı")).toBe(true);
+    expect(hubMatches("simsek", "Hazine ve Maliye Bakanı Şimşek'ten açıklama")).toBe(true);
+    expect(hubMatches("simsek", "Bakanı Şimşek'te toplantı")).toBe(true);
+  });
+
+  it("simsek: other Şimşeks and the lightning stay out", () => {
+    // Real: the CHP's Berhan Şimşek (1662ce5a) and a municipal council member Hülya Şimşek (6f99a6aa).
+    expect(storyMatches("simsek", "1662ce5a")).toBe(false);
+    expect(storyMatches("simsek", "6f99a6aa")).toBe(false);
+    // Hand-written (no live cluster carries these shapes in the 200 days read on 2026-11-09).
+    expect(hubMatches("simsek", "Vali Yılmaz Şimşek yangın bölgesinde incelemelerde bulundu")).toBe(false);
+    expect(hubMatches("simsek", "Şimşekspor sezonu galibiyetle açtı")).toBe(false);
+    expect(hubMatches("simsek", "Düzce'de şimşeklerin ardından sağanak başladı")).toBe(false);
+    expect(hubMatches("simsek", "Başbakan Şimşek")).toBe(false);
+  });
+
+  it("fidan: 'Bakan Fidan' and 'Dışişleri Bakanı Fidan' headlines are the minister's", () => {
+    // c05ed0eb (8 articles) and e3262ca6 (9): 'Dışişleri Bakanı Fidan ...' with 'Bakan Fidan' in the neutral title.
+    for (const id of ["c05ed0eb", "e3262ca6"]) expect(storyMatches("fidan", id), id).toBe(true);
+    expect(hubMatches("fidan", "Hakan Fidan Moskova'da")).toBe(true);
+    expect(hubMatches("fidan", "Bakanı Fidan'dan açıklama")).toBe(true);
+    // The ministers of other portfolios and a tree-planting minister stay out.
+    expect(hubMatches("fidan", "Bakan Yumaklı fidan dikim törenine katıldı")).toBe(false);
+    expect(hubMatches("fidan", "Fidan Doğan'ın duruşması ertelendi")).toBe(false);
+  });
+
+  it("meb: 'Milli Eğitim Bakanı Tekin' and 'Milli Eğitim Bakanlığı' stories are the ministry's", () => {
+    // b8a84cf2, 457bf390 and 57ef49ea: 'Milli Eğitim Bakanı (Yusuf) Tekin ...', none says MEB.
+    for (const id of ["b8a84cf2", "457bf390", "57ef49ea"]) expect(storyMatches("meb", id), id).toBe(true);
+    expect(hubMatches("meb", "MEB'den yeni müfredat açıklaması")).toBe(true);
+    expect(hubMatches("meb", "Milli Eğitim Bakanlığı karnelerin tarihini duyurdu")).toBe(true);
+  });
+
+  it("meb: the KKTC, French and Syrian ministries are out, and MEB itself needs no help", () => {
+    // 61bc5710 (archived, real): a Turkish minister and 'KKTC Milli Eğitim Bakanlığı' sign a dormitory protocol.
+    expect(storyMatches("meb", "61bc5710")).toBe(false);
+    // 0ad80814 (real): 'Fransa Milli Eğitim Bakanı Edouard Geffray'; 13d5948d (real, 2 articles): 'Suriye Milli Eğitim Bakanlığı'.
+    expect(storyMatches("meb", "0ad80814")).toBe(false);
+    expect(storyMatches("meb", "13d5948d")).toBe(false);
+    expect(hubMatches("meb", "KKTC Milli Eğitim Bakanı Çavuşoğlu açıklama yaptı")).toBe(false);
+    // The trusted spelling stands alone: the Turkish ministry's own protocol with the KKTC one.
+    expect(hubMatches("meb", "MEB, KKTC Milli Eğitim Bakanlığı ile protokol imzaladı")).toBe(true);
+  });
+
+  it("meb and msb: the official 'Millî' spelling counts, and the stemmed prefilter reaches it", () => {
+    // 1f9ebac9 (real): the school calendar, 'Millî Eğitim Bakanlığının çalışma takvimine göre'. The folded regex reads
+    // 'î' as 'i', but the Turkish stemmer keeps 'millî' and 'milli' apart, so the prefilter needs both spellings.
+    expect(storyMatches("meb", "1f9ebac9")).toBe(true);
+    expect(hubMatches("meb", "Millî Eğitim Bakanı Tekin açıkladı")).toBe(true);
+    expect(hubMatches("msb", "Millî Savunma Bakanlığı duyurdu")).toBe(true);
+    for (const key of ["meb", "msb"]) {
+      const queries = entityHubQueries(entityByKey(key)!);
+      expect(queries.length, key).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
+      const ministry = key === "meb" ? "eğitim" : "savunma";
+      for (const form of ["bakanlığı", "bakanı"]) {
+        expect(queries, `${key}: milli ${ministry} ${form}`).toContain(`milli ${ministry} ${form}`);
+        expect(queries, `${key}: millî ${ministry} ${form}`).toContain(`millî ${ministry} ${form}`);
+      }
+    }
+  });
+
+  it("msb: 'Milli Savunma Bakanı Güler' is the ministry; Poland's 'Milli Savunma' is not", () => {
+    expect(storyMatches("msb", "14d78e3c")).toBe(true);
+    expect(hubMatches("msb", "Milli Savunma Bakanlığı haftalık basın toplantısı")).toBe(true);
+    expect(hubMatches("msb", "MSB: Bir haftada 6 terörist teslim oldu")).toBe(true);
+    // Hand-written: the live Polish rows are single-article clusters, below the hub's floor.
+    expect(hubMatches("msb", "Polonya Milli Savunma Bakanı Kosiniak-Kamysz Ankara'da")).toBe(false);
+    expect(hubMatches("msb", "Polonya Milli Savunma Bakanlığı açıklaması")).toBe(false);
+    // 'Milli Savunma Komisyonu' is the TBMM committee, not the ministry.
+    expect(hubMatches("msb", "TBMM Milli Savunma Komisyonu toplandı")).toBe(false);
+  });
+
+  it("imamoglu: the politician stays, Adana's district and the Tuğberk İmamoğlu ship go", () => {
+    // 14c5e96f and 81c805d1 (real): the İBB trial's 104th hearing, and an 'Ekrem İmamoğlu' headline.
+    expect(storyMatches("imamoglu", "14c5e96f")).toBe(true);
+    expect(storyMatches("imamoglu", "81c805d1")).toBe(true);
+    // c828192c: the Adana shooting. The title says 'Adana İmamoğlu'nda', the lead 'Adana'nın İmamoğlu ilçesinde'.
+    const adana = H96_STORIES["c828192c"]!;
+    expect(storyMatches("imamoglu", "c828192c")).toBe(false);
+    expect(hubMatches("imamoglu", adana[0])).toBe(false);
+    expect(hubMatches("imamoglu", adana[2])).toBe(false);
+    // 848f51b2: only the lead names 'Tuğberk İmamoğlu gemisinde'.
+    const ship = H96_STORIES["848f51b2"]!;
+    expect(hubMatches("imamoglu", ship[2])).toBe(false);
+    expect(storyMatches("imamoglu", "848f51b2")).toBe(false);
+  });
+
+  it("imamoglu: the locative is not the district, and 'Ekrem İmamoğlu' beats a district cue elsewhere", () => {
+    // hunt-59's own samples: "Söz İmamoğlu'nda" and "Adana'da İmamoğlu protestoları" are the politician.
+    expect(hubMatches("imamoglu", "İBB davası 98. gün: Söz İmamoğlu'nda")).toBe(true);
+    expect(hubMatches("imamoglu", "Adana'da İmamoğlu protestoları nedeniyle 3 kişiye dava açıldı")).toBe(true);
+    expect(hubMatches("imamoglu", "İmamoğlu ilçesinde kurşunlama; Ekrem İmamoğlu'ndan tepki")).toBe(true);
+    expect(hubMatches("imamoglu", "Tuğberk İmamoğlu gemisi arama çalışmaları, Ekrem İmamoğlu mesaj gönderdi")).toBe(true);
+    expect(hubMatches("imamoglu", "Tuğberk İmamoğlu gemisinde arama sürüyor")).toBe(false);
+  });
+});
+
+describe("meclis hub: party, foreign and municipal councils are not the TBMM (h96-entityhubs-2)", () => {
+  // Page 1 of /gundem/meclis listed four of these and the whole 14-day hub about nineteen: the requires cue was
+  // satisfied by the matched phrase itself ('KKTC Meclis Başkanı', 'Parti Meclisi' under a party name).
+  const NOT_TBMM: ReadonlyArray<readonly [id: string, what: string]> = [
+    ["01cbab9a", "YENİ Parti's Parti Meclisi at its kurultay"],
+    ["430bacd3", "DEM Parti Parti Meclisi (PM) meeting"],
+    ["e04f9346", "DEM Parti Parti Meclisi (PM) meeting"],
+    ["53c4123b", "obituary of a former DEM Parti Parti Meclisi member"],
+    ["b9601948", "KKTC Meclis Başkanı (Cumhuriyet Meclisi)"],
+    ["d448df20", "the KKTC election"],
+    ["31342903", "Hırvatistan Meclis Başkanı"],
+    ["2a7e585a", "Hırvatistan Meclis Başkanı"],
+    ["048a9b43", "Almanya's Federal Meclis"],
+    ["095d29d1", "Almanya's Federal Meclis (Bundestag)"],
+    ["4b46258c", "İBB Meclisi"],
+    ["4cc69420", "İBB Meclisi"],
+    ["0f16f0f5", "AK Parti İl Danışma Meclisi"],
+    ["f5b282b7", "AK Parti İl Danışma Meclisi"],
+    ["278eb682", "DEM Parti Kadın Meclisi"],
+    ["892a7e64", "Barış Anneleri Meclisi"],
+    ["7b66c93b", "İSİG Meclisi"],
+    ["2c54476c", "Gaziantep Ticaret Borsası Meclis Başkanı"],
+  ];
+
+  it("the party, foreign, municipal and NGO councils drop out", () => {
+    for (const [id, what] of NOT_TBMM) expect(storyMatches("meclis", id), `${id} ${what}`).toBe(false);
+  });
+
+  it("the Turkish parliament stays: the bare week-in-Meclis, committees, a TBMM group, the Yeni Yol group, the Meclis budget, the Mekke vote", () => {
+    for (const id of ["fd7720a1", "f4642327", "cd9d067d", "41d9139c", "d94a58d4", "5ca6f9a3"]) {
+      expect(storyMatches("meclis", id), id).toBe(true);
+    }
+  });
+
+  it("'TBMM' keeps a story that also names a foreign speaker (the trusted form skips every guard)", () => {
+    // 0cf5badd (real): 'TBMM Başkanı Numan Kurtulmuş, Hırvatistan Meclis Başkanı Gordan Jandrokovi ile ...'.
+    expect(storyMatches("meclis", "0cf5badd")).toBe(true);
+    expect(hubMatches("meclis", "TBMM Başkanı Kurtulmuş, KKTC Meclis Başkanı Öztürkler'i kabul etti")).toBe(true);
+    expect(hubMatches("meclis", "Türkiye Büyük Millet Meclisi'nde İBB Meclisi tartışması")).toBe(true);
+  });
+
+  it("'parti meclisi' is the veto, not 'parti meclis': a TBMM party group still counts", () => {
+    expect(hubMatches("meclis", "DEM Parti Meclis Grubu toplandı")).toBe(true);
+    expect(hubMatches("meclis", "CHP Parti Meclisi toplandı, Meclis'e çağrı")).toBe(false);
+    expect(RISING_HUB_SPECS.meclis?.hubExcludes).toContain("parti meclisi");
+    expect(RISING_HUB_SPECS.meclis?.hubExcludes).not.toContain("parti meclis");
+  });
+
+  it("no bare 'almanya' veto: a TBMM delegation story that mentions Berlin stays", () => {
+    expect(RISING_HUB_SPECS.meclis?.hubExcludes).not.toContain("almanya");
+    expect(hubMatches("meclis", "Meclis heyeti Almanya'da: milletvekilleri Berlin'de temaslarda bulundu")).toBe(true);
+  });
+
+  it("'meclis baskan' is no longer a cue: the matched phrase cannot satisfy its own requirement", () => {
+    expect(RISING_HUB_SPECS.meclis?.requires).not.toContain("meclis baskan");
+    expect(hubMatches("meclis", "Meclis Başkanı açıklama yaptı")).toBe(false);
+    expect(hubMatches("meclis", "Gaziantep Ticaret Borsası Meclis Başkanı mesaj yayımladı")).toBe(false);
+    // 'kurtulmus' still carries the Speaker, and 'komisyon' the committee.
+    expect(hubMatches("meclis", "Meclis Başkanı Kurtulmuş yeni yasama yılını açtı")).toBe(true);
+    expect(hubMatches("meclis", "Meclis Başkanlığı Divanı komisyon üyelerini belirledi")).toBe(true);
+  });
+
+  it("the new vetoes are hub-only: excludes stays the list migration 163 mirrors, and the rollup tokens do not move", () => {
+    const spec = RISING_HUB_SPECS.meclis!;
+    expect(spec.hubExcludes).toEqual([
+      "parti meclisi",
+      "kktc",
+      "cumhuriyet meclisi",
+      "hirvatistan",
+      "federal meclis",
+      "bundestag",
+      "ibb meclis",
+      "danisma meclis",
+      "kadin meclis",
+      "baris anneleri",
+      "isig meclis",
+    ]);
+    for (const ex of spec.hubExcludes!) expect(spec.excludes, ex).not.toContain(ex);
+    // The hub-only list sits in a lookahead of its own, right behind the shared excludes and before the cues.
+    const [guarded] = entityHubPatterns(entityByKey("meclis")!);
+    expect(guarded!.startsWith(guardPrefix(spec.excludes!, spec.requires, spec.hubExcludes))).toBe(true);
+    expect(guarded!.startsWith(guardPrefix(spec.excludes!, spec.requires))).toBe(false);
+    expect(entityByKey("meclis")!.tokens).toEqual(["meclis", "tbmm"]);
+  });
+});
+
 describe("entityHubQueries", () => {
   it("akp searches both curated spellings", () => {
     const q = entityHubQueries(entityByKey("akp")!);
@@ -1158,7 +1448,7 @@ describe("invariants over every curated entity", () => {
   const EXCL = `${esc("(?![\\s\\S]*(?:")}${ALTS}${esc("))")}`;
   const REQ = `${esc("(?=[\\s\\S]*(?:")}${ALTS}${esc("))")}`;
   // `^`, then the negative lookahead and/or the positive one (in that order), then `[\s\S]*`.
-  const GUARD = `${esc("^")}(?:${EXCL}(?:${REQ})?|${REQ})${esc("[\\s\\S]*")}`;
+  const GUARD = `${esc("^")}(?:${EXCL}(?:${EXCL})?(?:${REQ})?|${REQ})${esc("[\\s\\S]*")}`;
   const GRAMMAR = new RegExp(`^(?:${PLAIN}|${QUANT}|${GUARD}(?:${PLAIN}|${QUANT}))$`);
 
   it("covers all 62 entities", () => {
@@ -1255,13 +1545,19 @@ describe("invariants over every curated entity", () => {
       ["exclude repeated, borsa at the end", fit("new york ").slice(0, N - 6) + " borsa"],
       ["meclis without any cue", fit("meclis ")],
       ["meclis repeated, cue at the end", fit("meclis ").slice(0, N - 5) + " tbmm"],
+      ["meclis with a cue, hub-only exclude at the end", fit("komisyon meclis ").slice(0, N - 14) + " parti meclisi"],
+      ["hub-only excludes repeated, meclis at the end", fit("kktc ibb meclis ").slice(0, N - 7) + " meclis"],
       ["dolar behind amounts", fit("100 dolar milyar dolar ")],
       ["digits", "1".repeat(N)],
       ["erdogan blocked on every line", fit("fatih erdogan ")],
       ["erdogan repeated, family name at the end", fit("erdogan ").slice(0, N - 14) + " emine erdogan"],
       ["family name repeated, trusted form at the end", fit("emine erdogan ").slice(0, N - 22) + " cumhurbaskani erdogan"],
+      ["imamoglu blocked on every line", fit("adana imamoglu ")],
+      ["imamoglu repeated, district at the end", fit("imamoglu ").slice(0, N - 14) + " imamoglu ilce"],
+      ["milli egitim repeated, foreign ministry at the end", fit("milli egitim bakani ").slice(0, N - 18) + " kktc milli egitim"],
+      ["milli savunma repeated, no foreign cue", fit("milli savunma bakanligi ")],
     ];
-    const keys = ["disisleri", "borsa", "meclis", "aym", "tcmb", "dolar", "erdogan"];
+    const keys = ["disisleri", "borsa", "meclis", "aym", "tcmb", "dolar", "erdogan", "imamoglu", "meb", "msb"];
 
     it("builds every input at exactly 100k characters", () => {
       for (const [name, text] of inputs) expect(text.length, name).toBe(N);
@@ -1359,6 +1655,8 @@ describe("invariants over every curated entity", () => {
       "borsa",
       "dem",
       "iyi-parti",
+      "meb",
+      "msb",
       "pkk",
     ]);
     for (const e of withInflections) {
@@ -1373,7 +1671,21 @@ describe("invariants over every curated entity", () => {
       RISING_ENTITIES.filter((e) => entityHubSpec(e).aliases !== undefined)
         .map((e) => e.key)
         .sort(),
-    ).toEqual(["akp", "aym", "borsa", "erdogan", "meclis", "tcmb", "yrp", "zelenski"]);
+    ).toEqual([
+      "akp",
+      "aym",
+      "borsa",
+      "erdogan",
+      "fidan",
+      "imamoglu",
+      "meb",
+      "meclis",
+      "msb",
+      "simsek",
+      "tcmb",
+      "yrp",
+      "zelenski",
+    ]);
   });
 });
 
@@ -1383,6 +1695,15 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
   it("every exclude is a folded ASCII phrase, so no metacharacter reaches the RPC", () => {
     for (const [key, spec] of specs) {
       for (const ex of spec.excludes ?? []) {
+        expect(ex, `${key}: ${ex}`).toBe(foldEntityText(ex));
+        expect(ex, `${key}: ${ex}`).toMatch(/^[a-z0-9]+( [a-z0-9]+)*$/);
+      }
+    }
+  });
+
+  it("every hub-only exclude is a folded ASCII phrase, so no metacharacter reaches the RPC", () => {
+    for (const [key, spec] of specs) {
+      for (const ex of spec.hubExcludes ?? []) {
         expect(ex, `${key}: ${ex}`).toBe(foldEntityText(ex));
         expect(ex, `${key}: ${ex}`).toMatch(/^[a-z0-9]+( [a-z0-9]+)*$/);
       }
@@ -1400,12 +1721,12 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
 
   it("every guarded pattern starts with guardPrefix(excludes, requires): the closing rule holds for both lists", () => {
     for (const [key, spec] of specs) {
-      if (spec.excludes === undefined && spec.requires === undefined) continue;
+      if (spec.excludes === undefined && spec.requires === undefined && spec.hubExcludes === undefined) continue;
       const e = entityByKey(key)!;
       const guarded = entityHubPatterns(e).filter((p) => p.startsWith("^(?"));
       expect(guarded.length, key).toBeGreaterThan(0);
       for (const p of guarded) {
-        expect(p.startsWith(guardPrefix(spec.excludes ?? [], spec.requires)), key).toBe(true);
+        expect(p.startsWith(guardPrefix(spec.excludes ?? [], spec.requires, spec.hubExcludes)), key).toBe(true);
       }
     }
   });
@@ -1444,13 +1765,13 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("excludes is curated on exactly aym, borsa, erdogan, meclis and tcmb; quantityGuard on dolar only", () => {
+  it("excludes is curated on exactly aym, borsa, erdogan, imamoglu, meb, meclis, msb and tcmb; quantityGuard on dolar only", () => {
     expect(
       specs
         .filter(([, s]) => s.excludes !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["aym", "borsa", "erdogan", "meclis", "tcmb"]);
+    ).toEqual(["aym", "borsa", "erdogan", "imamoglu", "meb", "meclis", "msb", "tcmb"]);
     expect(
       specs
         .filter(([, s]) => s.quantityGuard !== undefined)
@@ -1470,13 +1791,13 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("notAfter is curated on exactly disisleri and erdogan, as folded single ASCII words", () => {
+  it("notAfter is curated on exactly disisleri, erdogan and imamoglu, as folded single ASCII words", () => {
     expect(
       specs
         .filter(([, s]) => s.notAfter !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["disisleri", "erdogan"]);
+    ).toEqual(["disisleri", "erdogan", "imamoglu"]);
     for (const [key, spec] of specs) {
       for (const w of spec.notAfter ?? []) {
         expect(w, `${key}: ${w}`).toBe(foldEntityText(w));
@@ -1610,6 +1931,21 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     expect(tokens("tcmb")).toEqual(["tcmb", "merkez bankasi"]);
     expect(tokens("aym")).toEqual(["aym", "anayasa mahkemesi"]);
     expect(tokens("meclis")).toEqual(["meclis", "tbmm"]);
+    // h96-entityhubs-1 curates the hub aliases of these five; the rollup tokens (migration 112's emap) stay.
+    expect(tokens("simsek")).toEqual(["mehmet simsek"]);
+    expect(tokens("fidan")).toEqual(["hakan fidan"]);
+    expect(tokens("meb")).toEqual(["meb"]);
+    expect(tokens("msb")).toEqual(["msb"]);
+    expect(tokens("imamoglu")).toEqual(["imamoglu"]);
+  });
+
+  it("hubExcludes (vetoes that /trends does not mirror) is curated on exactly meclis", () => {
+    expect(
+      specs
+        .filter(([, s]) => s.hubExcludes !== undefined)
+        .map(([k]) => k)
+        .sort(),
+    ).toEqual(["meclis"]);
   });
 
   it("requires is curated on exactly meclis and tcmb", () => {
@@ -1676,7 +2012,6 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
       "kanun teklif",
       "yasa teklif",
       "grup toplanti",
-      "meclis baskan",
       "kurtulmus",
       "komisyon",
       "butce gorusme",

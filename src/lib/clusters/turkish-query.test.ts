@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
 
 import { RISING_FOLD_FROM, RISING_FOLD_TO } from "@/lib/trends/rising-entities";
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import {
   MAX_QUERY_VARIANTS,
   MAX_SEARCH_QUERY_LENGTH,
   MAX_SEARCH_TERMS,
   SEARCH_FOLD_FROM,
   SEARCH_FOLD_TO,
+  GEMINATE_ROOTS,
   canonicalSearchQuery,
   cleanQueryUnicode,
   foldTr,
@@ -15,6 +17,7 @@ import {
   pgLower,
   searchQueryCut,
   searchQueryWasShortened,
+  searchSiblingQuery,
   searchedWordsAsTyped,
   titleCaseTr,
   turkishQueryVariants,
@@ -989,5 +992,208 @@ describe("canonicalSearchQuery is idempotent over the h50-search-2 inputs", () =
       expect(once, label).toBe(once.trim());
       expect(/(^| )-+( |$)/.test(once), label).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h96-search-1: the headline form of an everyday noun. The Turkish stemmer gives
+// the possessive ('vergisi' -> 'vergis') and the doubled-consonant form ('zammı'
+// -> 'zammı') their own lexemes, so 'elektrik zammı' matched nothing while
+// 'elektrik zam' found 9 stories. searchSiblingQuery rewrites those two shapes to
+// the root; the archive then searches the typed words AND the sibling.
+// ---------------------------------------------------------------------------
+
+describe("searchSiblingQuery (h96-search-1)", () => {
+  it.each([
+    ["elektrik zammı", "elektrik zam"],
+    ["elektrik zammi", "elektrik zam"],
+    ["emlak vergisi", "emlak vergi"],
+    ["doğal gaz zammı", "doğal gaz zam"],
+    ["asgari ücret zammı", "asgari ücret zam"],
+    ["trafik cezası", "trafik ceza"],
+    ["gelir vergisi", "gelir vergi"],
+  ])("%j -> %j", (q, sibling) => {
+    expect(searchSiblingQuery(q)).toBe(sibling);
+  });
+
+  it.each([
+    ["soruşturması", "soruşturma"],
+    ["sorusturmasi", "sorusturma"],
+    ["belediyesi", "belediye"],
+    ["cezası", "ceza"],
+    ["aşısı", "aşı"],
+    ["ekonomisi", "ekonomi"],
+    ["üniversitesi", "üniversite"],
+  ])("rule A (possessive after a vowel): %j -> %j", (q, root) => {
+    expect(searchSiblingQuery(q)).toBe(root);
+  });
+
+  // CORR-2: rule A is the -sı / -si ending only. A -su / -sü word is a compound name (Karasu,
+  // Sarısu, Ilısu, Akarsu), not a possessive, and its 'root' ('kara', 'sarı') is another word:
+  // a sibling call for 'karasu' would fill the page with 'kara' rows. The fruit 'kayısı'
+  // matches the shape but its root 'kayı' is unrelated, so it is on a small folded deny set.
+  it.each([
+    "karasu",
+    "Karasu",
+    "KARASU",
+    "sarısu",
+    "ılısu",
+    "Ilısu",
+    "akarsu",
+    "kayısı",
+    "Kayısı",
+    "KAYISI",
+    "kayisi",
+    "Kayisi",
+  ])("no sibling for a -su compound name or the fruit: %j", (q) => {
+    expect(searchSiblingQuery(q)).toBeNull();
+  });
+
+  it("the ordinary possessives still return the root after the narrowing", () => {
+    expect(searchSiblingQuery("vergisi")).toBe("vergi");
+    expect(searchSiblingQuery("cezası")).toBe("ceza");
+    expect(searchSiblingQuery("soruşturması")).toBe("soruşturma");
+    expect(searchSiblingQuery("belediyesi")).toBe("belediye");
+    expect(searchSiblingQuery("Karasu belediyesi")).toBe("Karasu belediye");
+  });
+
+  it("the deny set is checked per term: a denied word next to a possessive leaves only the possessive rewritten", () => {
+    expect(searchSiblingQuery("kayısı vergisi")).toBe("kayısı vergi");
+    expect(searchSiblingQuery("kayısı fiyatı")).toBeNull();
+  });
+
+  it.each([
+    ["zammı", "zam"],
+    ["zammi", "zam"],
+    ["zammü", "zam"],
+    ["hakkı", "hak"],
+    ["affı", "af"],
+    ["hissi", "his"],
+    ["hattı", "hat"],
+    ["sırrı", "sır"],
+    ["reddi", "ret"],
+  ])("rule B (closed gemination allowlist): %j -> %j", (q, root) => {
+    expect(searchSiblingQuery(q)).toBe(root);
+  });
+
+  it("GEMINATE_ROOTS is exactly the seven reviewed roots and nothing else", () => {
+    expect([...GEMINATE_ROOTS.entries()].sort()).toEqual(
+      [
+        ["aff", "af"],
+        ["hakk", "hak"],
+        ["hatt", "hat"],
+        ["hiss", "his"],
+        ["redd", "ret"],
+        ["sırr", "sır"],
+        ["zamm", "zam"],
+      ].sort(),
+    );
+  });
+
+  it("compares case-insensitively with Turkish rules and keeps the other terms as typed", () => {
+    expect(searchSiblingQuery("ELEKTRİK ZAMMI")).toBe("ELEKTRİK zam");
+    expect(searchSiblingQuery("Emlak VERGİSİ")).toBe("Emlak vergi");
+    expect(searchSiblingQuery("Trafik Cezası")).toBe("Trafik ceza");
+  });
+
+  it("rewrites every term that qualifies and never changes the term count", () => {
+    expect(searchSiblingQuery("vergisi zammı cezası")).toBe("vergi zam ceza");
+    const q = "a vergisi b zammı c cezası";
+    expect(searchSiblingQuery(q)!.split(" ")).toHaveLength(q.split(" ").length);
+    const six = "emlak vergisi zammı trafik cezası yeni";
+    expect(searchSiblingQuery(six)!.split(" ")).toHaveLength(six.split(" ").length);
+    expect(searchSiblingQuery(six)!.split(" ").length).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+  });
+
+  it.each([
+    "erdoğan",
+    "messi",
+    "sisi",
+    "burdur",
+    "miller",
+    "zam",
+    "vergi",
+    "ceza",
+    "elektrik zam",
+    "emlak vergi",
+    "trafik ceza",
+    "zammına", // the allowlist rule covers the bare vowel forms only
+    "zamlar",
+    "istanbul",
+    "imamoğlu",
+    "seçim",
+    "",
+    "   ",
+  ])("returns null when no term qualifies: %j", (q) => {
+    expect(searchSiblingQuery(q)).toBeNull();
+  });
+
+  it("the allowlist is closed: a doubled consonant that is not listed is left alone", () => {
+    for (const q of ["messi", "kuzzi", "mekki", "yakki", "ossi", "allı", "tatlı", "hallı"]) {
+      expect(searchSiblingQuery(q), q).toBeNull();
+    }
+  });
+
+  it("returns null for any query that uses websearch syntax: the reader is in charge", () => {
+    for (const q of [
+      "akp or chp",
+      "vergisi or zammı",
+      '"emlak vergisi"',
+      '"emlak" vergisi',
+      "-vergisi",
+      "emlak -vergisi",
+      "emlak vergisi -zam",
+      "AKP OR vergisi",
+    ]) {
+      expect(searchSiblingQuery(q), q).toBeNull();
+    }
+  });
+
+  it("is idempotent: applying it to its own output returns null", () => {
+    for (const q of [
+      "elektrik zammı",
+      "emlak vergisi",
+      "doğal gaz zammı",
+      "asgari ücret zammı",
+      "trafik cezası",
+      "soruşturması",
+      "vergisi zammı cezası",
+      "hakkı affı",
+    ]) {
+      const once = searchSiblingQuery(q);
+      expect(once, q).not.toBeNull();
+      expect(searchSiblingQuery(once!), q).toBeNull();
+    }
+  });
+
+  it("changes terms only: the sibling is never longer than the query and holds no new word", () => {
+    for (const q of ["elektrik zammı", "emlak vergisi", "trafik cezası", "vergisi zammı cezası"]) {
+      const sib = searchSiblingQuery(q)!;
+      expect(sib.length).toBeLessThanOrEqual(q.length);
+      expect(sib.split(" ")).toHaveLength(q.split(" ").length);
+    }
+  });
+
+  it("leaves a term with an edge character alone (the canonical key has already cut punctuation)", () => {
+    for (const q of ["vergisi,", "(vergisi)", "vergisi!", "'zammı", "vergisi\u0307"]) {
+      expect(searchSiblingQuery(q), q).toBeNull();
+    }
+  });
+
+  it("scales linearly: a long single term, a long run of terms and a dotless-i run (CPU-time ladder, no wall-clock budget)", () => {
+    // Load-robust (tests/_helpers/linear-time.ts): the growth over a size ladder, not an absolute time.
+    expectLinear(
+      (n) => ({
+        longTerm: rep("a", "", "si")(n),
+        manyTerms: rep("ab ", "", "vergisi")(n),
+        dotless: rep("\u0131", "", "x")(n),
+      }),
+      (q) => {
+        expect(searchSiblingQuery(q.longTerm)).toBeNull();
+        expect(searchSiblingQuery(q.manyTerms)).not.toBeNull();
+        expect(searchSiblingQuery(q.dotless)).toBeNull();
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
   });
 });

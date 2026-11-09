@@ -87,6 +87,12 @@ export function entityHubNote(total: number, shown: number): string {
 //     counts only beside "TBMM", "genel kurul", "milletvekili", a party name and
 //     the like, so an İTO, ATSO or MTO "meclis toplantısı", a municipal council
 //     and a foreign parliament drop out.
+//   * hubExcludes (meclis, 2026-11-09): vetoes migration 163 does not mirror for
+//     /trends, as a second negative lookahead right behind the excludes one:
+//     `^(?![\s\S]*(?:<ex>))(?![\s\S]*(?:<hub-ex>))(?=[\s\S]*(?:<req>))[\s\S]*`.
+//     "Parti Meclisi", the KKTC and Croatian Speakers, the Federal Meclis, the İBB
+//     Meclisi and the like are not the TBMM, and the first lookahead stays word for
+//     word what tests/migrations/163 compares with the SQL guard.
 //   * quantityGuard (dolar): `\m` + QUANTITY_GUARD + word, so "100 dolar", "2,1
 //     milyar dolarlık" and "milyarlarca doları" are amounts, not the currency.
 //   * inflections (akp, dem, iyi-parti, asgari-ucret, pkk, borsa): widen the
@@ -115,12 +121,14 @@ export function entityHubNote(total: number, shown: number): string {
 // entities compile (`select 'x' ~ p`), and the 21 behaviour samples of
 // entity-hub.test.ts, plus the 16 meclis samples of the requires step, give the
 // same answer in Postgres and in the JS twin. entity_cluster_ids_v2 called with
-// the app's exact arrays returns the 255 meclis rows the counts below say.
+// the app's exact arrays returns the 255 meclis rows the counts below say (2026-11-01; h96-entityhubs-2 re-measured
+// meclis on 2026-11-09, see its block at the end of this comment).
 //
 //   key           old   new   ceiling   note
 //   aym            40    31       31    9 dropped, all Polonya; 0 Polonya left
 //   tcmb            5     2        2    dropped: Avrupa and İsrail Merkez Bankası, FED
 //   meclis        409   255      258    409 -> 313 (excludes) -> 255 (requires); see below
+//   meclis        252   234      235    2026-11-09 (h96-entityhubs-2): 18 dropped, 0 added; see the last block
 //   dolar          44     2        2    63 literal before; all 42 dropped are amounts
 //   akp           322   331      331    prefilter 'ak partili', 'ak partimize'
 //   dem            30    32       32    'dem partili'
@@ -161,15 +169,23 @@ export function entityHubNote(total: number, shown: number): string {
 //      council session and a Sarıyer council decision. One more row, under the
 //      wider "milletvekil" cue, is the Albanian parliament, dropped by
 //      'arnavutluk' as it should be.
-//      Residue: among the newest 50 NEW rows that match only the bare 'Meclis'
-//      pattern (not tbmm, not büyük millet meclisi) there are 7. Five are the
-//      Turkish parliament ("Meclis'te Yeni Yol grubu düştü", Tanrıkulu's
+//      Residue (2026-11-01): among the newest 50 NEW rows that match only the bare
+//      'Meclis' pattern (not tbmm, not büyük millet meclisi) there are 7. Five are
+//      the Turkish parliament ("Meclis'te Yeni Yol grubu düştü", Tanrıkulu's
 //      araştırma komisyonu, the Sarıgül fezleke, a soru önergesi) and 2 are
 //      foreign, municipal or chamber rows (target at most 2, met exactly): a
 //      Gaziantep Ticaret Borsası "meclis başkanı" story and the Kadıköy "CHP
 //      meclis grubu" story. Both carry a real cue word, so only a narrower
 //      phrase ('ticaret borsas') could close the first; the second reads the
 //      same as a TBMM group story and is left alone.
+//      Residue (2026-11-09, h96-entityhubs-2): the Gaziantep story went when
+//      'meclis baskan' stopped being a cue (it was the matched phrase's own
+//      neighbour). The newest 50 rows now hold 6 bare-only rows (11 before), all
+//      six the Turkish parliament, and 0 foreign, municipal or chamber rows. The
+//      one left anywhere in the 14-day hub is the Kadıköy "CHP meclis grubu"
+//      story (0b2e6dc8): "CHP Meclis Grubu" is also how a TBMM group is named
+//      ("DEM Parti Meclis Grubu", "Yeni Yol'un Meclis grubu"), so a phrase for it
+//      would drop real TBMM rows. It stays.
 //
 // disisleri and borsa (h43-entities-2, 2026-11-05), measured read-only through
 // entity_cluster_ids_v2 with the app's exact arrays, 14-day window, live
@@ -223,6 +239,28 @@ export function entityHubNote(total: number, shown: number): string {
 // exchange, India's reserves, a Philippine rate rise, two Palestinian banking-sector statements); none
 // had two articles, so none reaches the hub. Closing them needs more foreign names in `excludes`, which
 // migration 163 mirrors word for word, so it is a migration and not an app-side change.
+//
+// person and ministry hubs (h96-entityhubs-1, 2026-11-09), measured read-only with the app's exact arrays through
+// the body of entity_cluster_ids_v3 (p_headline_only false), 14-day window, live clusters, before and after each
+// hub's own spec change; the stemmed prefilter reaches every row the regex accepts (the no-prefilter ceiling is
+// equal to the listed count for all five):
+//   simsek     19 -> 27   +8, 0 dropped: the five 'Bakan Şimşek' stories (4e006e95, 3b041b3c with 19 articles,
+//                         71110c3b with 17, 758e72ad, 1edc2e33) and three that name him as 'Bakan Şimşek' only in a
+//                         neutral title or the summary lead
+//   fidan      44 -> 48   +4, 0 dropped: c05ed0eb and e3262ca6 ('Dışişleri Bakanı Fidan ...'), a Rubio story whose
+//                         neutral title is 'Bakan Fidan ...', and a question to 'Dışişleri Bakanı Fidan'
+//   meb        11 -> 47   +36, 0 dropped: 'Milli Eğitim Bakanı (Yusuf) Tekin' stories and the ministry's own
+//                         announcements; the Syrian ministry (13d5948d) is vetoed, the 'Millî' spelling needed two
+//                         inflections for the prefilter
+//   msb        17 -> 34   +17, 0 dropped: 'Milli Savunma Bakanı Güler' meetings and ministry announcements; one
+//                         row is a 1920s minister named in a medal story (9a550953), the known false positive
+//   imamoglu   60 -> 58   -2, 0 added: the Adana district shooting (c828192c) and the Tuğberk İmamoğlu ship (848f51b2)
+// meclis (h96-entityhubs-2, 2026-11-09), same read: 252 -> 234, 18 dropped, 0 added; the prefilter ceiling is 235
+// (one 'Meclisin en genç milletvekili' story, a stemming gap that was there before). The 18 dropped are exactly the
+// party, foreign, municipal and NGO rows of the finding: Parti Meclisi (01cbab9a, 430bacd3, e04f9346, 53c4123b), the
+// KKTC (b9601948, d448df20), Croatia (31342903, 2a7e585a), Federal Meclis (048a9b43, 095d29d1), İBB Meclisi (4b46258c,
+// 4cc69420), Danışma Meclisi (0f16f0f5, f5b282b7), Kadın Meclisi (278eb682), Barış Anneleri (892a7e64), İSİG (7b66c93b)
+// and the Gaziantep Ticaret Borsası (2c54476c). No TBMM row was lost: every one of the 18 was read by hand.
 // ---------------------------------------------------------------------------
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {
@@ -375,9 +413,13 @@ function notAfterGuard(words: readonly string[] | undefined): string {
  *   * `excludes`: a form that is not `trusted` is prefixed with
  *     `^(?![\s\S]*(?:<alt>|<alt>))[\s\S]*`, a lookahead over the whole text, so
  *     "Polonya'da ... Anayasa Mahkemesi" never matches.
+ *   * `hubExcludes`: vetoes that migration 163 does not mirror for /trends, as a
+ *     second negative lookahead right behind the `excludes` one (so the first stays
+ *     equal to the SQL list): `^(?![\s\S]*(?:<ex>))(?![\s\S]*(?:<hub-ex>))...`.
+ *     Same shape, same open/closed word rule; a trusted form skips it too.
  *   * `requires`: the same form also needs at least one cue anywhere in the
  *     text, a positive lookahead `(?=[\s\S]*(?:<alt>|<alt>))` placed after the
- *     exclude one: `^(?![\s\S]*(?:<ex>))(?=[\s\S]*(?:<req>))[\s\S]*`. So the
+ *     exclude ones: `^(?![\s\S]*(?:<ex>))(?=[\s\S]*(?:<req>))[\s\S]*`. So the
  *     bare "Meclis" of an İTO or a municipal story, with no TBMM cue, is out.
  *   The guard is emitted only when either list holds a usable entry. The
  *   pattern starts with `^`, never `(?`, which Postgres would read as embedded
@@ -396,10 +438,13 @@ export function entityHubPatterns(
   const prefix = spec.hubMatch === "prefix";
   const trusted = new Set(spec.trusted ?? []);
   const excludeAlts = guardAlternatives(spec.excludes);
+  const hubExcludeAlts = guardAlternatives(spec.hubExcludes);
   const requireAlts = guardAlternatives(spec.requires);
+  const veto = (alts: readonly string[]) =>
+    alts.length > 0 ? `(?![\\s\\S]*(?:${alts.join("|")}))` : "";
   const guard =
-    excludeAlts.length > 0 || requireAlts.length > 0
-      ? `^${excludeAlts.length > 0 ? `(?![\\s\\S]*(?:${excludeAlts.join("|")}))` : ""}${
+    excludeAlts.length > 0 || hubExcludeAlts.length > 0 || requireAlts.length > 0
+      ? `^${veto(excludeAlts)}${veto(hubExcludeAlts)}${
           requireAlts.length > 0 ? `(?=[\\s\\S]*(?:${requireAlts.join("|")}))` : ""
         }[\\s\\S]*`
       : "";

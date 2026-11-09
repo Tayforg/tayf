@@ -6,6 +6,7 @@ import { expandAliasQuery } from "./search-aliases";
 import {
   canonicalSearchQuery,
   foldTr,
+  searchSiblingQuery,
   turkishQueryVariants,
 } from "./turkish-query";
 import { getZoneFeedHealth } from "./feed-health";
@@ -28,6 +29,11 @@ import {
 //   - `p_folded`: the ASCII-folded query (`foldTr`, the twin of 129's
 //     `tayf_search_fold`) matched against the folded index, so 'sisli' finds
 //     Şişli and 'cumhurbaskani' finds Cumhurbaşkanı.
+// A possessive or doubled-stem form ('elektrik zammı', 'emlak vergisi') also asks for its
+// root ('elektrik zam', 'emlak vergi') in a SECOND call, made only when the typed call
+// returned fewer than SEARCH_LIMIT ids; its new ids are appended after the typed ones
+// (turkish-query.ts, h96-search-1). Every call sends at most 3 variants and `p_folded`
+// stays the typed words.
 // An alias in the query (AKP <-> AK Parti, search-aliases.ts) is expanded into a
 // two-way websearch `or` for BOTH arguments, so 'AKP' and 'AK Parti' send the
 // same RPC call; the cache key below stays the canonical query.
@@ -103,35 +109,64 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // characters, one alias, two disjuncts) holds, and a query without an alias
   // (the common case) takes exactly the arguments it always did.
   const expansion = expandAliasQuery(key);
-  const variants = turkishQueryVariants(expansion ? expansion.variantsQuery : key);
-  if (variants.length === 0) return { bundles: [], capped: false };
+  const base = expansion ? expansion.variantsQuery : key;
+  const typed = turkishQueryVariants(base);
+  if (typed.length === 0) return { bundles: [], capped: false };
+  // h96-search-1: 'elektrik zammı' and 'emlak vergisi' are stored under the stems of
+  // 'zam' and 'vergi', so a query holding a possessive or a doubled-stem form also asks
+  // for the sibling (searchSiblingQuery). The sibling is a SECOND call, never merged into
+  // the typed one: 172 ORs p_variants[1..3] with equal rank, and a merged call pushed
+  // real typed hits off the page behind unrelated rows ('karasu' + 'kara'). Typed hits
+  // keep their ranks and the sibling only fills empty slots of the page. A query without
+  // such a form, or with websearch syntax, makes the one typed call it always made.
+  // `folded` stays the typed words in both calls, so 166's guard and 172's tier never
+  // read the sibling.
+  const sibling = searchSiblingQuery(base);
   const folded = foldTr(expansion ? expansion.foldedQuery : key);
 
   const supabase = createReaderClient();
 
-  let res = await supabase.rpc("search_cluster_ids", {
-    p_variants: variants,
-    p_folded: folded,
-    p_limit: SEARCH_LIMIT,
-  });
-  // PGRST202 = the 3-arg function is not in PostgREST's schema cache, i.e.
-  // migration 129 is not applied yet. Only then fall back, once, to 083's
-  // 2-arg function (same pattern as entity-hub-query.ts); any other error
-  // keeps the throw-and-retry path below.
-  if (res.error?.code === "PGRST202") {
-    res = await supabase.rpc("search_cluster_ids", {
-      p_variants: variants,
-      p_limit: SEARCH_LIMIT,
-    });
+  // One RPC call. PGRST202 = the 3-arg function is not in PostgREST's schema cache,
+  // i.e. migration 129 is not applied yet. Only then fall back, once, to 083's 2-arg
+  // function (same pattern as entity-hub-query.ts) and stay on it for the rest of this
+  // search; any other error keeps the throw-and-retry path below.
+  let threeArg = true;
+  async function searchIds(variants: string[]): Promise<string[]> {
+    let res = threeArg
+      ? await supabase.rpc("search_cluster_ids", {
+          p_variants: variants,
+          p_folded: folded,
+          p_limit: SEARCH_LIMIT,
+        })
+      : await supabase.rpc("search_cluster_ids", {
+          p_variants: variants,
+          p_limit: SEARCH_LIMIT,
+        });
+    if (threeArg && res.error?.code === "PGRST202") {
+      threeArg = false;
+      res = await supabase.rpc("search_cluster_ids", {
+        p_variants: variants,
+        p_limit: SEARCH_LIMIT,
+      });
+    }
+    if (res.error) {
+      throw new Error(`[clusters] search-query error: ${res.error.message}`);
+    }
+    return ((res.data ?? []) as SearchIdRow[]).map((r) => r.id);
   }
-  const { data, error } = res;
 
-  if (error) {
-    throw new Error(`[clusters] search-query error: ${error.message}`);
+  const ids = await searchIds(typed);
+  // The typed page has room left: ask for the sibling and append what is new, after the
+  // typed ids, up to SEARCH_LIMIT. A full typed page is never touched.
+  if (sibling !== null && ids.length < SEARCH_LIMIT) {
+    const seen = new Set(ids);
+    for (const id of await searchIds(turkishQueryVariants(sibling))) {
+      if (ids.length >= SEARCH_LIMIT) break;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
   }
-
-  const idRows = (data ?? []) as SearchIdRow[];
-  const ids = idRows.map((r) => r.id);
   if (ids.length === 0) return { bundles: [], capped: false };
   const capped = ids.length >= SEARCH_LIMIT;
 
