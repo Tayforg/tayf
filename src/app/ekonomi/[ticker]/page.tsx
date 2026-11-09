@@ -50,6 +50,7 @@ import {
 } from "@/lib/finance/session";
 import { isThinTicker } from "@/lib/finance/ticker-index";
 import { errorShellMetadata, sharePageMetadata } from "@/lib/seo/page-metadata";
+import { sourceLang } from "@/lib/sources/source-language";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 import { currentTimeMs } from "@/lib/time";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
@@ -328,7 +329,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   const cut = intradayCutShort({ lastBar, intradayDay: sessionDay, stat, nowMs });
   const markers = sessionDay
     ? [
-        ...page.articles.filter((a) => istToday(new Date(a.publishedAt).getTime()) === sessionDay).map((a) => ({ ts: a.publishedAt, label: a.title })),
+        ...page.articles.filter((a) => istToday(new Date(a.publishedAt).getTime()) === sessionDay).map((a) => ({ ts: a.publishedAt, label: a.title, lang: sourceLang(a.source) })),
         ...page.disclosures.filter((d) => istToday(new Date(d.publishedAt).getTime()) === sessionDay).map((d) => ({ ts: d.publishedAt, label: `KAP: ${d.subject ?? "bildirim"}` })),
       ].sort((a, b) => a.ts.localeCompare(b.ts))
     : [];
@@ -343,7 +344,12 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         <span aria-current="page" className="text-brand">{ticker}</span>
       </nav>
 
-      <header className="grid gap-4 border border-border bg-black/25 px-4 py-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+      {/* h101-a11yrecent-1 (WCAG 1.4.10): grid-cols-1 is minmax(0,1fr), so the one track below md cannot outgrow
+          the container. The price block may shrink and wrap, so the 140 px sparkline drops under a long price
+          (4.950.000,00 is 216 px) instead of widening the page. max-sm:justify-end right-aligns that wrapped block
+          on phones only; at 640-767 px it stays where it was. md and above is unchanged. Pinned by
+          tests/guards/ekonomi-ticker-header-reflow.test.ts. */}
+      <header className="grid grid-cols-1 gap-4 border border-border bg-black/25 px-4 py-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div className="min-w-0 space-y-1">
           {displayName ? (
             <h1 className="text-3xl leading-none text-foreground">
@@ -356,11 +362,11 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           <p className="truncate text-[13px] text-foreground/90">{page.company?.title ?? "Şirket kaydı bulunamadı"}</p>
           {metaLine ? <p className="font-mono text-[11px] text-muted-foreground">{metaLine}</p> : null}
         </div>
-        <div className="flex items-end gap-4 font-mono">
+        <div className="flex min-w-0 flex-wrap items-end gap-x-4 gap-y-2 font-mono max-sm:justify-end">
           {quote && fresh ? (
             <>
               <div className="text-right">
-                <div className="flex items-baseline justify-end gap-2">
+                <div className="flex flex-wrap items-baseline justify-end gap-2">
                   {limit ? <span className="bg-brand/20 px-1.5 py-0.5 text-[11px] text-brand">{limit}</span> : null}
                   <span className="text-3xl leading-none tabular-nums">{fmtPrice(quote.price)}</span>
                 </div>
@@ -477,9 +483,11 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                   <time dateTime={a.publishedAt} className="font-mono text-[11px] tabular-nums text-muted-foreground">
                     {fmtWhen(a.publishedAt)}
                   </time>
-                  <span className="hidden truncate font-mono text-[11px] text-muted-foreground sm:block">{a.source?.name}</span>
+                  <span className="hidden truncate font-mono text-[11px] text-muted-foreground sm:block" lang={sourceLang(a.source)}>
+                    {a.source?.name}
+                  </span>
                   <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-[13px] leading-snug hover:text-brand">
-                    {a.title}
+                    <span lang={sourceLang(a.source)}>{a.title}</span>
                     <NewTabHint />
                   </a>
                 </li>

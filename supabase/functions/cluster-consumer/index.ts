@@ -13,6 +13,10 @@
 //      (DLQ-lite — the payload survives in pgmq.a_cluster_work for audit)
 //   4. cap total wall-clock work at MAX_INVOCATION_MS so we never hit the
 //      Edge Functions 400s limit
+//      (h101-e2elatency-1, migration 188) in the minutes where ingest-drain runs
+//      (UTC minute % 3 === 0) the FIRST read is a long poll, so the invocation
+//      waits for ingest's insert instead of leaving at :02 and letting the
+//      messages wait for the next minute (see planClusterWorkPoll)
 //   5. (hunt-25 W3, migration 151) once cluster_work ran dry, read at most
 //      ATTACH_MAX_PER_DRAIN messages of the separate `cluster_attach` queue and
 //      run the deterministic, attach-only probe on them (see processAttach)
@@ -24,9 +28,11 @@
 import {
   archive,
   deleteMessage,
+  isPollRpcMissing,
   type PgmqMessage,
   queueDepth,
   readBatch,
+  readBatchPoll,
 } from "../_shared/pgmq.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
@@ -174,6 +180,18 @@ const MAX_INVOCATION_MS = 30_000;           // 30 s wall budget per invocation
 // process — so reading with the budget nearly spent walks healthy messages
 // toward the poison threshold (audit S11).
 const READ_BUDGET_FLOOR_MS = 5_000;
+// Long poll of the first cluster_work read (h101-e2elatency-1, migration 188).
+// cluster-drain runs every minute and ingest-drain every third minute
+// ('*/3 * * * *'); ingest inserts its articles at about :04-:12 of its minute,
+// after the consumer of that minute has read once at about :02 and left, so 73 %
+// of the messages waited 40-65 s for the NEXT minute's consumer. In ingest's
+// minutes the first read waits for the insert instead. Other minutes keep the
+// plain read and spend no idle wall time.
+const POLL_MINUTE_MODULUS = 3;              // ingest-drain's minutes: 0, 3, 6, ... of every hour (UTC)
+const POLL_SECONDS = 6;                     // one call: PostgREST's authenticator cancels a statement after 8 s (the RPC clamps to 6 as well)
+const POLL_INTERVAL_MS = 250;               // how often the database re-reads while it waits
+const POLL_MAX_CALLS = 2;                   // per invocation
+const POLL_SECOND_CALL_BEFORE_MS = 14_000;  // a second poll starts only while less than this has passed since the start
 const CLUSTER_CONTEXT_TTL_MS = 60_000;      // refresh rolling-window context
 
 // Exact-title probe (h12-cluster-1, migration 135). A story that comes back with
@@ -3208,6 +3226,9 @@ interface InvocationSummary {
     top_cluster_id: string;
     top_score: number;
   }>;
+  // h101-e2elatency-1: long-poll reads of cluster_work made this invocation (0 outside
+  // ingest-drain's minutes, never more than POLL_MAX_CALLS).
+  polls: number;
   duration_ms: number;
   budgeted_out: boolean;
   jev_live: JevLiveState;
@@ -3342,6 +3363,33 @@ async function recordAdmission(
   }
 }
 
+// Seconds the NEXT cluster_work read may wait for a message (a long poll), or 0 for
+// the plain read. Pure: the clock is a parameter, so the minute rule and the budget
+// are tested without waiting.
+//   * only an invocation that STARTED in a UTC minute with minute % 3 === 0 polls
+//     (ingest-drain's minutes); every other minute answers 0;
+//   * at most POLL_MAX_CALLS polls per invocation; the second only while less than
+//     POLL_SECOND_CALL_BEFORE_MS have passed since the start;
+//   * a poll never runs past the point where the loop stops leasing new batches
+//     (MAX_INVOCATION_MS - READ_BUDGET_FLOOR_MS): the wait is shortened to what is
+//     left, whole seconds, and 0 when less than one second is left. A message found
+//     at the very end of a poll still has READ_BUDGET_FLOOR_MS to be processed.
+// A clock that is not a number answers 0.
+export function planClusterWorkPoll(input: {
+  startedAtMs: number;
+  nowMs: number;
+  pollsMade: number;
+}): number {
+  const { startedAtMs, nowMs, pollsMade } = input;
+  if (pollsMade >= POLL_MAX_CALLS) return 0;
+  if (new Date(startedAtMs).getUTCMinutes() % POLL_MINUTE_MODULUS !== 0) return 0;
+  const elapsedMs = nowMs - startedAtMs;
+  if (pollsMade >= 1 && !(elapsedMs < POLL_SECOND_CALL_BEFORE_MS)) return 0;
+  const leftSeconds = Math.floor((MAX_INVOCATION_MS - READ_BUDGET_FLOOR_MS - elapsedMs) / 1000);
+  const seconds = Math.min(POLL_SECONDS, leftSeconds);
+  return seconds >= 1 ? seconds : 0;
+}
+
 async function drainQueue(): Promise<InvocationSummary> {
   // FIRST statement: reset the live-verification counters for this
   // invocation. Read the env here (not at module load) so the Deno-env
@@ -3384,6 +3432,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     ctx_window_min: null,
     created_with_floor_candidate: 0,
     created_with_floor_candidate_samples: [],
+    polls: 0,
     duration_ms: 0,
     budgeted_out: false,
     jev_live: jevLive,
@@ -3434,23 +3483,59 @@ async function drainQueue(): Promise<InvocationSummary> {
   // gate for the attach phase. A read error, the deadline or the budget leave it false.
   let clusterWorkEmpty = false;
 
+  // h101-e2elatency-1 (migration 188): in an ingest minute the first reads are long
+  // polls. `polling` is true until a poll finds a message, the plan says stop, or the
+  // RPC turns out not to exist; the plain read below is the same read as always and
+  // always follows the last empty poll. Nothing here sleeps: the wait is inside the
+  // database call.
+  let polling = true;
+
   while (true) {
     // Lease a new batch only while enough budget remains to actually
     // process it. pgmq bumps read_ct on every read, so a read that only
     // ever budget-outs walks a never-attempted message toward the poison
-    // threshold (audit S11).
+    // threshold (audit S11). A poll is a read like any other: this guard
+    // runs before each one, and the plan keeps the poll inside the budget.
     if (Date.now() - startedAt > MAX_INVOCATION_MS - READ_BUDGET_FLOOR_MS) {
       summary.budgeted_out = true;
       break;
     }
     let messages: PgmqMessage<QueueMessage>[];
     try {
-      messages = await readBatch<QueueMessage>(
-        supabase,
-        QUEUE_NAME,
-        VT_SECONDS,
-        BATCH_SIZE,
-      );
+      const pollSeconds = polling
+        ? planClusterWorkPoll({ startedAtMs: startedAt, nowMs: Date.now(), pollsMade: summary.polls })
+        : 0;
+      if (pollSeconds > 0) {
+        summary.polls += 1;
+        try {
+          messages = await readBatchPoll<QueueMessage>(
+            supabase,
+            QUEUE_NAME,
+            VT_SECONDS,
+            BATCH_SIZE,
+            pollSeconds,
+            POLL_INTERVAL_MS,
+          );
+        } catch (pollErr) {
+          if (!isPollRpcMissing(pollErr)) throw pollErr;
+          // Migration 188 is not applied (yet): this consumer was deployed first.
+          // Read plainly, as before the poll existed; no poll is retried this invocation.
+          console.warn(
+            `[cluster-consumer] pgmq_read_msgs_poll is not available (apply migration 188), reading without the poll: ${pollErr instanceof Error ? pollErr.message : pollErr}`,
+          );
+          polling = false;
+          messages = await readBatch<QueueMessage>(supabase, QUEUE_NAME, VT_SECONDS, BATCH_SIZE);
+        }
+        if (messages.length > 0) polling = false;
+      } else {
+        polling = false;
+        messages = await readBatch<QueueMessage>(
+          supabase,
+          QUEUE_NAME,
+          VT_SECONDS,
+          BATCH_SIZE,
+        );
+      }
     } catch (err) {
       console.error(
         `[cluster-consumer] pgmq.read failed: ${err instanceof Error ? err.message : err}`,
@@ -3459,6 +3544,9 @@ async function drainQueue(): Promise<InvocationSummary> {
       break;
     }
     if (messages.length === 0) {
+      // An empty poll is not an empty queue yet: go round again for the second poll
+      // (if the plan allows one) or for the plain read; the budget guard runs first.
+      if (polling) continue;
       clusterWorkEmpty = true;
       break;
     }

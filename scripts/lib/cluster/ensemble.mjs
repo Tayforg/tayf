@@ -81,6 +81,14 @@
 //     noun of that set are disjoint, so the pair is two instalments of one
 //     story: the same two lanes are capped at SUBJECT_VETO_CAP (see
 //     counterVetoFires()).
+//   - Homonym veto (h101-clustermembers-1): one headline names only a family
+//     member or namesake of a surname ("Emine Erdogan'dan Karabag mesaji": every
+//     Erdogan follows a given name of FAMILY_HOMONYM_GIVEN_NAMES) and the other
+//     names the principal ("Cumhurbaskani Erdogan ...", "Erdogan, ...") without
+//     ever naming that family member. No headline exemption: it withdraws the
+//     headline lane (actorMismatchFires) and caps the primary and MinHash lanes
+//     at SUBJECT_VETO_CAP, because the pair that started it joined on the
+//     primary tf-idf + entity lane (see familyHomonymFires()).
 //   - Actor veto (h70-mergequality-3): a headline-lane match must not cross
 //     actors. When the lane fired but the two headlines name different actors
 //     (comma subjects that are disjoint, or one comma subject against a
@@ -142,6 +150,8 @@ import {
   HEADLINE_LIVE_TITLE_MAX_HOURS,
   HEADLINE_SHORT_MIN_TOKENS,
   HEADLINE_TITLE_MAX_CHARS,
+  FAMILY_HOMONYM_GIVEN_NAMES,
+  FAMILY_HOMONYM_NOT_AFTER,
   GENERIC_ENTITIES,
   GENERIC_ENTITY_WEIGHT,
   SUBJECT_SPAN_MAX_WORDS,
@@ -429,7 +439,8 @@ export function headlineLane(ha, hb, hoursDelta) {
  * @param {number} hoursDelta
  * @param {{aSourceSlug?: string|null, bSourceSlug?: string|null, aTitle?: string|null, bTitle?: string|null}} [opts]
  *        With both `aTitle` and `bTitle` the result is 0 when the two titles
- *        name different actors (actorMismatchFires), exactly as score()
+ *        name different actors (actorMismatchFires, which includes a family
+ *        member against the principal, familyHomonymFires), exactly as score()
  *        withdraws the lane for such a pair.
  * @returns {number}
  */
@@ -618,6 +629,151 @@ function subjectsDisjoint(a, b) {
 }
 
 // ---------------------------------------------------------------------------
+// Family homonym (h101-clustermembers-1)
+// ---------------------------------------------------------------------------
+
+// One title token: a run of letters and digits with its apostrophe suffix
+// kept ("erdogan'dan"), or a single other non-space character, which is a
+// break ("," ":" "-" quotes, emoji). Linear: the optional suffix starts at an
+// apostrophe, which the run itself never contains.
+const HOMONYM_TOKEN = /[\p{L}\p{N}]+(?:['\u2019\u02bc\u2018`\u00b4][\p{L}\p{N}]+)?|[^\s\p{L}\p{N}]/gu;
+// The apostrophes a suffix may hang on.
+const HOMONYM_APOSTROPHE = /['\u2019\u02bc\u2018`\u00b4]/;
+// Invisible format characters (zero-width space / joiner, soft hyphen, BOM).
+const INVISIBLE_FORMAT = /\p{Cf}/gu;
+// Given name -> the words that, right before it, make it somebody's surname
+// ("cevdet yilmaz"), so the surname after it is not preceded by a given name.
+const HOMONYM_NOT_AFTER = new Map(
+  Object.entries(FAMILY_HOMONYM_NOT_AFTER).map(([given, before]) => [given, new Set(before)]),
+);
+
+// The surnames with their given-name sets, built once (score() runs this per candidate).
+const HOMONYM_SURNAMES = Object.entries(FAMILY_HOMONYM_GIVEN_NAMES).map(
+  ([surname, names]) => [surname, new Set(names)],
+);
+
+// The title clipped to HEADLINE_TITLE_MAX_CHARS, composed to NFC (a decomposed "İ" is
+// one letter), stripped of invisible format characters and folded.
+function homonymFold(title) {
+  return foldTurkishWord(
+    title.slice(0, HEADLINE_TITLE_MAX_CHARS).normalize("NFC").replace(INVISIBLE_FORMAT, ""),
+  );
+}
+
+// The words of a folded title, in order, an empty string standing for every
+// punctuation break between them. A word keeps its apostrophe suffix; the surname
+// test below drops it.
+function homonymTokens(folded) {
+  const out = [];
+  for (const m of folded.matchAll(HOMONYM_TOKEN)) {
+    const t = m[0];
+    out.push(/^[\p{L}\p{N}]/u.test(t) ? t : "");
+  }
+  return out;
+}
+
+// How often `surname` occurs in `tokens` right after a given name of `givens`
+// (the family reading) and how often it does not (the bare, principal reading:
+// at the start, after a role, a comma or any other word, "Recep Tayyip Erdogan",
+// "Cevdet Yilmaz Erdogan": a given name that follows HOMONYM_NOT_AFTER's word is
+// a surname). `givensBefore` holds the given names that directly preceded the
+// surname at its family occurrences.
+function surnameReadings(tokens, surname, givens) {
+  let family = 0;
+  let bare = 0;
+  const givensBefore = new Set();
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === "" || t.split(HOMONYM_APOSTROPHE, 1)[0] !== surname) continue;
+    const prev = i > 0 ? tokens[i - 1] : "";
+    if (givens.has(prev) && !HOMONYM_NOT_AFTER.get(prev)?.has(tokens[i - 2] ?? "")) {
+      family++;
+      givensBefore.add(prev);
+    } else bare++;
+  }
+  return { family, bare, givensBefore };
+}
+
+// The given names of `givens` that `tokens` name anywhere, not only right before
+// the surname ("Erdogan'in oglu Bilal ...", "Erdogan ve esi Emine Hanim ..."):
+// a token's stem (apostrophe suffix dropped) is the name. A name that follows
+// HOMONYM_NOT_AFTER's word is somebody's surname, not a given name ("Cevdet
+// Yilmaz"), so it is skipped.
+function namedGivens(tokens, givens) {
+  const out = new Set();
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === "") continue;
+    const stem = t.split(HOMONYM_APOSTROPHE, 1)[0];
+    if (!givens.has(stem)) continue;
+    if (HOMONYM_NOT_AFTER.get(stem)?.has(tokens[i - 1] ?? "")) continue;
+    out.add(stem);
+  }
+  return out;
+}
+
+// True when the FAMILY side `x` and the PRINCIPAL side `y` are different people:
+// no given name that preceded the surname in `x` is named anywhere in `y`.
+function differentPeople(x, yTokens, givens) {
+  const named = namedGivens(yTokens, givens);
+  for (const g of x.givensBefore) if (named.has(g)) return false;
+  return true;
+}
+
+/**
+ * True when one headline names only a family member or namesake of a surname
+ * and the other names the principal: "Emine Erdogan'dan Karabag mesaji" vs
+ * "Cumhurbaskani Erdogan, Aliyev'in daveti uzerine ..." (prod cluster 94503853:
+ * ten Emine Erdogan messages joined the President's Azerbaijan trip because the
+ * two Erdogans share the surname, the whitelist entity and the subject span).
+ *
+ * Per surname S of FAMILY_HOMONYM_GIVEN_NAMES, over the folded words of each
+ * title (clipped to HEADLINE_TITLE_MAX_CHARS, apostrophe suffixes dropped:
+ * "Erdogan'dan" is erdogan; a punctuation mark between two words breaks them,
+ * so "Cevdet Yilmaz, Erdogan'in ..." is not "Yilmaz Erdogan"):
+ *   - FAMILY: S occurs, and every occurrence is directly preceded by a given
+ *     name mapped for S ("Emine Erdogan", "Bilal Erdogan", "Yilmaz Erdogan");
+ *     "Cevdet Yilmaz Erdogan" is not one (FAMILY_HOMONYM_NOT_AFTER: the
+ *     Vice President's name, then the President's);
+ *   - PRINCIPAL: S occurs at least once without such a name before it (bare,
+ *     after a role, after "Recep Tayyip").
+ * It fires when one title is FAMILY, the other is PRINCIPAL and that PRINCIPAL
+ * title does not name the family member: none of the given names that preceded S
+ * in the FAMILY title appears anywhere in the PRINCIPAL title, not only directly
+ * before S ("Erdogan'in oglu Bilal ..." and "Erdogan ve esi Emine Hanim ..." name
+ * Bilal and Emine, so "Bilal Erdogan ..." / "Emine Erdogan ..." do not fire
+ * against them; a given name after a FAMILY_HOMONYM_NOT_AFTER word, "Cevdet
+ * Yilmaz", is a surname and names nobody). So two FAMILY titles never fire, a
+ * title naming both people ("Emine Erdogan ile Cumhurbaskani Erdogan
+ * Seul'de karsilandi") never fires against either side, and a title without S
+ * never fires. Pure and symmetric; false for anything that is not a string.
+ *
+ * @param {string} aTitle
+ * @param {string} bTitle
+ * @returns {boolean}
+ */
+export function familyHomonymFires(aTitle, bTitle) {
+  if (typeof aTitle !== "string" || typeof bTitle !== "string") return false;
+  if (aTitle === "" || bTitle === "") return false;
+  const fa = homonymFold(aTitle);
+  const fb = homonymFold(bTitle);
+  let a;
+  let b;
+  for (const [surname, givens] of HOMONYM_SURNAMES) {
+    // Both titles must hold the surname at all; tokenised only then, once.
+    if (!fa.includes(surname) || !fb.includes(surname)) continue;
+    a ??= homonymTokens(fa);
+    b ??= homonymTokens(fb);
+    const ra = surnameReadings(a, surname, givens);
+    const rb = surnameReadings(b, surname, givens);
+    // FAMILY side: family > 0 && bare === 0. PRINCIPAL side: bare > 0 && family === 0.
+    if (ra.family > 0 && ra.bare === 0 && rb.bare > 0 && rb.family === 0 && differentPeople(ra, b, givens)) return true;
+    if (rb.family > 0 && rb.bare === 0 && ra.bare > 0 && ra.family === 0 && differentPeople(rb, a, givens)) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Actor mismatch (h70-mergequality-3)
 // ---------------------------------------------------------------------------
 
@@ -731,7 +887,10 @@ function oneSidedActorMismatch(a, b, bTitle) {
  *   - one actor under its acronym: "AKP," vs "AK Parti,", "MSB," vs "Milli Savunma
  *     Bakanligi,"; a role-only comma subject ("Saglik Bakani,") names no actor.
  * A single whitelisted name ("Erdogan, ..." vs "Bahceli ...") does count.
- * Symmetric.
+ * Also true for a family member against the principal that shares the surname
+ * ("Emine Erdogan'dan ..." vs "Cumhurbaskani Erdogan ..."): their subject
+ * spans overlap, so neither check above sees two actors (familyHomonymFires,
+ * h101-clustermembers-1). Symmetric.
  */
 export function actorMismatchFires(aTitle, bTitle) {
   const a = subjectOf(aTitle);
@@ -739,7 +898,8 @@ export function actorMismatchFires(aTitle, bTitle) {
   return (
     subjectsDisjoint(a, b) ||
     oneSidedActorMismatch(a, b, bTitle) ||
-    oneSidedActorMismatch(b, a, aTitle)
+    oneSidedActorMismatch(b, a, aTitle) ||
+    familyHomonymFires(aTitle, bTitle)
   );
 }
 
@@ -991,6 +1151,7 @@ export function score(
         subjectVeto: false,
         incidentVeto: false,
         counterVeto: false,
+        homonymVeto: false,
         actorVeto: false,
       },
     };
@@ -1126,8 +1287,16 @@ export function score(
   // headlineOnlyScore() (member headlines in attach.ts / the consumer) never
   // sees titles either, so closing it needs those callers too.
   const counterVeto = !!aTitle && !!bTitle && counterVetoFires(aTitle, bTitle);
+  // Homonym veto (h101-clustermembers-1): "Emine Erdoğan'dan ..." against
+  // "Cumhurbaşkanı Erdoğan ...". Placed with the counter veto because it too has
+  // no headline exemption, and for a stronger reason: the first stray into
+  // prod cluster 94503853 did not take the headline lane at all (primary 0.49 =
+  // 0.7 * tf-idf 0.58 + 0.3 * entity ratio 0.29, lane false), so withdrawing the
+  // lane through actorMismatchFires() is not enough. It caps the two lanes the
+  // other vetoes cap, at the same SUBJECT_VETO_CAP.
+  const homonymVeto = !!aTitle && !!bTitle && familyHomonymFires(aTitle, bTitle);
   let jaccardForRaw = jaccardScore;
-  if (subjectVeto || incidentVeto || counterVeto) {
+  if (subjectVeto || incidentVeto || counterVeto || homonymVeto) {
     primaryForRaw = Math.min(primaryForRaw, SUBJECT_VETO_CAP);
     jaccardForRaw = Math.min(jaccardScore, SUBJECT_VETO_CAP);
   }
@@ -1166,6 +1335,7 @@ export function score(
       subjectVeto,
       incidentVeto,
       counterVeto,
+      homonymVeto,
       actorVeto,
     },
   };

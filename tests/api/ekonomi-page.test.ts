@@ -65,6 +65,7 @@ vi.mock("@/lib/finance/quotes", () => ({
 import EkonomiPage from "@/app/ekonomi/page";
 import { BreakerStrip } from "@/components/finance/breaker-strip";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { refKey } from "@/lib/finance/queries";
 import type { Quote } from "@/lib/finance/quotes";
 
@@ -353,5 +354,124 @@ describe("/ekonomi -- an essential read still throws to the error boundary", () 
     fetchCircuitBreakersMock.mockRejectedValue(new Error("breakers down too"));
 
     await expect(EkonomiPage()).rejects.toBe(boom);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h101-a11yrecent-2 (WCAG 3.1.2 Language of Parts): the feed's headlines and source names are plain text under
+// <html lang="tr">. Items from an English outlet (Daily Sabah, Hürriyet Daily News, TRT World, A News, ...) must
+// carry lang="en" on the headline text and on the source-name span, the way every other surface wired through
+// sourceLang() does; a Turkish outlet's row renders no attribute. The lang sits on an inner span around the title,
+// not on the anchor: the anchor also holds <NewTabHint />, a Turkish sr-only cue that must not inherit "en". The
+// page is a server component, so these read the element tree.
+// ---------------------------------------------------------------------------
+describe("/ekonomi -- feed rows mark an English outlet's text (h101-a11yrecent-2)", () => {
+  const row = (id: string, source: { name: string; slug: string } | null, title: string) => ({
+    id,
+    title,
+    url: `https://example.com/${id}`,
+    publishedAt: "2026-11-05T08:00:00.000Z",
+    category: "ekonomi",
+    source,
+    tickers: ["THYAO"],
+  });
+  const EN_TITLE = "Turkish Airlines posts $1.3 billion net income in third quarter";
+  const TR_TITLE = "THY üçüncü çeyrekte 1,3 milyar dolar net kâr açıkladı";
+
+  const anchorFor = (els: El[], id: string) => els.find((e) => e.type === "a" && e.props.href === `https://example.com/${id}`);
+  /** The anchor's direct children as an array (React leaves a single child unwrapped). */
+  const kidsOf = (a: El) => ([] as unknown[]).concat(a.props.children ?? []) as El[];
+  /** The anchor's child span that prints the headline. */
+  const titleSpanOf = (a: El, title: string) =>
+    kidsOf(a).find((k) => k.type === "span" && textOfEl(k.props.children) === title);
+  /** The anchor's direct <NewTabHint /> children. */
+  const hintsOf = (a: El) => kidsOf(a).filter((k) => k.type === NewTabHint);
+  /** The two spans that print a source name (the sm:block cell and the sm:hidden chip-row copy). */
+  const nameSpans = (els: El[], name: string) =>
+    els.filter((e) => e.type === "span" && textOfEl(e.props.children) === name);
+
+  function textOfEl(node: unknown): string {
+    if (node == null || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(textOfEl).join("");
+    return textOfEl((node as { props?: { children?: unknown } }).props?.children);
+  }
+
+  it("a Daily Sabah row: the headline text span and both source-name spans are lang=\"en\", the anchor is not", async () => {
+    fetchEconFeedMock.mockResolvedValue([row("e1", { name: "Daily Sabah", slug: "daily-sabah" }, EN_TITLE)]);
+
+    const els = await render();
+
+    const a = anchorFor(els, "e1")!;
+    expect(a.props.lang).toBeUndefined();
+    const title = titleSpanOf(a, EN_TITLE);
+    expect(title).toBeDefined();
+    expect(title!.props.lang).toBe("en");
+    // The Turkish new-tab cue is a direct child of the anchor, outside the English span.
+    expect(title!.props.children).toBe(EN_TITLE);
+    expect(hintsOf(a)).toHaveLength(1);
+    const spans = nameSpans(els, "Daily Sabah");
+    // The desktop cell (hidden below sm) and the phone copy inside the chip row (hidden from sm).
+    expect(spans.map((s) => String(s.props.className).includes("sm:block") || String(s.props.className).includes("sm:hidden"))).toEqual([true, true]);
+    for (const s of spans) expect(s.props.lang).toBe("en");
+  });
+
+  it("a Hürriyet Daily News row is English too", async () => {
+    fetchEconFeedMock.mockResolvedValue([row("e2", { name: "Hürriyet Daily News", slug: "hurriyet-daily-news" }, EN_TITLE)]);
+
+    const els = await render();
+
+    const a = anchorFor(els, "e2")!;
+    expect(a.props.lang).toBeUndefined();
+    expect(titleSpanOf(a, EN_TITLE)!.props.lang).toBe("en");
+    expect(hintsOf(a)).toHaveLength(1);
+    for (const s of nameSpans(els, "Hürriyet Daily News")) expect(s.props.lang).toBe("en");
+  });
+
+  it("a Sözcü row renders no lang attribute on the link, the title span or either source-name span", async () => {
+    fetchEconFeedMock.mockResolvedValue([row("t1", { name: "Sözcü", slug: "sozcu" }, TR_TITLE)]);
+
+    const els = await render();
+
+    const a = anchorFor(els, "t1")!;
+    expect(a.props.lang).toBeUndefined();
+    expect(titleSpanOf(a, TR_TITLE)!.props.lang).toBeUndefined();
+    expect(hintsOf(a)).toHaveLength(1);
+    const spans = nameSpans(els, "Sözcü");
+    expect(spans).toHaveLength(2);
+    for (const s of spans) expect(s.props.lang).toBeUndefined();
+  });
+
+  it("the slug decides: a row whose slug is Turkish but whose name reads like an English outlet is not marked", async () => {
+    fetchEconFeedMock.mockResolvedValue([row("t2", { name: "Daily Sabah", slug: "sozcu" }, TR_TITLE)]);
+
+    const a = anchorFor(await render(), "t2")!;
+    expect(a.props.lang).toBeUndefined();
+    expect(titleSpanOf(a, TR_TITLE)!.props.lang).toBeUndefined();
+  });
+
+  it("a mixed feed marks only the English row", async () => {
+    fetchEconFeedMock.mockResolvedValue([
+      row("e1", { name: "Daily Sabah", slug: "daily-sabah" }, EN_TITLE),
+      row("t1", { name: "Sözcü", slug: "sozcu" }, TR_TITLE),
+    ]);
+
+    const els = await render();
+
+    expect(titleSpanOf(anchorFor(els, "e1")!, EN_TITLE)!.props.lang).toBe("en");
+    expect(titleSpanOf(anchorFor(els, "t1")!, TR_TITLE)!.props.lang).toBeUndefined();
+    expect(anchorFor(els, "e1")!.props.lang).toBeUndefined();
+    expect(anchorFor(els, "t1")!.props.lang).toBeUndefined();
+  });
+
+  it("a row with no source still renders, with no lang on its link or its title span", async () => {
+    fetchEconFeedMock.mockResolvedValue([row("n1", null, TR_TITLE)]);
+
+    const els = await render();
+
+    const a = anchorFor(els, "n1")!;
+    expect(a.props.lang).toBeUndefined();
+    expect(titleSpanOf(a, TR_TITLE)!.props.lang).toBeUndefined();
+    expect(hintsOf(a)).toHaveLength(1);
   });
 });

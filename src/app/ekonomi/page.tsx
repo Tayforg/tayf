@@ -23,6 +23,7 @@ import { getQuotes } from "@/lib/finance/quotes";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { marketCueText, quoteFreshness, rebaseQuoteOnStat } from "@/lib/finance/session";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
+import { sourceLang } from "@/lib/sources/source-language";
 import { currentTimeMs } from "@/lib/time";
 
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
@@ -142,7 +143,7 @@ export default async function EkonomiPage() {
                   <time dateTime={item.publishedAt} className="font-mono text-[11px] tabular-nums text-muted-foreground">
                     {fmtWhen(item.publishedAt)}
                   </time>
-                  <span className="hidden truncate font-mono text-[11px] text-muted-foreground sm:block">
+                  <span className="hidden truncate font-mono text-[11px] text-muted-foreground sm:block" lang={sourceLang(item.source)}>
                     {item.source ? (
                       <Link href={`/source/${item.source.slug}`} className="hover:text-foreground">
                         {item.source.name}
@@ -156,7 +157,7 @@ export default async function EkonomiPage() {
                       rel="noopener noreferrer"
                       className="block text-[13px] leading-snug text-foreground hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      {item.title}
+                      <span lang={sourceLang(item.source)}>{item.title}</span>
                       <NewTabHint />
                     </a>
                     <div className="flex min-w-0 flex-wrap gap-1">
@@ -172,7 +173,11 @@ export default async function EkonomiPage() {
                         const redundant = since != null && q != null && Math.abs(since - q.changePct) < 0.02;
                         return <TickerChip key={t} ticker={t} quote={q} sinceNews={redundant ? null : since} stale={isStale(t)} />;
                       })}
-                      {item.source ? <span className="font-mono text-[11px] text-muted-foreground sm:hidden">{item.source.name}</span> : null}
+                      {item.source ? (
+                        <span className="font-mono text-[11px] text-muted-foreground sm:hidden" lang={sourceLang(item.source)}>
+                          {item.source.name}
+                        </span>
+                      ) : null}
                     </div>
                   </div>
                 </li>

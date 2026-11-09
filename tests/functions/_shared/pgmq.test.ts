@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import {
   archive,
   deleteMessage,
+  isPollRpcMissing,
   queueDepth,
   readBatch,
+  readBatchPoll,
   send,
 } from "../../../supabase/functions/_shared/pgmq.ts";
 
@@ -22,13 +24,16 @@ import {
 //   2. '029 contract': the (name, argument keys) pairs found in pgmq.ts equal
 //      the (name, parameter names) pairs of the public.pgmq_* shims created by
 //      supabase/migrations/029_public_pgmq_wrappers.sql, and no later migration
-//      redefines or drops those shims.
+//      redefines or drops those shims;
+//   3. '188 contract' (h101-e2elatency-1): the long-poll twin readBatchPoll calls
+//      public.pgmq_read_msgs_poll, whose parameter names are those of migration
+//      188, the only migration that names it.
 // ---------------------------------------------------------------------------
 
 type Client = Parameters<typeof readBatch>[0];
 interface RpcResult {
   data: unknown;
-  error: { message: string } | null;
+  error: { message: string; code?: string } | null;
 }
 
 /** A client whose rpc() records (name, args) and answers from a FIFO of queued results. */
@@ -46,7 +51,10 @@ function fakeClient(...results: RpcResult[]): {
 }
 
 const ok = (data: unknown): RpcResult => ({ data, error: null });
-const fail = (message: string): RpcResult => ({ data: null, error: { message } });
+const fail = (message: string, code?: string): RpcResult => ({
+  data: null,
+  error: code === undefined ? { message } : { message, code },
+});
 
 describe("readBatch", () => {
   it("calls pgmq_read_msgs with the default vt 60 and qty 50", async () => {
@@ -71,6 +79,76 @@ describe("readBatch", () => {
   it("throws 'pgmq.read(q): boom' on an RPC error", async () => {
     const { client } = fakeClient(fail("boom"));
     await expect(readBatch(client, "q")).rejects.toThrow("pgmq.read(q): boom");
+  });
+});
+
+describe("readBatchPoll", () => {
+  const msg = { msg_id: 1, read_ct: 1, enqueued_at: "t", vt: "t", message: { a: 1 } };
+
+  it("calls pgmq_read_msgs_poll with the queue, vt, qty, wait and sleep step it was given", async () => {
+    const { client, rpc } = fakeClient(ok([msg]));
+    expect(await readBatchPoll(client, "q", 60, 2, 6, 250)).toEqual([msg]);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith("pgmq_read_msgs_poll", {
+      queue_name: "q",
+      vt: 60,
+      qty: 2,
+      max_poll_seconds: 6,
+      poll_interval_ms: 250,
+    });
+  });
+
+  it("does not clamp: the database function owns the 1..6 s and 50..1000 ms bounds", async () => {
+    const { client, rpc } = fakeClient(ok([]));
+    await readBatchPoll(client, "q", 60, 2, 99, 5);
+    expect(rpc).toHaveBeenCalledWith("pgmq_read_msgs_poll", {
+      queue_name: "q",
+      vt: 60,
+      qty: 2,
+      max_poll_seconds: 99,
+      poll_interval_ms: 5,
+    });
+  });
+
+  it("returns [] when the poll timed out empty or the RPC answers null", async () => {
+    const { client } = fakeClient(ok([]), ok(null));
+    expect(await readBatchPoll(client, "q", 60, 2, 6, 250)).toEqual([]);
+    expect(await readBatchPoll(client, "q", 60, 2, 6, 250)).toEqual([]);
+  });
+
+  it("throws with readBatch's message shape, 'pgmq.read(q): boom', on an RPC error", async () => {
+    const { client } = fakeClient(fail("boom"));
+    await expect(readBatchPoll(client, "q", 60, 2, 6, 250)).rejects.toThrow("pgmq.read(q): boom");
+  });
+
+  it("keeps the PostgREST / Postgres error code on the thrown error, so a caller can tell a missing RPC from a failure", async () => {
+    const { client } = fakeClient(fail("Could not find the function", "PGRST202"), fail("boom"));
+    const missing = await readBatchPoll(client, "q", 60, 2, 6, 250).catch((e: unknown) => e);
+    expect((missing as { code?: string }).code).toBe("PGRST202");
+    const plain = await readBatchPoll(client, "q", 60, 2, 6, 250).catch((e: unknown) => e);
+    expect((plain as { code?: string }).code).toBeUndefined();
+  });
+});
+
+describe("isPollRpcMissing", () => {
+  it.each([
+    ["PostgREST schema cache miss PGRST202", { code: "PGRST202" }],
+    ["Postgres undefined_function 42883", { code: "42883" }],
+  ])("is true for %s", (_label, err) => {
+    expect(isPollRpcMissing(Object.assign(new Error("x"), err))).toBe(true);
+  });
+
+  it.each([
+    ["a statement timeout 57014", Object.assign(new Error("x"), { code: "57014" })],
+    ["a permission error 42501", Object.assign(new Error("x"), { code: "42501" })],
+    ["an error without a code", new Error("x")],
+    ["a code that only contains the digits", Object.assign(new Error("x"), { code: "x42883" })],
+    ["a non-string code", Object.assign(new Error("x"), { code: 42883 })],
+    ["a plain string", "PGRST202"],
+    ["null", null],
+    ["undefined", undefined],
+  ])("is false for %s", (_label, err) => {
+    expect(isPollRpcMissing(err)).toBe(false);
   });
 });
 
@@ -183,6 +261,20 @@ const here = dirname(fileURLToPath(import.meta.url));
 const PGMQ_TS = resolve(here, "../../../supabase/functions/_shared/pgmq.ts");
 const MIGRATIONS_DIR = resolve(here, "../../../supabase/migrations");
 const MIGRATION_029 = join(MIGRATIONS_DIR, "029_public_pgmq_wrappers.sql");
+const MIGRATION_188 = join(MIGRATIONS_DIR, "188_pgmq_read_msgs_poll.sql");
+
+/** True when `name` occurs in `text` as a whole identifier (the next character does not continue it). */
+function mentionsIdentifier(text: string, name: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(name, from);
+    if (at === -1) return false;
+    const next = text.charAt(at + name.length);
+    const continues = (next >= "a" && next <= "z") || (next >= "0" && next <= "9") || next === "_";
+    if (!continues) return true;
+    from = at + name.length;
+  }
+}
 
 /**
  * Blanks comments (newlines kept) with a character scan. `lineComment` is the
@@ -326,8 +418,8 @@ describe("029 contract", () => {
     "pgmq_send_msg",
   ];
 
-  it("parses 5 client.rpc calls out of pgmq.ts and 5 shims out of migration 029", () => {
-    expect([...calls.keys()].sort()).toEqual(EXPECTED);
+  it("parses 6 client.rpc calls out of pgmq.ts (029's 5 and 188's long-poll twin) and 5 shims out of migration 029", () => {
+    expect([...calls.keys()].sort()).toEqual([...EXPECTED, "pgmq_read_msgs_poll"].sort());
     expect([...shims.keys()].sort()).toEqual(EXPECTED);
   });
 
@@ -351,7 +443,7 @@ describe("029 contract", () => {
     }
   });
 
-  it("no later migration (030 and up) redefines, alters, drops or regrants a pgmq shim", () => {
+  it("no later migration (030 and up) redefines, alters, drops or regrants a pgmq shim (188's new _poll function is a different identifier)", () => {
     const later = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql") && Number(f.slice(0, 3)) >= 30)
       .sort();
@@ -360,9 +452,32 @@ describe("029 contract", () => {
     for (const file of later) {
       const sql = blankComments(readFileSync(join(MIGRATIONS_DIR, file), "utf8"), "--", "'").toLowerCase();
       for (const name of EXPECTED) {
-        if (sql.includes(name)) offenders.push(`${file} mentions ${name}`);
+        if (mentionsIdentifier(sql, name)) offenders.push(`${file} mentions ${name}`);
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("188 contract (h101-e2elatency-1)", () => {
+  const calls = clientCalls(readFileSync(PGMQ_TS, "utf8"));
+  const shims188 = sqlShims(readFileSync(MIGRATION_188, "utf8"));
+
+  it("migration 188 creates exactly one pgmq shim, pgmq_read_msgs_poll", () => {
+    expect([...shims188.keys()]).toEqual(["pgmq_read_msgs_poll"]);
+  });
+
+  it("readBatchPoll sends exactly the parameter names migration 188 declares", () => {
+    expect(calls.get("pgmq_read_msgs_poll")).toEqual(["max_poll_seconds", "poll_interval_ms", "qty", "queue_name", "vt"]);
+    expect(calls.get("pgmq_read_msgs_poll")).toEqual(shims188.get("pgmq_read_msgs_poll"));
+  });
+
+  it("188 is the only migration that names pgmq_read_msgs_poll", () => {
+    const named = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith(".sql"))
+      .filter((f) =>
+        mentionsIdentifier(blankComments(readFileSync(join(MIGRATIONS_DIR, f), "utf8"), "--", "'").toLowerCase(), "pgmq_read_msgs_poll"),
+      );
+    expect(named).toEqual(["188_pgmq_read_msgs_poll.sql"]);
   });
 });

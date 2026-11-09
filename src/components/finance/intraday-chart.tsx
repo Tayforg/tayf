@@ -4,6 +4,12 @@ import type { Bar5m } from "@/lib/finance/queries";
 export interface ChartMarker {
   ts: string;
   label: string;
+  /**
+   * 'en' when `label` is an English outlet's headline (sourceLang, WCAG 3.1.2), so the caption below the chart
+   * carries lang="en" and a screen reader switches voice. Absent for Turkish text, which inherits the page's tr
+   * (the page leaves it off the "KAP: ..." labels too).
+   */
+  lang?: "en";
 }
 
 // One session of 5-minute closes with the headlines that landed during it
@@ -206,7 +212,7 @@ export function IntradayChart({
             <div key={`${m.ts}-${i}`} className="flex gap-2">
               <span className="text-brand">▲</span>
               <span className="tabular-nums">{fmtClock(m.ts)}</span>
-              <span className="truncate">{m.label}</span>
+              <span className="truncate" lang={m.lang}>{m.label}</span>
             </div>
           ))}
         </figcaption>

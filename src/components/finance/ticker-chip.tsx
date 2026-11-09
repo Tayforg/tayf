@@ -26,6 +26,13 @@ import { StripFocusReveal } from "./strip-focus-reveal";
 // "değişim bilinmiyor", because a bare "—" is read as nothing or as "dash".
 // `hasBaseline` undefined (a cache entry from before the field existed)
 // counts as known.
+//
+// The second figure ("+%0,14 haberden") is labelled at every width
+// (h101-a11yrecent-3): the word used to be `hidden sm:inline`, and display:none
+// also drops it from the accessibility tree, so on a phone the figure was an
+// unlabelled percentage for everyone. The chip already wraps (flex-wrap), and
+// the whitespace-nowrap on the figure keeps its number and label together.
+// TickerTape does not pass sinceNews, so the masthead strip is unaffected.
 
 /** The "move unknown" marker: visible dash plus its screen-reader text. */
 function unknownMove() {
@@ -76,7 +83,7 @@ export function TickerChip({
           {limit ? <span className="whitespace-nowrap bg-brand/20 px-1 text-[10px] text-brand">{limit}</span> : null}
           {sinceNews != null ? (
             <span className={cn("whitespace-nowrap border-l border-border/80 pl-1.5 tabular-nums", moveClass(sinceNews))}>
-              {fmtPct(sinceNews)} <span className="hidden text-muted-foreground sm:inline">haberden</span>
+              {fmtPct(sinceNews)} <span className="text-muted-foreground">haberden</span>
             </span>
           ) : null}
         </>

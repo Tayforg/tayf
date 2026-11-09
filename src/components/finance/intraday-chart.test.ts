@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Bar5m } from "@/lib/finance/queries";
-import { IntradayChart, priceTagTops, sessionAxisTicks } from "./intraday-chart";
+import { IntradayChart, priceTagTops, sessionAxisTicks, type ChartMarker } from "./intraday-chart";
 
 // The chart labels are HTML positioned over the SVG (an SVG <text> shrinks
 // with the viewBox: about 3 px on a 390 px phone). Their horizontal and
@@ -202,5 +202,70 @@ describe("IntradayChart closeOverride (h92-marketclock-1)", () => {
 
   it("still draws nothing for fewer than two bars", () => {
     expect(IntradayChart({ bars: bars.slice(0, 1), markers: [], prevClose: PREV, closeOverride: 12.09 })).toBeNull();
+  });
+});
+
+// h101-a11yrecent-2 (WCAG 3.1.2 Language of Parts): the page is lang="tr", and the caption under the chart
+// prints each marker's headline. An English outlet's headline (Daily Sabah, Hürriyet Daily News, ...) was read
+// with Turkish phonetics. The page now passes lang: 'en' on such a marker and the caption's label span carries
+// it; a Turkish headline, and the Turkish "KAP: ..." label, render no attribute (they inherit tr).
+describe("IntradayChart marker captions carry their language (h101-a11yrecent-2)", () => {
+  const bars: Bar5m[] = [
+    { ts: "2026-11-06T07:00:00.000Z", close: 11.8, volume: 100 },
+    { ts: "2026-11-06T08:30:00.000Z", close: 11.7, volume: 60 },
+    { ts: "2026-11-06T11:00:00.000Z", close: 11.9, volume: 60 },
+  ];
+  // 08:00Z, 08:10Z and 08:20Z are 11:00, 11:10 and 11:20 in Istanbul: inside the session window.
+  const EN = "Aselsan signs $1.1 billion air defense export deal";
+  const TR = "Aselsan yeni ihracat sözleşmesi imzaladı";
+  const KAP = "KAP: Yeni İş İlişkisi";
+  const render = (markers: ChartMarker[]) => renderToStaticMarkup(IntradayChart({ bars, markers, prevClose: 11.67 }));
+  const langCount = (html: string) => (html.match(/\blang=/g) ?? []).length;
+
+  it("a marker with lang 'en' renders its caption label with lang=\"en\"", () => {
+    const html = render([{ ts: "2026-11-06T08:00:00.000Z", label: EN, lang: "en" }]);
+    expect(html).toContain(`<span class="truncate" lang="en">${EN}</span>`);
+    expect(langCount(html)).toBe(1);
+  });
+
+  it("a marker without lang renders no lang attribute anywhere", () => {
+    const html = render([{ ts: "2026-11-06T08:00:00.000Z", label: TR }]);
+    expect(html).toContain(`<span class="truncate">${TR}</span>`);
+    expect(html).not.toContain("lang=");
+  });
+
+  it("an explicit lang: undefined renders no attribute (a Turkish outlet's marker)", () => {
+    const html = render([{ ts: "2026-11-06T08:00:00.000Z", label: TR, lang: undefined }]);
+    expect(html).toContain(`<span class="truncate">${TR}</span>`);
+    expect(html).not.toContain("lang=");
+  });
+
+  it("in a mixed list only the English headline's label is marked, and only the label span", () => {
+    const html = render([
+      { ts: "2026-11-06T08:00:00.000Z", label: TR },
+      { ts: "2026-11-06T08:10:00.000Z", label: EN, lang: "en" },
+      { ts: "2026-11-06T08:20:00.000Z", label: KAP },
+    ]);
+    expect(html).toContain(`<span class="truncate">${TR}</span>`);
+    expect(html).toContain(`<span class="truncate" lang="en">${EN}</span>`);
+    expect(html).toContain(`<span class="truncate">${KAP}</span>`);
+    // The ▲ glyph, the clock and the chart's own aria-label stay Turkish.
+    expect(langCount(html)).toBe(1);
+  });
+
+  it("every English marker in the caption is marked (the caption shows up to six)", () => {
+    const six: ChartMarker[] = Array.from({ length: 6 }, (_, i) => ({
+      ts: `2026-11-06T08:0${i}:00.000Z`,
+      label: `Headline number ${i}`,
+      lang: "en" as const,
+    }));
+    expect(langCount(render(six))).toBe(6);
+  });
+
+  it("a marker outside the session window is not captioned, so its language is not printed either", () => {
+    // 05:00Z is 08:00 in Istanbul, before the 09:30 floor.
+    const html = render([{ ts: "2026-11-06T05:00:00.000Z", label: EN, lang: "en" }]);
+    expect(html).not.toContain(EN);
+    expect(html).not.toContain("lang=");
   });
 });
