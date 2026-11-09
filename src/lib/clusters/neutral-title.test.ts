@@ -6593,7 +6593,7 @@ describe("h94-neutraltitles-3 (3): the quote twin", () => {
   it("preferUnglued returns the member title that differs only in quote marks and has fewer that sit between no two letters", () => {
     expect(preferUnglued(STRAY, [STRAY, CLEAN])).toBe(CLEAN);
     expect(preferUnglued(STRAY, [CLEAN, STRAY])).toBe(CLEAN);
-    expect(preferUnglued(STRAY, [`'${CLEAN}`.replace("'", "")])).toBe(CLEAN);
+    expect(preferUnglued(STRAY, [CLEAN])).toBe(CLEAN);
   });
 
   it("the twin may differ from the chosen title in any of ' ‘ ’ \" “ ”, with fewer such marks between no two letters", () => {
