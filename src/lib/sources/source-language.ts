@@ -56,6 +56,11 @@
 //     "not compared with Turkish sources" copy below, sets the NewsArticle
 //     inLanguage to 'en', and keeps the cluster off the home feed
 //     (politics-query.ts, by display name: the embed has no slug).
+//   - /ekonomi feed, /ekonomi/[ticker] news list and intraday chart caption
+//     (h101-a11yrecent-2): each row's headline link and source-name span, by
+//     {slug, name} (both queries carry the slug). The chart's marker captions
+//     take it through ChartMarker.lang ('en' for an English article's headline;
+//     the Turkish "KAP: ..." markers carry none).
 //
 // NOT wired: the /timeline rows (src/app/timeline/page.tsx). Its ClusterRow
 // (src/lib/clusters/timeline-query.ts) carries no member sources, so

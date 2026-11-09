@@ -438,6 +438,66 @@ export const ENTITY_PROPER_NOUNS = [
 //     Collateral measured on the 96 h corpus: 0 of 12,380 pairs scoring
 //     >= 0.40 are vetoed. No new constant: the cap is SUBJECT_VETO_CAP.
 
+//     (4e) Family homonym veto (h101-clustermembers-1). The two Erdogans count
+//     as one actor everywhere in clustering (the whitelist entity 'erdogan', the
+//     subject span {emine, erdogan} against {erdogan}), so Emine Erdogan's
+//     Zafer Gunu message joined the President's Azerbaijan-trip cluster
+//     94503853: hunt-101 found 10 of its 30 members were Emine headlines, all
+//     iktidar outlets (trt-haber c93dad8e 11:37 ... cnn-turk 21:39), and the
+//     trip page read Iktidar 16 of 25 instead of 6 of 15. The first stray did
+//     not come in through the headline lane: trt-haber scored 0.481 against the
+//     'latest' member bha on the primary lane (tf-idf 0.58, entity ratio 0.29,
+//     one shared entity, lane false). Withdrawing the headline lane alone
+//     therefore does not stop it, and neither does splitting the 'erdogan'
+//     entity (0.70 * 0.58 = 0.406, still >= MATCH_THRESHOLD). The veto
+//     (familyHomonymFires() in ensemble.ts) reads the headlines instead: a
+//     title whose every occurrence of the surname follows a given name of this
+//     map ("Emine Erdogan ...") is a family title; one with an occurrence that
+//     does not ("Cumhurbaskani Erdogan ...", "Erdogan, ...", "Recep Tayyip
+//     Erdogan ...") is a principal title. A family title against a principal
+//     title that never names the family member is a different actor, on any
+//     lane: the headline lane is withdrawn and the primary and MinHash lanes
+//     are capped at SUBJECT_VETO_CAP. A title that names both people matches
+//     either side, and so does a principal title that names the family
+//     member's given name anywhere, not only before the surname ("Erdogan'in
+//     oglu Bilal ...", "Erdogan ve esi Emine Hanim ..." do not fire against
+//     "Bilal Erdogan ..." / "Emine Erdogan ..."): it is the same person under
+//     a kinship possessive. 'recep' and 'tayyip' are deliberately absent (the President
+//     is "Recep Tayyip Erdogan"), and so is every given name the evidence does
+//     not show: a name is added only when a replay of stored rows shows a
+//     person who is not the principal. Keys and values are folded ASCII
+//     (foldTurkishWord). The list follows h56-entities-1, the hub matcher's
+//     (src/lib/trends/rising-entities.ts) excludes (emine, bilal, sumeyye,
+//     esra) and notAfter (fatih, yilmaz, asuman, canan, meryem, nehir, filiz),
+//     plus burak, the family name rss/category.ts also lists. No new
+//     threshold: the cap is SUBJECT_VETO_CAP.
+//     FAMILY_HOMONYM_NOT_AFTER is the one exception: a mapped given name that
+//     directly follows one of its words is somebody's surname, not a given name,
+//     so the surname after it is bare. "Cevdet Yilmaz Erdogan'a ..." (the Vice
+//     President reporting to the President, the pattern rss/category.ts keeps
+//     in politika through its 'cevdet yilmaz' marker) must not read as the
+//     director "Yilmaz Erdogan". Without it such a title would be a family title
+//     and veto every presidential headline of its own story.
+export const FAMILY_HOMONYM_GIVEN_NAMES = {
+  erdogan: [
+    "emine",
+    "bilal",
+    "sumeyye",
+    "esra",
+    "burak",
+    "yilmaz",
+    "nehir",
+    "filiz",
+    "fatih",
+    "asuman",
+    "canan",
+    "meryem",
+  ],
+};
+export const FAMILY_HOMONYM_NOT_AFTER = {
+  yilmaz: ["cevdet"],
+};
+
 // (5) h12-cluster-3: the headline lane missed same-story pairs. Measured on
 //     main fffeff1 with the real headlineLane() (scratchpad ana/pairs.mjs):
 //     Bahceli '100 il 1000 ilce ...' vs '19 yeni il ve 78 ilce onerisi'

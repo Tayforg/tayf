@@ -7,6 +7,9 @@
 // real `pgmq.*` functions; EXECUTE on the shims is granted to service_role
 // only. Arg names below match the shim parameter names.
 //
+// Migration 188 adds the long-poll twin of the read shim (`pgmq_read_msgs_poll`,
+// over `pgmq.read_with_poll`); `readBatchPoll` below calls it.
+//
 // pgmq's row shape (from `pgmq.read`):
 //   msg_id      bigint
 //   read_ct     integer    -- how many times read (visibility-timeout retries)
@@ -43,6 +46,55 @@ export async function readBatch<T = unknown>(
     throw new Error(`pgmq.read(${queue}): ${error.message}`);
   }
   return (data ?? []) as PgmqMessage<T>[];
+}
+
+/**
+ * Like `readBatch`, but waits for a message instead of answering [] at once:
+ * the database re-reads every `pollIntervalMs` until a message shows up or
+ * `maxPollSeconds` have passed (migration 188, `pgmq.read_with_poll`). Returns
+ * as soon as at least one message was leased, [] when the wait ran out empty.
+ *
+ * The database function clamps the wait to 1..6 s and the step to 50..1000 ms
+ * on its own: PostgREST's authenticator role cancels any statement after 8 s
+ * (57014), so a longer poll could never succeed. Nothing is clamped here.
+ *
+ * Errors have `readBatch`'s message shape. The PostgREST / Postgres error code
+ * is kept on the thrown error as `code`, so a caller can tell "the RPC does not
+ * exist yet" (`isPollRpcMissing`: migration 188 not applied) from a real failure.
+ */
+export async function readBatchPoll<T = unknown>(
+  client: SupabaseClient,
+  queue: string,
+  vt: number,
+  qty: number,
+  maxPollSeconds: number,
+  pollIntervalMs: number,
+): Promise<PgmqMessage<T>[]> {
+  const { data, error } = await client.rpc("pgmq_read_msgs_poll", {
+    queue_name: queue,
+    vt,
+    qty,
+    max_poll_seconds: maxPollSeconds,
+    poll_interval_ms: pollIntervalMs,
+  });
+  if (error) {
+    const failure = new Error(`pgmq.read(${queue}): ${error.message}`);
+    const code: unknown = (error as { code?: unknown }).code;
+    if (typeof code === "string") (failure as Error & { code?: string }).code = code;
+    throw failure;
+  }
+  return (data ?? []) as PgmqMessage<T>[];
+}
+
+/**
+ * True when `err` says the long-poll RPC does not exist: PostgREST's
+ * PGRST202 (not in its schema cache) or Postgres' 42883 (undefined_function,
+ * e.g. dropped while PostgREST still had it cached). Only that: a timeout,
+ * a permission error or an unknown failure is a real failure.
+ */
+export function isPollRpcMissing(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return code === "PGRST202" || code === "42883";
 }
 
 /**

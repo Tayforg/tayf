@@ -126,6 +126,16 @@ const pgmqState: {
   attachDeleteError: string | null;
   // Called after each cluster_work read, so a test can move the clock mid-drain.
   afterWorkRead: (() => void) | null;
+  // h101-e2elatency-1 (migration 188): the long-poll twin of readBatch. `polls`
+  // keeps every readBatchPoll call with its arguments; `plainReads` every readBatch
+  // call (`reads` holds both kinds, in call order). `pollScript` answers the next
+  // polls in order ({ msgs } is the batch, { error } makes the call throw,
+  // { advanceMs } moves the fake clock first, as a poll that waited would); once it
+  // is empty a poll behaves exactly like readBatch, so every test of this file gives
+  // the same result in an ingest minute (minute % 3 === 0) and in any other minute.
+  polls: Array<{ queue: string; vt: number; qty: number; maxPollSeconds: number; pollIntervalMs: number }>;
+  plainReads: Array<{ queue: string; qty: number }>;
+  pollScript: Array<{ msgs?: PgmqMessage[]; error?: Error; advanceMs?: number }>;
 } = {
   pending: [],
   archived: [],
@@ -137,6 +147,9 @@ const pgmqState: {
   attachReadError: null,
   attachDeleteError: null,
   afterWorkRead: null,
+  polls: [],
+  plainReads: [],
+  pollScript: [],
 };
 
 function resetPgmqState() {
@@ -150,11 +163,14 @@ function resetPgmqState() {
   pgmqState.attachReadError = null;
   pgmqState.attachDeleteError = null;
   pgmqState.afterWorkRead = null;
+  pgmqState.polls = [];
+  pgmqState.plainReads = [];
+  pgmqState.pollScript = [];
 }
 
 // Mock the shared pgmq wrapper. The exported names here MUST match the
-// real module's named exports (`readBatch`, `archive`, `deleteMessage`,
-// `send`, `queueDepth`) — otherwise vitest hoists a vi.mock with stale
+// real module's named exports (`readBatch`, `readBatchPoll`, `isPollRpcMissing`,
+// `archive`, `deleteMessage`, `send`, `queueDepth`) — otherwise vitest hoists a vi.mock with stale
 // identifiers and the SUT silently sees `undefined` for its imported
 // helpers.
 //
@@ -162,15 +178,41 @@ function resetPgmqState() {
 // arg (e.g. `readBatch(client, queue, vt, qty)`); the mock signatures
 // mirror that so caller-side drift surfaces as a clear arity mismatch
 // instead of being absorbed by JS's lenient positional binding.
-vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
+vi.mock("../../supabase/functions/_shared/pgmq.ts", async (importOriginal) => ({
+  // The pure error classifier is the real one; everything that touches the queue is faked.
+  isPollRpcMissing: (await importOriginal<typeof import("../../supabase/functions/_shared/pgmq.ts")>()).isPollRpcMissing,
   readBatch: vi.fn(
     async (_client: unknown, queue: string, _vt: number, qty: number) => {
       pgmqState.reads.push({ queue, qty });
+      pgmqState.plainReads.push({ queue, qty });
       if (queue === "cluster_attach") {
         if (pgmqState.attachReadError) throw new Error(pgmqState.attachReadError);
         const attachBatch = pgmqState.attachPending.slice(0, qty);
         pgmqState.attachPending = pgmqState.attachPending.slice(qty);
         return attachBatch;
+      }
+      const batch = pgmqState.pending.slice(0, qty);
+      pgmqState.pending = pgmqState.pending.slice(qty);
+      pgmqState.afterWorkRead?.();
+      return batch;
+    },
+  ),
+  readBatchPoll: vi.fn(
+    async (
+      _client: unknown,
+      queue: string,
+      vt: number,
+      qty: number,
+      maxPollSeconds: number,
+      pollIntervalMs: number,
+    ) => {
+      pgmqState.polls.push({ queue, vt, qty, maxPollSeconds, pollIntervalMs });
+      pgmqState.reads.push({ queue, qty });
+      const step = pgmqState.pollScript.shift();
+      if (step) {
+        if (step.advanceMs) vi.setSystemTime(new Date(Date.now() + step.advanceMs));
+        if (step.error) throw step.error;
+        return step.msgs ?? [];
       }
       const batch = pgmqState.pending.slice(0, qty);
       pgmqState.pending = pgmqState.pending.slice(qty);
@@ -7545,4 +7587,299 @@ describe("the 'Kısa haberler' digest is never clustered (h40-clusters-2)", () =
       expect(linkedClusters()).toEqual([]);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// h101-e2elatency-1 (migration 188): cluster-drain was phase-locked to ingest-drain. The
+// per-minute consumer read cluster_work once at about :02, found nothing and left; ingest's
+// insert lands at about :06-:11 of every third minute, so 73 % of the messages waited 40-65 s.
+// In the UTC minutes where ingest-drain runs (minute % 3 === 0) the consumer now long-polls
+// the first read (readBatchPoll, 6 s at 250 ms, one more poll when the first came back empty
+// and less than 14 s have passed), then continues with the plain loop. Every other minute is
+// unchanged. The clock is the fake Date, set per test.
+// ---------------------------------------------------------------------------
+describe("cluster_work long poll in ingest minutes (h101-e2elatency-1, migration 188)", () => {
+  // minute % 3 === 0 (poll): 08:03, 08:00, 08:57. Any other minute: no poll.
+  const POLL_MINUTE = "2026-11-09T08:03:02Z";
+  const PLAIN_MINUTE = "2026-11-09T08:04:02Z";
+  const IMPORT = "../../supabase/functions/cluster-consumer/index.ts";
+
+  interface PollBody {
+    drained: number;
+    matched: number;
+    created: number;
+    failedTransient: number;
+    failedPermanent: number;
+    budgeted_out: boolean;
+    attach: { read: number };
+  }
+
+  const msgOf = (n: number): PgmqMessage => ({ msg_id: 900 + n, read_ct: 1, message: { article_id: `art-lp-${n}` } });
+
+  function seedArticle(n: number) {
+    fakeArticles[`art-lp-${n}`] = {
+      id: `art-lp-${n}`,
+      source_id: "src-outlet",
+      title: `Uzun bekleme politika haberi ${n} bambaşka konu`,
+      description: "Detay",
+      url: `https://example.com/lp${n}`,
+      category: "politika",
+      published_at: new Date(Date.now() - 60_000).toISOString(),
+    };
+  }
+
+  /** Sets the fake clock and runs one drain. The clock stays where the drain left it (afterEach restores the real one). */
+  async function drainAt(iso: string): Promise<PollBody> {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(iso));
+    const handler = await importHandler();
+    if (!handler) throw new Error("unreachable");
+    const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as PollBody;
+  }
+
+  const workPlainReads = () => pgmqState.plainReads.filter((r) => r.queue === "cluster_work");
+  const attachReads = () => pgmqState.reads.filter((r) => r.queue === "cluster_attach");
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  describe("the plan (pure, clock injected)", () => {
+    const START = Date.parse("2026-11-09T08:03:02Z");
+    async function plan() {
+      await importHandler();
+      const mod = await import(IMPORT);
+      return mod.planClusterWorkPoll as (i: { startedAtMs: number; nowMs: number; pollsMade: number }) => number;
+    }
+
+    it.each([
+      ["2026-11-09T08:03:00.000Z", 6],
+      ["2026-11-09T08:03:59.999Z", 6],
+      ["2026-11-09T08:00:30.000Z", 6],
+      ["2026-11-09T08:57:02.000Z", 6],
+      ["2026-11-09T23:57:02.000Z", 6],
+      ["2026-11-09T08:02:59.999Z", 0],
+      ["2026-11-09T08:04:00.000Z", 0],
+      ["2026-11-09T08:05:59.999Z", 0],
+      ["2026-11-09T08:58:02.000Z", 0],
+      ["2026-11-09T08:59:59.999Z", 0],
+    ])("the first poll of an invocation that starts at %s waits %s s", async (iso, seconds) => {
+      const planPoll = await plan();
+      const t = Date.parse(iso);
+      expect(planPoll({ startedAtMs: t, nowMs: t, pollsMade: 0 })).toBe(seconds);
+    });
+
+    it("decides the minute from when the invocation STARTED, not from the clock at the read", async () => {
+      const planPoll = await plan();
+      // started 08:02:59.5 (no poll), now 08:03:01 (poll minute): still no poll; and the reverse.
+      const early = Date.parse("2026-11-09T08:02:59.500Z");
+      expect(planPoll({ startedAtMs: early, nowMs: early + 1_500, pollsMade: 0 })).toBe(0);
+      const late = Date.parse("2026-11-09T08:03:59.500Z");
+      expect(planPoll({ startedAtMs: late, nowMs: late + 1_500, pollsMade: 0 })).toBe(6);
+    });
+
+    it("allows the second poll only while less than 14 s have passed since the start", async () => {
+      const planPoll = await plan();
+      expect(planPoll({ startedAtMs: START, nowMs: START + 13_999, pollsMade: 1 })).toBeGreaterThan(0);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 14_000, pollsMade: 1 })).toBe(0);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 20_000, pollsMade: 1 })).toBe(0);
+    });
+
+    it("never plans a third poll, however early it is", async () => {
+      const planPoll = await plan();
+      expect(planPoll({ startedAtMs: START, nowMs: START, pollsMade: 2 })).toBe(0);
+      expect(planPoll({ startedAtMs: START, nowMs: START, pollsMade: 3 })).toBe(0);
+    });
+
+    it("shortens the wait so a poll ends no later than the read-budget floor (25 s of 30)", async () => {
+      const planPoll = await plan();
+      expect(planPoll({ startedAtMs: START, nowMs: START + 19_000, pollsMade: 0 })).toBe(6);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 19_001, pollsMade: 0 })).toBe(5);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 22_000, pollsMade: 0 })).toBe(3);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 24_000, pollsMade: 0 })).toBe(1);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 24_001, pollsMade: 0 })).toBe(0);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 25_000, pollsMade: 0 })).toBe(0);
+      expect(planPoll({ startedAtMs: START, nowMs: START + 40_000, pollsMade: 0 })).toBe(0);
+    });
+
+    it("invariant: whatever the elapsed time, the poll window never ends after the 25 s floor and is 0 or 1..6 s", async () => {
+      const planPoll = await plan();
+      for (let elapsed = -2_000; elapsed <= 40_000; elapsed += 250) {
+        for (const pollsMade of [0, 1]) {
+          const secs = planPoll({ startedAtMs: START, nowMs: START + elapsed, pollsMade });
+          expect(Number.isInteger(secs)).toBe(true);
+          expect(secs).toBeGreaterThanOrEqual(0);
+          expect(secs).toBeLessThanOrEqual(6);
+          if (secs > 0) expect(Math.max(elapsed, 0) + secs * 1000).toBeLessThanOrEqual(25_000);
+        }
+      }
+    });
+
+    it("answers 0 for a clock that is not a number", async () => {
+      const planPoll = await plan();
+      expect(planPoll({ startedAtMs: Number.NaN, nowMs: START, pollsMade: 0 })).toBe(0);
+      expect(planPoll({ startedAtMs: START, nowMs: Number.NaN, pollsMade: 0 })).toBe(0);
+      expect(planPoll({ startedAtMs: START, nowMs: Number.POSITIVE_INFINITY, pollsMade: 0 })).toBe(0);
+    });
+  });
+
+  describe("an ingest minute (08:03:02Z)", () => {
+    it("reads cluster_work with readBatchPoll first, 6 s at 250 ms; [] then [msg]: the message is processed and archived", async () => {
+      seedArticle(1);
+      pgmqState.pollScript = [{ msgs: [] }, { msgs: [msgOf(1)] }];
+      const body = await drainAt(POLL_MINUTE);
+      expect(pgmqState.polls).toEqual([
+        { queue: "cluster_work", vt: 60, qty: 2, maxPollSeconds: 6, pollIntervalMs: 250 },
+        { queue: "cluster_work", vt: 60, qty: 2, maxPollSeconds: 6, pollIntervalMs: 250 },
+      ]);
+      expect(pgmqState.archived).toEqual([901]);
+      expect(body.drained).toBe(1);
+      expect(body.created + body.matched).toBe(1);
+      expect(body.failedTransient).toBe(0);
+      // The first read of the invocation is the poll; the short batch ended the loop, so no plain cluster_work read at all.
+      expect(pgmqState.reads[0]).toEqual({ queue: "cluster_work", qty: 2 });
+      expect(workPlainReads()).toEqual([]);
+    });
+
+    it("a first poll that finds the message needs no second poll; a full batch continues with the plain read", async () => {
+      for (const n of [1, 2, 3]) seedArticle(n);
+      pgmqState.pollScript = [{ msgs: [msgOf(1), msgOf(2)] }];
+      pgmqState.pending = [msgOf(3)];
+      const body = await drainAt(POLL_MINUTE);
+      expect(pgmqState.polls).toHaveLength(1);
+      expect(workPlainReads()).toEqual([{ queue: "cluster_work", qty: 2 }]);
+      expect(pgmqState.archived).toEqual([901, 902, 903]);
+      expect(body.drained).toBe(3);
+    });
+
+    it("never makes more than 2 poll calls: two empty polls, then the plain read decides", async () => {
+      pgmqState.pollScript = [{ msgs: [] }, { msgs: [] }, { msgs: [msgOf(9)] }];
+      const body = await drainAt(POLL_MINUTE);
+      expect(pgmqState.polls).toHaveLength(2);
+      expect(pgmqState.pollScript).toHaveLength(1); // the third scripted answer was never asked for
+      expect(workPlainReads()).toEqual([{ queue: "cluster_work", qty: 2 }]);
+      expect(body.drained).toBe(0);
+    });
+
+    it("clusterWorkEmpty is set only after the final empty read: the attach queue is read after poll, poll, plain read, in that order", async () => {
+      pgmqState.pollScript = [{ msgs: [] }, { msgs: [] }];
+      const body = await drainAt(POLL_MINUTE);
+      expect(pgmqState.reads.map((r) => r.queue)).toEqual(["cluster_work", "cluster_work", "cluster_work", "cluster_attach"]);
+      expect(pgmqState.plainReads.map((r) => r.queue)).toEqual(["cluster_work", "cluster_attach"]);
+      expect(attachReads()).toHaveLength(1);
+      expect(body.budgeted_out).toBe(false);
+    });
+
+    it("the plain read after two empty polls can still find a message, which is processed", async () => {
+      seedArticle(4);
+      pgmqState.pollScript = [{ msgs: [] }, { msgs: [] }];
+      pgmqState.pending = [msgOf(4)];
+      const body = await drainAt(POLL_MINUTE);
+      expect(body.drained).toBe(1);
+      expect(pgmqState.archived).toEqual([904]);
+    });
+
+    it("skips the second poll when 14 s or more have passed since the invocation started", async () => {
+      pgmqState.pollScript = [{ msgs: [], advanceMs: 14_000 }, { msgs: [msgOf(5)] }];
+      const body = await drainAt(POLL_MINUTE);
+      expect(pgmqState.polls).toHaveLength(1);
+      expect(workPlainReads()).toEqual([{ queue: "cluster_work", qty: 2 }]);
+      expect(body.drained).toBe(0);
+      // control: one millisecond less and the second poll happens
+      resetPgmqState();
+      pgmqState.pollScript = [{ msgs: [], advanceMs: 13_999 }, { msgs: [] }];
+      await drainAt(POLL_MINUTE);
+      expect(pgmqState.polls).toHaveLength(2);
+    });
+
+    it("the budget guard still runs before every read: a poll that used the budget up ends the drain without a plain read or an attach read", async () => {
+      pgmqState.pollScript = [{ msgs: [], advanceMs: 26_000 }];
+      const body = await drainAt(POLL_MINUTE);
+      expect(body.budgeted_out).toBe(true);
+      expect(pgmqState.polls).toHaveLength(1);
+      expect(workPlainReads()).toEqual([]);
+      expect(attachReads()).toHaveLength(0);
+      expect(body.attach.read).toBe(0);
+    });
+
+    it("a poll error counts as failedTransient like a read error: the drain stops, no plain read, no attach read", async () => {
+      pgmqState.pollScript = [{ error: new Error("pgmq.read(cluster_work): canceling statement due to statement timeout") }];
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      const body = await drainAt(POLL_MINUTE);
+      const logged = err.mock.calls.map((c) => String(c[0])).join("\n");
+      err.mockRestore();
+      expect(body.failedTransient).toBe(1);
+      expect(pgmqState.polls).toHaveLength(1);
+      expect(workPlainReads()).toEqual([]);
+      expect(attachReads()).toHaveLength(0);
+      expect(logged).toContain("statement timeout");
+    });
+
+    it.each([
+      ["PostgREST schema-cache miss PGRST202", "PGRST202"],
+      ["Postgres undefined_function 42883", "42883"],
+    ])("a missing RPC (%s) falls back to the plain read, with no failedTransient, so deploy order is safe", async (_label, code) => {
+      seedArticle(6);
+      pgmqState.pending = [msgOf(6)];
+      pgmqState.pollScript = [{ error: Object.assign(new Error("pgmq.read(cluster_work): Could not find the function"), { code }) }];
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const body = await drainAt(POLL_MINUTE);
+      warn.mockRestore();
+      expect(body.failedTransient).toBe(0);
+      expect(pgmqState.polls).toHaveLength(1); // no retry of the poll within this invocation
+      expect(workPlainReads()).toEqual([{ queue: "cluster_work", qty: 2 }]);
+      expect(body.drained).toBe(1);
+      expect(pgmqState.archived).toEqual([906]);
+    });
+
+    it("a failing poll with another error code is not mistaken for a missing RPC", async () => {
+      pgmqState.pollScript = [{ error: Object.assign(new Error("pgmq.read(cluster_work): permission denied"), { code: "42501" }) }];
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      const body = await drainAt(POLL_MINUTE);
+      err.mockRestore();
+      expect(body.failedTransient).toBe(1);
+      expect(workPlainReads()).toEqual([]);
+    });
+
+    it.each(["2026-11-09T08:00:02Z", "2026-11-09T08:57:02Z", "2026-11-09T13:30:02Z"])("%s is an ingest minute too", async (iso) => {
+      await drainAt(iso);
+      expect(pgmqState.polls).toHaveLength(2);
+    });
+  });
+
+  describe("any other minute is unchanged", () => {
+    it("08:04:02Z reads with the plain readBatch only: no poll call, one empty read, then the attach queue", async () => {
+      const body = await drainAt(PLAIN_MINUTE);
+      expect(pgmqState.polls).toEqual([]);
+      expect(pgmqState.reads).toEqual([
+        { queue: "cluster_work", qty: 2 },
+        { queue: "cluster_attach", qty: 25 },
+      ]);
+      expect(body.failedTransient).toBe(0);
+    });
+
+    it.each(["2026-11-09T08:01:02Z", "2026-11-09T08:02:59Z", "2026-11-09T08:05:30Z", "2026-11-09T08:59:59Z"])(
+      "%s never polls, and a queued message is read and archived as before",
+      async (iso) => {
+        seedArticle(7);
+        pgmqState.pending = [msgOf(7)];
+        const body = await drainAt(iso);
+        expect(pgmqState.polls).toEqual([]);
+        expect(workPlainReads()).toEqual([{ queue: "cluster_work", qty: 2 }]);
+        expect(pgmqState.archived).toEqual([907]);
+        expect(body.drained).toBe(1);
+      },
+    );
+  });
+
+  it("wiring (static): the consumer imports readBatchPoll, calls it in one place, and never sleeps itself", () => {
+    const src = readFileSync(resolve(__dirname, "../../supabase/functions/cluster-consumer/index.ts"), "utf8");
+    expect(src).toContain("readBatchPoll,");
+    expect(src).toContain("isPollRpcMissing,");
+    expect(src.split("await readBatchPoll").length - 1).toBe(1);
+    expect(src.includes("setTimeout(")).toBe(false);
+    expect(src).toContain("export function planClusterWorkPoll(");
+  });
 });

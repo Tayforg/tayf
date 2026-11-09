@@ -63,13 +63,11 @@ describe("TickerChip", () => {
     );
     expect(nowrapSpans.length).toBeGreaterThanOrEqual(4);
 
+    // h101-a11yrecent-3: the 'haberden' label is no longer width-gated (see the describe below).
     const haberdenSpan = nodes.find(
       (n) => n.type === "span" && collect(n.props.children).length === 0 && n.props.children === "haberden",
     );
     expect(haberdenSpan).toBeDefined();
-    const haberdenClass = String(haberdenSpan!.props.className ?? "");
-    expect(haberdenClass).toContain("hidden");
-    expect(haberdenClass).toContain("sm:inline");
   });
 
   it("renders the signed move and the taban flag for a known move", () => {
@@ -117,6 +115,74 @@ describe("TickerChip", () => {
     const text = textOf(TickerChip({ ticker: "OZATD", quote: legacy as Quote }));
     expect(text).toContain("-%10,00");
     expect(text).not.toContain("—");
+  });
+
+  // h101-a11yrecent-3 (WCAG 1.3.1 / 4.1.2 name of a value): below the sm breakpoint the label was
+  // display:none, which also removes it from the accessibility tree, so a phone user (sighted or on
+  // VoiceOver/TalkBack) got two bare percentages ("HALKB 41,70 +%1,61 +%0,14"). The label is now
+  // visible and exposed at every width; the chip already wraps (flex-wrap + gap-y-0.5), and the
+  // outer whitespace-nowrap keeps "+%0,14 haberden" together on one line.
+  describe("the 'haberden' label is visible and exposed at every width (h101-a11yrecent-3)", () => {
+    const labelSpans = (el: unknown) => spans(collect(el)).filter((n) => n.props.children === "haberden");
+    const tokens = (n: Node) => classOf(n).split(/\s+/).filter(Boolean);
+
+    it("the chip text reads '+%0,14 haberden' for a quote with sinceNews 0.14", () => {
+      const text = textOf(TickerChip({ ticker: "HALKB", quote: { ...quote, ticker: "HALKB", price: 41.7, prevClose: 41.04, changePct: 1.61 }, sinceNews: 0.14 }));
+      expect(text).toContain("+%0,14 haberden");
+    });
+
+    it("the element whose text is 'haberden' is not hidden at any width and not sr-only", () => {
+      const label = labelSpans(TickerChip({ ticker: "OZATD", quote, sinceNews: 0.14 }));
+      expect(label).toHaveLength(1);
+      const cls = classOf(label[0]!);
+      expect(cls).not.toMatch(/(^|\s)hidden(\s|$)/);
+      expect(cls).not.toContain("sr-only");
+      // No width-gated variant either (sm:hidden, max-sm:hidden, ...) and no sm:inline re-reveal.
+      for (const token of tokens(label[0]!)) {
+        expect(token, `label class ${token}`).not.toMatch(/hidden$/);
+        expect(token, `label class ${token}`).not.toBe("sm:inline");
+      }
+      expect(label[0]!.props["aria-hidden"]).toBeUndefined();
+      expect(tokens(label[0]!)).toContain("text-muted-foreground");
+    });
+
+    it("the label sits inside the nowrap since-news span, so '+%0,14 haberden' stays on one line", () => {
+      const nodes = collect(TickerChip({ ticker: "OZATD", quote, sinceNews: 0.14 }));
+      const outer = spans(nodes).find((n) => textOf(n.props.children) === "+%0,14 haberden");
+      expect(outer).toBeDefined();
+      expect(tokens(outer!)).toContain("whitespace-nowrap");
+      expect(spans(collect(outer!.props.children)).filter((n) => n.props.children === "haberden")).toHaveLength(1);
+    });
+
+    it("the chip still wraps on a narrow row (flex-wrap, gap-y-0.5) instead of overflowing", () => {
+      const root = collect(TickerChip({ ticker: "OZATD", quote, sinceNews: 0.14 }))[0]!;
+      for (const token of ["flex-wrap", "gap-y-0.5", "max-w-full", "min-w-0"]) expect(tokens(root)).toContain(token);
+    });
+
+    it("a negative move since the headline keeps the sign and the label", () => {
+      expect(textOf(TickerChip({ ticker: "OZATD", quote, sinceNews: -3 }))).toContain("-%3,00 haberden");
+    });
+
+    it("a zero move since the headline still names itself (0 is known, not missing)", () => {
+      const label = labelSpans(TickerChip({ ticker: "OZATD", quote, sinceNews: 0 }));
+      expect(label).toHaveLength(1);
+    });
+
+    it("without sinceNews there is no label, with or without a quote", () => {
+      expect(labelSpans(TickerChip({ ticker: "OZATD", quote, sinceNews: null }))).toHaveLength(0);
+      expect(labelSpans(TickerChip({ ticker: "OZATD", quote }))).toHaveLength(0);
+      expect(labelSpans(TickerChip({ ticker: "OZATD", sinceNews: 0.14 }))).toHaveLength(0);
+    });
+
+    it("the masthead TickerTape never passes sinceNews, so it renders no 'haberden' and no chip", () => {
+      const items: TickerAttention[] = [
+        { ticker: "OZATD", articles: 3, sources: 2, ratio: null, title: "Özata" } as TickerAttention,
+        { ticker: "TURSG", articles: 2, sources: 2, ratio: null, title: "Sigorta" } as TickerAttention,
+      ];
+      const el = TickerTape({ items, quotes: { OZATD: quote, TURSG: { ...quote, ticker: "TURSG", changePct: 4 } }, stats: {} });
+      expect(textOf(el)).not.toContain("haberden");
+      expect(collect(el).filter((n) => n.type === TickerChip)).toHaveLength(0);
+    });
   });
 
   it("omitting sinceNews renders no 'haberden' span", () => {

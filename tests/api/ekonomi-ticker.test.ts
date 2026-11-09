@@ -968,6 +968,7 @@ describe("the H1 names the company (hunt-17)", () => {
 
 import { IntradayChart } from "@/components/finance/intraday-chart";
 import { PanelEmpty } from "@/components/finance/panel";
+import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { fmtPct, fmtPrice } from "@/lib/finance/format";
 
 describe("optional reads degrade instead of throwing (h41-resilience-3)", () => {
@@ -1421,5 +1422,162 @@ describe("the header volume line of a ticker with no 5-minute bars (h99-financen
 
     expect(el).toBeDefined();
     expect(String(el!.props.className)).not.toContain("text-amber-400");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h101-a11yrecent-2 (WCAG 3.1.2 Language of Parts): /ekonomi/<ticker> is lang="tr", and its "Haberler" list and the
+// intraday chart's marker captions print headlines verbatim. An English outlet's headline (ASELS: Daily Sabah,
+// Hürriyet Daily News) must carry lang="en" on the headline text, on the source-name cell and on its chart marker;
+// a Turkish outlet's row and the Turkish "KAP: ..." marker render no attribute. The headline lang sits on an inner
+// span, not on the anchor, because the anchor also holds <NewTabHint />, a Turkish sr-only cue that must not
+// inherit "en". The page is a server component, so these read the element tree (the chart's own caption markup is
+// pinned in intraday-chart.test.ts).
+// ---------------------------------------------------------------------------
+describe("news rows and chart markers carry the source's language (h101-a11yrecent-2)", () => {
+  const EN_TITLE = "Türkiye's defense giant Aselsan turns to solar to meet all energy needs";
+  const EN_TITLE_2 = "Aselsan signs $1.1 billion air defense export deal";
+  const TR_TITLE = "Aselsan yeni ihracat sözleşmesi imzaladı";
+  const OLD_EN_TITLE = "Aselsan earnings preview from the day before";
+  const SABAH = { name: "Daily Sabah", slug: "daily-sabah" };
+  const HDN = { name: "Hürriyet Daily News", slug: "hurriyet-daily-news" };
+  const SOZCU = { name: "Sözcü", slug: "sozcu" };
+
+  const article = (id: string, source: { name: string; slug: string } | null, title: string, publishedAt: string) => ({
+    id,
+    title,
+    url: `https://example.com/${id}`,
+    publishedAt,
+    category: "ekonomi",
+    source,
+    tickers: ["ASELS"],
+  });
+  // 08:00Z, 08:10Z, 08:20Z are 11:00, 11:10, 11:20 in Istanbul on 2026-11-06, the session the bars are from.
+  const ARTICLES = [
+    article("en1", SABAH, EN_TITLE, "2026-11-06T08:00:00.000Z"),
+    article("en2", HDN, EN_TITLE_2, "2026-11-06T08:10:00.000Z"),
+    article("tr1", SOZCU, TR_TITLE, "2026-11-06T08:20:00.000Z"),
+    article("old", SABAH, OLD_EN_TITLE, "2026-11-05T08:00:00.000Z"),
+  ];
+  const KAP_DISCLOSURE = {
+    disclosureIndex: 1700001,
+    publishedAt: "2026-11-06T08:30:00.000Z",
+    kapTitle: "ASELSAN ELEKTRONİK SANAYİ VE TİCARET A.Ş.",
+    stockCodes: ["ASELS"],
+    subject: "Yeni İş İlişkisi",
+    summary: null,
+    disclosureClass: null,
+  };
+  const BARS = [
+    { ts: "2026-11-06T06:55:00.000Z", close: 92.5, volume: 90 },
+    { ts: "2026-11-06T11:00:00.000Z", close: 92.9, volume: 40 },
+    { ts: "2026-11-06T14:55:00.000Z", close: 93.4, volume: 700 },
+  ];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T02:30:00Z"));
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function renderAsels(articles: unknown[], disclosures: unknown[] = []) {
+    fetchTickerPageMock.mockResolvedValue({
+      company: null,
+      attention: [],
+      articles,
+      articlesTruncated: false,
+      disclosures,
+      totalDisclosures30d: disclosures.length,
+      coverage: { disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+    });
+    fetchQuoteStatsMock.mockResolvedValue({});
+    fetchIntradayMock.mockResolvedValue({ day: "2026-11-06", bars: BARS });
+    getQuotesMock.mockResolvedValue({});
+    return collectEls(await TickerPage({ params: Promise.resolve({ ticker: "ASELS" }) }));
+  }
+
+  const anchorFor = (els: El[], id: string) => els.find((e) => e.type === "a" && e.props.href === `https://example.com/${id}`);
+  /** The anchor's direct children as an array (React leaves a single child unwrapped). */
+  const kidsOf = (a: El) => ([] as unknown[]).concat(a.props.children ?? []) as El[];
+  /** The anchor's child span that prints the headline. */
+  const titleSpanOf = (a: El, title: string) =>
+    kidsOf(a).find((k) => k.type === "span" && textOfNode(k.props.children) === title);
+  /** The anchor's direct <NewTabHint /> children. */
+  const hintsOf = (a: El) => kidsOf(a).filter((k) => k.type === NewTabHint);
+  /** The source-name cell of the news list (the sm:block span), found by its text. */
+  const nameCell = (els: El[], name: string) =>
+    els.find((e) => e.type === "span" && String(e.props.className ?? "").includes("sm:block") && textOfNode(e.props.children) === name);
+  type Marker = { ts: string; label: string; lang?: string };
+  const markersOf = (els: El[]) => els.find((e) => e.type === IntradayChart)!.props.markers as Marker[];
+  const markerFor = (els: El[], label: string) => markersOf(els).find((m) => m.label === label);
+
+  it("Daily Sabah and Hürriyet Daily News rows: the headline text span and the source-name cell are lang=\"en\", the anchor is not", async () => {
+    const els = await renderAsels(ARTICLES);
+
+    for (const [id, title] of [["en1", EN_TITLE], ["en2", EN_TITLE_2]] as const) {
+      const a = anchorFor(els, id)!;
+      expect(a.props.lang).toBeUndefined();
+      const span = titleSpanOf(a, title);
+      expect(span, id).toBeDefined();
+      expect(span!.props.lang).toBe("en");
+      // The Turkish new-tab cue is a direct child of the anchor, outside the English span.
+      expect(span!.props.children).toBe(title);
+      expect(hintsOf(a)).toHaveLength(1);
+    }
+    expect(nameCell(els, "Daily Sabah")!.props.lang).toBe("en");
+    expect(nameCell(els, "Hürriyet Daily News")!.props.lang).toBe("en");
+  });
+
+  it("a Sözcü row renders no lang on its link, its title span or its source-name cell", async () => {
+    const els = await renderAsels(ARTICLES);
+
+    const a = anchorFor(els, "tr1")!;
+    expect(a.props.lang).toBeUndefined();
+    expect(titleSpanOf(a, TR_TITLE)!.props.lang).toBeUndefined();
+    expect(hintsOf(a)).toHaveLength(1);
+    expect(nameCell(els, "Sözcü")!.props.lang).toBeUndefined();
+  });
+
+  it("a row with no source renders, with no lang on its link or its title span", async () => {
+    const els = await renderAsels([article("ns", null, TR_TITLE, "2026-11-06T08:00:00.000Z")]);
+
+    const a = anchorFor(els, "ns")!;
+    expect(a.props.lang).toBeUndefined();
+    expect(titleSpanOf(a, TR_TITLE)!.props.lang).toBeUndefined();
+    expect(hintsOf(a)).toHaveLength(1);
+  });
+
+  it("the chart markers of English articles carry lang 'en'; Turkish articles and KAP disclosures carry none", async () => {
+    const els = await renderAsels(ARTICLES, [KAP_DISCLOSURE]);
+
+    expect(markerFor(els, EN_TITLE)!.lang).toBe("en");
+    expect(markerFor(els, EN_TITLE_2)!.lang).toBe("en");
+    expect(markerFor(els, TR_TITLE)!.lang).toBeUndefined();
+    const kap = markerFor(els, "KAP: Yeni İş İlişkisi");
+    expect(kap).toBeDefined();
+    expect(kap!.lang).toBeUndefined();
+  });
+
+  it("an article from another day is in the list (marked) but not on the chart", async () => {
+    const els = await renderAsels(ARTICLES);
+
+    expect(anchorFor(els, "old")!.props.lang).toBeUndefined();
+    expect(titleSpanOf(anchorFor(els, "old")!, OLD_EN_TITLE)!.props.lang).toBe("en");
+    expect(markerFor(els, OLD_EN_TITLE)).toBeUndefined();
+  });
+
+  it("the markers stay in time order and keep their ts and label, whatever the language", async () => {
+    const els = await renderAsels(ARTICLES, [KAP_DISCLOSURE]);
+
+    expect(markersOf(els).map((m) => [m.ts, m.label])).toEqual([
+      ["2026-11-06T08:00:00.000Z", EN_TITLE],
+      ["2026-11-06T08:10:00.000Z", EN_TITLE_2],
+      ["2026-11-06T08:20:00.000Z", TR_TITLE],
+      ["2026-11-06T08:30:00.000Z", "KAP: Yeni İş İlişkisi"],
+    ]);
   });
 });

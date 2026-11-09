@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import {
   actorMismatchFires,
   counterVetoFires,
+  familyHomonymFires,
   headlineLane,
   headlineOnlyScore,
   isMatch,
@@ -26,6 +27,8 @@ import {
   ENTITY_SPARSE_TEXT_FACTOR,
   ENTITY_TEXT_FLOOR,
   ENTITY_WEIGHT,
+  FAMILY_HOMONYM_GIVEN_NAMES,
+  FAMILY_HOMONYM_NOT_AFTER,
   GENERIC_ENTITIES,
   GENERIC_ENTITY_WEIGHT,
   HEADLINE_TITLE_MAX_CHARS,
@@ -1938,6 +1941,507 @@ describe("actor mismatch: the headline lane does not cross actors (h70-mergequal
         const hb = headlineTokens(b);
         expect(headlineOnlyScore(ha, hb, 3.5, { aTitle: a, bTitle: b }), `${a} | ${b}`).toBe(
           legacy.headlineOnlyScore(ha, hb, 3.5, { aTitle: a, bTitle: b }),
+        );
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h101-clustermembers-1: a family member or namesake is not the President.
+//
+// Prod cluster 94503853 ("Cumhurbaşkanı Erdoğan, Aliyev'in daveti üzerine yarın
+// Karabağ'ı ziyaret edecek", 30 members) held ten "Emine Erdoğan'dan ..."
+// messages, all iktidar outlets: the trip page showed İktidar 16 of 25 instead
+// of 6 of 15. The first stray (trt-haber c93dad8e, 11:37) joined through the
+// PRIMARY tf-idf + entity lane, not the headline lane: 0.481 against the 'latest'
+// member bha (tf-idf 0.58, entity ratio 0.29, one shared entity, lane false), so
+// withdrawing the headline lane alone (actorMismatchFires) is not enough, and
+// splitting the 'erdogan' entity alone is not either (0.7 * 0.58 = 0.406 >= 0.40).
+// Titles below are the verbatim prod rows of 2026-11-07/08.
+// ---------------------------------------------------------------------------
+describe("family homonym: 'Emine Erdoğan' is not 'Cumhurbaşkanı Erdoğan' (h101-clustermembers-1)", () => {
+  const TRT = "Emine Erdoğan'dan 8 Kasım Azerbaycan Günü paylaşımı";
+  const STAR = "Emine Erdoğan'dan \"8 Kasım Azerbaycan Günü\" paylaşımı";
+  const MILLIYET = "Emine Erdoğan'dan Azerbaycan Zafer Günü mesajı!";
+  const AKSAM_EMINE = "Emine Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı";
+  const CNN = "Emine Erdoğan'dan Karabağ mesajı";
+  const BHA = "Cumhurbaşkanı Erdoğan, 8 Kasım Zafer Günü dolayısıyla Karabağ’a gitti";
+  const TRIP_SEED = "Cumhurbaşkanı Erdoğan, Aliyev'in daveti üzerine yarın Karabağ'ı ziyaret edecek";
+  const BARE = "Erdoğan bugün Azerbaycan’a gidiyor";
+  const AA_PRESIDENT = "Cumhurbaşkanı Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı";
+
+  // The h56-entities-1 list, spelled out here so the rule is pinned from outside constants.ts.
+  const ERDOGAN_GIVEN_NAMES: readonly string[] = [
+    "emine", "bilal", "sumeyye", "esra", "burak", "yilmaz", "nehir", "filiz", "fatih", "asuman", "canan", "meryem",
+  ];
+
+  describe("FAMILY_HOMONYM_GIVEN_NAMES", () => {
+    it("is exactly the h56-entities-1 list for erdogan, folded ASCII", () => {
+      expect(FAMILY_HOMONYM_GIVEN_NAMES).toEqual({ erdogan: ERDOGAN_GIVEN_NAMES });
+    });
+
+    it("FAMILY_HOMONYM_NOT_AFTER: only 'cevdet' before 'yilmaz' turns the given name into the Vice President's surname", () => {
+      expect(FAMILY_HOMONYM_NOT_AFTER).toEqual({ yilmaz: ["cevdet"] });
+      // Every key is a mapped given name, so the exception can only ever narrow the rule.
+      for (const given of Object.keys(FAMILY_HOMONYM_NOT_AFTER)) {
+        expect(ERDOGAN_GIVEN_NAMES).toContain(given);
+      }
+    });
+
+    it("every entry is a lower-case ASCII word, and 'recep' / 'tayyip' are deliberately absent", () => {
+      for (const names of Object.values(FAMILY_HOMONYM_GIVEN_NAMES)) {
+        for (const n of names) expect(n).toMatch(/^[a-z]+$/);
+        expect(names).not.toContain("recep");
+        expect(names).not.toContain("tayyip");
+      }
+    });
+  });
+
+  describe("familyHomonymFires: true", () => {
+    const TRUE_CASES: ReadonlyArray<readonly [string, string, string]> = [
+      [
+        "trt-haber vs bha (the first stray against 'latest')",
+        "Emine Erdoğan'dan 8 Kasım Azerbaycan Günü paylaşımı",
+        "Cumhurbaşkanı Erdoğan, 8 Kasım Zafer Günü dolayısıyla Karabağ’a gitti",
+      ],
+      [
+        "aksam-like vs the trip seed",
+        "Emine Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı",
+        "Cumhurbaşkanı Erdoğan, Aliyev'in daveti üzerine yarın Karabağ'ı ziyaret edecek",
+      ],
+      ["cnn-turk vs a bare 'Erdoğan' headline", "Emine Erdoğan'dan Karabağ mesajı", "Erdoğan bugün Azerbaycan’a gidiyor"],
+      ["Bilal Erdoğan vs 'Recep Tayyip Erdoğan'", "Bilal Erdoğan Japonya'da konuştu", "Recep Tayyip Erdoğan Japonya'da konuştu"],
+      ["straight double quotes around the message (star)", STAR, BARE],
+      ["a typographic apostrophe suffix (Erdoğan’dan)", "Emine Erdoğan’dan Karabağ mesajı", BHA],
+      ["all caps with dotted İ and Ğ", "EMİNE ERDOĞAN'DAN KARABAĞ MESAJI", "CUMHURBAŞKANI ERDOĞAN AZERBAYCAN'A GİTTİ"],
+      ["lower case", "emine erdoğan'dan karabağ mesajı", "cumhurbaşkanı erdoğan azerbaycan'a gitti"],
+      [
+        "decomposed (NFD) letters: İ and ğ as base letter + combining mark",
+        "EMİNE ERDOĞAN'DAN KARABAĞ MESAJI".normalize("NFD"),
+        "Cumhurbaşkanı Erdoğan Azerbaycan'a gitti".normalize("NFD"),
+      ],
+      [
+        "two family members, no principal on that side",
+        "Emine Erdoğan ve Bilal Erdoğan Japonya'da buluştu",
+        "Erdoğan Japonya'da buluştu",
+      ],
+      ["a surname after a role, not a given name", "Esra Erdoğan'dan açıklama", "Başkan Erdoğan'dan açıklama"],
+      [
+        "the Vice President's 'Cevdet Yılmaz Erdoğan'a' is the President's story, the director 'Yılmaz Erdoğan' is not",
+        "Yılmaz Erdoğan Vizontele 3'ün vizyon tarihini duyurdu",
+        "Cevdet Yılmaz Erdoğan'a Vizontele 3'ün vizyon tarihini duyurdu",
+      ],
+      [
+        "the Vice President in a principal title is a surname, not the director: 'Cevdet Yılmaz'ı' does not name 'Yılmaz'",
+        "Yılmaz Erdoğan yeni filmini tanıttı",
+        "Cumhurbaşkanı Erdoğan Cevdet Yılmaz'ı kabul etti",
+      ],
+    ];
+    it.each(TRUE_CASES)("true: %s", (_name, a, b) => {
+      expect(familyHomonymFires(a, b)).toBe(true);
+      // Pure and symmetric: the member may be either side.
+      expect(familyHomonymFires(b, a)).toBe(true);
+    });
+
+    it.each(ERDOGAN_GIVEN_NAMES)("true for the mapped given name %s", (given) => {
+      const family = `${given[0]!.toUpperCase()}${given.slice(1)} Erdoğan Japonya'da konuştu`;
+      expect(familyHomonymFires(family, "Cumhurbaşkanı Erdoğan Japonya'da konuştu")).toBe(true);
+      expect(familyHomonymFires("Erdoğan Japonya'da konuştu", family)).toBe(true);
+    });
+
+    it("every Emine member of cluster 94503853 fires against every presidential member of the trip", () => {
+      const emine = [TRT, STAR, MILLIYET, AKSAM_EMINE, CNN, "Emine Erdoğan'dan Azerbaycan'a anlamlı kutlama! Zaferin 6. yılında şehitleri andı"];
+      const president = [TRIP_SEED, BHA, BARE, "Erdoğan Azerbaycan’a gidiyor", "Cumhurbaşkanı Erdoğan Karabağ'da", "Erdoğan ile Aliyev kol kola"];
+      for (const e of emine) {
+        for (const p of president) expect(familyHomonymFires(e, p), `${e} | ${p}`).toBe(true);
+      }
+    });
+  });
+
+  describe("familyHomonymFires: false", () => {
+    const FALSE_CASES: ReadonlyArray<readonly [string, string, string]> = [
+      [
+        "two Emine headlines never fire (both FAMILY)",
+        "Emine Erdoğan'dan Azerbaycan Zafer Günü mesajı!",
+        "Emine Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı",
+      ],
+      [
+        "a title naming both people never fires against the President-only side",
+        "Emine Erdoğan ile Cumhurbaşkanı Erdoğan Seul'de karşılandı",
+        "Cumhurbaşkanı Erdoğan Seul'de karşılandı",
+      ],
+      [
+        "a title naming both people never fires against the Emine-only side",
+        "Emine Erdoğan ile Cumhurbaşkanı Erdoğan Seul'de karşılandı",
+        "Emine Erdoğan Seul'de karşılandı",
+      ],
+      [
+        "'Recep Tayyip Erdoğan' is the President: 'recep' and 'tayyip' are not mapped",
+        "Cumhurbaşkanı Recep Tayyip Erdoğan, Zelenskiy'i kabul etti",
+        "Erdoğan, Zelenskiy'i kabul etti",
+      ],
+      [
+        "a comma separates Yılmaz from Erdoğan (Cevdet Yılmaz, Erdoğan'ın talimatıyla)",
+        "Cevdet Yılmaz, Erdoğan'ın talimatıyla toplantı yaptı",
+        "Cumhurbaşkanı Erdoğan talimat verdi",
+      ],
+      [
+        "no comma: 'Cevdet Yılmaz Erdoğan'ın ...' is the Vice President then the President, not 'Yılmaz Erdoğan'",
+        "Cevdet Yılmaz Erdoğan'ın talimatıyla toplantı yaptı",
+        "Cumhurbaşkanı Erdoğan talimat verdi",
+      ],
+      ["a surname with no map entry", "Özgür Özel, CHP'de kurultay kararını açıkladı", "Özel, CHP'de kurultay kararını açıkladı"],
+      ["neither title names the surname", "Hava bugün parçalı bulutlu geçecek", "Borsa güne yükselişle başladı"],
+      ["the other side names no Erdoğan at all", CNN, "Aliyev Şuşa'da konuştu"],
+      ["both sides are the President", BHA, TRIP_SEED],
+      ["both sides are the bare surname", BARE, "Erdoğan Azerbaycan'da"],
+      [
+        "a kinship possessive that names the son is the same person",
+        "Bilal Erdoğan TÜGVA'da gençlerle buluştu",
+        "Erdoğan'ın oğlu Bilal TÜGVA'da gençlerle buluştu",
+      ],
+      [
+        "a kinship possessive that names the daughter",
+        "Sümeyye Erdoğan Bayraktar açıklama yaptı",
+        "Erdoğan'ın kızı Sümeyye açıklama yaptı",
+      ],
+      [
+        "a joint appearance naming the wife",
+        "Emine Erdoğan Zafer Günü mesajı yayımladı",
+        "Erdoğan ve eşi Emine Hanım Zafer Günü mesajı",
+      ],
+    ];
+    it.each(FALSE_CASES)("false: %s", (_name, a, b) => {
+      expect(familyHomonymFires(a, b)).toBe(false);
+      expect(familyHomonymFires(b, a)).toBe(false);
+    });
+
+    it("a kinship possessive that names the son neither fires actorMismatchFires nor sets homonymVeto in score()", () => {
+      const family = "Bilal Erdoğan TÜGVA'da gençlerle buluştu";
+      const possessive = "Erdoğan'ın oğlu Bilal TÜGVA'da gençlerle buluştu";
+      const noFp = { strict: null, signature: null };
+      expect(actorMismatchFires(family, possessive)).toBe(false);
+      expect(actorMismatchFires(possessive, family)).toBe(false);
+      const r = score(noFp, noFp, ["erdogan"], ["erdogan"], 0.58, 0.8, { aTitle: family, bTitle: possessive });
+      expect(r.components.homonymVeto).toBe(false);
+      const swapped = score(noFp, noFp, ["erdogan"], ["erdogan"], 0.58, 0.8, { aTitle: possessive, bTitle: family });
+      expect(swapped.components.homonymVeto).toBe(false);
+    });
+
+    it("a mapped given name named elsewhere in the principal title counts, a surname after the Vice President does not", () => {
+      // 'Cevdet Yılmaz' names the Vice President, not the director: still fires.
+      expect(familyHomonymFires("Yılmaz Erdoğan yeni filmini tanıttı", "Cumhurbaşkanı Erdoğan Cevdet Yılmaz'ı kabul etti")).toBe(true);
+      // A given name after a comma and a role word ('eşi Emine') still names the family member.
+      expect(familyHomonymFires("Emine Erdoğan mesaj yayımladı", "Erdoğan, eşi Emine ile birlikte törene katıldı")).toBe(false);
+    });
+
+    it.each([",", ":", ";", ".", "!", "?", "-", "–", "—", "\"", "(", "…"])(
+      "a '%s' between the given name and the surname breaks the pair: the surname is then a bare Erdoğan",
+      (mark) => {
+        const broken = `Fatih${mark} Erdoğan açıklama yaptı`;
+        expect(familyHomonymFires(broken, "Cumhurbaşkanı Erdoğan açıklama yaptı")).toBe(false);
+        expect(familyHomonymFires("Cumhurbaşkanı Erdoğan açıklama yaptı", broken)).toBe(false);
+      },
+    );
+
+    it("a given name that is not mapped is not family (Cevdet, Recep, Hakan)", () => {
+      for (const given of ["Cevdet", "Recep", "Hakan", "Tayyip"]) {
+        expect(familyHomonymFires(`${given} Erdoğan açıklama yaptı`, "Cumhurbaşkanı Erdoğan açıklama yaptı")).toBe(false);
+      }
+    });
+
+    it("a mapped given name beside a different surname is not the surname's family ('Emine Aliyeva', 'Esra Albayrak')", () => {
+      expect(familyHomonymFires("Emine Aliyeva Şuşa'da konuştu", "Aliyev Şuşa'da konuştu")).toBe(false);
+      expect(familyHomonymFires("Esra Albayrak açıklama yaptı", "Erdoğan açıklama yaptı")).toBe(false);
+    });
+
+    it("the surname must be a whole word: 'Erdoğanlar', 'Erdoğan-Aliyev' prefixes do not read as the key", () => {
+      expect(familyHomonymFires("Emine Erdoğanlar Japonya'da", "Erdoğan Japonya'da")).toBe(false);
+    });
+
+    it("empty, whitespace, null, undefined and non-string input never fire and never throw", () => {
+      const junk: unknown[] = ["", "   ", null, undefined, 0, 42, {}, [], true];
+      for (const j of junk) {
+        expect(() => familyHomonymFires(j as string, CNN)).not.toThrow();
+        expect(familyHomonymFires(j as string, CNN)).toBe(false);
+        expect(familyHomonymFires(CNN, j as string)).toBe(false);
+        expect(familyHomonymFires(j as string, j as string)).toBe(false);
+      }
+    });
+
+    it("is total over emoji, zero-width characters and injection-looking text", () => {
+      for (const t of [
+        "🚨 Emine Erdoğan'dan 🔥 mesaj",
+        "Emine​ Erdoğan'dan mesaj",
+        "'; DROP TABLE articles;-- Erdoğan",
+        "İİİİ ıııı ERDOĞAN",
+        "Erdoğan'",
+        "’ Erdoğan ’",
+      ]) {
+        expect(typeof familyHomonymFires(t, BHA)).toBe("boolean");
+        expect(typeof familyHomonymFires(BHA, t)).toBe("boolean");
+      }
+    });
+  });
+
+  describe("familyHomonymFires: clipping and cost", () => {
+    it("a surname past HEADLINE_TITLE_MAX_CHARS is not seen: the clipped title names nobody", () => {
+      const pad = "x ".repeat(HEADLINE_TITLE_MAX_CHARS / 2);
+      expect(familyHomonymFires(`${pad}Emine Erdoğan'dan mesaj`, BHA)).toBe(false);
+      expect(familyHomonymFires(CNN, `${pad}Cumhurbaşkanı Erdoğan Azerbaycan'da`)).toBe(false);
+      // The same words inside the clip fire.
+      expect(familyHomonymFires(`${"x ".repeat(20)}Emine Erdoğan'dan mesaj`, BHA)).toBe(true);
+    });
+
+    it("fires on maximum-length titles of the same pair", () => {
+      const tail = "Karabağ Zaferi'nin yılını kutladı ";
+      const family = `Emine Erdoğan, ${tail.repeat(12)}`;
+      const principal = `Cumhurbaşkanı Erdoğan, ${tail.repeat(12)}`;
+      expect(family.length).toBeGreaterThan(HEADLINE_TITLE_MAX_CHARS);
+      expect(familyHomonymFires(family, principal)).toBe(true);
+    });
+
+    it("costs the same for a 12 KB title as for a 100 KB one: the clip bounds the work (CPU time, not wall clock)", () => {
+      expectLinear(
+        rep("Karabağ Zaferi'nin yılını kutladı ", "Cumhurbaşkanı Erdoğan, "),
+        (other) => {
+          expect(familyHomonymFires("Emine Erdoğan'dan Karabağ mesajı", other)).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+  });
+
+  describe("actorMismatchFires also reports the homonym", () => {
+    it("true for the trt-haber / bha pair, which the subject and one-sided checks alone miss", () => {
+      // Control: the spans {emine, erdogan} and {erdogan} overlap, so the old
+      // checks cannot fire; only the homonym rule does.
+      expect(actorMismatchFires(TRT, BHA)).toBe(true);
+      expect(actorMismatchFires(BHA, TRT)).toBe(true);
+      expect(actorMismatchFires(AKSAM_EMINE, AA_PRESIDENT)).toBe(true);
+      expect(actorMismatchFires(AA_PRESIDENT, AKSAM_EMINE)).toBe(true);
+    });
+
+    it("false for two Emine headlines, two presidential headlines and the both-people title", () => {
+      expect(actorMismatchFires(TRT, STAR)).toBe(false);
+      expect(actorMismatchFires(BHA, TRIP_SEED)).toBe(false);
+      expect(
+        actorMismatchFires("Emine Erdoğan ile Cumhurbaşkanı Erdoğan Seul'de karşılandı", "Cumhurbaşkanı Erdoğan Seul'de karşılandı"),
+      ).toBe(false);
+    });
+  });
+
+  describe("headlineOnlyScore (member scan, attach evidence)", () => {
+    const HOURS = 0.8;
+
+    it("is 0 for the trt-haber / bha pair when both titles are given", () => {
+      expect(headlineOnlyScore(headlineTokens(TRT), headlineTokens(BHA), HOURS, { aTitle: TRT, bTitle: BHA })).toBe(0);
+      expect(headlineOnlyScore(headlineTokens(BHA), headlineTokens(TRT), HOURS, { aTitle: BHA, bTitle: TRT })).toBe(0);
+    });
+
+    it("the lane really fires for 'Emine Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı' vs the President's twin of it, and only the homonym rule zeroes it", () => {
+      const ha = headlineTokens(AKSAM_EMINE);
+      const hb = headlineTokens(AA_PRESIDENT);
+      expect(headlineLane(ha, hb, HOURS).fired).toBe(true);
+      // Without titles the lane's own score stands (backward compatible).
+      expect(headlineOnlyScore(ha, hb, HOURS)).toBeGreaterThan(0);
+      expect(headlineOnlyScore(ha, hb, HOURS, { aTitle: AKSAM_EMINE, bTitle: AA_PRESIDENT })).toBe(0);
+      expect(headlineOnlyScore(hb, ha, HOURS, { aTitle: AA_PRESIDENT, bTitle: AKSAM_EMINE })).toBe(0);
+    });
+
+    it("two Emine headlines of the same message keep their lane score", () => {
+      const ha = headlineTokens(AKSAM_EMINE);
+      const hb = headlineTokens("Emine Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı:");
+      const plain = headlineOnlyScore(ha, hb, HOURS);
+      expect(plain).toBeGreaterThan(0);
+      expect(headlineOnlyScore(ha, hb, HOURS, { aTitle: AKSAM_EMINE, bTitle: "Emine Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı:" })).toBe(plain);
+    });
+  });
+
+  describe("score()", () => {
+    const NO_FP = { strict: null, signature: null };
+    const HOURS = 0.8;
+    // trt-haber against the 'latest' member bha: tf-idf 0.58, one shared entity.
+    const run = (aTitle: string, bTitle: string, tfidf = 0.58, hours = HOURS) =>
+      score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], tfidf, hours, { aTitle, bTitle });
+
+    it("control: the first stray's inputs without the veto reach the match threshold on the primary lane (the prod 0.481)", () => {
+      // Same numbers, titles that name one actor: this is what the stray scored.
+      const r = run(BHA, TRIP_SEED);
+      expect(r.components.homonymVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+      expect(r.components.primary).toBeGreaterThan(MATCH_THRESHOLD);
+    });
+
+    it("trt-haber vs bha at tf-idf 0.58, entity erdogan on both sides: isMatch false, homonymVeto true", () => {
+      const r = run(TRT, BHA);
+      expect(r.components.homonymVeto).toBe(true);
+      expect(isMatch(r)).toBe(false);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
+      // The primary value is reported, only its contribution to raw is capped.
+      expect(r.components.primary).toBeGreaterThan(MATCH_THRESHOLD);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      // Symmetric.
+      const swapped = run(BHA, TRT);
+      expect(swapped.components.homonymVeto).toBe(true);
+      expect(isMatch(swapped)).toBe(false);
+    });
+
+    it("the same inputs with an Emine title on both sides still match, and with a presidential title on both sides too", () => {
+      const eminePair = run(TRT, STAR);
+      expect(eminePair.components.homonymVeto).toBe(false);
+      expect(isMatch(eminePair)).toBe(true);
+      const presidentPair = run(BHA, TRIP_SEED);
+      expect(presidentPair.components.homonymVeto).toBe(false);
+      expect(isMatch(presidentPair)).toBe(true);
+    });
+
+    it("has no headline exemption: a pair the headline lane would accept is still refused", () => {
+      // 'Emine Erdoğan, Karabağ Zaferi'nin 6. yılını kutladı' vs the President's twin of it: the lane fires
+      // (see headlineOnlyScore above), the spans overlap so no old veto applies, tf-idf is high.
+      const r = run(AKSAM_EMINE, AA_PRESIDENT, 0.9, 1);
+      expect(r.components.homonymVeto).toBe(true);
+      expect(r.components.actorVeto).toBe(true);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
+    });
+
+    it("caps the MinHash lane too: near-identical text under an Emine and a presidential headline", () => {
+      const description =
+        "Erdoğan'ın eşi Emine Erdoğan, Azerbaycan'ın Karabağ Zaferi'nin altıncı yıl dönümü nedeniyle sosyal medya hesabından paylaşım yaptı. Paylaşımda şehitler anıldı ve Azerbaycan halkına başarılar dilendi. Cumhurbaşkanı Erdoğan da Bakü'de düzenlenen törene katıldı.";
+      const fa = fingerprint(TRT, description);
+      const fb = fingerprint(BHA, description);
+      const r = score(fa, fb, ["erdogan"], ["erdogan"], 0.9, 0.5, { aTitle: TRT, bTitle: BHA });
+      // Control: without the cap the MinHash lane alone would clear the threshold.
+      expect(r.components.jaccardScore).toBeGreaterThan(MATCH_THRESHOLD);
+      expect(r.components.homonymVeto).toBe(true);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("no threshold constant moved: the cap is the existing SUBJECT_VETO_CAP and sits under the 0.9 * MATCH_THRESHOLD fallback floor", () => {
+      expect(MATCH_THRESHOLD).toBe(0.4);
+      expect(SUBJECT_VETO_CAP).toBeCloseTo(MATCH_THRESHOLD * 0.9 - 0.01, 12);
+    });
+
+    it("homonymVeto is a boolean component of every branch: auto-accept, missing titles, one title, unrelated titles", () => {
+      const same = { strict: "e".repeat(40), signature: null };
+      const auto = score(same, same, [], [], 0.1, 1, { aTitle: TRT, bTitle: BHA });
+      expect(auto.components.autoAccept).toBe(true);
+      expect(auto.components.homonymVeto).toBe(false);
+      expect(auto.score).toBe(1);
+
+      const noTitles = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, HOURS);
+      expect(noTitles.components.homonymVeto).toBe(false);
+      expect(isMatch(noTitles)).toBe(true);
+
+      const oneTitle = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, HOURS, { aTitle: TRT });
+      expect(oneTitle.components.homonymVeto).toBe(false);
+      expect(score(NO_FP, NO_FP, [], [], 0.1, 1, { aTitle: TRT, bTitle: "" }).components.homonymVeto).toBe(false);
+
+      const unrelated = run("Hava bugün parçalı bulutlu geçecek", "Borsa güne yükselişle başladı", 0.05);
+      expect(unrelated.components.homonymVeto).toBe(false);
+    });
+
+    it("the other vetoes still report as before for a homonym pair (it is additive)", () => {
+      const r = run(TRT, BHA);
+      expect(r.components.subjectVeto).toBe(false);
+      expect(r.components.incidentVeto).toBe(false);
+      expect(r.components.counterVeto).toBe(false);
+    });
+  });
+
+  describe("parity with scripts/lib/cluster (.mjs twin)", () => {
+    interface MjsSide {
+      familyHomonymFires: (a: string, b: string) => boolean;
+      actorMismatchFires: (a: string, b: string) => boolean;
+      score: (
+        a: unknown,
+        b: unknown,
+        ea: Iterable<string>,
+        eb: Iterable<string>,
+        tfidf: number,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => { score: number; components: Record<string, unknown> };
+      headlineOnlyScore: (
+        a: unknown,
+        b: unknown,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => number;
+    }
+    let legacy: MjsSide;
+    let legacyConstants: {
+      FAMILY_HOMONYM_GIVEN_NAMES: Record<string, readonly string[]>;
+      FAMILY_HOMONYM_NOT_AFTER: Record<string, readonly string[]>;
+    };
+    beforeAll(async () => {
+      legacy = (await import("../../../scripts/lib/cluster/ensemble.mjs")) as unknown as MjsSide;
+      legacyConstants = (await import("../../../scripts/lib/cluster/constants.mjs")) as unknown as typeof legacyConstants;
+    });
+
+    const NO_FP = { strict: null, signature: null };
+    const PAIRS: ReadonlyArray<readonly [string, string]> = [
+      [TRT, BHA],
+      [BHA, TRT],
+      [TRT, STAR],
+      [MILLIYET, AKSAM_EMINE],
+      [AKSAM_EMINE, TRIP_SEED],
+      [AKSAM_EMINE, AA_PRESIDENT],
+      [CNN, BARE],
+      [BHA, TRIP_SEED],
+      ["Bilal Erdoğan Japonya'da konuştu", "Recep Tayyip Erdoğan Japonya'da konuştu"],
+      ["Emine Erdoğan ile Cumhurbaşkanı Erdoğan Seul'de karşılandı", "Cumhurbaşkanı Erdoğan Seul'de karşılandı"],
+      ["Cevdet Yılmaz, Erdoğan'ın talimatıyla toplantı yaptı", "Cumhurbaşkanı Erdoğan talimat verdi"],
+      ["Özgür Özel, CHP'de kurultay kararını açıkladı", "Özel, CHP'de kurultay kararını açıkladı"],
+      ["EMİNE ERDOĞAN'DAN KARABAĞ MESAJI", "CUMHURBAŞKANI ERDOĞAN AZERBAYCAN'A GİTTİ"],
+      ["Fatih, Erdoğan açıklama yaptı", "Cumhurbaşkanı Erdoğan açıklama yaptı"],
+      ["Cevdet Yılmaz Erdoğan'ın talimatıyla toplantı yaptı", "Cumhurbaşkanı Erdoğan talimat verdi"],
+      ["Yılmaz Erdoğan Vizontele 3'ün vizyon tarihini duyurdu", "Cevdet Yılmaz Erdoğan'a Vizontele 3'ün vizyon tarihini duyurdu"],
+      ["Bilal Erdoğan TÜGVA'da gençlerle buluştu", "Erdoğan'ın oğlu Bilal TÜGVA'da gençlerle buluştu"],
+      ["Sümeyye Erdoğan Bayraktar açıklama yaptı", "Erdoğan'ın kızı Sümeyye açıklama yaptı"],
+      ["Emine Erdoğan Zafer Günü mesajı yayımladı", "Erdoğan ve eşi Emine Hanım Zafer Günü mesajı"],
+      ["Yılmaz Erdoğan yeni filmini tanıttı", "Cumhurbaşkanı Erdoğan Cevdet Yılmaz'ı kabul etti"],
+    ];
+
+    it("the given-name map and its exception are identical in constants.mjs", () => {
+      expect(legacyConstants.FAMILY_HOMONYM_GIVEN_NAMES).toEqual(FAMILY_HOMONYM_GIVEN_NAMES);
+      expect(legacyConstants.FAMILY_HOMONYM_NOT_AFTER).toEqual(FAMILY_HOMONYM_NOT_AFTER);
+    });
+
+    it("familyHomonymFires and actorMismatchFires agree with the .mjs twin on every pair, both orders", () => {
+      for (const [a, b] of PAIRS) {
+        expect(legacy.familyHomonymFires(a, b), `${a} | ${b}`).toBe(familyHomonymFires(a, b));
+        expect(legacy.familyHomonymFires(b, a), `${b} | ${a}`).toBe(familyHomonymFires(b, a));
+        expect(legacy.actorMismatchFires(a, b), `${a} | ${b}`).toBe(actorMismatchFires(a, b));
+      }
+    });
+
+    it("score and every component are identical (===) to the .mjs twin, and homonymVeto is a component of both", () => {
+      for (const [a, b] of PAIRS) {
+        for (const tfidf of [0.05, 0.37, 0.58, 0.9]) {
+          const port = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], tfidf, 0.8, { aTitle: a, bTitle: b });
+          const old = legacy.score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], tfidf, 0.8, { aTitle: a, bTitle: b });
+          expect(port.score, `${a} | ${b} @${tfidf}`).toBe(old.score);
+          expect(Object.keys(port.components).sort()).toEqual(Object.keys(old.components).sort());
+          expect(Object.keys(port.components)).toContain("homonymVeto");
+          for (const k of Object.keys(port.components)) {
+            expect((port.components as Record<string, unknown>)[k], `${a} | ${b} @${tfidf}: ${k}`).toBe(old.components[k]);
+          }
+        }
+      }
+    });
+
+    it("headlineOnlyScore with titles is identical to the .mjs twin", () => {
+      for (const [a, b] of PAIRS) {
+        const ha = headlineTokens(a);
+        const hb = headlineTokens(b);
+        expect(headlineOnlyScore(ha, hb, 0.8, { aTitle: a, bTitle: b }), `${a} | ${b}`).toBe(
+          legacy.headlineOnlyScore(ha, hb, 0.8, { aTitle: a, bTitle: b }),
         );
       }
     });

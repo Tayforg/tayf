@@ -61,9 +61,21 @@ function resetPgmqState() {
   pgmqState.deleted = [];
 }
 
-vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
+vi.mock("../../supabase/functions/_shared/pgmq.ts", async (importOriginal) => ({
+  // The pure error classifier is the real one; everything that touches the queue is faked.
+  isPollRpcMissing: (await importOriginal<typeof import("../../supabase/functions/_shared/pgmq.ts")>()).isPollRpcMissing,
   readBatch: vi.fn(
     async (_client: unknown, _queue: string, _vt: number, qty: number) => {
+      const batch = pgmqState.pending.slice(0, qty);
+      pgmqState.pending = pgmqState.pending.slice(qty);
+      return batch;
+    },
+  ),
+  // h101-e2elatency-1: in an ingest minute (minute % 3 === 0) the consumer's first cluster_work
+  // read is the long poll. Here it drains the same queue as readBatch, so these tests give the
+  // same result in every minute of the hour.
+  readBatchPoll: vi.fn(
+    async (_client: unknown, _queue: string, _vt: number, qty: number, _maxPollSeconds: number, _pollIntervalMs: number) => {
       const batch = pgmqState.pending.slice(0, qty);
       pgmqState.pending = pgmqState.pending.slice(qty);
       return batch;

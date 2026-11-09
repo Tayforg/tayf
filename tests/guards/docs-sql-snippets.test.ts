@@ -19,11 +19,14 @@ import { resolve } from "node:path";
 //           `select ... from cron.job` next to the broken run-table query (the
 //           038 verification block did), and a block-level check would pass it.
 //   Rule B  A queue call that changes state when it is only pasted to look:
-//             - pgmq.read(, pgmq.read_with_poll(, pgmq.pop( are ALWAYS a
-//               violation: they hide the messages for the visibility timeout and
-//               bump read_ct, and the consumers archive at read_ct > 3, so one
-//               look from the SQL editor can push a healthy message into poison.
-//               Read pgmq.q_<queue> / pgmq.a_<queue> with a select instead.
+//             - pgmq.read(, pgmq.read_with_poll(, pgmq.pop( and
+//               public.pgmq_read_msgs_poll( (188's long-poll shim over
+//               pgmq.read_with_poll) are ALWAYS a violation: they hide the
+//               messages for the visibility timeout and bump read_ct, and the
+//               consumers archive at read_ct > 3, so one look from the SQL editor
+//               can push a healthy message into poison. A long poll is never a
+//               sensible docs probe either. Read pgmq.q_<queue> / pgmq.a_<queue>
+//               with a select instead.
 //             - pgmq.send / send_batch / archive / delete / purge_queue /
 //               drop_queue / set_vt and public.pgmq_read_msgs / archive_msg /
 //               delete_msg / send_msg are a violation unless the block carries the
@@ -39,7 +42,7 @@ const DOCS_DIR = resolve(ROOT, "docs");
 const SQL_INFO_STRINGS = new Set(["sql", "psql", "pgsql", "postgres"]);
 const MUTATION_MARKER = "-- mutates queue state";
 
-const ALWAYS_BAD_CALLS = ["pgmq.read", "pgmq.read_with_poll", "pgmq.pop"] as const;
+const ALWAYS_BAD_CALLS = ["pgmq.read", "pgmq.read_with_poll", "pgmq.pop", "public.pgmq_read_msgs_poll"] as const;
 const MARKER_GATED_CALLS = [
   "pgmq.send",
   "pgmq.send_batch",
@@ -368,6 +371,19 @@ describe("docs SQL snippets: scanner self-tests", () => {
       expect.stringContaining("d.md:3 pgmq.read_with_poll("),
       expect.stringContaining("d.md:4 pgmq.pop("),
     ]);
+  });
+
+  it("flags public.pgmq_read_msgs_poll (188's long-poll shim) as always bad, once, and never as public.pgmq_read_msgs", () => {
+    const call = "select * from public.pgmq_read_msgs_poll('cluster_work', 60, 2, 6, 250);";
+    const bare = violationsIn("d.md", doc("sql", call));
+    expect(bare).toEqual([expect.stringContaining("d.md:2 public.pgmq_read_msgs_poll(")]);
+    // Exactly one report: the shorter public.pgmq_read_msgs name is not a prefix match of the _poll call.
+    expect(bare).toHaveLength(1);
+    expect(bare[0]).not.toContain("public.pgmq_read_msgs(");
+    // The mutation marker never excuses it: it leases messages and bumps read_ct like pgmq.read.
+    expect(violationsIn("d.md", doc("sql", "-- MUTATES QUEUE STATE", call))).toHaveLength(1);
+    // A blank before the parenthesis is still a call.
+    expect(violationsIn("d.md", doc("sql", "select * from public.pgmq_read_msgs_poll ('q', 30, 1, 6, 250);"))).toHaveLength(1);
   });
 
   it("flags the queue mutations unless the block carries the marker line", () => {
