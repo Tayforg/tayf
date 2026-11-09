@@ -87,6 +87,11 @@ describe("sibling title matching (src/lib/clusters/sibling-veto.ts)", () => {
       scopeHours: 48,
       tokenMinLen: 4,
       stemLen: 5,
+      // migration 180 (rare-stem tier); pinned to its SQL copy by tests/migrations/180-blindspot-sibling-rare-tier.test.ts
+      looseMinShared: 3,
+      looseMinJaccard: 0.3,
+      rareMinShared: 2,
+      rareMaxDocShare: 0.0025,
     });
   });
 

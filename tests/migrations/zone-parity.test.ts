@@ -506,6 +506,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "167_ops_queue_poison_contract.sql",
       // 173 re-creates ops_health_report() with 167's text verbatim (rows 1-21, including row 4's VALUES-list copy of BIAS_TO_ZONE) plus row 22 (sources_dark_persistent, a dark high-volume source stays named); pinned by tests/migrations/173-ops-sources-dark-persistent.test.ts
       "173_ops_sources_dark_persistent.sql",
+      // 180 repeats 148's function body verbatim (its VALUES-list copy of BIAS_TO_ZONE in zmap) except two CTEs, one join and the HAVING of `pairs` (the rare-stem tier); pinned by tests/migrations/180-blindspot-sibling-rare-tier.test.ts
+      "180_blindspot_sibling_rare_tier.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

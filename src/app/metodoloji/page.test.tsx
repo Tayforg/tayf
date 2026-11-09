@@ -263,11 +263,18 @@ describe("/metodoloji page", () => {
 
     // "en az yarısı" is the word form of minJaccard; pin the number it stands for.
     expect(SIBLING_VETO.minJaccard).toBe(0.5);
+    // the rare tier's numbers, spelled once so a change to a constant shows up here too
+    expect(SIBLING_VETO.looseMinJaccard).toBe(0.3);
+    expect(SIBLING_VETO.rareMaxDocShare).toBe(0.0025);
+    expect(SIBLING_VETO.rareMinShared).toBe(2);
+    expect(SIBLING_VETO.looseMinShared).toBe(3);
     const sentences = [
       "Aynı olay bazen neredeyse aynı başlıkla ikinci bir kümeye düşer.",
       // h62-methodology-1: since 2026-11-02 (migration 148) the search also covers
       // voting-source articles that sit in no cluster; the old "diğer kümelerde" is gone.
       `Bu yüzden ${SIBLING_VETO.windowHours} saat içinde yayımlanmış oy veren kaynak (haber kuruluşu ya da ajans) haberleri arasında, başka bir kümede yer alanlar da hiçbir kümeye girmemiş olanlar da dahil, başlığı büyük ölçüde örtüşenler de aranır (kümeleyici yalnızca politika ve son dakika haberlerini aldığından, karşı tarafın dünya, genel ya da yaşam kategorisinde verdiği haber çoğu zaman hiçbir kümede değildir): iki başlığın kelime kökleri karşılaştırılır (${SIBLING_VETO.tokenMinLen} harften kısa kelimeler sayılmaz, kök = kelimenin ilk ${SIBLING_VETO.stemLen} harfi); ortak köklerin sayısı en az ${SIBLING_VETO.minShared} olmalı ve iki başlıktaki tüm köklerin (ortak olanlar bir kez sayılır) en az yarısını oluşturmalı.`,
+      // h85-blindspotprecision-1 (migration 180): the rare-stem tier, every number from SIBLING_VETO.
+      `Ortak köklerin payı yarıdan azsa da en az %${Math.round(SIBLING_VETO.looseMinJaccard * 100)} ise ve iki başlık, aranan haberlerin başlıklarının en çok %${(SIBLING_VETO.rareMaxDocShare * 100).toLocaleString("tr-TR")}'inde geçen en az ${SIBLING_VETO.rareMinShared} seyrek kökü paylaşıyorsa (ortak köklerin sayısı yine en az ${SIBLING_VETO.looseMinShared} olmalı) haberler yine aynı olay sayılır.`,
       "Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.",
     ];
     for (const sentence of sentences) expect(text).toContain(sentence);
