@@ -27,9 +27,17 @@ import type { VercelConfig } from "@vercel/config/v1";
  *
  *   - `/api/cron/digest` — Weekly newsletter: top 5 politics clusters +
  *     the most lopsided blindspot, mailed to confirmed subscribers due
- *     for a resend (never sent, or last sent 6+ days ago). Fires
- *     Saturday 09:00 TRT (06:00 UTC). Fail-closed against a missing
- *     `CRON_SECRET`. See `src/app/api/cron/digest/route.ts`.
+ *     for a resend (never sent, or last sent more than 5 days 18 hours ago).
+ *     Fires Saturday 09:00 TRT (06:00 UTC) and again Sunday 09:00 TRT:
+ *     Saturday sends, Sunday retries only what Saturday could not (a send
+ *     Resend kept rate limiting, or rows left over once the send-time budget
+ *     ran out). Delivery is at-least-once: Saturday's stamps keep the Sunday
+ *     run from mailing most subscribers twice, but a mail Resend accepted
+ *     whose stamp was never written (a send in flight at a platform kill, a
+ *     fetch that timed out after Resend accepted it, a stamp that failed
+ *     twice) can be mailed again by Sunday's tick. Same route, same bearer.
+ *     Fail-closed against a missing `CRON_SECRET`. See
+ *     `src/app/api/cron/digest/route.ts`.
  *
  *   - `/api/cron/fact-checks` — "Bu konuda doğrulama": fetches Teyit,
  *     Doğruluk Payı and Malumatfuruş's RSS feeds, upserts new fact-check
@@ -79,7 +87,7 @@ const config: VercelConfig = {
   regions: ["lhr1"],
   crons: [
     { path: "/api/cron/headline", schedule: "*/5 * * * *" },
-    { path: "/api/cron/digest", schedule: "0 6 * * 6" },
+    { path: "/api/cron/digest", schedule: "0 6 * * 6,0" },
     { path: "/api/cron/fact-checks", schedule: "23 * * * *" },
     { path: "/api/cron/social", schedule: "*/20 5-20 * * *" },
     { path: "/api/cron/alerts-webhooks", schedule: "*/10 * * * *" },

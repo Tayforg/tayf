@@ -680,6 +680,123 @@ describe("replay of the audited published rows (keyword-v2)", () => {
   });
 });
 
+/**
+ * Two real fact-check/cluster pairs that candidate retrieval never scored (h87-factchecks-1, read 2026-11-09).
+ * The cron kept the 25 LARGEST clusters matching the title's OR query, and a small same-event cluster
+ * (4 and 3 articles) ranked far below that line: the Peru piece's cluster was #139 of 315 by article count,
+ * the Resmi Gazete piece's cluster was beyond 25 as well. Migration 181 now takes the 25 best by ts_rank_cd.
+ * The matcher was never the problem: both pairs score publish here, with the real headlines and member
+ * titles of the stored clusters (506da2d9 and 903f9541), which is what these two cases pin.
+ */
+interface MissedPair {
+  id: string;
+  factCheckTitle: string;
+  headline: string;
+  memberTitles: string[];
+  score: number;
+  matched: string[];
+  distinctTerms: number;
+}
+
+const MISSED_BY_SIZE_ORDER_PAIRS: MissedPair[] = [
+  {
+    id: "506da2d9",
+    // Teyit f8a58b4b, 2026-10-09: four shadow links, none to this cluster.
+    factCheckTitle: "Peru'da Hitler Mussolini adlı bir aday belediye başkanı seçildi",
+    headline: "Sol aday Hitler Mussolini Peru'da yerel seçimi kazandı",
+    memberTitles: [
+      "Belediye başkanlığı seçimini Hitler Mussolini Simeon Flores kazandı",
+      "Sol aday Hitler Mussolini Peru'da yerel seçimi kazandı",
+      "Peru’da Hitler Mussolini Simeon Flores, sosyal demokrat partiden belediye başkanı oldu",
+      "Peru'da solcu Hitler Mussolini belediye başkanı seçildi",
+    ],
+    score: 0.8,
+    matched: ["peru", "hitle", "musso", "aday", "beled", "baska"],
+    distinctTerms: 5,
+  },
+  {
+    id: "903f9541",
+    // Teyit 28f0f694, 2026-10-14: four shadow links, none to this cluster.
+    factCheckTitle: "Sosyal medyada yaşa takılanlar: Yaş kısıtlaması Resmi Gazete’de",
+    headline: "Resmi Gazete'de yayımlandı: Sosyal medyada 15 yaş Şartı",
+    memberTitles: [
+      "Resmi Gazete'de yayımlandı: 15 yaşını doldurmamış kimseler sosyal medya hesabı açamayacak",
+      "Resmi Gazete'de yayımlandı: Sosyal medyada 15 yaş Şartı",
+      "Resmi Gazete'de yayımlandı: Sosyal medyaya 15 sınırı getirildi",
+    ],
+    score: 0.7,
+    matched: ["medya", "yas", "resmi", "gazet"],
+    distinctTerms: 3,
+  },
+];
+
+describe("pairs the size-ordered candidate cut never scored (h87-factchecks-1)", () => {
+  it.each(MISSED_BY_SIZE_ORDER_PAIRS)(
+    "pair $id is an on-topic publish once it reaches the matcher: the matcher was never the problem",
+    (pair) => {
+      const t = extractFactCheckTerms(pair.factCheckTitle);
+      const r = scoreCluster(t, doc(pair.id, pair.headline, pair.memberTitles));
+      expect(r.decision).toBe("publish");
+      expect(r.score).toBe(pair.score);
+      expect(r.matched).toEqual(pair.matched);
+      expect(r.distinctTerms).toBe(pair.distinctTerms);
+      expect(r.distinctTerms).toBeGreaterThanOrEqual(MIN_MATCHED_TERMS);
+      expect(r.score).toBeGreaterThanOrEqual(PUBLISH_MIN_SCORE);
+    },
+  );
+
+  it("rankMatches puts each of them first and publishes it next to an unrelated same-word cluster", () => {
+    for (const pair of MISSED_BY_SIZE_ORDER_PAIRS) {
+      const t = extractFactCheckTerms(pair.factCheckTitle);
+      const unrelated = doc("unrelated", "Belediye başkanı yeni bir aday gösterdi", []);
+      const ranked = rankMatches(t, [unrelated, doc(pair.id, pair.headline, pair.memberTitles)]);
+      expect(ranked[0]?.clusterId).toBe(pair.id);
+      expect(ranked[0]?.decision).toBe("publish");
+    }
+  });
+
+  it("the Peru fact-check's search query is the six-word OR query that matches 315 clusters", () => {
+    // 315 clusters match this query inside the cron's window, so a limit of 25 has to be a relevance cut, not a size cut.
+    const t = extractFactCheckTerms(MISSED_BY_SIZE_ORDER_PAIRS[0]!.factCheckTitle);
+    expect(buildFtsQuery(t)).toBe("hitler or mussolini or peru or adlı or aday or belediye");
+  });
+});
+
+/**
+ * SEC-factcheck-autopublish-fp-1: the matcher's own 'publish' line (0.6 with 3 distinct terms) lets a pair
+ * through that is NOT the same claim. Read 2026-11-09 from the stored rows: Teyit 29c5930e is about a clip said
+ * to show a carrier strike, cluster 087390a8 is about satellite images of the damage to US bases. Same war, two
+ * claims. Once migration 181 ranks candidates by relevance, such a cluster reaches the matcher, so the cron
+ * (src/app/api/cron/fact-checks/route.ts) holds an RPC-sourced pair below RPC_PUBLISH_MIN_SCORE = 0.7 as a
+ * shadow row. match.ts and PUBLISH_MIN_SCORE stay as they are; this pin documents why the route floor exists.
+ */
+describe("a 0.6 publish that is a different claim (SEC-factcheck-autopublish-fp-1)", () => {
+  const IRAN_FACT_CHECK_TITLE =
+    "Görüntülerin İran'ın ABD uçak gemisini vurduğunu anlatan belgeselden olduğu iddiası";
+  const IRAN_HEADLINE =
+    "Uydu görüntüleriyle incelendi: İran'ın vurduğu ABD üslerindeki hasar milyarlarca doları buldu";
+  const IRAN_MEMBER_TITLES = [
+    IRAN_HEADLINE,
+    "İran'dan ABD'ye ağır darbe! Orta Doğu'daki milyarlarca dolarlık zarar ortaya çıktı",
+  ];
+
+  it("Iran/ABD pair 29c5930e -> 087390a8 scores 0.6 with 3 distinct terms and decision 'publish'", () => {
+    const t = extractFactCheckTerms(IRAN_FACT_CHECK_TITLE);
+    const r = scoreCluster(t, doc("087390a8", IRAN_HEADLINE, IRAN_MEMBER_TITLES));
+    expect(r.score).toBe(0.6);
+    expect(r.distinctTerms).toBe(3);
+    expect(r.decision).toBe("publish");
+    expect(r.matched).toEqual(["gorun", "iran", "abd", "vurdu"]);
+  });
+
+  it("rankMatches keeps it as the one 'publish' decision of its fact-check, which is what the route floor then holds", () => {
+    const t = extractFactCheckTerms(IRAN_FACT_CHECK_TITLE);
+    const ranked = rankMatches(t, [doc("087390a8", IRAN_HEADLINE, IRAN_MEMBER_TITLES)]);
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0]).toMatchObject({ clusterId: "087390a8", score: 0.6, decision: "publish" });
+  });
+});
+
 // Sanity: shadow threshold below publish threshold, keeps a two-tier gate.
 describe("thresholds", () => {
   it("SHADOW_MIN_SCORE is strictly below PUBLISH_MIN_SCORE", () => {

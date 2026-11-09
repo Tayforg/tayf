@@ -9,6 +9,15 @@ import {
   repairJoinedImageSegment,
   upgradeImageVariant,
 } from "../../../supabase/functions/_shared/image-url.ts";
+import {
+  extractHeroImageFromHtml,
+  isValidImageUrl as isValidOgImageUrl,
+} from "../../../supabase/functions/_shared/og-image.ts";
+import { normalizeItem } from "../../../supabase/functions/_shared/rss/normalize.ts";
+import {
+  isPlaceholderImageUrl as renderIsPlaceholderImageUrl,
+  optimizedThumbUrl,
+} from "../../../src/lib/images/image-url";
 import { isAllowedRemoteImageUrl } from "../../../src/lib/images/remote-image-hosts";
 import { expectCpuUnder } from "../../_helpers/linear-time";
 
@@ -1136,7 +1145,7 @@ describe("isPlaceholderImageUrl: five stand-ins that slipped through (h73-ingest
     expect(isPlaceholderImageUrl(url.replace(host, host.toUpperCase()))).toBe(true);
   });
 
-  it("keeps every pre-existing asset key and adds exactly the two new exact keys", () => {
+  it("keeps every pre-existing asset key and adds exactly the two h73 exact keys (and, since h87, nine more)", () => {
     for (const k of [
       "image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg",
       "img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg",
@@ -1152,7 +1161,8 @@ describe("isPlaceholderImageUrl: five stand-ins that slipped through (h73-ingest
     expect(
       PLACEHOLDER_IMAGE_ASSETS.has("imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg"),
     ).toBe(true);
-    expect(PLACEHOLDER_IMAGE_ASSETS.size).toBe(9);
+    // 9 up to h73 + the 9 exact keys of h87-imagerelevance-1.
+    expect(PLACEHOLDER_IMAGE_ASSETS.size).toBe(18);
   });
 
   it("the two new exact keys are already in normalised form", () => {
@@ -1297,5 +1307,346 @@ describe("isPlaceholderImageUrl: five stand-ins that slipped through (h73-ingest
         expect(isPlaceholderImageUrl(`https://cdn.x/${name}.jpg`)).toBe(false);
       }
     }, 8000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h87-imagerelevance-1 (2026-11-09): haberler-com byline avatars and twelve more
+// 'SON DAKIKA' stand-in cards that the placeholder filter missed. Read-only prod
+// replay of the trailing 7 days (DISTINCT titles per image_url):
+//
+//   avatars   foto.haberler.com/genel/editor/...   20 rows over 4 URLs
+//             (a 150 x 150 head-and-shoulders portrait of a byline writer: it was
+//             the hero of the El-Sayed story)
+//   cards     karar 1944983 (16), istiklal 658385 (15), cumhuriyet 5492ecf8 (12),
+//             cumhuriyet 3caba742 (11), haber7 0MFPK (9), mynet (7), milliyet (6),
+//             odatv son-dakika-emwd (5), cumhuriyet 327eee1c (5), karar 1944031
+//             (5), birgun (5), trt (3); each URL is used by ONE source
+//
+// Nine cards are exact assets (the file name says nothing), four more share a
+// basename SHAPE, and the avatars are a host + path-prefix family.
+// ---------------------------------------------------------------------------
+
+describe("isPlaceholderImageUrl: byline avatars and stand-in cards (h87-imagerelevance-1)", () => {
+  const AVATARS: ReadonlyArray<readonly [string, string]> = [
+    ["haberler-com editor-erdem-aksoy-895893", "https://foto.haberler.com/genel/editor/2026/04/16/editor-erdem-aksoy-895893.jpg"],
+    ["haberler-com editor--821788", "https://foto.haberler.com/genel/editor/2021/04/24/editor--821788.jpg"],
+    ["haberler-com editor-osman-demir-833073", "https://foto.haberler.com/genel/editor/2026/09/23/editor-osman-demir-833073.jpg"],
+    ["haberler-com editor--982692", "https://foto.haberler.com/genel/editor/2021/05/12/editor--982692.jpg"],
+    ["haberler-com upper-case host", "https://FOTO.HABERLER.COM/genel/editor/2026/04/16/editor-erdem-aksoy-895893.jpg"],
+  ];
+
+  const CARDS: ReadonlyArray<readonly [string, string]> = [
+    ["cumhuriyet 5492ecf8", "https://media.cumhuriyet.com.tr/Archive/5492ecf8-cc2b-420c-8153-7194d97c80d6.jpg"],
+    ["cumhuriyet 3caba742", "https://media.cumhuriyet.com.tr/Archive/3caba742-39e3-4f34-94a6-9c8330ef134e.jpg"],
+    ["cumhuriyet 327eee1c", "https://media.cumhuriyet.com.tr/Archive/327eee1c-27a4-4538-8427-00a4b7d78e7c.jpg"],
+    ["karar 1944983", "https://cdn.karar.com/news/1944983.jpg"],
+    ["karar 1944031", "https://cdn.karar.com/news/1944031.jpg"],
+    ["istiklal 658385", "https://cdn.istiklal.com.tr/news/658385.jpg"],
+    ["mynet 18971279", "https://imgrosetta.mynet.com.tr/file/18971279/18971279-1600x900.jpg"],
+    ["milliyet 66f66770", "https://image.milimaj.com/i/milliyet/75/460x340/66f66770793ca70899d91e75.jpg"],
+    ["haber7 0MFPK (mid-path //)", "https://i20.haber7.net/resize/1280x720//haber/haber7/photos/2024/32/0MFPK_1723247439_4294.jpg"],
+    ["odatv son-dakika-emwd", "https://img.odatv.com/rcman/Cw1280h720q95gc/storage/files/images/2026/09/13/son-dakika-emwd.jpg"],
+    ["odatv son-dakika-yllv", "https://img.odatv.com/rcman/Cw1280h720q95gc/storage/files/images/2026/09/13/son-dakika-yllv.jpg"],
+    ["birgun birgun-son-dakika-haberi", "https://static.birgun.net/resim/genel/birgun-son-dakika-haberi.jpg"],
+    ["trt son-dakika-dakika-son-dakika-2026652", "https://trthaberstatic.cdn.wp.trt.com.tr/resimler/2026000/son-dakika-dakika-son-dakika-2026652.jpg"],
+    ["haberler-com son-dakika-2_amp", "https://foto.haberler.com/haber/2026/07/03/son-dakika-2_amp.jpg"],
+    ["haberler-com son-dakika-3_amp", "https://foto.haberler.com/haber/2026/07/03/son-dakika-3_amp.jpg"],
+    ["sondakika son-dakika-2_sd", "https://foto.sondakika.com/crop/1210x0/haber/2026/07/03/son-dakika-2_sd.jpg"],
+  ];
+
+  const STORED = [...AVATARS, ...CARDS];
+
+  // The first slash after the host becomes `//`, the doubled leading slash that
+  // normalizeImageUrl collapses (a mid-path `//` such as haber7's is not touched).
+  const doubled = (url: string): string => url.replace(/^(https:\/\/[^/]+)\//, "$1//");
+
+  it("lists 5 avatar spellings and 16 card URLs (the 12 cards of the finding plus their 4 siblings)", () => {
+    expect(AVATARS).toHaveLength(5);
+    expect(CARDS).toHaveLength(16);
+  });
+
+  it.each(STORED)("is true for the stored URL: %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(url)).toBe(true);
+  });
+
+  it.each(STORED)("is true with a query string: %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(`${url}?v=1`)).toBe(true);
+  });
+
+  it.each(STORED)("is true with a doubled leading path slash: %s", (_label, url) => {
+    const d = doubled(url);
+    expect(d).not.toBe(url);
+    expect(isPlaceholderImageUrl(d)).toBe(true);
+  });
+
+  it.each(STORED)("is true for the protocol-relative and http spellings: %s", (_label, url) => {
+    const rest = url.slice("https://".length);
+    expect(isPlaceholderImageUrl(`//${rest}`)).toBe(true);
+    expect(isPlaceholderImageUrl(`http://${rest}`)).toBe(true);
+  });
+
+  it("is true for an upper-case host on every exact asset (the key is lower-cased host + path)", () => {
+    for (const [, url] of CARDS) {
+      const host = url.slice("https://".length).split("/")[0] as string;
+      expect(isPlaceholderImageUrl(url.replace(host, host.toUpperCase()))).toBe(true);
+    }
+  });
+
+  it("is true for the avatar when a resizer wraps it in u=", () => {
+    const [, avatar] = AVATARS[0] as readonly [string, string];
+    expect(isPlaceholderImageUrl(`https://r.x/c1/1/1?u=${avatar}`)).toBe(true);
+    const [, card] = CARDS[3] as readonly [string, string];
+    expect(isPlaceholderImageUrl(`https://r.x/c1/1/1?u=${card}`)).toBe(true);
+  });
+
+  describe("controls: real photos and look-alikes stay false", () => {
+    it.each([
+      ["a real haberler-com amp photo", "https://foto.haberler.com/haber/2026/11/08/cumhurbaskani-erdogan-abd-baskani-trump-ile-20406327_amp.jpg"],
+      ["haberler-com /genel/editoryal/ (the prefix needs the trailing /editor/)", "https://foto.haberler.com/genel/editoryal/a.jpg"],
+      ["haberler-com /genel/ without editor", "https://foto.haberler.com/genel/2026/04/16/a.jpg"],
+      ["a /genel/editor/ path on another host", "https://cdn.example.com/genel/editor/2026/04/16/a.jpg"],
+      ["a look-alike host that merely starts with foto.haberler.com", "https://foto.haberler.com.evil.test/genel/editor/2026/04/16/a.jpg"],
+      ["a host that merely ends with foto.haberler.com", "https://evil-foto.haberler.com/genel/editor/2026/04/16/a.jpg"],
+      ["/genel/editor/ only in the query", "https://foto.haberler.com/haber/2026/11/08/a.jpg?p=/genel/editor/x.jpg"],
+      ["/genel/editor/ not at the start of the path", "https://foto.haberler.com/a/genel/editor/x.jpg"],
+      ["a real karar photo", "https://cdn.karar.com/news/1946898.jpg"],
+      ["a real cumhuriyet photo", "https://media.cumhuriyet.com.tr/Archive/b3387a3c-5638-4451-919f-3f1b6e90a8c4.jpg"],
+      ["a real istiklal photo (same path family as the card)", "https://cdn.istiklal.com.tr/news/658386.jpg"],
+      ["a real mynet photo", "https://imgrosetta.mynet.com.tr/file/18971280/18971280-1600x900.jpg"],
+      ["a real milliyet photo", "https://image.milimaj.com/i/milliyet/75/460x340/66f66770793ca70899d91e76.jpg"],
+      ["a real haber7 photo with the same resize prefix", "https://i20.haber7.net/resize/1280x720//haber/haber7/photos/2024/32/0MFPL_1723247439_4294.jpg"],
+      ["the haber7 card without its mid-path //", "https://i20.haber7.net/resize/1280x720/haber/haber7/photos/2024/32/0MFPK_1723247439_4294.jpg"],
+      ["ekonomim slug starting with son-dakika", "https://img.ekonomim.com/rcman/Cw1280h720q95gc/storage/files/images/2026/10/27/son-dakika-bakirkoy-belediyesine-operasyon-68-supheli-hakkinda-gozalti-karari-zjph_cover.jpg"],
+      ["haber7 slug with son_dakika", "https://i20.haber7.net/resize/1280x720//haber/haber7/photos/2026/45/son_dakika_kademeli_emeklilik_asgari_ucret_ve_emekli_maasinda_son_durum_belli_oldu_1793782990_769.jpg"],
+      ["a real sondakika.com _osd photo", "https://foto.sondakika.com/haber/2026/11/04/istanbul-da-sabah-yagisiyla-trafik-yogunlugu-20393350_osd.jpg"],
+    ])("is false for %s", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    });
+  });
+
+  describe("path-prefix family: foto.haberler.com /genel/editor/", () => {
+    it("matches the prefix case-insensitively (path and host)", () => {
+      expect(isPlaceholderImageUrl("https://foto.haberler.com/GENEL/Editor/2026/04/16/x.jpg")).toBe(true);
+      expect(isPlaceholderImageUrl("https://Foto.Haberler.COM/genel/editor/x.jpg")).toBe(true);
+    });
+
+    it("matches any file under the prefix, including an unseen name", () => {
+      expect(isPlaceholderImageUrl("https://foto.haberler.com/genel/editor/2027/01/01/editor-yeni-yazar-999999.jpg")).toBe(true);
+      expect(isPlaceholderImageUrl("https://foto.haberler.com/genel/editor/a.png")).toBe(true);
+    });
+
+    it("does not match the bare directory name without a trailing slash", () => {
+      expect(isPlaceholderImageUrl("https://foto.haberler.com/genel/editor")).toBe(false);
+    });
+
+    it("is not an exact asset: the family is not in PLACEHOLDER_IMAGE_ASSETS", () => {
+      for (const k of PLACEHOLDER_IMAGE_ASSETS) {
+        expect(k).not.toMatch(/\/genel\/editor/);
+      }
+    });
+  });
+
+  describe("exact asset keys", () => {
+    const NEW_KEYS = [
+      "media.cumhuriyet.com.tr/Archive/5492ecf8-cc2b-420c-8153-7194d97c80d6.jpg",
+      "media.cumhuriyet.com.tr/Archive/3caba742-39e3-4f34-94a6-9c8330ef134e.jpg",
+      "media.cumhuriyet.com.tr/Archive/327eee1c-27a4-4538-8427-00a4b7d78e7c.jpg",
+      "cdn.karar.com/news/1944983.jpg",
+      "cdn.karar.com/news/1944031.jpg",
+      "cdn.istiklal.com.tr/news/658385.jpg",
+      "imgrosetta.mynet.com.tr/file/18971279/18971279-1600x900.jpg",
+      "image.milimaj.com/i/milliyet/75/460x340/66f66770793ca70899d91e75.jpg",
+      "i20.haber7.net/resize/1280x720//haber/haber7/photos/2024/32/0MFPK_1723247439_4294.jpg",
+    ];
+
+    it("holds exactly the nine new keys", () => {
+      for (const k of NEW_KEYS) expect(PLACEHOLDER_IMAGE_ASSETS.has(k)).toBe(true);
+      expect(new Set(NEW_KEYS).size).toBe(9);
+    });
+
+    it("every new key is already in normalised form (the haber7 mid-path // survives)", () => {
+      for (const k of NEW_KEYS) {
+        expect(normalizeImageUrl("https://" + k)).toBe("https://" + k);
+      }
+    });
+  });
+
+  describe("basename shapes of the odatv, birgun, trt, haberler-com and sondakika cards", () => {
+    it.each([
+      "https://cdn.x/img/son-dakika-emwd.jpg",
+      "https://cdn.x/img/son_dakika_yllv.png",
+      "https://cdn.x/img/SON-DAKIKA-ABCD.JPG",
+      "https://cdn.x/img/birgun-son-dakika-haberi.jpg",
+      "https://cdn.x/img/birgun-son-dakika-haber.jpg",
+      "https://cdn.x/img/birgun_son_dakika.jpg",
+      "https://cdn.x/img/ab-son-dakika.jpg",
+      "https://cdn.x/img/son-dakika-dakika-son-dakika-2026652.jpg",
+      "https://cdn.x/img/son-dakika-son.jpg",
+      "https://cdn.x/img/son_dakika_dakika_son_dakika_12.jpg",
+      "https://cdn.x/img/son-dakika-2_amp.jpg",
+      "https://cdn.x/img/son-dakika-3_amp.jpg",
+      "https://cdn.x/img/son-dakika-2_sd.jpg",
+      "https://cdn.x/img/son_dakika_12_sd.jpg",
+      "https://cdn.x/img/SON-DAKIKA-2_AMP.JPG",
+    ])("is true for %s", (url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(true);
+    });
+
+    it.each([
+      ["son-dakika plus a five-letter word", "https://cdn.x/img/son-dakika-depremi.jpg"],
+      ["son-dakika plus a three-letter word", "https://cdn.x/img/son-dakika-abc.jpg"],
+      ["son-dakika plus four characters that are not all letters", "https://cdn.x/img/son-dakika-ab12.jpg"],
+      ["a slug that ends with son-dakika after a long prefix", "https://cdn.x/img/erdogan-aciklama-son-dakika.jpg"],
+      ["a 13-character prefix before son-dakika", "https://cdn.x/img/abcdefghijklm-son-dakika.jpg"],
+      ["a prefix before son-dakika that holds a dot-free dash run", "https://cdn.x/img/ab-cd-son-dakika.jpg"],
+      ["son-dakika-haberi after a slug word", "https://cdn.x/img/ab-son-dakika-haberi-gundem.jpg"],
+      ["son-dakika repeated five more times", "https://cdn.x/img/son-dakika-son-dakika-son-dakika-son-dakika-son-dakika-son.jpg"],
+      ["son-dakika-dakika followed by a 9-digit id", "https://cdn.x/img/son-dakika-dakika-123456789.jpg"],
+      ["son-dakika-dakika followed by a word", "https://cdn.x/img/son-dakika-dakika-aciklama.jpg"],
+      ["son-dakika-<3 digits>_amp", "https://cdn.x/img/son-dakika-123_amp.jpg"],
+      ["son-dakika-2_amp-extra", "https://cdn.x/img/son-dakika-2_amp-extra.jpg"],
+      ["son-dakika-2_osd (a real-photo suffix)", "https://cdn.x/img/son-dakika-2_osd.jpg"],
+      ["a real photo that ends in _amp", "https://cdn.x/img/deprem-sonrasi-20384346_amp.jpg"],
+      ["a yeni-son-dakika-2_amp slug", "https://cdn.x/img/yeni-son-dakika-2_amp.jpg"],
+      ["a /son-dakika-emwd/ directory holding a real file", "https://cdn.x/son-dakika-emwd/2026/11/foto-123.jpg"],
+    ])("is false for %s", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    });
+
+    it("applies the new shapes to the wrapped origin of a u= resizer URL", () => {
+      expect(isPlaceholderImageUrl("https://r.x/c1/1/1?u=https://o.x/a/son-dakika-emwd.jpg")).toBe(true);
+      expect(isPlaceholderImageUrl("https://r.x/c1/1/1?u=https://o.x/a/son-dakika-2_amp.jpg")).toBe(true);
+      expect(isPlaceholderImageUrl("https://r.x/c1/1/1?u=https://o.x/a/real-photo.jpg")).toBe(false);
+    });
+
+    it("a placeholder-shaped name that only appears in the query is false", () => {
+      expect(isPlaceholderImageUrl("https://cdn.x/a.jpg?name=son-dakika-emwd.jpg")).toBe(false);
+    });
+  });
+
+  it("does not loosen the pre-existing rules: the old false cases still hold", () => {
+    for (const url of [
+      "https://cdn.x/2026/10/erdogan-son-dakika-aciklama-18123456.jpg",
+      "https://cdn.x/2026/10/son-dakika-erdogan-aciklama-18123456.jpg",
+      "https://cdn.x/son-dakika-deprem-oldu.jpg",
+      "https://cdn.x/yeni-sondakika-gelisme.jpg",
+      "https://cdn.x/yeni-son-dakika_amp.jpg",
+      "https://cdn.x/yeni-son-dakika_sd.jpg",
+      "https://cdn.x/son-dakika-sd.jpg",
+      "https://cdn.x/2026/11/son-dakika-sd-kart-18123456.jpg",
+    ]) {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    }
+  });
+
+  it("stays linear on adversarial basenames and paths of the new rules", () => {
+    const names = [
+      // Over MAX_BASENAME_LENGTH: refused before any pattern runs.
+      `son-dakika${"-dakika".repeat(5000)}x`,
+      `${"a".repeat(20000)}-son-dakika-haberix`,
+      `son-dakika-2${"_amp".repeat(5000)}x`,
+      // Within the 200-character budget: the patterns really run.
+      `son-dakika${"-dakika".repeat(25)}x`,
+      `son-dakika${"-son".repeat(60)}-12x`,
+      `${"a".repeat(150)}-son-dakika-haberix`,
+      `a${"-son-dakika".repeat(15)}x`,
+      `son-dakika-1${"_amp".repeat(40)}x`,
+      `son-dakika-${"1".repeat(150)}x`,
+    ];
+    expectCpuUnder(() => {
+      for (const name of names) {
+        expect(isPlaceholderImageUrl(`https://cdn.x/${name}.jpg`)).toBe(false);
+      }
+      // A very long path under the avatar prefix is still one startsWith.
+      expect(isPlaceholderImageUrl(`https://foto.haberler.com/genel/editor/${"a/".repeat(20000)}x.jpg`)).toBe(true);
+      expect(isPlaceholderImageUrl(`https://foto.haberler.com/genel/editoryal/${"a/".repeat(20000)}x.jpg`)).toBe(false);
+    }, 8000);
+  });
+
+  // The module is shared by three consumers; each one must see the new rules.
+  describe("the three consumers of the shared module", () => {
+    const AVATAR = "https://foto.haberler.com/genel/editor/2026/04/16/editor-erdem-aksoy-895893.jpg";
+    const CARD = "https://cdn.karar.com/news/1944983.jpg";
+    const REAL = "https://foto.haberler.com/haber/2026/11/08/cumhurbaskani-erdogan-abd-baskani-trump-ile-20406327_amp.jpg";
+    const source = {
+      id: "src-h87",
+      name: "Test Source",
+      slug: "test",
+      url: "https://example.test",
+      rss_url: "https://example.test/rss",
+    };
+    const item = (extra: Record<string, unknown>) => ({
+      title: "Afyonkarahisar'da dehşet: araç içinde 5 kişinin cansız bedeni bulundu",
+      link: "https://example.test/haber/1",
+      ...extra,
+    });
+
+    describe("render: src/lib/images/image-url.ts re-export (read-time Next filter)", () => {
+      it("is the same verdict as the shared function", () => {
+        for (const u of [AVATAR, CARD, REAL, "https://cdn.karar.com/news/1946898.jpg"]) {
+          expect(renderIsPlaceholderImageUrl(u)).toBe(isPlaceholderImageUrl(u));
+        }
+        expect(renderIsPlaceholderImageUrl(AVATAR)).toBe(true);
+        expect(renderIsPlaceholderImageUrl(CARD)).toBe(true);
+        expect(renderIsPlaceholderImageUrl(REAL)).toBe(false);
+      });
+
+      it("optimizedThumbUrl refuses an avatar and a card but still serves a real photo", () => {
+        expect(optimizedThumbUrl(AVATAR, 128)).toBeNull();
+        expect(optimizedThumbUrl(CARD, 128)).toBeNull();
+        expect(optimizedThumbUrl(REAL, 128)).not.toBeNull();
+      });
+    });
+
+    describe("ingest: supabase/functions/_shared/rss/normalize.ts", () => {
+      it.each([
+        ["an avatar enclosure", { enclosure: { url: AVATAR, type: "image/jpeg" } }],
+        ["a card enclosure", { enclosure: { url: CARD, type: "image/jpeg" } }],
+        ["a media:thumbnail avatar", { mediaThumbnail: { $: { url: AVATAR } } }],
+        ["an itemImage card", { itemImage: CARD }],
+        ["an inline <img> avatar", { content: `<p><img src="${AVATAR}"></p>` }],
+      ])("stores NULL for %s (the NULL queues the og:image backfill)", (_label, extra) => {
+        expect(normalizeItem(source, item(extra))?.image_url).toBeNull();
+      });
+
+      it("lets a real media:thumbnail behind a placeholder enclosure win", () => {
+        const row = normalizeItem(
+          source,
+          item({
+            enclosure: { url: AVATAR, type: "image/jpeg" },
+            mediaThumbnail: { $: { url: REAL } },
+          }),
+        );
+        expect(row?.image_url).toBe(REAL);
+      });
+
+      it("still stores a real photo untouched", () => {
+        const row = normalizeItem(source, item({ enclosure: { url: REAL, type: "image/jpeg" } }));
+        expect(row?.image_url).toBe(REAL);
+      });
+    });
+
+    describe("image-consumer: the og:image gate (_shared/og-image.ts, then isPlaceholderImageUrl in the consumer)", () => {
+      it("og-image isValidImageUrl rejects the avatar and the card, accepts a real photo", () => {
+        expect(isValidOgImageUrl(AVATAR)).toBe(false);
+        expect(isValidOgImageUrl(CARD)).toBe(false);
+        expect(isValidOgImageUrl(REAL)).toBe(true);
+      });
+
+      it("extractHeroImageFromHtml falls through a placeholder og:image to the real twitter:image", () => {
+        const html =
+          "<html><head>" +
+          `<meta property="og:image" content="${CARD}" />` +
+          `<meta name="twitter:image" content="${REAL}" />` +
+          "</head></html>";
+        expect(extractHeroImageFromHtml(html)).toBe(REAL);
+      });
+
+      it("extractHeroImageFromHtml returns null when the only candidate is an avatar", () => {
+        const html = `<html><head><meta property="og:image" content="${AVATAR}" /></head></html>`;
+        expect(extractHeroImageFromHtml(html)).toBeNull();
+      });
+    });
   });
 });

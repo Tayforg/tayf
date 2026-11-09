@@ -17,6 +17,14 @@ export interface DigestClusterItem {
   title: string;
   summary: string;
   /**
+   * The attribution heading for `summary` ("Özet — <Outlet>", "Özet — Kaynak
+   * açıklaması"), exactly `summaryLabel(attribution)` from
+   * src/lib/clusters/summary-attribution.ts (the cluster page's heading). The
+   * summary is one outlet's words (BL-13): the route sets this whenever it sets a
+   * summary, and null with an empty one (h87-newsletter-1).
+   */
+  summaryLabel: string | null;
+  /**
    * Every member of the cluster. The zone bar above the count is drawn from
    * `biasDistribution` (voting sources only), so the line prints both through
    * `sourceCountHead`: "16 kaynak (10 sınıflandırılmış)" (h66-statsparity-1).
@@ -29,6 +37,8 @@ export interface DigestBlindspotItem {
   id: string;
   title: string;
   summary: string;
+  /** Same contract as {@link DigestClusterItem.summaryLabel}. */
+  summaryLabel: string | null;
   biasDistribution: BiasDistribution;
   dominantZone: MediaDnaZone;
   /**
@@ -94,6 +104,25 @@ function zoneBar(distribution: BiasDistribution): string {
   );
 }
 
+/**
+ * The excerpt paragraph, preceded by its attribution heading when there is one.
+ * Empty when there is no summary: the heading never stands alone. #52525b passes
+ * AA on #fff (the story rows) and on #fafafa (the Kör Nokta card).
+ */
+function summaryBlock(summary: string, summaryLabel: string | null): string {
+  if (summary.length === 0) return "";
+  const hasLabel = summaryLabel !== null && summaryLabel.length > 0;
+  const label = hasLabel
+    ? `<p style="margin:6px 0 0;color:#52525b;font-size:12px;font-weight:600;font-family:Arial,Helvetica,sans-serif;">
+          ${escapeHtml(summaryLabel)}
+        </p>
+        `
+    : "";
+  return `${label}<p style="margin:${hasLabel ? "2px" : "6px"} 0 0;color:#52525b;font-size:14px;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
+          ${escapeHtml(summary)}
+        </p>`;
+}
+
 function storyBlock(item: DigestClusterItem, siteUrl: string): string {
   const link = `${siteUrl}/cluster/${encodeURIComponent(item.id)}`;
   return `
@@ -102,13 +131,7 @@ function storyBlock(item: DigestClusterItem, siteUrl: string): string {
         <a href="${link}" style="color:#18181b;text-decoration:none;font-size:17px;font-weight:600;line-height:1.35;font-family:Georgia,'Times New Roman',serif;">
           ${escapeHtml(item.title)}
         </a>
-        ${
-          item.summary.length > 0
-            ? `<p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
-          ${escapeHtml(item.summary)}
-        </p>`
-            : ""
-        }
+        ${summaryBlock(item.summary, item.summaryLabel)}
         ${zoneBar(item.biasDistribution)}
         <p style="margin:2px 0 0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
           ${sourceCountHead(item.articleCount, zoneCountsOf(item.biasDistribution))}
@@ -142,13 +165,7 @@ function blindspotBlock(item: DigestBlindspotItem, siteUrl: string): string {
         <a href="${link}" style="color:#18181b;text-decoration:none;font-size:17px;font-weight:600;line-height:1.35;font-family:Georgia,'Times New Roman',serif;">
           ${escapeHtml(item.title)}
         </a>
-        ${
-          item.summary.length > 0
-            ? `<p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
-          ${escapeHtml(item.summary)}
-        </p>`
-            : ""
-        }
+        ${summaryBlock(item.summary, item.summaryLabel)}
         ${zoneBar(item.biasDistribution)}
         <p style="margin:2px 0 0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
           ${zoneCopy}

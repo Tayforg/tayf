@@ -10,6 +10,7 @@ const CLUSTER: DigestClusterItem = {
   id: "c1",
   title: "Meclis bütçe görüşmeleri sürüyor",
   summary: "Muhalefet ve iktidar bütçe kalemlerinde anlaşamadı.",
+  summaryLabel: "Özet — Test Kaynak",
   articleCount: 7,
   biasDistribution: dist({ pro_government: 3, opposition: 4 }),
 };
@@ -18,6 +19,7 @@ const BLINDSPOT: DigestBlindspotItem = {
   id: "b1",
   title: "Tek taraflı haberleşen olay",
   summary: "Sadece bir cephe bu haberi verdi.",
+  summaryLabel: "Özet — Test Kaynak",
   biasDistribution: dist({ pro_government: 9, opposition: 1 }),
   dominantZone: "iktidar",
   dominantPct: 0.9,
@@ -212,6 +214,56 @@ describe("buildDigestHtml", () => {
       expect(marked).toContain("%90");
       expect(marked.replace("16 kaynak (7 sınıflandırılmış)", "7 kaynak")).toBe(bare);
     });
+  });
+
+  // h87-newsletter-1: clusters.summary_tr is one outlet's words (BL-13), so the mail
+  // labels it the way the cluster page does ("Özet — <Outlet>") or hides it. The
+  // label text is `summaryLabel(attribution)`, computed by the route; this module
+  // only places and escapes it.
+  describe("summary attribution label (h87-newsletter-1)", () => {
+    const cases: Array<{
+      name: string;
+      render: (patch: { summary?: string; summaryLabel?: string | null }) => string;
+    }> = [
+      {
+        name: "story block",
+        render: (patch) => buildDigestHtml({ ...BASE, blindspot: null, clusters: [{ ...CLUSTER, ...patch }] }),
+      },
+      {
+        name: "blindspot block",
+        render: (patch) => buildDigestHtml({ ...BASE, clusters: [], blindspot: { ...BLINDSPOT, ...patch } }),
+      },
+    ];
+
+    for (const { name, render } of cases) {
+      describe(name, () => {
+        it("prints the label, and prints it before the excerpt", () => {
+          const html = render({ summary: "Kara para aklama…", summaryLabel: "Özet — Mynet" });
+          expect(html).toContain("Özet — Mynet");
+          expect(html).toContain("Kara para aklama…");
+          expect(html.indexOf("Özet — Mynet")).toBeLessThan(html.indexOf("Kara para aklama"));
+        });
+
+        it("HTML-escapes the label", () => {
+          const html = render({ summary: "Kara para aklama…", summaryLabel: "Özet — <b>X</b>" });
+          expect(html).not.toContain("<b>X</b>");
+          expect(html).toContain("Özet — &lt;b&gt;X&lt;/b&gt;");
+        });
+
+        it("prints no label when the summary is empty, whatever the label says", () => {
+          expect(render({ summary: "", summaryLabel: null })).not.toContain("Özet —");
+          expect(render({ summary: "", summaryLabel: "Özet — Mynet" })).not.toContain("Özet —");
+        });
+
+        it("keeps the excerpt's own wording, with the label's heading style on its own line", () => {
+          const html = render({ summary: "Kara para aklama…", summaryLabel: "Özet — Mynet" });
+          // The label is its own <p> directly in front of the excerpt <p> (excerpt top margin 2px).
+          expect(html).toMatch(
+            /<p style="margin:6px 0 0;color:#52525b;font-size:12px;font-weight:600;font-family:Arial,Helvetica,sans-serif;">\s*Özet — Mynet\s*<\/p>\s*<p style="margin:2px 0 0;color:#52525b;font-size:14px;line-height:1\.5;font-family:Arial,Helvetica,sans-serif;">\s*Kara para aklama…\s*<\/p>/,
+          );
+        });
+      });
+    }
   });
 
   it("omits the blindspot section when there is none", () => {

@@ -283,9 +283,11 @@ export function isOptimizableImageUrl(u: string | null | undefined): boolean {
  * sample (articles published in the trailing 48 h, 2026-10-23, threshold
  * >= 10 titles; a row added later names its own window in its comment).
  *
- * Add a row only after the same query shows it reused across >= 10 titles at
- * a verified source. Names that follow the 'son dakika' / default-photo shape
- * belong in PLACEHOLDER_BASENAME instead, so they need no entry here.
+ * Admission: >= 5 distinct titles at one verified source in a 7-day sample AND
+ * a visual check that the file is a logo or SON DAKİKA card (48 h under-counts
+ * cards that recur every few days). Names that follow the 'son dakika' /
+ * default-photo shape belong in PLACEHOLDER_BASENAME instead, so they need no
+ * entry here.
  */
 export const PLACEHOLDER_IMAGE_ASSETS: ReadonlySet<string> = new Set([
   // cnn-turk: the red CNN TÜRK logo card, 174 distinct titles.
@@ -316,7 +318,41 @@ export const PLACEHOLDER_IMAGE_ASSETS: ReadonlySet<string> = new Set([
   // (iaahbr.tmgrup.com.tr/<crop>?u=<origin>), so the key is the wrapped
   // origin, which holds for every crop of it; 11 distinct titles.
   "iahbr.tmgrup.com.tr/Defaults/Upload/ahbr-default-1754911102530.png",
+  // h87-imagerelevance-1: nine more cards, each checked visually (a red or green
+  // 'SON DAKİKA' card). Distinct titles are over the 7 days to 2026-11-09, and
+  // every URL is used by a single source.
+  // cumhuriyet: Archive card 5492ecf8, 12 distinct titles.
+  "media.cumhuriyet.com.tr/Archive/5492ecf8-cc2b-420c-8153-7194d97c80d6.jpg",
+  // cumhuriyet: Archive card 3caba742, 11 distinct titles.
+  "media.cumhuriyet.com.tr/Archive/3caba742-39e3-4f34-94a6-9c8330ef134e.jpg",
+  // cumhuriyet: Archive card 327eee1c, 5 distinct titles.
+  "media.cumhuriyet.com.tr/Archive/327eee1c-27a4-4538-8427-00a4b7d78e7c.jpg",
+  // karar: red 'SON DAKİKA' card news/1944983, 16 distinct titles.
+  "cdn.karar.com/news/1944983.jpg",
+  // karar: second card news/1944031, 5 distinct titles.
+  "cdn.karar.com/news/1944031.jpg",
+  // istiklal: card news/658385, 15 distinct titles.
+  "cdn.istiklal.com.tr/news/658385.jpg",
+  // mynet: card 18971279 (1600x900), 7 distinct titles.
+  "imgrosetta.mynet.com.tr/file/18971279/18971279-1600x900.jpg",
+  // milliyet: card 66f66770793ca70899d91e75 (460x340), 6 distinct titles.
+  "image.milimaj.com/i/milliyet/75/460x340/66f66770793ca70899d91e75.jpg",
+  // haber7: green 'SON DAKİKA / TÜMSPOR' card, 9 distinct titles. The mid-path
+  // `//` is kept: normalizeImageUrl only collapses LEADING slashes, so this is
+  // the form normalisation produces.
+  "i20.haber7.net/resize/1280x720//haber/haber7/photos/2024/32/0MFPK_1723247439_4294.jpg",
 ]);
+
+// A whole directory of stand-ins on one host: `host` is compared to the
+// lower-case hostname and `prefix` (lower-case, with both slashes) to the start
+// of the lower-cased path. Used where the file names vary but the directory is
+// the signal, so an exact key would miss the next one.
+//   foto.haberler.com/genel/editor/  haberler-com byline avatars, 150-196 px,
+//                                    20 rows / 4 URLs in 7 days to 2026-11-09.
+//                                    Real photos live under /haber/YYYY/MM/DD/.
+const PLACEHOLDER_PATH_PREFIXES: ReadonlyArray<{ host: string; prefix: string }> = [
+  { host: "foto.haberler.com", prefix: "/genel/editor/" },
+];
 
 // Applied to the LAST path segment's basename only (percent-decoded, final
 // extension stripped) and anchored to the whole of it, so a directory called
@@ -361,6 +397,12 @@ const PLACEHOLDER_BASENAME =
 //                     `son-dakika_sd` name is a stand-in.
 // A slug that merely contains 'default' or 'son-dakika' does not match: the
 // word has to be the whole name, or the whole tail after a `-` / `_`.
+//
+// h87-imagerelevance-1 (2026-11-09, 14-day replay of stored image_url values)
+// adds four 'son dakika' shapes, the last four entries below. Over 122,602
+// distinct stored values they match exactly seven stand-in names and no real
+// slug (ekonomim `son-dakika-bakirkoy-...-zjph_cover` and haber7
+// `son_dakika_kademeli_emeklilik_...` stay false). All are anchored and bounded.
 const PLACEHOLDER_BASENAME_EXTRA: readonly RegExp[] = [
   /^(?:tr[_-]?)?son[_-]?dakika(?:\d{2,4}x\d{2,4})?[a-z]{0,8}(?:jpe?g|png|webp)(?:-[A-Za-z0-9_-]{16,32})?$/i,
   /^logo(?:jpe?g|png|webp)(?:-[A-Za-z0-9_-]{16,32})?$/i,
@@ -371,6 +413,10 @@ const PLACEHOLDER_BASENAME_EXTRA: readonly RegExp[] = [
   /(?:^|[-_])no[-_]?image$/i,
   /(?:^|[-_])default[-_]\d{1,2}$/i,
   /^placeholder$/i,
+  /^son[-_]dakika[-_][a-z]{4}$/i, // odatv son-dakika-emwd / -yllv
+  /^[a-z0-9]{2,12}[-_]son[-_]dakika(?:[-_]haberi?)?$/i, // birgun birgun-son-dakika-haberi
+  /^son[-_]dakika(?:[-_](?:son|dakika)){1,4}(?:[-_]\d{1,8})?$/i, // trt son-dakika-dakika-son-dakika-2026652
+  /^son[-_]dakika[-_]\d{1,2}_(?:amp|sd)$/i, // haberler-com son-dakika-2_amp, -3_amp; foto.sondakika.com son-dakika-2_sd
 ];
 
 // A real file name is short; refuse to run the pattern on anything longer.
@@ -388,7 +434,12 @@ function placeholderBasename(pathname: string): string {
 }
 
 function matchesPlaceholder(parsed: URL): boolean {
-  if (PLACEHOLDER_IMAGE_ASSETS.has(`${parsed.hostname.toLowerCase()}${parsed.pathname}`)) {
+  const host = parsed.hostname.toLowerCase();
+  if (PLACEHOLDER_IMAGE_ASSETS.has(`${host}${parsed.pathname}`)) {
+    return true;
+  }
+  const path = parsed.pathname.toLowerCase();
+  if (PLACEHOLDER_PATH_PREFIXES.some((p) => host === p.host && path.startsWith(p.prefix))) {
     return true;
   }
   const name = placeholderBasename(parsed.pathname);
@@ -418,9 +469,11 @@ function parseNormalized(u: string): URL | null {
  * tells the reader nothing and, worse, lets an unrelated story borrow the
  * look of another. The verdict is: an exact asset (PLACEHOLDER_IMAGE_ASSETS,
  * compared as lower-case host + path, so query, fragment, scheme, a doubled
- * leading slash and host case do not matter) or a basename that matches
- * PLACEHOLDER_BASENAME. A resizer URL that wraps its origin in a `u=` query
- * value is checked on the wrapped origin as well.
+ * leading slash and host case do not matter), a path under a placeholder
+ * directory on one host (PLACEHOLDER_PATH_PREFIXES, h87: haberler-com byline
+ * avatars) or a basename that matches PLACEHOLDER_BASENAME. A resizer URL that
+ * wraps its origin in a `u=` query value is checked on the wrapped origin as
+ * well.
  *
  * Three layers use it. Ingest drops a placeholder at normalize time (the row
  * gets a NULL image_url, which queues the og:image backfill). The og:image
