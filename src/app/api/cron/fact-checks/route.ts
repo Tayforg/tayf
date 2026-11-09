@@ -1,6 +1,7 @@
 import { connection, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import Parser from "rss-parser";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
@@ -39,6 +40,23 @@ import {
  * AUTH: same `requireCronBearer` contract as `/api/cron/headline` --
  * FAIL-CLOSED 503 on a missing `CRON_SECRET`, 401 on a bad/missing bearer.
  *
+ * CANDIDATES (migration 181, h87-factchecks-1): the clusters scored against a
+ * fact-check are the 25 MOST RELEVANT (ts_rank_cd) matches of its title query,
+ * from the service-role RPC `fact_check_cluster_candidates`, not the 25
+ * largest: an OR query over six common words matches hundreds of clusters, and
+ * the small cluster about the very same event (the Peru "Hitler Mussolini" piece,
+ * #139 of 315 by size, #1 by rank) never reached the matcher. The migration is
+ * applied by hand after the deploy, so while the function is missing (PGRST202,
+ * 42883 or a 404) the route logs ONCE per run and uses the previous size-ordered
+ * `clusters` query for the rest of that run; the next run asks the RPC again.
+ * Any other RPC failure is a real database failure and is counted below.
+ *
+ * AUTO-PUBLISH FLOOR (SEC-factcheck-autopublish-fp-1): relevance order puts clusters that
+ * share only generic stems in front of the matcher, so a pair from the RPC auto-publishes
+ * only at score >= RPC_PUBLISH_MIN_SCORE (0.7); match.ts's own 'publish' line (0.6) stays as
+ * it is and a 0.6 RPC-sourced 'publish' is written as a shadow row for admin review. The
+ * size-ordered fallback keeps the old behaviour.
+ *
  * SUB-STEP FAILURES (W3): the per-item loop logs, captures and skips a failed
  * Supabase call (cluster search, member titles, existing links, promote update,
  * new-links upsert) and still answers 200. Each such swallowed database failure
@@ -60,6 +78,14 @@ const factCheckLimit = createRateLimiter("cron-fact-checks", {
 const RECENT_WINDOW_DAYS = 3;
 const RECENT_ITEM_LIMIT = 40;
 const CLUSTER_CANDIDATE_LIMIT = 25;
+
+// SEC-factcheck-autopublish-fp-1: candidates ranked by relevance (migration 181) put clusters
+// that share only generic stems in front of the matcher. The replay published Teyit 29c5930e ->
+// cluster 087390a8 at 0.6 with 3 distinct terms (a clip said to show a carrier strike against
+// satellite images of the damage to US bases: two claims). So a pair that came from the RPC needs
+// 0.7 to auto-publish, and a 0.6 'publish' decision from match.ts is kept as a shadow row for
+// admin review. The size-ordered fallback query keeps match.ts's own line (0.6).
+const RPC_PUBLISH_MIN_SCORE = 0.7;
 
 interface FeedStatus {
   status: "ok" | "error";
@@ -158,6 +184,64 @@ async function fetchFeed(
       items: [],
     };
   }
+}
+
+/**
+ * What `findClusterCandidates` hands back: the envelope of whichever query answered, and which one it was.
+ * `fromRpc` is true for the relevance-ranked RPC (migration 181) and false for the size-ordered fallback.
+ */
+interface CandidateResult {
+  data: unknown;
+  error: { code?: string } | null;
+  fromRpc: boolean;
+}
+
+/**
+ * True when an RPC answer says the function itself does not exist: PostgREST's PGRST202 (not in the schema cache, HTTP 404),
+ * Postgres' 42883 (undefined_function), or a bare 404. Anything else (a timeout, a permission failure, a network error) is a
+ * real failure of a function that exists and must not be hidden behind a fallback.
+ */
+function isCandidateRpcMissing(res: { error: { code?: string } | null; status?: number }): boolean {
+  if (!res.error) return false;
+  return res.error.code === "PGRST202" || res.error.code === "42883" || res.status === 404;
+}
+
+/**
+ * Step 4: the candidate clusters of one fact-check. The RPC (migration 181) returns the CLUSTER_CANDIDATE_LIMIT most
+ * relevant clusters of the window. While it is missing, `source.rpcMissing` flips (logged once, here) and this run uses the
+ * query the cron ran before 181: the same filters, the same websearch tsquery, the largest clusters first.
+ */
+async function findClusterCandidates(
+  supabase: SupabaseClient,
+  source: { rpcMissing: boolean },
+  ftsQuery: string,
+  gteWindow: string,
+  lteWindow: string,
+): Promise<CandidateResult> {
+  if (!source.rpcMissing) {
+    const res = await supabase.rpc("fact_check_cluster_candidates", {
+      p_query: ftsQuery,
+      p_gte: gteWindow,
+      p_lte: lteWindow,
+      p_limit: CLUSTER_CANDIDATE_LIMIT,
+    });
+    if (!isCandidateRpcMissing(res)) return { ...res, fromRpc: true };
+    source.rpcMissing = true;
+    console.warn(
+      "[fact-checks-cron] fact_check_cluster_candidates is missing (migration 181 not applied); using the size-ordered cluster query for this run",
+    );
+  }
+  const res = await supabase
+    .from("clusters")
+    .select("id, title_tr, title_tr_neutral")
+    .eq("is_archived", false)
+    .gte("article_count", 2)
+    .gte("updated_at", gteWindow)
+    .lte("first_published", lteWindow)
+    .textSearch("search_tsv", ftsQuery, { config: "turkish", type: "websearch" })
+    .order("article_count", { ascending: false })
+    .limit(CLUSTER_CANDIDATE_LIMIT);
+  return { ...res, fromRpc: false };
 }
 
 interface RecentFactCheckRow {
@@ -270,6 +354,8 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
   let published = 0;
   let shadow = 0;
   const publishedClusterIds = new Set<string>();
+  // Flips to true on the first run-time proof that the candidate RPC is missing; shared by every item of this run.
+  const candidateSource = { rpcMissing: false };
 
   for (const item of recentItems) {
     const categories = categoriesByUrl.get(item.url) ?? [];
@@ -285,17 +371,15 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
       publishedAtMs + CANDIDATE_WINDOW_DAYS.after * 24 * 60 * 60 * 1000,
     ).toISOString();
 
-    // 4. Find candidate clusters via the search_tsv GIN index.
-    const { data: clusterData, error: clusterErr } = await supabase
-      .from("clusters")
-      .select("id, title_tr, title_tr_neutral")
-      .eq("is_archived", false)
-      .gte("article_count", 2)
-      .gte("updated_at", gteWindow)
-      .lte("first_published", lteWindow)
-      .textSearch("search_tsv", ftsQuery, { config: "turkish", type: "websearch" })
-      .order("article_count", { ascending: false })
-      .limit(CLUSTER_CANDIDATE_LIMIT);
+    // 4. Find candidate clusters: the most relevant matches of the search_tsv GIN index
+    // (fact_check_cluster_candidates, migration 181), or the previous size-ordered query while it is missing.
+    const { data: clusterData, error: clusterErr, fromRpc } = await findClusterCandidates(
+      supabase,
+      candidateSource,
+      ftsQuery,
+      gteWindow,
+      lteWindow,
+    );
 
     if (clusterErr) {
       console.error("[fact-checks-cron] cluster search failed", item.id, clusterErr);
@@ -370,7 +454,11 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
     }> = [];
 
     for (const r of ranked) {
-      const isPublishDecision = r.decision === "publish";
+      // A 'publish' from match.ts publishes outright only for the size-ordered fallback; an RPC-sourced
+      // pair also needs RPC_PUBLISH_MIN_SCORE. A held decision is a shadow row (inserted unpublished,
+      // counted in `shadow`) and never promotes an existing auto shadow row.
+      const isPublishDecision =
+        r.decision === "publish" && (!fromRpc || r.score >= RPC_PUBLISH_MIN_SCORE);
       const existing = existingByCluster.get(r.clusterId);
 
       if (!existing) {

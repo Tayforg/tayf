@@ -926,7 +926,7 @@ vercel env add NEXT_PUBLIC_SITE_URL production
 vercel --prod
 ```
 
-After this deploy, Vercel's Cron Jobs page should list `/api/cron/headline` (every 5 minutes) **and** `/api/cron/digest` (`0 6 * * 6` — Saturday 06:00 UTC / 09:00 TRT).
+After this deploy, Vercel's Cron Jobs page should list `/api/cron/headline` (every 5 minutes) **and** `/api/cron/digest` (`0 6 * * 6` — Saturday 06:00 UTC / 09:00 TRT; since h87 `0 6 * * 6,0`: Saturday send plus Sunday retry).
 
 **GO-LIVE checklist.** Work through this in order, every time `RESEND_API_KEY` changes state (added, rotated, or removed) in production. `$CRON_SECRET` is the same one gating `/api/cron/headline` above.
 
@@ -1483,7 +1483,7 @@ Before declaring the migration complete:
 
 - [ ] Migration 040 applied — every `newsletter_subscribers` row has both `confirm_token` and `unsubscribe_token` set
 - [ ] `RESEND_API_KEY`, `NEWSLETTER_FROM` (if overriding the default), and `NEXT_PUBLIC_SITE_URL` set on Vercel production
-- [ ] `vercel --prod` deploy landed with `/api/cron/digest` (`0 6 * * 6`) alongside `/api/cron/headline` in the Cron Jobs dashboard
+- [ ] `vercel --prod` deploy landed with `/api/cron/digest` (`0 6 * * 6`; since h87 `0 6 * * 6,0`, Saturday send plus Sunday retry) alongside `/api/cron/headline` in the Cron Jobs dashboard
 - [ ] A manual `POST /api/newsletter` test delivered a confirm email whose link redirects to `/?bulten=onaylandi` on click
 - [ ] Migration 041 applied and `ingest` redeployed — `select slug, fetch_last_status, fetch_last_at from sources order by fetch_last_at desc nulls last limit 10;` shows recent timestamps; the `200`-vs-`546` ratio in `net._http_response` for the `ingest` cron job has shifted toward `200`
 
