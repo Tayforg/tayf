@@ -742,7 +742,8 @@ describe("DailyGame — source guard: a failed copy is never swallowed", () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     expect(body).not.toContain(".catch(() => {})");
-    expect(body).not.toMatch(/catch\s*(\(\w*\))?\s*\{\s*(\/\/[^\n]*\s*)*\}/);
+    // Each comment line must end in a newline, so the repetition cannot backtrack (CodeQL js/redos).
+    expect(body).not.toMatch(/catch\s*(?:\(\w*\))?\s*\{\s*(?:\/\/[^\n]*\n\s*)*\}/);
   });
 
   it("every failure path (rejection, missing clipboard, throw) offers the text and announces it", () => {
