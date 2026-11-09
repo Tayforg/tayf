@@ -40,6 +40,17 @@ const ANNOUNCE_THRESHOLDS: readonly number[] = [30, 10];
 const EMPTY_TALLY: FramingTally = { n: 0, iktidar: 0, muhalefet: 0, none: 0 };
 
 /**
+ * What the polite region says when a headline draw fails. The text depends on
+ * how many draws in a row failed: the live region only announces when its text
+ * CHANGES, so the same sentence for a second failure would be silent (the
+ * "yükleniyor" announcement between two failures helps, but the wording of a
+ * repeat failure should also tell the player it is still not working).
+ */
+export function drawFailureAnnouncement(consecutive: number): string {
+  return consecutive >= 2 ? "Başlık hâlâ yüklenemedi." : "Başlık yüklenemedi.";
+}
+
+/**
  * "use client" state machine for the Çerçeve ("Framing") mode: idle ->
  * loading -> playing -> revealed -> finished, modelled closely on
  * zone-guess-game.tsx (deadline-based 60s timer via `endsAtRef`, a single
@@ -82,6 +93,9 @@ export function FramingGame() {
   // How many headlines this round has drawn so far: the "n." in the headline
   // announcement. The round has no fixed size, so there is no "/total".
   const drawnCountRef = useRef(0);
+  // Draws that failed in a row without a headline landing in between; reset by
+  // a successful draw and by handleStart. Feeds drawFailureAnnouncement.
+  const failureCountRef = useRef(0);
   // Ties the headline <p> to the vote group (aria-describedby), so a screen
   // reader reads the headline together with the choices.
   const headlineId = useId();
@@ -90,6 +104,7 @@ export function FramingGame() {
   const nextRef = useRef<HTMLButtonElement | null>(null);
   const replayRef = useRef<HTMLButtonElement | null>(null);
   const retryRef = useRef<HTMLButtonElement | null>(null);
+  const loadingRef = useRef<HTMLParagraphElement | null>(null);
 
   const recordEntry = useCallback((entry: FramingRoundEntry) => {
     entriesRef.current = [...entriesRef.current, entry];
@@ -105,6 +120,9 @@ export function FramingGame() {
 
   const drawHeadline = useCallback(async () => {
     setPhase("loading");
+    // The button that started this draw unmounts with the phase change, so the
+    // region says what is happening (the loading <p> below is only focusable).
+    setAnnouncement("Başlık yükleniyor…");
     // One retry after a 503 (the route's "draw timed out, try again"); the
     // phase stays "loading" throughout, so the player just sees the loading
     // line a little longer instead of the error panel.
@@ -125,6 +143,7 @@ export function FramingGame() {
       setSecondsLeft(Math.max(0, Math.ceil((endsAtRef.current - Date.now()) / 1000)));
       setHeadline({ articleId: outcome.articleId, title: outcome.title });
       headlineIdRef.current = outcome.articleId;
+      failureCountRef.current = 0;
       // The headline <p> sits outside the live region, so say it here. The
       // title is only known once the draw lands (handleStart cannot do it).
       drawnCountRef.current += 1;
@@ -147,8 +166,9 @@ export function FramingGame() {
       // started (endsAtRef stays 0), so there's nothing to lose by
       // retrying: show a retry affordance instead of silently ending the
       // round on a transient network blip.
+      failureCountRef.current += 1;
       setPhase("error");
-      setAnnouncement("Başlık yüklenemedi.");
+      setAnnouncement(drawFailureAnnouncement(failureCountRef.current));
       return;
     }
     finishRound();
@@ -160,6 +180,7 @@ export function FramingGame() {
     setPoolEmpty(false);
     setVoted(0);
     drawnCountRef.current = 0;
+    failureCountRef.current = 0;
     endsAtRef.current = 0;
     announcedThresholdsRef.current = new Set();
     setSecondsLeft(FRAMING_ROUND_SECONDS);
@@ -197,6 +218,16 @@ export function FramingGame() {
     } else if (phase === "error") {
       retryRef.current?.focus();
     }
+  }, [phase]);
+
+  // The control that started the draw (Başla, Sonraki, the retry button) is
+  // gone for the whole loading phase, which would leave focus on <body>. Park it
+  // on the loading line instead, but only when it really fell to <body>: a
+  // reader who moved focus elsewhere during the draw keeps it.
+  useEffect(() => {
+    if (phase !== "loading") return;
+    const active = document.activeElement;
+    if (active === null || active === document.body) loadingRef.current?.focus();
   }, [phase]);
 
   const handleVote = useCallback(
@@ -285,7 +316,13 @@ export function FramingGame() {
   } else if (phase === "loading") {
     content = (
       <div className="rounded-xl border border-border/60 bg-card/40 p-6 text-center space-y-4 min-h-[160px] flex flex-col items-center justify-center">
-        <p className="text-sm text-muted-foreground">Başlık yükleniyor...</p>
+        <p
+          ref={loadingRef}
+          tabIndex={-1}
+          className="rounded-sm text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          Başlık yükleniyor...
+        </p>
       </div>
     );
   } else if (phase === "error") {

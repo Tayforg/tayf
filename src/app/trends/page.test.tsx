@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -40,6 +40,15 @@ let mockRising: RisingResult | null = null;
 let mockHubs: Record<string, unknown> = {};
 const callLog: string[] = [];
 
+// h90-trends-2: getSourceFeedStatuses is a "use cache" reader of the source
+// directory; mocked wholesale like the other readers. Default `null` ("status
+// unknown") keeps every pre-existing test on the no-note branch.
+let mockStatuses: SourceFeedStatus[] | null = null;
+
+vi.mock("@/lib/sources/feed-status", () => ({
+  getSourceFeedStatuses: vi.fn(async () => mockStatuses),
+}));
+
 vi.mock("@/lib/trends/rising-query", () => ({
   getRisingEntities: vi.fn(async () => {
     callLog.push("rising");
@@ -73,6 +82,8 @@ import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { ZONE_META } from "@/lib/bias/config";
 import { ScrollToEnd } from "@/components/trends/scroll-to-end";
 import { formatCountTr } from "@/lib/format/number-tr";
+import type { SourceFeedStatus } from "@/lib/sources/feed-status";
+import { getSourceFeedStatuses } from "@/lib/sources/feed-status";
 
 /** Collects every string/number leaf under a React element tree. */
 function collectText(node: unknown, out: string[] = []): string[] {
@@ -459,8 +470,29 @@ describe("/trends page — Yükselen Konular section", () => {
     expect(metadata.twitter?.title).toBe("Medya DNA trendi — Tayf");
   });
 
-  it("the page description mentions today's rising topics", () => {
-    expect(String(metadata.description)).toContain("bugün yükselen konular");
+  // h90-trends-1: the rising list is the ranked Istanbul day of a cache entry
+  // served up to an hour past midnight, so the description must not say "bugün"
+  // (the card names the day by its date for the same reason, h63-timezones-1).
+  it("the page description says 'son günün yükselen konuları' and never 'bugün'", () => {
+    const description = String(metadata.description);
+    expect(description).toBe(
+      "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi ve son günün yükselen konuları.",
+    );
+    expect(description).not.toMatch(/bugün/i);
+  });
+
+  it("the og:description and twitter:description carry the same text, with no 'bugün'", () => {
+    const description = String(metadata.description);
+    expect(String(metadata.openGraph?.description)).toBe(description);
+    expect(String(metadata.twitter?.description)).toBe(description);
+    expect(String(metadata.openGraph?.description)).not.toMatch(/bugün/i);
+    expect(String(metadata.twitter?.description)).not.toMatch(/bugün/i);
+  });
+
+  it("page.tsx carries no literal 'bugün yükselen' anywhere (description, og or twitter)", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    expect(code).not.toMatch(/bugün yükselen/i);
   });
 });
 
@@ -1476,5 +1508,237 @@ describe("/trends page — x labels are HTML and carry the month (h46-mobile-3)"
     expect(titles[0]!.props?.children).toBe(`2026-10-28 · ${ZONE_META.iktidar.label}: 1`);
     const sum = buckets.reduce((acc, b) => acc + b.total, 0);
     expect(collectText(tree).join(" ")).toContain(formatCountTr(sum));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h90-trends-2: five voting outlets went dark inside the window (15-25 Oct
+// 2026) and caused the whole visible drift in zone shares; the chart said
+// nothing. The page reads getSourceFeedStatuses() in its page-level
+// Promise.all (never inside a "use cache" function) and, when some voting
+// source delivered inside the window and then stopped, prints one caveat under
+// the "Yalnızca spektruma sayılan kaynaklar" line, linking /kaynaklar/durum.
+// ---------------------------------------------------------------------------
+
+// The defaults are a real outage (403, 38 failures in a row, quarantined, so the
+// classifier says 'erisim_yok'): only a feed Tayf cannot fetch is listed.
+function statusRow(over: Partial<SourceFeedStatus> = {}): SourceFeedStatus {
+  return {
+    slug: "halk-tv",
+    name: "Halk TV",
+    bias: "opposition_leaning",
+    zone: "muhalefet",
+    kind: "outlet",
+    lastItemAt: "2026-10-30T09:00:00+00:00",
+    lastHttpStatus: 403,
+    lastFetchAt: "2026-11-26T01:00:00+00:00",
+    silent: true,
+    failStreak: 38,
+    quarantined: true,
+    silenceReason: "erisim_yok",
+    ...over,
+  };
+}
+
+/** The five sources of the 2026-11-09 production finding, in an arbitrary order. */
+function fiveDark(): SourceFeedStatus[] {
+  return [
+    statusRow({ slug: "halk-tv", name: "Halk TV" }),
+    statusRow({ slug: "medya-gazete", name: "Medya Gazete" }),
+    statusRow({ slug: "gazete-pencere", name: "Gazete Pencere", zone: "bagimsiz", bias: "center" }),
+    statusRow({ slug: "arti-gercek", name: "Artı Gerçek" }),
+    statusRow({ slug: "benguturk", name: "Benguturk", zone: "bagimsiz", bias: "center" }),
+  ];
+}
+
+const DARK_NOTE_START = "Bu dönemde";
+const FIVE_DARK_NOTE =
+  "Bu dönemde 5 spektrum kaynağı veri vermeyi bıraktı (Bağımsız: Benguturk, Gazete Pencere; Muhalefet: Artı Gerçek, Halk TV, Medya Gazete). Grafik bu kaynakları sustukları günden sonra içermez; bölge payları bu yüzden kayabilir.";
+
+/** The <p> that carries the caveat, or undefined when the page renders none. */
+async function darkNote(): Promise<Elementish | undefined> {
+  const tree = await TrendsPage();
+  return collectElements(tree).find(
+    (el) => el.type === "p" && collectText(el.props?.children).join("").startsWith(DARK_NOTE_START),
+  );
+}
+
+describe("/trends page — dark voting sources caveat (h90-trends-2)", () => {
+  beforeEach(() => {
+    mockBuckets = octNovBuckets(); // window 2026-10-28 .. 2026-11-26
+  });
+
+  afterEach(() => {
+    mockStatuses = null;
+  });
+
+  it("five sources that delivered inside the window and then stopped render the note with n=5, zones in order, names sorted", async () => {
+    mockStatuses = fiveDark();
+
+    const note = await darkNote();
+
+    expect(note).toBeDefined();
+    expect(collectText(note!.props?.children).join("")).toBe(`${FIVE_DARK_NOTE} Kaynak durumu`);
+    expect(note!.props?.className).toBe("text-xs text-muted-foreground");
+  });
+
+  it("the note links to /kaynaklar/durum with the text 'Kaynak durumu'", async () => {
+    mockStatuses = fiveDark();
+
+    const note = await darkNote();
+    const links = collectElements(note!.props?.children).filter(
+      (el) => typeof el.props?.href === "string",
+    );
+
+    expect(links).toHaveLength(1);
+    expect(links[0]!.props?.href).toBe("/kaynaklar/durum");
+    expect(collectText(links[0]!.props?.children).join("")).toBe("Kaynak durumu");
+  });
+
+  it("labels come from ZONE_META (İktidar, Bağımsız, Muhalefet)", async () => {
+    mockStatuses = [
+      statusRow({ name: "A Kaynak", zone: "iktidar", bias: "pro_government" }),
+      statusRow({ name: "B Kaynak", zone: "bagimsiz", bias: "center" }),
+      statusRow({ name: "C Kaynak", zone: "muhalefet" }),
+    ];
+
+    const text = collectText((await darkNote())!.props?.children).join("");
+
+    expect(text).toContain(
+      `(${ZONE_META.iktidar.label}: A Kaynak; ${ZONE_META.bagimsiz.label}: B Kaynak; ${ZONE_META.muhalefet.label}: C Kaynak)`,
+    );
+    expect(text).toContain("Bu dönemde 3 spektrum kaynağı");
+  });
+
+  it("sits under the 'Yalnızca spektruma sayılan kaynaklar' line, in the chart header", async () => {
+    mockStatuses = fiveDark();
+
+    const text = collectText(await TrendsPage()).join(" ");
+    const caption = text.indexOf("Yalnızca spektruma sayılan kaynaklar (haber siteleri ve ajanslar)");
+    const note = text.indexOf(DARK_NOTE_START);
+
+    expect(caption).toBeGreaterThan(-1);
+    expect(note).toBeGreaterThan(caption);
+    // ... and before the table / chart, i.e. in the header block.
+    expect(note).toBeLessThan(text.indexOf("Günlük sayıları tablo olarak göster"));
+  });
+
+  it.each([
+    ["an empty list", () => [] as SourceFeedStatus[]],
+    ["null (status unknown)", () => null as SourceFeedStatus[] | null],
+  ])("%s renders no note and no link to /kaynaklar/durum", async (_name, make) => {
+    mockStatuses = make();
+
+    const tree = await TrendsPage();
+
+    expect(collectText(tree).join(" ")).not.toContain(DARK_NOTE_START);
+    expect(collectText(tree).join(" ")).not.toContain("Kaynak durumu");
+    expect(collectHrefs(tree)).not.toContain("/kaynaklar/durum");
+  });
+
+  it("sources that are not dark inside the window render no note (non-silent, before the window, never delivered, aggregator)", async () => {
+    mockStatuses = [
+      statusRow({ name: "Canlı", silent: false, silenceReason: null }),
+      statusRow({ name: "Eski", lastItemAt: "2026-10-01T09:00:00+00:00" }),
+      statusRow({ name: "Hiç", lastItemAt: null }),
+      statusRow({ name: "Derleme", kind: "aggregator" }),
+      statusRow({ name: "Dar", kind: "niche" }),
+    ];
+
+    expect(await darkNote()).toBeUndefined();
+  });
+
+  it("a silent outlet whose feed still answers (Bianet-like: 304, no failures, akis_donmus) renders no note", async () => {
+    mockStatuses = [
+      statusRow({
+        slug: "bianet",
+        name: "Bianet",
+        zone: "bagimsiz",
+        bias: "center",
+        lastItemAt: "2026-10-30T09:00:00+00:00",
+        lastHttpStatus: 304,
+        failStreak: 0,
+        quarantined: false,
+        silenceReason: "akis_donmus",
+      }),
+    ];
+
+    const tree = await TrendsPage();
+
+    expect(await darkNote()).toBeUndefined();
+    expect(collectText(tree).join(" ")).not.toContain("Bianet");
+    expect(collectHrefs(tree)).not.toContain("/kaynaklar/durum");
+  });
+
+  it("counts only the sources inside the window: one in, one before it", async () => {
+    mockStatuses = [
+      statusRow({ name: "Halk TV" }),
+      statusRow({ name: "Eski", lastItemAt: "2026-10-01T09:00:00+00:00" }),
+    ];
+
+    const text = collectText((await darkNote())!.props?.children).join("");
+
+    expect(text).toContain("Bu dönemde 1 spektrum kaynağı veri vermeyi bıraktı (Muhalefet: Halk TV).");
+    expect(text).not.toContain("Eski");
+  });
+
+  it("window start is 00:00 Istanbul of the first bucket: an item on the first day counts, one the evening before does not", async () => {
+    // First bucket 2026-10-28 -> 2026-10-27T21:00:00Z.
+    mockStatuses = [
+      statusRow({ name: "Girdi", lastItemAt: "2026-10-27T21:00:00+00:00" }),
+      statusRow({ name: "Girmedi", lastItemAt: "2026-10-27T20:59:00+00:00" }),
+    ];
+
+    const text = collectText((await darkNote())!.props?.children).join("");
+
+    expect(text).toContain("Girdi");
+    expect(text).not.toContain("Girmedi");
+  });
+
+  it("renders no note on the unavailable-chart branch (no chart to caveat)", async () => {
+    mockBuckets = null;
+    mockStatuses = fiveDark();
+
+    const tree = await TrendsPage();
+
+    expect(collectText(tree).join(" ")).toContain(UNAVAILABLE_COPY);
+    expect(collectText(tree).join(" ")).not.toContain(DARK_NOTE_START);
+  });
+
+  it("does not throw for an empty bucket list (no first day, no note)", async () => {
+    mockBuckets = [];
+    mockStatuses = fiveDark();
+
+    await expect(TrendsPage()).resolves.toBeDefined();
+    expect(await darkNote()).toBeUndefined();
+  });
+
+  it("reads the source statuses exactly once per render", async () => {
+    vi.mocked(getSourceFeedStatuses).mockClear();
+    mockStatuses = fiveDark();
+
+    await TrendsPage();
+
+    expect(getSourceFeedStatuses).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing about 'today' (the card is served from a cache that outlives Istanbul midnight)", async () => {
+    mockStatuses = fiveDark();
+
+    const text = collectText((await darkNote())!.props?.children).join("");
+
+    expect(text).not.toMatch(/bugün|dün|sürüyor/i);
+  });
+
+  it("page.tsx reads the statuses in the page-level Promise.all, outside any \"use cache\" function, and holds no clock", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+    expect(code).not.toMatch(/["']use cache/);
+    expect(code).toMatch(/Promise\.all\(\[[^\]]*getSourceFeedStatuses\(\)[^\]]*\]\)/);
+    expect(code).toMatch(/darkVotingSourcesInWindow\(/);
+    expect(code).toMatch(/istanbulDayStartIso\(/);
+    expect(code).not.toMatch(/Date\.now\s*\(/);
+    expect(code).not.toMatch(/new Date\b/);
   });
 });

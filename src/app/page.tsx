@@ -10,6 +10,7 @@ import { DailyGameTeaser } from "@/components/game/daily-game-teaser";
 import { dailyTeaserSlot } from "@/lib/game/daily-teaser";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { FollowButton } from "@/components/follow/follow-button";
+import { ClearSearchLink } from "@/components/home/clear-search-link";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { SearchEcho } from "@/components/search/search-echo";
@@ -166,7 +167,8 @@ function renderClusterCard(
 }
 
 // The feed's focus target (FocusFeedOnPageChange moves focus here after a
-// pager navigation). A plain string so server and client agree on it.
+// pager navigation, ClearSearchLink after the search is cleared from an empty
+// or error card). A plain string so server and client agree on it.
 const HOME_FEED_ID = "haber-akisi";
 
 export default function HomePage({
@@ -687,12 +689,7 @@ function EmptySearch({
           Aramanıza uyan bir küme yok. Farklı bir kelime deneyin.
         </p>
       )}
-      <Link
-        href="/"
-        className="mt-1 inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted"
-      >
-        Aramayı temizle
-      </Link>
+      <ClearSearchLink targetId={HOME_FEED_ID} />
     </div>
   );
 }
@@ -711,12 +708,7 @@ function SearchUnavailable() {
       </p>
       <div className="flex items-center gap-3">
         <RetryButton />
-        <Link
-          href="/"
-          className="mt-1 inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted"
-        >
-          Aramayı temizle
-        </Link>
+        <ClearSearchLink targetId={HOME_FEED_ID} />
       </div>
     </div>
   );

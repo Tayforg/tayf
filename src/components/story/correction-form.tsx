@@ -137,6 +137,10 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // The button is aria-disabled while a request is in flight (not `disabled`,
+    // which would drop the focused button's focus to <body>), so it no longer
+    // blocks a second click or an Enter inside an input: ignore those here.
+    if (status === "submitting") return;
     setErrorMessage(null);
     setFieldError(null);
 
@@ -310,8 +314,8 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
 
       <button
         type="submit"
-        disabled={status === "submitting"}
-        className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:ring-3 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+        aria-disabled={status === "submitting"}
+        className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:ring-3 focus-visible:ring-ring aria-disabled:pointer-events-none aria-disabled:opacity-50"
       >
         {status === "submitting" ? "Gönderiliyor..." : "Gönder"}
       </button>

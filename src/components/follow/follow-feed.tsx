@@ -46,7 +46,15 @@ import {
 // announced. Unfollowing moves focus to the neighbouring follow's heading (or
 // the empty state's) instead of dropping it on <body>. A failed follow offers
 // a retry that re-fetches only that follow, and the same region then announces
-// how the retry ended (loaded with N stories, nothing matched, or failed).
+// how the retry ended (loaded with N stories, nothing matched, or failed). An
+// initial load that fails is announced once a batch settles; a successful
+// initial load stays silent. The failures wait in a ledger (a ref, so it outlives
+// a batch): a batch that is aborted after a failure (an unfollow, another tab
+// changing the store, a retry of a different follow) leaves the failure in the
+// ledger, because the failed key is skipped by every later run and would never be
+// reported again. The next batch that settles speaks it, together with the retry
+// outcome it carries, and a run with nothing left to fetch drains it from a
+// deferred callback.
 
 const FETCH_CONCURRENCY = 3;
 const ROWS_PER_FOLLOW = 5;
@@ -73,6 +81,60 @@ export function retryResultAnnouncement(
   return state.reason === "rate"
     ? `${label}: çok sık yenilendi, biraz sonra tekrar deneyin`
     : `${label} şu an yüklenemedi`;
+}
+
+// What the polite region says once a batch of INITIAL fetches has settled and
+// some follows ended in error (WCAG 4.1.3: the error UI appears on screen, so
+// it must also reach a screen reader). Nothing failed = nothing to say, so a
+// successful load stays silent. One failure names the follow; several only
+// count them, because a page can hold up to MAX_FOLLOWS and reading every
+// label out would bury the message.
+export function initialFailureAnnouncement(labels: string[]): string {
+  if (labels.length === 0) return "";
+  if (labels.length === 1) return `${labels[0]} yüklenemedi`;
+  return `${labels.length} takip yüklenemedi`;
+}
+
+// The initial failures nobody has heard yet, key -> label in failure order. A
+// pure bookkeeping object so the cases that matter (an aborted batch, an
+// unfollow, a retry) can be tested without a browser; the component keeps one in
+// a ref.
+export interface FailureLedger {
+  /** Remembers a failure. A later failure of the same key replaces the label and keeps its place. */
+  record(key: string, label: string): void;
+  /** Forgets every key that is not in `liveKeys` (its follow was removed). */
+  prune(liveKeys: ReadonlySet<string>): void;
+  /** Forgets one key (its retry outcome is announced instead). */
+  forget(key: string): void;
+  /** How many failures are waiting. */
+  size(): number;
+  /** The waiting labels, in failure order; the ledger is empty afterwards. */
+  drain(): string[];
+}
+
+export function createFailureLedger(): FailureLedger {
+  const waiting = new Map<string, string>();
+  return {
+    record(key, label) {
+      waiting.set(key, label);
+    },
+    prune(liveKeys) {
+      for (const key of [...waiting.keys()]) {
+        if (!liveKeys.has(key)) waiting.delete(key);
+      }
+    },
+    forget(key) {
+      waiting.delete(key);
+    },
+    size() {
+      return waiting.size;
+    },
+    drain() {
+      const labels = [...waiting.values()];
+      waiting.clear();
+      return labels;
+    },
+  };
 }
 
 async function fetchFollowState(
@@ -139,10 +201,17 @@ export function FollowFeed() {
   // reader's explicit "Tekrar dene" takes a key out of here.
   const erroredKeys = useRef<Set<string>>(new Set());
   // key -> label of a follow whose retry result must be announced. Only
-  // "Tekrar dene" puts a key here, so initial loads stay silent. An aborted
+  // "Tekrar dene" puts a key here; an initial load that FAILS goes into the
+  // ledger below instead, and a successful initial load stays silent. An aborted
   // run leaves the entry in place; the re-run fetches the key again and
   // announces then.
   const retryPending = useRef<Map<string, string>>(new Map());
+  // Initial failures not yet announced. They live here, not in the batch, so a
+  // batch that is aborted after a failure does not lose it: the failed key is
+  // already in erroredKeys, so the re-run skips it. Settled batches (and a re-run
+  // with nothing to fetch) drain it; an unfollow prunes it and a retry forgets
+  // that follow's entry.
+  const unannouncedFailures = useRef(createFailureLedger());
 
   // Focus handoff after an unfollow. `pendingFocus` is written by the click
   // handler (undefined = nothing pending, null = the list is now empty) and
@@ -191,15 +260,38 @@ export function FollowFeed() {
     for (const key of [...retryPending.current.keys()]) {
       if (!live.has(key)) retryPending.current.delete(key);
     }
+    unannouncedFailures.current.prune(live);
 
     // Everything that is neither loaded nor failed: new follows, plus any
     // fetch an earlier run of this effect aborted while it was in flight.
     const todo = wanted.filter(
       (w) => !loadedKeys.current.has(w.key) && !erroredKeys.current.has(w.key),
     );
-    if (todo.length === 0) return;
+    // Speaks the failures waiting in the ledger, after `lead` (the retry outcome
+    // of this batch, if any) as ONE string: two setAnnouncement calls in a tick
+    // collapse to the last, so a second call would swallow the first. Only ever
+    // called from a callback, never synchronously in the effect body.
+    const announceUnannounced = (lead: string) => {
+      const failureText = initialFailureAnnouncement(unannouncedFailures.current.drain());
+      if (failureText === "") return;
+      setAnnouncement(lead === "" ? failureText : `${lead} ${failureText}`);
+    };
+
+    if (todo.length === 0) {
+      // Nothing to fetch, but an earlier batch may have been aborted after a
+      // failure that nobody has heard. Deferred, a synchronous setState in an
+      // effect body is a react-hooks/set-state-in-effect error.
+      if (unannouncedFailures.current.size() > 0) {
+        const timer = setTimeout(() => announceUnannounced(""), 0);
+        return () => clearTimeout(timer);
+      }
+      return;
+    }
 
     const controller = new AbortController();
+    // The retry outcome announced in this batch; the summary below appends the
+    // initial failures to it.
+    let retryText = "";
     void (async () => {
       await runWithConcurrency(todo, FETCH_CONCURRENCY, async (item) => {
         const outcome = await fetchFollowState(item, controller.signal);
@@ -215,10 +307,17 @@ export function FollowFeed() {
         if (label !== undefined) {
           retryPending.current.delete(item.key);
           const seenAt = seenSnapshotRef.current[item.key] ?? null;
-          setAnnouncement(retryResultAnnouncement(label, outcome, seenAt));
+          retryText = retryResultAnnouncement(label, outcome, seenAt);
+          setAnnouncement(retryText);
+        } else if (outcome.status === "error") {
+          unannouncedFailures.current.record(item.key, followLabel(item));
         }
       });
       if (controller.signal.aborted) return;
+      // One announcement per settled batch, through the same region: every
+      // failure still waiting (also those of a batch that was aborted), after the
+      // retry outcome the reader just asked for.
+      announceUnannounced(retryText);
       const seen = new Set(
         wanted.map((w) => w.key).filter((key) => loadedKeys.current.has(key)),
       );
@@ -254,6 +353,8 @@ export function FollowFeed() {
   function handleRetry(follow: Follow) {
     const key = followKey(follow);
     erroredKeys.current.delete(key);
+    // This follow's retry outcome is announced instead of its earlier failure.
+    unannouncedFailures.current.forget(key);
     // Registered before the nonce bump, so the re-run's fetch finds it.
     retryPending.current.set(key, followLabel(follow));
     // Back to the skeleton until the new answer lands.

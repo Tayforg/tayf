@@ -12,7 +12,7 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 export const metadata: Metadata = staticPageMetadata({
   title: "Medya DNA trendi",
   description:
-    "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi ve bugün yükselen konular.",
+    "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi ve son günün yükselen konuları.",
   path: "/trends",
 });
 import { ZONE_META } from "@/lib/bias/config";
@@ -22,6 +22,8 @@ import { xAxisLabels } from "@/lib/trends/axis-labels";
 import { trendBarTitle } from "@/lib/trends/bar-title";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { chartTableRows } from "@/lib/trends/chart-table";
+import { getSourceFeedStatuses } from "@/lib/sources/feed-status";
+import { darkVotingSourcesInWindow, istanbulDayStartIso } from "@/lib/trends/dark-sources";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { MAX_ITEMS, withHubLinks, type RisingResult } from "@/lib/trends/rising";
 import { getRisingEntities } from "@/lib/trends/rising-query";
@@ -74,6 +76,17 @@ import type { MediaDnaZone } from "@/types";
 // `next build` (tests/guards/cache-retry-prerender.test.ts). Each read is one
 // of the 62 per-key cache entries /gundem/[key] and the hubs sitemap already
 // share, so a warm page costs no extra query.
+//
+// Dark sources (h90-trends-2). A voting outlet that stops delivering inside the
+// window lowers its zone's share from that day on, which reads as editorial
+// change but is a feed outage (seven voting sources between 15 and 25 Oct 2026). The page reads
+// getSourceFeedStatuses() in the same page-level Promise.all as the two cached
+// fetchers (never inside a "use cache" function) and, when some voting source
+// delivered inside the window and then stopped, says so under the caption.
+// `silent` is computed inside that reader's own cache scope and the window start
+// is derived from the first bucket's day, so the render stays clock-free. Only
+// sources whose feed Tayf cannot fetch (silenceReason erisim_yok) are listed: a
+// feed that answers with no new item can be a weekly outlet such as Bianet.
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -179,9 +192,10 @@ async function linkRisingHubs(rising: RisingResult | null): Promise<RisingResult
 }
 
 export default async function TrendsPage() {
-  const [buckets, risingRaw] = await Promise.all([
+  const [buckets, risingRaw, statuses] = await Promise.all([
     fetchIstanbulTimeline(),
     getRisingEntities(),
+    getSourceFeedStatuses(),
   ]);
   const rising = await linkRisingHubs(risingRaw);
 
@@ -233,6 +247,18 @@ export default async function TrendsPage() {
   // deliberately still include that day: only its presentation changes.
   const hasPartialDay = buckets.some((b) => b.partial === true);
 
+  // Voting sources that delivered inside the window and then went silent. `null`
+  // (status unknown) and an empty list both render nothing.
+  const firstDay = buckets[0]?.day;
+  const darkGroups =
+    statuses !== null && firstDay !== undefined
+      ? darkVotingSourcesInWindow(statuses, istanbulDayStartIso(firstDay))
+      : [];
+  const darkCount = darkGroups.reduce((acc, g) => acc + g.names.length, 0);
+  const darkList = darkGroups
+    .map((g) => `${ZONE_META[g.zone].label}: ${g.names.join(", ")}`)
+    .join("; ");
+
   const barWidth = (PLOT_W - BAR_GAP * (WINDOW_DAYS - 1)) / WINDOW_DAYS;
 
   // Gridlines and axis labels sit on round numbers: niceScale() picks a
@@ -262,6 +288,17 @@ export default async function TrendsPage() {
               Yalnızca spektruma sayılan kaynaklar (haber siteleri ve ajanslar) · günler
               Türkiye saatine göre
             </div>
+            {darkCount > 0 ? (
+              <p className="text-xs text-muted-foreground">
+                {`Bu dönemde ${darkCount} spektrum kaynağı veri vermeyi bıraktı (${darkList}). Grafik bu kaynakları sustukları günden sonra içermez; bölge payları bu yüzden kayabilir.`}{" "}
+                <Link
+                  href="/kaynaklar/durum"
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  Kaynak durumu
+                </Link>
+              </p>
+            ) : null}
           </div>
           <ul className="flex flex-wrap items-center gap-3">
             {ZONES.map((z) => {

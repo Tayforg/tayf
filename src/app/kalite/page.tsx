@@ -8,6 +8,7 @@ import {
   type QualitySnapshot,
 } from "@/lib/quality/snapshots";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
+import { TIME_WINDOW_HOURS } from "../../../supabase/functions/_shared/cluster/constants";
 
 // /kalite — M-09, the pipeline's own quality scoreboard. Publishes the
 // exact numbers `node scripts/audit-clusters.mjs --json --persist` writes once
@@ -24,6 +25,22 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 // job runs once a day, prints each row's real `taken_at`, and counts the days
 // with no measurement. The chart places points by Istanbul calendar day for the
 // same reason (a missing day shows as a wider step, see chartX).
+//
+// The explanations match what the numbers count (h90-kalite-1, re-checked with
+// read-only SQL over snapshot 61's 48 h window, 2026-11-09). The audit selects
+// articles by category only, so aggregator and niche sources are inside every
+// count (aggregators 749 of 3,056 articles), while /trends counts only the
+// voting kinds (outlet, wire). DHA and İHA have never supplied an article, so
+// agency republishing is not what makes the singleton rate high: of 1,188
+// singleton clusters 444 are aggregator-only (434 haberler-com), 671 outlet-only
+// and just 29 wire-only, and an aggregator article lands in a singleton 63% of
+// the time against 27-33% for outlet, niche and wire articles. A singleton is
+// one article INSIDE the audit window; only 31 of the 1,188 have older members
+// outside it, which the definition says are not counted. `blindspot_flip_rate`
+// compares the stored flag with detectBlindspot() only, so veto-withdrawn
+// claims are not in it. The window length in the singleton definition comes
+// from the snapshot (fallback: the clusterer's own TIME_WINDOW_HOURS), not from
+// a literal.
 //
 // Precision and recall are deliberately NOT shown as numbers here — see the
 // section below the table. `report.mjs`'s precision/recall PROBES exist
@@ -50,8 +67,10 @@ const ruleTerm =
   "text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground";
 const ruleDef = "text-sm text-foreground/90 leading-relaxed";
 
+// Labels for cluster pairs do not exist yet (jev_gold_labels is empty and holds
+// article-level labels, not pairs), so the sentence says exactly that.
 const PRECISION_RECALL_SENTENCE =
-  "Kesinlik ve duyarlılık henüz ölçülmedi: 300 haberlik altın set etiketlenince burada yayımlanacak.";
+  "Kesinlik ve duyarlılık henüz ölçülmedi: bunun için elle etiketlenmiş bir küme çifti seti gerekiyor ve bu set henüz yok.";
 
 function formatPercent(rate: number): string {
   return `%${Math.round(rate * 100)}`;
@@ -161,6 +180,16 @@ function countMissingDays(snapshots: ReadonlyArray<{ takenAt: string }>): number
   return spanned - days.size;
 }
 
+/**
+ * Length of the audit window the Definitions talk about: the latest snapshot's
+ * own `windowHours`, or the clusterer's TIME_WINDOW_HOURS when there is no
+ * snapshot (unavailable / empty) or the stored value is not a positive number.
+ */
+function definitionWindowHours(snapshots: QualitySnapshot[] | null): number {
+  const hours = snapshots?.[0]?.windowHours;
+  return hours !== undefined && hours > 0 ? hours : TIME_WINDOW_HOURS;
+}
+
 export default async function QualityPage() {
   const snapshots = await getQualitySnapshots();
 
@@ -201,7 +230,7 @@ export default async function QualityPage() {
         <p className={proseClass}>{PRECISION_RECALL_SENTENCE}</p>
       </section>
 
-      <Definitions />
+      <Definitions windowHours={definitionWindowHours(snapshots)} />
     </div>
   );
 }
@@ -487,7 +516,7 @@ function SnapshotsTable({ snapshots }: { snapshots: QualitySnapshot[] }) {
   );
 }
 
-function Definitions() {
+function Definitions({ windowHours }: { windowHours: number }) {
   return (
     <section className="space-y-3">
       <h2 className="font-serif text-xl sm:text-2xl font-normal tracking-tight border-b border-border/60 pb-2">
@@ -498,21 +527,18 @@ function Definitions() {
           <dt className={ruleTerm}>Kapsam</dt>
           <dd className={ruleDef}>
             Denetim yalnızca politika ve son dakika kategorisindeki haberleri
-            ve bu haberlerin kümelerini sayar. Bu yüzden haber ve küme
-            sayıları, tüm kategorileri kapsayan /trends ve kaynak
-            sayfalarındaki sayılardan küçüktür; küme sayısına tek haberli
-            kümeler de dahildir.
+            ve bu haberlerin kümelerini sayar. Tüm kaynak türleri dahildir:
+            haber siteleri ve ajansların yanında toplayıcı ve niş kaynaklar da
+            (ör. Haberler.com) sayılır. Bu yüzden sayılar, tüm kategorileri ama
+            yalnızca spektruma sayılan kaynakları (haber siteleri ve ajanslar)
+            sayan /trends ile doğrudan karşılaştırılamaz; küme sayısına tek
+            haberli kümeler de dahildir.
           </dd>
         </div>
         <div className={ruleCard}>
           <dt className={ruleTerm}>Tekil küme (singleton)</dt>
           <dd className={ruleDef}>
-            Sadece bir makaleden oluşan küme — kümeleyici, o haberi başka
-            hiçbir kaynağın haberiyle eşleştirecek kadar benzer bulamamış
-            demektir. Oran yüksek çünkü çoğu kaynak ajans (AA, DHA, İHA)
-            haberini kendi URL&apos;sinden yeniden yayımlar ve kümeleyici
-            yalnızca güçlü benzerlikte birleştirir — &quot;tek kaynak&quot;
-            her zaman &quot;diğerleri görmezden geldi&quot; anlamına gelmez.
+            {`Son ${windowHours} saatlik pencerede yalnızca bir siyaset haberi bulunan küme: kümeleyici o haberi pencere içindeki başka hiçbir haberle eşleştirecek kadar benzer bulamamıştır (kümenin pencereden önceki eski üyeleri sayılmaz). Tekil kümelerin önemli bir kısmı yüksek hacimli toplayıcı kaynakların yeniden yayımladığı ya da başka hiçbir kaynağın yazmadığı haberlerdir; aynı ajans metnini kopyalayan haberler ise genellikle birleşir. "Tek kaynak" her zaman "diğerleri görmezden geldi" anlamına gelmez.`}
           </dd>
         </div>
         <div className={ruleCard}>
@@ -538,7 +564,9 @@ function Definitions() {
             bayrağı ile kümenin güncel yanlılık dağılımından yeniden
             hesaplanan sonucun uyuşmadığı kümelerin oranı. Sıfırdan
             yüksekse, veri değiştikten sonra bayrağın yeniden
-            hesaplanmadığı anlamına gelir.
+            hesaplanmadığı anlamına gelir. Veto kurallarıyla geri çekilen kör
+            nokta iddiaları bu orana girmez; oran yalnızca saklanan bayrağın
+            yeniden hesaplamayla uyuşup uyuşmadığını ölçer.
           </dd>
         </div>
       </dl>

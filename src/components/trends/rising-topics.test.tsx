@@ -43,8 +43,21 @@ describe("<RisingTopics>", () => {
       expect(html).toContain('<h2 id="yukselen-konular"');
       expect(html).toContain("Yükselen Konular");
       expect(html).toContain(
-        "Başlıklarda son 7 günün ortalamasından belirgin biçimde fazla geçen kişi, kurum ve ülkeler · yalnızca spektruma sayılan kaynaklar · saatte bir güncellenir",
+        "Siyaset ve son dakika başlıklarında son 7 günün ortalamasından belirgin biçimde fazla geçen kişi, kurum, ülke ve konular · yalnızca spektruma sayılan kaynaklar · saatte bir güncellenir",
       );
+    }
+  });
+
+  // h90-trends-1: the count behind a row is politika / son_dakika only (the scope
+  // of the /gundem hubs it links to, migration 182) and the vocabulary is not only
+  // people, institutions and countries (enflasyon, faiz, dolar, borsa, asgari
+  // ücret), so the caption names the scope and says "konular".
+  it("the caption names the politics scope and says 'kişi, kurum, ülke ve konular'", () => {
+    for (const data of [ok([item()]), ok([]), { status: "insufficient" } as const, null]) {
+      const html = render(data);
+      expect(html).toContain("Siyaset ve son dakika başlıklarında");
+      expect(html).toContain("kişi, kurum, ülke ve konular");
+      expect(html).not.toContain("kişi, kurum ve ülkeler");
     }
   });
 
@@ -116,6 +129,8 @@ describe("<RisingTopics>", () => {
   it("formats big counts with the Turkish thousands separator", () => {
     const html = render(ok([item({ count: 1234 })]));
     expect(html).toContain("23 Ekim: 1.234 haber");
+    expect(html).toContain("1.234");
+    expect(html).not.toContain("1234");
   });
 
   it("ok with no items: honest 'no spike' copy naming the counted day, and no list", () => {
@@ -196,6 +211,17 @@ describe("rising-topics.tsx: source guard", () => {
   it("has no literal 'Bugün' or 'Dün'", () => {
     expect(code).not.toMatch(/Bugün/);
     expect(code).not.toMatch(/Dün/);
+  });
+
+  // The row count goes through the shared formatCountTr (useGrouping "always"),
+  // not a bare toLocaleString("tr-TR"): some ICU builds print "1234" for four
+  // digits, and server and client must agree.
+  it("formats the row count with the shared formatCountTr, never toLocaleString", () => {
+    expect(code).toMatch(
+      /import\s*\{\s*formatCountTr\s*\}\s*from\s*["']@\/lib\/format\/number-tr["']/,
+    );
+    expect(code).toMatch(/formatCountTr\(\s*item\.count\s*\)/);
+    expect(code).not.toMatch(/toLocaleString/);
   });
 
   it("labels the day through the shared dayLabelTr helper", () => {

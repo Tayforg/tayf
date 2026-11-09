@@ -13,6 +13,9 @@ export function NewsletterForm() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // aria-disabled (not `disabled`) keeps the focused button focused while the
+    // request is in flight, so it no longer blocks a second submit: ignore it here.
+    if (status === "sending") return;
     setStatus("sending");
 
     const form = event.currentTarget;
@@ -72,8 +75,8 @@ export function NewsletterForm() {
         />
         <button
           type="submit"
-          disabled={status === "sending"}
-          className="min-h-[40px] inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:ring-3 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+          aria-disabled={status === "sending"}
+          className="min-h-[40px] inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:ring-3 focus-visible:ring-ring aria-disabled:pointer-events-none aria-disabled:opacity-50"
         >
           {status === "sending" ? "Kaydediliyor..." : "Kaydol"}
         </button>

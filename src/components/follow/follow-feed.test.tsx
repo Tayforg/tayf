@@ -5,10 +5,12 @@ import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  createFailureLedger,
   EmptyState,
   FeedFrame,
   FollowFeed,
   FollowSection,
+  initialFailureAnnouncement,
   retryResultAnnouncement,
   SectionBody,
 } from "./follow-feed";
@@ -240,8 +242,14 @@ describe("retry result announcement wiring (source guard: effects need a browser
     const get = fetchEffect.indexOf("retryPending.current.get(item.key)");
     expect(aborted).toBeGreaterThan(-1);
     expect(get).toBeGreaterThan(aborted);
-    expect(fetchEffect).toContain("setAnnouncement(retryResultAnnouncement(");
-    expect(fetchEffect.indexOf("setAnnouncement(retryResultAnnouncement(")).toBeGreaterThan(get);
+    // The text is kept in a batch-local variable (the batch summary may append the
+    // initial failures to it) and announced at once.
+    expect(fetchEffect).toContain("retryText = retryResultAnnouncement(");
+    expect(fetchEffect.indexOf("retryText = retryResultAnnouncement(")).toBeGreaterThan(get);
+    expect(fetchEffect).toContain("setAnnouncement(retryText);");
+    expect(fetchEffect.indexOf("setAnnouncement(retryText);")).toBeGreaterThan(
+      fetchEffect.indexOf("retryText = retryResultAnnouncement("),
+    );
   });
 
   it("consumes the entry once it has announced, and prunes entries of unfollowed keys", () => {
@@ -261,7 +269,7 @@ describe("retry result announcement wiring (source guard: effects need a browser
   it("reads the per-key seenAt from a ref, passing it to retryResultAnnouncement", () => {
     expect(src).toContain("seenSnapshotRef = useRef<Record<string, string | null>>({})");
     expect(fetchEffect).toContain("seenSnapshotRef.current[item.key] ?? null");
-    expect(fetchEffect).toContain("retryResultAnnouncement(label, outcome, seenAt)");
+    expect(fetchEffect).toContain("retryText = retryResultAnnouncement(label, outcome, seenAt);");
   });
 
   it("mirrors seenSnapshot into that ref outside the fetch effect, and keeps the effect's deps", () => {
@@ -269,6 +277,204 @@ describe("retry result announcement wiring (source guard: effects need a browser
     expect(fetchEffect).not.toContain("seenSnapshotRef.current = seenSnapshot");
     expect(src).toContain("}, [keysSignature, retryNonce]);");
     expect(src).not.toMatch(/\}, \[[^\]]*seenSnapshot[^\]]*\]\);/);
+  });
+});
+
+// h90-livearia-3: /takip announced a RETRY's outcome but never an initial one, so
+// a first-load failure (a 429 on every follow, say) rendered the error UI while
+// the live region stayed empty. A batch that settles now says which follows
+// failed; successful initial loads stay silent.
+describe("initialFailureAnnouncement [h90-livearia-3]", () => {
+  it("is empty when nothing failed (a successful initial load stays silent)", () => {
+    expect(initialFailureAnnouncement([])).toBe("");
+  });
+
+  it("names the follow when exactly one failed", () => {
+    expect(initialFailureAnnouncement(["“ankara”"])).toBe("“ankara” yüklenemedi");
+    expect(initialFailureAnnouncement(["Ekonomi"])).toBe("Ekonomi yüklenemedi");
+  });
+
+  it("counts the follows when several failed", () => {
+    expect(initialFailureAnnouncement(["a", "b"])).toBe("2 takip yüklenemedi");
+    expect(initialFailureAnnouncement(["a", "b", "c", "d", "e"])).toBe("5 takip yüklenemedi");
+  });
+
+  it("does not echo the labels of several failures (a long list would be read out in full)", () => {
+    expect(initialFailureAnnouncement(["“seçim”", "Ekonomi"])).not.toContain("seçim");
+    expect(initialFailureAnnouncement(["“seçim”", "Ekonomi"])).not.toContain("Ekonomi");
+  });
+
+  it("never reads like a retry outcome, so the two cannot be confused", () => {
+    expect(initialFailureAnnouncement(["Ekonomi"])).not.toBe(
+      retryResultAnnouncement("Ekonomi", { status: "error", reason: "down" }, null),
+    );
+  });
+});
+
+describe("initial failure announcement wiring (source guard: effects need a browser) [h90-livearia-3]", () => {
+  const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
+  const effectStart = src.indexOf("useEffect(() => {");
+  const effectEnd = src.indexOf("}, [keysSignature, retryNonce]);");
+  const fetchEffect = src.slice(effectStart, effectEnd);
+  /** The worker callback that runs per follow, up to the end of runWithConcurrency. */
+  const workerStart = fetchEffect.indexOf("await runWithConcurrency(");
+  const settledAt = fetchEffect.lastIndexOf("if (controller.signal.aborted) return;");
+
+  it("slices the code it is guarding (the guards below are not vacuous)", () => {
+    expect(effectStart).toBeGreaterThan(-1);
+    expect(effectEnd).toBeGreaterThan(effectStart);
+    expect(workerStart).toBeGreaterThan(-1);
+    expect(settledAt).toBeGreaterThan(workerStart);
+  });
+
+  it("collects an errored follow that is NOT awaiting a retry announcement, by key and label, in a ref ledger", () => {
+    expect(src).toContain("unannouncedFailures = useRef(createFailureLedger())");
+    const worker = fetchEffect.slice(workerStart, settledAt);
+    const lookup = worker.indexOf("retryPending.current.get(item.key)");
+    const elseBranch = worker.indexOf('} else if (outcome.status === "error") {');
+    const record = worker.indexOf("unannouncedFailures.current.record(item.key, followLabel(item));");
+    expect(lookup).toBeGreaterThan(-1);
+    expect(elseBranch).toBeGreaterThan(lookup);
+    expect(record).toBeGreaterThan(elseBranch);
+    // a successful initial load adds nothing
+    expect(worker.slice(elseBranch)).not.toMatch(/outcome\.status === "ok"/);
+  });
+
+  it("the ledger outlives a batch: no batch-local list of failures is left", () => {
+    expect(src).not.toContain("initialFailures");
+    expect(src).not.toContain("retryAnnounced");
+  });
+
+  it("prunes the keys that are no longer live, next to the other refs", () => {
+    const prune = fetchEffect.indexOf("unannouncedFailures.current.prune(live);");
+    expect(prune).toBeGreaterThan(fetchEffect.indexOf("if (!live.has(key)) retryPending.current.delete(key);"));
+    expect(prune).toBeLessThan(fetchEffect.indexOf("const todo = "));
+  });
+
+  it("handleRetry forgets that follow's earlier failure (its retry outcome is announced instead), before the nonce bump", () => {
+    const retryStart = src.indexOf("function handleRetry");
+    const handleRetry = src.slice(retryStart, src.indexOf("\n  }\n", retryStart));
+    const forget = handleRetry.indexOf("unannouncedFailures.current.forget(key);");
+    expect(forget).toBeGreaterThan(-1);
+    expect(forget).toBeLessThan(handleRetry.indexOf("setRetryNonce"));
+  });
+
+  it("keeps the retry text of the batch and appends the unannounced failures to it", () => {
+    expect(fetchEffect).toContain('let retryText = "";');
+    const helperAt = fetchEffect.indexOf("const announceUnannounced = (lead: string) => {");
+    expect(helperAt).toBeGreaterThan(-1);
+    const helper = fetchEffect.slice(helperAt, fetchEffect.indexOf("const controller"));
+    const drain = helper.indexOf("initialFailureAnnouncement(unannouncedFailures.current.drain())");
+    const say = helper.indexOf("setAnnouncement(");
+    expect(drain).toBeGreaterThan(-1);
+    expect(say).toBeGreaterThan(drain);
+    // ONE combined string: two setAnnouncement calls in a tick collapse to the last.
+    expect(helper).toContain("`${lead} ${failureText}`");
+    expect(count(helper, "setAnnouncement(")).toBe(1);
+  });
+
+  it("announces once, after the batch settled and was not aborted, through the existing region", () => {
+    const tail = fetchEffect.slice(settledAt);
+    const say = tail.indexOf("announceUnannounced(retryText);");
+    expect(say).toBeGreaterThan(-1);
+    // the announcement comes before markSeen, which a failed follow never reaches anyway
+    expect(say).toBeLessThan(tail.indexOf("followsStore.markSeen("));
+  });
+
+  it("a re-run with nothing to fetch still drains the ledger, from a deferred callback", () => {
+    const emptyAt = fetchEffect.indexOf("if (todo.length === 0) {");
+    expect(emptyAt).toBeGreaterThan(-1);
+    const empty = fetchEffect.slice(emptyAt, fetchEffect.indexOf("const controller"));
+    expect(empty).toContain("unannouncedFailures.current.size() > 0");
+    expect(empty).toContain('const timer = setTimeout(() => announceUnannounced(""), 0);');
+    expect(empty).toContain("return () => clearTimeout(timer);");
+    // never synchronously (react-hooks/set-state-in-effect)
+    expect(empty.replace('announceUnannounced("")', "")).not.toContain("announceUnannounced(");
+  });
+
+  it("the drain is called in exactly two places: the settled batch and the deferred empty run", () => {
+    expect(count(fetchEffect, "announceUnannounced(")).toBe(2);
+  });
+
+  it("still has one live region, and the retry entry is consumed in exactly the two places it was", () => {
+    expect(count(src, 'role="status"')).toBe(1);
+    expect(count(fetchEffect, "retryPending.current.delete(")).toBe(2);
+  });
+
+  it("the initial-failure and the retry announcements go through the same setter (the FeedFrame region)", () => {
+    // one in the worker (the retry outcome), one in the drain helper
+    expect(count(fetchEffect, "setAnnouncement(")).toBe(2);
+    expect(src).toContain("<FeedFrame announcement={announcement}>");
+  });
+});
+
+// ts-follow-feed-aborted-batch-drops-failures: the failure labels used to live in a
+// batch-local array, and an abort (an unfollow, another tab changing the store, a
+// retry of a different follow) returned before the summary. The failed key was
+// already in erroredKeys, so the re-run skipped it and its "yüklenemedi" panel sat
+// on screen unspoken. The ledger is a ref, so it outlives the batch.
+describe("createFailureLedger [ts-follow-feed-aborted-batch-drops-failures]", () => {
+  it("a failure recorded in an aborted batch is announced by the run that settles later", () => {
+    const ledger = createFailureLedger();
+    ledger.record("q:ankara", "“ankara”");
+    // The batch is aborted here: nothing drains. The re-run prunes with the key still live.
+    ledger.prune(new Set(["q:ankara", "t:ekonomi"]));
+    const labels = ledger.drain();
+    expect(labels).toEqual(["“ankara”"]);
+    expect(initialFailureAnnouncement(labels)).toBe("“ankara” yüklenemedi");
+  });
+
+  it("a pruned (unfollowed) key is not announced, and a live one next to it still is", () => {
+    const ledger = createFailureLedger();
+    ledger.record("q:ankara", "“ankara”");
+    ledger.record("t:ekonomi", "Ekonomi");
+    ledger.prune(new Set(["t:ekonomi"]));
+    expect(ledger.drain()).toEqual(["Ekonomi"]);
+
+    const removedAll = createFailureLedger();
+    removedAll.record("q:ankara", "“ankara”");
+    removedAll.prune(new Set());
+    expect(removedAll.size()).toBe(0);
+    expect(removedAll.drain()).toEqual([]);
+  });
+
+  it("a forgotten (retried) key is not announced: its retry outcome is announced instead", () => {
+    const ledger = createFailureLedger();
+    ledger.record("q:ankara", "“ankara”");
+    ledger.record("t:ekonomi", "Ekonomi");
+    ledger.forget("q:ankara");
+    expect(ledger.drain()).toEqual(["Ekonomi"]);
+    // Forgetting a key that was never recorded is harmless.
+    expect(() => ledger.forget("t:yok")).not.toThrow();
+  });
+
+  it("drain() returns the labels in failure order and empties the ledger", () => {
+    const ledger = createFailureLedger();
+    ledger.record("a", "A");
+    ledger.record("b", "B");
+    ledger.record("a", "A2");
+    expect(ledger.size()).toBe(2);
+    // A second failure of the same key replaces its label and keeps its place.
+    expect(ledger.drain()).toEqual(["A2", "B"]);
+    expect(ledger.size()).toBe(0);
+    expect(ledger.drain()).toEqual([]);
+    expect(initialFailureAnnouncement(ledger.drain())).toBe("");
+  });
+
+  it("failures of several batches are counted together, not spoken one batch at a time", () => {
+    const ledger = createFailureLedger();
+    ledger.record("a", "A"); // batch 1, aborted
+    ledger.prune(new Set(["a", "b"]));
+    ledger.record("b", "B"); // batch 2, settled
+    expect(initialFailureAnnouncement(ledger.drain())).toBe("2 takip yüklenemedi");
+  });
+
+  it("ledgers are independent of each other (no shared module state)", () => {
+    const one = createFailureLedger();
+    const two = createFailureLedger();
+    one.record("a", "A");
+    expect(two.size()).toBe(0);
+    expect(two.drain()).toEqual([]);
   });
 });
 
