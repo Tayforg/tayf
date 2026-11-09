@@ -474,7 +474,15 @@ describe("TickerTape relative volume on an unrounded ratio (h57-ekonomi-1)", () 
   const item: TickerAttention[] = [
     { ticker: "GARAN", articles: 3, sources: 2, ratio: null, title: "Garanti" } as TickerAttention,
   ];
-  const garanQuote: Quote = { ...quote, ticker: "GARAN", price: 150, prevClose: 149, changePct: 0.67 };
+  // The quote is from the stat's own session (2026-11-06), so the volume carries no day label (h99-financenumbers-1).
+  const garanQuote: Quote = {
+    ...quote,
+    ticker: "GARAN",
+    price: 150,
+    prevClose: 149,
+    changePct: 0.67,
+    asOf: "2026-11-06T15:05:00Z",
+  };
   const withRvol = (rvol: number): Record<string, QuoteStat> => ({
     GARAN: { ticker: "GARAN", lastDay: "2026-11-06", lastClose: 150, prevClose: 149, lastVolume: 1, avgVolume20: 1, rvol },
   });
@@ -500,5 +508,86 @@ describe("TickerTape relative volume on an unrounded ratio (h57-ekonomi-1)", () 
     const n = hacimSpan(1.996);
     expect(n).toBeDefined();
     expect(classOf(n!)).not.toContain("text-amber-400");
+  });
+});
+
+// h99-financenumbers-1: during a live session the quote is today's, but bist_quote_stats still holds
+// the previous session until the daily bar lands (about 19:33 Istanbul). The tape printed that old
+// session's relative volume, amber when it was 2x or more, next to today's price and move, with no day.
+describe("TickerTape volume of another session (h99-financenumbers-1)", () => {
+  const froto: TickerAttention[] = [{ ticker: "FROTO", articles: 2, sources: 2, ratio: null, title: "Ford Otosan" } as TickerAttention];
+  const frotoQuote = (asOf: string): Quote => ({
+    ticker: "FROTO",
+    price: 72.35,
+    prevClose: 73.15,
+    changePct: -1.09,
+    hasBaseline: true,
+    closes: [67.85, 73.15, 72.35],
+    currency: "TRY",
+    asOf,
+  });
+  const fridayStat = (rvol: number): Record<string, QuoteStat> => ({
+    FROTO: { ticker: "FROTO", lastDay: "2026-11-06", lastClose: 73.15, prevClose: 67.85, lastVolume: 1, avgVolume20: 1, rvol },
+  });
+  const volumeSpan = (el: unknown) => spans(collect(el)).find((n) => textOf(n.props.children).startsWith("hacim"));
+
+  it("a Monday-morning quote beside Friday's volume reads 'hacim 2,7x · 06.11', not amber", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(2.7) });
+    expect(textOf(el)).toContain("hacim 2,7x · 06.11");
+    const n = volumeSpan(el);
+    expect(n).toBeDefined();
+    expect(classOf(n!)).not.toContain("text-amber-400");
+    expect(n!.props.title).toBe("06.11 seansının hacmi");
+  });
+
+  it("the ' · 06.11' piece is muted", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(2.7) });
+    const day = spans(collect(volumeSpan(el)!.props.children)).find((n) => textOf(n.props.children) === " · 06.11");
+    expect(day).toBeDefined();
+    expect(classOf(day!)).toContain("text-muted-foreground");
+  });
+
+  it("a quote from the stat's own session keeps today's markup: 'hacim 2,7x', amber at 2x or more, no date, no title", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-06T15:05:00Z") }, stats: fridayStat(2.7) });
+    const text = textOf(el);
+    expect(text).toContain("hacim 2,7x");
+    expect(text).not.toContain("06.11");
+    const n = volumeSpan(el);
+    expect(classOf(n!)).toContain("text-amber-400");
+    expect(n!.props.title).toBeUndefined();
+  });
+
+  it("another session's volume below 2x names its day and stays unflagged too", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(1.5) });
+    expect(textOf(el)).toContain("hacim 1,5x · 06.11");
+    expect(classOf(volumeSpan(el)!)).not.toContain("text-amber-400");
+  });
+
+  it("without a quote the tape keeps today's behaviour: the volume, amber, no date", () => {
+    const el = TickerTape({ items: froto, quotes: {}, stats: fridayStat(2.7) });
+    const text = textOf(el);
+    expect(text).toContain("hacim 2,7x");
+    expect(text).not.toContain("06.11");
+    expect(classOf(volumeSpan(el)!)).toContain("text-amber-400");
+  });
+
+  it("a quote with an unreadable asOf is treated as having no quote date: no label", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("garbage") }, stats: fridayStat(2.7) });
+    expect(textOf(el)).not.toContain("06.11");
+    expect(textOf(el)).toContain("hacim 2,7x");
+  });
+
+  it("a stale ticker still shows no 'hacim' at all, whatever the dates", () => {
+    const el = TickerTape({
+      items: froto,
+      quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") },
+      stats: fridayStat(2.7),
+      staleTickers: new Set(["FROTO"]),
+    });
+    expect(textOf(el)).not.toContain("hacim");
+  });
+
+  it("a ticker with no stat shows no volume", () => {
+    expect(textOf(TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: {} }))).not.toContain("hacim");
   });
 });

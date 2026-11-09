@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { MEDIA_DNA_EMPTY_CLASS, MediaDna, mediaDnaChipClass } from "./media-dna";
 import { toMediaDnaSources, type MediaDnaSource } from "./media-dna-sources";
 import { ZONE_META } from "@/lib/bias/config";
@@ -200,7 +203,7 @@ describe("MEDIA_DNA_EMPTY_CLASS (empty-zone label contrast)", () => {
 });
 
 // The cluster page projects the directory with toMediaDnaSources, so the client
-// component only ever receives these five fields. This file is .tsx, so tsc
+// component only ever receives these four fields (name, slug, bias, kind). This file is .tsx, so tsc
 // checks the type-level assertion (the .test.ts files are excluded from it).
 describe("MediaDna narrowed sources", () => {
   it("accepts exactly the MediaDnaSource projection", () => {
@@ -311,5 +314,74 @@ describe("MediaDna with an unavailable source directory", () => {
     );
     expect(normal).not.toContain("Kaynak bilgisi şu an alınamadı");
     expect(normal).toContain("bg-zinc-400");
+  });
+});
+
+// h99-clientjs-2: the id was only ever the React key of a chip. The projection
+// no longer carries it, so the chips are keyed by `slug` (UNIQUE in `sources`).
+describe("MediaDna chip keys (h99-clientjs-2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Literals typed as the projection itself: no id anywhere.
+  const rows: MediaDnaSource[] = [
+    { name: "Gov Outlet", slug: "gov", bias: "pro_government", kind: "outlet" },
+    { name: "Mid Outlet", slug: "mid", bias: "center", kind: "outlet" },
+    { name: "Mid Agg", slug: "mid-agg", bias: "center", kind: "aggregator" },
+    { name: "Opp Outlet", slug: "opp", bias: "opposition", kind: "outlet" },
+  ];
+
+  it("renders an id-less projection without a React key warning", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const html = renderToStaticMarkup(
+      <MediaDna sources={rows} highlightSlugs={new Set(["gov", "mid", "mid-agg", "opp"])} />,
+    );
+    expect(errors).not.toHaveBeenCalled();
+    for (const r of rows) expect(html).toContain(r.name);
+  });
+
+  it("keeps the chips in zone order and the highlightSlugs / voting / non-voting rendering unchanged", () => {
+    const html = renderToStaticMarkup(
+      <MediaDna sources={rows} highlightSlugs={new Set(["mid", "mid-agg"])} />,
+    );
+    // Collapsed view: only the two participants, voting chip solid, aggregator dashed.
+    expect(html).not.toContain("Gov Outlet");
+    expect(html).not.toContain("Opp Outlet");
+    const voting = html.match(/<span title="Mid Outlet[^"]*" class="([^"]*)"/);
+    const nonVoting = html.match(/<span title="Mid Agg[^"]*" class="([^"]*)"/);
+    expect(voting?.[1]).not.toContain("border-dashed");
+    expect(nonVoting?.[1]).toContain("border-dashed");
+    expect(html.indexOf("Mid Outlet")).toBeLessThan(html.indexOf("Mid Agg"));
+    expect(html).toContain("Tüm 4 kaynağı göster");
+  });
+
+  it("emits no source id: the markup is the same whatever ids the full rows had", () => {
+    const withIds = (ids: string[]) =>
+      renderToStaticMarkup(
+        <MediaDna
+          sources={toMediaDnaSources(
+            rows.map((r, i) => source({ ...r, id: ids[i] ?? "x" })),
+          )}
+          highlightSlugs={new Set(["mid"])}
+        />,
+      );
+    expect(withIds(["1", "2", "3", "4"])).toBe(withIds(["a", "b", "c", "d"]));
+  });
+
+  it("keys chips by slug in the source, not by an id field", () => {
+    const comp = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "media-dna.tsx"), "utf8");
+    expect(comp).toContain("key={source.slug}");
+    expect(comp).not.toMatch(/\bsource\.id\b/);
+  });
+
+  it("names no hard-coded directory size in its doc comments", () => {
+    const comp = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "media-dna.tsx"), "utf8");
+    const sourcesModule = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "media-dna-sources.ts"),
+      "utf8",
+    );
+    expect(comp).not.toMatch(/\b144\b/);
+    expect(sourcesModule).not.toMatch(/\b118\b/);
   });
 });

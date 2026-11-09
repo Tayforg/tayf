@@ -15,6 +15,7 @@ import {
   type AttentionRawRow,
   type AttentionRow,
 } from "@/lib/finance/ticker-relevance";
+import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
 import { readAllPages } from "@/lib/finance/paging";
 import {
   CIRCUIT_BREAKER_DAY_LIMIT,
@@ -848,6 +849,8 @@ function median(nums: number[]): number | null {
 }
 
 const EVENT_WINDOW_MS = 24 * 3_600_000;
+/** The pickup window in minutes (lag_e is in minutes): the 48 hours of "Medyada yankı". */
+const PICKUP_WINDOW_MINUTES = PICKUP_WINDOW_HOURS * 60;
 
 /**
  * Coverage of a ticker's disclosures, counted per EVENT.
@@ -863,14 +866,22 @@ const EVENT_WINDOW_MS = 24 * 3_600_000;
  * (lag_minutes is relative to the filing the view joined it to), and an article
  * seen under several filings of the event is one article.
  *   events           event count (<= disclosures).
- *   covered          events with at least one article at or after the event
- *                    start (lag_e >= 0); so `covered <= events` always.
+ *   covered          events with at least one article in the pickup window
+ *                    [event start, start + PICKUP_WINDOW_HOURS) (0 <= lag_e < 2880);
+ *                    so `covered <= events` always.
  *   medianLagMinutes median, over covered events, of the first such article's lag_e.
  *   pressAhead       events with abnormal attention in the 24 h before:
  *                    >= 2 DISTINCT articles with lag_e in [-1440, 0) and >= 3x
  *                    the ticker's usual daily rate (floored at 0.5 a day).
  * A mention before the filing is not leakage by itself; a ticker that is in
  * the news every day always has one.
+ *
+ * h99-financenumbers-2: the view joins articles in [-2 d, +5 d] of a filing, but
+ * "pickup" is the half-open 48 hours after the event start, the SAME window as
+ * "Medyada yankı" (kap-pickup.ts, PICKUP_WINDOW_HOURS) on the same page. An
+ * article 3137 minutes after the filing (SISE, the Q3 coverage of an old
+ * calendar notice) is not a reaction to it: it neither covers the event nor
+ * becomes its "first news". The view stays raw; the window is applied here.
  *
  * `disclosures` is the list the page shows (fetchTickerPage passes the
  * disclosures it lists, which are already free of circuit-breaker notices, so
@@ -921,8 +932,10 @@ export function coverageStats(
     let first = Number.POSITIVE_INFINITY;
     let pre24 = 0;
     for (const lag of lags.values()) {
-      if (lag >= 0) first = Math.min(first, lag);
-      else if (lag >= -1440) pre24++;
+      if (lag >= 0) {
+        // Past the 48 h window (lag_e >= 2880) an article is neither coverage nor the first news.
+        if (lag < PICKUP_WINDOW_MINUTES) first = Math.min(first, lag);
+      } else if (lag >= -1440) pre24++;
     }
     if (first !== Number.POSITIVE_INFINITY) firstAfter.push(first);
     if (pre24 >= 2 && pre24 >= 3 * Math.max(baselineDaily, 0.5)) pressAhead++;
@@ -1085,6 +1098,13 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
                   .eq("ticker", ticker)
                   .in("disclosure_index", indexes)
                   .gte("disclosed_at", since30)
+                  // The pickup window ends 48 h after the event start and the
+                  // event offset is >= 0, so lag_minutes >= 2880 implies
+                  // lag_e >= 2880: such a row can never count. The negative
+                  // (pre-filing) lags are untouched. coverageStats keeps its own
+                  // `lag < PICKUP_WINDOW_MINUTES` check, because a later filing of
+                  // a multi-filing event can have lag_minutes < 2880 and lag_e >= 2880.
+                  .lt("lag_minutes", PICKUP_WINDOW_MINUTES)
                   .order("disclosure_index")
                   .order("lag_minutes")
                   .order("article_id")

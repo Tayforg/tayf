@@ -29,6 +29,7 @@ import { SourceProfileLink } from "@/components/story/source-profile-link";
 import { SourceKunye, KUNYE_VISIBLE } from "@/components/story/source-kunye";
 import { SourceChips } from "@/components/source/source-chips";
 import { SOURCE_METADATA } from "@/lib/sources/factuality";
+import { GENERATED_IMAGE_HOSTS } from "@/lib/images/remote-image-hosts.data";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { CompareButton } from "@/components/compare/compare-button";
 import {
@@ -402,6 +403,16 @@ function emptyDistribution(): BiasDistribution {
   };
 }
 
+// h99-clientjs-1: the page now filters hero candidates with the same
+// normalise + allowlist rule as ClusterCardImage (pickHeroCandidates), so the
+// image fixtures must sit on a host from the generated /_next/image allowlist.
+const PHOTO_HOST = GENERATED_IMAGE_HOSTS.find((h) => !h.includes("*"));
+if (PHOTO_HOST === undefined) throw new Error("no exact host in the generated list");
+const OUTLET_PHOTO = `https://${PHOTO_HOST}/outlet/foto.jpg`;
+const BLOCKED_PHOTO = `https://${PHOTO_HOST}/blocked/foto.jpg`;
+const ALLOWED_PHOTO = `https://${PHOTO_HOST}/allowed/foto.jpg`;
+const HERO_PHOTO = `https://${PHOTO_HOST}/hero.jpg`;
+
 function makeSource(overrides: Partial<Source> & { id: string }): Source {
   return {
     id: overrides.id,
@@ -694,7 +705,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         "a-outlet",
         source,
         "2026-09-06T12:00:00.000Z",
-        "https://cdn.outlet.example/foto.jpg",
+        OUTLET_PHOTO,
       ),
     ];
 
@@ -720,7 +731,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
     expect(JSON.parse(html!).image).toEqual([
       "https://tayf.test/cluster/c1/opengraph-image",
     ]);
-    expect(html!).not.toContain("cdn.outlet.example");
+    expect(html!).not.toContain(PHOTO_HOST);
   });
 
   it("passes the outlet as a per-URL credit to ClusterCardImage when a hero image exists", async () => {
@@ -730,7 +741,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         "a-outlet",
         source,
         "2026-09-06T12:00:00.000Z",
-        "https://cdn.outlet.example/foto.jpg",
+        OUTLET_PHOTO,
       ),
     ];
 
@@ -758,7 +769,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
     // guarantees the credit can never name the wrong outlet after the
     // client-side fallback chain advances past the first candidate.
     expect(credits).toEqual({
-      "https://cdn.outlet.example/foto.jpg": {
+      [OUTLET_PHOTO]: {
         href: "https://example.com/articles/a-outlet",
         name: "Outlet Gazete",
       },
@@ -825,13 +836,13 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         "a-blocked",
         blocked,
         "2026-09-06T13:00:00.000Z",
-        "https://cdn.blocked.example/foto.jpg",
+        BLOCKED_PHOTO,
       ),
       makeMember(
         "a-allowed",
         allowed,
         "2026-09-06T12:00:00.000Z",
-        "https://cdn.allowed.example/foto.jpg",
+        ALLOWED_PHOTO,
       ),
     ];
 
@@ -854,12 +865,160 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
     const heroSrc = findHeroSrc(tree);
     const credits = findCredits(tree);
 
-    expect(heroSrc).toBe("https://cdn.allowed.example/foto.jpg");
+    expect(heroSrc).toBe(ALLOWED_PHOTO);
     expect(credits).toEqual({
-      "https://cdn.allowed.example/foto.jpg": {
+      [ALLOWED_PHOTO]: {
         href: "https://example.com/articles/a-allowed",
         name: "İzinli Kaynak",
       },
+    });
+  });
+
+  // h99-clientjs-1: the hero used to receive every member's image URL (a 44-URL
+  // `srcs` on a big cluster) and a credits map of all of them, both serialised
+  // into the RSC payload although ClusterCardImage filters and never walks that
+  // far. The page now hands over pickHeroCandidates(...) and credits for those
+  // URLs only.
+  describe("trimmed hero payload (h99-clientjs-1)", () => {
+    function detailOf(members: ClusterDetailMember[]): ClusterDetail {
+      return {
+        cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+        members,
+        allSources: members.map((m) => m.source),
+        wire: {
+          isWireRedistribution: false,
+          effectiveArticleCount: members.length,
+          memberCount: members.length,
+        },
+        blindspotSuppressed: false,
+        blindspotRecallVetoed: false,
+      };
+    }
+
+    async function heroOf(members: ClusterDetailMember[]) {
+      getClusterDetail.mockResolvedValue(detailOf(members));
+      const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+      const hero = findPropsOfType(tree, ClusterCardImage);
+      expect(hero).not.toBeNull();
+      return hero as unknown as {
+        src: string | null;
+        srcs: string[];
+        credits: Record<string, { href: string; name: string }>;
+        logoSrc: string | null;
+        logoAlt: string;
+      };
+    }
+
+    const photo = (n: number | string) => `https://${PHOTO_HOST}/foto/${n}.jpg`;
+
+    it("30 image members: at most 8 candidates, credits a subset of them, and the first candidate's credit names its owner", async () => {
+      const members = Array.from({ length: 30 }, (_, i) =>
+        makeMember(
+          `a-${i}`,
+          makeSource({ id: `s-${i}`, slug: `s-${i}`, name: `Kaynak ${i}` }),
+          "2026-09-06T12:00:00.000Z",
+          photo(i),
+        ),
+      );
+      const hero = await heroOf(members);
+
+      const candidates = [hero.src, ...hero.srcs];
+      expect(candidates).toHaveLength(8);
+      expect(candidates).toEqual(Array.from({ length: 8 }, (_, i) => photo(i)));
+
+      const keys = Object.keys(hero.credits);
+      expect(keys.length).toBeLessThanOrEqual(8);
+      expect(keys.every((k) => candidates.includes(k))).toBe(true);
+      expect(keys).toHaveLength(8);
+
+      expect(hero.credits[candidates[0]!]).toEqual({
+        href: "https://example.com/articles/a-0",
+        name: "Kaynak 0",
+      });
+      // Every candidate's credit names the member that owns that photo.
+      candidates.forEach((u, i) => {
+        expect(hero.credits[u!]?.name).toBe(`Kaynak ${i}`);
+      });
+      // A member past the cap is not credited: its photo is never a candidate.
+      expect(hero.credits[photo(29)]).toBeUndefined();
+    });
+
+    it("an unusable photo (gif, unlisted host) is neither a candidate nor credited, and does not use a slot", async () => {
+      const members = [
+        makeMember("a-gif", makeSource({ id: "s-gif", name: "Gif Kaynak" }), undefined, `https://${PHOTO_HOST}/loader.gif`),
+        makeMember("a-unlisted", makeSource({ id: "s-unlisted", name: "Listesiz" }), undefined, "https://not-listed.example/a.jpg"),
+        ...Array.from({ length: 9 }, (_, i) =>
+          makeMember(`a-${i}`, makeSource({ id: `s-${i}`, name: `Kaynak ${i}` }), undefined, photo(i)),
+        ),
+      ];
+      const hero = await heroOf(members);
+
+      expect([hero.src, ...hero.srcs]).toEqual(Array.from({ length: 8 }, (_, i) => photo(i)));
+      expect(Object.keys(hero.credits)).toHaveLength(8);
+      expect(JSON.stringify(hero)).not.toContain("loader.gif");
+      expect(JSON.stringify(hero)).not.toContain("not-listed.example");
+    });
+
+    it("the logo tier follows the owner of the first usable photo, not a member whose photo was unusable", async () => {
+      const gifSource = makeSource({ id: "s-gif", name: "Gif Kaynak", logo_url: "https://logo.example/gif.png" });
+      const fotoSource = makeSource({ id: "s-foto", name: "Foto Kaynak", logo_url: "https://logo.example/foto.png" });
+      const hero = await heroOf([
+        makeMember("a-gif", gifSource, undefined, `https://${PHOTO_HOST}/loader.gif`),
+        makeMember("a-foto", fotoSource, undefined, photo("foto")),
+      ]);
+
+      expect(hero.src).toBe(photo("foto"));
+      expect(hero.logoAlt).toBe("Foto Kaynak");
+      expect(hero.logoSrc).toBe("https://logo.example/foto.png");
+    });
+
+    it("with no usable photo the logo tier keeps today's rule: the first member that has any image_url", async () => {
+      const first = makeSource({ id: "s-first", name: "Ilk Kaynak", logo_url: "https://logo.example/first.png" });
+      const second = makeSource({ id: "s-second", name: "Ikinci Kaynak", logo_url: "https://logo.example/second.png" });
+      const hero = await heroOf([
+        makeMember("a-none", first),
+        makeMember("a-gif", second, undefined, `https://${PHOTO_HOST}/loader.gif`),
+      ]);
+
+      expect(hero.src).toBeNull();
+      expect(hero.srcs).toEqual([]);
+      expect(hero.credits).toEqual({});
+      expect(hero.logoAlt).toBe("Ikinci Kaynak");
+      expect(hero.logoSrc).toBe("https://logo.example/second.png");
+    });
+
+    it("credits are keyed by the normalised URL; two spellings of one photo give one entry and the first member wins", async () => {
+      const members = [
+        makeMember("a-one", makeSource({ id: "s-one", name: "Bir" }), undefined, `//${PHOTO_HOST}/foto/x.jpg`),
+        makeMember("a-two", makeSource({ id: "s-two", name: "Iki" }), undefined, `https://${PHOTO_HOST}//foto/x.jpg`),
+      ];
+      const hero = await heroOf(members);
+
+      expect(hero.src).toBe(`https://${PHOTO_HOST}/foto/x.jpg`);
+      expect(hero.srcs).toEqual([]);
+      expect(hero.credits).toEqual({
+        [`https://${PHOTO_HOST}/foto/x.jpg`]: {
+          href: "https://example.com/articles/a-one",
+          name: "Bir",
+        },
+      });
+    });
+
+    it("the serialised hero props shrink for a 44-member cluster", async () => {
+      const members = Array.from({ length: 44 }, (_, i) =>
+        makeMember(`a-${i}`, makeSource({ id: `s-${i}`, name: `Kaynak ${i}` }), undefined, photo(i)),
+      );
+      const hero = await heroOf(members);
+
+      const old = {
+        src: photo(0),
+        srcs: members.slice(1).map((m) => m.article.image_url),
+        credits: Object.fromEntries(
+          members.map((m) => [m.article.image_url, { href: m.article.url, name: m.source.name }]),
+        ),
+      };
+      const now = JSON.stringify({ src: hero.src, srcs: hero.srcs, credits: hero.credits }).length;
+      expect(now).toBeLessThan(JSON.stringify(old).length / 3);
     });
   });
 });
@@ -4099,12 +4258,12 @@ describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h
   it("(d) passes an empty alt, never the headline or a member's English article title", async () => {
     const detail = langDetail({
       sources: FBB078B4_SOURCES,
-      imageUrlOnFirst: "https://img.example/hero.jpg",
+      imageUrlOnFirst: HERO_PHOTO,
     });
     const tree = await renderTree(detail);
     const hero = findPropsOfType(tree, ClusterCardImage);
     expect(hero).not.toBeNull();
-    expect(hero!.src).toBe("https://img.example/hero.jpg");
+    expect(hero!.src).toBe(HERO_PHOTO);
     expect(hero!.alt).toBe("");
     expect(hero!.alt).not.toBe(detail.cluster.title_tr);
     expect(hero!.alt).not.toBe(detail.members[0]!.article.title);
@@ -4113,7 +4272,7 @@ describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h
   it("(d) the alt is empty for a Turkish cluster with an image as well", async () => {
     const detail = langDetail({
       sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }],
-      imageUrlOnFirst: "https://img.example/hero.jpg",
+      imageUrlOnFirst: HERO_PHOTO,
     });
     const tree = await renderTree(detail);
     expect(findPropsOfType(tree, ClusterCardImage)!.alt).toBe("");
@@ -4124,7 +4283,7 @@ describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h
       sources: FBB078B4_SOURCES,
       titleMethod: "extractive",
       titleOriginal: "Erdoğan visits Seoul with $15 billion trade goal",
-      imageUrlOnFirst: "https://img.example/hero.jpg",
+      imageUrlOnFirst: HERO_PHOTO,
     });
     detail.cluster.title_tr = "Erdoğan visits Seoul with $15 billion trade goal";
     const tree = await renderTree(detail);
@@ -4148,7 +4307,7 @@ describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h
     const detail = langDetail({
       sources: [...FBB078B4_SOURCES, { slug: "sozcu", name: "Sözcü", bias: "opposition" }],
       titleMethod: "extractive",
-      imageUrlOnFirst: "https://img.example/hero.jpg",
+      imageUrlOnFirst: HERO_PHOTO,
     });
     const tree = await renderTree(detail);
     expect(findPropsOfType(tree, ClusterCardImage)!.lang).toBeUndefined();
@@ -4158,7 +4317,7 @@ describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h
     const detail = langDetail({
       sources: FBB078B4_SOURCES,
       titleMethod: "llm",
-      imageUrlOnFirst: "https://img.example/hero.jpg",
+      imageUrlOnFirst: HERO_PHOTO,
     });
     const tree = await renderTree(detail);
     expect(findPropsOfType(tree, ClusterCardImage)!.lang).toBeUndefined();
@@ -4167,7 +4326,7 @@ describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h
   it("(f) leaves the hero image untagged for the Turkish 'Haber' fallback on an all-English cluster", async () => {
     const detail = langDetail({
       sources: FBB078B4_SOURCES,
-      imageUrlOnFirst: "https://img.example/hero.jpg",
+      imageUrlOnFirst: HERO_PHOTO,
     });
     detail.cluster.title_tr = "&nbsp";
     const tree = await renderTree(detail);
@@ -4179,7 +4338,7 @@ describe("ClusterDetailPage — hero image is decorative, lang follows the h1 (h
   it("(d) keeps the alt empty for a headline-less cluster that has an image", async () => {
     const detail = langDetail({
       sources: FBB078B4_SOURCES,
-      imageUrlOnFirst: "https://img.example/hero.jpg",
+      imageUrlOnFirst: HERO_PHOTO,
     });
     detail.cluster.title_tr = "&nbsp";
     const tree = await renderTree(detail);
@@ -4959,7 +5118,7 @@ describe("ClusterDetailPage — h1 lang for a mixed cluster (h59-english-2)", ()
     const detail = langDetail({
       sources: over.sources ?? MIXED_SOURCES,
       titleMethod: over.titleMethod ?? "extractive",
-      imageUrlOnFirst: over.image ? "https://img.example/hero.jpg" : null,
+      imageUrlOnFirst: over.image ? HERO_PHOTO : null,
     });
     detail.cluster.title_tr = over.titleTr;
     detail.members[0]!.article.title = over.enTitle ?? NATO_EN;

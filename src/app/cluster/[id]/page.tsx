@@ -43,6 +43,8 @@ import {
   shouldShowPublicFramingReceipt,
 } from "@/lib/clusters/framing-receipt";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { pickHeroCandidates } from "@/lib/images/hero-candidates";
+import { normalizeImageUrl } from "@/lib/images/image-url";
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 import {
   buildRelatedBlock,
@@ -547,25 +549,44 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // source of truth for the gate) rather than re-implemented here —
   // cluster-page.test.tsx's module mock preserves it via `importOriginal`.
   const imageEligible = imageEligibleMembers(members);
-  const heroCandidates = imageEligible
-    .map((m) => m.article.image_url)
-    .filter((u): u is string => typeof u === "string" && u.length > 0);
+  // h99-clientjs-1: only the first HERO_CANDIDATE_CAP USABLE urls cross into
+  // the client component (every one is serialised into the RSC payload; a
+  // 44-member cluster used to send 44 plus a credit for each). The same
+  // normalise + allowlist + dedupe ClusterCardImage applies runs here first,
+  // so the hero and the fallback order within the cap do not change.
+  const heroCandidates = pickHeroCandidates(
+    imageEligible.map((m) => m.article.image_url),
+  );
   const heroSrc = heroCandidates[0] ?? null;
-  const heroMember = imageEligible.find((m) => !!m.article.image_url) ?? null;
+  // The logo tier names the outlet that owns the photo the hero starts with:
+  // the first member whose normalised image is `heroSrc`. With no usable
+  // candidate it is the first member that has any image_url, as before.
+  const heroMember =
+    (heroSrc === null
+      ? undefined
+      : imageEligible.find(
+          (m) => normalizeImageUrl(m.article.image_url) === heroSrc,
+        )) ??
+    imageEligible.find((m) => !!m.article.image_url) ??
+    null;
 
-  // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the exact image
-  // URL rather than tied to `heroMember`/`heroSrc` alone, so the credit
+  // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the normalised
+  // image URL (the spelling ClusterCardImage looks credits up by) rather than
+  // tied to `heroMember`/`heroSrc` alone, so the credit
   // `ClusterCardImage` renders always names the outlet whose photo is
   // actually on screen — even after its client-side fallback chain
   // advances past the first candidate when a CDN 404s. First member to
   // claim a URL wins, matching the `Set`-based dedup order
   // `ClusterCardImage` applies to (src, ...srcs) internally. Built from
   // `imageEligible` (not `members`) so a blocked outlet's photo can never
-  // be credited even indirectly.
+  // be credited even indirectly, and only for the URLs in `heroCandidates`
+  // (h99-clientjs-1): a photo that is not sent to the client is never shown,
+  // so its credit would be dead payload.
+  const heroCreditUrls = new Set(heroCandidates);
   const heroCredits: Record<string, { href: string; name: string }> = {};
   for (const m of imageEligible) {
-    const url = m.article.image_url;
-    if (!url) continue;
+    const url = normalizeImageUrl(m.article.image_url);
+    if (url === null || !heroCreditUrls.has(url)) continue;
     heroCredits[url] ??= { href: m.article.url, name: m.source.name };
   }
 

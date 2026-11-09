@@ -242,6 +242,7 @@ import {
   type Disclosure,
 } from "./queries";
 import { tickerDisclosureOr } from "./disclosure-filter";
+import { PICKUP_WINDOW_HOURS } from "./kap-pickup";
 import { relevanceKey } from "./ticker-relevance";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -657,6 +658,96 @@ describe("finance query transforms", () => {
         expect(out.events).toBeLessThanOrEqual(out.disclosures);
         expect(out.pressAhead).toBeLessThanOrEqual(out.events);
       }
+    });
+
+    // h99-financenumbers-2: the disclosure_coverage view joins articles in [-2 d, +5 d], so "KAP ile basın
+    // arası" credited press pickup up to 5 days after a filing while "Medyada yankı" on the same page counts
+    // only the 48 hours after it (kap-pickup.ts, PICKUP_WINDOW_HOURS, half-open). SISE read "basında yer bulan
+    // 3, medyan 2 gün sonra" beside "haberi çıkan 5 (%71), medyan 1 saat sonra".
+    describe("coverageStats: 48-hour pickup window (h99-financenumbers-2)", () => {
+      const WINDOW_MIN = PICKUP_WINDOW_HOURS * 60;
+
+      it("the window is the pickup panel's 48 hours: 2880 minutes", () => {
+        expect(WINDOW_MIN).toBe(2880);
+      });
+
+      it("(a) a filing whose only row is 3137 minutes later is an event with no coverage", () => {
+        expect(coverageStats([row(1, 3137, "late")], [disc(1, 0)], 0.2)).toEqual({
+          disclosures: 1,
+          events: 1,
+          covered: 0,
+          medianLagMinutes: null,
+          pressAhead: 0,
+        });
+      });
+
+      it("(b) a row at lag 2879 is inside the window", () => {
+        expect(coverageStats([row(1, 2879, "a")], [disc(1, 0)], 0.2)).toMatchObject({ covered: 1, medianLagMinutes: 2879 });
+      });
+
+      it("(c) a row at lag 2880 is outside it: the window is half-open", () => {
+        expect(coverageStats([row(1, 2880, "a")], [disc(1, 0)], 0.2)).toMatchObject({ covered: 0, medianLagMinutes: null });
+      });
+
+      it("(d) the window runs from the event's FIRST filing, not from the filing the view joined the row to", () => {
+        // two filings 30 minutes apart are one event; lag_e = lag_minutes + 30 for the second filing
+        const filings = [disc(1, 0), disc(2, 0.5)];
+        expect(coverageStats([row(2, 2860, "late")], filings, 0.2)).toMatchObject({ events: 1, covered: 0, medianLagMinutes: null });
+        expect(coverageStats([row(2, 2820, "ok")], filings, 0.2)).toMatchObject({ events: 1, covered: 1, medianLagMinutes: 2850 });
+      });
+
+      it("(e) SISE replay: three events, only the 86-minute pickup is inside 48 hours (was 3 covered, median 3137)", () => {
+        const filings = [
+          { disclosureIndex: 11, publishedAt: "2026-10-21T16:52:45Z" },
+          { disclosureIndex: 12, publishedAt: "2026-11-02T18:33:44Z" },
+          { disclosureIndex: 13, publishedAt: "2026-11-05T15:16:55Z" },
+        ];
+        const rows = [row(11, 3137, "q3-a"), row(12, 4209, "q3-b"), row(13, 86, "q3-c")];
+        expect(coverageStats(rows, filings, 0.2)).toEqual({
+          disclosures: 3,
+          events: 3,
+          covered: 1,
+          medianLagMinutes: 86,
+          pressAhead: 0,
+        });
+      });
+
+      it("(f) pre-filing attention is unchanged: two rows at -100 and -200 still give one olağandışı ön ilgi", () => {
+        expect(coverageStats([row(1, -100, "p1"), row(1, -200, "p2")], [disc(1, 0)], 0.2).pressAhead).toBe(1);
+        // and a row beyond the window changes neither the ön ilgi nor the coverage
+        expect(coverageStats([row(1, -100, "p1"), row(1, -200, "p2"), row(1, 5000, "late")], [disc(1, 0)], 0.2)).toMatchObject({
+          covered: 0,
+          medianLagMinutes: null,
+          pressAhead: 1,
+        });
+      });
+
+      it("a late row never displaces an earlier in-window one, and an in-window row beats a row past the window", () => {
+        expect(coverageStats([row(1, 100, "soon"), row(1, 3000, "late")], [disc(1, 0)], 0.2)).toMatchObject({
+          covered: 1,
+          medianLagMinutes: 100,
+        });
+        expect(coverageStats([row(1, 4000, "late"), row(1, 2000, "in")], [disc(1, 0)], 0.2)).toMatchObject({
+          covered: 1,
+          medianLagMinutes: 2000,
+        });
+      });
+
+      it("the median is over events covered inside the window only", () => {
+        const out = coverageStats(
+          [row(1, 86, "a"), row(2, 2879, "b"), row(3, 3137, "c")],
+          [disc(1, 0), disc(2, 72), disc(3, 144)],
+          0.2,
+        );
+        expect(out).toMatchObject({ events: 3, covered: 2, medianLagMinutes: (86 + 2879) / 2 });
+      });
+
+      it("covered <= events <= disclosures still holds with rows far outside the window", () => {
+        const rows = [row(1, 10_000, "x"), row(1, -10_000, "y"), row(2, 2880, "z")];
+        const out = coverageStats(rows, [disc(1, 0), disc(2, 100)], 0.2);
+        expect(out.covered).toBe(0);
+        expect(out.covered).toBeLessThanOrEqual(out.events);
+      });
     });
 
     describe("coverage rows obey the page relevance gate (h72-kap-1)", () => {
@@ -1712,6 +1803,9 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
       expect(s.in).toEqual([{ col: "disclosure_index", vals: expect.arrayContaining(indexes) }]);
       expect(s.in[0]?.vals).toHaveLength(indexes.length);
       expect(s.gte).toEqual([{ col: "disclosed_at", val: new Date(Date.parse(NOW) - 30 * 86400_000).toISOString() }]);
+      // Rows 48 h or more after the filing can never count (lag_e >= lag_minutes), so
+      // they stay in the database; the negative (pre-filing) lags are not bounded.
+      expect(s.lt).toEqual([{ col: "lag_minutes", val: PICKUP_WINDOW_HOURS * 60 }]);
       // A bare .limit() is what PostgREST clamps at 1,000 -- never again.
       expect(s.limit).toBeNull();
     }
