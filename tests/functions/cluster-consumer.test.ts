@@ -302,6 +302,8 @@ const {
   skipLogFake,
   twinBridgeFake,
   attachShadowFake,
+  leaseFake,
+  fromTables,
   supabaseFakeClient,
   supabaseFakeCalls,
 } = await vi.hoisted(
@@ -384,6 +386,75 @@ const {
     // join (the context loader uses .in()), so a cluster that was not reloaded
     // leaves no entry here.
     const clusterArticleEqReadsState: string[] = [];
+    // h106-attachdesign-1 (migration 190): the consumer lease. An in-memory twin of the SQL of
+    // consumer_lease_acquire / consumer_lease_release, on the clock the tests move (Date.now): a row is taken
+    // over only once expired or by the same holder, a renewal is an acquire by the holder, a release deletes
+    // only for the holder. `error` makes every lease RPC answer that error; `acquireScript` answers the next
+    // acquires in order before the table logic (true, false, or {error}), so a test can lose the lease at a
+    // chosen turn. Every call is recorded with `at`, the number of pgmq calls made before it, and `t`, the
+    // clock, so a test can prove where in a drain's call sequence the lease sat and how long a wait took.
+    // Untouched, the lease is free and every drain of this file takes and gives it back unseen.
+    interface LeaseCall {
+      fn: "acquire" | "release";
+      name: string;
+      holder: string;
+      ttl: number | null;
+      result: boolean | string;
+      at: number;
+      t: number;
+    }
+    const leaseFakeState: {
+      row: { holder: string; expiresAt: number } | null;
+      error: { code?: string; message: string } | null;
+      acquireScript: Array<boolean | { error: { code?: string; message: string } }>;
+      calls: LeaseCall[];
+    } = { row: null, error: null, acquireScript: [], calls: [] };
+    // `pgmqState` is declared above in the file and read only when an RPC runs, long after it exists.
+    const pgmqCallsSoFar = (): number => pgmqState.calls.length;
+    const leaseRpcs = {
+      consumer_lease_acquire: (args: unknown) => {
+        const a = args as { p_name: string; p_holder: string; p_ttl_seconds: number | null };
+        const rec = { fn: "acquire" as const, name: a.p_name, holder: a.p_holder, ttl: a.p_ttl_seconds ?? null, at: pgmqCallsSoFar(), t: Date.now() };
+        if (leaseFakeState.error) {
+          leaseFakeState.calls.push({ ...rec, result: leaseFakeState.error.code ?? leaseFakeState.error.message });
+          return { data: null, error: leaseFakeState.error };
+        }
+        const scripted = leaseFakeState.acquireScript.shift();
+        if (scripted !== undefined && typeof scripted === "object") {
+          leaseFakeState.calls.push({ ...rec, result: scripted.error.code ?? scripted.error.message });
+          return { data: null, error: scripted.error };
+        }
+        let got: boolean;
+        if (scripted !== undefined) {
+          got = scripted;
+        } else {
+          const now = Date.now();
+          const row = leaseFakeState.row;
+          got = row === null || row.expiresAt <= now || row.holder === a.p_holder;
+          if (got) {
+            const ttl = Math.min(Math.max(a.p_ttl_seconds ?? 5, 5), 120);
+            leaseFakeState.row = { holder: a.p_holder, expiresAt: now + ttl * 1000 };
+          }
+        }
+        leaseFakeState.calls.push({ ...rec, result: got });
+        return { data: got, error: null };
+      },
+      consumer_lease_release: (args: unknown) => {
+        const a = args as { p_name: string; p_holder: string };
+        const rec = { fn: "release" as const, name: a.p_name, holder: a.p_holder, ttl: null, at: pgmqCallsSoFar(), t: Date.now() };
+        if (leaseFakeState.error) {
+          leaseFakeState.calls.push({ ...rec, result: leaseFakeState.error.code ?? leaseFakeState.error.message });
+          return { data: null, error: leaseFakeState.error };
+        }
+        const mine = leaseFakeState.row?.holder === a.p_holder;
+        if (mine) leaseFakeState.row = null;
+        leaseFakeState.calls.push({ ...rec, result: mine });
+        return { data: mine, error: null };
+      },
+    };
+    // Every table the SUT reads or writes, in call order (the shared fake logs only mutations and rpcs): lets a test
+    // see whether a cache was rebuilt (the `sources` lookup, the `clusters` context).
+    const fromTablesLog: string[] = [];
     const fake = helper.createSupabaseFake({
       tables: {
         articles: (state) => {
@@ -515,6 +586,8 @@ const {
           rpcFixturesState.cluster_stem_probe
             ? rpcFixturesState.cluster_stem_probe()
             : { data: [], error: null },
+        // h106-attachdesign-1 (migration 190): the consumer lease.
+        ...leaseRpcs,
       },
     });
     return {
@@ -531,9 +604,12 @@ const {
       skipLogFake: skipLogFakeState,
       twinBridgeFake: twinBridgeFakeState,
       attachShadowFake: attachShadowFakeState,
+      leaseFake: leaseFakeState,
+      fromTables: fromTablesLog,
       supabaseFakeClient: {
         ...fake.client,
         from: (table: string) => {
+          fromTablesLog.push(table);
           const builder = fake.client.from(table) as Record<string, unknown>;
           // The shared fake records only the patch of an upsert; these two audit
           // tables also keep its options (onConflict / ignoreDuplicates).
@@ -635,6 +711,12 @@ beforeEach(() => {
   attachShadowFake.mode = "ok";
   attachShadowFake.upsertOptions.length = 0;
   admissionRows.length = 0;
+  // h106-attachdesign-1: a free lease, no scripted answers, no error, no recorded calls, no table log.
+  leaseFake.row = null;
+  leaseFake.error = null;
+  leaseFake.acquireScript.length = 0;
+  leaseFake.calls.length = 0;
+  fromTables.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
   // Unset by default so tests that don't opt in never trigger a real fetch.
@@ -648,6 +730,9 @@ beforeEach(() => {
   delete process.env.JEV_LIVE_PAIRS;
   delete process.env.AI_GATEWAY_API_KEY;
   delete process.env.REVALIDATE_FEED_TAGS;
+  // h106-attachdesign-1: the lease and the kick are unset unless a test opts in.
+  delete process.env.CLUSTER_LEASE;
+  delete process.env.CLUSTER_KICK;
 });
 
 afterEach(() => {
@@ -6544,7 +6629,8 @@ describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", ()
     expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
     expect(supabaseFakeCalls.insert("cluster_articles")).toHaveLength(0);
     expect(vi.mocked(scoreMock)).not.toHaveBeenCalled();
-    for (const call of supabaseFakeCalls.rpc) {
+    // (The consumer lease RPCs of migration 190 belong to the lease, not to the probe: every drain makes them.)
+    for (const call of supabaseFakeCalls.rpc.filter((r) => !r.name.startsWith("consumer_lease_"))) {
       expect(["cluster_link_atomic"]).toContain(call.name); // no probe, no claim, no admission record, no Jev
     }
   }
@@ -6568,7 +6654,7 @@ describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", ()
     expect(attachShadowFake.upsertOptions).toEqual([{ onConflict: "article_id", ignoreDuplicates: true }]);
     // Shadow never touches the article or the cluster.
     expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
-    expect(supabaseFakeCalls.rpc).toHaveLength(0);
+    expect(supabaseFakeCalls.rpc.filter((r) => !r.name.startsWith("consumer_lease_"))).toHaveLength(0);
     expectNoClusterMachinery();
     expect(body.matched + body.created).toBe(0);
   });
@@ -6726,7 +6812,7 @@ describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", ()
     const body = await drain();
     expect(body.attach).toMatchObject({ attached: 0, by_reason: { "in-gate": 1 } });
     expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
-    expect(supabaseFakeCalls.rpc).toHaveLength(0);
+    expect(supabaseFakeCalls.rpc.filter((r) => !r.name.startsWith("consumer_lease_"))).toHaveLength(0);
     expect(pgmqState.attachDeleted).toEqual([7001]);
   });
 
@@ -7932,5 +8018,1065 @@ describe("cluster_work long poll is switched off (h102-pollregression-1; was h10
     const shared = readFileSync(resolve(__dirname, PGMQ), "utf8");
     expect(shared).toContain("export async function readBatchPoll<");
     expect(shared).toContain("export function isPollRpcMissing(");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h106-attachdesign-1 (migration 190): the consumer lease and the ingest kick.
+//
+// Attach still waited p50 55 s after #253 switched the long poll off: cluster-drain reads at about :02 of
+// every minute and ingest inserts at :04-:12 of its minute. The design: ingest POSTs {"trigger":"ingest"}
+// to this function from EdgeRuntime.waitUntil once its enqueue is done (CLUSTER_KICK=on), and a TTL lease
+// row (public.consumer_leases, two RPCs) keeps the cron-triggered consumer and the kicked one, in different
+// isolates, from reading cluster_work at the same time (two readers would score one story's messages in
+// parallel and open twins).
+//
+//   cron   (no body, or any body that is not {trigger:'ingest'}): acquire once; busy answers
+//          {ok:true,busy:true,reason:'lease'} before any read; an RPC that is missing or errors FAILS OPEN
+//          (today's drain);
+//   kick   ({trigger:'ingest'}): queue depth first (0: leave without touching the lease), then wait up to
+//          10 s in steps of 400 ms for the lease, re-checking the depth on every failed try; an RPC error
+//          FAILS CLOSED;
+//   both   after acquiring, renew at every read-loop turn (a false answer sets lease_lost and stops the
+//          reads), release in the handler's finally before drainInFlight is cleared;
+//   CLUSTER_LEASE=off  skips every lease call: the cron drain is call for call the pre-190 drain.
+//
+// Everything here runs on the lease fake of the harness (an in-memory twin of the SQL) and on pgmqState,
+// whose `calls` is the call sequence the h102 block already compares literally.
+// ---------------------------------------------------------------------------
+describe("cluster consumer lease and ingest kick (h106-attachdesign-1, migration 190)", () => {
+  const IMPORT = "../../supabase/functions/cluster-consumer/index.ts";
+  const PGMQ = "../../supabase/functions/_shared/pgmq.ts";
+  const CONSUMER_SRC = () => readFileSync(resolve(__dirname, IMPORT), "utf8");
+  const URL = "http://localhost/cluster-consumer";
+  const AT = "2026-11-10T12:00:02Z";
+  const KICK = { trigger: "ingest" } as const;
+
+  const DEPTH = "queueDepth(cluster_work)";
+  const WORK_READ = "readBatch(cluster_work,vt=60,qty=2)";
+  const ATTACH_READ = "readBatch(cluster_attach,vt=60,qty=25)";
+  const ATTACH_DEPTH = "queueDepth(cluster_attach)";
+  const ARCHIVE = (n: number) => `archive(cluster_work,${800 + n})`;
+
+  type Json = Record<string, unknown>;
+
+  const msgOf = (n: number): PgmqMessage => ({ msg_id: 800 + n, read_ct: 1, message: { article_id: `art-ls-${n}` } });
+  function seedArticle(n: number) {
+    fakeArticles[`art-ls-${n}`] = {
+      id: `art-ls-${n}`,
+      source_id: "src-outlet",
+      title: `Kira artışı sonrası yeni düzenleme ${n} bambaşka konu`,
+      description: "Detay",
+      url: `https://example.com/ls${n}`,
+      category: "politika",
+      published_at: new Date(Date.now() - 60_000).toISOString(),
+    };
+  }
+  function seedQueue(n: number) {
+    for (let i = 1; i <= n; i++) seedArticle(i);
+    pgmqState.pending = Array.from({ length: n }, (_, i) => msgOf(i + 1));
+  }
+
+  /** One POST to the handler of the SUT already imported in this test. */
+  async function post(body?: unknown, handler?: (req: Request) => Promise<Response>): Promise<{ status: number; json: Json }> {
+    const h = handler ?? (await importHandler());
+    if (!h) throw new Error("unreachable");
+    const init: RequestInit = { method: "POST" };
+    if (body !== undefined) {
+      init.body = typeof body === "string" ? body : JSON.stringify(body);
+      init.headers = { "content-type": "application/json" };
+    }
+    const res = await h(authedRequest(URL, init));
+    return { status: res.status, json: (await res.json()) as Json };
+  }
+
+  function clockAt(iso: string, toFake: Array<"Date" | "setTimeout"> = ["Date"]) {
+    vi.useFakeTimers({ toFake });
+    vi.setSystemTime(new Date(iso));
+  }
+
+  /** A drain from a clean slate: fresh SUT, empty queue state, `messages` queued, env set, clock fixed. */
+  async function runDrain(opts: { messages?: number; env?: Record<string, string>; body?: unknown; prepare?: () => void; iso?: string } = {}) {
+    vi.resetModules();
+    resetPgmqState();
+    clusterRows.length = 0;
+    clusterArticleRows.length = 0;
+    for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
+    leaseFake.row = null;
+    leaseFake.error = null;
+    leaseFake.acquireScript.length = 0;
+    leaseFake.calls.length = 0;
+    supabaseFakeCalls.rpc.length = 0;
+    supabaseFakeCalls.mutations.length = 0;
+    fromTables.length = 0;
+    delete process.env.CLUSTER_LEASE;
+    delete process.env.CLUSTER_KICK;
+    Object.assign(process.env, opts.env ?? {});
+    clockAt(opts.iso ?? AT);
+    seedQueue(opts.messages ?? 0);
+    opts.prepare?.();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const out = await post(opts.body);
+      return {
+        ...out,
+        pgmq: [...pgmqState.calls],
+        lease: leaseFake.calls.map((c) => ({ ...c })),
+        rpcNames: supabaseFakeCalls.rpc.map((r) => r.name),
+        mutations: supabaseFakeCalls.mutations.map((m) => `${m.table}:${m.op}`),
+        warns: warn.mock.calls.map((c) => c.map(String).join(" ")),
+      };
+    } finally {
+      err.mockRestore();
+      warn.mockRestore();
+    }
+  }
+
+  const leaseRpcNames = (names: string[]) => names.filter((n) => n.startsWith("consumer_lease_"));
+  const otherRpcNames = (names: string[]) => names.filter((n) => !n.startsWith("consumer_lease_"));
+
+  /** Every cluster_work / cluster_attach message read of `calls` sits after a lease acquire that answered true. */
+  function readsAreLeased(calls: string[], lease: Array<{ fn: string; result: boolean | string; at: number }>): boolean {
+    const grants = lease.filter((c) => c.fn === "acquire" && c.result === true).map((c) => c.at);
+    return calls.every((c, i) => !c.startsWith("readBatch(") || grants.some((at) => at <= i));
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // The pre-190 pgmq call sequences (the same ones the h102 block pins against 866a1d6), and where the lease
+  // calls sit in them: acquire before the first pgmq call, one renewal per loop turn (the turn's read has not
+  // happened yet), the release after the last one.
+  interface Scenario {
+    name: string;
+    messages: number;
+    readError?: string;
+    pgmq: string[];
+    renewAts: number[];
+    releaseAt: number;
+    drained: number;
+    failedTransient: number;
+  }
+  const SCENARIOS: Scenario[] = [
+    { name: "an empty queue", messages: 0, pgmq: [DEPTH, WORK_READ, ATTACH_READ, ATTACH_DEPTH, DEPTH], renewAts: [1], releaseAt: 5, drained: 0, failedTransient: 0 },
+    { name: "one message", messages: 1, pgmq: [DEPTH, WORK_READ, ARCHIVE(1), ATTACH_READ, ATTACH_DEPTH, DEPTH], renewAts: [1], releaseAt: 6, drained: 1, failedTransient: 0 },
+    {
+      name: "two messages (a full batch, then an empty read)",
+      messages: 2,
+      pgmq: [DEPTH, WORK_READ, ARCHIVE(1), ARCHIVE(2), WORK_READ, ATTACH_READ, ATTACH_DEPTH, DEPTH],
+      renewAts: [1, 4],
+      releaseAt: 8,
+      drained: 2,
+      failedTransient: 0,
+    },
+    {
+      name: "three messages (a full batch, then a short one)",
+      messages: 3,
+      pgmq: [DEPTH, WORK_READ, ARCHIVE(1), ARCHIVE(2), WORK_READ, ARCHIVE(3), ATTACH_READ, ATTACH_DEPTH, DEPTH],
+      renewAts: [1, 4],
+      releaseAt: 9,
+      drained: 3,
+      failedTransient: 0,
+    },
+    {
+      name: "a failing first read",
+      messages: 0,
+      readError: "pgmq.read(cluster_work): canceling statement due to statement timeout",
+      pgmq: [DEPTH, WORK_READ, DEPTH],
+      renewAts: [1],
+      releaseAt: 3,
+      drained: 0,
+      failedTransient: 1,
+    },
+  ];
+
+  describe("cron trigger, lease free (the default: CLUSTER_KICK and CLUSTER_LEASE unset)", () => {
+    it.each(SCENARIOS)("$name: today's pgmq call sequence, with one acquire first, one renewal per turn and one release last", async (sc) => {
+      const out = await runDrain({
+        messages: sc.messages,
+        prepare: () => {
+          if (sc.readError) pgmqState.workReadError = sc.readError;
+        },
+      });
+      expect(out.status).toBe(200);
+      expect(out.pgmq).toEqual(sc.pgmq);
+      expect(out.lease.map((c) => c.fn)).toEqual(["acquire", ...sc.renewAts.map(() => "acquire"), "release"]);
+      expect(out.lease.map((c) => c.at)).toEqual([0, ...sc.renewAts, sc.releaseAt]);
+      expect(out.lease.every((c) => c.result === true)).toBe(true);
+      expect(out.json.drained).toBe(sc.drained);
+      expect(out.json.failedTransient).toBe(sc.failedTransient);
+      expect(readsAreLeased(out.pgmq, out.lease)).toBe(true);
+      expect(leaseFake.row).toBeNull(); // given back
+    });
+
+    it("takes the lease 'cluster-consumer' for 45 s, under one fresh holder per invocation, renewed and released as that holder", async () => {
+      const a = await runDrain({ messages: 3 });
+      expect(new Set(a.lease.map((c) => c.name))).toEqual(new Set(["cluster-consumer"]));
+      expect(a.lease.filter((c) => c.fn === "acquire").map((c) => c.ttl)).toEqual([45, 45, 45]);
+      expect(a.lease.filter((c) => c.fn === "release").map((c) => c.ttl)).toEqual([null]);
+      const holders = new Set(a.lease.map((c) => c.holder));
+      expect(holders.size).toBe(1);
+      const [holderA] = [...holders] as [string];
+      expect(holderA).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      const b = await runDrain({ messages: 1 });
+      const [holderB] = [...new Set(b.lease.map((c) => c.holder))] as [string];
+      expect(holderB).not.toBe(holderA);
+    });
+
+    it("adds nothing to the drain's JSON body: the same keys as with CLUSTER_LEASE=off (no lease_lost, no trigger)", async () => {
+      const on = await runDrain({ messages: 2 });
+      const off = await runDrain({ messages: 2, env: { CLUSTER_LEASE: "off" } });
+      expect(Object.keys(on.json).sort()).toEqual(Object.keys(off.json).sort());
+      expect("lease_lost" in on.json).toBe(false);
+      expect("trigger" in on.json).toBe(false);
+      expect("lease_wait_ms" in on.json).toBe(false);
+    });
+
+    it.each([undefined, "", "on", "ON", "Off", "0", "false", "off ", " off"])(
+      "CLUSTER_LEASE=%j keeps the lease on: only the exact string 'off' switches it off",
+      async (flag) => {
+        const out = await runDrain({ messages: 1, env: flag === undefined ? {} : { CLUSTER_LEASE: flag } });
+        expect(leaseRpcNames(out.rpcNames).length).toBeGreaterThan(0);
+      },
+    );
+
+    it("a GET liveness probe, a 405 and a 401 never touch the lease", async () => {
+      vi.resetModules();
+      const handler = await importHandler();
+      const get = await handler!(authedRequest(URL, { method: "GET" }));
+      expect(get.status).toBe(200);
+      expect((await handler!(authedRequest(URL, { method: "PUT" }))).status).toBe(405);
+      expect((await handler!(new Request(URL, { method: "POST" }))).status).toBe(401);
+      expect(leaseFake.calls).toEqual([]);
+      expect(pgmqState.calls).toEqual([]);
+    });
+  });
+
+  describe("cron trigger, lease busy: no read at all", () => {
+    const heldByOther = () => {
+      leaseFake.row = { holder: "another-isolate", expiresAt: Date.now() + 30_000 };
+    };
+
+    it.each([
+      ["no body", undefined],
+      ["an empty JSON object", {}],
+      ["trigger 'cron'", { trigger: "cron" }],
+      ["a body that is not JSON", "not json {"],
+      ["an unknown trigger value", { trigger: "INGEST" }],
+      ["a trigger of the wrong type", { trigger: ["ingest"] }],
+      ["a JSON null", "null"],
+      ["a JSON array", "[]"],
+      ["a JSON number", "7"],
+    ])("%s: answers 200 {ok:true,busy:true,reason:'lease'} and makes no pgmq call and no other RPC", async (_name, body) => {
+      const out = await runDrain({ messages: 4, body, prepare: heldByOther });
+      expect(out.status).toBe(200);
+      expect(out.json).toEqual({ ok: true, busy: true, reason: "lease" });
+      expect(out.pgmq).toEqual([]); // not even a queue-depth probe
+      expect(out.rpcNames).toEqual(["consumer_lease_acquire"]);
+      expect(out.lease.map((c) => [c.fn, c.result])).toEqual([["acquire", false]]);
+      expect(pgmqState.pending).toHaveLength(4); // nothing was leased from the queue
+      expect(fromTables).toEqual([]); // no cache load, no article read
+    });
+
+    it("an oversized body is no trigger either (it counts as cron)", async () => {
+      const out = await runDrain({ messages: 1, body: JSON.stringify({ trigger: "ingest", pad: "x".repeat(5_000) }), prepare: heldByOther });
+      expect(out.json).toEqual({ ok: true, busy: true, reason: "lease" });
+    });
+
+    it("the lease of a holder that has expired is taken over by the cron drain", async () => {
+      const out = await runDrain({
+        messages: 1,
+        prepare: () => {
+          leaseFake.row = { holder: "dead-isolate", expiresAt: Date.now() - 1 };
+        },
+      });
+      expect(out.json.drained).toBe(1);
+      expect(out.lease[0]).toMatchObject({ fn: "acquire", result: true });
+    });
+  });
+
+  describe("cron trigger, lease RPC missing or failing: fails open, exactly today's drain (unless CLUSTER_KICK=on and the RPC exists)", () => {
+    const missing: Array<[string, { code?: string; message: string }]> = [
+      ["migration 190 not applied (PGRST202)", { code: "PGRST202", message: "Could not find the function public.consumer_lease_acquire" }],
+      ["the function dropped while PostgREST still had it cached (42883)", { code: "42883", message: "function does not exist" }],
+    ];
+    const failing: Array<[string, { code?: string; message: string }]> = [
+      ["a statement timeout (57014)", { code: "57014", message: "canceling statement due to statement timeout" }],
+      ["an error without a code", { message: "connection reset" }],
+    ];
+    const errors = [...missing, ...failing];
+
+    // With kicks on, a kicked drain (another isolate) can read cluster_work while a lease-less cron drain does:
+    // the two-reader case migration 190 exists to prevent. A failing RPC therefore fails CLOSED for the cron
+    // drain too; only a missing RPC (kicks fail closed on it as well, so nobody else reads) stays fail-open.
+    it.each(failing)("%s, CLUSTER_KICK=on: fails closed, 503 lease-unavailable, one acquire, nothing is read", async (_name, error) => {
+      const out = await runDrain({
+        messages: 3,
+        env: { CLUSTER_KICK: "on" },
+        prepare: () => {
+          leaseFake.error = error;
+        },
+      });
+      expect(out.status).toBe(503);
+      expect(out.json).toEqual({ ok: false, error: "lease-unavailable", reason: "lease-error" });
+      expect(out.pgmq).toEqual([]);
+      expect(out.lease).toHaveLength(1);
+      expect(out.lease[0]).toMatchObject({ fn: "acquire" });
+      expect(pgmqState.pending).toHaveLength(3);
+      expect(out.warns.filter((w) => w.includes("lease"))).toHaveLength(1);
+    });
+
+    it.each(missing)("%s, CLUSTER_KICK=on: still fails open (the kicks fail closed on it, so no second reader exists)", async (_name, error) => {
+      const out = await runDrain({
+        messages: 3,
+        env: { CLUSTER_KICK: "on" },
+        prepare: () => {
+          leaseFake.error = error;
+        },
+      });
+      expect(out.status).toBe(200);
+      expect(out.pgmq).toEqual(SCENARIOS[3]!.pgmq);
+      expect(out.json.drained).toBe(3);
+      expect(out.lease).toHaveLength(1);
+      expect(out.warns.filter((w) => w.includes("lease"))).toHaveLength(1);
+    });
+
+    it.each(["", "off", "ON", "true"])("CLUSTER_KICK=%j (not exactly 'on'): a failing RPC still fails open", async (kick) => {
+      const out = await runDrain({
+        messages: 3,
+        env: { CLUSTER_KICK: kick },
+        prepare: () => {
+          leaseFake.error = { code: "57014", message: "canceling statement due to statement timeout" };
+        },
+      });
+      expect(out.status).toBe(200);
+      expect(out.json.drained).toBe(3);
+    });
+
+    it.each(errors)("%s: drains as today, tries the lease once, then never renews or releases", async (_name, error) => {
+      const out = await runDrain({
+        messages: 3,
+        prepare: () => {
+          leaseFake.error = error;
+        },
+      });
+      expect(out.status).toBe(200);
+      expect(out.pgmq).toEqual(SCENARIOS[3]!.pgmq);
+      expect(out.json.drained).toBe(3);
+      expect("lease_lost" in out.json).toBe(false);
+      expect(out.lease).toHaveLength(1); // one acquire, nothing after it
+      expect(out.lease[0]).toMatchObject({ fn: "acquire" });
+      expect(out.warns.filter((w) => w.includes("lease"))).toHaveLength(1);
+    });
+
+    it("a lease answer that is not a boolean (null, no error) is an error too: the cron drain fails open", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      seedQueue(1);
+      const handler = await importHandler();
+      const original = supabaseFakeClient.rpc;
+      const rpc = vi.spyOn(supabaseFakeClient, "rpc");
+      rpc.mockImplementation(((name: string, args: unknown) => {
+        // The shared fake answers { data: null } for an RPC it does not know; make the lease RPCs do the same.
+        if (name.startsWith("consumer_lease_")) return Promise.resolve({ data: null, error: null });
+        return (original as (n: string, a: unknown) => unknown)(name, args);
+      }) as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const out = await post(undefined, handler!);
+        expect(out.status).toBe(200);
+        expect(out.json.drained).toBe(1);
+        expect("lease_lost" in out.json).toBe(false);
+        expect(rpc.mock.calls.filter(([n]) => String(n).startsWith("consumer_lease_")).map(([n]) => n)).toEqual(["consumer_lease_acquire"]);
+      } finally {
+        warn.mockRestore();
+        rpc.mockRestore();
+      }
+    });
+  });
+
+  describe("CLUSTER_LEASE=off: no lease call of any kind, call for call the pre-190 drain", () => {
+    it.each(SCENARIOS)("$name: the pre-190 pgmq call sequence and not one lease RPC", async (sc) => {
+      const out = await runDrain({
+        messages: sc.messages,
+        env: { CLUSTER_LEASE: "off" },
+        prepare: () => {
+          if (sc.readError) pgmqState.workReadError = sc.readError;
+        },
+      });
+      expect(out.status).toBe(200);
+      expect(out.pgmq).toEqual(sc.pgmq);
+      expect(out.lease).toEqual([]);
+      expect(leaseRpcNames(out.rpcNames)).toEqual([]);
+      expect(out.json.drained).toBe(sc.drained);
+      expect(out.json.failedTransient).toBe(sc.failedTransient);
+    });
+
+    it.each(SCENARIOS)(
+      "$name: the default drain and the CLUSTER_LEASE=off drain differ in the lease calls ONLY (pgmq calls, other RPCs, writes and counters equal)",
+      async (sc) => {
+        const prep = () => {
+          if (sc.readError) pgmqState.workReadError = sc.readError;
+        };
+        const on = await runDrain({ messages: sc.messages, prepare: prep });
+        const off = await runDrain({ messages: sc.messages, env: { CLUSTER_LEASE: "off" }, prepare: prep });
+        expect(on.pgmq).toEqual(off.pgmq);
+        expect(otherRpcNames(on.rpcNames)).toEqual(otherRpcNames(off.rpcNames));
+        expect(on.mutations).toEqual(off.mutations);
+        expect(fromTables.length).toBeGreaterThanOrEqual(0);
+        for (const k of ["drained", "matched", "created", "skipped", "failedTransient", "failedPermanent", "budgeted_out", "polls"]) {
+          expect(on.json[k], k).toEqual(off.json[k]);
+        }
+        expect(leaseRpcNames(on.rpcNames).length).toBe(2 + sc.renewAts.length);
+        expect(leaseRpcNames(off.rpcNames)).toEqual([]);
+      },
+    );
+
+    it("a busy lease cannot stop a drain that has the lease switched off", async () => {
+      const out = await runDrain({
+        messages: 2,
+        env: { CLUSTER_LEASE: "off" },
+        prepare: () => {
+          leaseFake.row = { holder: "another-isolate", expiresAt: Date.now() + 30_000 };
+        },
+      });
+      expect(out.json.drained).toBe(2);
+      expect(out.lease).toEqual([]);
+    });
+
+    it("the lease RPCs are never even reached for: the fake saw no call", async () => {
+      await runDrain({ messages: 1, env: { CLUSTER_LEASE: "off" } });
+      expect(supabaseFakeCalls.rpc.some((r) => r.name.startsWith("consumer_lease_"))).toBe(false);
+    });
+
+    it("a kick under CLUSTER_LEASE=off drains nothing and touches nothing: without the lease nothing serialises two readers", async () => {
+      const out = await runDrain({ messages: 4, env: { CLUSTER_LEASE: "off" }, body: KICK });
+      expect(out.status).toBe(200);
+      expect(out.json).toEqual({ ok: true, skipped: true, reason: "lease-off" });
+      expect(out.pgmq).toEqual([]);
+      expect(out.rpcNames).toEqual([]);
+      expect(pgmqState.pending).toHaveLength(4);
+    });
+  });
+
+  describe("kick trigger", () => {
+    it("depth 0: returns at once WITHOUT the lease: one queue-depth probe, no lease RPC, no read", async () => {
+      const out = await runDrain({ messages: 0, body: KICK });
+      expect(out.status).toBe(200);
+      expect(out.json).toEqual({ ok: true, empty: true, reason: "depth" });
+      expect(out.pgmq).toEqual([DEPTH]);
+      expect(out.lease).toEqual([]);
+      expect(out.rpcNames).toEqual([]);
+    });
+
+    it("a free lease: depth first, then acquire, the caches nulled, the drain, the release; the drain body names the trigger", async () => {
+      const out = await runDrain({ messages: 3, body: KICK });
+      expect(out.status).toBe(200);
+      expect(out.pgmq).toEqual([DEPTH, ...SCENARIOS[3]!.pgmq]);
+      expect(out.lease.map((c) => [c.fn, c.at])).toEqual([
+        ["acquire", 1], // after the depth probe, before every other pgmq call
+        ["acquire", 2], // renewal of turn 1
+        ["acquire", 5], // renewal of turn 2
+        ["release", 10],
+      ]);
+      expect(out.json).toMatchObject({ ok: true, drained: 3, trigger: "ingest", lease_wait_ms: 0 });
+      expect(readsAreLeased(out.pgmq, out.lease)).toBe(true);
+      expect(leaseFake.row).toBeNull();
+    });
+
+    it("nulls the context and the source lookup after acquiring: warm caches are rebuilt for a kick, reused by a plain cron drain", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      const handler = await importHandler();
+      const sourceLoads = () => fromTables.filter((t) => t === "sources").length;
+      // 1. a cron drain on an empty queue warms both caches
+      await post(undefined, handler!);
+      const warmCtx = clusterQueries.length;
+      const warmSrc = sourceLoads();
+      expect(warmCtx).toBeGreaterThan(0);
+      expect(warmSrc).toBeGreaterThan(0);
+      // 2. one second later another cron drain finds them warm (today's behaviour in the dark state): no rebuild
+      vi.setSystemTime(Date.now() + 1_000);
+      await post(undefined, handler!);
+      expect(clusterQueries.length).toBe(warmCtx);
+      expect(sourceLoads()).toBe(warmSrc);
+      // 3. a kick one second after that acquires the lease and starts from DB truth
+      vi.setSystemTime(Date.now() + 1_000);
+      seedQueue(1);
+      const kicked = await post(KICK, handler!);
+      expect(kicked.json.drained).toBe(1);
+      expect(clusterQueries.length).toBeGreaterThan(warmCtx);
+      expect(sourceLoads()).toBe(warmSrc + 1);
+    });
+
+    it("under CLUSTER_KICK=on a cron drain also starts from DB truth (a kicked drain may have run in another isolate since)", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      process.env.CLUSTER_KICK = "on";
+      const handler = await importHandler();
+      const sourceLoads = () => fromTables.filter((t) => t === "sources").length;
+      await post(undefined, handler!);
+      const warmCtx = clusterQueries.length;
+      const warmSrc = sourceLoads();
+      vi.setSystemTime(Date.now() + 1_000);
+      await post(undefined, handler!);
+      expect(clusterQueries.length).toBeGreaterThan(warmCtx);
+      expect(sourceLoads()).toBe(warmSrc + 1);
+    });
+
+    it("under CLUSTER_KICK=on a cron drain that fails open (lease RPC missing) also starts from DB truth", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      process.env.CLUSTER_KICK = "on";
+      // PGRST202 (not 57014): a missing RPC stays fail-open under CLUSTER_KICK=on, so the drain runs without a lease.
+      leaseFake.error = { code: "PGRST202", message: "Could not find the function public.consumer_lease_acquire" };
+      const handler = await importHandler();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const sourceLoads = () => fromTables.filter((t) => t === "sources").length;
+      try {
+        const first = await post(undefined, handler!);
+        expect(first.status).toBe(200);
+        const warmCtx = clusterQueries.length;
+        const warmSrc = sourceLoads();
+        expect(warmCtx).toBeGreaterThan(0);
+        expect(warmSrc).toBeGreaterThan(0);
+        vi.setSystemTime(Date.now() + 1_000);
+        const second = await post(undefined, handler!);
+        expect(second.status).toBe(200);
+        // No lease was held, yet a kicked drain may have run in another isolate since: DB truth again.
+        expect(clusterQueries.length).toBeGreaterThan(warmCtx);
+        expect(sourceLoads()).toBe(warmSrc + 1);
+      } finally {
+        warn.mockRestore();
+        leaseFake.error = null;
+      }
+    });
+
+    it("under CLUSTER_LEASE=off with CLUSTER_KICK=on a cron drain keeps its warm caches: the pre-190 drain, nothing to rebuild for", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      process.env.CLUSTER_LEASE = "off";
+      process.env.CLUSTER_KICK = "on";
+      const handler = await importHandler();
+      const sourceLoads = () => fromTables.filter((t) => t === "sources").length;
+      await post(undefined, handler!);
+      const warmCtx = clusterQueries.length;
+      const warmSrc = sourceLoads();
+      expect(warmCtx).toBeGreaterThan(0);
+      expect(warmSrc).toBeGreaterThan(0);
+      vi.setSystemTime(Date.now() + 1_000);
+      await post(undefined, handler!);
+      expect(clusterQueries.length).toBe(warmCtx);
+      expect(sourceLoads()).toBe(warmSrc);
+      expect(leaseFake.calls).toEqual([]);
+    });
+
+    it("releases the lease even when the drain throws (the drain's first statement past the lease)", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      seedQueue(3);
+      const handler = await importHandler();
+      const pgmq = await import(PGMQ);
+      vi.mocked(pgmq.queueDepth)
+        .mockImplementationOnce(async () => ({ depth: 3, oldest_msg_age_sec: null })) // the kick's own probe
+        .mockImplementationOnce(async () => {
+          throw new Error("metrics exploded");
+        }); // drainQueue's `before` sample
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const out = await post(KICK, handler!);
+        expect(out.status).toBe(500);
+        expect(out.json.ok).toBe(false);
+      } finally {
+        err.mockRestore();
+      }
+      expect(leaseFake.calls.map((c) => [c.fn, c.result])).toEqual([
+        ["acquire", true],
+        ["release", true],
+      ]);
+      expect(leaseFake.row).toBeNull();
+      expect(pgmqState.reads).toEqual([]);
+    });
+
+    it("the cron drain releases the lease when its drain throws as well, and a LATER drain can take it", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      const handler = await importHandler();
+      const pgmq = await import(PGMQ);
+      vi.mocked(pgmq.queueDepth).mockImplementationOnce(async () => {
+        throw new Error("metrics exploded");
+      });
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        expect((await post(undefined, handler!)).status).toBe(500);
+      } finally {
+        err.mockRestore();
+      }
+      expect(leaseFake.calls.map((c) => c.fn)).toEqual(["acquire", "release"]);
+      expect(leaseFake.row).toBeNull();
+      seedQueue(1);
+      expect((await post(undefined, handler!)).json.drained).toBe(1); // drainInFlight was cleared too
+    });
+
+    it("a kick that arrives while this isolate is draining answers {ok:true,busy:true} without any lease call", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      const handler = await importHandler();
+      const pgmq = await import(PGMQ);
+      let open: () => void = () => {};
+      const gate = new Promise<void>((r) => (open = r));
+      vi.mocked(pgmq.queueDepth).mockImplementationOnce(async () => {
+        await gate;
+        return { depth: 0, oldest_msg_age_sec: null };
+      });
+      const first = post(undefined, handler!); // takes the lease, then waits in drainQueue's depth sample
+      await vi.waitFor(() => expect(vi.mocked(pgmq.queueDepth)).toHaveBeenCalledTimes(1));
+      expect(leaseFake.calls.map((c) => c.fn)).toEqual(["acquire"]);
+      const second = await post(KICK, handler!);
+      expect(second.json).toEqual({ ok: true, busy: true });
+      expect(leaseFake.calls.map((c) => c.fn)).toEqual(["acquire"]); // the second made no lease call
+      open();
+      expect((await first).status).toBe(200);
+      expect(leaseFake.calls.map((c) => c.fn)).toEqual(["acquire", "acquire", "release"]);
+    });
+  });
+
+  describe("kick trigger, lease busy: waits at most 10 s on an injected clock, never reads without the lease", () => {
+    const heldFor = (ms: number) => () => {
+      leaseFake.row = { holder: "another-isolate", expiresAt: Date.now() + ms };
+    };
+
+    /** Runs a kick against a handler on fake Date + setTimeout; advances the clock in 100 ms steps until the response is in. */
+    async function kickWithClock(setup: () => void): Promise<{ status: number; json: Json; startedAt: number }> {
+      vi.resetModules();
+      resetPgmqState();
+      for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
+      leaseFake.row = null;
+      leaseFake.calls.length = 0;
+      supabaseFakeCalls.rpc.length = 0;
+      clockAt(AT, ["Date", "setTimeout"]);
+      const handler = await importHandler();
+      setup();
+      const startedAt = Date.now();
+      let answer: { status: number; json: Json } | null = null;
+      const pending = post(KICK, handler!).then((a) => (answer = a));
+      for (let i = 0; i < 400 && answer === null; i++) await vi.advanceTimersByTimeAsync(100);
+      await pending;
+      return { ...(answer as unknown as { status: number; json: Json }), startedAt };
+    }
+
+    it("held for the whole wait: 26 tries 400 ms apart over exactly 10 s, then {ok:true,busy:true,reason:'lease'}, no read, no release", async () => {
+      const out = await kickWithClock(() => {
+        seedQueue(2);
+        heldFor(60_000)();
+      });
+      expect(out.status).toBe(200);
+      expect(out.json).toEqual({ ok: true, busy: true, reason: "lease" });
+      const tries = leaseFake.calls;
+      expect(tries).toHaveLength(26);
+      expect(tries.every((c) => c.fn === "acquire" && c.result === false)).toBe(true);
+      expect(tries.map((c) => c.t - out.startedAt)).toEqual(Array.from({ length: 26 }, (_, i) => i * 400));
+      expect(tries[25]!.t - tries[0]!.t).toBe(10_000);
+      expect(pgmqState.reads).toEqual([]); // never a read without the lease
+      expect(pgmqState.archived).toEqual([]);
+      expect(pgmqState.calls.every((c) => c === DEPTH)).toBe(true); // the depth probes only (1 + one per failed try but the last)
+      expect(pgmqState.calls).toHaveLength(26);
+      expect(leaseFake.row?.holder).toBe("another-isolate"); // untouched
+      expect(pgmqState.pending).toHaveLength(2);
+    });
+
+    it("freed at +3 s: the first try after the expiry takes it (3200 ms), then it drains and releases", async () => {
+      const out = await kickWithClock(() => {
+        seedQueue(2);
+        heldFor(3_000)();
+      });
+      expect(out.json).toMatchObject({ ok: true, drained: 2, trigger: "ingest", lease_wait_ms: 3_200 });
+      const acquires = leaseFake.calls.filter((c) => c.fn === "acquire");
+      expect(acquires.slice(0, 9).map((c) => [c.t - out.startedAt, c.result])).toEqual([
+        ...Array.from({ length: 8 }, (_, i) => [i * 400, false]),
+        [3_200, true],
+      ]);
+      expect(leaseFake.calls[leaseFake.calls.length - 1]).toMatchObject({ fn: "release", result: true });
+      expect(readsAreLeased([...pgmqState.calls], leaseFake.calls)).toBe(true);
+      expect(pgmqState.archived).toEqual([801, 802]);
+    });
+
+    it("the queue empties while it waits (another consumer drained it): leaves with {ok:true,empty:true,reason:'depth'} at the next failed try, no read, no release", async () => {
+      const out = await kickWithClock(() => {
+        seedQueue(2);
+        heldFor(60_000)();
+        setTimeout(() => {
+          pgmqState.pending = [];
+        }, 1_500);
+      });
+      expect(out.json).toEqual({ ok: true, empty: true, reason: "depth" });
+      expect(leaseFake.calls.map((c) => [c.t - out.startedAt, c.result])).toEqual([
+        [0, false],
+        [400, false],
+        [800, false],
+        [1_200, false],
+        [1_600, false], // depth read 0 after this try (the queue was emptied at 1500)
+      ]);
+      expect(pgmqState.reads).toEqual([]);
+      expect(leaseFake.calls.some((c) => c.fn === "release")).toBe(false);
+    });
+  });
+
+  describe("kick trigger, lease RPC missing or failing: fails closed", () => {
+    it.each([
+      ["PGRST202", "lease-rpc-missing", "Could not find the function public.consumer_lease_acquire"],
+      ["42883", "lease-rpc-missing", "function public.consumer_lease_acquire does not exist"],
+      ["57014", "lease-error", "canceling statement due to statement timeout"],
+    ])("%s: 503 {ok:false,error:'lease-unavailable',reason:'%s'}, one lease try, no drain, no read", async (code, reason, message) => {
+      const out = await runDrain({
+        messages: 3,
+        body: KICK,
+        prepare: () => {
+          leaseFake.error = { code, message };
+        },
+      });
+      expect(out.status).toBe(503);
+      expect(out.json).toEqual({ ok: false, error: "lease-unavailable", reason });
+      expect(out.pgmq).toEqual([DEPTH]); // the depth probe only
+      expect(out.lease).toHaveLength(1);
+      expect(pgmqState.reads).toEqual([]);
+      expect(pgmqState.pending).toHaveLength(3);
+      const warned = out.warns.filter((w) => w.includes("lease"));
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toContain(code);
+    });
+
+    it("an acquire that answers null (not a boolean) is an error: closed, not 'free'", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      seedQueue(2);
+      const handler = await importHandler();
+      const rpc = vi.spyOn(supabaseFakeClient, "rpc");
+      rpc.mockImplementation((async (name: string) => {
+        if (name === "consumer_lease_acquire") return { data: null, error: null };
+        return { data: null, error: null };
+      }) as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const out = await post(KICK, handler!);
+        expect(out.status).toBe(503);
+        expect(out.json).toMatchObject({ ok: false, error: "lease-unavailable", reason: "lease-error" });
+        expect(pgmqState.reads).toEqual([]);
+      } finally {
+        warn.mockRestore();
+        rpc.mockRestore();
+      }
+    });
+  });
+
+  describe("renewal at every read-loop turn, and a lost lease stops the reads", () => {
+    it("renews once per turn: 4 messages take three turns (2, 2, empty) and three renewals", async () => {
+      const out = await runDrain({ messages: 4 });
+      expect(out.lease.filter((c) => c.fn === "acquire")).toHaveLength(1 + 3);
+      expect(out.json.drained).toBe(4);
+    });
+
+    it("a renewal that answers false (the lease expired and another holder took it) sets lease_lost and stops: the next read never happens, no attach read, the release still runs", async () => {
+      const out = await runDrain({
+        messages: 4,
+        prepare: () => {
+          leaseFake.acquireScript = [true, true, false]; // acquire, renewal of turn 1, renewal of turn 2 -> lost
+        },
+      });
+      expect(out.status).toBe(200);
+      expect(out.json.lease_lost).toBe(true);
+      expect(out.json.drained).toBe(2);
+      expect(out.pgmq).toEqual([DEPTH, WORK_READ, ARCHIVE(1), ARCHIVE(2), DEPTH]); // one read; no second, no attach read
+      expect(pgmqState.pending.map((m) => m.msg_id)).toEqual([803, 804]); // left untouched on the queue
+      expect(out.lease.map((c) => c.fn)).toEqual(["acquire", "acquire", "acquire", "release"]);
+      expect(out.json.budgeted_out).toBe(false);
+    });
+
+    it("a lease lost at the very first renewal means no read at all", async () => {
+      const out = await runDrain({
+        messages: 3,
+        prepare: () => {
+          leaseFake.acquireScript = [true, false];
+        },
+      });
+      expect(out.json.lease_lost).toBe(true);
+      expect(out.json.drained).toBe(0);
+      expect(pgmqState.reads).toEqual([]);
+      expect(out.pgmq).toEqual([DEPTH, DEPTH]);
+    });
+
+    it("a lost lease stops a kicked drain too", async () => {
+      const out = await runDrain({
+        messages: 4,
+        body: KICK,
+        prepare: () => {
+          leaseFake.acquireScript = [true, true, false];
+        },
+      });
+      expect(out.json).toMatchObject({ lease_lost: true, drained: 2, trigger: "ingest" });
+      expect(out.pgmq).toEqual([DEPTH, DEPTH, WORK_READ, ARCHIVE(1), ARCHIVE(2), DEPTH]);
+    });
+
+    it("a renewal that ERRORS does not stop the drain (the lease is still ours for its 45 s; only a false answer is a loss)", async () => {
+      const out = await runDrain({
+        messages: 3,
+        prepare: () => {
+          leaseFake.acquireScript = [true, { error: { code: "57014", message: "canceling statement due to statement timeout" } }];
+        },
+      });
+      expect(out.json.drained).toBe(3);
+      expect("lease_lost" in out.json).toBe(false);
+      expect(out.pgmq).toEqual(SCENARIOS[3]!.pgmq);
+    });
+
+    // A killed isolate (546 CPU / memory limit) never reaches the handler's finally, so its row lives until its
+    // expires_at. The first acquire is 45 s; a renewal at +25 s with a flat 45 s would leave a row until +70 s,
+    // past the next minute's cron drain (+60 s), which would answer 'busy' for a whole minute. Every renewal is
+    // therefore capped at drain start + 55 s (LEASE_HORIZON_MS).
+    describe("a renewal never pushes the lease past drain start + 55 s (a killed drain's row has expired by the next cron minute)", () => {
+      const HORIZON_MS = 55_000;
+      /** 8 messages (four full batches) with every cluster_work read taking 8 s of the (fake) clock: renewals at +0, +8, +16 and +24 s. */
+      const slowDrain = () =>
+        runDrain({
+          messages: 8,
+          prepare: () => {
+            pgmqState.afterWorkRead = () => vi.setSystemTime(Date.now() + 8_000);
+          },
+        });
+
+      it("renews with the time left to the horizon: every grant ends at or before +55 s, and some grant happens late enough to matter", async () => {
+        const out = await slowDrain();
+        const start = Date.parse(AT);
+        const grants = out.lease.filter((c) => c.fn === "acquire" && c.result === true);
+        expect(grants.length).toBeGreaterThanOrEqual(4);
+        expect(grants.some((c) => c.t - start >= 16_000)).toBe(true);
+        for (const c of grants) expect(c.t - start + c.ttl! * 1000).toBeLessThanOrEqual(HORIZON_MS);
+        // The renewals' TTLs shrink as the drain ages (the first acquire and the early renewals keep 45 s).
+        expect(grants.map((c) => [c.t - start, c.ttl])).toEqual([
+          [0, 45],
+          [0, 45],
+          [8_000, 45],
+          [16_000, 39],
+          [24_000, 31],
+        ]);
+      });
+
+      it("a drain killed after its last renewal leaves a row that has expired when the next minute's cron drain starts: it drains, it is not 'busy'", async () => {
+        const out = await slowDrain();
+        const start = Date.parse(AT);
+        const grants = out.lease.filter((c) => c.fn === "acquire" && c.result === true);
+        const last = grants[grants.length - 1]!;
+        // The kill: no finally, no release. The row the last grant wrote is what stays behind.
+        leaseFake.row = { holder: "killed-isolate", expiresAt: last.t + last.ttl! * 1000 };
+        pgmqState.afterWorkRead = null;
+        vi.setSystemTime(new Date(start + 60_000));
+        seedQueue(1);
+        const next = await post(undefined);
+        expect(next.status).toBe(200);
+        expect(next.json.busy).toBeUndefined();
+        expect(next.json.drained).toBe(1);
+      });
+    });
+
+    it("the release answers false when the lease was taken over meanwhile, and that is not an error", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      seedQueue(1);
+      const handler = await importHandler();
+      const original = supabaseFakeClient.rpc;
+      const rpc = vi.spyOn(supabaseFakeClient, "rpc");
+      rpc.mockImplementation(((name: string, args: unknown) => {
+        // Another isolate takes the row over (our TTL ran out) just before our release arrives.
+        if (name === "consumer_lease_release") leaseFake.row = { holder: "successor", expiresAt: Date.now() + 40_000 };
+        return (original as (n: string, a: unknown) => unknown)(name, args);
+      }) as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const out = await post(undefined, handler!);
+        expect(out.status).toBe(200);
+        expect(out.json.drained).toBe(1);
+        expect(leaseFake.calls[leaseFake.calls.length - 1]).toMatchObject({ fn: "release", result: false });
+        expect(leaseFake.row?.holder).toBe("successor"); // the successor's lease is untouched
+        expect(warn.mock.calls.map((c) => c.map(String).join(" ")).filter((w) => w.includes("lease"))).toEqual([]);
+      } finally {
+        warn.mockRestore();
+        rpc.mockRestore();
+      }
+    });
+
+    it("a failing release is warned about and never changes the answer", async () => {
+      vi.resetModules();
+      clockAt(AT);
+      seedQueue(1);
+      const handler = await importHandler();
+      const original = supabaseFakeClient.rpc;
+      const rpc = vi.spyOn(supabaseFakeClient, "rpc");
+      rpc.mockImplementation(((name: string, args: unknown) => {
+        if (name === "consumer_lease_release") return Promise.resolve({ data: null, error: { code: "57014", message: "canceling statement" } });
+        return (original as (n: string, a: unknown) => unknown)(name, args);
+      }) as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const out = await post(undefined, handler!);
+        expect(out.status).toBe(200);
+        expect(out.json.drained).toBe(1);
+        expect(warn.mock.calls.map((c) => c.map(String).join(" ")).filter((w) => w.includes("release"))).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+        rpc.mockRestore();
+      }
+      // The release failed, so the row stays until its 45 s TTL runs out: the next cron drain is told 'lease busy'
+      // (not the isolate's own busy answer: drainInFlight was cleared) ...
+      const next = await post(undefined, handler!);
+      expect(next.json).toEqual({ ok: true, busy: true, reason: "lease" });
+      // ... and 46 s later the TTL has freed it.
+      vi.setSystemTime(Date.now() + 46_000);
+      seedQueue(1);
+      const later = await post(undefined, handler!);
+      expect(later.json.drained).toBe(1);
+    });
+  });
+
+  describe("the trigger is read from the body, and only the exact value 'ingest' is a kick", () => {
+    it.each([
+      [{ trigger: "ingest" }, "kick"],
+      [{ trigger: "ingest", extra: 1 }, "kick"],
+      [{ trigger: "cron" }, "cron"],
+      [{}, "cron"],
+      ["", "cron"],
+      ["{", "cron"],
+      [{ trigger: "Ingest" }, "cron"],
+      [{ trigger: 1 }, "cron"],
+      [{ trigger: null }, "cron"],
+    ])("%j is a %s", async (body, kind) => {
+      const out = await runDrain({ messages: 0, body });
+      if (kind === "kick") expect(out.json).toEqual({ ok: true, empty: true, reason: "depth" }); // the kick leaves on depth 0
+      else expect(out.json).toMatchObject({ ok: true, drained: 0 }); // the cron drain runs its empty read
+    });
+  });
+
+  describe("parseTrigger and leaseEnabled (pure)", () => {
+    async function pure() {
+      await importHandler();
+      return (await import(IMPORT)) as {
+        parseTrigger: (text: string) => "ingest" | "cron";
+        leaseEnabled: (value: string | undefined) => boolean;
+      };
+    }
+
+    it.each([
+      ['{"trigger":"ingest"}', "ingest"],
+      ['  {"trigger":"ingest"}\n', "ingest"],
+      ['{"trigger":"ingest","enqueued_at":"2026-11-10T12:00:00Z"}', "ingest"],
+      ['{"trigger":"cron"}', "cron"],
+      ["{}", "cron"],
+      ["", "cron"],
+      ["null", "cron"],
+      ["[]", "cron"],
+      ['["ingest"]', "cron"],
+      ['"ingest"', "cron"],
+      ["ingest", "cron"],
+      ["{", "cron"],
+      ['{"trigger":"ingest"', "cron"],
+      ['{"trigger":" ingest"}', "cron"],
+      ['{"Trigger":"ingest"}', "cron"],
+      ['{"trigger":{"name":"ingest"}}', "cron"],
+      [`{"trigger":"ingest","pad":"${"x".repeat(1_100)}"}`, "cron"],
+      ["{\"trigger\":\"ingest\"}\u0000", "cron"],
+      ["{\"trigger\":\"in\\u0067est\"}", "ingest"], // the JSON escape for 'g' is the same string once parsed
+    ])("parseTrigger(%j) is %s", async (text, expected) => {
+      const { parseTrigger } = await pure();
+      expect(parseTrigger(text)).toBe(expected);
+    });
+
+    it.each([
+      [undefined, true],
+      ["", true],
+      ["on", true],
+      ["off", false],
+      ["OFF", true],
+      ["Off", true],
+      [" off", true],
+      ["false", true],
+      ["0", true],
+    ])("leaseEnabled(%j) is %s: only the exact string 'off' switches the lease off", async (value, expected) => {
+      const { leaseEnabled } = await pure();
+      expect(leaseEnabled(value)).toBe(expected);
+    });
+
+    // The TTL of a renewal: the full 45 s while that ends before drain start + 55 s, then what is left to that
+    // horizon, never below the 5 s the database clamps to. A clock that is not a number, or went backwards, is 45.
+    it.each([
+      [0, 45],
+      [10_000, 45],
+      [15_000, 40],
+      [25_000, 30],
+      [60_000, 5],
+      [Number.NaN, 45],
+      [Number.POSITIVE_INFINITY, 45],
+      [-1, 45],
+      [10_999, 44],
+      [50_000, 5],
+      [51_000, 5],
+    ])("leaseRenewTtlSeconds(%j) is %j", async (elapsedMs, expected) => {
+      const mod = (await pure()) as unknown as { leaseRenewTtlSeconds: (elapsedMs: number) => number };
+      expect(mod.leaseRenewTtlSeconds(elapsedMs)).toBe(expected);
+    });
+  });
+
+  describe("wiring (static)", () => {
+    const src = CONSUMER_SRC();
+
+    it("declares the constants of the design", () => {
+      expect(src).toContain('const LEASE_NAME = "cluster-consumer";');
+      expect(src).toContain("const LEASE_TTL_S = 45;");
+      expect(src).toContain("const KICK_LEASE_WAIT_MS = 10_000;");
+      expect(src).toContain("const KICK_LEASE_STEP_MS = 400;");
+    });
+
+    it("keeps POLL_ENABLED false (h102-pollregression-1): the kick is the answer, not the long poll", () => {
+      expect(/^const POLL_ENABLED = false;/m.test(src)).toBe(true);
+    });
+
+    it("releases the lease in the handler's finally, BEFORE drainInFlight is cleared", () => {
+      const fin = src.lastIndexOf("} finally {");
+      expect(fin).toBeGreaterThan(src.indexOf("Deno.serve("));
+      const tail = src.slice(fin);
+      expect(tail.indexOf("releaseQuietly(")).toBeGreaterThan(-1);
+      expect(tail.indexOf("releaseQuietly(")).toBeLessThan(tail.indexOf("drainInFlight = false"));
+      expect(src).toContain("await releaseLease(supabase, LEASE_NAME, lease.holder);"); // the one release call, inside releaseQuietly
+    });
+
+    it("holds no timer of its own: the 400 ms wait lives in _shared/lease.ts, where its clock can be injected", () => {
+      expect(src.includes("setTimeout(")).toBe(false);
+      expect(src).toContain("waitForLease(");
+    });
+
+    it("imports the lease helpers from the shared module and calls the RPC through no other path", () => {
+      expect(src).toContain('from "../_shared/lease.ts"');
+      expect(src.includes("consumer_lease_acquire")).toBe(false);
+      expect(src.includes("consumer_lease_release")).toBe(false);
+    });
+
+    it("renews inside the read loop, after the budget check and before the read", () => {
+      const loop = src.indexOf("while (true) {", src.indexOf("let polling = true;"));
+      const budget = src.indexOf("summary.budgeted_out = true;", loop);
+      const renew = src.indexOf("renewLease(", loop);
+      const read = src.indexOf("readBatch<QueueMessage>(", loop);
+      expect(loop).toBeGreaterThan(0);
+      expect(renew).toBeGreaterThan(budget);
+      expect(renew).toBeLessThan(read);
+      expect(src.slice(renew, read)).toContain("lease_lost = true");
+    });
+
+    it("never logs a key or a header", () => {
+      for (const line of src.split("\n")) {
+        if (/console\.(log|warn|error)\(/.test(line) && /lease|kick/i.test(line)) {
+          expect(/authorization|SERVICE_ROLE|secret/i.test(line), line).toBe(false);
+        }
+      }
+    });
   });
 });

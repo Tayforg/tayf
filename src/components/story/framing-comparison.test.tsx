@@ -612,3 +612,142 @@ describe("FramingComparison — zone titles are headings (h67-landmarks-1)", () 
     expect(section(html, "Bağımsız")).toContain("0 manşet");
   });
 });
+
+// h106-blindspotbadges-1: cluster 0746c9d2's Muhalefet column said "— bu tarafta
+// sessizlik —" although Tayf's own Jev recall stage had matched Yeniçağ and Elips
+// Haber (both Muhalefet) with the very same event, filed in another cluster
+// (blindspot_recall_suspect). An empty column Jev matched now says what the data
+// shows: nothing in THIS cluster, and a similar story may sit in another one.
+// Words only: no count, vote or "N manşet" moves, and with no matched zone the
+// markup is byte-identical to before.
+describe("FramingComparison — empty zone Jev matched in another cluster (h106-blindspotbadges-1)", () => {
+  const IKTIDAR_A = mkSource("sabah", "Sabah", "pro_government");
+  const IKTIDAR_B = mkSource("aksam", "Akşam", "pro_government");
+  const members = [
+    mkMember("r1", IKTIDAR_A, "Sabah başlığı"),
+    mkMember("r2", IKTIDAR_B, "Akşam başlığı", "2026-09-06T11:00:00.000Z"),
+  ];
+
+  const MATCHED_LINE = "— bu kümede yok · benzer haber başka kümede olabilir —";
+  const PLAIN_LINE = "— bu tarafta sessizlik —";
+  const QUALIFIED_LINE = `— ${SPECTRUM_ABSENT_QUALIFIED} —`;
+  const NOT_COMPARED = "— Türkçe kaynaklarla karşılaştırılmadı —";
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+  function renderWith(
+    recallMatchedZones: ReadonlySet<MediaDnaZone> | undefined,
+    {
+      nonVotingZones = new Set<MediaDnaZone>(),
+      languageIsolated = false,
+      list = members,
+    }: {
+      nonVotingZones?: ReadonlySet<MediaDnaZone>;
+      languageIsolated?: boolean;
+      list?: ClusterDetailMember[];
+    } = {},
+  ): string {
+    return renderToStaticMarkup(
+      <FramingComparison
+        members={list}
+        nowMs={NOW_MS}
+        nonVotingZones={nonVotingZones}
+        languageIsolated={languageIsolated}
+        {...(recallMatchedZones === undefined ? {} : { recallMatchedZones })}
+      />,
+    );
+  }
+
+  it("says 'bu kümede yok · benzer haber başka kümede olabilir' in a matched empty zone, and not 'sessizlik' there", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["muhalefet"]));
+    const muhalefet = section(html, "Muhalefet");
+    expect(muhalefet).toContain(MATCHED_LINE);
+    expect(muhalefet).not.toContain("sessizlik");
+  });
+
+  it("keeps '— bu tarafta sessizlik —' in an empty zone Jev did not match", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["muhalefet"]));
+    const bagimsiz = section(html, "Bağımsız");
+    expect(bagimsiz).toContain(PLAIN_LINE);
+    expect(bagimsiz).not.toContain("benzer haber");
+  });
+
+  it("qualifies both empty zones when both were matched", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]));
+    expect(count(html, MATCHED_LINE)).toBe(2);
+    expect(html).not.toContain("sessizlik");
+  });
+
+  it("with an empty set, or no prop at all, the markup is byte-identical to today's", () => {
+    const today = render(members);
+    expect(renderWith(new Set())).toBe(today);
+    expect(renderWith(undefined)).toBe(today);
+    expect(count(today, PLAIN_LINE)).toBe(2);
+    expect(today).not.toContain("benzer haber");
+  });
+
+  it("only swaps the words: the matched markup is the plain markup with that one line replaced (same dashed box and styling)", () => {
+    const plain = renderWith(new Set());
+    const matched = renderWith(new Set<MediaDnaZone>(["muhalefet"]));
+    // Muhalefet is the last column, so its silent line is the last occurrence.
+    const at = plain.lastIndexOf(PLAIN_LINE);
+    expect(at).toBeGreaterThan(-1);
+    expect(matched).toBe(plain.slice(0, at) + MATCHED_LINE + plain.slice(at + PLAIN_LINE.length));
+  });
+
+  it("changes no count: both empty zones still read '0 manşet', İktidar keeps its two", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]));
+    expect(section(html, "Bağımsız")).toContain("0 manşet");
+    expect(section(html, "Muhalefet")).toContain("0 manşet");
+    expect(section(html, "İktidar")).toContain("2 manşet");
+    expect(html).toContain("2 kaynağın kendi manşetleri");
+    expect(listItems(html)).toHaveLength(2);
+  });
+
+  it("precedence 1: an all-English cluster keeps 'Türkçe kaynaklarla karşılaştırılmadı' whatever the set says", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]), {
+      languageIsolated: true,
+      list: [mkMember("e1", DAILY_SABAH, EN_TITLE)],
+    });
+    expect(count(html, NOT_COMPARED)).toBe(2);
+    expect(html).not.toContain("benzer haber");
+  });
+
+  it("precedence 2: a zone a toplayıcı / niş source covered keeps the spectrum wording over the matched one", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]), {
+      nonVotingZones: new Set<MediaDnaZone>(["muhalefet"]),
+    });
+    const muhalefet = section(html, "Muhalefet");
+    expect(muhalefet).toContain(QUALIFIED_LINE);
+    expect(muhalefet).not.toContain("benzer haber");
+    // Bağımsız has no non-voting source: the matched wording applies there.
+    expect(section(html, "Bağımsız")).toContain(MATCHED_LINE);
+  });
+
+  it("precedence 3: the matched wording beats 'sessizlik'", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["muhalefet"]));
+    expect(count(html, MATCHED_LINE)).toBe(1);
+    expect(count(html, PLAIN_LINE)).toBe(1);
+  });
+
+  it("a zone with voting members ignores the set", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["iktidar", "muhalefet"]));
+    const iktidar = section(html, "İktidar");
+    expect(iktidar).not.toContain("benzer haber");
+    expect(iktidar).not.toContain("sessizlik");
+    expect(iktidar).toContain("Sabah başlığı");
+  });
+
+  it("emits no lang attribute for the matched line", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]), {
+      list: [mkMember("a1", DAILY_SABAH, EN_TITLE)],
+    });
+    expect(html.split("lang=").length - 1).toBe(2);
+  });
+
+  it("is optional, like languageIsolated: a caller that omits it still compiles and renders", () => {
+    const html = renderToStaticMarkup(
+      <FramingComparison members={members} nowMs={NOW_MS} nonVotingZones={new Set()} />,
+    );
+    expect(html).toContain(PLAIN_LINE);
+  });
+});

@@ -496,6 +496,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   const nonVotingZones = new Set<MediaDnaZone>(
     nonVotingMembers.map((m) => zoneOf(m.source.bias)),
   );
+  // h106-blindspotbadges-1: the empty columns Tayf's own Jev recall stage matched
+  // with this story's event (a similar story sits in another cluster). The detail
+  // fetcher computed them on the very voting members listed here; a detail cached
+  // before the field existed has none (`?? []`). Words only, like the set above:
+  // an empty column then says "benzer haber başka kümede olabilir" instead of
+  // claiming silence, and nothing is counted from it.
+  const recallMatchedZones = new Set<MediaDnaZone>(detail.recallMatchedZones ?? []);
 
   // Derive inputs for the cross-spectrum surprise detector from only the
   // VOTING member list. `detectCrossSpectrum` also filters internally via
@@ -1112,7 +1119,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           An empty column says "spektruma sayılan kaynaklardan haber yok"
           instead of "bu tarafta sessizlik" when a toplayıcı / niş source of
           that zone covered the story (nonVotingZones, h58-postship-2); they
-          stay out of the columns and the counts. For an all-English cluster
+          stay out of the columns and the counts. A column Jev's recall stage
+          matched with this event in another cluster (recallMatchedZones,
+          h106-blindspotbadges-1) reads "bu kümede yok · benzer haber başka
+          kümede olabilir" rather than "sessizlik". For an all-English cluster
           (languageIsolated, h59-english-1) an empty column reads "Türkçe
           kaynaklarla karşılaştırılmadı" and the read-across slot carries the one note.
           Omitted entirely when no voting member exists — the spectrum
@@ -1125,6 +1135,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             nowMs={renderNowMs}
             nonVotingZones={nonVotingZones}
             languageIsolated={languageIsolated}
+            recallMatchedZones={recallMatchedZones}
           />
         </div>
       )}

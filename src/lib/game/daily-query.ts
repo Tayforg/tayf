@@ -31,6 +31,11 @@
  * list stays as short as the article id list (URL length). Keys before the
  * gate make no such read: their puzzles recompute byte-identically.
  *
+ * The twin key itself has a version per puzzle key (`dailyTwinKeyVersion`):
+ * version 1 below DAILY_TWIN_KEY_V2_FROM (the keys already served, so they
+ * recompute byte-identically), version 2 from it (a "Son dakika..." lead-in no
+ * longer hides a copy). One version is used for the whole build of a key.
+ *
  * DRIFT NOTE: a source deactivated mid-day (`sources.active` flips to
  * false) can change the picked set on a cache miss that lands after the
  * deactivation but was itself cached before it — this is rare and
@@ -51,6 +56,7 @@ import {
   DAILY_POLITICS_MIN_PROB,
   DAILY_TWIN_GATE_FROM,
   dailyHash,
+  dailyTwinKeyVersion,
   pickDailySet,
   puzzleNumber,
   puzzleWindow,
@@ -262,19 +268,23 @@ async function fetchTwinEvidence(
  * `candidate` with `crossZoneTwin` set: true when members of two or more zones
  * carry its text in its cluster. The candidate itself always counts as a member
  * (it is an outlet article of the window, but a future `published_at` would keep
- * it out of `evidence`).
+ * it out of `evidence`). "Its text" is the twin key of `dailyTwinKeyVersion(dateKey)`.
  */
 function withTwinFlag(
   candidate: DailyCandidate,
   evidence: ReadonlyMap<string, TwinMember[]>,
+  dateKey: string,
 ): DailyCandidate {
   const members = candidate.clusterId ? evidence.get(candidate.clusterId) : undefined;
   if (!members) return { ...candidate, crossZoneTwin: false };
-  const twins = crossZoneTwinKeys([
-    ...members,
-    { title: candidate.title, zone: zoneOf(candidate.source.bias) },
-  ]);
-  return { ...candidate, crossZoneTwin: twins.has(twinKey(candidate.title)) };
+  // Both calls take the version of the puzzle key: a key compares only with a key
+  // of its own version.
+  const version = dailyTwinKeyVersion(dateKey);
+  const twins = crossZoneTwinKeys(
+    [...members, { title: candidate.title, zone: zoneOf(candidate.source.bias) }],
+    version,
+  );
+  return { ...candidate, crossZoneTwin: twins.has(twinKey(candidate.title, version)) };
 }
 
 function toCandidate(row: ArticleRow): DailyCandidate | null {
@@ -351,7 +361,7 @@ async function buildDailyPuzzle(dateKey: string): Promise<DailyPuzzle> {
       for (const [clusterId, members] of await fetchTwinEvidence(supabase, [...unread], endIso)) {
         twinEvidence.set(clusterId, members);
       }
-      for (const c of fresh) collected.push(withTwinFlag(c, twinEvidence));
+      for (const c of fresh) collected.push(withTwinFlag(c, twinEvidence, dateKey));
     } else {
       collected.push(...fresh);
     }

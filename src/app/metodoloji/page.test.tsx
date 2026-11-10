@@ -71,6 +71,7 @@ import {
   FEED_YIELD_WINDOW_MS,
 } from "@/lib/clusters/feed-health";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
+import { RECALL_MATCH_MIN_PROB } from "@/lib/clusters/recall-matched-zones";
 import { SIBLING_VETO } from "@/lib/clusters/sibling-veto";
 import {
   NEAR_BLINDSPOT_DISPLAY_LIMIT,
@@ -296,6 +297,32 @@ describe("/metodoloji page", () => {
     expect(jev).toBeGreaterThan(0);
     expect(sibling).toBeGreaterThan(jev);
     expect(near).toBeGreaterThan(sibling);
+  });
+
+  // h106-blindspotbadges-1: the one sentence that explains the wording change on
+  // the cards, the cluster page and the "yer vermedi" band for a side Jev matched
+  // in another cluster. The kör nokta rule itself is not touched, and the number
+  // comes from the shared module, never from a literal.
+  it("explains that a silent side Jev matched in another cluster reads 'benzer haber başka kümede olabilir' and that the rule is unchanged (h106-blindspotbadges-1)", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = await MethodologyPage();
+    const section = collectText(
+      findElement(tree, (el) => el.type === "section" && el.props?.["aria-labelledby"] === "kor-nokta"),
+    ).join("");
+
+    const sentence = `Tayf'ın otomatik kontrolü (Jev, olasılık ≥ %${Math.round(RECALL_MATCH_MIN_PROB * 100)}) sessiz görünen taraftaki bir kaynağın aynı olayı başka bir kümede verdiğini bulursa, o taraf küme sayfasında “sessizlik” yerine “benzer haber başka kümede olabilir” diye gösterilir, kartlarda “Sadece X yazdı” yerine “Kümede sadece X” yazar ve “Bu listede kim yer vermedi?” özetine o taraf sayılmaz; kör nokta kuralı bu yüzden değişmez.`;
+    expect(section).toContain(sentence);
+    expect(RECALL_MATCH_MIN_PROB).toBe(0.7);
+
+    // Placement: after the sibling-veto paragraph, before "Besleme sağlığı".
+    const siblingEnd = section.indexOf(
+      "Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.",
+    );
+    const mine = section.indexOf(sentence);
+    const feedHealth = section.indexOf("Besleme sağlığı");
+    expect(siblingEnd).toBeGreaterThan(0);
+    expect(mine).toBeGreaterThan(siblingEnd);
+    expect(feedHealth).toBeGreaterThan(mine);
   });
 
   it("lists the 2026-11-07 CHANGELOG entry first and the footer reads that date (h62-methodology-2)", async () => {

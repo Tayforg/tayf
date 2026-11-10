@@ -28,6 +28,10 @@ import {
 } from "@/lib/clusters/feed-health";
 import type { BundleSource } from "@/lib/clusters/politics-query";
 import {
+  fetchRecallMatchedZones,
+  recallQualifiedZones,
+} from "@/lib/clusters/recall-matched-zones";
+import {
   buildSilenceDigest,
   type SilenceDigest,
 } from "@/lib/clusters/silence-digest";
@@ -146,13 +150,21 @@ export type EmbeddedClusterRow = {
   blindspot_side: BiasCategory | null;
   /** Migration 071; filtered DB-side (always false on returned rows). */
   blindspot_recall_veto?: boolean | null;
+  /**
+   * Migration 064: Jev's blindspot_recall stage found a likely same-event article
+   * from the silent side. Not filtered on (a suspect claim that survives the veto
+   * stays public by design); only read to decide which claims get the recall
+   * lookup (h106-blindspotbadges-1). Optional: fixtures and rows fetched before
+   * the column was read pass through as "not flagged".
+   */
+  blindspot_recall_suspect?: boolean | null;
   article_count: number;
   first_published: string;
   updated_at: string;
   cluster_articles: EmbeddedClusterArticle[] | null;
 };
 
-const EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
+const EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, blindspot_recall_suspect, article_count, first_published, updated_at,
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash, politics_admitted_at,
@@ -180,6 +192,19 @@ export interface BlindspotBundle {
    * answer the card's "%100 tek tarafta" label is built on.
    */
   votingZoneCounts: Record<MediaDnaZone, number>;
+  /**
+   * h106-blindspotbadges-1: the silent zones (not dominant, no voting member) in
+   * which the site's own Jev recall stage matched a voting source with the same
+   * event, so the claim cannot honestly say nobody there covered it (the story
+   * may sit in another cluster). Sorted, de-duplicated, [] unless the cluster is
+   * flagged blindspot_recall_suspect and the lookup answered. WORDING ONLY: the
+   * claim, the veto, every count and share ignore it; the card says "Kümede
+   * sadece X" instead of "Sadece X yazdı" and the silence digest leaves that zone
+   * out of that claim's "yer vermedi". A plain array so it survives the cache
+   * payload; a payload cached before this field existed lacks it, and readers
+   * treat that as [].
+   */
+  recallMatchedZones: MediaDnaZone[];
   isWireRedistribution: boolean;
   effectiveArticleCount: number;
 }
@@ -209,6 +234,8 @@ export interface BlindspotMoreRow {
    */
   firstPublished: string;
   votingZoneCounts: Record<MediaDnaZone, number>;
+  /** The card's `recallMatchedZones` (h106-blindspotbadges-1), kept so a row promoted to a card words itself the same way. */
+  recallMatchedZones: MediaDnaZone[];
 }
 
 /** Everything /blindspots, its feeds and the crons read from one fetch. */
@@ -355,6 +382,8 @@ function toBlindspotBundle(
     dominantPct,
     // Copied from the same `tally` that produced dominantZone/dominantPct.
     votingZoneCounts: { ...tally.counts },
+    // Filled in by withRecallMatchedZones for the few flagged claims.
+    recallMatchedZones: [],
     isWireRedistribution: wire.isWireRedistribution,
     effectiveArticleCount: wire.effectiveArticleCount,
   };
@@ -437,7 +466,41 @@ function toMoreRow(b: BlindspotBundle): BlindspotMoreRow {
     sourceCount: b.sources.length,
     firstPublished: b.cluster.first_published,
     votingZoneCounts: { ...b.votingZoneCounts },
+    recallMatchedZones: [...b.recallMatchedZones],
   };
+}
+
+/**
+ * h106-blindspotbadges-1: gives each claim whose cluster is flagged
+ * blindspot_recall_suspect the silent zones Jev matched (`recallMatchedZones`).
+ * ONE extra request, and only when at least one claim that survived the live
+ * contract is flagged (none means no request at all); it rides the caller's read
+ * profile like every other read here. Wording only: nothing is added to or
+ * removed from `claims`, and no flag, veto, count or share is read from the
+ * answer. `fetchRecallMatchedZones` never throws and answers an empty Map on any
+ * error, which leaves every claim exactly as built (today's strings).
+ */
+async function withRecallMatchedZones(
+  claims: BlindspotBundle[],
+  flaggedIds: ReadonlySet<string>,
+  profile: ReadProfile,
+): Promise<BlindspotBundle[]> {
+  const ids = claims.map((c) => c.cluster.id).filter((id) => flaggedIds.has(id));
+  if (ids.length === 0) return claims;
+  const matched = await fetchRecallMatchedZones(clientFor(profile), ids);
+  if (matched.size === 0) return claims;
+  return claims.map((claim) =>
+    flaggedIds.has(claim.cluster.id)
+      ? {
+          ...claim,
+          recallMatchedZones: recallQualifiedZones(
+            claim.votingZoneCounts,
+            claim.dominantZone,
+            matched.get(claim.cluster.id),
+          ),
+        }
+      : claim,
+  );
 }
 
 /** The digest of `claims`, annotated with how many of them are full cards. */
@@ -482,11 +545,17 @@ async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
   const rows = batchRows
     .flat()
     .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
-  const claims: BlindspotBundle[] = [];
+  const built: BlindspotBundle[] = [];
+  const flaggedIds = new Set<string>();
   for (const row of rows) {
     const bundle = toBlindspotBundle(row, health);
-    if (bundle) claims.push(bundle);
+    if (!bundle) continue;
+    built.push(bundle);
+    // A literal `true` only: null, false and a row from before the column was
+    // read are all "not flagged".
+    if (row.blindspot_recall_suspect === true) flaggedIds.add(row.id);
   }
+  const claims = await withRecallMatchedZones(built, flaggedIds, profile);
 
   // Side-balanced cards, most lopsided first (a 100% cluster is a starker
   // blindspot than an 86% one); everything else is a slim row in the same order.

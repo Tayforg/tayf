@@ -23,6 +23,11 @@ const fixture = vi.hoisted(() => ({
   embedStates: [] as unknown[],
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
+  /** h106: the jev_shadow_predictions rows the recall lookup receives. */
+  recallRows: [] as unknown[],
+  recallError: null as { message: string } | null,
+  /** Builder state of every recall lookup, in call order. */
+  recallStates: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -43,6 +48,11 @@ const supabaseFake = await vi.hoisted(async () => {
           .map((id) => fixture.rowsById.get(id))
           .filter((r): r is unknown => r !== undefined);
         return { data: rows, error: null };
+      },
+      jev_shadow_predictions: (state: unknown) => {
+        fixture.recallStates.push(state);
+        if (fixture.recallError) return { data: null, error: fixture.recallError };
+        return { data: fixture.recallRows, error: null };
       },
     },
   });
@@ -174,6 +184,9 @@ beforeEach(() => {
   fixture.lastIdState = null;
   fixture.embedStates = [];
   fixture.clientOpts = [];
+  fixture.recallRows = [];
+  fixture.recallError = null;
+  fixture.recallStates = [];
   vi.mocked(cacheLife).mockClear();
   feedHealthMock.getZoneFeedHealth.mockReset();
   feedHealthMock.shouldSuppressBlindspot.mockReset();
@@ -1099,7 +1112,7 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
     for (const row of more) expect(row.dominantPct).toBeLessThanOrEqual(cardIktidarFloor);
   });
 
-  it("a compact row is slim: id, title, zone, share, source count, first-published time and the voting tally", async () => {
+  it("a compact row is slim: id, title, zone, share, source count, first-published time, the voting tally and the recall-matched zones", async () => {
     const slim = {
       ...mkClaimRow("slim", "iktidar", 6, 1, "2026-11-04T08:00:00.000Z"),
       // Older than updated_at: the feed dates a compact row by this, as it dates a card.
@@ -1125,6 +1138,8 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
         sourceCount: 7,
         firstPublished: "2026-11-02T06:30:00.000Z",
         votingZoneCounts: { iktidar: 6, bagimsiz: 1, muhalefet: 0 },
+        // h106: the zones Jev matched with the same event; none for an ordinary claim.
+        recallMatchedZones: [],
       },
     ]);
     expect(Object.keys(more[0]!).sort()).toEqual([
@@ -1132,6 +1147,7 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
       "dominantZone",
       "firstPublished",
       "id",
+      "recallMatchedZones",
       "sourceCount",
       "title",
       "votingZoneCounts",
@@ -1265,6 +1281,298 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
       expect(row).not.toHaveProperty("articles");
       expect(row).not.toHaveProperty("sources");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h106-blindspotbadges-1: a public claim whose silent zone the site's own Jev
+// recall stage matched with the same event (clusters.blindspot_recall_suspect,
+// migration 064) must not print absolute silence for that zone. The fetcher
+// reads the column, asks jev_shadow_predictions ONLY for the flagged claims and
+// carries the zones it matched on the bundle (recallMatchedZones). The claim
+// list, the veto, the count line and every vote stay as they are; only the
+// "yer vermedi" digest drops the matched zone of that claim. Fail-open: a failed
+// lookup renders today's strings.
+// ---------------------------------------------------------------------------
+
+/** A jev_shadow_predictions row: one candidate article of a source with `bias`. */
+function recallRow(
+  clusterId: string,
+  prob: number,
+  bias: BiasCategory,
+  kind: SourceKind = "outlet",
+) {
+  return {
+    cluster_id: clusterId,
+    jev_prob: prob,
+    articles: { sources: { bias, kind } },
+  };
+}
+
+/** A claim row carrying the migration-064 flag. */
+function mkSuspectRow(
+  id: string,
+  zone: MediaDnaZone,
+  inZone: number,
+  outZone: number,
+  // "absent" leaves the column off the row (a row from before the column was read);
+  // a bare `undefined` would fall to the default, so it is not used for that.
+  suspect: boolean | null | "absent" = true,
+) {
+  return {
+    ...mkClaimRow(id, zone, inZone, outZone),
+    ...(suspect === "absent" ? {} : { blindspot_recall_suspect: suspect }),
+  };
+}
+
+describe("getBlindspots recall-matched zones (h106-blindspotbadges-1)", () => {
+  it("carries blindspot_recall_suspect in the embed select", async () => {
+    seedRows([mkClaimRow("c1", "iktidar", 5, 0)]);
+
+    await getBlindspots();
+
+    expect(fixture.embedStates).toHaveLength(1);
+    const select = String((fixture.embedStates[0] as BuilderState).selectArgs[0]);
+    expect(select).toContain("blindspot_recall_suspect");
+    // The veto columns it sits next to are untouched.
+    expect(select).toContain("blindspot_recall_veto");
+  });
+
+  it("the candidate filter still keys on the veto only (the claim list is unchanged)", async () => {
+    seedRows([mkSuspectRow("c1", "iktidar", 5, 0)]);
+
+    await getBlindspots();
+
+    const stepA = fixture.lastIdState as BuilderState;
+    expect(stepA.eq).toContainEqual({ col: "blindspot_recall_veto", val: false });
+    expect(stepA.eq.some((f) => f.col === "blindspot_recall_suspect")).toBe(false);
+  });
+
+  it("makes no extra request when no claim is flagged (false, null and a missing column)", async () => {
+    seedRows([
+      mkSuspectRow("f", "iktidar", 5, 0, false),
+      mkSuspectRow("n", "iktidar", 5, 0, null),
+      mkSuspectRow("u", "iktidar", 5, 0, "absent"),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(fixture.recallStates).toHaveLength(0);
+    expect(bundles).toHaveLength(3);
+    for (const b of bundles) expect(b.recallMatchedZones).toEqual([]);
+  });
+
+  it("asks for the flagged claims only, in one request, and qualifies the zone Jev matched (the 0746c9d2 shape)", async () => {
+    seedRows([
+      mkSuspectRow("0746c9d2", "iktidar", 9, 0),
+      mkClaimRow("plain", "iktidar", 6, 0),
+    ]);
+    fixture.recallRows = [
+      recallRow("0746c9d2", 0.92, "opposition_leaning"),
+      recallRow("0746c9d2", 0.92, "opposition_leaning"),
+    ];
+
+    const { bundles } = await getBlindspots();
+
+    expect(fixture.recallStates).toHaveLength(1);
+    const lookup = fixture.recallStates[0] as BuilderState;
+    expect(lookup.table).toBe("jev_shadow_predictions");
+    expect(lookup.in).toEqual([{ col: "cluster_id", vals: ["0746c9d2"] }]);
+    expect(lookup.eq).toContainEqual({ col: "task", val: "blindspot_recall" });
+
+    const byId = new Map(bundles.map((b) => [b.cluster.id, b]));
+    expect(byId.get("0746c9d2")!.recallMatchedZones).toEqual(["muhalefet"]);
+    expect(byId.get("plain")!.recallMatchedZones).toEqual([]);
+  });
+
+  it("qualifies both silent zones when Jev matched both (the f5012836 shape: Muhalefet plus Bağımsız)", async () => {
+    seedRows([mkSuspectRow("f5012836", "iktidar", 7, 0)]);
+    fixture.recallRows = [
+      recallRow("f5012836", 0.86, "opposition_leaning"),
+      recallRow("f5012836", 0.76, "center"),
+      recallRow("f5012836", 0.76, "international"),
+    ];
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles[0]!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("a flagged claim whose matches sit in a zone that has voters, or in no silent zone, gets no qualifier", async () => {
+    // 6 İktidar + 1 Bağımsız voter: Bağımsız has a member, Muhalefet is silent.
+    seedRows([
+      mkSuspectRow("has-members", "iktidar", 6, 1),
+      mkSuspectRow("only-dominant", "iktidar", 5, 0),
+    ]);
+    fixture.recallRows = [
+      recallRow("has-members", 0.9, "center"),
+      recallRow("only-dominant", 0.9, "pro_government"),
+    ];
+
+    const { bundles } = await getBlindspots();
+
+    for (const b of bundles) expect(b.recallMatchedZones).toEqual([]);
+  });
+
+  it("a flagged claim that Jev matched nothing for keeps today's strings (no qualifier)", async () => {
+    seedRows([mkSuspectRow("c1", "iktidar", 6, 0)]);
+    fixture.recallRows = [];
+
+    const { bundles } = await getBlindspots();
+
+    expect(fixture.recallStates).toHaveLength(1);
+    expect(bundles[0]!.recallMatchedZones).toEqual([]);
+  });
+
+  it("does not ask for a flagged claim that never became one (fails the live contract)", async () => {
+    // 3 voters: below BLINDSPOT.minSources, so it is dropped before the lookup.
+    seedRows([mkSuspectRow("too-small", "iktidar", 3, 0), mkSuspectRow("ok", "iktidar", 6, 0)]);
+    fixture.recallRows = [];
+
+    await getBlindspots();
+
+    expect(fixture.recallStates).toHaveLength(1);
+    expect((fixture.recallStates[0] as BuilderState).in).toEqual([{ col: "cluster_id", vals: ["ok"] }]);
+  });
+
+  it("leaves the claim list, the counts and the card order exactly as without the lookup", async () => {
+    const rows = [
+      mkSuspectRow("s1", "iktidar", 9, 0),
+      mkSuspectRow("s2", "muhalefet", 6, 0),
+      mkClaimRow("p1", "iktidar", 7, 1),
+    ];
+    seedRows(rows);
+    const without = await getBlindspots();
+
+    __resetCacheResilienceForTests();
+    seedRows(rows);
+    fixture.recallRows = [
+      recallRow("s1", 0.9, "opposition"),
+      recallRow("s2", 0.9, "pro_government"),
+    ];
+    const withLookup = await getBlindspots();
+
+    expect(withLookup.claimCount).toBe(without.claimCount);
+    expect(withLookup.sideCounts).toEqual(without.sideCounts);
+    expect(withLookup.bundles.map((b) => b.cluster.id)).toEqual(without.bundles.map((b) => b.cluster.id));
+    expect(withLookup.more).toEqual(without.more);
+    expect(withLookup.digest.windowTotal).toBe(without.digest.windowTotal);
+    for (const b of withLookup.bundles) {
+      const before = without.bundles.find((x) => x.cluster.id === b.cluster.id)!;
+      expect(b.dominantZone).toBe(before.dominantZone);
+      expect(b.dominantPct).toBe(before.dominantPct);
+      expect(b.votingZoneCounts).toEqual(before.votingZoneCounts);
+    }
+  });
+
+  it("the silence digest drops the matched zone of the flagged claims and nothing else", async () => {
+    // Three İktidar claims silent on Muhalefet and Bağımsız; Jev matched
+    // Muhalefet on two of them and Bağımsız on one of those.
+    seedRows([
+      mkSuspectRow("m1", "iktidar", 9, 0),
+      mkSuspectRow("m2", "iktidar", 8, 0),
+      mkClaimRow("p", "iktidar", 7, 0),
+    ]);
+    fixture.recallRows = [
+      recallRow("m1", 0.92, "opposition_leaning"),
+      recallRow("m2", 0.81, "opposition"),
+      recallRow("m2", 0.7, "center"),
+    ];
+
+    const { digest, claimCount, sideCounts } = await getBlindspots();
+
+    const byZone = Object.fromEntries(digest.rows.map((r) => [r.zone, r.silentCount]));
+    // Muhalefet was silent on three claims; two of them are matched.
+    expect(byZone.muhalefet).toBe(1);
+    // Bağımsız was silent on three; one of them is matched.
+    expect(byZone.bagimsiz).toBe(2);
+    expect(byZone.iktidar).toBe(0);
+    // The claim count line and the story total are unchanged.
+    expect(digest.windowTotal).toBe(3);
+    expect(claimCount).toBe(3);
+    expect(sideCounts).toEqual({ iktidar: 3, bagimsiz: 0, muhalefet: 0 });
+  });
+
+  it("a claim beyond the 30 cards counts in the digest as the cards do, and its slim row carries the zones", async () => {
+    const minute = 60_000;
+    const base = Date.parse("2026-11-05T12:00:00.000Z");
+    const cards = Array.from({ length: 30 }, (_, i) =>
+      mkClaimRow(`ik-${i}`, "iktidar", 7, 0, new Date(base - i * minute).toISOString()),
+    );
+    // 6/7 = 86%: less lopsided than the 100% claims, so it is the one compact row.
+    const slim = { ...mkClaimRow("slim", "iktidar", 6, 1), blindspot_recall_suspect: true };
+    seedRows([...cards, slim]);
+    fixture.recallRows = [recallRow("slim", 0.9, "opposition")];
+
+    const { more, bundles, digest } = await getBlindspots();
+
+    expect(bundles).toHaveLength(30);
+    expect(more.map((m) => m.id)).toEqual(["slim"]);
+    expect(more[0]!.recallMatchedZones).toEqual(["muhalefet"]);
+    const muhalefet = digest.rows.find((r) => r.zone === "muhalefet")!;
+    // 30 cards silent on Muhalefet; the slim claim is matched, so not counted.
+    expect(muhalefet.silentCount).toBe(30);
+    expect(digest.windowTotal).toBe(31);
+  });
+
+  it("fails open: a failed lookup warns, leaves every qualifier empty and the digest as today's", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      seedRows([mkSuspectRow("m1", "iktidar", 9, 0), mkClaimRow("p", "iktidar", 7, 0)]);
+      fixture.recallError = { message: "statement timeout" };
+
+      const { bundles, digest } = await getBlindspots();
+
+      expect(bundles).toHaveLength(2);
+      for (const b of bundles) expect(b.recallMatchedZones).toEqual([]);
+      const byZone = Object.fromEntries(digest.rows.map((r) => [r.zone, r.silentCount]));
+      expect(byZone.muhalefet).toBe(2);
+      expect(byZone.bagimsiz).toBe(2);
+      expect(
+        warn.mock.calls.some((c) => String(c[0]).startsWith("[recall-matched-zones] ")),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("getBlindspotsSafe stays ok: true when only the lookup fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      seedRows([mkSuspectRow("m1", "iktidar", 9, 0)]);
+      fixture.recallError = { message: "boom" };
+
+      const result = await getBlindspotsSafe();
+
+      expect(result.ok).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the lookup rides the same read profile as the embed (reader: capped client; batch: plain client)", async () => {
+    seedRows([mkSuspectRow("m1", "iktidar", 9, 0)]);
+    fixture.recallRows = [recallRow("m1", 0.9, "opposition")];
+    await getBlindspots();
+    // Step A, Step B and the lookup: three clients, every one capped.
+    expect(fixture.clientOpts).toHaveLength(3);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+
+    __resetCacheResilienceForTests();
+    fixture.clientOpts = [];
+    seedRows([mkSuspectRow("m1", "iktidar", 9, 0)]);
+    await getBlindspots({ profile: "batch" });
+    expect(fixture.clientOpts).toHaveLength(3);
+    expect(fixture.clientOpts.some(isCappedClientOpts)).toBe(false);
+  });
+
+  it("the cached payload stays JSON-serialisable (arrays, not a Map or a Set)", async () => {
+    seedRows([mkSuspectRow("m1", "iktidar", 9, 0)]);
+    fixture.recallRows = [recallRow("m1", 0.9, "opposition")];
+
+    const result = await getBlindspots();
+
+    expect(JSON.parse(JSON.stringify(result)).bundles[0].recallMatchedZones).toEqual(["muhalefet"]);
   });
 });
 

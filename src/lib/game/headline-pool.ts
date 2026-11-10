@@ -12,7 +12,7 @@ import { isGameEligibleTitle } from "./pii-filter";
 // imports, because the client game needs GAME_ROUND_SIZE and must not pull this
 // file (next/cache, "use cache") into the client bundle. Import them from there.
 import { GAME_ROUND_SIZE } from "./round-size";
-import { crossZoneTwinKeys, twinKey } from "./title-twin";
+import { crossZoneTwinKeys, twinKey, type TwinKeyVersion } from "./title-twin";
 
 // /oyun's headline pool — the pick. Mirrors the embedded-select shape
 // blindspots-query.ts / politics-query.ts already use (clusters →
@@ -39,8 +39,9 @@ import { crossZoneTwinKeys, twinKey } from "./title-twin";
 // outlet or wire of ANOTHER zone ran word for word in the same story has two
 // correct answers ("İlke TV", "Aydınlık" and AA all ran "Cumhurbaşkanı Erdoğan,
 // ABD Başkanı Trump ile telefonda görüştü"), so title-twin.ts's `twinKey` drops
-// it, on both sides. These rules shrink the pool; GAME_ROUND_SIZE is
-// deliberately NOT lowered to compensate.
+// it, on both sides (a "Son dakika..." lead-in does not hide the copy). These
+// rules shrink the pool; GAME_ROUND_SIZE is deliberately NOT lowered to
+// compensate.
 //
 // The outlet rule is per cluster: an outlet keeps ONE headline in each cluster
 // it covers, not one in the whole window. A pool-wide rule left the pool with
@@ -100,6 +101,15 @@ const DEFAULT_LIMIT = GAME_ROUND_SIZE;
 // blindspots-query.ts's CANDIDATE_LIMIT — so a cheap `article_count >= 3`
 // prefilter doesn't drag in the entire clusters table.
 const CANDIDATE_LIMIT = 200;
+
+/**
+ * The twin-key version Bölge compares texts with (title-twin.ts): 2, so a
+ * breaking-news lead-in of any punctuation ("Son dakika...", "SON DAKİKA…") does
+ * not hide a copy another zone ran. Bölge has no replay contract (its pool is a
+ * 5-minute cache, not a served-and-replayable set), so it never needs version 1;
+ * the daily mode picks its version per puzzle key instead.
+ */
+const POOL_TWIN_KEY_VERSION: TwinKeyVersion = 2;
 
 /**
  * A drawn list holds at most this many headlines from one outlet. It is 1
@@ -177,7 +187,7 @@ export function selectGameHeadlines(
     // every outlet or wire member (before any window, active or language rule),
     // because those rules choose candidates, not what a reader has already seen
     // the other camp print.
-    const twins = crossZoneTwinKeys(twinEvidence(cluster));
+    const twins = crossZoneTwinKeys(twinEvidence(cluster), POOL_TWIN_KEY_VERSION);
 
     // One outlet, one headline, per cluster.
     const seenSourceIds = new Set<string>();
@@ -214,7 +224,7 @@ export function selectGameHeadlines(
 
       // Another zone's outlet or wire ran the same text: the question would
       // have two right answers. Also dropped before the outlet is marked seen.
-      if (twins.has(twinKey(article.title))) continue;
+      if (twins.has(twinKey(article.title, POOL_TWIN_KEY_VERSION))) continue;
 
       seenSourceIds.add(source.id);
       candidates.push({

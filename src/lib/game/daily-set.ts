@@ -25,6 +25,7 @@ import { isPoliticsMember, zoneOf } from "@/lib/bias/config";
 import { sourceKindOf } from "@/lib/sources/kind";
 import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";
 import { isGameEligibleTitle } from "./pii-filter";
+import type { TwinKeyVersion } from "./title-twin";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 // ===========================================================================
@@ -67,6 +68,20 @@ export const DAILY_ENGLISH_GATE_FROM = "2026-11-05";
 // Istanbul date strictly after the PR merged (2026-11-09), a key no player has
 // seen at deploy time; bump it before merge if the deploy date is on or after it.
 export const DAILY_TWIN_GATE_FROM = "2026-11-10";
+// From this puzzle date onward the twin key (title-twin.ts) is VERSION 2: a
+// breaking-news lead-in ends at any run of non-letters, so "Son dakika... X" and
+// "SON DAKİKA… X" meet a plain "X" of another zone (version 1 only knew
+// `: ! | - – —` and left such a pair as two single-answer questions). The
+// version is part of what makes a candidate a twin, so it follows the same
+// replay contract as the gates above: keyed on the puzzle key, never on the
+// clock, and every EARLIER key (gated days from DAILY_TWIN_GATE_FROM included)
+// keeps the version 1 key and recomputes byte-identically. It must be a key no
+// player has seen at deploy time (every key up to the deploy day is replayable
+// and recomputes from a cold cache). It is the first Istanbul date strictly
+// after the day this PR is expected to merge (2026-11-11); bump it before merge
+// if the deploy date is on or after it. Bölge (headline-pool.ts) has no replay
+// contract and uses version 2 straight away.
+export const DAILY_TWIN_KEY_V2_FROM = "2026-11-12";
 export const DAILY_MAX_PER_ZONE = 2;
 export const DAILY_TITLE_MIN = 25;
 export const DAILY_TITLE_MAX = 180;
@@ -133,6 +148,15 @@ export interface DailyPuzzle {
 export interface PuzzleWindow {
   startIso: string;
   endIso: string;
+}
+
+/**
+ * The twin-key version (title-twin.ts) of the puzzle for `key`: 1 below
+ * DAILY_TWIN_KEY_V2_FROM, 2 from it. A function of the key alone, so a cached
+ * build and a rebuild of the same day agree.
+ */
+export function dailyTwinKeyVersion(key: string): TwinKeyVersion {
+  return key >= DAILY_TWIN_KEY_V2_FROM ? 2 : 1;
 }
 
 // ===========================================================================

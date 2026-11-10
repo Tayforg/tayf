@@ -38,6 +38,8 @@ function mkBundle(opts: {
   voting?: Partial<Record<MediaDnaZone, number>>;
   /** Zones of NON-voting sources (aggregator / niche) listed on bundle.sources. */
   nonVotingZones?: MediaDnaZone[];
+  /** h106: zones Jev matched with the same event; left off the bundle when omitted. */
+  recallMatchedZones?: readonly MediaDnaZone[];
   updatedAtMs?: number;
   updatedAt?: string;
 }): Bundle {
@@ -61,6 +63,9 @@ function mkBundle(opts: {
     sources: [...votingSources, ...nonVotingSources],
     dominantZone: opts.dominantZone,
     votingZoneCounts: voting,
+    ...(opts.recallMatchedZones === undefined
+      ? {}
+      : { recallMatchedZones: opts.recallMatchedZones }),
   };
 }
 
@@ -530,5 +535,138 @@ describe("copy policy", () => {
       expect(s).not.toContain("sustu");
       expect(s).not.toContain("gizledi");
     }
+  });
+});
+
+// h106-blindspotbadges-1: a public claim whose silent zone the site's own Jev
+// recall stage matched with the same event (blindspot_recall_suspect) does not
+// call that zone silent any more: the zone leaves the "yer vermedi" counts of
+// that one claim. Nothing else moves: the story is still counted (windowTotal),
+// still counts for every other silent zone, and a caller that never passes the
+// field (the weekly template, /hafta) is counted exactly as before.
+describe("buildSilenceDigest — recall-matched zones (h106-blindspotbadges-1)", () => {
+  // Shaped like cluster 0746c9d2: nine İktidar voters, Muhalefet and Bağımsız
+  // both empty, Jev matched the Muhalefet side (Yeniçağ, Elips Haber).
+  const matchedMuhalefet = () =>
+    mkBundle({
+      id: "0746c9d2",
+      dominantZone: "iktidar",
+      voting: { iktidar: 9 },
+      recallMatchedZones: ["muhalefet"],
+    });
+
+  it("leaves a matched zone out of its row but still counts the other silent zone", () => {
+    const d = buildSilenceDigest([matchedMuhalefet()]);
+
+    expect(row(d, "muhalefet").silentCount).toBe(0);
+    expect(row(d, "muhalefet").byDominant).toEqual([]);
+    // Bağımsız is silent and was NOT matched: counted as before.
+    expect(row(d, "bagimsiz").silentCount).toBe(1);
+    expect(row(d, "bagimsiz").byDominant).toEqual([{ zone: "iktidar", count: 1 }]);
+    expect(row(d, "iktidar").silentCount).toBe(0);
+  });
+
+  it("does not change windowTotal: the claim is still one of the counted stories", () => {
+    const d = buildSilenceDigest([matchedMuhalefet()]);
+    expect(d.windowTotal).toBe(1);
+  });
+
+  it("only that claim leaves the row: an unmatched claim still counts Muhalefet as silent", () => {
+    const d = buildSilenceDigest([
+      matchedMuhalefet(),
+      mkBundle({ id: "plain", dominantZone: "iktidar", voting: { iktidar: 6 } }),
+      mkBundle({
+        id: "matched-too",
+        dominantZone: "iktidar",
+        voting: { iktidar: 7 },
+        recallMatchedZones: ["muhalefet", "bagimsiz"],
+      }),
+    ]);
+
+    expect(d.windowTotal).toBe(3);
+    expect(row(d, "muhalefet").silentCount).toBe(1);
+    expect(row(d, "muhalefet").byDominant).toEqual([{ zone: "iktidar", count: 1 }]);
+    // Bağımsız: counted on 0746c9d2 and "plain", left out on "matched-too".
+    expect(row(d, "bagimsiz").silentCount).toBe(2);
+  });
+
+  it("matches count per zone, in both rows, when both silent zones are matched", () => {
+    const d = buildSilenceDigest([
+      mkBundle({
+        id: "both",
+        dominantZone: "iktidar",
+        voting: { iktidar: 5 },
+        recallMatchedZones: ["bagimsiz", "muhalefet"],
+      }),
+    ]);
+
+    expect(row(d, "bagimsiz").silentCount).toBe(0);
+    expect(row(d, "muhalefet").silentCount).toBe(0);
+    expect(d.windowTotal).toBe(1);
+  });
+
+  it("works for a Muhalefet-dominant claim whose İktidar side was matched", () => {
+    const d = buildSilenceDigest([
+      mkBundle({
+        id: "mu",
+        dominantZone: "muhalefet",
+        voting: { muhalefet: 6 },
+        recallMatchedZones: ["iktidar"],
+      }),
+    ]);
+
+    expect(row(d, "iktidar").silentCount).toBe(0);
+    expect(row(d, "bagimsiz").byDominant).toEqual([{ zone: "muhalefet", count: 1 }]);
+  });
+
+  it("ignores a matched zone that is the dominant zone or already has voting members (it was not silent anyway)", () => {
+    const d = buildSilenceDigest([
+      mkBundle({
+        id: "weighted",
+        dominantZone: "iktidar",
+        voting: { iktidar: 8, bagimsiz: 1 },
+        recallMatchedZones: ["iktidar", "bagimsiz"],
+      }),
+    ]);
+
+    // Muhalefet stays silent and unmatched; nothing else is silent.
+    expect(row(d, "muhalefet").silentCount).toBe(1);
+    expect(row(d, "bagimsiz").silentCount).toBe(0);
+    expect(row(d, "iktidar").silentCount).toBe(0);
+  });
+
+  it("an empty or absent recallMatchedZones counts exactly as before", () => {
+    const base = [
+      mkBundle({ id: "a", dominantZone: "iktidar", voting: { iktidar: 5 } }),
+      mkBundle({ id: "b", dominantZone: "muhalefet", voting: { muhalefet: 5, bagimsiz: 1 } }),
+    ];
+    const withEmpty = [
+      mkBundle({ id: "a", dominantZone: "iktidar", voting: { iktidar: 5 }, recallMatchedZones: [] }),
+      mkBundle({
+        id: "b",
+        dominantZone: "muhalefet",
+        voting: { muhalefet: 5, bagimsiz: 1 },
+        recallMatchedZones: [],
+      }),
+    ];
+
+    expect(buildSilenceDigest(withEmpty)).toEqual(buildSilenceDigest(base));
+  });
+
+  it("formats a row whose only silent claims were matched as 'yer vermedikleri hikâye yok'", () => {
+    const d = buildSilenceDigest([matchedMuhalefet()]);
+    expect(formatSilenceRow(row(d, "muhalefet"))).toBe(
+      `${capitalizeTr("muhalefete yakın kaynaklar")}: yer vermedikleri hikâye yok`,
+    );
+  });
+
+  it("de-duplicates by cluster id first, so the first occurrence's matches decide", () => {
+    const d = buildSilenceDigest([
+      matchedMuhalefet(),
+      mkBundle({ id: "0746c9d2", dominantZone: "iktidar", voting: { iktidar: 9 } }),
+    ]);
+
+    expect(d.windowTotal).toBe(1);
+    expect(row(d, "muhalefet").silentCount).toBe(0);
   });
 });

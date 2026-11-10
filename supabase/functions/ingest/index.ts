@@ -117,6 +117,7 @@ import type { BisectUpsertResult } from "./order.ts";
 import { FETCH_STATE_WRITE_MAX_CALLS, isRowScopedPgError } from "./fetch-state.ts";
 import { collectSourceIds, partitionWithRowErrorGrace } from "./settle.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
+import { KICK_ENV, scheduleClusterKick, shouldKick } from "../_shared/kick.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
 
@@ -2414,6 +2415,18 @@ async function runCycleBody(
 // HTTP entrypoint
 // ---------------------------------------------------------------------------
 
+// The CLUSTER_KICK secret, read per request (so the polyfilled env of the tests
+// and a `supabase secrets set` between two invocations of a warm isolate both
+// take effect). Deno.env.get can throw under restricted permissions: any other
+// outcome than the exact string "on" is no kick.
+function readKickFlag(): string | undefined {
+  try {
+    return Deno.env.get(KICK_ENV) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 Deno.serve(withSentry("ingest", async (req: Request) => {
   // Only the Vercel cron endpoint (or `supabase functions invoke`) should
   // reach this — Supabase Edge Functions sit behind a service-role bearer
@@ -2436,10 +2449,24 @@ Deno.serve(withSentry("ingest", async (req: Request) => {
 
   try {
     const stats = await runCycle();
-    return new Response(JSON.stringify({ ok: true, ...stats }), {
+    const response = new Response(JSON.stringify({ ok: true, ...stats }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
+    // h106-attachdesign-1: kick cluster-consumer so the articles this cycle
+    // just enqueued are read in seconds, not at the next cron minute (attach
+    // wait p50 55 s). Behind the Edge secret CLUSTER_KICK=on and only when the
+    // cycle inserted something. NEVER awaited: pg_net starts its next batch
+    // only after this request has ended, so a handler that waited for the
+    // consumer would hold ingest-drain open and queue cluster-drain behind it
+    // (the #252 failure mode, h102-pollregression-1). scheduleClusterKick hands
+    // the request to EdgeRuntime.waitUntil and returns void; it never throws,
+    // and a failed kick is warned about and captured, never able to change this
+    // response (see _shared/kick.ts).
+    if (shouldKick(readKickFlag(), stats.inserted)) {
+      scheduleClusterKick(undefined, { capture: (kickErr) => captureException("ingest", kickErr) });
+    }
+    return response;
   } catch (err) {
     const request_id = crypto.randomUUID();
     // Round-6 P1: forward to Sentry explicitly. The withSentry wrapper

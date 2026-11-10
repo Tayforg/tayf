@@ -28,6 +28,7 @@ import {
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
 import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
 import { BLINDSPOT_LIST_LOOKBACK_DAYS } from "@/lib/clusters/blindspot-pick";
+import { RECALL_MATCH_NOTE } from "@/lib/clusters/recall-matched-zones";
 import { blindspotCountLine } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
@@ -349,7 +350,8 @@ interface BlindspotCardProps {
 
 // Composes the existing <ClusterCard> with a "Sadece X yazdı" ribbon (or the
 // qualified "Spektrumda sadece X" when a non-voting source from another zone
-// also wrote the story) and a
+// also wrote the story, or "Kümede sadece X" when Jev matched the silent zone in
+// another cluster) and a
 // dominant-zone tint frame. We deliberately do NOT duplicate ClusterCard's
 // markup — the ribbon sits above and the tint is a parent ring + bg layer
 // so any future ClusterCard tweak (e.g. layout, image rules) is inherited
@@ -369,16 +371,29 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
   // names the uncounted outsiders. The flag rule and every count are untouched;
   // with no such outsider both strings are exactly what they always were.
   const outsiders = only ? nonVotingOutsideZone(bundle.sources, bundle.dominantZone) : 0;
+  // h106-blindspotbadges-1: "only" is also a claim about the whole story. When the
+  // site's own Jev recall stage matched the silent zone with the same event (filed
+  // in another cluster; the fetcher hands the zones over as recallMatchedZones),
+  // "Sadece X yazdı" is not something the data supports, so the chip says what
+  // THIS cluster shows and the side note adds the qualifier. The claim stays
+  // public and no count, share or flag moves. A bundle cached before the field
+  // existed has none (`?? []`), and an empty list leaves every string as it was.
+  const recallMatched = only && (bundle.recallMatchedZones ?? []).length > 0;
+  const recallNote = recallMatched ? ` · ${RECALL_MATCH_NOTE}` : "";
+  // Precedence: the toplayıcı / niş qualifier keeps the chip text ("Spektrumda
+  // sadece X" is already not absolute) and the recall phrase joins its side note.
   const chipLabel = !only
     ? `${pctLabel} ${meta.label}`
     : outsiders > 0
       ? `Spektrumda sadece ${meta.label}`
-      : `Sadece ${meta.label} yazdı`;
+      : recallMatched
+        ? `Kümede sadece ${meta.label}`
+        : `Sadece ${meta.label} yazdı`;
   // One string (leading space kept) so the markup stays a single text node.
   const sideNote =
     outsiders > 0
-      ? ` tek tarafta · +${outsiders} toplayıcı/niş kaynak (sayılmaz)`
-      : " tek tarafta";
+      ? ` tek tarafta · +${outsiders} toplayıcı/niş kaynak (sayılmaz)${recallNote}`
+      : ` tek tarafta${recallNote}`;
 
   return (
     <div

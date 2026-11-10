@@ -2,6 +2,7 @@ import { ExternalLink } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
 import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
+import { RECALL_MATCH_EMPTY_COLUMN } from "@/lib/clusters/recall-matched-zones";
 import { SourceLogo } from "@/components/source/source-logo";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
@@ -39,6 +40,14 @@ import type { MediaDnaZone } from "@/types";
  * prints no note of its own: the read-across slot above carries the one
  * ENGLISH_ONLY_NOTE (copy-2 / react-h59-3), so the page says it exactly once.
  *
+ * h106-blindspotbadges-1: an empty column Tayf's own Jev recall stage matched with
+ * the same event (`recallMatchedZones`: a similar story sits in another cluster,
+ * clusters.blindspot_recall_suspect) must not claim silence either. It reads
+ * "— bu kümede yok · benzer haber başka kümede olabilir —" (RECALL_MATCH_EMPTY_COLUMN).
+ * Order of the empty-column text: languageIsolated, then nonVotingZones, then
+ * recallMatchedZones, then "bu tarafta sessizlik". Wording only: no count, vote or
+ * "N manşet" moves, and with no matched zone the markup is exactly what it was.
+ *
  * h47-time-1: ages are measured against `nowMs`, the page's per-request render
  * stamp, and RelativeTime re-bases them to the reader's clock after mount, so a
  * service-worker copy of the page does not show frozen ages. The server text is
@@ -65,6 +74,11 @@ interface FramingComparisonProps {
   // (`isLanguageIsolatedCluster`, computed once in page.tsx). Optional (false):
   // the only caller is the cluster page, which always passes it.
   languageIsolated?: boolean;
+  // h106-blindspotbadges-1: the zones Jev's recall stage matched with this
+  // story's event (ClusterDetail.recallMatchedZones, as a set). Optional (empty):
+  // like nonVotingZones it only changes the words of an EMPTY column, and nothing
+  // is counted from it.
+  recallMatchedZones?: ReadonlySet<MediaDnaZone>;
 }
 
 // Spectrum order, matching the bias bar left-to-right.
@@ -164,6 +178,7 @@ export function FramingComparison({
   nowMs,
   nonVotingZones,
   languageIsolated = false,
+  recallMatchedZones,
 }: FramingComparisonProps) {
   const byZone = groupMembersByZone(members);
   const total = members.length;
@@ -215,7 +230,9 @@ export function FramingComparison({
                       ? ENGLISH_ONLY_EMPTY_COLUMN
                       : nonVotingZones.has(zone)
                         ? `— ${SPECTRUM_ABSENT_QUALIFIED} —`
-                        : "— bu tarafta sessizlik —"}
+                        : recallMatchedZones?.has(zone)
+                          ? `— ${RECALL_MATCH_EMPTY_COLUMN} —`
+                          : "— bu tarafta sessizlik —"}
                   </span>
                 </div>
               ) : (

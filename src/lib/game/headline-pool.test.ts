@@ -618,6 +618,73 @@ describe("selectGameHeadlines -- cross-zone twin text", () => {
     expect(result).toEqual([]);
   });
 
+  describe("breaking-news lead-in (twin key version 2)", () => {
+    const PLAIN = "Mustafa Sarıgül'ün dosyası Ankara'ya gönderildi";
+    const OTHER = "Bütçe için Genel Kurul yarın toplanıyor";
+
+    it("drops a muhalefet 'SON DAKİKA...' headline that an iktidar outlet ran word for word without the lead-in (and the plain copy too)", () => {
+      const result = selectGameHeadlines([
+        clusterOf("cluster-sarigul", [
+          { sourceName: "Sözcü", sourceSlug: "sozcu-gazetesi", bias: "opposition", title: `SON DAKİKA... ${PLAIN}` },
+          { sourceName: "Habertürk", sourceSlug: "haberturk-gazetesi", bias: "pro_government", title: PLAIN },
+          { bias: "center", title: OTHER },
+        ]),
+      ]);
+
+      expect(result.map((h) => h.title)).toEqual([OTHER]);
+      expect(result.some((h) => h.sourceName === "Sözcü")).toBe(false);
+    });
+
+    it("keeps that same 'SON DAKİKA...' headline when nobody of another zone ran the text (the candidate is eligible on its own)", () => {
+      const result = selectGameHeadlines([
+        clusterOf("cluster-sarigul-alone", [
+          { sourceName: "Sözcü", sourceSlug: "sozcu-gazetesi", bias: "opposition", title: `SON DAKİKA... ${PLAIN}` },
+          { bias: "center", title: OTHER },
+        ]),
+      ]);
+
+      expect(result.map((h) => h.sourceName)).toContain("Sözcü");
+      expect(result).toHaveLength(2);
+    });
+
+    it.each(["Son dakika... ", "SON DAKİKA… ", "Son dakika! ", "Son Dakika - ", "FLAŞ... "])(
+      "sees through the lead-in %j against a plain copy of another zone",
+      (leadIn) => {
+        const result = selectGameHeadlines([
+          clusterOf("cluster-lead-in", [
+            { bias: "opposition", title: `${leadIn}${PLAIN}` },
+            { bias: "center", title: PLAIN },
+          ]),
+        ]);
+
+        expect(result).toEqual([]);
+      },
+    );
+
+    it("a wire of another zone that ran the plain text is evidence against the lead-in copy", () => {
+      const result = selectGameHeadlines([
+        clusterOf("cluster-wire-lead-in", [
+          { bias: "opposition", title: `Son dakika... ${PLAIN}` },
+          { bias: "pro_government", sourceKind: "wire", sourceSlug: "anadolu-ajansi", title: PLAIN },
+        ]),
+      ]);
+
+      expect(result).toEqual([]);
+    });
+
+    it("keeps 'Son dakikada ...' and 'Flaşlar ...' headlines (a longer word is not the lead-in)", () => {
+      const result = selectGameHeadlines([
+        clusterOf("cluster-longer-word", [
+          { bias: "opposition", title: "Son dakikada Meclis'ten çıkan karar tartışıldı" },
+          { bias: "center", title: "Meclis'ten çıkan karar tartışıldı" },
+          { bias: "pro_government", title: "Flaşlar patladı Meclis'ten çıkan karar tartışıldı" },
+        ]),
+      ]);
+
+      expect(result).toHaveLength(3);
+    });
+  });
+
   it("a member without a source or an article is no evidence and does not throw", () => {
     const cluster = clusterOf("cluster-holes", [
       { bias: "center", title: TEXT },
@@ -1208,11 +1275,21 @@ describe("headline-pool source guard", () => {
 
 
   it("applies the twin-text rule after the PII and outlet-name checks and BEFORE the outlet is marked seen", () => {
-    expect(source).toContain('import { crossZoneTwinKeys, twinKey } from "./title-twin";');
-    const twinAt = source.indexOf("if (twins.has(twinKey(article.title))) continue;");
+    expect(source).toContain(
+      'import { crossZoneTwinKeys, twinKey, type TwinKeyVersion } from "./title-twin";',
+    );
+    const twinAt = source.indexOf("if (twins.has(twinKey(article.title, POOL_TWIN_KEY_VERSION))) continue;");
     expect(twinAt).toBeGreaterThan(-1);
     expect(source.indexOf("if (titleNamesOutlet(article.title, source)) continue;")).toBeLessThan(twinAt);
     expect(twinAt).toBeLessThan(source.indexOf("seenSourceIds.add(source.id)"));
+  });
+
+  it("compares twin texts with key version 2 on both sides (the lead-in fix), from one constant", () => {
+    expect(source).toContain("const POOL_TWIN_KEY_VERSION: TwinKeyVersion = 2;");
+    expect(source).toContain("crossZoneTwinKeys(twinEvidence(cluster), POOL_TWIN_KEY_VERSION)");
+    // Version 1 is the daily mode's frozen rule for served days; Bölge never uses it.
+    expect(source).not.toMatch(/twinKey\([^)]*,\s*1\)/);
+    expect(source).not.toMatch(/crossZoneTwinKeys\([^)]*,\s*1\)/);
   });
 
   it("the clusters select starts with `id, article_count`", () => {

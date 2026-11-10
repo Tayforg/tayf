@@ -2,13 +2,20 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { crossZoneTwinKeys, twinKey } from "./title-twin";
+import { crossZoneTwinKeys, twinKey as twinKeyOf, type TwinKeyVersion } from "./title-twin";
 import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import type { MediaDnaZone } from "@/types";
 
 const member = (title: string, zone: MediaDnaZone) => ({ title, zone });
 
-describe("twinKey", () => {
+const VERSIONS: readonly TwinKeyVersion[] = [1, 2];
+
+// Every vector below must hold for BOTH rules: version 1 is frozen (the sets /oyun
+// served before the lead-in fix recompute from it), version 2 only widens what a
+// separator after the prefix may be.
+describe.each(VERSIONS)("twinKey version %i: the shared vectors", (version) => {
+  const twinKey = (title: string) => twinKeyOf(title, version);
+
   it("gives the same key for a title that differs only in case, apostrophe and final punctuation (Turkish İ/I)", () => {
     // Without the tr-TR lower-casing, "CUMHURBAŞKANI" would fold to
     // "cumhurbaşkani" (dotted i) and never meet the "ı" of the lower-case form.
@@ -75,7 +82,99 @@ describe("twinKey", () => {
   });
 });
 
+// The lead-in the first twin gate (#248) missed: "Son dakika... X", "SON DAKİKA… X".
+const X = "Gazeteci İsmail Saymaz'ın ev hapsi kaldırıldı";
+
+describe("twinKey version 2: any run of non-letters after the breaking-news prefix is a separator", () => {
+  it.each([
+    "Son dakika... " + X,
+    "SON DAKİKA… " + X,
+    "Son dakika! " + X,
+    "Son Dakika - " + X,
+    "SON DAKİKA: " + X,
+    "Flaş... " + X,
+  ])("%j has the key of the plain text", (title) => {
+    expect(twinKeyOf(title, 2)).toBe(twinKeyOf(X, 2));
+    expect(twinKeyOf(title)).toBe(twinKeyOf(X));
+  });
+
+  it.each([
+    "SON DAKİKA... ",
+    "Son dakika.. ",
+    "SON DAKİKA …",
+    "Son dakika!!! ",
+    "SON DAKİKA | ",
+    "Son dakika – ",
+    "Son dakika — ",
+    "SON DAKİKA ‒ ",
+    "Son dakika:: ",
+    "Son dakika\" ",
+    "Son dakika 🔴 ",
+    "FLAŞ… ",
+    "FLAŞ!.. ",
+  ])("strips the lead-in %j", (leadIn) => {
+    expect(twinKeyOf(leadIn + X, 2)).toBe(twinKeyOf(X, 2));
+  });
+
+  it("a digit after the separators starts the text, a bare prefix is empty", () => {
+    expect(twinKeyOf("Son dakika... 3 yaralı", 2)).toBe("3yaralı");
+    expect(twinKeyOf("SON DAKİKA…", 2)).toBe("");
+    expect(twinKeyOf("Flaş...", 2)).toBe("");
+  });
+
+  it("still needs a separator: a longer word that starts like the prefix keeps its first word", () => {
+    expect(twinKeyOf("Son dakikada gol", 2).startsWith("sondakikada")).toBe(true);
+    expect(twinKeyOf("Son dakikada gol", 2)).toBe("sondakikadagol");
+    expect(twinKeyOf("Flaşlar patladı", 2).startsWith("flaşlar")).toBe(true);
+    expect(twinKeyOf("Flaşlar patladı", 2)).toBe("flaşlarpatladı");
+    expect(twinKeyOf("Son dakikada ... gol", 2)).toBe("sondakikadagol");
+    expect(twinKeyOf("SONDAKİKA... haberi", 2)).toBe("sondakikahaberi");
+  });
+
+  it("strips only ONE prefix, and only at the start", () => {
+    expect(twinKeyOf("SON DAKİKA... FLAŞ... X haberi", 2)).toBe("flaşxhaberi");
+    expect(twinKeyOf("Meclis'ten SON DAKİKA... kararı", 2)).toBe("meclistensondakikakararı");
+  });
+
+  it("is the default version", () => {
+    expect(twinKeyOf("Son dakika... " + X)).toBe(twinKeyOf(X));
+    expect(twinKeyOf("SON DAKİKA… " + X)).toBe(twinKeyOf(X, 2));
+  });
+
+  it("is linear on a long run of separators after the prefix (any separator character)", () => {
+    for (const unit of [".", "…", " ", "🔴", ".…!:- "]) {
+      expectLinear(rep(unit, "Son dakika"), (title) => twinKeyOf(title, 2), { n: 250_000, ceilingMs: 2_000 });
+      expectLinear(rep(unit, "SON DAKİKA", "x"), (title) => twinKeyOf(title, 2), { n: 250_000, ceilingMs: 2_000 });
+    }
+    // A prefix with no separator, followed by a long word, fails the match at once.
+    expectLinear(rep("a", "Son dakika"), (title) => twinKeyOf(title, 2), { n: 250_000, ceilingMs: 2_000 });
+  });
+});
+
+describe("twinKey version 1: the frozen rule behind every set already served", () => {
+  it("does not see through 'Son dakika...' or the '…' lead-in (the gap version 2 closes)", () => {
+    expect(twinKeyOf("Son dakika... " + X, 1)).not.toBe(twinKeyOf(X, 1));
+    expect(twinKeyOf("Son dakika... " + X, 1)).toBe("sondakikagazeteciismailsaymazınevhapsikaldırıldı");
+    expect(twinKeyOf("SON DAKİKA… Mustafa Sarıgül", 1)).toBe("sondakikamustafasarıgül");
+    expect(twinKeyOf("Flaş... " + X, 1)).not.toBe(twinKeyOf(X, 1));
+  });
+
+  it("still strips the six separators it always did", () => {
+    for (const leadIn of ["Son dakika! ", "Son Dakika - ", "SON DAKİKA: ", "SON DAKİKA | ", "SON DAKİKA – ", "SON DAKİKA — ", "Flaş: "]) {
+      expect(twinKeyOf(leadIn + X, 1), leadIn).toBe(twinKeyOf(X, 1));
+    }
+  });
+
+  it("keeps the same key as version 2 for a title without a lead-in", () => {
+    for (const title of [X, "Çiğ köfte: 3 kişi 'gözaltına' alındı!", "🔴 Dolar 34,50 oldu 🔴", "", "!!!"]) {
+      expect(twinKeyOf(title, 1)).toBe(twinKeyOf(title, 2));
+    }
+  });
+});
+
 describe("crossZoneTwinKeys", () => {
+  const twinKey = (title: string) => twinKeyOf(title);
+
   it("returns no key when one zone carries a text twice", () => {
     const keys = crossZoneTwinKeys([
       member("Meclis tatile girdi", "iktidar"),
@@ -158,6 +257,52 @@ describe("crossZoneTwinKeys", () => {
   });
 });
 
+describe("crossZoneTwinKeys versions", () => {
+  it("version 2 (the default) flags a text one zone ran behind 'Son dakika...' and another ran plain", () => {
+    const members = [
+      member("Son dakika... " + X, "muhalefet"),
+      member(X, "bagimsiz"),
+    ];
+    expect([...crossZoneTwinKeys(members, 2)]).toEqual([twinKeyOf(X, 2)]);
+    expect([...crossZoneTwinKeys(members)]).toEqual([twinKeyOf(X, 2)]);
+  });
+
+  it("version 2 flags the '…' lead-in against a plain copy, whichever zone carries which", () => {
+    const keys = crossZoneTwinKeys([
+      member("SON DAKİKA… " + X, "iktidar"),
+      member(X, "muhalefet"),
+    ]);
+    expect(keys.size).toBe(1);
+  });
+
+  it("version 1 does not flag that pair (the old behaviour is locked)", () => {
+    const keys = crossZoneTwinKeys(
+      [member("Son dakika... " + X, "muhalefet"), member(X, "bagimsiz")],
+      1,
+    );
+    expect(keys.size).toBe(0);
+  });
+
+  it("version 1 still flags the lead-ins it always saw", () => {
+    const keys = crossZoneTwinKeys(
+      [member("SON DAKİKA: " + X, "muhalefet"), member(X, "bagimsiz")],
+      1,
+    );
+    expect([...keys]).toEqual([twinKeyOf(X, 1)]);
+  });
+
+  it("two lead-in forms of one text in two zones are twins under version 2 only", () => {
+    const members = [member("Son dakika... " + X, "iktidar"), member("SON DAKİKA! " + X, "muhalefet")];
+    expect(crossZoneTwinKeys(members, 2).size).toBe(1);
+    expect(crossZoneTwinKeys(members, 1).size).toBe(0);
+  });
+
+  it("one zone running both forms is still no twin", () => {
+    const keys = crossZoneTwinKeys([member("Son dakika... " + X, "iktidar"), member(X, "iktidar")]);
+    expect(keys.size).toBe(0);
+  });
+});
+
 describe("title-twin source guard", () => {
   const source = readFileSync(resolve(__dirname, "title-twin.ts"), "utf8");
 
@@ -170,5 +315,15 @@ describe("title-twin source guard", () => {
       }
     }
     expect(source).not.toMatch(/\brequire\(|\bimport\(/);
+  });
+
+  // The prefix is one anchored literal followed by ONE character-class run: no
+  // nested quantifier, no alternation inside a repeat (CodeQL js/redos).
+  it("keeps both prefix regexes anchored with a single, un-nested quantifier", () => {
+    const prefixes = [...source.matchAll(/^const BREAKING_PREFIX_V\d = (\/.*\/u?);$/gm)];
+    expect(prefixes).toHaveLength(2);
+    for (const [, literal] of prefixes) {
+      expect(literal).toMatch(/^\/\^\(\?:son dakika\|flas\)\[[^\]]+\]\+\/u?$/);
+    }
   });
 });

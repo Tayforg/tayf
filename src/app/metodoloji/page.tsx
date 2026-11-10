@@ -36,6 +36,10 @@ import {
   NEAR_BLINDSPOT_LOOKBACK_DAYS,
   NEAR_BLINDSPOT_MIN_SHARE,
 } from "@/lib/clusters/near-blindspot-rule";
+import {
+  RECALL_MATCH_MIN_PROB,
+  RECALL_MATCH_NOTE,
+} from "@/lib/clusters/recall-matched-zones";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
 import { SIBLING_VETO } from "@/lib/clusters/sibling-veto";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
@@ -434,6 +438,9 @@ export default async function MethodologyPage() {
             {`Bu yüzden ${SIBLING_VETO.windowHours} saat içinde yayımlanmış oy veren kaynak (haber kuruluşu ya da ajans) haberleri arasında, başka bir kümede yer alanlar da hiçbir kümeye girmemiş olanlar da dahil, başlığı büyük ölçüde örtüşenler de aranır (kümeleyici yalnızca politika ve son dakika haberlerini aldığından, karşı tarafın dünya, genel ya da yaşam kategorisinde verdiği haber çoğu zaman hiçbir kümede değildir): iki başlığın kelime kökleri karşılaştırılır (${SIBLING_VETO.tokenMinLen} harften kısa kelimeler sayılmaz, kök = kelimenin ilk ${SIBLING_VETO.stemLen} harfi); ortak köklerin sayısı en az ${SIBLING_VETO.minShared} olmalı ve iki başlıktaki tüm köklerin (ortak olanlar bir kez sayılır) en az yarısını oluşturmalı.`}{" "}
             {`Ortak köklerin payı yarıdan azsa da en az %${looseJaccardPct} ise ve iki başlık, aranan haberlerin başlıklarının en çok %${rareSharePct}'inde geçen en az ${SIBLING_VETO.rareMinShared} seyrek kökü paylaşıyorsa (ortak köklerin sayısı yine en az ${SIBLING_VETO.looseMinShared} olmalı) haberler yine aynı olay sayılır.`}{" "}
             {`Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.`}
+          </p>
+          <p className={proseClass}>
+            {`Tayf'ın otomatik kontrolü (Jev, olasılık ≥ %${Math.round(RECALL_MATCH_MIN_PROB * 100)}) sessiz görünen taraftaki bir kaynağın aynı olayı başka bir kümede verdiğini bulursa, o taraf küme sayfasında “sessizlik” yerine “${RECALL_MATCH_NOTE}” diye gösterilir, kartlarda “Sadece X yazdı” yerine “Kümede sadece X” yazar ve “Bu listede kim yer vermedi?” özetine o taraf sayılmaz; kör nokta kuralı bu yüzden değişmez.`}
           </p>
           <h3
             id="besleme-sagligi"

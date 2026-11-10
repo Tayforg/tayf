@@ -68,8 +68,14 @@ vi.mock("@supabase/supabase-js", () => ({
 import { cacheLife } from "next/cache";
 
 const { fetchDailyPuzzleCached, getDailyPuzzle } = await import("./daily-query");
-const { DAILY_POLITICS_GATE_FROM, DAILY_TWIN_GATE_FROM, addDays, dailyHash, puzzleWindow } =
-  await import("./daily-set");
+const {
+  DAILY_POLITICS_GATE_FROM,
+  DAILY_TWIN_GATE_FROM,
+  DAILY_TWIN_KEY_V2_FROM,
+  addDays,
+  dailyHash,
+  puzzleWindow,
+} = await import("./daily-set");
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const DATE_KEY = "2026-10-05";
@@ -337,7 +343,7 @@ describe("daily puzzle — cross-zone twin gate", () => {
    * `TWIN_TEXT` (it is the first of its zone in hash order, so a pick that may
    * use it always does).
    */
-  function setup(key: string) {
+  function setup(key: string, candidateTitle: string = TWIN_TEXT) {
     const window = puzzleWindow(key);
     const hashFirst = [...IDS].sort((a, b) => dailyHash(key, a) - dailyHash(key, b))[0]!;
     const index = IDS.indexOf(hashFirst);
@@ -346,7 +352,7 @@ describe("daily puzzle — cross-zone twin gate", () => {
       articleRow(i, z, {
         published_at: window.startIso,
         created_at: window.startIso,
-        ...(i === index ? { title: TWIN_TEXT } : {}),
+        ...(i === index ? { title: candidateTitle } : {}),
       }),
     );
     fixture.predictionRows = IDS.map((article_id) => ({ article_id }));
@@ -563,6 +569,103 @@ describe("daily puzzle — cross-zone twin gate", () => {
     fixture.siblingError = { message: "boom" };
 
     expect(await build(preKey)).toHaveLength(5);
+  });
+
+  // The breaking-news lead-in (title-twin.ts, key version 2): "Son dakika... X" in
+  // one zone and a plain "X" in another are twins from DAILY_TWIN_KEY_V2_FROM on.
+  // Keys in [DAILY_TWIN_GATE_FROM, DAILY_TWIN_KEY_V2_FROM) were already served
+  // under the version 1 key and must recompute byte-identically.
+  describe("lead-in twin key by puzzle key (version 1 below DAILY_TWIN_KEY_V2_FROM, version 2 from it)", () => {
+    const LEAD_IN_KEY = DAILY_TWIN_KEY_V2_FROM;
+    const SERVED_KEY = addDays(DAILY_TWIN_KEY_V2_FROM, -1);
+    const LEAD_IN_TITLE = `Son dakika... ${TWIN_TEXT}`;
+
+    /** A plain copy of TWIN_TEXT from an outlet of another zone, inside the window. */
+    function plainCopy(s: ReturnType<typeof setup>) {
+      return [
+        member(s.clusterId, LEAD_IN_TITLE, ZONE_BIAS[s.zone], "outlet", s.during), // the candidate itself
+        member(s.clusterId, TWIN_TEXT, otherZoneBias(s.zone), "outlet", s.during),
+      ];
+    }
+
+    it("the version 2 key is a key no player has seen, between the twin gate and the lead-in key", () => {
+      expect(SERVED_KEY >= GATE_KEY).toBe(true);
+      expect(LEAD_IN_KEY > SERVED_KEY).toBe(true);
+    });
+
+    it("does NOT flag a 'Son dakika...' candidate against a plain copy for a key in [DAILY_TWIN_GATE_FROM, DAILY_TWIN_KEY_V2_FROM)", async () => {
+      for (const key of [GATE_KEY, SERVED_KEY]) {
+        const s = setup(key, LEAD_IN_TITLE);
+        fixture.siblingRows = plainCopy(s);
+
+        expect(await build(key), key).toContain(s.hashFirst);
+      }
+    });
+
+    it("flags the same candidate for a key >= DAILY_TWIN_KEY_V2_FROM", async () => {
+      for (const key of [LEAD_IN_KEY, addDays(LEAD_IN_KEY, 1), addDays(LEAD_IN_KEY, 30)]) {
+        const s = setup(key, LEAD_IN_TITLE);
+        fixture.siblingRows = plainCopy(s);
+
+        const picked = await build(key);
+
+        expect(picked, key).toHaveLength(5);
+        expect(picked, key).not.toContain(s.hashFirst);
+      }
+    });
+
+    it("flags a plain candidate whose twin is the 'SON DAKİKA…' copy of another zone, from DAILY_TWIN_KEY_V2_FROM on only", async () => {
+      const lead = "SON DAKİKA… " + TWIN_TEXT;
+      for (const [key, flagged] of [
+        [SERVED_KEY, false],
+        [LEAD_IN_KEY, true],
+      ] as const) {
+        const s = setup(key);
+        fixture.siblingRows = [
+          member(s.clusterId, TWIN_TEXT, ZONE_BIAS[s.zone], "outlet", s.during),
+          member(s.clusterId, lead, otherZoneBias(s.zone), "outlet", s.during),
+        ];
+
+        const picked = await build(key);
+
+        expect(picked.includes(s.hashFirst), key).toBe(!flagged);
+      }
+    });
+
+    it("keeps flagging what version 1 already flagged on both sides of the switch (a ':' lead-in, an identical text)", async () => {
+      for (const key of [GATE_KEY, SERVED_KEY, LEAD_IN_KEY]) {
+        const s = setup(key, `SON DAKİKA: ${TWIN_TEXT}`);
+        fixture.siblingRows = [
+          member(s.clusterId, TWIN_TEXT, otherZoneBias(s.zone), "outlet", s.during),
+        ];
+
+        expect(await build(key), key).not.toContain(s.hashFirst);
+      }
+    });
+
+    it("keeps a 'Son dakika...' candidate whose only copy is from its own zone, on both sides of the switch", async () => {
+      for (const key of [SERVED_KEY, LEAD_IN_KEY]) {
+        const s = setup(key, LEAD_IN_TITLE);
+        fixture.siblingRows = [
+          member(s.clusterId, LEAD_IN_TITLE, ZONE_BIAS[s.zone], "outlet", s.during),
+          member(s.clusterId, TWIN_TEXT, ZONE_BIAS[s.zone], "outlet", s.during),
+        ];
+
+        expect(await build(key), key).toContain(s.hashFirst);
+      }
+    });
+
+    it("keeps the cluster_articles read count unchanged by the version (ONE paged read per chunk on both sides)", async () => {
+      for (const key of [SERVED_KEY, LEAD_IN_KEY]) {
+        const s = setup(key, LEAD_IN_TITLE);
+        fixture.siblingRows = plainCopy(s);
+        fixture.siblingCalls = [];
+
+        await build(key);
+
+        expect(fixture.siblingCalls, key).toHaveLength(1);
+      }
+    });
   });
 });
 

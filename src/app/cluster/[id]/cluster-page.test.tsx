@@ -1519,6 +1519,105 @@ describe("ClusterDetailPage — framing comparison silence wording (h58-postship
 });
 
 // ---------------------------------------------------------------------------
+// h106-blindspotbadges-1: cluster 0746c9d2's Muhalefet column said "— bu tarafta
+// sessizlik —" although Tayf's own Jev recall stage had matched Yeniçağ and Elips
+// Haber (Muhalefet) with the same event, filed in another cluster. The detail
+// fetcher hands the page the zones Jev matched (recallMatchedZones); the page
+// passes them on as a set and the framing comparison words an EMPTY column Jev
+// matched as "bu kümede yok · benzer haber başka kümede olabilir". Words only.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — framing comparison, zones Jev matched (h106-blindspotbadges-1)", () => {
+  const MATCHED = "— bu kümede yok · benzer haber başka kümede olabilir —";
+  const PLAIN = "— bu tarafta sessizlik —";
+  const QUALIFIED = "— spektruma sayılan kaynaklardan haber yok —";
+
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+  function column(html: string, label: string): string {
+    const id = new RegExp(`<h3 id="([^"]+)"[^>]*>${label}</h3>`).exec(html)?.[1];
+    const open = id === undefined ? -1 : html.indexOf(`<section aria-labelledby="${id}"`);
+    if (open === -1) throw new Error(`no column ${label}`);
+    return html.slice(open, html.indexOf("</section>", open) + "</section>".length);
+  }
+
+  const outlets = Array.from({ length: 9 }, (_, i) =>
+    makeSource({ id: `s-gov-${i}`, slug: `s-gov-${i}`, name: `Gazete ${i}`, bias: "pro_government", kind: "outlet" }),
+  );
+  const isciHaber = makeSource({ id: "s-isci", slug: "isci-haber", name: "İşçi Haber", bias: "opposition", kind: "niche" });
+
+  async function framing(
+    sources: Source[],
+    recallMatchedZones?: ClusterDetail["recallMatchedZones"],
+  ): Promise<{ html: string; props: Record<string, unknown> }> {
+    const members = sources.map((s) => makeMember(`a-${s.id}`, s));
+    const distribution = emptyDistribution();
+    distribution.pro_government = 9;
+    getClusterDetail.mockResolvedValue({
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members,
+      allSources: sources,
+      wire: { isWireRedistribution: false, effectiveArticleCount: members.length, memberCount: members.length },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+      ...(recallMatchedZones === undefined ? {} : { recallMatchedZones }),
+    } satisfies ClusterDetail);
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, FramingComparison);
+    expect(el).not.toBeNull();
+    return {
+      html: renderToStaticMarkup(el as unknown as ReactElement),
+      props: (el as { props: Record<string, unknown> }).props,
+    };
+  }
+
+  it("a 0746c9d2-shaped cluster (9 İktidar, Muhalefet matched): the Muhalefet column carries the qualifier, Bağımsız keeps 'sessizlik'", async () => {
+    const { html } = await framing(outlets, ["muhalefet"]);
+
+    expect(column(html, "Muhalefet")).toContain(MATCHED);
+    expect(column(html, "Muhalefet")).not.toContain("sessizlik");
+    expect(column(html, "Bağımsız")).toContain(PLAIN);
+    expect(count(html, MATCHED)).toBe(1);
+    expect(count(html, PLAIN)).toBe(1);
+  });
+
+  it("passes the zones as a Set, and an empty Set when the detail has none", async () => {
+    const withZones = await framing(outlets, ["bagimsiz", "muhalefet"]);
+    expect(withZones.props.recallMatchedZones).toBeInstanceOf(Set);
+    expect([...(withZones.props.recallMatchedZones as Set<string>)].sort()).toEqual(["bagimsiz", "muhalefet"]);
+
+    const empty = await framing(outlets, []);
+    expect([...(empty.props.recallMatchedZones as Set<string>)]).toEqual([]);
+  });
+
+  it("a detail that predates the field (a cache entry written before the deploy) renders exactly as today", async () => {
+    const old = await framing(outlets);
+    const none = await framing(outlets, []);
+
+    expect([...(old.props.recallMatchedZones as Set<string>)]).toEqual([]);
+    expect(old.html).toBe(none.html);
+    expect(count(old.html, PLAIN)).toBe(2);
+    expect(old.html).not.toContain("benzer haber");
+  });
+
+  it("a zone a toplayıcı / niş source covered keeps the spectrum wording over the matched one", async () => {
+    const { html } = await framing([...outlets, isciHaber], ["bagimsiz", "muhalefet"]);
+
+    expect(column(html, "Muhalefet")).toContain(QUALIFIED);
+    expect(column(html, "Muhalefet")).not.toContain("benzer haber");
+    expect(column(html, "Bağımsız")).toContain(MATCHED);
+  });
+
+  it("changes no count: nine İktidar headlines, both other columns at 0 manşet", async () => {
+    const { html } = await framing(outlets, ["bagimsiz", "muhalefet"]);
+
+    expect(column(html, "İktidar")).toContain("9 manşet");
+    expect(column(html, "Bağımsız")).toContain("0 manşet");
+    expect(column(html, "Muhalefet")).toContain("0 manşet");
+    expect(html).toContain("9 kaynağın kendi manşetleri");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // h16-mobile-2: the header's meta + action row was one flex-wrap row of ~28 px
 // pills and 11 px links. It is now a wrapper of two display:contents groups:
 // from sm up `contents` makes it the same single flex row as before; below sm

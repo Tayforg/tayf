@@ -683,6 +683,57 @@ about 15 ms to a report. Rollback: the header of migration 150 (re-run only 145'
 `ops_health_report()` section, `drop table public.ops_cron_expected;`, delete ledger row
 150).
 
+## Kicked cluster-consumer runs (migration 190, h106-attachdesign-1)
+
+With the Edge secret `CLUSTER_KICK=on`, a cycle of `ingest` that inserted articles POSTs
+`{"trigger":"ingest"}` to `cluster-consumer` from `EdgeRuntime.waitUntil` after its response
+has been sent (the design is in `docs/migration-guide.md`, section 190). That request is a
+`fetch` made by the Edge runtime, not a `net.http_post` made by Postgres, so **a failed
+kicked run never reaches `net._http_response`**: rows 2 (`edge_http_errors_30m`) and 12 do
+not count it, and the table does not show it either. Where to look instead:
+
+- **The Edge Function logs of `ingest`**: one line per kicked cycle,
+  `[ingest] cluster kick {"status":200,"drained":N,"ms":...}` (a consumer that was busy or
+  found nothing adds `"busy":true` or `"empty":true` and a `"reason"`; those are 200s and
+  normal), and a warning for a failure: `[ingest] cluster kick answered HTTP 503 after ...`
+  or `[ingest] cluster kick failed after ... ms: ...` (a rejected fetch or the 45 s timeout).
+  The key and the headers are never in these lines.
+- **Sentry**, function tag `ingest`: every failed kick is captured (`cluster kick failed: ...`
+  or `cluster kick: the consumer answered HTTP <status>`). A `503` with
+  `lease-unavailable` in the consumer's answer means the lease RPC is missing or failing
+  (migration 190 not applied, or PostgREST's cache not reloaded): the kicked consumer fails
+  closed and reads nothing. The cron drain fails open on a missing RPC (it keeps working, so
+  nothing is lost, only the speed-up), but with `CLUSTER_KICK=on` it fails closed on any other
+  failing RPC too (see the next item).
+- **The Edge Function logs of `cluster-consumer`**: the `drain` line of a kicked run carries
+  `"trigger":"ingest"` and `"lease_wait_ms"`; `"lease_lost":true` means the lease expired
+  mid-drain and the reads stopped (it should never appear); `lease unavailable` and
+  `lease renewal failed` are warnings about the lease RPCs, with the error code. A cron run
+  that finds the lease held answers `{"ok":true,"busy":true,"reason":"lease"}` and reads
+  nothing: normal while a kicked drain runs, and it shows as a plain `200` in
+  `net._http_response` for `cluster-drain`.
+- **A `503 lease-unavailable` from a cron drain** (`cluster-drain`, `"reason":"lease-error"`,
+  the warning `lease unavailable while kicks are on, not draining`) is a real 5xx in
+  `net._http_response`, so it counts in row 2 (`edge_http_errors_30m`, warn at 2 or more in
+  30 min). It means the lease RPC is failing (a timeout or another error, not a missing
+  function) while `CLUSTER_KICK=on`: the cron drain reads nothing, because a kicked drain in
+  another isolate could be reading `cluster_work` at the same time, and the next minute
+  retries. A persistent one is cleared with `supabase secrets unset CLUSTER_KICK` or
+  `supabase secrets set CLUSTER_LEASE=off`.
+- **A skipped minute after a killed consumer.** A consumer killed mid-drain (a 546 CPU or
+  memory limit, row 2 records them) never reaches its `finally`, so it does not release the
+  lease. Every renewal is capped, so the lease row it leaves expires at most 55 s after its
+  drain started, before the next minute's cron drain starts; that drain then takes it over and
+  does not answer `busy`. A cron `busy` answer that repeats minute after minute is not this:
+  look for a live holder (`lease_lost`, the consumer's logs).
+- **Row 18 `queue_lag`** is unchanged and still the alarm for a consumer that does not drain:
+  a kicked run only makes the messages leave the queue sooner. If it warns, the kick is not the
+  first suspect; check the cron drain (row 19) and the consumer's logs.
+
+To stop the kicks without a deploy: `supabase secrets unset CLUSTER_KICK`. To make the cron
+drain exactly the pre-190 drain: `supabase secrets set CLUSTER_LEASE=off` (a kick then drains
+nothing).
+
 ## Twin bridges (147, shadow)
 
 Twin clusters are never repaired: `cluster_merge_log` has 0 rows ever and
