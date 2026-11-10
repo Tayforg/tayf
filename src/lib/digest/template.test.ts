@@ -24,6 +24,7 @@ const BLINDSPOT: DigestBlindspotItem = {
   dominantZone: "iktidar",
   dominantPct: 0.9,
   nonVotingOutside: 0,
+  recallMatchedCount: 0,
 };
 
 const BASE = {
@@ -148,6 +149,85 @@ describe("buildDigestHtml", () => {
       const qualified = buildDigestHtml({ ...BASE, blindspot: { ...blindspot, nonVotingOutside: 2 } });
       const plain = buildDigestHtml({ ...BASE, blindspot: { ...blindspot, nonVotingOutside: 0 } });
       expect(qualified.replace("Spektrumda sadece İktidar", "Sadece İktidar yazdı")).toBe(plain);
+    });
+  });
+
+  // h108-sharesurfaces-1: the Kör Nokta card said "Sadece İktidar yazdı" for cluster
+  // 0746c9d2 although Jev matched the silent Muhalefet side with the same event in
+  // another cluster; /blindspots says "Kümede sadece İktidar". The route hands the
+  // template the number of matched zones (BlindspotBundle.recallMatchedZones).
+  describe("blindspot line with zones Jev matched (h108-sharesurfaces-1)", () => {
+    const ONLY_IKTIDAR = dist({ pro_government: 5 });
+    const item = (over: Partial<DigestBlindspotItem>): DigestBlindspotItem => ({
+      ...BLINDSPOT,
+      biasDistribution: ONLY_IKTIDAR,
+      dominantPct: 1,
+      ...over,
+    });
+
+    it("prints 'Kümede sadece <Label>' for a 0746c9d2-shaped item, never 'yazdı'", () => {
+      const html = buildDigestHtml({ ...BASE, blindspot: item({ recallMatchedCount: 1 }) });
+      expect(html).toContain("Kümede sadece İktidar");
+      expect(html).not.toContain("Sadece İktidar yazdı");
+      expect(html).not.toMatch(/sadece \S+ yazdı/i);
+    });
+
+    it("one matched zone is enough, and so are two", () => {
+      for (const recallMatchedCount of [1, 2]) {
+        expect(buildDigestHtml({ ...BASE, blindspot: item({ recallMatchedCount }) })).toContain(
+          "Kümede sadece İktidar",
+        );
+      }
+    });
+
+    it("keeps 'Sadece <Label> yazdı' byte-identical with a count of 0 and with the field missing", () => {
+      const zero = buildDigestHtml({ ...BASE, blindspot: item({ recallMatchedCount: 0 }) });
+      expect(zero).toContain("Sadece İktidar yazdı");
+      expect(zero).not.toContain("Kümede sadece");
+      // A caller that predates the field (the type requires it; JS callers may omit it).
+      const { recallMatchedCount: _omitted, ...legacy } = item({});
+      void _omitted;
+      expect(buildDigestHtml({ ...BASE, blindspot: legacy as DigestBlindspotItem })).toBe(zero);
+    });
+
+    it("keeps the toplayıcı / niş qualifier ahead of it (precedence, as on /blindspots)", () => {
+      const html = buildDigestHtml({ ...BASE, blindspot: item({ nonVotingOutside: 2, recallMatchedCount: 1 }) });
+      expect(html).toContain("Spektrumda sadece İktidar");
+      expect(html).not.toContain("Kümede sadece");
+    });
+
+    it("leaves the %share line alone below 'only', whatever the count", () => {
+      for (const recallMatchedCount of [0, 2]) {
+        const html = buildDigestHtml({
+          ...BASE,
+          blindspot: { ...BLINDSPOT, recallMatchedCount },
+        });
+        expect(html).toContain("%90 İktidar");
+        expect(html).not.toContain("Kümede sadece");
+      }
+    });
+
+    it("leaves 250/1/0 on the %share line even with a match", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        blindspot: { ...BLINDSPOT, biasDistribution: dist({ pro_government: 250, center: 1 }), dominantPct: 250 / 251, recallMatchedCount: 1 },
+      });
+      expect(html).toContain("%100 İktidar");
+      expect(html).not.toContain("Kümede sadece");
+    });
+
+    it("uses the dominant zone's label for the other zones", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        blindspot: item({ biasDistribution: dist({ opposition: 4 }), dominantZone: "muhalefet", recallMatchedCount: 1 }),
+      });
+      expect(html).toContain("Kümede sadece Muhalefet");
+    });
+
+    it("changes only that line: the zone bar, the title and the link are the same with and without a match", () => {
+      const matched = buildDigestHtml({ ...BASE, blindspot: item({ recallMatchedCount: 1 }) });
+      const plain = buildDigestHtml({ ...BASE, blindspot: item({ recallMatchedCount: 0 }) });
+      expect(matched.replace("Kümede sadece İktidar", "Sadece İktidar yazdı")).toBe(plain);
     });
   });
 

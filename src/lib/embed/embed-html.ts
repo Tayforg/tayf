@@ -117,6 +117,10 @@ function ribbonOf(detail: ClusterDetail): string | null {
   // the DB flag fires from 80%). h57-outbound-1: when a toplayıcı / niş source
   // from another zone also carried the story, "yazdı" would be false, so the
   // ribbon says "spektrumda sadece X", as /blindspots does.
+  // h108-sharesurfaces-1: the same goes for a silent zone Jev's recall stage
+  // matched with this event (ClusterDetail.recallMatchedZones: a similar story
+  // sits in another cluster): "kümede sadece X", as /blindspots says it. A
+  // detail cached before the field existed has none (`?.length ?? 0`).
   const tally = tallyZones(cluster.bias_distribution);
   const zone: MediaDnaZone = cluster.blindspot_side
     ? zoneOf(cluster.blindspot_side)
@@ -125,12 +129,15 @@ function ribbonOf(detail: ClusterDetail): string | null {
     zoneCountsOf(cluster.bias_distribution),
     zone,
     nonVotingOutsideZone(uniqueSources(members), zone),
+    detail.recallMatchedZones?.length ?? 0,
   );
   return claim === "only"
     ? `Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
     : claim === "spectrumOnly"
       ? `Kör nokta: spektrumda sadece ${ZONE_LABEL_LOWER[zone]}`
-      : `Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
+      : claim === "clusterOnly"
+        ? `Kör nokta: kümede sadece ${ZONE_LABEL_LOWER[zone]}`
+        : `Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
 }
 
 export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedModel {

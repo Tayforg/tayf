@@ -48,14 +48,36 @@ export const CIRCUIT_BREAKER_DAY_LIMIT = 1000;
  */
 export const NOT_CIRCUIT_BREAKER_OR = `subject.is.null,subject.not.ilike.*${CIRCUIT_BREAKER_TEXT}*`;
 
+/** The subject of the notices KAP TEST A.Ş. (KTEST) files to exercise KAP itself. */
+export const TEST_NOTICE_TEXT = "Test Bildirimi";
+
 /**
- * The `.or()` argument for "this ticker's disclosures, circuit-breaker notices
- * excluded": (stock_codes has T OR related_stocks has T) AND (not a breaker).
- * Throws on anything that is not an upper-case 2-6 character code.
+ * h108-kapdisclosures-4: KAP's own "Test Bildirimi" rows (3-4 a month, the latest on a Saturday)
+ * are real disclosures, and with the breaker clause the only feed exclusion one stayed among the
+ * newest 40 until 40 later notices arrived, up to about 61 h over a weekend. `neq` is NULL for a
+ * NULL subject, so NULLs are kept explicitly, as in NOT_CIRCUIT_BREAKER_OR. The value has a space,
+ * so it is double-quoted inside the or() list (PostgREST reads a quoted value whole).
+ *
+ * Never a second `.or()` call: a kap_disclosures query chain has at most one (the guard in
+ * tests/guards/kap-related-stocks.test.ts), so this joins the one string through
+ * tickerDisclosureOr and FEED_DISCLOSURE_OR.
+ */
+export const NOT_TEST_NOTICE_OR = `subject.is.null,subject.neq."${TEST_NOTICE_TEXT}"`;
+
+/**
+ * The `.or()` argument for the all-ticker feed (/ekonomi's KAP panel): not a circuit-breaker
+ * notice AND not a test notice, as one logic tree.
+ */
+export const FEED_DISCLOSURE_OR = `and(or(${NOT_CIRCUIT_BREAKER_OR}),or(${NOT_TEST_NOTICE_OR}))`;
+
+/**
+ * The `.or()` argument for "this ticker's disclosures, circuit-breaker and test notices
+ * excluded": (stock_codes has T OR related_stocks has T) AND (not a breaker) AND (not a test
+ * notice). Throws on anything that is not an upper-case 2-6 character code.
  */
 export function tickerDisclosureOr(ticker: string): string {
   if (typeof ticker !== "string" || !TICKER_SHAPE.test(ticker)) {
     throw new Error(`[finance] tickerDisclosureOr: invalid ticker ${JSON.stringify(ticker)}`);
   }
-  return `and(or(stock_codes.cs.{${ticker}},related_stocks.cs.{${ticker}}),or(${NOT_CIRCUIT_BREAKER_OR}))`;
+  return `and(or(stock_codes.cs.{${ticker}},related_stocks.cs.{${ticker}}),or(${NOT_CIRCUIT_BREAKER_OR}),or(${NOT_TEST_NOTICE_OR}))`;
 }

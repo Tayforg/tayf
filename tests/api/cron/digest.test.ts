@@ -1271,6 +1271,75 @@ describe("blindspot item wording (h57-outbound-1)", () => {
   });
 });
 
+// h108-sharesurfaces-1: toBlindspotItem also hands the template how many silent
+// zones Jev's recall stage matched with the event (BlindspotBundle.recallMatchedZones),
+// so the mail says "Kümede sadece İktidar", the wording /blindspots uses.
+describe("blindspot item wording, zones Jev matched (h108-sharesurfaces-1)", () => {
+  const VOTING = [
+    { kind: "outlet", bias: "pro_government" },
+    { kind: "outlet", bias: "gov_leaning" },
+    { kind: "wire", bias: "pro_government" },
+  ];
+
+  async function sentHtml(
+    sources: Array<{ kind: string | null; bias: string }>,
+    recallMatchedZones: string[] | undefined,
+  ): Promise<string> {
+    process.env.CRON_SECRET = "shhh";
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+    ];
+    const { sendBatch } = await import("@/lib/email/resend");
+    (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+      list.map(() => ({ ok: true, id: "resend-id" })),
+    );
+    const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+    (getBlindspots as unknown as Mock).mockResolvedValueOnce({
+      bundles: [
+        {
+          cluster: {
+            id: "b1",
+            title_tr: "Tek taraflı haber",
+            summary_tr: "",
+            bias_distribution: {
+              pro_government: 2, gov_leaning: 1, state_media: 0, center: 0, opposition_leaning: 0,
+              opposition: 0, nationalist: 0, islamist_conservative: 0, pro_kurdish: 0, international: 0,
+            },
+          },
+          sources,
+          dominantZone: "iktidar",
+          dominantPct: 1,
+          ...(recallMatchedZones === undefined ? {} : { recallMatchedZones }),
+        },
+      ],
+    });
+    const mod = await importRoute();
+    const res = await mod.GET(req("shhh"));
+    expect(res.status).toBe(200);
+    return (sendBatch as unknown as Mock).mock.calls[0]![0][0].html as string;
+  }
+
+  it("prints 'Kümede sadece İktidar' when Jev matched the silent zone", async () => {
+    const html = await sentHtml(VOTING, ["muhalefet"]);
+    expect(html).toContain("Kümede sadece İktidar");
+    expect(html).not.toContain("Sadece İktidar yazdı");
+  });
+
+  it("keeps 'Sadece İktidar yazdı' with [] (a failed lookup) and with the field missing (an old cache entry)", async () => {
+    for (const zones of [[], undefined]) {
+      const html = await sentHtml(VOTING, zones);
+      expect(html).toContain("Sadece İktidar yazdı");
+      expect(html).not.toContain("Kümede sadece");
+    }
+  });
+
+  it("keeps 'Spektrumda sadece İktidar' when a non-voting outsider is also in the bundle", async () => {
+    const html = await sentHtml([...VOTING, { kind: "niche", bias: "opposition" }], ["bagimsiz"]);
+    expect(html).toContain("Spektrumda sadece İktidar");
+    expect(html).not.toContain("Kümede sadece");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // h87-newsletter-2: Resend allows 2 requests per second, so sendBatch paces its
 // sends and retries a 429 (src/lib/email/resend.test.ts). A send that still

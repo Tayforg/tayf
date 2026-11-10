@@ -9,6 +9,7 @@ import {
   pickupRowKind,
   relatedOnlyCountLabel,
   RELATED_ONLY_LABEL,
+  RELATED_ONLY_SHORT,
   relevanceKeys,
   summarizePickups,
   TICKER_RELEVANCE_MIN,
@@ -335,6 +336,109 @@ describe("computePickups: related-only notices carry no pickup numbers", () => {
   });
 });
 
+// h108-kapdisclosures-3: an original KAP later corrected (a DUZENLENEN twin) is flagged
+// `superseded` by the query layer. It is read, but it gets no row and counts nowhere, so the
+// same filing is not scored twice.
+describe("computePickups / summarizePickups: superseded originals", () => {
+  const original = disclosure({ disclosureIndex: 1, publishedAt: new Date(T).toISOString(), superseded: true });
+  const correction = disclosure({ disclosureIndex: 2, publishedAt: new Date(T + HOUR / 3).toISOString() });
+  const m = mention({ articleId: "a1", publishedAt: new Date(T + HOUR).toISOString(), createdAt: new Date(T + HOUR).toISOString() });
+  const NOW = T + 100 * HOUR;
+
+  it("the totals exclude it: one filing, one pick-up, instead of two", () => {
+    const withIt = summarizePickups(computePickups([original, correction], [m], sourcesMap(OUTLET_A), NOW));
+    const without = summarizePickups(computePickups([{ ...original, superseded: false }, correction], [m], sourcesMap(OUTLET_A), NOW));
+
+    expect(without).toMatchObject({ disclosures: 2, pickedUp: 2 });
+    expect(withIt).toMatchObject({ disclosures: 1, pickedUp: 1, relatedOnly: 0, pickupRate: 1 });
+  });
+
+  it("it has no row in the list, and the correction no longer overlaps it", () => {
+    const results = computePickups([original, correction], [m], sourcesMap(OUTLET_A), NOW);
+
+    expect(results.map((r) => r.disclosureIndex)).toEqual([2]);
+    expect(results[0]!.overlapping).toBe(0);
+  });
+
+  it("only a literal true counts: a missing flag is a normal row", () => {
+    const results = computePickups([disclosure({ disclosureIndex: 3 })], [], new Map(), NOW);
+    expect(results).toHaveLength(1);
+  });
+
+  it("a list of nothing but superseded rows summarises to no filings and no rate", () => {
+    const totals = summarizePickups(computePickups([original], [m], sourcesMap(OUTLET_A), NOW));
+    expect(totals).toMatchObject({ disclosures: 0, pickedUp: 0, pickupRate: null, relatedOnly: 0 });
+  });
+});
+
+// h109: the surviving correction is the same filing as its original, which was public from its own
+// time. `anchorAt` (the chain's earliest version) is where the 48-hour window starts, so a mention
+// between the original and the correction is still that filing's pickup. The row keeps the
+// correction's own time and link: it shows the current version.
+describe("computePickups: a corrected filing is anchored at its earliest version (anchorAt)", () => {
+  const original = disclosure({ disclosureIndex: 1, publishedAt: new Date(T).toISOString(), superseded: true });
+  const correction = disclosure({
+    disclosureIndex: 2,
+    publishedAt: new Date(T + 46 * HOUR).toISOString(),
+    anchorAt: new Date(T).toISOString(),
+  });
+  const at = (offsetMs: number, articleId = "a1") =>
+    mention({ articleId, publishedAt: new Date(T + offsetMs).toISOString(), createdAt: new Date(T + offsetMs).toISOString() });
+  const NOW = T + 200 * HOUR;
+
+  it("a mention between the original and its correction counts, with the lag measured from the original", () => {
+    const results = computePickups([original, correction], [at(HOUR)], sourcesMap(OUTLET_A), NOW);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ disclosureIndex: 2, articles: 1, outlets: 1, firstLagMinutes: 60 });
+  });
+
+  it("the row still shows and links the correction: its own time and its own KAP number", () => {
+    const [row] = computePickups([original, correction], [at(HOUR)], sourcesMap(OUTLET_A), NOW);
+
+    expect(row!.disclosedAt).toBe(new Date(T + 46 * HOUR).toISOString());
+    expect(row!.kapUrl).toBe("https://www.kap.org.tr/tr/Bildirim/2");
+  });
+
+  it("the window is T..T+48h from the anchor: a mention at T+49h does not count", () => {
+    const results = computePickups([original, correction], [at(49 * HOUR)], sourcesMap(OUTLET_A), NOW);
+
+    expect(results[0]).toMatchObject({ articles: 0, firstLagMinutes: null });
+    // T+48h is the open end, T+47h59 is inside.
+    expect(computePickups([original, correction], [at(48 * HOUR)], sourcesMap(OUTLET_A), NOW)[0]!.articles).toBe(0);
+    expect(computePickups([original, correction], [at(48 * HOUR - 60_000)], sourcesMap(OUTLET_A), NOW)[0]!.articles).toBe(1);
+  });
+
+  it("a mention before the original is still no pickup", () => {
+    expect(computePickups([original, correction], [at(-HOUR)], sourcesMap(OUTLET_A), NOW)[0]!.articles).toBe(0);
+  });
+
+  it("windowComplete follows the anchored window end (T+48h), not the correction's", () => {
+    const early = computePickups([original, correction], [], new Map(), T + 49 * HOUR)[0]!;
+    const open = computePickups([original, correction], [], new Map(), T + 47 * HOUR)[0]!;
+
+    expect(early.windowComplete).toBe(true);
+    expect(open.windowComplete).toBe(false);
+  });
+
+  it("overlapping is measured between anchors: a filing 30 h before the original overlaps the correction", () => {
+    const neighbour = disclosure({ disclosureIndex: 3, publishedAt: new Date(T - 30 * HOUR).toISOString() });
+    const results = computePickups([original, correction, neighbour], [], new Map(), NOW);
+
+    expect(results.find((r) => r.disclosureIndex === 2)!.overlapping).toBe(1);
+    expect(results.find((r) => r.disclosureIndex === 3)!.overlapping).toBe(1);
+  });
+
+  it("without an anchor (null or absent) the row windows from its own time, as before", () => {
+    const m = at(HOUR);
+    const plain = disclosure({ disclosureIndex: 2, publishedAt: new Date(T + 46 * HOUR).toISOString() });
+    expect(computePickups([plain], [m], sourcesMap(OUTLET_A), NOW)[0]!.articles).toBe(0);
+    expect(computePickups([{ ...plain, anchorAt: null }], [m], sourcesMap(OUTLET_A), NOW)[0]!.articles).toBe(0);
+    const inOwnWindow = at(47 * HOUR);
+    expect(computePickups([{ ...plain, anchorAt: null }], [inOwnWindow], sourcesMap(OUTLET_A), NOW)[0]).toMatchObject({ articles: 1, firstLagMinutes: 60 });
+  });
+});
+
 describe("summarizePickups: issuer filings only", () => {
   function row(overrides: Partial<DisclosurePickup> = {}): DisclosurePickup {
     return {
@@ -430,6 +534,13 @@ describe("summarizePickups: issuer filings only", () => {
 describe("panel formatting helpers (pure, so the server component needs no render test)", () => {
   it("RELATED_ONLY_LABEL is the one sentence the panel puts on a related-only row", () => {
     expect(RELATED_ONLY_LABEL).toBe("hisseyi anan bildirim · yankı hesaplanmaz");
+  });
+
+  // h108-kapdisclosures-1: the ticker page's KAP list marks a row it did not file with the same
+  // short phrase, so the two panels cannot drift apart.
+  it("RELATED_ONLY_SHORT is the short phrase, and RELATED_ONLY_LABEL is built from it", () => {
+    expect(RELATED_ONLY_SHORT).toBe("hisseyi anan bildirim");
+    expect(RELATED_ONLY_LABEL.startsWith(`${RELATED_ONLY_SHORT} · `)).toBe(true);
   });
 
   it("pickupRowKind: related-only wins over every other state, even with articles", () => {

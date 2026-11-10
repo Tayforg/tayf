@@ -41,6 +41,11 @@ const fixture = vi.hoisted(() => ({
   articleTickers: [] as Array<{ ticker: string; article_id: string; published_at: string; source_id: string }>,
   // Builder state of every article_tickers read (paging assertions).
   articleTickerStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
+  // h108-kapdisclosures-2: when set, a head:true COUNT read of article_tickers (a sibling code's
+  // mentions) resolves this error envelope; the paged row reads are unaffected.
+  articleTickerCountError: null as string | null,
+  // ... and only for this ticker's count when set (a single failing sibling).
+  articleTickerCountErrorOnly: null as string | null,
   // disclosure_coverage rows for fetchTickerPage / fetchLagHistogram, the
   // builder state of EVERY read (one per page), and an error switch.
   coverageRows: [] as Array<{ ticker: string; disclosure_index: number; lag_minutes: number; article_id: string }>,
@@ -126,6 +131,13 @@ const supabaseFake = await vi.hoisted(async () => {
               a.article_id.localeCompare(b.article_id) ||
               a.ticker.localeCompare(b.ticker),
           );
+        // A head:true / count:'exact' read: no rows, just the count PostgREST would report.
+        if ((s.selectArgs[1] as { head?: boolean } | undefined)?.head === true) {
+          if (fixture.articleTickerCountError && (!fixture.articleTickerCountErrorOnly || fixture.articleTickerCountErrorOnly === ticker)) {
+            return { data: null, error: { message: fixture.articleTickerCountError } };
+          }
+          return { data: null, error: null, count: rows.length };
+        }
         // Like PostgREST: a response never exceeds max_rows (1,000), whatever limit/range asks.
         const from = s.range ? s.range.from : 0;
         const asked = s.range ? s.range.to - s.range.from + 1 : (s.limit ?? rows.length);
@@ -219,6 +231,7 @@ vi.mock("@supabase/supabase-js", () => ({
 import { cacheLife, cacheTag } from "next/cache";
 import { fmtKat, istToday } from "./format";
 import {
+  AGENCY_FILED_SUBJECTS,
   bucketLags,
   coverageStats,
   fetchCircuitBreakers,
@@ -235,13 +248,14 @@ import {
   fetchTopTickers,
   filterCoverageRows,
   haltNoticeToShow,
+  isAgencyFiled,
   latestTradingHalt,
   rankAttention,
   recentWindowDays,
   toFeedItem,
   type Disclosure,
 } from "./queries";
-import { tickerDisclosureOr } from "./disclosure-filter";
+import { FEED_DISCLOSURE_OR, NOT_TEST_NOTICE_OR, tickerDisclosureOr } from "./disclosure-filter";
 import { PICKUP_WINDOW_HOURS } from "./kap-pickup";
 import { relevanceKey } from "./ticker-relevance";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
@@ -263,6 +277,8 @@ beforeEach(() => {
   fixture.kapFetchStateRow = undefined;
   fixture.articleTickers = [];
   fixture.articleTickerStates = [];
+  fixture.articleTickerCountError = null;
+  fixture.articleTickerCountErrorOnly = null;
   fixture.coverageRows = [];
   fixture.coverageStates = [];
   fixture.coverageError = null;
@@ -1116,6 +1132,229 @@ describe("finance query transforms", () => {
       expect(d?.subject).toBe("Devre Kesici");
     });
   });
+
+  // h108-kapdisclosures-1: KAP rows say who filed. A rating agency files "Kredi
+  // Derecelendirmesi" under its own code (TRATE, JCRAV) for a company it rated; the
+  // rated company is in related_stocks. The chips must be the rated company, the
+  // agency stays in filerCodes. Every other row keeps its chips.
+  describe("isAgencyFiled / toDisclosure: who filed (h108-kapdisclosures-1)", () => {
+    const row = (over: Record<string, unknown>) => ({
+      disclosure_index: 1696754,
+      published_at: "2026-11-10T17:58:00Z",
+      kap_title: "İSTANBUL ULUSLARARASI DERECELENDİRME HİZMETLERİ A.Ş.",
+      stock_codes: ["TRATE"],
+      related_stocks: ["DNYVA"],
+      subject: "Kredi Derecelendirmesi",
+      summary: "Kredi Derecelendirme Notunun Askıya Alınması",
+      disclosure_class: "ODA",
+      ...over,
+    });
+
+    it("AGENCY_FILED_SUBJECTS names the two rating subjects", () => {
+      expect([...AGENCY_FILED_SUBJECTS].sort()).toEqual([
+        "Kredi Derecelendirmesi",
+        "Kurumsal Yönetim İlkelerine Uyum Derecelendirmesi",
+      ]);
+    });
+
+    it("isAgencyFiled: a rating subject, related_stocks set, and no code in both columns", () => {
+      expect(isAgencyFiled(row({}))).toBe(true);
+      expect(isAgencyFiled(row({ subject: "Kurumsal Yönetim İlkelerine Uyum Derecelendirmesi" }))).toBe(true);
+    });
+
+    it("isAgencyFiled: false for a company's own rating (no related_stocks), another subject, an overlap or null columns", () => {
+      expect(isAgencyFiled(row({ stock_codes: ["ZOREN"], related_stocks: [] }))).toBe(false);
+      expect(isAgencyFiled(row({ stock_codes: ["ZOREN"], related_stocks: null }))).toBe(false);
+      expect(isAgencyFiled(row({ subject: "Pay Alım Satım Bildirimi" }))).toBe(false);
+      expect(isAgencyFiled(row({ subject: null }))).toBe(false);
+      // The company named itself in both columns: its own filing.
+      expect(isAgencyFiled(row({ stock_codes: ["ZOREN", "TRATE"], related_stocks: ["ZOREN"] }))).toBe(false);
+    });
+
+    it("isAgencyFiled: a rating row with no stock_codes at all still is (nobody rated itself); the chips are related_stocks either way", () => {
+      expect(isAgencyFiled(row({ stock_codes: null }))).toBe(true);
+      expect(isAgencyFiled(row({ stock_codes: [] }))).toBe(true);
+    });
+
+    it("a 1696754-shaped row shows the RATED company: stockCodes DNYVA, filerCodes TRATE, agencyFiled", async () => {
+      fixture.kapDisclosures = [row({})];
+      const [d] = await fetchRecentDisclosures(10);
+      expect(d?.stockCodes).toEqual(["DNYVA"]);
+      expect(d?.filerCodes).toEqual(["TRATE"]);
+      expect(d?.relatedCodes).toEqual(["DNYVA"]);
+      expect(d?.agencyFiled).toBe(true);
+      expect(d?.kapTitle).toBe("İSTANBUL ULUSLARARASI DERECELENDİRME HİZMETLERİ A.Ş.");
+    });
+
+    it("a company's own rating is unchanged: stockCodes ZOREN, nothing related, not agency-filed", async () => {
+      fixture.kapDisclosures = [row({ stock_codes: ["ZOREN"], related_stocks: [], kap_title: "ZORLU ENERJİ A.Ş." })];
+      const [d] = await fetchRecentDisclosures(10);
+      expect(d?.stockCodes).toEqual(["ZOREN"]);
+      expect(d?.filerCodes).toEqual(["ZOREN"]);
+      expect(d?.relatedCodes).toEqual([]);
+      expect(d?.agencyFiled).toBe(false);
+    });
+
+    it("a Takasbank-shaped row (no stock_codes, related X) is unchanged: chips from related_stocks, not agency-filed", async () => {
+      fixture.kapDisclosures = [
+        row({ stock_codes: [], related_stocks: ["X"], kap_title: "TAKASBANK", subject: "Temerrüt İşlemi" }),
+      ];
+      const [d] = await fetchRecentDisclosures(10);
+      expect(d?.stockCodes).toEqual(["X"]);
+      expect(d?.filerCodes).toEqual([]);
+      expect(d?.relatedCodes).toEqual(["X"]);
+      expect(d?.agencyFiled).toBe(false);
+    });
+
+    it("a 1696723-shaped row keeps the FILER's chip (NTHOL) and carries the share it names (MERIT) in relatedCodes", async () => {
+      fixture.kapDisclosures = [
+        row({
+          disclosure_index: 1696723,
+          kap_title: "NET HOLDİNG A.Ş.",
+          stock_codes: ["NTHOL"],
+          related_stocks: ["MERIT"],
+          subject: "Pay Alım Satım Bildirimi",
+          summary: "Şirketimizin MERİT paylarının alışı hk.",
+        }),
+      ];
+      const [d] = await fetchRecentDisclosures(10);
+      expect(d?.stockCodes).toEqual(["NTHOL"]);
+      expect(d?.filerCodes).toEqual(["NTHOL"]);
+      expect(d?.relatedCodes).toEqual(["MERIT"]);
+      expect(d?.agencyFiled).toBe(false);
+    });
+
+    it("missing columns (the narrow circuit-breaker select) read as empty arrays", async () => {
+      fixture.kapDisclosures = [{ disclosure_index: 5, published_at: "2026-11-10T08:00:00Z", kap_title: null, stock_codes: null, subject: "Devre Kesici", disclosure_class: null }];
+      const [d] = await fetchCircuitBreakers();
+      expect(d?.filerCodes).toEqual([]);
+      expect(d?.relatedCodes).toEqual([]);
+      expect(d?.agencyFiled).toBe(false);
+    });
+
+    it("the coverage panel's input stays keyed on stock_codes: an agency-filed row is nobody's own filing on the rated page", async () => {
+      fixture.bistCompanies = [{ tickers: ["DNYVA"], title: "DENİZ YATIRIM", shares_traded: true }];
+      fixture.kapDisclosures = [row({})];
+      fixture.coverageRows = [{ ticker: "DNYVA", disclosure_index: 1696754, lag_minutes: 30, article_id: "a1" }];
+      const page = await fetchTickerPage("DNYVA");
+      expect(page.disclosures.map((d) => d.disclosureIndex)).toEqual([1696754]);
+      expect(page.coverage.disclosures).toBe(0);
+      expect(fixture.coverageStates).toHaveLength(0);
+    });
+  });
+});
+
+// h109: KAP files a correction as a new disclosure (kap-corrections.ts). The filing was public from
+// its ORIGINAL, so the "KAP ile basın arası" read counts the earliest version of a chain and leaves the
+// later versions out: disclosure_coverage.lag_minutes is relative to each index's own published_at, so the
+// event starts at the original and a story between the two is coverage, not "ön ilgi".
+describe("h109: fetchTickerPage anchors a corrected filing's coverage at its original", () => {
+  const NOW = "2026-11-10T12:00:00Z";
+  const HOUR_MS = 3_600_000;
+  const filing = (over: Record<string, unknown>) => ({
+    disclosure_index: 1694030,
+    published_at: "2026-11-06T15:10:24+00:00",
+    kap_title: "OTTO HOLDİNG A.Ş.",
+    stock_codes: ["OTTO"],
+    related_stocks: [] as string[],
+    subject: "Sorumluluk Beyanı (Konsolide)",
+    summary: "Otto Holding A.Ş. 3. Aylık Finansal Durum Raporu Ve Ekleri Sorumluluk Beyanı",
+    disclosure_class: "FR",
+    modify_status: null as string | null,
+    year: "2026",
+    period: "3",
+    rule_type: "9 Aylık",
+    ...over,
+  });
+  const cov = (disclosure_index: number, lag_minutes: number, article_id: string) => ({ ticker: "OTTO", disclosure_index, lag_minutes, article_id });
+  const sentIndexes = () => fixture.coverageStates.flatMap((st) => st.in.filter((i) => i.col === "disclosure_index").flatMap((i) => i.vals as number[]));
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  it("the OTTO pair 38 minutes apart: the coverage .in() holds the original, not the correction", async () => {
+    fixture.kapDisclosures = [
+      filing({ disclosure_index: 1694331, published_at: "2026-11-06T15:48:38+00:00", modify_status: "DUZENLENEN" }),
+      filing({ disclosure_index: 1694030, modify_status: "DUZELTILEN" }),
+    ];
+    fixture.coverageRows = [cov(1694030, 10, "a1"), cov(1694331, -28, "a1")];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(sentIndexes()).toEqual([1694030]);
+    expect(page.coverage).toEqual({ disclosures: 1, events: 1, covered: 1, medianLagMinutes: 10, pressAhead: 0 });
+    // Both versions are still listed.
+    expect(page.disclosures.map((d) => d.disclosureIndex)).toEqual([1694331, 1694030]);
+  });
+
+  it("an original KAP never flagged DUZELTILEN is found by its twin and counted all the same", async () => {
+    fixture.kapDisclosures = [
+      filing({ disclosure_index: 1694331, published_at: "2026-11-06T15:48:38+00:00", modify_status: "DUZENLENEN" }),
+      filing({ disclosure_index: 1694030 }),
+    ];
+    fixture.coverageRows = [cov(1694030, 10, "a1")];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(sentIndexes()).toEqual([1694030]);
+    expect(page.coverage).toMatchObject({ disclosures: 1, events: 1, covered: 1, pressAhead: 0 });
+  });
+
+  it("a story between the original and a correction 46 h later is coverage, not 'olağandışı ön ilgi'", async () => {
+    fixture.kapDisclosures = [
+      filing({ disclosure_index: 1694263, published_at: new Date(Date.parse("2026-11-06T15:10:24Z") + 46 * HOUR_MS).toISOString(), modify_status: "DUZENLENEN" }),
+      filing({ disclosure_index: 1692808 }),
+    ];
+    // Two stories 30 h after the original: 16 h BEFORE the correction, which is what used to read as pre-event interest.
+    fixture.coverageRows = [cov(1692808, 1800, "a1"), cov(1692808, 1810, "a2")];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(sentIndexes()).toEqual([1692808]);
+    expect(page.coverage).toEqual({ disclosures: 1, events: 1, covered: 1, medianLagMinutes: 1800, pressAhead: 0 });
+  });
+
+  it("a chain 1 <- 2 <- 3 counts only its first version", async () => {
+    const at = (h: number) => new Date(Date.parse("2026-11-06T15:10:24Z") + h * HOUR_MS).toISOString();
+    fixture.kapDisclosures = [
+      filing({ disclosure_index: 3, published_at: at(30), modify_status: "DUZENLENEN" }),
+      filing({ disclosure_index: 2, published_at: at(10), modify_status: "DUZENLENEN" }),
+      filing({ disclosure_index: 1, published_at: at(0) }),
+    ];
+    fixture.coverageRows = [cov(1, 120, "a1")];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(sentIndexes()).toEqual([1]);
+    expect(page.coverage).toMatchObject({ disclosures: 1, events: 1, covered: 1, medianLagMinutes: 120 });
+  });
+
+  it("a DUZELTILEN row no correction claimed is still left out of the coverage read", async () => {
+    fixture.kapDisclosures = [filing({ disclosure_index: 7, modify_status: "DUZELTILEN" })];
+    fixture.coverageRows = [cov(7, 10, "a1")];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(fixture.coverageStates).toHaveLength(0);
+    expect(page.coverage.disclosures).toBe(0);
+  });
+
+  it("a recurring daily notice with one correction counts each of the eight days once, and not the correction", async () => {
+    const TABGD = { stock_codes: ["TABGD"], subject: "Payların Geri Alınmasına İlişkin Bildirim", summary: "Pay Geri Alım İşlemleri", year: null, period: null, rule_type: null };
+    const day = (i: number) => new Date(Date.parse("2026-11-01T14:00:00Z") + i * 24 * HOUR_MS).toISOString();
+    fixture.kapDisclosures = [
+      filing({ ...TABGD, disclosure_index: 100, published_at: day(8), modify_status: "DUZENLENEN" }),
+      ...Array.from({ length: 8 }, (_, i) => filing({ ...TABGD, disclosure_index: 8 - i, published_at: day(7 - i) })),
+    ];
+
+    await fetchTickerPage("TABGD");
+
+    // The correction (100) claimed the newest day (index 8): that day is counted as the chain's first version,
+    // the correction is not, and the seven days before it are untouched (they used to be dropped with it).
+    expect(sentIndexes().sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
 });
 
 describe("finance query fetchers (live Supabase shape)", () => {
@@ -1138,9 +1377,16 @@ describe("finance query fetchers (live Supabase shape)", () => {
         publishedAt: "2026-09-13T08:00:00Z",
         kapTitle: "ÖRNEK A.Ş.",
         stockCodes: ["ASELS"],
+        filerCodes: ["ASELS"],
+        relatedCodes: [],
+        agencyFiled: false,
         subject: null,
         summary: null,
         disclosureClass: null,
+        modifyStatus: null,
+        year: null,
+        period: null,
+        ruleType: null,
       },
     ]);
   });
@@ -1215,18 +1461,32 @@ describe("finance query fetchers (live Supabase shape)", () => {
           publishedAt: "2026-11-06T07:00:03Z",
           kapTitle: "KAPLM",
           stockCodes: ["KAPLM"],
+          filerCodes: ["KAPLM"],
+          relatedCodes: [],
+          agencyFiled: false,
           subject: "Devre Kesici",
           summary: null,
           disclosureClass: null,
+          modifyStatus: null,
+          year: null,
+          period: null,
+          ruleType: null,
         },
         {
           disclosureIndex: 1693002,
           publishedAt: "2026-11-06T07:01:00Z",
           kapTitle: "BORSA İSTANBUL A.Ş.",
           stockCodes: ["VANGD"],
+          filerCodes: [],
+          relatedCodes: ["VANGD"],
+          agencyFiled: false,
           subject: "Devre Kesici",
           summary: null,
           disclosureClass: null,
+          modifyStatus: null,
+          year: null,
+          period: null,
+          ruleType: null,
         },
       ]);
     });
@@ -1918,7 +2178,7 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
     const state = fixture.lastKapState as BuilderState;
     expect(state.or).toEqual([tickerDisclosureOr("TURSG")]);
     expect(state.or).toEqual([
-      "and(or(stock_codes.cs.{TURSG},related_stocks.cs.{TURSG}),or(subject.is.null,subject.not.ilike.*Devre Kesici*))",
+      'and(or(stock_codes.cs.{TURSG},related_stocks.cs.{TURSG}),or(subject.is.null,subject.not.ilike.*Devre Kesici*),or(subject.is.null,subject.neq."Test Bildirimi"))',
     ]);
     // The old `.contains("stock_codes", [T])` never saw related_stocks-only notices.
     expect(state.contains).toEqual([]);
@@ -1927,10 +2187,11 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
     expect(state.gte).toEqual([{ col: "published_at", val: new Date(Date.parse(NOW) - 30 * 86400_000).toISOString() }]);
   });
 
-  it("fetchRecentDisclosures without a ticker keeps the plain breaker or() (one definition for the feed)", async () => {
+  it("fetchRecentDisclosures without a ticker sends ONE or(): not a breaker and not a test notice (one definition for the feed)", async () => {
     await fetchRecentDisclosures(10);
     const state = fixture.lastKapState as BuilderState;
-    expect(state.or).toEqual([NO_BREAKER_FILTER]);
+    expect(state.or).toEqual([FEED_DISCLOSURE_OR]);
+    expect(state.or).toEqual([`and(or(${NO_BREAKER_FILTER}),or(${NOT_TEST_NOTICE_OR}))`]);
     expect(state.contains).toEqual([]);
   });
 
@@ -2589,5 +2850,270 @@ describe("cached-failure-sweep: input normalisation and short-circuits live in t
       // stored 2.00 would have lit the amber class; the true 1.996 does not.
       expect(r.EDGE!.rvol!).toBeLessThan(2);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-3: KAP files a correction (modify_status DUZENLENEN) as a NEW
+// disclosure with the same subject and summary. The page still lists both, but the
+// coverage section ("bildirim N", events) counts the filing once. h109: it counts the
+// ORIGINAL (the chain's earliest version, which is where the filing first appeared); the
+// correction leaves issuerDisclosureIndexes, so it is neither counted nor asked of
+// disclosure_coverage.
+// ---------------------------------------------------------------------------
+describe("h108-kapdisclosures-3: fetchTickerPage and a corrected filing", () => {
+  const OTTO = {
+    kap_title: "OTTO HOLDİNG A.Ş.",
+    stock_codes: ["OTTO"],
+    related_stocks: [] as string[],
+    subject: "Sorumluluk Beyanı (Konsolide)",
+    summary: "Otto Holding A.Ş. 3. Aylık Finansal Durum Raporu Ve Ekleri Sorumluluk Beyanı",
+    disclosure_class: "FR",
+    year: "2026",
+    period: "3",
+    rule_type: "9 Aylık",
+  };
+  const ORIGINAL = { ...OTTO, disclosure_index: 1694030, published_at: "2026-11-06T15:10:24+00:00", modify_status: "DUZELTILEN" };
+  const CORRECTION = { ...OTTO, disclosure_index: 1694331, published_at: "2026-11-06T15:48:38+00:00", modify_status: "DUZENLENEN" };
+  const coverageFor = (index: number, articleId: string) => ({ ticker: "OTTO", disclosure_index: index, lag_minutes: 30, article_id: articleId });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-10T12:00:00Z"));
+  });
+
+  it("DISCLOSURE_SELECT carries modify_status, year, period and rule_type", async () => {
+    await fetchRecentDisclosures(10);
+    const cols = String((fixture.lastKapState as BuilderState).selectArgs[0]).split(",");
+    expect(cols).toEqual(expect.arrayContaining(["modify_status", "year", "period", "rule_type"]));
+  });
+
+  it("a Disclosure carries modifyStatus, year, period and ruleType (null when the column is absent)", async () => {
+    fixture.kapDisclosures = [CORRECTION, { ...OTTO, disclosure_index: 5, published_at: "2026-11-05T10:00:00Z" }];
+    const [a, b] = await fetchRecentDisclosures(10);
+    expect(a).toMatchObject({ modifyStatus: "DUZENLENEN", year: "2026", period: "3", ruleType: "9 Aylık" });
+    expect(b).toMatchObject({ modifyStatus: null, year: "2026", period: "3", ruleType: "9 Aylık" });
+
+    fixture.kapDisclosures = [{ disclosure_index: 9, published_at: "2026-11-05T10:00:00Z", kap_title: null, stock_codes: ["X"], subject: "Devre Kesici", disclosure_class: null }];
+    const [narrow] = await fetchCircuitBreakers();
+    expect(narrow).toMatchObject({ modifyStatus: null, year: null, period: null, ruleType: null });
+  });
+
+  it("lists both, but counts the filing once, at its original: the coverage view is asked for 1694030, never for the correction", async () => {
+    fixture.kapDisclosures = [CORRECTION, ORIGINAL];
+    fixture.coverageRows = [coverageFor(1694030, "a1"), coverageFor(1694331, "a1"), coverageFor(1694331, "a2")];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(page.disclosures.map((d) => d.disclosureIndex)).toEqual([1694331, 1694030]);
+    expect(page.coverage.disclosures).toBe(1);
+    expect(page.coverage.events).toBe(1);
+    expect(page.coverage.covered).toBe(1);
+    const indexes = fixture.coverageStates.flatMap((s) => s.in.filter((i) => i.col === "disclosure_index").map((i) => i.vals));
+    expect(indexes).toEqual([[1694030]]);
+  });
+
+  it("finds an unflagged original (the ATEKS case) by its twin", async () => {
+    fixture.kapDisclosures = [CORRECTION, { ...ORIGINAL, modify_status: null }];
+    fixture.coverageRows = [coverageFor(1694030, "a1")];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(page.coverage.disclosures).toBe(1);
+  });
+
+  it("two plain filings of one issuer stay two", async () => {
+    fixture.kapDisclosures = [
+      { ...OTTO, disclosure_index: 2, published_at: "2026-11-06T15:48:38+00:00", modify_status: null },
+      { ...OTTO, disclosure_index: 1, published_at: "2026-11-06T15:10:24+00:00", modify_status: null },
+    ];
+    fixture.coverageRows = [coverageFor(1, "a1")];
+
+    expect((await fetchTickerPage("OTTO")).coverage.disclosures).toBe(2);
+  });
+
+  it("a page whose only own filing is a lone DUZELTILEN original reads no coverage at all", async () => {
+    fixture.kapDisclosures = [ORIGINAL];
+
+    const page = await fetchTickerPage("OTTO");
+
+    expect(page.disclosures).toHaveLength(1);
+    expect(page.coverage.disclosures).toBe(0);
+    expect(fixture.coverageStates).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-2: bist_companies holds ONE row per company with every code it trades
+// under ({ISATR,ISBTR,ISCTR,ISKUR,TIB}), and KAP fans a filing out to every code. Press is
+// matched to one of them (ISCTR), so the others' pages (ISATR, indexable) printed
+// "haberi çıkan 0 (%0)" for filings the main code shows at 100 %. fetchTickerPage now
+// says which sibling carries the press: `pressCode`, only when the page ticker has no
+// mention of its own in the 30-day window and a sibling does.
+// ---------------------------------------------------------------------------
+describe("h108-kapdisclosures-2: fetchTickerPage pressCode", () => {
+  const IS_BANK = { tickers: ["ISATR", "ISBTR", "ISCTR", "ISKUR", "TIB"], title: "TÜRKİYE İŞ BANKASI A.Ş.", shares_traded: true };
+  const mentions = (ticker: string, n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      ticker,
+      article_id: `${ticker}-${String(i).padStart(4, "0")}`,
+      published_at: "2026-11-09T10:00:00Z",
+      source_id: "s1",
+    }));
+  /** The head:true count reads of article_tickers, by the ticker they asked for. */
+  const countReads = () =>
+    fixture.articleTickerStates
+      .filter((s) => (s.selectArgs[1] as { head?: boolean } | undefined)?.head === true)
+      .map((s) => s.eq.find((e) => e.col === "ticker")?.val);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-10T12:00:00Z"));
+  });
+
+  it("ISATR with 0 own mentions and ISCTR 207 names ISCTR", async () => {
+    fixture.bistCompanies = [IS_BANK];
+    fixture.articleTickers = mentions("ISCTR", 207);
+
+    const page = await fetchTickerPage("ISATR");
+
+    expect(page.pressCode).toBe("ISCTR");
+  });
+
+  it("ISCTR itself has its mentions: null, and no sibling is counted", async () => {
+    fixture.bistCompanies = [IS_BANK];
+    fixture.articleTickers = mentions("ISCTR", 207);
+
+    const page = await fetchTickerPage("ISCTR");
+
+    expect(page.pressCode).toBeNull();
+    expect(countReads()).toEqual([]);
+  });
+
+  it("KRDMA with its own mentions is null, whatever its siblings hold", async () => {
+    fixture.bistCompanies = [{ tickers: ["KRDMA", "KRDMB", "KRDMD"], title: "KARDEMİR A.Ş.", shares_traded: true }];
+    fixture.articleTickers = [...mentions("KRDMA", 3), ...mentions("KRDMD", 40)];
+
+    expect((await fetchTickerPage("KRDMA")).pressCode).toBeNull();
+    expect(countReads()).toEqual([]);
+  });
+
+  it("picks the sibling with the most mentions, ties broken alphabetically", async () => {
+    fixture.bistCompanies = [IS_BANK];
+    fixture.articleTickers = [...mentions("ISCTR", 9), ...mentions("ISBTR", 3), ...mentions("TIB", 9)];
+
+    expect((await fetchTickerPage("ISATR")).pressCode).toBe("ISCTR");
+
+    fixture.articleTickers = [...mentions("TIB", 4), ...mentions("ISKUR", 4), ...mentions("ISBTR", 4)];
+    expect((await fetchTickerPage("ISATR")).pressCode).toBe("ISBTR");
+  });
+
+  it("counts each sibling once, over the same 30-day window as the attention read, never the page ticker", async () => {
+    fixture.bistCompanies = [IS_BANK];
+    fixture.articleTickers = mentions("ISCTR", 2);
+
+    await fetchTickerPage("ISATR");
+
+    expect(countReads().sort()).toEqual(["ISBTR", "ISCTR", "ISKUR", "TIB"]);
+    const attention = fixture.articleTickerStates.find(
+      (s) => (s.selectArgs[1] as { head?: boolean } | undefined)?.head !== true && s.eq.some((e) => e.col === "ticker" && e.val === "ISATR"),
+    )!;
+    const since = attention.gte.find((g) => g.col === "published_at")!.val;
+    for (const read of fixture.articleTickerStates.filter((s) => (s.selectArgs[1] as { head?: boolean } | undefined)?.head === true)) {
+      expect(read.selectArgs[1]).toEqual({ count: "exact", head: true });
+      expect(read.gte.find((g) => g.col === "published_at")!.val).toBe(since);
+    }
+  });
+
+  it("a company with one code, no company row, or siblings without press: null, and no wasted reads", async () => {
+    fixture.bistCompanies = [{ tickers: ["THYAO"], title: "TÜRK HAVA YOLLARI A.O.", shares_traded: true }];
+    expect((await fetchTickerPage("THYAO")).pressCode).toBeNull();
+    expect(countReads()).toEqual([]);
+
+    fixture.bistCompanies = [];
+    expect((await fetchTickerPage("ZZZZZ")).pressCode).toBeNull();
+    expect(countReads()).toEqual([]);
+
+    fixture.bistCompanies = [IS_BANK];
+    fixture.articleTickers = [];
+    expect((await fetchTickerPage("ISATR")).pressCode).toBeNull();
+  });
+
+  it("a sibling count error fails open to null and warns, and the page still renders", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fixture.bistCompanies = [IS_BANK];
+    fixture.articleTickers = mentions("ISCTR", 207);
+    fixture.articleTickerCountError = "canceling statement due to statement timeout";
+
+    const page = await fetchTickerPage("ISATR");
+
+    expect(page.pressCode).toBeNull();
+    expect(page.company?.title).toBe("TÜRKİYE İŞ BANKASI A.Ş.");
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("fetchTickerPage press code ISATR"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("one failing sibling read fails the whole answer open: null, not a guess from the others", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fixture.bistCompanies = [IS_BANK];
+    // TIB's count fails while ISBTR's answers: a partial answer could name the wrong sibling
+    // (TIB may hold more), so a failed sibling read means no pressCode at all.
+    fixture.articleTickers = mentions("ISBTR", 5);
+    fixture.articleTickerCountError = "boom";
+    fixture.articleTickerCountErrorOnly = "TIB";
+
+    expect((await fetchTickerPage("ISATR")).pressCode).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-4: KAP's own "Test Bildirimi" notices (KTEST) are real rows. Every reader
+// that lists or counts a ticker's or the market's disclosures sends the shared exclusion, inside
+// its ONE or() (a second chained .or() on one kap_disclosures query is banned by
+// tests/guards/kap-related-stocks.test.ts). The circuit-breaker strip needs none: it reads only
+// breaker notices.
+// ---------------------------------------------------------------------------
+describe("h108-kapdisclosures-4: readers leave KAP's test notices out", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-10T12:00:00Z"));
+  });
+
+  const orsOf = (s: BuilderState) => s.or;
+
+  it("the all-ticker feed sends the test-notice filter", async () => {
+    await fetchRecentDisclosures(40);
+    const ors = orsOf(fixture.lastKapState as BuilderState);
+    expect(ors).toHaveLength(1);
+    expect(ors[0]).toContain(NOT_TEST_NOTICE_OR);
+  });
+
+  it("the per-ticker list of fetchRecentDisclosures sends it, beside the breaker exclusion", async () => {
+    await fetchRecentDisclosures(40, "KTEST");
+    const ors = orsOf(fixture.lastKapState as BuilderState);
+    expect(ors).toHaveLength(1);
+    expect(ors[0]).toContain(NOT_TEST_NOTICE_OR);
+    expect(ors[0]).toContain("subject.not.ilike.*Devre Kesici*");
+    expect(ors[0]).toContain("stock_codes.cs.{KTEST}");
+  });
+
+  it("fetchTickerPage's list AND its 30-day count send it", async () => {
+    fixture.kapCount = 5;
+    await fetchTickerPage("KTEST");
+
+    const list = fixture.kapStates.find((s) => (s.selectArgs[1] as { head?: boolean } | undefined)?.head !== true)!;
+    const count = fixture.lastKapCountState as BuilderState;
+    for (const state of [list, count]) {
+      expect(state.or).toHaveLength(1);
+      expect(state.or[0]).toContain(NOT_TEST_NOTICE_OR);
+    }
+  });
+
+  it("the circuit-breaker strip keeps its own ilike and sends no test-notice or()", async () => {
+    await fetchCircuitBreakers(5);
+    const state = fixture.lastKapState as BuilderState;
+    expect(state.or).toEqual([]);
   });
 });

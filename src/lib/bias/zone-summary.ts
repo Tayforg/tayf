@@ -118,6 +118,11 @@ export function nonVotingOutsideZone(
  *                  toplayıcı / niş source from another zone carried it too:
  *                  "spektrumda sadece X" (what the counted sources show), never
  *                  "yazdı".
+ *   "clusterOnly"  the zone is the only one with a voting source in THIS
+ *                  cluster, but Jev's recall stage matched a silent zone with
+ *                  the same event (a similar story sits in another cluster):
+ *                  "kümede sadece X", never "yazdı" (h108-sharesurfaces-1, the
+ *                  wording /blindspots already uses, h106-blindspotbadges-1).
  *   "weighted"     another zone has a voting source: "X ağırlıklı" / "%N X".
  *
  * The one decision every outbound surface reads (the OG ribbon, the share text,
@@ -125,20 +130,29 @@ export function nonVotingOutsideZone(
  * from `nonVotingOutsideZone`), so none of them can word it differently.
  * Nothing here is a vote: the counts, the shares and the flag are untouched.
  */
-export type OnlyZoneClaim = "only" | "spectrumOnly" | "weighted";
+export type OnlyZoneClaim = "only" | "spectrumOnly" | "clusterOnly" | "weighted";
 
 /**
- * `isOnlyZone` plus the non-voting qualifier. `nonVotingOutside` is
+ * `isOnlyZone` plus the two qualifiers. `nonVotingOutside` is
  * `nonVotingOutsideZone(sources, zone)`; a caller that has no source list passes
- * 0 and gets the unqualified wording it always had.
+ * 0 and gets the unqualified wording it always had. `recallMatchedCount` is how
+ * many silent zones Jev matched (`ClusterDetail.recallMatchedZones.length`); a
+ * caller with no lookup (a cache entry from before the field, a failed lookup)
+ * passes 0 and fails open to today's wording.
+ *
+ * Precedence, as on /blindspots: the toplayıcı / niş qualifier keeps its
+ * wording ("spektrumda sadece X" is already not absolute), then the recall one.
+ * A claim that is not "only" is "weighted" whatever either number says.
  */
 export function onlyZoneClaim(
   counts: Record<MediaDnaZone, number>,
   zone: MediaDnaZone,
   nonVotingOutside: number,
+  recallMatchedCount = 0,
 ): OnlyZoneClaim {
   if (!isOnlyZone(counts, zone)) return "weighted";
-  return nonVotingOutside > 0 ? "spectrumOnly" : "only";
+  if (nonVotingOutside > 0) return "spectrumOnly";
+  return recallMatchedCount > 0 ? "clusterOnly" : "only";
 }
 
 /**

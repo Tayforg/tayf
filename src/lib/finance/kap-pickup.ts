@@ -1,4 +1,5 @@
 import { isVotingKind, normalizeSourceKind, zoneOf } from "@/lib/bias/config";
+import { companyDisplayName } from "@/lib/finance/company-display-name";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 /**
@@ -8,6 +9,8 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
  * The window rule is LITERAL per disclosure: each KAP disclosure counts
  * every mention published in its own [t, t+48h) window, regardless of
  * whether another disclosure of the same ticker also claims that mention.
+ * t is the disclosure's `publishedAt`, or its `anchorAt` when it is a
+ * correction (the window then starts at the filing's earliest version).
  * Overlapping disclosures double-count the same article on purpose — the
  * `overlapping` field on each result makes that visible instead of hiding
  * it behind a dedup rule. A mention strictly before its disclosure's `t`
@@ -55,6 +58,18 @@ export interface PickupDisclosure {
   disclosureClass: string | null;
   /** The ticker is one of the notice's own `stock_codes` (false: it is only named in `related_stocks`). */
   issuer: boolean;
+  /**
+   * h108-kapdisclosures-3: a later correction (a DUZENLENEN twin) replaced this notice. It is
+   * read, but computePickups gives it no row, so it is in no total and claims no mention.
+   */
+  superseded?: boolean;
+  /**
+   * h109: where the 48-hour window starts when it is not `publishedAt`: the EARLIEST version of
+   * a corrected filing (kap-corrections.ts, correctionChains). The row is the correction, but the
+   * filing was public from its original, so a mention between the two is still its pickup.
+   * Null or absent: the window starts at `publishedAt`.
+   */
+  anchorAt?: string | null;
 }
 
 export interface PickupMention {
@@ -164,7 +179,10 @@ export function computePickups(
   nowMs: number,
 ): DisclosurePickup[] {
   const withT = disclosures
-    .map((d) => ({ d, t: validMs(d.publishedAt) }))
+    // A superseded original is the same filing as its correction: scored once, on the correction,
+    // whose window (`anchorAt`) starts where the original's did.
+    .filter((d) => d.superseded !== true)
+    .map((d) => ({ d, t: validMs(d.anchorAt ?? d.publishedAt) }))
     .filter((x): x is { d: PickupDisclosure; t: number } => x.t !== null);
   // Only issuer filings claim mentions, so only they can overlap one another.
   const issuerWithT = withT.filter((x) => x.d.issuer);
@@ -287,8 +305,38 @@ export function formatPickupLag(minutes: number | null): string {
   return `${Math.round(abs / 1440)} gün sonra`;
 }
 
+/**
+ * The short phrase for a notice that only names the share. The panel's row label and the
+ * ticker page's KAP list (h108-kapdisclosures-1: "<filer> bildirimi · hisseyi anan bildirim")
+ * both build on it.
+ */
+export const RELATED_ONLY_SHORT = "hisseyi anan bildirim";
+
 /** What a related-only row says instead of "N haber · M kaynak" (the panel and the tests share this). */
-export const RELATED_ONLY_LABEL = "hisseyi anan bildirim · yankı hesaplanmaz";
+export const RELATED_ONLY_LABEL = `${RELATED_ONLY_SHORT} · yankı hesaplanmaz`;
+
+/**
+ * h108-kapdisclosures-1: who filed a notice the page is not about, for a muted marker line.
+ * The short company name when KAP's title yields one, else the filer's codes, else
+ * "Başka kurum" (a Takasbank or MKK list has no stock_codes and sometimes no usable title).
+ */
+export function filerName(d: { kapTitle: string | null; filerCodes: readonly string[] }): string {
+  return companyDisplayName(d.kapTitle) ?? (d.filerCodes.join(", ") || "Başka kurum");
+}
+
+/**
+ * h108-kapdisclosures-2: what a code says in place of its pickup numbers when the press for its
+ * company is matched to a sibling code (ISATR -> ISCTR). Three pieces, the middle one the link to
+ * the sibling's page; the ticker page's "KAP ile basın arası" panel and the "Medyada yankı" panel
+ * print the same sentence.
+ */
+export function pressCodeNote(code: string): { before: string; link: string; after: string } {
+  return {
+    before: `Basın bu şirketi ${code} koduyla anıyor; bildirimlerin basın karşılığı `,
+    link: `${code} sayfasında`,
+    after: ".",
+  };
+}
 
 export type PickupRowKind = "related-only" | "picked-up" | "empty-closed" | "empty-open";
 
@@ -306,5 +354,5 @@ export function formatPickupRate(rate: number | null): string {
 
 /** "+3 hisseyi anan bildirim" beside the filing count, or null when no related-only notice is listed. */
 export function relatedOnlyCountLabel(n: number): string | null {
-  return n > 0 ? `+${n} hisseyi anan bildirim` : null;
+  return n > 0 ? `+${n} ${RELATED_ONLY_SHORT}` : null;
 }

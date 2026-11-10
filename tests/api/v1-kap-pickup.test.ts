@@ -139,6 +139,7 @@ const TOP_LEVEL_KEYS = [
   "truncated",
   "capped",
   "total_disclosures",
+  "superseded",
   "totals",
   "count",
   "disclosures",
@@ -337,6 +338,7 @@ function tickerPickup(overrides: Partial<TickerPickup> = {}): TickerPickup {
     relevanceApplied: true,
     truncated: false,
     totalDisclosures: 12,
+    superseded: 0,
     capped: false,
     ...overrides,
   };
@@ -420,7 +422,7 @@ describe("toV1PickupBody: issuer and related_only (h48-ekonomi-2)", () => {
     expect(body.count).toBe(1);
   });
 
-  it("adds no key at the top level (the additive fields live inside totals and each record)", () => {
+  it("adds no top-level key but the additive superseded (the other fields live inside totals and each record)", () => {
     const keys = Object.keys(toV1PickupBody(tickerPickup())).sort();
     expect(keys).toEqual(
       [
@@ -432,11 +434,57 @@ describe("toV1PickupBody: issuer and related_only (h48-ekonomi-2)", () => {
         "truncated",
         "capped",
         "total_disclosures",
+        "superseded",
         "totals",
         "count",
         "disclosures",
       ].sort(),
     );
+  });
+});
+
+// h109: a notice a later KAP correction (DUZENLENEN) replaced is read but left out of `disclosures`, `count`
+// and `totals`, while `total_disclosures` (a head count of the whole window) still holds it. Without a
+// field a client saw a permanent gap that no `limit` or `since` closed; `superseded` is that gap, named.
+describe("toV1PickupBody: superseded (h109)", () => {
+  const listed = (index: number) => ({
+    disclosureIndex: index,
+    disclosedAt: "2026-10-30T10:00:00.000Z",
+    subject: "Finansal Rapor",
+    disclosureClass: "FR",
+    issuer: true,
+    kapUrl: `https://www.kap.org.tr/tr/Bildirim/${index}`,
+    articles: 0,
+    outlets: 0,
+    zones: { ...EMPTY_ZONES },
+    sources: [],
+    firstLagMinutes: null,
+    windowComplete: true,
+    overlapping: 0,
+  });
+
+  it("copies TickerPickup.superseded onto the body", () => {
+    expect(toV1PickupBody(tickerPickup({ superseded: 1 })).superseded).toBe(1);
+    expect(toV1PickupBody(tickerPickup({ superseded: 8 })).superseded).toBe(8);
+  });
+
+  it("zero is a real number, not an omitted key", () => {
+    const body = toV1PickupBody(tickerPickup({ superseded: 0 }));
+    expect(body.superseded).toBe(0);
+    expect(Object.keys(body)).toContain("superseded");
+    expect(JSON.parse(JSON.stringify(body)).superseded).toBe(0);
+  });
+
+  it("sits right after total_disclosures, the number it reconciles with", () => {
+    const keys = Object.keys(toV1PickupBody(tickerPickup()));
+    const at = keys.indexOf("total_disclosures");
+    expect(keys.slice(at, at + 2)).toEqual(["total_disclosures", "superseded"]);
+  });
+
+  it("with capped false, count + superseded equals total_disclosures (the TTKOM shape: 1 listed + 1 replaced = 2)", () => {
+    const body = toV1PickupBody(tickerPickup({ pickups: [listed(1694263)], superseded: 1, totalDisclosures: 2, capped: false }));
+    expect(body.capped).toBe(false);
+    expect(body.count + body.superseded).toBe(body.total_disclosures);
   });
 });
 

@@ -4,6 +4,7 @@ import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { pickOtherSide } from "@/lib/clusters/read-across";
+import { RECALL_MATCH_NOTE } from "@/lib/clusters/recall-matched-zones";
 import { ENGLISH_ONLY_NOTE, sourceLang } from "@/lib/sources/source-language";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { RelativeTime } from "@/components/story/relative-time";
@@ -63,6 +64,15 @@ interface ReadAcrossSpectrumProps {
    * other caller renders exactly as before.
    */
   languageIsolated?: boolean;
+  /**
+   * h108-sharesurfaces-1: the empty zones in which Tayf's own Jev recall stage
+   * matched a voting source with this story's event (`ClusterDetail.recallMatchedZones`
+   * as a set, the one the framing comparison gets): a similar story sits in another
+   * cluster. The blindspot caption then says so instead of stating the silence
+   * flatly. Optional (empty), so every other caller renders exactly as before.
+   * Wording only: no count, vote or link reads it.
+   */
+  recallMatchedZones?: ReadonlySet<MediaDnaZone>;
 }
 
 // Literal Tailwind class strings per pole, drawn from the same red /
@@ -84,6 +94,7 @@ export function ReadAcrossSpectrum({
   feedDegraded = false,
   nonVotingZoneCounts,
   languageIsolated = false,
+  recallMatchedZones,
 }: ReadAcrossSpectrumProps) {
   const { zone, member, counts } = pickOtherSide(members);
   const zoneLabel = ZONE_META[zone].label;
@@ -116,16 +127,26 @@ export function ReadAcrossSpectrum({
       isBlindspot && nonVotingCount > 0
         ? ` · ${nonVotingCount} toplayıcı / niş kaynak yazdı (spektruma sayılmaz)`
         : "";
+    // h108-sharesurfaces-1: a silent pole Jev matched with this event reads
+    // "benzer haber başka kümede olabilir" (the framing comparison's qualifier),
+    // not a flat silence. A single empty pole is judged on its own zone; with both
+    // poles empty either pole's match is enough. An empty / missing Set is today's.
+    const recallMatched = bothPolesEmpty
+      ? recallMatchedZones?.has("iktidar") === true || recallMatchedZones?.has("muhalefet") === true
+      : recallMatchedZones?.has(zone) === true;
+    const recallSuffix = isBlindspot && recallMatched ? ` · ${RECALL_MATCH_NOTE}` : "";
     // h72-newreader-1: the blindspot caption names the SILENT zone inside the
     // sentence and leaves nothing in brackets after "kör nokta": a bracketed
     // zone read as the zone that owns the blind spot, while /blindspots counts
     // a story under the side that WROTE it ("İktidar ağırlıklı").
     const emptyText = bothPolesEmpty
       ? isBlindspot
-        ? `İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı${nonVotingSuffix}`
+        ? recallMatched
+          ? `Bu kümede iki kutuptan da haber yok${recallSuffix}${nonVotingSuffix}`
+          : `İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı${nonVotingSuffix}`
         : "İki kutupta da henüz haber yok"
       : isBlindspot
-        ? `Spektruma sayılan ${zoneLabel} kaynaklarından bu kümede haber yok (kör nokta)${nonVotingSuffix}`
+        ? `Spektruma sayılan ${zoneLabel} kaynaklarından bu kümede haber yok (kör nokta)${recallSuffix}${nonVotingSuffix}`
         : `${zoneLabel} tarafında henüz haber yok${degradedSuffix}`;
     return (
       <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground">

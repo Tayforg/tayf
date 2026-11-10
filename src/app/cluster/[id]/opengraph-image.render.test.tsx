@@ -609,6 +609,109 @@ describe("cluster opengraph-image qualified ribbon (real Satori render, h57-outb
 });
 
 // ---------------------------------------------------------------------------
+// h108-sharesurfaces-1: a blindspot Jev's recall stage matched with the same event
+// (cluster 0746c9d2) now reads "KÖR NOKTA — kümede sadece İktidar" instead of
+// "... sadece İktidar yazdı". The card must still render to a real PNG, with the
+// ribbon on ONE line inside the 72 px side padding, no wider than the
+// "spektrumda sadece" ribbon that already fits, and the rows below it unmoved.
+// ---------------------------------------------------------------------------
+describe("cluster opengraph-image recall-matched ribbon (real Satori render, h108-sharesurfaces-1)", () => {
+  type Zone = "iktidar" | "muhalefet";
+  type Mode = "plain" | "spectrum" | "recall";
+  const cards = new Map<string, Promise<DecodedPng>>();
+  const renderCard = (title: string, zone: Zone, mode: Mode): Promise<DecodedPng> => {
+    const key = `${zone}|${mode}|${title}`;
+    let card = cards.get(key);
+    if (!card) {
+      card = (async () => {
+        const base = blindspotDetail();
+        const bias_distribution =
+          zone === "iktidar"
+            ? { ...base.cluster.bias_distribution }
+            : { ...base.cluster.bias_distribution, pro_government: 0, gov_leaning: 0, state_media: 0, opposition: 5, opposition_leaning: 2 };
+        const members =
+          mode === "spectrum"
+            ? [
+                nonVotingMember("son-dakika", "aggregator", zone === "iktidar" ? "center" : "gov_leaning"),
+                nonVotingMember("isci-haber", "niche", zone === "iktidar" ? "opposition" : "pro_government"),
+              ]
+            : [];
+        getClusterDetailOrThrow.mockResolvedValueOnce({
+          ...base,
+          cluster: {
+            ...base.cluster,
+            title_tr: title,
+            bias_distribution,
+            blindspot_side: zone === "iktidar" ? "pro_government" : "opposition",
+          },
+          members,
+          ...(mode === "recall"
+            ? { recallMatchedZones: zone === "iktidar" ? ["muhalefet" as const] : ["iktidar" as const] }
+            : {}),
+        });
+        const { default: Image } = await import("./opengraph-image");
+        const png = decodePng(await pngBytes(await Image({ params: Promise.resolve({ id: VALID_ID }) })));
+        expect(png.width).toBe(1200);
+        expect(png.height).toBe(630);
+        return png;
+      })();
+      cards.set(key, card);
+    }
+    return card;
+  };
+
+  it("renders a real 1200x630 PNG with a one-line ribbon inside the 72 px side padding", async () => {
+    const plain = ribbonBox(await renderCard(TITLE_SHORT, "iktidar", "plain"));
+    const recall = ribbonBox(await renderCard(TITLE_SHORT, "iktidar", "recall"));
+    expect(plain).not.toBeNull();
+    expect(recall).not.toBeNull();
+    // Same left edge (alignSelf flex-start inside the 72 px padding) and the same height: one line.
+    expect(recall!.minX).toBe(plain!.minX);
+    expect(Math.abs(recall!.minY - plain!.minY)).toBeLessThanOrEqual(1);
+    expect(Math.abs(recall!.maxY - plain!.maxY)).toBeLessThanOrEqual(1);
+    expect(recall!.maxX).toBeLessThan(1128);
+    // The ribbon text did change: "kümede sadece İktidar" is not "sadece İktidar yazdı".
+    expect(recall!.maxX).not.toBe(plain!.maxX);
+  }, 30_000);
+
+  it("is no wider than the 'spektrumda sadece' ribbon that already fits, also for the widest label (Muhalefet)", async () => {
+    for (const zone of ["iktidar", "muhalefet"] as const) {
+      const spectrum = ribbonBox(await renderCard(TITLE_SHORT, zone, "spectrum"));
+      const recall = ribbonBox(await renderCard(TITLE_SHORT, zone, "recall"));
+      expect(spectrum).not.toBeNull();
+      expect(recall).not.toBeNull();
+      expect(recall!.maxX).toBeLessThanOrEqual(spectrum!.maxX);
+      expect(recall!.maxY - recall!.minY).toBeLessThanOrEqual(spectrum!.maxY - spectrum!.minY + 1);
+    }
+  }, 60_000);
+
+  it("keeps the legend row on the canvas under the ribbon, whatever the title", async () => {
+    const ref = await renderCard(TITLE_SHORT, "iktidar", "recall");
+    expectNear(pixelAt(ref, 250, LEGEND_PROBE_Y), [21, 21, 24], "reference at (250,629)");
+    for (const title of [TITLE_96_RIBBON, TITLE_200, TITLE_ALL_CAPS]) {
+      const card = await renderCard(title, "iktidar", "recall");
+      for (const x of LEGEND_PROBE_X) {
+        expectNear(
+          pixelAt(card, x, LEGEND_PROBE_Y),
+          pixelAt(ref, x, LEGEND_PROBE_Y),
+          `${title.slice(0, 24)}... at (${x},${LEGEND_PROBE_Y})`,
+        );
+      }
+    }
+  }, 60_000);
+
+  it("lays the card out exactly like the plain ribbon card below the ribbon (same title box)", async () => {
+    const plain = await renderCard(TITLE_96_RIBBON, "iktidar", "plain");
+    const recall = await renderCard(TITLE_96_RIBBON, "iktidar", "recall");
+    for (const x of [250, 950]) {
+      for (let y = 470; y < 630; y++) {
+        expectNear(pixelAt(recall, x, y), pixelAt(plain, x, y), `legend column at (${x},${y})`);
+      }
+    }
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
 // h64-ogcards-3: a cluster whose sources are all toplayıcı / niş (cluster
 // 4b5cd9f5: haberler-com + ekonomim) has an all-zero bias_distribution. The card
 // drew an empty bar and three "%0 · 0" tiles; it now draws ONE box with the

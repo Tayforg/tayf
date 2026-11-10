@@ -154,4 +154,41 @@ describe("GET /cluster/[id]/kart (real Satori render)", () => {
     expect(header.getUint32(20)).toBe(1920);
     expect(bytes.byteLength).toBeGreaterThan(10_000);
   });
+
+  // h108-sharesurfaces-1: a silent zone Jev matched prints "— bu kümede yok · benzer
+  // haber başka kümede olabilir" at fontSize 34 in the 936 px column. Measured in a
+  // real render (0746c9d2-shaped card): one line, ending at x ~ 938 of the 1008 px
+  // right edge, so it cannot wrap past two. This keeps the real Satori render of
+  // that card in the suite: a style or a string Satori rejects fails here.
+  it("rasterises the 0746c9d2-shaped card with the recall-matched empty-column line", async () => {
+    const base = detailWithLongHeadlines();
+    const gov = base.members.slice(0, 1);
+    getClusterDetailOrThrow.mockResolvedValueOnce({
+      ...base,
+      cluster: {
+        ...base.cluster,
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        bias_distribution: { ...base.cluster.bias_distribution, center: 0, opposition: 0 },
+      },
+      members: gov,
+      recallMatchedZones: ["bagimsiz", "muhalefet"],
+    } satisfies ClusterDetail);
+    getZoneFeedHealth.mockResolvedValue(null);
+
+    const { GET } = await import("./route");
+    const res = await GET(
+      new Request(`https://tayfhaber.com/cluster/${ID}/kart`),
+      { params: Promise.resolve({ id: ID }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect(Array.from(bytes.slice(0, 8))).toEqual(PNG_SIGNATURE);
+    const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    expect(header.getUint32(16)).toBe(1080);
+    expect(header.getUint32(20)).toBe(1920);
+    expect(bytes.byteLength).toBeGreaterThan(10_000);
+  });
 });

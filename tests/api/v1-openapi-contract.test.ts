@@ -574,6 +574,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
       relevanceApplied: true,
       truncated: false,
       totalDisclosures: 102,
+      superseded: 0,
       capped: true,
     };
     const body = toV1PickupBody(fixture);
@@ -598,6 +599,33 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     expect(Object.keys(properties).sort()).toEqual(Object.keys(body).sort());
     expect(properties.capped).toEqual(expect.objectContaining({ type: "boolean" }));
     expect(properties.total_disclosures?.type).toEqual(["integer", "null"]);
+    // h109: the notices a KAP correction replaced, so count + superseded reconciles with total_disclosures.
+    expect(required).toContain("superseded");
+    expect(properties.superseded?.type).toBe("integer");
+  });
+
+  it("h109: docs/api.md and the Turkish pickup notes both explain superseded and how it reconciles with total_disclosures", () => {
+    const md = readFileSync(path.join(process.cwd(), "docs/api.md"), "utf8");
+    const start = md.indexOf("### `GET /api/v1/kap/pickup`");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = md.slice(start + 1);
+    const next = rest.search(/\n### /);
+    const section = next < 0 ? rest : rest.slice(0, next);
+
+    // The example body carries the field, and a note says what it is and how the three numbers relate.
+    expect(section).toMatch(/"superseded":\s*\d+/);
+    expect(section).toContain("**`superseded`**");
+    expect(section).toContain("`count` + `superseded`");
+    expect(section).toContain("`total_disclosures`");
+    // The total_disclosures bullet no longer tells a client that every gap is a missing row.
+    expect(section.replace(/\s+/g, " ")).not.toContain("compare it with `count` to see how many are missing");
+
+    const pickup = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/kap/pickup")!;
+    const note = pickup.notesTr.find((n) => n.startsWith("superseded:"));
+    expect(note, "a Turkish note for superseded").toBeDefined();
+    expect(note).toContain("count + superseded = total_disclosures");
+    // The same text reaches the machine-readable document.
+    expect(doc.paths["/api/v1/kap/pickup"]?.get?.description ?? "").toContain("count + superseded = total_disclosures");
   });
 
   it("h48-ekonomi-2: the nested pickup schemas document the additive issuer and related_only fields", () => {
@@ -649,6 +677,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
       relevanceApplied: true,
       truncated: false,
       totalDisclosures: 1,
+      superseded: 0,
       capped: false,
     });
     expect(Object.keys(totals.properties ?? {}).sort()).toEqual(Object.keys(body.totals).sort());

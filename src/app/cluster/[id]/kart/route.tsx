@@ -9,6 +9,7 @@ import {
 } from "@/lib/cards/story-card";
 import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { RECALL_MATCH_EMPTY_COLUMN } from "@/lib/clusters/recall-matched-zones";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { cutAtWord } from "@/lib/seo/og-title";
@@ -40,7 +41,9 @@ import type { MediaDnaZone } from "@/types";
 //     applies — genuinely nobody wrote, only toplayıcı / niş sources of that
 //     zone wrote (the spectrum does not count them), or somebody wrote and the
 //     headline is not shareable — because the coverage counter beside it would
-//     otherwise contradict a blanket "no news here" (h57-outbound-1).
+//     otherwise contradict a blanket "no news here" (h57-outbound-1). A zone
+//     nobody wrote in, where Jev's recall stage matched a similar story filed in
+//     another cluster, says so too (h108-sharesurfaces-1).
 //   * a zone's headline is news whenever the zone has any: an opinion column
 //     (the article URL's path, `isOpinionUrl`) is shown only when it is all the
 //     zone has, and is then labelled "<Outlet> · köşe yazısı" (h57-outbound-2).
@@ -130,15 +133,24 @@ function outletLine(headline: NonNullable<StoryCard["headlines"][MediaDnaZone]>)
  *  spectrum counts, as /blindspots and the cluster timeline word it
  *  (h57-outbound-1). It is just as false for a cluster written only by
  *  English-language outlets, which never met the Turkish zones: there the line
- *  says no comparison exists (h59-english-1). */
+ *  says no comparison exists (h59-english-1). And it is false for a zone in
+ *  which Tayf's own Jev recall stage matched an article with this story's event
+ *  (`matched`, ClusterDetail.recallMatchedZones: a similar story sits in another
+ *  cluster): the line then says what the cluster page's framing comparison says
+ *  (h108-sharesurfaces-1, RECALL_MATCH_EMPTY_COLUMN). The order is the order of
+ *  how much each line claims: isolated, then non-voting, then matched, then the
+ *  plain silence. `matched` is empty for a detail cached before the field existed
+ *  or after a failed lookup, and the line is then today's. */
 function silentZoneLabel(
+  zone: MediaDnaZone,
   coverage: StoryCard["coverage"][MediaDnaZone],
   languageIsolated: boolean,
+  matched: ReadonlySet<MediaDnaZone>,
 ): string {
   if (languageIsolated) return ENGLISH_ONLY_KART_EMPTY_ZONE;
-  return coverage.nonVotingCount > 0
-    ? `— ${SPECTRUM_ABSENT_QUALIFIED}`
-    : "— bu tarafta haber yok";
+  if (coverage.nonVotingCount > 0) return `— ${SPECTRUM_ABSENT_QUALIFIED}`;
+  if (matched.has(zone)) return `— ${RECALL_MATCH_EMPTY_COLUMN}`;
+  return "— bu tarafta haber yok";
 }
 
 // A plain builder, not a React component: Satori renders the tree it is
@@ -150,6 +162,7 @@ function renderCard({
   title,
   dateLabel,
   languageIsolated,
+  recallMatchedZones,
 }: {
   card: StoryCard;
   id: string;
@@ -157,6 +170,11 @@ function renderCard({
   dateLabel: string;
   /** Every member is an English-language outlet (h59-english-1). */
   languageIsolated: boolean;
+  /**
+   * The empty zones Jev's recall stage matched with this story's event
+   * (`detail.recallMatchedZones`, h108-sharesurfaces-1). Wording only.
+   */
+  recallMatchedZones: ReadonlySet<MediaDnaZone>;
 }) {
   const totalCoverage = ZONES.reduce(
     (sum, zone) => sum + card.coverage[zone].count,
@@ -239,7 +257,7 @@ function renderCard({
                   }}
                 >
                   <div style={{ fontSize: 34, color: DIM }}>
-                    {silentZoneLabel(coverage, languageIsolated)}
+                    {silentZoneLabel(zone, coverage, languageIsolated, recallMatchedZones)}
                   </div>
                   {/* The caveat explains a silence the card claims. An
                       English-only cluster claims none (h59-english-1). */}
@@ -381,6 +399,8 @@ export async function GET(
       title,
       dateLabel: formatDdMmYyyy(detail.cluster.first_published),
       languageIsolated: isLanguageIsolatedCluster(detail.members.map((m) => m.source)),
+      // A detail cached before the field existed has none: today's lines.
+      recallMatchedZones: new Set(detail.recallMatchedZones ?? []),
     }),
     {
       width: 1080,

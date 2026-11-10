@@ -16,6 +16,7 @@ import {
 } from "@/lib/finance/kap-pickup";
 import { attemptCached } from "@/lib/cache-resilience";
 import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
+import { correctionChains, supersededIndexes } from "@/lib/finance/kap-corrections";
 import { readAllPages } from "@/lib/finance/paging";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 
@@ -49,7 +50,12 @@ import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/ser
  * not take the panel or the API response down.
  */
 
-const DISCLOSURE_SELECT = "disclosure_index,published_at,stock_codes,subject,disclosure_class";
+// h108-kapdisclosures-3: modify_status, year and period (with summary, which the twin match also
+// compares) tell an original from its correction; rule_type rides along for the shared select shape.
+// h109: related_stocks tells one company's notice from another's when an agency (JCRAV) files one
+// subject for many; it is a list of tickers, not article content.
+const DISCLOSURE_SELECT =
+  "disclosure_index,published_at,stock_codes,related_stocks,subject,summary,disclosure_class,modify_status,year,period,rule_type";
 const MENTION_PAGE_SIZE = 1000;
 const MENTION_MAX_PAGES = 5;
 const RELEVANCE_CHUNK = 100;
@@ -65,6 +71,8 @@ export interface TickerPickup {
   truncated: boolean;
   /** The ticker's disclosures in the window (breakers excluded), uncapped; null when the count failed. */
   totalDisclosures: number | null;
+  /** Read notices a later correction replaced (h108-kapdisclosures-3): in none of `pickups` or `totals`. */
+  superseded: number;
   /** The disclosure list reached `opts.limit`, so older disclosures in the window are not in `pickups`. */
   capped: boolean;
 }
@@ -74,8 +82,15 @@ interface DisclosureRow {
   published_at: string;
   /** The notice's issuers; the ticker being in it is what makes the row an `issuer` filing. */
   stock_codes?: string[] | null;
+  /** The shares the notice names without filing it; part of what makes two notices the same filing. */
+  related_stocks?: string[] | null;
   subject: string | null;
+  summary?: string | null;
   disclosure_class: string | null;
+  modify_status?: string | null;
+  year?: string | null;
+  period?: string | null;
+  rule_type?: string | null;
 }
 
 interface MentionRow {
@@ -113,6 +128,7 @@ function emptyResult(ticker: string, sinceIso: string, untilIso: string, totalDi
     relevanceApplied: true,
     truncated: false,
     totalDisclosures,
+    superseded: 0,
     capped: false,
   };
 }
@@ -181,13 +197,23 @@ export async function fetchTickerPickup(
     throw new Error(`[finance] fetchTickerPickup disclosures: ${disclosureError.message}`);
   }
 
-  const disclosures: PickupDisclosure[] = ((disclosureData ?? []) as DisclosureRow[]).map((r) => ({
+  const disclosureRows = (disclosureData ?? []) as DisclosureRow[];
+  // h108-kapdisclosures-3: an original a later correction replaced is flagged, and computePickups
+  // leaves it out of the list and every total.
+  // h109: the surviving correction is anchored at the EARLIEST version of its chain, so its 48-hour
+  // window (and the mention read below) starts where the filing first appeared.
+  const supersededSet = supersededIndexes(disclosureRows);
+  const chains = correctionChains(disclosureRows);
+  const disclosures: PickupDisclosure[] = disclosureRows.map((r) => ({
     disclosureIndex: r.disclosure_index,
     publishedAt: r.published_at,
     subject: r.subject,
     disclosureClass: r.disclosure_class,
     issuer: (r.stock_codes ?? []).includes(ticker),
+    superseded: supersededSet.has(r.disclosure_index),
+    anchorAt: chains.get(r.disclosure_index)?.earliestPublishedAt ?? null,
   }));
+  const superseded = disclosures.filter((d) => d.superseded).length;
 
   if (disclosures.length === 0) {
     return emptyResult(ticker, sinceIso, nowIso, totalDisclosures);
@@ -195,7 +221,8 @@ export async function fetchTickerPickup(
 
   // Related-only notices are listed with zero numbers and no mention is read for
   // them: with no issuer filing at all there is nothing to match mentions to.
-  const issuerDisclosures = disclosures.filter((d) => d.issuer);
+  // A superseded original is not a filing to match either.
+  const issuerDisclosures = disclosures.filter((d) => d.issuer && !d.superseded);
   if (issuerDisclosures.length === 0) {
     const pickups = computePickups(disclosures, [], new Map(), nowMs);
     return {
@@ -207,11 +234,13 @@ export async function fetchTickerPickup(
       relevanceApplied: true,
       truncated: false,
       totalDisclosures,
+      superseded,
       capped: disclosures.length >= opts.limit,
     };
   }
 
-  const disclosureMs = issuerDisclosures.map((d) => new Date(d.publishedAt).getTime());
+  // Each window starts at the anchor (the original's time for a correction), so the read covers the gap.
+  const disclosureMs = issuerDisclosures.map((d) => new Date(d.anchorAt ?? d.publishedAt).getTime());
   const minDisclosureMs = Math.min(...disclosureMs);
   const maxDisclosureMs = Math.max(...disclosureMs);
   const mentionGte = new Date(minDisclosureMs - PUBLISHED_AT_SKEW_MARGIN_MS).toISOString();
@@ -298,6 +327,7 @@ export async function fetchTickerPickup(
     relevanceApplied,
     truncated,
     totalDisclosures,
+    superseded,
     capped: disclosures.length >= opts.limit,
   };
 }

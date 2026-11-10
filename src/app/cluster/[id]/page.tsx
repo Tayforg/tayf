@@ -112,12 +112,17 @@ import { isContentlessTitle } from "../../../../supabase/functions/_shared/rss/e
  * `languageIsolated` (h59-english-1: every member an English-language outlet)
  * words no zone as absent, so the feed-health read that only explains an absent
  * zone is skipped too.
+ *
+ * `recallMatchedZones` (h108-sharesurfaces-1) is the Set the framing comparison
+ * gets: an absent zone Jev matched with this event reads "… bu kümede haber yok ·
+ * benzer haber başka kümede olabilir". Wording only; no extra read.
  */
 async function loadStoryTimeline(
   clusterId: string,
   votingMembers: Parameters<typeof timelineMembersFrom>[0],
   nonVotingMembers: Parameters<typeof timelineMembersFrom>[0],
   languageIsolated: boolean,
+  recallMatchedZones: ReadonlySet<MediaDnaZone>,
 ): Promise<StoryTimelineData | null> {
   const members = timelineMembersFrom(votingMembers);
   if (votingSourceCount(members) < STORY_TIMELINE_MIN_SOURCES) return null;
@@ -133,6 +138,7 @@ async function loadStoryTimeline(
     health,
     timelineMembersFrom(nonVotingMembers),
     languageIsolated,
+    recallMatchedZones,
   );
 }
 
@@ -649,6 +655,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     // also carried the story (the very sources listed under "Toplayıcı / niş
     // kaynaklar" below).
     sources: uniqueMemberSources,
+    // h108-sharesurfaces-1: the empty zones Jev matched with this event; the
+    // blindspot suffix then says "kümede sadece X" instead of "sadece X yazdı".
+    // A detail cached before the field existed has none (the share text reads a
+    // missing value as []).
+    recallMatchedZones: detail.recallMatchedZones,
   });
 
   // Attributed cluster summary — see summary-attribution.ts. Null hides the
@@ -683,6 +694,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     votingMembers,
     nonVotingMembers,
     languageIsolated,
+    recallMatchedZones,
   );
   // The story-thread pill and the fact-check box are optional widgets: each is
   // read by its own async slot (ClusterThreadSlot / ClusterFactCheckSlot) inside
@@ -1059,6 +1071,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               feedDegraded={blindspotSuppressed}
               nonVotingZoneCounts={nonVotingZoneCounts}
               languageIsolated={languageIsolated}
+              recallMatchedZones={recallMatchedZones}
             />
 
             {/* Summary attribution (idea #7): clusters.summary_tr is one

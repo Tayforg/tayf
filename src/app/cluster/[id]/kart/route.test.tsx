@@ -889,6 +889,164 @@ describe("GET /cluster/[id]/kart non-voting sources in a silent zone (h57-outbou
   });
 });
 
+// h108-sharesurfaces-1: cluster 0746c9d2 (nine İktidar outlets; Jev matched Yeniçağ
+// and Elips Haber, Muhalefet, with the same event in another cluster) printed
+// "Muhalefet — bu tarafta haber yok" on the card readers save and post, while the
+// cluster page's framing comparison said "bu kümede yok · benzer haber başka
+// kümede olabilir". ClusterDetail.recallMatchedZones is already on the detail.
+describe("GET /cluster/[id]/kart zones Jev matched (h108-sharesurfaces-1)", () => {
+  const MATCHED_SILENCE = "— bu kümede yok · benzer haber başka kümede olabilir";
+  const QUALIFIED_SILENCE = "— spektruma sayılan kaynaklardan haber yok";
+  const PLAIN_SILENCE = "— bu tarafta haber yok";
+  const ISOLATED_LINE = "— karşılaştırma yok (yalnızca İngilizce kaynaklar)";
+
+  const ISCI_HABER = mkSource({ id: "isci-haber", name: "İşçi Haber", bias: "opposition", kind: "niche" });
+  const SABAH_EN = mkSource({ id: "ds", slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government", kind: "outlet" });
+  const HDN = mkSource({ id: "hdn", slug: "hurriyet-daily-news", name: "Hürriyet Daily News", bias: "gov_leaning", kind: "outlet" });
+  const A_NEWS = mkSource({ id: "an", slug: "a-news", name: "A News", bias: "pro_government", kind: "outlet" });
+
+  const countOf = (text: string, needle: string) => text.split(needle).length - 1;
+
+  /** Nine voting İktidar outlets, like 0746c9d2. */
+  const nineGov = () =>
+    Array.from({ length: 9 }, (_, i) =>
+      mkMember(`g${i}`, mkSource({ id: `gov-${i}`, name: `Gazete ${i}`, bias: "pro_government", kind: "outlet" }), `Gazete ${i} haberi`),
+    );
+
+  const withRecall = (detail: ClusterDetail, zones: MediaDnaZone[] | undefined): ClusterDetail =>
+    zones === undefined ? detail : { ...detail, recallMatchedZones: zones };
+
+  async function textFor(detail: ClusterDetail): Promise<string> {
+    getClusterDetailOrThrow.mockResolvedValueOnce(detail);
+    const res = await callGET(ID);
+    expect(res.status).toBe(200);
+    return collectText(captured).join(" ");
+  }
+
+  beforeEach(() => {
+    captured = null;
+    capturedOptions = null;
+    vi.resetModules();
+    getClusterDetailOrThrow.mockReset();
+    getZoneFeedHealth.mockReset();
+    getZoneFeedHealth.mockResolvedValue(null);
+  });
+
+  it("0746c9d2-shaped: the Muhalefet column carries the qualifier and Bağımsız keeps the plain line", async () => {
+    const text = await textFor(withRecall(mkDetail(nineGov()), ["muhalefet"]));
+
+    expect(countOf(text, MATCHED_SILENCE)).toBe(1);
+    expect(countOf(text, PLAIN_SILENCE)).toBe(1);
+    const bagimsizAt = text.indexOf("Bağımsız");
+    const muhalefetAt = text.indexOf("Muhalefet");
+    expect(text.indexOf(PLAIN_SILENCE)).toBeGreaterThan(bagimsizAt);
+    expect(text.indexOf(PLAIN_SILENCE)).toBeLessThan(muhalefetAt);
+    expect(text.indexOf(MATCHED_SILENCE)).toBeGreaterThan(muhalefetAt);
+  });
+
+  it("both empty zones matched: both columns carry the qualifier", async () => {
+    const text = await textFor(withRecall(mkDetail(nineGov()), ["bagimsiz", "muhalefet"]));
+
+    expect(countOf(text, MATCHED_SILENCE)).toBe(2);
+    expect(text).not.toContain(PLAIN_SILENCE);
+  });
+
+  it("reads the very constant the framing comparison prints", async () => {
+    const { RECALL_MATCH_EMPTY_COLUMN } = await import("@/lib/clusters/recall-matched-zones");
+    expect(MATCHED_SILENCE).toBe(`— ${RECALL_MATCH_EMPTY_COLUMN}`);
+  });
+
+  it("is byte-identical to today's card with [] (a failed lookup) and with the field undefined (an old cache entry)", async () => {
+    const plain = await textFor(mkDetail(nineGov()));
+    const empty = await textFor(withRecall(mkDetail(nineGov()), []));
+
+    expect(empty).toBe(plain);
+    expect(countOf(plain, PLAIN_SILENCE)).toBe(2);
+    expect(plain).not.toContain("benzer haber");
+  });
+
+  it("weighted claims too: iktidar 7, bağımsız 1, muhalefet 0, matched muhalefet prints the line for Muhalefet only", async () => {
+    const members = [
+      ...nineGov().slice(0, 7),
+      mkMember("c1", CENTER, CENTER_TITLE),
+    ];
+    const text = await textFor(withRecall(mkDetail(members), ["muhalefet"]));
+
+    expect(countOf(text, MATCHED_SILENCE)).toBe(1);
+    // The zones with headlines are untouched, and nothing else is silent.
+    expect(text).toContain(CENTER_TITLE);
+    expect(text).not.toContain(PLAIN_SILENCE);
+    expect(text.indexOf(MATCHED_SILENCE)).toBeGreaterThan(text.indexOf("Muhalefet"));
+  });
+
+  it("precedence: a toplayıcı / niş source in the zone keeps the spectrum wording over the matched one", async () => {
+    const text = await textFor(
+      withRecall(
+        mkDetail([...nineGov(), mkMember("n2", ISCI_HABER, "İşçi haber başlığı")]),
+        ["bagimsiz", "muhalefet"],
+      ),
+    );
+
+    // Muhalefet has the niche source: qualified. Bağımsız has nobody: matched.
+    expect(countOf(text, QUALIFIED_SILENCE)).toBe(1);
+    expect(countOf(text, MATCHED_SILENCE)).toBe(1);
+    expect(text).not.toContain(PLAIN_SILENCE);
+    expect(text.indexOf(MATCHED_SILENCE)).toBeLessThan(text.indexOf(QUALIFIED_SILENCE));
+  });
+
+  it("precedence: an all-English cluster keeps the no-comparison line over the matched one", async () => {
+    const members = [
+      mkMember("a1", HDN, "Erdoğan visits Seoul with $15 billion trade goal"),
+      mkMember("a2", A_NEWS, "Erdoğan visits Seoul"),
+      mkMember("a3", SABAH_EN, "Erdoğan in Seoul"),
+    ];
+    const text = await textFor(withRecall(mkDetail(members), ["bagimsiz", "muhalefet"]));
+
+    expect(countOf(text, ISOLATED_LINE)).toBe(2);
+    expect(text).not.toContain("benzer haber");
+    expect(text).not.toContain(MATCHED_SILENCE);
+  });
+
+  it("a matched zone that has a headline shows the headline, not the line", async () => {
+    const text = await textFor(
+      withRecall(mkDetail([...nineGov().slice(0, 2), mkMember("c1", CENTER, CENTER_TITLE)]), ["bagimsiz"]),
+    );
+
+    expect(text).toContain(CENTER_TITLE);
+    expect(text).not.toContain(MATCHED_SILENCE);
+  });
+
+  it("keeps the PII line for a matched zone whose voting members were all filtered (not silent at all)", async () => {
+    const text = await textFor(
+      withRecall(
+        mkDetail([...nineGov().slice(0, 2), mkMember("c1", CENTER, "17 yaşındaki çocuk kayboldu")]),
+        ["bagimsiz"],
+      ),
+    );
+
+    expect(text).toContain("1 kaynak yazdı · başlık paylaşıma uygun değil");
+    expect(text).not.toContain(MATCHED_SILENCE);
+  });
+
+  it("keeps the degraded-feed caveat under the matched line", async () => {
+    getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: { degraded: true } }));
+    const text = await textFor(withRecall(mkDetail(nineGov()), ["muhalefet"]));
+
+    expect(text).toContain(MATCHED_SILENCE);
+    expect(countOf(text, "bazı kaynaklara ulaşılamıyor")).toBe(1);
+  });
+
+  it("does not change the counters, the share bar or the denominator", async () => {
+    getZoneFeedHealth.mockResolvedValue(mkHealth({ iktidar: { votingDelivering: 12 } }));
+    const matched = await textFor(withRecall(mkDetail(nineGov()), ["muhalefet"]));
+    const plain = await textFor(mkDetail(nineGov()));
+
+    expect(matched).toContain("9 / 12 kaynak");
+    expect(matched).toContain("0 / 8 kaynak");
+    expect(matched.replace(MATCHED_SILENCE, PLAIN_SILENCE)).toBe(plain);
+  });
+});
+
 // h57-outbound-2: the card is the image readers download and post, so a column
 // that is the only thing a zone has is labelled the way the cluster page's
 // summary already labels it ('<Outlet> · köşe yazısı'); a zone with news never

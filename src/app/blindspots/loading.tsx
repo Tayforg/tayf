@@ -6,7 +6,7 @@ export default function BlindspotsLoading() {
       <div className="space-y-2">
         <div className="h-4 w-48 rounded bg-muted/60 animate-pulse" />
         <div className="h-8 w-44 rounded bg-muted/60 animate-pulse" />
-        <div className="h-4 w-96 rounded bg-muted/40 animate-pulse" />
+        <div className="h-4 w-full max-w-96 rounded bg-muted/40 animate-pulse" />
       </div>
       <div className="space-y-4">
         {Array.from({ length: 4 }, (_, i) => (

@@ -1,11 +1,15 @@
+import Link from "next/link";
+
 import { ZONE_META } from "@/lib/bias/config";
 import {
   formatPickupLag,
   formatPickupRate,
   pickupRowKind,
+  pressCodeNote,
   RELATED_ONLY_LABEL,
   relatedOnlyCountLabel,
   type DisclosurePickup,
+  type PickupTotals,
 } from "@/lib/finance/kap-pickup";
 import { PICKUP_LIMIT, getTickerPickupSafe } from "@/lib/finance/kap-pickup-query";
 import { disclosureWindowLabel, fmtWhen } from "@/lib/finance/format";
@@ -65,7 +69,44 @@ function PickupRowStatus({ p }: { p: DisclosurePickup }) {
   }
 }
 
-export async function KapPickupPanel({ ticker }: { ticker: string }) {
+/** The four headline numbers above the rows (the panel swaps them for a note when a sibling code carries the press). */
+function PickupStats({ totals, relatedOnlyNote }: { totals: PickupTotals; relatedOnlyNote: string | null }) {
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-4">
+      <div>
+        <dt className="text-muted-foreground">bildirim</dt>
+        <dd className="text-lg tabular-nums">
+          {totals.disclosures}
+          {relatedOnlyNote ? (
+            <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">{relatedOnlyNote}</span>
+          ) : null}
+        </dd>
+      </div>
+      <div>
+        <dt className="text-muted-foreground">haberi çıkan</dt>
+        <dd className="text-lg tabular-nums">
+          {totals.pickedUp} <span className="text-[10px] text-muted-foreground">({formatPickupRate(totals.pickupRate)})</span>
+        </dd>
+      </div>
+      <div>
+        <dt className="text-muted-foreground">ilk haber, medyan</dt>
+        <dd className="text-lg tabular-nums">{formatPickupLag(totals.medianFirstLagMinutes)}</dd>
+      </div>
+      <div>
+        <dt className="text-muted-foreground">kaynak dağılımı</dt>
+        <dd className="text-[13px]">
+          <span className={ZONE_META.iktidar.zoneLabel}>İktidar {totals.zones.iktidar}</span>
+          <span className="text-muted-foreground"> · </span>
+          <span className={ZONE_META.bagimsiz.zoneLabel}>Bağımsız {totals.zones.bagimsiz}</span>
+          <span className="text-muted-foreground"> · </span>
+          <span className={ZONE_META.muhalefet.zoneLabel}>Muhalefet {totals.zones.muhalefet}</span>
+        </dd>
+      </div>
+    </dl>
+  );
+}
+
+export async function KapPickupPanel({ ticker, pressCode = null }: { ticker: string; pressCode?: string | null }) {
   const data = await getTickerPickupSafe(ticker);
 
   if (data === null) {
@@ -83,43 +124,27 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
   const { totals } = data;
   const rows = data.pickups.slice(0, 8);
   const relatedOnlyNote = relatedOnlyCountLabel(totals.relatedOnly);
+  // h108-kapdisclosures-2: this code has no press of its own, a sibling has it; numbers computed from
+  // this code's mentions would read 0 / %0, so the panel names the sibling instead.
+  const note = pressCode ? pressCodeNote(pressCode) : null;
 
   return (
     <Panel
       title="Medyada yankı"
-      meta={`${disclosureWindowLabel(data.pickups.length, data.totalDisclosures, PICKUP_LIMIT)} · bildirimden sonraki 48 saat`}
+      // h108-kapdisclosures-3: the cap is about the rows READ; superseded originals are read but not listed.
+      meta={`${disclosureWindowLabel(data.pickups.length + data.superseded, data.totalDisclosures, PICKUP_LIMIT)} · bildirimden sonraki 48 saat`}
     >
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-4">
-        <div>
-          <dt className="text-muted-foreground">bildirim</dt>
-          <dd className="text-lg tabular-nums">
-            {totals.disclosures}
-            {relatedOnlyNote ? (
-              <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">{relatedOnlyNote}</span>
-            ) : null}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-muted-foreground">haberi çıkan</dt>
-          <dd className="text-lg tabular-nums">
-            {totals.pickedUp} <span className="text-[10px] text-muted-foreground">({formatPickupRate(totals.pickupRate)})</span>
-          </dd>
-        </div>
-        <div>
-          <dt className="text-muted-foreground">ilk haber, medyan</dt>
-          <dd className="text-lg tabular-nums">{formatPickupLag(totals.medianFirstLagMinutes)}</dd>
-        </div>
-        <div>
-          <dt className="text-muted-foreground">kaynak dağılımı</dt>
-          <dd className="text-[13px]">
-            <span className={ZONE_META.iktidar.zoneLabel}>İktidar {totals.zones.iktidar}</span>
-            <span className="text-muted-foreground"> · </span>
-            <span className={ZONE_META.bagimsiz.zoneLabel}>Bağımsız {totals.zones.bagimsiz}</span>
-            <span className="text-muted-foreground"> · </span>
-            <span className={ZONE_META.muhalefet.zoneLabel}>Muhalefet {totals.zones.muhalefet}</span>
-          </dd>
-        </div>
-      </dl>
+      {note && pressCode ? (
+        <p className="px-3 py-3 font-mono text-[11px] text-muted-foreground">
+          {note.before}
+          <Link href={`/ekonomi/${pressCode}`} className="text-brand hover:underline">
+            {note.link}
+          </Link>
+          {note.after}
+        </p>
+      ) : (
+        <PickupStats totals={totals} relatedOnlyNote={relatedOnlyNote} />
+      )}
 
       <ol className="divide-y divide-border/70">
         {rows.map((p) => (
@@ -137,14 +162,17 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
                 {p.subject ?? "Bildirim"}
                 <NewTabHint />
               </a>
-              <p className="text-[10px] text-muted-foreground">
-                <PickupRowStatus p={p} />
-                {p.overlapping > 0 ? (
-                  <span className="ml-1 text-muted-foreground">
-                    (yakın tarihli {p.overlapping} bildirimle ortak pencere)
-                  </span>
-                ) : null}
-              </p>
+              {/* With a sibling's press named above, an issuer row has no verdict of its own to give. */}
+              {note && p.issuer ? null : (
+                <p className="text-[10px] text-muted-foreground">
+                  <PickupRowStatus p={p} />
+                  {!note && p.overlapping > 0 ? (
+                    <span className="ml-1 text-muted-foreground">
+                      (yakın tarihli {p.overlapping} bildirimle ortak pencere)
+                    </span>
+                  ) : null}
+                </p>
+              )}
             </div>
           </li>
         ))}
@@ -156,7 +184,8 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
         Otomatik ilgi denetiminin şirketle ilgisiz bulduğu eşleşmeler çıkarılır. Birbirine 48 saatten yakın
         bildirimlerde aynı haber her birine sayılır. Devre kesici bildirimleri hariçtir. Hisseyi yalnızca anan
         bildirimlerde (Takasbank ve MKK listeleri, işlem yasağı gibi) şirketin kendi bildirimi olmadığından yankı
-        hesaplanmaz; toplamlara girmezler.
+        hesaplanmaz; toplamlara girmezler. Sonradan düzeltilen bir bildirimin yalnızca düzeltilmiş hâli sayılır;
+        ilk hâli listelenmez ve toplamlara girmez.
       </p>
     </Panel>
   );

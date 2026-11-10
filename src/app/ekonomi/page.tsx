@@ -6,7 +6,9 @@ import { BreakerStrip } from "@/components/finance/breaker-strip";
 import { DataNote } from "@/components/finance/data-note";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
+import { disclosureClassLabel } from "@/lib/finance/disclosure-class";
 import { fmtWhen, pctChange } from "@/lib/finance/format";
+import { filerName } from "@/lib/finance/kap-pickup";
 import { optionalRead } from "@/lib/finance/optional-read";
 import {
   fetchCircuitBreakers,
@@ -49,8 +51,6 @@ export const metadata: Metadata = staticPageMetadata({
 // goes through optionalRead and degrades to its section's empty state (the
 // strip says it is unavailable; a move without stats is "—"; a missing
 // reference price drops the "since the headline" value).
-
-const CLASS_LABEL: Record<string, string> = { FR: "finansal rapor", ODA: "özel durum", DG: "duyuru", DKB: "diğer" };
 
 export default async function EkonomiPage() {
   // Row times are formatted against Date.now(); connection() tells PPR this
@@ -225,9 +225,11 @@ export default async function EkonomiPage() {
                         </Link>
                       ))}
                       {d.stockCodes.length > 3 ? <span className="text-muted-foreground">+{d.stockCodes.length - 3}</span> : null}
+                      {/* h108-kapdisclosures-1: the chips are the rated companies; say whose notice it is. */}
+                      {d.agencyFiled ? <span className="text-muted-foreground">{`· ${filerName(d)} bildirimi`}</span> : null}
                       {d.disclosureClass ? (
                         <span className={d.disclosureClass === "FR" ? "text-amber-400" : "text-muted-foreground"}>
-                          {CLASS_LABEL[d.disclosureClass] ?? d.disclosureClass.toLowerCase()}
+                          {disclosureClassLabel(d.disclosureClass)}
                         </span>
                       ) : null}
                       <a
