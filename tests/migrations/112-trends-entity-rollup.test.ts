@@ -31,6 +31,21 @@ function stripComments(sql: string): string {
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * The four (token, entity) pairs migration 191 added to the vocabulary after 112
+ * shipped (h110-trendsdata-1: "Bakan Şimşek", "Bakanı Şimşek", "Bakan Fidan",
+ * "Bakanı Fidan"). 112's emap is history and stays as it was written; the current
+ * emap is pinned against RISING_ENTITIES by tests/migrations/191. This list is the
+ * one explicit exemption, so 112's parity keeps holding for every other token and
+ * the vocabulary can still grow.
+ */
+const MINISTER_FORMS_191: ReadonlyArray<readonly [string, string]> = [
+  ["bakan simsek", "simsek"],
+  ["bakani simsek", "simsek"],
+  ["bakan fidan", "fidan"],
+  ["bakani fidan", "fidan"],
+];
+
 describe("migration 112_trends_entity_rollup.sql (SQL contract)", () => {
   let sql = "";
   let code = "";
@@ -246,7 +261,7 @@ describe("migration 112_trends_entity_rollup.sql (SQL contract)", () => {
     expect(code).toMatch(/lower\s*\(\s*(?:pg_catalog\.)?translate\s*\(/i);
   });
 
-  it("the emap VALUES pairs deep-equal the flattened RISING_ENTITIES (token, key)", () => {
+  it("the emap VALUES pairs deep-equal the flattened RISING_ENTITIES (token, key) minus the 191 minister forms", () => {
     const span =
       /emap\s*\(\s*token\s*,\s*entity\s*\)\s+as\s*\(\s*values([\s\S]*?)\)\s*,\s*day_articles\s+as/i.exec(
         code,
@@ -259,10 +274,18 @@ describe("migration 112_trends_entity_rollup.sql (SQL contract)", () => {
     while ((m = pairRe.exec(body)) !== null) {
       pairs.push([m[1]!, m[2]!]);
     }
+    const isMinisterForm191 = (t: string, k: string) =>
+      MINISTER_FORMS_191.some(([token, key]) => token === t && key === k);
     const expected = RISING_ENTITIES.flatMap((e) =>
       e.tokens.map((t): [string, string] => [t, e.key]),
-    );
+    ).filter(([t, k]) => !isMinisterForm191(t, k));
     expect(pairs).toEqual(expected);
+    // The exemption is exactly the four pairs: each is in the vocabulary now and
+    // not in 112's emap, so it can neither hide a missing token nor a stray one.
+    for (const [t, k] of MINISTER_FORMS_191) {
+      expect(RISING_ENTITIES.some((e) => e.key === k && e.tokens.includes(t)), `${t} in RISING_ENTITIES`).toBe(true);
+      expect(pairs.some(([pt, pk]) => pt === t && pk === k), `${t} not in 112's emap`).toBe(false);
+    }
     // Nothing else hides in the VALUES body besides those pairs.
     const residue = body.replace(pairRe, "").replace(/[\s,]/g, "");
     expect(residue).toBe("");

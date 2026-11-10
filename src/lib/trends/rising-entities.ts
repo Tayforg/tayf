@@ -25,8 +25,10 @@
 //   * cities and clubs (a city is a place, not a story; clubs are sport noise)
 //   * religion terms
 //   * generic or ambiguous words: ozel, iyi, tip, gelecek, vatan, adalet,
-//     saglik, yilmaz, guler, yavas, simsek on its own (only "mehmet simsek"),
-//     altin, kur, euro, avrupa, turkiye, bakan, secim, ekonomi
+//     saglik, yilmaz, guler, yavas, simsek and fidan on their own (only the full
+//     name and the two Bakan / Bakanı bigrams: "mehmet simsek", "bakan simsek",
+//     "bakani simsek", "hakan fidan", "bakan fidan", "bakani fidan"), altin, kur,
+//     euro, avrupa, turkiye, bakan, secim, ekonomi
 //   * years and "pct"-style figures
 // Known residual ambiguity, accepted: "mit" (MİT, but also Turkish "myth"),
 // "cin" (Çin, but also "genie"), "deva" (DEVA Partisi, but also "cure").
@@ -120,16 +122,18 @@ export type RisingHubSpec = {
    */
   requires?: readonly string[];
   /**
-   * Single words that, standing directly in front of the entity's word, make it
+   * Words that, standing directly in front of the entity's word, make it
    * someone else's: "ABD Dışişleri Bakanı" and "İran Dışişleri Sözcüsü" are
-   * foreign ministries, not the Turkish one. Folded lowercase ASCII words
-   * (entries that fold to more than one word are dropped). entity-hub.ts emits
-   * one fixed-length negative lookbehind per word, `(?<!abd\s)(?<!iran\s)`,
-   * right before the base word, so the word counts only where it is NOT directly
-   * preceded by a listed word and one whitespace character. Unlike `excludes`
-   * it looks at the word's own neighbour, not at the whole story: a story that
-   * also names the Turkish ministry once, unprefixed, still matches. It applies
-   * to every form, `trusted` or not.
+   * foreign ministries, not the Turkish one. Folded lowercase ASCII entries of
+   * ONE word, or of TWO words separated by a single space ("basbakani ve", for
+   * "Katar Başbakanı ve Dışişleri Bakanı"); an entry that folds to three or more
+   * words is dropped. entity-hub.ts emits one fixed-length negative lookbehind
+   * per entry, `(?<!abd\s)(?<!basbakani\sve\s)`, right before the base word,
+   * so the word counts only where it is NOT directly preceded by a listed entry
+   * and one whitespace character. Unlike `excludes` it looks at the word's own
+   * neighbour, not at the whole story: a story that also names the Turkish
+   * ministry once, unprefixed, still matches. It applies to every form,
+   * `trusted` or not.
    */
   notAfter?: readonly string[];
   /**
@@ -197,8 +201,16 @@ export const RISING_ENTITIES: readonly RisingEntity[] = [
   { key: "bahceli", label: "Bahçeli", tokens: ["bahceli"] },
   { key: "kilicdaroglu", label: "Kılıçdaroğlu", tokens: ["kilicdaroglu"] },
   { key: "mansur-yavas", label: "Mansur Yavaş", tokens: ["mansur yavas"] },
-  { key: "simsek", label: "Mehmet Şimşek", tokens: ["mehmet simsek"] },
-  { key: "fidan", label: "Hakan Fidan", tokens: ["hakan fidan"] },
+  // The two ministers are printed with their title far more often than with the full name ("Bakan Şimşek",
+  // "Bakanı Fidan": 60 against 12 and 48 against 10 on 5 Kasım, h110-trendsdata-1), so the Bakan and Bakanı
+  // bigrams count too (migration 191). The bare surnames stay out: Berhan and Hülya Şimşek, a "fidan"
+  // (sapling) and a lightning "şimşek" are not the minister, and no title word before them is.
+  {
+    key: "simsek",
+    label: "Mehmet Şimşek",
+    tokens: ["mehmet simsek", "bakan simsek", "bakani simsek"],
+  },
+  { key: "fidan", label: "Hakan Fidan", tokens: ["hakan fidan", "bakan fidan", "bakani fidan"] },
   { key: "yerlikaya", label: "Ali Yerlikaya", tokens: ["yerlikaya"] },
   { key: "babacan", label: "Babacan", tokens: ["babacan"] },
   { key: "davutoglu", label: "Davutoğlu", tokens: ["davutoglu"] },
@@ -268,7 +280,9 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
   // duyurdu" (17), /gundem/meb every "Milli Eğitim Bakanı (Yusuf) Tekin" story, msb and fidan the "Bakanı"
   // headlines. 'Bakan Şimşek' and 'Bakanı Fidan' are as unambiguous as the full name (Berhan and Hülya
   // Şimşek, Yılmaz Şimşek the governor and Şimşekspor never follow "Bakan"), so these two carry no guard.
-  // Hub-only: the rollup tokens (migration 112's emap) are untouched.
+  // Hub-only when written: the rollup tokens were untouched then. Migration 191 (h110-trendsdata-1) gave the
+  // rollup the same two Bakan / Bakanı bigrams, so the card's count and the hub it links to now spell the
+  // minister alike.
   simsek: { aliases: ["Mehmet Şimşek", "Bakan Şimşek", "Bakanı Şimşek"] },
   fidan: { aliases: ["Hakan Fidan", "Bakan Fidan", "Bakanı Fidan"] },
   // "MEB" and "MSB" name the Turkish ministry on their own (trusted), the long forms are vetoed by another
@@ -434,6 +448,16 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
   dolar: { hubMatch: "prefix", quantityGuard: true },
   // The Turkish ministry only: "Dışişleri" right after a foreign country word
   // ("ABD Dışişleri Bakanı Rubio", "İran Dışişleri Sözcüsü") is that country's.
+  // h110-trendsdata-2 (2026-11-10): 9 of the 20 cards of page 1 were other countries' ministers, because the
+  // list was the countries someone thought of on 5 Kasım. The additions are every foreign state or bloc the
+  // 30-day tally of live clusters finds directly before "Dışişleri" (hollanda ... belize, g7, ab) and
+  // the two compounds "Başbakanı ve" / "Yardımcısı ve" ("Katar Başbakanı ve Dışişleri Bakanı", "İtalya
+  // Başbakan Yardımcısı ve Dışişleri Bakanı"). Not added, on purpose: a bare "ve" ("Cumhurbaşkanı Erdoğan ve
+  // Dışişleri Bakanı Fidan" is the Turkish ministry), "eski", "tbmm" (TBMM Dışişleri Komisyonu), "tdt" and
+  // "teşkilatı" (Türk Devletleri Teşkilatı), "r4"/"e3" (the R4+E3 meeting Fidan hosted in İstanbul), "iit",
+  // "meclis", "cumhuriyeti" ("Türkiye Cumhuriyeti Dışişleri"), "g20" (Turkey is a G20 member: "Bakan Fidan,
+  // G20 Dışişleri Bakanları Toplantısı" is the Turkish minister; 22c347c7 matched only through it). The guard
+  // is per occurrence: a story that names the Turkish ministry anywhere without a prefix still matches.
   disisleri: {
     notAfter: [
       "abd",
@@ -469,6 +493,33 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "italya",
       "macaristan",
       "avrupa",
+      "hollanda",
+      "kuba",
+      "filistin",
+      "urdun",
+      "yemen",
+      "isvicre",
+      "meksika",
+      "finlandiya",
+      "kazakistan",
+      "g7",
+      "ab",
+      "belcika",
+      "bae",
+      "bulgaristan",
+      "irak",
+      "kanada",
+      "arabistan",
+      "krallik",
+      "lanka",
+      "libya",
+      "norvec",
+      "portekiz",
+      "umman",
+      "bahreyn",
+      "belize",
+      "basbakani ve",
+      "yardimcisi ve",
     ],
   },
   // Borsa İstanbul and BIST name the exchange on their own (trusted). The bare

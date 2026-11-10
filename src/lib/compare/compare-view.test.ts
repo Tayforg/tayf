@@ -5,7 +5,7 @@ import type {
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
 import type { WireSignal } from "@/lib/clusters/wire";
-import type { BiasDistribution, Source } from "@/types";
+import type { BiasDistribution, MediaDnaZone, Source } from "@/types";
 
 import type { ParsedSide } from "./compare-params";
 import {
@@ -53,12 +53,12 @@ function makeSource(
   };
 }
 
-function makeMember(source: Source, n = 1): ClusterDetailMember {
+function makeMember(source: Source, n = 1, title?: string): ClusterDetailMember {
   return {
     source,
     article: {
       id: `a-${source.slug}-${n}`,
-      title: `${source.name} başlığı ${n}`,
+      title: title ?? `${source.name} başlığı ${n}`,
       url: `https://example.com/${source.slug}/${n}`,
       published_at: "2026-10-22T11:05:00.000Z",
       image_url: null,
@@ -73,6 +73,9 @@ function makeDetail(
     members?: ClusterDetailMember[];
     is_blindspot?: boolean;
     wire?: Partial<WireSignal>;
+    title_tr?: string;
+    title_method?: ClusterDetail["cluster"]["title_method"];
+    recallMatchedZones?: MediaDnaZone[];
   } = {},
 ): ClusterDetail {
   const distribution = emptyDistribution();
@@ -82,9 +85,9 @@ function makeDetail(
   return {
     cluster: {
       id: ID,
-      title_tr: "Deneme hikâyesi",
+      title_tr: overrides.title_tr ?? "Deneme hikâyesi",
       title_original: null,
-      title_method: null,
+      title_method: overrides.title_method ?? null,
       summary_tr: "özet",
       article_count: 3,
       bias_distribution: distribution,
@@ -107,6 +110,10 @@ function makeDetail(
     },
     blindspotSuppressed: false,
     blindspotRecallVetoed: false,
+    // Absent unless given: a detail cached before the field existed has none.
+    ...(overrides.recallMatchedZones !== undefined
+      ? { recallMatchedZones: overrides.recallMatchedZones }
+      : {}),
   };
 }
 
@@ -191,6 +198,11 @@ describe("toSideState", () => {
     expect(state.view.nonVoting).toEqual([]);
     expect(state.view.nonVotingZones).toEqual([]);
     expect(state.view.wire).toEqual({ isWire: false, memberCount: 1, uniqueTexts: 7 });
+    // h110-karsilastir-1: the three fields of a plain Turkish cluster that was
+    // never looked up by Jev recall are the neutral ones.
+    expect(state.view.languageIsolated).toBe(false);
+    expect(state.view.recallMatchedZones).toEqual([]);
+    expect(state.view.headlineLang).toBeUndefined();
   });
 
   it("carries the zones of the non-voting members through to the view", () => {
@@ -239,6 +251,122 @@ describe("toSideState", () => {
     if (state.kind !== "ok") return;
     expect(state.view.wire).toEqual({ isWire: true, memberCount: 4, uniqueTexts: 2 });
     expect(state.view.sourceCount).toBe(2);
+  });
+
+  describe("h110-karsilastir-1: language and recall facts the cluster page already derives", () => {
+    const aNews = () => makeSource("a-news", "A News", "gov_leaning");
+    const trtWorld = () => makeSource("trt-world", "TRT World", "gov_leaning");
+    const turkish = () => makeSource("sozcu", "Sözcü", "opposition");
+
+    function okView(detail: ClusterDetail) {
+      const state = toSideState(ID_SIDE, { status: "fulfilled", value: detail });
+      expect(state.kind).toBe("ok");
+      if (state.kind !== "ok") throw new Error("expected an ok side");
+      return state.view;
+    }
+
+    it("marks a cluster whose every member is an English outlet as language-isolated with an 'en' headline", () => {
+      const view = okView(
+        makeDetail({ members: [makeMember(aNews()), makeMember(trtWorld())] }),
+      );
+      expect(view.languageIsolated).toBe(true);
+      expect(view.headlineLang).toBe("en");
+    });
+
+    it("does not isolate a mixed Turkish and English cluster", () => {
+      const view = okView(
+        makeDetail({ members: [makeMember(aNews()), makeMember(turkish())] }),
+      );
+      expect(view.languageIsolated).toBe(false);
+    });
+
+    it("counts a non-voting English member too (voting or not, as the cluster page does)", () => {
+      const view = okView(
+        makeDetail({
+          members: [
+            makeMember(aNews()),
+            makeMember(makeSource("mfa-turkey", "MFA Türkiye", "gov_leaning", "niche")),
+          ],
+        }),
+      );
+      expect(view.languageIsolated).toBe(true);
+    });
+
+    it("never isolates an empty member list", () => {
+      const view = okView(makeDetail({ members: [] }));
+      expect(view.languageIsolated).toBe(false);
+      expect(view.headlineLang).toBeUndefined();
+    });
+
+    it("gives a mixed cluster an 'en' headline only when an English member's title IS the headline", () => {
+      const english = "NATO chief visits Türkiye ahead of key summit";
+      const view = okView(
+        makeDetail({
+          title_tr: english,
+          members: [makeMember(aNews(), 1, english), makeMember(turkish(), 1, "NATO Genel Sekreteri ziyaret etti")],
+        }),
+      );
+      expect(view.languageIsolated).toBe(false);
+      expect(view.headlineLang).toBe("en");
+    });
+
+    it("gives a mixed cluster with a Turkish headline no lang", () => {
+      const view = okView(
+        makeDetail({
+          title_tr: "NATO Genel Sekreteri ziyaret etti",
+          members: [
+            makeMember(aNews(), 1, "NATO chief visits Türkiye ahead of key summit"),
+            makeMember(turkish(), 1, "NATO Genel Sekreteri ziyaret etti"),
+          ],
+        }),
+      );
+      expect(view.headlineLang).toBeUndefined();
+    });
+
+    it("lets a Turkish member that carries the same title veto the 'en' headline", () => {
+      const shared = "NATO";
+      const view = okView(
+        makeDetail({
+          title_tr: shared,
+          members: [makeMember(aNews(), 1, shared), makeMember(turkish(), 1, shared)],
+        }),
+      );
+      expect(view.headlineLang).toBeUndefined();
+    });
+
+    it("leaves the headline of an LLM rewrite undefined, even for an all-English cluster", () => {
+      const view = okView(
+        makeDetail({
+          title_method: "llm",
+          members: [makeMember(aNews()), makeMember(trtWorld())],
+        }),
+      );
+      expect(view.languageIsolated).toBe(true);
+      expect(view.headlineLang).toBeUndefined();
+    });
+
+    it("leaves a contentless headline undefined (the page prints it as text without a language claim)", () => {
+      for (const title_tr of ["—", "...", "", "   "]) {
+        const view = okView(
+          makeDetail({ title_tr, members: [makeMember(aNews()), makeMember(trtWorld())] }),
+        );
+        expect(view.headlineLang).toBeUndefined();
+      }
+    });
+
+    it("passes the recall-matched zones through", () => {
+      const view = okView(makeDetail({ recallMatchedZones: ["muhalefet"] }));
+      expect(view.recallMatchedZones).toEqual(["muhalefet"]);
+      const two = okView(makeDetail({ recallMatchedZones: ["bagimsiz", "iktidar"] }));
+      expect(two.recallMatchedZones).toEqual(["bagimsiz", "iktidar"]);
+    });
+
+    it("reads a missing recallMatchedZones (a cache entry from before the field, a failed lookup) as []", () => {
+      const detail = makeDetail();
+      expect("recallMatchedZones" in detail).toBe(false);
+      expect(okView(detail).recallMatchedZones).toEqual([]);
+      expect(okView(makeDetail({ recallMatchedZones: [] })).recallMatchedZones).toEqual([]);
+    });
   });
 });
 
