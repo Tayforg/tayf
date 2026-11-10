@@ -108,6 +108,8 @@ export function entityHubNote(total: number, shown: number): string {
 //     that also names "Dışişleri Bakanı Fidan" unprefixed still matches. Every
 //     lookbehind is a single fixed-length literal, so the pattern is valid in
 //     JS and in PostgreSQL ARE and runs in linear time on both (100k characters).
+//     Since 2026-11-10 (h110-trendsdata-2) an entry of two words is one literal
+//     too, `(?<!basbakani\sve\s)`, for "Katar Başbakanı ve Dışişleri Bakanı".
 // Postgres AREs support (?=...), (?!...) and (?<!...) (checked on production). A
 // pattern starts with `^`, never `(?`, which Postgres would read as embedded
 // options.
@@ -199,6 +201,35 @@ export function entityHubNote(total: number, shown: number): string {
 // neutral title says "Almanya Dışişleri", "Dışişleri de sessiz kaldı" in an
 // Israeli story, "Başbakan Yardımcısı ve Dışişleri Bakanı" compounds) and
 // countries that are not in the list (Yemen, Küba, Norveç, Filistin, İsviçre).
+// h110-trendsdata-2 (2026-11-10) closed the two gaps it names: the countries, and the compounds.
+//
+// disisleri (h110-trendsdata-2, 2026-11-10), measured read-only through entity_cluster_ids_v3 with the app's exact
+// arrays (queries 'dışişleri' and 'dişişleri'), 14-day window, live clusters; the JS twin and PostgreSQL agree on
+// the 8 behaviour samples of entity-hub.test.ts (4 out, 4 in) and on all 102 old rows, and the pattern compiles in
+// Postgres (457 -> 830 characters, 0.4 s for the 102-row scan):
+//   disisleri  102 -> 87   15 dropped, 0 added. 9 of the 20 cards of page 1 were another country's minister and all
+//                          9 are gone (Fransa 043232d8 and ABD 5bc79ba5 through 'G7 Dışişleri Bakanları' in the lead,
+//                          Katar accec1ab and b07dcedc through 'Başbakanı ve', Ürdün 3b682787, Filistin 0818550a,
+//                          Küba 46163338, Hollanda 9f791a90, İtalya 122617de through 'Yardımcısı ve'). The other 6:
+//                          Katar 15396627, Yemen 59305767 and 1b57abb6, İsviçre 44272989, Finlandiya 6b80373d and
+//                          Kazakistan ac27be25. Every one was read by hand: none of the 15 is the Turkish ministry,
+//                          each is another state's (or, for the G7 pair, another state's minister at a G7 meeting).
+//   The new page 1 is the next 9 clusters by first_published (all the Turkish ministry, Fidan or Keçeli, plus one
+//   North Korean story, 51101680: its lead says 'Kuzey Kore ... tepki gösterdi. Dışişleri Bakanlığı, ...' with no
+//   country word right before 'Dışişleri', the residue of a one-word lookbehind that stays).
+//   'g20' is not in the list (Turkey is a G20 member). With it the hub dropped 19, not 15 (102 -> 83): the four
+//   G20 Dışişleri Bakanları meeting stories 14916071, 447e9bc7, 77b5d6f6 and 22c347c7. The last is the Turkish
+//   minister ('Fidan ... G20 dışişleri bakanları toplantısına katıldı'; its summary lead glues the sentence,
+//   'katıldıDışişleri Bakanı Hakan Fidan', where `\m` finds no word start, so only the G20 occurrences could match
+//   it). Keeping 'g20' out brings all four back; the other three are G20 meeting stories that do not name the Turkish
+//   ministry (Lavrov and the family photo, the closing statement), a known residue of that choice.
+// The tally behind the list (word directly before 'dışişleri', live clusters, 30 days, by clusters): iran 50, abd 28,
+// tbmm 20, rusya 16, ve 14, g20 13, kktc 10, cin 9, fransa 9, almanya 7, yemen 7, belçika 6, e3 6, filistin 4, kuba 3,
+// bae 2, bulgaristan 2, finlandiya 2, g7 2, hollanda 2, irak 2, isviçre 2, kanada 2, ürdün 2 ... The Turkish or
+// Turkish-hosted words are left out: ve, eski, tbmm, meclis (TBMM Dışişleri Komisyonu), tdt and teşkilatı (Türk
+// Devletleri Teşkilatı), r4 and e3 (the R4+E3 meeting Fidan hosted), iit, cumhuriyeti, anand (the Canadian
+// minister visiting the Turkish ministry), and g20 (Turkey is a G20 member: 'Bakan Fidan, G20 Dışişleri Bakanları
+// Toplantısı' is the Turkish minister).
 //
 // erdogan and akp (h56-entities-1 and h56-entities-2, 2026-11-06), measured read-only with the app's exact arrays, 14-day
 // window, live clusters; the JS twin and PostgreSQL agree on all 421 candidate rows of erdogan:
@@ -377,21 +408,28 @@ function guardAlternatives(phrases: readonly string[] | undefined): string[] {
 }
 
 /**
- * The `notAfter` block: one fixed-length negative lookbehind per word,
+ * The `notAfter` block: one fixed-length negative lookbehind per entry,
  * `(?<!abd\s)(?<!iran\s)`, so the base word that follows is not directly
- * preceded by a listed word and one whitespace character. Only an entry that
- * folds to exactly ONE word is used (a phrase, or an "a|b" that folds to two
- * words, is dropped), so every lookbehind is a single literal of fixed length:
- * valid in JavaScript and in PostgreSQL ARE alike. Deduped, in curated order;
- * "" when none is left.
+ * preceded by a listed word and one whitespace character. An entry that folds
+ * to exactly TWO words ("Başbakanı ve") renders `(?<!basbakani\sve\s)`: the
+ * two words joined by one literal `\s`, then the closing `\s` (h110-trendsdata-2:
+ * "Katar Başbakanı ve Dışişleri Bakanı" and "Başbakan Yardımcısı ve Dışişleri
+ * Bakanı" are a foreign minister, and "ve" alone must stay out of the list:
+ * "Cumhurbaşkanı Erdoğan ve Dışişleri Bakanı Fidan" is the Turkish one). An entry
+ * of three or more words, or one that folds to nothing, is dropped, so every
+ * lookbehind is a single literal of fixed length: valid in JavaScript and in
+ * PostgreSQL ARE alike. The words are re-joined from the folded pieces, so no
+ * metacharacter of the curated text can reach the pattern. Single-word output is
+ * byte for byte what it was before two-word entries were allowed. Deduped, in
+ * curated order; "" when none is left.
  */
 function notAfterGuard(words: readonly string[] | undefined): string {
-  const single = (words ?? [])
+  const phrases = (words ?? [])
     .map(foldedWords)
-    .filter((w) => w.length === 1)
-    .map((w) => w[0] as string);
-  return dedupe(single)
-    .map((w) => `(?<!${w}\\s)`)
+    .filter((w) => w.length === 1 || w.length === 2)
+    .map((w) => w.join("\\s"));
+  return dedupe(phrases)
+    .map((phrase) => `(?<!${phrase}\\s)`)
     .join("");
 }
 
@@ -425,7 +463,8 @@ function notAfterGuard(words: readonly string[] | undefined): string {
  *   pattern starts with `^`, never `(?`, which Postgres would read as embedded
  *   options. A trusted form ("TCMB", "TBMM") stays bare.
  *   * `notAfter`: `\m` + notAfterGuard + the first word, so "Dışişleri" does not
- *     match right behind "ABD", "İran" or another listed country word. It is
+ *     match right behind "ABD", "İran", "Başbakanı ve" or another listed
+ *     country word or two-word compound. It is
  *     part of the base, so it applies to a trusted form too, and it sits after
  *     the amount guard on a `quantityGuard` word. Unlike `excludes` it reads only
  *     the word's own neighbour: a story that names the Turkish ministry once,

@@ -4447,3 +4447,60 @@ select date_trunc('day', created_at) as day, count(*) as calls
 In the Edge Function logs: `cluster-consumer` `drain` lines of kicked runs carry `"trigger":"ingest"` and `lease_wait_ms`; a `lease_lost` of true is the lease expiring mid-drain (should be absent); `ingest` logs `[ingest] cluster kick {"status":200,"drained":N,"ms":...}` per kicked cycle. A failed kick shows in the Edge logs of `ingest` and in Sentry, NOT in `net._http_response` (see `docs/ops-heartbeat.md`).
 
 **Rollback:** `supabase secrets unset CLUSTER_KICK` first (the kicks stop at the source; no redeploy). Emergency, without touching code: `supabase secrets set CLUSTER_LEASE=off` makes the cron drain exactly the pre-190 drain and turns a stray kick into a no-op. To remove the migration: `drop function public.consumer_lease_acquire(text, text, int); drop function public.consumer_lease_release(text, text); drop table public.consumer_leases; delete from supabase_migrations.schema_migrations where version = '190'; notify pgrst, 'reload schema';`. The deployed consumer then fails open on the cron path (`PGRST202`, one warning per minute) and drains as before; redeploying the previous consumer removes the warning. Nothing depends on 190 but the lease.
+
+## 191 — "Yükselen Konular" counts the ministers under their title too (`trends_daily_entity_counts_ist_refresh` emap: "Bakan Şimşek", "Bakanı Fidan"): APPLY 191, then RUN the recompute at once, the app has no ordering
+
+**Why:** the card counted the finance and the foreign minister only under the full name (`mehmet simsek`, `hakan fidan`), while about three quarters of the headlines on them print the title and the surname. Per Istanbul day, politics scope, outlet and wire titles, legal notices excluded (read-only, 2026-11-10): Şimşek 12 stored against 60 headlines on 2026-11-05, Fidan 10 against 48, so the card undercounted 4 to 5 times and could miss a real rise that `/gundem/simsek` and `/gundem/fidan` list (h96-entityhubs-1 widened only the hubs, so the count and its destination spelled the minister differently). The stored rollup equals the full-name count exactly from 5 Kasım on (h110-trendsdata-1).
+
+**What 191 does** (function-only, one transaction, safe to re-apply): `create or replace function public.trends_daily_entity_counts_ist_refresh(p_days integer default 2)` with 182's **signature, `SECURITY DEFINER`, `search_path = ''`, `plan_cache_mode = force_custom_plan`, advisory lock, exception handler, politics-scope predicate, `guard_map` and grants** (revoke from public, anon, authenticated; execute to `service_role`), the comment restated (mentions 112, 163, 182 and 191), and 182's body **byte for byte except one place**: `emap` gains `('bakan simsek','simsek')`, `('bakani simsek','simsek')`, `('bakan fidan','fidan')` and `('bakani fidan','fidan')`, the new `RISING_ENTITIES` tokens of `simsek` and `fidan`. It creates, drops, alters and deletes nothing else, schedules no cron job and **writes no row**. `tests/migrations/191-trends-entity-rollup-minister-forms.test.ts` pins the body to 182's, the `emap` to the flattened `RISING_ENTITIES` (the current parity check; `tests/migrations/112-trends-entity-rollup.test.ts` exempts exactly these four pairs, `MINISTER_FORMS_191`), `guard_map` to 182's, and the grants. The bare surnames stay out of the vocabulary (`simsek`, `fidan` and `bakan` are banned single words): the bigram needs `bakan` or `bakani` right before the surname, so "Vali Yılmaz Şimşek", "Bakan Yumaklı fidan dikti" and a lightning "şimşek" are not hits. 303 titles of 2026-10-29 .. 2026-11-10 match only through the new bigrams and every one is the finance or the foreign minister (30 drawn at random were read by hand).
+
+**Recompute (required, run by the operator; the file does not).** Run as `service_role`, in the same session, immediately after applying:
+
+```sql
+select public.trends_daily_entity_counts_ist_refresh(10);
+```
+
+It is the rollup's own function over its own derived rows: it recomputes `trends_daily_entity_counts_ist_rollup` for today and the 9 days before with the new body (about 0.5 s per day). **No source table is written**; the upsert is the one the hourly `trends-rollup-refresh` run (`:25`) already makes for the last 2 days. It also rewrites the rows of those 10 days that 182 left on the all-category basis, so it ends 182's transitional all-category baseline early. It returns the number of rows changed; `0` means another call held the advisory lock (run it again), `-1` means it failed after a WARNING (run it again, do not ignore it). **This step must not be skipped:** the hourly run recomputes only the last 2 days, so without it the days D-2 .. D-7 of the 7-day baseline stay on the full-name basis for 8 days while the ranked day is counted with the new forms, and Şimşek or Fidan can rise falsely. Example for 2026-11-10: 17 articles against a stored baseline of 3.1 (ratio 5.4) is a false rise; after the recompute it is 17 against 15.6, no row.
+
+**Function fingerprint** (`md5(prosrc)`, `length(prosrc)`):
+
+| | md5 | length |
+|---|---|---|
+| production before 191 (read-only, 2026-11-10) = the body of 182 | `045d9ee0610f00467d1b2da1474911cc` | 8247 |
+| after 191 | `e43dce0dfd8e7bc27f5b823965cdd68f` | 8349 |
+
+**Read-only replay before shipping** (the per-day statement of 182 without its `insert`, as a plain SELECT, once with 182's `emap` and once with the four pairs; the 182 text reproduces the stored rollup for both entities from 5 Kasım on). Articles per Istanbul day, old rule then new rule:
+
+| day | `simsek` | `fidan` |
+|---|---|---|
+| 11-03 | 1 -> 15 | 2 -> 5 |
+| 11-05 | 12 -> 60 | 10 -> 48 |
+| 11-06 | 3 -> 15 | 13 -> 45 |
+| 11-07 | 1 -> 16 | 9 -> 36 |
+| 11-10 | 0 -> 17 | 0 -> 0 |
+
+The other 60 entities do not change. The gates of `src/lib/trends/rising.ts` on the recomputed series: `simsek` rises on 11-05 (60 against 2.6) and on no later day (11-10: 17 against 15.6, lift 1.4); `fidan` rises on 11-05 (48 against 16.1) and 11-06 (45 against 18.3) and not on 11-07 (36 against 20.6, ratio 1.75). The next ranked day (11-11, baseline 11-04 .. 11-10) needs at least 32 Şimşek or 38 Fidan articles.
+
+**Order:** apply `191_trends_entity_rollup_minister_forms.sql` (`supabase db push`, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/191_trends_entity_rollup_minister_forms.sql`; operator), run the recompute above immediately, then check the verify block. The app change (the tokens in `src/lib/trends/rising-entities.ts`) reads no table and has no order: it feeds only the related-clusters stems, which already held these words through the hub aliases. No Edge Function deploy.
+
+**Verify** (read-only):
+
+```sql
+select md5(prosrc), length(prosrc), prosecdef, proconfig::text, proacl::text
+  from pg_proc where oid = 'public.trends_daily_entity_counts_ist_refresh(integer)'::regprocedure;
+-- e43dce0dfd8e7bc27f5b823965cdd68f, 8349, t, {"search_path=\"\"",plan_cache_mode=force_custom_plan}, {postgres=X/postgres,service_role=X/postgres}
+select has_function_privilege('anon', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute'),
+       has_function_privilege('service_role', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute');   -- f, f, t
+select version, name from supabase_migrations.schema_migrations where version = '191';   -- 1 row
+-- after the recompute: the ten days on the new basis (matches the replay table)
+select day, entity, count from public.trends_daily_entity_counts_ist_rollup
+ where entity in ('simsek', 'fidan') and day >= (now() at time zone 'Europe/Istanbul')::date - 9
+ order by entity, day;
+select jobid, status, return_message, start_time, end_time from cron.job_run_details
+ where jobid = (select jobid from cron.job where jobname = 'trends-rollup-refresh') order by runid desc limit 3;
+```
+
+Then `GET /trends`: no Şimşek or Fidan row unless the replayed gates pass for the day.
+
+**Rollback** (nothing else depends on 191; one transaction): re-run the function statements of `182_trends_entity_rollup_politics_scope.sql` (section 1: its `create or replace function`, `comment on function`, `revoke` and `grant`; it restores `md5(prosrc)` `045d9ee0610f00467d1b2da1474911cc`, length 8247), then remove ledger row 191 (`delete from supabase_migrations.schema_migrations where version = '191';`), then run `select public.trends_daily_entity_counts_ist_refresh(10);` again so the rollup is back on full-name counts, and put the tokens of `simsek` and `fidan` in `rising-entities.ts` back (the parity test fails otherwise). The ACL does not change in either direction.

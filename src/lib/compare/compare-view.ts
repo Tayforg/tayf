@@ -8,7 +8,14 @@ import type {
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
 import { partitionByVote } from "@/lib/sources/kind";
+import {
+  clusterTextLang,
+  headlineLang as memberHeadlineLang,
+  isLanguageIsolatedCluster,
+  sourceLang,
+} from "@/lib/sources/source-language";
 import type { BiasDistribution, MediaDnaZone } from "@/types";
+import { isContentlessTitle } from "../../../supabase/functions/_shared/rss/entities";
 
 import { COMPARE_UUID_RE, type ParsedSide } from "./compare-params";
 
@@ -36,6 +43,28 @@ export interface SideView {
    */
   nonVotingZones: MediaDnaZone[];
   wire: SideWire;
+  /**
+   * True when EVERY member (voting or not) is an English-language outlet: such
+   * a cluster never met the Turkish zones, so an empty zone reads "not compared
+   * with Turkish sources", not "no source" (h110-karsilastir-1; the cluster
+   * page's `isLanguageIsolatedCluster`).
+   */
+  languageIsolated: boolean;
+  /**
+   * Zones Jev's recall stage matched with this story's event, already cut down
+   * to the cluster page's empty columns (`ClusterDetail.recallMatchedZones`).
+   * [] for a detail cached before the field existed or after a failed lookup.
+   * Words only: an empty roster of such a zone reads "benzer haber başka
+   * kümede olabilir" instead of "no source".
+   */
+  recallMatchedZones: MediaDnaZone[];
+  /**
+   * `'en'` when the headline is English text on a Turkish page (WCAG 3.1.2),
+   * otherwise undefined so React omits the attribute. The cluster page's rule
+   * for its <h1>: never for the neutral LLM rewrite or a contentless title,
+   * else the all-English member rule, else the headline-is-a-member's-title rule.
+   */
+  headlineLang: "en" | undefined;
 }
 
 export type SideState =
@@ -128,6 +157,17 @@ export function toSideState(
   }
 
   const { roster, nonVoting, nonVotingZones } = rosterByZone(members);
+  const sources = members.map((m) => m.source);
+  // Same rule as the cluster page's <h1> (src/app/cluster/[id]/page.tsx): the
+  // LLM rewrite and a title with no letter or digit are never English text.
+  const headlineLang =
+    cluster.title_method === "llm" || isContentlessTitle(cluster.title_tr)
+      ? undefined
+      : (clusterTextLang(sources) ??
+        memberHeadlineLang(
+          cluster.title_tr,
+          members.map((m) => ({ title: m.article.title, lang: sourceLang(m.source) })),
+        ));
   return {
     kind: "ok",
     view: {
@@ -145,6 +185,9 @@ export function toSideState(
         memberCount: wire.memberCount,
         uniqueTexts: wire.effectiveArticleCount,
       },
+      languageIsolated: isLanguageIsolatedCluster(sources),
+      recallMatchedZones: detail.recallMatchedZones ?? [],
+      headlineLang,
     },
   };
 }

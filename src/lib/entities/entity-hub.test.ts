@@ -245,11 +245,12 @@ function excludeAlt(exclude: string): string {
 
 /**
  * Test-side restatement of the `notAfter` rule, deliberately not imported: one
- * fixed-length negative lookbehind per word, `(?<!abd\s)(?<!iran\s)`, sitting
- * right after `\m` and before the base word.
+ * fixed-length negative lookbehind per entry, `(?<!abd\s)(?<!iran\s)`, sitting
+ * right after `\m` and before the base word. An entry of two words renders as
+ * `(?<!basbakani\sve\s)` (h110-trendsdata-2).
  */
 function notAfterLookbehinds(words: readonly string[]): string {
-  return words.map((w) => `(?<!${w}\\s)`).join("");
+  return words.map((w) => `(?<!${w.split(" ").join("\\s")}\\s)`).join("");
 }
 
 /** The foreign-country words in front of which "Dışişleri" is not the Turkish ministry (the spec, restated). */
@@ -287,6 +288,38 @@ const DISISLERI_NOT_AFTER = [
   "italya",
   "macaristan",
   "avrupa",
+  // h110-trendsdata-2 (2026-11-10): the foreign states and blocs the 30-day tally of live clusters finds directly
+  // before "Dışişleri" and the list missed, then the two-word compounds "Katar Başbakanı ve Dışişleri Bakanı" and
+  // "İtalya Başbakan Yardımcısı ve Dışişleri Bakanı". Not here on purpose: a bare "ve", "eski", "tbmm", "tdt", "r4",
+  // "e3" and "iit" (Turkish or Turkish-hosted meetings), and "g20" (Turkey is a member: "Bakan Fidan, G20
+  // Dışişleri Bakanları Toplantısı" is the Turkish minister).
+  "hollanda",
+  "kuba",
+  "filistin",
+  "urdun",
+  "yemen",
+  "isvicre",
+  "meksika",
+  "finlandiya",
+  "kazakistan",
+  "g7",
+  "ab",
+  "belcika",
+  "bae",
+  "bulgaristan",
+  "irak",
+  "kanada",
+  "arabistan",
+  "krallik",
+  "lanka",
+  "libya",
+  "norvec",
+  "portekiz",
+  "umman",
+  "bahreyn",
+  "belize",
+  "basbakani ve",
+  "yardimcisi ve",
 ] as const;
 
 /** The family members whose name vetoes the bare "Erdoğan" (folded; h56-entities-1, the spec restated). */
@@ -693,14 +726,60 @@ describe("entityHubPatterns (exact runtime values)", () => {
       expect(entityHubPatterns(bare, { aliases: ["Xyz"] })).toEqual(["\\mxyz\\M"]);
     });
 
-    it("keeps only single words, so every lookbehind stays one fixed-length alternative", () => {
-      // 'a|b' and 'd(e)' fold to two words and 'two words' is a phrase: all dropped.
-      // 'c.*' folds to the single word 'c'; no metacharacter reaches the pattern.
+    it("keeps entries of one or two words, so every lookbehind stays one fixed-length literal", () => {
+      // 'a|b', 'd(e)' and 'two words' fold to two words and are kept as `w1\sw2\s`; 'c.*' folds to the single
+      // word 'c'. No metacharacter reaches the pattern: the words are re-joined with a literal `\s`.
       const out = entityHubPatterns(bare, {
         aliases: ["Xyz"],
         notAfter: ["a|b", "c.*", "d(e)", "two words"],
       });
-      expect(out).toEqual(["\\m(?<!c\\s)xyz\\M"]);
+      expect(out).toEqual(["\\m(?<!a\\sb\\s)(?<!c\\s)(?<!d\\se\\s)(?<!two\\swords\\s)xyz\\M"]);
+    });
+
+    it("drops an entry of three or more words (h110-trendsdata-2)", () => {
+      expect(
+        entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["a b c", "one two three four", "abd"] }),
+      ).toEqual(["\\m(?<!abd\\s)xyz\\M"]);
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["a b c"] })).toEqual(["\\mxyz\\M"]);
+    });
+
+    it("renders a two-word entry as one fixed-length `(?<!w1\\sw2\\s)` (h110-trendsdata-2)", () => {
+      // The spec's own example: ['abd', 'basbakani ve', 'a b c'] -> '(?<!abd\s)(?<!basbakani\sve\s)'.
+      expect(
+        entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["abd", "basbakani ve", "a b c"] }),
+      ).toEqual(["\\m(?<!abd\\s)(?<!basbakani\\sve\\s)xyz\\M"]);
+      // folded and deduped like a single word, however the phrase is spelled
+      expect(
+        entityHubPatterns(bare, {
+          aliases: ["Xyz"],
+          notAfter: ["Başbakanı ve", "BAŞBAKANI  VE", "başbakanı, ve", "Yardımcısı ve"],
+        }),
+      ).toEqual(["\\m(?<!basbakani\\sve\\s)(?<!yardimcisi\\sve\\s)xyz\\M"]);
+    });
+
+    it("a two-word lookbehind blocks the word only right behind the whole phrase", () => {
+      const pat = pgPatternToJs(
+        entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["abd", "basbakani ve"] })[0] as string,
+      );
+      expect(pat.test("katar basbakani ve xyz bakani")).toBe(false);
+      expect(pat.test("abd xyz")).toBe(false);
+      // half of the phrase, or the phrase with a comma, is not the phrase
+      expect(pat.test("basbakani xyz")).toBe(true);
+      expect(pat.test("ve xyz")).toBe(true);
+      expect(pat.test("basbakani, ve xyz")).toBe(true);
+      expect(pat.test("basbakani ve, xyz")).toBe(true);
+      expect(pat.test("erdogan ve xyz bakani")).toBe(true);
+      // per occurrence: a second, unprefixed mention still matches
+      expect(pat.test("katar basbakani ve xyz bakani ... turkiye xyz bakani")).toBe(true);
+    });
+
+    it("single-word output is byte-identical to what it was before two-word entries were allowed", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], notAfter: ["abd", "iran", "cin"] })).toEqual([
+        "\\m(?<!abd\\s)(?<!iran\\s)(?<!cin\\s)xyz\\M",
+      ]);
+      expect(entityHubPatterns(bare, { aliases: ["Xyz Abc"], notAfter: ["abd"] })).toEqual([
+        "\\m(?<!abd\\s)xyz\\s+abc",
+      ]);
     });
 
     it("sits after the amount guard on a quantityGuard entity", () => {
@@ -738,6 +817,121 @@ describe("entityHubPatterns (exact runtime values)", () => {
       expect(pat.test("abd, xyz")).toBe(true);
       expect(pat.test("abd xyz ve turkiye xyz")).toBe(true);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /gundem/disisleri, page 1 of 2026-11-10 (h110-trendsdata-2). The texts are the hub's own: title_tr, title_tr_neutral
+// and the first line of summary_tr, pulled verbatim from production (read-only). Nine of the twenty cards were
+// other countries' foreign ministers, because the notAfter list missed Hollanda, Küba, Filistin, Ürdün, G7 and the
+// two-word "Başbakanı ve" / "Yardımcısı ve" compounds.
+// ---------------------------------------------------------------------------
+
+/** [cluster id prefix, [title_tr, title_tr_neutral, first summary line]] */
+type ClusterText = readonly [string, readonly [string, string, string]];
+
+const DISISLERI_FOREIGN_CARDS: readonly ClusterText[] = [
+  // 9f791a90: Hollanda Dışişleri Bakanı
+  ["9f791a90", ["Hollanda Dışişleri Bakanı: Bağımsız bir Filistin devleti için çaba göstereceğiz", "Hollanda Dışişleri Bakanı: Bağımsız bir Filistin devleti için çaba göstereceğiz", "Hollanda Dışişleri Bakanı Berendsen, insanların Filistin toprakları ve İsrail'deki duruma dair endişelerinin ve hissettikleri çaresizliğin anlaşılır olduğunu belirterek hükümetin bağımsız bir Filistin devleti için çabalarını sürdüreceğini açıkladı."]],
+  // 46163338: Küba Dışişleri Bakanı
+  ["46163338", ["Küba Dışişleri Bakanı Çin'e gidiyor", "Küba Dışişleri Bakanı Parrilla'nın Çin ziyareti 10-13 Kasım'da gerçekleşecek", "Küba Dışişleri Bakanı Bruno Rodriguez Parrilla Çin’e resmi ziyarette bulunacak."]],
+  // 0818550a: Filistin Dışişleri Bakanı
+  ["0818550a", ["Filistinli Bakan dünyaya seslendi! Gazze'deki çocuklar için kritik uyarı", "Filistinli bakandan Gazze'deki çocuklar yetersiz beslenmenin etkilerini yıllarca yaşayacak uyarısı", "Filistin Dışişleri Bakanı Farsin Ağabekyan Şahin, Gazze'deki çocukların yetersiz beslenmenin yanı sıra maruz kaldıkları fiziksel ve psikolojik sorunların etkilerini yıllarca yaşayabileceği uyarısında bulundu."]],
+  // 3b682787: Ürdün Dışişleri Bakanı in the lead, Suriye's in the title
+  ["3b682787", ["Suriye Dışişleri Bakanı Şeybani, Yemen'e asker gönderilmeyeceğini açıkladı", "Güven ve iş birliği ön planda: Suriye bakanı Yemen'e asker konuşlandırılmayacağını duyurdu", "Suriye Dışişleri Bakanı Esad Hasan Şeybani, Ürdün Dışişleri Bakanı Ayman Safadi ile Şam'da düzenlediği ortak basın toplantısında Yemen'e herhangi bir Suriye birliğinin konuşlandırılmasının söz konusu olmadığını söyledi. İki ülke ayrıca 11 iş birliği anlaşması imzaladı."]],
+  // accec1ab: Katar Başbakanı ve Dışişleri Bakanı (lead)
+  ["accec1ab", ["Trump, Katar Başbakanı ile görüştü; kaynaklara göre İran görüşmeleri konuşuldu", "Trump, Katar Başbakanı Al Thani ile bir araya geldi", "ABD Başkanı Donald Trump, Beyaz Saray'da Katar Başbakanı ve Dışişleri Bakanı Şeyh Muhammed bin Abdurrahman Al Thani ile görüştü. Adı açıklanmayan kaynaklar, yaklaşık 45 dakika süren görüşmenin İran ile yürütülen müzakerelere odaklandığını aktardı."]],
+  // b07dcedc: Katar Başbakanı ve Dışişleri Bakanı (lead)
+  ["b07dcedc", ["Trump, arabulucu Katar Başbakanı Al Sani'yi bugün Beyaz Saray'da kabul edecek", "Trump, İran'la görüşmelere arabuluculuk eden Katar Başbakanı Al Sani ile Beyaz Saray'da görüşecek", "ABD Başkanı Donald Trump, ABD-İran müzakerelerinde arabuluculuk eden Katar Başbakanı ve Dışişleri Bakanı Muhammed bin Abdurrahman Al Sani'yi bugün Beyaz Saray'da kabul edecek. Görüşmede ABD-İran geriliminin sona erdirilmesine yönelik müzakerelerin ele alınması bekleniyor."]],
+  // 122617de: İtalya Başbakan Yardımcısı ve Dışişleri Bakanı (lead)
+  ["122617de", ["İtalya Dışişleri Bakanı Tajani, ailesiyle siber saldırıya maruz kaldığını açıkladı", "İtalya Dışişleri Bakanı Tajani, ailesiyle siber saldırıya maruz kaldığını açıkladı", "İtalya Başbakan Yardımcısı ve Dışişleri Bakanı Antonio Tajani, kendisi ve ailesinin kişisel verilerinin siber saldırılarla hedef alındığını duyurdu. Tajani, karanlık ağda günlerdir verilerinin yayımlandığını belirtirken, Başbakan Giorgia Meloni dayanışma mesajı verdi."]],
+  // 043232d8: Fransa Dışişleri Bakanı Barrot, G7 Dışişleri Bakanları in the lead
+  ["043232d8", ["Fransa Dışişleri Bakanı Barrot: ABD-İran arasında saldırı riski sürüyor", "Fransa Dışişleri Bakanı Barrot: ABD-İran arasında saldırı riski sürüyor", "Fransa Dışişleri Bakanı Jean-Noel Barrot, ABD ile İran arasında saldırıların yeniden başlaması ve gerilimin tırmanması riskinin tamamen ortadan kalkmadığını belirterek, bu konunun G7 Dışişleri Bakanları Toplantısı'nda ele alınan başlıca konulardan biri olduğunu söyledi"]],
+  // 5bc79ba5: ABD Dışişleri Bakanı Rubio, G7 Dışişleri Bakanları in the lead
+  ["5bc79ba5", ["ABD Dışişleri Bakanı Rubio: \"(İsrail) Bizden silah alabilir ama artık finansman sağlamamız gerekmiyor\"", "ABD Dışişleri Bakanı Rubio: “İsrail'e finansman sağlamamız gerekmiyor, ortak üretim yapılabilir”", "ABD Dışişleri Bakanı Marco Rubio, İsrail'in finansal açıdan yeterli bir seviyede olduğunu ve ülkesinin artık Tel Aviv yönetimine finansman sağlamasına gerek kalmadığını ifade etti \tFransa'nın başkenti Paris'te düzenlenen G7 Dışişleri Bakanları toplantısının ardından Rubio, burada gündemdeki konulara ilişkin değerlendirmelerde bulundu.\tRubio, \"Başkanın (Donald Trump) beklentisi, İsrail'in artık yeterince refah düzeyine ve zenginliğe ulaştığı, dolayısıyla sadece 'satış' modeline geçebileceği yö..."]],
+];
+
+const DISISLERI_TURKISH_CARDS: readonly ClusterText[] = [
+  // 4201a86c: the Turkish ministry's statement on the Cyprus talks
+  ["4201a86c", ["Dışişleri Bakanlığı'ndan Kıbrıs'taki üçlü görüşmeye ilişkin açıklama: Olumlu buluyoruz", "Dışişleri Bakanlığı'ndan Kıbrıs'taki Üçlü Görüşmeye İlişkin Açıklama", "Dışişleri Bakanlığı'ndan Kıbrıs'taki üçlü görüşmeye ilişkin açıklama: Olumlu buluyoruz"]],
+  // 0430bd42: the ministry spokesman Keçeli
+  ["0430bd42", ["Dışişleri Bakanlığı Sözcüsü Öncü Keçeli: Erhürman'ın üçlü görüşmede iş birliği alanlarının ele alınmış olmasını olumlu buluyoruz", "Dışişleri Sözcüsü Keçeli, Kıbrıs'ta işbirliği alanlarının ele alınmasını olumlu buldu", "Dışişleri Bakanlığı Sözcüsü Öncü Keçeli, \"KKTC Cumhurbaşkanı Sayın Tufan Erhürman'ın dün (9 Kasım) Rum lider ve BM Genel Sekreteri'nin Şahsi Temsilcisi'yle Ada'da yaptığı üçlü görüşmede, Türk tarafının hassasiyetle üzerinde durduğu, iki taraf arasında güvenin tesisine yönelik iş birliği alanlarının ele alınmış olmasını olumlu buluyoruz.\" dedi."]],
+  // 3175d6f7: the ministry's condolences for Egypt
+  ["3175d6f7", ["Dışişleri Bakanlığından Mısır'daki tren kazasında hayatını kaybedenler için taziye mesajı", "Dışişleri bakanlığından Mısır'daki kazaya taziye", "Dışişleri Bakanlığı, Mısır'ın Giza vilayetindeki tren kazasında hayatını kaybedenler için taziye mesajı yayımladı."]],
+  // 137629bb: Dışişleri Bakanı Fidan and Defence Minister Güler
+  ["137629bb", ["Dışişleri Bakanı Hakan Fidan ile Milli Savunma Bakanı Güler Ankara’da görüştü", "Dışişleri Bakanı Hakan Fidan ile Milli Savunma Bakanı Güler Ankara’da görüştü", "Dışişleri Bakanı Hakan Fidan ve Milli Savunma Bakanı Yaşar Güler, Ankara’da bir araya geldi."]],
+  // 46a1d46b: Dışişleri Bakanı Fidan with his Egyptian counterpart
+  ["46a1d46b", ["Dışişleri Bakanı Fidan, Mısırlı mevkidaşıyla Ortadoğu ve Doğu Akdeniz'i görüştü", "Dışişleri Bakanı Fidan, Mısırlı mevkidaşıyla Ortadoğu ve Doğu Akdeniz'i görüştü", "Dışişleri Bakanlığı kaynaklarına göre, Dışişleri Bakanı Hakan Fidan, Mısırlı mevkidaşı Bedir Abdülati ile telefon görüşmesi gerçekleştirdi. Görüşmede Ortadoğu ve Doğu Akdeniz'deki gelişmeler ele alındı."]],
+  // 69ee0bcd: the Turkish ministry's condolence that names Polonya AFTER Dışişleri
+  ["69ee0bcd", ["Dışişleri Bakanlığı, Krakow'daki terör saldırısı için taziye mesajı yayımladı", "Dışişleri Bakanlığı, Krakow'daki terör saldırısı için taziye mesajı yayımladı", "Dışişleri Bakanlığı, Polonya'nın Krakow şehrinde dün düzenlenen terör saldırısında hayatını kaybedenler için taziye mesajı yayımladı. Bakanlık, can kayıplarından derin üzüntü duyduğunu belirterek yakınlara ve Polonya halkına taziye, yaralılara acil şifa diledi."]],
+  // 2904e849: the ministry's Azerbaijan Victory Day post (Azerbaycan after Dışişleri)
+  ["2904e849", ["Dışişleri Bakanlığı: Azerbaycan'ın Zafer Günü'nü içtenlikle kutluyoruz", "Dışişleri Bakanlığı'ndan Azerbaycan'a Zafer Günü tebriği", "Dışişleri Bakanlığının sosyal medya hesabından Azerbaycan'ın Zafer Günü'ne ilişkin paylaşım yapıldı. Paylaşımda, \"Karabağ’ın azadlığının altıncı yıl dönümünde kardeş Azerbaycan halkının ve devletinin Zafer Günü’nü içtenlikle kutluyoruz\" ifadelerine yer verildi."]],
+];
+
+/** The text the hub regex sees: title, neutral title and the first line of the summary, one space apart. */
+const hubText = ([title, neutral, lead]: readonly [string, string, string]) => `${title} ${neutral} ${lead}`;
+
+describe("disisleri hub: page 1 of 2026-11-10 (h110-trendsdata-2)", () => {
+  it.each(DISISLERI_FOREIGN_CARDS.map(([id, text]) => [id, text] as const))(
+    "%s is another country's foreign ministry: out",
+    (_id, text) => {
+      expect(hubMatches("disisleri", hubText(text)), _id).toBe(false);
+    },
+  );
+
+  it.each(DISISLERI_TURKISH_CARDS.map(([id, text]) => [id, text] as const))(
+    "%s is the Turkish ministry: in",
+    (_id, text) => {
+      expect(hubMatches("disisleri", hubText(text)), _id).toBe(true);
+    },
+  );
+
+  it("'Cumhurbaşkanı Erdoğan ve Dışişleri Bakanı Fidan görüştü' still matches (a bare 've' is not a prefix)", () => {
+    expect(hubMatches("disisleri", "Cumhurbaşkanı Erdoğan ve Dışişleri Bakanı Fidan görüştü")).toBe(true);
+  });
+
+  it("the new prefixes block one occurrence, not the story: an unprefixed mention elsewhere still matches", () => {
+    expect(hubMatches("disisleri", "Hollanda Dışişleri Bakanı konuştu. Dışişleri Bakanı Fidan yanıt verdi.")).toBe(true);
+    expect(hubMatches("disisleri", "Katar Başbakanı ve Dışişleri Bakanı Al Sani geldi")).toBe(false);
+    expect(hubMatches("disisleri", "Başbakan Yardımcısı ve Dışişleri Bakanı Tajani konuştu")).toBe(false);
+    expect(hubMatches("disisleri", "Dışişleri Bakanlığı Sözcüsü ve Dışişleri Bakanı Fidan")).toBe(true);
+  });
+
+  it.each([
+    ["Hollanda Dışişleri Bakanı Berendsen Ankara'da"],
+    ["Kuba Dışişleri Bakanlığı açıklama yaptı"],
+    ["Filistin Dışişleri Bakanlığı Gazze'ye çağrı yaptı"],
+    ["Ürdün Dışişleri Bakanı Safadi Şam'da"],
+    ["Yemen Dışişleri Bakanı BM'ye seslendi"],
+    ["İsviçre Dışişleri Bakanı Cassis konuştu"],
+    ["Meksika Dışişleri Bakanı Velasco Atlanta'da"],
+    ["Finlandiya Dışişleri Bakanı Valtonen açıkladı"],
+    ["Kazakistan Dışişleri Bakanı Nurtleu Ankara'da"],
+    ["G7 Dışişleri Bakanları toplantısı sona erdi"],
+    ["AB Dışişleri Bakanları acil toplanıyor"],
+  ])("a foreign state or bloc before 'Dışişleri' is not the Turkish ministry: %s", (title) => {
+    expect(hubMatches("disisleri", title), title).toBe(false);
+  });
+
+  // Turkey is a G20 member, so "G20 Dışişleri Bakanları" is not another state's ministry. 22c347c7 is the Turkish
+  // minister at the Atlanta meeting; its summary lead glues two sentences ('katıldıDışişleri'), so `\m` finds no
+  // unprefixed "Dışişleri" there and only the G20 occurrences can match it.
+  it("22c347c7: Fidan at the G20 Dışişleri Bakanları meeting is the Turkish ministry: in", () => {
+    expect(
+      hubMatches(
+        "disisleri",
+        hubText([
+          "Fidan ABD'nin Atlanta kentinde G20 dışişleri bakanları toplantısına katıldı",
+          "Bakan Fidan, G20 Dışişleri Bakanları Toplantısı marjında temaslarda bulundu",
+          "Fidan ABD'nin Atlanta kentinde G20 dışişleri bakanları toplantısına katıldıDışişleri Bakanı Hakan Fidan, 30-31 Ekim tarihlerinde ABD'nin Georgia eyaletindeki Atlanta kentinde düzenlenen G20 dışişleri...",
+        ]),
+      ),
+    ).toBe(true);
+  });
+
+  it("a G20 meeting is not a foreign state: 'G20 Dışişleri Bakanları' stays in", () => {
+    expect(hubMatches("disisleri", "Bakan Fidan, G20 Dışişleri Bakanları Toplantısı'na katıldı")).toBe(true);
+    expect(hubMatches("disisleri", "G20 Dışişleri Bakanları toplantısı Atlanta'da başladı")).toBe(true);
   });
 });
 
@@ -1440,8 +1634,8 @@ describe("invariants over every curated entity", () => {
   const WORD = "[a-z0-9]+";
   // One alternative of an exclude / require guard: no lookbehind allowed.
   const ALT = `${esc("\\m")}${WORD}(?:${esc("\\s")}\\+${WORD})*(?:${esc("\\M")})?`;
-  // The notAfter block: one fixed-length `(?<!word\s)` per word, right after `\m`.
-  const NOTAFTER = `(?:${esc("(?<!")}${WORD}${esc("\\s)")})+`;
+  // The notAfter block: one fixed-length `(?<!word\s)` or `(?<!word\sword\s)` per entry, right after `\m`.
+  const NOTAFTER = `(?:${esc("(?<!")}${WORD}(?:${esc("\\s")}${WORD})?${esc("\\s)")})+`;
   const PLAIN = `${esc("\\m")}(?:${NOTAFTER})?${WORD}(?:${esc("\\s")}\\+${WORD})*(?:${esc("\\M")})?`;
   const QUANT = `${esc("\\m")}${esc(QUANTITY_GUARD)}(?:${NOTAFTER})?${WORD}(?:${esc("\\M")})?`;
   const ALTS = `${ALT}(?:${esc("|")}${ALT})*`;
@@ -1488,6 +1682,9 @@ describe("invariants over every curated entity", () => {
       "\\m(?<!abd)deva\\M",
       "\\m(?<!abd\\s|iran\\s)deva\\M",
       "\\m(?<!abd\\s+)deva\\M",
+      "\\m(?<!a\\sb\\sc\\s)deva\\M",
+      "\\m(?<!abd\\s\\s)deva\\M",
+      "\\m(?<!abd\\sve)deva\\M",
       "\\m(?<!ab.\\s)deva\\M",
       "\\m(?<=abd\\s)deva\\M",
       "\\m(?<abd>x)deva\\M",
@@ -1501,9 +1698,9 @@ describe("invariants over every curated entity", () => {
 
   it("every emitted lookbehind is a negative, fixed-length, single alternative: valid in JS and in PostgreSQL ARE", () => {
     // Negative only, one alternative (no `|`), no quantifier (no `*`, `+`, `?`, `{`): a
-    // literal digit class or word, then at most one `\s`. Nothing JS-only (named groups,
-    // `\p{..}`, `\k<..>`, variable-length lookbehind) reaches the RPC.
-    const FIXED = /^!(?:\[0-9\]|[a-z0-9]+)(?:\\s)?$/;
+    // literal digit class, a word or two words joined by one `\s`, then at most one `\s`.
+    // Nothing JS-only (named groups, `\p{..}`, `\k<..>`, variable-length lookbehind) reaches the RPC.
+    const FIXED = /^!(?:\[0-9\]|[a-z0-9]+(?:\\s[a-z0-9]+)?)(?:\\s)?$/;
     let lookbehinds = 0;
     for (const e of RISING_ENTITIES) {
       for (const p of entityHubPatterns(e)) {
@@ -1540,6 +1737,8 @@ describe("invariants over every curated entity", () => {
       ["abd prefixes", fit("abd ")],
       ["every disisleri blocked", fit("abd disisleri ")],
       ["every disisleri open", fit("disisleri ")],
+      ["every disisleri behind a two-word prefix", fit("basbakani ve disisleri ")],
+      ["near-miss two-word prefixes", fit("basbakani disisleri ve disisleri yardimcisi disisleri ")],
       ["near misses", fit("disisler borsas meclisi ")],
       ["borsa repeated, exclude at the end", `${fit("borsa ")}`.slice(0, N - 9) + " new york"],
       ["exclude repeated, borsa at the end", fit("new york ").slice(0, N - 6) + " borsa"],
@@ -1791,7 +1990,7 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("notAfter is curated on exactly disisleri, erdogan and imamoglu, as folded single ASCII words", () => {
+  it("notAfter is curated on exactly disisleri, erdogan and imamoglu, as folded ASCII words of one or two words", () => {
     expect(
       specs
         .filter(([, s]) => s.notAfter !== undefined)
@@ -1801,7 +2000,7 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     for (const [key, spec] of specs) {
       for (const w of spec.notAfter ?? []) {
         expect(w, `${key}: ${w}`).toBe(foldEntityText(w));
-        expect(w, `${key}: ${w}`).toMatch(/^[a-z0-9]+$/);
+        expect(w, `${key}: ${w}`).toMatch(/^[a-z0-9]+(?: [a-z0-9]+)?$/);
       }
       expect(new Set(spec.notAfter ?? []).size, key).toBe((spec.notAfter ?? []).length);
     }
@@ -1811,6 +2010,14 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     expect(RISING_HUB_SPECS.disisleri?.notAfter).toEqual([...DISISLERI_NOT_AFTER]);
     for (const own of ["turkiye", "turk", "tc", "ankara", "fidan"]) {
       expect(RISING_HUB_SPECS.disisleri?.notAfter, own).not.toContain(own);
+    }
+    // h110-trendsdata-2: a bare "ve" would drop "Cumhurbaşkanı Erdoğan ve Dışişleri Bakanı Fidan", and these
+    // precede the Turkish ministry or a Turkish-hosted meeting (TBMM Dışişleri Komisyonu, TDT, R4+E3, İİT).
+    for (const never of ["ve", "eski", "tbmm", "tdt", "meclis", "r4", "e3", "iit", "teskilati", "cumhuriyeti", "ulkenin"]) {
+      expect(RISING_HUB_SPECS.disisleri?.notAfter, never).not.toContain(never);
+    }
+    for (const phrase of ["basbakani ve", "yardimcisi ve"]) {
+      expect(RISING_HUB_SPECS.disisleri?.notAfter, phrase).toContain(phrase);
     }
     // The hub still searches by the label, with no alias, exclude or require.
     expect(RISING_HUB_SPECS.disisleri?.aliases).toBeUndefined();
@@ -1924,16 +2131,17 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     });
   });
 
-  it("the rollup tokens of the guarded hubs did not change (parity with migration 112)", () => {
+  it("the rollup tokens of the guarded hubs did not change (parity with migrations 112 and 191)", () => {
     const tokens = (key: string) => RISING_ENTITIES.find((e) => e.key === key)?.tokens;
     expect(tokens("disisleri")).toEqual(["disisleri"]);
     expect(tokens("borsa")).toEqual(["borsa", "bist"]);
     expect(tokens("tcmb")).toEqual(["tcmb", "merkez bankasi"]);
     expect(tokens("aym")).toEqual(["aym", "anayasa mahkemesi"]);
     expect(tokens("meclis")).toEqual(["meclis", "tbmm"]);
-    // h96-entityhubs-1 curates the hub aliases of these five; the rollup tokens (migration 112's emap) stay.
-    expect(tokens("simsek")).toEqual(["mehmet simsek"]);
-    expect(tokens("fidan")).toEqual(["hakan fidan"]);
+    // h96-entityhubs-1 curates the hub aliases of these five; the rollup tokens of meb, msb and imamoglu stay.
+    // h110-trendsdata-1 (migration 191) gave simsek and fidan the same Bakan / Bakanı bigrams their hubs search.
+    expect(tokens("simsek")).toEqual(["mehmet simsek", "bakan simsek", "bakani simsek"]);
+    expect(tokens("fidan")).toEqual(["hakan fidan", "bakan fidan", "bakani fidan"]);
     expect(tokens("meb")).toEqual(["meb"]);
     expect(tokens("msb")).toEqual(["msb"]);
     expect(tokens("imamoglu")).toEqual(["imamoglu"]);

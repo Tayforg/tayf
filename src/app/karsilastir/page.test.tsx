@@ -8,7 +8,7 @@ import type {
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
 import type { WireSignal } from "@/lib/clusters/wire";
-import type { BiasDistribution, Source } from "@/types";
+import type { BiasDistribution, MediaDnaZone, Source } from "@/types";
 
 const getClusterDetailOrThrow = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
@@ -91,6 +91,10 @@ function makeDetail(
     members?: ClusterDetailMember[];
     /** Merged over the default non-wire signal. */
     wire?: Partial<WireSignal>;
+    /** "llm" is the neutral Turkish rewrite (default null: an extractive title). */
+    title_method?: ClusterDetail["cluster"]["title_method"];
+    /** Zones Jev's recall stage matched (absent: a detail cached before the field). */
+    recallMatchedZones?: MediaDnaZone[];
   } = {},
 ): ClusterDetail {
   const distribution = emptyDistribution();
@@ -110,7 +114,7 @@ function makeDetail(
       id,
       title_tr: title,
       title_original: null,
-      title_method: null,
+      title_method: extra.title_method ?? null,
       summary_tr: "özet",
       article_count: 3,
       bias_distribution: distribution,
@@ -131,6 +135,9 @@ function makeDetail(
     },
     blindspotSuppressed: false,
     blindspotRecallVetoed: false,
+    ...(extra.recallMatchedZones !== undefined
+      ? { recallMatchedZones: extra.recallMatchedZones }
+      : {}),
   };
 }
 
@@ -590,6 +597,262 @@ describe("CompareBody — qualifiers shared with the cluster page", () => {
         ],
       });
       expect(zoneNotes(first).bagimsiz.text).toBe("Merkez Haber");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // h110-karsilastir-1: an empty zone line makes the claim the cluster page
+  // makes (kart/route.tsx silentZoneLabel order: English-only, then non-voting,
+  // then Jev-matched, then plain), and an English headline carries lang="en".
+  // -------------------------------------------------------------------------
+  describe("h110-karsilastir-1: empty zone lines and headline language", () => {
+    const ENGLISH_ONLY = "Türkçe kaynaklarla karşılaştırılmadı";
+    const RECALL = "Bu kümede yok · benzer haber başka kümede olabilir";
+
+    const englishOnly = () => [
+      makeMember(makeSource("a-news", "A News", "gov_leaning")),
+      makeMember(makeSource("trt-world", "TRT World", "gov_leaning")),
+    ];
+    const govOnly = () => [
+      makeMember(makeSource("gov-1", "Hükümet Gazetesi", "pro_government")),
+    ];
+
+    describe("an English-only side", () => {
+      it("prints the not-compared line for each empty zone, and none of the absence wordings", async () => {
+        const { first } = await renderSide({ members: englishOnly() });
+        const notes = zoneNotes(first);
+        expect(notes.iktidar.text).toBe("A News, TRT World");
+        expect(notes.bagimsiz.text).toBe(ENGLISH_ONLY);
+        expect(notes.muhalefet.text).toBe(ENGLISH_ONLY);
+        const text = textOf(first).toLocaleLowerCase("tr-TR");
+        expect(text).not.toContain("bu bölgeden kaynak yok");
+        expect(text).not.toContain("spektruma sayılan");
+        expect(text).not.toContain("benzer haber başka kümede");
+      });
+
+      it("derives the line from ENGLISH_ONLY_EMPTY_COLUMN with its dashes stripped", async () => {
+        const { ENGLISH_ONLY_EMPTY_COLUMN } = await import("@/lib/sources/source-language");
+        expect(ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—$/g, "")).toBe(ENGLISH_ONLY);
+        const { first } = await renderSide({ members: englishOnly() });
+        expect(zoneNotes(first).bagimsiz.text).toBe(
+          ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—$/g, ""),
+        );
+      });
+
+      it("keeps the English line even when the empty zone also holds a non-voting member (precedence)", async () => {
+        const { first } = await renderSide({
+          members: [
+            makeMember(makeSource("a-news", "A News", "gov_leaning")),
+            makeMember(makeSource("mfa-turkey", "MFA Türkiye", "center", "niche")),
+          ],
+        });
+        const notes = zoneNotes(first);
+        expect(notes.bagimsiz.text).toBe(ENGLISH_ONLY);
+        expect(textOf(first)).not.toContain(QUALIFIED);
+        // The footnote that lists the non-voting member is untouched.
+        expect(textOf(kidsOf(first)[6])).toBe(
+          "Toplayıcı / niş (spektruma sayılmaz): MFA Türkiye",
+        );
+      });
+
+      it("keeps the English line over a Jev-matched zone too", async () => {
+        const { first } = await renderSide({
+          members: englishOnly(),
+          recallMatchedZones: ["muhalefet"],
+        });
+        expect(zoneNotes(first).muhalefet.text).toBe(ENGLISH_ONLY);
+      });
+
+      it("uses the same <p> element and classes, and keeps eight children (row order holds)", async () => {
+        const { first } = await renderSide({ members: englishOnly() });
+        const notes = zoneNotes(first);
+        expect(notes.bagimsiz.type).toBe("p");
+        expect(notes.muhalefet.type).toBe("p");
+        expect(notes.bagimsiz.className).toBe("text-[13px] text-muted-foreground");
+        expect(notes.muhalefet.className).toBe("text-[13px] text-muted-foreground");
+        expect(kidsOf(first)).toHaveLength(8);
+      });
+
+      it("does not leak into the other side (a Turkish side keeps its own lines)", async () => {
+        const { first, second } = await renderSide(
+          { members: englishOnly() },
+          { members: govOnly() },
+        );
+        expect(zoneNotes(first).bagimsiz.text).toBe(ENGLISH_ONLY);
+        expect(zoneNotes(second).bagimsiz.text).toBe(PLAIN);
+        expect(zoneNotes(second).muhalefet.text).toBe(PLAIN);
+      });
+
+      it("never claims a zone that has a voting source is not compared", async () => {
+        const { first } = await renderSide({
+          members: [
+            makeMember(makeSource("a-news", "A News", "gov_leaning")),
+            makeMember(makeSource("daily-sabah", "Daily Sabah", "center")),
+          ],
+        });
+        const notes = zoneNotes(first);
+        expect(notes.iktidar.text).toBe("A News");
+        expect(notes.bagimsiz.text).toBe("Daily Sabah");
+        expect(notes.muhalefet.text).toBe(ENGLISH_ONLY);
+      });
+    });
+
+    describe("a Jev-matched empty zone", () => {
+      it("prints the recall line, sentence-cased from RECALL_MATCH_EMPTY_COLUMN", async () => {
+        const { RECALL_MATCH_EMPTY_COLUMN } = await import(
+          "@/lib/clusters/recall-matched-zones"
+        );
+        expect(RECALL).toBe(
+          RECALL_MATCH_EMPTY_COLUMN.charAt(0).toLocaleUpperCase("tr-TR") +
+            RECALL_MATCH_EMPTY_COLUMN.slice(1),
+        );
+        const { first } = await renderSide({
+          members: govOnly(),
+          recallMatchedZones: ["muhalefet"],
+        });
+        const notes = zoneNotes(first);
+        expect(notes.iktidar.text).toBe("Hükümet Gazetesi");
+        expect(notes.bagimsiz.text).toBe(PLAIN);
+        expect(notes.muhalefet.text).toBe(RECALL);
+        expect(notes.muhalefet.type).toBe("p");
+        expect(notes.muhalefet.className).toBe("text-[13px] text-muted-foreground");
+        expect(kidsOf(first)).toHaveLength(8);
+      });
+
+      it("qualifies every matched empty zone and only those", async () => {
+        const { first } = await renderSide({
+          members: [makeMember(makeSource("ctr", "Merkez Haber", "center"))],
+          recallMatchedZones: ["iktidar", "muhalefet"],
+        });
+        const notes = zoneNotes(first);
+        expect(notes.iktidar.text).toBe(RECALL);
+        expect(notes.bagimsiz.text).toBe("Merkez Haber");
+        expect(notes.muhalefet.text).toBe(RECALL);
+      });
+
+      it("never replaces the roster of a zone that has a voting source", async () => {
+        const { first } = await renderSide({
+          members: govOnly(),
+          recallMatchedZones: ["iktidar"],
+        });
+        expect(zoneNotes(first).iktidar.text).toBe("Hükümet Gazetesi");
+      });
+
+      it("prints the spectrum-absent sentence when the zone is also non-voting (precedence)", async () => {
+        const { first } = await renderSide({
+          members: [
+            makeMember(makeSource("gov-1", "Hükümet Gazetesi", "pro_government")),
+            makeMember(makeSource("nic-1", "Niş Merkez", "center", "niche")),
+          ],
+          recallMatchedZones: ["bagimsiz", "muhalefet"],
+        });
+        const notes = zoneNotes(first);
+        expect(notes.bagimsiz.text).toBe(QUALIFIED);
+        // Matched, but no non-voting member there: the recall line.
+        expect(notes.muhalefet.text).toBe(RECALL);
+      });
+
+      it("reads each side from its own recall zones", async () => {
+        const { first, second } = await renderSide(
+          { members: govOnly(), recallMatchedZones: ["muhalefet"] },
+          { members: govOnly() },
+        );
+        expect(zoneNotes(first).muhalefet.text).toBe(RECALL);
+        expect(zoneNotes(second).muhalefet.text).toBe(PLAIN);
+      });
+    });
+
+    describe("neither condition", () => {
+      it("prints the plain line, byte for byte", async () => {
+        const { first } = await renderSide({ members: govOnly(), recallMatchedZones: [] });
+        const notes = zoneNotes(first);
+        expect(notes.bagimsiz.text).toBe(PLAIN);
+        expect(notes.muhalefet.text).toBe(PLAIN);
+        expect(textOf(first)).not.toContain(ENGLISH_ONLY);
+        expect(textOf(first)).not.toContain(RECALL);
+      });
+
+      it("a mixed Turkish and English cluster is not language-isolated (plain line)", async () => {
+        const { first } = await renderSide({
+          members: [
+            makeMember(makeSource("a-news", "A News", "gov_leaning")),
+            makeMember(makeSource("gov-1", "Hükümet Gazetesi", "pro_government")),
+          ],
+        });
+        expect(zoneNotes(first).bagimsiz.text).toBe(PLAIN);
+      });
+    });
+
+    describe("headline language", () => {
+      const h2Link = (article: Elementish) => {
+        const h2 = kidsOf(article)[0]!;
+        expect(h2.type).toBe("h2");
+        const link = kidsOf(h2)[0]!;
+        return { h2, link };
+      };
+
+      it("sets lang=\"en\" on the h2 anchor for an English-only cluster", async () => {
+        const { first } = await renderSide({ members: englishOnly() });
+        const { link } = h2Link(first);
+        expect(link.props?.lang).toBe("en");
+        expect(link.props?.href).toBe(`/cluster/${A}`);
+        expect(renderToStaticMarkup(kidsOf(first)[0] as unknown as React.ReactElement)).toContain(
+          'lang="en"',
+        );
+      });
+
+      it("sets lang=\"en\" when a mixed cluster's headline is an English member's own title", async () => {
+        const english = "NATO chief visits Türkiye ahead of key summit";
+        getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+          makeDetail(id, english, {
+            members: [
+              {
+                ...makeMember(makeSource("daily-sabah", "Daily Sabah", "pro_government")),
+                article: {
+                  ...makeMember(makeSource("daily-sabah", "Daily Sabah", "pro_government")).article,
+                  title: english,
+                },
+              },
+              makeMember(makeSource("opp-1", "Muhalif Gazete", "opposition")),
+            ],
+          }),
+        );
+        const tree = await render({ a: A, b: B });
+        const article = collectElements(tree).find((el) => el.type === "article")!;
+        expect(h2Link(article).link.props?.lang).toBe("en");
+      });
+
+      it("sets no lang attribute for a Turkish cluster", async () => {
+        const { first } = await renderSide({ members: govOnly() });
+        const { link } = h2Link(first);
+        expect(link.props?.lang).toBeUndefined();
+        expect(
+          renderToStaticMarkup(kidsOf(first)[0] as unknown as React.ReactElement),
+        ).not.toContain("lang=");
+      });
+
+      it("sets no lang attribute for an English-only cluster whose headline is the Turkish LLM rewrite", async () => {
+        const { first } = await renderSide({ members: englishOnly(), title_method: "llm" });
+        expect(h2Link(first).link.props?.lang).toBeUndefined();
+        // The zone lines still say the cluster was not compared with Turkish sources.
+        expect(zoneNotes(first).bagimsiz.text).toBe(ENGLISH_ONLY);
+      });
+
+      it("adds no other lang attribute anywhere in the side", async () => {
+        const { first } = await renderSide({ members: englishOnly() });
+        const withLang = collectElements(first).filter(
+          (el) => el.props && el.props.lang !== undefined,
+        );
+        expect(withLang).toHaveLength(1);
+        expect(withLang[0]?.props?.href).toBe(`/cluster/${A}`);
+      });
+
+      it("keeps the title text, the meta line and the remove label unchanged", async () => {
+        const { first } = await renderSide({ members: englishOnly() });
+        expect(textOf(kidsOf(first)[0])).toBe("Birinci hikâye");
+        expect(textOf(kidsOf(first)[1])).toBe("3 kaynak · İlk yayın: 22 Ekim 2026 14:05");
+        expect(kidsOf(first)[7]?.props?.["aria-label"]).toBe("Bu tarafı kaldır: Birinci hikâye");
+      });
     });
   });
 

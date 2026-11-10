@@ -460,7 +460,8 @@ describe("RISING_ENTITIES vocabulary", () => {
     expect(byKey.get("akp")).toEqual({ key: "akp", label: "AK Parti", tokens: ["akp", "ak parti"] });
     expect(byKey.get("borsa")?.tokens).toEqual(["borsa", "bist"]);
     expect(byKey.get("zelenski")?.tokens).toEqual(["zelenski", "zelenskiy"]);
-    expect(byKey.get("simsek")?.tokens).toEqual(["mehmet simsek"]);
+    expect(byKey.get("simsek")?.tokens).toEqual(["mehmet simsek", "bakan simsek", "bakani simsek"]);
+    expect(byKey.get("fidan")?.tokens).toEqual(["hakan fidan", "bakan fidan", "bakani fidan"]);
   });
 
   it("excludes the documented ambiguous tokens", () => {
@@ -498,6 +499,75 @@ describe("RISING_ENTITIES vocabulary", () => {
         `${e.key} label '${e.label}' folds to ${[...grams].join("|")}`,
       ).toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The minister forms (h110-trendsdata-1). "Bakan Şimşek" / "Bakanı Şimşek" and
+// "Bakan Fidan" / "Bakanı Fidan" print about three quarters of the headlines on
+// those two ministers (5 Kasım: 12 stored against 60 for Şimşek, 10 against 48
+// for Fidan), so a card that counted only the full names undercounted 4-5x. The
+// rollup's token match, restated in JS: an entity is hit when one of its tokens is
+// among the unigrams or bigrams of the folded title (migration 112 / 191).
+// ---------------------------------------------------------------------------
+
+/** The entity keys a title is counted for: any token among foldTitleGrams. */
+function entitiesOf(title: string): Set<string> {
+  const grams = new Set(foldTitleGrams(title));
+  return new Set(RISING_ENTITIES.filter((e) => e.tokens.some((t) => grams.has(t))).map((e) => e.key));
+}
+
+describe("minister forms are counted (h110-trendsdata-1)", () => {
+  it.each([
+    ["Bakan Şimşek'ten enflasyon açıklaması", "simsek"],
+    ["Hazine ve Maliye Bakanı Şimşek: Faiz indirimi sürecek", "simsek"],
+    ["Mehmet Şimşek: Fiyat istikrarı önceliğimiz", "simsek"],
+    ["BAKAN ŞİMŞEK DUYURDU", "simsek"],
+    ["Dışişleri Bakanı Fidan Mısırlı mevkidaşıyla görüştü", "fidan"],
+    ["Bakan Fidan'dan KKTC açıklaması", "fidan"],
+    ["Dışişleri Bakanı Hakan Fidan Moskova'da", "fidan"],
+    ["Bakanı Fidan: Gazze'de ateşkes için çalışıyoruz", "fidan"],
+  ])("%s -> %s", (title, key) => {
+    expect(entitiesOf(title).has(key)).toBe(true);
+  });
+
+  it("counts an article once per entity even when several of its tokens hit", () => {
+    const keys = [...entitiesOf("Bakan Şimşek ve Mehmet Şimşek aynı haberde")];
+    expect(keys.filter((k) => k === "simsek")).toHaveLength(1);
+  });
+
+  it.each([
+    "Vali Yılmaz Şimşek törene katıldı",
+    "Berhan Şimşek yeni albümünü duyurdu",
+    "Bakan Yumaklı fidan dikti",
+    "Bakan Yumaklı: Şimşek gibi hızlı karar",
+    "Şimşek çaktı, sağanak yağış uyarısı",
+    "Fidan dikim töreni düzenlendi",
+    "Başkan Fidan Yılmaz açıklama yaptı",
+  ])("is no minister hit: %s", (title) => {
+    const keys = entitiesOf(title);
+    expect(keys.has("simsek"), title).toBe(false);
+    expect(keys.has("fidan"), title).toBe(false);
+  });
+
+  it("the two surnames stay out of the vocabulary as single words, and 'bakan' alone too", () => {
+    const all = new Set(RISING_ENTITIES.flatMap((e) => [...e.tokens]));
+    for (const banned of ["simsek", "fidan", "bakan", "bakani"]) {
+      expect(all.has(banned), banned).toBe(false);
+    }
+  });
+
+  it("the new tokens are two-word bigrams that begin with a title word, one entity each", () => {
+    const byKey = new Map(RISING_ENTITIES.map((e) => [e.key, e]));
+    for (const [key, surname] of [
+      ["simsek", "simsek"],
+      ["fidan", "fidan"],
+    ] as const) {
+      const extra = (byKey.get(key)?.tokens ?? []).filter((t) => t.startsWith("bakan"));
+      expect(extra).toEqual([`bakan ${surname}`, `bakani ${surname}`]);
+    }
+    const all = RISING_ENTITIES.flatMap((e) => [...e.tokens]);
+    expect(new Set(all).size).toBe(all.length);
   });
 });
 

@@ -13,6 +13,7 @@ import {
   getClusterDetailOrThrow,
   type ClusterDetail,
 } from "@/lib/clusters/cluster-detail-query";
+import { RECALL_MATCH_EMPTY_COLUMN } from "@/lib/clusters/recall-matched-zones";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import {
   compareHref,
@@ -25,6 +26,7 @@ import {
   type SideState,
 } from "@/lib/compare/compare-view";
 import { noindexPageMetadata } from "@/lib/seo/page-metadata";
+import { ENGLISH_ONLY_EMPTY_COLUMN } from "@/lib/sources/source-language";
 import type { MediaDnaZone } from "@/types";
 
 // A shareable view of two clusters: noindex (the URL space is unbounded and
@@ -52,6 +54,19 @@ const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 const SPECTRUM_ABSENT_SENTENCE =
   SPECTRUM_ABSENT_QUALIFIED.charAt(0).toLocaleUpperCase("tr-TR") +
   SPECTRUM_ABSENT_QUALIFIED.slice(1);
+
+// The same wording choices for the other two claims an empty zone line must not
+// make absolutely (h110-karsilastir-1). Each is the cluster page's own constant,
+// reshaped because here the line stands alone instead of between dashes:
+//  - an English-only cluster never met the Turkish zones, so its empty zone
+//    reads "not compared with Turkish sources" (ENGLISH_ONLY_EMPTY_COLUMN, dashes
+//    stripped, as /metodoloji strips them);
+//  - a zone Jev's recall stage matched reads "not in this cluster, a similar
+//    story may sit in another" (RECALL_MATCH_EMPTY_COLUMN, sentence-cased).
+const ENGLISH_ONLY_ZONE_LINE = ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—$/g, "");
+const RECALL_MATCH_ZONE_LINE =
+  RECALL_MATCH_EMPTY_COLUMN.charAt(0).toLocaleUpperCase("tr-TR") +
+  RECALL_MATCH_EMPTY_COLUMN.slice(1);
 
 // Static shell. Reading `searchParams` is request-time data, so under
 // cacheComponents it has to sit inside <Suspense>; the shell (container,
@@ -172,6 +187,19 @@ function Picker({ anyInvalid }: { anyInvalid: boolean }) {
   );
 }
 
+// What an empty zone line says, in the order of how much each wording claims
+// (the Manşet Kartı's silentZoneLabel, src/app/cluster/[id]/kart/route.tsx):
+// English-only, then non-voting, then Jev-matched, then the plain absence.
+function emptyZoneLine(
+  view: Extract<SideState, { kind: "ok" }>["view"],
+  zone: MediaDnaZone,
+): string {
+  if (view.languageIsolated) return ENGLISH_ONLY_ZONE_LINE;
+  if (view.nonVotingZones.includes(zone)) return SPECTRUM_ABSENT_SENTENCE;
+  if (view.recallMatchedZones.includes(zone)) return RECALL_MATCH_ZONE_LINE;
+  return "Bu bölgeden kaynak yok";
+}
+
 // Notice sides (missing / invalid / not found / ...) span the same eight grid
 // rows as an ok article (see OK_ARTICLE) but are NOT subgrids, so without
 // `md:self-start` they would stretch to the full height of the other side.
@@ -263,6 +291,7 @@ function SideColumn({
           <h2 className="font-serif text-xl font-semibold leading-snug text-foreground">
             <Link
               href={`/cluster/${view.id}`}
+              lang={view.headlineLang}
               className="underline-offset-2 hover:underline"
             >
               {view.title}
@@ -320,9 +349,7 @@ function SideColumn({
                   </p>
                 ) : (
                   <p className="text-[13px] text-muted-foreground">
-                    {view.nonVotingZones.includes(zone)
-                      ? SPECTRUM_ABSENT_SENTENCE
-                      : "Bu bölgeden kaynak yok"}
+                    {emptyZoneLine(view, zone)}
                   </p>
                 )}
               </div>
