@@ -236,7 +236,11 @@ export default async function Image({ params }: ImageProps) {
   // all (decided on the counts: 250/1/0 reads 100 but is not "only"). When a
   // toplayıcı / niş source from another zone also carried the story, "yazdı"
   // would be false and the ribbon says "spektrumda sadece {Zone}" instead
-  // (h57-outbound-1, the wording /blindspots already uses).
+  // (h57-outbound-1, the wording /blindspots already uses). h108-sharesurfaces-1:
+  // when Jev's recall stage matched a silent zone with this event
+  // (`detail.recallMatchedZones`: a similar story sits in another cluster) it says
+  // "kümede sadece {Zone}", also the /blindspots wording; a detail cached before
+  // the field existed has none (`?.length ?? 0`) and the ribbon stays as it was.
   const ribbonZone: MediaDnaZone | null = cluster.is_blindspot
     ? cluster.blindspot_side
       ? zoneOf(cluster.blindspot_side)
@@ -244,7 +248,12 @@ export default async function Image({ params }: ImageProps) {
     : null;
   const ribbonShare = ribbonZone ? dominantZonePercent(zones, ribbonZone) : 0;
   const ribbonClaim = ribbonZone
-    ? onlyZoneClaim(zones, ribbonZone, nonVotingOutsideZone(uniqueSources(members), ribbonZone))
+    ? onlyZoneClaim(
+        zones,
+        ribbonZone,
+        nonVotingOutsideZone(uniqueSources(members), ribbonZone),
+        detail.recallMatchedZones?.length ?? 0,
+      )
     : "weighted";
 
   // Clamp the headline to the title box (h20-contracts-1). clampOgTitle cuts a
@@ -385,7 +394,9 @@ export default async function Image({ params }: ImageProps) {
               ? `KÖR NOKTA — sadece ${ZONE_STYLE[ribbonZone].label} yazdı`
               : ribbonClaim === "spectrumOnly"
                 ? `KÖR NOKTA — spektrumda sadece ${ZONE_STYLE[ribbonZone].label}`
-                : `KÖR NOKTA — %${ribbonShare} ${ZONE_STYLE[ribbonZone].label}`}
+                : ribbonClaim === "clusterOnly"
+                  ? `KÖR NOKTA — kümede sadece ${ZONE_STYLE[ribbonZone].label}`
+                  : `KÖR NOKTA — %${ribbonShare} ${ZONE_STYLE[ribbonZone].label}`}
           </div>
         )}
 

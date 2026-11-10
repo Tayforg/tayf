@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import type { ClusterDetail, ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
-import type { BiasCategory, BiasDistribution, SourceKind } from "@/types";
+import type { BiasCategory, BiasDistribution, MediaDnaZone, SourceKind } from "@/types";
 import {
   EMBED_GENERIC_TITLE,
   EMBED_TITLE_MAX,
@@ -30,6 +30,8 @@ function detail(over: {
   blindspotSide?: BiasCategory | null;
   sourceCount?: number;
   members?: ClusterDetailMember[];
+  /** Omitted: the field is absent, like a cache entry written before it existed. */
+  recallMatchedZones?: MediaDnaZone[];
 }): ClusterDetail {
   return {
     cluster: {
@@ -52,6 +54,7 @@ function detail(over: {
     wire: { effectiveArticleCount: over.sourceCount ?? 4 } as ClusterDetail["wire"],
     blindspotSuppressed: false,
     blindspotRecallVetoed: false,
+    ...(over.recallMatchedZones === undefined ? {} : { recallMatchedZones: over.recallMatchedZones }),
   };
 }
 
@@ -471,6 +474,120 @@ describe("buildEmbedModel", () => {
         expect(html).not.toContain("sadece iktidar yazdı");
         expect(html.indexOf("TAYF ·")).toBeLessThan(html.indexOf("spektrumda"));
         expect(html.indexOf("spektrumda")).toBeLessThan(html.indexOf("<h1"));
+      });
+    });
+
+    // h108-sharesurfaces-1: cluster 0746c9d2 (9 İktidar; Jev matched Yeniçağ and
+    // Elips Haber, Muhalefet, with the same event in another cluster) printed
+    // "Kör nokta: sadece iktidar yazdı" here while /blindspots said "Kümede sadece
+    // İktidar". ClusterDetail.recallMatchedZones is already on the detail.
+    describe("zones Jev matched (h108-sharesurfaces-1)", () => {
+      const blindspot = (
+        recallMatchedZones: MediaDnaZone[] | undefined,
+        members: ClusterDetailMember[] = VOTING9,
+        over: Parameters<typeof detail>[0] = {},
+      ) =>
+        buildEmbedModel(
+          detail({
+            isBlindspot: true,
+            blindspotSide: "pro_government",
+            distribution: NINE_IKTIDAR,
+            sourceCount: 9,
+            members,
+            recallMatchedZones,
+            ...over,
+          }),
+          ORIGIN,
+        ).ribbon;
+
+      it("says 'kümede sadece iktidar' for a 0746c9d2-shaped cluster, never 'yazdı'", () => {
+        const ribbon = blindspot(["muhalefet"]);
+        expect(ribbon).toBe("Kör nokta: kümede sadece iktidar");
+        expect(ribbon).not.toContain("sadece iktidar yazdı");
+        expect(ribbon).not.toContain("yazdı");
+      });
+
+      it("one matched zone is enough, and so are two", () => {
+        expect(blindspot(["bagimsiz"])).toBe("Kör nokta: kümede sadece iktidar");
+        expect(blindspot(["bagimsiz", "muhalefet"])).toBe("Kör nokta: kümede sadece iktidar");
+      });
+
+      it("is byte-identical to today's ribbon with [] (a failed lookup) and with the field undefined (an old cache entry)", () => {
+        expect(blindspot([])).toBe("Kör nokta: sadece iktidar yazdı");
+        expect(blindspot(undefined)).toBe("Kör nokta: sadece iktidar yazdı");
+        const plain = buildEmbedModel(
+          detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 9, members: VOTING9 }),
+          ORIGIN,
+        );
+        expect(plain.ribbon).toBe("Kör nokta: sadece iktidar yazdı");
+        expect(JSON.stringify(plain)).toBe(
+          JSON.stringify(
+            buildEmbedModel(
+              detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 9, members: VOTING9, recallMatchedZones: [] }),
+              ORIGIN,
+            ),
+          ),
+        );
+      });
+
+      it("keeps the toplayıcı / niş qualifier ahead of it (precedence, as on /blindspots)", () => {
+        expect(blindspot(["bagimsiz"], FIXTURE_MEMBERS, { sourceCount: 12 })).toBe(
+          "Kör nokta: spektrumda sadece iktidar",
+        );
+      });
+
+      it("leaves '… ağırlıklı' alone: another zone has a voting source", () => {
+        expect(
+          blindspot(["bagimsiz"], VOTING9, { distribution: dist({ pro_government: 9, opposition: 1 }) }),
+        ).toBe("Kör nokta: iktidar ağırlıklı");
+        expect(blindspot(["bagimsiz"], VOTING9, { distribution: dist({ pro_government: 250, center: 1 }) })).toBe(
+          "Kör nokta: iktidar ağırlıklı",
+        );
+      });
+
+      it("qualifies the tally's fallback zone too, with its Turkish lower-case label", () => {
+        expect(blindspot(["muhalefet"], VOTING9, { blindspotSide: null })).toBe("Kör nokta: kümede sadece iktidar");
+        const opp = [memberOf("a", "outlet", "opposition")];
+        expect(
+          blindspot(["iktidar"], opp, { blindspotSide: "opposition", distribution: dist({ opposition: 4 }) }),
+        ).toBe("Kör nokta: kümede sadece muhalefet");
+        expect(
+          blindspot(["iktidar"], [memberOf("a", "outlet", "center")], { blindspotSide: "center", distribution: dist({ center: 5 }) }),
+        ).toBe("Kör nokta: kümede sadece bağımsız");
+      });
+
+      it("has no ribbon for a cluster that is not a blindspot, whatever Jev matched", () => {
+        const m = buildEmbedModel(
+          detail({ isBlindspot: false, members: VOTING9, recallMatchedZones: ["muhalefet"] }),
+          ORIGIN,
+        );
+        expect(m.ribbon).toBeNull();
+      });
+
+      it("changes nothing but the ribbon (counts, percents, total, source count, link)", () => {
+        const matched = buildEmbedModel(
+          detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 9, members: VOTING9, recallMatchedZones: ["muhalefet"] }),
+          ORIGIN,
+        );
+        const plain = buildEmbedModel(
+          detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 9, members: VOTING9 }),
+          ORIGIN,
+        );
+        expect({ ...matched, ribbon: null }).toEqual({ ...plain, ribbon: null });
+        expect(matched.total).toBe(9);
+      });
+
+      it("renders the new ribbon in the framed document, between the brand and the headline", () => {
+        const html = renderEmbedHtml(
+          buildEmbedModel(
+            detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: NINE_IKTIDAR, sourceCount: 9, members: VOTING9, recallMatchedZones: ["muhalefet"] }),
+            ORIGIN,
+          ),
+        );
+        expect(html).toContain('<div class="r">Kör nokta: kümede sadece iktidar</div>');
+        expect(html).not.toContain("sadece iktidar yazdı");
+        expect(html.indexOf("TAYF ·")).toBeLessThan(html.indexOf("kümede sadece"));
+        expect(html.indexOf("kümede sadece")).toBeLessThan(html.indexOf("<h1"));
       });
     });
   });

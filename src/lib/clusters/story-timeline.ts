@@ -1,6 +1,7 @@
 import { ZONE_META, zoneOf } from "@/lib/bias/config";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import type { ZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { RECALL_MATCH_NOTE } from "@/lib/clusters/recall-matched-zones";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
 // "Kim önce yazdı?" — the per-story timeline under the cluster page's
@@ -279,6 +280,16 @@ function firstMoverLabel(names: readonly string[]): string {
  * "bu kümede haber yok" / "akışı şu an sorunlu" part. The page prints its one
  * note instead (ENGLISH_ONLY_NOTE). Points, joins, `absentZones` and the zone
  * list are unchanged.
+ *
+ * `recallMatchedZones` (h108-sharesurfaces-1) is `ClusterDetail.recallMatchedZones`
+ * as a set: the empty zones in which Tayf's own Jev recall stage matched a voting
+ * source with this story's event, a similar story sitting in another cluster. An
+ * absent zone in it gets the framing comparison's qualifier appended to its
+ * absence line, bare or qualified ("… bu kümede haber yok · benzer haber başka
+ * kümede olabilir"). A degraded-feed line is the feed's explanation and keeps its
+ * wording; an English-only cluster states no absence. Undefined or empty leaves
+ * every string as it was. Wording only: `absentZones` and everything else are
+ * unchanged.
  */
 export function buildStoryTimeline(
   members: readonly StoryTimelineMember[],
@@ -286,6 +297,7 @@ export function buildStoryTimeline(
   health: ZoneFeedHealth | null,
   nonVoting: readonly StoryTimelineMember[] = [],
   languageIsolated = false,
+  recallMatchedZones?: ReadonlySet<MediaDnaZone>,
 ): StoryTimeline | null {
   const votingOrdered = earliestPerSource(members, seenAt).sort(byTimeThenName);
   const votingFirst = votingOrdered[0];
@@ -386,7 +398,8 @@ export function buildStoryTimeline(
     } else if (degradedAbsentZones.includes(zone)) {
       parts.push(DEGRADED_TEXT[zone]);
     } else if (absentZones.includes(zone)) {
-      parts.push(nonVotingZones.has(zone) ? ABSENT_TEXT_QUALIFIED[zone] : ABSENT_TEXT[zone]);
+      const absent = nonVotingZones.has(zone) ? ABSENT_TEXT_QUALIFIED[zone] : ABSENT_TEXT[zone];
+      parts.push(recallMatchedZones?.has(zone) ? `${absent} · ${RECALL_MATCH_NOTE}` : absent);
     }
     // Otherwise the zone is present but undated — say nothing about it.
   }

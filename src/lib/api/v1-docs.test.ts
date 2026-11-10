@@ -158,6 +158,16 @@ describe("Turkish strings of the v1 docs are plain text (h47-reports-1)", () => 
     expect(note).toContain("total_disclosures:");
     expect(note).toContain("truncated: true ise");
   });
+
+  // h109: a replaced original is left out of the list, count and totals but not of total_disclosures.
+  it("explains superseded, and that count + superseded = total_disclosures while capped is false, without the backticks", () => {
+    const pickup = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/kap/pickup")!;
+    const note = pickup.notesTr.find((n) => n.startsWith("superseded:"));
+    expect(note).toBeDefined();
+    expect(note).toContain("düzelt");
+    expect(note).toContain("capped false iken count + superseded = total_disclosures");
+    expect(note).not.toContain("`");
+  });
 });
 
 describe("Turkish strings of the v1 docs carry no ASCII decimal", () => {

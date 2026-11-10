@@ -271,6 +271,126 @@ describe("cluster opengraph-image", () => {
       );
       expect(text).not.toContain("KÖR NOKTA");
     });
+
+    // h108-sharesurfaces-1: cluster 0746c9d2 (9 İktidar; Jev matched Yeniçağ and
+    // Elips Haber, Muhalefet, with the same event in another cluster) printed
+    // "KÖR NOKTA — sadece İktidar yazdı" on the OG / Twitter card while /blindspots
+    // said "Kümede sadece İktidar". twitter-image.tsx re-exports this file.
+    describe("zones Jev matched (h108-sharesurfaces-1)", () => {
+      const withRecall = (
+        detail: ClusterDetail,
+        recallMatchedZones: ClusterDetail["recallMatchedZones"],
+      ): ClusterDetail => (recallMatchedZones === undefined ? detail : { ...detail, recallMatchedZones });
+
+      it("prints 'KÖR NOKTA — kümede sadece İktidar' for a 0746c9d2-shaped cluster, never 'yazdı'", async () => {
+        const text = await ribbonText(withRecall(mkDetail(NINE, undefined, voting9), ["muhalefet"]));
+        expect(text).toContain("KÖR NOKTA — kümede sadece İktidar");
+        expect(text).not.toContain("sadece İktidar yazdı");
+        expect(text).not.toContain("yazdı");
+      });
+
+      it("one matched zone is enough, and so are two", async () => {
+        for (const zones of [["bagimsiz"], ["bagimsiz", "muhalefet"]] as const) {
+          const text = await ribbonText(withRecall(mkDetail(NINE, undefined, voting9), [...zones]));
+          expect(text).toContain("KÖR NOKTA — kümede sadece İktidar");
+        }
+      });
+
+      it("keeps today's ribbon with [] (a failed lookup) and with the field undefined (an old cache entry)", async () => {
+        for (const zones of [[], undefined] as const) {
+          const text = await ribbonText(withRecall(mkDetail(NINE, undefined, voting9), zones as never));
+          expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
+          expect(text).not.toContain("kümede");
+        }
+        // And nothing else changes: the two renders differ in the ribbon only.
+        const plain = await ribbonText(mkDetail(NINE, undefined, voting9));
+        const empty = await ribbonText(withRecall(mkDetail(NINE, undefined, voting9), []));
+        expect(empty).toBe(plain);
+      });
+
+      it("keeps the toplayıcı / niş qualifier ahead of it (precedence, as on /blindspots)", async () => {
+        const text = await ribbonText(
+          withRecall(mkDetail(NINE, undefined, [...voting9, ISCI_HABER]), ["bagimsiz"]),
+        );
+        expect(text).toContain("KÖR NOKTA — spektrumda sadece İktidar");
+        expect(text).not.toContain("kümede");
+      });
+
+      it("leaves the %share ribbon alone: another zone has a voting source", async () => {
+        const text = await ribbonText(
+          withRecall(
+            mkDetail(
+              {
+                article_count: 5,
+                bias_distribution: { ...NINE.bias_distribution!, pro_government: 4, gov_leaning: 0, opposition: 1 },
+              },
+              undefined,
+              [],
+            ),
+            ["bagimsiz"],
+          ),
+        );
+        expect(text).toContain("KÖR NOKTA — %80 İktidar");
+        expect(text).not.toContain("kümede");
+      });
+
+      it("names the fallback zone with its capitalised label when no blindspot_side is recorded", async () => {
+        const text = await ribbonText(
+          withRecall(
+            mkDetail(
+              {
+                blindspot_side: null,
+                article_count: 6,
+                bias_distribution: { ...NINE.bias_distribution!, pro_government: 0, gov_leaning: 0, opposition_leaning: 3, opposition: 2 },
+              },
+              undefined,
+              [member("a", "outlet", "opposition"), member("b", "outlet", "opposition_leaning")],
+            ),
+            ["iktidar"],
+          ),
+        );
+        expect(text).toContain("KÖR NOKTA — kümede sadece Muhalefet");
+      });
+
+      it("prints no ribbon for a cluster that is not a blindspot, whatever Jev matched", async () => {
+        const text = await ribbonText(
+          withRecall(
+            mkDetail({ ...NINE, is_blindspot: false, blindspot_side: null }, undefined, voting9),
+            ["muhalefet"],
+          ),
+        );
+        expect(text).not.toContain("KÖR NOKTA");
+      });
+
+      it("does not touch the zone tiles, the count chip or the percents", async () => {
+        const matched = await ribbonText(withRecall(mkDetail(NINE, undefined, voting9), ["muhalefet"]));
+        const plain = await ribbonText(mkDetail(NINE, undefined, voting9));
+        const strip = (t: string) =>
+          t.replace("KÖR NOKTA — kümede sadece İktidar", "").replace("KÖR NOKTA — sadece İktidar yazdı", "");
+        expect(strip(matched)).toBe(strip(plain));
+        expect(matched).toContain("%100 · 9");
+      });
+
+      // The ribbon is a single flex pill at fontSize 26 on a 1056 px content
+      // width. "spektrumda sadece Muhalefet" (the longest variant before this one,
+      // the longest label too) already fits, so a ribbon no longer than it fits.
+      it("is no longer than the longest ribbon that already fits, for every zone", () => {
+        const labels = ["İktidar", "Bağımsız", "Muhalefet"];
+        const longestToday = Math.max(
+          ...labels.flatMap((l) => [
+            `KÖR NOKTA — spektrumda sadece ${l}`.length,
+            `KÖR NOKTA — sadece ${l} yazdı`.length,
+            `KÖR NOKTA — %100 ${l}`.length,
+          ]),
+        );
+        for (const label of labels) {
+          expect(`KÖR NOKTA — kümede sadece ${label}`.length).toBeLessThanOrEqual(longestToday);
+          expect(`KÖR NOKTA — kümede sadece ${label}`.length).toBeLessThan(
+            `KÖR NOKTA — spektrumda sadece ${label}`.length,
+          );
+        }
+      });
+    });
   });
 
   it("omits the ribbon when the cluster is not a blindspot", async () => {

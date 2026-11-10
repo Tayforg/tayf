@@ -15,12 +15,13 @@ import {
   type AttentionRawRow,
   type AttentionRow,
 } from "@/lib/finance/ticker-relevance";
+import { correctionChains, supersededIndexes } from "@/lib/finance/kap-corrections";
 import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
 import { readAllPages } from "@/lib/finance/paging";
 import {
   CIRCUIT_BREAKER_DAY_LIMIT,
   CIRCUIT_BREAKER_TEXT,
-  NOT_CIRCUIT_BREAKER_OR,
+  FEED_DISCLOSURE_OR,
   tickerDisclosureOr,
 } from "@/lib/finance/disclosure-filter";
 import { repairKapApostrophe } from "../../../supabase/functions/_shared/kap-text";
@@ -123,6 +124,15 @@ import { repairKapApostrophe } from "../../../supabase/functions/_shared/kap-tex
 // open (warn + null): a label that loses its "(30 günde N)" suffix is a far
 // smaller problem than a ticker page that errors because a count timed out. The
 // disclosure LIST itself still throws.
+//
+// h108-kapdisclosures: a Disclosure says who filed it (`filerCodes` = stock_codes, `relatedCodes` =
+// related_stocks; a rating agency's notice shows the RATED company as its chips, isAgencyFiled), and
+// carries KAP's modify_status / year / period / rule_type. A correction (DUZENLENEN) is a new
+// disclosure, so a corrected filing is listed in every version but counted once, at its ORIGINAL
+// (kap-corrections.ts): issuerDisclosureIndexes drops the later versions, and it stays keyed on stock_codes. `pressCode` (fetchTickerPage,
+// fail-open like totalDisclosures30d) names the sibling code that carries the company's press when
+// the page's own code has none. KAP's "Test Bildirimi" is left out of every reader through the one
+// shared or() string (disclosure-filter.ts), never a second chained .or().
 
 export interface FeedSource {
   name: string;
@@ -152,11 +162,28 @@ export interface Disclosure {
   disclosureIndex: number;
   publishedAt: string;
   kapTitle: string | null;
-  /** The notice's tickers: `stock_codes`, or `related_stocks` when the notice is tagged only there. */
+  /**
+   * The notice's tickers, the chips a reader clicks: `stock_codes`, or `related_stocks`
+   * when the notice is tagged only there, or (a rating agency's notice, see isAgencyFiled)
+   * the RATED companies in `related_stocks` rather than the agency's own code.
+   */
   stockCodes: string[];
+  /** `stock_codes` as KAP wrote it: the filer(s), whatever `stockCodes` shows. Empty for a notice tagged only in related_stocks. */
+  filerCodes: string[];
+  /** `related_stocks`: the shares the notice names without being filed by them. */
+  relatedCodes: string[];
+  /** A rating agency filed this notice for a company it rated: `filerCodes` is the agency, `stockCodes` the rated company. */
+  agencyFiled: boolean;
   subject: string | null;
   summary: string | null;
   disclosureClass: string | null;
+  /** KAP's modify_status: "DUZENLENEN" marks a correction filed as a new disclosure, "DUZELTILEN" an original it replaced. */
+  modifyStatus: string | null;
+  /** The reporting year and period of a report ("2026", "3"), as KAP writes them; null on other notices. */
+  year: string | null;
+  period: string | null;
+  /** KAP's rule_type, for a report the period's name ("9 Aylık"). */
+  ruleType: string | null;
 }
 
 export interface Company {
@@ -198,6 +225,12 @@ export interface TickerPage {
   /** All of the ticker's disclosures in the last 30 days (breakers excluded); null when the count failed. */
   totalDisclosures30d: number | null;
   coverage: CoverageStats;
+  /**
+   * h108-kapdisclosures-2: the sibling code of this company where the press is matched, set only
+   * when this code has no mention of its own in the 30-day window and a sibling has (ISATR -> ISCTR).
+   * The pickup numbers of this page would read 0 / %0 for press that exists under the sibling.
+   */
+  pressCode: string | null;
 }
 
 export interface QuoteStat {
@@ -529,21 +562,64 @@ interface DisclosureRow {
   /** Absent when the read used a narrow select without it (the circuit-breaker strip). */
   summary?: string | null;
   disclosure_class: string | null;
+  /** h108-kapdisclosures-3: absent on the strip's narrow select, like `summary`. */
+  modify_status?: string | null;
+  year?: string | null;
+  period?: string | null;
+  rule_type?: string | null;
+}
+
+/**
+ * h108-kapdisclosures-1: the subjects a rating agency files under its OWN code for a
+ * company it rated ("Kredi Derecelendirmesi" by TRATE, JCRAV, SAHAR: 64 notices in 30
+ * days, none of those codes has a company row). KAP puts the rated company in
+ * related_stocks.
+ */
+export const AGENCY_FILED_SUBJECTS: ReadonlySet<string> = new Set([
+  "Kredi Derecelendirmesi",
+  "Kurumsal Yönetim İlkelerine Uyum Derecelendirmesi",
+]);
+
+/**
+ * A rating agency's notice about another company: a rating subject, related_stocks set,
+ * and no code in both columns (a company that names itself in both rated itself: its own
+ * filing). The one rule behind "the chips are the rated company".
+ */
+export function isAgencyFiled(row: {
+  subject?: string | null;
+  stock_codes?: readonly string[] | null;
+  related_stocks?: readonly string[] | null;
+}): boolean {
+  if (row.subject == null || !AGENCY_FILED_SUBJECTS.has(row.subject)) return false;
+  const related = row.related_stocks ?? [];
+  if (related.length === 0) return false;
+  const filers = row.stock_codes ?? [];
+  return !filers.some((code) => related.includes(code));
 }
 
 function toDisclosure(r: DisclosureRow): Disclosure {
-  const codes = r.stock_codes ?? [];
+  const filerCodes = r.stock_codes ?? [];
+  const relatedCodes = r.related_stocks ?? [];
+  const agencyFiled = isAgencyFiled(r);
   return {
     disclosureIndex: r.disclosure_index,
     publishedAt: r.published_at,
     kapTitle: r.kap_title,
     // h11-finance-1: a notice tagged only in related_stocks shows those as its chips.
-    stockCodes: codes.length > 0 ? codes : (r.related_stocks ?? []),
+    // h108-kapdisclosures-1: so does a rating agency's notice, so the chip is the rated company.
+    stockCodes: agencyFiled ? relatedCodes : filerCodes.length > 0 ? filerCodes : relatedCodes,
+    filerCodes,
+    relatedCodes,
+    agencyFiled,
     // h81-textclean-1: KAP's feed loses a suffix apostrophe ("Limanı?nda"); repaired here at read
     // time, so the stored row (and Jev's input) stays verbatim and old rows heal without a backfill.
     subject: repairKapApostrophe(r.subject),
     summary: repairKapApostrophe(r.summary ?? null),
     disclosureClass: r.disclosure_class,
+    modifyStatus: r.modify_status ?? null,
+    year: r.year ?? null,
+    period: r.period ?? null,
+    ruleType: r.rule_type ?? null,
   };
 }
 
@@ -557,10 +633,29 @@ function toDisclosure(r: DisclosureRow): Disclosure {
  * coverageStats take this set and nothing else. The page still LISTS the others.
  */
 function issuerDisclosureIndexes(rows: readonly DisclosureRow[], ticker: string): number[] {
-  return rows.filter((r) => (r.stock_codes ?? []).includes(ticker)).map((r) => r.disclosure_index);
+  // h108-kapdisclosures-3: an original a later correction replaced is the same filing twice, so a
+  // chain (original <- correction <- ...) counts once. The other versions are still listed, just not counted.
+  // h109: the version that counts is the EARLIEST one. The filing was public from its original, and
+  // disclosure_coverage.lag_minutes is relative to each index's own published_at, so the coverage read
+  // and coverageStats then anchor the event at the original with no further plumbing; counting the
+  // correction instead would start the event days late and turn the stories in between into "ön ilgi".
+  // A correction row ("latest") and a replaced row that is not a chain's first version (a middle link, or
+  // a DUZELTILEN row nobody claimed) are dropped; a claimed original stays even when it is flagged DUZELTILEN.
+  const superseded = supersededIndexes(rows);
+  const chains = correctionChains(rows);
+  const earliest = new Set<number>();
+  for (const chain of chains.values()) earliest.add(chain.earliestIndex);
+  return rows
+    .filter((r) => {
+      if (!(r.stock_codes ?? []).includes(ticker)) return false;
+      if (chains.has(r.disclosure_index)) return false;
+      return !superseded.has(r.disclosure_index) || earliest.has(r.disclosure_index);
+    })
+    .map((r) => r.disclosure_index);
 }
 
-const DISCLOSURE_SELECT = "disclosure_index,published_at,kap_title,stock_codes,related_stocks,subject,summary,disclosure_class";
+const DISCLOSURE_SELECT =
+  "disclosure_index,published_at,kap_title,stock_codes,related_stocks,subject,summary,disclosure_class,modify_status,year,period,rule_type";
 /**
  * h48-ekonomi-3: the circuit-breaker strip reads a whole day (hundreds of rows) and
  * shows a ticker code and a time, so it asks for no `summary` (the long free text);
@@ -620,10 +715,12 @@ async function readRecentDisclosures(limit: number, ticker: string | undefined):
   // TS-06: NULL subjects are kept explicitly -- see NOT_CIRCUIT_BREAKER_OR.
   // h11-finance-1: with a ticker, ONE combined or() (stock_codes OR related_stocks,
   // and not a breaker) replaces `.or(NOT_CIRCUIT_BREAKER_OR)` + `.contains(...)`.
+  // h108-kapdisclosures-4: both forms also leave KAP's own "Test Bildirimi" out, inside the same
+  // single or() (a kap_disclosures chain never has a second one).
   const { data, error } = await supabase
     .from("kap_disclosures")
     .select(DISCLOSURE_SELECT)
-    .or(ticker ? tickerDisclosureOr(ticker) : NOT_CIRCUIT_BREAKER_OR)
+    .or(ticker ? tickerDisclosureOr(ticker) : FEED_DISCLOSURE_OR)
     .order("published_at", { ascending: false })
     .limit(limit);
   if (error) throw new Error(`[finance] fetchRecentDisclosures: ${error.message}`);
@@ -1021,6 +1118,54 @@ async function readDisclosureCount(
   }
 }
 
+/**
+ * h108-kapdisclosures-2: bist_companies holds one row per company with every code it trades
+ * under, KAP fans a filing out to every code, and the resolver matches press to ONE of them
+ * (ISCTR). So ISATR, ISBTR, TIB, ISKUR, TGB, THL, YKB and IYM read "haberi çıkan 0 (%0)" for
+ * filings their main code shows at 100 %. When `ticker` has no mention of its own in the window
+ * (`ownMentions`, raw rows) and a sibling code of the same company has some, this returns the
+ * sibling with the most (ties: alphabetical), counted with one head:true read per sibling over
+ * the SAME window as the attention read. Otherwise null, with no read at all.
+ *
+ * Fails OPEN to null (warn), like totalDisclosures30d: a missing note is far smaller than a page
+ * that errors. One failed sibling read voids the answer, because the sibling that failed may be the
+ * one with most press. Never rejects.
+ */
+async function readPressCode(
+  supabase: Awaited<ReturnType<typeof createFinanceServerClient>>,
+  ticker: string,
+  companyTickers: readonly string[],
+  ownMentions: number,
+  sinceIso: string,
+): Promise<string | null> {
+  if (ownMentions > 0) return null;
+  const siblings = [...new Set(companyTickers)].filter((code) => code !== ticker).sort();
+  if (siblings.length === 0) return null;
+  try {
+    const counts = await Promise.all(
+      siblings.map(async (code) => {
+        const { count, error } = await supabase
+          .from("article_tickers")
+          .select("article_id", { count: "exact", head: true })
+          .eq("ticker", code)
+          .gte("published_at", sinceIso);
+        if (error) throw new Error(error.message);
+        if (typeof count !== "number") throw new Error(`no count for ${code}`);
+        return { code, count };
+      }),
+    );
+    // `siblings` is sorted, so a strict > keeps the alphabetically first of equal counts.
+    let best: { code: string; count: number } | null = null;
+    for (const c of counts) if (c.count > 0 && (best === null || c.count > best.count)) best = c;
+    return best === null ? null : best.code;
+  } catch (err) {
+    console.warn(
+      `[finance] fetchTickerPage press code ${ticker} unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
 async function readTickerPage(ticker: string): Promise<TickerPage> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const since30 = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
@@ -1142,7 +1287,11 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
       ...coverageRes.rows.map((r) => relevanceKey(r.article_id, ticker)),
     ]),
   ];
-  const scores = await fetchRelevanceScores(supabase, relevanceKeys);
+  // h108-kapdisclosures-2: runs beside the relevance lookup; it never rejects.
+  const [scores, pressCode] = await Promise.all([
+    fetchRelevanceScores(supabase, relevanceKeys),
+    readPressCode(supabase, ticker, c?.tickers ?? [], attentionRes.rows.length, attentionSinceIso),
+  ]);
   const attention = aggregateAttention(attentionRaw, scores, legalIds).map((d) => ({ day: d.day, articles: d.articles, sources: d.sources }));
   attention.sort((a, b) => a.day.localeCompare(b.day));
   const baselineDaily = attention.reduce((s, d) => s + d.articles, 0) / 30;
@@ -1173,6 +1322,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
       disclosures.filter((d) => issuerIndexes.has(d.disclosureIndex)),
       baselineDaily,
     ),
+    pressCode,
   };
 }
 

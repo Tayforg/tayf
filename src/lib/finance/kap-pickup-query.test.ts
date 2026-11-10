@@ -85,7 +85,7 @@ describe("fetchTickerPickup", () => {
     expect(articleTickersCalled).toBe(false);
   });
 
-  it("sends ONE combined or() (stock_codes OR related_stocks, no Devre Kesici) and no contains filter, and the mention gte = earliest disclosure - 3h", async () => {
+  it("sends ONE combined or() (stock_codes OR related_stocks, no Devre Kesici, no Test Bildirimi) and no contains filter, and the mention gte = earliest disclosure - 3h", async () => {
     const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
     const captured: { disclosures?: unknown; mentions?: unknown } = {};
 
@@ -123,7 +123,7 @@ describe("fetchTickerPickup", () => {
     };
     // h11-finance-1: related_stocks-only notices (halts, bans) belong to the ticker too.
     expect(dState.or).toEqual([
-      "and(or(stock_codes.cs.{THYAO},related_stocks.cs.{THYAO}),or(subject.is.null,subject.not.ilike.*Devre Kesici*))",
+      'and(or(stock_codes.cs.{THYAO},related_stocks.cs.{THYAO}),or(subject.is.null,subject.not.ilike.*Devre Kesici*),or(subject.is.null,subject.neq."Test Bildirimi"))',
     ]);
     expect(dState.contains).toEqual([]);
 
@@ -233,7 +233,7 @@ describe("fetchTickerPickup", () => {
       const count = states.find((s) => (s.selectArgs[1] as { head?: boolean } | undefined)?.head === true)!;
       expect(count.selectArgs).toEqual(["disclosure_index", { count: "exact", head: true }]);
       expect(count.or).toEqual([
-        "and(or(stock_codes.cs.{ISMEN},related_stocks.cs.{ISMEN}),or(subject.is.null,subject.not.ilike.*Devre Kesici*))",
+        'and(or(stock_codes.cs.{ISMEN},related_stocks.cs.{ISMEN}),or(subject.is.null,subject.not.ilike.*Devre Kesici*),or(subject.is.null,subject.neq."Test Bildirimi"))',
       ]);
       expect(count.contains).toEqual([]);
       expect(count.gte).toEqual([{ col: "published_at", val: iso(NOW - 30 * DAY) }]);
@@ -264,6 +264,182 @@ describe("fetchTickerPickup", () => {
       expect(result.pickups).toEqual([]);
       expect(result.totalDisclosures).toBe(0);
       expect(result.capped).toBe(false);
+    });
+  });
+
+  // h108-kapdisclosures-3: KAP files a correction as a new disclosure; the original is not
+  // scored a second time. The query reads modify_status, year, period and rule_type to tell.
+  describe("h108-kapdisclosures-3: superseded originals", () => {
+    const OTTO = {
+      stock_codes: ["OTTO"],
+      subject: "Sorumluluk Beyanı (Konsolide)",
+      summary: "Otto Holding A.Ş. 3. Aylık Finansal Durum Raporu Ve Ekleri Sorumluluk Beyanı",
+      year: "2026",
+      period: "3",
+      rule_type: "9 Aylık",
+      disclosure_class: "FR",
+    };
+    const ORIGINAL = { ...OTTO, disclosure_index: 1694030, published_at: iso(NOW - 4 * DAY), modify_status: "DUZELTILEN" };
+    const CORRECTION = { ...OTTO, disclosure_index: 1694331, published_at: iso(NOW - 4 * DAY + 38 * 60_000), modify_status: "DUZENLENEN" };
+    const OTHER = { ...OTTO, disclosure_index: 1690000, published_at: iso(NOW - 9 * DAY), subject: "Genel Kurul", summary: null, year: null, period: null, rule_type: null, modify_status: null, disclosure_class: "ODA" };
+
+    async function run(rows: unknown[], mentions: unknown[] = [], ticker = "OTTO") {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const seen: { disclosures: BuilderState[]; mentions: BuilderState[] } = { disclosures: [], mentions: [] };
+      const { client } = createSupabaseFake({
+        tables: {
+          kap_disclosures: (state) => {
+            if ((state.selectArgs[1] as { head?: boolean } | undefined)?.head === true) return { data: null, error: null, count: rows.length };
+            seen.disclosures.push(state);
+            return { data: rows, error: null };
+          },
+          article_tickers: (state) => {
+            seen.mentions.push(state);
+            return { data: mentions, error: null };
+          },
+          jev_shadow_predictions: () => ({ data: [], error: null }),
+          sources: () => ({ data: [], error: null }),
+        },
+      });
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      const result = await fetchTickerPickup(client as never, ticker, NOW - 30 * DAY, NOW, { limit: 60 });
+      return { result, seen };
+    }
+
+    it("selects modify_status, year, period, rule_type and related_stocks", async () => {
+      const { seen } = await run([CORRECTION]);
+      const cols = String(seen.disclosures[0]!.selectArgs[0]).split(",");
+      expect(cols).toEqual(expect.arrayContaining(["modify_status", "year", "period", "rule_type", "stock_codes", "related_stocks"]));
+    });
+
+    it("the OTTO pair is one filing: the superseded original is out of the list and the totals", async () => {
+      const mention = { article_id: "a1", published_at: iso(NOW - 4 * DAY + HOUR), created_at: iso(NOW - 4 * DAY + HOUR), source_id: null };
+      const { result } = await run([CORRECTION, ORIGINAL, OTHER], [mention]);
+
+      expect(result.pickups.map((p) => p.disclosureIndex)).toEqual([1694331, 1690000]);
+      expect(result.totals.disclosures).toBe(2);
+      expect(result.totals.pickedUp).toBe(1);
+      expect(result.superseded).toBe(1);
+      // The read was not cut by the limit.
+      expect(result.capped).toBe(false);
+    });
+
+    it("an unflagged original (the ATEKS case) is found by its twin", async () => {
+      const unflagged = { ...ORIGINAL, modify_status: null };
+      const { result } = await run([CORRECTION, unflagged]);
+
+      expect(result.pickups.map((p) => p.disclosureIndex)).toEqual([1694331]);
+      expect(result.superseded).toBe(1);
+    });
+
+    it("the mention window starts at the earliest disclosure that still counts, not at the superseded one", async () => {
+      const early = { ...ORIGINAL, disclosure_index: 1, published_at: iso(NOW - 20 * DAY), modify_status: "DUZELTILEN" };
+      const { seen } = await run([CORRECTION, early]);
+
+      const gte = seen.mentions[0]!.gte.find((g) => g.col === "published_at");
+      expect(gte?.val).toBe(iso(NOW - 4 * DAY + 38 * 60_000 - 3 * HOUR));
+    });
+
+    it("rows with no correction are untouched: superseded 0", async () => {
+      const { result } = await run([OTHER]);
+      expect(result.superseded).toBe(0);
+      expect(result.pickups).toHaveLength(1);
+    });
+
+    it("a list of one lone DUZELTILEN original summarises to nothing but still reports it", async () => {
+      const { result } = await run([ORIGINAL]);
+      expect(result.pickups).toEqual([]);
+      expect(result.totals.disclosures).toBe(0);
+      expect(result.superseded).toBe(1);
+    });
+
+    // h109: the TTKOM shape. The correction came 46 hours after the original, so the stories
+    // published in between are the filing's pickup, not the correction's.
+    describe("h109: the correction is anchored at its original", () => {
+      const GAP_ORIGINAL = { ...OTTO, disclosure_index: 1692808, published_at: iso(NOW - 10 * DAY), modify_status: null };
+      const GAP_CORRECTION = { ...OTTO, disclosure_index: 1694263, published_at: iso(NOW - 10 * DAY + 46 * HOUR), modify_status: "DUZENLENEN" };
+      const mentionAt = (articleId: string, ms: number) => ({ article_id: articleId, published_at: iso(ms), created_at: iso(ms), source_id: null });
+
+      it("a mention between the two counts on the correction's row, with the lag from the original", async () => {
+        const { result } = await run([GAP_CORRECTION, GAP_ORIGINAL], [mentionAt("a1", NOW - 10 * DAY + HOUR)]);
+
+        expect(result.pickups.map((p) => p.disclosureIndex)).toEqual([1694263]);
+        expect(result.pickups[0]).toMatchObject({ articles: 1, firstLagMinutes: 60, disclosedAt: GAP_CORRECTION.published_at });
+        expect(result.totals).toMatchObject({ disclosures: 1, pickedUp: 1 });
+        expect(result.superseded).toBe(1);
+      });
+
+      it("reads mentions from the original's published_at minus the skew margin, to 48 h after it", async () => {
+        const { seen } = await run([GAP_CORRECTION, GAP_ORIGINAL], [mentionAt("a1", NOW - 10 * DAY + HOUR)]);
+
+        const state = seen.mentions[0]!;
+        expect(state.gte.find((g) => g.col === "published_at")?.val).toBe(iso(NOW - 10 * DAY - 3 * HOUR));
+        expect(state.lt.find((l) => l.col === "published_at")?.val).toBe(iso(NOW - 10 * DAY + 48 * HOUR + 3 * HOUR));
+      });
+
+      it("a mention 49 h after the original is past its window and does not count", async () => {
+        const { result } = await run([GAP_CORRECTION, GAP_ORIGINAL], [mentionAt("a1", NOW - 10 * DAY + 49 * HOUR)]);
+
+        expect(result.pickups[0]).toMatchObject({ articles: 0, firstLagMinutes: null });
+      });
+
+      it("a chain 1 <- 2 <- 3 anchors the last version at the first", async () => {
+        const second = { ...GAP_CORRECTION, disclosure_index: 1694000, published_at: iso(NOW - 10 * DAY + 10 * HOUR) };
+        const third = { ...GAP_CORRECTION, disclosure_index: 1694500, published_at: iso(NOW - 10 * DAY + 30 * HOUR) };
+        const { result, seen } = await run([third, second, GAP_ORIGINAL], [mentionAt("a1", NOW - 10 * DAY + 2 * HOUR)]);
+
+        expect(result.pickups.map((p) => p.disclosureIndex)).toEqual([1694500]);
+        expect(result.pickups[0]).toMatchObject({ articles: 1, firstLagMinutes: 120 });
+        expect(result.superseded).toBe(2);
+        expect(seen.mentions[0]!.gte.find((g) => g.col === "published_at")?.val).toBe(iso(NOW - 10 * DAY - 3 * HOUR));
+      });
+    });
+
+    // h109: one correction replaces one filing. TABGD files the same buyback notice every working
+    // day; one DUZENLENEN row on the 23rd used to take all eight earlier days out of the list.
+    it("a recurring daily notice with ONE correction: only its nearest twin is superseded", async () => {
+      const TABGD = {
+        stock_codes: ["TABGD"],
+        related_stocks: [] as string[],
+        subject: "Payların Geri Alınmasına İlişkin Bildirim",
+        summary: "Pay Geri Alım İşlemleri",
+        year: null,
+        period: null,
+        disclosure_class: "ODA",
+        rule_type: null,
+        modify_status: null as string | null,
+      };
+      const daily = Array.from({ length: 8 }, (_, i) => ({ ...TABGD, disclosure_index: 1680000 + i, published_at: iso(NOW - (12 - i) * DAY) }));
+      const correction = { ...TABGD, disclosure_index: 1686985, published_at: iso(NOW - 3 * DAY), modify_status: "DUZENLENEN" };
+      const { result } = await run([correction, ...[...daily].reverse()], [], "TABGD");
+
+      expect(result.superseded).toBe(1);
+      expect(result.pickups).toHaveLength(8);
+      expect(result.pickups.map((p) => p.disclosureIndex)).not.toContain(1680007);
+      expect(result.pickups.map((p) => p.disclosureIndex)).toContain(1680000);
+      expect(result.totals.disclosures).toBe(8);
+    });
+
+    it("related_stocks tells one company's rating from another's: a THYAO correction replaces neither", async () => {
+      const rating = {
+        stock_codes: ["JCRAV"],
+        subject: "Kredi Derecelendirmesi",
+        summary: "KREDİ DERECELENDİRME BİLDİRİMİ",
+        year: null,
+        period: null,
+        disclosure_class: "ODA",
+        rule_type: null,
+        modify_status: null as string | null,
+      };
+      const rows = [
+        { ...rating, disclosure_index: 3, published_at: iso(NOW - DAY), related_stocks: ["THYAO"], modify_status: "DUZENLENEN" },
+        { ...rating, disclosure_index: 2, published_at: iso(NOW - 2 * DAY), related_stocks: ["GARAN"] },
+        { ...rating, disclosure_index: 1, published_at: iso(NOW - 2 * DAY - 1000), related_stocks: ["AKBNK"] },
+      ];
+      const { result } = await run(rows, [], "JCRAV");
+
+      expect(result.superseded).toBe(0);
+      expect(result.pickups).toHaveLength(3);
     });
   });
 

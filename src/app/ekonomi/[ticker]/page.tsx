@@ -10,6 +10,7 @@ import { KapPickupPanel } from "@/components/finance/kap-pickup-panel";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
 import { companyDisplayName } from "@/lib/finance/company-display-name";
+import { disclosureClassLabel } from "@/lib/finance/disclosure-class";
 import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
 import {
   articleCountLabel,
@@ -23,6 +24,8 @@ import {
   limitFlag,
   moveClass,
 } from "@/lib/finance/format";
+import { MODIFY_STATUS_CORRECTION, supersededDisclosureIndexes } from "@/lib/finance/kap-corrections";
+import { filerName, pressCodeNote, RELATED_ONLY_SHORT } from "@/lib/finance/kap-pickup";
 import { optionalRead } from "@/lib/finance/optional-read";
 import {
   fetchIntraday,
@@ -239,6 +242,16 @@ function lagLabel(minutes: number | null): string {
   return minutes < 0 ? `${text} önce` : `${text} sonra`;
 }
 
+/**
+ * h108-kapdisclosures-3: a "Finansal Rapor" row carries no summary text, so its line would be
+ * empty. It names the year and the period instead ("2026 · 9 Aylık"); null for any other subject
+ * or when KAP gave neither.
+ */
+function reportPeriodLine(d: { subject: string | null; year: string | null; ruleType: string | null }): string | null {
+  if (d.subject !== "Finansal Rapor") return null;
+  return [d.year, d.ruleType].filter((part): part is string => Boolean(part)).join(" · ") || null;
+}
+
 export default async function TickerPage({ params }: { params: Promise<{ ticker: string }> }) {
   const { ticker: raw } = await params;
   const ticker = raw.toUpperCase();
@@ -320,6 +333,12 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // h11-finance-3: the list is cut at DISCLOSURE_CAP, so "son 30 gün" is only
   // true while it is not full.
   const windowLabel = disclosureWindowLabel(page.disclosures.length, page.totalDisclosures30d, DISCLOSURE_CAP);
+  // h108-kapdisclosures-3: originals a later correction replaced stay listed (tagged) but are not
+  // counted by the coverage section, so they are not "notices that only name the share" either.
+  const supersededRows = supersededDisclosureIndexes(page.disclosures);
+  const supersededOwn = page.disclosures.filter((d) => supersededRows.has(d.disclosureIndex) && d.filerCodes.includes(ticker)).length;
+  // h108-kapdisclosures-2: the sibling code that carries this company's press, when this code has none.
+  const pressNote = page.pressCode ? pressCodeNote(page.pressCode) : null;
   const sessionDay = intraday.day;
   // h92-marketclock-1: a session whose bars stop before 17:30 although its daily bar is in (the ticker left
   // bist_intraday_targets mid-session and quotes-ingest never back-fills) would draw its last price, colour and
@@ -442,35 +461,46 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           <AttentionBars days={page.attention} today={istToday()} />
         </Panel>
         <Panel title="KAP ile basın arası" meta={`${windowLabel} · bildirimden sonraki 48 saat`}>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-5">
-            <div>
-              <dt className="text-muted-foreground">bildirim</dt>
-              <dd className="text-lg tabular-nums">{page.coverage.disclosures}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">olay</dt>
-              <dd className="text-lg tabular-nums">{page.coverage.events}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">basında yer bulan</dt>
-              <dd className="text-lg tabular-nums">{page.coverage.covered}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">ilk haber, medyan</dt>
-              <dd className="text-lg tabular-nums">{lagLabel(page.coverage.medianLagMinutes)}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">olağandışı ön ilgi</dt>
-              <dd className={cn("text-lg tabular-nums", page.coverage.pressAhead > 0 ? "text-amber-400" : "")}>{page.coverage.pressAhead}</dd>
-            </div>
-          </dl>
+          {pressNote && page.pressCode ? (
+            // h108-kapdisclosures-2: this code has no press of its own; a sibling code of the same company does.
+            <p className="px-3 py-3 font-mono text-[11px] text-muted-foreground">
+              {pressNote.before}
+              <Link href={`/ekonomi/${page.pressCode}`} className="text-brand hover:underline">
+                {pressNote.link}
+              </Link>
+              {pressNote.after}
+            </p>
+          ) : (
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-5">
+              <div>
+                <dt className="text-muted-foreground">bildirim</dt>
+                <dd className="text-lg tabular-nums">{page.coverage.disclosures}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">olay</dt>
+                <dd className="text-lg tabular-nums">{page.coverage.events}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">basında yer bulan</dt>
+                <dd className="text-lg tabular-nums">{page.coverage.covered}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">ilk haber, medyan</dt>
+                <dd className="text-lg tabular-nums">{lagLabel(page.coverage.medianLagMinutes)}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">olağandışı ön ilgi</dt>
+                <dd className={cn("text-lg tabular-nums", page.coverage.pressAhead > 0 ? "text-amber-400" : "")}>{page.coverage.pressAhead}</dd>
+              </div>
+            </dl>
+          )}
           <p className="border-t border-border/70 px-3 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
-            Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. Basında yer bulan ve ilk haber, olaydaki ilk bildirimden sonraki 48 saat içinde çıkan haberlere göre ölçülür; daha geç haberler sayılmaz. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. {coverageScopeNote(page.disclosures.length, page.coverage.disclosures)}
+            Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. Basında yer bulan ve ilk haber, olaydaki ilk bildirimden sonraki 48 saat içinde çıkan haberlere göre ölçülür; daha geç haberler sayılmaz. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. {coverageScopeNote(page.disclosures.length - supersededOwn, page.coverage.disclosures)}
           </p>
         </Panel>
       </div>
 
-      <KapPickupPanel ticker={ticker} />
+      <KapPickupPanel ticker={ticker} pressCode={page.pressCode} />
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <Panel title="Haberler" meta={articleCountLabel(page.articles.length, page.articlesTruncated)}>
@@ -500,25 +530,41 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
             <PanelEmpty>Son 30 günde bildirim yok.</PanelEmpty>
           ) : (
             <ol className="divide-y divide-border/70">
-              {page.disclosures.map((d) => (
-                <li key={d.disclosureIndex} className="grid grid-cols-[3.25rem_minmax(0,1fr)] gap-x-3 px-3 py-1.5 font-mono text-[11px]">
-                  <time dateTime={d.publishedAt} className="tabular-nums text-muted-foreground">
-                    {fmtWhen(d.publishedAt)}
-                  </time>
-                  <div className="min-w-0">
-                    <a
-                      href={`https://www.kap.org.tr/tr/Bildirim/${d.disclosureIndex}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-foreground/90 hover:text-brand"
-                    >
-                      {d.subject ?? "Bildirim"}
-                      <NewTabHint />
-                    </a>
-                    {d.summary ? <p className="truncate text-[10px] text-muted-foreground">{d.summary}</p> : null}
-                  </div>
-                </li>
-              ))}
+              {page.disclosures.map((d) => {
+                const replaced = supersededRows.has(d.disclosureIndex);
+                const summaryLine = d.summary ?? reportPeriodLine(d);
+                return (
+                  <li key={d.disclosureIndex} className="grid grid-cols-[3.25rem_minmax(0,1fr)] gap-x-3 px-3 py-1.5 font-mono text-[11px]">
+                    <time dateTime={d.publishedAt} className="tabular-nums text-muted-foreground">
+                      {fmtWhen(d.publishedAt)}
+                    </time>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-baseline gap-x-2">
+                        {/* h108-kapdisclosures-4: KAP's class, with the labels of the /ekonomi feed. */}
+                        {d.disclosureClass ? <span className="text-muted-foreground">{disclosureClassLabel(d.disclosureClass)}</span> : null}
+                        <a
+                          href={`https://www.kap.org.tr/tr/Bildirim/${d.disclosureIndex}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={replaced ? "text-muted-foreground hover:text-brand" : "text-foreground/90 hover:text-brand"}
+                        >
+                          {d.subject ?? "Bildirim"}
+                          <NewTabHint />
+                        </a>
+                        {/* h108-kapdisclosures-3: KAP files a correction as a new notice; tell the two apart. */}
+                        {d.modifyStatus === MODIFY_STATUS_CORRECTION ? <span className="text-[10px] text-amber-400">düzeltme</span> : null}
+                        {replaced ? <span className="text-[10px] text-muted-foreground">düzeltildi</span> : null}
+                      </div>
+                      {summaryLine ? <p className="truncate text-[10px] text-muted-foreground">{summaryLine}</p> : null}
+                      {/* h108-kapdisclosures-1: a notice another company filed (an insider purchase of this
+                          share, an agency's rating, a Takasbank list) says whose it is. */}
+                      {d.filerCodes.includes(ticker) ? null : (
+                        <p className="text-[10px] text-muted-foreground">{`${filerName(d)} bildirimi · ${RELATED_ONLY_SHORT}`}</p>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
             </ol>
           )}
         </Panel>

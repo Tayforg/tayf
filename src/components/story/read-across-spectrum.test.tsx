@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ReadAcrossSpectrum } from "./read-across-spectrum";
 import { NEW_TAB_NOTICE } from "@/components/ui/new-tab-hint";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
-import type { Source } from "@/types";
+import type { MediaDnaZone, Source } from "@/types";
 
 // h47-time-1: the CTA's age is printed through <RelativeTime> against the
 // page's per-request stamp. A fixed stamp keeps these tests off the real clock.
@@ -164,6 +164,138 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
     ];
     for (const markup of cases) {
       expect(markup).not.toContain("İzlediğimiz");
+    }
+  });
+});
+
+// h108-sharesurfaces-1: cluster 0746c9d2 (nine İktidar outlets; Jev matched Yeniçağ
+// and Elips Haber, Muhalefet, with the same event in another cluster) read "Spektruma
+// sayılan Muhalefet kaynaklarından bu kümede haber yok (kör nokta)" under the
+// spectrum, while the framing comparison on the same page said "benzer haber başka
+// kümede olabilir". The page passes the same Set it hands the framing comparison.
+describe("ReadAcrossSpectrum — zones Jev matched (h108-sharesurfaces-1)", () => {
+  const NOTE = "benzer haber başka kümede olabilir";
+  const OLD_MUHALEFET = "Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok (kör nokta)";
+  const OLD_IKTIDAR = "Spektruma sayılan İktidar kaynaklarından bu kümede haber yok (kör nokta)";
+  const OLD_BOTH = "İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı";
+  const NEW_BOTH = `Bu kümede iki kutuptan da haber yok · ${NOTE}`;
+
+  const matched = (...zones: MediaDnaZone[]) => new Set<MediaDnaZone>(zones);
+  const render = (props: Partial<React.ComponentProps<typeof ReadAcrossSpectrum>>) =>
+    renderToStaticMarkup(
+      <ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} {...props} />,
+    );
+  /** The text of the caption <p> (markup minus tags), so the sentence is asserted whole. */
+  const caption = (markup: string) => {
+    let out = "";
+    let inTag = false;
+    for (const ch of markup) {
+      if (ch === "<") inTag = true;
+      else if (ch === ">") inTag = false;
+      else if (!inTag) out += ch;
+    }
+    return out;
+  };
+
+  describe("a single empty pole", () => {
+    it("appends the note after the existing sentence for a 0746c9d2-shaped cluster", () => {
+      const markup = render({ recallMatchedZones: matched("muhalefet") });
+      expect(caption(markup)).toBe(`${OLD_MUHALEFET} · ${NOTE}`);
+    });
+
+    it("puts the note before the toplayıcı / niş suffix", () => {
+      const markup = render({
+        recallMatchedZones: matched("muhalefet"),
+        nonVotingZoneCounts: { muhalefet: 1 },
+      });
+      expect(caption(markup)).toBe(
+        `${OLD_MUHALEFET} · ${NOTE} · 1 toplayıcı / niş kaynak yazdı (spektruma sayılmaz)`,
+      );
+    });
+
+    it("works for the mirror case (the silent pole is İktidar)", () => {
+      const markup = render({ members: ZERO_IKTIDAR_MEMBERS, recallMatchedZones: matched("iktidar") });
+      expect(caption(markup)).toBe(`${OLD_IKTIDAR} · ${NOTE}`);
+    });
+
+    it("an empty Set, an undefined prop and a Set without the silent zone all give today's markup", () => {
+      const today = render({});
+      expect(caption(today)).toBe(OLD_MUHALEFET);
+      expect(render({ recallMatchedZones: matched() })).toBe(today);
+      expect(render({ recallMatchedZones: undefined })).toBe(today);
+      // Only the other pole and Bağımsız matched: the silent pole is not one of them.
+      expect(render({ recallMatchedZones: matched("iktidar", "bagimsiz") })).toBe(today);
+    });
+
+    it("leaves the non-blindspot copy alone, matched or not", () => {
+      const plain = render({ isBlindspot: false });
+      expect(caption(plain)).toBe("Muhalefet tarafında henüz haber yok");
+      expect(render({ isBlindspot: false, recallMatchedZones: matched("muhalefet") })).toBe(plain);
+      const degraded = render({ isBlindspot: false, feedDegraded: true });
+      expect(render({ isBlindspot: false, feedDegraded: true, recallMatchedZones: matched("muhalefet") })).toBe(
+        degraded,
+      );
+    });
+  });
+
+  describe("both poles empty", () => {
+    it("says neither pole has news and adds the note when either pole matched", () => {
+      for (const zones of [["muhalefet"], ["iktidar"], ["iktidar", "muhalefet"]] as const) {
+        const markup = render({ members: [], recallMatchedZones: matched(...zones) });
+        expect(caption(markup)).toBe(NEW_BOTH);
+        expect(markup).not.toContain("sadece bağımsız kaynaklar yazdı");
+      }
+    });
+
+    it("keeps the toplayıcı / niş suffix after the new sentence", () => {
+      const markup = render({
+        members: [],
+        recallMatchedZones: matched("muhalefet"),
+        nonVotingZoneCounts: { iktidar: 2, muhalefet: 3 },
+      });
+      expect(caption(markup)).toBe(`${NEW_BOTH} · 5 toplayıcı / niş kaynak yazdı (spektruma sayılmaz)`);
+    });
+
+    it("keeps today's sentence when nothing matched, and when only Bağımsız did", () => {
+      const today = render({ members: [] });
+      expect(caption(today)).toBe(OLD_BOTH);
+      expect(render({ members: [], recallMatchedZones: matched() })).toBe(today);
+      expect(render({ members: [], recallMatchedZones: undefined })).toBe(today);
+      expect(render({ members: [], recallMatchedZones: matched("bagimsiz") })).toBe(today);
+    });
+
+    it("leaves the non-blindspot copy alone", () => {
+      const plain = render({ members: [], isBlindspot: false });
+      expect(caption(plain)).toBe("İki kutupta da henüz haber yok");
+      expect(render({ members: [], isBlindspot: false, recallMatchedZones: matched("muhalefet") })).toBe(plain);
+    });
+  });
+
+  it("never touches the CTA of a pole that has a member", () => {
+    const members = [
+      mkMember("gov1", "pro_government", "2026-07-01T10:00:00Z"),
+      mkMember("opp1", "opposition", "2026-07-01T09:00:00Z"),
+    ];
+    const today = render({ members });
+    expect(today).toContain("Karşı tarafı oku");
+    expect(render({ members, recallMatchedZones: matched("muhalefet", "iktidar") })).toBe(today);
+    expect(today).not.toContain(NOTE);
+  });
+
+  it("the English-only note still wins over the matched wording", () => {
+    const markup = render({ members: [], languageIsolated: true, recallMatchedZones: matched("muhalefet") });
+    expect(markup).not.toContain(NOTE);
+    expect(markup).not.toContain("kör nokta");
+    expect(markup).toBe(render({ members: [], languageIsolated: true }));
+  });
+
+  it("never renders 'İzlediğimiz' or a bracketed zone after 'kör nokta'", () => {
+    for (const markup of [
+      render({ recallMatchedZones: matched("muhalefet") }),
+      render({ members: [], recallMatchedZones: matched("muhalefet") }),
+    ]) {
+      expect(markup).not.toContain("İzlediğimiz");
+      expect(markup).not.toContain("kör nokta (");
     }
   });
 });

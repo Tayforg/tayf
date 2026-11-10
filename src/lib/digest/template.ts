@@ -55,6 +55,15 @@ export interface DigestBlindspotItem {
    * X" instead of "Sadece X yazdı" (h57-outbound-1).
    */
   nonVotingOutside: number;
+  /**
+   * `bundle.recallMatchedZones.length` (h108-sharesurfaces-1): how many silent zones
+   * Tayf's own Jev recall stage matched with this story's event, a similar story
+   * sitting in another cluster. When "sadece" holds on the voting tally and nobody
+   * from another zone carried it, but this is above 0, the line says "Kümede sadece
+   * X" instead of "Sadece X yazdı", the wording /blindspots uses. 0 (no match, a
+   * failed lookup, a bundle cached before the field existed) is today's line.
+   */
+  recallMatchedCount: number;
 }
 
 export interface BuildDigestHtmlInput {
@@ -148,13 +157,20 @@ function blindspotBlock(item: DigestBlindspotItem, siteUrl: string): string {
   // two zones have no source at all (250/1/0 is %100 but not "only").
   const counts = zoneCountsOf(item.biasDistribution);
   const pct = dominantZonePercent(counts, item.dominantZone);
-  const claim = onlyZoneClaim(counts, item.dominantZone, item.nonVotingOutside);
+  const claim = onlyZoneClaim(
+    counts,
+    item.dominantZone,
+    item.nonVotingOutside,
+    item.recallMatchedCount,
+  );
   const zoneCopy =
     claim === "only"
       ? `Sadece ${zoneLabel} yazdı`
       : claim === "spectrumOnly"
         ? `Spektrumda sadece ${zoneLabel}`
-        : `%${pct} ${zoneLabel}`;
+        : claim === "clusterOnly"
+          ? `Kümede sadece ${zoneLabel}`
+          : `%${pct} ${zoneLabel}`;
   return `
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:24px 0;background:#fafafa;border-radius:8px;">
     <tr>

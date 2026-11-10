@@ -96,6 +96,12 @@ export interface V1PickupBody {
   capped: boolean;
   /** Every disclosure of the ticker in the window (uncapped); null when the count failed. */
   total_disclosures: number | null;
+  /**
+   * Notices read that a later KAP correction (DUZENLENEN) replaced: left out of `disclosures`, `count` and
+   * `totals`, but still in `total_disclosures`. With `capped` false, `count + superseded` equals
+   * `total_disclosures`; a remaining gap means rows are missing.
+   */
+  superseded: number;
   totals: {
     /** The ticker's own filings (issuer: true) in the list; every other total is over these too. */
     disclosures: number;
@@ -122,6 +128,7 @@ export function toV1PickupBody(r: TickerPickup): V1PickupBody {
     truncated: r.truncated,
     capped: r.capped,
     total_disclosures: r.totalDisclosures,
+    superseded: r.superseded,
     totals: {
       disclosures: r.totals.disclosures,
       picked_up: r.totals.pickedUp,

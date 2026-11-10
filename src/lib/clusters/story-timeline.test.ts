@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import type { ZoneFeedHealth, ZoneHealth } from "@/lib/clusters/feed-health";
-import type { BiasCategory } from "@/types";
+import type { BiasCategory, MediaDnaZone } from "@/types";
 
 import {
   buildStoryTimeline,
@@ -808,6 +808,119 @@ describe("buildStoryTimeline — absent zone qualified by a non-voting point in 
       future,
     ])!;
     expect(t.summary).toContain("— Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok");
+  });
+});
+
+// h108-sharesurfaces-1: the timeline's "bu kümede haber yok" is a statement about the
+// cluster, but Tayf's own Jev recall stage matched the absent zone with this event
+// in another cluster (cluster 0746c9d2: Yeniçağ and Elips Haber, Muhalefet). The page
+// passes the same Set the framing comparison gets; the absence line then adds the
+// framing comparison's qualifier. Only wording moves.
+describe("buildStoryTimeline — absent zone Jev matched (h108-sharesurfaces-1)", () => {
+  const NOTE = "benzer haber başka kümede olabilir";
+  const matched = (...zones: MediaDnaZone[]) => new Set<MediaDnaZone>(zones);
+
+  // Bağımsız is the absent zone here.
+  const twoZones = [
+    member("Sabah", "pro_government", "2026-09-27T06:12:00Z"),
+    member("A Haber", "pro_government", "2026-09-27T06:20:00Z"),
+    member("Sözcü", "opposition_leaning", "2026-09-27T08:22:00Z"),
+  ];
+  // Bağımsız and Muhalefet are the absent zones here (a 0746c9d2 shape).
+  const allIktidar = [
+    member("Sabah", "pro_government", "2026-09-27T06:12:00Z"),
+    member("A Haber", "pro_government", "2026-09-27T06:20:00Z"),
+    member("Yeni Şafak", "pro_government", "2026-09-27T06:40:00Z"),
+  ];
+  const isci = member("İşçi Haber", "opposition", "2026-09-27T07:30:00Z");
+
+  const build = (
+    members: StoryTimelineMember[],
+    over: {
+      health?: ZoneFeedHealth | null;
+      nonVoting?: StoryTimelineMember[];
+      languageIsolated?: boolean;
+      recall?: ReadonlySet<MediaDnaZone>;
+    } = {},
+  ) =>
+    buildStoryTimeline(
+      members,
+      null,
+      over.health === undefined ? health({}) : over.health,
+      over.nonVoting ?? [],
+      over.languageIsolated ?? false,
+      over.recall,
+    )!;
+
+  it("appends the note to the bare absence line", () => {
+    const t = build(twoZones, { recall: matched("bagimsiz") });
+    expect(t.summary).toBe(
+      `İlk: Sabah · 09:12 — Bağımsız kaynaklardan bu kümede haber yok · ${NOTE} — Muhalefet 2 sa 10 dk sonra katıldı`,
+    );
+  });
+
+  it("appends the note to the qualified absence line too (a non-voting point in the zone)", () => {
+    const t = build(allIktidar, { nonVoting: [isci], recall: matched("muhalefet") });
+    expect(t.summary).toBe(
+      `İlk: Sabah · 09:12 — Bağımsız kaynaklardan bu kümede haber yok — Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok · ${NOTE}`,
+    );
+  });
+
+  it("annotates only the matched zones when two zones are absent", () => {
+    const one = build(allIktidar, { recall: matched("muhalefet") });
+    expect(one.summary).toBe(
+      `İlk: Sabah · 09:12 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet kaynaklarından bu kümede haber yok · ${NOTE}`,
+    );
+    const both = build(allIktidar, { recall: matched("bagimsiz", "muhalefet") });
+    expect(both.summary.split(NOTE)).toHaveLength(3);
+  });
+
+  it("an empty Set, an undefined Set and a Set without an absent zone give today's summary", () => {
+    const today = build(allIktidar).summary;
+    expect(today).toBe(
+      "İlk: Sabah · 09:12 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet kaynaklarından bu kümede haber yok",
+    );
+    expect(build(allIktidar, { recall: matched() }).summary).toBe(today);
+    expect(build(allIktidar, { recall: undefined }).summary).toBe(today);
+    // İktidar voted, so a match there is not an absence to annotate.
+    expect(build(allIktidar, { recall: matched("iktidar") }).summary).toBe(today);
+    // And a zone that did vote is never annotated.
+    expect(build(twoZones, { recall: matched("muhalefet") }).summary).toBe(build(twoZones).summary);
+  });
+
+  it("keeps the degraded-feed wording (the feed, not the cluster, explains that absence)", () => {
+    const t = build(twoZones, { health: health({ bagimsiz: true }), recall: matched("bagimsiz") });
+    expect(t.summary).toContain("— Bağımsız kaynakların akışı şu an sorunlu");
+    expect(t.summary).not.toContain(NOTE);
+  });
+
+  it("says nothing for an all-English cluster (no absence is stated there)", () => {
+    const t = build(allIktidar, { languageIsolated: true, recall: matched("bagimsiz", "muhalefet") });
+    expect(t.summary).not.toContain(NOTE);
+    expect(t.summary).not.toContain("bu kümede haber yok");
+    expect(t.summary).toBe(build(allIktidar, { languageIsolated: true }).summary);
+  });
+
+  it("changes wording only: absence, joins, first mover, points and the zone line are what they were", () => {
+    const without = build(allIktidar);
+    const withRecall = build(allIktidar, { recall: matched("bagimsiz", "muhalefet") });
+
+    expect(withRecall.absentZones).toEqual(without.absentZones);
+    expect(withRecall.degradedAbsentZones).toEqual(without.degradedAbsentZones);
+    expect(withRecall.zoneJoin).toEqual(without.zoneJoin);
+    expect(withRecall.zoneFirsts).toEqual(without.zoneFirsts);
+    expect(withRecall.zoneLine).toBe(without.zoneLine);
+    expect(withRecall.first).toEqual(without.first);
+    expect(withRecall.points).toEqual(without.points);
+    expect(withRecall.crossesMidnight).toBe(without.crossesMidnight);
+    expect(withRecall.summary).not.toBe(without.summary);
+    expect(withRecall.summary.split(` · ${NOTE}`).join("")).toBe(without.summary);
+  });
+
+  it("does not mutate the Set it is given", () => {
+    const zones = matched("muhalefet");
+    build(allIktidar, { recall: zones });
+    expect([...zones]).toEqual(["muhalefet"]);
   });
 });
 

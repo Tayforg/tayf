@@ -720,6 +720,10 @@ const haltNotice = (over: Record<string, unknown> = {}) => ({
   publishedAt: "2026-10-28T06:38:59Z",
   kapTitle: "BORSA İSTANBUL A.Ş.",
   stockCodes: ["TRHOL"],
+  // KAP tags a halt only in related_stocks: Borsa Istanbul filed it, TRHOL is named.
+  filerCodes: [] as string[],
+  relatedCodes: ["TRHOL"],
+  agencyFiled: false,
   subject: "Pay İşlem Sırası Kapatma / Açma",
   summary: "Pay Sırasının İşleme Kapatılması",
   disclosureClass: null,
@@ -833,6 +837,9 @@ describe("honest window labels (h11-finance-3)", () => {
       publishedAt: new Date(Date.parse("2026-10-30T10:00:00Z") - i * 3_600_000).toISOString(),
       kapTitle: "İŞ YATIRIM A.Ş.",
       stockCodes: ["ISMEN"],
+      filerCodes: ["ISMEN"],
+      relatedCodes: [] as string[],
+      agencyFiled: false,
       subject: "Özel Durum Açıklaması (Genel)",
       summary: null,
       disclosureClass: "ODA",
@@ -1464,6 +1471,9 @@ describe("news rows and chart markers carry the source's language (h101-a11yrece
     publishedAt: "2026-11-06T08:30:00.000Z",
     kapTitle: "ASELSAN ELEKTRONİK SANAYİ VE TİCARET A.Ş.",
     stockCodes: ["ASELS"],
+    filerCodes: ["ASELS"],
+    relatedCodes: [] as string[],
+    agencyFiled: false,
     subject: "Yeni İş İlişkisi",
     summary: null,
     disclosureClass: null,
@@ -1579,5 +1589,396 @@ describe("news rows and chart markers carry the source's language (h101-a11yrece
       ["2026-11-06T08:20:00.000Z", TR_TITLE],
       ["2026-11-06T08:30:00.000Z", "KAP: Yeni İş İlişkisi"],
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-1: the ticker page's "KAP bildirimleri" list holds notices the
+// ticker did not file (another company's insider purchase of its shares, an agency's
+// rating, a Takasbank list). Each such row says whose filing it is; the issuer's own
+// rows are unchanged. The page is a server component, so these read the element tree.
+// ---------------------------------------------------------------------------
+describe("KAP list: a notice the ticker did not file names its filer (h108-kapdisclosures-1)", () => {
+  const kapRow = (over: Record<string, unknown> = {}) => ({
+    disclosureIndex: 1696723,
+    publishedAt: "2026-11-06T16:03:00.000Z",
+    kapTitle: "NET HOLDİNG A.Ş.",
+    stockCodes: ["NTHOL"],
+    filerCodes: ["NTHOL"],
+    relatedCodes: ["MERIT"],
+    agencyFiled: false,
+    subject: "Pay Alım Satım Bildirimi",
+    summary: "Şirketimizin MERİT paylarının alışı hk.",
+    disclosureClass: "ODA",
+    modifyStatus: null,
+    year: null,
+    period: null,
+    ruleType: null,
+    ...over,
+  });
+  const OWN = kapRow({
+    disclosureIndex: 1690001,
+    publishedAt: "2026-11-02T08:00:00.000Z",
+    kapTitle: "MERİT TURİZM YATIRIM VE İŞLETME A.Ş.",
+    stockCodes: ["MERIT"],
+    filerCodes: ["MERIT"],
+    relatedCodes: [],
+    subject: "Özel Durum Açıklaması (Genel)",
+    summary: "Genel Kurul tarihi",
+  });
+
+  /** The <li> rows of the page's "KAP bildirimleri" list, by their text. */
+  const listRows = (els: El[]) => {
+    const panel = els.find((e) => e.props.title === "KAP bildirimleri")!;
+    return collectEls(panel.props.children).filter((e) => e.type === "li");
+  };
+  const rowText = (els: El[], needle: string) => {
+    const row = listRows(els).find((li) => textOfNode(li.props.children).includes(needle));
+    return row === undefined ? undefined : textOfNode(row.props.children);
+  };
+  const markerEls = (els: El[]) =>
+    listRows(els).flatMap((li) => collectEls(li.props.children)).filter((e) => e.type === "p" && textOfNode(e.props.children).includes("bildirimi ·"));
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T10:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("on MERIT, Net Holding's purchase of MERIT shares carries 'Net Holding bildirimi · hisseyi anan bildirim'", async () => {
+    const els = await renderTicker("MERIT", { disclosures: [kapRow(), OWN] });
+
+    expect(rowText(els, "MERİT paylarının alışı")).toContain("Net Holding bildirimi · hisseyi anan bildirim");
+    const markers = markerEls(els);
+    expect(markers).toHaveLength(1);
+    expect(String(markers[0]!.props.className)).toContain("text-[10px]");
+    expect(String(markers[0]!.props.className)).toContain("text-muted-foreground");
+  });
+
+  it("MERIT's own filing shows no marker, and the row order is unchanged", async () => {
+    const els = await renderTicker("MERIT", { disclosures: [kapRow(), OWN] });
+
+    const own = rowText(els, "Genel Kurul tarihi")!;
+    expect(own).not.toContain("bildirimi ·");
+    expect(own).not.toContain("hisseyi anan");
+    expect(listRows(els).map((li) => textOfNode(li.props.children).includes("Genel Kurul tarihi"))).toEqual([false, true]);
+  });
+
+  it("an agency's rating on the rated company's page names the agency", async () => {
+    const rating = kapRow({
+      disclosureIndex: 1696754,
+      kapTitle: "İSTANBUL ULUSLARARASI DERECELENDİRME HİZMETLERİ A.Ş.",
+      stockCodes: ["DNYVA"],
+      filerCodes: ["TRATE"],
+      relatedCodes: ["DNYVA"],
+      agencyFiled: true,
+      subject: "Kredi Derecelendirmesi",
+      summary: "Kredi Derecelendirme Notunun Askıya Alınması",
+    });
+    const els = await renderTicker("DNYVA", { disclosures: [rating] });
+
+    expect(rowText(els, "Notunun Askıya")).toContain("İstanbul Uluslararası Derecelendirme Hizmetleri bildirimi · hisseyi anan bildirim");
+  });
+
+  it("on the agency's own page (TRATE) the same row is the page ticker's own filing: no marker", async () => {
+    const rating = kapRow({ filerCodes: ["TRATE"], stockCodes: ["DNYVA"], relatedCodes: ["DNYVA"], agencyFiled: true, kapTitle: "İSTANBUL ULUSLARARASI DERECELENDİRME HİZMETLERİ A.Ş.", subject: "Kredi Derecelendirmesi" });
+    const els = await renderTicker("TRATE", { disclosures: [rating] });
+
+    expect(markerEls(els)).toHaveLength(0);
+  });
+
+  it("falls back to the filer codes, then to 'Başka kurum', when KAP gave no usable title", async () => {
+    const byCodes = kapRow({ kapTitle: null, filerCodes: ["GLCVY", "GLCVB"] });
+    const nobody = kapRow({ disclosureIndex: 2, kapTitle: null, filerCodes: [], stockCodes: ["MERIT"], summary: "Takas listesi" });
+    const els = await renderTicker("MERIT", { disclosures: [byCodes, nobody] });
+
+    expect(rowText(els, "MERİT paylarının alışı")).toContain("GLCVY, GLCVB bildirimi · hisseyi anan bildirim");
+    expect(rowText(els, "Takas listesi")).toContain("Başka kurum bildirimi · hisseyi anan bildirim");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-3: KAP files a correction as a NEW disclosure. The list shows both
+// rows, tells them apart ('düzeltme' on the correction, 'düzeltildi' on the original it
+// replaced, dimmed), and a Finansal Rapor row with no summary prints its year and period
+// instead of nothing. The coverage footnote does not blame the superseded row for being a
+// notice that "only names the share".
+// ---------------------------------------------------------------------------
+describe("KAP list: originals and their corrections (h108-kapdisclosures-3)", () => {
+  const otto = (over: Record<string, unknown> = {}) => ({
+    disclosureIndex: 1694030,
+    publishedAt: "2026-11-06T15:10:24.000Z",
+    kapTitle: "OTTO HOLDİNG A.Ş.",
+    stockCodes: ["OTTO"],
+    filerCodes: ["OTTO"],
+    relatedCodes: [] as string[],
+    agencyFiled: false,
+    subject: "Sorumluluk Beyanı (Konsolide)",
+    summary: "Otto Holding A.Ş. 3. Aylık Finansal Durum Raporu Ve Ekleri Sorumluluk Beyanı",
+    disclosureClass: "FR",
+    modifyStatus: null as string | null,
+    year: "2026",
+    period: "3",
+    ruleType: "9 Aylık",
+    ...over,
+  });
+  const ORIGINAL = otto({ modifyStatus: "DUZELTILEN" });
+  const CORRECTION = otto({ disclosureIndex: 1694331, publishedAt: "2026-11-06T15:48:38.000Z", modifyStatus: "DUZENLENEN" });
+
+  const listRows = (els: El[]) => {
+    const panel = els.find((e) => e.props.title === "KAP bildirimleri")!;
+    return collectEls(panel.props.children).filter((e) => e.type === "li");
+  };
+  const rowFor = (els: El[], index: number) =>
+    listRows(els).find((li) => collectEls(li.props.children).some((e) => e.type === "a" && String(e.props.href).endsWith(`/${index}`)))!;
+  const textOfRow = (els: El[], index: number) => textOfNode(rowFor(els, index).props.children);
+  const subjectLink = (els: El[], index: number) =>
+    collectEls(rowFor(els, index).props.children).find((e) => e.type === "a" && String(e.props.href).endsWith(`/${index}`))!;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T10:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("the correction is tagged 'düzeltme', the replaced original 'düzeltildi', and both stay listed", async () => {
+    const els = await renderTicker("OTTO", { disclosures: [CORRECTION, ORIGINAL] });
+
+    expect(listRows(els)).toHaveLength(2);
+    expect(textOfRow(els, 1694331)).toContain("düzeltme");
+    expect(textOfRow(els, 1694331)).not.toContain("düzeltildi");
+    expect(textOfRow(els, 1694030)).toContain("düzeltildi");
+    expect(textOfRow(els, 1694030)).not.toContain("düzeltme");
+  });
+
+  it("an original whose DUZELTILEN flag was never set is still 'düzeltildi' when its twin is in the list (ATEKS)", async () => {
+    const els = await renderTicker("OTTO", { disclosures: [CORRECTION, otto({ modifyStatus: null })] });
+
+    expect(textOfRow(els, 1694030)).toContain("düzeltildi");
+  });
+
+  it("the superseded row is dimmed to the muted token, the correction keeps the normal link colour", async () => {
+    const els = await renderTicker("OTTO", { disclosures: [CORRECTION, ORIGINAL] });
+
+    expect(String(subjectLink(els, 1694030).props.className)).toContain("text-muted-foreground");
+    expect(String(subjectLink(els, 1694030).props.className)).not.toContain("text-foreground/90");
+    expect(String(subjectLink(els, 1694331).props.className)).toContain("text-foreground/90");
+  });
+
+  it("a plain row carries no tag: no 'düzeltme' when modify_status is null", async () => {
+    const els = await renderTicker("OTTO", { disclosures: [otto({ disclosureIndex: 7 })] });
+
+    expect(textOfRow(els, 7)).not.toContain("düzeltme");
+    expect(textOfRow(els, 7)).not.toContain("düzeltildi");
+  });
+
+  it("a Finansal Rapor row with no summary prints its year and period, '2026 · 9 Aylık'", async () => {
+    const report = otto({ disclosureIndex: 1692808, subject: "Finansal Rapor", summary: null, kapTitle: "TÜRK TELEKOMÜNİKASYON A.Ş.", stockCodes: ["TTKOM"], filerCodes: ["TTKOM"] });
+    const els = await renderTicker("TTKOM", { disclosures: [report] });
+
+    const summaryLine = collectEls(rowFor(els, 1692808).props.children).find((e) => e.type === "p" && textOfNode(e.props.children) === "2026 · 9 Aylık");
+    expect(summaryLine).toBeDefined();
+    expect(String(summaryLine!.props.className)).toContain("text-[10px]");
+  });
+
+  it("only the Finansal Rapor subject gets that line; a written summary always wins; missing parts are left out", async () => {
+    const reportWithSummary = otto({ disclosureIndex: 1, subject: "Finansal Rapor", summary: "2026 Yılı 3. Çeyrek" });
+    const otherSubject = otto({ disclosureIndex: 2, subject: "Genel Kurul", summary: null });
+    const noYear = otto({ disclosureIndex: 3, subject: "Finansal Rapor", summary: null, year: null });
+    const nothing = otto({ disclosureIndex: 4, subject: "Finansal Rapor", summary: null, year: null, ruleType: null });
+    const els = await renderTicker("OTTO", { disclosures: [reportWithSummary, otherSubject, noYear, nothing] });
+
+    expect(textOfRow(els, 1)).toContain("2026 Yılı 3. Çeyrek");
+    expect(textOfRow(els, 1)).not.toContain("9 Aylık");
+    expect(textOfRow(els, 2)).not.toContain("9 Aylık");
+    expect(textOfRow(els, 3)).toContain("9 Aylık");
+    expect(textOfRow(els, 3)).not.toContain("·");
+    expect(collectEls(rowFor(els, 4).props.children).some((e) => e.type === "p")).toBe(false);
+  });
+
+  it("the coverage footnote does not blame the superseded own row: 1 of 2 counted is not '1 anan bildirim'", async () => {
+    const els = await renderTicker("OTTO", {
+      disclosures: [CORRECTION, ORIGINAL],
+      totalDisclosures30d: 2,
+      coverage: { disclosures: 1, events: 1, covered: 1, medianLagMinutes: 20, pressAhead: 0 },
+    });
+
+    const footnote = els.find((e) => e.type === "p" && textOfNode(e.props.children).startsWith("Aynı 24 saat"));
+    expect(textOfNode(footnote?.props.children)).not.toContain("Hisseyi yalnızca anan");
+  });
+
+  it("a notice that only names the share is still reported there next to a superseded row", async () => {
+    const related = otto({ disclosureIndex: 55, kapTitle: "NET HOLDİNG A.Ş.", stockCodes: ["NTHOL"], filerCodes: ["NTHOL"], relatedCodes: ["OTTO"], subject: "Pay Alım Satım Bildirimi", summary: "x", modifyStatus: null });
+    const els = await renderTicker("OTTO", {
+      disclosures: [CORRECTION, ORIGINAL, related],
+      totalDisclosures30d: 3,
+      coverage: { disclosures: 1, events: 1, covered: 1, medianLagMinutes: 20, pressAhead: 0 },
+    });
+
+    const footnote = els.find((e) => e.type === "p" && textOfNode(e.props.children).startsWith("Aynı 24 saat"));
+    expect(textOfNode(footnote?.props.children)).toContain("Hisseyi yalnızca anan 1 bildirim");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-2: press is matched to ONE code of a company (ISCTR); its siblings
+// (ISATR is indexable) printed "basında yer bulan 0" and, in the pickup panel, "%0" for the
+// same filings. When fetchTickerPage reports a `pressCode`, the number grid gives way to a
+// note that names the sibling and links to it; everything else on the page is as before.
+// ---------------------------------------------------------------------------
+describe("KAP ile basın arası: a sibling code carries the press (h108-kapdisclosures-2)", () => {
+  const NOTE = "Basın bu şirketi ISCTR koduyla anıyor; bildirimlerin basın karşılığı ISCTR sayfasında.";
+  const disclosure = (i: number) => ({
+    disclosureIndex: 1700000 + i,
+    publishedAt: new Date(Date.parse("2026-11-06T10:00:00Z") - i * 26 * 3_600_000).toISOString(),
+    kapTitle: "TÜRKİYE İŞ BANKASI A.Ş.",
+    stockCodes: ["ISATR", "ISBTR", "ISCTR"],
+    filerCodes: ["ISATR", "ISBTR", "ISCTR"],
+    relatedCodes: [] as string[],
+    agencyFiled: false,
+    subject: "Özel Durum Açıklaması (Genel)",
+    summary: "Borçlanma aracı ihracı",
+    disclosureClass: "ODA",
+    modifyStatus: null,
+    year: null,
+    period: null,
+    ruleType: null,
+  });
+  const PAGE = {
+    disclosures: [disclosure(1), disclosure(2)],
+    totalDisclosures30d: 2,
+    coverage: { disclosures: 2, events: 2, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T10:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const coveragePanel = (els: El[]) => els.find((e) => e.props.title === "KAP ile basın arası")!;
+  const inPanel = (els: El[]) => collectEls(coveragePanel(els).props.children);
+
+  it("with a pressCode the panel prints the note, linked to the sibling's page, and no number grid", async () => {
+    const els = await renderTicker("ISATR", { ...PAGE, pressCode: "ISCTR" });
+
+    const inside = inPanel(els);
+    expect(inside.some((e) => e.type === "dl")).toBe(false);
+    const note = inside.find((e) => e.type === "p" && textOfNode(e.props.children) === NOTE);
+    expect(note).toBeDefined();
+    const link = collectEls(note!.props.children).find((e) => e.props.href === "/ekonomi/ISCTR");
+    expect(link).toBeDefined();
+    expect(textOfNode(link!.props.children)).toBe("ISCTR sayfasında");
+    expect(String(note!.props.className)).toContain("text-muted-foreground");
+  });
+
+  it("the '%0' and 'basında yer bulan 0' strings are absent from the page", async () => {
+    const els = await renderTicker("ISATR", { ...PAGE, pressCode: "ISCTR" });
+
+    const all = els.map((e) => textOfNode(e.props.children)).join("\n");
+    expect(all).not.toContain("%0");
+    expect(all).not.toContain("basında yer bulan");
+    expect(inPanel(els).filter((e) => e.type === "dt")).toHaveLength(0);
+  });
+
+  it("keeps the panel title and meta and the methodology paragraph", async () => {
+    const els = await renderTicker("ISATR", { ...PAGE, pressCode: "ISCTR" });
+
+    expect(coveragePanel(els).props.meta).toBe("son 30 gün · bildirimden sonraki 48 saat");
+    const method = inPanel(els).find((e) => e.type === "p" && textOfNode(e.props.children).startsWith("Aynı 24 saat"));
+    expect(method).toBeDefined();
+  });
+
+  it("hands the pickup panel the same pressCode", async () => {
+    const els = await renderTicker("ISATR", { ...PAGE, pressCode: "ISCTR" });
+
+    const panel = els.find((e) => typeof e.type === "function" && e.props.ticker === "ISATR");
+    expect(panel?.props.pressCode).toBe("ISCTR");
+  });
+
+  it("without a pressCode the grid and the panel props are exactly as before", async () => {
+    const els = await renderTicker("ISCTR", { ...PAGE, pressCode: null });
+
+    const dl = inPanel(els).find((e) => e.type === "dl");
+    expect(dl).toBeDefined();
+    expect(collectEls(dl).filter((e) => e.type === "dt").map((e) => textOfNode(e.props.children))).toEqual([
+      "bildirim",
+      "olay",
+      "basında yer bulan",
+      "ilk haber, medyan",
+      "olağandışı ön ilgi",
+    ]);
+    expect(inPanel(els).some((e) => e.props.href === "/ekonomi/ISCTR")).toBe(false);
+    const panel = els.find((e) => typeof e.type === "function" && e.props.ticker === "ISCTR");
+    expect(panel?.props.pressCode ?? null).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-4: the KAP list shows KAP's class for each row, with the same labels as the
+// /ekonomi feed (DG = 'diğer', DKB = 'düzenleyici kurum'), muted and before the subject.
+// ---------------------------------------------------------------------------
+describe("KAP list: class labels (h108-kapdisclosures-4)", () => {
+  const row = (index: number, disclosureClass: string | null, subject: string) => ({
+    disclosureIndex: index,
+    publishedAt: "2026-11-06T15:10:24.000Z",
+    kapTitle: "DENGE YATIRIM HOLDİNG A.Ş.",
+    stockCodes: ["DENGE"],
+    filerCodes: ["DENGE"],
+    relatedCodes: [] as string[],
+    agencyFiled: false,
+    subject,
+    summary: null,
+    disclosureClass,
+    modifyStatus: null,
+    year: null,
+    period: null,
+    ruleType: null,
+  });
+  /** The row's first line: [class label?] subject link [tags]. */
+  const firstLine = (els: El[], index: number) => {
+    const panel = els.find((e) => e.props.title === "KAP bildirimleri")!;
+    const li = collectEls(panel.props.children).find(
+      (e) => e.type === "li" && collectEls(e.props.children).some((c) => c.type === "a" && String(c.props.href).endsWith(`/${index}`)),
+    )!;
+    return collectEls(li.props.children).find((e) => e.type === "div" && String(e.props.className ?? "").includes("flex-wrap"))!;
+  };
+  const kids = (line: El) => collectEls(line.props.children).filter((e) => e.type === "span" || e.type === "a");
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T10:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ["DG", "diğer"],
+    ["DKB", "düzenleyici kurum"],
+    ["FR", "finansal rapor"],
+    ["ODA", "özel durum"],
+    ["XYZ", "xyz"],
+  ])("a %s row reads '%s' before its subject, in the muted colour", async (cls, label) => {
+    const els = await renderTicker("DENGE", { disclosures: [row(1, cls, "Şirket Genel Bilgi Formu")] });
+
+    const [first, second] = kids(firstLine(els, 1));
+    expect(first!.type).toBe("span");
+    expect(textOfNode(first!.props.children)).toBe(label);
+    expect(String(first!.props.className)).toContain("text-muted-foreground");
+    expect(String(first!.props.className)).not.toContain("text-amber-400");
+    expect(second!.type).toBe("a");
+  });
+
+  it("a row with no class prints no label: the subject link is the first thing in the line", async () => {
+    const els = await renderTicker("DENGE", { disclosures: [row(2, null, "Şirket Genel Bilgi Formu")] });
+
+    expect(kids(firstLine(els, 2))[0]!.type).toBe("a");
   });
 });

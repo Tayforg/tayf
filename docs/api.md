@@ -839,7 +839,7 @@ production) — this endpoint is always ticker- and time-bounded on
   "since": "…", "until": "…",
   "relevance_filter": { "task": "ticker_relevance", "min_prob": 0.2, "applied": true },
   "truncated": false,
-  "capped": false, "total_disclosures": 14,
+  "capped": false, "total_disclosures": 15, "superseded": 1,
   "totals": {
     "disclosures": 12, "picked_up": 9, "pickup_rate": 0.75,
     "median_first_lag_minutes": 184, "outlets": 14,
@@ -897,8 +897,19 @@ Notes:
   ones). Raise `limit` (up to 100) or narrow `since` to see them.
 - **`total_disclosures`**: the number of the ticker's disclosures in the whole
   window, however many `disclosures` lists. `null` when that count failed (the
-  endpoint still answers rather than 500ing); compare it with `count` to see
-  how many are missing.
+  endpoint still answers rather than 500ing). When `capped` is `false`,
+  `count` + `superseded` equals `total_disclosures`; a remaining gap means rows
+  are missing.
+- **`superseded`** (additive): the number of notices KAP later replaced with a
+  correction (a new disclosure with `modify_status` `DUZENLENEN`, same issuer,
+  subject, summary, year, period and `related_stocks`, filed within 14 days).
+  A correction replaces one earlier notice, so a notice KAP files every day
+  (a share buyback report) loses one row per correction, not the whole series.
+  The replaced notice is read but left out of `disclosures`, `count` and every
+  `totals` figure, so the filing is scored once; `total_disclosures` still
+  counts it. The correction stays in `disclosures` (its `disclosed_at` and
+  `kap_url` are the correction's own), and its 48-hour window starts at the
+  replaced notice's time, because the filing was public from then.
 - **`outlets` vs `articles`**: `articles` counts every matching mention,
   including aggregator/KAP-bot republication; `outlets` and `zones` count
   only distinct, classified, voting-eligible news sources — that is the

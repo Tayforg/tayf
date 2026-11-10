@@ -475,3 +475,152 @@ describe("/ekonomi -- feed rows mark an English outlet's text (h101-a11yrecent-2
     expect(hintsOf(a)).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-1: a rating agency files "Kredi Derecelendirmesi" under its own
+// code (TRATE, JCRAV, SAHAR) for the company it rated. The feed's chips used to be the
+// agency's (a link to /ekonomi/TRATE, a page with no company row); they are now the rated
+// company's, and a muted marker after them says whose filing it is.
+// ---------------------------------------------------------------------------
+describe("/ekonomi -- a rating agency's notice is listed under the rated company (h108-kapdisclosures-1)", () => {
+  const AGENCY_TITLE = "İSTANBUL ULUSLARARASI DERECELENDİRME HİZMETLERİ A.Ş.";
+  const kapRow = (over: Record<string, unknown> = {}) => ({
+    disclosureIndex: 1696754,
+    publishedAt: "2026-11-05T09:58:00.000Z",
+    kapTitle: AGENCY_TITLE,
+    // What toDisclosure hands over for an agency-filed row: the rated company is the chip.
+    stockCodes: ["DNYVA"],
+    filerCodes: ["TRATE"],
+    relatedCodes: ["DNYVA"],
+    agencyFiled: true,
+    subject: "Kredi Derecelendirmesi",
+    summary: "Kredi Derecelendirme Notunun Askıya Alınması",
+    disclosureClass: "ODA",
+    modifyStatus: null,
+    year: null,
+    period: null,
+    ruleType: null,
+    ...over,
+  });
+
+  function textOfEl(node: unknown): string {
+    if (node == null || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(textOfEl).join("");
+    return textOfEl((node as { props?: { children?: unknown } }).props?.children);
+  }
+  const chipHrefs = (els: El[]) => els.filter((e) => typeof e.props.href === "string" && String(e.props.href).startsWith("/ekonomi/")).map((e) => e.props.href);
+  const filerSpans = (els: El[]) => els.filter((e) => e.type === "span" && /bildirimi$/.test(textOfEl(e.props.children)));
+
+  it("links the rated company, not the agency, and names the agency after the chips", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([kapRow()]);
+
+    const els = await render();
+
+    expect(chipHrefs(els)).toContain("/ekonomi/DNYVA");
+    expect(chipHrefs(els)).not.toContain("/ekonomi/TRATE");
+    const spans = filerSpans(els);
+    expect(spans).toHaveLength(1);
+    expect(textOfEl(spans[0]!.props.children)).toBe("· İstanbul Uluslararası Derecelendirme Hizmetleri bildirimi");
+    expect(String(spans[0]!.props.className)).toContain("text-muted-foreground");
+  });
+
+  it("the marker comes after the last chip in the row", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([kapRow({ stockCodes: ["DNYVA", "DNYVB"], relatedCodes: ["DNYVA", "DNYVB"] })]);
+
+    const els = await render();
+
+    const order = els
+      .filter((e) => (typeof e.props.href === "string" && String(e.props.href).startsWith("/ekonomi/D")) || (e.type === "span" && /bildirimi$/.test(textOfEl(e.props.children))))
+      .map((e) => (e.type === "span" ? "marker" : String(e.props.href)));
+    expect(order).toEqual(["/ekonomi/DNYVA", "/ekonomi/DNYVB", "marker"]);
+  });
+
+  it("falls back to the filer's code when KAP gave no usable title", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([kapRow({ kapTitle: null, filerCodes: ["TRATE", "JCRAV"] })]);
+
+    const spans = filerSpans(await render());
+
+    expect(spans.map((s) => textOfEl(s.props.children))).toEqual(["· TRATE, JCRAV bildirimi"]);
+  });
+
+  it("a company's own filing and a related-only notice carry no marker", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([
+      kapRow({ disclosureIndex: 1, kapTitle: "ZORLU ENERJİ A.Ş.", stockCodes: ["ZOREN"], filerCodes: ["ZOREN"], relatedCodes: [], agencyFiled: false }),
+      kapRow({ disclosureIndex: 2, kapTitle: "NET HOLDİNG A.Ş.", stockCodes: ["NTHOL"], filerCodes: ["NTHOL"], relatedCodes: ["MERIT"], agencyFiled: false, subject: "Pay Alım Satım Bildirimi" }),
+      kapRow({ disclosureIndex: 3, kapTitle: "TAKASBANK", stockCodes: ["X"], filerCodes: [], relatedCodes: ["X"], agencyFiled: false, subject: "Temerrüt İşlemi" }),
+    ]);
+
+    const els = await render();
+
+    expect(filerSpans(els)).toHaveLength(0);
+    expect(chipHrefs(els)).toEqual(expect.arrayContaining(["/ekonomi/ZOREN", "/ekonomi/NTHOL", "/ekonomi/X"]));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h108-kapdisclosures-4: the feed's class labels follow KAP's taxonomy. DG ("Diğer": standing
+// forms and reports) used to read "duyuru" and DKB ("Düzenleyici Kurum Bildirimi": exchange, MKK,
+// Takasbank, SPK notices) "diğer".
+// ---------------------------------------------------------------------------
+describe("/ekonomi -- KAP class labels match KAP's taxonomy (h108-kapdisclosures-4)", () => {
+  const kapRow = (index: number, disclosureClass: string | null, subject: string) => ({
+    disclosureIndex: index,
+    publishedAt: "2026-11-05T09:58:00.000Z",
+    kapTitle: "DENGE YATIRIM HOLDİNG A.Ş.",
+    stockCodes: ["DENGE"],
+    filerCodes: ["DENGE"],
+    relatedCodes: [] as string[],
+    agencyFiled: false,
+    subject,
+    summary: null,
+    disclosureClass,
+    modifyStatus: null,
+    year: null,
+    period: null,
+    ruleType: null,
+  });
+  function textOfEl(node: unknown): string {
+    if (node == null || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(textOfEl).join("");
+    return textOfEl((node as { props?: { children?: unknown } }).props?.children);
+  }
+  const labelOf = (els: El[], subject: string) => {
+    // The class label is the span just before the subject link inside the row's chip line.
+    const line = els.find(
+      (e) => e.type === "div" && String(e.props.className ?? "").includes("flex-wrap") && textOfEl(e.props.children).includes(subject),
+    );
+    const spans = collectEls(line?.props.children).filter((e) => e.type === "span" && String(e.props.className ?? "").includes("text-"));
+    return spans.map((s) => textOfEl(s.props.children)).find((t) => ["diğer", "düzenleyici kurum", "finansal rapor", "özel durum", "duyuru"].includes(t));
+  };
+
+  it("a DG row ('Şirket Genel Bilgi Formu') reads 'diğer', not 'duyuru'", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([kapRow(1, "DG", "Şirket Genel Bilgi Formu")]);
+    expect(labelOf(await render(), "Şirket Genel Bilgi Formu")).toBe("diğer");
+  });
+
+  it("a DKB row ('MKK Duyurusu') reads 'düzenleyici kurum', not 'diğer'", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([kapRow(2, "DKB", "MKK Duyurusu")]);
+    expect(labelOf(await render(), "MKK Duyurusu")).toBe("düzenleyici kurum");
+  });
+
+  it("FR and ODA keep their labels; FR stays amber, the rest muted", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([kapRow(3, "FR", "Finansal Rapor"), kapRow(4, "ODA", "Özel Durum Açıklaması (Genel)")]);
+    const els = await render();
+    expect(labelOf(els, "Finansal Rapor")).toBe("finansal rapor");
+    expect(labelOf(els, "Özel Durum Açıklaması (Genel)")).toBe("özel durum");
+    const fr = els.find((e) => e.type === "span" && textOfEl(e.props.children) === "finansal rapor")!;
+    expect(String(fr.props.className)).toBe("text-amber-400");
+    const oda = els.find((e) => e.type === "span" && textOfEl(e.props.children) === "özel durum")!;
+    expect(String(oda.props.className)).toBe("text-muted-foreground");
+  });
+
+  it("an unknown class prints its lower-case code and a null class prints nothing", async () => {
+    fetchRecentDisclosuresMock.mockResolvedValue([kapRow(5, "XYZ", "Bir Konu"), kapRow(6, null, "Başka Konu")]);
+    const els = await render();
+    expect(els.some((e) => e.type === "span" && textOfEl(e.props.children) === "xyz")).toBe(true);
+    const other = els.find((e) => e.type === "div" && String(e.props.className ?? "").includes("flex-wrap") && textOfEl(e.props.children).includes("Başka Konu"));
+    expect(collectEls(other?.props.children).some((e) => e.type === "span" && ["diğer", "duyuru", "düzenleyici kurum"].includes(textOfEl(e.props.children)))).toBe(false);
+  });
+});

@@ -48,6 +48,15 @@ const ZONE_LABEL_LOWER: Record<MediaDnaZone, string> = {
  * count -- the head names the voting total in news items:
  * "2 kaynak · 5 sınıflandırılmış haber: %80 iktidar · %0 bağımsız · %20 muhalefet".
  * Only when the two counts are equal does the head stay plain.
+ *
+ * `recallMatchedZones` (h108-sharesurfaces-1) is `ClusterDetail.recallMatchedZones`:
+ * the silent zones in which Jev's recall stage matched a voting source with this
+ * story's event, a similar story sitting in another cluster. "Sadece X yazdı" is
+ * then not something the data supports, so the suffix says what THIS cluster
+ * shows, as /blindspots does: " · Kör nokta: kümede sadece iktidar". The
+ * toplayıcı / niş qualifier keeps its own wording ahead of it. Undefined (a cache
+ * entry from before the field) or [] (a failed lookup) leaves the text exactly as
+ * it was. Wording only: no count, percent or flag reads it.
  */
 export function buildShareText(input: {
   articleCount: number;
@@ -56,8 +65,17 @@ export function buildShareText(input: {
   blindspotSide: BiasCategory | null;
   wire?: { isWireRedistribution: boolean; memberCount: number };
   sources?: readonly { kind?: SourceKind | null; bias: BiasCategory }[];
+  recallMatchedZones?: readonly MediaDnaZone[];
 }): string {
-  const { articleCount, distribution, isBlindspot, blindspotSide, wire, sources } = input;
+  const {
+    articleCount,
+    distribution,
+    isBlindspot,
+    blindspotSide,
+    wire,
+    sources,
+    recallMatchedZones,
+  } = input;
   const counts = zoneCountsOf(distribution);
   const percents = zonePercents(counts);
 
@@ -93,13 +111,20 @@ export function buildShareText(input: {
     // still has a source).
     const tally = tallyZones(distribution);
     const zone = blindspotSide ? zoneOf(blindspotSide) : (tally.dominantZone ?? "iktidar");
-    const claim = onlyZoneClaim(counts, zone, sources ? nonVotingOutsideZone(sources, zone) : 0);
+    const claim = onlyZoneClaim(
+      counts,
+      zone,
+      sources ? nonVotingOutsideZone(sources, zone) : 0,
+      recallMatchedZones?.length ?? 0,
+    );
     text +=
       claim === "only"
         ? ` · Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
         : claim === "spectrumOnly"
           ? ` · Kör nokta: spektrumda sadece ${ZONE_LABEL_LOWER[zone]}`
-          : ` · Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
+          : claim === "clusterOnly"
+            ? ` · Kör nokta: kümede sadece ${ZONE_LABEL_LOWER[zone]}`
+            : ` · Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
   }
 
   if (wire?.isWireRedistribution) {

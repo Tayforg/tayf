@@ -29,9 +29,16 @@ function row(index: number, code: string | null, publishedAt: string): Disclosur
     publishedAt,
     kapTitle: null,
     stockCodes: code === null ? [] : [code],
+    filerCodes: code === null ? [] : [code],
+    relatedCodes: [],
+    agencyFiled: false,
     subject: null,
     summary: null,
     disclosureClass: null,
+    modifyStatus: null,
+    year: null,
+    period: null,
+    ruleType: null,
   };
 }
 

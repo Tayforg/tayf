@@ -209,6 +209,10 @@ function toBlindspotItem(
     // h57-outbound-1: the same count /blindspots qualifies its chip with
     // (`bundle.sources` is already de-duplicated per source).
     nonVotingOutside: nonVotingOutsideZone(bundle.sources, bundle.dominantZone),
+    // h108-sharesurfaces-1: the silent zones Jev's recall stage matched with this
+    // event; the mail then says "Kümede sadece X", as /blindspots does. A bundle
+    // cached before the field existed has none (`?.length ?? 0`, today's line).
+    recallMatchedCount: bundle.recallMatchedZones?.length ?? 0,
   };
 }
 

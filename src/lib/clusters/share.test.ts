@@ -436,6 +436,133 @@ describe("buildShareText qualifies 'sadece' for non-voting sources (h57-outbound
   });
 });
 
+// h108-sharesurfaces-1: cluster 0746c9d2 (9 İktidar, Jev matched Yeniçağ and Elips
+// Haber, both Muhalefet, with the same event in another cluster) said "Kör nokta:
+// sadece iktidar yazdı" in the share sheet and every chip, while /blindspots said
+// "Kümede sadece İktidar". The page now hands buildShareText the zones Jev matched.
+describe("buildShareText, zones Jev matched (h108-sharesurfaces-1)", () => {
+  const HEAD = "9 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet";
+  const base = {
+    articleCount: 9,
+    distribution: dist({ pro_government: 6, gov_leaning: 3 }),
+    isBlindspot: true,
+    blindspotSide: "pro_government" as BiasCategory,
+  };
+  const OLD = `${HEAD} · Kör nokta: sadece iktidar yazdı`;
+  const NEW = `${HEAD} · Kör nokta: kümede sadece iktidar`;
+
+  it("a 0746c9d2-shaped cluster ends in ' · Kör nokta: kümede sadece iktidar'", () => {
+    const text = buildShareText({ ...base, recallMatchedZones: ["muhalefet"] });
+    expect(text).toBe(NEW);
+    expect(text).not.toContain("sadece iktidar yazdı");
+    expect(text).not.toContain("yazdı");
+  });
+
+  it("one match is enough, and so are two", () => {
+    expect(buildShareText({ ...base, recallMatchedZones: ["bagimsiz"] })).toBe(NEW);
+    expect(buildShareText({ ...base, recallMatchedZones: ["bagimsiz", "muhalefet"] })).toBe(NEW);
+  });
+
+  it("is byte-identical to today's text with [] (a failed lookup) and with the field undefined (an old cache entry)", () => {
+    expect(buildShareText({ ...base, recallMatchedZones: [] })).toBe(OLD);
+    expect(buildShareText({ ...base, recallMatchedZones: undefined })).toBe(OLD);
+    expect(buildShareText(base)).toBe(OLD);
+  });
+
+  it("names the NAMED zone in lower case, also when blindspot_side is null (tally fallback)", () => {
+    const text = buildShareText({
+      articleCount: 6,
+      distribution: dist({ opposition: 5, opposition_leaning: 1 }),
+      isBlindspot: true,
+      blindspotSide: null,
+      recallMatchedZones: ["iktidar"],
+    });
+    expect(text).toContain("Kör nokta: kümede sadece muhalefet");
+    expect(text).not.toContain("yazdı");
+  });
+
+  it("keeps the toplayıcı / niş qualifier ahead of it (precedence, as on /blindspots)", () => {
+    const text = buildShareText({
+      ...base,
+      sources: [
+        ...Array.from({ length: 9 }, (): { kind: SourceKind; bias: BiasCategory } => ({
+          kind: "outlet",
+          bias: "pro_government",
+        })),
+        { kind: "niche", bias: "opposition" },
+      ],
+      recallMatchedZones: ["bagimsiz"],
+    });
+    expect(text).toBe(`${HEAD} · Kör nokta: spektrumda sadece iktidar`);
+  });
+
+  it("a source list with no outsider does not hide the recall wording", () => {
+    const text = buildShareText({
+      ...base,
+      sources: Array.from({ length: 9 }, (): { kind: SourceKind; bias: BiasCategory } => ({
+        kind: "outlet",
+        bias: "pro_government",
+      })),
+      recallMatchedZones: ["muhalefet"],
+    });
+    expect(text).toBe(NEW);
+  });
+
+  it("leaves 'ağırlıklı' alone: another zone has a voting source", () => {
+    const text = buildShareText({
+      articleCount: 5,
+      distribution: dist({ pro_government: 4, opposition: 1 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+      recallMatchedZones: ["bagimsiz"],
+    });
+    expect(text).toBe(
+      "5 kaynak · %80 iktidar · %0 bağımsız · %20 muhalefet · Kör nokta: iktidar ağırlıklı",
+    );
+  });
+
+  it("adds nothing when the cluster is not a blindspot", () => {
+    const text = buildShareText({ ...base, isBlindspot: false, recallMatchedZones: ["muhalefet"] });
+    expect(text).toBe(HEAD);
+  });
+
+  it("changes nothing but the blindspot suffix (counts, percents and the head)", () => {
+    const matched = buildShareText({ ...base, recallMatchedZones: ["muhalefet"] });
+    const plain = buildShareText(base);
+    expect(matched.replace(" · Kör nokta: kümede sadece iktidar", "")).toBe(
+      plain.replace(" · Kör nokta: sadece iktidar yazdı", ""),
+    );
+  });
+
+  it("keeps the wire suffix after the recall suffix", () => {
+    const text = buildShareText({
+      ...base,
+      recallMatchedZones: ["muhalefet"],
+      wire: { isWireRedistribution: true, memberCount: 14 },
+    });
+    expect(text).toBe(`${NEW} · 14 haber · 9 farklı metin`);
+  });
+
+  it("does not mutate the zones it is given", () => {
+    const zones: Array<"bagimsiz" | "muhalefet"> = ["muhalefet", "bagimsiz"];
+    buildShareText({ ...base, recallMatchedZones: zones });
+    expect(zones).toEqual(["muhalefet", "bagimsiz"]);
+  });
+
+  it("reaches all four channel links (WhatsApp, Telegram, X, Bluesky) as the new wording", () => {
+    const body = buildShareText({ ...base, recallMatchedZones: ["muhalefet"] });
+    const url = buildShareUrl("https://tayf.test", "0746c9d2-8f33-4bad-b2da-64b3a600e5f9", "whatsapp");
+    const decoded = SHARE_LINK_CHANNELS.map(
+      (channel) => new URL(buildChannelShareHref(channel, url, body)).searchParams.get("text") ?? "",
+    );
+    expect(decoded).toHaveLength(4);
+    for (const text of decoded) {
+      expect(text).toContain("· Kör nokta: kümede sadece iktidar");
+      expect(text).not.toContain("yazdı");
+    }
+  });
+});
+
 describe("buildShareUrl", () => {
   it("builds the exact UTM-tagged cluster URL", () => {
     expect(buildShareUrl("https://tayf.test", "c1", "whatsapp")).toBe(

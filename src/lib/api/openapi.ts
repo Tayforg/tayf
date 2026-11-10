@@ -285,6 +285,7 @@ function buildSchemas(): Record<string, unknown> {
           "truncated",
           "capped",
           "total_disclosures",
+          "superseded",
           "totals",
           "count",
           "disclosures",
@@ -311,6 +312,10 @@ function buildSchemas(): Record<string, unknown> {
           // Every disclosure of the ticker in the window (uncapped), or null
           // when that count failed.
           total_disclosures: { type: ["integer", "null"] },
+          // Notices a later KAP correction replaced: read, but left out of `disclosures`,
+          // `count` and `totals` (still in `total_disclosures`). With `capped` false,
+          // count + superseded = total_disclosures.
+          superseded: { type: "integer" },
           totals: {
             type: "object",
             required: [

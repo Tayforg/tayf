@@ -379,6 +379,75 @@ describe("onlyZoneClaim (h57-outbound-1)", () => {
   });
 });
 
+// h108-sharesurfaces-1: /blindspots and the framing comparison already say
+// "Kümede sadece X" when Jev matched a silent zone with the same event
+// (h106-blindspotbadges-1); the outbound surfaces read onlyZoneClaim, which had
+// no recall input. The fourth argument is the number of matched zones.
+describe("onlyZoneClaim, recall-matched zones (h108-sharesurfaces-1)", () => {
+  const only9 = { iktidar: 9, bagimsiz: 0, muhalefet: 0 };
+
+  it("is 'clusterOnly' for a 9/0/0 count when Jev matched one silent zone", () => {
+    expect(onlyZoneClaim(only9, "iktidar", 0, 1)).toBe("clusterOnly");
+    expect(onlyZoneClaim(only9, "iktidar", 0, 2)).toBe("clusterOnly");
+  });
+
+  it("keeps 'spectrumOnly' ahead of it: a toplayici / nis outsider wins, as on /blindspots", () => {
+    expect(onlyZoneClaim(only9, "iktidar", 1, 1)).toBe("spectrumOnly");
+    expect(onlyZoneClaim(only9, "iktidar", 3, 2)).toBe("spectrumOnly");
+  });
+
+  it("the default argument gives exactly today's results", () => {
+    for (const outside of [0, 1, 4]) {
+      expect(onlyZoneClaim(only9, "iktidar", outside)).toBe(
+        onlyZoneClaim(only9, "iktidar", outside, 0),
+      );
+    }
+    expect(onlyZoneClaim(only9, "iktidar", 0)).toBe("only");
+    expect(onlyZoneClaim(only9, "iktidar", 2)).toBe("spectrumOnly");
+  });
+
+  it("a zero or negative count is no match: 'only'", () => {
+    expect(onlyZoneClaim(only9, "iktidar", 0, 0)).toBe("only");
+    expect(onlyZoneClaim(only9, "iktidar", 0, -1)).toBe("only");
+  });
+
+  it("stays 'weighted' whenever isOnlyZone is false, whatever the recall count", () => {
+    for (const recall of [0, 1, 3]) {
+      expect(onlyZoneClaim({ iktidar: 250, bagimsiz: 1, muhalefet: 0 }, "iktidar", 0, recall)).toBe("weighted");
+      expect(onlyZoneClaim(only9, "muhalefet", 0, recall)).toBe("weighted");
+      expect(onlyZoneClaim({ iktidar: 3, bagimsiz: 0, muhalefet: 2 }, "iktidar", 2, recall)).toBe("weighted");
+      expect(onlyZoneClaim({ iktidar: 0, bagimsiz: 0, muhalefet: 0 }, "iktidar", 0, recall)).toBe("weighted");
+    }
+  });
+
+  it("is never a different 'weighted' / not-weighted answer than isOnlyZone", () => {
+    const table: Array<Record<MediaDnaZone, number>> = [
+      { iktidar: 5, bagimsiz: 0, muhalefet: 0 },
+      { iktidar: 0, bagimsiz: 1, muhalefet: 0 },
+      { iktidar: 250, bagimsiz: 1, muhalefet: 0 },
+      { iktidar: 3, bagimsiz: 0, muhalefet: 2 },
+      { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+    ];
+    for (const counts of table) {
+      for (const zone of ZONES) {
+        for (const outside of [0, 2]) {
+          for (const recall of [0, 1]) {
+            expect(onlyZoneClaim(counts, zone, outside, recall) !== "weighted").toBe(
+              isOnlyZone(counts, zone),
+            );
+          }
+        }
+      }
+    }
+  });
+
+  it("never reads or changes the counts", () => {
+    const counts = { ...only9 };
+    onlyZoneClaim(counts, "iktidar", 0, 2);
+    expect(counts).toEqual(only9);
+  });
+});
+
 describe("uniqueSources (h57-outbound-1)", () => {
   const mk = (slug: string, bias: BiasCategory = "center") => ({ slug, bias });
 

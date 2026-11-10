@@ -6,7 +6,7 @@ export default function TrendsLoading() {
       <div className="space-y-2">
         <div className="h-4 w-32 rounded bg-muted/60 animate-pulse" />
         <div className="h-8 w-56 rounded bg-muted/60 animate-pulse" />
-        <div className="h-4 w-96 rounded bg-muted/40 animate-pulse" />
+        <div className="h-4 w-full max-w-96 rounded bg-muted/40 animate-pulse" />
       </div>
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6 space-y-4">
         <div className="flex items-center justify-between">

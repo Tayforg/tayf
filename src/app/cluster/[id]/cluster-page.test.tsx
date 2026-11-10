@@ -5029,6 +5029,120 @@ describe("ClusterDetailPage — blindspot share text qualifies 'sadece' (h57-out
 });
 
 // ---------------------------------------------------------------------------
+// h108-sharesurfaces-1: cluster 0746c9d2 (nine İktidar outlets; Jev matched Yeniçağ
+// and Elips Haber, Muhalefet, with the same event in another cluster) said "Kör
+// nokta: sadece iktidar yazdı" in the share text, "bu kümede haber yok (kör nokta)"
+// in the read-across caption and a flat absence in the timeline, next to a framing
+// comparison that already said "benzer haber başka kümede olabilir". The page now
+// hands detail.recallMatchedZones to the three of them. Words only.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — share text, read-across and timeline, zones Jev matched (h108-sharesurfaces-1)", () => {
+  const HEAD = "9 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet";
+  const NOTE = "benzer haber başka kümede olabilir";
+
+  const outlets = Array.from({ length: 9 }, (_, i) =>
+    makeSource({ id: `s-gov-${i}`, slug: `s-gov-${i}`, name: `Gazete ${i}`, bias: "pro_government", kind: "outlet" }),
+  );
+  const ISCI_HABER = makeSource({ id: "isci-haber", slug: "isci-haber", name: "İşçi Haber", bias: "opposition", kind: "niche" });
+
+  function detailWith(
+    sources: Source[],
+    recallMatchedZones?: ClusterDetail["recallMatchedZones"],
+  ): ClusterDetail {
+    const members = sources.map((s, i) =>
+      // Spread over an hour so the timeline has dated points.
+      makeMember(`a-${s.id}`, s, `2026-09-06T${String(10 + Math.floor(i / 3)).padStart(2, "0")}:${String((i % 3) * 10).padStart(2, "0")}:00.000Z`),
+    );
+    const distribution = emptyDistribution();
+    distribution.pro_government = 9;
+    const cluster = makeCluster({ bias_distribution: distribution, article_count: members.length });
+    cluster.is_blindspot = true;
+    cluster.blindspot_side = "pro_government";
+    return {
+      cluster,
+      members,
+      allSources: sources,
+      wire: { isWireRedistribution: false, effectiveArticleCount: 9, memberCount: members.length },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+      ...(recallMatchedZones === undefined ? {} : { recallMatchedZones }),
+    };
+  }
+
+  async function render(detail: ClusterDetail) {
+    getClusterDetail.mockResolvedValue(detail);
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const readAcross = findElementOfType(tree, ReadAcrossSpectrum);
+    const timeline = findElementOfType(tree, StoryTimeline);
+    return {
+      tree,
+      shareText: String(findPropsOfType(tree, ShareButton)!.text),
+      readAcross,
+      readAcrossHtml: readAcross ? renderToStaticMarkup(readAcross as unknown as ReactElement) : "",
+      summary: timeline ? (timeline.props.timeline as StoryTimelineData).summary : null,
+    };
+  }
+
+  it("a 0746c9d2-shaped cluster: the share text ends 'Kör nokta: kümede sadece iktidar', never 'yazdı'", async () => {
+    const { shareText } = await render(detailWith(outlets, ["muhalefet"]));
+    expect(shareText).toBe(`${HEAD} · Kör nokta: kümede sadece iktidar`);
+    expect(shareText).not.toContain("yazdı");
+  });
+
+  it("the read-across caption carries the note after the existing sentence", async () => {
+    const { readAcross, readAcrossHtml } = await render(detailWith(outlets, ["muhalefet"]));
+    expect(readAcross).not.toBeNull();
+    expect(readAcrossHtml).toContain(
+      `Spektruma sayılan Muhalefet kaynaklarından bu kümede haber yok (kör nokta) · ${NOTE}`,
+    );
+  });
+
+  it("hands ReadAcrossSpectrum the same Set the framing comparison gets", async () => {
+    const { tree, readAcross } = await render(detailWith(outlets, ["bagimsiz", "muhalefet"]));
+    const fromAcross = readAcross!.props.recallMatchedZones as Set<string>;
+    const fromFraming = findElementOfType(tree, FramingComparison)!.props.recallMatchedZones as Set<string>;
+    expect(fromAcross).toBeInstanceOf(Set);
+    expect([...fromAcross].sort()).toEqual(["bagimsiz", "muhalefet"]);
+    expect([...fromAcross].sort()).toEqual([...fromFraming].sort());
+  });
+
+  it("the timeline's absence lines carry the note for the matched zones only", async () => {
+    const { summary } = await render(detailWith(outlets, ["muhalefet"]));
+    expect(summary).not.toBeNull();
+    expect(summary).toContain(`Muhalefet kaynaklarından bu kümede haber yok · ${NOTE}`);
+    expect(summary).toContain("— Bağımsız kaynaklardan bu kümede haber yok —");
+    expect(summary!.split(NOTE)).toHaveLength(2);
+  });
+
+  it("a detail that predates the field, and one with [], render exactly as today on all three surfaces", async () => {
+    const old = await render(detailWith(outlets));
+    const empty = await render(detailWith(outlets, []));
+
+    expect(old.shareText).toBe(`${HEAD} · Kör nokta: sadece iktidar yazdı`);
+    expect(empty.shareText).toBe(old.shareText);
+    expect(empty.readAcrossHtml).toBe(old.readAcrossHtml);
+    expect(empty.summary).toBe(old.summary);
+    expect(old.readAcrossHtml).not.toContain("benzer haber");
+    expect(old.summary).not.toContain("benzer haber");
+    expect((old.readAcross!.props.recallMatchedZones as Set<string>).size).toBe(0);
+  });
+
+  it("a toplayıcı / niş source from another zone keeps 'spektrumda sadece' over 'kümede sadece'", async () => {
+    const { shareText } = await render(detailWith([...outlets, ISCI_HABER], ["bagimsiz"]));
+    expect(shareText).toContain("Kör nokta: spektrumda sadece iktidar");
+    expect(shareText).not.toContain("kümede sadece");
+  });
+
+  it("changes no count: the head of the share text and the percents are what they were", async () => {
+    const matched = await render(detailWith(outlets, ["muhalefet"]));
+    const plain = await render(detailWith(outlets));
+    expect(matched.shareText.replace(" · Kör nokta: kümede sadece iktidar", "")).toBe(
+      plain.shareText.replace(" · Kör nokta: sadece iktidar yazdı", ""),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // h59-english-1: all-English clusters. fbb078b4 ('Erdoğan visits Seoul with $15
 // billion trade goal': hurriyet-daily-news, trt-world, daily-sabah, a-news) and
 // 26e8abf9 were written only by English-language outlets, so no Bağımsız or
