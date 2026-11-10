@@ -186,7 +186,16 @@ describe("ReadAcrossSpectrum — zones Jev matched (h108-sharesurfaces-1)", () =
       <ReadAcrossSpectrum nowMs={NOW_MS} members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} {...props} />,
     );
   /** The text of the caption <p> (markup minus tags), so the sentence is asserted whole. */
-  const caption = (markup: string) => markup.replace(/<[^>]+>/g, "");
+  const caption = (markup: string) => {
+    let out = "";
+    let inTag = false;
+    for (const ch of markup) {
+      if (ch === "<") inTag = true;
+      else if (ch === ">") inTag = false;
+      else if (!inTag) out += ch;
+    }
+    return out;
+  };
 
   describe("a single empty pole", () => {
     it("appends the note after the existing sentence for a 0746c9d2-shaped cluster", () => {

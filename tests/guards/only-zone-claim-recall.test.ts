@@ -151,6 +151,18 @@ const files = walk(SRC_DIR).map((full) => ({
   src: readFileSync(full, "utf8"),
 }));
 
+/** Drops every `<...>` group (nested generics included) by a depth scan, not a regex. */
+function dropAngleGroups(src: string): string {
+  let out = "";
+  let depth = 0;
+  for (const ch of src) {
+    if (ch === "<") depth++;
+    else if (ch === ">" && depth > 0) depth--;
+    else if (depth === 0) out += ch;
+  }
+  return out;
+}
+
 describe("only-zone-claim-recall guard: scanner self-test", () => {
   it("counts top-level arguments, not commas inside nested calls, arrays, objects or strings", () => {
     expect(topLevelArgCount("a, b, c, d")).toBe(4);
@@ -245,7 +257,7 @@ describe("only-zone-claim-recall guard: src/", () => {
     const close = matchingParen(code, open);
     // Type annotations carry commas of their own (`Record<MediaDnaZone, number>`),
     // which a call's arguments never do: drop the generics before counting.
-    const params = code.slice(open + 1, close).replace(/<[^<>]*>/g, "");
+    const params = dropAngleGroups(code.slice(open + 1, close));
     expect(topLevelArgCount(params)).toBe(EXPECTED_ARGS);
     expect(params).toContain("recallMatchedCount");
   });
