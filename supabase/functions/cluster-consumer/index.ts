@@ -20,6 +20,20 @@
 //   5. (hunt-25 W3, migration 151) once cluster_work ran dry, read at most
 //      ATTACH_MAX_PER_DRAIN messages of the separate `cluster_attach` queue and
 //      run the deterministic, attach-only probe on them (see processAttach)
+//   0. (h106-attachdesign-1, migration 190) BEFORE step 1 the invocation takes a TTL
+//      lease (public.consumer_leases, `_shared/lease.ts`): ingest kicks this function
+//      (`{"trigger":"ingest"}`, `_shared/kick.ts`) right after its enqueue, so the cron
+//      consumer and the kicked one can be alive in different isolates, and two readers
+//      of cluster_work would score one story's messages in parallel and open twins.
+//      cron trigger: acquire once, a busy lease answers {busy:true,reason:'lease'}
+//      before any read, a missing RPC (PGRST202 / 42883) FAILS OPEN (the drain as before),
+//      and so does any other failing RPC while CLUSTER_KICK is not 'on'; with CLUSTER_KICK=on
+//      a failing RPC FAILS CLOSED (503 lease-unavailable, nothing read): a kicked drain in
+//      another isolate could be reading the queue at the same time;
+//      kick trigger: queue depth first, then wait up to KICK_LEASE_WAIT_MS for the lease,
+//      a failing RPC FAILS CLOSED; both renew it at every read-loop turn (a renewal never
+//      reaches past drain start + LEASE_HORIZON_MS) and release it in the handler's finally;
+//      CLUSTER_LEASE=off skips every lease call.
 //
 // In-memory caches (cluster context, source lookup) survive between dequeues
 // within the same Edge Function instance, so warm invocations skip the
@@ -35,6 +49,7 @@ import {
   readBatchPoll,
 } from "../_shared/pgmq.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
+import { acquireLease, isLeaseRpcMissing, releaseLease, waitForLease } from "../_shared/lease.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 
 // Initialise Sentry at module load. No-op if SENTRY_DSN is unset.
@@ -215,6 +230,18 @@ const POLL_SECONDS = 6;                     // one call: PostgREST's authenticat
 const POLL_INTERVAL_MS = 250;               // how often the database re-reads while it waits
 const POLL_MAX_CALLS = 2;                   // per invocation
 const POLL_SECOND_CALL_BEFORE_MS = 14_000;  // a second poll starts only while less than this has passed since the start
+// Consumer lease (h106-attachdesign-1, migration 190). The answer to the attach wait that the long poll
+// above could not give (p50 55 s, 2026-11-10): ingest kicks this function from EdgeRuntime.waitUntil once
+// its enqueue is done (CLUSTER_KICK=on), the kick does not hold any pg_net request open, and the lease row
+// keeps the kicked consumer and the cron one from reading cluster_work at the same time. POLL_ENABLED stays false.
+const LEASE_NAME = "cluster-consumer";
+const LEASE_TTL_S = 45;                     // the TTL of the first acquire, and of a renewal early in the drain (30 s budget); renewed at every read-loop turn
+const LEASE_HORIZON_MS = 55_000;            // a renewal never pushes expires_at past drain start + 55 s: a lease left by a killed drain (546 CPU / memory, no finally) has expired when the next minute's cron drain starts
+const KICK_LEASE_WAIT_MS = 10_000;          // how long a kick waits for a busy lease (re-checking the queue depth) before it leaves
+const KICK_LEASE_STEP_MS = 400;             // pause between two tries of that wait
+const LEASE_ENV = "CLUSTER_LEASE";          // the exact value "off" skips every lease call
+const KICK_ENV = "CLUSTER_KICK";            // the exact value "on": a kick or a cron drain may meet another isolate's drain, so caches are dropped
+const TRIGGER_BODY_MAX_CHARS = 1_024;       // a body longer than this is no trigger (the real one is 20 bytes)
 const CLUSTER_CONTEXT_TTL_MS = 60_000;      // refresh rolling-window context
 
 // Exact-title probe (h12-cluster-1, migration 135). A story that comes back with
@@ -3254,6 +3281,13 @@ interface InvocationSummary {
   polls: number;
   duration_ms: number;
   budgeted_out: boolean;
+  // h106-attachdesign-1 (migration 190). Present only when it applies, so a cron drain's JSON body and
+  // log line carry exactly the keys they carried before the lease: `lease_lost` when a renewal answered
+  // false (the lease had expired and another holder took it: the reads stopped), `trigger` and
+  // `lease_wait_ms` on a drain that ingest kicked (how long it waited for the lease).
+  lease_lost?: boolean;
+  trigger?: "ingest";
+  lease_wait_ms?: number;
   jev_live: JevLiveState;
   admission: AdmissionSummary;
   // hunt-25 W3: the attach-only probe's block ({mode, read, would_attach, attached, by_reason, ...}).
@@ -3414,7 +3448,184 @@ export function planClusterWorkPoll(input: {
   return seconds >= 1 ? seconds : 0;
 }
 
-async function drainQueue(): Promise<InvocationSummary> {
+// ---------------------------------------------------------------------------
+// Consumer lease and ingest kick (h106-attachdesign-1, migration 190)
+// ---------------------------------------------------------------------------
+
+type Trigger = "ingest" | "cron";
+
+/** The lease an invocation holds: the id it acquired, renewed and will release under. */
+interface LeaseHandle {
+  holder: string;
+}
+
+interface DrainContext {
+  trigger: Trigger;
+  lease: LeaseHandle | null;
+  /** How long a kick waited for the lease (ms); null for a cron drain. */
+  leaseWaitMs: number | null;
+}
+
+/**
+ * The trigger a request body names: `{"trigger":"ingest"}` is a kick, anything else is the cron
+ * drain: no body, `{}` (what pg_cron posts), another value, a value of another type, a body that is
+ * not JSON, not an object or longer than TRIGGER_BODY_MAX_CHARS.
+ */
+export function parseTrigger(text: string): Trigger {
+  if (text.length === 0 || text.length > TRIGGER_BODY_MAX_CHARS) return "cron";
+  try {
+    const body: unknown = JSON.parse(text);
+    if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+      if ((body as { trigger?: unknown }).trigger === "ingest") return "ingest";
+    }
+  } catch {
+    // not JSON: the cron drain
+  }
+  return "cron";
+}
+
+/** True unless CLUSTER_LEASE is exactly "off". */
+export function leaseEnabled(value: string | undefined): boolean {
+  return value !== "off";
+}
+
+async function readTriggerBody(req: Request): Promise<string> {
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > TRIGGER_BODY_MAX_CHARS * 4) return "";
+  try {
+    return await req.text();
+  } catch {
+    return "";
+  }
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+/** `code <c>: <message>` of a lease error, for one warning line (never a key: PostgREST's message and code only). */
+function leaseErrorNote(err: unknown): string {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  const message = err instanceof Error ? err.message : String(err);
+  return `${typeof code === "string" ? `code ${code}` : "no code"}: ${message}`;
+}
+
+type LeaseGate =
+  | { go: true; lease: LeaseHandle | null; waitedMs: number | null }
+  | { go: false; response: Response };
+
+/**
+ * Decides whether this invocation may drain, and takes the lease for it.
+ *
+ *   CLUSTER_LEASE=off  cron: no lease call at all, the drain as before the lease; kick: nothing is
+ *                      drained (without the lease nothing keeps two readers apart);
+ *   cron               acquire once. Busy: 200 {ok:true,busy:true,reason:'lease'} before any read.
+ *                      The RPC missing (PGRST202 / 42883) FAILS OPEN: drain without a lease, as today
+ *                      (kicks fail closed on it too, so no other reader exists). Any other error FAILS
+ *                      OPEN as well while CLUSTER_KICK is not 'on'; with CLUSTER_KICK=on it FAILS CLOSED
+ *                      (503 lease-unavailable, reason lease-error, nothing is read, the next minute retries):
+ *                      a kick in another isolate can acquire the lease and read cluster_work while a
+ *                      lease-less cron drain does, the two-reader case the lease exists to prevent;
+ *   kick               queue depth first (0: leave without touching the lease), then wait up to
+ *                      KICK_LEASE_WAIT_MS for the lease, re-checking the depth on every failed try
+ *                      (0: leave). Still busy: leave busy. The RPC missing or failing FAILS CLOSED:
+ *                      503, nothing is read.
+ */
+async function takeLease(trigger: Trigger): Promise<LeaseGate> {
+  if (!leaseEnabled(Deno.env.get(LEASE_ENV) ?? undefined)) {
+    if (trigger === "ingest") {
+      return { go: false, response: jsonResponse(200, { ok: true, skipped: true, reason: "lease-off" }) };
+    }
+    return { go: true, lease: null, waitedMs: null };
+  }
+
+  const holder = crypto.randomUUID();
+
+  if (trigger === "cron") {
+    let got: boolean;
+    try {
+      got = await acquireLease(supabase, LEASE_NAME, holder, LEASE_TTL_S);
+    } catch (err) {
+      if (Deno.env.get(KICK_ENV) === "on" && !isLeaseRpcMissing(err)) {
+        console.warn(`[cluster-consumer] lease unavailable while kicks are on, not draining (${leaseErrorNote(err)})`);
+        return { go: false, response: jsonResponse(503, { ok: false, error: "lease-unavailable", reason: "lease-error" }) };
+      }
+      console.warn(`[cluster-consumer] lease unavailable, draining without it (${leaseErrorNote(err)})`);
+      return { go: true, lease: null, waitedMs: null };
+    }
+    if (!got) return { go: false, response: jsonResponse(200, { ok: true, busy: true, reason: "lease" }) };
+    return { go: true, lease: { holder }, waitedMs: null };
+  }
+
+  const first = await queueDepth(supabase, QUEUE_NAME);
+  if (first.depth === 0) {
+    return { go: false, response: jsonResponse(200, { ok: true, empty: true, reason: "depth" }) };
+  }
+  const waited = await waitForLease({
+    acquire: () => acquireLease(supabase, LEASE_NAME, holder, LEASE_TTL_S),
+    depth: async () => (await queueDepth(supabase, QUEUE_NAME)).depth,
+    waitMs: KICK_LEASE_WAIT_MS,
+    stepMs: KICK_LEASE_STEP_MS,
+  });
+  switch (waited.outcome) {
+    case "acquired":
+      return { go: true, lease: { holder }, waitedMs: waited.waitedMs };
+    case "busy":
+      return { go: false, response: jsonResponse(200, { ok: true, busy: true, reason: "lease" }) };
+    case "empty":
+      return { go: false, response: jsonResponse(200, { ok: true, empty: true, reason: "depth" }) };
+    case "error":
+      console.warn(`[cluster-consumer] kick: lease unavailable, not draining (${leaseErrorNote(waited.error)})`);
+      return {
+        go: false,
+        response: jsonResponse(503, {
+          ok: false,
+          error: "lease-unavailable",
+          reason: isLeaseRpcMissing(waited.error) ? "lease-rpc-missing" : "lease-error",
+        }),
+      };
+  }
+}
+
+/**
+ * The TTL, in whole seconds, of a renewal made `elapsedMs` after the drain started: the full LEASE_TTL_S
+ * while that ends before drain start + LEASE_HORIZON_MS, then what is left to that horizon, never below
+ * the 5 s the database clamps to. An elapsed time that is not a finite number >= 0 (a clock that went
+ * backwards) gets LEASE_TTL_S. A killed drain (546, no finally) leaves its last row behind: the cap makes
+ * that row expire before the next minute's cron drain starts, instead of answering it 'busy'.
+ */
+export function leaseRenewTtlSeconds(elapsedMs: number): number {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return LEASE_TTL_S;
+  return Math.max(5, Math.min(LEASE_TTL_S, Math.floor((LEASE_HORIZON_MS - elapsedMs) / 1000)));
+}
+
+/**
+ * Renews the lease (an acquire by the same holder) for `ttlSeconds` (leaseRenewTtlSeconds). "lost" only
+ * when the database answers false: the lease expired and another holder took it, so this invocation must
+ * stop reading. An error is "error" and the drain goes on: the lease is ours until its expiry unless the
+ * database says otherwise.
+ */
+async function renewLease(lease: LeaseHandle, ttlSeconds: number): Promise<"held" | "lost" | "error"> {
+  try {
+    return (await acquireLease(supabase, LEASE_NAME, lease.holder, ttlSeconds)) ? "held" : "lost";
+  } catch (err) {
+    console.warn(`[cluster-consumer] lease renewal failed, continuing (${leaseErrorNote(err)})`);
+    return "error";
+  }
+}
+
+/** Gives the lease back. Best effort: a failure is warned about and the TTL frees the lease anyway. */
+async function releaseQuietly(lease: LeaseHandle): Promise<void> {
+  try {
+    await releaseLease(supabase, LEASE_NAME, lease.holder);
+  } catch (err) {
+    console.warn(
+      `[cluster-consumer] lease release failed, it expires by itself at most ${LEASE_HORIZON_MS / 1000} s after the drain started (${leaseErrorNote(err)})`,
+    );
+  }
+}
+
+async function drainQueue(ctx: DrainContext = { trigger: "cron", lease: null, leaseWaitMs: null }): Promise<InvocationSummary> {
   // FIRST statement: reset the live-verification counters for this
   // invocation. Read the env here (not at module load) so the Deno-env
   // polyfill in tests/functions/cluster-consumer.test.ts keeps working.
@@ -3463,6 +3674,10 @@ async function drainQueue(): Promise<InvocationSummary> {
     admission: newAdmissionSummary(admissionModeValue),
     attach: newAttachSummary(attachModeValue),
   };
+  if (ctx.trigger === "ingest") {
+    summary.trigger = "ingest";
+    summary.lease_wait_ms = ctx.leaseWaitMs ?? 0;
+  }
 
   // Best-effort depth sample for the drain summary log (audit O13).
   const before = await queueDepth(supabase, QUEUE_NAME);
@@ -3525,6 +3740,15 @@ async function drainQueue(): Promise<InvocationSummary> {
     if (Date.now() - startedAt > MAX_INVOCATION_MS - READ_BUDGET_FLOOR_MS) {
       summary.budgeted_out = true;
       break;
+    }
+    // h106-attachdesign-1 (migration 190): renew the lease at every turn, after the budget check and
+    // before the read. A false answer means it expired and another holder took it: stop reading (the
+    // attach phase below needs clusterWorkEmpty, which stays false, so nothing else is read either).
+    if (ctx.lease) {
+      if ((await renewLease(ctx.lease, leaseRenewTtlSeconds(Date.now() - startedAt))) === "lost") {
+        summary.lease_lost = true;
+        break;
+      }
     }
     let messages: PgmqMessage<QueueMessage>[];
     try {
@@ -3827,8 +4051,24 @@ Deno.serve(withSentry("cluster-consumer", async (req: Request) => {
     });
   }
   drainInFlight = true;
+  let lease: LeaseHandle | null = null;
   try {
-    const summary = await drainQueue();
+    // h106-attachdesign-1 (migration 190): who is calling, and the lease, before any queue work.
+    const trigger = parseTrigger(await readTriggerBody(req));
+    const gate = await takeLease(trigger);
+    if (!gate.go) return gate.response;
+    lease = gate.lease;
+    // Another isolate may have drained since this one's caches were built (the TTLs are 60 s and 5 min,
+    // and a kicked drain can run seconds after a cron one): a kicked drain, or any drain while kicks are
+    // enabled, starts from database truth. That holds whether the lease is held or the cron drain failed
+    // open without it (a missing RPC): the question is whether the lease is ENABLED, not whether this drain
+    // holds it. With CLUSTER_KICK unset a cron drain keeps its warm caches, as before the lease (a kick is
+    // the only way two drains can come that close together), and so does CLUSTER_LEASE=off, the pre-190 drain.
+    if (leaseEnabled(Deno.env.get(LEASE_ENV) ?? undefined) && (trigger === "ingest" || Deno.env.get(KICK_ENV) === "on")) {
+      clusterContextCache = null;
+      sourceLookupCache = null;
+    }
+    const summary = await drainQueue({ trigger, lease, leaseWaitMs: gate.waitedMs });
     return new Response(JSON.stringify({ ok: true, ...summary }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -3852,6 +4092,8 @@ Deno.serve(withSentry("cluster-consumer", async (req: Request) => {
       },
     );
   } finally {
+    // Give the lease back BEFORE this isolate may start another drain (h106-attachdesign-1).
+    if (lease !== null) await releaseQuietly(lease);
     drainInFlight = false;
   }
 }));

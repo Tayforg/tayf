@@ -140,6 +140,18 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
   };
 });
 
+// h106-blindspotbadges-1: the Jev recall lookup is mocked (its own test file
+// covers the query); `recallQualifiedZones` stays REAL, so the zones the detail
+// reports are computed by the shipped rule on the page's own voting counts.
+// The default answer is "Jev matched nothing".
+const recallMock = vi.hoisted(() => ({ fetchRecallMatchedZones: vi.fn() }));
+
+vi.mock("@/lib/clusters/recall-matched-zones", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/clusters/recall-matched-zones")>();
+  return { ...actual, fetchRecallMatchedZones: recallMock.fetchRecallMatchedZones };
+});
+
 // Import AFTER mocks are declared.
 import { cacheLife, cacheTag } from "next/cache";
 import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
@@ -232,6 +244,8 @@ beforeEach(() => {
   feedHealthMock.shouldSuppressBlindspot.mockReset();
   feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
   feedHealthMock.shouldSuppressBlindspot.mockReturnValue(false);
+  recallMock.fetchRecallMatchedZones.mockReset();
+  recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map());
 });
 
 // ---------------------------------------------------------------------------
@@ -1479,6 +1493,215 @@ describe("getClusterDetail blindspot recall veto (migration 071)", () => {
     } finally {
       logSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h106-blindspotbadges-1: clusters.blindspot_recall_suspect (migration 064) says
+// Jev's recall stage matched a silent-side article with this cluster's event.
+// The detail reads the flag and, only then, asks which zones Jev matched; it
+// returns the ones the page shows as an empty column (no voting member), so the
+// framing comparison can stop printing absolute silence there. The claim, the
+// veto and every count are unchanged; a failed lookup is today's page.
+// ---------------------------------------------------------------------------
+
+describe("getClusterDetail recall-matched zones (h106-blindspotbadges-1)", () => {
+  const ID = "11111111-1111-4111-8111-111111111111";
+
+  /** Five voting İktidar outlets (the BLINDSPOT.minSources floor) and anything extra, flagged or not. */
+  function setRow(
+    suspect: boolean | null | undefined,
+    extraMembers: Array<ReturnType<typeof mkEmbeddedMember>> = [],
+    rowOverrides: Record<string, unknown> = {},
+  ) {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: { pro_government: 3, gov_leaning: 2 },
+          // Old enough that the feed delay is not what this test is about.
+          first_published: "2026-04-10T08:00:00Z",
+          ...(suspect !== undefined ? { blindspot_recall_suspect: suspect } : {}),
+          ...rowOverrides,
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "g1", "2026-04-17T10:00:00Z", { source: { bias: "pro_government" } }),
+          mkEmbeddedMember("a2", "g2", "2026-04-17T09:00:00Z", { source: { bias: "pro_government" } }),
+          mkEmbeddedMember("a3", "g3", "2026-04-17T08:30:00Z", { source: { bias: "pro_government" } }),
+          mkEmbeddedMember("a4", "g4", "2026-04-17T08:20:00Z", { source: { bias: "gov_leaning" } }),
+          mkEmbeddedMember("a5", "g5", "2026-04-17T08:10:00Z", { source: { bias: "gov_leaning" } }),
+          ...extraMembers,
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+  }
+
+  it("selects blindspot_recall_suspect on the cluster row", async () => {
+    setRow(false);
+    await getClusterDetail(ID);
+    const clusterCall = callLog.find((c) => c.table === "clusters");
+    const select = clusterCall!.steps.find((s) => s.method === "select");
+    expect(String(select!.args[0])).toMatch(/\bblindspot_recall_suspect\b/);
+    // Next to the veto column, which stays selected.
+    expect(String(select!.args[0])).toMatch(/\bblindspot_recall_veto\b/);
+  });
+
+  it.each([
+    ["false", false],
+    ["null", null],
+    ["absent (a row before the column was read)", undefined],
+  ])("never calls the lookup when the flag is %s, and reports no zones", async (_l, suspect) => {
+    setRow(suspect);
+    const result = await getClusterDetail(ID);
+    expect(recallMock.fetchRecallMatchedZones).not.toHaveBeenCalled();
+    expect(result!.recallMatchedZones).toEqual([]);
+  });
+
+  it("calls the lookup once, for this cluster only, with the capped reader client, when the flag is true", async () => {
+    setRow(true);
+    await getClusterDetail(ID);
+
+    expect(recallMock.fetchRecallMatchedZones).toHaveBeenCalledTimes(1);
+    const [client, ids] = recallMock.fetchRecallMatchedZones.mock.calls[0]!;
+    expect(ids).toEqual([ID]);
+    expect(typeof (client as { from?: unknown }).from).toBe("function");
+    // Every client this module built is the capped reader one (the plain one throws).
+    expect(clientFactories.createServerClient).not.toHaveBeenCalled();
+  });
+
+  it("only a literal true counts as the flag (a truthy string does not)", async () => {
+    setRow("true" as unknown as boolean);
+    await getClusterDetail(ID);
+    expect(recallMock.fetchRecallMatchedZones).not.toHaveBeenCalled();
+  });
+
+  it("reports the matched zones that are empty columns on the page (the 0746c9d2 shape: İktidar voters only, Muhalefet matched)", async () => {
+    setRow(true);
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["muhalefet"]]]));
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["muhalefet"]);
+  });
+
+  it("drops a matched zone that has a voting member: it is not an empty column", async () => {
+    setRow(true, [mkEmbeddedMember("a6", "c1", "2026-04-17T08:00:00Z", { source: { bias: "center" } })]);
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["bagimsiz", "muhalefet"]]]));
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["muhalefet"]);
+  });
+
+  it("a toplayıcı / niş member of a zone is not a voting member: that zone is still an empty column", async () => {
+    setRow(true, [
+      mkEmbeddedMember("a6", "n1", "2026-04-17T08:00:00Z", { source: { bias: "opposition", kind: "niche" } }),
+      mkEmbeddedMember("a7", "n2", "2026-04-17T07:00:00Z", { source: { bias: "center", kind: "aggregator" } }),
+    ]);
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["bagimsiz", "muhalefet"]]]));
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("is computed on the de-duplicated voting members, one vote per source", async () => {
+    // A second article of the same İktidar source changes nothing.
+    setRow(true, [mkEmbeddedMember("a1b", "g1", "2026-04-17T11:00:00Z", { source: { bias: "pro_government" } })]);
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["muhalefet"]]]));
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["muhalefet"]);
+    expect(result!.members).toHaveLength(5);
+  });
+
+  it("a cluster with no voting member is still looked up once flagged; every matched zone is then an empty column (moot: the page draws no framing block there)", async () => {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({ is_blindspot: false, blindspot_recall_suspect: true, bias_distribution: {} }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = {
+      returns: {
+        data: [mkEmbeddedMember("a1", "n1", "2026-04-17T10:00:00Z", { source: { bias: "opposition", kind: "niche" } })],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["muhalefet"]]]));
+
+    const result = await getClusterDetail(ID);
+
+    expect(recallMock.fetchRecallMatchedZones).toHaveBeenCalledTimes(1);
+    expect(result!.recallMatchedZones).toEqual(["muhalefet"]);
+  });
+
+  it("fails open: an empty lookup answer is today's page (no zones)", async () => {
+    setRow(true);
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map());
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual([]);
+    expect(result!.cluster.is_blindspot).toBe(true);
+  });
+
+  it("keeps the claim, the veto and the counts exactly as without the flag", async () => {
+    setRow(false);
+    const without = await getClusterDetail(ID);
+
+    __resetCacheResilienceForTests();
+    setRow(true);
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["bagimsiz", "muhalefet"]]]));
+    const withFlag = await getClusterDetail(ID);
+
+    expect(withFlag!.cluster).toEqual(without!.cluster);
+    expect(withFlag!.members).toEqual(without!.members);
+    expect(withFlag!.blindspotSuppressed).toBe(without!.blindspotSuppressed);
+    expect(withFlag!.blindspotRecallVetoed).toBe(without!.blindspotRecallVetoed);
+  });
+
+  it("still asks and reports for a vetoed cluster (its empty columns say 'sessizlik' too)", async () => {
+    setRow(true, [], { blindspot_recall_veto: true });
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["muhalefet"]]]));
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const result = await getClusterDetail(ID);
+
+      expect(result!.blindspotRecallVetoed).toBe(true);
+      expect(result!.cluster.is_blindspot).toBe(false);
+      expect(result!.recallMatchedZones).toEqual(["muhalefet"]);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("an unknown cluster never reaches the lookup", async () => {
+    responses.clusters = { maybeSingle: { data: null, error: null } };
+
+    const result = await getClusterDetail(ID);
+
+    expect(result).toBeNull();
+    expect(recallMock.fetchRecallMatchedZones).not.toHaveBeenCalled();
+  });
+
+  it("the reported zones are a plain array that survives the cache payload", async () => {
+    setRow(true);
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["muhalefet"]]]));
+
+    const result = await getClusterDetail(ID);
+
+    expect(JSON.parse(JSON.stringify(result)).recallMatchedZones).toEqual(["muhalefet"]);
   });
 });
 

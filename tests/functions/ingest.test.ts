@@ -10,6 +10,9 @@ import {
   normalizeArticles,
 } from "../../supabase/functions/_shared/rss/normalize.ts";
 import { sourceArticleKeyFor } from "../../supabase/functions/_shared/rss/article-key.ts";
+// The ingest handler reports a failed cluster kick through this export (h106-attachdesign-1); the mock below keeps
+// the real behaviour and only counts the calls.
+import { captureException as captureExceptionSpy } from "../../supabase/functions/_shared/sentry.ts";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the ingest Edge Function (audit T7 P1-22 verification).
@@ -298,6 +301,11 @@ const fakeSources: Array<Record<string, unknown>> = [];
 // a number of calls, not as a flaky wall-clock figure. The real functions
 // still run.
 const jaccardWork = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("../../supabase/functions/_shared/sentry.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../supabase/functions/_shared/sentry.ts")>();
+  return { ...actual, captureException: vi.fn(actual.captureException) };
+});
+
 vi.mock("../../supabase/functions/_shared/rss/title-jaccard.ts", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../supabase/functions/_shared/rss/title-jaccard.ts")>();
@@ -6476,5 +6484,331 @@ describe("stale feed reservation: BHA's body arrives last on a busy fresh isolat
     for (const k of ["isolate_budget_deferred", "parse_deferred", "parse_deferred_max_streak", "stale_deferred", "oldest_stale_min"]) {
       expect(row, k).not.toHaveProperty(k);
     }
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// h106-attachdesign-1: the cluster kick.
+//
+// Attach waited p50 55 s because cluster-drain reads at about :02 of every minute and ingest inserts at
+// :04-:12. With CLUSTER_KICK=on, a cycle that inserted articles POSTs {"trigger":"ingest"} to cluster-consumer
+// once its enqueue is done, so the new cluster_work messages are read seconds later (the lease of migration
+// 190 keeps that consumer and the cron one from reading together).
+//
+// The rule these tests exist for is the #252 failure mode (h102-pollregression-1): the kick must NEVER be
+// awaited in ingest's response path. pg_net 0.20.0 starts its next batch only after the previous request
+// ended, so a handler that waits on the consumer holds ingest-drain's request open and every later request
+// of the batch (cluster-drain) behind it. The kick therefore runs inside EdgeRuntime.waitUntil (an
+// un-awaited promise where the runtime has none, as here), and a rejected fetch, a timeout or a non-2xx
+// answer is captured and warned about, never rethrown and never able to change the response.
+// ---------------------------------------------------------------------------
+describe("ingest: the cluster kick (h106-attachdesign-1)", () => {
+  const CONSUMER_URL = "https://example.supabase.co/functions/v1/cluster-consumer";
+  const SRC = () => readFileSync(resolvePath(__dirname, "../../supabase/functions/ingest/index.ts"), "utf8");
+
+  interface ConsumerCall {
+    url: string;
+    method: string | undefined;
+    body: unknown;
+    authorization: string | null;
+    contentType: string | null;
+    signal: AbortSignal | null | undefined;
+  }
+
+  /** Routes the consumer URL to `answer`, everything else to the feed stub the file installed. */
+  function routeConsumer(answer: (call: ConsumerCall) => Promise<Response> | Response): ConsumerCall[] {
+    const calls: ConsumerCall[] = [];
+    const feedStub = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url !== CONSUMER_URL) return feedStub(input, init);
+      const headers = new Headers(init?.headers);
+      const call: ConsumerCall = {
+        url,
+        method: init?.method,
+        body: init?.body,
+        authorization: headers.get("authorization"),
+        contentType: headers.get("content-type"),
+        signal: init?.signal,
+      };
+      calls.push(call);
+      return await answer(call);
+    }) as typeof fetch;
+    return calls;
+  }
+
+  let seedN = 0;
+  /** One active source with one new item: a cycle that inserts one article. */
+  function seedInsertingCycle() {
+    seedN += 1;
+    const rss = `https://example.com/kick-${seedN}.rss`;
+    fakeSources.push({
+      id: `src-kick-${seedN}`,
+      name: `Kick Fixture ${seedN}`,
+      slug: `kick-fixture-${seedN}`,
+      url: "https://example.com",
+      rss_url: rss,
+      active: true,
+    });
+    fetcherItems[rss] = [{ title: `Kick headline ${seedN}`, link: `https://example.com/kick-${seedN}/1` }];
+  }
+
+  const logged: string[] = [];
+  const spies: Array<{ mockRestore: () => void }> = [];
+
+  async function handlerOrThrow() {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire must throw");
+    return handler;
+  }
+  const run = async () => (await handlerOrThrow())(authedRequest("http://localhost/ingest", { method: "POST" }));
+
+  beforeEach(() => {
+    delete process.env.CLUSTER_KICK;
+    logged.length = 0;
+    for (const m of ["log", "warn", "error"] as const) {
+      spies.push(
+        vi.spyOn(console, m).mockImplementation((...args: unknown[]) => {
+          logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+        }),
+      );
+    }
+  });
+
+  afterEach(() => {
+    delete process.env.CLUSTER_KICK;
+    delete (globalThis as { EdgeRuntime?: unknown }).EdgeRuntime;
+    while (spies.length > 0) spies.pop()?.mockRestore();
+  });
+
+  /** Lets the un-awaited kick settle (one macrotask turn is enough for the stubs). */
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+  it.each([undefined, "", "off", "ON", "On", "true", "1", " on", "on "])(
+    "CLUSTER_KICK=%j: no kick even though the cycle inserted articles",
+    async (flag) => {
+      if (flag !== undefined) process.env.CLUSTER_KICK = flag;
+      const calls = routeConsumer(() => Response.json({ ok: true, drained: 1 }));
+      seedInsertingCycle();
+      const res = await run();
+      await settle();
+      expect(res.status).toBe(200);
+      expect(upserted.length).toBeGreaterThan(0); // the cycle did insert
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it("CLUSTER_KICK=on but nothing was inserted (an empty roster): no kick", async () => {
+    process.env.CLUSTER_KICK = "on";
+    const calls = routeConsumer(() => Response.json({ ok: true }));
+    const res = await run();
+    await settle();
+    expect(res.status).toBe(200);
+    expect(upserted).toHaveLength(0);
+    expect(calls).toEqual([]);
+  });
+
+  it("CLUSTER_KICK=on and a cycle that throws (500): no kick", async () => {
+    process.env.CLUSTER_KICK = "on";
+    const calls = routeConsumer(() => Response.json({ ok: true }));
+    forcedSourcesError = "sources table unreachable (test-forced)";
+    const res = await run();
+    await settle();
+    expect(res.status).toBe(500);
+    expect(calls).toEqual([]);
+  });
+
+  it("CLUSTER_KICK=on and articles inserted: one POST {\"trigger\":\"ingest\"} to <SUPABASE_URL>/functions/v1/cluster-consumer with the service-role bearer", async () => {
+    process.env.CLUSTER_KICK = "on";
+    const calls = routeConsumer(() => Response.json({ ok: true, drained: 4 }));
+    seedInsertingCycle();
+    const res = await run();
+    await settle();
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      url: CONSUMER_URL,
+      method: "POST",
+      body: '{"trigger":"ingest"}',
+      authorization: `Bearer ${TEST_SERVICE_ROLE_KEY}`,
+      contentType: "application/json",
+    });
+    expect(calls[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(logged.filter((l) => l.includes("cluster kick")).some((l) => l.includes('"drained":4') && l.includes('"status":200'))).toBe(true);
+  });
+
+  it("the handler's response resolves BEFORE the consumer answers: the kick is never awaited (the #252 failure mode)", async () => {
+    process.env.CLUSTER_KICK = "on";
+    let answer: (r: Response) => void = () => {};
+    let answered = false;
+    const calls = routeConsumer(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = (r) => {
+            answered = true;
+            resolve(r);
+          };
+        }),
+    );
+    seedInsertingCycle();
+    const res = await run(); // would hang (test timeout) if the handler awaited the pending consumer fetch
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1); // the kick is in flight ...
+    expect(answered).toBe(false); // ... and the consumer has not answered yet
+    const body = (await res.json()) as { ok: boolean; inserted: number };
+    expect(body.ok).toBe(true);
+    expect(body.inserted).toBeGreaterThan(0);
+    answer(Response.json({ ok: true, drained: 2 }));
+    await settle();
+    expect(logged.some((l) => l.includes("cluster kick") && l.includes('"drained":2'))).toBe(true);
+  });
+
+  it("hands the kick to EdgeRuntime.waitUntil when the runtime has it, once, and the response does not wait for it", async () => {
+    process.env.CLUSTER_KICK = "on";
+    const handed: Array<Promise<unknown>> = [];
+    (globalThis as { EdgeRuntime?: unknown }).EdgeRuntime = {
+      waitUntil(promise: Promise<unknown>) {
+        handed.push(promise);
+      },
+    };
+    let release: (r: Response) => void = () => {};
+    routeConsumer(() => new Promise<Response>((resolve) => (release = resolve)));
+    seedInsertingCycle();
+    const res = await run();
+    expect(res.status).toBe(200);
+    expect(handed).toHaveLength(1);
+    let settled = false;
+    void handed[0]!.then(() => (settled = true));
+    await settle();
+    expect(settled).toBe(false);
+    release(Response.json({ ok: true, drained: 1 }));
+    await handed[0];
+    expect(settled).toBe(true);
+  });
+
+  it("the response of a kicked cycle has the same shape as the response of an unkicked one", async () => {
+    routeConsumer(() => Response.json({ ok: true, drained: 1 }));
+    seedInsertingCycle();
+    const plain = (await (await run()).json()) as Record<string, unknown>;
+    upserted.length = 0;
+    fakeSources.length = 0;
+    process.env.CLUSTER_KICK = "on";
+    seedInsertingCycle();
+    const kicked = (await (await run()).json()) as Record<string, unknown>;
+    expect(Object.keys(kicked).sort()).toEqual(Object.keys(plain).sort());
+  });
+
+  describe("a failing consumer never changes the response", () => {
+    async function kickedCycle(answer: () => Promise<Response> | Response) {
+      process.env.CLUSTER_KICK = "on";
+      const calls = routeConsumer(answer);
+      seedInsertingCycle();
+      const res = await run();
+      const body = (await res.json()) as { ok: boolean; inserted: number };
+      await settle();
+      return { res, body, calls };
+    }
+
+    it("a rejected fetch: 200 {ok:true}, captured under 'ingest' and warned, nothing thrown", async () => {
+      const { res, body, calls } = await kickedCycle(() => Promise.reject(new TypeError("fetch failed")));
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.inserted).toBeGreaterThan(0);
+      expect(calls).toHaveLength(1);
+      expect(captureExceptionSpy).toHaveBeenCalledTimes(1);
+      const [fn, err] = vi.mocked(captureExceptionSpy).mock.calls[0] as [string, Error];
+      expect(fn).toBe("ingest");
+      expect(err.message).toContain("fetch failed");
+      expect(logged.some((l) => l.includes("cluster kick") && l.includes("fetch failed"))).toBe(true);
+    });
+
+    it("a timeout (the 45 s signal fires): 200 {ok:true}, captured and warned", async () => {
+      const ctl = new AbortController();
+      const original = AbortSignal.timeout.bind(AbortSignal);
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => (ms === 45_000 ? ctl.signal : original(ms)));
+      spies.push(timeout);
+      const { res, body } = await kickedCycle(
+        () =>
+          new Promise<Response>((_resolve, reject) => {
+            ctl.signal.addEventListener("abort", () => reject(new DOMException("The operation timed out.", "TimeoutError")));
+            queueMicrotask(() => ctl.abort());
+          }),
+      );
+      expect(timeout).toHaveBeenCalledWith(45_000);
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(captureExceptionSpy).toHaveBeenCalledTimes(1);
+      expect(logged.some((l) => l.includes("cluster kick") && l.includes("timed out"))).toBe(true);
+    });
+
+    it.each([500, 503, 401, 546])("a %s answer: 200 {ok:true}, captured and warned with the status", async (status) => {
+      const { res, body } = await kickedCycle(() => new Response(JSON.stringify({ ok: false, error: "internal-error" }), { status }));
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(captureExceptionSpy).toHaveBeenCalledTimes(1);
+      const [, err] = vi.mocked(captureExceptionSpy).mock.calls[0] as [string, Error];
+      expect(err.message).toContain(String(status));
+      expect(logged.some((l) => l.includes("cluster kick") && l.includes(String(status)))).toBe(true);
+    });
+
+    it("a fetch that throws synchronously, and a waitUntil that throws: still 200 {ok:true}", async () => {
+      (globalThis as { EdgeRuntime?: unknown }).EdgeRuntime = {
+        waitUntil() {
+          throw new Error("isolate is shutting down");
+        },
+      };
+      const { res, body } = await kickedCycle(() => {
+        throw new Error("sync boom");
+      });
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+    });
+  });
+
+  it("never writes the service-role key or the authorization header to a log line, on success or on failure", async () => {
+    for (const answer of [
+      () => Response.json({ ok: true, drained: 1 }),
+      () => new Response("denied", { status: 401 }),
+      () => Promise.reject(new Error(`connect failed for Bearer ${TEST_SERVICE_ROLE_KEY}`)),
+    ]) {
+      logged.length = 0;
+      upserted.length = 0;
+      fakeSources.length = 0;
+      process.env.CLUSTER_KICK = "on";
+      routeConsumer(answer);
+      seedInsertingCycle();
+      await run();
+      await settle();
+      const everything = logged.join("\n") + "\n" + vi.mocked(captureExceptionSpy).mock.calls.map(([, e]) => String((e as Error).message)).join("\n");
+      expect(everything.includes(TEST_SERVICE_ROLE_KEY), everything).toBe(false);
+      expect(everything.toLowerCase().includes("authorization")).toBe(false);
+    }
+  });
+
+  describe("wiring (static)", () => {
+    it("fires the kick after runCycle(), un-awaited, behind the flag and the inserted count", () => {
+      const src = SRC();
+      const serve = src.indexOf("Deno.serve(withSentry(\"ingest\"");
+      const handler = src.slice(serve);
+      expect(handler).toContain("const stats = await runCycle();");
+      expect(handler).toContain("shouldKick(");
+      expect(handler).toContain("stats.inserted");
+      expect(handler).toContain("scheduleClusterKick(");
+      expect(handler.indexOf("scheduleClusterKick(")).toBeGreaterThan(handler.indexOf("const stats = await runCycle();"));
+      expect(/await\s+(?:\w+\.)?(?:scheduleClusterKick|kickClusterConsumer)/.test(src)).toBe(false);
+      expect(src).toContain('from "../_shared/kick.ts"');
+    });
+
+    it("keeps EdgeRuntime out of index.ts's code: the waitUntil fallback lives in _shared/kick.ts", () => {
+      const code = SRC()
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("//"))
+        .join("\n");
+      expect(code.includes("EdgeRuntime")).toBe(false);
+      const kick = readFileSync(resolvePath(__dirname, "../../supabase/functions/_shared/kick.ts"), "utf8");
+      expect(kick).toContain("EdgeRuntime");
+      expect(kick).toContain("waitUntil");
+    });
   });
 });

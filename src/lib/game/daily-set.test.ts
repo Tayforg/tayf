@@ -8,10 +8,12 @@ import {
   DAILY_POLITICS_GATE_FROM,
   DAILY_TITLE_MAX,
   DAILY_TWIN_GATE_FROM,
+  DAILY_TWIN_KEY_V2_FROM,
   ISTANBUL_OFFSET_MS,
   addDays,
   dailyHash,
   dailyIntroText,
+  dailyTwinKeyVersion,
   isDailyEligible,
   isDateKey,
   pickDailySet,
@@ -576,6 +578,47 @@ describe("DAILY_TWIN_GATE_FROM", () => {
 
   it("comes after the English gate, so the gates keep their order", () => {
     expect(DAILY_TWIN_GATE_FROM > DAILY_ENGLISH_GATE_FROM).toBe(true);
+  });
+});
+
+describe("DAILY_TWIN_KEY_V2_FROM", () => {
+  it("is a valid date key", () => {
+    expect(isDateKey(DAILY_TWIN_KEY_V2_FROM)).toBe(true);
+  });
+
+  // Same replay contract as the gates: every key up to the deploy day is
+  // replayable and recomputes from a cold cache, so the key that switches the
+  // twin key to version 2 must be one no player has seen. The change was built on
+  // 2026-11-10 (Istanbul), whose key is already served, so 2026-11-11 is the
+  // lowest value that can ever be right. The shipped value is later (the merge is
+  // expected on 2026-11-11); raise it, never lower it, if the deploy slips.
+  it("is not earlier than 2026-11-11, a key nobody has seen at deploy time", () => {
+    expect(DAILY_TWIN_KEY_V2_FROM >= "2026-11-11").toBe(true);
+  });
+
+  it("comes after DAILY_TWIN_GATE_FROM, so the first gated days keep the version 1 key they were served with", () => {
+    expect(DAILY_TWIN_KEY_V2_FROM > DAILY_TWIN_GATE_FROM).toBe(true);
+  });
+});
+
+describe("dailyTwinKeyVersion", () => {
+  it("is 1 for every key below DAILY_TWIN_KEY_V2_FROM, however far back", () => {
+    expect(dailyTwinKeyVersion(DAILY_GAME_EPOCH)).toBe(1);
+    expect(dailyTwinKeyVersion(DAILY_POLITICS_GATE_FROM)).toBe(1);
+    expect(dailyTwinKeyVersion(DAILY_TWIN_GATE_FROM)).toBe(1);
+    expect(dailyTwinKeyVersion(addDays(DAILY_TWIN_KEY_V2_FROM, -1))).toBe(1);
+    expect(dailyTwinKeyVersion("2000-01-01")).toBe(1);
+  });
+
+  it("is 2 from DAILY_TWIN_KEY_V2_FROM on", () => {
+    expect(dailyTwinKeyVersion(DAILY_TWIN_KEY_V2_FROM)).toBe(2);
+    expect(dailyTwinKeyVersion(addDays(DAILY_TWIN_KEY_V2_FROM, 1))).toBe(2);
+    expect(dailyTwinKeyVersion(addDays(DAILY_TWIN_KEY_V2_FROM, 365))).toBe(2);
+  });
+
+  it("switches on exactly one day", () => {
+    const before = addDays(DAILY_TWIN_KEY_V2_FROM, -1);
+    expect([dailyTwinKeyVersion(before), dailyTwinKeyVersion(DAILY_TWIN_KEY_V2_FROM)]).toEqual([1, 2]);
   });
 });
 

@@ -4,7 +4,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import { cache } from "react";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import { normalizeSourceKind } from "@/lib/bias/config";
+import { isVotingKind, normalizeSourceKind, zoneOf } from "@/lib/bias/config";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import {
   distributionsEqual,
@@ -25,6 +25,10 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
+import {
+  fetchRecallMatchedZones,
+  recallQualifiedZones,
+} from "@/lib/clusters/recall-matched-zones";
 import { logRecallVeto, publicBlindspotClaim } from "@/lib/clusters/recall-veto";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { createReaderClient } from "@/lib/supabase/server";
@@ -74,7 +78,11 @@ function logVotingRecountMismatch(clusterId: string): void {
  * (iktidar, bagimsiz, muhalefet), matching the contract's own tie-break.
  */
 function dominantZoneOf(distribution: BiasDistribution): MediaDnaZone | null {
-  const counts = zoneCountsOf(distribution);
+  return dominantZoneOfCounts(zoneCountsOf(distribution));
+}
+
+/** The same tie-break over per-zone counts already in hand (first of ZONE_ORDER wins a tie). */
+function dominantZoneOfCounts(counts: Record<MediaDnaZone, number>): MediaDnaZone | null {
   const order: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
   let best: MediaDnaZone | null = null;
   for (const zone of order) {
@@ -185,6 +193,15 @@ export interface ClusterDetail {
   // that the clusterer put in another cluster. A matching fact, not a feed
   // outage, so it is independent of `blindspotSuppressed` (never both).
   blindspotRecallVetoed: boolean;
+  // h106-blindspotbadges-1: the zones that are an EMPTY column on this page (no
+  // voting member) in which Jev's blindspot_recall stage matched a voting source
+  // with this story's event (clusters.blindspot_recall_suspect), so the framing
+  // comparison can say "benzer haber başka kümede olabilir" instead of claiming
+  // silence there. Sorted, [] unless the cluster is flagged and the lookup
+  // answered. Wording only: no claim, veto, count or share reads it. Optional so
+  // fixtures and cache entries written before the field existed still compile;
+  // the page reads a missing value as [].
+  recallMatchedZones?: MediaDnaZone[];
 }
 
 /**
@@ -231,6 +248,10 @@ type ClusterRow = {
   blindspot_side: BiasCategory | null;
   /** Migration 071 recall veto. Optional: pre-071 rows/fixtures pass through. */
   blindspot_recall_veto?: boolean | null;
+  /** Migration 064: Jev matched a silent-side article with this event.
+   *  Optional: fixtures and rows from before the column was read pass through
+   *  as "not flagged" (only a literal true triggers the lookup). */
+  blindspot_recall_suspect?: boolean | null;
   first_published: string;
   updated_at: string;
   /** seo-3 (migration 037): true once the retention cron has archived this
@@ -365,7 +386,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     const clusterRes = await supabase
       .from("clusters")
       .select(
-        "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived, merged_into, topic7"
+        "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, blindspot_recall_suspect, first_published, updated_at, is_archived, merged_into, topic7"
       )
       .eq("id", id)
       .maybeSingle<ClusterRow>();
@@ -599,6 +620,39 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         new Date(a.article.published_at).getTime()
     );
 
+    // h106-blindspotbadges-1: Jev's blindspot_recall stage (migration 064) flags a
+    // cluster whose silent side has a likely same-event article elsewhere. Only a
+    // flagged cluster pays for the lookup (one jev_shadow_predictions read on the
+    // capped reader client; none for the common unflagged one). The zones that
+    // come back are cut down to this page's EMPTY columns, counted on the very
+    // members the page lists (de-duplicated per source, voting kinds only, the
+    // partitionByVote rule), so the framing comparison never qualifies a column
+    // that has headlines. Never throws and answers an empty Map on any error, so
+    // a failed lookup is today's page. This neither reads nor writes the claim:
+    // isBlindspot, blindspotSide, the veto and the counts above and below are
+    // untouched.
+    let recallMatchedZones: MediaDnaZone[] = [];
+    if (clusterRow.blindspot_recall_suspect === true) {
+      const votingZoneCounts: Record<MediaDnaZone, number> = {
+        iktidar: 0,
+        bagimsiz: 0,
+        muhalefet: 0,
+      };
+      for (const m of dedupedMembers) {
+        if (isVotingKind(m.source.kind)) votingZoneCounts[zoneOf(m.source.bias)] += 1;
+      }
+      const pageDominant = dominantZoneOfCounts(votingZoneCounts);
+      // Always asked once flagged, even when no voting member exists (then there
+      // is no dominant zone and the page draws no framing block, so the answer is
+      // moot): the rule stays "flagged means looked up".
+      const matched = await fetchRecallMatchedZones(supabase, [id]);
+      recallMatchedZones = recallQualifiedZones(
+        votingZoneCounts,
+        pageDominant,
+        matched.get(id),
+      );
+    }
+
     // Cluster titles were stored before the ingest entity fix, so 49 archived
     // rows still carry "&quot;" / "&amp;" in `title_tr` (their neutral title is
     // empty). Repair at the one place the detail is shaped. `repairEntityResidue`
@@ -697,6 +751,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       ),
       blindspotSuppressed,
       blindspotRecallVetoed: veto.vetoed,
+      recallMatchedZones,
     };
   } catch (err) {
     // Rethrow — swallowing to null would cache a 404 for a real cluster.

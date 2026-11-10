@@ -4343,3 +4343,107 @@ Counting aggregator partners too would give 239 for AA (not 217), 56 for haberle
 **Verify** (read-only): `select md5(prosrc), length(prosrc), prosecdef, proconfig from pg_proc where oid = 'public.source_reliability_refresh_source(uuid,integer)'::regprocedure` is `c23aa161f55921967e997578b2be16da`, 4660, true, `{search_path=""}`; `has_function_privilege('anon', …, 'execute')` and `('authenticated', …)` false, `('service_role', …)` true; `select version, name from supabase_migrations.schema_migrations where version = '189'` returns one row. After one batch cycle: `select s.slug, r.n_wire_copy, r.n_clusters, r.computed_at from source_reliability_30d r join sources s on s.id = r.source_id where s.slug in ('anadolu-ajansi', 'trt-haber', 'milat', 'cumhuriyet')` with `computed_at` after the apply; expect AA near 15 to 21 %, TRT Haber and Milat in the 30s, Cumhuriyet near 1 to 2 %. `GET /source/anadolu-ajansi` no longer prints `%1 (8/1.165)` in the "Başka kaynaklarla aynı başlık ve özet" row. Do NOT call the function from the SQL editor to "check" it: it upserts the source's row.
 
 **Rollback:** re-run the `create or replace function public.source_reliability_refresh_source` statement and its `comment on function` statement of section 2 of `111_source_reliability.sql` (`create or replace` keeps 189's comment otherwise; restores `md5(prosrc)` `761dacdf55be8a0d632a04df034fdec9`, length 4586, and the wire gate), then `delete from supabase_migrations.schema_migrations where version = '189';`. The rows return to the gated count as the batch recomputes them. The ACL does not change in either direction. The app copy would then promise a count of every cluster while the rows hold the gated one, so roll the app back with it.
+
+## 190 — the cluster consumer is kicked by ingest and serialised by a TTL lease (`public.consumer_leases`, `consumer_lease_acquire` / `consumer_lease_release`; `cluster-consumer` takes the lease, `ingest` kicks it behind `CLUSTER_KICK`): APPLY 190, DEPLOY `cluster-consumer`, DEPLOY `ingest`, then SET `CLUSTER_KICK=on` (ships dark)
+
+**Why:** h106-attachdesign-1 (hunt 106), the follow-up that the comment above `POLL_ENABLED` asks for. Attach still waits p50 55 s after #253 switched the long poll off, because `cluster-drain` (`* * * * *`) reads `cluster_work` at about :02 of every minute and `ingest-drain` (`*/3 * * * *`) inserts at about :04-:12, so the messages wait for the next minute's consumer (h101-e2elatency-1 measured the phase lock). #252 tried to wait inside the consumer and held pg_net's batch open (h102-pollregression-1: pg_net 0.20.0 starts the next batch only after the previous request ended, so ingest started up to 19 s late). The design that cannot do that: after its enqueue is done, `ingest` POSTs `{"trigger":"ingest"}` to `cluster-consumer` from `EdgeRuntime.waitUntil` (the response is sent first; nothing waits for the consumer), behind the Edge secret `CLUSTER_KICK=on`. The kicked consumer and the cron one then live in different isolates, and `drainInFlight` serialises one isolate only: two readers of `cluster_work` would score the same story's messages in parallel and open twins. PostgREST cannot hold a session advisory lock, so a row with an expiry does it: the lease.
+
+Measured read-only on 2026-11-10 (`pgmq.a_cluster_work`, `enqueued_at` in the last 24 h to 18:33Z, read time = `vt - 60 s`): n = 1,923, enqueue-to-first-read wait p50 55.3 s, p90 59.4 s, p99 67.3 s, 18.1 % under 10 s, max `read_ct` 1 (no backlog, no retry). Of the last 6 h at 17:50Z: n = 701, p50 54.8 s, p90 59.3 s, p99 62.1 s, 21.4 % under 10 s.
+
+**What 190 does** (additive, one table and two functions, one transaction, safe to re-apply; no change to an existing table, column, index, trigger, queue, cron job or GUC; nothing is applied by the PR):
+
+- `public.consumer_leases (name text primary key, holder text not null, acquired_at timestamptz not null default clock_timestamp(), expires_at timestamptz not null)`. Row level security on, no policy, `revoke all` from `public, anon, authenticated`.
+- `public.consumer_lease_acquire(p_name text, p_holder text, p_ttl_seconds int) returns boolean`, `SECURITY DEFINER`, `search_path = ''`. The TTL is clamped to 5..120 s (`least(greatest(p_ttl_seconds, 5), 120)`; a null or negative TTL is 5 s). ONE statement: `insert ... on conflict (name) do update ... where l.expires_at <= clock_timestamp() or l.holder = excluded.holder returning true`, with `coalesce(..., false)`. A free name inserts, a name held by someone else is taken over only once it has expired, the same holder renews (`acquired_at` kept on a live renewal, reset on a takeover), a held unexpired lease of another holder writes nothing and answers false. No select-then-write window: the conflict arbiter serialises two simultaneous callers. Time is `clock_timestamp()`, never `now()`.
+- `public.consumer_lease_release(p_name text, p_holder text) returns boolean`, `SECURITY DEFINER`, `search_path = ''`: deletes the row only when the holder matches (a consumer whose lease was taken over cannot release its successor's).
+- `execute` on both: revoked from `public, anon, authenticated`, granted to `service_role` only. Ledger row 190, `notify pgrst, 'reload schema'`.
+
+| function | md5(prosrc) | length |
+|---|---|---|
+| `consumer_lease_acquire(text, text, integer)` | `d097cca98ee4fc1991a0c17bd23677cb` | 683 |
+| `consumer_lease_release(text, text)` | `bf73840bcd754136bb0eb8fb98aff06a` | 168 |
+
+(Before 190: no table `public.consumer_leases` and no function of either name.) The local PG15 dry-run `tests/migrations/sql/190-consumer-lease-dryrun.sql` (run by `tests/migrations/sql/run-live.sh`, `TAYF_LIVE_ONLY=190`) checks the takeover only after expiry, the same-holder renewal, the release only by the holder, the TTL clamp over a grid, the ACLs against real roles (anon and authenticated refused on both functions and on the table), row level security on with no policy, the body fingerprints above, the ledger row after two applications and the rollback below followed by a re-apply. Two sessions racing for one free name cannot be shown from one psql session; the guarantee is the single-statement `on conflict`, pinned in `tests/migrations/190-consumer-lease.test.ts`.
+
+**What the Edge Functions do** (`supabase/functions/_shared/lease.ts`, `_shared/kick.ts`, `cluster-consumer/index.ts`, `ingest/index.ts`):
+
+| | cron drain (the body is `{}`: no `trigger`) | kicked drain (`{"trigger":"ingest"}`) |
+|---|---|---|
+| lease | acquire once, 45 s; busy: `200 {ok:true,busy:true,reason:'lease'}` and no read at all | queue depth first (0: `200 {ok:true,empty:true,reason:'depth'}`, no lease call); then wait up to 10 s in steps of 400 ms, depth re-checked on every failed try (0: leave); still busy: `200 {ok:true,busy:true,reason:'lease'}` |
+| lease RPC missing (`PGRST202` / `42883`) or failing | **fails open** when the RPC is missing, or on any error while `CLUSTER_KICK` is not `on` (one warning, the drain as before 190); with `CLUSTER_KICK=on` any other error answers `503 {ok:false,error:'lease-unavailable',reason:'lease-error'}`, reads nothing, and the next minute retries (a kick in another isolate could be reading `cluster_work` at the same time) | **fails closed**: `503 {ok:false,error:'lease-unavailable',reason:'lease-rpc-missing' or 'lease-error'}`, nothing is read |
+| after acquiring | renewed (acquire by the same holder) at every read-loop turn, with a TTL of min(45, 55 - elapsed s) and a floor of 5, so no renewal pushes `expires_at` past drain start + 55 s; a `false` answer sets `lease_lost` in the summary and stops the reads (no attach phase either); an error on a renewal is a warning and the drain goes on | the same, and the drain summary carries `trigger: "ingest"` and `lease_wait_ms` |
+| end | released in the handler's `finally`, before `drainInFlight` is cleared; a failed release is a warning (the TTL frees it, at most 55 s after the drain started) | the same |
+| caches | kept, as before, while `CLUSTER_KICK` is unset; dropped (context and source lookup) when `CLUSTER_KICK=on` and the lease is enabled, whether this drain holds the lease or failed open without it (a missing RPC), because a kicked drain can have run in another isolate seconds ago; kept under `CLUSTER_LEASE=off` | dropped: the drain starts from database truth |
+
+`CLUSTER_LEASE=off` (the exact string) skips every lease call: the cron drain is then call for call the pre-190 drain, and a kick answers `200 {ok:true,skipped:true,reason:'lease-off'}` and drains nothing (without the lease nothing keeps two readers apart). `POLL_ENABLED` stays `false`. `ingest` kicks only when `CLUSTER_KICK` is exactly `on` AND the cycle inserted at least one article, after `runCycle()`, from `EdgeRuntime.waitUntil` (an un-awaited promise where the runtime has none), with `AbortSignal.timeout(45000)`; a rejected fetch, a timeout or a non-2xx answer is warned about and captured to Sentry under `ingest`, never rethrown and never able to change the response; the key and the headers are never logged. It uses only environment the functions already read (`SUPABASE_URL` and the service-role key).
+
+**Ships dark.** With `CLUSTER_KICK` unset, `ingest` never kicks, and the cron consumer's behaviour differs from the pre-190 one by lease RPCs only: one acquire at the start, one renewal per read-loop turn and one release at the end (three on an empty queue, about 10-20 ms each; no extra pgmq call, no other RPC, same writes, same JSON body keys). `tests/functions/cluster-consumer.test.ts` proves it call for call: the pgmq call sequence of every scenario equals the pre-190 one, `CLUSTER_LEASE=off` makes no lease call at all, and the same `CLUSTER_LEASE=off` assertions also pass against the pre-190 `index.ts` (`git show HEAD:supabase/functions/cluster-consumer/index.ts`). Jev: `pair_marginal` calls are per article, and a split drain cannot reset a budget (the only budget is `JEV_LIVE_POLICY.maxCallsPerDrain` = 40 per invocation; there is no per-day counter); at about 78 messages an hour the cap does not bind today either.
+
+**Replay** (production, SELECT only, 2026-11-10; the model, not the new code, because the code is not deployed): per ingest cycle with messages (392 of the 455 cycles with `inserted > 0` in 24 h; the other 63 enqueue nothing for `cluster_work`, so their kick would stop at the depth probe) the real gap between the enqueue and the end of the cycle, `ingest_cycles.started_at + duration_ms - enqueued_at`: p50 0.157 s, p90 0.30 s, p99 0.54 s, max 1.7 s (the cycle's own telemetry insert, about 0.1 s, still runs before the handler returns and the kick leaves, so 0.1 s is added). Then the delay from there to the first read, taken from the 74 of those 392 cycles (18.9 %) in which the cron consumer happened to start right after the insert (pg_net ordering): 356 messages read 0.49 to 12.5 s after the insert, per message p50 2.19 s, p90 4.70 s (per cycle's first read p50 1.5 s, p90 1.9 s, max 2.6 s). That delay includes pg_net's dispatch, the isolate start and the context build, so it is conservative about the dispatch and carries no warm-context discount (a kicked drain rebuilds its context). Combining every cycle's gap with every one of those delays, weighted by messages:
+
+| enqueue to first read | p50 | p90 | p99 | under 10 s | under 5 s | max |
+|---|---|---|---|---|---|---|
+| now (production, 24 h) | 55.3 s | 59.4 s | 67.3 s | 18.1 % | 16.8 % | 71.6 s |
+| kick on (replay) | 2.6 s | 5.2 s | 11.3 s | 98.0 % | 89.4 % | 14.3 s |
+| kick on, +1.5 s for a slower cold start | 4.1 s | 6.7 s | 12.8 s | 96.8 % | 74.2 % | 15.8 s |
+| kick on, +3 s | 5.6 s | 8.2 s | 14.3 s | 94.9 % | 26.2 % | 17.3 s |
+
+The Verify targets below (p50 under 5 s, at least 90 % under 10 s) hold for any extra delay up to about 2.4 s. Not modelled: the kick's own HTTP hop through the functions gateway (tens of milliseconds); a cron drain that is still running when the kick arrives (the kick waits up to 10 s; if that drain is already in its attach phase it will not read the new messages, the kick leaves busy after 10 s and those messages wait for the next minute, as today); the attach queue (`cluster_attach`) is read by a kicked drain only after `cluster_work` ran dry and only when `cluster_work` was not empty at the kick, so attach-queue messages keep their minute-boundary wait. **Cost:** about 455 extra consumer invocations a day (+31 % on the 1,440 cron runs), 63 of them one RPC long; 392 kicked drains each rebuild the 48 h context once (the cost of a cold cron invocation, the same CPU envelope as before); the lease adds three RPCs to an empty cron run.
+
+**Order:** (1) APPLY `190_consumer_lease.sql` (`supabase db push` or post the SQL; not applied by the PR); (2) DEPLOY `cluster-consumer` (`supabase functions deploy cluster-consumer --no-verify-jwt`); (3) DEPLOY `ingest` (`supabase functions deploy ingest --no-verify-jwt`, as today); (4) the operator runs `supabase secrets set CLUSTER_KICK=on`. Nothing is deployed or set by the PR. Wrong order is safe: a consumer deployed before 190 gets `PGRST202` on the cron path and drains as before (one warning per minute); `ingest` deployed first does nothing without the secret; the secret set before the consumer is deployed makes `ingest` POST a body the old consumer ignores (it drains as a cron drain, without the lease: not wanted, hence the order).
+
+**Verify** (read-only; do not call the lease functions from the SQL editor, they write; do not read the queue with the pgmq read functions, they lease messages). 1. The next day, the same 24 h histogram as the Why section; expect `p50` under 5 s, at least 90 % under 10 s, `max_read_ct` still 1:
+
+```sql
+select count(*) as n,
+       round(percentile_cont(0.5) within group (order by w)::numeric, 1) as p50,
+       round(percentile_cont(0.9) within group (order by w)::numeric, 1) as p90,
+       round(percentile_cont(0.99) within group (order by w)::numeric, 1) as p99,
+       round(100.0 * count(*) filter (where w < 10) / count(*), 1) as pct_under_10s,
+       max(read_ct) as max_read_ct
+  from (select extract(epoch from (vt - interval '60 seconds') - enqueued_at) as w, read_ct
+          from pgmq.a_cluster_work
+         where enqueued_at > now() - interval '24 hours') s;
+```
+
+2. The #252 guard: ingest must still start at the top of its minute (the long poll moved `started_at` from :00-:09 to :13-:19). The seconds of the minute per hour must stay as in the 7 days before; `net._http_response` (about 6 h kept) must keep one ingest answer per 3 minutes:
+
+```sql
+select date_trunc('hour', started_at) as hour,
+       min(extract(second from started_at))::int as min_sec,
+       round(percentile_cont(0.5) within group (order by extract(second from started_at))::numeric, 1) as p50_sec,
+       max(extract(second from started_at))::int as max_sec,
+       count(*) as cycles
+  from public.ingest_cycles
+ where started_at > now() - interval '24 hours'
+ group by 1 order by 1;
+```
+
+3. Twins must not rise against the 7-day baseline (the days before the secret was set): `cluster_twin_bridges` per day, and `created_with_floor_candidate` in the `cluster-consumer` drain lines:
+
+```sql
+select date_trunc('day', seen_at) as day, count(*) as bridges, count(distinct article_id) as articles
+  from public.cluster_twin_bridges
+ where seen_at > now() - interval '8 days'
+ group by 1 order by 1;
+```
+
+4. The lease: one row at most per name by construction (primary key), and the row of a finished drain is gone (a clean release deletes it). A row whose `expires_at` is in the past that stays is a consumer that died before releasing: the next acquire takes it over. Repeated reads should show `holder` and `acquired_at` changing from drain to drain, `expires_at` at most 45 s ahead and never past the drain's start + 55 s, never two live holders:
+
+```sql
+select name, holder, acquired_at, expires_at, expires_at > clock_timestamp() as live
+  from public.consumer_leases
+ order by name;
+```
+
+5. Jev: `pair_marginal` calls per day unchanged within noise (zero while `JEV_LIVE_PAIRS` is off):
+
+```sql
+select date_trunc('day', created_at) as day, count(*) as calls
+  from public.jev_shadow_predictions
+ where task = 'pair_marginal' and run_id is null and created_at > now() - interval '8 days'
+ group by 1 order by 1;
+```
+
+In the Edge Function logs: `cluster-consumer` `drain` lines of kicked runs carry `"trigger":"ingest"` and `lease_wait_ms`; a `lease_lost` of true is the lease expiring mid-drain (should be absent); `ingest` logs `[ingest] cluster kick {"status":200,"drained":N,"ms":...}` per kicked cycle. A failed kick shows in the Edge logs of `ingest` and in Sentry, NOT in `net._http_response` (see `docs/ops-heartbeat.md`).
+
+**Rollback:** `supabase secrets unset CLUSTER_KICK` first (the kicks stop at the source; no redeploy). Emergency, without touching code: `supabase secrets set CLUSTER_LEASE=off` makes the cron drain exactly the pre-190 drain and turns a stray kick into a no-op. To remove the migration: `drop function public.consumer_lease_acquire(text, text, int); drop function public.consumer_lease_release(text, text); drop table public.consumer_leases; delete from supabase_migrations.schema_migrations where version = '190'; notify pgrst, 'reload schema';`. The deployed consumer then fails open on the cron path (`PGRST202`, one warning per minute) and drains as before; redeploying the previous consumer removes the warning. Nothing depends on 190 but the lease.

@@ -20,6 +20,13 @@ import type { MediaDnaZone } from "@/types";
 // one dominantZone / dominantPct are built from), never on bundle.sources,
 // which also lists non-voting aggregator and niche outlets. Counting those
 // let a single aggregator in a pole zone mask a "%100 tek tarafta" card.
+//
+// RECALL (h106-blindspotbadges-1): a zone the site's own Jev recall stage matched
+// with the same event (BlindspotBundle.recallMatchedZones, from
+// clusters.blindspot_recall_suspect) is not counted as having given no coverage
+// on THAT claim: the story may sit in another cluster. The claim itself stays in
+// windowTotal and in every other row. A caller that passes no such field (the
+// weekly template, /hafta) is counted exactly as before.
 
 export const ZONE_ROW_ORDER: readonly MediaDnaZone[] = [
   "iktidar",
@@ -59,7 +66,13 @@ export interface SilenceDigest {
 type DigestBundle = Pick<
   BlindspotBundle,
   "cluster" | "dominantZone" | "votingZoneCounts"
->;
+> & {
+  /**
+   * Zones Jev matched with the same event (h106-blindspotbadges-1). Optional on
+   * purpose: a bundle without it is counted as it always was.
+   */
+  recallMatchedZones?: readonly MediaDnaZone[];
+};
 
 function emptyZoneTally(): Record<MediaDnaZone, number> {
   return { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
@@ -70,8 +83,10 @@ function emptyZoneTally(): Record<MediaDnaZone, number> {
  * Y is not the bundle's dominant zone AND `votingZoneCounts[Y] === 0`. Strict
  * zero: a single voting source from the zone means it is not silent.
  * Non-voting kinds are never counted, matching how the blindspot itself is
- * computed. Bundles are de-duplicated by cluster id (first occurrence wins);
- * one story can count in two rows.
+ * computed. A zone listed in the bundle's `recallMatchedZones` is skipped for
+ * that bundle only (see the RECALL note above); `windowTotal` is unchanged.
+ * Bundles are de-duplicated by cluster id (first occurrence wins); one story can
+ * count in two rows.
  */
 export function buildSilenceDigest(
   bundles: ReadonlyArray<DigestBundle>,
@@ -92,7 +107,11 @@ export function buildSilenceDigest(
     windowTotal += 1;
 
     for (const zone of ZONE_ROW_ORDER) {
-      if (zone !== bundle.dominantZone && bundle.votingZoneCounts[zone] === 0) {
+      if (
+        zone !== bundle.dominantZone &&
+        bundle.votingZoneCounts[zone] === 0 &&
+        !bundle.recallMatchedZones?.includes(zone)
+      ) {
         silent[zone][bundle.dominantZone] += 1;
       }
     }

@@ -794,7 +794,10 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
     return out;
   }
 
-  async function renderCard(bundle: ReturnType<typeof cardBundle>) {
+  // h106: a card may also carry the zones Jev matched (BlindspotBundle.recallMatchedZones).
+  async function renderCard(
+    bundle: ReturnType<typeof cardBundle> & { recallMatchedZones?: MediaDnaZone[] },
+  ) {
     getBlindspots.mockResolvedValueOnce(okResult([bundle]));
     const tree = await BlindspotsFeed();
     const cards = collectElements(tree).filter(
@@ -1006,6 +1009,145 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
       expect(text).not.toContain("Spektrumda");
       expect(text).not.toContain("Sadece");
       expect(text).not.toContain("toplayıcı");
+    });
+  });
+
+  // h106-blindspotbadges-1: "Sadece İktidar yazdı" is absolute. When the site's
+  // own Jev recall stage matched the silent zone with the same event (filed in
+  // another cluster: blindspot_recall_suspect), the fetcher hands the card the
+  // zones it matched (recallMatchedZones) and the chip says what THIS cluster
+  // shows. The claim stays public, the flag, the counts and the percent are
+  // untouched; with no matched zone every string is byte-identical to before.
+  describe("qualified claim when Jev matched the silent zone in another cluster (h106-blindspotbadges-1)", () => {
+    // Shaped like cluster 0746c9d2: nine İktidar voters, nobody else voting;
+    // Jev matched Yeniçağ and Elips Haber (Muhalefet) with the same event.
+    const IKTIDAR_9 = { iktidar: 9, bagimsiz: 0, muhalefet: 0 };
+    const IKTIDAR_9_DIST = { pro_government: 5, gov_leaning: 4 };
+    const matched = (zones: MediaDnaZone[], extra: Record<string, unknown> = {}) => ({
+      ...cardBundle(IKTIDAR_9, IKTIDAR_9_DIST),
+      recallMatchedZones: zones,
+      ...extra,
+    });
+    const SIDE_NOTE_RECALL =
+      '<span class="text-[11px] text-muted-foreground"><span class="font-mono">%100</span> tek tarafta · benzer haber başka kümede olabilir</span>';
+    const SIDE_NOTE_PLAIN =
+      '<span class="text-[11px] text-muted-foreground"><span class="font-mono">%100</span> tek tarafta</span>';
+
+    it("reads 'Kümede sadece İktidar' and ' tek tarafta · benzer haber başka kümede olabilir' for the 0746c9d2 shape", async () => {
+      const { html, text } = await renderCard(matched(["muhalefet"]));
+
+      expect(text).toContain("Kümede sadece İktidar");
+      expect(text).toContain("%100 tek tarafta · benzer haber başka kümede olabilir");
+      expect(html).toContain("Kümede sadece İktidar</span>");
+      expect(html).toContain(SIDE_NOTE_RECALL);
+      // The absolute claim is gone from the chip: Jev found a likely match.
+      expect(text).not.toContain("Sadece İktidar yazdı");
+      expect(text).not.toContain("yazdı");
+    });
+
+    it("the same fixture with no matched zone is exactly today's 'Sadece İktidar yazdı' and ' tek tarafta'", async () => {
+      const { html, text } = await renderCard(matched([]));
+
+      expect(text).toContain("Sadece İktidar yazdı");
+      expect(text).toContain("%100 tek tarafta");
+      expect(text).not.toContain("Kümede sadece");
+      expect(text).not.toContain("benzer haber");
+      expect(html).toContain("Sadece İktidar yazdı</span>");
+      expect(html).toContain(SIDE_NOTE_PLAIN);
+    });
+
+    it("a bundle that predates the field (a cache entry written before the deploy) renders as today", async () => {
+      const { html, text } = await renderCard(cardBundle(IKTIDAR_9, IKTIDAR_9_DIST));
+
+      expect(text).toContain("Sadece İktidar yazdı");
+      expect(html).toContain(SIDE_NOTE_PLAIN);
+      expect(text).not.toContain("benzer haber");
+    });
+
+    it("the markup differs from the unmatched card in the chip text and the side note only", async () => {
+      const plain = (await renderCard(matched([]))).html;
+      const qualified = (await renderCard(matched(["muhalefet"]))).html;
+
+      expect(qualified).toBe(
+        plain
+          .replace("Sadece İktidar yazdı</span>", "Kümede sadece İktidar</span>")
+          .replace(SIDE_NOTE_PLAIN, SIDE_NOTE_RECALL),
+      );
+    });
+
+    it("qualifies a Muhalefet-dominant card the same way", async () => {
+      const { text } = await renderCard({
+        ...cardBundle(
+          { iktidar: 0, bagimsiz: 0, muhalefet: 4 },
+          { opposition: 4 },
+          [],
+          "muhalefet",
+        ),
+        recallMatchedZones: ["iktidar"],
+      });
+
+      expect(text).toContain("Kümede sadece Muhalefet");
+      expect(text).not.toContain("Sadece Muhalefet yazdı");
+      expect(text).toContain("%100 tek tarafta · benzer haber başka kümede olabilir");
+    });
+
+    it("the toplayıcı/niş qualifier keeps the chip text; the recall phrase is appended to its side note", async () => {
+      const isciHaber = { id: "isci-haber", name: "isci-haber", bias: "opposition", logo_url: null, kind: "niche" };
+      const sources = [
+        ...Array.from({ length: 9 }, (_, i) => ({
+          id: `ik-${i}`,
+          name: `ik-${i}`,
+          bias: "pro_government",
+          logo_url: null,
+          kind: "outlet",
+        })),
+        isciHaber,
+      ];
+      const { text } = await renderCard({
+        ...cardBundle(IKTIDAR_9, IKTIDAR_9_DIST, sources),
+        recallMatchedZones: ["muhalefet"],
+      });
+
+      expect(text).toContain("Spektrumda sadece İktidar");
+      expect(text).not.toContain("Kümede sadece");
+      expect(text).toContain(
+        "%100 tek tarafta · +1 toplayıcı/niş kaynak (sayılmaz) · benzer haber başka kümede olabilir",
+      );
+      expect(text).not.toContain("yazdı");
+    });
+
+    it("leaves a card that does not claim 'only one side' alone, matched zones or not", async () => {
+      const { text } = await renderCard({
+        ...cardBundle(
+          { iktidar: 11, bagimsiz: 1, muhalefet: 0 },
+          { pro_government: 11, center: 1 },
+        ),
+        recallMatchedZones: ["muhalefet"],
+      });
+
+      expect(text).toContain("%92 İktidar");
+      expect(text).not.toContain("Kümede sadece");
+      expect(text).not.toContain("Sadece");
+      expect(text).not.toContain("benzer haber");
+      // The share chip's own side note ("%100 tek tarafta") is absent; the compact
+      // Denge chip beside it prints its tier word, which is not a share claim.
+      expect(text).not.toContain("%92 tek tarafta");
+    });
+
+    it("does not change the percent or the bar: still %100 and the same bar title", async () => {
+      const plain = await renderCard(matched([]));
+      const qualified = await renderCard(matched(["muhalefet"]));
+
+      expect(qualified.html).toContain("İktidar: 9 kaynak (%100)");
+      expect(qualified.text).toContain("%100");
+      expect(plain.html).toContain("İktidar: 9 kaynak (%100)");
+    });
+
+    it("keeps the copy to coverage, never motive (no 'görmezden', 'susuyor', 'sustu')", async () => {
+      const { text } = await renderCard(matched(["muhalefet"]));
+      for (const word of ["görmezden", "susuyor", "sustu", "yok sayd"]) {
+        expect(text).not.toContain(word);
+      }
     });
   });
 });
