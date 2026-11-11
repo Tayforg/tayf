@@ -4606,3 +4606,63 @@ select check_name, status, observed from public.ops_health_report()
 **Verify** (read-only, after applying): `md5(prosrc), length(prosrc)` of `'public.search_cluster_ids(text[], text, integer)'::regprocedure` is `53eddcee85dc444ef0e24ad7087f5b00`, 18894; `prosecdef` true, `provolatile` `s`, `has_function_privilege('anon', …, 'execute')` and `('authenticated', …)` false, `('service_role', …)` true, `proacl` `{postgres=X/postgres,service_role=X/postgres}`; `select version, name from supabase_migrations.schema_migrations where version = '194'` returns one row. Then, one request per second, `GET /?q=emekli%20maaşı` shows no row older than 60 days and the stories of the last two weeks that name the plural, `GET /?q=deprem` shows the six stories named above and at most 4 of the daily `Depremler. Deprem mi oldu?` rows in 24, `/?q=İmamoğlu` and `/?q=imamoglu` list the same stories in the same order; `explain (analyze)` of the body for `deprem` stays within +20% of 186's (about 49 ms).
 
 **Rollback:** re-run the function statement and the `comment on function` statement of `186_search_stem_fold_arm.sql` (restores `md5(prosrc)` `973e3707e98448b0385bd0402c039df3`, length 14850), then `delete from supabase_migrations.schema_migrations where version = '194'; notify pgrst, 'reload schema';`. 186's helper, index and arms are not involved, 083's two-argument function is not involved, and the app does not depend on 194.
+
+## 195 — ops row 15 (`cron_route_failures_30m`) can fail for the hourly `fact-checks` route and the weekly `digest`, and notices `fact-checks` going silent (`ops_health_report()`, function-only): APPLY 195, no app change, no deploy-order constraint
+
+**Numbering:** 195, not 194. 194 (`search_rank_display_title`, hunt-117) is taken by another branch. 195 copies `192`'s `ops_health_report()`, the newest re-creation and the body production runs, and depends on nothing else.
+
+**Why:** h118-crons-1 (hunt 118; production read-only, 2026-11-11 06:40-07:20 UTC). Row 15 fails only for a route with at least 2 failures that are at least half of its runs inside **30 minutes**. `fact-checks` runs hourly at :23 (168 rows in 7 days, the 167 gaps between them 59.9 to 60.1 minutes), so a 30 minute window never holds two of its runs, and the weekly `digest` has 1 row. A `fact-checks` route that answers 500 on every tick therefore reads at most `warn`, and a warn never pages: `scripts/lib/ops-heartbeat.mjs` `evaluate()` exits 1 only for a fail, a missed FAIL snapshot, the archive-gap row, an empty report or a half-unknown report. That route feeds the cluster page's "Bu konuda doğrulama" block through `cluster_fact_checks`. Nothing alerted on `fact-checks` going **silent** either: row 15's silence list held only `headline` (15 / 30 min) and `alerts-webhooks` (25 / 60 min), so if Vercel stopped invoking `fact-checks` (or killed every run at `maxDuration`, which writes no row) the row stayed `pass` as long as `headline` kept ticking. Production now: 0 route failures in 7 days (`fact-checks` 168 x 200, `social` 336 x 200, `digest` 1 x 200) except one `headline` 599 on 2026-11-06; the gap is latent and today's row reads `pass` before and after 195.
+
+**What 195 does** (function-only, one transaction, safe to re-apply): `create or replace function public.ops_health_report()` with **192's text byte for byte** (rows 1-14 and 16-22, the declare block, row 4's `BIAS_TO_ZONE` copy, row 17's seven-RPC allowlist; `returns table`, plpgsql, volatile, `SECURITY DEFINER`, `search_path = ''`; revoke from public, anon, authenticated and execute to `service_role` only) **except row 15**, the function comment's description of row 15 and its migration list (`... 173, 192, 195`). It creates, drops and alters nothing else: no table, column, index, policy, data, grant or pg_cron job. Row 15 keeps its name, threshold 1 and place; the 22 rows keep their names and order.
+
+| | before (192) | 195 |
+|---|---|---|
+| silence list | `headline` 15 / 30, `alerts-webhooks` 25 / 60 | plus `fact-checks` **130 / 250** minutes: warn after two missed hourly ticks, fail after four (only for a route that has a row within the 7 day retention) |
+| failure rule | >= 2 failures, at least half the runs, 30 minutes, every route | the same, unchanged (`headline`, `alerts-webhooks` keep it and their gaps exactly) |
+| streak rule | none | `fact-checks`, `social`, `digest`: each route's newest **two** rows within 7 days. Both status >= 500: `fail`. Only the newest >= 500: `warn`, even when that row is older than 30 minutes. A newer success clears an older failure |
+| detail | `son 30 dakikada ...` then ` · kayıt gelmiyor: route n dk` | the same, then ` · ardışık başarısız: fact-checks 2/2` (or `1/2`; worst streak first): route names and counts only, the Actions log is public |
+| `observed` | failures in 30 min + silent routes | plus the routes with a streak (a failure inside the 30 minute window is seen by both rules and counts in both) |
+| empty window | `son 30 dakikada cron rotası kaydı yok` (warn) | unchanged, unless a low-cadence route has a streak: then its fail or warn shows |
+
+**Consequence to know:** a streak of 2 is a `fail` until a newer success or until the failing rows leave `ops_cron_route_runs` (7 day retention, pruned 04:17 UTC). For `fact-checks` and `social` the next healthy tick clears it; `digest` runs Saturday and Sunday 06:00 UTC, so two failing weekend runs keep row 15 failing (and the heartbeat exiting 1) until the next weekend's success or seven days. `social` (daytime only, 05:00-20:59 UTC) and `digest` (weekly) are **not** silence-listed: a gap rule would warn every night or week.
+
+**Function fingerprint** (`md5(prosrc)`, `length(prosrc)`):
+
+| | md5 | length |
+|---|---|---|
+| production before 195 (read-only, 2026-11-11 06:40 UTC) = the body of 192 | `a2252c75458b9d86a0a536b589d97ceb` | 52463 |
+| after 195 | `52072a51a208b77e1cae577db8a22ff1` | 55271 |
+
+`tests/migrations/195-ops-cron-route-low-cadence.test.ts` pins 192's body to the production fingerprint, the byte-for-byte copy outside row 15, the unchanged 30 minute and silence CTEs, the silence list and the route list, the grants, and (live, `TAYF_PSQL`) the cases below against 192's text run side by side; `tests/guards/ops-health-checks.test.ts` keeps the silence gaps at two and four ticks of `vercel.ts`'s schedule.
+
+**Replay** (read-only, 2026-11-11 07:00-07:20 UTC; the new row's CTEs as plain SELECTs with `now()` for `v_now`, over production's `ops_cron_route_runs` of the last 7 days; OLD is 192's rule):
+
+| rows | OLD | NEW |
+|---|---|---|
+| today's data (newest `fact-checks` 06:23Z) | pass, 0, `son 30 dakikada 11 çalışma, başarısız yok` | the same |
+| synthetic: `headline` 6 and `alerts-webhooks` 3 healthy, one `fact-checks` 500 at 23 min | warn 1 | warn 2, `... fact-checks 1/1 · ardışık başarısız: fact-checks 1/2` |
+| `fact-checks` 500 at 23 and 83 min | warn 1 | **fail** 2, `... · ardışık başarısız: fact-checks 2/2` |
+| `fact-checks` 500 at 45 and 105 min | pass 0 | **fail** 1, `son 30 dakikada 9 çalışma, başarısız yok · ardışık başarısız: fact-checks 2/2` |
+| `fact-checks` 500 at 45 min, 200 at 105 min | pass 0 | warn 1, `... · ardışık başarısız: fact-checks 1/2` |
+| one `fact-checks` 200 at 131 min / 260 min / 300 min (a 5 h silence) | pass 0 | warn / **fail** / **fail**, `... · kayıt gelmiyor: fact-checks 131 dk` (260, 300) |
+| 200 at 23 and 83 min (healthy) | pass 0 | pass 0 |
+
+**Order:** apply `195_ops_cron_route_low_cadence.sql` (the founder, through the normal migration flow: `supabase db push`, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/195_ops_cron_route_low_cadence.sql`). No app change, no Edge Function deploy, no Vercel change; the next 30 minute heartbeat run and the 10 minute snapshot read the new row, which stays `pass` on today's data.
+
+**Verify** (read-only, after applying):
+
+```sql
+select check_name, status, observed, detail from public.ops_health_report() where check_name = 'cron_route_failures_30m';
+-- pass, 0, 'son 30 dakikada N çalışma, başarısız yok' (as before applying)
+select count(*) from public.ops_health_report();    -- 22
+select md5(p.prosrc), length(p.prosrc) from pg_proc p where p.oid = 'public.ops_health_report()'::regprocedure;
+-- 52072a51a208b77e1cae577db8a22ff1, 55271
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('service_role', 'public.ops_health_report()', 'execute');   -- f, f, t
+select route, count(*), max(ran_at) from public.ops_cron_route_runs
+ where ran_at >= now() - interval '7 days' group by route order by route;   -- fact-checks: newest row under 130 minutes old
+select version, name from supabase_migrations.schema_migrations where version = '195';   -- 1 row
+```
+
+**Rollback** (nothing else depends on 195; one transaction): re-run the `ops_health_report()` section of `192_saved_clusters_v4.sql` (its `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;`; it restores `md5(prosrc)` `a2252c75458b9d86a0a536b589d97ceb`, length 52463), then `notify pgrst, 'reload schema';` and `delete from supabase_migrations.schema_migrations where version = '195';`. The rollback removes the `fact-checks` gap and the streak rule; no table, cron job or data is touched in either direction.

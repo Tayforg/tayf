@@ -1,6 +1,7 @@
 import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import { renderSpectrumBadgeSvg } from "@/lib/cards/badge-svg";
+import { isLanguageIsolatedCluster } from "@/lib/sources/source-language";
 
 // /rozet/<uuid>.svg — embeddable "Yelpaze rozeti". `file` is parsed by a
 // fully anchored regex plus a strict UUID check before any DB access (same
@@ -55,6 +56,10 @@ export async function GET(_req: Request, { params }: RouteContext): Promise<Resp
   const svg = renderSpectrumBadgeSvg({
     zones: zoneCountsOf(detail.cluster.bias_distribution),
     sourceCount: detail.wire.effectiveArticleCount,
+    // h118-shares-1: the cluster page's own predicate. An all-English cluster's
+    // badge carries the "not compared with Turkish sources" qualifier; the SVG
+    // still holds only counts and fixed strings.
+    languageIsolated: isLanguageIsolatedCluster(detail.members.map((m) => m.source)),
   });
   return new Response(svg, { status: 200, headers: OK_HEADERS });
 }

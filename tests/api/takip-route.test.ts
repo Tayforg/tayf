@@ -35,6 +35,9 @@ vi.mock("@/lib/entities/entity-hub-query", () => ({
   getEntityHub: (key: string) => getEntityHubMock(key),
 }));
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { GET } from "@/app/api/takip/route";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
@@ -66,6 +69,10 @@ interface BundleOpts {
   kinds?: Array<string | null | undefined>;
   firstPublished?: string;
   updatedAt?: string;
+  /** Per-source display name, aligned with `biases` by index; omitted = 'Kaynak i'. */
+  names?: string[];
+  /** Member articles, each pointing at a source index (h118-english-1). */
+  articles?: Array<{ title: string; source: number; sourceName?: string }>;
 }
 
 function bundle(o: BundleOpts) {
@@ -81,10 +88,17 @@ function bundle(o: BundleOpts) {
       first_published: o.firstPublished ?? "2026-10-22T08:00:00+00:00",
       updated_at: o.updatedAt ?? "2026-10-22T09:30:00+00:00",
     },
-    articles: [],
+    articles: (o.articles ?? []).map((a, i) => ({
+      id: `a${i}`,
+      title: a.title,
+      url: `https://example.test/${o.id}/${i}`,
+      published_at: "2026-10-22T08:00:00+00:00",
+      source_id: `s${a.source}`,
+      ...(a.sourceName !== undefined ? { source_name: a.sourceName } : {}),
+    })),
     sources: (o.biases ?? ["center"]).map((bias, i) => ({
       id: `s${i}`,
-      name: `Kaynak ${i}`,
+      name: o.names?.[i] ?? `Kaynak ${i}`,
       bias,
       ...(o.kinds !== undefined ? { kind: o.kinds[i] } : {}),
     })),
@@ -682,6 +696,224 @@ describe("GET /api/takip -- item shape", () => {
       items: Array<{ id: string; isBlindspot: boolean }>;
     };
     expect(body.items.map((i) => i.isBlindspot)).toEqual([false, false, true]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h118-english-1 (WCAG 3.1.2 and the "not compared" wording). 2dab7e87 is an
+// all-English cluster (Daily Sabah + TRT World): /api/takip printed its English
+// title with no lang, and the zone line 'İktidar 2 · Bağımsız 0 · Muhalefet 0',
+// which reads as a coverage claim although no Turkish outlet could have matched
+// the story. The item now carries lang 'en' (the ClusterCard / related-clusters
+// headline rule: an English member's own title, no Turkish member with the same
+// title) and an all-English cluster's zone line says it was not compared. Both
+// keys are absent / unchanged for every Turkish and mixed item.
+// ---------------------------------------------------------------------------
+describe("GET /api/takip -- English-only clusters (h118-english-1)", () => {
+  const EN_TITLE = "Turkish president Erdoğan, UN chief Guterres discuss regional, global issues at COP31";
+  const QUALIFIED_ZONE_LINE =
+    "Yalnızca İngilizce kaynaklar · Türkçe haberlerle karşılaştırılmadı";
+
+  type Item = {
+    id: string;
+    title: string;
+    zoneLine: string;
+    countHead: string;
+    lang?: string;
+  };
+
+  async function itemFor(b: ReturnType<typeof bundle>, search = "?q=Guterres"): Promise<Item> {
+    searchClustersMock.mockResolvedValue({ ok: true, bundles: [b] });
+    const res = await call(search);
+    const body = (await res.json()) as { items: Item[] };
+    return body.items[0] as Item;
+  }
+
+  function englishBundle(extra: Partial<BundleOpts> = {}) {
+    return bundle({
+      id: "2dab7e87",
+      title: EN_TITLE,
+      articleCount: 2,
+      biases: ["pro_government", "pro_government"],
+      names: ["Daily Sabah", "TRT World"],
+      articles: [
+        { title: EN_TITLE, source: 0 },
+        { title: "Erdogan, Guterres discuss regional, global issues at COP31", source: 1 },
+      ],
+      ...extra,
+    });
+  }
+
+  it("an all-English bundle gets lang 'en' and the qualified zone line; the count head is unchanged", async () => {
+    const item = await itemFor(englishBundle());
+
+    expect(item.lang).toBe("en");
+    expect(item.zoneLine).toBe(QUALIFIED_ZONE_LINE);
+    expect(item.countHead).toBe("2 kaynak");
+    expect(item.title).toBe(EN_TITLE);
+  });
+
+  it("a mixed bundle with a Turkish title has no lang key and today's zone line", async () => {
+    const item = await itemFor(
+      bundle({
+        id: "mixed-tr",
+        title: "Cumhurbaşkanı Erdoğan, Guterres ile görüştü",
+        articleCount: 2,
+        biases: ["pro_government", "pro_government"],
+        names: ["Daily Sabah", "A Haber"],
+        articles: [
+          { title: EN_TITLE, source: 0 },
+          { title: "Cumhurbaşkanı Erdoğan, Guterres ile görüştü", source: 1 },
+        ],
+      }),
+    );
+
+    expect("lang" in item).toBe(false);
+    expect(item.zoneLine).toBe("İktidar 2 · Bağımsız 0 · Muhalefet 0");
+  });
+
+  it("a Turkish bundle is byte-identical to before: same keys, no lang", async () => {
+    const item = await itemFor(
+      bundle({
+        id: "tr-1",
+        articleCount: 3,
+        biases: ["pro_government", "center", "opposition"],
+        names: ["A Haber", "Sözcü", "Halk TV"],
+        articles: [{ title: "Başlık tr-1", source: 1 }],
+      }),
+    );
+
+    expect(Object.keys(item).sort()).toEqual(
+      ["countHead", "firstPublished", "id", "isBlindspot", "sourceCount", "title", "updatedAt", "zoneLine"].sort(),
+    );
+    expect(item.zoneLine).toBe("İktidar 1 · Bağımsız 1 · Muhalefet 1");
+  });
+
+  it("a mixed bundle whose title IS the English member's own title gets lang 'en' but keeps today's zone line", async () => {
+    // The home card's rule (h59-english-2): an English member's title is the
+    // headline and no Turkish member carries it too. The cluster is not isolated.
+    const item = await itemFor(
+      bundle({
+        id: "mixed-en",
+        title: EN_TITLE,
+        articleCount: 2,
+        biases: ["pro_government", "pro_government"],
+        names: ["Daily Sabah", "A Haber"],
+        articles: [
+          { title: EN_TITLE, source: 0 },
+          { title: "Cumhurbaşkanı Erdoğan, Guterres ile görüştü", source: 1 },
+        ],
+      }),
+    );
+
+    expect(item.lang).toBe("en");
+    expect(item.zoneLine).toBe("İktidar 2 · Bağımsız 0 · Muhalefet 0");
+  });
+
+  it("a Turkish member carrying the same title vetoes lang", async () => {
+    const item = await itemFor(
+      bundle({
+        id: "veto",
+        title: "Aynı başlık",
+        articleCount: 2,
+        biases: ["pro_government", "pro_government"],
+        names: ["Daily Sabah", "A Haber"],
+        articles: [
+          { title: "Aynı başlık", source: 0 },
+          { title: "Aynı başlık", source: 1 },
+        ],
+      }),
+    );
+
+    expect("lang" in item).toBe(false);
+  });
+
+  it("an all-English cluster whose headline is not any member's own title (a rewrite) gets the zone line but no lang", async () => {
+    const item = await itemFor(
+      englishBundle({ title: "Erdoğan ve Guterres COP31'de bir araya geldi" }),
+    );
+
+    expect("lang" in item).toBe(false);
+    expect(item.zoneLine).toBe(QUALIFIED_ZONE_LINE);
+  });
+
+  it("an article's own source_name stands in for a source the bundle does not list", async () => {
+    const b = englishBundle({
+      articles: [
+        { title: EN_TITLE, source: 0, sourceName: "Daily Sabah" },
+        { title: "Other", source: 5, sourceName: "TRT World" },
+      ],
+    });
+    const item = await itemFor(b);
+
+    expect(item.lang).toBe("en");
+  });
+
+  it("a headline that differs from its member title only by an entity residue still matches", async () => {
+    const item = await itemFor(
+      englishBundle({
+        title: "Türkiye &amp; Azerbaijan sign deals",
+        articles: [
+          { title: "Türkiye & Azerbaijan sign deals", source: 0 },
+          { title: "Other", source: 1 },
+        ],
+      }),
+    );
+
+    expect(item.lang).toBe("en");
+    // The title itself is printed exactly as stored.
+    expect(item.title).toBe("Türkiye &amp; Azerbaijan sign deals");
+  });
+
+  it("a bundle with no sources is never isolated", async () => {
+    const b = englishBundle();
+    const empty = { ...b, sources: [] };
+    searchClustersMock.mockResolvedValue({ ok: true, bundles: [empty] });
+    const res = await call("?q=Guterres");
+    const body = (await res.json()) as { items: Item[] };
+
+    expect(body.items[0]?.zoneLine).toBe("İktidar 0 · Bağımsız 0 · Muhalefet 0");
+    expect("lang" in (body.items[0] as object)).toBe(false);
+  });
+
+  it("the topic and hub paths mark an English-only cluster the same way", async () => {
+    getTopicClustersMock.mockResolvedValue({
+      bundles: [englishBundle()],
+      hasMore: false,
+      page: 1,
+    });
+    const topic = (await (await call("?konu=dunya")).json()) as { items: Item[] };
+    expect(topic.items[0]?.lang).toBe("en");
+    expect(topic.items[0]?.zoneLine).toBe(QUALIFIED_ZONE_LINE);
+
+    const key = RISING_ENTITIES[0]?.key as string;
+    getEntityHubMock.mockResolvedValue({ bundles: [englishBundle()], total: 1, asOfMs: 0 });
+    const hub = (await (await call(`?gundem=${encodeURIComponent(key)}`)).json()) as {
+      items: Item[];
+    };
+    expect(hub.items[0]?.lang).toBe("en");
+    expect(hub.items[0]?.zoneLine).toBe(QUALIFIED_ZONE_LINE);
+  });
+
+  it("the qualifier carries no coverage number, and the count head still counts every member", async () => {
+    const item = await itemFor(
+      englishBundle({ articleCount: 4, biases: ["pro_government", "pro_government"] }),
+    );
+
+    expect(item.zoneLine).not.toMatch(/İktidar|Bağımsız|Muhalefet/);
+    expect(item.countHead).toBe("4 kaynak (2 sınıflandırılmış)");
+  });
+
+  it("source guard: the route keeps no literal of the English-only wording (it reads ENGLISH_ONLY_ZONE_LINE from source-language.ts)", () => {
+    const source = readFileSync(
+      resolve(__dirname, "../../src/app/api/takip/route.ts"),
+      "utf8",
+    );
+    expect(source).not.toContain("Yalnızca İngilizce");
+    expect(source).not.toContain("karşılaştırılmadı");
+    const sourceLanguageImport =
+      /import\s*\{([^}]*)\}\s*from\s*"@\/lib\/sources\/source-language"/.exec(source);
+    expect(sourceLanguageImport?.[1]).toContain("ENGLISH_ONLY_ZONE_LINE");
   });
 });
 

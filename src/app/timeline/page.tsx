@@ -39,6 +39,10 @@ export const metadata: Metadata = staticPageMetadata({
 // written one yet, the cron's own first pick over the member titles
 // (h76-timeline-2). A fresh cluster is therefore never listed under its raw
 // ALL-CAPS outlet headline, and the list agrees with the cluster page's H1.
+// A row whose cluster has only English-language outlets as members carries
+// `lang="en"` on its headline link (WCAG 3.1.2; getRecentClusters marks it, see
+// h118-english-1), unless its title is an LLM rewrite, which is Turkish and gets
+// no lang; every other row inherits the document's lang="tr".
 //
 // Caching: the route is static (cacheComponents allows no segment `revalidate`).
 // Its data comes from the "use cache" entry in getRecentClusters: cacheLife
@@ -194,6 +198,7 @@ export default async function TimelinePage() {
                     </time>
                     <Link
                       href={`/cluster/${row.id}`}
+                      lang={row.lang}
                       className="min-w-0 flex-1 text-sm font-medium leading-snug hover:text-foreground sm:line-clamp-2 max-sm:order-last max-sm:basis-full max-sm:line-clamp-4"
                     >
                       {row.title}

@@ -30,6 +30,7 @@ function detail(over: {
   blindspotSide?: BiasCategory | null;
   sourceCount?: number;
   members?: ClusterDetailMember[];
+  titleMethod?: ClusterDetail["cluster"]["title_method"];
   /** Omitted: the field is absent, like a cache entry written before it existed. */
   recallMatchedZones?: MediaDnaZone[];
 }): ClusterDetail {
@@ -38,7 +39,7 @@ function detail(over: {
       id: ID,
       title_tr: over.title ?? "Merkez Bankası faizi sabit tuttu",
       title_original: null,
-      title_method: null,
+      title_method: over.titleMethod ?? null,
       summary_tr: "özet",
       article_count: 4,
       bias_distribution: over.distribution ?? dist({ pro_government: 2, center: 1, opposition: 1 }),
@@ -975,5 +976,300 @@ describe("renderEmbedMessageHtml", () => {
     const evil = renderEmbedMessageHtml("<script>alert(1)</script>");
     expect(evil).not.toMatch(/<script/i);
     expect(evil).toContain("&lt;script&gt;");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h118-shares-1: an all-English cluster (92742df8: daily-sabah, hurriyet-daily-news,
+// trt-world, 3 sources, pro_government 2 / gov_leaning 1) embedded as a bare
+// <h1>Türkiye remembers Atatürk ...</h1> over "İktidar %100 · Bağımsız %0 ·
+// Muhalefet %0 · 3 kaynak", the zone-absence claim its own page does not make, and
+// the English headline had no lang="en". The qualifier is the page's; the bar stays.
+// ---------------------------------------------------------------------------
+describe("embed of an all-English cluster (h118-shares-1)", () => {
+  const CLAUSE = "Yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı";
+  const ARIA = "Yalnızca İngilizce kaynaklar; Türkçe haberlerle karşılaştırılmadı";
+
+  // Mirrors 92742df8: the headline is the trt-world member's own title.
+  const TRT = memberOf("trt-world", "outlet", "pro_government");
+  const ISO_TITLE = TRT.article.title;
+  const ISO_MEMBERS = [
+    memberOf("daily-sabah", "outlet", "pro_government"),
+    memberOf("hurriyet-daily-news", "outlet", "gov_leaning"),
+    TRT,
+  ];
+  const ISO_DIST = dist({ pro_government: 2, gov_leaning: 1 });
+  // Mirrors 2dab7e87.
+  const ISO2_MEMBERS = [memberOf("a-news", "outlet", "pro_government"), memberOf("trt-world", "outlet", "pro_government")];
+  const withTitle = (m: ClusterDetailMember, title: string): ClusterDetailMember => ({
+    ...m,
+    article: { ...m.article, title },
+  });
+
+  const iso = (over: Parameters<typeof detail>[0] = {}) =>
+    detail({
+      title: ISO_TITLE,
+      titleMethod: "extractive",
+      distribution: ISO_DIST,
+      sourceCount: 3,
+      members: ISO_MEMBERS,
+      ...over,
+    });
+  const htmlOf = (d: ClusterDetail) => renderEmbedHtml(buildEmbedModel(d, ORIGIN));
+  const legendOfHtml = (html: string) => html.match(/<p class="l">([^<]*)<\/p>/)![1]!;
+  const ariaOfHtml = (html: string) => html.match(/role="img" aria-label="([^"]*)"/)![1]!;
+  const h1OfHtml = (html: string) => html.match(/<h1[^>]*>[^<]*<\/h1>/)![0];
+
+  describe("buildEmbedModel", () => {
+    it("flags the cluster isolated and marks its extractive English headline 'en'", () => {
+      const m = buildEmbedModel(iso(), ORIGIN);
+      expect(m.languageIsolated).toBe(true);
+      expect(m.headlineLang).toBe("en");
+    });
+
+    it("2dab7e87: a-news + trt-world is isolated too", () => {
+      const m = buildEmbedModel(
+        detail({ title: "Erdogan, Guterres discuss regional issues", titleMethod: "extractive", distribution: dist({ pro_government: 2 }), sourceCount: 2, members: ISO2_MEMBERS }),
+        ORIGIN,
+      );
+      expect(m.languageIsolated).toBe(true);
+      expect(m.headlineLang).toBe("en");
+    });
+
+    it("title_method null (a pre-method row) counts as the member's own title: 'en'", () => {
+      expect(buildEmbedModel(iso({ titleMethod: null }), ORIGIN).headlineLang).toBe("en");
+    });
+
+    it("the LLM rewrite is Turkish text: no headline lang, but the cluster is still isolated", () => {
+      const m = buildEmbedModel(iso({ titleMethod: "llm" }), ORIGIN);
+      expect(m.headlineLang).toBeUndefined();
+      expect(m.languageIsolated).toBe(true);
+    });
+
+    it("the KVKK generic fallback is not the cluster's own title: no headline lang", () => {
+      const m = buildEmbedModel(iso({ title: "17 yaşındaki genç tutuklandı" }), ORIGIN);
+      expect(m.title).toBe(EMBED_GENERIC_TITLE);
+      expect(m.headlineLang).toBeUndefined();
+      expect(m.languageIsolated).toBe(true);
+    });
+
+    it("a contentless title shown as 'Haber' is not English text either", () => {
+      const m = buildEmbedModel(iso({ title: "&nbsp" }), ORIGIN);
+      expect(m.title).toBe(NO_HEADLINE_TITLE);
+      expect(m.headlineLang).toBeUndefined();
+    });
+
+    it("an empty title falls back to the generic heading: no headline lang", () => {
+      const m = buildEmbedModel(iso({ title: "   " }), ORIGIN);
+      expect(m.title).toBe(EMBED_GENERIC_TITLE);
+      expect(m.headlineLang).toBeUndefined();
+    });
+
+    it("decides on the FULL stored title, not the truncated model title", () => {
+      // The English headline is longer than EMBED_TITLE_MAX: the model title is cut with an
+      // ellipsis, and only the full stored title equals the English member's own.
+      const long = `${"Turkish president Erdogan and UN chief Guterres discuss regional and global issues ".repeat(3)}at COP31`;
+      expect(long.length).toBeGreaterThan(EMBED_TITLE_MAX);
+      const mixed = [
+        withTitle(memberOf("a-haber", "outlet", "pro_government"), "Türkçe bir başlık"),
+        withTitle(memberOf("daily-sabah", "outlet", "pro_government"), long),
+      ];
+      const m = buildEmbedModel(
+        detail({ title: long, titleMethod: "extractive", distribution: dist({ pro_government: 2 }), sourceCount: 2, members: mixed }),
+        ORIGIN,
+      );
+      expect(m.title.endsWith("…")).toBe(true);
+      expect(m.languageIsolated).toBe(false);
+      expect(m.headlineLang).toBe("en");
+    });
+
+    it("a mixed cluster whose headline is an English member's own title takes the page's rule: 'en', not isolated", () => {
+      const tr = memberOf("a-haber", "outlet", "pro_government");
+      const en = memberOf("daily-sabah", "outlet", "pro_government");
+      const m = buildEmbedModel(
+        detail({ title: en.article.title, titleMethod: "extractive", distribution: dist({ pro_government: 2 }), sourceCount: 2, members: [tr, en] }),
+        ORIGIN,
+      );
+      expect(m.languageIsolated).toBe(false);
+      expect(m.headlineLang).toBe("en");
+    });
+
+    it("a mixed cluster with a Turkish headline: no headline lang, not isolated", () => {
+      const m = buildEmbedModel(
+        detail({
+          distribution: dist({ pro_government: 2 }),
+          sourceCount: 2,
+          members: [memberOf("a-haber", "outlet", "pro_government"), memberOf("daily-sabah", "outlet", "pro_government")],
+        }),
+        ORIGIN,
+      );
+      expect(m.languageIsolated).toBe(false);
+      expect(m.headlineLang).toBeUndefined();
+    });
+
+    it("a detail with no members is neither isolated nor English", () => {
+      const m = buildEmbedModel(detail({}), ORIGIN);
+      expect(m.languageIsolated).toBe(false);
+      expect(m.headlineLang).toBeUndefined();
+    });
+  });
+
+  describe("renderEmbedHtml", () => {
+    it('92742df8: <h1 lang="en"> over the new legend and aria-label, with the bar and the Turkish document language kept', () => {
+      const html = htmlOf(iso());
+      expect(h1OfHtml(html)).toBe(`<h1 lang="en">${escapeHtml(ISO_TITLE)}</h1>`);
+      expect(legendOfHtml(html)).toBe(`${CLAUSE} · 3 kaynak`);
+      expect(ariaOfHtml(html)).toBe(ARIA);
+      // The bar is the cluster's own and stays.
+      expect(html).toContain('<span class="zi" style="width:100%"></span>');
+      // The legend and the link are Turkish: the document language does not change.
+      expect(html.startsWith('<!doctype html><html lang="tr">')).toBe(true);
+      expect(html).not.toContain("İktidar %");
+      expect(html).not.toContain("Bağımsız %");
+    });
+
+    it("the lang attribute sits on the <h1> only", () => {
+      expect(htmlOf(iso()).match(/lang="en"/g)).toHaveLength(1);
+    });
+
+    it("2dab7e87: two sources", () => {
+      const html = htmlOf(
+        detail({ title: "Erdogan, Guterres discuss regional issues", titleMethod: "extractive", distribution: dist({ pro_government: 2 }), sourceCount: 2, members: ISO2_MEMBERS }),
+      );
+      expect(legendOfHtml(html)).toBe(`${CLAUSE} · 2 kaynak`);
+      expect(h1OfHtml(html)).toBe('<h1 lang="en">Erdogan, Guterres discuss regional issues</h1>');
+    });
+
+    it("the legend keeps the classified-basis head when fewer sources voted than wrote", () => {
+      const html = htmlOf(iso({ sourceCount: 4 }));
+      expect(legendOfHtml(html)).toBe(`${CLAUSE} · 4 kaynak (3 sınıflandırılmış)`);
+    });
+
+    it("title_method 'llm' gives a bare <h1> (the rewrite is Turkish) under the same legend", () => {
+      const html = htmlOf(iso({ title: "Atatürk 88. ölüm yıl dönümünde anıldı", titleMethod: "llm" }));
+      expect(h1OfHtml(html)).toBe("<h1>Atatürk 88. ölüm yıl dönümünde anıldı</h1>");
+      expect(legendOfHtml(html)).toBe(`${CLAUSE} · 3 kaynak`);
+    });
+
+    it("the generic fallback gives a bare <h1>", () => {
+      expect(h1OfHtml(htmlOf(iso({ title: "SANIK hakkında karar" })))).toBe(`<h1>${EMBED_GENERIC_TITLE}</h1>`);
+    });
+
+    it("the contentless 'Haber' gives a bare <h1>", () => {
+      expect(h1OfHtml(htmlOf(iso({ title: "&nbsp" })))).toBe("<h1>Haber</h1>");
+    });
+
+    it("escapes the English headline inside the lang-tagged <h1>", () => {
+      const html = htmlOf(iso({ title: '"><script>alert(1)</script>' }));
+      expect(html).not.toMatch(/<script/i);
+      expect(h1OfHtml(html).startsWith('<h1 lang="en">')).toBe(true);
+    });
+
+    it("never prints a percent in the legend, and the layout block is untouched", () => {
+      const html = htmlOf(iso());
+      expect(legendOfHtml(html)).not.toContain("%");
+      const style = (doc: string) => doc.match(/<style>([\s\S]*?)<\/style>/)![1];
+      expect(style(html)).toBe(style(htmlOf(detail({}))));
+    });
+
+    it("an isolated cluster with nothing voting keeps its 'henüz sınıflandırılmış kaynak yok' legend, and the aria-label names the qualifier", () => {
+      const html = htmlOf(
+        iso({
+          distribution: dist(),
+          sourceCount: 2,
+          members: [memberOf("mfa-turkey", "niche", "center"), memberOf("a-news", "niche", "center")],
+        }),
+      );
+      expect(legendOfHtml(html)).toBe("Bu haberde henüz sınıflandırılmış kaynak yok · 2 kaynak");
+      expect(ariaOfHtml(html)).toBe(ARIA);
+    });
+
+    it("a flagged isolated cluster's ribbon reads 'kümede sadece iktidar', never 'sadece iktidar yazdı'", () => {
+      const html = htmlOf(
+        iso({ distribution: dist({ pro_government: 3 }), isBlindspot: true, blindspotSide: "pro_government" }),
+      );
+      expect(html).toContain('<div class="r">Kör nokta: kümede sadece iktidar</div>');
+      expect(html).not.toContain("yazdı");
+    });
+
+    it("a flagged isolated cluster with a toplayıcı / niş source in another zone keeps 'spektrumda sadece'", () => {
+      const html = htmlOf(
+        iso({
+          distribution: dist({ pro_government: 2 }),
+          isBlindspot: true,
+          blindspotSide: "pro_government",
+          members: [
+            memberOf("daily-sabah", "outlet", "pro_government"),
+            memberOf("trt-world", "outlet", "pro_government"),
+            memberOf("mfa-turkey", "niche", "opposition"),
+          ],
+        }),
+      );
+      expect(html).toContain('<div class="r">Kör nokta: spektrumda sadece iktidar</div>');
+    });
+  });
+
+  // The controls: HTML captured from the code as it was BEFORE h118-shares-1
+  // (6c49f9c), with the shared <style> block elided. They must stay byte-identical.
+  describe("controls stay byte-identical", () => {
+    const withoutStyle = (html: string) => html.replace(/<style>[\s\S]*?<\/style>/, "<style>STYLE</style>");
+    const GOLDEN_TURKISH = "<!doctype html><html lang=\"tr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"robots\" content=\"noindex,nofollow\"><title>Merkez Bankası faizi sabit tuttu · Tayf</title><style>STYLE</style></head><body><div class=\"c\"><div class=\"b\">TAYF · Aynı haber, farklı dünyalar</div><h1>Merkez Bankası faizi sabit tuttu</h1><div class=\"bar\" role=\"img\" aria-label=\"İktidar %100, Bağımsız %0, Muhalefet %0\"><span class=\"zi\" style=\"width:100%\"></span><span class=\"zb\" style=\"width:0%\"></span><span class=\"zm\" style=\"width:0%\"></span></div><p class=\"l\">İktidar %100 · Bağımsız %0 · Muhalefet %0 · 3 kaynak</p><a class=\"a\" href=\"https://tayf.test/cluster/3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b?utm_source=embed&amp;utm_medium=iframe&amp;utm_campaign=cluster\" target=\"_blank\" rel=\"noopener\">tayfhaber.com'da oku →<span class=\"v\"> (yeni sekmede açılır)</span></a></div></body></html>";
+    const GOLDEN_MIXED = "<!doctype html><html lang=\"tr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"robots\" content=\"noindex,nofollow\"><title>Merkez Bankası faizi sabit tuttu · Tayf</title><style>STYLE</style></head><body><div class=\"c\"><div class=\"b\">TAYF · Aynı haber, farklı dünyalar</div><h1>Merkez Bankası faizi sabit tuttu</h1><div class=\"bar\" role=\"img\" aria-label=\"İktidar %100, Bağımsız %0, Muhalefet %0\"><span class=\"zi\" style=\"width:100%\"></span><span class=\"zb\" style=\"width:0%\"></span><span class=\"zm\" style=\"width:0%\"></span></div><p class=\"l\">İktidar %100 · Bağımsız %0 · Muhalefet %0 · 2 kaynak</p><a class=\"a\" href=\"https://tayf.test/cluster/3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b?utm_source=embed&amp;utm_medium=iframe&amp;utm_campaign=cluster\" target=\"_blank\" rel=\"noopener\">tayfhaber.com'da oku →<span class=\"v\"> (yeni sekmede açılır)</span></a></div></body></html>";
+    const GOLDEN_NON_VOTING = "<!doctype html><html lang=\"tr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"robots\" content=\"noindex,nofollow\"><title>Merkez Bankası faizi sabit tuttu · Tayf</title><style>STYLE</style></head><body><div class=\"c\"><div class=\"b\">TAYF · Aynı haber, farklı dünyalar</div><h1>Merkez Bankası faizi sabit tuttu</h1><div class=\"bar\" role=\"img\" aria-label=\"Sınıflandırılmış kaynak yok\"><span class=\"zi\" style=\"width:0%\"></span><span class=\"zb\" style=\"width:0%\"></span><span class=\"zm\" style=\"width:0%\"></span></div><p class=\"l\">Bu haberde henüz sınıflandırılmış kaynak yok · 2 kaynak</p><a class=\"a\" href=\"https://tayf.test/cluster/3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b?utm_source=embed&amp;utm_medium=iframe&amp;utm_campaign=cluster\" target=\"_blank\" rel=\"noopener\">tayfhaber.com'da oku →<span class=\"v\"> (yeni sekmede açılır)</span></a></div></body></html>";
+    const GOLDEN_RECALL = "<!doctype html><html lang=\"tr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"robots\" content=\"noindex,nofollow\"><title>Merkez Bankası faizi sabit tuttu · Tayf</title><style>STYLE</style></head><body><div class=\"c\"><div class=\"b\">TAYF · Aynı haber, farklı dünyalar</div><div class=\"r\">Kör nokta: kümede sadece iktidar</div><h1>Merkez Bankası faizi sabit tuttu</h1><div class=\"bar\" role=\"img\" aria-label=\"İktidar %100, Bağımsız %0, Muhalefet %0\"><span class=\"zi\" style=\"width:100%\"></span><span class=\"zb\" style=\"width:0%\"></span><span class=\"zm\" style=\"width:0%\"></span></div><p class=\"l\">İktidar %100 · Bağımsız %0 · Muhalefet %0 · 9 kaynak</p><a class=\"a\" href=\"https://tayf.test/cluster/3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b?utm_source=embed&amp;utm_medium=iframe&amp;utm_campaign=cluster\" target=\"_blank\" rel=\"noopener\">tayfhaber.com'da oku →<span class=\"v\"> (yeni sekmede açılır)</span></a></div></body></html>";
+
+    it("a Turkish 3-outlet 100% İktidar cluster", () => {
+      const html = htmlOf(
+        detail({
+          distribution: dist({ pro_government: 3 }),
+          sourceCount: 3,
+          members: [
+            memberOf("sabah", "outlet", "pro_government"),
+            memberOf("yeni-safak", "outlet", "pro_government"),
+            memberOf("a-haber", "outlet", "pro_government"),
+          ],
+        }),
+      );
+      expect(withoutStyle(html)).toBe(GOLDEN_TURKISH);
+    });
+
+    it("a mixed a-haber + daily-sabah cluster with a Turkish title", () => {
+      const html = htmlOf(
+        detail({
+          distribution: dist({ pro_government: 2 }),
+          sourceCount: 2,
+          members: [memberOf("a-haber", "outlet", "pro_government"), memberOf("daily-sabah", "outlet", "pro_government")],
+        }),
+      );
+      expect(withoutStyle(html)).toBe(GOLDEN_MIXED);
+    });
+
+    it("an all-zero non-voting cluster (the h64-ogcards-3 line)", () => {
+      const html = htmlOf(
+        detail({
+          distribution: dist(),
+          sourceCount: 2,
+          members: [memberOf("haberler-com", "aggregator", "gov_leaning"), memberOf("ekonomim", "niche", "center")],
+        }),
+      );
+      expect(withoutStyle(html)).toBe(GOLDEN_NON_VOTING);
+    });
+
+    it("a recall-matched blindspot (the h108 'kümede sadece')", () => {
+      const html = htmlOf(
+        detail({
+          distribution: dist({ pro_government: 6, gov_leaning: 3 }),
+          sourceCount: 9,
+          isBlindspot: true,
+          blindspotSide: "pro_government",
+          members: [
+            ...Array.from({ length: 6 }, (_, i) => memberOf(`outlet-${i}`, "outlet", "pro_government")),
+            ...Array.from({ length: 3 }, (_, i) => memberOf(`leaning-${i}`, "outlet", "gov_leaning")),
+          ],
+          recallMatchedZones: ["muhalefet"],
+        }),
+      );
+      expect(withoutStyle(html)).toBe(GOLDEN_RECALL);
+    });
   });
 });

@@ -951,6 +951,47 @@ describe("SectionBody", () => {
     expect(markup).not.toContain("sınıflandırılmış");
   });
 
+  // h118-english-1 (WCAG 3.1.2): the title span of an English-only cluster's row
+  // is English text inside the Turkish page, so it carries lang="en"; a Turkish
+  // row's span has no lang attribute.
+  it("an English row's title span has lang=\"en\"; a Turkish row's has none", () => {
+    const en = item({
+      id: "aaaaaaaa-1111-4111-8111-000000000001",
+      title: "Erdogan, Guterres discuss regional, global issues at COP31",
+      lang: "en",
+      zoneLine: "Yalnızca İngilizce kaynaklar · Türkçe haberlerle karşılaştırılmadı",
+    });
+    const tr = item({ id: "aaaaaaaa-1111-4111-8111-000000000002", title: "Bir haber başlığı" });
+    const markup = renderToStaticMarkup(
+      <SectionBody kind="q" state={{ status: "ok", items: [en, tr] }} label="“Guterres”" />,
+    );
+
+    expect(markup).toMatch(
+      /<span(?=[^>]*\blang="en")[^>]*>Erdogan, Guterres discuss regional, global issues at COP31<\/span>/,
+    );
+    expect(markup).toMatch(/<span(?![^>]*\blang=)[^>]*>Bir haber başlığı<\/span>/);
+    expect((markup.match(/lang="en"/g) ?? []).length).toBe(1);
+  });
+
+  it("the English row's meta line prints the qualified zone line the server sent", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-22T09:00:00.000Z"));
+    const en = item({
+      sourceCount: 2,
+      countHead: "2 kaynak",
+      lang: "en",
+      zoneLine: "Yalnızca İngilizce kaynaklar · Türkçe haberlerle karşılaştırılmadı",
+    });
+    const markup = renderToStaticMarkup(
+      <SectionBody kind="q" state={{ status: "ok", items: [en] }} label="“Guterres”" />,
+    );
+
+    expect(markup).toContain(
+      "<span>2 kaynak · 2 saat önce · Yalnızca İngilizce kaynaklar · Türkçe haberlerle karşılaştırılmadı</span>",
+    );
+    expect(markup).not.toContain("Bağımsız 0");
+  });
+
   it("marks a blindspot row", () => {
     const markup = renderToStaticMarkup(
       <SectionBody

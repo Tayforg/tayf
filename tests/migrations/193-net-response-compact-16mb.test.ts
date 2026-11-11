@@ -425,7 +425,8 @@ describe("migration 193_net_response_compact_16mb.sql (SQL contract)", () => {
     expect(code).not.toContain("ops_health_report");
     const withReport = allMigrations().filter((m) => m.code.includes("create or replace function public.ops_health_report()"));
     const body = collapse(prosrc(withReport[withReport.length - 1]!.code, "ops_health_report"));
-    expect(withReport[withReport.length - 1]!.num).toBeLessThan(193);
+    // 193 is not one of the migrations that re-create the report (195 is the newest one now; it copies the thresholds below unchanged)
+    expect(withReport.map((m) => m.num)).not.toContain(193);
     expect(body).toContain("check_name := 'net_response_heap_mb'; threshold := 200;");
     expect(body).toContain("case when v_n > 200 then 'fail' when v_n >= 64 then 'warn' else 'pass' end;");
     expect(body).toContain("'uyarı >= 64 MB, hata > 200 MB; 15 dakikada bir küçültülür (ops_net_response_compact)'");

@@ -3,6 +3,7 @@ import { cacheLife } from "next/cache";
 import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { escapeXml } from "@/lib/feeds/rss-builder";
 import { createReaderClient } from "@/lib/supabase/server";
+import { fetchLanguageIsolatedIds } from "@/lib/clusters/language-isolation-read";
 import { getTopicCounts, TOPIC_SLUGS, type TopicSlug } from "@/lib/clusters/topic-query";
 import { topicHubIndexable } from "@/lib/clusters/topic-page-robots";
 import { hasIndexableTitle, servedClusterTitle } from "@/lib/seo/indexable-title";
@@ -27,7 +28,9 @@ import { WEEK_ARCHIVE_FIRST, weekKeyFromMs } from "@/lib/weekly/week-key";
 // Console "Submitted URL marked noindex" error). The title test is
 // hasIndexableTitle (indexable-title.ts) on `title_tr_neutral ?? title_tr`, done
 // in JS on the rows read: the explainer phrases are folded matches PostgREST
-// cannot express, and paging stays by rows read.
+// cannot express, and paging stays by rows read. The news file alone also leaves
+// out a cluster whose every member is an English-language outlet, because its
+// entries all declare <news:language>tr</news:language> (h118-english-1).
 //
 // Every DB-backed builder below THROWS on a Supabase error instead of
 // returning an empty result — an empty-but-cached sitemap would silently
@@ -462,6 +465,7 @@ interface NewsClusterRow {
   id: string;
   title_tr: string;
   title_tr_neutral: string | null;
+  article_count: number;
   first_published: string;
 }
 
@@ -472,7 +476,7 @@ async function readNewsSitemapXml(baseUrl: string): Promise<string> {
   const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("clusters")
-    .select("id, title_tr, title_tr_neutral, first_published")
+    .select("id, title_tr, title_tr_neutral, article_count, first_published")
     .eq("is_archived", false)
     .gte("article_count", NEWS_MIN_ARTICLES)
     .gte("first_published", since.toISOString())
@@ -485,7 +489,18 @@ async function readNewsSitemapXml(baseUrl: string): Promise<string> {
     throw new Error(`news sitemap query failed: ${error.message}`);
   }
 
-  const entries: NewsUrlEntry[] = (data ?? [])
+  const rows = data ?? [];
+
+  // h118-english-1: renderNewsUrlset declares <news:language>tr</news:language>
+  // for every entry, so a cluster formed among English-language outlets only (its
+  // title is English) is not submitted; the home feed and /rss.xml already leave
+  // such clusters out. One bounded member-sources read over the rows listed, in
+  // this same cache scope; it never throws, and a failure leaves the list as it
+  // was. clusters-YYYY-MM.xml keeps every cluster: the page itself is indexable.
+  const isolated = await fetchLanguageIsolatedIds(supabase, rows);
+
+  const entries: NewsUrlEntry[] = rows
+    .filter((row) => !isolated.has(row.id))
     .filter((row) => hasIndexableTitle(row))
     .map((row) => ({
       loc: `${baseUrl}/cluster/${row.id}`,

@@ -512,6 +512,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "189_source_reliability_copy_any_cluster.sql",
       // 192 re-creates ops_health_report() with 173's text verbatim (rows 1-22, including row 4's VALUES-list copy of BIAS_TO_ZONE) except three spots in row 17 (the seventh anon RPC, saved_clusters_v4); pinned by tests/migrations/192-saved-clusters-v4.test.ts
       "192_saved_clusters_v4.sql",
+      // 195 re-creates ops_health_report() with 192's text verbatim (rows 1-22, including row 4's VALUES-list copy of BIAS_TO_ZONE) except row 15 (cron_route_failures_30m: the fact-checks silence gap and the low-cadence streak rule); pinned by tests/migrations/195-ops-cron-route-low-cadence.test.ts
+      "195_ops_cron_route_low_cadence.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

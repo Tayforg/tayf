@@ -71,6 +71,7 @@ describe("GET /rozet/[file]", () => {
   it("200s with the exact headers and an SVG body", async () => {
     getClusterDetailMock.mockResolvedValue({
       cluster: { bias_distribution: { pro_government: 2, state_media: 0, center: 1, opposition: 1 } },
+      members: [],
       wire: { effectiveArticleCount: 4 },
     });
     const res = await call(`${ID}.svg`);
@@ -86,3 +87,54 @@ describe("GET /rozet/[file]", () => {
     expect(body).toContain("4 kaynak");
   });
 });
+
+// h118-shares-1: an all-English cluster (92742df8: daily-sabah, hurriyet-daily-news,
+// trt-world) must not print the zone-absence claim its own page does not make.
+// The route decides isolation with the page's own predicate, over the members.
+describe("GET /rozet/[file] for an all-English cluster (h118-shares-1)", () => {
+  const member = (slug: string) => ({ source: { slug, name: slug } });
+  const detail = (slugs: string[], zones: Record<string, number>, count: number) => ({
+    cluster: { bias_distribution: zones },
+    members: slugs.map(member),
+    wire: { effectiveArticleCount: count },
+  });
+  const bodyOf = async () => (await call(`${ID}.svg`)).text();
+
+  it("92742df8: the badge names the qualifier and the count, not 'İktidar %100, Bağımsız %0'", async () => {
+    getClusterDetailMock.mockResolvedValue(
+      detail(["daily-sabah", "hurriyet-daily-news", "trt-world"], { pro_government: 2, gov_leaning: 1 }, 3),
+    );
+    const body = await bodyOf();
+    expect(body).toContain(
+      "<title>Tayf yelpazesi: yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı · 3 kaynak</title>",
+    );
+    expect(body).toContain(">3 kaynak · yalnızca İngilizce</text>");
+    expect(body).not.toContain("Bağımsız %0");
+  });
+
+  it("2dab7e87: a-news + trt-world", async () => {
+    getClusterDetailMock.mockResolvedValue(detail(["a-news", "trt-world"], { pro_government: 2 }, 2));
+    expect(await bodyOf()).toContain("· 2 kaynak</title>");
+    expect(await bodyOf()).toContain("yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı");
+  });
+
+  it("controls: a Turkish cluster and a mixed English + Turkish cluster keep the percent label", async () => {
+    getClusterDetailMock.mockResolvedValue(
+      detail(["sabah", "yeni-safak", "a-haber"], { pro_government: 3 }, 3),
+    );
+    const turkish = await bodyOf();
+    expect(turkish).toContain("<title>Tayf yelpazesi: İktidar %100, Bağımsız %0, Muhalefet %0 · 3 kaynak</title>");
+    expect(turkish).toContain(">3 kaynak · %100/%0/%0</text>");
+
+    getClusterDetailMock.mockResolvedValue(detail(["a-haber", "daily-sabah"], { pro_government: 2 }, 2));
+    const mixed = await bodyOf();
+    expect(mixed).toContain("<title>Tayf yelpazesi: İktidar %100, Bağımsız %0, Muhalefet %0 · 2 kaynak</title>");
+    expect(mixed).not.toContain("İngilizce");
+  });
+
+  it("a cluster with no members is not isolated", async () => {
+    getClusterDetailMock.mockResolvedValue(detail([], { pro_government: 2 }, 2));
+    expect(await bodyOf()).toContain("İktidar %100");
+  });
+});
+

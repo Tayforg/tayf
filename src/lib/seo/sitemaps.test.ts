@@ -27,6 +27,11 @@ const fixture = vi.hoisted(() => ({
   clustersBlips: 0,
   clustersFailFromPage: null as number | null,
   clientBuilds: 0,
+  // h118-english-1: the news sitemap's language-isolation read
+  // (cluster_articles -> articles -> sources). It records every read it gets.
+  members: [] as Array<Record<string, unknown>>,
+  membersError: null as { message: string } | null,
+  memberStates: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -55,6 +60,13 @@ const supabaseFake = await vi.hoisted(async () => {
           return { data: page, error: null };
         }
         return { data: fixture.clusters, error: null };
+      },
+      cluster_articles: (state) => {
+        fixture.memberStates.push(state);
+        if (fixture.membersError) {
+          return { data: null, error: fixture.membersError };
+        }
+        return { data: fixture.members, error: null };
       },
       sources: (state) => {
         fixture.lastSourcesState = state;
@@ -135,6 +147,9 @@ beforeEach(() => {
   fixture.clustersBlips = 0;
   fixture.clustersFailFromPage = null;
   fixture.clientBuilds = 0;
+  fixture.members = [];
+  fixture.membersError = null;
+  fixture.memberStates = [];
   vi.mocked(cacheLife).mockClear();
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -750,6 +765,154 @@ describe("getNewsSitemapXml", () => {
     const xml = await getNewsSitemapXml("https://tayf.test");
     expect((xml.match(/<url>/g) ?? []).length).toBe(0);
     expect(xml).toContain("<urlset");
+  });
+
+  // h118-english-1: a cluster whose members are all English-language outlets has
+  // an English title, but the sitemap declares <news:language>tr</news:language>
+  // for every entry. The home feed and /rss.xml already leave such clusters out
+  // (politics-query admit gate); the news sitemap now does too, from one bounded
+  // member-sources read over the rows it listed. clusters-YYYY-MM.xml is not
+  // touched, and a failed read leaves the sitemap exactly as it was.
+  describe("h118-english-1: English-only clusters are not submitted", () => {
+    const sourceRow = (clusterId: string, slug: string, name: string) => ({
+      cluster_id: clusterId,
+      articles: { sources: { slug, name } },
+    });
+    const newsRow = (id: string, title: string, articleCount: number) => ({
+      id,
+      title_tr: title,
+      title_tr_neutral: null,
+      article_count: articleCount,
+      first_published: "2026-09-27T10:00:00.000Z",
+    });
+
+    it("drops an English-only cluster of 3 articles; Turkish and mixed clusters stay; the language stays 'tr'", async () => {
+      fixture.clusters = [
+        newsRow("en-1", "Türkiye remembers Atatürk on 88th anniversary of his death", 3),
+        newsRow("tr-1", "Merkez Bankası faizi sabit tuttu", 3),
+        newsRow("mixed-1", "NATO chief visits Türkiye ahead of key summit", 3),
+      ];
+      fixture.members = [
+        sourceRow("en-1", "daily-sabah", "Daily Sabah"),
+        sourceRow("en-1", "trt-world", "TRT World"),
+        sourceRow("en-1", "a-news", "A News"),
+        sourceRow("tr-1", "sozcu", "Sözcü"),
+        sourceRow("tr-1", "a-haber", "A Haber"),
+        sourceRow("tr-1", "hurriyet", "Hürriyet"),
+        sourceRow("mixed-1", "daily-sabah", "Daily Sabah"),
+        sourceRow("mixed-1", "a-haber", "A Haber"),
+        sourceRow("mixed-1", "a-news", "A News"),
+      ];
+
+      const xml = await getNewsSitemapXml("https://tayf.test");
+
+      expect(xml).not.toContain("/cluster/en-1<");
+      expect(xml).not.toContain("Atatürk");
+      expect(xml).toContain("https://tayf.test/cluster/tr-1<");
+      expect(xml).toContain("https://tayf.test/cluster/mixed-1<");
+      expect((xml.match(/<url>/g) ?? []).length).toBe(2);
+      expect((xml.match(/<news:language>tr<\/news:language>/g) ?? []).length).toBe(2);
+    });
+
+    it("selects article_count, and asks the isolation read about the listed rows only", async () => {
+      fixture.clusters = [
+        newsRow("c-a", "Merkez Bankası faizi sabit tuttu", 3),
+        newsRow("c-b", "Dolar güne yükselişle başladı", 5),
+      ];
+
+      await getNewsSitemapXml("https://tayf.test");
+
+      const state = fixture.lastClustersState as BuilderState;
+      expect(String(state.selectArgs[0])).toMatch(/\barticle_count\b/);
+      expect(fixture.memberStates).toHaveLength(1);
+      const read = fixture.memberStates[0] as BuilderState;
+      expect(read.table).toBe("cluster_articles");
+      expect(read.in).toEqual([{ col: "cluster_id", vals: ["c-a", "c-b"] }]);
+    });
+
+    it("a cluster of more than 12 articles is not asked about (and so stays listed)", async () => {
+      fixture.clusters = [newsRow("big", "Büyük hikâye", 40), newsRow("small", "Küçük hikâye", 3)];
+
+      const xml = await getNewsSitemapXml("https://tayf.test");
+
+      const read = fixture.memberStates[0] as BuilderState;
+      expect(read.in).toEqual([{ col: "cluster_id", vals: ["small"] }]);
+      expect(xml).toContain("/cluster/big<");
+    });
+
+    it("English rows fewer than article_count do not drop the cluster (a short read is not a verdict)", async () => {
+      fixture.clusters = [newsRow("en-short", "Türkiye commemorates Atatürk", 3)];
+      fixture.members = [
+        sourceRow("en-short", "daily-sabah", "Daily Sabah"),
+        sourceRow("en-short", "trt-world", "TRT World"),
+      ];
+
+      const xml = await getNewsSitemapXml("https://tayf.test");
+
+      expect(xml).toContain("/cluster/en-short<");
+    });
+
+    it("a failed isolation read keeps the sitemap exactly as before and does not throw", async () => {
+      fixture.clusters = [newsRow("en-1", "Türkiye remembers Atatürk", 3)];
+      fixture.members = [
+        sourceRow("en-1", "daily-sabah", "Daily Sabah"),
+        sourceRow("en-1", "trt-world", "TRT World"),
+        sourceRow("en-1", "a-news", "A News"),
+      ];
+      fixture.membersError = { message: "members timed out" };
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const xml = await getNewsSitemapXml("https://tayf.test");
+
+      expect(xml).toContain("/cluster/en-1<");
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining("members timed out"));
+      // Still one successful attempt: no live retry, cached for the normal window.
+      expect(fixture.clientBuilds).toBe(1);
+      expect(vi.mocked(cacheLife)).toHaveBeenCalledWith({ revalidate: 600 });
+      spy.mockRestore();
+    });
+
+    it("a row-read error still throws, and no isolation read is attempted", async () => {
+      fixture.clustersError = { message: "db down" };
+
+      await expect(getNewsSitemapXml("https://tayf.test")).rejects.toThrow(/db down/);
+      expect(fixture.memberStates).toHaveLength(0);
+    });
+
+    it("the isolation filter runs before the title filter: an English-only question cluster is dropped once, not twice", async () => {
+      fixture.clusters = [newsRow("en-q", "Who is the new minister?", 3)];
+      fixture.members = [
+        sourceRow("en-q", "daily-sabah", "Daily Sabah"),
+        sourceRow("en-q", "trt-world", "TRT World"),
+        sourceRow("en-q", "a-news", "A News"),
+      ];
+
+      const xml = await getNewsSitemapXml("https://tayf.test");
+
+      expect((xml.match(/<url>/g) ?? []).length).toBe(0);
+    });
+
+    it("clusters-YYYY-MM.xml is unchanged: it does not read members and still lists an English-only cluster", async () => {
+      fixture.clusters = [
+        {
+          id: "en-month",
+          updated_at: "2026-09-01T00:00:00.000Z",
+          title_tr: "Türkiye remembers Atatürk",
+          title_tr_neutral: null,
+          article_count: 3,
+        },
+      ];
+      fixture.members = [
+        sourceRow("en-month", "daily-sabah", "Daily Sabah"),
+        sourceRow("en-month", "trt-world", "TRT World"),
+        sourceRow("en-month", "a-news", "A News"),
+      ];
+
+      const xml = await getClustersMonthXml("https://tayf.test", "2026-09");
+
+      expect(fixture.memberStates).toHaveLength(0);
+      expect(xml).toContain("/cluster/en-month<");
+    });
   });
 });
 

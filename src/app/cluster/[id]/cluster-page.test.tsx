@@ -5456,3 +5456,81 @@ describe("ClusterDetailPage — h1 lang for a mixed cluster (h59-english-2)", ()
     expect(span?.props.lang).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// h118-shares-1: an all-English cluster (92742df8: daily-sabah, hurriyet-daily-news,
+// trt-world, pro_government 2 / gov_leaning 1) handed the share sheet, WhatsApp,
+// Telegram, X and Bluesky "3 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet",
+// the zone-absence claim its own page does not make. The page threads the
+// `languageIsolated` it already computes into buildShareText.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — share text of an all-English cluster (h118-shares-1)", () => {
+  const CLAUSE = "yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı";
+  const ISO_SOURCES = [
+    { slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government" as const },
+    { slug: "hurriyet-daily-news", name: "Hürriyet Daily News", bias: "gov_leaning" as const },
+    { slug: "trt-world", name: "TRT World", bias: "pro_government" as const },
+  ];
+  const TURKISH_SOURCES = [
+    { slug: "sabah", name: "Sabah", bias: "pro_government" as const },
+    { slug: "yeni-safak", name: "Yeni Şafak", bias: "pro_government" as const },
+    { slug: "a-haber", name: "A Haber", bias: "pro_government" as const },
+  ];
+  const MIXED_SOURCES = [
+    { slug: "a-haber", name: "A Haber", bias: "pro_government" as const },
+    { slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government" as const },
+  ];
+
+  function withVotes(
+    sources: Array<{ slug: string; name: string; bias: Source["bias"] }>,
+    votes: Partial<BiasDistribution>,
+  ): ClusterDetail {
+    const detail = langDetail({ sources, titleMethod: "extractive" });
+    detail.cluster.bias_distribution = { ...emptyDistribution(), ...votes };
+    return detail;
+  }
+
+  async function shareOf(detail: ClusterDetail) {
+    const tree = await renderTree(detail);
+    const el = findElementOfType(tree, ShareButton);
+    expect(el).not.toBeNull();
+    return { text: String(el!.props.text), markup: renderToStaticMarkup(el as unknown as ReactElement) };
+  }
+
+  /** Every share-intent href of the rendered ShareButton, entity-decoded then URL-decoded. */
+  function decodedHrefs(markup: string): string[] {
+    return [...markup.matchAll(/href="((?:https:\/\/wa\.me|https:\/\/t\.me|https:\/\/twitter\.com\/intent|https:\/\/bsky\.app)[^"]*)"/g)].map(
+      (m) => decodeURIComponent(m[1]!.replace(/&amp;/g, "&")),
+    );
+  }
+
+  it("92742df8: ShareButton's text carries the qualifier, not the percents", async () => {
+    const { text } = await shareOf(withVotes(ISO_SOURCES, { pro_government: 2, gov_leaning: 1 }));
+    expect(text).toBe(`3 kaynak · ${CLAUSE}`);
+  });
+
+  it("92742df8: the WhatsApp, Telegram, X and Bluesky hrefs decode to the new text", async () => {
+    const { markup } = await shareOf(withVotes(ISO_SOURCES, { pro_government: 2, gov_leaning: 1 }));
+    const hrefs = decodedHrefs(markup);
+    expect(hrefs).toHaveLength(4);
+    for (const href of hrefs) {
+      expect(href).toContain(`3 kaynak · ${CLAUSE}`);
+      expect(href).not.toContain("%100 iktidar");
+      expect(href).not.toContain("%0 bağımsız");
+    }
+  });
+
+  it("controls: a Turkish 3-outlet cluster keeps today's share text and hrefs", async () => {
+    const { text, markup } = await shareOf(withVotes(TURKISH_SOURCES, { pro_government: 3 }));
+    expect(text).toBe("3 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet");
+    for (const href of decodedHrefs(markup)) {
+      expect(href).toContain("3 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet");
+      expect(href).not.toContain("İngilizce");
+    }
+  });
+
+  it("controls: a mixed a-haber + daily-sabah cluster keeps today's share text", async () => {
+    const { text } = await shareOf(withVotes(MIXED_SOURCES, { pro_government: 2 }));
+    expect(text).toBe("2 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet");
+  });
+});

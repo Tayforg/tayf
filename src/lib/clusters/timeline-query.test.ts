@@ -7,6 +7,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // count read, anything else is the row read. The fake `cluster_articles`
 // resolver is the member read of h76-timeline-2 (display titles for clusters
 // whose neutral title is not stored yet); it records every read it receives.
+// h118-english-1 adds a second `cluster_articles` read, the language-isolation
+// read (member sources of the small clusters); the resolver tells the two apart
+// by the select string: only the isolation read embeds `sources`.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -33,6 +36,12 @@ const fixture = vi.hoisted(() => ({
   membersThrows: false,
   /** Builder state of EVERY member read, in order (empty = none was issued). */
   memberStates: [] as unknown[],
+  /** Rows the language-isolation read (cluster_articles -> articles -> sources) returns. */
+  isolation: [] as unknown[],
+  isolationError: null as { message: string } | null,
+  isolationThrows: false,
+  /** Builder state of EVERY isolation read, in order (empty = none was issued). */
+  isolationStates: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -52,6 +61,14 @@ const supabaseFake = await vi.hoisted(async () => {
         return { data: fixture.data, error: fixture.error };
       },
       cluster_articles: (state) => {
+        if (String(state.selectArgs[0]).includes("sources")) {
+          fixture.isolationStates.push(state);
+          if (fixture.isolationThrows) throw new Error("isolation boom");
+          if (fixture.isolationError) {
+            return { data: null, error: fixture.isolationError };
+          }
+          return { data: fixture.isolation, error: null };
+        }
         fixture.memberStates.push(state);
         if (fixture.membersThrows) throw new Error("members boom");
         if (fixture.membersError) {
@@ -120,6 +137,10 @@ beforeEach(() => {
   fixture.membersError = null;
   fixture.membersThrows = false;
   fixture.memberStates = [];
+  fixture.isolation = [];
+  fixture.isolationError = null;
+  fixture.isolationThrows = false;
+  fixture.isolationStates = [];
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -329,11 +350,15 @@ function mkClusterRow(
   titleTr: string,
   neutral: string | null,
   firstPublished = "2026-11-08T18:30:00.000Z",
+  // The model that wrote the stored neutral title (clusters.title_neutral_model):
+  // today's production value for every stored title is the extractive pick.
+  model: string | null = neutral === null ? null : "extractive-v6",
 ) {
   return {
     id,
     title_tr: titleTr,
     title_tr_neutral: neutral,
+    title_neutral_model: model,
     article_count: 2,
     first_published: firstPublished,
   };
@@ -619,6 +644,272 @@ describe("getRecentClusters member read failure", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h118-english-1: the rows of an all-English cluster printed their English
+// headline inside <html lang="tr"> with no lang attribute (WCAG 3.1.2). The row
+// read carries no member sources, so fetchRecentClusters asks
+// fetchLanguageIsolatedIds (one bounded cluster_articles -> articles -> sources
+// read over the small clusters, inside the same cache scope) and marks the rows
+// whose every member is an English outlet with lang: 'en'. The key is omitted
+// for every other row, so a Turkish row is byte-identical to before.
+// ---------------------------------------------------------------------------
+
+const EN_ID = "2dab7e87-0000-4000-8000-000000000001";
+const MIXED_ID = "2dab7e87-0000-4000-8000-000000000002";
+const TR_ID = "2dab7e87-0000-4000-8000-000000000003";
+
+function sourceMember(clusterId: string, slug: string, name: string) {
+  return { cluster_id: clusterId, articles: { sources: { slug, name } } };
+}
+
+const EN_MEMBERS = [
+  sourceMember(EN_ID, "daily-sabah", "Daily Sabah"),
+  sourceMember(EN_ID, "trt-world", "TRT World"),
+];
+const MIXED_MEMBERS = [
+  sourceMember(MIXED_ID, "a-news", "A News"),
+  sourceMember(MIXED_ID, "a-haber", "A Haber"),
+];
+const TR_MEMBERS = [
+  sourceMember(TR_ID, "sozcu", "Sözcü"),
+  sourceMember(TR_ID, "a-haber", "A Haber"),
+];
+
+describe("getRecentClusters language isolation (h118-english-1)", () => {
+  it("an all-English cluster's row has lang 'en'; a mixed and a Turkish row have no lang key", async () => {
+    fixture.data = [
+      mkClusterRow(EN_ID, "Erdogan, Guterres discuss issues", "Turkish president Erdoğan, UN chief Guterres discuss issues"),
+      mkClusterRow(MIXED_ID, "Karışık", "Karışık nötr"),
+      mkClusterRow(TR_ID, "Türkçe", "Türkçe nötr"),
+    ];
+    fixture.isolation = [...EN_MEMBERS, ...MIXED_MEMBERS, ...TR_MEMBERS];
+
+    const result = await getRecentClusters();
+
+    const [en, mixed, tr] = result?.rows ?? [];
+    expect(en?.lang).toBe("en");
+    expect(en?.title).toBe("Turkish president Erdoğan, UN chief Guterres discuss issues");
+    expect(mixed).toBeDefined();
+    expect(tr).toBeDefined();
+    expect("lang" in (mixed as object)).toBe(false);
+    expect("lang" in (tr as object)).toBe(false);
+  });
+
+  it("a Turkish row keeps exactly its old keys (byte-identical to before)", async () => {
+    fixture.data = [mkClusterRow(TR_ID, "Türkçe", "Türkçe nötr")];
+    fixture.isolation = TR_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(Object.keys(result?.rows[0] ?? {}).sort()).toEqual(
+      ["article_count", "first_published", "id", "title", "title_tr", "title_tr_neutral"].sort(),
+    );
+  });
+
+  it("the isolation read is issued once, over the stored rows, on the page's one client", async () => {
+    fixture.data = [mkClusterRow("c1", "a", "Nötr a"), mkClusterRow("c2", "b", "Nötr b")];
+    fixture.count = 2;
+
+    await getRecentClusters();
+
+    expect(fixture.isolationStates).toHaveLength(1);
+    const state = fixture.isolationStates[0] as BuilderState;
+    expect(state.table).toBe("cluster_articles");
+    expect(state.in).toEqual([{ col: "cluster_id", vals: ["c1", "c2"] }]);
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+
+  it("only clusters of 2 to 12 members are read: a 20-member cluster is not asked about", async () => {
+    fixture.data = [
+      { ...mkClusterRow("big", "a", "Nötr a"), article_count: 20 },
+      mkClusterRow("small", "b", "Nötr b"),
+    ];
+
+    await getRecentClusters();
+
+    expect(fixture.isolationStates).toHaveLength(1);
+    expect((fixture.isolationStates[0] as BuilderState).in).toEqual([
+      { col: "cluster_id", vals: ["small"] },
+    ]);
+  });
+
+  it("an empty window issues no isolation read", async () => {
+    fixture.data = [];
+    fixture.count = 0;
+
+    await getRecentClusters();
+
+    expect(fixture.isolationStates).toHaveLength(0);
+  });
+
+  it("does not disturb the h76 title: an English cluster with no stored neutral title gets the same first pick with or without lang", async () => {
+    const enRaw = "ERDOGAN, GUTERRES DISCUSS ISSUES AT COP31";
+    fixture.data = [mkClusterRow(EN_ID, enRaw, null)];
+    fixture.members = [
+      member(EN_ID, enRaw, "2026-11-10T14:40:00Z"),
+      member(EN_ID, "Turkish president Erdoğan, UN chief Guterres discuss issues at COP31", "2026-11-10T14:46:00Z"),
+    ];
+
+    fixture.isolation = [];
+    const plain = await getRecentClusters();
+    fixture.isolation = EN_MEMBERS;
+    const isolated = await getRecentClusters();
+
+    expect(plain?.rows[0]?.title).not.toBe(enRaw);
+    expect(isolated?.rows[0]?.title).toBe(plain?.rows[0]?.title);
+    expect("lang" in (plain?.rows[0] as object)).toBe(false);
+    expect(isolated?.rows[0]?.lang).toBe("en");
+    // Both reads ran for the one row that lacks a neutral title.
+    expect(fixture.memberStates).toHaveLength(2);
+    expect(fixture.isolationStates).toHaveLength(2);
+  });
+
+  it("the title read is still skipped when every row has a stored neutral title (only the isolation read runs)", async () => {
+    fixture.data = [mkClusterRow(EN_ID, "Ham", "Stored neutral")];
+    fixture.isolation = EN_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(fixture.memberStates).toHaveLength(0);
+    expect(fixture.isolationStates).toHaveLength(1);
+    expect(result?.rows[0]?.lang).toBe("en");
+  });
+
+  it("an isolation read that errors leaves every row and title unchanged, logs, and is still cached for cluster-feed", async () => {
+    fixture.data = [
+      mkClusterRow(EN_ID, "English raw", "English neutral"),
+      mkClusterRow(TR_ID, "Ham", "Nötr"),
+    ];
+    fixture.count = 2;
+    fixture.isolation = EN_MEMBERS;
+    fixture.isolationError = { message: "isolation timed out" };
+
+    const result = await getRecentClusters();
+
+    expect(result).not.toBeNull();
+    expect(result?.rows).toEqual([
+      {
+        id: EN_ID,
+        title_tr: "English raw",
+        title_tr_neutral: "English neutral",
+        article_count: 2,
+        first_published: "2026-11-08T18:30:00.000Z",
+        title: "English neutral",
+      },
+      {
+        id: TR_ID,
+        title_tr: "Ham",
+        title_tr_neutral: "Nötr",
+        article_count: 2,
+        first_published: "2026-11-08T18:30:00.000Z",
+        title: "Nötr",
+      },
+    ]);
+    expect((result?.rows ?? []).some((r) => "lang" in r)).toBe(false);
+    expect(result?.total).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("isolation timed out"),
+    );
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("an isolation read that throws is contained the same way", async () => {
+    fixture.data = [mkClusterRow(EN_ID, "English raw", "English neutral")];
+    fixture.isolationThrows = true;
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows).toHaveLength(1);
+    expect(result?.rows[0]?.title).toBe("English neutral");
+    expect("lang" in (result?.rows[0] as object)).toBe(false);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("isolation boom"));
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+  });
+
+  // CAR-1: the headline cron in LLM mode writes a TURKISH neutral title ("Türkçe
+  // olmalı", src/lib/headline/prompt.ts), so lang="en" on a row whose title is
+  // that rewrite would mark Turkish text as English. The rule is the cluster
+  // page's title_method: a stored neutral title from a non-extractive model is
+  // the LLM rewrite and gets no lang; an extractive pick is a member's own
+  // (English) title and does.
+  it("an all-English cluster whose stored neutral title is an LLM rewrite gets NO lang key", async () => {
+    fixture.data = [
+      mkClusterRow(EN_ID, "English raw", "Erdoğan ve Guterres sorunları görüştü", undefined, "claude-haiku-4-5"),
+    ];
+    fixture.isolation = EN_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows[0]?.title).toBe("Erdoğan ve Guterres sorunları görüştü");
+    expect("lang" in (result?.rows[0] as object)).toBe(false);
+  });
+
+  it("the same all-English cluster with an extractive-v6 neutral title has lang 'en'", async () => {
+    fixture.data = [
+      mkClusterRow(EN_ID, "English raw", "Erdogan, Guterres discuss issues", undefined, "extractive-v6"),
+    ];
+    fixture.isolation = EN_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows[0]?.lang).toBe("en");
+  });
+
+  it("an all-English cluster with no stored neutral title has lang 'en' (the title is a member's own)", async () => {
+    fixture.data = [mkClusterRow(EN_ID, "English raw", null)];
+    fixture.isolation = EN_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows[0]?.title).toBe("English raw");
+    expect(result?.rows[0]?.lang).toBe("en");
+  });
+
+  it("a stored neutral title with no recorded model is treated as the LLM rewrite (the cluster page's rule): no lang", async () => {
+    fixture.data = [mkClusterRow(EN_ID, "English raw", "Nötr başlık", undefined, null)];
+    fixture.isolation = EN_MEMBERS;
+
+    const result = await getRecentClusters();
+
+    expect("lang" in (result?.rows[0] as object)).toBe(false);
+  });
+
+  it("no row exposes a title_neutral_model key, with or without lang", async () => {
+    fixture.data = [
+      mkClusterRow(EN_ID, "English raw", "English neutral", undefined, "extractive-v6"),
+      mkClusterRow(MIXED_ID, "Karışık", "Karışık nötr", undefined, "claude-haiku-4-5"),
+      mkClusterRow(TR_ID, "Ham", null),
+    ];
+    fixture.isolation = [...EN_MEMBERS, ...MIXED_MEMBERS, ...TR_MEMBERS];
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows).toHaveLength(3);
+    for (const row of result?.rows ?? []) {
+      expect("title_neutral_model" in row).toBe(false);
+    }
+  });
+
+  it("the row read selects title_neutral_model (the lang rule needs it)", async () => {
+    await getRecentClusters();
+
+    const select = String((fixture.lastState as BuilderState).selectArgs[0]);
+    expect(select).toMatch(/\btitle_neutral_model\b/);
+  });
+
+  it("a row-read error still wins: null, and no isolation read is attempted", async () => {
+    fixture.error = { message: "relation missing" };
+    fixture.data = [mkClusterRow(EN_ID, "a", null)];
+    fixture.isolation = EN_MEMBERS;
+
+    await expect(getRecentClusters()).resolves.toBeNull();
+    expect(fixture.isolationStates).toHaveLength(0);
+  });
+});
+
 describe("/timeline page renders the display title (source guard)", () => {
   const page = readFileSync(resolve(__dirname, "../../app/timeline/page.tsx"), "utf8");
 
@@ -629,5 +920,9 @@ describe("/timeline page renders the display title (source guard)", () => {
 
   it("renders row.title as the headline link text", () => {
     expect(page).toMatch(/\{row\.title\}/);
+  });
+
+  it("hands the row's lang to the headline link (h118-english-1)", () => {
+    expect(page).toMatch(/lang=\{row\.lang\}/);
   });
 });

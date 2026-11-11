@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192).
+// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192, 195).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -56,6 +56,11 @@ import { fileURLToPath } from "node:url";
 // 'saved_clusters_v4(uuid[])', "six" -> "seven", "(6 izinli RPC hariç)" -> "(7 ...") and the function comment, so the "rows 1-17
 // as 145 wrote them" check below allows exactly those spots, again, in the newest version
 // (tests/migrations/192-saved-clusters-v4.test.ts pins the full diff against 173).
+// 195 (h118-crons-1) changes only row 15 (`cron_route_failures_30m`): the silence list gains ('fact-checks', 130, 250) (the hourly route
+// at minute :23: warn after two missed ticks, fail after four) and fact-checks, social and digest get a streak rule on their newest two
+// rows (both >= 500 fails, only the newest warns), so a fact-checks route that fails every hour pages. It re-creates the function with
+// 192's text verbatim otherwise (tests/migrations/195-ops-cron-route-low-cadence.test.ts pins the full diff against 192), so the "rows
+// 1-17 as 145 wrote them" check below swaps in the newest version's own row 15 and keeps every other row of 1-17 at 145's text.
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -116,6 +121,28 @@ function withSeventhAnonRpc(rows158: string): string {
   return out;
 }
 
+/** Where row 15 starts and ends inside a function text (the next row's marker comment starts the end). */
+const ROW15_START = "\n  -- 15. cron_route_failures_30m (";
+const ROW16_START = "\n  -- 16. db_size_mb";
+
+/**
+ * Rows 1-17 with row 15 as the newest version wrote it (195 changed row 15: the fact-checks gap and the low-cadence streak rule). Every
+ * other row of the text is untouched, so the byte comparison still guards rows 1-14, 16 and 17 against a copy-paste slip.
+ */
+function withRow15Of(rows: string, rawNewest: string): string {
+  const from = rawNewest.lastIndexOf(CREATE_LINE);
+  const newStart = rawNewest.indexOf(ROW15_START, from);
+  const newEnd = rawNewest.indexOf(ROW16_START, newStart);
+  expect(newStart, "row 15 in the newest version").toBeGreaterThan(from);
+  expect(newEnd, "row 16 after row 15 in the newest version").toBeGreaterThan(newStart);
+  const oldStart = rows.indexOf(ROW15_START);
+  const oldEnd = rows.indexOf(ROW16_START, oldStart);
+  expect(oldStart, "row 15 in 145's text").toBeGreaterThan(0);
+  expect(rows.indexOf(ROW15_START, oldStart + 1), "row 15 marker is unique").toBe(-1);
+  expect(oldEnd, "row 16 after row 15 in 145's text").toBeGreaterThan(oldStart);
+  return rows.slice(0, oldStart) + rawNewest.slice(newStart, newEnd) + rows.slice(oldEnd);
+}
+
 function stripSqlComments(sql: string): string {
   return sql.replace(/--[^\n]*/g, "");
 }
@@ -156,10 +183,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192) in number order", () => {
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192, 195) in number order", () => {
     expect(versions.length).toBeGreaterThanOrEqual(17);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192, 195]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -272,9 +299,11 @@ describe("ops_health_report(): the newest version", () => {
     // the executable create line is in the file once (comments are stripped before counting)
     expect(newest.code.indexOf(CREATE_LINE)).toBeGreaterThanOrEqual(0);
     expect(newest.code.indexOf(CREATE_LINE, newest.code.indexOf(CREATE_LINE) + 1), "the create line is executable once").toBe(-1);
-    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20, 161 appended row 21, 167 changed row 18's poison count, 173 appended row 22 after row 21 and 192 changed the same three row-17 spots again (the seventh anon RPC); rows 1-17 are still 145's text
+    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20, 161 appended row 21, 167 changed row 18's poison count, 173 appended row 22 after row 21, 192 changed the same three row-17 spots again (the seventh anon RPC) and 195 changed row 15; rows 1-17 are still 145's text apart from those
     const sixRpcRows = newest.num >= 158 ? withSixthAnonRpc(rows145) : rows145;
-    const expected = newest.num >= 192 ? withSeventhAnonRpc(sixRpcRows) : sixRpcRows;
+    const sevenRpcRows = newest.num >= 192 ? withSeventhAnonRpc(sixRpcRows) : sixRpcRows;
+    // 195 changed row 15 only (the fact-checks gap, the low-cadence streak rule): its own text for row 15, 145's for everything else
+    const expected = newest.num >= 195 ? withRow15Of(sevenRpcRows, rawNewest) : sevenRpcRows;
     expect(rawNewest.slice(at, at + expected.length)).toBe(expected);
     // the next non-blank line is the row-18 marker comment
     const rest = rawNewest.slice(at + expected.length);
@@ -315,13 +344,17 @@ describe("ops_health_report(): the newest version", () => {
     const seg = slice(ROUTE_CHECK).replace(/\s+/g, " ");
     expect(seg).toContain("public.ops_cron_route_runs");
     expect(seg).toContain("interval '30 minutes'");
-    expect(seg).toMatch(/status\s*:=\s*case when v_zero >= 1 or v_active then 'fail'/i);
+    // 195 adds the low-cadence streak (`or v_low_fail >= 1`) to the fail condition
+    expect(seg).toMatch(/status\s*:=\s*case when v_zero >= 1 or v_active( or v_low_fail >= 1)? then 'fail'/i);
+    expect(seg).toContain("or v_low_fail >= 1 then 'fail'");
     expect(seg).toContain("x.status >= 500");
   });
 
   // A run that Vercel kills at maxDuration never reaches withCronOutcome's finally/after(): it writes no row, so
-  // the failure count cannot see it. Row 15 therefore also checks the newest row of the sub-hourly routes
-  // against a gap list; the list must keep following vercel.ts (review of h12-ops-1).
+  // the failure count cannot see it. Row 15 therefore also checks the newest row of the listed routes against a
+  // gap list; the list must keep following vercel.ts (review of h12-ops-1). 195 (h118-crons-1) lists the hourly
+  // fact-checks route too: an hourly route has enough ticks for a gap rule (warn after two missed ticks, fail after
+  // four); social (daytime only) and digest (weekly) do not and stay out.
   describe("cron_route_failures_30m: the silence list follows the schedule in vercel.ts", () => {
     function silenceList(): Array<{ route: string; warnMin: number; failMin: number }> {
       const seg = slice(ROUTE_CHECK).replace(/\s+/g, " ");
@@ -333,40 +366,99 @@ describe("ops_health_report(): the newest version", () => {
       }));
     }
     const vercelTs = () => readFileSync(resolve(here, "..", "..", "vercel.ts"), "utf8");
+    const scheduleOf = (route: string): string | undefined =>
+      new RegExp(`path:\\s*"/api/cron/${route}",\\s*schedule:\\s*"([^"]+)"`).exec(vercelTs())?.[1];
+    // Minutes between ticks: "every N minutes" (N in the first field) is N, one fixed minute every hour ("23 * * * *") is 60;
+    // anything else is not an all-day cadence.
+    function tickMinutes(schedule: string | undefined): number | null {
+      const every = /^\*\/(\d+) \* \* \* \*$/.exec(schedule ?? "");
+      if (every) return Number(every[1]);
+      return /^\d{1,2} \* \* \* \*$/.test(schedule ?? "") ? 60 : null;
+    }
 
-    it("is not vacuous: headline and alerts-webhooks are listed", () => {
-      expect(silenceList().map((e) => e.route)).toEqual(["headline", "alerts-webhooks"]);
+    it("is not vacuous: headline, alerts-webhooks and (195) fact-checks are listed, in that order", () => {
+      expect(silenceList().map((e) => e.route)).toEqual(["headline", "alerts-webhooks", "fact-checks"]);
     });
 
-    it("every listed route has a cron folder and an every-N-minutes schedule in vercel.ts", () => {
+    it("every listed route has a cron folder and an all-day schedule in vercel.ts (every N minutes, or one fixed minute every hour)", () => {
       for (const { route } of silenceList()) {
         expect(
           readdirSync(resolve(here, "..", "..", "src", "app", "api", "cron")),
           `src/app/api/cron/${route}`,
         ).toContain(route);
-        expect(vercelTs(), `vercel.ts schedule of /api/cron/${route}`).toMatch(
-          new RegExp(`path:\\s*"/api/cron/${route}",\\s*schedule:\\s*"\\*/\\d+ \\* \\* \\* \\*"`),
-        );
+        expect(tickMinutes(scheduleOf(route)), `vercel.ts schedule of /api/cron/${route}: ${scheduleOf(route)}`).not.toBeNull();
       }
     });
 
-    it("warn_min is at least two ticks and fail_min at least six ticks of the route's own schedule", () => {
+    it("warn_min is at least two ticks of the route's own schedule, and fail_min at least six ticks (four for the hourly route: 250 min, not 6 h)", () => {
       for (const { route, warnMin, failMin } of silenceList()) {
-        const m = new RegExp(`path:\\s*"/api/cron/${route}",\\s*schedule:\\s*"\\*/(\\d+) `).exec(vercelTs());
-        const tick = Number(m?.[1]);
+        const tick = tickMinutes(scheduleOf(route)) as number;
         expect(tick, `${route}: tick minutes`).toBeGreaterThan(0);
         expect(warnMin, `${route}: warn_min`).toBeGreaterThanOrEqual(2 * tick);
-        expect(failMin, `${route}: fail_min`).toBeGreaterThanOrEqual(6 * tick);
+        expect(failMin, `${route}: fail_min`).toBeGreaterThanOrEqual((tick >= 60 ? 4 : 6) * tick);
         expect(failMin, `${route}: fail_min above warn_min`).toBeGreaterThan(warnMin);
+        // and not absurdly loose: the warn is at most three ticks (headline: 15 min), the fail under eight (a gap rule that waits a day is no rule)
+        expect(warnMin, `${route}: warn_min at most three ticks`).toBeLessThanOrEqual(3 * tick);
+        expect(failMin, `${route}: fail_min under eight ticks`).toBeLessThan(8 * tick);
       }
     });
 
-    it("never lists a route that does not run all day (social is 05:00-20:59 UTC) or runs less often than every 10 minutes", () => {
-      const v = vercelTs();
-      for (const { route } of silenceList()) {
-        const m = new RegExp(`path:\\s*"/api/cron/${route}",\\s*schedule:\\s*"([^"]+)"`).exec(v);
-        expect(m?.[1], `${route}: schedule`).toMatch(/^\*\/(5|10) \* \* \* \*$/);
+    it("fact-checks is the one hourly route of the list: minute :23 every hour, gaps 130 / 250", () => {
+      expect(scheduleOf("fact-checks")).toBe("23 * * * *");
+      expect(silenceList().find((e) => e.route === "fact-checks")).toEqual({ route: "fact-checks", warnMin: 130, failMin: 250 });
+      expect(silenceList().filter((e) => tickMinutes(scheduleOf(e.route)) === 60).map((e) => e.route)).toEqual(["fact-checks"]);
+    });
+
+    it("never lists a route that does not run all day (social is 05:00-20:59 UTC, digest is weekly) or runs less often than hourly", () => {
+      const listed = silenceList().map((e) => e.route);
+      expect(listed).not.toContain("social");
+      expect(listed).not.toContain("digest");
+      for (const route of listed) {
+        const tick = tickMinutes(scheduleOf(route));
+        expect(tick, `${route}: schedule ${scheduleOf(route)}`).not.toBeNull();
+        expect(tick as number, `${route}: at least hourly`).toBeLessThanOrEqual(60);
       }
+      // the routes left out really are not all-day cadences
+      expect(scheduleOf("social")).toBe("*/20 5-20 * * *");
+      expect(tickMinutes(scheduleOf("social"))).toBeNull();
+      expect(tickMinutes(scheduleOf("digest"))).toBeNull();
+    });
+  });
+
+  // 195: the streak rule for the routes whose runs the 30 minute window cannot count twice (an hourly or weekly route) and for
+  // social (every 20 minutes, daytime only). headline and alerts-webhooks keep the 30 minute rule and are never in this list.
+  describe("cron_route_failures_30m: the low-cadence streak list", () => {
+    function streakRoutes(): string[] {
+      const seg = slice(ROUTE_CHECK).replace(/\s+/g, " ");
+      const at = seg.indexOf("with l as (");
+      expect(at, "the low-cadence CTE").toBeGreaterThan(0);
+      const open = seg.indexOf("in (", at);
+      return [...seg.slice(open + 4, seg.indexOf(")", open)).matchAll(/'([^']*)'/g)].map((m) => m[1] as string);
+    }
+
+    it("lists exactly fact-checks, social and digest, each a cron route folder with a schedule in vercel.ts; headline and alerts-webhooks are not in it", () => {
+      expect(streakRoutes()).toEqual(["fact-checks", "social", "digest"]);
+      const folders = readdirSync(resolve(here, "..", "..", "src", "app", "api", "cron"));
+      const vercel = readFileSync(resolve(here, "..", "..", "vercel.ts"), "utf8");
+      for (const route of streakRoutes()) {
+        expect(folders, `src/app/api/cron/${route}`).toContain(route);
+        expect(vercel, `vercel.ts schedule of /api/cron/${route}`).toMatch(new RegExp(`path:\\s*"/api/cron/${route}",\\s*schedule:\\s*"[^"]+"`));
+      }
+      expect(streakRoutes()).not.toContain("headline");
+      expect(streakRoutes()).not.toContain("alerts-webhooks");
+    });
+
+    it("judges each route on its newest TWO rows within 7 days: both >= 500 is a fail, only the newest a warn, the detail names route and n/2 only", () => {
+      const seg = slice(ROUTE_CHECK).replace(/\s+/g, " ");
+      expect(seg).toContain("pg_catalog.row_number() over (partition by x.route order by x.ran_at desc, x.id desc) as rn");
+      expect(seg).toContain("where l.rn <= 2");
+      expect(seg).toContain("interval '7 days'");
+      expect(seg).toContain("when pg_catalog.count(*) filter (where l.status >= 500) = 2 then 2");
+      expect(seg).toContain("when pg_catalog.bool_or(l.rn = 1 and l.status >= 500) then 1");
+      expect(seg).toContain("'ardışık başarısız: ' || v_low_text");
+      expect(seg).toContain("k.route || ' ' || k.streak::text || '/2'");
+      expect(seg).toContain("or v_low_fail >= 1 then 'fail'");
+      expect(seg).toContain("or v_low_warn >= 1 or v_total = 0 then 'warn'");
     });
   });
 

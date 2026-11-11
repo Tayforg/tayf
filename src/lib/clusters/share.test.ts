@@ -563,6 +563,171 @@ describe("buildShareText, zones Jev matched (h108-sharesurfaces-1)", () => {
   });
 });
 
+// h118-shares-1: an all-English cluster (92742df8: daily-sabah, hurriyet-daily-news,
+// trt-world, 3 sources, pro_government 2 / gov_leaning 1) shared "3 kaynak · %100
+// iktidar · %0 bağımsız · %0 muhalefet", the zone-absence claim its own page does
+// not make. With languageIsolated the text carries the page's qualifier instead.
+describe("buildShareText for a language-isolated (all-English) cluster (h118-shares-1)", () => {
+  const CLAUSE = "yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı";
+
+  it("92742df8: names the count and the qualifier, with no percent", () => {
+    const text = buildShareText({
+      articleCount: 3,
+      distribution: dist({ pro_government: 2, gov_leaning: 1 }),
+      isBlindspot: false,
+      blindspotSide: null,
+      languageIsolated: true,
+    });
+    expect(text).toBe(`3 kaynak · ${CLAUSE}`);
+    expect(text).not.toContain("%");
+    expect(text).not.toContain("bağımsız");
+    expect(text).not.toContain("muhalefet");
+  });
+
+  it("2dab7e87: two sources, a-news + trt-world", () => {
+    const text = buildShareText({
+      articleCount: 2,
+      distribution: dist({ pro_government: 2 }),
+      isBlindspot: false,
+      blindspotSide: null,
+      languageIsolated: true,
+    });
+    expect(text).toBe(`2 kaynak · ${CLAUSE}`);
+  });
+
+  it("replaces every head variant: votes below, above and equal to the member count", () => {
+    const base = { isBlindspot: false, blindspotSide: null, languageIsolated: true } as const;
+    // Fewer votes than members (a non-voting niche outlet such as mfa-turkey).
+    expect(buildShareText({ ...base, articleCount: 3, distribution: dist({ pro_government: 2 }) })).toBe(
+      `3 kaynak · ${CLAUSE}`,
+    );
+    // More votes than the distinct-text count (a wire cluster).
+    expect(buildShareText({ ...base, articleCount: 2, distribution: dist({ pro_government: 5 }) })).toBe(
+      `2 kaynak · ${CLAUSE}`,
+    );
+  });
+
+  it("leaves 'sınıflandırılmış kaynak yok' alone when nothing voted", () => {
+    expect(
+      buildShareText({
+        articleCount: 2,
+        distribution: dist({}),
+        isBlindspot: false,
+        blindspotSide: null,
+        languageIsolated: true,
+      }),
+    ).toBe("2 kaynak · sınıflandırılmış kaynak yok");
+  });
+
+  it("is today's text when the flag is omitted or false", () => {
+    const input = {
+      articleCount: 3,
+      distribution: dist({ pro_government: 2, gov_leaning: 1 }),
+      isBlindspot: false,
+      blindspotSide: null,
+    } as const;
+    const today = "3 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet";
+    expect(buildShareText(input)).toBe(today);
+    expect(buildShareText({ ...input, languageIsolated: false })).toBe(today);
+  });
+
+  it("every existing head is untouched without the flag (qualified, wire and plain)", () => {
+    expect(
+      buildShareText({
+        articleCount: 14,
+        distribution: dist({ pro_government: 6, center: 1, opposition: 4 }),
+        isBlindspot: false,
+        blindspotSide: null,
+        languageIsolated: false,
+      }),
+    ).toBe("14 kaynak · 11 sınıflandırılmış: %55 iktidar · %9 bağımsız · %36 muhalefet");
+    expect(
+      buildShareText({
+        articleCount: 2,
+        distribution: dist({ pro_government: 4, opposition: 1 }),
+        isBlindspot: false,
+        blindspotSide: null,
+        languageIsolated: false,
+      }),
+    ).toBe("2 kaynak · 5 sınıflandırılmış haber: %80 iktidar · %0 bağımsız · %20 muhalefet");
+  });
+
+  it("a flagged isolated cluster reads 'kümede sadece X', never 'sadece X yazdı'", () => {
+    const text = buildShareText({
+      articleCount: 3,
+      distribution: dist({ pro_government: 3 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+      languageIsolated: true,
+    });
+    expect(text).toBe(`3 kaynak · ${CLAUSE} · Kör nokta: kümede sadece iktidar`);
+    expect(text).not.toContain("yazdı");
+  });
+
+  it("keeps 'spektrumda sadece' over 'kümede sadece' when a toplayıcı / niş source sits in another zone", () => {
+    const text = buildShareText({
+      articleCount: 3,
+      distribution: dist({ pro_government: 2 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+      sources: [
+        { kind: "outlet", bias: "pro_government" },
+        { kind: "niche", bias: "opposition" },
+      ],
+      languageIsolated: true,
+    });
+    expect(text).toContain("Kör nokta: spektrumda sadece iktidar");
+    expect(text).not.toContain("kümede sadece");
+  });
+
+  it("a weighted flag stays 'ağırlıklı' (the +1 only matters for an only-zone claim)", () => {
+    const text = buildShareText({
+      articleCount: 5,
+      distribution: dist({ pro_government: 4, opposition: 1 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+      languageIsolated: true,
+    });
+    expect(text).toBe(`5 kaynak · ${CLAUSE} · Kör nokta: iktidar ağırlıklı`);
+  });
+
+  it("the blindspot suffix of a non-isolated cluster is unchanged (recall 'kümede sadece' included)", () => {
+    const input = {
+      articleCount: 4,
+      distribution: dist({ pro_government: 4 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+    } as const;
+    expect(buildShareText({ ...input, languageIsolated: false })).toBe(
+      "4 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet · Kör nokta: sadece iktidar yazdı",
+    );
+    expect(buildShareText({ ...input, recallMatchedZones: ["muhalefet"] })).toBe(
+      "4 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet · Kör nokta: kümede sadece iktidar",
+    );
+  });
+
+  it("leaves the wire suffix as it was", () => {
+    const text = buildShareText({
+      articleCount: 2,
+      distribution: dist({ pro_government: 2 }),
+      isBlindspot: false,
+      blindspotSide: null,
+      wire: { isWireRedistribution: true, memberCount: 5 },
+      languageIsolated: true,
+    });
+    const plain = buildShareText({
+      articleCount: 2,
+      distribution: dist({ pro_government: 2 }),
+      isBlindspot: false,
+      blindspotSide: null,
+      wire: { isWireRedistribution: true, memberCount: 5 },
+    });
+    const suffix = plain.slice(plain.indexOf(" · ", plain.indexOf("%0 muhalefet")));
+    expect(text).toBe(`2 kaynak · ${CLAUSE}${suffix}`);
+    expect(suffix).not.toBe("");
+  });
+});
+
 describe("buildShareUrl", () => {
   it("builds the exact UTM-tagged cluster URL", () => {
     expect(buildShareUrl("https://tayf.test", "c1", "whatsapp")).toBe(

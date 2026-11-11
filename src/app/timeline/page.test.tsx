@@ -609,3 +609,75 @@ describe("/timeline row layout on phones (h46-mobile-2)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// h118-english-1 (WCAG 3.1.2): getRecentClusters marks a row whose cluster has
+// only English-language outlets as members with lang: 'en'. The headline link of
+// that row carries lang="en"; every other row keeps the document's lang="tr", so
+// its anchor has no lang attribute at all.
+// ---------------------------------------------------------------------------
+describe("/timeline English-only rows (h118-english-1)", () => {
+  const links = (tree: unknown): El[] => {
+    const hits: El[] = [];
+    walk(tree, (el) => {
+      if (el.type === Link) hits.push(el);
+    });
+    return hits;
+  };
+
+  function mkRow(id: string, title: string, extra: Record<string, unknown> = {}) {
+    return {
+      id,
+      title_tr: title,
+      title_tr_neutral: title,
+      title,
+      article_count: 2,
+      first_published: "2026-09-18T10:05:00.000Z",
+      ...extra,
+    };
+  }
+
+  it("the English row's headline link has lang=\"en\"; Turkish and mixed rows have no lang", async () => {
+    mocks.result = {
+      rows: [
+        mkRow("ea12c93d", "Erdogan vows to bolster Türkiye's national unity", { lang: "en" }),
+        mkRow("tr-1", "Merkez Bankası faizi sabit tuttu"),
+        mkRow("mixed-1", "NATO chief visits Türkiye ahead of key summit"),
+      ],
+      total: 3,
+    };
+
+    const tree = await TimelinePage();
+
+    const all = links(tree);
+    expect(all.map((l) => l.props?.href)).toEqual([
+      "/cluster/ea12c93d",
+      "/cluster/tr-1",
+      "/cluster/mixed-1",
+    ]);
+    expect(all[0]?.props?.lang).toBe("en");
+    expect(all[1]?.props?.lang).toBeUndefined();
+    expect(all[2]?.props?.lang).toBeUndefined();
+  });
+
+  it("no row has lang when none is marked (today's markup)", async () => {
+    mocks.result = { rows: [mkRow("a", "Bir"), mkRow("b", "İki")], total: 2 };
+
+    const tree = await TimelinePage();
+
+    expect(links(tree).every((l) => l.props?.lang === undefined)).toBe(true);
+  });
+
+  it("the lang sits on the link, not on the row <li>, the time or the count", async () => {
+    mocks.result = { rows: [mkRow("en-1", "English title", { lang: "en" })], total: 1 };
+
+    const tree = await TimelinePage();
+
+    const others: El[] = [];
+    walk(tree, (el) => {
+      if (el.type === "li" || el.type === "time" || el.type === "span") others.push(el);
+    });
+    expect(others.length).toBeGreaterThan(0);
+    expect(others.every((el) => el.props?.lang === undefined)).toBe(true);
+  });
+});

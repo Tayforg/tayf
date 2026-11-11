@@ -656,6 +656,13 @@ export type FollowItem = {
    * '{sourceCount} kaynak').
    */
   countHead?: string;
+  /**
+   * 'en' when the headline is an English outlet's own article title (WCAG 3.1.2,
+   * h118-english-1): the title span carries lang="en". Additive like countHead: a
+   * cached body from before the field has none, and only the exact string 'en' is
+   * kept.
+   */
+  lang?: "en";
 };
 
 function coerceItem(v: unknown): FollowItem | null {
@@ -682,6 +689,9 @@ function coerceItem(v: unknown): FollowItem | null {
   if (typeof o.countHead === "string" && o.countHead.length > 0) {
     item.countHead = o.countHead;
   }
+  // Same rule for lang: exactly 'en' or missing, never a rejected row and never
+  // an arbitrary string that would reach a lang attribute.
+  if (o.lang === "en") item.lang = "en";
   return item;
 }
 

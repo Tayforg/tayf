@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { ENGLISH_ONLY_SPECTRUM_LINE } from "@/lib/sources/source-language";
+
 import {
   EMPTY_SPECTRUM_NON_VOTING,
   EMPTY_SPECTRUM_UNCLASSIFIED,
@@ -73,5 +75,41 @@ describe("ogSpectrumState", () => {
     const zones = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
     ogSpectrumState(zones, 2);
     expect(zones).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 0 });
+  });
+});
+
+// h118-shares-1: an all-English cluster has voting sources (3/0/0) yet the card
+// printed "İktidar %100 · 3 / Bağımsız %0 · 0 / Muhalefet %0 · 0", the zone-absence
+// claim its page and Manşet Kartı deliberately do not make. With languageIsolated
+// the slot prints one line instead, ahead of every other branch.
+describe("ogSpectrumState for a language-isolated (all-English) cluster (h118-shares-1)", () => {
+  it("prints the English line instead of the tiles for 3/0/0 (92742df8)", () => {
+    expect(ogSpectrumState({ iktidar: 3, bagimsiz: 0, muhalefet: 0 }, 0, true)).toEqual({
+      kind: "empty",
+      line: ENGLISH_ONLY_SPECTRUM_LINE,
+    });
+  });
+
+  it("prints it for 2/0/0 too (2dab7e87), and for a spread-out tally", () => {
+    expect(ogSpectrumState({ iktidar: 2, bagimsiz: 0, muhalefet: 0 }, 0, true)).toEqual({
+      kind: "empty",
+      line: ENGLISH_ONLY_SPECTRUM_LINE,
+    });
+    expect(ogSpectrumState({ iktidar: 1, bagimsiz: 1, muhalefet: 1 }, 0, true)).toEqual({
+      kind: "empty",
+      line: ENGLISH_ONLY_SPECTRUM_LINE,
+    });
+  });
+
+  it("wins over the non-voting and the unclassified lines when nothing voted", () => {
+    expect(ogSpectrumState({ ...ZERO }, 2, true)).toEqual({ kind: "empty", line: ENGLISH_ONLY_SPECTRUM_LINE });
+    expect(ogSpectrumState({ ...ZERO }, 0, true)).toEqual({ kind: "empty", line: ENGLISH_ONLY_SPECTRUM_LINE });
+  });
+
+  it("keeps the tiles when the flag is omitted or false (every other cluster is unchanged)", () => {
+    expect(ogSpectrumState({ iktidar: 3, bagimsiz: 0, muhalefet: 0 }, 0)).toEqual({ kind: "tiles" });
+    expect(ogSpectrumState({ iktidar: 3, bagimsiz: 0, muhalefet: 0 }, 0, false)).toEqual({ kind: "tiles" });
+    expect(ogSpectrumState({ ...ZERO }, 2, false)).toEqual({ kind: "empty", line: EMPTY_SPECTRUM_NON_VOTING });
+    expect(ogSpectrumState({ ...ZERO }, 0, false)).toEqual({ kind: "empty", line: EMPTY_SPECTRUM_UNCLASSIFIED });
   });
 });

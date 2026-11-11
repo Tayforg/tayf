@@ -90,3 +90,88 @@ describe("renderSpectrumBadgeSvg", () => {
     expect(a).toBe(b);
   });
 });
+
+// h118-shares-1: an all-English cluster (92742df8: 3 sources, pro_government 2 /
+// gov_leaning 1) served "Tayf yelpazesi: İktidar %100, Bağımsız %0, Muhalefet %0 ·
+// 3 kaynak", the zone-absence claim its own page does not make. With
+// languageIsolated the title / aria-label and the small text carry the qualifier;
+// the bar is the cluster's own and does not change.
+describe("renderSpectrumBadgeSvg for a language-isolated (all-English) cluster (h118-shares-1)", () => {
+  const LABEL =
+    "Tayf yelpazesi: yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı · 3 kaynak";
+
+  it("92742df8: title and aria-label name the qualifier and the count, with no percent", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(3, 0, 0), sourceCount: 3, languageIsolated: true });
+    expect(svg).toContain(`aria-label="${LABEL}"`);
+    expect(svg).toContain(`<title>${LABEL}</title>`);
+    expect(svg).not.toContain("İktidar %");
+    expect(svg).not.toContain("%100");
+  });
+
+  it("the small text reads 'N kaynak · yalnızca İngilizce'", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(3, 0, 0), sourceCount: 3, languageIsolated: true });
+    expect(svg).toContain(">3 kaynak · yalnızca İngilizce</text>");
+    expect(svg).not.toContain("%100/%0/%0");
+  });
+
+  it("2dab7e87: two sources", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(2, 0, 0), sourceCount: 2, languageIsolated: true });
+    expect(svg).toContain(
+      "<title>Tayf yelpazesi: yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı · 2 kaynak</title>",
+    );
+    expect(svg).toContain(">2 kaynak · yalnızca İngilizce</text>");
+  });
+
+  it("leaves the bar, the colours and the geometry exactly as the unqualified badge draws them", () => {
+    const isolated = renderSpectrumBadgeSvg({ zones: zones(3, 0, 0), sourceCount: 3, languageIsolated: true });
+    const plain = renderSpectrumBadgeSvg({ zones: zones(3, 0, 0), sourceCount: 3 });
+    expect(barWidths(isolated)).toEqual(barWidths(plain));
+    expect(barWidths(isolated).reduce((a, b) => a + b, 0)).toBe(176);
+    const bar = (svg: string) => svg.match(/<g clip-path="url\(#tayf-bar\)">.*?<\/g>/)?.[0];
+    expect(bar(isolated)).toBeDefined();
+    expect(bar(isolated)).toBe(bar(plain));
+    // Only the aria-label, the <title> and the small text differ.
+    const strip = (svg: string) =>
+      svg
+        .replace(/aria-label="[^"]*"/, "")
+        .replace(/<title>[^<]*<\/title>/, "")
+        .replace(/(<text x="64"[^>]*>)[^<]*(<\/text>)/, "$1$2");
+    expect(strip(isolated)).toBe(strip(plain));
+  });
+
+  it("fits the 320x48 badge: the small text starts at x=64 and stays short", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(3, 0, 0), sourceCount: 3, languageIsolated: true });
+    const caption = svg.match(/<text x="64"[^>]*>([^<]*)<\/text>/)![1]!;
+    // 10 px system-ui averages ~5.5 px a character: 256 px of room is ~46 characters.
+    expect(caption.length).toBeLessThanOrEqual(34);
+  });
+
+  it("an isolated badge with nothing voting still carries the qualifier and the grey bar", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(0, 0, 0), sourceCount: 2, languageIsolated: true });
+    expect(svg).toContain(
+      "<title>Tayf yelpazesi: yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı · 2 kaynak</title>",
+    );
+    expect(svg).toContain(">2 kaynak · yalnızca İngilizce</text>");
+    expect(barWidths(svg)).toEqual([176]);
+  });
+
+  it("counts members by `sourceCount`, not by the (qualified) head: a 9-member cluster with 8 votes reads '9 kaynak'", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(5, 3, 0), sourceCount: 9, languageIsolated: true });
+    expect(svg).toContain("· 9 kaynak</title>");
+    expect(svg).not.toContain("sınıflandırılmış)");
+  });
+
+  it("is the old badge, byte for byte, when the flag is omitted or false", () => {
+    const input = { zones: zones(3, 0, 0), sourceCount: 3 };
+    const plain = renderSpectrumBadgeSvg(input);
+    expect(renderSpectrumBadgeSvg({ ...input, languageIsolated: false })).toBe(plain);
+    expect(plain).toContain('aria-label="Tayf yelpazesi: İktidar %100, Bağımsız %0, Muhalefet %0 · 3 kaynak"');
+    expect(plain).toContain(">3 kaynak · %100/%0/%0</text>");
+  });
+
+  it("never emits raw <script or an unescaped ampersand", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(3, 0, 0), sourceCount: 3, languageIsolated: true });
+    expect(svg).not.toContain("<script");
+    expect(svg).not.toMatch(/&(?!amp;|lt;|gt;|quot;|apos;)/);
+  });
+});

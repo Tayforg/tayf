@@ -1,6 +1,7 @@
 import { escapeXml } from "@/lib/feeds/rss-builder";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { zonePercents } from "@/lib/bias/zone-summary";
+import { ENGLISH_ONLY_BADGE_TAG, ENGLISH_ONLY_SHARE_CLAUSE } from "@/lib/sources/source-language";
 import type { MediaDnaZone } from "@/types";
 
 // "Yelpaze rozeti": a 320x48 SVG showing the iktidar/bagimsiz/muhalefet
@@ -27,9 +28,19 @@ function safeInt(n: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+/**
+ * `languageIsolated` (h118-shares-1) is `isLanguageIsolatedCluster(...)`: every
+ * member is an English-language outlet. The percents would then read as a
+ * zone-absence claim the cluster page does not make, so the aria-label, the
+ * <title> and the small text carry the qualifier instead ("Tayf yelpazesi:
+ * yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı · N kaynak",
+ * "N kaynak · yalnızca İngilizce"). The bar is the cluster's own and is drawn as
+ * before. Omitted or false leaves the badge byte for byte as it was.
+ */
 export function renderSpectrumBadgeSvg(input: {
   zones: Record<MediaDnaZone, number>;
   sourceCount: number;
+  languageIsolated?: boolean;
 }): string {
   const n = safeInt(input.sourceCount);
   const total = ZONE_ORDER.reduce((a, z) => a + safeInt(input.zones[z]), 0);
@@ -49,12 +60,16 @@ export function renderSpectrumBadgeSvg(input: {
   // against buildShareText's 'M sınıflandırılmış haber' left for a follow-up.
   const head = sourceCountHead(n, counts);
 
-  const label = empty
-    ? "Tayf yelpazesi: sınıflandırılmış kaynak yok"
-    : `Tayf yelpazesi: İktidar %${pct.iktidar}, Bağımsız %${pct.bagimsiz}, Muhalefet %${pct.muhalefet} · ${head}`;
-  const caption = empty
-    ? `${n} kaynak`
-    : `${head} · %${pct.iktidar}/%${pct.bagimsiz}/%${pct.muhalefet}`;
+  const label = input.languageIsolated
+    ? `Tayf yelpazesi: ${ENGLISH_ONLY_SHARE_CLAUSE} · ${n} kaynak`
+    : empty
+      ? "Tayf yelpazesi: sınıflandırılmış kaynak yok"
+      : `Tayf yelpazesi: İktidar %${pct.iktidar}, Bağımsız %${pct.bagimsiz}, Muhalefet %${pct.muhalefet} · ${head}`;
+  const caption = input.languageIsolated
+    ? `${n} kaynak · ${ENGLISH_ONLY_BADGE_TAG}`
+    : empty
+      ? `${n} kaynak`
+      : `${head} · %${pct.iktidar}/%${pct.bagimsiz}/%${pct.muhalefet}`;
 
   let bar: string;
   if (empty) {
