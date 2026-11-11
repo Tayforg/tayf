@@ -231,12 +231,13 @@ describe("toV1ClusterRecord", () => {
     expect(Object.keys(record)).not.toContain("cluster_articles");
   });
 
-  it("topic7 is null when the column is absent, never an error", () => {
+  it("topic7 is null when the row has none, never an error; a stored topic is copied as is", () => {
     const record = toV1ClusterRecord(makeRow());
     expect(record.topic7).toBeNull();
     expect("topic7" in record).toBe(true);
 
-    const withTopic = toV1ClusterRecord(makeRow(), "siyaset");
-    expect(withTopic.topic7).toBe("siyaset");
+    expect(toV1ClusterRecord(makeRow({ topic7: null })).topic7).toBeNull();
+    const withTopic = toV1ClusterRecord(makeRow({ topic7: "ekonomi" }));
+    expect(withTopic.topic7).toBe("ekonomi");
   });
 });

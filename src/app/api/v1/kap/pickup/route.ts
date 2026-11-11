@@ -9,6 +9,7 @@ import {
 } from "@/lib/api/keys";
 import { parsePickupParams, toV1PickupBody } from "@/lib/api/v1-kap-pickup";
 import { fetchTickerPickup } from "@/lib/finance/kap-pickup-query";
+import { fetchPressCodeForWindow } from "@/lib/finance/press-code";
 import { createReaderClient } from "@/lib/supabase/server";
 import { registryEnvelope } from "@/lib/sources/registry";
 
@@ -18,6 +19,11 @@ import { registryEnvelope } from "@/lib/sources/registry";
  * exactly like the other v1 endpoints; responses are uncached
  * (`private, no-store` via apiV1Headers). Never returns an article title
  * or URL — see toV1PickupBody's header comment.
+ *
+ * `press_code` (h128-apiv1-2) is the panel's "Basın bu şirketi ISCTR koduyla
+ * anıyor" rule: a sibling share code of the same company carries the press the
+ * ticker's own code has none of. Its lookup runs beside the pickup read, fails
+ * open to null and never rejects, so it cannot turn a good answer into an error.
  */
 export const GET = withApiErrors(async (request: Request) => {
   const auth = await requireApiKey(request);
@@ -29,10 +35,19 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   try {
-    const r = await fetchTickerPickup(createReaderClient(), parsed.ticker, parsed.sinceMs, parsed.nowMs, {
-      limit: parsed.limit,
+    const supabase = createReaderClient();
+    const [r, pressCode] = await Promise.all([
+      fetchTickerPickup(supabase, parsed.ticker, parsed.sinceMs, parsed.nowMs, { limit: parsed.limit }),
+      fetchPressCodeForWindow(
+        supabase,
+        parsed.ticker,
+        new Date(parsed.sinceMs).toISOString(),
+        new Date(parsed.nowMs).toISOString(),
+      ),
+    ]);
+    return NextResponse.json(registryEnvelope({ ...toV1PickupBody(r, pressCode) }), {
+      headers: apiV1Headers(auth.tier),
     });
-    return NextResponse.json(registryEnvelope({ ...toV1PickupBody(r) }), { headers: apiV1Headers(auth.tier) });
   } catch (err) {
     return withApiV1Headers(apiServerError(err), auth.tier);
   }

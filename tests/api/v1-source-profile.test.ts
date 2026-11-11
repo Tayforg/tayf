@@ -32,6 +32,26 @@ const RAW_SOURCES = [
     trustee_note: null,
     rss_url: "https://www.sabah.com.tr/rss/anasayfa.xml",
   },
+  ...(
+    [
+      ["haberler-com", "aggregator", "aaaaaaaa-0000-4000-8000-000000000001"],
+      ["isci-haber", "niche", "aaaaaaaa-0000-4000-8000-000000000002"],
+      ["anadolu-ajansi", "wire", "aaaaaaaa-0000-4000-8000-000000000003"],
+    ] as const
+  ).map(([slug, kind, id]) => ({
+    id,
+    slug,
+    name: slug,
+    url: `https://${slug}.example`,
+    bias: "center",
+    kind,
+    active: true,
+    zone_rationale: null,
+    zone_rationale_at: null,
+    trustee_since: null,
+    trustee_note: null,
+    rss_url: `https://${slug}.example/rss.xml`,
+  })),
   {
     id: "11111111-2222-3333-4444-555555555555",
     slug: "retired-outlet",
@@ -72,6 +92,8 @@ const dbState = vi.hoisted(() => ({
   sourcesQueries: 0,
   karneRow: null as Record<string, unknown> | null,
   karneError: null as { message: string } | null,
+  /** Serve `karneRow`'s numbers for whichever source id is asked for, not just `sabah`'s. */
+  karneForAll: false,
   touchCalls: 0,
 }));
 
@@ -91,8 +113,11 @@ const supabaseFake = await vi.hoisted(async () => {
         if (dbState.karneError) return { data: null, error: dbState.karneError };
         const idEq = state.eq.find((e) => e.col === "source_id");
         const row = dbState.karneRow;
-        if (!row || !idEq || row.source_id !== idEq.val) return { data: [], error: null };
-        return { data: [row], error: null };
+        if (!row || !idEq) return { data: [], error: null };
+        // The karne row of the source asked for: the default fixture belongs to `sabah`, the rest
+        // of the fixture sources reuse its numbers under their own id.
+        if (row.source_id !== idEq.val && !dbState.karneForAll) return { data: [], error: null };
+        return { data: [{ ...row, source_id: idEq.val }], error: null };
       },
       api_keys: () => ({ data: [], error: null }),
       api_key_usage_daily: () => ({ data: [{ calls: 0 }], error: null }),
@@ -135,6 +160,7 @@ beforeEach(() => {
   dbState.sourcesQueries = 0;
   dbState.karneRow = karneRow();
   dbState.karneError = null;
+  dbState.karneForAll = false;
   dbState.touchCalls = 0;
 });
 
@@ -283,6 +309,34 @@ describe("GET /api/v1/sources/{slug}/profile", () => {
   it("meters exactly once per GET (api_key_touch)", async () => {
     await get("sabah");
     expect(dbState.touchCalls).toBe(1);
+  });
+
+  // h128-apiv1-2 part B: the site's karne drops "yazan bölgedeydi" for an aggregator or niche
+  // source (their own_zone is derived from the bias label: migration 106), so the keyed profile
+  // returns null for public_blindspot_same_side there. haberler-com: 152 appearances, 131 "same side".
+  describe("public_blindspot_same_side follows the site's voting rule", () => {
+    beforeEach(() => {
+      dbState.karneForAll = true;
+      dbState.karneRow = karneRow({ n_clusters: 600, n_multi: 400, co_iktidar: 300, co_bagimsiz: 280, co_muhalefet: 250, n_blindspot: 152, n_blindspot_same_side: 131 });
+    });
+
+    it.each(["haberler-com", "isci-haber"])("%s (not a voting kind): appearances 152, same_side null", async (slug) => {
+      const res = await get(slug);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.profile.public_blindspot_appearances).toBe(152);
+      expect(body.profile.public_blindspot_same_side).toBeNull();
+      expect(Object.keys(body.profile).sort()).toEqual(PROFILE_KEYS);
+      expect(body.profile.n_clusters).toBe(600);
+    });
+
+    it.each(["sabah", "anadolu-ajansi"])("%s (an outlet or a wire votes): same_side stays 131", async (slug) => {
+      const res = await get(slug);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.profile.public_blindspot_appearances).toBe(152);
+      expect(body.profile.public_blindspot_same_side).toBe(131);
+    });
   });
 
   it("OPTIONS returns 204", async () => {

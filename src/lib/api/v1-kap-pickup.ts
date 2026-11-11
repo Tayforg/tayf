@@ -102,12 +102,20 @@ export interface V1PickupBody {
    * `total_disclosures`; a remaining gap means rows are missing.
    */
   superseded: number;
+  /**
+   * The sibling share code the press matches this ticker's company to (ISATR -> ISCTR), the code the
+   * /ekonomi panel names in its "Basın bu şirketi ISCTR koduyla anıyor" note. Set only when the ticker
+   * has no mention of its own in the window and a sibling code of the same company has some. Null
+   * otherwise, and when the sibling reads failed (the lookup fails open).
+   */
+  press_code: string | null;
   totals: {
     /** The ticker's own filings (issuer: true) in the list; every other total is over these too. */
     disclosures: number;
     picked_up: number;
-    /** null when `disclosures` is 0. */
+    /** null when `disclosures` is 0, and whenever `press_code` is set (the ticker's own press is empty). */
     pickup_rate: number | null;
+    /** null when no disclosure was picked up, and whenever `press_code` is set. */
     median_first_lag_minutes: number | null;
     outlets: number;
     zones: Record<string, number>;
@@ -118,7 +126,14 @@ export interface V1PickupBody {
   disclosures: V1PickupDisclosure[];
 }
 
-export function toV1PickupBody(r: TickerPickup): V1PickupBody {
+/**
+ * `pressCode` is the answer of `fetchPressCodeForWindow` (src/lib/finance/press-code.ts), null by default.
+ * When it is set the ticker's own mentions are empty and a sibling code carries the press, so the two
+ * ratios computed from those empty mentions (`pickup_rate`, `median_first_lag_minutes`) are null instead
+ * of a misleading 0, exactly as the /ekonomi panel swaps its number grid for the note. Every other field
+ * is the query's own.
+ */
+export function toV1PickupBody(r: TickerPickup, pressCode: string | null = null): V1PickupBody {
   return {
     ticker: r.ticker,
     window_hours: PICKUP_WINDOW_HOURS,
@@ -129,11 +144,12 @@ export function toV1PickupBody(r: TickerPickup): V1PickupBody {
     capped: r.capped,
     total_disclosures: r.totalDisclosures,
     superseded: r.superseded,
+    press_code: pressCode,
     totals: {
       disclosures: r.totals.disclosures,
       picked_up: r.totals.pickedUp,
-      pickup_rate: r.totals.pickupRate,
-      median_first_lag_minutes: r.totals.medianFirstLagMinutes,
+      pickup_rate: pressCode === null ? r.totals.pickupRate : null,
+      median_first_lag_minutes: pressCode === null ? r.totals.medianFirstLagMinutes : null,
       outlets: r.totals.outlets,
       zones: r.totals.zones,
       related_only: r.totals.relatedOnly,

@@ -16,7 +16,6 @@ import {
 } from "@/lib/api/keys";
 import {
   V1_CLUSTER_SELECT,
-  fetchTopic7,
   toV1ClusterRecord,
   type V1ClusterRow,
 } from "@/lib/api/v1-clusters";
@@ -95,8 +94,7 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
     return withApiV1Headers(apiNotFound("Cluster not found"), auth.tier);
   }
 
-  const topic7Map = await fetchTopic7(supabase, [data.id]);
-  const cluster = toV1ClusterRecord(data, topic7Map.get(data.id) ?? null);
+  const cluster = toV1ClusterRecord(data);
 
   return NextResponse.json(registryEnvelope({ cluster }), {
     headers: apiV1Headers(auth.tier),

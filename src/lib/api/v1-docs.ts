@@ -4,6 +4,7 @@ import {
   V1_MAX_LIMIT,
   V1_MAX_SINCE_DAYS,
   V1_POLITICS_THRESHOLD,
+  V1_TOPIC7_VALUES,
 } from "@/lib/api/v1-clusters";
 import { V1_PICKUP_DEFAULT_DAYS, V1_PICKUP_MAX_DAYS } from "@/lib/api/v1-kap-pickup";
 import { PICKUP_WINDOW_HOURS, TICKER_RELEVANCE_MIN } from "@/lib/finance/kap-pickup";
@@ -289,7 +290,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
     summaryTr: "Haber kümelerini listele",
     summaryEn: "List news clusters",
     notesTr: [
-      `Yalnızca üyelerinin en az %${Math.round(V1_POLITICS_THRESHOLD * 100)}'ı politika/son dakika kategorisinde olan kümeler döner; ekonomi ve spor kümeleri bu uç noktada yoktur.`,
+      `Liste, üyelerinin en az %${Math.round(V1_POLITICS_THRESHOLD * 100)}'ı politika/son dakika kategorisinde olan kümelerden oluşur; kümenin konu etiketi (topic7) yine de ekonomi, dünya ya da spor olabilir.`,
       "Tek haberden oluşan kümeler (article_count < 2) bu listede yer almaz; tek küme okuması (GET /api/v1/clusters/{id}) bu süzgeci uygulamaz.",
       `since, updated_at için alt sınırdır; ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir.`,
       "Her sayfa en çok 300 aday arasından süzülür, bu yüzden bir sayfa limit'ten az küme içerebilir. Devamı için yanıttaki next_cursor değerini before parametresiyle gönderin; next_cursor null ise liste bitmiştir.",
@@ -298,6 +299,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       "is_blindspot, sitenin kör nokta geri çağırma (recall veto) kuralını uygular.",
       `Site, kör nokta etiketini kartlarda ve haber sayfasında ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra gösterir; bu uç nokta etiketi beklemeden döndürür (beklemeyi uygulayan liste: /api/v1/alerts/blindspots).`,
       "sources listesi toplayıcı ve niş türündeki kaynakları da içerir.",
+      `topic7, kümenin kendi konu etiketidir (${V1_TOPIC7_VALUES.join(", ")}) ve üyelerin yayın kategorisinden ayrı bir sınıflandırmadır; null, kümeye henüz konu atanmadığı anlamına gelir.`,
     ],
     params: [SINCE_PARAM, LIMIT_PARAM, BEFORE_PARAM],
     responses: [
@@ -426,7 +428,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       "Sayılar günde bir kez yeniden hesaplanır; window_start, window_end ve computed_at hesaplamanın zamanını verir. Henüz hesaplanmamış bir kaynak için profile null döner.",
       `Sitedeki eşikler aynen uygulanır: ${V1_PROFILE_MIN_CLUSTERS} kümeden azsa yalnızca n_clusters döner, diğer sayılar null olur; ${V1_PROFILE_MIN_MULTI} çok kaynaklı haberden azsa co_covering_zones null olur.`,
       "co_covering_zones: kaynağın yazdığı çok kaynaklı haberlerden kaçında her bölgeden (iktidar/bağımsız/muhalefet) en az bir başka kaynağın da yazdığı; bir haber birden çok bölgede sayılabilir.",
-      "public_blindspot_appearances: sitenin kör nokta tanımına (geri çağırma vetosu uygulanmış) giren haberlerden kaçında bu kaynağın da haberi var; public_blindspot_same_side: bunların kaçında haberi ağırlıkla yazan bölge kaynağın kendi bölgesiydi.",
+      "public_blindspot_appearances: sitenin kör nokta tanımına (geri çağırma vetosu uygulanmış) giren haberlerden kaçında bu kaynağın da haberi var; public_blindspot_same_side: bunların kaçında haberi ağırlıkla yazan bölge kaynağın kendi bölgesiydi. Toplayıcı ve niş kaynakların oy hakkı yoktur, kendi bölgeleri etiketten türetilir; karnedeki gibi bu kaynaklar için public_blindspot_same_side null döner, public_blindspot_appearances kalır.",
       "Bu uç nokta tık tuzağı puanı veya başlık değişikliği verisi içermez.",
     ],
     params: [SLUG_PARAM],
@@ -476,6 +478,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       "disclosure_coverage görünümü asla sorgulanmaz; sorgu her zaman kap_disclosures / article_tickers üzerinden hisse kodu ve zaman sınırlıdır.",
       "capped: true ise liste limit sınırına ulaştı; penceredeki daha eski bildirimler listede yok. total_disclosures: penceredeki tüm bildirimlerin sayısı (sayım başarısız olursa null). truncated: true ise haber eşleşmelerinin sayfa sınırına ulaşıldı.",
       "superseded: sonradan bir KAP düzeltmesiyle (DUZENLENEN) yerine yenisi konan, bu yüzden okunup disclosures, count ve totals dışında bırakılan ilk bildirimlerin sayısı; düzeltme bildirimi listede yer alır ve 48 saatlik penceresi ilk bildirimin zamanından başlar. total_disclosures bu bildirimleri de sayar: capped false iken count + superseded = total_disclosures olur, aradaki fark kalıyorsa bazı kayıtlar listede eksiktir.",
+      "press_code: hissenin kendi kodunda penceredeki haber yok ama aynı şirketin başka bir koduna (ör. ISATR için ISCTR) haber eşleşiyorsa o kod, yoksa null. press_code doluysa basın bu şirketi o kodla anıyor; totals.pickup_rate ve totals.median_first_lag_minutes null döner, oranlar için o kodu sorgulayın. Kardeş kod okumalarından biri başarısız olursa da null döner (açık başarısız, 200).",
       "issuer: bildirimi hissenin kendisi mi yaptı (hisse kodu bildirimin stock_codes alanında). false ise bildirim hisseyi yalnızca anıyor (Takasbank veya MKK listesi, işlem yasağı gibi): listede yer alır ama articles, outlets ve first_lag_minutes 0 ya da null kalır, yankı hesaplanmaz. totals yalnızca issuer: true kayıtları sayar; issuer: false kayıtların sayısı totals.related_only alanındadır ve issuer: true kayıt yoksa pickup_rate null döner.",
     ],
     params: [TICKER_PARAM, PICKUP_SINCE_PARAM, PICKUP_LIMIT_PARAM],

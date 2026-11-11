@@ -328,6 +328,23 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     );
   });
 
+  it("h128-apiv1-4: docs/api.md lists the topic7 values and no longer describes the per-process probe", () => {
+    const md = readFileSync(path.join(process.cwd(), "docs/api.md"), "utf8");
+    const start = md.indexOf("### `GET /api/v1/clusters`");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = md.slice(start + 1);
+    const next = rest.search(/\n### /);
+    const section = (next < 0 ? rest : rest.slice(0, next)).replace(/\s+/g, " ");
+
+    expect(section).not.toContain("probed once per server process");
+    expect(section).not.toContain("degrades to `null`");
+    for (const value of ["politika", "dunya", "ekonomi", "spor", "yasam", "teknoloji", "genel"]) {
+      expect(section, `topic7 value ${value}`).toContain(`\`${value}\``);
+    }
+    // The member-category rule and the topic7 taxonomy are two different things.
+    expect(section).toContain("**not** the feed category");
+  });
+
   it("V1Alert schema property names equal Object.keys(toV1AlertRecord(fixture))", () => {
     const fixture: AlertItem = {
       type: "one_zone_silent",
@@ -684,6 +701,40 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     expect([...(totals.required ?? [])].sort()).toEqual(Object.keys(body.totals).sort());
     expect(Object.keys(record.properties ?? {}).sort()).toEqual(Object.keys(body.disclosures[0]!).sort());
     expect([...(record.required ?? [])].sort()).toEqual(Object.keys(body.disclosures[0]!).sort());
+  });
+
+  it("h128-apiv1-2: KapPickupResponse documents press_code, and docs/api.md carries it in the example and a note", () => {
+    const response = doc.components.schemas.KapPickupResponse as unknown as {
+      allOf: Array<{ required?: string[]; properties?: Record<string, { type?: unknown; description?: string }> }>;
+    };
+    const own = response.allOf.find((p) => p.required)!;
+    expect(own.required).toContain("press_code");
+    expect(own.properties?.press_code?.type).toEqual(["string", "null"]);
+    expect(own.properties?.press_code?.description ?? "").toContain("ISCTR");
+
+    const md = readFileSync(path.join(process.cwd(), "docs/api.md"), "utf8");
+    const start = md.indexOf("### `GET /api/v1/kap/pickup`");
+    const rest = md.slice(start + 1);
+    const next = rest.search(/\n### /);
+    const section = next < 0 ? rest : rest.slice(0, next);
+    expect(section).toMatch(/"press_code":\s*null/);
+    expect(section).toContain("**`press_code`**");
+    expect(section.replace(/\s+/g, " ")).toContain("`totals.pickup_rate` and `totals.median_first_lag_minutes` are `null`");
+  });
+
+  it("h128-apiv1-2: the source profile schema and docs say public_blindspot_same_side is null for an aggregator or niche source", () => {
+    const schema = doc.components.schemas.SourceProfile as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(schema.properties.public_blindspot_same_side?.description ?? "").toMatch(/aggregator|niche/i);
+
+    const md = readFileSync(path.join(process.cwd(), "docs/api.md"), "utf8");
+    const start = md.indexOf("### `GET /api/v1/sources/{slug}/profile`");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = md.slice(start + 1);
+    const next = rest.search(/\n### /);
+    const section = (next < 0 ? rest : rest.slice(0, next)).replace(/\s+/g, " ");
+    expect(section).toContain("`public_blindspot_same_side` is `null` for an aggregator or niche source");
   });
 
   it("documents the 405 on every GET endpoint (and only GET endpoints)", () => {

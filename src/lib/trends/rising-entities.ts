@@ -106,7 +106,12 @@ export type RisingHubSpec = {
    * (tests/migrations/163 fails if the two drift), so a veto that is not in that
    * migration lives here, and growing it needs no migration. entity-hub.ts emits
    * it as a second negative lookahead right behind the `excludes` one, so the
-   * first lookahead stays equal to the SQL list. A trusted alias skips it too.
+   * first lookahead stays equal to the SQL list. A trusted alias skips it too. related-clusters
+   * uses the vetoed KEYS but ignores hubExcludes for its stem exclusion: the entity's words
+   * ("borsa", "enflasyon") stay excluded from "the shared stem" even where the veto withholds
+   * the key (h129). Curated on
+   * meclis and, since h128-hubs-1, on the five generic-word hubs enflasyon, faiz, dolar,
+   * borsa and asgari-ucret (foreign cues; their comments carry the replay counts).
    */
   hubExcludes?: readonly string[];
   /**
@@ -443,9 +448,54 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
     ],
   },
   zelenski: { aliases: ["Zelenski", "Zelenskiy", "Zelensky", "Zelenskyy"] },
-  enflasyon: { hubMatch: "prefix" },
-  faiz: { hubMatch: "prefix" },
-  dolar: { hubMatch: "prefix", quantityGuard: true },
+  // The five generic-word hubs below name a topic that every country has, so each carries hub-only foreign vetoes
+  // (h128-hubs-1, replay 2026-11-11 ~15:52Z, read-only, the hub's own RPC body as a plain select). Method, as for tcmb
+  // above: the hub's real candidate set (live clusters: not archived, article_count >= 2, merged_into null, 14-day
+  // updated_at window, stemmed prefilter, same folded text as entity_cluster_ids_v3) and the same set over 365 days;
+  // every row a candidate cue removes was labelled by hand, and a cue stays only if it removes more foreign rows than
+  // Turkish ones and at least one that no other kept cue removes. The summary lead stays in the text (no headlineOnly):
+  // most of the Turkish emekli-zam stories of enflasyon name the topic only there ("enflasyon farkı"). They are
+  // hubExcludes, not excludes: migration 163 mirrors `excludes` for /trends, and none of these five is a guarded key.
+  // The starting list was abd, fed, vance, trump, kongre, ara secim, cin, sanghay, hong kong, japonya, banglades,
+  // arjantin, almanya, ingiltere, avro bolgesi. Out, and why: "vance", "trump", "kongre" and "ara secim" only ever
+  // removed rows "abd" removes too ("kongre" also hit a CHP congress story, 96127c6b); "sanghay", "hong kong",
+  // "almanya" and "avro bolgesi" matched no row of these hubs in a year; "arjantin" removed only a Turkish dollar-swap
+  // story (f54b50d1); a bare "new york" would also catch "New York Times" citations, so the phrase is "new york borsa".
+  // Foreign-country names are not blanket cues: "Rusya, Ukrayna ve Suriye ile karşılaştırarak" is a Turkish enflasyon
+  // story (Özdağ, ef9a8076).
+  // enflasyon, 14 days: 24 -> 20, 4 dropped, all read: b6fe7960 (US Vice President Vance on the midterms), c89215b1
+  // ("ABD sandık başında"), 4619dcb5 (the Fed's rate decision) and 9f7c27c3 (a Dolar/TL report that says "enflasyon"
+  // in one lead clause: a Turkish story, but about the lira rate, so a passing mention here). 365 days: 175 -> 155, 20
+  // dropped: 16 foreign (US CPI and election wraps, New York openings, the Bank of England, Iran on US sanctions), the
+  // 9f7c27c3 report, a Turkish column on US costs (83925be2) and two Şimşek statements whose lead names the US-Iran war
+  // (eaf2af47, a53c3e7b, 8 June): the known cost of the bare "abd", none of them in the 14-day window. Left in on
+  // purpose: 5a01e024 (the AK Parti 25th-anniversary panel, enflasyon in a lead clause) and be844f70 (a poll): Turkish
+  // passing mentions that no foreign cue can tell apart.
+  enflasyon: { hubMatch: "prefix", hubExcludes: ["abd", "fed", "ingiltere", "new york borsa"] },
+  // faiz, 14 days: 18 -> 11, 7 dropped: 4 foreign (8ea9e45f and 4619dcb5 / 8fd26b07 on the Fed, c2a994a2, ING on the US
+  // midterms) and 3 Turkish gold-price stories whose lead names US bond yields (57f9b800, 8bd08fc2, 30959fc3), where
+  // the faiz is the US yield. 365 days: 120 -> 72, 48 dropped: 43 foreign (Fed decisions and officials,
+  // 26 New York openings, the Bank of England, the ECB minutes, US mortgage rates) and 5 Turkish gold-price stories that
+  // name US yields in the lead (the 3 above, 93cb5710, 6270a2a2). No Turkish faiz story was lost: the budget-interest,
+  // credit-card and policy-rate rows all stay. "fed" is the debatable one: a Fed decision is news to a Turkish reader,
+  // but it is the US rate. It removes 24 rows in 365 days; 4 of them (4619dcb5, 8fd26b07, Bowman 3fd27ccd, 6375318c)
+  // carry no other foreign cue. They stay on the home feed and in search.
+  faiz: { hubMatch: "prefix", hubExcludes: ["abd", "fed", "ecb", "ingiltere", "new york borsa"] },
+  // dolar, 14 days: 11 -> 3, 8 dropped: the US-election gold and market wraps (c2a994a2 ING, 57f9b800, 8bd08fc2,
+  // 0ef5843d, 46980da8, 8dff5a78, 30959fc3, dd026e44), where "dolar" is the dollar index or a side clause. No bare "abd":
+  // it also removes 9f7c27c3 ("Dolar 50 TL'nin üstünde! ABD seçim gelişmeleri izleniyor", a Turkish lira-rate report)
+  // and, over 365 days, the Turkish swap-line stories (ed96265c, f54b50d1, 0c243d16). "ara secim" separates the two:
+  // the US wraps say "ABD ara seçimleri", the lira report only "ABD seçimleri" ("ara secim" removes 7 of the 8, "fed" the
+  // eighth, 8dff5a78). 365 days: 47 -> 36, 11 dropped, all foreign or side mentions: the 8 above plus Iraq's dollar
+  // shipments (c21e9f2f, da88a783) and China's answer on Iran sanctions (5033fa55). The hub is now 3 clusters: Babacan on
+  // the 200-lira note, the Dolar/TL report and c9e1b994, a Hatay burglary that says "dolar" in its headline (an accepted
+  // leftover: no cue separates it from a Turkish dollar story). 3 is the indexable floor; below it the hub is noindex by
+  // the existing thin-hub rule.
+  dolar: {
+    hubMatch: "prefix",
+    quantityGuard: true,
+    hubExcludes: ["ara secim", "fed", "irak", "cin"],
+  },
   // The Turkish ministry only: "Dışişleri" right after a foreign country word
   // ("ABD Dışişleri Bakanı Rubio", "İran Dışişleri Sözcüsü") is that country's.
   // h110-trendsdata-2 (2026-11-10): 9 of the 20 cards of page 1 were other countries' ministers, because the
@@ -544,9 +594,25 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "kripto",
       "ticaret borsa",
     ],
+    // The bare "borsa" is also the global markets' (h128-hubs-1, replay 2026-11-11 ~15:52Z). hubExcludes apply to the
+    // bare form only: Borsa İstanbul and BIST are trusted and keep a story that also names the US or China. 14 days:
+    // 21 -> 18, 3 dropped, all foreign: 2a6b4822 and 0ef5843d (the US-election gold, oil and global-market wraps) and
+    // 75ff029b ("Çin'de eski borsa denetim başkanına idam cezası"). 365 days: 125 -> 119, 6 dropped, all foreign: those
+    // three, a US robot maker's IPO (cb440b96), "Hürmüz Boğazı açıldı: Petrol çakıldı, altın yükselişe geçti" (da42dacb)
+    // and a Japan-led global alarm (ed1b3f48). The 18 left are Borsa İstanbul stories and the Turkish fon / manipülasyon
+    // stories that say "borsa" in the lead. The trusted alias at work: 934f5af8 ("Borsa İstanbul'da 'barış' yükselişi",
+    // its neutral title names the US-Iran deal) says "abd" and stays.
+    hubExcludes: ["abd", "cin", "japonya"],
   },
   pkk: { inflections: ["PKK/KCK"] },
-  "asgari-ucret": { inflections: ["asgari ücretli", "asgari ücretlilerin"] },
+  // asgari-ucret, 14 days: 17 -> 16, 1 dropped: 7b83daa0 (Bangladeshi textile workers); 365 days: 49 -> 48, the same
+  // row (h128-hubs-1, replay 2026-11-11 ~15:52Z). Every other country word tried (abd, almanya, ingiltere, japonya,
+  // arjantin, cin) matched no row in a year, and a Turkish comparison story ("Almanya'da asgari ücret ...,
+  // Türkiye'de ...") would be lost by one, so only the country with a row is listed.
+  "asgari-ucret": {
+    inflections: ["asgari ücretli", "asgari ücretlilerin"],
+    hubExcludes: ["banglades"],
+  },
 };
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {

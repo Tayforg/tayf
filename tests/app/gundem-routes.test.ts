@@ -457,9 +457,11 @@ describe("/gundem/[key] body", () => {
     expect(text).toContain("Erdoğan");
     expect(text).toContain("Erdoğan ile ilgili son 14 günün haber kümeleri.");
     expect(text).toContain("Son 14 günde 422 küme · en yeni 3 tanesi listeleniyor");
+    // h128-hubs-1: the note says what the hub searches (headline and the first paragraph, i.e. first line, of the summary), not "tam metin".
     expect(text).toContain(
-      "Eşleşme, küme başlığı ve özetinde tam metin aramasıyla yapılır; eş adlı kişi ve kurumlar karışabilir.",
+      "Eşleşme, küme başlığında ve özetin ilk paragrafında geçen ada göre yapılır; eş adlı kişi ve kurumlar karışabilir.",
     );
+    expect(text).not.toContain("tam metin");
     expect(text).toContain("Listelenen haberlerin kaynak dağılımı");
     expect(robotsMetas(tree)).toHaveLength(0);
 

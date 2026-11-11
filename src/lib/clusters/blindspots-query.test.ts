@@ -13,12 +13,19 @@ vi.mock("next/cache", () => ({
   cacheTag: vi.fn(),
 }));
 
+// errors.ts imports the Sentry helper; the classification below never calls it.
+vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
+
 const fixture = vi.hoisted(() => ({
   candidateIds: [] as string[],
-  candidateError: null as { message: string } | null,
+  candidateError: null as { message: string; code?: string } | null,
+  /** The PostgREST response status that rides along with `candidateError`. */
+  candidateStatus: undefined as number | undefined,
   /** id -> embedded row. */
   rowsById: new Map<string, unknown>(),
-  embedError: null as { message: string } | null,
+  embedError: null as { message: string; code?: string } | null,
+  /** The PostgREST response status that rides along with `embedError`. */
+  embedStatus: undefined as number | undefined,
   lastIdState: null as unknown,
   embedStates: [] as unknown[],
   /** The options object each `createClient(url, key, opts)` call received. */
@@ -38,11 +45,15 @@ const supabaseFake = await vi.hoisted(async () => {
         const s = state as { selectArgs: unknown[]; in: Array<{ col: string; vals: unknown[] }> };
         if (s.selectArgs[0] === "id") {
           fixture.lastIdState = state;
-          if (fixture.candidateError) return { data: null, error: fixture.candidateError };
+          if (fixture.candidateError) {
+            return { data: null, error: fixture.candidateError, status: fixture.candidateStatus };
+          }
           return { data: fixture.candidateIds.map((id) => ({ id })), error: null };
         }
         fixture.embedStates.push(state);
-        if (fixture.embedError) return { data: null, error: fixture.embedError };
+        if (fixture.embedError) {
+          return { data: null, error: fixture.embedError, status: fixture.embedStatus };
+        }
         const wantedIds = (s.in.find((f) => f.col === "id")?.vals ?? []) as string[];
         const rows = wantedIds
           .map((id) => fixture.rowsById.get(id))
@@ -91,6 +102,7 @@ import {
   getBlindspots,
   getBlindspotsSafe,
 } from "./blindspots-query";
+import { isUpstreamUnavailable } from "@/lib/api/errors";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 import { votingZoneCounts } from "@/lib/feeds/zone-line";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
@@ -179,8 +191,10 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.candidateIds = [];
   fixture.candidateError = null;
+  fixture.candidateStatus = undefined;
   fixture.rowsById = new Map();
   fixture.embedError = null;
+  fixture.embedStatus = undefined;
   fixture.lastIdState = null;
   fixture.embedStates = [];
   fixture.clientOpts = [];
@@ -261,6 +275,61 @@ describe("getBlindspots query shape (Step A: lean candidate select)", () => {
     await expect(getBlindspots()).rejects.toThrow(
       "[blindspots] candidate select error: db down",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h128-apiv1-3: the message keeps its prefix, so the PostgREST code and status
+// of a database outage (a 57014, the reader cap's AbortError, a gateway 504 with
+// an HTML body) ride along as the Error's `cause`. getBlindspots rethrows the
+// live retry's error unchanged (resolveCachedOrThrow), so the keyed alerts route
+// can still answer 503 instead of 500.
+// ---------------------------------------------------------------------------
+describe("getBlindspots: a database outage stays classifiable (h128-apiv1-3)", () => {
+  const OUTAGES: Array<[string, { message: string; code?: string }, number]> = [
+    ["a 57014 statement timeout", { message: "canceling statement due to statement timeout", code: "57014" }, 500],
+    ["the reader cap's AbortError", { message: "AbortError: Supabase request exceeded 4000 ms", code: "" }, 0],
+    ["a gateway answer with an HTML body (504)", { message: "<html>Gateway Timeout</html>", code: "" }, 504],
+  ];
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  it.each(OUTAGES)("Step A, %s", async (_label, error, status) => {
+    fixture.candidateError = error;
+    fixture.candidateStatus = status;
+
+    const err = await getBlindspots().catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe(`[blindspots] candidate select error: ${error.message}`);
+    expect(isUpstreamUnavailable(err)).toBe(true);
+  });
+
+  it.each(OUTAGES)("Step B, %s", async (_label, error, status) => {
+    seedRows([mkBlindspotClusterRow("cluster-x", "pro_government")]);
+    fixture.embedError = error;
+    fixture.embedStatus = status;
+
+    const err = await getBlindspots().catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe(`[blindspots] embedded select error: ${error.message}`);
+    expect(isUpstreamUnavailable(err)).toBe(true);
+  });
+
+  it("a unique violation is not an outage (Step A and Step B)", async () => {
+    fixture.candidateError = { message: "duplicate key", code: "23505" };
+    fixture.candidateStatus = 409;
+    expect(isUpstreamUnavailable(await getBlindspots().catch((e: unknown) => e))).toBe(false);
+
+    fixture.candidateError = null;
+    seedRows([mkBlindspotClusterRow("cluster-x", "pro_government")]);
+    fixture.embedError = { message: "duplicate key", code: "23505" };
+    fixture.embedStatus = 409;
+    expect(isUpstreamUnavailable(await getBlindspots().catch((e: unknown) => e))).toBe(false);
   });
 });
 

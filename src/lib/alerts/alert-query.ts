@@ -187,7 +187,7 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertQueryR
   const sinceBoundIso = new Date(sinceMs).toISOString();
   const silentFloorIso = new Date(sinceMs - SILENT_MIN_AGE_H * 3600 * 1000).toISOString();
   const supabase = createServerClient();
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from("clusters")
     .select(SILENT_SELECT)
     .eq("is_archived", false)
@@ -199,7 +199,14 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertQueryR
     .order("updated_at", { ascending: false })
     .limit(SILENT_CANDIDATE_LIMIT)
     .returns<SilentRow[]>();
-  if (error) throw new Error(`[alerts] silent candidate select error: ${error.message}`);
+  // The PostgREST error and its response status ride along as the cause, so the keyed route's
+  // apiServerError can tell a database outage (57014, the reader cap's abort, a gateway 5xx) from
+  // a bug: the prefixed message alone hides all three from isUpstreamUnavailable.
+  if (error) {
+    throw new Error(`[alerts] silent candidate select error: ${error.message}`, {
+      cause: { ...error, status },
+    });
+  }
 
   const candidates = data ?? [];
   const truncated = candidates.length === SILENT_CANDIDATE_LIMIT;

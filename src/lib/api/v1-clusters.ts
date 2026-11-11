@@ -1,7 +1,6 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-
 import { isPoliticsMember, zoneOf } from "@/lib/bias/config";
 import { applyRecallVeto } from "@/lib/clusters/recall-veto";
+import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 import { siteUrl } from "@/lib/site-url";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
@@ -19,15 +18,29 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
  * performance-tuned query never meant to be a stable API surface. Same
  * "hand-duplicated constant, keep the two in sync by hand" precedent as
  * JEV_POLITICS_CATEGORIES.
+ *
+ * The one deliberate import from that family is `TOPIC_SLUGS` (below, for the
+ * `topic7` value set): it is the exported hub whitelist, a constant, and the
+ * value set the `clusters_topic7_check` constraint (migration 067) enforces.
  */
 
-export const V1_CLUSTER_SELECT = `id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
+export const V1_CLUSTER_SELECT = `id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, topic7, article_count, first_published, updated_at,
          cluster_articles (
            articles (
              category, politics_admitted_at,
              sources ( slug, bias )
            )
          )`;
+
+/**
+ * The values `clusters.topic7` can hold (the `clusters_topic7_check` constraint,
+ * migration 067): the six topic hubs plus `politika`, which is stored but has no
+ * hub page. A record's `topic7` is `null` when no topic was assigned. This is the
+ * cluster's own topic label, NOT the feed category of its members that the list
+ * filters on (V1_POLITICS_CATEGORIES), so an ekonomi, dunya or spor `topic7` does
+ * occur on this endpoint. The OpenAPI enum is built from it.
+ */
+export const V1_TOPIC7_VALUES = [...TOPIC_SLUGS, "politika"] as const;
 
 export const V1_POLITICS_CATEGORIES = ["politika", "son_dakika"] as const;
 export const V1_POLITICS_THRESHOLD = 0.6;
@@ -83,6 +96,8 @@ export interface V1ClusterRow {
   blindspot_side: string | null;
   /** Migration 071 recall veto — read here, never forwarded on the wire. */
   blindspot_recall_veto?: boolean | null;
+  /** Migration 067: the cluster's topic label (see V1_TOPIC7_VALUES), null when unassigned. Optional so a fixture without it reads as null. */
+  topic7?: string | null;
   article_count: number;
   first_published: string;
   updated_at: string;
@@ -295,15 +310,11 @@ const ZONE_SORT_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
  * new embedded column in the future — a reviewer would have to add a new
  * *read* here too, not just widen the select string.
  *
- * `topic7` is intentionally a separate parameter (default `null`) rather
- * than a field read off `row`: `clusters.topic7` may not exist yet (see
- * `fetchTopic7` below), so the main select never requests it and this
- * function never assumes it is present on the row.
+ * `topic7` is read off the same row as everything else (V1_CLUSTER_SELECT asks
+ * for it): a failed read is the main query's own error (the 503 path), never a
+ * silently nulled field, so a `null` always means "no topic assigned".
  */
-export function toV1ClusterRecord(
-  row: V1ClusterRow,
-  topic7: string | null = null,
-): V1ClusterRecord {
+export function toV1ClusterRecord(row: V1ClusterRow): V1ClusterRecord {
   const title =
     row.title_tr_neutral && row.title_tr_neutral.trim().length > 0
       ? row.title_tr_neutral
@@ -340,65 +351,7 @@ export function toV1ClusterRecord(
     bias_distribution: normalizeBiasDistribution(row.bias_distribution),
     is_blindspot: veto.isBlindspot,
     blindspot_side: veto.blindspotSide,
-    topic7: topic7 ?? null,
+    topic7: row.topic7 ?? null,
     sources,
   };
-}
-
-// One-shot process-local probe flag. `clusters.topic7` is specified as
-// "if present" and is not a documented column on this branch — rather
-// than embed it in V1_CLUSTER_SELECT (which would 500 the whole query on
-// every request until the column ships), we probe it ONCE and remember
-// the answer, so a consumer can never distinguish "no topic" from
-// "column not shipped yet" — both render as `topic7: null` forever until
-// the next process/deploy.
-//
-// The latch trips ONLY on a definitive "column does not exist" signal
-// (`isMissingTopic7Column`). A reader-cap abort (`AbortError: Supabase
-// request exceeded 4000 ms`), a statement_timeout or a thrown network error
-// says nothing about the schema: it degrades THIS request to an empty map and
-// leaves the latch alone, so one cold-database blip cannot blank `topic7` for
-// the rest of the serverless instance's life.
-let topic7Available = true;
-
-function isMissingTopic7Column(error: { message?: string; code?: string }): boolean {
-  // 42703 = Postgres undefined_column; PGRST204 = PostgREST schema-cache miss.
-  if (error.code === "42703" || error.code === "PGRST204") return true;
-  const message = error.message ?? "";
-  return (
-    /topic7/i.test(message) &&
-    /does not exist|schema cache|could not find/i.test(message)
-  );
-}
-
-export async function fetchTopic7(
-  supabase: SupabaseClient,
-  ids: string[],
-): Promise<Map<string, string>> {
-  if (!topic7Available || ids.length === 0) return new Map();
-
-  let data: unknown;
-  let error: unknown;
-  try {
-    ({ data, error } = await supabase
-      .from("clusters")
-      .select("id, topic7")
-      .in("id", ids));
-  } catch {
-    // Network failure / client throw: transient, do not latch.
-    return new Map();
-  }
-
-  if (error) {
-    if (isMissingTopic7Column(error as { message?: string; code?: string })) {
-      topic7Available = false;
-    }
-    return new Map();
-  }
-
-  const map = new Map<string, string>();
-  for (const row of (data ?? []) as Array<{ id: string; topic7: string | null }>) {
-    if (row.topic7) map.set(row.id, row.topic7);
-  }
-  return map;
 }

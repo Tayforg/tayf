@@ -398,15 +398,22 @@ function matchers(): readonly EntityMatcher[] {
 }
 
 /**
- * The same matchers without the hub's `requires` cue (the excludes and every
- * other guard stay). They decide only whose WORDS are excluded from the shared
- * stems, never whether a title carries the entity key.
+ * The same matchers without the hub's `requires` cue and without its hub-only
+ * foreign veto `hubExcludes` (the shared `excludes` and every other guard
+ * stay). They decide only whose WORDS are excluded from the shared stems, never
+ * whether a title carries the entity key. Like `requires`, a hub-only foreign
+ * veto withholds the KEY ("Çin borsası" is not the Borsa hub), but the entity's
+ * words are still not "the shared stem": otherwise "borsa" or "enflasyon" alone
+ * would relate "Çin borsası sert düştü" to a Chinese bourse-regulator story
+ * (h129; the h37-clusters-1 rule).
  */
 function stemMatchers(): readonly EntityMatcher[] {
   if (stemKeyMatchers === null) {
     stemKeyMatchers = RISING_ENTITIES.map((entity) => ({
       key: entity.key,
-      patterns: toRegExps(entityHubPatterns(entity, { ...entityHubSpec(entity), requires: undefined })),
+      patterns: toRegExps(
+        entityHubPatterns(entity, { ...entityHubSpec(entity), requires: undefined, hubExcludes: undefined }),
+      ),
     }));
   }
   return stemKeyMatchers;
@@ -427,8 +434,8 @@ export function entityKeysIn(title: string): string[] {
 }
 
 /**
- * The keys whose words a title carries, ignoring the hub's `requires` cue: a
- * superset of {@link entityKeysIn}. [] for an empty title and for a non-string.
+ * The keys whose words a title carries, ignoring the hub's `requires` cue and
+ * its hub-only `hubExcludes` veto: a superset of {@link entityKeysIn}. [] for an empty title and for a non-string.
  */
 function stemKeysIn(title: string): string[] {
   if (typeof title !== "string" || title === "") return [];
@@ -606,6 +613,9 @@ function evidenceAgainst(
   // `requires` cue is absent from a title and so withholds the key (h37-clusters-1
   // vs the h61 tcmb requires: "Paraguay Merkez Bankası" carries no tcmb key, yet
   // "merkez" and "banka" are still the bank's words, not a second shared fact).
+  // A hub-only foreign veto (hubExcludes) is the same: it withholds the key
+  // ("Çin borsası" is not the Borsa hub) but "borsa" is still the entity's word,
+  // not a shared fact (h129).
   const candidateStemKeys = stemKeysIn(title);
   const stemKeys = new Set(sharedKeys);
   for (const key of stemKeysIn(currentTitle)) if (candidateStemKeys.includes(key)) stemKeys.add(key);
