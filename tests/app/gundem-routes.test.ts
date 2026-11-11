@@ -129,7 +129,7 @@ describe("/gundem/[key] page source", () => {
     expect(code).toMatch(/RISING_ENTITIES\.map\(\s*\(\s*e\s*\)\s*=>\s*\(\s*\{\s*key:\s*e\.key\s*\}\s*\)\s*\)/);
   });
 
-  it("404s unknown keys via notFound() and never reads the clock (fully static page)", () => {
+  it("404s unknown keys via notFound() and never reads the clock (the no-clock rule of the static page it was; it now reads ?sayfa= too)", () => {
     expect(code).toContain("!isEntityKey(key)");
     expect(code).toContain("notFound()");
     expect(code).not.toMatch(/\bDate\.now\s*\(/);
@@ -141,7 +141,9 @@ describe("/gundem/[key] page source", () => {
 
   it("generateMetadata shares getEntityHub with the body and only adds robots when needed", () => {
     expect(code).toMatch(/export\s+async\s+function\s+generateMetadata/);
-    expect(code).toContain("entityHubRobots(await getEntityHub(key))");
+    // h136-roadmap-2: the same read as the body, for the page that was asked for
+    expect(code).toContain("entityHubPageRobots(page, await getEntityHub(key, page))");
+    expect(code).toContain("const result = await getEntityHub(key, page);");
     expect(code).toContain("...(robots ? { robots } : {})");
     expect(code).toContain("staticPageMetadata(");
     expect(code).toContain("path: `/gundem/${key}`");
@@ -359,7 +361,7 @@ function bundle(id: string, dist: unknown = { center: 1 }) {
 }
 
 const renderHub = (key = "erdogan") =>
-  EntityHubPage({ params: Promise.resolve({ key }) });
+  EntityHubPage({ params: Promise.resolve({ key }), searchParams: Promise.resolve({}) });
 
 beforeEach(() => {
   mocks.result = null;
@@ -375,7 +377,8 @@ describe("generateStaticParams", () => {
 });
 
 describe("generateMetadata", () => {
-  const meta = (key: string) => generateMetadata({ params: Promise.resolve({ key }) });
+  const meta = (key: string) =>
+    generateMetadata({ params: Promise.resolve({ key }), searchParams: Promise.resolve({}) });
 
   it("returns {} for an unknown key without reading data", async () => {
     await expect(meta("bilinmeyen")).resolves.toEqual({});

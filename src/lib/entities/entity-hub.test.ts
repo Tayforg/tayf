@@ -12,6 +12,9 @@ import {
 
 import {
   ENTITY_HUB_LIMIT,
+  ENTITY_HUB_MAX_OFFSET,
+  ENTITY_HUB_MAX_PAGE,
+  ENTITY_HUB_MAX_ROWS,
   ENTITY_HUB_MAX_TERMS,
   ENTITY_HUB_MIN_INDEXABLE,
   ENTITY_HUB_WINDOW_DAYS,
@@ -19,7 +22,9 @@ import {
   entityByKey,
   entityHubForms,
   entityHubHeadlineOnly,
+  entityHubLastPage,
   entityHubNote,
+  entityHubPageRobots,
   entityHubPatterns,
   entityHubQueries,
   entityHubRobots,
@@ -27,6 +32,7 @@ import {
   foldEntityText,
   hubMatchNote,
   isEntityKey,
+  parseEntityHubPage,
   sumDistributions,
 } from "./entity-hub";
 
@@ -190,6 +196,117 @@ describe("entityHubNote", () => {
     expect(entityHubNote(21, 20)).toBe(
       "Son 14 günde 21 küme · en yeni 20 tanesi listeleniyor",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h136-roadmap-2: the hub pager (?sayfa=N). Pure helpers: the page parser, the last
+// page, the note of a later page, the robots rule of a page.
+// ---------------------------------------------------------------------------
+
+describe("parseEntityHubPage", () => {
+  it("takes a plain positive integer", () => {
+    expect(parseEntityHubPage("1")).toBe(1);
+    expect(parseEntityHubPage("2")).toBe(2);
+    expect(parseEntityHubPage("51")).toBe(51);
+    expect(parseEntityHubPage("9999")).toBe(9999);
+  });
+
+  it("returns 1 for undefined, empty and every value that is not an integer >= 1", () => {
+    for (const raw of [undefined, "", " ", "abc", "0", "-1", "-0", "2.5", "1.0", "1e3", "0x10", "+2", " 2", "2 ", "２", "NaN", "Infinity", "null"]) {
+      expect(parseEntityHubPage(raw), JSON.stringify(raw)).toBe(1);
+    }
+  });
+
+  it("takes the first element of a repeated parameter and parses only that one", () => {
+    expect(parseEntityHubPage(["3", "4"])).toBe(3);
+    expect(parseEntityHubPage(["abc", "4"])).toBe(1);
+    expect(parseEntityHubPage([])).toBe(1);
+  });
+
+  it("returns 1 for a number too large to be an exact integer (never an imprecise page)", () => {
+    expect(parseEntityHubPage("99999999999999999999999")).toBe(1);
+    expect(parseEntityHubPage(String(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseEntityHubPage(String(Number.MAX_SAFE_INTEGER + 1))).toBe(1);
+  });
+
+  it("accepts leading zeros as the same integer", () => {
+    expect(parseEntityHubPage("02")).toBe(2);
+    expect(parseEntityHubPage("0002")).toBe(2);
+    expect(parseEntityHubPage("00")).toBe(1);
+  });
+});
+
+describe("pager limits", () => {
+  it("serve at most 1020 rows: 51 pages of 20, the last starting at the SQL offset clamp of 1000", () => {
+    expect(ENTITY_HUB_MAX_ROWS).toBe(1020);
+    expect(ENTITY_HUB_MAX_OFFSET).toBe(1000);
+    expect(ENTITY_HUB_MAX_PAGE).toBe(51);
+    // the last page's offset is the clamp: a page beyond it would be served the clamped window
+    expect((ENTITY_HUB_MAX_PAGE - 1) * ENTITY_HUB_LIMIT).toBe(ENTITY_HUB_MAX_OFFSET);
+  });
+});
+
+describe("entityHubLastPage", () => {
+  it("is 1 for an empty or single-page hub", () => {
+    expect(entityHubLastPage(0)).toBe(1);
+    expect(entityHubLastPage(1)).toBe(1);
+    expect(entityHubLastPage(20)).toBe(1);
+  });
+
+  it("is ceil(total / 20)", () => {
+    expect(entityHubLastPage(21)).toBe(2);
+    expect(entityHubLastPage(40)).toBe(2);
+    expect(entityHubLastPage(41)).toBe(3);
+    expect(entityHubLastPage(152)).toBe(8);
+    expect(entityHubLastPage(452)).toBe(23);
+  });
+
+  it("caps at 1020 matched rows: 51 pages however large the total", () => {
+    expect(entityHubLastPage(1020)).toBe(51);
+    expect(entityHubLastPage(1021)).toBe(51);
+    expect(entityHubLastPage(50_000)).toBe(51);
+    expect(entityHubLastPage(Number.POSITIVE_INFINITY)).toBe(51);
+  });
+
+  it("is 1 for a negative or NaN total", () => {
+    expect(entityHubLastPage(-5)).toBe(1);
+    expect(entityHubLastPage(Number.NaN)).toBe(1);
+  });
+});
+
+describe("entityHubNote for a later page", () => {
+  it("page 1 (or no page) is today's string, unchanged", () => {
+    expect(entityHubNote(422, 20, 1)).toBe("Son 14 günde 422 küme · en yeni 20 tanesi listeleniyor");
+    expect(entityHubNote(422, 20)).toBe(entityHubNote(422, 20, 1));
+    expect(entityHubNote(5, 5, 1)).toBe("Son 14 günde 5 küme");
+  });
+
+  it("page 2 names the range: 21-40", () => {
+    expect(entityHubNote(152, 20, 2)).toBe("Son 14 günde 152 küme · 21-40 arası listeleniyor");
+  });
+
+  it("a later page ranges over what it shows: the short last page, and page 3", () => {
+    expect(entityHubNote(152, 12, 8)).toBe("Son 14 günde 152 küme · 141-152 arası listeleniyor");
+    expect(entityHubNote(452, 20, 3)).toBe("Son 14 günde 452 küme · 41-60 arası listeleniyor");
+    expect(entityHubNote(41, 1, 3)).toBe("Son 14 günde 41 küme · 41-41 arası listeleniyor");
+  });
+});
+
+describe("entityHubPageRobots", () => {
+  const mk = (n: number) => ({ bundles: Array.from({ length: n }, () => ({})) });
+
+  it("page 1 is entityHubRobots, exactly", () => {
+    for (const result of [null, mk(0), mk(2), mk(3), mk(20)]) {
+      expect(entityHubPageRobots(1, result)).toEqual(entityHubRobots(result));
+    }
+  });
+
+  it("every later page is noindex, follow: full, short, empty (past the end), failed or unavailable", () => {
+    for (const result of [null, mk(0), mk(1), mk(20)]) {
+      expect(entityHubPageRobots(2, result)).toEqual({ index: false, follow: true });
+      expect(entityHubPageRobots(51, result)).toEqual({ index: false, follow: true });
+    }
   });
 });
 

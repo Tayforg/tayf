@@ -106,8 +106,14 @@ describe("static pages never read the clock during prerender", () => {
 
   it("covers /gundem/[key] (the page that broke the #138 build)", () => {
     const src = readFileSync(join(APP, "gundem", "[key]", "page.tsx"), "utf8");
-    expect(isFullyStatic(src)).toBe(true);
+    // h136-roadmap-2: the hub reads ?sayfa= (searchParams, like /konu/[slug]), so it is
+    // no longer "fully static" in this file's sense and the scan above does not select it.
+    // It keeps the no-clock rule it was written under: relative times come from the
+    // read's own asOfMs, and every card gets that explicit now.
+    expect(isFullyStatic(src)).toBe(false);
     expect(clockReads(src)).toEqual([]);
+    expect(src).toContain("result?.asOfMs");
+    expect(elementsMissingProp(src, "ClusterCard", "nowMs")).toBe(0);
   });
 });
 

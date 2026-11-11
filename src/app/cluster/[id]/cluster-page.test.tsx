@@ -23,6 +23,7 @@ import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { RelativeTime } from "@/components/story/relative-time";
 import { StaleCopyNotice } from "@/components/pwa/stale-copy-notice";
 import { BalanceChip } from "@/components/story/balance-chip";
+import { EntityHubChips } from "@/components/story/entity-hub-chips";
 import { ShareButton } from "@/components/story/share-button";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { SourceProfileLink } from "@/components/story/source-profile-link";
@@ -453,12 +454,13 @@ function makeCluster(overrides: {
   bias_distribution: BiasDistribution;
   is_archived?: boolean;
   article_count?: number;
+  title_tr?: string;
   title_original?: string | null;
   title_method?: ClusterDetail["cluster"]["title_method"];
 }): ClusterDetail["cluster"] {
   return {
     id: "c1",
-    title_tr: "Test kümesi",
+    title_tr: overrides.title_tr ?? "Test kümesi",
     title_original: overrides.title_original ?? null,
     title_method: overrides.title_method ?? null,
     summary_tr: "Test özeti",
@@ -3788,6 +3790,63 @@ describe("ClusterDetailPage — timeout is not a 404", () => {
       ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) }),
     ).rejects.toThrow("NEXT_NOT_FOUND");
     expect(notFound).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h136-roadmap-1: the story page links the /gundem entity hubs its headline
+// names (the hub's own matching rule, src/lib/entities/cluster-hub-keys.ts).
+// Like the Denge puanı chip below, the component is found in the unexpanded
+// page tree and rendered on its own.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — entity hub chips", () => {
+  function hubDetail(overrides: Partial<Parameters<typeof makeCluster>[0]>): ClusterDetail {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak", kind: "outlet" });
+    const distribution = emptyDistribution();
+    distribution.pro_government = 1;
+    return {
+      cluster: makeCluster({ bias_distribution: distribution, ...overrides }),
+      members: [makeMember("a1", source)],
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  it("renders href=/gundem/chp for a story whose headline names the CHP", async () => {
+    getClusterDetail.mockResolvedValue(
+      hubDetail({ title_tr: "CHP'nin 38'inci Olağan Kurultayı davasında yeni gelişme: Dava ertelendi" }),
+    );
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, EntityHubChips);
+    expect(el).not.toBeNull();
+    expect(el?.props.keys).toEqual(["chp"]);
+
+    const html = renderToStaticMarkup(
+      el as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(html).toContain('href="/gundem/chp"');
+    expect(html).toContain("Bu haberdeki gündem başlıkları");
+  });
+
+  it("mounts nothing for a headline that names no hub, and for a one-article or archived cluster", async () => {
+    for (const detail of [
+      hubDetail({}),
+      hubDetail({ title_tr: "CHP'den yeni açıklama", article_count: 1 }),
+      hubDetail({ title_tr: "CHP'den yeni açıklama", is_archived: true }),
+    ]) {
+      getClusterDetail.mockResolvedValue(detail);
+      const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+      const el = findElementOfType(tree, EntityHubChips);
+      // Either no element, or one that renders nothing: no empty heading on the page.
+      const html = el
+        ? renderToStaticMarkup(el as unknown as Parameters<typeof renderToStaticMarkup>[0])
+        : "";
+      expect(html).toBe("");
+      expect(collectHrefs(tree).filter((h) => h.startsWith("/gundem/"))).toEqual([]);
+    }
   });
 });
 

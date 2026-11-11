@@ -17,6 +17,18 @@ import {
 export const ENTITY_HUB_WINDOW_DAYS = 14;
 /** Clusters listed per hub (the RPC clamps p_limit to 1..50). */
 export const ENTITY_HUB_LIMIT = 20;
+/**
+ * Most matched rows the pager reaches: 1020 = 51 pages of 20. Migration 199's
+ * `entity_cluster_ids_v4` clamps `p_offset` to 1000 (ENTITY_HUB_MAX_OFFSET), and
+ * the last page starts exactly there, so a page past 51 would be silently served
+ * the clamped window instead of being past the end. The biggest hub holds about
+ * 450 clusters in the 14-day window, so the cap is a bound, not a limit anyone meets.
+ */
+export const ENTITY_HUB_MAX_ROWS = 1020;
+/** The SQL offset clamp of migration 199 (`least(coalesce(p_offset, 0), 1000)`). */
+export const ENTITY_HUB_MAX_OFFSET = 1000;
+/** The last page the pager serves (ceil(ENTITY_HUB_MAX_ROWS / ENTITY_HUB_LIMIT)). */
+export const ENTITY_HUB_MAX_PAGE = 51;
 /** A hub with fewer clusters than this is thin and stays out of the index. */
 export const ENTITY_HUB_MIN_INDEXABLE = 3;
 /**
@@ -59,9 +71,56 @@ export function entityHubRobots(
   return undefined;
 }
 
-/** "Son 14 günde 422 küme · en yeni 20 tanesi listeleniyor". */
-export function entityHubNote(total: number, shown: number): string {
+/**
+ * The ?sayfa= value of a hub URL as a page number: the first element of a repeated
+ * parameter (Next hands a string[] for ?sayfa=2&sayfa=3), and only a plain integer
+ * >= 1 that is exactly representable (digits only, no sign, space, point or
+ * exponent); 1 for everything else, so a junk value serves page 1 under page 1's
+ * own canonical. NOT clamped to the last page: the page names the page that was
+ * asked for, and a page past the end says so (the h79/h98 lesson). The data read
+ * bounds its own cache key (entity-hub-query.ts).
+ */
+export function parseEntityHubPage(raw: string | string[] | undefined): number {
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof first !== "string" || first.length === 0) return 1;
+  for (const ch of first) if (ch < "0" || ch > "9") return 1;
+  const n = Number(first);
+  return Number.isSafeInteger(n) && n >= 1 ? n : 1;
+}
+
+/**
+ * The last page of a hub with `total` matched clusters: ceil(total / 20), at
+ * least 1, and at most ENTITY_HUB_MAX_PAGE (the pager stops at 1020 rows).
+ */
+export function entityHubLastPage(total: number): number {
+  const rows = Number.isNaN(total) ? 0 : Math.min(total, ENTITY_HUB_MAX_ROWS);
+  return Math.max(1, Math.ceil(rows / ENTITY_HUB_LIMIT));
+}
+
+/**
+ * Robots override for page `page` of a hub. Page 1 is {@link entityHubRobots}
+ * (unchanged); every later page is `noindex, follow`, whatever it holds: a list
+ * window of a list is not a page to rank, and its links stay crawlable.
+ */
+export function entityHubPageRobots(
+  page: number,
+  result: { bundles: readonly unknown[] } | null,
+): { index: false; follow: true } | undefined {
+  if (page > 1) return { index: false, follow: true };
+  return entityHubRobots(result);
+}
+
+/**
+ * "Son 14 günde 422 küme · en yeni 20 tanesi listeleniyor" on page 1 (the
+ * default, unchanged); "Son 14 günde 152 küme · 21-40 arası listeleniyor" on a
+ * later page, ranging over what the page shows (`shown` rows from the page's first).
+ */
+export function entityHubNote(total: number, shown: number, page = 1): string {
   const base = `Son ${ENTITY_HUB_WINDOW_DAYS} günde ${total} küme`;
+  if (page > 1) {
+    const from = (page - 1) * ENTITY_HUB_LIMIT + 1;
+    return `${base} · ${from}-${from + shown - 1} arası listeleniyor`;
+  }
   return total > shown ? `${base} · en yeni ${shown} tanesi listeleniyor` : base;
 }
 

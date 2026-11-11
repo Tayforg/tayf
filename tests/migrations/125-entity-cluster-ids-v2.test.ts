@@ -307,6 +307,14 @@ describe("entity-hub-query.ts is the only caller of v2, as the PGRST202 fallback
     expect(secondCodeAt).toBeGreaterThan(v2At);
     expect(v1At).toBeGreaterThan(secondCodeAt);
     expect(src.match(/\.rpc\(\s*"entity_cluster_ids"/g)).toHaveLength(1);
-    expect(src.match(/PGRST\d+/g)).toEqual(["PGRST202", "PGRST202"]);
+    // h136-roadmap-2: the third PGRST202 is migration 199's page reader (`entity_cluster_ids_v4`, a page after the
+    // first), which answers "unavailable" instead of falling back; it sits after the v3 -> v2 -> v1 chain, and
+    // PGRST202 is still the only PostgREST code.
+    const v4At = src.indexOf('.rpc("entity_cluster_ids_v4"');
+    const thirdCodeAt = src.indexOf('"PGRST202"', secondCodeAt + 1);
+    expect(v4At).toBeGreaterThan(v1At);
+    expect(thirdCodeAt).toBeGreaterThan(v4At);
+    expect(src.match(/\.rpc\(\s*"entity_cluster_ids_v4"/g)).toHaveLength(1);
+    expect(src.match(/PGRST\d+/g)).toEqual(["PGRST202", "PGRST202", "PGRST202"]);
   });
 });

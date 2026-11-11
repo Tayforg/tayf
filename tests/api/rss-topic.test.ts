@@ -1,13 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import {
   TOPIC_SLUGS,
   topicNounTr,
   topicSubtitleTr,
 } from "@/lib/clusters/topic-query";
+import {
+  ENTITY_HUB_LIMIT,
+  entityByKey,
+  hubMatchNote,
+} from "@/lib/entities/entity-hub";
+import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 // ---------------------------------------------------------------------------
-// /rss/[topic].xml — per-topic RSS feeds + /rss/kor-noktalar.xml.
+// /rss/[topic].xml — per-topic RSS feeds + /rss/kor-noktalar.xml, and (h136-roadmap-3)
+// /rss/gundem-<key>.xml, one feed per entity hub.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/server", async (importOriginal) => {
@@ -23,6 +33,17 @@ const mocks = vi.hoisted(() => ({
   topicClusters: null as unknown,
   blindspots: null as unknown,
   blindspotsThrows: false,
+  hub: null as unknown,
+  hubCalls: [] as unknown[][],
+}));
+
+// The entity feed reads page 1 of the hub through the same cached getter the
+// /gundem/[key] page uses; the feed has no query of its own.
+vi.mock("@/lib/entities/entity-hub-query", () => ({
+  getEntityHub: vi.fn(async (...args: unknown[]) => {
+    mocks.hubCalls.push(args);
+    return mocks.hub;
+  }),
 }));
 
 vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
@@ -63,6 +84,8 @@ beforeEach(() => {
   mocks.topicClusters = { bundles: [bundle()], hasMore: false, page: 1 };
   mocks.blindspots = { bundles: [] };
   mocks.blindspotsThrows = false;
+  mocks.hub = { bundles: [bundle()], total: 1, asOfMs: 0 };
+  mocks.hubCalls = [];
 });
 
 async function callRoute(topic: string) {
@@ -298,3 +321,265 @@ describe("GET /rss/[topic].xml", () => {
     expect(itemCount).toBe(30);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h136-roadmap-3: /rss/gundem-<key>.xml, one RSS feed per entity hub. Page 1 of
+// getEntityHub (the read /gundem/<key> renders), the topic feeds' item builder,
+// headers and 503, a 'gundem-' prefix that cannot collide with a topic slug.
+// ---------------------------------------------------------------------------
+
+function hubBundle(i: number, overrides: Record<string, unknown> = {}) {
+  return bundle({
+    cluster: {
+      ...bundle().cluster,
+      id: `c${i}`,
+      title_tr: `Hub başlığı ${i}`,
+      first_published: new Date(Date.UTC(2026, 10, 10, 12, 0) - i * 3_600_000).toISOString(),
+    },
+    ...overrides,
+  });
+}
+
+function itemLinks(body: string): string[] {
+  return [...body.matchAll(/<link>([^<]*)<\/link>/g)].map((m) => m[1] as string).slice(1);
+}
+
+describe("GET /rss/gundem-<key>.xml", () => {
+  it("returns 200 application/rss+xml with the hub's items, and reads only page 1 of the hub", async () => {
+    mocks.hub = { bundles: [hubBundle(1), hubBundle(2)], total: 152, asOfMs: 0 };
+    const res = await callRoute("gundem-chp.xml");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/rss+xml; charset=utf-8");
+    const body = await res.text();
+    expect(body).toContain("<rss");
+    expect(body).toContain("Hub başlığı 1");
+    expect(body).toContain("Hub başlığı 2");
+    // the same cached read the page uses: key only, so page 1, no query of its own
+    expect(mocks.hubCalls).toEqual([["chp"]]);
+  });
+
+  it("carries at most ENTITY_HUB_LIMIT (20) items even when the read hands back more", async () => {
+    mocks.hub = {
+      bundles: Array.from({ length: 25 }, (_, i) => hubBundle(i)),
+      total: 400,
+      asOfMs: 0,
+    };
+    const body = await (await callRoute("gundem-chp.xml")).text();
+    expect(ENTITY_HUB_LIMIT).toBe(20);
+    expect((body.match(/<item>/g) ?? []).length).toBe(20);
+    expect(body).not.toContain("Hub başlığı 20<");
+  });
+
+  it("keeps the hub's order (first_published desc) and prints the cluster ids in it", async () => {
+    mocks.hub = { bundles: [hubBundle(3), hubBundle(1), hubBundle(2)], total: 3, asOfMs: 0 };
+    const body = await (await callRoute("gundem-chp.xml")).text();
+    const ids = itemLinks(body).map((l) => /\/cluster\/(c\d+)/.exec(l)?.[1]);
+    expect(ids).toEqual(["c3", "c1", "c2"]);
+  });
+
+  it("links carry utm_campaign=gundem_<key>; the guid is the canonical cluster URL with no utm_", async () => {
+    mocks.hub = { bundles: [hubBundle(1)], total: 1, asOfMs: 0 };
+    const body = await (await callRoute("gundem-chp.xml")).text();
+    expect(body).toContain(
+      "<link>https://tayfhaber.com/cluster/c1?utm_source=rss&amp;utm_medium=feed&amp;utm_campaign=gundem_chp</link>",
+    );
+    expect(body).toContain(
+      '<guid isPermaLink="true">https://tayfhaber.com/cluster/c1</guid>',
+    );
+    const guids = [...body.matchAll(/<guid[^>]*>([^<]*)<\/guid>/g)].map((m) => m[1] as string);
+    expect(guids).toHaveLength(1);
+    expect(guids[0]).not.toContain("utm_");
+  });
+
+  it("uses the campaign of the requested hub, with a hyphenated key intact", async () => {
+    mocks.hub = { bundles: [hubBundle(1)], total: 1, asOfMs: 0 };
+    const body = await (await callRoute("gundem-ozgur-ozel.xml")).text();
+    expect(body).toContain("utm_campaign=gundem_ozgur-ozel");
+    expect(mocks.hubCalls).toEqual([["ozgur-ozel"]]);
+  });
+
+  it("builds the item description with the topic feeds' source-count head and zone line", async () => {
+    mocks.hub = {
+      bundles: [
+        hubBundle(1, {
+          sources: [
+            { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
+            { id: "s2", name: "B", bias: "center", kind: "wire" },
+            { id: "s3", name: "C", bias: "opposition", kind: "aggregator" },
+          ],
+        }),
+      ],
+      total: 1,
+      asOfMs: 0,
+    };
+    const body = await (await callRoute("gundem-chp.xml")).text();
+    expect(body).toContain(
+      "<description>3 kaynak (2 sınıflandırılmış) · İktidar 1 · Bağımsız 1 · Muhalefet 0</description>",
+    );
+  });
+
+  it("never prints old_title, only the current headline, and no summary text", async () => {
+    mocks.hub = {
+      bundles: [
+        hubBundle(1, {
+          cluster: {
+            ...hubBundle(1).cluster,
+            old_title: "ESKİ BAŞLIK",
+            summary_tr: "ÖZET METNİ",
+          },
+        }),
+      ],
+      total: 1,
+      asOfMs: 0,
+    };
+    const body = await (await callRoute("gundem-chp.xml")).text();
+    expect(body).not.toContain("ESKİ BAŞLIK");
+    expect(body).not.toContain("ÖZET METNİ");
+    expect(body).toContain("Hub başlığı 1");
+    const src = readFileSync(resolve(__dirname, "..", "..", "src", "app", "rss", "[topic]", "route.ts"), "utf8");
+    expect(src).not.toContain("old_title");
+  });
+
+  it("channel: title 'Tayf — Gündem: {label}', link to the hub, atom self, description from hubMatchNote", async () => {
+    mocks.hub = { bundles: [hubBundle(1)], total: 1, asOfMs: 0 };
+    const body = await (await callRoute("gundem-chp.xml")).text();
+    expect(body).toContain("<title>Tayf — Gündem: CHP</title>");
+    expect(body).toContain("<link>https://tayfhaber.com/gundem/chp</link>");
+    expect(body).toContain(
+      '<atom:link href="https://tayfhaber.com/rss/gundem-chp.xml" rel="self" type="application/rss+xml" />',
+    );
+    const channelDescription = /<atom:link[^>]*\/>\s*<description>([^<]*)<\/description>/.exec(body)?.[1];
+    expect(channelDescription).toBe(
+      `${hubMatchNote(entityByKey("chp")!)} (son 14 gün, en yeni 20)`,
+    );
+    expect(channelDescription!.endsWith("(son 14 gün, en yeni 20)")).toBe(true);
+  });
+
+  it("akp (headline-only) says the match is on the headline only, never the lead", async () => {
+    mocks.hub = { bundles: [hubBundle(1)], total: 1, asOfMs: 0 };
+    const body = await (await callRoute("gundem-akp.xml")).text();
+    expect(body).toContain("<title>Tayf — Gündem: AK Parti</title>");
+    const channelDescription = /<atom:link[^>]*\/>\s*<description>([^<]*)<\/description>/.exec(body)?.[1];
+    expect(channelDescription).toContain("küme başlığında geçen ada göre");
+    expect(channelDescription).not.toContain("özetin ilk paragrafında");
+    expect(channelDescription!.endsWith("(son 14 gün, en yeni 20)")).toBe(true);
+  });
+
+  it("sets exactly the topic feeds' Cache-Control", async () => {
+    const entity = await callRoute("gundem-chp.xml");
+    const topic = await callRoute("dunya.xml");
+    expect(entity.headers.get("Cache-Control")).toBe("public, max-age=300, s-maxage=300");
+    expect(entity.headers.get("Cache-Control")).toBe(topic.headers.get("Cache-Control"));
+  });
+
+  it("a hub with no cluster in the window is a normal 200 feed with no items, not a 503", async () => {
+    mocks.hub = { bundles: [], total: 0, asOfMs: 0 };
+    const res = await callRoute("gundem-chp.xml");
+    expect(res.status).toBe(200);
+    expect(((await res.text()).match(/<item>/g) ?? []).length).toBe(0);
+  });
+
+  it("a null read is a 503 with Retry-After 300 and no-store, exactly as the topic feeds answer", async () => {
+    mocks.hub = null;
+    const res = await callRoute("gundem-chp.xml");
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    mocks.topicClusters = null;
+    const topic = await callRoute("dunya.xml");
+    expect(Object.fromEntries(res.headers)).toEqual(Object.fromEntries(topic.headers));
+  });
+
+  it.each([
+    ["gundem-.xml", "an empty key"],
+    ["gundem-unknown.xml", "an unknown key"],
+    ["gundem-chp-x.xml", "a key plus a suffix"],
+    ["gundem-chp-.xml", "a trailing hyphen"],
+    ["gundem--chp.xml", "a leading hyphen"],
+    ["gundem-CHP.xml", "an upper-case key"],
+    ["gundem-chp", "no .xml suffix"],
+    ["gundem-chp.xml.xml", "a doubled suffix"],
+    ["gundem-__proto__.xml", "a prototype name"],
+    ["gundem-constructor.xml", "a prototype name"],
+    ["chp.xml", "the bare key without the prefix"],
+    ["gundem.xml", "the prefix word alone"],
+    ["gundem-dunya.xml", "a topic slug after the prefix"],
+    ["gundem-kor-noktalar.xml", "the blindspot slug after the prefix"],
+  ])("404s %s (%s) without reading the hub", async (name) => {
+    const res = await callRoute(name);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Content-Type")).toContain("text/plain");
+    expect(mocks.hubCalls).toEqual([]);
+  });
+
+  it("every curated entity key has a feed: the key fits the slug pattern and cannot collide with a topic slug", async () => {
+    expect(RISING_ENTITIES.length).toBeGreaterThan(50);
+    for (const e of RISING_ENTITIES) {
+      expect(e.key, e.key).toMatch(/^[a-z-]+$/);
+      expect((TOPIC_SLUGS as readonly string[]).includes(`gundem-${e.key}`), e.key).toBe(false);
+      const res = await callRoute(`gundem-${e.key}.xml`);
+      expect(res.status, e.key).toBe(200);
+    }
+  });
+
+  it("leaves the topic and kor-noktalar feeds byte-identical (golden XML of the unchanged route)", async () => {
+    mocks.topicClusters = {
+      bundles: [
+        {
+          cluster: {
+            id: "c1",
+            title_tr: "Birinci & başlık",
+            first_published: "2026-09-20T10:00:00.000Z",
+            updated_at: "2026-09-20T10:00:00.000Z",
+          },
+          articles: [],
+          sources: [
+            { id: "s1", name: "A", bias: "pro_government" },
+            { id: "s2", name: "B", bias: "center" },
+          ],
+        },
+        {
+          cluster: {
+            id: "c2",
+            title_tr: "İkinci başlık",
+            first_published: "2026-09-19T08:30:00.000Z",
+            updated_at: "2026-09-20T10:00:00.000Z",
+          },
+          articles: [],
+          sources: [{ id: "s3", name: "C", bias: "opposition", kind: "outlet" }],
+        },
+      ],
+      hasMore: false,
+      page: 1,
+    };
+    const body = await (await callRoute("dunya.xml")).text();
+    expect(body).toBe(GOLDEN_DUNYA);
+    expect(mocks.hubCalls).toEqual([]);
+  });
+});
+
+const GOLDEN_DUNYA = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Tayf — Dünya haberleri</title>
+    <link>https://tayfhaber.com/konu/dunya</link>
+    <atom:link href="https://tayfhaber.com/rss/dunya.xml" rel="self" type="application/rss+xml" />
+    <description>Son 7 günde dünya konusunda kümelenen haberler.</description>
+    <language>tr-TR</language>
+    <lastBuildDate>Sun, 20 Sep 2026 10:00:00 GMT</lastBuildDate>
+        <item>
+      <title>Birinci &amp; başlık</title>
+      <link>https://tayfhaber.com/cluster/c1?utm_source=rss&amp;utm_medium=feed&amp;utm_campaign=konu_dunya</link>
+      <guid isPermaLink="true">https://tayfhaber.com/cluster/c1</guid>
+      <pubDate>Sun, 20 Sep 2026 10:00:00 GMT</pubDate>
+      <description>2 kaynak · İktidar 1 · Bağımsız 1 · Muhalefet 0</description>
+    </item>
+    <item>
+      <title>İkinci başlık</title>
+      <link>https://tayfhaber.com/cluster/c2?utm_source=rss&amp;utm_medium=feed&amp;utm_campaign=konu_dunya</link>
+      <guid isPermaLink="true">https://tayfhaber.com/cluster/c2</guid>
+      <pubDate>Sat, 19 Sep 2026 08:30:00 GMT</pubDate>
+      <description>1 kaynak · İktidar 0 · Bağımsız 0 · Muhalefet 1</description>
+    </item>
+  </channel>
+</rss>`;

@@ -6,6 +6,7 @@ import { AlertTriangle, ArrowLeft, Copy } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
 import { BalanceChip } from "@/components/story/balance-chip";
+import { EntityHubChips } from "@/components/story/entity-hub-chips";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import {
@@ -43,6 +44,7 @@ import {
   shouldShowPublicFramingReceipt,
 } from "@/lib/clusters/framing-receipt";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { clusterHubKeysFromDetail } from "@/lib/entities/cluster-hub-keys";
 import { pickHeroCandidates } from "@/lib/images/hero-candidates";
 import { normalizeImageUrl } from "@/lib/images/image-url";
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
@@ -617,6 +619,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // Denge puanı: same 3-zone basis as the spectrum bar above it. `null` below
   // the classified-source floor (rendered as the "Az kaynak" chip).
   const balance = balanceFromDistribution(biasDistribution);
+  // h136-roadmap-1: the /gundem hubs this story's headline names, by the hub's own
+  // matching rule (at most five, in curated order; [] for a story no hub lists).
+  // Pure and clock-free, so the page stays prerenderable.
+  const hubKeys = clusterHubKeysFromDetail(cluster);
   // The stored jsonb is voting-only just for rows the post-034 consumer wrote
   // or the 48h backfill touched; older clusters still carry all-member counts
   // (one vote per article, every kind). `members` is deduped per source while
@@ -1051,6 +1057,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 </div>
               )}
             </div>
+
+            {/* The entity hubs (/gundem/<key>) the headline names. Outside the
+                spectrum block above: it is shown whether or not the bar exists
+                (distributionTotal 0 has no balance chip). Renders nothing for
+                a story that names no hub. */}
+            <EntityHubChips keys={hubKeys} />
 
             {storyTimeline && <StoryTimeline timeline={storyTimeline} />}
 

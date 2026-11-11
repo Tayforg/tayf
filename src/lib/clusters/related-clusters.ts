@@ -1,4 +1,5 @@
-import { entityHubPatterns, entityHubSpec, foldEntityText } from "@/lib/entities/entity-hub";
+import { hubMatchers, stemMatchers } from "@/lib/entities/cluster-hub-keys";
+import { foldEntityText } from "@/lib/entities/entity-hub";
 import { headlineLang, sourceLang } from "@/lib/sources/source-language";
 import { RISING_ENTITIES, RISING_HUB_SPECS } from "@/lib/trends/rising-entities";
 import {
@@ -372,52 +373,12 @@ const ENTITY_SCAN_CHARS = 400;
 // Entity keys. The hub's own patterns (src/lib/entities/entity-hub.ts), which
 // are PostgreSQL regexes: only the word anchors \m and \M differ from
 // JavaScript, and \b stands for both (the same twin entity-hub.test.ts uses).
-// Built once, on first use, from curated data only (never from a title).
+// Built once, on first use, from curated data only (never from a title). The
+// matcher lists (hubMatchers, and stemMatchers without the hub-only `requires`
+// and `hubExcludes`) live in src/lib/entities/cluster-hub-keys.ts since
+// h136-roadmap-1, shared with the story page's hub chips; they are the same
+// lists, built the same way.
 // ---------------------------------------------------------------------------
-
-interface EntityMatcher {
-  key: string;
-  patterns: readonly RegExp[];
-}
-
-let entityMatchers: readonly EntityMatcher[] | null = null;
-let stemKeyMatchers: readonly EntityMatcher[] | null = null;
-
-function toRegExps(patterns: readonly string[]): RegExp[] {
-  return patterns.map((p) => new RegExp(p.replace(/\\[mM]/g, "\\b")));
-}
-
-function matchers(): readonly EntityMatcher[] {
-  if (entityMatchers === null) {
-    entityMatchers = RISING_ENTITIES.map((entity) => ({
-      key: entity.key,
-      patterns: toRegExps(entityHubPatterns(entity)),
-    }));
-  }
-  return entityMatchers;
-}
-
-/**
- * The same matchers without the hub's `requires` cue and without its hub-only
- * foreign veto `hubExcludes` (the shared `excludes` and every other guard
- * stay). They decide only whose WORDS are excluded from the shared stems, never
- * whether a title carries the entity key. Like `requires`, a hub-only foreign
- * veto withholds the KEY ("Çin borsası" is not the Borsa hub), but the entity's
- * words are still not "the shared stem": otherwise "borsa" or "enflasyon" alone
- * would relate "Çin borsası sert düştü" to a Chinese bourse-regulator story
- * (h129; the h37-clusters-1 rule).
- */
-function stemMatchers(): readonly EntityMatcher[] {
-  if (stemKeyMatchers === null) {
-    stemKeyMatchers = RISING_ENTITIES.map((entity) => ({
-      key: entity.key,
-      patterns: toRegExps(
-        entityHubPatterns(entity, { ...entityHubSpec(entity), requires: undefined, hubExcludes: undefined }),
-      ),
-    }));
-  }
-  return stemKeyMatchers;
-}
 
 /**
  * The entity-hub keys a title names (sorted), by label and by alias, with the
@@ -427,7 +388,7 @@ function stemMatchers(): readonly EntityMatcher[] {
 export function entityKeysIn(title: string): string[] {
   if (typeof title !== "string" || title === "") return [];
   const folded = foldEntityText(title.slice(0, ENTITY_SCAN_CHARS));
-  return matchers()
+  return hubMatchers()
     .filter((m) => m.patterns.some((re) => re.test(folded)))
     .map((m) => m.key)
     .sort();

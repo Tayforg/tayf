@@ -16,6 +16,7 @@ import { currentTimeMs } from "@/lib/time";
 import type { RisingEntity } from "@/lib/trends/rising-entities";
 import {
   ENTITY_HUB_LIMIT,
+  ENTITY_HUB_MAX_PAGE,
   entityByKey,
   entityHubHeadlineOnly,
   entityHubPatterns,
@@ -61,6 +62,19 @@ import {
 // The app never passes `p_since`: the window lives in SQL, so no clock is read
 // here and the page prerenders under cacheComponents.
 //
+// Paging (h136-roadmap-2): getEntityHub(key, page) reads page N of the hub, 20 per
+// page. Page 1 is the v3 read above, untouched. A later page calls migration 199's
+// `entity_cluster_ids_v4` (v3's body plus `p_offset`, so the matching, the order and the
+// total are identical, and page 1 of v4 is page 1 of v3) with p_offset
+// (page - 1) * 20. On PGRST202 (199 not applied yet) a later page resolves to an
+// `unavailable` result (EntityHub.unavailable) and does not throw, and page 1 keeps
+// working on v3: deploying the app before 199 only costs the later pages. A page past
+// the end has no rows, so the total (which the page needs to point at the last page)
+// is read from page 1's own v3 chain. The SQL clamps p_offset to 1000, so the last
+// page that exists is ENTITY_HUB_MAX_PAGE (51); any page past it is answered as past the
+// end WITHOUT calling v4 (the clamped offset would hand back page 51's rows) and shares
+// one cache key, so a crawler's ?sayfa=N cannot mint an entry per integer.
+//
 // The route key reaches this module only after `entityByKey` accepts it, so
 // the text that goes into the RPC is always one of the curated labels or
 // aliases in rising-entities.ts, never request-controlled.
@@ -78,8 +92,18 @@ import {
 
 export interface EntityHub {
   bundles: ClusterBundle[];
-  /** Full match count in the window (>= bundles.length). */
+  /**
+   * Full match count in the window (>= bundles.length). On a page past the end it is
+   * still the hub's total (read from page 1), so the page can name the last page; 0
+   * when the hub has no match or the page is `unavailable`.
+   */
   total: number;
+  /**
+   * Set (true) only on a page after the first while migration 199's
+   * `entity_cluster_ids_v4` is not in the schema cache (PGRST202): the page cannot be
+   * listed yet. Absent otherwise. Never set on page 1.
+   */
+  unavailable?: true;
   /**
    * When this result was read (epoch ms). Stamped inside fetchEntityHub, which
    * only ever runs inside the "use cache" scope or after the request scope on
@@ -133,14 +157,28 @@ interface EntitySummaryRow {
 
 interface EntityIdRead {
   ids: string[];
-  /** Full match count, never below ids.length; 0 when there are no ids. */
+  /** Full match count, never below offset + ids.length; 0 when there are no ids (a later page: the page 1 probe's total). */
   total: number;
+  /** A later page whose RPC (migration 199) is not in the schema cache yet. */
+  unavailable?: true;
 }
 
-// The id step both readers share, so the RPC arguments, the PGRST202 fallbacks
-// and the total can never drift between the full hub and its summary. THROWS on a
-// Supabase error.
-async function readEntityIds(
+/**
+ * The total off the rows of one RPC answer. `count(*) over ()` repeats the full match
+ * count on every row, so the first row's value is the total. A missing / non-numeric /
+ * impossibly small value (below the rows before and on this page, `offset + rows.length`)
+ * falls back to that, so the note can never read "0 küme" above a list of cards.
+ */
+function totalOfRows(rows: EntityIdRow[], offset: number): number {
+  const floor = offset + rows.length;
+  const reported = Number(rows[0]?.total);
+  return Number.isFinite(reported) && reported >= floor ? reported : floor;
+}
+
+// Page 1's id step, which both readers share, so the RPC arguments, the PGRST202
+// fallbacks and the total can never drift between the full hub, its summary and the
+// past-the-end probe. THROWS on a Supabase error.
+async function readFirstPageIds(
   supabase: SupabaseClient,
   entity: RisingEntity,
   queries: string[],
@@ -182,22 +220,66 @@ async function readEntityIds(
   const rows = (data ?? []) as EntityIdRow[];
   const ids = rows.map((r) => r.id);
   if (ids.length === 0) return { ids, total: 0 };
+  return { ids, total: totalOfRows(rows, 0) };
+}
 
-  // `count(*) over ()` repeats the full match count on every row, so the first
-  // row's value is the total. A missing / non-numeric / impossibly small value
-  // (below the number of rows actually returned) falls back to the row count so
-  // the note can never read "0 küme" above a list of cards.
-  const reported = Number(rows[0]?.total);
-  const total =
-    Number.isFinite(reported) && reported >= ids.length ? reported : ids.length;
-  return { ids, total };
+// A page after the first: migration 199's `entity_cluster_ids_v4` with
+// p_offset = (page - 1) * 20, the same limit, queries, patterns and headline-only
+// flag as page 1. PGRST202 = 199 is not applied: `unavailable`, never a throw (the
+// page says so and links to page 1; any other error keeps the throw-and-retry path).
+// No rows = a page past the end: the total comes from page 1's chain so the page can
+// name the last page. A page past ENTITY_HUB_MAX_PAGE skips v4 altogether: the SQL
+// clamps p_offset to 1000, which would answer page 51's rows for page 52 and up.
+async function readLaterPageIds(
+  supabase: SupabaseClient,
+  entity: RisingEntity,
+  queries: string[],
+  patterns: string[],
+  headlineOnly: boolean,
+  page: number,
+): Promise<EntityIdRead> {
+  if (page <= ENTITY_HUB_MAX_PAGE) {
+    const offset = (page - 1) * ENTITY_HUB_LIMIT;
+    const { data, error } = await supabase.rpc("entity_cluster_ids_v4", {
+      p_queries: queries,
+      p_patterns: patterns,
+      p_limit: ENTITY_HUB_LIMIT,
+      p_headline_only: headlineOnly,
+      p_offset: offset,
+    });
+    if (error?.code === "PGRST202") return { ids: [], total: 0, unavailable: true };
+    if (error) {
+      throw new Error(`[clusters] entity-hub error: ${error.message}`);
+    }
+    const rows = (data ?? []) as EntityIdRow[];
+    if (rows.length > 0) {
+      return { ids: rows.map((r) => r.id), total: totalOfRows(rows, offset) };
+    }
+  }
+  const first = await readFirstPageIds(supabase, entity, queries, patterns, headlineOnly);
+  return { ids: [], total: first.total };
+}
+
+// The id step both readers share. `page` defaults to 1, the v3 chain exactly as it
+// always was (the summary reader never passes one). THROWS on a Supabase error.
+async function readEntityIds(
+  supabase: SupabaseClient,
+  entity: RisingEntity,
+  queries: string[],
+  patterns: string[],
+  headlineOnly: boolean,
+  page = 1,
+): Promise<EntityIdRead> {
+  return page <= 1
+    ? readFirstPageIds(supabase, entity, queries, patterns, headlineOnly)
+    : readLaterPageIds(supabase, entity, queries, patterns, headlineOnly, page);
 }
 
 // Internal, UNCACHED implementation. THROWS on a Supabase error/exception —
 // mirroring search-query.ts's fetch/cache split. Kept free of the "use cache"
 // directive so it can run twice: once (wrapped by `attemptCached`) inside the
 // cache boundary below, and once more, live, as `getEntityHub`'s retry.
-async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<EntityHub> {
+async function fetchEntityHub(key: string, headlineOnly: boolean, page: number): Promise<EntityHub> {
   const asOfMs = currentTimeMs();
   const entity = entityByKey(key);
   if (entity === null) return { bundles: [], total: 0, asOfMs };
@@ -209,8 +291,11 @@ async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<Entit
   }
 
   const supabase = createReaderClient();
-  const { ids, total } = await readEntityIds(supabase, entity, queries, patterns, headlineOnly);
-  if (ids.length === 0) return { bundles: [], total: 0, asOfMs };
+  const read = await readEntityIds(supabase, entity, queries, patterns, headlineOnly, page);
+  if (read.unavailable === true) return { bundles: [], total: 0, asOfMs, unavailable: true };
+  const { ids, total } = read;
+  // No ids: an empty hub (total 0), or a page past the end, whose total is the hub's.
+  if (ids.length === 0) return { bundles: [], total, asOfMs };
 
   // Same feed-health gate as the home feed and the search results, fetched
   // once per hub and in parallel with the embed read: neither depends on the
@@ -251,7 +336,8 @@ async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<Entit
 //
 // Plain `"use cache"` (not remote): 62 keys, each tiny; an in-memory
 // per-instance entry is the right fit, same call as search-query.ts. The
-// headline-only flag is an argument, so it is part of the cache key.
+// headline-only flag and the page are arguments, so both are part of the cache
+// key (the caller bounds the page: see getEntityHub).
 //
 // Cache lifetime follows the outcome: a read keeps the `cluster-feed` window,
 // a failed attempt ({ ok: false }) is memoised for `minutes` only. Exactly one
@@ -262,11 +348,13 @@ async function fetchEntityHub(key: string, headlineOnly: boolean): Promise<Entit
 // epoch ms of the database read, which fetchEntityHub already took), so a cache
 // HIT can be remembered as a last-good value without reading the clock on the
 // hit path (cache-resilience.ts, section 4). A failed attempt carries no stamp.
-async function cachedEntityHub(key: string, headlineOnly: boolean) {
+async function cachedEntityHub(key: string, headlineOnly: boolean, page: number) {
   "use cache";
   cacheTag("clusters-entity");
-  const r = await attemptCached("clusters-entity", () => fetchEntityHub(key, headlineOnly));
-  if (r.ok) cacheLife("cluster-feed");
+  const r = await attemptCached("clusters-entity", () => fetchEntityHub(key, headlineOnly, page));
+  // An `unavailable` page (199 not applied yet) is memoised like a failure, for
+  // `minutes`, so applying the migration heals it quickly.
+  if (r.ok && r.data.unavailable !== true) cacheLife("cluster-feed");
   else cacheLife("minutes");
   return r.ok ? { ...r, at: r.data.asOfMs } : r;
 }
@@ -281,26 +369,44 @@ async function cachedEntityHub(key: string, headlineOnly: boolean) {
  * page's honest "unavailable" state. Concurrent live retries for one hub share
  * one read and a failed one backs off for a few seconds (key
  * `clusters-entity:<key>:<headline|lead>`: one of the 62 curated hub keys plus
- * its headline-only flag, so the key space is bounded). That matters because /trends reads up
+ * its headline-only flag, plus `:p<N>` on a page after the first, N at most 52, so the key space is bounded). That matters because /trends reads up
  * to 8 hubs per request (the /gundem index and the hubs sitemap read the lighter
  * getEntityHubSummary below), and without it every visitor would start its own
  * retries against a struggling reader. Never throws.
  */
-export async function getEntityHub(key: string): Promise<EntityHub | null> {
+export async function getEntityHub(key: string, page = 1): Promise<EntityHub | null> {
   const entity = entityByKey(key);
   if (entity === null) return null;
 
   // The hub's headline-only flag, read once and carried into every cache key.
   const headlineOnly = entityHubHeadlineOnly(entity);
+  // The page bounds its own key space here, once: a non-page value is page 1, and
+  // every page past ENTITY_HUB_MAX_PAGE is the one "past the end" page.
+  const readPage = hubReadPage(page);
   return resolveCachedOrRetry<EntityHub | null>(
     {
       label: "clusters-entity",
-      key: `clusters-entity:${key}:${headlineOnly ? "headline" : "lead"}`,
+      // Page 1 keeps the key it always had; a later page appends :p<N>.
+      key: `clusters-entity:${key}:${headlineOnly ? "headline" : "lead"}${readPage > 1 ? `:p${readPage}` : ""}`,
+      // Only page 1 is kept as a last-good value: the store holds 200 keys, and a
+      // crawler walking ?sayfa=2..51 across 62 hubs must not push the hubs'
+      // page 1 (and /trends' reads) out of it. An unavailable page is no good value.
+      remember: (value) => readPage === 1 && value?.unavailable !== true,
     },
-    () => cachedEntityHub(key, headlineOnly),
-    () => fetchEntityHub(key, headlineOnly),
+    () => cachedEntityHub(key, headlineOnly, readPage),
+    () => fetchEntityHub(key, headlineOnly, readPage),
     null,
   );
+}
+
+/**
+ * The page the data read (and its cache key) uses for a requested page: an integer
+ * >= 1, with every page past the last servable one folded into one "past the end"
+ * page (ENTITY_HUB_MAX_PAGE + 1). Anything that is not a page is page 1.
+ */
+function hubReadPage(page: number): number {
+  if (!Number.isInteger(page) || page < 1) return 1;
+  return Math.min(page, ENTITY_HUB_MAX_PAGE + 1);
 }
 
 // ---------------------------------------------------------------------------
