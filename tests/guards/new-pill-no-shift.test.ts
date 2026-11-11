@@ -8,7 +8,7 @@ import { createElement } from "react";
 import type { DependencyList, EffectCallback } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { LAST_VISIT_KEY } from "@/lib/last-visit";
+import { LAST_VISIT_KEY, LAST_VISIT_SEEN_KEY } from "@/lib/last-visit";
 
 // ---------------------------------------------------------------------------
 // Permanent CI guard (h68-lcp-1): the home "N yeni haber" pill must not move
@@ -27,9 +27,9 @@ import { LAST_VISIT_KEY } from "@/lib/last-visit";
 //     <body>) puts `data-rv` on <html> before the feed is parsed when the stamp
 //     exists, and globals.css turns the wrapper from sr-only geometry into a
 //     reserved 26 px slot under `html[data-rv]` ... but only when the render
-//     also carries `data-reserve` (server-decided: timestamps.length > 0, i.e.
+//     also carries `data-reserve` (server-decided: items.length > 0, i.e.
 //     this render shows clusters). The outage shell, EmptyClusters and a search
-//     with no in-feed matches pass timestamps=[], where the count is always 0
+//     with no in-feed matches pass items=[], where the count is always 0
 //     and no row may be reserved. The pill has an exact height (h-6.5
 //     leading-4) so filling the slot moves nothing.
 //   - A layout effect sets `data-rv` before paint when count > 0, for the soft
@@ -184,21 +184,37 @@ const OLDER = ["2026-11-08T05:00:00.000Z"];
  * render runs with no `window` and no `document` at all. A client render stubs
  * `document` with the shared `setAttribute` spy.
  */
-async function render(opts: { client: boolean; stored?: string | null; timestamps: string[] }): Promise<string> {
+async function render(opts: {
+  client: boolean;
+  stored?: string | null;
+  /** What localStorage holds under LAST_VISIT_SEEN_KEY (absent = a legacy reader). */
+  storedSeen?: string | null;
+  /** first_published of the rendered clusters; each becomes an item with its own id. */
+  timestamps: string[];
+  /** The page's `stamp` prop (default true: page 1 of the plain feed). */
+  stamp?: boolean;
+}): Promise<string> {
   vi.resetModules();
   setAttribute.mockClear();
   mode.client = opts.client;
   if (opts.client) {
     vi.stubGlobal("window", {
       localStorage: {
-        getItem: (key: string) => (key === LAST_VISIT_KEY ? (opts.stored ?? null) : null),
+        getItem: (key: string) =>
+          key === LAST_VISIT_KEY
+            ? (opts.stored ?? null)
+            : key === LAST_VISIT_SEEN_KEY
+              ? (opts.storedSeen ?? null)
+              : null,
       },
     });
     vi.stubGlobal("document", { documentElement: { setAttribute } });
   }
   const { NewSinceLastVisit } = await import("@/components/home/new-since-last-visit");
   const { renderToString } = await import("react-dom/server");
-  return renderToString(createElement(NewSinceLastVisit, { stamp: true, timestamps: opts.timestamps }));
+  const items = opts.timestamps.map((firstPublished, i) => ({ id: `cluster-${i}`, firstPublished }));
+  // `listed` (every cluster the plain feed lists) only feeds the stamp effect, which renderToString never runs.
+  return renderToString(createElement(NewSinceLastVisit, { stamp: opts.stamp ?? true, items, listed: items }));
 }
 
 /** The markup with the (first) pill <p> removed. */
@@ -250,11 +266,67 @@ describe("NewSinceLastVisit: server HTML and hydrated client share one wrapper",
 });
 
 // ---------------------------------------------------------------------------
+// h112-follows-1: a story that became listed after the stamp but was first
+// published before it is counted through the seen record; the wrapper never moves
+// ---------------------------------------------------------------------------
+
+describe("NewSinceLastVisit: the seen record counts late-listed stories", () => {
+  // Three clusters, all first published BEFORE the stamp. cluster-0 and cluster-1
+  // were on the stamped render; cluster-2 (30 min before the stamp) became listed
+  // after it (its 2nd source arrived later).
+  const ALL = ["2026-11-08T05:50:00.000Z", "2026-11-08T05:00:00.000Z", "2026-11-08T05:30:00.000Z"];
+  const SEEN = JSON.stringify({ v: 1, ids: ["cluster-0", "cluster-1"], floor: "2026-11-08T04:00:00.000Z" });
+
+  it("a returning reader with the record: counts the late story the stamp rule misses; the wrapper is unchanged", async () => {
+    const server = await render({ client: false, timestamps: ALL });
+    const legacy = await render({ client: true, stored: STAMP, timestamps: ALL });
+    expect(legacy).not.toContain("yeni haber");
+    const client = await render({ client: true, stored: STAMP, storedSeen: SEEN, timestamps: ALL });
+    expect(client).toMatch(/1(?:<!-- -->)? yeni haber/);
+    expect(withoutPill(client)).toBe(server);
+  });
+
+  it("sets data-rv for that count, exactly like the stamp rule does", async () => {
+    await render({ client: true, stored: STAMP, storedSeen: SEEN, timestamps: ALL });
+    expect(setAttribute).toHaveBeenCalledTimes(1);
+    expect(setAttribute).toHaveBeenCalledWith("data-rv", "");
+  });
+
+  it("a story older than the floor that merely resurfaced is not counted", async () => {
+    const old = JSON.stringify({ v: 1, ids: ["cluster-0", "cluster-1"], floor: "2026-11-08T05:45:00.000Z" });
+    const client = await render({ client: true, stored: STAMP, storedSeen: old, timestamps: ALL });
+    expect(client).not.toContain("yeni haber");
+  });
+
+  it("h113 correctness-1: a render that does not stamp (?page>=2, ?q=) counts with the stamp rule and ignores the record", async () => {
+    // NEWER were first published after the stamp, and the record knows both: the record says 0,
+    // the stamp rule says 2. A non-stamping view must give HEAD's 2 (the record describes page 1).
+    const known = JSON.stringify({ v: 1, ids: ["cluster-0", "cluster-1"], floor: "2026-11-08T04:00:00.000Z" });
+    const onPage1 = await render({ client: true, stored: STAMP, storedSeen: known, timestamps: NEWER });
+    expect(onPage1).not.toContain("yeni haber");
+    const onPage2 = await render({ client: true, stored: STAMP, storedSeen: known, timestamps: NEWER, stamp: false });
+    expect(onPage2).toMatch(/2(?:<!-- -->)? yeni haber/);
+    // and the late-listed story the record would have counted is NOT counted there (stamp rule: before the stamp)
+    const late = await render({ client: true, stored: STAMP, storedSeen: SEEN, timestamps: ALL, stamp: false });
+    expect(late).not.toContain("yeni haber");
+  });
+
+  it("a garbage record falls back to the stamp rule (no pill here; the usual 2 for newer items)", async () => {
+    expect(await render({ client: true, stored: STAMP, storedSeen: "{oops", timestamps: ALL })).not.toContain(
+      "yeni haber",
+    );
+    expect(await render({ client: true, stored: STAMP, storedSeen: "{oops", timestamps: NEWER })).toMatch(
+      /2(?:<!-- -->)? yeni haber/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // react-L1: the slot is reserved only when this render shows clusters
 // ---------------------------------------------------------------------------
 
 describe("NewSinceLastVisit: data-reserve is decided by the server prop, never by the stamp", () => {
-  it("empty timestamps (outage shell, EmptyClusters, search with no in-feed matches): server and client are byte-identical and reserve nothing", async () => {
+  it("empty items (outage shell, EmptyClusters, search with no in-feed matches): server and client are byte-identical and reserve nothing", async () => {
     const server = await render({ client: false, timestamps: [] });
     const client = await render({ client: true, stored: STAMP, timestamps: [] });
     expect(client).toBe(server);
@@ -263,7 +335,7 @@ describe("NewSinceLastVisit: data-reserve is decided by the server prop, never b
     expect(client).not.toContain("data-reserve");
   });
 
-  it("non-empty timestamps: server and client both carry data-reserve on the slot", async () => {
+  it("non-empty items: server and client both carry data-reserve on the slot", async () => {
     const server = await render({ client: false, timestamps: NEWER });
     const client = await render({ client: true, stored: STAMP, timestamps: NEWER });
     expect(server).toContain('data-new-pill-slot="" data-reserve=""');
@@ -271,7 +343,7 @@ describe("NewSinceLastVisit: data-reserve is decided by the server prop, never b
     expect(withoutPill(client)).toBe(server);
   });
 
-  it("non-empty timestamps with nothing new, a first visit and an unreadable stamp all still carry data-reserve (the server cannot know the stamp)", async () => {
+  it("non-empty items with nothing new, a first visit and an unreadable stamp all still carry data-reserve (the server cannot know the stamp)", async () => {
     for (const [stored, timestamps] of [
       [STAMP, OLDER],
       [null, NEWER],
@@ -311,7 +383,7 @@ describe("NewSinceLastVisit: a before-paint layout effect sets data-rv when coun
     expect(setAttribute).not.toHaveBeenCalled();
   });
 
-  it("client, empty timestamps: never touches <html> (count is always 0)", async () => {
+  it("client, empty items: never touches <html> (count is always 0)", async () => {
     await render({ client: true, stored: STAMP, timestamps: [] });
     expect(setAttribute).not.toHaveBeenCalled();
   });
@@ -333,9 +405,9 @@ describe("NewSinceLastVisit: a before-paint layout effect sets data-rv when coun
     expect(count(code, "document.documentElement")).toBe(1);
   });
 
-  it("source: the wrapper sets data-reserve from timestamps.length, with no className and nothing that reads count", () => {
+  it("source: the wrapper sets data-reserve from items.length, with no className and nothing that reads count", () => {
     const code = blankComments(read(COMPONENT));
-    expect(code).toContain('<div data-new-pill-slot="" data-reserve={timestamps.length > 0 ? "" : undefined}>');
+    expect(code).toContain('<div data-new-pill-slot="" data-reserve={items.length > 0 ? "" : undefined}>');
     const slotAt = code.indexOf("data-new-pill-slot");
     const tag = code.slice(code.lastIndexOf("<div", slotAt), code.indexOf(">", slotAt));
     expect(tag).not.toContain("className");

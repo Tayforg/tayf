@@ -4,7 +4,7 @@ import { BIAS_ORDER } from "@/lib/bias/config";
 import { publicBlindspotClaim } from "@/lib/clusters/recall-veto";
 import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 
-import { isRpcMissing, savedUpdatedLabel, toPublicSavedRow, toSavedRowView } from "./saved-row";
+import { isRpcMissing, savedSourceLabel, savedUpdatedLabel, toPublicSavedRow, toSavedRowView } from "./saved-row";
 
 const ZEROS = Object.fromEntries(BIAS_ORDER.map((k) => [k, 0]));
 
@@ -245,5 +245,32 @@ describe("isRpcMissing", () => {
     expect(isRpcMissing({ message: "boom" })).toBe(false);
     expect(isRpcMissing(null)).toBe(false);
     expect(isRpcMissing(undefined)).toBe(false);
+  });
+});
+
+// h112-follows-3 (migration 192): the count a /saved row prints is the wire-collapsed one the cards, the cluster page
+// and /api/takip print (saved_clusters_v4's effective_article_count), so "1e801e36" reads "3 kaynak" here too
+// (stored article_count 6: 6 outlets, 3 distinct texts). A row from the v3 / v2 / v1 fallback has no such field and
+// keeps printing article_count.
+describe("savedSourceLabel", () => {
+  it("prints the effective count when the row has one", () => {
+    expect(savedSourceLabel({ article_count: 6, effective_article_count: 3 })).toBe("3 kaynak");
+    expect(savedSourceLabel({ article_count: 6, effective_article_count: 6 })).toBe("6 kaynak");
+    expect(savedSourceLabel({ article_count: 12, effective_article_count: 1 })).toBe("1 kaynak");
+  });
+
+  it("prints article_count when the field is absent, null or unusable", () => {
+    expect(savedSourceLabel({ article_count: 6 })).toBe("6 kaynak");
+    expect(savedSourceLabel({ article_count: 6, effective_article_count: null })).toBe("6 kaynak");
+    expect(savedSourceLabel({ article_count: 6, effective_article_count: undefined })).toBe("6 kaynak");
+    expect(savedSourceLabel({ article_count: 6, effective_article_count: 0 })).toBe("6 kaynak");
+    expect(savedSourceLabel({ article_count: 6, effective_article_count: Number.NaN })).toBe("6 kaynak");
+    expect(savedSourceLabel({ article_count: 6, effective_article_count: -2 })).toBe("6 kaynak");
+  });
+
+  it("keeps the Turkish copy 'kaynak' and always yields a number and the word", () => {
+    expect(savedSourceLabel({ article_count: 0 })).toBe("0 kaynak");
+    expect(savedSourceLabel({ article_count: Number.NaN })).toBe("0 kaynak");
+    expect(savedSourceLabel({ article_count: 3, effective_article_count: 3 })).toMatch(/^\d+ kaynak$/);
   });
 });

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173).
+// 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -51,6 +51,11 @@ import { fileURLToPath } from "node:url";
 // 60 days up to that newest article; warn only): the newest version carries it LAST, after image_coverage, and keeps rows 1-21 as 167
 // wrote them (tests/migrations/173-ops-sources-dark-persistent.test.ts pins that byte identity). It exists because row 13 forgets
 // a source that stays dark after 14 days and row 8 only counts.
+// 192 (h112-follows-3) adds the seventh anon RPC, saved_clusters_v4, to row 17's allowlist the same way 158 added the sixth:
+// it re-creates the function with 173's text verbatim except the same three row-17 spots (the identity array gains
+// 'saved_clusters_v4(uuid[])', "six" -> "seven", "(6 izinli RPC hariç)" -> "(7 ...") and the function comment, so the "rows 1-17
+// as 145 wrote them" check below allows exactly those spots, again, in the newest version
+// (tests/migrations/192-saved-clusters-v4.test.ts pins the full diff against 173).
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -88,6 +93,24 @@ function withSixthAnonRpc(rows145: string): string {
   let out = rows145;
   for (const [from, to] of swaps) {
     expect(out.split(from).length - 1, `145 row 17 has ${from} once`).toBe(1);
+    out = out.replace(from, to);
+  }
+  return out;
+}
+
+/**
+ * 158's rows 1-17 as migration 192 re-creates them: the same text with the three spots where row 17 names the
+ * allowlisted anon RPCs moved from six to seven (saved_clusters_v4 appended to the identity array).
+ */
+function withSeventhAnonRpc(rows158: string): string {
+  const swaps: ReadonlyArray<readonly [string, string]> = [
+    ["outside the six allowlisted RPCs", "outside the seven allowlisted RPCs"],
+    ["'saved_clusters_v3(uuid[])'])", "'saved_clusters_v3(uuid[])', 'saved_clusters_v4(uuid[])'])"],
+    ["' (6 izinli RPC hariç)'", "' (7 izinli RPC hariç)'"],
+  ];
+  let out = rows158;
+  for (const [from, to] of swaps) {
+    expect(out.split(from).length - 1, `158 row 17 has ${from} once`).toBe(1);
     out = out.replace(from, to);
   }
   return out;
@@ -133,10 +156,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173) in number order", () => {
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192) in number order", () => {
     expect(versions.length).toBeGreaterThanOrEqual(17);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150, 157, 158, 159, 161, 167, 173, 192]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -249,8 +272,9 @@ describe("ops_health_report(): the newest version", () => {
     // the executable create line is in the file once (comments are stripped before counting)
     expect(newest.code.indexOf(CREATE_LINE)).toBeGreaterThanOrEqual(0);
     expect(newest.code.indexOf(CREATE_LINE, newest.code.indexOf(CREATE_LINE) + 1), "the create line is executable once").toBe(-1);
-    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20, 161 appended row 21, 167 changed row 18's poison count and 173 appended row 22 after row 21; rows 1-17 are still 145's text
-    const expected = newest.num >= 158 ? withSixthAnonRpc(rows145) : rows145;
+    // 158 changed row 17 in exactly three spots (the sixth anon RPC), 159 only row 20, 161 appended row 21, 167 changed row 18's poison count, 173 appended row 22 after row 21 and 192 changed the same three row-17 spots again (the seventh anon RPC); rows 1-17 are still 145's text
+    const sixRpcRows = newest.num >= 158 ? withSixthAnonRpc(rows145) : rows145;
+    const expected = newest.num >= 192 ? withSeventhAnonRpc(sixRpcRows) : sixRpcRows;
     expect(rawNewest.slice(at, at + expected.length)).toBe(expected);
     // the next non-blank line is the row-18 marker comment
     const rest = rawNewest.slice(at + expected.length);

@@ -1,22 +1,47 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 
-import { countNewSince, readLastVisit, writeLastVisit } from "@/lib/last-visit";
+import {
+  countNewSinceVisit,
+  readLastVisit,
+  readLastVisitSeen,
+  recordVisit,
+  type LastVisitSeen,
+  type VisitItem,
+} from "@/lib/last-visit";
 
-// Stamp as it was when this page load started — read once, then frozen so the
-// pill doesn't vanish after the stamp is refreshed in the effect below.
-let stampAtLoad: string | null | undefined;
-const subscribe = () => () => {};
-function getSnapshot(): string | null {
-  if (stampAtLoad === undefined) stampAtLoad = readLastVisit();
-  return stampAtLoad;
+// Stamp and seen record as they were when this page load started — read once,
+// then frozen so the pill doesn't vanish after the effect below refreshes them.
+// One frozen object keeps the snapshot reference stable for useSyncExternalStore.
+interface VisitAtLoad {
+  stamp: string | null;
+  seen: LastVisitSeen | null;
 }
-const getServerSnapshot = () => null;
+const NO_VISIT: VisitAtLoad = { stamp: null, seen: null };
+let visitAtLoad: VisitAtLoad | undefined;
+const subscribe = () => () => {};
+function getSnapshot(): VisitAtLoad {
+  visitAtLoad ??= { stamp: readLastVisit(), seen: readLastVisitSeen() };
+  return visitAtLoad;
+}
+const getServerSnapshot = () => NO_VISIT;
 
 interface NewSinceLastVisitProps {
-  /** ISO `first_published` of the clusters rendered on the page. */
-  timestamps: string[];
+  /**
+   * The clusters rendered on the page (breaking strip plus this page's rows):
+   * id and `first_published`. The count is "not shown at the last stamped
+   * visit and newer than the oldest story it showed" (countNewSinceVisit).
+   */
+  items: VisitItem[];
+  /**
+   * Every cluster the plain feed lists (breaking strip plus the whole ranked
+   * set, 36 or fewer), not only this page's rows: what a stamped render becomes
+   * as the next visit's seen record. Page 2 is disjoint from page 1, so a record
+   * of page 1 alone would make page 2's newer stories look new (h113
+   * correctness-1). `[]` where nothing was listed.
+   */
+  listed: VisitItem[];
   /**
    * Whether this render showed the feed (page.tsx: shouldStampLastVisit). Only
    * then is the last-visit stamp advanced; the outage shell, a search view and
@@ -54,19 +79,30 @@ interface NewSinceLastVisitProps {
 // `data-rv`, and gets no blank row.
 //
 // The slot is reserved only when this render shows clusters: `data-reserve` is
-// set from `timestamps.length > 0`, a server-decided prop, so server HTML and
+// set from `items.length > 0`, a server-decided prop, so server HTML and
 // client markup are identical. The outage shell, EmptyClusters and a search with
-// no in-feed matches pass timestamps=[], so count is always 0 there and no row
+// no in-feed matches pass items=[], so count is always 0 there and no row
 // is reserved (a returning reader would otherwise see those cards start 46 px
 // lower: the 26 px slot plus the 20 px space-y-5 gap).
 //
-// Accepted trade-off, now only when timestamps is non-empty: a returning reader
+// Accepted trade-off, now only when items is non-empty: a returning reader
 // with 0 new items sees an empty 26 px slot. Collapsing it after hydration would
 // be a new layout shift, and the server cannot know the stamp (the page stays
 // cacheable, no cookies).
-export function NewSinceLastVisit({ timestamps, stamp }: NewSinceLastVisitProps) {
-  const since = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const count = countNewSince(timestamps, since);
+export function NewSinceLastVisit({ items, listed, stamp }: NewSinceLastVisitProps) {
+  const visit = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  // The seen record describes the plain feed's listing, so only a render that
+  // stamps (page 1 of the plain feed) may count against it; ?page>=2 and ?q=
+  // views count with the stamp rule alone.
+  const count = countNewSinceVisit(items, stamp ? visit.seen : null, visit.stamp);
+
+  // The listing this render carries, for the stamp effect below. Kept in a ref so
+  // that effect still re-runs only when `stamp` flips (a refreshed `listed` array
+  // alone must not move the stamp). Declared first: effects run in order.
+  const listedRef = useRef(listed);
+  useEffect(() => {
+    listedRef.current = listed;
+  });
 
   // RETURNING_READER_SCRIPT only runs at document parse, in the root layout that
   // persists across App Router soft navigations. A soft navigation to "/" can
@@ -75,20 +111,23 @@ export function NewSinceLastVisit({ timestamps, stamp }: NewSinceLastVisitProps)
   // clipped while still announced. This layout effect opens the slot before
   // paint (a soft-navigation mount commits fresh content in the same frame, so
   // nothing visibly shifts). During normal hydration it is a no-op, the script
-  // already set the attribute. count > 0 implies timestamps.length > 0, so
+  // already set the attribute. count > 0 implies items.length > 0, so
   // `data-reserve` is on the wrapper whenever this runs.
   useLayoutEffect(() => {
     if (count > 0) document.documentElement.setAttribute("data-rv", "");
   }, [count]);
 
   // Re-runs when `stamp` flips: clearing a search on "/" (false -> true) puts the
-  // reader back on the feed, which is a visit worth stamping.
+  // reader back on the feed, which is a visit worth stamping. recordVisit writes
+  // the stamp and the seen record (ids + oldest first_published of exactly the
+  // listed clusters, plus the ids of the previous record), never anything
+  // derived from a fetch.
   useEffect(() => {
-    if (stamp) writeLastVisit(new Date().toISOString());
+    if (stamp) recordVisit(new Date().toISOString(), listedRef.current);
   }, [stamp]);
 
   return (
-    <div data-new-pill-slot="" data-reserve={timestamps.length > 0 ? "" : undefined}>
+    <div data-new-pill-slot="" data-reserve={items.length > 0 ? "" : undefined}>
       <div role="status" aria-live="polite">
         {count > 0 && (
           <p className="flex h-6.5 w-fit items-center gap-1.5 rounded-full border border-brand/30 bg-brand/10 px-3 py-1 text-[11px] leading-4 font-medium text-brand">

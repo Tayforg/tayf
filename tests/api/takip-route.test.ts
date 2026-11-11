@@ -108,7 +108,11 @@ afterEach(() => {
 });
 
 describe("GET /api/takip -- q (keyword) path", () => {
-  it("calls searchClusters with the NORMALISED keyword and answers 200", async () => {
+  // h112-follows-2: the keyword is normalised for display (format characters out,
+  // whitespace collapsed, case kept); searchClusters canonicalises it itself
+  // (canonicalSearchQuery lower-cases with Turkish rules and the SQL folds ı/i), so
+  // the search side needs no change: 'IMF' and 'imf' reach the same result list.
+  it("calls searchClusters with the normalised keyword (case kept) and answers 200", async () => {
     searchClustersMock.mockResolvedValue({
       ok: true,
       bundles: [bundle({ id: "c1" })],
@@ -117,7 +121,7 @@ describe("GET /api/takip -- q (keyword) path", () => {
     const res = await call(`?q=${encodeURIComponent("  İMAMOĞLU   Davası ")}`);
 
     expect(searchClustersMock).toHaveBeenCalledTimes(1);
-    expect(searchClustersMock).toHaveBeenCalledWith("imamoğlu davası");
+    expect(searchClustersMock).toHaveBeenCalledWith("İMAMOĞLU Davası");
     expect(getTopicClustersMock).not.toHaveBeenCalled();
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe(PUBLIC_CACHE);

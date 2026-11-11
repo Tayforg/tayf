@@ -19,11 +19,16 @@ import {
   followRowMeta,
   followRowsToShow,
   MAX_FOLLOWS,
+  NO_BASELINE,
   parseFollowItems,
   parseFollowKey,
+  rowsShown,
   runWithConcurrency,
   type Follow,
   type FollowItem,
+  type FollowKind,
+  type SeenBaseline,
+  type SeenRows,
 } from "@/lib/follows/follows";
 
 // Client half of /takip. For every followed keyword / topic / gündem hub it
@@ -32,14 +37,19 @@ import {
 // newest of the hub page's own list (the same matcher as /gundem/<key>); a
 // keyword follow lists the most-corroborated matches the search returned,
 // newest first (the search has no date window, so the copy never promises
-// "the latest"). "yeni" counts come from a snapshot of each follow's seenAt
-// taken BEFORE the visit marks them seen, so the badges stay on screen for this
-// visit and are gone on the next one. For a keyword follow "yeni" is a lower
-// bound: a fresh story the search did not return cannot be counted.
+// "the latest"). "yeni" counts come from a snapshot of each follow's baseline
+// (seenAt, plus the ids and oldest first_published of the rows its last visit
+// rendered) taken BEFORE the visit marks them seen, so the badges stay on screen
+// for this visit and are gone on the next one. A story is "yeni" when the last
+// visit did not show it and it is newer than the oldest story that visit showed
+// (isNewItem): that also counts a story that became listed after the visit
+// although it was first published before it. For a keyword follow "yeni" is a
+// lower bound: a fresh story the search did not return cannot be counted.
 //
 // A list shows ROWS_PER_FOLLOW rows by default but grows to the last "yeni"
 // story (followRowsToShow), so the badge counts only rows on screen and the
-// markSeen at the end of the visit consumes only stories the reader was shown.
+// markSeen at the end of the visit consumes only stories the reader was shown:
+// it stores exactly the rows rendered (rowsShown).
 //
 // Accessibility: ONE polite live region (FeedFrame) is mounted in every state
 // -- placeholder, empty and list -- so it never remounts and a removal can be
@@ -65,18 +75,19 @@ type FeedState =
 
 // What the polite region says once a RETRY's fetch has landed (WCAG 4.1.3).
 // The count is the rows actually shown: ROWS_PER_FOLLOW, or more when the list
-// grew to cover every "yeni" story (followRowsToShow with the follow's seenAt
-// snapshot). The empty case mirrors the visible followEmptyText: an empty
-// list means "nothing matched", not "no new news".
+// grew to cover every "yeni" story (followRowsToShow with the follow's baseline
+// snapshot; a bare seenAt string or null is the legacy seenAt-only baseline).
+// The empty case mirrors the visible followEmptyText: an empty list means
+// "nothing matched", not "no new news".
 export function retryResultAnnouncement(
   label: string,
   state: FeedState,
-  seenAt: string | null,
+  baseline: SeenBaseline | string | null,
 ): string {
   if (state.status === "ok") {
     return state.items.length === 0
       ? `${label} yüklendi · eşleşen hikâye yok`
-      : `${label} yüklendi · ${followRowsToShow(state.items, seenAt, ROWS_PER_FOLLOW)} hikâye`;
+      : `${label} yüklendi · ${followRowsToShow(state.items, baseline, ROWS_PER_FOLLOW)} hikâye`;
   }
   return state.reason === "rate"
     ? `${label}: çok sık yenilendi, biraz sonra tekrar deneyin`
@@ -137,6 +148,29 @@ export function createFailureLedger(): FailureLedger {
   };
 }
 
+// What the fetch effect is keyed on: one line per follow, "<key>\t<value>". The
+// key alone cannot rebuild the request: a keyword's key is its identity ('q:imf'
+// for 'IMF', 'q:secim' for 'seçim'), and the search must run with the display
+// value the reader sees. Tab and newline cannot occur in a value (whitespace is
+// collapsed when a keyword is stored). seenAt, seenIds and seenFloor are left
+// out on purpose: markSeen rewrites them on every visit and must not refetch.
+export function followsSignature(follows: ReadonlyArray<Pick<Follow, "kind" | "value">>): string {
+  return follows.map((f) => `${followKey(f)}\t${f.value}`).join("\n");
+}
+
+/** Inverse of followsSignature; a line that is not a valid follow key is dropped. */
+export function followsFromSignature(
+  signature: string,
+): Array<{ key: string; kind: FollowKind; value: string }> {
+  if (signature === "") return [];
+  return signature.split("\n").flatMap((line) => {
+    const tab = line.indexOf("\t");
+    const key = tab < 0 ? "" : line.slice(0, tab);
+    const parsed = tab < 0 ? null : parseFollowKey(key);
+    return parsed === null ? [] : [{ key, kind: parsed.kind, value: line.slice(tab + 1) }];
+  });
+}
+
 async function fetchFollowState(
   follow: Pick<Follow, "kind" | "value">,
   signal: AbortSignal,
@@ -183,13 +217,13 @@ export function FollowFeed() {
   const hydrated = useHydrated();
 
   const [results, setResults] = useState<Record<string, FeedState>>({});
-  const [seenSnapshot, setSeenSnapshot] = useState<Record<string, string | null>>({});
+  const [seenSnapshot, setSeenSnapshot] = useState<Record<string, SeenBaseline>>({});
   // Mirrors seenSnapshot (updated in an effect after every commit) for the fetch
-  // effect below, which must read the current per-key baseline when a retry
+  // effect below, which must read the current per-key baseline when a fetch
   // lands but must NOT list seenSnapshot as a dependency: it is keyed on the
   // set of follows and the retry nonce only, or every snapshot change would
   // refetch.
-  const seenSnapshotRef = useRef<Record<string, string | null>>({});
+  const seenSnapshotRef = useRef<Record<string, SeenBaseline>>({});
   const [announcement, setAnnouncement] = useState("");
   // Bumped by a retry so the fetch effect re-runs without the follow set changing.
   const [retryNonce, setRetryNonce] = useState(0);
@@ -200,6 +234,10 @@ export function FollowFeed() {
   // would hammer a failing endpoint every time any follow changes); only the
   // reader's explicit "Tekrar dene" takes a key out of here.
   const erroredKeys = useRef<Set<string>>(new Set());
+  // key -> the rows this visit rendered for a loaded follow (their ids and the
+  // oldest first_published). What markSeen stores, so the next visit judges
+  // "yeni" against what the reader was shown, not against the whole response.
+  const shownRows = useRef<Map<string, SeenRows>>(new Map());
   // key -> label of a follow whose retry result must be announced. Only
   // "Tekrar dene" puts a key here; an initial load that FAILS goes into the
   // ledger below instead, and a successful initial load stays silent. An aborted
@@ -221,10 +259,11 @@ export function FollowFeed() {
   const pendingFocus = useRef<string | null | undefined>(undefined);
 
   // The effect is keyed on the SET of follows, not on the objects: markSeen
-  // rewrites seenAt on every entry, which must not trigger a refetch.
-  const keysSignature = follows.map(followKey).join("\n");
+  // rewrites seenAt (and the seen ids) on every entry, which must not trigger a
+  // refetch.
+  const keysSignature = followsSignature(follows);
 
-  // Snapshot of each follow's seenAt, taken the first render a follow is seen
+  // Snapshot of each follow's baseline, taken the first render a follow is seen
   // in this visit (always before the fetches below can mark it seen). A
   // follow keeps its first snapshot for the whole visit; one that was removed
   // and re-added gets a fresh one. Adjusted during render (React's "derive
@@ -234,10 +273,14 @@ export function FollowFeed() {
     Object.keys(seenSnapshot).length === follows.length &&
     follows.every((f) => followKey(f) in seenSnapshot);
   if (!snapshotInSync) {
-    const next: Record<string, string | null> = {};
+    const next: Record<string, SeenBaseline> = {};
     for (const f of follows) {
       const key = followKey(f);
-      next[key] = key in seenSnapshot ? (seenSnapshot[key] ?? null) : f.seenAt;
+      next[key] = seenSnapshot[key] ?? {
+        seenAt: f.seenAt,
+        seenIds: f.seenIds,
+        seenFloor: f.seenFloor,
+      };
     }
     setSeenSnapshot(next);
   }
@@ -245,11 +288,7 @@ export function FollowFeed() {
   useEffect(() => {
     // Rebuilt from the signature (not from the render's `follows`) so the
     // effect's only inputs are the string it is keyed on and the retry nonce.
-    const list = keysSignature === "" ? [] : keysSignature.split("\n");
-    const wanted = list.flatMap((key) => {
-      const parsed = parseFollowKey(key);
-      return parsed === null ? [] : [{ key, ...parsed }];
-    });
+    const wanted = followsFromSignature(keysSignature);
     const live = new Set(wanted.map((w) => w.key));
     for (const key of [...loadedKeys.current]) {
       if (!live.has(key)) loadedKeys.current.delete(key);
@@ -259,6 +298,9 @@ export function FollowFeed() {
     }
     for (const key of [...retryPending.current.keys()]) {
       if (!live.has(key)) retryPending.current.delete(key);
+    }
+    for (const key of [...shownRows.current.keys()]) {
+      if (!live.has(key)) shownRows.current.delete(key);
     }
     unannouncedFailures.current.prune(live);
 
@@ -296,9 +338,12 @@ export function FollowFeed() {
       await runWithConcurrency(todo, FETCH_CONCURRENCY, async (item) => {
         const outcome = await fetchFollowState(item, controller.signal);
         if (controller.signal.aborted) return;
+        // This visit's baseline for the follow, the one its section renders with.
+        const baseline = seenSnapshotRef.current[item.key] ?? NO_BASELINE;
         if (outcome.status === "ok") {
           loadedKeys.current.add(item.key);
           erroredKeys.current.delete(item.key);
+          shownRows.current.set(item.key, rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW));
         } else {
           erroredKeys.current.add(item.key);
         }
@@ -306,8 +351,7 @@ export function FollowFeed() {
         const label = retryPending.current.get(item.key);
         if (label !== undefined) {
           retryPending.current.delete(item.key);
-          const seenAt = seenSnapshotRef.current[item.key] ?? null;
-          retryText = retryResultAnnouncement(label, outcome, seenAt);
+          retryText = retryResultAnnouncement(label, outcome, baseline);
           setAnnouncement(retryText);
         } else if (outcome.status === "error") {
           unannouncedFailures.current.record(item.key, followLabel(item));
@@ -318,10 +362,13 @@ export function FollowFeed() {
       // failure still waiting (also those of a batch that was aborted), after the
       // retry outcome the reader just asked for.
       announceUnannounced(retryText);
-      const seen = new Set(
-        wanted.map((w) => w.key).filter((key) => loadedKeys.current.has(key)),
-      );
-      followsStore.markSeen(seen, new Date().toISOString());
+      // Every loaded follow is marked seen with the rows rendered for it.
+      const shown = new Map<string, SeenRows>();
+      for (const w of wanted) {
+        const rows = shownRows.current.get(w.key);
+        if (loadedKeys.current.has(w.key) && rows !== undefined) shown.set(w.key, rows);
+      }
+      followsStore.markSeen(shown, new Date().toISOString());
     })();
 
     return () => controller.abort();
@@ -385,12 +432,15 @@ export function FollowFeed() {
         <p className="text-xs text-muted-foreground">{`${count}/${MAX_FOLLOWS} takip`}</p>
         {follows.map((follow) => {
           const key = followKey(follow);
+          const baseline = seenSnapshot[key] ?? NO_BASELINE;
           return (
             <FollowSection
               key={key}
               follow={follow}
               state={results[key]}
-              seenAt={seenSnapshot[key] ?? null}
+              seenAt={baseline.seenAt}
+              seenIds={baseline.seenIds}
+              seenFloor={baseline.seenFloor}
               onRemove={() => handleRemove(follow)}
               onRetry={() => handleRetry(follow)}
               headingRef={(el) => {
@@ -451,12 +501,12 @@ export function EmptyState({
   );
 }
 
-function newBadgeLabel(state: FeedState | undefined, seenAt: string | null): string | null {
+function newBadgeLabel(state: FeedState | undefined, baseline: SeenBaseline): string | null {
   if (state?.status !== "ok") return null;
   // Counts every "yeni" item of the response, and that is exactly the rows on
   // screen: SectionBody renders followRowsToShow() rows, which always reach the
   // last new item. Keep the two on the same countNew rule.
-  const n = countNew(state.items, seenAt);
+  const n = countNew(state.items, baseline);
   if (n === 0) return null;
   // The API caps a follow at FOLLOW_ITEMS_MAX items, so "all of them are new"
   // at the cap means "at least that many".
@@ -469,18 +519,24 @@ export function FollowSection({
   follow,
   state,
   seenAt,
+  seenIds = null,
+  seenFloor = null,
   onRemove,
   onRetry,
   headingRef,
 }: {
   follow: Follow;
   state: FeedState | undefined;
+  /** The follow's baseline for this visit: when it was last seen... */
   seenAt: string | null;
+  /** ...which stories that visit rendered, and the oldest of them (null = legacy: seenAt rule). */
+  seenIds?: readonly string[] | null;
+  seenFloor?: string | null;
   onRemove: () => void;
   onRetry?: () => void;
   headingRef?: Ref<HTMLHeadingElement>;
 }) {
-  const badge = newBadgeLabel(state, seenAt);
+  const badge = newBadgeLabel(state, { seenAt, seenIds, seenFloor });
   // Every control names the follow it acts on: a page of 20 follows would
   // otherwise be 20 identical "Tümü" links and 20 identical remove buttons.
   const label = followLabel(follow);
@@ -522,6 +578,8 @@ export function FollowSection({
           kind={follow.kind}
           state={state}
           seenAt={seenAt}
+          seenIds={seenIds}
+          seenFloor={seenFloor}
           label={label}
           onRetry={onRetry}
         />
@@ -534,16 +592,22 @@ export function SectionBody({
   kind,
   state,
   seenAt = null,
+  seenIds = null,
+  seenFloor = null,
   label,
   onRetry,
 }: {
   kind: Follow["kind"];
   state: FeedState | undefined;
   /**
-   * The follow's seenAt snapshot for this visit; decides how many rows to show
-   * (followRowsToShow). Omitted = no baseline = the default ROWS_PER_FOLLOW.
+   * The follow's baseline snapshot for this visit (seenAt, plus the ids and
+   * oldest first_published of the rows its last visit rendered); decides how
+   * many rows to show (followRowsToShow). Omitted = no baseline = the default
+   * ROWS_PER_FOLLOW.
    */
   seenAt?: string | null;
+  seenIds?: readonly string[] | null;
+  seenFloor?: string | null;
   /** The follow's label; names the retry button. */
   label?: string;
   onRetry?: () => void;
@@ -600,7 +664,7 @@ export function SectionBody({
         <p className="px-2 text-[11px] text-muted-foreground">{caption}</p>
       )}
       <ul className="space-y-1">
-        {state.items.slice(0, followRowsToShow(state.items, seenAt, ROWS_PER_FOLLOW)).map((item) => (
+        {state.items.slice(0, followRowsToShow(state.items, { seenAt, seenIds, seenFloor }, ROWS_PER_FOLLOW)).map((item) => (
           <li key={item.id}>
             <Link
               href={`/cluster/${item.id}`}

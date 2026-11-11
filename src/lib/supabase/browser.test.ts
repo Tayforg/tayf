@@ -72,6 +72,20 @@ describe("createBrowserClient: request shape", () => {
     expect(init.credentials).toBe("omit");
   });
 
+  it("POSTs rpc('saved_clusters_v4', args) to its own PostgREST rpc URL (migration 192, effective_article_count)", async () => {
+    const fetchMock = stubFetch(async () => json([]));
+    const { createBrowserClient } = await load();
+    const args = { p_ids: [ID] };
+    await createBrowserClient().rpc("saved_clusters_v4", args);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${URL_ENV}/rest/v1/rpc/saved_clusters_v4`);
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(JSON.stringify(args));
+    expect(init.credentials).toBe("omit");
+  });
+
   it("also reaches the v1 function by name", async () => {
     const fetchMock = stubFetch(async () => json([]));
     const { createBrowserClient } = await load();
@@ -269,10 +283,13 @@ describe("createBrowserClient: runtime allowlist", () => {
     const names = [
       "merged_cluster_map",
       "source_slugs",
-      "saved_clusters_v4",
+      "saved_clusters_v5",
+      "saved_clusters_v4/../other",
+      "saved_clusters_v4?select=*",
       "saved_clusters_v3/../other",
       "saved_clusters_v3?select=*",
       "SAVED_CLUSTERS_V3",
+      "SAVED_CLUSTERS_V4",
       "",
       "saved_clusters/../other",
       "saved_clusters?select=*",

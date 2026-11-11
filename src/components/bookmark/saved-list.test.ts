@@ -40,13 +40,25 @@ describe("saved-list.tsx source", () => {
 describe("saved-list.tsx change badges", () => {
   const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
 
-  it("reads rows through the saved_clusters_v3 RPC first (bias_distribution, is_blindspot and first_published are in its return shape)", () => {
-    expect(src.match(/\.rpc\("saved_clusters_v3"/g)).toHaveLength(1);
-    expect(src).toMatch(/\.rpc\("saved_clusters_v3",\s*\{\s*p_ids:\s*ids\s*\}\)/);
+  it("reads rows through the saved_clusters_v4 RPC first (bias_distribution, is_blindspot, first_published and effective_article_count are in its return shape)", () => {
+    expect(src.match(/\.rpc\("saved_clusters_v4"/g)).toHaveLength(1);
+    expect(src).toMatch(/\.rpc\("saved_clusters_v4",\s*\{\s*p_ids:\s*ids\s*\}\)/);
     expect(src).toContain("bias_distribution: unknown");
     expect(src).toContain("is_blindspot?: boolean");
     // absent on v2 / v1 fallback rows, null when the cluster has no first_published
     expect(src).toContain("first_published?: string | null");
+    // absent on v3 / v2 / v1 fallback rows, null when the cluster has no member rows
+    expect(src).toContain("effective_article_count?: number | null");
+  });
+
+  it("prints the source count through savedSourceLabel (the wire-collapsed count of v4 when present, article_count otherwise), never the raw column (h112-follows-3)", () => {
+    expect(src).toMatch(/import\s*\{[^}]*savedSourceLabel[^}]*\}\s*from\s*["']@\/components\/bookmark\/saved-row["']/);
+    const code = src.replace(/\/\/[^\n]*/g, "");
+    expect(code).toContain("{savedSourceLabel(row)}");
+    expect(code).not.toContain("{row.article_count}");
+    expect(code).not.toMatch(/row\.article_count/);
+    // the label sits where the bare count was: after the Users icon, inside the meta line
+    expect(code).toMatch(/<Users className="h-3 w-3" \/>\s*\{savedSourceLabel\(row\)\}/);
   });
 
   it("imports reconcileSnapshots and changeBadgeLabels", () => {
@@ -80,21 +92,27 @@ describe("saved-list.tsx reading-diet card", () => {
     expect(src).not.toMatch(/\btrack\(/);
   });
 
-  it("one v3 lookup plus a missing-RPC fallback to v2 and a PGRST202-only fallback to v1 (no new fetch for the diet)", () => {
+  it("one v4 lookup plus missing-RPC fallbacks to v3 and v2 and a PGRST202-only fallback to v1 (no new fetch for the diet)", () => {
+    expect(src.match(/\.rpc\("saved_clusters_v4"/g)).toHaveLength(1);
     expect(src.match(/\.rpc\("saved_clusters_v3"/g)).toHaveLength(1);
     expect(src.match(/\.rpc\("saved_clusters_v2"/g)).toHaveLength(1);
     expect(src.match(/\.rpc\("saved_clusters"/g)).toHaveLength(1);
     expect(src).toMatch(/\.rpc\("saved_clusters",\s*\{\s*p_ids:\s*ids\s*\}\)/);
-    // v3 first, the v2 call behind isRpcMissing, the v1 call behind the PGRST202 check, in that order.
+    // v4 first, the v3 call behind isRpcMissing, the v2 call behind a second isRpcMissing, the v1 call behind the
+    // PGRST202 check, in that order.
     const code = src.replace(/\/\/[^\n]*/g, "");
-    const v3At = code.indexOf('.rpc("saved_clusters_v3"');
+    const v4At = code.indexOf('.rpc("saved_clusters_v4"');
     const missingAt = code.indexOf("isRpcMissing(res.error)");
+    const v3At = code.indexOf('.rpc("saved_clusters_v3"');
+    const missing2At = code.indexOf("isRpcMissing(res.error)", missingAt + 1);
     const v2At = code.indexOf('.rpc("saved_clusters_v2"');
     const codeAt = code.indexOf("PGRST202");
     const v1At = code.indexOf('.rpc("saved_clusters",');
-    expect(v3At).toBeGreaterThan(-1);
-    expect(missingAt).toBeGreaterThan(v3At);
-    expect(v2At).toBeGreaterThan(missingAt);
+    expect(v4At).toBeGreaterThan(-1);
+    expect(missingAt).toBeGreaterThan(v4At);
+    expect(v3At).toBeGreaterThan(missingAt);
+    expect(missing2At).toBeGreaterThan(v3At);
+    expect(v2At).toBeGreaterThan(missing2At);
     expect(codeAt).toBeGreaterThan(v2At);
     expect(v1At).toBeGreaterThan(codeAt);
     // Array.from(...) is not a PostgREST table call.
@@ -126,14 +144,17 @@ describe("saved-list.tsx RPC input hygiene", () => {
   });
 });
 
-describe("saved-list.tsx v3 lookup, v2 fallback and v1 fallback", () => {
+describe("saved-list.tsx v4 lookup, v3 fallback, v2 fallback and v1 fallback", () => {
   const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
   // Line comments removed, so prose can neither satisfy nor trip a code guard.
   const code = src.replace(/\/\/[^\n]*/g, "");
 
-  it("falls back from v3 to v2 once, only when v3 is missing (PGRST202 or 42883), then from v2 to v1 only on PGRST202, before the shared error handling", () => {
+  it("falls back from v4 to v3 once, only when v4 is missing (PGRST202 or 42883: the app deployed before migration 192), then v3 to v2 the same way, then v2 to v1 only on PGRST202, before the shared error handling", () => {
     expect(src).toMatch(/const client = createBrowserClient\(\);/);
-    expect(src).toMatch(/let res = await client\.rpc\("saved_clusters_v3",\s*\{\s*p_ids:\s*ids\s*\}\);/);
+    expect(src).toMatch(/let res = await client\.rpc\("saved_clusters_v4",\s*\{\s*p_ids:\s*ids\s*\}\);/);
+    expect(src).toMatch(
+      /if \(isRpcMissing\(res\.error\)\) \{\s*res = await client\.rpc\("saved_clusters_v3",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
+    );
     expect(src).toMatch(
       /if \(isRpcMissing\(res\.error\)\) \{\s*res = await client\.rpc\("saved_clusters_v2",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
     );

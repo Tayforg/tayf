@@ -343,7 +343,7 @@ describe("144 ops freshness margin", () => {
 
   it("reads the threshold of blindspot_veto_cron_min from the newest ops_health_report()", () => {
     const { file, startAt, endAt, threshold } = newestCheck();
-    expect(file).toBe("173_ops_sources_dark_persistent.sql"); // update this when a later migration redefines the report
+    expect(file).toBe("192_saved_clusters_v4.sql"); // update this when a later migration redefines the report
     expect(startAt).toBeGreaterThan(-1);
     expect(endAt).toBeGreaterThan(startAt);
     expect(threshold).toBe(30);

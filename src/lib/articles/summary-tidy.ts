@@ -9,6 +9,7 @@ import {
   startsWithPlaceholderLine,
   TRAILING_CTA_PHRASES,
 } from "./description-boilerplate";
+import { endsWithFiniteVerb } from "./finite-verb";
 
 // Read-time tidy for feed residue in a cluster summary.
 //
@@ -866,25 +867,42 @@ export function stripDatelineLead(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Trailing come-on (h95-summaries-1). 6ef586c4's Özet ended "... araştırılıyor.
-// Peki, Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit Kocasakal nereli,
-// kaç yaşında, evli mi?": an outlet's search-bait question stood where the summary
-// of the story should end (9 of 985 live clusters of a week; the same shape is the
-// "İşte ..." tail). A sentence that OPENS with "Peki" or "İşte" starts a come-on,
-// and the run of sentences from the first such one to the end of the text is cut,
-// provided that
+// Trailing come-on (h95-summaries-1, h112-ozetregress-1). 6ef586c4's Özet ended
+// "... araştırılıyor. Peki, Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit
+// Kocasakal nereli, kaç yaşında, evli mi?": an outlet's search-bait question stood where
+// the summary of the story should end (9 of 985 live clusters of a week; the same shape is
+// the "İşte ..." tail). A sentence that OPENS with "Peki" or "İşte" starts a come-on, and
+// the run of sentences from such a start to the end of the text is cut, provided that
 //   - a complete sentence of {@link MIN_SENTENCE_BEFORE_COME_ON} characters or more
 //     stands in front of it (any one of the sentences in front: the text is never
 //     emptied, and a come-on behind a short lead is left to the stub / teaser checks
 //     of summary-agreement.ts);
 //   - it does not start inside an open quotation (a quoted question is the
 //     speaker's, never cut: `Başkan şunu söyledi: "Hepimiz buradayız. Peki bu iş
-//     nasıl bitecek?"`).
+//     nasıl bitecek?"`);
+//   - h112-ozetregress-1: EVERY sentence from that start to the end of the text is
+//     come-on shaped ({@link isComeOnShaped}): it ends in "?", "…", "..." or ":" (closing
+//     quotes and brackets may follow the mark), or it does not end in a finite verb
+//     ({@link endsWithFiniteVerb}: the predicate is the last word, h113 correctness-2;
+//     a participle or a "kendi" / "yedi" in front of a noun is not one). #249 cut from the first Peki / İşte start whatever stood
+//     behind it, and so deleted the story itself: 5b93eb08's "İşte bunlardan biri ...
+//     California eyaletinde yaşanıyor. Eyalet senatosu ... servet vergisi" (the Özet no
+//     longer said what the page is about) and cd99f5d4's answer to its own headline
+//     ("Peki, Gürsel Erol kimdir ...? 1963 Elazığ doğumlu siyasetçi ... kazandırdı.").
+//     About 6.5% of the come-on texts of a 5-day scan lost a statement that way.
+// A start whose tail is not all come-on shaped is not cut and the scan goes on to the
+// later starts, as it does behind an open quotation: the cut lands at the EARLIEST start
+// whose whole tail qualifies ("Lead. İşte X yaşanıyor. Peki ne olacak?" ends at "İşte X
+// yaşanıyor."), and when none does the text comes back as it was before #249.
+// Accepted miss: a Peki sentence that ends in "." or "!" and has a verb ("Peki bu karar
+// yürürlüğe girdi.") reads as a statement and stays. No colon or opinion guard and no
+// change to the unmarked-clamp rule were added: both were rejected in the hunt.
 // "Peki" and "İşte" count as whole words in either case and either spelling of the
 // İ ("İşte", "İŞTE", "Işte"); "peki" in the middle of a sentence, "Pekin", "Pekiştirme"
 // and "İştah" are text. A sentence ends at ". ! ? …" (and its closing marks) followed
 // by a blank, except an abbreviation's, an initial's or an ordinal's dot
-// ({@link isNonSentenceDot}). One forward pass and one balance table: linear.
+// ({@link isNonSentenceDot}). One forward pass, one balance table, and every sentence
+// behind the first come-on start is judged once: linear.
 // ---------------------------------------------------------------------------
 
 /** A sentence in front of a come-on must be at least this long (code units, closing marks included). */
@@ -906,36 +924,92 @@ function startsComeOn(s: string, start: number): boolean {
   return word === "peki" || word === "iste";
 }
 
+/** The three marks that make a sentence a question or a trailing-off line (besides "..."). */
+const COME_ON_ENDINGS: ReadonlySet<string> = new Set(["?", "…", ":"]);
+
+/**
+ * True when the sentence `s.slice(start, end)` is come-on shaped (h112-ozetregress-1):
+ * trimmed, with any closing quotes and brackets taken off its end, it ends in "?", "…",
+ * "..." or ":", or it does not END in a finite verb ({@link endsWithFiniteVerb}: "İşte
+ * COP31 Başkanı hakkında bilinenler."). A sentence that ends in "." or "!" and ends in a
+ * verb is a statement. The predicate stands last in a Turkish sentence, so a participle in
+ * front of a noun ("İşte uygulanacak yeni kurallar.") or a word that ends like a past tense
+ * ("kendi", "yedi") no longer makes a teaser a statement (h113 correctness-2). The cheap
+ * mark test comes first, so only a sentence that does not end in a come-on mark is read for
+ * a verb, once.
+ */
+function isComeOnShaped(s: string, start: number, end: number): boolean {
+  let last = end;
+  while (last > start && CLOSERS.has(s.charAt(last - 1))) last--;
+  if (last > start) {
+    if (COME_ON_ENDINGS.has(s.charAt(last - 1))) return true;
+    if (last - start >= 3 && s.startsWith("...", last - 3)) return true;
+  }
+  return !endsWithFiniteVerb(s.slice(start, end));
+}
+
+/**
+ * The end (exclusive, closing marks included) of the sentence that starts at `from`: after
+ * the first ". ! ? …" and its closing marks that is followed by a blank, except an
+ * abbreviation's, an initial's or an ordinal's dot ({@link isNonSentenceDot}); the end of
+ * the text for the last sentence, which has no blank behind it.
+ */
+function sentenceEnd(s: string, from: number): number {
+  for (let i = from; i < s.length; i++) {
+    if (!SENTENCE_MARKS.has(s.charAt(i))) continue;
+    let end = i + 1;
+    while (end < s.length && CLOSERS.has(s.charAt(end))) end++;
+    if (end >= s.length) return s.length;
+    if (isBlankChar(s.charAt(end)) && !isNonSentenceDot(s, i)) return end;
+  }
+  return s.length;
+}
+
 /**
  * `s` (trimmed, blanks collapsed) without the run of sentences that starts at the
- * first Peki / İşte sentence, or `s` itself when there is none that may be cut: see
- * the section header for the three conditions. Never returns "" for a non-empty
- * text, and a text it did not cut comes back as the same string.
+ * earliest Peki / İşte sentence whose whole tail is come-on shaped, or `s` itself when
+ * there is none that may be cut: see the section header for the three conditions and
+ * {@link isComeOnShaped} for the shape. Never returns "" for a non-empty text (the cut
+ * ends a sentence of 60 characters or more), and a text it did not cut comes back as the
+ * same string.
  */
 function cutTrailingComeOn(s: string): string {
   if (s.length < MIN_SENTENCE_BEFORE_COME_ON) return s;
   let balanced: ((end: number) => boolean) | null = null;
-  let sentenceStart = 0;
+  let start = 0;
   let longest = 0;
-  for (let i = 0; i < s.length; i++) {
-    if (!SENTENCE_MARKS.has(s.charAt(i))) continue;
-    let end = i + 1;
-    while (end < s.length && CLOSERS.has(s.charAt(end))) end++;
-    if (end >= s.length) return s;
-    if (!isBlankChar(s.charAt(end))) continue;
-    if (isNonSentenceDot(s, i)) continue;
-    longest = Math.max(longest, end - sentenceStart);
+  // The sentence that starts at `start` opens a come-on, and where the sentence in front of
+  // it ended: the end of the text that is kept when this is the start that gets cut.
+  let opensComeOn = false;
+  let keepEnd = 0;
+  // Once a come-on start has been seen every later sentence is judged; the sentences in
+  // front of the first start never are, so a text without a start pays for no verb scan.
+  let judging = false;
+  // The end of the text to keep for the earliest start whose tail has been come-on shaped
+  // so far; -1 when there is none (a sentence that is not shaped drops every start up to it).
+  let cutAt = -1;
+  for (;;) {
+    const end = sentenceEnd(s, start);
+    if (judging) {
+      if (!isComeOnShaped(s, start, end)) cutAt = -1;
+      else if (opensComeOn && cutAt < 0) cutAt = keepEnd;
+    }
+    if (end >= s.length) break;
+    longest = Math.max(longest, end - start);
     let next = end;
     while (next < s.length && isBlankChar(s.charAt(next))) next++;
-    sentenceStart = next;
-    if (longest < MIN_SENTENCE_BEFORE_COME_ON || !startsComeOn(s, next)) continue;
-    // The balances are built on first use: most texts never reach this point.
-    balanced ??= quoteBalance(s);
-    if (balanced(next)) return s.slice(0, end);
-    // A come-on inside an open quotation is left alone; the next sentence start is looked at.
-    i = next - 1;
+    start = next;
+    keepEnd = end;
+    // The balances are built on first use: most texts never reach this point. A come-on
+    // inside an open quotation is left alone; the next sentence start is looked at.
+    opensComeOn = false;
+    if (longest >= MIN_SENTENCE_BEFORE_COME_ON && startsComeOn(s, next)) {
+      balanced ??= quoteBalance(s);
+      opensComeOn = balanced(next);
+    }
+    judging ||= opensComeOn;
   }
-  return s;
+  return cutAt < 0 ? s : s.slice(0, cutAt);
 }
 
 /** `s` without a trailing ":" (and the blanks around it), left by a stripped CTA. */
@@ -1489,11 +1563,14 @@ export function stripLeadingStyleRules(description: string): string {
  *      changed the text;
  *   4b. collapse every whitespace run to one space;
  *   5. trim;
- *   6. cut a trailing come-on ({@link cutTrailingComeOn}, h95-summaries-1): the run of
- *      sentences from the first one that opens with "Peki" or "İşte", when a complete
+ *   6. cut a trailing come-on ({@link cutTrailingComeOn}, h95-summaries-1, h112-
+ *      ozetregress-1): the run of sentences from the earliest one that opens with "Peki"
+ *      or "İşte" and whose whole tail, to the end of the text, is come-on shaped (every
+ *      sentence ends in "?", "…", "..." or ":" or has no finite verb), when a complete
  *      sentence of 60 characters or more stands in front of it and it does not start
  *      inside an open quotation ("... araştırılıyor. Peki, X kimdir? ..." ends at
- *      "araştırılıyor."). Never empties the text.
+ *      "araştırılıyor."; a statement or the answer behind the come-on, "İşte bunlardan biri
+ *      California'da yaşanıyor.", keeps the text whole). Never empties the text.
  *
  * Step 0 repairs a clamp with {@link cutAppendedTicker} first: foreign text is
  * never kept, so a clamped text that holds a ticker line ends where the ticker
