@@ -80,7 +80,7 @@ const PURE_CACHE_BODIES: Record<string, string[]> = {
   "src/lib/seo/sitemaps.ts": [
     "getCurrentSitemapMonth",
     "getSitemapIndexXml",
-    "getStaticSitemapXml",
+    "getStaticSitemapXmlCached",
   ],
   "src/lib/weekly/week-archive.ts": ["getRecentWeekKeys"],
   "src/lib/sources/karne.ts": ["getKarneFreshnessCached"],

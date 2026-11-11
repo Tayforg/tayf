@@ -530,6 +530,19 @@ function memberTfidfText(art: { title: string; description: string | null }): st
   return `${art.title || ""} ${cleanDescription(art.description) || ""}`;
 }
 
+// A member's cleaned description, memoised on the member object (the cached context
+// keeps them for its lifetime). The headline lane's name check (genericHeadlineNameConflict,
+// h114-clusterpurity-4) is the only reader, and asks only for a pair the lane fired for,
+// so nothing is cleaned at context build or for a pair that does not match.
+const cleanedDescriptions = new WeakMap<object, string | null>();
+function cleanedDescriptionOf(member: { description: string | null }): string | null {
+  const hit = cleanedDescriptions.get(member);
+  if (hit !== undefined) return hit;
+  const cleaned = cleanDescription(member.description);
+  cleanedDescriptions.set(member, cleaned);
+  return cleaned;
+}
+
 function buildBiasDistribution(biasLabels: Array<BiasKey | null | undefined>): Record<BiasKey, number> {
   const dist = Object.fromEntries(BIAS_KEYS.map((k) => [k, 0])) as Record<BiasKey, number>;
   for (const b of biasLabels) {
@@ -2226,9 +2239,34 @@ async function clusterArticle(
   //
   // `headlineHit` (h70-mergequality-2): the headline lane carried some part of the
   // candidate's result -- the full scorer's lane against the seed or the latest, or a
-  // member headline of the scan. Such a candidate is exempt from the centroid guard.
+  // member headline of the scan. Such a candidate is not exempt from the centroid
+  // guard: it must clear the lower HEADLINE_CENTROID_FLOOR instead of CENTROID_FLOOR
+  // (centroid.ts, h114-clusterpurity-3).
   type Scored = { clusterId: string; score: number; fallbackScore: number; headlineHit: boolean };
   const scored: Scored[] = [];
+
+  // The full ensemble for the incoming article against one cluster member. When its
+  // headline lane fired the pair is scored once more with the two CLEANED descriptions,
+  // so the lane can be withdrawn for generic headlines that name different people
+  // (genericHeadlineNameConflict, h114-clusterpurity-4: 'Fon sorusturmasinda yeni
+  // gozalti' for two different detainees). The descriptions are already in memory
+  // (clusteringDescription, the member row); cleaning is paid only for those pairs.
+  const scorePair = (
+    member: ClusterMemberArticle,
+    memberFp: { strict: string | null; signature: Uint32Array | null },
+    tfidfCosine: number,
+    hoursDelta: number,
+    bSourceSlug: string | null,
+  ): ReturnType<typeof score> => {
+    const opts = { aSourceSlug, bSourceSlug, aTitle: article.title, bTitle: member.title };
+    const res = score(articleFp, memberFp, article.entities, member.entities, tfidfCosine, hoursDelta, opts);
+    if (!headlineLaneFired(res)) return res;
+    return score(articleFp, memberFp, article.entities, member.entities, tfidfCosine, hoursDelta, {
+      ...opts,
+      aDescription: article.clusteringDescription,
+      bDescription: cleanedDescriptionOf(member),
+    });
+  };
 
   // Scores one candidate cluster against the incoming article: the full
   // ensemble against the cluster's seed and latest member, then the headline
@@ -2248,20 +2286,7 @@ async function clusterArticle(
     const bSourceSlugSeed = seed.source_id
       ? sourceLookup.get(seed.source_id)?.slug ?? null
       : null;
-    const seedRes = score(
-      articleFp,
-      seedFp,
-      article.entities,
-      seed.entities,
-      tfidfCosineSeed,
-      hoursDeltaSeed,
-      {
-        aSourceSlug,
-        bSourceSlug: bSourceSlugSeed,
-        aTitle: article.title,
-        bTitle: seed.title,
-      },
-    );
+    const seedRes = scorePair(seed, seedFp, tfidfCosineSeed, hoursDeltaSeed, bSourceSlugSeed);
 
     let bestScore = seedRes.score;
     let fallbackScore = fallbackEligibleScore(seedRes);
@@ -2275,20 +2300,7 @@ async function clusterArticle(
         const bSourceSlugLatest = latest.source_id
           ? sourceLookup.get(latest.source_id)?.slug ?? null
           : null;
-        const latestRes = score(
-          articleFp,
-          latestFp,
-          article.entities,
-          latest.entities,
-          tfidfCosineLatest,
-          hoursDeltaLatest,
-          {
-            aSourceSlug,
-            bSourceSlug: bSourceSlugLatest,
-            aTitle: article.title,
-            bTitle: latest.title,
-          },
-        );
+        const latestRes = scorePair(latest, latestFp, tfidfCosineLatest, hoursDeltaLatest, bSourceSlugLatest);
         if (latestRes.score > bestScore) bestScore = latestRes.score;
         fallbackScore = Math.max(fallbackScore, fallbackEligibleScore(latestRes));
         if (headlineLaneFired(latestRes)) headlineHit = true;
@@ -2311,18 +2323,25 @@ async function clusterArticle(
         // first one older than it ends the scan.
         if (m.publishedMs > articleMs + scanWindowMs) continue;
         if (m.publishedMs < articleMs - scanWindowMs) break;
-        const memberScore = headlineOnlyScore(
-          articleHeadline,
-          m.tokens,
-          Math.abs(articleMs - m.publishedMs) / 3_600_000,
-          {
-            aSourceSlug,
-            bSourceSlug: m.sourceId ? sourceLookup.get(m.sourceId)?.slug ?? null : null,
-            // h70-mergequality-3: a headline-lane match must not cross actors.
-            aTitle: article.title,
-            bTitle: m.title,
-          },
-        );
+        const memberHours = Math.abs(articleMs - m.publishedMs) / 3_600_000;
+        const memberOpts = {
+          aSourceSlug,
+          bSourceSlug: m.sourceId ? sourceLookup.get(m.sourceId)?.slug ?? null : null,
+          // h70-mergequality-3: a headline-lane match must not cross actors.
+          aTitle: article.title,
+          bTitle: m.title,
+        };
+        let memberScore = headlineOnlyScore(articleHeadline, m.tokens, memberHours, memberOpts);
+        // h114-clusterpurity-4: a lane hit between generic headlines ('Fon sorusturmasinda yeni
+        // gozalti') is withdrawn when the two descriptions name different people. The
+        // descriptions are cleaned only for a member the lane fired for.
+        if (memberScore > 0) {
+          memberScore = headlineOnlyScore(articleHeadline, m.tokens, memberHours, {
+            ...memberOpts,
+            aDescription: article.clusteringDescription,
+            bDescription: cleanedDescriptionOf(m),
+          });
+        }
         if (memberScore > bestScore) bestScore = memberScore;
         if (memberScore > fallbackScore) fallbackScore = memberScore;
         if (memberScore > 0) headlineHit = true;
@@ -2370,11 +2389,13 @@ async function clusterArticle(
   // (centroid.ts, constants.ts CENTROID_*). Before joining a candidate of
   // CENTROID_MIN_MEMBERS or more members on non-headline evidence the article's
   // tf-idf vector must reach CENTROID_FLOOR with the centroid of the cluster's
-  // seed and its CENTROID_MAX_MEMBERS newest scan members. A candidate the guard
-  // passes over is skipped, not blocked: the walk goes on to the next candidate and,
-  // with none left, the article opens its own cluster. The vectors are built lazily,
-  // only for a candidate that reaches the guard, and the cosine is kept per
-  // cluster for this article. CLUSTER_CENTROID_GUARD=off turns it off.
+  // seed and its CENTROID_MAX_MEMBERS newest scan members. A candidate the headline
+  // lane carried must reach HEADLINE_CENTROID_FLOOR instead; only an exact-title
+  // probe hit, an equal strict fingerprint or an existing member is exempt. A
+  // candidate the guard passes over is skipped, not blocked: the walk goes on to the
+  // next candidate and, with none left, the article opens its own cluster. The
+  // vectors are built lazily, only for a candidate that reaches the guard, and the
+  // cosine is kept per cluster for this article. CLUSTER_CENTROID_GUARD=off turns it off.
   //
   // The guard sits before the Jev live band below, not only in the join loop: Jev sees
   // just the seed headline and the latest headline, the same blind spot, and its "join"
@@ -2438,7 +2459,7 @@ async function clusterArticle(
     if (!verdict.blocked) return false;
     const cos = verdict.cosine ?? 0;
     console.log(
-      `[cluster-consumer] centroid-guard skip article=${article.id} cluster=${cand.clusterId} cos=${cos.toFixed(3)}${dryRun ? " dry-run" : ""}`,
+      `[cluster-consumer] centroid-guard skip article=${article.id} cluster=${cand.clusterId} cos=${cos.toFixed(3)}${cand.headlineHit ? " lane=headline" : ""}${dryRun ? " dry-run" : ""}`,
     );
     if (!dryRun) {
       centroidSkipCount += 1;
@@ -2940,6 +2961,11 @@ function buildAttachCandidates(ctx: ClusterContext): AttachCandidate[] {
         tokens: m.tokens,
         publishedMs: m.publishedMs,
         fingerprint: m.fingerprint,
+        // Cleaned on first read only (h114-clusterpurity-4): the probe reads it for a pair
+        // its headline lane fired for, never at candidate build.
+        get description(): string | null {
+          return cleanedDescriptionOf(m);
+        },
       });
     }
     for (const m of [ctx.seedByCluster.get(cluster.id), ctx.latestByCluster.get(cluster.id)]) {
@@ -2951,6 +2977,9 @@ function buildAttachCandidates(ctx: ClusterContext): AttachCandidate[] {
         tokens: headlineTokens(m.title),
         publishedMs: Date.parse(m.published_at),
         fingerprint: m.fingerprint ?? null,
+        get description(): string | null {
+          return cleanedDescriptionOf(m);
+        },
       });
     }
     if (members.size === 0) continue;
@@ -3042,7 +3071,8 @@ async function processAttach(
 
     // The strict fingerprint of title + cleaned description: a SHA-1 of the folded
     // text, exactly what the clusterer stores for its members.
-    const fingerprint = strictFingerprint(raw.title || "", cleanDescription(raw.description) || "");
+    const cleanedDescription = cleanDescription(raw.description);
+    const fingerprint = strictFingerprint(raw.title || "", cleanedDescription || "");
     const article: AttachArticle = {
       id: raw.id,
       sourceId: raw.source_id,
@@ -3050,6 +3080,8 @@ async function processAttach(
       tokens: headlineTokens(raw.title),
       publishedMs: Date.parse(raw.published_at),
       fingerprint,
+      // h114-clusterpurity-4: the cleaned description, for the headline lane's name check.
+      description: cleanedDescription,
     };
     // The context warmed at the top of the drain is used as it is: reloading it here
     // is the expensive step the 546 CPU limit is about.

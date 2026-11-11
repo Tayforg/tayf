@@ -241,6 +241,72 @@ describe("getMergeQueue recall source", () => {
     fx.articleClusters = { data: [{ cluster_id: A, article_id: "art-1" }], error: null };
     expect(await getMergeQueue()).toEqual([]);
   });
+
+  // h114-postship-1: every re-check's answers are stored now (subject_id carries the
+  // day), so one (cluster, article) pair can have a row per day.
+  describe("one row per (cluster, article) pair", () => {
+    it("two stored rows for the same pair give one queue entry, with the first (highest jev_prob) row's score and detail", async () => {
+      fx.predictions = {
+        data: [
+          { cluster_id: A, article_id: "art-1", jev_prob: 0.93, article: { title: "Yeni cevap", source: { slug: "bbc-turkce" } } },
+          { cluster_id: A, article_id: "art-1", jev_prob: 0.86, article: { title: "Eski cevap", source: { slug: "bbc-turkce" } } },
+        ],
+        error: null,
+      };
+
+      const rows = await getMergeQueue();
+
+      expect(rows).toHaveLength(1);
+      expect(rows![0].key).toBe(`${A}:${C}`);
+      expect(rows![0].score).toBe(0.93);
+      expect(rows![0].detail).toBe("Jev: %93 aynı olay · bbc-turkce: Yeni cevap");
+    });
+
+    it("rows of the same article under two different clusters are NOT one pair: each cluster keeps its own", async () => {
+      fx.suspects = { data: [{ id: A }, { id: B }], error: null };
+      fx.predictions = {
+        data: [
+          { cluster_id: A, article_id: "art-1", jev_prob: 0.93, article: null },
+          { cluster_id: B, article_id: "art-1", jev_prob: 0.88, article: null },
+          { cluster_id: B, article_id: "art-1", jev_prob: 0.86, article: null },
+        ],
+        error: null,
+      };
+      fx.articleClusters = {
+        data: [
+          { cluster_id: A, article_id: "art-1" },
+          { cluster_id: B, article_id: "art-1" },
+          { cluster_id: C, article_id: "art-1" },
+        ],
+        error: null,
+      };
+
+      const rows = await getMergeQueue();
+
+      expect(rows!.map((r) => [r.key, r.score])).toEqual([
+        [`${A}:${B}`, 0.93],
+        [`${A}:${C}`, 0.93],
+        [`${B}:${C}`, 0.88],
+      ]);
+    });
+
+    it("looks every article up in cluster_articles once, however many rows it has", async () => {
+      fx.predictions = {
+        data: [
+          { cluster_id: A, article_id: "art-1", jev_prob: 0.93, article: null },
+          { cluster_id: A, article_id: "art-1", jev_prob: 0.9, article: null },
+          { cluster_id: A, article_id: "art-2", jev_prob: 0.88, article: null },
+          { cluster_id: A, article_id: "art-2", jev_prob: 0.87, article: null },
+        ],
+        error: null,
+      };
+
+      await getMergeQueue();
+
+      const ca = statesOf("cluster_articles").find((s) => s.in.some((i) => i.col === "article_id"))!;
+      expect(ca.in).toEqual([{ col: "article_id", vals: ["art-1", "art-2"] }]);
+    });
+  });
 });
 
 describe("getMergeQueue pair rules", () => {

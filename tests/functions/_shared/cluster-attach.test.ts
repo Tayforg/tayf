@@ -580,3 +580,80 @@ describe("attachDecision: the headline lane does not cross actors (h70-mergequal
     expect(attachDecision(a, [candidate(KARABAG_ID, [withFp])])).toEqual({ clusterId: KARABAG_ID, score: 1, lane: "fingerprint" });
   });
 });
+
+// h114-clusterpurity-4: the attach probe compares titles through the headline lane too, so
+// a generic headline ('Fon sorusturmasinda yeni gozalti') of one detainee must not attach to
+// the cluster of another's. Members and the article may carry their CLEANED description
+// (AttachMember.description); with both the lane is withdrawn for generic headlines that
+// name different people (genericHeadlineNameConflict), with one or none nothing changes.
+describe("attachDecision: generic headlines of different people (h114-clusterpurity-4)", () => {
+  const ARTICLE_TITLE = "Fon soruşturmasında yeni gözaltı";
+  const MEMBER_TITLE = "Fon soruşturmasında yeni gözaltı kararı";
+  const CEVIK_DESC = 'Sermaye piyasası işlemlerine ilişkin "fon" soruşturmasında Enver Çevik gözaltına alındı.';
+  const GULKAN_DESC =
+    "Fon soruşturması kapsamında OMG Capital Advisors Yönetim Kurulu Başkanı Ömer Murat Gülkan gözaltına alındı.";
+  const LYDIA_DESC = "Fon soruşturması kapsamında Lydia Holding Yönetim Kurulu Başkanı Enver Çevik gözaltına alındı.";
+  const CEVIK_ID = "9cb0f088-0000-4000-8000-000000000001";
+  const MEMBER_ROW: FixtureMember = ["aaaaaaaa-0000-4000-8000-0000000000d1", "trt-haber", MEMBER_TITLE, "2026-11-09T13:42:00Z", null];
+  // The article arrives 28 minutes after the member, inside the lane window.
+  const NEAR_ARTICLE_ROW: FixtureMember = ["bbbbbbbb-0000-4000-8000-0000000000d2", "cumhuriyet", ARTICLE_TITLE, "2026-11-09T14:10:00Z", null];
+
+  const withDescription = (row: FixtureMember, description: string | null | undefined): AttachMember => ({
+    ...toMember(row),
+    ...(description === undefined ? {} : { description }),
+  });
+  const cluster = (member: AttachMember): AttachCandidate => ({
+    clusterId: CEVIK_ID,
+    politicsShare: 1,
+    sourceIds: new Set([member.sourceId as string]),
+    articleCount: 1,
+    members: [member],
+  });
+
+  it("control: the lane fires for the pair and the exact-title evidence does not (titles differ), so the outcome below is the name rule", () => {
+    const a = toMember(NEAR_ARTICLE_ROW);
+    const m = toMember(MEMBER_ROW);
+    const hours = Math.abs(a.publishedMs - m.publishedMs) / 3_600_000;
+    expect(headlineLane(a.tokens, m.tokens, hours).fired).toBe(true);
+    expect(headlineOnlyScore(a.tokens, m.tokens, hours, { aTitle: ARTICLE_TITLE, bTitle: MEMBER_TITLE })).toBeGreaterThan(0);
+    expect(attachDecision(toMember(NEAR_ARTICLE_ROW), [cluster(toMember(MEMBER_ROW))])).toMatchObject({ clusterId: CEVIK_ID, lane: "headline" });
+  });
+
+  it("another person's description on the article refuses the headline evidence: no-match", () => {
+    const decision = attachDecision(withDescription(NEAR_ARTICLE_ROW, GULKAN_DESC), [cluster(withDescription(MEMBER_ROW, CEVIK_DESC))]);
+    expect(decision).toEqual({ reason: "no-match" });
+  });
+
+  it("the same person in both descriptions keeps the evidence", () => {
+    const decision = attachDecision(withDescription(NEAR_ARTICLE_ROW, CEVIK_DESC), [cluster(withDescription(MEMBER_ROW, LYDIA_DESC))]);
+    expect(decision).toMatchObject({ clusterId: CEVIK_ID, lane: "headline" });
+  });
+
+  it("a member or an article without a description leaves the decision exactly as before", () => {
+    for (const [articleDesc, memberDesc] of [
+      [GULKAN_DESC, undefined],
+      [GULKAN_DESC, null],
+      [undefined, CEVIK_DESC],
+      [null, CEVIK_DESC],
+      [undefined, undefined],
+    ] as const) {
+      const decision = attachDecision(withDescription(NEAR_ARTICLE_ROW, articleDesc), [cluster(withDescription(MEMBER_ROW, memberDesc))]);
+      expect(decision, `${String(articleDesc)} | ${String(memberDesc)}`).toMatchObject({ clusterId: CEVIK_ID, lane: "headline" });
+    }
+  });
+
+  it("one conflicting member does not hide a genuine one of the same cluster", () => {
+    const other: FixtureMember = ["cccccccc-0000-4000-8000-0000000000d1", "sozcu", "Fon soruşturmasında yeni gözaltı kararı!", "2026-11-09T14:00:00Z", null];
+    const candidateWith = { ...cluster(withDescription(MEMBER_ROW, CEVIK_DESC)), members: [withDescription(MEMBER_ROW, CEVIK_DESC), withDescription(other, GULKAN_DESC)], sourceIds: new Set(["trt-haber", "sozcu"]) };
+    const decision = attachDecision(withDescription(NEAR_ARTICLE_ROW, GULKAN_DESC), [candidateWith]);
+    expect(decision).toMatchObject({ clusterId: CEVIK_ID });
+  });
+
+  it("the exact-title evidence is untouched by the rule (an identical headline still attaches)", () => {
+    const sameTitle: FixtureMember = ["dddddddd-0000-4000-8000-0000000000d1", "trt-haber", ARTICLE_TITLE, "2026-11-09T14:00:00Z", null];
+    expect(attachDecision(withDescription(NEAR_ARTICLE_ROW, GULKAN_DESC), [cluster(withDescription(sameTitle, CEVIK_DESC))])).toMatchObject({
+      lane: "exact-title",
+      score: 1,
+    });
+  });
+});

@@ -3764,11 +3764,11 @@ describe("blindspot_recall: buildBlindspotRecallRows", () => {
       usage: { inputTokens: 10, outputTokens: 1 },
     };
 
-    const rows = buildBlindspotRecallRows(1, cluster, keys, response, "call-1", "hash-1", "preview-1", 5);
+    const rows = buildBlindspotRecallRows(1, cluster, keys, response, "call-1", "hash-1", "preview-1", 5, "2026-11-10");
 
     expect(rows).toHaveLength(2);
-    const low = rows.find((r) => r.subject_id === "clx:art-low");
-    const high = rows.find((r) => r.subject_id === "clx:art-high");
+    const low = rows.find((r) => r.subject_id === "clx:art-low:2026-11-10");
+    const high = rows.find((r) => r.subject_id === "clx:art-high:2026-11-10");
     expect(low).toMatchObject({
       task: "blindspot_recall",
       subject_type: "cluster",
@@ -3787,6 +3787,53 @@ describe("blindspot_recall: buildBlindspotRecallRows", () => {
       agree: false,
       jev_prob: 0.8,
     });
+  });
+});
+
+describe("blindspot_recall: answer subject_id carries the check's day (h114-postship-1)", () => {
+  const cluster = blindspotClusterRow({ id: "clx" });
+  const keys = { c1: "art-a", c2: "art-b" };
+  const responseOf = (p1: number, p2: number): JevResponse => ({
+    answers: {
+      c1: { type: "boolean", probability: p1 },
+      c2: { type: "boolean", probability: p2 },
+    },
+    usage: { inputTokens: 10, outputTokens: 1 },
+  });
+
+  it("every answer subject_id is <cluster>:<article>:<day>", () => {
+    const rows = buildBlindspotRecallRows(1, cluster, keys, responseOf(0.3, 0.8), "call-1", "h", "p", 5, "2026-11-10");
+
+    expect(rows.map((r) => r.subject_id).sort()).toEqual(["clx:art-a:2026-11-10", "clx:art-b:2026-11-10"]);
+    for (const r of rows) expect(r.subject_id.endsWith(":2026-11-10")).toBe(true);
+  });
+
+  it("two days give distinct ids for the same (cluster, article), so a re-check answer is never an ignoreDuplicates no-op", () => {
+    const day1 = buildBlindspotRecallRows(1, cluster, keys, responseOf(0.69, 0.1), "call-1", "h", "p", 5, "2026-11-09");
+    const day2 = buildBlindspotRecallRows(2, cluster, keys, responseOf(0.74, 0.1), "call-2", "h", "p", 5, "2026-11-10");
+
+    const idsDay1 = new Set(day1.map((r) => r.subject_id));
+    for (const r of day2) expect(idsDay1.has(r.subject_id)).toBe(false);
+    expect(new Set([...day1, ...day2].map((r) => r.subject_id)).size).toBe(4);
+  });
+
+  it("an answer id (3 parts) can never equal the <cluster>:<day> marker id (2 parts) of the same cluster", () => {
+    const rows = buildBlindspotRecallRows(1, cluster, keys, responseOf(0.3, 0.8), "call-1", "h", "p", 5, "2026-11-10");
+    const marker = buildBlindspotDayRow({
+      runId: 1,
+      clusterId: "clx",
+      day: "2026-11-10",
+      candidates: 2,
+      stateHash: "h",
+      preview: "p",
+    });
+
+    expect(marker.subject_id).toBe("clx:2026-11-10");
+    for (const r of rows) {
+      expect(r.subject_id).not.toBe(marker.subject_id);
+      expect(r.subject_id.split(":")).toHaveLength(3);
+    }
+    expect(marker.subject_id.split(":")).toHaveLength(2);
   });
 });
 
@@ -4011,9 +4058,80 @@ describe("blindspot_recall stage", () => {
 
     const allRows = rec.insertPredictionsCalls.flat();
     const oldRow = allRows.find(
-      (r) => r.task === "blindspot_recall" && r.subject_id === "bc-survive:old-near-event",
+      (r) => r.task === "blindspot_recall" && r.subject_id === "bc-survive:old-near-event:2026-09-21",
     );
     expect(oldRow).toBeDefined();
+  });
+
+  it("blindspot_recall: a re-check on a later day stores its own answers, and the flag follows them (h114-postship-1)", async () => {
+    const cluster = blindspotClusterRow({
+      id: "bc-recheck",
+      title: "ankara meclis kanun teklifi",
+      blindspot_side: "pro_government",
+      first_published: "2026-11-09T08:00:00.000Z",
+    });
+    const candidate = blindspotCandidateRow({
+      article_id: "art-A",
+      title: "ankara meclis kanun teklifi onaylandi",
+      published_at: "2026-11-09T09:00:00.000Z",
+    });
+    // jev_shadow_predictions: unique (task, subject_id), upsert ignoreDuplicates (jev-shadow/index.ts).
+    const store = new Map<string, JevPredictionRow>();
+    const inserted: JevPredictionRow[][] = [];
+    const probs = [0.69, 0.74];
+    let evaluations = 0;
+    let runs = 0;
+    const rec = makePorts({
+      fetchBlindspotClusters: async () => [cluster],
+      fetchBlindspotCandidates: async () => [candidate],
+      startRun: async () => {
+        runs += 1;
+        return 6000 + runs;
+      },
+      evaluate: async (req) => {
+        const key = Object.keys(req.questions)[0]!;
+        const probability = probs[evaluations]!;
+        evaluations += 1;
+        return {
+          response: { answers: { [key]: { type: "boolean", probability } }, usage: { inputTokens: 5, outputTokens: 1 } },
+          latencyMs: 1,
+        };
+      },
+      insertPredictions: async (rows) => {
+        inserted.push([...rows]);
+        let fresh = 0;
+        for (const r of rows) {
+          const k = `${r.task}|${r.subject_id}`;
+          if (store.has(k)) continue;
+          store.set(k, r);
+          fresh += 1;
+        }
+        return fresh;
+      },
+    });
+
+    await runJevShadow(rec.ports, { nowIso: "2026-11-09T10:00:00.000Z" });
+    await runJevShadow(rec.ports, { nowIso: "2026-11-10T10:00:00.000Z" });
+
+    // Both days' answers reach insertPredictions under different subject_ids...
+    const sent = inserted.flat().filter((r) => r.task === "blindspot_recall" && r.article_id === "art-A");
+    expect(sent.map((r) => r.subject_id)).toEqual(["bc-recheck:art-A:2026-11-09", "bc-recheck:art-A:2026-11-10"]);
+    expect(sent.map((r) => r.jev_prob)).toEqual([0.69, 0.74]);
+    // ...and both survive the unique-key ignoreDuplicates upsert (one marker per day too).
+    const stored = [...store.values()].filter((r) => r.article_id === "art-A");
+    expect(stored.map((r) => [r.run_id, r.jev_prob])).toEqual([
+      [6001, 0.69],
+      [6002, 0.74],
+    ]);
+    expect([...store.values()].filter((r) => r.article_id === null).map((r) => r.subject_id)).toEqual([
+      "bc-recheck:2026-11-09",
+      "bc-recheck:2026-11-10",
+    ]);
+    // The flag follows the latest check: false on day 1 (0.69), true on day 2 (0.74).
+    expect(rec.markBlindspotCheckedCalls).toEqual([
+      { clusterId: "bc-recheck", suspect: false },
+      { clusterId: "bc-recheck", suspect: true },
+    ]);
   });
 
   it("blindspot_recall: audit mode never touches the four new ports", async () => {

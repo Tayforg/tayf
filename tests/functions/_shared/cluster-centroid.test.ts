@@ -13,6 +13,7 @@ import {
   CENTROID_GUARD_ENV,
   CENTROID_MAX_MEMBERS,
   CENTROID_MIN_MEMBERS,
+  HEADLINE_CENTROID_FLOOR,
   HEADLINE_MEMBER_SCAN_MAX,
   MATCH_THRESHOLD,
 } from "../../../supabase/functions/_shared/cluster/constants.ts";
@@ -128,6 +129,21 @@ describe("centroid constants", () => {
 
   it("the floor sits well under MATCH_THRESHOLD: it is a coherence check, not a second match score", () => {
     expect(CENTROID_FLOOR).toBeLessThan(MATCH_THRESHOLD);
+  });
+
+  it("h114-clusterpurity-3: a headline-lane join clears a lower floor, 0.10, under the ordinary one", () => {
+    expect(HEADLINE_CENTROID_FLOOR).toBe(0.1);
+    expect(HEADLINE_CENTROID_FLOOR).toBeLessThan(CENTROID_FLOOR);
+    expect(HEADLINE_CENTROID_FLOOR).toBeGreaterThan(0);
+  });
+
+  it("the headline floor keeps a clear margin under the lowest on-topic live-speech member (0.125-0.130) of the 7-day replay", () => {
+    // Replay of 2026-11-04..11 (h115): AA c528a551 0.123 over every cluster's seed and latest, 0.109 over the clusters of the
+    // 48 h before it; the lowest on-topic lane member, ekonomim 7c077140 in the Ataturk commemoration cluster 298bbb75,
+    // 0.130 and 0.125. A floor of 0.2 would also have skipped three on-topic quotes of live speeches (0.130-0.164).
+    // A floor between AA (0.123) and ekonomim (0.125) would be a coin flip that moves with the corpus, so it sits at least
+    // 0.02 under the lowest on-topic member and catches only egregious lane joins (not the Gabar items).
+    expect(HEADLINE_CENTROID_FLOOR).toBeLessThanOrEqual(0.125 - 0.02);
   });
 });
 
@@ -389,12 +405,16 @@ describe("centroidGuard: when a candidate is passed over", () => {
       calls += 1;
       return 0;
     };
+    // The headline lane is NOT one of them any more (h114-clusterpurity-3): it clears HEADLINE_CENTROID_FLOOR.
     const exemptions: Array<Partial<CentroidGuardInput>> = [
       { enabled: false },
-      { headlineHit: true },
       { exactTitleProbeHit: true },
       { strictFingerprintMatch: true },
       { alreadyMember: true },
+      { headlineHit: true, exactTitleProbeHit: true },
+      { headlineHit: true, strictFingerprintMatch: true },
+      { headlineHit: true, alreadyMember: true },
+      { headlineHit: true, enabled: false },
     ];
     for (const e of exemptions) {
       expect(centroidGuard(base({ ...e, cosine })), JSON.stringify(e)).toEqual({ blocked: false, cosine: null });
@@ -407,5 +427,187 @@ describe("centroidGuard: when a candidate is passed over", () => {
     expect(centroidGuard(base({ memberCount: Number.POSITIVE_INFINITY, cosine: () => 0 })).blocked).toBe(true);
     expect(centroidGuard(base({ cosine: () => Number.NaN })).blocked).toBe(false);
     expect(centroidGuard(base({ cosine: () => Number.NEGATIVE_INFINITY })).blocked).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h114-clusterpurity-3: the centroid guard exempted every headline-lane join, so Gabar
+// oil headlines joined the Izmir explosion cluster 9a24657e through a multi-topic
+// bridge (posta f96d6c5a, a 'satir basi' article whose headline is oil and whose
+// description leads with the Izmir toll). The AA item scored 0.123 against its 17
+// prior members, haberet 0.166, the bridge 0.330, and the legitimate members 0.42-0.60.
+// A headline-lane hit now clears HEADLINE_CENTROID_FLOOR (0.10), not nothing.
+// ---------------------------------------------------------------------------
+describe("centroidGuard: a headline-lane hit clears a lower floor (h114-clusterpurity-3)", () => {
+  const lane = (over: Partial<CentroidGuardInput> = {}): CentroidGuardInput => ({
+    enabled: true,
+    memberCount: 17,
+    headlineHit: true,
+    exactTitleProbeHit: false,
+    strictFingerprintMatch: false,
+    alreadyMember: false,
+    cosine: () => 0.123,
+    ...over,
+  });
+
+  it("blocks an egregious lane join (cosine under 0.10) and documents that the Gabar oil item AA (0.109-0.123) is above the floor", () => {
+    expect(centroidGuard(lane({ cosine: () => 0.05 }))).toEqual({ blocked: true, cosine: 0.05 });
+    expect(centroidGuard(lane({ cosine: () => 0 }))).toEqual({ blocked: true, cosine: 0 });
+    // A floor between AA and the lowest on-topic member (0.125) would be a coin flip; the bridge member is the lever for AA.
+    expect(centroidGuard(lane({ cosine: () => 0.123 }))).toEqual({ blocked: false, cosine: 0.123 });
+    expect(centroidGuard(lane({ cosine: () => 0.109 }))).toEqual({ blocked: false, cosine: 0.109 });
+  });
+
+  it("does not block the on-topic live-speech quotes of the replay (0.130, 0.157, 0.164), the bridge (0.33) or a cosine between the two floors", () => {
+    for (const c of [0.13, 0.157, 0.164, 0.22, 0.33]) {
+      expect(centroidGuard(lane({ cosine: () => c })), String(c)).toEqual({ blocked: false, cosine: c });
+    }
+    // The ordinary floor would have blocked 0.22, and would have skipped the live-speech quotes.
+    expect(centroidGuard(lane({ headlineHit: false, cosine: () => 0.22 })).blocked).toBe(true);
+    expect(centroidGuard(lane({ headlineHit: false, cosine: () => 0.13 })).blocked).toBe(true);
+  });
+
+  it("documented gap: haberet 8c29b6b0 (0.155-0.166), the second oil item, clears the floor the replay allows", () => {
+    expect(centroidGuard(lane({ cosine: () => 0.155 })).blocked).toBe(false);
+    expect(centroidGuard(lane({ cosine: () => 0.166 })).blocked).toBe(false);
+  });
+
+  it("the headline floor itself is not blocked (strictly under), and just under it is", () => {
+    expect(centroidGuard(lane({ cosine: () => HEADLINE_CENTROID_FLOOR })).blocked).toBe(false);
+    expect(centroidGuard(lane({ cosine: () => HEADLINE_CENTROID_FLOOR - 1e-12 })).blocked).toBe(true);
+  });
+
+  it("exactTitleProbeHit, strictFingerprintMatch and alreadyMember stay full exemptions, whatever the cosine", () => {
+    for (const e of [{ exactTitleProbeHit: true }, { strictFingerprintMatch: true }, { alreadyMember: true }] as const) {
+      expect(centroidGuard(lane({ ...e, cosine: () => 0.05 })), JSON.stringify(e)).toEqual({ blocked: false, cosine: null });
+    }
+  });
+
+  it("a cluster of fewer than CENTROID_MIN_MEMBERS is exempt as before, and the cosine is not computed", () => {
+    let calls = 0;
+    const cosine = () => {
+      calls += 1;
+      return 0.05;
+    };
+    expect(centroidGuard(lane({ memberCount: 2, cosine }))).toEqual({ blocked: false, cosine: null });
+    expect(centroidGuard(lane({ memberCount: 0, cosine }))).toEqual({ blocked: false, cosine: null });
+    expect(calls).toBe(0);
+    expect(centroidGuard(lane({ memberCount: CENTROID_MIN_MEMBERS, cosine })).blocked).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  it("fails open: a non-finite cosine or member count never blocks a headline-lane hit", () => {
+    expect(centroidGuard(lane({ cosine: () => Number.NaN })).blocked).toBe(false);
+    expect(centroidGuard(lane({ cosine: () => Number.NEGATIVE_INFINITY })).blocked).toBe(false);
+    expect(centroidGuard(lane({ memberCount: Number.NaN })).blocked).toBe(false);
+    expect(centroidGuard(lane({ enabled: false })).blocked).toBe(false);
+  });
+
+  it("without the lane the ordinary floor is unchanged: 0.24 blocks, 0.26 passes", () => {
+    expect(centroidGuard(lane({ headlineHit: false, cosine: () => 0.24 })).blocked).toBe(true);
+    expect(centroidGuard(lane({ headlineHit: false, cosine: () => 0.26 })).blocked).toBe(false);
+  });
+
+  it("the cosine is computed once, and only for a candidate that reaches the check", () => {
+    let calls = 0;
+    const cosine = () => {
+      calls += 1;
+      return 0.5;
+    };
+    centroidGuard(lane({ cosine }));
+    expect(calls).toBe(1);
+  });
+});
+
+// Production rows (read-only SELECT of 2026-11-11): the 18 members of cluster 9a24657e in creation order
+// (id prefix, source slug, title, description verbatim; birgun's description is empty). The last row is the
+// AA oil item, created at 18:09Z, an hour after the 17th member.
+const IZMIR: readonly (Row & { id: string })[] = [
+  {"id": "9197fc3f", "slug": "ekonomim", "title": "Cumhurbaşkanı Erdoğan: İzmir'de 16 kardeşimiz vefat etti", "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, İzmir'in Aliağa ilçesindeki fabrika patlamasına ilişkin yaptığı açıklamada, \"16 kardeşimiz vefat etti\" dedi."},
+  {"id": "27222363", "slug": "istiklal", "title": "Cumhurbaşkanı Erdoğan acı haberi duyurdu: İzmir'de fabrikadaki patlamada 16 kardeşimiz vefat etti", "description": "Kabine toplantısı sonrası açıklama yapan Cumhurbaşkanı Erdoğan İzmir'in Aliağa ilçesindeki HABAŞ Demir Çelik Fabrikasında meydana gelen patlamadaki can kaybı sayısının 16'ya yükseldiğini açıkladı."},
+  {"id": "d80a6a1f", "slug": "sputnik-turkce", "title": "Cumhurbaşkanı Erdoğan: İzmir'de 16 kardeşimiz vefat etti", "description": "Cumhurbaşkanlığı Kabine toplantısı sona erdi. Yaklaşık 2 saat süren toplantının ardından açıklama yapan Cumhurbaşkanı Erdoğan İzmir'deki patlamada can kaybının 16'ya yükseldiğini duyurdu."},
+  {"id": "355e67fe", "slug": "haber-global", "title": "Cumhurbaşkanı Erdoğan acı haberi duyurdu: İzmir'deki fabrika patlamasında can kaybı 16'ya çıktı", "description": "Cumhurbaşkanı Recep Tayyip Erdoğan kabine toplantısı sonrası önemli açıklamalarda bulunuyor."},
+  {"id": "ffc5aad9", "slug": "aydinlik", "title": "Cumhurbaşkanı Erdoğan, Kabine Toplantısı sonrası acı haberi duyurdu! İzmir'deki patlamada can kaybı yükseldi", "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, İzmir'de bir fabrikada meydana gelen patlamaya ilişkin son durumu açıkladı. Erdoğan, \"16 kardeşimiz hayatını kaybetti. 2'si ağır, 13 vatandaşımız yaralandı.\" dedi."},
+  {"id": "11b259b0", "slug": "birgun", "title": "Erdoğan'dan Kabine sonrası açıklamalar: İzmir'deki patlamada can kaybı 16'ya yükseldi", "description": ""},
+  {"id": "ab840f4b", "slug": "elips-haber", "title": "Aliağa’daki fabrika faciasında can kaybı 17’ye yükseldi", "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, İzmir’in Aliağa ilçesindeki demir çelik fabrikasında meydana gelen patlamada hayatını kaybedenlerin sayısının 16’ya yükseldiğini açıkladı. Erdoğan, 2’si ağır olmak üzere 13 kişinin yaralandığını bildirdi."},
+  {"id": "f5425ac1", "slug": "onedio", "title": "Cumhurbaşkanı Erdoğan, İzmir'deki Patlamada Can Kaybının 16'ya Yükseldiğini Açıkladı", "description": "Cumhurbaşkanı Erdoğan, 'İzmir'de 16 kardeşimiz vefat etti. Fabrikadaki patlamayla ilgili soruşturma sürüyor' dedi.GELİŞMELER BİRAZDAN"},
+  {"id": "60181c89", "slug": "karar", "title": "Cumhurbaşkanı Erdoğan: İzmir'de 16 kardeşimiz hayatını kaybetti; İnceleme sürüyor", "description": "Son dakika haberi... Bakanlar Toplantısı sonrası açıklamalarda bulunan Cumhurbaşkanı Erdoğan, İzmir’in Aliağa ilçesindeki demir çelik fabrikasında meydana gelen patlamada 16 kişinin hayatını kaybettiğini, 2'si ağır, 13 kişinin yaralandığını paylaştı."},
+  {"id": "951f024c", "slug": "haberler-com", "title": "Cumhurbaşkanı Recep Tayyip Erdoğan, İzmir’in Aliağa ilçesindeki demir çelik fabrikasında meydana gelen patlamada 16 kişinin hayatını kaybettiğini, 2’si ağır 13 kişinin yaralandığını açıkladı.", "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, İzmir’in Aliağa ilçesindeki demir çelik fabrikasında meydana gelen patlamada 16 kişinin hayatını kaybettiğini, 2’si ağır 13 kişinin yaralandığını açıkladı."},
+  {"id": "868043fb", "slug": "yeni-safak", "title": "Cumhurbaşkanı Erdoğan İzmir'deki patlamada can kaybının 16'ya yükseldiğini açıkladı", "description": "Cumhurbaşkanı Erdoğan, Kabine Toplantısı sonrası açıklamalarda bulundu. Cumhurbaşkanı Erdoğan sözlerine İzmir'de demir çelik fabrikasında meydana gelen patlamaya ilişkin bilgi vererek başladı. Erdoğan şu ifadeleri kullandı: \"Bugün öğle saatlerinde İzmir Aliağa'dan çok üzücü bir haber aldık. Bir demir çelik fabrikasında sıvı çelik dökümü yapıldığı esnada meydana gelen patlamada maalesef 16 kardeşimiz vefat etti. Öncelikle hayatını kaybeden işçi kardeşlerimize Cenab-ı Allah'tan rahmet niyaz edi..."},
+  {"id": "f96d6c5a", "slug": "posta", "title": "Cumhurbaşkanı Erdoğan: İki sahada yeni petrol keşfettik", "description": "İşte Cumhurbaşkanı Erdoğan'ın açıklamalarından öne çıkan satır başları:\nİzmir'deki fabrikada meydana gelen patlamada 16 kardeşimiz vefat etti. Hayatını kaybeden işçi kardeşlerimize Allah'tan rahmet diliyorum. Kederli ailelerine taziyelerimi sunuyorum. Olayın hemen akabinde talimatım üzerine bakanlarımız İzmir'e intikal etti. Patlamayla ilgili soruşturma başlatıldı. Olayın neden ve nasıl yaşandığı, kimlerin sorumlu olduğu ortaya çıkarılacaktır."},
+  {"id": "03b3bd26", "slug": "haber7", "title": "Cumhurbaşkanı Erdoğan: İzmir'de 16 kardeşimiz vefat etti", "description": "Cumhurbaşkanı Erdoğan, İzmir’in Aliağa ilçesindeki demir çelik fabrikasında meydana gelen patlamada 16 kişinin hayatını kaybettiğini, 2'si ağır, 13 kişinin yaralandığını açıkladı"},
+  {"id": "c7a0a7ba", "slug": "habervakti", "title": "Erdoğan: İzmir'deki patlamada 16 kardeşimiz hayatını kaybetti", "description": "Kabine toplantısının sona ermesinin ardından kameraların karşısına geçen Cumhurbaşkanı Erdoğan, İzmir'deki fabrika patlamasında can kaybının 16'ya yükseldiğini duyururken soruşturmanın sürdüğünü ve sorumluların ortaya çıkarılacağını ifade etti."},
+  {"id": "8c29b6b0", "slug": "haberet", "title": "Cumhurbaşkanı Erdoğan'dan Kabine sonrası önemli açıklamalar: İki sahada yeni petrol keşfettik", "description": "Cumhurbaşkanı Erdoğan, Kabine Toplantısı sonrası açıklamalarda bulundu. Erdoğan, \"Şırnak, Gabar adeta petrolün başkenti haline geldi. Bölgede iki yeni sahada daha petrol keşfettik. Gaziler ve Çardaklı adını verdiğimiz sahalarda ekim ayı itibarıyla üretim başladı. Bu iki yeni sahada ilk değerlendirmelerimize göre 135 milyon varil yerinde petrol potansiyeli bulunuyor\" dedi."},
+  {"id": "0c73aacd", "slug": "f5-haber", "title": "Cumhurbaşkanı Erdoğan'dan HABAŞ açıklaması: ''İhmali olanlar ortaya çıkarılacak\"", "description": "İzmir'in Aliağa ilçesindeki HABAŞ tesislerinde meydana gelen patlamada can kaybı artıyor. Cumhurbaşkanı Recep Tayyip Erdoğan can kaybının 16’ya yükseldiğini duyurdu."},
+  {"id": "4110e56b", "slug": "evrensel", "title": "Kabine sonrası Erdoğan’dan açıklamalar: Fon meselesi, HABAŞ’taki patlama", "description": "Cumhurbaşkanı Erdoğan, Kabine toplantısının ardından yaptığı açıklamada İzmir’in Aliağa ilçesindeki fabrika patlamasında can kaybının 16’ya yükseldiğini duyurdu"},
+  {"id": "c528a551", "slug": "anadolu-ajansi", "title": "Cumhurbaşkanı Erdoğan: Gabar'da iki yeni sahada daha petrol keşfettik", "description": "Cumhurbaşkanı Erdoğan, Gabar'da iki yeni sahada petrol keşfedildiğini belirterek \"2027 yılının ikinci yarısında bölgedeki günlük üretimimiz 100 bin varil barajını aşacak. Bugünkü karşılığı ekonomimize yılda 4,4 milyar dolarlık bir katkı demek\" dedi."},
+];
+
+describe("centroidCosine on production clusters: 9a24657e (the Izmir explosion, 18 members, the last an oil headline)", () => {
+  const index = corpusWith(IZMIR);
+  const textAt = (id: string): string => textOf(IZMIR.find((r) => r.id === id)!);
+  // The members created before row `at`, in creation order: what the guard sees for the next article.
+  const before = (id: string): string[] => IZMIR.slice(0, IZMIR.findIndex((r) => r.id === id)).map(textOf);
+
+  it("the fixture is the cluster: 18 rows, the AA oil item last", () => {
+    expect(IZMIR).toHaveLength(18);
+    expect(IZMIR[17]!.slug).toBe("anadolu-ajansi");
+    expect(IZMIR[17]!.title).toContain("Gabar");
+  });
+
+  it("anadolu-ajansi c528a551 (Gabar oil) against its 17 prior members is the lowest of the cluster and far under the ordinary floor", () => {
+    const aa = centroidCosine(textAt("c528a551"), before("c528a551"), index);
+    expect(aa).toBeLessThan(CENTROID_FLOOR);
+    // Its absolute value moves with the corpus (0.152 over this 26-document stand-in, 0.123 over the replay's 867 documents, 0.109 over
+    // the clusters of the 48 h before it), so what the test pins is the order: lower than every other member.
+    for (const r of IZMIR.slice(CENTROID_MIN_MEMBERS, 17)) {
+      expect(aa, r.id).toBeLessThan(centroidCosine(textOf(r), before(r.id), index));
+    }
+  });
+
+  it("the three oil items (AA, haberet, the posta bridge) score below every legitimate member that follows at least CENTROID_MIN_MEMBERS earlier ones", () => {
+    const OIL = new Set(["c528a551", "8c29b6b0", "f96d6c5a"]);
+    const cosineOf = (id: string) => centroidCosine(textAt(id), before(id), index);
+    const guarded = IZMIR.slice(CENTROID_MIN_MEMBERS);
+    const oil = guarded.filter((r) => OIL.has(r.id)).map((r) => cosineOf(r.id));
+    const legit = guarded.filter((r) => !OIL.has(r.id)).map((r) => cosineOf(r.id));
+    expect(oil).toHaveLength(3);
+    expect(Math.max(...oil)).toBeLessThan(Math.min(...legit));
+    // AA is the lowest of all, and it is the one the headline floor catches on this corpus.
+    expect(cosineOf("c528a551")).toBeLessThanOrEqual(Math.min(...oil));
+  });
+
+  it("birgun 11b259b0 and evrensel 4110e56b (legitimate members) are above the ordinary floor against the members before them", () => {
+    expect(centroidCosine(textAt("11b259b0"), before("11b259b0"), index)).toBeGreaterThanOrEqual(CENTROID_FLOOR);
+    expect(centroidCosine(textAt("4110e56b"), before("4110e56b"), index)).toBeGreaterThanOrEqual(CENTROID_FLOOR);
+  });
+
+  it("the guard, fed those cosines for a headline-lane hit, passes both legitimate members, and blocks the oil item under a corpus that drives it to the replay's 0.123", () => {
+    const verdict = (id: string, cosine: () => number) =>
+      centroidGuard({
+        enabled: true,
+        memberCount: before(id).length,
+        headlineHit: true,
+        exactTitleProbeHit: false,
+        strictFingerprintMatch: false,
+        alreadyMember: false,
+        cosine,
+      }).blocked;
+    const real = (id: string) => () => centroidCosine(textAt(id), before(id), index);
+    expect(verdict("11b259b0", real("11b259b0"))).toBe(false);
+    expect(verdict("4110e56b", real("4110e56b"))).toBe(false);
+    // With the ordinary floor the oil item is skipped on this corpus too (0.152 < 0.25); with the headline floor it needs the replay's corpus.
+    expect(centroidGuard({ enabled: true, memberCount: 17, headlineHit: false, exactTitleProbeHit: false, strictFingerprintMatch: false, alreadyMember: false, cosine: real("c528a551") }).blocked).toBe(true);
+    // At 0.123 the oil item is above the 0.10 headline floor (the bridge member is the lever for it); an egregious 0.05 is blocked.
+    expect(verdict("c528a551", () => 0.123)).toBe(false);
+    expect(verdict("c528a551", () => 0.05)).toBe(true);
+  });
+
+  it("no legitimate member that follows at least CENTROID_MIN_MEMBERS earlier ones is under the headline floor", () => {
+    const OIL = new Set(["c528a551", "8c29b6b0", "f96d6c5a"]);
+    const under = IZMIR.slice(CENTROID_MIN_MEMBERS)
+      .filter((r) => !OIL.has(r.id) && centroidCosine(textOf(r), before(r.id), index) < HEADLINE_CENTROID_FLOOR)
+      .map((r) => r.id);
+    expect(under).toEqual([]);
   });
 });

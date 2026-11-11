@@ -198,7 +198,16 @@ async function recallCandidates(supabase: Supabase): Promise<Candidate[]> {
     .order("jev_prob", { ascending: false })
     .limit(RECALL_PREDICTION_LIMIT);
   fail("recall predictions", preds.error);
-  const predRows = rows<Record<string, unknown>>(preds.data);
+  // Every re-check stores its answers under its own day (h114-postship-1), so a
+  // (cluster, article) pair can have one row per check. Predictions arrive ordered
+  // jev_prob desc: the first row per pair is the strongest answer and the only one kept.
+  const firstPerPair = new Set<string>();
+  const predRows = rows<Record<string, unknown>>(preds.data).filter((p) => {
+    const key = `${str(p.cluster_id)}:${str(p.article_id)}`;
+    if (firstPerPair.has(key)) return false;
+    firstPerPair.add(key);
+    return true;
+  });
   const articleIds = [...new Set(predRows.map((p) => str(p.article_id)).filter(Boolean))];
   if (articleIds.length === 0) return [];
 

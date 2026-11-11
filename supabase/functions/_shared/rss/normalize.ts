@@ -513,6 +513,48 @@ export function canonicalizeUrl(
 }
 
 // ---------------------------------------------------------------------------
+// Stable article id (hunt-114)
+// ---------------------------------------------------------------------------
+
+// Sources whose article url ends in a numeric id that survives a headline edit
+// (the slug changes, the id does not) AND whose feed keeps the first url's
+// pubDate on the re-slugged item. Anadolu Ajansı retitles a live article ("CANLI
+// - Cumhurbaşkanı Erdoğan konuşuyor" -> "...Gabar'da iki yeni sahada daha petrol
+// keşfettik") under a new url and still ships the live stub's pubDate, so the
+// re-slugged row was stored 2.5-3 hours "old" and gave AA a head start as the
+// first mover of the cluster it joined. Ingest looks the id up among the
+// source's stored rows and stamps the new url with its first-seen time instead.
+//
+// Evidence (hunt-114, 7 days to 2026-11-11): 22 AA ids stored under 2 or 3
+// urls; 4117359 (pub 11-09 13:14Z, rows created 16:27Z, 16:36Z, 18:09Z),
+// 4116605 (pub 08:36Z, created 11:33Z and 12:00Z) and 4118171 (pub 06:36Z,
+// created 09:03Z, 09:18Z, 09:21Z) carry one pubDate on every row.
+//
+// An entry is added only with evidence for that outlet. The capture is digits
+// only, which is what lets ingest build a PostgREST filter from it.
+export const STABLE_ARTICLE_ID_SOURCES: ReadonlyMap<string, RegExp> = new Map([
+  ["anadolu-ajansi", /\/(\d{6,9})\/?$/],
+]);
+
+/**
+ * The stable article id of `url` for `sourceSlug`, or null: the source is not in
+ * STABLE_ARTICLE_ID_SOURCES, the url has no numeric path tail, or the digits sit
+ * only in the query string or the fragment (both are cut off before matching).
+ * The result is always 6-9 ASCII digits, never any other part of the url. Pure;
+ * never throws; linear in the url length.
+ */
+export function stableArticleId(sourceSlug: string, url: string): string | null {
+  if (typeof url !== "string") return null;
+  const re = STABLE_ARTICLE_ID_SOURCES.get(sourceSlug);
+  if (re === undefined) return null;
+  const q = url.indexOf("?");
+  const h = url.indexOf("#");
+  const cut = q < 0 ? h : h < 0 ? q : Math.min(q, h);
+  const m = re.exec(cut < 0 ? url : url.slice(0, cut));
+  return m?.[1] ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // Normalisation
 // ---------------------------------------------------------------------------
 
