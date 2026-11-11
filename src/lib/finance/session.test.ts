@@ -5,6 +5,7 @@ import type { Quote } from "@/lib/finance/quotes";
 
 import { limitFlag } from "./format";
 import {
+  auctionStubSettledClose,
   chartBaseline,
   companyMetaLine,
   intradayCutShort,
@@ -19,6 +20,7 @@ import {
   rvolLabel,
   rvolParts,
   rvolPhrase,
+  sparklineCloses,
 } from "./session";
 
 // Every case passes an explicit nowMs: the module is pure and never reads the
@@ -763,5 +765,297 @@ describe("intradayPanelMeta (h92-marketclock-1)", () => {
 
   it("falls back to the plain string for a cut time it cannot read", () => {
     expect(intradayPanelMeta("2026-11-06", "garbage")).toBe("06.11.2026, 5 dakikalık kapanışlar, haberler işaretli");
+  });
+});
+
+// h120-finance-1: during a session Yahoo's 5d/1d array leaves out the D-1 settled close (CITAS 2026-11-11 11:16
+// Istanbul: 5, 6, 9 Nov and the live 11 Nov bar, no 10 Nov). The header move is re-based on the settled close
+// (rebaseQuoteOnStat) but the sparkline drew the raw array, so its last segment contradicted the header
+// (-19 % line next to "taban -%9,96"). sparklineCloses puts the settled close back where it belongs.
+describe("sparklineCloses (h120-finance-1)", () => {
+  const citas = (over: Partial<Quote> = {}): Quote => ({
+    ticker: "CITAS",
+    price: 81.85,
+    prevClose: 90.9,
+    changePct: -9.96,
+    hasBaseline: true,
+    closes: [108.9, 101, 101, 81.85],
+    closeDays: ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"],
+    currency: "TRY",
+    asOf: "2026-11-11T08:16:00Z",
+    ...over,
+  });
+  const citasStat = (over: Partial<QuoteStat> = {}): QuoteStat => ({
+    ticker: "CITAS",
+    lastDay: "2026-11-10",
+    lastClose: 90.9,
+    prevClose: 101,
+    lastVolume: 1000,
+    avgVolume20: 900,
+    rvol: 1.1,
+    ...over,
+  });
+  const garan = (over: Partial<Quote> = {}): Quote => ({
+    ticker: "GARAN",
+    price: 153.2,
+    prevClose: 155.4,
+    changePct: -1.42,
+    hasBaseline: true,
+    closes: [142, 144.3, 153.1, 153.2],
+    closeDays: ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"],
+    currency: "TRY",
+    asOf: "2026-11-11T08:16:00Z",
+    ...over,
+  });
+  const garanStat = (over: Partial<QuoteStat> = {}): QuoteStat => citasStat({ ticker: "GARAN", lastClose: 155.4, prevClose: 153.1, ...over });
+
+  it("CITAS replay: the 11-10 close 90.9 goes in before the live bar, so the last segment is down 90.9 -> 81.85", () => {
+    expect(sparklineCloses(citas(), citasStat())).toEqual([108.9, 101, 101, 90.9, 81.85]);
+  });
+
+  it("GARAN replay: the line no longer ends flat-up next to a red move: 155.4 then 153.2", () => {
+    expect(sparklineCloses(garan(), garanStat())).toEqual([142, 144.3, 153.1, 155.4, 153.2]);
+  });
+
+  it("the last segment's sign agrees with the header move for both replays", () => {
+    for (const [q, s] of [[citas(), citasStat()], [garan(), garanStat()]] as const) {
+      const pts = sparklineCloses(q, s);
+      const rebased = rebaseQuoteOnStat(q, s);
+      const last = pts[pts.length - 1]! - pts[pts.length - 2]!;
+      expect(Math.sign(last)).toBe(Math.sign(rebased.changePct));
+    }
+  });
+
+  it("a 5-close input that already has 11-10 is unchanged", () => {
+    const q = citas({
+      closes: [108.9, 101, 101, 90.9, 81.85],
+      closeDays: ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11"],
+    });
+    expect(sparklineCloses(q, citasStat())).toEqual([108.9, 101, 101, 90.9, 81.85]);
+  });
+
+  it("stat.lastDay === the session day (evening, after the daily bar landed) leaves it unchanged", () => {
+    const out = sparklineCloses(citas(), citasStat({ lastDay: "2026-11-11", lastClose: 81.85, prevClose: 90.9 }));
+    expect(out).toEqual([108.9, 101, 101, 81.85]);
+  });
+
+  it("a stat that describes a later day than the session on screen leaves it unchanged", () => {
+    expect(sparklineCloses(citas(), citasStat({ lastDay: "2026-11-12" }))).toEqual([108.9, 101, 101, 81.85]);
+  });
+
+  it("no stat, a null stat, closeDays undefined, or closeDays of the wrong length all leave it unchanged", () => {
+    const base = [108.9, 101, 101, 81.85];
+    expect(sparklineCloses(citas(), undefined)).toEqual(base);
+    expect(sparklineCloses(citas(), null)).toEqual(base);
+    expect(sparklineCloses(citas({ closeDays: undefined }), citasStat())).toEqual(base);
+    expect(sparklineCloses(citas({ closeDays: ["2026-11-05", "2026-11-06", "2026-11-11"] }), citasStat())).toEqual(base);
+    expect(sparklineCloses(citas({ closeDays: [] }), citasStat())).toEqual(base);
+  });
+
+  it("an older cache entry (no closeDays key at all) keeps working", () => {
+    const { closeDays: _days, ...legacy } = citas();
+    expect(sparklineCloses(legacy as Quote, citasStat())).toEqual([108.9, 101, 101, 81.85]);
+  });
+
+  it("a ticker that has not traded today (asOf on 11-10, closes up to 11-10) is unchanged", () => {
+    const q = citas({
+      asOf: "2026-11-10T15:09:00Z",
+      closes: [108.9, 101, 101, 90.9],
+      closeDays: ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10"],
+    });
+    expect(sparklineCloses(q, citasStat())).toEqual([108.9, 101, 101, 90.9]);
+  });
+
+  it("an unusable stat close (zero, negative, NaN, Infinity) leaves it unchanged", () => {
+    for (const lastClose of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(sparklineCloses(citas(), citasStat({ lastClose }))).toEqual([108.9, 101, 101, 81.85]);
+    }
+  });
+
+  it("an unusable asOf (no session day) leaves it unchanged", () => {
+    expect(sparklineCloses(citas({ asOf: "garbage" }), citasStat())).toEqual([108.9, 101, 101, 81.85]);
+    expect(sparklineCloses(citas({ asOf: "" }), citasStat())).toEqual([108.9, 101, 101, 81.85]);
+  });
+
+  it("an unusable stat day leaves it unchanged (never sorts an empty or garbage day before the session)", () => {
+    expect(sparklineCloses(citas(), citasStat({ lastDay: "" }))).toEqual([108.9, 101, 101, 81.85]);
+    expect(sparklineCloses(citas(), citasStat({ lastDay: "garbage" }))).toEqual([108.9, 101, 101, 81.85]);
+  });
+
+  it("a stat day that is not later than every earlier close day is unchanged (it would land out of order)", () => {
+    // Closes already run to 11-09 but the stat is the older 11-06 bar: its 11-06 close is already in the array.
+    expect(sparklineCloses(citas(), citasStat({ lastDay: "2026-11-06", lastClose: 101 }))).toEqual([108.9, 101, 101, 81.85]);
+    // Stat day 11-07 sits before 11-09 in time: inserting it just before the live bar would put it after 11-09.
+    expect(sparklineCloses(citas(), citasStat({ lastDay: "2026-11-07", lastClose: 100 }))).toEqual([108.9, 101, 101, 81.85]);
+  });
+
+  it("inserts just before the first close on or after the session day (two entries on the live day), then trims to 5", () => {
+    const q = citas({
+      closes: [108.9, 101, 101, 81.85, 82.1],
+      closeDays: ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11", "2026-11-11"],
+    });
+    expect(sparklineCloses(q, citasStat())).toEqual([101, 101, 90.9, 81.85, 82.1]);
+  });
+
+  it("appends the settled close when there is no bar on or after the session day", () => {
+    // asOf is today's, but the array stops at 11-09 (a payload with no live bar).
+    const q = citas({ closes: [108.9, 101, 101], closeDays: ["2026-11-05", "2026-11-06", "2026-11-09"] });
+    expect(sparklineCloses(q, citasStat())).toEqual([108.9, 101, 101, 90.9]);
+  });
+
+  it("keeps only the last 5 values and never returns more than 5", () => {
+    const q = citas({
+      closes: [1, 2, 3, 4, 81.85],
+      closeDays: ["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"],
+    });
+    const out = sparklineCloses(q, citasStat());
+    expect(out).toEqual([2, 3, 4, 90.9, 81.85]);
+    expect(out.length).toBeLessThanOrEqual(5);
+    const long = citas({
+      closes: [1, 2, 3, 4, 5, 6, 81.85],
+      closeDays: ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"],
+    });
+    expect(sparklineCloses(long, citasStat())).toHaveLength(5);
+  });
+
+  it("does not mutate its input and returns a new array when it inserts", () => {
+    const q = citas();
+    const copy = structuredClone(q);
+    const out = sparklineCloses(q, citasStat());
+    expect(q).toEqual(copy);
+    expect(out).not.toBe(q.closes);
+  });
+
+  it("works on the rebased quote the page passes (rebaseQuoteOnStat keeps closeDays)", () => {
+    const rebased = rebaseQuoteOnStat(citas({ prevClose: 101, changePct: -18.96 }), citasStat());
+    expect(rebased.closeDays).toEqual(["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"]);
+    expect(sparklineCloses(rebased, citasStat())).toEqual([108.9, 101, 101, 90.9, 81.85]);
+  });
+
+  it("never throws on garbage and falls back to the closes", () => {
+    const q = citas({ closeDays: [null, 3, undefined, {}] as unknown as string[] });
+    expect(() => sparklineCloses(q, citasStat())).not.toThrow();
+    expect(sparklineCloses(q, citasStat())).toEqual([108.9, 101, 101, 81.85]);
+    const s = citasStat({ lastDay: 42 as unknown as string });
+    expect(() => sparklineCloses(citas(), s)).not.toThrow();
+    expect(sparklineCloses(citas(), s)).toEqual([108.9, 101, 101, 81.85]);
+    expect(() => sparklineCloses({ ...citas(), closes: undefined } as unknown as Quote, citasStat())).not.toThrow();
+  });
+});
+
+// h120-finance-2: the last 5-minute bar of every session is an 18:00 pre-auction stub with volume 0 whose close can
+// differ from the settled close (2026-11-10: SISE stub 35.46 red vs settled 35.72 green; TUPRS stub 332.25 green
+// vs settled 331.25 red). Once the daily bar is in, the chart is given the settled close for its last-price tag,
+// colour and aria-label. Known residual: between the close and the daily bar's arrival (about 19:33 Istanbul)
+// bist_quote_stats still describes the previous day, so the helper answers null and the stub still shows.
+describe("auctionStubSettledClose (h120-finance-2)", () => {
+  const sise = () => ({
+    lastBar: { ts: "2026-11-10T15:00:00Z", close: 35.46, volume: 0 as number | null },
+    intradayDay: "2026-11-10" as string | null,
+    stat: {
+      ticker: "SISE",
+      lastDay: "2026-11-10",
+      lastClose: 35.72,
+      prevClose: 35.48,
+      lastVolume: 1000,
+      avgVolume20: 900,
+      rvol: 1.1,
+    } as QuoteStat | null | undefined,
+    nowMs: at("2026-11-10T19:00:00Z"),
+  });
+
+  it("SISE 11-10 replay: the 18:00 stub 35.46 gives the settled close 35.72", () => {
+    expect(auctionStubSettledClose(sise())).toBe(35.72);
+  });
+
+  it("TUPRS 11-10 replay: the stub 332.25 gives the settled close 331.25", () => {
+    const base = sise();
+    expect(
+      auctionStubSettledClose({
+        ...base,
+        lastBar: { ts: "2026-11-10T15:00:00Z", close: 332.25, volume: 0 },
+        stat: { ...base.stat!, ticker: "TUPRS", lastClose: 331.25, prevClose: 332.25 },
+      }),
+    ).toBe(331.25);
+  });
+
+  it("a bar that traded (volume 1200) is not a stub: null", () => {
+    expect(auctionStubSettledClose({ ...sise(), lastBar: { ts: "2026-11-10T15:00:00Z", close: 35.46, volume: 1200 } })).toBeNull();
+  });
+
+  it("a null volume is not proof of a stub: null", () => {
+    expect(auctionStubSettledClose({ ...sise(), lastBar: { ts: "2026-11-10T15:00:00Z", close: 35.46, volume: null } })).toBeNull();
+  });
+
+  it("a volume-0 bar at 17:55 (the closing auction itself) is not the 18:00 stub: null", () => {
+    expect(auctionStubSettledClose({ ...sise(), lastBar: { ts: "2026-11-10T14:55:00Z", close: 35.46, volume: 0 } })).toBeNull();
+  });
+
+  it("18:00 Istanbul is the first stub minute; a later volume-0 bar counts too", () => {
+    expect(auctionStubSettledClose({ ...sise(), lastBar: { ts: "2026-11-10T15:00:00Z", close: 35.46, volume: 0 } })).toBe(35.72);
+    expect(auctionStubSettledClose({ ...sise(), lastBar: { ts: "2026-11-10T15:05:00Z", close: 35.46, volume: 0 } })).toBe(35.72);
+  });
+
+  it("stat.lastDay 11-09 (the daily bar is not in yet): null", () => {
+    const base = sise();
+    expect(auctionStubSettledClose({ ...base, stat: { ...base.stat!, lastDay: "2026-11-09" } })).toBeNull();
+  });
+
+  it("a stat day later than the session on screen: null", () => {
+    const base = sise();
+    expect(auctionStubSettledClose({ ...base, stat: { ...base.stat!, lastDay: "2026-11-11" } })).toBeNull();
+  });
+
+  it("tolerates a longer ISO string in stat.lastDay or intradayDay (dayKey)", () => {
+    const base = sise();
+    expect(auctionStubSettledClose({ ...base, stat: { ...base.stat!, lastDay: "2026-11-10T00:00:00Z" } })).toBe(35.72);
+    expect(auctionStubSettledClose({ ...base, intradayDay: "2026-11-10T00:00:00Z" })).toBe(35.72);
+  });
+
+  it("the session is not over yet: 17:59 Istanbul the same day is null, and so is 18:15 itself", () => {
+    expect(auctionStubSettledClose({ ...sise(), nowMs: at("2026-11-10T14:59:00Z") })).toBeNull();
+    expect(auctionStubSettledClose({ ...sise(), nowMs: at("2026-11-10T15:15:00Z") })).toBeNull();
+  });
+
+  it("the same day one minute past 18:15 is over (intradayCutShort's rule), a later day always is", () => {
+    expect(auctionStubSettledClose({ ...sise(), nowMs: at("2026-11-10T15:16:00Z") })).toBe(35.72);
+    expect(auctionStubSettledClose({ ...sise(), nowMs: at("2026-11-12T10:00:00Z") })).toBe(35.72);
+  });
+
+  it("agrees with intradayCutShort on when a session is over", () => {
+    const cutArgs = (nowMs: number) => ({
+      lastBar: { ts: "2026-11-10T09:05:00Z", close: 30 },
+      intradayDay: "2026-11-10",
+      stat: sise().stat,
+      nowMs,
+    });
+    for (const now of ["2026-11-10T14:59:00Z", "2026-11-10T15:15:00Z", "2026-11-10T15:16:00Z", "2026-11-11T03:00:00Z"]) {
+      const over = intradayCutShort(cutArgs(at(now)));
+      expect(auctionStubSettledClose({ ...sise(), nowMs: at(now) }) !== null).toBe(over);
+    }
+  });
+
+  it("the next morning before the first bar (11-11 06:00Z, 09:00 Istanbul) still gives 35.72", () => {
+    expect(auctionStubSettledClose({ ...sise(), nowMs: at("2026-11-11T06:00:00Z") })).toBe(35.72);
+  });
+
+  it("stub equal to the settled close: null (nothing to correct)", () => {
+    expect(auctionStubSettledClose({ ...sise(), lastBar: { ts: "2026-11-10T15:00:00Z", close: 35.72, volume: 0 } })).toBeNull();
+  });
+
+  it("null or non-finite inputs return null and never throw", () => {
+    const base = sise();
+    expect(auctionStubSettledClose({ ...base, lastBar: null })).toBeNull();
+    expect(auctionStubSettledClose({ ...base, intradayDay: null })).toBeNull();
+    expect(auctionStubSettledClose({ ...base, stat: null })).toBeNull();
+    expect(auctionStubSettledClose({ ...base, stat: undefined })).toBeNull();
+    expect(auctionStubSettledClose({ ...base, nowMs: Number.NaN })).toBeNull();
+    expect(auctionStubSettledClose({ ...base, nowMs: Number.POSITIVE_INFINITY })).toBeNull();
+    expect(auctionStubSettledClose({ ...base, lastBar: { ts: "garbage", close: 35.46, volume: 0 } })).toBeNull();
+    expect(auctionStubSettledClose({ ...base, lastBar: { ts: "2026-11-10T15:00:00Z", close: Number.NaN, volume: 0 } })).toBeNull();
+    for (const lastClose of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(auctionStubSettledClose({ ...base, stat: { ...base.stat!, lastClose } })).toBeNull();
+    }
+    expect(() => auctionStubSettledClose({ ...base, stat: { ...base.stat!, lastDay: 42 as unknown as string } })).not.toThrow();
   });
 });

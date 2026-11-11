@@ -100,7 +100,24 @@ const englishOnlyEmptyColumn = ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—
 // substring of each line, src/app/metodoloji/page.tsx), newest first. The
 // "Son güncelleme" footer reads CHANGELOG[0].date, so keep the newest entry
 // on top (pinned by page.test.tsx).
+//
+// h120-methodology-1: 2026-11-08 is hunt-66 (#228, list copy filter), 2026-11-09
+// is hunt-85 (#244, rare-stem tier) and hunt-105 (#254, wire-copy share over every
+// cluster), 2026-11-10 is hunt-107 (#255) and hunt-109 (#256, the same wording on
+// the share surfaces). Every number is read from the constant the code runs on.
 const CHANGELOG = [
+  {
+    date: "2026-11-10",
+    text: `Kör nokta ifadesi: Tayf'ın otomatik kontrolü (Jev, olasılık ≥ %${Math.round(RECALL_MATCH_MIN_PROB * 100)}) sessiz görünen taraftaki bir kaynağın aynı olayı başka bir kümede verdiğini bulursa, kartlarda “Sadece X yazdı” yerine “Kümede sadece X” yazıyor, küme sayfasında ise o taraf “${RECALL_MATCH_NOTE}” diye gösteriliyor; paylaşım görseli, gömme kodu ve paylaşım metni de aynı ifadeyi kullanıyor. Kör nokta kuralının kendisi değişmedi; yalnızca ifade değişti.`,
+  },
+  {
+    date: "2026-11-09",
+    text: `Kaynak göstergeleri: “Başka kaynaklarla aynı başlık ve özet” göstergesi artık kaynağın yer aldığı her kümeyi sayıyor, yalnızca tek kaynaktan dağıtım olarak işaretlenen kümeleri değil; bu yüzden birçok kaynakta değer belirgin biçimde yükseldi. Kör nokta doğrulaması genişledi: ortak köklerin payı yarıdan azsa da en az %${looseJaccardPct} ise ve iki başlık, aranan haberlerin başlıklarının en çok %${rareSharePct}'inde geçen en az ${SIBLING_VETO.rareMinShared} seyrek kökü paylaşıyorsa (ortak köklerin sayısı yine en az ${SIBLING_VETO.looseMinShared} olmalı) haberler aynı olay sayılıyor; bu haberleri veren kaynaklar sayıma eklenince baskınlık eşiği tutmuyorsa kör nokta işareti gösterilmiyor.`,
+  },
+  {
+    date: "2026-11-08",
+    text: `Kör Noktalar listesi: bir haberin oy veren kaynaklarının metinlerinin (aynı içerik özeti ya da aynı başlık tek metin sayılır) %${Math.round(BLINDSPOT_LIST_FILTERS.minIndependentTextRatio * 100)}'den azı birbirinden farklıysa haber artık listeye alınmıyor; kör nokta etiketi kartta ve haber sayfasında yine görünebilir.`,
+  },
   {
     date: "2026-11-07",
     text: `Denge puanı: “${BALANCE_LABELS.dengeli}” etiketi artık yalnızca puanı ${BALANCE_BALANCED_MIN} veya üzeri olan ve hiçbir bölgenin oy veren kaynakların %${balancedMaxSharePct}'ine ulaşmadığı kümelere veriliyor; bir bölge %${balancedMaxSharePct} veya üzerindeyse etiket “${BALANCE_LABELS.yakin}” oluyor. Türkçe ve İngilizce haberlerin karıştığı kümelerde Türkçe başlık seçiliyor; yalnızca İngilizce kaynaklardan oluşan kümeler bölgeler arasında karşılaştırılmıyor.`,
@@ -401,20 +418,19 @@ export default async function MethodologyPage() {
             <div className={ruleCard}>
               <dt className={ruleTerm}>Kaynak eşiği</dt>
               <dd className={ruleDef}>
-                Kümede en az {BLINDSPOT.minSources} kaynak yer almalı,
+                {`Kümede en az ${BLINDSPOT.minSources} oy veren kaynak (haber kuruluşu ya da ajans) yer almalı,`}
               </dd>
             </div>
             <div className={ruleCard}>
               <dt className={ruleTerm}>Baskınlık eşiği</dt>
               <dd className={ruleDef}>
-                ve bu kaynakların tek bir Medya DNA bölgesi (İktidar, Bağımsız
-                veya Muhalefet) payı ≥ %{dominantSharePct} olmalı.
+                {`ve bu oy veren kaynakların tek bir Medya DNA bölgesi (İktidar, Bağımsız veya Muhalefet) payı ≥ %${dominantSharePct} olmalı; toplayıcı ve niş kaynaklar sayılmaz.`}
               </dd>
             </div>
           </dl>
           <p className={proseClass}>
-            Kümede {BLINDSPOT.minSources} kaynaktan azı varsa &quot;diğer
-            taraf görmezden geldi&quot; ile &quot;henüz kimse haber
+            Kümede {BLINDSPOT.minSources} oy veren kaynaktan azı varsa
+            &quot;diğer taraf görmezden geldi&quot; ile &quot;henüz kimse haber
             yapmadı&quot; ayırt edilemez, bu yüzden {BLINDSPOT.minSources}{" "}
             kaynak eşiği var. Bir küme eşikleri geçtiğinde bile, karşı
             tarafa yetişme fırsatı tanımak için &ldquo;Kör nokta&rdquo;
@@ -489,20 +505,22 @@ export default async function MethodologyPage() {
           <dl className="grid gap-3 sm:grid-cols-2">
             <div className={ruleCard}>
               <dt className={ruleTerm}>Kaynak eşiği</dt>
-              <dd className={ruleDef}>Kümede en az {SURPRISE.minSources} kaynak varsa,</dd>
+              <dd className={ruleDef}>
+                {`Kümede en az ${SURPRISE.minSources} oy veren kaynak varsa,`}
+              </dd>
             </div>
             <div className={ruleCard}>
               <dt className={ruleTerm}>Baskınlık eşiği</dt>
               <dd className={ruleDef}>
-                bir Medya DNA bölgesi kümenin ≥ %{surpriseSharePct}&apos;ini
-                oluşturuyorsa,
+                {`bir Medya DNA bölgesi oy veren kaynakların ≥ %${surpriseSharePct}'ini oluşturuyorsa,`}
               </dd>
             </div>
             <div className={ruleCard + " sm:col-span-2"}>
               <dt className={ruleTerm}>Karşı taraf + marj</dt>
               <dd className={ruleDef}>
-                ve karşıt bölgeden en az bir kaynak habere yer vermiş, baskın
-                bölgedeki kaynak sayısı ise karşıt bölgedekinden en az{" "}
+                ve karşıt bölgeden en az bir oy veren kaynak habere yer vermiş,
+                baskın bölgedeki oy veren kaynak sayısı ise karşıt
+                bölgedekinden en az{" "}
                 {SURPRISE.minMargin} fazla olmalı.
               </dd>
             </div>

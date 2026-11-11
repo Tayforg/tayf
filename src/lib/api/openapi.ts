@@ -477,7 +477,7 @@ function buildSchemas(): Record<string, unknown> {
           truncated: {
             type: "boolean",
             description:
-              "True when the one_zone_silent candidate pull hit its cap of 1000 clusters (newest updated_at first), so older alerts of the since window may be missing. The 30-blindspot cap is not part of this flag.",
+              "True when the one_zone_silent candidate pull hit its cap of 1000 clusters (newest updated_at first), so older alerts of the since window may be missing. The blindspot list (cards and rows) is not part of this flag.",
           },
           alerts: {
             type: "array",

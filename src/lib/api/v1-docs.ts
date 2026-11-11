@@ -258,7 +258,7 @@ const FORMAT_PARAM: V1ParamDoc = {
 };
 
 const ALERT_NOTES_TR: string[] = [
-  `İki kural, tek akış. Kör nokta: geri çağırma (recall veto) uygulanmış, en az ${BLINDSPOT.minSources} oy veren kaynak ve tek bölgeden %${Math.round(BLINDSPOT.dominantShare * 100)} veya fazlası, ${BLINDSPOT.feedDelayHours} saat gecikmeli, yayın sağlığı bozuk bölge için bastırılmış; en çok 30 kayıt (sitedeki /blindspots ile aynı).`,
+  `İki kural, tek akış. Kör nokta: geri çağırma (recall veto) uygulanmış, en az ${BLINDSPOT.minSources} oy veren kaynak ve tek bölgeden %${Math.round(BLINDSPOT.dominantShare * 100)} veya fazlası, ${BLINDSPOT.feedDelayHours} saat gecikmeli, yayın sağlığı bozuk bölge için bastırılmış; sitedeki /blindspots listesindeki her kayıt (kartlar ve satırlar).`,
   `alert_at, uyarının oluştuğu andır: kör noktada updated_at ile first_published + ${BLINDSPOT.feedDelayHours} saatin büyüğü, sessiz bölgede updated_at ile first_published + ${SILENT_MIN_AGE_H} saatin büyüğü; updated_at kümenin kendi son güncellemesi olarak kayıtta kalır. since bu değere uygulanır. Sıralama alert_at'e göre, en yeniden en eskiye. Bir küme uyarı olduktan sonra güncellenirse alert_at ileri kayar ve kayıt yeniden döner; id ile tekilleştirin.`,
   `Sessiz bölge: tam olarak bir bölgede sıfır kaynak, en az ${SILENT_MIN_SOURCES} oy veren kaynak, küme en az ${SILENT_MIN_AGE_H} saat önce başlamış, veto yok, arşivlenmemiş. Sessiz bölgenin yayın akışları bozuksa kayıt düşer; sağlık bilgisi alınamazsa akış açık kalır.`,
   "sessiz = Tayf eşleştiremedi: bir bölgenin sessiz görünmesi o bölgenin haberi yapmamayı seçtiği anlamına gelmez, yalnızca Tayf'ın o bölgeden bu kümeye eşleşen haber bulamadığı anlamına gelir.",

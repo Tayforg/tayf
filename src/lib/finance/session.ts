@@ -146,6 +146,19 @@ const CUT_BAR_BEFORE_MIN = 17 * 60 + 30;
 const CUT_CLOSE_GAP = 0.005;
 
 /**
+ * Whether the session of Istanbul day `session` (YYYY-MM-DD) is over at `nowMs`: a later Istanbul day, or the
+ * same day after SESSION_CLOSE_MIN (18:15). An unparsable `nowMs` is not over. The one definition of "over" that
+ * intradayCutShort and auctionStubSettledClose share.
+ */
+function sessionOver(nowMs: number, session: string): boolean {
+  if (!Number.isFinite(nowMs)) return false;
+  const now = new Date(nowMs + IST_OFFSET_MS);
+  const today = now.toISOString().slice(0, 10);
+  const nowMinute = now.getUTCHours() * 60 + now.getUTCMinutes();
+  return today > session || (today === session && nowMinute > SESSION_CLOSE_MIN);
+}
+
+/**
  * Whether the newest 5-minute session on screen was cut short, so that its last
  * bar is not where the day settled (h92-marketclock-1).
  *
@@ -175,13 +188,7 @@ export function intradayCutShort(a: {
   if (!stat || dayKey(stat.lastDay) !== dayKey(intradayDay)) return false;
   if (!Number.isFinite(stat.lastClose) || !(stat.lastClose > 0)) return false;
 
-  if (!Number.isFinite(nowMs)) return false;
-  const now = new Date(nowMs + IST_OFFSET_MS);
-  const today = now.toISOString().slice(0, 10);
-  const session = dayKey(intradayDay);
-  const nowMinute = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const over = today > session || (today === session && nowMinute > SESSION_CLOSE_MIN);
-  if (!over) return false;
+  if (!sessionOver(nowMs, dayKey(intradayDay))) return false;
 
   const barMs = Date.parse(lastBar.ts);
   if (!Number.isFinite(barMs)) return false;
@@ -189,6 +196,60 @@ export function intradayCutShort(a: {
   if (bar.getUTCHours() * 60 + bar.getUTCMinutes() >= CUT_BAR_BEFORE_MIN) return false;
 
   return Math.abs(lastBar.close / stat.lastClose - 1) > CUT_CLOSE_GAP;
+}
+
+/**
+ * A 5-minute bar from this Istanbul minute of the day (18:00) on, with volume 0, is the closing auction's
+ * pre-print stub, not a trade: the continuous session ends 18:00 and the closing auction prints the 17:55 bar.
+ */
+const AUCTION_STUB_FROM_MIN = 18 * 60;
+
+/**
+ * The settled close to draw the intraday chart's last price from instead of the 18:00 stub bar, or null when the
+ * chart should keep reading its last bar (h120-finance-2).
+ *
+ * Every finished session's last 5-minute bar is stamped 18:00 Istanbul with volume 0: it carries the auction's
+ * indicative price, which can differ from the settled close (2026-11-10: SISE stub 35,46 red against a settled
+ * 35,72 green; TUPRS stub 332,25 green against a settled 331,25 red). The chart took its last-price tag, colour
+ * and aria-label from that bar and contradicted the header, which reads the settled close. It is stat.lastClose
+ * that is returned, the header's own number. This is the chart-side twin of intradayCutShort, whose rule
+ * (bars before 17:30) never fires for a bar at 18:00. Non-null only when ALL of these hold:
+ *  1. there is a last bar with volume exactly 0 and a finite close, whose Istanbul time is 18:00 or later;
+ *  2. the stat is the daily bar of the session day on screen and has a usable settled close;
+ *  3. the session is over, by the same rule as intradayCutShort (a later Istanbul day, or the same day after
+ *     SESSION_CLOSE_MIN);
+ *  4. the stub's close is not already the settled close.
+ * Anything unreadable gives null. Never throws.
+ *
+ * Known residual: bist_quote_stats gets the day's daily bar only at about 19:33 Istanbul, so between the close
+ * (18:15) and that moment stat.lastDay is still the previous day, rule 2 fails, and the stub still shows. That
+ * window is accepted. From the daily bar's arrival to the next session's first bar (the whole evening, the
+ * weekend, the next morning) the settled close is returned.
+ */
+export function auctionStubSettledClose(a: {
+  lastBar: { ts: string; close: number; volume: number | null } | null;
+  intradayDay: string | null;
+  stat: QuoteStat | null | undefined;
+  nowMs: number;
+}): number | null {
+  try {
+    const { lastBar, intradayDay, stat, nowMs } = a;
+    if (!lastBar || lastBar.volume !== 0 || !Number.isFinite(lastBar.close)) return null;
+    if (typeof intradayDay !== "string" || !intradayDay) return null;
+    if (!stat || typeof stat.lastDay !== "string" || dayKey(stat.lastDay) !== dayKey(intradayDay)) return null;
+    if (!Number.isFinite(stat.lastClose) || !(stat.lastClose > 0)) return null;
+
+    if (!sessionOver(nowMs, dayKey(intradayDay))) return null;
+
+    const barMs = Date.parse(lastBar.ts);
+    if (!Number.isFinite(barMs)) return null;
+    const bar = new Date(barMs + IST_OFFSET_MS);
+    if (bar.getUTCHours() * 60 + bar.getUTCMinutes() < AUCTION_STUB_FROM_MIN) return null;
+
+    return lastBar.close !== stat.lastClose ? stat.lastClose : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -293,6 +354,54 @@ export function quoteSessionDay(asOf: string | null | undefined): string | null 
   if (Number.isNaN(shifted.getTime())) return null;
   const day = shifted.toISOString().slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
+const SPARKLINE_POINTS = 5;
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The values for the header sparkline: quote.closes with the D-1 settled close put back (h120-finance-1).
+ *
+ * During a session Yahoo's 5d/1d array has no bar for the previous day (CITAS 2026-11-11 11:16 Istanbul: 5, 6 and
+ * 9 Nov plus the live 11 Nov bar, no 10 Nov), the same quirk rebaseQuoteOnStat repairs for the move and never for
+ * `closes`. The line then ran from 9 Nov straight to today, so its last segment contradicted the re-based move
+ * beside it (a -19 % line next to "taban -%9,96"; GARAN flat-up next to red -1,42 %).
+ * bist_quote_stats.last_close is that missing close. It is inserted, in order, just before the first close of the
+ * session day (or appended when there is none), and only the last 5 values are kept, as before. Every one of
+ * these must hold, else quote.closes is returned as it is (the same array):
+ *  1. the stat has a finite lastClose > 0 and a YYYY-MM-DD lastDay;
+ *  2. quote.closeDays names a day for each close (same length; absent on a cache entry from before the field);
+ *  3. the quote has a session day (the Istanbul day of quote.asOf, the rule of rebaseQuoteOnStat);
+ *  4. the stat day is before the session day, so it is a finished session and not today's own bar;
+ *  5. no close already sits on the stat day;
+ *  6. the stat day is later than every close day that is before the session day, so the insert keeps the order.
+ * A new array is returned only when a value was inserted. Never throws, never mutates the quote.
+ */
+export function sparklineCloses(quote: Quote, stat: QuoteStat | null | undefined): number[] {
+  try {
+    const closes = quote.closes;
+    const days = quote.closeDays;
+    if (!stat || !Number.isFinite(stat.lastClose) || !(stat.lastClose > 0)) return closes;
+    if (!Array.isArray(days) || days.length !== closes.length) return closes;
+    if (typeof stat.lastDay !== "string") return closes;
+    const sessionDay = quoteSessionDay(quote.asOf);
+    if (sessionDay === null) return closes;
+    const statDay = dayKey(stat.lastDay);
+    if (!DAY_KEY_RE.test(statDay) || !(statDay < sessionDay)) return closes;
+
+    let insertAt = days.length;
+    for (let i = 0; i < days.length; i++) {
+      const d = days[i];
+      if (typeof d !== "string" || !DAY_KEY_RE.test(d)) return closes;
+      if (d === statDay) return closes;
+      if (d < sessionDay && d > statDay) return closes;
+      if (d >= sessionDay && insertAt === days.length) insertAt = i;
+    }
+
+    return [...closes.slice(0, insertAt), stat.lastClose, ...closes.slice(insertAt)].slice(-SPARKLINE_POINTS);
+  } catch {
+    return Array.isArray(quote?.closes) ? quote.closes : [];
+  }
 }
 
 /**

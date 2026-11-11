@@ -941,9 +941,11 @@ and per-day metering as every other `/api/v1` route.
     (`SILENT_MIN_AGE_H`).
   A cluster's `updated_at` usually precedes the moment its alert first
   appears, so `since` on `updated_at` alone would miss it.
-- `limit` (optional integer, 1-100, default 50). Blindspots are capped at 30
-  before the merge, the same cap as `/blindspots`, so the list holds at most
-  30 `blindspot` alerts however large `limit` is.
+- `limit` (optional integer, 1-100, default 50). It caps the merged list of
+  both alert types, newest `alert_at` first. There is no separate blindspot
+  cap: a `since` window can return every claim `/blindspots` lists (cards and
+  rows) up to `limit`, so a claim on the page's compact rows is alerted like
+  one with a card.
 - `format` (optional): `json` or `rss`. Anything else -> `400 Invalid format`.
   When absent, RSS is served if `Accept` includes `application/rss+xml`,
   otherwise JSON. RSS responses carry
@@ -952,12 +954,19 @@ and per-day metering as every other `/api/v1` route.
 
 **Two alert types**, merged newest first (`alert_at` descending, ties by
 `cluster_id` ascending):
-- `blindspot`: exactly the `/blindspots` page rule: the public claim
+- `blindspot`: every claim the `/blindspots` page lists, cards and rows (the
+  page shows the 30 most lopsided, side-balanced claims as cards and every
+  other claim of its 7-day window as a compact row; the feed carries both, so
+  its list matches the page): the public claim
   `is_blindspot AND NOT blindspot_recall_veto` (both vetoes applied: a Jev
   `blindspot_recall` match at p >= 0.85 that pulls the dominant share under
   80%, and a near-identically titled sibling cluster within 24h that does the
   same), at least 5 voting sources with 80% or more in one zone, 24h delay,
-  suppressed when the silent pole zone's feeds are degraded, capped at 30.
+  suppressed when the silent pole zone's feeds are degraded. `source_count` and
+  `zone_counts` are the voting sources, the same for a card and a row. The
+  feed orders by `alert_at`, not by the page's side balance. A claim keeps the
+  same `id` (`blindspot:<cluster uuid>`) whether it holds a card or a row, so a
+  claim that moves between them is never delivered twice.
 - `one_zone_silent`: at least 5 voting sources, exactly one zone at zero,
   cluster first published at least 6h ago, vetoed by neither rule
   (`blindspot_recall_veto` false), not archived. Dropped
@@ -997,8 +1006,8 @@ the zone chose not to cover it. The copy avoids accusatory wording.
 `truncated` is always present: `true` when the `one_zone_silent` candidate
 pull returned its full 1000 rows, so older `one_zone_silent` alerts of the
 `since` window may be missing (narrow `since`, or poll more often, and read
-again); `false` otherwise. The 30-blindspot cap above is documented and is not
-part of `truncated`. RSS has no such field and its output is unchanged.
+again); `false` otherwise. The `blindspot` list (cards and rows) is not part
+of `truncated`. RSS has no such field and its output is unchanged.
 `dominant_zone` is set for `blindspot` only. `updated_at` is the cluster's own
 last update; `alert_at` is the moment the alert qualified (formulas above) and
 is what `since` and the ordering use. If a cluster is updated after it became

@@ -118,21 +118,27 @@ function istMinutes(iso: string): number {
 const PRICE_TAG_CLASS = "absolute left-full ml-1 -translate-y-1/2 font-mono text-[10px] tabular-nums";
 
 /**
- * `closeOverride` (h92-marketclock-1) is the settled daily close of a session whose bars were cut short
- * (bist_intraday_targets dropped the ticker mid-session, so the newest bar is not where the day ended). When it is
- * finite, the colour, the last-price tag (its text and its level) and the aria-label follow it instead of the last
- * bar; the path is still the bars. Absent or not finite, the output is what it always was.
+ * `closeOverride` (h92-marketclock-1) is the settled daily close of a session whose newest bar is not where the day
+ * ended. When it is finite, the colour, the last-price tag (its text and its level) and the aria-label follow it
+ * instead of the last bar; the path is still the bars. Absent or not finite, the output is what it always was.
+ * `overrideReason` says why, and only changes the aria-label:
+ *  - 'cut' (default): bist_intraday_targets dropped the ticker mid-session, so the bars stop early and the label
+ *    adds "gün içi veri eksik".
+ *  - 'auction' (h120-finance-2): the bars are complete, but the last one is the volume-0 18:00 pre-auction stub,
+ *    whose close is not the settled close; the label states the settled close and nothing about missing data.
  */
 export function IntradayChart({
   bars,
   markers,
   prevClose,
   closeOverride,
+  overrideReason = "cut",
 }: {
   bars: Bar5m[];
   markers: ChartMarker[];
   prevClose?: number | null;
   closeOverride?: number | null;
+  overrideReason?: "cut" | "auction";
 }) {
   if (bars.length < 2) return null;
   const closes = bars.map((b) => b.close);
@@ -152,7 +158,12 @@ export function IntradayChart({
     return mins >= SESSION_START_MIN - 30 && mins <= SESSION_END_MIN;
   });
   const tops = priceTagTops(y(lastClose), prevClose != null ? y(prevClose) : null, H, PRICE_TAG_PHONE_GAP);
-  const ariaLabel = settled != null ? `Seans içi fiyat, kapanış ${fmtPrice(settled)}, gün içi veri eksik` : `Seans içi fiyat, son ${fmtPrice(last.close)}`;
+  const ariaLabel =
+    settled == null
+      ? `Seans içi fiyat, son ${fmtPrice(last.close)}`
+      : overrideReason === "auction"
+        ? `Seans içi fiyat, kapanış ${fmtPrice(settled)}`
+        : `Seans içi fiyat, kapanış ${fmtPrice(settled)}, gün içi veri eksik`;
 
   return (
     <figure className="px-3 py-2">

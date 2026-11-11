@@ -24,10 +24,18 @@ import type { MediaDnaZone } from "@/types";
  * updated_at hid almost every qualifying blindspot (2 of 111 on 2026-11-01).
  *
  * Two rules, merged by alertAt newest-first (clusterId ascending on a tie):
- *   - blindspot: `getBlindspots()` as-is. It already carries the recall veto
+ *   - blindspot: EVERY public claim of `getBlindspots()`, the cards (`bundles`,
+ *     side-balanced, at most 30) AND the compact rows (`more`), which together
+ *     are the whole /blindspots list. It already carries the recall veto
  *     (`.eq('blindspot_recall_veto', false)`), the live contract (>=5 voting
- *     sources, >=80% in one zone), the 24h delay and feed-health
- *     suppression, and is capped at 30 like /blindspots.
+ *     sources, >=80% in one zone), the 24h delay and feed-health suppression.
+ *     There is no separate blindspot cap: only `limit` cuts the merged list.
+ *     The cards rank by side balance and share, not recency, so a fresh claim on
+ *     the larger side lands in `more` and would never have been alerted by the
+ *     cards alone (14 of 44 claims on 2026-11-11). A claim keeps the same alert
+ *     id (`blindspot:<cluster id>`) whether it is a card or a row, so the
+ *     webhook queue's unique (key_id, alert_id) never re-delivers it when it is
+ *     promoted or demoted.
  *   - one_zone_silent: ONE lean query, then the pure `oneZoneSilentOf`.
  *     "Silent" means Tayf could not match a story from that zone, not that
  *     the zone stayed quiet, so a zone whose feeds are degraded is dropped.
@@ -42,7 +50,7 @@ import type { MediaDnaZone } from "@/types";
  * 2026-11-09). `getAlertItems` therefore returns `{ items, truncated }`:
  * `truncated` is true when the pull came back with exactly
  * SILENT_CANDIDATE_LIMIT rows, i.e. older candidates may not have been read.
- * The 30-blindspot cap is documented and is not part of `truncated`.
+ * The blindspot list is not part of `truncated`.
  */
 
 const SILENT_SELECT =
@@ -55,8 +63,6 @@ const SILENT_SELECT =
  * asked for. The select stays lean (7 columns).
  */
 export const SILENT_CANDIDATE_LIMIT = 1000;
-/** Same cap as /blindspots (blindspots-query DISPLAY_LIMIT), re-applied defensively. */
-const BLINDSPOT_CAP = 30;
 
 interface SilentRow {
   id: string;
@@ -69,6 +75,18 @@ interface SilentRow {
 }
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
+
+/** A public /blindspots claim, whether it holds a card or a compact row. */
+interface BlindspotClaim {
+  id: string;
+  title: string;
+  firstPublished: string;
+  updatedAt: string;
+  /** Voting sources: the sum of `counts`. */
+  total: number;
+  counts: Record<MediaDnaZone, number>;
+  dominantZone: MediaDnaZone;
+}
 
 export interface AlertQueryInput {
   sinceIso: string;
@@ -99,7 +117,7 @@ export interface AlertQueryResult {
   /**
    * The one_zone_silent candidate pull returned exactly SILENT_CANDIDATE_LIMIT
    * rows, so older candidates of the window may not have been read. The
-   * blindspot cap (30) is deliberately not part of this flag.
+   * blindspot list (cards and compact rows) is deliberately not part of this flag.
    */
   truncated: boolean;
 }
@@ -112,22 +130,53 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertQueryR
 
   const items: AlertItem[] = [];
 
-  const { bundles } = await getBlindspots({ profile });
-  for (const b of bundles.slice(0, BLINDSPOT_CAP)) {
-    const alertAt = alertAtOf("blindspot", b.cluster.first_published, b.cluster.updated_at);
-    if (alertAt === null || Date.parse(alertAt) < sinceMs) continue;
+  const { bundles, more } = await getBlindspots({ profile });
+  // One normalised list for every public claim: the cards first, then the
+  // compact rows. A claim is never in both lists; a repeated id keeps its first
+  // (card) entry anyway.
+  const claims: BlindspotClaim[] = [];
+  const seenClaims = new Set<string>();
+  for (const b of bundles) {
+    if (seenClaims.has(b.cluster.id)) continue;
+    seenClaims.add(b.cluster.id);
     const tally = tallyZones(normalizeDistribution(b.cluster.bias_distribution));
-    items.push({
-      type: "blindspot",
-      clusterId: b.cluster.id,
-      title: isTitle(b.cluster.title_tr) ? b.cluster.title_tr : "",
+    claims.push({
+      id: b.cluster.id,
+      title: b.cluster.title_tr,
       firstPublished: b.cluster.first_published,
       updatedAt: b.cluster.updated_at,
-      alertAt,
-      sourceCount: tally.total,
-      zoneCounts: { ...tally.counts },
+      total: tally.total,
+      counts: tally.counts,
       dominantZone: b.dominantZone,
-      silentZones: ZONES.filter((z) => tally.counts[z] === 0),
+    });
+  }
+  for (const row of more ?? []) {
+    if (seenClaims.has(row.id)) continue;
+    seenClaims.add(row.id);
+    claims.push({
+      id: row.id,
+      title: row.title,
+      firstPublished: row.firstPublished,
+      updatedAt: row.updatedAt,
+      total: ZONES.reduce((sum, z) => sum + row.votingZoneCounts[z], 0),
+      counts: row.votingZoneCounts,
+      dominantZone: row.dominantZone,
+    });
+  }
+  for (const c of claims) {
+    const alertAt = alertAtOf("blindspot", c.firstPublished, c.updatedAt);
+    if (alertAt === null || Date.parse(alertAt) < sinceMs) continue;
+    items.push({
+      type: "blindspot",
+      clusterId: c.id,
+      title: isTitle(c.title) ? c.title : "",
+      firstPublished: c.firstPublished,
+      updatedAt: c.updatedAt,
+      alertAt,
+      sourceCount: c.total,
+      zoneCounts: { ...c.counts },
+      dominantZone: c.dominantZone,
+      silentZones: ZONES.filter((z) => c.counts[z] === 0),
     });
   }
 

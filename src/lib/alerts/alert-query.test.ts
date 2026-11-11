@@ -4,6 +4,8 @@ const state = vi.hoisted(() => ({
   /** Every argument list `getBlindspots` was called with. */
   blindspotCalls: [] as unknown[][],
   bundles: [] as unknown[],
+  /** The compact rows of /blindspots (claims without a card). */
+  more: [] as unknown[],
   silentRows: [] as unknown[],
   silentError: null as { message: string } | null,
 }));
@@ -35,12 +37,12 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/clusters/blindspots-query", () => ({
   getBlindspots: async (...args: unknown[]) => {
     state.blindspotCalls.push(args);
-    return { bundles: state.bundles };
+    return { bundles: state.bundles, more: state.more };
   },
 }));
 
 import { getAlertItems } from "@/lib/alerts/alert-query";
-import { SILENT_MIN_AGE_H } from "@/lib/alerts/alert-feed";
+import { SILENT_MIN_AGE_H, toV1AlertRecord } from "@/lib/alerts/alert-feed";
 import { BLINDSPOT } from "@/lib/bias/config";
 import type { ZoneFeedHealth } from "@/lib/clusters/feed-health";
 
@@ -79,6 +81,30 @@ function bundle(
   };
 }
 
+/**
+ * A compact row of /blindspots as `getBlindspots().more` carries it (a claim
+ * without a card). Zone counts default to 5 / 1 / 0 like `bundle`.
+ */
+function moreRow(
+  id: string,
+  firstPublished: string,
+  updatedAt: string,
+  counts: Record<"iktidar" | "bagimsiz" | "muhalefet", number> = { iktidar: 5, bagimsiz: 1, muhalefet: 0 },
+  dominantZone = "iktidar",
+) {
+  return {
+    id,
+    title: `kompakt ${id}`,
+    dominantZone,
+    dominantPct: 0.83,
+    sourceCount: 99, // deliberately not the tally: the alert counts voting sources
+    firstPublished,
+    updatedAt,
+    votingZoneCounts: counts,
+    recallMatchedZones: [],
+  };
+}
+
 function silentRow(
   id: string,
   firstPublished: string,
@@ -105,6 +131,7 @@ function health(degraded: Partial<Record<"iktidar" | "bagimsiz" | "muhalefet", b
 beforeEach(() => {
   state.blindspotCalls = [];
   state.bundles = [];
+  state.more = [];
   state.silentRows = [];
   state.silentError = null;
   captured.states.length = 0;
@@ -325,12 +352,13 @@ describe("getAlertItems", () => {
     expect(items.map((i) => i.clusterId)).toEqual(["s-top"]);
   });
 
-  it("caps blindspots at 30 like /blindspots", async () => {
+  it("has no separate blindspot cap: 40 card bundles all come back (only `limit` caps the merged list)", async () => {
     state.bundles = Array.from({ length: 40 }, (_, i) =>
       bundle(`b${i}`, at(NOW, 40 * H), at(NOW, 4 * H)),
     );
     const items = await itemsOf({ sinceIso: SINCE, limit: 100, health: null, nowMs: NOW });
-    expect(items).toHaveLength(30);
+    expect(items).toHaveLength(40);
+    expect(items.every((i) => i.type === "blindspot")).toBe(true);
   });
 
   it("throws when the silent query errors (the route turns it into a 500)", async () => {
@@ -343,6 +371,194 @@ describe("getAlertItems", () => {
       getAlertItems({ sinceIso: "not-a-date", limit: 5, health: null, nowMs: NOW }),
     ).rejects.toThrow(/sinceIso/);
     expect(captured.states).toHaveLength(0);
+  });
+});
+
+describe("getAlertItems blindspots beyond the 30 cards (h120-methodology-2)", () => {
+  const fp = () => at(NOW, 40 * H);
+  const upd = () => at(NOW, 4 * H);
+
+  it("(a) 30 card bundles plus 14 compact rows, all inside the window, give 44 blindspot items at limit 100", async () => {
+    state.bundles = Array.from({ length: 30 }, (_, i) => bundle(`b${i}`, fp(), upd()));
+    state.more = Array.from({ length: 14 }, (_, i) => moreRow(`m${i}`, fp(), upd()));
+    const items = await itemsOf({ sinceIso: SINCE, limit: 100, health: null, nowMs: NOW });
+    expect(items).toHaveLength(44);
+    expect(items.every((i) => i.type === "blindspot")).toBe(true);
+    expect(new Set(items.map((i) => i.clusterId)).size).toBe(44);
+    expect(items.filter((i) => i.clusterId.startsWith("m"))).toHaveLength(14);
+  });
+
+  it("(b) a compact row qualifying inside the window gets alertAt = first_published + 24 h while its updated_at is older", async () => {
+    const fpMs = NOW - 24.5 * H;
+    state.more = [moreRow("m-new", new Date(fpMs).toISOString(), at(NOW, 24.4 * H))];
+    const items = await itemsOf({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
+    expect(items.map((i) => i.clusterId)).toEqual(["m-new"]);
+    expect(items[0]!.alertAt).toBe(new Date(fpMs + DELAY_MS).toISOString());
+    // The record still reports the cluster's own timestamps.
+    expect(items[0]!.firstPublished).toBe(new Date(fpMs).toISOString());
+    expect(items[0]!.updatedAt).toBe(at(NOW, 24.4 * H));
+  });
+
+  it("(b) a compact row updated inside the window whose first_published + 24 h lies after it takes the later moment", async () => {
+    // first_published + 24 h is one hour AFTER now; updated_at (1 h ago) is inside the window.
+    const fpMs = NOW - 23 * H;
+    state.more = [moreRow("m-later", new Date(fpMs).toISOString(), at(NOW, 1 * H))];
+    const items = await itemsOf({ sinceIso: at(NOW, 2 * H), limit: 50, health: null, nowMs: NOW });
+    expect(items).toHaveLength(1);
+    expect(items[0]!.alertAt).toBe(new Date(fpMs + 24 * H).toISOString());
+  });
+
+  it("(b) a compact row updated after it qualified is included with alertAt = updated_at", async () => {
+    const u = at(NOW, 10 * MIN);
+    state.more = [moreRow("m-upd", at(NOW, 40 * H), u)];
+    const items = await itemsOf({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
+    expect(items).toHaveLength(1);
+    expect(items[0]!.alertAt).toBe(u);
+  });
+
+  it("(c) a compact row whose alertAt is older than since is skipped, one inside the window is kept", async () => {
+    state.more = [
+      moreRow("m-old", at(NOW, 30 * H), at(NOW, 29 * H)),
+      moreRow("m-in", at(NOW, 30 * H), at(NOW, 20 * MIN)),
+    ];
+    const items = await itemsOf({ sinceIso: at(NOW, 1 * H), limit: 50, health: null, nowMs: NOW });
+    expect(items.map((i) => i.clusterId)).toEqual(["m-in"]);
+  });
+
+  it("keeps the boundary for a compact row: alertAt exactly equal to since is included", async () => {
+    const fpMs = NOW - 30 * H;
+    state.more = [moreRow("m-edge", new Date(fpMs).toISOString(), at(NOW, 29 * H))];
+    const since = new Date(fpMs + DELAY_MS).toISOString();
+    const items = await itemsOf({ sinceIso: since, limit: 50, health: null, nowMs: NOW });
+    expect(items.map((i) => i.clusterId)).toEqual(["m-edge"]);
+  });
+
+  it("(d) a compact row carries its dominant zone, silent zones, voting source count and zone counts from votingZoneCounts", async () => {
+    state.more = [
+      moreRow("m-ik", fp(), upd(), { iktidar: 8, bagimsiz: 1, muhalefet: 0 }, "iktidar"),
+      moreRow("m-mu", fp(), at(NOW, 5 * H), { iktidar: 0, bagimsiz: 0, muhalefet: 6 }, "muhalefet"),
+      moreRow("m-bg", fp(), at(NOW, 6 * H), { iktidar: 0, bagimsiz: 5, muhalefet: 1 }, "bagimsiz"),
+    ];
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    const byId = new Map(items.map((i) => [i.clusterId, i]));
+    expect(byId.get("m-ik")).toMatchObject({
+      type: "blindspot",
+      title: "kompakt m-ik",
+      dominantZone: "iktidar",
+      sourceCount: 9, // 8 + 1 + 0, not the row's own sourceCount (99)
+      zoneCounts: { iktidar: 8, bagimsiz: 1, muhalefet: 0 },
+      silentZones: ["muhalefet"],
+    });
+    expect(byId.get("m-mu")).toMatchObject({
+      dominantZone: "muhalefet",
+      sourceCount: 6,
+      zoneCounts: { iktidar: 0, bagimsiz: 0, muhalefet: 6 },
+      silentZones: ["iktidar", "bagimsiz"],
+    });
+    expect(byId.get("m-bg")).toMatchObject({
+      dominantZone: "bagimsiz",
+      sourceCount: 6,
+      silentZones: ["iktidar"],
+    });
+  });
+
+  it("a compact row's zoneCounts is a copy, not the cached row's own object", async () => {
+    const row = moreRow("m-copy", fp(), upd());
+    state.more = [row];
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(items[0]!.zoneCounts).toEqual(row.votingZoneCounts);
+    expect(items[0]!.zoneCounts).not.toBe(row.votingZoneCounts);
+  });
+
+  it("(e) limit 10 returns the 10 newest by alertAt across cards, compact rows and silent clusters", async () => {
+    // Every updated_at is later than its first_published + delay, so alertAt = updated_at.
+    const ago = (n: number) => at(NOW, n * H);
+    state.bundles = [bundle("b-1", ago(60), ago(30)), bundle("b-2", ago(60), ago(8))];
+    state.more = [
+      moreRow("m-1", ago(60), ago(25)),
+      moreRow("m-2", ago(60), ago(3)),
+      moreRow("m-3", ago(60), ago(1)),
+    ];
+    state.silentRows = [
+      silentRow("s-1", ago(40), ago(20)),
+      silentRow("s-2", ago(40), ago(7)),
+      silentRow("s-3", ago(40), ago(2)),
+    ];
+    const ten = await itemsOf({ sinceIso: ago(100), limit: 10, health: null, nowMs: NOW });
+    // 8 candidates only: all come back, newest alertAt first (1, 2, 3, 7, 8, 20, 25, 30 h ago).
+    expect(ten.map((i) => i.clusterId)).toEqual(["m-3", "s-3", "m-2", "s-2", "b-2", "s-1", "m-1", "b-1"]);
+
+    // 13 candidates, limit 10: the three OLDEST alertAt (42, 43, 44 h ago) fall off, whatever
+    // their type. first_published 100 h ago keeps their alertAt on updated_at, not on the delay.
+    state.bundles = [
+      ...state.bundles,
+      bundle("b-3", ago(100), ago(40)),
+      bundle("b-4", ago(100), ago(41)),
+    ];
+    state.more = [...state.more, moreRow("m-4", ago(100), ago(42))];
+    state.silentRows = [...state.silentRows, silentRow("s-4", ago(80), ago(43)), silentRow("s-5", ago(80), ago(44))];
+    const capped = await itemsOf({ sinceIso: ago(100), limit: 10, health: null, nowMs: NOW });
+    expect(capped).toHaveLength(10);
+    expect(capped.map((i) => i.clusterId)).toEqual(["m-3", "s-3", "m-2", "s-2", "b-2", "s-1", "m-1", "b-1", "b-3", "b-4"]);
+  });
+
+  it("breaks an alertAt tie between a card and a compact row by clusterId ascending", async () => {
+    state.bundles = [bundle("b-z", fp(), upd())];
+    state.more = [moreRow("m-a", fp(), upd()), moreRow("a-first", fp(), upd())];
+    const items = await itemsOf({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW });
+    expect(items.map((i) => i.clusterId)).toEqual(["a-first", "b-z", "m-a"]);
+  });
+
+  it("lists a claim once if it ever sits in both bundles and more (the card wins)", async () => {
+    state.bundles = [bundle("dup", fp(), upd())];
+    state.more = [moreRow("dup", fp(), upd(), { iktidar: 9, bagimsiz: 0, muhalefet: 0 })];
+    const items = await itemsOf({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW });
+    expect(items).toHaveLength(1);
+    // The card's tally (5 / 1 / 0), not the row's (9 / 0 / 0).
+    expect(items[0]!.sourceCount).toBe(6);
+  });
+
+  it("webhook dedupe: a claim has the same alert id whether it is a card or a compact row, so a promotion or demotion never re-delivers", async () => {
+    const f = fp();
+    const u = upd();
+    state.bundles = [bundle("c1", f, u)];
+    const asCard = (await itemsOf({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW }))[0]!;
+    state.bundles = [];
+    state.more = [moreRow("c1", f, u)];
+    const asRow = (await itemsOf({ sinceIso: SINCE, limit: 10, health: null, nowMs: NOW }))[0]!;
+    expect(toV1AlertRecord(asRow).id).toBe("blindspot:c1");
+    expect(toV1AlertRecord(asRow).id).toBe(toV1AlertRecord(asCard).id);
+    // And the same alertAt, so the since window sees it in the same polls.
+    expect(asRow.alertAt).toBe(asCard.alertAt);
+  });
+
+  it("a compact row cached before updatedAt existed falls back to first_published + 24 h instead of throwing", async () => {
+    const fpMs = NOW - 30 * H;
+    const legacy = moreRow("m-legacy", new Date(fpMs).toISOString(), "x") as Record<string, unknown>;
+    delete legacy.updatedAt;
+    state.more = [legacy];
+    const items = await itemsOf({ sinceIso: at(NOW, 12 * H), limit: 50, health: null, nowMs: NOW });
+    expect(items).toHaveLength(1);
+    expect(items[0]!.alertAt).toBe(new Date(fpMs + DELAY_MS).toISOString());
+  });
+
+  it("(g) a compact row with both timestamps unparsable is dropped, never thrown on", async () => {
+    state.more = [moreRow("m-bad", "nope", "garbage")];
+    expect(await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW })).toEqual([]);
+  });
+
+  it("an empty title falls back to an empty string like a card", async () => {
+    state.more = [{ ...moreRow("m-nt", fp(), upd()), title: "   " }];
+    const items = await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(items[0]!.title).toBe("");
+  });
+
+  it("one_zone_silent stays disjoint: its query still excludes blindspot claims and its limit is unchanged", async () => {
+    state.more = [moreRow("m1", fp(), upd())];
+    await itemsOf({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(captured.states).toHaveLength(1);
+    expect(captured.states[0]!.eq).toEqual(expect.arrayContaining([{ col: "is_blindspot", val: false }]));
+    expect(captured.states[0]!.limit).toBe(1000);
   });
 });
 
@@ -383,10 +599,11 @@ describe("getAlertItems silent candidate cap (h103-apiv1-1)", () => {
     expect(Array.isArray(res.items)).toBe(true);
   });
 
-  it("(b) the blindspot cap of 30 is not part of truncated", async () => {
-    state.bundles = Array.from({ length: 40 }, (_, i) => bundle(`b${i}`, at(NOW, 40 * H), at(NOW, 4 * H)));
+  it("(b) truncated reflects the silent pull only, however many blindspots (cards and rows) are listed", async () => {
+    state.bundles = Array.from({ length: 30 }, (_, i) => bundle(`b${i}`, at(NOW, 40 * H), at(NOW, 4 * H)));
+    state.more = Array.from({ length: 14 }, (_, i) => moreRow(`m${i}`, at(NOW, 40 * H), at(NOW, 4 * H)));
     const res = await getAlertItems({ sinceIso: SINCE, limit: 100, health: null, nowMs: NOW });
-    expect(res.items).toHaveLength(30);
+    expect(res.items).toHaveLength(44);
     expect(res.truncated).toBe(false);
   });
 

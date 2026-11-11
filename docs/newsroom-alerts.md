@@ -21,7 +21,7 @@ Public contract: `docs/api.md` (section `GET /api/v1/alerts/blindspots`), `/geli
 
 ## Rules
 
-- **blindspot**: `getBlindspots()` as is (recall veto, live contract of at least 5 voting sources and 80% in one zone, 24h delay, feed-health suppression), capped at 30, kept when `cluster.updated_at >= since`. Counts come from the cluster's `bias_distribution` tally.
+- **blindspot**: every public `/blindspots` claim from `getBlindspots()`, both the cards (`bundles`, at most 30) and the compact rows (`more`). Rules: recall veto, live contract of at least 5 voting sources and 80% in one zone, 24h delay, feed-health suppression. No separate blindspot cap; only `limit` cuts the merged list. Kept when `alert_at >= since`, where `alert_at = max(updated_at, first_published + 24h)` (`alertAtOf`). A card's counts come from the cluster's `bias_distribution` tally and a row's from its live `votingZoneCounts`. The alert id is `blindspot:<cluster uuid>` either way, so a claim moving between card and row is not delivered twice.
 - **one_zone_silent**: one lean query (below) then `oneZoneSilentOf`: voting total at least `BLINDSPOT.minSources` (5) and EXACTLY one zone at zero. `SILENT_MIN_AGE_H = 6`. Dropped when that zone's feeds are degraded; with health unknown the pull feed fails open like the site, the push cron fails closed.
 - "Silent" always means "Tayf could not match a story from that zone". Copy never says a zone "did not write" and never uses accusatory wording (a test pins it).
 
@@ -30,7 +30,7 @@ Public contract: `docs/api.md` (section `GET /api/v1/alerts/blindspots`), `/geli
 1. Enabled webhooks on non-revoked keys (max 20; more is logged). None: `{skipped:'no webhooks'}` before any other query.
 2. Health unknown: `{skipped:'feed health unknown'}` (fail closed).
 3. Blindspot rows are re-read fresh; only `is_blindspot` true, veto false, suspect false, checked_at set and not archived are pushed.
-4. Enqueue per webhook, only items with `updated_at >= webhook.created_at`, via `upsert(..., {onConflict:'key_id,alert_id', ignoreDuplicates:true})`. The payload is stored once, so every retry sends identical bytes and the same `X-Tayf-Delivery`.
+4. Enqueue per webhook, only items with `alert_at >= webhook.created_at`, via `upsert(..., {onConflict:'key_id,alert_id', ignoreDuplicates:true})`. The payload is stored once, so every retry sends identical bytes and the same `X-Tayf-Delivery`.
 5. `api_webhook_claim(p_limit := 20)`, deliver with concurrency 4 and a 5 s timeout, fresh timestamp and signature per attempt.
 6. Success: `delivered`, streak reset. Retryable failure: `pending` with backoff of 1, 5, 15, 60 minutes, `failed` at 5 attempts. A row reclaimed as stale (worker died before recording an outcome) has its `attempts` bumped by each claim; the cron fails any claimed row whose `attempts` exceeds `MAX_ATTEMPTS` (`last_error = 'attempts_exceeded'`) without another POST, so no row can loop forever. The guard is code-side; no migration. Any failure bumps `fail_streak`; the 20th consecutive one sets `enabled=false, disabled_reason='too_many_failures'`.
 

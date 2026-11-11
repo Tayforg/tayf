@@ -38,6 +38,7 @@ import {
 } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
 import {
+  auctionStubSettledClose,
   chartBaseline,
   companyMetaLine,
   intradayCutShort,
@@ -50,6 +51,7 @@ import {
   rvolLabel,
   rvolParts,
   rvolPhrase,
+  sparklineCloses,
 } from "@/lib/finance/session";
 import { isThinTicker } from "@/lib/finance/ticker-index";
 import { errorShellMetadata, sharePageMetadata } from "@/lib/seo/page-metadata";
@@ -346,6 +348,10 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // panel meta says where the data stops.
   const lastBar = intraday.bars.at(-1) ?? null;
   const cut = intradayCutShort({ lastBar, intradayDay: sessionDay, stat, nowMs });
+  // h120-finance-2: a full session's last bar is the volume-0 18:00 pre-auction stub, whose close can differ from
+  // the settled close (the chart's tag and colour contradicted the header). Once the daily bar is in, the chart is
+  // given the settled close. A cut session keeps its own override and wording; the panel meta stays tied to `cut`.
+  const auction = cut ? null : auctionStubSettledClose({ lastBar, intradayDay: sessionDay, stat, nowMs });
   const markers = sessionDay
     ? [
         ...page.articles.filter((a) => istToday(new Date(a.publishedAt).getTime()) === sessionDay).map((a) => ({ ts: a.publishedAt, label: a.title, lang: sourceLang(a.source) })),
@@ -419,7 +425,8 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                   </div>
                 ) : null}
               </div>
-              <Sparkline values={quote.closes} className={knownMove ? moveClass(quote.changePct) : "text-muted-foreground"} width={140} height={40} />
+              {/* h120-finance-1: Yahoo leaves the D-1 settled close out of the array during a session; put it back. */}
+              <Sparkline values={sparklineCloses(quote, statsRead.failed ? null : stat)} className={knownMove ? moveClass(quote.changePct) : "text-muted-foreground"} width={140} height={40} />
             </>
           ) : (
             <div className="text-right">
@@ -446,7 +453,8 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           <IntradayChart
             bars={intraday.bars}
             markers={markers}
-            closeOverride={cut && stat ? stat.lastClose : null}
+            closeOverride={cut && stat ? stat.lastClose : auction}
+            overrideReason={cut ? "cut" : "auction"}
             prevClose={chartBaseline({
               stat,
               intradayDay: intraday.day,

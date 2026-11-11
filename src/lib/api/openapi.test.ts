@@ -134,4 +134,18 @@ describe("buildOpenApiDocument", () => {
     expect(own?.properties?.truncated?.type).toBe("boolean");
     expect(own?.properties?.truncated?.description).toMatch(/1000/);
   });
+
+  it("the truncated description no longer mentions a 30-blindspot cap, which is gone (h120-methodology-2)", () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    const schema = doc.components.schemas.AlertListResponse as {
+      allOf: Array<{ required?: string[]; properties?: Record<string, { description?: string }> }>;
+    };
+    const own = schema.allOf.find((part) => part.required);
+    const description = own?.properties?.truncated?.description ?? "";
+    expect(description).not.toMatch(/30/);
+    expect(description).not.toMatch(/blindspot cap/i);
+    // It still names what truncated does mean.
+    expect(description).toContain("one_zone_silent candidate pull");
+    expect(description).toMatch(/1000/);
+  });
 });
