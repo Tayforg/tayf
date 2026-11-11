@@ -7,6 +7,7 @@ import {
 } from "@/lib/bias/zone-summary";
 import { wireBadgeShort } from "@/lib/clusters/wire";
 import { cutAtWord } from "@/lib/seo/og-title";
+import { ENGLISH_ONLY_SHARE_CLAUSE } from "@/lib/sources/source-language";
 import type { BiasCategory, BiasDistribution, MediaDnaZone, SourceKind } from "@/types";
 
 // Lowercase Turkish zone labels for share text. `ZONE_META` labels
@@ -57,6 +58,16 @@ const ZONE_LABEL_LOWER: Record<MediaDnaZone, string> = {
  * toplayıcı / niş qualifier keeps its own wording ahead of it. Undefined (a cache
  * entry from before the field) or [] (a failed lookup) leaves the text exactly as
  * it was. Wording only: no count, percent or flag reads it.
+ *
+ * `languageIsolated` (h118-shares-1) is `isLanguageIsolatedCluster(...)`: every
+ * member is an English-language outlet, so no Bağımsız or Muhalefet outlet could
+ * have matched the story. The percents would then read as a zone-absence claim the
+ * cluster page does not make, so with at least one classified source the text is
+ * "3 kaynak · yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı":
+ * the count, no percent. The blindspot suffix reads the flag as one more matched
+ * zone (an isolated story was never compared, so "sadece X yazdı" is not
+ * supported either: "kümede sadece X"); the wire suffix is unchanged. Omitted or
+ * false leaves every text exactly as it was.
  */
 export function buildShareText(input: {
   articleCount: number;
@@ -66,6 +77,7 @@ export function buildShareText(input: {
   wire?: { isWireRedistribution: boolean; memberCount: number };
   sources?: readonly { kind?: SourceKind | null; bias: BiasCategory }[];
   recallMatchedZones?: readonly MediaDnaZone[];
+  languageIsolated?: boolean;
 }): string {
   const {
     articleCount,
@@ -75,6 +87,7 @@ export function buildShareText(input: {
     wire,
     sources,
     recallMatchedZones,
+    languageIsolated = false,
   } = input;
   const counts = zoneCountsOf(distribution);
   const percents = zonePercents(counts);
@@ -84,6 +97,8 @@ export function buildShareText(input: {
   let text: string;
   if (!(classified > 0)) {
     text = `${articleCount} kaynak · sınıflandırılmış kaynak yok`;
+  } else if (languageIsolated) {
+    text = `${articleCount} kaynak · ${ENGLISH_ONLY_SHARE_CLAUSE}`;
   } else {
     const pcts = [
       `%${percents.iktidar} iktidar`,
@@ -115,7 +130,7 @@ export function buildShareText(input: {
       counts,
       zone,
       sources ? nonVotingOutsideZone(sources, zone) : 0,
-      recallMatchedZones?.length ?? 0,
+      (recallMatchedZones?.length ?? 0) + (languageIsolated ? 1 : 0),
     );
     text +=
       claim === "only"

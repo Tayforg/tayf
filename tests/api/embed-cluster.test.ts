@@ -35,7 +35,8 @@ function detail(over: {
   blindspotSide?: BiasCategory | null;
   mergedInto?: string | null;
   sourceCount?: number;
-  members?: { source: { slug: string; bias: BiasCategory; kind: string } }[];
+  // `article.title` is read for the heading's lang (h118-shares-1), as in a real ClusterDetailMember.
+  members?: { source: { slug: string; bias: BiasCategory; kind: string }; article: { title: string } }[];
 } = {}) {
   return {
     cluster: {
@@ -178,14 +179,57 @@ describe("GET /embed/cluster/[id] — 200", () => {
         blindspotSide: "pro_government",
         distribution: dist({ pro_government: 6 }),
         members: [
-          { source: { slug: "sabah", bias: "pro_government", kind: "outlet" } },
-          { source: { slug: "isci-haber", bias: "opposition", kind: "niche" } },
+          { source: { slug: "sabah", bias: "pro_government", kind: "outlet" }, article: { title: "Sabah başlığı" } },
+          { source: { slug: "isci-haber", bias: "opposition", kind: "niche" }, article: { title: "İşçi Haber başlığı" } },
         ],
       }),
     );
     const body = await (await call(ID)).text();
     expect(body).toContain("Kör nokta: spektrumda sadece iktidar");
     expect(body).not.toContain("sadece iktidar yazdı");
+  });
+
+  // h118-shares-1: 92742df8 (daily-sabah, hurriyet-daily-news, trt-world) embedded as a
+  // bare <h1> over "İktidar %100 · Bağımsız %0 · Muhalefet %0 · 3 kaynak".
+  it("an all-English cluster gets a lang=en heading and the not-compared legend, a Turkish one does not (h118-shares-1)", async () => {
+    const english = "Türkiye remembers Atatürk on 88th anniversary of his death";
+    const member = (slug: string, bias: BiasCategory, title: string) => ({
+      source: { slug, bias, kind: "outlet" },
+      article: { title },
+    });
+    getClusterDetailMock.mockResolvedValue(
+      detail({
+        title: english,
+        sourceCount: 3,
+        distribution: dist({ pro_government: 2, gov_leaning: 1 }),
+        members: [
+          member("daily-sabah", "pro_government", "Other headline"),
+          member("hurriyet-daily-news", "gov_leaning", "Another headline"),
+          member("trt-world", "pro_government", english),
+        ],
+      }),
+    );
+    const body = await (await call(ID)).text();
+    expect(body).toContain(`<h1 lang="en">${english}</h1>`);
+    expect(body).toContain("Yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı · 3 kaynak");
+    expect(body).toContain('aria-label="Yalnızca İngilizce kaynaklar; Türkçe haberlerle karşılaştırılmadı"');
+    expect(body).not.toContain("Bağımsız %0");
+
+    getClusterDetailMock.mockResolvedValue(
+      detail({
+        sourceCount: 3,
+        distribution: dist({ pro_government: 3 }),
+        members: [
+          member("sabah", "pro_government", "Sabah başlığı"),
+          member("yeni-safak", "pro_government", "Yeni Şafak başlığı"),
+          member("a-haber", "pro_government", "A Haber başlığı"),
+        ],
+      }),
+    );
+    const turkish = await (await call(ID)).text();
+    expect(turkish).toContain("<h1>Merkez Bankası faizi sabit tuttu</h1>");
+    expect(turkish).toContain("İktidar %100 · Bağımsız %0 · Muhalefet %0 · 3 kaynak");
+    expect(turkish).not.toContain("İngilizce");
   });
 
   it("links out to the cluster in a new tab with rel=noopener", async () => {

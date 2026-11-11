@@ -4,6 +4,8 @@ import { attemptCached } from "@/lib/cache-resilience";
 import { createReaderClient } from "@/lib/supabase/server";
 
 import { clusterDisplayTitle, type HeadlineMember } from "./display-headline";
+import { fetchLanguageIsolatedIds } from "./language-isolation-read";
+import { isExtractiveModelId } from "./neutral-title";
 
 // Fetcher for /timeline — extracted out of the page component so the unit
 // tests can exercise it without rendering JSX (mirrors blindspots-query.ts).
@@ -31,10 +33,26 @@ export interface ClusterRow {
   title: string;
   article_count: number;
   first_published: string;
+  /**
+   * 'en' when every member of the cluster is an English-language outlet
+   * (isLanguageIsolatedCluster; h118-english-1) and the row's headline is one
+   * member's own English title, so it is an English article title inside
+   * <html lang="tr"> (WCAG 3.1.2). A headline the LLM rewrote is Turkish and
+   * gets no lang. The key is omitted for every other row, so a Turkish row
+   * serialises exactly as before.
+   */
+  lang?: "en";
 }
 
-/** A `clusters` row as the row read returns it, before the display title is attached. */
-type StoredClusterRow = Omit<ClusterRow, "title">;
+/**
+ * A `clusters` row as the row read returns it, before the display title and lang
+ * are attached. `title_neutral_model` is read only to decide `lang` (see
+ * fetchRecentClusters) and is dropped before the row is returned, so it is not
+ * part of the public ClusterRow.
+ */
+type StoredClusterRow = Omit<ClusterRow, "title" | "lang"> & {
+  title_neutral_model: string | null;
+};
 
 export interface RecentClusters {
   rows: ClusterRow[];
@@ -87,7 +105,7 @@ const MEMBER_READ_MAX_ROWS = 1000;
 
 // The stored column is the cron's output, so a row without one (null, or
 // whitespace only) is the only kind that needs its members read.
-function lacksStoredNeutral(row: StoredClusterRow): boolean {
+function lacksStoredNeutral(row: Pick<StoredClusterRow, "title_tr_neutral">): boolean {
   const neutral: unknown = row.title_tr_neutral;
   return typeof neutral !== "string" || neutral.trim().length === 0;
 }
@@ -153,7 +171,9 @@ async function fetchRecentClusters(): Promise<RecentClusters> {
   const [{ data, error }, count] = await Promise.all([
     supabase
       .from("clusters")
-      .select("id, title_tr, title_tr_neutral, article_count, first_published")
+      .select(
+        "id, title_tr, title_tr_neutral, title_neutral_model, article_count, first_published",
+      )
       // Archived (migration 037) clusters are excluded from every reader-facing
       // surface; the detail page still resolves them so shared links never 404.
       .eq("is_archived", false)
@@ -180,14 +200,32 @@ async function fetchRecentClusters(): Promise<RecentClusters> {
   // member read over just the rows that need it (normally 0-5), inside this
   // cache scope: one small extra read per cache fill, none when every row
   // already has a stored title. Nothing is written.
+  //
+  // h118-english-1: the rows whose every member is an English outlet carry
+  // lang: 'en' (WCAG 3.1.2), unless the title is an LLM rewrite: the headline cron
+  // in LLM mode writes a Turkish neutral title, which must not be marked English.
+  // The isolation read is independent of the title read, so the two run together;
+  // both are nicety reads that never throw, and an empty set / no members is
+  // today's output.
   const missing = stored.filter(lacksStoredNeutral).map((r) => r.id);
-  const members =
+  const [members, isolated] = await Promise.all([
     missing.length > 0
-      ? await fetchMemberTitles(supabase, missing)
-      : new Map<string, HeadlineMember[]>();
-  const rows: ClusterRow[] = stored.map((r) => ({
+      ? fetchMemberTitles(supabase, missing)
+      : Promise.resolve(new Map<string, HeadlineMember[]>()),
+    fetchLanguageIsolatedIds(supabase, stored),
+  ]);
+  // The title is English only when it is a member's own title: no stored neutral
+  // title yet (the first pick over the members, extractive), or a stored one from
+  // an extractive model id. A stored neutral title from any other model is the
+  // Turkish LLM rewrite. This is the cluster page's title_method rule
+  // (cluster-detail-query.ts); title_neutral_model is read here and not returned.
+  const rows: ClusterRow[] = stored.map(({ title_neutral_model, ...r }) => ({
     ...r,
     title: clusterDisplayTitle(r, members.get(r.id) ?? []).title,
+    ...(isolated.has(r.id) &&
+    (lacksStoredNeutral(r) || isExtractiveModelId(title_neutral_model))
+      ? { lang: "en" as const }
+      : {}),
   }));
 
   // The two reads are not one snapshot: a cluster archived between them could

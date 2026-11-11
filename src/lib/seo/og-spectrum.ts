@@ -1,3 +1,4 @@
+import { ENGLISH_ONLY_SPECTRUM_LINE } from "@/lib/sources/source-language";
 import type { MediaDnaZone } from "@/types";
 
 // What the cluster OG card draws in the spectrum slot (h64-ogcards-3).
@@ -37,11 +38,22 @@ export type OgSpectrumState =
  * the caller passes 0 otherwise, so "yalnızca toplayıcı / niş kaynaklar yazdı"
  * is never printed over a story a voting source also carried. A count that is
  * not above 0 (0, negative, NaN) reads as "none".
+ *
+ * `languageIsolated` (h118-shares-1) is `isLanguageIsolatedCluster(...)`: every
+ * member is an English-language outlet. Such a story formed among English
+ * articles only, so "Bağımsız %0 · Muhalefet %0" would be a zone-absence claim
+ * the cluster page and the Manşet Kartı deliberately do not make. The slot then
+ * prints ENGLISH_ONLY_SPECTRUM_LINE, ahead of every other branch (the tallies
+ * still exist; the card just does not draw them as an absence). It goes through
+ * the same `empty` box, so the card's geometry does not move. Defaults to false:
+ * every other cluster is decided exactly as before.
  */
 export function ogSpectrumState(
   zones: Record<MediaDnaZone, number>,
   nonVotingSourceCount: number,
+  languageIsolated = false,
 ): OgSpectrumState {
+  if (languageIsolated) return { kind: "empty", line: ENGLISH_ONLY_SPECTRUM_LINE };
   const total = zones.iktidar + zones.bagimsiz + zones.muhalefet;
   if (total > 0) return { kind: "tiles" };
   return {

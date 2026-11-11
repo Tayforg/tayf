@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
 
 import type { ClusterDetail, ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
+import { ENGLISH_ONLY_SPECTRUM_LINE } from "@/lib/sources/source-language";
 import type { BiasCategory, SourceKind } from "@/types";
 
 // Mocked BEFORE importing the module under test so the dynamic
@@ -1187,6 +1188,292 @@ describe("cluster opengraph-image", () => {
       const text = collectText(captured).join("");
       expect(text).toContain(NON_VOTING_LINE);
       expect(text).not.toContain("%0 · 0");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h118-shares-1: an all-English cluster (92742df8: daily-sabah, hurriyet-daily-news,
+// trt-world; pro_government 2 / gov_leaning 1) drew "İktidar %100 · 3 / Bağımsız %0
+// · 0 / Muhalefet %0 · 0" on its OG / Twitter card, the zone-absence claim its own
+// page and Manşet Kartı deliberately do not make. The card now prints the English-only
+// line in the spectrum slot, and its ribbon never says "yazdı".
+// ---------------------------------------------------------------------------
+describe("cluster opengraph-image for an all-English cluster (h118-shares-1)", () => {
+  const ZERO_DIST = {
+    pro_government: 0,
+    gov_leaning: 0,
+    state_media: 0,
+    center: 0,
+    opposition_leaning: 0,
+    opposition: 0,
+    nationalist: 0,
+    islamist_conservative: 0,
+    pro_kurdish: 0,
+    international: 0,
+  };
+  const NON_VOTING_LINE =
+    "Bu kümede sınıflandırılan kaynak yok — yalnızca toplayıcı / niş kaynaklar yazdı";
+
+  const member = (slug: string, kind: SourceKind, bias: BiasCategory): ClusterDetailMember => ({
+    source: {
+      id: slug,
+      name: slug,
+      slug,
+      url: `https://${slug}.example`,
+      rss_url: `https://${slug}.example/rss`,
+      bias,
+      logo_url: null,
+      active: true,
+      kind,
+      trustee_since: null,
+      trustee_note: null,
+    },
+    article: {
+      id: `${slug}-1`,
+      title: `${slug} headline`,
+      url: `https://${slug}.example/haber/1`,
+      published_at: "2026-11-11T05:00:00Z",
+      image_url: null,
+      content_hash: `hash-${slug}`,
+    },
+  });
+
+  // Mirrors 92742df8 and 2dab7e87.
+  const ISO = [
+    member("daily-sabah", "outlet", "pro_government"),
+    member("hurriyet-daily-news", "outlet", "gov_leaning"),
+    member("trt-world", "outlet", "pro_government"),
+  ];
+  const ISO2 = [member("a-news", "outlet", "pro_government"), member("trt-world", "outlet", "pro_government")];
+  const TURKISH = [
+    member("sabah", "outlet", "pro_government"),
+    member("yeni-safak", "outlet", "pro_government"),
+    member("a-haber", "outlet", "pro_government"),
+  ];
+  const MIXED = [member("a-haber", "outlet", "pro_government"), member("daily-sabah", "outlet", "pro_government")];
+  const EN_TITLE = "Türkiye commemorates Atatürk on 88th anniversary of death";
+
+  type Styled = { props?: { style?: Record<string, unknown>; children?: unknown } };
+  function findElements(node: unknown, pred: (el: Styled) => boolean, out: Styled[] = []): Styled[] {
+    if (Array.isArray(node)) {
+      for (const child of node) findElements(child, pred, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as Styled;
+      if (pred(el)) out.push(el);
+      if (el.props?.children !== undefined) findElements(el.props.children, pred, out);
+    }
+    return out;
+  }
+  const isBar = (el: Styled) => el.props?.style?.height === 18 && el.props?.style?.overflow === "hidden";
+  const isTile = (el: Styled) =>
+    el.props?.style?.flex === 1 &&
+    typeof el.props?.style?.border === "string" &&
+    el.props.style.borderRadius === 12;
+
+  async function render(detail: ClusterDetail): Promise<{ text: string; tree: ReactElement | null }> {
+    captured = null;
+    getClusterDetailOrThrow.mockResolvedValueOnce(detail);
+    const { default: Image } = await import("./opengraph-image");
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+    return { text: collectText(captured).join(""), tree: captured };
+  }
+  const plain = { is_blindspot: false, blindspot_side: null } as const;
+  const isoDetail = (over: Partial<ClusterDetail["cluster"]> = {}, members = ISO) =>
+    mkDetail(
+      {
+        ...plain,
+        title_tr: EN_TITLE,
+        title_method: "extractive",
+        article_count: members.length,
+        bias_distribution: { ...ZERO_DIST, pro_government: 2, gov_leaning: members.length === 3 ? 1 : 0 },
+        ...over,
+      },
+      undefined,
+      members,
+    );
+
+  it("92742df8: prints the English-only line, with no tile, no bar and no '%0 · 0'", async () => {
+    const { text, tree } = await render(isoDetail());
+
+    expect(text).toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    expect(text).not.toContain("%0 · 0");
+    expect(text).not.toContain("%100");
+    for (const label of ["İktidar", "Bağımsız", "Muhalefet"]) expect(text).not.toContain(label);
+    expect(findElements(tree, isBar)).toHaveLength(0);
+    expect(findElements(tree, isTile)).toHaveLength(0);
+  });
+
+  it("keeps the pill, the headline and the methodology row exactly as they were", async () => {
+    const { text } = await render(isoDetail());
+
+    expect(text).toContain("3 kaynak");
+    expect(text).toContain(EN_TITLE);
+    expect(text).toContain("tayfhaber.com/metodoloji");
+    expect(text).not.toContain("KÖR NOKTA");
+  });
+
+  it("2dab7e87: a-news + trt-world prints the same line", async () => {
+    const { text } = await render(isoDetail({}, ISO2));
+
+    expect(text).toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    expect(text).toContain("2 kaynak");
+    expect(text).not.toContain("%0 · 0");
+  });
+
+  it("draws ONE box with the line as its single text node, the tile's own box tokens and 22 px size", async () => {
+    const iso = await render(isoDetail());
+    const boxes = findElements(iso.tree, (el) => el.props?.children === ENGLISH_ONLY_SPECTRUM_LINE);
+    expect(boxes).toHaveLength(1);
+    expect(typeof boxes[0]!.props!.children).toBe("string");
+    const box = boxes[0]!.props!.style!;
+
+    const filled = await render(
+      mkDetail({ ...plain, article_count: 4, bias_distribution: { ...ZERO_DIST, pro_government: 4 } }, undefined, TURKISH),
+    );
+    const tile = findElements(filled.tree, isTile)[0]!.props!.style!;
+    expect(box.background).toBe(tile.background);
+    expect(box.border).toBe(tile.border);
+    expect(box.borderRadius).toBe(tile.borderRadius);
+    expect(box.fontSize).toBe(22);
+  });
+
+  it("the English line wins over the toplayıcı / niş line when nothing voted (mfa-turkey is niche)", async () => {
+    const { text } = await render(
+      mkDetail(
+        { ...plain, article_count: 2, bias_distribution: ZERO_DIST },
+        undefined,
+        [member("mfa-turkey", "niche", "center"), member("a-news", "niche", "center")],
+      ),
+    );
+
+    expect(text).toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    expect(text).not.toContain(NON_VOTING_LINE);
+  });
+
+  it("serves the same card through the twitter-image re-export", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(isoDetail());
+    const tw = await import("./twitter-image");
+
+    await tw.default({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    expect(text).not.toContain("%0 · 0");
+  });
+
+  describe("the blindspot ribbon", () => {
+    const flagged = (members = ISO) =>
+      isoDetail(
+        { is_blindspot: true, blindspot_side: "pro_government", bias_distribution: { ...ZERO_DIST, pro_government: 3 } },
+        members,
+      );
+
+    it("reads 'kümede sadece İktidar' for a flagged isolated cluster, never 'sadece İktidar yazdı'", async () => {
+      const { text } = await render(flagged());
+
+      expect(text).toContain("KÖR NOKTA — kümede sadece İktidar");
+      // (the English-only line itself says "kaynaklar yazdı", so the claim is matched whole)
+      expect(text).not.toContain("sadece İktidar yazdı");
+      expect(text).toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    });
+
+    it("keeps 'spektrumda sadece' over 'kümede sadece' when a toplayıcı / niş source sits in another zone", async () => {
+      const { text } = await render(
+        isoDetail(
+          { is_blindspot: true, blindspot_side: "pro_government", bias_distribution: { ...ZERO_DIST, pro_government: 2 } },
+          [...ISO2, member("mfa-turkey", "niche", "opposition")],
+        ),
+      );
+
+      expect(text).toContain("KÖR NOKTA — spektrumda sadece İktidar");
+    });
+
+    it("a weighted flag stays '%N Zone'", async () => {
+      const { text } = await render(
+        isoDetail(
+          { is_blindspot: true, blindspot_side: "pro_government", bias_distribution: { ...ZERO_DIST, pro_government: 4, opposition: 1 } },
+          ISO2,
+        ),
+      );
+
+      expect(text).toContain("KÖR NOKTA — %80 İktidar");
+    });
+  });
+
+  describe("controls render exactly as before", () => {
+    it("a Turkish 3-outlet 100% İktidar cluster keeps the bar and the three tiles", async () => {
+      const { text, tree } = await render(
+        mkDetail({ ...plain, article_count: 3, bias_distribution: { ...ZERO_DIST, pro_government: 3 } }, undefined, TURKISH),
+      );
+
+      expect(text).toContain("%100 · 3");
+      expect(text).toContain("%0 · 0");
+      for (const label of ["İktidar", "Bağımsız", "Muhalefet"]) expect(text).toContain(label);
+      expect(text).not.toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+      expect(findElements(tree, isBar)).toHaveLength(1);
+      expect(findElements(tree, isTile)).toHaveLength(3);
+    });
+
+    it("a mixed a-haber + daily-sabah cluster keeps the tiles", async () => {
+      const { text, tree } = await render(
+        mkDetail({ ...plain, article_count: 2, bias_distribution: { ...ZERO_DIST, pro_government: 2 } }, undefined, MIXED),
+      );
+
+      expect(text).toContain("%100 · 2");
+      expect(text).not.toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+      expect(findElements(tree, isTile)).toHaveLength(3);
+    });
+
+    it("a cluster with no members keeps the tiles", async () => {
+      const { text } = await render(
+        mkDetail({ ...plain, article_count: 2, bias_distribution: { ...ZERO_DIST, pro_government: 2 } }),
+      );
+
+      expect(text).toContain("%100 · 2");
+      expect(text).not.toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    });
+
+    it("an all-zero non-voting cluster keeps its h64-ogcards-3 line", async () => {
+      const { text } = await render(
+        mkDetail(
+          { ...plain, article_count: 2, bias_distribution: ZERO_DIST },
+          undefined,
+          [member("haberler-com", "aggregator", "gov_leaning"), member("ekonomim", "niche", "center")],
+        ),
+      );
+
+      expect(text).toContain(NON_VOTING_LINE);
+      expect(text).not.toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    });
+
+    it("a recall-matched blindspot keeps the h108 'kümede sadece' ribbon over its tiles", async () => {
+      const { text } = await render({
+        ...mkDetail(
+          { is_blindspot: true, blindspot_side: "pro_government", article_count: 3, bias_distribution: { ...ZERO_DIST, pro_government: 3 } },
+          undefined,
+          TURKISH,
+        ),
+        recallMatchedZones: ["muhalefet"],
+      });
+
+      expect(text).toContain("KÖR NOKTA — kümede sadece İktidar");
+      expect(text).toContain("%100 · 3");
+      expect(text).not.toContain(ENGLISH_ONLY_SPECTRUM_LINE);
+    });
+
+    it("a plain blindspot keeps 'sadece İktidar yazdı'", async () => {
+      const { text } = await render(
+        mkDetail(
+          { is_blindspot: true, blindspot_side: "pro_government", article_count: 3, bias_distribution: { ...ZERO_DIST, pro_government: 3 } },
+          undefined,
+          TURKISH,
+        ),
+      );
+
+      expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
     });
   });
 });

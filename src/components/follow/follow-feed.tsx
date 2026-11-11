@@ -670,7 +670,10 @@ export function SectionBody({
               href={`/cluster/${item.id}`}
               className="block rounded-lg px-2 py-2 transition-colors hover:bg-muted/50"
             >
-              <span className="block font-serif text-sm font-semibold leading-snug text-foreground line-clamp-2">
+              <span
+                lang={item.lang}
+                className="block font-serif text-sm font-semibold leading-snug text-foreground line-clamp-2"
+              >
                 {item.title}
               </span>
               <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">

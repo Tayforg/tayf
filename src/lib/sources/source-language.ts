@@ -56,17 +56,27 @@
 //     "not compared with Turkish sources" copy below, sets the NewsArticle
 //     inLanguage to 'en', and keeps the cluster off the home feed
 //     (politics-query.ts, by display name: the embed has no slug).
+//   - h118-shares-1: the outbound surfaces take the same predicate. The OG /
+//     Twitter card prints ENGLISH_ONLY_SPECTRUM_LINE where its tiles were
+//     (og-spectrum.ts), the share text and the rozet carry ENGLISH_ONLY_SHARE_CLAUSE
+//     (share.ts, badge-svg.ts), and the embed does both plus a lang="en" <h1> by
+//     the cluster page's own rule (embed-html.ts).
+//   - h118-english-1: the list readers that select no member sources take one
+//     bounded member read, fetchLanguageIsolatedIds
+//     (src/lib/clusters/language-isolation-read.ts; clusters of 2..12 members,
+//     count-guarded). /timeline (timeline-query.ts getRecentClusters) puts
+//     lang="en" on the headline link of a cluster whose every member is English,
+//     except for an LLM-rewritten title, which is Turkish. /api/takip gives an
+//     item lang "en" by headlineLang over its members (follow-feed.tsx puts it on
+//     the title span) and prints ENGLISH_ONLY_ZONE_LINE instead of the zone tally
+//     when isLanguageIsolatedCluster. The news sitemap (src/lib/seo/sitemaps.ts
+//     readNewsSitemapXml) leaves isolated clusters out because every entry
+//     declares <news:language>tr</news:language>; clusters-YYYY-MM.xml keeps them.
 //   - /ekonomi feed, /ekonomi/[ticker] news list and intraday chart caption
 //     (h101-a11yrecent-2): each row's headline link and source-name span, by
 //     {slug, name} (both queries carry the slug). The chart's marker captions
 //     take it through ChartMarker.lang ('en' for an English article's headline;
 //     the Turkish "KAP: ..." markers carry none).
-//
-// NOT wired: the /timeline rows (src/app/timeline/page.tsx). Its ClusterRow
-// (src/lib/clusters/timeline-query.ts) carries no member sources, so
-// clusterTextLang has nothing to look at; wiring it needs a timeline-query
-// join from clusters to their members' sources. Until then those headlines
-// keep the inherited lang="tr".
 
 /** Slugs of the registered English-language outlets (exactly six). */
 export const ENGLISH_SOURCE_SLUGS: ReadonlySet<string> = new Set([
@@ -196,6 +206,40 @@ export const ENGLISH_ONLY_EMPTY_COLUMN = "— Türkçe kaynaklarla karşılaşt�
 /** An empty zone row of an English-only cluster's Manşet Kartı. */
 export const ENGLISH_ONLY_KART_EMPTY_ZONE =
   "— karşılaştırma yok (yalnızca İngilizce kaynaklar)";
+
+// h118-shares-1: the same "not compared with Turkish sources" qualifier on the
+// outbound surfaces, which printed the zone-absence claim ("İktidar %100 ·
+// Bağımsız %0 · Muhalefet %0") for an all-English cluster while its own page and
+// Manşet Kartı did not. One wording per slot; no surface keeps a literal of its own.
+
+/**
+ * The line an all-English cluster's OG / Twitter card prints where the three zone
+ * tiles would be (src/lib/seo/og-spectrum.ts).
+ */
+export const ENGLISH_ONLY_SPECTRUM_LINE =
+  "Yalnızca İngilizce yayın yapan kaynaklar yazdı — Türkçe haberlerle karşılaştırılmadı";
+
+/**
+ * The short tag the rozet's 10 px caption can hold ("N kaynak · yalnızca
+ * İngilizce"); the head of ENGLISH_ONLY_SHARE_CLAUSE, so the two cannot drift.
+ */
+export const ENGLISH_ONLY_BADGE_TAG = "yalnızca İngilizce";
+
+/**
+ * The clause an all-English cluster's outbound text carries in place of its zone
+ * percents: the share text ("3 kaynak · <clause>"), the embed legend (first letter
+ * capitalised, tr-TR) and the rozet's title / aria-label.
+ */
+export const ENGLISH_ONLY_SHARE_CLAUSE = `${ENGLISH_ONLY_BADGE_TAG} kaynaklar, Türkçe haberlerle karşılaştırılmadı`;
+
+/**
+ * The /api/takip follow-feed zone line, shown where the zone tally would be: no
+ * Bağımsız or Muhalefet outlet could have matched a story that formed among
+ * English articles only, so "Bağımsız 0 · Muhalefet 0" would claim a silence that
+ * was never measured (h59-english-1, the cluster page's own wording). The head is
+ * the rozet tag, first letter capitalised under tr-TR (as the embed legend does).
+ */
+export const ENGLISH_ONLY_ZONE_LINE = `${ENGLISH_ONLY_BADGE_TAG.charAt(0).toLocaleUpperCase("tr-TR")}${ENGLISH_ONLY_BADGE_TAG.slice(1)} kaynaklar · Türkçe haberlerle karşılaştırılmadı`;
 
 /** Trims and collapses whitespace runs; anything that is not a string is "". */
 function normaliseTitle(title: unknown): string {

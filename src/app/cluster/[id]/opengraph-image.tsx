@@ -21,6 +21,7 @@ import {
   clampOgTitle,
 } from "@/lib/seo/og-title";
 import { partitionByVote } from "@/lib/sources/kind";
+import { isLanguageIsolatedCluster } from "@/lib/sources/source-language";
 import type { MediaDnaZone } from "@/types";
 
 // File-route OG card for /cluster/[id].
@@ -224,7 +225,14 @@ export default async function Image({ params }: ImageProps) {
     partitionByVote(members);
   const nonVotingSourceCount =
     votingMembers.length === 0 ? uniqueSources(nonVotingMembers).length : 0;
-  const spectrum = ogSpectrumState(zones, nonVotingSourceCount);
+  // h118-shares-1: every member an English-language outlet (the cluster page's own
+  // predicate, over the same members). Such a story formed among English articles
+  // only, so the tiles' "Bağımsız %0 · Muhalefet %0" would be a zone-absence claim
+  // the page and the Manşet Kartı do not make: the slot prints the English-only
+  // line in the same box instead, and the ribbon below counts the isolation as one
+  // more matched zone ("kümede sadece X", never "sadece X yazdı").
+  const languageIsolated = isLanguageIsolatedCluster(members.map((m) => m.source));
+  const spectrum = ogSpectrumState(zones, nonVotingSourceCount, languageIsolated);
 
   // Blindspot ribbon zone + share: prefer the reported `blindspot_side`; a
   // freshly-flagged row without one yet falls back to whichever zone
@@ -252,7 +260,7 @@ export default async function Image({ params }: ImageProps) {
         zones,
         ribbonZone,
         nonVotingOutsideZone(uniqueSources(members), ribbonZone),
-        detail.recallMatchedZones?.length ?? 0,
+        (detail.recallMatchedZones?.length ?? 0) + (languageIsolated ? 1 : 0),
       )
     : "weighted";
 

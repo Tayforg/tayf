@@ -17,6 +17,13 @@ import {
   normalizeKeyword,
   RAW_MAX,
 } from "@/lib/follows/follows";
+import {
+  ENGLISH_ONLY_ZONE_LINE,
+  headlineLang,
+  isLanguageIsolatedCluster,
+  sourceLang,
+} from "@/lib/sources/source-language";
+import { repairEntityResidue } from "../../../../supabase/functions/_shared/rss/entities";
 
 /**
  * GET /api/takip?q=<keyword> | ?konu=<slug> | ?gundem=<key> -- the read side of
@@ -56,6 +63,12 @@ import {
  * Caching: only the 200 is publicly cacheable (a follow's answer is the same
  * for every visitor, and both readers sit behind "use cache" anyway). Every
  * error answer is `no-store`, so a CDN can never pin a 400/429/503.
+ *
+ * Language (h118-english-1, WCAG 3.1.2): an item whose headline is an English
+ * outlet's own article title carries `lang: 'en'` (the key is absent otherwise, so
+ * a Turkish item's JSON is unchanged), and the zone line of a cluster whose every
+ * member is an English outlet says it was not compared with Turkish sources
+ * instead of printing coverage counts nobody could have earned.
  *
  * Privacy: the keyword is reader-typed input. It is never logged here (the
  * readers do not log it either) -- see tests/guards/no-pii-logging.
@@ -125,12 +138,39 @@ function mostCorroborated(bundles: readonly ClusterBundle[]): ClusterBundle[] {
     .slice(0, KEYWORD_POOL);
 }
 
+/** A title for comparing only: HTML entity residue repaired, anything else as it is. */
+function comparable(title: unknown): string {
+  return typeof title === "string" ? repairEntityResidue(title) : "";
+}
+
+/**
+ * 'en' when the item's headline is an English outlet's own article title and no
+ * Turkish outlet carries the same title: the ClusterCard / related-clusters rule
+ * (headlineLang over the members, by source id; the slug decides, the display
+ * name is the fallback). A neutral Turkish rewrite matches no member and gets
+ * nothing. Never throws: a bundle without articles or sources answers undefined.
+ */
+function itemLang(b: ClusterBundle): "en" | undefined {
+  const sourceById = new Map((b.sources ?? []).map((s) => [s.id, s]));
+  return headlineLang(
+    comparable(b.cluster.title_tr),
+    (b.articles ?? []).map((a) => {
+      const src = sourceById.get(a.source_id);
+      return {
+        title: comparable(a.title),
+        lang: sourceLang({ slug: src?.slug, name: a.source_name ?? src?.name }),
+      };
+    }),
+  );
+}
+
 function toItems(bundles: readonly ClusterBundle[]) {
   return bundles.slice(0, FOLLOW_ITEMS_MAX).map((b) => {
     // Voting basis, like the card the reader clicks through to: aggregators and
     // niche feeds are listed on it but never counted in its zone tally.
     const counts = votingZoneCounts(b.sources);
     const sourceCount = effectiveCount(b);
+    const lang = itemLang(b);
     return {
       id: b.cluster.id,
       title: b.cluster.title_tr,
@@ -138,11 +178,15 @@ function toItems(bundles: readonly ClusterBundle[]) {
       updatedAt: b.cluster.updated_at,
       sourceCount,
       isBlindspot: b.cluster.is_blindspot === true,
-      zoneLine: formatZoneLine(counts),
+      zoneLine: isLanguageIsolatedCluster(b.sources)
+        ? ENGLISH_ONLY_ZONE_LINE
+        : formatZoneLine(counts),
       // The head every other zone-line surface prints in front of it: 'N
       // kaynak', or 'N kaynak (M sınıflandırılmış)' when only M of the N
       // members vote, so the zone line next to it adds up.
       countHead: sourceCountHead(sourceCount, counts),
+      // Only when 'en': a Turkish item's JSON keeps exactly its old keys.
+      ...(lang === undefined ? {} : { lang }),
     };
   });
 }

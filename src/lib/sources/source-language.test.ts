@@ -5,9 +5,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   clusterTextLang,
+  ENGLISH_ONLY_BADGE_TAG,
   ENGLISH_ONLY_EMPTY_COLUMN,
   ENGLISH_ONLY_KART_EMPTY_ZONE,
   ENGLISH_ONLY_NOTE,
+  ENGLISH_ONLY_SHARE_CLAUSE,
+  ENGLISH_ONLY_SPECTRUM_LINE,
+  ENGLISH_ONLY_ZONE_LINE,
   ENGLISH_SOURCE_NAMES,
   ENGLISH_SOURCE_SLUGS,
   headlineLang,
@@ -347,6 +351,64 @@ describe("English-only cluster copy (h59-english-1)", () => {
       expect(copy).not.toContain("bu tarafta sessizlik");
       expect(copy).not.toContain("bu tarafta haber yok");
     }
+  });
+});
+
+// h118-shares-1: the outbound surfaces (OG / Twitter card, embed, share text,
+// rozet) carry the same "not compared with Turkish sources" qualifier the page
+// and the Manşet Kartı do. Their copy lives here, next to the page's, so no
+// surface keeps its own wording.
+describe("English-only outbound copy (h118-shares-1)", () => {
+  it("pins the OG spectrum line, the share clause and the rozet tag", () => {
+    expect(ENGLISH_ONLY_SPECTRUM_LINE).toBe(
+      "Yalnızca İngilizce yayın yapan kaynaklar yazdı — Türkçe haberlerle karşılaştırılmadı",
+    );
+    expect(ENGLISH_ONLY_SHARE_CLAUSE).toBe(
+      "yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı",
+    );
+    expect(ENGLISH_ONLY_BADGE_TAG).toBe("yalnızca İngilizce");
+  });
+
+  it("the rozet tag is the head of the share clause (one wording, not two)", () => {
+    expect(ENGLISH_ONLY_SHARE_CLAUSE.startsWith(`${ENGLISH_ONLY_BADGE_TAG} `)).toBe(true);
+  });
+
+  it("none of it contains a zone-absence claim or a percent", () => {
+    for (const copy of [ENGLISH_ONLY_SPECTRUM_LINE, ENGLISH_ONLY_SHARE_CLAUSE, ENGLISH_ONLY_BADGE_TAG]) {
+      expect(copy).not.toContain("bu kümede haber yok");
+      expect(copy).not.toContain("henüz haber yok");
+      expect(copy).not.toContain("sessizlik");
+      expect(copy).not.toContain("%");
+    }
+  });
+
+  it("every outbound copy says the story was not compared with Turkish news", () => {
+    expect(ENGLISH_ONLY_SPECTRUM_LINE).toContain("Türkçe haberlerle karşılaştırılmadı");
+    expect(ENGLISH_ONLY_SHARE_CLAUSE).toContain("Türkçe haberlerle karşılaştırılmadı");
+    expect(ENGLISH_ONLY_ZONE_LINE).toContain("Türkçe haberlerle karşılaştırılmadı");
+  });
+
+  // CAR-2: the /api/takip follow feed printed its own literal of this line.
+  it("pins the /api/takip follow-feed zone line", () => {
+    expect(ENGLISH_ONLY_ZONE_LINE).toBe(
+      "Yalnızca İngilizce kaynaklar · Türkçe haberlerle karşılaştırılmadı",
+    );
+  });
+
+  it("the follow-feed zone line starts with the rozet tag (one wording, not two)", () => {
+    // The tag itself holds an uppercase İ, which tr-TR lower-casing turns into a
+    // plain i, so both sides are folded the same way before comparing.
+    expect(
+      ENGLISH_ONLY_ZONE_LINE.toLocaleLowerCase("tr-TR").startsWith(
+        ENGLISH_ONLY_BADGE_TAG.toLocaleLowerCase("tr-TR"),
+      ),
+    ).toBe(true);
+    // And only the first letter differs from the tag's own spelling.
+    expect(ENGLISH_ONLY_ZONE_LINE.slice(1).startsWith(ENGLISH_ONLY_BADGE_TAG.slice(1))).toBe(true);
+  });
+
+  it("the follow-feed zone line carries no zone-absence claim or percent", () => {
+    expect(ENGLISH_ONLY_ZONE_LINE).not.toMatch(/İktidar|Bağımsız|Muhalefet|%/);
   });
 });
 

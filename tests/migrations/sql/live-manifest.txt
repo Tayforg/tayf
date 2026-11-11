@@ -108,6 +108,8 @@ run | 192-saved-clusters-v4.test.ts | tests/migrations/sql/192-saved-clusters-v4
 run | 193-net-response-compact-16mb.test.ts | tests/migrations/sql/193-net-response-compact-16mb-dryrun.sql | - | 0
 # 194: the dry-run script builds the state itself (the 129 setup, 166, 172, 185 and 186 as production has them, gated on 186's md5 and a baseline reading of 186's function through a pg_temp copy) and applies 194 twice, so it is the setup. Every live case inserts its fixtures (clusters only) inside its own rolled-back transaction and compares 186's body with 194's side by side.
 run | 194-search-rank-display-title.test.ts | tests/migrations/sql/194-search-rank-display-title-dryrun.sql | - | 0
+# 195: the dry-run script builds the state itself (192's dry-run: the chain up to 192 with the report as production runs it, gated on its md5 a2252c75... and length 52463, a baseline reading of 22 rows) and applies 195 twice, so it is the setup. Every live case inserts ops_cron_route_runs rows inside its own rolled-back transaction and compares 195's row 15 with 192's text run side by side as a temporary function.
+run | 195-ops-cron-route-low-cadence.test.ts | tests/migrations/sql/195-ops-cron-route-low-cadence-dryrun.sql | - | 0
 # --- pending: not runnable in the harness yet -----------------------------------------------------
 pending | 128-delete-source-recompute.test.ts | setup 061+064+128 loads and 4 of 14 live tests pass, then 3 nested suites fail with: update or delete on table sources violates foreign key constraint articles_source_id_fkey on table articles (the stub FKs lack ON DELETE CASCADE as in production), which skips 10 tests
 pending | 024-028.test.ts | needs a full local Supabase stack (SUPABASE_LOCAL_URL)

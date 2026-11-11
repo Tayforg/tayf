@@ -660,6 +660,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     // A detail cached before the field existed has none (the share text reads a
     // missing value as []).
     recallMatchedZones: detail.recallMatchedZones,
+    // h118-shares-1: an all-English cluster shares the page's "not compared with
+    // Turkish sources" qualifier instead of zone percents it never claimed.
+    languageIsolated,
   });
 
   // Attributed cluster summary — see summary-attribution.ts. Null hides the

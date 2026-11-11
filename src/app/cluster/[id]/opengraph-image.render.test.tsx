@@ -930,3 +930,174 @@ describe("cluster opengraph-image empty spectrum (real Satori render, h64-ogcard
     }
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// h118-shares-1: an all-English cluster (92742df8: daily-sabah, hurriyet-daily-news,
+// trt-world) drew "İktidar %100 · 3 / Bağımsız %0 · 0 / Muhalefet %0 · 0". The card
+// now prints the English-only line in the box the empty-spectrum state already uses.
+// Satori must accept it, the box must sit exactly where the tiles sit, the line must
+// stay on ONE line inside the box's padding whatever the headline, and the bottom
+// padding row must stay background.
+// ---------------------------------------------------------------------------
+
+function isolatedDetail(title: string, ribbon = false): ClusterDetail {
+  const base = blindspotDetail();
+  return {
+    ...base,
+    cluster: {
+      ...base.cluster,
+      title_tr: title,
+      title_method: "extractive",
+      article_count: 3,
+      bias_distribution: {
+        ...base.cluster.bias_distribution,
+        pro_government: ribbon ? 3 : 2,
+        gov_leaning: ribbon ? 0 : 1,
+        state_media: 0,
+      },
+      is_blindspot: ribbon,
+      blindspot_side: ribbon ? "pro_government" : null,
+    },
+    members: [
+      nonVotingMember("daily-sabah", "outlet", "pro_government"),
+      nonVotingMember("hurriyet-daily-news", "outlet", "gov_leaning"),
+      nonVotingMember("trt-world", "outlet", "pro_government"),
+    ],
+    wire: { isWireRedistribution: false, effectiveArticleCount: 3, memberCount: 3 },
+  };
+}
+
+describe("cluster opengraph-image language-isolated state (real Satori render, h118-shares-1)", () => {
+  const cards = new Map<string, Promise<DecodedPng>>();
+  const isoCard = (title: string, ribbon = false): Promise<DecodedPng> => {
+    const key = `${ribbon}|${title}`;
+    let card = cards.get(key);
+    if (!card) {
+      card = (async () => {
+        getClusterDetailOrThrow.mockResolvedValueOnce(isolatedDetail(title, ribbon));
+        const { default: Image } = await import("./opengraph-image");
+        const png = decodePng(await pngBytes(await Image({ params: Promise.resolve({ id: VALID_ID }) })));
+        expect(png.width).toBe(1200);
+        expect(png.height).toBe(630);
+        return png;
+      })();
+      cards.set(key, card);
+    }
+    return card;
+  };
+  const refs = new Map<string, Promise<DecodedPng>>();
+  /** A plain Turkish card with a classified source: the tiles are the reference for where the box goes. */
+  const tilesCard = (): Promise<DecodedPng> => {
+    let card = refs.get("tiles");
+    if (!card) {
+      card = renderCard(TITLE_SHORT, false);
+      refs.set("tiles", card);
+    }
+    return card;
+  };
+  const EN_TITLE = "Türkiye remembers Atatürk on 88th anniversary of his death";
+
+  it("renders to a 1200x630 PNG, and the bottom padding row stays the page gradient", async () => {
+    const card = await isoCard(EN_TITLE);
+    const ref = await tilesCard();
+    expectNear(pixelAt(card, 250, LEGEND_PROBE_Y), [21, 21, 24], "isolated card at (250,629)");
+    for (const x of LEGEND_PROBE_X) {
+      expectNear(pixelAt(card, x, LEGEND_PROBE_Y), pixelAt(ref, x, LEGEND_PROBE_Y), `vs the tiles card at (${x},${LEGEND_PROBE_Y})`);
+    }
+  }, 30_000);
+
+  it("puts the box exactly where the tiles were: same top, same bottom, same left and right edge", async () => {
+    const card = await isoCard(EN_TITLE);
+    const ref = await tilesCard();
+
+    const tile = boxRows(ref, 80, 440, LEGEND_PROBE_Y);
+    const box = boxRows(card, 80, 440, LEGEND_PROBE_Y);
+    expect(tile).not.toBeNull();
+    expect(box).not.toBeNull();
+    expect(Math.abs(box!.minY - tile!.minY)).toBeLessThanOrEqual(1);
+    expect(Math.abs(box!.maxY - tile!.maxY)).toBeLessThanOrEqual(1);
+
+    const row = Math.round((tile!.minY + tile!.maxY) / 2);
+    const tileCols = boxColumns(ref, row);
+    const boxCols = boxColumns(card, row);
+    expect(tileCols).not.toBeNull();
+    expect(boxCols).not.toBeNull();
+    expect(Math.abs(boxCols!.minX - tileCols!.minX)).toBeLessThanOrEqual(1);
+    expect(Math.abs(boxCols!.maxX - tileCols!.maxX)).toBeLessThanOrEqual(1);
+    expect(boxCols!.minX).toBeGreaterThanOrEqual(72);
+    expect(boxCols!.maxX).toBeLessThan(1128);
+  }, 30_000);
+
+  it("draws no bar: the 18 px bar's rows above the methodology row are the page gradient", async () => {
+    const card = await isoCard(EN_TITLE);
+    const ref = await tilesCard();
+    const tile = boxRows(ref, 80, 440, LEGEND_PROBE_Y)!;
+    const barBottom = tile.minY - 12 - 19 - 14;
+    const barTop = barBottom - 18;
+    expect(boxRows(ref, 600, barTop - 4, barBottom + 4)).not.toBeNull();
+    expect(boxRows(card, 600, barTop - 4, barBottom + 4)).toBeNull();
+  }, 30_000);
+
+  it("keeps the line on one line, readable, inside the box's own padding", async () => {
+    const card = await isoCard(EN_TITLE);
+    const box = boxRows(card, 80, 440, LEGEND_PROBE_Y)!;
+    const text = textBounds(card, box);
+
+    expect(text).not.toBeNull();
+    expect(text!.count).toBeGreaterThan(1_000);
+    expect(text!.minX).toBeGreaterThanOrEqual(72 + 1 + 20 - 2);
+    expect(text!.maxX).toBeLessThanOrEqual(1128 - 1 - 20 + 2);
+    expect(text!.minY).toBeGreaterThanOrEqual(box.minY + 1 + 16 - 2);
+    expect(text!.maxY).toBeLessThanOrEqual(box.maxY - 1 - 16 + 2);
+    // One 22 px line is ~28 px from the top of an ascender to the foot of a descender; a wrapped
+    // second line would double it.
+    expect(text!.maxY - text!.minY).toBeLessThanOrEqual(34);
+  }, 30_000);
+
+  it.each([
+    ["a 110-character Turkish title", TITLE_110],
+    ["a 200-character Turkish title", TITLE_200],
+    ["a 126-character run of wide 'W' words", TITLE_WIDE_WORDS],
+    ["a 130-character all-caps headline", TITLE_ALL_CAPS],
+  ] as const)("keeps the box and the bottom row where they are under %s", async (label, title) => {
+    const ref = await isoCard(EN_TITLE);
+    const card = await isoCard(title);
+    for (const x of LEGEND_PROBE_X) {
+      expectNear(pixelAt(card, x, LEGEND_PROBE_Y), pixelAt(ref, x, LEGEND_PROBE_Y), `${label} at (${x},${LEGEND_PROBE_Y})`);
+    }
+    for (const x of [250, 950]) {
+      for (let y = 470; y < 630; y++) {
+        expectNear(pixelAt(card, x, y), pixelAt(ref, x, y), `${label} at (${x},${y})`);
+      }
+    }
+  }, 30_000);
+
+  it("a flagged isolated card ('kümede sadece İktidar' ribbon) draws the same-size box, on the canvas and no lower than the ribbon card's tiles", async () => {
+    // A 3-line headline under the ribbon already pushes the legend row below the 64 px bottom
+    // padding on today's cards (the tiles end near y 613 on this very title); the box is the
+    // tiles' height without the 18 px bar, so it must end no lower than they do.
+    const card = await isoCard(TITLE_96_RIBBON, true);
+    const tilesRibbon = await renderCard(TITLE_96_RIBBON, true);
+    const box = boxRows(card, 80, 440, LEGEND_PROBE_Y);
+    const tiles = boxRows(tilesRibbon, 80, 440, LEGEND_PROBE_Y);
+    expect(box).not.toBeNull();
+    expect(tiles).not.toBeNull();
+    expect(box!.maxY - box!.minY).toBeGreaterThanOrEqual(110);
+    expect(box!.maxY - box!.minY).toBeLessThanOrEqual(113);
+    expect(box!.maxY).toBeLessThanOrEqual(tiles!.maxY);
+    // The page gradient is still the bottom row of the canvas (the box does not reach it).
+    expectNear(pixelAt(card, 250, LEGEND_PROBE_Y), [21, 21, 24], "ribbon card at (250,629)");
+    // The line stays on one line inside the box's padding.
+    const text = textBounds(card, box!);
+    expect(text).not.toBeNull();
+    expect(text!.maxY - text!.minY).toBeLessThanOrEqual(34);
+    expect(text!.minX).toBeGreaterThanOrEqual(72 + 1 + 20 - 2);
+    expect(text!.maxX).toBeLessThanOrEqual(1128 - 1 - 20 + 2);
+    // The ribbon is one line inside the 72 px side padding.
+    const ribbon = ribbonBox(card);
+    expect(ribbon).not.toBeNull();
+    expect(ribbon!.minX).toBeGreaterThanOrEqual(72);
+    expect(ribbon!.maxX).toBeLessThan(1128);
+    expect(ribbon!.maxY - ribbon!.minY).toBeLessThanOrEqual(60);
+  }, 30_000);
+});

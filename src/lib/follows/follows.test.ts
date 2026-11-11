@@ -696,6 +696,45 @@ describe("parseFollowItems", () => {
   });
 });
 
+// h118-english-1 (WCAG 3.1.2): the server marks an item whose headline is an
+// English outlet's own title with lang 'en'. The key is additive: an old cached
+// body has none, and nothing but the exact string 'en' is trusted.
+describe("parseFollowItems lang", () => {
+  const ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+  const base = {
+    id: ID,
+    title: "Erdogan, Guterres discuss regional, global issues at COP31",
+    firstPublished: "2026-10-22T08:00:00+00:00",
+    updatedAt: "2026-10-22T09:00:00+00:00",
+    sourceCount: 2,
+    isBlindspot: false,
+    zoneLine: "Yalnızca İngilizce kaynaklar · Türkçe haberlerle karşılaştırılmadı",
+  };
+
+  it("keeps lang 'en'", () => {
+    const withLang = { ...base, lang: "en" };
+    const out = parseFollowItems({ items: [withLang] });
+    expect(out).toEqual([withLang]);
+    expect(out?.[0]?.lang).toBe("en");
+  });
+
+  it("an old body without lang parses, and the item carries no lang key", () => {
+    const out = parseFollowItems({ items: [base] });
+    expect(out).toEqual([base]);
+    expect(out?.[0] && "lang" in out[0]).toBe(false);
+  });
+
+  it("drops every other value (the item is kept, never rejected)", () => {
+    const hostile: unknown[] = ["tr", "EN", "en ", "", null, 5, true, {}, ["en"], "x\"><script>"];
+    for (const lang of hostile) {
+      const out = parseFollowItems({ items: [{ ...base, lang }] });
+      expect(out, String(lang)).toHaveLength(1);
+      expect(out?.[0] && "lang" in out[0], String(lang)).toBe(false);
+      expect(out?.[0]?.title).toBe(base.title);
+    }
+  });
+});
+
 describe("runWithConcurrency", () => {
   it("never runs more than `limit` workers at once and visits every item", async () => {
     let active = 0;

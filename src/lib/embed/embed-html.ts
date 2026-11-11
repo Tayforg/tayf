@@ -10,6 +10,13 @@ import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import { cutAtWord } from "@/lib/seo/og-title";
+import {
+  clusterTextLang,
+  ENGLISH_ONLY_SHARE_CLAUSE,
+  headlineLang as memberHeadlineLang,
+  isLanguageIsolatedCluster,
+  sourceLang,
+} from "@/lib/sources/source-language";
 import type { MediaDnaZone } from "@/types";
 
 import { isContentlessTitle } from "../../../supabase/functions/_shared/rss/entities";
@@ -68,6 +75,20 @@ export interface EmbedModel {
   ribbon: string | null;
   /** UTM-tagged cluster URL (raw; escaped on render). */
   href: string;
+  /**
+   * h118-shares-1: every member is an English-language outlet
+   * (`isLanguageIsolatedCluster`, the cluster page's own predicate). The legend
+   * and the bar's aria-label then carry the "not compared with Turkish sources"
+   * qualifier instead of a zone-absence claim; the bar itself is unchanged.
+   */
+  languageIsolated: boolean;
+  /**
+   * h118-shares-1: `'en'` when the shown heading is an English member's own
+   * title, so the <h1> carries lang="en" (WCAG 3.1.2); `undefined` for Turkish
+   * text, which keeps the inherited `tr`. The cluster page's rule, see
+   * `embedHeadlineLang`.
+   */
+  headlineLang: "en" | undefined;
 }
 
 /**
@@ -108,7 +129,7 @@ export function safeEmbedTitle(raw: string, fallback: string): string {
   return cutAtWord(trimmed, EMBED_TITLE_MAX);
 }
 
-function ribbonOf(detail: ClusterDetail): string | null {
+function ribbonOf(detail: ClusterDetail, languageIsolated: boolean): string | null {
   const { cluster, members } = detail;
   if (!cluster.is_blindspot) return null;
   // Same rule as buildShareText / the OG card: no recorded side falls back to
@@ -121,6 +142,9 @@ function ribbonOf(detail: ClusterDetail): string | null {
   // matched with this event (ClusterDetail.recallMatchedZones: a similar story
   // sits in another cluster): "kümede sadece X", as /blindspots says it. A
   // detail cached before the field existed has none (`?.length ?? 0`).
+  // h118-shares-1: an all-English cluster was never compared with Turkish news,
+  // which is the same unknown a recall-matched zone stands for, so it counts as
+  // one more matched zone: "kümede sadece X", never "sadece X yazdı".
   const tally = tallyZones(cluster.bias_distribution);
   const zone: MediaDnaZone = cluster.blindspot_side
     ? zoneOf(cluster.blindspot_side)
@@ -129,7 +153,7 @@ function ribbonOf(detail: ClusterDetail): string | null {
     zoneCountsOf(cluster.bias_distribution),
     zone,
     nonVotingOutsideZone(uniqueSources(members), zone),
-    detail.recallMatchedZones?.length ?? 0,
+    (detail.recallMatchedZones?.length ?? 0) + (languageIsolated ? 1 : 0),
   );
   return claim === "only"
     ? `Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
@@ -140,18 +164,48 @@ function ribbonOf(detail: ClusterDetail): string | null {
         : `Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
 }
 
+/**
+ * h118-shares-1: the lang of the heading the embed shows, by the cluster page's
+ * own <h1> rule (src/app/cluster/[id]/page.tsx; src/lib/compare/compare-view.ts
+ * holds the same expression):
+ *   - `undefined` when title_method is 'llm' (the neutral rewrite is Turkish);
+ *   - `undefined` when the shown heading is not the cluster's own title:
+ *     `shown` is EMBED_GENERIC_TITLE (the private-individual fallback) or
+ *     NO_HEADLINE_TITLE (a title with no letter or digit);
+ *   - otherwise `clusterTextLang(sources)` (every member English), else the home
+ *     card's `headlineLang` (an English member's title IS the headline and no
+ *     Turkish member carries it too).
+ * It compares the FULL stored `title_tr`, never the cut one in `shown`.
+ */
+function embedHeadlineLang(detail: ClusterDetail, shown: string): "en" | undefined {
+  const { cluster, members } = detail;
+  if (cluster.title_method === "llm") return undefined;
+  if (shown === EMBED_GENERIC_TITLE || shown === NO_HEADLINE_TITLE) return undefined;
+  return (
+    clusterTextLang(members.map((m) => m.source)) ??
+    memberHeadlineLang(
+      cluster.title_tr,
+      members.map((m) => ({ title: m.article.title, lang: sourceLang(m.source) })),
+    )
+  );
+}
+
 export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedModel {
   const { cluster, wire } = detail;
   const counts = zoneCountsOf(cluster.bias_distribution);
   const base = origin.replace(/\/+$/, "");
+  const title = safeEmbedTitle(cluster.title_tr, EMBED_GENERIC_TITLE);
+  const languageIsolated = isLanguageIsolatedCluster(detail.members.map((m) => m.source));
   return {
-    title: safeEmbedTitle(cluster.title_tr, EMBED_GENERIC_TITLE),
+    title,
     counts,
     percents: zonePercents(counts),
     total: counts.iktidar + counts.bagimsiz + counts.muhalefet,
     sourceCount: wire.effectiveArticleCount,
-    ribbon: ribbonOf(detail),
+    ribbon: ribbonOf(detail, languageIsolated),
     href: `${base}/cluster/${cluster.id}?utm_source=embed&utm_medium=iframe&utm_campaign=cluster`,
+    languageIsolated,
+    headlineLang: embedHeadlineLang(detail, title),
   };
 }
 
@@ -214,9 +268,25 @@ const HEAD_META =
   '<meta name="color-scheme" content="light dark">' +
   '<meta name="robots" content="noindex,nofollow">';
 
+/** First letter upper-cased under the tr-TR rules ('yalnızca' -> 'Yalnızca'). */
+function capitaliseTr(text: string): string {
+  return text.charAt(0).toLocaleUpperCase("tr-TR") + text.slice(1);
+}
+
+// h118-shares-1: the page's qualifier, sentence-cased for the legend and spoken
+// with a semicolon in the bar's aria-label; both derived from the one clause.
+const ENGLISH_ONLY_LEGEND_HEAD = capitaliseTr(ENGLISH_ONLY_SHARE_CLAUSE);
+const ENGLISH_ONLY_ARIA_LABEL = ENGLISH_ONLY_LEGEND_HEAD.replace(", ", "; ");
+
 function legendOf(model: EmbedModel): string {
   if (model.total === 0) {
     return `Bu haberde henüz sınıflandırılmış kaynak yok · ${model.sourceCount} kaynak`;
+  }
+  // h118-shares-1: an all-English cluster prints the page's qualifier where the
+  // zone percents were (they would read as "Bağımsız %0 · Muhalefet %0"); the
+  // count keeps the classified-basis wording.
+  if (model.languageIsolated) {
+    return `${ENGLISH_ONLY_LEGEND_HEAD} · ${sourceCountHead(model.sourceCount, model.counts)}`;
   }
   const zones = ZONES.map((z) => `${ZONE_LABEL[z]} %${model.percents[z]}`).join(" · ");
   // The percents are over the classified (voting) sources only while the count
@@ -226,6 +296,9 @@ function legendOf(model: EmbedModel): string {
 }
 
 function ariaLabelOf(model: EmbedModel): string {
+  // h118-shares-1: the bar is drawn from the voting tally, but its percents would
+  // announce a zone absence the page does not claim for an all-English cluster.
+  if (model.languageIsolated) return ENGLISH_ONLY_ARIA_LABEL;
   // h70-embed-3: nothing classified yet -> no zone list. Reading 'İktidar %0,
   // Bağımsız %0, Muhalefet %0' next to a legend that says there is no
   // classified source is false precision (legendOf has the same branch).
@@ -247,7 +320,9 @@ export function renderEmbedHtml(model: EmbedModel): string {
     `<style>${STYLE}</style></head><body><div class="c">` +
     '<div class="b">TAYF · Aynı haber, farklı dünyalar</div>' +
     ribbon +
-    `<h1>${e(model.title)}</h1>` +
+    // h118-shares-1: an English member's own title is English text inside the
+    // Turkish document (WCAG 3.1.2); html lang stays "tr", the legend and the link are Turkish.
+    `${model.headlineLang === "en" ? '<h1 lang="en">' : "<h1>"}${e(model.title)}</h1>` +
     `<div class="bar" role="img" aria-label="${e(ariaLabelOf(model))}">${bar}</div>` +
     `<p class="l">${e(legendOf(model))}</p>` +
     `<a class="a" href="${e(model.href)}" target="_blank" rel="noopener">tayfhaber.com'da oku →<span class="v"> (yeni sekmede açılır)</span></a>` +
