@@ -764,9 +764,15 @@ describe("entry points", () => {
   });
 
   it("/gundem/[key] offers a hub follow (kind gundem, value = the entity key), not the bare label as a keyword", async () => {
-    const tree = await EntityHubPage({ params: Promise.resolve({ key: "deva" }) });
+    const tree = await EntityHubPage({
+      params: Promise.resolve({ key: "deva" }),
+      searchParams: Promise.resolve({}),
+    });
     expect(followButtonProps(tree)).toEqual([{ kind: "gundem", value: "deva" }]);
-    const aym = await EntityHubPage({ params: Promise.resolve({ key: "aym" }) });
+    const aym = await EntityHubPage({
+      params: Promise.resolve({ key: "aym" }),
+      searchParams: Promise.resolve({}),
+    });
     expect(followButtonProps(aym)).toEqual([{ kind: "gundem", value: "aym" }]);
   });
 

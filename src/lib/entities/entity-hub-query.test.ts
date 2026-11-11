@@ -12,6 +12,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // 4-argument `entity_cluster_ids_v2` of migrations 125/156 and then to migration
 // 123's `entity_cluster_ids`, then embeds just those ids with `.in('id', ids)`.
 //
+// h136-roadmap-2: getEntityHub(key, page) pages through the hub. Page 1 is the v3
+// read above, untouched. A later page calls migration 199's additive
+// `entity_cluster_ids_v4` (v3 plus p_offset); while 199 is unapplied (PGRST202)
+// it resolves to an `unavailable` result instead of throwing.
+//
 // getEntityHubSummary (h94-slowroutes-1) is the light twin the /gundem index and
 // /sitemaps/hubs.xml read: the same RPC call, then ONE lean
 // `clusters(id, first_published, cluster_articles!inner(article_id))` read for
@@ -59,6 +64,11 @@ const fixture = vi.hoisted(() => ({
   v2Calls: [] as unknown[],
   v2Rows: [] as Array<{ id: string; total: unknown }>,
   v2Error: null as { message: string; code?: string } | null,
+  // entity_cluster_ids_v4 (migration 199): v3 plus p_offset, the read of every page after the first.
+  v4Calls: [] as unknown[],
+  v4Rows: [] as Array<{ id: string; total: unknown }>,
+  v4Error: null as { message: string; code?: string } | null,
+  v4Throws: false,
   // The labels getEntityHub hands the resolver (the single-flight / last-good key rides in it).
   resolverLabels: [] as unknown[],
   // entity_cluster_ids (migration 123), the second PGRST202 fallback.
@@ -96,6 +106,12 @@ const supabaseFake = await vi.hoisted(async () => {
           return { data: null, error: fixture.rpcError as { message: string } };
         }
         return { data: fixture.rpcRows, error: null };
+      },
+      entity_cluster_ids_v4: (args: unknown) => {
+        fixture.v4Calls.push(args);
+        if (fixture.v4Throws) throw new Error("v4 connection reset");
+        if (fixture.v4Error) return { data: null, error: fixture.v4Error as { message: string } };
+        return { data: fixture.v4Rows, error: null };
       },
       entity_cluster_ids_v2: (args: unknown) => {
         fixture.v2Calls.push(args);
@@ -173,6 +189,10 @@ beforeEach(() => {
   fixture.v2Calls = [];
   fixture.v2Rows = [];
   fixture.v2Error = null;
+  fixture.v4Calls = [];
+  fixture.v4Rows = [];
+  fixture.v4Error = null;
+  fixture.v4Throws = false;
   fixture.resolverLabels = [];
   fixture.v1Calls = [];
   fixture.v1Rows = [];
@@ -680,7 +700,10 @@ describe("getEntityHub cache key carries the headline-only flag (h56-entities-2)
     await getEntityHub("akp");
     await getEntityHub("chp");
     await getEntityHub("erdogan");
-    expect(fixture.resolverLabels).toEqual([
+    // (the label also carries the `remember` predicate, h136-roadmap-2)
+    expect(
+      (fixture.resolverLabels as Array<{ label: string; key: string }>).map(({ label, key }) => ({ label, key })),
+    ).toEqual([
       { label: "clusters-entity", key: "clusters-entity:akp:headline" },
       { label: "clusters-entity", key: "clusters-entity:chp:lead" },
       { label: "clusters-entity", key: "clusters-entity:erdogan:lead" },
@@ -697,10 +720,14 @@ describe("getEntityHub cache key carries the headline-only flag (h56-entities-2)
 
   it("the flag reaches the 'use cache' function as an argument too, so the Next cache entry is keyed on it", () => {
     const src = readFileSync(resolve(__dirname, "entity-hub-query.ts"), "utf8");
-    expect(src).toMatch(/async function cachedEntityHub\(key: string, headlineOnly: boolean\)/);
-    expect(src).toContain("() => cachedEntityHub(key, headlineOnly)");
-    expect(src).toContain("() => fetchEntityHub(key, headlineOnly)");
-    expect(src).toContain("async function fetchEntityHub(key: string, headlineOnly: boolean)");
+    expect(src).toMatch(
+      /async function cachedEntityHub\(key: string, headlineOnly: boolean, page: number\)/,
+    );
+    expect(src).toContain("() => cachedEntityHub(key, headlineOnly, readPage)");
+    expect(src).toContain("() => fetchEntityHub(key, headlineOnly, readPage)");
+    expect(src).toContain(
+      "async function fetchEntityHub(key: string, headlineOnly: boolean, page: number)",
+    );
   });
 });
 
@@ -823,6 +850,309 @@ describe("getEntityHub cache lifetime", () => {
     expect(cacheLife).toHaveBeenCalledWith("minutes");
     expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
     expect(cacheTag).toHaveBeenCalledWith("clusters-entity");
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// h136-roadmap-2: the hub pager. getEntityHub(key, page = 1).
+// ---------------------------------------------------------------------------
+
+/** The ids a v4 page answers, `total` repeated on every row like `count(*) over ()`. */
+const ids4 = (ids: string[], total: unknown = ids.length) => ids.map((id) => ({ id, total }));
+
+describe("getEntityHub(key, page): page 1 is v3, exactly as before", () => {
+  it("page 1 (and no page, and every non-page value) calls v3 with v3's exact arguments and never v4", async () => {
+    for (const page of [undefined, 1, 0, -3, 2.5, Number.NaN]) {
+      fixture.rpcCalls = [];
+      fixture.v4Calls = [];
+      await (page === undefined ? getEntityHub("erdogan") : getEntityHub("erdogan", page));
+      expect(fixture.rpcCalls, String(page)).toEqual([
+        {
+          p_queries: entityHubQueries(entityByKey("erdogan")!),
+          p_patterns: entityHubPatterns(entityByKey("erdogan")!),
+          p_limit: ENTITY_HUB_LIMIT,
+          p_headline_only: false,
+        },
+      ]);
+      expect(fixture.rpcCalls[0], String(page)).not.toHaveProperty("p_offset");
+      expect(fixture.v4Calls, String(page)).toEqual([]);
+    }
+  });
+
+  it("page 1 never reaches v4 even when v3 is missing: the v2 and v1 fallbacks are today's", async () => {
+    fixture.rpcError = { message: "not found", code: "PGRST202" };
+    fixture.v2Error = { message: "not found", code: "PGRST202" };
+    fixture.v1Rows = [{ id: "c1", total: 1 }];
+    fixture.data = [one("c1")];
+    const result = await getEntityHub("chp", 1);
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["c1"]);
+    expect(fixture.v4Calls).toEqual([]);
+    expect(fixture.v2Calls).toHaveLength(1);
+    expect(fixture.v1Calls).toHaveLength(1);
+  });
+
+  it("the summary reader stays page 1 only: it never calls v4", async () => {
+    fixture.rpcRows = rpcIds(["c1", "c2"], 152);
+    fixture.leanData = [leanRow("c1", "2026-11-01T00:00:00Z"), leanRow("c2", "2026-11-02T00:00:00Z")];
+    const summary = await getEntityHubSummary("chp");
+    expect(summary?.total).toBe(152);
+    expect(fixture.v4Calls).toEqual([]);
+  });
+});
+
+describe("getEntityHub(key, page): a later page reads v4 with an offset", () => {
+  it("page 3 sends p_offset 40 and p_limit 20 to v4, with the hub's queries, patterns and flag (never p_since, never v3)", async () => {
+    fixture.v4Rows = ids4(["c41", "c42"], 152);
+    fixture.data = [one("c41"), one("c42", "s2")];
+
+    const result = await getEntityHub("chp", 3);
+
+    expect(fixture.v4Calls).toEqual([
+      {
+        p_queries: entityHubQueries(entityByKey("chp")!),
+        p_patterns: entityHubPatterns(entityByKey("chp")!),
+        p_limit: 20,
+        p_headline_only: false,
+        p_offset: 40,
+      },
+    ]);
+    expect(fixture.v4Calls[0]).not.toHaveProperty("p_since");
+    expect(fixture.rpcCalls).toEqual([]);
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["c41", "c42"]);
+    expect(result?.total).toBe(152);
+    expect(result).not.toHaveProperty("unavailable");
+  });
+
+  it("p_offset is (page - 1) * 20 for page 2 and for the last served page 51 (the SQL clamp itself)", async () => {
+    fixture.v4Rows = ids4(["c1"], 1100);
+    fixture.data = [one("c1")];
+    await getEntityHub("erdogan", 2);
+    await getEntityHub("erdogan", 51);
+    expect(fixture.v4Calls.map((c) => (c as { p_offset: number }).p_offset)).toEqual([20, 1000]);
+    expect(fixture.v4Calls.map((c) => (c as { p_limit: number }).p_limit)).toEqual([20, 20]);
+  });
+
+  it("akp keeps its headline-only flag on every page", async () => {
+    fixture.v4Rows = ids4(["c1"], 90);
+    fixture.data = [one("c1")];
+    await getEntityHub("akp", 2);
+    expect((fixture.v4Calls[0] as { p_headline_only: boolean }).p_headline_only).toBe(true);
+  });
+
+  it("keeps the RPC's order, takes the total from the first row and never reports less than offset + rows", async () => {
+    fixture.v4Rows = [
+      { id: "c2", total: "152" },
+      { id: "c1", total: "152" },
+    ];
+    fixture.data = [one("c1"), one("c2", "s2")];
+    const result = await getEntityHub("chp", 2);
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["c2", "c1"]);
+    expect(result?.total).toBe(152);
+
+    // a missing or impossible total (below offset + rows = 22) falls back to offset + rows
+    fixture.v4Rows = [
+      { id: "c2", total: null },
+      { id: "c1", total: null },
+    ];
+    const bad = await getEntityHub("deva", 2);
+    expect(bad?.total).toBe(22);
+    fixture.v4Rows = [{ id: "c1", total: 5 }];
+    fixture.data = [one("c1")];
+    expect((await getEntityHub("mhp", 2))?.total).toBe(21);
+  });
+
+  it("a page past the end (v4 answers no rows) is an empty result that still carries the hub's total, read from page 1's v3 call", async () => {
+    fixture.v4Rows = [];
+    fixture.rpcRows = rpcIds(["c1", "c2"], 152);
+
+    const result = await getEntityHub("chp", 9);
+
+    expect(result).toEqual({ bundles: [], total: 152, asOfMs: expect.any(Number) });
+    expect(fixture.v4Calls).toHaveLength(1);
+    expect((fixture.v4Calls[0] as { p_offset: number }).p_offset).toBe(160);
+    // the probe is page 1's own read, v3's exact arguments
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_queries: entityHubQueries(entityByKey("chp")!),
+        p_patterns: entityHubPatterns(entityByKey("chp")!),
+        p_limit: ENTITY_HUB_LIMIT,
+        p_headline_only: false,
+      },
+    ]);
+    expect(fixture.embedCalls).toBe(0);
+    expect(feedHealth.getZoneFeedHealth).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty("unavailable");
+  });
+
+  it("a page past the end of a hub with no matches at all has total 0", async () => {
+    fixture.v4Rows = [];
+    fixture.rpcRows = [];
+    expect(await getEntityHub("ysk", 3)).toEqual({ bundles: [], total: 0, asOfMs: expect.any(Number) });
+  });
+
+  it("a page beyond the last servable page (52, 60, 5000) never calls v4: its offset would be clamped to page 51's window", async () => {
+    fixture.rpcRows = rpcIds(["c1"], 700);
+    for (const page of [52, 60, 5000, Number.MAX_SAFE_INTEGER]) {
+      fixture.rpcCalls = [];
+      const result = await getEntityHub("erdogan", page);
+      expect(result, String(page)).toEqual({ bundles: [], total: 700, asOfMs: expect.any(Number) });
+      expect(fixture.rpcCalls, String(page)).toHaveLength(1);
+    }
+    expect(fixture.v4Calls).toEqual([]);
+  });
+});
+
+describe("getEntityHub(key, page): v4 missing (migration 199 not applied yet)", () => {
+  it("page 2 on PGRST202 resolves to an 'unavailable' result: no throw, no live retry, no v3, no embed", async () => {
+    fixture.v4Error = { message: "Could not find the function", code: "PGRST202" };
+
+    const result = await getEntityHub("chp", 2);
+
+    expect(result).toEqual({
+      bundles: [],
+      total: 0,
+      asOfMs: expect.any(Number),
+      unavailable: true,
+    });
+    expect(fixture.v4Calls).toHaveLength(1);
+    expect(fixture.rpcCalls).toEqual([]);
+    expect(fixture.v2Calls).toEqual([]);
+    expect(fixture.v1Calls).toEqual([]);
+    expect(fixture.embedCalls).toBe(0);
+  });
+
+  it("the unavailable page is memoised for 'minutes' only, so applying 199 heals it quickly", async () => {
+    fixture.v4Error = { message: "Could not find the function", code: "PGRST202" };
+    await getEntityHub("chp", 2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a real later page keeps the cluster-feed window", async () => {
+    fixture.v4Rows = ids4(["c1"], 30);
+    fixture.data = [one("c1")];
+    await getEntityHub("chp", 2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("page 1 of the same hub is unaffected while v4 is missing", async () => {
+    fixture.v4Error = { message: "Could not find the function", code: "PGRST202" };
+    fixture.rpcRows = rpcIds(["c1", "c2"], 152);
+    fixture.data = [one("c1"), one("c2", "s2")];
+    const page1 = await getEntityHub("chp", 1);
+    expect(page1?.total).toBe(152);
+    expect(page1?.bundles).toHaveLength(2);
+    expect(page1).not.toHaveProperty("unavailable");
+    expect(fixture.v4Calls).toEqual([]);
+  });
+
+  it("any other v4 error is a failure like v3's: a live retry, then null (2 v4 calls), never the 'unavailable' state", async () => {
+    fixture.v4Error = { message: "statement timeout", code: "57014" };
+    await expect(getEntityHub("chp", 2)).resolves.toBeNull();
+    expect(fixture.v4Calls).toHaveLength(2);
+    expect(fixture.rpcCalls).toEqual([]);
+
+    fixture.v4Calls = [];
+    fixture.v4Error = { message: "no code" };
+    await expect(getEntityHub("erdogan", 2)).resolves.toBeNull();
+    expect(fixture.v4Calls).toHaveLength(2);
+  });
+
+  it("a thrown v4 call is retried once and resolves to null", async () => {
+    fixture.v4Throws = true;
+    await expect(getEntityHub("chp", 2)).resolves.toBeNull();
+    expect(fixture.v4Calls).toHaveLength(2);
+  });
+});
+
+describe("getEntityHub(key, page): the page is part of every cache key", () => {
+  it("page 1's resolver key is unchanged; a later page appends :p<N>; pages 1 and 2 differ", async () => {
+    fixture.v4Rows = ids4(["c1"], 30);
+    fixture.data = [one("c1")];
+    await getEntityHub("chp", 1);
+    await getEntityHub("chp", 2);
+    await getEntityHub("akp", 3);
+    expect(fixture.resolverLabels.map((l) => (l as { key: string }).key)).toEqual([
+      "clusters-entity:chp:lead",
+      "clusters-entity:chp:lead:p2",
+      "clusters-entity:akp:headline:p3",
+    ]);
+  });
+
+  it("every page past the last servable one shares one key, so ?sayfa=N cannot mint unbounded cache entries", async () => {
+    fixture.rpcRows = [];
+    for (const page of [52, 53, 1000, 123456789]) await getEntityHub("chp", page);
+    const keys = fixture.resolverLabels.map((l) => (l as { key: string }).key);
+    expect(new Set(keys)).toEqual(new Set(["clusters-entity:chp:lead:p52"]));
+    // and page 51, the last real page, has its own
+    await getEntityHub("chp", 51);
+    expect((fixture.resolverLabels.at(-1) as { key: string }).key).toBe("clusters-entity:chp:lead:p51");
+  });
+
+  it("a non-page value (0, -1, 2.5, NaN) is page 1 and carries page 1's key", async () => {
+    for (const page of [0, -1, 2.5, Number.NaN]) await getEntityHub("chp", page);
+    expect(new Set(fixture.resolverLabels.map((l) => (l as { key: string }).key))).toEqual(
+      new Set(["clusters-entity:chp:lead"]),
+    );
+  });
+
+  it("different pages never share a live-retry flight", async () => {
+    fixture.v4Error = { message: "db down" };
+    fixture.rpcError = { message: "db down" };
+    await Promise.all([getEntityHub("deva", 1), getEntityHub("deva", 2)]);
+    // page 1: cached attempt + live retry on v3; page 2: cached attempt + live retry on v4
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(fixture.v4Calls).toHaveLength(2);
+  });
+
+  it("the page reaches the 'use cache' function as an argument and its tag stays clusters-entity", async () => {
+    const src = readFileSync(resolve(__dirname, "entity-hub-query.ts"), "utf8");
+    const at = src.indexOf("async function cachedEntityHub(");
+    const body = src.slice(at, src.indexOf("\n}\n", at));
+    expect(body).toContain('"use cache"');
+    expect(body).toContain('cacheTag("clusters-entity")');
+    expect(body).toContain("fetchEntityHub(key, headlineOnly, page)");
+    fixture.v4Rows = ids4(["c1"], 30);
+    fixture.data = [one("c1")];
+    await getEntityHub("chp", 2);
+    expect(cacheTag).toHaveBeenCalledWith("clusters-entity");
+  });
+});
+
+describe("getEntityHub(key, page): the last-good value is page 1's alone", () => {
+  it("a later page that read fine is not served after an outage (the store is small and page 1's)", async () => {
+    fixture.v4Rows = ids4(["c1"], 30);
+    fixture.data = [one("c1")];
+    expect((await getEntityHub("deva", 2))?.total).toBe(30);
+
+    fixture.v4Error = { message: "db down" };
+    await expect(getEntityHub("deva", 2)).resolves.toBeNull();
+  });
+
+  it("page 1 is still served from last-good (unchanged)", async () => {
+    fixture.rpcRows = [{ id: "c1", total: 4 }];
+    fixture.data = [one("c1")];
+    expect((await getEntityHub("deva", 1))?.total).toBe(4);
+    fixture.rpcError = { message: "db down" };
+    expect((await getEntityHub("deva", 1))?.total).toBe(4);
+  });
+
+  it("an unavailable page is never remembered either", async () => {
+    fixture.v4Error = { message: "x", code: "PGRST202" };
+    expect((await getEntityHub("deva", 2))?.unavailable).toBe(true);
+    fixture.v4Error = { message: "db down" };
+    await expect(getEntityHub("deva", 2)).resolves.toBeNull();
+  });
+});
+
+describe("getEntityHub(key, page): unknown key", () => {
+  it("returns null without touching Supabase, for any page", async () => {
+    for (const page of [1, 2, 99]) await expect(getEntityHub("bilinmeyen", page)).resolves.toBeNull();
+    expect(fixture.rpcCalls).toEqual([]);
+    expect(fixture.v4Calls).toEqual([]);
   });
 });
 

@@ -8,6 +8,14 @@ import {
   type TopicSlug,
 } from "@/lib/clusters/topic-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
+import {
+  ENTITY_HUB_LIMIT,
+  ENTITY_HUB_WINDOW_DAYS,
+  entityByKey,
+  hubMatchNote,
+  isEntityKey,
+} from "@/lib/entities/entity-hub";
+import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { blindspotsFeedResponse } from "@/lib/feeds/blindspots-feed";
 import {
   buildRssXml,
@@ -23,13 +31,23 @@ import {
 import { siteUrl } from "@/lib/site-url";
 
 // GET /rss/[topic].xml — one RSS 2.0 feed per topic hub (TOPIC_SLUGS) plus
-// /rss/kor-noktalar.xml for /blindspots. Not prerendered
+// /rss/kor-noktalar.xml for /blindspots, and (h136-roadmap-3) one feed per
+// entity hub at /rss/gundem-<key>.xml (the /gundem/<key> hubs). Not prerendered
 // (no generateStaticParams): the underlying reads can transiently return
 // null/throw, and baking a 503 into the build would be worse than paying a
 // per-request round trip for a low-traffic feed endpoint.
+//
+// The entity feed is page 1 of getEntityHub(key), the same cached read the hub
+// page renders (no query of its own), so its items are the hub's first 20
+// clusters in the hub's order (first_published desc) and /rss/gundem-chp.xml
+// lists the same /cluster ids as /gundem/chp. A 'gundem-' prefix cannot collide
+// with a topic slug (none of TOPIC_SLUGS starts with it), and the middleware
+// matcher '/rss/:topic' already covers the path.
 
 const SLUG_PATTERN = /^([a-z-]+)\.xml$/;
 const MAX_ITEMS = 30;
+
+const ENTITY_FEED_PREFIX = "gundem-";
 
 const KOR_NOKTALAR_SLUG = "kor-noktalar";
 const ALLOWED_SLUGS: ReadonlySet<string> = new Set<string>([
@@ -58,11 +76,13 @@ function rssResponse(xml: string): Response {
   });
 }
 
-function topicItem(base: string, slug: TopicSlug, bundle: ClusterBundle): RssItemInput {
+// One item for any cluster feed: `campaign` is the utm_campaign (konu_<slug> for
+// a topic, gundem_<key> for an entity hub). The guid is the plain cluster URL.
+function clusterItem(base: string, campaign: string, bundle: ClusterBundle): RssItemInput {
   const link = withUtm(`${base}/cluster/${bundle.cluster.id}`, {
     source: "rss",
     medium: "feed",
-    campaign: `konu_${slug}`,
+    campaign,
   });
   // Zones count voting sources only; the head is every member, with the
   // voting count in parentheses when they differ (see sourceCountHead).
@@ -79,6 +99,31 @@ function topicItem(base: string, slug: TopicSlug, bundle: ClusterBundle): RssIte
   };
 }
 
+// /rss/gundem-<key>.xml. `key` is already a curated entity key (isEntityKey).
+async function entityFeedResponse(key: string): Promise<Response> {
+  const entity = entityByKey(key);
+  if (entity === null) return notFoundResponse();
+
+  const hub = await getEntityHub(key);
+  if (hub === null) return rssUnavailableResponse();
+
+  const base = siteUrl();
+  const items = hub.bundles
+    .slice(0, ENTITY_HUB_LIMIT)
+    .map((b) => clusterItem(base, `gundem_${key}`, b));
+
+  const xml = buildRssXml({
+    title: `Tayf — Gündem: ${entity.label}`,
+    link: `${base}/gundem/${key}`,
+    selfUrl: `${base}/rss/${ENTITY_FEED_PREFIX}${key}.xml`,
+    // What the hub searches (headline only for akp), then the window and the
+    // cap, so a subscriber knows the name match can include same-name stories.
+    description: `${hubMatchNote(entity)} (son ${ENTITY_HUB_WINDOW_DAYS} gün, en yeni ${ENTITY_HUB_LIMIT})`,
+    items,
+  });
+  return rssResponse(xml);
+}
+
 export async function GET(
   _request: Request,
   { params }: RouteContext,
@@ -93,6 +138,14 @@ export async function GET(
   if (!match) return notFoundResponse();
 
   const slug = match[1]!;
+
+  // Entity hubs: 'gundem-<key>' with a curated key. 'gundem-', 'gundem-unknown'
+  // and 'gundem-chp-x' are not keys and fall through to the 404 below.
+  if (slug.startsWith(ENTITY_FEED_PREFIX)) {
+    const key = slug.slice(ENTITY_FEED_PREFIX.length);
+    return isEntityKey(key) ? entityFeedResponse(key) : notFoundResponse();
+  }
+
   if (!ALLOWED_SLUGS.has(slug)) return notFoundResponse();
 
   if (slug === KOR_NOKTALAR_SLUG) {
@@ -107,7 +160,7 @@ export async function GET(
 
   const items = result.bundles
     .slice(0, MAX_ITEMS)
-    .map((b) => topicItem(base, topicSlug, b));
+    .map((b) => clusterItem(base, `konu_${topicSlug}`, b));
 
   const xml = buildRssXml({
     title: `Tayf — ${topicNounTr(topicSlug)}`,
