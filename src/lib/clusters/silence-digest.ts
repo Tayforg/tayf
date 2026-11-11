@@ -211,3 +211,25 @@ export function blindspotCountLine(
   }
   return parts.join(" · ");
 }
+
+/**
+ * h130-blindspots-1: the line under the /blindspots count line for the claims
+ * that keep the label on the card and the story page (and that /hafta counts)
+ * but are not on this list:
+ *
+ *   "Bu dönemde kör nokta etiketi taşıyan 4 haber daha burada listelenmiyor: liste
+ *    kuralları (...) ya da güncel kaynak sayımı nedeniyle."
+ *
+ * `n` is `BlindspotsData.unlistedCount`, so the count line plus this line add up
+ * to /hafta's "Toplam". Word order keeps Turkish case suffixes off the number
+ * ("4 haber daha", never "4'ü"). Feed-health suppressions are not in `n` (/hafta,
+ * the cards and the story page withdraw those claims too), so the line names only
+ * the three list-rule classes and the live source tally.
+ * /metodoloji#kor-noktalar-listesi spells out the list rules. `null` for a
+ * count that is not above zero, including NaN and a payload cached before the
+ * field existed (`undefined`), so the page renders nothing.
+ */
+export function blindspotUnlistedLine(n: number): string | null {
+  if (!(n > 0)) return null;
+  return `Bu dönemde kör nokta etiketi taşıyan ${formatCountTr(n)} haber daha burada listelenmiyor: liste kuralları (aynı metnin kopyası, arama açıklaması başlığı, ağırlıkla Dünya ya da politika dışı haber) ya da güncel kaynak sayımı nedeniyle.`;
+}

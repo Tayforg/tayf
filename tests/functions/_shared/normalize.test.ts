@@ -1246,6 +1246,157 @@ describe("normalize.ts contentless titles: dropped and counted", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h130-feeds-2: an ad click-tracker link is not a story. On 2026-11-11 a
+// DoubleClick `gampad/clk` url was stored as a normal "Son haberler" card on
+// /source/haberturk (every reader click registered a paid ad click). prepareItem
+// now drops an item whose absolute url is on an ad host, counted in
+// `counters.adLinks`, after the title checks (a blank or contentless title is
+// still counted as contentless, never as an ad link).
+// ---------------------------------------------------------------------------
+
+describe("normalize.ts ad click links: dropped and counted (h130-feeds-2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const haberturk = {
+    id: "src-haberturk",
+    name: "Habertürk",
+    slug: "haberturk",
+    url: "https://www.haberturk.com",
+    rss_url: "https://www.haberturk.com/rss",
+  };
+  const AD_URL = "https://pubads.g.doubleclick.net/gampad/clk?id=7487496184&iu=/31903365";
+  const adItem = { title: "Kentin İyi Yaşam Çizgisi: KENT Etiler", link: AD_URL };
+  const fresh = () => ({ contentlessTitles: 0, adLinks: 0 });
+
+  it("prepareItem drops the Habertürk ad item and counts it as an ad link only", () => {
+    const counters = fresh();
+    expect(mod!.prepareItem(haberturk, adItem, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 1 });
+  });
+
+  it("normalizeItem returns null for the ad item and counts it once", () => {
+    const counters = fresh();
+    expect(mod!.normalizeItem(haberturk, adItem, 0, counters)).toBeNull();
+    expect(counters.adLinks).toBe(1);
+    expect(counters.contentlessTitles).toBe(0);
+  });
+
+  it("drops the ad item without a counters object (the old 2- and 3-argument calls)", () => {
+    expect(mod!.prepareItem(haberturk, adItem)).toBeNull();
+    expect(mod!.normalizeItem(haberturk, adItem)).toBeNull();
+    expect(mod!.normalizeItem(haberturk, adItem, 0)).toBeNull();
+  });
+
+  it("an ordinary item is unchanged and uncounted", () => {
+    const counters = fresh();
+    const item = {
+      title: "Merkez Bankası faizi sabit tuttu",
+      link: "https://www.haberturk.com/ekonomi/merkez-bankasi-faiz-1234567",
+    };
+    const prepared = mod!.prepareItem(haberturk, item, counters);
+    expect(prepared).not.toBeNull();
+    expect(prepared!.title).toBe("Merkez Bankası faizi sabit tuttu");
+    expect(prepared!.url).toBe("https://www.haberturk.com/ekonomi/merkez-bankasi-faiz-1234567");
+    expect(prepared!.item).toBe(item);
+    const row = mod!.normalizeItem(haberturk, item, 0, counters);
+    expect(row).not.toBeNull();
+    expect(row!.url).toBe("https://www.haberturk.com/ekonomi/merkez-bankasi-faiz-1234567");
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0 });
+  });
+
+  it("a relative link resolves against the source before the host check", () => {
+    const counters = fresh();
+    // The path names an ad host, the resolved host is the source's: kept.
+    const prepared = mod!.prepareItem(
+      haberturk,
+      { title: "Yol adında reklam sunucusu", link: "/doubleclick.net/gampad/clk" },
+      counters,
+    );
+    expect(prepared).not.toBeNull();
+    expect(prepared!.url).toBe("https://www.haberturk.com/doubleclick.net/gampad/clk");
+    expect(counters.adLinks).toBe(0);
+  });
+
+  it("a lookalike host is kept and uncounted (host match, not substring)", () => {
+    const counters = fresh();
+    expect(
+      mod!.prepareItem(
+        haberturk,
+        { title: "Benzer alan adı", link: "https://doubleclick.net.example.com/haber/1" },
+        counters,
+      ),
+    ).not.toBeNull();
+    expect(
+      mod!.prepareItem(
+        haberturk,
+        { title: "Benzer alan adı 2", link: "https://notdoubleclick.net/haber/2" },
+        counters,
+      ),
+    ).not.toBeNull();
+    expect(counters.adLinks).toBe(0);
+  });
+
+  it("an item without a link stays silent: not counted as an ad link", () => {
+    const counters = fresh();
+    expect(mod!.prepareItem(haberturk, { title: "Bağlantısız" }, counters)).toBeNull();
+    expect(mod!.prepareItem(haberturk, { title: "Bağlantısız", link: "  " }, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0 });
+  });
+
+  it("contentless titles still count separately: the title checks run before the ad check", () => {
+    const counters = fresh();
+    expect(mod!.prepareItem(haberturk, { title: "&nbsp", link: AD_URL }, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 0 });
+    expect(mod!.prepareItem(haberturk, { title: "   ", link: AD_URL }, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 2, adLinks: 0 });
+    expect(mod!.prepareItem(haberturk, { title: "&nbsp", link: "/x" }, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 3, adLinks: 0 });
+    expect(mod!.prepareItem(haberturk, adItem, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 3, adLinks: 1 });
+  });
+
+  it("adds to a counters object that already holds a count", () => {
+    const counters = { contentlessTitles: 4, adLinks: 5 };
+    mod!.prepareItem(haberturk, adItem, counters);
+    expect(counters).toEqual({ contentlessTitles: 4, adLinks: 6 });
+  });
+
+  const batch = [
+    { title: "Önce gerçek bir başlık", link: "/1" },
+    adItem,
+    { title: "&amp;nbsp", link: "/3" },
+    { title: "Reklam ikinci", link: "https://ad.doubleclick.net/ddm/clk/1;2;3" },
+    { title: "Sonra başka bir başlık", link: "/5" },
+    { title: "Bağlantısız başlık" },
+  ];
+
+  it("normalizeArticles totals both counters and returns only the real rows", () => {
+    const counters = fresh();
+    const rows = mod!.normalizeArticles(haberturk, batch, 0, counters);
+    expect(rows.map((r) => r.title)).toEqual(["Önce gerçek bir başlık", "Sonra başka bir başlık"]);
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 2 });
+  });
+
+  it("prepareArticles totals both counters and returns only the real items, in order", () => {
+    const counters = fresh();
+    const prepared = mod!.prepareArticles(haberturk, batch, counters);
+    expect(prepared.map((p) => p.title)).toEqual(["Önce gerçek bir başlık", "Sonra başka bir başlık"]);
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 2 });
+  });
+
+  it("an ad link drop logs nothing in the normaliser (ingest owns the log line, slug and count only)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mod!.normalizeArticles(haberturk, batch, 0, fresh());
+    mod!.prepareArticles(haberturk, batch, fresh());
+    expect(errSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // A-ingest-cpu (hunt-11): the normaliser is split into a cheap prepare phase
 // (link, title cleanup, contentless check, absolute url) and a heavy complete
 // phase (legal notice, canonical url, description, image, date, hash,

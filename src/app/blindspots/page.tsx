@@ -29,7 +29,10 @@ import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
 import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
 import { BLINDSPOT_LIST_LOOKBACK_DAYS } from "@/lib/clusters/blindspot-pick";
 import { RECALL_MATCH_NOTE } from "@/lib/clusters/recall-matched-zones";
-import { blindspotCountLine } from "@/lib/clusters/silence-digest";
+import {
+  blindspotCountLine,
+  blindspotUnlistedLine,
+} from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
 import {
@@ -144,6 +147,10 @@ export async function BlindspotsFeed() {
         BLINDSPOT_LIST_LOOKBACK_DAYS,
       )
     : null;
+  // h130-blindspots-1: the claims that keep the label but are not listed here
+  // (list rules, live tally); null at 0 and for a payload cached
+  // before the field existed, so nothing renders then.
+  const unlistedLine = result.ok ? blindspotUnlistedLine(result.unlistedCount) : null;
 
   return (
     <>
@@ -195,6 +202,23 @@ export async function BlindspotsFeed() {
               compact rows. */}
           {countLine && (
             <p className="text-sm text-muted-foreground">{countLine}</p>
+          )}
+          {/* h130-blindspots-1: /hafta counts every public claim of the same 7
+              days (49 on 2026-11-11) and this page lists 45: the others keep the
+              label on their card and story page but fail a list rule or the live
+              tally. One short line says so, so the two
+              totals read as one number (N + this count = /hafta's total). A plain
+              <a> like the definition link above: /metodoloji is static. */}
+          {unlistedLine && (
+            <p className="text-xs text-muted-foreground">
+              {unlistedLine}{" "}
+              <a
+                href="/metodoloji#kor-noktalar-listesi"
+                className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+              >
+                Kurallar
+              </a>
+            </p>
           )}
           <SilenceDigestBand digest={result.digest} />
           {/* h67-landmarks-1: the cards are <h3>s (BlindspotCard), so they need

@@ -5,7 +5,7 @@ import type {
   ClusterCardCluster,
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import { BLINDSPOT } from "@/lib/bias/config";
+import { BLINDSPOT, zoneOf } from "@/lib/bias/config";
 import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
@@ -252,8 +252,25 @@ export interface BlindspotsData {
   bundles: BlindspotBundle[];
   /** Every other passing claim of the window, most lopsided first. */
   more: BlindspotMoreRow[];
-  /** bundles.length + more.length: every public claim of the window. */
+  /** bundles.length + more.length: every claim of the window this list shows. */
   claimCount: number;
+  /**
+   * h130-blindspots-1: Step-A claims (is_blindspot, not vetoed, past the feed
+   * delay, inside the window) that this list does NOT show because of a list rule
+   * (`passesFeedFilters`: copy, SEO-explainer title, Dünya or non-politics share),
+   * the live zone tally, or no embedded member. They keep their label on the card
+   * and the story page and /hafta counts them, so claimCount + unlistedCount is
+   * /hafta's total for the same days. Feed-health suppressions are NOT counted:
+   * /hafta, the cards and the story page withdraw those claims too, so they are
+   * not labelled claims anywhere (the gate is applied to the stored
+   * `blindspot_side`, as /hafta does, so a row that fails a list rule AND sits on
+   * a suppressed side is excluded as well). Counted over the rows Step B embedded,
+   * so a claim above BLINDSPOT_CANDIDATE_SAFETY_CAP (which Step A never returned)
+   * is in neither number. Display only: no flag, veto, count, share or list moves
+   * because of it. A payload cached before this field existed lacks it, and
+   * `blindspotUnlistedLine` treats that as 0.
+   */
+  unlistedCount: number;
   /** Claims per dominant zone over the whole window; sums to claimCount. */
   sideCounts: Record<MediaDnaZone, number>;
   /** "Bu listede kim yer vermedi?", counted over ALL claims, not the cards. */
@@ -538,6 +555,7 @@ async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
       bundles: [],
       more: [],
       claimCount: 0,
+      unlistedCount: 0,
       sideCounts: zeroSideCounts(),
       digest: scopedDigest([], 0),
     };
@@ -562,9 +580,17 @@ async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
     .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   const built: BlindspotBundle[] = [];
   const flaggedIds = new Set<string>();
+  // Dropped rows whose stored side the feed-health gate withdraws: /hafta
+  // (summariseWeek), the cards and the story page drop these too, so they are
+  // not "unlisted" (see BlindspotsData.unlistedCount).
+  let suppressedDrops = 0;
   for (const row of rows) {
     const bundle = toBlindspotBundle(row, health);
-    if (!bundle) continue;
+    if (!bundle) {
+      const side = row.blindspot_side ? zoneOf(row.blindspot_side) : null;
+      if (side !== null && shouldSuppressBlindspot(side, health)) suppressedDrops++;
+      continue;
+    }
     built.push(bundle);
     // A literal `true` only: null, false and a row from before the column was
     // read are all "not flagged".
@@ -587,6 +613,12 @@ async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
     bundles,
     more,
     claimCount: bundles.length + more.length,
+    // Every embedded Step-A row that toBlindspotBundle returned null for (list
+    // rule, live tally, no member), minus the rows whose stored side the
+    // feed-health gate withdraws: /hafta, the cards and the story page drop those
+    // too. Rows above the safety cap never reach this point, so they are not
+    // counted (see BlindspotsData.unlistedCount).
+    unlistedCount: rows.length - built.length - suppressedDrops,
     sideCounts,
     digest: scopedDigest(claims, bundles.length),
   };

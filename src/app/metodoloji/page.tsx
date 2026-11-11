@@ -104,8 +104,13 @@ const englishOnlyEmptyColumn = ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—
 // h120-methodology-1: 2026-11-08 is hunt-66 (#228, list copy filter), 2026-11-09
 // is hunt-85 (#244, rare-stem tier) and hunt-105 (#254, wire-copy share over every
 // cluster), 2026-11-10 is hunt-107 (#255) and hunt-109 (#256, the same wording on
-// the share surfaces). Every number is read from the constant the code runs on.
+// the share surfaces), 2026-11-11 is h130-blindspots-2 (copy only: the label can be
+// withdrawn after it shows). Every number is read from the constant the code runs on.
 const CHANGELOG = [
+  {
+    date: "2026-11-11",
+    text: `Kör nokta etiketinin, göründükten sonra da ilk ${SIBLING_VETO.scopeHours} saat içinde kaldırılabileceği açıkça yazıldı; kural değişmedi.`,
+  },
   {
     date: "2026-11-10",
     text: `Kör nokta ifadesi: Tayf'ın otomatik kontrolü (Jev, olasılık ≥ %${Math.round(RECALL_MATCH_MIN_PROB * 100)}) sessiz görünen taraftaki bir kaynağın aynı olayı başka bir kümede verdiğini bulursa, kartlarda “Sadece X yazdı” yerine “Kümede sadece X” yazıyor, küme sayfasında ise o taraf “${RECALL_MATCH_NOTE}” diye gösteriliyor; paylaşım görseli, gömme kodu ve paylaşım metni de aynı ifadeyi kullanıyor. Kör nokta kuralının kendisi değişmedi; yalnızca ifade değişti.`,
@@ -445,7 +450,12 @@ export default async function MethodologyPage() {
               Kör Noktalar
             </Link>{" "}
             listesinde ilk yayından {BLINDSPOT.feedDelayHours} saat sonra
-            görünür — veritabanındaki işaretleme anlıktır.
+            görünür — veritabanındaki işaretleme anlıktır.{" "}
+            {/* h130-blindspots-2: the wait is not the whole catch-up window. The
+                sibling check below rescans a story for SIBLING_VETO.scopeHours
+                (48 h, longer than the wait), so the label can still be withdrawn
+                after it showed. Copy only: no rule or threshold changed. */}
+            {`Kardeş başlık denetimi bir haberi ilk yayından sonraki ${SIBLING_VETO.scopeHours} saat boyunca yeniden tarar; bu yüzden etiket göründükten sonra da kaldırılabilir. Kaldırılan haber Kör Noktalar listesinden ve RSS akışından çıkar.`}
           </p>
           <p className={proseClass}>
             Tayf&apos;ın kümeleyicisi aynı olayı bazen iki ayrı kümeye böler.
