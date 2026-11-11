@@ -18,11 +18,24 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
 //
 // This module answers two questions, and nothing else:
 //   1. fetchRecallMatchedZones: for these clusters, which zones did Jev match at
-//      p >= RECALL_MATCH_MIN_PROB with a voting source?
+//      p >= RECALL_MATCH_MIN_PROB with a voting source, in the LATEST check?
 //   2. recallQualifiedZones: of those, which does a claim call silent (a zone
 //      that is not the dominant one and has no voting member)?
 // No count, share, flag or veto is derived from either: the claim list, the
 // "N kör nokta" line, RSS and the v1 API do not read this module.
+//
+// The LATEST check (h114-postship-1). A blindspot is re-checked once per UTC day
+// while it stays in the stage's window, and every check stores every answer
+// (jev.ts keys an answer `<cluster>:<article>:<day>`; before that fix the second
+// answer of a pair was dropped, 36% of re-check answers in 30 days).
+// `blindspot_recall_suspect` is rewritten by every check, so it states the LATEST
+// check's verdict: a flagged cluster's wording must read that check's answers
+// only, not a union with an earlier day's matches the later check no longer
+// supports. Per cluster the rows of the highest run_id are kept (one run is one
+// check of that cluster: the stage asks a cluster once per UTC day). A row whose
+// run was pruned (run_id null) is older than any row with a run_id; a cluster
+// whose rows all lack one is read as one check, as before. Rows written before
+// the fix keep their first check's answers only.
 //
 // Fail-open: when the lookup errors, `fetchRecallMatchedZones` warns and returns
 // an empty Map, so every surface renders today's wording.
@@ -60,6 +73,8 @@ type OneOrMany<T> = T | T[] | null | undefined;
 /** The columns selected below; the embeds are objects (or one-element arrays). */
 interface PredictionRow {
   cluster_id: string | null;
+  /** bigint, null once the run's row is pruned (061: on delete set null). */
+  run_id?: number | string | null;
   jev_prob: number | string | null;
   articles: OneOrMany<{
     sources: OneOrMany<{ bias: string | null; kind: string | null }>;
@@ -78,6 +93,13 @@ function zoneFromBias(bias: string | null | undefined): MediaDnaZone | null {
   return ZONES_SORTED.find((z) => z === zone) ?? null;
 }
 
+/** The run id as a number; null when it is missing, empty or not a number. */
+function runIdOf(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function fetchChunk(
   supabase: SupabaseClient,
   ids: string[],
@@ -86,7 +108,7 @@ async function fetchChunk(
   // cluster_id list; task and jev_prob filter the few rows each cluster has.
   const { data, error } = await supabase
     .from("jev_shadow_predictions")
-    .select("cluster_id, jev_prob, articles(sources(bias, kind))")
+    .select("cluster_id, run_id, jev_prob, articles(sources(bias, kind))")
     .eq("task", "blindspot_recall")
     .in("cluster_id", ids)
     .gte("jev_prob", RECALL_MATCH_MIN_PROB)
@@ -98,9 +120,10 @@ async function fetchChunk(
 /**
  * Per cluster, the zones in which Jev's blindspot_recall stage matched a VOTING
  * source (outlet or wire; a toplayıcı / niş match never counts, as they never
- * count in the spectrum) at p >= RECALL_MATCH_MIN_PROB. Each value is a sorted,
- * de-duplicated plain array, so it can ride in a `"use cache"` payload. A cluster
- * with no match has no entry.
+ * count in the spectrum) at p >= RECALL_MATCH_MIN_PROB, in the cluster's LATEST
+ * check only (the rows of its highest run_id; see the header). Each value is a
+ * sorted, de-duplicated plain array, so it can ride in a `"use cache"` payload. A
+ * cluster with no match has no entry.
  *
  * Never throws: on ANY error (a failed chunk, a client that throws) it warns and
  * returns an EMPTY Map, so the caller prints today's wording; one failed chunk
@@ -121,26 +144,41 @@ export async function fetchRecallMatchedZones(
     const results = await Promise.all(chunks.map((chunk) => fetchChunk(supabase, chunk)));
 
     const wanted = new Set(ids);
-    const zonesByCluster = new Map<string, Set<MediaDnaZone>>();
+    const matchesByCluster = new Map<string, Array<{ runId: number | null; row: PredictionRow }>>();
     for (const rows of results) {
       for (const row of rows) {
         if (typeof row.cluster_id !== "string" || !wanted.has(row.cluster_id)) continue;
         // The query already filters on jev_prob; checking again keeps the
         // threshold true to this constant whatever shape the value arrives in
         // (numeric(4,3) is a JSON number, but a string must not slip under it).
+        // It runs before the latest-run pick, so a below-threshold row never
+        // makes its run "the latest".
         if (!(Number(row.jev_prob) >= RECALL_MATCH_MIN_PROB)) continue;
-        const source = firstOf(firstOf(row.articles)?.sources);
-        if (!source || !isVotingKind(source.kind)) continue;
-        const zone = zoneFromBias(source.bias);
-        if (!zone) continue;
-        const zones = zonesByCluster.get(row.cluster_id) ?? new Set<MediaDnaZone>();
-        zones.add(zone);
-        zonesByCluster.set(row.cluster_id, zones);
+        const list = matchesByCluster.get(row.cluster_id) ?? [];
+        list.push({ runId: runIdOf(row.run_id), row });
+        matchesByCluster.set(row.cluster_id, list);
       }
     }
 
     const out = new Map<string, MediaDnaZone[]>();
-    for (const [id, zones] of zonesByCluster) out.set(id, Array.from(zones).sort());
+    for (const [id, matches] of matchesByCluster) {
+      // The latest check of this cluster: its highest run_id. null only when no
+      // row has one, and then every row (all null) is read as one check.
+      let latest: number | null = null;
+      for (const { runId } of matches) {
+        if (runId !== null && (latest === null || runId > latest)) latest = runId;
+      }
+      const zones = new Set<MediaDnaZone>();
+      for (const { runId, row } of matches) {
+        if (runId !== latest) continue;
+        const source = firstOf(firstOf(row.articles)?.sources);
+        if (!source || !isVotingKind(source.kind)) continue;
+        const zone = zoneFromBias(source.bias);
+        if (!zone) continue;
+        zones.add(zone);
+      }
+      if (zones.size > 0) out.set(id, Array.from(zones).sort());
+    }
     return out;
   } catch (err) {
     // No cluster id, headline or count in the line (tests/guards/no-pii-logging).

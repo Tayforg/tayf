@@ -13,11 +13,14 @@
 // centroidGuard() is the decision made from it (CENTROID_FLOOR, CENTROID_MIN_MEMBERS,
 // the exemptions); cluster-consumer/index.ts gathers its inputs, builds the member
 // texts lazily and acts on the verdict (a candidate that is blocked is skipped).
+// A candidate the headline lane carried is checked too, against the lower
+// HEADLINE_CENTROID_FLOOR (h114-clusterpurity-3: a multi-topic bridge member lets the
+// lane glue another story onto a big cluster).
 //
 // The Edge runtime and tsc both compile it; relative .ts imports, same discipline as
 // ensemble.ts.
 
-import { CENTROID_FLOOR, CENTROID_MIN_MEMBERS } from "./constants.ts";
+import { CENTROID_FLOOR, CENTROID_MIN_MEMBERS, HEADLINE_CENTROID_FLOOR } from "./constants.ts";
 import type { TfidfIndex } from "./tfidf.ts";
 
 // The unit-length tf-idf vector of a free text, weighed like the consumer's own
@@ -92,7 +95,10 @@ export interface CentroidGuardInput {
   enabled: boolean;
   /** max(article_count, sources loaded for the cluster). */
   memberCount: number;
-  /** The headline lane carried the candidate (the full scorer's lane, or a member headline of the scan). */
+  /**
+   * The headline lane carried the candidate (the full scorer's lane, or a member headline of
+   * the scan). Not an exemption: such a candidate clears HEADLINE_CENTROID_FLOOR.
+   */
   headlineHit: boolean;
   /** The candidate came from the exact-title probe. */
   exactTitleProbeHit: boolean;
@@ -113,16 +119,17 @@ export interface CentroidGuardResult {
 /**
  * Whether the consumer passes a candidate cluster over instead of joining it
  * (h70-mergequality-2). It does so when the guard is on, the cluster has at least
- * CENTROID_MIN_MEMBERS members, nothing exempts the article (the headline lane, an
- * exact-title probe hit, an equal strict fingerprint, already being a member) and the
- * article's cosine with the cluster's centroid is under CENTROID_FLOOR. Every exemption
- * short-circuits before `cosine()` runs, so the cost is paid only for the candidates
- * that need it. Fails open: a non-finite member count or cosine never blocks.
+ * CENTROID_MIN_MEMBERS members, nothing exempts the article (an exact-title probe hit,
+ * an equal strict fingerprint, already being a member) and the article's cosine with the
+ * cluster's centroid is under the floor: CENTROID_FLOOR, or the lower
+ * HEADLINE_CENTROID_FLOOR when the headline lane carried the candidate (it used to be an
+ * exemption; h114-clusterpurity-3). Every exemption short-circuits before `cosine()`
+ * runs, so the cost is paid only for the candidates that need it. Fails open: a
+ * non-finite member count or cosine never blocks.
  */
 export function centroidGuard(input: CentroidGuardInput): CentroidGuardResult {
   if (
     !input.enabled ||
-    input.headlineHit ||
     input.exactTitleProbeHit ||
     input.strictFingerprintMatch ||
     input.alreadyMember ||
@@ -130,6 +137,7 @@ export function centroidGuard(input: CentroidGuardInput): CentroidGuardResult {
   ) {
     return { blocked: false, cosine: null };
   }
+  const floor = input.headlineHit ? HEADLINE_CENTROID_FLOOR : CENTROID_FLOOR;
   const cosine = input.cosine();
-  return { blocked: Number.isFinite(cosine) && cosine < CENTROID_FLOOR, cosine };
+  return { blocked: Number.isFinite(cosine) && cosine < floor, cosine };
 }

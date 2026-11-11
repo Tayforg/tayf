@@ -45,3 +45,28 @@ export function topicPageRobots(
   }
   return undefined;
 }
+
+/**
+ * Is page 1 of a hub with `count` clusters in the 7-day window indexable? The
+ * third rule of `topicPageRobots` stated on the cluster COUNT (getTopicCounts,
+ * the same filter the page reads with), for a caller that has the count and no
+ * page: the static sitemap, which lists a /konu/<slug> hub only when this holds
+ * (h114-consumers-1), so it never submits a URL the page itself marks `noindex`
+ * (a Search Console "Submitted URL marked noindex" error).
+ *
+ * `count >= TOPIC_INDEX_MIN_CLUSTERS`. It agrees with
+ * `topicPageRobots(1, { bundles: min(count, TOPIC_PAGE_SIZE) of them, hasMore:
+ * count > TOPIC_PAGE_SIZE })` for every count: a count past one page means a
+ * page 2 exists (`hasMore`, indexable however few cards survive), and a count
+ * of at most one page IS the page's bundle count, which must reach the minimum.
+ * The parity test in topic-page-robots.test.ts pins that. One gap by design: a
+ * cluster with no readable member is dropped from the page's cards but still
+ * counted, so a hub sitting at 20 to 30 can serve `noindex` while this says
+ * true; the page rule reads the cards, this reads the count.
+ *
+ * Anything that is not a count at or above the minimum (0, negative, NaN) is
+ * `false`.
+ */
+export function topicHubIndexable(count: number): boolean {
+  return count >= TOPIC_INDEX_MIN_CLUSTERS;
+}

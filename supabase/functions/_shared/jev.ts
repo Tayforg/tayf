@@ -2806,9 +2806,22 @@ export function unlinkCandidatesFromRows(rows: readonly JevPredictionRow[]): Jev
   return out;
 }
 
-/** One row per candidate answer: subject_id `${clusterId}:${articleId}`,
- * baseline "false" (the system says the silent zone did NOT cover it), so
- * agree is true exactly when the answer also lands below the 0.5 threshold. */
+/** One row per candidate answer: subject_id `${clusterId}:${articleId}:${day}`
+ * (`day` is the run's UTC runDayKey), baseline "false" (the system says the
+ * silent zone did NOT cover it), so agree is true exactly when the answer also
+ * lands below the 0.5 threshold.
+ *
+ * The day is part of the key because jev_shadow_predictions is written with
+ * `ignoreDuplicates` on (task, subject_id): without it, the second check of the
+ * same (cluster, article) pair -- one per UTC day while the cluster stays in the
+ * stage's window -- was a silent no-op and 36% of re-check answers were never
+ * stored, while `blindspot_recall_suspect` (computed from the in-memory rows)
+ * followed them. Every check now stores every answer; readers that want "the
+ * check that set the flag" take the rows of the highest run_id of the cluster
+ * (src/lib/clusters/recall-matched-zones.ts). The `${clusterId}:${day}` marker
+ * row of buildBlindspotDayRow has two parts and never collides with these three;
+ * rows written before this change keep their two-part ids, and no reader parses
+ * subject_id. */
 export function buildBlindspotRecallRows(
   runId: number,
   cluster: JevBlindspotClusterRow,
@@ -2818,6 +2831,7 @@ export function buildBlindspotRecallRows(
   hash: string,
   preview: string,
   latencyMs: number,
+  day: string,
 ): JevPredictionRow[] {
   const rows: JevPredictionRow[] = [];
   for (const [key, articleId] of Object.entries(keys)) {
@@ -2827,7 +2841,7 @@ export function buildBlindspotRecallRows(
       predictionRow({
         task: "blindspot_recall",
         subjectType: "cluster",
-        subjectId: `${cluster.id}:${articleId}`,
+        subjectId: `${cluster.id}:${articleId}:${day}`,
         articleId,
         clusterId: cluster.id,
         stateHash: hash,
@@ -3257,7 +3271,10 @@ async function runClustersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
  * the same event. One `<clusterId>:<day>` marker row per cluster per UTC
  * day makes the anti-join hold even when a cluster had zero ranked
  * candidates that day; a gateway failure writes NO marker row, so the next
- * run retries the cluster.
+ * run retries the cluster. Each candidate answer is stored under
+ * `<clusterId>:<articleId>:<day>` (h114-postship-1), so a re-check on a later
+ * day keeps its own answers instead of being dropped as a duplicate of the
+ * first check's.
  */
 async function runBlindspotRecallStage(ctx: RunCtx, nowMs: number): Promise<void> {
   const sinceIso = new Date(nowMs - JEV_BLINDSPOT_WINDOW_HOURS * 3600e3).toISOString();
@@ -3325,7 +3342,17 @@ async function runBlindspotRecallStage(ctx: RunCtx, nowMs: number): Promise<void
     const hash = await stateHash(request.state);
     const preview = statePreview(request.state);
     const callId = nextCallId(ctx);
-    const answerRows = buildBlindspotRecallRows(ctx.runId, cluster, keys, result.response, callId, hash, preview, result.latencyMs);
+    const answerRows = buildBlindspotRecallRows(
+      ctx.runId,
+      cluster,
+      keys,
+      result.response,
+      callId,
+      hash,
+      preview,
+      result.latencyMs,
+      day,
+    );
     const dayRow = buildBlindspotDayRow({
       runId: ctx.runId,
       clusterId: cluster.id,

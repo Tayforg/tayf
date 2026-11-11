@@ -45,6 +45,20 @@
 //     started it (trt-haber against bha, prod cluster 94503853) joined on the
 //     primary tf-idf + entity lane (h101-clustermembers-1; see
 //     familyHomonymFires())
+//   template veto: two headlines share a statement or budget template but name
+//     different speakers or ministries ("Bakan Kurum'dan 10 Kasim ... mesaji" vs
+//     "Cumhurbaskani Erdogan'dan ...", "Genclik ve Spor Bakanliginin ... butcesi"
+//     vs "Adalet Bakanligi butcesi"). No headline exemption, like the homonym
+//     veto: it withdraws the headline lane (actorMismatchFires) and caps the
+//     primary and MinHash lanes at SUBJECT_VETO_CAP, because the intruders of
+//     five prod clusters joined on those lanes too (h114-clusterpurity-2; see
+//     templateActorMismatchFires())
+//   generic headline name conflict: when the headline lane fired for two headlines
+//     of at most HEADLINE_GENERIC_MAX_TOKENS tokens that name nobody ("Fon
+//     sorusturmasinda yeni gozalti") and both CLEANED descriptions are given
+//     (ScoreOpts.aDescription / bDescription, headlineOnlyScore opts), the lane is
+//     withdrawn like actorVeto when the descriptions name different people
+//     (h114-clusterpurity-4; see genericHeadlineNameConflict())
 //   actor veto: a headline-lane match must not cross actors (h70-mergequality-3;
 //     see actorMismatchFires()). When the lane fired but the two headlines name
 //     different actors -- comma subjects that are disjoint, or one comma subject
@@ -70,6 +84,7 @@
 // constants.ts for the per-constant evidence.
 
 import {
+  DESCRIPTION_NAME_STOP,
   ENTITY_DENOM_MIN,
   ENTITY_FRESHNESS_HOURS,
   ENTITY_SPARSE_TEXT_FACTOR,
@@ -83,18 +98,23 @@ import {
   HEADLINE_CONTAIN_MIN,
   HEADLINE_CONTAIN_MIN_SIZE_RATIO,
   HEADLINE_CONTAIN_MIN_TOKENS,
+  HEADLINE_GENERIC_MAX_TOKENS,
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_LANE_MIN_JACCARD,
   HEADLINE_LANE_MIN_SHARED,
   HEADLINE_LIVE_TITLE_MAX_HOURS,
   HEADLINE_SHORT_MIN_TOKENS,
   HEADLINE_TITLE_MAX_CHARS,
+  INSTITUTION_HEAD_WORDS,
   MATCH_THRESHOLD,
   MIN_SHARED_ENTITIES,
   MINHASH_SOFT_ACCEPT_JACCARD,
+  STATEMENT_TEMPLATE_NOUNS,
   SUBJECT_SPAN_MAX_WORDS,
   SUBJECT_STOP_WORDS,
   SUBJECT_VETO_CAP,
+  TEMPLATE_ACTOR_GENERIC_KEEP,
+  TEMPLATE_PLACE_PHRASES,
   TFIDF_WEIGHT,
   TIME_WINDOW_HOURS,
 } from "./constants.ts";
@@ -106,7 +126,7 @@ import {
   jaccardFromSignatures,
 } from "./fingerprint.ts";
 import { extractEntities } from "./entities.ts";
-import { hasIncidentWord, provincesIn } from "./provinces.ts";
+import { hasIncidentWord, IL_NAMES, provincesIn } from "./provinces.ts";
 
 // ---------------------------------------------------------------------------
 // Per-source clustering penalties.
@@ -130,6 +150,12 @@ export interface ScoreOpts {
   // non-empty.
   aTitle?: string | null;
   bTitle?: string | null;
+  // The cleaned descriptions (cleanDescription) of the two articles. Read only for a
+  // pair the headline lane fired for, and only when both are given: generic
+  // headlines whose descriptions name different people withdraw the lane (see
+  // genericHeadlineNameConflict()).
+  aDescription?: string | null;
+  bDescription?: string | null;
 }
 
 export interface ScoreComponents {
@@ -177,10 +203,18 @@ export interface ScoreComponents {
   // SUBJECT_VETO_CAP (the headline lane is withdrawn through actorVeto); see
   // familyHomonymFires().
   homonymVeto: boolean;
+  // True when the two headlines share a statement or budget template but name
+  // different speakers or ministries ("Bakan Kurum'dan ... mesajı" vs
+  // "Cumhurbaşkanı Erdoğan'dan ... mesajı", "Gençlik ve Spor Bakanlığının ...
+  // bütçesi" vs "Adalet Bakanlığı bütçesi"), so the primary and MinHash lanes
+  // were capped at SUBJECT_VETO_CAP (the headline lane is withdrawn through
+  // actorVeto); see templateActorMismatchFires().
+  templateVeto: boolean;
   // True when the headline lane fired but the two headlines name different
   // actors, so the lane was withdrawn (headlineLane is then false and the
-  // lane's score is dropped); see actorMismatchFires(). Only evaluated for a
-  // pair the lane fired for.
+  // lane's score is dropped); see actorMismatchFires(). Also true when the lane
+  // fired for two generic headlines whose descriptions name different people
+  // (genericHeadlineNameConflict). Only evaluated for a pair the lane fired for.
   actorVeto: boolean;
 }
 
@@ -405,7 +439,10 @@ export function headlineLane(
  * With both `aTitle` and `bTitle` given it returns 0 when the two titles name
  * different actors (actorMismatchFires, which includes a family member against
  * the principal, familyHomonymFires), exactly as score() withdraws the lane
- * for such a pair; without titles the result is the lane's alone.
+ * for such a pair; without titles the result is the lane's alone. With both
+ * `aDescription` and `bDescription` as well (the cleaned descriptions) it also
+ * returns 0 for two generic headlines whose descriptions name different people
+ * (genericHeadlineNameConflict); without them, or with only one, nothing changes.
  */
 export function headlineOnlyScore(
   ha: HeadlineTokens,
@@ -416,11 +453,16 @@ export function headlineOnlyScore(
     bSourceSlug?: string | null;
     aTitle?: string | null;
     bTitle?: string | null;
+    aDescription?: string | null;
+    bDescription?: string | null;
   } = {},
 ): number {
   const lane = headlineLane(ha, hb, hoursDelta);
   if (!lane.fired) return 0;
-  if (opts?.aTitle && opts?.bTitle && actorMismatchFires(opts.aTitle, opts.bTitle)) return 0;
+  if (opts?.aTitle && opts?.bTitle) {
+    if (actorMismatchFires(opts.aTitle, opts.bTitle)) return 0;
+    if (genericHeadlineNameConflict(opts.aTitle, opts.bTitle, opts.aDescription, opts.bDescription)) return 0;
+  }
   return lane.score * timeDecayFor(hoursDelta) *
     sourcePenaltyFor(opts?.aSourceSlug, opts?.bSourceSlug);
 }
@@ -887,7 +929,429 @@ export function actorMismatchFires(aTitle: string, bTitle: string): boolean {
   return subjectsDisjoint(a, b) ||
     oneSidedActorMismatch(a, b, bTitle) ||
     oneSidedActorMismatch(b, a, aTitle) ||
-    familyHomonymFires(aTitle, bTitle);
+    familyHomonymFires(aTitle, bTitle) ||
+    templateActorMismatchFires(aTitle, bTitle);
+}
+
+// ---------------------------------------------------------------------------
+// Template actor mismatch (h114-clusterpurity-2)
+// ---------------------------------------------------------------------------
+
+const PROVINCE_SET: ReadonlySet<string> = new Set(IL_NAMES);
+const TEMPLATE_KEEP_GENERIC: ReadonlySet<string> = new Set(TEMPLATE_ACTOR_GENERIC_KEEP);
+const TEMPLATE_PLACE_PHRASE_SET: ReadonlySet<string> = new Set(TEMPLATE_PLACE_PHRASES);
+
+// The suffix of a person's or place's ablative after an apostrophe, folded:
+// dan den tan ten ("Kurum'dan", "Gurlek'ten").
+const ABLATIVE_SUFFIX = /^[dt][ae]n$/;
+// The same suffix behind a name that ends in a vowel takes the buffer n: ndan nden
+// ("Memisoglu'ndan", "Dervisoglu'ndan"). Read by ablativeIn only after the institution
+// head check, so "Bakanligi'ndan" keeps its head.
+const BUFFER_ABLATIVE_SUFFIX = /^nd[ae]n$/;
+const ENDS_IN_VOWEL = /[aeiou]$/;
+// The end of an institution's ablative, folded: "bakanligindan", "mudurlugunden".
+const INSTITUTION_ABLATIVE_END = /n?d[ae]n$/;
+// A word that closes a clause: the word after it does not continue its name.
+const CLAUSE_END = /[,;:!?.…]["”’')\]]*$/;
+
+// A title word without the characters around it that are not part of it: leading
+// quotes and brackets, closing punctuation. Its apostrophe suffix is kept.
+function trimWord(raw: string): string {
+  return raw.replace(/^[^\p{L}\p{N}]+/u, "").replace(TRAILING_PUNCTUATION, "");
+}
+
+// The word before its first apostrophe ("Kurum'dan" -> "Kurum").
+function stemOfWord(raw: string): string {
+  return trimWord(raw).split(HOMONYM_APOSTROPHE)[0] ?? "";
+}
+
+function clippedWords(title: string): string[] {
+  return title.slice(0, HEADLINE_TITLE_MAX_CHARS).split(/\s+/).filter(Boolean);
+}
+
+function foldedWordSet(title: string): Set<string> {
+  const words = new Set<string>();
+  for (const w of foldTurkishWord(title.slice(0, HEADLINE_TITLE_MAX_CHARS)).split(/[^a-z0-9]+/)) {
+    if (w) words.add(w);
+  }
+  return words;
+}
+
+// True when some prefix of `a` is a prefix of `b`.
+function sharePrefix(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  for (const x of a) if (b.has(x)) return true;
+  return false;
+}
+
+interface TemplateSide {
+  // ACTOR_PREFIX_LEN prefixes of the actor key's folded pieces.
+  keyPrefixes: Set<string>;
+  // ACTOR_PREFIX_LEN prefixes of every folded word of the (clipped) title.
+  wordPrefixes: Set<string>;
+  // The capitalised words up to and including the ablative, case kept.
+  raw: string[];
+  // A minister ("Bakan Kurum'dan"): a capitalised 'bakan...' word that is not a ministry.
+  bakanRole: boolean;
+  // The ablative is a ministry ("Milli Savunma Bakanligindan").
+  bakanligHead: boolean;
+}
+
+// The first word within the first SUBJECT_SPAN_MAX_WORDS that is an ablative: an
+// apostrophe -dan/-den/-tan/-ten, or an institution head ending in -(n)dan/-(n)den.
+function ablativeIn(raws: readonly string[]): { index: number; head: string | null } | null {
+  const limit = Math.min(raws.length, SUBJECT_SPAN_MAX_WORDS);
+  for (let i = 0; i < limit; i++) {
+    const parts = trimWord(raws[i]!).split(HOMONYM_APOSTROPHE);
+    if ((parts[0] ?? "") === "") continue;
+    if (parts.length > 1 && ABLATIVE_SUFFIX.test(foldTurkishWord(parts[1]))) return { index: i, head: null };
+    const folded = foldTurkishWord(parts.join(""));
+    if (!INSTITUTION_ABLATIVE_END.test(folded)) continue;
+    const head = INSTITUTION_HEAD_WORDS.find((h) => folded.startsWith(h));
+    if (head !== undefined) return { index: i, head };
+    // A buffer-n ablative on a name ("Memisoglu'ndan"): a person, so no head.
+    if (parts.length > 1 && BUFFER_ABLATIVE_SUFFIX.test(foldTurkishWord(parts[1]!)) &&
+        ENDS_IN_VOWEL.test(foldTurkishWord(parts[0]!))) {
+      return { index: i, head: null };
+    }
+  }
+  return null;
+}
+
+// True when a STATEMENT_TEMPLATE_NOUNS word (a folded prefix) occurs from word `from` on.
+function hasStatementNoun(raws: readonly string[], from: number): boolean {
+  for (let i = from; i < raws.length; i++) {
+    const folded = foldTurkishWord(raws[i]!).replace(/[^a-z0-9]/g, "");
+    for (const noun of STATEMENT_TEMPLATE_NOUNS) if (folded.startsWith(noun)) return true;
+  }
+  return false;
+}
+
+// The speaker of a "<actor>'dan <...> <statement noun>" headline, or null when the
+// title is not one or names no actor (only roles, or a place: "Ankara'dan ...").
+function templateSideOf(title: string): TemplateSide | null {
+  const raws = clippedWords(title);
+  const ablative = ablativeIn(raws);
+  if (ablative === null || !hasStatementNoun(raws, ablative.index + 1)) return null;
+  const key = new Set<string>();
+  const raw: string[] = [];
+  let bakanRole = false;
+  let hasRole = false;
+  let namedWords = 0;
+  for (let i = 0; i <= ablative.index; i++) {
+    const stem = stemOfWord(raws[i]!);
+    const pieces = foldTurkishWord(stem).split(/[^a-z0-9]+/).filter(Boolean);
+    // A role counts in any case ("BBP lideri Destici'den").
+    if (i < ablative.index && pieces.some(isRolePiece)) hasRole = true;
+    if (!startsCapitalised(stem)) continue;
+    raw.push(stem);
+    let named = false;
+    for (const piece of pieces) {
+      if (piece.startsWith("bakan") && !piece.startsWith("bakanl")) bakanRole = true;
+      if (i === ablative.index && ablative.head !== null) continue; // the institution head itself
+      if (isRolePiece(piece) || SUBJECT_STOP.has(piece) || PROVINCE_SET.has(piece)) continue;
+      if (GENERIC_ENTITY_SET.has(piece) && !TEMPLATE_KEEP_GENERIC.has(piece)) continue;
+      key.add(piece);
+      named = true;
+    }
+    if (named) namedWords++;
+  }
+  if (key.size === 0) return null;
+  // A party speaks through its people ("YENI Parti'den ..." is "Gokhan Gunaydin'dan ...").
+  const stemFolded = foldTurkishWord(stemOfWord(raws[ablative.index]!));
+  if (stemFolded === "parti" || stemFolded === "partisi") return null;
+  // A country or seat of power written as two words ("Kuzey Kore'den", "Beyaz
+  // Saray'dan") is a bare word as well: two capitalised words, but no full name.
+  if (!hasRole && ablative.head === null &&
+      TEMPLATE_PLACE_PHRASE_SET.has(raw.map((w) => foldTurkishWord(w)).join(" "))) {
+    return null;
+  }
+  // A speaker: an institution head, a role ("Bakan Kurum'dan"), a full name ("Emine
+  // Erdogan'dan") or one of the persons of TEMPLATE_ACTOR_GENERIC_KEEP. A bare word
+  // ("Iran'dan", "Tahran'dan", "Kremlin'den", "MHP'den", "Kalibaf'tan") is as likely a
+  // country, a seat of power or a party as a person, and each of them speaks through
+  // its people, so it is no actor to tell apart (nor is a TEMPLATE_PLACE_PHRASES one).
+  const speaker = ablative.head !== null || hasRole || namedWords >= 2 ||
+    (key.size === 1 && TEMPLATE_KEEP_GENERIC.has([...key][0]!));
+  if (!speaker) return null;
+  return {
+    keyPrefixes: prefixesOf(key),
+    wordPrefixes: prefixesOf(foldedWordSet(title)),
+    raw,
+    bakanRole,
+    bakanligHead: ablative.head !== null && ablative.head.startsWith("bakanlig"),
+  };
+}
+
+// True when an all-caps word of `x` spells the capitalised words of `y` ("MSB" in
+// "MSB Sozcusu Aktürk'ten" against "Milli Savunma Bakanligindan"): the same actor under
+// its short and long name, where acronymAlias needs the acronym to be the whole side.
+function acronymIn(x: readonly string[], y: readonly string[]): boolean {
+  return x.some((w) => isAcronym(w) && spellsAcronym(w, y));
+}
+
+// R1: both titles are statements of an ablative speaker and the speakers differ.
+function statementActorsDiffer(aTitle: string, bTitle: string): boolean {
+  const a = templateSideOf(aTitle);
+  if (a === null) return false;
+  const b = templateSideOf(bTitle);
+  if (b === null) return false;
+  if (sharePrefix(a.keyPrefixes, b.keyPrefixes)) return false;
+  // A name of one speaker anywhere in the other title ("Emine Erdogan'dan ..." led by
+  // "Ataturk'u saygiyla andi: Emine Erdogan'dan ...") is the same speaker.
+  if (sharePrefix(a.keyPrefixes, b.wordPrefixes) || sharePrefix(b.keyPrefixes, a.wordPrefixes)) return false;
+  if (acronymAlias(a.raw, b.raw) || acronymIn(a.raw, b.raw) || acronymIn(b.raw, a.raw)) return false;
+  // A minister against a ministry is ambiguous ("Bakan Simsek'ten ..." vs "Hazine ve
+  // Maliye Bakanligindan ...").
+  return !((a.bakanRole && b.bakanligHead) || (b.bakanRole && a.bakanligHead));
+}
+
+// The capitalised words (and 've') directly before each word that starts with
+// 'bakanlig', nearest first: the name of every ministry the title mentions. A clause
+// end or a lower-case word ends a name.
+function ministryNameWords(raws: readonly string[]): string[][] {
+  const out: string[][] = [];
+  for (let h = 0; h < raws.length; h++) {
+    if (!foldTurkishWord(stemOfWord(raws[h]!)).startsWith("bakanlig")) continue;
+    const stems: string[] = [];
+    for (let k = h - 1; k >= 0; k--) {
+      const word = raws[k]!;
+      if (CLAUSE_END.test(word)) break;
+      const stem = stemOfWord(word);
+      if (foldTurkishWord(stem) === "ve") continue;
+      if (!startsCapitalised(stem)) break;
+      stems.push(stem);
+    }
+    out.push(stems);
+  }
+  return out;
+}
+
+// The ministries a title names: the capitalised words (and 've') directly before a
+// word that starts with 'bakanlig', folded, without roles and the connector.
+function ministryNames(title: string): Set<string> {
+  const out = new Set<string>();
+  for (const stems of ministryNameWords(clippedWords(title))) {
+    for (const stem of stems) {
+      for (const piece of foldTurkishWord(stem).split(/[^a-z0-9]+/)) {
+        if (piece && !isRolePiece(piece)) out.add(piece);
+      }
+    }
+  }
+  return out;
+}
+
+// True when an all-caps word of `a` is the acronym of a ministry `b` names: the first
+// letters of the capitalised words before its 'bakanlig' word, plus B ("Milli Egitim
+// Bakanligi" = MEB, "Genclik ve Spor Bakanligi" = GSB, "Milli Savunma Bakanligi" = MSB).
+function acronymNamesMinistry(a: string, b: string): boolean {
+  const tokens = new Set<string>();
+  for (const w of clippedWords(a)) {
+    const stem = stemOfWord(w);
+    if (isAcronym(stem)) tokens.add(stem.toLocaleUpperCase("tr"));
+  }
+  if (tokens.size === 0) return false;
+  for (const stems of ministryNameWords(clippedWords(b))) {
+    if (stems.length === 0) continue;
+    let acronym = "B";
+    for (const stem of stems) acronym = ([...stem][0] ?? "") + acronym;
+    if (tokens.has(acronym.toLocaleUpperCase("tr"))) return true;
+  }
+  return false;
+}
+
+// R2: both titles name ministries, and the two sets of names are disjoint.
+function ministriesDiffer(aTitle: string, bTitle: string): boolean {
+  const a = ministryNames(aTitle);
+  if (a.size === 0) return false;
+  const b = ministryNames(bTitle);
+  if (b.size === 0) return false;
+  const pa = prefixesOf(a);
+  const pb = prefixesOf(b);
+  if (sharePrefix(pa, pb)) return false;
+  if (sharePrefix(pa, prefixesOf(foldedWordSet(bTitle))) || sharePrefix(pb, prefixesOf(foldedWordSet(aTitle)))) return false;
+  // A ministry under its acronym in the other title ("MEB" for "Milli Egitim Bakanligi").
+  return !(acronymNamesMinistry(aTitle, bTitle) || acronymNamesMinistry(bTitle, aTitle));
+}
+
+/**
+ * True when two headlines share a statement or budget template but name different
+ * speakers or ministries (h114-clusterpurity-2). Pure, symmetric, false for anything
+ * that is not a non-empty string. Either rule fires it; both read the title clipped
+ * to HEADLINE_TITLE_MAX_CHARS and compare words by their first ACTOR_PREFIX_LEN
+ * folded letters.
+ *
+ * R1, ablative statement template ("Bakan Kurum'dan 10 Kasim Ataturk'u Anma Gunu
+ * mesaji" vs "Cumhurbaskani Erdogan'dan ..."). Per title: the first of the first
+ * SUBJECT_SPAN_MAX_WORDS words that is an ablative -- an apostrophe suffix that is
+ * dan, den, tan or ten (ndan / nden behind a name that ends in a vowel:
+ * "Memisoglu'ndan"), or a word that starts with an INSTITUTION_HEAD_WORDS prefix
+ * and ends in -(n)dan / -(n)den ("Bakanliginden") -- with a STATEMENT_TEMPLATE_NOUNS
+ * word after it. The actor key is the folded pieces of the capitalised words from
+ * the title start up to and including the ablative, less roles, stop words,
+ * GENERIC_ENTITIES (except the persons of TEMPLATE_ACTOR_GENERIC_KEEP), provinces
+ * and the institution head itself; the qualifier before a head stays ("Milli
+ * Savunma Bakanligindan" -> milli, savunma). A title with no key (only roles, or a
+ * place: "Ankara'dan ...", "Bakanliktan ...") never fires, and neither does one whose
+ * actor is not a speaker: a party ("YENI Parti'den ..."), a bare word that is no
+ * person of TEMPLATE_ACTOR_GENERIC_KEEP ("Iran'dan", "Tahran'dan", "Kremlin'den",
+ * "MHP'den", "Kalibaf'tan") and a country or seat of power written as two words
+ * (TEMPLATE_PLACE_PHRASES: "Kuzey Kore'den", "Beyaz Saray'dan", unless a role comes
+ * before it) speak through their people, so they are not told apart;
+ * a speaker is an institution head, a role ("Bakan Kurum'dan"), a full name ("Emine
+ * Erdogan'dan") or one of those persons. It fires when both keys
+ * exist, share no prefix, no key piece occurs (by prefix) anywhere in the other
+ * title, the two are not one actor under an acronym (a side that is the acronym
+ * alone, "MSB'den" vs "Milli Savunma Bakanligindan", or an all-caps word of one side
+ * that spells the other side's capitalised words, "MSB Sozcusu Aktürk'ten" vs the
+ * same ministry), and it is not a minister against a ministry ("Bakan Simsek'ten"
+ * vs "Hazine ve Maliye Bakanligindan": ambiguous).
+ *
+ * R2, named ministries ("Genclik ve Spor Bakanliginin 2027 yili butcesi ..." vs "Adalet
+ * Bakanligi butcesi ..."). A title names the ministries whose 'bakanlig...' word it
+ * has, by the capitalised words (and 've') directly before it. It fires when both
+ * titles name a ministry, the two name sets share no prefix, no name occurs in the
+ * other title and no all-caps word of one title is the acronym of a ministry the
+ * other names ("MEB" for "Milli Egitim Bakanligi": the first letters of its name
+ * words plus B); a title naming both ministries never fires.
+ */
+export function templateActorMismatchFires(aTitle: string, bTitle: string): boolean {
+  if (typeof aTitle !== "string" || typeof bTitle !== "string") return false;
+  if (aTitle === "" || bTitle === "") return false;
+  return statementActorsDiffer(aTitle, bTitle) || ministriesDiffer(aTitle, bTitle);
+}
+
+// ---------------------------------------------------------------------------
+// Generic headline, different people (h114-clusterpurity-4)
+// ---------------------------------------------------------------------------
+
+// Only the first part of a description is read: the lead names who the story is about.
+const DESCRIPTION_NAME_SPAN = 240;
+// A word that ends a sentence ("alindi.", "mi?", "...").
+const SENTENCE_END = /[.!?…]["”’')\]]*$/;
+
+// True when a title holds a capitalised word after word 0 that is more than a role, a
+// stop word or a generic entity: it names somebody (or something), so it is not generic.
+function namesSomebody(title: string): boolean {
+  const raws = clippedWords(title);
+  for (let i = 1; i < raws.length; i++) {
+    const stem = stemOfWord(raws[i]!);
+    if (!startsCapitalised(stem)) continue;
+    for (const piece of foldTurkishWord(stem).split(/[^a-z0-9]+/)) {
+      if (!piece) continue;
+      if (!(isRolePiece(piece) || SUBJECT_STOP.has(piece) || GENERIC_ENTITY_SET.has(piece))) return true;
+    }
+  }
+  return false;
+}
+
+// A headline token this short ("fon", "ara") is no event word.
+const EVENT_STEM_MIN_LEN = 4;
+
+// The folded pieces of the proper-name runs in the first DESCRIPTION_NAME_SPAN
+// characters of a cleaned description: maximal runs of two or more consecutive
+// capitalised words (apostrophe suffixes stripped; a word that closes a clause ends
+// its run), less the sentence-initial word of a run and the pieces that are roles,
+// stop words, generic entities or company / board words (DESCRIPTION_NAME_STOP).
+// Only a run that the headline's own event word follows directly counts ("Enver Cevik
+// GOZALTINA alindi", "Murat Yonac TUTUKLANDI"): that is the person the headline is
+// about. A name elsewhere in the lead ("ABD Baskani Donald Trump", "Cumhuriyet
+// Bassavciligi") is another story's person at least as often as another person of
+// this one -- the same-story pairs of the replay named them all -- so it is not read.
+function descriptionNamePieces(description: string, eventStems: readonly string[]): Set<string> {
+  const text = description.slice(0, DESCRIPTION_NAME_SPAN);
+  const out = new Set<string>();
+  const entries: Array<{ word: string; stem: string; cap: boolean; initial: boolean }> = [];
+  let initial = true;
+  let prevEnd = 0;
+  for (const m of text.matchAll(/\S+/g)) {
+    const word = m[0];
+    const at = m.index ?? 0;
+    if (text.slice(prevEnd, at).includes("\n")) initial = true;
+    const stem = stemOfWord(word);
+    entries.push({ word, stem, cap: startsCapitalised(stem), initial });
+    initial = SENTENCE_END.test(word);
+    prevEnd = at + word.length;
+  }
+  let i = 0;
+  while (i < entries.length) {
+    if (!entries[i]!.cap) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (!CLAUSE_END.test(entries[j]!.word) && j + 1 < entries.length && entries[j + 1]!.cap) j++;
+    const closed = CLAUSE_END.test(entries[j]!.word);
+    const next = entries[j + 1];
+    if (j > i && !closed && next !== undefined) {
+      const folded = foldTurkishWord(next.word).replace(/[^a-z0-9]/g, "");
+      if (eventStems.some((stem) => folded.startsWith(stem))) {
+        for (let k = i; k <= j; k++) {
+          const w = entries[k]!;
+          if (w.initial) continue;
+          for (const piece of foldTurkishWord(w.stem).split(/[^a-z0-9]+/)) {
+            if (!piece || isRolePiece(piece) || SUBJECT_STOP.has(piece) || GENERIC_ENTITY_SET.has(piece)) continue;
+            if (DESCRIPTION_NAME_STOP.some((p) => piece.startsWith(p))) continue;
+            out.add(piece);
+          }
+        }
+      }
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+/**
+ * True when two GENERIC headlines that matched on the headline lane are about
+ * different people, which only their descriptions say (h114-clusterpurity-4: 'Fon
+ * sorusturmasinda yeni gozalti' for Enver Cevik's detention and for Omer Murat
+ * Gulkan's). The caller applies it to a pair the lane fired for, with the CLEANED
+ * descriptions (cleanDescription). Pure, symmetric, false for anything that is not a
+ * non-empty string.
+ *
+ * It applies only when the shorter title has at most HEADLINE_GENERIC_MAX_TOKENS
+ * headline tokens and neither title holds a capitalised word after word 0 that is not
+ * a role, a SUBJECT_STOP_WORDS word or a GENERIC_ENTITIES word (a title that names the
+ * person is judged by the actor rules, not by this one). Then, from the first 240
+ * characters of each description it reads the proper-name runs -- maximal runs of 2+
+ * consecutive capitalised words, apostrophe suffixes stripped -- drops the
+ * sentence-initial word and the pieces matching ROLE_PREFIXES, DESCRIPTION_NAME_STOP,
+ * SUBJECT_STOP_WORDS and GENERIC_ENTITIES, and folds what remains. It fires when both
+ * piece sets are non-empty and share no ACTOR_PREFIX_LEN prefix.
+ *
+ * Tightening over the first draft (h115 replay): of the runs only those that are
+ * directly followed by a word starting with a headline token of 4+ letters count (the
+ * person the headline's own event word is about: "Enver Cevik gozaltina alindi" for
+ * 'gozalti'). Without it 12 of the 13 conflicts the 7-day replay found were the same
+ * story told with different names in the lead (a BDDK deputy chairman and the
+ * Istanbul prosecutor's office on the same arrests, 'Resmi Gazete' against the
+ * President on the same rector appointments, KEPCO against Seoul's companies on the
+ * same audience); with it exactly one fires, the cgtn-turk / cumhuriyet pair.
+ */
+export function genericHeadlineNameConflict(
+  aTitle: string,
+  bTitle: string,
+  aDescription: string | null | undefined,
+  bDescription: string | null | undefined,
+): boolean {
+  if (typeof aTitle !== "string" || typeof bTitle !== "string") return false;
+  if (typeof aDescription !== "string" || typeof bDescription !== "string") return false;
+  if (aTitle === "" || bTitle === "" || aDescription === "" || bDescription === "") return false;
+  const shorter = Math.min(headlineTokens(aTitle).tokens.size, headlineTokens(bTitle).tokens.size);
+  if (shorter > HEADLINE_GENERIC_MAX_TOKENS) return false;
+  if (namesSomebody(aTitle) || namesSomebody(bTitle)) return false;
+  const eventStems = new Set<string>();
+  for (const title of [aTitle, bTitle]) {
+    for (const token of headlineTokens(title).tokens) {
+      if (token.length >= EVENT_STEM_MIN_LEN && !/^\d+$/.test(token)) eventStems.add(token);
+    }
+  }
+  const stems = [...eventStems];
+  const a = descriptionNamePieces(aDescription, stems);
+  if (a.size === 0) return false;
+  const b = descriptionNamePieces(bDescription, stems);
+  if (b.size === 0) return false;
+  return !sharePrefix(prefixesOf(a), prefixesOf(b));
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,7 +1535,7 @@ export function score(
   hoursDelta: number,
   opts: ScoreOpts = {},
 ): ScoreResult {
-  const { aSourceSlug, bSourceSlug, aTitle, bTitle } = opts || {};
+  const { aSourceSlug, bSourceSlug, aTitle, bTitle, aDescription, bDescription } = opts || {};
   const sourcePenalty = sourcePenaltyFor(aSourceSlug, bSourceSlug);
 
   // 1. Strict fingerprint auto-accept.
@@ -1098,6 +1562,7 @@ export function score(
         incidentVeto: false,
         counterVeto: false,
         homonymVeto: false,
+        templateVeto: false,
         actorVeto: false,
       },
     };
@@ -1174,8 +1639,12 @@ export function score(
   // not fired, so the text floor and the subject / incident vetoes below
   // apply to it again. Evaluated only for a pair the lane fired for (the
   // subject veto already covers the other pairs).
+  // The same withdrawal for two generic headlines whose descriptions name different
+  // people (h114-clusterpurity-4, genericHeadlineNameConflict); it needs both
+  // descriptions.
   const actorVeto = headlineFired && !!aTitle && !!bTitle &&
-    actorMismatchFires(aTitle, bTitle);
+    (actorMismatchFires(aTitle, bTitle) ||
+      genericHeadlineNameConflict(aTitle, bTitle, aDescription, bDescription));
   const headlineEffective = headlineFired && !actorVeto;
   if (!headlineEffective) headlineScore = 0;
 
@@ -1218,8 +1687,14 @@ export function score(
   // lane through actorMismatchFires() is not enough. It caps the two lanes the
   // other vetoes cap, at the same SUBJECT_VETO_CAP.
   const homonymVeto = !!aTitle && !!bTitle && familyHomonymFires(aTitle, bTitle);
+  // Template veto (h114-clusterpurity-2): the same statement or budget template
+  // under different speakers or ministries. Like the homonym veto it has no
+  // headline exemption: the intruders of 04e8fdce, c0436da0 and c9525327 joined on
+  // MinHash and the primary lane as well, so withdrawing the headline lane
+  // (actorMismatchFires) is not enough.
+  const templateVeto = !!aTitle && !!bTitle && templateActorMismatchFires(aTitle, bTitle);
   let jaccardForRaw = jaccardScore;
-  if (subjectVeto || incidentVeto || counterVeto || homonymVeto) {
+  if (subjectVeto || incidentVeto || counterVeto || homonymVeto || templateVeto) {
     primaryForRaw = Math.min(primaryForRaw, SUBJECT_VETO_CAP);
     jaccardForRaw = Math.min(jaccardScore, SUBJECT_VETO_CAP);
   }
@@ -1255,6 +1730,7 @@ export function score(
       incidentVeto,
       counterVeto,
       homonymVeto,
+      templateVeto,
       actorVeto,
     },
   };

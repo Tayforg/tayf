@@ -78,6 +78,14 @@ vi.mock("@supabase/supabase-js", () => ({
   },
 }));
 
+// h114-consumers-1: static.xml lists a /konu hub only when its page 1 is
+// indexable, from getTopicCounts (the cached 7-day counts the /konu index
+// renders). Only that getter is stubbed; TOPIC_SLUGS and the rest stay real.
+vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/topic-query")>();
+  return { ...actual, getTopicCounts: vi.fn() };
+});
+
 import {
   escapeXml,
   monthsBetween,
@@ -99,13 +107,23 @@ import {
   NEWS_LIMIT,
 } from "./sitemaps";
 import { cacheLife } from "next/cache";
+import { getTopicCounts, TOPIC_SLUGS, type TopicSlug } from "@/lib/clusters/topic-query";
 import { getRecentWeekKeys, weekRange } from "@/lib/weekly/week-archive";
 import { escapeXml as rssBuilderEscapeXml } from "@/lib/feeds/rss-builder";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
 
+/** Seven-day cluster count per hub, as getTopicCounts returns it. */
+function topicCounts(overrides: Partial<Record<TopicSlug, number>> = {}): Record<TopicSlug, number> {
+  return { dunya: 120, ekonomi: 80, spor: 30, yasam: 30, teknoloji: 30, genel: 40, ...overrides };
+}
+
 beforeEach(() => {
+  // Default: every hub is full enough to be indexable, so a test that does not
+  // care about the /konu hubs sees today's six.
+  vi.mocked(getTopicCounts).mockReset();
+  vi.mocked(getTopicCounts).mockResolvedValue(topicCounts());
   fixture.clusters = [];
   fixture.sources = [];
   fixture.clustersError = null;
@@ -369,11 +387,103 @@ describe("getSitemapIndexXml", () => {
 });
 
 describe("getStaticSitemapXml", () => {
-  it("lists /konu and every TOPIC_SLUGS hub, and never /konu/politika", async () => {
-    const xml = await getStaticSitemapXml("https://tayf.test");
-    expect(xml).toContain("<loc>https://tayf.test/konu</loc>");
-    expect(xml).toContain("<loc>https://tayf.test/konu/dunya</loc>");
-    expect(xml).not.toContain("/konu/politika");
+  /** Every /konu and /konu/<slug> <loc> in `xml`, in document order. */
+  const konuLocs = (xml: string): string[] =>
+    [...xml.matchAll(/<loc>(https:\/\/tayf\.test\/konu(?:\/[^<]*)?)<\/loc>/g)].map((m) => m[1]!);
+
+  describe("h114-consumers-1: a /konu hub is listed only when its page 1 is indexable", () => {
+    it("lists /konu and the full hubs, and none of the thin ones or /konu/politika", async () => {
+      vi.mocked(getTopicCounts).mockResolvedValue(
+        topicCounts({ dunya: 120, ekonomi: 80, spor: 6, yasam: 12, teknoloji: 4, genel: 40 }),
+      );
+
+      const xml = await getStaticSitemapXml("https://tayf.test");
+
+      expect(xml).toContain("<loc>https://tayf.test/konu</loc>");
+      expect(xml).toContain("<loc>https://tayf.test/konu/dunya</loc>");
+      expect(xml).toContain("<loc>https://tayf.test/konu/ekonomi</loc>");
+      expect(xml).toContain("<loc>https://tayf.test/konu/genel</loc>");
+      expect(xml).not.toContain("/konu/spor");
+      expect(xml).not.toContain("/konu/yasam");
+      expect(xml).not.toContain("/konu/teknoloji");
+      expect(xml).not.toContain("/konu/politika");
+      expect(konuLocs(xml)).toEqual([
+        "https://tayf.test/konu",
+        "https://tayf.test/konu/dunya",
+        "https://tayf.test/konu/ekonomi",
+        "https://tayf.test/konu/genel",
+      ]);
+    });
+
+    it("lists all six hubs and never /konu/politika when every hub is full (today's list)", async () => {
+      const xml = await getStaticSitemapXml("https://tayf.test");
+
+      expect(konuLocs(xml)).toEqual([
+        "https://tayf.test/konu",
+        ...TOPIC_SLUGS.map((slug) => `https://tayf.test/konu/${slug}`),
+      ]);
+      expect(xml).not.toContain("/konu/politika");
+    });
+
+    it("keeps a hub entry as it was: hourly, priority 0.6", async () => {
+      const xml = await getStaticSitemapXml("https://tayf.test");
+      const at = xml.indexOf("<loc>https://tayf.test/konu/dunya</loc>");
+      expect(at).toBeGreaterThan(-1);
+      const entry = xml.slice(at, xml.indexOf("</url>", at));
+      expect(entry).toContain("<changefreq>hourly</changefreq>");
+      expect(entry).toContain("<priority>0.6</priority>");
+    });
+
+    it("lists all six hubs when the counts could not be read (null): a read blip never drops URLs", async () => {
+      vi.mocked(getTopicCounts).mockResolvedValue(null);
+
+      const xml = await getStaticSitemapXml("https://tayf.test");
+
+      expect(konuLocs(xml)).toEqual([
+        "https://tayf.test/konu",
+        ...TOPIC_SLUGS.map((slug) => `https://tayf.test/konu/${slug}`),
+      ]);
+      expect(xml).not.toContain("/konu/politika");
+    });
+
+    it("the boundary is 20 clusters: 19 is left out, 20 is listed", async () => {
+      vi.mocked(getTopicCounts).mockResolvedValue(topicCounts({ spor: 19, yasam: 20 }));
+
+      const xml = await getStaticSitemapXml("https://tayf.test");
+
+      expect(xml).not.toContain("<loc>https://tayf.test/konu/spor</loc>");
+      expect(xml).toContain("<loc>https://tayf.test/konu/yasam</loc>");
+    });
+
+    it("lists only the /konu index when every hub is thin (it is always listed)", async () => {
+      vi.mocked(getTopicCounts).mockResolvedValue(
+        topicCounts({ dunya: 0, ekonomi: 0, spor: 0, yasam: 0, teknoloji: 0, genel: 0 }),
+      );
+
+      const xml = await getStaticSitemapXml("https://tayf.test");
+
+      expect(konuLocs(xml)).toEqual(["https://tayf.test/konu"]);
+      // The rest of the file is untouched: the neighbours are still there.
+      expect(xml).toContain("<loc>https://tayf.test/gundem</loc>");
+    });
+
+    it("a hub that fills up is listed again on the next build, a hub that thins out drops (no deploy, no stale list)", async () => {
+      vi.mocked(getTopicCounts).mockResolvedValue(topicCounts({ spor: 6, genel: 40 }));
+      const thin = await getStaticSitemapXml("https://tayf.test");
+      expect(thin).not.toContain("/konu/spor");
+      expect(thin).toContain("/konu/genel");
+
+      vi.mocked(getTopicCounts).mockResolvedValue(topicCounts({ spor: 31, genel: 3 }));
+      const refilled = await getStaticSitemapXml("https://tayf.test");
+      expect(refilled).toContain("<loc>https://tayf.test/konu/spor</loc>");
+      expect(refilled).not.toContain("/konu/genel");
+    });
+
+    it("reads the counts once per build, through getTopicCounts, and builds no Supabase client of its own", async () => {
+      await getStaticSitemapXml("https://tayf.test");
+      expect(getTopicCounts).toHaveBeenCalledTimes(1);
+      expect(fixture.clientBuilds).toBe(0);
+    });
   });
 
   it("lists the /gundem index right after /konu (daily, 0.5) but none of the /gundem/<key> hubs", async () => {
@@ -867,7 +977,7 @@ describe("cached-failure-sweep: DB sitemap builders", () => {
 });
 
 describe("cached-failure-sweep: the pure builders are unchanged", () => {
-  it("getStaticSitemapXml and getSitemapIndexXml build no client and keep one revalidate:3600", async () => {
+  it("getStaticSitemapXml (its counts come from the mocked getTopicCounts) and getSitemapIndexXml build no client and keep one revalidate:3600", async () => {
     await getStaticSitemapXml("https://tayf.test");
     await getSitemapIndexXml("https://tayf.test");
     expect(fixture.clientBuilds).toBe(0);

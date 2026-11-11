@@ -18,7 +18,9 @@
 //                 containment, >= HEADLINE_LANE_MIN_SHARED shared tokens, numerals
 //                 consistent, size guard on containment), scored by
 //                 headlineOnlyScore -- which is 0 for a pair whose two headlines name
-//                 different actors (actorMismatchFires), so that pair is no evidence.
+//                 different actors (actorMismatchFires), so that pair is no evidence, and
+//                 for two generic headlines whose cleaned descriptions (when both sides
+//                 carry one) name different people (genericHeadlineNameConflict).
 // All three need the member to be within HEADLINE_LANE_MAX_HOURS of the article.
 // The live-title variant ("CANLI | ...") and the short-identical variant (fewer
 // than HEADLINE_LANE_MIN_SHARED shared tokens) are NOT evidence here.
@@ -84,6 +86,13 @@ export interface AttachMember {
   tokens: HeadlineTokens;
   publishedMs: number;
   fingerprint: string | null;
+  /**
+   * The CLEANED description (cleanDescription), when the caller has one. Only the
+   * headline lane reads it, and only when both sides carry one: two generic headlines
+   * whose descriptions name different people are no evidence (h114-clusterpurity-4,
+   * genericHeadlineNameConflict). Absent, null or empty leaves the decision unchanged.
+   */
+  description?: string | null;
 }
 
 export type AttachArticle = AttachMember;
@@ -155,10 +164,14 @@ function memberEvidence(
   if (!lane.fired || lane.kind === "live-title" || lane.shared < HEADLINE_LANE_MIN_SHARED) return null;
   // With both titles headlineOnlyScore is 0 for a pair that names different actors
   // (h70-mergequality-3: "Erdogan, Karabag Zaferi'nin ..." against a comma-less
-  // "AK Parti Sozcusu Celik Karabag Zaferi'nin ..."): no headline evidence then.
+  // "AK Parti Sozcusu Celik Karabag Zaferi'nin ..."): no headline evidence then. With
+  // both descriptions as well it is 0 for two generic headlines whose descriptions
+  // name different people (h114-clusterpurity-4); a side without one changes nothing.
   const score = headlineOnlyScore(article.tokens, member.tokens, hours, {
     aTitle: article.title,
     bTitle: member.title,
+    aDescription: article.description,
+    bDescription: member.description,
   });
   return score > 0 ? { score, lane: "headline" } : null;
 }

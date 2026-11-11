@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { INVALID_XML_CHARS_RE } from "../../../supabase/functions/_shared/rss/entities.ts";
+import { expectLinear, rep } from "../../_helpers/linear-time";
 
 // ---------------------------------------------------------------------------
 // Sanitisation coverage for supabase/functions/_shared/rss/normalize.ts.
@@ -1977,5 +1978,111 @@ describe("normalize.ts hostile markup is linear-time [h26-security-2]", () => {
       expect(hasTagShape(row!.title)).toBe(false);
       expect(hasTagShape(row!.description)).toBe(false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-114: stableArticleId. Anadolu Ajansı retitles a live article under a NEW
+// url (new slug, same trailing numeric id) and keeps the live stub's pubDate, so
+// the re-slugged row used to enter the database 2.5-3 hours "old". Ingest finds
+// the earlier row by this id (evidence: 4117359, 4116605, 4118171).
+// ---------------------------------------------------------------------------
+describe("stableArticleId (hunt-114)", () => {
+  type StableIdModule = {
+    stableArticleId: (sourceSlug: string, url: string) => string | null;
+    STABLE_ARTICLE_ID_SOURCES: ReadonlyMap<string, RegExp>;
+  };
+  let ids: StableIdModule;
+  beforeAll(async () => {
+    ids = (await import(
+      "../../../supabase/functions/_shared/rss/normalize.ts"
+    )) as unknown as StableIdModule;
+  });
+
+  const AA = "anadolu-ajansi";
+  const GABAR =
+    "https://www.aa.com.tr/tr/gundem/cumhurbaskani-erdogan-gabarda-iki-yeni-sahada-daha-petrol-kesfettik/4117359";
+
+  it("lists anadolu-ajansi and nothing else", () => {
+    expect([...ids.STABLE_ARTICLE_ID_SOURCES.keys()]).toEqual([AA]);
+  });
+
+  it("returns the trailing numeric id of an AA article url", () => {
+    expect(ids.stableArticleId(AA, GABAR)).toBe("4117359");
+    expect(
+      ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/canli-cumhurbaskani-erdogan-konusuyor/4117359"),
+    ).toBe("4117359");
+  });
+
+  it("two slugs of one article give the same id", () => {
+    const a = ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/canli-cumhurbaskani-erdogan-konusuyor-/4118171");
+    const b = ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/cumhurbaskani-erdogan-devleti-ve-milleti/4118171");
+    expect(a).toBe("4118171");
+    expect(b).toBe(a);
+  });
+
+  it("strips the query string and the fragment before matching", () => {
+    expect(ids.stableArticleId(AA, `${GABAR}?utm_source=x&id=111111`)).toBe("4117359");
+    expect(ids.stableArticleId(AA, `${GABAR}#yorumlar`)).toBe("4117359");
+    expect(ids.stableArticleId(AA, `${GABAR}#a?b=222222`)).toBe("4117359");
+    expect(ids.stableArticleId(AA, `${GABAR}/?x=1`)).toBe("4117359");
+  });
+
+  it("accepts one trailing slash", () => {
+    expect(ids.stableArticleId(AA, `${GABAR}/`)).toBe("4117359");
+  });
+
+  it("returns null for any other source slug", () => {
+    expect(ids.stableArticleId("trt-haber", GABAR)).toBeNull();
+    expect(ids.stableArticleId("", GABAR)).toBeNull();
+    expect(ids.stableArticleId("anadolu-ajansi-english", GABAR)).toBeNull();
+    expect(ids.stableArticleId("constructor", GABAR)).toBeNull();
+    expect(ids.stableArticleId("__proto__", GABAR)).toBeNull();
+  });
+
+  it("returns null for a url without a numeric tail", () => {
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/sadece-slug")).toBeNull();
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/")).toBeNull();
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr")).toBeNull();
+    expect(ids.stableArticleId(AA, "")).toBeNull();
+  });
+
+  it("returns null for an id that appears only in the query string or the fragment", () => {
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/slug?id=4117359")).toBeNull();
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/slug?x=1/4117359")).toBeNull();
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/slug#/4117359")).toBeNull();
+  });
+
+  it("needs the digits to be a whole path segment of 6 to 9 digits", () => {
+    // digits glued to the slug are part of the headline, not an id
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/konut-kredisi-4117359")).toBeNull();
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/slug/12345")).toBeNull();
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/slug/123456")).toBe("123456");
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/slug/123456789")).toBe("123456789");
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/gundem/slug/1234567890")).toBeNull();
+    // a numeric segment that is not last is a section id
+    expect(ids.stableArticleId(AA, "https://www.aa.com.tr/tr/4117359/slug")).toBeNull();
+  });
+
+  it("returns only digits, whatever the rest of the url holds", () => {
+    const hostile = "https://www.aa.com.tr/tr/gundem/a),or(source_id.neq.x,url.like.*%25/4117360";
+    const id = ids.stableArticleId(AA, hostile);
+    expect(id).toBe("4117360");
+    expect(id).toMatch(/^[0-9]+$/);
+  });
+
+  it("never throws on a non-string url", () => {
+    expect(ids.stableArticleId(AA, undefined as unknown as string)).toBeNull();
+    expect(ids.stableArticleId(AA, null as unknown as string)).toBeNull();
+    expect(ids.stableArticleId(AA, 4117359 as unknown as string)).toBeNull();
+  });
+
+  it.each([
+    ["a run of slashes", rep("/", "https://www.aa.com.tr/", "x")],
+    ["a run of digits", rep("1", "https://www.aa.com.tr/")],
+    ["slash-digit pairs", rep("/1", "https://www.aa.com.tr")],
+    ["a run of question marks", rep("?", "https://www.aa.com.tr/slug")],
+  ])("%s in the url scales linearly", (_name, gen) => {
+    expectLinear(gen, (url) => ids.stableArticleId(AA, url), { n: 200_000, ceilingMs: 1_000 });
   });
 });

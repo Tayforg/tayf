@@ -3,7 +3,8 @@ import { cacheLife } from "next/cache";
 import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { escapeXml } from "@/lib/feeds/rss-builder";
 import { createReaderClient } from "@/lib/supabase/server";
-import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
+import { getTopicCounts, TOPIC_SLUGS, type TopicSlug } from "@/lib/clusters/topic-query";
+import { topicHubIndexable } from "@/lib/clusters/topic-page-robots";
 import { hasIndexableTitle, servedClusterTitle } from "@/lib/seo/indexable-title";
 import { THIN_SOURCE_MIN, THIN_SOURCE_WINDOW_DAYS, isThinSource } from "@/lib/seo/thin-source";
 import { WEEK_ARCHIVE_MAX_WEEKS, shiftWeek, weekRange } from "@/lib/weekly/week-archive";
@@ -46,9 +47,14 @@ import { WEEK_ARCHIVE_FIRST, weekKeyFromMs } from "@/lib/weekly/week-key";
 //                            returns the XML; a failed attempt awaits the
 //                            request scope and reads live once more; a
 //                            still-failing read rejects (the route sends 503).
-// getCurrentSitemapMonth / getSitemapIndexXml / getStaticSitemapXml read
+// getCurrentSitemapMonth / getSitemapIndexXml / getStaticSitemapXmlCached read
 // nothing from the outside world (a clock and a pure render), so they stay
 // plain cached bodies, exempt by name in tests/guards/cache-life-after-attempt.
+// static.xml does need one read (the /konu hub counts, see getStaticSitemapXml),
+// so it is split the same way: the exported getStaticSitemapXml is uncached and
+// reads the counts through getTopicCounts (a resolveCachedOrRetry getter, which
+// must never run inside a "use cache" body), then hands the result to the pure
+// cached renderer as an argument.
 
 /** First calendar month with any non-archived, article_count >= 2 cluster.
  *  V1 (SBQ, 2026-09-28): min(first_published) among those rows is
@@ -104,8 +110,10 @@ const BASE_STATIC_ROUTES: ReadonlyArray<{
   { path: "/kalite", changefreq: "daily", priority: 0.5 },
   { path: "/duzeltmeler", changefreq: "daily", priority: 0.4 },
   { path: "/hafta", changefreq: "daily", priority: 0.6 },
-  // Pack C ("Konu"): /konu index + the six hub slugs (TOPIC_SLUGS).
-  // politika is deliberately absent — it 308s to "/" and is not a hub.
+  // Pack C ("Konu"): the /konu index, always listed. The hub slugs (TOPIC_SLUGS)
+  // are added in getStaticSitemapXml, one per hub whose page 1 is indexable
+  // (sitemapTopicSlugs). politika is deliberately absent — it 308s to "/" and
+  // is not a hub.
   { path: "/konu", changefreq: "daily", priority: 0.6 },
   // Entity hubs (roadmap G2): the /gundem index only. The indexable
   // /gundem/<key> hubs are listed in /sitemaps/hubs.xml (hub-sitemap.ts), which
@@ -327,10 +335,29 @@ export function sitemapArchiveWeeks(nowMs: number): Array<{ key: string; lastmod
   return out;
 }
 
-/** Today's static routes + the six /konu hubs + the eligible optional pages +
- *  the past weekly archive. No DB access; the clock read (the archive weeks)
- *  is legal inside this cache body, as in getSitemapIndexXml. */
-export async function getStaticSitemapXml(baseUrl: string): Promise<string> {
+/** The /konu hubs static.xml submits for `counts` (the 7-day cluster count per
+ *  hub, from getTopicCounts), in TOPIC_SLUGS order: a hub is listed only when
+ *  its page 1 is indexable (topicHubIndexable), because a thin hub serves
+ *  `noindex, follow` and submitting it is a Search Console "Submitted URL marked
+ *  noindex" error, as for the thin sources and the question-titled clusters.
+ *  `null` (the counts could not be read) lists all six, which is what the file
+ *  held before this rule: a sitemap must not drop URLs on a read blip. Pure. */
+export function sitemapTopicSlugs(
+  counts: Readonly<Record<TopicSlug, number>> | null,
+): readonly TopicSlug[] {
+  if (counts === null) return TOPIC_SLUGS;
+  return TOPIC_SLUGS.filter((slug) => topicHubIndexable(counts[slug]));
+}
+
+/** The pure cached renderer behind getStaticSitemapXml: the static routes, the
+ *  `hubSlugs` /konu hubs, the eligible optional pages and the past weekly
+ *  archive. It reads nothing but a clock, which is legal inside this cache body
+ *  (as in getSitemapIndexXml); the hub list arrives as an argument, so it is
+ *  part of the cache key and a change in the list is a new entry at once. */
+async function getStaticSitemapXmlCached(
+  baseUrl: string,
+  hubSlugs: readonly string[],
+): Promise<string> {
   "use cache";
   cacheLife({ revalidate: 3600 });
 
@@ -340,7 +367,7 @@ export async function getStaticSitemapXml(baseUrl: string): Promise<string> {
       changefreq: route.changefreq,
       priority: route.priority,
     })),
-    ...TOPIC_SLUGS.map((slug) => ({
+    ...hubSlugs.map((slug) => ({
       loc: `${baseUrl}/konu/${slug}`,
       changefreq: "hourly",
       priority: 0.6,
@@ -353,6 +380,20 @@ export async function getStaticSitemapXml(baseUrl: string): Promise<string> {
   ];
 
   return renderUrlset(entries);
+}
+
+/** Today's static routes + the /konu hubs whose page 1 is indexable + the
+ *  eligible optional pages + the past weekly archive. One cached count read:
+ *  getTopicCounts (the 7-day counts with the hub page's own filter, cached for
+ *  the `cluster-feed` window) decides the hubs (sitemapTopicSlugs). It is a
+ *  resolveCachedOrRetry getter, so it is awaited HERE, in the uncached wrapper,
+ *  never inside the "use cache" renderer (tests/guards/cache-retry-prerender).
+ *  The rendered file keeps its one revalidate:3600 window. getTopicCounts never
+ *  throws for a data failure, so a read blip lists all six hubs rather than
+ *  failing the file. */
+export async function getStaticSitemapXml(baseUrl: string): Promise<string> {
+  const hubSlugs = sitemapTopicSlugs(await getTopicCounts());
+  return getStaticSitemapXmlCached(baseUrl, hubSlugs);
 }
 
 /** One `sources` row of the existence probe. `recent` is the aliased

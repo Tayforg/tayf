@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { topicPageRobots } from "./topic-page-robots";
+import { topicHubIndexable, topicPageRobots } from "./topic-page-robots";
 import { TOPIC_INDEX_MIN_CLUSTERS, TOPIC_PAGE_SIZE } from "./topic-query";
 
 const NOINDEX = { index: false, follow: true };
@@ -71,5 +71,39 @@ describe("topicPageRobots", () => {
       expect(topicPageRobots(2, { bundles: bundles(1), hasMore: false })).toBeUndefined();
       expect(topicPageRobots(2, { bundles: bundles(30), hasMore: true })).toBeUndefined();
     });
+  });
+});
+
+// h114-consumers-1: static.xml lists a hub only when its page 1 is indexable.
+// topicHubIndexable is that rule on the 7-day cluster COUNT (getTopicCounts),
+// the one number the sitemap has without reading a page.
+describe("topicHubIndexable", () => {
+  it("the threshold is TOPIC_INDEX_MIN_CLUSTERS: 19 is thin, 20 is indexable", () => {
+    expect(TOPIC_INDEX_MIN_CLUSTERS).toBe(20);
+    expect(topicHubIndexable(TOPIC_INDEX_MIN_CLUSTERS - 1)).toBe(false);
+    expect(topicHubIndexable(TOPIC_INDEX_MIN_CLUSTERS)).toBe(true);
+  });
+
+  it("an empty hub is not indexable, a big one is", () => {
+    expect(topicHubIndexable(0)).toBe(false);
+    expect(topicHubIndexable(TOPIC_PAGE_SIZE)).toBe(true);
+    expect(topicHubIndexable(TOPIC_PAGE_SIZE + 1)).toBe(true);
+    expect(topicHubIndexable(344)).toBe(true);
+  });
+
+  it("anything that is not a usable count is not indexable (negative, NaN, undefined)", () => {
+    expect(topicHubIndexable(-1)).toBe(false);
+    expect(topicHubIndexable(Number.NaN)).toBe(false);
+    expect(topicHubIndexable(undefined as unknown as number)).toBe(false);
+  });
+
+  it("agrees with topicPageRobots(1, ...) for every count 0..35 (page 1 holds min(n, 30), a next page exists past 30)", () => {
+    for (let n = 0; n <= 35; n += 1) {
+      const robots = topicPageRobots(1, {
+        bundles: bundles(Math.min(n, TOPIC_PAGE_SIZE)),
+        hasMore: n > TOPIC_PAGE_SIZE,
+      });
+      expect(topicHubIndexable(n), `count ${n}`).toBe(robots === undefined);
+    }
   });
 });

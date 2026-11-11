@@ -26,18 +26,21 @@ import {
 
 interface PredictionRow {
   cluster_id: string;
-  jev_prob: number | null;
+  jev_prob: number | string | null;
+  run_id?: number | string | null;
   articles: unknown;
 }
 
 const row = (
   clusterId: string,
-  prob: number | null,
+  prob: number | string | null,
   bias: string | null,
   kind: string | null | undefined = "outlet",
+  runId?: number | string | null,
 ): PredictionRow => ({
   cluster_id: clusterId,
   jev_prob: prob,
+  ...(runId === undefined ? {} : { run_id: runId }),
   articles: { sources: { bias, ...(kind === undefined ? {} : { kind }) } },
 });
 
@@ -90,7 +93,7 @@ describe("fetchRecallMatchedZones: the query", () => {
     const state = states[0]!;
     expect(state.table).toBe("jev_shadow_predictions");
     const select = String(state.selectArgs[0]);
-    for (const needle of ["cluster_id", "jev_prob", "articles", "sources", "bias", "kind"]) {
+    for (const needle of ["cluster_id", "run_id", "jev_prob", "articles", "sources", "bias", "kind"]) {
       expect(select).toContain(needle);
     }
     expect(state.eq).toContainEqual({ col: "task", val: "blindspot_recall" });
@@ -294,6 +297,157 @@ describe("fetchRecallMatchedZones: the answer", () => {
     const out = await fetchRecallMatchedZones(client, ["a"]);
 
     expect(out.get("a")).toEqual(["muhalefet"]);
+  });
+});
+
+describe("fetchRecallMatchedZones: only the latest check's answers (h114-postship-1)", () => {
+  // jev.ts now stores every re-check's answers (subject_id carries the day), so a
+  // cluster re-checked on several days has rows of several runs. The flag follows
+  // the latest check, and so must the wording.
+
+  it("a cluster with rows of two runs reads only the newer run's: 6334 muhalefet 0.72 then 6380 center 0.75 gives bagimsiz only", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("23b4563e", 0.72, "opposition", "outlet", 6334),
+        row("23b4563e", 0.75, "center", "outlet", 6380),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["23b4563e"]);
+
+    expect(out.get("23b4563e")).toEqual(["bagimsiz"]);
+  });
+
+  it("the newer run wins whatever order the rows arrive in (the query has no order)", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("c", 0.75, "center", "outlet", 6380),
+        row("c", 0.72, "opposition", "outlet", 6334),
+        row("c", 0.8, "pro_government", "outlet", 6001),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["c"]);
+
+    expect(out.get("c")).toEqual(["bagimsiz"]);
+  });
+
+  it("several rows of the SAME (latest) run all count: the zones are their union", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("f5012836", 0.86, "opposition_leaning", "outlet", 6380),
+        row("f5012836", 0.76, "center", "outlet", 6380),
+        row("f5012836", 0.72, "pro_government", "outlet", 6334),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["f5012836"]);
+
+    expect(out.get("f5012836")).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("a single run is unchanged", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("a", 0.9, "opposition", "outlet", 6380),
+        row("a", 0.8, "center", "wire", 6380),
+        row("b", 0.8, "pro_government", "outlet", 6380),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["a", "b"]);
+
+    expect(out.get("a")).toEqual(["bagimsiz", "muhalefet"]);
+    expect(out.get("b")).toEqual(["iktidar"]);
+  });
+
+  it("each cluster is judged against ITS OWN latest run, not the page's", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("old", 0.8, "opposition", "outlet", 6100),
+        row("new", 0.8, "center", "outlet", 6380),
+        row("new", 0.8, "opposition", "outlet", 6200),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["old", "new"]);
+
+    expect(out.get("old")).toEqual(["muhalefet"]);
+    expect(out.get("new")).toEqual(["bagimsiz"]);
+  });
+
+  it("an older run is read when it is the only one with a match (the latest check cleared nothing here: no newer row passes 0.7)", async () => {
+    const { client } = clientWith(rowsFor([row("a", 0.8, "opposition", "outlet", 6334)]));
+
+    const out = await fetchRecallMatchedZones(client, ["a"]);
+
+    expect(out.get("a")).toEqual(["muhalefet"]);
+  });
+
+  it("a string jev_prob below 0.7 is still dropped, and does not make its run 'the latest'", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("a", "0.65", "opposition", "outlet", 6380),
+        row("b", "0.75", "center", "outlet", 6380),
+        row("b", "0.69", "opposition", "outlet", 6390),
+        row("c", "0.7", "pro_government", "outlet", 6380),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["a", "b", "c"]);
+
+    expect(out.has("a")).toBe(false);
+    expect(out.get("b")).toEqual(["bagimsiz"]);
+    expect(out.get("c")).toEqual(["iktidar"]);
+  });
+
+  it("a run_id that arrives as a numeric string compares as a number (6380 beats 998, which sorts later as text)", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("a", 0.8, "opposition", "outlet", "998"),
+        row("a", 0.8, "center", "outlet", "6380"),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["a"]);
+
+    expect(out.get("a")).toEqual(["bagimsiz"]);
+  });
+
+  it("rows with no run_id (their run was pruned) are older than any row with one; all-null rows still count together", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("mixed", 0.8, "opposition", "outlet", null),
+        row("mixed", 0.8, "center", "outlet", 6380),
+        row("nulls", 0.8, "opposition", "outlet", null),
+        row("nulls", 0.8, "pro_government", "outlet"),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["mixed", "nulls"]);
+
+    expect(out.get("mixed")).toEqual(["bagimsiz"]);
+    expect(out.get("nulls")).toEqual(["iktidar", "muhalefet"]);
+  });
+
+  it("a non-voting latest-run match is ignored, but the latest run is still the one read (no fall back to a stale voting match)", async () => {
+    const { client } = clientWith(
+      rowsFor([
+        row("a", 0.9, "opposition", "outlet", 6334),
+        row("a", 0.9, "center", "aggregator", 6380),
+      ]),
+    );
+
+    const out = await fetchRecallMatchedZones(client, ["a"]);
+
+    expect(out.has("a")).toBe(false);
+  });
+
+  it("an error still returns an empty Map, run rows or not", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { client } = clientWith(() => ({ data: null, error: { message: "boom" } }));
+
+    await expect(fetchRecallMatchedZones(client, ["a"])).resolves.toEqual(new Map());
   });
 });
 

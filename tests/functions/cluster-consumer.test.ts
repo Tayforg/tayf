@@ -12,6 +12,7 @@ import {
   score as scoreMock,
 } from "../../supabase/functions/_shared/cluster/ensemble.ts";
 import {
+  HEADLINE_CENTROID_FLOOR,
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_MEMBER_SCAN_MAX,
   HEADLINE_TITLE_MAX_CHARS,
@@ -5872,6 +5873,134 @@ describe("cluster-consumer Edge Function", () => {
       });
     });
 
+    // ---- h114-clusterpurity-4: a generic headline names nobody -----------------
+    //
+    // 9cb0f088 (the Enver Cevik detention) held cumhuriyet 'Fon sorusturmasinda yeni gozalti',
+    // whose description names Omer Murat Gulkan: the headline lane fires on four shared stems
+    // for a headline that names nobody, and the member scan saw titles only. The scan now
+    // hands both CLEANED descriptions to headlineOnlyScore for a pair the lane fired for.
+    describe("h114-clusterpurity-4: generic headline, different people", () => {
+      const GENERIC = "Fon soruşturmasında yeni gözaltı";
+      const CEVIK_DESC = 'Sermaye piyasası işlemlerine ilişkin "fon" soruşturmasında Enver Çevik gözaltına alındı.';
+      const GULKAN_DESC =
+        "Fon soruşturması kapsamında OMG Capital Advisors Yönetim Kurulu Başkanı Ömer Murat Gülkan gözaltına alındı.";
+      // The stored diken description with its feed wrapper: the guard must read the cleaned text.
+      const GULKAN_DIKEN_RAW =
+        "Fon soruşturmasında yeni gözaltı 09.11.2026 DikenFon soruşturmasında OMG Capital Advisors Yönetim Kurulu Başkanı Ömer Murat Gülkan gözaltına alındı.\nThe post Fon soruşturmasında yeni gözaltı appeared first on #site_linkat 09.11.2026 .";
+      const SEED = "Fon soruşturmasında yeni gelişme: Lydia Holding Yönetim Kurulu Başkanı Enver Çevik gözaltına alındı";
+      const LATEST = "Fon soruşturması kapsamında Enver Çevik yeniden gözaltına alındı";
+      const SEED_DESC = "Lydia Holding Yönetim Kurulu Başkanı Enver Çevik fon soruşturması kapsamında gözaltına alındı.";
+
+      /** The Cevik cluster: the generic headline is the MIDDLE member (neither seed nor latest). */
+      function seedCevik(id = "gn1") {
+        seedCluster(
+          id,
+          3,
+          [
+            { id: `${id}-seed`, sourceId: "src-agg", fp: `fp-${id}-seed`, ageMs: 50 * 60_000, title: SEED, description: SEED_DESC },
+            { id: `${id}-mid`, sourceId: "src-wire", fp: `fp-${id}-mid`, ageMs: 40 * 60_000, title: GENERIC, description: CEVIK_DESC },
+            { id: `${id}-latest`, sourceId: "src-posta", fp: `fp-${id}-latest`, ageMs: 30 * 60_000, title: LATEST, description: SEED_DESC },
+          ],
+          { title: SEED },
+        );
+      }
+      const scanCalls = () =>
+        vi.mocked(headlineOnlyScoreMock).mock.calls.map((c) => c[3] as {
+          aTitle?: string;
+          bTitle?: string;
+          aDescription?: string | null;
+          bDescription?: string | null;
+        });
+      const withDescriptions = () => scanCalls().filter((o) => o.aDescription !== undefined || o.bDescription !== undefined);
+
+      beforeEach(() => {
+        vi.mocked(headlineOnlyScoreMock).mockClear();
+      });
+
+      it("the same generic headline with another person's description opens its own cluster (not joined through the scan)", async () => {
+        seedCevik();
+        queueIncoming({ id: "art-gulkan", sourceId: "src-outlet", title: GENERIC, description: GULKAN_DESC });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+      });
+
+      it("control: the same headline with the same person's description joins the cluster through the scan", async () => {
+        seedCevik();
+        queueIncoming({ id: "art-cevik", sourceId: "src-outlet", title: GENERIC, description: CEVIK_DESC });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual(["gn1"]);
+      });
+
+      it("the descriptions are handed over cleaned, and only for the member the lane fired for", async () => {
+        seedCevik();
+        queueIncoming({ id: "art-gulkan", sourceId: "src-outlet", title: GENERIC, description: GULKAN_DIKEN_RAW });
+        scoreBy({});
+
+        await drain();
+
+        const given = withDescriptions();
+        // One member of the scan matched the headline (the middle one); the other scan members are not seen with descriptions.
+        expect(given).toHaveLength(1);
+        expect(given[0]).toMatchObject({ aTitle: GENERIC, bTitle: GENERIC });
+        expect(given[0]!.aDescription).toBe(cleanDescription(GULKAN_DIKEN_RAW));
+        expect(given[0]!.aDescription).not.toContain("The post");
+        expect(given[0]!.bDescription).toBe(CEVIK_DESC);
+      });
+
+      it("an unrelated scan never reads a description: no pair, no cleaning", async () => {
+        seedCevik();
+        queueIncoming({ id: "art-other", sourceId: "src-outlet", title: "Hava bugün parçalı bulutlu geçecek", description: "Meteoroloji yağış beklemiyor." });
+        scoreBy({});
+
+        await drain();
+
+        expect(withDescriptions()).toEqual([]);
+      });
+
+      it("the full scorer gets both cleaned descriptions only for a seed or latest pair its headline lane fired for", async () => {
+        seedCevik();
+        queueIncoming({ id: "art-gulkan", sourceId: "src-outlet", title: GENERIC, description: GULKAN_DIKEN_RAW });
+        const lane = { score: 0.82, components: { headlineLane: true }, isMatch: true };
+        const quiet = { score: 0, components: { headlineLane: false }, isMatch: false };
+        // The lane fires against the seed only, and is withdrawn when both descriptions are given (what the real scorer does).
+        vi.mocked(scoreMock).mockImplementation((_a: unknown, b: unknown, _ae: unknown, _be: unknown, _c: unknown, _h: unknown, opts?: unknown) => {
+          const o = (opts ?? {}) as { aDescription?: string | null; bDescription?: string | null };
+          const strict = (b as { strict?: string | null } | null | undefined)?.strict ?? null;
+          if (strict !== "fp-gn1-seed") return quiet;
+          return o.aDescription != null && o.bDescription != null ? quiet : lane;
+        });
+
+        const body = await drain();
+
+        const calls = vi.mocked(scoreMock).mock.calls
+          .map((c) => ({ strict: (c[1] as { strict?: string | null } | null)?.strict ?? null, opts: (c[6] ?? {}) as { aDescription?: string | null; bDescription?: string | null; bTitle?: string } }));
+        const seedCalls = calls.filter((c) => c.strict === "fp-gn1-seed");
+        const latestCalls = calls.filter((c) => c.strict === "fp-gn1-latest");
+        // Seed: scored once on titles, then again with the two descriptions because the lane fired.
+        expect(seedCalls).toHaveLength(2);
+        expect(seedCalls[0]!.opts.aDescription).toBeUndefined();
+        expect(seedCalls[1]!.opts.aDescription).toBe(cleanDescription(GULKAN_DIKEN_RAW));
+        expect(seedCalls[1]!.opts.bDescription).toBe(SEED_DESC);
+        // Latest: the lane did not fire, so one call and no description.
+        expect(latestCalls).toHaveLength(1);
+        expect(latestCalls[0]!.opts.aDescription).toBeUndefined();
+        // The re-scored pair (lane withdrawn) is what ranks: no join through the seed.
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+      });
+    });
+
     // ---- h70-mergequality-2: the centroid guard -------------------------------
     //
     // A candidate of 3 or more members was scored against its seed and latest only, so
@@ -6019,9 +6148,9 @@ describe("cluster-consumer Edge Function", () => {
           expect(body.centroidSkips.count).toBe(0);
         });
 
-        it("a headline-lane result of the full scorer against the seed or the latest exempts it as well", async () => {
+        it("a headline-lane result of the full scorer against the seed or the latest clears the lower floor: an on-topic article joins", async () => {
           seedFaiz("cg1");
-          wedding();
+          queueIncoming({ id: "art-faiz", sourceId: "src-outlet", title: FAIZ_TITLE, description: FAIZ_DESC });
           vi.mocked(scoreMock).mockImplementation(() => ({
             score: 0.82,
             components: { headlineLane: true },
@@ -6033,6 +6162,157 @@ describe("cluster-consumer Edge Function", () => {
           expect(body.matched).toBe(1);
           expect(linkedClusters()).toEqual(["cg1"]);
           expect(body.centroidSkips.count).toBe(0);
+        });
+
+        // h114-clusterpurity-3: the headline lane is no longer an exemption. Cluster 9a24657e (the Izmir
+        // explosion, 18 members) took three oil headlines through the lane (AA at centroid cosine 0.123):
+        // a lane hit now clears HEADLINE_CENTROID_FLOOR, and a candidate under it is skipped like any other.
+        describe("h114-clusterpurity-3: the headline lane clears a lower floor, not none", () => {
+          const laneStub = (clusters: string[]) =>
+            vi.mocked(scoreMock).mockImplementation((_a: unknown, b: unknown) => {
+              const strict = (b as { strict?: string | null } | null | undefined)?.strict ?? "";
+              const hit = clusters.some((c) => strict.startsWith(`fp-${c}-`));
+              return { score: hit ? 0.82 : 0, components: { headlineLane: hit }, isMatch: hit };
+            });
+
+          it("a scan-list headline hit under the floor is skipped: the off-topic article opens its own cluster", async () => {
+            // Nine faiz members; one middle member (neither seed nor latest) carries the incoming HEADLINE with a faiz text, as a
+            // bridge member does. The lane fires on the scan alone (the stubbed full scorer scores seed and latest 0), and the
+            // centroid of the nine is still the faiz story: the wedding article's cosine is far under the floor.
+            const faizTexts = [
+              [KARAHAN_MID, FAIZ_DESC_MID],
+              [KARAHAN_LATEST, FAIZ_DESC_LATEST],
+              ["Merkez Bankası faiz kararı sonrası piyasalar", FAIZ_DESC_SEED],
+              ["Politika faizi yüzde 40'ta sabit: Merkez Bankası açıklaması", FAIZ_DESC_LATEST],
+              ["Para Politikası Kurulu faiz kararını duyurdu", FAIZ_DESC_SEED],
+              ["Faiz kararı sonrası dolar ve borsa", FAIZ_DESC_MID],
+              ["Merkez Bankası enflasyon vurgusunu sürdürdü", FAIZ_DESC_LATEST],
+              // More faiz members dilute the bridge's share of the centroid, so the wedding article sits under the 0.10 floor.
+              ["Faiz kararı: Merkez Bankası politika faizini sabit tuttu", FAIZ_DESC_MID],
+              ["Merkez Bankası faiz kararını açıkladı, piyasalar yükseldi", FAIZ_DESC_SEED],
+              ["PPK toplantısı sonrası faiz ve enflasyon beklentisi", FAIZ_DESC_LATEST],
+              ["Merkez Bankası Başkanı faiz kararını değerlendirdi", FAIZ_DESC_MID],
+            ];
+            const members = [
+              { id: "cg1-seed", sourceId: "src-agg", fp: "fp-cg1-seed", ageMs: 120 * 60_000, title: KARAHAN_SEED, description: FAIZ_DESC_SEED },
+              ...faizTexts.slice(0, 3).map(([title, description], i) => ({ id: `cg1-a${i}`, sourceId: `src-a${i}`, fp: `fp-cg1-a${i}`, ageMs: (110 - 10 * i) * 60_000, title: title!, description: description! })),
+              { id: "cg1-bridge", sourceId: "src-posta", fp: "fp-cg1-bridge", ageMs: 75 * 60_000, title: WEDDING_TITLE, description: FAIZ_DESC_SEED },
+              ...faizTexts.slice(3).map(([title, description], i) => ({ id: `cg1-b${i}`, sourceId: `src-b${i}`, fp: `fp-cg1-b${i}`, ageMs: (70 - 10 * i) * 60_000, title: title!, description: description! })),
+              { id: "cg1-latest", sourceId: "src-haber7", fp: "fp-cg1-latest", ageMs: 20 * 60_000, title: KARAHAN_LATEST, description: FAIZ_DESC_LATEST },
+            ];
+            seedCluster("cg1", members.length, members, { title: KARAHAN_SEED });
+            wedding();
+            scoreBy({});
+
+            const body = await drain();
+
+            // Premise: the lane fired on the scan (the bridge member), so the candidate is a headline-lane candidate.
+            const bridgeCalls = vi.mocked(headlineOnlyScoreMock).mock.calls.filter((c) => (c[3] as { bTitle?: string }).bTitle === WEDDING_TITLE);
+            expect(bridgeCalls.length).toBeGreaterThan(0);
+            expect(body.centroidSkips.count).toBe(1);
+            expect(body.centroidSkips.samples[0]!.cos).toBeLessThan(HEADLINE_CENTROID_FLOOR);
+            expect(body.matched).toBe(0);
+            expect(body.created).toBe(1);
+            expect(linkedClusters()).toEqual([]);
+            expect(String(guardLogs()[0]?.[0])).toContain("lane=headline");
+          });
+
+          it("a full-scorer lane hit under the floor is skipped, logged with lane=headline and counted once", async () => {
+            seedFaiz("cg1");
+            wedding();
+            laneStub(["cg1"]);
+
+            const body = await drain();
+
+            expect(body.matched).toBe(0);
+            expect(body.created).toBe(1);
+            expect(linkedClusters()).toEqual([]);
+            expect(body.centroidSkips.count).toBe(1);
+            expect(body.centroidSkips.samples[0]!.clusterId).toBe("cg1");
+            expect(body.centroidSkips.samples[0]!.cos).toBeLessThan(HEADLINE_CENTROID_FLOOR);
+            const logs = guardLogs();
+            expect(logs).toHaveLength(1);
+            expect(String(logs[0]?.[0])).toContain("lane=headline");
+            expect(String(logs[0]?.[0])).toContain("art-wedding");
+            expect(String(logs[0]?.[0])).not.toContain("Karahan");
+          });
+
+          it("the next candidate is tried: the article joins the wedding cluster it belongs to when the lane-carried primary fails the guard", async () => {
+            seedFaiz("cg1");
+            seedCluster(
+              "cg2",
+              3,
+              [
+                { id: "cg2-seed", sourceId: "src-cnn-turk", fp: "fp-cg2-seed", ageMs: 60 * 60_000, title: "Ünlü isimlerin katıldığı düğün İstanbul'da yapıldı", description: "İstanbul'da düzenlenen düğüne ünlü isimler katıldı. Gelin ve damat misafirleri ağırladı." },
+                { id: "cg2-mid", sourceId: "src-wire", fp: "fp-cg2-mid", ageMs: 55 * 60_000, title: "Düğün töreninde gelin ve damat misafirleri ağırladı", description: "Nikâhın ardından düzenlenen düğünde aileler ve dostlar bir araya geldi." },
+                { id: "cg2-latest", sourceId: "src-agg", fp: "fp-cg2-latest", ageMs: 45 * 60_000, title: "Nikâh ve düğün sonrası çift ilk kez konuştu", description: "Evlenen çift düğünün ardından misafirlere teşekkür etti. Aileler düğünden memnun kaldı." },
+              ],
+              { title: "Ünlü isimlerin katıldığı düğün İstanbul'da yapıldı" },
+            );
+            wedding();
+            // cg1 ranks first and carries a lane hit; cg2 follows on the plain score.
+            vi.mocked(scoreMock).mockImplementation((_a: unknown, b: unknown) => {
+              const strict = (b as { strict?: string | null } | null | undefined)?.strict ?? "";
+              if (strict.startsWith("fp-cg1-")) return { score: 0.9, components: { headlineLane: true }, isMatch: true };
+              if (strict.startsWith("fp-cg2-")) return { score: 0.7, components: { headlineLane: false }, isMatch: true };
+              return { score: 0, components: { headlineLane: false }, isMatch: false };
+            });
+
+            const body = await drain();
+
+            expect(body.matched).toBe(1);
+            expect(body.created).toBe(0);
+            expect(linkedClusters()).toEqual(["cg2"]);
+            expect(body.centroidSkips.count).toBe(1);
+            expect(body.centroidSkips.samples[0]!.clusterId).toBe("cg1");
+          });
+
+          it("the same lane-carried candidate on-topic joins, and a skip without the lane carries no lane tag", async () => {
+            seedFaiz("cg1");
+            queueIncoming({ id: "art-faiz", sourceId: "src-outlet", title: FAIZ_TITLE, description: FAIZ_DESC });
+            laneStub(["cg1"]);
+            const joined = await drain();
+            expect(joined.matched).toBe(1);
+            expect(joined.centroidSkips.count).toBe(0);
+            expect(guardLogs()).toHaveLength(0);
+          });
+
+          it("without the lane the skip log carries no lane tag", async () => {
+            seedFaiz("cg1");
+            wedding();
+            scoreBy({ "fp-cg1-seed": 0.82, "fp-cg1-latest": 0.82 });
+
+            const body = await drain();
+
+            expect(body.centroidSkips.count).toBe(1);
+            const logs = guardLogs();
+            expect(logs).toHaveLength(1);
+            expect(String(logs[0]?.[0])).not.toContain("lane=headline");
+          });
+
+          it("a lane-carried candidate of fewer than 3 members is still exempt", async () => {
+            seedFaiz("cg1", 2, ["src-agg", "src-wire"]);
+            wedding();
+            laneStub(["cg1"]);
+
+            const body = await drain();
+
+            expect(body.matched).toBe(1);
+            expect(linkedClusters()).toEqual(["cg1"]);
+            expect(body.centroidSkips.count).toBe(0);
+          });
+
+          it("CLUSTER_CENTROID_GUARD=off turns the lane check off too", async () => {
+            process.env.CLUSTER_CENTROID_GUARD = "off";
+            seedFaiz("cg1");
+            wedding();
+            laneStub(["cg1"]);
+
+            const body = await drain();
+
+            expect(body.matched).toBe(1);
+            expect(body.centroidSkips.count).toBe(0);
+          });
         });
 
         it("control for the two above: without the lane hit the same article is skipped", async () => {
@@ -6536,6 +6816,7 @@ describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", ()
     category?: string;
     admitted?: boolean;
     minutes?: number;
+    description?: string;
   }
 
   function seedCluster(id: string, members: SeedMember[]) {
@@ -6553,7 +6834,7 @@ describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", ()
         id: m.id,
         source_id: m.source,
         title: m.title,
-        description: `Ayrıntı ${m.id}`,
+        description: m.description ?? `Ayrıntı ${m.id}`,
         published_at: minutesAgo(m.minutes ?? 12),
         fingerprint: `fp-${m.id}`,
         entities: [],
@@ -6657,6 +6938,53 @@ describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", ()
     expect(supabaseFakeCalls.rpc.filter((r) => !r.name.startsWith("consumer_lease_"))).toHaveLength(0);
     expectNoClusterMachinery();
     expect(body.matched + body.created).toBe(0);
+  });
+
+  // h114-clusterpurity-4: the probe's headline lane is the same lane, so a generic headline of one
+  // detainee must not attach to another's cluster. The members' cleaned descriptions come from the
+  // rows the context already loaded (read lazily), the article's from its own row.
+  describe("h114-clusterpurity-4: generic headlines of different people", () => {
+    const FON_CLUSTER = "cluster-fon-attach";
+    const MEMBER_TITLE = "Fon soruşturmasında yeni gözaltı kararı";
+    const ARTICLE_TITLE = "Fon soruşturmasında yeni gözaltı";
+    const CEVIK_DESC = 'Sermaye piyasası işlemlerine ilişkin "fon" soruşturmasında Enver Çevik gözaltına alındı.';
+    const GULKAN_RAW =
+      "Fon soruşturmasında yeni gözaltı 09.11.2026 DikenFon soruşturmasında OMG Capital Advisors Yönetim Kurulu Başkanı Ömer Murat Gülkan gözaltına alındı.\nThe post Fon soruşturmasında yeni gözaltı appeared first on #site_linkat 09.11.2026 .";
+    const fonMembers = (): SeedMember[] => [
+      { id: "fon-a", source: "src-aksam", title: MEMBER_TITLE, description: CEVIK_DESC, minutes: 20 },
+      { id: "fon-b", source: "src-star", title: "Lydia Holding Yönetim Kurulu Başkanı Enver Çevik gözaltına alındı", description: CEVIK_DESC, minutes: 25 },
+      { id: "fon-c", source: "src-haber7", title: "Fon soruşturmasında yeni dalga: operasyon sürüyor", description: CEVIK_DESC, minutes: 30 },
+    ];
+
+    it("premise: the lane fires for the pair and no exact title or fingerprint is shared", () => {
+      const hours = 17 / 60;
+      expect(headlineLane(headlineTokens(ARTICLE_TITLE), headlineTokens(MEMBER_TITLE), hours).fired).toBe(true);
+      expect(normalizeTurkish(ARTICLE_TITLE)).not.toBe(normalizeTurkish(MEMBER_TITLE));
+    });
+
+    it("another person's description (raw, with the feed wrapper) records no-match", async () => {
+      seedCluster(FON_CLUSTER, fonMembers());
+      seedIncoming({ title: ARTICLE_TITLE, description: GULKAN_RAW });
+      queueAttach();
+
+      const body = await drain();
+
+      expect(body.attach).toMatchObject({ mode: "shadow", read: 1, would_attach: 0, by_reason: { "no-match": 1 } });
+      expect(shadowWrites()).toHaveLength(0);
+      expectNoClusterMachinery();
+    });
+
+    it("control: the same person's description attaches on the headline lane", async () => {
+      seedCluster(FON_CLUSTER, fonMembers());
+      seedIncoming({ title: ARTICLE_TITLE, description: CEVIK_DESC });
+      queueAttach();
+
+      const body = await drain();
+
+      expect(body.attach).toMatchObject({ would_attach: 1, by_reason: {} });
+      expect(shadowWrites()).toHaveLength(1);
+      expect((shadowWrites()[0]!.patch as Array<{ lane: string; cluster_id: string }>)[0]).toMatchObject({ cluster_id: FON_CLUSTER, lane: "headline" });
+    });
   });
 
   it("explicit shadow behaves like the default", async () => {

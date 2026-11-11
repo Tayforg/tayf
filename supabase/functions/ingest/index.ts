@@ -84,6 +84,8 @@ import {
   canonicalizeUrl,
   completeArticles,
   prepareArticles,
+  STABLE_ARTICLE_ID_SOURCES,
+  stableArticleId,
 } from "../_shared/rss/normalize.ts";
 import { sourceArticleKeyFor } from "../_shared/rss/article-key.ts";
 import { buildHostOwners, foreignHostOwner } from "../_shared/rss/host-owner.ts";
@@ -520,6 +522,18 @@ interface CycleStats {
   // Feeds whose stored-url lookup failed (any batch): every item of such a feed
   // takes the full path, exactly as before the lookup existed (fail-open).
   knownUrlLookupErrors: number;
+  // Re-slugged items (hunt-114, STABLE_ARTICLE_ID_SOURCES): new rows of a source
+  // whose feed keeps the first url's pubDate on a retitled article (Anadolu
+  // Ajansı live pages) and whose trailing numeric id is already stored for that
+  // source under a different url within 7 days. `reslugRestamped` counts the rows
+  // stamped with the poll's clock instead of the feed's pubDate that survive the
+  // twin drop of the upsert phase (a restamped row dropped as a stored twin never
+  // reaches the database and is not counted); `reslugLookupErrors` the lookup
+  // batches that failed (fail-open: those rows keep the parsed pubDate). Summary
+  // line and HTTP JSON only: no `ingest_cycles` column. Normally 0 and 0 for every
+  // other source.
+  reslugRestamped: number;
+  reslugLookupErrors: number;
   // Isolate item budget (hunt-11, A-ingest-cpu): items booked on this isolate
   // so far, cycles it has served, and changed feeds this cycle refused because
   // they did not fit what is left of the isolate's allowance (each also counts
@@ -1102,6 +1116,137 @@ export async function lookupStoredByUrl(
   return { byUrl, ok: true };
 }
 
+// ---------------------------------------------------------------------------
+// Re-slugged items keep the first url's pubDate (hunt-114)
+// ---------------------------------------------------------------------------
+//
+// Anadolu Ajansı retitles a live article under a NEW url (new slug, same trailing
+// numeric id) and ships the live stub's pubDate on it. The url-keyed upsert and
+// the known-url skip see a new url, so the row was stored 2.5-3 hours "old" and
+// gave AA a head start as the first mover of the cluster it joined (cluster
+// 9a24657e: "Muhalefet 2 sa 56 dk sonra katıldı"; ids 4117359, 4116605, 4118171).
+// For a source in STABLE_ARTICLE_ID_SOURCES a NEW row whose id is stored for the
+// same source under a DIFFERENT url, created within RESLUG_WINDOW_MS, is stamped
+// with the poll's clock (the time Tayf first saw that article under its new url)
+// instead of the feed's pubDate. Stored rows are never rewritten.
+//
+// The lookup is ONE select per batch of at most RESLUG_LOOKUP_BATCH ids, served
+// by the (created_at, source_id) index range (EXPLAIN on prod, 2026-11-11: an
+// index scan, ~1,400 buffers, 11-30 ms for 10-50 ids against 1,312 AA rows in 7
+// days):
+//   articles.select("url").eq("source_id", id).gte("created_at", since)
+//           .or("url.like.*/4117359,url.like.*/4116605,...")
+// The filter is built ONLY from the digit-only ids `stableArticleId` captured,
+// never from url text, so a hostile feed url cannot add a PostgREST operator.
+// Fail-open: a batch that errors or throws is counted and its rows keep the parsed
+// pubDate.
+export const RESLUG_LOOKUP_BATCH = 50;
+export const RESLUG_WINDOW_MS = 7 * 24 * 3_600_000;
+
+const RESLUG_ID_RE = /^[0-9]{1,20}$/;
+
+/**
+ * The `or=` values of the re-slug lookup, one per request, for `ids`: each is
+ * `url.like.*\/<id>` filters joined by commas, at most `maxCount` ids and at most
+ * `maxBytes` of encoded query value (the same greedy cut as `planUrlLookupSlices`,
+ * whose per-slice cost model it reuses: `or=(` `)` is one encoded byte more than
+ * `in.(` `)`, far inside the margin below the failing size). Duplicates are
+ * looked up once. An id that is not all ASCII digits is dropped, so no other
+ * character can reach the filter. Pure; never throws.
+ */
+export function planReslugFilters(
+  ids: readonly string[],
+  maxCount = RESLUG_LOOKUP_BATCH,
+  maxBytes = URL_LOOKUP_MAX_BYTES,
+): string[] {
+  const filters = [...new Set(ids)]
+    .filter((id) => typeof id === "string" && RESLUG_ID_RE.test(id))
+    .map((id) => `url.like.*/${id}`);
+  return planUrlLookupSlices(filters, maxCount, maxBytes).map((slice) => slice.join(","));
+}
+
+/**
+ * Stamps every row of `rows` (new rows of source `slug`, none of them stored yet)
+ * whose `stableArticleId` is stored for `sourceId` under a different url, created
+ * at or after `nowMs - RESLUG_WINDOW_MS`, with `published_at = nowMs`. The rows
+ * are mutated in place. No request is made when no row has an id. Returns the
+ * number restamped, the number of lookup batches that failed and the urls of the
+ * rows stamped (the caller counts the ones that survive the twin drop); never throws. On
+ * failure ONE line is logged with `slug`, the count and a redacted, clamped message,
+ * never a url, an id or a headline.
+ */
+export async function restampResluggedRows<T extends { url: string; published_at: string }>(
+  supabase: ReturnType<typeof createServiceClient>,
+  slug: string,
+  sourceId: string,
+  rows: readonly T[],
+  nowMs: number,
+): Promise<{ restamped: number; lookupErrors: number; urls: string[] }> {
+  const idOf = new Map<T, string>();
+  for (const row of rows) {
+    const id = stableArticleId(slug, row.url);
+    if (id !== null) idOf.set(row, id);
+  }
+  if (idOf.size === 0) return { restamped: 0, lookupErrors: 0, urls: [] };
+
+  const storedUrlsById = new Map<string, Set<string>>();
+  let lookupErrors = 0;
+  let firstMessage: string | null = null;
+  let restamped = 0;
+  const stampedUrls: string[] = [];
+  try {
+    const sinceIso = new Date(nowMs - RESLUG_WINDOW_MS).toISOString();
+    for (const orFilter of planReslugFilters([...idOf.values()])) {
+      try {
+        const { data, error } = await supabase
+          .from("articles")
+          .select("url")
+          .eq("source_id", sourceId)
+          .gte("created_at", sinceIso)
+          .or(orFilter);
+        if (error) {
+          lookupErrors++;
+          firstMessage ??= safeErrorMessage(error.message);
+          continue;
+        }
+        for (const stored of (data ?? []) as Array<{ url?: unknown }>) {
+          if (typeof stored.url !== "string") continue;
+          const id = stableArticleId(slug, stored.url);
+          if (id === null) continue;
+          const urls = storedUrlsById.get(id);
+          if (urls === undefined) storedUrlsById.set(id, new Set([stored.url]));
+          else urls.add(stored.url);
+        }
+      } catch (err) {
+        lookupErrors++;
+        firstMessage ??= safeErrorMessage(err);
+      }
+    }
+    if (storedUrlsById.size > 0) {
+      const nowIso = new Date(nowMs).toISOString();
+      for (const [row, id] of idOf) {
+        const urls = storedUrlsById.get(id);
+        if (urls === undefined) continue;
+        for (const storedUrl of urls) {
+          if (storedUrl !== row.url) {
+            row.published_at = nowIso;
+            restamped++;
+            stampedUrls.push(row.url);
+            break;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    lookupErrors++;
+    firstMessage ??= safeErrorMessage(err);
+  }
+  if (lookupErrors > 0) {
+    console.error(`[ingest] ${slug}: re-slug lookup failed (${lookupErrors} batch(es)): ${firstMessage}`);
+  }
+  return { restamped, lookupErrors, urls: stampedUrls };
+}
+
 export interface RecordTitleVersionsResult {
   titleVersions: number;
   // Outlet headline write-backs applied this chunk via the
@@ -1529,6 +1674,8 @@ async function runCycle(): Promise<CycleStats> {
     freshnessBootstraps: 0,
     itemsKnownSkipped: 0,
     knownUrlLookupErrors: 0,
+    reslugRestamped: 0,
+    reslugLookupErrors: 0,
     isolateItemsUsed: 0,
     isolateCycles: 0,
     isolateBudgetDeferred: 0,
@@ -1701,6 +1848,11 @@ async function runCycleBody(
   // Twin-articles (migration 113): stored rows created before this instant
   // are not looked up. Fixed per cycle.
   const twinSinceIso = new Date(startedAt - TWIN_WINDOW_MS).toISOString();
+
+  // hunt-114: url -> source slug of every row the fetch phase stamped with the
+  // poll's clock. A restamped row can still be dropped as a stored twin in the
+  // upsert phase, so it is counted and logged there, once it survives.
+  const restampedUrls = new Map<string, string>();
 
   const allRows: IngestArticleRow[] = [];
   // Per-source intra-cycle de-dup so two section-slug variants of the same
@@ -2004,6 +2156,11 @@ async function runCycleBody(
       const completed = completeArticles(source, toComplete, sourceNowMs);
 
       let pushed = 0;
+      // hunt-114: the rows this loop pushes whose url is confirmed absent from
+      // `articles`, for a source whose feed keeps the first url's pubDate on a
+      // retitled article (STABLE_ARTICLE_ID_SOURCES). They are checked below.
+      const resluggable: IngestArticleRow[] = [];
+      const stableIdSource = STABLE_ARTICLE_ID_SOURCES.has(source.slug);
       let intraFeedTwins = 0;
       let intraFeedKeptDistinct = 0;
       let intraFeedKeyCapped = 0;
@@ -2070,12 +2227,33 @@ async function runCycleBody(
         // falls back to the raw URL), so this is always a string in
         // practice — the column stays nullable for any future producer
         // that can't compute one.
-        allRows.push({
+        const pushedRow: IngestArticleRow = {
           ...row,
           canonical_url: canonicalizeUrl(row.url, source.slug),
           source_article_key: articleKey,
-        });
+        };
+        allRows.push(pushedRow);
         pushed++;
+        // Absent = the stored-url lookup succeeded and found no row for this url
+        // (under any source). A failed lookup confirms nothing, so nothing is
+        // checked and every row keeps its parsed pubDate (fail-open).
+        if (stableIdSource && lookup.ok && !lookup.byUrl.has(pushedRow.url)) {
+          resluggable.push(pushedRow);
+        }
+      }
+      // hunt-114: one lookup (per batch of 50 ids) for the AA ids of those rows.
+      // The rows are already in `allRows` and the upsert phase starts only after
+      // the whole fetch pool settles, so stamping them in place here is safe.
+      if (resluggable.length > 0) {
+        const reslug = await restampResluggedRows(
+          supabase,
+          source.slug,
+          source.id,
+          resluggable,
+          sourceNowMs,
+        );
+        stats.reslugLookupErrors += reslug.lookupErrors;
+        for (const url of reslug.urls) restampedUrls.set(url, source.slug);
       }
       if (intraFeedTwins > 0) {
         // Slug and count only: never a url or a headline.
@@ -2222,6 +2400,20 @@ async function runCycleBody(
         lookupErrors: twinLookupErrors,
         keptDistinct,
       } = await dropExistingSourceArticleKeyRows(supabase, afterContentHash, twinSinceIso);
+      // hunt-114: the re-slugged rows that survived every drop above are the ones
+      // that reach the database stamped with the poll's clock.
+      if (restampedUrls.size > 0) {
+        const keptBySlug = new Map<string, number>();
+        for (const r of chunk) {
+          const slug = restampedUrls.get(r.url);
+          if (slug !== undefined) keptBySlug.set(slug, (keptBySlug.get(slug) ?? 0) + 1);
+        }
+        for (const [slug, kept] of keptBySlug) {
+          stats.reslugRestamped += kept;
+          // Slug and count only: never a url or a headline.
+          console.log(`[ingest] ${slug}: ${kept} re-slugged item(s) stamped with first-seen time`);
+        }
+      }
       const deduped = intraDeduplicated + crossDeduplicated;
       if (deduped > 0) {
         stats.dedupedInBatch += deduped;

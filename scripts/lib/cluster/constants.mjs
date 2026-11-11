@@ -498,6 +498,122 @@ export const FAMILY_HOMONYM_NOT_AFTER = {
   yilmaz: ["cevdet"],
 };
 
+//     (4f) Template actor mismatch (h114-clusterpurity-2). Two headlines that
+//     share a statement or budget template but name different speakers or
+//     ministries are two events. Hunt 114 found five prod clusters that glued
+//     them, on every lane:
+//       04e8fdce (7, Bakan Kurum's 10 Kasim message) held AA 820a62ca
+//         'Cumhurbaskani Erdogan'dan 10 Kasim Ataturk'u Anma Gunu mesaji' and
+//         aksam 5a102630 'Baskan Erdogan'dan ...';
+//       c0436da0 (10, Emine Erdogan) held haberler-com 047296ab 'AK Parti Sivas
+//         Milletvekili Toy'dan ...' and AA c07dc617 'Milli Savunma
+//         Bakanligindan ...';
+//       91de50e9 (Destici) held sabah 432d5dd2 'Bakan Gurlek'ten '10 Kasim'
+//         mesaji!';
+//       23be7e73 (16, COP31 Kurum) held three 'Bakan Yumakli'dan iklim
+//         krizlerine ... cagrisi' items;
+//       c9525327 (10, the Adalet budget) held AA d57f44fa and isci-haber
+//         554e48ce 'Genclik ve Spor Bakanliginin 2027 yili butcesi ...'.
+//     None is a comma subject (no subject veto), the ablative of a person
+//     ("Kurum'dan") reads as a place in leadRun() (no actor mismatch) and the
+//     family homonym veto knows one surname. Several joins did not take the
+//     headline lane at all (MSB 0.78-0.81 and Gurlek 0.79 on MinHash, the
+//     budget item 0.60 on the primary lane), and the intruders sit at tf-idf
+//     centroid cosine 0.29-0.56, above CENTROID_FLOOR. So the rule withdraws
+//     the headline lane (actorMismatchFires) AND caps the primary and MinHash
+//     lanes at SUBJECT_VETO_CAP with no headline exemption (templateVeto).
+//     R1 reads "<actor>'dan <...> mesaji": the first ablative of the first
+//     SUBJECT_SPAN_MAX_WORDS words (an apostrophe -dan/-den/-tan/-ten, or an
+//     INSTITUTION_HEAD_WORDS word ending in -(n)dan/-(n)den) with a
+//     STATEMENT_TEMPLATE_NOUNS word after it; the capitalised words before it,
+//     less roles, stop words, provinces and the institution head, are the
+//     actor. R2 reads the ministry names before a 'Bakanlig...' word. Both are
+//     prefix lists of folded words (a word matches when it starts with one).
+//     TEMPLATE_ACTOR_GENERIC_KEEP: GENERIC_ENTITIES that name a PERSON. The
+//     actor key drops the other generic entities (abd, turkiye, istanbul,
+//     bakan, disisleri: places and roles), but 'Cumhurbaskani Erdogan'dan' is
+//     the very actor the 04e8fdce pair differs on, so 'erdogan' and 'fidan'
+//     stay.
+//     Only a SPEAKER is an actor to tell apart: an institution head, a role
+//     ('Bakan Kurum'dan', 'BBP lideri Destici'den'), a full name ('Emine
+//     Erdogan'dan') or a TEMPLATE_ACTOR_GENERIC_KEEP person. A party ('YENI
+//     Parti'den ...') and a bare word ('Iran'dan', 'Tahran'dan', 'Kremlin'den',
+//     'MHP'den', 'Kalibaf'tan') speak through their people: the first replay (7
+//     days, 40,668 same-cluster pairs) found 42 same-story pairs split by exactly
+//     these (2ee853c9 Iran / Tahran / Kalibaf 29, 268d231b Rusya / Kremlin 3,
+//     05b95ff3 YENI Parti / Gokhan Gunaydin 3, df635766 AK Parti / Eyyup Kadir
+//     Inan 2, faf09ec4 / 4fbde412 / f9a332c4 Iran / Kalibaf / Tahran 5), so
+//     they never fire.
+//     A country or seat of power written as two words is as bare as a one-word
+//     one ('Kuzey Kore'den', 'Beyaz Saray'dan', 'Birlesik Krallik'tan'): it is
+//     no full name, so it is no speaker either. TEMPLATE_PLACE_PHRASES lists
+//     them folded and space-joined; a title whose actor, without a role, is
+//     exactly one of them never fires ('Kuzey Kore'den ... tepki' against
+//     'Kim Jong Un'dan ... tepki' is one story; review of h115, CR-2).
+export const STATEMENT_TEMPLATE_NOUNS = [
+  "mesaj",
+  "paylasim",
+  "aciklama",
+  "taziye",
+  "tebrik",
+  "cagri",
+  "kutlama",
+  "tepki",
+  "yanit",
+  "uyari",
+];
+export const INSTITUTION_HEAD_WORDS = [
+  "bakanlig",
+  "baskanlig",
+  "valilig",
+  "mudurlug",
+  "komutanlig",
+];
+export const TEMPLATE_ACTOR_GENERIC_KEEP = ["erdogan", "fidan"];
+export const TEMPLATE_PLACE_PHRASES = [
+  "kuzey kore",
+  "guney kore",
+  "birlesik krallik",
+  "beyaz saray",
+  "suudi arabistan",
+  "birlesik arap emirlikleri",
+  "guney afrika",
+  "yeni zelanda",
+  "kuzey makedonya",
+  "bosna hersek",
+];
+
+//     (4g) Generic headline, different people (h114-clusterpurity-4). A headline
+//     of at most HEADLINE_GENERIC_MAX_TOKENS tokens that names nobody
+//     ('Fon sorusturmasinda yeni gozalti') satisfies the headline lane's four
+//     shared stems for ANY detainee of the same investigation. Cluster 9cb0f088
+//     (the Enver Cevik gozalti, 32 members) held cumhuriyet ee184d9b 'Fon
+//     sorusturmasinda yeni gozalti' and diken 62a70ae3 'Fon sorusturmasinda bir
+//     gozalti daha', whose descriptions name Omer Murat Gulkan (the Gulkan
+//     cluster 27df2d98, 15 members, exists). cgtn-turk e1ede591 carries the very
+//     same title with a description naming Enver Cevik; it was the 7th member,
+//     neither seed nor latest, so the join went through the consumer's member
+//     scan (headlineOnlyScore on titles alone). The centroid cannot separate
+//     the two (cumhuriyet scores 0.461 against the Cevik cluster, the same
+//     investigation, and 0.882 against Gulkan's), only the people in the
+//     descriptions can. genericHeadlineNameConflict() reads the proper-name
+//     runs (2+ capitalised words) of the first 240 characters of each cleaned
+//     description; the pieces that are roles, SUBJECT_STOP_WORDS, GENERIC_ENTITIES
+//     or begin with a DESCRIPTION_NAME_STOP prefix (company-form and board words:
+//     'OMG Capital Advisors Yonetim Kurulu Baskani' is a role, not a name) are
+//     dropped; two non-empty sets with no shared prefix withdraw the lane.
+export const HEADLINE_GENERIC_MAX_TOKENS = 5;
+export const DESCRIPTION_NAME_STOP = [
+  "yonetim",
+  "kurul",
+  "genel",
+  "mudur",
+  "holding",
+  "sirket",
+  "grup",
+  "baskan",
+];
+
 // (5) h12-cluster-3: the headline lane missed same-story pairs. Measured on
 //     main fffeff1 with the real headlineLane() (scratchpad ana/pairs.mjs):
 //     Bahceli '100 il 1000 ilce ...' vs '19 yeni il ve 78 ilce onerisi'

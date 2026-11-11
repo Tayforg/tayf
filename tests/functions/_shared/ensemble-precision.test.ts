@@ -3,11 +3,13 @@ import {
   actorMismatchFires,
   counterVetoFires,
   familyHomonymFires,
+  genericHeadlineNameConflict,
   headlineLane,
   headlineOnlyScore,
   isMatch,
   score,
   subjectVetoFires,
+  templateActorMismatchFires,
   type ScoreResult,
 } from "../../../supabase/functions/_shared/cluster/ensemble.ts";
 import { expectLinear, rep } from "../../_helpers/linear-time";
@@ -23,7 +25,9 @@ import {
   provincesIn,
 } from "../../../supabase/functions/_shared/cluster/provinces.ts";
 import { TfidfIndex } from "../../../supabase/functions/_shared/cluster/tfidf.ts";
+import { cleanDescription } from "../../../supabase/functions/_shared/cluster/description-clean.ts";
 import {
+  DESCRIPTION_NAME_STOP,
   ENTITY_SPARSE_TEXT_FACTOR,
   ENTITY_TEXT_FLOOR,
   ENTITY_WEIGHT,
@@ -31,11 +35,15 @@ import {
   FAMILY_HOMONYM_NOT_AFTER,
   GENERIC_ENTITIES,
   GENERIC_ENTITY_WEIGHT,
+  HEADLINE_GENERIC_MAX_TOKENS,
   HEADLINE_TITLE_MAX_CHARS,
+  INSTITUTION_HEAD_WORDS,
   MATCH_THRESHOLD,
+  STATEMENT_TEMPLATE_NOUNS,
   SUBJECT_SPAN_MAX_WORDS,
   SUBJECT_STOP_WORDS,
   SUBJECT_VETO_CAP,
+  TEMPLATE_PLACE_PHRASES,
   TFIDF_WEIGHT,
   TIME_WINDOW_HOURS,
 } from "../../../supabase/functions/_shared/cluster/constants.ts";
@@ -2443,6 +2451,804 @@ describe("family homonym: 'Emine Erdoğan' is not 'Cumhurbaşkanı Erdoğan' (h1
         expect(headlineOnlyScore(ha, hb, 0.8, { aTitle: a, bTitle: b }), `${a} | ${b}`).toBe(
           legacy.headlineOnlyScore(ha, hb, 0.8, { aTitle: a, bTitle: b }),
         );
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h114-clusterpurity-2: statement and budget templates that differ only in the
+// speaker or the ministry. 10 Kasim messages ("Bakan Kurum'dan ... mesaji",
+// "Cumhurbaskani Erdogan'dan ...", "Emine Erdogan'dan ...", "Milli Savunma
+// Bakanligindan ...") and the Adalet budget cluster that held a Genclik ve Spor
+// item. No old veto sees either: the ablative speaker is no comma subject, and
+// leadRun() treats the ablative of a person ("Kurum'dan") as a place.
+// ---------------------------------------------------------------------------
+describe("template actor mismatch: statement and budget templates (h114-clusterpurity-2)", () => {
+  const KURUM = "Bakan Kurum'dan 10 Kasım Atatürk'ü Anma Günü mesajı";
+  const KURUM_MESAJ = "Bakan Kurum'dan 10 Kasım Mesajı! 'Aziz Hatırasını Aynı İnanç Ve Kararlılıkla Geleceğe Taşıyacağız'";
+  const AA_ERDOGAN = "Cumhurbaşkanı Erdoğan'dan 10 Kasım Atatürk'ü Anma Günü mesajı";
+  const AKSAM_ERDOGAN = "Başkan Erdoğan'dan 10 Kasım Atatürk'ü Anma Günü mesajı";
+  const EMINE = "Emine Erdoğan'dan 10 Kasım Atatürk'ü Anma Günü mesajı";
+  const TOY = "AK Parti Sivas Milletvekili Toy'dan 10 Kasım Atatürk'ü Anma Günü mesajı";
+  const MSB_FULL = "Milli Savunma Bakanlığından 10 Kasım Atatürk'ü Anma Günü mesajı";
+  const DESTICI = "BBP lideri Destici’den Ulu Önder Mustafa Kemal Atatürk mesajı";
+  const GURLEK = "Bakan Gürlek'ten '10 Kasım' mesajı!";
+  const GENCLIK = "Gençlik ve Spor Bakanlığının 2027 yılı bütçesi TBMM Plan ve Bütçe Komisyonunda";
+  const ADALET = "Adalet Bakanlığı bütçesi TBMM Plan ve Bütçe Komisyonunda kabul edildi";
+  const YUMAKLI = "Bakan Yumaklı'dan iklim krizlerine karşı uluslararası işbirliği çağrısı";
+  const KURUM_COP = "Bakan Kurum'dan COP31 Zirvesi'nde önemli açıklamalar";
+
+  describe("constants", () => {
+    it("STATEMENT_TEMPLATE_NOUNS and INSTITUTION_HEAD_WORDS are the folded prefixes of the finding", () => {
+      expect(STATEMENT_TEMPLATE_NOUNS).toEqual([
+        "mesaj", "paylasim", "aciklama", "taziye", "tebrik", "cagri", "kutlama", "tepki", "yanit", "uyari",
+      ]);
+      expect(INSTITUTION_HEAD_WORDS).toEqual(["bakanlig", "baskanlig", "valilig", "mudurlug", "komutanlig"]);
+      for (const w of [...STATEMENT_TEMPLATE_NOUNS, ...INSTITUTION_HEAD_WORDS]) expect(w).toMatch(/^[a-z]+$/);
+    });
+
+    it("TEMPLATE_PLACE_PHRASES is the folded, space-joined list of multi-word countries and seats of power", () => {
+      expect([...TEMPLATE_PLACE_PHRASES]).toEqual([
+        "kuzey kore",
+        "guney kore",
+        "birlesik krallik",
+        "beyaz saray",
+        "suudi arabistan",
+        "birlesik arap emirlikleri",
+        "guney afrika",
+        "yeni zelanda",
+        "kuzey makedonya",
+        "bosna hersek",
+      ]);
+      for (const p of TEMPLATE_PLACE_PHRASES) expect(p).toMatch(/^[a-z]+( [a-z]+)+$/);
+    });
+  });
+
+  describe("fires: two actors, one template (both argument orders)", () => {
+    const FIRES: ReadonlyArray<readonly [string, string, string]> = [
+      ["04e8fdce: Bakan Kurum vs the AA President message", KURUM, AA_ERDOGAN],
+      ["04e8fdce: Bakan Kurum vs the aksam 'Baskan Erdogan' message", KURUM, AKSAM_ERDOGAN],
+      ["c0436da0: Emine Erdogan vs the AK Parti milletvekili Toy", EMINE, TOY],
+      ["c0436da0: Emine Erdogan vs the Milli Savunma Bakanligi", EMINE, MSB_FULL],
+      ["91de50e9: BBP lideri Destici vs Bakan Gurlek", DESTICI, GURLEK],
+      ["c9525327: the Genclik ve Spor budget vs the Adalet budget", GENCLIK, ADALET],
+      ["23be7e73: Bakan Yumakli's call vs Bakan Kurum's statement", YUMAKLI, KURUM_COP],
+      ["two ministers, the same template", KURUM, GURLEK],
+      ["a minister vs the First Lady", KURUM, EMINE],
+      ["the MSB and an AK Parti MP", MSB_FULL, TOY],
+      // The buffer-n ablative of a -oglu name ("Dervisoglu'ndan"): a role names the speaker.
+      ["a party leader with a -oglu name vs another party leader", "İYİ Parti Genel Başkanı Dervişoğlu'ndan 10 Kasım mesajı", "MHP Genel Başkanı Bahçeli'den 10 Kasım mesajı"],
+      ["a minister with a -oglu name vs another minister", "Bakan Memişoğlu'ndan 10 Kasım mesajı", "Bakan Kurum'dan 10 Kasım mesajı"],
+    ];
+    it.each(FIRES)("true: %s", (_name, a, b) => {
+      expect(templateActorMismatchFires(a, b)).toBe(true);
+      expect(templateActorMismatchFires(b, a)).toBe(true);
+    });
+
+    it("a typographic apostrophe and upper case read the same; lower case names nobody (no capital, no actor)", () => {
+      expect(templateActorMismatchFires("Bakan Kurum’dan 10 Kasım mesajı", AA_ERDOGAN)).toBe(true);
+      expect(templateActorMismatchFires("BAKAN KURUM'DAN 10 KASIM MESAJI", "CUMHURBAŞKANI ERDOĞAN'DAN 10 KASIM MESAJI")).toBe(true);
+      expect(templateActorMismatchFires("bakan kurum'dan 10 kasım mesajı", "bakan yumaklı'dan 10 kasım mesajı")).toBe(false);
+      // Bare names: only the persons of TEMPLATE_ACTOR_GENERIC_KEEP are speakers on their own.
+      expect(templateActorMismatchFires("Erdoğan'dan 10 Kasım mesajı", "Fidan'dan 10 Kasım mesajı")).toBe(true);
+      expect(templateActorMismatchFires("Kurum'dan 10 Kasım mesajı", "Erdoğan'dan 10 Kasım mesajı")).toBe(false);
+    });
+
+    it("every statement noun counts as the template", () => {
+      for (const noun of ["mesajı", "paylaşımı", "açıklaması", "taziyesi", "tebrikleri", "çağrısı", "kutlaması", "tepkisi", "yanıtı", "uyarısı"]) {
+        expect(templateActorMismatchFires(`Bakan Kurum'dan ${noun}`, `Bakan Yumaklı'dan ${noun}`), noun).toBe(true);
+      }
+    });
+
+    it("an institution ablative: -ndan and -nden of every head word", () => {
+      const pairs: ReadonlyArray<readonly [string, string]> = [
+        ["Milli Savunma Bakanlığından açıklama", "Emine Erdoğan'dan açıklama"],
+        ["Emniyet Genel Müdürlüğünden açıklama", "Emine Erdoğan'dan açıklama"],
+        ["Jandarma Genel Komutanlığından açıklama", "Emine Erdoğan'dan açıklama"],
+        ["Diyanet İşleri Başkanlığından açıklama", "Emine Erdoğan'dan açıklama"],
+      ];
+      for (const [inst, person] of pairs) {
+        expect(templateActorMismatchFires(inst, person), inst).toBe(true);
+        expect(templateActorMismatchFires(person, inst), inst).toBe(true);
+      }
+    });
+  });
+
+  describe("does not fire", () => {
+    const NO_FIRE: ReadonlyArray<readonly [string, string, string]> = [
+      ["one speaker, two wordings of the message", KURUM, KURUM_MESAJ],
+      ["the same speaker with a lead-in", "Emine Erdoğan'dan 10 Kasım mesajı", "Atatürk'ü saygı ve rahmetle andı: Emine Erdoğan'dan 10 Kasım mesajı"],
+      ["a full ministerial title against its short form", "Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum'dan açıklama", "Bakan Kurum'dan açıklama"],
+      ["two places, no actor", "Ankara'dan Gazze'ye yardım çağrısı", "İstanbul'dan Gazze'ye yardım çağrısı"],
+      ["a bare 'Bakanlık' against a minister", "Bakanlıktan açıklama", "Bakan Şimşek'ten açıklama"],
+      ["a minister against his ministry (ambiguous)", "Hazine ve Maliye Bakanlığından açıklama", "Bakan Şimşek'ten açıklama"],
+      ["an acronym against its spelled-out institution", "MSB'den 10 Kasım mesajı", "Milli Savunma Bakanlığından 10 Kasım mesajı"],
+      ["a title naming both ministries", "Sağlık Bakanlığı uyardı", "Sağlık Bakanlığı ile Milli Eğitim Bakanlığı ortak genelge yayımladı"],
+      ["one party under two names", "AK Parti'den 10 Kasım mesajı", "AKP'den 10 Kasım mesajı"],
+      ["the same BBP leader, two wordings", "BBP lideri Mustafa Destici’den 10 Kasım mesajı", DESTICI],
+      ["one minister, twice, with different leads", "COP31 başladı! Bakan Kurum'dan açıklamalar", KURUM_COP],
+      ["the same ministry budget, two wordings", "Adalet Bakanlığı 2027 yılı bütçesi TBMM'de kabul edildi", ADALET],
+      ["the same ministry as 'Bakanlığı' and 'Bakanlığı'nın'", "Adalet Bakanlığı’nın 2027 yılı bütçesi kabul edildi! Bakan Akın Gürlek’ten açıklama", "Bakan Gürlek'ten Adalet Bakanlığı bütçesinin kabulüne ilişkin açıklama"],
+      ["a ministry with and without its country", "ABD Dışişleri Bakanlığı açıkladı", "Dışişleri Bakanlığı açıkladı"],
+      ["a title without any ablative", "Erdoğan Kabine toplantısı sonrası açıklama yaptı", "Kurum Kabine toplantısı sonrası açıklama yaptı"],
+      ["an ablative without a statement noun after it", "Bakan Kurum'dan Antalya'ya ziyaret", "Bakan Yumaklı'dan Antalya'ya ziyaret"],
+      ["the noun before the ablative is not a template", "Mesaj Bakan Kurum'dan", "Mesaj Bakan Yumaklı'dan"],
+      ["an ablative past the subject span", "Kabine toplantısı sonrası dün akşam Bakan Kurum'dan açıklama", "Kabine toplantısı sonrası dün akşam Bakan Yumaklı'dan açıklama"],
+      ["a ministry in only one title", "Adalet Bakanlığı bütçesi kabul edildi", "TBMM'de bütçe görüşmeleri sürüyor"],
+      ["two roles, no names", "Bakan'dan açıklama", "Başkan'dan açıklama"],
+      ["a province's governorship names no actor", "Ankara Valiliğinden açıklama", "Emine Erdoğan'dan açıklama"],
+      // The replay of 2026-11-04..11 (h115): same-story pairs a bare country, capital, party or person split.
+      ["a country against its parliament speaker (2ee853c9)", "İran'dan ABD seçimlerine ilk yanıt: Halkı savaşa hayır dedi", "Kalibaf'tan ABD'ye ara seçim mesajı: “Halk savaşa hayır dedi”"],
+      ["a country against its capital (2ee853c9)", "İran'dan ABD seçim sonuçlarıyla ilgili sert mesaj: Halkın iradesine ihanet edilirse kabusu yaşarsınız!", "Tahran'dan ABD seçimlerine dair dikkat çeken yorum: Halkın mesajını destekliyoruz"],
+      ["a country against its seat of power (268d231b)", "Rusya'dan ABD seçimi için ilk açıklama", "Kremlin'den ABD seçimleri açıklaması: \"Dış politikamız siyasi dengelere bağlı değil\""],
+      ["a party against its spokesman (05b95ff3)", "YENİ Parti'den ABD seçimleri açıklaması: 'Erdoğan adına çıkarılacak ağır dersler var'", "Gökhan Günaydın’dan ABD seçimleri için açıklama: Erdoğan adına çıkarılacak ağır dersler var"],
+      ["a party against a named party official (df635766)", "AK Parti'den 'mücadele' mesajı: 'Özel'in hakkındaki iddiaların bini bir para!'", "Eyyüp Kadir İnan'dan Özgür Özel'e İzmir tepkisi: Bu şehirde sana yer yok"],
+      ["a country against a roled person of it", "İran'dan ABD seçimlerine ilk yanıt", "Meclis Başkanı Kalibaf'tan ABD'ye seçim mesajı"],
+      // Review of h115 (CR-2): a two-word country or seat of power is a bare word, not a full name.
+      ["a two-word country against its leader", "Kuzey Kore'den ABD'ye tepki", "Kim Jong Un'dan ABD'ye tepki"],
+      ["a two-word country against the prime minister of it", "Birleşik Krallık'tan Rusya'ya yaptırım açıklaması", "İngiltere Başbakanı Starmer'dan Rusya'ya yaptırım açıklaması"],
+      ["a two-word seat of power against the president of it", "Beyaz Saray'dan İran açıklaması", "ABD Başkanı Trump'tan İran açıklaması"],
+      ["an acronym with a role against the spelled-out ministry", "MSB Sözcüsü Aktürk'ten F-16 açıklaması", "Milli Savunma Bakanlığından F-16 açıklaması"],
+      ["two ministries, each named by its acronym in the other title", "Gençlik ve Spor Bakanlığı ile MEB arasında okul sporları protokolü", "Milli Eğitim Bakanlığı ile GSB arasında okul sporları protokolü imzalandı"],
+      // Review of h115 (CR-3): the buffer-n ablative of a -oglu name.
+      ["a minister with a -oglu name, with and without his ministry", "Bakan Memişoğlu'ndan 10 Kasım mesajı", "Sağlık Bakanı Memişoğlu'ndan 10 Kasım mesajı"],
+      ["a ministry in 'Bakanlığı'ndan' against its acronym", "Milli Savunma Bakanlığı'ndan 10 Kasım mesajı", "MSB'den 10 Kasım mesajı"],
+    ];
+    it.each(NO_FIRE)("false: %s", (_name, a, b) => {
+      expect(templateActorMismatchFires(a, b)).toBe(false);
+      expect(templateActorMismatchFires(b, a)).toBe(false);
+    });
+
+    it("false for a title that is not a string, or empty, on either side", () => {
+      for (const bad of [null, undefined, 42, {}, [], true] as unknown[]) {
+        expect(templateActorMismatchFires(bad as string, KURUM)).toBe(false);
+        expect(templateActorMismatchFires(KURUM, bad as string)).toBe(false);
+        expect(templateActorMismatchFires(bad as string, bad as string)).toBe(false);
+      }
+      expect(templateActorMismatchFires("", KURUM)).toBe(false);
+      expect(templateActorMismatchFires(KURUM, "")).toBe(false);
+      expect(templateActorMismatchFires("", "")).toBe(false);
+      expect(templateActorMismatchFires("   ", AA_ERDOGAN)).toBe(false);
+    });
+
+    it("an identical title never fires against itself", () => {
+      for (const t of [KURUM, AA_ERDOGAN, EMINE, TOY, MSB_FULL, DESTICI, GURLEK, GENCLIK, ADALET]) {
+        expect(templateActorMismatchFires(t, t), t).toBe(false);
+      }
+    });
+  });
+
+  describe("clipping and cost", () => {
+    it("an ablative past HEADLINE_TITLE_MAX_CHARS is not seen", () => {
+      const pad = "x ".repeat(HEADLINE_TITLE_MAX_CHARS / 2);
+      expect(templateActorMismatchFires(`${pad}Bakan Kurum'dan mesaj`, AA_ERDOGAN)).toBe(false);
+      expect(templateActorMismatchFires(`Bakan Kurum'dan mesaj ${pad}`, AA_ERDOGAN)).toBe(true);
+    });
+
+    it("costs the same for a 12 KB title as for a 100 KB one: the clip bounds the work (CPU time, not wall clock)", () => {
+      expectLinear(
+        rep("Atatürk'ü Anma Günü mesajı ", "Bakan Kurum'dan 10 Kasım "),
+        (other) => {
+          expect(templateActorMismatchFires(AA_ERDOGAN, other)).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+  });
+
+  describe("actorMismatchFires reports it, so the headline lane is withdrawn", () => {
+    it("true for the 10 Kasım pairs and the budget pair, which no old rule catches", () => {
+      expect(actorMismatchFires(KURUM, AA_ERDOGAN)).toBe(true);
+      expect(actorMismatchFires(AA_ERDOGAN, KURUM)).toBe(true);
+      expect(actorMismatchFires(EMINE, TOY)).toBe(true);
+      expect(actorMismatchFires(GENCLIK, ADALET)).toBe(true);
+    });
+
+    it("false for the same-actor pairs", () => {
+      expect(actorMismatchFires(KURUM, KURUM_MESAJ)).toBe(false);
+      expect(actorMismatchFires("Adalet Bakanlığı 2027 yılı bütçesi TBMM'de kabul edildi", ADALET)).toBe(false);
+    });
+  });
+
+  describe("headlineOnlyScore (member scan, attach evidence)", () => {
+    const HOURS = 0.5;
+    it("the lane really fires for the 10 Kasım pair, and the template rule zeroes it", () => {
+      const ha = headlineTokens(KURUM);
+      const hb = headlineTokens(AA_ERDOGAN);
+      expect(headlineLane(ha, hb, HOURS).fired).toBe(true);
+      // Without titles the lane's own score stands (backward compatible).
+      expect(headlineOnlyScore(ha, hb, HOURS)).toBeGreaterThan(0);
+      expect(headlineOnlyScore(ha, hb, HOURS, { aTitle: KURUM, bTitle: AA_ERDOGAN })).toBe(0);
+      expect(headlineOnlyScore(hb, ha, HOURS, { aTitle: AA_ERDOGAN, bTitle: KURUM })).toBe(0);
+    });
+
+    it("the same speaker keeps the lane score", () => {
+      const ha = headlineTokens(KURUM);
+      const hb = headlineTokens(KURUM_MESAJ);
+      const plain = headlineOnlyScore(ha, hb, HOURS);
+      expect(headlineOnlyScore(ha, hb, HOURS, { aTitle: KURUM, bTitle: KURUM_MESAJ })).toBe(plain);
+    });
+  });
+
+  describe("score()", () => {
+    const NO_FP = { strict: null, signature: null };
+    const HOURS = 0.5;
+    const entitiesOf = (t: string) => extractEntities(t);
+    const run = (aTitle: string, bTitle: string, tfidf = 0.8, hours = HOURS, ea = entitiesOf(aTitle), eb = entitiesOf(bTitle)) =>
+      score(NO_FP, NO_FP, ea, eb, tfidf, hours, { aTitle, bTitle });
+
+    it("control: the same speaker's two wordings of the 10 Kasım message match and carry no template veto", () => {
+      const r = run(KURUM, KURUM_MESAJ);
+      expect(r.components.templateVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("the 10 Kasım pair: the headline lane would carry it, templateVeto is true and the pair is no match", () => {
+      // Control: the lane fires on the titles alone, and without the rule the pair is a match.
+      expect(headlineLane(headlineTokens(KURUM), headlineTokens(AA_ERDOGAN), HOURS).fired).toBe(true);
+      for (const [a, b] of [[KURUM, AA_ERDOGAN], [AA_ERDOGAN, KURUM], [EMINE, TOY], [EMINE, MSB_FULL]] as const) {
+        const r = run(a, b);
+        expect(r.components.templateVeto, `${a} | ${b}`).toBe(true);
+        // The lane is withdrawn for a pair it fired for (actorVeto is judged only then).
+        expect(r.components.actorVeto).toBe(headlineLane(headlineTokens(a), headlineTokens(b), HOURS).fired);
+        expect(r.components.headlineLane).toBe(false);
+        expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+        expect(isMatch(r), `${a} | ${b}`).toBe(false);
+        expect(r.score).toBeLessThan(MATCH_THRESHOLD);
+        expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
+      }
+    });
+
+    it("the primary lane is capped too: the budget pair that joined at primary 0.60 (c9525327)", () => {
+      // Titles that do not take the headline lane; text and one shared entity carry the pair.
+      const ea = ["tbmm"];
+      const eb = ["tbmm"];
+      const control = run("Adalet Bakanlığı bütçesi TBMM'de kabul edildi", ADALET, 0.6, 1, ea, eb);
+      expect(control.components.templateVeto).toBe(false);
+      expect(isMatch(control)).toBe(true);
+      const r = run(GENCLIK, ADALET, 0.6, 1, ea, eb);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.templateVeto).toBe(true);
+      expect(r.components.primary).toBeGreaterThan(MATCH_THRESHOLD);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
+    });
+
+    it("the MinHash lane is capped too (the MSB and Gürlek joins took the MinHash lane at 0.78-0.81)", () => {
+      const description =
+        "Atatürk'ün ebediyete intikalinin 88. yıl dönümünde Anıtkabir'de tören düzenlendi. Devlet erkanı ve vatandaşlar Anıtkabir'i ziyaret etti. Saat 09.05'te Türkiye genelinde saygı duruşu yapıldı ve sirenler çaldı. Törende mesajlar yayımlandı.";
+      const fa = fingerprint(KURUM, description);
+      const fb = fingerprint(AA_ERDOGAN, description);
+      const r = score(fa, fb, [], [], 0.9, 0.5, { aTitle: KURUM, bTitle: AA_ERDOGAN });
+      // Control: without the veto the MinHash lane alone would clear the threshold.
+      expect(r.components.jaccardScore).toBeGreaterThan(MATCH_THRESHOLD);
+      expect(r.components.templateVeto).toBe(true);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("has no headline exemption: a pair whose lane fires is still capped on the other lanes", () => {
+      const r = run(KURUM, AA_ERDOGAN, 0.95, 0.2);
+      expect(r.components.templateVeto).toBe(true);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+    });
+
+    it("no threshold constant moved: the cap is SUBJECT_VETO_CAP", () => {
+      expect(MATCH_THRESHOLD).toBe(0.4);
+      expect(SUBJECT_VETO_CAP).toBeCloseTo(MATCH_THRESHOLD * 0.9 - 0.01, 12);
+    });
+
+    it("templateVeto is a boolean component of every branch: auto-accept, missing titles, one title, unrelated titles", () => {
+      const same = { strict: "e".repeat(40), signature: null };
+      const auto = score(same, same, [], [], 0.1, 1, { aTitle: KURUM, bTitle: AA_ERDOGAN });
+      expect(auto.components.autoAccept).toBe(true);
+      expect(auto.components.templateVeto).toBe(false);
+      expect(auto.score).toBe(1);
+
+      const noTitles = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, HOURS);
+      expect(noTitles.components.templateVeto).toBe(false);
+      expect(isMatch(noTitles)).toBe(true);
+
+      const oneTitle = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, HOURS, { aTitle: KURUM });
+      expect(oneTitle.components.templateVeto).toBe(false);
+      expect(score(NO_FP, NO_FP, [], [], 0.1, 1, { aTitle: KURUM, bTitle: "" }).components.templateVeto).toBe(false);
+
+      const unrelated = run("Hava bugün parçalı bulutlu geçecek", "Borsa güne yükselişle başladı", 0.05);
+      expect(unrelated.components.templateVeto).toBe(false);
+    });
+
+    it("the other vetoes still report as before for a template pair (it is additive)", () => {
+      const r = run(KURUM, AA_ERDOGAN);
+      expect(r.components.subjectVeto).toBe(false);
+      expect(r.components.incidentVeto).toBe(false);
+      expect(r.components.counterVeto).toBe(false);
+      expect(r.components.homonymVeto).toBe(false);
+    });
+  });
+
+  describe("parity with scripts/lib/cluster (.mjs twin)", () => {
+    interface MjsSide {
+      templateActorMismatchFires: (a: string, b: string) => boolean;
+      actorMismatchFires: (a: string, b: string) => boolean;
+      score: (
+        a: unknown,
+        b: unknown,
+        ea: Iterable<string>,
+        eb: Iterable<string>,
+        tfidf: number,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => { score: number; components: Record<string, unknown> };
+      headlineOnlyScore: (
+        a: unknown,
+        b: unknown,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => number;
+    }
+    let legacy: MjsSide;
+    let legacyConstants: {
+      STATEMENT_TEMPLATE_NOUNS: readonly string[];
+      INSTITUTION_HEAD_WORDS: readonly string[];
+      TEMPLATE_PLACE_PHRASES: readonly string[];
+    };
+    beforeAll(async () => {
+      legacy = (await import("../../../scripts/lib/cluster/ensemble.mjs")) as unknown as MjsSide;
+      legacyConstants = (await import("../../../scripts/lib/cluster/constants.mjs")) as unknown as typeof legacyConstants;
+    });
+
+    const NO_FP = { strict: null, signature: null };
+    const PAIRS: ReadonlyArray<readonly [string, string]> = [
+      [KURUM, AA_ERDOGAN],
+      [KURUM, AKSAM_ERDOGAN],
+      [KURUM, KURUM_MESAJ],
+      [EMINE, TOY],
+      [EMINE, MSB_FULL],
+      [DESTICI, GURLEK],
+      [GENCLIK, ADALET],
+      [YUMAKLI, KURUM_COP],
+      ["Emine Erdoğan'dan 10 Kasım mesajı", "Atatürk'ü saygı ve rahmetle andı: Emine Erdoğan'dan 10 Kasım mesajı"],
+      ["Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum'dan açıklama", "Bakan Kurum'dan açıklama"],
+      ["Ankara'dan Gazze'ye yardım çağrısı", "İstanbul'dan Gazze'ye yardım çağrısı"],
+      ["Bakanlıktan açıklama", "Bakan Şimşek'ten açıklama"],
+      ["Hazine ve Maliye Bakanlığından açıklama", "Bakan Şimşek'ten açıklama"],
+      ["MSB'den 10 Kasım mesajı", MSB_FULL],
+      ["Sağlık Bakanlığı uyardı", "Sağlık Bakanlığı ile Milli Eğitim Bakanlığı ortak genelge yayımladı"],
+      ["AK Parti'den 10 Kasım mesajı", "AKP'den 10 Kasım mesajı"],
+      ["Emniyet Genel Müdürlüğünden açıklama", "Emine Erdoğan'dan açıklama"],
+      ["BAKAN KURUM'DAN 10 KASIM MESAJI", "CUMHURBAŞKANI ERDOĞAN'DAN 10 KASIM MESAJI"],
+      ["Kuzey Kore'den ABD'ye tepki", "Kim Jong Un'dan ABD'ye tepki"],
+      ["Birleşik Krallık'tan Rusya'ya yaptırım açıklaması", "İngiltere Başbakanı Starmer'dan Rusya'ya yaptırım açıklaması"],
+      ["Beyaz Saray'dan İran açıklaması", "ABD Başkanı Trump'tan İran açıklaması"],
+      ["MSB Sözcüsü Aktürk'ten F-16 açıklaması", "Milli Savunma Bakanlığından F-16 açıklaması"],
+      ["Gençlik ve Spor Bakanlığı ile MEB arasında okul sporları protokolü", "Milli Eğitim Bakanlığı ile GSB arasında okul sporları protokolü imzalandı"],
+      ["İYİ Parti Genel Başkanı Dervişoğlu'ndan 10 Kasım mesajı", "MHP Genel Başkanı Bahçeli'den 10 Kasım mesajı"],
+      ["Bakan Memişoğlu'ndan 10 Kasım mesajı", "Bakan Kurum'dan 10 Kasım mesajı"],
+      ["Bakan Memişoğlu'ndan 10 Kasım mesajı", "Sağlık Bakanı Memişoğlu'ndan 10 Kasım mesajı"],
+      ["Milli Savunma Bakanlığı'ndan 10 Kasım mesajı", "MSB'den 10 Kasım mesajı"],
+    ];
+
+    it("the two word lists are identical in constants.mjs", () => {
+      expect(legacyConstants.STATEMENT_TEMPLATE_NOUNS).toEqual(STATEMENT_TEMPLATE_NOUNS);
+      expect(legacyConstants.INSTITUTION_HEAD_WORDS).toEqual(INSTITUTION_HEAD_WORDS);
+      expect(legacyConstants.TEMPLATE_PLACE_PHRASES).toEqual(TEMPLATE_PLACE_PHRASES);
+    });
+
+    it("templateActorMismatchFires and actorMismatchFires agree with the .mjs twin on every pair, both orders", () => {
+      for (const [a, b] of PAIRS) {
+        expect(legacy.templateActorMismatchFires(a, b), `${a} | ${b}`).toBe(templateActorMismatchFires(a, b));
+        expect(legacy.templateActorMismatchFires(b, a), `${b} | ${a}`).toBe(templateActorMismatchFires(b, a));
+        expect(legacy.actorMismatchFires(a, b), `${a} | ${b}`).toBe(actorMismatchFires(a, b));
+      }
+    });
+
+    it("score and every component are identical (===) to the .mjs twin, and templateVeto is a component of both", () => {
+      for (const [a, b] of PAIRS) {
+        for (const tfidf of [0.05, 0.37, 0.58, 0.9]) {
+          const port = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], tfidf, 0.5, { aTitle: a, bTitle: b });
+          const old = legacy.score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], tfidf, 0.5, { aTitle: a, bTitle: b });
+          expect(port.score, `${a} | ${b} @${tfidf}`).toBe(old.score);
+          expect(Object.keys(port.components).sort()).toEqual(Object.keys(old.components).sort());
+          expect(Object.keys(port.components)).toContain("templateVeto");
+          for (const k of Object.keys(port.components)) {
+            expect((port.components as Record<string, unknown>)[k], `${a} | ${b} @${tfidf}: ${k}`).toBe(old.components[k]);
+          }
+        }
+      }
+    });
+
+    it("headlineOnlyScore with titles is identical to the .mjs twin", () => {
+      for (const [a, b] of PAIRS) {
+        const ha = headlineTokens(a);
+        const hb = headlineTokens(b);
+        expect(headlineOnlyScore(ha, hb, 0.5, { aTitle: a, bTitle: b }), `${a} | ${b}`).toBe(
+          legacy.headlineOnlyScore(ha, hb, 0.5, { aTitle: a, bTitle: b }),
+        );
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h114-clusterpurity-4: a generic headline that names nobody glues another
+// person's story. Cluster 9cb0f088 (the Enver Cevik gozalti, 32 members) held
+// cumhuriyet ee184d9b 'Fon sorusturmasinda yeni gozalti' and diken 62a70ae3 'Fon
+// sorusturmasinda bir gozalti daha': both are the Omer Murat Gulkan detention (the
+// Gulkan cluster 27df2d98 exists). The bridge was cgtn-turk e1ede591, whose
+// identical title names Enver Cevik only in the description; the join went
+// through the consumer's member scan (headlineOnlyScore on titles alone), and four
+// shared stems satisfy HEADLINE_LANE_MIN_SHARED for a headline that names nobody.
+// ---------------------------------------------------------------------------
+describe("generic headline name conflict (h114-clusterpurity-4)", () => {
+  const GENERIC = "Fon soruşturmasında yeni gözaltı";
+  const GENERIC_DIKEN = "Fon soruşturmasında bir gözaltı daha";
+  const CGTN_DESC = 'Sermaye piyasası işlemlerine ilişkin "fon" soruşturmasında Enver Çevik gözaltına alındı.';
+  const CUMHURIYET_DESC =
+    "Fon soruşturması kapsamında OMG Capital Advisors Yönetim Kurulu Başkanı Ömer Murat Gülkan gözaltına alındı.";
+  // The stored diken description, wrapper and all; the guard reads the cleaned one.
+  const DIKEN_RAW =
+    "Fon soruşturmasında bir gözaltı daha 09.11.2026 DikenFon soruşturmasında OMG Capital Advisors Yönetim Kurulu Başkanı Ömer Murat Gülkan gözaltına alındı.\nThe post Fon soruşturmasında bir gözaltı daha appeared first on #site_linkat 09.11.2026 .";
+  const DIKEN_DESC = cleanDescription(DIKEN_RAW) as string;
+  const LYDIA_DESC =
+    "Fon soruşturması kapsamında Lydia Holding Yönetim Kurulu Başkanı Enver Çevik gözaltına alındı.";
+  const NAMED_TITLE = "Fon soruşturmasında Enver Çevik gözaltına alındı";
+
+  describe("constants", () => {
+    it("HEADLINE_GENERIC_MAX_TOKENS is 5 and DESCRIPTION_NAME_STOP is the folded prefix list of the finding", () => {
+      expect(HEADLINE_GENERIC_MAX_TOKENS).toBe(5);
+      expect(DESCRIPTION_NAME_STOP).toEqual(["yonetim", "kurul", "genel", "mudur", "holding", "sirket", "grup", "baskan"]);
+      for (const w of DESCRIPTION_NAME_STOP) expect(w).toMatch(/^[a-z]+$/);
+    });
+
+    it("the premise: the cleaned diken description is the sentence without the feed wrapper", () => {
+      expect(DIKEN_DESC).toBe(
+        "Fon soruşturmasında OMG Capital Advisors Yönetim Kurulu Başkanı Ömer Murat Gülkan gözaltına alındı.",
+      );
+      expect(headlineTokens(GENERIC).tokens.size).toBeLessThanOrEqual(HEADLINE_GENERIC_MAX_TOKENS);
+      expect(headlineTokens(GENERIC_DIKEN).tokens.size).toBeLessThanOrEqual(HEADLINE_GENERIC_MAX_TOKENS);
+    });
+  });
+
+  describe("fires: generic headlines whose descriptions name different people", () => {
+    it("cgtn-turk (Enver Çevik) vs cumhuriyet (Ömer Murat Gülkan), both orders", () => {
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, CGTN_DESC, CUMHURIYET_DESC)).toBe(true);
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, CUMHURIYET_DESC, CGTN_DESC)).toBe(true);
+    });
+
+    it("cgtn-turk vs diken (the cleaned description)", () => {
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC_DIKEN, CGTN_DESC, DIKEN_DESC)).toBe(true);
+      expect(genericHeadlineNameConflict(GENERIC_DIKEN, GENERIC, DIKEN_DESC, CGTN_DESC)).toBe(true);
+    });
+
+    it("a short generic title against a longer one that names nobody either: the shorter title decides", () => {
+      const longGeneric = "Fon soruşturması kapsamında yeni gözaltı kararları verildi bugün";
+      expect(headlineTokens(longGeneric).tokens.size).toBeGreaterThan(HEADLINE_GENERIC_MAX_TOKENS);
+      expect(genericHeadlineNameConflict(GENERIC, longGeneric, CGTN_DESC, CUMHURIYET_DESC)).toBe(true);
+      // Both over the limit: the rule does not apply.
+      expect(genericHeadlineNameConflict(longGeneric, `${longGeneric} dün`, CGTN_DESC, CUMHURIYET_DESC)).toBe(false);
+    });
+
+    it("apostrophe suffixes are stripped from the names, and a sentence-initial run drops its first word", () => {
+      expect(
+        genericHeadlineNameConflict(GENERIC, GENERIC, "Soruşturmada Enver Çevik'in gözaltına alındığı bildirildi.", "Soruşturmada Ömer Murat Gülkan'ın gözaltına alındığı bildirildi."),
+      ).toBe(true);
+      // 'Enver' opens the sentence and is dropped; 'Çevik' stays.
+      expect(
+        genericHeadlineNameConflict(GENERIC, GENERIC, "Enver Çevik gözaltına alındı.", "Ömer Gülkan gözaltına alındı."),
+      ).toBe(true);
+      // The same name under two inflections is one name.
+      expect(
+        genericHeadlineNameConflict(GENERIC, GENERIC, "Soruşturmada Enver Çevik gözaltına alındı.", "Soruşturmada Enver Çevik'in gözaltına alındığı duyuruldu."),
+      ).toBe(false);
+    });
+
+    it("only a name directly followed by a headline word counts: the person the headline's own event word is about", () => {
+      // Same detention, one description leads with the detainee, the other with the prosecutor's office.
+      expect(
+        genericHeadlineNameConflict(GENERIC, GENERIC, CGTN_DESC, "İstanbul Cumhuriyet Başsavcılığı fon soruşturmasında Enver Çevik hakkında işlem başlattı."),
+      ).toBe(false);
+      // A name run followed by another word is not the subject of the event.
+      expect(
+        genericHeadlineNameConflict(GENERIC, GENERIC, "Soruşturmada Enver Çevik ifade verdi, ardından gözaltına alındı.", "Soruşturmada Ömer Murat Gülkan ifade verdi, ardından gözaltına alındı."),
+      ).toBe(false);
+      // A run closed by punctuation is not adjacent to the word after it.
+      expect(
+        genericHeadlineNameConflict(GENERIC, GENERIC, "Soruşturmada Enver Çevik, gözaltına alındı.", "Soruşturmada Ömer Murat Gülkan, gözaltına alındı."),
+      ).toBe(false);
+    });
+  });
+
+  describe("does not fire", () => {
+    it("cumhuriyet vs diken: both name Gülkan", () => {
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC_DIKEN, CUMHURIYET_DESC, DIKEN_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(GENERIC_DIKEN, GENERIC, DIKEN_DESC, CUMHURIYET_DESC)).toBe(false);
+    });
+
+    it("two generic titles whose descriptions both name 'Lydia Holding Yönetim Kurulu Başkanı Enver Çevik'", () => {
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, LYDIA_DESC, CGTN_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, LYDIA_DESC, LYDIA_DESC)).toBe(false);
+    });
+
+    it("a generic title against a title that names the person: the rule does not apply", () => {
+      expect(genericHeadlineNameConflict(GENERIC, NAMED_TITLE, CUMHURIYET_DESC, CGTN_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(NAMED_TITLE, GENERIC, CGTN_DESC, CUMHURIYET_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(NAMED_TITLE, NAMED_TITLE, CUMHURIYET_DESC, CGTN_DESC)).toBe(false);
+    });
+
+    it("descriptions with no name run: nothing to compare", () => {
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, "Sermaye piyasası işlemlerine ilişkin soruşturmada gözaltı.", CUMHURIYET_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, CUMHURIYET_DESC, "gözaltı kararı verildi")).toBe(false);
+      // A lone capitalised word (not at the start of a sentence) is no run; a run of roles and stop words names nobody.
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, "Soruşturmada dün Çevik gözaltına alındı.", CUMHURIYET_DESC)).toBe(false);
+      expect(
+        genericHeadlineNameConflict(GENERIC, GENERIC, "Soruşturmada Yönetim Kurulu Başkanı Genel Müdürü ifade verdi.", CUMHURIYET_DESC),
+      ).toBe(false);
+    });
+
+    it("a missing description, on either side, never fires", () => {
+      for (const d of [null, undefined, ""] as const) {
+        expect(genericHeadlineNameConflict(GENERIC, GENERIC, d, CUMHURIYET_DESC)).toBe(false);
+        expect(genericHeadlineNameConflict(GENERIC, GENERIC, CGTN_DESC, d)).toBe(false);
+        expect(genericHeadlineNameConflict(GENERIC, GENERIC, d, d)).toBe(false);
+      }
+    });
+
+    it("anything that is not a string, or an empty title, never fires", () => {
+      for (const bad of [null, undefined, 7, {}, []] as unknown[]) {
+        expect(genericHeadlineNameConflict(bad as string, GENERIC, CGTN_DESC, CUMHURIYET_DESC)).toBe(false);
+        expect(genericHeadlineNameConflict(GENERIC, bad as string, CGTN_DESC, CUMHURIYET_DESC)).toBe(false);
+        expect(genericHeadlineNameConflict(GENERIC, GENERIC, bad as string, CUMHURIYET_DESC)).toBe(false);
+        expect(genericHeadlineNameConflict(GENERIC, GENERIC, CGTN_DESC, bad as string)).toBe(false);
+      }
+      expect(genericHeadlineNameConflict("", GENERIC, CGTN_DESC, CUMHURIYET_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(GENERIC, "", CGTN_DESC, CUMHURIYET_DESC)).toBe(false);
+    });
+
+    it("a name past the first 240 characters of the description is not read", () => {
+      const pad = "gözaltı kararı verildi ".repeat(12);
+      expect(pad.length).toBeGreaterThan(240);
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, `${pad}Ömer Murat Gülkan gözaltına alındı.`, CGTN_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, `Soruşturmada Ömer Murat Gülkan gözaltına alındı. ${pad}`, CGTN_DESC)).toBe(true);
+    });
+
+    it("a title whose capitalised words are only roles, stop words and generic entities is still generic", () => {
+      // 'Erdoğan' is a GENERIC_ENTITIES word, 'Bakan' a role: neither names somebody on its own.
+      const withRole = "Fon soruşturmasında Bakan Erdoğan'dan yeni gözaltı";
+      expect(headlineTokens(withRole).tokens.size).toBeLessThanOrEqual(HEADLINE_GENERIC_MAX_TOKENS);
+      expect(genericHeadlineNameConflict(withRole, withRole, CGTN_DESC, CUMHURIYET_DESC)).toBe(true);
+    });
+
+    it("an identical pair never fires against itself", () => {
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, CGTN_DESC, CGTN_DESC)).toBe(false);
+      expect(genericHeadlineNameConflict(GENERIC, GENERIC, CUMHURIYET_DESC, CUMHURIYET_DESC)).toBe(false);
+    });
+  });
+
+  // The first draft of the rule (every name run of the first 240 characters) fired on 13 pairs of
+  // the 7-day replay and 12 of them were one story told with different names in the lead. The rule
+  // reads only the run that is directly followed by a headline word, and none of these fires.
+  describe("same-story pairs of the replay (cleaned prod descriptions, first 240 characters)", () => {
+    const PAIRS: ReadonlyArray<readonly [string, string, string, string, string]> = [
+      [
+        "dddac4f1: the arrests, a BDDK deputy chairman against the prosecutor's office",
+        "Fon soruşturmasında 2 şüpheli daha tutuklandı",
+        "Sermaye piyasası işlemlerine yönelik yürütülen soruşturmada BDDK Başkan Yardımcısı Muhammet Erişen ile Adil Katılım Bankası Genel Müdürü Murat Yönaç tutuklandı.Devamı için tıklayınız",
+        "Fon soruşturmasında 2 şüpheli daha tutuklandı",
+        "İstanbul Cumhuriyet Başsavcılığı tarafından yürütülen fon soruşturmasında, gözaltına alınan isimlerden ikisi hakkında tutuklama kararı verildi. Toplam tutuklu sayısının 4'e ulaştığı operasyonda, üst düzey bankacı ve BDDK yetkilileri hakkınd",
+      ],
+      [
+        "c43b0bad: the rector appointments, the President against the Resmi Gazete",
+        "11 üniversiteye rektör atandı",
+        "Cumhurbaşkanı Tayyip Erdoğan'ın imzasıyla 11 üniversiteye rektör atandı.",
+        "Cumhurbaşkanı Erdoğan'ın imzası ile 11 üniversiteye rektör atandı",
+        "Cumhurbaşkanı Erdoğan’ın imzasıyla 11 üniversiteye rektör ataması yapıldı. Atama kararları, 7 Kasım 2026 tarihli Resmi Gazete’de yayımlandı.",
+      ],
+      [
+        "c43b0bad: the rector appointments, the law against the universities",
+        "Cumhurbaşkanı Erdoğan'dan 11 üniversiteye rektör ataması",
+        "Cumhurbaşkanı Erdoğan, Yükseköğretim Kanunu ve ilgili Cumhurbaşkanlığı Kararnamesi’ne dayanarak 11 üniversiteye rektör ataması yaptı.",
+        "Erdoğan’dan 11 üniversiteye rektör ataması",
+        "AKP'li Cumhurbaşkanı Recep Tayyip Erdoğan’ın imzasıyla 11 üniversiteye yeni rektör atandı. Atama kararları Resmi Gazete’de yayımlanırken, Erciyes, Eskişehir Teknik, Kayseri ve Muğla Sıtkı Koçman üniversitelerinin de aralarında bulunduğu 11 ",
+      ],
+      [
+        "955328bb: the US midterms, the President against the Congress",
+        "ABD 2026 ara seçimlerinde seçim tarihinin ilkleri",
+        "ABD'de yapılan 2026 ara seçimlerinde sandıktan çıkan sonuçlar, eyalet ve federal düzeyde birçok tarihi ilke sahne oldu. ABD Başkanı Donald Trump'ın ikinci başkanlık döneminin ikinci yarısına girilirken, iki parti de temsil gücü yüksek yeni ",
+        "ABD ara seçimlerinde tarihi ilkler!",
+        "ABD Kongre ara seçimlerinde Demokratların elde ettiği zaferler, ülke siyasetinde daha önce eşine az rastlanır tarihi ilklere sahne oldu. Seçim sonuçlarıyla birlikte ABD'nin ilk siyah kadın valisi, ilk açık eşcinsel erkek senatörü ve ilk Ame",
+      ],
+      [
+        "5d8d1646: the Seoul audience, KEPCO against Seoul's companies",
+        "Başkan Erdoğan'dan önemli kabul",
+        "Başkan Erdoğan, Korea Electric Power Corporation (KEPCO)'nun Başkan Yardımcısı ve Küresel Yeni İşler Başkanı Chan-hyuk Chun ve beraberindeki heyeti kabul etti.Devamı için tıklayınız",
+        "Başkan Erdoğan'dan önemli kabul",
+        "Başkan Recep Tayyip Erdoğan, resmi ziyaret kapsamında bulunduğu Güney Kore'nin başkenti Seul'de, teknoloji, elektronik, biyoteknoloji ve kimya alanlarında faaliyet gösteren şirketlerin üst düzey yöneticilerini...Devamı için tıklayınız",
+      ],
+    ];
+    it.each(PAIRS)("false: %s", (_name, aTitle, aDesc, bTitle, bDesc) => {
+      expect(genericHeadlineNameConflict(aTitle, bTitle, aDesc, bDesc)).toBe(false);
+      expect(genericHeadlineNameConflict(bTitle, aTitle, bDesc, aDesc)).toBe(false);
+    });
+  });
+
+  describe("cost", () => {
+    it("costs the same for a 12 KB description as for a 100 KB one: only the first 240 characters are read (CPU time, not wall clock)", () => {
+      expectLinear(
+        rep("Soruşturma kapsamında gözaltına alındı. ", "Ömer Murat Gülkan gözaltına alındı. "),
+        (desc) => {
+          expect(genericHeadlineNameConflict(GENERIC, GENERIC, CGTN_DESC, desc)).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+  });
+
+  describe("headlineOnlyScore (member scan, attach evidence)", () => {
+    const HOURS = 0.4;
+    const ha = headlineTokens(GENERIC);
+    const hb = headlineTokens(GENERIC);
+
+    it("the lane really fires for the cgtn / cumhuriyet pair, and the conflict zeroes it when descriptions are given", () => {
+      expect(headlineLane(ha, hb, HOURS).fired).toBe(true);
+      const plain = headlineOnlyScore(ha, hb, HOURS, { aTitle: GENERIC, bTitle: GENERIC });
+      expect(plain).toBeGreaterThan(0);
+      const withNames = { aTitle: GENERIC, bTitle: GENERIC, aDescription: CGTN_DESC, bDescription: CUMHURIYET_DESC };
+      expect(headlineOnlyScore(ha, hb, HOURS, withNames)).toBe(0);
+      expect(headlineOnlyScore(ha, hb, HOURS, { ...withNames, aDescription: CUMHURIYET_DESC, bDescription: CGTN_DESC })).toBe(0);
+    });
+
+    it("is unchanged when the descriptions are omitted, one is missing, or no titles are given", () => {
+      const plain = headlineOnlyScore(ha, hb, HOURS, { aTitle: GENERIC, bTitle: GENERIC });
+      expect(headlineOnlyScore(ha, hb, HOURS)).toBe(plain);
+      expect(headlineOnlyScore(ha, hb, HOURS, { aTitle: GENERIC, bTitle: GENERIC, aDescription: CGTN_DESC })).toBe(plain);
+      expect(headlineOnlyScore(ha, hb, HOURS, { aTitle: GENERIC, bTitle: GENERIC, bDescription: CUMHURIYET_DESC, aDescription: null })).toBe(plain);
+      // Descriptions without titles are not read either.
+      expect(headlineOnlyScore(ha, hb, HOURS, { aDescription: CGTN_DESC, bDescription: CUMHURIYET_DESC })).toBe(plain);
+    });
+
+    it("two Gülkan items keep their lane score", () => {
+      const hd = headlineTokens(GENERIC_DIKEN);
+      const hc = headlineTokens(GENERIC);
+      const plain = headlineOnlyScore(hc, hd, HOURS, { aTitle: GENERIC, bTitle: GENERIC_DIKEN });
+      if (plain > 0) {
+        expect(
+          headlineOnlyScore(hc, hd, HOURS, { aTitle: GENERIC, bTitle: GENERIC_DIKEN, aDescription: CUMHURIYET_DESC, bDescription: DIKEN_DESC }),
+        ).toBe(plain);
+      }
+      // The identical-title pair of the same Çevik story does as well.
+      expect(
+        headlineOnlyScore(ha, hb, HOURS, { aTitle: GENERIC, bTitle: GENERIC, aDescription: CGTN_DESC, bDescription: LYDIA_DESC }),
+      ).toBe(headlineOnlyScore(ha, hb, HOURS, { aTitle: GENERIC, bTitle: GENERIC }));
+    });
+  });
+
+  describe("score()", () => {
+    const NO_FP = { strict: null, signature: null };
+    const HOURS = 0.4;
+    const run = (tfidf: number, aDescription?: string | null, bDescription?: string | null) =>
+      score(NO_FP, NO_FP, ["tbmm"], ["tbmm"], tfidf, HOURS, {
+        aTitle: GENERIC,
+        bTitle: GENERIC,
+        aDescription,
+        bDescription,
+      });
+
+    it("control: without descriptions the generic pair matches on the headline lane alone", () => {
+      const r = run(0.1);
+      expect(r.components.headlineLane).toBe(true);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("withdraws the lane when both descriptions name different people, and the text floor applies again", () => {
+      const low = run(0.1, CGTN_DESC, CUMHURIYET_DESC);
+      expect(low.components.headlineLane).toBe(false);
+      expect(low.components.actorVeto).toBe(true);
+      expect(low.components.textFloorCapped).toBe(true);
+      expect(isMatch(low)).toBe(false);
+      // A middling text score (the 0.46 of the Çevik cluster) does not carry the pair either.
+      const mid = run(0.3, CGTN_DESC, CUMHURIYET_DESC);
+      expect(mid.components.headlineLane).toBe(false);
+      expect(mid.components.textFloorCapped).toBe(false);
+      expect(isMatch(mid)).toBe(false);
+    });
+
+    it("keeps the lane for one description, two names that agree, and two missing descriptions", () => {
+      expect(run(0.1, CGTN_DESC).components.headlineLane).toBe(true);
+      expect(run(0.1, null, CUMHURIYET_DESC).components.headlineLane).toBe(true);
+      expect(run(0.1, LYDIA_DESC, CGTN_DESC).components.headlineLane).toBe(true);
+      expect(run(0.1, CUMHURIYET_DESC, DIKEN_DESC).components.headlineLane).toBe(true);
+      expect(run(0.1, undefined, undefined).components.headlineLane).toBe(true);
+    });
+
+    it("a pair the lane did not fire for never reads the descriptions", () => {
+      const r = score(NO_FP, NO_FP, [], [], 0.9, HOURS, {
+        aTitle: "Hava bugün parçalı bulutlu geçecek",
+        bTitle: "Borsa güne yükselişle başladı",
+        aDescription: CGTN_DESC,
+        bDescription: CUMHURIYET_DESC,
+      });
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.actorVeto).toBe(false);
+    });
+
+    it("the strict-fingerprint auto-accept ignores the descriptions", () => {
+      const same = { strict: "e".repeat(40), signature: null };
+      const auto = score(same, same, [], [], 0.1, 1, { aTitle: GENERIC, bTitle: GENERIC, aDescription: CGTN_DESC, bDescription: CUMHURIYET_DESC });
+      expect(auto.components.autoAccept).toBe(true);
+      expect(auto.score).toBe(1);
+    });
+  });
+
+  describe("parity with scripts/lib/cluster (.mjs twin)", () => {
+    interface MjsSide {
+      genericHeadlineNameConflict: (a: string, b: string, ad?: string | null, bd?: string | null) => boolean;
+      score: (
+        a: unknown,
+        b: unknown,
+        ea: Iterable<string>,
+        eb: Iterable<string>,
+        tfidf: number,
+        hours: number,
+        opts?: Record<string, unknown>,
+      ) => { score: number; components: Record<string, unknown> };
+      headlineOnlyScore: (a: unknown, b: unknown, hours: number, opts?: Record<string, unknown>) => number;
+    }
+    let legacy: MjsSide;
+    let legacyConstants: { HEADLINE_GENERIC_MAX_TOKENS: number; DESCRIPTION_NAME_STOP: readonly string[] };
+    beforeAll(async () => {
+      legacy = (await import("../../../scripts/lib/cluster/ensemble.mjs")) as unknown as MjsSide;
+      legacyConstants = (await import("../../../scripts/lib/cluster/constants.mjs")) as unknown as typeof legacyConstants;
+    });
+
+    const NO_FP = { strict: null, signature: null };
+    const CASES: ReadonlyArray<readonly [string, string, string | null, string | null]> = [
+      [GENERIC, GENERIC, CGTN_DESC, CUMHURIYET_DESC],
+      [GENERIC, GENERIC_DIKEN, CGTN_DESC, DIKEN_DESC],
+      [GENERIC, GENERIC_DIKEN, CUMHURIYET_DESC, DIKEN_DESC],
+      [GENERIC, GENERIC, LYDIA_DESC, CGTN_DESC],
+      [GENERIC, NAMED_TITLE, CUMHURIYET_DESC, CGTN_DESC],
+      [GENERIC, GENERIC, "Enver Çevik gözaltına alındı.", "Ömer Gülkan gözaltına alındı."],
+      [GENERIC, GENERIC, "Soruşturmada Çevik gözaltına alındı.", CUMHURIYET_DESC],
+      [GENERIC, GENERIC, null, CUMHURIYET_DESC],
+      [GENERIC, GENERIC, "", ""],
+      [GENERIC, GENERIC, "Soruşturmada Enver Çevik'in ifadesi alındı.", "Soruşturmada Ömer Murat Gülkan'ın ifadesi alındı."],
+    ];
+
+    it("the constants are identical in constants.mjs", () => {
+      expect(legacyConstants.HEADLINE_GENERIC_MAX_TOKENS).toBe(HEADLINE_GENERIC_MAX_TOKENS);
+      expect(legacyConstants.DESCRIPTION_NAME_STOP).toEqual(DESCRIPTION_NAME_STOP);
+    });
+
+    it("genericHeadlineNameConflict agrees with the .mjs twin on every case, both orders", () => {
+      for (const [a, b, ad, bd] of CASES) {
+        expect(legacy.genericHeadlineNameConflict(a, b, ad, bd), `${a} | ${b}`).toBe(genericHeadlineNameConflict(a, b, ad, bd));
+        expect(legacy.genericHeadlineNameConflict(b, a, bd, ad), `${b} | ${a}`).toBe(genericHeadlineNameConflict(b, a, bd, ad));
+      }
+    });
+
+    it("score and every component are identical (===) to the .mjs twin with descriptions given", () => {
+      for (const [a, b, ad, bd] of CASES) {
+        for (const tfidf of [0.1, 0.3, 0.6]) {
+          const opts = { aTitle: a, bTitle: b, aDescription: ad, bDescription: bd };
+          const port = score(NO_FP, NO_FP, ["tbmm"], ["tbmm"], tfidf, 0.4, opts);
+          const old = legacy.score(NO_FP, NO_FP, ["tbmm"], ["tbmm"], tfidf, 0.4, opts);
+          expect(port.score, `${a} | ${b} @${tfidf}`).toBe(old.score);
+          expect(Object.keys(port.components).sort()).toEqual(Object.keys(old.components).sort());
+          for (const k of Object.keys(port.components)) {
+            expect((port.components as Record<string, unknown>)[k], `${a} | ${b} @${tfidf}: ${k}`).toBe(old.components[k]);
+          }
+        }
+      }
+    });
+
+    it("headlineOnlyScore with descriptions is identical to the .mjs twin", () => {
+      for (const [a, b, ad, bd] of CASES) {
+        const ha = headlineTokens(a);
+        const hb = headlineTokens(b);
+        const opts = { aTitle: a, bTitle: b, aDescription: ad, bDescription: bd };
+        expect(headlineOnlyScore(ha, hb, 0.4, opts), `${a} | ${b}`).toBe(legacy.headlineOnlyScore(ha, hb, 0.4, opts));
       }
     });
   });
