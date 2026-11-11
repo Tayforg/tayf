@@ -197,17 +197,17 @@ describe("/gelistirici page", () => {
     delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
     const html = await renderPage();
 
-    // Inner text of every <tr> cell in the errors table body, found by index
-    // scans (the cells hold plain text, so the next '</td>' closes the cell).
+    // Inner text of every <tr> cell (the status th scope=row and the two td) in
+    // the errors table body; the cells hold plain text, so the matching closing
+    // tag ends the cell.
     const section = html.slice(html.indexOf('aria-label="Hata kodları tablosu"'));
     const body = section.slice(section.indexOf("<tbody"), section.indexOf("</tbody>"));
     const rows: string[][] = [];
     for (let at = body.indexOf("<tr"); at !== -1; at = body.indexOf("<tr", at + 1)) {
       const end = body.indexOf("</tr>", at);
-      const cells: string[] = [];
-      for (let c = body.indexOf("<td", at); c !== -1 && c < end; c = body.indexOf("<td", c + 1)) {
-        cells.push(body.slice(body.indexOf(">", c) + 1, body.indexOf("</td>", c)));
-      }
+      const cells = [...body.slice(at, end).matchAll(/<t([dh])\b[^>]*>([\s\S]*?)<\/t\1>/g)].map(
+        (m) => m[2]!,
+      );
       rows.push(cells);
     }
 
@@ -313,5 +313,109 @@ describe("/gelistirici page", () => {
     delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
     const html = await renderPage();
     expect(html).not.toMatch(/tayf_[0-9a-f]{40}/);
+  });
+});
+
+// h126-a11y-2 (WCAG 1.3.1, technique H63): the cell that names each row of the
+// three tables (parameter name, plan, HTTP status) was a <td>. It is now
+// <th scope="row"> with text-left and an explicit weight (th is bold and centred
+// by default), and every table has an sr-only caption.
+describe("/gelistirici page: row headers (h126-a11y-2)", () => {
+  const getEndpoints = V1_ENDPOINTS.filter((e) => e.method === "GET");
+  const paramRows = getEndpoints.reduce((n, e) => n + e.params.length, 0);
+
+  /** The <table> ... </table> markup of the region labelled `label`. */
+  function tableOf(html: string, label: string): string {
+    const from = html.indexOf(`aria-label="${label}"`);
+    expect(from, label).toBeGreaterThan(-1);
+    const start = html.indexOf("<table", from);
+    return html.slice(start, html.indexOf("</table>", start) + "</table>".length);
+  }
+
+  it("every table has an sr-only caption as its first child", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    const tables = html.match(/<table\b[^>]*><caption class="sr-only">[^<]+<\/caption>/g) ?? [];
+
+    expect(html.match(/<table\b/g)).toHaveLength(tables.length);
+    expect(tables.length).toBe(getEndpoints.filter((e) => e.params.length > 0).length + 2);
+  });
+
+  it("names each table in Turkish: one distinct caption per params table, Kullanım sınırları, Hata kodları", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    const captions = [...html.matchAll(/<caption class="sr-only">([^<]+)<\/caption>/g)].map((m) => m[1] ?? "");
+    const withParams = getEndpoints.filter((e) => e.params.length > 0);
+
+    // The caption is the table's accessible name, so a rotor / elements list must
+    // tell the params tables apart: the same string as the wrapping region's label.
+    const expectedParamCaptions = withParams.map((e) => `${e.method} ${e.path} parametreleri`);
+    for (const caption of expectedParamCaptions) expect(captions).toContain(caption);
+    const paramCaptions = captions.filter((c) => c.endsWith(" parametreleri"));
+    expect(paramCaptions).toHaveLength(withParams.length);
+    expect(new Set(paramCaptions).size).toBe(paramCaptions.length);
+    expect(captions).not.toContain("Parametreler");
+
+    expect(captions.filter((c) => c === "Kullanım sınırları")).toHaveLength(1);
+    expect(captions.filter((c) => c === "Hata kodları")).toHaveLength(1);
+    expect(captions).toHaveLength(withParams.length + 2);
+  });
+
+  it("renders one th scope=row per parameter, plan and error row, and no other row header", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+
+    expect(paramRows).toBeGreaterThan(0);
+    expect(html.match(/<th scope="row"/g)).toHaveLength(
+      paramRows + API_PLANS.length + V1_ERROR_ROWS.length,
+    );
+  });
+
+  it("the parameter name (with its required star) is the row header of each params row", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    const clusters = getEndpoints.find((e) => e.path === "/api/v1/clusters")!;
+    const before = clusters.params.find((p) => p.name === "before")!;
+
+    expect(html).toContain(
+      `<th scope="row" class="py-2.5 pr-4 text-left font-mono text-xs font-normal text-foreground">${before.name}${before.required ? " *" : ""}</th>`,
+    );
+    // the other two cells of a params row stay td
+    expect(html).toContain('<td class="py-2.5 pr-4 text-muted-foreground">sorgu</td>');
+  });
+
+  it("the plan label is the row header of the usage-limits table", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const table = tableOf(await renderPage(), "Kullanım sınırları tablosu");
+    const heads = [...table.matchAll(/<th scope="row"[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]);
+
+    expect(heads).toEqual(API_PLANS.map((p) => p.labelTr));
+    expect(table).toContain(
+      '<th scope="row" class="py-2.5 pr-4 text-left font-medium text-foreground">',
+    );
+  });
+
+  it("the HTTP status is the row header of the error table", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const table = tableOf(await renderPage(), "Hata kodları tablosu");
+    const heads = [...table.matchAll(/<th scope="row"[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]);
+
+    expect(heads).toEqual(V1_ERROR_ROWS.map((r) => String(r.status)));
+    expect(table).toContain(
+      '<th scope="row" class="py-2.5 pr-4 text-left font-mono text-xs font-normal text-foreground">',
+    );
+  });
+
+  it("no row header carries the th default look: every one sets text-left and a font weight", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    const heads = html.match(/<th scope="row"[^>]*>/g) ?? [];
+
+    expect(heads.length).toBeGreaterThan(0);
+    for (const head of heads) {
+      expect(head).toContain("text-left");
+      expect(head).toMatch(/font-(normal|medium)/);
+      expect(head).not.toMatch(/font-(bold|semibold)/);
+    }
   });
 });

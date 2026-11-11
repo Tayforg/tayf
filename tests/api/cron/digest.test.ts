@@ -599,6 +599,151 @@ describe("GET /api/cron/digest", () => {
       expect(res.status).toBe(500);
       expect(sendBatch).not.toHaveBeenCalled();
     });
+
+    // h126-digest-1: the Kör Nokta is optional in the template (`topBlindspotBundle ?? null`) and
+    // getBlindspots THROWS when both its cached and live attempt fail (batch calls get no
+    // stale-if-error), so an uncaught rejection used to turn a missing extra into a 500 and no mail
+    // until the Sunday tick. The week read stays fatal (the test above); this read degrades.
+    describe("a failed Kör Nokta read (h126-digest-1)", () => {
+      const SUBSTEP_HEADER = "x-cron-substep-errors";
+      let warnSpy: ReturnType<typeof vi.spyOn>;
+
+      beforeEach(() => {
+        warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      });
+
+      afterEach(() => {
+        warnSpy.mockRestore();
+      });
+
+      /** Every argument any console.warn call received, as one string. */
+      const warned = () => warnSpy.mock.calls.flat().map(String).join(" | ");
+      const outcomeCalls = () => supabaseFake.fake.calls.rpc.filter((c) => c.name === "ops_cron_route_run_record");
+
+      it("a failed Kör Nokta read still sends the stories, without the Kör Nokta block, as a degraded run", async () => {
+        const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+        (getBlindspots as unknown as Mock).mockRejectedValueOnce(new Error("statement timeout"));
+
+        const { res, sendBatch } = await runDigest();
+
+        expect(res.status).toBe(200);
+        expect(sendBatch).toHaveBeenCalledTimes(1);
+        const html = sendBatch.mock.calls[0]![0][0].html as string;
+        expect(html).toContain("Test cluster");
+        expect(html).not.toContain("Kör Nokta");
+        expect(await res.json()).toEqual({ sent: 1, skipped: 0, substepErrors: 1 });
+        // withCronOutcome strips the internal header from the response and records 599 for it.
+        expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+        await Promise.all(afterCallbacks.splice(0).map((cb) => cb()));
+        expect(outcomeCalls()).toHaveLength(1);
+        expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "digest", p_status: 599 });
+        // The send is stamped as usual.
+        expect(supabaseFake.fake.calls.mutations.some((m) => m.table === "newsletter_subscribers")).toBe(true);
+        expect(warned()).toContain("[digest-cron] blindspot read failed; sending without Kör Nokta");
+        expect(warned()).toContain("statement timeout");
+      });
+
+      it("control: a successful Kör Nokta read puts the Kör Nokta heading in the mail and reports no sub-step error", async () => {
+        const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+        (getBlindspots as unknown as Mock).mockResolvedValueOnce({
+          bundles: [
+            {
+              cluster: {
+                id: "b1",
+                title_tr: "Tek taraflı haber",
+                summary_tr: "",
+                bias_distribution: {},
+              },
+              sources: [],
+              dominantZone: "iktidar",
+              dominantPct: 1,
+            },
+          ],
+        });
+
+        const { res, sendBatch } = await runDigest();
+
+        expect(sendBatch.mock.calls[0]![0][0].html as string).toContain("Kör Nokta");
+        expect(await res.json()).toEqual({ sent: 1, skipped: 0, substepErrors: 0 });
+        expect(warned()).not.toContain("blindspot read failed");
+      });
+
+      it("never logs a subscriber or reporter e-mail address: the warn carries the redacted, capped message only", async () => {
+        const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+        (getBlindspots as unknown as Mock).mockRejectedValueOnce(
+          new Error(`upstream rejected the request for reader.name+tag@example.co.uk (${"x".repeat(400)}) and ops@tayf.test`),
+        );
+
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+        const { res } = await runDigest();
+        const everything = [warnSpy, errSpy, logSpy].flatMap((spy) => spy.mock.calls.flat().map(String)).join(" | ");
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+
+        expect(res.status).toBe(200);
+        // No console channel (warn, error, log) carries an address, from this read or any other step.
+        expect(everything).not.toMatch(/[\w.+-]+@[\w.-]+/);
+        const blindspotWarn = warnSpy.mock.calls.find((c) => String(c[0]).includes("blindspot read failed"));
+        expect(blindspotWarn).toBeDefined();
+        const detail = String(blindspotWarn![1]);
+        expect(detail).toContain("[e-posta gizlendi]");
+        expect(detail).not.toContain("@");
+        expect(detail).not.toContain("reader.name");
+        expect(detail).not.toContain("example.co.uk");
+        expect(detail.length).toBeLessThanOrEqual(200);
+      });
+
+      it("redacts before it caps, so an address that straddles the 200-character cut leaves no fragment", async () => {
+        const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+        (getBlindspots as unknown as Mock).mockRejectedValueOnce(new Error(`${"y".repeat(190)} someone@example.com tail`));
+
+        await runDigest();
+
+        const blindspotWarn = warnSpy.mock.calls.find((c) => String(c[0]).includes("blindspot read failed"));
+        const detail = String(blindspotWarn![1]);
+        expect(detail).not.toContain("@");
+        expect(detail).not.toContain("someone");
+        expect(detail.length).toBeLessThanOrEqual(200);
+      });
+
+      it("a non-Error rejection (a string, a plain object) is a degraded run too, never a crash", async () => {
+        const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+        (getBlindspots as unknown as Mock).mockRejectedValueOnce("connection reset by peer");
+
+        const { res, sendBatch } = await runDigest();
+
+        expect(res.status).toBe(200);
+        expect(sendBatch).toHaveBeenCalledTimes(1);
+        expect(await res.json()).toEqual({ sent: 1, skipped: 0, substepErrors: 1 });
+        expect(warned()).toContain("connection reset by peer");
+      });
+
+      it("a failed week read is still a 500 with no mail when the Kör Nokta read fails too", async () => {
+        const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
+        const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+        (getWeeklyDigestClusters as unknown as Mock).mockRejectedValueOnce(new Error("weekly select: statement timeout"));
+        (getBlindspots as unknown as Mock).mockRejectedValueOnce(new Error("statement timeout"));
+
+        const { res, sendBatch } = await runDigest();
+
+        expect(res.status).toBe(500);
+        expect(sendBatch).not.toHaveBeenCalled();
+      });
+
+      it("a failed Kör Nokta read and a failed summary member lookup add up to two sub-step errors", async () => {
+        const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+        (getBlindspots as unknown as Mock).mockRejectedValueOnce(new Error("statement timeout"));
+        const { getRssSummaryMembers } = await import("@/lib/clusters/rss-summary-attribution");
+        (getRssSummaryMembers as unknown as Mock).mockResolvedValue({ members: {}, lookupFailed: true });
+
+        const { res, sendBatch } = await runDigest();
+
+        expect(res.status).toBe(200);
+        expect(sendBatch).toHaveBeenCalledTimes(1);
+        expect(await res.json()).toEqual({ sent: 1, skipped: 0, substepErrors: 2 });
+      });
+    });
   });
 
   it("looks up the rights-gated summary members through the uncapped batch profile too", async () => {

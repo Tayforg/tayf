@@ -464,6 +464,7 @@ function SnapshotsTable({ snapshots }: { snapshots: QualitySnapshot[] }) {
         tabIndex={0}
       >
         <table className="w-full border-collapse text-left text-sm">
+          <caption className="sr-only">Kalite ölçümleri</caption>
           <thead>
             <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
               <th scope="col" className="py-2 pr-4 font-medium">
@@ -489,9 +490,14 @@ function SnapshotsTable({ snapshots }: { snapshots: QualitySnapshot[] }) {
           <tbody className="divide-y divide-border/30">
             {snapshots.map((s) => (
               <tr key={s.id}>
-                <td className="py-2.5 pr-4 whitespace-nowrap text-muted-foreground">
+                {/* The date names the row (WCAG 1.3.1, H63); th defaults to
+                    bold and centred, hence text-left and font-normal. */}
+                <th
+                  scope="row"
+                  className="py-2.5 pr-4 text-left font-normal whitespace-nowrap text-muted-foreground"
+                >
                   {formatMeasuredAt(s.takenAt)}
-                </td>
+                </th>
                 <td className="py-2.5 pr-4 font-mono text-foreground">
                   {formatCount(s.articleCount)}
                 </td>

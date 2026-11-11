@@ -21,6 +21,13 @@ import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/ki
  * sources keep their text and border but lose the zone tint (transparent
  * background), so the directory still reads as background context.
  *
+ * That tint is only ~1.2:1 against the zone card, so in the expanded view
+ * (story set present) it is never the sole cue (WCAG 1.4.1 / 1.3.1): each
+ * covering chip carries a "✓" glyph (aria-hidden) plus an sr-only "bu haberde
+ * var", every other chip an sr-only "bu haberde yok", one legend line explains
+ * the mark, and the zone count reads "covering/total kaynak". The toggle exposes
+ * `aria-expanded`. Collapsed and no-filter views carry none of those marks.
+ *
  * If `highlightSlugs` is `undefined` or empty, the component starts in
  * the show-all state (there's no filter to apply, so dropping the tint
  * from everything would be wrong).
@@ -97,6 +104,12 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
   // apply — start expanded so the component still shows useful data.
   const hasFilter = highlightSlugs !== undefined && highlightSlugs.size > 0;
   const [showAll, setShowAll] = useState(!hasFilter);
+  // Expanded view WITH a story set: the only state in which "covered the story"
+  // vs "did not" is a comparison the reader is making, so it gets the glyph, the
+  // sr-only note, the legend and the covering/total count. Collapsed shows only
+  // covering chips and no-filter has nothing to compare, so neither is marked.
+  const marksCoverage = hasFilter && showAll;
+  const covers = (slug: string) => highlightSlugs !== undefined && highlightSlugs.has(slug);
 
   // Bucket every source into its zone. Done at render time — over the whole
   // directory this is cheap and we want both views (collapsed + expanded) to
@@ -171,17 +184,16 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
           // for this zone. In the expanded view we render every source.
           const visibleMembers = showAll
             ? allMembers
-            : allMembers.filter(
-                (s) => highlightSlugs !== undefined && highlightSlugs.has(s.slug),
-              );
+            : allMembers.filter((s) => covers(s.slug));
           return (
             <div
               key={zone}
               className={`rounded-lg border ${meta.zoneBg} ${meta.zoneBorder} p-3 space-y-2`}
             >
-              {/* Zone card header: dot + label + member count.
-                  Count reflects the CURRENT view (participating in
-                  collapsed mode, total in expanded mode). */}
+              {/* Zone card header: dot + label + member count. Collapsed:
+                  the participating sources ("N kaynak"). Expanded with a
+                  story set: "covering/total kaynak", so the switch from
+                  participants to the whole directory is not silent. */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   <span
@@ -195,7 +207,9 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                   </span>
                 </div>
                 <span className={`text-[10px] ${meta.zoneLabel}`}>
-                  {`${visibleMembers.length} kaynak`}
+                  {marksCoverage
+                    ? `${allMembers.filter((s) => covers(s.slug)).length}/${allMembers.length} kaynak`
+                    : `${visibleMembers.length} kaynak`}
                 </span>
               </div>
 
@@ -220,6 +234,9 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                     !showAll ||
                     highlightSlugs === undefined ||
                     highlightSlugs.has(source.slug);
+                  // The tint alone cannot carry "covered this story" (~1.2:1,
+                  // WCAG 1.4.1), so expanded chips also get the glyph + note.
+                  const covered = marksCoverage && covers(source.slug);
                   return (
                     <span
                       key={source.slug}
@@ -232,9 +249,17 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                         className={`h-1 w-1 rounded-full ${meta.dot}`}
                         aria-hidden="true"
                       />
+                      {covered && (
+                        <span aria-hidden="true" className={meta.chipText}>
+                          ✓
+                        </span>
+                      )}
                       {source.name}
                       <span className="sr-only">
-                        {" — " + biasLabel + (isVoting ? "" : " · " + kindLabel + " · yanlılık dağılımına sayılmaz")}
+                        {" — " +
+                          biasLabel +
+                          (isVoting ? "" : " · " + kindLabel + " · yanlılık dağılımına sayılmaz") +
+                          (marksCoverage ? (covered ? " — bu haberde var" : " — bu haberde yok") : "")}
                       </span>
                       {!isVoting && (
                         <span className="ml-0.5 text-[10px] uppercase tracking-wider">
@@ -255,6 +280,12 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
         })}
       </div>
 
+      {marksCoverage && (
+        <p className="text-[10px] text-muted-foreground">
+          Onay işaretli (✓) kaynaklar bu haberi yazdı; işaretsiz olanlar yazmadı.
+        </p>
+      )}
+
       {showsNonVotingChip && (
         <p className="text-[10px] text-muted-foreground">
           Kesikli çerçeveyle gösterilen toplayıcı / niş kaynaklar kümelerde
@@ -270,6 +301,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
           <button
             type="button"
             onClick={() => setShowAll((v) => !v)}
+            aria-expanded={showAll}
             className="inline-flex min-h-6 items-center max-sm:min-h-11 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
           >
             {showAll

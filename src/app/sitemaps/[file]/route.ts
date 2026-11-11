@@ -23,6 +23,14 @@ import { siteUrl } from "@/lib/site-url";
 // (the current UTC month, the 48h news window, the month's UTC bounds)
 // happens inside a `"use cache"` function in src/lib/seo/sitemaps.ts.
 //
+// news.xml carries the tightest window, the same bound as /rss.xml (s-maxage
+// 300 + stale-while-revalidate 60: no copy is served more than 360 s after it
+// was built). It had stale-while-revalidate=3600, so after 600 s every expired
+// copy was served once more, up to 70 min old, before the rebuild: a crawler
+// polling Google News less often than every 10 min was handed the list built at
+// its previous poll (h126-freshness-1; tests/guards/news-sitemap-cache-window).
+// The other leaf files keep their long windows: hubs.xml is slow on a miss.
+//
 // Cache-Control by file: a CLOSED month (strictly before the current UTC
 // month) can no longer gain clusters that belong to it, so it gets a long
 // CDN lifetime and spares the database a repeat of its paged scan. The
@@ -36,7 +44,7 @@ interface RouteContext {
 
 const NOT_FOUND_HEADERS = { "Cache-Control": "public, s-maxage=300" };
 const NEWS_CACHE_HEADERS = {
-  "Cache-Control": "public, s-maxage=600, stale-while-revalidate=3600",
+  "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
 };
 const DEFAULT_CACHE_HEADERS = {
   "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",

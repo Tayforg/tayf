@@ -366,6 +366,7 @@ Cue phrases are folded lower-case ASCII and open-ended, except a single word of 
 
 - `/sitemap.xml` is an index that lists `/sitemaps/hubs.xml` next to `static.xml`, `sources.xml`, `news.xml` and the monthly cluster files.
 - `static.xml` carries only the `/gundem` index page.
+- `news.xml` (the Google News file) is sent with `Cache-Control: public, s-maxage=300, stale-while-revalidate=60`, the same bound as `/rss.xml`, so no CDN copy is served more than 360 s after it was built (the earlier one-hour stale window handed a crawler that polls less often than every 10 minutes the list built at its previous poll).
 - `hubs.xml` is built by `getHubsSitemapXml` (`src/lib/seo/hub-sitemap.ts`). It reads every `RISING_ENTITIES` hub through `getEntityHub` in batches of `HUB_SITEMAP_CONCURRENCY` (8), lists `/gundem/<key>` exactly when the page itself is indexable (so the sitemap never submits a URL the page asks crawlers to skip), and sets `lastmod` to the newest `first_published` among the hub's clusters.
 - A `null` hub read fails the whole build: the route answers `503` with `Retry-After: 600` and `Cache-Control: no-store` instead of publishing a short urlset that would de-index hubs. The builder itself is uncached; the load is carried by the 62 per-key cache entries and the route's `Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`.
 

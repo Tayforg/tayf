@@ -252,6 +252,7 @@ export function KaynakDurumBody({
               tabIndex={0}
             >
               <table className="w-full border-collapse text-left text-sm">
+                <caption className="sr-only">Kaynak durumu</caption>
                 <thead>
                   <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                     <th
@@ -317,14 +318,21 @@ export function KaynakDurumBody({
                 <tbody className="divide-y divide-border/30">
                   {sortedRows.map((row) => (
                     <tr key={row.slug}>
-                      <td className="sticky left-0 z-10 bg-card py-2.5 pr-4 font-medium text-foreground whitespace-nowrap">
+                      {/* The cell that names the row is its header (WCAG 1.3.1,
+                          H63): a screen reader moving down a column announces
+                          the source with every value. th defaults to bold and
+                          centred, hence the explicit text-left and font-medium. */}
+                      <th
+                        scope="row"
+                        className="sticky left-0 z-10 bg-card py-2.5 pr-4 text-left font-medium text-foreground whitespace-nowrap"
+                      >
                         <Link
                           href={`/source/${row.slug}`}
                           className="hover:underline"
                         >
                           {row.name}
                         </Link>
-                      </td>
+                      </th>
                       <td className="py-2.5 pr-4">
                         <span className="flex flex-wrap items-center gap-1.5">
                           {row.silent ? (
