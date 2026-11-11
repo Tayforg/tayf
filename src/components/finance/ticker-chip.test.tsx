@@ -4,7 +4,7 @@ import { TickerChip, TickerTape } from "./ticker-chip";
 import { StripFocusReveal } from "./strip-focus-reveal";
 import type { Quote } from "@/lib/finance/quotes";
 import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
-import { rebaseQuoteOnStat } from "@/lib/finance/session";
+import { rebaseQuoteOnStat, rvolParts } from "@/lib/finance/session";
 
 // Walks the element tree the way label-card.test.tsx and framing-game.test.tsx
 // do, since vitest runs in a plain node environment (no jsdom/RTL).
@@ -597,20 +597,45 @@ describe("TickerTape volume of another session (h99-financenumbers-1)", () => {
   });
   const volumeSpan = (el: unknown) => spans(collect(el)).find((n) => textOf(n.props.children).startsWith("hacim"));
 
-  it("a Monday-morning quote beside Friday's volume reads 'hacim 2,7x · 06.11', not amber", () => {
+  // h124-widgets-1: the day used to be a bare ' · 06.11' with the explanation ('seansının hacmi') only in a
+  // hover title. In Turkish 'hacim 2,7x · 10.11' reads as a clock time, and a title is never exposed on
+  // touch or in the accessible name of the link. The label is now visible text, the ticker header's wording.
+  it("a Monday-morning quote beside Friday's volume reads 'hacim 2,7x · 06.11 seansı', not amber, with no title", () => {
     const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(2.7) });
-    expect(textOf(el)).toContain("hacim 2,7x · 06.11");
+    expect(textOf(el)).toContain("hacim 2,7x · 06.11 seansı");
     const n = volumeSpan(el);
     expect(n).toBeDefined();
     expect(classOf(n!)).not.toContain("text-amber-400");
-    expect(n!.props.title).toBe("06.11 seansının hacmi");
+    expect(n!.props.title).toBeUndefined();
   });
 
-  it("the ' · 06.11' piece is muted", () => {
+  it("the ' · 06.11 seansı' piece is muted", () => {
     const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(2.7) });
-    const day = spans(collect(volumeSpan(el)!.props.children)).find((n) => textOf(n.props.children) === " · 06.11");
+    const day = spans(collect(volumeSpan(el)!.props.children)).find((n) => textOf(n.props.children) === " · 06.11 seansı");
     expect(day).toBeDefined();
     expect(classOf(day!)).toContain("text-muted-foreground");
+  });
+
+  it("no element of the strip carries a title any more: the day is visible text, not a hover tooltip", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(2.7) });
+    const titled = collect(el).filter((n) => n.props.title !== undefined);
+    expect(titled).toEqual([]);
+    expect(textOf(el)).not.toContain("seansının hacmi");
+  });
+
+  it("the day piece is the ticker header's wording (rvolParts day), so the two surfaces cannot drift", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(2.7) });
+    const header = rvolParts({ rvol: 2.7, dayLabel: "06.11" });
+    expect(header.day).toBe("06.11 seansı");
+    const day = spans(collect(volumeSpan(el)!.props.children)).find((n) => textOf(n.props.children) === ` · ${header.day}`);
+    expect(day).toBeDefined();
+  });
+
+  it("the label stays inside the link's text, so it is part of the chip's accessible name", () => {
+    const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(2.7) });
+    const link = collect(el).find((n) => n.type === Link)!;
+    expect(textOf(link.props.children)).toContain("hacim 2,7x · 06.11 seansı");
+    expect(link.props["aria-label"]).toBeUndefined();
   });
 
   it("a quote from the stat's own session keeps today's markup: 'hacim 2,7x', amber at 2x or more, no date, no title", () => {
@@ -618,6 +643,7 @@ describe("TickerTape volume of another session (h99-financenumbers-1)", () => {
     const text = textOf(el);
     expect(text).toContain("hacim 2,7x");
     expect(text).not.toContain("06.11");
+    expect(text).not.toContain("seansı");
     const n = volumeSpan(el);
     expect(classOf(n!)).toContain("text-amber-400");
     expect(n!.props.title).toBeUndefined();
@@ -625,7 +651,7 @@ describe("TickerTape volume of another session (h99-financenumbers-1)", () => {
 
   it("another session's volume below 2x names its day and stays unflagged too", () => {
     const el = TickerTape({ items: froto, quotes: { FROTO: frotoQuote("2026-11-09T07:20:00Z") }, stats: fridayStat(1.5) });
-    expect(textOf(el)).toContain("hacim 1,5x · 06.11");
+    expect(textOf(el)).toContain("hacim 1,5x · 06.11 seansı");
     expect(classOf(volumeSpan(el)!)).not.toContain("text-amber-400");
   });
 
