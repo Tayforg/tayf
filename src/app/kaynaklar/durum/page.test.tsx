@@ -91,6 +91,12 @@ function collectText(node: unknown, out: string[] = []): string[] {
 
 const NOW = Date.parse("2026-09-18T12:00:00.000Z");
 
+// h126-a11y-2: the cell that names a row is a <th scope="row">, so a row's cells
+// are td AND th, and the column headers are the th with scope="col".
+type CellEl = { type?: unknown; props?: Record<string, unknown> };
+const isCell = (e: CellEl): boolean => e.type === "td" || e.type === "th";
+const isColHead = (e: CellEl): boolean => e.type === "th" && e.props?.scope === "col";
+
 function rawRow(overrides: Partial<SourceFeedStatusRawRow> = {}): SourceFeedStatusRawRow {
   return {
     slug: "ornek-kaynak",
@@ -397,7 +403,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
         fetch_last_status: 0,
       }),
     ]);
-    const cells = elements(rowOf(tree, "cevapsiz")).filter((e) => e.type === "td");
+    const cells = elements(rowOf(tree, "cevapsiz")).filter(isCell);
     const cellTexts = cells.map((cell) => textOf(cell));
 
     // columns: Kaynak, Sessiz, Tür, Bölge, Son haber, Son HTTP durumu, 7 gün
@@ -411,7 +417,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     const tree = body([
       rawRow({ slug: "engelli", name: "Engelli Haber", latest: stale, fetch_last_status: 403 }),
     ]);
-    const cells = elements(rowOf(tree, "engelli")).filter((e) => e.type === "td");
+    const cells = elements(rowOf(tree, "engelli")).filter(isCell);
     expect(textOf(cells[5])).toBe("403");
   });
 
@@ -433,7 +439,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
           fetch_quarantined_until: quarantinedUntil,
         }),
       ]);
-      const cells = elements(rowOf(tree, "t24")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "t24")).filter(isCell);
       const cellTexts = cells.map((cell) => textOf(cell));
 
       // columns: Kaynak, Sessiz, Tür, Bölge, Son haber, Son HTTP durumu, 7 gün
@@ -456,7 +462,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
           fetch_quarantined_until: quarantinedUntil,
         }),
       ]);
-      const cells = elements(rowOf(tree, "t24")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "t24")).filter(isCell);
       const cls = String(cells[5]?.props?.className).split(/\s+/);
 
       expect(cls).toContain("sm:whitespace-nowrap");
@@ -468,7 +474,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
       const tree = body([
         rawRow({ slug: "yeni-bozuk", name: "Yeni Bozuk", latest: stale, fetch_fail_streak: 2 }),
       ]);
-      const cells = elements(rowOf(tree, "yeni-bozuk")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "yeni-bozuk")).filter(isCell);
       expect(textOf(cells[5])).toBe("200 · geçersiz akış");
     });
 
@@ -482,19 +488,19 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
           fetch_fail_streak: 1,
         }),
       ]);
-      const cells = elements(rowOf(tree, "bozuk-304")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "bozuk-304")).filter(isCell);
       expect(textOf(cells[5])).toBe("304 · geçersiz akış");
     });
 
     it("a healthy 200 (streak 0) still reads '200'", () => {
       const tree = body([rawRow({ slug: "saglam", name: "Sağlam Haber", fetch_fail_streak: 0 })]);
-      const cells = elements(rowOf(tree, "saglam")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "saglam")).filter(isCell);
       expect(textOf(cells[5])).toBe("200");
     });
 
     it("a legacy row without the streak column still reads '200'", () => {
       const tree = body([rawRow({ slug: "eski", name: "Eski Haber" })]);
-      const cells = elements(rowOf(tree, "eski")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "eski")).filter(isCell);
       expect(textOf(cells[5])).toBe("200");
     });
 
@@ -509,7 +515,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
           fetch_quarantined_until: quarantinedUntil,
         }),
       ]);
-      const cells = elements(rowOf(tree, "halk-tv")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "halk-tv")).filter(isCell);
       expect(textOf(cells[5])).toBe("403");
     });
 
@@ -524,7 +530,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
           fetch_quarantined_until: quarantinedUntil,
         }),
       ]);
-      const cells = elements(rowOf(tree, "cevapsiz-karantina")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "cevapsiz-karantina")).filter(isCell);
       expect(textOf(cells[5])).toBe("—");
     });
   });
@@ -533,7 +539,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     const tree = body([
       rawRow({ slug: "yeni", name: "Yeni Haber", fetch_last_status: null }),
     ]);
-    const cells = elements(rowOf(tree, "yeni")).filter((e) => e.type === "td");
+    const cells = elements(rowOf(tree, "yeni")).filter(isCell);
     expect(textOf(cells[5])).toBe("—");
   });
 
@@ -697,7 +703,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     });
 
     it("the Kaynak column header is sticky on an opaque card background", () => {
-      const th = elements(body(fixtures())).find((e) => e.type === "th" && textOf(e) === "Kaynak");
+      const th = elements(body(fixtures())).find((e) => isColHead(e) && textOf(e) === "Kaynak");
       expect(th, "Kaynak <th>").toBeDefined();
       const cls = classOf(th);
       expect(cls).toContain("sticky left-0");
@@ -708,8 +714,8 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     it("every row's name cell is sticky on an opaque card background", () => {
       const tree = body(fixtures());
       for (const slug of ["donmus", "engelli", "sakin", "aktif"]) {
-        const firstCell = elements(rowOf(tree, slug)).find((e) => e.type === "td");
-        expect(firstCell, `${slug} first <td>`).toBeDefined();
+        const firstCell = elements(rowOf(tree, slug)).find(isCell);
+        expect(firstCell, `${slug} first cell`).toBeDefined();
         const cls = classOf(firstCell);
         expect(cls, slug).toContain("sticky left-0");
         expect(tokens(cls), slug).toContain("z-10");
@@ -720,10 +726,10 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
 
     it("only the first column is sticky", () => {
       const tree = body(fixtures());
-      const cells = elements(rowOf(tree, "aktif")).filter((e) => e.type === "td");
+      const cells = elements(rowOf(tree, "aktif")).filter(isCell);
       expect(cells.length).toBeGreaterThan(1);
       for (const cell of cells.slice(1)) expect(classOf(cell)).not.toContain("sticky");
-      const heads = elements(tree).filter((e) => e.type === "th");
+      const heads = elements(tree).filter(isColHead);
       for (const th of heads.filter((h) => textOf(h) !== "Kaynak")) {
         expect(classOf(th)).not.toContain("sticky");
       }
@@ -734,7 +740,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
       const region = elements(tree).find((e) => e.props?.role === "region");
       expect(region, "scroll region").toBeDefined();
       expect(classOf(region)).toContain("overflow-x-auto");
-      expect(elements(region).some((e) => e.type === "th" && textOf(e) === "Kaynak")).toBe(true);
+      expect(elements(region).some((e) => isColHead(e) && textOf(e) === "Kaynak")).toBe(true);
 
       const card = elements(tree).find((e) => e.type === "div" && classOf(e).includes("ring-1"));
       expect(card, "table card wrapper").toBeDefined();
@@ -762,7 +768,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     const CUE_ID = "durum-kaydir";
 
     const cellsOf = (tree: unknown, slug: string) =>
-      elements(rowOf(tree, slug)).filter((e) => e.type === "td");
+      elements(rowOf(tree, slug)).filter(isCell);
 
     const quarantinedSilent = () =>
       cellsOf(
@@ -797,7 +803,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
 
     it("orders the columns Kaynak, Sessiz, Tür, Bölge, Son haber, Son HTTP durumu, 7 günlük gün başına haber", () => {
       const heads = elements(body(fixtures()))
-        .filter((e) => e.type === "th")
+        .filter(isColHead)
         .map((th) => textOf(th));
       expect(heads).toEqual([
         "Kaynak",
@@ -846,7 +852,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
 
     it("Sessiz th and td carry pr-4; the new last column drops it", () => {
       const tree = body(fixtures());
-      const heads = elements(tree).filter((e) => e.type === "th");
+      const heads = elements(tree).filter(isColHead);
       expect(tokens(classOf(heads[1]))).toContain("pr-4");
       expect(tokens(classOf(heads[6]))).not.toContain("pr-4");
       for (const slug of ["donmus", "aktif"]) {
@@ -858,7 +864,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
 
     it("Kaynak stays the only sticky column", () => {
       const tree = body(fixtures());
-      const heads = elements(tree).filter((e) => e.type === "th");
+      const heads = elements(tree).filter(isColHead);
       expect(heads.filter((h) => classOf(h).includes("sticky"))).toHaveLength(1);
       expect(textOf(heads[0])).toBe("Kaynak");
       const cells = cellsOf(tree, "donmus");
@@ -926,7 +932,7 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
       { full: "7 günlük gün başına haber", short: "Haber/gün" },
     ] as const;
 
-    const heads = () => elements(body(fixtures())).filter((e) => e.type === "th");
+    const heads = () => elements(body(fixtures())).filter(isColHead);
     const headOf = (full: string): El => {
       const th = heads().find((h) => textOf(h) === full);
       if (!th) throw new Error(`no <th> for ${full}`);
@@ -1035,6 +1041,89 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
       expect(cls).toContain("focus-visible:outline-none");
       expect(cls).toContain("focus-visible:ring-2");
       expect(cls).toContain("focus-visible:ring-ring");
+    });
+  });
+
+  // h126-a11y-2 (WCAG 1.3.1, technique H63): the cell that names a row was a
+  // <td>, so moving down a column a screen reader announced "Son haber, 16
+  // Haziran 2026" with no source name. It is now <th scope="row">; the 118-row
+  // table keeps its look (th defaults to bold and centred, so text-left and the
+  // old font-medium are explicit) and its sticky first column.
+  describe("row headers (h126-a11y-2)", () => {
+    const classOf = (el: El | undefined): string => String(el?.props?.className);
+    const tokens = (cls: string) => cls.split(/\s+/);
+
+    const rowHeads = (tree: unknown) =>
+      elements(tree).filter((e) => e.type === "th" && e.props?.scope === "row");
+    const dataRows = (tree: unknown) =>
+      elements(tree).filter((e) => e.type === "tr" && e.key !== null && e.key !== undefined);
+
+    it("renders one th scope=row per data row, and the first one names the first source", () => {
+      const tree = body(fixtures());
+      const heads = rowHeads(tree);
+
+      expect(dataRows(tree)).toHaveLength(4);
+      expect(heads).toHaveLength(4);
+      // silent rows first (alphabetical), then the delivering one
+      expect(heads.map((h) => textOf(h))).toEqual([
+        "Donmuş Haber",
+        "Engelli Haber",
+        "Sakin Haber",
+        "Aktif Haber",
+      ]);
+    });
+
+    it("in every row the name is the th and the other six cells stay td", () => {
+      const tree = body(fixtures());
+      for (const [slug, name] of [
+        ["donmus", "Donmuş Haber"],
+        ["engelli", "Engelli Haber"],
+        ["sakin", "Sakin Haber"],
+        ["aktif", "Aktif Haber"],
+      ] as const) {
+        const cells = elements(rowOf(tree, slug)).filter(isCell);
+        expect(cells[0]!.type, slug).toBe("th");
+        expect(cells[0]!.props?.scope, slug).toBe("row");
+        expect(textOf(cells[0]), slug).toBe(name);
+        expect(cells.slice(1).map((c) => c.type), slug).toEqual(Array(6).fill("td"));
+      }
+    });
+
+    it("the name inside the row header is still the link to the source page", () => {
+      const tree = body(fixtures());
+      const th = rowHeads(rowOf(tree, "donmus"))[0];
+      expect(th, "row header").toBeDefined();
+      expect(elements(th).some((e) => e.props?.href === "/source/donmus")).toBe(true);
+    });
+
+    it("keeps the sticky opaque classes and sets text-left plus font-medium (th is bold and centred by default)", () => {
+      const tree = body(fixtures());
+      expect(rowHeads(tree)).toHaveLength(4);
+      for (const th of rowHeads(tree)) {
+        const cls = tokens(classOf(th));
+        for (const token of ["sticky", "left-0", "z-10", "bg-card", "text-left", "font-medium"]) {
+          expect(cls, `${textOf(th)} ${token}`).toContain(token);
+        }
+        expect(cls).not.toContain("font-bold");
+        expect(cls).not.toContain("font-semibold");
+      }
+    });
+
+    it("gives the table an sr-only caption 'Kaynak durumu' as its first child", () => {
+      const tree = body(fixtures());
+      const table = elements(tree).find((e) => e.type === "table");
+      expect(table, "table").toBeDefined();
+      const children = table!.props?.children as El[];
+      expect(children[0]!.type).toBe("caption");
+      expect(tokens(classOf(children[0]))).toContain("sr-only");
+      expect(textOf(children[0])).toBe("Kaynak durumu");
+      expect(elements(tree).filter((e) => e.type === "caption")).toHaveLength(1);
+    });
+
+    it("renders no row header (and no caption) for an empty list", () => {
+      const tree = KaynakDurumBody({ rows: [], itemsPerDayPromise: Promise.resolve({}) });
+      expect(rowHeads(tree)).toHaveLength(0);
+      expect(elements(tree).filter((e) => e.type === "caption")).toHaveLength(0);
     });
   });
 });

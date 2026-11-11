@@ -97,6 +97,7 @@ function EndpointCard({ endpoint }: { endpoint: V1EndpointDoc }) {
           tabIndex={0}
         >
           <table className="w-full border-collapse text-left text-sm">
+            <caption className="sr-only">{`${endpoint.method} ${endpoint.path} parametreleri`}</caption>
             <thead>
               <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                 <th scope="col" className="py-2 pr-4 font-medium">Ad</th>
@@ -107,10 +108,17 @@ function EndpointCard({ endpoint }: { endpoint: V1EndpointDoc }) {
             <tbody className="divide-y divide-border/30">
               {endpoint.params.map((param) => (
                 <tr key={param.name}>
-                  <td className="py-2.5 pr-4 font-mono text-xs text-foreground">
+                  {/* Row headers (WCAG 1.3.1, H63): the cell that names the row
+                      is a th; th defaults to bold and centred, hence text-left
+                      and an explicit font weight here and in the two tables
+                      below. */}
+                  <th
+                    scope="row"
+                    className="py-2.5 pr-4 text-left font-mono text-xs font-normal text-foreground"
+                  >
                     {param.name}
                     {param.required ? " *" : ""}
-                  </td>
+                  </th>
                   <td className="py-2.5 pr-4 text-muted-foreground">
                     {PARAM_IN_TR[param.in] ?? param.in}
                   </td>
@@ -263,6 +271,7 @@ for (const cluster of data.clusters) {
             tabIndex={0}
           >
             <table className="w-full border-collapse text-left text-sm">
+              <caption className="sr-only">Kullanım sınırları</caption>
               <thead>
                 <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                   <th scope="col" className="py-2 pr-4 font-medium">Katman</th>
@@ -275,7 +284,9 @@ for (const cluster of data.clusters) {
               <tbody className="divide-y divide-border/30">
                 {API_PLANS.map((plan) => (
                   <tr key={plan.tier}>
-                    <td className="py-2.5 pr-4 font-medium text-foreground">{plan.labelTr}</td>
+                    <th scope="row" className="py-2.5 pr-4 text-left font-medium text-foreground">
+                      {plan.labelTr}
+                    </th>
                     <td className="py-2.5 pr-4 text-muted-foreground">
                       {formatCountTr(plan.perMinute)}
                     </td>
@@ -331,6 +342,7 @@ for (const cluster of data.clusters) {
             tabIndex={0}
           >
             <table className="w-full border-collapse text-left text-sm">
+              <caption className="sr-only">Hata kodları</caption>
               <thead>
                 <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                   <th scope="col" className="py-2 pr-4 font-medium">Durum</th>
@@ -341,7 +353,12 @@ for (const cluster of data.clusters) {
               <tbody className="divide-y divide-border/30">
                 {V1_ERROR_ROWS.map((row) => (
                   <tr key={row.status}>
-                    <td className="py-2.5 pr-4 font-mono text-xs text-foreground">{row.status}</td>
+                    <th
+                      scope="row"
+                      className="py-2.5 pr-4 text-left font-mono text-xs font-normal text-foreground"
+                    >
+                      {row.status}
+                    </th>
                     <td className="py-2.5 pr-4 font-mono text-xs text-muted-foreground">{row.messages.join(" / ")}</td>
                     <td className="py-2.5 text-muted-foreground">{row.meaningTr}</td>
                   </tr>

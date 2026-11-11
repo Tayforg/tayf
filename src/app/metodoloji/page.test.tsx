@@ -1665,7 +1665,11 @@ describe("/metodoloji page: the Kör nokta and Sürpriz cards count voting sourc
 describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
   // If this fails and the change alters a rule or the meaning of a published number,
   // add a CHANGELOG entry; then update the hash.
-  const RULES_SHA256 = "93291c7deca116a2d878666d2b509d48949806ae783e8b23f4f87b034c329be9";
+  // h126-a11y-2: 93291c7d... -> d4d007b9... adds exactly one string, the sr-only
+  // caption "Kategori tanımları" of the category table (assistive-technology
+  // label, no rule and no published number). Removing that caption restores the
+  // old hash, so no CHANGELOG entry.
+  const RULES_SHA256 = "d4d007b9095a015a861dd747cdd0b681318b23a9c189945d34aa8a94791a7958";
 
   it("the rendered text of everything above the CHANGELOG hashes to the pinned value", async () => {
     // The two inputs that are not the page's own text: the registry-backed tagged
@@ -1692,5 +1696,77 @@ describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
       else process.env.NEXT_PUBLIC_CONTACT_EMAIL = originalEmail;
       mockActiveSlugs = ["sabah", "anadolu-ajansi", "bilinmeyen-kaynak"];
     }
+  });
+});
+
+// h126-a11y-2 (WCAG 1.3.1, technique H63): the category cell that names each row
+// of the "Kaynaklar nasıl etiketleniyor" table was a <td>, so a screen reader read
+// "İktidar" with no category in front of it. It is now <th scope="row"> (text-left
+// and the old font-medium made explicit: th is bold and centred by default), and
+// the table has an sr-only caption.
+describe("/metodoloji page: category table row headers (h126-a11y-2)", () => {
+  async function renderTree() {
+    const { default: MethodologyPage } = await import("./page");
+    return MethodologyPage();
+  }
+
+  /** Every element (depth-first) whose props match `pred`. */
+  function allMatching(node: unknown, pred: (el: Node) => boolean, out: Node[] = []): Node[] {
+    if (Array.isArray(node)) {
+      for (const child of node) allMatching(child, pred, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as Node;
+      if (el.props && pred(el)) out.push(el);
+      if (el.props?.children !== undefined) allMatching(el.props.children, pred, out);
+    }
+    return out;
+  }
+
+  const rowHeads = (tree: unknown) =>
+    allMatching(tree, (el) => el.type === "th" && el.props?.scope === "row");
+  const tokens = (el: Node | undefined): string[] => String(el?.props?.className).split(/\s+/);
+
+  it("renders one th scope=row per WRITABLE_SOURCE_BIAS row, and the first reads the first category", async () => {
+    const tree = await renderTree();
+    const heads = rowHeads(tree);
+
+    expect(heads).toHaveLength(WRITABLE_SOURCE_BIAS.length);
+    expect(WRITABLE_SOURCE_BIAS).toHaveLength(5);
+    expect(collectText(heads[0]).join("")).toBe(BIAS_LABELS[WRITABLE_SOURCE_BIAS[0]!]);
+    expect(heads.map((h) => collectText(h).join(""))).toEqual(
+      WRITABLE_SOURCE_BIAS.map((k) => BIAS_LABELS[k]),
+    );
+  });
+
+  it("makes the category the th and the zone the td in every row", async () => {
+    const tbody = findElement(await renderTree(), (el) => el.type === "tbody");
+    const rows = (tbody?.props?.children ?? []) as Array<{ props: { children: Node[] } }>;
+
+    expect(rows).toHaveLength(WRITABLE_SOURCE_BIAS.length);
+    for (const row of rows) {
+      expect(row.props.children.map((c) => c.type)).toEqual(["th", "td"]);
+    }
+  });
+
+  it("keeps the font-medium look and sets text-left on the row header", async () => {
+    const heads = rowHeads(await renderTree());
+    expect(heads).toHaveLength(WRITABLE_SOURCE_BIAS.length);
+    for (const th of heads) {
+      for (const token of ["py-2.5", "pr-4", "font-medium", "text-foreground", "text-left"]) {
+        expect(tokens(th), token).toContain(token);
+      }
+      expect(tokens(th)).not.toContain("font-bold");
+    }
+  });
+
+  it("gives the table an sr-only caption 'Kategori tanımları' as its first child", async () => {
+    const tables = allMatching(await renderTree(), (el) => el.type === "table");
+    expect(tables).toHaveLength(1);
+    const children = tables[0]!.props?.children as Node[];
+    expect(children[0]!.type).toBe("caption");
+    expect(tokens(children[0])).toContain("sr-only");
+    expect(collectText(children[0]).join("")).toBe("Kategori tanımları");
   });
 });

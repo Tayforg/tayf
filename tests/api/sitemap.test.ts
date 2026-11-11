@@ -171,11 +171,11 @@ describe("GET /sitemaps/[file] cache headers", () => {
     expect(res.headers.get("cache-control")).toBe(SHORT);
   });
 
-  it("static.xml and sources.xml keep the default cache; news.xml keeps its own", async () => {
+  it("static.xml and sources.xml keep the default cache; news.xml keeps its own (h126-freshness-1: a CDN copy is at most 360 s old)", async () => {
     expect((await callFile("static.xml")).headers.get("cache-control")).toBe(SHORT);
     expect((await callFile("sources.xml")).headers.get("cache-control")).toBe(SHORT);
     expect((await callFile("news.xml")).headers.get("cache-control")).toBe(
-      "public, s-maxage=600, stale-while-revalidate=3600",
+      "public, s-maxage=300, stale-while-revalidate=60",
     );
   });
 

@@ -622,7 +622,9 @@ async function getBlindspotsCached(profile: ReadProfile) {
 // cron both call this identical signature — the cache layer is invisible
 // from the call site. Still THROWS on failure (unchanged contract): the
 // digest cron, the social cron and rss/[topic] depend on that — they each
-// catch it themselves. On a cache-attempt failure this retries the query
+// catch it themselves (the digest cron sends its stories without the Kör Nokta
+// and counts a substep error, h126-digest-1; the social cron skips). On a
+// cache-attempt failure this retries the query
 // live once (bypassing the cache boundary; the live result is not memoised,
 // the cached ok:false result is) before letting a genuine, still-failing
 // outage propagate as a throw.

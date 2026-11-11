@@ -537,7 +537,7 @@ describe("timing copy: a daily job whose hour varies, not a fixed 03:00 nightly 
 
     const tree = await QualityPage();
     const cells = allElements(tree)
-      .filter(({ el }) => el.type === "td")
+      .filter(({ el }) => el.type === "td" || el.type === "th")
       .map(({ el }) => collectText(el.props.children).join(""));
 
     // 10:26Z = 13:26 and 07:35Z = 10:35 in Istanbul (UTC+3).
@@ -889,5 +889,83 @@ describe("explanation copy matches what the numbers count (h90-kalite-1)", () =>
       "Kör nokta tutarsızlık oranı",
     ]);
     expect(definitionsText(await QualityPage())).toContain("Küme (cluster)");
+  });
+});
+
+// h126-a11y-2 (WCAG 1.3.1, technique H63): the date-and-time cell that names
+// each measurement row was a <td>, so a screen reader announced "Küme, 640"
+// with no date. It is now <th scope="row">, with text-left and an explicit
+// font-normal so the th default (bold, centred) does not change the look.
+describe("row headers (h126-a11y-2)", () => {
+  const threeSnapshots = () => [
+    snapshot({ id: 3, takenAt: "2026-11-05T10:26:54.000Z" }),
+    snapshot({ id: 2, takenAt: "2026-11-04T07:35:10.000Z" }),
+    snapshot({ id: 1, takenAt: "2026-11-03T09:00:00.000Z" }),
+  ];
+  const rowHeads = (tree: unknown): El[] =>
+    allElements(tree)
+      .filter(({ el }) => el.type === "th" && el.props.scope === "row")
+      .map(({ el }) => el);
+  const tokens = (el: El | undefined): string[] => String(el?.props.className).split(/\s+/);
+
+  it("renders one th scope=row per snapshot row, and the first reads the newest measurement", async () => {
+    mockSnapshots.value = threeSnapshots();
+
+    const tree = await QualityPage();
+    const heads = rowHeads(tree);
+    const bodyRows = allElements(tree).filter(({ el }) => el.type === "tr").slice(1);
+
+    expect(bodyRows).toHaveLength(3);
+    expect(heads).toHaveLength(3);
+    // 10:26Z is 13:26 in Istanbul (UTC+3)
+    expect(collectText(heads[0]!.props.children).join("")).toBe(
+      `${formatTurkishDate("2026-11-05T10:26:54.000Z")} 13:26`,
+    );
+    expect(collectText(heads[1]!.props.children).join("")).toContain("10:35");
+  });
+
+  it("in every row the date is the th and the other five cells stay td", async () => {
+    mockSnapshots.value = threeSnapshots();
+
+    const rows = allElements(await QualityPage())
+      .filter(({ el }) => el.type === "tr")
+      .slice(1);
+    expect(rows).toHaveLength(3);
+    for (const { el } of rows) {
+      const cells = el.props.children as El[];
+      expect(cells.map((c) => c.type)).toEqual(["th", "td", "td", "td", "td", "td"]);
+      expect(cells[0]!.props.scope).toBe("row");
+    }
+  });
+
+  it("sets text-left and font-normal on the row header and keeps the old cell classes", async () => {
+    mockSnapshots.value = threeSnapshots();
+
+    const heads = rowHeads(await QualityPage());
+    expect(heads).toHaveLength(3);
+    for (const th of heads) {
+      for (const token of ["py-2.5", "pr-4", "whitespace-nowrap", "text-muted-foreground", "text-left", "font-normal"]) {
+        expect(tokens(th), token).toContain(token);
+      }
+      expect(tokens(th)).not.toContain("font-bold");
+    }
+  });
+
+  it("gives the table an sr-only caption 'Kalite ölçümleri' as its first child", async () => {
+    mockSnapshots.value = threeSnapshots();
+
+    const tables = allElements(await QualityPage()).filter(({ el }) => el.type === "table");
+    expect(tables).toHaveLength(1);
+    const children = tables[0]!.el.props.children as El[];
+    expect(children[0]!.type).toBe("caption");
+    expect(tokens(children[0])).toContain("sr-only");
+    expect(collectText(children[0]!.props.children).join("")).toBe("Kalite ölçümleri");
+  });
+
+  it("renders no row header when there is no table (unavailable and empty states)", async () => {
+    for (const value of [null, []]) {
+      mockSnapshots.value = value;
+      expect(rowHeads(await QualityPage()), String(value)).toHaveLength(0);
+    }
   });
 });

@@ -358,6 +358,7 @@ export default async function MethodologyPage() {
             aria-label="Kategori ve Medya DNA bölgesi tablosu"
           >
             <table className="w-full border-collapse text-left text-sm">
+              <caption className="sr-only">Kategori tanımları</caption>
               <thead>
                 <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                   <th scope="col" className="py-2 pr-4 font-medium">
@@ -374,9 +375,14 @@ export default async function MethodologyPage() {
                   const meta = ZONE_META[zone];
                   return (
                     <tr key={bias}>
-                      <td className="py-2.5 pr-4 font-medium text-foreground">
+                      {/* The category names the row (WCAG 1.3.1, H63); th
+                          defaults to bold and centred, hence text-left. */}
+                      <th
+                        scope="row"
+                        className="py-2.5 pr-4 text-left font-medium text-foreground"
+                      >
                         {BIAS_LABELS[bias]}
-                      </td>
+                      </th>
                       <td className="py-2.5">
                         <span className="inline-flex items-center gap-2 whitespace-nowrap text-muted-foreground">
                           <span
