@@ -10,11 +10,15 @@ import {
   FeedFrame,
   FollowFeed,
   FollowSection,
+  followsFromSignature,
+  followsSignature,
   initialFailureAnnouncement,
   retryResultAnnouncement,
   SectionBody,
 } from "./follow-feed";
 import {
+  followApiPath,
+  followKey,
   followRowMeta,
   type Follow,
   type FollowItem,
@@ -29,7 +33,7 @@ import {
 const NOW = "2026-10-22T09:00:00.000Z";
 
 function follow(kind: Follow["kind"], value: string): Follow {
-  return { kind, value, addedAt: NOW, seenAt: NOW };
+  return { kind, value, addedAt: NOW, seenAt: NOW, seenIds: null, seenFloor: null };
 }
 const SECIM = follow("q", "seçim");
 const EKONOMI = follow("konu", "ekonomi");
@@ -266,10 +270,10 @@ describe("retry result announcement wiring (source guard: effects need a browser
   // h55-personal-1: the announcement counts rows with the reader's baseline. The
   // effect cannot depend on seenSnapshot (that would refetch on every snapshot
   // change), so it reads the per-key snapshot from a ref mirrored by an effect.
-  it("reads the per-key seenAt from a ref, passing it to retryResultAnnouncement", () => {
-    expect(src).toContain("seenSnapshotRef = useRef<Record<string, string | null>>({})");
-    expect(fetchEffect).toContain("seenSnapshotRef.current[item.key] ?? null");
-    expect(fetchEffect).toContain("retryText = retryResultAnnouncement(label, outcome, seenAt);");
+  it("reads the per-key baseline (seenAt, seenIds, seenFloor) from a ref, passing it to retryResultAnnouncement", () => {
+    expect(src).toContain("seenSnapshotRef = useRef<Record<string, SeenBaseline>>({})");
+    expect(fetchEffect).toContain("seenSnapshotRef.current[item.key] ?? NO_BASELINE");
+    expect(fetchEffect).toContain("retryText = retryResultAnnouncement(label, outcome, baseline);");
   });
 
   it("mirrors seenSnapshot into that ref outside the fetch effect, and keeps the effect's deps", () => {
@@ -1001,5 +1005,152 @@ describe("SectionBody", () => {
     });
     const button = collect(tree).find((el) => el.type === "button");
     expect(textOf(button)).toBe("Tekrar dene");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h112-follows-1: a story that became listed after the reader's last visit but
+// was first published before it is "yeni" too; the visit records the rows it
+// showed (ids + oldest first_published) and judges the next one against them.
+// ---------------------------------------------------------------------------
+
+describe("FollowSection -- late-listed stories (h112-follows-1)", () => {
+  /** Eight rows, all first published BEFORE SEEN_AT, newest first (08:00, 07:55, ...). */
+  const rows = Array.from({ length: 8 }, (_, i) =>
+    item({
+      id: `aaaaaaaa-1111-4111-8111-${String(i).padStart(12, "0")}`,
+      title: `Haber ${i}`,
+      firstPublished: new Date(Date.parse("2026-10-22T08:00:00.000Z") - i * 5 * 60_000).toISOString(),
+    }),
+  );
+  /** The visit showed every row except index 6, and its oldest row was 07:00. */
+  const seenIds = rows.filter((_, i) => i !== 6).map((r) => r.id);
+  const seenFloor = "2026-10-22T07:00:00.000Z";
+
+  const renderedIds = (markup: string) =>
+    [...markup.matchAll(/<li><a [^>]*href="\/cluster\/([^"]+)"/g)].map((m) => m[1] as string);
+  const badge = (markup: string) =>
+    /<span class="shrink-0 rounded-full bg-brand\/15[^>]*>([^<]*)<\/span>/.exec(markup)?.[1] ?? null;
+
+  it("with the seen baseline: the late story gets the badge and its row is rendered below row 5", () => {
+    const markup = renderToStaticMarkup(
+      section(EKONOMI, { status: "ok", items: rows }, { seenAt: SEEN_AT, seenIds, seenFloor }),
+    );
+    expect(badge(markup)).toBe("1 yeni");
+    expect(renderedIds(markup)).toEqual(rows.slice(0, 7).map((r) => r.id));
+  });
+
+  it("the legacy follow (seenAt only) keeps today's behaviour: no badge, five rows", () => {
+    const markup = renderToStaticMarkup(
+      section(EKONOMI, { status: "ok", items: rows }, { seenAt: SEEN_AT }),
+    );
+    expect(badge(markup)).toBeNull();
+    expect(renderedIds(markup)).toHaveLength(5);
+  });
+
+  it("a resurfaced old story below the floor gets no badge", () => {
+    const old = [...rows, item({ id: "aaaaaaaa-1111-4111-8111-0000000000ff", firstPublished: "2026-10-21T01:00:00.000Z" })];
+    const markup = renderToStaticMarkup(
+      section(EKONOMI, { status: "ok", items: old }, { seenAt: SEEN_AT, seenIds: rows.map((r) => r.id), seenFloor }),
+    );
+    expect(badge(markup)).toBeNull();
+    expect(renderedIds(markup)).toHaveLength(5);
+  });
+
+  it("hands the whole baseline through to its body", () => {
+    const tree = FollowSection({
+      follow: EKONOMI,
+      state: { status: "ok", items: rows },
+      seenAt: SEEN_AT,
+      seenIds,
+      seenFloor,
+      onRemove: () => {},
+    });
+    const body = collect(tree).find((el) => el.type === SectionBody);
+    expect(body?.props?.seenAt).toBe(SEEN_AT);
+    expect(body?.props?.seenIds).toBe(seenIds);
+    expect(body?.props?.seenFloor).toBe(seenFloor);
+  });
+
+  it("the retry announcement counts the extended rows under the same baseline", () => {
+    const state = { status: "ok", items: rows } as const;
+    expect(retryResultAnnouncement("Ekonomi", state, { seenAt: SEEN_AT, seenIds, seenFloor })).toBe(
+      "Ekonomi yüklendi · 7 hikâye",
+    );
+    // the legacy shorthand (a bare seenAt) and null are unchanged
+    expect(retryResultAnnouncement("Ekonomi", state, SEEN_AT)).toBe("Ekonomi yüklendi · 5 hikâye");
+    expect(retryResultAnnouncement("Ekonomi", state, null)).toBe("Ekonomi yüklendi · 5 hikâye");
+  });
+});
+
+// h112-follows-2: a keyword's key is its identity, so the fetch can no longer be
+// rebuilt from the key alone: 'IMF' and 'imf' share 'q:imf', and the search must
+// run with the display value the reader sees. The effect is keyed on a signature
+// that carries both.
+describe("followsSignature / followsFromSignature (h112-follows-2)", () => {
+  const IMF = follow("q", "IMF");
+
+  it("round-trips key, kind and DISPLAY value, so the request searches what the reader sees", () => {
+    const wanted = followsFromSignature(followsSignature([IMF, EKONOMI, DEVA, follow("q", "asgari ücret")]));
+    expect(wanted).toEqual([
+      { key: "q:imf", kind: "q", value: "IMF" },
+      { key: "konu:ekonomi", kind: "konu", value: "ekonomi" },
+      { key: "gundem:deva", kind: "gundem", value: "deva" },
+      { key: "q:asgari ucret", kind: "q", value: "asgari ücret" },
+    ]);
+    expect(followApiPath(wanted[0]!)).toBe("/api/takip?q=IMF");
+    expect(wanted.map((w) => w.key)).toEqual([IMF, EKONOMI, DEVA, follow("q", "asgari ücret")].map(followKey));
+  });
+
+  it("is empty for no follows and stable while only seenAt / seenIds change (markSeen must not refetch)", () => {
+    expect(followsSignature([])).toBe("");
+    expect(followsFromSignature("")).toEqual([]);
+    const marked: Follow = { ...IMF, seenAt: "2026-10-23T00:00:00.000Z", seenIds: ["x"], seenFloor: NOW };
+    expect(followsSignature([marked])).toBe(followsSignature([IMF]));
+  });
+
+  it("drops a line that is not a follow key, instead of fetching something unvalidated", () => {
+    expect(followsFromSignature("garbage")).toEqual([]);
+    expect(followsFromSignature("q:IMF\tIMF")).toEqual([]); // 'IMF' is not an identity
+    expect(followsFromSignature("konu:politika\tpolitika")).toEqual([]);
+  });
+});
+
+describe("the visit records the rows it showed (source guard: effects need a browser) [h112-follows-1]", () => {
+  const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
+  const effectStart = src.indexOf("useEffect(() => {");
+  const effectEnd = src.indexOf("}, [keysSignature, retryNonce]);");
+  const fetchEffect = src.slice(effectStart, effectEnd);
+
+  it("slices the code it is guarding", () => {
+    expect(effectStart).toBeGreaterThan(-1);
+    expect(effectEnd).toBeGreaterThan(effectStart);
+  });
+
+  it("builds the effect's wanted list from the signature (display value included), not from bare keys", () => {
+    expect(src).toContain("const keysSignature = followsSignature(follows);");
+    expect(fetchEffect).toContain("const wanted = followsFromSignature(keysSignature);");
+    expect(fetchEffect).not.toContain("parseFollowKey(");
+  });
+
+  it("keeps the first baseline of each follow (seenAt, seenIds, seenFloor) for the whole visit", () => {
+    expect(src).toContain("useState<Record<string, SeenBaseline>>({})");
+    expect(src).toContain("seenIds: f.seenIds");
+    expect(src).toContain("seenFloor: f.seenFloor");
+  });
+
+  it("remembers the rows rendered per follow with the baseline the section uses, in a ref pruned with the others", () => {
+    expect(src).toContain("shownRows = useRef<Map<string, SeenRows>>(new Map())");
+    expect(fetchEffect).toContain("shownRows.current.set(item.key, rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW));");
+    expect(fetchEffect).toContain("if (!live.has(key)) shownRows.current.delete(key);");
+    // the section renders followRowsToShow(items, same baseline, ROWS_PER_FOLLOW)
+    expect(src).toContain("followRowsToShow(state.items, { seenAt, seenIds, seenFloor }, ROWS_PER_FOLLOW)");
+  });
+
+  it("marks the loaded follows seen with those rows (a Map), after the failures were announced, never with bare keys", () => {
+    const tail = fetchEffect.slice(fetchEffect.lastIndexOf("announceUnannounced(retryText);"));
+    expect(tail).toContain("shown.set(w.key, rows)");
+    expect(tail).toContain("followsStore.markSeen(shown, new Date().toISOString());");
+    expect(tail).not.toContain("new Set(");
   });
 });

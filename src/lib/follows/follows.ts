@@ -29,6 +29,20 @@ export const KEYWORD_MAX = 64;
 export const RAW_MAX = 200;
 /** The API returns (and the client trusts) at most this many items per follow. */
 export const FOLLOW_ITEMS_MAX = 10;
+/** A follow remembers at most this many story ids of its last visit (the API caps a list at 10). */
+export const SEEN_IDS_MAX = 40;
+
+// The two strings of SEARCH_FOLD_FROM / SEARCH_FOLD_TO in
+// src/lib/clusters/turkish-query.ts (the TypeScript twin of the SQL
+// tayf_search_fold): Turkish and circumflex letters and their ASCII bases, same
+// code-point length. turkish-query.ts cannot be imported here (client-bundle
+// whitelist above); follows.test.ts holds the parity test.
+export const SEARCH_FOLD_FROM = "İIıŞşĞğÜüÖöÇçÂâÎîÛû";
+export const SEARCH_FOLD_TO = "iiissgguuooccaaiiuu";
+
+const FOLD_MAP: ReadonlyMap<string, string> = new Map(
+  [...SEARCH_FOLD_FROM].map((from, i) => [from, [...SEARCH_FOLD_TO][i] as string]),
+);
 
 // Mirrors TOPIC_SLUGS / TOPIC_LABELS_TR in src/lib/clusters/topic-query.ts,
 // which cannot be imported here (it pulls next/cache and Supabase into the
@@ -70,6 +84,16 @@ export type Follow = {
   addedAt: string | null;
   /** ISO instant the reader last saw this follow's results; null = no baseline. */
   seenAt: string | null;
+  /**
+   * Ids of the stories the last /takip visit showed for this follow (at most
+   * SEEN_IDS_MAX); null = none recorded (a legacy follow, a new one, or an empty
+   * result), and the seenAt rule applies. h112-follows-1: a story that became
+   * listed after the visit keeps a firstPublished from before it, so seenAt alone
+   * cannot tell it from one the reader already saw.
+   */
+  seenIds: readonly string[] | null;
+  /** The oldest firstPublished among those rows, as the API gave it; null with seenIds. */
+  seenFloor: string | null;
 };
 
 export type AddFollowResult = "added" | "exists" | "full" | "invalid";
@@ -88,6 +112,13 @@ const GUNDEM_LABELS: ReadonlyMap<string, string> = new Map(
 // throw while rendering the follow's link.
 const FORBIDDEN_CHARS = /[\p{Cc}\p{Cs}]/u;
 
+// Format characters (Cf: zero-width space / joiners, word joiner, BOM, soft
+// hyphen, bidi marks and overrides) are invisible and not whitespace. They are
+// stripped from the stored value, otherwise 'seçim' + U+200B would be a second,
+// look-alike follow of the same search (the server search strips them too:
+// cleanQueryUnicode).
+const FORMAT_CHARS = /\p{Cf}/gu;
+
 /** Why a keyword is not followable (see keywordRejectReason). */
 export type KeywordRejectReason = "too-long" | "too-short" | "invalid";
 
@@ -97,14 +128,21 @@ type KeywordCheck =
 
 // The ONE place the keyword rules live, so normalizeKeyword and
 // keywordRejectReason can never disagree about what is accepted.
+//
+// The stored value is the DISPLAY form: format characters out, NFC (after the
+// strip, so a base letter next to a combining mark it was separated from
+// composes), whitespace collapsed, trimmed, and the reader's case kept.
+// Lower-casing it with Turkish rules turned the ASCII 'IMF' every keyboard types
+// into 'ımf' (and 'FIFA' into 'fıfa'), labelled and linked that way. Identity
+// (what makes two keywords the same follow) is keywordIdentity, not this value.
 function checkKeyword(raw: unknown): KeywordCheck {
   if (typeof raw !== "string") return { ok: false, reason: "invalid" };
   if (raw.length > RAW_MAX) return { ok: false, reason: "too-long" };
   const s = raw
+    .replace(FORMAT_CHARS, "")
     .normalize("NFC")
     .replace(/\s+/gu, " ")
-    .trim()
-    .toLocaleLowerCase("tr");
+    .trim();
   if (FORBIDDEN_CHARS.test(s)) return { ok: false, reason: "invalid" };
   const length = [...s].length;
   if (length < KEYWORD_MIN) return { ok: false, reason: "too-short" };
@@ -112,10 +150,27 @@ function checkKeyword(raw: unknown): KeywordCheck {
   return { ok: true, value: s };
 }
 
-/** Canonical keyword form, or null when the input is not an acceptable keyword. */
+/** The stored (display) form of a keyword, or null when the input is not an acceptable keyword. */
 export function normalizeKeyword(raw: unknown): string | null {
   const check = checkKeyword(raw);
   return check.ok ? check.value : null;
+}
+
+/**
+ * What makes two keywords the same follow: İ, I and ı fold to i, the rest is
+ * lower-cased, then the search fold (Turkish and circumflex letters to ASCII).
+ * 'IMF', 'imf' and a legacy stored 'ımf' share the identity 'imf', as do
+ * 'Seçim' and 'secim' -- the server search treats them alike (it folds ı and i,
+ * ş and s, ...), so following both would spend two of the 20 slots on one
+ * result list. Not 'I' -> 'ı': that would make 'Irak' and 'IMF' disagree. The
+ * display value keeps the reader's case, and Turkish words that really start
+ * with a dotless I ('Irak', 'Isparta') keep it on screen. Expects a value
+ * already passed through normalizeKeyword.
+ */
+export function keywordIdentity(v: string): string {
+  let out = "";
+  for (const ch of v.replace(/[İIı]/gu, "i").toLowerCase()) out += FOLD_MAP.get(ch) ?? ch;
+  return out;
 }
 
 /**
@@ -157,15 +212,16 @@ function uniqueLookup(
   return map;
 }
 
-// Hub key by its label in keyword form ("deva", "merkez bankası"). A reader who
-// tapped "Takip et" on /gundem/deva before the hub follow existed holds
-// {kind:"q", value:"deva"}: the old button stored normalizeKeyword(label). The
+// Hub key by its label's keyword identity ("deva", "merkez bankasi"). A reader
+// who tapped "Takip et" on /gundem/deva before the hub follow existed holds
+// {kind:"q", value:"deva"}: the old button stored the lower-cased label. The
 // same lookup serves a keyword typed into the search box, because both go
-// through normalizeKeyword first (canonicalFollow).
+// through normalizeKeyword and then keywordIdentity (canonicalFollow), so 'DEVA'
+// and 'deva' + U+200B reach the hub as well.
 const GUNDEM_KEY_BY_KEYWORD = uniqueLookup(
   RISING_ENTITIES.flatMap((e) => {
     const keyword = normalizeKeyword(e.label);
-    return keyword === null ? [] : [[keyword, e.key] as const];
+    return keyword === null ? [] : [[keywordIdentity(keyword), e.key] as const];
   }),
 );
 
@@ -178,9 +234,10 @@ export function normalizeFollowValue(kind: FollowKind, value: unknown): string |
 }
 
 /**
- * The stored identity of a follow: `value` normalised for `kind`, and a keyword
- * that normalises to a hub's label becomes that hub ({kind:"q", value:"  DEVA "}
- * -> {kind:"gundem", value:"deva"}). Anything else keeps its kind. null when the
+ * The stored form of a follow: `value` normalised for `kind` (a keyword keeps
+ * its case), and a keyword whose identity is a hub label's identity becomes that
+ * hub ({kind:"q", value:"  DEVA "} -> {kind:"gundem", value:"deva"}). Anything
+ * else keeps its kind. null when the
  * input is not followable. ONE rule for every path: add / has / toggle use it
  * on what the reader types, and parseStoredFollows (coerceEntry) uses it on what
  * is already in storage, so parse is idempotent (parse(serialize(parse(x))) ==
@@ -196,17 +253,28 @@ export function canonicalFollow(
   const normalized = normalizeFollowValue(kind, value);
   if (normalized === null) return null;
   if (kind === "q") {
-    const key = GUNDEM_KEY_BY_KEYWORD.get(normalized);
+    const key = GUNDEM_KEY_BY_KEYWORD.get(keywordIdentity(normalized));
     if (key !== undefined) return { kind: "gundem", value: key };
   }
   return { kind, value: normalized };
 }
 
+/**
+ * The identity of a follow, used wherever two follows are compared (exists,
+ * has, remove, markSeen, React keys). For a keyword it is the keyword's
+ * identity ('q:imf' for 'IMF'), NOT its display value; the other kinds use their
+ * slug / hub key.
+ */
 export function followKey(f: Pick<Follow, "kind" | "value">): string {
-  return `${f.kind}:${f.value}`;
+  return f.kind === "q" ? `q:${keywordIdentity(f.value)}` : `${f.kind}:${f.value}`;
 }
 
-/** Inverse of followKey. null unless the key is exactly what followKey would emit. */
+/**
+ * Inverse of followKey. null unless the key is exactly what followKey would
+ * emit. For a keyword the value is its IDENTITY ('imf'), which cannot rebuild
+ * the reader's display ('IMF'): never build a link or an API path from it, use
+ * the Follow's own value (followHref / followApiPath).
+ */
 export function parseFollowKey(
   key: string,
 ): { kind: FollowKind; value: string } | null {
@@ -214,7 +282,11 @@ export function parseFollowKey(
   if (colon < 0) return null;
   const kind = key.slice(0, colon);
   const value = key.slice(colon + 1);
-  if (kind !== "q" && kind !== "konu" && kind !== "gundem") return null;
+  if (kind === "q") {
+    const display = normalizeKeyword(value);
+    return display !== null && keywordIdentity(display) === value ? { kind, value } : null;
+  }
+  if (kind !== "konu" && kind !== "gundem") return null;
   return normalizeFollowValue(kind, value) === value ? { kind, value } : null;
 }
 
@@ -234,11 +306,38 @@ function cleanStamp(v: unknown): string | null {
   return Number.isFinite(Date.parse(v)) ? v : null;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** First SEEN_IDS_MAX distinct entries of `ids` (compared case-insensitively), as given. */
+function distinctIds(ids: Iterable<string>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (out.length >= SEEN_IDS_MAX) break;
+    const lower = id.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * A stored seenIds: null for anything that is not an array (absent, a string, an
+ * object) and for an array whose entries are all garbage; otherwise its
+ * uuid-shaped entries, de-duplicated, at most SEEN_IDS_MAX.
+ */
+function cleanSeenIds(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const ids = distinctIds(v.filter((x): x is string => typeof x === "string" && UUID_RE.test(x)));
+  return ids.length === 0 && v.length > 0 ? null : ids;
+}
+
 function coerceEntry(entry: unknown): Follow | null {
   // Legacy shape: a bare string was a keyword.
   if (typeof entry === "string") {
     const c = canonicalFollow("q", entry);
-    return c === null ? null : { ...c, addedAt: null, seenAt: null };
+    return c === null ? null : { ...c, addedAt: null, seenAt: null, seenIds: null, seenFloor: null };
   }
   if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
   const o = entry as Record<string, unknown>;
@@ -246,11 +345,14 @@ function coerceEntry(entry: unknown): Follow | null {
   if (kind !== "q" && kind !== "konu" && kind !== "gundem") return null;
   const addedAt = cleanStamp(o.addedAt);
   const seenAt = cleanStamp(o.seenAt);
+  const seenIds = cleanSeenIds(o.seenIds);
+  const seenFloor = cleanStamp(o.seenFloor);
   // Same rule as add / has / toggle: a keyword that is a hub's label becomes
-  // the hub follow, stamps kept.
+  // the hub follow, stamps kept. A stored lower-case value ('ımf') parses
+  // unchanged: it keeps its display, and its identity makes a later 'IMF' exist.
   const c = canonicalFollow(kind, o.value);
   if (c === null) return null;
-  return { ...c, addedAt, seenAt };
+  return { ...c, addedAt, seenAt, seenIds, seenFloor };
 }
 
 /** Never throws. Invalid entries are dropped, duplicates collapse (first wins). */
@@ -285,13 +387,16 @@ export function serializeFollows(list: readonly Follow[]): string {
       value: f.value,
       addedAt: f.addedAt,
       seenAt: f.seenAt,
+      seenIds: f.seenIds,
+      seenFloor: f.seenFloor,
     })),
   );
 }
 
 /**
  * Adds a follow. A new entry starts with addedAt = seenAt = nowIso, so only
- * stories first published AFTER the follow count as "yeni". Check order:
+ * stories first published AFTER the follow count as "yeni", and with no seen ids
+ * (it uses the seenAt rule until its first /takip visit records some). Check order:
  * invalid, then exists (an already-followed entry in a full list is "exists",
  * not "full"), then full. On any non-"added" result `list` is the input.
  */
@@ -302,7 +407,13 @@ export function addFollow(
 ): { list: readonly Follow[]; result: AddFollowResult } {
   const canonical = canonicalFollow(input.kind, input.value);
   if (canonical === null) return { list, result: "invalid" };
-  const next: Follow = { ...canonical, addedAt: nowIso, seenAt: nowIso };
+  const next: Follow = {
+    ...canonical,
+    addedAt: nowIso,
+    seenAt: nowIso,
+    seenIds: null,
+    seenFloor: null,
+  };
   const key = followKey(next);
   if (list.some((f) => followKey(f) === key)) return { list, result: "exists" };
   if (list.length >= MAX_FOLLOWS) return { list, result: "full" };
@@ -313,33 +424,102 @@ export function removeFollow(list: readonly Follow[], key: string): Follow[] {
   return list.filter((f) => followKey(f) !== key);
 }
 
-/** Moves seenAt to nowIso for exactly the given keys; every other entry is untouched. */
+/** The rows a /takip visit rendered for one follow: their ids and the oldest firstPublished among them. */
+export type SeenRows = {
+  ids: readonly string[];
+  /** null when no rendered row has a readable time (an empty result). */
+  floor: string | null;
+};
+
+/**
+ * Records a visit for exactly the given keys: seenAt = nowIso, plus the ids and
+ * the floor of the rows that were actually rendered (rowsShown). Every other
+ * entry is untouched. Rows that give no usable record (an empty result, an
+ * unreadable floor) reset seenIds / seenFloor to null, so that follow uses the
+ * seenAt rule, which is exactly "nothing was on screen".
+ */
 export function markSeen(
   list: readonly Follow[],
-  keys: ReadonlySet<string>,
+  shown: ReadonlyMap<string, SeenRows>,
   nowIso: string,
 ): Follow[] {
-  return list.map((f) => (keys.has(followKey(f)) ? { ...f, seenAt: nowIso } : f));
+  return list.map((f) => {
+    const rows = shown.get(followKey(f));
+    if (rows === undefined) return f;
+    const ids = distinctIds(rows.ids);
+    const floorOk = rows.floor !== null && cleanStamp(rows.floor) !== null;
+    return ids.length > 0 && floorOk
+      ? { ...f, seenAt: nowIso, seenIds: ids, seenFloor: rows.floor }
+      : { ...f, seenAt: nowIso, seenIds: null, seenFloor: null };
+  });
+}
+
+/** What isNewItem needs from a follow: its last visit (when, which stories, the oldest of them). */
+export type SeenBaseline = Pick<Follow, "seenAt" | "seenIds" | "seenFloor">;
+
+export const NO_BASELINE: SeenBaseline = Object.freeze({
+  seenAt: null,
+  seenIds: null,
+  seenFloor: null,
+});
+
+/**
+ * A baseline from what callers hold: a SeenBaseline, or the legacy shorthand (a
+ * bare seenAt string, or null for no baseline at all), which means the seenAt
+ * rule.
+ */
+function toBaseline(v: SeenBaseline | string | null | undefined): SeenBaseline {
+  if (v === null || v === undefined) return NO_BASELINE;
+  return typeof v === "string" ? { seenAt: v, seenIds: null, seenFloor: null } : v;
+}
+
+type RowLike = { id?: string; firstPublished: string };
+
+/**
+ * Whether a story is "yeni" for a follow whose last visit is `baseline`.
+ * Instants are compared numerically: the API returns PostgREST timestamps
+ * ("...+00:00") while seenAt comes from toISOString ("...Z"), so a string
+ * comparison would be wrong. An unparseable firstPublished is never new, and
+ * neither is anything without a usable baseline: the feed never claims novelty
+ * it cannot back up.
+ *
+ * With seenIds (and a readable floor), "new" means: the visit did not show it,
+ * and it was first published strictly after the oldest story the visit showed.
+ * That counts a story that became listed after the visit although it was first
+ * published before it (a keyword's second source arrives a median of 33 min
+ * after firstPublished), and ignores an old story that merely resurfaced. A tie
+ * at the floor is not new: that row may have been below the cut. Otherwise
+ * (legacy follows, a new follow, an empty result) it is firstPublished > seenAt.
+ */
+export function isNewItem(item: RowLike, baseline: SeenBaseline): boolean {
+  const ms = Date.parse(item.firstPublished);
+  if (!Number.isFinite(ms)) return false;
+  if (baseline.seenIds !== null && baseline.seenFloor !== null) {
+    const floorMs = Date.parse(baseline.seenFloor);
+    if (Number.isFinite(floorMs)) {
+      const id = (item.id ?? "").toLowerCase();
+      if (id !== "" && baseline.seenIds.some((seen) => seen.toLowerCase() === id)) return false;
+      return ms > floorMs;
+    }
+  }
+  if (baseline.seenAt === null) return false;
+  const seenMs = Date.parse(baseline.seenAt);
+  return Number.isFinite(seenMs) && ms > seenMs;
 }
 
 /**
- * How many items were first published after the reader last saw this follow.
- * Instants are compared numerically: the API returns PostgREST timestamps
- * ("...+00:00") while seenAt comes from toISOString ("...Z"), so a string
- * comparison would be wrong. No baseline (null / unparseable) means 0 -- the
- * feed never claims novelty it cannot back up.
+ * How many items are "yeni" for the reader's last visit (isNewItem). `baseline`
+ * is the follow's SeenBaseline, or a bare seenAt string / null (the legacy,
+ * seenAt-only rule).
  */
 export function countNew(
-  items: ReadonlyArray<{ firstPublished: string }>,
-  seenAt: string | null,
+  items: ReadonlyArray<RowLike>,
+  baseline: SeenBaseline | string | null,
 ): number {
-  if (seenAt === null) return 0;
-  const seenMs = Date.parse(seenAt);
-  if (!Number.isFinite(seenMs)) return 0;
+  const b = toBaseline(baseline);
   let n = 0;
   for (const item of items) {
-    const ms = Date.parse(item.firstPublished);
-    if (Number.isFinite(ms) && ms > seenMs) n += 1;
+    if (isNewItem(item, b)) n += 1;
   }
   return n;
 }
@@ -353,29 +533,47 @@ export function countNew(
  * by default, and a topic read is ordered by updated_at (not first_published),
  * so a new story can sit below row `base`. Without this, the badge counted
  * stories the reader could not see and the visit's markSeen then consumed them.
- * "New" is exactly countNew's rule (Date.parse(firstPublished) > Date.parse(seenAt),
- * an unparseable timestamp is never new), and with no usable baseline nothing is
- * new, so the list stays at `base`.
+ * "New" is exactly countNew's rule (isNewItem), and with no usable baseline
+ * nothing is new, so the list stays at `base`.
  */
 export function followRowsToShow(
-  items: ReadonlyArray<{ firstPublished: string }>,
-  seenAt: string | null,
+  items: ReadonlyArray<RowLike>,
+  baseline: SeenBaseline | string | null,
   base: number,
 ): number {
+  const b = toBaseline(baseline);
   let rows = base;
-  if (seenAt !== null) {
-    const seenMs = Date.parse(seenAt);
-    if (Number.isFinite(seenMs)) {
-      for (let i = items.length - 1; i >= 0; i--) {
-        const ms = Date.parse((items[i] as { firstPublished: string }).firstPublished);
-        if (Number.isFinite(ms) && ms > seenMs) {
-          rows = Math.max(base, i + 1);
-          break;
-        }
-      }
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (isNewItem(items[i] as RowLike, b)) {
+      rows = Math.max(base, i + 1);
+      break;
     }
   }
   return Math.min(items.length, rows);
+}
+
+/**
+ * The rows /takip renders for one follow (the followRowsToShow slice of
+ * `items`), as the record markSeen stores: their ids, and the oldest
+ * firstPublished among them as the API gave it. Exactly what the reader was
+ * shown, never the rest of the response.
+ */
+export function rowsShown(
+  items: ReadonlyArray<{ id: string; firstPublished: string }>,
+  baseline: SeenBaseline | string | null,
+  base: number,
+): SeenRows {
+  const rows = items.slice(0, followRowsToShow(items, baseline, base));
+  let floor: string | null = null;
+  let floorMs = Infinity;
+  for (const row of rows) {
+    const ms = Date.parse(row.firstPublished);
+    if (Number.isFinite(ms) && ms < floorMs) {
+      floorMs = ms;
+      floor = row.firstPublished;
+    }
+  }
+  return { ids: rows.map((r) => r.id), floor };
 }
 
 export function followHref(f: Pick<Follow, "kind" | "value">): string {
@@ -459,8 +657,6 @@ export type FollowItem = {
    */
   countHead?: string;
 };
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function coerceItem(v: unknown): FollowItem | null {
   if (v === null || typeof v !== "object") return null;

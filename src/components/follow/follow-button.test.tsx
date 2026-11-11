@@ -5,7 +5,7 @@ import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { FollowButton, FollowButtonView } from "./follow-button";
-import { FOLLOWS_CHANGE_EVENT, FOLLOWS_KEY, MAX_FOLLOWS } from "@/lib/follows/follows";
+import { FOLLOWS_CHANGE_EVENT, FOLLOWS_KEY, hasFollow, MAX_FOLLOWS } from "@/lib/follows/follows";
 import { HomeFeed } from "@/app/page";
 import TopicHubPage from "@/app/konu/[slug]/page";
 import EntityHubPage from "@/app/gundem/[key]/page";
@@ -59,10 +59,20 @@ describe("FollowButton -- server render", () => {
     expect(markup).not.toContain('href="/takip"');
   });
 
-  it("names a keyword follow after the normalised keyword", () => {
+  // h112-follows-2: the name shows the keyword as the reader typed it (trimmed,
+  // whitespace collapsed, case kept); 'IMF' used to read “ımf”.
+  it("names a keyword follow after the keyword as typed (trimmed, case kept)", () => {
     const markup = renderToStaticMarkup(<FollowButton kind="q" value="  Seçim " />);
     expect(markup).toContain("Takip et");
+    expect(markup).toContain('aria-label="Takip et: “Seçim”"');
+    expect(renderToStaticMarkup(<FollowButton kind="q" value="IMF" />)).toContain('aria-label="Takip et: “IMF”"');
+    expect(renderToStaticMarkup(<FollowButton kind="q" value="Irak" />)).toContain('aria-label="Takip et: “Irak”"');
+  });
+
+  it("strips an invisible format character from the name (and still offers the button)", () => {
+    const markup = renderToStaticMarkup(<FollowButton kind="q" value={"seçim\u200b"} />);
     expect(markup).toContain('aria-label="Takip et: “seçim”"');
+    expect(markup).not.toContain("\u200b");
   });
 
   it("escapes a hostile keyword in the accessible name instead of writing markup", () => {
@@ -112,7 +122,7 @@ describe("FollowButton -- server render", () => {
     const markup = renderToStaticMarkup(<FollowButton kind="q" value={value} />);
     expect(markup).toContain("Takip et");
     expect(markup).toContain("<button");
-    expect(markup).toContain(`aria-label="Takip et: “cumhurbaşkanı erdoğan azerbaycan&#x27;a gidecek”"`);
+    expect(markup).toContain(`aria-label="Takip et: “Cumhurbaşkanı Erdoğan Azerbaycan&#x27;a gidecek”"`);
     expect(markup).not.toContain("en fazla 64 karakter");
   });
 
@@ -411,6 +421,8 @@ describe("followsStore", () => {
         value: "ekonomi",
         addedAt: "2026-10-22T09:00:00.000Z",
         seenAt: "2026-10-22T09:00:00.000Z",
+        seenIds: null,
+        seenFloor: null,
       },
     ]);
     expect(store.read()).toHaveLength(1);
@@ -426,6 +438,8 @@ describe("followsStore", () => {
         value: "deva",
         addedAt: "2026-10-22T09:00:00.000Z",
         seenAt: "2026-10-22T09:00:00.000Z",
+        seenIds: null,
+        seenFloor: null,
       },
     ]);
     expect(store.toggle("gundem", "deva")).toBe("removed");
@@ -549,15 +563,47 @@ describe("followsStore", () => {
     store.toggle("q", "bir iki");
     store.toggle("konu", "spor");
     vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"));
-    store.markSeen(new Set(["konu:spor"]));
+    const id = "aaaaaaaa-1111-4111-8111-000000000001";
+    store.markSeen(new Map([["konu:spor", { ids: [id], floor: "2026-10-22T07:00:00+00:00" }]]));
     const [first, second] = store.read();
     expect(first?.seenAt).toBe("2026-10-22T09:00:00.000Z");
+    expect(first?.seenIds).toBeNull();
     expect(second?.seenAt).toBe("2026-10-22T12:00:00.000Z");
+    // h112-follows-1: the rows the visit showed are stored with the stamp, and persisted
+    expect(second?.seenIds).toEqual([id]);
+    expect(second?.seenFloor).toBe("2026-10-22T07:00:00+00:00");
+    expect(JSON.parse(h.storage.get(FOLLOWS_KEY)!)[1]).toMatchObject({ seenIds: [id], seenFloor: "2026-10-22T07:00:00+00:00" });
     // keys that do not exist change nothing and do not write
     h.setItem.mockClear();
-    store.markSeen(new Set(["q:yok boyle"]));
-    store.markSeen(new Set());
+    store.markSeen(new Map([["q:yok boyle", { ids: [id], floor: "2026-10-22T07:00:00+00:00" }]]));
+    store.markSeen(new Map());
     expect(h.setItem).not.toHaveBeenCalled();
+  });
+
+  // h112-follows-2: 'IMF' and 'imf' (and a legacy stored 'ımf') are one follow.
+  it("a keyword keeps the reader's case in storage, and 'imf' after 'IMF' is the same follow", async () => {
+    const store = await loadStore();
+    expect(store.toggle("q", "IMF")).toBe("added");
+    expect(JSON.parse(h.storage.get(FOLLOWS_KEY)!)).toMatchObject([{ kind: "q", value: "IMF" }]);
+    expect(hasFollow(store.read(), "q", "imf")).toBe(true);
+    // toggling the other spelling removes the one follow instead of adding a twin
+    expect(store.toggle("q", "imf")).toBe("removed");
+    expect(store.read()).toEqual([]);
+  });
+
+  it("a legacy stored 'ımf' keeps its display, and a later 'IMF' resolves to it", async () => {
+    h.storage.set(FOLLOWS_KEY, JSON.stringify([{ kind: "q", value: "ımf", addedAt: null, seenAt: null }]));
+    const store = await loadStore();
+    expect(store.read().map((f) => f.value)).toEqual(["ımf"]);
+    expect(hasFollow(store.read(), "q", "IMF")).toBe(true);
+    expect(store.toggle("q", "IMF")).toBe("removed");
+    expect(h.setItem).toHaveBeenCalledTimes(1); // only the removal wrote
+  });
+
+  it("'deva' with a zero-width space is toggled as the DEVA hub follow", async () => {
+    const store = await loadStore();
+    expect(store.toggle("q", "deva\u200b")).toBe("added");
+    expect(JSON.parse(h.storage.get(FOLLOWS_KEY)!)).toMatchObject([{ kind: "gundem", value: "deva" }]);
   });
 
   it("syncs across tabs: a storage event for our key notifies, other keys do not", async () => {

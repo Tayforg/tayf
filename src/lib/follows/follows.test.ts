@@ -29,8 +29,10 @@ import {
   hasFollow,
   isFollowGundemKey,
   isFollowTopicSlug,
+  isNewItem,
   KEYWORD_MAX,
   KEYWORD_MIN,
+  keywordIdentity,
   keywordRejectReason,
   markSeen,
   MAX_FOLLOWS,
@@ -42,25 +44,33 @@ import {
   RAW_MAX,
   removeFollow,
   runWithConcurrency,
+  SEARCH_FOLD_FROM,
+  SEARCH_FOLD_TO,
   serializeFollows,
   type Follow,
   type FollowItem,
 } from "./follows";
 import { TOPIC_LABELS_TR, TOPIC_SLUGS } from "@/lib/clusters/topic-query";
-import { MAX_SEARCH_QUERY_LENGTH } from "@/lib/clusters/turkish-query";
+import {
+  foldTr,
+  MAX_SEARCH_QUERY_LENGTH,
+  pgLower,
+  SEARCH_FOLD_FROM as QUERY_FOLD_FROM,
+  SEARCH_FOLD_TO as QUERY_FOLD_TO,
+} from "@/lib/clusters/turkish-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 const NOW = "2026-10-22T09:00:00.000Z";
 
 function q(value: string, over: Partial<Follow> = {}): Follow {
-  return { kind: "q", value, addedAt: NOW, seenAt: NOW, ...over };
+  return { kind: "q", value, addedAt: NOW, seenAt: NOW, seenIds: null, seenFloor: null, ...over };
 }
 function konu(value: string, over: Partial<Follow> = {}): Follow {
-  return { kind: "konu", value, addedAt: NOW, seenAt: NOW, ...over };
+  return { kind: "konu", value, addedAt: NOW, seenAt: NOW, seenIds: null, seenFloor: null, ...over };
 }
 function gundem(value: string, over: Partial<Follow> = {}): Follow {
-  return { kind: "gundem", value, addedAt: NOW, seenAt: NOW, ...over };
+  return { kind: "gundem", value, addedAt: NOW, seenAt: NOW, seenIds: null, seenFloor: null, ...over };
 }
 
 describe("constants", () => {
@@ -87,13 +97,16 @@ describe("constants", () => {
 });
 
 describe("normalizeKeyword", () => {
-  it("trims and folds Turkish case", () => {
-    expect(normalizeKeyword("  İMAMOĞLU  ")).toBe("imamoğlu");
-    expect(normalizeKeyword("ISPARTA")).toBe("ısparta");
+  // h112-follows-2: the stored value is the DISPLAY form and keeps the reader's
+  // case; two spellings of one keyword are told apart by keywordIdentity.
+  it("trims and keeps the reader's case (no Turkish lower-casing of the display value)", () => {
+    expect(normalizeKeyword("  İMAMOĞLU  ")).toBe("İMAMOĞLU");
+    expect(normalizeKeyword("ISPARTA")).toBe("ISPARTA");
+    expect(normalizeKeyword("IMF")).toBe("IMF");
   });
 
   it("collapses runs of whitespace (including tabs and newlines) to one space", () => {
-    expect(normalizeKeyword("Asgari   Ücret")).toBe("asgari ücret");
+    expect(normalizeKeyword("Asgari   Ücret")).toBe("Asgari Ücret");
     expect(normalizeKeyword("asgari\t\n ücret")).toBe("asgari ücret");
   });
 
@@ -116,8 +129,8 @@ describe("normalizeKeyword", () => {
   it("accepts a 41..64 character search and rejects 65 (h60-forms-3)", () => {
     const real = "Cumhurbaşkanı Erdoğan Azerbaycan'a gidecek";
     expect([...real]).toHaveLength(42);
-    // tr-lower-cased: the capital C and E fold, "I"-less so no dotless-i trap.
-    expect(normalizeKeyword(real)).toBe("cumhurbaşkanı erdoğan azerbaycan'a gidecek");
+    // The reader's capitals are kept.
+    expect(normalizeKeyword(real)).toBe(real);
     expect(normalizeKeyword("a".repeat(41))).toBe("a".repeat(41));
     expect(normalizeKeyword("a".repeat(64))).toBe("a".repeat(64));
     expect(normalizeKeyword("a".repeat(65))).toBeNull();
@@ -226,7 +239,7 @@ describe("isFollowTopicSlug / normalizeFollowValue", () => {
   });
 
   it("normalizeFollowValue dispatches on kind", () => {
-    expect(normalizeFollowValue("q", "  SEÇİM ")).toBe("seçim");
+    expect(normalizeFollowValue("q", "  SEÇİM ")).toBe("SEÇİM");
     expect(normalizeFollowValue("q", "a")).toBeNull();
     expect(normalizeFollowValue("konu", "ekonomi")).toBe("ekonomi");
     expect(normalizeFollowValue("konu", "Ekonomi")).toBeNull();
@@ -235,8 +248,8 @@ describe("isFollowTopicSlug / normalizeFollowValue", () => {
 });
 
 describe("followKey / href / label / apiPath", () => {
-  it("builds a kind-prefixed key", () => {
-    expect(followKey(q("seçim"))).toBe("q:seçim");
+  it("builds a kind-prefixed key (a keyword's key is its identity, see the h112-follows-2 block)", () => {
+    expect(followKey(q("seçim"))).toBe("q:secim");
     expect(followKey(konu("spor"))).toBe("konu:spor");
   });
 
@@ -310,7 +323,7 @@ describe("parseStoredFollows", () => {
 
   it("treats a bare string as a legacy keyword and normalises it", () => {
     expect(parseStoredFollows('["Seçim"]')).toEqual([
-      { kind: "q", value: "seçim", addedAt: null, seenAt: null },
+      { kind: "q", value: "Seçim", addedAt: null, seenAt: null, seenIds: null, seenFloor: null },
     ]);
     expect(parseStoredFollows('["x"]')).toEqual([]);
   });
@@ -327,7 +340,7 @@ describe("parseStoredFollows", () => {
     const raw = JSON.stringify([
       { kind: "q", value: "  SEÇİM   SONUÇLARI ", addedAt: NOW, seenAt: NOW },
     ]);
-    expect(parseStoredFollows(raw)[0]?.value).toBe("seçim sonuçları");
+    expect(parseStoredFollows(raw)[0]?.value).toBe("SEÇİM SONUÇLARI");
   });
 
   it("turns an unparseable addedAt / seenAt into null, and keeps a parseable one", () => {
@@ -336,8 +349,8 @@ describe("parseStoredFollows", () => {
       { kind: "konu", value: "spor", addedAt: NOW, seenAt: "" },
     ]);
     expect(parseStoredFollows(raw)).toEqual([
-      { kind: "q", value: "seçim", addedAt: null, seenAt: null },
-      { kind: "konu", value: "spor", addedAt: NOW, seenAt: null },
+      { kind: "q", value: "seçim", addedAt: null, seenAt: null, seenIds: null, seenFloor: null },
+      { kind: "konu", value: "spor", addedAt: NOW, seenAt: null, seenIds: null, seenFloor: null },
     ]);
   });
 
@@ -349,7 +362,7 @@ describe("parseStoredFollows", () => {
       { kind: "konu", value: "spor", addedAt: null, seenAt: NOW },
     ]);
     const out = parseStoredFollows(raw);
-    expect(out.map(followKey)).toEqual(["q:seçim", "konu:spor"]);
+    expect(out.map(followKey)).toEqual(["q:secim", "konu:spor"]);
     expect(out[0]?.addedAt).toBeNull(); // the legacy string came first
     expect(out[1]?.seenAt).toBeNull();
   });
@@ -381,16 +394,16 @@ describe("parseStoredFollows", () => {
   it("ignores prototype-pollution style keys", () => {
     const raw = '[{"kind":"q","value":"seçim","__proto__":{"polluted":true},"addedAt":null,"seenAt":null}]';
     const out = parseStoredFollows(raw);
-    expect(out).toEqual([{ kind: "q", value: "seçim", addedAt: null, seenAt: null }]);
+    expect(out).toEqual([{ kind: "q", value: "seçim", addedAt: null, seenAt: null, seenIds: null, seenFloor: null }]);
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
 
 describe("serializeFollows", () => {
-  it("emits only the four Follow fields", () => {
+  it("emits only the six Follow fields", () => {
     const withExtra = { ...q("seçim"), extra: "x" } as Follow;
     expect(JSON.parse(serializeFollows([withExtra]))).toEqual([
-      { kind: "q", value: "seçim", addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: "seçim", addedAt: NOW, seenAt: NOW, seenIds: null, seenFloor: null },
     ]);
   });
 
@@ -400,10 +413,10 @@ describe("serializeFollows", () => {
 });
 
 describe("addFollow", () => {
-  it("adds a normalised keyword with addedAt = seenAt = now", () => {
+  it("adds a normalised keyword (the reader's case kept) with addedAt = seenAt = now", () => {
     const r = addFollow([], { kind: "q", value: "  SEÇİM " }, NOW);
     expect(r.result).toBe("added");
-    expect(r.list).toEqual([q("seçim")]);
+    expect(r.list).toEqual([q("SEÇİM")]);
   });
 
   it("adds a topic slug", () => {
@@ -471,10 +484,12 @@ describe("removeFollow", () => {
 });
 
 describe("markSeen", () => {
+  const rows = { ids: [ID(1)], floor: "2026-10-22T07:00:00.000Z" };
+
   it("touches only the given keys", () => {
     const old = "2026-10-01T00:00:00.000Z";
     const list = [q("a1", { seenAt: old }), konu("spor", { seenAt: old }), q("b2", { seenAt: null })];
-    const out = markSeen(list, new Set(["konu:spor", "q:b2"]), NOW);
+    const out = markSeen(list, new Map([["konu:spor", rows], ["q:b2", rows]]), NOW);
     expect(out[0]).toEqual(list[0]);
     expect(out[1]?.seenAt).toBe(NOW);
     expect(out[2]?.seenAt).toBe(NOW);
@@ -482,9 +497,9 @@ describe("markSeen", () => {
     expect(out[1]?.addedAt).toBe(list[1]?.addedAt);
   });
 
-  it("returns an equal list for an empty key set and does not mutate", () => {
+  it("returns an equal list for an empty map and does not mutate", () => {
     const list = Object.freeze([q("a1")]);
-    expect(markSeen(list, new Set(), NOW)).toEqual(list);
+    expect(markSeen(list, new Map(), NOW)).toEqual(list);
   });
 });
 
@@ -722,8 +737,12 @@ describe("runWithConcurrency", () => {
 
 describe("parseFollowKey", () => {
   it("inverts followKey", () => {
-    for (const f of [q("seçim"), q("a: b"), konu("spor")]) {
-      expect(parseFollowKey(followKey(f))).toEqual({ kind: f.kind, value: f.value });
+    // A keyword's key carries its identity, a slug's carries the slug itself.
+    expect(parseFollowKey(followKey(q("seçim")))).toEqual({ kind: "q", value: "secim" });
+    expect(parseFollowKey(followKey(q("a: b")))).toEqual({ kind: "q", value: "a: b" });
+    expect(parseFollowKey(followKey(konu("spor")))).toEqual({ kind: "konu", value: "spor" });
+    for (const f of [q("seçim"), q("IMF"), q("a: b"), konu("spor")]) {
+      expect(followKey({ ...f, ...(parseFollowKey(followKey(f)) ?? {}) })).toBe(followKey(f));
     }
   });
 
@@ -738,7 +757,8 @@ describe("parseFollowKey", () => {
       "x:seçim",
       "q:a",
       "q:  Seçim ", // not in normal form
-      "q:İMAM",
+      "q:İMAM", // display case, not an identity
+      "q:Seçim",
       "konu:politika",
       "konu:Ekonomi",
       ":spor",
@@ -976,7 +996,7 @@ describe("gundem follow kind", () => {
     const list = [q("seçim"), gundem("deva"), konu("ekonomi", { seenAt: null }), gundem("meclis", { addedAt: null })];
     expect(parseStoredFollows(serializeFollows(list))).toEqual(list);
     expect(JSON.parse(serializeFollows([gundem("deva")]))).toEqual([
-      { kind: "gundem", value: "deva", addedAt: NOW, seenAt: NOW },
+      { kind: "gundem", value: "deva", addedAt: NOW, seenAt: NOW, seenIds: null, seenFloor: null },
     ]);
   });
 
@@ -1199,5 +1219,353 @@ describe("module purity (bundled to the client)", () => {
     const src = readFileSync(resolve(__dirname, "../time.ts"), "utf8");
     const imports = src.match(/^\s*(?:import|export)\s[^;]*?from\s+["'][^"']+["']/gm) ?? [];
     expect(imports).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h112-follows-1: "yeni" must also count a story that became listed (2nd source)
+// after the reader's last /takip visit although it was first published before it.
+// A visit stores the ids it showed and the oldest first_published among them.
+// ---------------------------------------------------------------------------
+
+const ID = (n: number) => `aaaaaaaa-1111-4111-8111-${String(n).padStart(12, "0")}`;
+const SEEN_T = "2026-10-22T09:00:00.000Z";
+const SEEN_T_MS = Date.parse(SEEN_T);
+const hoursBefore = (h: number) => new Date(SEEN_T_MS - h * 3_600_000).toISOString();
+const FLOOR = hoursBefore(5);
+/** A baseline of a visit at SEEN_T that showed ids 0..4 and whose oldest row was FLOOR. */
+const BASELINE = { seenAt: SEEN_T, seenIds: [ID(0), ID(1), ID(2), ID(3), ID(4)], seenFloor: FLOOR };
+const LEGACY = { seenAt: SEEN_T, seenIds: null, seenFloor: null };
+const row = (n: number, firstPublished: string) => ({ id: ID(n), firstPublished });
+
+describe("isNewItem [h112-follows-1]", () => {
+  it("with seenIds: a late-visible item (unseen id, older than the visit, newer than the floor) is new", () => {
+    expect(isNewItem(row(9, hoursBefore(1)), BASELINE)).toBe(true);
+    expect(isNewItem(row(9, hoursBefore(1)), LEGACY)).toBe(false); // today's rule misses it
+  });
+
+  it("with seenIds: a resurfaced old item below the floor is not new", () => {
+    expect(isNewItem(row(9, hoursBefore(6)), BASELINE)).toBe(false);
+  });
+
+  it("with seenIds: a tie at the floor is not new, one millisecond above it is", () => {
+    expect(isNewItem(row(9, FLOOR), BASELINE)).toBe(false);
+    expect(isNewItem(row(9, new Date(Date.parse(FLOOR) + 1).toISOString()), BASELINE)).toBe(true);
+  });
+
+  it("with seenIds: an item the visit showed is never new, whatever its time or the id's case", () => {
+    expect(isNewItem(row(2, hoursBefore(1)), BASELINE)).toBe(false);
+    expect(isNewItem({ id: ID(2).toUpperCase(), firstPublished: hoursBefore(1) }, BASELINE)).toBe(false);
+  });
+
+  it("with seenIds: an item published after the visit is new", () => {
+    expect(isNewItem(row(9, new Date(SEEN_T_MS + 60_000).toISOString()), BASELINE)).toBe(true);
+  });
+
+  it("with seenIds: an unparseable first_published is never new", () => {
+    expect(isNewItem(row(9, "garbage"), BASELINE)).toBe(false);
+  });
+
+  it("without seenIds it is today's rule: firstPublished strictly after seenAt, instants compared numerically", () => {
+    expect(isNewItem(row(9, new Date(SEEN_T_MS + 1).toISOString()), LEGACY)).toBe(true);
+    expect(isNewItem(row(9, SEEN_T), LEGACY)).toBe(false);
+    expect(isNewItem(row(9, "2026-10-22T09:00:00+00:00"), LEGACY)).toBe(false);
+    expect(isNewItem(row(9, "2026-10-22T09:00:00.500+00:00"), LEGACY)).toBe(true);
+    expect(isNewItem(row(9, hoursBefore(1)), { seenAt: null, seenIds: null, seenFloor: null })).toBe(false);
+    expect(isNewItem(row(9, hoursBefore(1)), { seenAt: "garbage", seenIds: null, seenFloor: null })).toBe(false);
+  });
+
+  it("falls back to the seenAt rule when the stored floor cannot be read (never claims novelty it cannot back up)", () => {
+    const broken = { seenAt: SEEN_T, seenIds: [ID(0)], seenFloor: "garbage" };
+    expect(isNewItem(row(9, hoursBefore(1)), broken)).toBe(false);
+    expect(isNewItem(row(9, new Date(SEEN_T_MS + 60_000).toISOString()), broken)).toBe(true);
+  });
+});
+
+describe("countNew / followRowsToShow with a seen baseline [h112-follows-1]", () => {
+  const items = [
+    row(10, new Date(SEEN_T_MS + 60_000).toISOString()), // published after the visit
+    row(0, hoursBefore(1)), // shown at the visit
+    row(9, hoursBefore(2)), // late-visible
+    row(1, hoursBefore(3)), // shown
+    row(2, hoursBefore(4)), // shown
+    row(3, hoursBefore(4.5)), // shown
+    row(4, hoursBefore(4.8)), // shown
+    row(11, hoursBefore(8)), // resurfaced, below the floor
+  ];
+
+  it("counts the late-visible item and the post-visit item, not the shown or resurfaced ones", () => {
+    expect(countNew(items, BASELINE)).toBe(2);
+    expect(countNew(items, LEGACY)).toBe(1);
+  });
+
+  it("legacy follows behave as before: a bare seenAt string or null still works", () => {
+    expect(countNew(items, SEEN_T)).toBe(1);
+    expect(countNew(items, null)).toBe(0);
+    expect(followRowsToShow(items, SEEN_T, 5)).toBe(5);
+    expect(followRowsToShow(items, null, 2)).toBe(2);
+  });
+
+  it("followRowsToShow reaches the last new item under the same rule as countNew", () => {
+    // New items sit at index 0 and 2: with base 2 the list must grow to 3 rows.
+    expect(followRowsToShow(items, BASELINE, 2)).toBe(3);
+    expect(followRowsToShow(items, LEGACY, 2)).toBe(2);
+    const shown = items.slice(0, followRowsToShow(items, BASELINE, 2));
+    expect(countNew(shown, BASELINE)).toBe(countNew(items, BASELINE));
+  });
+
+  it("an item below the floor that is not shown never extends the list", () => {
+    expect(followRowsToShow([row(11, hoursBefore(8))], BASELINE, 5)).toBe(1);
+    expect(countNew([row(11, hoursBefore(8))], BASELINE)).toBe(0);
+  });
+});
+
+describe("markSeen with the rows shown [h112-follows-1]", () => {
+  const shownRows = new Map([["konu:spor", { ids: [ID(1), ID(2)], floor: hoursBefore(3) }]]);
+
+  it("stores seenAt, the ids and the floor for the given keys only", () => {
+    const list = [q("a1", { seenAt: NOW }), konu("spor", { seenAt: "2026-10-01T00:00:00.000Z" })];
+    const out = markSeen(list, shownRows, SEEN_T);
+    expect(out[0]).toBe(list[0]);
+    expect(out[1]).toEqual(konu("spor", { seenAt: SEEN_T, seenIds: [ID(1), ID(2)], seenFloor: hoursBefore(3) }));
+  });
+
+  it("is a no-op for an empty map or an unknown key", () => {
+    const list = [q("a1")];
+    expect(markSeen(list, new Map(), SEEN_T)).toEqual(list);
+    expect(markSeen(list, shownRows, SEEN_T)).toEqual(list);
+  });
+
+  it("an empty response (no rows, no floor) moves seenAt and goes back to the legacy rule", () => {
+    const list = [konu("spor", { seenIds: [ID(1)], seenFloor: FLOOR })];
+    const out = markSeen(list, new Map([["konu:spor", { ids: [], floor: null }]]), SEEN_T);
+    expect(out[0]).toEqual(konu("spor", { seenAt: SEEN_T, seenIds: null, seenFloor: null }));
+  });
+
+  it("an unreadable floor is stored as the legacy rule too, and ids are de-duplicated and capped at 40", () => {
+    const many = Array.from({ length: 60 }, (_, i) => ID(i));
+    const out = markSeen([konu("spor")], new Map([["konu:spor", { ids: [ID(1), ID(1), ...many], floor: FLOOR }]]), SEEN_T);
+    expect(out[0]?.seenIds).toHaveLength(40);
+    expect(new Set(out[0]?.seenIds).size).toBe(40);
+    const bad = markSeen([konu("spor")], new Map([["konu:spor", { ids: [ID(1)], floor: "garbage" }]]), SEEN_T);
+    expect(bad[0]).toEqual(konu("spor", { seenAt: SEEN_T, seenIds: null, seenFloor: null }));
+  });
+
+  it("what it stores survives serialize -> parse unchanged", () => {
+    const out = markSeen([konu("spor")], shownRows, SEEN_T);
+    expect(parseStoredFollows(serializeFollows(out))).toEqual(out);
+  });
+});
+
+describe("seenIds / seenFloor in storage [h112-follows-1]", () => {
+  const parseOne = (extra: Record<string, unknown>) =>
+    parseStoredFollows(JSON.stringify([{ kind: "konu", value: "spor", addedAt: NOW, seenAt: NOW, ...extra }]))[0];
+
+  it("legacy shapes (no fields at all, a bare string) parse with both null", () => {
+    expect(parseOne({})).toEqual(konu("spor"));
+    expect(parseStoredFollows('["seçim"]')).toEqual([q("seçim", { addedAt: null, seenAt: null })]);
+  });
+
+  it("keeps valid ids and a valid floor", () => {
+    expect(parseOne({ seenIds: [ID(1), ID(2)], seenFloor: FLOOR })).toEqual(
+      konu("spor", { seenIds: [ID(1), ID(2)], seenFloor: FLOOR }),
+    );
+  });
+
+  it("maps a garbage seenIds or seenFloor to null, whatever the other field holds", () => {
+    for (const bad of ["abc", 5, {}, true, null]) {
+      expect(parseOne({ seenIds: bad, seenFloor: FLOOR })?.seenIds).toBeNull();
+    }
+    for (const bad of ["garbage", "", 5, null, {}, "x".repeat(65)]) {
+      expect(parseOne({ seenIds: [ID(1)], seenFloor: bad })?.seenFloor).toBeNull();
+    }
+  });
+
+  it("keeps only uuid-shaped ids, de-duplicated, at most 40", () => {
+    const ids = [ID(1), "not-a-uuid", 7, null, ID(1), ID(2)];
+    expect(parseOne({ seenIds: ids, seenFloor: FLOOR })?.seenIds).toEqual([ID(1), ID(2)]);
+    const many = Array.from({ length: 55 }, (_, i) => ID(i));
+    expect(parseOne({ seenIds: many, seenFloor: FLOOR })?.seenIds).toEqual(many.slice(0, 40));
+  });
+
+  it("an inconsistent record (ids without a floor) counts with the seenAt rule, not as 'nothing is new'", () => {
+    const f = parseOne({ seenIds: [ID(1)], seenFloor: "garbage" })!;
+    expect(isNewItem(row(9, new Date(SEEN_T_MS + 60_000).toISOString()), f)).toBe(true);
+    expect(isNewItem(row(9, hoursBefore(1)), f)).toBe(false);
+  });
+
+  it("serializeFollows writes both fields", () => {
+    const raw = JSON.parse(serializeFollows([konu("spor", { seenIds: [ID(1)], seenFloor: FLOOR })]));
+    expect(raw).toEqual([{ kind: "konu", value: "spor", addedAt: NOW, seenAt: NOW, seenIds: [ID(1)], seenFloor: FLOOR }]);
+  });
+
+  it("addFollow stores nulls: the new follow uses the seenAt rule until its first /takip visit", () => {
+    const { list } = addFollow([], { kind: "konu", value: "spor" }, NOW);
+    expect(list[0]).toEqual(konu("spor", { addedAt: NOW, seenAt: NOW, seenIds: null, seenFloor: null }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h112-follows-2: a keyword keeps the reader's case; identity folds.
+// ---------------------------------------------------------------------------
+
+const ZWSP = "\u200b";
+
+describe("keyword display value [h112-follows-2]", () => {
+  it("keeps the reader's case: 'IMF' is stored, labelled and linked as IMF", () => {
+    expect(normalizeKeyword("IMF")).toBe("IMF");
+    expect(normalizeKeyword("FIFA")).toBe("FIFA");
+    expect(followLabel(q("IMF"))).toBe("“IMF”");
+    expect(followHref(q("IMF"))).toBe("/?q=IMF");
+    expect(followApiPath(q("IMF"))).toBe("/api/takip?q=IMF");
+    expect(canonicalFollow("q", "IMF")).toEqual({ kind: "q", value: "IMF" });
+  });
+
+  it("'Irak' displays “Irak” (a real dotless I) with identity 'irak'", () => {
+    expect(normalizeKeyword("Irak")).toBe("Irak");
+    expect(followLabel(q("Irak"))).toBe("“Irak”");
+    expect(keywordIdentity("Irak")).toBe("irak");
+    expect(keywordIdentity("Isparta")).toBe("isparta");
+  });
+
+  it("strips format characters (Cf) and still rejects control characters and lone surrogates", () => {
+    expect(normalizeKeyword(`seçim${ZWSP}`)).toBe("seçim");
+    for (const cf of ["\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u2060", "\ufeff", "\u00ad", "\u202e"]) {
+      expect(normalizeKeyword(`se${cf}çim`), cf.charCodeAt(0).toString(16)).toBe("seçim");
+    }
+    expect(normalizeKeyword("\u0000ab")).toBeNull();
+    expect(normalizeKeyword("ab\ud800")).toBeNull();
+    expect(keywordRejectReason("ab\u0000")).toBe("invalid");
+  });
+
+  it("collapses whitespace around a stripped format character and trims", () => {
+    expect(normalizeKeyword(`  Asgari ${ZWSP} \t Ücret  `)).toBe("Asgari Ücret");
+  });
+
+  it("applies the length limits to the stored value (format characters do not count)", () => {
+    expect(normalizeKeyword(`a${ZWSP}`)).toBeNull();
+    expect(keywordRejectReason(`a${ZWSP}`)).toBe("too-short");
+    expect(keywordRejectReason(ZWSP.repeat(5))).toBe("too-short");
+    expect(normalizeKeyword(`${"a".repeat(KEYWORD_MAX)}${ZWSP.repeat(10)}`)).toBe("a".repeat(KEYWORD_MAX));
+    expect(keywordRejectReason("a".repeat(KEYWORD_MAX + 1))).toBe("too-long");
+    expect(keywordRejectReason("a".repeat(RAW_MAX + 1))).toBe("too-long");
+    expect(keywordRejectReason("a")).toBe("too-short");
+  });
+
+  it("normalizeKeyword stays idempotent on its own output", () => {
+    for (const raw of ["IMF", "  İMAMOĞLU ", `Irak${ZWSP}`, "Asgari   Ücret"]) {
+      const once = normalizeKeyword(raw);
+      expect(normalizeKeyword(once)).toBe(once);
+    }
+  });
+});
+
+describe("keywordIdentity [h112-follows-2]", () => {
+  it("folds İ, I and ı to i and lower-cases the rest, then folds Turkish letters to ASCII", () => {
+    expect(keywordIdentity("IMF")).toBe("imf");
+    expect(keywordIdentity("ımf")).toBe("imf");
+    expect(keywordIdentity("İmf")).toBe("imf");
+    expect(keywordIdentity("Istanbul")).toBe("istanbul");
+    expect(keywordIdentity("FIFA")).toBe("fifa");
+    expect(keywordIdentity("BIST")).toBe("bist");
+    expect(keywordIdentity("SEÇİM")).toBe("secim");
+    expect(keywordIdentity("Şişli Çağlayan Öğüt")).toBe("sisli caglayan ogut");
+  });
+
+  it("is idempotent", () => {
+    for (const v of ["IMF", "ımf", "SEÇİM", "Şişli", "Irak", "Âlem"]) {
+      expect(keywordIdentity(keywordIdentity(v))).toBe(keywordIdentity(v));
+    }
+  });
+
+  it("mirrors the search fold of turkish-query.ts: same two strings, same results (parity guard)", () => {
+    expect(SEARCH_FOLD_FROM).toBe(QUERY_FOLD_FROM);
+    expect(SEARCH_FOLD_TO).toBe(QUERY_FOLD_TO);
+    expect([...SEARCH_FOLD_FROM]).toHaveLength([...SEARCH_FOLD_TO].length);
+    for (const word of ["IMF", "Irak", "SEÇİM", "Şişli", "Çağlayan", "ÖĞRETMEN", "Isparta", "IŞIK", "ıslak", "İYİ Parti", "Âlem", "Mûsiki"]) {
+      expect(keywordIdentity(word), word).toBe(foldTr(pgLower(word)));
+    }
+  });
+});
+
+describe("keyword follows share one identity [h112-follows-2]", () => {
+  it("followKey for a keyword is its identity; konu / gundem keys are unchanged", () => {
+    expect(followKey(q("IMF"))).toBe("q:imf");
+    expect(followKey(q("ımf"))).toBe("q:imf");
+    expect(followKey(q("Seçim"))).toBe("q:secim");
+    expect(followKey(konu("spor"))).toBe("konu:spor");
+    expect(followKey(gundem("deva"))).toBe("gundem:deva");
+  });
+
+  it("adding 'imf' after 'IMF' returns 'exists' and keeps the reader's case", () => {
+    const first = addFollow([], { kind: "q", value: "IMF" }, NOW);
+    expect(first.result).toBe("added");
+    expect(first.list[0]?.value).toBe("IMF");
+    const again = addFollow(first.list, { kind: "q", value: "imf" }, NOW);
+    expect(again.result).toBe("exists");
+    expect(again.list).toBe(first.list);
+  });
+
+  it("a legacy stored 'ımf' keeps its display; a later 'IMF' is 'exists'", () => {
+    const stored = parseStoredFollows(JSON.stringify([{ kind: "q", value: "ımf", addedAt: NOW, seenAt: NOW }]));
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.value).toBe("ımf");
+    expect(followLabel(stored[0]!)).toBe("“ımf”");
+    expect(addFollow(stored, { kind: "q", value: "IMF" }, NOW).result).toBe("exists");
+    expect(hasFollow(stored, "q", "IMF")).toBe(true);
+    expect(hasFollow(stored, "q", "imf")).toBe(true);
+  });
+
+  it("'seçim' plus a zero-width space is the same follow as 'seçim'", () => {
+    const base = addFollow([], { kind: "q", value: "seçim" }, NOW).list;
+    expect(addFollow(base, { kind: "q", value: `seçim${ZWSP}` }, NOW).result).toBe("exists");
+    expect(hasFollow(base, "q", `seçim${ZWSP}`)).toBe(true);
+    const added = addFollow([], { kind: "q", value: `seçim${ZWSP}` }, NOW);
+    expect(added.list[0]?.value).toBe("seçim");
+  });
+
+  it("'deva' plus a zero-width space still becomes the DEVA hub follow, in any case", () => {
+    expect(canonicalFollow("q", `deva${ZWSP}`)).toEqual({ kind: "gundem", value: "deva" });
+    expect(canonicalFollow("q", "DEVA")).toEqual({ kind: "gundem", value: "deva" });
+    const out = parseStoredFollows(JSON.stringify([{ kind: "q", value: `deva${ZWSP}`, addedAt: NOW, seenAt: NOW }]));
+    expect(out).toEqual([gundem("deva")]);
+  });
+
+  it("parse collapses legacy duplicates of one identity (first wins), and never rewrites storage itself", () => {
+    const raw = JSON.stringify([
+      { kind: "q", value: "ımf", addedAt: NOW, seenAt: NOW },
+      { kind: "q", value: "imf", addedAt: NOW, seenAt: NOW },
+    ]);
+    expect(parseStoredFollows(raw).map((f) => f.value)).toEqual(["ımf"]);
+  });
+
+  it("the 20-follow cap is unchanged, and an identity that already exists is 'exists', not 'full'", () => {
+    let list: readonly Follow[] = [];
+    for (let i = 0; i < MAX_FOLLOWS; i++) {
+      const r = addFollow(list, { kind: "q", value: `kelime${String.fromCharCode(97 + i)}` }, NOW);
+      expect(r.result).toBe("added");
+      list = r.list;
+    }
+    expect(addFollow(list, { kind: "q", value: "Yeni Kelime" }, NOW).result).toBe("full");
+    expect(addFollow(list, { kind: "q", value: "KELİMEA" }, NOW).result).toBe("exists");
+    expect(addFollow(list, { kind: "q", value: "a" }, NOW).result).toBe("invalid");
+  });
+
+  it("hasFollow, removeFollow and parseFollowKey agree on the identity key", () => {
+    const list = [q("IMF")];
+    expect(hasFollow(list, "q", "imf")).toBe(true);
+    expect(removeFollow(list, followKey({ kind: "q", value: "imf" }))).toEqual([]);
+    expect(parseFollowKey("q:imf")).toEqual({ kind: "q", value: "imf" });
+    // the key is the identity, so a display-cased value is not a key
+    expect(parseFollowKey("q:IMF")).toBeNull();
+  });
+
+  it("every hub label still canonicalises to its hub, typed in any case or with the ASCII look-alikes", () => {
+    for (const e of RISING_ENTITIES) {
+      const viaLabel = canonicalFollow("q", e.label);
+      expect(viaLabel, e.label).toEqual({ kind: "gundem", value: e.key });
+      const viaUpper = canonicalFollow("q", e.label.toLocaleUpperCase("tr"));
+      expect(viaUpper, e.label).toEqual({ kind: "gundem", value: e.key });
+    }
   });
 });

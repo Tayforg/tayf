@@ -5,7 +5,12 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { publicBlindspotClaim } from "@/lib/clusters/recall-veto";
-import { ALLOWED_RPCS, ALLOWED_RPC_IDENTITIES } from "../_helpers/anon-rpc-allowlist";
+// 158 is frozen text: it names the six RPCs that existed when it was written. Migration 192 added a seventh
+// (saved_clusters_v4), so this file pins the set BEFORE 192, not the current one.
+import {
+  ALLOWED_RPCS_BEFORE_192 as ALLOWED_RPCS,
+  ALLOWED_RPC_IDENTITIES_BEFORE_192 as ALLOWED_RPC_IDENTITIES,
+} from "../_helpers/anon-rpc-allowlist";
 import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------

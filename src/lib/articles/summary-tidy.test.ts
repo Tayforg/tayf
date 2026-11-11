@@ -4946,7 +4946,10 @@ describe("tidySummaryText: a trailing Peki / İşte come-on is cut (h95-summarie
   });
 
   it("the cut starts at the FIRST such sentence and takes every sentence behind it", () => {
-    expect(tidySummaryText(`${LEAD} Peki, ne değişecek? Bunu bilmeyen kalmadı. İşte cevaplar.`)).toBe(LEAD);
+    // h112-ozetregress-1: the sentences behind the come-on must be come-on shaped too (a question, or no
+    // finite verb); the old row here ("Bunu bilmeyen kalmadı.") was a statement and is kept now, see the
+    // h112 describe below.
+    expect(tidySummaryText(`${LEAD} Peki, ne değişecek? Bunu bilen var mı? İşte cevaplar.`)).toBe(LEAD);
   });
 
   it("any complete sentence of 60 characters or more in front is enough, wherever it stands", () => {
@@ -5013,6 +5016,246 @@ describe("tidySummaryText: a trailing Peki / İşte come-on is cut (h95-summarie
     const kept: Gen = (n) => "Peki, ne oldu? ".repeat(Math.ceil(n / 15));
     expectLinear(cut, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
     expectLinear(kept, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
+  });
+});
+
+// h112-ozetregress-1 (hunt 112, 2026-11-11): #249 cut everything from the first
+// "İşte <statement>" or "Peki ...?" sentence to the end, so 5b93eb08's Özet never
+// reached its California story and cd99f5d4's never answered "Gürsel Erol kimdir?".
+// The cut now lands only where EVERY sentence from the come-on start to the end of the
+// text is come-on shaped: it ends in "?", "…", "..." or ":" (closing marks may follow),
+// or it has no finite verb (hasFiniteVerb).
+describe("h112: the come-on cut removes only come-on-shaped tails", () => {
+  const LEAD = "Bakan Yılmaz yeni konut kredisi paketini açıkladı ve faiz oranlarını sabit tuttu.";
+
+  // 5b93eb08 (10Haber), stored description verbatim: NBSP and a blank before "oylamalar",
+  // and the feed's " […]" excerpt marker.
+  const B93_STORED =
+    "Amerikalılar seçimlerde sadece milletvekilleri ve senatörler için oy kullanmıyor. Eyaletten eyalete değişmekle birlikte yüzlerce farklı konuda, bazıları referandum olan  oylamalar da seçim gününe denk getiriliyor. İşte bunlardan biri ve sembolik önemi yüksek olanı California eyaletinde yaşanıyor. Eyalet senatosu bundan bir süre önce toplam serveti 1 milyar doları aşanlara tek seferlik yüzde 5’lik bir servet vergisi […]";
+  // The same text with the plain double blank the finding quotes.
+  const B93_DOUBLE_BLANK = B93_STORED.replace("  ", "  ");
+  const B93_SHOWN =
+    "Amerikalılar seçimlerde sadece milletvekilleri ve senatörler için oy kullanmıyor. Eyaletten eyalete değişmekle birlikte yüzlerce farklı konuda, bazıları referandum olan oylamalar da seçim gününe denk getiriliyor. İşte bunlardan biri ve sembolik önemi yüksek olanı California eyaletinde yaşanıyor. Eyalet senatosu bundan bir süre önce toplam serveti 1 milyar doları aşanlara tek seferlik yüzde 5’lik bir servet vergisi…";
+
+  // cd99f5d4 (Haberler.com), stored description verbatim: nothing but one blank between the sentences.
+  const CD99_STORED =
+    "CHP Elazığ Milletvekili Gürsel Erol'un oğlu Erencan Erol'un 31 Ekim'de Ankara'da yapılan düğünü, Kemal Kılıçdaroğlu ile Cevdet Yılmaz'ı aynı salonda buluşturdu. Peki, Gürsel Erol kimdir, nereli ve kaç kez milletvekili seçildi? 1963 Elazığ doğumlu siyasetçi, 2018'de CHP'ye Elazığ'da 41 yıl sonra ilk milletvekilliğini kazandırdı.";
+
+  // 126077c3 shape: an "İşte <fragment>." sentence with no verb, then a sentence with one.
+  const P126_SHORT =
+    "2026 yılının da sonu yaklaşıyor. Gelenek olduğu üzere her yıl geride kalan 365 günün ‘enleri’ seçilir magazin dünyasında. İşte bunlardan biri de People dergisinin her yıl yaptığı “Yılın yaşayan en çekici erkeği” seçimi. Bu yıl bu unvanı Noah Wyle aldı.";
+  const P126_STORED =
+    "2026 yılının da sonu yaklaşıyor. Gelenek olduğu üzere her yıl geride kalan 365 günün ‘enleri’ seçilir magazin dünyasında. İşte bunlardan biri de People dergisinin her yıl yaptığı “Yılın yaşayan en çekici erkeği” seçimi. Bu yıl bu unvanı, rol aldığı Pitt dizisiyle tanınan Noah Wyle aldı.  Bu durum 55 yaşındaki Wyle’ın kendisi için de çok şaşırtıcı […]";
+
+  // 97ec3ce4 shape: a Peki question, then an expert quotation and a closing sentence with a verb.
+  const E97 =
+    "ABD'deki ara seçimlerde Demokratlar, Kongre'nin iki kanadında da çoğunluğu kazandı. Trump, 2018 seçimlerinde Temsilciler Meclisi'ni kaybetmiş ancak Senato'daki Cumhuriyetçi desteğini korumuştu. Peki, bu kez Trump'ı ne bekliyor? İstanbul Aydın Üniversitesi Öğretim Görevlisi Yeliz Albayrak, yeni bir azil sürecinin başlayabileceğine dikkat çekerek, “Bu sefer Senato'da Trump'ı kurtaracak kadar Cumhuriyetçi de yok” dedi. Albayrak, Trump’ın elinde bulunan önemli bir yetki gücüne işaret etti.";
+
+  // The cases that are still cut (pure come-on tails).
+  const LEAD_ARAS = "İstanbul Barosu başkanlık seçimlerinde adaylar arasında yer alan eski başkan Ümit Kocasakal, yeniden gündeme geldi. Hukukçu ve akademisyen kimliğiyle tanınan Kocasakal'ın yaşamı, mesleki kariyeri ve özel hayatı araştırılıyor.";
+  const KOCASAKAL = `${LEAD_ARAS} Peki, Ümit Kocasakal kimdir? İstanbul Barosu başkan adayı Ümit Kocasakal nereli, kaç yaşında, evli mi?`;
+  const COP31 = `${LEAD} İşte COP31 Başkanı hakkında bilinenler.`;
+  const NAMES = `${LEAD} İşte kamuoyuna açıklanan önemli isimler ve görevleri.`;
+  const SUB_RUN = `${LEAD} İşte konutta yaşanan değişiklik yaşanıyor. Peki ne olacak?`;
+
+  it("the fixtures are what the cases below assume", () => {
+    expect(LEAD.length).toBeGreaterThanOrEqual(60);
+    expect(tidySummaryText(LEAD)).toBe(LEAD);
+    expect(B93_STORED).toContain(" ");
+    expect(B93_DOUBLE_BLANK).toContain("olan  oylamalar");
+  });
+
+  describe("(a) 5b93eb08: the 'İşte <statement>' sentence and what follows it stay", () => {
+    it.each([
+      ["stored (NBSP and a blank)", B93_STORED],
+      ["double blank", B93_DOUBLE_BLANK],
+    ])("%s: the Özet reaches the California story", (_label, input) => {
+      const out = tidySummaryText(input);
+      expect(out).toContain("California eyaletinde yaşanıyor.");
+      expect(out).toContain("servet vergisi");
+      expect(out).toBe(B93_SHOWN);
+    });
+  });
+
+  it("(b) cd99f5d4: the answer to the headline's question stays, the text comes back unchanged", () => {
+    const out = tidySummaryText(CD99_STORED);
+    expect(out).toBe(CD99_STORED);
+    expect(out).toContain("1963 Elazığ doğumlu");
+  });
+
+  it("(c) 126077c3 shape: an 'İşte' fragment with no verb, then a sentence with one, is kept whole", () => {
+    expect(tidySummaryText(P126_SHORT)).toBe(P126_SHORT);
+    const stored = tidySummaryText(P126_STORED);
+    expect(stored).toContain("Noah Wyle aldı.");
+    expect(stored).toBe(
+      "2026 yılının da sonu yaklaşıyor. Gelenek olduğu üzere her yıl geride kalan 365 günün ‘enleri’ seçilir magazin dünyasında. İşte bunlardan biri de People dergisinin her yıl yaptığı “Yılın yaşayan en çekici erkeği” seçimi. Bu yıl bu unvanı, rol aldığı Pitt dizisiyle tanınan Noah Wyle aldı. Bu durum 55 yaşındaki Wyle’ın kendisi için de çok şaşırtıcı…",
+    );
+  });
+
+  it("(d) 97ec3ce4 shape: a Peki question, an expert quotation and a closing sentence with a verb, is kept whole", () => {
+    expect(tidySummaryText(E97)).toBe(E97);
+  });
+
+  describe("(e) a tail that is come-on shaped from its first sentence to the end is still cut", () => {
+    it("Peki + question, then a question: ends at the lead", () => {
+      expect(tidySummaryText(KOCASAKAL)).toBe(LEAD_ARAS);
+    });
+
+    it("'İşte COP31 Başkanı hakkında bilinenler.' (no verb) is cut to the lead", () => {
+      expect(tidySummaryText(COP31)).toBe(LEAD);
+    });
+
+    it("'İşte kamuoyuna açıklanan önemli isimler ve görevleri.' (no verb) is cut to the lead", () => {
+      expect(tidySummaryText(NAMES)).toBe(LEAD);
+    });
+
+    it("a trailing sub-run: 'Lead. İşte X yaşanıyor. Peki ne olacak?' ends at 'yaşanıyor.'", () => {
+      expect(tidySummaryText(SUB_RUN)).toBe(`${LEAD} İşte konutta yaşanan değişiklik yaşanıyor.`);
+    });
+
+    it("the cut lands at the EARLIEST start whose whole tail is come-on shaped", () => {
+      // "Peki ... mi?" is shaped and the sentence behind it is a verbless fragment: the Peki sentence starts the cut.
+      expect(tidySummaryText(`${LEAD} Peki, ne değişecek? Yeni dönem başlıyor mu? İşte cevaplar.`)).toBe(LEAD);
+      // An "İşte" statement with a verb in the middle of two come-ons: the run behind it is what goes.
+      expect(tidySummaryText(`${LEAD} Peki, ne oldu? İşte değişiklik yaşanıyor. Peki, ne olacak? İşte cevaplar.`)).toBe(
+        `${LEAD} Peki, ne oldu? İşte değişiklik yaşanıyor.`,
+      );
+    });
+
+    it("every ending of a come-on shape counts: '?', '…', '...', ':', with closing marks behind it", () => {
+      for (const tail of [
+        "Peki, ne olacak?",
+        "Peki, ne olacak…",
+        "Peki, ne olacak...",
+        "Peki, ne olacak yarın:",
+        "Peki, ne olacak?”",
+        'Peki, "ne olacak?"',
+        "Peki, ne olacak?)",
+        "Peki, ne olacak yarın…’",
+      ]) {
+        expect(tidySummaryText(`${LEAD} ${tail}`), tail).toBe(LEAD);
+      }
+    });
+
+    it("a verbless 'İşte' sentence behind a question is cut together with it", () => {
+      expect(tidySummaryText(`${LEAD} Peki, ne olacak? İşte önemli tarihler ve rakamlar.`)).toBe(LEAD);
+    });
+  });
+
+  // h113 correctness-2: a Turkish predicate stands at the END of its sentence, so only the last word is
+  // read for a verb. A participle in front of a noun ("yapılacak zam oranı", "uygulanacak yeni kurallar")
+  // and words that merely end like a past tense ("kendi", "yedi") are not predicates: these teasers read
+  // as statements before, and the trailing come-on behind a long lead stayed in the Özet.
+  describe("(f) an 'İşte' teaser whose only verb-looking words are not the predicate is still cut (h113 correctness-2)", () => {
+    it.each([
+      ["a future participle in front of nouns", "İşte asgari ücrete yapılacak zam oranı."],
+      ["a future participle, then 'yeni kurallar'", "İşte uygulanacak yeni kurallar."],
+      ["a participle, then a noun phrase", "İşte emeklilere verilecek bayram ikramiyesi miktarı."],
+      ["'kendi' (ends like a past tense)", "İşte kendi ilinizin durumu."],
+      ["'yedi' (the number seven)", "İşte ilk yedi madde."],
+    ])("%s: %s", (_label, teaser) => {
+      expect(LEAD.length).toBeGreaterThanOrEqual(60);
+      expect(tidySummaryText(`${LEAD} ${teaser}`), teaser).toBe(LEAD);
+    });
+
+    it("a participle teaser behind a question is cut together with it", () => {
+      expect(tidySummaryText(`${LEAD} Peki, ne olacak? İşte uygulanacak yeni kurallar.`)).toBe(LEAD);
+    });
+
+    it("the two production keep rows still keep their statements (a verb ends the sentence)", () => {
+      expect(tidySummaryText(B93_STORED)).toBe(B93_SHOWN);
+      expect(tidySummaryText(CD99_STORED)).toBe(CD99_STORED);
+    });
+
+    it("a statement whose last word is the finite verb stays, whatever participles stand in front of it", () => {
+      const text = `${LEAD} İşte uygulanacak yeni kurallar bugün yürürlüğe girdi.`;
+      expect(tidySummaryText(text)).toBe(text);
+    });
+  });
+
+  describe("what a declarative sentence behind the come-on keeps", () => {
+    it("a sentence with a verb after a question keeps the question and the sentence", () => {
+      const text = `${LEAD} Peki, ne olacak? Bakanlık yarın yeni bir açıklama yapacak.`;
+      expect(tidySummaryText(text)).toBe(text);
+    });
+
+    it("a sentence with a verb after an 'İşte' fragment keeps both", () => {
+      const text = `${LEAD} İşte kamuoyuna açıklanan isimler. Listeyi Bakanlık yayımladı.`;
+      expect(tidySummaryText(text)).toBe(text);
+    });
+
+    it("an 'İşte' sentence with a verb is a statement: kept, with the sentences behind it", () => {
+      const text = `${LEAD} İşte bu paket bugün Meclis'e sunuldu. Detaylar ilerleyen günlerde netleşecek.`;
+      expect(tidySummaryText(text)).toBe(text);
+    });
+
+    it("accepted miss: a 'Peki' sentence that ends in '.' or '!' and has a verb is kept", () => {
+      for (const mark of [".", "!"]) {
+        const text = `${LEAD} Peki bu karar yürürlüğe girdi${mark}`;
+        expect(tidySummaryText(text), mark).toBe(text);
+      }
+    });
+
+    it("a verb in the last sentence of the tail keeps every come-on in front of it", () => {
+      const text = `${LEAD} Peki, ne olacak? İşte cevaplar. Bunu Bakanlık duyurdu.`;
+      expect(tidySummaryText(text)).toBe(text);
+    });
+
+    it("the 8e1a8c91 shape (a come-on, then a verbless closing sentence) is still cut", () => {
+      expect(
+        tidySummaryText(
+          "TBMM Başkanı Numan Kurtulmuş, Meclis Genel Sekreterliğine Kemal Şamlıoğlu'nu atadı. 1978'de Rize'de doğan Şamlıoğlu daha önce Milli Eğitim Bakan Yardımcılığı ve Ankara Hacı Bayram Veli Üniversitesi Genel Sekreterliği yaptı. Peki, Kemal Şamlıoğlu kimdir, hangi görevlerde bulundu? Yeni genel sekreter şu an Samsun Üniversitesinde profesör.",
+        ),
+      ).toBe(
+        "TBMM Başkanı Numan Kurtulmuş, Meclis Genel Sekreterliğine Kemal Şamlıoğlu'nu atadı. 1978'de Rize'de doğan Şamlıoğlu daha önce Milli Eğitim Bakan Yardımcılığı ve Ankara Hacı Bayram Veli Üniversitesi Genel Sekreterliği yaptı.",
+      );
+    });
+  });
+
+  describe("the pre-conditions of #249 are unchanged", () => {
+    it("a come-on behind a lead shorter than 60 characters is left alone", () => {
+      const text = "Bakan konuştu. Peki, şimdi ne olacak? İşte cevaplar.";
+      expect(tidySummaryText(text)).toBe(text);
+    });
+
+    it("a come-on inside an open quotation is left alone, a later one outside it is cut", () => {
+      const quoted = `${LEAD} Başkan şunu söyledi: "Hepimiz buradayız. Peki bu iş nasıl bitecek?" Salon alkışladı.`;
+      expect(tidySummaryText(quoted)).toBe(quoted);
+      expect(tidySummaryText(`${quoted} Peki, şimdi ne olacak?`)).toBe(quoted);
+    });
+
+    it("a text that opens with the come-on and has nothing in front of it is returned unchanged, never blank", () => {
+      for (const text of [
+        "Peki, İstanbul Barosu'nun yeni başkanı kim oldu? İşte seçim sonuçları ve ayrıntılar.",
+        "İşte bunlardan biri.",
+        "Peki, bu iş nasıl bitecek?",
+      ]) {
+        expect(tidySummaryText(text)).toBe(text);
+      }
+    });
+  });
+
+  it("is idempotent on every fixture of (a) to (e)", () => {
+    for (const input of [
+      B93_STORED, B93_DOUBLE_BLANK, CD99_STORED, P126_SHORT, P126_STORED, E97,
+      KOCASAKAL, COP31, NAMES, SUB_RUN,
+    ]) {
+      const once = tidySummaryText(input);
+      expect(tidySummaryText(once), input).toBe(once);
+      expect(once.length, input).toBeGreaterThan(0);
+    }
+  });
+
+  it("stays linear when a candidate's tail is walked: unshaped tails, verbless tails, shaped tails", () => {
+    // Every "İşte ... yaşanıyor." is a candidate whose tail has a verb: no cut, and one pass.
+    const verbs: Gen = (n) => `${LEAD} ${"İşte bu yaşanıyor. ".repeat(Math.ceil(n / 19))}`;
+    // One long verbless sentence behind a shaped question (hasFiniteVerb reads it once).
+    const verbless: Gen = (n) => `${LEAD} Peki, ne oldu? ${"kelime ".repeat(Math.ceil(n / 7))}sonuç.`;
+    // A long run of shaped questions closed by a statement with a verb: every candidate is dropped at the end.
+    const dropped: Gen = (n) => `${LEAD} ${"Peki, ne oldu? ".repeat(Math.ceil(n / 15))}Bu bitti.`;
+    for (const gen of [verbs, verbless, dropped]) {
+      expectLinear(gen, (s) => tidySummaryText(s), { n: 100_000, ceilingMs: 2_000 });
+    }
   });
 });
 

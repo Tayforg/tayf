@@ -17,7 +17,12 @@
 // publicBlindspotClaim, so /saved shows the "Kör nokta" pill no earlier than a
 // card does. On a v2 or v1 row there is no first_published and the claim is the
 // veto-only one it was before.
+//
+// `effective_article_count` comes only from v4 (h112-follows-3, migration 192): the wire-collapsed member count
+// the cards, the cluster page and /api/takip print as "N kaynak". `savedSourceLabel` prints it, falling back to
+// the stored `article_count` on a v3 / v2 / v1 row or a cluster with no member rows.
 import { BIAS_ORDER } from "@/lib/bias/config";
+import { sourceCountOf, type SnapshotRow } from "@/components/bookmark/bookmark-snapshots";
 import { publicBlindspotClaim } from "@/lib/clusters/recall-veto";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasDistribution } from "@/types";
@@ -71,6 +76,15 @@ export function toPublicSavedRow<R extends { is_blindspot?: unknown; first_publi
     nowMs,
   );
   return { ...row, is_blindspot: claim.isBlindspot };
+}
+
+/**
+ * "N kaynak" for a /saved row: the effective (wire-collapsed) count when the row has one, else `article_count`.
+ * The same number the "+N yeni kaynak" badge compares (`sourceCountOf`), so a story of 6 outlets that reprint
+ * 3 distinct texts reads "3 kaynak" here, as on its card and its own page.
+ */
+export function savedSourceLabel(row: Pick<SnapshotRow, "article_count" | "effective_article_count">): string {
+  return `${sourceCountOf({ bias_distribution: null, ...row })} kaynak`;
 }
 
 /**

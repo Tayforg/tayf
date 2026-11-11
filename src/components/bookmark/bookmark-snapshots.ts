@@ -31,6 +31,13 @@ export interface StorageLike {
 export interface SnapshotRow {
   bias_distribution: unknown;
   article_count: number;
+  /**
+   * saved_clusters_v4 only (migration 192): the wire-collapsed member count, the number the cards, the cluster
+   * page and /api/takip print as "N kaynak". Absent on rows from the v3 / v2 / v1 fallback, null when the
+   * cluster has no member rows. `article_count` is the stored raw count (6 for a story of 6 outlets that
+   * reprint 3 distinct texts, whose own page says "3 kaynak").
+   */
+  effective_article_count?: number | null;
 }
 
 export interface SnapshotDiff {
@@ -80,12 +87,31 @@ export function safeZoneCounts(dist: unknown): Record<MediaDnaZone, number> {
   return out;
 }
 
+/** The effective count when the row carries a usable one (a positive integer), else null. */
+function effectiveCountOf(row: SnapshotRow | null | undefined): number | null {
+  const n = row?.effective_article_count;
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+/**
+ * The source count /saved prints and the snapshots compare: saved_clusters_v4's wire-collapsed
+ * `effective_article_count` when the row has one, else the stored `article_count` (rows from the
+ * v3 / v2 / v1 fallback, or a cluster with no member rows), else 0. One definition for both, so the
+ * number on the row and the "+N yeni kaynak" badge count the same thing.
+ */
+export function sourceCountOf(row: SnapshotRow | null | undefined): number {
+  const effective = effectiveCountOf(row);
+  if (effective !== null) return effective;
+  const raw = row?.article_count;
+  return goodCount(raw) ? raw : 0;
+}
+
 export function makeSnapshot(row: SnapshotRow, basis: SnapshotBasis, nowIso: string): BookmarkSnapshot {
   return {
     v: 1,
     at: nowIso,
     zones: safeZoneCounts(row?.bias_distribution),
-    sources: goodCount(row?.article_count) ? row.article_count : 0,
+    sources: sourceCountOf(row),
     basis,
   };
 }
@@ -120,7 +146,7 @@ export function diffSnapshot(snap: BookmarkSnapshot, row: SnapshotRow): Snapshot
   try {
     const now = safeZoneCounts(row?.bias_distribution);
     const newZones = ZONES.filter((z) => snap.zones[z] === 0 && now[z] >= 1);
-    const count = goodCount(row?.article_count) ? row.article_count : 0;
+    const count = sourceCountOf(row);
     const delta = count - snap.sources;
     const newSources = delta >= MIN_NEW_SOURCES ? delta : 0;
     if (newZones.length === 0 && newSources === 0) return null;
@@ -152,6 +178,15 @@ export function reconcileSnapshots(
     }
     const d = diffSnapshot(snap, row);
     if (d) changes[row.id] = { ...d, basis: snap.basis };
+    // A snapshot taken on the raw count (before migration 192: article_count 6 for a story whose page says
+    // "3 kaynak") sits above the effective count the row now carries. Lower it silently on this first read:
+    // no badge, no negative delta, so a later real growth of 2 shows up instead of hiding under the old 6.
+    // Only the count moves; the zones, the time and the basis stay. A row without an effective count (v3 / v2 /
+    // v1 fallback) never rewrites a baseline, as before.
+    const effective = effectiveCountOf(row);
+    if (effective !== null && effective < snap.sources) {
+      toWrite[row.id] = { ...snap, sources: effective };
+    }
   }
   return { changes, toWrite };
 }

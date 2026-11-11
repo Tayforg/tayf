@@ -330,7 +330,7 @@ export async function HomeFeed({
           }
         />
         {/* No stories were shown, so this render must not count as a visit. */}
-        <NewSinceLastVisit stamp={false} timestamps={[]} />
+        <NewSinceLastVisit stamp={false} items={[]} listed={[]} />
         <FeedUnavailable />
       </>
     );
@@ -380,9 +380,22 @@ export async function HomeFeed({
   const breaking = safePage === 1 ? filteredBreaking : [];
 
   // Feeds the "N yeni haber" pill: only clusters actually rendered on this page.
-  const renderedTimestamps = [...breaking, ...paged].map(
-    (b) => b.cluster.first_published
-  );
+  // The id matters as much as the time: a story that became listed (2nd source)
+  // after the last visit keeps a first_published from before it, so the pill
+  // tells new from seen by id and uses the time only as a floor (h112-follows-1).
+  const renderedItems = [...breaking, ...paged].map((b) => ({
+    id: b.cluster.id,
+    firstPublished: b.cluster.first_published,
+  }));
+  // What a stamped render records: EVERY cluster the plain feed lists (the breaking
+  // strip plus the whole ranked set, 36 or fewer), not just this page's rows. The
+  // ranked set is ordered by score, not by time, and page 2 is disjoint from page 1,
+  // so a record of page 1 alone made page 2's newer stories count as new (h113
+  // correctness-1). Only a stamping render (page 1, no query) uses it.
+  const listedItems = [...breaking, ...ranked].map((b) => ({
+    id: b.cluster.id,
+    firstPublished: b.cluster.first_published,
+  }));
 
   // Day buckets are computed on the PAGED slice only — each page is
   // self-contained, so the bucket headings reflect what's actually on
@@ -483,7 +496,8 @@ export async function HomeFeed({
           the plain feed: not a /?q= view, not ?page=N (shouldStampLastVisit). */}
       <NewSinceLastVisit
         stamp={shouldStampLastVisit({ page: safePage, q, feedOk: true })}
-        timestamps={renderedTimestamps}
+        items={renderedItems}
+        listed={listedItems}
       />
 
       <FocusFeedOnPageChange

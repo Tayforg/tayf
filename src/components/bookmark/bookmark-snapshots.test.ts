@@ -15,6 +15,7 @@ import {
   reconcileSnapshots,
   removeSnapshot,
   safeZoneCounts,
+  sourceCountOf,
   writeSnapshots,
   type BookmarkSnapshot,
   type StorageLike,
@@ -151,6 +152,134 @@ describe("reconcileSnapshots", () => {
     expect(toWrite).toEqual({});
     expect(changes.a.newZones).toEqual(["muhalefet"]);
     expect(changes.a.basis).toBe("first-view");
+  });
+});
+
+// h112-follows-3 (migration 192): /saved prints the wire-collapsed count (saved_clusters_v4's
+// effective_article_count), so the snapshot's `sources` and the "+N yeni kaynak" badge count the same thing.
+// Example from production: cluster 1e801e36 has article_count 6 (6 sources, 3 distinct texts) and its own
+// page says "3 kaynak": raw 6 -> effective 3.
+function effRow(dist: unknown, article_count: number, effective_article_count: number | null | undefined) {
+  return { bias_distribution: dist, article_count, effective_article_count };
+}
+
+describe("sourceCountOf / makeSnapshot: the effective count when the row has one", () => {
+  it("prefers a positive effective_article_count over article_count", () => {
+    expect(sourceCountOf(effRow({}, 6, 3))).toBe(3);
+    expect(sourceCountOf(effRow({}, 6, 6))).toBe(6);
+    expect(sourceCountOf(effRow({}, 2, 1))).toBe(1);
+  });
+
+  it("falls back to article_count when the field is absent, null or unusable (v3 / v2 / v1 rows, a cluster with no members)", () => {
+    expect(sourceCountOf(row({}, 6))).toBe(6);
+    expect(sourceCountOf(effRow({}, 6, null))).toBe(6);
+    expect(sourceCountOf(effRow({}, 6, undefined))).toBe(6);
+    for (const bad of [0, -1, NaN, Infinity, 2.5, "3" as unknown as number]) {
+      expect(sourceCountOf(effRow({}, 6, bad)), String(bad)).toBe(6);
+    }
+  });
+
+  it("is 0 when neither count is usable", () => {
+    expect(sourceCountOf(effRow({}, NaN, null))).toBe(0);
+    expect(sourceCountOf({ bias_distribution: {}, article_count: undefined as unknown as number })).toBe(0);
+    expect(sourceCountOf(undefined as unknown as { bias_distribution: unknown; article_count: number })).toBe(0);
+  });
+
+  it("makeSnapshot stores the effective count as `sources`", () => {
+    expect(makeSnapshot(effRow({ center: 2 }, 6, 3), "save", NOW)).toEqual(snap({ bagimsiz: 2 }, 3));
+    expect(makeSnapshot(effRow({ center: 2 }, 6, null), "save", NOW)).toEqual(snap({ bagimsiz: 2 }, 6));
+  });
+});
+
+describe("diffSnapshot: the '+N yeni kaynak' badge follows the effective count", () => {
+  it("no badge when the raw count grows but the effective count does not (outlets reprinting the same wire text)", () => {
+    const base = snap({ iktidar: 1 }, 3); // taken on the effective count
+    expect(diffSnapshot(base, effRow({ pro_government: 1 }, 6, 3))).toBeNull();
+    expect(diffSnapshot(base, effRow({ pro_government: 1 }, 40, 3))).toBeNull();
+    // +1 effective is still below MIN_NEW_SOURCES
+    expect(diffSnapshot(base, effRow({ pro_government: 1 }, 9, 4))).toBeNull();
+  });
+
+  it("a badge when the effective count grows by 2 or more, worded as before", () => {
+    const base = snap({ iktidar: 1 }, 3);
+    const d = diffSnapshot(base, effRow({ pro_government: 1 }, 9, 5));
+    expect(d).not.toBeNull();
+    expect(d!.newSources).toBe(2);
+    expect(changeBadgeLabels(d!)).toEqual(["+2 yeni kaynak"]);
+    expect(changeBadgeLabels(diffSnapshot(base, effRow({ pro_government: 1 }, 9, 8))!)).toEqual(["+5 yeni kaynak"]);
+  });
+
+  it("a row without an effective count is diffed on article_count exactly as before", () => {
+    const base = snap({ iktidar: 1 }, 3);
+    expect(diffSnapshot(base, row({ pro_government: 1 }, 4))).toBeNull();
+    expect(changeBadgeLabels(diffSnapshot(base, row({ pro_government: 1 }, 5))!)).toEqual(["+2 yeni kaynak"]);
+    expect(diffSnapshot(base, effRow({ pro_government: 1 }, 5, null))!.newSources).toBe(2);
+  });
+
+  it("a raw-based snapshot above the current effective count shows no badge and no negative delta", () => {
+    const legacy = snap({ iktidar: 1 }, 6); // taken on the raw count of 1e801e36
+    expect(diffSnapshot(legacy, effRow({ pro_government: 1 }, 6, 3))).toBeNull();
+  });
+
+  it("still reports a new zone on a re-based row (the zones baseline is untouched)", () => {
+    const legacy = snap({ iktidar: 1 }, 6);
+    const d = diffSnapshot(legacy, effRow({ pro_government: 1, opposition: 1 }, 6, 3));
+    expect(d).not.toBeNull();
+    expect(d!.newZones).toEqual(["muhalefet"]);
+    expect(d!.newSources).toBe(0);
+    expect(changeBadgeLabels(d!)).toEqual(["Muhalefet medyası da yazmaya başladı"]);
+  });
+});
+
+describe("reconcileSnapshots: a snapshot taken on the raw count is re-based silently (h112-follows-3)", () => {
+  it("lowers `sources` to the effective count on first read, with no badge, keeping zones, time and basis", () => {
+    const stored = snap({ iktidar: 1 }, 6, { basis: "save", at: "2026-09-01T00:00:00.000Z" });
+    const { changes, toWrite } = reconcileSnapshots([{ id: "a", ...effRow({ pro_government: 1 }, 6, 3) }], { a: stored }, NOW);
+    expect(changes).toEqual({});
+    expect(toWrite.a).toEqual({ ...stored, sources: 3 });
+    expect(toWrite.a!.basis).toBe("save");
+    expect(toWrite.a!.at).toBe("2026-09-01T00:00:00.000Z");
+    expect(toWrite.a!.zones).toEqual(stored.zones);
+  });
+
+  it("after the re-base, a later effective growth of 2 shows the badge", () => {
+    const stored = snap({ iktidar: 1 }, 6);
+    const first = reconcileSnapshots([{ id: "a", ...effRow({ pro_government: 1 }, 6, 3) }], { a: stored }, NOW);
+    const rebased = { a: first.toWrite.a! };
+    const later = reconcileSnapshots([{ id: "a", ...effRow({ pro_government: 1 }, 9, 5) }], rebased, NOW);
+    expect(later.toWrite).toEqual({});
+    expect(changeBadgeLabels(later.changes.a!)).toEqual(["+2 yeni kaynak"]);
+  });
+
+  it("a re-based row can still carry a zone badge in the same read", () => {
+    const stored = snap({ iktidar: 1 }, 6);
+    const { changes, toWrite } = reconcileSnapshots(
+      [{ id: "a", ...effRow({ pro_government: 1, opposition: 1 }, 6, 3) }],
+      { a: stored },
+      NOW,
+    );
+    expect(toWrite.a!.sources).toBe(3);
+    expect(changes.a!.newZones).toEqual(["muhalefet"]);
+    expect(changes.a!.newSources).toBe(0);
+  });
+
+  it("writes nothing when the snapshot is not above the effective count, or the row has no effective count", () => {
+    const equal = reconcileSnapshots([{ id: "a", ...effRow({ pro_government: 1 }, 6, 3) }], { a: snap({ iktidar: 1 }, 3) }, NOW);
+    expect(equal.toWrite).toEqual({});
+    const below = reconcileSnapshots([{ id: "a", ...effRow({ pro_government: 1 }, 6, 4) }], { a: snap({ iktidar: 1 }, 3) }, NOW);
+    expect(below.toWrite).toEqual({});
+    // v3 / v2 / v1 rows (no effective count): a lower raw count never rewrites the stored baseline (as before)
+    const raw = reconcileSnapshots([{ id: "a", ...row({ pro_government: 1 }, 2) }], { a: snap({ iktidar: 1 }, 6) }, NOW);
+    expect(raw.toWrite).toEqual({});
+    expect(raw.changes).toEqual({});
+    const nul = reconcileSnapshots([{ id: "a", ...effRow({ pro_government: 1 }, 2, null) }], { a: snap({ iktidar: 1 }, 6) }, NOW);
+    expect(nul.toWrite).toEqual({});
+  });
+
+  it("a first view stores the effective count, not the raw one", () => {
+    const { changes, toWrite } = reconcileSnapshots([{ id: "a", ...effRow({ center: 1 }, 6, 3) }], {}, NOW);
+    expect(changes).toEqual({});
+    expect(toWrite.a).toEqual(snap({ bagimsiz: 1 }, 3, { basis: "first-view" }));
   });
 });
 

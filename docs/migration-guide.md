@@ -4504,3 +4504,84 @@ select jobid, status, return_message, start_time, end_time from cron.job_run_det
 Then `GET /trends`: no Şimşek or Fidan row unless the replayed gates pass for the day.
 
 **Rollback** (nothing else depends on 191; one transaction): re-run the function statements of `182_trends_entity_rollup_politics_scope.sql` (section 1: its `create or replace function`, `comment on function`, `revoke` and `grant`; it restores `md5(prosrc)` `045d9ee0610f00467d1b2da1474911cc`, length 8247), then remove ledger row 191 (`delete from supabase_migrations.schema_migrations where version = '191';`), then run `select public.trends_daily_entity_counts_ist_refresh(10);` again so the rollup is back on full-name counts, and put the tokens of `simsek` and `fidan` in `rising-entities.ts` back (the parity test fails otherwise). The ACL does not change in either direction.
+
+## 192 — `/saved` prints the same "N kaynak" as the cards and the cluster page (`saved_clusters_v4` returns `effective_article_count`; anon allowlist in `ops_health_report` row 17): apply 192 before the Vercel deploy
+
+**Why:** cluster `1e801e36-6649-4fff-b978-b745cb723cfa` has `article_count` 6, 6 members from 6 sources and 3 distinct `content_hash` values; its own page header reads "3 kaynak • 2 bağımsız başlık · Ajans ağırlıklı · 6 haber, 3 farklı metin", and the cards, the RSS description and `/api/takip` print the same 3 (`wire.effectiveArticleCount`). `/saved` printed `{row.article_count} kaynak` from `saved_clusters_v3`, the stored raw count ("6 kaynak"), and its "+N yeni kaynak" badge (`bookmark-snapshots.ts` `diffSnapshot`) diffed that raw count too, so outlets reprinting the same wire text raised the badge although the honest count had not moved (read-only, 2026-11-11; about 0.65% of clusters with 3 or more members in 48 h, 2 of 319 in the replay below).
+
+**What 192 does** (additive, one transaction, safe to re-apply):
+
+1. `public.saved_clusters_v4(p_ids uuid[])`: `saved_clusters_v3`'s text (158) plus one last output column, `effective_article_count integer`, from a per-cluster lateral subquery that mirrors the cluster page: one article per source (the earliest by `published_at`), then, for 3 or more such members whose distinct `content_hash` values (a NULL hash is a text of its own) are at most half of them (`WIRE_UNIQUE_HASH_RATIO` 0.5), the number of distinct hashes, otherwise the number of members; **NULL when the cluster has no member rows**, so the client falls back to the stored `article_count` instead of printing "0 kaynak". `SECURITY DEFINER`, `search_path = ''`, `STABLE`, revoke from public, anon, authenticated; execute to anon and service_role (v3's two statements with the name changed). v3, v2 and v1 are not touched. One guard is the only difference from v3's `where`: `and array_ndims(p_ids) = 1`. `p_ids[1:200]` slices only the outer dimension, so a 2-D array keeps every inner element and `= any` would look up all of them, past the 200-id cap, through a per-cluster lateral that v3's primary-key probes do not have; a 2-D array now reads no rows (null and `'{}'` still read none). saved_clusters v1, v2 and v3 keep the 2-D gap as a known issue, at primary-key-probe cost.
+2. `public.ops_health_report()` is re-created with 173's text verbatim except six spots that name the allowlisted anon RPCs: row 17 (`anon_surface`) counts every anon-executable `SECURITY DEFINER` function outside an allowlist of full identities, so without the seventh entry (`'saved_clusters_v4(uuid[])'`) the row would read `fail` the moment 192 is applied. Its detail now says `(7 izinli RPC hariç)`. Rows 1-22 are 173's. The allowlist copies move together in the same change: `tests/_helpers/anon-rpc-allowlist.ts`, the array in row 17, `src/lib/supabase/browser.ts` (and `tests/guards/browser-client-weight.test.ts`), `tests/migrations/zone-parity.test.ts` and `tests/guards/ops-health-checks.test.ts` (the report guard). A new anon RPC in this repo always needs this, see `AGENTS.md`.
+3. `notify pgrst, 'reload schema'` and the ledger row.
+
+**The client:** `saved-list.tsx` calls v4 first and falls back once to v3 on PGRST202 or 42883 (the app deployed before 192), then v2 and v1 as before; it prints `savedSourceLabel(row)` (the effective count, or `article_count` without it). `bookmark-snapshots.ts` counts the same number (`sourceCountOf`) in `makeSnapshot` and `diffSnapshot`. A stored snapshot above the current effective count (taken on the raw count) is re-based silently on its first read: `sources` is lowered, zones, time and basis are kept, no badge and no negative delta. The capture on bookmarking still reads v1 (raw); such a snapshot is re-based at the first `/saved` read.
+
+**Fingerprints** (`md5(prosrc)`, `length(prosrc)`):
+
+| | md5 | length |
+|---|---|---|
+| `saved_clusters_v3`: production before 192 (read-only, 2026-11-11) = the body of 158 | `2964f03d7a434b67dc00ddeecf833131` | 393 |
+| `saved_clusters_v4` after 192 | `2b0bc75efc089abb1b4609e86d05195e` | 1185 |
+| `ops_health_report()`: production before 192 = the body of 173 | `55fa63d2f5d876feed93eb9f7b263b27` | 52432 |
+| `ops_health_report()` after 192 | `a2252c75458b9d86a0a536b589d97ceb` | 52463 |
+
+**Read-only replay before shipping** (v4's select inlined as a plain query on production): for the 319 clusters updated in the last 2 days with `article_count >= 3`, the SQL answer was compared with `wireSignalOf` run on the same members after the page's dedupe: 319 compared, 0 mismatches, 2 wire clusters (among them `1e801e36`: stored 6, effective 3). Cost: `EXPLAIN (ANALYZE, BUFFERS)` for the 200 largest clusters of the last 3 days (2,276 members) took 1.06 s in total on a cold cache, the anon role's statement timeout is not approached.
+
+**Order:** apply `192_saved_clusters_v4.sql` (`supabase db push`, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/192_saved_clusters_v4.sql`; operator) **before** the Vercel deploy (apply 192 before the Vercel deploy): PostgREST reloads its schema cache on the notify, so `/rest/v1/rpc/saved_clusters_v4` is routable at once. The reverse order is safe, not harmful: a client deployed first gets PGRST202 (or 42883) from v4, falls back to v3 and prints the stored count as before. Applying 192 alone (old app) changes nothing visible; only the anon surface check now allows v4. No Edge Function deploy.
+
+**Verify** (read-only, after applying):
+
+```sql
+select count(*) from public.ops_health_report();   -- 22
+select status, detail from public.ops_health_report() where check_name = 'anon_surface';
+-- pass / anon/authenticated yetkisi yok: tablo/dizi 0, definer fonksiyon 0, invoker fonksiyon 0 (7 izinli RPC hariç) · auth.users 0
+select has_function_privilege('anon', 'public.saved_clusters_v4(uuid[])', 'execute'),
+       has_function_privilege('authenticated', 'public.saved_clusters_v4(uuid[])', 'execute'),
+       has_function_privilege('service_role', 'public.saved_clusters_v4(uuid[])', 'execute');   -- t, f, t
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.saved_clusters_v4(uuid[])'::regprocedure;   -- 2b0bc75efc089abb1b4609e86d05195e, 1185
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;         -- a2252c75458b9d86a0a536b589d97ceb, 52463
+select md5(prosrc), length(prosrc), proacl::text from pg_proc where proname = 'saved_clusters_v3';             -- unchanged: 2964f03d7a434b67dc00ddeecf833131, 393
+select effective_article_count, article_count
+  from public.saved_clusters_v4(array['1e801e36-6649-4fff-b978-b745cb723cfa']::uuid[]);                        -- 3, 6
+select version, name from supabase_migrations.schema_migrations where version = '192';                        -- 1 row
+```
+
+**Rollback** (nothing else depends on 192; one transaction): `drop function public.saved_clusters_v4(uuid[]);`, then re-run only the `ops_health_report()` section of `173_ops_sources_dark_persistent.sql` (from its `create or replace function public.ops_health_report()` through the `grant execute` line; the report returns to the six-RPC allowlist, `md5(prosrc)` `55fa63d2f5d876feed93eb9f7b263b27`, length 52432), then `notify pgrst, 'reload schema';` and `delete from supabase_migrations.schema_migrations where version = '192';`. Do the drop after the app no longer calls v4, or accept the one-time fallback to v3. The report goes back to six entries only together with the drop (the reverse, v4 dropped and the seven-entry report kept, is harmless).
+
+## 193 — pg_net's response log returns its dead heap at 16 MiB, not 64 MiB (`ops_net_response_compact` default): APPLY 193, no deploy-order constraint
+
+**Why:** `net._http_response` (pg_net's response log) is 40,910,848 B of heap (39.5 MiB with TOAST and indexes) for 768 live rows, about 1.3 MB of data (read-only, 2026-11-11 00:28Z; rows from 18:29Z, about 128 responses an hour). Migration 100's compactor truncates it only above 64 MiB, and it grows about 5.9 MB a day, so the heap saw-tooths between 0 and 64 MiB: about 32 MiB of dead heap on average, all of it inside `pg_database_size`. That is 7,222,267,027 B (6,888 MiB) against `ops_db_size_limits()` warn 7000 / fail 7600 MiB, +113 MB since 2026-11-08 and about 52 MiB a day, so the warn trips about 2026-11-13. A lower threshold is the one lever that returns bytes at once without a disk decision (that stays with the founder-held h68-sqlperf-3). Cron job 50 `net-response-compact` (`*/15`, no arguments) already runs; its last three runs succeeded.
+
+**What 193 does** (function-only, one transaction, safe to re-apply): `create or replace function public.ops_net_response_compact(p_max_bytes bigint default 16 * 1024 * 1024)` with 100's **signature, `SECURITY DEFINER`, `search_path = ''`, 1 MiB floor, advisory lock, `lock_timeout '20s'`, `lock_not_available` handler, truncate-only-above-max logic and grants** (revoke from public, anon, authenticated; execute to `service_role`), the comment restated, and 100's body **byte for byte except one place**: the coalesce fallback, `64 * 1024 * 1024` becomes `16 * 1024 * 1024`. An explicit argument behaves as before. It creates, drops, alters and deletes nothing else, **does not touch cron job 50** (it still calls the function with no arguments) and **does not re-create `ops_health_report()`**: the `net_response_heap_mb` thresholds (pass < 64, warn 64-200, fail > 200 MiB) and its Turkish detail text (`uyarı >= 64 MB, hata > 200 MB; ...`) stay as 100 wrote them; with a 16 MiB compaction the row reads pass, and a warn still means "the compactor is being skipped". `tests/migrations/193-net-response-compact-16mb.test.ts` pins the body to 100's, the production fingerprint of what it replaces, the grants, that no later migration schedules the job, and that every reader of the table looks back at most 30 minutes.
+
+**What reads the table, and how far back:** `ops_health_report()` row 2 (`edge_http_errors_30m`) and row 12 (`jev_shadow_cron_failures_30m`), each over the last 30 minutes; row 11 reads only its size; 081's `ops_exhaust_prune()` removes rows older than 3 days (there are none: pg_net's TTL is 6 h). No script, workflow, route or Edge Function reads it. Hand queries from `docs/ops-heartbeat.md` (post-mortems) see only the rows since the last truncate.
+
+**Cost (accepted by 100 at 64 MiB, now more often):** a truncate drops every row older than the tick, so for up to 30 minutes the two ops rows count only responses created after it; a 5xx or timeout from the 30 minutes before the tick that no heartbeat run had read yet is lost (the heartbeat polls every 30 minutes, the public status snapshot every 10). At about 5.9 MB a day that happens about every 2.7 days instead of about every 11, and once at the first tick after applying, when the table is already 39.5 MiB. Apply it when nobody is reading the response log by hand for an incident.
+
+**Function fingerprint** (`md5(prosrc)`, `length(prosrc)`):
+
+| | md5 | length |
+|---|---|---|
+| production before 193 (read-only, 2026-11-11) = the body of 100 | `1177f2c28709eae53292ca192b9c812f` | 1567 |
+| after 193 | `ddc6119ae61ec7c2e4b9ad85a8bd5e36` | 1567 |
+
+**Order:** apply `193_net_response_compact_16mb.sql` (`supabase db push`, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/193_net_response_compact_16mb.sql`; operator). The next quarter-hour tick truncates the table if it is above 16 MiB. No app change, no Edge Function deploy, no other migration depends on it.
+
+**Verify** (read-only, after applying):
+
+```sql
+select md5(prosrc), length(prosrc), prosecdef, proconfig::text, proacl::text, pg_get_function_arguments(oid)
+  from pg_proc where oid = 'public.ops_net_response_compact(bigint)'::regprocedure;
+-- ddc6119ae61ec7c2e4b9ad85a8bd5e36, 1567, t, {"search_path=\"\""}, {postgres=X/postgres,service_role=X/postgres}, p_max_bytes bigint DEFAULT ((16 * 1024) * 1024)
+select version, name from supabase_migrations.schema_migrations where version = '193';   -- 1 row
+-- at the next quarter hour:
+select d.status, d.start_time from cron.job_run_details d
+ where d.jobid = (select jobid from cron.job where jobname = 'net-response-compact') order by d.runid desc limit 1;   -- succeeded
+select pg_relation_size('net._http_response');      -- under 17 MiB (17,825,792) from then on
+select pg_database_size(current_database());          -- about 40 MB lower than before the first tick
+select check_name, status, observed from public.ops_health_report()
+ where check_name in ('net_response_heap_mb', 'edge_http_errors_30m');   -- pass, pass (0 / 0 responses just after the truncate is the blind window above)
+```
+
+**Rollback** (nothing else depends on 193; one transaction): re-run the function statements of `100_pgnet_bloat_guard.sql` (section 1: its `create or replace function` with `default 64 * 1024 * 1024`, `comment on function`, `revoke` and `grant`; it restores `md5(prosrc)` `1177f2c28709eae53292ca192b9c812f`, length 1567), then remove ledger row 193 (`delete from supabase_migrations.schema_migrations where version = '193';`). The report, the cron job and the data are not touched in either direction; the bytes the first tick returned are not given back, and nothing needs the response log it dropped.

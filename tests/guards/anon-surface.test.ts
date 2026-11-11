@@ -16,8 +16,9 @@ import { ALLOWED_RPCS, ALLOWED_RPC_ARGS, ALLOWED_RPC_IDENTITIES, ALLOWED_RPC_MIG
 //       privilege grant; every SECURITY DEFINER function revokes anon;
 //   (2) the browser Supabase client is imported by exactly the two /saved
 //       files, and they use no `.from(` and no RPC but saved_clusters,
-//       saved_clusters_v2 (124, the same lookup plus is_blindspot) or
-//       saved_clusters_v3 (158, v2 plus first_published);
+//       saved_clusters_v2 (124, the same lookup plus is_blindspot),
+//       saved_clusters_v3 (158, v2 plus first_published) or
+//       saved_clusters_v4 (192, v3 plus effective_article_count);
 //   (3) the anon key is read by exactly browser.ts and the two edge gates,
 //       and the gates only ever call the allowlisted RPCs;
 //   (4) non-vacuity: the scan sees 116 + 117 (+ 118 when present), and the
@@ -698,13 +699,13 @@ describe("anon surface: browser Supabase client", () => {
   });
 
   for (const f of BROWSER_CLIENT_IMPORTERS) {
-    it(`${f} uses no .from( and no RPC but saved_clusters / saved_clusters_v2 / saved_clusters_v3`, () => {
+    it(`${f} uses no .from( and no RPC but saved_clusters / saved_clusters_v2 / saved_clusters_v3 / saved_clusters_v4`, () => {
       const code = blankComments(readFileSync(resolve(ROOT, f), "utf8"));
       // Array.from(...) is not a PostgREST table call.
       expect(code.match(/(?<!Array)\.from\s*\(/g) ?? []).toEqual([]);
       const rpcs = Array.from(code.matchAll(/\.rpc\s*\(\s*([^,)\s]*)/g), (m) => m[1]);
       expect(rpcs.length).toBeGreaterThan(0);
-      for (const arg of rpcs) expect(arg).toMatch(/^["']saved_clusters(_v2|_v3)?["']$/);
+      for (const arg of rpcs) expect(arg).toMatch(/^["']saved_clusters(_v2|_v3|_v4)?["']$/);
       // No other Supabase surface (storage buckets, edge functions, auth) either.
       expect(code).not.toMatch(/\.(?:storage|functions|auth)\s*\./);
     });
@@ -771,8 +772,10 @@ describe("anon surface: the guard fails on a bad migration", () => {
     expect(bad("grant execute on function public.saved_clusters_v2(text[]) to anon, service_role;")).toHaveLength(1);
     expect(bad("grant execute on function public.saved_clusters_v3(text[]) to anon, service_role;")).toHaveLength(1);
     expect(bad("grant execute on function public.saved_clusters_v3(uuid[], boolean) to anon, service_role;")).toHaveLength(1);
-    // a v4 is not allowlisted until someone adds it to tests/_helpers/anon-rpc-allowlist.ts on purpose
-    expect(bad("grant execute on function public.saved_clusters_v4(uuid[]) to anon, service_role;")).toHaveLength(1);
+    expect(bad("grant execute on function public.saved_clusters_v4(text[]) to anon, service_role;")).toHaveLength(1);
+    expect(bad("grant execute on function public.saved_clusters_v4(uuid[], boolean) to anon, service_role;")).toHaveLength(1);
+    // a v5 is not allowlisted until someone adds it to tests/_helpers/anon-rpc-allowlist.ts on purpose
+    expect(bad("grant execute on function public.saved_clusters_v5(uuid[]) to anon, service_role;")).toHaveLength(1);
     expect(bad("grant execute on function public.merged_cluster_map(integer) to anon, service_role;")).toHaveLength(1);
     expect(bad("grant execute on function public.source_slugs(text) to anon, service_role;")).toHaveLength(1);
     // an argument list that merely starts like the allowlisted one is not it
@@ -787,6 +790,7 @@ describe("anon surface: the guard fails on a bad migration", () => {
       "source_slug_exists(text)",
       "saved_clusters_v2(uuid[])",
       "saved_clusters_v3(uuid[])",
+      "saved_clusters_v4(uuid[])",
     ]);
     for (const identity of ALLOWED_RPC_IDENTITIES) {
       expect(bad(`grant execute on function public.${identity} to anon, service_role;`), identity).toEqual([]);

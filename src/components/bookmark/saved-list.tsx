@@ -6,7 +6,13 @@ import { AlertTriangle, Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
 import { SavedMixCard } from "@/components/bookmark/saved-mix-card";
-import { isRpcMissing, savedUpdatedLabel, toPublicSavedRow, toSavedRowView } from "@/components/bookmark/saved-row";
+import {
+  isRpcMissing,
+  savedSourceLabel,
+  savedUpdatedLabel,
+  toPublicSavedRow,
+  toSavedRowView,
+} from "@/components/bookmark/saved-row";
 import { savedRemovalAnnouncement, savedRemoveLabel } from "@/components/bookmark/bookmark-label";
 import {
   changeBadgeLabels,
@@ -21,9 +27,9 @@ import { focusTargetAfterRemove } from "@/lib/follows/follows";
 import { useHydrated } from "@/lib/hooks/use-hydrated";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// saved_clusters_v3 (migration 158; v2 from 124 and v1 from 116 have the same
-// caps) truncates its input to 200 ids and returns at most 200 rows, so send the
-// newest 200 bookmarks.
+// saved_clusters_v4 (migration 192; v3 from 158, v2 from 124 and v1 from 116 have
+// the same caps) truncates its input to 200 ids and returns at most 200 rows, so
+// send the newest 200 bookmarks.
 const SAVED_RPC_MAX_IDS = 200;
 
 interface SavedRow {
@@ -44,6 +50,13 @@ interface SavedRow {
    * fallback, null when the cluster has none. The wait reads it, nothing renders it.
    */
   first_published?: string | null;
+  /**
+   * saved_clusters_v4 only (migration 192); absent on rows from the v3 / v2 / v1 fallback, null when the
+   * cluster has no member rows. The wire-collapsed member count the cards and the cluster page print as
+   * "N kaynak": the row prints it (savedSourceLabel) and the "+N yeni kaynak" badge compares it. Without
+   * it the row falls back to `article_count`, the stored raw count.
+   */
+  effective_article_count?: number | null;
 }
 
 // The one live region of the page (WCAG 4.1.3). SavedList returns this frame on
@@ -167,11 +180,17 @@ export function SavedList() {
         }
         const { createBrowserClient } = await import("@/lib/supabase/browser");
         const client = createBrowserClient();
-        let res = await client.rpc("saved_clusters_v3", { p_ids: ids });
+        let res = await client.rpc("saved_clusters_v4", { p_ids: ids });
         // PGRST202 (not in PostgREST's schema cache) or 42883 (undefined
-        // function) = migration 158 is not applied yet. Fall back once to v2:
-        // same rows without first_published, so the pill follows the veto only
-        // (what /saved showed before 158) until the migration lands.
+        // function) = migration 192 is not applied yet (the app can deploy
+        // first). Fall back once to v3: same rows without effective_article_count,
+        // so the row prints the stored article_count (what /saved showed before
+        // 192) until the migration lands.
+        if (isRpcMissing(res.error)) {
+          res = await client.rpc("saved_clusters_v3", { p_ids: ids });
+        }
+        // The same again for 158: v2 has no first_published, so the pill
+        // follows the veto only (what /saved showed before 158).
         if (isRpcMissing(res.error)) {
           res = await client.rpc("saved_clusters_v2", { p_ids: ids });
         }
@@ -326,7 +345,7 @@ export function SavedList() {
             <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
               <span className="inline-flex items-center gap-1">
                 <Users className="h-3 w-3" />
-                {row.article_count} kaynak
+                {savedSourceLabel(row)}
               </span>
               {updatedLabel && (
                 <time dateTime={row.updated_at}>{updatedLabel}</time>

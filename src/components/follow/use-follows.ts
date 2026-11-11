@@ -16,6 +16,7 @@ import {
   type AddFollowResult,
   type Follow,
   type FollowKind,
+  type SeenRows,
 } from "@/lib/follows/follows";
 
 // Same structure as ../bookmark/use-bookmarks.ts: a localStorage-backed
@@ -116,9 +117,16 @@ export const followsStore = {
     commit(removeFollow(readList(), key));
   },
 
-  markSeen(keys: ReadonlySet<string>, nowIso: string = new Date().toISOString()): void {
-    if (keys.size === 0) return;
-    commit(markSeenIn(readList(), keys, nowIso));
+  /**
+   * Records a /takip visit for the given follows (key -> the rows rendered for
+   * it): seenAt = nowIso plus those rows' ids and oldest firstPublished.
+   */
+  markSeen(
+    shown: ReadonlyMap<string, SeenRows>,
+    nowIso: string = new Date().toISOString(),
+  ): void {
+    if (shown.size === 0) return;
+    commit(markSeenIn(readList(), shown, nowIso));
   },
 };
 
@@ -135,7 +143,8 @@ export function useFollows() {
   );
   const remove = useCallback((key: string) => followsStore.remove(key), []);
   const markSeen = useCallback(
-    (keys: ReadonlySet<string>, nowIso?: string) => followsStore.markSeen(keys, nowIso),
+    (shown: ReadonlyMap<string, SeenRows>, nowIso?: string) =>
+      followsStore.markSeen(shown, nowIso),
     [],
   );
 
