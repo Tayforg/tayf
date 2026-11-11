@@ -20,6 +20,7 @@ import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceChips } from "@/components/source/source-chips";
+import { SourceBadge } from "@/components/story/source-badge";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
@@ -84,7 +85,15 @@ import type { BiasCategory, Source } from "@/types";
 // directory-wide ("N/M kaynak etiketli"), instead of a per-card
 // "sınıflandırılmamış" chip that would otherwise dominate most cards.
 
-interface SourceRow extends Source {
+interface SourceRow extends Omit<Source, "trustee_since"> {
+  /**
+   * h122-sourcepages-2: `sources.trustee_since` (migration 055) as stored: the
+   * yyyy-mm-dd date a court-appointed trustee (kayyum) took over the outlet, or
+   * null. The raw column is renamed to this on the row, like the fetch_*
+   * columns become booleans. The card hands it to <SourceBadge>, which prints
+   * "Kayyum · dd.mm.yyyy" and renders nothing for null or an unparseable value.
+   */
+  trusteeSince: string | null;
   lastPublishedAt: string | null;
   /**
    * "3 saat önce", formatted when the directory was read (cache fill time), so
@@ -281,7 +290,7 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
     supabase
       .from("sources")
       .select(
-        "id, name, slug, url, rss_url, bias, logo_url, active, kind, created_at, zone_rationale_at, fetch_quarantined_until, fetch_last_status, fetch_fail_streak, fetch_newest_item_at, fetch_items_count, latest:articles(published_at)",
+        "id, name, slug, url, rss_url, bias, logo_url, active, kind, trustee_since, created_at, zone_rationale_at, fetch_quarantined_until, fetch_last_status, fetch_fail_streak, fetch_newest_item_at, fetch_items_count, latest:articles(published_at)",
       )
       .eq("active", true)
       .gte("latest.published_at", sevenDaysAgo)
@@ -361,11 +370,13 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
     // created_at / zone_rationale_at only feed registryModifiedIso above,
     // fetch_quarantined_until only becomes `quarantined` and the four other
     // fetch_* columns only become `feedFrozen`; they are dropped here so
-    // SourceRow carries no raw timestamps or ingest counters.
+    // SourceRow carries no raw timestamps or ingest counters. trustee_since is
+    // renamed to `trusteeSince` (h122-sourcepages-2), not dropped: the card shows it.
     const {
       latest,
       created_at: _createdAt,
       zone_rationale_at: _rationaleAt,
+      trustee_since: trusteeSince,
       fetch_quarantined_until: quarantinedUntil,
       fetch_last_status: lastHttpStatus,
       fetch_fail_streak: failStreak,
@@ -385,6 +396,7 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
       lastMs !== null && lastMs <= nowMs && nowMs - lastMs <= FEED_YIELD_WINDOW_MS;
     grouped[bias].push({
       ...rest,
+      trusteeSince: trusteeSince ?? null,
       lastPublishedAt,
       lastSeenLabel: lastPublishedAt
         ? formatTurkishTimeAgo(lastPublishedAt, { now: nowMs })
@@ -724,6 +736,10 @@ export function SourceDirectory({
                             </span>
                           )}
                           <SourceChips slug={source.slug} />
+                          {/* h122-sourcepages-2: kayyum status from the registry, the
+                              same badge story pages print in "Kaynak künyesi". Renders
+                              nothing for null or an unparseable date. */}
+                          <SourceBadge trusteeSince={source.trusteeSince} />
                         </div>
                         <p className="text-muted-foreground">
                           <span className="font-mono text-[10px]">{label}</span>

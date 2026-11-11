@@ -147,6 +147,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
     articleCount7d,
     articles,
     zoneHistory,
+    historyUnavailable,
     quarantined,
     feedFrozen: feedFrozenVerdict,
     newestFeedItemAt,
@@ -304,6 +305,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
         trusteeSince={source.trustee_since}
         trusteeNote={source.trustee_note}
         history={zoneHistory}
+        historyUnavailable={historyUnavailable === true}
         readerAgreement={readerAgreement}
         kind={source.kind}
       />

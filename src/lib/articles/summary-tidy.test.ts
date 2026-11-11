@@ -7,6 +7,8 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 import { cleanDescription, stripTrailingTeasers } from "../../../supabase/functions/_shared/cluster/description-clean";
 import {
   backOffOpenQuote,
+  clampCutIntroducedQuote,
+  isCtaFeedCut,
   isUnmarkedClamp,
   KNOWN_AGENCIES,
   stripDatelineLead,
@@ -2395,11 +2397,19 @@ describe("tidySummaryText outlet feed caps (h25-live-1)", () => {
       }
     });
 
-    it("a 200-character cut followed by a CTA keeps the cut as the outlet wrote it (the signature is read off the raw input)", () => {
+    it("a 200-character cut followed by a CTA is repaired as a cut: the partial word and the CTA go (h122-ozet-3 removed the old exception)", () => {
+      // Before h122-ozet-3 the clamp signature was read off the raw input only, so this came back as the cut
+      // ("... yeni bir...") and a second call repaired it ("3 in 1000" live summaries). The CTA feed cut is a clamp now.
       const cut =
         "Libya Temsilciler Meclisinin, Türkiye ile imzalanan deniz yetki alanlarının sınırlandırılmasına ilişkin mutabakatı onaylayarak 2020 yılında aldığı boykot kararını kaldırması, Doğu Akdeniz'de yeni bir...";
       expect(cut).toHaveLength(202);
-      expect(tidySummaryText(cut + "Devamı için tıklayınız")).toBe(cut);
+      expect(isCtaFeedCut(cut + "Devamı için tıklayınız")).toBe(true);
+      const once = tidySummaryText(cut + "Devamı için tıklayınız");
+      expect(once).toBe(
+        "Libya Temsilciler Meclisinin, Türkiye ile imzalanan deniz yetki alanlarının sınırlandırılmasına ilişkin mutabakatı onaylayarak 2020 yılında aldığı boykot kararını kaldırması, Doğu Akdeniz'de yeni…",
+      );
+      expect(tidySummaryText(once)).toBe(once);
+      expect(tidySummaryText(cut)).toBe(once);
     });
 
     it("a text of a cap length with a single-character ellipsis is left alone", () => {
@@ -5368,5 +5378,314 @@ describe("tidySummaryText: a 400 or 500 character cut without an ellipsis is a c
       const once = tidySummaryText(raw);
       expect(tidySummaryText(once)).toBe(once);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-1 (hunt 122, 2026-11-11): Independent Türkçe's raw Drupal field dump. stripFeedWrappers
+// (step 1b) now cuts it, so the shown summary and the meta description lose the date stamp, the
+// "Main image:" / "Type: news" / "SEO Title:" / "copyright Independentturkish:" fields and the
+// caption glued in front of the lead. The rows are real indyturk descriptions (dumped read-only
+// 2026-11-11 09:45Z); 34b8f7b9 is a 500 character ingest clamp.
+// ---------------------------------------------------------------------------
+const INDY_ROWS: ReadonlyArray<readonly [string, string]> = [
+  ["e702de20", "AYM Başkanı Kadir ÖzkayaAYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirterek, “Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir” dediPazartesi, Kasım 9, 2026 - 21:30Main image: HaberType: newsSEO Title: AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidircopyright Independentturkish:"],
+  ["e85e5ce8", "MHP Genel Başkanı Devlet Bahçeli10 KASIMMHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajda Gazi Mustafa Kemal Atatürk'ü rahmet ve minnetle andıPazartesi, Kasım 9, 2026 - 18:30Main image: Type: newsSEO Title: Bahçeli'den 10 Kasım mesajı: Atatürk'ü anlamanın en sağlıklı yolu temel ilkelerini faaliyetlerimizin merkezine koymaktırcopyright Independentturkish:"],
+  ["34b8f7b9", "ABD Jeolojik Araştırmalar Kurumundan (USGS) yapılan açıklamaya göre, Panama'nın güney ucuna yakın Pitaloza Arriba bölgesinde meydana gelen 7,7 büyüklüğündeki deprem, yaklaşık 10 kilometre derinlikte kaydedildi.\n\nBaşkent Panama City'de de hissedilen depremin ardından doğu Pasifik'te kıyısı bulunan bölgeler için tsunami uyarısı verildi.\n\nAA\nPANAMADEPREMOrta Amerika ülkesi Panama'nın güneyinde 7,7 büyüklüğünde deprem meydana geldiği bildirildiCuma, Ekim 9, 2026 - 21:45Main image: \n  Fotoğraf: AA..."],
+  ["c67e24e3", "Türkiye Cumhuriyet Merkez Bankası (TCMB) Başkanı Fatih Karahan'ın başkanlığında toplanan Para Politikası Kurulu (PPK), politika faizinin yüzde 37'den yüzde 36'ya indirilmesine karar verdi.\n\n \n\nAyrıntılar gelecek...\nMerkez BankasıfaizPerşembe, Ekim 22, 2026 - 14:30Main image: \n  Fotoğraf: AA\n\nEkonomi̇Type: newsSEO Title: Merkez Bankası faizi yüzde 36'ya indirdicopyright Independentturkish:"],
+  ["1d393369", "r4TürkiyeR4 ülkelerinin İstanbul’daki toplantısının ardından yayımlanan bildiride, İsrail’in politikalarına tepki gösterilerek Filistin’de iki devletli çözüm çağrısı yapıldıCuma, Ekim 23, 2026 - 23:45Main image: DünyaType: newsSEO Title: R4 ülkelerinden İstanbul’da ortak bildiri: İsrail politikalarına tepki, iki devletli çözüm çağrısıcopyright Independentturkish:"],
+  ["da2e8bf0", "Bulgaristan, Romanya ve Türkiye savunma bakanlarının Sofya'daki toplantısının ardından ortak açıklama yayımlandıÇarşamba, Ekim 28, 2026 - 19:15Main image: \n  Fotoğraf: AA\n\nDünyaType: newsSEO Title: Bulgaristan, Romanya ve Türkiye savunma bakanlarından Sofya'daki toplantının ardından ortak açıklamacopyright Independentturkish:"],
+];
+
+describe("tidySummaryText: Independent Türkçe's CMS field dump (h122-ozet-1)", () => {
+  const row = (id: string) => INDY_ROWS.find(([i]) => i === id)![1];
+  const CMS_FIELDS = /Main image|SEO Title|Type:\s*news|copyright\s*Independent|Fotoğraf:/i;
+  const DATE_STAMP = /(?:Pazartesi|Salı|Çarşamba|Perşembe|Cuma|Cumartesi|Pazar),\s*[\p{L}]+\s+\d{1,2},\s*\d{4}\s*-/u;
+
+  it("710ef4bb: the AYM Başkanı lead, with its quotation, and no caption", () => {
+    expect(tidySummaryText(row("e702de20"))).toBe(
+      "AYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirterek, “Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir” dedi.",
+    );
+  });
+
+  it("b8e7cc75: the Bahçeli lead, with no 'SEO Title' and no glued 'Bahçeli10 KASIMMHP'", () => {
+    expect(tidySummaryText(row("e85e5ce8"))).toBe(
+      "MHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajda Gazi Mustafa Kemal Atatürk'ü rahmet ve minnetle andı.",
+    );
+  });
+
+  it.each(INDY_ROWS)("%s: no CMS field, no date stamp, not empty, and a fixed point", (_id, raw) => {
+    const out = tidySummaryText(raw);
+    expect(out).not.toBe("");
+    expect(out).not.toMatch(CMS_FIELDS);
+    expect(out).not.toMatch(DATE_STAMP);
+    expect(tidySummaryText(out)).toBe(out);
+  });
+
+  it("34b8f7b9: the 500 character clamp of a dump ends at a sentence, not in the dump", () => {
+    const raw = row("34b8f7b9");
+    expect(raw).toHaveLength(500);
+    expect(raw.endsWith("...")).toBe(true);
+    const out = tidySummaryText(raw);
+    expect(out.endsWith("tsunami uyarısı verildi.")).toBe(true);
+    expect(out).not.toMatch(CMS_FIELDS);
+  });
+
+  it("the 'Ayrıntılar gelecek...' spot keeps its lead sentence in front of the placeholder", () => {
+    const out = tidySummaryText(row("c67e24e3"));
+    expect(out.startsWith("Türkiye Cumhuriyet Merkez Bankası (TCMB) Başkanı Fatih Karahan'ın başkanlığında")).toBe(true);
+    expect(out).toContain("indirilmesine karar verdi.");
+    expect(out).not.toMatch(CMS_FIELDS);
+  });
+
+  it("an ordinary text is not touched by the rule", () => {
+    const plain = "Bakan Yılmaz, yeni düzenlemeyi açıkladı. Ayrıntılar yarın paylaşılacak.";
+    expect(tidySummaryText(plain)).toBe(plain);
+    const dated = "Toplantı Pazartesi, Kasım 9, 2026 - 18:30 saatinde başlayacak ve iki gün sürecek.";
+    expect(tidySummaryText(dated)).toBe(dated);
+  });
+
+  it("cleanDescription (the clustering text) and tidySummaryText agree: neither keeps a CMS field", () => {
+    for (const [id, raw] of INDY_ROWS) {
+      expect(cleanDescription(raw), id).not.toMatch(CMS_FIELDS);
+      expect(tidySummaryText(raw), id).not.toMatch(CMS_FIELDS);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-3 (hunt 122, 2026-11-11): two cuts that hide the statement.
+//
+// (A) Turkuvaz's feed ships "<cut>...Devamı için tıklayınız": the body is cut at about 200
+//     characters, mid-word, and the CTA follows the dots. The 202/203 feed-cap signature rarely
+//     matches (the body is 203 to 210 characters), so repairClamp never ran and the page showed
+//     "…yanıt verdi. AK..." (107 cluster seeds in 7 days). isCtaFeedCut() reads the shape (a
+//     letter, a digit or a comma, then the dots, then a CTA phrase) and clampBody() hands the text in
+//     front of the dots to repairClamp, which cuts at a sentence end or at a word, and the CTA goes
+//     with it. (B) A clamp that ends inside a quotation after "(şunları|şöyle) <verb>:" showed
+//     "...şunları kaydetti…": the quotation is gone and the headline's statement with it. Behind a
+//     ":" the cut now prefers the last balanced sentence end that keeps 60 characters.
+// The raw descriptions are real (dumped read-only 2026-11-11).
+// ---------------------------------------------------------------------------
+const H122_FAKIBABA = "Geçtiğimiz günlerde İYİ Parti üyeliğinden ve Ankara Milletvekilliği görevinden istifa eden Ahmet Eşref Fakıbaba, AK Parti'ye geçeceği yönündeki kulis iddialarına A Haber ekranlarından yanıt verdi. AK...Devamı için tıklayınız";
+const H122_MAHIROGLU = "İstanbul Büyükşehir Belediyesi eski Başkanı Ekrem İmamoğlu'na verdiği destek nedeniyle Sarıyer'deki kaçak villasına göz yumulan Halk TV'nin firari eski sahibi Cafer Mahiroğlu'na yönelik rüşvet, ihaleye...Devamı için tıklayınız";
+const H122_KABINE = "Başkan Recep Tayyip Erdoğan başkanlığında Cumhurbaşkanlığı Külliyesi'nde toplanacak Cumhurbaşkanlığı Kabinesi; emekli maaşlarına yönelik yeni düzenlemelerden terörsüz Türkiye sürecine, fon...Devamı için tıklayınız";
+const H122_DURAN = "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, NSosyal hesabından, Türkiye'nin ev sahipliğinde Antalya'da düzenlenen Birleşmiş Milletler İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı'na (COP31) ilişkin paylaşımda bulundu.\nTürkiye'nin, COP31'e başkanlık ve ev sahipliği yaparak küresel iklim diplomasisinin merkezinde yer aldığını belirten Duran, şunları kaydetti: \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin ...";
+const H122_YAYMAN = "Yayman, Türkiye Yüzyılı Buluşmaları kapsamında AK Parti Mersin İl Başkanlığınca Suphi Öner Öğretmenevi'nde düzenlenen Basın Buluşması programına katıldı.\nBurada konuşan Yayman, AK Parti'nin krizlerle mücadele ederek bu noktaya geldiğini söyledi.\nFon meselesiyle ilgili değerlendirmede bulunan Yayman, konuşmasını şöyle sürdürdü: \"Cumhurbaşkanı'mızın söylediği gibi biz bunu da aşacağız çünkü AK Parti '3 Y' ile kurulmuştur. Yasaklarla mücadele etmek, sessiz devrimler başarmıştır. Yoksullukla müca...";
+const H122_YAYMAN_POSTA = "Yayman, Türkiye Yüzyılı Buluşmaları kapsamında AK Parti Mersin İl Başkanlığınca Suphi Öner Öğretmenevi'nde düzenlenen Basın Buluşması programına katıldı.\nBurada konuşan Yayman, AK Parti'nin krizlerle mücadele ederek bu noktaya geldiğini söyledi.\nFon meselesiyle ilgili değerlendirmede bulunan Yayman, konuşmasını şöyle sürdürdü:\n\"Cumhurbaşkanı'mızın söylediği gibi biz bunu da aşacağız çünkü AK Parti '3 Y' ile kurulmuştur. Yasaklarla mücadele etmek, sessiz devrimler başarmıştır. Yoksullukla müca...";
+
+describe("isCtaFeedCut (h122-ozet-3)", () => {
+  // 127 characters: a feed cap cuts at about 200, and a text under 100 in front of the dots is not one.
+  const LONG = "Bakan Yılmaz, yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve kurumların uygulamaya geçe";
+  const CTA = "Devamı için tıklayınız";
+
+  it("the fixture is long enough", () => {
+    expect(LONG.length).toBeGreaterThanOrEqual(100);
+  });
+
+  it.each([
+    ["605765b8: a cut mid-word, the dots, the CTA", H122_FAKIBABA],
+    ["7fd1bd19: a cut inside a word", H122_MAHIROGLU],
+    ["dfaaceac: a cut after a word", H122_KABINE],
+    ["a digit in front of the dots", `${LONG.slice(0, -4)} 2026...${CTA}`],
+    ["a comma in front of the dots", `${LONG.slice(0, -10)} kurumlar,...${CTA}`],
+    ["the ellipsis character instead of three dots", `${LONG}…${CTA}`],
+    ["blanks between the dots and the CTA", `${LONG}... ${CTA}`],
+    ["a closing dot after the CTA", `${LONG}...${CTA}.`],
+    ["trailing blanks after the CTA", `${LONG}...${CTA}  \n`],
+    ["upper case, both folds", `${LONG.toLocaleUpperCase("tr-TR")}...DEVAMI İÇİN TIKLAYINIZ`],
+    ["lower case", `${LONG}...devamı için tıklayınız`],
+    ["the other 'continue reading' phrases", `${LONG}...Haberin devamı için tıklayın`],
+    ["'Devamını oku'", `${LONG}...Devamını oku`],
+    ["'Read more'", `${LONG}...Read more »`],
+    ["a no-break space and a double space inside the phrase", `${LONG}...Devamı için  tıklayınız`],
+  ])("is true for %s", (_label, raw) => {
+    expect(isCtaFeedCut(raw)).toBe(true);
+  });
+
+  it.each([
+    ["a full stop in front of the dots", `${LONG.slice(0, -4)}geçti....${CTA}`],
+    ["a sentence mark and an ellipsis", `${LONG.slice(0, -4)}geçti.…${CTA}`],
+    ["an exclamation mark in front of the dots", `${LONG.slice(0, -4)}geçti!...${CTA}`],
+    ["a closing parenthesis in front of the dots (the outlet's own ellipsis)", `${LONG.slice(0, -4)}(ILS)...${CTA}`],
+    ["a blank in front of the dots", `${LONG} ...${CTA}`],
+    ["a closing quote in front of the dots", `${LONG.slice(0, -4)}"geçti"...${CTA}`],
+    ["no CTA: the dots alone", `${LONG}...`],
+    ["no CTA: another closing sentence", `${LONG}...Ayrıntılar yarın`],
+    ["a CTA with no dots in front of it", `${LONG} ${CTA}`],
+    ["a CTA that is followed by more text", `${LONG}...${CTA} Bakan sözlerini sürdürdü`],
+    ["a sentence mark in front of the CTA, dots earlier", `Bakan Yılmaz, yeni düzenlemeyi açıkladı... ${LONG.slice(0, -4)}geçti. ${CTA}`],
+    ["a sentence-style CTA: an editor's teaser, not a template (af529f2a)", `${LONG}... İşte tüm detaylar!`],
+    ["a sentence-style CTA: 'Detaylar haberimizde'", `${LONG}... Detaylar haberimizde`],
+    ["fewer than 100 characters in front of the dots: the outlet's own short ellipsis", `Haber metni burada… ${CTA}`],
+    ["99 characters in front of the dots", `${"a".repeat(99)}...${CTA}`],
+    ["an empty text", ""],
+    ["only the CTA", CTA],
+    ["only the dots and the CTA", `...${CTA}`],
+  ])("is false for %s", (_label, raw) => {
+    expect(isCtaFeedCut(raw)).toBe(false);
+  });
+
+  it("100 characters in front of the dots are enough", () => {
+    expect(isCtaFeedCut(`${"a".repeat(100)}...${CTA}`)).toBe(true);
+  });
+
+  it("never throws on a non-string", () => {
+    expect(isCtaFeedCut(undefined as unknown as string)).toBe(false);
+    expect(isCtaFeedCut(null as unknown as string)).toBe(false);
+    expect(isCtaFeedCut(203 as unknown as string)).toBe(false);
+  });
+
+  // 200,000 characters; ceiling 2000 ms (CPU time over a size ladder, tests/_helpers/linear-time.ts).
+  it.each([
+    ["dots repeated", rep("a...", "", "Devamı için tıklayınız"), 200_000],
+    ["'Devamı için tıklayınız' repeated", rep("a...Devamı için tıklayınız "), 200_000],
+    ["a long run of blanks in front of the CTA", rep(" ", `${LONG}...`, "Devamı için tıklayınız"), 200_000],
+    ["a long run of blanks inside the phrase", rep(" ", `${LONG}...Devamı`, "için tıklayınız"), 200_000],
+    ["a long word and no dots", rep("a", "", " Devamı için tıklayınız"), 200_000],
+    ["ellipsis characters", rep("…", "a", "Devamı için tıklayınız"), 200_000],
+  ] as Array<[string, Gen, number]>)("linear time: %s", (_name, gen, n) => {
+    expectLinear(gen, (s) => isCtaFeedCut(s), { n, ceilingMs: 2_000 });
+    expectLinear(gen, (s) => tidySummaryText(s), { n, ceilingMs: 4_000 });
+  });
+});
+
+describe("tidySummaryText: a Turkuvaz CTA feed cut is repaired like a clamp (h122-ozet-3)", () => {
+  it("605765b8: the cut ends at the last sentence end, the CTA goes with it", () => {
+    expect(tidySummaryText(H122_FAKIBABA)).toBe(
+      "Geçtiğimiz günlerde İYİ Parti üyeliğinden ve Ankara Milletvekilliği görevinden istifa eden Ahmet Eşref Fakıbaba, AK Parti'ye geçeceği yönündeki kulis iddialarına A Haber ekranlarından yanıt verdi.",
+    );
+  });
+
+  it.each([
+    ["7fd1bd19", H122_MAHIROGLU, "Halk TV'nin firari eski sahibi Cafer Mahiroğlu'na yönelik rüşvet…"],
+    ["dfaaceac", H122_KABINE, "emekli maaşlarına yönelik yeni düzenlemelerden terörsüz Türkiye sürecine…"],
+  ])("%s: no sentence end to cut at, so a word cut with one '…' (the partial word is dropped)", (_id, raw, tail) => {
+    const out = tidySummaryText(raw);
+    expect(out.endsWith(tail)).toBe(true);
+    expect(out).not.toContain("...");
+    expect(out).not.toMatch(/Devamı/);
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.endsWith("……")).toBe(false);
+  });
+
+  it.each([
+    ["605765b8", H122_FAKIBABA],
+    ["7fd1bd19", H122_MAHIROGLU],
+    ["dfaaceac", H122_KABINE],
+  ])("%s: never ends in '...' or in a partial word, and is a fixed point", (_id, raw) => {
+    const out = tidySummaryText(raw);
+    expect(out.endsWith("...")).toBe(false);
+    expect(/[.…!?]$/.test(out)).toBe(true);
+    expect(tidySummaryText(out)).toBe(out);
+  });
+
+  it("a sentence end keeps the text when it holds 60% or more of the body, a word cut otherwise", () => {
+    const sentence = "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve uygulama takvimini açıkladı.";
+    // The sentence is 72% of the body: the text ends at its full stop.
+    expect(tidySummaryText(`${sentence} Düzenleme kapsamında kurumlara yeni görevler ver...Devamı için tıklayınız`)).toBe(sentence);
+    // A short first sentence and a long unfinished one: the word cut, with the partial word dropped.
+    const long = "Kısa bir giriş cümlesi var. Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve uygulama takvimini kurumlara tek tek anlattı ve bu süreçte yaşanabilecek sorunları da sıraladı ve çözüm önerilerini de";
+    expect(tidySummaryText(`${long} acıkl...Devamı için tıklayınız`)).toBe(`${long}…`);
+  });
+
+  it("a comma in front of the dots is trimmed and the cut gets one '…'", () => {
+    const out = tidySummaryText("Bakan Yılmaz, yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve uygulama takvimini açıkladı, kurumlar,...Devamı için tıklayınız");
+    expect(out.endsWith("…")).toBe(true);
+    expect(out).not.toContain(",…");
+    expect(out).not.toMatch(/Devamı/);
+  });
+
+  it("what the CTA logic did before is unchanged for the other shapes", () => {
+    // A sentence mark, a parenthesis or a blank in front of the dots: the outlet's own ellipsis stays, the CTA goes.
+    expect(tidySummaryText("Aletli İniş Sistemi (ILS)...Devamı için tıklayınız")).toBe("Aletli İniş Sistemi (ILS)...");
+    expect(tidySummaryText("Bakan açıklama yaptı. Ayrıntılar şöyle ...Devamı için tıklayınız")).toBe("Bakan açıklama yaptı. Ayrıntılar şöyle ...");
+    expect(tidySummaryText("Toplantı yapıldı. HABERİN DEVAMI İÇİN TIKLAYIN")).toBe("Toplantı yapıldı.");
+  });
+
+  it("the '3 in 1000' idempotency exception is gone: tidy of a feed cut plus CTA is a fixed point", () => {
+    const raws = [
+      "Cumhurbaşkanı Erdoğan, başkanlığında toplanan kabine toplantısının ardından açıklama yaparak yeni bir düzenlemenin hazırlandığını ve bunun kamuoyuyla yakında paylaşılacağını belirterek yeni bir...Devamı için tıklayınız",
+      "Bakan Yılmaz, yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve kurumların uygulamaya geçe...Devamı için tıklayınız",
+    ];
+    for (const raw of raws) {
+      const once = tidySummaryText(raw);
+      expect(once).not.toMatch(/Devamı|\.\.\./);
+      expect(tidySummaryText(once)).toBe(once);
+    }
+  });
+});
+
+describe("tidySummaryText: a clamp cut inside a quotation behind a ':' ends in front of the introducer's sentence (h122-ozet-3)", () => {
+  it("837fa770: 'şunları kaydetti: \"...' keeps the first paragraph, which ends on a full stop", () => {
+    const out = tidySummaryText(H122_DURAN);
+    expect(out.endsWith("ilişkin paylaşımda bulundu.")).toBe(true);
+    expect(out).not.toMatch(/şunları kaydetti/);
+    expect(out.startsWith("Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, NSosyal hesabından")).toBe(true);
+    expect(tidySummaryText(out)).toBe(out);
+  });
+
+  it("98266829: 'konuşmasını şöyle sürdürdü: \"...' keeps the text up to the last balanced sentence end", () => {
+    for (const raw of [H122_YAYMAN, H122_YAYMAN_POSTA]) {
+      const out = tidySummaryText(raw);
+      expect(out.endsWith("bu noktaya geldiğini söyledi.")).toBe(true);
+      expect(out).not.toMatch(/şöyle sürdürdü/);
+      expect(tidySummaryText(out)).toBe(out);
+    }
+  });
+
+  it("the sentence end must keep 60 characters: a shorter one leaves today's cut in front of the opener", () => {
+    const intro =
+      "Kısa cümle. Duran, ülkemizin enerji politikalarına ve yatırım ortamına ilişkin yaptığı uzun değerlendirmede, iklim diplomasisinin merkezinde yer aldığımızı, bu alanda öncü olacağımızı ve kurumlarımızın hazırlıklarını sürdürdüğünü belirterek, ayrıca ilgili bakanlıkların koordinasyon içinde çalıştığını da vurgulayarak, şunları kaydetti: ";
+    const raw = `${(intro + '"' + "çok önemli bir adım ".repeat(30)).slice(0, 497)}...`;
+    expect(raw).toHaveLength(500);
+    expect(clampCutIntroducedQuote(raw)).toBe(true);
+    // "Kısa cümle." is 11 characters, under the 60 that make a sentence end worth keeping, and the cut in
+    // front of the opener keeps two thirds of the text: it is today's cut, with the ":" dropped.
+    expect(tidySummaryText(raw)).toBe(`${intro.slice(0, intro.length - 2)}…`);
+  });
+
+  it("a ':' that is not in front of the opener changes nothing: e5d77d31 and c526f480 keep their cuts", () => {
+    // The existing quote-cut tests of h25-live-1 are the pin; this row has a comma in front of the opener.
+    const text = `Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve uygulama takvimini kurumlara tek tek anlattı, dedi ki "${"çok önemli bir adım ".repeat(30)}`.slice(0, 497) + "...";
+    expect(text).toHaveLength(500);
+    expect(clampCutIntroducedQuote(text)).toBe(false);
+  });
+});
+
+describe("clampCutIntroducedQuote (h122-ozet-3)", () => {
+  it("is true for the 837fa770 and 98266829 raws", () => {
+    expect(clampCutIntroducedQuote(H122_DURAN)).toBe(true);
+    expect(clampCutIntroducedQuote(H122_YAYMAN)).toBe(true);
+    expect(clampCutIntroducedQuote(H122_YAYMAN_POSTA)).toBe(true);
+  });
+
+  it("is false for a clamp that leaves no quotation open", () => {
+    const raw = `${"Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu. ".repeat(6)}`.slice(0, 497) + "...";
+    expect(raw).toHaveLength(500);
+    expect(clampCutIntroducedQuote(raw)).toBe(false);
+  });
+
+  it("is false when the opener is not preceded by a colon", () => {
+    const raw = `${"Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu. ".repeat(3)}Yılmaz, "${"çok önemli bir adım ".repeat(20)}`.slice(0, 497) + "...";
+    expect(raw).toHaveLength(500);
+    expect(clampCutIntroducedQuote(raw)).toBe(false);
+  });
+
+  it("is false for a text that is not a clamp, even when it has the same shape", () => {
+    const text = "Bakan Yılmaz, yeni düzenlemeye ilişkin şunları kaydetti: \"Düzenleme çok önemli bir adımdır";
+    expect(clampCutIntroducedQuote(text)).toBe(false);
+  });
+
+  it("is false for an empty text and a non-string", () => {
+    expect(clampCutIntroducedQuote("")).toBe(false);
+    expect(clampCutIntroducedQuote(undefined as unknown as string)).toBe(false);
+    expect(clampCutIntroducedQuote(null as unknown as string)).toBe(false);
+  });
+
+  it("a Turkuvaz CTA feed cut that ends inside a quotation behind a colon counts too", () => {
+    const raw = "Bakan Yılmaz, yeni düzenlemeye ilişkin açıklamasında şunları kaydetti: \"Düzenleme çok önemli bir adımdır ve kurumların hızla uygulamaya geçmesi gerekir çünkü zaman çok az kaldı ve geç...Devamı için tıklayınız";
+    expect(isCtaFeedCut(raw)).toBe(true);
+    expect(clampCutIntroducedQuote(raw)).toBe(true);
   });
 });

@@ -16,6 +16,7 @@ import {
   foldNameToken,
   personNames,
   stripFeedWrappers,
+  stripIndyturkCmsDump,
   stripTrailingTeasers,
 } from "../../../supabase/functions/_shared/cluster/description-clean.ts";
 import { expectLinear, rep } from "../../_helpers/linear-time";
@@ -2049,5 +2050,232 @@ describe("stripTrailingTeasers has one implementation (h34-reader-5)", () => {
     expect(src).toContain('from "../../../supabase/functions/_shared/cluster/description-clean"');
     expect(src).toMatch(/\bstripTrailingTeasers\(/);
     expect(src).not.toMatch(/function\s+stripTrailingTeasers/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-1 (hunt 122, 2026-11-11): Independent Türkçe's raw Drupal field dump.
+//
+// indyturk ships its CMS fields as the RSS description: the page caption and the lead glued
+// together ("...Bahçeli10 KASIMMHP Genel Başkanı ..."), then the date stamp, "Main image:",
+// "Type: news", "SEO Title: <the headline again>" and "copyright Independentturkish:". 15 of the
+// descriptions of 60 days carry it, 7 are cluster members, and it was picked as the Özet of
+// b8e7cc75 (28 sources) and 710ef4bb. stripIndyturkCmsDump() cuts the tail at the first marker and
+// drops the glued caption, and stripFeedWrappers() runs it first. The 15 raw descriptions below
+// were dumped read-only on 2026-11-11 09:45Z (the e702de20 row is 710ef4bb's, e85e5ce8 is b8e7cc75's).
+// ---------------------------------------------------------------------------
+
+const INDY_DUMPS: ReadonlyArray<readonly [string, string]> = [
+  ["e702de20", "AYM Başkanı Kadir ÖzkayaAYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirterek, “Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir” dediPazartesi, Kasım 9, 2026 - 21:30Main image: HaberType: newsSEO Title: AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidircopyright Independentturkish:"],
+  ["e85e5ce8", "MHP Genel Başkanı Devlet Bahçeli10 KASIMMHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajda Gazi Mustafa Kemal Atatürk'ü rahmet ve minnetle andıPazartesi, Kasım 9, 2026 - 18:30Main image: Type: newsSEO Title: Bahçeli'den 10 Kasım mesajı: Atatürk'ü anlamanın en sağlıklı yolu temel ilkelerini faaliyetlerimizin merkezine koymaktırcopyright Independentturkish:"],
+  ["da2e8bf0", "Bulgaristan, Romanya ve Türkiye savunma bakanlarının Sofya'daki toplantısının ardından ortak açıklama yayımlandıÇarşamba, Ekim 28, 2026 - 19:15Main image: \n  Fotoğraf: AA\n\nDünyaType: newsSEO Title: Bulgaristan, Romanya ve Türkiye savunma bakanlarından Sofya'daki toplantının ardından ortak açıklamacopyright Independentturkish:"],
+  ["1d393369", "r4TürkiyeR4 ülkelerinin İstanbul’daki toplantısının ardından yayımlanan bildiride, İsrail’in politikalarına tepki gösterilerek Filistin’de iki devletli çözüm çağrısı yapıldıCuma, Ekim 23, 2026 - 23:45Main image: DünyaType: newsSEO Title: R4 ülkelerinden İstanbul’da ortak bildiri: İsrail politikalarına tepki, iki devletli çözüm çağrısıcopyright Independentturkish:"],
+  ["c67e24e3", "Türkiye Cumhuriyet Merkez Bankası (TCMB) Başkanı Fatih Karahan'ın başkanlığında toplanan Para Politikası Kurulu (PPK), politika faizinin yüzde 37'den yüzde 36'ya indirilmesine karar verdi.\n\n \n\nAyrıntılar gelecek...\nMerkez BankasıfaizPerşembe, Ekim 22, 2026 - 14:30Main image: \n  Fotoğraf: AA\n\nEkonomi̇Type: newsSEO Title: Merkez Bankası faizi yüzde 36'ya indirdicopyright Independentturkish:"],
+  ["64dffbb8", "Cumhurbaşkanı ve AK Parti Genel Başkanı Recep Tayyip Erdoğan partisinin grup toplantısında açıklamalarda bulunuyor.\n\nErdoğan konuşmasında şunları söyledi:\n\n \n\nAyrıntılar gelecek...\ncumhurbaşkanı erdoğanÇarşamba, Ekim 21, 2026 - 12:15Main image: \n  Fotoğraf: AA\n\nHaberType: newsSEO Title: Erdoğan partisinin grup toplantısında konuşuyorcopyright Independentturkish:"],
+  ["61e7e106", "YENİ Parti Genel Başkanı Özgür Özel, partisinin grup toplantısında konuşuyor.\n\nÖzel konuşmasında şunları söyledi:\n\n \n\nAyrıntılar gelecek...\nÖZGÜR ÖZELyeni partiSalı, Ekim 20, 2026 - 11:45Main image: \n  Fotoğraf: AA\n\nHaberType: newsSEO Title: Özel partisinin grup toplantısında konuşuyorcopyright Independentturkish:"],
+  ["a31e91c3", "resmi gazeteResmi Gazete’de yayımlanan Cumhurbaşkanı kararlarıyla Hazine ve Maliye Bakan Yardımcılığına Kutluhan Taşkın atanırken, SPK Başkanı Mahmut Sütcü ve Kamu Gözetimi Kurulu Başkanı İbrahim Ömer Gönül görevden alındıSalı, Ekim 20, 2026 - 00:30Main image: \n  Fotoğraf: AA\n\nHaberType: newsSEO Title: Resmi Gazete’de yayımlandı: Kutluhan Taşkın bakan yardımcısı oldu, SPK Başkanı Sütcü görevden alındıcopyright Independentturkish:"],
+  ["a5d5dd71", "SAADET PARTİSİmahmut arıkanSaadet Partisi Genel Başkanı Mahmut Arıkan, MSCI’nin Türkiye hisselerine ilişkin kararını fon krizine bağlayarak sorumluların hesap vermesi gerektiğini belirttiCumartesi, Ekim 17, 2026 - 00:15Main image: Type: newsSEO Title: Arıkan: MSCI’nin Türkiye kararı hukuk ve denetim krizini gösteriyorcopyright Independentturkish:"],
+  ["19c340aa", "TÜRKİYE BELEDİYELER BİRLİĞİayşe ünlüceTürkiye Belediyeler Birliği Başkan Vekilliği seçiminde Ayşe Ünlüce 417, Tahir Büyükakın 369 oy aldı. Dördüncü turda sonuçlanan seçimi 48 oy farkla kazanan Ünlüce, başkan vekilliğine seçildiPerşembe, Ekim 15, 2026 - 21:45Main image: \n  Fotoğraf: ANKA\n\nHaberType: newsSEO Title: Türkiye Belediyeler Birliği Başkan Vekilliğine Ayşe Ünlüce seçildicopyright Independentturkish:"],
+  ["7320f211", "Nobel Barış ÖdülüDoç. Dr. Ali Oğuz Diriöz Independent Türkçe için yazdıDoç. Dr. Ali Oğuz DiriözPazartesi, Ekim 12, 2026 - 00:45Main image: TÜRKİYE'DEN SESLERType: newsSEO Title: 2026 Nobel Barış Ödülü: Adalet, mülkün ve barışın temelidircopyright Independentturkish:"],
+  ["7a9f3f28", "Independent Türkçe, Türkiye ve dünyadan güncel haberleri okurları için derlediPazartesi, Ekim 12, 2026 - 00:00Main image: \n  Fotoğraf: Independent Türkçe\n\nHaberType: newsSEO Title: Kısa haberlercopyright Independentturkish:"],
+  ["34b8f7b9", "ABD Jeolojik Araştırmalar Kurumundan (USGS) yapılan açıklamaya göre, Panama'nın güney ucuna yakın Pitaloza Arriba bölgesinde meydana gelen 7,7 büyüklüğündeki deprem, yaklaşık 10 kilometre derinlikte kaydedildi.\n\nBaşkent Panama City'de de hissedilen depremin ardından doğu Pasifik'te kıyısı bulunan bölgeler için tsunami uyarısı verildi.\n\nAA\nPANAMADEPREMOrta Amerika ülkesi Panama'nın güneyinde 7,7 büyüklüğünde deprem meydana geldiği bildirildiCuma, Ekim 9, 2026 - 21:45Main image: \n  Fotoğraf: AA..."],
+  ["4d68c47f", "ÜMİT ÖZDAĞSOKAK HAYVANLARIZafer Partisi Genel Başkanı Ümit Özdağ, sokak hayvanları sorununun kısırlaştırma ve doğayla bütünleşik bir yaklaşımla çözülmesi gerektiğini belirterek, “Öldürmek çözüm değil ama bu işi de kontrol altına almamız lazım” dediCuma, Ekim 9, 2026 - 20:15Main image: \n  Fotoğraf: ANKA\n\nHaberType: newsSEO Title: Ümit Özdağ: Sokak hayvanları sorununu kısırlaştırmayla çözmeliyizcopyright Independentturkish:"],
+  ["d98fe680", "İRANHUSİLERYEMENdosya\"Tahran, Arap dünyasında kendisinden başka hiçbir aktör görmüyor\"Refik HuriCumartesi, Eylül 19, 2026 - 08:00Main image: DÜNYADAN SESLERLabel: dosyaType: newsSEO Title: İran'ın yarattığı kaos karşısında bölgesel güvenlik tehdidicopyright Independentturkish:"],
+];
+const INDY_AYM = INDY_DUMPS.find(([id]) => id === "e702de20")![1];
+const INDY_BAHCELI = INDY_DUMPS.find(([id]) => id === "e85e5ce8")![1];
+const INDY_MARKERS = /Main image|SEO Title|Type:\s*news|copyright\s*Independent|Fotoğraf:/i;
+const TURKISH_DATE_STAMP =
+  /(?:Pazartesi|Salı|Çarşamba|Perşembe|Cuma|Cumartesi|Pazar),\s*(?:Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık)\s+\d{1,2},\s*\d{4}/u;
+
+describe("stripIndyturkCmsDump (h122-ozet-1): the two cited rows, exactly", () => {
+  it("710ef4bb: the AYM Başkanı dump becomes the lead sentence", () => {
+    expect(stripIndyturkCmsDump(INDY_AYM)).toBe(
+      "AYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirterek, “Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir” dedi.",
+    );
+  });
+
+  it("b8e7cc75: the Bahçeli dump becomes the lead sentence", () => {
+    expect(stripIndyturkCmsDump(INDY_BAHCELI)).toBe(
+      "MHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajda Gazi Mustafa Kemal Atatürk'ü rahmet ve minnetle andı.",
+    );
+  });
+
+  it("stripFeedWrappers runs it: the same two results", () => {
+    expect(stripFeedWrappers(INDY_AYM)).toBe(stripIndyturkCmsDump(INDY_AYM));
+    expect(stripFeedWrappers(INDY_BAHCELI)).toBe(stripIndyturkCmsDump(INDY_BAHCELI));
+    expect(stripFeedWrappers(INDY_BAHCELI).endsWith("minnetle andı.")).toBe(true);
+  });
+
+  it("cleanDescription inherits it (the clustering text of an indyturk article holds no CMS field)", () => {
+    for (const [id, raw] of INDY_DUMPS) {
+      expect(cleanDescription(raw), id).not.toMatch(INDY_MARKERS);
+    }
+  });
+});
+
+describe("stripIndyturkCmsDump: all 15 dumped descriptions", () => {
+  it.each(INDY_DUMPS)("%s: non-empty, no CMS field, no date stamp", (_id, raw) => {
+    expect(INDY_MARKERS.test(raw)).toBe(true);
+    for (const out of [stripIndyturkCmsDump(raw), stripFeedWrappers(raw)]) {
+      expect(out.trim()).not.toBe("");
+      expect(out).not.toMatch(INDY_MARKERS);
+      expect(out).not.toMatch(TURKISH_DATE_STAMP);
+    }
+  });
+
+  it.each(INDY_DUMPS)("%s: idempotent, and never longer than the input", (_id, raw) => {
+    const once = stripIndyturkCmsDump(raw);
+    expect(stripIndyturkCmsDump(once)).toBe(once);
+    expect(stripFeedWrappers(stripFeedWrappers(raw))).toBe(stripFeedWrappers(raw));
+    expect(once.length).toBeLessThan(raw.length);
+  });
+
+  it("the glued caption goes where its first word comes back glued to the lead", () => {
+    const starts = (id: string) => stripIndyturkCmsDump(INDY_DUMPS.find(([i]) => i === id)![1]);
+    expect(starts("a5d5dd71").startsWith("Saadet Partisi Genel Başkanı Mahmut Arıkan, MSCI")).toBe(true);
+    expect(starts("a31e91c3").startsWith("Resmi Gazete’de yayımlanan Cumhurbaşkanı kararlarıyla")).toBe(true);
+    expect(starts("a31e91c3")).not.toContain("gazeteResmi");
+    expect(starts("e85e5ce8")).not.toContain("KASIMMHP");
+    expect(starts("e702de20")).not.toContain("ÖzkayaAYM");
+  });
+
+  it("a body in front of the dump keeps its paragraphs, and the tail goes from the date stamp on", () => {
+    const out = stripIndyturkCmsDump(INDY_DUMPS.find(([i]) => i === "34b8f7b9")![1]);
+    expect(out.startsWith("ABD Jeolojik Araştırmalar Kurumundan (USGS) yapılan açıklamaya göre")).toBe(true);
+    expect(out).toContain("tsunami uyarısı verildi.");
+    expect(out).toMatch(/bildirildi\.$/);
+  });
+});
+
+describe("stripIndyturkCmsDump: what is not touched", () => {
+  const PLAIN = "Cumhurbaşkanı Erdoğan, partisinin grup toplantısında açıklamalarda bulundu.";
+  const DATED = "Toplantı Pazartesi, Kasım 9, 2026 - 18:30 saatinde başlayacak ve iki gün sürecek.";
+
+  it("an ordinary text without the three markers comes back as the SAME string", () => {
+    expect(stripIndyturkCmsDump(PLAIN) === PLAIN).toBe(true);
+    expect(stripFeedWrappers(PLAIN) === PLAIN).toBe(true);
+  });
+
+  it("a date stamp with no marker is text", () => {
+    expect(stripIndyturkCmsDump(DATED) === DATED).toBe(true);
+    expect(stripFeedWrappers(DATED) === DATED).toBe(true);
+  });
+
+  it("'' and a text of blanks come back as they are", () => {
+    expect(stripIndyturkCmsDump("")).toBe("");
+    expect(stripIndyturkCmsDump("   ")).toBe("   ");
+  });
+
+  it("a marker alone is the gate, the cut is at the earliest field", () => {
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladı.SEO Title: Başlık")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladı Main image: x")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladıcopyright Independentturkish:")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+  });
+
+  it("the date stamp may be glued to the word in front of it, whatever the weekday and month", () => {
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladıSalı, Şubat 3, 2026 - 09:05Main image: ")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladı. Cumartesi, Ağustos 15, 2026 - 9:05Main image: ")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+  });
+
+  it("a '<label>Type: news' field cuts the glued section label with it", () => {
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladıHaberType: newsSEO Title: x")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladıType: newsSEO Title: x")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+  });
+
+  it("a result that ends in a sentence mark or a closing quote gets no extra full stop", () => {
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, yeni düzenlemeyi açıkladı.Main image: x")).toBe(
+      "Bakan Yılmaz, yeni düzenlemeyi açıkladı.",
+    );
+    expect(stripIndyturkCmsDump("Bakan Yılmaz, “Düzenleme geliyor.”SEO Title: x")).toBe("Bakan Yılmaz, “Düzenleme geliyor.”");
+  });
+
+  it("a caption word that comes back only after a blank is not glued: the text is kept whole", () => {
+    // 4d68c47f's caption is two all-caps tags and the lead repeats the name behind a blank.
+    const out = stripIndyturkCmsDump(INDY_DUMPS.find(([i]) => i === "4d68c47f")![1]);
+    expect(out.startsWith("ÜMİT ÖZDAĞSOKAK HAYVANLARIZafer Partisi Genel Başkanı Ümit Özdağ")).toBe(true);
+  });
+
+  it("a first word that comes back inside another word is not a caption (the repeat starts upper case)", () => {
+    const text =
+      "Ak partili vekil, bakanlıkta yaptığı görüşmede yeni dönemin ilk adımlarını anlattı ve bakanlığın hazırlıklarını sıraladı. Takvim akışı belirlendi" +
+      "SEO Title: Başlık";
+    expect(stripIndyturkCmsDump(text).startsWith("Ak partili vekil, bakanlıkta")).toBe(true);
+  });
+
+  it("a first word that comes back inside an ALL-CAPS word is not a caption (the repeat must end at a word boundary)", () => {
+    // (a) "AK" is the first word; "BAKANLIK" holds "AK" with an upper-case "A" after an upper-case "B".
+    const akText =
+      "AK Parti Grup Başkanvekili Abdullah Güler, TBMM'de yaptığı açıklamada BAKANLIK bütçesinin görüşüleceğini söyledi ve muhalefete çağrıda bulundu." +
+      "Pazartesi, Kasım 9, 2026 - 18:30Main image: HaberType: newsSEO Title: Güler açıklamacopyright Independentturkish:";
+    const akOut = stripIndyturkCmsDump(akText);
+    expect(akOut.startsWith("AK Parti Grup Başkanvekili Abdullah Güler")).toBe(true);
+    expect(akOut.startsWith("AKANLIK")).toBe(false);
+    // (b) "AB" is the first word; "KABUL" holds "AB" with an upper-case "A" after an upper-case "K".
+    const abText =
+      "AB Komisyonu, Türkiye raporunda yargı bağımsızlığı konusunda KABUL edilen reformların yetersiz kaldığını belirtti ve yeni adımlar istedi." +
+      "Pazartesi, Kasım 9, 2026 - 18:30Main image: HaberType: newsSEO Title: AB raporucopyright Independentturkish:";
+    const abOut = stripIndyturkCmsDump(abText);
+    expect(abOut.startsWith("AB Komisyonu, Türkiye raporunda")).toBe(true);
+    expect(abOut.startsWith("ABUL")).toBe(false);
+  });
+
+  it("a drop that would leave under 60 characters is not made", () => {
+    const text = "Vali Yılmaz'ınVali Yılmaz kente geldi" + "Pazartesi, Kasım 9, 2026 - 18:30Main image: x";
+    expect(stripIndyturkCmsDump(text)).toBe("Vali Yılmaz'ınVali Yılmaz kente geldi.");
+  });
+
+  it("a cut that would leave under 20 characters returns the input", () => {
+    const text = "Kısa metinMain image: Type: newsSEO Title: Başlık";
+    expect(stripIndyturkCmsDump(text) === text).toBe(true);
+    const onlyDump = "Main image: Type: newsSEO Title: Başlık copyright Independentturkish:";
+    expect(stripIndyturkCmsDump(onlyDump) === onlyDump).toBe(true);
+  });
+});
+
+describe("stripIndyturkCmsDump: linear time (CodeQL js/redos)", () => {
+  const LEAD = "AYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirtti. ";
+  it.each([
+    ["a marker at the end of 200000 letters", rep("a", "", "SEO Title: x"), 200_000],
+    ["blanks after 'copyright'", rep(" ", "copyright", "x"), 200_000],
+    ["'copyright ' repeated", rep("copyright "), 200_000],
+    ["'Pazartesi, ' repeated, then a marker", rep("Pazartesi, ", "", "Main image: x"), 200_000],
+    ["a weekday then a long blank run, then a marker", rep(" ", LEAD + "Pazartesi,", "Main image: x"), 200_000],
+    ["'Cuma, Kasım 9, 2026 -' repeated, then a marker", rep("Cuma, Kasım 9, 2026 -", "", "SEO Title: x"), 200_000],
+    ["'Type: ' repeated", rep("Type: ", "", "Main image: x"), 200_000],
+    ["a long letter run in front of 'Type: news'", rep("a", LEAD, "Type: newsSEO Title: x"), 200_000],
+    ["the first word repeated glued to digits, with a marker", rep("AYM1", "", " Main image: x"), 200_000],
+    ["a dump behind 100000 newlines", rep("\n", LEAD, "Main image: x"), 100_000],
+  ] as Array<[string, Gen, number]>)("%s", (_name, gen, n) => {
+    expectLinear(gen, (s) => stripIndyturkCmsDump(s), { n, ceilingMs: 2_000 });
+    expectLinear(gen, (s) => stripFeedWrappers(s), { n, ceilingMs: 2_000 });
+  });
+});
+
+describe("stripIndyturkCmsDump has one implementation (h122-ozet-1)", () => {
+  const read = (...parts: string[]) => readFileSync(resolve(__dirname, "..", "..", "..", ...parts), "utf8");
+
+  it("summary-tidy.ts reaches it only through stripFeedWrappers; rss modules never import it", () => {
+    const src = stripTsComments(read("src", "lib", "articles", "summary-tidy.ts"));
+    expect(src).not.toMatch(/function\s+stripIndyturkCmsDump/);
+    const dir = resolve(__dirname, "..", "..", "..", "supabase", "functions", "_shared", "rss");
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
+      const rss = stripTsComments(readFileSync(resolve(dir, f), "utf8"));
+      expect(rss, `${f} must not use stripIndyturkCmsDump`).not.toMatch(/stripIndyturkCmsDump/);
+    }
   });
 });

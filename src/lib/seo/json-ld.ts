@@ -50,6 +50,12 @@ export interface RegistryDatasetOptions {
  * licence), the machine-readable distribution (`/api/sources`), and, when
  * known, `dateModified` (the registry's last change time). Rendered on
  * /sources.
+ *
+ * The description names only fields every `/api/sources` record carries
+ * (`bias`, `kind`, `trustee_since`; see toRegistryRecord). It used to promise
+ * "hak bayrakları" too, but the public API has no image_allowed or
+ * excerpt_allowed key, and exposing the rights flags is a founder decision, so
+ * the copy must not claim them (h122-sourcepages-3).
  */
 export function buildRegistryDataset(options: RegistryDatasetOptions) {
   return {
@@ -57,7 +63,7 @@ export function buildRegistryDataset(options: RegistryDatasetOptions) {
     "@type": "Dataset",
     name: "Tayf Kaynak Kaydı",
     description:
-      "Tayf'ın izlediği Türk haber kaynaklarının kaydı — yanlılık kategorisi, tür (outlet/aggregator/wire/niche), hak bayrakları ve kayyum durumu dahil.",
+      "Tayf'ın izlediği Türk haber kaynaklarının kaydı — yanlılık kategorisi, tür (outlet/aggregator/wire/niche) ve kayyum durumu dahil.",
     license: "https://creativecommons.org/licenses/by-sa/4.0/",
     distribution: {
       "@type": "DataDownload",

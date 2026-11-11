@@ -22,8 +22,11 @@ import { endsWithFiniteVerb } from "./finite-verb";
 //   - feed wrappers          "<title> 02.11.2026 Diken<body>\nThe post <title>
 //                            appeared first on #site_linkat 02.11.2026 ." (Diken),
 //                            "<body>\n<title> yazısı ilk önce Serbestiyet
-//                            adresinde yayınlanmıştır." (Serbestiyet) and
-//                            "<body>\n<headline> Medyascope" (Medyascope)
+//                            adresinde yayınlanmıştır." (Serbestiyet),
+//                            "<body>\n<headline> Medyascope" (Medyascope) and the raw
+//                            CMS dump "<caption><lead>Pazartesi, Kasım 9, 2026 -
+//                            18:30Main image: ...SEO Title: ...copyright
+//                            Independentturkish:" (Independent Türkçe, h122-ozet-1)
 //   - raw newlines, and bullet lists whose lines are sentences with no full stop
 //     ("- Koreli öğrenciler ... sohbet etti\nKoreli iki öğrencinin ... tebrik
 //     etti"), which a plain blank would run on into one sentence
@@ -31,7 +34,9 @@ import { endsWithFiniteVerb } from "./finite-verb";
 //     outlet's own feed cap cut mid-word (Haberport 202/203, Sözcü 123, Daily
 //     Sabah 183 characters ending "..."), and a text an outlet cut at exactly 400
 //     or 500 characters with no "..." at all ("... yeni kanun hazırlığı h", ABC
-//     Haber; h95-summaries-1)
+//     Haber; h95-summaries-1), and a Turkuvaz feed cut with its CTA behind the dots
+//     ("... yanıt verdi. AK...Devamı için tıklayınız", A Haber, Sabah, Yeni Asır;
+//     h122-ozet-3)
 //   - a repaired cut that would end inside an open quotation, and a text a feed
 //     cut inside a quotation before its trailing "[…]" (h29-regress-1)
 //   - a sub-heading glued onto the body ("odaklı ziyaretİçişleri Bakanı",
@@ -217,6 +222,11 @@ const CLAMP_MIN_KEPT_SHARE = 0.6;
  * ends inside the quotation, and e5d77d31 keeps 50.3% in front of its quotation.
  */
 const CLAMP_QUOTE_MIN_KEPT_SHARE = 0.5;
+/**
+ * Behind a ":" that introduces the open quotation (h122-ozet-3), the last balanced sentence end is
+ * kept when it holds at least this many characters, whatever its share of the text.
+ */
+const CLAMP_INTRODUCED_QUOTE_MIN_KEPT = 60;
 const SENTENCE_MARKS = new Set([".", "!", "?", "…"]);
 /** Quotes and brackets that may close a sentence right after its mark. */
 const CLOSERS = new Set(['"', "”", "»", "’", "'", ")", "]"]);
@@ -438,9 +448,89 @@ export function isUnmarkedClamp(raw: string): boolean {
   return last === "," || ANY_LETTER.test(last);
 }
 
-/** The text a clamp cut, without its "..." when it has one, or null when `raw` is not a clamp. */
+// ---------------------------------------------------------------------------
+// Turkuvaz CTA feed cut (h122-ozet-3). A Turkuvaz feed (A Haber, Sabah, Yeni Asır) ships "<cut>...
+// Devamı için tıklayınız": the body is cut at about 200 characters, mid-word, and the CTA follows
+// the dots. 813 of the 7-day descriptions of yeni-asir, a-haber and sabah end that way, but the
+// body is 203 to 210 characters, so the 202/203 feed-cap signature rarely matches and the text
+// was never repaired: the page showed "…yanıt verdi. AK..." (107 cluster seeds in 7 days).
+// ---------------------------------------------------------------------------
+
+/** The CTA of a CTA feed cut is within this many characters of the end (the longest phrase is 30, plus blanks and marks). */
+const CTA_FEED_CUT_WINDOW = 120;
+/** What may stand right in front of the dots of a CTA feed cut: a word cut off, a number, a comma. */
+const CTA_FEED_CUT_BEFORE_DOTS = /^[\p{L}\p{N},]$/u;
+/**
+ * The text in front of the dots is at least this long. A feed cap cuts at about 200 characters; a
+ * shorter text with its own ellipsis in front of a CTA is the outlet's own words ("Haber metni
+ * burada… Devamı için tıklayın"), whose last word is whole.
+ */
+const CTA_FEED_CUT_MIN_BODY = 100;
+/** Marks a CTA may be followed by (the same set as the end of {@link CTA_TAIL}); a character scan strips them, no regex. */
+const TRAILING_CTA_MARKS: ReadonlySet<string> = new Set([".", "…", "!", "»", "›", ">"]);
+
+/**
+ * True when `removed` (the blanks, the phrase and the marks behind the dots) is one of the "continue
+ * reading" templates a feed appends after cutting a description ({@link BOILERPLATE_PHRASES}:
+ * "Devamı için tıklayınız", "Devamını oku", "Read more", ...). The sentence-style
+ * {@link TRAILING_CTA_PHRASES} ("İşte tüm detaylar!", "Detaylar haberimizde") are an editor's teaser
+ * behind the editor's own sentence, not a template behind a cut, so they never make a feed cut.
+ */
+function isContinueReadingTemplate(removed: string): boolean {
+  const collapsed = removed.replace(/\s+/g, " ");
+  let end = collapsed.length;
+  while (end > 0 && (TRAILING_CTA_MARKS.has(collapsed.charAt(end - 1)) || isBlankChar(collapsed.charAt(end - 1)))) end--;
+  const phrase = collapsed.slice(0, end).trim();
+  return FOLDS.some((fold) => BOILERPLATE_PHRASES.has(fold(phrase)));
+}
+
+/**
+ * The text in front of the dots of a CTA feed cut, or null when `raw` is not one: the trimmed text ends
+ * with a "continue reading" template ({@link isContinueReadingTemplate}; any case, blanks between the
+ * words), the dots ("..." or "…", blanks allowed behind them) are right in front of it, the text in
+ * front of the dots holds at least {@link CTA_FEED_CUT_MIN_BODY} characters, and the character in
+ * front of the dots is a letter, a digit or a comma (a sentence mark, a closing mark or a blank there
+ * is the outlet's own ellipsis, and stays with step 3 of {@link tidySummaryText}). One regular
+ * expression pass, and only when the last 120 characters hold a dot-run or an ellipsis character.
+ */
+function ctaFeedCutBody(raw: string): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trimEnd();
+  const tail = trimmed.slice(-CTA_FEED_CUT_WINDOW);
+  if (!tail.includes(CLAMP_SUFFIX) && !tail.includes("…")) return null;
+  const stripped = stripTrailingCta(trimmed);
+  if (stripped === null) return null;
+  const dots = stripped.endsWith(CLAMP_SUFFIX) ? CLAMP_SUFFIX.length : stripped.endsWith("…") ? 1 : 0;
+  if (dots === 0) return null;
+  const body = stripped.slice(0, stripped.length - dots);
+  if (body.length < CTA_FEED_CUT_MIN_BODY || !CTA_FEED_CUT_BEFORE_DOTS.test(body.charAt(body.length - 1))) return null;
+  return isContinueReadingTemplate(trimmed.slice(stripped.length)) ? body : null;
+}
+
+/**
+ * True for a Turkuvaz CTA feed cut (h122-ozet-3): "<body cut mid-word>...Devamı için tıklayınız". The
+ * trimmed raw text ends with a "continue reading" CTA (case-insensitive: "Devamı için tıklayınız" and the
+ * other {@link BOILERPLATE_PHRASES}), the dots ("..." or "…") are right in front of it, at least 100
+ * characters stand in front of the dots, and the character in front of the dots is a letter, a digit or a
+ * comma. False when a sentence mark, a parenthesis, a quote or a blank is there (the outlet's own
+ * ellipsis), when there is no such CTA (a sentence-style "İşte tüm detaylar!" is an editor's teaser, not a
+ * template), when the text is shorter than a feed cap, and for a non-string. {@link tidySummaryText}
+ * repairs such a text like a clamp, and `isCutStub` (summary-agreement.ts) calls the seed a stub when what
+ * is shown still ends in a cut.
+ */
+export function isCtaFeedCut(raw: string): boolean {
+  return ctaFeedCutBody(raw) !== null;
+}
+
+/**
+ * The text a clamp cut, without its "..." when it has one, or null when `raw` is not a clamp. A CTA
+ * feed cut ({@link isCtaFeedCut}) is a clamp too (h122-ozet-3): its body is the text in front of the
+ * dots, so the repair never sees the CTA.
+ */
 function clampBody(raw: string): string | null {
   if (hasClampSignature(raw)) return raw.slice(0, raw.length - CLAMP_SUFFIX.length);
+  const cta = ctaFeedCutBody(raw);
+  if (cta !== null) return cta;
   return isUnmarkedClamp(raw) ? raw : null;
 }
 
@@ -477,11 +567,39 @@ function clampBody(raw: string): string | null {
  * else a word cut with one "…" (the partial last word dropped).
  */
 function repairClamp(raw: string): string | null {
+  return repairClampDetailed(raw)?.text ?? null;
+}
+
+/** A repaired clamp, and whether the repair had to cut around a quotation that a ":" introduces. */
+interface ClampRepair {
+  text: string;
+  introducedQuote: boolean;
+}
+
+/** True when the first non-blank character in front of the opener at `openerAt` is a ":" ("şunları kaydetti: \"..."). */
+function opensAfterColon(text: string, openerAt: number): boolean {
+  let p = openerAt - 1;
+  while (p >= 0 && isBlankChar(text.charAt(p))) p--;
+  return p >= 0 && text.charAt(p) === ":";
+}
+
+/**
+ * The body of {@link repairClamp}, with one more fact: `introducedQuote` is true when the text the
+ * clamp cut still ended inside a quotation after the word cut (the open-quote branch) and the opener
+ * is introduced by a ":" ("... Duran, şunları kaydetti: \"Cumhurbaşkanımız ..."; h122-ozet-3). Then the
+ * quotation, which is what the headline reports, is not in the repaired text, whichever cut was
+ * made. In that branch a ":" opener also prefers the last balanced sentence end when it keeps at
+ * least {@link CLAMP_INTRODUCED_QUOTE_MIN_KEPT} characters, whatever its share of the text: the
+ * alternative, the cut in front of the opener, ends on "... şunları kaydetti…".
+ */
+function repairClampDetailed(raw: string): ClampRepair | null {
   const body = clampBody(raw);
   if (body === null) return null;
 
   const withoutTicker = cutAppendedTicker(body);
-  if (withoutTicker !== body && withoutTicker.trim() !== "") return withoutTicker.trimEnd();
+  if (withoutTicker !== body && withoutTicker.trim() !== "") {
+    return { text: withoutTicker.trimEnd(), introducedQuote: false };
+  }
 
   // h26-live-1: lastSentenceEnd needs a blank after the mark, and step 4 (which
   // un-glues "lower.Upper") runs after this repair, so a glued last sentence was
@@ -492,7 +610,7 @@ function repairClamp(raw: string): string | null {
   const end = lastSentenceEnd(text, lines, balanced);
   if (end > 0) {
     const kept = text.slice(0, end).trimEnd();
-    if (kept.length >= CLAMP_MIN_KEPT_SHARE * text.length) return kept;
+    if (kept.length >= CLAMP_MIN_KEPT_SHARE * text.length) return { text: kept, introducedQuote: false };
   }
 
   let cut = text.trimEnd();
@@ -526,9 +644,19 @@ function repairClamp(raw: string): string | null {
   if (cut === "") return null;
   // The cut ends inside an open quotation (e5d77d31): end in front of the opener
   // instead, the largest prefix that leaves nothing open, when it keeps enough.
+  let introducedQuote = false;
   if (!balanced(cut.length)) {
     let at = cut.length;
     while (at > 0 && !balanced(at)) at--;
+    // h122-ozet-3: a ":" in front of the opener introduces the quotation. The cut in front of the
+    // opener would end on the introducer ("... şunları kaydetti…") and show none of what was said;
+    // the last balanced sentence end at least says something whole, so it is preferred from 60
+    // characters up, whatever its share. A shorter one keeps today's cut.
+    introducedQuote = opensAfterColon(text, at);
+    if (introducedQuote && end > 0) {
+      const kept = text.slice(0, end).trimEnd();
+      if (kept.length >= CLAMP_INTRODUCED_QUOTE_MIN_KEPT) return { text: kept, introducedQuote };
+    }
     const before = text.slice(0, trimDanglingEnd(text, at));
     if (before !== "" && before.length >= CLAMP_QUOTE_MIN_KEPT_SHARE * text.length) {
       cut = before;
@@ -537,10 +665,22 @@ function repairClamp(raw: string): string | null {
       // (the sentence ends the quote check passed over count again).
       const anyEnd = lastSentenceEnd(text, lines);
       const kept = anyEnd > 0 ? text.slice(0, anyEnd).trimEnd() : "";
-      if (kept.length >= CLAMP_MIN_KEPT_SHARE * text.length) return kept;
+      if (kept.length >= CLAMP_MIN_KEPT_SHARE * text.length) return { text: kept, introducedQuote };
     }
   }
-  return SENTENCE_MARKS.has(cut.charAt(cut.length - 1)) ? cut : cut + "…";
+  return { text: SENTENCE_MARKS.has(cut.charAt(cut.length - 1)) ? cut : cut + "…", introducedQuote };
+}
+
+/**
+ * True when the clamp (or CTA feed cut) `raw` ended inside a quotation that a ":" introduces and the repair
+ * had to cut around it (h122-ozet-3): "... belirten Duran, şunları kaydetti: \"Cumhurbaşkanımız ...", cut at
+ * 500 characters. Whatever the repair shows, the quotation (the statement the headline reports) is not
+ * in it, so `seedDisqualified` (summary-agreement.ts) calls such a seed a stub. False for a text that is
+ * not a clamp, a clamp that leaves no quotation open, and one whose opener is not preceded by a ":"
+ * ("... dedi ki \"...", "Yılmaz, \"..."), and for a non-string.
+ */
+export function clampCutIntroducedQuote(raw: string): boolean {
+  return typeof raw === "string" && repairClampDetailed(raw)?.introducedQuote === true;
 }
 
 /**
@@ -1484,15 +1624,26 @@ export function stripLeadingStyleRules(description: string): string {
  *      and the headline is not this outlet's summary (h48-ingest-1). Returns "";
  *   0. repair a text the ingest clamp or an outlet feed cap cut
  *      ({@link repairClamp}); keyed on the raw input, so it runs before anything
- *      changes the length;
+ *      changes the length. A Turkuvaz "<cut>...Devamı için tıklayınız" is one too
+ *      ({@link isCtaFeedCut}, h122-ozet-3: a letter, digit or comma, the dots, a
+ *      "continue reading" CTA, at least 100 characters in front of the dots): the
+ *      body in front of the dots is repaired and the CTA is not seen again;
  *   1. drop whole lines that are a widget heading ("İlginizi Çekebilir");
  *   1b. strip the Diken header ("<title> dd.mm.yyyy Diken"), the WordPress /
  *      Yoast footers ("The post ... appeared first on ...", "... yazısı ilk
- *      önce ... adresinde yayınlanmıştır.") and the Medyascope site-name footer
- *      ("<headline> Medyascope" as the last line) with {@link stripFeedWrappers},
+ *      önce ... adresinde yayınlanmıştır."), the Medyascope site-name footer
+ *      ("<headline> Medyascope" as the last line) and Independent Türkçe's raw
+ *      Drupal field dump ("<caption><lead>Pazartesi, Kasım 9, 2026 - 18:30Main
+ *      image: Type: newsSEO Title: <headline>copyright Independentturkish:": the
+ *      tail from the date stamp or the first CMS field on goes, so does the
+ *      caption glued in front of the lead, and the lead gets its full stop;
+ *      `stripIndyturkCmsDump`, h122-ozet-1) with {@link stripFeedWrappers},
  *      the same function the cluster consumer applies to the clustering text.
  *      It runs here, while the newlines are still present, because a footer
- *      starts at a line boundary. When that turned a trailing excerpt marker
+ *      starts at a line boundary. The dump is cut here for DISPLAY only: the RAW
+ *      text still carries its markers, which is what `summaryDefect` /
+ *      `seedDisqualified` ('cms', summary-agreement.ts) read, so a dump never
+ *      stands in for the seed. When that turned a trailing excerpt marker
  *      into "…" and the text is cut inside a quotation ("…videoda “ABD Senatosu
  *      için…"), it ends at the last sentence end in front of the opener, or at
  *      the word in front of it, when that keeps at least half of the text
@@ -1576,7 +1727,13 @@ export function stripLeadingStyleRules(description: string): string {
  * never kept, so a clamped text that holds a ticker line ends where the ticker
  * block starts, with no "…". A clamp that holds a line break late in the text
  * ends there when no sentence end does (see {@link repairClamp}). A cut never
- * ends inside an open quotation when it can end in front of it.
+ * ends inside an open quotation when it can end in front of it, except when a ":"
+ * introduces the quotation (h122-ozet-3): then the last balanced sentence end wins
+ * when it keeps 60 characters ("... Duran, şunları kaydetti: \"..." ends on the
+ * sentence in front of the introducer, not on "... şunları kaydetti…"; see
+ * {@link clampCutIntroducedQuote}). A Turkuvaz feed cut, "<cut>...Devamı için
+ * tıklayınız" ({@link isCtaFeedCut}), is repaired the same way from the text in
+ * front of the dots, and the CTA goes with it.
  *
  * Returns "" when nothing but residue was there (a footer-only text included);
  * the caller then hides the summary. Idempotent for any input with at most
@@ -1586,11 +1743,7 @@ export function stripLeadingStyleRules(description: string): string {
  * any, is not followed by a CTA (a footer is recognised only at the very end of
  * the text), and which has no Diken-style header after its first line (the
  * header is found before the newlines are collapsed, so such a line is a header
- * only once it has become part of the first line). One more exception, from the
- * feed caps: the clamp signature is read off the raw input, so an outlet text
- * that is a 200-character cut + "..." + "Devamı için tıklayınız" (3 in 1000
- * live summaries) comes back as the cut ("... yeni bir..."), and a second call
- * sees a feed-cap signature and repairs it. The summary is tidied once.
+ * only once it has become part of the first line).
  */
 export function tidySummaryText(s: string): string {
   // pre. A placeholder first line: nothing behind it is ours to show. On the raw

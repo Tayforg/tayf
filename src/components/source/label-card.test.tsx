@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { LabelCard, type ZoneHistoryEntry } from "./label-card";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { LabelCard, ZONE_HISTORY_RECORDED_SINCE, type ZoneHistoryEntry } from "./label-card";
 import type { ReaderAgreement } from "@/lib/game/agreement";
 import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
 import {
@@ -239,11 +242,73 @@ describe("LabelCard — trustee badge", () => {
   });
 });
 
+// h122-sourcepages-3: the empty state used to say "Bu etiket hiç değişmedi." on
+// every profile. Label changes have been recorded only since 18 Eylül 2026
+// (migration 055 added the trigger; migration 175 states the table is not
+// backfilled), and /metodoloji records the 'Bağımsız' -> 'Merkez' rename, so
+// "never changed" was a claim the data cannot back. The card now says only that
+// no change is on record, and since when changes are recorded.
+const EMPTY_HISTORY_SENTENCE =
+  "Kayıtlı bir etiket değişikliği yok (etiket değişiklikleri 18 Eylül 2026'dan beri kaydediliyor).";
+const HISTORY_UNAVAILABLE_SENTENCE = "Etiket geçmişi şu anda okunamadı.";
+
 describe("LabelCard — zone history", () => {
-  it("renders the empty state when the history list is empty", () => {
+  it("an empty history says no change is on record and since when changes are recorded", () => {
     const el = LabelCard({ ...BASE_PROPS, history: [] });
     const text = collectText(el).join(" ");
-    expect(text).toContain("Bu etiket hiç değişmedi.");
+    expect(text).toContain(EMPTY_HISTORY_SENTENCE);
+  });
+
+  it("an empty history never claims the label 'hiç değişmedi' (history is recorded only since 18 Eylül 2026)", () => {
+    for (const historyUnavailable of [undefined, false, true]) {
+      const text = collectText(LabelCard({ ...BASE_PROPS, history: [], historyUnavailable })).join(" ");
+      expect(text, String(historyUnavailable)).not.toContain("hiç değişmedi");
+    }
+  });
+
+  it("names the recording start as ZONE_HISTORY_RECORDED_SINCE = 2026-09-18 and prints it in Turkish long form", () => {
+    expect(ZONE_HISTORY_RECORDED_SINCE).toBe("2026-09-18");
+    const text = collectText(LabelCard({ ...BASE_PROPS, history: [] })).join(" ");
+    expect(text).toContain("18 Eylül 2026'dan beri");
+  });
+
+  it("with historyUnavailable the card says the history could not be read, instead of the empty-state sentence", () => {
+    const el = LabelCard({ ...BASE_PROPS, history: [], historyUnavailable: true });
+    const text = collectText(el).join(" ");
+    expect(text).toContain(HISTORY_UNAVAILABLE_SENTENCE);
+    expect(text).not.toContain("Kayıtlı bir etiket değişikliği yok");
+    expect(text).not.toContain("hiç değişmedi");
+  });
+
+  it("historyUnavailable false or absent keeps the empty-state sentence and none of the unavailable one", () => {
+    for (const historyUnavailable of [undefined, false]) {
+      const text = collectText(LabelCard({ ...BASE_PROPS, history: [], historyUnavailable })).join(" ");
+      expect(text, String(historyUnavailable)).toContain(EMPTY_HISTORY_SENTENCE);
+      expect(text, String(historyUnavailable)).not.toContain(HISTORY_UNAVAILABLE_SENTENCE);
+    }
+  });
+
+  it("recorded rows win: with rows present neither the empty-state nor the unavailable sentence renders", () => {
+    const history: ZoneHistoryEntry[] = [
+      {
+        oldBias: "center",
+        newBias: "opposition_leaning",
+        reason: null,
+        rater: null,
+        changedAt: "2026-10-05T00:00:00Z",
+      },
+    ];
+    for (const historyUnavailable of [false, true]) {
+      const text = collectText(LabelCard({ ...BASE_PROPS, history, historyUnavailable })).join(" ");
+      expect(text).toContain("05.10.2026");
+      expect(text).not.toContain("Kayıtlı bir etiket değişikliği yok");
+      expect(text).not.toContain(HISTORY_UNAVAILABLE_SENTENCE);
+    }
+  });
+
+  it("the component source no longer contains the unprovable 'hiç değişmedi' claim", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    expect(readFileSync(resolve(here, "label-card.tsx"), "utf8")).not.toContain("hiç değişmedi");
   });
 
   it("renders history rows newest-first with reason and rater when present", () => {
@@ -270,7 +335,9 @@ describe("LabelCard — zone history", () => {
     expect(text).toContain("20.06.2025");
     expect(text).toContain("Redaksiyon kararı");
     expect(text).toContain("editör");
-    expect(text).not.toContain("Bu etiket hiç değişmedi.");
+    expect(text).not.toContain("hiç değişmedi");
+    expect(text).not.toContain("Kayıtlı bir etiket değişikliği yok");
+    expect(text).not.toContain(HISTORY_UNAVAILABLE_SENTENCE);
 
     // newest-first: the 2025 row's date must appear before the 2024 row's.
     expect(text.indexOf("20.06.2025")).toBeLessThan(text.indexOf("05.01.2024"));

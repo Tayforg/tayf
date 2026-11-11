@@ -52,6 +52,15 @@
 // (an exclamation headline that shares no content stem with the text in front of it,
 // plus the unpunctuated headlines after it); cleanDescription() applies it last, and
 // summary-tidy.ts imports the same function for the shown summary.
+//
+// Independent Türkçe ships its raw Drupal field dump as the description (hunt 122,
+// h122-ozet-1: "AYM Başkanı Kadir ÖzkayaAYM Başkanı Kadir Özkaya, ... dediPazartesi,
+// Kasım 9, 2026 - 21:30Main image: HaberType: newsSEO Title: <the headline again>copyright
+// Independentturkish:"): the page caption glued to the lead, the date stamp, and the CMS
+// fields. It was picked as the Özet and the meta description of b8e7cc75 (28 sources) and
+// 710ef4bb. stripIndyturkCmsDump() cuts the tail and the glued caption; stripFeedWrappers()
+// runs it first, so the consumer's clustering text (entities, fingerprint, tf-idf) and the
+// shown summary both lose the dump.
 
 // A ticker line: "Son dakika", "SON DAKİKA" or "Son Dakika" at the start of a
 // line (leading blanks allowed), followed by 1-3 dots, an ellipsis, a colon or
@@ -209,13 +218,116 @@ function stripExcerptMarker(text: string): string {
   return text;
 }
 
+// ---------------------------------------------------------------------------
+// Independent Türkçe CMS dump (h122-ozet-1, hunt 122). Only regular expressions with bounded
+// gaps (every run of blanks is `\s{0,n}`, no nested quantifier), a bounded character walk,
+// `indexOf` and a few `slice`s: linear in the input, and the caption search looks at no more
+// than INDY_CAPTION_WINDOW characters.
+// ---------------------------------------------------------------------------
+
+/** The gate: a text without one of the CMS fields is never touched. */
+const INDY_GATE = /copyright\s{0,8}Independentturkish|SEO Title:|Main image:/i;
+const INDY_MAIN_IMAGE = /Main image:/i;
+const INDY_SEO_TITLE = /SEO Title:/i;
+const INDY_COPYRIGHT = /copyright\s{0,8}Independentturkish/i;
+const INDY_TYPE_FIELD = /Type:\s{0,4}news/i;
+/** "Pazartesi, Kasım 9, 2026 - 18:30": the Drupal date stamp, which may be glued to the word before it. */
+const INDY_DATE_STAMP =
+  /(?:Pazartesi|Salı|Çarşamba|Perşembe|Cuma|Cumartesi|Pazar),\s{0,4}(?:Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık)\s{1,4}\d{1,2},\s{0,4}\d{4}\s{0,4}-\s{0,4}\d{1,2}:\d{2}/u;
+/** A section label glued in front of "Type: news" ("Haber", "Dünya") is at most this many letters long. */
+const INDY_LABEL_MAX = 30;
+/** The caption's repeat is looked for among the first this many characters. */
+const INDY_CAPTION_WINDOW = 150;
+/** A first word longer than this is not a caption word. */
+const INDY_CAPTION_MAX_WORD = 40;
+/** The caption's first word has at least this many letters. */
+const INDY_CAPTION_MIN_WORD = 2;
+/** Dropping the caption must leave at least this many characters. */
+const INDY_MIN_BODY_AFTER_CAPTION = 60;
+/** A cut that would leave less than this returns the input (the dump is then seen by the caller's own rules). */
+const INDY_MIN_RESULT = 20;
+
+/** Start of the section label glued in front of the "Type:" at `at`, or `at` when there is none. */
+function indyTypeFieldStart(text: string, at: number): number {
+  const lowest = Math.max(0, at - INDY_LABEL_MAX);
+  let start = at;
+  while (start > lowest && ONE_LETTER.test(text.charAt(start - 1))) start--;
+  // The label begins at an upper-case letter that does not follow another one: "…açıkladıHaber" -> "Haber".
+  for (let p = at - 1; p >= start; p--) {
+    if (!ONE_UPPER.test(text.charAt(p))) continue;
+    if (p === 0 || !ONE_UPPER.test(text.charAt(p - 1))) return p;
+  }
+  return at;
+}
+
+/**
+ * The glued caption in front of the lead ("Bahçeli10 KASIMMHP Genel Başkanı Devlet Bahçeli, ...",
+ * "ÖzkayaAYM Başkanı Kadir Özkaya, ...", "arıkanSaadet Partisi ...", "gazeteResmi Gazete’de ..."): the
+ * first word's letters (2 to 40) come back among the first 150 characters, glued to the
+ * character before (a letter or a digit, not a blank) and starting upper case, so "Ak" is never
+ * found inside "bakanlıkta". The repeat must also end at a word boundary (no letter right after
+ * it), so neither "ak" inside "bakanlıkta" nor "ab" inside "KABUL" counts. Everything in front of
+ * that repeat goes, when 60 characters or more are left. The text itself otherwise.
+ */
+function dropGluedCaption(text: string): string {
+  let end = 0;
+  while (end <= INDY_CAPTION_MAX_WORD && end < text.length && ONE_LETTER.test(text.charAt(end))) end++;
+  if (end < INDY_CAPTION_MIN_WORD || end > INDY_CAPTION_MAX_WORD) return text;
+  const windowEnd = Math.min(text.length, INDY_CAPTION_WINDOW + end);
+  const lowered = text.slice(0, windowEnd).toLocaleLowerCase("tr-TR");
+  if (lowered.length !== windowEnd) return text; // the fold changed the length: cannot index safely
+  const word = lowered.slice(0, end);
+  let from = 1;
+  for (;;) {
+    const at = lowered.indexOf(word, from);
+    if (at === -1 || at >= INDY_CAPTION_WINDOW) return text;
+    if (ONE_ALNUM.test(text.charAt(at - 1)) && ONE_UPPER.test(text.charAt(at)) && !ONE_LETTER.test(text.charAt(at + end))) {
+      return text.length - at >= INDY_MIN_BODY_AFTER_CAPTION ? text.slice(at) : text;
+    }
+    from = at + 1;
+  }
+}
+
+/**
+ * Independent Türkçe's raw Drupal field dump (h122-ozet-1): the description is
+ * "<caption><lead><date stamp>Main image: <label>Type: newsSEO Title: <headline>copyright
+ * Independentturkish:". The SAME string comes back unless the text holds "Main image:",
+ * "SEO Title:" or "copyright Independentturkish" (any case). Then:
+ *  - the tail goes, from the earliest of the Turkish date stamp ("Pazartesi, Kasım 9, 2026 -
+ *    18:30", glued or not to the word before it), "Main image:", the "<label>Type: news" field,
+ *    "SEO Title:" and "copyright Independentturkish"; the rest is trimmed and gets a "." when it
+ *    ends in a letter or a digit;
+ *  - the glued caption in front of the lead goes ({@link dropGluedCaption});
+ *  - a result under 20 characters is not used: the input comes back.
+ * Idempotent (the markers are gone from the result). Pure, linear.
+ */
+export function stripIndyturkCmsDump(text: string): string {
+  if (typeof text !== "string" || text.length === 0) return text;
+  if (!INDY_GATE.test(text)) return text;
+  let cut = text.length;
+  for (const re of [INDY_DATE_STAMP, INDY_MAIN_IMAGE, INDY_SEO_TITLE, INDY_COPYRIGHT]) {
+    const m = re.exec(text);
+    if (m !== null && m.index < cut) cut = m.index;
+  }
+  const field = INDY_TYPE_FIELD.exec(text);
+  if (field !== null) {
+    const start = indyTypeFieldStart(text, field.index);
+    if (start < cut) cut = start;
+  }
+  let out = dropGluedCaption(text.slice(0, cut).trim());
+  if (out !== "" && ONE_ALNUM.test(out.charAt(out.length - 1))) out += ".";
+  return out.length < INDY_MIN_RESULT ? text : out;
+}
+
 /**
  * Remove the Diken header, the WordPress / Yoast footers, the Medyascope
  * site-name footer ("<headline> Medyascope" as the last line, hunt 24: 428 of 430
  * articles) and the trailing WordPress excerpt marker ("[…]") that feeds wrap
  * around a description. The footers go first (the site-name footer innermost, so
  * a WordPress / Yoast footer or a marker in front of it is trailing once it is
- * gone), then the header, then the marker. Returns the SAME string when nothing
+ * gone), then the header, then the marker. Independent Türkçe's CMS field dump
+ * ({@link stripIndyturkCmsDump}, h122-ozet-1) goes before all of them, because its tail
+ * ends the text. Returns the SAME string when nothing
  * matches, '' when the text was only a footer or a marker, and is idempotent (the
  * rules are re-applied until nothing changes, at most {@link MAX_WRAPPER_PASSES}
  * times).
@@ -225,7 +337,9 @@ export function stripFeedWrappers(text: string): string {
   let out = text;
   for (let pass = 0; pass < MAX_WRAPPER_PASSES; pass++) {
     const next = stripExcerptMarker(
-      stripDikenHeader(stripYoastFooter(stripWordPressFooter(stripSiteNameFooter(out)))),
+      stripDikenHeader(
+        stripYoastFooter(stripWordPressFooter(stripSiteNameFooter(stripIndyturkCmsDump(out)))),
+      ),
     );
     if (next === out) break;
     out = next;

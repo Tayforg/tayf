@@ -70,7 +70,8 @@ describe("sourceExcerpt: feed residue the cluster summaries already lose", () =>
   it("drops the Sabah / A Haber / Yeni Asır 'Devamı için tıklayınız' tail and keeps the text before it", () => {
     const out = sourceExcerpt("Emine Erdoğan sergi açılışına ilişkin paylaşım yaptı", SABAH);
     expect(out).not.toContain("Devamı için");
-    expect(out.endsWith("paylaşım...")).toBe(true);
+    expect(out.endsWith("Programı'na ilişkin…")).toBe(true);
+    expect(out.endsWith("...")).toBe(false);
     expect(out.startsWith("Başkan Recep Tayyip Erdoğan'ın eşi Emine Erdoğan")).toBe(true);
   });
 
