@@ -49,6 +49,8 @@ const state = vi.hoisted(() => ({
     status: number;
   },
   registry: { kind: "rows" } as { kind: "rows" } | { kind: "throw"; error: unknown },
+  /** Per-table results for the reads a single route test needs to steer (kap_disclosures, article_tickers, ...). */
+  tables: {} as Record<string, { data: unknown; error: unknown; status: number }>,
 }));
 
 /** A chainable, thenable query builder that resolves to `result()`. */
@@ -83,6 +85,8 @@ function makeClient() {
       if (table === "api_key_usage_daily") return chainable(() => state.usageResult);
       if (table === "sources") return chainable(() => state.sourcesResult);
       if (table === "source_karne_30d") return chainable(() => state.karneResult);
+      const override = state.tables[table];
+      if (override) return chainable(() => override);
       return chainable(() => ({ data: [], error: null }));
     },
   };
@@ -101,6 +105,10 @@ vi.mock("@/lib/sources/registry-query", () => ({
 }));
 
 vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
+
+// The alerts route runs the real getBlindspots and getZoneFeedHealth, whose
+// "use cache" bodies call these two.
+vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
@@ -134,6 +142,7 @@ beforeEach(() => {
   state.touchResult = { data: [{ key_id: 55, tier: "free" }], error: null, status: 200 };
   state.usageResult = { data: { calls: 1 }, error: null, status: 200 };
   state.registry = { kind: "rows" };
+  state.tables = {};
   // apiServerError logs every error; keep the output clean.
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -493,6 +502,153 @@ describe("GET /api/sources: a database outage is a 503", () => {
 
     expect(res.status).toBe(500);
     expect(res.headers.get("Retry-After")).toBeNull();
+    const text = await res.text();
+    expect(text).toContain("Internal server error");
+    expect(text).not.toContain("SECRET_NAME");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h128-apiv1-3: the keyed alerts feed and the KAP pickup read answer a database
+// outage with the same 503 + Retry-After: 30 as the other v1 routes. Their
+// readers used to throw `new Error("<prefix>: " + error.message)` and drop the
+// PostgREST code and status, so apiServerError saw a plain Error and answered
+// 500. The alerts route runs the real getBlindspots (candidate and embed reads)
+// and the real silent-candidate select; only the Supabase client is faked.
+// ---------------------------------------------------------------------------
+
+const OUTAGE_SHAPES: Array<[string, DbResult]> = [
+  [
+    "a 57014 statement timeout",
+    {
+      data: null,
+      error: { code: "57014", message: "canceling statement SECRET_NAME", details: null, hint: null },
+      status: 500,
+    },
+  ],
+  [
+    "the reader cap's AbortError (status 0)",
+    {
+      data: null,
+      error: {
+        message: "AbortError: Supabase request exceeded 4000 ms SECRET_NAME",
+        details: "",
+        hint: "Request was aborted (timeout or manual cancellation)",
+        code: "",
+      },
+      status: 0,
+    },
+  ],
+  ["a 504 gateway answer with an HTML body", { data: null, error: { message: "<html>SECRET_NAME</html>" }, status: 504 }],
+];
+
+const NON_OUTAGE: DbResult = {
+  data: null,
+  error: { code: "23505", message: "duplicate key SECRET_NAME", details: null, hint: null },
+  status: 409,
+};
+
+async function expectV1Unavailable(res: Response) {
+  const body = await expectUnavailableBody(res);
+  expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  expect(res.headers.get("Access-Control-Expose-Headers")).toContain("Retry-After");
+  expect(res.headers.get("X-Tayf-Tier")).toBe("free");
+  expect(JSON.stringify(body)).not.toContain("SECRET_NAME");
+}
+
+describe("GET /api/v1/alerts/blindspots: a database outage is a 503", () => {
+  it.each(OUTAGE_SHAPES)("the blindspot candidate read: %s", async (_label, result) => {
+    state.clustersResult = result;
+    const { GET } = await import("@/app/api/v1/alerts/blindspots/route");
+
+    const res = await GET(keyedRequest("/api/v1/alerts/blindspots"));
+
+    await expectV1Unavailable(res);
+  });
+
+  it.each(OUTAGE_SHAPES)("the silent-candidate select: %s", async (_label, result) => {
+    // getBlindspots' own candidate read comes first and finds no claim; the
+    // silent-candidate select that follows is the one that fails.
+    state.clustersQueue = [{ data: [], error: null, status: 200 }];
+    state.clustersResult = result;
+    const { GET } = await import("@/app/api/v1/alerts/blindspots/route");
+
+    const res = await GET(keyedRequest("/api/v1/alerts/blindspots"));
+
+    await expectV1Unavailable(res);
+  });
+
+  it("a non-outage read error (23505) on the silent-candidate select stays a sanitised 500", async () => {
+    state.clustersQueue = [{ data: [], error: null, status: 200 }];
+    state.clustersResult = NON_OUTAGE;
+    const { GET } = await import("@/app/api/v1/alerts/blindspots/route");
+
+    const res = await GET(keyedRequest("/api/v1/alerts/blindspots"));
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    const text = await res.text();
+    expect(text).toContain("Internal server error");
+    expect(text).not.toContain("SECRET_NAME");
+  });
+
+  it("a non-outage read error (23505) on the blindspot candidate read stays a 500", async () => {
+    state.clustersResult = NON_OUTAGE;
+    const { GET } = await import("@/app/api/v1/alerts/blindspots/route");
+
+    const res = await GET(keyedRequest("/api/v1/alerts/blindspots"));
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    expect(await res.text()).not.toContain("SECRET_NAME");
+  });
+});
+
+describe("GET /api/v1/kap/pickup: a database outage is a 503", () => {
+  const ISSUER_DISCLOSURE = {
+    data: [
+      {
+        disclosure_index: 1,
+        published_at: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+        stock_codes: ["THYAO"],
+        subject: null,
+        disclosure_class: null,
+      },
+    ],
+    error: null,
+    status: 200,
+  };
+
+  it.each(OUTAGE_SHAPES)("the disclosure read: %s", async (_label, result) => {
+    state.tables.kap_disclosures = result;
+    const { GET } = await import("@/app/api/v1/kap/pickup/route");
+
+    const res = await GET(keyedRequest("/api/v1/kap/pickup?ticker=THYAO"));
+
+    await expectV1Unavailable(res);
+  });
+
+  it.each(OUTAGE_SHAPES)("the mention read: %s", async (_label, result) => {
+    state.tables.kap_disclosures = ISSUER_DISCLOSURE;
+    state.tables.article_tickers = result;
+    const { GET } = await import("@/app/api/v1/kap/pickup/route");
+
+    const res = await GET(keyedRequest("/api/v1/kap/pickup?ticker=THYAO"));
+
+    await expectV1Unavailable(res);
+  });
+
+  it("a non-outage read error (23505) on the disclosure read stays a sanitised 500", async () => {
+    state.tables.kap_disclosures = NON_OUTAGE;
+    const { GET } = await import("@/app/api/v1/kap/pickup/route");
+
+    const res = await GET(keyedRequest("/api/v1/kap/pickup?ticker=THYAO"));
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     const text = await res.text();
     expect(text).toContain("Internal server error");
     expect(text).not.toContain("SECRET_NAME");

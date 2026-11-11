@@ -128,7 +128,7 @@ describe("/api/v1/clusters article_count floor note (h47-reports-1)", () => {
 
   it("sits right after the politics-majority note it qualifies", () => {
     const notes = clusters!.notesTr;
-    const politics = notes.findIndex((n) => n.startsWith("Yalnızca üyelerinin en az %"));
+    const politics = notes.findIndex((n) => n.startsWith("Liste, üyelerinin en az %"));
     expect(politics).toBeGreaterThanOrEqual(0);
     expect(notes[politics + 1]).toBe(FLOOR_NOTE);
   });
@@ -263,5 +263,50 @@ describe("alerts blindspot copy names the whole /blindspots list (h120-methodolo
     expect(flat).toContain("1000");
     expect(flat).toContain("`truncated`");
     expect(flat).toContain("`alert_at` descending, ties by `cluster_id` ascending");
+  });
+});
+
+// h128-apiv1-4: the list is filtered on the members' feed categories, but a record's `topic7` is a
+// different taxonomy (the cluster's own topic label), so an ekonomi, dunya or spor topic7 does occur.
+describe("clusters list note: topic7 is not the feed category", () => {
+  const list = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters")!;
+  const joined = list.notesTr.join("\n");
+
+  it("no longer claims that economy and sports clusters are absent from the list", () => {
+    expect(joined).not.toContain("ekonomi ve spor kümeleri bu uç noktada yoktur");
+  });
+
+  it("says the 60% rule is on the member categories and that topic7 can still be ekonomi, dünya or spor", () => {
+    expect(joined).toContain("topic7");
+    expect(joined).toMatch(/ekonomi/);
+    expect(joined).toMatch(/spor/);
+    expect(joined).toMatch(/politika\/son dakika kategorisinde olan kümelerden oluşur/);
+  });
+});
+
+// h128-apiv1-2: the keyed pickup and profile endpoints mirror panels that apply two more rules.
+describe("kap pickup press_code note (h128-apiv1-2)", () => {
+  const pickup = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/kap/pickup")!;
+  const note = pickup.notesTr.find((n) => n.startsWith("press_code:"));
+
+  it("explains press_code: the sibling code, the null ratios and where to ask instead", () => {
+    expect(note, "a Turkish note for press_code").toBeDefined();
+    expect(note).toContain("basın bu şirketi o kodla anıyor");
+    expect(note).toContain("pickup_rate");
+    expect(note).toContain("median_first_lag_minutes");
+    expect(note).toContain("null");
+    expect(note).toContain("o kodu sorgulayın");
+  });
+});
+
+describe("source profile same-side note (h128-apiv1-2)", () => {
+  const profile = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/sources/{slug}/profile")!;
+
+  it("says public_blindspot_same_side is null for an aggregator or niche source, as on the karne", () => {
+    const note = profile.notesTr.find((n) => n.startsWith("public_blindspot_appearances:"));
+    expect(note).toBeDefined();
+    expect(note).toContain("public_blindspot_same_side");
+    expect(note).toMatch(/Toplayıcı ve niş kaynak/);
+    expect(note).toContain("null");
   });
 });

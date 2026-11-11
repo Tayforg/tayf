@@ -140,6 +140,7 @@ const TOP_LEVEL_KEYS = [
   "capped",
   "total_disclosures",
   "superseded",
+  "press_code",
   "totals",
   "count",
   "disclosures",
@@ -422,7 +423,7 @@ describe("toV1PickupBody: issuer and related_only (h48-ekonomi-2)", () => {
     expect(body.count).toBe(1);
   });
 
-  it("adds no top-level key but the additive superseded (the other fields live inside totals and each record)", () => {
+  it("adds no top-level key but the additive superseded and press_code (the other fields live inside totals and each record)", () => {
     const keys = Object.keys(toV1PickupBody(tickerPickup())).sort();
     expect(keys).toEqual(
       [
@@ -435,6 +436,7 @@ describe("toV1PickupBody: issuer and related_only (h48-ekonomi-2)", () => {
         "capped",
         "total_disclosures",
         "superseded",
+        "press_code",
         "totals",
         "count",
         "disclosures",

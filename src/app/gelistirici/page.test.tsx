@@ -51,7 +51,7 @@ describe("/gelistirici page", () => {
     expect(html).toContain("/api/v1/openapi.json");
     expect(html).toContain("SLA");
     expect(html).toContain(
-      "politika/son dakika kategorisinde olan kümeler döner",
+      "politika/son dakika kategorisinde olan kümelerden oluşur",
     );
   });
 

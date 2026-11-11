@@ -93,6 +93,11 @@ export function entityHubNote(total: number, shown: number): string {
 //     "Parti Meclisi", the KKTC and Croatian Speakers, the Federal Meclis, the İBB
 //     Meclisi and the like are not the TBMM, and the first lookahead stays word for
 //     word what tests/migrations/163 compares with the SQL guard.
+//     Also curated, since h128-hubs-1 (2026-11-11), on the five generic-word hubs enflasyon, faiz, dolar, borsa and
+//     asgari-ucret: a topic every country has, so the foreign cues that a read-only replay showed (abd, fed, ecb,
+//     ingiltere, new york borsa, ara secim, irak, cin, japonya, banglades) veto the story. A closed 3-letter cue
+//     ("abd", "fed", "ecb", "cin") takes `\M`, so "Abdullah" and "federasyon" are not cues. borsa's trusted aliases
+//     skip them too.
 //   * quantityGuard (dolar): `\m` + QUANTITY_GUARD + word, so "100 dolar", "2,1
 //     milyar dolarlık" and "milyarlarca doları" are amounts, not the currency.
 //   * inflections (akp, dem, iyi-parti, asgari-ucret, pkk, borsa): widen the
@@ -292,6 +297,24 @@ export function entityHubNote(total: number, shown: number): string {
 // KKTC (b9601948, d448df20), Croatia (31342903, 2a7e585a), Federal Meclis (048a9b43, 095d29d1), İBB Meclisi (4b46258c,
 // 4cc69420), Danışma Meclisi (0f16f0f5, f5b282b7), Kadın Meclisi (278eb682), Barış Anneleri (892a7e64), İSİG (7b66c93b)
 // and the Gaziantep Ticaret Borsası (2c54476c). No TBMM row was lost: every one of the 18 was read by hand.
+//
+// generic-word hubs (h128-hubs-1, 2026-11-11 ~15:54Z), measured read-only through entity_cluster_ids_v3 with the app's exact
+// arrays and, row by row, as a plain select of the same body over the 14-day window and over 365 days (live clusters);
+// the JS twin and PostgreSQL agree on all 607 replayed rows, and 57 of the 62 hubs have byte-identical queries and patterns
+// (akp 190, chp 150, tcmb 1, meclis 245 and disisleri 88 return what they returned before):
+//   enflasyon     24 -> 20   4 dropped (Vance on the midterms b6fe7960, "ABD sandık başında" c89215b1, the Fed 4619dcb5, and the
+//                            Dolar/TL report 9f7c27c3 that says "enflasyon" in one lead clause); 365 days 175 -> 155
+//   faiz          18 -> 11   7 dropped (the Fed, ING on the midterms, three gold stories naming US yields); 365 days 120 -> 72
+//   dolar         11 ->  3   8 dropped (the US-election gold and market wraps); 365 days 47 -> 36. No bare "abd": it removes the
+//                            Turkish lira report 9f7c27c3 and the Turkish dollar-swap stories
+//   borsa         21 -> 18   3 dropped (the midterm wraps 2a6b4822 and 0ef5843d, the Chinese regulator 75ff029b); 365 days 125 -> 119
+//   asgari-ucret  17 -> 16   1 dropped (Bangladeshi textile workers 7b83daa0); 365 days 49 -> 48
+// Every dropped row was read by hand: none of the 14-day ones is a Turkish story about its hub's topic. The cost of the bare
+// "abd" on enflasyon, over 365 days, is two Şimşek statements whose lead names the US-Iran war (eaf2af47, a53c3e7b). The
+// summary lead stays in the text: the 8 emekli-zam stories of the 14-day enflasyon hub (32 in 365 days) all stay, where the
+// headline alone would have dropped 14 of its 24 rows. Left in on purpose: the Hatay burglary c9e1b994 under dolar (its headline
+// says "dolar") and the Turkish passing mentions 5a01e024 and be844f70 under enflasyon. dolar is now 3 clusters, the indexable
+// floor; a hub under it is noindex by entityHubRobots, unchanged.
 // ---------------------------------------------------------------------------
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {
@@ -334,6 +357,34 @@ export function entityHubHeadlineOnly(
   spec: RisingHubSpec = entityHubSpec(entity),
 ): boolean {
   return spec.headlineOnly === true;
+}
+
+/** What a headline-only hub (akp) says it searches: a name that sits only in the summary is not listed. */
+const HUB_NOTE_HEADLINE_ONLY =
+  "Eşleşme, küme başlığında geçen ada göre yapılır; adı yalnızca özette geçen haberler listelenmez. Eş adlı kişi ve kurumlar karışabilir.";
+/**
+ * What every other hub says it searches: the headline and the summary's first line (its first paragraph; for
+ * almost every cluster the whole summary). Not "first sentence": on prod most first lines hold several sentences.
+ */
+const HUB_NOTE_HEADLINE_AND_LEAD =
+  "Eşleşme, küme başlığında ve özetin ilk paragrafında geçen ada göre yapılır; eş adlı kişi ve kurumlar karışabilir.";
+
+/**
+ * The line under a hub's count that says what the hub actually searches
+ * (h128-hubs-1). It used to be one static sentence on all 62 hubs claiming a
+ * "tam metin" search, but the hub regex never sees the body: it runs on
+ * title_tr, title_tr_neutral and the FIRST LINE of summary_tr (migration 156),
+ * and for a `headlineOnly` hub (akp, migration 170) on the two titles alone, so
+ * a story that names the party only in its summary is not listed. The text
+ * follows {@link entityHubHeadlineOnly}, the same flag that picks the RPC's
+ * column, so the copy and the read can never disagree. Pure; `spec` defaults to
+ * the curated one and tests pass their own.
+ */
+export function hubMatchNote(
+  entity: RisingEntity,
+  spec: RisingHubSpec = entityHubSpec(entity),
+): string {
+  return entityHubHeadlineOnly(entity, spec) ? HUB_NOTE_HEADLINE_ONLY : HUB_NOTE_HEADLINE_AND_LEAD;
 }
 
 /**

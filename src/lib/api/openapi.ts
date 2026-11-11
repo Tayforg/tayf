@@ -1,3 +1,4 @@
+import { V1_TOPIC7_VALUES } from "@/lib/api/v1-clusters";
 import { REGISTRY_LICENCE } from "@/lib/sources/registry";
 import { V1_ENDPOINTS, type V1EndpointDoc, type V1ResponseDoc } from "@/lib/api/v1-docs";
 
@@ -118,7 +119,9 @@ function buildSchemas(): Record<string, unknown> {
       },
       is_blindspot: { type: "boolean" },
       blindspot_side: { type: ["string", "null"], enum: [...BIAS_ENUM, null] },
-      topic7: { type: ["string", "null"] },
+      // The cluster's own topic label (clusters.topic7), not the feed category the list filters on;
+      // null when no topic is assigned.
+      topic7: { type: ["string", "null"], enum: [...V1_TOPIC7_VALUES, null] },
       sources: {
         type: "array",
         items: { $ref: "#/components/schemas/V1ClusterSource" },
@@ -286,6 +289,7 @@ function buildSchemas(): Record<string, unknown> {
           "capped",
           "total_disclosures",
           "superseded",
+          "press_code",
           "totals",
           "count",
           "disclosures",
@@ -316,6 +320,11 @@ function buildSchemas(): Record<string, unknown> {
           // `count` and `totals` (still in `total_disclosures`). With `capped` false,
           // count + superseded = total_disclosures.
           superseded: { type: "integer" },
+          press_code: {
+            type: ["string", "null"],
+            description:
+              "The sibling share code the press matches this ticker's company to (ISATR -> ISCTR), set only when the ticker has no mention of its own in the window and a sibling code has some. When set, totals.pickup_rate and totals.median_first_lag_minutes are null: query that code for the ratios. Null otherwise, and when the sibling lookup failed.",
+          },
           totals: {
             type: "object",
             required: [
@@ -331,8 +340,9 @@ function buildSchemas(): Record<string, unknown> {
               // The ticker's own filings (issuer: true); every total below is over these.
               disclosures: { type: "integer" },
               picked_up: { type: "integer" },
-              // null when `disclosures` is 0.
+              // null when `disclosures` is 0, and whenever `press_code` is set.
               pickup_rate: { type: ["number", "null"] },
+              // null when nothing was picked up, and whenever `press_code` is set.
               median_first_lag_minutes: { type: ["number", "null"] },
               outlets: { type: "integer" },
               zones: { type: "object", additionalProperties: { type: "number" } },
@@ -405,7 +415,11 @@ function buildSchemas(): Record<string, unknown> {
         },
       },
       public_blindspot_appearances: { type: ["integer", "null"] },
-      public_blindspot_same_side: { type: ["integer", "null"] },
+      public_blindspot_same_side: {
+        type: ["integer", "null"],
+        description:
+          "How many of the appearances had the story written mainly by the source's own zone. Null below the cluster threshold and for an aggregator or niche source (it has no vote, so it has no own zone to be on the same side of); the appearance count stays.",
+      },
     },
   };
 

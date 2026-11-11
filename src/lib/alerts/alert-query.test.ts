@@ -7,7 +7,9 @@ const state = vi.hoisted(() => ({
   /** The compact rows of /blindspots (claims without a card). */
   more: [] as unknown[],
   silentRows: [] as unknown[],
-  silentError: null as { message: string } | null,
+  silentError: null as { message: string; code?: string } | null,
+  /** The PostgREST response status that rides along with `silentError`. */
+  silentStatus: undefined as number | undefined,
 }));
 
 const captured = vi.hoisted(() => ({
@@ -24,11 +26,14 @@ const fake = await vi.hoisted(async () => {
         let rows = state.silentRows;
         if (st.range) rows = rows.slice(st.range.from, st.range.to + 1);
         else if (st.limit !== null) rows = rows.slice(0, st.limit);
-        return { data: rows, error: state.silentError };
+        return { data: rows, error: state.silentError, status: state.silentStatus };
       },
     },
   });
 });
+
+// errors.ts imports the Sentry helper; the classification below never calls it.
+vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
 
 vi.mock("@/lib/supabase/server", () => ({
   createServerClient: () => fake.client,
@@ -42,6 +47,7 @@ vi.mock("@/lib/clusters/blindspots-query", () => ({
 }));
 
 import { getAlertItems } from "@/lib/alerts/alert-query";
+import { isUpstreamUnavailable } from "@/lib/api/errors";
 import { SILENT_MIN_AGE_H, toV1AlertRecord } from "@/lib/alerts/alert-feed";
 import { BLINDSPOT } from "@/lib/bias/config";
 import type { ZoneFeedHealth } from "@/lib/clusters/feed-health";
@@ -134,6 +140,7 @@ beforeEach(() => {
   state.more = [];
   state.silentRows = [];
   state.silentError = null;
+  state.silentStatus = undefined;
   captured.states.length = 0;
 });
 
@@ -364,6 +371,35 @@ describe("getAlertItems", () => {
   it("throws when the silent query errors (the route turns it into a 500)", async () => {
     state.silentError = { message: "boom" };
     await expect(getAlertItems({ sinceIso: SINCE, limit: 5, health: null, nowMs: NOW })).rejects.toThrow(/silent/);
+  });
+
+  // h128-apiv1-3: a database outage must still be recognisable after the prefix is added.
+  it.each([
+    ["a 57014 statement timeout", { message: "canceling statement due to statement timeout", code: "57014" }, 500],
+    ["the reader cap's AbortError", { message: "AbortError: Supabase request exceeded 4000 ms", code: "" }, 0],
+    ["a gateway answer with an HTML body (504)", { message: "<html>Gateway Timeout</html>", code: "" }, 504],
+  ])("the silent query error is classified as an outage: %s", async (_label, error, status) => {
+    state.silentError = error;
+    state.silentStatus = status;
+
+    const err = await getAlertItems({ sinceIso: SINCE, limit: 5, health: null, nowMs: NOW }).catch(
+      (e: unknown) => e,
+    );
+
+    expect((err as Error).message).toBe(`[alerts] silent candidate select error: ${error.message}`);
+    expect(isUpstreamUnavailable(err)).toBe(true);
+  });
+
+  it("a unique violation on the silent query is not an outage", async () => {
+    state.silentError = { message: "duplicate key", code: "23505" };
+    state.silentStatus = 409;
+
+    const err = await getAlertItems({ sinceIso: SINCE, limit: 5, health: null, nowMs: NOW }).catch(
+      (e: unknown) => e,
+    );
+
+    expect((err as Error).message).toBe("[alerts] silent candidate select error: duplicate key");
+    expect(isUpstreamUnavailable(err)).toBe(false);
   });
 
   it("throws a clear error on an unparsable sinceIso instead of querying with it", async () => {

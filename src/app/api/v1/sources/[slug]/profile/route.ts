@@ -12,6 +12,7 @@ import {
   V1_PROFILE_SOURCE_COLUMNS,
   toV1SourceProfile,
 } from "@/lib/api/v1-source-profile";
+import { isVotingKind } from "@/lib/sources/kind";
 import { toSourceKarne } from "@/lib/sources/karne";
 import {
   registryEnvelope,
@@ -58,7 +59,9 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
   }
 
   const parsed = karne.data ? toSourceKarne(karne.data) : null;
-  const profile = parsed ? toV1SourceProfile(parsed) : null;
+  // The site's karne drops the same-side clause for an aggregator or niche source (source-karne.tsx
+  // passes the same isVotingKind); a source with no kind votes.
+  const profile = parsed ? toV1SourceProfile(parsed, { voting: isVotingKind(row.kind) }) : null;
 
   return NextResponse.json(
     registryEnvelope({ source: toRegistryRecord(row), profile }),

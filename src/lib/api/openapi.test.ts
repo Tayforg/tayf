@@ -148,4 +148,22 @@ describe("buildOpenApiDocument", () => {
     expect(description).toContain("one_zone_silent candidate pull");
     expect(description).toMatch(/1000/);
   });
+
+  // h128-apiv1-4: topic7 is the stored clusters.topic7 label, one of seven values or null.
+  it("V1Cluster.topic7 is a nullable string with the seven stored topics as its enum", () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    const schema = doc.components.schemas.V1Cluster as {
+      required: string[];
+      properties: { topic7: { type: unknown; enum?: Array<string | null> } };
+    };
+    const topic7 = schema.properties.topic7;
+    expect(topic7.type).toEqual(["string", "null"]);
+    expect(topic7.enum).toBeDefined();
+    expect(topic7.enum).toHaveLength(8);
+    expect(topic7.enum).toContain(null);
+    expect(
+      (topic7.enum ?? []).filter((v): v is string => v !== null).sort(),
+    ).toEqual(["dunya", "ekonomi", "genel", "politika", "spor", "teknoloji", "yasam"]);
+    expect(schema.required).toContain("topic7");
+  });
 });

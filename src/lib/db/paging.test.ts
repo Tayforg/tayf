@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { isUpstreamUnavailable } from "@/lib/api/errors";
+
 import { POSTGREST_MAX_ROWS, readAllPages } from "./paging";
+
+// errors.ts imports the Sentry helper; the classification below never calls it.
+vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
 
 type Page = { data: number[] | null; error: { message: string } | null };
 
@@ -162,5 +167,47 @@ describe("readAllPages", () => {
         : { data: null, error: { message: "second page down" } };
 
     await expect(readAllPages(fetchPage, { label: "x", maxPages: 4 })).rejects.toThrow(/x: second page down/);
+  });
+});
+
+// h128-apiv1-3: the message keeps its `[paging] <label>:` prefix (so isUpstreamUnavailable's
+// startsWith test can no longer see a transport error in it), and the code and status of a
+// database outage were dropped. The page error now rides along as the Error's `cause`.
+describe("readAllPages: a database outage stays classifiable (h128-apiv1-3)", () => {
+  const OUTAGES: Array<[string, { message: string; code?: string }, number]> = [
+    ["a 57014 statement timeout", { message: "canceling statement due to statement timeout", code: "57014" }, 500],
+    ["the reader cap's AbortError", { message: "AbortError: Supabase request exceeded 4000 ms", code: "" }, 0],
+    ["a gateway answer with an HTML body (504)", { message: "<html>Gateway Timeout</html>", code: "" }, 504],
+  ];
+
+  it.each(OUTAGES)("%s: same message, outage cause", async (_label, error, status) => {
+    const fetchPage = async () => ({ data: null, error, status });
+
+    const err = await readAllPages(fetchPage, { label: "x", maxPages: 2 }).catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe(`[paging] x: ${error.message}`);
+    expect(isUpstreamUnavailable(err)).toBe(true);
+  });
+
+  it("a unique violation (23505) is not an outage and stays a plain Error", async () => {
+    const fetchPage = async () => ({
+      data: null,
+      error: { message: "duplicate key", code: "23505" },
+      status: 409,
+    });
+
+    const err = await readAllPages(fetchPage, { label: "x", maxPages: 2 }).catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe("[paging] x: duplicate key");
+    expect(isUpstreamUnavailable(err)).toBe(false);
+  });
+
+  it("a page envelope without a status (the common test shape) still throws, with the error as the cause", async () => {
+    const fetchPage = async (): Promise<Page> => ({ data: null, error: { message: "boom" } });
+
+    const err = await readAllPages(fetchPage, { label: "x", maxPages: 2 }).catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe("[paging] x: boom");
+    expect((err as Error).cause).toMatchObject({ message: "boom" });
   });
 });

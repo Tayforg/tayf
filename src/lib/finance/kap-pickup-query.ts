@@ -182,7 +182,7 @@ export async function fetchTickerPickup(
 
   // stock_codes OR related_stocks, circuit-breaker notices excluded: ONE or().
   const disclosureOr = tickerDisclosureOr(ticker);
-  const [{ data: disclosureData, error: disclosureError }, totalDisclosures] = await Promise.all([
+  const [{ data: disclosureData, error: disclosureError, status: disclosureStatus }, totalDisclosures] = await Promise.all([
     supabase
       .from("kap_disclosures")
       .select(DISCLOSURE_SELECT)
@@ -194,7 +194,11 @@ export async function fetchTickerPickup(
     countDisclosures(supabase, ticker, disclosureOr, sinceIso, nowIso),
   ]);
   if (disclosureError) {
-    throw new Error(`[finance] fetchTickerPickup disclosures: ${disclosureError.message}`);
+    // `cause` keeps the PostgREST code and response status, so the keyed route can answer an outage
+    // with the 503 (isUpstreamUnavailable) instead of a 500; the message and prefix are unchanged.
+    throw new Error(`[finance] fetchTickerPickup disclosures: ${disclosureError.message}`, {
+      cause: { ...disclosureError, status: disclosureStatus },
+    });
   }
 
   const disclosureRows = (disclosureData ?? []) as DisclosureRow[];
@@ -303,12 +307,14 @@ export async function fetchTickerPickup(
   const sourceIds = Array.from(new Set(mentions.map((m) => m.sourceId).filter((id): id is string => id !== null)));
   const sourcesById = new Map<string, PickupSource>();
   for (const idChunk of chunk(sourceIds, SOURCE_CHUNK)) {
-    const { data: sourceData, error: sourceError } = await supabase
+    const { data: sourceData, error: sourceError, status: sourceStatus } = await supabase
       .from("sources")
       .select("id,slug,bias,kind")
       .in("id", idChunk);
     if (sourceError) {
-      throw new Error(`[finance] fetchTickerPickup sources: ${sourceError.message}`);
+      throw new Error(`[finance] fetchTickerPickup sources: ${sourceError.message}`, {
+        cause: { ...sourceError, status: sourceStatus },
+      });
     }
     for (const row of (sourceData ?? []) as SourceRow[]) {
       sourcesById.set(row.id, { id: row.id, slug: row.slug, bias: row.bias, kind: row.kind });

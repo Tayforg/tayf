@@ -271,6 +271,33 @@ describe("isUpstreamUnavailable", () => {
     ).toBe(true);
   });
 
+  // h128-apiv1-3: the readers (alert-query, blindspots-query, kap-pickup-query, db/paging)
+  // wrap a PostgREST error as `new Error("<site prefix>: <message>", { cause: { ...error, status } })`,
+  // and the route's apiServerError classifies through that cause.
+  it.each([
+    ["a 57014 statement timeout", { code: "57014", message: "canceling statement due to statement timeout" }],
+    ["the reader cap's AbortError text", { message: "AbortError: Supabase request exceeded 4000 ms", code: "" }],
+    ["a gateway answer with an HTML body", { message: "<html>", code: "", status: 504 }],
+  ])("is true for a prefixed reader Error whose cause is %s", (_label, cause) => {
+    expect(
+      isUpstreamUnavailable(new Error("[alerts] silent candidate select error: x", { cause })),
+    ).toBe(true);
+  });
+
+  it("is false for a prefixed reader Error whose cause is a unique violation", () => {
+    expect(
+      isUpstreamUnavailable(
+        new Error("[alerts] silent candidate select error: x", { cause: { code: "23505", message: "duplicate key" } }),
+      ),
+    ).toBe(false);
+  });
+
+  it("is false for the same prefixed Error without a cause (the prefix hides the transport text)", () => {
+    expect(
+      isUpstreamUnavailable(new Error("[alerts] silent candidate select error: AbortError: aborted")),
+    ).toBe(false);
+  });
+
   it("follows err.cause up to depth 3 and no further", () => {
     const leaf = { code: "57014", message: "canceling statement" };
     expect(isUpstreamUnavailable(chain(3, leaf))).toBe(true);

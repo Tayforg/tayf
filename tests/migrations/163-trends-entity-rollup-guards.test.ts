@@ -331,7 +331,15 @@ describe("migration 163_trends_entity_rollup_guards.sql (SQL contract)", () => {
     const literal = sqlDolarRegex();
     expect(literal).toBe(`\\m${QUANTITY_GUARD}dolar`);
     expect(literal).toContain(QUANTITY_GUARD);
-    expect(entityHubPatterns(entityByKey("dolar")!)).toContain(literal);
+    // The hub pattern ends with the SQL literal. Since h128-hubs-1 it may open with the hub-only foreign
+    // veto (`^(?![\s\S]*(?:...))[\s\S]*`, `hubExcludes`, which /trends never reads), and nothing else:
+    // the amount guard itself is still word for word the SQL one.
+    const patterns = entityHubPatterns(entityByKey("dolar")!);
+    expect(patterns).toHaveLength(1);
+    const pattern = patterns[0]!;
+    expect(pattern.endsWith(literal)).toBe(true);
+    const head = pattern.slice(0, pattern.length - literal.length);
+    expect(head === "" || /^\^\(\?!\[\\s\\S\]\*\(\?:[^()]*\)\)\[\\s\\S\]\*$/.test(head)).toBe(true);
   });
 
   it("every SQL regex string is a valid regex (and, in JS, a valid twin)", () => {

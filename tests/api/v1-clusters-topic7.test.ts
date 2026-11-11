@@ -1,185 +1,238 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { SupabaseClient } from "@supabase/supabase-js";
-import { createSupabaseFake } from "../_helpers/supabase-fake";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import crypto from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
-// fetchTopic7 probes `clusters.topic7` and remembers (process-wide) that the
-// column is not shipped. The latch must only trip on a definitive "column
-// does not exist" signal: a 4 s reader-cap abort, a statement_timeout or a
-// network throw says nothing about the schema, and latching on it would make
-// every later /api/v1/clusters response from the instance report
-// `topic7: null` until it is recycled.
+// ---------------------------------------------------------------------------
+// h128-apiv1-4: `topic7` is read in the SAME query as the record. It used to
+// come from a second `select id, topic7 ... in(ids)` that returned an empty map
+// on any error, so a failed second read nulled topic7 on a 200 and a consumer
+// could not tell "degraded" from "no topic assigned". Now the main select asks
+// for it: a failed read is the main query's own 503, and a null is a real null.
+// ---------------------------------------------------------------------------
 
-type PgError = { message: string; code?: string };
+const KEY = `tayf_${"8".repeat(40)}`;
+const KEY_HASH = crypto.createHash("sha256").update(KEY).digest("hex");
 
-const IDS = ["c1", "c2"];
+const C1 = "c1111111-1111-4111-8111-111111111111";
+const C2 = "c2222222-2222-4222-8222-222222222222";
+const C3 = "c3333333-3333-4333-8333-333333333333";
+const C4 = "c4444444-4444-4444-8444-444444444444";
 
-/** A client whose `clusters` read answers from `responses`, one per call (last repeats). */
-function clientWith(responses: Array<{ data: unknown; error: PgError | null } | "throw">) {
-  let calls = 0;
-  const { client } = createSupabaseFake({
-    tables: {
-      clusters: () => {
-        const r = responses[Math.min(calls, responses.length - 1)];
-        calls += 1;
-        if (r === "throw") throw new TypeError("fetch failed");
-        return r as never;
-      },
-    },
-  });
+const RECENT = new Date().toISOString();
+
+/** `topic7: undefined` leaves the key off the row (a fixture from before the column was selected). */
+function row(id: string, topic7: string | null | undefined) {
   return {
-    client: client as unknown as SupabaseClient,
-    calls: () => calls,
+    id,
+    title_tr: `t-${id}`,
+    title_tr_neutral: null,
+    bias_distribution: { pro_government: 1, opposition: 1 },
+    is_blindspot: false,
+    blindspot_side: null,
+    article_count: 2,
+    first_published: RECENT,
+    updated_at: RECENT,
+    is_archived: false,
+    ...(topic7 === undefined ? {} : { topic7 }),
+    cluster_articles: [
+      { articles: { category: "politika", sources: { slug: "sabah", bias: "pro_government" } } },
+      { articles: { category: "son_dakika", sources: { slug: "birgun", bias: "opposition" } } },
+    ],
   };
 }
 
-const OK = {
-  data: [
-    { id: "c1", topic7: "politika" },
-    { id: "c2", topic7: null },
-  ],
-  error: null,
-};
+const dbState = vi.hoisted(() => ({
+  rows: [] as Array<Record<string, unknown>>,
+  /** The `select` string of every clusters read, in call order. */
+  selects: [] as string[],
+  error: null as { code?: string; message: string } | null,
+  errorStatus: 500,
+}));
 
-async function freshFetchTopic7() {
-  vi.resetModules();
-  const mod = await import("@/lib/api/v1-clusters");
-  return mod.fetchTopic7;
-}
-
-beforeEach(() => {
-  vi.restoreAllMocks();
+const supabaseFake = await vi.hoisted(async () => {
+  const helper = await import("../_helpers/supabase-fake");
+  return helper.createSupabaseFake({
+    tables: {
+      clusters: (state) => {
+        dbState.selects.push(String(state.selectArgs[0] ?? ""));
+        if (dbState.error) {
+          return { data: null, error: dbState.error, status: dbState.errorStatus };
+        }
+        const idEq = state.eq.find((e) => e.col === "id");
+        const rows = idEq ? dbState.rows.filter((r) => r.id === idEq.val) : dbState.rows;
+        return { data: rows, error: null };
+      },
+      api_keys: () => ({ data: [{ id: 101 }], error: null }),
+      api_key_usage_daily: () => ({ data: [{ calls: 0 }], error: null }),
+    },
+    rpc: {
+      api_key_touch: (args) => {
+        const { p_key_hash } = args as { p_key_hash: string };
+        if (p_key_hash !== KEY_HASH) return { data: [], error: null };
+        return { data: [{ key_id: 101, tier: "free" }], error: null };
+      },
+    },
+  });
 });
 
-describe("fetchTopic7", () => {
-  it("returns the non-null topics keyed by cluster id", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client } = clientWith([OK]);
+vi.mock("@supabase/supabase-js", () => ({ createClient: () => supabaseFake.client }));
 
-    const map = await fetchTopic7(client, IDS);
+vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
 
-    expect(map).toEqual(new Map([["c1", "politika"]]));
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, connection: async () => {} };
+});
+
+const ORIGINAL_ENV = { ...process.env };
+let ipCounter = 0;
+
+beforeEach(() => {
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  process.env.NEXT_PUBLIC_SITE_URL = "https://tayfhaber.com";
+  dbState.rows = [];
+  dbState.selects = [];
+  dbState.error = null;
+  dbState.errorStatus = 500;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "NEXT_PUBLIC_SITE_URL"]) {
+    if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
+    else delete process.env[k];
+  }
+  vi.restoreAllMocks();
+  vi.resetModules();
+});
+
+function request(pathname: string): Request {
+  ipCounter += 1;
+  return new Request(`http://example.com${pathname}`, {
+    headers: {
+      "x-forwarded-for": `198.51.100.${ipCounter % 250}.${ipCounter}`,
+      authorization: `Bearer ${KEY}`,
+    },
+  });
+}
+
+async function getList() {
+  const { GET } = await import("@/app/api/v1/clusters/route");
+  return GET(request("/api/v1/clusters"));
+}
+
+async function getOne(id: string) {
+  const { GET } = await import("@/app/api/v1/clusters/[id]/route");
+  return GET(request(`/api/v1/clusters/${id}`), { params: Promise.resolve({ id }) });
+}
+
+describe("GET /api/v1/clusters: topic7 comes from the main read", () => {
+  it("copies the stored topic7 onto each record, null and absent alike giving null", async () => {
+    dbState.rows = [row(C1, "ekonomi"), row(C2, null), row(C3, "spor"), row(C4, undefined)];
+
+    const res = await getList();
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const byId = new Map<string, { topic7: string | null }>(
+      body.clusters.map((c: { id: string; topic7: string | null }) => [c.id, c]),
+    );
+    expect(byId.get(C1)?.topic7).toBe("ekonomi");
+    expect(byId.get(C2)?.topic7).toBeNull();
+    expect(byId.get(C3)?.topic7).toBe("spor");
+    expect(byId.get(C4)?.topic7).toBeNull();
+    for (const c of body.clusters) expect("topic7" in c).toBe(true);
   });
 
-  it("short-circuits on an empty id list without querying", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith([OK]);
+  it("reads clusters exactly once: topic7 rides in the one select, no second `id, topic7` probe", async () => {
+    dbState.rows = [row(C1, "ekonomi"), row(C2, "politika")];
 
-    const map = await fetchTopic7(client, []);
+    await getList();
 
-    expect(map.size).toBe(0);
-    expect(calls()).toBe(0);
+    expect(dbState.selects).toHaveLength(1);
+    expect(dbState.selects[0]).toMatch(/\btopic7\b/);
+    expect(dbState.selects).not.toContain("id, topic7");
+    expect(dbState.selects.some((s) => /^id,\s*topic7$/.test(s.trim()))).toBe(false);
   });
 
-  it("does NOT latch off on a reader-cap abort: the next call still reads topic7", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith([
-      {
-        data: null,
-        error: { message: "AbortError: Supabase request exceeded 4000 ms", code: "" },
-      },
-      OK,
-    ]);
+  it("a main-query 57014 is the stable 503 (there is no second read left to swallow it)", async () => {
+    dbState.error = { code: "57014", message: "canceling statement SECRET_NAME" };
 
-    const first = await fetchTopic7(client, IDS);
-    const second = await fetchTopic7(client, IDS);
+    const res = await getList();
 
-    expect(first.size).toBe(0);
-    expect(calls()).toBe(2);
-    expect(second.get("c1")).toBe("politika");
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    const text = await res.text();
+    expect(text).toContain("upstream_unavailable");
+    expect(text).not.toContain("SECRET_NAME");
+    expect(dbState.selects).toHaveLength(1);
+  });
+});
+
+describe("GET /api/v1/clusters/[id]: topic7 comes from the main read", () => {
+  it("returns the stored topic7 from one clusters read", async () => {
+    dbState.rows = [row(C1, "ekonomi")];
+
+    const res = await getOne(C1);
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).cluster.topic7).toBe("ekonomi");
+    expect(dbState.selects).toHaveLength(1);
+    expect(dbState.selects[0]).toMatch(/\btopic7\b/);
+    expect(dbState.selects).not.toContain("id, topic7");
   });
 
-  it("does NOT latch off on a statement_timeout (57014)", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith([
-      {
-        data: null,
-        error: { message: "canceling statement due to statement timeout", code: "57014" },
-      },
-      OK,
-    ]);
+  it("an unassigned cluster is topic7 null on the same 200", async () => {
+    dbState.rows = [row(C2, null)];
 
-    await fetchTopic7(client, IDS);
-    const second = await fetchTopic7(client, IDS);
+    const res = await getOne(C2);
 
-    expect(calls()).toBe(2);
-    expect(second.get("c1")).toBe("politika");
+    expect(res.status).toBe(200);
+    expect((await res.json()).cluster.topic7).toBeNull();
   });
 
-  it("does NOT latch off when the client throws (network failure)", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith(["throw", OK]);
+  it("a main-query 57014 is the stable 503", async () => {
+    dbState.error = { code: "57014", message: "canceling statement SECRET_NAME" };
 
-    const first = await fetchTopic7(client, IDS);
-    const second = await fetchTopic7(client, IDS);
+    const res = await getOne(C1);
 
-    expect(first.size).toBe(0);
-    expect(calls()).toBe(2);
-    expect(second.get("c1")).toBe("politika");
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(await res.text()).not.toContain("SECRET_NAME");
+  });
+});
+
+describe("v1-clusters module: the topic7 contract", () => {
+  it("V1_CLUSTER_SELECT asks for topic7 on the cluster row, outside the member embed", async () => {
+    const { V1_CLUSTER_SELECT } = await import("@/lib/api/v1-clusters");
+    const clusterColumns = V1_CLUSTER_SELECT.split("cluster_articles")[0] as string;
+    expect(clusterColumns).toMatch(/\btopic7\b/);
   });
 
-  it("latches off for good on Postgres undefined_column (42703)", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith([
-      {
-        data: null,
-        error: { message: "column clusters.topic7 does not exist", code: "42703" },
-      },
-      OK,
-    ]);
-
-    const first = await fetchTopic7(client, IDS);
-    const second = await fetchTopic7(client, IDS);
-
-    expect(first.size).toBe(0);
-    expect(second.size).toBe(0);
-    // The probe ran once; the second call never reached the database.
-    expect(calls()).toBe(1);
+  it("toV1ClusterRecord reads topic7 off the row (and null when the row has none)", async () => {
+    const { toV1ClusterRecord } = await import("@/lib/api/v1-clusters");
+    const base = row(C1, undefined) as unknown as Parameters<typeof toV1ClusterRecord>[0];
+    expect(toV1ClusterRecord({ ...base, topic7: "dunya" }).topic7).toBe("dunya");
+    expect(toV1ClusterRecord({ ...base, topic7: null }).topic7).toBeNull();
+    expect(toV1ClusterRecord(base).topic7).toBeNull();
   });
 
-  it("latches off on a PostgREST schema-cache miss (PGRST204)", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith([
-      {
-        data: null,
-        error: {
-          message: "Could not find the 'topic7' column of 'clusters' in the schema cache",
-          code: "PGRST204",
-        },
-      },
-      OK,
-    ]);
-
-    await fetchTopic7(client, IDS);
-    const second = await fetchTopic7(client, IDS);
-
-    expect(second.size).toBe(0);
-    expect(calls()).toBe(1);
+  it("the second-read helper and its process-wide latch are gone", async () => {
+    const mod = (await import("@/lib/api/v1-clusters")) as Record<string, unknown>;
+    expect(mod.fetchTopic7).toBeUndefined();
   });
 
-  it("latches off on a code-less 'topic7 ... does not exist' message", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith([
-      { data: null, error: { message: "column clusters.topic7 does not exist" } },
-      OK,
-    ]);
-
-    await fetchTopic7(client, IDS);
-    await fetchTopic7(client, IDS);
-
-    expect(calls()).toBe(1);
-  });
-
-  it("does NOT latch on an unrelated 'does not exist' error", async () => {
-    const fetchTopic7 = await freshFetchTopic7();
-    const { client, calls } = clientWith([
-      { data: null, error: { message: "relation \"clusters\" does not exist", code: "42P01" } },
-      OK,
-    ]);
-
-    await fetchTopic7(client, IDS);
-    const second = await fetchTopic7(client, IDS);
-
-    expect(calls()).toBe(2);
-    expect(second.get("c1")).toBe("politika");
+  it("V1_TOPIC7_VALUES is the production check constraint (migration 067): the six hubs plus politika", async () => {
+    const { V1_TOPIC7_VALUES } = await import("@/lib/api/v1-clusters");
+    const sql = readFileSync(
+      path.join(process.cwd(), "supabase/migrations/067_cluster_topics.sql"),
+      "utf8",
+    );
+    const list = /or topic7 in \(([^)]*)\)/.exec(sql)?.[1] ?? "";
+    const inConstraint = list.split(",").map((v) => v.trim().replace(/'/g, "")).filter(Boolean);
+    expect(inConstraint).toHaveLength(7);
+    expect([...V1_TOPIC7_VALUES].sort()).toEqual([...inConstraint].sort());
   });
 });

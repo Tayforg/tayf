@@ -12,6 +12,9 @@ import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const cacheMocks = vi.hoisted(() => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
+// errors.ts imports the Sentry helper; the classification below never calls it.
+vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
+
 vi.mock("next/cache", () => ({
   cacheLife: cacheMocks.cacheLife,
   cacheTag: cacheMocks.cacheTag,
@@ -492,6 +495,74 @@ describe("fetchTickerPickup", () => {
 
     const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
     await expect(fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 })).rejects.toThrow();
+  });
+
+  // h128-apiv1-3: every read error keeps its `[finance] fetchTickerPickup ...: <message>` text and
+  // carries the PostgREST error (with the response status) as its cause, so the keyed
+  // /api/v1/kap/pickup route can answer a database outage with the 503 instead of a 500.
+  describe("h128-apiv1-3: a database outage stays classifiable", () => {
+    type Reply = { data: unknown; error: { message: string; code?: string } | null; status?: number };
+    const OUTAGES: Array<[string, { message: string; code?: string }, number]> = [
+      ["a 57014 statement timeout", { message: "canceling statement due to statement timeout", code: "57014" }, 500],
+      ["the reader cap's AbortError", { message: "AbortError: Supabase request exceeded 4000 ms", code: "" }, 0],
+      ["a gateway answer with an HTML body (504)", { message: "<html>Gateway Timeout</html>", code: "" }, 504],
+    ];
+    const ISSUER_ROW = {
+      disclosure_index: 1,
+      published_at: iso(NOW - 2 * DAY),
+      stock_codes: ["THYAO"],
+      subject: null,
+      disclosure_class: null,
+    };
+    const run = async (tables: Record<string, () => Reply>) => {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const { client } = createSupabaseFake({ tables: tables as never });
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      const { isUpstreamUnavailable } = await import("@/lib/api/errors");
+      const err = await fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 }).catch(
+        (e: unknown) => e,
+      );
+      return { err: err as Error, outage: isUpstreamUnavailable(err) };
+    };
+
+    it.each(OUTAGES)("the disclosure read, %s", async (_label, error, status) => {
+      const { err, outage } = await run({
+        kap_disclosures: () => ({ data: null, error, status }),
+      });
+      expect(err.message).toBe(`[finance] fetchTickerPickup disclosures: ${error.message}`);
+      expect(outage).toBe(true);
+    });
+
+    it.each(OUTAGES)("the mention read, %s", async (_label, error, status) => {
+      const { err, outage } = await run({
+        kap_disclosures: () => ({ data: [ISSUER_ROW], error: null }),
+        article_tickers: () => ({ data: null, error, status }),
+      });
+      expect(err.message).toBe(`[paging] fetchTickerPickup mentions THYAO: ${error.message}`);
+      expect(outage).toBe(true);
+    });
+
+    it.each(OUTAGES)("the source read, %s", async (_label, error, status) => {
+      const { err, outage } = await run({
+        kap_disclosures: () => ({ data: [ISSUER_ROW], error: null }),
+        article_tickers: () => ({
+          data: [{ article_id: "a1", published_at: iso(NOW - DAY), created_at: iso(NOW - DAY), source_id: "s1" }],
+          error: null,
+        }),
+        jev_shadow_predictions: () => ({ data: [], error: null }),
+        sources: () => ({ data: null, error, status }),
+      });
+      expect(err.message).toBe(`[finance] fetchTickerPickup sources: ${error.message}`);
+      expect(outage).toBe(true);
+    });
+
+    it("a unique violation on the disclosure read is not an outage", async () => {
+      const { err, outage } = await run({
+        kap_disclosures: () => ({ data: null, error: { message: "duplicate key", code: "23505" }, status: 409 }),
+      });
+      expect(err.message).toBe("[finance] fetchTickerPickup disclosures: duplicate key");
+      expect(outage).toBe(false);
+    });
   });
 
   // h48-ekonomi-2: issuer = the ticker is in the notice's own stock_codes. A notice

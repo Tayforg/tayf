@@ -151,7 +151,8 @@ describe("GET /api/v1/clusters/[id] — merged clusters", () => {
   it("a live cluster is 200 with exactly one main clusters query and no merged_into lookup", async () => {
     const res = await get(LIVE);
     expect(res.status).toBe(200);
-    // (fetchTopic7 issues its own topic probe against clusters; that is not the row lookup.)
+    // topic7 rides in the main select (h128-apiv1-4): no second `id, topic7` probe any more.
+    expect(dbState.clusterQueries).toHaveLength(1);
     expect(dbState.clusterQueries.filter((q) => q.archivedEq)).toHaveLength(1);
     expect(dbState.clusterQueries.filter((q) => q.select === "merged_into")).toHaveLength(0);
   });

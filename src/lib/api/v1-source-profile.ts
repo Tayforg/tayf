@@ -36,7 +36,21 @@ export interface V1SourceProfile {
   public_blindspot_same_side: number | null;
 }
 
-export function toV1SourceProfile(k: SourceKarne): V1SourceProfile {
+export interface V1SourceProfileOptions {
+  /**
+   * Whether the source's kind votes (default true: an outlet or a wire, or a source with no kind). An
+   * aggregator or niche source has no vote: migration 106 derives its own_zone from the bias label, so
+   * "the zone that wrote the story" is a zone it never voted in, and the karne drops the "yazan
+   * bölgedeydi" clause for it (buildKarneView's `voting`). This mirrors it: `public_blindspot_same_side`
+   * is null, while `public_blindspot_appearances` stays.
+   */
+  voting?: boolean;
+}
+
+export function toV1SourceProfile(
+  k: SourceKarne,
+  { voting = true }: V1SourceProfileOptions = {},
+): V1SourceProfile {
   const sufficient = k.nClusters >= KARNE_MIN_CLUSTERS;
   const zonesShown = sufficient && k.nMulti >= KARNE_MIN_MULTI_FOR_ZONES;
   return {
@@ -54,6 +68,6 @@ export function toV1SourceProfile(k: SourceKarne): V1SourceProfile {
       ? { iktidar: k.co.iktidar, bagimsiz: k.co.bagimsiz, muhalefet: k.co.muhalefet }
       : null,
     public_blindspot_appearances: sufficient ? k.nBlindspot : null,
-    public_blindspot_same_side: sufficient ? k.nBlindspotSameSide : null,
+    public_blindspot_same_side: sufficient && voting ? k.nBlindspotSameSide : null,
   };
 }

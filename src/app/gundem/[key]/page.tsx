@@ -16,6 +16,7 @@ import {
   entityByKey,
   entityHubNote,
   entityHubRobots,
+  hubMatchNote,
   isEntityKey,
 } from "@/lib/entities/entity-hub";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
@@ -92,8 +93,6 @@ const footerLinkClass =
 const UNAVAILABLE_COPY =
   "Bu sayfa şu anda yüklenemiyor. Birkaç dakika içinde tekrar deneyin.";
 const EMPTY_COPY = `Son ${ENTITY_HUB_WINDOW_DAYS} günde bu konuda küme yok.`;
-const MATCH_NOTE =
-  "Eşleşme, küme başlığı ve özetinde tam metin aramasıyla yapılır; eş adlı kişi ve kurumlar karışabilir.";
 
 export default async function EntityHubPage({ params }: PageProps) {
   const { key } = await params;
@@ -164,7 +163,10 @@ export default async function EntityHubPage({ params }: PageProps) {
               while kind="gundem" is answered by this page's own matcher. */}
           <FollowButton kind="gundem" value={entity.key} />
         </div>
-        <p className={noteClass}>{MATCH_NOTE}</p>
+        {/* What THIS hub searches (h128-hubs-1): the headline and the summary's first line (its first
+            paragraph; for almost every cluster the whole summary), or the headline alone for a
+            headline-only hub. Never "tam metin": no hub reads the body. */}
+        <p className={noteClass}>{hubMatchNote(entity)}</p>
       </div>
 
       {result === null ? (

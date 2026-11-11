@@ -323,11 +323,12 @@ describe("getEntityHub query shape", () => {
       expect.arrayContaining(["borsa", "bist", "borsada", "borsası"]),
     );
     // 'Borsa İstanbul' and 'BIST' are bare (trusted); the bare 'Borsa' carries the
-    // exclude guard that keeps New York, Asia and Binance stories out (h43-entities-2).
+    // exclude guard that keeps New York, Asia and Binance stories out (h43-entities-2) and,
+    // behind it, the hub-only foreign cues (h128-hubs-1: abd, cin, japonya).
     expect(borsa!.p_patterns).toHaveLength(3);
     expect(borsa!.p_patterns[0]).toBe("\\mborsa\\s+istanbul");
     expect(borsa!.p_patterns[1]).toMatch(
-      /^\^\(\?!\[\\s\\S\]\*\(\?:\\mnew\\s\+york\|.*\\mkripto\|\\mticaret\\s\+borsa\)\)\[\\s\\S\]\*\\mborsa$/,
+      /^\^\(\?!\[\\s\\S\]\*\(\?:\\mnew\\s\+york\|.*\\mkripto\|\\mticaret\\s\+borsa\)\)\(\?!\[\\s\\S\]\*\(\?:\\mabd\\M\|\\mcin\\M\|\\mjaponya\)\)\[\\s\\S\]\*\\mborsa$/,
     );
     expect(borsa!.p_patterns[2]).toBe("\\mbist");
   });

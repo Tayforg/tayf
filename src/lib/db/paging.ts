@@ -13,6 +13,8 @@ export const POSTGREST_MAX_ROWS = 1000;
 interface PageEnvelope<T> {
   data: T[] | null;
   error: { message: string } | null;
+  /** The PostgREST response status; carried into the thrown error's `cause` so a gateway 5xx stays classifiable. */
+  status?: number;
 }
 
 export interface ReadAllPagesOptions {
@@ -35,7 +37,9 @@ export interface ReadAllPagesOptions {
  * means the result may be cut off: it returns what was read with
  * `truncated: true` and warns once. THROWS `[paging] <label>: <message>` on a
  * Supabase error, discarding earlier pages (a partial result would be a wrong
- * number presented as a right one).
+ * number presented as a right one). The error and the response status are the
+ * thrown Error's `cause`, so a database outage stays classifiable behind the
+ * prefix (`isUpstreamUnavailable`).
  */
 export async function readAllPages<T>(
   fetchPage: (from: number, to: number) => PromiseLike<PageEnvelope<T>>,
@@ -50,8 +54,10 @@ export async function readAllPages<T>(
   const rows: T[] = [];
   for (let page = 0; page < maxPages; page++) {
     const from = page * pageSize;
-    const { data, error } = await fetchPage(from, from + pageSize - 1);
-    if (error) throw new Error(`[paging] ${label}: ${error.message}`);
+    const { data, error, status } = await fetchPage(from, from + pageSize - 1);
+    // `cause` keeps the PostgREST code and response status (a 57014, the reader cap's abort, a gateway
+    // 5xx) behind the prefixed message, so a keyed route can still answer an outage with the 503.
+    if (error) throw new Error(`[paging] ${label}: ${error.message}`, { cause: { ...error, status } });
     const batch = data ?? [];
     rows.push(...batch);
     if (batch.length < pageSize) return { rows, truncated: false };

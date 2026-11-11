@@ -693,11 +693,18 @@ example above is the real shape, not a trimmed one); read a missing key as 0.
 Per member, only `{slug, zone}` is
 ever surfaced — no article title, URL, image or description is present
 anywhere in the payload; the only URL in a cluster record is Tayf's own
-`/cluster/<id>` link. `topic7` is nullable: the `clusters.topic7` column
-exists in production, so a `null` means no topic has been assigned to that
-cluster. The column is probed once per server process; if the probe ever
-fails (e.g. the column is absent on a preview deploy) the field degrades to
-`null` for the remaining lifetime of that process rather than erroring.
+`/cluster/<id>` link.
+
+`topic7` is the cluster's own topic label, read in the same query as the rest
+of the record, so it is never silently dropped: if that read fails the whole
+request is the `503` described under *Response codes*, not a `200` with a
+blanked field. It is one of `politika`, `dunya`, `ekonomi`, `spor`, `yasam`,
+`teknoloji` or `genel`, and `null` means no topic has been assigned to that
+cluster yet (a recent cluster often has none). It is **not** the feed category
+the `≥60%` rule above uses: that rule looks at the `politika`/`son_dakika`
+category of the member articles, while `topic7` is a separate classification of
+the cluster as a whole, so a record in this list can carry `ekonomi`, `dunya`
+or `spor` as its `topic7`.
 
 `is_blindspot` and `blindspot_side` are the stored flag minus the recall veto,
 `is_blindspot AND NOT blindspot_recall_veto`; they are **not** the claim the
@@ -793,6 +800,11 @@ Null and threshold rules (same as the site):
 - Fewer than 20 clustered stories (`sufficient: false`): only the window
   fields and `n_clusters` are set; `n_multi`, `n_solo`, `co_covering_zones`
   and both blindspot fields are `null`.
+- `public_blindspot_same_side` is `null` for an aggregator or niche source
+  (its `kind` in the source record), as on the source page's karne: such a
+  source has no vote, its own zone is derived from its bias label, so "the zone
+  that wrote the story" is a zone it never voted in. `public_blindspot_appearances`
+  is still reported. Outlets and wires keep both numbers.
 - 20 or more stories but fewer than 10 multi-source stories:
   `co_covering_zones` is `null`, the rest is present.
 - `profile` itself is `null` when the source has no computed row yet (or the
@@ -840,6 +852,7 @@ production) — this endpoint is always ticker- and time-bounded on
   "relevance_filter": { "task": "ticker_relevance", "min_prob": 0.2, "applied": true },
   "truncated": false,
   "capped": false, "total_disclosures": 15, "superseded": 1,
+  "press_code": null,
   "totals": {
     "disclosures": 12, "picked_up": 9, "pickup_rate": 0.75,
     "median_first_lag_minutes": 184, "outlets": 14,
@@ -885,6 +898,19 @@ Notes:
   unrelated articles. Clients that sum `disclosures[].articles` keep working;
   clients that read `totals.disclosures` now get the issuer count, which is
   what `/ekonomi/[ticker]` shows.
+- **`press_code`** (additive): `bist_companies` holds one row per company with
+  every share code it trades under (Iş Bankası: `ISATR`, `ISBTR`, `ISCTR`,
+  `ISKUR`, `TIB`), KAP files a notice under every one of them, and the press
+  is matched to only one (`ISCTR`). When the ticker has no mention of its own
+  in the window and a sibling code of the same company has some, `press_code` is
+  that sibling (the one with most mentions, ties alphabetical): the press names
+  the company by that code. `totals.pickup_rate` and `totals.median_first_lag_minutes`
+  are `null` then, instead of a misleading `0` computed from the empty code,
+  and the rest of the body is unchanged: query `press_code` for the ratios. It
+  is `null` when the ticker has mentions of its own, when the company has a
+  single code, and when a read behind it failed (the lookup fails open and the
+  response stays a `200`). This is the "Basın bu şirketi ISCTR koduyla anıyor"
+  note of `/ekonomi/[ticker]`.
 - **Relevance filter**: mentions Jev's `ticker_relevance` shadow model
   scored below 0.2 are excluded (a documented false-positive band — e.g. a
   political-party story matching a same-named ticker). Unscored mentions

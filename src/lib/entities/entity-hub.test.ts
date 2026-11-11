@@ -25,6 +25,7 @@ import {
   entityHubRobots,
   entityHubSpec,
   foldEntityText,
+  hubMatchNote,
   isEntityKey,
   sumDistributions,
 } from "./entity-hub";
@@ -337,6 +338,32 @@ const IMAMOGLU_EXCLUDES = ["imamoglu ilce", "tugberk imamoglu"] as const;
 const IMAMOGLU_NOT_AFTER = ["adana", "tugberk"] as const;
 
 /**
+ * The foreign cues that veto the generic-word hubs (folded; h128-hubs-1, the spec restated). Hub-only: no migration
+ * mirrors them and /trends never reads them. Each list is what the 2026-11-11 replay left standing: a cue that
+ * removes more foreign rows than Turkish ones and at least one no other cue removes.
+ */
+const ENFLASYON_HUB_EXCLUDES = ["abd", "fed", "ingiltere", "new york borsa"] as const;
+const FAIZ_HUB_EXCLUDES = ["abd", "fed", "ecb", "ingiltere", "new york borsa"] as const;
+const DOLAR_HUB_EXCLUDES = ["ara secim", "fed", "irak", "cin"] as const;
+const BORSA_HUB_EXCLUDES = ["abd", "cin", "japonya"] as const;
+const ASGARI_UCRET_HUB_EXCLUDES = ["banglades"] as const;
+/** borsa's own `excludes` (the markets list of h43-entities-2, untouched by h128-hubs-1). */
+const BORSA_EXCLUDES = [
+  "new york",
+  "wall street",
+  "nasdaq",
+  "dow jones",
+  "nikkei",
+  "asya borsa",
+  "avrupa borsa",
+  "londra borsa",
+  "frankfurt",
+  "binance",
+  "kripto",
+  "ticaret borsa",
+] as const;
+
+/**
  * The guard in front of a non-trusted base: a negative lookahead over the
  * excludes, a second one over the hub-only excludes, then a positive lookahead
  * over the requires (each only when its list is non-empty), then `[\s\S]*`. A
@@ -406,15 +433,20 @@ describe("entityHubPatterns (exact runtime values)", () => {
   const expected: Record<string, string[]> = {
     deva: ["\\mdeva\\M"],
     "iyi-parti": ["\\miyi\\s+parti"],
+    // The five generic-word hubs carry hub-only foreign vetoes behind the (empty) excludes slot (h128-hubs-1).
+    enflasyon: [`${guardPrefix([], undefined, ENFLASYON_HUB_EXCLUDES)}\\menflasyon`],
+    faiz: [`${guardPrefix([], undefined, FAIZ_HUB_EXCLUDES)}\\mfaiz`],
     dolar: [
-      "\\m(?<![0-9]\\s)(?<![0-9])(?<!bin\\s)(?<!milyon\\s)(?<!milyar\\s)(?<!trilyon\\s)(?<!milyonlarca\\s)(?<!milyarlarca\\s)dolar",
+      `${guardPrefix([], undefined, DOLAR_HUB_EXCLUDES)}\\m(?<![0-9]\\s)(?<![0-9])(?<!bin\\s)(?<!milyon\\s)(?<!milyar\\s)(?<!trilyon\\s)(?<!milyonlarca\\s)(?<!milyarlarca\\s)dolar`,
     ],
     akp: ["\\mak\\s+parti", "\\makp\\M"],
     zelenski: ["\\mzelenski\\M", "\\mzelenskiy\\M", "\\mzelensky\\M", "\\mzelenskyy\\M"],
-    // 'Borsa İstanbul' and 'BIST' are trusted (bare); the bare 'Borsa' carries the exclude guard.
+    // 'Borsa İstanbul' and 'BIST' are trusted (bare); the bare 'Borsa' carries the exclude guard and, behind it, the
+    // hub-only foreign vetoes (h128-hubs-1).
     borsa: [
       "\\mborsa\\s+istanbul",
-      "^(?![\\s\\S]*(?:\\mnew\\s+york|\\mwall\\s+street|\\mnasdaq|\\mdow\\s+jones|\\mnikkei|\\masya\\s+borsa|\\mavrupa\\s+borsa|\\mlondra\\s+borsa|\\mfrankfurt|\\mbinance|\\mkripto|\\mticaret\\s+borsa))[\\s\\S]*\\mborsa",
+      // The two lookaheads: the 12 markets excludes, then the hub-only cues ('abd' and 'cin' are closed, 3 letters).
+      "^(?![\\s\\S]*(?:\\mnew\\s+york|\\mwall\\s+street|\\mnasdaq|\\mdow\\s+jones|\\mnikkei|\\masya\\s+borsa|\\mavrupa\\s+borsa|\\mlondra\\s+borsa|\\mfrankfurt|\\mbinance|\\mkripto|\\mticaret\\s+borsa))(?![\\s\\S]*(?:\\mabd\\M|\\mcin\\M|\\mjaponya))[\\s\\S]*\\mborsa",
       "\\mbist",
     ],
     // One fixed-length negative lookbehind per foreign-country word, right before the base word.
@@ -450,7 +482,7 @@ describe("entityHubPatterns (exact runtime values)", () => {
     ],
     chp: ["\\mchp\\M"],
     cin: ["\\mcin\\M"],
-    "asgari-ucret": ["\\masgari\\s+ucret"],
+    "asgari-ucret": [`${guardPrefix([], undefined, ASGARI_UCRET_HUB_EXCLUDES)}\\masgari\\s+ucret`],
     dem: ["\\mdem\\s+parti"],
     pkk: ["\\mpkk\\M"],
     aym: [
@@ -1747,6 +1779,13 @@ describe("invariants over every curated entity", () => {
       ["meclis with a cue, hub-only exclude at the end", fit("komisyon meclis ").slice(0, N - 14) + " parti meclisi"],
       ["hub-only excludes repeated, meclis at the end", fit("kktc ibb meclis ").slice(0, N - 7) + " meclis"],
       ["dolar behind amounts", fit("100 dolar milyar dolar ")],
+      ["enflasyon blocked on every line", fit("abd enflasyon ")],
+      ["enflasyon repeated, foreign cue at the end", fit("enflasyon ").slice(0, N - 4) + " abd"],
+      ["foreign cue repeated, enflasyon at the end", fit("abd ").slice(0, N - 10) + " enflasyon"],
+      ["faiz repeated, new york borsa at the end", fit("faiz new york ").slice(0, N - 15) + " new york borsa"],
+      ["near-miss new york cue", fit("new york times ")],
+      ["dolar repeated, ara secim at the end", fit("dolar ara ").slice(0, N - 10) + " ara secim"],
+      ["asgari ucret repeated, banglades at the end", fit("asgari ucret ").slice(0, N - 10) + " banglades"],
       ["digits", "1".repeat(N)],
       ["erdogan blocked on every line", fit("fatih erdogan ")],
       ["erdogan repeated, family name at the end", fit("erdogan ").slice(0, N - 14) + " emine erdogan"],
@@ -1756,7 +1795,10 @@ describe("invariants over every curated entity", () => {
       ["milli egitim repeated, foreign ministry at the end", fit("milli egitim bakani ").slice(0, N - 18) + " kktc milli egitim"],
       ["milli savunma repeated, no foreign cue", fit("milli savunma bakanligi ")],
     ];
-    const keys = ["disisleri", "borsa", "meclis", "aym", "tcmb", "dolar", "erdogan", "imamoglu", "meb", "msb"];
+    const keys = [
+      "disisleri", "borsa", "meclis", "aym", "tcmb", "dolar", "erdogan", "imamoglu", "meb", "msb",
+      "enflasyon", "faiz", "asgari-ucret",
+    ];
 
     it("builds every input at exactly 100k characters", () => {
       for (const [name, text] of inputs) expect(text.length, name).toBe(N);
@@ -2045,7 +2087,9 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
         "kripto",
         "ticaret borsa",
       ],
+      hubExcludes: [...BORSA_HUB_EXCLUDES],
     });
+    expect(RISING_HUB_SPECS.borsa?.excludes).toEqual([...BORSA_EXCLUDES]);
   });
 
   it("the erdogan spec (h56-entities-1): the President by title is trusted, a family member vetoes the story, a given name skips one occurrence", () => {
@@ -2147,13 +2191,57 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     expect(tokens("imamoglu")).toEqual(["imamoglu"]);
   });
 
-  it("hubExcludes (vetoes that /trends does not mirror) is curated on exactly meclis", () => {
+  it("hubExcludes (vetoes that /trends does not mirror) is curated on exactly meclis and the five generic-word hubs (h128-hubs-1)", () => {
     expect(
       specs
         .filter(([, s]) => s.hubExcludes !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["meclis"]);
+    ).toEqual(["asgari-ucret", "borsa", "dolar", "enflasyon", "faiz", "meclis"]);
+  });
+
+  it("the five generic-word hubs: the foreign cues the 2026-11-11 replay left standing, as folded ASCII phrases, no headlineOnly", () => {
+    expect(RISING_HUB_SPECS.enflasyon).toEqual({ hubMatch: "prefix", hubExcludes: [...ENFLASYON_HUB_EXCLUDES] });
+    expect(RISING_HUB_SPECS.faiz).toEqual({ hubMatch: "prefix", hubExcludes: [...FAIZ_HUB_EXCLUDES] });
+    expect(RISING_HUB_SPECS.dolar).toEqual({
+      hubMatch: "prefix",
+      quantityGuard: true,
+      hubExcludes: [...DOLAR_HUB_EXCLUDES],
+    });
+    expect(RISING_HUB_SPECS["asgari-ucret"]).toEqual({
+      inflections: ["asgari ücretli", "asgari ücretlilerin"],
+      hubExcludes: [...ASGARI_UCRET_HUB_EXCLUDES],
+    });
+    // None of them touches `excludes`, `requires` or `trusted` (migration 163 mirrors those for tcmb, aym, meclis only).
+    for (const key of ["enflasyon", "faiz", "dolar", "asgari-ucret"]) {
+      expect(RISING_HUB_SPECS[key]?.excludes, key).toBeUndefined();
+      expect(RISING_HUB_SPECS[key]?.requires, key).toBeUndefined();
+      expect(RISING_HUB_SPECS[key]?.trusted, key).toBeUndefined();
+    }
+  });
+
+  it("the generic-word hubs never veto on a bare 'abd' where the lira rate is the story (dolar), nor on words a Turkish story uses", () => {
+    // dolar: 'Dolar/TL ... ABD seçimlerinin ardından' is a Turkish lira report, and the Turkish dollar-swap stories
+    // name 'Trump', 'Bessent' and 'Arjantin' (365-day replay): none of them is a cue.
+    for (const never of ["abd", "trump", "kongre", "bessent", "arjantin", "turkiye", "tl", "lira"]) {
+      expect(RISING_HUB_SPECS.dolar?.hubExcludes, never).not.toContain(never);
+    }
+    // 'kongre' is also a Turkish party congress (96127c6b), and a bare 'new york' would catch 'New York Times'.
+    for (const key of ["enflasyon", "faiz", "dolar", "borsa", "asgari-ucret"]) {
+      expect(RISING_HUB_SPECS[key]?.hubExcludes, key).not.toContain("kongre");
+      expect(RISING_HUB_SPECS[key]?.hubExcludes, key).not.toContain("new york");
+      expect(RISING_HUB_SPECS[key]?.hubExcludes, key).not.toContain("turkiye");
+    }
+    // A Turkish enflasyon story that compares Turkey with other countries (Özdağ, ef9a8076) stays: no country list.
+    expect(
+      hubMatches(
+        "enflasyon",
+        "Özdağ: Savaş halinde olan ülkelerden daha yüksek bir enflasyonla bu halk bu şekilde eziliyor. Türkiye'deki enflasyonu Rusya, Ukrayna ve Suriye ile karşılaştırarak",
+      ),
+    ).toBe(true);
+    // A New York Times citation is not a New York exchange report.
+    expect(hubMatches("faiz", "New York Times yazdı: Türkiye'de faiz kararı bekleniyor")).toBe(true);
+    expect(hubMatches("faiz", "New York borsası Fed kararı öncesi karışık açıldı")).toBe(false);
   });
 
   it("requires is curated on exactly meclis and tcmb", () => {
@@ -2254,5 +2342,270 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     expect(RISING_HUB_SPECS.tcmb?.trusted).toEqual(["TCMB"]);
     expect(RISING_HUB_SPECS.meclis?.trusted).toEqual(["TBMM", "Büyük Millet Meclisi"]);
     expect(RISING_HUB_SPECS.borsa?.trusted).toEqual(["Borsa İstanbul", "BIST"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h128-hubs-1 (2026-11-11). The generic-word hubs (/gundem/enflasyon, faiz, dolar, borsa, asgari-ucret) listed
+// other countries' stories and passing mentions: US midterm wraps, Fed decisions, New York openings, a Chinese
+// regulator's death sentence, Bangladeshi textile strikes. The bare word names the topic in every country, so each
+// hub gets hub-only vetoes (hubExcludes: no migration, nothing changes on /trends) for the foreign cues the replay
+// found. The summary lead stays in the matched text: it carries most of the Turkish emekli-zam stories of
+// enflasyon, so headlineOnly is NOT set. Every title and lead below is a live cluster of the 14-day replay.
+// ---------------------------------------------------------------------------
+
+describe("generic-word hubs: other countries' stories are out, Turkish ones stay (h128-hubs-1)", () => {
+  /** Title (and neutral title), then the summary lead, joined like the RPC's guard text. */
+  const story = (headline: string, lead = "") => `${headline} ${lead}`;
+
+  describe("must not match", () => {
+    it("borsa: a Chinese regulator's death sentence (75ff029b) is not Borsa İstanbul", () => {
+      expect(hubMatches("borsa", "Çin'de eski borsa denetim başkanına idam cezası")).toBe(false);
+      expect(
+        hubMatches(
+          "borsa",
+          story(
+            "Çin'de CSRC eski başkanı Yi Huiman'a rüşvetten 2 yıl ertelemeli idam cezası verildi Çin'de eski borsa denetim başkanına idam cezası",
+            "Çin'de CSRC eski başkanı Yi Huiman, yolsuzluk soruşturmasının ardından rüşvet suçundan 2 yıl ertelemeyle idam cezasına çarptırıldı.",
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it("borsa: the US-election gold, oil and global-market wraps (2a6b4822, 0ef5843d) are not Borsa İstanbul", () => {
+      expect(
+        hubMatches(
+          "borsa",
+          story(
+            "Seçim sonrası piyasalarda ters rüzgar! Altın ve borsa yükseldi, petrol geriledi ABD ara seçimleri sonrası ons altın 4 bin 25 doları gördü, brent 102 dolara indi",
+            "ABD ara seçimlerinin ardından altının onsu 4 bin 25 dolara yükselirken, Brent petrolün varil fiyatı 102 dolara kadar geriledi.",
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        hubMatches(
+          "borsa",
+          story(
+            "ABD ara seçimleri küresel piyasaları salladı! Dolar geriledi, altın fırladı, borsalarda büyük çalkantı",
+            "ABD'deki Kongre ara seçimlerinin ilk sonuçlarının netleşmesiyle küresel piyasalarda dalgalanma yaşandı.",
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it("asgari-ucret: Bangladeshi textile workers (7b83daa0) are not the Turkish minimum wage", () => {
+      expect(hubMatches("asgari-ucret", "Bangladeş'te tekstil işçileri asgari ücret için sokakta")).toBe(false);
+      expect(
+        hubMatches(
+          "asgari-ucret",
+          story(
+            "Bangladeş'te tekstil işçileri asgari ücret için sokakta",
+            "Bangladeş'te tekstil işçilerinin asgari ücret protestoları sürerken hükümet 6 üyeli ücret kurulu kurdu.",
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it("enflasyon: Vance on the US midterms (b6fe7960) is out, on the headline and on the lead", () => {
+      expect(
+        hubMatches(
+          "enflasyon",
+          story(
+            "ABD Başkan Yardımcısı Vance: Ara seçimleri kaybetmemizin nedeni İran savaşı",
+            "Hayat pahalılığına ve enflasyona odaklanın, diye uyardı.",
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it("enflasyon: 'ABD sandık başında' (c89215b1) is out, whatever the lead says about inflation", () => {
+      expect(
+        hubMatches(
+          "enflasyon",
+          story(
+            "ABD sandık başında: Seçimler Trump'ın ikinci döneminin kaderini çizecek",
+            "Yüksek hayat pahalılığı, tırmanan enflasyon ve İran ile devam eden savaşın gölgesinde sandık başına giden ABD'li seçmenler.",
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it("enflasyon: US data wraps, the Fed and New York openings are out", () => {
+      expect(hubMatches("enflasyon", "Fed politika faizini yüzde 3,75-4 aralığında tuttu")).toBe(false);
+      expect(hubMatches("enflasyon", "Son dakika... ABD eylül enflasyonu açıklandı")).toBe(false);
+      expect(
+        hubMatches("enflasyon", "New York borsası enflasyon verilerinin ardından düşüşle açıldı"),
+      ).toBe(false);
+    });
+
+    it("faiz: the Fed's decision and the US-election gold story with US Treasury yields in the lead are out", () => {
+      expect(hubMatches("faiz", "FED faiz kararını açıkladı")).toBe(false);
+      expect(
+        hubMatches("faiz", "Fed politika faizini yüzde 3,75-4 aralığında tuttu, iki üye 25 baz puan artış istedi"),
+      ).toBe(false);
+      expect(
+        hubMatches(
+          "faiz",
+          story(
+            "ABD seçimleri altın fiyatlarını yükseltti: Gram altın 6 bin 335 liraya çıktı",
+            "ABD ara seçimlerinde Demokratların kazanımlarıyla dolar ve ABD Hazine tahvili faizleri gerilerken altın yükselişe geçti.",
+          ),
+        ),
+      ).toBe(false);
+      expect(hubMatches("faiz", "New York borsası Fed kararı öncesi karışık açıldı")).toBe(false);
+    });
+
+    it("dolar: the US-election gold and market wraps are out (the dollar is a side word there)", () => {
+      expect(
+        hubMatches(
+          "dolar",
+          story(
+            "ABD ara seçimleri sonrası altın yükselişe geçti",
+            "ABD ara seçimleri sonrası altın fiyatları yüzde 2'nin üzerinde yükseldi. Doların değer kaybetmesi ve tahvil getirilerindeki düşüş de seçimleri destekledi.",
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        hubMatches(
+          "dolar",
+          story(
+            "Dev bankadan ABD seçimleri sonrası dolar analizi: Düşüş sürecek mi? ING'den ABD ara seçimleri analizi: Dolar için 101,25 seviyesi öne çıktı",
+            "ABD'de ara seçimlerin ardından Demokratların Kongre'nin iki kanadında da çoğunluğu elde etmesi küresel piyasalarda hareketliliğe yol açtı.",
+          ),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe("must still match", () => {
+    it("enflasyon: Işıkhan's emekli zam statement, whose lead carries 'enflasyon farkı' (the Turkish lead-only stories)", () => {
+      expect(
+        hubMatches(
+          "enflasyon",
+          story(
+            "Bakan Işıkhan'dan emekliye zam açıklaması",
+            "SGK uzmanı, milletvekillerinin enflasyon farkına ilave emeklilere 10-15 bin TL seyyanen zam için ısrarcı olduğunu belirtti.",
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        hubMatches(
+          "enflasyon",
+          story(
+            "Bakan Işıkhan duyurmuştu: Emekliye enflasyon farkının üzerine 'seyyanen zam' masada!",
+            "Emekli maaşlarında 2027 yılı zamları için bekleyiş sürüyor. Dört aylık enflasyon farkı yüzde 8,28'e ulaştı.",
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it("enflasyon: the monthly figure and the minister's reading of it", () => {
+      expect(hubMatches("enflasyon", "Ekim ayı enflasyonu açıklandı")).toBe(true);
+      expect(hubMatches("enflasyon", "Bakan Şimşek'ten enflasyon mesajı: Tekrar düşüş trendinde")).toBe(true);
+      expect(hubMatches("enflasyon", "Son dakika... İstanbul'un ekim ayı enflasyonu belli oldu")).toBe(true);
+    });
+
+    it("faiz: the Turkish policy rate, budget interest and credit-card interest", () => {
+      expect(hubMatches("faiz", "Merkez Bankası politika faizini sabit tuttu")).toBe(true);
+      expect(
+        hubMatches("faiz", "Yeni Partili Tanrıkulu: Faiz gideri 4 trilyon TL civarında, bütçe açığının tümünü faiz giderleri oluşturuyor"),
+      ).toBe(true);
+      expect(hubMatches("faiz", "Kredi kartı borçları için yeni düzenleme önerisi Meclis gündeminde: faiz sınırı")).toBe(true);
+    });
+
+    it("borsa: Borsa İstanbul and BIST are trusted, so a foreign cue in the same story does not drop them", () => {
+      expect(hubMatches("borsa", "Borsa İstanbul günü yükselişle tamamladı")).toBe(true);
+      expect(hubMatches("borsa", "BIST 100, ABD seçimleri sonrası yükselişle kapandı")).toBe(true);
+      expect(hubMatches("borsa", "Borsa İstanbul güne Çin borsalarının izinden başladı")).toBe(true);
+    });
+
+    it("borsa: the bare Turkish 'borsa' (fon soruşturması, manipülasyon) stays", () => {
+      expect(hubMatches("borsa", "YENİ Parti'nin fon ve borsa manipülasyonu iddiaları için araştırma önergesi reddedildi")).toBe(true);
+      expect(hubMatches("borsa", "Borsadaki 173 milyar dolarlık erimeyi bütçeyle karşılaştırdı")).toBe(true);
+    });
+
+    it("asgari-ucret: the Turkish commission, the minister and the pension demand", () => {
+      expect(hubMatches("asgari-ucret", "Asgari ücret tespit komisyonu toplanıyor")).toBe(true);
+      expect(hubMatches("asgari-ucret", "Bakan Işıkhan'dan asgari ücret ve emekli maaşı açıklaması")).toBe(true);
+      expect(hubMatches("asgari-ucret", "CHP'li Gürer'den en düşük emekli aylığı için asgari ücret talebi")).toBe(true);
+    });
+
+    it("dolar: the Turkish lira rate stays even when the story is about the US election (no bare 'abd' veto)", () => {
+      expect(hubMatches("dolar", "Dolar/TL 50 liranın üzerinde")).toBe(true);
+      // 9f7c27c3: a Dolar/TL report whose neutral title names the US vote. A bare 'abd' veto would drop it.
+      expect(
+        hubMatches(
+          "dolar",
+          story(
+            "Dolar 50 TL'nin üstünde! ABD seçim gelişmeleri izleniyor Dolar/TL 50 liranın üzerinde: ABD seçimlerinin ardından döviz piyasalarında son durum",
+            "Dolar çarşamba gününe 50 TL'nin üstünde 50,02 TL'den başlarken, euro 56,22 TL'den başladı. ABD seçimlerinde Trump ağır kaybetti!",
+          ),
+        ),
+      ).toBe(true);
+      // The Turkish swap-line stories that name the US president and the Treasury secretary (365-day replay).
+      expect(hubMatches("dolar", "Trump seçimlerden önce Erdoğan'a dolar desteği verecek")).toBe(true);
+      expect(hubMatches("dolar", "Bessent'ten swap hattı görüşmelerine rutin vurgusu: dolar")).toBe(true);
+    });
+  });
+
+  it("the foreign cues are hub-only vetoes: the other hubs and the /trends tokens are untouched", () => {
+    for (const key of ["enflasyon", "faiz", "dolar", "borsa", "asgari-ucret"]) {
+      const spec = RISING_HUB_SPECS[key]!;
+      expect(spec.hubExcludes, key).toBeDefined();
+      expect(spec.hubExcludes!.length, key).toBeGreaterThan(0);
+      // The generic-word hubs never run on the headline only: the lead carries the emekli-zam stories.
+      expect(spec.headlineOnly, key).toBeUndefined();
+      expect(entityHubHeadlineOnly(entityByKey(key)!), key).toBe(false);
+    }
+    // A hub without a spec entry for it is not affected: chp keeps its plain pattern.
+    expect(entityHubPatterns(entityByKey("chp")!)).toEqual(["\\mchp\\M"]);
+  });
+});
+
+describe("hubMatchNote: the copy says what the hub actually searches (h128-hubs-1)", () => {
+  const AKP_NOTE =
+    "Eşleşme, küme başlığında geçen ada göre yapılır; adı yalnızca özette geçen haberler listelenmez. Eş adlı kişi ve kurumlar karışabilir.";
+  const LEAD_NOTE =
+    "Eşleşme, küme başlığında ve özetin ilk paragrafında geçen ada göre yapılır; eş adlı kişi ve kurumlar karışabilir.";
+
+  it("a headline-only hub (akp) says the name must be in the headline and a summary-only name is not listed", () => {
+    expect(hubMatchNote(entityByKey("akp")!)).toBe(AKP_NOTE);
+  });
+
+  it("every other hub (chp, erdogan, enflasyon) says headline and the first paragraph (first line) of the summary", () => {
+    for (const key of ["chp", "erdogan", "enflasyon", "faiz", "dolar", "borsa", "asgari-ucret", "tcmb"]) {
+      expect(hubMatchNote(entityByKey(key)!), key).toBe(LEAD_NOTE);
+    }
+  });
+
+  it("does not say 'cümle': the hub regex reads the first LINE of the summary, which on prod usually holds several sentences", () => {
+    expect(hubMatchNote(entityByKey("chp")!)).not.toContain("cümle");
+    for (const e of RISING_ENTITIES) {
+      expect(hubMatchNote(e), e.key).not.toContain("cümle");
+    }
+  });
+
+  it("no hub still claims a full-text search", () => {
+    for (const e of RISING_ENTITIES) {
+      const note = hubMatchNote(e);
+      expect(note, e.key).not.toContain("tam metin");
+      expect(note, e.key).toMatch(/^Eşleşme, küme başlığında/);
+      expect(note.length, e.key).toBeGreaterThan(0);
+    }
+  });
+
+  it("is the headline-only flag of the spec that decides, and only akp is headline-only", () => {
+    const headline = RISING_ENTITIES.filter((e) => hubMatchNote(e) === AKP_NOTE).map((e) => e.key);
+    expect(headline).toEqual(["akp"]);
+    const e = { key: "x", label: "X", tokens: [] as string[] };
+    expect(hubMatchNote(e)).toBe(LEAD_NOTE);
+    expect(hubMatchNote(e, { headlineOnly: true })).toBe(AKP_NOTE);
+  });
+
+  it("is pure: the same text on every call and no shared state", () => {
+    const e = entityByKey("akp")!;
+    expect(hubMatchNote(e)).toBe(hubMatchNote(e));
+    expect(hubMatchNote(entityByKey("chp")!)).toBe(LEAD_NOTE);
+    expect(hubMatchNote(e)).toBe(AKP_NOTE);
   });
 });

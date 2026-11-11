@@ -210,3 +210,50 @@ describe("/gundem/[key] kaynak dağılımı, nothing counted", () => {
     expect(spectrumSections(await renderHub())).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h128-hubs-1. One static MATCH_NOTE printed 'tam metin aramasıyla' on all 62 hubs, but a hub never searches the
+// whole text: it searches the headline and the first line of the summary, and akp the headline only. The note now
+// comes from hubMatchNote(entity), so it says what that hub searches.
+// ---------------------------------------------------------------------------
+
+describe("/gundem/[key] eşleşme notu", () => {
+  const AKP_NOTE =
+    "Eşleşme, küme başlığında geçen ada göre yapılır; adı yalnızca özette geçen haberler listelenmez. Eş adlı kişi ve kurumlar karışabilir.";
+  const LEAD_NOTE =
+    "Eşleşme, küme başlığında ve özetin ilk paragrafında geçen ada göre yapılır; eş adlı kişi ve kurumlar karışabilir.";
+
+  const noteOf = async (key: string) => {
+    mocks.result = { bundles: [bundle("a", { center: 1 })], total: 1, asOfMs: 0 };
+    const tree = await EntityHubPage({ params: Promise.resolve({ key }) });
+    return elementsOfType(tree, "p")
+      .filter((el) => el.props?.className === "text-xs text-muted-foreground")
+      .map((el) => textOf(el))
+      .filter((t) => t.startsWith("Eşleşme,"));
+  };
+
+  it("akp (headline only) says a name found only in the summary is not listed", async () => {
+    expect(await noteOf("akp")).toEqual([AKP_NOTE]);
+  });
+
+  it("chp, the generic-word hubs and the person hubs say headline plus the first paragraph (first line) of the summary", async () => {
+    for (const key of ["chp", "erdogan", "enflasyon", "borsa", "asgari-ucret"]) {
+      expect(await noteOf(key), key).toEqual([LEAD_NOTE]);
+    }
+  });
+
+  it("no hub page claims a full-text search any more", async () => {
+    for (const key of ["akp", "chp", "faiz", "dolar", "tcmb"]) {
+      const [note] = await noteOf(key);
+      expect(note, key).toBeDefined();
+      expect(note, key).not.toContain("tam metin");
+    }
+  });
+
+  it("prints the note beside the count, also for an empty or failed hub (unchanged placement)", async () => {
+    mocks.result = null;
+    const tree = await EntityHubPage({ params: Promise.resolve({ key: "akp" }) });
+    const texts = elementsOfType(tree, "p").map((el) => textOf(el));
+    expect(texts).toContain(AKP_NOTE);
+  });
+});

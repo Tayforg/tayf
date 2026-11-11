@@ -604,6 +604,33 @@ describe("entityKeysIn", () => {
   });
 });
 
+// h129: a hub-only foreign veto (hubExcludes) withholds the entity KEY, but the entity's words must still not
+// count as "the one shared stem" (the h37-clusters-1 rule). Like the `requires` cue, the veto only decides the
+// key. Without that, "Çin borsası ..." vs "Çin'de eski borsa ..." became related on the word "borsa" alone.
+describe("a hub-only foreign veto (hubExcludes) does not turn the entity word into the shared stem", () => {
+  const CIN_A = "Çin borsası sert düştü";
+  const CIN_B = "Çin'de eski borsa denetim başkanına idam cezası";
+  const ABD_A = "ABD'de enflasyon beklentileri aştı";
+  const ABD_B = "ABD'de enflasyon geriledi, piyasalar yükseldi";
+
+  it("keeps the veto on the keys: the foreign borsa and enflasyon are not hub keys", () => {
+    expect(entityKeysIn(CIN_A)).toEqual(["cin"]);
+    expect(entityKeysIn(CIN_B)).toEqual(["cin"]);
+    expect(entityKeysIn(ABD_A)).toEqual(["abd"]);
+    expect(entityKeysIn(ABD_B)).toEqual(["abd"]);
+  });
+
+  it("does not relate Çin borsası with a Chinese bourse-regulator story on the word 'borsa' alone", () => {
+    expect(isRelatedTitle(CIN_A, CIN_B)).toBe(false);
+    expect(isRelatedTitle(CIN_B, CIN_A)).toBe(false);
+  });
+
+  it("does not relate two ABD enflasyon stories on the word 'enflasyon' alone", () => {
+    expect(isRelatedTitle(ABD_A, ABD_B)).toBe(false);
+    expect(isRelatedTitle(ABD_B, ABD_A)).toBe(false);
+  });
+});
+
 describe("relatedScore", () => {
   it("is titleAgreement against the current title, plus the entity bonus when a key is shared", () => {
     const other = "Belediye Başkanı Ali Veli CHP'den istifa etti";

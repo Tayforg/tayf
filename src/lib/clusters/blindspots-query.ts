@@ -416,7 +416,7 @@ async function fetchCandidateIds(profile: ReadProfile): Promise<string[]> {
     now - BLINDSPOT_LIST_LOOKBACK_DAYS * DAY_MS,
   ).toISOString();
 
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from("clusters")
     .select("id")
     .gte("article_count", PREFILTER_MIN_ARTICLE_COUNT)
@@ -430,7 +430,11 @@ async function fetchCandidateIds(profile: ReadProfile): Promise<string[]> {
     .returns<Array<{ id: string }>>();
 
   if (error) {
-    throw new Error(`[blindspots] candidate select error: ${error.message}`);
+    // `cause` keeps the PostgREST code and response status, so an outage is still classifiable
+    // (isUpstreamUnavailable) behind the prefixed message; see alert-query.ts.
+    throw new Error(`[blindspots] candidate select error: ${error.message}`, {
+      cause: { ...error, status },
+    });
   }
   const ids = (data ?? []).map((r) => r.id);
   if (ids.length >= BLINDSPOT_CANDIDATE_SAFETY_CAP) {
@@ -448,14 +452,16 @@ export async function fetchEmbedBatch(
   profile: ReadProfile,
 ): Promise<EmbeddedClusterRow[]> {
   const supabase = clientFor(profile);
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from("clusters")
     .select(EMBED_SELECT)
     .in("id", ids)
     .returns<EmbeddedClusterRow[]>();
 
   if (error) {
-    throw new Error(`[blindspots] embedded select error: ${error.message}`);
+    throw new Error(`[blindspots] embedded select error: ${error.message}`, {
+      cause: { ...error, status },
+    });
   }
   return data ?? [];
 }

@@ -11,7 +11,6 @@ import {
   V1_CLUSTER_SELECT,
   decodeV1Cursor,
   encodeV1Cursor,
-  fetchTopic7,
   isPoliticsMajority,
   parseLimit,
   parseSince,
@@ -116,8 +115,7 @@ export const GET = withApiErrors(async (request: Request) => {
     nextCursor = encodeV1Cursor({ u: lastScanned.updated_at, i: lastScanned.id });
   }
 
-  const topic7Map = await fetchTopic7(supabase, rows.map((r) => r.id));
-  const clusters = rows.map((r) => toV1ClusterRecord(r, topic7Map.get(r.id) ?? null));
+  const clusters = rows.map((r) => toV1ClusterRecord(r));
 
   return NextResponse.json(
     registryEnvelope({ since, count: clusters.length, next_cursor: nextCursor, clusters }),

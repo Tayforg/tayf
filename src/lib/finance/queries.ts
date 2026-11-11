@@ -18,6 +18,7 @@ import {
 import { correctionChains, supersededIndexes } from "@/lib/finance/kap-corrections";
 import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
 import { readAllPages } from "@/lib/finance/paging";
+import { readPressCode } from "@/lib/finance/press-code";
 import {
   CIRCUIT_BREAKER_DAY_LIMIT,
   CIRCUIT_BREAKER_TEXT,
@@ -1113,54 +1114,6 @@ async function readDisclosureCount(
   } catch (err) {
     console.warn(
       `[finance] fetchTickerPage disclosure count ${ticker} unavailable: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
-}
-
-/**
- * h108-kapdisclosures-2: bist_companies holds one row per company with every code it trades
- * under, KAP fans a filing out to every code, and the resolver matches press to ONE of them
- * (ISCTR). So ISATR, ISBTR, TIB, ISKUR, TGB, THL, YKB and IYM read "haberi çıkan 0 (%0)" for
- * filings their main code shows at 100 %. When `ticker` has no mention of its own in the window
- * (`ownMentions`, raw rows) and a sibling code of the same company has some, this returns the
- * sibling with the most (ties: alphabetical), counted with one head:true read per sibling over
- * the SAME window as the attention read. Otherwise null, with no read at all.
- *
- * Fails OPEN to null (warn), like totalDisclosures30d: a missing note is far smaller than a page
- * that errors. One failed sibling read voids the answer, because the sibling that failed may be the
- * one with most press. Never rejects.
- */
-async function readPressCode(
-  supabase: Awaited<ReturnType<typeof createFinanceServerClient>>,
-  ticker: string,
-  companyTickers: readonly string[],
-  ownMentions: number,
-  sinceIso: string,
-): Promise<string | null> {
-  if (ownMentions > 0) return null;
-  const siblings = [...new Set(companyTickers)].filter((code) => code !== ticker).sort();
-  if (siblings.length === 0) return null;
-  try {
-    const counts = await Promise.all(
-      siblings.map(async (code) => {
-        const { count, error } = await supabase
-          .from("article_tickers")
-          .select("article_id", { count: "exact", head: true })
-          .eq("ticker", code)
-          .gte("published_at", sinceIso);
-        if (error) throw new Error(error.message);
-        if (typeof count !== "number") throw new Error(`no count for ${code}`);
-        return { code, count };
-      }),
-    );
-    // `siblings` is sorted, so a strict > keeps the alphabetically first of equal counts.
-    let best: { code: string; count: number } | null = null;
-    for (const c of counts) if (c.count > 0 && (best === null || c.count > best.count)) best = c;
-    return best === null ? null : best.code;
-  } catch (err) {
-    console.warn(
-      `[finance] fetchTickerPage press code ${ticker} unavailable: ${err instanceof Error ? err.message : String(err)}`,
     );
     return null;
   }
