@@ -106,6 +106,8 @@ run | 179-alias-precision-report.test.ts | tests/migrations/sql/179-alias-precis
 run | 192-saved-clusters-v4.test.ts | tests/migrations/sql/192-saved-clusters-v4-dryrun.sql | - | 0
 # 193: the dry-run script builds the state itself (a stand-in net._http_response whose text column is stored EXTERNAL so a known number of bytes is that many bytes on disk, 100 as production runs it gated on its md5, a baseline reading) and applies 193 twice, so it is the setup. Every live case grows and truncates the table inside its own rolled-back transaction; the database it leaves behind has an empty net._http_response.
 run | 193-net-response-compact-16mb.test.ts | tests/migrations/sql/193-net-response-compact-16mb-dryrun.sql | - | 0
+# 194: the dry-run script builds the state itself (the 129 setup, 166, 172, 185 and 186 as production has them, gated on 186's md5 and a baseline reading of 186's function through a pg_temp copy) and applies 194 twice, so it is the setup. Every live case inserts its fixtures (clusters only) inside its own rolled-back transaction and compares 186's body with 194's side by side.
+run | 194-search-rank-display-title.test.ts | tests/migrations/sql/194-search-rank-display-title-dryrun.sql | - | 0
 # --- pending: not runnable in the harness yet -----------------------------------------------------
 pending | 128-delete-source-recompute.test.ts | setup 061+064+128 loads and 4 of 14 live tests pass, then 3 nested suites fail with: update or delete on table sources violates foreign key constraint articles_source_id_fkey on table articles (the stub FKs lack ON DELETE CASCADE as in production), which skips 10 tests
 pending | 024-028.test.ts | needs a full local Supabase stack (SUPABASE_LOCAL_URL)

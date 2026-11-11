@@ -849,7 +849,7 @@ describe("HomeFeed: AKP and AK Parti are one search (h42-search-1)", () => {
     expect(clusterCardIds(tree)).toEqual(["grup"]);
   });
 
-  it("leaves the 'ak' prefix behaviour alone", async () => {
+  it("'ak' is a whole word: AK Parti, not Akşener or Başbakan (h116-search-3)", async () => {
     getPoliticsClusters.mockResolvedValue(
       feedOf(
         bundle("grup", "AK Parti Grup Başkanı açıkladı"),
@@ -861,7 +861,7 @@ describe("HomeFeed: AKP and AK Parti are one search (h42-search-1)", () => {
 
     const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "ak" }) });
 
-    expect(clusterCardIds(tree)).toEqual(["grup", "aks"]);
+    expect(clusterCardIds(tree)).toEqual(["grup"]);
   });
 });
 

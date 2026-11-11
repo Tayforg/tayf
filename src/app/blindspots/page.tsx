@@ -370,6 +370,11 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
   // would be false, so the chip says what the spectrum shows and the side note
   // names the uncounted outsiders. The flag rule and every count are untouched;
   // with no such outsider both strings are exactly what they always were.
+  // h116-claims-1: the number counts only the toplayıcı / niş sources from
+  // ANOTHER zone, the ones that make "yazdı" false. A toplayıcı / niş source
+  // inside the dominant zone is not in it, so it can sit beside the card's
+  // "7 kaynak (5 sınıflandırılmış)" pill without the two adding up; the note
+  // says "başka bölgeden" so a bare "+1" is not read as every uncounted source.
   const outsiders = only ? nonVotingOutsideZone(bundle.sources, bundle.dominantZone) : 0;
   // h106-blindspotbadges-1: "only" is also a claim about the whole story. When the
   // site's own Jev recall stage matched the silent zone with the same event (filed
@@ -392,7 +397,7 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
   // One string (leading space kept) so the markup stays a single text node.
   const sideNote =
     outsiders > 0
-      ? ` tek tarafta · +${outsiders} toplayıcı/niş kaynak (sayılmaz)${recallNote}`
+      ? ` tek tarafta · başka bölgeden +${outsiders} toplayıcı/niş kaynak (sayılmaz)${recallNote}`
       : ` tek tarafta${recallNote}`;
 
   return (

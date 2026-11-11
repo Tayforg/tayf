@@ -55,6 +55,21 @@
 // afyon is also opium and 'Antep fıstığı' is a product, so a reader who typed the
 // official name must not be handed those. 'maraş' and 'kahramanmaraş' are left out in
 // both directions: 'Kapalı Maraş' (Varosha) is a frequent KKTC topic, not Kahramanmaraş.
+//
+// FOREIGN NAMES (h116-search-2). A foreign name has several spellings in Turkish
+// headlines, and each is a separate archive search. Live counts, 2026-11-11 (clusters
+// updated in the last 45 days, article_count >= 2, word-start match on the folded title,
+// neutral title and summary): erakci 31 / arakci 21 / both 3, so 'Erakçi' and 'Arakçi'
+// (Iran's foreign minister) shared 0 of 24 ids on the live pages; zelenskiy 38 /
+// zelenski-only 6; hamaney 11 / hamenei 0, so 'Hamenei' answered 'sonuç bulunamadı'.
+// The two symmetric groups cover Erakçi / Arakçi and Zelenskiy / Zelenski; 'Hamenei' is
+// one way, since only 'hamaney' is in use and the other spelling has nothing to offer a
+// reader who typed 'Hamaney'. The English 'zelensky' is left out on purpose: a third form
+// would be a third disjunct, and the cost bound above is at most two. ts_lexize leaves
+// every one of these forms whole (erakci, arakci, zelenskiy, zelenski, hamaney, hamenei),
+// so each stem is a whole word: no spelling is over-cut, the 166 over-stem guard set is
+// empty for them, and the `or` expansion does not switch a guard off for these queries.
+// Each future pair still needs its own check against the live archive.
 
 import { MAX_SEARCH_TERMS, foldTr } from "./turkish-query";
 
@@ -69,7 +84,11 @@ type AliasGroup = readonly AliasForm[];
  * Turkish letters ('AK PARTİ', 'Ak Partı') is matched through `foldTr`, the same
  * fold the archive's folded arm uses.
  */
-export const SEARCH_ALIAS_GROUPS: readonly AliasGroup[] = [[["akp"], ["ak", "parti"]]];
+export const SEARCH_ALIAS_GROUPS: readonly AliasGroup[] = [
+  [["akp"], ["ak", "parti"]],
+  [["erakci"], ["arakci"]],
+  [["zelenskiy"], ["zelenski"]],
+];
 
 /** A short spelling that also searches the official one, never the other way round. */
 interface OneWayAlias {
@@ -78,7 +97,8 @@ interface OneWayAlias {
 }
 
 /**
- * Province short names that also search the official name (h58-postship-4). Terms are
+ * Province short names that also search the official name (h58-postship-4), and the
+ * unused 'hamenei' spelling that also searches 'hamaney' (h116-search-2). Terms are
  * ASCII-folded like the groups above. Only `from` triggers an expansion; a `to` form
  * typed on its own is left exactly as the reader wrote it.
  */
@@ -86,6 +106,7 @@ export const SEARCH_ONE_WAY_ALIASES: readonly OneWayAlias[] = [
   { from: ["afyon"], to: ["afyonkarahisar"] },
   { from: ["urfa"], to: ["sanliurfa"] },
   { from: ["antep"], to: ["gaziantep"] },
+  { from: ["hamenei"], to: ["hamaney"] },
 ];
 
 // '"' opens a phrase, a leading '-' negates and a standalone `or` joins: all

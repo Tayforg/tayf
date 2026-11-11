@@ -889,25 +889,25 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
     const ajansHaber = src("ajans-haber", "center", "aggregator");
     const isciHaber = src("isci-haber", "opposition", "niche");
 
-    it("reads 'Spektrumda sadece İktidar' and '%100 tek tarafta · +2 toplayıcı/niş kaynak (sayılmaz)' for the 5692a4a1 shape", async () => {
+    it("reads 'Spektrumda sadece İktidar' and '%100 tek tarafta · başka bölgeden +2 toplayıcı/niş kaynak (sayılmaz)' for the 5692a4a1 shape", async () => {
       const { text } = await renderCard(
         cardBundle(IKTIDAR_10, IKTIDAR_10_DIST, [...voting10, hablerCom, ajansHaber, isciHaber]),
       );
 
       expect(text).toContain("Spektrumda sadece İktidar");
-      expect(text).toContain("%100 tek tarafta · +2 toplayıcı/niş kaynak (sayılmaz)");
+      expect(text).toContain("%100 tek tarafta · başka bölgeden +2 toplayıcı/niş kaynak (sayılmaz)");
       // The bare claim is gone: the story was not written by İktidar alone.
       expect(text).not.toContain("Sadece İktidar yazdı");
       expect(text).not.toContain("yazdı");
     });
 
-    it("names one outsider as '+1 toplayıcı/niş kaynak (sayılmaz)'", async () => {
+    it("names one outsider as 'başka bölgeden +1 toplayıcı/niş kaynak (sayılmaz)'", async () => {
       const { text } = await renderCard(
         cardBundle(IKTIDAR_10, IKTIDAR_10_DIST, [...voting10, isciHaber]),
       );
 
       expect(text).toContain("Spektrumda sadece İktidar");
-      expect(text).toContain("%100 tek tarafta · +1 toplayıcı/niş kaynak (sayılmaz)");
+      expect(text).toContain("%100 tek tarafta · başka bölgeden +1 toplayıcı/niş kaynak (sayılmaz)");
     });
 
     it("qualifies a Muhalefet-dominant card by the non-voting sources outside Muhalefet", async () => {
@@ -930,8 +930,72 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
       );
 
       expect(text).toContain("Spektrumda sadece Muhalefet");
-      expect(text).toContain("%100 tek tarafta · +2 toplayıcı/niş kaynak (sayılmaz)");
+      expect(text).toContain("%100 tek tarafta · başka bölgeden +2 toplayıcı/niş kaynak (sayılmaz)");
       expect(text).not.toContain("Sadece Muhalefet yazdı");
+    });
+
+    // h116-claims-1: the "+N" is the count of non-voting sources from ANOTHER
+    // zone, but beside the card's "7 kaynak (5 sınıflandırılmış)" pill it read
+    // as the total of non-voting sources. Cluster b6ee3474: five İktidar voters,
+    // Haberler.com (aggregator, İktidar: inside the zone, never counted) and
+    // İşçi Haber (niche, Muhalefet: the one outsider). The note names the zone
+    // qualifier so it cannot be read as "2 of 7 do not count".
+    describe("the count says it is from another zone (h116-claims-1)", () => {
+      const voting5 = [
+        src("aksam", "gov_leaning", "outlet"),
+        src("haber7", "gov_leaning", "outlet"),
+        src("milat", "gov_leaning", "outlet"),
+        src("trt-haber", "pro_government", "outlet"),
+        src("yeni-safak", "pro_government", "outlet"),
+      ];
+      const IKTIDAR_5 = { iktidar: 5, bagimsiz: 0, muhalefet: 0 };
+      const IKTIDAR_5_DIST = { pro_government: 2, gov_leaning: 3 };
+
+      it("b6ee3474 shape: in-zone aggregator + other-zone niche reads 'başka bölgeden +1', never a bare '+1'", async () => {
+        const { text } = await renderCard(
+          cardBundle(IKTIDAR_5, IKTIDAR_5_DIST, [...voting5, hablerCom, isciHaber]),
+        );
+
+        expect(text).toContain("Spektrumda sadece İktidar");
+        expect(text).toContain("tek tarafta · başka bölgeden +1 toplayıcı/niş kaynak (sayılmaz)");
+        expect(text).not.toContain("tek tarafta · +1 toplayıcı/niş kaynak (sayılmaz)");
+        expect(text).not.toContain("yazdı");
+      });
+
+      it("never prints a bare '+N' (without the zone qualifier) for any outsider count", async () => {
+        for (const extra of [[isciHaber], [isciHaber, ajansHaber]]) {
+          const { text } = await renderCard(
+            cardBundle(IKTIDAR_5, IKTIDAR_5_DIST, [...voting5, hablerCom, ...extra]),
+          );
+
+          expect(text).toContain(`başka bölgeden +${extra.length} toplayıcı/niş kaynak (sayılmaz)`);
+          expect(text).not.toContain(`tarafta · +${extra.length}`);
+        }
+      });
+
+      it("control: only an in-zone aggregator keeps 'Sadece İktidar yazdı' and the exact side note ' tek tarafta'", async () => {
+        const { html, text } = await renderCard(
+          cardBundle(IKTIDAR_5, IKTIDAR_5_DIST, [...voting5, hablerCom]),
+        );
+
+        expect(text).toContain("Sadece İktidar yazdı");
+        expect(text).not.toContain("Spektrumda");
+        expect(text).not.toContain("başka bölgeden");
+        expect(text).not.toContain("toplayıcı");
+        expect(html).toContain(
+          '<span class="text-[11px] text-muted-foreground"><span class="font-mono">%100</span> tek tarafta</span>',
+        );
+      });
+
+      it("control: no non-voting source at all is unchanged", async () => {
+        const { html, text } = await renderCard(cardBundle(IKTIDAR_5, IKTIDAR_5_DIST, voting5));
+
+        expect(text).toContain("Sadece İktidar yazdı");
+        expect(text).not.toContain("başka bölgeden");
+        expect(html).toContain(
+          '<span class="text-[11px] text-muted-foreground"><span class="font-mono">%100</span> tek tarafta</span>',
+        );
+      });
     });
 
     it("keeps the byte-identical 'Sadece İktidar yazdı' / '%100 tek tarafta' when there is no non-voting source at all", async () => {
@@ -1111,7 +1175,7 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
       expect(text).toContain("Spektrumda sadece İktidar");
       expect(text).not.toContain("Kümede sadece");
       expect(text).toContain(
-        "%100 tek tarafta · +1 toplayıcı/niş kaynak (sayılmaz) · benzer haber başka kümede olabilir",
+        "%100 tek tarafta · başka bölgeden +1 toplayıcı/niş kaynak (sayılmaz) · benzer haber başka kümede olabilir",
       );
       expect(text).not.toContain("yazdı");
     });

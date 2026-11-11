@@ -111,9 +111,12 @@ describe("searchTokens", () => {
 });
 
 describe("titleMatchesTokens", () => {
-  it("matches a prefix at a word start", () => {
+  it("matches a prefix at a word start (a two-letter token only as a whole word)", () => {
     expect(matches("ak", "AK Parti açıklama yaptı")).toBe(true);
-    expect(matches("ak", "Akşener açıklama yaptı")).toBe(true);
+    // h116-search-3: 'ak' is two letters, so it is a whole word and 'Akşener' is not 'AK'
+    // (the archive never returned her for 'ak'); a longer token keeps the prefix rule.
+    expect(matches("ak", "Akşener açıklama yaptı")).toBe(false);
+    expect(matches("aks", "Akşener açıklama yaptı")).toBe(true);
   });
 
   it("does not match in the middle of a word", () => {
@@ -180,7 +183,8 @@ describe("titleMatchesTokens", () => {
   });
 
   it("keeps the word-start rule after folding", () => {
-    expect(matches("ak", "Akşener açıklama yaptı")).toBe(true);
+    expect(matches("ak", "Akşener açıklama yaptı")).toBe(false);
+    expect(matches("aks", "Akşener açıklama yaptı")).toBe(true);
     expect(matches("ak", "Başbakan açıklama yaptı")).toBe(false);
     // Folding must not create a mid-word hit: 'gan' sits inside Erdoğan.
     expect(matches("gan", "Erdoğan konuştu")).toBe(false);
@@ -337,10 +341,11 @@ describe("alias matching in the feed (AKP <-> AK Parti)", () => {
     expect(matchesAlt("AK Parti", "Başbakan dakikaya kadar bekledi")).toBe(false);
   });
 
-  it("leaves the 'ak' prefix behaviour unchanged", () => {
+  it("'ak' alone is the whole word 'AK' (h116-search-3), not Akşener or AKP; the query adds no alias", () => {
     expect(matchesAlt("ak", "AK Parti açıklama yaptı")).toBe(true);
-    expect(matchesAlt("ak", "Akşener açıklama yaptı")).toBe(true);
-    expect(matchesAlt("ak", "AKP'den açıklama")).toBe(true);
+    expect(matchesAlt("ak", "Akşener açıklama yaptı")).toBe(false);
+    // AKP is another word, and 'ak' alone is not an alias, so the archive never returned it either.
+    expect(matchesAlt("ak", "AKP'den açıklama")).toBe(false);
     expect(matchesAlt("ak", "Başbakan dakikaya kadar bekledi")).toBe(false);
     expect(matchesAlt("ak", "dakika bakan")).toBe(false);
   });
@@ -624,5 +629,321 @@ describe("Unicode: NFD, zero-width and full-width input (h50-search-2)", () => {
 
   it("a query of zero-width characters only has no token", () => {
     expect(searchTokens("\u200b\u200c\ufeff")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h116-search-3: a two-letter token is a whole word. The archive reads 'ab' as a
+// whole lexeme (the EU), but the prefix rule used to hand 'AB' every ABD and Abiy
+// card above the archive section and into the 'N sonuç' count. A token of three or
+// more letters keeps the prefix rule.
+// ---------------------------------------------------------------------------
+
+describe("titleMatchesTokens: a two-letter token needs a whole word (h116-search-3)", () => {
+  it.each([
+    "ABD Savunma Bakanı Hegseth'i azil girişimi engellendi",
+    "ABD'de Savunma Bakanı'na azil girişimi",
+    "Cumhurbaşkanı Erdoğan, Etiyopya Başbakanı Abiy Ahmed'i kabul etti",
+    "ABD Temsilciler Meclisindeki Cumhuriyetçilerin yeni lideri Jim Jordan oldu",
+    "Başbakan açıklama yaptı",
+    "Abdullah Gül konuştu",
+  ])("'ab' does not match %j", (title) => {
+    expect(titleMatchesTokens(title, ["ab"])).toBe(false);
+  });
+
+  it.each([
+    "İngiltere'nin AB'ye yeniden katılma",
+    "Merz’den, AB’ye Ukrayna şartı", // typographic apostrophe
+    "AB-Türkiye ilişkileri",
+    "AB, yeni paket",
+    "(AB) kararı",
+    "Yeni lider AB", // the key ends right after the token
+    "Türkiye ve ab: 'yeni dönem'",
+    "AB’nin kararı",
+  ])("'ab' matches %j", (title) => {
+    expect(titleMatchesTokens(title, ["ab"])).toBe(true);
+  });
+
+  it("'AB' typed in capitals or Turkish casing reads the same as 'ab'", () => {
+    expect(matches("AB", "AB'ye yeniden katılma")).toBe(true);
+    expect(matches("Ab", "AB'ye yeniden katılma")).toBe(true);
+    expect(matches("AB", "ABD'de azil girişimi")).toBe(false);
+    expect(matchesAlt("AB", "ABD Savunma Bakanı Hegseth'i azil girişimi engellendi")).toBe(false);
+    expect(matchesAlt("AB", "AB, yeni paket")).toBe(true);
+  });
+
+  it("keeps exactly the EU stories of a mixed feed (the live 'AB' page, 2026-11-11)", () => {
+    const feed = [
+      "ABD Savunma Bakanı Hegseth'i azil girişimi engellendi",
+      "ABD'de Savunma Bakanı'na azil girişimi",
+      "Cumhurbaşkanı Erdoğan, Etiyopya Başbakanı Abiy Ahmed'i kabul etti",
+      "ABD Temsilciler Meclisindeki Cumhuriyetçilerin yeni lideri",
+      "İskoçya İşçi Partisi lideri Marra, İngiltere'nin AB'ye yeniden katılmasını istedi",
+      "Almanya Başbakanı Merz’den, AB’ye Ukrayna şartı: Onay vermeyiz",
+    ];
+    expect(feed.filter((t) => matches("AB", t))).toEqual(feed.slice(4));
+  });
+
+  it.each([
+    ["bm", "BM Genel Kurulu", true],
+    ["bm", "BMW yeni modelini tanıttı", false],
+    ["bm", "BM'den Gazze çağrısı", true],
+    ["tl", "30 bin TL maaş", true],
+    ["tl", "TL'ye yükseldi", true],
+    ["tl", "Tlemcen'de seçim", false],
+    ["ak", "AK Parti", true],
+    ["ak", "AK Parti'den açıklama", true],
+    ["ak", "Akşener açıklama yaptı", false],
+    ["ak", "Akbank hisseleri yükseldi", false],
+    ["tr", "TR Genel Müdürü", true],
+    ["tr", "Trump açıklama yaptı", false],
+    ["5g", "5G ihalesi yapıldı", true],
+    ["5g", "5G'nin ilk ayı", true],
+    ["5g", "5Gb bellek", false],
+  ])("two-letter token %j on %j gives %s", (token, title, expected) => {
+    expect(titleMatchesTokens(title, [token])).toBe(expected);
+  });
+
+  it("a letter or digit after the token ends the whole word match, a later whole word still counts", () => {
+    expect(titleMatchesTokens("AB2 raporu", ["ab"])).toBe(false);
+    expect(titleMatchesTokens("ABD ve AB zirvesi", ["ab"])).toBe(true);
+    expect(titleMatchesTokens("Abiy, AB'yi eleştirdi", ["ab"])).toBe(true);
+    expect(titleMatchesTokens("Abiy Ahmed ABD'de", ["ab"])).toBe(false);
+  });
+
+  it("an astral letter after the token is a letter (the whole word test reads a code point, not half of a pair)", () => {
+    // U+10428 is a Deseret small letter: \p{L}, so 'ab' + it is a longer word.
+    expect(titleMatchesTokens("ab\u{10428} raporu", ["ab"])).toBe(false);
+    // An emoji is not a letter or a digit: the word ends there.
+    expect(titleMatchesTokens("AB\u{1F5F3} raporu", ["ab"])).toBe(true);
+  });
+
+  it("zero-width characters and NFD text do not hide or split the whole word", () => {
+    expect(titleMatchesTokens("A​B kararı", ["ab"])).toBe(true);
+    expect(titleMatchesTokens("AB​ kararı", ["ab"])).toBe(true);
+    expect(titleMatchesTokens("Öz kararı", ["oz"])).toBe(true);
+    expect(titleMatchesTokens("Özel kararı", ["oz"])).toBe(false);
+  });
+
+  it("every token of a query is judged on its own length", () => {
+    // 'ak' is a whole word, 'parti' keeps the prefix rule.
+    expect(matches("ak parti", "AK Parti Grup Başkanı açıkladı")).toBe(true);
+    expect(matches("ak parti", "AK Partili vekil açıkladı")).toBe(true);
+    expect(matches("ak parti", "Akşener Parti Genel Merkezi'nde")).toBe(false);
+    // Two two-letter tokens: both whole words.
+    expect(matches("ab bm", "AB ve BM ortak açıklama yaptı")).toBe(true);
+    expect(matches("ab bm", "ABD ve BM ortak açıklama yaptı")).toBe(false);
+  });
+
+  // The archive's Turkish stemmer reduces oyları, işten, illerde, suyu, evleri and
+  // Akın to the two-letter root, so a two-letter token also matches a root plus a
+  // Turkish suffix. Without it the page would drop cards the archive returns.
+  it("a two-letter Turkish root followed by a Turkish suffix matches, as the archive stems it", () => {
+    expect(matches("oy", "CHP'nin oyları yüzde 30'u aştı")).toBe(true);
+    expect(matches("iş", "İşten çıkarmalar arttı")).toBe(true);
+    expect(matches("il", "İllerde seçim heyecanı")).toBe(true);
+    expect(matches("su", "Suyu kesilen mahalle")).toBe(true);
+    expect(matches("ev", "Evleri yıkıldı")).toBe(true);
+    expect(matches("ak", "Akın konuştu")).toBe(true);
+  });
+
+  it("an acronym followed by a non-suffix still does not match", () => {
+    expect(matches("ak", "Akşener açıklama yaptı")).toBe(false);
+    expect(matches("ak", "AKP'den açıklama")).toBe(false);
+    expect(matches("ab", "ABD'de azil girişimi")).toBe(false);
+    expect(matches("ab", "Abiy Ahmed konuştu")).toBe(false);
+    expect(matches("oz", "Özel kararı")).toBe(false);
+    expect(matches("ab", "AB2 raporu")).toBe(false);
+    expect(matches("bm", "BMW fabrikası")).toBe(false);
+    expect(matches("ak", "Akbank hisseleri yükseldi")).toBe(false);
+    expect(matches("tr", "Tren seferleri")).toBe(false);
+    expect(matches("tl", "Tlaib konuştu")).toBe(false);
+  });
+
+  it("a root followed by a long run of letters is not a suffix (the tail scan is bounded)", () => {
+    expect(matches("oy", `oy${"lar".repeat(20)}`)).toBe(false);
+    expect(matches("oy", "oylarımızdan söz etti")).toBe(true);
+  });
+
+  it("a suffix tail ends at a non-letter, so a later word does not extend it", () => {
+    expect(matches("oy", "oyları, sayım")).toBe(true);
+    expect(matches("oy", "oy2 sayımı")).toBe(false);
+  });
+
+  it("the residual: 'ab' matches 'Abla' here (the archive stems it to 'ap')", () => {
+    expect(matches("ab", "Abla geldi")).toBe(true);
+  });
+
+  it("a token of three or more letters keeps the prefix rule", () => {
+    expect(matches("zam", "Emeklilere zamlar geliyor")).toBe(true);
+    expect(matches("deprem", "İstanbul'da depremi hissettiler")).toBe(true);
+    expect(matches("erdogan", "Erdoğan'ın açıklaması")).toBe(true);
+    expect(matches("erdoğan", "ERDOGAN SEUL YOLUNDA")).toBe(true);
+    expect(matches("ibb", "İBB'den açıklama")).toBe(true);
+    // Folding does not make a mid-word hit: 'gan' is inside Erdoğan.
+    expect(matches("gan", "Erdoğan konuştu")).toBe(false);
+  });
+
+  it("'ab' never matches Başbakan, in the middle of a word, whatever the rule", () => {
+    expect(matches("ab", "Başbakan açıklama yaptı")).toBe(false);
+    expect(matches("ab", "Başbakan Ab'a gitti")).toBe(true);
+  });
+
+  it("the residual: a 3-letter acronym such as ABD still reads as a prefix (ABD -> Abdullah)", () => {
+    expect(matches("abd", "ABD'de azil girişimi")).toBe(true);
+    expect(matches("abd", "Abdullah Gül konuştu")).toBe(true);
+    expect(matches("abd", "Abiy Ahmed konuştu")).toBe(false);
+  });
+
+  it("a two-letter token is not matched by a regexp-shaped title or query (bounded indexOf, no regex from user text)", () => {
+    expect(titleMatchesTokens("(.*) AB", ["ab"])).toBe(true);
+    expect(matches("a.", "ab")).toBe(false);
+    expect(matches("..", "AB")).toBe(false);
+  });
+
+  it("copes with a long title that repeats the token inside longer words", () => {
+    const title = `${"abd ".repeat(20_000)}ab`;
+    expect(titleMatchesTokens(title, ["ab"])).toBe(true);
+    expect(titleMatchesTokens(`${"abd ".repeat(20_000)}abiy`, ["ab"])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h116-search-2: spelling variants of one foreign name. On production (2026-11-11)
+// the live pages for 'Erakçi' and 'Arakçi' shared 0 of 24 ids, 'Hamenei' found
+// nothing while 'Hamaney' had 11+ stories. The archive expands those queries
+// (search-aliases.ts), so the cards must too, or they disagree with the archive.
+// ---------------------------------------------------------------------------
+
+describe("foreign-name spelling aliases in the feed (h116-search-2)", () => {
+  it("searchTokenAlternatives adds the other spelling after the typed one", () => {
+    expect(searchTokenAlternatives("Erakçi")).toEqual([["erakci"], ["arakci"]]);
+    expect(searchTokenAlternatives("Arakçi")).toEqual([["arakci"], ["erakci"]]);
+    expect(searchTokenAlternatives("Zelenskiy")).toEqual([["zelenskiy"], ["zelenski"]]);
+    expect(searchTokenAlternatives("Zelenski")).toEqual([["zelenski"], ["zelenskiy"]]);
+    expect(searchTokenAlternatives("Zelenski'nin")).toEqual([["zelenski"], ["zelenskiy"]]);
+  });
+
+  it("'Hamenei' also searches 'Hamaney', one way only", () => {
+    expect(searchTokenAlternatives("Hamenei")).toEqual([["hamenei"], ["hamaney"]]);
+    expect(searchTokenAlternatives("hamaney")).toEqual([["hamaney"]]);
+  });
+
+  it("keeps the rest of the query in the substituted list", () => {
+    expect(searchTokenAlternatives("Erakçi İran")).toEqual([
+      ["erakci", "iran"],
+      ["arakci", "iran"],
+    ]);
+    expect(searchTokenAlternatives("hamenei talimat")).toEqual([
+      ["hamenei", "talimat"],
+      ["hamaney", "talimat"],
+    ]);
+  });
+
+  it("is Turkish-fold aware: ERAKÇİ, Arakçı (dotless) and the ASCII spelling agree", () => {
+    for (const q of ["ERAKÇİ", "erakci", "Erakçı", "ERAKCI"]) {
+      expect(searchTokenAlternatives(q), q).toEqual([["erakci"], ["arakci"]]);
+    }
+    expect(searchTokenAlternatives("ARAKÇI")).toEqual([["arakci"], ["erakci"]]);
+  });
+
+  it("gives no alternative for a different term or once the query uses an operator", () => {
+    expect(searchTokenAlternatives("erakcinin")).toEqual([["erakcinin"]]);
+    expect(searchTokenAlternatives("erakçili")).toEqual([["erakcili"]]);
+    expect(searchTokenAlternatives('"erakçi"')).toEqual([["erakci"]]);
+    expect(searchTokenAlternatives("erakçi -iran")).toEqual([["erakci"]]);
+    expect(searchTokenAlternatives("erakçi or arakçi")).toEqual([["erakci", "arakci"]]);
+    expect(searchTokenAlternatives('"zelenskiy"')).toEqual([["zelenskiy"]]);
+    expect(searchTokenAlternatives("hamenei -iran")).toEqual([["hamenei"]]);
+  });
+
+  it("'Arakçi' matches a title spelled 'Erakçi' (the 0-of-24 case), and the reverse", () => {
+    const erakci = "İran Dışişleri Bakanı Erakçi: \"Katar ile Hürmüz Boğazı için görüşmeler devam ediyor\"";
+    const arakci = "İran Dışişleri Bakanı Abbas Arakçi, 2 günlük teklifi savunarak diplomasiyi işaret etti";
+    expect(matchesAlt("Arakçi", erakci)).toBe(true);
+    expect(matchesAlt("Erakçi", arakci)).toBe(true);
+    // Its own spelling still matches, and so does an inflected form of either.
+    expect(matchesAlt("Arakçi", arakci)).toBe(true);
+    expect(matchesAlt("Arakçi", "Fidan, Erakçi’yle görüştü")).toBe(true);
+    expect(matchesAlt("Erakçi", "Fidan, Arakçi'yle görüştü")).toBe(true);
+    // Without the alias the first pair does not match: the feed used to show nothing.
+    expect(matches("Arakçi", erakci)).toBe(false);
+  });
+
+  it("'Zelenski' and 'Zelenskiy' find both spellings, 'Zelensky' stays out (two forms per group)", () => {
+    expect(matchesAlt("Zelenskiy", "İstanbul’a gelen Zelenski Cumhurbaşkanı Erdoğan ile görüştü")).toBe(true);
+    expect(matchesAlt("Zelenski'nin", "Ukrayna Devlet Başkanı Zelenskiy İstanbul'a geldi")).toBe(true);
+    expect(matchesAlt("Zelenski", "Zelenski: Cumhurbaşkanı Erdoğan ile anlaştı")).toBe(true);
+    expect(matchesAlt("Zelenskiy", "Zelensky ile görüştü")).toBe(false);
+    expect(matchesAlt("Zelenski", "Zelensky ile görüştü")).toBe(false);
+  });
+
+  it("'Hamenei' finds 'Hamaney' stories, but 'Hamaney' does not go looking for 'Hamenei'", () => {
+    expect(matchesAlt("Hamenei", "Hamaney'den ABD seçimleri açıklaması")).toBe(true);
+    expect(matchesAlt("Hamenei", "Kalibaf, Hamaney’in Çin ile ilişkilerde öncelik talimatını açıkladı")).toBe(true);
+    expect(matchesAlt("Hamenei", "Hamenei: seçim sonucu")).toBe(true);
+    expect(matchesAlt("Hamaney", "Hamenei: seçim sonucu")).toBe(false);
+    expect(matchesAlt("Hamaney", "Hamaney'den talimat")).toBe(true);
+  });
+
+  it("carries the rest of the query across the alias", () => {
+    expect(matchesAlt("Arakçi Fidan", "Bakan Fidan, İranlı mevkidaşı Erakçi ile görüştü")).toBe(true);
+    expect(matchesAlt("Arakçi Fidan", "İran Dışişleri Bakanı Erakçi: Katar ile görüşüyoruz")).toBe(false);
+  });
+
+  it("does not pull in an unrelated title", () => {
+    expect(matchesAlt("Arakçi", "Myanmar'ın Arakan eyaletinde çatışma")).toBe(false);
+    expect(matchesAlt("Erakçi", "Eraslan açıklama yaptı")).toBe(false);
+    expect(matchesAlt("Zelenski", "Zelenka kulübü şampiyon oldu")).toBe(false);
+    expect(matchesAlt("Hamenei", "Hamas heyeti Kahire'de")).toBe(false);
+    expect(matchesAlt("Hamenei", "Hamburg'da seçim")).toBe(false);
+  });
+
+  it("the earlier alias in the query wins, at most two spellings are searched", () => {
+    expect(searchTokenAlternatives("erakçi zelenski")).toEqual([
+      ["erakci", "zelenski"],
+      ["arakci", "zelenski"],
+    ]);
+    expect(searchTokenAlternatives("zelenski erakçi")).toEqual([
+      ["zelenski", "erakci"],
+      ["zelenskiy", "erakci"],
+    ]);
+    expect(searchTokenAlternatives("akp erakçi")).toEqual([
+      ["akp", "erakci"],
+      ["ak", "parti", "erakci"],
+    ]);
+  });
+
+  it("agrees with the archive: alternatives exist exactly when the archive expands, and spell the same disjuncts", () => {
+    for (const q of [
+      "Erakçi",
+      "Arakçi",
+      "ERAKÇİ",
+      "Zelenski'nin",
+      "Zelenskiy",
+      "Zelenski",
+      "Hamenei",
+      "hamaney",
+      "Erakçi İran",
+      "erakcinin",
+      '"erakçi"',
+      "erakçi -iran",
+      "erakçi or arakçi",
+      "zelensky",
+    ]) {
+      const expansion = expandAliasQuery(canonicalSearchQuery(q));
+      const alternatives = searchTokenAlternatives(q);
+      expect(alternatives.length > 1, q).toBe(expansion !== null);
+      if (expansion !== null) {
+        expect(alternatives.map((alt) => alt.join(" ")).sort(), q).toEqual(
+          expansion.foldedQuery.split(" or ").sort(),
+        );
+      }
+    }
+  });
+
+  it("a two-letter query is unaffected by the alias tables ('ab' is no alias)", () => {
+    expect(searchTokenAlternatives("AB")).toEqual([["ab"]]);
+    expect(searchTokenAlternatives("bm")).toEqual([["bm"]]);
   });
 });
