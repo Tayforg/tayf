@@ -4,8 +4,20 @@
 //
 // Rule: every query token must occur at a WORD START in the cluster title.
 //   - order-free:   "Erdoğan Cumhurbaşkanı" finds "Cumhurbaşkanı Erdoğan ..."
-//   - prefix:       "ak" finds "AK Parti ..." and "Akşener ...", but not
-//                   "Başbakan" or "dakikaya" (a plain substring match did)
+//   - prefix:       "zam" finds "zamlar" and "deprem" finds "depremi", and "ak"
+//                   is not found in the middle of "Başbakan" or "dakikaya" (a plain
+//                   substring match did). "ak" finds "AK Parti ..." but, being two
+//                   letters, only as a whole word or as a Turkish root plus a
+//                   suffix (oyları, işten, Akın), so not "Akşener" (h116-search-3):
+//                   the archive's Turkish stemmer reduces those forms to the
+//                   two-letter root, while an acronym followed by a non-suffix
+//                   (ABD, Abiy, Akşener, AKP, BMW) is another word there. So "AB"
+//                   (the EU) must not put ABD and Abiy cards above the archive
+//                   section or into its count. A whole word ends at the end of the
+//                   title, at a character that is not a letter or digit, or at an
+//                   apostrophe ("AB'ye"). The residuals: 3-letter acronyms such
+//                   as ABD -> Abdullah keep the prefix rule, and "Abla" matches
+//                   "ab" here but not in the archive (its stem is 'ap').
 //   - tr casing:    "ISTANBUL" finds "İstanbul'da ..." (dotted/dotless i fold)
 //   - lenient:      quotes, a standalone `or` and -negated words are ignored
 //                   (the archive RPC interprets them; this filter only has to
@@ -143,6 +155,41 @@ function atWordStart(key: string, index: number): boolean {
   return !LETTER_OR_DIGIT.test(prev);
 }
 
+/**
+ * True when the word that contains the match ends at `index`: the key ends there,
+ * or the code point at `index` is an apostrophe (a Turkish suffix follows: AB'ye) or
+ * not a letter or digit (AB, / AB- / (AB)). One code point is read, so an astral
+ * letter after the token is a letter and not half of a surrogate pair.
+ */
+function atWordEnd(key: string, index: number): boolean {
+  // First code point at `index` (a surrogate pair is one character), as atWordStart reads
+  // the last one before it; undefined at the end of the key.
+  const ch = Array.from(key.slice(index, index + 2))[0];
+  if (ch === undefined) return true;
+  // U+02BC is an apostrophe AND a letter: the apostrophe test comes first.
+  return isApostrophe(ch) || !LETTER_OR_DIGIT.test(ch);
+}
+
+/**
+ * True when the letters and digits that run from `index` (stopping at an
+ * apostrophe or any other character) are a Turkish suffix: "oyları" after 'oy',
+ * "ten" after 'iş', "ın" after 'ak'. The archive's Turkish stemmer reduces such a
+ * word to the two-letter root, so the in-feed filter must accept it too. False for
+ * an empty run, a run that reaches TAIL_SCAN_LIMIT code points (no suffix is that
+ * long) and a run that is not a suffix ("şener" after 'ak', "d" after 'ab'). The
+ * scan reads at most TAIL_SCAN_LIMIT code points, so a long word costs nothing extra.
+ */
+function suffixTailFollows(key: string, index: number): boolean {
+  const run: string[] = [];
+  for (const ch of Array.from(key.slice(index, index + 2 * TAIL_SCAN_LIMIT))) {
+    // U+02BC is an apostrophe AND a letter: the apostrophe test comes first.
+    if (isApostrophe(ch) || !LETTER_OR_DIGIT.test(ch)) break;
+    run.push(ch);
+    if (run.length >= TAIL_SCAN_LIMIT) return false;
+  }
+  return run.length > 0 && isTurkishSuffixTail(run.join(""));
+}
+
 function hasWordStartOccurrence(haystack: string, needle: string): boolean {
   let from = 0;
   for (;;) {
@@ -153,11 +200,32 @@ function hasWordStartOccurrence(haystack: string, needle: string): boolean {
   }
 }
 
+// A whole word, not a prefix: the occurrence starts a word AND the word ends right
+// after it, or only a Turkish suffix follows (oy + ları). A bounded indexOf walk
+// like hasWordStartOccurrence (no regex is built from the query), one step per
+// occurrence.
+function hasWholeWordOccurrence(haystack: string, needle: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(needle, from);
+    if (at === -1) return false;
+    const end = at + needle.length;
+    if (atWordStart(haystack, at) && (atWordEnd(haystack, end) || suffixTailFollows(haystack, end))) {
+      return true;
+    }
+    from = at + 1;
+  }
+}
+
 /**
- * True when every token starts a word of `title`. An empty token list never
- * matches (a query that reduces to nothing, e.g. "-ak", shows no in-feed
- * cards rather than the whole feed). Tokens come from `searchTokens` but are
- * re-keyed here, so passing raw lowercase words works too.
+ * True when every token starts a word of `title`; a token of exactly
+ * MIN_TOKEN_LENGTH (2) characters must be a whole word or a Turkish root plus a
+ * suffix instead (h116-search-3: 'ab' is the EU, not ABD or Abiy, while 'oy' still
+ * finds "oyları" and 'ak' finds "Akın", because the archive's Turkish stemmer
+ * reduces those forms to the two-letter root). An empty token list never matches (a
+ * query that reduces to nothing, e.g. "-ak", shows no in-feed cards rather than the
+ * whole feed). Tokens come from `searchTokens` but are re-keyed here, so passing raw
+ * lowercase words works too.
  */
 export function titleMatchesTokens(
   title: string,
@@ -167,7 +235,10 @@ export function titleMatchesTokens(
   const key = matchKey(title);
   return tokens.every((token) => {
     const needle = matchKey(token);
-    return needle !== "" && hasWordStartOccurrence(key, needle);
+    if (needle === "") return false;
+    return needle.length === MIN_TOKEN_LENGTH
+      ? hasWholeWordOccurrence(key, needle)
+      : hasWordStartOccurrence(key, needle);
   });
 }
 

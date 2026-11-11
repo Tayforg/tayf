@@ -15,8 +15,14 @@ import { MAX_SEARCH_TERMS, canonicalSearchQuery } from "./turkish-query";
 // existing search_cluster_ids RPC already understands, so no migration is needed.
 
 describe("SEARCH_ALIAS_GROUPS", () => {
-  it("is exactly the AKP / AK Parti pair, as tr-lowercased term sequences", () => {
-    expect(SEARCH_ALIAS_GROUPS).toEqual([[["akp"], ["ak", "parti"]]]);
+  it("is exactly the AKP / AK Parti pair and two foreign-name spelling pairs, as tr-lowercased term sequences", () => {
+    // h116-search-2: Erakçi / Arakçi (Iran's foreign minister) and Zelenskiy / Zelenski.
+    // 'zelensky' stays out: two forms per group keep the documented bound of two disjuncts.
+    expect(SEARCH_ALIAS_GROUPS).toEqual([
+      [["akp"], ["ak", "parti"]],
+      [["erakci"], ["arakci"]],
+      [["zelenskiy"], ["zelenski"]],
+    ]);
   });
 
   it("holds only ASCII-folded lower-case terms (the matching folds the query the same way)", () => {
@@ -26,17 +32,31 @@ describe("SEARCH_ALIAS_GROUPS", () => {
       }
     }
   });
+
+  it("keeps two forms per group (at most two disjuncts) and no spelling in two groups", () => {
+    for (const group of SEARCH_ALIAS_GROUPS) expect(group).toHaveLength(2);
+    const forms = SEARCH_ALIAS_GROUPS.flatMap((g) => g.map((f) => f.join(" ")));
+    expect(new Set(forms).size).toBe(forms.length);
+  });
+
+  it("never lists the English spelling 'zelensky' (a third form would make a third disjunct)", () => {
+    const terms = SEARCH_ALIAS_GROUPS.flatMap((g) => g.flat());
+    expect(terms).not.toContain("zelensky");
+  });
 });
 
 // h58-postship-4: a short province name ('afyon', 'urfa', 'antep') also finds the stories
 // written with the official name. One way only: 'afyon' is also opium, 'Antep fıstığı' is a
 // product, and 'maraş' is left out for Kapalı Maraş (Varosha), a frequent KKTC topic.
 describe("SEARCH_ONE_WAY_ALIASES", () => {
-  it("is exactly afyon / urfa / antep -> the official name, as ASCII-folded term sequences", () => {
+  it("is exactly afyon / urfa / antep -> the official name, and hamenei -> hamaney, as ASCII-folded term sequences", () => {
     expect(SEARCH_ONE_WAY_ALIASES).toEqual([
       { from: ["afyon"], to: ["afyonkarahisar"] },
       { from: ["urfa"], to: ["sanliurfa"] },
       { from: ["antep"], to: ["gaziantep"] },
+      // h116-search-2: 'hamaney' is the spelling the archive holds (11 live clusters on 2026-11-11),
+      // 'hamenei' none, so only the empty spelling is widened.
+      { from: ["hamenei"], to: ["hamaney"] },
     ]);
   });
 
@@ -407,5 +427,176 @@ describe("aliasTermForms", () => {
     expect(aliasTermForms(["ak"])).toBeNull();
     expect(aliasTermForms(["erdoğan"])).toBeNull();
     expect(aliasTermForms([])).toBeNull();
+  });
+});
+
+// h116-search-2: spelling variants of one foreign name are two archive searches. On production
+// (2026-11-11) the live pages for 'Erakçi' and 'Arakçi' shared 0 of 24 ids, 'Zelenskiy' (38 live
+// clusters) and 'Zelenski' (6 on their own) split the archive, and 'Hamenei' (0) answered
+// 'sonuç bulunamadı' while 'Hamaney' (11) had stories. The group's order is the disjunct order,
+// as for AKP / AK Parti: the typed spelling does not move to the front (the in-feed filter lists
+// it first, the archive uses group order; in-feed-match.test.ts pins that).
+describe("expandAliasQuery: foreign-name spellings (h116-search-2)", () => {
+  it("expands 'Erakçi' into erakci or arakci on both arms", () => {
+    expect(expandAliasQuery(canonicalSearchQuery("Erakçi"))).toEqual({
+      variantsQuery: "erakci or arakci",
+      foldedQuery: "erakci or arakci",
+    });
+  });
+
+  it("gives 'Arakçi' the same two disjuncts in group order", () => {
+    expect(expandAliasQuery(canonicalSearchQuery("Arakçi"))).toEqual({
+      variantsQuery: "erakci or arakci",
+      foldedQuery: "erakci or arakci",
+    });
+  });
+
+  it("expands \"Zelenski'nin\" (the suffix is cut by the canonical query) into the zelenskiy / zelenski pair", () => {
+    const out = expandAliasQuery(canonicalSearchQuery("Zelenski'nin"));
+    expect(out).toEqual({
+      variantsQuery: "zelenskiy or zelenski",
+      foldedQuery: "zelenskiy or zelenski",
+    });
+    expect(expandAliasQuery(canonicalSearchQuery("Zelenskiy"))).toEqual(out);
+  });
+
+  it("expands 'hamenei' into hamenei or hamaney, and 'hamaney' not at all (one way)", () => {
+    expect(expandAliasQuery("hamenei")).toEqual({
+      variantsQuery: "hamenei or hamaney",
+      foldedQuery: "hamenei or hamaney",
+    });
+    expect(expandAliasQuery(canonicalSearchQuery("Hamenei'nin"))?.foldedQuery).toBe(
+      "hamenei or hamaney",
+    );
+    expect(expandAliasQuery("hamaney")).toBeNull();
+    expect(expandAliasQuery(canonicalSearchQuery("Hamaney'in"))).toBeNull();
+  });
+
+  it("is Turkish-fold aware: ERAKÇİ, Erakçı (dotless) and the ASCII spelling expand alike", () => {
+    for (const q of ["ERAKÇİ", "Erakçı", "erakci", "ERAKCI", "Erakçi"]) {
+      expect(expandAliasQuery(canonicalSearchQuery(q))?.foldedQuery, q).toBe("erakci or arakci");
+    }
+    expect(expandAliasQuery(canonicalSearchQuery("ARAKÇI"))?.foldedQuery).toBe("erakci or arakci");
+    expect(expandAliasQuery(canonicalSearchQuery("HAMENEİ"))?.foldedQuery).toBe("hamenei or hamaney");
+  });
+
+  it.each([
+    ["erakcinin", "a different term that merely starts with the alias"],
+    ["erakçili", "a suffixed word that is not cut (no apostrophe)"],
+    ["arakçıl", "a different word"],
+    ["zelensky", "the English spelling is no member of the group"],
+    ["zelenskiyin", "a different term"],
+    ["hamaneyin", "a different term"],
+    ["hamas", "an unrelated word"],
+    ["erak", "a stem of the name is not the name"],
+    ["iran", "an ordinary query"],
+  ])("returns null for %j (%s)", (q) => {
+    expect(expandAliasQuery(q)).toBeNull();
+  });
+
+  it.each([
+    ['"erakçi"', "a quoted phrase is an exact search"],
+    ["erakçi -iran", "a negated term"],
+    ["-erakçi", "a leading negation"],
+    ["erakçi or arakçi", "a standalone or"],
+    ['"zelenskiy"', "a quoted phrase"],
+    ["hamenei -iran", "a negated term"],
+  ])("returns null for %j (%s): the reader already used websearch syntax", (q) => {
+    expect(expandAliasQuery(q)).toBeNull();
+  });
+
+  it("keeps the rest of the query in both disjuncts and never quotes (every spelling is one word)", () => {
+    // The matched term is replaced by the group's (folded) spelling on both arms, as 'akp' is.
+    expect(expandAliasQuery("erakçi iran")).toEqual({
+      variantsQuery: "erakci iran or arakci iran",
+      foldedQuery: "erakci iran or arakci iran",
+    });
+    expect(expandAliasQuery("iran arakci hürmüz")).toEqual({
+      variantsQuery: "iran erakci hürmüz or iran arakci hürmüz",
+      foldedQuery: "iran erakci hürmüz or iran arakci hürmüz",
+    });
+    for (const q of ["erakci", "arakci", "zelenski", "zelenskiy", "hamenei", "erakci iran", "hamenei talimat"]) {
+      const out = expandAliasQuery(q);
+      expect(out?.variantsQuery, q).not.toContain('"');
+      expect(out?.foldedQuery, q).not.toContain('"');
+    }
+  });
+
+  it("expands only the FIRST alias occurrence: two disjuncts, across groups and the one-way table", () => {
+    expect(expandAliasQuery("erakci zelenski")?.foldedQuery).toBe("erakci zelenski or arakci zelenski");
+    expect(expandAliasQuery("zelenski erakci")?.foldedQuery).toBe("zelenskiy erakci or zelenski erakci");
+    expect(expandAliasQuery("akp erakci")?.foldedQuery).toBe("akp erakci or ak parti erakci");
+    expect(expandAliasQuery("hamenei erakci")?.foldedQuery).toBe("hamenei erakci or hamaney erakci");
+    expect(expandAliasQuery("erakci hamenei")?.foldedQuery).toBe("erakci hamenei or arakci hamenei");
+    expect(expandAliasQuery("erakci arakci")?.foldedQuery).toBe("erakci arakci or arakci arakci");
+    for (const q of ["erakci zelenski", "zelenski erakci", "hamenei erakci", "erakci arakci"]) {
+      expect(expandAliasQuery(q)?.foldedQuery.split(" or "), q).toHaveLength(2);
+      expect(expandAliasQuery(q)?.variantsQuery.split(" or "), q).toHaveLength(2);
+    }
+  });
+
+  it("is bounded: at most 2 disjuncts of 6 terms (every new spelling is one term), 7 terms are refused", () => {
+    for (const alias of ["erakci", "zelenski", "hamenei"]) {
+      const canonical = canonicalSearchQuery(`${alias} a1 b2 c3 d4 e5 f6 g7`);
+      expect(canonical.split(" ")).toHaveLength(MAX_SEARCH_TERMS);
+      const out = expandAliasQuery(canonical);
+      const disjuncts = out?.foldedQuery.split(" or ") ?? [];
+      expect(disjuncts, alias).toHaveLength(2);
+      expect(Math.max(...disjuncts.map((d) => d.split(" ").length)), alias).toBe(MAX_SEARCH_TERMS);
+      expect(out?.variantsQuery.split(" or "), alias).toHaveLength(2);
+      expect(expandAliasQuery(`${alias} a1 b2 c3 d4 e5 f6`), alias).toBeNull();
+    }
+  });
+
+  it("a phrase-making term keeps the folded arm unexpanded, the variants arm still expands", () => {
+    const out = expandAliasQuery("erakci covid_19");
+    expect(out?.foldedQuery).toBe("erakci covid_19");
+    expect(out?.variantsQuery).toBe("erakci covid_19 or arakci covid_19");
+  });
+
+  it("leaves the AKP group, the province aliases and every earlier expansion exactly as they were", () => {
+    expect(expandAliasQuery("akp")).toEqual({
+      variantsQuery: 'akp or "ak parti"',
+      foldedQuery: "akp or ak parti",
+    });
+    expect(expandAliasQuery("ak parti")?.foldedQuery).toBe("akp or ak parti");
+    expect(expandAliasQuery("afyon")?.foldedQuery).toBe("afyon or afyonkarahisar");
+    expect(expandAliasQuery("antep")?.foldedQuery).toBe("antep or gaziantep");
+    expect(expandAliasQuery("urfa")?.foldedQuery).toBe("urfa or sanliurfa");
+  });
+});
+
+describe("aliasTermForms: foreign-name spellings (h116-search-2)", () => {
+  it("returns both spellings in group order, whichever the reader typed", () => {
+    expect(aliasTermForms(["arakci"])).toEqual([["erakci"], ["arakci"]]);
+    expect(aliasTermForms(["erakci"])).toEqual([["erakci"], ["arakci"]]);
+    expect(aliasTermForms(["zelenski"])).toEqual([["zelenskiy"], ["zelenski"]]);
+    expect(aliasTermForms(["zelenskiy"])).toEqual([["zelenskiy"], ["zelenski"]]);
+  });
+
+  it("matches through the fold and keeps the other terms", () => {
+    expect(aliasTermForms(["Arakçi"])).toEqual([["erakci"], ["arakci"]]);
+    expect(aliasTermForms(["iran", "ERAKÇİ", "hürmüz"])).toEqual([
+      ["iran", "erakci", "hürmüz"],
+      ["iran", "arakci", "hürmüz"],
+    ]);
+  });
+
+  it("expands 'hamenei' into [hamenei, hamaney] and never 'hamaney'", () => {
+    expect(aliasTermForms(["hamenei"])).toEqual([["hamenei"], ["hamaney"]]);
+    expect(aliasTermForms(["hamaney"])).toBeNull();
+  });
+
+  it("returns null for a different term or the English spelling", () => {
+    expect(aliasTermForms(["erakcinin"])).toBeNull();
+    expect(aliasTermForms(["zelensky"])).toBeNull();
+    expect(aliasTermForms(["erak"])).toBeNull();
+    expect(aliasTermForms(["hamas"])).toBeNull();
+  });
+
+  it("keeps the earliest-position rule across the groups and the one-way table", () => {
+    expect(aliasTermForms(["erakci", "afyon"])).toEqual([["erakci", "afyon"], ["arakci", "afyon"]]);
+    expect(aliasTermForms(["afyon", "erakci"])).toEqual([["afyon", "erakci"], ["afyonkarahisar", "erakci"]]);
+    expect(aliasTermForms(["hamenei", "akp"])).toEqual([["hamenei", "akp"], ["hamaney", "akp"]]);
   });
 });
