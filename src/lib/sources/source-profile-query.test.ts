@@ -271,6 +271,45 @@ describe("getSourceProfile found / missing", () => {
     expect(cacheLife).toHaveBeenCalledWith("source-directory");
     expect(console.error).toHaveBeenCalled();
   });
+
+  // h122-sourcepages-3: a failed history read used to look exactly like an empty
+  // history, so the card printed "Bu etiket hiç değişmedi." for a table that
+  // could not be read. The read still never fails the profile and is still
+  // logged, but the profile now says the history is unavailable.
+  it("a zone-history error sets historyUnavailable, with zoneHistory [] and the failure still logged", async () => {
+    fixture.history = [
+      { data: null, error: { message: "history table unavailable" } },
+    ];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.historyUnavailable).toBe(true);
+    expect(profile?.zoneHistory).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(
+      "[source-profile] zone history query failed",
+      expect.objectContaining({ message: "history table unavailable" }),
+    );
+  });
+
+  it("a successful history read is not unavailable, with rows or without (an empty table is an honest empty history)", async () => {
+    const withRows = await getSourceProfile("ornek-gazete");
+    expect(withRows?.historyUnavailable).toBe(false);
+    expect(withRows?.zoneHistory).toHaveLength(1);
+
+    fixture.history = [{ data: [], error: null }];
+    fixture.served = { sources: 0, count: 0, articles: 0, history: 0, clusterArticles: 0 };
+    const empty = await getSourceProfile("ornek-gazete");
+    expect(empty?.historyUnavailable).toBe(false);
+    expect(empty?.zoneHistory).toEqual([]);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("a null history payload without an error reads as an empty, available history", async () => {
+    fixture.history = [{ data: null, error: null }];
+    const profile = await getSourceProfile("ornek-gazete");
+    expect(profile?.historyUnavailable).toBe(false);
+    expect(profile?.zoneHistory).toEqual([]);
+  });
 });
 
 // h47-sources-1: /source/[slug] now says when a source is no longer monitored

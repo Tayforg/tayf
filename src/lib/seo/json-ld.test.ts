@@ -8,6 +8,7 @@ import {
   serializeJsonLd,
 } from "./json-ld";
 import { isLanguageIsolatedCluster, sourceLang } from "@/lib/sources/source-language";
+import { toRegistryRecord } from "@/lib/sources/registry";
 
 const ORIGINAL_SITE_URL_ENV = process.env.NEXT_PUBLIC_SITE_URL;
 
@@ -205,6 +206,52 @@ describe("buildRegistryDataset", () => {
       expect(ds.distribution.contentUrl).toBe("https://tayf.test/api/sources");
       expect(ds.distribution.contentUrl.endsWith("/api/sources")).toBe(true);
     }
+  });
+
+  // h122-sourcepages-3: the description promised "hak bayrakları" (rights
+  // flags), but /api/sources (toRegistryRecord) carries no image_allowed or
+  // excerpt_allowed key. Exposing them is a founder decision, so the copy stops
+  // naming them and lists only what the distribution holds.
+  it("the description no longer promises 'hak bayrakları' and names exactly what the registry carries", () => {
+    const ds = buildRegistryDataset({});
+
+    expect(ds.description).not.toContain("hak bayrakları");
+    expect(ds.description).toBe(
+      "Tayf'ın izlediği Türk haber kaynaklarının kaydı — yanlılık kategorisi, tür (outlet/aggregator/wire/niche) ve kayyum durumu dahil.",
+    );
+  });
+
+  it("every field the description names is a key of a toRegistryRecord record, and no rights flag is exposed", () => {
+    const ds = buildRegistryDataset({});
+    const record = toRegistryRecord({
+      slug: "tele1",
+      name: "Tele1",
+      url: "https://www.tele1.com.tr",
+      bias: "opposition_leaning",
+      kind: "outlet",
+      active: true,
+      zone_rationale: null,
+      zone_rationale_at: null,
+      trustee_since: "2025-10-24",
+      trustee_note: "TMSF kayyum atandı",
+    });
+
+    const named: Record<string, string> = {
+      "yanlılık kategorisi": "bias",
+      "tür (outlet/aggregator/wire/niche)": "kind",
+      "kayyum durumu": "trustee_since",
+    };
+    for (const [phrase, key] of Object.entries(named)) {
+      expect(ds.description, phrase).toContain(phrase);
+      expect(record, key).toHaveProperty(key);
+    }
+    expect(record.bias).toBe("opposition_leaning");
+    expect(record.kind).toBe("outlet");
+    expect(record.trustee_since).toBe("2025-10-24");
+
+    expect(Object.keys(record)).not.toContain("image_allowed");
+    expect(Object.keys(record)).not.toContain("excerpt_allowed");
+    expect(ds.description).not.toMatch(/hak|rights|image_allowed|excerpt_allowed/i);
   });
 
   it("never reads the clock: the output is identical under two different system times", () => {

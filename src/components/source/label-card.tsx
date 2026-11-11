@@ -6,6 +6,7 @@ import { nonVotingNote } from "@/lib/sources/kind";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { ownerLineParts } from "@/lib/sources/owner-line";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
+import { formatTurkishDate } from "@/lib/time";
 import type { ReaderAgreement } from "@/lib/game/agreement";
 
 // The 'Etiket kartı' (S-20/M-04) evidence section on /source/[slug].
@@ -34,6 +35,14 @@ export interface LabelCardProps {
   trusteeSince: string | null;
   trusteeNote: string | null;
   history: ZoneHistoryEntry[];
+  /**
+   * True when the zone-history read failed (the profile query then passes
+   * `history: []`). The empty list alone would read as "no recorded change";
+   * with this flag the card says the history could not be read. Absent or false
+   * means the read worked, so an empty `history` is a real empty list. Recorded
+   * rows always win: this flag only chooses between the two empty-state lines.
+   */
+  historyUnavailable?: boolean;
   /** Aggregate /oyun guess share for this outlet, or null below the
    *  publication threshold (see @/lib/game/agreement). */
   readerAgreement: ReaderAgreement | null;
@@ -43,7 +52,22 @@ export interface LabelCardProps {
 }
 
 const EMPTY_RATIONALE = "Gerekçe henüz girilmedi";
-const EMPTY_HISTORY = "Bu etiket hiç değişmedi.";
+/**
+ * The day source_zone_history started recording label changes (an ISO date).
+ * Migration 055 (2026-09-18, git 1c65fea) added the insert/update trigger; no
+ * row was written before it, and migration 175 states the table "is not
+ * backfilled" (it holds no origin rows for the sources that existed then, and
+ * adding them is a founder decision). So an empty history proves only that no
+ * change has been recorded since this date, never that the label never changed:
+ * /metodoloji's changelog records the 'Bağımsız' -> 'Merkez' rename, which
+ * predates it. The empty state below must say exactly that and nothing more.
+ * The "'dan" suffix below follows the year (2026 ends in a back vowel): revisit
+ * it if this date ever changes.
+ */
+export const ZONE_HISTORY_RECORDED_SINCE = "2026-09-18";
+
+const EMPTY_HISTORY = `Kayıtlı bir etiket değişikliği yok (etiket değişiklikleri ${formatTurkishDate(ZONE_HISTORY_RECORDED_SINCE)}'dan beri kaydediliyor).`;
+const HISTORY_UNAVAILABLE = "Etiket geçmişi şu anda okunamadı.";
 const EMPTY_AGREEMENT = "Henüz yeterli tahmin yok";
 
 // "Okur tahmini", never "doğruluk": the share says how often readers
@@ -70,6 +94,7 @@ export function LabelCard({
   trusteeSince,
   trusteeNote,
   history,
+  historyUnavailable,
   readerAgreement,
   kind,
 }: LabelCardProps) {
@@ -220,7 +245,9 @@ export function LabelCard({
           Etiket geçmişi
         </h3>
         {sortedHistory.length === 0 ? (
-          <p className="text-xs text-muted-foreground">{EMPTY_HISTORY}</p>
+          <p className="text-xs text-muted-foreground">
+            {historyUnavailable ? HISTORY_UNAVAILABLE : EMPTY_HISTORY}
+          </p>
         ) : (
           <ul className="space-y-1.5">
             {sortedHistory.map((entry, i) => {

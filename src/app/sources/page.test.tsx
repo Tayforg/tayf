@@ -82,6 +82,9 @@ function makeFakeClient() {
   // h47-sources-1: fetch_quarantined_until is NULL unless a test sets it.
   const quarantinedUntilOf = (slug: string) =>
     supabaseFixture.quarantinedUntilBySlug[slug] ?? null;
+  // h122-sourcepages-2: trustee_since (migration 055) is NULL unless a test sets it.
+  const trusteeSinceOf = (slug: string) =>
+    supabaseFixture.trusteeSinceBySlug[slug] ?? null;
   // h103-sourcescores-2: the four ingest columns classifySilence reads. A slug a
   // test does not touch is a healthy feed (200, no failures, nothing measured),
   // which classifies as 'sessiz', never 'akış donmuş'.
@@ -110,6 +113,7 @@ function makeFakeClient() {
       created_at: createdAtOf("s-outlet"),
       zone_rationale_at: rationaleAtOf("s-outlet"),
       fetch_quarantined_until: quarantinedUntilOf("s-outlet"),
+      trustee_since: trusteeSinceOf("s-outlet"),
       ...feedColumnsOf("s-outlet"),
     },
     {
@@ -127,6 +131,7 @@ function makeFakeClient() {
       created_at: createdAtOf("s-aggregator"),
       zone_rationale_at: rationaleAtOf("s-aggregator"),
       fetch_quarantined_until: quarantinedUntilOf("s-aggregator"),
+      trustee_since: trusteeSinceOf("s-aggregator"),
       ...feedColumnsOf("s-aggregator"),
     },
     {
@@ -144,6 +149,7 @@ function makeFakeClient() {
       created_at: createdAtOf("s-wire"),
       zone_rationale_at: rationaleAtOf("s-wire"),
       fetch_quarantined_until: quarantinedUntilOf("s-wire"),
+      trustee_since: trusteeSinceOf("s-wire"),
       ...feedColumnsOf("s-wire"),
     },
     // h103-sourcescores-2: extra directory rows for the header-count tests; empty by default.
@@ -153,6 +159,7 @@ function makeFakeClient() {
       created_at: createdAtOf(String(row.slug)),
       zone_rationale_at: rationaleAtOf(String(row.slug)),
       fetch_quarantined_until: quarantinedUntilOf(String(row.slug)),
+      trustee_since: trusteeSinceOf(String(row.slug)),
       ...feedColumnsOf(String(row.slug)),
       ...row,
     })),
@@ -160,8 +167,8 @@ function makeFakeClient() {
   return createSupabaseFake({
     tables: {
       // Like PostgREST, return only the columns the query selects: a page that
-      // forgets `created_at, zone_rationale_at, fetch_quarantined_until` (or one of the four fetch_*
-      // columns the frozen-feed verdict reads) in its select string must not
+      // forgets `created_at, zone_rationale_at, fetch_quarantined_until, trustee_since` (or one of the
+      // four fetch_* columns the frozen-feed verdict reads) in its select string must not
       // be rescued by a fake that hands them over anyway.
       sources: (state) => {
         // h69-jsonld-1: the newest registry_changed_at stamp, a separate one-row read of the
@@ -228,6 +235,7 @@ function makeFakeClient() {
               "fetch_fail_streak",
               "fetch_newest_item_at",
               "fetch_items_count",
+              "trustee_since",
             ]) {
               if (!selected.includes(column)) delete out[column];
             }
@@ -282,6 +290,8 @@ const supabaseFixture = vi.hoisted(() => ({
   rationaleBySlug: {} as Record<string, string | null>,
   /** slug -> fetch_quarantined_until (ISO); an absent slug is NULL (never quarantined). */
   quarantinedUntilBySlug: {} as Record<string, string | null>,
+  /** slug -> trustee_since (a yyyy-mm-dd or any string); an absent slug is NULL (no kayyum). */
+  trusteeSinceBySlug: {} as Record<string, string | null>,
   /**
    * slug -> the ingest columns classifySilence reads (h103-sourcescores-2). A key that is absent
    * keeps the healthy default (status 200, fail streak 0, no newest item, no item count); an
@@ -460,6 +470,7 @@ beforeEach(() => {
   supabaseFixture.createdAtBySlug = {};
   supabaseFixture.rationaleBySlug = { "s-aggregator": "2025-06-15T00:00:00Z" };
   supabaseFixture.quarantinedUntilBySlug = {};
+  supabaseFixture.trusteeSinceBySlug = {};
   supabaseFixture.feedBySlug = {};
   supabaseFixture.extraRows = [];
   supabaseFixture.history = [];
@@ -2441,5 +2452,210 @@ describe("/sources page source -- the frozen verdict is computed inside the cach
 
   it("keeps cacheLife as one literal per branch (untouched)", () => {
     expect(code).toMatch(/if \(r\.ok\) cacheLife\("source-directory"\);\s*else cacheLife\("minutes"\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-sourcepages-2: /sources never showed kayyum status from the registry.
+// Tele1 (TMSF kayyum since 24.10.2025 by its own record) was tagged "Bağımsız
+// sahiplik" with no kayyum mark, while the story "Kaynak künyesi" and the
+// profile both print "Kayyum · 24.10.2025". The directory read now selects
+// trustee_since, stamps `trusteeSince` on each row, and the card renders the
+// shared <SourceBadge> right after <SourceChips>, in the same flex row. The
+// factuality.ts strings, owner groups and /api/sources are untouched.
+// ---------------------------------------------------------------------------
+
+describe("/sources page -- kayyum status is visible on the cards (h122-sourcepages-2)", () => {
+  const BADGE = "Kayyum · ";
+  const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+  type KayyumRow = { slug: string; trusteeSince?: unknown } & Record<string, unknown>;
+
+  async function groupedProps() {
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    return (child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0]).grouped;
+  }
+  async function groupedRows(): Promise<KayyumRow[]> {
+    return Object.values(await groupedProps()).flat() as unknown as KayyumRow[];
+  }
+  async function cardsMarkup(): Promise<string> {
+    return renderToStaticMarkup(
+      createElement(SourceDirectory, { grouped: await groupedProps(), countLabel: "0 haber" }),
+    );
+  }
+  /** The markup of the card whose profile link points at /source/<slug>. */
+  function cardOf(markup: string, slug: string): string {
+    return (
+      markup
+        .split('<div class="group relative')
+        .find((chunk) => chunk.includes(`href="/source/${slug}"`)) ?? ""
+    );
+  }
+
+  it("(a) a row with trustee_since 2025-10-24 renders 'Kayyum · 24.10.2025' inside that source's card, and in no other card", async () => {
+    supabaseFixture.trusteeSinceBySlug = { "s-outlet": "2025-10-24" };
+    const markup = await cardsMarkup();
+
+    expect(cardOf(markup, "s-outlet")).toContain("Kayyum · 24.10.2025");
+    expect(cardOf(markup, "s-aggregator")).not.toContain("Kayyum");
+    expect(cardOf(markup, "s-wire")).not.toContain("Kayyum");
+    expect(countOf(markup, BADGE)).toBe(1);
+  });
+
+  it("(a) the badge does not depend on the kind: a wire row shows its own date too", async () => {
+    supabaseFixture.trusteeSinceBySlug = { "s-wire": "2025-09-11" };
+    expect(await cardsMarkup()).toContain("Kayyum · 11.09.2025");
+  });
+
+  it("(b) a NULL trustee_since renders no 'Kayyum' on any card", async () => {
+    // Default fixtures: every row has trustee_since NULL.
+    expect(await cardsMarkup()).not.toContain("Kayyum");
+    expect((await collectText(await SourcesPage())).join("")).not.toContain("Kayyum");
+  });
+
+  it("(c) an unparseable trustee_since renders nothing: the SourceBadge gate, never an undated kayyum claim", async () => {
+    for (const bad of ["not-a-date", "", "   ", "2025-13-45"]) {
+      supabaseFixture.trusteeSinceBySlug = { "s-outlet": bad, "s-wire": bad };
+      const markup = await cardsMarkup();
+      expect(markup, JSON.stringify(bad)).not.toContain("Kayyum");
+    }
+  });
+
+  it("(d) the directory select requests trustee_since, and a read without it would show nothing (the fake returns only selected columns)", async () => {
+    const reader = functionSource(stripComments(PAGE_SOURCE), "readSourcesDirectory");
+    expect(reader).toMatch(/"[^"]*\btrustee_since\b[^"]*"/);
+
+    supabaseFixture.trusteeSinceBySlug = { "s-outlet": "2025-10-24" };
+    const rows = await groupedRows();
+    expect(rows.find((r) => r.slug === "s-outlet")?.trusteeSince).toBe("2025-10-24");
+  });
+
+  it("(e) a SourceRow carries trusteeSince (string | null) and no raw trustee_since key", async () => {
+    supabaseFixture.trusteeSinceBySlug = { "s-outlet": "2025-10-24" };
+    const rows = await groupedRows();
+
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect("trustee_since" in row).toBe(false);
+      expect(row.trusteeSince === null || typeof row.trusteeSince === "string").toBe(true);
+    }
+    expect(rows.find((r) => r.slug === "s-aggregator")?.trusteeSince).toBeNull();
+    expect(rows.find((r) => r.slug === "s-wire")?.trusteeSince).toBeNull();
+  });
+
+  it("(f) the number of 'Kayyum ·' badges equals the number of rows that carry a trustee_since", async () => {
+    supabaseFixture.extraRows = [
+      {
+        id: "s-extra-a",
+        name: "Ekstra A",
+        slug: "s-extra-a",
+        url: "https://example.com/a",
+        rss_url: "https://example.com/a/rss",
+        bias: "opposition",
+        logo_url: null,
+        active: true,
+        kind: "outlet",
+      },
+    ];
+    supabaseFixture.trusteeSinceBySlug = {
+      "s-outlet": "2025-09-11",
+      "s-wire": "2025-10-24",
+      "s-extra-a": "2025-09-11",
+      // s-aggregator: NULL
+    };
+    const markup = await cardsMarkup();
+    expect(countOf(markup, BADGE)).toBe(3);
+    expect(cardOf(markup, "s-aggregator")).not.toContain("Kayyum");
+  });
+
+  it("(g) the badge sits right after the SourceChips, in the same flex row as the bias badge (Tele1: 'Bağımsız sahiplik' then 'Kayyum · 24.10.2025')", async () => {
+    supabaseFixture.extraRows = [
+      {
+        id: "s-tele1",
+        name: "Tele1",
+        slug: "tele1",
+        url: "https://example.com/tele1",
+        rss_url: "https://example.com/tele1/rss",
+        bias: "opposition_leaning",
+        logo_url: null,
+        active: true,
+        kind: "outlet",
+      },
+    ];
+    supabaseFixture.trusteeSinceBySlug = { tele1: "2025-10-24" };
+    const card = cardOf(await cardsMarkup(), "tele1");
+
+    // The flex row holds spans only (BiasBadge, chips, badge), so its first </div> closes it.
+    const row = /<div class="flex flex-wrap items-center gap-1 min-w-0">(.*?)<\/div>/.exec(card)?.[1] ?? "";
+    expect(row).toContain("Muhalefete Meyilli");
+    expect(row).toContain("Bağımsız sahiplik");
+    expect(row).toContain("Kayyum · 24.10.2025");
+    expect(row.indexOf("Bağımsız sahiplik")).toBeLessThan(row.indexOf("Kayyum · 24.10.2025"));
+    // Right after the chips group: nothing but the badge's own closing tag follows its text.
+    expect(row.slice(row.indexOf("Kayyum · 24.10.2025"))).toBe("Kayyum · 24.10.2025</span>");
+  });
+
+  it("(h) the factuality.ts ownership strings are untouched: Habertürk keeps its hand-typed kayyum text and gains the dated badge", async () => {
+    supabaseFixture.extraRows = [
+      {
+        id: "s-haberturk",
+        name: "Habertürk",
+        slug: "haberturk",
+        url: "https://example.com/haberturk",
+        rss_url: "https://example.com/haberturk/rss",
+        bias: "gov_leaning",
+        logo_url: null,
+        active: true,
+        kind: "outlet",
+      },
+    ];
+    supabaseFixture.trusteeSinceBySlug = { haberturk: "2025-09-11" };
+    const card = cardOf(await cardsMarkup(), "haberturk");
+    expect(card).toContain("TMSF kayyum yönetiminde, 11.09.2025; önceki sahip Ciner Medya");
+    expect(card).toContain("Kayyum · 11.09.2025");
+  });
+});
+
+describe("SourceDirectory -- the kayyum card badge (h122-sourcepages-2)", () => {
+  const render = (row: Record<string, unknown>) =>
+    renderToStaticMarkup(
+      createElement(SourceDirectory, {
+        grouped: { pro_government: [{ ...GZT, ...row }] } as unknown as GroupedSources,
+        countLabel: "0 haber",
+      }),
+    );
+
+  it("a row with trusteeSince '2025-10-24' carries the amber 'Kayyum · 24.10.2025' pill with its title", () => {
+    const markup = render({ trusteeSince: "2025-10-24" });
+    expect(markup).toContain("Kayyum · 24.10.2025");
+    expect(markup).toContain('title="Kayyum yönetiminde"');
+    expect(markup).toContain("border-amber-500/30");
+  });
+
+  it("null, undefined (a row that predates the field) and an unparseable value render no badge", () => {
+    for (const trusteeSince of [null, undefined, "not-a-date", ""]) {
+      expect(render({ trusteeSince }), String(trusteeSince)).not.toContain("Kayyum");
+    }
+  });
+
+  it("the badge is a span inside the one profile link: still exactly one card link, no nested anchor", () => {
+    const markup = render({ trusteeSince: "2025-10-24" });
+    expect(markup.match(/href="\/source\/gzt"/g)).toHaveLength(1);
+    const open = markup.indexOf('href="/source/gzt"');
+    const close = markup.indexOf("</a>", open);
+    const badge = markup.indexOf("Kayyum · 24.10.2025");
+    expect(badge).toBeGreaterThan(open);
+    expect(badge).toBeLessThan(close);
+    expect(markup.slice(open, close)).not.toMatch(/<a\b/);
+  });
+
+  it("the page reuses the shared SourceBadge from the story components (no second copy of the badge text)", () => {
+    const code = stripComments(PAGE_SOURCE);
+    expect(code).toMatch(
+      /import\s*\{[^}]*\bSourceBadge\b[^}]*\}\s*from\s*"@\/components\/story\/source-badge"/,
+    );
+    expect(code).toMatch(/<SourceBadge\s+trusteeSince=\{source\.trusteeSince\}\s*\/>/);
+    expect(code).not.toContain("Kayyum ·");
   });
 });

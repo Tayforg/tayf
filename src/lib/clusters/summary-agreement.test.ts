@@ -10,8 +10,11 @@ import {
   agreementSwitches,
   carriesOutcome,
   contentWords,
+  findAgreeingMember,
   hasFiniteVerb,
+  isExplainerTitle,
   isLiveLine,
+  isQuoteOnly,
   seedDisqualified,
   sharedStemsExcluding,
   stageBehindTitle,
@@ -21,7 +24,9 @@ import {
   titleAgreement,
   titleStemOverlap,
 } from "./summary-agreement";
-import { tidySummaryText } from "@/lib/articles/summary-tidy";
+import { clampCutIntroducedQuote, isCtaFeedCut, tidySummaryText } from "@/lib/articles/summary-tidy";
+import type { SummaryMember } from "./summary-attribution";
+import type { SourceKind } from "@/types";
 import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import type { Gen } from "../../../tests/_helpers/linear-time";
 
@@ -1376,8 +1381,11 @@ describe("seedDisqualified: live, teaser, echo and the surname stub (h95-summari
   });
 
   it("dd5535a7: the cut that 'Kurtulmuş' hid is a stub", () => {
+    // Turkuvaz's "<cut>...Devamı için tıklayınız" (a CTA feed cut). h122-ozet-3: the tidy step now repairs it like a
+    // clamp, with a word cut that drops the last word and one "…" (it showed "...Yeni Parti Genel Başkanı..." before).
     const shown = tidySummaryText(DD5_RAW);
-    expect(shown.endsWith("Yeni Parti Genel Başkanı...")).toBe(true);
+    expect(isCtaFeedCut(DD5_RAW)).toBe(true);
+    expect(shown.endsWith("Cevdet Yılmaz, Yeni Parti Genel…")).toBe(true);
     expect(seedDisqualified(DD5_RAW, shown)).toBe("stub");
   });
 
@@ -1437,5 +1445,706 @@ describe("agreementSwitches takes the floor of the replacement (h95-summaries-1)
   it("a null score never switches, whatever the floor", () => {
     expect(agreementSwitches(null, 1, true, 0)).toBe(false);
     expect(agreementSwitches(0.1, null, true, 0)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-1 (hunt 122, 2026-11-11): Independent Türkçe's CMS field dump is a form defect.
+//
+// indyturk's RSS description is its Drupal field dump ("...dediPazartesi, Kasım 9, 2026 -
+// 21:30Main image: HaberType: newsSEO Title: <the headline>copyright Independentturkish:"). The
+// tidy step now cuts it, but the cut text is still a guess at what the caption and the lead were,
+// and its "SEO Title:" repeats the headline word for word, so it scored 1.00 and was picked as
+// the Özet of 710ef4bb and, by the recency tie-break, of b8e7cc75. 'cms' is read on the RAW text
+// (the tidied text no longer holds the markers): a member that has it never stands in for the
+// seed, and a seed that has it is replaced from AGREEMENT_FORM_DEFECT_MIN up.
+//
+// The members are the real outlet texts of the live clusters (dumped read-only 2026-11-11), the
+// ones each case needs.
+// ---------------------------------------------------------------------------
+
+function mem(name: string, kind: SourceKind, at: string, description: string, title: string): SummaryMember {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return {
+    source: { name, slug, kind, bias: "center" },
+    article: { published_at: at, content_hash: `h-${slug}`, title, description, url: `https://example.com/${slug}` },
+  };
+}
+
+function memberNamed(members: readonly SummaryMember[], name: string): SummaryMember {
+  const m = members.find((x) => x.source.name === name);
+  if (!m) throw new Error(`no member ${name}`);
+  return m;
+}
+
+/** findAgreeingMember with `seedName` as the seed (its description is the stored summary). */
+function pickFor(title: string, members: readonly SummaryMember[], seedName: string) {
+  const seed = memberNamed(members, seedName);
+  return findAgreeingMember({
+    members,
+    seed,
+    seedShown: tidySummaryText((seed.article.description ?? "").trim()),
+    title,
+    wireMajorityHashes: new Set<string>(),
+  });
+}
+
+const CMS_BAHCELI_TITLE = "MHP lideri Bahçeli’den 10 Kasım mesajı";
+const CMS_BAHCELI_MEMBERS: SummaryMember[] = [
+  mem("Türkiye Gazetesi", "outlet", "2026-11-09T14:40:03Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün vefatının 88'inci yıl dönümü dolayısıyla yayımladığı mesajda, Atatürk'ün fikirlerinin çağın gerçekleriyle geliştirilmesi ve Cumhuriyet mirasına sahip çıkılması gerektiğini belirtti.", "MHP lideri Bahçeli'den 10 Kasım mesajı"),
+  mem("Milliyet", "outlet", "2026-11-09T14:43:41Z", "Milliyetçi Hareket Partisi Genel Başkanı Devlet Bahçeli’nin, \"Gazi Mustafa Kemal Atatürk’ün 88. Vefat Yıldönümü\" münasebetiyle yapmış olduğu yazılı basın açıklaması şöyle;\n\n\"ATATÜRK’Ü ANMA GÜNÜ, DEVLETİMİZ ADINA, MİLLETİMİZ NAMINA ÇOK KIYMETLİ\" \n\"Türkiye Cumhuriyeti devletinin kurucusu, istiklal mücadelemizin lideri, ilk Cumhurbaşkanımız Gazi Mustafa Kemal Atatürk’ü ebediyete irtihalinin 88. senesinde hürmet, rahmet ve minnetle anıyoruz. Türkiye Cumhuriyeti Devleti’nin kurucusu Gazi Mustafa K...", "Son dakika... Bahçeli'den 'Gazi Mustafa Kemal Atatürk’ün 88. vefat yıl dönümü' mesajı"),
+  mem("Hürriyet", "outlet", "2026-11-09T14:45:00Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün vefatının 88. yıl dönümü dolayısıyla mesajı yayımladı.", "MHP lideri Bahçeli'den 10 Kasım mesajı"),
+  mem("Haber7", "outlet", "2026-11-09T14:46:00Z", "Bahçeli, \"Aramızdan ayrılışının 88'inci yıl dönümünde Gazi Mustafa Kemal Atatürk’ü, Milli Mücadele kahramanlarıyla birlikte aziz şehitlerimizi saygı ve şükran hislerimle anıyor, hepsine Cenab-ı Allah’tan rahmetler niyaz ediyorum.\" dedi.", "Bahçeli'den 10 Kasım mesajı"),
+  mem("Haberler.com", "aggregator", "2026-11-09T14:49:07Z", "MHP Genel Başkanı Devlet Bahçeli, Atatürk'ün 88. vefat yıl dönümü dolayısıyla yayımladığı mesajda, Atatürk'ü anlamanın kurucu felsefesine, devlet aklına ve temel ilkelerine sahip çıkmaktan geçtiğini belirterek, Cumhuriyet'in sonsuza kadar yaşatılması gerektiğini vurguladı.", "MHP Genel Başkanı Bahçeli: Atatürk'ü anlamanın yolu eserine ve fikirlerine sahip çıkmaktır"),
+  mem("Yeniçağ", "outlet", "2026-11-09T15:00:18Z", "MHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla Atatürk’ü anma mesajı yayımladı. Atatürk’ü 88. ölüm yıl dönümünde anan Bahçeli, “Atatürk’ü yaşatmanın doğru yolu, eserine sahip çıkmak ve onun fikirlerini çağın gerçekleriyle yorumlayarak geliştirmekle imkana kavuşur” dedi.", "Devlet Bahçeli’den 10 Kasım’da Atatürk mesajı: “Fikirlerini çağın gerçekleriyle geliştirmeliyiz”"),
+  mem("A Haber", "outlet", "2026-11-09T15:04:23Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün ebediyete irtihalinin 88. yıl dönümü dolayısıyla yayımladığı mesajda, Atatürk'ü anmanın yanı sıra onun fikirlerini yaşatmanın önemine...Devamı için tıklayınız", "MHP lideri Bahçeli'den Atatürk'ün 88. yıl dönümünde anma mesajı"),
+  mem("Posta", "outlet", "2026-11-09T15:08:45Z", "MHP lideri Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajında şu ifadelere yer verdi:\nTürkiye Cumhuriyeti devletinin kurucusu, istiklal mücadelemizin lideri, ilk Cumhurbaşkanımız Gazi Mustafa Kemal Atatürk’ü ebediyete irtihalinin 88. senesinde hürmet, rahmet ve minnetle anıyoruz.\nTürkiye Cumhuriyeti Devleti’nin kurucusu Gazi Mustafa Kemal Atatürk’ün ebediyete irtihalinin 88. Yıldönümü, Atatürk’ü anma günü, hiç kuşkusuz devletimiz adına, milletimiz namına çok kıymetli ve çok değerlidir. Ancak...", "MHP lideri Bahçeli'den 10 Kasım mesajı"),
+  mem("Sabah", "outlet", "2026-11-09T15:09:32Z", "MHP Genel Başkanı Devlet Bahçeli, Atatürk’ü vefatının 88’nci yıl dönümünde andı. Bahçeli paylaşımında, “Milli Mücadele kahramanlarıyla birlikte aziz şehitlerimizi saygı ve şükran hislerimle anıyor, hepsine...Devamı için tıklayınız", "MHP lideri Bahçeli’den 10 Kasım paylaşımı!"),
+  mem("TRT Haber", "outlet", "2026-11-09T15:22:00Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün ebediyete intikalinin 88. yılı vesilesiyle yayımladığı mesajda, \"Atatürke sevgi, saygı ve büyük bir duyguyla bağlı olan kuşaklara düşen görev onu anarken anlayıp geriye bıraktığı bu büyük mirası sonsuza kadar yaşatmaktır\" ifadelerini kullandı.", "MHP Genel Başkanı Bahçeli'den 10 Kasım mesajı"),
+  mem("Independent Türkçe", "outlet", "2026-11-09T15:32:08Z", "MHP Genel Başkanı Devlet Bahçeli10 KASIMMHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajda Gazi Mustafa Kemal Atatürk'ü rahmet ve minnetle andıPazartesi, Kasım 9, 2026 - 18:30Main image: Type: newsSEO Title: Bahçeli'den 10 Kasım mesajı: Atatürk'ü anlamanın en sağlıklı yolu temel ilkelerini faaliyetlerimizin merkezine koymaktırcopyright Independentturkish:", "Bahçeli'den 10 Kasım mesajı: Atatürk'ü anlamanın en sağlıklı yolu temel ilkelerini faaliyetlerimizin merkezine koymaktır"),
+];
+const CMS_AYM_TITLE = "AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir";
+const CMS_AYM_MEMBERS: SummaryMember[] = [
+  mem("Dokuz8 Haber", "outlet", "2026-11-09T17:55:00Z", "Anayasa Mahkemesi Başkanı Kadir Özkaya, anayasanın devletin işleyişini ve bireylerin hak ve özgürlüklerini güvence altına alan temel hukuk metni olduğunu vurguladı.", "AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir"),
+  mem("Independent Türkçe", "outlet", "2026-11-09T18:38:43Z", "AYM Başkanı Kadir ÖzkayaAYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirterek, “Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir” dediPazartesi, Kasım 9, 2026 - 21:30Main image: HaberType: newsSEO Title: AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidircopyright Independentturkish:", "AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir"),
+];
+const CMS_AYM_RAW = memberNamed(CMS_AYM_MEMBERS, "Independent Türkçe").article.description ?? "";
+const CMS_BAHCELI_RAW = memberNamed(CMS_BAHCELI_MEMBERS, "Independent Türkçe").article.description ?? "";
+
+describe("cms: Independent Türkçe's CMS field dump (h122-ozet-1)", () => {
+  it("the fixtures are the dumps the cases below assume", () => {
+    expect(CMS_AYM_RAW).toContain("SEO Title:");
+    expect(CMS_BAHCELI_RAW).toContain("copyright Independentturkish:");
+    expect(CMS_BAHCELI_RAW).toContain("Main image:");
+    expect(tidySummaryText(CMS_AYM_RAW)).not.toContain("SEO Title");
+    expect(tidySummaryText(CMS_BAHCELI_RAW)).not.toContain("Main image");
+  });
+
+  it.each([
+    ["710ef4bb (AYM Başkanı)", CMS_AYM_RAW],
+    ["b8e7cc75 (Bahçeli)", CMS_BAHCELI_RAW],
+  ])("%s: summaryDefect and seedDisqualified both say 'cms' although the tidied text is clean", (_label, raw) => {
+    const shown = tidySummaryText(raw);
+    expect(shown).not.toMatch(/SEO Title|Main image|Independentturkish/i);
+    expect(summaryDefect(raw, shown)).toBe("cms");
+    expect(seedDisqualified(raw, shown)).toBe("cms");
+    expect(seedDisqualified(raw, shown, { memberTitle: "x", clusterTitle: "y" })).toBe("cms");
+  });
+
+  it("each of the three fields alone is enough, in any case", () => {
+    const lead = "Bakan Yılmaz, yeni düzenlemeyi açıkladı.";
+    for (const tail of ["SEO Title: Başlık", "seo title: Başlık", "Main image: ", "MAIN IMAGE: x", "copyright Independentturkish:", "copyrightIndependentturkish:"]) {
+      const raw = lead + tail;
+      expect(summaryDefect(raw, lead), tail).toBe("cms");
+      expect(seedDisqualified(raw, lead), tail).toBe("cms");
+    }
+  });
+
+  it("it is the first verdict: before a cut stub, unbalanced quotes and a teaser", () => {
+    const stub = "Bakan Yılmaz, yeni düzenlemeye ilişkin açıklamasında Main image: \n  Fotoğraf: AA...";
+    expect(summaryDefect(stub, tidySummaryText(stub))).toBe("cms");
+    const quotes = "“Bakan Yılmaz yeni düzenlemeyi açıkladı.SEO Title: x";
+    expect(seedDisqualified(quotes, "“Bakan Yılmaz yeni düzenlemeyi açıkladı.")).toBe("cms");
+    const teaser = "Peki, yeni düzenleme neler getiriyor?SEO Title: x";
+    expect(summaryDefect(teaser, "Peki, yeni düzenleme neler getiriyor?")).toBe("cms");
+  });
+
+  it("a text that only mentions a date, a section label or an image is not 'cms'", () => {
+    const dated = "Toplantı Pazartesi, Kasım 9, 2026 - 18:30 saatinde başlayacak ve iki gün sürecek.";
+    expect(summaryDefect(dated, dated)).toBeNull();
+    expect(seedDisqualified(dated, dated)).toBeNull();
+    const image = "Sergide yer alan ana görüntü (main image) ile ilgili açıklama yapıldı ve ziyaretçilere bilgi verildi.";
+    expect(summaryDefect(image, image)).toBeNull();
+    expect(seedDisqualified(image, image)).toBeNull();
+    expect(summaryDefect("", "")).toBeNull();
+  });
+
+  it("never throws on a non-string", () => {
+    expect(summaryDefect(null as unknown as string, "x")).toBeNull();
+    expect(seedDisqualified("x", undefined as unknown as string)).toBeNull();
+  });
+
+  describe("the replacement floor of a 'cms' seed is AGREEMENT_FORM_DEFECT_MIN, like any form defect", () => {
+    // Five title stems: cumhu, erdog, azerb, forum, konus.
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda konuştu";
+    const dump = "Cumhurbaşkanı Erdoğan, Azerbaycan forumunda konuştu.Cuma, Kasım 6, 2026 - 12:00Main image: Type: newsSEO Title: x";
+    const seed = mem("Tohum", "outlet", "2026-11-08T10:00:00Z", dump, "Başlık");
+    const three = mem("Üç", "outlet", "2026-11-08T10:05:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan ziyaretinde yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+    const two = mem("İki", "outlet", "2026-11-08T10:06:00Z", "Cumhurbaşkanı Erdoğan, bugün yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+
+    it("the seed itself covers the whole headline, so only its form can replace it", () => {
+      expect(titleAgreement(title, tidySummaryText(dump))).toBe(1);
+      expect(titleAgreement(title, tidySummaryText(three.article.description ?? ""))).toBeCloseTo(0.6, 9);
+      expect(titleAgreement(title, tidySummaryText(two.article.description ?? ""))).toBeCloseTo(0.4, 9);
+    });
+
+    it("a 0.6 member replaces it (the floor is 0.6, not 0.75) and a 0.4 member does not", () => {
+      expect(pickFor(title, [seed, three, two], "Tohum")?.member.source.name).toBe("Üç");
+      expect(pickFor(title, [seed, two], "Tohum")).toBeNull();
+    });
+
+    it("the same seed without the CMS fields is kept: it agrees with the headline and is well formed", () => {
+      const clean = mem("Tohum", "outlet", "2026-11-08T10:00:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan forumunda konuştu.", "Başlık");
+      expect(pickFor(title, [clean, three], "Tohum")).toBeNull();
+    });
+
+    it("a member that carries the dump never stands in, whatever it scores", () => {
+      const clean = mem("Tohum", "outlet", "2026-11-08T10:00:00Z", "Bugün hava parçalı bulutlu ve rüzgarlı geçecek, sıcaklıklar mevsim normalleri civarında olacak.", "Başlık");
+      const dumped = mem("Dump", "outlet", "2026-11-08T10:10:00Z", dump, "Başlık");
+      // The seed is a clean text that disagrees with the headline: it keeps the 0.75 bar, which `four` clears.
+      const four = mem("Dört", "outlet", "2026-11-08T10:06:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan forumunda yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+      expect(titleAgreement(title, tidySummaryText(dump))).toBe(1);
+      expect(pickFor(title, [clean, dumped], "Tohum")).toBeNull();
+      expect(pickFor(title, [clean, dumped, four], "Tohum")?.member.source.name).toBe("Dört");
+    });
+  });
+
+  describe("the live clusters", () => {
+    it("b8e7cc75: the dump ties Yeniçağ at 0.83 and is the newer, so it used to win; now Yeniçağ is picked", () => {
+      const dumped = memberNamed(CMS_BAHCELI_MEMBERS, "Independent Türkçe");
+      const yenicag = memberNamed(CMS_BAHCELI_MEMBERS, "Yeniçağ");
+      const dumpScore = titleAgreement(CMS_BAHCELI_TITLE, tidySummaryText(dumped.article.description ?? ""));
+      const yenicagScore = titleAgreement(CMS_BAHCELI_TITLE, tidySummaryText(yenicag.article.description ?? ""));
+      expect(dumpScore).toBeCloseTo(5 / 6, 9);
+      expect(yenicagScore).toBeCloseTo(5 / 6, 9);
+      expect(Date.parse(dumped.article.published_at)).toBeGreaterThan(Date.parse(yenicag.article.published_at));
+
+      const pick = pickFor(CMS_BAHCELI_TITLE, CMS_BAHCELI_MEMBERS, "Milliyet");
+      expect(pick?.member.source.name).toBe("Yeniçağ");
+      expect(pick?.text).toBe(tidySummaryText(yenicag.article.description ?? ""));
+      expect(pick?.text).not.toMatch(/SEO Title|Main image/);
+    });
+
+    it("b8e7cc75: Posta (1.00, a cut) and the other candidates do not beat Yeniçağ either", () => {
+      const without = CMS_BAHCELI_MEMBERS.filter((m) => m.source.name !== "Independent Türkçe");
+      expect(pickFor(CMS_BAHCELI_TITLE, without, "Milliyet")?.member.source.name).toBe("Yeniçağ");
+      expect(pickFor(CMS_BAHCELI_TITLE, without.filter((m) => m.source.name !== "Yeniçağ"), "Milliyet")).toBeNull();
+    });
+
+    it("710ef4bb: the dump scores 1.00 because its SEO Title is the headline, yet nothing replaces the Dokuz8 Haber seed", () => {
+      const dumped = memberNamed(CMS_AYM_MEMBERS, "Independent Türkçe");
+      expect(titleAgreement(CMS_AYM_TITLE, tidySummaryText(dumped.article.description ?? ""))).toBe(1);
+      expect(titleAgreement(CMS_AYM_TITLE, tidySummaryText(memberNamed(CMS_AYM_MEMBERS, "Dokuz8 Haber").article.description ?? ""))).toBeCloseTo(5 / 11, 9);
+      expect(pickFor(CMS_AYM_TITLE, CMS_AYM_MEMBERS, "Dokuz8 Haber")).toBeNull();
+    });
+
+    it("a dump that is the SEED is replaced by a clean member from the form floor up", () => {
+      // Independent Türkçe seeds the cluster; Yeniçağ (0.83) is a clean text of the same story.
+      const members = CMS_BAHCELI_MEMBERS.filter((m) => ["Independent Türkçe", "Yeniçağ", "Posta", "A Haber"].includes(m.source.name));
+      expect(pickFor(CMS_BAHCELI_TITLE, members, "Independent Türkçe")?.member.source.name).toBe("Yeniçağ");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-2 (hunt 122, 2026-11-11): seeds that never state the news.
+//
+// (a) Haberler.com copies Anadolu Ajansı's quote bullets as its description ('- "Genel
+//     Sekreterlik görevine talibim ..." "40 yıllık ..."'): 72abfb9f (7 sources), c859c91b and
+//     4e0c0003 showed two or one bare, speaker-less quotations as the Özet. The seed scored
+//     0.50, 0.36 and 0.00 and every replacement was under 0.75. A text that is only quotations
+//     is a form defect ('quote-only', floor AGREEMENT_FORM_DEFECT_MIN) and never stands in.
+// (b) 777ea7c5's seed is Elips Haber's "Yonca Verdioğlu Şık kimdir?" biography under a headline
+//     that says she was detained: it names the people (0.63) and never says what happened. A seed
+//     whose own article title is an explainer ("kimdir", "kaç yaşında", "nereli", "biyografisi")
+//     under a headline that is not one counts as malformed (the gain is waived, its text is kept
+//     out) but keeps the 0.75 floor: the gate is about what the text says.
+//
+// The members are the real outlet texts of the live clusters (dumped read-only 2026-11-11).
+// ---------------------------------------------------------------------------
+
+const QO_SINIRLIOGLU_TITLE = "Türkiye'nin BM Genel Sekreter adayı Sinirlioğlu: Diyalog taviz değil sorumluluktur";
+const QO_SINIRLIOGLU: SummaryMember[] = [
+  mem("Anadolu Ajansı", "wire", "2026-11-06T21:39:49Z", "Türkiye’nin Birleşmiş Milletler (BM) Genel Sekreter adayı Feridun Sinirlioğlu, \"Genel Sekreterlik görevine talibim çünkü BM'nin kusursuz olduğunu düşündüğüm için değil onun vazgeçilmez olduğuna inandığım için buradayım.\" dedi.", "Türkiye’nin BM Genel Sekreter adayı Sinirlioğlu, \"İnteraktif Diyalog Başlangıcı\" toplantısında hedeflerini açıkladı"),
+  mem("Haberler.com", "aggregator", "2026-11-06T21:42:20Z", "- \"Genel Sekreterlik görevine talibim çünkü BM'nin kusursuz olduğunu düşündüğüm için değil onun vazgeçilmez olduğuna inandığım için buradayım\"\n\"40 yıllık diplomatik kariyerimde öğrendiğim bir ders varsa o da şudur: Diyalog, her zaman mümkündür. Bunun için yalnızca bir platforma ihtiyaç vardır. BM ise bu platformların en önemlisi\"", "Türkiye’nin BM Genel Sekreter adayı Sinirlioğlu, \"İnteraktif Diyalog Başlangıcı\" toplantısında hedeflerini açıkladı:"),
+  mem("Star", "outlet", "2026-11-06T21:48:00Z", "Türkiye'nin BM Genel Sekreter adayı Feridun Sinirlioğlu, New York'taki BM Genel Merkezi'nde vizyonunu açıkladı. 40 yıllık diplomatik tecrübesine dikkat çekerek etkili arabuluculuk ve sessiz diplomasinin önemini vurgulayan Sinirlioğlu, kriz anlarında taraflarla temas kurmanın taviz değil, barış için bir sorumluluk olduğunu ifade etti.", "Türkiye'nin BM Genel Sekreter adayı Sinirlioğlu: Diyalog taviz değil sorumluluktur"),
+  mem("İşçi Haber", "niche", "2026-11-06T21:52:59Z", "Türkiye'nin Birleşmiş Milletler Genel Sekreter adayı Feridun Sinirlioğlu, katıldığı interaktif diyalog toplantısında adaylık hedeflerini kamuoyu ile paylaştı. Sinirlioğlu, BM'nin yapısının kusursuz olmadığını ancak küresel sistem için vazgeçilmez bir öneme sahip olduğunu vurguladı.", "Feridun sinirlioğlu BM genel sekreterliği için vizyonunu açıkladı"),
+  mem("CGTN Türk", "outlet", "2026-11-06T22:18:00Z", "Türkiye’nin Birleşmiş Milletler (BM) Genel Sekreter adayı Feridun Sinirlioğlu, \"Genel Sekreterlik görevine talibim çünkü BM'nin kusursuz olduğunu düşündüğüm için değil onun vazgeçilmez olduğuna inandığım için buradayım.\" dedi.", "Feridun Sinirlioğlu: BM Genel Sekreterliğine adayım çünkü..."),
+  mem("Milliyet", "outlet", "2026-11-06T22:58:45Z", "Eski Dışişleri Bakanı ve halen Avrupa Güvenlik ve İşbirliği Teşkilatı (AGİT) Genel Sekreterliği görevini yürüten Sinirlioğlu, BM Genel Merkezi’nde düzenlenen \"İnteraktif Diyalog Başlangıcı\" toplantısında yaptığı konuşmada, BM Genel Sekreteri seçilmesi halinde izleyeceği politikaları ve öncelik vereceği alanları anlattı.\nSinirlioğlu, BM Şartı'na bağlı kalmanın idealizm meselesi olmadığını ve devletler arasındaki anlaşmazlıkları çözmenin yegane yolu olduğunu vurguladı.\nBM Şartı'nın, uluslararas...", "Türkiye’nin BM Genel Sekreter adayı Sinirlioğlu hedeflerini açıkladı"),
+];
+const QO_KACIR_TITLE = "Bakan Kacır, Seul'de Güney Koreli şirketlerin üst düzey yöneticileriyle görüştüklerini bildirdi";
+const QO_KACIR: SummaryMember[] = [
+  mem("Haberler.com", "aggregator", "2026-11-04T17:05:16Z", "- \"Ülkemizin yatırım, üretim ve teknoloji alanlarındaki potansiyelini küresel ölçekte daha ileriye taşımak için uluslararası işbirliklerini artırmaya devam edeceğiz\"", "Bakan Kacır, Seul'de Güney Koreli şirketlerin üst düzey yöneticileriyle görüştüklerini bildirdi:"),
+  mem("Milliyet", "outlet", "2026-11-04T17:45:37Z", "Kacır, sanal medya hesabından hesabından, görüşmeye ilişkin paylaşım yaptı. Cumhurbaşkanımız Erdoğan'ın başkanlığında, Güney Kore'nin başkenti Seul'de teknoloji, otomotiv, elektronik, biyoteknoloji, kimya ve enerji gibi stratejik sektörlerde faaliyet gösteren şirketlerin üst düzey yöneticileriyle bir araya geldiklerini aktaran Kacır, \"⁠LG Electronics Üst Yöneticisi (CEO) Lyu Jae-cheol, ⁠Celltrion CEO'su Seo Jin-seok, ⁠SK Chemicals ve SK Plasma CEO'su Jaehyun Ahn, ⁠Hyundai Motor Group CEO'su C...", "Seul'de stratejik zirve! Bakan Kacır, Güney Koreli şirketlerin üst düzey yöneticileriyle görüştüklerini bildirdi"),
+  mem("Haber7", "outlet", "2026-11-04T19:16:00Z", "Sanayi ve Teknoloji Bakanı Mehmet Fatih Kacır, Seul’de Samsung, Hyundai, LG ve SK Chemicals gibi şirketlerin üst düzey yöneticileriyle Türkiye’deki yatırım ve iş birliği fırsatlarını görüştü.", "Bakan Kacır, Güney Koreli teknoloji devleriyle bir araya geldi"),
+  mem("Muhalif", "outlet", "2026-11-04T19:28:33Z", "Sanayi ve Teknoloji Bakanı Mehmet Fatih Kacır, Cumhurbaşkanı Erdoğan'ın Seul temasları kapsamında Güney Koreli dev şirketlerin CEO'larıyla bir araya gelerek...", "Seul'de dev zirve: Bakan Kacır küresel teknoloji devleriyle masaya oturdu"),
+  mem("Posta", "outlet", "2026-11-04T22:14:18Z", "Sanayi ve Teknoloji Bakanı Mehmet Fatih Kacır, sanal medya hesabından yaptığı açıklamada şu ifadeleri kullandı:\n\"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın başkanlığında, Güney Kore'nin başkenti Seul'de teknoloji, otomotiv, elektronik, biyoteknoloji, kimya ve enerji gibi stratejik sektörlerde faaliyet gösteren şirketlerin üst düzey yöneticileriyle bir araya geldik. LG Electronics Üst Yöneticisi (CEO) Lyu Jae-cheol, Celltrion CEO'su Seo Jin-seok, SK Chemicals ve SK Plasma CEO'su Jaehyun Ah...", "Bakan Kacır, Cumhurbaşkanı Erdoğan'ın başkanlığında Güney Koreli teknoloji devleriyle bir araya geldi"),
+  mem("Yeni Şafak", "outlet", "2026-11-05T01:00:00Z", "Cumhurbaşkanı Erdoğan, Güney Kore ziyaretinde teknoloji, elektronik, biyoteknoloji ve kimya alanlarında faaliyet gösteren şirketlerin üst düzey yöneticileriyle görüştü. Görüşmelerde LG Electronics CEO’su Lyu Jae-cheol, Samsung CEO’su Roh Tae-moon ve Hyundai Motor Group CEO’su Chung Euisun de yer aldı.", "Güney Kore’de teknoloji buluşması"),
+];
+const QO_ALABED_TITLE = "Cumhurbaşkanı Erdoğan'a kelebek figürü takdim eden Halepli Alabed'den okulların onarılması çağrısı";
+const QO_ALABED: SummaryMember[] = [
+  mem("Haberler.com", "aggregator", "2026-11-06T15:21:10Z", "- \"Suriye'deki okullar halen yıkık durumda; geleceğimizi yeniden inşa edebilmemiz için bu okulların onarılmasına yardım etmeliyiz\"\n\"Benim için Cumhurbaşkanı Erdoğan büyük bir rol model ve gelecekte onun gibi büyük bir lider olmayı diliyorum\"", "Cumhurbaşkanı Erdoğan'a kelebek figürü takdim eden Halepli Alabed'den okulların onarılması çağrısı:"),
+  mem("Anadolu Ajansı", "wire", "2026-11-06T15:27:43Z", "Cumhurbaşkanı Erdoğan'a savaştan etkilenen çocukları temsil eden kelebek figürünü takdim eden Suriyeli Alabed, Erdoğan'la 10 yıl sonra bir araya gelmenin kendisi için büyük bir onur olduğunu belirterek \"Kendisi, benim için büyük bir rol model\" dedi.", "Cumhurbaşkanı Erdoğan'a kelebek figürü takdim eden Halepli Alabed'den okulların onarılması çağrısı"),
+  mem("Star", "outlet", "2026-11-06T15:44:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan'a savaş ve açlıktan etkilenen çocukları temsil eden kelebek figürünü takdim eden Suriyeli Bana Alabed, Cumhurbaşkanı Erdoğan'la 10 yıl sonra yeniden bir araya gelmenin kendisi için büyük bir onur olduğunu belirterek, \"Benim için Cumhurbaşkanı Erdoğan büyük bir rol model ve gelecekte onun gibi büyük bir lider olmayı diliyorum.\" dedi.", "Halep'in sesi Alabed: Cumhurbaşkanı Erdoğan gibi bir lider olmak istiyorum"),
+  mem("Akşam", "outlet", "2026-11-06T15:51:00Z", "Suriyeli aktivist Bana Alabed, Başkan Erdoğan'a savaş ve açlıktan etkilenen çocukları temsil eden kelebek figürünü takdim etti. Alabed, Erdoğan'ı kendisi için büyük bir rol model olarak nitelendirdi. Alabed, Başkan Erdoğan'la 10 yıl sonra yeniden bir araya gelmenin kendisi için büyük bir onur olduğunu belirterek \"Gelecekte onun gibi büyük bir lider olmayı diliyorum.\" dedi.", "Halepli Alabed 10 yıl sonra yeniden Başkan Erdoğan ile bir arada: Benim için büyük bir rol model"),
+  mem("Takvim", "outlet", "2026-11-06T19:30:01Z", "Suriye'deki savaş sürecinde yaptığı sosyal medya paylaşımlarıyla tüm dünyaya sesini duyuran ve 10 yıl önce Cumhurbaşkanlığı Külliyesi'nde ağırlanan Halepli Bana Alabed, İstanbul Kongre Merkezi'nde düzenlenen TRT World Forum 2026'nın açılışında Basşkan Recep Tayyip Erdoğan ile yeniden bir araya geldi. Alabed, programda Erdoğan'a savaş ve açlıktan etkilenen çocukları temsil eden kelebek figürünü takdim etti.", "Suriye'nin sesi Bana Alabed 10 yıl sonra Başkan Erdoğan'la bir araya geldi: \"O benim için büyük bir rol model\""),
+  mem("A Haber", "outlet", "2026-11-06T20:34:57Z", "Suriye'deki kanlı savaş sırasında sosyal medya paylaşımlarıyla Haleplilerin yaşadığı dramı tüm dünyaya duyuran ve 10 yıl önce Cumhurbaşkanlığı Külliyesi'nde ağırlanan Bana Alabed, Başkan Recep Tayyip...Devamı için tıklayınız", "Savaşın acılarını dünyaya duyurmuştu! Başkan Erdoğan ile Halepli Bana Alabed 10 yıl sonra yeniden bir arada"),
+];
+const EX_SIK_TITLE = "TİP Milletvekili Ahmet Şık'ın eşi Yonca Şık gözaltına alındı";
+const EX_SIK: SummaryMember[] = [
+  mem("Elips Haber", "outlet", "2026-11-10T10:55:00Z", "Yonca Verdioğlu Şık, TİP İstabul Milletvekili Ahmet Şık'ın eşidir. Sivil toplum ve medya alanındaki çalışmalarıyla tanınan Şık, İstanbul Üniversitesi İletişim Fakültesi Gazetecilik Bölümü mezunudur.", "Yonca Verdioğlu Şık kimdir?"),
+  mem("Karar", "outlet", "2026-11-10T10:58:00Z", "TİP İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık, \"siyasal veya askeri casusluk\" suçlamasıyla evinden gözaltına alındı. Gözaltı kararının, TİP Genel Başkanı Erkan Baş'ın TBMM'de Şık'ın fon skandalına ilişkin paylaşımlarını silmesi karşılığında tutuklu arkadaşının serbest bırakılmasının teklif edildiğini açıklamasından bir gün sonra gelmesi dikkat çekti. Şık'ın arkadaşı Ahmet Saymadi de daha önce uyuşturucu soruşturması kapsamında tutuklanmıştı.", "Erkan Baş'ın 'tweeti silsin' açıklamasından bir gün sonra Ahmet Şık'ın eşine gözaltı"),
+  mem("Haber7", "outlet", "2026-11-10T10:59:00Z", "TİP İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık hakkında gözaltı ve ev araması iddialarının gerçeği yansıtmadığı açıklandı.  Yetkililer, Şık hakkında herhangi bir gözaltı kararı bulunmadığını belirtti.", "Ahmet Şık'ın eşi hakkında yeni gelişme: \"Gözaltına alındı\" iddiası yalan çıktı!"),
+  mem("Haber.com", "outlet", "2026-11-10T11:05:19Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık “siyasal veya askeri casusluk” suçlamasıyla gözaltına alındı.", "TİP Milletvekili Ahmet Şık'ın eşi Yonca Şık gözaltına alındı"),
+  mem("Takvim", "outlet", "2026-11-10T11:25:48Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık’ın gözaltına alındığı yönündeki haberlerin gerçeği yansıtmadığı ortaya çıktı. Şık hakkında gözaltı kararı bulunmadığı, evinde arama yapılmadığı ve yalnızca ifadesinin alınması amacıyla mevcutlu olarak hazır edildiği belirtildi.", "Yonca Şık’ın gözaltına alındığı iddiası asılsız çıktı! Alman derneğiyle para trafiği mercek altında"),
+  mem("GZT", "outlet", "2026-11-10T11:31:07Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili ve gazeteci Ahmet Şık'ın eşi Yonca Verdioğlu Şık, hakkında yürütülen soruşturma kapsamında \"siyasal veya askeri casusluk\" iddiasıyla gözaltına alındı. Evinde gözaltına alınan Yonca Şık'ın Çağlayan'daki İstanbul Adalet Sarayı'na götürüldüğü öğrenildi. Gelişmenin ardından Yonca Şık'ın hayatı, yaşı, memleketi ve mesleği yeniden araştırılmaya başlandı. Peki, Yonca Şık kimdir, nereli, kaç yaşında ve ne iş yapıyor?", "Yonca Şık kimdir?  Ahmet Şık'ın eşi Yonca Şık nereli, kaç yaşında, ne iş yapıyor?"),
+  mem("BirGün", "outlet", "2026-11-10T11:34:00Z", "Partisinin İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık gözaltına alınmasıyla ilgili TBMM'de basın toplantısı düzenleyen TİP Genel Başkanı Erkan Baş, \"Bu kadar alçaklık, bu kadar mafyavari bir uygulama sanıyorum Türkiye Cumhuriyeti tarihinde eşine rastlanmamış bir şey\" dedi.", "Erkan Baş, Yonca Şık'ın gözaltına alınmasıyla ilgili konuştu: \"Saray rejimi bir mafya düzenine dönüşmüştür\""),
+  mem("Sözcü", "outlet", "2026-11-10T11:37:10Z", "TİP İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık, \"siyasal veya askeri casusluk\" soruşturması kapsamında e...", "Yonca Verdioğlu Şık kimdir, Ahmet Şık'ın eşi neden göz altına alındı?"),
+  mem("Yeni Akit", "outlet", "2026-11-10T11:43:00Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık, 'siyasal veya askeri casusluk' soruşturması kapsamında gözaltına alındı.", "Bütün kamuoyuna yalan söyledikleri ortaya çıktı! Ahmet Şık’ın eşine casusluk incelemesi"),
+  mem("Haberler.com", "aggregator", "2026-11-10T11:52:09Z", "TİP İstanbul Milletvekili Ahmet Şık, eşi Yonca Verdioğlu Şık'ın gözaltına alınmasının ardından gündeme geldi. Gazetecilik geçmişi ve siyasi kariyeriyle tanınan Şık'ın hayatı, yaşı, memleketi ve hangi partiden milletvekili olduğu araştırılmaya başlandı. Peki, Ahmet Şık kimdir, milletvekili mi, hangi partiden? Ahmet Şık kaç yaşında, nereli? Detaylar haberimizde.", "Ahmet Şık kimdir, milletvekili mi, hangi partiden? Ahmet Şık kaç yaşında, nereli?"),
+  mem("Cumhuriyet", "outlet", "2026-11-10T11:55:00Z", "TİP İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık, “siyasal veya askeri casusluk” soruşturması kapsamında Beyoğlu’ndaki evinden gözaltına alınarak İstanbul Adliyesi’ne götürüldü. Peki, Ahmet Şık kimdir? TİP Milletvekili Ahmet Şık kaç yaşında, nereli? Ahmet Şık'ın eşi Yonca Şık kim, neden gözaltına alındı?", "Ahmet Şık kimdir? TİP Milletvekili Ahmet Şık kaç yaşında, nereli? Ahmet Şık'ın eşi kim, neden gözaltına alındı?"),
+  mem("Diken", "outlet", "2026-11-10T13:51:13Z", "Sera Kadıgil: Ahmet Şık'ın eşi kanser; bu mudur vekilliğin bedeli? 10.11.2026 DikenTürkiye İşçi Partisi (TİP) İstanbul Milletvekili Sera Kadıgil, gözaltına alınan vekil Ahmet Şık'ın eşi Yonca Şık'ın kanser olduğunu söyledi.\nThe post Sera Kadıgil: Ahmet Şık'ın eşi kanser; bu mudur vekilliğin bedeli? appeared first on #site_linkat 10.11.2026 .", "Sera Kadıgil: Ahmet Şık'ın eşi kanser; bu mudur vekilliğin bedeli?"),
+  mem("İstiklal", "outlet", "2026-11-10T15:30:18Z", "TİP İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık hakkında yürütülen gözaltı sürecinde yeni gelişme yaşandı. Casusluk iddiasıyla gözaltına alınan Şık'ın ifadesinin ardından verilen karar belli oldu.", "Ahmet Şık'ın eşi Yonca Verdioğlu Şık hakkında yeni gelişme"),
+  mem("Dokuz8 Haber", "outlet", "2026-11-10T17:19:22Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık, bir soruşturma kapsamında ifade vermek üzere gözaltına alındıktan sonra adli kontrolle serbest bırakıldı.", "Erkan Baş: Biz yarım adım bile geri atmayacağız, siz yolsuzluktan vazgeçeceksiniz"),
+];
+
+/** The tidied text of a member's description: what the page shows for it. */
+const shownOfMember = (members: readonly SummaryMember[], name: string): string =>
+  tidySummaryText((memberNamed(members, name).article.description ?? "").trim());
+
+describe("isQuoteOnly (h122-ozet-2)", () => {
+  it.each([
+    ["72abfb9f: two segments, the list marker already tidied away", shownOfMember(QO_SINIRLIOGLU, "Haberler.com")],
+    ["c859c91b: two segments", shownOfMember(QO_ALABED, "Haberler.com")],
+    ["4e0c0003: one segment", shownOfMember(QO_KACIR, "Haberler.com")],
+  ])("is true for the tidied seed of %s", (_label, shown) => {
+    expect(isQuoteOnly(shown)).toBe(true);
+  });
+
+  it.each([
+    ['one straight segment', '"Ekonomi büyüyecek"'],
+    ['one curly segment', "“Ekonomi büyüyecek”"],
+    ['two segments with a blank between', '"Birinci söz" "İkinci söz"'],
+    ['two segments with several blanks and a newline', '"Birinci söz"   \n  "İkinci söz"'],
+    ['a trailing full stop', '"Ekonomi büyüyecek".'],
+    ['a trailing full stop after a blank', '"Ekonomi büyüyecek" .'],
+    ['a raw list marker "- "', '- "Ekonomi büyüyecek"'],
+    ['a raw list marker "• "', '• "Ekonomi büyüyecek"'],
+    ['blanks around it all', '   "Ekonomi büyüyecek"   '],
+    ['segments with no blank between them', '"Birinci""İkinci"'],
+    ['sentences, a colon and digits inside a segment', '"Bu bir ders: Diyalog mümkündür. 40 yıl, 3 ay"'],
+    ['a nested curly pair inside a curly segment', "“Dedi ki “yarın” gelir”"],
+    ['a straight pair inside a curly segment', '“Dedi ki "yarın" gelir”'],
+    ['an apostrophe and single quotes inside a segment', "\"BM'nin 'kusursuz' olduğu\""],
+    ['mixed straight and curly segments', '"Birinci" “İkinci”'],
+  ])("is true for %s", (_label, text) => {
+    expect(isQuoteOnly(text)).toBe(true);
+  });
+
+  it.each([
+    ["a speaker in front of the quotation", 'Sinirlioğlu, "Genel Sekreterlik görevine talibim" dedi.'],
+    ["a quoted word in a sentence", '"Ekonomi" başlıklı rapor yayımlandı.'],
+    ["a word after the last quotation", '"Ekonomi büyüyecek" dedi'],
+    ["a word between two quotations", '"Birinci söz" ve "İkinci söz"'],
+    ["a comma between two quotations", '"Birinci söz", "İkinci söz"'],
+    ["a dash between two quotations", '"Birinci söz" - "İkinci söz"'],
+    ["a trailing ellipsis", '"Ekonomi büyüyecek"…'],
+    ["two trailing full stops", '"Ekonomi büyüyecek"..'],
+    ["the empty string", ""],
+    ["blanks only", "   \n "],
+    ["a list marker only", "- "],
+    ["a list marker with no blank after it", '-"Ekonomi büyüyecek"'],
+    ["two list markers", '- - "Ekonomi büyüyecek"'],
+    ["an unbalanced straight quote", '"Ekonomi büyüyecek'],
+    ["an unbalanced second quotation", '"Birinci söz" "İkinci söz'],
+    ["an opener with no closer", "“Ekonomi büyüyecek"],
+    ["a closer with no opener", "Ekonomi büyüyecek”"],
+    ["two openers and one closer", "“Birinci “İkinci”"],
+    ["an empty pair of quotes", '""'],
+    ["a pair of quotes holding blanks", '"   "'],
+    ["single quotes only", "'Ekonomi büyüyecek'"],
+    ["a plain sentence", "Cumhurbaşkanı Erdoğan, partisinin grup toplantısında konuştu."],
+    ["a digit outside the quotes", '"Birinci söz" 2'],
+  ])("is false for %s", (_label, text) => {
+    expect(isQuoteOnly(text)).toBe(false);
+  });
+
+  it("never throws on a non-string", () => {
+    expect(isQuoteOnly(undefined as unknown as string)).toBe(false);
+    expect(isQuoteOnly(null as unknown as string)).toBe(false);
+    expect(isQuoteOnly(42 as unknown as string)).toBe(false);
+  });
+
+  // 200,000 characters; ceiling 2000 ms (CPU time over a size ladder, tests/_helpers/linear-time.ts).
+  it.each([
+    ["segments repeated", rep('"a" ', "", ""), 200_000],
+    ["curly segments repeated", rep("“a” ", "", ""), 200_000],
+    ["an opener and 200000 letters", rep("a", '"', ""), 200_000],
+    ["200000 curly openers", rep("“", "", ""), 200_000],
+    ["200000 straight quotes", rep('"', "", ""), 200_000],
+    ["a segment, then 200000 blanks and a letter", rep(" ", '"a"', "x"), 200_000],
+    ["200000 nested curly pairs", rep("“a”", "“", "”"), 200_000],
+  ] as Array<[string, Gen, number]>)("linear time: %s", (_name, gen, n) => {
+    expectLinear(gen, (s) => isQuoteOnly(s), { n, ceilingMs: 2_000 });
+  });
+});
+
+describe("'quote-only' is a form defect of a seed and of a candidate (h122-ozet-2)", () => {
+  const QUOTES = '"Ülkemizin yatırım, üretim ve teknoloji alanlarındaki potansiyelini daha ileriye taşıyacağız"';
+
+  it("seedDisqualified says 'quote-only' for the three live seeds", () => {
+    for (const [members, name] of [
+      [QO_SINIRLIOGLU, "Haberler.com"],
+      [QO_ALABED, "Haberler.com"],
+      [QO_KACIR, "Haberler.com"],
+    ] as const) {
+      const raw = (memberNamed(members, name).article.description ?? "").trim();
+      expect(seedDisqualified(raw, tidySummaryText(raw)), `${members.length} members`).toBe("quote-only");
+    }
+  });
+
+  it("summaryDefect says 'quote-only' for them too", () => {
+    for (const [members, name] of [
+      [QO_SINIRLIOGLU, "Haberler.com"],
+      [QO_ALABED, "Haberler.com"],
+      [QO_KACIR, "Haberler.com"],
+    ] as const) {
+      const raw = (memberNamed(members, name).article.description ?? "").trim();
+      expect(summaryDefect(raw, tidySummaryText(raw))).toBe("quote-only");
+    }
+  });
+
+  it("it is checked after 'quotes': an unbalanced text keeps 'quotes'", () => {
+    const unbalanced = '"Birinci söz" "İkinci söz';
+    expect(seedDisqualified(unbalanced, unbalanced)).toBe("quotes");
+    expect(seedDisqualified(QUOTES, QUOTES)).toBe("quote-only");
+  });
+
+  it("a quotation with a speaker is not quote-only: it is clean", () => {
+    const attributed = 'Sinirlioğlu, "Genel Sekreterlik görevine talibim çünkü BM vazgeçilmez" dedi.';
+    expect(seedDisqualified(attributed, attributed)).toBeNull();
+    expect(summaryDefect(attributed, attributed)).toBeNull();
+  });
+
+  it("a quote-only seed is replaced from the form floor (0.6), not from 0.75", () => {
+    // Five title stems: cumhu, erdog, azerb, forum, konus.
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda konuştu";
+    const seed = mem("Tohum", "outlet", "2026-11-08T10:00:00Z", '"Cumhurbaşkanı Erdoğan, Azerbaycan forumunda konuştu"', "x");
+    const three = mem("Üç", "outlet", "2026-11-08T10:05:00Z", "Cumhurbaşkanı Erdoğan, Azerbaycan ziyaretinde yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+    const two = mem("İki", "outlet", "2026-11-08T10:06:00Z", "Cumhurbaşkanı Erdoğan, bugün yaptığı görüşmeleri özetledi ve gazetecilere bilgi verdi.", "x");
+    // The seed covers the whole headline: only its form can replace it.
+    expect(titleAgreement(title, tidySummaryText(seed.article.description ?? ""))).toBe(1);
+    expect(pickFor(title, [seed, three, two], "Tohum")?.member.source.name).toBe("Üç");
+    expect(pickFor(title, [seed, two], "Tohum")).toBeNull();
+  });
+
+  it("a member whose description is only quotations never stands in, whatever it scores", () => {
+    // Five title stems: cumhu, erdog, azerb, forum, konus.
+    const title = "Cumhurbaşkanı Erdoğan Azerbaycan forumunda konuştu";
+    const weather = mem("Tohum", "outlet", "2026-11-08T10:00:00Z", "Bugün hava parçalı bulutlu ve rüzgarlı geçecek, sıcaklıklar mevsim normalleri civarında olacak.", "x");
+    const quotes = mem("Alıntı", "outlet", "2026-11-08T10:05:00Z", '- "Cumhurbaşkanı Erdoğan Azerbaycan forumunda konuştu, ilişkileri anlattı"', "x");
+    expect(titleAgreement(title, tidySummaryText(quotes.article.description ?? ""))).toBe(1);
+    expect(pickFor(title, [weather, quotes], "Tohum")).toBeNull();
+  });
+});
+
+describe("findAgreeingMember: the quote-only seeds of the live clusters (h122-ozet-2)", () => {
+  it("72abfb9f: the seed scores exactly 0.50 (kept before); Star (0.90) replaces it", () => {
+    const seedShown = shownOfMember(QO_SINIRLIOGLU, "Haberler.com");
+    expect(titleAgreement(QO_SINIRLIOGLU_TITLE, seedShown)).toBe(0.5);
+    expect(titleAgreement(QO_SINIRLIOGLU_TITLE, shownOfMember(QO_SINIRLIOGLU, "Star"))).toBeCloseTo(0.9, 9);
+    const pick = pickFor(QO_SINIRLIOGLU_TITLE, QO_SINIRLIOGLU, "Haberler.com");
+    expect(pick?.member.source.name).toBe("Star");
+    expect(pick?.text).toBe(shownOfMember(QO_SINIRLIOGLU, "Star"));
+  });
+
+  it("4e0c0003: the seed scores 0.00; Haber7 (0.73, under 0.75) replaces it", () => {
+    expect(titleAgreement(QO_KACIR_TITLE, shownOfMember(QO_KACIR, "Haberler.com"))).toBe(0);
+    expect(titleAgreement(QO_KACIR_TITLE, shownOfMember(QO_KACIR, "Haber7"))).toBeCloseTo(8 / 11, 9);
+    const pick = pickFor(QO_KACIR_TITLE, QO_KACIR, "Haberler.com");
+    expect(pick?.member.source.name).toBe("Haber7");
+    expect(pick?.text).toBe(shownOfMember(QO_KACIR, "Haber7"));
+  });
+
+  it("c859c91b: the seed scores 0.36; Takvim (0.73, under 0.75) replaces it", () => {
+    expect(titleAgreement(QO_ALABED_TITLE, shownOfMember(QO_ALABED, "Haberler.com"))).toBeCloseTo(4 / 11, 9);
+    expect(titleAgreement(QO_ALABED_TITLE, shownOfMember(QO_ALABED, "Takvim"))).toBeCloseTo(8 / 11, 9);
+    const pick = pickFor(QO_ALABED_TITLE, QO_ALABED, "Haberler.com");
+    expect(pick?.member.source.name).toBe("Takvim");
+    expect(pick?.text).toBe(shownOfMember(QO_ALABED, "Takvim"));
+  });
+
+  it("a cluster with no qualifying member keeps the seed (never blank)", () => {
+    // Yeni Şafak scores 0.55 against the 4e0c0003 headline, under the 0.6 floor; Muhalif is a cut stub.
+    const two = QO_KACIR.filter((m) => ["Haberler.com", "Yeni Şafak"].includes(m.source.name));
+    expect(two).toHaveLength(2);
+    expect(titleAgreement(QO_KACIR_TITLE, shownOfMember(QO_KACIR, "Yeni Şafak"))).toBeCloseTo(6 / 11, 9);
+    expect(pickFor(QO_KACIR_TITLE, two, "Haberler.com")).toBeNull();
+    const stub = QO_KACIR.filter((m) => ["Haberler.com", "Muhalif"].includes(m.source.name));
+    expect(pickFor(QO_KACIR_TITLE, stub, "Haberler.com")).toBeNull();
+  });
+});
+
+describe("isExplainerTitle (h122-ozet-2)", () => {
+  it.each([
+    "Yonca Verdioğlu Şık kimdir?",
+    "YONCA ŞIK KİMDİR",
+    "Ahmet Şık kimdir, milletvekili mi, hangi partiden?",
+    "Yonca Şık kaç yaşında, ne iş yapıyor?",
+    "Yonca Şık KAÇ YAŞINDA",
+    "Yonca Şık nereli?",
+    "Yonca Şık biyografisi",
+    "Ahmet Şık'ın eşi kimdir",
+    "Yonca Şık kaç\u00a0yaşında",
+  ])("is true for %s", (title) => {
+    expect(isExplainerTitle(title)).toBe(true);
+  });
+
+  it.each([
+    "TİP Milletvekili Ahmet Şık'ın eşi Yonca Şık gözaltına alındı",
+    "Kimdirler bunlar",
+    "Kimdirin bir sözü",
+    "Nerelerde yağış var",
+    "Biyografisiz bir hayat",
+    "",
+  ])("is false for %s", (title) => {
+    expect(isExplainerTitle(title)).toBe(false);
+  });
+
+  it("never throws on a non-string", () => {
+    expect(isExplainerTitle(undefined)).toBe(false);
+    expect(isExplainerTitle(null)).toBe(false);
+    expect(isExplainerTitle(7 as unknown as string)).toBe(false);
+  });
+
+  it.each([
+    ["a long text with no match", rep("a ", "", ""), 200_000],
+    ["'kimdir' glued to letters, repeated", rep("kimdirx ", "", ""), 200_000],
+    ["blanks", rep(" ", "kac", "yasinda"), 200_000],
+  ] as Array<[string, Gen, number]>)("linear time: %s", (_name, gen, n) => {
+    expectLinear(gen, (s) => isExplainerTitle(s), { n, ceilingMs: 2_000 });
+  });
+});
+
+describe("findAgreeingMember: an explainer seed (h122-ozet-2, 777ea7c5)", () => {
+  const SEED = "Elips Haber";
+  const SIX = ["Karar", "Haber.com", "Takvim", "GZT", "Yeni Akit", "Dokuz8 Haber"];
+
+  it("the fixtures are what the cases assume: a biography at 0.63 under a headline of detention", () => {
+    expect(memberNamed(EX_SIK, SEED).article.title).toBe("Yonca Verdioğlu Şık kimdir?");
+    const seedShown = shownOfMember(EX_SIK, SEED);
+    expect(seedShown.endsWith("Gazetecilik Bölümü mezunudur.")).toBe(true);
+    expect(titleAgreement(EX_SIK_TITLE, seedShown)).toBeCloseTo(5 / 8, 9);
+    expect(seedDisqualified((memberNamed(EX_SIK, SEED).article.description ?? "").trim(), seedShown)).toBeNull();
+    for (const name of SIX) expect(titleAgreement(EX_SIK_TITLE, shownOfMember(EX_SIK, name)), name).toBe(1);
+  });
+
+  it("the pick is Dokuz8 Haber: the newest of the six members that cover the whole headline", () => {
+    const times = SIX.map((n) => [n, memberNamed(EX_SIK, n).article.published_at] as const);
+    const newest = [...times].sort((a, b) => Date.parse(b[1]) - Date.parse(a[1]))[0]!;
+    expect(newest[0]).toBe("Dokuz8 Haber");
+    const pick = pickFor(EX_SIK_TITLE, EX_SIK, SEED);
+    expect(pick?.member.source.name).toBe("Dokuz8 Haber");
+    expect(pick?.text).toBe(shownOfMember(EX_SIK, "Dokuz8 Haber"));
+  });
+
+  it("the seed's own words are kept out, also under another outlet's name", () => {
+    // The seed (an explainer-titled article) holds Haber.com's statement, which covers the headline
+    // (1.00): it is replaced for its title, so neither Haber.com's identical text nor a newer copy of it may stand in.
+    const description = memberNamed(EX_SIK, "Haber.com").article.description ?? "";
+    const members = EX_SIK.map((m) => (m.source.name === SEED ? { ...m, article: { ...m.article, description } } : m));
+    const copy = mem("Kopya", "outlet", "2026-11-10T18:00:00Z", description, "Başka başlık");
+    expect(titleAgreement(EX_SIK_TITLE, tidySummaryText(description))).toBe(1);
+    const pick = pickFor(EX_SIK_TITLE, [...members, copy], SEED);
+    expect(pick?.member.source.name).toBe("Dokuz8 Haber");
+  });
+
+  it("candidates are not filtered by their titles: Cumhuriyet's 'Ahmet Şık kimdir?' carries the detention", () => {
+    const cumhuriyet = memberNamed(EX_SIK, "Cumhuriyet");
+    expect(isExplainerTitle(cumhuriyet.article.title)).toBe(true);
+    expect(shownOfMember(EX_SIK, "Cumhuriyet")).toContain("gözaltına alınarak");
+    const only = EX_SIK.filter((m) => [SEED, "Cumhuriyet"].includes(m.source.name));
+    // 0.88 clears the 0.75 floor: the explainer-titled candidate stands in.
+    expect(titleAgreement(EX_SIK_TITLE, shownOfMember(EX_SIK, "Cumhuriyet"))).toBeCloseTo(7 / 8, 9);
+    expect(pickFor(EX_SIK_TITLE, only, SEED)?.member.source.name).toBe("Cumhuriyet");
+  });
+
+  it("the floor stays 0.75: a 0.63 member does not replace an explainer seed", () => {
+    // Haberler.com's text is a come-on ('teaser'), Sözcü's is a cut stub: build a clean 0.63 member.
+    const sixtyThree = mem("Altmış", "outlet", "2026-11-10T12:00:00Z", "Yonca Verdioğlu Şık, TİP İstanbul Milletvekili Ahmet Şık'ın hayat arkadaşı olarak biliniyor ve gazetecilik yapıyor.", "Başka başlık");
+    expect(titleAgreement(EX_SIK_TITLE, shownOfMember([sixtyThree], "Altmış"))).toBeCloseTo(5 / 8, 9);
+    const only = [memberNamed(EX_SIK, SEED), sixtyThree];
+    expect(pickFor(EX_SIK_TITLE, only, SEED)).toBeNull();
+  });
+
+  it("the same seed under the cluster title 'Yonca Verdioğlu Şık kimdir?' is kept: the headline is an explainer too", () => {
+    expect(pickFor("Yonca Verdioğlu Şık kimdir?", EX_SIK, SEED)).toBeNull();
+  });
+
+  it("a seed whose article title has no explainer word behaves as today: the 0.63 seed is kept", () => {
+    const members = EX_SIK.map((m) =>
+      m.source.name === SEED ? { ...m, article: { ...m.article, title: "Yonca Şık hakkında bilgi" } } : m,
+    );
+    expect(pickFor(EX_SIK_TITLE, members, SEED)).toBeNull();
+    const noTitle = EX_SIK.map((m) => (m.source.name === SEED ? { ...m, article: { ...m.article, title: undefined } } : m));
+    expect(pickFor(EX_SIK_TITLE, noTitle, SEED)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-3 (hunt 122, 2026-11-11): a seed that is cut where it hides the statement.
+//
+// (A) Turkuvaz's "<cut>...Devamı için tıklayınız" (A Haber, Sabah, Yeni Aşır: 107 cluster seeds in 7
+//     days) is a cut stub whether or not it matches the 202/203 feed-cap lengths: the tidy step now
+//     repairs it, and when what is shown still ends in "…" the seed is a 'stub' (dfaaceac: it
+//     scored 0.43 and escaped the stub check, because "…terörsüz Türkiye sürecine, fon..." has a
+//     finite verb in its last sentence).
+// (B) A clamp cut inside a quotation that follows "şunları kaydetti:" or "şöyle sürdürdü:" shows the
+//     sentence in front of the introducer's sentence, and the quotation is gone: the seed is a
+//     'stub' (837fa770: Milliyet's text said nothing of the headline's quote, while four outlets
+//     score 1.00).
+// The members are the real outlet texts of the live clusters (dumped read-only 2026-11-11).
+// ---------------------------------------------------------------------------
+
+const CT_FAKIBABA_TITLE = "Ahmet Eşref Fakıbaba A Haber'e konuştu. Kapıyı aralayan sözler: \"AK Parti bana emek verdi, ben AK Parti'ye...\"";
+const CT_FAKIBABA: SummaryMember[] = [
+  mem("A Haber", "outlet", "2026-11-10T19:51:25Z", "Geçtiğimiz günlerde İYİ Parti üyeliğinden ve Ankara Milletvekilliği görevinden istifa eden Ahmet Eşref Fakıbaba, AK Parti'ye geçeceği yönündeki kulis iddialarına A Haber ekranlarından yanıt verdi. AK...Devamı için tıklayınız", "Ahmet Eşref Fakıbaba A Haber'e konuştu! Kapıyı aralayan sözler: \"AK Parti bana emek verdi, ben AK Parti'ye...\""),
+  mem("Takvim", "outlet", "2026-11-10T20:42:28Z", "İYİ Parti üyeliğinden ve Ankara Milletvekilliği görevinden istifa eden Ahmet Eşref Fakıbaba, AK Parti'ye geçeceği yönündeki iddialara A Haber'de yanıt verdi. AK Parti ile herhangi bir temasının olmadığını belirten Fakıbaba, siyasi geleceğine ilişkin kararını henüz vermediğini söyledi. Olası bir teklife ise \"Büyük bir sürpriz olur mu sizce? Bilmiyorum.\" sözleriyle kapıyı açık bıraktı.", "Ahmet Eşref Fakıbaba'dan AK Parti'ye dönüş iddialarına A Haber'de yanıt! \"Büyük bir sürpriz olur mu sizce?\""),
+];
+const CT_MAHIROGLU_TITLE = "Mahiroğlu'nun kara para ağına 2. dalga operasyon: 7 şüpheli gözaltında";
+const CT_MAHIROGLU: SummaryMember[] = [
+  mem("Sabah", "outlet", "2026-11-10T19:55:43Z", "İstanbul Büyükşehir Belediyesi eski Başkanı Ekrem İmamoğlu'na verdiği destek nedeniyle Sarıyer'deki kaçak villasına göz yumulan Halk TV'nin firari eski sahibi Cafer Mahiroğlu'na yönelik rüşvet, ihaleye...Devamı için tıklayınız", "Mahiroğlu'nun kara para ağına 2. dalga operasyon: 7 şüpheli gözaltında"),
+];
+const CT_KABINE_TITLE = "Kabine Erdoğan liderliğinde toplanıyor: Masada kritik başlıklar";
+const CT_KABINE: SummaryMember[] = [
+  mem("A Haber", "outlet", "2026-11-08T17:11:11Z", "Başkan Recep Tayyip Erdoğan başkanlığında Cumhurbaşkanlığı Külliyesi'nde toplanacak Cumhurbaşkanlığı Kabinesi; emekli maaşlarına yönelik yeni düzenlemelerden terörsüz Türkiye sürecine, fon...Devamı için tıklayınız", "CANLI | Kabine sona erdi! Başkan Erdoğan'dan önemli açıklamalar"),
+  mem("İşçi Haber", "niche", "2026-11-08T17:27:16Z", "Başkan Erdoğan liderliğinde toplanan Kabine, emekli maaşlarına yapılacak ek zam ve piyasa manipülasyonlarına karşı alınacak önlemleri değerlendirecek. Toplantıda ayrıca terörle mücadeledeki yeni süreç ve Türkiye'nin ev sahipliğinde gerçekleşecek uluslararası zirveler masaya yatırılacak.", "Kabine Erdoğan liderliğinde toplanıyor: Masada kritik başlıklar"),
+  mem("Yeni Şafak", "outlet", "2026-11-09T06:16:48Z", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de saat 16.00'da toplanıyor. Yılın en kritik toplantılarından birinde emeklilere refah payı düzenlemesinden dev yatırım fonu soruşturmasına, Terörsüz Türkiye sürecinden ABD-İran gerilimine kadar çok sayıda hayati başlık masaya yatırılacak.", "Beştepe'de kritik Kabine toplanıyor: Masada emekli zammı var"),
+  mem("Yeni Mesaj", "outlet", "2026-11-09T07:45:00Z", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak.Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de saat 16.00'da toplanacak kabinenin gündeminde; emeklilere refah payı düzenlemesi , fon ...", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak"),
+  mem("F5 Haber", "aggregator", "2026-11-09T08:20:00Z", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak.", "Kabine toplanıyor. Emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak"),
+];
+const CT_DURAN_TITLE = "Burhanettin Duran: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek";
+const CT_DURAN: SummaryMember[] = [
+  mem("Haberler.com", "aggregator", "2026-11-09T19:58:05Z", "- \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek\"", "İletişim Başkanı Duran'dan \"COP31\" paylaşımı:"),
+  mem("Milliyet", "outlet", "2026-11-09T20:08:52Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, NSosyal hesabından, Türkiye'nin ev sahipliğinde Antalya'da düzenlenen Birleşmiş Milletler İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı'na (COP31) ilişkin paylaşımda bulundu.\nTürkiye'nin, COP31'e başkanlık ve ev sahipliği yaparak küresel iklim diplomasisinin merkezinde yer aldığını belirten Duran, şunları kaydetti: \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin ...", "İletişim Başkanı Duran'dan 'COP31' paylaşımı: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek"),
+  mem("Diriliş Postası", "outlet", "2026-11-09T20:15:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek.\" ifadesini kullandı.", "Burhanettin Duran: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek"),
+  mem("Yeni Şafak", "outlet", "2026-11-09T20:25:05Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran NSosyal hesabından, Türkiye'nin ev sahipliğinde Antalya'da düzenlenen Birleşmiş Milletler İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı'na (COP31) ilişkin paylaşımda bulundu. Türkiye'nin, COP31'e başkanlık ve ev sahipliği yaparak küresel iklim diplomasisinin merkezinde yer aldığını belirten Duran, şunları kaydetti: \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin k...", "İletişim Başkanı Duran'dan \"COP31\" paylaşımı"),
+  mem("Haber Global", "outlet", "2026-11-09T20:52:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek.\" ifadesini kullandı.", "İletişim Başkanı Duran'dan \"COP31\" paylaşımı: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek"),
+  mem("Elips Haber", "outlet", "2026-11-09T21:07:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek.\" ifadesini kullandı.", "İletişim Başkanı Duran'dan 'COP31' paylaşımı"),
+  mem("TRT Haber", "outlet", "2026-11-09T21:21:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek\" dedi.", "İletişim Başkanı Duran: Türkiye küresel iklim diplomasisinin merkezinde yer alıyor"),
+];
+const CT_YAYMAN_TITLE = "AK Parti'li Yayman'dan yeni anayasa açıklaması";
+const CT_YAYMAN: SummaryMember[] = [
+  mem("Milliyet", "outlet", "2026-11-07T12:49:01Z", "Yayman, Türkiye Yüzyılı Buluşmaları kapsamında AK Parti Mersin İl Başkanlığınca Suphi Öner Öğretmenevi'nde düzenlenen Basın Buluşması programına katıldı.\nBurada konuşan Yayman, AK Parti'nin krizlerle mücadele ederek bu noktaya geldiğini söyledi.\nFon meselesiyle ilgili değerlendirmede bulunan Yayman, konuşmasını şöyle sürdürdü: \"Cumhurbaşkanı'mızın söylediği gibi biz bunu da aşacağız çünkü AK Parti '3 Y' ile kurulmuştur. Yasaklarla mücadele etmek, sessiz devrimler başarmıştır. Yoksullukla müca...", "AK Parti'li Yayman'dan yeni anayasa açıklaması"),
+  mem("Posta", "outlet", "2026-11-07T13:33:50Z", "Yayman, Türkiye Yüzyılı Buluşmaları kapsamında AK Parti Mersin İl Başkanlığınca Suphi Öner Öğretmenevi'nde düzenlenen Basın Buluşması programına katıldı.\nBurada konuşan Yayman, AK Parti'nin krizlerle mücadele ederek bu noktaya geldiğini söyledi.\nFon meselesiyle ilgili değerlendirmede bulunan Yayman, konuşmasını şöyle sürdürdü:\n\"Cumhurbaşkanı'mızın söylediği gibi biz bunu da aşacağız çünkü AK Parti '3 Y' ile kurulmuştur. Yasaklarla mücadele etmek, sessiz devrimler başarmıştır. Yoksullukla müca...", "AK Parti'li Yayman: Türkiye'yi dünyanın en gelişmiş 10 ülkesinden birisi haline getireceğiz"),
+];
+
+/** The repaired, trimmed description of a member: what `seedDisqualified` is given as `raw`. */
+const rawOfMember = (members: readonly SummaryMember[], name: string): string =>
+  (memberNamed(members, name).article.description ?? "").trim();
+
+describe("seedDisqualified: a Turkuvaz CTA feed cut (h122-ozet-3)", () => {
+  it("dfaaceac: the repaired text still ends in '…' and the raw text is a CTA feed cut: 'stub'", () => {
+    const raw = rawOfMember(CT_KABINE, "A Haber");
+    const shown = tidySummaryText(raw);
+    expect(isCtaFeedCut(raw)).toBe(true);
+    expect(shown.endsWith("terörsüz Türkiye sürecine…")).toBe(true);
+    // The last sentence holds a finite verb ("toplanacak"), which is why the old rule let it through.
+    expect(hasFiniteVerb("Başkan Recep Tayyip Erdoğan başkanlığında Cumhurbaşkanlığı Külliyesi'nde toplanacak")).toBe(true);
+    expect(titleAgreement(CT_KABINE_TITLE, shown)).toBeCloseTo(3 / 7, 9);
+    expect(seedDisqualified(raw, shown)).toBe("stub");
+  });
+
+  it("dfaaceac: Yeni Şafak (0.71, under 0.75, over the form floor) replaces the cut seed", () => {
+    expect(titleAgreement(CT_KABINE_TITLE, shownOfMember(CT_KABINE, "Yeni Şafak"))).toBeCloseTo(5 / 7, 9);
+    const pick = pickFor(CT_KABINE_TITLE, CT_KABINE, "A Haber");
+    expect(pick?.member.source.name).toBe("Yeni Şafak");
+    expect(pick?.text).toBe(shownOfMember(CT_KABINE, "Yeni Şafak"));
+  });
+
+  it("605765b8: the repaired seed ends at a sentence, so it is no stub any more and stays", () => {
+    const raw = rawOfMember(CT_FAKIBABA, "A Haber");
+    const shown = tidySummaryText(raw);
+    expect(isCtaFeedCut(raw)).toBe(true);
+    expect(shown.endsWith("A Haber ekranlarından yanıt verdi.")).toBe(true);
+    expect(seedDisqualified(raw, shown)).toBeNull();
+    expect(pickFor(CT_FAKIBABA_TITLE, CT_FAKIBABA, "A Haber")).toBeNull();
+  });
+
+  it("7fd1bd19: a single-member cluster keeps its cut seed, which now ends in one '…'", () => {
+    const raw = rawOfMember(CT_MAHIROGLU, "Sabah");
+    const shown = tidySummaryText(raw);
+    expect(shown.endsWith("Cafer Mahiroğlu'na yönelik rüşvet…")).toBe(true);
+    expect(seedDisqualified(raw, shown)).toBe("stub");
+    expect(pickFor(CT_MAHIROGLU_TITLE, CT_MAHIROGLU, "Sabah")).toBeNull();
+  });
+
+  it("a candidate that is a CTA feed cut ending in '…' is a 'stub' for summaryDefect (it already was)", () => {
+    const raw = rawOfMember(CT_KABINE, "A Haber");
+    expect(summaryDefect(raw, tidySummaryText(raw))).toBe("stub");
+  });
+
+  it("a CTA feed cut whose repair ends at a sentence is not a stub, and a seed with a CTA after a sentence mark is untouched", () => {
+    const raw = "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve uygulama takvimini açıkladı. Düzenleme kapsamında kurumlara yeni görevler ver...Devamı için tıklayınız";
+    expect(isCtaFeedCut(raw)).toBe(true);
+    expect(seedDisqualified(raw, tidySummaryText(raw))).toBeNull();
+    const plain = "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu ve uygulama takvimini açıkladı. Devamı için tıklayınız";
+    expect(seedDisqualified(plain, tidySummaryText(plain))).toBeNull();
+  });
+});
+
+describe("seedDisqualified: a clamp cut that hides the quotation behind a ':' (h122-ozet-3)", () => {
+  it("837fa770: the shown text ends on a full stop, yet the seed is a 'stub'", () => {
+    const raw = rawOfMember(CT_DURAN, "Milliyet");
+    const shown = tidySummaryText(raw);
+    expect(shown.endsWith("ilişkin paylaşımda bulundu.")).toBe(true);
+    expect(clampCutIntroducedQuote(raw)).toBe(true);
+    expect(seedDisqualified(raw, shown)).toBe("stub");
+  });
+
+  it("837fa770: the seed scores 0.40 (0.50 with its old '...şunları kaydetti…' cut), four outlets score 1.00, and the newest stands in", () => {
+    const seedShown = shownOfMember(CT_DURAN, "Milliyet");
+    expect(titleAgreement(CT_DURAN_TITLE, seedShown)).toBeCloseTo(0.4, 9);
+    for (const name of ["Diriliş Postası", "Haber Global", "Elips Haber", "TRT Haber"]) {
+      expect(titleAgreement(CT_DURAN_TITLE, shownOfMember(CT_DURAN, name)), name).toBe(1);
+    }
+    // Diriliş Postası, Haber Global and Elips Haber hold one text (credited to the earliest); TRT Haber's differs by "dedi".
+    const pick = pickFor(CT_DURAN_TITLE, CT_DURAN, "Milliyet");
+    expect(pick?.member.source.name).toBe("TRT Haber");
+    expect(pick?.text).toBe(shownOfMember(CT_DURAN, "TRT Haber"));
+    const withoutTrt = CT_DURAN.filter((m) => m.source.name !== "TRT Haber");
+    expect(pickFor(CT_DURAN_TITLE, withoutTrt, "Milliyet")?.member.source.name).toBe("Diriliş Postası");
+  });
+
+  it("837fa770: Haberler.com's quotation-only text (0.80) never stands in", () => {
+    const raw = rawOfMember(CT_DURAN, "Haberler.com");
+    expect(summaryDefect(raw, tidySummaryText(raw))).toBe("quote-only");
+    const onlyQuote = CT_DURAN.filter((m) => ["Milliyet", "Haberler.com"].includes(m.source.name));
+    expect(pickFor(CT_DURAN_TITLE, onlyQuote, "Milliyet")).toBeNull();
+  });
+
+  it("98266829: the seed is a 'stub', but Posta holds the same text, so the seed is kept with its sentence-end cut", () => {
+    const raw = rawOfMember(CT_YAYMAN, "Milliyet");
+    const shown = tidySummaryText(raw);
+    expect(shown.endsWith("bu noktaya geldiğini söyledi.")).toBe(true);
+    expect(seedDisqualified(raw, shown)).toBe("stub");
+    expect(tidySummaryText(rawOfMember(CT_YAYMAN, "Posta"))).toBe(shown);
+    expect(pickFor(CT_YAYMAN_TITLE, CT_YAYMAN, "Milliyet")).toBeNull();
+  });
+
+  it("a clamp cut behind a comma (no colon) is no 'introduced quote': a kept sentence end is a clean seed, as before", () => {
+    // Four whole sentences (78% of the text), then a quotation after "Yılmaz," that the clamp cut: the sentence end is kept.
+    const sentence = "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu. ";
+    const raw = `${sentence.repeat(4)}Yılmaz, "${"çok önemli bir adım ".repeat(20)}`.slice(0, 497) + "...";
+    expect(raw).toHaveLength(500);
+    expect(clampCutIntroducedQuote(raw)).toBe(false);
+    const shown = tidySummaryText(raw);
+    expect(shown.endsWith("kamuoyuna duyurdu.")).toBe(true);
+    expect(seedDisqualified(raw, shown)).toBeNull();
+  });
+
+  it("the same clamp with a colon in front of the opener hides the quotation: a 'stub' although the shown text ends on a full stop", () => {
+    const sentence = "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu. ";
+    const raw = `${sentence.repeat(1)}Yılmaz, şunları söyledi: "${"çok önemli bir adım ".repeat(30)}`.slice(0, 497) + "...";
+    expect(raw).toHaveLength(500);
+    expect(clampCutIntroducedQuote(raw)).toBe(true);
+    const shown = tidySummaryText(raw);
+    expect(shown).toBe("Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısıyla kamuoyuna duyurdu.");
+    expect(seedDisqualified(raw, shown)).toBe("stub");
+  });
+
+  it("the order: a stub is decided before unbalanced quotes", () => {
+    const raw = rawOfMember(CT_DURAN, "Milliyet");
+    expect(seedDisqualified(raw, "“Bakan Yılmaz konuştu.")).toBe("stub");
   });
 });

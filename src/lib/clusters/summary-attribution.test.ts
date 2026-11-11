@@ -14,6 +14,7 @@ import {
   AGREEMENT_HIGH,
   AGREEMENT_LOW,
   isLiveLine,
+  isQuoteOnly,
   seedDisqualified,
   summaryDefect,
   textOverlap,
@@ -3372,12 +3373,17 @@ describe("h95-summaries-1: a stub that a surname hid, and a teaser seed", () => 
     expect(titleAgreement(DD5_TITLE, res?.text ?? "")).toBeCloseTo(2 / 3, 9);
   });
 
-  it("6ef586c4: the Özet no longer ends in the 'Peki … kimdir?' teaser, and stays Haberler.com's", () => {
+  it("6ef586c4: the Özet no longer ends in the 'Peki … kimdir?' teaser; the biography seed gives way to a member that says the headline (h122-ozet-2)", () => {
+    // h95-summaries-1 kept Haberler.com's text with the teaser cut off. Its ARTICLE is "Ümit Kocasakal kimdir? ...
+    // nereli, kaç yaşında, evli mi?" under the headline "... Ümit Kocasakal oldu", so h122-ozet-2 treats the seed as an
+    // explainer (the gain is waived, the floor stays 0.75): Cumhuriyet's lead states that he won the election.
     const res = resolve(K6E_TITLE, K6E_SUMMARY, K6E_MEMBERS);
-    expect(res?.source?.name).toBe("Haberler.com");
-    expect(res?.text.endsWith("özel hayatı araştırılıyor.")).toBe(true);
+    expect(res?.source?.name).toBe("Cumhuriyet");
+    expect(res?.text.endsWith("baronun yeni başkanı oldu.")).toBe(true);
     expect(res?.text).not.toMatch(/Peki|kimdir|evli mi/);
+    // Without the headline (rss, digest, cards) the seed stays, and its tail is still cut.
     const withoutTitle = summaryAttribution({ summary: K6E_SUMMARY, members: K6E_MEMBERS, wire: NOT_WIRE });
+    expect(withoutTitle?.source?.name).toBe("Haberler.com");
     expect(withoutTitle?.text.endsWith("özel hayatı araştırılıyor.")).toBe(true);
   });
 
@@ -3631,5 +3637,317 @@ describe("h95-summaries-2: identical text is credited to the wire, then the outl
       const early = fx("Erken", "erken", "outlet", "2026-11-08T10:10:00Z", good, "y2");
       expect(resolve(title, seedText, [seed, late, early])?.source?.name).toBe("Erken");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-1 (hunt 122, 2026-11-11): the Özet and the meta description of b8e7cc75 and 710ef4bb
+// were Independent Türkçe's CMS field dump ("...copyright Independentturkish:"). The members are
+// the real outlet texts of the live clusters (dumped read-only 2026-11-11), trimmed to the
+// members each case needs; the stored summary is the seed's description.
+// ---------------------------------------------------------------------------
+
+const CMS_B8_TITLE = "MHP lideri Bahçeli’den 10 Kasım mesajı";
+const CMS_B8_MEMBERS = [
+  fx("Türkiye Gazetesi", "turkiye-gazetesi", "outlet", "2026-11-09T14:40:03Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün vefatının 88'inci yıl dönümü dolayısıyla yayımladığı mesajda, Atatürk'ün fikirlerinin çağın gerçekleriyle geliştirilmesi ve Cumhuriyet mirasına sahip çıkılması gerektiğini belirtti.", "MHP lideri Bahçeli'den 10 Kasım mesajı"),
+  fx("Milliyet", "milliyet", "outlet", "2026-11-09T14:43:41Z", "Milliyetçi Hareket Partisi Genel Başkanı Devlet Bahçeli’nin, \"Gazi Mustafa Kemal Atatürk’ün 88. Vefat Yıldönümü\" münasebetiyle yapmış olduğu yazılı basın açıklaması şöyle;\n\n\"ATATÜRK’Ü ANMA GÜNÜ, DEVLETİMİZ ADINA, MİLLETİMİZ NAMINA ÇOK KIYMETLİ\" \n\"Türkiye Cumhuriyeti devletinin kurucusu, istiklal mücadelemizin lideri, ilk Cumhurbaşkanımız Gazi Mustafa Kemal Atatürk’ü ebediyete irtihalinin 88. senesinde hürmet, rahmet ve minnetle anıyoruz. Türkiye Cumhuriyeti Devleti’nin kurucusu Gazi Mustafa K...", "Son dakika... Bahçeli'den 'Gazi Mustafa Kemal Atatürk’ün 88. vefat yıl dönümü' mesajı"),
+  fx("Hürriyet", "hurriyet", "outlet", "2026-11-09T14:45:00Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün vefatının 88. yıl dönümü dolayısıyla mesajı yayımladı.", "MHP lideri Bahçeli'den 10 Kasım mesajı"),
+  fx("Haber7", "haber7", "outlet", "2026-11-09T14:46:00Z", "Bahçeli, \"Aramızdan ayrılışının 88'inci yıl dönümünde Gazi Mustafa Kemal Atatürk’ü, Milli Mücadele kahramanlarıyla birlikte aziz şehitlerimizi saygı ve şükran hislerimle anıyor, hepsine Cenab-ı Allah’tan rahmetler niyaz ediyorum.\" dedi.", "Bahçeli'den 10 Kasım mesajı"),
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-09T14:49:07Z", "MHP Genel Başkanı Devlet Bahçeli, Atatürk'ün 88. vefat yıl dönümü dolayısıyla yayımladığı mesajda, Atatürk'ü anlamanın kurucu felsefesine, devlet aklına ve temel ilkelerine sahip çıkmaktan geçtiğini belirterek, Cumhuriyet'in sonsuza kadar yaşatılması gerektiğini vurguladı.", "MHP Genel Başkanı Bahçeli: Atatürk'ü anlamanın yolu eserine ve fikirlerine sahip çıkmaktır"),
+  fx("Yeniçağ", "yenicag", "outlet", "2026-11-09T15:00:18Z", "MHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla Atatürk’ü anma mesajı yayımladı. Atatürk’ü 88. ölüm yıl dönümünde anan Bahçeli, “Atatürk’ü yaşatmanın doğru yolu, eserine sahip çıkmak ve onun fikirlerini çağın gerçekleriyle yorumlayarak geliştirmekle imkana kavuşur” dedi.", "Devlet Bahçeli’den 10 Kasım’da Atatürk mesajı: “Fikirlerini çağın gerçekleriyle geliştirmeliyiz”"),
+  fx("A Haber", "a-haber", "outlet", "2026-11-09T15:04:23Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün ebediyete irtihalinin 88. yıl dönümü dolayısıyla yayımladığı mesajda, Atatürk'ü anmanın yanı sıra onun fikirlerini yaşatmanın önemine...Devamı için tıklayınız", "MHP lideri Bahçeli'den Atatürk'ün 88. yıl dönümünde anma mesajı"),
+  fx("Posta", "posta", "outlet", "2026-11-09T15:08:45Z", "MHP lideri Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajında şu ifadelere yer verdi:\nTürkiye Cumhuriyeti devletinin kurucusu, istiklal mücadelemizin lideri, ilk Cumhurbaşkanımız Gazi Mustafa Kemal Atatürk’ü ebediyete irtihalinin 88. senesinde hürmet, rahmet ve minnetle anıyoruz.\nTürkiye Cumhuriyeti Devleti’nin kurucusu Gazi Mustafa Kemal Atatürk’ün ebediyete irtihalinin 88. Yıldönümü, Atatürk’ü anma günü, hiç kuşkusuz devletimiz adına, milletimiz namına çok kıymetli ve çok değerlidir. Ancak...", "MHP lideri Bahçeli'den 10 Kasım mesajı"),
+  fx("Sabah", "sabah", "outlet", "2026-11-09T15:09:32Z", "MHP Genel Başkanı Devlet Bahçeli, Atatürk’ü vefatının 88’nci yıl dönümünde andı. Bahçeli paylaşımında, “Milli Mücadele kahramanlarıyla birlikte aziz şehitlerimizi saygı ve şükran hislerimle anıyor, hepsine...Devamı için tıklayınız", "MHP lideri Bahçeli’den 10 Kasım paylaşımı!"),
+  fx("TRT Haber", "trt-haber", "outlet", "2026-11-09T15:22:00Z", "MHP Genel Başkanı Devlet Bahçeli, Gazi Mustafa Kemal Atatürk'ün ebediyete intikalinin 88. yılı vesilesiyle yayımladığı mesajda, \"Atatürke sevgi, saygı ve büyük bir duyguyla bağlı olan kuşaklara düşen görev onu anarken anlayıp geriye bıraktığı bu büyük mirası sonsuza kadar yaşatmaktır\" ifadelerini kullandı.", "MHP Genel Başkanı Bahçeli'den 10 Kasım mesajı"),
+  fx("Independent Türkçe", "indyturk", "outlet", "2026-11-09T15:32:08Z", "MHP Genel Başkanı Devlet Bahçeli10 KASIMMHP Genel Başkanı Devlet Bahçeli, 10 Kasım dolayısıyla yayımladığı mesajda Gazi Mustafa Kemal Atatürk'ü rahmet ve minnetle andıPazartesi, Kasım 9, 2026 - 18:30Main image: Type: newsSEO Title: Bahçeli'den 10 Kasım mesajı: Atatürk'ü anlamanın en sağlıklı yolu temel ilkelerini faaliyetlerimizin merkezine koymaktırcopyright Independentturkish:", "Bahçeli'den 10 Kasım mesajı: Atatürk'ü anlamanın en sağlıklı yolu temel ilkelerini faaliyetlerimizin merkezine koymaktır"),
+];
+const CMS_B8_SUMMARY = byName(CMS_B8_MEMBERS, "Milliyet").article.description ?? "";
+
+const CMS_AYM_TITLE = "AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir";
+const CMS_AYM_MEMBERS = [
+  fx("Dokuz8 Haber", "dokuz8-haber", "outlet", "2026-11-09T17:55:00Z", "Anayasa Mahkemesi Başkanı Kadir Özkaya, anayasanın devletin işleyişini ve bireylerin hak ve özgürlüklerini güvence altına alan temel hukuk metni olduğunu vurguladı.", "AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir"),
+  fx("Independent Türkçe", "indyturk", "outlet", "2026-11-09T18:38:43Z", "AYM Başkanı Kadir ÖzkayaAYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirterek, “Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir” dediPazartesi, Kasım 9, 2026 - 21:30Main image: HaberType: newsSEO Title: AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidircopyright Independentturkish:", "AYM Başkanı Özkaya: Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir"),
+];
+const CMS_AYM_SUMMARY = byName(CMS_AYM_MEMBERS, "Dokuz8 Haber").article.description ?? "";
+
+describe("h122-ozet-1: Independent Türkçe's CMS dump is neither the Özet nor the meta description", () => {
+  it("b8e7cc75: the Özet is Yeniçağ's lead, not the dump that tied it on the headline and was newer", () => {
+    const res = resolve(CMS_B8_TITLE, CMS_B8_SUMMARY, CMS_B8_MEMBERS);
+    expect(res?.source?.name).toBe("Yeniçağ");
+    expect(res?.text).toBe(shownOf(byName(CMS_B8_MEMBERS, "Yeniçağ")));
+    expect(res?.text).not.toMatch(/SEO Title|Main image|Independentturkish/);
+  });
+
+  it("710ef4bb: the Özet stays Dokuz8 Haber's sentence, not the 1.00 dump", () => {
+    const res = resolve(CMS_AYM_TITLE, CMS_AYM_SUMMARY, CMS_AYM_MEMBERS);
+    expect(res?.source?.name).toBe("Dokuz8 Haber");
+    expect(res?.text).toBe(shownOf(byName(CMS_AYM_MEMBERS, "Dokuz8 Haber")));
+    expect(res?.text).not.toContain("SEO Title");
+  });
+
+  it("the meta description carries the same text and no CMS field", () => {
+    for (const [title, summary, members] of [
+      [CMS_B8_TITLE, CMS_B8_SUMMARY, CMS_B8_MEMBERS],
+      [CMS_AYM_TITLE, CMS_AYM_SUMMARY, CMS_AYM_MEMBERS],
+    ] as const) {
+      const res = resolve(title, summary, members as ClusterDetailMember[]);
+      const meta = describeForMeta({ count: members.length, attribution: res, title });
+      expect(meta).toContain(res?.source?.name ?? "yok");
+      expect(meta).not.toMatch(/SEO Title|Main image|Independentturkish/);
+    }
+  });
+
+  it("a cluster whose only member is the dump still shows the lead, with no CMS field (never blank)", () => {
+    const dumped = byName(CMS_AYM_MEMBERS, "Independent Türkçe");
+    const res = resolve(CMS_AYM_TITLE, dumped.article.description ?? "", [dumped]);
+    expect(res?.text).toBe(
+      "AYM Başkanı Kadir Özkaya, anayasanın hak ve özgürlükleri güvence altına alan temel hukuk metni olduğunu belirterek, “Anayasa, insan onurunu merkeze alan bir toplumsal mutabakat metnidir” dedi.",
+    );
+    expect(res?.source?.name).toBe("Independent Türkçe");
+  });
+
+  it("without agreeWithTitle (rss, digest, cards) the seed is shown as before, tidied", () => {
+    const res = summaryAttribution({ summary: CMS_B8_SUMMARY, members: CMS_B8_MEMBERS, wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Milliyet");
+  });
+
+  it("the dump is a 'cms' seed and a 'cms' candidate for the two readers of the Özet", () => {
+    const dumped = byName(CMS_B8_MEMBERS, "Independent Türkçe");
+    const raw = dumped.article.description ?? "";
+    expect(summaryDefect(raw, shownOf(dumped))).toBe("cms");
+    expect(seedDisqualified(raw, shownOf(dumped))).toBe("cms");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-2 (hunt 122, 2026-11-11): the Özet of 72abfb9f, c859c91b and 4e0c0003 was one or two
+// bare, speaker-less quotations (Haberler.com copies a wire's quote bullets), and the Özet of
+// 777ea7c5 was a biography ("Yonca Verdioğlu Şık kimdir?") under a headline of a detention. The
+// members are the real outlet texts of the live clusters (dumped read-only 2026-11-11).
+// ---------------------------------------------------------------------------
+
+const QO_SINIRLIOGLU_TITLE = "Türkiye'nin BM Genel Sekreter adayı Sinirlioğlu: Diyalog taviz değil sorumluluktur";
+const QO_SINIRLIOGLU = [
+  fx("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-11-06T21:39:49Z", "Türkiye’nin Birleşmiş Milletler (BM) Genel Sekreter adayı Feridun Sinirlioğlu, \"Genel Sekreterlik görevine talibim çünkü BM'nin kusursuz olduğunu düşündüğüm için değil onun vazgeçilmez olduğuna inandığım için buradayım.\" dedi.", "Türkiye’nin BM Genel Sekreter adayı Sinirlioğlu, \"İnteraktif Diyalog Başlangıcı\" toplantısında hedeflerini açıkladı"),
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-06T21:42:20Z", "- \"Genel Sekreterlik görevine talibim çünkü BM'nin kusursuz olduğunu düşündüğüm için değil onun vazgeçilmez olduğuna inandığım için buradayım\"\n\"40 yıllık diplomatik kariyerimde öğrendiğim bir ders varsa o da şudur: Diyalog, her zaman mümkündür. Bunun için yalnızca bir platforma ihtiyaç vardır. BM ise bu platformların en önemlisi\"", "Türkiye’nin BM Genel Sekreter adayı Sinirlioğlu, \"İnteraktif Diyalog Başlangıcı\" toplantısında hedeflerini açıkladı:"),
+  fx("Star", "star", "outlet", "2026-11-06T21:48:00Z", "Türkiye'nin BM Genel Sekreter adayı Feridun Sinirlioğlu, New York'taki BM Genel Merkezi'nde vizyonunu açıkladı. 40 yıllık diplomatik tecrübesine dikkat çekerek etkili arabuluculuk ve sessiz diplomasinin önemini vurgulayan Sinirlioğlu, kriz anlarında taraflarla temas kurmanın taviz değil, barış için bir sorumluluk olduğunu ifade etti.", "Türkiye'nin BM Genel Sekreter adayı Sinirlioğlu: Diyalog taviz değil sorumluluktur"),
+  fx("İşçi Haber", "isci-haber", "niche", "2026-11-06T21:52:59Z", "Türkiye'nin Birleşmiş Milletler Genel Sekreter adayı Feridun Sinirlioğlu, katıldığı interaktif diyalog toplantısında adaylık hedeflerini kamuoyu ile paylaştı. Sinirlioğlu, BM'nin yapısının kusursuz olmadığını ancak küresel sistem için vazgeçilmez bir öneme sahip olduğunu vurguladı.", "Feridun sinirlioğlu BM genel sekreterliği için vizyonunu açıkladı"),
+  fx("CGTN Türk", "cgtn-turk", "outlet", "2026-11-06T22:18:00Z", "Türkiye’nin Birleşmiş Milletler (BM) Genel Sekreter adayı Feridun Sinirlioğlu, \"Genel Sekreterlik görevine talibim çünkü BM'nin kusursuz olduğunu düşündüğüm için değil onun vazgeçilmez olduğuna inandığım için buradayım.\" dedi.", "Feridun Sinirlioğlu: BM Genel Sekreterliğine adayım çünkü..."),
+  fx("Milliyet", "milliyet", "outlet", "2026-11-06T22:58:45Z", "Eski Dışişleri Bakanı ve halen Avrupa Güvenlik ve İşbirliği Teşkilatı (AGİT) Genel Sekreterliği görevini yürüten Sinirlioğlu, BM Genel Merkezi’nde düzenlenen \"İnteraktif Diyalog Başlangıcı\" toplantısında yaptığı konuşmada, BM Genel Sekreteri seçilmesi halinde izleyeceği politikaları ve öncelik vereceği alanları anlattı.\nSinirlioğlu, BM Şartı'na bağlı kalmanın idealizm meselesi olmadığını ve devletler arasındaki anlaşmazlıkları çözmenin yegane yolu olduğunu vurguladı.\nBM Şartı'nın, uluslararas...", "Türkiye’nin BM Genel Sekreter adayı Sinirlioğlu hedeflerini açıkladı"),
+];
+const QO_KACIR_TITLE = "Bakan Kacır, Seul'de Güney Koreli şirketlerin üst düzey yöneticileriyle görüştüklerini bildirdi";
+const QO_KACIR = [
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-04T17:05:16Z", "- \"Ülkemizin yatırım, üretim ve teknoloji alanlarındaki potansiyelini küresel ölçekte daha ileriye taşımak için uluslararası işbirliklerini artırmaya devam edeceğiz\"", "Bakan Kacır, Seul'de Güney Koreli şirketlerin üst düzey yöneticileriyle görüştüklerini bildirdi:"),
+  fx("Milliyet", "milliyet", "outlet", "2026-11-04T17:45:37Z", "Kacır, sanal medya hesabından hesabından, görüşmeye ilişkin paylaşım yaptı. Cumhurbaşkanımız Erdoğan'ın başkanlığında, Güney Kore'nin başkenti Seul'de teknoloji, otomotiv, elektronik, biyoteknoloji, kimya ve enerji gibi stratejik sektörlerde faaliyet gösteren şirketlerin üst düzey yöneticileriyle bir araya geldiklerini aktaran Kacır, \"⁠LG Electronics Üst Yöneticisi (CEO) Lyu Jae-cheol, ⁠Celltrion CEO'su Seo Jin-seok, ⁠SK Chemicals ve SK Plasma CEO'su Jaehyun Ahn, ⁠Hyundai Motor Group CEO'su C...", "Seul'de stratejik zirve! Bakan Kacır, Güney Koreli şirketlerin üst düzey yöneticileriyle görüştüklerini bildirdi"),
+  fx("Haber7", "haber7", "outlet", "2026-11-04T19:16:00Z", "Sanayi ve Teknoloji Bakanı Mehmet Fatih Kacır, Seul’de Samsung, Hyundai, LG ve SK Chemicals gibi şirketlerin üst düzey yöneticileriyle Türkiye’deki yatırım ve iş birliği fırsatlarını görüştü.", "Bakan Kacır, Güney Koreli teknoloji devleriyle bir araya geldi"),
+  fx("Muhalif", "muhalif", "outlet", "2026-11-04T19:28:33Z", "Sanayi ve Teknoloji Bakanı Mehmet Fatih Kacır, Cumhurbaşkanı Erdoğan'ın Seul temasları kapsamında Güney Koreli dev şirketlerin CEO'larıyla bir araya gelerek...", "Seul'de dev zirve: Bakan Kacır küresel teknoloji devleriyle masaya oturdu"),
+  fx("Posta", "posta", "outlet", "2026-11-04T22:14:18Z", "Sanayi ve Teknoloji Bakanı Mehmet Fatih Kacır, sanal medya hesabından yaptığı açıklamada şu ifadeleri kullandı:\n\"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın başkanlığında, Güney Kore'nin başkenti Seul'de teknoloji, otomotiv, elektronik, biyoteknoloji, kimya ve enerji gibi stratejik sektörlerde faaliyet gösteren şirketlerin üst düzey yöneticileriyle bir araya geldik. LG Electronics Üst Yöneticisi (CEO) Lyu Jae-cheol, Celltrion CEO'su Seo Jin-seok, SK Chemicals ve SK Plasma CEO'su Jaehyun Ah...", "Bakan Kacır, Cumhurbaşkanı Erdoğan'ın başkanlığında Güney Koreli teknoloji devleriyle bir araya geldi"),
+  fx("Yeni Şafak", "yeni-safak", "outlet", "2026-11-05T01:00:00Z", "Cumhurbaşkanı Erdoğan, Güney Kore ziyaretinde teknoloji, elektronik, biyoteknoloji ve kimya alanlarında faaliyet gösteren şirketlerin üst düzey yöneticileriyle görüştü. Görüşmelerde LG Electronics CEO’su Lyu Jae-cheol, Samsung CEO’su Roh Tae-moon ve Hyundai Motor Group CEO’su Chung Euisun de yer aldı.", "Güney Kore’de teknoloji buluşması"),
+];
+const QO_ALABED_TITLE = "Cumhurbaşkanı Erdoğan'a kelebek figürü takdim eden Halepli Alabed'den okulların onarılması çağrısı";
+const QO_ALABED = [
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-06T15:21:10Z", "- \"Suriye'deki okullar halen yıkık durumda; geleceğimizi yeniden inşa edebilmemiz için bu okulların onarılmasına yardım etmeliyiz\"\n\"Benim için Cumhurbaşkanı Erdoğan büyük bir rol model ve gelecekte onun gibi büyük bir lider olmayı diliyorum\"", "Cumhurbaşkanı Erdoğan'a kelebek figürü takdim eden Halepli Alabed'den okulların onarılması çağrısı:"),
+  fx("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-11-06T15:27:43Z", "Cumhurbaşkanı Erdoğan'a savaştan etkilenen çocukları temsil eden kelebek figürünü takdim eden Suriyeli Alabed, Erdoğan'la 10 yıl sonra bir araya gelmenin kendisi için büyük bir onur olduğunu belirterek \"Kendisi, benim için büyük bir rol model\" dedi.", "Cumhurbaşkanı Erdoğan'a kelebek figürü takdim eden Halepli Alabed'den okulların onarılması çağrısı"),
+  fx("Star", "star", "outlet", "2026-11-06T15:44:00Z", "Cumhurbaşkanı Recep Tayyip Erdoğan'a savaş ve açlıktan etkilenen çocukları temsil eden kelebek figürünü takdim eden Suriyeli Bana Alabed, Cumhurbaşkanı Erdoğan'la 10 yıl sonra yeniden bir araya gelmenin kendisi için büyük bir onur olduğunu belirterek, \"Benim için Cumhurbaşkanı Erdoğan büyük bir rol model ve gelecekte onun gibi büyük bir lider olmayı diliyorum.\" dedi.", "Halep'in sesi Alabed: Cumhurbaşkanı Erdoğan gibi bir lider olmak istiyorum"),
+  fx("Akşam", "aksam", "outlet", "2026-11-06T15:51:00Z", "Suriyeli aktivist Bana Alabed, Başkan Erdoğan'a savaş ve açlıktan etkilenen çocukları temsil eden kelebek figürünü takdim etti. Alabed, Erdoğan'ı kendisi için büyük bir rol model olarak nitelendirdi. Alabed, Başkan Erdoğan'la 10 yıl sonra yeniden bir araya gelmenin kendisi için büyük bir onur olduğunu belirterek \"Gelecekte onun gibi büyük bir lider olmayı diliyorum.\" dedi.", "Halepli Alabed 10 yıl sonra yeniden Başkan Erdoğan ile bir arada: Benim için büyük bir rol model"),
+  fx("Takvim", "takvim", "outlet", "2026-11-06T19:30:01Z", "Suriye'deki savaş sürecinde yaptığı sosyal medya paylaşımlarıyla tüm dünyaya sesini duyuran ve 10 yıl önce Cumhurbaşkanlığı Külliyesi'nde ağırlanan Halepli Bana Alabed, İstanbul Kongre Merkezi'nde düzenlenen TRT World Forum 2026'nın açılışında Basşkan Recep Tayyip Erdoğan ile yeniden bir araya geldi. Alabed, programda Erdoğan'a savaş ve açlıktan etkilenen çocukları temsil eden kelebek figürünü takdim etti.", "Suriye'nin sesi Bana Alabed 10 yıl sonra Başkan Erdoğan'la bir araya geldi: \"O benim için büyük bir rol model\""),
+  fx("A Haber", "a-haber", "outlet", "2026-11-06T20:34:57Z", "Suriye'deki kanlı savaş sırasında sosyal medya paylaşımlarıyla Haleplilerin yaşadığı dramı tüm dünyaya duyuran ve 10 yıl önce Cumhurbaşkanlığı Külliyesi'nde ağırlanan Bana Alabed, Başkan Recep Tayyip...Devamı için tıklayınız", "Savaşın acılarını dünyaya duyurmuştu! Başkan Erdoğan ile Halepli Bana Alabed 10 yıl sonra yeniden bir arada"),
+];
+const EX_SIK_TITLE = "TİP Milletvekili Ahmet Şık'ın eşi Yonca Şık gözaltına alındı";
+const EX_SIK = [
+  fx("Elips Haber", "elips-haber", "outlet", "2026-11-10T10:55:00Z", "Yonca Verdioğlu Şık, TİP İstabul Milletvekili Ahmet Şık'ın eşidir. Sivil toplum ve medya alanındaki çalışmalarıyla tanınan Şık, İstanbul Üniversitesi İletişim Fakültesi Gazetecilik Bölümü mezunudur.", "Yonca Verdioğlu Şık kimdir?"),
+  fx("Karar", "karar", "outlet", "2026-11-10T10:58:00Z", "TİP İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık, \"siyasal veya askeri casusluk\" suçlamasıyla evinden gözaltına alındı. Gözaltı kararının, TİP Genel Başkanı Erkan Baş'ın TBMM'de Şık'ın fon skandalına ilişkin paylaşımlarını silmesi karşılığında tutuklu arkadaşının serbest bırakılmasının teklif edildiğini açıklamasından bir gün sonra gelmesi dikkat çekti. Şık'ın arkadaşı Ahmet Saymadi de daha önce uyuşturucu soruşturması kapsamında tutuklanmıştı.", "Erkan Baş'ın 'tweeti silsin' açıklamasından bir gün sonra Ahmet Şık'ın eşine gözaltı"),
+  fx("Haber7", "haber7", "outlet", "2026-11-10T10:59:00Z", "TİP İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık hakkında gözaltı ve ev araması iddialarının gerçeği yansıtmadığı açıklandı.  Yetkililer, Şık hakkında herhangi bir gözaltı kararı bulunmadığını belirtti.", "Ahmet Şık'ın eşi hakkında yeni gelişme: \"Gözaltına alındı\" iddiası yalan çıktı!"),
+  fx("Haber.com", "haber-com", "outlet", "2026-11-10T11:05:19Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık “siyasal veya askeri casusluk” suçlamasıyla gözaltına alındı.", "TİP Milletvekili Ahmet Şık'ın eşi Yonca Şık gözaltına alındı"),
+  fx("Takvim", "takvim", "outlet", "2026-11-10T11:25:48Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık’ın gözaltına alındığı yönündeki haberlerin gerçeği yansıtmadığı ortaya çıktı. Şık hakkında gözaltı kararı bulunmadığı, evinde arama yapılmadığı ve yalnızca ifadesinin alınması amacıyla mevcutlu olarak hazır edildiği belirtildi.", "Yonca Şık’ın gözaltına alındığı iddiası asılsız çıktı! Alman derneğiyle para trafiği mercek altında"),
+  fx("GZT", "gzt", "outlet", "2026-11-10T11:31:07Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili ve gazeteci Ahmet Şık'ın eşi Yonca Verdioğlu Şık, hakkında yürütülen soruşturma kapsamında \"siyasal veya askeri casusluk\" iddiasıyla gözaltına alındı. Evinde gözaltına alınan Yonca Şık'ın Çağlayan'daki İstanbul Adalet Sarayı'na götürüldüğü öğrenildi. Gelişmenin ardından Yonca Şık'ın hayatı, yaşı, memleketi ve mesleği yeniden araştırılmaya başlandı. Peki, Yonca Şık kimdir, nereli, kaç yaşında ve ne iş yapıyor?", "Yonca Şık kimdir?  Ahmet Şık'ın eşi Yonca Şık nereli, kaç yaşında, ne iş yapıyor?"),
+  fx("BirGün", "birgun", "outlet", "2026-11-10T11:34:00Z", "Partisinin İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık gözaltına alınmasıyla ilgili TBMM'de basın toplantısı düzenleyen TİP Genel Başkanı Erkan Baş, \"Bu kadar alçaklık, bu kadar mafyavari bir uygulama sanıyorum Türkiye Cumhuriyeti tarihinde eşine rastlanmamış bir şey\" dedi.", "Erkan Baş, Yonca Şık'ın gözaltına alınmasıyla ilgili konuştu: \"Saray rejimi bir mafya düzenine dönüşmüştür\""),
+  fx("Sözcü", "sozcu", "outlet", "2026-11-10T11:37:10Z", "TİP İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık, \"siyasal veya askeri casusluk\" soruşturması kapsamında e...", "Yonca Verdioğlu Şık kimdir, Ahmet Şık'ın eşi neden göz altına alındı?"),
+  fx("Yeni Akit", "yeni-akit", "outlet", "2026-11-10T11:43:00Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık, 'siyasal veya askeri casusluk' soruşturması kapsamında gözaltına alındı.", "Bütün kamuoyuna yalan söyledikleri ortaya çıktı! Ahmet Şık’ın eşine casusluk incelemesi"),
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-10T11:52:09Z", "TİP İstanbul Milletvekili Ahmet Şık, eşi Yonca Verdioğlu Şık'ın gözaltına alınmasının ardından gündeme geldi. Gazetecilik geçmişi ve siyasi kariyeriyle tanınan Şık'ın hayatı, yaşı, memleketi ve hangi partiden milletvekili olduğu araştırılmaya başlandı. Peki, Ahmet Şık kimdir, milletvekili mi, hangi partiden? Ahmet Şık kaç yaşında, nereli? Detaylar haberimizde.", "Ahmet Şık kimdir, milletvekili mi, hangi partiden? Ahmet Şık kaç yaşında, nereli?"),
+  fx("Cumhuriyet", "cumhuriyet", "outlet", "2026-11-10T11:55:00Z", "TİP İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık, “siyasal veya askeri casusluk” soruşturması kapsamında Beyoğlu’ndaki evinden gözaltına alınarak İstanbul Adliyesi’ne götürüldü. Peki, Ahmet Şık kimdir? TİP Milletvekili Ahmet Şık kaç yaşında, nereli? Ahmet Şık'ın eşi Yonca Şık kim, neden gözaltına alındı?", "Ahmet Şık kimdir? TİP Milletvekili Ahmet Şık kaç yaşında, nereli? Ahmet Şık'ın eşi kim, neden gözaltına alındı?"),
+  fx("Diken", "diken", "outlet", "2026-11-10T13:51:13Z", "Sera Kadıgil: Ahmet Şık'ın eşi kanser; bu mudur vekilliğin bedeli? 10.11.2026 DikenTürkiye İşçi Partisi (TİP) İstanbul Milletvekili Sera Kadıgil, gözaltına alınan vekil Ahmet Şık'ın eşi Yonca Şık'ın kanser olduğunu söyledi.\nThe post Sera Kadıgil: Ahmet Şık'ın eşi kanser; bu mudur vekilliğin bedeli? appeared first on #site_linkat 10.11.2026 .", "Sera Kadıgil: Ahmet Şık'ın eşi kanser; bu mudur vekilliğin bedeli?"),
+  fx("İstiklal", "istiklal", "outlet", "2026-11-10T15:30:18Z", "TİP İstanbul Milletvekili Ahmet Şık'ın eşi Yonca Verdioğlu Şık hakkında yürütülen gözaltı sürecinde yeni gelişme yaşandı. Casusluk iddiasıyla gözaltına alınan Şık'ın ifadesinin ardından verilen karar belli oldu.", "Ahmet Şık'ın eşi Yonca Verdioğlu Şık hakkında yeni gelişme"),
+  fx("Dokuz8 Haber", "dokuz8-haber", "outlet", "2026-11-10T17:19:22Z", "Türkiye İşçi Partisi (TİP) İstanbul Milletvekili Ahmet Şık’ın eşi Yonca Verdioğlu Şık, bir soruşturma kapsamında ifade vermek üzere gözaltına alındıktan sonra adli kontrolle serbest bırakıldı.", "Erkan Baş: Biz yarım adım bile geri atmayacağız, siz yolsuzluktan vazgeçeceksiniz"),
+];
+
+/** The stored summary of a cluster is the seed's description. */
+const seedText = (members: ClusterDetailMember[], name: string): string => byName(members, name).article.description ?? "";
+
+describe("h122-ozet-2: a bare quotation is not the Özet", () => {
+  it.each([
+    ["72abfb9f", QO_SINIRLIOGLU_TITLE, QO_SINIRLIOGLU, "Star"],
+    ["4e0c0003", QO_KACIR_TITLE, QO_KACIR, "Haber7"],
+    ["c859c91b", QO_ALABED_TITLE, QO_ALABED, "Takvim"],
+  ])("%s: the Özet is %s's own sentence, credited to it", (_id, title, members, expected) => {
+    const res = resolve(title, seedText(members, "Haberler.com"), members);
+    expect(res?.source?.name).toBe(expected);
+    expect(res?.text).toBe(shownOf(byName(members, expected)));
+    expect(isQuoteOnly(res?.text ?? "")).toBe(false);
+  });
+
+  it("the meta description no longer starts with the bare quotation", () => {
+    for (const [title, members] of [
+      [QO_SINIRLIOGLU_TITLE, QO_SINIRLIOGLU],
+      [QO_KACIR_TITLE, QO_KACIR],
+      [QO_ALABED_TITLE, QO_ALABED],
+    ] as const) {
+      const res = resolve(title, seedText(members as ClusterDetailMember[], "Haberler.com"), members as ClusterDetailMember[]);
+      const meta = describeForMeta({ count: members.length, attribution: res, title });
+      expect(meta).toContain(res?.source?.name ?? "yok");
+      expect(meta).not.toMatch(/Haberler\.com: ["“]/);
+    }
+  });
+
+  it("a cluster with no qualifying member keeps the quotation (never blank)", () => {
+    const only = QO_KACIR.filter((m) => ["Haberler.com", "Yeni Şafak"].includes(m.source.name));
+    const res = resolve(QO_KACIR_TITLE, seedText(only, "Haberler.com"), only);
+    expect(res?.source?.name).toBe("Haberler.com");
+    expect(isQuoteOnly(res?.text ?? "")).toBe(true);
+  });
+
+  it("without agreeWithTitle the seed is shown as stored, tidied", () => {
+    const res = summaryAttribution({ summary: seedText(QO_KACIR, "Haberler.com"), members: QO_KACIR, wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Haberler.com");
+    expect(isQuoteOnly(res?.text ?? "")).toBe(true);
+  });
+
+  it("a quotation with its speaker is a statement: it stays the Özet when it covers the headline", () => {
+    const title = "Bakan Kacır Güney Koreli şirketlerle görüştü";
+    const seed = fx("Tohum", "tohum", "outlet", "2026-11-04T10:00:00Z", 'Bakan Kacır, "Güney Koreli şirketlerle görüştük" dedi.', "x");
+    const other = fx("Diğer", "diger", "outlet", "2026-11-04T10:05:00Z", "Bakan Kacır, Seul'de Güney Koreli şirketlerin yöneticileriyle bir araya geldi ve görüştü.", "x");
+    expect(resolve(title, seed.article.description ?? "", [seed, other])?.source?.name).toBe("Tohum");
+  });
+});
+
+describe("h122-ozet-2: a biography is not the Özet of a detention", () => {
+  it("777ea7c5: Elips Haber's 'kimdir?' text gives way to the newest member that covers the headline", () => {
+    const res = resolve(EX_SIK_TITLE, seedText(EX_SIK, "Elips Haber"), EX_SIK);
+    expect(res?.source?.name).toBe("Dokuz8 Haber");
+    expect(res?.text).toBe(shownOf(byName(EX_SIK, "Dokuz8 Haber")));
+    expect(res?.text).not.toContain("mezunudur");
+  });
+
+  it("the same cluster under a headline that is an explainer keeps the biography seed", () => {
+    const res = resolve("Yonca Verdioğlu Şık kimdir?", seedText(EX_SIK, "Elips Haber"), EX_SIK);
+    expect(res?.source?.name).toBe("Elips Haber");
+    expect(res?.text).toContain("mezunudur");
+  });
+
+  it("a seed whose article title is not an explainer is kept at 0.63, as before", () => {
+    const members = EX_SIK.map((m) =>
+      m.source.name === "Elips Haber" ? { ...m, article: { ...m.article, title: "Yonca Şık hakkında" } } : m,
+    );
+    const res = resolve(EX_SIK_TITLE, seedText(members, "Elips Haber"), members);
+    expect(res?.source?.name).toBe("Elips Haber");
+  });
+
+  it("the other 'kimdir' articles of the cluster are no seed: nothing else changes", () => {
+    const res = resolve(EX_SIK_TITLE, seedText(EX_SIK, "Karar"), EX_SIK);
+    expect(res?.source?.name).toBe("Karar");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h122-ozet-3 (hunt 122, 2026-11-11): Turkuvaz's "<cut>...Devamı için tıklayınız" seeds showed the
+// cut ("…yanıt verdi. AK..."), and a clamp cut inside a quotation behind "şunları kaydetti:" showed
+// the sentences in front of it and no statement. The members are the real outlet texts of the live
+// clusters (dumped read-only 2026-11-11).
+// ---------------------------------------------------------------------------
+
+const CT_FAKIBABA_TITLE = "Ahmet Eşref Fakıbaba A Haber'e konuştu. Kapıyı aralayan sözler: \"AK Parti bana emek verdi, ben AK Parti'ye...\"";
+const CT_FAKIBABA = [
+  fx("A Haber", "a-haber", "outlet", "2026-11-10T19:51:25Z", "Geçtiğimiz günlerde İYİ Parti üyeliğinden ve Ankara Milletvekilliği görevinden istifa eden Ahmet Eşref Fakıbaba, AK Parti'ye geçeceği yönündeki kulis iddialarına A Haber ekranlarından yanıt verdi. AK...Devamı için tıklayınız", "Ahmet Eşref Fakıbaba A Haber'e konuştu! Kapıyı aralayan sözler: \"AK Parti bana emek verdi, ben AK Parti'ye...\""),
+  fx("Takvim", "takvim", "outlet", "2026-11-10T20:42:28Z", "İYİ Parti üyeliğinden ve Ankara Milletvekilliği görevinden istifa eden Ahmet Eşref Fakıbaba, AK Parti'ye geçeceği yönündeki iddialara A Haber'de yanıt verdi. AK Parti ile herhangi bir temasının olmadığını belirten Fakıbaba, siyasi geleceğine ilişkin kararını henüz vermediğini söyledi. Olası bir teklife ise \"Büyük bir sürpriz olur mu sizce? Bilmiyorum.\" sözleriyle kapıyı açık bıraktı.", "Ahmet Eşref Fakıbaba'dan AK Parti'ye dönüş iddialarına A Haber'de yanıt! \"Büyük bir sürpriz olur mu sizce?\""),
+];
+const CT_MAHIROGLU_TITLE = "Mahiroğlu'nun kara para ağına 2. dalga operasyon: 7 şüpheli gözaltında";
+const CT_MAHIROGLU = [
+  fx("Sabah", "sabah", "outlet", "2026-11-10T19:55:43Z", "İstanbul Büyükşehir Belediyesi eski Başkanı Ekrem İmamoğlu'na verdiği destek nedeniyle Sarıyer'deki kaçak villasına göz yumulan Halk TV'nin firari eski sahibi Cafer Mahiroğlu'na yönelik rüşvet, ihaleye...Devamı için tıklayınız", "Mahiroğlu'nun kara para ağına 2. dalga operasyon: 7 şüpheli gözaltında"),
+];
+const CT_KABINE_TITLE = "Kabine Erdoğan liderliğinde toplanıyor: Masada kritik başlıklar";
+const CT_KABINE = [
+  fx("A Haber", "a-haber", "outlet", "2026-11-08T17:11:11Z", "Başkan Recep Tayyip Erdoğan başkanlığında Cumhurbaşkanlığı Külliyesi'nde toplanacak Cumhurbaşkanlığı Kabinesi; emekli maaşlarına yönelik yeni düzenlemelerden terörsüz Türkiye sürecine, fon...Devamı için tıklayınız", "CANLI | Kabine sona erdi! Başkan Erdoğan'dan önemli açıklamalar"),
+  fx("İşçi Haber", "isci-haber", "niche", "2026-11-08T17:27:16Z", "Başkan Erdoğan liderliğinde toplanan Kabine, emekli maaşlarına yapılacak ek zam ve piyasa manipülasyonlarına karşı alınacak önlemleri değerlendirecek. Toplantıda ayrıca terörle mücadeledeki yeni süreç ve Türkiye'nin ev sahipliğinde gerçekleşecek uluslararası zirveler masaya yatırılacak.", "Kabine Erdoğan liderliğinde toplanıyor: Masada kritik başlıklar"),
+  fx("Yeni Şafak", "yeni-safak", "outlet", "2026-11-09T06:16:48Z", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de saat 16.00'da toplanıyor. Yılın en kritik toplantılarından birinde emeklilere refah payı düzenlemesinden dev yatırım fonu soruşturmasına, Terörsüz Türkiye sürecinden ABD-İran gerilimine kadar çok sayıda hayati başlık masaya yatırılacak.", "Beştepe'de kritik Kabine toplanıyor: Masada emekli zammı var"),
+  fx("Yeni Mesaj", "yeni-mesaj", "outlet", "2026-11-09T07:45:00Z", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak.Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de saat 16.00'da toplanacak kabinenin gündeminde; emeklilere refah payı düzenlemesi , fon ...", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak"),
+  fx("F5 Haber", "f5-haber", "aggregator", "2026-11-09T08:20:00Z", "Cumhurbaşkanlığı Kabinesi, Cumhurbaşkanı Recep Tayyip Erdoğan başkanlığında Beştepe'de toplanıyor. Toplantıda emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak.", "Kabine toplanıyor. Emekliye refah payı düzenlemesi ve fon soruşturması ele alınacak"),
+];
+const CT_DURAN_TITLE = "Burhanettin Duran: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek";
+const CT_DURAN = [
+  fx("Haberler.com", "haberler-com", "aggregator", "2026-11-09T19:58:05Z", "- \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek\"", "İletişim Başkanı Duran'dan \"COP31\" paylaşımı:"),
+  fx("Milliyet", "milliyet", "outlet", "2026-11-09T20:08:52Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, NSosyal hesabından, Türkiye'nin ev sahipliğinde Antalya'da düzenlenen Birleşmiş Milletler İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı'na (COP31) ilişkin paylaşımda bulundu.\nTürkiye'nin, COP31'e başkanlık ve ev sahipliği yaparak küresel iklim diplomasisinin merkezinde yer aldığını belirten Duran, şunları kaydetti: \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin ...", "İletişim Başkanı Duran'dan 'COP31' paylaşımı: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek"),
+  fx("Diriliş Postası", "dirilis-postasi", "outlet", "2026-11-09T20:15:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek.\" ifadesini kullandı.", "Burhanettin Duran: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek"),
+  fx("Yeni Şafak", "yeni-safak", "outlet", "2026-11-09T20:25:05Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran NSosyal hesabından, Türkiye'nin ev sahipliğinde Antalya'da düzenlenen Birleşmiş Milletler İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı'na (COP31) ilişkin paylaşımda bulundu. Türkiye'nin, COP31'e başkanlık ve ev sahipliği yaparak küresel iklim diplomasisinin merkezinde yer aldığını belirten Duran, şunları kaydetti: \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin k...", "İletişim Başkanı Duran'dan \"COP31\" paylaşımı"),
+  fx("Haber Global", "haber-global", "outlet", "2026-11-09T20:52:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek.\" ifadesini kullandı.", "İletişim Başkanı Duran'dan \"COP31\" paylaşımı: Türkiye küresel iklim politikalarına katkı sunmaya devam edecek"),
+  fx("Elips Haber", "elips-haber", "outlet", "2026-11-09T21:07:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek.\" ifadesini kullandı.", "İletişim Başkanı Duran'dan 'COP31' paylaşımı"),
+  fx("TRT Haber", "trt-haber", "outlet", "2026-11-09T21:21:00Z", "Cumhurbaşkanlığı İletişim Başkanı Burhanettin Duran, \"Cumhurbaşkanımız Sayın Recep Tayyip Erdoğan'ın liderliğinde Türkiye, sürdürülebilir kalkınmayı ve çevrenin korunmasını birlikte ele alan yaklaşımıyla küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek\" dedi.", "İletişim Başkanı Duran: Türkiye küresel iklim diplomasisinin merkezinde yer alıyor"),
+];
+const CT_YAYMAN_TITLE = "AK Parti'li Yayman'dan yeni anayasa açıklaması";
+const CT_YAYMAN = [
+  fx("Milliyet", "milliyet", "outlet", "2026-11-07T12:49:01Z", "Yayman, Türkiye Yüzyılı Buluşmaları kapsamında AK Parti Mersin İl Başkanlığınca Suphi Öner Öğretmenevi'nde düzenlenen Basın Buluşması programına katıldı.\nBurada konuşan Yayman, AK Parti'nin krizlerle mücadele ederek bu noktaya geldiğini söyledi.\nFon meselesiyle ilgili değerlendirmede bulunan Yayman, konuşmasını şöyle sürdürdü: \"Cumhurbaşkanı'mızın söylediği gibi biz bunu da aşacağız çünkü AK Parti '3 Y' ile kurulmuştur. Yasaklarla mücadele etmek, sessiz devrimler başarmıştır. Yoksullukla müca...", "AK Parti'li Yayman'dan yeni anayasa açıklaması"),
+  fx("Posta", "posta", "outlet", "2026-11-07T13:33:50Z", "Yayman, Türkiye Yüzyılı Buluşmaları kapsamında AK Parti Mersin İl Başkanlığınca Suphi Öner Öğretmenevi'nde düzenlenen Basın Buluşması programına katıldı.\nBurada konuşan Yayman, AK Parti'nin krizlerle mücadele ederek bu noktaya geldiğini söyledi.\nFon meselesiyle ilgili değerlendirmede bulunan Yayman, konuşmasını şöyle sürdürdü:\n\"Cumhurbaşkanı'mızın söylediği gibi biz bunu da aşacağız çünkü AK Parti '3 Y' ile kurulmuştur. Yasaklarla mücadele etmek, sessiz devrimler başarmıştır. Yoksullukla müca...", "AK Parti'li Yayman: Türkiye'yi dünyanın en gelişmiş 10 ülkesinden birisi haline getireceğiz"),
+];
+
+describe("h122-ozet-3: a cut that hides the statement is not the Özet", () => {
+  it("605765b8: the Özet is the A Haber sentence, not '...yanıt verdi. AK...'", () => {
+    const res = resolve(CT_FAKIBABA_TITLE, seedText(CT_FAKIBABA, "A Haber"), CT_FAKIBABA);
+    expect(res?.source?.name).toBe("A Haber");
+    expect(res?.text).toBe(
+      "Geçtiğimiz günlerde İYİ Parti üyeliğinden ve Ankara Milletvekilliği görevinden istifa eden Ahmet Eşref Fakıbaba, AK Parti'ye geçeceği yönündeki kulis iddialarına A Haber ekranlarından yanıt verdi.",
+    );
+    const meta = describeForMeta({ count: 2, attribution: res, title: CT_FAKIBABA_TITLE });
+    expect(meta).not.toContain("...");
+    expect(meta.startsWith("2 kaynak. A Haber: Geçtiğimiz günlerde İYİ Parti")).toBe(true);
+  });
+
+  it("dfaaceac: the cut seed (0.43) gives way to Yeni Şafak (0.71)", () => {
+    const res = resolve(CT_KABINE_TITLE, seedText(CT_KABINE, "A Haber"), CT_KABINE);
+    expect(res?.source?.name).toBe("Yeni Şafak");
+    expect(res?.text).toBe(shownOf(byName(CT_KABINE, "Yeni Şafak")));
+  });
+
+  it("7fd1bd19: a lone cut seed is shown cut with one '…', never '...' and never the CTA", () => {
+    const res = resolve(CT_MAHIROGLU_TITLE, seedText(CT_MAHIROGLU, "Sabah"), CT_MAHIROGLU);
+    expect(res?.source?.name).toBe("Sabah");
+    expect(res?.text.endsWith("Cafer Mahiroğlu'na yönelik rüşvet…")).toBe(true);
+    expect(res?.text).not.toMatch(/\.\.\.|Devamı/);
+    const without = summaryAttribution({ summary: seedText(CT_MAHIROGLU, "Sabah"), members: CT_MAHIROGLU, wire: NOT_WIRE });
+    expect(without?.text).toBe(res?.text);
+  });
+
+  it("837fa770: Milliyet's clamp that lost its quotation gives way to a 1.00 outlet (the newest, TRT Haber)", () => {
+    const res = resolve(CT_DURAN_TITLE, seedText(CT_DURAN, "Milliyet"), CT_DURAN);
+    expect(res?.source?.name).toBe("TRT Haber");
+    expect(res?.text).toBe(shownOf(byName(CT_DURAN, "TRT Haber")));
+    expect(res?.text).toContain("küresel iklim politikalarının şekillenmesine katkı sunmaya devam edecek");
+  });
+
+  it("837fa770: without the headline (rss, digest, cards) the seed shows its first paragraph and no 'şunları kaydetti'", () => {
+    const res = summaryAttribution({ summary: seedText(CT_DURAN, "Milliyet"), members: CT_DURAN, wire: NOT_WIRE });
+    expect(res?.source?.name).toBe("Milliyet");
+    expect(res?.text.endsWith("ilişkin paylaşımda bulundu.")).toBe(true);
+    expect(res?.text).not.toContain("şunları kaydetti");
+  });
+
+  it("98266829: the only other member holds the same words, so the seed stays and ends at 'söyledi.'", () => {
+    const res = resolve(CT_YAYMAN_TITLE, seedText(CT_YAYMAN, "Milliyet"), CT_YAYMAN);
+    expect(res?.source?.name).toBe("Milliyet");
+    expect(res?.text.endsWith("AK Parti'nin krizlerle mücadele ederek bu noktaya geldiğini söyledi.")).toBe(true);
+    expect(res?.text).not.toMatch(/şöyle sürdürdü|…$/);
+  });
+
+  it("every one of the five clusters yields a non-empty Özet that does not end in '...'", () => {
+    for (const [title, members, seedName] of [
+      [CT_FAKIBABA_TITLE, CT_FAKIBABA, "A Haber"],
+      [CT_MAHIROGLU_TITLE, CT_MAHIROGLU, "Sabah"],
+      [CT_KABINE_TITLE, CT_KABINE, "A Haber"],
+      [CT_DURAN_TITLE, CT_DURAN, "Milliyet"],
+      [CT_YAYMAN_TITLE, CT_YAYMAN, "Milliyet"],
+    ] as const) {
+      const list = members as ClusterDetailMember[];
+      const res = resolve(title, seedText(list, seedName), list);
+      expect(res, title).not.toBeNull();
+      expect(res?.text.endsWith("..."), title).toBe(false);
+    }
   });
 });

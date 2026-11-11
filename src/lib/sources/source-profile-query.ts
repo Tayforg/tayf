@@ -106,6 +106,14 @@ export interface SourceProfile {
   articleCount7d: number;
   articles: ArticleRow[];
   zoneHistory: ZoneHistoryEntry[];
+  /**
+   * h122-sourcepages-3: true when the zone-history read failed, so `zoneHistory`
+   * is `[]` because nothing could be read, not because nothing is recorded. The
+   * label card then says "Etiket geçmişi şu anda okunamadı." instead of the
+   * empty-history line. Always set by the read (false on success); optional in
+   * the type only so a profile fixture that predates it reads as "history read".
+   */
+  historyUnavailable?: boolean;
 }
 
 // h61-journey-3: 'Son haberler' hides an UNCLUSTERED article that matches the
@@ -204,10 +212,12 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   }
   // Deliberately non-fatal, unlike the two checks above: a
   // source_zone_history read failure renders the card without a history
-  // list (LabelCard's own empty state) rather than failing the whole
-  // profile over a secondary, non-essential fetch. Still logged (not
-  // swallowed) so a permanently-broken query doesn't silently masquerade
-  // as the honest "Bu etiket hiç değişmedi." empty state forever.
+  // list rather than failing the whole profile over a secondary,
+  // non-essential fetch. Still logged (not swallowed), and flagged on the
+  // profile as `historyUnavailable` (h122-sourcepages-3), so a broken query
+  // never masquerades as the empty-history line ("Kayıtlı bir etiket
+  // değişikliği yok ...") and the card says the history could not be read.
+  const historyUnavailable = Boolean(historyResult.error);
   if (historyResult.error) {
     console.error(
       "[source-profile] zone history query failed",
@@ -288,6 +298,7 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
     articleCount7d: countResult.count ?? 0,
     articles: selectSourceRecentArticles(repaired, clusteredIds),
     zoneHistory,
+    historyUnavailable,
   };
 }
 

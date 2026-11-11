@@ -2,7 +2,7 @@ import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/ent
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { isHeadlineEcho } from "@/lib/articles/description-boilerplate";
 import { hasFiniteVerb } from "@/lib/articles/finite-verb";
-import { isUnmarkedClamp, tidySummaryText } from "@/lib/articles/summary-tidy";
+import { clampCutIntroducedQuote, isCtaFeedCut, isUnmarkedClamp, tidySummaryText } from "@/lib/articles/summary-tidy";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { sourceLang } from "@/lib/sources/source-language";
 import type { SummaryMember } from "./summary-attribution";
@@ -143,6 +143,47 @@ import type { SummaryMember } from "./summary-attribution";
 //     sources, every candidate 0.4) stays as it is: the documented residual. With no
 //     qualifying member the seed stays, never blank.
 // A clean seed that scores 0.5 or more is still never replaced.
+//
+// h122-ozet-1: a CMS FIELD DUMP is a form defect too ('cms'). Independent Türkçe's RSS
+// description is its raw Drupal fields ("<caption><lead>Pazartesi, Kasım 9, 2026 -
+// 18:30Main image: Type: newsSEO Title: <the headline>copyright Independentturkish:"); the
+// tidy step now cuts it (stripIndyturkCmsDump), but its "SEO Title:" repeats the headline
+// word for word, so the text scored 1.00 and won the Özet of 710ef4bb, and the recency
+// tie-break gave it b8e7cc75 over Yeniçağ's clean 0.83. The markers are read on the RAW text
+// ({@link CMS_RESIDUE}: the tidied text no longer holds them): a member that has them is never
+// a replacement ('cms' in `summaryDefect`), and a seed that has them is replaced from
+// AGREEMENT_FORM_DEFECT_MIN up ('cms' in `seedDisqualified`, checked first).
+//
+// h122-ozet-2: two more seeds that never state the news, both kept because they cover
+// enough of the headline's words:
+//   - a QUOTE-ONLY seed. Haberler.com copies Anadolu Ajansı's quote bullets as its
+//     description ('- "Genel Sekreterlik görevine talibim ..." "40 yıllık ..."'), and the
+//     Özet of 72abfb9f (7 sources), c859c91b and 4e0c0003 was one or two bare quotations
+//     with no speaker (the seed scored 0.50, 0.36 and 0.00, and every replacement was under
+//     0.75). `isQuoteOnly` is a form defect ('quote-only', checked after 'quotes' so an
+//     unbalanced text keeps 'quotes'; floor AGREEMENT_FORM_DEFECT_MIN), and a member that is
+//     one never stands in ('quote-only' in `summaryDefect`);
+//   - an EXPLAINER seed. 777ea7c5 (14 sources, "... Yonca Şık gözaltına alındı") showed Elips
+//     Haber's "Yonca Verdioğlu Şık kimdir?" biography ("... Ahmet Şık'ın eşidir. ...
+//     Gazetecilik Bölümü mezunudur."), which names the people (0.63) and never says what
+//     happened. The seed's own ARTICLE title is read (`isExplainerTitle`: "kimdir", "kaç
+//     yaşında", "nereli", "biyografisi"): when it is an explainer and the cluster's headline
+//     is not, the seed is malformed like an opinion seed: the gain is waived and its own text
+//     is kept out. The floor stays AGREEMENT_HIGH and it is NOT a `SeedDefect`: the gate is
+//     about what the text says, not how it looks. Candidates are not filtered by their titles
+//     (Cumhuriyet's "Ahmet Şık kimdir?" article carries the detention in its description).
+//
+// h122-ozet-3: two cuts that hide the statement were not stubs. (a) Turkuvaz's "<cut>...Devamı
+// için tıklayınız" (A Haber, Sabah, Yeni Asır: 107 cluster seeds in 7 days) is cut at about 200
+// characters, mid-word, but the body is 203 to 210 characters, so the feed-cap lengths never
+// matched and "…terörsüz Türkiye sürecine, fon..." (dfaaceac, 0.43) passed because its last
+// sentence holds a finite verb. The tidy step now repairs such a text like a clamp
+// (`isCtaFeedCut`), and when what is shown still ends in "…" the seed is a stub whatever its
+// verbs say. (b) A clamp cut inside a quotation that a ":" introduces ("... belirten Duran,
+// şunları kaydetti: \"Cumhurbaşkanımız ...", 837fa770) is shown up to a sentence end in front of
+// the introducer, with none of what was said: `clampCutIntroducedQuote` makes the seed a stub even
+// though the shown text ends on a full stop. With no qualifying member the seed stays (98266829:
+// Posta holds the same text), never blank.
 
 /** A seed scoring below this disagrees with the title (exclusive: 0.5 is kept). */
 export const AGREEMENT_LOW = 0.5;
@@ -152,7 +193,8 @@ export const AGREEMENT_HIGH = 0.75;
 export const AGREEMENT_MIN_GAIN = 0.3;
 /**
  * A replacement must score at least this (inclusive) when the seed is a form defect
- * ({@link SeedDefect}: a stub, unbalanced quotes, a live line, a teaser or an echo)
+ * ({@link SeedDefect}: a CMS field dump, a stub, unbalanced quotes, only quotations, a live line, a
+ * teaser or an echo)
  * instead of {@link AGREEMENT_HIGH}. In the replay of the 1,600 newest clusters of 3
  * members or more, the clean replacements behind a live line scored 0.6 to 0.7 against
  * the headline (the live lines of the other outlets carry the same words and are not
@@ -394,7 +436,14 @@ export function agreementSwitches(
   return disagrees(seedScore) && candidateScore - seedScore >= AGREEMENT_MIN_GAIN - EPSILON;
 }
 
-export type SummaryDefect = "stub" | "teaser" | "dateline" | "run-on" | "live";
+export type SummaryDefect = "cms" | "stub" | "teaser" | "dateline" | "run-on" | "live" | "quote-only";
+
+/**
+ * The fields of Independent Türkçe's raw Drupal dump (h122-ozet-1), tested on the RAW
+ * description: "SEO Title:", "Main image:" and "copyright Independentturkish". Bounded gap,
+ * so a long run of blanks after "copyright" costs one pass.
+ */
+const CMS_RESIDUE = /SEO Title:|Main image:|copyright\s{0,8}Independentturkish/i;
 
 const CLOSERS = new Set(['"', "”", "»", "’", "'", ")", "]"]);
 
@@ -528,10 +577,67 @@ export function isLiveLine(shown: string): boolean {
   return !hasFiniteVerb(named.slice(0, predicate.index));
 }
 
+/** A list marker that may stand in front of the first quotation ("- ", "• "); the tidy step drops it. */
+const QUOTE_ONLY_MARKERS: readonly string[] = ["- ", "• "];
+
+/**
+ * True when `shown` is nothing but quotations (h122-ozet-2): after trimming and dropping one
+ * leading list marker ("- ", "• "), one or more COMPLETE double-quoted segments ("…" up to the next
+ * straight quote, or “…” with nested pairs balanced), separated only by blanks (none is fine) and
+ * optionally followed by one ".", with no letter, digit or other mark outside the quotes. A
+ * segment holds something besides blanks. Single quotes and apostrophes are ignored (they are
+ * not segments). False for a speaker ("Sinirlioğlu, \"...\" dedi."), a quoted word in a sentence
+ * ("\"Ekonomi\" başlıklı rapor yayımlandı."), an unbalanced quote, '' and a non-string. One pass over
+ * the text: every segment is found with `indexOf` or a depth count, and nothing is looked at twice.
+ */
+export function isQuoteOnly(shown: string): boolean {
+  if (typeof shown !== "string") return false;
+  let s = shown.trim();
+  for (const marker of QUOTE_ONLY_MARKERS) {
+    if (s.startsWith(marker)) {
+      s = s.slice(marker.length);
+      break;
+    }
+  }
+  const n = s.length;
+  let segments = 0;
+  let i = 0;
+  while (i < n) {
+    const c = s.charAt(i);
+    if (c.trim() === "") {
+      i++;
+    } else if (c === '"') {
+      const close = s.indexOf('"', i + 1);
+      if (close === -1 || s.slice(i + 1, close).trim() === "") return false;
+      segments++;
+      i = close + 1;
+    } else if (c === "\u201c") {
+      let depth = 1;
+      let j = i + 1;
+      while (j < n && depth > 0) {
+        const d = s.charAt(j);
+        if (d === "\u201c") depth++;
+        else if (d === "\u201d") depth--;
+        j++;
+      }
+      if (depth !== 0 || s.slice(i + 1, j - 1).trim() === "") return false;
+      segments++;
+      i = j;
+    } else {
+      // The only thing allowed outside a quotation: one full stop, the last character.
+      return c === "." && segments > 0 && s.slice(i + 1).trim() === "";
+    }
+  }
+  return segments > 0;
+}
+
 /**
  * Why a description is not fit to stand in for the seed, or null. `raw` is the
  * member's repaired, trimmed description and `shown` its tidied form
  * (`tidySummaryText`). Checked in this order, the first that applies is returned:
+ *   - "cms": the RAW text holds a field of Independent Türkçe's CMS dump ("SEO Title:",
+ *     "Main image:", "copyright Independentturkish"; h122-ozet-1): the tidy step cuts the
+ *     dump, and what is left is a guess at the lead, so it never stands in;
  *   - "stub": a feed cut it ("..." or "…" at the end, raw or tidied);
  *   - "teaser": a question mark anywhere, or a sentence that opens with Peki/İşte;
  *   - "dateline": an agency or all-caps place lead ("İSTANBUL (Medyascope) –") in
@@ -539,17 +645,21 @@ export function isLiveLine(shown: string): boolean {
  *     `shown`, h81-textclean-2, so the raw text is what still carries it);
  *   - "run-on": its first five words come again later (a title glued to the body);
  *   - "live": a live-blog line ({@link isLiveLine}, h95-summaries-1): it says that
- *     someone is speaking and nothing of what is said.
+ *     someone is speaking and nothing of what is said;
+ *   - "quote-only": the text is nothing but quotations ({@link isQuoteOnly}, h122-ozet-2):
+ *     Haberler.com's copy of a wire's quote bullets, with no speaker.
  * An echo of a headline needs the headlines and is checked by the caller
  * ({@link findAgreeingMember}). Never throws.
  */
 export function summaryDefect(raw: string, shown: string): SummaryDefect | null {
   if (typeof raw !== "string" || typeof shown !== "string") return null;
+  if (CMS_RESIDUE.test(raw)) return "cms";
   if (endsCut(raw) || endsCut(shown)) return "stub";
   if (isTeaser(shown)) return "teaser";
   if (hasDatelineLead(shown) || hasDatelineLead(raw.trim())) return "dateline";
   if (isRunOn(shown)) return "run-on";
   if (isLiveLine(shown)) return "live";
+  if (isQuoteOnly(shown)) return "quote-only";
   return null;
 }
 
@@ -636,10 +746,14 @@ function lastSentence(shown: string): string {
  * backs it off to a sentence end when there is one (no cut is left to see); when none
  * exists it ends in "…" after a word cut, and that text is a stub whatever its last
  * sentence holds: the verb in it belongs to a sentence the cut took the end of.
+ *
+ * h122-ozet-3: the same for a Turkuvaz CTA feed cut ({@link isCtaFeedCut}, "<cut>...Devamı için
+ * tıklayınız", whatever the length of the body): the tidy step repairs it, and when that leaves a
+ * "…" the last sentence's verb belongs to a sentence the cut took the end of.
  */
 function isCutStub(raw: string, shown: string): boolean {
   if (!endsCut(shown)) return false;
-  return isFeedCapCut(raw) || isUnmarkedClamp(raw) || !hasFiniteVerb(lastSentence(shown));
+  return isFeedCapCut(raw) || isUnmarkedClamp(raw) || isCtaFeedCut(raw) || !hasFiniteVerb(lastSentence(shown));
 }
 
 /**
@@ -660,7 +774,7 @@ function unbalancedQuotes(s: string): boolean {
   return straight % 2 === 1 || curly !== 0;
 }
 
-export type SeedDefect = "stub" | "quotes" | "live" | "teaser" | "echo";
+export type SeedDefect = "cms" | "stub" | "quotes" | "quote-only" | "live" | "teaser" | "echo";
 
 /** A text that opens with "Peki" or "İşte" as a whole word (the folded COME_ON rule, anchored at the start). */
 const OPENS_WITH_COME_ON = /^(?:peki|iste)(?![\p{L}\p{N}])/u;
@@ -676,10 +790,20 @@ export interface SeedTitles {
  * null (h34-reader-4, h95-summaries-1). `raw` is the seed's repaired, trimmed
  * description and `shown` its tidied form (`tidySummaryText`), which is what the page
  * would show. Checked in this order, the first that applies is returned:
+ *   - "cms": the RAW text holds a field of Independent Türkçe's CMS dump ("SEO Title:",
+ *     "Main image:", "copyright Independentturkish"; {@link CMS_RESIDUE}, h122-ozet-1). The
+ *     tidied text has the dump cut away, so only the raw text can tell;
  *   - "stub": a feed cut it (see {@link isCutStub}): the shown text ends in "..."
  *     or "…" and the raw text is a known feed-cap cut, an unmarked 400 / 500
- *     character cut or the last sentence has no finite verb ({@link hasFiniteVerb});
+ *     character cut, a Turkuvaz CTA feed cut ({@link isCtaFeedCut}, h122-ozet-3) or the last
+ *     sentence has no finite verb ({@link hasFiniteVerb}); or the raw text is a clamp that
+ *     ended inside a quotation introduced by a ":" ({@link clampCutIntroducedQuote},
+ *     h122-ozet-3): what is shown ends before the introducer's sentence and has none of what
+ *     was said, whatever it ends on;
  *   - "quotes": the shown text has an odd number of straight " or unequal “ and ”;
+ *   - "quote-only": the shown text is nothing but quotations ({@link isQuoteOnly},
+ *     h122-ozet-2): no speaker, no sentence of the outlet's own. Checked after "quotes", so an
+ *     unbalanced text keeps "quotes";
  *   - "live": a live-blog line ({@link isLiveLine});
  *   - "teaser": the shown text OPENS with Peki / İşte (the tidy step cuts a come-on
  *     that has a complete sentence in front of it, so what is left is one with nothing
@@ -693,8 +817,11 @@ export interface SeedTitles {
  */
 export function seedDisqualified(raw: string, shown: string, titles: SeedTitles = {}): SeedDefect | null {
   if (typeof raw !== "string" || typeof shown !== "string") return null;
+  if (CMS_RESIDUE.test(raw)) return "cms";
   if (isCutStub(raw, shown)) return "stub";
+  if (clampCutIntroducedQuote(raw)) return "stub";
   if (unbalancedQuotes(shown)) return "quotes";
+  if (isQuoteOnly(shown)) return "quote-only";
   if (isLiveLine(shown)) return "live";
   if (OPENS_WITH_COME_ON.test(fold(shown.trimStart()))) return "teaser";
   if (isHeadlineEcho(titles.memberTitle, shown) || isHeadlineEcho(titles.clusterTitle, shown)) return "echo";
@@ -832,6 +959,24 @@ export function carriesOutcome(title: string, text: string): boolean {
   return statesAll(outcomeFamilies(title), text);
 }
 
+/**
+ * "kimdir", "kaç yaşında", "nereli" and "biyografisi" as whole words, in the folded spelling of
+ * this module (so "KİMDİR", "kaç  yaşında" with a no-break space and "Nereli?" match). The gap
+ * in "kaç yaşında" is 1 to 4 blanks: no unbounded quantifier.
+ */
+const EXPLAINER_TITLE = /\bkimdir\b|\bkac\s{1,4}yasinda\b|\bnereli\b|\bbiyografisi\b/;
+
+/**
+ * True when a headline is an explainer, not a report (h122-ozet-2): "Yonca Verdioğlu Şık kimdir?",
+ * "... kaç yaşında, nereli?", "... biyografisi". Whole words, on the module's fold (case and
+ * diacritics do not matter). `findAgreeingMember` reads the SEED article's title with it: a seed
+ * that is an explainer under a headline that is not one is a biography of the people the
+ * headline names, whatever words it shares with it. False for null, undefined and a non-string.
+ */
+export function isExplainerTitle(title: string | null | undefined): boolean {
+  return typeof title === "string" && EXPLAINER_TITLE.test(fold(title));
+}
+
 /** The member that should replace the seed, with the text to show (its tidied description). */
 export interface AgreeingPick {
   member: SummaryMember;
@@ -860,12 +1005,15 @@ function byNewest(a: Scored, b: Scored): number {
  * qualifiers.
  *
  * The seed must disagree with `title` ({@link AGREEMENT_LOW}), be malformed
- * ({@link seedDisqualified}: a feed-cut stub, unbalanced quotes; h34-reader-4), be
+ * ({@link seedDisqualified}: a CMS dump, a feed-cut stub, a clamp that hid its quotation,
+ * unbalanced quotes, quotations only; h34-reader-4, h122), be
  * a stage behind the title ({@link stageBehindTitle}: "tutuklandı" over
  * "tutuklama talebiyle"; h54-editorial-1) or be an opinion column (its article
- * `url` is an opinion path, {@link isOpinionUrl}; h54-editorial-3); a title without
+ * `url` is an opinion path, {@link isOpinionUrl}; h54-editorial-3) or be an explainer
+ * (its article title is "X kimdir?", "kaç yaşında", "nereli" or "biyografisi" and the
+ * cluster's title is not one, {@link isExplainerTitle}; h122-ozet-2); a title without
  * enough content tokens, or a clean seed that agrees and is not behind, returns
- * null before any other member is looked at. For a malformed, opinion or stale seed
+ * null before any other member is looked at. For a malformed, opinion, explainer or stale seed
  * the gain over the seed is waived, and two more conditions hold: the member's text is not the seed's own
  * (raw or tidied, under another outlet's name) and has no unbalanced quotes. For a
  * stale seed a third holds: the member's text states the outcome the title
@@ -889,8 +1037,10 @@ function byNewest(a: Scored, b: Scored): number {
  *     (`member.article.title`, absent on a lighter projection) or the cluster title
  *     (`isHeadlineEcho`, h95-summaries-1);
  *   - its score passes {@link agreementSwitches}, with the floor of the seed's defect:
- *     {@link AGREEMENT_FORM_DEFECT_MIN} behind a stub, quotes, a live line, a teaser or an
- *     echo ({@link seedDisqualified}), {@link AGREEMENT_HIGH} otherwise. Behind a clean
+ *     {@link AGREEMENT_FORM_DEFECT_MIN} behind a CMS dump, a stub, quotes, quotations only, a
+ *     live line, a teaser or an echo ({@link seedDisqualified}), {@link AGREEMENT_HIGH}
+ *     otherwise (an opinion, a stale or an explainer seed keep it: what they say is the
+ *     problem, not how they look). A candidate is never filtered by its OWN title. Behind a clean
  *     seed a copy of the seed's text scores what the seed scores, so it can never pass.
  * Among the qualifiers the highest score wins and a tie goes to the newest; the
  * outlet name, ascending in Turkish order, settles the same instant, so the pick
@@ -922,15 +1072,19 @@ export function findAgreeingMember({
   // An opinion column is the story's summary only when nothing else can be
   // (h54-editorial-3): it is replaced for what it is, whatever it covers.
   const opinionSeed = isOpinionUrl(seed.article.url);
-  // A malformed, an opinion or a stale seed is replaced for what it is, not for what
-  // it covers: its score and the gain over it no longer apply. A form defect (stub,
-  // quotes, live, teaser, echo) also lowers the bar for the replacement (h95-
-  // summaries-1); an opinion or a stale seed keeps AGREEMENT_HIGH.
+  // A biography is not the story's summary either (h122-ozet-2): the seed's article is "X
+  // kimdir?" and the headline is not an explainer. Replaced for what it is, at AGREEMENT_HIGH.
+  const explainerSeed = isExplainerTitle(seed.article.title) && !isExplainerTitle(title);
+  // A malformed, an opinion, an explainer or a stale seed is replaced for what it is, not for
+  // what it covers: its score and the gain over it no longer apply. A form defect (stub,
+  // quotes, quote-only, live, teaser, echo, and h122-ozet-1's CMS dump) also lowers the bar
+  // for the replacement (h95-summaries-1); an opinion, an explainer or a stale seed keeps
+  // AGREEMENT_HIGH.
   const defect = seedDisqualified(seedRaw, seedShown, {
     memberTitle: seed.article.title,
     clusterTitle: title,
   });
-  const malformed = defect !== null || stale || opinionSeed;
+  const malformed = defect !== null || stale || opinionSeed || explainerSeed;
   const floor = defect !== null ? AGREEMENT_FORM_DEFECT_MIN : AGREEMENT_HIGH;
   if (!malformed && !disagrees(seedScore)) return null;
 

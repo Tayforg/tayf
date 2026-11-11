@@ -568,7 +568,8 @@ describe("/source/[slug] excerpt line is tidied like a cluster summary (h52-sour
     );
     const text = textOf(tree);
     expect(text).not.toContain("Devamı için");
-    expect(text).toContain("Programı'na ilişkin paylaşım...");
+    expect(text).toContain("Programı'na ilişkin…");
+    expect(text).not.toContain("paylaşım...");
     expect(excerptParagraphs(tree)).toHaveLength(1);
   });
 
