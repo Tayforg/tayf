@@ -7,6 +7,7 @@ import {
   AGREEMENT_MIN_CHARS,
   AGREEMENT_MIN_GAIN,
   AGREEMENT_MIN_TITLE_TOKENS,
+  AGREEMENT_STUB_LOW_SEED,
   agreementSwitches,
   carriesOutcome,
   contentWords,
@@ -36,6 +37,7 @@ describe("thresholds (h31-reader-3 v2)", () => {
     expect(AGREEMENT_HIGH).toBe(0.75);
     expect(AGREEMENT_MIN_GAIN).toBe(0.3);
     expect(AGREEMENT_MIN_TITLE_TOKENS).toBe(3);
+    expect(AGREEMENT_STUB_LOW_SEED).toBe(0.3);
     expect(AGREEMENT_MIN_CHARS).toBe(60);
     expect(AGENCY_COPY_OVERLAP).toBe(0.85);
   });
@@ -1267,6 +1269,13 @@ describe("isLiveLine (h95-summaries-1)", () => {
       ["quote openers and letters", rep('"a')],
       ["dots", rep(".")],
       ["digits and dots", rep("1.")],
+      // h132-ozetpost-1: the digit-bearing name rule (a capital, up to 10 letters, an optional hyphen, 1-4 digits).
+      ["digit-bearing names", rep("COP31 ")],
+      ["hyphenated names", rep("F-16 ")],
+      ["names glued together", rep("A1B2C3")],
+      ["a letter run longer than a name, then digits", rep("Aaaaaaaaaaaaaaaaaaaa1")],
+      ["a digit run longer than a name", rep("A12345678")],
+      ["capitals, hyphens and digits with no break", rep("A-1-")],
     ];
     for (const [label, gen] of gens) {
       expect(() => expectLinear(gen, (s) => isLiveLine(s), { n: 100_000, ceilingMs: 2_000 }), label).not.toThrow();
@@ -2146,5 +2155,279 @@ describe("seedDisqualified: a clamp cut that hides the quotation behind a ':' (h
   it("the order: a stub is decided before unbalanced quotes", () => {
     const raw = rawOfMember(CT_DURAN, "Milliyet");
     expect(seedDisqualified(raw, "“Bakan Yılmaz konuştu.")).toBe("stub");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h132-ozetpost-1 (hunt 132, 2026-11-11): two gaps in the Özet seed rules.
+//
+// (a) A digit-bearing NAME ("COP31 Başkanı ...") made the digit test of `isLiveLine` fail, so
+//     Star's "... Antalya'da \"COP31 Liderler Zirvesi\"nde konuşuyor" (ece7ef31, 6 sources) was
+//     not a live line and stayed the Özet. A name token (a capital letter, up to 10 letters, an
+//     optional hyphen, 1 to 4 digits, not glued to a letter or digit in front or a digit behind:
+//     COP31, G20, F-16, Covid-19) is blanked out before the digit test, as a year and an ordinal
+//     are. A figure ("yüzde 30", "58 bin", "17 işçinin") is not a name and still fails the line.
+// (b) A feed-cut stub that covers almost none of the headline (78d3a0ee: Sözcü's "... Aile ...",
+//     score 0.0) was replaced only by a member from AGREEMENT_FORM_DEFECT_MIN (0.6) up, and the
+//     clean member scored 0.56. Behind such a stub (below AGREEMENT_STUB_LOW_SEED, exclusive)
+//     the floor is AGREEMENT_LOW (0.5); every other form defect and every stub that covers the
+//     headline at 0.3 or more keeps 0.6.
+//
+// The texts are the real outlet texts of the live clusters (dumped read-only 2026-11-11).
+// ---------------------------------------------------------------------------
+
+const H132_STAR_ECE = 'COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya\'da "COP31 Liderler Zirvesi"nde konuşuyor';
+const H132_AKSAM_ECE = "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya'da “COP31 Liderler Zirvesi”nde konuşuyor.";
+const H132_HABER7_NTV = "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, NTV canlı yayınında soruları yanıtlıyor.";
+const H132_ILKE_HABAS = "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, yaşanan patlamada 17 işçinin yaşamını yitirdiği HABAŞ önünde açıklama yapıyor.";
+
+describe("isLiveLine: a name that carries a digit is not a figure (h132-ozetpost-1)", () => {
+  it.each([
+    ["ece7ef31, Star (no closing mark)", H132_STAR_ECE],
+    ["ece7ef31, Akşam (closing full stop)", H132_AKSAM_ECE],
+    ["9dd62dcd, Haber7", H132_HABER7_NTV],
+    ["G20", "Bakan Kurum, G20 toplantısında konuşuyor."],
+    ["a hyphen in front of the digits: F-16", "Bakan Yılmaz, F-16 teslimatı için soruları yanıtlıyor."],
+    ["Covid-19", "Sağlık Bakanı Koca, Covid-19 toplantısında açıklama yapıyor."],
+    ["a case suffix behind the name", "Bakan Kurum, COP31'de konuşuyor."],
+    ["the name opens the line", "COP31 Başkanı Kurum konuşuyor."],
+    ["a name of 11 letters is the longest", "Bakan Kurum, Abcdefghijk7 toplantısında konuşuyor."],
+    ["a name of one letter and four digits", "Bakan Kurum, F1234 toplantısında konuşuyor."],
+  ])("is true for %s", (_label, text) => {
+    expect(isLiveLine(text)).toBe(true);
+  });
+
+  it.each([
+    ["a figure behind 'yüzde'", "Bakan, yüzde 30 enflasyon hedefini açıklarken konuşuyor."],
+    ["a figure in front of a noun", "Bakan, 58 bin konut için konuşuyor."],
+    ["a figure in front of a plural noun (7abb902e, İlke TV)", H132_ILKE_HABAS],
+    ["a name does not excuse a figure next to it", "Bakan Kurum, COP31 için yüzde 30 oranında konuşuyor."],
+    ["a name does not excuse a figure of its own", "Bakan Kurum, COP31 kapsamında 58 bin konut için konuşuyor."],
+    ["five digits are a number, not a name", "Bakan Kurum, G20202 toplantısında konuşuyor."],
+    ["12 letters in front of the digits is not a name", "Bakan Kurum, Abcdefghijkl7 toplantısında konuşuyor."],
+    ["a long word with digits is not a name", "Bakan Kurum, Cumhurbaşkanlığı31 toplantısında konuşuyor."],
+    ["a lower-case word with digits is not a name", "Bakan Kurum, cop31 toplantısında konuşuyor."],
+    ["a blank between the letters and the digits is not a name token", "Bakan Kurum, COP 31 toplantısında konuşuyor."],
+    ["a second digit group: only the first is a name", "Bakan Kurum, A1B2 toplantısında konuşuyor."],
+    ["a digit in front of the capital", "Bakan Kurum, 3COP toplantısında konuşuyor."],
+    ["a name in a line that is not a live line", "Bakan Kurum, COP31 Başkanı olarak konuştu."],
+    ["a name in a line with a second sentence", "Bakan Kurum, COP31 toplantısında konuşuyor. Yeni paketi duyurdu."],
+    ["a name in a line with a question mark", "Bakan Kurum COP31 için neden konuşuyor?"],
+    ["a name in a line with a colon", "Bakan Kurum, COP31 toplantısında konuşuyor: iklim paketi geliyor."],
+  ])("is false for %s", (_label, text) => {
+    expect(isLiveLine(text)).toBe(false);
+  });
+
+  it("the existing pins are untouched: a year, an ordinal and a quoted event name still do not make a line a figure", () => {
+    expect(isLiveLine("Cumhurbaşkanı Erdoğan, TRT World Forum 2026 Resmi Açılış Töreni'nde açıklamalarda bulunuyor.")).toBe(true);
+    expect(
+      isLiveLine('Cumhurbaşkanı Erdoğan, İstanbul\'da "12. Türk Tıp Dünyası Kurultayı ve TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni"nde konuşuyor.'),
+    ).toBe(true);
+    expect(isLiveLine("Bakan Yılmaz, yüzde 30 oranında açıklama yapıyor.")).toBe(false);
+  });
+
+  it("a digit-bearing name at the 160-character limit is decided (inclusive), one character more is refused", () => {
+    const tail = " konuşuyor.";
+    const head = "Bakan Kurum, COP31";
+    const filler = (n: number): string => ` ${"a".repeat(n - 1)}`;
+    const at160 = head + filler(160 - head.length - tail.length) + tail;
+    expect(at160).toHaveLength(160);
+    expect(isLiveLine(at160)).toBe(true);
+    const at161 = head + filler(161 - head.length - tail.length) + tail;
+    expect(at161).toHaveLength(161);
+    expect(isLiveLine(at161)).toBe(false);
+  });
+
+  it("a line of nothing but digit-bearing names inside the limit is no live line and ends at once", () => {
+    for (const unit of ["A1", "A-1", "COP31 ", "A1B2C3", "Aaaaaaaaaaaa1"]) {
+      expect(isLiveLine(unit.repeat(Math.ceil(160 / unit.length)).slice(0, 160))).toBe(false);
+    }
+  });
+
+  it("stays linear on a 100k-character hostile text, through isLiveLine and through the two callers that reach it", () => {
+    const gens: Array<[string, Gen]> = [
+      ["names", rep("COP31 ", "", " konuşuyor.")],
+      ["hyphenated names", rep("F-16 ", "", " konuşuyor.")],
+      ["a long letter run and digits", rep("Aaaaaaaaaaaaaaaaaaaa1", "", " konuşuyor.")],
+      ["a long digit run", rep("A12345678", "", " konuşuyor.")],
+      ["capitals, hyphens and digits", rep("A-1-", "", " konuşuyor.")],
+    ];
+    for (const [label, gen] of gens) {
+      expect(() => expectLinear(gen, (s) => isLiveLine(s), { n: 100_000, ceilingMs: 2_000 }), `isLiveLine, ${label}`).not.toThrow();
+      expect(() => expectLinear(gen, (s) => summaryDefect(s, s), { n: 100_000, ceilingMs: 4_000 }), `summaryDefect, ${label}`).not.toThrow();
+      expect(() => expectLinear(gen, (s) => seedDisqualified(s, s), { n: 100_000, ceilingMs: 4_000 }), `seedDisqualified, ${label}`).not.toThrow();
+    }
+  });
+});
+
+describe("a live line with a digit-bearing name is a defect of a seed and of a candidate (h132-ozetpost-1)", () => {
+  it("ece7ef31: seedDisqualified says 'live' for Star's text", () => {
+    expect(seedDisqualified(H132_STAR_ECE, H132_STAR_ECE)).toBe("live");
+  });
+
+  it("ece7ef31: summaryDefect says 'live' for Akşam's text, so it never stands in for the seed", () => {
+    expect(summaryDefect(H132_AKSAM_ECE, H132_AKSAM_ECE)).toBe("live");
+    expect(seedDisqualified(H132_AKSAM_ECE, H132_AKSAM_ECE)).toBe("live");
+  });
+
+  it("9dd62dcd: Haber7's NTV line is 'live' as a seed and as a candidate", () => {
+    expect(seedDisqualified(H132_HABER7_NTV, H132_HABER7_NTV)).toBe("live");
+    expect(summaryDefect(H132_HABER7_NTV, H132_HABER7_NTV)).toBe("live");
+  });
+
+  it("7abb902e: İlke TV's line with '17 işçinin' is a sentence of the outlet's, not a defect", () => {
+    expect(summaryDefect(H132_ILKE_HABAS, H132_ILKE_HABAS)).toBeNull();
+    expect(seedDisqualified(H132_ILKE_HABAS, H132_ILKE_HABAS)).toBeNull();
+  });
+
+  it("the same sentence in the past tense, with the same name, is a report and not a defect", () => {
+    const done = "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya'da “COP31 Liderler Zirvesi”nde konuştu.";
+    expect(summaryDefect(done, done)).toBeNull();
+    expect(seedDisqualified(done, done)).toBeNull();
+  });
+});
+
+describe("findAgreeingMember: a stub seed that covers almost none of the headline (h132-ozetpost-1)", () => {
+  const WORDS = ["abaka", "bobin", "cidem", "dalka", "ekmek", "fidan", "gazoz", "havuz", "irmak", "jeton"];
+  const TITLE10 = WORDS.join(" ");
+  /** A complete sentence that carries the first `hits` title words and nothing else of the title. */
+  const clean = (hits: number, salt = ""): string =>
+    `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`.trim();
+  /** A feed cut that carries the first `hits` title words: no verb in its last sentence, so a stub. */
+  const stub = (hits: number): string => `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmelerin ayrıntıları…`.trim();
+  /** A live line (no digit, one sentence) that carries the first `hits` title words. */
+  const live = (hits: number): string => `Bakan ${WORDS.slice(0, hits).join(" ")} toplantısında konuşuyor.`;
+  /** Unbalanced quotes: one “ against no ”. */
+  const quotes = (hits: number): string => `${WORDS.slice(0, hits).join(" ")} hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi.`.trim();
+
+  const AT = (n: number): string => `2026-11-11T10:${String(n).padStart(2, "0")}:00Z`;
+  const seedOf = (text: string): SummaryMember => mem("Tohum", "outlet", AT(0), text, "tohum");
+  const candidateOf = (text: string, name = "Aday"): SummaryMember => mem(name, "outlet", AT(5), text, `${name} başlığı`);
+  const pick = (seed: SummaryMember, others: SummaryMember[]) =>
+    findAgreeingMember({
+      members: [...others, seed],
+      seed,
+      seedShown: tidySummaryText((seed.article.description ?? "").trim()),
+      title: TITLE10,
+      wireMajorityHashes: new Set<string>(),
+    });
+
+  it("the fixtures score and classify as the cases below assume", () => {
+    for (let hits = 0; hits <= 10; hits++) {
+      expect(titleAgreement(TITLE10, clean(hits)), `clean(${hits})`).toBeCloseTo(hits / 10, 9);
+      expect(titleAgreement(TITLE10, stub(hits)), `stub(${hits})`).toBeCloseTo(hits / 10, 9);
+      expect(summaryDefect(clean(hits), clean(hits)), `clean(${hits})`).toBeNull();
+      expect(seedDisqualified(stub(hits), stub(hits)), `stub(${hits})`).toBe("stub");
+    }
+    expect(titleAgreement(TITLE10, live(2))).toBeCloseTo(0.2, 9);
+    expect(seedDisqualified(live(2), live(2))).toBe("live");
+    expect(titleAgreement(TITLE10, quotes(0))).toBe(0);
+    expect(seedDisqualified(quotes(0), quotes(0))).toBe("quotes");
+  });
+
+  it("a stub seed under AGREEMENT_STUB_LOW_SEED is replaced from AGREEMENT_LOW up: 0.5 (inclusive), not 0.4", () => {
+    for (const seedHits of [0, 1, 2]) {
+      const seed = seedOf(stub(seedHits));
+      expect(pick(seed, [candidateOf(clean(5))])?.member.source.name, `seed ${seedHits}/10, candidate 0.5`).toBe("Aday");
+      expect(pick(seed, [candidateOf(clean(6))])?.member.source.name, `seed ${seedHits}/10, candidate 0.6`).toBe("Aday");
+      expect(pick(seed, [candidateOf(clean(4))]), `seed ${seedHits}/10, candidate 0.4`).toBeNull();
+      expect(pick(seed, [candidateOf(clean(0))]), `seed ${seedHits}/10, candidate 0`).toBeNull();
+    }
+  });
+
+  it("a stub seed at exactly AGREEMENT_STUB_LOW_SEED (3/10) or above keeps the 0.6 floor", () => {
+    for (const seedHits of [3, 4]) {
+      const seed = seedOf(stub(seedHits));
+      expect(pick(seed, [candidateOf(clean(5))]), `seed ${seedHits}/10, candidate 0.5`).toBeNull();
+      expect(pick(seed, [candidateOf(clean(6))])?.member.source.name, `seed ${seedHits}/10, candidate 0.6`).toBe("Aday");
+    }
+  });
+
+  it("the best of the qualifiers still wins, and a tie goes to the newest", () => {
+    const seed = seedOf(stub(0));
+    const five = candidateOf(clean(5), "Beş");
+    const seven = mem("Yedi", "outlet", AT(4), clean(7), "yedi");
+    const sevenLate = mem("Yedi Geç", "outlet", AT(9), clean(7, " (geç)"), "yedi geç");
+    expect(pick(seed, [five, seven])?.member.source.name).toBe("Yedi");
+    expect(pick(seed, [five, seven, sevenLate])?.member.source.name).toBe("Yedi Geç");
+    expect(pick(seed, [five])?.member.source.name).toBe("Beş");
+  });
+
+  it("the other form defects keep 0.6 whatever the seed scores: quotes at 0, a live line at 0.2", () => {
+    for (const [label, text] of [
+      ["quotes", quotes(0)],
+      ["live", live(2)],
+    ] as const) {
+      const seed = seedOf(text);
+      expect(pick(seed, [candidateOf(clean(5))]), `${label}, candidate 0.5`).toBeNull();
+      expect(pick(seed, [candidateOf(clean(6))])?.member.source.name, `${label}, candidate 0.6`).toBe("Aday");
+    }
+  });
+
+  it("a clean seed that disagrees keeps 0.75, and a clean seed at 0.5 or more is never replaced", () => {
+    const poor = seedOf(clean(2, " (tohum)"));
+    expect(pick(poor, [candidateOf(clean(5))])).toBeNull();
+    expect(pick(poor, [candidateOf(clean(7))])).toBeNull();
+    expect(pick(poor, [candidateOf(clean(8))])?.member.source.name).toBe("Aday");
+    const fair = seedOf(clean(5, " (tohum)"));
+    expect(pick(fair, [candidateOf(clean(10))])).toBeNull();
+  });
+
+  it("an opinion seed keeps 0.75: the lowered floor is for a stub only", () => {
+    const column = seedOf(clean(0, " (köşe)"));
+    column.article.url = "https://example.com/yazarlar/biri/yazi";
+    expect(pick(column, [candidateOf(clean(5))])).toBeNull();
+    expect(pick(column, [candidateOf(clean(8))])?.member.source.name).toBe("Aday");
+  });
+
+  describe("every other gate of a candidate is unchanged at the lower floor", () => {
+    const seed = seedOf(stub(0));
+
+    it("a candidate that is itself a stub, a live line or an echo is not picked", () => {
+      expect(pick(seed, [candidateOf(stub(5))])).toBeNull();
+      expect(pick(seed, [candidateOf(live(5))])).toBeNull();
+      const echo = mem("Yankı", "outlet", AT(5), clean(5), clean(5).replace(/\.$/, ""));
+      expect(pick(seed, [echo])).toBeNull();
+    });
+
+    it("a wire or an aggregator member is not picked", () => {
+      expect(pick(seed, [mem("Ajans", "wire", AT(5), clean(5), "ajans")])).toBeNull();
+      expect(pick(seed, [mem("Toplayıcı", "aggregator", AT(5), clean(5), "toplayıcı")])).toBeNull();
+    });
+
+    it("a near copy of a wire member's text is the agency's and is not picked", () => {
+      const wire = mem("Ajans", "wire", AT(1), clean(5), "ajans");
+      expect(pick(seed, [wire, candidateOf(clean(5, " bugün"))])).toBeNull();
+    });
+
+    it("a member whose source does not allow excerpts is not picked (BL-13)", () => {
+      const blocked = candidateOf(clean(5));
+      blocked.source.excerpt_allowed = false;
+      expect(pick(seed, [blocked])).toBeNull();
+    });
+
+    it("an opinion column is not picked", () => {
+      const column = candidateOf(clean(5));
+      column.article.url = "https://example.com/yazarlar/biri/yazi";
+      expect(pick(seed, [column])).toBeNull();
+    });
+
+    it("a text under 60 characters is not picked", () => {
+      const short = candidateOf("abaka bobin cidem dalka ekmek yazdı.");
+      expect(short.article.description?.length ?? 0).toBeLessThan(AGREEMENT_MIN_CHARS);
+      expect(pick(seed, [short])).toBeNull();
+    });
+
+    it("a title with no signal (under 3 content tokens) keeps the seed", () => {
+      const seed2 = seedOf(stub(0));
+      const out = findAgreeingMember({
+        members: [candidateOf(clean(5)), seed2],
+        seed: seed2,
+        seedShown: tidySummaryText((seed2.article.description ?? "").trim()),
+        title: "abaka bobin",
+        wireMajorityHashes: new Set<string>(),
+      });
+      expect(out).toBeNull();
+    });
   });
 });

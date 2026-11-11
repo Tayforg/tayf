@@ -13,6 +13,7 @@ import {
   AGREEMENT_FORM_DEFECT_MIN,
   AGREEMENT_HIGH,
   AGREEMENT_LOW,
+  AGREEMENT_STUB_LOW_SEED,
   isLiveLine,
   isQuoteOnly,
   seedDisqualified,
@@ -3949,5 +3950,365 @@ describe("h122-ozet-3: a cut that hides the statement is not the Özet", () => {
       expect(res, title).not.toBeNull();
       expect(res?.text.endsWith("..."), title).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h132-ozetpost-1 (hunt 132, 2026-11-11): two gaps in the Özet seed rules.
+//
+// (a) A name that carries a digit ("COP31 Başkanı ...") made the digit test of `isLiveLine` fail:
+//     Star's "... \"COP31 Liderler Zirvesi\"nde konuşuyor" (ece7ef31, 6 kaynak) stayed the Özet and
+//     the meta description of an indexable page. A name token is now taken out before the test
+//     ("yüzde 30", "58 bin", "17 işçinin" are figures and still fail the line).
+// (b) A feed-cut stub that covers almost none of the headline (78d3a0ee 7 kaynak: Sözcü's
+//     "... toplantısı öncesinde Aile ...", 0.0; 7bc0b1bb 0.2; 7a31a7ff 0.22) was kept, because the
+//     clean member behind it scored 0.50 to 0.56 and the floor was 0.6. Behind a stub under
+//     AGREEMENT_STUB_LOW_SEED (0.3) the floor is AGREEMENT_LOW (0.5).
+//
+// The members are the real outlet rows of the live clusters (dumped read-only 2026-11-11, member
+// rows and the cluster title_tr as they stood), whole clusters: the negative pins depend on the
+// members that are NOT picked.
+// ---------------------------------------------------------------------------
+
+function h132(
+  name: string,
+  slug: string,
+  kind: SourceKind,
+  bias: Source["bias"],
+  at: string,
+  hash: string,
+  url: string,
+  title: string,
+  description: string,
+): ClusterDetailMember {
+  return {
+    source: { ...src(slug), name, kind, bias },
+    article: { id: `${slug}@${at}`, title, url, published_at: at, image_url: null, content_hash: hash, description },
+  };
+}
+
+// ece7ef31-6f4c-49ab-87c4-a3479b5e9730 (6 kaynak)
+const H132_ECE_TITLE = "COP31 Zirvesi! Bakan Kurum'dan açıklamalar";
+const H132_ECE_SUMMARY = "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya'da \"COP31 Liderler Zirvesi\"nde konuşuyor";
+const H132_ECE_MEMBERS: ClusterDetailMember[] = [
+  h132("Akşam", "aksam", "outlet", "gov_leaning", "2026-11-11T13:11:00+00:00", "6deb539e551142f66c85db56a420fa251bf5bc53", "https://www.aksam.com.tr/guncel/bakan-kurum-aciklamalarda-bulunuyor/haber-1713805", "Bakan Kurum açıklamalarda bulunuyor", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya'da “COP31 Liderler Zirvesi”nde konuşuyor."),
+  h132("Star", "star", "outlet", "pro_government", "2026-11-11T13:11:00+00:00", "0c2ec0f2f447a55745fbbba76d2a0e538f3f81ec", "https://www.star.com.tr/guncel/cop31-zirvesi-bakan-kurumdan-aciklamalar-haber-2052759/", "COP31 Zirvesi! Bakan Kurum'dan açıklamalar", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya'da \"COP31 Liderler Zirvesi\"nde konuşuyor"),
+  h132("Posta", "posta", "outlet", "gov_leaning", "2026-11-11T13:33:18+00:00", "798d34942afae193fc25c7c6539e4ede9929e6dd", "https://www.posta.com.tr/ekonomi/bakan-kurumdan-cop31de-dunyaya-mesaj-iklim-risklerinin-siniri-yok-3063423", "Bakan Kurum’dan COP31’de dünyaya mesaj: İklim risklerinin sınırı yok", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum COP31 kapsamında gerçekleştirilen programda konuştu.\nBakan Kurum'un açıklamalarından satır başları:\nKıymetli liderler, hep söylüyoruz: 1,5 derece hedefi ortak pusulamız olmalıdır. Fakat 2024 yılında küresel ortalama sıcaklığın sanayi öncesi seviyenin yıllık bazda 1,5 santigrat derece üzerine çıktığını gördük. Felaketler de ardı ardına gelmeye başladı. Nepal'de seller ve heyelanlar yaşanıyor, canlar gidiyor. Pasifik'tek..."),
+  h132("Milliyet", "milliyet", "outlet", "gov_leaning", "2026-11-11T13:19:40+00:00", "ea5e0c8bcacdbf4513794e10a8b0df4f268d0b07", "https://www.milliyet.com.tr/ekonomi/bakan-kurumdan-onemli-aciklamalar-7698867", "Bakan Kurum’dan COP31’de dünyaya mesaj: İklim risklerinin sınırı yok", "COP31 programı kapsamında Antalya’da konuşan Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, küresel iklim politikalarının yalnızca hedef ve taahhütlerle sınırlı kalmaması gerektiğini söyledi. COP31 Başkanlığı sürecinde Avustralya ile birlikte yürütülen çalışmalar hakkında bilgi veren Kurum, ülkelerin ulusal iklim hedeflerini doğrudan yatırım programlarına dönüştürmesinin önemine dikkat çekti.\nKurum, iklim hedeflerinin bütçelerde karşılığının bulunması gerektiğini ifade ederek bu s..."),
+  h132("CNN Türk", "cnn-turk", "outlet", "gov_leaning", "2026-11-11T13:17:25+00:00", "aabc83317bd9cad675530d73b858315ab60fae6c", "https://www.cnnturk.com/ekonomi/son-dakika-bakan-kurumdan-cop31de-uc-kritik-cagri-iklim-hedefleri-yatirima-donusmeli-3491991", "SON DAKİKA | Bakan Kurum'dan COP31'de üç kritik çağrı: İklim hedefleri yatırıma dönüşmeli", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya'da düzenlenen COP31 Liderler Zirvesi'nde iklim hedeflerinin somut yatırımlara dönüştürülmesi gerektiğini söyledi. Kurum, ulusal iklim hedeflerinin yatırım programlarıyla desteklenmesi, iklim finansmanına erişimin kolaylaştırılması ve dirençliliğin kalkınma politikalarının merkezine alınması yönünde üç önemli çağrıda bulundu."),
+  h132("Ajans Haber", "ajans-haber", "aggregator", "center", "2026-11-11T13:06:49+00:00", "c841762b02da9bda7094b0445960cbbbc20124e3", "https://ajanshaber.com.tr/haber/bakan-kurum-iklim-risklerinin-siniri-yok-kuresel-dayanisma-sart", "Bakan Kurum: “İklim risklerinin sınırı yok, küresel dayanışma şart”", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, Antalya’da düzenlenen COP31 kapsamında iklim hedeflerinin somut yatırımlara dönüştürülmesi, finansmana erişimin hızlandırılması ve dirençli şehirlerin oluşturulması çağrısında bulundu. Türkiye’nin iklim politikalarına ilişkin yol haritasını paylaşan Kurum, “İklim finansmanında taahhütten erişime geçelim” dedi."),
+];
+
+// 78d3a0ee-2cd1-4a20-9768-dd507110a31d (7 kaynak)
+const H132_GOK_TITLE = "Meclis'te dikkat çeken anlar! Bakan Göktaş'ın eli havada kaldı";
+const H132_GOK_SUMMARY = "YENİ Parti Kadın Kolları Genel Başkanı ve milletvekili Asu Kaya, TBMM Plan ve Bütçe Komisyonu toplantısı öncesinde Aile ...";
+const H132_GOK_MEMBERS: ClusterDetailMember[] = [
+  h132("Türkiye Gazetesi", "turkiye-gazetesi", "outlet", "pro_government", "2026-11-11T09:41:50+00:00", "f66ba519037877fdc0c15161c1ee91c5bd213aa0", "https://www.turkiyegazetesi.com.tr/gundem/yeni-partili-isimden-butce-sunumunda-saygisiz-hareket-bakan-goktas-cevap-vermedi-1828612", "BAKAN CEVAP VERMEDİ", "Bütçe sunumu yapmak için TBMM'ye gelen Aile ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş, tek tek komisyondakilerle selamlaştı. Yeni Parti Kadın Kolları Genel Başkanı Asu Kaya ise Göktaş'ın tokalaşmak için uzattığı elini havada bıraktı. Bu saygısız davranış tepki topladı."),
+  h132("Haberler.com", "haberler-com", "aggregator", "gov_leaning", "2026-11-11T09:12:11+00:00", "1f09af436d6972233e2e37082c3df2721afb3f76", "https://www.haberler.com/guncel/bakan-goktasin-elinin-havada-kaldigi-an-20416444-haberi/", "Bakan Göktaş'ın elinin havada kaldığı an!", "TBMM Plan ve Bütçe Komisyonunda 2027 yılı bütçe görüşmeleri öncesinde dikkat çeken anlar yaşandı. Salona girerek katılımcılarla tek tek selamlaşan Aile ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş'ın uzattığı eli, Yeni Parti Kadın Kolları Genel Başkanı Asu Kaya sıkmadı. Bakan Göktaş'ın elinin havada kaldığı anlar kameralara yansıdı."),
+  h132("Sözcü", "sozcu", "outlet", "opposition_leaning", "2026-11-11T09:32:09+00:00", "671ab59f7fadd2e6f6f6291809d4f39434346844", "https://www.sozcu.com.tr/meclis-te-dikkat-ceken-anlar-bakan-goktas-in-eli-havada-kaldi-p380256", "Meclis'te dikkat çeken anlar! Bakan Göktaş'ın eli havada kaldı", "YENİ Parti Kadın Kolları Genel Başkanı ve milletvekili Asu Kaya, TBMM Plan ve Bütçe Komisyonu toplantısı öncesinde Aile ..."),
+  h132("OdaTV", "odatv", "outlet", "opposition_leaning", "2026-11-11T11:18:37+00:00", "80a46cf6340b2bd4b7aef9a42e709b617d0ebaaa", "https://www.odatv.com/siyaset/bakan-mahinur-ozdemir-goktasin-eli-havada-kaldi-120170742", "Bakan Göktaş'ın eli havada kaldı", "YENİ Parti Osmaniye Milletvekili Asu Kaya, Aile ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş'ın elini havada bıraktı."),
+  h132("Mynet", "mynet", "outlet", "gov_leaning", "2026-11-11T10:40:40+00:00", "fc185af3535744f603156cf1ed8fdead90005c15", "https://haber.mynet.com/tbmm-de-dikkat-ceken-anlar-bakan-goktas-hakkindaki-fon-iddialari-dogru-cikmayan-umit-ozlale-siraya-girdi-110107320854", "TBMM’de dikkat çeken anlar! Bakan Göktaş hakkındaki fon iddiaları doğru çıkmayan Ümit Özlale sıraya girdi", "TBMM Plan ve Bütçe Komisyonu’nda Aile ve Sosyal Hizmetler Bakanlığı’nın 2027 yılı bütçe görüşmeleri sırasında dikkat çeken anlar yaşandı. Bakan Mahinur Özdemir Göktaş, komisyon üyelerini tek tek selamlarken Yeni Parti Kadın Kolları Genel Başkanı Asu Kaya’nın tokalaşmaması gündem oldu. Daha önce Bakan Göktaş’ı hedef alan iddiaları nedeniyle iftira tartışmalarının odağında yer alan Yeni Partili Ümit Özlale’nin ise tokalaşmak için sıraya girmesi dikkat çekti. O anlar kameralara yansıdı."),
+  h132("Yeni Akit", "yeni-akit", "outlet", "pro_government", "2026-11-11T10:40:00+00:00", "403efa4c1e459bb19b626891f81b767e8823b1cb", "https://www.yeniakit.com.tr/haber/goktasin-elini-havada-birakti-ypli-kadin-baskandan-bakana-terbiyesizlik-2033019.html", "Göktaş'ın elini havada bıraktı! YP’li kadın başkandan Bakan’a terbiyesizlik", "TBMM Plan ve Bütçe Komisyonunda 2027 yılı bütçe görüşmeleri öncesinde Yeni Partili isimler saygısızlığa imza attı. Salona gelerek katılımcılarla tek tek selamlaşan Aile ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş'ın uzattığı el, Yeni Parti Kadın Kolları Genel Başkanı Asu Kaya tarafından havada bırakıldı. Adı yeni ama zihniyeti eski olan partinin sergilediği bu terbiyesizce tavra sosyal medyadan tepki yağdı."),
+  h132("Yeniçağ", "yenicag", "outlet", "opposition_leaning", "2026-11-11T10:47:20+00:00", "75e71572238c1162612b6616a8e33e79dd7986d1", "https://www.yenicaggazetesi.com/yeni-parti-kadin-kollari-genel-baskani-asu-kaya-bakan-mahinur-goktasin-elini-havada-birakti-1090247h.htm", "YENİ Parti Kadın Kolları Genel Başkanı Asu Kaya Bakan Mahinur Göktaş'ın elini havada bıraktı", "YENİ Parti Kadın Kolları Genel Başkanı Asu Kaya, TBMM Plan ve Bütçe Komisyonu'nda Aile ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş ile tokalaşmadı. Bakan Göktaş'ın uzattığı el karşılıksız kalırken o anlar kameralara yansıdı."),
+];
+
+// 7bc0b1bb-37f4-46ed-811e-6f367ca4fd36 (4 kaynak)
+const H132_DIL_TITLE = "'Fon krizi Erdoğan'a komplo' diyen İslamcı yazara Abdurrahman Dilipak'tan yanıt";
+const H132_DIL_SUMMARY = "Yeni Şafak yazarı Hayreddin Karaman, gündemdeki fon tartışmalarına ilişkin kaleme aldığı yazısında suçun şahsiliği ilkes...";
+const H132_DIL_MEMBERS: ClusterDetailMember[] = [
+  h132("10Haber", "on-haber", "outlet", "center", "2026-11-10T12:28:12+00:00", "761a30bf451f9956df2adc60becb24887928e2c2", "https://10haber.net/gundem/dilipak-fon-krizi-erdogana-komplo-diyen-karamana-cevap-verdi-gecti-o-gunler-753540/", "Dilipak ‘Fon krizi Erdoğan’a komplo’ diyen Karaman’a cevap verdi: ‘Geçti o günler", "Yeni Şafak Gazetesi köşe yazarı Hayreddin Karaman, Türkiye'nin gündemine oturan fon skandalını Cumhurbaşkanı Recep Tayyip Erdoğan'a yönelik bir 'komplo' olarak nitelendirdi. Karaman'a yanıt veren İslamcı yazar olan Abdurrahman Dilipak ise, \"Bu söylem toplumdan destek görmez, tepki görür. Geçti o günler\" ifadelerini kullandı. Yeni Şafak Gazetesi köşe yazarı Hayreddin Karaman fon skandalı için \"Kimseye başkasının suçu […]"),
+  h132("Evrensel", "evrensel", "outlet", "opposition", "2026-11-10T13:48:00+00:00", "69e3267316ee287b2ebafaaa81e6235225eaa074", "https://www.evrensel.net/haber/6008848/dilipaktan-fon-krizi-erdogana-komplo-diyen-karamana-yanit-bu-soylem-toplumdan-destek-gormez-gecti-o-gunler?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication", "Dilipak’tan 'Fon krizi Erdoğan’a komplo' diyen Karaman’a yanıt: 'Bu söylem toplumdan destek görmez, geçti o günler'", "Karaman'ın komplo bu çıkışına yanıt veren yazar Abdurrahman Dilipak, \"Her şeyi başka bir şey ile ilişkilendirerek konuyu geçiştirmeye çalışmak zor durumda bırakır\" diyerek tepki gösterdi."),
+  h132("Sözcü", "sozcu", "outlet", "opposition_leaning", "2026-11-10T11:30:07+00:00", "2beda1ea6c7c8ff53857171f3afab6e4468114b7", "https://www.sozcu.com.tr/fon-krizi-erdogan-a-komplo-diyen-islamci-yazara-abdurrahman-dilipak-tan-yanit-p379922", "'Fon krizi Erdoğan'a komplo' diyen İslamcı yazara Abdurrahman Dilipak'tan yanıt", "Yeni Şafak yazarı Hayreddin Karaman, gündemdeki fon tartışmalarına ilişkin kaleme aldığı yazısında suçun şahsiliği ilkes..."),
+  h132("Yeniçağ", "yenicag", "outlet", "opposition_leaning", "2026-11-10T17:39:58+00:00", "132753e9d92402d1ae1cfa48a573a6018b4552be", "https://www.yenicaggazetesi.com/dilipaktan-fon-krizinde-komplo-var-diyen-karamana-gecti-o-gunler-1090111h.htm", "Dilipak’tan ‘fon krizinde komplo var’ diyen Karaman’a: Geçti o günler", "Abdurrahman Dilipak, fon skandalını Erdoğan yönetimini hedef alan bir girişim olarak yorumlayan Hayreddin Karaman’ın değerlendirmelerine karşı çıktı. Dilipak, bu yaklaşımın kamuoyunda tepkiyle karşılanacağını söyledi."),
+];
+
+// 7a31a7ff-7508-473c-a449-a08134ea4161 (2 kaynak)
+const H132_GAB_TITLE = "Türkiye ve Gabon arasında stratejik iş birliği mesajı: Erdoğan'a özel davet";
+const H132_GAB_SUMMARY = "Antalya'daki COP31 Zirvesi'nde Gabon Cumhurbaşkanı Yardımcısı Chambrier ile bir araya gelen Cevdet Yılmaz, iki ülke arasındaki ilişkileri ve bölgesel...";
+const H132_GAB_MEMBERS: ClusterDetailMember[] = [
+  h132("Yeni Şafak", "yeni-safak", "outlet", "pro_government", "2026-11-11T14:15:51+00:00", "0532d2eae9343297bb56ca0b1edf640eb1353140", "https://www.yenisafak.com/gundem/gabon-cumhurbaskanindan-erdogana-ozel-davet-mektup-cevdet-yilmaza-teslim-edildi-4871572", "Gabon Cumhurbaşkanı'ndan Erdoğan'a özel davet: Mektup Cevdet Yılmaz'a teslim edildi", "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, Antalya'da düzenlenen COP31 Liderler Zirvesi kapsamında Gabon Cumhurbaşkanı Yardımcısı Alexandre Barro Chambrier ile bir araya geldi. Görüşmede iki ülke arasındaki iş birliği imkanları ele alınırken, Gabon Cumhurbaşkanı Brice Oligui Nguema'nın Cumhurbaşkanı Recep Tayyip Erdoğan'ı ülkesinde ağırlama arzusunu içeren davet mektubu da Yılmaz'a teslim edildi."),
+  h132("Muhalif", "muhalif", "outlet", "opposition_leaning", "2026-11-11T13:57:33+00:00", "99de0a951a38d83fb28a1765a972bcb53094ac67", "https://www.muhalif.com.tr/gundem/turkiye-ve-gabon-arasinda-stratejik-is-birligi-mesaji-erdogana-ozel-davet/748407", "Türkiye ve Gabon arasında stratejik iş birliği mesajı: Erdoğan'a özel davet", "Antalya'daki COP31 Zirvesi'nde Gabon Cumhurbaşkanı Yardımcısı Chambrier ile bir araya gelen Cevdet Yılmaz, iki ülke arasındaki ilişkileri ve bölgesel..."),
+];
+
+// 2f5d7d53-2900-4373-82b9-6704e1374ec0 (2 kaynak)
+const H132_CAM_TITLE = "Cami açılışındaki fotoğraf gündem olmuştu! AKP'li isim sessizliğini bozdu";
+const H132_CAM_SUMMARY = "AKP Genel Başkan Yardımcısı Hülya Terzioğlu, Çorum'daki cami açılışında çekilen ve tartışma yaratan fotoğrafa yönelik el...";
+const H132_CAM_MEMBERS: ClusterDetailMember[] = [
+  h132("Kısa Dalga", "kisa-dalga", "outlet", "opposition_leaning", "2026-11-11T09:23:42+00:00", "6356f51e7ceab95bf7b724cc4342ed9bf770c532", "https://kisadalga.net/haber/gundem/akpli-terzioglunun-camide-erkeklerle-oturmasi-tartisma-yaratti-feminist-bile-ilan-ettiler-141559", "AKP'li Terzioğlu’nun camide erkeklerle oturması tartışma yarattı: Feminist bile ilan ettiler", "AKP Genel Başkan Yardımcısı Hülya Terzioğlu'nun cami açılışında erkeklerle ön sırada oturması, muhafazakâr çevrelerde tartışma başlattı. Terzioğlu, kendisine yöneltilen eleştirilere Şamil Tayyar aracılığıyla yanıt vererek “Feminist bile ilan ettiler, oysa benim feministlere karşı kaç tane reddiyem var” dedi."),
+  h132("Sözcü", "sozcu", "outlet", "opposition_leaning", "2026-11-11T08:55:32+00:00", "e84be355220ef590eaf92cee63db4ef03f93b5d6", "https://www.sozcu.com.tr/cami-acilisindaki-fotograf-gundem-olmustu-akp-li-isim-sessizligini-bozdu-p380239", "Cami açılışındaki fotoğraf gündem olmuştu! AKP'li isim sessizliğini bozdu", "AKP Genel Başkan Yardımcısı Hülya Terzioğlu, Çorum'daki cami açılışında çekilen ve tartışma yaratan fotoğrafa yönelik el..."),
+];
+
+// 56eaa832-c70f-4825-9007-ec08ffb11c7c (12 kaynak)
+const H132_FID_TITLE = "Antalya'da iklim zirvesinde yeşil mesaj: Erdoğan ve Guterres'ten ortak fidan dikimi";
+const H132_FID_SUMMARY = "COP31 Liderler Zirvesi için Antalya'da bulunan Cumhurbaşkanı Erdoğan ve BM Genel Sekreteri Guterres, Milli Ağaçlandırma Günü kapsamında zeytin fidanlarını...";
+const H132_FID_MEMBERS: ClusterDetailMember[] = [
+  h132("Haber Global", "haber-global", "outlet", "gov_leaning", "2026-11-11T09:17:00+00:00", "b114225323a1c653a612706f9f7560aee4801719", "https://haberglobal.com/gundem/cumhurbaskani-erdogan-bm-genel-sekreteri-guterres-ile-zeytin-fidani-dikti-552910", "Cumhurbaşkanı Erdoğan, BM Genel Sekreteri Guterres ile zeytin fidanı dikti", "Cumhurbaşkanı Recep Tayyip Erdoğan, BM Genel Sekreteri Antonio Guterres ile birlikte Birleşmiş Milletler (BM) İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı (COP31) Liderler Zirvesi'nde zeytin fidanı dikti."),
+  h132("Haberler.com", "haberler-com", "aggregator", "gov_leaning", "2026-11-11T10:17:37+00:00", "efc9ee24a9266e0a5ac8852fe60028d6fd615baa", "https://www.haberler.com/haberler/cop31de-liderler-aile-fotografinda-bulustu-20416728-haberi/", "COP31'de liderler aile fotoğrafında buluştu! Erdoğan ve Aliyev'in samimi anları dikkat çekti", "Cumhurbaşkanı Recep Tayyip Erdoğan'ın ev sahipliğinde Antalya'da düzenlenen COP31 Liderler Zirvesi'nde dünya liderleri aile fotoğrafı için bir araya geldi. Erdoğan'ın Azerbaycan Cumhurbaşkanı İlham Aliyev ve BM Genel Sekreteri Antonio Guterres ile verdiği görüntüler de dikkat çekti."),
+  h132("Sabah", "sabah", "outlet", "pro_government", "2026-11-11T08:22:24+00:00", "a839d2993e0b0efd13690aad77c4064322eb7d2e", "https://www.sabah.com.tr/gundem/2026/11/11/baskan-erdogan-bm-genel-sekreteri-guterres-ile-zeytin-fidani-dikti", "Başkan Erdoğan, BM Genel Sekreteri Guterres ile zeytin fidanı dikti", "Başkan Recep Tayyip Erdoğan, BM Genel Sekreteri Antonio Guterres ile Birleşmiş Milletler (BM) İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı (COP31) Liderler Zirvesi'nde zeytin fidanı...Devamı için tıklayınız"),
+  h132("Haberport", "haberport", "outlet", "center", "2026-11-11T08:43:36+00:00", "762a0a73349f1ffc2abfaad3c8922b740a1339e0", "https://www.haberport.com/haber/liderler-toprakla-bulustu-erdogan-ve-guterres-fidan-dikti/66875", "Liderler toprakla buluştu: Erdoğan ve Guterres fidan dikti", "Liderler toprakla buluştu: Erdoğan ve Guterres fidan diktiCumhurbaşkanı Erdoğan ile BM Genel Sekreteri Guterres ortak bir fidan dikimi gerçekleştirdi; hareket, çevre ve iş birliğine dair sembolik bir..."),
+  h132("Yeni Asır", "yeni-asir", "outlet", "gov_leaning", "2026-11-11T09:01:44+00:00", "a839d2993e0b0efd13690aad77c4064322eb7d2e", "https://www.yeniasir.com.tr/gundem/2026/11/11/baskan-erdogan-bm-genel-sekreteri-guterres-ile-zeytin-fidani-dikti", "Başkan Erdoğan, BM Genel Sekreteri Guterres ile zeytin fidanı dikti", "Başkan Recep Tayyip Erdoğan, BM Genel Sekreteri Antonio Guterres ile Birleşmiş Milletler (BM) İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı (COP31) Liderler Zirvesi'nde zeytin fidanı...Devamı için tıklayınız"),
+  h132("Milat", "milat", "outlet", "gov_leaning", "2026-11-11T09:10:00+00:00", "faa2f80e3d6e3d93ffb1d86679d837db15c21847", "https://www.milatgazetesi.com/cumhurbaskani-erdogan-cop31-alaninda-zeytin-fidani-dikti", "Cumhurbaşkanı Erdoğan COP31 alanında zeytin fidanı dikti", "Cumhurbaşkanı Recep Tayyip Erdoğan, BM Genel Sekreteri Antonio Guterres ile Birleşmiş Milletler (BM) İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı (COP31) Liderler Zirvesi'nde zeytin fidanı dikti."),
+  h132("Muhalif", "muhalif", "outlet", "opposition_leaning", "2026-11-11T08:04:42+00:00", "1c0f97e991e42034f7810cb04c757e65521c49b8", "https://www.muhalif.com.tr/haberler/antalyada-iklim-zirvesinde-yesil-mesaj-erdogan-ve-guterresten-ortak-fidan-dikimi/748360", "Antalya'da iklim zirvesinde yeşil mesaj: Erdoğan ve Guterres'ten ortak fidan dikimi", "COP31 Liderler Zirvesi için Antalya'da bulunan Cumhurbaşkanı Erdoğan ve BM Genel Sekreteri Guterres, Milli Ağaçlandırma Günü kapsamında zeytin fidanlarını..."),
+  h132("BHA", "bha", "wire", "opposition", "2026-11-11T09:40:35+00:00", "2a3a30cdd6cfd403323095b5e6d0fa5d5be430f3", "https://www.bha.net.tr/antalya/cop31de-anlamli-etkinlik-cumhurbaskani-erdogan-ve-guterres-zeytin-fidani-dikti/469177", "COP31'de anlamlı etkinlik: Cumhurbaşkanı Erdoğan ve Guterres zeytin fidanı dikti", "Cumhurbaşkanı Recep Tayyip Erdoğan ile Birleşmiş Milletler (BM) Genel Sekreteri Antonio Guterres, COP31 Liderler Zirvesi kapsamında Antalya'da düzenlenen ağaçlandırma etkinliğinde zeytin fidanı dikti."),
+  h132("Haberet", "haberet", "outlet", "center", "2026-11-11T10:52:01+00:00", "97a6398dd162768435590b28b462eb177fed92ed", "https://www.haberet.com/gundem/cumhurbaskani-erdogan-guterres-ile-zeytin-fidani-dikti-110926", "Cumhurbaşkanı Erdoğan, Guterres ile zeytin fidanı dikti", "Cumhurbaşkanı Recep Tayyip Erdoğan, BM Genel Sekreteri Antonio Guterres ile Birleşmiş Milletler (BM) İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı (COP31) Liderler Zirvesi'nde zeytin fidanı dikti."),
+  h132("TRT Haber", "trt-haber", "outlet", "pro_government", "2026-11-11T08:27:00+00:00", "97a6398dd162768435590b28b462eb177fed92ed", "https://www.trthaber.com/haber/gundem/cumhurbaskani-erdogan-guterres-ile-zeytin-fidani-dikti-962914.html", "Cumhurbaşkanı Erdoğan, Guterres ile zeytin fidanı dikti", "Cumhurbaşkanı Recep Tayyip Erdoğan, BM Genel Sekreteri Antonio Guterres ile Birleşmiş Milletler BM İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı COP31 Liderler Zirvesi'nde zeytin fidanı dikti."),
+  h132("Ajans Haber", "ajans-haber", "aggregator", "center", "2026-11-11T09:07:00+00:00", "27eab129d8f0f85f7a57ee6982d56eba5c87c83b", "https://ajanshaber.com.tr/haber/cumhurbaskani-erdogan-ve-guterres-cop31-kapsaminda-zeytin-fidani-dikti", "Cumhurbaşkanı Erdoğan ve Guterres COP31 kapsamında zeytin fidanı dikti", "Cumhurbaşkanı Recep Tayyip Erdoğan ve BM Genel Sekreteri Antonio Guterres, COP31 Liderler Zirvesi kapsamında Antalya’da düzenlenen ağaçlandırma etkinliğinde zeytin fidanını toprakla buluşturdu."),
+  h132("Habertürk", "haberturk", "outlet", "gov_leaning", "2026-11-11T15:14:02+00:00", "867a8687321a08ac196a3c62c30789aa4ea4a4d4", "https://www.haberturk.com/dunya/cumhurbaskani-erdogan-guterres-ile-fidan-dikti-3926608", "Cumhurbaşkanı Erdoğan, Guterres ile fidan dikti", "Cumhurbaşkanı Recep Tayyip Erdoğan, BM Genel Sekreteri Antonio Guterres ile Birleşmiş Milletler (BM) İklim Değişikliği Çerçeve Sözleşmesi'nin 31. Taraflar Konferansı (COP31) Liderler Zirvesi'nde zeytin fidanı dikti."),
+];
+
+// 9dd62dcd-56d2-41f0-b151-8e8bf2f69999 (3 kaynak)
+const H132_NTV_TITLE = "Bakan Murat Kurum: İsrail hükümetini davet etmedik";
+const H132_NTV_SUMMARY = "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, NTV canlı yayınında soruları yanıtlıyor.";
+const H132_NTV_MEMBERS: ClusterDetailMember[] = [
+  h132("Haber7", "haber7", "outlet", "gov_leaning", "2026-11-09T18:32:00+00:00", "f1a2f30e445d19dca62acc7e1bb8f959b9267a37", "https://www.haber7.com/guncel/haber/3675518-bakan-murat-kurum-canli-yayinda-sorulari-yanitliyor", "Bakan Murat Kurum: İsrail hükümetini davet etmedik", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, NTV canlı yayınında soruları yanıtlıyor."),
+  h132("Milliyet", "milliyet", "outlet", "gov_leaning", "2026-11-09T21:10:01+00:00", "9d47ffcedfd044c0056fa8e91db71ce75e80ce58", "https://www.milliyet.com.tr/gundem/cop31-baskani-bakan-kurum-ev-sahibi-ulke-olarak-israili-davet-etmedik-7697659", "COP31 Başkanı Bakan Kurum: Ev sahibi ülke olarak İsrail'i davet etmedik", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, NTV canlı yayınında Antalya'da düzenlenen Birleşmiş Milletler İklim Değişikliği Çerçeve Sözleşmesi'nin (UNFCCC) 31. Taraflar Konferansı'na (COP31) ilişkin soruları yanıtladı.\nİzmir'in Aliağa ilçesindeki demir çelik fabrikasında meydana gelen patlamada hayatını kaybedenlere Allah'tan rahmet, yaralılara acil şifalar dileyen Kurum, devletin tüm ilgili birimlerinin yaralılara yönelik çalışmaları sürdürdüğünü söyledi. Baka..."),
+  h132("Posta", "posta", "outlet", "gov_leaning", "2026-11-09T21:23:56+00:00", "9d47ffcedfd044c0056fa8e91db71ce75e80ce58", "https://www.posta.com.tr/gundem/cop31-baskani-bakan-kurum-ev-sahibi-ulke-olarak-israili-davet-etmedik-3062733", "COP31 Başkanı Bakan Kurum: Ev sahibi ülke olarak İsrail'i davet etmedik", "COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum, NTV canlı yayınında Antalya'da düzenlenen Birleşmiş Milletler İklim Değişikliği Çerçeve Sözleşmesi'nin (UNFCCC) 31. Taraflar Konferansı'na (COP31) ilişkin soruları yanıtladı.\nİzmir'in Aliağa ilçesindeki demir çelik fabrikasında meydana gelen patlamada hayatını kaybedenlere Allah'tan rahmet, yaralılara acil şifalar dileyen Kurum, devletin tüm ilgili birimlerinin yaralılara yönelik çalışmaları sürdürdüğünü söyledi. Baka..."),
+];
+
+// 7abb902e-6087-4383-acec-f6cb8b6b2c27 (8 kaynak)
+const H132_HAB_TITLE = "Aliağa fabrika patlaması | Tülay Hatimoğulları: ‘İşçilerin yaşamında fıtrat ölüm değildir’";
+const H132_HAB_SUMMARY = "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, yaşanan patlamada 17 işçinin yaşamını yitirdiği HABAŞ önünde açıklama yapıyor.";
+const H132_HAB_MEMBERS: ClusterDetailMember[] = [
+  h132("Karar", "karar", "outlet", "center", "2026-11-10T13:14:38+00:00", "ebf58ed48d6de575ff7d4cd91ac4d2feee3222bf", "https://www.karar.com/guncel-haberler/habas-faciasinin-ardindan-hatimogullarindan-istifa-cagrisi-bir-gun-dahi-2083398", "HABAŞ faciasının ardından Hatimoğulları'ndan istifa çağrısı: Bir gün dahi görevde kalmamalılar", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, HABAŞ Demir Çelik Fabrikası'nda 17 işçinin hayatını kaybettiği patlamanın ardından ilgili bakan ve yöneticilere istifa çağrısında bulundu. Fabrika önünde açıklama yapan Hatimoğulları, yaşananları \"iş cinayeti\" olarak nitelendirerek, \"Sorumlular derhal istifa etmelidir, bir gün dahi görevde kalmamalıdır\" dedi."),
+  h132("BirGün", "birgun", "outlet", "opposition", "2026-11-10T12:30:00+00:00", "aff4cd9fe17b329b51ae9cba12e942e882d8e4c1", "https://www.birgun.net/haber/izmir-deki-fabrikada-patlama-dem-parti-den-bakan-isikhan-a-istifa-cagrisi-745654", "İzmir'deki fabrikada patlama: DEM Parti'den Bakan Işıkhan'a istifa çağrısı", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, 17 işçinin yaşamını yitirdiği Aliağa'daki HABAŞ Demir Çelik Fabrikası önünde açıklama yaptı. İstifa çağrısında bulunan Hatimoğulları, \"Bunun sorumlusu olan Çalışma ve Sosyal Güvenlik Bakanı, İş Sağlığı ve Güvenliği Genel Müdürü, Sanayi ve Teknoloji Bakanı, Rehberlik ve Teftiş Bakanı derhal istifa etmelidir, bir gün dahi görevde kalmamalıdır\" ifadelerini kullandı."),
+  h132("Independent Türkçe", "indyturk", "outlet", "center", "2026-11-10T12:24:57+00:00", "a469763d8150da9ae1a165d181828bcbff523a4f", "https://www.indyturk.com/node/785027/siyaset/dem-parti-e%C5%9F-genel-ba%C5%9Fkan%C4%B1-hatimo%C4%9Fullar%C4%B1-sorumlular-derhal-istifa-etmelidir-bir", "DEM Parti Eş Genel Başkanı Hatimoğulları: Sorumlular derhal istifa etmelidir", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları ve beraberindeki heyet, 17 işçinin yaşamını yitirdiği Aliağa'daki HABAŞ Demir Çelik Fabrikası önünde yaptığı açıklamada, şunları kaydetti:\n\n\nİzmir Aliağa’da büyük bir patlama sonucu işçilerin yaşamını kaybettiği fabrikanın önündeyiz. HABAŞ’ın demir çelik fabrikasında yaşanan bu katliam bir kaza değil iş cinayetidir. Gerçekten katliam gibi bir durumla karşı karşıyayız. İzmir Şehir Hastanesi'nde bir yaralı işçi kardeşimizle görüşme fırsatımız oldu ..."),
+  h132("Dokuz8 Haber", "dokuz8-haber", "outlet", "center", "2026-11-10T12:16:51+00:00", "60cff6c792d824ccc730b43e196ce9212b9b2845", "https://dokuz8haber.net/tulay-hatimogullari-aliagada-konustu-sorumlular-derhal-istifa-etmelidir-bir-gun-dahi-gorevde-kalmamalidir", "Tülay Hatimoğulları Aliağa'da konuştu: Sorumlular derhal istifa etmelidir, bir gün dahi görevde kalmamalıdır", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, 17 işçinin yaşamını yitirdiği HABAŞ fabrikası önünde yaptığı açıklamada, patlamanın kaza değil cinayet olduğunu belirterek ilgili bakanlar ile denetimden sorumlu kamu yöneticilerini derhal istifa etmeye çağırdı."),
+  h132("Haberler.com", "haberler-com", "aggregator", "gov_leaning", "2026-11-10T12:09:22+00:00", "8538f350edb08f7a39f8e661e0d9a76f0cd7873d", "https://www.haberler.com/guncel/hatimogullari-habas-onunde-17-iscinin-olumu-icin-20413877-haberi/", "Hatimoğulları, HABAŞ önünde 17 işçinin ölümü için bakanlara istifa çağrısı yaptı", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, 17 işçinin yaşamını yitirdiği Aliağa'daki HABAŞ Demir Çelik Fabrikası önünde olayın kaza değil iş cinayeti olduğunu söyledi. Hatimoğulları, Çalışma ve Sosyal Güvenlik Bakanı ile sorumlu yetkililerin derhal istifa etmesini istedi."),
+  h132("İlke TV", "ilke-tv", "outlet", "opposition_leaning", "2026-11-10T09:40:43+00:00", "3cca76273aecb072862acfbc5ad55a6588485802", "https://ilketv.com.tr/dem-parti-es-genel-baskani-hatimogullari-habas-fabrikasi-onunde-konusuyor/", "Aliağa fabrika patlaması | Tülay Hatimoğulları: ‘İşçilerin yaşamında fıtrat ölüm değildir’", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, yaşanan patlamada 17 işçinin yaşamını yitirdiği HABAŞ önünde açıklama yapıyor."),
+  h132("Cumhuriyet", "cumhuriyet", "outlet", "opposition_leaning", "2026-11-10T13:12:00+00:00", "9d1ad9cb306919b8f6600487e98ab80192bb088e", "https://www.cumhuriyet.com.tr/turkiye/tulay-hatimogullari-ndan-iktidara-habas-tepkisi-sorumlular-bir-gun-dahi-gorevde-kalmamali-2555064", "Tülay Hatimoğulları'ndan iktidara 'HABAŞ' tepkisi: 'Sorumlular bir gün dahi görevde kalmamalı'", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, 17 işçinin yaşamını yitirdiği Aliağa’daki HABAŞ Demir Çelik Fabrikası önünde yaptığı açıklamada yaşananları “iş cinayeti” olarak nitelendirdi. Hatimoğulları, iş güvenliği önlemlerinin alınmadığını ve denetim mekanizmalarının işlemediğini savunarak Çalışma ve Sosyal Güvenlik Bakanı ile ilgili kamu yöneticilerinin istifa etmesi çağrısında bulundu."),
+  h132("Elips Haber", "elips-haber", "outlet", "opposition_leaning", "2026-11-10T12:56:00+00:00", "41551ba0eea61954feb60d4fa09a4108efb86067", "https://www.elipshaber.com/tulay-hatimogullari-habas-onunde-patrona-da-devlet-mekanizmalarina-da-bedeli-odetilmeli", "Tülay Hatimoğulları, HABAŞ önünde: ‘Patrona da devlet mekanizmalarına da bedeli ödetilmeli!’", "DEM Parti Eş Genel Başkanı Tülay Hatimoğulları ve beraberindeki kitle, 17 işçinin hayatını kaybettiği İzmir Aliağa'daki HABAŞ Demir Çelik Fabrikası'nın önünde basın açıklaması düzenledi. Yaşananların basit bir kaza olarak değerlendirilemeyeceğini, bunun açık bir iş cinayeti olduğunu ifade eden Hatimoğulları, denetim eksikliklerine ve şirketlerin kâr hırsına sert eleştiriler yöneltti."),
+];
+
+const H132_ALL: Array<[string, string, string, ClusterDetailMember[]]> = [
+  ["ece7ef31", H132_ECE_TITLE, H132_ECE_SUMMARY, H132_ECE_MEMBERS],
+  ["78d3a0ee", H132_GOK_TITLE, H132_GOK_SUMMARY, H132_GOK_MEMBERS],
+  ["7bc0b1bb", H132_DIL_TITLE, H132_DIL_SUMMARY, H132_DIL_MEMBERS],
+  ["7a31a7ff", H132_GAB_TITLE, H132_GAB_SUMMARY, H132_GAB_MEMBERS],
+  ["2f5d7d53", H132_CAM_TITLE, H132_CAM_SUMMARY, H132_CAM_MEMBERS],
+  ["56eaa832", H132_FID_TITLE, H132_FID_SUMMARY, H132_FID_MEMBERS],
+  ["9dd62dcd", H132_NTV_TITLE, H132_NTV_SUMMARY, H132_NTV_MEMBERS],
+  ["7abb902e", H132_HAB_TITLE, H132_HAB_SUMMARY, H132_HAB_MEMBERS],
+];
+
+/** The score of a member's tidied text against the cluster title. */
+const h132Score = (title: string, members: ClusterDetailMember[], name: string): number => titleAgreement(title, shownOf(byName(members, name))) ?? -1;
+
+describe("h132-ozetpost-1: the fixtures are what the cases below assume", () => {
+  it("every stored summary is the description of a member (the seed), and there are 2 to 12 members", () => {
+    for (const [id, , summary, members] of H132_ALL) {
+      const seeds = members.filter((m) => (m.article.description ?? "").trim() === summary.trim());
+      expect(seeds.length, id).toBeGreaterThan(0);
+      expect(members.length, id).toBeGreaterThanOrEqual(2);
+      expect(members.length, id).toBeLessThanOrEqual(12);
+    }
+  });
+
+  it("ece7ef31: Star's and Akşam's lines are live lines, CNN Türk's sentence is clean; the seed scores 0.8 against the title", () => {
+    const star = byName(H132_ECE_MEMBERS, "Star");
+    expect(star.article.description).toBe(H132_ECE_SUMMARY);
+    expect(isLiveLine(shownOf(star))).toBe(true);
+    expect(seedDisqualified(H132_ECE_SUMMARY, shownOf(star), { memberTitle: star.article.title, clusterTitle: H132_ECE_TITLE })).toBe("live");
+    const aksam = byName(H132_ECE_MEMBERS, "Akşam");
+    expect(summaryDefect(aksam.article.description ?? "", shownOf(aksam))).toBe("live");
+    const cnn = byName(H132_ECE_MEMBERS, "CNN Türk");
+    expect(summaryDefect(cnn.article.description ?? "", shownOf(cnn))).toBeNull();
+    expect(h132Score(H132_ECE_TITLE, H132_ECE_MEMBERS, "CNN Türk")).toBeCloseTo(0.8, 9);
+    expect(h132Score(H132_ECE_TITLE, H132_ECE_MEMBERS, "Star")).toBeCloseTo(0.8, 9);
+  });
+
+  it("78d3a0ee, 7bc0b1bb, 7a31a7ff: the seed is a stub under 0.3 and the clean member scores between 0.5 and 0.6", () => {
+    for (const [title, summary, members, seedName, winner] of [
+      [H132_GOK_TITLE, H132_GOK_SUMMARY, H132_GOK_MEMBERS, "Sözcü", "Mynet"],
+      [H132_DIL_TITLE, H132_DIL_SUMMARY, H132_DIL_MEMBERS, "Sözcü", "Evrensel"],
+      [H132_GAB_TITLE, H132_GAB_SUMMARY, H132_GAB_MEMBERS, "Muhalif", "Yeni Şafak"],
+    ] as const) {
+      const seed = byName(members as ClusterDetailMember[], seedName);
+      expect(seed.article.description, title).toBe(summary);
+      expect(seedDisqualified(summary, shownOf(seed), { memberTitle: seed.article.title, clusterTitle: title }), title).toBe("stub");
+      expect(h132Score(title, members as ClusterDetailMember[], seedName), title).toBeLessThan(AGREEMENT_STUB_LOW_SEED);
+      const won = h132Score(title, members as ClusterDetailMember[], winner);
+      expect(won, title).toBeGreaterThanOrEqual(AGREEMENT_LOW);
+      expect(won, title).toBeLessThan(AGREEMENT_FORM_DEFECT_MIN);
+      const wonMember = byName(members as ClusterDetailMember[], winner);
+      expect(summaryDefect(wonMember.article.description ?? "", shownOf(wonMember)), title).toBeNull();
+    }
+  });
+
+  it("2f5d7d53 and 56eaa832: the seeds are stubs at 0.44 and 0.5, so they are not under the low line", () => {
+    for (const [title, summary, members, seedName, score] of [
+      [H132_CAM_TITLE, H132_CAM_SUMMARY, H132_CAM_MEMBERS, "Sözcü", 4 / 9],
+      [H132_FID_TITLE, H132_FID_SUMMARY, H132_FID_MEMBERS, "Muhalif", 0.5],
+    ] as const) {
+      const seed = byName(members as ClusterDetailMember[], seedName);
+      expect(seed.article.description, title).toBe(summary);
+      expect(seedDisqualified(summary, shownOf(seed), { memberTitle: seed.article.title, clusterTitle: title }), title).toBe("stub");
+      expect(h132Score(title, members as ClusterDetailMember[], seedName), title).toBeCloseTo(score, 9);
+      expect(h132Score(title, members as ClusterDetailMember[], seedName), title).toBeGreaterThanOrEqual(AGREEMENT_STUB_LOW_SEED);
+    }
+  });
+});
+
+describe("h132-ozetpost-1: the four Özets that change", () => {
+  it("ece7ef31: Star's live line (a digit-bearing name) gives way to CNN Türk's sentence", () => {
+    const res = resolve(H132_ECE_TITLE, H132_ECE_SUMMARY, H132_ECE_MEMBERS);
+    const cnn = byName(H132_ECE_MEMBERS, "CNN Türk");
+    expect(res?.source?.name).toBe("CNN Türk");
+    expect(res?.text).toBe(shownOf(cnn));
+    expect(res?.text).toContain("iklim hedeflerinin somut yatırımlara dönüştürülmesi gerektiğini söyledi");
+    expect(isLiveLine(res?.text ?? "")).toBe(false);
+  });
+
+  it("ece7ef31: the meta description carries CNN Türk's sentence, not 'konuşuyor'", () => {
+    const res = resolve(H132_ECE_TITLE, H132_ECE_SUMMARY, H132_ECE_MEMBERS);
+    const meta = describeForMeta({ count: H132_ECE_MEMBERS.length, attribution: res, title: H132_ECE_TITLE });
+    expect(meta.startsWith("6 kaynak. CNN Türk: COP31 Başkanı ve Çevre, Şehircilik ve İklim Değişikliği Bakanı Murat Kurum")).toBe(true);
+    expect(meta).not.toContain("konuşuyor");
+  });
+
+  it("ece7ef31: Akşam's copy of the line (it ends with a full stop) is not the replacement either", () => {
+    const res = resolve(H132_ECE_TITLE, H132_ECE_SUMMARY, H132_ECE_MEMBERS);
+    expect(res?.source?.name).not.toBe("Akşam");
+    // Without CNN Türk nothing is clean and above the floor: the seed stays, never blank.
+    const without = resolve(H132_ECE_TITLE, H132_ECE_SUMMARY, H132_ECE_MEMBERS.filter((m) => m.source.name !== "CNN Türk"));
+    expect(without?.source?.name).toBe("Star");
+    expect(without?.text).toBe(H132_ECE_SUMMARY);
+  });
+
+  it("78d3a0ee: Sözcü's cut ('... Aile ...', 0.0) gives way to Mynet's clean sentence (0.56), not to the aggregator's 0.89", () => {
+    const res = resolve(H132_GOK_TITLE, H132_GOK_SUMMARY, H132_GOK_MEMBERS);
+    expect(res?.source?.name).toBe("Mynet");
+    expect(res?.text).toBe(shownOf(byName(H132_GOK_MEMBERS, "Mynet")));
+    expect(res?.text).toContain("Bakan Mahinur Özdemir Göktaş, komisyon üyelerini tek tek selamlarken");
+    expect(res?.text.endsWith("...")).toBe(false);
+    expect(byName(H132_GOK_MEMBERS, "Haberler.com").source.kind).toBe("aggregator");
+    expect(h132Score(H132_GOK_TITLE, H132_GOK_MEMBERS, "Haberler.com")).toBeGreaterThan(h132Score(H132_GOK_TITLE, H132_GOK_MEMBERS, "Mynet"));
+  });
+
+  it("7bc0b1bb: Sözcü's cut (0.2) gives way to Evrensel's sentence (Dilipak's reply, 0.5, inclusive), not to 10Haber's cut (0.8)", () => {
+    const res = resolve(H132_DIL_TITLE, H132_DIL_SUMMARY, H132_DIL_MEMBERS);
+    expect(res?.source?.name).toBe("Evrensel");
+    expect(res?.text).toBe(shownOf(byName(H132_DIL_MEMBERS, "Evrensel")));
+    expect(res?.text).toContain("Abdurrahman Dilipak");
+    expect(h132Score(H132_DIL_TITLE, H132_DIL_MEMBERS, "Evrensel")).toBeCloseTo(0.5, 9);
+    const tenHaber = byName(H132_DIL_MEMBERS, "10Haber");
+    expect(summaryDefect(tenHaber.article.description ?? "", shownOf(tenHaber))).toBe("stub");
+  });
+
+  it("7a31a7ff: Muhalif's cut (0.22) gives way to Yeni Şafak's sentence (0.56)", () => {
+    const res = resolve(H132_GAB_TITLE, H132_GAB_SUMMARY, H132_GAB_MEMBERS);
+    expect(res?.source?.name).toBe("Yeni Şafak");
+    expect(res?.text).toBe(shownOf(byName(H132_GAB_MEMBERS, "Yeni Şafak")));
+    expect(res?.text).toContain("Gabon Cumhurbaşkanı Yardımcısı Alexandre Barro Chambrier ile bir araya geldi");
+  });
+
+  it("the four picks do not depend on the order of the members", () => {
+    for (const [title, summary, members, winner] of [
+      [H132_ECE_TITLE, H132_ECE_SUMMARY, H132_ECE_MEMBERS, "CNN Türk"],
+      [H132_GOK_TITLE, H132_GOK_SUMMARY, H132_GOK_MEMBERS, "Mynet"],
+      [H132_DIL_TITLE, H132_DIL_SUMMARY, H132_DIL_MEMBERS, "Evrensel"],
+      [H132_GAB_TITLE, H132_GAB_SUMMARY, H132_GAB_MEMBERS, "Yeni Şafak"],
+    ] as const) {
+      const list = members as ClusterDetailMember[];
+      expect(resolve(title, summary, [...list].reverse())?.source?.name, title).toBe(winner);
+      expect(resolve(title, summary, [...list].sort((a, b) => a.article.published_at.localeCompare(b.article.published_at)))?.source?.name, title).toBe(winner);
+    }
+  });
+
+  it("without the headline (rss.xml, the digest, the cards) every seed stays, as before", () => {
+    for (const [, , summary, members] of H132_ALL) {
+      const res = summaryAttribution({ summary, members, wire: NOT_WIRE });
+      expect(res?.text).toBe(tidySummaryText(summary));
+    }
+  });
+});
+
+describe("h132-ozetpost-1: negative pins", () => {
+  it("2f5d7d53: a stub seed at 0.44 keeps its 0.6 floor, and Sözcü stays", () => {
+    const res = resolve(H132_CAM_TITLE, H132_CAM_SUMMARY, H132_CAM_MEMBERS);
+    expect(res?.source?.name).toBe("Sözcü");
+    expect(res?.text).toBe(shownOf(byName(H132_CAM_MEMBERS, "Sözcü")));
+  });
+
+  it("56eaa832: a stub seed at 0.5 keeps its 0.6 floor although five clean members score exactly 0.5; Muhalif stays", () => {
+    const clean = H132_FID_MEMBERS.filter(
+      (m) => m.source.kind === "outlet" && m.source.name !== "Muhalif" && summaryDefect(m.article.description ?? "", shownOf(m)) === null && titleAgreement(H132_FID_TITLE, shownOf(m)) === 0.5,
+    );
+    expect(clean.length).toBeGreaterThanOrEqual(4);
+    const res = resolve(H132_FID_TITLE, H132_FID_SUMMARY, H132_FID_MEMBERS);
+    expect(res?.source?.name).toBe("Muhalif");
+    expect(res?.text).toBe(shownOf(byName(H132_FID_MEMBERS, "Muhalif")));
+  });
+
+  it("9dd62dcd: Haber7's line is live now, no member is clean and covers 0.6, so Haber7 stays and the Özet is never blank", () => {
+    const haber7 = byName(H132_NTV_MEMBERS, "Haber7");
+    expect(seedDisqualified(H132_NTV_SUMMARY, shownOf(haber7), { memberTitle: haber7.article.title, clusterTitle: H132_NTV_TITLE })).toBe("live");
+    for (const name of ["Milliyet", "Posta"]) {
+      const m = byName(H132_NTV_MEMBERS, name);
+      expect(summaryDefect(m.article.description ?? "", shownOf(m)), name).toBe("stub");
+    }
+    const res = resolve(H132_NTV_TITLE, H132_NTV_SUMMARY, H132_NTV_MEMBERS);
+    expect(res).toEqual({ text: shownOf(haber7), source: haber7.source });
+  });
+
+  it("7abb902e: İlke TV's line has '17 işçinin', a figure, so it is no live line and stays", () => {
+    const ilke = byName(H132_HAB_MEMBERS, "İlke TV");
+    expect(isLiveLine(shownOf(ilke))).toBe(false);
+    expect(seedDisqualified(H132_HAB_SUMMARY, shownOf(ilke), { memberTitle: ilke.article.title, clusterTitle: H132_HAB_TITLE })).toBeNull();
+    const res = resolve(H132_HAB_TITLE, H132_HAB_SUMMARY, H132_HAB_MEMBERS);
+    expect(res).toEqual({ text: shownOf(ilke), source: ilke.source });
+  });
+
+  it("85ef184c: the documented residual is unchanged, the live line stays (never blank)", () => {
+    const seedMember = byName(R85_MEMBERS, "Star");
+    expect(resolve(R85_TITLE, R85_SUMMARY, R85_MEMBERS)).toEqual({ text: shownOf(seedMember), source: seedMember.source });
+  });
+
+  it("a clean seed that scores 0.5 or more is never replaced, whatever the members say", () => {
+    // ece7ef31 with CNN Türk's sentence as the seed (0.8): the live lines of Star and Akşam are around it.
+    const cnn = byName(H132_ECE_MEMBERS, "CNN Türk");
+    expect(resolve(H132_ECE_TITLE, cnn.article.description ?? "", H132_ECE_MEMBERS)).toEqual({ text: shownOf(cnn), source: cnn.source });
+    // 78d3a0ee with Mynet's sentence as the seed (0.56): the aggregator scores 0.89 and is no candidate.
+    const mynet = byName(H132_GOK_MEMBERS, "Mynet");
+    expect(resolve(H132_GOK_TITLE, mynet.article.description ?? "", H132_GOK_MEMBERS)).toEqual({ text: shownOf(mynet), source: mynet.source });
+    // 56eaa832 with TRT Haber's sentence as the seed (0.5, clean): eight members score the same.
+    const trt = byName(H132_FID_MEMBERS, "TRT Haber");
+    expect(h132Score(H132_FID_TITLE, H132_FID_MEMBERS, "TRT Haber")).toBeCloseTo(0.5, 9);
+    expect(resolve(H132_FID_TITLE, trt.article.description ?? "", H132_FID_MEMBERS)).toEqual({ text: shownOf(trt), source: trt.source });
+  });
+
+  it("a clean seed below 0.5 is replaced only from 0.75 (the lowered floor is for a stub): 7abb902e's İlke TV stays", () => {
+    // İlke TV scores 0.4 and is clean; Dokuz8 Haber (0.6) and the aggregator (0.6) are below 0.75, Independent Türkçe (0.8) is a stub.
+    expect(h132Score(H132_HAB_TITLE, H132_HAB_MEMBERS, "İlke TV")).toBeCloseTo(0.4, 9);
+    expect(h132Score(H132_HAB_TITLE, H132_HAB_MEMBERS, "Dokuz8 Haber")).toBeCloseTo(0.6, 9);
+    expect(resolve(H132_HAB_TITLE, H132_HAB_SUMMARY, H132_HAB_MEMBERS)?.source?.name).toBe("İlke TV");
+  });
+
+  it("every cluster of the fixtures yields a non-empty Özet, with and without the headline (a seed that stays may still be a cut: never blank)", () => {
+    for (const [id, title, summary, members] of H132_ALL) {
+      const res = resolve(title, summary, members);
+      expect(res, id).not.toBeNull();
+      expect(res?.text.length ?? 0, id).toBeGreaterThan(0);
+      const plain = summaryAttribution({ summary, members, wire: NOT_WIRE });
+      expect(plain, id).not.toBeNull();
+      expect(plain?.text.length ?? 0, id).toBeGreaterThan(0);
+    }
+  });
+
+  it("the four clusters that change end in a complete sentence, not in a cut", () => {
+    for (const [, title, summary, members] of H132_ALL.slice(0, 4)) {
+      const res = resolve(title, summary, members);
+      expect(res?.text.endsWith("...")).toBe(false);
+      expect(res?.text.endsWith("…")).toBe(false);
+      expect(summaryDefect(res?.text ?? "", res?.text ?? "")).toBeNull();
+    }
+  });
+
+  it("BL-13: the replacement is a member whose source allows excerpts; a blocked CNN Türk leaves Star's line in place", () => {
+    const members = H132_ECE_MEMBERS.map((m) =>
+      m.source.name === "CNN Türk" ? { ...m, source: { ...m.source, excerpt_allowed: false } } : m,
+    );
+    const res = resolve(H132_ECE_TITLE, H132_ECE_SUMMARY, members);
+    expect(res?.source?.name).toBe("Star");
+    expect(res?.text).toBe(H132_ECE_SUMMARY);
   });
 });
