@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,7 +72,10 @@ import {
   FEED_YIELD_WINDOW_MS,
 } from "@/lib/clusters/feed-health";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
-import { RECALL_MATCH_MIN_PROB } from "@/lib/clusters/recall-matched-zones";
+import {
+  RECALL_MATCH_MIN_PROB,
+  RECALL_MATCH_NOTE,
+} from "@/lib/clusters/recall-matched-zones";
 import { SIBLING_VETO } from "@/lib/clusters/sibling-veto";
 import {
   NEAR_BLINDSPOT_DISPLAY_LIMIT,
@@ -188,11 +192,12 @@ describe("/metodoloji page", () => {
     // Assert the interpolated phrasing, not bare digits — a bare-digit
     // assertion (e.g. `toContain("5")`) would still pass if the prose used
     // a hardcoded literal instead of the contract constant.
-    expect(text).toContain(`en az ${BLINDSPOT.minSources} kaynak yer almalı`);
+    // Only voting sources count toward both thresholds (h120-methodology-1).
+    expect(text).toContain(`en az ${BLINDSPOT.minSources} oy veren kaynak (haber kuruluşu ya da ajans) yer almalı`);
     expect(text).toContain(`≥ %${Math.round(BLINDSPOT.dominantShare * 100)}`);
     expect(text).toContain(`${BLINDSPOT.feedDelayHours} saat sonra`);
 
-    expect(text).toContain(`en az ${SURPRISE.minSources} kaynak`);
+    expect(text).toContain(`en az ${SURPRISE.minSources} oy veren kaynak`);
     expect(text).toContain(`≥ %${Math.round(SURPRISE.dominantShare * 100)}`);
     expect(text).toContain(`${SURPRISE.minMargin} fazla`);
 
@@ -325,20 +330,122 @@ describe("/metodoloji page", () => {
     expect(feedHealth).toBeGreaterThan(mine);
   });
 
-  it("lists the 2026-11-07 CHANGELOG entry first and the footer reads that date (h62-methodology-2)", async () => {
+  // h120-methodology-1: the footer is pinned to the FIRST rendered entry, never to a
+  // literal of an older entry, so the next CHANGELOG line cannot leave a stale pin
+  // behind. The date below is the newest entry's.
+  it("lists the 2026-11-10 CHANGELOG entry first and the footer reads the first rendered entry's date (h120-methodology-1)", async () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
     const tail = text.slice(text.indexOf("Son güncelleme:"));
-    expect(tail.startsWith("Son güncelleme: 2026-11-07")).toBe(true);
-    expect(/Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(tail)?.[1]).toBe("2026-11-07");
-    // The first list item: its date directly precedes its text, and the footer
-    // is not left on the date of the previous newest entry (2026-11-05).
-    expect(tail).toContain("2026-11-07 Denge puanı:");
-    expect(tail.startsWith("Son güncelleme: 2026-11-05")).toBe(false);
+    const footer = /Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(tail)?.[1];
+    const entryDates = tail.match(/\d{4}-\d{2}-\d{2}/g)?.slice(1) ?? [];
+    // The footer is the first rendered entry's date, and that is the newest.
+    expect(footer).toBe(entryDates[0]);
+    expect(footer).toBe("2026-11-10");
+    expect(tail.startsWith(`Son güncelleme: ${entryDates[0]}`)).toBe(true);
+    // The first list item: its date directly precedes its text, and it comes
+    // before the 2026-11-09, 2026-11-08 and 2026-11-07 entries.
+    const first = tail.indexOf(`${entryDates[0]} Kör nokta ifadesi:`);
+    expect(first).toBeGreaterThan(0);
+    expect(first).toBeLessThan(tail.indexOf("2026-11-09 Kaynak göstergeleri:"));
+    expect(tail.indexOf("2026-11-09 Kaynak göstergeleri:")).toBeLessThan(
+      tail.indexOf("2026-11-08 Kör Noktalar listesi:"),
+    );
+    expect(tail.indexOf("2026-11-08 Kör Noktalar listesi:")).toBeLessThan(
+      tail.indexOf("2026-11-07 Denge puanı:"),
+    );
     expect(tail.indexOf("2026-11-07 Denge puanı:")).toBeLessThan(
       tail.indexOf("2026-11-06 Köşe yazıları:"),
     );
+  });
+
+  // h120-methodology-1 (b): the date order of the whole list, newest first.
+  it("renders the CHANGELOG dates newest first: 2026-11-10, -09, -08, -07, -06, ... (h120-methodology-1)", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    const tail = text.slice(text.indexOf("Son güncelleme:"));
+    const entryDates = (tail.match(/\d{4}-\d{2}-\d{2}/g) ?? []).slice(1);
+    expect(entryDates.slice(0, 7)).toEqual([
+      "2026-11-10",
+      "2026-11-09",
+      "2026-11-08",
+      "2026-11-07",
+      "2026-11-06",
+      "2026-11-05",
+      "2026-11-02",
+    ]);
+    // Newest first all the way down: the list is already in descending order.
+    expect(entryDates).toEqual([...entryDates].sort().reverse());
+  });
+
+  // h120-methodology-1 (c): each new entry names the change it logs, the numbers
+  // from the constants the code runs on, never typed.
+  describe("the 2026-11-08 to 2026-11-10 CHANGELOG entries (h120-methodology-1)", () => {
+    async function changelogEntry(date: string): Promise<string> {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+      const tail = text.slice(text.indexOf("Son güncelleme:"));
+      // From "<date> " to the next ISO date (the next entry), or the end.
+      const start = tail.indexOf(`${date} `, "Son güncelleme: ".length + date.length);
+      expect(start).toBeGreaterThan(0);
+      const rest = tail.slice(start + date.length + 1);
+      const next = rest.search(/\d{4}-\d{2}-\d{2}/);
+      return next === -1 ? rest : rest.slice(0, next);
+    }
+
+    it("2026-11-10 is wording only: the Jev threshold, the cards' and the cluster page's new wording, and 'the rule did not change'", async () => {
+      const entry = await changelogEntry("2026-11-10");
+
+      expect(RECALL_MATCH_MIN_PROB).toBe(0.7);
+      expect(entry).toContain(`%${Math.round(RECALL_MATCH_MIN_PROB * 100)}`);
+      expect(entry).toContain(RECALL_MATCH_NOTE);
+      expect(entry).toContain("“Sadece X yazdı” yerine “Kümede sadece X”");
+      expect(entry).toContain("Kör nokta kuralının kendisi değişmedi; yalnızca ifade değişti.");
+    });
+
+    it("2026-11-09 has the Başka kaynaklarla aynı başlık ve özet change (every cluster) and the rare-stem tier, numbers from SIBLING_VETO", async () => {
+      const entry = await changelogEntry("2026-11-09");
+
+      expect(entry).toContain("Başka kaynaklarla aynı başlık ve özet");
+      expect(entry).toContain("kaynağın yer aldığı her kümeyi");
+      expect(entry).toContain("tek kaynaktan dağıtım");
+      expect(entry).toContain(`%${Math.round(SIBLING_VETO.looseMinJaccard * 100)}`);
+      expect(entry).toContain(
+        `%${(SIBLING_VETO.rareMaxDocShare * 100).toLocaleString("tr-TR")}'inde`,
+      );
+      expect(entry).toContain(`en az ${SIBLING_VETO.rareMinShared} seyrek kökü`);
+      expect(entry).toContain(`yine en az ${SIBLING_VETO.looseMinShared}`);
+      expect(entry).toContain("seyrek kök");
+      expect(entry).toContain("aynı olay sayılıyor");
+      // The veto still only withdraws the claim when the added sources break the threshold.
+      expect(entry).toContain("baskınlık eşiği tutmuyorsa kör nokta işareti gösterilmiyor");
+    });
+
+    it("2026-11-08 says the list drops a story below the independent-text share, and that the label can still show on the card and the story page", async () => {
+      const entry = await changelogEntry("2026-11-08");
+
+      expect(BLINDSPOT_LIST_FILTERS.minIndependentTextRatio).toBe(0.5);
+      expect(entry).toContain(
+        `%${Math.round(BLINDSPOT_LIST_FILTERS.minIndependentTextRatio * 100)}'den azı birbirinden farklıysa`,
+      );
+      expect(entry).toContain("aynı içerik özeti ya da aynı başlık tek metin sayılır");
+      expect(entry).toContain("kartta ve haber sayfasında yine görünebilir");
+    });
+
+    it("quotes no typed digit: every number in the three entries comes from a constant", () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(join(here, "page.tsx"), "utf8");
+      // The CHANGELOG array, from its opening to the first entry older than these three.
+      const block = source.slice(source.indexOf("const CHANGELOG = ["), source.indexOf('date: "2026-11-07"'));
+      const entries = block.split(/\n\s*\{\n/).filter((piece) => piece.includes("text:"));
+      expect(entries).toHaveLength(3);
+      for (const entry of entries) {
+        const text = entry.slice(entry.indexOf("text:")).replace(/\$\{[^}]*\}/g, "#");
+        expect(text).not.toMatch(/\d/);
+      }
+    });
   });
 
   it("keeps the feed-delay CHANGELOG entry, dated 2026-11-05, with no exception for the saved list (h37-content-1)", async () => {
@@ -351,8 +458,13 @@ describe("/metodoloji page", () => {
     expect(entry).not.toContain("Kaydedilenler");
     const tail = text.slice(text.indexOf("Son güncelleme:"));
     expect(tail).toContain(`2026-11-05 ${entry}`);
-    // It comes before the 2026-11-02 and 2026-11-01 sibling-veto entries.
-    expect(tail.indexOf(entry)).toBeLessThan(tail.indexOf("Kör nokta doğrulaması genişledi:"));
+    // It comes before the 2026-11-02 and 2026-11-01 sibling-veto entries. The marker
+    // carries the date: the 2026-11-09 entry (h120-methodology-1) opens its second
+    // sentence with the same "Kör nokta doğrulaması genişledi:" and sits above this one.
+    expect(tail.indexOf(entry)).toBeLessThan(
+      tail.indexOf("2026-11-02 Kör nokta doğrulaması genişledi:"),
+    );
+    expect(tail.indexOf("2026-11-02 Kör nokta doğrulaması genişledi:")).toBeGreaterThan(0);
   });
 
   it("lists the sibling-veto CHANGELOG entry after the feed-delay and unclustered-arm entries, dated 2026-11-01", async () => {
@@ -366,10 +478,14 @@ describe("/metodoloji page", () => {
     // The entry's date directly precedes its text.
     expect(tail).toContain(`2026-11-01 ${entry}`);
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer, then the 2026-11-07, 2026-11-06 (h62-methodology-2), 2026-11-05 and
-    // 2026-11-02 (h62-methodology-1) entries, then this one.
-    expect(dates.slice(0, 6)).toEqual([
-      "2026-11-07",
+    // footer (the newest entry's date), then the 2026-11-10, -09 and -08 entries
+    // (h120-methodology-1), the 2026-11-07, 2026-11-06 (h62-methodology-2),
+    // 2026-11-05 and 2026-11-02 (h62-methodology-1) entries, then this one.
+    expect(dates.slice(0, 9)).toEqual([
+      "2026-11-10",
+      "2026-11-10",
+      "2026-11-09",
+      "2026-11-08",
       "2026-11-07",
       "2026-11-06",
       "2026-11-05",
@@ -1121,12 +1237,16 @@ describe("/metodoloji page: changelog order", () => {
     expect(denge).toBeGreaterThan(sources);
 
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer, then the 2026-11-07 balance/English entry, the 2026-11-06 column
+    // footer, then the 2026-11-10, -09 and -08 entries (h120-methodology-1), the
+    // 2026-11-07 balance/English entry, the 2026-11-06 column
     // entry, the 2026-11-05 feed-delay entry, the 2026-11-02 unclustered-arm
     // entry (148), the 2026-11-01 sibling-veto entry (126), then the three
     // 2026-10-22 entries
-    expect(dates.slice(0, 9)).toEqual([
-      "2026-11-07",
+    expect(dates.slice(0, 12)).toEqual([
+      "2026-11-10",
+      "2026-11-10",
+      "2026-11-09",
+      "2026-11-08",
       "2026-11-07",
       "2026-11-06",
       "2026-11-05",
@@ -1426,5 +1546,151 @@ describe("/metodoloji page: category table follows WRITABLE_SOURCE_BIAS (h43-sou
         expect(source).not.toContain(`'${key}'`);
       }
     });
+  });
+});
+
+// h120-methodology-1: the Kör nokta and Sürpriz rule cards said "en az 5 kaynak",
+// but both rules count the voting sources only (detectBlindspot reads the voting
+// tally, cross-spectrum.ts filters isVotingSource), so a cluster of 7 members of
+// which 4 vote is not a Kör nokta. Copy only: the numbers still come from
+// BLINDSPOT / SURPRISE.
+describe("/metodoloji page: the Kör nokta and Sürpriz cards count voting sources only (h120-methodology-1)", () => {
+  async function renderTree() {
+    const { default: MethodologyPage } = await import("./page");
+    return MethodologyPage();
+  }
+
+  function section(tree: unknown, id: string): Node {
+    const found = findElement(
+      tree,
+      (el) => el.type === "section" && el.props?.["aria-labelledby"] === id,
+    );
+    expect(found).not.toBeNull();
+    return found as Node;
+  }
+
+  /** The text of the rule card (dt + dd) inside `sectionNode` whose term is `term`. */
+  function cardText(sectionNode: Node, term: string): string {
+    const card = findElement(
+      sectionNode,
+      (el) =>
+        el.type === "div" && collectText(el.props?.children).join("").startsWith(term),
+    );
+    expect(card).not.toBeNull();
+    return collectText(card).join("");
+  }
+
+  const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
+  const surpriseSharePct = Math.round(SURPRISE.dominantShare * 100);
+
+  it("Kör nokta 'Kaynak eşiği' asks for voting sources (haber kuruluşu ya da ajans), the number from BLINDSPOT.minSources", async () => {
+    const tree = await renderTree();
+    const card = cardText(section(tree, "kor-nokta"), "Kaynak eşiği");
+
+    expect(card).toBe(
+      `Kaynak eşiğiKümede en az ${BLINDSPOT.minSources} oy veren kaynak (haber kuruluşu ya da ajans) yer almalı,`,
+    );
+    expect(card).toContain(`en az ${BLINDSPOT.minSources} oy veren kaynak`);
+    expect(BLINDSPOT.minSources).toBe(5);
+  });
+
+  it("Kör nokta 'Baskınlık eşiği' takes the share of the voting sources and says aggregators and niche sources are not counted", async () => {
+    const tree = await renderTree();
+    const card = cardText(section(tree, "kor-nokta"), "Baskınlık eşiği");
+
+    expect(card).toBe(
+      `Baskınlık eşiğive bu oy veren kaynakların tek bir Medya DNA bölgesi (İktidar, Bağımsız veya Muhalefet) payı ≥ %${dominantSharePct} olmalı; toplayıcı ve niş kaynaklar sayılmaz.`,
+    );
+    expect(dominantSharePct).toBe(80);
+  });
+
+  it("the paragraph under the cards names the voting-source floor", async () => {
+    const tree = await renderTree();
+    const kor = collectText(section(tree, "kor-nokta")).join("");
+
+    expect(kor).toContain(`Kümede ${BLINDSPOT.minSources} oy veren kaynaktan azı varsa`);
+    expect(kor).not.toContain(`Kümede ${BLINDSPOT.minSources} kaynaktan azı varsa`);
+  });
+
+  it("Sürpriz 'Kaynak eşiği' and 'Baskınlık eşiği' read the voting sources, numbers from SURPRISE", async () => {
+    const tree = await renderTree();
+    const surpriz = section(tree, "surpriz");
+
+    expect(cardText(surpriz, "Kaynak eşiği")).toBe(
+      `Kaynak eşiğiKümede en az ${SURPRISE.minSources} oy veren kaynak varsa,`,
+    );
+    expect(cardText(surpriz, "Baskınlık eşiği")).toBe(
+      `Baskınlık eşiğibir Medya DNA bölgesi oy veren kaynakların ≥ %${surpriseSharePct}'ini oluşturuyorsa,`,
+    );
+    expect(SURPRISE.minSources).toBe(5);
+    expect(surpriseSharePct).toBe(65);
+  });
+
+  it("Sürpriz 'Karşı taraf + marj' counts voting sources too, the margin from SURPRISE.minMargin", async () => {
+    const tree = await renderTree();
+    const card = cardText(section(tree, "surpriz"), "Karşı taraf + marj");
+
+    expect(card).toBe(
+      `Karşı taraf + marjve karşıt bölgeden en az bir oy veren kaynak habere yer vermiş, baskın bölgedeki oy veren kaynak sayısı ise karşıt bölgedekinden en az ${SURPRISE.minMargin} fazla olmalı.`,
+    );
+  });
+
+  it("the page no longer says the bare 'kaynak' thresholds", async () => {
+    const text = collectText(await renderTree()).join("");
+
+    expect(text).not.toContain(`Kümede en az ${BLINDSPOT.minSources} kaynak yer almalı`);
+    expect(text).not.toContain(`Kümede en az ${SURPRISE.minSources} kaynak varsa`);
+    expect(text).not.toContain("ve bu kaynakların tek bir Medya DNA bölgesi");
+    expect(text).not.toContain("bir Medya DNA bölgesi kümenin ≥");
+  });
+
+  it("states the thresholds in one text node, so the sentence reads as written in the HTML", async () => {
+    const tree = await renderTree();
+    const dd = findElement(
+      tree,
+      (el) =>
+        el.type === "dd" &&
+        typeof el.props?.children === "string" &&
+        el.props.children.startsWith("Kümede en az"),
+    );
+    expect(dd).not.toBeNull();
+    expect(collectText(dd).join("")).toContain(
+      "oy veren kaynak (haber kuruluşu ya da ajans) yer almalı",
+    );
+  });
+});
+
+// h120-methodology-1 (e): the page text outside the CHANGELOG is the published rule
+// contract. This pin makes any edit to it visible in review.
+describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
+  // If this fails and the change alters a rule or the meaning of a published number,
+  // add a CHANGELOG entry; then update the hash.
+  const RULES_SHA256 = "93291c7deca116a2d878666d2b509d48949806ae783e8b23f4f87b034c329be9";
+
+  it("the rendered text of everything above the CHANGELOG hashes to the pinned value", async () => {
+    // The two inputs that are not the page's own text: the registry-backed tagged
+    // count (an empty registry prints zeros) and the contact mailto.
+    mockNeutralStatus = { neutralized: 0, eligible: 12 };
+    mockActiveSlugs = [];
+    mockExtraMetadata = {};
+    const originalEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    try {
+      vi.resetModules();
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+      const rules = text.slice(0, text.indexOf("Son güncelleme:"));
+
+      // Non-vacuous: the rule cards and the prompt are in the pinned text.
+      expect(rules).toContain(`en az ${BLINDSPOT.minSources} oy veren kaynak`);
+      expect(rules).toContain(HEADLINE_PROMPT_TEMPLATE);
+      expect(rules).not.toContain("2026-11-");
+
+      expect(createHash("sha256").update(rules).digest("hex")).toBe(RULES_SHA256);
+    } finally {
+      if (originalEmail === undefined) delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+      else process.env.NEXT_PUBLIC_CONTACT_EMAIL = originalEmail;
+      mockActiveSlugs = ["sabah", "anadolu-ajansi", "bilinmeyen-kaynak"];
+    }
   });
 });

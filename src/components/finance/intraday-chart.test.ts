@@ -205,6 +205,95 @@ describe("IntradayChart closeOverride (h92-marketclock-1)", () => {
   });
 });
 
+// h120-finance-2: the last bar of a finished session is an 18:00 pre-auction stub (volume 0) whose close can
+// differ from the settled close. SISE 2026-11-10: stub 35,46 (red against the previous close 35,48), settled
+// 35,72 (green, header +%0,68). The page now passes the settled close with overrideReason 'auction': the colour,
+// the tag and the level follow it, and the aria-label drops the 'gün içi veri eksik' clause (the bars are all
+// there; only the last print was a stub). Without overrideReason the 'cut' wording is unchanged.
+describe("IntradayChart overrideReason 'auction' (h120-finance-2)", () => {
+  const bars: Bar5m[] = [
+    { ts: "2026-11-10T07:00:00.000Z", close: 35.5, volume: 900 },
+    { ts: "2026-11-10T09:00:00.000Z", close: 35.4, volume: 700 },
+    { ts: "2026-11-10T14:55:00.000Z", close: 35.5, volume: 4000 },
+    { ts: "2026-11-10T15:00:00.000Z", close: 35.46, volume: 0 },
+  ];
+  const PREV = 35.48;
+  const render = (extra: { closeOverride?: number | null; overrideReason?: "cut" | "auction" } = {}) =>
+    renderToStaticMarkup(IntradayChart({ bars, markers: [], prevClose: PREV, ...extra }));
+  const ariaOf = (html: string) => /aria-label="([^"]+)"/.exec(html)?.[1];
+  const pathClass = (html: string) => /<path d="[^"]+"[^>]*class="([^"]+)"/.exec(html)?.[1];
+  const lastTag = (html: string) =>
+    /<span aria-hidden="true" data-chart-label="true" class="[^"]*text-(emerald|red)-400" style="top:([\d.]+)%">([^<]+)<\/span>/.exec(html);
+
+  it("the stub alone reads red 35,46 (the bug the override fixes)", () => {
+    const html = render();
+    expect(pathClass(html)).toContain("stroke-red-400");
+    expect(lastTag(html)?.[1]).toBe("red");
+    expect(lastTag(html)?.[3]).toBe("35,46");
+    expect(ariaOf(html)).toBe("Seans içi fiyat, son 35,46");
+  });
+
+  it("with the settled 35,72, prevClose 35,48 and reason 'auction': emerald path, tag 35,72, plain aria-label", () => {
+    const html = render({ closeOverride: 35.72, overrideReason: "auction" });
+    expect(pathClass(html)).toContain("stroke-emerald-400");
+    expect(pathClass(html)).not.toContain("stroke-red-400");
+    expect(lastTag(html)?.[1]).toBe("emerald");
+    expect(lastTag(html)?.[3]).toBe("35,72");
+    expect(html).not.toContain("35,46");
+    expect(ariaOf(html)).toBe("Seans içi fiyat, kapanış 35,72");
+    expect(html).not.toContain("gün içi veri eksik");
+  });
+
+  it("a settled close below the previous close under 'auction' is red and still has no 'veri eksik' clause", () => {
+    const html = render({ closeOverride: 35.3, overrideReason: "auction" });
+    expect(pathClass(html)).toContain("stroke-red-400");
+    expect(lastTag(html)?.[1]).toBe("red");
+    expect(lastTag(html)?.[3]).toBe("35,30");
+    expect(ariaOf(html)).toBe("Seans içi fiyat, kapanış 35,30");
+  });
+
+  it("the TUPRS shape: the stub is at the previous close (green by >=), the settled close is below it: red", () => {
+    const tuprs: Bar5m[] = [
+      { ts: "2026-11-10T07:00:00.000Z", close: 332, volume: 900 },
+      { ts: "2026-11-10T14:55:00.000Z", close: 331.5, volume: 4000 },
+      { ts: "2026-11-10T15:00:00.000Z", close: 332.25, volume: 0 },
+    ];
+    const stub = renderToStaticMarkup(IntradayChart({ bars: tuprs, markers: [], prevClose: 332.25 }));
+    expect(lastTag(stub)?.[1]).toBe("emerald");
+    const fixed = renderToStaticMarkup(IntradayChart({ bars: tuprs, markers: [], prevClose: 332.25, closeOverride: 331.25, overrideReason: "auction" }));
+    expect(lastTag(fixed)?.[1]).toBe("red");
+    expect(lastTag(fixed)?.[3]).toBe("331,25");
+    expect(pathClass(fixed)).toContain("stroke-red-400");
+  });
+
+  it("the path still draws the bars, whatever the override", () => {
+    const d = (html: string) => /<path d="([^"]+)"/.exec(html)?.[1];
+    expect(d(render({ closeOverride: 35.72, overrideReason: "auction" }))).toBe(d(render()));
+  });
+
+  it("the tag moves to the settled level (higher on the chart), inside 0-100", () => {
+    const before = Number(lastTag(render())?.[2]);
+    const after = Number(lastTag(render({ closeOverride: 35.72, overrideReason: "auction" }))?.[2]);
+    expect(after).toBeLessThan(before);
+    expect(after).toBeGreaterThanOrEqual(0);
+    expect(after).toBeLessThanOrEqual(100);
+  });
+
+  it("with the reason omitted the 'cut' aria-label is unchanged, and it equals an explicit 'cut'", () => {
+    const omitted = render({ closeOverride: 35.72 });
+    expect(ariaOf(omitted)).toBe("Seans içi fiyat, kapanış 35,72, gün içi veri eksik");
+    expect(render({ closeOverride: 35.72, overrideReason: "cut" })).toBe(omitted);
+  });
+
+  it("a reason with no usable override changes nothing: null, undefined and non-finite all read the last bar", () => {
+    const plain = render();
+    expect(render({ closeOverride: null, overrideReason: "auction" })).toBe(plain);
+    expect(render({ closeOverride: undefined, overrideReason: "auction" })).toBe(plain);
+    expect(render({ closeOverride: Number.NaN, overrideReason: "auction" })).toBe(plain);
+    expect(render({ closeOverride: Number.POSITIVE_INFINITY, overrideReason: "auction" })).toBe(plain);
+  });
+});
+
 // h101-a11yrecent-2 (WCAG 3.1.2 Language of Parts): the page is lang="tr", and the caption under the chart
 // prints each marker's headline. An English outlet's headline (Daily Sabah, Hürriyet Daily News, ...) was read
 // with Turkish phonetics. The page now passes lang: 'en' on such a marker and the caption's label span carries

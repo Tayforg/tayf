@@ -30,6 +30,13 @@ export interface Quote {
   hasBaseline: boolean;
   /** Daily closes, oldest first, for a sparkline. */
   closes: number[];
+  /**
+   * The Istanbul day (YYYY-MM-DD) of each element of `closes`: same length, same order. Absent when the timestamps
+   * could not be aligned with the closes. Optional because getQuote is cached remotely (expire 900 s) and an
+   * entry written before this field existed must keep working (h120-finance-1: session.sparklineCloses uses it to
+   * put the D-1 settled close back, which Yahoo leaves out of the 5d/1d array during a session).
+   */
+  closeDays?: string[];
   currency: string;
   asOf: string;
 }
@@ -113,6 +120,33 @@ function previousSessionClose(
   return null;
 }
 
+/** YYYY-MM-DD of an Istanbul day number (the output of istanbulDay). */
+function istanbulDayKey(ms: number): string {
+  return new Date(istanbulDay(ms) * DAY_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * The Istanbul day of each close that parseYahooChart keeps, in the same order, or undefined when the alignment
+ * cannot be proven: `timestamps` missing, not an array, not the same length as `rawCloses`, or a kept index whose
+ * timestamp is not a finite number. The kept indexes are exactly those of the `closes` filter in parseYahooChart
+ * (a finite number); a dropped bar's own timestamp is never read, so it may be null.
+ */
+function keptCloseDays(
+  rawCloses: ReadonlyArray<number | null>,
+  timestamps: ReadonlyArray<number | null> | undefined,
+): string[] | undefined {
+  if (!Array.isArray(timestamps) || timestamps.length !== rawCloses.length) return undefined;
+  const days: string[] = [];
+  for (let i = 0; i < rawCloses.length; i++) {
+    const close = rawCloses[i];
+    if (typeof close !== "number" || !Number.isFinite(close)) continue;
+    const ts = timestamps[i];
+    if (typeof ts !== "number" || !Number.isFinite(ts)) return undefined;
+    days.push(istanbulDayKey(ts * 1000));
+  }
+  return days;
+}
+
 export function parseYahooChart(ticker: string, json: unknown): Quote | null {
   const r = (json as YahooChart)?.chart?.result?.[0];
   const meta = r?.meta;
@@ -171,6 +205,7 @@ export function parseYahooChart(ticker: string, json: unknown): Quote | null {
     prevClose = price;
     hasBaseline = false;
   }
+  const closeDays = keptCloseDays(rawCloses, r.timestamp);
   return {
     ticker,
     price,
@@ -178,6 +213,7 @@ export function parseYahooChart(ticker: string, json: unknown): Quote | null {
     changePct,
     hasBaseline,
     closes,
+    ...(closeDays ? { closeDays } : {}),
     currency: meta.currency ?? "TRY",
     asOf: new Date((meta.regularMarketTime ?? Date.now() / 1000) * 1000).toISOString(),
   };

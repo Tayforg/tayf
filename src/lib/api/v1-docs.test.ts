@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { BLINDSPOT } from "@/lib/bias/config";
@@ -196,5 +199,69 @@ describe("Turkish strings of the v1 docs carry no ASCII decimal", () => {
     expect(asciiDecimals("0,2 altında")).toEqual([]);
     expect(asciiDecimals("HTTP 1.1 ile")).toEqual([{ match: "1.1", index: 5 }]);
     expect(asciiDecimals("OpenAPI 3.1 ve 0.5")).toEqual([{ match: "0.5", index: 15 }]);
+  });
+});
+
+// h120-methodology-2: the alerts feed and the webhook cron now carry EVERY claim
+// of /blindspots (the 30 cards and the compact rows beneath them), so no copy may
+// still promise "at most 30" or say the cap matches the page.
+describe("alerts blindspot copy names the whole /blindspots list (h120-methodology-2)", () => {
+  const alerts = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/alerts/blindspots");
+  const API_MD = resolve(__dirname, "../../../docs/api.md");
+
+  /** The api.md section of GET /api/v1/alerts/blindspots, up to the next ### heading. */
+  function alertsSection(): string {
+    const md = readFileSync(API_MD, "utf8");
+    const start = md.indexOf("### `GET /api/v1/alerts/blindspots`");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const next = md.indexOf("\n### ", start + 10);
+    return md.slice(start, next === -1 ? undefined : next);
+  }
+
+  it("the first note says every /blindspots claim (cards and rows) and drops 'en çok 30 kayıt'", () => {
+    expect(alerts).toBeDefined();
+    const first = alerts!.notesTr[0]!;
+    expect(first).toContain("sitedeki /blindspots listesindeki her kayıt (kartlar ve satırlar)");
+    expect(first).not.toContain("en çok 30 kayıt");
+    expect(first).not.toContain("sitedeki /blindspots ile aynı");
+    // The rest of the rule text is untouched.
+    expect(first).toContain(`en az ${BLINDSPOT.minSources} oy veren kaynak`);
+    expect(first).toContain(`${BLINDSPOT.feedDelayHours} saat gecikmeli`);
+  });
+
+  it("no alerts note or parameter text promises a 30-claim cap", () => {
+    const texts = [
+      ...alerts!.notesTr,
+      ...alerts!.params.flatMap((p) => [p.descriptionTr, p.descriptionEn]),
+    ];
+    for (const t of texts) {
+      expect(t, t).not.toMatch(/en çok 30\b/);
+      expect(t, t).not.toMatch(/at most 30\b/i);
+      expect(t, t).not.toMatch(/30-blindspot/i);
+    }
+  });
+
+  it("docs/api.md: limit caps the merged list and there is no separate blindspot cap", () => {
+    const flat = alertsSection().replace(/\s+/g, " ");
+    expect(flat).toMatch(/no separate blindspot cap/i);
+    expect(flat).toContain("cards and rows");
+  });
+
+  it("docs/api.md: no sentence still says capped at 30, 'the same cap as /blindspots' or 'exactly the /blindspots page rule' with a cap", () => {
+    const flat = alertsSection().replace(/\s+/g, " ");
+    expect(flat).not.toMatch(/capped at 30/i);
+    expect(flat).not.toContain("the same cap as `/blindspots`");
+    expect(flat).not.toMatch(/at most 30 `blindspot`/);
+    expect(flat).not.toContain("30-blindspot cap");
+  });
+
+  it("docs/api.md keeps the contract it documented: limit 1-100 default 50, the 7-day since clamp, the 1000 silent candidate cap, truncated and the alert_at order", () => {
+    const flat = alertsSection().replace(/\s+/g, " ");
+    expect(flat).toContain("1-100, default 50");
+    expect(flat).toContain("clamped to 7 days");
+    expect(flat).toContain("`SILENT_CANDIDATE_LIMIT`");
+    expect(flat).toContain("1000");
+    expect(flat).toContain("`truncated`");
+    expect(flat).toContain("`alert_at` descending, ties by `cluster_id` ascending");
   });
 });

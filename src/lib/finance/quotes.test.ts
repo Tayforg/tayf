@@ -438,6 +438,79 @@ describe("parseYahooChart pre-open baseline", () => {
   });
 });
 
+// h120-finance-1: Yahoo's 5d/1d array drops the D-1 settled close during a session, so the page needs to know
+// which Istanbul day each kept close belongs to (session.sparklineCloses puts the settled close back).
+// closeDays is index-aligned with `closes` (the same indexes the closes filter keeps); it is absent whenever
+// the alignment cannot be proven, and absent in a cache entry written before the field existed.
+describe("parseYahooChart closeDays (h120-finance-1)", () => {
+  const epoch = (y: number, m: number, d: number, h: number, min: number): number => Date.UTC(y, m - 1, d, h, min) / 1000;
+
+  // CITAS 2026-11-11 11:16 Istanbul: the daily bars of 5, 6 and 9 Nov, then the live bar of 11 Nov (10:30 Istanbul).
+  // 10 Nov, the settled close, is the bar Yahoo leaves out during the session.
+  const TS = [epoch(2026, 11, 5, 7, 0), epoch(2026, 11, 6, 7, 0), epoch(2026, 11, 9, 7, 0), epoch(2026, 11, 11, 7, 30)];
+  const chart = (closes: Array<number | null>, timestamp?: unknown) => ({
+    chart: {
+      result: [
+        {
+          meta: { currency: "TRY", regularMarketPrice: 81.85, regularMarketTime: epoch(2026, 11, 11, 8, 16) },
+          ...(timestamp === undefined ? {} : { timestamp }),
+          indicators: { quote: [{ close: closes }] },
+        },
+      ],
+      error: null,
+    },
+  });
+
+  it("names the Istanbul day of every kept close, in order", () => {
+    const q = parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], TS))!;
+    expect(q.closes).toEqual([108.9, 101, 101, 81.85]);
+    expect(q.closeDays).toEqual(["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"]);
+  });
+
+  it("uses the Istanbul calendar day, not the UTC day (a 22:30Z bar belongs to the next Istanbul day)", () => {
+    const q = parseYahooChart("CITAS", chart([100, 101], [epoch(2026, 11, 5, 22, 30), epoch(2026, 11, 6, 7, 0)]))!;
+    expect(q.closeDays).toEqual(["2026-11-06", "2026-11-06"]);
+  });
+
+  it("a null close is skipped in both closes and closeDays, so the two stay the same length", () => {
+    const q = parseYahooChart("CITAS", chart([108.9, null, 101, 81.85], TS))!;
+    expect(q.closes).toEqual([108.9, 101, 81.85]);
+    expect(q.closeDays).toEqual(["2026-11-05", "2026-11-09", "2026-11-11"]);
+    expect(q.closeDays).toHaveLength(q.closes.length);
+  });
+
+  it("a dropped bar may carry a null timestamp: only the kept indexes need a usable one", () => {
+    const q = parseYahooChart("CITAS", chart([108.9, null, 101, 81.85], [TS[0]!, null, TS[2]!, TS[3]!]))!;
+    expect(q.closeDays).toEqual(["2026-11-05", "2026-11-09", "2026-11-11"]);
+  });
+
+  it("is undefined when the timestamp array is missing, not an array, or not the same length as the closes", () => {
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85]))!.closeDays).toBeUndefined();
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], null))!.closeDays).toBeUndefined();
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], "2026-11-05"))!.closeDays).toBeUndefined();
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], TS.slice(0, 3)))!.closeDays).toBeUndefined();
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101], TS))!.closeDays).toBeUndefined();
+  });
+
+  it("is undefined when a kept index has a null or non-finite timestamp", () => {
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], [TS[0]!, null, TS[2]!, TS[3]!]))!.closeDays).toBeUndefined();
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], [TS[0]!, Number.NaN, TS[2]!, TS[3]!]))!.closeDays).toBeUndefined();
+    expect(parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], [TS[0]!, "x", TS[2]!, TS[3]!]))!.closeDays).toBeUndefined();
+  });
+
+  it("leaves the key off the quote when it is undefined, and changes nothing else in it", () => {
+    const withTs = parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85], TS))!;
+    const without = parseYahooChart("CITAS", chart([108.9, 101, 101, 81.85]))!;
+    expect("closeDays" in without).toBe(false);
+    const { closeDays: _days, ...rest } = withTs;
+    expect(rest).toEqual(without);
+  });
+
+  it("an empty close array gives an empty closeDays when the timestamps are empty too", () => {
+    expect(parseYahooChart("CITAS", chart([], []))!.closeDays).toEqual([]);
+  });
+});
+
 describe("YahooQuoteSource", () => {
   it("skips symbols that fail and keeps the rest", async () => {
     vi.spyOn(console, "info").mockImplementation(() => {});

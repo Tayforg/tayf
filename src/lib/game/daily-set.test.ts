@@ -6,6 +6,7 @@ import {
   DAILY_GAME_SIZE,
   DAILY_MAX_PER_ZONE,
   DAILY_POLITICS_GATE_FROM,
+  DAILY_TITLE_ASOF_FROM,
   DAILY_TITLE_MAX,
   DAILY_TWIN_GATE_FROM,
   DAILY_TWIN_KEY_V2_FROM,
@@ -578,6 +579,27 @@ describe("DAILY_TWIN_GATE_FROM", () => {
 
   it("comes after the English gate, so the gates keep their order", () => {
     expect(DAILY_TWIN_GATE_FROM > DAILY_ENGLISH_GATE_FROM).toBe(true);
+  });
+});
+
+describe("DAILY_TITLE_ASOF_FROM", () => {
+  it("is a valid date key", () => {
+    expect(isDateKey(DAILY_TITLE_ASOF_FROM)).toBe(true);
+  });
+
+  // Same replay contract as the gates: every key up to the deploy day is
+  // replayable and recomputes from a cold cache, so the key that starts reading
+  // headline text as of the window close must be one no player has seen. The
+  // fix is expected to merge on 2026-11-11 or 2026-11-12 (Istanbul), so
+  // 2026-11-13 is the lowest value that can be right; raise it, never lower it,
+  // if the deploy slips.
+  it("is not earlier than 2026-11-13, a key nobody has seen at deploy time", () => {
+    expect(DAILY_TITLE_ASOF_FROM >= "2026-11-13").toBe(true);
+  });
+
+  it("is not earlier than the twin gate, which an as-of key always runs under (member titles are read as of the close only for twin evidence)", () => {
+    expect(DAILY_TITLE_ASOF_FROM >= DAILY_TWIN_GATE_FROM).toBe(true);
+    expect(DAILY_TITLE_ASOF_FROM >= DAILY_TWIN_KEY_V2_FROM).toBe(true);
   });
 });
 

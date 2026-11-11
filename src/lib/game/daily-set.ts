@@ -10,9 +10,27 @@
  * Jev predictions arrive, so different visitors (or the same visitor on a
  * cache miss an hour later) would see different sets. The puzzle for
  * Istanbul date D is therefore built from a CLOSED window: articles seen
- * during Istanbul day D-1, i.e. [D-1 00:00, D 00:00) at +03. Nothing
- * written after the window closes can change the set (barring a rare
- * source deactivation — see daily-query.ts's module doc comment).
+ * during Istanbul day D-1, i.e. [D-1 00:00, D 00:00) at +03.
+ *
+ * From DAILY_TITLE_ASOF_FROM on, the edited-headline exclusion and the twin
+ * comparison are read AS OF the window close (daily-query.ts, resolveTitleAsOf):
+ * only a title edit recorded before the close leaves an article out, and the twin
+ * rule compares the text the article (and each member) carried at the close. A
+ * title edit recorded after the close therefore cannot drop a candidate,
+ * reshuffle the hash order or flip the twin rule. The SERVED headline is always
+ * `articles.title` as it stands: `article_title_versions.old_title` is compared
+ * internally and never rendered (migrations 056/074: it is text the outlet
+ * removed, and any public read path of it is a counsel question first). Before
+ * that key, a title edit recorded after the close can still drop a candidate on
+ * the next cold build.
+ *
+ * Still read as they stand when the set is built, and so the remaining known
+ * caveats: a post-close write-back of `articles.title` (the title checks below
+ * run on the served text, so it can change a headline's eligibility on a cold
+ * rebuild), cluster membership (`cluster_articles`: a story that is merged or
+ * split after the close can change a cluster id or a twin), the article's
+ * category and politics admission, and the source flags (a deactivation or a
+ * bias change; see daily-query.ts's module doc comment).
  *
  * This module NEVER calls `Date.now()` / `new Date()` with an implicit
  * "now" — every date it touches is derived from an explicit `dateKey`
@@ -82,6 +100,27 @@ export const DAILY_TWIN_GATE_FROM = "2026-11-10";
 // if the deploy date is on or after it. Bölge (headline-pool.ts) has no replay
 // contract and uses version 2 straight away.
 export const DAILY_TWIN_KEY_V2_FROM = "2026-11-12";
+// From this puzzle date onward the title versions are read AS OF THE WINDOW CLOSE
+// (daily-query.ts, resolveTitleAsOf): an article is left out as "edited" only if
+// a title version was recorded before the close (`article_title_versions.seen_at
+// < endIso`), and the twin comparison (title-twin.ts) uses the text the candidate
+// and each evidence member carried at the close (the `old_title` of the earliest
+// post-close version). The SERVED headline is always `articles.title` as it
+// stands: `old_title` is compared internally and never rendered (migrations
+// 056/074: the ledger is not published, and any public read path is a counsel
+// question first). Remaining caveat: a post-close write-back of `articles.title`
+// can still change a headline's eligibility. Before this key, ANY version
+// excludes the article, so a title edit recorded after the close can still
+// change a set.
+// Same replay contract as the gates above: gated on the puzzle key, never on the
+// clock, so every EARLIER key recomputes exactly as it did (it makes no extra
+// request either). It MUST be a key no player has seen when this deploys (every
+// key up to the deploy day is replayable and recomputes from a cold cache). It is
+// the first Istanbul date strictly after the day this fix is expected to merge
+// (2026-11-11 or 2026-11-12), never earlier than 2026-11-13; bump it before
+// merge if the deploy date is on or after it. It is on or after
+// DAILY_TWIN_GATE_FROM, so an as-of key always runs the twin rule.
+export const DAILY_TITLE_ASOF_FROM = "2026-11-13";
 export const DAILY_MAX_PER_ZONE = 2;
 export const DAILY_TITLE_MIN = 25;
 export const DAILY_TITLE_MAX = 180;

@@ -1112,7 +1112,7 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
     for (const row of more) expect(row.dominantPct).toBeLessThanOrEqual(cardIktidarFloor);
   });
 
-  it("a compact row is slim: id, title, zone, share, source count, first-published time, the voting tally and the recall-matched zones", async () => {
+  it("a compact row is slim: id, title, zone, share, source count, first-published and updated times, the voting tally and the recall-matched zones", async () => {
     const slim = {
       ...mkClaimRow("slim", "iktidar", 6, 1, "2026-11-04T08:00:00.000Z"),
       // Older than updated_at: the feed dates a compact row by this, as it dates a card.
@@ -1137,6 +1137,8 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
         dominantPct: 6 / 7,
         sourceCount: 7,
         firstPublished: "2026-11-02T06:30:00.000Z",
+        // h120-methodology-2: the cluster's own last update; the alerts feed derives alert_at from it.
+        updatedAt: "2026-11-04T08:00:00.000Z",
         votingZoneCounts: { iktidar: 6, bagimsiz: 1, muhalefet: 0 },
         // h106: the zones Jev matched with the same event; none for an ordinary claim.
         recallMatchedZones: [],
@@ -1150,8 +1152,23 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
       "recallMatchedZones",
       "sourceCount",
       "title",
+      "updatedAt",
       "votingZoneCounts",
     ]);
+  });
+
+  it("every compact row carries its cluster's own first_published and updated_at (h120-methodology-2)", async () => {
+    const seeded = seedWeek();
+
+    const { more } = await getBlindspots();
+
+    expect(more).toHaveLength(20);
+    for (const row of more) {
+      const src = seeded.find((r) => r.id === row.id)!;
+      // Not swapped with another claim's and not re-derived: the cluster row's own values.
+      expect(row.updatedAt).toBe(src.updated_at);
+      expect(row.firstPublished).toBe(src.first_published);
+    }
   });
 
   it("sideCounts cover the whole window and sum to claimCount", async () => {

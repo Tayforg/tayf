@@ -229,10 +229,18 @@ export interface BlindspotMoreRow {
    * When the claim was first published (clusters.first_published), the date a
    * card's feed item carries. Not updated_at: that moves with every new member,
    * so a compact row dated by it would sort above every card in a date-sorted
-   * reader and move again when the row is promoted to a card. Its only consumer
-   * is the RSS feed.
+   * reader and move again when the row is promoted to a card. The RSS feed dates
+   * its items by this.
    */
   firstPublished: string;
+  /**
+   * The cluster's own last update (clusters.updated_at). The RSS feed never
+   * reads it (see `firstPublished`); the alerts feed and webhooks do, to derive
+   * a compact row's `alert_at` exactly as for a card (`alertAtOf`:
+   * max(updated_at, first_published + the feed delay)). A payload cached before
+   * this field existed lacks it; `alertAtOf` then falls back to the delay alone.
+   */
+  updatedAt: string;
   votingZoneCounts: Record<MediaDnaZone, number>;
   /** The card's `recallMatchedZones` (h106-blindspotbadges-1), kept so a row promoted to a card words itself the same way. */
   recallMatchedZones: MediaDnaZone[];
@@ -465,6 +473,7 @@ function toMoreRow(b: BlindspotBundle): BlindspotMoreRow {
     dominantPct: b.dominantPct,
     sourceCount: b.sources.length,
     firstPublished: b.cluster.first_published,
+    updatedAt: b.cluster.updated_at,
     votingZoneCounts: { ...b.votingZoneCounts },
     recallMatchedZones: [...b.recallMatchedZones],
   };
