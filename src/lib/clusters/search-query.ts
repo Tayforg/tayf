@@ -32,8 +32,9 @@ import {
 // A possessive or doubled-stem form ('elektrik zammı', 'emlak vergisi') also asks for its
 // root ('elektrik zam', 'emlak vergi') in a SECOND call, made only when the typed call
 // returned fewer than SEARCH_LIMIT ids; its new ids are appended after the typed ones
-// (turkish-query.ts, h96-search-1). Every call sends at most 3 variants and `p_folded`
-// stays the typed words.
+// (turkish-query.ts, h96-search-1). Every call sends at most 3 variants, and each call
+// folds its own words: the typed call sends `p_folded` = the typed words, the sibling call
+// the sibling's words (h124-postship-1).
 // An alias in the query (AKP <-> AK Parti, search-aliases.ts) is expanded into a
 // two-way websearch `or` for BOTH arguments, so 'AKP' and 'AK Parti' send the
 // same RPC call; the cache key below stays the canonical query.
@@ -119,8 +120,11 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // real typed hits off the page behind unrelated rows ('karasu' + 'kara'). Typed hits
   // keep their ranks and the sibling only fills empty slots of the page. A query without
   // such a form, or with websearch syntax, makes the one typed call it always made.
-  // `folded` stays the typed words in both calls, so 166's guard and 172's tier never
-  // read the sibling.
+  // h124-postship-1: the sibling call folds the sibling (`p_folded` = foldTr(sibling)), so
+  // its own 166 guard and 172 / 194 tiers read the sibling words. It used to send the typed
+  // words, and the stem of an ASCII 'zammi' ('asgari ucret zammi') kept the guard and the
+  // folded arm on a word no headline holds: 0 stories against 7 for 'asgari ucret zam'. The
+  // sibling call only fills empty slots after the typed ids, so typed ranks never move.
   const sibling = searchSiblingQuery(base);
   const folded = foldTr(expansion ? expansion.foldedQuery : key);
 
@@ -131,11 +135,11 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // function (same pattern as entity-hub-query.ts) and stay on it for the rest of this
   // search; any other error keeps the throw-and-retry path below.
   let threeArg = true;
-  async function searchIds(variants: string[]): Promise<string[]> {
+  async function searchIds(variants: string[], foldedArg: string): Promise<string[]> {
     let res = threeArg
       ? await supabase.rpc("search_cluster_ids", {
           p_variants: variants,
-          p_folded: folded,
+          p_folded: foldedArg,
           p_limit: SEARCH_LIMIT,
         })
       : await supabase.rpc("search_cluster_ids", {
@@ -155,12 +159,12 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
     return ((res.data ?? []) as SearchIdRow[]).map((r) => r.id);
   }
 
-  const ids = await searchIds(typed);
+  const ids = await searchIds(typed, folded);
   // The typed page has room left: ask for the sibling and append what is new, after the
   // typed ids, up to SEARCH_LIMIT. A full typed page is never touched.
   if (sibling !== null && ids.length < SEARCH_LIMIT) {
     const seen = new Set(ids);
-    for (const id of await searchIds(turkishQueryVariants(sibling))) {
+    for (const id of await searchIds(turkishQueryVariants(sibling), foldTr(sibling))) {
       if (ids.length >= SEARCH_LIMIT) break;
       if (seen.has(id)) continue;
       seen.add(id);

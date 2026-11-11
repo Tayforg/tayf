@@ -460,8 +460,9 @@ export function searchedWordsAsTyped(q: string): string {
 // SECOND call with the sibling's spellings, appending the ids it adds after the
 // typed ones. The sibling is never merged into the typed call: migration 172 ORs
 // `p_variants[1..3]` with equal rank, so a merged call let unrelated 'kara' rows
-// push real 'karasu' rows off the page. `p_folded` stays the typed words in both
-// calls, so 166's over-stem guard and 172's tier read what the reader typed.
+// push real 'karasu' rows off the page. The typed call sends `p_folded` = the typed
+// words and the sibling call the sibling's words (h124-postship-1), so each call's own
+// 166 over-stem guard and 172 / 194 tiers read the words that call searched for.
 //
 // Two narrow rules, both anchored on the whole term and with one quantifier each,
 // so the match is linear. Terms are compared Turkish-lower-cased and ASCII-folded

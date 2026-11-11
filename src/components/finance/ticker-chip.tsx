@@ -3,7 +3,7 @@ import Link from "next/link";
 import { fmtPct, fmtPrice, fmtX, limitFlag, moveClass } from "@/lib/finance/format";
 import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
 import type { Quote } from "@/lib/finance/quotes";
-import { quoteSessionDay, rvolLabel } from "@/lib/finance/session";
+import { quoteSessionDay, rvolLabel, rvolParts } from "@/lib/finance/session";
 import { cn } from "@/lib/utils";
 
 import { StripFocusReveal } from "./strip-focus-reveal";
@@ -131,6 +131,9 @@ export function TickerTape({
         // h99-financenumbers-1: the stat is the daily bar of stat.lastDay. During a session that is the
         // PREVIOUS session next to today's price and move, so its volume names its day (muted, never amber:
         // yesterday's volume is not today's signal). Without a quote there is no day to compare with.
+        // h124-widgets-1: the day reads "· 06.11 seansı", the /ekonomi/<ticker> header's wording (rvolParts), as
+        // visible text. A bare "· 10.11" reads as a clock time in Turkish, and a title attribute is not shown on
+        // touch nor part of the link's accessible name.
         const vol = s && !stale ? rvolLabel(s, quoteSessionDay(q?.asOf)) : null;
         return (
           <Link
@@ -155,9 +158,9 @@ export function TickerTape({
               {t.ratio != null && t.ratio >= 2 ? <span className="tabular-nums text-amber-400">ilgi {fmtX(t.ratio)}</span> : null}
               {vol ? (
                 vol.dayLabel ? (
-                  <span title={`${vol.dayLabel} seansının hacmi`} className="tabular-nums">
+                  <span className="tabular-nums">
                     hacim {fmtX(vol.rvol)}
-                    <span className="text-muted-foreground"> · {vol.dayLabel}</span>
+                    <span className="text-muted-foreground">{` · ${rvolParts(vol).day}`}</span>
                   </span>
                 ) : (
                   <span className={cn("tabular-nums", vol.rvol >= 2 ? "text-amber-400" : "")}>hacim {fmtX(vol.rvol)}</span>

@@ -126,6 +126,7 @@ import {
   canonicalSearchQuery,
   foldTr,
   normaliseSearchQuery,
+  searchSiblingQuery,
   turkishQueryVariants,
 } from "./turkish-query";
 import type { ZoneFeedHealth } from "./feed-health";
@@ -608,8 +609,11 @@ describe("searchClusters one-way alias expansion (afyon / urfa / antep)", () => 
 // 'kara' rows push real 'karasu' rows off the page (CORR-2). The typed call goes
 // first with at most three variants; only when it leaves slots of the page empty
 // (fewer than SEARCH_LIMIT ids) does a second call ask for the sibling's spellings,
-// and its new ids are appended after the typed ids. p_folded is the typed words in
-// both calls, and the cache key stays canonical.
+// and its new ids are appended after the typed ids. h124-postship-1: the typed call
+// sends p_folded = foldTr(typed) and the sibling call sends p_folded = foldTr(sibling),
+// so the sibling call's own guard and tiers read the sibling words ('asgari ucret zammi'
+// found 0 stories because the sibling call kept the typed 'zammi' as p_folded). The
+// cache key stays canonical.
 // ---------------------------------------------------------------------------
 
 describe("searchClusters sibling variants (h96-search-1)", () => {
@@ -618,25 +622,54 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
   const ids = (n: number, prefix: string) =>
     Array.from({ length: n }, (_, i) => `${prefix}${i}`);
 
-  it("'elektrik zammı' with no typed hit: typed call, then the sibling's spellings in a second call, p_folded unchanged", async () => {
+  it("'elektrik zammı' with no typed hit: typed call, then the sibling call folds the sibling", async () => {
     await searchClusters("elektrik zammı");
     expect(fixture.rpcCalls).toEqual([
       { p_variants: ["elektrik zammı", "elektrik zammi"], p_folded: "elektrik zammi", p_limit: 24 },
-      { p_variants: ["elektrik zam"], p_folded: "elektrik zammi", p_limit: 24 },
+      { p_variants: ["elektrik zam"], p_folded: "elektrik zam", p_limit: 24 },
     ]);
   });
 
   it.each([
-    ["emlak vergisi", ["emlak vergisi"], ["emlak vergi"], "emlak vergisi"],
-    ["doğal gaz zammı", ["doğal gaz zammı", "doğal gaz zammi"], ["doğal gaz zam"], "dogal gaz zammi"],
-    ["Asgari Ücret Zammı", ["asgari ücret zammı", "asgari ücret zammi"], ["asgari ücret zam"], "asgari ucret zammi"],
-    ["trafik cezası", ["trafik cezası", "trafik cezasi"], ["trafik ceza"], "trafik cezasi"],
-  ])("%j with no typed hit sends %j, then %j, with p_folded %j both times", async (q, typed, sibling, folded) => {
-    await searchClusters(q);
+    ["emlak vergisi", ["emlak vergisi"], "emlak vergisi", ["emlak vergi"], "emlak vergi"],
+    ["doğal gaz zammı", ["doğal gaz zammı", "doğal gaz zammi"], "dogal gaz zammi", ["doğal gaz zam"], "dogal gaz zam"],
+    ["Asgari Ücret Zammı", ["asgari ücret zammı", "asgari ücret zammi"], "asgari ucret zammi", ["asgari ücret zam"], "asgari ucret zam"],
+    ["trafik cezası", ["trafik cezası", "trafik cezasi"], "trafik cezasi", ["trafik ceza"], "trafik ceza"],
+  ])(
+    "%j with no typed hit: the typed call sends %j with p_folded %j, the sibling call %j with p_folded %j",
+    async (q, typed, typedFolded, sibling, siblingFolded) => {
+      await searchClusters(q);
+      expect(fixture.rpcCalls).toEqual([
+        { p_variants: typed, p_folded: typedFolded, p_limit: 24 },
+        { p_variants: sibling, p_folded: siblingFolded, p_limit: 24 },
+      ]);
+    },
+  );
+
+  // h124-postship-1: the ASCII spelling of a possessive. Both calls come back empty here (the fixture's default),
+  // so the page makes exactly two calls: the typed words, then the sibling's spellings folded as the sibling.
+  // Before the fix the sibling call carried the typed 'zammi' as p_folded and found 0 stories on production
+  // ('asgari ucret zam' as p_folded found 7, 'dogal gaz zam' found 4).
+  it.each([
+    ["asgari ucret zammi", "asgari ucret zam"],
+    ["dogal gaz zammi", "dogal gaz zam"],
+  ])("%j (ASCII, empty typed result): exactly two calls, the second folds the sibling %j", async (typed, sibling) => {
+    await searchClusters(typed);
     expect(fixture.rpcCalls).toEqual([
-      { p_variants: typed, p_folded: folded, p_limit: 24 },
-      { p_variants: sibling, p_folded: folded, p_limit: 24 },
+      { p_variants: turkishQueryVariants(typed), p_folded: typed, p_limit: 24 },
+      { p_variants: turkishQueryVariants(sibling), p_folded: sibling, p_limit: 24 },
     ]);
+  });
+
+  it("the ASCII possessive's sibling ids fill the empty page, typed ids first: 'asgari ucret zammi' lists the 7 sibling stories", async () => {
+    const sib = ids(7, "z");
+    fixture.rpcIdsPerCall = [[], sib];
+    fixture.data = sib.map((id) => mkRow({ id, members: [{ id: `a-${id}`, sourceId: "s1" }] }));
+    const result = await searchClusters("asgari ucret zammi");
+    expect(fixture.rpcCalls).toHaveLength(2);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(sib);
+    expect(result.capped).toBe(false);
   });
 
   it("a full typed page (24 ids): 'trafik cezası' makes exactly one call, so the sibling never displaces a typed hit", async () => {
@@ -662,7 +695,7 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
     const result = await searchClusters("trafik cezası");
     expect(fixture.rpcCalls).toEqual([
       { p_variants: ["trafik cezası", "trafik cezasi"], p_folded: "trafik cezasi", p_limit: 24 },
-      { p_variants: ["trafik ceza"], p_folded: "trafik cezasi", p_limit: 24 },
+      { p_variants: ["trafik ceza"], p_folded: "trafik ceza", p_limit: 24 },
     ]);
     const state = fixture.lastState as BuilderState;
     expect(state.in).toEqual([{ col: "id", vals: ["t1", "t2", "s1", "s2"] }]);
@@ -710,15 +743,19 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
     },
   );
 
-  it("p_folded is foldTr of the typed query in every call, never of the sibling", async () => {
-    for (const q of ["elektrik zammı", "emlak vergisi", "hakkı", "Soruşturması"]) {
+  it("the sibling call folds the sibling: p_folded is foldTr(typed) in the typed call and foldTr(sibling) in the sibling call", async () => {
+    for (const q of ["elektrik zammı", "emlak vergisi", "hakkı", "Soruşturması", "asgari ucret zammi"]) {
       fixture.rpcCalls = [];
       await searchClusters(q);
       const canonical = canonicalSearchQuery(q);
+      const sibling = searchSiblingQuery(canonical);
+      expect(sibling, q).not.toBeNull();
       expect(fixture.rpcCalls.length, q).toBe(2);
       expect(argsOf(0).p_folded, q).toBe(foldTr(canonical));
-      expect(argsOf(1).p_folded, q).toBe(foldTr(canonical));
+      expect(argsOf(1).p_folded, q).toBe(foldTr(sibling as string));
+      expect(argsOf(1).p_folded, q).not.toBe(argsOf(0).p_folded);
       expect(argsOf(0).p_variants, q).toEqual(turkishQueryVariants(canonical));
+      expect(argsOf(1).p_variants, q).toEqual(turkishQueryVariants(sibling as string));
     }
   });
 
