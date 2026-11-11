@@ -122,16 +122,38 @@ describe("saved-list.tsx reading-diet card", () => {
 
 describe("saved-list.tsx RPC input hygiene", () => {
   const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+  const code = src.replace(/\/\/[^\n]*/g, "");
 
-  it("sends only well-formed UUIDs, capped at the newest 200 (the RPC's own cap)", () => {
-    expect(src).toMatch(/const SAVED_RPC_MAX_IDS = 200;/);
+  // h135 (h134-reader-2): this was "sends only well-formed UUIDs, capped at the newest 200", a regex over the old
+  // `const ids = idList.filter(...).slice(-SAVED_RPC_MAX_IDS)` statement. The filter, the 200-per-call cap and the
+  // new 1000-id window moved into saved-lookup.ts (savedLookupPlan, pinned in saved-lookup.test.ts), so the page
+  // is pinned on what it takes from there and on having ONE regex and ONE cap constant.
+  it("takes its chunks from savedLookupPlan (valid UUIDs only, 200 per call, newest 1000 deep) in saved-lookup.ts", () => {
     expect(src).toMatch(
-      /const ids = idList\s*\.filter\(\(id\) => typeof id === "string" && UUID_RE\.test\(id\)\)\s*\.slice\(-SAVED_RPC_MAX_IDS\);/,
+      /import\s*\{[^}]*\bsavedLookupPlan\b[^}]*\}\s*from\s*["']\.\/saved-lookup["']/,
     );
+    expect(src).toMatch(
+      /import\s*\{[^}]*\bmergeSavedRows\b[^}]*\}\s*from\s*["']\.\/saved-lookup["']/,
+    );
+    expect(src).toMatch(
+      /import\s*\{[^}]*\bSavedTruncationNote\b[^}]*\}\s*from\s*["']\.\/saved-lookup["']/,
+    );
+    expect(code).toContain("const plan = savedLookupPlan(idList);");
+    // one regex and one cap constant, both in saved-lookup.ts
+    expect(code).not.toMatch(/const UUID_RE\b/);
+    expect(code).not.toMatch(/const SAVED_RPC_MAX_IDS\b/);
+    expect(code).not.toMatch(/\.slice\(-SAVED_RPC_MAX_IDS\)/);
+    expect(code).not.toMatch(/UUID_RE\.test/);
   });
 
+  it("the v4 call site is still the only one, and it sends chunk 0 (the newest 200, today's p_ids)", () => {
+    expect(code.match(/\.rpc\("saved_clusters_v4"/g)).toHaveLength(1);
+    expect(code).toContain("const [ids = [], ...older] = plan.chunks;");
+  });
+
+  // h135: was `ids.length === 0` (the old filtered array). The list is now empty when the plan is.
   it("short-circuits an empty id list without importing the client", () => {
-    const emptyAt = src.indexOf("ids.length === 0");
+    const emptyAt = src.indexOf("plan.total === 0");
     const importAt = src.indexOf(`await import("@/lib/supabase/browser")`);
     expect(emptyAt).toBeGreaterThan(-1);
     expect(importAt).toBeGreaterThan(emptyAt);
@@ -152,19 +174,24 @@ describe("saved-list.tsx v4 lookup, v3 fallback, v2 fallback and v1 fallback", (
   it("falls back from v4 to v3 once, only when v4 is missing (PGRST202 or 42883: the app deployed before migration 192), then v3 to v2 the same way, then v2 to v1 only on PGRST202, before the shared error handling", () => {
     expect(src).toMatch(/const client = createBrowserClient\(\);/);
     expect(src).toMatch(/let res = await client\.rpc\("saved_clusters_v4",\s*\{\s*p_ids:\s*ids\s*\}\);/);
+    // h135: each fallback block now also records the name that is being asked (`rpcName = "..."`), because chunks
+    // 1..4 are sent to the RPC that answered chunk 0. Only that assignment is new in the three regexes below; the
+    // condition, the call, its arguments and the order are the ones that were here.
+    expect(src).toMatch(/let rpcName: SavedRpcName = "saved_clusters_v4";\s*let res = await client\.rpc\("saved_clusters_v4"/);
     expect(src).toMatch(
-      /if \(isRpcMissing\(res\.error\)\) \{\s*res = await client\.rpc\("saved_clusters_v3",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
+      /if \(isRpcMissing\(res\.error\)\) \{\s*rpcName = "saved_clusters_v3";\s*res = await client\.rpc\("saved_clusters_v3",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
     );
     expect(src).toMatch(
-      /if \(isRpcMissing\(res\.error\)\) \{\s*res = await client\.rpc\("saved_clusters_v2",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
+      /if \(isRpcMissing\(res\.error\)\) \{\s*rpcName = "saved_clusters_v2";\s*res = await client\.rpc\("saved_clusters_v2",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
     );
     expect(src).toMatch(/import\s*\{[^}]*isRpcMissing[^}]*\}\s*from\s*["']@\/components\/bookmark\/saved-row["']/);
     const v2At = src.indexOf('res = await client.rpc("saved_clusters_v2",');
     const v1CheckAt = src.indexOf('res.error?.code === "PGRST202"');
     expect(v2At).toBeGreaterThan(-1);
     expect(v1CheckAt).toBeGreaterThan(v2At);
+    // h135: the v1 fallback records its name too (see above).
     expect(src).toMatch(
-      /if \(res\.error\?\.code === "PGRST202"\) \{\s*res = await client\.rpc\("saved_clusters",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
+      /if \(res\.error\?\.code === "PGRST202"\) \{\s*rpcName = "saved_clusters";\s*res = await client\.rpc\("saved_clusters",\s*\{\s*p_ids:\s*ids\s*\}\);\s*\}/,
     );
     const fallbackAt = src.indexOf('res = await client.rpc("saved_clusters",');
     const errorAt = src.indexOf("const { data, error } = res;");
@@ -177,6 +204,143 @@ describe("saved-list.tsx v4 lookup, v3 fallback, v2 fallback and v1 fallback", (
   it("keeps the fail-open path for every other error code", () => {
     expect(src).toContain("if (error) {");
     expect(src).toContain("setFailed(true);");
+  });
+});
+
+// h135 (h134-reader-2): /saved sent only the newest 200 bookmarks to the RPC, so older ones silently lost their
+// row (no link, no remove button). The ids now go out in chunks of at most 200 (newest chunk first, 5 chunks at
+// most); the behaviour of the chunk plan, the merge, the older-chunk runner and the 201 / 1001-id fixtures is
+// pinned in saved-lookup.test.ts. What only this file can see is how the page uses them.
+describe("saved-list.tsx chunked lookup (h135)", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+  const code = src.replace(/\/\/[^\n]*/g, "");
+  const effect = code.slice(code.indexOf("useEffect("), code.indexOf("}, [idList]);"));
+
+  it("imports the runner, the status rule, the window constant and the partial copy from ./saved-lookup", () => {
+    for (const name of [
+      "fetchOlderSavedChunks",
+      "savedLookupStatus",
+      "SAVED_MAX_IDS",
+      "SAVED_PARTIAL_TEXT",
+      "rowsForSnapshots",
+      "nextSavedAnnouncement",
+    ]) {
+      expect(src, name).toMatch(new RegExp(`import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*["']\\./saved-lookup["']`));
+    }
+    expect(src).toMatch(/import\s*\{[^}]*\btype SavedRpcName\b[^}]*\}\s*from\s*["']\.\/saved-lookup["']/);
+  });
+
+  it("sends chunk 0 through the unchanged fallback chain, then the older chunks one after another with the name that answered", () => {
+    const chainEnd = effect.indexOf("const { data, error } = res;");
+    const olderAt = effect.indexOf("await fetchOlderSavedChunks<SavedRow>(client, rpcName, older, () => cancelled)");
+    expect(chainEnd).toBeGreaterThan(-1);
+    expect(olderAt).toBeGreaterThan(chainEnd);
+    // the older chunks run in saved-lookup.ts (sequentially, bounded); no parallel fan-out here
+    expect(code).not.toMatch(/Promise\.(all|allSettled|race|any)\b/);
+    // the effect still has exactly the four literal call sites of the chain, no fifth one
+    expect(effect.match(/\.rpc\(/g)).toHaveLength(4);
+    // cancelled is checked after the await: a null answer means the reader left the page
+    expect(effect.slice(olderAt)).toMatch(/^[^;]*;\s*if \(more === null\) return;/);
+  });
+
+  it("checks cancelled right after the chunk-0 answer, before it is read", () => {
+    const errorAt = effect.indexOf("const { data, error } = res;");
+    expect(effect.slice(errorAt, errorAt + 80)).toMatch(/const \{ data, error \} = res;\s*if \(cancelled\) return;/);
+  });
+
+  it("a chunk-0 error is counted and logged with the existing prefix, not an early exit: the older chunks may still answer", () => {
+    const errorAt = effect.indexOf("if (error) {");
+    expect(errorAt).toBeGreaterThan(-1);
+    const block = effect.slice(errorAt, effect.indexOf("}", errorAt));
+    expect(block).toContain('console.warn("[saved] title lookup error:", error.message);');
+    expect(block).toContain("failedChunks += 1;");
+    expect(block).not.toContain("return");
+    expect(block).not.toContain("setFailed");
+  });
+
+  it("only when nothing can be shown does the page take the failure path (setFailed + empty rows); a partial failure keeps the rows", () => {
+    const ruleAt = effect.indexOf('savedLookupStatus(plan.chunks.length, failedChunks, merged.length) === "failed"');
+    expect(ruleAt).toBeGreaterThan(-1);
+    const block = effect.slice(ruleAt, effect.indexOf("}", ruleAt));
+    expect(block).toMatch(/setFailed\(true\);\s*setRows\(\[\]\);\s*return;/);
+    // a single chunk (200 bookmarks or fewer) that fails is "all chunks failed": exactly today's failure path.
+    // The rows are merged before the rule, so "failed chunks and no rows" is a failure, not the empty state.
+    expect(effect.indexOf("const merged = mergeSavedRows(results);")).toBeGreaterThan(-1);
+    expect(effect.indexOf("const merged = mergeSavedRows(results);")).toBeLessThan(ruleAt);
+    expect(effect.indexOf("setFailed(true);")).toBe(effect.indexOf("setFailed(true);", ruleAt));
+    // and it happens before the rows are mapped, so a failed page never reaches the clock or the snapshots
+    // (no clock literal on purpose: tests/guards/no-wall-clock-budget.test.ts counts those lines)
+    expect(effect.slice(0, ruleAt)).not.toContain("const nowMs");
+    expect(effect.slice(0, ruleAt)).not.toContain("readSnapshots(");
+  });
+
+  it("merges the chunks in the page's order (updated_at desc), after the last await", () => {
+    const olderAt = effect.indexOf("await fetchOlderSavedChunks");
+    const mergeAt = effect.indexOf("const merged = mergeSavedRows(results);");
+    const mapAt = effect.indexOf("merged.map((row) => toPublicSavedRow(row, nowMs))");
+    expect(mergeAt).toBeGreaterThan(olderAt);
+    expect(mapAt).toBeGreaterThan(mergeAt);
+    expect(effect.slice(mergeAt)).not.toContain("await ");
+  });
+
+  it("stores the total and the requested count with the rows (set together), and reports a partial failure", () => {
+    const loadedAt = effect.indexOf("setRows(loaded)");
+    const lookupAt = effect.indexOf("setLookup({ total: plan.total, requested: plan.requested, partial: failedChunks > 0 });");
+    expect(lookupAt).toBeGreaterThan(-1);
+    expect(lookupAt).toBeLessThan(loadedAt);
+    // the live region follows the lookup: the partial copy is set while the lookup is partial and cleared when a
+    // later lookup completes (a bookmark change in another tab re-runs the effect), never left stale
+    const announceLine = "setAnnouncement((prev) => nextSavedAnnouncement(prev, failedChunks > 0));";
+    expect(effect).toContain(announceLine);
+    expect(effect.indexOf(announceLine)).toBeLessThan(loadedAt);
+    expect(effect).not.toContain("if (failedChunks > 0) setAnnouncement(SAVED_PARTIAL_TEXT);");
+    expect(effect).not.toContain("setAnnouncement(SAVED_PARTIAL_TEXT)");
+    expect(src).toMatch(/import\s*\{[^}]*\bnextSavedAnnouncement\b[^}]*\}\s*from\s*["']\.\/saved-lookup["']/);
+    expect(code).toMatch(/const \[lookup, setLookup\] = useState\(\{ total: 0, requested: 0, partial: false \}\);/);
+  });
+
+  it("renders the truncation note inside the list's SavedFrame, above the reading-diet card, only when the lookup was complete", () => {
+    const component = code.slice(code.indexOf("export function SavedList"));
+    const frameAt = component.lastIndexOf("<SavedFrame announcement={announcement}>");
+    // a partial lookup shows the partial-failure note alone: "newest 1.000 shown; 1.200 in total" would contradict it
+    const guarded = "{!lookup.partial && <SavedTruncationNote shown={lookup.requested} total={lookup.total} />}";
+    const noteAt = component.indexOf(guarded);
+    const cardAt = component.indexOf("<SavedMixCard rows={rows} />");
+    expect(noteAt).toBeGreaterThan(frameAt);
+    expect(cardAt).toBeGreaterThan(noteAt);
+    expect(component.match(/<SavedTruncationNote/g)).toHaveLength(1);
+    // no unguarded element: removing the guard leaves the single occurrence outside `guarded`
+    expect(component.replace(guarded, "")).not.toContain("<SavedTruncationNote");
+  });
+
+  it("reconciles the snapshots of the chunk-0 rows only (the newest 200, as before h135), never the whole merged list", () => {
+    // 1000 merged rows would stamp a 'first-view' snapshot on every row without one, and the 500-entry cap would
+    // then evict the older 'save' baselines of the newest 200; the badges keep the set the page always used
+    expect(effect).toContain("reconcileSnapshots(rowsForSnapshots(loaded, plan),");
+    expect(effect).not.toContain("reconcileSnapshots(loaded,");
+    expect(code).not.toMatch(/reconcileSnapshots\(\s*loaded\b/);
+    expect(effect.match(/reconcileSnapshots\(/g)).toHaveLength(1);
+    // the badges, the pruning and the rows on screen are otherwise unchanged
+    expect(effect).toContain("setChanges(found);");
+    expect(effect).toContain("pruneSnapshots(idList);");
+    expect(effect).toContain("setRows(loaded);");
+  });
+
+  it("shows the partial-failure note like the failure copy: same muted note style, aria-hidden, the text carried by the live region", () => {
+    expect(code).toMatch(
+      /\{lookup\.partial && \(\s*<p aria-hidden="true" className="mb-3 text-xs text-muted-foreground">\s*\{SAVED_PARTIAL_TEXT\}\s*<\/p>\s*\)\}/,
+    );
+    // still exactly one live region and one SAVED_LOAD_FAILED_TEXT reference trio
+    expect(code.match(/role="status"/g)).toHaveLength(1);
+  });
+
+  it("the loading skeleton draws at most SAVED_MAX_IDS bars (the ids that will be looked up), not one per stored id", () => {
+    expect(code).toContain("{idList.slice(-SAVED_MAX_IDS).map((id) => (");
+    expect(code).not.toMatch(/\{idList\.map\(/);
+  });
+
+  it("never reads the stored list beyond the plan: pruneSnapshots still gets the full saved list", () => {
+    expect(code).toContain("pruneSnapshots(idList);");
   });
 });
 
@@ -217,7 +381,8 @@ describe("saved-list.tsx public Kör nokta claim (h38-saved-1)", () => {
     expect(reconcileAt).toBeGreaterThan(mapAt);
     expect(setRowsAt).toBeGreaterThan(reconcileAt);
     expect(code).toMatch(/\.map\(\(row\) => toPublicSavedRow\(row, nowMs\)\)/);
-    expect(code).toContain("reconcileSnapshots(loaded, snaps,");
+    // the loaded rows reach the snapshots through rowsForSnapshots (chunk 0 only; pinned in the h135 block above)
+    expect(code).toContain("reconcileSnapshots(rowsForSnapshots(loaded, plan), snaps,");
   });
 
   it("the pill still renders only for view.isBlindspot, which is now the public claim", () => {
