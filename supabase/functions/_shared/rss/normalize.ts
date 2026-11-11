@@ -37,6 +37,7 @@ import {
 } from "../image-url.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 import { isLegalNotice } from "./legal-notice.ts";
+import { isAdClickLink } from "./ad-link.ts";
 import { findInlineImgSrc } from "./inline-image.ts";
 import { clampForScan, stripTagsLinear } from "./strip-tags.ts";
 import { classifyCategory } from "./category.ts";
@@ -50,9 +51,14 @@ export type { NewsCategory } from "./category.ts";
  * letter or digit after decoding (`isContentlessTitle`: '&nbsp', '&amp;nbsp',
  * '-', '…', an empty or whitespace-only title). A BİK legal notice or an item
  * with no link is dropped too but is NOT counted here.
+ * `adLinks` counts the items dropped because their absolute url is on an ad
+ * click-tracker host (`isAdClickLink`: a DoubleClick `gampad/clk` link). The
+ * ad check runs after the title checks, so a blank or contentless title is
+ * counted as contentless, never as an ad link.
  */
 export interface NormalizeCounters {
   contentlessTitles: number;
+  adLinks: number;
 }
 
 export interface NormalizedArticle {
@@ -582,9 +588,11 @@ export interface PreparedItem {
 /**
  * The cheap half of `normalizeItem`, in the order it always ran: no link ->
  * null (silent); blank title -> counted, null; decode / strip the title, then
- * `isContentlessTitle` -> counted, null; otherwise the cleaned title and the
- * absolute url. It does NOT decide the legal-notice drop (that stays in
- * `completeItem`, as a legal notice is never counted as contentless).
+ * `isContentlessTitle` -> counted, null; then an absolute url on an ad
+ * click-tracker host (`isAdClickLink`, h130-feeds-2) -> counted in `adLinks`,
+ * null; otherwise the cleaned title and the absolute url. It does NOT decide the
+ * legal-notice drop (that stays in `completeItem`, as a legal notice is never
+ * counted as contentless).
  *
  * Ingest runs this for every parsed item, looks up which urls are already
  * stored, and calls `completeItem` only for the rest: 99% of the items of a
@@ -619,7 +627,16 @@ export function prepareItem(
     if (counters) counters.contentlessTitles++;
     return null;
   }
-  return { item, title, url: absolutiseUrl(rawLink, source) };
+  // h130-feeds-2: an ad click-tracker is not a story (a DoubleClick `gampad/clk`
+  // link was stored as a Habertürk card and every reader click paid the
+  // advertiser). The absolute url is computed once and checked by host, after
+  // the title checks, so a headline-less item stays counted as contentless.
+  const url = absolutiseUrl(rawLink, source);
+  if (isAdClickLink(url)) {
+    if (counters) counters.adLinks++;
+    return null;
+  }
+  return { item, title, url };
 }
 
 /**
@@ -677,7 +694,8 @@ export function completeItem(
  * Normalise a single raw RSS item into the row shape expected by the
  * `articles` table. `content_hash` is computed via `strictFingerprint`
  * exclusively. Returns `null` if the item lacks a link, has no headline text
- * (see below), or is a BİK legal notice (`isLegalNotice`).
+ * (see below), links to an ad click-tracker host (`isAdClickLink`, counted in
+ * `counters.adLinks`), or is a BİK legal notice (`isLegalNotice`).
  *
  * "No headline text" = the raw title is empty or whitespace-only, or the
  * decoded title holds no letter or digit (`isContentlessTitle`: '&nbsp',
@@ -719,7 +737,8 @@ function logSkippedItems(slug: string, skipped: number, firstMessage: string): v
  * Normalise an array of raw items, dropping any that fail the title/link
  * filter. Order preserved. `counters`, when given, is forwarded to every
  * `normalizeItem` call and totals the headline-less items of the batch
- * (`contentlessTitles`); omitting it behaves exactly as before.
+ * (`contentlessTitles`) and the ad click links (`adLinks`); omitting it behaves
+ * exactly as before.
  *
  * One item that throws (a malformed field the decoders did not anticipate)
  * must not take the rest of the source's items down with it: it is skipped on
@@ -750,7 +769,7 @@ export function normalizeArticles(
 }
 
 /**
- * `prepareItem` over an array. Items that are dropped (no link, contentless)
+ * `prepareItem` over an array. Items that are dropped (no link, contentless, ad link)
  * are absent from the result; the others keep their order. Same per-item
  * isolation as `normalizeArticles`: an item that throws is skipped on its own
  * and ONE `[normalize] <slug>: skipped N item(s) that threw` line is logged per

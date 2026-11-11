@@ -88,7 +88,8 @@ import {
   stableArticleId,
 } from "../_shared/rss/normalize.ts";
 import { sourceArticleKeyFor } from "../_shared/rss/article-key.ts";
-import { buildHostOwners, foreignHostOwner } from "../_shared/rss/host-owner.ts";
+import { buildHostOwners, foreignHostOwner, hostKey } from "../_shared/rss/host-owner.ts";
+import { isOffHostItem } from "../_shared/rss/ad-link.ts";
 import {
   TITLE_TWIN_MIN_JACCARD,
   jaccardOfSets,
@@ -487,6 +488,12 @@ interface CycleStats {
   // away instead of storing them as stories. Summary line and HTTP JSON only,
   // no `ingest_cycles` column, like the twins counters. Normally 0.
   contentlessTitlesDropped: number;
+  // `adLinksDropped` (h130-feeds-2): items whose link is an ad click-tracker
+  // (a DoubleClick `gampad/clk` url, `isAdClickLink`) that normalizeItem threw
+  // away instead of storing them as stories: every reader click on such a card
+  // registered a paid ad click. Summary line and HTTP JSON only, no
+  // `ingest_cycles` column. Normally 0.
+  adLinksDropped: number;
   // `foreignHostSkipped` (h63-clusterintegrity-2): items left to another source
   // because their link host is the host of a different active source (an
   // aggregator feed carrying a registered outlet's stream: haberler.com's feed
@@ -494,6 +501,13 @@ interface CycleStats {
   // source and register no twin key; the owning source claims the url on its own
   // poll. Normally 0. Summary line and HTTP JSON only, no `ingest_cycles` column.
   foreignHostSkipped: number;
+  // `offHostItems` (h130-feeds-2, LOG ONLY): items of a polled feed whose link
+  // host is neither the source's own host (subdomains allowed) nor the host of
+  // any active source (staging hosts such as bbstagedesktop.ciner.com.tr, video
+  // hosts such as youtu.be). Counted per cycle over the feed's current items,
+  // known ones included, and NEVER dropped: it only makes those hosts visible
+  // before any rule is set. Summary line and HTTP JSON only. Normally small.
+  offHostItems: number;
   // Parse budget: changed feeds this cycle refused a parse because the cycle
   // already used its MAX_PARSES_PER_CYCLE / PARSE_BUDGET_BYTES. Not failures:
   // they are retried first next cycle. Summary line, HTTP JSON and, since
@@ -1667,7 +1681,9 @@ async function runCycle(): Promise<CycleStats> {
     twinsKeptDistinct: 0,
     twinsKeyCapped: 0,
     contentlessTitlesDropped: 0,
+    adLinksDropped: 0,
     foreignHostSkipped: 0,
+    offHostItems: 0,
     parseDeferred: 0,
     parseDeferredMaxStreak: 0,
     parsedBytes: 0,
@@ -1746,6 +1762,14 @@ async function runCycleBody(
   // that two active sources claim is left out, so an ambiguous host never skips
   // an item. Read in the feed loop below.
   const hostOwners = buildHostOwners(liveSources);
+  // h130-feeds-2 (log only): the host of EVERY active source, an ambiguous one
+  // included (`hostOwners` leaves those out), so `offHostItems` never counts a
+  // registered host as foreign.
+  const registeredHosts = new Set<string>();
+  for (const s of liveSources) {
+    const host = hostKey(s.url);
+    if (host !== null) registeredHosts.add(host);
+  }
 
   // Skip sources still inside their quarantine backoff window (migration
   // 074, §4) -- 23 dead feeds cost ~11,000 failed fetches/day; a
@@ -2079,7 +2103,7 @@ async function runCycleBody(
       const bootstrapUnchanged =
         bootstrap && !!result.bodyHash && result.bodyHash === source.fetch_body_hash;
       // Per source, so the log line below names the feed that sent the junk.
-      const normalizeCounters = { contentlessTitles: 0 };
+      const normalizeCounters = { contentlessTitles: 0, adLinks: 0 };
       // Phase 1 (hunt-11): the cheap half of the normalisation for every item.
       // A bootstrap whose body is the stored one prepares nothing.
       const preparedAll = bootstrapUnchanged
@@ -2095,13 +2119,25 @@ async function runCycleBody(
       // so a skipped item costs none of them and registers no twin key; the
       // owner claims the url on its own poll. Filtering here also keeps
       // `isKnown` / `toComplete` / `completed` aligned with one list below.
+      //
+      // h130-feeds-2, LOG ONLY, same loop: an item that stays and whose host is
+      // neither this source's own host (subdomains allowed) nor a registered
+      // source's is counted as off-host. Nothing is dropped on that count. A
+      // source whose own host cannot be read counts nothing.
       const leftToOwner = new Map<string, number>();
+      const ownHost = hostKey(source.url);
+      let offHost = 0;
       const prepared =
-        hostOwners.size === 0
+        hostOwners.size === 0 && ownHost === null
           ? preparedAll
           : preparedAll.filter((p) => {
               const owner = foreignHostOwner(p.url, source.id, hostOwners);
-              if (owner === null) return true;
+              if (owner === null) {
+                if (ownHost !== null && isOffHostItem(hostKey(p.url), ownHost, registeredHosts)) {
+                  offHost++;
+                }
+                return true;
+              }
               leftToOwner.set(owner.slug, (leftToOwner.get(owner.slug) ?? 0) + 1);
               stats.foreignHostSkipped++;
               return false;
@@ -2117,6 +2153,20 @@ async function runCycleBody(
         // Slug and count only: never a url or a headline.
         console.log(
           `[ingest] ${source.slug}: ${normalizeCounters.contentlessTitles} item(s) dropped: no headline text`,
+        );
+      }
+      if (normalizeCounters.adLinks > 0) {
+        stats.adLinksDropped += normalizeCounters.adLinks;
+        // Slug and count only: never a url or a headline.
+        console.log(
+          `[ingest] ${source.slug}: ${normalizeCounters.adLinks} item(s) dropped: ad click link`,
+        );
+      }
+      if (offHost > 0) {
+        stats.offHostItems += offHost;
+        // Slug and count only: never a url or a headline. Kept, not dropped.
+        console.log(
+          `[ingest] ${source.slug}: ${offHost} item(s) off-host (link host is neither the source's own nor a registered source's); kept`,
         );
       }
 

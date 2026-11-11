@@ -35,6 +35,8 @@ type FeedResult =
       bundles: unknown[];
       more: unknown[];
       claimCount: number;
+      /** h130-blindspots-1: Step-A claims the fetcher dropped (list rules, live tally, feed health). */
+      unlistedCount: number;
       sideCounts: Record<MediaDnaZone, number>;
       digest: SilenceDigest;
     }
@@ -68,7 +70,11 @@ import { DenominatorNote } from "@/components/source/denominator-note";
 import { PageHero } from "@/components/ui/page-hero";
 import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
-import { buildSilenceDigest, type SilenceDigest } from "@/lib/clusters/silence-digest";
+import {
+  blindspotUnlistedLine,
+  buildSilenceDigest,
+  type SilenceDigest,
+} from "@/lib/clusters/silence-digest";
 import type { MediaDnaZone } from "@/types";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -92,6 +98,7 @@ function okResult(
     bundles,
     more,
     claimCount: bundles.length + more.length,
+    unlistedCount: 0,
     sideCounts,
     digest: buildSilenceDigest(
       bundles as Parameters<typeof buildSilenceDigest>[0],
@@ -1467,5 +1474,113 @@ describe("/blindspots page — the whole window is listed (h53-consistency-1)", 
     expect(countAt).toBeLessThan(bandAt);
     expect(bandAt).toBeLessThan(cardAt);
     expect(cardAt).toBeLessThan(moreAt);
+  });
+
+  // h130-blindspots-1: /hafta printed "Toplam 49 kör nokta" for the same 7 days
+  // while this page said 45. The 4 others keep the label on the card and the story
+  // page but are not listed here; the line under the count line says so.
+  describe("the unlisted line under the count line (h130-blindspots-1)", () => {
+    const UNLISTED_START = "Bu dönemde kör nokta etiketi taşıyan ";
+
+    function unlistedLines(tree: unknown): string[] {
+      return collectText(tree).filter((t) => t.startsWith(UNLISTED_START));
+    }
+
+    it("renders the line (the fetcher's count, the reason classes) when unlistedCount is above zero", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult([cardFixture("c1"), cardFixture("c2", "muhalefet")], MORE, {
+          claimCount: 45,
+          sideCounts: COUNTS(43, 0, 2),
+          unlistedCount: 4,
+        }),
+      );
+
+      const tree = await BlindspotsFeed();
+
+      expect(unlistedLines(tree)).toEqual([blindspotUnlistedLine(4)]);
+      expect(unlistedLines(tree)[0]).toContain("4 haber daha");
+      expect(unlistedLines(tree)[0]).toContain("liste kuralları");
+      expect(unlistedLines(tree)[0]).not.toContain("kaynak durumu");
+      // The count line is the one it always was: 45, never 49.
+      expect(countLines(tree)).toEqual([
+        "Son 7 günde 45 kör nokta · İktidar ağırlıklı 43 · Muhalefet ağırlıklı 2",
+      ]);
+    });
+
+    it("renders no line when unlistedCount is 0, and none for a payload cached before the field existed", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], MORE));
+      expect(unlistedLines(await BlindspotsFeed())).toEqual([]);
+
+      // A remote-cache entry written by the previous deploy has no unlistedCount.
+      const { unlistedCount: _omitted, ...legacy } = okResult([cardFixture("c1")], MORE);
+      void _omitted;
+      getBlindspots.mockResolvedValueOnce(legacy as unknown as FeedResult);
+      expect(unlistedLines(await BlindspotsFeed())).toEqual([]);
+    });
+
+    it("renders no line on the empty and failed paths", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult([]));
+      expect(unlistedLines(await BlindspotsFeed())).toEqual([]);
+
+      getBlindspots.mockResolvedValueOnce({ ok: false });
+      expect(unlistedLines(await BlindspotsFeed())).toEqual([]);
+    });
+
+    it("sits directly under the count line and above the silence band and the cards", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult([cardFixture("c1")], MORE, { unlistedCount: 4 }),
+      );
+
+      const tree = (await BlindspotsFeed()) as Elementish;
+      const startsWith = (el: unknown, prefix: string) =>
+        (el as Elementish | null)?.type === "p" &&
+        collectText(el).join("").startsWith(prefix);
+      // The list branch's children: [count line, unlisted line, band, h2, cards, ...].
+      const siblings = collectElements(tree)
+        .map((el) => el.props?.children)
+        .find(
+          (children): children is unknown[] =>
+            Array.isArray(children) && children.some((c) => startsWith(c, "Son 7 günde ")),
+        );
+      expect(siblings).toBeDefined();
+      const countAt = siblings!.findIndex((c) => startsWith(c, "Son 7 günde "));
+
+      // Directly under: the very next sibling is the unlisted line, then the band.
+      expect(startsWith(siblings![countAt + 1], UNLISTED_START)).toBe(true);
+      expect((siblings![countAt + 2] as Elementish).type).toBe(SilenceDigestBand);
+    });
+
+    it("links 'Kurallar' to the list-rules paragraph of /metodoloji, as a plain <a>", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult([cardFixture("c1")], MORE, { unlistedCount: 4 }),
+      );
+
+      const tree = await BlindspotsFeed();
+      const links = collectElements(tree).filter(
+        (el) => el.props?.href === "/metodoloji#kor-noktalar-listesi",
+      );
+
+      expect(links).toHaveLength(1);
+      // Plain <a> like the definition link in the hero: /metodoloji is static.
+      expect(links[0]?.type).toBe("a");
+      expect(collectText(links[0]).join("")).toBe("Kurallar");
+    });
+
+    it("the link target exists: /metodoloji carries id=\"kor-noktalar-listesi\" on the list-rules heading", () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(join(here, "../metodoloji/page.tsx"), "utf8");
+
+      expect(source).toContain('id="kor-noktalar-listesi"');
+    });
+
+    it("renders no link when there is no line", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], MORE));
+
+      const links = collectElements(await BlindspotsFeed()).filter(
+        (el) => el.props?.href === "/metodoloji#kor-noktalar-listesi",
+      );
+
+      expect(links).toEqual([]);
+    });
   });
 });

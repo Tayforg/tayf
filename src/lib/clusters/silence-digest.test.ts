@@ -4,6 +4,7 @@ import * as silenceModule from "./silence-digest";
 import {
   ZONE_ROW_ORDER,
   blindspotCountLine,
+  blindspotUnlistedLine,
   buildSilenceDigest,
   capitalizeTr,
   formatSilenceRow,
@@ -510,6 +511,50 @@ describe("blindspotCountLine", () => {
   it("never says 'X tarafında N' (that names the silent side to a Turkish reader)", () => {
     const line =
       blindspotCountLine(12, { iktidar: 7, bagimsiz: 2, muhalefet: 3 }, 7) ?? "";
+    expect(line).not.toContain("tarafında");
+  });
+});
+
+// h130-blindspots-1: /hafta says "Toplam 49 kör nokta" for the week while the
+// count line above the /blindspots list says 45. The other 4 keep their label on
+// the card and the story page but fail a list rule or the live tally; this line
+// says so, directly under the count line.
+describe("blindspotUnlistedLine (h130-blindspots-1)", () => {
+  it("is null for zero, a negative count and a count that is not a number (a payload cached before the field existed)", () => {
+    expect(blindspotUnlistedLine(0)).toBeNull();
+    expect(blindspotUnlistedLine(-3)).toBeNull();
+    expect(blindspotUnlistedLine(Number.NaN)).toBeNull();
+    expect(blindspotUnlistedLine(undefined as unknown as number)).toBeNull();
+  });
+
+  it("names the count and the two reason classes: the list rules (copy, explainer title, Dünya / non-politics share) and the current source tally", () => {
+    const line = blindspotUnlistedLine(4);
+
+    expect(line).toBe(
+      "Bu dönemde kör nokta etiketi taşıyan 4 haber daha burada listelenmiyor: liste kuralları (aynı metnin kopyası, arama açıklaması başlığı, ağırlıkla Dünya ya da politika dışı haber) ya da güncel kaynak sayımı nedeniyle.",
+    );
+    expect(line).toContain("4 haber daha");
+  });
+
+  it("puts no Turkish case suffix on the number (no 'N'ü', 'N'i', 'N haberi')", () => {
+    for (const n of [1, 4, 12, 40, 1234]) {
+      const line = blindspotUnlistedLine(n) ?? "";
+      // The digit run is followed by a space, never by an apostrophe or a letter.
+      expect(line).not.toMatch(/\d['’]/);
+      expect(line).not.toMatch(/\d[a-zçğıöşüâîû]/i);
+      expect(line).toContain(" haber daha ");
+    }
+  });
+
+  it("groups thousands the Turkish way", () => {
+    expect(blindspotUnlistedLine(1234)).toContain("1.234 haber daha");
+  });
+
+  it("never says görmezden, sustu or gizledi, and never says 'X tarafında N'", () => {
+    const line = blindspotUnlistedLine(4) ?? "";
+    expect(line).not.toContain("görmezden");
+    expect(line).not.toContain("sustu");
+    expect(line).not.toContain("gizledi");
     expect(line).not.toContain("tarafında");
   });
 });

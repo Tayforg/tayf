@@ -332,8 +332,8 @@ describe("/metodoloji page", () => {
 
   // h120-methodology-1: the footer is pinned to the FIRST rendered entry, never to a
   // literal of an older entry, so the next CHANGELOG line cannot leave a stale pin
-  // behind. The date below is the newest entry's.
-  it("lists the 2026-11-10 CHANGELOG entry first and the footer reads the first rendered entry's date (h120-methodology-1)", async () => {
+  // behind. The date below is the newest entry's (h130-blindspots-2: 2026-11-11).
+  it("lists the 2026-11-11 CHANGELOG entry first and the footer reads the first rendered entry's date (h120-methodology-1, h130-blindspots-2)", async () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
@@ -342,13 +342,16 @@ describe("/metodoloji page", () => {
     const entryDates = tail.match(/\d{4}-\d{2}-\d{2}/g)?.slice(1) ?? [];
     // The footer is the first rendered entry's date, and that is the newest.
     expect(footer).toBe(entryDates[0]);
-    expect(footer).toBe("2026-11-10");
+    expect(footer).toBe("2026-11-11");
     expect(tail.startsWith(`Son güncelleme: ${entryDates[0]}`)).toBe(true);
     // The first list item: its date directly precedes its text, and it comes
-    // before the 2026-11-09, 2026-11-08 and 2026-11-07 entries.
-    const first = tail.indexOf(`${entryDates[0]} Kör nokta ifadesi:`);
+    // before the 2026-11-10, 2026-11-09, 2026-11-08 and 2026-11-07 entries.
+    const first = tail.indexOf(`${entryDates[0]} Kör nokta etiketinin, göründükten sonra da`);
     expect(first).toBeGreaterThan(0);
-    expect(first).toBeLessThan(tail.indexOf("2026-11-09 Kaynak göstergeleri:"));
+    expect(first).toBeLessThan(tail.indexOf("2026-11-10 Kör nokta ifadesi:"));
+    expect(tail.indexOf("2026-11-10 Kör nokta ifadesi:")).toBeLessThan(
+      tail.indexOf("2026-11-09 Kaynak göstergeleri:"),
+    );
     expect(tail.indexOf("2026-11-09 Kaynak göstergeleri:")).toBeLessThan(
       tail.indexOf("2026-11-08 Kör Noktalar listesi:"),
     );
@@ -361,13 +364,14 @@ describe("/metodoloji page", () => {
   });
 
   // h120-methodology-1 (b): the date order of the whole list, newest first.
-  it("renders the CHANGELOG dates newest first: 2026-11-10, -09, -08, -07, -06, ... (h120-methodology-1)", async () => {
+  it("renders the CHANGELOG dates newest first: 2026-11-11, -10, -09, -08, -07, -06, ... (h120-methodology-1, h130-blindspots-2)", async () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
     const tail = text.slice(text.indexOf("Son güncelleme:"));
     const entryDates = (tail.match(/\d{4}-\d{2}-\d{2}/g) ?? []).slice(1);
-    expect(entryDates.slice(0, 7)).toEqual([
+    expect(entryDates.slice(0, 8)).toEqual([
+      "2026-11-11",
       "2026-11-10",
       "2026-11-09",
       "2026-11-08",
@@ -434,13 +438,13 @@ describe("/metodoloji page", () => {
       expect(entry).toContain("kartta ve haber sayfasında yine görünebilir");
     });
 
-    it("quotes no typed digit: every number in the three entries comes from a constant", () => {
+    it("quotes no typed digit: every number in the four entries comes from a constant (the 2026-11-11 one included, h130-blindspots-2)", () => {
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(join(here, "page.tsx"), "utf8");
-      // The CHANGELOG array, from its opening to the first entry older than these three.
+      // The CHANGELOG array, from its opening to the first entry older than these four.
       const block = source.slice(source.indexOf("const CHANGELOG = ["), source.indexOf('date: "2026-11-07"'));
       const entries = block.split(/\n\s*\{\n/).filter((piece) => piece.includes("text:"));
-      expect(entries).toHaveLength(3);
+      expect(entries).toHaveLength(4);
       for (const entry of entries) {
         const text = entry.slice(entry.indexOf("text:")).replace(/\$\{[^}]*\}/g, "#");
         expect(text).not.toMatch(/\d/);
@@ -478,11 +482,13 @@ describe("/metodoloji page", () => {
     // The entry's date directly precedes its text.
     expect(tail).toContain(`2026-11-01 ${entry}`);
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer (the newest entry's date), then the 2026-11-10, -09 and -08 entries
+    // footer (the newest entry's date), then the 2026-11-11 entry (h130-blindspots-2),
+    // the 2026-11-10, -09 and -08 entries
     // (h120-methodology-1), the 2026-11-07, 2026-11-06 (h62-methodology-2),
     // 2026-11-05 and 2026-11-02 (h62-methodology-1) entries, then this one.
-    expect(dates.slice(0, 9)).toEqual([
-      "2026-11-10",
+    expect(dates.slice(0, 10)).toEqual([
+      "2026-11-11",
+      "2026-11-11",
       "2026-11-10",
       "2026-11-09",
       "2026-11-08",
@@ -1237,13 +1243,15 @@ describe("/metodoloji page: changelog order", () => {
     expect(denge).toBeGreaterThan(sources);
 
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer, then the 2026-11-10, -09 and -08 entries (h120-methodology-1), the
+    // footer, then the 2026-11-11 entry (h130-blindspots-2), the 2026-11-10, -09
+    // and -08 entries (h120-methodology-1), the
     // 2026-11-07 balance/English entry, the 2026-11-06 column
     // entry, the 2026-11-05 feed-delay entry, the 2026-11-02 unclustered-arm
     // entry (148), the 2026-11-01 sibling-veto entry (126), then the three
     // 2026-10-22 entries
-    expect(dates.slice(0, 12)).toEqual([
-      "2026-11-10",
+    expect(dates.slice(0, 13)).toEqual([
+      "2026-11-11",
+      "2026-11-11",
       "2026-11-10",
       "2026-11-09",
       "2026-11-08",
@@ -1660,6 +1668,65 @@ describe("/metodoloji page: the Kör nokta and Sürpriz cards count voting sourc
   });
 });
 
+// h130-blindspots-2: the page presented the 24 h wait as the catch-up window, but the
+// sibling veto searches SIBLING_VETO.scopeHours (48 h) and the cron re-scores any
+// blindspot touched in the last 26 h, so a claim can still be withdrawn after it went
+// public (3 cron vetoes on clusters first published 2026-10-28 to 2026-11-11 came 25.6
+// to 34.8 h after first_published). Copy only: no rule, no threshold, no query changed.
+describe("/metodoloji page: a public claim can be withdrawn after the wait (h130-blindspots-2)", () => {
+  const WITHDRAWN_SENTENCE = `Kardeş başlık denetimi bir haberi ilk yayından sonraki ${SIBLING_VETO.scopeHours} saat boyunca yeniden tarar; bu yüzden etiket göründükten sonra da kaldırılabilir. Kaldırılan haber Kör Noktalar listesinden ve RSS akışından çıkar.`;
+
+  async function pageText(): Promise<string> {
+    const { default: MethodologyPage } = await import("./page");
+    return collectText(await MethodologyPage()).join("");
+  }
+
+  it("says the sibling check rescans for SIBLING_VETO.scopeHours hours after first publication, so the label can be withdrawn after it shows", async () => {
+    const text = await pageText();
+
+    // Read from the constants the code runs on, never typed: the scan is longer than the wait.
+    expect(SIBLING_VETO.scopeHours).toBeGreaterThan(BLINDSPOT.feedDelayHours);
+    expect(text).toContain(`${SIBLING_VETO.scopeHours} saat boyunca`);
+    expect(text).toContain("kaldırılabilir");
+    expect(text).toContain(WITHDRAWN_SENTENCE);
+  });
+
+  it("follows the feed-delay sentence in the same Kör nokta section, before the Jev paragraph, and the delay sentence itself is unchanged", async () => {
+    const text = await pageText();
+
+    const delay = `ilk yayından ${BLINDSPOT.feedDelayHours} saat sonra görünür — veritabanındaki işaretleme anlıktır.`;
+    const delayAt = text.indexOf(delay);
+    const mine = text.indexOf(WITHDRAWN_SENTENCE);
+    const jevParagraph = text.indexOf("Tayf'ın kümeleyicisi aynı olayı bazen iki ayrı kümeye böler");
+    expect(delayAt).toBeGreaterThan(0);
+    expect(mine).toBe(delayAt + delay.length + 1);
+    expect(jevParagraph).toBeGreaterThan(mine);
+  });
+
+  it("no longer presents the wait as a guarantee: it says nothing like 'bir daha kaldırılmaz'", async () => {
+    const text = await pageText();
+
+    expect(text).not.toContain("kaldırılmaz");
+    expect(text).not.toContain("geri alınmaz");
+  });
+
+  it("CHANGELOG[0] is the new 2026-11-11 entry, the footer pin reads it, and it says the rule did not change", async () => {
+    const text = await pageText();
+    const entry = `Kör nokta etiketinin, göründükten sonra da ilk ${SIBLING_VETO.scopeHours} saat içinde kaldırılabileceği açıkça yazıldı; kural değişmedi.`;
+
+    const tail = text.slice(text.indexOf("Son güncelleme:"));
+    expect(tail.startsWith("Son güncelleme: 2026-11-11")).toBe(true);
+    // The first rendered entry: its date directly precedes its text, and it is the newest.
+    expect(tail).toContain(`2026-11-11 ${entry}`);
+    expect(tail.indexOf(`2026-11-11 ${entry}`)).toBeLessThan(
+      tail.indexOf("2026-11-10 Kör nokta ifadesi:"),
+    );
+    const entryDates = tail.match(/\d{4}-\d{2}-\d{2}/g)?.slice(1) ?? [];
+    expect(entryDates[0]).toBe("2026-11-11");
+    expect(entryDates).toEqual([...entryDates].sort().reverse());
+  });
+});
+
 // h120-methodology-1 (e): the page text outside the CHANGELOG is the published rule
 // contract. This pin makes any edit to it visible in review.
 describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
@@ -1669,7 +1736,14 @@ describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
   // caption "Kategori tanımları" of the category table (assistive-technology
   // label, no rule and no published number). Removing that caption restores the
   // old hash, so no CHANGELOG entry.
-  const RULES_SHA256 = "d4d007b9095a015a861dd747cdd0b681318b23a9c189945d34aa8a94791a7958";
+  // h130-blindspots-2: d4d007b9... -> 8b500eb4... adds exactly one sentence to the
+  // feed-delay paragraph of "Kör nokta nedir" (the sibling check rescans a story for
+  // SIBLING_VETO.scopeHours, so the label can be withdrawn after it showed; checked by
+  // rendering the HEAD page and this one: the new text is the old text with that
+  // sentence inserted after "veritabanındaki işaretleme anlıktır.", nothing else).
+  // It changes what the page tells a reader about the wait, so it has the 2026-11-11
+  // CHANGELOG entry ("kural değişmedi": no threshold, delay, veto or query moved).
+  const RULES_SHA256 = "8b500eb4965cf481f1dace1bdcb41483cc86d9455970f29c40fc071458eb848b";
 
   it("the rendered text of everything above the CHANGELOG hashes to the pinned value", async () => {
     // The two inputs that are not the page's own text: the registry-backed tagged

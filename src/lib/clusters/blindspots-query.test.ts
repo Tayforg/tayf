@@ -1371,6 +1371,144 @@ describe("getBlindspots result: cards, compact rows, counts, digest (h53-consist
 });
 
 // ---------------------------------------------------------------------------
+// h130-blindspots-1: /hafta counts every public claim of the week (49 on
+// 2026-11-11) while /blindspots listed 45: the 4 others keep their label on the
+// card and the story page but fail a list rule or the live tally. `unlistedCount`
+// is how many Step-A claims (embedded rows) toBlindspotBundle dropped for a list
+// rule, the live tally or no member, so that claimCount + unlistedCount is
+// /hafta's total. A feed-health suppression is NOT counted: /hafta, the cards and
+// the story page withdraw that label too (the gate is applied to the stored side).
+// Read-time only: claimCount, sideCounts, the digest and the listed claims are
+// exactly what they were without it.
+// ---------------------------------------------------------------------------
+
+/** Five distinct outlets in one zone whose headlines are the same dispatch under distinct hashes: fails the copy_dedup list rule only. */
+function mkCopyDedupRow(id: string) {
+  const row = mkClaimRow(id, "iktidar", 5, 0);
+  return {
+    ...row,
+    cluster_articles: row.cluster_articles.map((ca, i) => ({
+      articles: {
+        ...ca.articles,
+        title: "Cumhurbaşkanlığı aynı açıklamayı bütün gazetelere gönderdi",
+        content_hash: `hash-${id}-${i}`,
+      },
+    })),
+  };
+}
+
+describe("getBlindspots unlistedCount (h130-blindspots-1)", () => {
+  it("counts the Step-A claims that fail a list rule or the live tally, and leaves claimCount at the listed ones", async () => {
+    seedRows([
+      mkClaimRow("keep", "iktidar", 5, 0),
+      // Passes the contract on paper but is one dispatch copied by five outlets: copy_dedup.
+      mkCopyDedupRow("copy-dedup"),
+      // 4 of 6 voters = 0.667: below the 0.8 dominant share (the live tally).
+      mkClaimRow("diluted", "iktidar", 4, 2),
+    ]);
+
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(1);
+    expect(result.unlistedCount).toBe(2);
+    // Nothing else moves: the listed claim, the side counts and the digest are as before.
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["keep"]);
+    expect(result.more).toEqual([]);
+    expect(result.sideCounts).toEqual({ iktidar: 1, bagimsiz: 0, muhalefet: 0 });
+    expect(result.digest.windowTotal).toBe(1);
+  });
+
+  it("is 0 when every Step-A claim is listed, and claimCount is the number of rows", async () => {
+    const rows = seedWeek();
+
+    const result = await getBlindspots();
+
+    expect(result.unlistedCount).toBe(0);
+    expect(result.claimCount).toBe(rows.length);
+  });
+
+  it("is 0 on the empty path (no Step-A candidate at all)", async () => {
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(0);
+    expect(result.unlistedCount).toBe(0);
+  });
+
+  it("does not count a feed-health suppression as unlisted (/hafta, cards and story pages withdraw it too)", async () => {
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+    seedRows([
+      mkClaimRow("ik-suppressed-1", "iktidar", 5, 0),
+      mkClaimRow("ik-suppressed-2", "iktidar", 5, 0),
+      mkClaimRow("mu-keep", "muhalefet", 5, 0),
+    ]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getBlindspots();
+
+      expect(result.claimCount).toBe(1);
+      expect(result.unlistedCount).toBe(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("applies /hafta's own gate (the stored side) to every dropped row: a list-rule drop on a feed-suppressed side is not counted, one on a healthy side is", async () => {
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+    seedRows([
+      // Feed-suppressed (stored side iktidar): /hafta drops it, so it is not unlisted.
+      mkClaimRow("ik-suppressed", "iktidar", 5, 0),
+      // Fails the copy_dedup list rule BEFORE the feed gate, but its stored side is
+      // iktidar, which /hafta suppresses: not unlisted either.
+      mkCopyDedupRow("copy-dedup"),
+      // 4 of 6 voters = 0.667, below the dominant share; stored side muhalefet is
+      // healthy, so /hafta counts it and it is the one unlisted claim.
+      mkClaimRow("mu-diluted", "muhalefet", 4, 2),
+      mkClaimRow("mu-keep", "muhalefet", 5, 0),
+    ]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getBlindspots();
+
+      expect(result.claimCount).toBe(1);
+      expect(result.unlistedCount).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("counts a claim with no embedded article (nothing to tally) as unlisted", async () => {
+    seedRows([
+      mkClaimRow("keep", "iktidar", 5, 0),
+      { ...mkClaimRow("no-members", "iktidar", 5, 0), cluster_articles: [] },
+      { ...mkClaimRow("null-members", "iktidar", 5, 0), cluster_articles: null },
+    ]);
+
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(1);
+    expect(result.unlistedCount).toBe(2);
+  });
+
+  it("counts every embedded candidate, however many (120 failing rows), and adds up with claimCount to the rows Step B returned", async () => {
+    seedRows([
+      ...Array.from({ length: 120 }, (_, i) => mkFailingCandidateRow(`c${i}`)),
+      mkClaimRow("keep-a", "iktidar", 5, 0),
+      mkClaimRow("keep-b", "muhalefet", 5, 0),
+    ]);
+
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(2);
+    expect(result.unlistedCount).toBe(120);
+    expect(result.claimCount + result.unlistedCount).toBe(122);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // h106-blindspotbadges-1: a public claim whose silent zone the site's own Jev
 // recall stage matched with the same event (clusters.blindspot_recall_suspect,
 // migration 064) must not print absolute silence for that zone. The fetcher
