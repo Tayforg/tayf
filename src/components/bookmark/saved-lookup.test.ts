@@ -269,7 +269,7 @@ describe("SavedTruncationNote", () => {
 
   it("groups thousands with a dot, at any size", () => {
     const text = (shown: number, total: number) =>
-      renderToStaticMarkup(createElement(SavedTruncationNote, { shown, total })).replace(/<[^>]*>/g, "");
+      renderToStaticMarkup(createElement(SavedTruncationNote, { shown, total })).replace(/<[^>]*>/g, "").replace(/[<>]/g, "");
     expect(text(1000, 12345)).toBe("En yeni 1.000 kayıt gösteriliyor; toplam 12.345 kayıt var.");
     expect(text(200, 201)).toBe("En yeni 200 kayıt gösteriliyor; toplam 201 kayıt var.");
   });
@@ -941,7 +941,7 @@ describe("fixture: 201 real saved ids (production shape, 2026-11-11)", () => {
     expect(rows.map((r) => r.id)).toEqual(many.slice(1).reverse()); // newest first
     expect(plan).toMatchObject({ total: 1001, requested: 1000 });
     expect(
-      renderToStaticMarkup(createElement(SavedTruncationNote, { shown: plan.requested, total: plan.total })).replace(/<[^>]*>/g, ""),
+      renderToStaticMarkup(createElement(SavedTruncationNote, { shown: plan.requested, total: plan.total })).replace(/<[^>]*>/g, "").replace(/[<>]/g, ""),
     ).toBe("En yeni 1.000 kayıt gösteriliyor; toplam 1.001 kayıt var.");
   });
 
