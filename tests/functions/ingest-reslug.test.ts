@@ -340,9 +340,9 @@ function setOtherFeed(items: FeedItem[]): void {
 function seedStored(
   url: string,
   title: string,
-  opts: { sourceId?: string; createdAt?: string; publishedAt?: string } = {},
+  opts: { sourceId?: string; createdAt?: string; publishedAt?: string; key?: string | null } = {},
 ): ArticleRec {
-  const tail = /\/(\d{6,9})$/.exec(url)?.[1] ?? null;
+  const tail = opts.key !== undefined ? opts.key : (/\/(\d{6,9})$/.exec(url)?.[1] ?? null);
   const rec: ArticleRec = {
     id: `seed-${articlesStore.size + 1}`,
     url,
@@ -1004,6 +1004,234 @@ describe("restampResluggedRows", () => {
     const out = await restampResluggedRows(c, "anadolu-ajansi", SOURCE_ID, [a], Number.NaN);
     expect(out).toEqual({ restamped: 0, lookupErrors: 1, urls: [] });
     expect(a.published_at).toBe(STUB_ISO);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h132-purity-1: a source OTHER than AA that reuses an article id under a different
+// url (a new story under an old id) ships the old item's pubDate. dropExistingSource-
+// ArticleKeyRows keeps the row (its headline shares no words with the stored one) and
+// now stamps it with the poll clock when its pubDate is not later than the first time
+// the id was seen. Cluster 99f8fd67: Evrensel key 6008841, pubDate 2026-11-10T13:11Z,
+// the first row created 13:24Z, the second 20:24Z.
+// ---------------------------------------------------------------------------
+describe("a reused id from a source other than AA is stamped with the poll clock [h132-purity-1]", () => {
+  const EV = "src-evrensel";
+  const EV_RSS = "https://www.evrensel.net/rss/haber.xml";
+  const EV_NOW = Date.parse("2026-11-10T20:24:11Z");
+  const EV_NOW_ISO = "2026-11-10T20:24:11.000Z";
+  // 16:11 Istanbul = 13:11Z, carried by both stories.
+  const EV_PUBDATE = "Tue, 10 Nov 2026 16:11:00 +0300";
+  const EV_PUB_ISO = "2026-11-10T13:11:00.000Z";
+  const EV_OLD_URL =
+    "https://www.evrensel.net/haber/6008841/fon-vurgunu-sorusturmasi-aralarinda-murat-gulkan-ve-yunus-arinci-nin-oldugu-5-kisi-adliyeye-sevk-edildi";
+  const EV_OLD_TITLE =
+    "Fon vurgunu soruşturması: Aralarında Murat Gülkan ve Yunus Arıncı'nın olduğu 5 kişi adliyeye sevk edildi";
+  const EV_NEW_URL =
+    "https://www.evrensel.net/haber/6008841/fon-vurgunu-sorusturmasi-eski-takasbank-genel-mudurunun-de-aralarinda-oldugu-3-kisiye-tutuklama-talebi";
+  const EV_NEW_TITLE =
+    "Fon vurgunu soruşturması: Eski Takasbank Genel Müdürü'nün de aralarında olduğu 3 kişiye tutuklama talebi";
+
+  function seedAll(): void {
+    seedSources();
+    sourcesTable.push(source("evrensel", "https://www.evrensel.net", EV_RSS));
+    vi.setSystemTime(EV_NOW);
+  }
+  function setEvFeed(items: FeedItem[]): void {
+    feeds.set(new URL(EV_RSS).toString(), rss(items));
+  }
+  function seedEvOld(): ArticleRec {
+    return seedStored(EV_OLD_URL, EV_OLD_TITLE, {
+      sourceId: EV,
+      key: "6008841",
+      publishedAt: EV_PUB_ISO,
+      createdAt: "2026-11-10T13:24:04.851Z",
+    });
+  }
+
+  it("stamps the second story of key 6008841 with the poll clock and leaves the stored first one alone", async () => {
+    seedAll();
+    const first = seedEvOld();
+    setAaFeed([]);
+    setOtherFeed([]);
+    setEvFeed([{ title: EV_NEW_TITLE, link: EV_NEW_URL, pubDate: EV_PUBDATE }]);
+
+    const stats = await cycle();
+
+    expect(stored(EV_NEW_URL)?.published_at).toBe(EV_NOW_ISO);
+    expect(stats.keyReuseRestamped).toBe(1);
+    expect(stats.reslugRestamped).toBe(0);
+    expect(stats.inserted).toBe(1);
+    expect(stats.twinsDropped).toBe(0);
+    expect(stats.twinsKeptDistinct).toBe(1);
+    // Stored rows are never rewritten.
+    expect(stored(EV_OLD_URL)).toBe(first);
+    expect(first.published_at).toBe(EV_PUB_ISO);
+  });
+
+  it("logs ONE count-only line for the chunk: no url, no key, no headline", async () => {
+    seedAll();
+    seedEvOld();
+    setAaFeed([]);
+    setOtherFeed([]);
+    setEvFeed([{ title: EV_NEW_TITLE, link: EV_NEW_URL, pubDate: EV_PUBDATE }]);
+
+    await cycle();
+
+    const lines = logLines.filter((l) => l.includes("same-id row(s) whose pubDate predates"));
+    expect(lines).toEqual([
+      "[ingest] restamped 1 same-id row(s) whose pubDate predates the id's first sighting in chunk 0-1",
+    ]);
+    for (const l of lines) {
+      expect(l).not.toMatch(/https?:\/\//);
+      expect(l).not.toContain("6008841");
+      expect(l).not.toContain("Takasbank");
+    }
+  });
+
+  it("puts keyReuseRestamped in the cycle JSON and in the [ingest] cycle summary line", async () => {
+    seedAll();
+    seedEvOld();
+    setAaFeed([]);
+    setOtherFeed([]);
+    setEvFeed([{ title: EV_NEW_TITLE, link: EV_NEW_URL, pubDate: EV_PUBDATE }]);
+
+    const body = await cycle();
+
+    expect(body.keyReuseRestamped).toBe(1);
+    const summary = logLines.filter((l) => l.startsWith("[ingest] cycle"));
+    expect(summary.length).toBeGreaterThan(0);
+    const json = JSON.parse(
+      (summary[summary.length - 1] as string).replace("[ingest] cycle", ""),
+    ) as Record<string, unknown>;
+    expect(json.keyReuseRestamped).toBe(1);
+  });
+
+  it("reports 0 (and logs nothing) when no id was reused", async () => {
+    seedAll();
+    setAaFeed([]);
+    setOtherFeed([]);
+    setEvFeed([{ title: EV_NEW_TITLE, link: EV_NEW_URL, pubDate: EV_PUBDATE }]);
+
+    const body = await cycle();
+
+    expect(body.keyReuseRestamped).toBe(0);
+    expect(stored(EV_NEW_URL)?.published_at).toBe(EV_PUB_ISO);
+    expect(logLines.filter((l) => l.includes("same-id row(s)"))).toEqual([]);
+  });
+
+  it("10. keyReuseRestamped equals the stamped rows that reach the upsert: a twin is neither stamped nor counted", async () => {
+    seedAll();
+    seedEvOld();
+    // A second id with a stored story whose edited headline is a twin (dropped, never stamped).
+    seedStored(
+      "https://www.evrensel.net/haber/6008900/merkez-bankasi-faizi-sabit-tuttu",
+      "Merkez Bankası faizi sabit tuttu",
+      { sourceId: EV, key: "6008900", publishedAt: EV_PUB_ISO, createdAt: "2026-11-10T13:30:00.000Z" },
+    );
+    // A third id reused for an unrelated story.
+    seedStored(
+      "https://www.evrensel.net/haber/6008950/derbi-oncesi-kritik-aciklama",
+      "Derbi öncesi kritik açıklama",
+      { sourceId: EV, key: "6008950", publishedAt: EV_PUB_ISO, createdAt: "2026-11-10T13:31:00.000Z" },
+    );
+    setAaFeed([]);
+    setOtherFeed([]);
+    setEvFeed([
+      { title: EV_NEW_TITLE, link: EV_NEW_URL, pubDate: EV_PUBDATE },
+      {
+        title: "Merkez Bankası faiz kararını açıkladı",
+        link: "https://www.evrensel.net/haber/6008900/merkez-bankasi-faiz-kararini-acikladi",
+        pubDate: EV_PUBDATE,
+      },
+      {
+        title: "Deprem sonrası yeni açıklama",
+        link: "https://www.evrensel.net/haber/6008950/deprem-sonrasi-yeni-aciklama",
+        pubDate: EV_PUBDATE,
+      },
+      {
+        title: "Hiç görülmemiş haber",
+        link: "https://www.evrensel.net/haber/6009001/hic-gorulmemis-haber",
+        pubDate: EV_PUBDATE,
+      },
+    ]);
+
+    const stats = await cycle();
+
+    expect(stats.twinsDroppedStored).toBe(1);
+    expect(stored("https://www.evrensel.net/haber/6008900/merkez-bankasi-faiz-kararini-acikladi")).toBeUndefined();
+    expect(stored(EV_NEW_URL)?.published_at).toBe(EV_NOW_ISO);
+    expect(stored("https://www.evrensel.net/haber/6008950/deprem-sonrasi-yeni-aciklama")?.published_at).toBe(
+      EV_NOW_ISO,
+    );
+    // A brand-new id keeps its feed pubDate.
+    expect(stored("https://www.evrensel.net/haber/6009001/hic-gorulmemis-haber")?.published_at).toBe(EV_PUB_ISO);
+    expect(stats.keyReuseRestamped).toBe(2);
+    expect(stats.inserted).toBe(3);
+    const stampedInStore = [...articlesStore.values()].filter(
+      (r) => r.source_id === EV && r.published_at === EV_NOW_ISO,
+    );
+    expect(stampedInStore).toHaveLength(stats.keyReuseRestamped as number);
+  });
+
+  it("a later cycle takes the stamped row as a known url: nothing is stamped again", async () => {
+    seedAll();
+    seedEvOld();
+    setAaFeed([]);
+    setOtherFeed([]);
+    const feed: FeedItem[] = [{ title: EV_NEW_TITLE, link: EV_NEW_URL, pubDate: EV_PUBDATE }];
+    setEvFeed(feed);
+    await cycle();
+
+    vi.setSystemTime(EV_NOW + 600_000);
+    setEvFeed([
+      {
+        title: "Hiç görülmemiş haber",
+        link: "https://www.evrensel.net/haber/6009001/hic-gorulmemis-haber",
+        pubDate: "Tue, 10 Nov 2026 23:30:00 +0300",
+      },
+      ...feed,
+    ]);
+    const again = await cycle();
+
+    expect(again.itemsKnownSkipped).toBe(1);
+    expect(again.keyReuseRestamped).toBe(0);
+    expect(stored(EV_NEW_URL)?.published_at).toBe(EV_NOW_ISO);
+  });
+
+  it("9. AA: a re-slug stamped by restampResluggedRows is counted once, as reslugRestamped, never as keyReuseRestamped", async () => {
+    seedAll();
+    vi.setSystemTime(NOW);
+    const live = seedStored(LIVE_URL, "CANLI - Cumhurbaşkanı Erdoğan konuşuyor");
+    setAaFeed([{ title: RESLUG_TITLE, link: RESLUG_URL, pubDate: STUB_PUBDATE }]);
+    setOtherFeed([]);
+    setEvFeed([]);
+
+    const stats = await cycle();
+
+    expect(stored(RESLUG_URL)?.published_at).toBe(NOW_ISO);
+    expect(stats.reslugRestamped).toBe(1);
+    expect(stats.keyReuseRestamped).toBe(0);
+    expect(stats.inserted).toBe(1);
+    expect(logLines.filter((l) => l.includes("same-id row(s)"))).toEqual([]);
+    expect(live.published_at).toBe(STUB_ISO);
+  });
+
+  it("AA stays #262's: when its re-slug lookup failed the row keeps the parsed pubDate, the key layer does not rescue it", async () => {
+    seedAll();
+    vi.setSystemTime(NOW);
+    seedStored(LIVE_URL, "CANLI - Cumhurbaşkanı Erdoğan konuşuyor");
+    setAaFeed([{ title: RESLUG_TITLE, link: RESLUG_URL, pubDate: STUB_PUBDATE }]);
+    setOtherFeed([]);
+    setEvFeed([]);
+    reslugMode = "error";
+
+    const stats = await cycle();
+
+    expect(stats.reslugLookupErrors).toBe(1);
+    expect(stats.reslugRestamped).toBe(0);
+    expect(stats.keyReuseRestamped).toBe(0);
+    expect(stored(RESLUG_URL)?.published_at).toBe(STUB_ISO);
   });
 });
 

@@ -184,6 +184,31 @@ import type { SummaryMember } from "./summary-attribution";
 // the introducer, with none of what was said: `clampCutIntroducedQuote` makes the seed a stub even
 // though the shown text ends on a full stop. With no qualifying member the seed stays (98266829:
 // Posta holds the same text), never blank.
+//
+// h132-ozetpost-1: two gaps in the seed rules above, both seen on indexable multi-source pages
+// on 2026-11-11 (in the 517 non-archived clusters with 2 members or more first published in the
+// last 48 hours, 32 shown Özets were a form defect by the code's own `seedDisqualified`, 20 of
+// them stubs; this change moves 4 of the 517 and leaves 29, 17 of them stubs):
+//   - a NAME THAT CARRIES A DIGIT defeated `isLiveLine`. Star's "COP31 Başkanı ve ... Murat
+//     Kurum, Antalya'da \"COP31 Liderler Zirvesi\"nde konuşuyor" (ece7ef31, 6 sources) is a live
+//     line, but the digit test saw the 31 of "COP31" (a year, an ordinal and a quoted event name
+//     were taken out first, a name was not), so it stayed the Özet and the meta description. A
+//     name token (a capital letter, at most 10 more letters, an optional hyphen, 1 to 4 digits,
+//     not glued to a letter or digit in front and not followed by a digit: COP31, G20, F-16,
+//     Covid-19) is now blanked out with the year and the ordinal. A figure is not a name and
+//     still fails the line ("yüzde 30", "58 bin", "17 işçinin");
+//   - a STUB THAT COVERS ALMOST NONE OF THE HEADLINE kept the 0.6 floor of the form defects, and
+//     the member that says what happened scored just under it (78d3a0ee, 7 sources: Sözcü's
+//     "... toplantısı öncesinde Aile ..." scored 0.0, Mynet's clean sentence 0.56). Behind a stub
+//     whose own score is below AGREEMENT_STUB_LOW_SEED (0.3, exclusive) the floor is
+//     AGREEMENT_LOW (0.5), the line below which a seed itself is held to disagree: a member that
+//     covers half of the headline is a better Özet than a cut that covers a third of it at
+//     most. A stub that covers 0.3 or more (2f5d7d53 0.44, 56eaa832 0.5), and every other form
+//     defect (quotes, live, teaser, echo, CMS dump, quote-only), keeps AGREEMENT_FORM_DEFECT_MIN;
+//     an opinion, an explainer or a stale seed keeps AGREEMENT_HIGH. Every other gate of a
+//     candidate (defect, agency copy, language, rights, echo, length) is unchanged, and with no
+//     qualifying member the seed stays, never blank (9dd62dcd: the live line is kept, no member
+//     is clean and covers enough). A past tense ("açıklama yaptı") stays a report, not a live line.
 
 /** A seed scoring below this disagrees with the title (exclusive: 0.5 is kept). */
 export const AGREEMENT_LOW = 0.5;
@@ -195,13 +220,22 @@ export const AGREEMENT_MIN_GAIN = 0.3;
  * A replacement must score at least this (inclusive) when the seed is a form defect
  * ({@link SeedDefect}: a CMS field dump, a stub, unbalanced quotes, only quotations, a live line, a
  * teaser or an echo)
- * instead of {@link AGREEMENT_HIGH}. In the replay of the 1,600 newest clusters of 3
+ * instead of {@link AGREEMENT_HIGH}; behind a stub that scores under {@link AGREEMENT_STUB_LOW_SEED}
+ * it is {@link AGREEMENT_LOW} (h132-ozetpost-1). In the replay of the 1,600 newest clusters of 3
  * members or more, the clean replacements behind a live line scored 0.6 to 0.7 against
  * the headline (the live lines of the other outlets carry the same words and are not
  * candidates), and none reached 0.75. 0.6 is three of five title stems, the smallest
  * share that is more than half; a judgement, not a measured boundary.
  */
 export const AGREEMENT_FORM_DEFECT_MIN = 0.6;
+/**
+ * A stub seed that scores below this (exclusive) against the title covers almost none of it, and
+ * a replacement needs only {@link AGREEMENT_LOW} instead of {@link AGREEMENT_FORM_DEFECT_MIN}
+ * (h132-ozetpost-1). In the 517 clusters of 48 hours the stubs below it scored 0 to 0.22 and the
+ * clean members behind them 0.50 to 0.56; the stubs at 0.44 and 0.5 are not changed. A judgement,
+ * not a measured boundary: 0.3 is about one stem in three.
+ */
+export const AGREEMENT_STUB_LOW_SEED = 0.3;
 /** A title with fewer content tokens carries no signal: the seed is kept. */
 export const AGREEMENT_MIN_TITLE_TOKENS = 3;
 /** A replacement's tidied text must be at least this long (no stubs, no headlines). */
@@ -420,7 +454,8 @@ function disagrees(seedScore: number): boolean {
  *
  * `floor` (h95-summaries-1) is the least the candidate may score, inclusive; the
  * default is {@link AGREEMENT_HIGH}. The caller passes
- * {@link AGREEMENT_FORM_DEFECT_MIN} for a seed that is a form defect. A floor applies
+ * {@link AGREEMENT_FORM_DEFECT_MIN} for a seed that is a form defect, and {@link AGREEMENT_LOW}
+ * for a stub that covers almost none of the title (h132-ozetpost-1). A floor applies
  * to a well-formed seed too (the ceiling and the gain still do), but the caller never
  * lowers it for one.
  */
@@ -526,6 +561,12 @@ const TRAILING_LIVE_MARKS = /[\s.!…]+$/u;
 const QUOTED_EVENT_NAME = /(?<![\p{L}\p{N}])["“«„'‘][^"“”«»„‘’]{1,120}?["”»’'](?=\p{L})/gu;
 const YEAR = /(?<![\p{N}])(?:19|20)\d{2}(?![\p{N}])/gu;
 const ORDINAL = /(?<![\p{N}.,])\d{1,3}\.(?=\s+\p{Lu})/gu;
+// A name that carries digits is not a figure (h132-ozetpost-1): "COP31", "G20", "F-16", "Covid-19".
+// A capital letter, at most 10 more letters, an optional hyphen, one to four digits; not glued to a
+// letter or a digit in front, not followed by a digit (a run of five digits is a number). Every
+// repeat is bounded and the letters, the hyphen and the digits cannot stand for one another, so
+// the pattern backtracks by a constant at most, whatever the text.
+const DIGIT_NAME = /(?<![\p{L}\p{N}])\p{Lu}\p{L}{0,10}-?\p{N}{1,4}(?!\p{N})/gu;
 const QUOTE_MARKS = /["“”«»„‘]/u;
 const ANY_DIGIT = /\p{N}/u;
 /** Clause separators that open a second statement. */
@@ -554,19 +595,21 @@ function hasSentenceEnd(text: string): boolean {
  * ve konuşuyor"), a question, a figure, a quotation that is not an event's name, a cut
  * inside the predicate. `shown` is the tidied text.
  *
- * The three things that read as a figure or a quotation and are not: a year ("TRT World
- * Forum 2026"), an ordinal ("12. Türk Tıp Dünyası Kurultayı") and a quoted event name
- * whose closing mark is glued to its suffix ("... Töreni"nde konuşuyor"), are taken
- * out before the digit and quote-mark test, so the lines of 85ef184c and b04edded are
- * live lines; "yüzde 30" and `"enflasyon düşecek" diyerek` are not. Lexical, one pass
- * plus one regular expression per step, no nested quantifier. Never throws.
+ * The four things that read as a figure or a quotation and are not: a year ("TRT World
+ * Forum 2026"), an ordinal ("12. Türk Tıp Dünyası Kurultayı"), a quoted event name
+ * whose closing mark is glued to its suffix ("... Töreni"nde konuşuyor") and a name that
+ * carries digits ("COP31", "G20", "F-16", "Covid-19": a capital, at most 10 letters, an
+ * optional hyphen, 1 to 4 digits; h132-ozetpost-1), are taken out before the digit and
+ * quote-mark test, so the lines of 85ef184c, b04edded and ece7ef31 are live lines;
+ * "yüzde 30", "58 bin", "17 işçinin" and `"enflasyon düşecek" diyerek` are not. Lexical, one
+ * pass plus one regular expression per step, no nested quantifier. Never throws.
  */
 export function isLiveLine(shown: string): boolean {
   if (typeof shown !== "string") return false;
   const text = shown.trim();
   if (text === "" || text.length > LIVE_MAX_CHARS) return false;
   const core = text.replace(TRAILING_LIVE_MARKS, "");
-  const named = core.replace(QUOTED_EVENT_NAME, " ").replace(YEAR, " ").replace(ORDINAL, " ");
+  const named = core.replace(QUOTED_EVENT_NAME, " ").replace(YEAR, " ").replace(ORDINAL, " ").replace(DIGIT_NAME, " ");
   if (ANY_DIGIT.test(named) || QUOTE_MARKS.test(named) || SECOND_CLAUSE_MARKS.test(named)) return false;
   const folded = fold(named);
   // The index of the predicate in `named` is the index in `folded` only when the fold kept the length.
@@ -813,7 +856,9 @@ export interface SeedTitles {
  *     `isHeadlineEcho` (case, blanks, trailing marks and a cut-off "…" do not matter).
  *     Without `titles` there is nothing to echo.
  * Every one of them is a form defect: the replacement needs
- * {@link AGREEMENT_FORM_DEFECT_MIN}, not {@link AGREEMENT_HIGH}. Never throws.
+ * {@link AGREEMENT_FORM_DEFECT_MIN}, not {@link AGREEMENT_HIGH}; behind a "stub" that scores under
+ * {@link AGREEMENT_STUB_LOW_SEED} against the title, {@link AGREEMENT_LOW} (h132-ozetpost-1,
+ * decided in {@link findAgreeingMember}, which knows the title). Never throws.
  */
 export function seedDisqualified(raw: string, shown: string, titles: SeedTitles = {}): SeedDefect | null {
   if (typeof raw !== "string" || typeof shown !== "string") return null;
@@ -1038,7 +1083,8 @@ function byNewest(a: Scored, b: Scored): number {
  *     (`isHeadlineEcho`, h95-summaries-1);
  *   - its score passes {@link agreementSwitches}, with the floor of the seed's defect:
  *     {@link AGREEMENT_FORM_DEFECT_MIN} behind a CMS dump, a stub, quotes, quotations only, a
- *     live line, a teaser or an echo ({@link seedDisqualified}), {@link AGREEMENT_HIGH}
+ *     live line, a teaser or an echo ({@link seedDisqualified}), {@link AGREEMENT_LOW} behind a
+ *     stub that scores under {@link AGREEMENT_STUB_LOW_SEED} (h132-ozetpost-1), {@link AGREEMENT_HIGH}
  *     otherwise (an opinion, a stale or an explainer seed keep it: what they say is the
  *     problem, not how they look). A candidate is never filtered by its OWN title. Behind a clean
  *     seed a copy of the seed's text scores what the seed scores, so it can never pass.
@@ -1079,13 +1125,16 @@ export function findAgreeingMember({
   // what it covers: its score and the gain over it no longer apply. A form defect (stub,
   // quotes, quote-only, live, teaser, echo, and h122-ozet-1's CMS dump) also lowers the bar
   // for the replacement (h95-summaries-1); an opinion, an explainer or a stale seed keeps
-  // AGREEMENT_HIGH.
+  // AGREEMENT_HIGH. A stub that covers almost none of the title (under AGREEMENT_STUB_LOW_SEED,
+  // h132-ozetpost-1) lowers it once more, to AGREEMENT_LOW: a member that covers half of the
+  // headline is a better Özet than a cut that covers a third of it at most.
   const defect = seedDisqualified(seedRaw, seedShown, {
     memberTitle: seed.article.title,
     clusterTitle: title,
   });
   const malformed = defect !== null || stale || opinionSeed || explainerSeed;
-  const floor = defect !== null ? AGREEMENT_FORM_DEFECT_MIN : AGREEMENT_HIGH;
+  const nearZeroStub = defect === "stub" && seedScore < AGREEMENT_STUB_LOW_SEED - EPSILON;
+  const floor = nearZeroStub ? AGREEMENT_LOW : defect !== null ? AGREEMENT_FORM_DEFECT_MIN : AGREEMENT_HIGH;
   if (!malformed && !disagrees(seedScore)) return null;
 
   const texts = members.map((m) => repairEntityResidue(m.article.description ?? "").trim());

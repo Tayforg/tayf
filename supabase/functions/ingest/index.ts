@@ -39,7 +39,10 @@
 //      (the same key twice in one feed, re-counted on every re-parse of a long
 //      feed), `twinsKeptDistinct` (same key, unrelated headline, stored) and
 //      `twinsKeyCapped` (an id repeated past MAX_KEPT_TITLES_PER_KEY in one
-//      feed: kept, no longer compared, so the gate's CPU stays bounded). The
+//      feed: kept, no longer compared, so the gate's CPU stays bounded). A kept
+//      reused-id row whose feed pubDate is not later than the first time that id
+//      was seen carries the OLD item's pubDate: it is stamped with the poll
+//      clock instead (`keyReuseRestamped`, h132-purity-1). The
 //      `AFTER INSERT ON articles` trigger (migration 025) takes over from here
 //      to enqueue `cluster_work` and `image_backfill` messages.
 //   5. Persists per-source fetch state. The fresh validators (ETag,
@@ -548,6 +551,20 @@ interface CycleStats {
   // other source.
   reslugRestamped: number;
   reslugLookupErrors: number;
+  // Reused ids (h132-purity-1): rows kept by the stored (source_id,
+  // source_article_key) check although another url is stored under their id (the
+  // headline shares no words: a different story under a reused id) and whose feed
+  // pubDate is not later than the first time that id was seen. That pubDate belongs
+  // to the earlier item, so the row is stamped with the poll's clock instead.
+  // Counted per chunk from the rows that go on to the upsert (a twin is dropped and
+  // never stamped). The sources of STABLE_ARTICLE_ID_SOURCES (AA) are left to the
+  // re-slug check above and never counted here. Summary line and HTTP JSON only: no
+  // `ingest_cycles` column. About 28 a day across sources other than AA (7-day
+  // prod replay of this rule, 2026-11-11: 198 rows, about 12 a day more than 60
+  // minutes stale; haber7, yenicag and birgun the most). haber7's share is mostly
+  // same-story live-update retitles (same id and pubDate, new slug and headline),
+  // which are stamped too.
+  keyReuseRestamped: number;
   // Isolate item budget (hunt-11, A-ingest-cpu): items booked on this isolate
   // so far, cycles it has served, and changed feeds this cycle refused because
   // they did not fit what is left of the isolate's allowance (each also counts
@@ -774,6 +791,32 @@ async function dropExistingSourceContentHashRows(
 // lookup degrades only its own slice (those
 // rows are kept, fail-open) and is counted in `lookupErrors`, which the caller
 // adds to `stats.prefilterErrors`.
+//
+// Reused ids keep the old item's pubDate (hunt-132, h132-purity-1). The CMS that
+// reuses an id for a new story keeps shipping the OLD item's pubDate on it, so
+// the row of a kept (distinct) story was stored hours "old", set its cluster's
+// first_published and took the "Kim önce yazdı?" first-mover slot: Evrensel key
+// 6008841 (pubDate 2026-11-10T13:11Z on both rows; the first created 13:24Z, the
+// second 20:24Z, which set cluster 99f8fd67 "İlk: Evrensel 16:11, İktidar 6 sa
+// 35 dk sonra katıldı") and BirGün 745397 (pubDate 08:11Z; rows created 09:12Z
+// and 14:15Z; the second set e2be28a4's first_published). Their headlines score
+// 0.192 and 0.111, below TITLE_TWIN_MIN_JACCARD, so the gate above keeps them with
+// the feed's pubDate. A kept row whose pubDate is NOT LATER than the first time
+// that (source, key) was seen (the minimum created_at over EVERY returned match
+// of the pair, not only the MAX_KEPT_TITLES_PER_KEY compared ones) cannot be the
+// new story's own: that pubDate predates the id's first sighting. It gets the
+// poll clock (`nowMs`) instead, and its url goes in `restampedUrls`. A twin is
+// dropped and never stamped, a same-url re-poll and a failed lookup slice are
+// untouched, and stored rows and clusters are never rewritten (new rows only).
+// The sources of STABLE_ARTICLE_ID_SOURCES (Anadolu Ajansı) belong to the re-slug
+// check below (hunt-114, #262), whose contract includes "a failed lookup keeps the
+// parsed pubDate": their ids are passed in `reslugSourceIds` and this rule never
+// touches their rows, so no row is handled by both checks. (A row that check did
+// stamp carries the poll clock, later than the id's first sighting, so it would not
+// be stamped again either.) Matches created at or after the cycle start
+// (`firstSeenBeforeMs`: rows this cycle inserted in an earlier UPSERT_BATCH chunk)
+// do not count as the first sighting, so the stamp does not depend on how the
+// cycle is chunked.
 
 export interface ExistingKeyedArticle {
   id: string;
@@ -782,6 +825,7 @@ export interface ExistingKeyedArticle {
   source_id: string;
   source_article_key: string;
   created_at: string;
+  published_at: string;
 }
 
 export async function dropExistingSourceArticleKeyRows<
@@ -790,11 +834,21 @@ export async function dropExistingSourceArticleKeyRows<
     url: string;
     title: string;
     source_article_key: string | null;
+    published_at: string;
   },
 >(
   supabase: ReturnType<typeof createServiceClient>,
   rows: readonly T[],
   sinceIso: string,
+  nowMs: number,
+  // Ids of the sources whose re-stamping belongs to `restampResluggedRows`
+  // (STABLE_ARTICLE_ID_SOURCES): their rows are never stamped here.
+  reslugSourceIds: ReadonlySet<string> = new Set<string>(),
+  // The cycle start (h133): a match created at or after it is a row this cycle
+  // inserted itself (an earlier UPSERT_BATCH chunk), not a prior sighting of the
+  // id. Only the first-sighting clock skips it; the twin and same-url checks
+  // still see it. +Infinity (the default) counts every match.
+  firstSeenBeforeMs: number = Number.POSITIVE_INFINITY,
 ): Promise<{
   rows: T[];
   twins: Array<{ row: T; existing: ExistingKeyedArticle }>;
@@ -802,13 +856,23 @@ export async function dropExistingSourceArticleKeyRows<
   // Rows kept although another url is stored under their (source_id, key):
   // none of those headlines shares words with the row's (an id reuse).
   keptDistinct: number;
+  // The urls of the kept rows whose `published_at` was replaced by `nowMs`
+  // (h132-purity-1): a reused id whose pubDate is not later than the id's first
+  // sighting. The rows themselves are mutated in place and are all in `rows`.
+  restampedUrls: string[];
 }> {
   const keyed = rows.filter((r) => r.source_article_key !== null);
   if (keyed.length === 0) {
-    return { rows: [...rows], twins: [], lookupErrors: 0, keptDistinct: 0 };
+    return { rows: [...rows], twins: [], lookupErrors: 0, keptDistinct: 0, restampedUrls: [] };
   }
 
+  // The poll clock as written on a stamped row; null (nothing is ever stamped)
+  // when `nowMs` is not a usable date, so a bad clock can never throw here.
+  const nowDate = new Date(nowMs);
+  const nowIso = Number.isNaN(nowDate.getTime()) ? null : nowDate.toISOString();
+
   const twinOf = new Map<T, ExistingKeyedArticle>();
+  const restampedUrls: string[] = [];
   let lookupErrors = 0;
   let keptDistinct = 0;
   for (let i = 0; i < keyed.length; i += PREFILTER_CHUNK) {
@@ -820,7 +884,7 @@ export async function dropExistingSourceArticleKeyRows<
     try {
       const { data, error } = await supabase
         .from("articles")
-        .select("id, url, title, source_id, source_article_key, created_at")
+        .select("id, url, title, source_id, source_article_key, created_at, published_at")
         .in("source_id", sourceIds)
         .in("source_article_key", keys)
         .gte("created_at", sinceIso)
@@ -848,6 +912,9 @@ export async function dropExistingSourceArticleKeyRows<
       {
         urls: Set<string>;
         earliest: Array<{ match: ExistingKeyedArticle; tokens: ReadonlySet<string> }>;
+        // The earliest created_at of ALL the pair's returned matches (not just the
+        // compared ones): when this id was first seen. +Infinity when none parses.
+        firstSeenMs: number;
       }
     >();
     const createdMs = (e: ExistingKeyedArticle): number => {
@@ -870,7 +937,14 @@ export async function dropExistingSourceArticleKeyRows<
         })
         .slice(0, MAX_KEPT_TITLES_PER_KEY)
         .map((match) => ({ match, tokens: titleTokens(match.title) }));
-      byPair.set(pair, { urls: new Set(list.map((e) => e.url)), earliest });
+      let firstSeenMs = Number.POSITIVE_INFINITY;
+      for (const e of list) {
+        const ms = createdMs(e);
+        // A row this cycle inserted earlier is not a prior sighting (h133).
+        if (ms >= firstSeenBeforeMs) continue;
+        if (ms < firstSeenMs) firstSeenMs = ms;
+      }
+      byPair.set(pair, { urls: new Set(list.map((e) => e.url)), earliest, firstSeenMs });
     }
     for (const row of slice) {
       const candidates = byPair.get(`${row.source_id}\x1f${row.source_article_key}`);
@@ -888,6 +962,20 @@ export async function dropExistingSourceArticleKeyRows<
       }
       if (earliest === null) {
         keptDistinct++;
+        // A reused id (h132-purity-1): the row's pubDate is not later than the
+        // first time this id was seen, so it is the earlier item's, not the new
+        // story's. Stamp the poll clock. An unparseable pubDate (NaN) or an id
+        // with no usable first sighting (Infinity) never stamps.
+        if (
+          nowIso !== null &&
+          !reslugSourceIds.has(row.source_id) &&
+          Number.isFinite(candidates.firstSeenMs) &&
+          typeof row.published_at === "string" &&
+          Date.parse(row.published_at) <= candidates.firstSeenMs
+        ) {
+          row.published_at = nowIso;
+          restampedUrls.push(row.url);
+        }
         continue;
       }
       twinOf.set(row, earliest);
@@ -901,7 +989,7 @@ export async function dropExistingSourceArticleKeyRows<
     if (existing) twins.push({ row, existing });
     else kept.push(row);
   }
-  return { rows: kept, twins, lookupErrors, keptDistinct };
+  return { rows: kept, twins, lookupErrors, keptDistinct, restampedUrls };
 }
 
 // ---------------------------------------------------------------------------
@@ -1692,6 +1780,7 @@ async function runCycle(): Promise<CycleStats> {
     knownUrlLookupErrors: 0,
     reslugRestamped: 0,
     reslugLookupErrors: 0,
+    keyReuseRestamped: 0,
     isolateItemsUsed: 0,
     isolateCycles: 0,
     isolateBudgetDeferred: 0,
@@ -1877,6 +1966,11 @@ async function runCycleBody(
   // poll's clock. A restamped row can still be dropped as a stored twin in the
   // upsert phase, so it is counted and logged there, once it survives.
   const restampedUrls = new Map<string, string>();
+  // h132-purity-1: the sources whose same-id rows are re-stamped by the re-slug
+  // check above, left alone by the reused-id stamp of the upsert phase.
+  const reslugSourceIds = new Set<string>(
+    toFetch.filter((s) => STABLE_ARTICLE_ID_SOURCES.has(s.slug)).map((s) => s.id),
+  );
 
   const allRows: IngestArticleRow[] = [];
   // Per-source intra-cycle de-dup so two section-slug variants of the same
@@ -2444,12 +2538,24 @@ async function runCycleBody(
       // an edited headline -- it is not inserted. A same-key row with an
       // unrelated headline is a different story under a reused id: it stays in
       // `chunk` and counts as `keptDistinct`.
+      // h132-purity-1: a kept reused-id row whose pubDate predates the id's first
+      // sighting is stamped with this clock (taken right before the lookup).
+      const keyReuseNowMs = Date.now();
       const {
         rows: chunk,
         twins,
         lookupErrors: twinLookupErrors,
         keptDistinct,
-      } = await dropExistingSourceArticleKeyRows(supabase, afterContentHash, twinSinceIso);
+        restampedUrls: keyReuseUrls,
+      } = await dropExistingSourceArticleKeyRows(
+        supabase,
+        afterContentHash,
+        twinSinceIso,
+        keyReuseNowMs,
+        reslugSourceIds,
+        // h133: rows this cycle inserted in an earlier chunk are not a prior sighting.
+        startedAt,
+      );
       // hunt-114: the re-slugged rows that survived every drop above are the ones
       // that reach the database stamped with the poll's clock.
       if (restampedUrls.size > 0) {
@@ -2480,6 +2586,13 @@ async function runCycleBody(
         // Count only: never the url or the headline.
         console.log(
           `[ingest] dropped ${twins.length} twin row(s) sharing (source_id, source_article_key) with a stored article in chunk ${i}-${i + rawChunk.length}`,
+        );
+      }
+      if (keyReuseUrls.length > 0) {
+        stats.keyReuseRestamped += keyReuseUrls.length;
+        // Count only: never a url, a key or a headline.
+        console.log(
+          `[ingest] restamped ${keyReuseUrls.length} same-id row(s) whose pubDate predates the id's first sighting in chunk ${i}-${i + rawChunk.length}`,
         );
       }
       if (keptDistinct > 0) {

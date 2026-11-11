@@ -258,7 +258,7 @@ const legacyPrefilterLookupCalls: Array<{ sourceIds: string[]; hashes: string[] 
 
 // Twin-articles (migration 113): rows "stored" in `articles` that carry a
 // source_article_key, read by `dropExistingSourceArticleKeyRows`'s
-// `select("id, url, title, source_id, source_article_key, created_at")
+// `select("id, url, title, source_id, source_article_key, created_at, published_at")
 // .in("source_id", ids).in("source_article_key", keys).gte("created_at", since)`.
 // The mock tells that lookup apart from the other two `articles` reads by its
 // `.in("source_article_key", ...)` call, and answers like the real table does:
@@ -272,6 +272,9 @@ type StoredKeyRow = {
   source_id: string;
   source_article_key: string;
   created_at?: string;
+  // h132-purity-1: the feed pubDate the stored row carries. Passed through to
+  // the lookup answer like every other field of the row.
+  published_at?: string;
 };
 let storedArticlesByKey: StoredKeyRow[] = [];
 // When set, the key lookup returns this as a Supabase `error`.
@@ -285,6 +288,8 @@ const keyLookupCalls: Array<{
   gte: Array<{ column: string; value: unknown }>;
   order: Array<{ column: string; ascending: boolean }>;
   limit: number | null;
+  // The columns the lookup asked for (h132-purity-1: published_at joined them).
+  select: string | null;
 }> = [];
 // Every `.gte(column, value)` call on an `articles` query this test made.
 const articlesGteCalls: Array<{ column: string; value: unknown }> = [];
@@ -351,6 +356,7 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
       const gteCalls: Array<{ column: string; value: unknown }> = [];
       const orderCalls: Array<{ column: string; ascending: boolean }> = [];
       let limitCall: number | null = null;
+      let selectCall: string | null = null;
       const settle = () => {
         if (table === "sources") {
           if (forcedSourcesError) {
@@ -392,6 +398,7 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
               gte: [...gteCalls],
               order: [...orderCalls],
               limit: limitCall,
+              select: selectCall,
             });
             if (forcedKeyLookupThrow) throw new Error("simulated key lookup throw");
             if (forcedKeyLookupError) {
@@ -441,7 +448,10 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
         return { data: null, error: null };
       };
       Object.assign(chain, {
-        select: () => chain,
+        select: (cols?: unknown) => {
+          selectCall = typeof cols === "string" ? cols : null;
+          return chain;
+        },
         eq: () => chain,
         order: (column: string, opts?: { ascending?: boolean }) => {
           orderCalls.push({ column, ascending: opts?.ascending !== false });
@@ -3746,7 +3756,14 @@ describe("twin drop: same source_article_key under another url [migration 113]",
 // dedupeBySourceContentHash / recordTitleVersions above).
 // ---------------------------------------------------------------------------
 
-type KeyedRow = { source_id: string; url: string; title: string; source_article_key: string | null };
+type KeyedRow = {
+  source_id: string;
+  url: string;
+  title: string;
+  source_article_key: string | null;
+  // h132-purity-1: only the rows of the restamp tests carry the feed pubDate.
+  published_at?: string;
+};
 type ExistingKeyed = {
   id: string;
   url: string;
@@ -3754,16 +3771,26 @@ type ExistingKeyed = {
   source_id: string;
   source_article_key: string;
   created_at: string;
+  published_at: string;
 };
 type DropKeyFn = (
   supabase: unknown,
   rows: ReadonlyArray<KeyedRow>,
   sinceIso: string,
+  // The older tests of this block never pass it (they carry no pubDate, so
+  // nothing can be restamped); the restamp tests always do.
+  nowMs?: number,
+  // Sources whose re-stamping is #262's (STABLE_ARTICLE_ID_SOURCES): never stamped here.
+  reslugSourceIds?: ReadonlySet<string>,
+  // The cycle start: a match created at or after it is not a prior sighting
+  // (h133). Omitted = +Infinity, every match counts.
+  firstSeenBeforeMs?: number,
 ) => Promise<{
   rows: KeyedRow[];
   twins: Array<{ row: KeyedRow; existing: ExistingKeyed }>;
   lookupErrors: number;
   keptDistinct: number;
+  restampedUrls: string[];
 }>;
 
 async function importDropKey(): Promise<{ drop: DropKeyFn; supabase: unknown }> {
@@ -3790,13 +3817,14 @@ describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
     expect(out.twins).toEqual([]);
     expect(out.lookupErrors).toBe(0);
     expect(out.keptDistinct).toBe(0);
+    expect(out.restampedUrls).toEqual([]);
     expect(keyLookupCalls).toHaveLength(0);
   });
 
   it("returns an empty result for an empty input", async () => {
     const { drop, supabase } = await importDropKey();
     const out = await drop(supabase, [], SINCE);
-    expect(out).toEqual({ rows: [], twins: [], lookupErrors: 0, keptDistinct: 0 });
+    expect(out).toEqual({ rows: [], twins: [], lookupErrors: 0, keptDistinct: 0, restampedUrls: [] });
     expect(keyLookupCalls).toHaveLength(0);
   });
 
@@ -4172,6 +4200,552 @@ describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
     expect(out.rows).toEqual([row]);
     expect(out.twins).toEqual([]);
     expect(out.keptDistinct).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h132-purity-1: an outlet that REUSES an article id under a different url
+// (a new story under an old id) ships the OLD item's pubDate on the new one.
+// The row was stored hours "early", set its cluster's first_published and gave
+// the outlet the "Kim önce yazdı?" first-mover slot (cluster 99f8fd67: Evrensel
+// key 6008841, pubDate 13:11Z on a row first seen 20:24Z). The title gate lets
+// such a row through (a different story: Jaccard below 0.2), so the row is kept
+// -- and now stamped with the poll clock when its pubDate is not later than the
+// first time that id was seen. Stored rows are never touched.
+// ---------------------------------------------------------------------------
+describe("dropExistingSourceArticleKeyRows: reused-id rows are stamped with the poll clock [h132-purity-1]", () => {
+  const SINCE = "2026-11-03T00:00:00.000Z";
+
+  // 99f8fd67: Evrensel key 6008841, two stories under one id.
+  const EV_STORED_URL =
+    "https://www.evrensel.net/haber/6008841/fon-vurgunu-sorusturmasi-aralarinda-murat-gulkan-ve-yunus-arinci-nin-oldugu-5-kisi-adliyeye-sevk-edildi";
+  const EV_NEW_URL =
+    "https://www.evrensel.net/haber/6008841/fon-vurgunu-sorusturmasi-eski-takasbank-genel-mudurunun-de-aralarinda-oldugu-3-kisiye-tutuklama-talebi";
+  const EV_PUB = "2026-11-10T13:11:00Z";
+  const EV_NOW = Date.parse("2026-11-10T20:24:11Z");
+
+  function evrensel(overrides: Partial<StoredKeyRow> = {}): StoredKeyRow {
+    return {
+      id: "ev-1",
+      source_id: "evrensel",
+      source_article_key: "6008841",
+      url: EV_STORED_URL,
+      title:
+        "Fon vurgunu soruşturması: Aralarında Murat Gülkan ve Yunus Arıncı'nın olduğu 5 kişi adliyeye sevk edildi",
+      published_at: EV_PUB,
+      created_at: "2026-11-10T13:24:04.851Z",
+      ...overrides,
+    };
+  }
+  function evrenselNew(overrides: Partial<KeyedRow> = {}): KeyedRow {
+    return {
+      source_id: "evrensel",
+      source_article_key: "6008841",
+      url: EV_NEW_URL,
+      title:
+        "Fon vurgunu soruşturması: Eski Takasbank Genel Müdürü'nün de aralarında olduğu 3 kişiye tutuklama talebi",
+      published_at: EV_PUB,
+      ...overrides,
+    };
+  }
+
+  it("1. Evrensel 6008841: the reused id's old pubDate is replaced by the poll clock; kept, keptDistinct 1", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel()];
+    const row = evrenselNew();
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.twins).toEqual([]);
+    expect(out.rows).toEqual([row]);
+    expect(out.rows[0]).toBe(row);
+    expect(out.keptDistinct).toBe(1);
+    expect(out.lookupErrors).toBe(0);
+    expect(row.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(out.restampedUrls).toEqual([EV_NEW_URL]);
+  });
+
+  it("2. BirGün 745397: the same shape stamps the second row (it set e2be28a4's first_published)", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      {
+        id: "bg-1",
+        source_id: "birgun",
+        source_article_key: "745397",
+        url: "https://www.birgun.net/haber/bakan-akin-gurlek-e-protesto-yeni-partililer-salondan-cikti-745397",
+        title: "Bakan Akın Gürlek’e protesto: YENİ Partililer salondan çıktı",
+        published_at: "2026-11-09T08:11:00Z",
+        created_at: "2026-11-09T09:12:06Z",
+      },
+    ];
+    const row: KeyedRow = {
+      source_id: "birgun",
+      source_article_key: "745397",
+      url: "https://www.birgun.net/haber/akin-gurlek-ten-fatma-betul-sayan-kaya-aciklamasi-745397",
+      title: "Akın Gürlek'ten 'Fatma Betül Sayan Kaya' açıklaması: \"Kimseyi koruyup kollamıyoruz\"",
+      published_at: "2026-11-09T08:11:00Z",
+    };
+
+    const out = await drop(supabase, [row], SINCE, Date.parse("2026-11-09T14:15:10Z"));
+
+    expect(out.twins).toEqual([]);
+    expect(out.keptDistinct).toBe(1);
+    expect(row.published_at).toBe("2026-11-09T14:15:10.000Z");
+    expect(out.restampedUrls).toEqual([row.url]);
+  });
+
+  it("3. a pubDate a few seconds off is still earlier than the first sighting: stamped", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      evrensel({ published_at: "2026-11-10T10:07:00Z", created_at: "2026-11-10T10:09:00Z" }),
+    ];
+    const row = evrenselNew({ published_at: "2026-11-10T10:07:30Z" });
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(row.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(out.restampedUrls).toEqual([EV_NEW_URL]);
+  });
+
+  it("a pubDate exactly at the first sighting is stamped too (not later than it)", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel({ created_at: "2026-11-10T13:24:04.851Z" })];
+    const row = evrenselNew({ published_at: "2026-11-10T13:24:04.851Z" });
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(row.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(out.restampedUrls).toEqual([EV_NEW_URL]);
+  });
+
+  it("4. NEGATIVE: a pubDate later than the id's first sighting is the new story's own and stays", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      evrensel({ published_at: "2026-11-10T10:07:00Z", created_at: "2026-11-10T10:09:00Z" }),
+    ];
+    const row = evrenselNew({ published_at: "2026-11-10T11:00:00Z" });
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([row]);
+    expect(out.keptDistinct).toBe(1);
+    expect(row.published_at).toBe("2026-11-10T11:00:00Z");
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("5. NEGATIVE: a twin (Jaccard >= 0.2) is still dropped into twins and never stamped", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      evrensel({ title: "Fon vurgunu soruşturması: 5 kişi adliyeye sevk edildi" }),
+    ];
+    const row = evrenselNew({ title: "Fon vurgunu soruşturması: 5 kişi adliyeye sevk edildi (güncellendi)" });
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([]);
+    expect(out.twins.map((t) => t.row)).toEqual([row]);
+    expect(out.keptDistinct).toBe(0);
+    expect(row.published_at).toBe(EV_PUB);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("5b. NEGATIVE: an unrelated earliest match does not turn a later TWIN into a stamped row", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      evrensel({
+        id: "unrelated",
+        url: "https://www.evrensel.net/haber/6008841/baska-bir-haber",
+        title: "Trabzonspor, Hearts maçına hazır",
+        created_at: "2026-11-10T09:00:00Z",
+      }),
+      evrensel({
+        id: "related",
+        title: "Fon vurgunu soruşturması: 5 kişi adliyeye sevk edildi",
+        created_at: "2026-11-10T13:24:04Z",
+      }),
+    ];
+    const row = evrenselNew({ title: "Fon vurgunu soruşturması: 5 kişi adliyeye sevk edildi (yeni)" });
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.twins).toHaveLength(1);
+    expect(out.twins[0]?.existing.id).toBe("related");
+    expect(row.published_at).toBe(EV_PUB);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("6. NEGATIVE: a same-url re-poll is untouched, even beside an unrelated other-url match", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      evrensel({ id: "other", url: "https://www.evrensel.net/haber/6008841/baska-bir-haber", title: "Trabzonspor, Hearts maçına hazır" }),
+      evrensel({ id: "same", url: EV_NEW_URL, title: evrenselNew().title }),
+    ];
+    const row = evrenselNew();
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([row]);
+    expect(out.keptDistinct).toBe(0);
+    expect(row.published_at).toBe(EV_PUB);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("7. FAIL-OPEN: a failed lookup keeps the row with its pubDate and counts one lookup error", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel()];
+    forcedKeyLookupError = "boom";
+    const row = evrenselNew();
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([row]);
+    expect(out.lookupErrors).toBe(1);
+    expect(row.published_at).toBe(EV_PUB);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("7b. FAIL-OPEN: a lookup that throws is the same", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel()];
+    forcedKeyLookupThrow = true;
+    const row = evrenselNew();
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([row]);
+    expect(out.lookupErrors).toBe(1);
+    expect(row.published_at).toBe(EV_PUB);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("8. firstSeen is the minimum created_at over EVERY match of the pair, however many (and in any array order)", async () => {
+    const { drop, supabase } = await importDropKey();
+    const { MAX_KEPT_TITLES_PER_KEY } = (await import(
+      "../../supabase/functions/ingest/index.ts"
+    )) as { MAX_KEPT_TITLES_PER_KEY: number };
+    const count = MAX_KEPT_TITLES_PER_KEY + 4;
+    // created_at 10:00 .. 10:(count-1), listed newest first so the earliest is last.
+    const matches: StoredKeyRow[] = Array.from({ length: count }, (_, n) =>
+      evrensel({
+        id: `m-${n}`,
+        url: `https://www.evrensel.net/haber/6008841/eski-haber-${n}`,
+        title: `gurultu${n}kelime ${n}baska`,
+        published_at: "2026-11-10T09:00:00Z",
+        created_at: `2026-11-10T10:${String(n).padStart(2, "0")}:00Z`,
+      }),
+    ).reverse();
+    storedArticlesByKey = matches;
+    // 10:05 is later than the first sighting (10:00): the id's earliest match is NOT the
+    // MAX-th one, so a wrong "first seen" taken from a later match would stamp this row.
+    const later = evrenselNew({ url: `${EV_NEW_URL}-a`, published_at: "2026-11-10T10:05:00Z" });
+    // 09:59 predates the first sighting: stamped.
+    const earlier = evrenselNew({ url: `${EV_NEW_URL}-b`, published_at: "2026-11-10T09:59:00Z" });
+
+    const out = await drop(supabase, [later, earlier], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([later, earlier]);
+    expect(later.published_at).toBe("2026-11-10T10:05:00Z");
+    expect(earlier.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(out.restampedUrls).toEqual([`${EV_NEW_URL}-b`]);
+  });
+
+  it("8b. a match whose created_at does not parse is ignored for the first sighting", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      evrensel({ id: "bad", url: "https://www.evrensel.net/haber/6008841/bozuk", title: "gurultu kelime", created_at: "not a date" }),
+      evrensel({ created_at: "2026-11-10T13:24:04.851Z" }),
+    ];
+    const stampedRow = evrenselNew({ url: `${EV_NEW_URL}-a`, published_at: "2026-11-10T13:00:00Z" });
+    const keptRow = evrenselNew({ url: `${EV_NEW_URL}-b`, published_at: "2026-11-10T14:00:00Z" });
+
+    const out = await drop(supabase, [stampedRow, keptRow], SINCE, EV_NOW);
+
+    expect(stampedRow.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(keptRow.published_at).toBe("2026-11-10T14:00:00Z");
+    expect(out.restampedUrls).toEqual([`${EV_NEW_URL}-a`]);
+  });
+
+  it("8c. when no match has a usable created_at nothing is stamped", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel({ created_at: "garbage" })];
+    const row = evrenselNew();
+
+    const out = await drop(supabase, [row], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([row]);
+    expect(row.published_at).toBe(EV_PUB);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("9. an AA row already stamped by restampResluggedRows (published_at = the poll clock) is not stamped again and not counted", async () => {
+    const { drop, supabase } = await importDropKey();
+    // Row 1 of the id was seen at 16:27Z; the re-slug carries the poll clock.
+    const NOW_ISO = "2026-11-09T18:09:00.000Z";
+    storedArticlesByKey = [
+      {
+        id: "aa-1",
+        source_id: "anadolu-ajansi",
+        source_article_key: "4117359",
+        url: "https://www.aa.com.tr/tr/gundem/canli-cumhurbaskani-erdogan-konusuyor/4117359",
+        title: "CANLI - Cumhurbaşkanı Erdoğan konuşuyor",
+        published_at: "2026-11-09T13:14:00Z",
+        created_at: "2026-11-09T16:27:10Z",
+      },
+    ];
+    const row: KeyedRow = {
+      source_id: "anadolu-ajansi",
+      source_article_key: "4117359",
+      url: "https://www.aa.com.tr/tr/gundem/cumhurbaskani-erdogan-gabarda-iki-yeni-sahada-daha-petrol-kesfettik/4117359",
+      title: "Gabar'da iki yeni sahada daha petrol keşfettik",
+      published_at: NOW_ISO,
+    };
+
+    const out = await drop(supabase, [row], SINCE, Date.parse(NOW_ISO));
+
+    expect(out.rows).toEqual([row]);
+    expect(out.keptDistinct).toBe(1);
+    expect(row.published_at).toBe(NOW_ISO);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("asks for published_at in the same single lookup (no extra request)", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel()];
+
+    await drop(supabase, [evrenselNew()], SINCE, EV_NOW);
+
+    expect(keyLookupCalls).toHaveLength(1);
+    expect(keyLookupCalls[0]?.select).toBe(
+      "id, url, title, source_id, source_article_key, created_at, published_at",
+    );
+  });
+
+  it("stamps each reused-id row of a mixed batch on its own pair and leaves keyless, fresh and new-id rows alone", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      evrensel(),
+      evrensel({
+        id: "ev-2",
+        source_article_key: "6008999",
+        url: "https://www.evrensel.net/haber/6008999/eski",
+        title: "Merkez Bankası faizi sabit tuttu",
+        published_at: "2026-11-10T15:00:00Z",
+        created_at: "2026-11-10T15:10:00Z",
+      }),
+    ];
+    const reused = evrenselNew();
+    const reusedSecondPair = evrenselNew({
+      source_article_key: "6008999",
+      url: "https://www.evrensel.net/haber/6008999/yeni",
+      title: "Deprem sonrası yeni açıklama",
+      published_at: "2026-11-10T15:00:00Z",
+    });
+    const unkeyed = evrenselNew({ source_article_key: null, url: "https://www.evrensel.net/yazi/x", published_at: "2026-11-01T00:00:00Z" });
+    const fresh = evrenselNew({ source_article_key: "6009000", url: "https://www.evrensel.net/haber/6009000/y", published_at: "2026-11-01T00:00:00Z" });
+
+    const out = await drop(supabase, [reused, unkeyed, reusedSecondPair, fresh], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([reused, unkeyed, reusedSecondPair, fresh]);
+    expect(out.restampedUrls).toEqual([reused.url, reusedSecondPair.url]);
+    expect(reused.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(reusedSecondPair.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(unkeyed.published_at).toBe("2026-11-01T00:00:00Z");
+    expect(fresh.published_at).toBe("2026-11-01T00:00:00Z");
+    // Only keyed rows are looked up.
+    expect(keyLookupCalls).toHaveLength(1);
+  });
+
+  it("a row without a parseable pubDate is never stamped (and never throws)", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel()];
+    const noDate = evrenselNew({ url: `${EV_NEW_URL}-a`, published_at: undefined });
+    const badDate = evrenselNew({ url: `${EV_NEW_URL}-b`, published_at: "yarın" });
+
+    const out = await drop(supabase, [noDate, badDate], SINCE, EV_NOW);
+
+    expect(out.rows).toEqual([noDate, badDate]);
+    expect(noDate.published_at).toBeUndefined();
+    expect(badDate.published_at).toBe("yarın");
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  it("a source in reslugSourceIds (AA, #262's) is never stamped here, even with a stale pubDate", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      {
+        id: "aa-1",
+        source_id: "src-aa",
+        source_article_key: "4117359",
+        url: "https://www.aa.com.tr/tr/gundem/canli-cumhurbaskani-erdogan-konusuyor/4117359",
+        title: "CANLI - Cumhurbaşkanı Erdoğan konuşuyor",
+        published_at: "2026-11-09T13:14:00Z",
+        created_at: "2026-11-09T16:27:10Z",
+      },
+      evrensel(),
+    ];
+    const aa: KeyedRow = {
+      source_id: "src-aa",
+      source_article_key: "4117359",
+      url: "https://www.aa.com.tr/tr/gundem/cumhurbaskani-erdogan-gabarda-iki-yeni-sahada-daha-petrol-kesfettik/4117359",
+      title: "Gabar'da iki yeni sahada daha petrol keşfettik",
+      published_at: "2026-11-09T13:14:00Z",
+    };
+    const ev = evrenselNew();
+
+    const out = await drop(supabase, [aa, ev], SINCE, EV_NOW, new Set(["src-aa"]));
+
+    expect(out.rows).toEqual([aa, ev]);
+    expect(aa.published_at).toBe("2026-11-09T13:14:00Z");
+    expect(ev.published_at).toBe("2026-11-10T20:24:11.000Z");
+    expect(out.restampedUrls).toEqual([EV_NEW_URL]);
+  });
+
+  it("never throws on a clock that is not a date: the row keeps its pubDate", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [evrensel()];
+    const row = evrenselNew();
+
+    const out = await drop(supabase, [row], SINCE, Number.NaN);
+
+    expect(out.rows).toEqual([row]);
+    expect(row.published_at).toBe(EV_PUB);
+    expect(out.restampedUrls).toEqual([]);
+  });
+
+  // The cycle start: rows this cycle inserted in an earlier UPSERT_BATCH chunk
+  // are visible to a later chunk's lookup (`created_at >= twinSinceIso`), but
+  // they are not a prior sighting of the id. Without the cutoff the stamp
+  // depended on how the cycle was chunked.
+  describe("cycle-start cutoff: rows this cycle inserted are not a prior sighting", () => {
+    const CYCLE_START = Date.parse("2026-11-10T20:20:00Z");
+    const OTHER_URL = "https://www.evrensel.net/haber/6008841/baska-bir-haber";
+
+    it("(a) the only match was created after the cutoff: not a first sighting, so no stamp (still kept distinct)", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [evrensel({ created_at: "2026-11-10T20:24:05Z" })];
+      const row = evrenselNew();
+
+      const out = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+
+      expect(out.rows).toEqual([row]);
+      expect(out.twins).toEqual([]);
+      expect(out.keptDistinct).toBe(1);
+      expect(out.restampedUrls).toEqual([]);
+      expect(row.published_at).toBe(EV_PUB);
+    });
+
+    it("(b) a pre-cutoff match is the first sighting even when a post-cutoff match exists: stamped", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [
+        evrensel({ created_at: "2026-11-10T13:24:04Z" }),
+        evrensel({
+          id: "ev-2",
+          url: OTHER_URL,
+          title: "Trabzonspor, Hearts maçına hazır",
+          created_at: "2026-11-10T20:24:05Z",
+        }),
+      ];
+      const row = evrenselNew();
+
+      const out = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+
+      expect(out.rows).toEqual([row]);
+      expect(out.keptDistinct).toBe(1);
+      expect(row.published_at).toBe(new Date(EV_NOW).toISOString());
+      expect(out.restampedUrls).toEqual([EV_NEW_URL]);
+    });
+
+    it("(c) a pubDate between the two created_at values is not stamped (the post-cutoff match was ignored)", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [
+        evrensel({ created_at: "2026-11-10T13:24:04Z" }),
+        evrensel({
+          id: "ev-2",
+          url: OTHER_URL,
+          title: "Trabzonspor, Hearts maçına hazır",
+          created_at: "2026-11-10T20:24:05Z",
+        }),
+      ];
+      const row = evrenselNew({ published_at: "2026-11-10T15:00:00Z" });
+
+      const out = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+
+      expect(out.rows).toEqual([row]);
+      expect(out.keptDistinct).toBe(1);
+      expect(row.published_at).toBe("2026-11-10T15:00:00Z");
+      expect(out.restampedUrls).toEqual([]);
+    });
+
+    it("(c2) the discriminating form of (c): a lone post-cutoff match must not stamp a pubDate that predates it", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [evrensel({ created_at: "2026-11-10T20:24:05Z" })];
+      const row = evrenselNew({ published_at: "2026-11-10T15:00:00Z" });
+
+      const withCutoff = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+      expect(withCutoff.restampedUrls).toEqual([]);
+      expect(row.published_at).toBe("2026-11-10T15:00:00Z");
+
+      // The same lookup without a cutoff (the pre-h133 behaviour) stamps it: the
+      // cutoff, not the data, is what makes the difference.
+      const withoutCutoff = await drop(supabase, [row], SINCE, EV_NOW);
+      expect(withoutCutoff.restampedUrls).toEqual([EV_NEW_URL]);
+      expect(row.published_at).toBe(new Date(EV_NOW).toISOString());
+    });
+
+    it("a match created exactly at the cutoff is not a prior sighting (created at or after it is skipped)", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [evrensel({ created_at: "2026-11-10T20:20:00Z" })];
+      const row = evrenselNew();
+
+      const out = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+
+      expect(out.keptDistinct).toBe(1);
+      expect(out.restampedUrls).toEqual([]);
+      expect(row.published_at).toBe(EV_PUB);
+    });
+
+    it("a match created just before the cutoff is a prior sighting: stamped", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [evrensel({ created_at: "2026-11-10T20:19:59.999Z" })];
+      const row = evrenselNew();
+
+      const out = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+
+      expect(out.restampedUrls).toEqual([EV_NEW_URL]);
+      expect(row.published_at).toBe(new Date(EV_NOW).toISOString());
+    });
+
+    it("the twin gate still sees a post-cutoff match: a related headline is dropped as a twin, never stamped", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [
+        evrensel({
+          title: "Fon vurgunu soruşturması: 5 kişi adliyeye sevk edildi",
+          created_at: "2026-11-10T20:24:05Z",
+        }),
+      ];
+      const row = evrenselNew({ title: "Fon vurgunu soruşturması: 5 kişi adliyeye sevk edildi (güncellendi)" });
+
+      const out = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+
+      expect(out.rows).toEqual([]);
+      expect(out.twins.map((t) => t.row)).toEqual([row]);
+      expect(out.keptDistinct).toBe(0);
+      expect(row.published_at).toBe(EV_PUB);
+      expect(out.restampedUrls).toEqual([]);
+    });
+
+    it("the same-url re-poll check still sees a post-cutoff match", async () => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [evrensel({ url: EV_NEW_URL, title: evrenselNew().title, created_at: "2026-11-10T20:24:05Z" })];
+      const row = evrenselNew();
+
+      const out = await drop(supabase, [row], SINCE, EV_NOW, new Set(), CYCLE_START);
+
+      expect(out.rows).toEqual([row]);
+      expect(out.keptDistinct).toBe(0);
+      expect(out.restampedUrls).toEqual([]);
+      expect(row.published_at).toBe(EV_PUB);
+    });
   });
 });
 

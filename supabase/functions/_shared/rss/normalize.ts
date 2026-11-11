@@ -538,6 +538,11 @@ export function canonicalizeUrl(
 //
 // An entry is added only with evidence for that outlet. The capture is digits
 // only, which is what lets ingest build a PostgREST filter from it.
+//
+// Sources whose ids are keyed by `source_article_key` (article-key.ts) are covered
+// by the stored (source_id, key) check in ingest instead: a kept row whose pubDate
+// predates the id's first sighting is stamped there (h132-purity-1, evrensel
+// 6008841, birgun 745397), so no entry is needed here for them.
 export const STABLE_ARTICLE_ID_SOURCES: ReadonlyMap<string, RegExp> = new Map([
   ["anadolu-ajansi", /\/(\d{6,9})\/?$/],
 ]);
