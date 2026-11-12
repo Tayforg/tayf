@@ -2,9 +2,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getImageProps } from "next/image";
+import { createElement } from "react";
+import { preload } from "react-dom";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
+import { pickHeroCandidates } from "@/lib/images/hero-candidates";
 import { GENERATED_IMAGE_HOSTS } from "@/lib/images/remote-image-hosts.data";
 import type { BiasDistribution } from "@/types";
 
@@ -12,11 +16,16 @@ import { ClusterCardImage } from "./cluster-card-image";
 import {
   ClusterCard,
   type ClusterCardArticle,
+  type ClusterCardSource,
+  MOBILE_BANNER_HEIGHT,
   MOBILE_BANNER_SIZES,
+  MOBILE_BANNER_WIDTH,
   SOURCE_COUNT_QUALIFIED_TITLE,
+  cardHeroCandidates,
   cardSourceCountLabel,
   cardSourceCountTitle,
   mobileBannerImageProps,
+  mobileBannerPreload,
 } from "./cluster-card";
 
 // Source guard (repo convention: no render tests of server components --
@@ -905,5 +914,315 @@ describe("ClusterCard hero payload (h99-clientjs-1)", () => {
     const now = JSON.stringify([banner?.src, banner?.srcs]).length;
     const before = JSON.stringify([urls[0], urls.slice(1)]).length;
     expect(now).toBeLessThan(before / 4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h160-1: the home shell preloads card 0's mobile banner before the feed has
+// streamed in (HomeLcpPreload). It needs the card's hero URL and the card's own
+// preload arguments, so both live here, next to the markup they must match, and
+// ClusterCard computes its hero through the same helper.
+// ---------------------------------------------------------------------------
+describe("cardHeroCandidates (h160-1)", () => {
+  const HOST = GENERATED_IMAGE_HOSTS.find((h) => !h.includes("*"));
+  if (HOST === undefined) throw new Error("no exact host in the generated list");
+  const photo = (n: number) => `https://${HOST}/foto/${n}.jpg`;
+
+  function art(
+    i: number,
+    over: Partial<ClusterCardArticle> = {},
+  ): ClusterCardArticle {
+    return {
+      id: `a-${i}`,
+      title: `Haber ${i}`,
+      url: `https://example.com/a-${i}`,
+      image_url: photo(i),
+      published_at: "2026-11-12T06:00:00.000Z",
+      source_id: `s-${i}`,
+      source_name: `Kaynak ${i}`,
+      ...over,
+    };
+  }
+  const source = (i: number): ClusterCardSource => ({
+    id: `s-${i}`,
+    name: `Kaynak ${i}`,
+    bias: "tarafsiz" as ClusterCardSource["bias"],
+  });
+
+  it("skips an article whose source is unresolved, even when it carries the first image", () => {
+    const ghost = art(0, { source_name: undefined, source_id: "ghost" });
+    const articles = [ghost, art(1), art(2)];
+    const out = cardHeroCandidates(articles, [source(1), source(2)]);
+    expect(out).toEqual([photo(1), photo(2)]);
+    expect(out).not.toContain(photo(0));
+  });
+
+  it("equals pickHeroCandidates over the images of the resolved articles", () => {
+    const articles = [
+      art(0, { source_name: undefined, source_id: "ghost" }),
+      art(1, { image_url: `//${HOST}/foto/1.jpg` }),
+      art(2, { image_url: null }),
+      art(3, { image_url: `https://${HOST}/x.gif` }),
+      art(4, { image_url: "https://not-listed.example/a.jpg" }),
+      art(5, { source_name: undefined, source_id: "s-5" }),
+      art(6, { image_url: photo(1) }),
+      art(7, { image_url: photo(7) }),
+    ];
+    const sources = [1, 2, 3, 4, 5, 6, 7].map(source);
+    const resolved = articles.filter(
+      (a) => (a.source_name ?? sources.find((s) => s.id === a.source_id)?.name) !== undefined,
+    );
+    expect(resolved).toHaveLength(7);
+    expect(cardHeroCandidates(articles, sources)).toEqual(
+      pickHeroCandidates(resolved.map((a) => a.image_url)),
+    );
+    expect(cardHeroCandidates(articles, sources)).toEqual([photo(1), photo(5), photo(7)]);
+  });
+
+  it("resolves a missing source_name from the sources list by id", () => {
+    const a = art(0, { source_name: undefined });
+    expect(cardHeroCandidates([a], [source(0)])).toEqual([photo(0)]);
+    expect(cardHeroCandidates([a], [])).toEqual([]);
+  });
+
+  it("an empty source name counts as unresolved, as the card treats it (it does not fall back to the lookup)", () => {
+    const a = art(0, { source_name: "" });
+    expect(cardHeroCandidates([a], [source(0)])).toEqual([]);
+    expect(cardHeroCandidates([a], [])).toEqual([]);
+  });
+
+  it("caps at the same candidate cap the card sends to the client", () => {
+    const articles = Array.from({ length: 20 }, (_, i) => art(i));
+    const sources = articles.map((_, i) => source(i));
+    expect(cardHeroCandidates(articles, sources)).toEqual(
+      pickHeroCandidates(articles.map((a) => a.image_url)),
+    );
+    expect(cardHeroCandidates(articles, sources)).toHaveLength(8);
+  });
+
+  it("no articles, no candidates", () => {
+    expect(cardHeroCandidates([], [])).toEqual([]);
+  });
+
+  it("is what ClusterCard hands its banner: src is the first candidate, srcs the rest", () => {
+    const articles = [
+      art(0, { source_name: undefined, source_id: "ghost" }),
+      art(1),
+      art(2),
+      art(3),
+    ];
+    const sources = [source(1), source(2), source(3)];
+    const cluster = {
+      id: "c1",
+      title_tr: "Başlık",
+      summary_tr: "Özet",
+      bias_distribution: emptyBiasDistribution(),
+      is_blindspot: false,
+      blindspot_side: null,
+      article_count: 4,
+      first_published: "2026-11-12T05:00:00.000Z",
+      updated_at: "2026-11-12T06:00:00.000Z",
+    };
+    const candidates = cardHeroCandidates(articles, sources);
+    const tree = ClusterCard({ cluster, articles, sources, index: 0 });
+    const images: Array<{ src?: string | null; srcs?: string[]; width?: number; height?: number }> = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node && typeof node === "object") {
+        const el = node as { type?: unknown; props?: { children?: unknown } };
+        if (el.type === ClusterCardImage) images.push(el.props as never);
+        if (el.props?.children !== undefined) walk(el.props.children);
+      }
+    };
+    walk(tree);
+    expect(images).toHaveLength(2);
+    for (const props of images) {
+      expect(props.src).toBe(candidates[0]);
+      expect(props.srcs).toEqual(candidates.slice(1));
+    }
+    // The first image element is the mobile banner, at the exported size.
+    expect(images[0]?.width).toBe(MOBILE_BANNER_WIDTH);
+    expect(images[0]?.height).toBe(MOBILE_BANNER_HEIGHT);
+  });
+});
+
+describe("mobileBannerPreload (h160-1)", () => {
+  const URL_ = "https://example.com/photo.jpg";
+
+  it("exports the banner's intrinsic size", () => {
+    expect(MOBILE_BANNER_WIDTH).toBe(640);
+    expect(MOBILE_BANNER_HEIGHT).toBe(360);
+  });
+
+  it("builds the card's own next/image candidates: srcset, sizes, high priority, as image", () => {
+    const { href, options } = mobileBannerPreload(URL_);
+    const { props } = getImageProps({
+      src: URL_,
+      alt: "",
+      width: 640,
+      height: 360,
+      sizes: MOBILE_BANNER_SIZES,
+      quality: 50,
+    });
+    expect(options.imageSrcSet).toBe(props.srcSet);
+    expect(options.imageSrcSet).toBeTruthy();
+    expect(options.imageSizes).toBe(MOBILE_BANNER_SIZES);
+    expect(options.fetchPriority).toBe("high");
+    expect(options.as).toBe("image");
+    expect(href).toBe(props.src);
+  });
+
+  it("asks for the quality the banner asks for", () => {
+    expect(mobileBannerImageProps(0).quality).toBe(50);
+    const { options } = mobileBannerPreload(URL_);
+    const sameQuality = getImageProps({
+      src: URL_,
+      alt: "",
+      width: MOBILE_BANNER_WIDTH,
+      height: MOBILE_BANNER_HEIGHT,
+      sizes: MOBILE_BANNER_SIZES,
+      quality: mobileBannerImageProps(0).quality,
+    });
+    expect(options.imageSrcSet).toBe(sameQuality.props.srcSet);
+  });
+
+  it("carries no other option (no crossOrigin or referrerPolicy: the card's preload has none)", () => {
+    const { options } = mobileBannerPreload(URL_);
+    expect(Object.keys(options).sort()).toEqual([
+      "as",
+      "fetchPriority",
+      "imageSizes",
+      "imageSrcSet",
+    ]);
+  });
+
+  it("another URL gives another srcset (the argument is used)", () => {
+    const a = mobileBannerPreload("https://example.com/a.jpg");
+    const b = mobileBannerPreload("https://example.com/b.jpg");
+    expect(a.options.imageSrcSet).not.toBe(b.options.imageSrcSet);
+    expect(a.href).not.toBe(b.href);
+  });
+
+  // The point of the helper: the shell's hint and the card's own hint must be
+  // the SAME resource to React. Its key is the srcset plus the sizes
+  // (imageSrcSet + "\n" + imageSizes), whether the hint comes from preload() or
+  // from the <img> React finds in the card. So the card's rendered <img> must
+  // carry exactly the srcset and sizes the helper returns, and one document
+  // holding both must get one preload <link>, not two. (The attribute ORDER
+  // differs between a preload() call and the one React derives from an <img>;
+  // the key, which decides the dedupe, does not.)
+  describe("one resource with the card's own preload", () => {
+    const HOST = GENERATED_IMAGE_HOSTS.find((h) => !h.includes("*"));
+    if (HOST === undefined) throw new Error("no exact host in the generated list");
+    const url = `https://${HOST}/foto/1.jpg`;
+
+    function Hint() {
+      const { href, options } = mobileBannerPreload(url);
+      preload(href, options);
+      return null;
+    }
+
+    const card = () =>
+      ClusterCard({
+        cluster: {
+          id: "c1",
+          title_tr: "Başlık",
+          summary_tr: "Özet",
+          bias_distribution: emptyBiasDistribution(),
+          is_blindspot: false,
+          blindspot_side: null,
+          article_count: 1,
+          first_published: "2026-11-12T05:00:00.000Z",
+          updated_at: "2026-11-12T06:00:00.000Z",
+        },
+        articles: [
+          {
+            id: "a-1",
+            title: "Haber",
+            url: "https://example.com/a-1",
+            image_url: url,
+            published_at: "2026-11-12T06:00:00.000Z",
+            source_id: "s-1",
+            source_name: "Kaynak",
+          },
+        ],
+        sources: [],
+        index: 0,
+      });
+
+    const LINK = '<link rel="preload" as="image"';
+    const countLinks = (html: string): number => html.split(LINK).length - 1;
+    /** Value of attribute `name` inside the first `<tag ...>` of `html` (HTML-escaped as written). */
+    function attrOf(html: string, tag: string, name: string): string {
+      const open = html.indexOf(tag);
+      expect(open, tag).toBeGreaterThanOrEqual(0);
+      const close = html.indexOf(">", open);
+      const at = html.indexOf(` ${name}="`, open);
+      expect(at, `${name} in ${tag}`).toBeGreaterThan(open);
+      expect(at).toBeLessThan(close);
+      const from = at + name.length + 3;
+      return html.slice(from, html.indexOf('"', from));
+    }
+    const escaped = (text: string | undefined): string =>
+      String(text).replaceAll("&", "&amp;");
+
+    it("the rendered banner <img> carries the srcset and sizes the preload helper returns", () => {
+      const html = renderToStaticMarkup(card());
+      const { options } = mobileBannerPreload(url);
+      expect(attrOf(html, "<img", "srcSet")).toBe(escaped(options.imageSrcSet));
+      expect(attrOf(html, "<img", "sizes")).toBe(escaped(options.imageSizes));
+      expect(attrOf(html, "<img", "fetchPriority")).toBe("high");
+    });
+
+    it("the shell's hint then the card: one preload <link>, the shell's", () => {
+      const html = renderToStaticMarkup(
+        createElement("div", null, createElement(Hint), card()),
+      );
+      expect(countLinks(html)).toBe(1);
+      const from = html.indexOf(LINK);
+      const tag = html.slice(from, html.indexOf("/>", from) + 2);
+      const { options } = mobileBannerPreload(url);
+      expect(tag).toContain(`imageSrcSet="${escaped(options.imageSrcSet)}"`);
+      expect(tag).toContain(`imageSizes="${escaped(options.imageSizes)}"`);
+      expect(tag).toContain('fetchPriority="high"');
+    });
+
+    it("the card then the hint: still one preload <link>", () => {
+      const html = renderToStaticMarkup(
+        createElement("div", null, card(), createElement(Hint)),
+      );
+      expect(countLinks(html)).toBe(1);
+    });
+
+    it("a different image is a different resource: both are preloaded", () => {
+      function OtherHint() {
+        const { href, options } = mobileBannerPreload(`https://${HOST}/foto/2.jpg`);
+        preload(href, options);
+        return null;
+      }
+      const html = renderToStaticMarkup(
+        createElement("div", null, createElement(OtherHint), card()),
+      );
+      expect(countLinks(html)).toBe(2);
+    });
+  });
+});
+
+describe("cluster-card.tsx banner wiring (h160-1)", () => {
+  it("the banner passes the exported size, not literals", () => {
+    expect(count(src, "width={MOBILE_BANNER_WIDTH}")).toBe(1);
+    expect(count(src, "height={MOBILE_BANNER_HEIGHT}")).toBe(1);
+    expect(src).not.toContain("width={640}");
+    expect(src).not.toContain("height={360}");
+    // ...inside the sm:hidden banner, before the desktop thumbnail.
+    const at = src.indexOf("width={MOBILE_BANNER_WIDTH}");
+    expect(at).toBeGreaterThan(src.indexOf("sm:hidden"));
+    expect(at).toBeLessThan(src.indexOf("hidden sm:block"));
+  });
+
+  it("ClusterCard computes its hero candidates through cardHeroCandidates, once", () => {
+    expect(count(src, "cardHeroCandidates(articles, sources)")).toBe(1);
+    expect(src).toContain("const heroCandidates = cardHeroCandidates(articles, sources)");
+    expect(src).not.toContain("pickHeroCandidates(resolved");
   });
 });

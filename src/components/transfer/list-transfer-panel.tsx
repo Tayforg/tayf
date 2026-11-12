@@ -109,6 +109,59 @@ export function runImport(
   };
 }
 
+/**
+ * The state of the import box and its status line, kept as one value so the click
+ * handler can tell "the box was just cleared by a complete import" from "the reader
+ * has not pasted anything yet". `clearedBySuccess` is true only between a complete
+ * import and the next edit or export.
+ */
+export interface ImportBoxState {
+  input: string;
+  status: string;
+  invalid: boolean;
+  clearedBySuccess: boolean;
+}
+
+export const INITIAL_IMPORT_BOX: ImportBoxState = {
+  input: "",
+  status: "",
+  invalid: false,
+  clearedBySuccess: false,
+};
+
+/**
+ * What the "İçe aktar" button does to the box, without React. A complete import
+ * clears the input, so a second activation right after it (a double-click, a second
+ * Enter or Space) would parse "" and replace the success status with the empty-input
+ * error. That repeat returns `state` itself: no store call, no status change. The
+ * emptiness test is parseTransferCode's own, so it honours trimTransferEdges (a box
+ * holding only a no-break space or a zero-width space is as empty as ""). Every other
+ * click runs runImport; any edit (importBoxInput) re-arms today's empty-box message.
+ */
+export function importClick(state: ImportBoxState, deps: Parameters<typeof runImport>[1]): ImportBoxState {
+  if (state.clearedBySuccess) {
+    const parsed = parseTransferCode(state.input);
+    if (!parsed.ok && parsed.reason === "empty") return state;
+  }
+  const result = runImport(state.input, deps);
+  return {
+    input: result.clearInput ? "" : state.input,
+    status: result.status,
+    invalid: result.invalid,
+    clearedBySuccess: result.clearInput,
+  };
+}
+
+/** The reader edited the import box (typing, pasting, clearing by hand). */
+export function importBoxInput(state: ImportBoxState, value: string): ImportBoxState {
+  return { ...state, input: value, clearedBySuccess: false };
+}
+
+/** The status line is set by something else than an import (the export). The import box keeps its text. */
+export function importBoxStatus(state: ImportBoxState, status: string): ImportBoxState {
+  return { ...state, status, invalid: false, clearedBySuccess: false };
+}
+
 export function ListTransferView({
   code,
   input,
@@ -196,9 +249,7 @@ export function ListTransferPanel() {
   const { ids } = useBookmarks();
   const { follows } = useFollows();
   const [code, setCode] = useState<string | null>(null);
-  const [input, setInput] = useState("");
-  const [status, setStatus] = useState("");
-  const [invalid, setInvalid] = useState(false);
+  const [box, setBox] = useState<ImportBoxState>(INITIAL_IMPORT_BOX);
 
   const onExport = () => {
     void runExport({
@@ -207,30 +258,31 @@ export function ListTransferPanel() {
       copy: copyText,
     }).then((result) => {
       setCode(result.code);
-      setStatus(result.status);
-      setInvalid(false);
+      setBox((b) => importBoxStatus(b, result.status));
     });
   };
 
   const onImport = () => {
-    const result = runImport(input, {
+    // Computed here, never inside a setState updater: the stores are written to, and
+    // StrictMode runs an updater twice.
+    const next = importClick(box, {
       importBookmarks: (x) => importBookmarkIds(x, SAVED_MAX_IDS),
       importFollows: (x) => followsStore.importMany(x),
     });
-    setStatus(result.status);
-    setInvalid(result.invalid);
-    if (result.clearInput) setInput("");
+    if (next !== box) setBox(next);
   };
+
+  const onInput = (value: string) => setBox((b) => importBoxInput(b, value));
 
   return (
     <ListTransferView
       code={code}
-      input={input}
-      status={status}
-      invalid={invalid}
+      input={box.input}
+      status={box.status}
+      invalid={box.invalid}
       onExport={onExport}
       onImport={onImport}
-      onInput={setInput}
+      onInput={onInput}
     />
   );
 }

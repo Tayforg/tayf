@@ -1,4 +1,4 @@
-import { Suspense, createElement } from "react";
+import { Fragment, Suspense, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -64,6 +64,8 @@ import HomePage, { HomeFeed, generateMetadata } from "./page";
 import { ClearSearchLink } from "@/components/home/clear-search-link";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { FollowButton } from "@/components/follow/follow-button";
+import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
+import { homeFirstCard } from "@/lib/home/first-card";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 import { resultCountPhrase } from "@/lib/search/search-status";
 
@@ -1294,6 +1296,72 @@ describe("HomePage — the feed container", () => {
           (el.type as { name?: string }).name === "SearchBar",
       ),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h160-1: the first card's banner is preloaded from the prerendered shell
+// (HomeLcpPreload), which picks that card with homeFirstCard and no clock. The
+// shell's pick must be the card HomeFeed really renders first.
+// ---------------------------------------------------------------------------
+
+describe("HomePage — the LCP preload boundary (h160-1)", () => {
+  it("returns a fragment: the preload boundary first, then the page container", () => {
+    const tree = HomePage({ searchParams: Promise.resolve({}) }) as unknown as Elementish;
+    expect(tree.type).toBe(Fragment);
+    const [boundary, container] = tree.props?.children as Elementish[];
+    expect(boundary?.type).toBe(Suspense);
+    expect(boundary?.props?.fallback).toBeNull();
+    expect((boundary?.props?.children as Elementish).type).toBe(HomeLcpPreload);
+    expect(container?.type).toBe("div");
+    expect(String(container?.props?.className)).toContain("container");
+  });
+
+  it("gives HomeLcpPreload no props, so it cannot depend on the request", () => {
+    const tree = HomePage({ searchParams: Promise.resolve({ q: "x", page: "2" }) }) as unknown as Elementish;
+    const [boundary] = tree.props?.children as Elementish[];
+    const preloadEl = boundary?.props?.children as Elementish;
+    expect(Object.keys(preloadEl.props ?? {})).toEqual([]);
+  });
+});
+
+describe("homeFirstCard names the card HomeFeed renders first (h160-1)", () => {
+  const NOW = Date.parse("2026-11-12T10:00:00Z");
+
+  function at(id: string, iso: string) {
+    return {
+      cluster: { id, title_tr: `Haber ${id}`, first_published: iso, updated_at: iso },
+      articles: [],
+      sources: [],
+      isWireRedistribution: false,
+      effectiveArticleCount: 2,
+    };
+  }
+  function full(bundles: ReturnType<typeof at>[], breakingBundles: ReturnType<typeof at>[] = []) {
+    return { bundles, breakingBundles, prefilterCount: bundles.length } as unknown as PoliticsClustersResult;
+  }
+
+  async function firstRenderedId(result: PoliticsClustersResult): Promise<string | undefined> {
+    getPoliticsClusters.mockResolvedValue(result);
+    nowOverrideMs = NOW;
+    const tree = await HomeFeed({ searchParams: Promise.resolve({}) });
+    return clusterCardIds(tree)[0];
+  }
+
+  const FEEDS: Array<[string, PoliticsClustersResult]> = [
+    ["a Son Dakika strip", full([at("r0", "2026-11-12T08:00:00Z")], [at("b0", "2026-11-12T09:30:00Z"), at("b1", "2026-11-12T09:40:00Z")])],
+    ["a strip card that is also ranked", full([at("same", "2026-11-12T09:30:00Z"), at("r1", "2026-11-12T09:00:00Z")], [at("same", "2026-11-12T09:30:00Z")])],
+    ["ranked[0] from yesterday, ranked[1] from today", full([at("r0", "2026-11-11T15:00:00Z"), at("r1", "2026-11-12T08:00:00Z"), at("r2", "2026-11-12T07:00:00Z")])],
+    ["only yesterday's stories", full([at("r0", "2026-11-11T09:00:00Z"), at("r1", "2026-11-11T18:00:00Z"), at("r2", "2026-11-10T18:00:00Z")])],
+    ["Istanbul midnight between ranked[0] and ranked[1]", full([at("r0", "2026-11-11T20:59:00Z"), at("r1", "2026-11-11T21:01:00Z")])],
+    ["a 16th ranked story that is the newest", full([...Array.from({ length: 15 }, (_, i) => at(`r${i}`, "2026-11-11T12:00:00Z")), at("r15", "2026-11-12T09:00:00Z")])],
+    ["no stories at all", full([])],
+  ];
+
+  it.each(FEEDS)("%s", async (_name, result) => {
+    const rendered = await firstRenderedId(result);
+    const picked = homeFirstCard(result);
+    expect(picked?.cluster.id).toBe(rendered);
   });
 });
 
