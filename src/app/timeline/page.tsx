@@ -11,6 +11,7 @@ import {
 } from "@/lib/clusters/timeline-buckets";
 import { TIMELINE_HEAD_LIMIT } from "@/lib/clusters/timeline-head";
 import { getRecentClusters, TIMELINE_LIMIT } from "@/lib/clusters/timeline-query";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
@@ -43,6 +44,15 @@ export const metadata: Metadata = staticPageMetadata({
 // `lang="en"` on its headline link (WCAG 3.1.2; getRecentClusters marks it, see
 // h118-english-1), unless its title is an LLM rewrite, which is Turkish and gets
 // no lang; every other row inherits the document's lang="tr".
+//
+// Source count (h142-consistency-1): each row prints `row.source_count`, the honest
+// number the cluster page header, the cards and the RSS feed print (distinct texts
+// for an agency redistribution, else the member count), never the raw stored
+// `article_count` ("8 kaynak" for 8 outlets reprinting 3 dispatches). A wire
+// cluster (`row.wire`, set by getRecentClusters) also gets a small violet tag
+// after the count: the leading words of wireBadgeLabel (wire.ts), the cluster
+// page's own badge text, with the full label as its tooltip. The page reads only
+// those two numbers; the descriptions the detection runs on stay in the query.
 //
 // Caching: the route is static (cacheComponents allows no segment `revalidate`).
 // Its data comes from the "use cache" entry in getRecentClusters: cacheLife
@@ -121,6 +131,16 @@ function formatHourLabel(hourISO: string): string {
 
 function formatRowTime(iso: string): string {
   return TIME_FORMAT.format(new Date(iso));
+}
+
+// The visible words of the wire tag: wireBadgeLabel's leading phrase, i.e.
+// "Ajans ağırlıklı" for a cluster of several texts and "Tek kaynaktan
+// dağıtıldı" for copies of one, exactly the cluster page's badge wording without
+// its "· 8 haber, 3 farklı metin" tail (that is the tooltip). Plain string
+// search, no pattern.
+function wireTagText(label: string): string {
+  const cut = label.indexOf(" · ");
+  return cut === -1 ? label : label.slice(0, cut);
 }
 
 export default async function TimelinePage() {
@@ -204,7 +224,20 @@ export default async function TimelinePage() {
                       {row.title}
                     </Link>
                     <span className="shrink-0 max-sm:ml-auto text-[11px] text-muted-foreground tabular-nums">
-                      {row.article_count} kaynak
+                      {row.source_count} kaynak
+                      {row.wire && (
+                        <>
+                          {/* A real space node: the tag is inline-flex, so without it copy,
+                              extracted text and screen readers read "3 kaynakAjans ağırlıklı". */}
+                          {" "}
+                          <span
+                            className="ml-1 inline-flex items-center whitespace-nowrap rounded-full bg-violet-500/15 border border-violet-500/30 px-1.5 py-px text-violet-800 dark:text-violet-400 font-medium"
+                            title={wireBadgeLabel(row.wire.memberCount, row.wire.uniqueTexts)}
+                          >
+                            {wireTagText(wireBadgeLabel(row.wire.memberCount, row.wire.uniqueTexts))}
+                          </span>
+                        </>
+                      )}
                     </span>
                   </li>
                 ))}

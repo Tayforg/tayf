@@ -6,6 +6,7 @@ import { createReaderClient } from "@/lib/supabase/server";
 import { clusterDisplayTitle, type HeadlineMember } from "./display-headline";
 import { fetchLanguageIsolatedIds } from "./language-isolation-read";
 import { isExtractiveModelId } from "./neutral-title";
+import { detectWireRedistribution } from "./wire";
 
 // Fetcher for /timeline — extracted out of the page component so the unit
 // tests can exercise it without rendering JSX (mirrors blindspots-query.ts).
@@ -32,6 +33,27 @@ export interface ClusterRow {
    */
   title: string;
   article_count: number;
+  /**
+   * The source count the page prints (h142-consistency-1): the same honest
+   * number the cluster page header, the cards, the RSS feed and the OG card
+   * print. The members are de-duplicated to the earliest article per source,
+   * then it is the distinct-text count (detectWireRedistribution, wire.ts) for a
+   * wire redistribution and the member count otherwise. `article_count` is the
+   * raw stored count, so it over-counts an agency dispatch reprinted by N
+   * outlets (8 members, 3 texts); it is also the value here when no member could
+   * be read, so the page degrades to today's number and never to a wrong one.
+   */
+  source_count: number;
+  /**
+   * Present only when the cluster is a wire redistribution (detectWireRedistribution
+   * over the de-duplicated members): the member count and the number of distinct
+   * texts behind it, the two numbers wireBadgeLabel (wire.ts) takes. The key is
+   * omitted for every other row, so a non-wire row serialises exactly as before
+   * apart from `source_count`. Two numbers only: the member descriptions and
+   * hashes the detection reads are server-side input and never leave the query
+   * (wire.ts header).
+   */
+  wire?: { memberCount: number; uniqueTexts: number };
   first_published: string;
   /**
    * 'en' when every member of the cluster is an English-language outlet
@@ -45,12 +67,12 @@ export interface ClusterRow {
 }
 
 /**
- * A `clusters` row as the row read returns it, before the display title and lang
- * are attached. `title_neutral_model` is read only to decide `lang` (see
- * fetchRecentClusters) and is dropped before the row is returned, so it is not
- * part of the public ClusterRow.
+ * A `clusters` row as the row read returns it, before the display title, the
+ * honest source count, the wire mark and lang are attached. `title_neutral_model`
+ * is read only to decide `lang` (see fetchRecentClusters) and is dropped before
+ * the row is returned, so it is not part of the public ClusterRow.
  */
-type StoredClusterRow = Omit<ClusterRow, "title" | "lang"> & {
+type StoredClusterRow = Omit<ClusterRow, "title" | "lang" | "source_count" | "wire"> & {
   title_neutral_model: string | null;
 };
 
@@ -95,9 +117,9 @@ async function countRecentClusters(
 }
 
 /**
- * Members read per cluster that has no stored neutral title yet. A cluster the
- * headline cron has not titled is a fresh one (normally 2-5 members); the cap
- * only bounds a pathological answer.
+ * Members read per cluster, for both member reads (the titles of a cluster the
+ * headline cron has not titled yet, normally a fresh one of 2-5 members, and the
+ * wire members of every row); the cap only bounds a pathological answer.
  */
 const MEMBERS_PER_CLUSTER = 50;
 /** Hard ceiling on the member read, however many rows lack a title. */
@@ -149,6 +171,171 @@ async function fetchMemberTitles(
     console.error(`[timeline] member titles unavailable: ${message}`);
     return new Map();
   }
+}
+
+/**
+ * Cluster ids per wire member read. A chunk's row limit is
+ * CHUNK x MEMBERS_PER_CLUSTER = 2,500, clamped to MEMBER_READ_MAX_ROWS (1,000,
+ * PostgREST's max-rows), so no request asks for more than the server answers. A
+ * 200-row window is 4 reads (today's 875 member rows, ~220 per read), in parallel.
+ */
+const WIRE_CHUNK_SIZE = 50;
+
+/**
+ * The slice of a member article wire detection needs, server-side only: it is
+ * read, reduced to two numbers per cluster (honestSourceCount) and dropped, and
+ * no ClusterRow, prop or serialised output carries it.
+ */
+interface WireMember {
+  id: string;
+  source_id: string | null;
+  content_hash: string | null;
+  description: string | null;
+  published_at: string | null;
+}
+
+type WireMemberReadRow = {
+  cluster_id: string;
+  articles: unknown;
+};
+
+// A member article as the embed returns it (object, or a one-element array, or
+// null when the article is unreadable). Anything that is not an article with an
+// id is not a member. Values are passed through as read, exactly as the cluster
+// page hands them to the detection: a missing or non-string hash is null (each
+// null is its own text), a non-string description is null (it links nothing).
+function toWireMember(embed: unknown): WireMember | null {
+  const article = Array.isArray(embed) ? embed[0] : embed;
+  if (typeof article !== "object" || article === null) return null;
+  const a = article as Record<string, unknown>;
+  if (typeof a.id !== "string" || a.id.length === 0) return null;
+  return {
+    id: a.id,
+    source_id: typeof a.source_id === "string" && a.source_id.length > 0 ? a.source_id : null,
+    content_hash: typeof a.content_hash === "string" ? a.content_hash : null,
+    description: typeof a.description === "string" ? a.description : null,
+    published_at: typeof a.published_at === "string" ? a.published_at : null,
+  };
+}
+
+// ONE chunk of the wire member read. A chunk is all-or-nothing: a returned error,
+// a throw (including the 4 s reader-cap abort) or an answer as long as its row
+// limit (it may have been cut, and a cut list under-counts the sources) is logged
+// and yields no members at all for the clusters of this chunk, which then keep
+// their article_count. It never throws.
+async function readWireChunk(
+  supabase: ReaderClient,
+  ids: string[],
+): Promise<Map<string, WireMember[]>> {
+  const byCluster = new Map<string, WireMember[]>();
+  try {
+    const limit = Math.min(ids.length * MEMBERS_PER_CLUSTER, MEMBER_READ_MAX_ROWS);
+    const { data, error } = await supabase
+      .from("cluster_articles")
+      .select("cluster_id, articles ( id, source_id, content_hash, description, published_at )")
+      .in("cluster_id", ids)
+      .limit(limit);
+    if (error) {
+      console.error(`[timeline] wire members unavailable: ${error.message}`);
+      return new Map();
+    }
+    const rows = (data ?? []) as unknown as WireMemberReadRow[];
+    if (rows.length >= limit) {
+      console.error(
+        `[timeline] wire members truncated at ${limit} rows (${ids.length} clusters), ignored`,
+      );
+      return new Map();
+    }
+    const asked = new Set(ids);
+    for (const r of rows) {
+      if (!asked.has(r.cluster_id)) continue;
+      const member = toWireMember(r.articles);
+      if (!member) continue;
+      const list = byCluster.get(r.cluster_id);
+      if (list) list.push(member);
+      else byCluster.set(r.cluster_id, [member]);
+    }
+    return byCluster;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[timeline] wire members unavailable: ${message}`);
+    return new Map();
+  }
+}
+
+// h142-consistency-1: the members of EVERY row, grouped by cluster, for the
+// honest source count. The row read carries no members, and the detection needs
+// each member's hash and description, so this is one more read inside the same
+// cache scope, chunked by WIRE_CHUNK_SIZE ids and run in parallel on the page's
+// one reader client. Like the title and isolation reads it is a nicety on top of
+// the rows: each chunk contains its own failure, so one bad chunk only leaves ITS
+// clusters at article_count. It never throws and never fails the attempt -- the
+// rows are the page.
+async function fetchWireMembers(
+  supabase: ReaderClient,
+  clusterIds: string[],
+): Promise<Map<string, WireMember[]>> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < clusterIds.length; i += WIRE_CHUNK_SIZE) {
+    chunks.push(clusterIds.slice(i, i + WIRE_CHUNK_SIZE));
+  }
+  const reads = await Promise.all(chunks.map((ids) => readWireChunk(supabase, ids)));
+  const byCluster = new Map<string, WireMember[]>();
+  for (const read of reads) {
+    for (const [id, list] of read) byCluster.set(id, list);
+  }
+  return byCluster;
+}
+
+// Epoch ms of a member's published_at; a missing or unparsable one sorts last so
+// it can never displace a dated article as its source's earliest.
+function epochMsOrLast(iso: string | null): number {
+  if (iso === null) return Number.POSITIVE_INFINITY;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
+}
+
+// Earliest article per source: the cluster page's dedupe (cluster-detail-query.ts,
+// "keep the EARLIEST article per source") run before the detection, so two
+// articles of one outlet are one source and the count here is the page header's.
+// Sorted by published_at ascending (ties by article id, so the pick never depends
+// on the order the read answered in). A member with no source_id cannot be shown
+// to share a source with anyone, so it is its own.
+function dedupeEarliestPerSource(members: readonly WireMember[]): WireMember[] {
+  const sorted = [...members].sort((a, b) => {
+    const am = epochMsOrLast(a.published_at);
+    const bm = epochMsOrLast(b.published_at);
+    if (am !== bm) return am < bm ? -1 : 1;
+    if (a.id === b.id) return 0;
+    return a.id < b.id ? -1 : 1;
+  });
+  const seen = new Set<string>();
+  const kept: WireMember[] = [];
+  for (const m of sorted) {
+    const key = m.source_id ?? `__no_source__:${m.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(m);
+  }
+  return kept;
+}
+
+// The row's honest source count and, for a wire redistribution only, its wire
+// mark. The union rule is wire.ts's (detectWireRedistribution): not
+// reimplemented here. `members` undefined (nothing was read for this cluster)
+// keeps the stored article_count and no wire key.
+function honestSourceCount(
+  articleCount: number,
+  members: readonly WireMember[] | undefined,
+): Pick<ClusterRow, "source_count" | "wire"> {
+  const deduped = members ? dedupeEarliestPerSource(members) : [];
+  if (deduped.length === 0) return { source_count: articleCount };
+  const { isWire, uniqueHashes } = detectWireRedistribution(deduped);
+  if (!isWire) return { source_count: deduped.length };
+  return {
+    source_count: uniqueHashes,
+    wire: { memberCount: deduped.length, uniqueTexts: uniqueHashes },
+  };
 }
 
 // Raw read: THROWS on a Supabase error in the ROW read (including a 4 s
@@ -207,12 +394,25 @@ async function fetchRecentClusters(): Promise<RecentClusters> {
   // The isolation read is independent of the title read, so the two run together;
   // both are nicety reads that never throw, and an empty set / no members is
   // today's output.
+  //
+  // h142-consistency-1: the honest source count. A third read, over EVERY row,
+  // fetches the members' hashes and descriptions (fetchWireMembers, chunked), and
+  // each row's `source_count` / `wire` come from wire.ts's detection over the
+  // members de-duplicated per source, the cluster page header's own number. It is
+  // independent of the other two (a failure in one never touches the others) and
+  // never throws; a row it could not read keeps article_count.
   const missing = stored.filter(lacksStoredNeutral).map((r) => r.id);
-  const [members, isolated] = await Promise.all([
+  const [members, isolated, wireMembers] = await Promise.all([
     missing.length > 0
       ? fetchMemberTitles(supabase, missing)
       : Promise.resolve(new Map<string, HeadlineMember[]>()),
     fetchLanguageIsolatedIds(supabase, stored),
+    stored.length > 0
+      ? fetchWireMembers(
+          supabase,
+          stored.map((r) => r.id),
+        )
+      : Promise.resolve(new Map<string, WireMember[]>()),
   ]);
   // The title is English only when it is a member's own title: no stored neutral
   // title yet (the first pick over the members, extractive), or a stored one from
@@ -222,6 +422,7 @@ async function fetchRecentClusters(): Promise<RecentClusters> {
   const rows: ClusterRow[] = stored.map(({ title_neutral_model, ...r }) => ({
     ...r,
     title: clusterDisplayTitle(r, members.get(r.id) ?? []).title,
+    ...honestSourceCount(r.article_count, wireMembers.get(r.id)),
     ...(isolated.has(r.id) &&
     (lacksStoredNeutral(r) || isExtractiveModelId(title_neutral_model))
       ? { lang: "en" as const }

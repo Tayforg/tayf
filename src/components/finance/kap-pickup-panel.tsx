@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import Link from "next/link";
 
 import { ZONE_META } from "@/lib/bias/config";
@@ -35,18 +36,28 @@ import type { MediaDnaZone } from "@/types";
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
-/** Mini per-zone dots + counts, each dot carrying its zone name as sr-only text. */
+/**
+ * Per-zone dot + "İktidar 17" in visible text, " · " between zones like the totals line in PickupStats
+ * (h142-a11y-1, WCAG 1.4.1: a 6 px colour dot alone told the zones apart). The dot is decoration (aria-hidden), the
+ * name is real text, so nothing is read twice. Plain inline flow, each zone kept whole by whitespace-nowrap, so the
+ * group wraps between zones on a 320 px phone instead of widening the row. The leading space keeps the zones from
+ * gluing onto "ilk: 10 dk sonra" in copied or read text.
+ */
 function ZoneCounts({ zones }: { zones: Record<MediaDnaZone, number> }) {
   return (
-    <span className="ml-1 inline-flex items-center gap-1.5">
-      {ZONE_ORDER.map((z) => (
-        <span key={z} className="inline-flex items-center gap-0.5">
-          <span className={`inline-block h-1.5 w-1.5 rounded-full ${ZONE_META[z].dot}`} aria-hidden="true" />
-          <span className="sr-only">{ZONE_META[z].label}</span>
-          <span className="tabular-nums">{zones[z]}</span>
-        </span>
+    <>
+      {" "}
+      {ZONE_ORDER.map((z, i) => (
+        <Fragment key={z}>
+          {i > 0 ? " " : null}
+          <span className="whitespace-nowrap">
+            <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full align-middle ${ZONE_META[z].dot}`} aria-hidden="true" />
+            <span className={`tabular-nums ${ZONE_META[z].zoneLabel}`}>{`${ZONE_META[z].label} ${zones[z]}`}</span>
+            {i < ZONE_ORDER.length - 1 ? <span className="text-muted-foreground"> ·</span> : null}
+          </span>
+        </Fragment>
       ))}
-    </span>
+    </>
   );
 }
 

@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 // ---------------------------------------------------------------------------
 
 import { GET } from "@/app/robots.txt/route";
+import { oembedDiscoveryHref } from "@/lib/embed/embed-snippet";
 import { isCrawlAllowed, parseRobots, rulesFor } from "../_helpers/robots-match";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -108,6 +109,7 @@ describe("GET /robots.txt", () => {
     expect(starGroupMatch).not.toBeNull();
     const starGroup = starGroupMatch ? starGroupMatch[1] : "";
     expect(starGroup).toContain("Allow: /");
+    expect(starGroup).toContain("Allow: /api/oembed");
     expect(starGroup).toContain("Disallow: /admin");
     expect(starGroup).toContain("Disallow: /api/");
   });
@@ -179,7 +181,7 @@ describe("GET /robots.txt", () => {
     expect(lines.filter((l) => l === "Allow: /api/v1/openapi.json")).toHaveLength(userAgents.length);
   });
 
-  it("opens only the three Allow paths and keeps the Disallow set exactly the six lines (the carve-out is a longer match, not a removal)", async () => {
+  it("opens only the four Allow paths and keeps the Disallow set exactly the six lines (the carve-out is a longer match, not a removal)", async () => {
     const body = await (await GET()).text();
     const lines = body.split("\n");
     const allows = new Set(lines.filter((l) => l.startsWith("Allow:")));
@@ -187,6 +189,7 @@ describe("GET /robots.txt", () => {
       "Allow: /",
       "Allow: /api/sources",
       "Allow: /api/v1/openapi.json",
+      "Allow: /api/oembed",
     ]);
     const disallows = new Set(lines.filter((l) => l.startsWith("Disallow:")));
     expect([...disallows].sort()).toEqual(SIX_DISALLOWS);
@@ -306,5 +309,85 @@ describe("GET /robots.txt — crawl-index hygiene (h31-bots-1)", () => {
     ])("disallows %s", async (path) => {
       expect(isCrawlAllowed(await rules(), path)).toBe(false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h142-api-1: every cluster page advertises /api/oembed as its oEmbed
+// discovery endpoint (<link rel="alternate" type="application/json+oembed">),
+// and Tayf deliberately serves that tag to WordPress, Iframely and Embedly. It
+// sat under `Disallow: /api/` in every group, so a robots-honouring consumer
+// was told not to fetch the very URL the page points it at. The carve-out is
+// an exact-path Allow (longer than `Disallow: /api/`, so it wins under RFC 9309
+// longest match); the iframe target /embed/ and the rest of /api/ stay closed.
+//
+// The path is derived from oembedDiscoveryHref, not hard-coded, so renaming the
+// endpoint breaks this guard instead of silently re-blocking it.
+// ---------------------------------------------------------------------------
+describe("GET /robots.txt — oEmbed discovery endpoint is crawl-allowed (h142-api-1)", () => {
+  const CLUSTER_ID = "532ee77c-525b-43c8-9bc5-20097064c7e2";
+  const discovery = new URL(oembedDiscoveryHref("https://www.tayfhaber.com", CLUSTER_ID));
+  const OEMBED_PATH = discovery.pathname;
+  const OEMBED_TARGET = discovery.pathname + discovery.search;
+  const ALL_AGENTS = ["*", "Googlebot", "Bingbot", ...AI_BOTS];
+
+  it("derives a real /api/ endpoint with a query from oembedDiscoveryHref", () => {
+    expect(OEMBED_PATH.startsWith("/api/")).toBe(true);
+    expect(discovery.search).toContain("url=");
+    expect(discovery.search).toContain("format=json");
+  });
+
+  it("carries exactly one Allow line for the discovery path in each of the 21 groups", async () => {
+    const groups = groupsByAgent(await (await GET()).text());
+    expect(groups.size).toBe(3 + AI_BOTS.length);
+    expect(groups.size).toBe(21);
+    for (const [ua, lines] of groups) {
+      expect(lines.filter((l) => l === `Allow: ${OEMBED_PATH}`), `Allow ${OEMBED_PATH} in group for ${ua}`).toHaveLength(1);
+      expect(lines, `Disallow: /api/ still present in group for ${ua}`).toContain("Disallow: /api/");
+    }
+    const body = await (await GET()).text();
+    expect(body.split("\n").filter((l) => l === `Allow: ${OEMBED_PATH}`)).toHaveLength(groups.size);
+  });
+
+  it("evaluates the discovery URL as allowed for every group named in the file (longest match beats Disallow: /api/)", async () => {
+    const parsed = parseRobots(await (await GET()).text());
+    expect([...parsed.keys()].sort()).toEqual(ALL_AGENTS.map((a) => a.toLowerCase()).sort());
+    for (const ua of ALL_AGENTS) {
+      const rules = rulesFor(parsed, ua);
+      expect(isCrawlAllowed(rules, OEMBED_TARGET), `${OEMBED_TARGET} for ${ua}`).toBe(true);
+      expect(isCrawlAllowed(rules, OEMBED_PATH), `${OEMBED_PATH} for ${ua}`).toBe(true);
+    }
+  });
+
+  it("falls back to the `*` group for an unlisted crawler (Embedly, Iframely) and allows the discovery URL there", async () => {
+    const parsed = parseRobots(await (await GET()).text());
+    for (const ua of ["Embedly", "Iframely", "WordPress"]) {
+      expect(isCrawlAllowed(rulesFor(parsed, ua), OEMBED_TARGET), `${OEMBED_TARGET} for ${ua}`).toBe(true);
+    }
+  });
+
+  it.each(ALL_AGENTS)("keeps everything else under /api/ and /embed/ closed for %s", async (ua) => {
+    const rules = rulesFor(parseRobots(await (await GET()).text()), ua);
+    for (const path of [
+      "/api/takip",
+      "/api/admin",
+      "/api/v1/clusters",
+      "/api/v1/clusters?limit=5",
+      `/embed/cluster/${CLUSTER_ID}`,
+      "/embed/x",
+      "/admin",
+    ]) {
+      expect(isCrawlAllowed(rules, path), `${path} for ${ua}`).toBe(false);
+    }
+  });
+
+  it("still allows the two older carve-outs and the cluster page the tag is emitted on", async () => {
+    const parsed = parseRobots(await (await GET()).text());
+    for (const ua of ALL_AGENTS) {
+      const rules = rulesFor(parsed, ua);
+      for (const path of ["/api/sources", "/api/sources/sozcu", "/api/v1/openapi.json", `/cluster/${CLUSTER_ID}`]) {
+        expect(isCrawlAllowed(rules, path), `${path} for ${ua}`).toBe(true);
+      }
+    }
   });
 });
