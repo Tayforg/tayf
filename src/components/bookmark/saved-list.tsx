@@ -22,15 +22,25 @@ import {
   writeSnapshots,
   type SavedChange,
 } from "@/components/bookmark/bookmark-snapshots";
+import {
+  SAVED_MAX_IDS,
+  SAVED_PARTIAL_TEXT,
+  SavedTruncationNote,
+  fetchOlderSavedChunks,
+  mergeSavedRows,
+  nextSavedAnnouncement,
+  rowsForSnapshots,
+  savedLookupPlan,
+  savedLookupStatus,
+  type SavedRpcName,
+} from "./saved-lookup";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { focusTargetAfterRemove } from "@/lib/follows/follows";
 import { useHydrated } from "@/lib/hooks/use-hydrated";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// saved_clusters_v4 (migration 192; v3 from 158, v2 from 124 and v1 from 116 have
-// the same caps) truncates its input to 200 ids and returns at most 200 rows, so
-// send the newest 200 bookmarks.
-const SAVED_RPC_MAX_IDS = 200;
+// saved_clusters_v4 (migration 192; v3 from 158, v2 from 124 and v1 from 116 have the same caps) reads at most
+// 200 ids and returns at most 200 rows per call. saved-lookup.ts splits the bookmarks into chunks of at most 200
+// (newest chunk first, five chunks at most) and merges the answers back into this page's order (h135).
 
 interface SavedRow {
   id: string;
@@ -150,6 +160,9 @@ export function SavedList() {
   // null = still loading (or first paint before the effect runs).
   const [rows, setRows] = useState<SavedRow[] | null>(null);
   const [failed, setFailed] = useState(false);
+  // What the last lookup covered: every well-formed bookmark, how many of them were asked for (the newest 1000
+  // at most), and whether some chunks failed while others answered. Set together with `rows`.
+  const [lookup, setLookup] = useState({ total: 0, requested: 0, partial: false });
   const [changes, setChanges] = useState<Record<string, SavedChange>>({});
   const [announcement, setAnnouncement] = useState("");
 
@@ -167,19 +180,21 @@ export function SavedList() {
     let cancelled = false;
     (async () => {
       try {
-        // Set.add appends, so the tail of idList is the newest bookmarks.
-        // Malformed ids (hand-edited bookmark storage) cannot match a cluster and
-        // would turn the whole uuid[] argument into a 400.
-        const ids = idList
-          .filter((id) => typeof id === "string" && UUID_RE.test(id))
-          .slice(-SAVED_RPC_MAX_IDS);
-        if (ids.length === 0) {
+        // Set.add appends, so the tail of idList is the newest bookmarks. Chunk 0 is the newest 200 valid ids,
+        // exactly the set this page always sent; chunks 1..4 reach the older bookmarks (h135). Malformed ids
+        // (hand-edited bookmark storage) cannot match a cluster and would turn the whole uuid[] argument into a
+        // 400, so the plan drops them.
+        const plan = savedLookupPlan(idList);
+        if (plan.total === 0) {
           setRows([]);
           setFailed(false);
           return;
         }
+        const [ids = [], ...older] = plan.chunks;
         const { createBrowserClient } = await import("@/lib/supabase/browser");
         const client = createBrowserClient();
+        // The RPC that answers chunk 0 is the one the older chunks are sent to.
+        let rpcName: SavedRpcName = "saved_clusters_v4";
         let res = await client.rpc("saved_clusters_v4", { p_ids: ids });
         // PGRST202 (not in PostgREST's schema cache) or 42883 (undefined
         // function) = migration 192 is not applied yet (the app can deploy
@@ -187,23 +202,43 @@ export function SavedList() {
         // so the row prints the stored article_count (what /saved showed before
         // 192) until the migration lands.
         if (isRpcMissing(res.error)) {
+          rpcName = "saved_clusters_v3";
           res = await client.rpc("saved_clusters_v3", { p_ids: ids });
         }
         // The same again for 158: v2 has no first_published, so the pill
         // follows the veto only (what /saved showed before 158).
         if (isRpcMissing(res.error)) {
+          rpcName = "saved_clusters_v2";
           res = await client.rpc("saved_clusters_v2", { p_ids: ids });
         }
         // PGRST202 again = migration 124 is not applied either. Only then fall
         // back to v1 (no is_blindspot, so no pill); any other error keeps the
         // fail-open path.
         if (res.error?.code === "PGRST202") {
+          rpcName = "saved_clusters";
           res = await client.rpc("saved_clusters", { p_ids: ids });
         }
         const { data, error } = res;
         if (cancelled) return;
+        // A failed chunk is counted, not fatal: the chunks that answered keep their rows. Only when nothing can be
+        // shown is the page failed: every chunk failed (always the case for a reader with 200 bookmarks or fewer,
+        // who has one chunk), or the rest brought no row.
+        const results: SavedRow[][] = [];
+        let failedChunks = 0;
         if (error) {
           console.warn("[saved] title lookup error:", error.message);
+          failedChunks += 1;
+        } else {
+          results.push((data ?? []) as SavedRow[]);
+        }
+        // The older chunks, one after another (never in parallel), at most four more calls.
+        const more = await fetchOlderSavedChunks<SavedRow>(client, rpcName, older, () => cancelled);
+        if (more === null) return;
+        results.push(...more.results);
+        failedChunks += more.failed;
+        // Chunks that failed while the others brought no row at all are a failure too: "no saved stories" would be false.
+        const merged = mergeSavedRows(results);
+        if (savedLookupStatus(plan.chunks.length, failedChunks, merged.length) === "failed") {
           setFailed(true);
           setRows([]);
           return;
@@ -214,14 +249,20 @@ export function SavedList() {
         // The claim therefore settles when the list is opened; a pill that is
         // still waiting appears on the next visit after the delay.
         const nowMs = Date.now();
-        const loaded = ((data ?? []) as SavedRow[]).map((row) => toPublicSavedRow(row, nowMs));
-        // Device-local change detection; effect-only (never during render).
+        const loaded = merged.map((row) => toPublicSavedRow(row, nowMs));
+        // Device-local change detection; effect-only (never during render). Only the chunk-0 rows (the newest
+        // 200, the set the page always reconciled): all of the merged rows would stamp first-view snapshots that
+        // push the older 'save' baselines out of the 500-entry cap, visit after visit.
         const snaps = readSnapshots();
-        const { changes: found, toWrite } = reconcileSnapshots(loaded, snaps, new Date().toISOString());
+        const { changes: found, toWrite } = reconcileSnapshots(rowsForSnapshots(loaded, plan), snaps, new Date().toISOString());
         if (Object.keys(toWrite).length > 0) writeSnapshots({ ...snaps, ...toWrite });
         pruneSnapshots(idList);
         setChanges(found);
         setFailed(false);
+        setLookup({ total: plan.total, requested: plan.requested, partial: failedChunks > 0 });
+        // The live region follows this lookup: the partial copy while it is partial, cleared once a later lookup
+        // completes (the bookmark list changed in another tab), and not repeated while it stays the same.
+        setAnnouncement((prev) => nextSavedAnnouncement(prev, failedChunks > 0));
         setRows(loaded);
       } catch (err) {
         if (cancelled) return;
@@ -288,11 +329,12 @@ export function SavedList() {
   }
 
   if (rows === null) {
-    // Loading skeleton — one bar per saved id keeps the height stable.
+    // Loading skeleton — one bar per saved id keeps the height stable. Only the ids that will be looked up (the
+    // newest SAVED_MAX_IDS) get a bar, so the skeleton never outgrows the list.
     return (
       <SavedFrame announcement={announcement}>
         <ul className="space-y-2" aria-busy="true">
-          {idList.map((id) => (
+          {idList.slice(-SAVED_MAX_IDS).map((id) => (
             <li
               key={id}
               className="h-16 animate-pulse rounded-lg bg-card/60 ring-1 ring-border/60"
@@ -314,6 +356,12 @@ export function SavedList() {
 
   return (
     <SavedFrame announcement={announcement}>
+    {lookup.partial && (
+      <p aria-hidden="true" className="mb-3 text-xs text-muted-foreground">
+        {SAVED_PARTIAL_TEXT}
+      </p>
+    )}
+    {!lookup.partial && <SavedTruncationNote shown={lookup.requested} total={lookup.total} />}
     <SavedMixCard rows={rows} />
     {changedCount > 0 && (
       <p className="mb-3 text-xs text-muted-foreground">
