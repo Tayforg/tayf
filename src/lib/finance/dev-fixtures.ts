@@ -328,17 +328,25 @@ export function createFinanceFakeClient(): unknown {
     rvol: b.rvol,
   }));
 
-  // Today's session as 5-minute bars, 10:00 Istanbul up to now (or the
+  const BAR_MS = 5 * 60 * 1000;
+  const SESSION_START_MS = Date.parse(`${day(0)}T10:00:00+03:00`);
+  const SESSION_END_MS = Date.parse(`${day(0)}T18:10:00+03:00`);
+
+  // Today's session as 5-minute bars, start-stamped like bist_bars_5m (051):
+  // a volume-0 opening-auction stub at 09:55 (price a little off the previous
+  // close, as production's stub is), then 10:00 Istanbul up to now (or the
   // close), a deterministic wobble around the previous close.
   function sessionBars(ticker: string): Array<{ ticker: string; ts: string; close: number; volume: number }> {
     const b = BASE[ticker]!;
-    const todayIst = day(0);
-    const start = Date.parse(`${todayIst}T10:00:00+03:00`);
-    const end = Math.min(now, Date.parse(`${todayIst}T18:10:00+03:00`));
+    const start = SESSION_START_MS;
+    const end = Math.min(now, SESSION_END_MS);
     const out = [];
+    if (start - BAR_MS <= end) {
+      out.push({ ticker, ts: new Date(start - BAR_MS).toISOString(), close: Math.round(b.prev * 1.002 * 100) / 100, volume: 0 });
+    }
     let seed = ticker.charCodeAt(0) + ticker.charCodeAt(1);
     let price = b.prev;
-    for (let t = start; t <= end; t += 5 * 60 * 1000) {
+    for (let t = start; t <= end; t += BAR_MS) {
       seed = (seed * 9301 + 49297) % 233280;
       price *= 1 + ((seed / 233280 - 0.5) * 0.006);
       out.push({ ticker, ts: new Date(t).toISOString(), close: Math.round(price * 100) / 100, volume: 20_000 + (seed % 90_000) });
@@ -373,12 +381,48 @@ export function createFinanceFakeClient(): unknown {
     { kind: "press_ahead", ticker: "ASELS", score: 2, evidence: { disclosure_index: 1662101, articles_before: 2, median_lag_min: -2030 }, observed_at: iso(40 * H) },
   ];
 
-  // price_at() equivalent over the fixture bars.
+  // bist_bars_daily stand-in for priceAt: the previous session's close (BASE.prev,
+  // the same number QUOTE_STATS carries) and, once the session has ended (18:10
+  // Istanbul, where sessionBars stops), today's settled close, taken as the
+  // session's last bar close. Oldest first; no history before the previous
+  // session.
+  const DAILY = Object.entries(BASE).flatMap(([ticker, b]) => {
+    const rows = [{ ticker, day: day(1), close: b.prev }];
+    const settled = BARS_5M.filter((x) => x.ticker === ticker).at(-1);
+    if (now >= SESSION_END_MS && settled) rows.push({ ticker, day: day(0), close: settled.close });
+    return rows;
+  });
+
+  const istDate = (ms: number) => new Date(ms + 3 * H).toISOString().slice(0, 10);
+
+  // price_at() equivalent over the fixture bars: migration 203, which keeps
+  // 187's daily-close and session-day rules.
+  //  - bar: the close of the newest COMPLETED 5-minute bar within 4 days. Bars
+  //    are start-stamped, so a bar stamped T is complete from T + 5 min on,
+  //    inclusive (203's ts <= p_ts - 5 minutes); the bar that contains p_ts is
+  //    still running and never counts.
+  //  - daily: the newest daily row with day <= the reference day, which is the
+  //    Istanbul date of p_ts from 18:10 on and the day before until then.
+  //  - the bar wins when there is no daily row or its Istanbul date is later
+  //    than the daily row's day; otherwise the daily close.
+  // The fixture's daily rows start at the previous session, so a headline from
+  // before that (no eligible row) reads the oldest one, as it read the previous
+  // close before 203.
   function priceAt(ticker: string, isoTs: string): number | null {
     const ts = Date.parse(isoTs);
-    const bars = BARS_5M.filter((b) => b.ticker === ticker && Date.parse(b.ts) <= ts);
-    if (bars.length) return bars[bars.length - 1]!.close;
-    return BASE[ticker]?.prev ?? null;
+    let bar: { ts: string; close: number } | undefined;
+    for (const b of BARS_5M) {
+      const t = Date.parse(b.ts);
+      if (b.ticker === ticker && t <= ts - BAR_MS && t >= ts - 4 * D) bar = b; // BARS_5M is ascending by ts
+    }
+    // istMs only gives the Istanbul minute of day; istDate takes a UTC ms value and adds the +3 h itself.
+    const istMs = ts + 3 * H;
+    const minuteOfDay = Math.floor((istMs % D) / 60_000);
+    const referenceDay = istDate(minuteOfDay >= 18 * 60 + 10 ? ts : ts - D);
+    const rows = DAILY.filter((r) => r.ticker === ticker);
+    const daily = rows.filter((r) => r.day <= referenceDay).at(-1) ?? rows[0];
+    if (bar && (!daily || istDate(Date.parse(bar.ts)) > daily.day)) return bar.close;
+    return daily?.close ?? null;
   }
 
   return createFakeClient({
