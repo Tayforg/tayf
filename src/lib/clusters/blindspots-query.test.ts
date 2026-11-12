@@ -485,6 +485,8 @@ describe("getBlindspots Step B: batched embed", () => {
     expect(selectArg).toMatch(/sources\s*\([^)]*\blogo_url\b/);
     // Migration 089 ("ADMIT"): politics_share must see the admission stamp.
     expect(selectArg).toMatch(/\bpolitics_admitted_at\b/);
+    // h138-roadmap2-1: the wire signal reads the agency lead, on the article embed.
+    expect(selectArg).toMatch(/articles\s*\(\s*id, [^)]*\bdescription\b/);
   });
 
   it("120 candidates (none clearing the contract) produce exactly 3 embed batches (ceil(120/50))", async () => {
@@ -1967,5 +1969,66 @@ describe("getBlindspots stale-if-error and single-flight", () => {
     vi.setSystemTime(start + 5_001);
     await expect(getBlindspots()).rejects.toThrow("db down");
     expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h138-roadmap2-1: /blindspots cards take their wire badge and effective count
+// from the same description-aware signal as the home feed, and the description
+// stays server-side.
+// ---------------------------------------------------------------------------
+
+describe("getBlindspots wire signal reads the member description (h138-roadmap2-1)", () => {
+  const LEAD =
+    "Anadolu Ajansının edindiği bilgiye göre, Bakanlık yeni düzenlemeyi yarından itibaren uygulamaya koyacağını açıkladı.";
+
+  /** 5 distinct voting outlets, 5 distinct hashes, `descriptions[i]` on member i. */
+  function mkReprintRow(id: string, descriptions: Array<string | null | undefined>) {
+    const row = mkBlindspotClusterRow(id, "pro_government");
+    return {
+      ...row,
+      cluster_articles: row.cluster_articles.map((ca, i) => ({
+        articles: {
+          ...ca.articles,
+          content_hash: `hash-${id}-${i}`,
+          ...(descriptions[i] !== undefined ? { description: descriptions[i] } : {}),
+        },
+      })),
+    };
+  }
+
+  it("flags five members on one lead as wire with one effective source, although all five hashes differ", async () => {
+    seedRows([mkReprintRow("reprint", [LEAD, LEAD, LEAD, LEAD, LEAD])]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]!.isWireRedistribution).toBe(true);
+    expect(bundles[0]!.effectiveArticleCount).toBe(1);
+    expect(bundles[0]!.cluster.article_count).toBe(5);
+  });
+
+  it("without a description the same row is five independent texts (today's result)", async () => {
+    seedRows([mkReprintRow("plain", [undefined, null, "", undefined, null])]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]!.isWireRedistribution).toBe(false);
+    expect(bundles[0]!.effectiveArticleCount).toBe(5);
+  });
+
+  it("never carries the description to the client: not on an article, not anywhere in the payload", async () => {
+    seedRows([mkReprintRow("server-only", [LEAD, LEAD, LEAD, LEAD, LEAD])]);
+
+    const data = await getBlindspots();
+
+    const bundle = data.bundles[0]!;
+    for (const article of bundle.articles) {
+      expect("description" in article).toBe(false);
+    }
+    const payload = JSON.stringify(data);
+    expect(payload).not.toContain("description");
+    expect(payload).not.toContain("Anadolu Ajansının");
   });
 });

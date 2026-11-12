@@ -3,7 +3,7 @@ import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { backOffOpenQuote, tidySummaryText, trimDanglingEnd } from "@/lib/articles/summary-tidy";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { findAgreeingMember } from "./summary-agreement";
-import type { WireSignal } from "./wire";
+import { textComponentsOf, type WireSignal } from "./wire";
 import type { BiasCategory, SourceKind } from "@/types";
 
 // clusters.summary_tr is the seed article's raw RSS description — one
@@ -186,17 +186,6 @@ export function findSeedMember(
   return inCreditOrder(holdersOf(members, text)).find(mayShowExcerpt) ?? null;
 }
 
-/** Non-null content_hash counts among members — for finding the wire dispatch's hash. */
-function contentHashCounts(members: SummaryMember[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const m of members) {
-    const hash = m.article.content_hash;
-    if (hash === null) continue;
-    counts.set(hash, (counts.get(hash) ?? 0) + 1);
-  }
-  return counts;
-}
-
 export interface SummaryAttribution {
   text: string;
   source: SummaryMember["source"] | null;
@@ -229,22 +218,52 @@ function attributedTo(text: string, member: SummaryMember | null): SummaryAttrib
   return out;
 }
 
+/** What a wire redistribution copied: the members of its largest text(s), and their content hashes. */
+interface WireMajority {
+  /** The members whose text is (one of) the largest, ties included. Compared by identity. */
+  members: ReadonlySet<SummaryMember>;
+  /** The non-null content hashes of `members`, for the title-agreement choice. */
+  hashes: ReadonlySet<string>;
+}
+
+const NO_WIRE_MAJORITY: WireMajority = { members: new Set(), hashes: new Set() };
+
 /**
- * The content hashes a wire redistribution copied: the hash(es) most members
- * share, ties included. The seed is hidden when its hash is one of them; the
- * title-agreement choice skips a candidate that holds one. Empty without a wire
- * redistribution.
+ * The dispatch a wire redistribution copied: the members of the largest
+ * text(s), ties included, where a text is a component of "same content_hash
+ * or same agency lead" (`textComponentsOf`, the rule the wire flag itself is
+ * computed with; h139 ts-3). Counting content hashes alone mis-hid an
+ * independent seed when every hash was distinct (all tie at one) and showed a
+ * copied lead when two unrelated members happened to share a hash. The seed is
+ * hidden when it is one of these members (by identity, so a seed with no hash
+ * is covered); the title-agreement choice skips a candidate that holds one of
+ * their hashes. Empty without a wire redistribution, or when no text is held
+ * by at least two members (there is no copy to hide).
  */
-function wireMajorityHashes(
+function wireMajority(
   members: SummaryMember[],
   wire: Pick<WireSignal, "isWireRedistribution">,
-): Set<string> {
-  if (!wire.isWireRedistribution) return new Set();
-  const counts = contentHashCounts(members);
-  const bestCount = Math.max(0, ...counts.values());
-  const majority = new Set<string>();
-  for (const [hash, count] of counts) if (count === bestCount) majority.add(hash);
-  return majority;
+): WireMajority {
+  if (!wire.isWireRedistribution) return NO_WIRE_MAJORITY;
+  const roots = textComponentsOf(
+    members.map((m, i) => ({
+      id: String(i),
+      content_hash: m.article.content_hash,
+      description: m.article.description,
+    })),
+  );
+  const sizes = new Map<number, number>();
+  for (const root of roots) sizes.set(root, (sizes.get(root) ?? 0) + 1);
+  const bestSize = Math.max(0, ...sizes.values());
+  if (bestSize < 2) return NO_WIRE_MAJORITY;
+  const majorityMembers = new Set<SummaryMember>();
+  const hashes = new Set<string>();
+  members.forEach((m, i) => {
+    if (sizes.get(roots[i]!) !== bestSize) return;
+    majorityMembers.add(m);
+    if (m.article.content_hash !== null) hashes.add(m.article.content_hash);
+  });
+  return { members: majorityMembers, hashes };
 }
 
 /**
@@ -289,12 +308,9 @@ export function summaryAttribution({
   const credited = inCreditOrder(literalMatches).find(mayShowExcerpt) ?? null;
   const seedMember = inTimeOrder(literalMatches).find(mayShowExcerpt) ?? null;
 
-  const majorityHashes = wireMajorityHashes(members, wire);
-  if (seedMember) {
-    const hash = seedMember.article.content_hash;
-    // Tie-safe: hide when the seed's hash is (one of) the majority.
-    if (hash !== null && majorityHashes.has(hash)) return null;
-  }
+  const majority = wireMajority(members, wire);
+  // Tie-safe: hide when the seed is one of the members of the largest text(s).
+  if (seedMember && majority.members.has(seedMember)) return null;
 
   const shown = tidySummaryText(text);
   if (shown.length === 0) return null;
@@ -307,7 +323,7 @@ export function summaryAttribution({
       seed: seedMember,
       seedShown: shown,
       title: agreeWithTitle,
-      wireMajorityHashes: majorityHashes,
+      wireMajorityHashes: majority.hashes,
     });
     if (better) return attributedTo(better.text, better.member);
   }
@@ -503,7 +519,7 @@ export function resolveSummaryAttribution({
  * lookup failure). Strictly more conservative than summaryAttribution: it
  * can never name an outlet (no members to run findSeedMember against), and
  * it hides the summary wholesale on any wire redistribution because the
- * per-seed content_hash majority check cannot run without members — so it
+ * per-seed wire-majority check (largest text, wireMajority) cannot run without members — so it
  * may hide a summary the member-aware path would show. That divergence is
  * intentional, not a bug to reconcile: the caller has strictly less
  * information, so it must be strictly less willing to publish someone

@@ -1,4 +1,5 @@
 import { BIAS_ORDER, BLINDSPOT, tallyZones } from "@/lib/bias/config";
+import { ZONE_BOLGE_ABLATIVE, ZONE_BOLGE_LOCATIVE_ATTR } from "@/lib/bias/zone-phrases";
 import { buildRssXml, withUtm } from "@/lib/feeds/rss-builder";
 import { formatZoneLine } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
@@ -148,14 +149,16 @@ function rssItemFor(alert: V1AlertRecord) {
   let title: string;
   let description = `${alert.source_count} kaynak · ${counts}.`;
   if (alert.type === "blindspot") {
-    const zone = ZONE_LABEL_TR[alert.dominant_zone ?? "iktidar"];
+    const dominant = alert.dominant_zone ?? "iktidar";
+    const zone = ZONE_LABEL_TR[dominant];
     const pct = Math.round(BLINDSPOT.dominantShare * 100);
     title = `Kör nokta · ${zone} ağırlıklı: ${alert.title}`;
-    description += ` Kaynakların en az %${pct}'i ${zone} bölgesinden.`;
+    description += ` Kaynakların en az %${pct}'i ${ZONE_BOLGE_ABLATIVE[dominant]}.`;
   } else {
-    const zone = ZONE_LABEL_TR[alert.silent_zones[0] ?? "muhalefet"];
+    const silent = alert.silent_zones[0] ?? "muhalefet";
+    const zone = ZONE_LABEL_TR[silent];
     title = `Sessiz bölge · ${zone}: ${alert.title}`;
-    description += ` Tayf, ${zone} bölgesindeki kaynaklardan bu kümeye eşleşen haber bulamadı.`;
+    description += ` Tayf, ${ZONE_BOLGE_LOCATIVE_ATTR[silent]} kaynaklardan bu kümeye eşleşen haber bulamadı.`;
   }
   return {
     title,

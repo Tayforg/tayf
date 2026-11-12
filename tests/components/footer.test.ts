@@ -59,7 +59,7 @@ function navLabels(): string[] {
 
 describe("footer.tsx labels (h19-copy-2)", () => {
   it("finds every NAV_LINKS label", () => {
-    expect(navLabels()).toHaveLength(12);
+    expect(navLabels()).toHaveLength(14);
   });
 
   it("names /timeline like its page H1", () => {

@@ -17,6 +17,7 @@
 //   - groupByOwner()          @/lib/sources/ownership
 
 import { zoneOf } from "@/lib/bias/config";
+import { ZONE_KANAT_GENITIVE } from "@/lib/bias/zone-phrases";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import type {
   ClusterDetail,
@@ -39,14 +40,14 @@ import type { BiasCategory, BiasDistribution, MediaDnaZone, Source } from "@/typ
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
-// Lowercase Turkish zone names for mid-sentence use (mirrors
-// src/lib/clusters/share.ts's own ZONE_LABEL_LOWER — kept local here since
-// it's a 3-entry table and share.ts's copy isn't exported).
-const ZONE_LABEL_TR: Record<MediaDnaZone, string> = {
-  iktidar: "iktidar",
-  bagimsiz: "bağımsız",
-  muhalefet: "muhalefet",
-};
+// The caveat is a lowercase fragment spliced mid-sentence (see
+// BlindspotSection.caveat), and "Bağımsız" is an adjective that takes no
+// possessive, so the whole phrase comes from ZONE_KANAT_GENITIVE
+// ("Bağımsız kanadın", never "Bağımsız kanadının"; h138-suffix-1) and is only
+// lowered here. Turkish rules, so "İktidar" gives "iktidar" and not "i̇ktidar".
+function kanatGenitiveLower(zone: MediaDnaZone): string {
+  return ZONE_KANAT_GENITIVE[zone].toLocaleLowerCase("tr-TR");
+}
 
 // ---------------------------------------------------------------------------
 // Section 01 — coverage
@@ -231,10 +232,10 @@ function dominantZoneOfDistribution(
   return best;
 }
 
-function formatHealthFragment(zone: MediaDnaZone, stats: ZoneHealth): string {
+export function formatHealthFragment(zone: MediaDnaZone, stats: ZoneHealth): string {
   const pct = Math.round(stats.healthyShare * 100);
   const label = stats.degraded ? "düşük" : "yeterli";
-  return `${ZONE_LABEL_TR[zone]} kanadının feed sağlığı ${label} (${stats.healthy}/${stats.total} sağlıklı, %${pct})`;
+  return `${kanatGenitiveLower(zone)} feed sağlığı ${label} (${stats.healthy}/${stats.total} sağlıklı, %${pct})`;
 }
 
 const NO_BLINDSPOT_SECTION: BlindspotSection = {
@@ -308,7 +309,7 @@ function buildBlindspotSection(
       blindspotSuppressed: false,
       silentZone,
       healthStatus: "unknown",
-      caveat: `${ZONE_LABEL_TR[silentZone]} kanadının feed sağlığı bilinmiyor, bu iddia doğrulanmadan gösteriliyor`,
+      caveat: `${kanatGenitiveLower(silentZone)} feed sağlığı bilinmiyor, bu iddia doğrulanmadan gösteriliyor`,
     };
   }
 
@@ -380,8 +381,16 @@ function buildTimelineSection(
         ? null
         : firstMs - clusterFirstMs;
 
+    // The same inputs as the cluster-level `detail.wire` (cluster-detail-query.ts),
+    // description included: a zone whose outlets reprint one agency lead under
+    // distinct hashes is wire here too, so a zone row never reads "N bağımsız
+    // yayın" under a "Genel" line that detected an agency copy (h139 ts-5).
     const wire = wireSignalOf(
-      members.map((m) => ({ id: m.article.id, content_hash: m.article.content_hash })),
+      members.map((m) => ({
+        id: m.article.id,
+        content_hash: m.article.content_hash,
+        description: m.article.description,
+      })),
     );
 
     return { zone, firstPublishedAt, lagMs, wire };

@@ -1,5 +1,5 @@
-import { ZONE_META } from "@/lib/bias/config";
 import { dominantZonePercent } from "@/lib/bias/zone-summary";
+import { ZONE_KAYNAKLAR } from "@/lib/bias/zone-phrases";
 import {
   getBlindspots,
   type BlindspotBundle,
@@ -58,9 +58,8 @@ function claimRssItem(base: string, claim: FeedClaim): RssItemInput {
   // sort key, never copy.
   const zoneLine = formatZoneLine(claim.votingZoneCounts);
   const head = sourceCountHead(claim.sourceCount, claim.votingZoneCounts);
-  const zoneLabel = ZONE_META[claim.dominantZone].label;
   const pct = dominantZonePercent(claim.votingZoneCounts, claim.dominantZone);
-  const prefix = `Kör nokta: ağırlıkla ${zoneLabel} kaynakları (%${pct}). `;
+  const prefix = `Kör nokta: ağırlıkla ${ZONE_KAYNAKLAR[claim.dominantZone]} (%${pct}). `;
 
   return {
     title: claim.title,

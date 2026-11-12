@@ -2,11 +2,15 @@
 // settled fetch into a SideState the page renders without any branching on
 // transport errors, and builds the per-zone source roster.
 
+import type { SourceKunyeSource } from "@/components/story/source-kunye";
+import { sourceProfileHref } from "@/components/story/source-profile-link";
 import { zoneOf } from "@/lib/bias/config";
+import { uniqueSources } from "@/lib/bias/zone-summary";
 import type {
   ClusterDetail,
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
+import { getSourceMetadata } from "@/lib/sources/factuality";
 import { partitionByVote } from "@/lib/sources/kind";
 import {
   clusterTextLang,
@@ -18,6 +22,16 @@ import type { BiasDistribution, MediaDnaZone } from "@/types";
 import { isContentlessTitle } from "../../../supabase/functions/_shared/rss/entities";
 
 import { COMPARE_UUID_RE, type ParsedSide } from "./compare-params";
+
+/**
+ * One outlet in a roster line: the display name plus the slug the page links to
+ * `/source/<slug>` with (h138-roadmap2-4). Exactly these two fields, so nothing
+ * else of the source row reaches the roster.
+ */
+export interface RosterSource {
+  slug: string;
+  name: string;
+}
 
 /** The wire facts the cluster page prints as its violet badge. */
 export interface SideWire {
@@ -34,8 +48,15 @@ export interface SideView {
   distribution: BiasDistribution;
   sourceCount: number;
   firstPublished: string;
-  roster: Record<MediaDnaZone, string[]>;
-  nonVoting: string[];
+  roster: Record<MediaDnaZone, RosterSource[]>;
+  nonVoting: RosterSource[];
+  /**
+   * The rows of the "Kaynak künyesi" strip: this side's rated outlets, one per
+   * slug, in member order, exactly what the cluster page passes <SourceKunye>
+   * (`kunyeSources`). [] when no member outlet carries factuality / ownership
+   * metadata.
+   */
+  kunyeSources: SourceKunyeSource[];
   /**
    * Zones a toplayıcı / niş member sits in, deduped, in ZONES order. Words
    * only: an empty roster reads "no source the spectrum counts" for these
@@ -78,38 +99,41 @@ export type SideState =
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
-function sortedNames(names: Iterable<string>): string[] {
-  return Array.from(names).sort((x, y) => x.localeCompare(y, "tr"));
+function sortedSources(sources: Iterable<RosterSource>): RosterSource[] {
+  return Array.from(sources).sort((x, y) => x.name.localeCompare(y.name, "tr"));
 }
 
-/** One display name per source slug (an outlet can appear as many articles). */
-function uniqueNames(
+/** One {slug, name} per source slug (an outlet can appear as many articles). */
+function uniqueRosterSources(
   members: readonly Pick<ClusterDetailMember, "source">[],
-): string[] {
-  const bySlug = new Map<string, string>();
+): RosterSource[] {
+  const bySlug = new Map<string, RosterSource>();
   for (const m of members) {
-    if (!bySlug.has(m.source.slug)) bySlug.set(m.source.slug, m.source.name);
+    if (!bySlug.has(m.source.slug)) {
+      bySlug.set(m.source.slug, { slug: m.source.slug, name: m.source.name });
+    }
   }
-  return sortedNames(bySlug.values());
+  return sortedSources(bySlug.values());
 }
 
 /**
  * Voting sources grouped by Medya DNA zone (via `zoneOf(source.bias)`, not a
- * second bias-to-zone mapping), plus the toplayıcı / niş names that never
- * vote. Both lists are deduped by slug and sorted with Turkish collation.
+ * second bias-to-zone mapping), plus the toplayıcı / niş sources that never
+ * vote. Entries are `{slug, name}` (the slug is what the page links with); both
+ * lists are deduped by slug and sorted by name with Turkish collation.
  * `nonVotingZones` is the same fact as the cluster page's set: the zones those
  * non-voting members belong to, in ZONES order.
  */
 export function rosterByZone(
   members: readonly Pick<ClusterDetailMember, "source">[],
 ): {
-  roster: Record<MediaDnaZone, string[]>;
-  nonVoting: string[];
+  roster: Record<MediaDnaZone, RosterSource[]>;
+  nonVoting: RosterSource[];
   nonVotingZones: MediaDnaZone[];
 } {
   const { voting, nonVoting } = partitionByVote(members);
 
-  const byZone: Record<MediaDnaZone, Map<string, string>> = {
+  const byZone: Record<MediaDnaZone, Map<string, RosterSource>> = {
     iktidar: new Map(),
     bagimsiz: new Map(),
     muhalefet: new Map(),
@@ -117,7 +141,7 @@ export function rosterByZone(
   for (const m of voting) {
     const bucket = byZone[zoneOf(m.source.bias)];
     if (bucket && !bucket.has(m.source.slug)) {
-      bucket.set(m.source.slug, m.source.name);
+      bucket.set(m.source.slug, { slug: m.source.slug, name: m.source.name });
     }
   }
 
@@ -127,13 +151,44 @@ export function rosterByZone(
 
   return {
     roster: {
-      iktidar: sortedNames(byZone.iktidar.values()),
-      bagimsiz: sortedNames(byZone.bagimsiz.values()),
-      muhalefet: sortedNames(byZone.muhalefet.values()),
+      iktidar: sortedSources(byZone.iktidar.values()),
+      bagimsiz: sortedSources(byZone.bagimsiz.values()),
+      muhalefet: sortedSources(byZone.muhalefet.values()),
     },
-    nonVoting: uniqueNames(nonVoting),
+    nonVoting: uniqueRosterSources(nonVoting),
     nonVotingZones: ZONES.filter((zone) => nonVotingZoneSet.has(zone)),
   };
+}
+
+/**
+ * The outlets the "Kaynak künyesi" strip lists for a cluster: one per slug, in
+ * member order, voting or not (factuality and ownership are properties of the
+ * outlet, unrelated to whether its kind votes in the spectrum), kept only when
+ * the outlet is hand-tagged in `SOURCE_METADATA` (`<SourceChips>` renders nothing
+ * for the rest, so an untagged outlet would only add an empty row). The same
+ * expression as the cluster page's `uniqueRatedSources`, so a story shows the
+ * same künye on /cluster/<id> and here.
+ */
+export function kunyeSources<S extends { slug: string }>(
+  members: readonly { source: S }[],
+): S[] {
+  return uniqueSources(members).filter((s) => getSourceMetadata(s.slug) !== null);
+}
+
+/**
+ * Where one roster entry points and which language its name is in. `href` is
+ * the same `/source/<slug>` the künye rows use (`sourceProfileHref`: it gates on
+ * the slug shape the profile route accepts, which is also why no
+ * `encodeURIComponent` is needed, no other page applies one) and is null for a
+ * slug the route would reject, so such an entry stays plain text. `lang` is
+ * `'en'` for an English-language outlet (WCAG 3.1.2, the cluster page's
+ * `sourceLang`: the slug decides, the name is the fallback for a blank slug).
+ */
+export function rosterLinkTarget(source: RosterSource): {
+  href: string | null;
+  lang: "en" | undefined;
+} {
+  return { href: sourceProfileHref(source.slug), lang: sourceLang(source) };
 }
 
 export function toSideState(
@@ -179,6 +234,7 @@ export function toSideState(
       firstPublished: cluster.first_published,
       roster,
       nonVoting,
+      kunyeSources: kunyeSources(members),
       nonVotingZones,
       wire: {
         isWire: wire.isWireRedistribution,

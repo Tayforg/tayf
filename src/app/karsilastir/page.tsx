@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Suspense } from "react";
+import { Suspense, type ReactNode } from "react";
 import { AlertTriangle, Copy } from "lucide-react";
 
 import { RemoveSideLink } from "@/components/compare/remove-side-link";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
+import { SourceKunye } from "@/components/story/source-kunye";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import { ZONE_META } from "@/lib/bias/config";
@@ -22,7 +23,9 @@ import {
 } from "@/lib/compare/compare-params";
 import {
   formatIstanbulDateTime,
+  rosterLinkTarget,
   toSideState,
+  type RosterSource,
   type SideState,
 } from "@/lib/compare/compare-view";
 import { noindexPageMetadata } from "@/lib/seo/page-metadata";
@@ -200,24 +203,58 @@ function emptyZoneLine(
   return "Bu bölgeden kaynak yok";
 }
 
-// Notice sides (missing / invalid / not found / ...) span the same eight grid
+// Notice sides (missing / invalid / not found / ...) span the same nine grid
 // rows as an ok article (see OK_ARTICLE) but are NOT subgrids, so without
 // `md:self-start` they would stretch to the full height of the other side.
 const NOTICE_BOX =
-  "rounded-xl border border-dashed border-border/60 bg-card/30 p-6 space-y-3 md:row-span-8 md:self-start";
+  "rounded-xl border border-dashed border-border/60 bg-card/30 p-6 space-y-3 md:row-span-9 md:self-start";
 
-// An ok side is a subgrid of the outer `md:grid-cols-2` grid: it spans EIGHT
-// rows and lays out exactly eight direct children, one per row — title, meta
+// An ok side is a subgrid of the outer `md:grid-cols-2` grid: it spans NINE
+// rows and lays out exactly nine direct children, one per row — title, meta
 // line, spectrum, the three zone rosters, the non-voting note (or a placeholder
-// when there is none) and the remove link. Both columns therefore share row
+// when there is none), the Kaynak künyesi (or a placeholder when no member
+// outlet is rated) and the remove link. Both columns therefore share row
 // tracks, and the İktidar / Bağımsız / Muhalefet rosters line up at md+ even
 // when one title wraps or one roster is longer (they used to drift by 21-22 px
 // because each column stacked its own rows independently). Below md the article
-// is a plain flex column: the aria-hidden placeholder is display:none there, so
-// it adds no gap, and the row-span / subgrid classes do not apply. Keep the
-// child count at eight whenever you add or remove a block inside the article.
+// is a plain flex column: the aria-hidden placeholders are display:none there,
+// so they add no gap, and the row-span / subgrid classes do not apply. Keep the
+// child count at nine whenever you add or remove a block inside the article.
 const OK_ARTICLE =
-  "rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 min-w-0 flex flex-col gap-4 md:grid md:grid-rows-subgrid md:row-span-8";
+  "rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 min-w-0 flex flex-col gap-4 md:grid md:grid-rows-subgrid md:row-span-9";
+
+// One roster line as links: each outlet links to its /source/<slug> profile
+// (h138-roadmap2-4), joined with ", ". Hookless, so it is invoked as a plain
+// function like SideColumn: the returned nodes carry the names directly. The
+// href gate and the lang rule live in compare-view's rosterLinkTarget: an English
+// outlet gets lang="en" (the cluster page's sourceLang), and a slug the profile
+// route would reject stays plain text. prefetch={false}: a large cluster lists
+// dozens of outlets and /source/* is DB-backed (as in SourceProfileLink).
+const ROSTER_LINK_CLASS =
+  "underline decoration-dotted underline-offset-2 hover:text-foreground";
+
+function rosterLinks(sources: readonly RosterSource[]): ReactNode[] {
+  return sources.flatMap((source, i) => {
+    const { href, lang } = rosterLinkTarget(source);
+    const entry =
+      href === null ? (
+        <span key={source.slug} lang={lang}>
+          {source.name}
+        </span>
+      ) : (
+        <Link
+          key={source.slug}
+          href={href}
+          prefetch={false}
+          lang={lang}
+          className={ROSTER_LINK_CLASS}
+        >
+          {source.name}
+        </Link>
+      );
+    return i === 0 ? [entry] : [", ", entry];
+  });
+}
 
 function SideColumn({
   state,
@@ -322,13 +359,13 @@ function SideColumn({
           </div>
 
           {/* BiasSpectrum renders null for an all-zero distribution; the
-              wrapper keeps its grid row (and the eight-child count) either way. */}
+              wrapper keeps its grid row (and the nine-child count) either way. */}
           <div className="min-w-0">
             <BiasSpectrum distribution={view.distribution} compact />
           </div>
 
           {ZONES.map((zone) => {
-            const names = view.roster[zone];
+            const sources = view.roster[zone];
             const zoneMeta = ZONE_META[zone];
             return (
               <div key={zone} className="space-y-1">
@@ -343,9 +380,9 @@ function SideColumn({
                     {zoneMeta.label}
                   </span>
                 </div>
-                {names.length > 0 ? (
+                {sources.length > 0 ? (
                   <p className="text-[13px] text-foreground/90 leading-relaxed">
-                    {names.join(", ")}
+                    {rosterLinks(sources)}
                   </p>
                 ) : (
                   <p className="text-[13px] text-muted-foreground">
@@ -358,8 +395,22 @@ function SideColumn({
 
           {view.nonVoting.length > 0 ? (
             <p className="text-[11px] text-muted-foreground">
-              {`Toplayıcı / niş (spektruma sayılmaz): ${view.nonVoting.join(", ")}`}
+              {"Toplayıcı / niş (spektruma sayılmaz): "}
+              {rosterLinks(view.nonVoting)}
             </p>
+          ) : (
+            <div aria-hidden="true" className="hidden md:block" />
+          )}
+
+          {/* The cluster page's "Kaynak künyesi" for this side's members: the
+              same component and the same props (this side's rated outlets, one
+              per slug), so factuality and ownership read here as on
+              /cluster/[id] (h138-roadmap2-4). It renders nothing for no rated
+              outlet, so that case keeps its grid row with a placeholder. */}
+          {view.kunyeSources.length > 0 ? (
+            <div className="min-w-0">
+              <SourceKunye sources={view.kunyeSources} headingLevel={3} />
+            </div>
           ) : (
             <div aria-hidden="true" className="hidden md:block" />
           )}

@@ -747,6 +747,8 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           id: m.article.id,
           content_hash: m.article.content_hash,
           title: m.article.title,
+          // h138-roadmap2-1: members that share an agency lead are one text.
+          description: m.article.description,
         }))
       ),
       blindspotSuppressed,

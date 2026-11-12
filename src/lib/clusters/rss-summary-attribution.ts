@@ -11,12 +11,13 @@ import type { SummaryMember } from "./summary-attribution";
 
 // RSS-only member projection for summary attribution. rss.xml needs the
 // same seed-matching / wire-majority logic as the cluster detail page
-// (summary-attribution.ts) but must not widen politics-query.ts's
-// CLUSTER_EMBED_SELECT — that query is shared by every reader of the
-// cached home feed. This module runs one extra, RSS-only Supabase query,
-// bounded to the <=30 cluster ids the feed already chose, and selects
-// only the columns SummaryMember needs (source name/bias, article
-// published_at/content_hash/description) — never rss_url/url/slug/id.
+// (summary-attribution.ts). Since h138-roadmap2-1 politics-query.ts's
+// CLUSTER_EMBED_SELECT carries articles.description, but only as a
+// server-side input of the wire signal (buildClusterBundle), never copied
+// into ClusterBundle. This module still runs its own extra, RSS-only
+// Supabase query, bounded to the <=30 cluster ids the feed already chose,
+// and selects only the columns SummaryMember needs (source name/bias,
+// article published_at/content_hash/description) — never rss_url/url/slug/id.
 //
 // TODO(follow-up): this duplicates ~20 lines of the embedded-select /
 // same-source-dedupe logic in cluster-detail-query.ts and politics-

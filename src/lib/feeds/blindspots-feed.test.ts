@@ -134,6 +134,35 @@ describe("blindspotRssItem", () => {
     );
   });
 
+  it("a Bağımsız-dominant item prints 'ağırlıkla Bağımsız kaynaklar (%N)', never 'Bağımsız kaynakları'", () => {
+    const item = blindspotRssItem(
+      BASE,
+      bundle("c7", {
+        dominantZone: "bagimsiz",
+        dominantPct: 4 / 5,
+        votingZoneCounts: { iktidar: 1, bagimsiz: 4, muhalefet: 0 },
+      }),
+    );
+    expect(item.description).toBe(
+      "Kör nokta: ağırlıkla Bağımsız kaynaklar (%80). 6 kaynak (5 sınıflandırılmış) · İktidar 1 · Bağımsız 4 · Muhalefet 0",
+    );
+    expect(item.description).not.toContain("Bağımsız kaynakları");
+  });
+
+  it("keeps İktidar kaynakları and Muhalefet kaynakları for the two poles", () => {
+    const iktidar = blindspotRssItem(BASE, bundle("c8"));
+    expect(iktidar.description).toContain("Kör nokta: ağırlıkla İktidar kaynakları (%80). ");
+    const muhalefet = blindspotRssItem(
+      BASE,
+      bundle("c10", {
+        dominantZone: "muhalefet",
+        dominantPct: 4 / 5,
+        votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 4 },
+      }),
+    );
+    expect(muhalefet.description).toContain("Kör nokta: ağırlıkla Muhalefet kaynakları (%80). ");
+  });
+
   it("marks the voting count when 2 of 10 members are aggregators, so the zones add up", () => {
     const item = blindspotRssItem(
       BASE,

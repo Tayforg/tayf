@@ -10,7 +10,9 @@ import type { BiasDistribution, MediaDnaZone, Source } from "@/types";
 import type { ParsedSide } from "./compare-params";
 import {
   formatIstanbulDateTime,
+  kunyeSources,
   rosterByZone,
+  rosterLinkTarget,
   toSideState,
 } from "./compare-view";
 
@@ -119,6 +121,9 @@ function makeDetail(
 
 const ID_SIDE: ParsedSide = { kind: "id", id: ID };
 
+/** The display names of a roster list, for the cases that only care about names. */
+const names = (list: readonly { name: string }[]) => list.map((s) => s.name);
+
 describe("toSideState", () => {
   it.each<ParsedSide>([
     { kind: "missing" },
@@ -194,9 +199,11 @@ describe("toSideState", () => {
     expect(state.view.sourceCount).toBe(7);
     expect(state.view.firstPublished).toBe("2026-10-22T11:05:00.000Z");
     expect(state.view.distribution.pro_government).toBe(2);
-    expect(state.view.roster.iktidar).toEqual(["Alfa"]);
+    expect(state.view.roster.iktidar).toEqual([{ slug: "a", name: "Alfa" }]);
     expect(state.view.nonVoting).toEqual([]);
     expect(state.view.nonVotingZones).toEqual([]);
+    // No rated outlet in the cluster: the künye strip has nothing to print.
+    expect(state.view.kunyeSources).toEqual([]);
     expect(state.view.wire).toEqual({ isWire: false, memberCount: 1, uniqueTexts: 7 });
     // h110-karsilastir-1: the three fields of a plain Turkish cluster that was
     // never looked up by Jev recall are the neutral ones.
@@ -218,8 +225,48 @@ describe("toSideState", () => {
     expect(state.kind).toBe("ok");
     if (state.kind !== "ok") return;
     expect(state.view.roster.bagimsiz).toEqual([]);
-    expect(state.view.nonVoting).toEqual(["Niş Merkez"]);
+    expect(state.view.nonVoting).toEqual([{ slug: "nic", name: "Niş Merkez" }]);
     expect(state.view.nonVotingZones).toEqual(["bagimsiz"]);
+  });
+
+  describe("h138-roadmap2-4: the source roster and the künye come from the data the page already fetched", () => {
+    it("carries the slug of every roster and non-voting entry through to the view", () => {
+      const state = toSideState(ID_SIDE, {
+        status: "fulfilled",
+        value: makeDetail({
+          members: [
+            makeMember(makeSource("hurriyet", "Hürriyet", "center")),
+            makeMember(makeSource("sozcu", "Sözcü", "opposition")),
+            makeMember(makeSource("agg-x", "Toplayıcı X", "center", "aggregator")),
+          ],
+        }),
+      });
+      expect(state.kind).toBe("ok");
+      if (state.kind !== "ok") return;
+      expect(state.view.roster.bagimsiz).toEqual([{ slug: "hurriyet", name: "Hürriyet" }]);
+      expect(state.view.roster.muhalefet).toEqual([{ slug: "sozcu", name: "Sözcü" }]);
+      expect(state.view.nonVoting).toEqual([{ slug: "agg-x", name: "Toplayıcı X" }]);
+    });
+
+    it("hands the page the same künye subset the cluster page builds: rated outlets, one per slug, voting or not", () => {
+      const rated = makeSource("haberturk", "Habertürk", "center");
+      const ratedAggregator = makeSource("trt-haber", "TRT Haber", "state_media", "aggregator");
+      const unrated = makeSource("kimse-bilmez", "Kimse Bilmez", "opposition");
+      const state = toSideState(ID_SIDE, {
+        status: "fulfilled",
+        value: makeDetail({
+          members: [
+            makeMember(unrated),
+            makeMember(rated, 1),
+            makeMember(rated, 2),
+            makeMember(ratedAggregator),
+          ],
+        }),
+      });
+      expect(state.kind).toBe("ok");
+      if (state.kind !== "ok") return;
+      expect(state.view.kunyeSources.map((s) => s.slug)).toEqual(["haberturk", "trt-haber"]);
+    });
   });
 
   it("exposes the wire signal without changing the source count", () => {
@@ -378,9 +425,9 @@ describe("rosterByZone", () => {
       makeMember(makeSource("opp", "Muhalif Gazete", "opposition")),
     ]);
     expect(roster).toEqual({
-      iktidar: ["Hükümet Gazetesi"],
-      bagimsiz: ["Merkez Haber"],
-      muhalefet: ["Muhalif Gazete"],
+      iktidar: [{ slug: "gov", name: "Hükümet Gazetesi" }],
+      bagimsiz: [{ slug: "ctr", name: "Merkez Haber" }],
+      muhalefet: [{ slug: "opp", name: "Muhalif Gazete" }],
     });
   });
 
@@ -398,14 +445,14 @@ describe("rosterByZone", () => {
       makeMember(makeSource("s2", "Milliyetçi", "nationalist")),
       makeMember(makeSource("s3", "Dış", "international")),
     ]);
-    expect(roster.iktidar).toEqual(["Devlet", "Milliyetçi"]);
-    expect(roster.bagimsiz).toEqual(["Dış"]);
+    expect(names(roster.iktidar)).toEqual(["Devlet", "Milliyetçi"]);
+    expect(names(roster.bagimsiz)).toEqual(["Dış"]);
   });
 
   it("dedupes by source slug (several articles from one outlet)", () => {
     const s = makeSource("dup", "Tekrar Gazete", "center");
     const { roster } = rosterByZone([makeMember(s, 1), makeMember(s, 2), makeMember(s, 3)]);
-    expect(roster.bagimsiz).toEqual(["Tekrar Gazete"]);
+    expect(roster.bagimsiz).toEqual([{ slug: "dup", name: "Tekrar Gazete" }]);
   });
 
   it("keeps non-voting members out of the zones and separate", () => {
@@ -414,15 +461,15 @@ describe("rosterByZone", () => {
       makeMember(makeSource("agg", "Toplayıcı", "center", "aggregator")),
       makeMember(makeSource("nic", "Niş", "opposition", "niche")),
     ]);
-    expect(roster.bagimsiz).toEqual(["Gazete"]);
+    expect(names(roster.bagimsiz)).toEqual(["Gazete"]);
     expect(roster.muhalefet).toEqual([]);
-    expect(nonVoting).toEqual(["Niş", "Toplayıcı"]);
+    expect(names(nonVoting)).toEqual(["Niş", "Toplayıcı"]);
   });
 
   it("dedupes non-voting members by slug too", () => {
     const agg = makeSource("agg", "Toplayıcı", "center", "aggregator");
     expect(rosterByZone([makeMember(agg, 1), makeMember(agg, 2)]).nonVoting).toEqual([
-      "Toplayıcı",
+      { slug: "agg", name: "Toplayıcı" },
     ]);
   });
 
@@ -432,7 +479,7 @@ describe("rosterByZone", () => {
       makeMember(makeSource("nic", "Niş Merkez", "center", "niche")),
     ]);
     expect(roster.bagimsiz).toEqual([]);
-    expect(nonVoting).toEqual(["Niş Merkez"]);
+    expect(names(nonVoting)).toEqual(["Niş Merkez"]);
     expect(nonVotingZones).toEqual(["bagimsiz"]);
   });
 
@@ -469,7 +516,7 @@ describe("rosterByZone", () => {
       makeMember(makeSource("ctr", "Merkez Haber", "center")),
       makeMember(makeSource("nic", "Niş Merkez", "center", "niche")),
     ]);
-    expect(roster.bagimsiz).toEqual(["Merkez Haber"]);
+    expect(names(roster.bagimsiz)).toEqual(["Merkez Haber"]);
     expect(nonVotingZones).toEqual(["bagimsiz"]);
   });
 
@@ -489,7 +536,63 @@ describe("rosterByZone", () => {
       makeMember(makeSource("h", "Habertürk", "center")),
     ]);
     // Turkish alphabet: C < Ç < H < I (dotless) < Z
-    expect(roster.bagimsiz).toEqual(["Cumhuriyet", "Çarşı", "Habertürk", "Işık", "Zaman"]);
+    expect(names(roster.bagimsiz)).toEqual(["Cumhuriyet", "Çarşı", "Habertürk", "Işık", "Zaman"]);
+  });
+
+  describe("h138-roadmap2-4: entries keep the slug so the page can link them", () => {
+    it("returns exactly {slug, name} per entry: nothing else of the source row leaks into the roster", () => {
+      const { roster, nonVoting } = rosterByZone([
+        makeMember(makeSource("gov", "Hükümet Gazetesi", "pro_government")),
+        makeMember(makeSource("agg", "Toplayıcı", "center", "aggregator")),
+      ]);
+      for (const entry of [...roster.iktidar, ...nonVoting]) {
+        expect(Object.keys(entry).sort()).toEqual(["name", "slug"]);
+      }
+    });
+
+    it("orders entries by name with Turkish collation, whatever their slugs sort like", () => {
+      const { roster, nonVoting } = rosterByZone([
+        makeMember(makeSource("a-last", "Zaman", "center")),
+        makeMember(makeSource("z-first", "Çarşı", "center")),
+        makeMember(makeSource("m-mid", "Işık", "center")),
+        makeMember(makeSource("n-2", "Niş Zeta", "center", "niche")),
+        makeMember(makeSource("n-1", "Niş Alfa", "center", "niche")),
+      ]);
+      expect(roster.bagimsiz).toEqual([
+        { slug: "z-first", name: "Çarşı" },
+        { slug: "m-mid", name: "Işık" },
+        { slug: "a-last", name: "Zaman" },
+      ]);
+      expect(nonVoting).toEqual([
+        { slug: "n-1", name: "Niş Alfa" },
+        { slug: "n-2", name: "Niş Zeta" },
+      ]);
+    });
+
+    it("keeps the first name seen for a slug that appears under two names", () => {
+      const { roster } = rosterByZone([
+        makeMember(makeSource("dup", "İlk Ad", "center"), 1),
+        makeMember(makeSource("dup", "İkinci Ad", "center"), 2),
+      ]);
+      expect(roster.bagimsiz).toEqual([{ slug: "dup", name: "İlk Ad" }]);
+    });
+
+    it("dedupes by slug, not by name: two outlets with the same display name are both listed", () => {
+      const { roster } = rosterByZone([
+        makeMember(makeSource("haber-1", "Haber", "center")),
+        makeMember(makeSource("haber-2", "Haber", "center")),
+      ]);
+      expect(roster.bagimsiz.map((s) => s.slug)).toEqual(["haber-1", "haber-2"]);
+    });
+
+    it("leaves nonVotingZones as before when the entries become objects", () => {
+      const { nonVoting, nonVotingZones } = rosterByZone([
+        makeMember(makeSource("n1", "Niş Bir", "center", "niche")),
+        makeMember(makeSource("agg", "Toplayıcı", "gov_leaning", "aggregator")),
+      ]);
+      expect(nonVoting).toHaveLength(2);
+      expect(nonVotingZones).toEqual(["iktidar", "bagimsiz"]);
+    });
   });
 
   it("does not mutate its input", () => {
@@ -499,6 +602,91 @@ describe("rosterByZone", () => {
     ]);
     expect(() => rosterByZone(members)).not.toThrow();
     expect(members.map((m) => m.source.slug)).toEqual(["b", "a"]);
+  });
+});
+
+describe("kunyeSources (the member subset the page hands <SourceKunye>)", () => {
+  // `haberturk`, `trt-haber` and `daily-sabah` are hand-tagged in SOURCE_METADATA.
+  it("keeps only the outlets that carry factuality / ownership metadata", () => {
+    const members = [
+      makeMember(makeSource("kimse-bilmez", "Kimse Bilmez", "center")),
+      makeMember(makeSource("haberturk", "Habertürk", "center")),
+      makeMember(makeSource("baska-bilinmeyen", "Başka Bilinmeyen", "opposition")),
+    ];
+    expect(kunyeSources(members).map((s) => s.slug)).toEqual(["haberturk"]);
+  });
+
+  it("returns one entry per slug, in member order (the cluster page's order, not name order)", () => {
+    const tr = makeSource("trt-haber", "TRT Haber", "state_media");
+    const ht = makeSource("haberturk", "Habertürk", "center");
+    expect(
+      kunyeSources([makeMember(tr, 1), makeMember(ht, 1), makeMember(tr, 2), makeMember(ht, 2)]).map(
+        (s) => s.slug,
+      ),
+    ).toEqual(["trt-haber", "haberturk"]);
+  });
+
+  it("counts non-voting members: factuality and ownership belong to the outlet, not to its vote", () => {
+    const agg = makeSource("haberturk", "Habertürk", "center", "aggregator");
+    expect(kunyeSources([makeMember(agg)]).map((s) => s.slug)).toEqual(["haberturk"]);
+  });
+
+  it("returns the member's own source object (the props the künye reads are untouched)", () => {
+    const ht = makeSource("haberturk", "Habertürk", "center");
+    const [only] = kunyeSources([makeMember(ht)]);
+    expect(only).toBe(ht);
+    expect(only).toMatchObject({ id: "id-haberturk", slug: "haberturk", name: "Habertürk", trustee_since: null });
+  });
+
+  it("returns [] for no members and for members with no metadata", () => {
+    expect(kunyeSources([])).toEqual([]);
+    expect(kunyeSources([makeMember(makeSource("x", "X", "center"))])).toEqual([]);
+  });
+
+  it("does not mutate its input", () => {
+    const members = Object.freeze([makeMember(makeSource("haberturk", "Habertürk", "center"))]);
+    expect(() => kunyeSources(members)).not.toThrow();
+    expect(members).toHaveLength(1);
+  });
+});
+
+describe("rosterLinkTarget (href and lang for one roster entry)", () => {
+  it("links a valid slug to its profile, built the way the künye rows and other pages do (no encoding needed)", () => {
+    expect(rosterLinkTarget({ slug: "sozcu", name: "Sözcü" })).toEqual({
+      href: "/source/sozcu",
+      lang: undefined,
+    });
+    expect(rosterLinkTarget({ slug: "trt-haber-2", name: "TRT Haber" }).href).toBe(
+      "/source/trt-haber-2",
+    );
+  });
+
+  it("marks an English outlet lang=en by its slug, as the cluster page does", () => {
+    expect(rosterLinkTarget({ slug: "daily-sabah", name: "Daily Sabah" })).toEqual({
+      href: "/source/daily-sabah",
+      lang: "en",
+    });
+    expect(rosterLinkTarget({ slug: "hurriyet-daily-news", name: "Hürriyet Daily News" }).lang).toBe(
+      "en",
+    );
+  });
+
+  it("lets a non-empty slug decide: a Turkish slug under an English-looking name is not English", () => {
+    expect(rosterLinkTarget({ slug: "sozcu", name: "Daily Sabah" }).lang).toBeUndefined();
+  });
+
+  it.each(["", " ", "Sözcü", "A-Haber", "a/b", "../admin", "x?y=1", "x#z", "-bas", "a".repeat(65)])(
+    "gives a slug the profile route would reject (%j) no href",
+    (slug) => {
+      expect(rosterLinkTarget({ slug, name: "Ad" }).href).toBeNull();
+    },
+  );
+
+  it("still resolves the language of an un-linkable entry by name, so its text keeps lang=en", () => {
+    expect(rosterLinkTarget({ slug: "", name: "Daily Sabah" })).toEqual({
+      href: null,
+      lang: "en",
+    });
   });
 });
 

@@ -73,6 +73,80 @@ describe("footer.tsx Gündem link", () => {
   });
 });
 
+// h138-roadmap2-2: /takip (the follow feature's "yeni since last visit" return
+// loop) and /diyetim had no inbound link from the header, the footer or the
+// home; /takip was reachable only through small print on /saved. The header
+// gets no fifth item (h73-breakpoints-2 fixed its 640-767 px wrapping), so the
+// footer, the only site-wide nav with room, lists both right after /gundem.
+describe("footer.tsx Takip ettiklerim and Haber diyetim links (h138-roadmap2-2)", () => {
+  const src = readFileSync(join(__dirname, "footer.tsx"), "utf8");
+  const nav = src.slice(src.indexOf("const NAV_LINKS"), src.indexOf("] as const"));
+  const entries = [...nav.matchAll(/\{ href: "([^"]+)", label: "([^"]+)" \}/g)].map((m) => ({
+    href: m[1],
+    label: m[2],
+  }));
+  const GUNDEM = '{ href: "/gundem", label: "Gündem" },';
+  const TAKIP = '{ href: "/takip", label: "Takip ettiklerim" },';
+  const DIYETIM = '{ href: "/diyetim", label: "Haber diyetim" },';
+
+  it("lists /takip as Takip ettiklerim and /diyetim as Haber diyetim, once each", () => {
+    expect(entries).toContainEqual({ href: "/takip", label: "Takip ettiklerim" });
+    expect(entries).toContainEqual({ href: "/diyetim", label: "Haber diyetim" });
+    expect(entries.filter((e) => e.href === "/takip")).toHaveLength(1);
+    expect(entries.filter((e) => e.href === "/diyetim")).toHaveLength(1);
+  });
+
+  it("keeps every footer href unique", () => {
+    expect(entries.length).toBeGreaterThan(0);
+    const hrefs = entries.map((e) => e.href);
+    expect(new Set(hrefs).size).toBe(hrefs.length);
+  });
+
+  it("places the two entries directly after Gündem, Takip ettiklerim first", () => {
+    expect(nav).toContain(`${GUNDEM}\n  ${TAKIP}\n  ${DIYETIM}`);
+    const i = entries.findIndex((e) => e.href === "/gundem");
+    expect(entries[i + 1]).toEqual({ href: "/takip", label: "Takip ettiklerim" });
+    expect(entries[i + 2]).toEqual({ href: "/diyetim", label: "Haber diyetim" });
+  });
+});
+
+// h138-roadmap2-2: /saved used to fold both links into one sentence, "Hangi
+// taraftan ne kadar okuduğunuzu görmek için: Haber diyetim · Takip ettiklerim",
+// which framed following as a reading diet. Source guard, not a render test
+// (CLAUDE.md: no render tests of server components): one <p> per link.
+describe("saved/page.tsx link lines (h138-roadmap2-2)", () => {
+  const src = readFileSync(join(__dirname, "../../app/saved/page.tsx"), "utf8");
+  const paragraphs = [...src.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/g)].map((m) => m[1]);
+  const linkOf = (p: string) => /<Link\b[^>]*href="([^"]+)"/.exec(p)?.[1];
+
+  it("no longer joins the two links with a middle dot in one sentence", () => {
+    expect(src).not.toContain('{" · "}');
+  });
+
+  it("gives /diyetim its own <p> with the reading-diet sentence", () => {
+    const p = paragraphs.filter((x) => linkOf(x) === "/diyetim");
+    expect(p).toHaveLength(1);
+    expect(p[0]).toContain("Hangi taraftan ne kadar okuduğunuzu görmek için:");
+    expect(p[0]).not.toContain("/takip");
+  });
+
+  it("gives /takip its own <p> with the follow sentence", () => {
+    const p = paragraphs.filter((x) => linkOf(x) === "/takip");
+    expect(p).toHaveLength(1);
+    expect(p[0]).toContain("Takip ettiğiniz konu, kişi ve kelimelerdeki yeni haberler:");
+    expect(p[0]).not.toContain("/diyetim");
+    expect(p[0]).not.toContain("okuduğunuz");
+  });
+
+  it("keeps the link classes on both links", () => {
+    const classes = [...src.matchAll(/<Link\b[^>]*className="([^"]*)"/g)].map((m) => m[1]);
+    expect(classes).toHaveLength(2);
+    for (const c of classes) {
+      expect(c).toBe("underline decoration-dotted underline-offset-2 hover:text-foreground");
+    }
+  });
+});
+
 // h16-mobile-2: every footer link was ~13 px tall on a phone (text-[11px] with
 // no padding). Below sm each link is lifted to a 44 px row; sm and up keeps the
 // exact current classes, so the desktop footer does not move.

@@ -131,6 +131,8 @@ import {
 import { OyunModes } from "./oyun-modes";
 import { ManualCopyBox } from "@/components/story/share-button";
 import type { DailyHeadline, DailyPuzzle } from "@/lib/game/daily-set";
+import { ZONE_META } from "@/lib/bias/config";
+import type { MediaDnaZone } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Same two-pronged convention zone-guess-game.test.tsx uses: (A) static
@@ -989,5 +991,126 @@ describe("DailyGame — copy flow (behaviour)", () => {
     expect(vi.getTimerCount()).toBe(1);
     view.app.unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+// h138-suffix-1: "Bağımsız" is an adjective, so the reveal after a wrong guess
+// must not glue "bölgesine" to it. Played through the real component: Başla,
+// then one wrong zone button, then read the visible paragraph and the live region.
+describe("DailyGame — reveal copy after a wrong guess (behaviour)", () => {
+  type El = { type?: unknown; props?: Record<string, unknown> };
+
+  function walk(node: unknown, visit: (el: El) => void): void {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child, visit);
+    } else if (node && typeof node === "object") {
+      const el = node as El;
+      if (el.type !== undefined) visit(el);
+      walk(el.props?.children, visit);
+    }
+  }
+
+  function find(node: unknown, pred: (el: El) => boolean): El | undefined {
+    let hit: El | undefined;
+    walk(node, (el) => {
+      if (hit === undefined && pred(el)) hit = el;
+    });
+    return hit;
+  }
+
+  const text = (node: unknown): string =>
+    Array.isArray(node)
+      ? node.map(text).join("")
+      : typeof node === "string" || typeof node === "number"
+        ? String(node)
+        : node && typeof node === "object"
+          ? text((node as El).props?.children)
+          : "";
+
+  // Five headlines of one zone; the first one is the outlet the test reads.
+  // Article ids are unique per zone so the module-level answered set never
+  // makes one test's guess look like a replay in another.
+  function puzzleOf(zone: MediaDnaZone, sourceName: string): DailyPuzzle {
+    return {
+      dateKey: "2026-09-28",
+      number: 1,
+      windowLabel: "27 Eylül 2026",
+      headlines: Array.from({ length: 5 }, (_, i) => ({
+        articleId: `reveal-${zone}-${i}`,
+        sourceId: `reveal-source-${zone}-${i}`,
+        title: `Başlık ${i} — siyasi bir gelişme yaşandı bugün`,
+        url: `https://ornek.com/reveal-${zone}-${i}`,
+        sourceName: i === 0 ? sourceName : `Kaynak ${i}`,
+        sourceSlug: `kaynak-${zone}-${i}`,
+        zone,
+        clusterId: null,
+      })),
+    };
+  }
+
+  function stubBrowser() {
+    vi.stubGlobal("window", {
+      localStorage: { getItem: () => null, setItem: () => {} },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => true,
+      setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
+      clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
+    });
+    // The guess POST is fire-and-forget; the stub keeps it off the network.
+    vi.stubGlobal("fetch", vi.fn(async () => ({})));
+  }
+
+  /** Starts the round and answers its first headline with `guess`. */
+  function guessFirst(puzzle: DailyPuzzle, guess: MediaDnaZone) {
+    const app = new rt.Runtime(() => DailyGame({ puzzle, todayKey: "2026-09-28" }));
+    app.render();
+    const tree = () => app.outputs[app.outputs.length - 1];
+    const press = (label: string) => {
+      const button = find(tree(), (el) => el.type === "button" && text(el) === label);
+      expect(button, `a "${label}" button`).toBeDefined();
+      (button!.props!.onClick as () => void)();
+    };
+    press("Başla");
+    press(ZONE_META[guess].label);
+    return {
+      /** The reveal sentence in the card. */
+      visible: () => text(find(tree(), (el) => el.type === "p" && el.props?.className === "text-sm")),
+      /** What the aria-live region holds. */
+      announcement: () => text(find(tree(), (el) => el.props?.role === "status")?.props?.children),
+    };
+  }
+
+  beforeEach(() => stubBrowser());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("a wrong guess on a Bağımsız puzzle says 'Bağımsız bölgeye', never 'bölgesine', in the card and the live region", () => {
+    const view = guessFirst(puzzleOf("bagimsiz", "Haberet"), "iktidar");
+    const sentence = "Haberet — Tayf bu kaynağı Bağımsız bölgeye koyuyor";
+    expect(view.visible()).toBe(sentence);
+    expect(view.announcement()).toBe(sentence);
+    expect(view.visible()).not.toContain("Bağımsız bölgesine");
+    expect(view.announcement()).not.toContain("Bağımsız bölgesine");
+  });
+
+  it("a wrong guess on an İktidar puzzle still says 'İktidar bölgesine'", () => {
+    const view = guessFirst(puzzleOf("iktidar", "Haberet"), "muhalefet");
+    const sentence = "Haberet — Tayf bu kaynağı İktidar bölgesine koyuyor";
+    expect(view.visible()).toBe(sentence);
+    expect(view.announcement()).toBe(sentence);
+  });
+
+  it("a wrong guess on a Muhalefet puzzle still says 'Muhalefet bölgesine'", () => {
+    const view = guessFirst(puzzleOf("muhalefet", "Haberet"), "bagimsiz");
+    const sentence = "Haberet — Tayf bu kaynağı Muhalefet bölgesine koyuyor";
+    expect(view.visible()).toBe(sentence);
+    expect(view.announcement()).toBe(sentence);
+  });
+
+  it("a matching guess keeps its own sentence, whatever the zone", () => {
+    const view = guessFirst(puzzleOf("bagimsiz", "Haberet"), "bagimsiz");
+    const sentence = "Haberet · Bağımsız — Tayf'ın etiketiyle aynı";
+    expect(view.visible()).toBe(sentence);
+    expect(view.announcement()).toBe(sentence);
   });
 });

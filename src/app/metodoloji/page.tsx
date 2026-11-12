@@ -42,7 +42,7 @@ import {
 } from "@/lib/clusters/recall-matched-zones";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
 import { SIBLING_VETO } from "@/lib/clusters/sibling-veto";
-import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
+import { SAME_DESCRIPTION_MIN_CHARS, WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import {
   KARNE_MIN_CLUSTERS,
   KARNE_MIN_MULTI_FOR_ZONES,
@@ -86,6 +86,10 @@ export const metadata: Metadata = staticPageMetadata({
 // Module scope: the CHANGELOG below quotes it as well as the Denge puanı card.
 const balancedMaxSharePct = Math.round(BALANCE_BALANCED_MAX_SHARE * 100);
 
+// h138-roadmap2-1: the wire ratio, at module scope because the CHANGELOG below
+// quotes it as well as the "Tek kaynaktan dağıtım" card.
+const wireRatioPct = Math.round(WIRE_UNIQUE_HASH_RATIO * 100);
+
 // h85-blindspotprecision-1 (migration 180): the sibling veto's rare-stem tier, quoted from SIBLING_VETO.
 // The Jaccard floor is a whole percent; the rare share (0.25 percent) is formatted for tr-TR ("0,25").
 const looseJaccardPct = Math.round(SIBLING_VETO.looseMinJaccard * 100);
@@ -105,8 +109,14 @@ const englishOnlyEmptyColumn = ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—
 // is hunt-85 (#244, rare-stem tier) and hunt-105 (#254, wire-copy share over every
 // cluster), 2026-11-10 is hunt-107 (#255) and hunt-109 (#256, the same wording on
 // the share surfaces), 2026-11-11 is h130-blindspots-2 (copy only: the label can be
-// withdrawn after it shows). Every number is read from the constant the code runs on.
+// withdrawn after it shows) and h138-roadmap2-1 (the same agency lead under a
+// reworded headline is one text; listed above h130's entry, same date). Every
+// number is read from the constant the code runs on.
 const CHANGELOG = [
+  {
+    date: "2026-11-11",
+    text: `Ajans ağırlıklı rozeti artık aynı ajans özetini paylaşan ama başlığı değiştirilmiş haberleri de tek metin sayıyor (özet en az ${SAME_DESCRIPTION_MIN_CHARS} karakter olmalı); bu kümelerde gösterilen kaynak sayısı da buna göre düşüyor. Oran eşiği (%${wireRatioPct}) değişmedi.`,
+  },
   {
     date: "2026-11-11",
     text: `Kör nokta etiketinin, göründükten sonra da ilk ${SIBLING_VETO.scopeHours} saat içinde kaldırılabileceği açıkça yazıldı; kural değişmedi.`,
@@ -287,7 +297,6 @@ export default async function MethodologyPage() {
   const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
   const surpriseSharePct = Math.round(SURPRISE.dominantShare * 100);
   const nearBlindspotPct = Math.round(NEAR_BLINDSPOT_MIN_SHARE * 100);
-  const wireRatioPct = Math.round(WIRE_UNIQUE_HASH_RATIO * 100);
   // h62-methodology-1: the feed-health gate (feed-health.ts) and the /blindspots
   // list filters (blindspot-feed.ts), printed from the constants they run on.
   const feedHealthSharePct = Math.round(FEED_HEALTH_MIN_SHARE * 100);
@@ -626,14 +635,15 @@ export default async function MethodologyPage() {
           <p className={proseClass}>
             Bazı &quot;kümeler&quot; aslında birden fazla gazetecilik çabası
             değil, tek bir ajans (AA, DHA, İHA gibi) dispeçinin farklı
-            kaynaklarca birebir yeniden yayınlanmasıdır. Tayf, bir kümedeki
-            makalelerin içerik özetlerinin (content hash) kaçının birbirinden
-            farklı olduğuna bakar: benzersiz içerik oranı ≤ %{wireRatioPct}
+            kaynaklarca birebir yeniden yayınlanmasıdır.{" "}
+            {`Tayf, bir kümedeki haberlerin kaçının birbirinden farklı bir metin taşıdığına bakar: aynı içerik parmak izine (content hash) ya da aynı haber özetine (RSS özeti; büyük/küçük harf, noktalama ve boşluk farkları yok sayılır, en az ${SAME_DESCRIPTION_MIN_CHARS} karakter) sahip haberler tek metin sayılır; bu yüzden başlığını değiştirip ajansın özetini aynen basan haber de kopya sayılır.`}{" "}
+            Benzersiz metin oranı ≤ %{wireRatioPct}
             {" "}
-            ise küme &quot;tek kaynaktan dağıtım&quot; olarak işaretlenir ve
-            gösterilen kaynak sayısı, kopya sayısı yerine benzersiz dispeç
-            sayısına indirilir — böylece &quot;7 kaynak&quot; aslında tek bir
-            ajans haberinin 7 kopyası olduğunda bu dürüstçe belirtilir.
+            ise küme &quot;tek kaynaktan dağıtım&quot; olarak işaretlenir
+            (birden fazla farklı metin varsa rozet &quot;Ajans ağırlıklı&quot;
+            der) ve gösterilen kaynak sayısı, kopya sayısı yerine benzersiz
+            metin sayısına indirilir — böylece &quot;7 kaynak&quot; aslında tek
+            bir ajans haberinin 7 kopyası olduğunda bu dürüstçe belirtilir.
           </p>
           <p className={proseClass}>
             Tayf ayrıca aynı başlığı kullanan kaynakları sayar: büyük/küçük

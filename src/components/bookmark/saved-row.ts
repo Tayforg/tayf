@@ -81,7 +81,12 @@ export function toPublicSavedRow<R extends { is_blindspot?: unknown; first_publi
 /**
  * "N kaynak" for a /saved row: the effective (wire-collapsed) count when the row has one, else `article_count`.
  * The same number the "+N yeni kaynak" badge compares (`sourceCountOf`), so a story of 6 outlets that reprint
- * 3 distinct texts reads "3 kaynak" here, as on its card and its own page.
+ * 3 distinct texts reads "3 kaynak" here.
+ *
+ * Known gap (h138-roadmap2-1): the card and the cluster page count a text as one when two outlets share a
+ * content_hash OR the same agency lead, but `saved_clusters_v4` (migration 192) counts distinct content_hash
+ * only. A cluster linked only by a shared agency lead can therefore read higher on /saved until a follow-up
+ * migration mirrors `descriptionKey` (wire.ts). Example: 532ee77c reads 8 here and 3 on its card and page.
  */
 export function savedSourceLabel(row: Pick<SnapshotRow, "article_count" | "effective_article_count">): string {
   return `${sourceCountOf({ bias_distribution: null, ...row })} kaynak`;

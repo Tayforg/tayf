@@ -15,6 +15,8 @@ const NAV_LINKS = [
   { href: "/hafta", label: "Haftanın yelpazesi" },
   { href: "/konu", label: "Konular" },
   { href: "/gundem", label: "Gündem" },
+  { href: "/takip", label: "Takip ettiklerim" },
+  { href: "/diyetim", label: "Haber diyetim" },
   { href: "/oyun", label: "Tarafı tahmin et" },
   { href: "/metodoloji", label: "Metodoloji" },
   { href: "/durum", label: "Sistem durumu" },
