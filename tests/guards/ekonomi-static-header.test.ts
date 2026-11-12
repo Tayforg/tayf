@@ -11,14 +11,21 @@ import { describe, expect, it } from "vitest";
 // statement, so the whole page, subtitle included, streamed as a hidden
 // segment: React 19.3's $RC reveals it no earlier than $RT + 300 ms after the
 // shell's first paint (measured: first paint 2260 ms, LCP 2660 ms). The
-// subtitle is static copy; only the market cue below it and the body depend on
-// data. So:
+// subtitle is static copy; only the body depends on data. So:
 //   - EkonomiPage is a plain (sync) function: no await, no connection(), no
 //     clock read in the shell;
 //   - connection() lives in loadEkonomiView (React cache(): one read per
-//     request for the cue and the body), which only the Suspense-wrapped
-//     EkonomiMarketCue and EkonomiBody await;
+//     request), which only the Suspense-wrapped EkonomiBody awaits;
 //   - the subtitle text comes before the first <Suspense in the file.
+//
+// h161-cls-1: the market cue ("Piyasa kapali ...", rendered only when the freshest
+// quote is not live) used to be a second Suspense island inside the header's
+// div.space-y-0.5. It streamed in after the header's first paint, grew the header by
+// one line and pushed the still-visible body skeleton down 18 px (CLS 0.015). So the
+// header is now fully static (h1 + subtitle, no Suspense, nothing dynamic) and the
+// cue is the FIRST element EkonomiBody renders: it arrives in the same swap that
+// replaces the skeleton, and while the market is live it renders nothing, so no blank
+// line is reserved.
 //
 // The page is a server component, so this reads the source as text and uses
 // indexOf / slice / includes only (no regex over JSX).
@@ -119,20 +126,67 @@ describe("/ekonomi static header (h159-perf-2)", () => {
     }
   });
 
-  it("the only dynamic children of the shell are the Suspense-wrapped cue and body", () => {
+  it("the only dynamic child of the shell is the one Suspense-wrapped body, behind the skeleton", () => {
     const shell = declarationBody(page, DEFAULT_DECL);
-    expect(shell).toContain("<Suspense fallback={null}>");
-    expect(shell).toContain("<EkonomiMarketCue />");
+    expect(indexesOf(shell, "<Suspense")).toHaveLength(1);
+    expect(indexesOf(shell, "</Suspense>")).toHaveLength(1);
     expect(shell).toContain("<Suspense fallback={<EkonomiBodySkeleton />}>");
     expect(shell).toContain("<EkonomiBody />");
-    expect(shell.indexOf("<Suspense fallback={null}>")).toBeLessThan(shell.indexOf("<EkonomiMarketCue />"));
-    expect(shell.indexOf("<EkonomiMarketCue />")).toBeLessThan(shell.indexOf("</Suspense>"));
+    expect(shell.includes("fallback={null}")).toBe(false);
+    expect(shell.indexOf("<Suspense fallback={<EkonomiBodySkeleton />}>")).toBeLessThan(shell.indexOf("<EkonomiBody />"));
+    expect(shell.indexOf("<EkonomiBody />")).toBeLessThan(shell.indexOf("</Suspense>"));
   });
 
-  it("the cue and the body, not the shell, await the cached view", () => {
-    for (const decl of ["export async function EkonomiMarketCue(", "export async function EkonomiBody("]) {
-      expect(declarationBody(page, decl), decl).toContain("await loadEkonomiView()");
+  it("the header block (h1 to the end of div.space-y-0.5) is fully static: no Suspense, no cue", () => {
+    const shell = declarationBody(page, DEFAULT_DECL);
+    const h1At = shell.indexOf("<h1");
+    expect(h1At).toBeGreaterThan(-1);
+    const rightOpen = shell.indexOf('<div className="space-y-0.5">', h1At);
+    expect(rightOpen).toBeGreaterThan(h1At);
+    // The right column holds only <p> lines, so its first closing tag ends it.
+    const rightEnd = shell.indexOf("</div>", rightOpen);
+    expect(rightEnd).toBeGreaterThan(rightOpen);
+    const header = shell.slice(h1At, rightEnd + "</div>".length);
+    expect(header).toContain(SUBTITLE);
+    for (const banned of ["Suspense", "EkonomiMarketCue", "marketCue", "EkonomiBody", "await ", "loadEkonomiView"]) {
+      expect(header.includes(banned), banned).toBe(false);
     }
+    // Only the subtitle paragraph sits in the right column.
+    expect(indexesOf(shell.slice(rightOpen, rightEnd), "<p ")).toHaveLength(1);
+  });
+
+  it("the body, not the shell, awaits the cached view, and it is the only awaiter", () => {
+    expect(declarationBody(page, "export async function EkonomiBody(")).toContain("await loadEkonomiView()");
+    expect(indexesOf(page, "await loadEkonomiView()")).toHaveLength(1);
+    expect(page.includes("export async function EkonomiMarketCue(")).toBe(false);
+    expect(page.includes("EkonomiMarketCue")).toBe(false);
+  });
+
+  it("the market cue is the FIRST thing EkonomiBody renders: conditional, before the tape, mono 12 px, text printed once", () => {
+    const body = declarationBody(page, "export async function EkonomiBody(");
+    // The cue comes from the one cached view the body already awaits.
+    const awaitAt = body.indexOf("await loadEkonomiView()");
+    expect(awaitAt).toBeGreaterThan(-1);
+    expect(body.slice(0, awaitAt)).toContain("marketCue");
+    const returnAt = body.indexOf("return (");
+    expect(returnAt).toBeGreaterThan(awaitAt);
+    const jsx = body.slice(returnAt);
+    // The cue is conditional (nothing, not a blank reserved line, when the market is live) ...
+    const cueAt = jsx.indexOf("{marketCue ? (");
+    expect(cueAt).toBeGreaterThan(-1);
+    expect(indexesOf(jsx, "{marketCue}")).toHaveLength(1);
+    expect(indexesOf(page, "{marketCue}")).toHaveLength(1);
+    const cueEnd = jsx.indexOf(") : null}", cueAt);
+    expect(cueEnd).toBeGreaterThan(cueAt);
+    const cue = jsx.slice(cueAt, cueEnd);
+    // ... keeps the look it had in the header row ...
+    expect(cue).toContain('className="font-mono text-[12px]"');
+    expect(cue).toContain('<p className="text-muted-foreground">{marketCue}</p>');
+    // ... and nothing but the fragment opener precedes it, so it is the first child.
+    expect(jsx.slice(0, cueAt).split("\n").map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("//"))).toEqual(["return (", "<>"]);
+    expect(cueAt).toBeLessThan(jsx.indexOf("<TickerTape"));
+    expect(cueAt).toBeLessThan(jsx.indexOf("<BreakerStrip"));
+    expect(cueAt).toBeLessThan(jsx.indexOf("<Panel "));
   });
 
   it("does not swallow an essential-read failure: no .catch in the page, so error.tsx still renders", () => {

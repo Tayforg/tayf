@@ -20,11 +20,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 //
 // h159-perf-2: the header renders in the static PPR shell. EkonomiPage is a plain
 // function; the data (connection(), every read, the quotes re-basing, the market
-// cue) lives in loadEkonomiView, which the Suspense-wrapped EkonomiMarketCue and
-// EkonomiBody await. The resilience cases below therefore drive loadEkonomiView()
-// and the element tree of EkonomiBody, with the same assertions as before. Outside
-// the server renderer React's cache() is a pass-through, so every call here runs the
-// view once, as one request would.
+// cue text) lives in loadEkonomiView, which the Suspense-wrapped EkonomiBody awaits.
+// The resilience cases below therefore drive loadEkonomiView() and the element tree
+// of EkonomiBody, with the same assertions as before. Outside the server renderer
+// React's cache() is a pass-through, so every call here runs the view once, as one
+// request would.
+//
+// h161-cls-1: the market cue is the first element of EkonomiBody, not a second
+// Suspense island in the header, so it lands in the same swap as the body and shifts
+// nothing (it used to push the visible skeleton down 18 px after first paint).
 // ---------------------------------------------------------------------------
 
 const {
@@ -71,9 +75,10 @@ vi.mock("@/lib/finance/quotes", () => ({
   getQuotes: (...args: unknown[]) => getQuotesMock(...args),
 }));
 
-import EkonomiPage, { EkonomiBody, EkonomiMarketCue, loadEkonomiView } from "@/app/ekonomi/page";
+import EkonomiPage, { EkonomiBody, loadEkonomiView } from "@/app/ekonomi/page";
 import { EkonomiBodySkeleton } from "@/app/ekonomi/loading";
 import { BreakerStrip } from "@/components/finance/breaker-strip";
+import { Panel } from "@/components/finance/panel";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
 import { refKey } from "@/lib/finance/queries";
@@ -366,12 +371,11 @@ describe("/ekonomi -- an essential read still throws to the error boundary", () 
     await expect(loadEkonomiView()).rejects.toBe(boom);
   });
 
-  it("both Suspense children reject with the same error, so the error boundary (error.tsx) renders; nothing is caught", async () => {
+  it("the Suspense child (the body, cue included) rejects with that error, so the error boundary (error.tsx) renders; nothing is caught", async () => {
     const boom = new Error("[finance] fetchEconFeed: statement timeout");
     fetchEconFeedMock.mockRejectedValue(boom);
 
     await expect(EkonomiBody()).rejects.toBe(boom);
-    await expect(EkonomiMarketCue()).rejects.toBe(boom);
     expect(warn).not.toHaveBeenCalled();
   });
 });
@@ -413,27 +417,116 @@ describe("/ekonomi -- loadEkonomiView (h159-perf-2)", () => {
   });
 });
 
-describe("/ekonomi -- EkonomiMarketCue (h159-perf-2)", () => {
-  type CueEl = { type: unknown; props: { className?: string; children?: unknown } };
+// ---------------------------------------------------------------------------
+// h161-cls-1: the market cue is the FIRST element of EkonomiBody. It used to be a
+// second Suspense island inside the header; it streamed in after the header painted,
+// grew the header by one line and moved the visible body skeleton down 18 px. Inside
+// the body it lands in the same swap that replaces the skeleton. While the market is
+// live there is no cue and nothing is rendered in its place (no blank reserved line).
+// ---------------------------------------------------------------------------
+describe("/ekonomi -- the market cue is the first element of the body (h161-cls-1)", () => {
+  // 2026-11-05 is a Thursday; 16:00Z is 19:00 in Istanbul, after the 18:15 close.
+  const AFTER_CLOSE = new Date("2026-11-05T16:00:00Z");
+  const CLOSED_CUE = "Piyasa kapalı · son seans 05.11";
+  const DELAYED_CUE = "Veriler gecikmeli · son seans 04.11";
 
-  it("renders nothing while the freshest quote is live", async () => {
-    expect(await EkonomiMarketCue()).toBeNull();
+  function textOfNode(node: unknown): string {
+    if (node == null || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(textOfNode).join("");
+    return textOfNode((node as { props?: { children?: unknown } }).props?.children);
+  }
+  /** The body's rendered top-level children, in order (a conditional that is null/false renders nothing and is dropped). */
+  const topLevel = (tree: unknown): unknown[] =>
+    ([] as unknown[]).concat((tree as { props: { children: unknown } }).props.children).filter((c) => c != null && typeof c !== "boolean");
+  /** Every element whose whole text is exactly `text`, in document order. */
+  const printing = (els: El[], text: string) => els.filter((e) => e.type === "p" && textOfNode(e.props.children) === text);
+  const firstPanelAt = (els: El[]) => els.findIndex((e) => e.type === Panel);
+
+  it("after the close it renders the cue text exactly once, before the tape, the strip and the first panel, in font-mono text-[12px]", async () => {
+    vi.setSystemTime(AFTER_CLOSE);
+
+    const tree = await EkonomiBody();
+    const els = collectEls(tree);
+
+    const cues = printing(els, CLOSED_CUE);
+    expect(cues).toHaveLength(1);
+    const cueAt = els.indexOf(cues[0]!);
+    expect(cueAt).toBeGreaterThan(-1);
+    const tapeAt = els.findIndex((e) => e.type === TickerTape);
+    const stripAt = els.findIndex((e) => e.type === BreakerStrip);
+    expect(tapeAt).toBeGreaterThan(-1);
+    expect(stripAt).toBeGreaterThan(-1);
+    expect(firstPanelAt(els)).toBeGreaterThan(-1);
+    expect(cueAt).toBeLessThan(tapeAt);
+    expect(cueAt).toBeLessThan(stripAt);
+    expect(cueAt).toBeLessThan(firstPanelAt(els));
+    // The same text is not printed anywhere else in the body.
+    expect(textOfNode(tree).split(CLOSED_CUE)).toHaveLength(2);
+
+    // First child of the body, wrapped to keep the look it had in the header row.
+    const [first] = topLevel(tree) as El[];
+    expect(first!.type).toBe("div");
+    expect(first!.props.className).toBe("font-mono text-[12px]");
+    const inner = first!.props.children as El;
+    expect(inner.type).toBe("p");
+    expect(inner.props.className).toBe("text-muted-foreground");
+    expect(inner.props.children).toBe(CLOSED_CUE);
   });
 
-  it("renders the muted line when the freshest quote is not today's during the session", async () => {
+  it("during the session with a not-today quote it prints the delayed-data wording, once, first", async () => {
     getQuotesMock.mockResolvedValue({ THYAO: { ...yahooQuote(), asOf: "2026-11-04T15:00:00.000Z" } });
 
-    const cue = (await EkonomiMarketCue()) as unknown as CueEl;
+    const tree = await EkonomiBody();
 
-    expect(cue.type).toBe("p");
-    expect(cue.props.className).toBe("text-muted-foreground");
-    expect(cue.props.children).toBe("Veriler gecikmeli · son seans 04.11");
+    expect(printing(collectEls(tree), DELAYED_CUE)).toHaveLength(1);
+    const [first] = topLevel(tree) as El[];
+    expect(first!.props.className).toBe("font-mono text-[12px]");
+    expect(textOfNode(first)).toBe(DELAYED_CUE);
   });
 
-  it("renders nothing when there are no quotes at all", async () => {
-    getQuotesMock.mockResolvedValue({});
+  it("with a live market no cue renders and the tape is the first element", async () => {
+    const tree = await EkonomiBody();
+    const els = collectEls(tree);
 
-    expect(await EkonomiMarketCue()).toBeNull();
+    expect((await loadEkonomiView()).marketCue).toBeNull();
+    expect((topLevel(tree)[0] as El).type).toBe(TickerTape);
+    for (const wording of ["Piyasa kapalı", "Veriler gecikmeli"]) {
+      expect(textOfNode(tree).includes(wording), wording).toBe(false);
+    }
+    expect(els.some((e) => e.type === "div" && String(e.props.className) === "font-mono text-[12px]")).toBe(false);
+  });
+
+  it("with no quotes at all no cue renders either", async () => {
+    getQuotesMock.mockResolvedValue({});
+    vi.setSystemTime(AFTER_CLOSE);
+
+    const tree = await EkonomiBody();
+
+    expect((topLevel(tree)[0] as El).type).toBe(TickerTape);
+    expect(textOfNode(tree).includes("Piyasa kapalı")).toBe(false);
+  });
+
+  it("the cue is the only difference between the closed and the live body: the same children follow it", async () => {
+    const live = topLevel(await EkonomiBody());
+    vi.setSystemTime(AFTER_CLOSE);
+    const closed = topLevel(await EkonomiBody());
+
+    // The tape, the strip, the panel grid and the data note.
+    expect(live).toHaveLength(4);
+    expect(closed).toHaveLength(live.length + 1);
+    expect(textOfNode(closed[0])).toBe(CLOSED_CUE);
+    expect(closed.slice(1)).toEqual(live);
+  });
+
+  it("reads the view once for the cue and the body together (no second read)", async () => {
+    getQuotesMock.mockResolvedValue({ THYAO: { ...yahooQuote(), asOf: "2026-11-04T15:00:00.000Z" } });
+
+    await EkonomiBody();
+
+    expect(connectionMock).toHaveBeenCalledTimes(1);
+    expect(getQuotesMock).toHaveBeenCalledTimes(1);
+    expect(fetchEconFeedMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -501,30 +594,40 @@ describe("/ekonomi -- the header renders in the static shell (h159-perf-2)", () 
     expect(textOfNode(subtitle!.el.props.children)).toContain("Yatırım tavsiyesi değildir.");
   });
 
-  it("puts EkonomiMarketCue and EkonomiBody each inside a Suspense element, and nothing else data-driven outside one", () => {
+  it("puts EkonomiBody inside a Suspense element, and nothing else data-driven anywhere in the shell", () => {
     const hits = walkTree(EkonomiPage());
 
-    const cue = hits.filter((h) => h.el.type === EkonomiMarketCue);
     const body = hits.filter((h) => h.el.type === EkonomiBody);
-    expect(cue).toHaveLength(1);
     expect(body).toHaveLength(1);
-    expect(cue[0]!.inSuspense).toBe(true);
     expect(body[0]!.inSuspense).toBe(true);
-    // The shell holds no data component: the cue and the body are the only function-typed children.
+    // The shell holds no data component: the body is the only function-typed child.
     const components = hits.filter((h) => typeof h.el.type === "function" && h.el.type !== Suspense);
-    expect(components.map((h) => h.el.type)).toEqual([EkonomiMarketCue, EkonomiBody]);
+    expect(components.map((h) => h.el.type)).toEqual([EkonomiBody]);
   });
 
-  it("the cue's fallback is null and the body's fallback is the shared skeleton", () => {
+  it("the body's boundary is the shell's only Suspense, and its fallback is the shared skeleton", () => {
     const suspenses = walkTree(EkonomiPage()).filter((h) => h.el.type === Suspense);
 
-    expect(suspenses).toHaveLength(2);
-    const [cueBoundary, bodyBoundary] = suspenses;
-    expect(cueBoundary!.el.props.fallback).toBeNull();
+    expect(suspenses).toHaveLength(1);
+    const [bodyBoundary] = suspenses;
     expect((bodyBoundary!.el.props.fallback as { type: unknown }).type).toBe(EkonomiBodySkeleton);
   });
 
-  it("keeps the header markup of the loaded page: outer div, header row, h1, then the subtitle before the cue slot", () => {
+  it("the header row is fully static: no Suspense and no component inside it, so nothing can grow it after first paint", () => {
+    const tree = EkonomiPage() as unknown as { props: { children: unknown[] } };
+    const [row] = tree.props.children as El[];
+
+    const inside = walkTree(row!.props.children);
+    expect(inside.length).toBeGreaterThan(0);
+    for (const h of inside) {
+      expect(h.el.type === Suspense, "Suspense").toBe(false);
+      expect(typeof h.el.type, String(h.el.type)).not.toBe("function");
+    }
+    // Plain host elements only: the h1 (with its brand span) and the subtitle column.
+    expect(inside.map((h) => h.el.type)).toEqual(["h1", "span", "div", "p"]);
+  });
+
+  it("keeps the header markup of the loaded page: outer div, header row, h1, then the subtitle as the right column's only child", () => {
     const tree = EkonomiPage() as unknown as { props: { className: string; children: unknown[] } };
 
     expect(tree.props.className).toBe("mx-auto w-full max-w-[1600px] px-4 py-6 space-y-3");
@@ -536,10 +639,11 @@ describe("/ekonomi -- the header renders in the static shell (h159-perf-2)", () 
     expect(h1!.props.className).toBe("font-mono text-[12px] font-normal text-foreground");
     expect(right!.type).toBe("div");
     expect(right!.props.className).toBe("space-y-0.5");
-    const [subtitle, cueSlot] = right!.props.children as Array<{ type: unknown; props: { className?: string } }>;
-    expect(subtitle!.type).toBe("p");
-    expect(subtitle!.props.className).toBe("text-muted-foreground");
-    expect(cueSlot!.type).toBe(Suspense);
+    // One child, not an array: the subtitle. The market cue is no longer a sibling of it.
+    expect(Array.isArray(right!.props.children)).toBe(false);
+    const subtitle = right!.props.children as { type: unknown; props: { className?: string } };
+    expect(subtitle.type).toBe("p");
+    expect(subtitle.props.className).toBe("text-muted-foreground");
     expect((rest as unknown as { type: unknown }).type).toBe(Suspense);
   });
 });

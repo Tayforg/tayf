@@ -60,19 +60,25 @@ export const metadata: Metadata = staticPageMetadata({
 // shell. EkonomiPage used to be async and opened with connection(), so the whole page,
 // subtitle included, streamed as one hidden segment that React reveals no earlier than
 // 300 ms after the shell's first paint (measured: first paint 2260 ms, LCP 2660 ms).
-// Now EkonomiPage is a plain function: the header is static copy, the market cue is the
-// one dynamic line beside it (EkonomiMarketCue, no fallback) and everything below is
-// EkonomiBody, behind the shared body skeleton. Both read loadEkonomiView, which holds
-// connection(), the clock and every read; React's cache() runs it once per request for the
-// two. An essential read that fails rejects both boundaries, and the error boundary
-// (error.tsx) renders as before: nothing here catches it.
+// Now EkonomiPage is a plain function: the header is static copy and everything below it
+// is EkonomiBody, behind the shared body skeleton. EkonomiBody awaits loadEkonomiView,
+// which holds connection(), the clock and every read. An essential read that fails
+// rejects the boundary, and the error boundary (error.tsx) renders as before: nothing
+// here catches it.
+//
+// h161-cls-1: the market cue (the "Piyasa kapalı ..." line, present only when the freshest
+// quote is not live) used to be a second Suspense island inside the header. It streamed in
+// after the header had painted, grew the header by one line and pushed the still-visible
+// body skeleton down 18 px (CLS 0.015 after the close). It is now the first element of
+// EkonomiBody: it arrives in the same swap that replaces the skeleton, and during live
+// trading it renders nothing, so no blank line is reserved. The header is fully static.
 // tests/guards/ekonomi-static-header.test.ts pins the split.
 
-/** Everything the cue and the body draw, read once per request (React cache). */
+/** Everything the body draws (cue text included), read once per request (React cache). */
 export const loadEkonomiView = cache(async () => {
   // Row times are formatted against Date.now(); connection() tells PPR this
   // view runs at request time. It is only ever reached from inside a Suspense
-  // boundary (EkonomiMarketCue, EkonomiBody), never from the shell.
+  // boundary (EkonomiBody), never from the shell.
   await connection();
   // Taken after connection(): never read the clock in a prerender path.
   // currentTimeMs() is the repo's Date.now() wrapper (react-hooks/purity).
@@ -159,9 +165,6 @@ export default function EkonomiPage() {
           <p className="text-muted-foreground">
             Haberde adı geçen hisseler, son fiyat, gün içi değişim ve haberden bu yana hareket. Fiyatlar 15 dk gecikmeli olabilir. Yatırım tavsiyesi değildir.
           </p>
-          <Suspense fallback={null}>
-            <EkonomiMarketCue />
-          </Suspense>
         </div>
       </div>
 
@@ -172,21 +175,25 @@ export default function EkonomiPage() {
   );
 }
 
-/** The market cue line under the subtitle, or nothing when the freshest quote is live. */
-export async function EkonomiMarketCue() {
-  const { marketCue } = await loadEkonomiView();
-  return marketCue ? <p className="text-muted-foreground">{marketCue}</p> : null;
-}
-
-/** The tape, the breaker strip, the three panels and the data note: the loaded page below the header. */
+/**
+ * The market cue line, the tape, the breaker strip, the three panels and the data note: the loaded page below
+ * the header. The cue comes first and only when the freshest quote is not live; the wrapper carries the
+ * font-mono text-[12px] the line inherited from the header row.
+ */
 export async function EkonomiBody() {
-  const { feed, top, disclosures, breakers, breakersFailed, supersededRows, stats, refs, quotes, staleTickers } =
+  const { feed, top, disclosures, breakers, breakersFailed, supersededRows, stats, refs, quotes, marketCue, staleTickers } =
     await loadEkonomiView();
   // A quote whose last trade is days old has no "move" to show on its chip.
   const isStale = (ticker: string): boolean => staleTickers.has(ticker);
 
   return (
     <>
+      {marketCue ? (
+        <div className="font-mono text-[12px]">
+          <p className="text-muted-foreground">{marketCue}</p>
+        </div>
+      ) : null}
+
       <TickerTape items={top} quotes={quotes} stats={stats} staleTickers={staleTickers} />
 
       <BreakerStrip breakers={breakers} unavailable={breakersFailed} />
