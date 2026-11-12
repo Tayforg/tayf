@@ -131,6 +131,12 @@ jobs:
       - name: Build
         run: npx next build
 
+      # h159-perf-1: experimental.inlineCss must have put the sheet into every
+      # prerendered shell (a <style data-precedence="next">, no stylesheet <link>)
+      # with only absolute font urls. Reads .next/server/app/**/*.html; no network.
+      - name: Inline CSS check
+        run: node scripts/check-inline-css.mjs
+
   # The live-Postgres migration tests (describe.runIf on TAYF_PSQL, tests/migrations/*.test.ts).
   # Without this job a broken live block only ever showed as "skipped". The runner builds a fresh
   # throwaway database per test file from tests/migrations/sql/stub.sql and

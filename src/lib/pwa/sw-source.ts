@@ -259,7 +259,7 @@ function extractShellAssets(html, origin, max) {
   const out = [];
   if (!(max > 0)) return out;
   const seen = new Set();
-  const re = /(?:src|href)="(\/_next\/static\/[^"#]+)"/g;
+  const re = /(?:^|\s)(?:src|href)="(\/_next\/static\/[^"#\s]+)"/g;
   let m;
   while ((m = re.exec(html)) !== null) {
     const abs = parseUrl(origin + m[1].replace(/&amp;/g, "&"));

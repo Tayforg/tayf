@@ -533,6 +533,31 @@ describe("extractShellAssets", () => {
     ]);
   });
 
+  it("never takes data-href / data-src or a space-joined value for an asset (experimental.inlineCss)", () => {
+    // Next's inlineCss emits <style data-precedence="next" data-href="/_next/static/chunks/a.css /_next/static/chunks/b.css">.
+    // Read as a URL that value is one nonexistent asset, "...a.css%20/_next/static/chunks/b.css".
+    const inlined = [
+      '<style data-precedence="next" data-href="/_next/static/chunks/a.css /_next/static/chunks/b.css">x</style>',
+      '<style data-precedence="next" data-href="/_next/static/chunks/solo.css">x</style>',
+      '<img data-src="/_next/static/media/lazy.png"/>',
+      '<link rel="stylesheet" href="/_next/static/css/b.css"/>',
+    ].join("\n");
+    const out = extractShellAssets(inlined, ORIGIN, 60);
+    expect(out).toEqual([`${ORIGIN}/_next/static/css/b.css`]);
+    for (const url of out) {
+      expect(url).not.toContain("%20");
+      expect(url).not.toContain("a.css");
+      expect(url).not.toContain("solo.css");
+    }
+  });
+
+  it("still reads src and href after any whitespace, and rejects a value that holds whitespace", () => {
+    expect(
+      extractShellAssets('<script\tasync\nsrc="/_next/static/chunks/t.js"></script>', ORIGIN, 10),
+    ).toEqual([`${ORIGIN}/_next/static/chunks/t.js`]);
+    expect(extractShellAssets('<link href="/_next/static/a.css /_next/static/b.css"/>', ORIGIN, 10)).toEqual([]);
+  });
+
   it("caps at max", () => {
     expect(extractShellAssets(html, ORIGIN, 2)).toHaveLength(2);
     expect(extractShellAssets(html, ORIGIN, 0)).toEqual([]);

@@ -19,11 +19,13 @@ import {
   entityHubNote,
   entityHubPageRobots,
   entityHubRobots,
+  hubCardBannerIndex,
   hubMatchNote,
   isEntityKey,
   parseEntityHubPage,
 } from "@/lib/entities/entity-hub";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
+import { hubTrendState } from "@/lib/entities/hub-trend";
 import { getHubTrend } from "@/lib/entities/hub-trend-query";
 import {
   buildBreadcrumbs,
@@ -173,6 +175,14 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
   const trendPromise = page === 1 ? getHubTrend(key) : null;
   const result = await getEntityHub(key, page);
   const trend = trendPromise === null ? null : await trendPromise;
+  // Whether the daily chart is drawn above the list. It decides two things: the chart conditional, and the first card's
+  // banner priority (h159-perf-3: with the chart above it, card 0 is below the fold, so it must not be fetched at
+  // fetchpriority=high; hubCardBannerIndex).
+  const trendShown = trend !== null && trend.status === "ok";
+  // Whether the FULL chart is drawn. The sparse state (under ENTITY_HUB_MIN_INDEXABLE clusters in the window) draws only a
+  // heading and a note, and 0 clusters over 0 earlier renders null, so in both cases card 0 is back above the fold and keeps
+  // its banner hint. The "chart" state implies a sum of at least 3, which excludes the null branch.
+  const trendChartDrawn = trendShown && hubTrendState(trend.days) === "chart";
   // No clock read here, the rule this page had when it was fully static (a
   // Date.now() in the render body fails `next build` once the cached read
   // succeeds): relative times use the read's own timestamp, stamped inside the
@@ -297,7 +307,7 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
         )
       ) : (
         <>
-          {trend !== null && trend.status === "ok" ? (
+          {trendShown ? (
             <HubTrendChart label={label} days={trend.days} earlier={trend.earlier} />
           ) : null}
           <section aria-labelledby="entity-spectrum-heading" className={spectrumWrapClass}>
@@ -326,7 +336,7 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
                   cluster={b.cluster}
                   articles={b.articles}
                   sources={b.sources}
-                  index={i}
+                  index={hubCardBannerIndex(i, trendChartDrawn)}
                   isAging={hoursAgo > 48}
                   isWireRedistribution={b.isWireRedistribution}
                   effectiveArticleCount={b.effectiveArticleCount}

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
+import { cache, Suspense } from "react";
 
 import { BreakerStrip } from "@/components/finance/breaker-strip";
 import { DataNote } from "@/components/finance/data-note";
@@ -29,6 +30,8 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { sourceLang } from "@/lib/sources/source-language";
 import { currentTimeMs } from "@/lib/time";
 
+import { EkonomiBodySkeleton } from "./loading";
+
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
   title: "Ekonomi",
@@ -53,9 +56,23 @@ export const metadata: Metadata = staticPageMetadata({
 // strip says it is unavailable; a move without stats is "—"; a missing
 // reference price drops the "since the headline" value).
 
-export default async function EkonomiPage() {
+// h159-perf-2: the header (h1 and the static subtitle, the LCP text) renders in the PPR
+// shell. EkonomiPage used to be async and opened with connection(), so the whole page,
+// subtitle included, streamed as one hidden segment that React reveals no earlier than
+// 300 ms after the shell's first paint (measured: first paint 2260 ms, LCP 2660 ms).
+// Now EkonomiPage is a plain function: the header is static copy, the market cue is the
+// one dynamic line beside it (EkonomiMarketCue, no fallback) and everything below is
+// EkonomiBody, behind the shared body skeleton. Both read loadEkonomiView, which holds
+// connection(), the clock and every read; React's cache() runs it once per request for the
+// two. An essential read that fails rejects both boundaries, and the error boundary
+// (error.tsx) renders as before: nothing here catches it.
+// tests/guards/ekonomi-static-header.test.ts pins the split.
+
+/** Everything the cue and the body draw, read once per request (React cache). */
+export const loadEkonomiView = cache(async () => {
   // Row times are formatted against Date.now(); connection() tells PPR this
-  // body runs at request time (loading.tsx is the Suspense boundary).
+  // view runs at request time. It is only ever reached from inside a Suspense
+  // boundary (EkonomiMarketCue, EkonomiBody), never from the shell.
   await connection();
   // Taken after connection(): never read the clock in a prerender path.
   // currentTimeMs() is the repo's Date.now() wrapper (react-hooks/purity).
@@ -116,6 +133,22 @@ export default async function EkonomiPage() {
   };
   const staleTickers = new Set(Object.keys(quotes).filter(isStale));
 
+  return {
+    feed,
+    top,
+    disclosures,
+    breakers,
+    breakersFailed: breakersRead.failed,
+    supersededRows,
+    stats,
+    refs,
+    quotes,
+    marketCue,
+    staleTickers,
+  };
+});
+
+export default function EkonomiPage() {
   return (
     <div className="mx-auto w-full max-w-[1600px] px-4 py-6 space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 font-mono text-[12px]">
@@ -126,13 +159,37 @@ export default async function EkonomiPage() {
           <p className="text-muted-foreground">
             Haberde adı geçen hisseler, son fiyat, gün içi değişim ve haberden bu yana hareket. Fiyatlar 15 dk gecikmeli olabilir. Yatırım tavsiyesi değildir.
           </p>
-          {marketCue ? <p className="text-muted-foreground">{marketCue}</p> : null}
+          <Suspense fallback={null}>
+            <EkonomiMarketCue />
+          </Suspense>
         </div>
       </div>
 
+      <Suspense fallback={<EkonomiBodySkeleton />}>
+        <EkonomiBody />
+      </Suspense>
+    </div>
+  );
+}
+
+/** The market cue line under the subtitle, or nothing when the freshest quote is live. */
+export async function EkonomiMarketCue() {
+  const { marketCue } = await loadEkonomiView();
+  return marketCue ? <p className="text-muted-foreground">{marketCue}</p> : null;
+}
+
+/** The tape, the breaker strip, the three panels and the data note: the loaded page below the header. */
+export async function EkonomiBody() {
+  const { feed, top, disclosures, breakers, breakersFailed, supersededRows, stats, refs, quotes, staleTickers } =
+    await loadEkonomiView();
+  // A quote whose last trade is days old has no "move" to show on its chip.
+  const isStale = (ticker: string): boolean => staleTickers.has(ticker);
+
+  return (
+    <>
       <TickerTape items={top} quotes={quotes} stats={stats} staleTickers={staleTickers} />
 
-      <BreakerStrip breakers={breakers} unavailable={breakersRead.failed} />
+      <BreakerStrip breakers={breakers} unavailable={breakersFailed} />
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <Panel title="Haber akışı" meta={`${feed.length} haber, hisse eşleşmeli`} className="lg:row-span-2">
@@ -264,6 +321,6 @@ export default async function EkonomiPage() {
       </div>
 
       <DataNote />
-    </div>
+    </>
   );
 }

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 import { BIAS_ORDER } from "@/lib/bias/config";
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
+import { mobileBannerImageProps } from "@/components/story/cluster-card";
 import {
   RISING_ENTITIES,
   RISING_HUB_SPECS,
@@ -30,6 +31,7 @@ import {
   entityHubRobots,
   entityHubSpec,
   foldEntityText,
+  hubCardBannerIndex,
   hubMatchNote,
   isEntityKey,
   parseEntityHubPage,
@@ -2724,5 +2726,54 @@ describe("hubMatchNote: the copy says what the hub actually searches (h128-hubs-
     expect(hubMatchNote(e)).toBe(hubMatchNote(e));
     expect(hubMatchNote(entityByKey("chp")!)).toBe(LEAD_NOTE);
     expect(hubMatchNote(e)).toBe(AKP_NOTE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h159-perf-3: which card of a hub list may be the page's LCP image candidate.
+// With the trend chart drawn above the list, card 0 sits at the fold (y=898 of a
+// 915 px phone viewport), so it must not be preloaded at fetchpriority=high.
+// ---------------------------------------------------------------------------
+describe("hubCardBannerIndex (h159-perf-3)", () => {
+  it("chart shown: undefined for every position, including 0", () => {
+    for (const position of [0, 1, 2, 5, 19]) {
+      expect(hubCardBannerIndex(position, true), String(position)).toBeUndefined();
+    }
+  });
+
+  it("chart not shown: returns the position unchanged", () => {
+    for (const position of [0, 1, 2, 5, 19]) {
+      expect(hubCardBannerIndex(position, false), String(position)).toBe(position);
+    }
+  });
+
+  it("chart shown: card 0 gets no priority and no fetchPriority hint from mobileBannerImageProps", () => {
+    const props = mobileBannerImageProps(hubCardBannerIndex(0, true));
+    expect(props.priority).toBe(false);
+    expect(props.fetchPriority).toBeUndefined();
+  });
+
+  it("chart shown: no card of the list is eager or high priority", () => {
+    for (let position = 0; position < 20; position += 1) {
+      const props = mobileBannerImageProps(hubCardBannerIndex(position, true));
+      expect(props.priority, String(position)).toBe(false);
+      expect(props.fetchPriority, String(position)).toBeUndefined();
+    }
+  });
+
+  it("chart not shown: priority true, fetchPriority high at position 0 only", () => {
+    const first = mobileBannerImageProps(hubCardBannerIndex(0, false));
+    expect(first.priority).toBe(true);
+    expect(first.fetchPriority).toBe("high");
+    for (let position = 1; position < 20; position += 1) {
+      const props = mobileBannerImageProps(hubCardBannerIndex(position, false));
+      expect(props.priority, String(position)).toBe(false);
+      expect(props.fetchPriority, String(position)).toBeUndefined();
+    }
+  });
+
+  it("keeps the banner sizes and quality of the shared helper either way", () => {
+    expect(mobileBannerImageProps(hubCardBannerIndex(0, true)).sizes).toBe(mobileBannerImageProps(0).sizes);
+    expect(mobileBannerImageProps(hubCardBannerIndex(0, true)).quality).toBe(mobileBannerImageProps(0).quality);
   });
 });
