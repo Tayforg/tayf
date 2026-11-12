@@ -87,8 +87,15 @@ export function BiasSpectrum({
 
     return (
       <div className="space-y-2">
-        {/* Bar */}
-        <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted forced-color-adjust-none">
+        {/* Bar. aria-hidden: the segments are empty divs, so accname step 2I
+            (tooltip) would give each its title as a name, and the card link's
+            description (aria-describedby on this component's wrapper) would read
+            every zone twice. The legend below carries the same zones and
+            percents as text. The titles stay for the mouse hover tooltip. */}
+        <div
+          className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted forced-color-adjust-none"
+          aria-hidden="true"
+        >
           {activeZones.map((segment) => {
             const pct = pctByZone.get(segment.key) ?? 0;
             return (

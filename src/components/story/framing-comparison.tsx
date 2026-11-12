@@ -2,7 +2,11 @@ import { ExternalLink } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
 import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
-import { RECALL_MATCH_EMPTY_COLUMN } from "@/lib/clusters/recall-matched-zones";
+import {
+  RECALL_MATCH_EMPTY_COLUMN,
+  RECALL_MATCH_NOTE,
+} from "@/lib/clusters/recall-matched-zones";
+import { DEGRADED_EMPTY_COLUMN } from "@/lib/clusters/story-timeline";
 import { SourceLogo } from "@/components/source/source-logo";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
@@ -44,9 +48,23 @@ import type { MediaDnaZone } from "@/types";
  * the same event (`recallMatchedZones`: a similar story sits in another cluster,
  * clusters.blindspot_recall_suspect) must not claim silence either. It reads
  * "— bu kümede yok · benzer haber başka kümede olabilir —" (RECALL_MATCH_EMPTY_COLUMN).
- * Order of the empty-column text: languageIsolated, then nonVotingZones, then
- * recallMatchedZones, then "bu tarafta sessizlik". Wording only: no count, vote or
- * "N manşet" moves, and with no matched zone the markup is exactly what it was.
+ * Order of the empty-column text: languageIsolated, then degradedZones, then
+ * nonVotingZones, then recallMatchedZones, then "bu tarafta sessizlik". Wording
+ * only: no count, vote or "N manşet" moves, and with no matched zone the markup is
+ * exactly what it was.
+ *
+ * h162-cluster-2: a zone with BOTH a non-voting writer and a Jev recall match used
+ * to print only the spectrum wording (the two were mutually exclusive), while the
+ * timeline and the read-across of the same page carried the note. It now reads
+ * "— spektruma sayılan kaynaklardan haber yok · benzer haber başka kümede olabilir —":
+ * the non-voting wording, then RECALL_MATCH_NOTE, the order the timeline uses.
+ *
+ * h162-cluster-1: a zone whose feeds are degraded right now (`degradedZones`, the
+ * timeline's `degradedAbsentZones`, which only holds a zone while the story is
+ * inside the feed-yield window) reads "— bu taraftaki kaynakların akışı şu an
+ * sorunlu —" (DEGRADED_EMPTY_COLUMN), as the timeline above it does, instead of
+ * "sessizlik". It wins over the non-voting and recall wordings: the feed, not the
+ * newsroom, explains the empty column, as in the timeline.
  *
  * h47-time-1: ages are measured against `nowMs`, the page's per-request render
  * stamp, and RelativeTime re-bases them to the reader's clock after mount, so a
@@ -79,6 +97,11 @@ interface FramingComparisonProps {
   // like nonVotingZones it only changes the words of an EMPTY column, and nothing
   // is counted from it.
   recallMatchedZones?: ReadonlySet<MediaDnaZone>;
+  // h162-cluster-1: the zones whose feeds are degraded right now, from the story
+  // timeline's `degradedAbsentZones` (empty for a story older than the feed-yield
+  // window). Optional (empty): like the sets above it only changes the words of
+  // an EMPTY column, and nothing is counted from it.
+  degradedZones?: ReadonlySet<MediaDnaZone>;
 }
 
 // Spectrum order, matching the bias bar left-to-right.
@@ -179,6 +202,7 @@ export function FramingComparison({
   nonVotingZones,
   languageIsolated = false,
   recallMatchedZones,
+  degradedZones,
 }: FramingComparisonProps) {
   const byZone = groupMembersByZone(members);
   const total = members.length;
@@ -228,11 +252,15 @@ export function FramingComparison({
                   <span className="text-[11px] italic text-muted-foreground">
                     {languageIsolated
                       ? ENGLISH_ONLY_EMPTY_COLUMN
-                      : nonVotingZones.has(zone)
-                        ? `— ${SPECTRUM_ABSENT_QUALIFIED} —`
-                        : recallMatchedZones?.has(zone)
-                          ? `— ${RECALL_MATCH_EMPTY_COLUMN} —`
-                          : "— bu tarafta sessizlik —"}
+                      : degradedZones?.has(zone)
+                        ? DEGRADED_EMPTY_COLUMN
+                        : nonVotingZones.has(zone)
+                          ? recallMatchedZones?.has(zone)
+                            ? `— ${SPECTRUM_ABSENT_QUALIFIED} · ${RECALL_MATCH_NOTE} —`
+                            : `— ${SPECTRUM_ABSENT_QUALIFIED} —`
+                          : recallMatchedZones?.has(zone)
+                            ? `— ${RECALL_MATCH_EMPTY_COLUMN} —`
+                            : "— bu tarafta sessizlik —"}
                   </span>
                 </div>
               ) : (

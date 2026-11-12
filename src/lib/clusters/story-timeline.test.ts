@@ -1,13 +1,19 @@
 import { describe, it, expect } from "vitest";
 
-import type { ZoneFeedHealth, ZoneHealth } from "@/lib/clusters/feed-health";
+import {
+  FEED_YIELD_WINDOW_MS,
+  type ZoneFeedHealth,
+  type ZoneHealth,
+} from "@/lib/clusters/feed-health";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
 import {
   buildStoryTimeline,
+  DEGRADED_EMPTY_COLUMN,
   formatLag,
   formatStoryClock,
   missingZones,
+  STORY_DEGRADED_NOTE_MAX_AGE_MS,
   timelineMembersFrom,
   timelineOffsetPct,
   votingSourceCount,
@@ -1018,5 +1024,205 @@ describe("buildStoryTimeline — all-English cluster (h59-english-1)", () => {
     expect(
       buildStoryTimeline(turkish, null, health({ bagimsiz: true }), [], false)!.summary,
     ).toContain("— Bağımsız kaynakların akışı şu an sorunlu");
+  });
+});
+
+// h162-cluster-1: the degraded-feed line ("… akışı şu an sorunlu") reads CURRENT
+// feed health, so it is a present-tense claim. On cluster 8331a4e7 (first
+// published 23 Oct, 20 days old, no Bağımsız writer) it blamed today's Bağımsız
+// feeds for a silence from three weeks ago, while the framing column of the same
+// page said "bu tarafta sessizlik". Past STORY_DEGRADED_NOTE_MAX_AGE_MS (the
+// 72 h feed-yield window) the story falls back to the plain absence wording.
+describe("buildStoryTimeline — degraded-feed note is bounded by story age (h162-cluster-1)", () => {
+  // The voting members of 8331a4e7: four İktidar-zone outlets, Bağımsız and
+  // Muhalefet absent. 08:57:46Z is 11:57 in Istanbul.
+  const OLD_STORY = [
+    member("Anadolu Ajansı", "pro_government", "2026-10-23T08:57:46Z"),
+    member("TRT Haber", "pro_government", "2026-10-23T09:00:00Z"),
+    member("Milliyet", "gov_leaning", "2026-10-23T09:00:43Z"),
+    member("Star", "pro_government", "2026-10-23T09:10:00Z"),
+  ];
+  const FIRST_T = Date.parse("2026-10-23T08:57:46Z");
+  const HOUR_MS = 3_600_000;
+  const HEAD = "İlk: Anadolu Ajansı · 11:57";
+  const ABSENT_BAGIMSIZ = "Bağımsız kaynaklardan bu kümede haber yok";
+  const ABSENT_MUHALEFET = "Muhalefet kaynaklarından bu kümede haber yok";
+  const DEGRADED_BAGIMSIZ = "Bağımsız kaynakların akışı şu an sorunlu";
+
+  it("a 20-day-old story drops the degraded line: plain absence wording, no 'sorunlu'", () => {
+    const nowMs = Date.parse("2026-11-12T17:00:00Z");
+    const t = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, nowMs)!;
+    expect(t.degradedAbsentZones).toEqual([]);
+    expect(t.summary).toBe(`${HEAD} — ${ABSENT_BAGIMSIZ} — ${ABSENT_MUHALEFET}`);
+    expect(t.summary).toContain(`— ${ABSENT_BAGIMSIZ}`);
+    expect(t.summary).toContain(`— ${ABSENT_MUHALEFET}`);
+    expect(t.summary).not.toContain("sorunlu");
+  });
+
+  it("changes nothing but the wording: absentZones, points, joins and the zone line are the same", () => {
+    const old = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, Date.parse("2026-11-12T17:00:00Z"))!;
+    const today = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }))!;
+    expect(old.absentZones).toEqual(["bagimsiz", "muhalefet"]);
+    expect(old.absentZones).toEqual(today.absentZones);
+    expect(old.points).toEqual(today.points);
+    expect(old.zoneJoin).toEqual(today.zoneJoin);
+    expect(old.zoneFirsts).toEqual(today.zoneFirsts);
+    expect(old.zoneLine).toBe(today.zoneLine);
+    expect(old.first).toEqual(today.first);
+  });
+
+  it("the same fixture one hour after its first report keeps the degraded line", () => {
+    const t = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, FIRST_T + HOUR_MS)!;
+    expect(t.degradedAbsentZones).toEqual(["bagimsiz"]);
+    expect(t.summary).toContain(`— ${DEGRADED_BAGIMSIZ}`);
+    expect(t.summary).toBe(`${HEAD} — ${DEGRADED_BAGIMSIZ} — ${ABSENT_MUHALEFET}`);
+  });
+
+  it("boundary: exactly 72 h after the first report still shows the degraded line, 1 ms later does not", () => {
+    const at = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, FIRST_T + 72 * HOUR_MS)!;
+    expect(at.degradedAbsentZones).toEqual(["bagimsiz"]);
+    expect(at.summary).toContain(`— ${DEGRADED_BAGIMSIZ}`);
+
+    const past = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, FIRST_T + 72 * HOUR_MS + 1)!;
+    expect(past.degradedAbsentZones).toEqual([]);
+    expect(past.summary).not.toContain("sorunlu");
+    expect(past.summary).toContain(`— ${ABSENT_BAGIMSIZ}`);
+  });
+
+  it("a story whose first report is in the future of nowMs (clock skew) still shows the degraded line", () => {
+    const t = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, FIRST_T - HOUR_MS)!;
+    expect(t.degradedAbsentZones).toEqual(["bagimsiz"]);
+  });
+
+  it("nowMs omitted: today's behaviour, however old the story is", () => {
+    const omitted = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }))!;
+    const explicit = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, undefined)!;
+    expect(omitted.degradedAbsentZones).toEqual(["bagimsiz"]);
+    expect(omitted.summary).toContain(`— ${DEGRADED_BAGIMSIZ}`);
+    expect(explicit).toEqual(omitted);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "a non-finite nowMs (%s) is ignored: today's behaviour",
+    (nowMs) => {
+      const t = buildStoryTimeline(OLD_STORY, null, health({ bagimsiz: true }), [], false, undefined, nowMs)!;
+      expect(t.degradedAbsentZones).toEqual(["bagimsiz"]);
+      expect(t.summary).toContain(`— ${DEGRADED_BAGIMSIZ}`);
+    },
+  );
+
+  const iso = (ms: number): string => new Date(ms).toISOString();
+
+  it("an earlier non-voting point does not age the story", () => {
+    // The age runs from the first VOTING report (FIRST_T), not from the axis
+    // start: a Haberler.com point 73 h before FIRST_T is plotted first on the
+    // axis but is not coverage. One hour after FIRST_T the story is 1 h old, so
+    // the degraded line applies; measuring from the axis would make it 74 h old.
+    const early = member("Haberler.com", "center", iso(FIRST_T - 73 * HOUR_MS));
+    const t = buildStoryTimeline(
+      OLD_STORY,
+      null,
+      health({ bagimsiz: true }),
+      [early],
+      false,
+      undefined,
+      FIRST_T + HOUR_MS,
+    )!;
+    expect(t.degradedAbsentZones).toEqual(["bagimsiz"]);
+  });
+
+  it("the created_at cap can make a story older, never younger", () => {
+    // The effective time of a report is min(published_at, created_at). Every
+    // pubDate here is 2 h after FIRST_T, but Tayf first saw the first article at
+    // FIRST_T, so the story starts there: at FIRST_T + 72.5 h it is 72.5 h old
+    // (past the window) even though every pubDate is only 70.5 h old.
+    const members = OLD_STORY.map((m, i) => ({
+      ...m,
+      publishedAt: iso(FIRST_T + 2 * HOUR_MS + i * 60_000),
+    }));
+    const seenAt = { [members[0]!.articleId]: iso(FIRST_T) };
+    const t = buildStoryTimeline(
+      members,
+      seenAt,
+      health({ bagimsiz: true }),
+      [],
+      false,
+      undefined,
+      FIRST_T + 72 * HOUR_MS + 30 * 60_000,
+    )!;
+    expect(t.degradedAbsentZones).toEqual([]);
+  });
+
+  it("a healthy zone is unaffected by nowMs: a fresh story with no degraded zone reads plain absence", () => {
+    const t = buildStoryTimeline(OLD_STORY, null, health({}), [], false, undefined, FIRST_T + HOUR_MS)!;
+    expect(t.degradedAbsentZones).toEqual([]);
+    expect(t.summary).toBe(`${HEAD} — ${ABSENT_BAGIMSIZ} — ${ABSENT_MUHALEFET}`);
+  });
+
+  it("null health with an old story is the plain absence wording (fail open, unchanged)", () => {
+    const t = buildStoryTimeline(OLD_STORY, null, null, [], false, undefined, Date.parse("2026-11-12T17:00:00Z"))!;
+    expect(t.degradedAbsentZones).toEqual([]);
+    expect(t.summary).toBe(`${HEAD} — ${ABSENT_BAGIMSIZ} — ${ABSENT_MUHALEFET}`);
+  });
+
+  it("past the window the non-voting qualifier and the recall note still apply", () => {
+    const aggregator = member("Haberler.com", "center", "2026-10-23T09:05:00Z");
+    const nowMs = Date.parse("2026-11-12T17:00:00Z");
+    const t = buildStoryTimeline(
+      OLD_STORY,
+      null,
+      health({ bagimsiz: true }),
+      [aggregator],
+      false,
+      new Set<MediaDnaZone>(["bagimsiz"]),
+      nowMs,
+    )!;
+    expect(t.degradedAbsentZones).toEqual([]);
+    expect(t.summary).toContain(
+      "— Spektruma sayılan bağımsız kaynaklardan bu kümede haber yok · benzer haber başka kümede olabilir",
+    );
+    expect(t.summary).not.toContain("sorunlu");
+    // Muhalefet has neither a non-voting point nor a recall match: the bare line.
+    expect(t.summary).toContain(`— ${ABSENT_MUHALEFET}`);
+  });
+
+  it("within the window a degraded zone still wins over the non-voting qualifier and the recall note", () => {
+    const aggregator = member("Haberler.com", "center", "2026-10-23T09:05:00Z");
+    const t = buildStoryTimeline(
+      OLD_STORY,
+      null,
+      health({ bagimsiz: true }),
+      [aggregator],
+      false,
+      new Set<MediaDnaZone>(["bagimsiz"]),
+      FIRST_T + HOUR_MS,
+    )!;
+    expect(t.summary).toContain(`— ${DEGRADED_BAGIMSIZ}`);
+    expect(t.summary).not.toContain("Spektruma sayılan bağımsız");
+  });
+
+  it("an all-English cluster still states no absence, old or fresh", () => {
+    const english = [
+      member("Daily Sabah", "pro_government", "2026-10-23T08:57:46Z"),
+      member("A News", "pro_government", "2026-10-23T09:00:00Z"),
+      member("TRT World", "state_media", "2026-10-23T09:10:00Z"),
+    ];
+    for (const nowMs of [FIRST_T + HOUR_MS, Date.parse("2026-11-12T17:00:00Z")]) {
+      const t = buildStoryTimeline(english, null, health({ bagimsiz: true }), [], true, undefined, nowMs)!;
+      expect(t.summary).toBe("İlk: Daily Sabah · 11:57");
+    }
+  });
+
+  it("the age limit is the feed-yield window: STORY_DEGRADED_NOTE_MAX_AGE_MS === FEED_YIELD_WINDOW_MS", () => {
+    // feed-health.ts reads the server Supabase client, so story-timeline.ts keeps
+    // a local literal; this parity check is the only place the two meet.
+    expect(STORY_DEGRADED_NOTE_MAX_AGE_MS).toBe(FEED_YIELD_WINDOW_MS);
+    expect(STORY_DEGRADED_NOTE_MAX_AGE_MS).toBe(72 * 60 * 60 * 1000);
+  });
+
+  it("DEGRADED_EMPTY_COLUMN is the framing column's degraded line, reusing the timeline's wording", () => {
+    expect(DEGRADED_EMPTY_COLUMN).toBe("— bu taraftaki kaynakların akışı şu an sorunlu —");
+    // Same phrase as the timeline's per-zone DEGRADED_TEXT, so the two never drift.
+    expect(DEGRADED_EMPTY_COLUMN).toContain("akışı şu an sorunlu");
   });
 });

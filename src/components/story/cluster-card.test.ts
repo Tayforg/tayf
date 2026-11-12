@@ -420,12 +420,17 @@ describe("card link accessible name (h10-a11y-1)", () => {
     expect(linkBody).not.toContain("<section");
   });
 
-  it("names the link from the visible headline (h2 or h3, see h67-landmarks-1) via aria-labelledby", () => {
+  it("names the link from the visible badge (when drawn) plus the headline (h2 or h3, see h67-landmarks-1) via aria-labelledby", () => {
     expect(src).toContain("const headingId = `kart-baslik-${cluster.id}`");
+    expect(src).toContain("const badgeId = `kart-rozet-${cluster.id}`");
+    // One condition decides both whether the badge is drawn and whether the
+    // name carries it, so the two cannot drift apart.
+    expect(src).toContain("const showBadge = cluster.is_blindspot && !languageIsolated");
+    expect(count(src, "showBadge")).toBe(3);
 
     const linkTags = openingTagsOf(src, "<Link");
     expect(linkTags).toHaveLength(1);
-    expect(linkTags[0]).toContain("aria-labelledby={headingId}");
+    expect(linkTags[0]).toContain("aria-labelledby={showBadge ? `${badgeId} ${headingId}` : headingId}");
 
     const headingTags = openingTagsOf(src, "<Heading");
     expect(headingTags).toHaveLength(1);
@@ -435,6 +440,61 @@ describe("card link accessible name (h10-a11y-1)", () => {
     const headingAt = src.indexOf("<Heading");
     expect(headingAt).toBeGreaterThan(linkOpen);
     expect(headingAt).toBeLessThan(linkClose);
+
+    // The badge's text span carries badgeId, inside the link and before the
+    // headline (the name reads badge, then headline).
+    const badgeAt = src.indexOf("id={badgeId}");
+    expect(count(src, "id={badgeId}")).toBe(1);
+    expect(badgeAt).toBeGreaterThan(linkOpen);
+    expect(badgeAt).toBeLessThan(headingAt);
+  });
+
+  it("describes the link by the meta line and the spectrum bar via aria-describedby (h162-a11yname-1)", () => {
+    expect(src).toContain("const metaId = `kart-meta-${cluster.id}`");
+    expect(src).toContain("const spectrumId = `kart-spektrum-${cluster.id}`");
+    // react-a11y-2 (h163): the English-only note joins the description on an
+    // all-English card, so the bar's "İktidar %100" is announced with its qualifier.
+    expect(src).toContain("const langNoteId = `kart-dil-${cluster.id}`");
+
+    const linkTags = openingTagsOf(src, "<Link");
+    expect(linkTags).toHaveLength(1);
+    expect(linkTags[0]).toContain(
+      "aria-describedby={languageIsolated ? `${metaId} ${spectrumId} ${langNoteId}` : `${metaId} ${spectrumId}`}",
+    );
+
+    // metaId rides on ClusterMetaBadges' own root div (no wrapper element).
+    const metaTags = openingTagsOf(src, "<ClusterMetaBadges");
+    expect(metaTags).toHaveLength(1);
+    expect(metaTags[0]).toContain("id={metaId}");
+    expect(count(src, "id={metaId}")).toBe(1);
+
+    // spectrumId rides on the existing spectrum-glow wrapper.
+    expect(src).toContain('<div className="spectrum-glow rounded" id={spectrumId}>');
+    expect(count(src, "id={spectrumId}")).toBe(1);
+
+    // langNoteId rides on the English-only qualifier <p>, once, only drawn
+    // under the same `languageIsolated` condition the description lists it for.
+    expect(count(src, "id={langNoteId}")).toBe(1);
+    const noteAt = src.indexOf("id={langNoteId}");
+    const noteTag = src.slice(src.lastIndexOf("<p", noteAt), src.indexOf("</p>", noteAt));
+    expect(noteTag).toContain("{ENGLISH_ONLY_SPECTRUM_LINE}");
+    // The nearest `{languageIsolated && (` gate opens right after the spectrum
+    // wrapper and before the <p>, so the id exists exactly when the link lists it.
+    const gateAt = src.lastIndexOf("{languageIsolated && (", noteAt);
+    expect(gateAt).toBeGreaterThan(src.indexOf("id={spectrumId}"));
+    expect(gateAt).toBeLessThan(src.lastIndexOf("<p", noteAt));
+
+    // All three elements sit inside the link they describe.
+    expect(src.indexOf("id={metaId}")).toBeGreaterThan(linkOpen);
+    expect(src.indexOf("id={spectrumId}")).toBeLessThan(linkClose);
+    expect(noteAt).toBeGreaterThan(src.indexOf("id={spectrumId}"));
+    expect(noteAt).toBeLessThan(linkClose);
+  });
+
+  it("keeps the name on aria-labelledby: the link is not named from its content (h162-a11yname-1)", () => {
+    const linkTag = openingTagsOf(src, "<Link")[0] ?? "";
+    expect(linkTag).toContain("aria-labelledby=");
+    expect(linkTag).not.toContain("aria-label=");
   });
 
   it("gives both thumbnails alt=\"\" (the headline is adjacent) and drops heroAlt", () => {

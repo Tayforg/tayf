@@ -245,6 +245,76 @@ describe("BiasSpectrum — text contrast", () => {
   });
 });
 
+// react-a11y-1 (h163): the compact bar's segments are empty divs with a title,
+// so accname step 2I (tooltip) gives each one its title as a name. The card link
+// points aria-describedby at a wrapper holding this bar, and the legend under
+// it already says every zone and percent as text, so each zone was announced
+// twice ("İktidar: 4 kaynak (%67) ... İktidar %67"). The bar container is
+// aria-hidden; the segments keep their title for the mouse hover tooltip, and
+// the legend (the text that carries the information) stays exposed.
+describe("BiasSpectrum — compact bar is hidden from assistive tech (react-a11y-1)", () => {
+  const THREE_TO_TWO = dist({ pro_government: 3, opposition: 2 });
+  const BAR_CLASS = "h-2 w-full gap-px";
+
+  /** The opening tag (`<div ...>`) of the element whose markup starts at `start`. */
+  function openingTagAt(markup: string, start: number): string {
+    const end = markup.indexOf(">", start);
+    if (end === -1) throw new Error("unterminated tag");
+    return markup.slice(start, end + 1);
+  }
+
+  /** Every opening tag that carries a title="..." attribute, in document order. */
+  function titledTags(markup: string): string[] {
+    const tags: string[] = [];
+    let from = 0;
+    for (;;) {
+      const lt = markup.indexOf("<", from);
+      if (lt === -1) return tags;
+      const tag = openingTagAt(markup, lt);
+      if (tag.includes(' title="')) tags.push(tag);
+      from = lt + tag.length;
+    }
+  }
+
+  it("the bar container carries aria-hidden=\"true\"", () => {
+    const markup = renderToStaticMarkup(
+      <BiasSpectrum distribution={THREE_TO_TWO} compact />,
+    );
+    const classAt = markup.indexOf(BAR_CLASS);
+    expect(classAt).toBeGreaterThan(-1);
+    // Exactly one bar container in the compact branch.
+    expect(markup.indexOf(BAR_CLASS, classAt + 1)).toBe(-1);
+    const barTag = openingTagAt(markup, markup.lastIndexOf("<div", classAt));
+    expect(barTag.startsWith("<div ")).toBe(true);
+    expect(barTag).toContain(' aria-hidden="true"');
+  });
+
+  it("keeps the segment titles (the mouse hover tooltip) inside the hidden bar", () => {
+    const markup = renderToStaticMarkup(
+      <BiasSpectrum distribution={THREE_TO_TWO} compact />,
+    );
+    const titled = titledTags(markup);
+    // Two bar segments, then two legend spans.
+    expect(titled).toHaveLength(4);
+    const segments = titled.filter((tag) => tag.startsWith("<div "));
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toContain('title="İktidar: 3 kaynak (%60)"');
+    expect(segments[1]).toContain('title="Muhalefet: 2 kaynak (%40)"');
+  });
+
+  it("leaves every legend <span title=...> exposed: none carries aria-hidden", () => {
+    const markup = renderToStaticMarkup(
+      <BiasSpectrum distribution={THREE_TO_TWO} compact />,
+    );
+    const legendTags = titledTags(markup).filter((tag) => tag.startsWith("<span "));
+    expect(legendTags).toHaveLength(2);
+    for (const tag of legendTags) expect(tag).not.toContain("aria-hidden");
+    // The legend text is what a screen reader reads: it carries zone and percent.
+    expect(markup).toContain("%60");
+    expect(markup).toContain("%40");
+  });
+});
+
 // Forced colors (Windows High Contrast) repaints backgrounds with system
 // colours, collapsing every zone/category segment to one flat colour. The bar
 // and the legend dots opt out so the zone colours survive (WCAG 1.4.11).

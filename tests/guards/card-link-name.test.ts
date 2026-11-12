@@ -12,6 +12,15 @@ import { describe, expect, it } from "vitest";
 // /konu/*, and axe-core's link-name rule passes it, so nothing else would
 // notice. Wrap the link in the <article> (and name it with aria-labelledby),
 // never the other way round.
+//
+// h162-a11yname-1: the name is now the "Kör nokta" badge (when the card draws
+// it) plus the headline, both through aria-labelledby, so it starts with the
+// first visible words (WCAG 2.5.3 label in name) and stays short. The meta
+// line (source count, age, Denge) and the spectrum bar are the link's
+// DESCRIPTION through aria-describedby, not part of its name. The wiring is
+// pinned in src/components/story/cluster-card.test.ts and rendered in
+// cluster-card-english.test.tsx; this guard only keeps an <article> or
+// <section> out of any link.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));

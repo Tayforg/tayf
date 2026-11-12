@@ -1611,8 +1611,21 @@ describe("ClusterDetailPage — framing comparison, zones Jev matched (h106-blin
     expect(old.html).not.toContain("benzer haber");
   });
 
-  it("a zone a toplayıcı / niş source covered keeps the spectrum wording over the matched one", async () => {
+  it("a zone a toplayıcı / niş source covered keeps the spectrum wording over the matched one, and adds the note (h162-cluster-2)", async () => {
     const { html } = await framing([...outlets, isciHaber], ["bagimsiz", "muhalefet"]);
+
+    // h162-cluster-2: the two wordings stack, as the timeline's line does.
+    expect(column(html, "Muhalefet")).toContain(
+      "— spektruma sayılan kaynaklardan haber yok · benzer haber başka kümede olabilir —",
+    );
+    expect(column(html, "Muhalefet")).not.toContain("sessizlik");
+    expect(column(html, "Bağımsız")).toContain(MATCHED);
+    // Nothing recall-matched is left over for the bare qualified line.
+    expect(count(html, QUALIFIED)).toBe(0);
+  });
+
+  it("a zone a toplayıcı / niş source covered, with no recall match, keeps today's qualified line", async () => {
+    const { html } = await framing([...outlets, isciHaber], ["bagimsiz"]);
 
     expect(column(html, "Muhalefet")).toContain(QUALIFIED);
     expect(column(html, "Muhalefet")).not.toContain("benzer haber");
@@ -2724,6 +2737,143 @@ describe("cluster/[id]/page.tsx source — optional widgets stay out of the arti
     const slotStart = code.indexOf("async function ClusterRelatedSlot");
     const slotBody = code.slice(slotStart, code.indexOf("\n}\n", slotStart) + 2);
     expect(slotBody).not.toContain("currentTimeMs(");
+  });
+});
+
+// h162-cluster-1: the timeline's "… akışı şu an sorunlu" line reads CURRENT feed
+// health, so it must not be printed for a story older than the feed-yield window,
+// and the framing column must say the same thing as the timeline. Static source
+// guard (AGENTS.md: no render tests of server components): the behaviour itself is
+// covered by story-timeline.test.ts and framing-comparison.test.tsx; this pins the
+// wiring that no unit test of those two can see.
+describe("cluster/[id]/page.tsx source — degraded-feed wording follows the story's age (h162-cluster-1)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const raw = readFileSync(join(here, "page.tsx"), "utf8");
+
+  /** Every run of whitespace becomes one space (a character walk, no regex). */
+  function collapse(src: string): string {
+    let out = "";
+    let pendingSpace = false;
+    for (const ch of src) {
+      if (ch === " " || ch === "\n" || ch === "\t" || ch === "\r") {
+        pendingSpace = out.length > 0;
+      } else {
+        if (pendingSpace) out += " ";
+        pendingSpace = false;
+        out += ch;
+      }
+    }
+    return out;
+  }
+  const flat = collapse(raw);
+
+  const count = (hay: string, needle: string) => hay.split(needle).length - 1;
+
+  /** The top-level comma-separated arguments of the call that opens at `open` (the "(" index). */
+  function callArgs(src: string, open: number): string[] {
+    const args: string[] = [];
+    let depth = 0;
+    let current = "";
+    for (let i = open + 1; i < src.length; i++) {
+      const ch = src.charAt(i);
+      if (ch === "(" || ch === "[" || ch === "{") depth++;
+      if (ch === ")" || ch === "]" || ch === "}") {
+        if (depth === 0) break;
+        depth--;
+      }
+      if (ch === "," && depth === 0) {
+        args.push(current.trim());
+        current = "";
+      } else {
+        current += ch;
+      }
+    }
+    if (current.trim() !== "") args.push(current.trim());
+    return args;
+  }
+
+  it("takes renderNowMs once, after the data await and above the loadStoryTimeline call", () => {
+    const stamp = "const renderNowMs = currentTimeMs();";
+    const call = "await loadStoryTimeline(";
+    expect(count(flat, stamp)).toBe(1);
+    expect(count(flat, call)).toBe(1);
+    const pageAt = flat.indexOf("export default async function ClusterDetailPage");
+    const awaitAt = flat.indexOf("await getClusterDetailOrThrow(id)", pageAt);
+    expect(pageAt).toBeGreaterThan(-1);
+    expect(awaitAt).toBeGreaterThan(pageAt);
+    expect(flat.indexOf(stamp)).toBeGreaterThan(awaitAt);
+    expect(flat.indexOf(stamp)).toBeLessThan(flat.indexOf(call));
+  });
+
+  it("passes renderNowMs to loadStoryTimeline as its sixth argument", () => {
+    const call = "await loadStoryTimeline(";
+    const args = callArgs(flat, flat.indexOf(call) + call.length - 1);
+    expect(args).toEqual([
+      "id",
+      "votingMembers",
+      "nonVotingMembers",
+      "languageIsolated",
+      "recallMatchedZones",
+      "renderNowMs",
+    ]);
+  });
+
+  it("loadStoryTimeline takes nowMs: number and forwards it as the seventh argument of buildStoryTimeline", () => {
+    const head = "async function loadStoryTimeline(";
+    const headAt = flat.indexOf(head);
+    expect(headAt).toBeGreaterThan(-1);
+    const params = callArgs(flat, headAt + head.length - 1);
+    expect(params.at(-1)).toBe("nowMs: number");
+
+    const build = "return buildStoryTimeline(";
+    expect(count(flat, build)).toBe(1);
+    const args = callArgs(flat, flat.indexOf(build) + build.length - 1);
+    expect(args).toHaveLength(7);
+    expect(args[6]).toBe("nowMs");
+  });
+
+  it("hands <FramingComparison> the timeline's degradedAbsentZones as a Set", () => {
+    expect(count(flat, "<FramingComparison")).toBe(1);
+    const at = flat.indexOf("<FramingComparison");
+    const tag = flat.slice(at, flat.indexOf("/>", at) + 2);
+    expect(tag).toContain("degradedZones={new Set(storyTimeline?.degradedAbsentZones ?? [])}");
+    // The timeline is built before the framing block renders.
+    expect(flat.indexOf("const storyTimeline = await loadStoryTimeline(")).toBeLessThan(at);
+  });
+
+  it("story-timeline.ts imports only types from feed-health (a value import pulls the server Supabase client)", () => {
+    // Matches on the module SPECIFIER (the closing quote right after
+    // `feed-health`), so '@/lib/clusters/feed-health', './feed-health' and
+    // '../clusters/feed-health' are all caught, and a comment that merely says
+    // "feed-health.ts" is not.
+    const feedHealthLines = (source: string): string[] =>
+      source
+        .split("\n")
+        .filter((line) => line.includes('feed-health"') || line.includes("feed-health'"));
+
+    // Self-check: the filter must be able to fail. A value import through a
+    // relative specifier next to the existing type import is flagged.
+    const synthetic = [
+      'import type { ZoneFeedHealth } from "@/lib/clusters/feed-health";',
+      'import { FEED_YIELD_WINDOW_MS } from "./feed-health";',
+      "export { FEED_YIELD_WINDOW_MS } from '../clusters/feed-health';",
+    ].join("\n");
+    const flagged = feedHealthLines(synthetic).filter(
+      (line) => !line.startsWith("import type ") || line.startsWith("export "),
+    );
+    expect(feedHealthLines(synthetic)).toHaveLength(3);
+    expect(flagged).toEqual([
+      'import { FEED_YIELD_WINDOW_MS } from "./feed-health";',
+      "export { FEED_YIELD_WINDOW_MS } from '../clusters/feed-health';",
+    ]);
+
+    const src = readFileSync(join(here, "../../../lib/clusters/story-timeline.ts"), "utf8");
+    const feedHealthImports = feedHealthLines(src);
+    expect(feedHealthImports.length).toBeGreaterThan(0);
+    for (const line of feedHealthImports) {
+      expect(line.startsWith("import type ")).toBe(true);
+      expect(line.startsWith("export ")).toBe(false);
+    }
   });
 });
 
