@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { FollowFeed } from "@/components/follow/follow-feed";
+import { ListTransferPanel } from "@/components/transfer/list-transfer-panel";
 import { noindexPageMetadata } from "@/lib/seo/page-metadata";
 
 // Server shell around the client FollowFeed. Follows live in localStorage, so
@@ -40,6 +41,7 @@ export default function TakipPage() {
           Kaydedilenler
         </Link>
       </p>
+      <ListTransferPanel />
       <FollowFeed />
     </div>
   );

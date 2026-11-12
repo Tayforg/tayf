@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { SavedList } from "@/components/bookmark/saved-list";
+import { ListTransferPanel } from "@/components/transfer/list-transfer-panel";
 import { noindexPageMetadata } from "@/lib/seo/page-metadata";
 
 // Server shell around the client SavedList. Bookmarks live in
@@ -39,6 +40,7 @@ export default function SavedPage() {
           Takip ettiklerim
         </Link>
       </p>
+      <ListTransferPanel />
       <SavedList />
     </div>
   );

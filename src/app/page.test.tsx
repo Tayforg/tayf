@@ -28,6 +28,13 @@ vi.mock("@/lib/clusters/search-query", () => ({
   searchClusters: (q: string) => searchClusters(q),
 }));
 
+// h153: the home search's one link row (a BIST code or an outlet name). The
+// lookup is mocked: its rules are pinned in src/lib/search/search-intent*.test.ts.
+const loadSearchIntent = vi.fn();
+vi.mock("@/lib/search/search-intent-query", () => ({
+  loadSearchIntent: (q: string) => loadSearchIntent(q),
+}));
+
 // composeSearchView passes through to the real implementation unless a test
 // installs `viewOverride` (used to pin how the page renders `archiveCapped`
 // without depending on how search-view derives it).
@@ -202,6 +209,9 @@ function feedOf(...bundles: ReturnType<typeof bundle>[]) {
 beforeEach(() => {
   getPoliticsClusters.mockReset();
   searchClusters.mockReset();
+  // mockReset wipes the resolved value, so the default is set AFTER it.
+  loadSearchIntent.mockReset();
+  loadSearchIntent.mockResolvedValue(null);
   viewOverride = null;
   nowOverrideMs = null;
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1284,5 +1294,229 @@ describe("HomePage — the feed container", () => {
           (el.type as { name?: string }).name === "SearchBar",
       ),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h153: "/?q=THYAO" or "/?q=Hürriyet" used to land on the archive and say
+// 'Hiç haber bulunamadı' although /ekonomi/THYAO and /source/hurriyet exist.
+// When the query is a traded BIST code or an active outlet's name, ONE link row
+// sits under the "için N sonuç" line and above the first story. Nothing else
+// on the page changes: the results, the counts, the live region and the follow
+// button are the same as without the row, and there is no redirect.
+// ---------------------------------------------------------------------------
+
+describe("HomeFeed — search intent row (h153)", () => {
+  const TICKER = { kind: "ticker", ticker: "THYAO" } as const;
+  const SOURCE = { kind: "source", slug: "hurriyet", name: "Hürriyet" } as const;
+  const EXPAND = new Set(["SearchIntentRow"]);
+
+  /** The links of the intent row: the only elements with an /ekonomi/ or /source/ href. */
+  function intentLinks(tree: unknown): Elementish[] {
+    return collectRendered(tree, EXPAND).filter((el) => {
+      const href = el.props?.href;
+      return typeof href === "string" && (href.startsWith("/ekonomi/") || href.startsWith("/source/"));
+    });
+  }
+
+  function intentRowText(tree: unknown): string {
+    const row = collectElements(tree).find((e) => typeName(e) === "SearchIntentRow");
+    if (!row) return "";
+    return textOf((row.type as (p: unknown) => unknown)(row.props));
+  }
+
+  async function render(q: string | undefined, intent: unknown = null) {
+    loadSearchIntent.mockResolvedValue(intent);
+    getPoliticsClusters.mockResolvedValue(
+      feedOf(bundle("t1", "THYAO hisseleri yükseldi"), bundle("t2", "THYAO için hedef fiyat")),
+    );
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    return (await HomeFeed({
+      searchParams: Promise.resolve(q === undefined ? {} : { q }),
+    })) as Elementish;
+  }
+
+  it("renders the ticker link between the result count and the first story, and leaves the stories unchanged", async () => {
+    const without = await render("thyao", null);
+    const withRow = await render("thyao", TICKER);
+
+    const links = intentLinks(withRow);
+    expect(links).toHaveLength(1);
+    const link = links[0]!;
+    expect(link.props?.href).toBe("/ekonomi/THYAO");
+    expect(textOf(link)).toBe("THYAO hisse sayfası");
+    expect(link.props?.prefetch).toBe(false);
+    expect(intentRowText(withRow)).toContain("Borsa İstanbul kodu:");
+
+    // One walk, so the positions are comparable (every walk expands the row into fresh objects).
+    const order = collectRendered(withRow, EXPAND);
+    const linkAt = order.findIndex((e) => e.props?.href === "/ekonomi/THYAO");
+    const countAt = order.findIndex((e) => typeName(e) === "SearchEcho");
+    const firstCardAt = order.findIndex((e) => e.props?.cluster !== undefined);
+    expect(countAt).toBeGreaterThan(-1);
+    expect(firstCardAt).toBeGreaterThan(-1);
+    expect(linkAt).toBeGreaterThan(countAt);
+    expect(linkAt).toBeLessThan(firstCardAt);
+
+    // Not one thing about the results moved.
+    expect(clusterCardIds(withRow)).toEqual(["t1", "t2"]);
+    expect(clusterCardIds(withRow)).toEqual(clusterCardIds(without));
+    expect(liveRegionText(withRow)).toBe(liveRegionText(without));
+    expect(visibleText(withRow)).toContain("“thyao” için 2 sonuç");
+    expect(collectElements(withRow).some((e) => e.type === FollowButton)).toBe(true);
+    expect(loadSearchIntent).toHaveBeenCalledWith("thyao");
+    expect(intentLinks(without)).toHaveLength(0);
+  });
+
+  it("renders the source link", async () => {
+    const tree = await render("hürriyet", SOURCE);
+
+    const links = intentLinks(tree);
+    expect(links).toHaveLength(1);
+    expect(links[0]?.props?.href).toBe("/source/hurriyet");
+    expect(textOf(links[0])).toBe("Hürriyet kaynak sayfası");
+    expect(links[0]?.props?.prefetch).toBe(false);
+    expect(intentRowText(tree)).toContain("Haber kaynağı:");
+  });
+
+  it("keeps the same number of top-level children with and without the row (no layout shift)", async () => {
+    const without = await render("thyao", null);
+    const withRow = await render("thyao", TICKER);
+    const count = (t: Elementish) => (t.props?.children as unknown[]).length;
+    expect(count(withRow)).toBe(count(without));
+  });
+
+  it("uses the chip class of EntityHubChips: a fixed height, no opacity on the text colour", async () => {
+    const tree = await render("thyao", TICKER);
+    const cls = String(intentLinks(tree)[0]?.props?.className);
+    expect(cls).toContain("inline-flex items-center min-h-6 max-sm:min-h-11 rounded-full border border-border/60");
+    expect(cls).toContain("text-foreground");
+    expect(cls).not.toContain("text-foreground/");
+    const row = collectRendered(tree, EXPAND).find((e) => e.type === "p" && String(e.props?.className).includes("flex-wrap"));
+    expect(String(row?.props?.className)).toContain("text-muted-foreground");
+    expect(String(row?.props?.className)).not.toContain("text-muted-foreground/");
+  });
+
+  it("is a hookless server component that adds no client element", async () => {
+    const tree = await render("thyao", TICKER);
+    const row = collectElements(tree).find((e) => typeName(e) === "SearchIntentRow");
+    expect(row).toBeDefined();
+    // Callable as a plain function: a component with a hook would throw outside a render.
+    expect(() => (row!.type as (p: unknown) => unknown)(row!.props)).not.toThrow();
+  });
+
+  it("escapes an outlet name that carries markup", async () => {
+    // The page's own row, rendered for real: React escapes the name, nothing is HTML.
+    const tree = await render("hürriyet", { kind: "source", slug: "hurriyet", name: "<b>Hürriyet</b>" });
+    const row = collectElements(tree).find((e) => typeName(e) === "SearchIntentRow");
+    const markup = renderToStaticMarkup(createElement(row!.type as never, row!.props as never));
+    expect(markup).toContain("&lt;b&gt;Hürriyet&lt;/b&gt; kaynak sayfası");
+    expect(markup).not.toContain("<b>");
+    expect(markup).toContain('href="/source/hurriyet"');
+  });
+
+  it("renders no row when the lookup found nothing", async () => {
+    const tree = await render("thyao", null);
+    expect(intentLinks(tree)).toHaveLength(0);
+    expect(intentRowText(tree)).toBe("");
+    expect(visibleText(tree)).not.toContain("hisse sayfası");
+    expect(visibleText(tree)).not.toContain("kaynak sayfası");
+  });
+
+  it("copes with a lookup that resolves undefined (an unset mock) instead of rendering a broken row", async () => {
+    const tree = await render("thyao", undefined);
+    expect(collectElements(tree).some((e) => typeName(e) === "SearchIntentRow")).toBe(false);
+  });
+
+  it("asks for the lookup with the first value of a repeated ?q=", async () => {
+    loadSearchIntent.mockResolvedValue(TICKER);
+    getPoliticsClusters.mockResolvedValue(feedOf());
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    await HomeFeed({ searchParams: Promise.resolve({ q: ["thyao", "kchol"] }) });
+    expect(loadSearchIntent).toHaveBeenCalledTimes(1);
+    expect(loadSearchIntent).toHaveBeenCalledWith("thyao");
+  });
+
+  it("no lookup without a search or for a too-short one", async () => {
+    for (const q of [undefined, "a", "!!", "  ", ""]) {
+      loadSearchIntent.mockClear();
+      // The mock WOULD answer with a link: the page must not even ask.
+      const tree = await render(q, TICKER);
+      expect(loadSearchIntent, JSON.stringify(q)).not.toHaveBeenCalled();
+      expect(intentLinks(tree), JSON.stringify(q)).toHaveLength(0);
+      expect(collectElements(tree).some((e) => typeName(e) === "SearchIntentRow"), JSON.stringify(q)).toBe(false);
+    }
+  });
+
+  it("the plain home page carries neither link and does no extra read", async () => {
+    const tree = await render(undefined, SOURCE);
+    expect(loadSearchIntent).not.toHaveBeenCalled();
+    expect(visibleText(tree)).not.toContain("hisse sayfası");
+    expect(visibleText(tree)).not.toContain("kaynak sayfası");
+    expect(clusterCardIds(tree)).toEqual(["t1", "t2"]);
+  });
+
+  it("keeps the link when the archive fails and nothing matched", async () => {
+    loadSearchIntent.mockResolvedValue(TICKER);
+    getPoliticsClusters.mockResolvedValue(feedOf());
+    searchClusters.mockResolvedValue({ ok: false });
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "thyao" }) });
+
+    expect(intentLinks(tree)).toHaveLength(1);
+    expect(collectRendered(tree, EXPAND).some((e) => typeName(e) === "SearchUnavailable")).toBe(true);
+  });
+
+  it("keeps the link next to the empty-search card when the search simply found nothing", async () => {
+    loadSearchIntent.mockResolvedValue(TICKER);
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("b", "Başbakan açıkladı")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "thyao" }) });
+
+    expect(intentLinks(tree)).toHaveLength(1);
+    expect(visibleText(tree)).toContain("Hiç haber bulunamadı");
+    expect(visibleText(tree)).toContain("“thyao” için 0 sonuç");
+  });
+
+  it("leaves the FeedUnavailable state alone: no row, still three children", async () => {
+    loadSearchIntent.mockResolvedValue(TICKER);
+    getPoliticsClusters.mockRejectedValue(new Error("db down"));
+
+    const tree = (await HomeFeed({ searchParams: Promise.resolve({ q: "thyao" }) })) as Elementish;
+
+    expect(tree.props?.children as Elementish[]).toHaveLength(3);
+    expect(intentLinks(tree)).toHaveLength(0);
+  });
+
+  it("runs the lookup in parallel with the feed and the archive (none waits for another)", async () => {
+    // A latch that opens only once all three have STARTED: a sequential page would wait on it forever.
+    let started = 0;
+    let open!: () => void;
+    const latch = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const arrive = async () => {
+      started += 1;
+      if (started === 3) open();
+      await latch;
+    };
+    getPoliticsClusters.mockImplementation(async () => {
+      await arrive();
+      return feedOf();
+    });
+    searchClusters.mockImplementation(async () => {
+      await arrive();
+      return { ok: true, bundles: [] };
+    });
+    loadSearchIntent.mockImplementation(async () => {
+      await arrive();
+      return TICKER;
+    });
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "thyao" }) });
+
+    expect(started).toBe(3);
+    expect(intentLinks(tree)).toHaveLength(1);
   });
 });

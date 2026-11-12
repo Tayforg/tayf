@@ -38,6 +38,8 @@ import {
 } from "@/lib/clusters/turkish-query";
 import { groupByDayBucket } from "@/lib/home/day-buckets";
 import { shouldStampLastVisit } from "@/lib/last-visit";
+import { searchIntentLink, type SearchIntent } from "@/lib/search/search-intent";
+import { loadSearchIntent } from "@/lib/search/search-intent-query";
 import {
   MIN_QUERY_LENGTH,
   displayQuery,
@@ -307,13 +309,18 @@ export async function HomeFeed({
   // the canonical decision wins in the live region too.
   const tooShortStatus = `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
 
-  // Neither fetch depends on the other — run them in parallel. `search` is
+  // None of the fetches depends on another — run them in parallel. `search` is
   // only attempted for a searchable query (searchClusters itself also
   // enforces the floor, but skipping the call entirely here avoids an
   // unnecessary await on a query too short to ever match).
-  const [feed, search] = await Promise.all([
+  // h153: `intent` is the one link row for a query that is a traded BIST code or
+  // an outlet's name (SearchIntentRow). It is asked for only on a searchable
+  // query, so the plain home page does no extra read, and loadSearchIntent never
+  // rejects (a failed lookup is null: no row).
+  const [feed, search, intent] = await Promise.all([
     loadFeed(),
     searchable ? searchClusters(q) : Promise.resolve(null),
+    searchable ? loadSearchIntent(q) : Promise.resolve(null),
   ]);
 
   if (feed === null) {
@@ -517,13 +524,16 @@ export async function HomeFeed({
       {/* The echo is capped and wrapped (SearchEcho): a pasted URL of 170
           unbroken characters used to push the page to 1193 px at 390 px. */}
       {searchable && (
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="min-w-0 text-xs text-muted-foreground break-words [overflow-wrap:anywhere]">
-            <SearchEcho q={echoQ} /> için {resultPhrase}
-            {cutNote !== null && `. ${cutNote}`}
-          </p>
-          <FollowButton kind="q" value={q} />
-        </div>
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="min-w-0 text-xs text-muted-foreground break-words [overflow-wrap:anywhere]">
+              <SearchEcho q={echoQ} /> için {resultPhrase}
+              {cutNote !== null && `. ${cutNote}`}
+            </p>
+            <FollowButton kind="q" value={q} />
+          </div>
+          {intent ? <SearchIntentRow intent={intent} /> : null}
+        </>
       )}
 
       {!q && bundles.length === 0 && breakingBundles.length === 0 ? (
@@ -620,6 +630,36 @@ export async function HomeFeed({
         </>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Search intent row (h153)
+// ---------------------------------------------------------------------------
+
+// One link under the result count when the query is a traded BIST code or an
+// active outlet's name: "Borsa İstanbul kodu: THYAO hisse sayfası" or "Haber
+// kaynağı: Hürriyet kaynak sayfası". The rules and the copy live in
+// search-intent.ts (searchIntentLink); `intent` is already validated there (a code
+// from the traded set, a slug that passes SOURCE_SLUG_RE), and the name is a React
+// child, so it is escaped. No client JS (a hookless server component), no prefetch
+// (the target is a DB-backed page and a search can show one on every keystroke
+// settle), and a fixed height (the chip class of EntityHubChips: 24 px, 44 px on a
+// phone), so the results below do not move once it paints. It is not in the live
+// region: the count line is, and the link is a way out, not a result.
+function SearchIntentRow({ intent }: { intent: SearchIntent }) {
+  const { href, lead, linkText } = searchIntentLink(intent);
+  return (
+    <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>{lead}</span>
+      <Link
+        href={href}
+        prefetch={false}
+        className="inline-flex items-center min-h-6 max-sm:min-h-11 rounded-full border border-border/60 bg-muted/50 px-3 text-xs font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {linkText}
+      </Link>
+    </p>
   );
 }
 

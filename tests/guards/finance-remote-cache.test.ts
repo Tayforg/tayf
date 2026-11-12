@@ -23,10 +23,10 @@ import { describe, expect, it } from "vitest";
 // cache-life-after-attempt and cache-retry-prerender keep pinning that shape.
 //
 // What this file enforces: every function-level cache directive in
-// src/lib/finance/queries.ts and quotes.ts, mapped to the nearest preceding
-// `async function <name>`, is `"use cache: remote"` -- except the ADMIN
-// allow-list below -- and a directive on a function that is in neither list
-// fails, so a new reader must be classified on purpose.
+// src/lib/finance/queries.ts, quotes.ts and traded-tickers.ts, mapped to the
+// nearest preceding `async function <name>`, is `"use cache: remote"` --
+// except the ADMIN allow-list below -- and a directive on a function that is
+// in neither list fails, so a new reader must be classified on purpose.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -90,6 +90,7 @@ const ADMIN_INSTANCE_LOCAL = [
 
 const queries = directives(readFileSync(join(FINANCE_DIR, "queries.ts"), "utf-8"));
 const quotes = directives(readFileSync(join(FINANCE_DIR, "quotes.ts"), "utf-8"));
+const traded = directives(readFileSync(join(FINANCE_DIR, "traded-tickers.ts"), "utf-8"));
 
 const names = (list: readonly Directive[]): string[] => list.map((d) => d.fn).sort();
 
@@ -117,9 +118,20 @@ describe("finance remote cache (h21-perf-2)", () => {
     expect(quotes[0]?.directive).toBe(REMOTE);
   });
 
+  it('traded-tickers.ts getTradedTickersCached (home search ticker set) is "use cache: remote" and is the only directive there', () => {
+    expect(traded).toHaveLength(1);
+    expect(traded[0]?.fn).toBe("getTradedTickersCached");
+    expect(traded[0]?.directive).toBe(REMOTE);
+  });
+
   it("fails any directive that is in neither list", () => {
-    const known = new Set<string>([...PUBLIC_REMOTE, ...ADMIN_INSTANCE_LOCAL, "getQuote"]);
-    const unclassified = [...queries, ...quotes].filter((d) => !known.has(d.fn));
+    const known = new Set<string>([
+      ...PUBLIC_REMOTE,
+      ...ADMIN_INSTANCE_LOCAL,
+      "getQuote",
+      "getTradedTickersCached",
+    ]);
+    const unclassified = [...queries, ...quotes, ...traded].filter((d) => !known.has(d.fn));
     expect(unclassified.map((d) => `${d.fn}:${d.line}`)).toEqual([]);
   });
 });

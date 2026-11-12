@@ -731,6 +731,8 @@ describe("kap-ingest upstream outage classification (h30-alerts-5)", () => {
     upstreamErrors: number;
     tayfErrors: number;
     upstream_unavailable?: boolean;
+    failedDays: string[];
+    partial?: boolean;
   }
 
   const DAY1 = "2026-09-10";
@@ -1144,6 +1146,223 @@ describe("kap-ingest upstream outage classification (h30-alerts-5)", () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // h153-kap-health: a partial cycle (at least one day of the range ingested,
+  // at least one did not) answers 200 ok:true exactly as before, but the body
+  // now says which days did not ingest (failedDays) and marks the cycle
+  // partial. `ok` and the HTTP status are deliberately unchanged:
+  // scripts/kap-backfill.mjs aborts on !json.ok, and ops_health_report row 2
+  // counts status codes only, so a 502 here would turn it red within five
+  // kap-drain ticks.
+  // -------------------------------------------------------------------------
+  describe("partial cycles (h153-kap-health)", () => {
+    // Default window at 2026-09-12T10:00:00Z: TODAY 2026-09-12, YDAY 2026-09-11
+    // (istanbulDate). Only Date is faked, so no retry sleep is ever involved:
+    // a KAP 502 is not retried and a 403 is returned at once.
+    const TODAY = "2026-09-12";
+    const YDAY = "2026-09-11";
+    const DEFAULT_RANGE_LENGTH = 2;
+
+    const freezeClock = () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-12T10:00:00Z"));
+    };
+    const items = (n: number) => new Response(JSON.stringify([kapItem(n)]), { status: 200 });
+    const kap502 = () => new Response("bad gateway", { status: 502 });
+    // The invariant every case shares: failedDays is the range minus the days
+    // that ingested.
+    const expectInvariant = (json: CycleBody, rangeLength: number) => {
+      expect(json.failedDays.length).toBe(rangeLength - json.days);
+    };
+
+    it("today fails with a KAP 502 after yesterday ingested: 200, ok true, partial true, failedDays [today]", async () => {
+      freezeClock();
+      fetchImpl = async (_url, init) => (dayOf(init) === YDAY ? items(1) : kap502());
+
+      const { res, json } = await post({});
+
+      expect(res.status).toBe(200);
+      expect(json.ok).toBe(true);
+      expect(json.partial).toBe(true);
+      expect(json.failedDays).toEqual([TODAY]);
+      expect(json.days).toBe(1);
+      expect(json.upstreamErrors).toBe(1);
+      expect(json.tayfErrors).toBe(0);
+      expect(json.upstream_unavailable).toBeUndefined();
+      expect(json.errors.filter((e) => e.startsWith(`${TODAY}:`))).toHaveLength(1);
+      expect(kapSentryCalls.captured).toHaveLength(0);
+      expectInvariant(json, DEFAULT_RANGE_LENGTH);
+    });
+
+    it("today fails with a network error after yesterday ingested: same contract", async () => {
+      freezeClock();
+      fetchImpl = async (_url, init) => {
+        if (dayOf(init) === YDAY) return items(1);
+        throw new TypeError("fetch failed");
+      };
+
+      const { res, json } = await post({});
+
+      expect(res.status).toBe(200);
+      expect(json.ok).toBe(true);
+      expect(json.partial).toBe(true);
+      expect(json.failedDays).toEqual([TODAY]);
+      expect(json.upstreamErrors).toBe(1);
+      expectInvariant(json, DEFAULT_RANGE_LENGTH);
+    });
+
+    it("yesterday fails, today ingests: partial true, failedDays [yesterday]", async () => {
+      freezeClock();
+      fetchImpl = async (_url, init) => (dayOf(init) === YDAY ? kap502() : items(2));
+
+      const { res, json } = await post({});
+
+      expect(res.status).toBe(200);
+      expect(json.ok).toBe(true);
+      expect(json.partial).toBe(true);
+      expect(json.failedDays).toEqual([YDAY]);
+      expectInvariant(json, DEFAULT_RANGE_LENGTH);
+    });
+
+    it("a breaker trip on today after yesterday ingested: still 200, partial true, clear then trip written and nothing else", async () => {
+      freezeClock();
+      fetchImpl = async (_url, init) =>
+        dayOf(init) === YDAY ? items(3) : new Response("forbidden", { status: 403 });
+
+      const { res, json } = await post({});
+
+      // unchanged behaviour, pinned: days is 1, so ok stays true and the answer 200
+      expect(res.status).toBe(200);
+      expect(json.ok).toBe(true);
+      expect(json.partial).toBe(true);
+      expect(json.failedDays).toEqual([TODAY]);
+      expect(json.tayfErrors).toBe(1);
+      expect(stateUpdates()).toHaveLength(2);
+      expect(patchOf(0)).toMatchObject({ last_error: null, last_status: 200 });
+      expect(patchOf(1)).toMatchObject({ last_status: 403 });
+      expect(patchOf(1)).toHaveProperty("blocked_until");
+      expect(blockedWrites()).toHaveLength(1);
+      expectInvariant(json, DEFAULT_RANGE_LENGTH);
+    });
+
+    it("the 50 s deadline before today: failedDays [today], partial true, no error counted by cause", async () => {
+      freezeClock();
+      fetchImpl = async (_url, init) => {
+        if (dayOf(init) === YDAY) {
+          vi.setSystemTime(Date.now() + 60_000);
+          return items(4);
+        }
+        return kap502();
+      };
+
+      const { res, json } = await post({});
+
+      expect(json.errors).toContain(`deadline before ${TODAY}`);
+      expect(json.failedDays).toEqual([TODAY]);
+      expect(json.partial).toBe(true);
+      expect(json.upstreamErrors).toBe(0);
+      expect(json.tayfErrors).toBe(0);
+      expect(res.status).toBe(200);
+      expectInvariant(json, DEFAULT_RANGE_LENGTH);
+    });
+
+    it("a healthy default cycle: failedDays [] and no partial key", async () => {
+      freezeClock();
+      fetchImpl = async () => items(5);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { res, json } = await post({});
+
+      expect(json.failedDays).toEqual([]);
+      expect(json.partial).toBeUndefined();
+      expect(json).not.toHaveProperty("partial");
+      expect(json.ok).toBe(true);
+      expect(res.status).toBe(200);
+      expect(warnSpy.mock.calls.some((c) => String(c[0]).includes("partial cycle"))).toBe(false);
+      expectInvariant(json, DEFAULT_RANGE_LENGTH);
+    });
+
+    it("a total KAP outage lists every day, no partial, still 200 upstream_unavailable", async () => {
+      fetchImpl = async () => kap502();
+
+      const { res, json } = await post(RANGE);
+
+      expect(json.failedDays).toEqual([DAY1, DAY2]);
+      expect(json.partial).toBeUndefined();
+      expect(json.ok).toBe(false);
+      expect(json.upstream_unavailable).toBe(true);
+      expect(res.status).toBe(200);
+      expectInvariant(json, 2);
+    });
+
+    it("a breaker trip on the first day lists the untried day too, no partial, still 502", async () => {
+      fetchImpl = async () => new Response("forbidden", { status: 403 });
+
+      const { res, json } = await post(RANGE);
+
+      expect(json.failedDays).toEqual([DAY1, DAY2]);
+      expect(json.days).toBe(0);
+      expect(json.partial).toBeUndefined();
+      expect(res.status).toBe(502);
+      expect(json.errors).toHaveLength(1);
+      expectInvariant(json, 2);
+    });
+
+    it("an upsert error is not a failed day (scope unchanged): failedDays [] and no partial", async () => {
+      kapSupabaseFake.faults.disclosuresUpsertError = true;
+      fetchImpl = async () => items(1);
+
+      const { res, json } = await post(RANGE);
+
+      expect(json.days).toBe(2);
+      expect(json.failedDays).toEqual([]);
+      expect(json.partial).toBeUndefined();
+      expect(json.tayfErrors).toBe(2);
+      expect(res.status).toBe(200);
+      expectInvariant(json, 2);
+    });
+
+    it("a partial cycle logs one warn line and sends no Sentry event", async () => {
+      freezeClock();
+      fetchImpl = async (_url, init) => (dayOf(init) === YDAY ? items(1) : kap502());
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { json } = await post({});
+
+      expect(json.partial).toBe(true);
+      // toHaveBeenCalledWith, not a call count: the REVALIDATE_URL warn also fires
+      expect(warnSpy).toHaveBeenCalledWith("[kap-ingest] partial cycle: 2026-09-12 not ingested");
+      expect(warnSpy.mock.calls.filter((c) => String(c[0]).includes("partial cycle"))).toHaveLength(1);
+      expect(kapSentryCalls.captured).toHaveLength(0);
+    });
+
+    it("failedDays keeps range order and the warn line joins several days with a comma", async () => {
+      fetchImpl = async (_url, init) => (dayOf(init) === DAY2 ? items(7) : kap502());
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { res, json } = await post({ from: DAY1, to: DAY3 });
+
+      expect(res.status).toBe(200);
+      expect(json.ok).toBe(true);
+      expect(json.partial).toBe(true);
+      expect(json.failedDays).toEqual([DAY1, DAY3]);
+      expect(warnSpy).toHaveBeenCalledWith(`[kap-ingest] partial cycle: ${DAY1},${DAY3} not ingested`);
+      expectInvariant(json, 3);
+    });
+
+    it("an explicit backfill range with one failed day keeps ok true (scripts/kap-backfill.mjs reads json.ok)", async () => {
+      fetchImpl = async (_url, init) => (dayOf(init) === DAY1 ? kap502() : items(6));
+
+      const { res, json } = await post(RANGE);
+
+      expect(json.ok).toBe(true);
+      expect(json.partial).toBe(true);
+      expect(json.failedDays).toEqual([DAY1]);
+      expect(res.status).toBe(200);
+      expectInvariant(json, 2);
+    });
+  });
+
   describe("docs/ops-heartbeat.md row 2", () => {
     const doc = readFileSync(resolve(__dirname, "..", "..", "docs", "ops-heartbeat.md"), "utf8");
     const row2 = doc.split("\n").find((l) => l.startsWith("| 2 | `edge_http_errors_30m`")) ?? "";
@@ -1164,6 +1383,13 @@ describe("kap-ingest upstream outage classification (h30-alerts-5)", () => {
       expect(row2).toMatch(/mixed cycle/);
       expect(row2).toMatch(/circuit-breaker trip/);
       expect(row2).toContain("502");
+    });
+
+    it("says a partial cycle answers 200 with partial and failedDays and does not count", () => {
+      expect(row2).toContain('"partial":true');
+      expect(row2).toContain("failedDays");
+      expect(row2).toContain("h153");
+      expect(row2).toContain("[kap-ingest] partial cycle:");
     });
   });
 });

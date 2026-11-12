@@ -10,12 +10,14 @@ import {
   hasFollow,
   markSeen as markSeenIn,
   MAX_FOLLOWS,
+  mergeFollows,
   parseStoredFollows,
   removeFollow,
   serializeFollows,
   type AddFollowResult,
   type Follow,
   type FollowKind,
+  type FollowMerge,
   type SeenRows,
 } from "@/lib/follows/follows";
 
@@ -55,10 +57,11 @@ function readList(): readonly Follow[] {
   return cachedList;
 }
 
-function commit(next: readonly Follow[]): void {
+/** True when nothing changed or the list was written; false when localStorage refused it (the list lives on in memory). */
+function commit(next: readonly Follow[]): boolean {
   const serialized = serializeFollows(next);
   // Nothing changed (e.g. removing an unknown key): no write, no notification.
-  if (serialized === cachedSerialized) return;
+  if (serialized === cachedSerialized) return true;
   cachedSerialized = serialized;
   cachedList = next.length === 0 ? EMPTY : Object.freeze([...next]);
   try {
@@ -71,6 +74,7 @@ function commit(next: readonly Follow[]): void {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(FOLLOWS_CHANGE_EVENT));
   }
+  return !storageBroken;
 }
 
 function subscribe(onChange: () => void): () => void {
@@ -127,6 +131,23 @@ export const followsStore = {
   ): void {
     if (shown.size === 0) return;
     commit(markSeenIn(readList(), shown, nowIso));
+  },
+
+  /**
+   * Merges follows from a transfer code (mergeFollows): adds what is missing,
+   * removes nothing, stays within MAX_FOLLOWS. Reads storage fresh. Nothing is
+   * written when nothing is added. `stored` is false when a write is refused, or
+   * when nothing was added while the store is memory-only (storageBroken): the
+   * "existing" follows then live only in memory, so a retry must not claim they
+   * are saved. An empty `incoming` (a bookmarks-only code) is always stored.
+   */
+  importMany(
+    incoming: ReadonlyArray<{ kind: FollowKind; value: string }>,
+    nowIso: string = new Date().toISOString(),
+  ): FollowMerge & { stored: boolean } {
+    const merge = mergeFollows(readList(), incoming, nowIso);
+    if (merge.added === 0) return { ...merge, stored: incoming.length === 0 || !storageBroken };
+    return { ...merge, stored: commit(merge.list) };
   },
 };
 

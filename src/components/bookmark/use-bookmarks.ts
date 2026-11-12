@@ -2,9 +2,11 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 import {
+  mergeBookmarkIds,
   normaliseBookmarkId,
   normaliseBookmarkIds,
   toggleBookmarkId,
+  type BookmarkMerge,
 } from "@/components/bookmark/bookmark-ids";
 import { captureSnapshot, removeSnapshot } from "@/components/bookmark/bookmark-snapshots";
 import { pinForOffline, unpinForOffline } from "@/lib/pwa/offline-pins";
@@ -18,6 +20,8 @@ const EMPTY_SET: ReadonlySet<string> = new Set();
 // useSyncExternalStore to avoid infinite loops).
 let cachedSerialized: string | null = null;
 let cachedSet: Set<string> = new Set();
+// true while cachedSet holds ids localStorage refused
+let memoryOnly = false;
 
 function readSet(): Set<string> {
   if (typeof window === "undefined") return cachedSet;
@@ -27,6 +31,8 @@ function readSet(): Set<string> {
   } catch {
     return cachedSet;
   }
+  // Storage answered, so whatever is returned below mirrors it.
+  memoryOnly = false;
   if (raw === cachedSerialized) return cachedSet;
   cachedSerialized = raw;
   try {
@@ -39,20 +45,25 @@ function readSet(): Set<string> {
   return cachedSet;
 }
 
-function writeSet(next: Set<string>) {
+/** False when localStorage refused the write; toggle ignores it, importBookmarkIds reports it. */
+function writeSet(next: Set<string>): boolean {
   const serialized = JSON.stringify(Array.from(next));
   cachedSerialized = serialized;
   cachedSet = next;
+  let stored = true;
   try {
     localStorage.setItem(KEY, serialized);
   } catch {
-    // ignore storage failures
+    // refused (private mode, quota): reported through the return value
+    stored = false;
   }
+  memoryOnly = !stored;
   // Notify all subscribers in this tab — `storage` events only fire
   // for *other* tabs, so we dispatch a synthetic event for ourselves.
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event("tayf:bookmarks-change"));
   }
+  return stored;
 }
 
 function subscribe(onChange: () => void): () => void {
@@ -70,6 +81,30 @@ function subscribe(onChange: () => void): () => void {
 
 function getServerSnapshot(): ReadonlySet<string> {
   return EMPTY_SET;
+}
+
+/**
+ * Merges ids from a transfer code into the saved list: adds what is missing,
+ * removes nothing, stays within `max` (see mergeBookmarkIds). Reads storage fresh,
+ * not a render snapshot.
+ *
+ * Deliberately NOT toggle: toggle calls captureSnapshot (a saved_clusters RPC) and
+ * pinForOffline (asks the service worker to download the page), and both make
+ * requests, and an import makes none. SwRegistrar pins the imported ids on the
+ * next page load by itself.
+ *
+ * `stored` is false when a write is refused, or when nothing was added while the
+ * list is memory-only (memoryOnly): ids that exist only in memory are not saved,
+ * so a retry must not say they are. An empty `incoming` (a follows-only code) is
+ * always stored.
+ */
+export function importBookmarkIds(
+  incoming: readonly string[],
+  max: number,
+): BookmarkMerge & { stored: boolean } {
+  const merge = mergeBookmarkIds(Array.from(readSet()), incoming, max);
+  if (merge.added === 0) return { ...merge, stored: incoming.length === 0 || !memoryOnly };
+  return { ...merge, stored: writeSet(new Set(merge.next)) };
 }
 
 export function useBookmarks() {

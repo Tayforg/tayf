@@ -130,6 +130,21 @@ export async function getActiveSourceSlugs(): Promise<string[] | null> {
   return r.ok ? r.data.map((row) => row.slug) : null;
 }
 
+/**
+ * Slug and display name of every active source, in the registry's order (by name),
+ * or `null` when the cached read failed.
+ *
+ * The twin of `getActiveSourceSlugs`, for the home search's "Haber kaynağı" link
+ * (h153): the same cached entry, so no extra read, and the same NULL contract (no
+ * live retry, no `connection()`, never throws). It takes no argument, so a stream
+ * of unique search queries cannot create new cache keys. Only the two fields the
+ * match needs leave the module, never the id, the feed URL or the bias.
+ */
+export async function getActiveSourceNames(): Promise<Array<{ slug: string; name: string }> | null> {
+  const r = await getRegistryRowsCached();
+  return r.ok ? r.data.map((row) => ({ slug: row.slug, name: row.name })) : null;
+}
+
 // ---------------------------------------------------------------------------
 // One source's detail
 // ---------------------------------------------------------------------------

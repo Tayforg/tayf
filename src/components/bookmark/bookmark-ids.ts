@@ -42,6 +42,41 @@ export interface BookmarkToggle {
   key: string;
 }
 
+export interface BookmarkMerge {
+  /** `current` as it was, then the ids that were added. */
+  next: string[];
+  added: number;
+  /** Incoming ids (distinct) that were already in `current`. */
+  existing: number;
+  /** New incoming ids left out because the list is at `max`. */
+  skipped: number;
+}
+
+/**
+ * Merge `incoming` ids into `current` without ever removing one. `current` is kept
+ * exactly as it is, even when it is already longer than `max` (a legacy list). New
+ * ids go on the end, and when they do not all fit the NEWEST ones are kept. The
+ * inputs are never mutated.
+ */
+export function mergeBookmarkIds(
+  current: readonly string[],
+  incoming: readonly string[],
+  max: number,
+): BookmarkMerge {
+  const have = new Set(current);
+  const distinct = normaliseBookmarkIds(incoming);
+  const candidates = distinct.filter((id) => !have.has(id));
+  const room = Math.max(0, max - current.length);
+  // Not slice(-room): slice(-0) returns everything.
+  const toAdd = room === 0 ? [] : candidates.slice(Math.max(0, candidates.length - room));
+  return {
+    next: [...current, ...toAdd],
+    added: toAdd.length,
+    existing: distinct.length - candidates.length,
+    skipped: candidates.length - toAdd.length,
+  };
+}
+
 /** Add or remove `id` (canonicalised) and return the new set, or null for an empty id. */
 export function toggleBookmarkId(current: ReadonlySet<string>, id: string): BookmarkToggle | null {
   const key = normaliseBookmarkId(id);
