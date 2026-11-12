@@ -5,6 +5,7 @@ import type { Quote } from "@/lib/finance/quotes";
 
 import { limitFlag } from "./format";
 import {
+  HALTED_AFTER_MISSED_SESSIONS,
   auctionStubSettledClose,
   chartBaseline,
   companyMetaLine,
@@ -1057,5 +1058,345 @@ describe("auctionStubSettledClose (h120-finance-2)", () => {
       expect(auctionStubSettledClose({ ...base, stat: { ...base.stat!, lastClose } })).toBeNull();
     }
     expect(() => auctionStubSettledClose({ ...base, stat: { ...base.stat!, lastDay: 42 as unknown as string } })).not.toThrow();
+  });
+});
+
+// h154: the BIST holiday and half-day calendar (src/lib/finance/bist-calendar.ts). Before it, marketOpen was clock
+// only: a weekday holiday read as open, a half day (session ends 12:30, closing-price trades to 12:40) stayed
+// "live" until 18:15, and every bayram closure of 5+ calendar days made every quote "halted". Calendar anchors
+// (Istanbul): Wed 28.10.2026 (half), Thu 29.10.2026 (closed), Fri 01.01.2027, Mon 08.03.2027 (half),
+// Mon-Wed 17-19.05.2027 (Kurban), Thu 20.05.2027.
+describe("marketOpen with the BIST calendar (h154)", () => {
+  it("a closed holiday is closed all day: 29.10.2026, 01.01.2027, 30.08.2027 at 11:00", () => {
+    expect(marketOpen(at("2026-10-29T11:00:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2027-01-01T11:00:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2027-08-30T11:00:00+03:00"))).toBe(false);
+  });
+
+  it("Kurban Bayramı 2027: 17, 18 and 19 May at 11:00 are closed, Thursday 20 May at 11:00 is open", () => {
+    expect(marketOpen(at("2027-05-17T11:00:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2027-05-18T11:00:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2027-05-19T11:00:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2027-05-20T11:00:00+03:00"))).toBe(true);
+  });
+
+  it("the half day 28.10.2026 is open 09:55-12:45 (both bounds inclusive) and closed after", () => {
+    expect(marketOpen(at("2026-10-28T09:54:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2026-10-28T09:55:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2026-10-28T12:45:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2026-10-28T12:46:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2026-10-28T15:00:00+03:00"))).toBe(false);
+  });
+
+  it("the 2027 half days end at 12:45 too: 08.03 and 28.10", () => {
+    expect(marketOpen(at("2027-03-08T12:00:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2027-03-08T12:46:00+03:00"))).toBe(false);
+    expect(marketOpen(at("2027-10-28T12:46:00+03:00"))).toBe(false);
+  });
+
+  it("trading days stay open: idari izin 25.05.2026, 31.12.2026, and a Wednesday past the table (01.03.2028)", () => {
+    expect(marketOpen(at("2026-05-25T11:00:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2026-12-31T15:00:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2028-03-01T11:00:00+03:00"))).toBe(true);
+  });
+
+  it("a normal weekday keeps the 09:55-18:15 session (a Tuesday with no table row)", () => {
+    expect(marketOpen(at("2026-11-10T09:55:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2026-11-10T15:00:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2026-11-10T18:15:00+03:00"))).toBe(true);
+    expect(marketOpen(at("2026-11-10T18:16:00+03:00"))).toBe(false);
+  });
+
+  it("reads the Istanbul clock on the half day: 06:55Z is 09:55 (open), 09:45Z is 12:45 (open), 09:46Z is 12:46 (closed)", () => {
+    expect(marketOpen(at("2026-10-28T06:55:00Z"))).toBe(true);
+    expect(marketOpen(at("2026-10-28T09:45:00Z"))).toBe(true);
+    expect(marketOpen(at("2026-10-28T09:46:00Z"))).toBe(false);
+  });
+
+  it("an instant past the Date range or beyond it is not open and never throws", () => {
+    expect(() => marketOpen(8.64e15 + 1)).not.toThrow();
+    expect(marketOpen(8.64e15 + 1)).toBe(false);
+    expect(() => marketOpen(1e20)).not.toThrow();
+    expect(marketOpen(1e20)).toBe(false);
+    expect(marketOpen(Number.POSITIVE_INFINITY)).toBe(false);
+    expect(marketOpen(Number.NEGATIVE_INFINITY)).toBe(false);
+  });
+});
+
+describe("quoteFreshness across BIST holidays (h154)", () => {
+  it("the half day 28.10.2026: a 12:40 quote is live at 12:45 and last_session at 13:00", () => {
+    const asOf = "2026-10-28T12:40:00+03:00";
+    expect(quoteFreshness(asOf, at("2026-10-28T12:45:00+03:00"))).toEqual({ kind: "live", label: "bugün" });
+    expect(quoteFreshness(asOf, at("2026-10-28T13:00:00+03:00"))).toEqual({
+      kind: "last_session",
+      label: "son seans 28.10",
+    });
+  });
+
+  it("Kurban Bayramı 2026: the 26.05 quote read on Sunday 31.05 is last_session, not halted", () => {
+    expect(quoteFreshness("2026-05-26T12:40:00+03:00", at("2026-05-31T12:00:00+03:00"))).toEqual({
+      kind: "last_session",
+      label: "son seans 26.05",
+    });
+  });
+
+  it("the day after a multi-day bayram: Kurban 2027, the 14.05 quote is last_session on 19.05 and 20.05, not halted", () => {
+    const asOf = "2027-05-14T18:05:00+03:00";
+    const expected = { kind: "last_session", label: "son seans 14.05" };
+    expect(quoteFreshness(asOf, at("2027-05-19T12:00:00+03:00"))).toEqual(expected);
+    expect(quoteFreshness(asOf, at("2027-05-20T09:30:00+03:00"))).toEqual(expected);
+  });
+
+  it("Ramazan Bayramı 2027: the 05.03 quote read on Thursday 11.03 is last_session (only 08.03 was a session)", () => {
+    expect(quoteFreshness("2027-03-05T18:05:00+03:00", at("2027-03-11T12:00:00+03:00"))).toEqual({
+      kind: "last_session",
+      label: "son seans 05.03",
+    });
+  });
+
+  it("only the 28.10 half day was missed between a 27.10 quote and 30.10 evening (29.10 is not a session)", () => {
+    expect(quoteFreshness("2026-10-27T14:00:00Z", at("2026-10-30T20:00:00+03:00"))).toEqual({
+      kind: "last_session",
+      label: "son seans 27.10",
+    });
+  });
+
+  it("two missed sessions are halted: a quote with a trading day on each side of a gap of closed days", () => {
+    // 27.10 quote, read 01.11: 28.10 (half) and 30.10 are sessions, 29.10 is not -> 2 missed -> halted.
+    expect(quoteFreshness("2026-10-27T14:00:00Z", at("2026-11-01T12:00:00+03:00"))).toEqual({
+      kind: "halted",
+      label: "son işlem 27.10.2026",
+    });
+  });
+
+  it("behaviour change, pinned: a Monday quote is last_session on Wednesday (1 missed) and halted on Thursday (2 missed)", () => {
+    const asOf = "2026-11-02T15:00:00Z";
+    expect(quoteFreshness(asOf, at("2026-11-04T12:00:00+03:00"))).toEqual({
+      kind: "last_session",
+      label: "son seans 02.11",
+    });
+    expect(quoteFreshness(asOf, at("2026-11-05T12:00:00+03:00"))).toEqual({
+      kind: "halted",
+      label: "son işlem 02.11.2026",
+    });
+  });
+
+  it("HALTED_AFTER_MISSED_SESSIONS is 2", () => {
+    expect(HALTED_AFTER_MISSED_SESSIONS).toBe(2);
+  });
+
+  it("a gap of more than a month is halted without walking the days (a quote from 2026-01-02 read on 2026-11-12)", () => {
+    expect(quoteFreshness("2026-01-02T15:00:00Z", at("2026-11-12T12:00:00+03:00"))).toEqual({
+      kind: "halted",
+      label: "son işlem 02.01.2026",
+    });
+  });
+
+  it("a gap of exactly 31 days (the bound of the day walk) is halted too", () => {
+    // 2026-11-13 (Fri) -> 2026-12-14 (Mon) is 31 days: the loop runs and finds many sessions.
+    expect(quoteFreshness("2026-11-13T15:00:00Z", at("2026-12-14T12:00:00+03:00"))).toEqual({
+      kind: "halted",
+      label: "son işlem 13.11.2026",
+    });
+  });
+
+  it("a quote from the future (the closed 29.10, read on 28.10) is last_session", () => {
+    expect(quoteFreshness("2026-10-29T10:00:00+03:00", at("2026-10-28T11:00:00+03:00")).kind).toBe("last_session");
+  });
+});
+
+describe("marketCueText on BIST holidays and half days (h154)", () => {
+  it("a closed holiday says so all day: Cumhuriyet Bayramı at 11:00 and at 21:00", () => {
+    const text = "Piyasa kapalı · Cumhuriyet Bayramı tatili · son seans 28.10";
+    expect(marketCueText("2026-10-28T12:40:00+03:00", at("2026-10-29T11:00:00+03:00"))).toBe(text);
+    expect(marketCueText("2026-10-28T12:40:00+03:00", at("2026-10-29T21:00:00+03:00"))).toBe(text);
+  });
+
+  it("Yılbaşı 2027 at 11:00: the reason replaces the old 'Veriler gecikmeli' wording", () => {
+    expect(marketCueText("2026-12-31T18:05:00+03:00", at("2027-01-01T11:00:00+03:00"))).toBe(
+      "Piyasa kapalı · Yılbaşı tatili · son seans 31.12",
+    );
+  });
+
+  it("a half day after 12:45 says arife with its reason", () => {
+    expect(marketCueText("2026-10-28T12:40:00+03:00", at("2026-10-28T14:00:00+03:00"))).toBe(
+      "Piyasa kapalı · Cumhuriyet Bayramı arifesi, yarım gün · son seans 28.10",
+    );
+  });
+
+  it("a half day at 12:45 is still in session, so it has no closed reason", () => {
+    expect(marketCueText("2026-10-28T12:40:00+03:00", at("2026-10-28T12:45:00+03:00"))).toBeNull();
+    expect(marketCueText("2026-10-27T18:05:00+03:00", at("2026-10-28T12:45:00+03:00"))).toBe(
+      "Veriler gecikmeli · son seans 27.10",
+    );
+  });
+
+  it("a half day 12:46 is closed with the reason", () => {
+    expect(marketCueText("2026-10-27T18:05:00+03:00", at("2026-10-28T12:46:00+03:00"))).toBe(
+      "Piyasa kapalı · Cumhuriyet Bayramı arifesi, yarım gün · son seans 27.10",
+    );
+  });
+
+  it("a half day during the session with a stale quote is 'Veriler gecikmeli', before the open it is plain 'Piyasa kapalı'", () => {
+    expect(marketCueText("2026-10-27T18:05:00+03:00", at("2026-10-28T10:15:00+03:00"))).toBe(
+      "Veriler gecikmeli · son seans 27.10",
+    );
+    expect(marketCueText("2026-10-27T18:05:00+03:00", at("2026-10-28T09:30:00+03:00"))).toBe(
+      "Piyasa kapalı · son seans 27.10",
+    );
+  });
+
+  it("a bayram weekend has no reason; the first closed weekday of Kurban 2027 does", () => {
+    expect(marketCueText("2027-05-14T18:05:00+03:00", at("2027-05-15T12:00:00+03:00"))).toBe(
+      "Piyasa kapalı · son seans 14.05",
+    );
+    expect(marketCueText("2027-05-14T18:05:00+03:00", at("2027-05-17T11:00:00+03:00"))).toBe(
+      "Piyasa kapalı · Kurban Bayramı tatili · son seans 14.05",
+    );
+  });
+
+  it("a halted quote on a closed holiday keeps its reason and its date", () => {
+    expect(marketCueText("2026-10-20T14:00:00Z", at("2026-10-29T11:00:00+03:00"))).toBe(
+      "Piyasa kapalı · Cumhuriyet Bayramı tatili · son işlem 20.10.2026",
+    );
+  });
+
+  it("a normal weekday outside the session is plain 'Piyasa kapalı', with no reason", () => {
+    expect(marketCueText("2026-11-10T18:05:00+03:00", at("2026-11-10T20:00:00+03:00"))).toBe(
+      "Piyasa kapalı · son seans 10.11",
+    );
+  });
+
+  it("a live quote, no quote and an unparsable clock keep their old answers on a holiday week", () => {
+    expect(marketCueText(null, at("2026-10-29T11:00:00+03:00"))).toBeNull();
+    expect(marketCueText("2026-10-28T12:40:00+03:00", Number.NaN)).toBe("Veriler gecikmeli · son seans 28.10");
+  });
+
+  it("a clock past the Date range never throws", () => {
+    expect(() => marketCueText("2026-10-28T12:40:00+03:00", 1e20)).not.toThrow();
+  });
+});
+
+describe("intradayCutShort on a half day (h154)", () => {
+  // The half day 2026-10-28: the session ends 12:30, the closing-price trades 12:38-12:40. Migration 183's header
+  // records one ticker of 183 whose last half-day bar was more than 0.5 % off its settle.
+  const halfStat = (): QuoteStat => ({
+    ticker: "TURSG",
+    lastDay: "2026-10-28",
+    lastClose: 12.09,
+    prevClose: 11.9,
+    lastVolume: 1000,
+    avgVolume20: 800,
+    rvol: 1.1,
+  });
+  const half = (ts: string, close: number, now = "2026-10-28T20:00:00+03:00") => ({
+    lastBar: { ts, close },
+    intradayDay: "2026-10-28" as string | null,
+    stat: halfStat() as QuoteStat | null | undefined,
+    nowMs: at(now),
+  });
+
+  it("the migration-183 case: a 12:25 last bar 1 % off the settle is a normal half-day end, not a cut: false", () => {
+    expect(intradayCutShort(half("2026-10-28T09:25:00Z", 12.21))).toBe(false);
+  });
+
+  it("a last bar at 11:55 (before the 12:00 threshold) 1 % off the settle is cut short: true", () => {
+    expect(intradayCutShort(half("2026-10-28T08:55:00Z", 12.21))).toBe(true);
+  });
+
+  it("the 12:00 bar is not before the half-day threshold, the 11:55 bar is", () => {
+    expect(intradayCutShort(half("2026-10-28T09:00:00Z", 12.21))).toBe(false);
+    expect(intradayCutShort(half("2026-10-28T08:55:00Z", 12.21))).toBe(true);
+  });
+
+  it("the session end is 12:45: a 11:30 bar 4.6 % off the settle is not cut at 12:45 and is cut at 12:46", () => {
+    expect(intradayCutShort(half("2026-10-28T08:30:00Z", 11.53, "2026-10-28T12:45:00+03:00"))).toBe(false);
+    expect(intradayCutShort(half("2026-10-28T08:30:00Z", 11.53, "2026-10-28T12:46:00+03:00"))).toBe(true);
+  });
+
+  it("a normal day keeps the 17:30 rule: the same 12:25 bar is cut short on a full day", () => {
+    const normal = {
+      lastBar: { ts: "2026-11-06T09:25:00Z", close: 12.21 },
+      intradayDay: "2026-11-06" as string | null,
+      stat: { ...halfStat(), lastDay: "2026-11-06" } as QuoteStat | null | undefined,
+      nowMs: at("2026-11-06T21:00:00+03:00"),
+    };
+    expect(intradayCutShort(normal)).toBe(true);
+  });
+
+  it("a tolerant day string with a time part still finds the half day", () => {
+    expect(
+      intradayCutShort({
+        ...half("2026-10-28T09:25:00Z", 12.21),
+        intradayDay: "2026-10-28T00:00:00Z",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("auctionStubSettledClose on a half day (h154)", () => {
+  const stubStat = (day: string): QuoteStat => ({
+    ticker: "SISE",
+    lastDay: day,
+    lastClose: 35.72,
+    prevClose: 35.48,
+    lastVolume: 1000,
+    avgVolume20: 900,
+    rvol: 1.1,
+  });
+  const halfStub = (ts: string, now = "2026-10-28T20:00:00+03:00") => ({
+    lastBar: { ts, close: 35.46, volume: 0 as number | null },
+    intradayDay: "2026-10-28" as string | null,
+    stat: stubStat("2026-10-28") as QuoteStat | null | undefined,
+    nowMs: at(now),
+  });
+
+  it("a volume-0 bar at 12:30 on the half day is the stub: the settled close 35.72", () => {
+    expect(auctionStubSettledClose(halfStub("2026-10-28T09:30:00Z"))).toBe(35.72);
+  });
+
+  it("a volume-0 bar at 12:25 is before the half-day stub threshold: null", () => {
+    expect(auctionStubSettledClose(halfStub("2026-10-28T09:25:00Z"))).toBeNull();
+  });
+
+  it("the session is over after 12:45: null at 12:45, 35.72 at 12:46", () => {
+    expect(auctionStubSettledClose(halfStub("2026-10-28T09:30:00Z", "2026-10-28T12:45:00+03:00"))).toBeNull();
+    expect(auctionStubSettledClose(halfStub("2026-10-28T09:30:00Z", "2026-10-28T12:46:00+03:00"))).toBe(35.72);
+  });
+
+  it("a normal day keeps its rule: a 12:30 volume-0 bar is not a stub at 22:00", () => {
+    expect(
+      auctionStubSettledClose({
+        lastBar: { ts: "2026-11-10T09:30:00Z", close: 35.46, volume: 0 },
+        intradayDay: "2026-11-10",
+        stat: stubStat("2026-11-10"),
+        nowMs: at("2026-11-10T22:00:00+03:00"),
+      }),
+    ).toBeNull();
+  });
+
+  it("a normal day's 18:00 stub still gets the settled close", () => {
+    expect(
+      auctionStubSettledClose({
+        lastBar: { ts: "2026-11-10T15:00:00Z", close: 35.46, volume: 0 },
+        intradayDay: "2026-11-10",
+        stat: stubStat("2026-11-10"),
+        nowMs: at("2026-11-10T22:00:00+03:00"),
+      }),
+    ).toBe(35.72);
+  });
+
+  it("agrees with intradayCutShort on when a half-day session is over", () => {
+    for (const now of ["2026-10-28T12:45:00+03:00", "2026-10-28T12:46:00+03:00", "2026-10-28T18:10:00+03:00"]) {
+      const over = intradayCutShort({
+        lastBar: { ts: "2026-10-28T08:30:00Z", close: 11.53 },
+        intradayDay: "2026-10-28",
+        stat: { ...stubStat("2026-10-28"), lastClose: 12.09 },
+        nowMs: at(now),
+      });
+      expect(auctionStubSettledClose(halfStub("2026-10-28T09:30:00Z", now)) !== null, now).toBe(over);
+      // and both are right: the half-day session is over after 12:45 (false at 12:45, true at 12:46 and 18:10), not at the normal 18:10
+      expect(over, now).toBe(now !== "2026-10-28T12:45:00+03:00");
+    }
   });
 });

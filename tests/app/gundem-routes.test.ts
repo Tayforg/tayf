@@ -277,6 +277,9 @@ vi.mock("@/lib/entities/entity-hub-query", () => ({
   getEntityHubSummary: () => Promise.resolve(null),
 }));
 
+// The hub's daily chart (h154-hub-trend) is read beside the hub; no chart in these body-state tests.
+vi.mock("@/lib/entities/hub-trend-query", () => ({ getHubTrend: () => Promise.resolve(null) }));
+
 vi.mock("next/navigation", () => ({
   notFound: () => {
     throw new Error("NEXT_NOT_FOUND");
