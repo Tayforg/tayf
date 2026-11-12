@@ -1023,7 +1023,7 @@ const WIRE_MEMBERS_8 = [
   wireMember(WIRE_ID, { id: "a1", description: LEAD_A, published_at: at("08:00") }),
   wireMember(WIRE_ID, {
     id: "a2",
-    description: LEAD_A.replace("'", "’") + ".",
+    description: LEAD_A.replaceAll("'", "’") + ".",
     published_at: at("08:05"),
   }),
   wireMember(WIRE_ID, { id: "a3", description: `  ${LEAD_A}  `, published_at: at("08:10") }),
@@ -1031,7 +1031,7 @@ const WIRE_MEMBERS_8 = [
   wireMember(WIRE_ID, { id: "a5", description: LEAD_B + "!", published_at: at("08:20") }),
   wireMember(WIRE_ID, { id: "a6", description: LEAD_B, published_at: at("08:25") }),
   wireMember(WIRE_ID, { id: "a7", description: LEAD_C, published_at: at("08:30") }),
-  wireMember(WIRE_ID, { id: "a8", description: LEAD_C.replace("'", "’"), published_at: at("08:35") }),
+  wireMember(WIRE_ID, { id: "a8", description: LEAD_C.replaceAll("'", "’"), published_at: at("08:35") }),
 ];
 
 function wireRow(id: string, articleCount: number, neutral: string | null = "Nötr başlık") {
