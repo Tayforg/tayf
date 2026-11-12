@@ -6717,3 +6717,336 @@ describe("h94-neutraltitles-2 / -3: hostile input stays cheap", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// h140-seo-1: bffb0a3f served the partisan label 'şaibeli' as its neutral headline
+// ---------------------------------------------------------------------------
+//
+// "CHP'nin şaibeli kurultay davası 18 Kasım'a ertelendi" was Akşam's own headline for 33 minutes (11:45 to 12:18Z on
+// 2026-11-11), then Akşam edited it away. Four outlets (Milliyet, Yeni Şafak, Posta, haberler-com) carry the span in scare
+// quotes, 'şaibeli kurultay', and incumbentIsMemberTitle ignored quote marks, so those quoted copies still counted as the
+// stored title being a member's wording: the re-pick never saw it as stale. Neither did the loaded-word list know 'şaibe'
+// ('butlan CHP'si' is the same case's other label). The fixture
+// (src/lib/clusters/__fixtures__/h140-saibe.json, test-only) is the cluster's 36 member titles as read on production on
+// 2026-11-12 and the two old_title values of the Akşam article.
+
+interface H140Fixture {
+  id: string;
+  stored: string;
+  model: string;
+  stamped: number;
+  article_count: number;
+  members: Array<{ source: string; title: string }>;
+  aksamOldTitles: Array<{ version_id: number; seen_at: string; old_title: string }>;
+}
+
+const H140: H140Fixture = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h140-saibe.json"), "utf8"),
+) as H140Fixture;
+const H140_CURRENT = H140.members.map((m) => m.title);
+const H140_MEMBERS = H140.members.map((m) => ({ title: m.title, source: m.source }));
+const H140_SERVED = "CHP'nin şaibeli kurultay davası 18 Kasım'a ertelendi";
+const H140_SCARE_QUOTED = "CHP'nin 'şaibeli kurultay' davası 18 Kasım'a ertelendi";
+const H140_CLEAN = "CHP'nin kurultay davası 18 Kasım'a ertelendi";
+
+describe("h140-seo-1: the fixture", () => {
+  it("holds the 36 current member titles, the served title and Akşam's two old_title values", () => {
+    expect(H140.id).toBe("bffb0a3f-a552-45d6-a2fd-a2f69050c73b");
+    expect(H140.stored).toBe(H140_SERVED);
+    expect(H140.model).toBe("extractive-v6");
+    expect(H140.members).toHaveLength(36);
+    expect(H140.article_count).toBe(36);
+    for (const m of H140.members) {
+      expect(m.source.length).toBeGreaterThan(0);
+      expect(m.title.trim().length).toBeGreaterThan(0);
+    }
+    expect(H140.aksamOldTitles.map((v) => v.old_title)).toEqual([
+      "CHP kurultay davası 18 Kasım'a ertelendi",
+      H140_SERVED,
+    ]);
+  });
+
+  it("none of the 36 titles carries the served string bare, and the four scare-quoting outlets carry it in quotes", () => {
+    expect(H140_CURRENT).not.toContain(H140_SERVED);
+    expect(H140_CURRENT.filter((t) => t.includes(H140_SCARE_QUOTED)).length).toBeGreaterThanOrEqual(2);
+    const quoting = H140.members.filter((m) => /['‘“]şaibeli kurultay['’”]/u.test(m.title)).map((m) => m.source);
+    expect(quoting).toEqual(expect.arrayContaining(["milliyet", "yeni-safak", "posta", "haberler-com"]));
+  });
+});
+
+describe("h140-seo-1: incumbentIsMemberTitle is quote-aware", () => {
+  it("the served title is no longer carried by any of the 36 current members (their quoted copies are not it)", () => {
+    expect(incumbentIsMemberTitle(H140_SERVED, H140_CURRENT)).toBe(false);
+  });
+
+  it("it is carried again once Akşam's 11:45 title (the old_title of its 12:18 edit) is a member", () => {
+    const aksam1145 = H140.aksamOldTitles[1]!.old_title;
+    expect(aksam1145).toBe(H140_SERVED);
+    expect(incumbentIsMemberTitle(H140_SERVED, [...H140_CURRENT, aksam1145])).toBe(true);
+  });
+
+  it("the scare-quoted wording is still carried: Milliyet, Yeni Şafak and Posta write exactly it", () => {
+    expect(incumbentIsMemberTitle(H140_SCARE_QUOTED, H140_CURRENT)).toBe(true);
+  });
+
+  it("a member that quotes a span does not carry a stored title that writes the span bare, and the reverse", () => {
+    expect(incumbentIsMemberTitle("Bakan 'zam yok' dedi", ["Bakan zam yok dedi"])).toBe(false);
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", ["Bakan 'zam yok' dedi"])).toBe(false);
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", ["Bakan “zam yok” dedi"])).toBe(false);
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", ["Bakan «zam yok» dedi"])).toBe(false);
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", ['Bakan "zam yok" dedi'])).toBe(false);
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", ["Bakan ‘zam yok’ dedi"])).toBe(false);
+  });
+
+  it("every quotation mark is the same mark: straight, curly and guillemets agree with each other", () => {
+    const marks: Array<[string, string]> = [["'", "'"], ["‘", "’"], ['"', '"'], ["“", "”"], ["«", "»"]];
+    for (const [a, b] of marks) {
+      for (const [c, d] of marks) {
+        expect(incumbentIsMemberTitle(`Bakan ${a}zam yok${b} dedi`, [`Bakan ${c}zam yok${d} dedi`]), `${a}${b} vs ${c}${d}`).toBe(true);
+      }
+    }
+  });
+
+  it("the legacy 'Başkan Erdoğan' branch is quote-aware too", () => {
+    expect(incumbentIsMemberTitle("Cumhurbaşkanı Erdoğan sert konuştu", ["Başkan Erdoğan sert konuştu"])).toBe(true);
+    expect(incumbentIsMemberTitle("Cumhurbaşkanı Erdoğan 'sert' konuştu", ["Başkan Erdoğan 'sert' konuştu"])).toBe(true);
+    expect(incumbentIsMemberTitle("Cumhurbaşkanı Erdoğan sert konuştu", ["Başkan Erdoğan 'sert' konuştu"])).toBe(false);
+  });
+
+  it("the cleanHeadline-equality branch is quote-aware: a lead-in is cleaned, an inner quoted span is not bare", () => {
+    expect(incumbentIsMemberTitle("CHP'nin 'şaibeli kurultay' davası", ["Son dakika! CHP'nin 'şaibeli kurultay' davası"])).toBe(true);
+    expect(incumbentIsMemberTitle("CHP'nin şaibeli kurultay davası", ["Son dakika! CHP'nin 'şaibeli kurultay' davası"])).toBe(false);
+  });
+
+  // The h42-titles-1 guarantees stay.
+  it("regression: a title whose wrapping quotes cleanHeadline removed is still carried", () => {
+    expect(incumbentIsMemberTitle("Bu bir test", ['"Bu bir test"'])).toBe(true);
+    expect(incumbentIsMemberTitle("Bu bir test", ["“Bu bir test”"])).toBe(true);
+    expect(incumbentIsMemberTitle("Bu bir test", ["'Bu bir test'"])).toBe(true);
+  });
+
+  it("regression: a stray leading quote dropped by dropStrayLeadingQuote is still carried", () => {
+    const member = "'Kaşif Kozinoğlu'nun ATK raporu: 'Ölüm nedeni' açıklandı";
+    const stored = cleanHeadline(member);
+    expect(stored).toBe("Kaşif Kozinoğlu'nun ATK raporu: 'Ölüm nedeni' açıklandı");
+    expect(incumbentIsMemberTitle(stored, [member])).toBe(true);
+    expect(incumbentIsMemberTitle("Kaşif Kozinoğlu'nun ATK raporu: 'Ölüm nedeni' açıklandı", [member])).toBe(true);
+  });
+
+  it("regression: curly against straight quotes is still carried", () => {
+    expect(incumbentIsMemberTitle("“X dedi”", ['"X dedi"'])).toBe(true);
+    expect(incumbentIsMemberTitle('"X dedi"', ["“X dedi”"])).toBe(true);
+  });
+
+  it("regression: an in-word apostrophe, straight or curly, is not a quote mark", () => {
+    expect(incumbentIsMemberTitle("Erdoğan’dan", ["Erdoğan'dan"])).toBe(true);
+    expect(incumbentIsMemberTitle("Erdoğan'dan açıklama", ["Erdoğan’dan açıklama"])).toBe(true);
+    expect(incumbentIsMemberTitle("CHP'nin kurultay davası 18 Kasım'a ertelendi", ["CHP’nin kurultay davası 18 Kasım’a ertelendi"])).toBe(true);
+    expect(incumbentIsMemberTitle("10'luk paket", ["10’luk paket"])).toBe(true);
+  });
+
+  it("regression: recasing, separators, a glued twin and a lead-in are still carried", () => {
+    expect(incumbentIsMemberTitle("CHP'de Kurultay Davası 18 Kasım'a Ertelendi", [H140.members[5]!.title])).toBe(true);
+    expect(incumbentIsMemberTitle("Tel Aviv-Washington hattı", ["Tel AvivWashington hattı"])).toBe(true);
+    expect(incumbentIsMemberTitle("CHP kurultay davası ertelendi", ["Son dakika! CHP kurultay davası ertelendi"])).toBe(true);
+    expect(incumbentIsMemberTitle("CHP kurultay davası ertelendi", ["SON DAKİKA | CHP KURULTAY DAVASI ERTELENDİ"])).toBe(true);
+  });
+
+  it("quotes at the two edges of a title wrap the whole of it and are not a quoted span: a stored title wrapped in quotes is carried by the bare member, and the reverse", () => {
+    expect(incumbentIsMemberTitle('"Diplomatik çözüm için çalışıyoruz"', ["Diplomatik çözüm için çalışıyoruz"])).toBe(true);
+    expect(incumbentIsMemberTitle("Diplomatik çözüm için çalışıyoruz", ['"Diplomatik çözüm için çalışıyoruz"'])).toBe(true);
+    expect(incumbentIsMemberTitle("“Diplomatik çözüm için çalışıyoruz”", ["«Diplomatik çözüm için çalışıyoruz»"])).toBe(true);
+    expect(incumbentIsMemberTitle("''Siyonist çoğunluk dedi''", ["Siyonist çoğunluk dedi"])).toBe(true);
+  });
+
+  it("a quote that closes inside the title is still a quoted span, even when the title opens with its opening mark", () => {
+    expect(incumbentIsMemberTitle("Ölüm nedeni açıklandı", ["'Ölüm nedeni' açıklandı"])).toBe(false);
+    expect(incumbentIsMemberTitle("'Ölüm nedeni' açıklandı", ["Ölüm nedeni açıklandı"])).toBe(false);
+    expect(incumbentIsMemberTitle("'Ölüm nedeni' açıklandı", ["Kaşif'in raporu: 'Ölüm nedeni' açıklandı"])).toBe(true);
+  });
+
+  it("a title that quotes only the in-word apostrophes of its names is not read as quoted", () => {
+    expect(incumbentIsMemberTitle("Özel'e Kılıçdaroğlu’ndan yanıt", ["Özel’e Kılıçdaroğlu'ndan yanıt"])).toBe(true);
+  });
+
+  it("a literal U+0001 in a title is not a quote mark: the sentinel is stripped first, on both sides", () => {
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", ["Bakan \u0001zam yok\u0001 dedi"])).toBe(true);
+    expect(incumbentIsMemberTitle("Bakan \u0001zam yok\u0001 dedi", ["Bakan zam yok dedi"])).toBe(true);
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", ["Bakan 'zam yok' dedi\u0001"])).toBe(false);
+  });
+
+  it("keeps the edge cases: no members is false, a title with no letter or digit is not judged, non-strings are skipped", () => {
+    expect(incumbentIsMemberTitle(H140_SERVED, [])).toBe(false);
+    expect(incumbentIsMemberTitle("''", ["Bakan zam yok dedi"])).toBe(true);
+    expect(incumbentIsMemberTitle("", ["Bakan zam yok dedi"])).toBe(true);
+    expect(incumbentIsMemberTitle("Bakan zam yok dedi", [undefined as unknown as string, "", "   ", "Bakan zam yok dedi"])).toBe(true);
+  });
+
+  it("every quote mark has a verdict, however many: a hostile title of marks stays linear", () => {
+    expectLinear(rep("'a\"b “c” «d» ‘e’ "), (shape) => incumbentIsMemberTitle(shape, [shape, `${shape}x`]), {
+      n: 250_000,
+      ceilingMs: 8_000,
+    });
+    expectLinear(rep("'"), (shape) => incumbentIsMemberTitle("x", [shape]), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("a'"), (shape) => incumbentIsMemberTitle(shape, ["Bakan zam yok dedi"]), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+describe("h140-seo-1: 'şaibe' is a loaded word", () => {
+  it("charges the served title, Star's variant and the scare-quoted version", () => {
+    expect(loadedPenalty(H140_SERVED)).toBeGreaterThan(0);
+    expect(loadedPenalty("CHP'nin şaibeli 38.Kurultay davası 18 Kasım'a ertelendi")).toBeGreaterThan(0);
+    expect(loadedPenalty(H140_SCARE_QUOTED)).toBeGreaterThan(0);
+  });
+
+  it("charges every member that writes it, and none of the others", () => {
+    const charged = H140.members.filter((m) => loadedPenalty(m.title) > 0).map((m) => m.source);
+    expect(charged).toEqual(
+      expect.arrayContaining(["milliyet", "yeni-safak", "posta", "haberler-com", "star", "aksam", "yeni-akit", "cnn-turk"]),
+    );
+    for (const m of H140.members) {
+      if (/şaibe/iu.test(m.title)) continue;
+      expect(loadedPenalty(m.title), `${m.source}: ${m.title}`).toBe(0);
+    }
+  });
+
+  it("does not charge the clean wording", () => {
+    expect(loadedPenalty(H140_CLEAN)).toBe(0);
+    expect(loadedPenalty("CHP kurultay davası 18 Kasım'a ertelendi")).toBe(0);
+  });
+
+  it("charges the word with any suffix and in either case, quoted or not (the h54 rule (b) precedent)", () => {
+    for (const t of [
+      "Şaibe iddiası büyüyor",
+      "Şaibesi bulunan ihale iptal edildi",
+      "ihalede şaibeli süreç",
+      "ŞAİBELİ KURULTAY DAVASI ERTELENDİ",
+      "SAIBELI KURULTAY DAVASI ERTELENDI",
+      "Dava ertelendi! CHP'deki “şaibeli kurultay” kördüğüm oldu",
+      'Son dakika haberi: CHP kurultayında "şaibe davası" ertelendi',
+      "Özel şaibeli kurultayı yorumladı: 'Karar bekliyoruz'",
+    ]) {
+      expect(loadedPenalty(t), t).toBeGreaterThan(0);
+    }
+  });
+
+  it("takes a left word edge: a longer word that merely ends in it is not charged", () => {
+    expect(loadedPenalty("Beşaibe kasabası ziyaret edildi")).toBe(0);
+  });
+
+  it("does not charge the words after a speaker label's opening quote: they are someone's own", () => {
+    expect(loadedPenalty("Özel: 'Şaibe iddiaları asılsız'")).toBe(0);
+    expect(loadedPenalty("Özel: “şaibeli kurultay iddiası asılsız”")).toBe(0);
+    expect(loadedPenalty('Özel: "şaibe yok"')).toBe(0);
+    expect(loadedPenalty("Özel: ‘şaibe yok’")).toBe(0);
+    expect(loadedPenalty("Özel: «şaibe yok»")).toBe(0);
+    expect(loadedPenalty("Özel:   'şaibe yok'")).toBe(0);
+  });
+
+  // ts-1: a bulletin lead-in ('Son dakika:', 'FLAŞ:', 'Şok:') is not a speaker label, so the quote after it is a scare quote
+  // in the headline's own words and is charged. scoreTitle reads the RAW member title, lead-in included.
+  it("charges a scare quote that follows a bulletin lead-in: the lead-in is not a speaker label", () => {
+    expect(loadedPenalty("Son dakika: 'Şaibeli kurultay' davası 18 Kasım'a ertelendi")).toBe(1);
+    expect(loadedPenalty("FLAŞ: “şaibeli kurultay” davası ertelendi")).toBe(1);
+    expect(loadedPenalty("SON DAKİKA | FLAŞ: 'Şaibeli kurultay' davası ertelendi")).toBe(1);
+    expect(loadedPenalty("Şok: 'Şaibeli kurultay' davası ertelendi")).toBe(1);
+    expect(loadedPenalty("CANLI: 'Şaibeli kurultay' davası ertelendi")).toBe(1);
+  });
+
+  it("keeps a real speaker exempt after a bulletin lead-in", () => {
+    expect(loadedPenalty("Son dakika: Özel: 'Şaibe iddiaları asılsız'")).toBe(0);
+    expect(loadedPenalty("FLAŞ: Özel: “şaibe yok”")).toBe(0);
+  });
+
+  it("does not pick the scare-quoted lead-in copy over the plain one", () => {
+    expect(
+      pickNeutralTitle([
+        { title: "Son dakika: 'Şaibeli kurultay' davası 18 Kasım'a ertelendi" },
+        { title: "Son dakika: Kurultay davası 18 Kasım'a ertelendi" },
+      ]),
+    ).toBe("Kurultay davası 18 Kasım'a ertelendi");
+  });
+
+  // ts-3: the privative -siz/-sız ('free of irregularity') is the opposite of the label.
+  it("does not charge the privative 'şaibesiz' (free of irregularity)", () => {
+    expect(loadedPenalty("Seçim şaibesiz tamamlandı")).toBe(0);
+    expect(loadedPenalty("Şaibesiz bir kurultay istiyoruz")).toBe(0);
+    expect(loadedPenalty("SECIM SAIBESIZ TAMAMLANDI")).toBe(0);
+    expect(loadedPenalty("YSK: Seçim şaibesiz tamamlandı")).toBe(0);
+    expect(loadedPenalty("Şaibesizlik vurgusu yapıldı")).toBe(0);
+  });
+
+  it("still charges 'şaibe' with the other suffixes", () => {
+    expect(loadedPenalty("CHP'nin şaibesi")).toBeGreaterThanOrEqual(1);
+    expect(loadedPenalty("Şaibeyi araştıracaklar")).toBeGreaterThanOrEqual(1);
+    expect(loadedPenalty("Şaibeli seçim")).toBeGreaterThanOrEqual(1);
+    expect(loadedPenalty("Şaibe iddiası")).toBeGreaterThanOrEqual(1);
+  });
+
+  it("charges the headline's own words around a speaker's quote", () => {
+    expect(loadedPenalty("Şaibeli kurultay: 'Karar çıktı'")).toBeGreaterThan(0);
+    expect(loadedPenalty("Özel şaibeli kurultayı yorumladı: 'Karar bekliyoruz'")).toBeGreaterThan(0);
+    // No opening quote after the label: not a speaker's quote.
+    expect(loadedPenalty("Özel: şaibe var")).toBeGreaterThan(0);
+  });
+
+  it("the speaker exception is for this one word: the rest of the list charges inside a speaker's quote as before", () => {
+    expect(loadedPenalty("Bahçeli: 'rezil bir karar'")).toBe(loadedPenalty("Bahçeli rezil bir karar"));
+    expect(loadedPenalty("Bahçeli: 'rezil bir karar'")).toBeGreaterThan(0);
+  });
+
+  it("adds one unit, whatever the number of occurrences", () => {
+    expect(loadedPenalty("Şaibeli ihale, şaibeli süreç")).toBe(loadedPenalty("Şaibeli ihale"));
+    expect(loadedPenalty("Şaibeli ihale")).toBe(loadedPenalty("İhale") + 1);
+  });
+
+  it("stays linear on hostile input", () => {
+    expectLinear(rep("özel: '"), (shape) => loadedPenalty(shape), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("şaibe "), (shape) => loadedPenalty(shape), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep(":   "), (shape) => loadedPenalty(shape), { n: 250_000, ceilingMs: 8_000 });
+    // ts-1: the lead-in skip is bounded (LEAD_IN_PASSES), so a title that is nothing but lead-ins stays linear too.
+    expectLinear(rep("son dakika: "), (shape) => loadedPenalty(shape + "şaibe"), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("flaş: '"), (shape) => loadedPenalty(shape), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+describe("h140-seo-1: the re-pick of bffb0a3f", () => {
+  it("replaces the served title with a member's own wording that has no 'şaibe' in it", () => {
+    const picked = pickNeutralTitle(H140_MEMBERS, { incumbent: H140_SERVED });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(H140_SERVED);
+    expect(searchFoldTr(picked as string)).not.toContain("saibe");
+    expect(loadedPenalty(picked as string)).toBe(0);
+    // A member's own cleaned wording: nothing is invented.
+    expect(H140_CURRENT.some((t) => cleanHeadline(t) === picked), picked as string).toBe(true);
+    expect(picked).toBe(H140_CLEAN);
+  });
+
+  it("is the same pick a first pick (with the floor) makes, and without an incumbent", () => {
+    const withIncumbent = pickNeutralTitle(H140_MEMBERS, { incumbent: H140_SERVED });
+    expect(pickNeutralTitle(H140_MEMBERS)).toBe(withIncumbent);
+    expect(pickNeutralTitle(H140_MEMBERS, { floor: true })).toBe(withIncumbent);
+    expect(searchFoldTr(pickNeutralTitle(H140_MEMBERS) as string)).not.toContain("saibe");
+  });
+
+  it("is deterministic: the same members in the same order give the same title, and the pick is a fixed point", () => {
+    const first = pickNeutralTitle(H140_MEMBERS, { incumbent: H140_SERVED });
+    for (let i = 0; i < 3; i++) expect(pickNeutralTitle(H140_MEMBERS, { incumbent: H140_SERVED })).toBe(first);
+    // The next re-pick, with the new title as the incumbent, keeps it.
+    expect(pickNeutralTitle(H140_MEMBERS, { incumbent: first as string })).toBe(first);
+    expect(incumbentIsMemberTitle(first as string, H140_CURRENT)).toBe(true);
+  });
+
+  it("keeps the served title while Akşam still carries it (the stored title is then a member's wording and not loaded-protected away)", () => {
+    const withAksam = [...H140_MEMBERS, { title: H140.aksamOldTitles[1]!.old_title, source: "aksam" }];
+    expect(incumbentIsMemberTitle(H140_SERVED, withAksam.map((m) => m.title))).toBe(true);
+    // Still loaded, so the h42 'loaded' incumbent switch may replace it with the clean twin; it must never pick another loaded title.
+    const picked = pickNeutralTitle(withAksam, { incumbent: H140_SERVED });
+    expect(picked).not.toBeNull();
+    expect(loadedPenalty(picked as string)).toBeLessThanOrEqual(loadedPenalty(H140_SERVED));
+  });
+
+  it("a stored title the outlets quote is not replaced for being carried: the scare-quoted wording stays a member's", () => {
+    expect(incumbentIsMemberTitle(H140_SCARE_QUOTED, H140_CURRENT)).toBe(true);
+  });
+});
