@@ -26,7 +26,11 @@
 //                   "erdogan" after folding). Only a TURKISH suffix is
 //                   dropped (turkish-query.ts isTurkishSuffixTail), so "Kur'an",
 //                   "O'Brien" and "L'Oréal" stay whole, as they do in the
-//                   archive query. A dash between words is a separator.
+//                   archive query. A dash between words is a separator, and so is a
+//                   '/', '\' or '|' between two letters ("Rusya/Ukrayna" is two words,
+//                   h144-search-3), also when an apostrophe sits before it ("Rusya'/Ukrayna":
+//                   the archive cuts the apostrophe first, so the slash then sits between two
+//                   letters, h145 review TS-3); digits keep theirs ("24/7").
 //   - aliases:      "AKP" also finds "AK Parti ..." and the reverse
 //                   (search-aliases.ts), exactly when the archive expands the
 //                   same query, so the cards and the archive section agree.
@@ -39,6 +43,7 @@
 
 import { aliasTermForms, expandAliasQuery } from "./search-aliases";
 import {
+  SLASH_BETWEEN_LETTERS,
   canonicalSearchQuery,
   cleanQueryUnicode,
   foldTr,
@@ -94,6 +99,35 @@ function cutApostropheSuffix(word: string): string {
   return tail === "" || isTurkishSuffixTail(tail) ? word.slice(0, i - 1) : word;
 }
 
+const SLASH_CHARS = "/\\|";
+
+/**
+ * Splits one whitespace-free word at every '/', '\' or '|' that follows a letter and one or more
+ * apostrophes and is followed by a letter ("Rusya'/Ukrayna" -> ["Rusya'", "Ukrayna"]). The archive's
+ * cleanup cuts such an apostrophe (its tail is empty) AFTER it looked at the slash, so the slash only
+ * sits between two letters once the apostrophe is gone; SLASH_BETWEEN_LETTERS, which runs first, cannot
+ * see it. The apostrophe stays on the left piece, where `cutApostropheSuffix` removes it. One pass,
+ * and each apostrophe run is scanned back from at most one slash, so the cost is linear.
+ */
+function splitSlashAfterApostrophe(word: string): string[] {
+  const pieces: string[] = [];
+  let start = 0;
+  for (let i = 1; i < word.length - 1; i++) {
+    if (!SLASH_CHARS.includes(word[i]!) || !isApostrophe(word[i - 1]!)) continue;
+    let run = i - 1;
+    while (run > 0 && isApostrophe(word[run - 1]!)) run--;
+    // The code point before the run (a surrogate pair is one character) must be a letter.
+    const before = Array.from(word.slice(Math.max(0, run - 2), run)).pop() ?? "";
+    const after = Array.from(word.slice(i + 1, i + 3))[0] ?? "";
+    if (!LETTER.test(before) || !LETTER.test(after)) continue;
+    pieces.push(word.slice(start, i));
+    start = i + 1;
+  }
+  if (start === 0) return [word];
+  pieces.push(word.slice(start));
+  return pieces;
+}
+
 /**
  * Trims every leading and trailing character that is not a letter or digit. Two
  * indices walk in from the ends, one code point per step, so the cost is linear
@@ -111,8 +145,11 @@ function trimNonWordEdges(word: string): string {
 /**
  * Query text -> match keys. Cleans the Unicode first (NFKC, format characters
  * out, so a zero-width or full-width mark cannot hide a word or a leading '-'),
- * strips `"`, drops a standalone `or` and `-negated` tokens, cuts an apostrophe
- * followed by a Turkish suffix, trims leading/trailing non-letter/digit
+ * turns a '/', '\' or '|' between two letters into a space (the archive does the
+ * same: 'Rusya/Ukrayna' is two words, and so is "Rusya'/Ukrayna", whose apostrophe the
+ * archive cuts first), strips `"`, drops a standalone `or` and
+ * `-negated` tokens, cuts an apostrophe followed by a Turkish suffix, trims
+ * leading/trailing non-letter/digit
  * characters, drops keys shorter than 2 characters and dedupes. A dash on its
  * own ("erdoğan - bahçeli", "trump <-> iran") is a separator: it is trimmed to
  * nothing and the words on both sides stay. Returns [] when nothing usable is
@@ -120,12 +157,18 @@ function trimNonWordEdges(word: string): string {
  */
 export function searchTokens(q: string): string[] {
   const keys = new Set<string>();
-  for (const raw of cleanQueryUnicode(q).replace(/"/g, "").split(/\s+/)) {
+  // The slash is read before the quotes go, as the archive's term walk reads it, so both
+  // sides cut the same words.
+  for (const raw of cleanQueryUnicode(q).replace(SLASH_BETWEEN_LETTERS, " ").replace(/"/g, "").split(/\s+/)) {
     if (raw === "" || raw.startsWith("-")) continue;
-    const word = trimNonWordEdges(cutApostropheSuffix(raw));
-    if (word.toLowerCase() === "or") continue;
-    const key = matchKey(word);
-    if (key.length >= MIN_TOKEN_LENGTH) keys.add(key);
+    // An apostrophe before a slash is cut by the archive, which then splits there too (h145 review TS-3):
+    // each piece is read on its own, so the apostrophe at the end of the left piece goes as any other.
+    for (const piece of splitSlashAfterApostrophe(raw)) {
+      const word = trimNonWordEdges(cutApostropheSuffix(piece));
+      if (word.toLowerCase() === "or") continue;
+      const key = matchKey(word);
+      if (key.length >= MIN_TOKEN_LENGTH) keys.add(key);
+    }
   }
   return [...keys];
 }

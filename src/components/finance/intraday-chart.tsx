@@ -115,6 +115,19 @@ function istMinutes(iso: string): number {
   return d.getUTCHours() * 60 + d.getUTCMinutes();
 }
 
+/** Minutes one bar of bist_bars_5m spans. */
+const BAR_MINUTES = 5;
+
+/**
+ * The Istanbul minute of the day at which a bar CLOSES (h144-ekonomi-1). bist_bars_5m is stamped with each bar's
+ * START (051: "ts is the bar start, floored to 5 min"), so the close of the bar stamped 09:55 is the price at 10:00
+ * and the close of the bar stamped 18:00 is the price at 18:05 (inside the 18:10 session end). The path plots each
+ * close here, not at the stamp; markers keep their own minute.
+ */
+export function barCloseMinutes(ts: string): number {
+  return istMinutes(ts) + BAR_MINUTES;
+}
+
 /** How many marker rows the caption lists under the chart; the rest are counted, not dropped silently. */
 const CAPTION_MARKERS_MAX = 6;
 
@@ -169,7 +182,8 @@ export function IntradayChart({
   const plotH = H - PAD.top - PAD.bottom;
   const x = (iso: string) => xAt(istMinutes(iso));
   const y = (v: number) => PAD.top + (1 - (v - lo) / span) * plotH;
-  const path = bars.map((b, i) => `${i ? "L" : "M"}${x(b.ts).toFixed(1)},${y(b.close).toFixed(1)}`).join(" ");
+  // Each close is drawn at the minute it happened: the bar's start plus five (barCloseMinutes), not its stamp.
+  const path = bars.map((b, i) => `${i ? "L" : "M"}${xAt(barCloseMinutes(b.ts)).toFixed(1)},${y(b.close).toFixed(1)}`).join(" ");
   const last = bars[bars.length - 1]!;
   const settled = typeof closeOverride === "number" && Number.isFinite(closeOverride) ? closeOverride : null;
   const lastClose = settled ?? last.close;

@@ -6,6 +6,7 @@ import {
   searchTokens,
   titleMatchesTokens,
 } from "./in-feed-match";
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import { expandAliasQuery } from "./search-aliases";
 import { canonicalSearchQuery } from "./turkish-query";
 
@@ -945,5 +946,103 @@ describe("foreign-name spelling aliases in the feed (h116-search-2)", () => {
   it("a two-letter query is unaffected by the alias tables ('ab' is no alias)", () => {
     expect(searchTokenAlternatives("AB")).toEqual([["ab"]]);
     expect(searchTokenAlternatives("bm")).toEqual([["bm"]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h144-search-3: a '/', '\' or '|' between two letters separates words. The archive
+// reads 'Rusya/Ukrayna' as 'rusya ukrayna', so the in-feed filter must too, or the cards
+// above the archive section would be filtered by one word no title holds.
+// ---------------------------------------------------------------------------
+
+describe("searchTokens: a slash between letters separates words (h144-search-3)", () => {
+  it("'Rusya/Ukrayna' gives two tokens, in the matcher's own casing", () => {
+    expect(searchTokens("Rusya/Ukrayna")).toEqual(["rusya", "ukrayna"]);
+  });
+
+  it.each([
+    ["Dolar/TL", ["dolar", "tl"]],
+    ["CHP|AKP", ["chp", "akp"]],
+    ["Rusya\\Ukrayna", ["rusya", "ukrayna"]],
+    ["a/b/c", []], // one-letter tokens are dropped, as ever
+    ["İran/İsrail", ["iran", "israil"]],
+    ["Ak/Parti seçim", ["ak", "parti", "secim"]],
+  ])("%j", (q, expected) => {
+    expect(searchTokens(q)).toEqual(expected);
+  });
+
+  // h145 review TS-3 / sec-LOW-1: an apostrophe before the slash is cut by the archive's cleanup, which leaves the
+  // slash between two letters ("Rusya'/Ukrayna" -> 'rusya ukrayna'). The token reader used to keep the whole
+  // word, "rusya'/ukrayna", while the archive and the page's canonical query searched two words.
+  it("an apostrophe before the slash is cut and the slash separates: \"Rusya'/Ukrayna\"", () => {
+    expect(searchTokens("Rusya'/Ukrayna")).toEqual(["rusya", "ukrayna"]);
+  });
+
+  it.each([
+    ["Erdoğan'/Bahçeli", ["erdogan", "bahceli"]],
+    ["Rusya\u2019/Ukrayna", ["rusya", "ukrayna"]],
+    ["Rusya'\\Ukrayna", ["rusya", "ukrayna"]],
+    ["CHP'|AKP", ["chp", "akp"]],
+    ["Rusya''/Ukrayna", ["rusya", "ukrayna"]],
+    ["Rusya'/Ukrayna/Belarus", ["rusya", "ukrayna", "belarus"]],
+    ["Erdoğan'ın/Bahçeli'nin", ["erdogan", "bahceli"]],
+    ["a'/b", []], // one-letter tokens are dropped, as ever
+  ])("%j", (q, expected) => {
+    expect(searchTokens(q)).toEqual(expected);
+  });
+
+  it("an apostrophe that is not a Turkish suffix keeps its word, slash or not", () => {
+    expect(searchTokens("O'Brien/Kur'an")).toEqual(["o'brien", "kur'an"]);
+  });
+
+  it("agrees with the canonical query for the apostrophe-slash shapes", () => {
+    for (const q of ["Erdoğan'/Bahçeli", "Rusya'/Ukrayna", "a'/b", "a'|b", "CHP'|AKP"]) {
+      expect(searchTokens(canonicalSearchQuery(q)), q).toEqual(searchTokens(q));
+    }
+  });
+
+  it("a title holding both words matches the apostrophe-slash query, a title holding one does not", () => {
+    expect(matches("Rusya'/Ukrayna", "Rusya ile Ukrayna arasında yeni görüşme")).toBe(true);
+    expect(matches("Rusya'/Ukrayna", "Rusya yeni füze denedi")).toBe(false);
+  });
+
+  it("digits keep their slash: '24/7' and '1/2' are one token", () => {
+    expect(searchTokens("24/7")).toEqual(["24/7"]);
+    expect(searchTokens("1/2")).toEqual(["1/2"]);
+  });
+
+  it("a title holding both words matches, a title holding one does not", () => {
+    expect(matches("Rusya/Ukrayna", "Rusya ile Ukrayna arasında yeni görüşme")).toBe(true);
+    expect(matches("Rusya/Ukrayna", "Rusya yeni füze denedi")).toBe(false);
+    expect(matches("Dolar/TL", "Dolar/TL rekor kırdı")).toBe(true);
+  });
+
+  it("agrees with the canonical query: the page hands searchTokens the canonical form", () => {
+    for (const q of ["Rusya/Ukrayna", "Dolar/TL", "CHP|AKP", "24/7", "Rusya\\Ukrayna"]) {
+      expect(searchTokens(canonicalSearchQuery(q)), q).toEqual(searchTokens(q));
+    }
+  });
+
+  it("a slash at an edge, or next to a space or a digit, is trimmed or kept as before", () => {
+    expect(searchTokens("Rusya/")).toEqual(["rusya"]);
+    expect(searchTokens("/Rusya")).toEqual(["rusya"]);
+    expect(searchTokens("Rusya / Ukrayna")).toEqual(["rusya", "ukrayna"]);
+  });
+
+  it("scales linearly: a long run of slashes and bars (CPU-time ladder, no wall-clock budget)", () => {
+    expectLinear(
+      (n) => ({
+        slashes: rep("a/", "", "b")(n),
+        bars: rep("ab|", "", "c")(n),
+        lone: rep("/", "a", "b")(n),
+        apostropheSlashes: rep("a'/", "", "b")(n),
+        apostropheRun: rep("'", "a", "/b")(n),
+        modifierRun: rep("\u02bc", "a", "/b")(n),
+      }),
+      (q) => {
+        for (const text of Object.values(q)) searchTokens(text);
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
   });
 });

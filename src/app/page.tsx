@@ -33,6 +33,7 @@ import {
   MAX_SEARCH_TERMS,
   canonicalSearchQuery,
   searchQueryCut,
+  searchQueryCutsWord,
   searchedWordsAsTyped,
 } from "@/lib/clusters/turkish-query";
 import { groupByDayBucket } from "@/lib/home/day-buckets";
@@ -286,13 +287,20 @@ export async function HomeFeed({
   // search used, instead of claiming results for the whole text. The raw q still
   // goes to searchClusters (the cache key is built from it) and to the follow
   // button; only the words shown back are the searched ones.
+  // h144-search-3: the length cut keeps whole words (a partial last word is dropped), so
+  // its note names the words that fit, and the echo above shows just those. The one exception
+  // is a single word longer than the bound (searchQueryCutsWord): there is no whole word to
+  // fall back to, a fragment of it is searched, and the note says the first characters were used.
   const cut = searchable ? searchQueryCut(q) : null;
+  const cutsWord = searchable && cut === "length" ? searchQueryCutsWord(q) : false;
   const echoQ = searchable && cut !== null ? searchedWordsAsTyped(q) : q;
   const cutNote =
     cut === "terms"
       ? `Arama ilk ${MAX_SEARCH_TERMS} kelimeyle yapıldı.`
       : cut === "length"
-        ? `Arama sorgunun ilk ${MAX_SEARCH_QUERY_LENGTH} karakteriyle yapıldı.`
+        ? cutsWord
+          ? `Arama sorgunun ilk ${MAX_SEARCH_QUERY_LENGTH} karakteriyle yapıldı.`
+          : `Arama sorgunun ilk ${MAX_SEARCH_QUERY_LENGTH} karakterine sığan kelimelerle yapıldı.`
         : null;
   // searchStatusText only knows the normalised floor, so a punctuation-only
   // query would be announced as "no results" while the page says "type more":

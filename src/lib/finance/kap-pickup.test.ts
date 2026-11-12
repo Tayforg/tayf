@@ -6,6 +6,7 @@ import {
   effectiveMentionMs,
   formatPickupLag,
   formatPickupRate,
+  pickupPanelRows,
   pickupRowKind,
   relatedOnlyCountLabel,
   RELATED_ONLY_LABEL,
@@ -616,5 +617,158 @@ describe("formatPickupLag", () => {
 
   it("1440 minutes -> 'N gün sonra'", () => {
     expect(formatPickupLag(1440)).toBe("1 gün sonra");
+  });
+});
+
+// h144-ekonomi-2: the panel listed only the newest 8 rows, so related-only notices (no numbers) pushed the ticker's
+// own filings (the ones the totals count) off the list. THYAO read "bildirim 7" over 3 listed own filings.
+describe("pickupPanelRows", () => {
+  type Row = { id: number; issuer: boolean; disclosedAt: string };
+  const SIX_HOURS = 6 * HOUR;
+  /** Row `pos` places behind the newest one: the list computePickups returns is newest first. */
+  const row = (pos: number, issuer: boolean): Row => ({ id: 1000 - pos, issuer, disclosedAt: new Date(T - pos * SIX_HOURS).toISOString() });
+  const rows = (issuerAt: readonly number[], total: number): Row[] =>
+    Array.from({ length: total }, (_, pos) => row(pos, issuerAt.includes(pos)));
+  const ids = (list: readonly Row[]) => list.map((r) => r.id);
+  const newestFirst = (list: readonly Row[]) => list.every((r, i) => i === 0 || list[i - 1]!.disclosedAt >= r.disclosedAt);
+
+  it("THYAO-like: 7 own filings and 10 related-only notices interleaved by date list all 7 own plus the 1 newest notice", () => {
+    const input = rows([0, 3, 5, 8, 10, 13, 16], 17);
+
+    const { shown, hidden } = pickupPanelRows(input);
+
+    expect(shown).toHaveLength(8);
+    expect(shown.filter((r) => r.issuer)).toHaveLength(7);
+    // Position 1 is the newest related-only notice; the rest wait behind the summary.
+    expect(ids(shown)).toEqual([0, 1, 3, 5, 8, 10, 13, 16].map((pos) => 1000 - pos));
+    expect(hidden).toHaveLength(9);
+    expect(hidden.every((r) => !r.issuer)).toBe(true);
+    expect(ids(hidden)).toEqual([2, 4, 6, 7, 9, 11, 12, 14, 15].map((pos) => 1000 - pos));
+    expect(newestFirst(shown)).toBe(true);
+    expect(newestFirst(hidden)).toBe(true);
+  });
+
+  it("every row lands in exactly one of the two lists", () => {
+    const input = rows([0, 3, 5, 8, 10, 13, 16], 17);
+
+    const { shown, hidden } = pickupPanelRows(input);
+
+    expect([...ids(shown), ...ids(hidden)].sort((a, b) => a - b)).toEqual(ids(input).sort((a, b) => a - b));
+  });
+
+  it("3 own filings and 2 related-only notices fit in the cap: 5 shown, none hidden", () => {
+    const { shown, hidden } = pickupPanelRows(rows([0, 2, 4], 5));
+
+    expect(shown).toHaveLength(5);
+    expect(hidden).toEqual([]);
+  });
+
+  it("no own filing and 12 related-only notices: the newest 8 are shown, 4 hidden", () => {
+    const input = rows([], 12);
+
+    const { shown, hidden } = pickupPanelRows(input);
+
+    expect(ids(shown)).toEqual(ids(input.slice(0, 8)));
+    expect(ids(hidden)).toEqual(ids(input.slice(8)));
+  });
+
+  it("12 own filings and 3 related-only notices: the cap never drops an own filing, all 3 notices wait", () => {
+    const input = rows([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 15);
+
+    const { shown, hidden } = pickupPanelRows(input);
+
+    expect(shown).toHaveLength(12);
+    expect(shown.every((r) => r.issuer)).toBe(true);
+    expect(hidden).toHaveLength(3);
+    expect(hidden.every((r) => !r.issuer)).toBe(true);
+  });
+
+  it("exactly 8 own filings and a notice: the notice has no slot left", () => {
+    const { shown, hidden } = pickupPanelRows(rows([0, 1, 2, 3, 4, 5, 6, 7], 9));
+
+    expect(shown).toHaveLength(8);
+    expect(hidden).toHaveLength(1);
+  });
+
+  it("an empty list gives two empty lists", () => {
+    expect(pickupPanelRows([])).toEqual({ shown: [], hidden: [] });
+  });
+
+  it("does not mutate its input, and returns new arrays", () => {
+    const input = rows([0, 3, 5, 8, 10, 13, 16], 17);
+    const before = structuredClone(input);
+
+    const { shown, hidden } = pickupPanelRows(input);
+
+    expect(input).toEqual(before);
+    expect(shown).not.toBe(input);
+    expect(hidden).not.toBe(input);
+  });
+
+  it("sorts newest first whatever order it is given", () => {
+    const input = rows([0, 3, 5, 8, 10, 13, 16], 17).reverse();
+
+    const { shown, hidden } = pickupPanelRows(input);
+
+    expect(ids(shown)).toEqual([0, 1, 3, 5, 8, 10, 13, 16].map((pos) => 1000 - pos));
+    expect(newestFirst(hidden)).toBe(true);
+  });
+
+  it("orders by the instant, not by the text: a +03:00 stamp is not newer than a later Z stamp", () => {
+    // 15:00+03:00 is 12:00Z, so the 13:00Z notice is the newer one although "15" sorts after "13".
+    const older = { id: 1, issuer: true, disclosedAt: "2026-11-06T15:00:00+03:00" };
+    const newer = { id: 2, issuer: true, disclosedAt: "2026-11-06T13:00:00.000Z" };
+
+    expect(ids(pickupPanelRows([older, newer]).shown)).toEqual([2, 1]);
+  });
+
+  it("a custom cap: 5 own filings fill a cap of 3, so every notice is hidden", () => {
+    const { shown, hidden } = pickupPanelRows(rows([0, 1, 2, 3, 4], 8), 3);
+
+    expect(shown).toHaveLength(5);
+    expect(hidden).toHaveLength(3);
+  });
+
+  it("a cap of 0 shows only the own filings", () => {
+    const { shown, hidden } = pickupPanelRows(rows([1, 3], 6), 0);
+
+    expect(ids(shown)).toEqual([1, 3].map((pos) => 1000 - pos));
+    expect(hidden).toHaveLength(4);
+  });
+
+  it("keeps rows whose timestamp does not parse, instead of throwing", () => {
+    const input: Row[] = [
+      { id: 1, issuer: true, disclosedAt: "not a date" },
+      { id: 2, issuer: false, disclosedAt: "2026-11-06T13:00:00.000Z" },
+      { id: 3, issuer: false, disclosedAt: "" },
+    ];
+
+    const { shown, hidden } = pickupPanelRows(input, 2);
+
+    expect(shown.length + hidden.length).toBe(3);
+    expect(shown.some((r) => r.id === 1)).toBe(true);
+  });
+
+  it("works on real DisclosurePickup rows (the type the panel passes)", () => {
+    const own: DisclosurePickup = {
+      disclosureIndex: 1,
+      disclosedAt: new Date(T).toISOString(),
+      subject: "Kredi Derecelendirmesi",
+      disclosureClass: "ODA",
+      issuer: true,
+      kapUrl: "https://www.kap.org.tr/tr/Bildirim/1",
+      articles: 0,
+      outlets: 0,
+      zones: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+      sources: [],
+      firstLagMinutes: null,
+      windowComplete: true,
+      overlapping: 0,
+    };
+
+    const { shown, hidden } = pickupPanelRows([own]);
+
+    expect(shown[0]?.kapUrl).toBe(own.kapUrl);
+    expect(hidden).toEqual([]);
   });
 });

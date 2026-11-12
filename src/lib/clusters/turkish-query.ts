@@ -163,6 +163,15 @@ export function cleanQueryUnicode(s: string): string {
   return s.replace(FORMAT_CHARS, "").normalize("NFKC");
 }
 
+// A '/', '\' or '|' between two letters separates two words (h144-search-3): 'Rusya/Ukrayna',
+// 'Dolar/TL' and 'CHP|AKP' were ONE term each, so the archive looked for one lexeme that no story
+// holds (0 stories against 50 for 'rusya ukrayna'; 'dolar/tl' 1 against 13 for 'dolar tl'). The
+// archive's folded arm turns only a hyphen into a space. Digits are left alone ('24/7', '1/2', a
+// date or a ratio). One character with a one-character look-behind and look-ahead: no quantifier,
+// so the match is linear. Shared with the in-feed filter (in-feed-match.ts searchTokens), so the
+// cards above the archive section and the archive read the same words. Replace it with ' '.
+export const SLASH_BETWEEN_LETTERS = /(?<=\p{L})[\/\\|](?=\p{L})/gu;
+
 // A Turkish case suffix is written after an apostrophe: Erdoğan'ın, Özel'den,
 // Bahçeli'nin. The stored titles carry the bare name (or the suffixed form
 // without the apostrophe), so the apostrophe and the suffix after a letter are
@@ -340,11 +349,19 @@ interface SearchTerm {
  * no whitespace and the apostrophe cut never reaches across one). The Unicode
  * cleanup runs on the whole text before the split, so a zero-width character or
  * a full-width space cannot hide a word boundary or a leading '-'. A term of
- * nothing but dashes is a separator and is skipped like bare punctuation.
+ * nothing but dashes is a separator and is skipped like bare punctuation. A '/',
+ * '\' or '|' between two letters is a separator too (SLASH_BETWEEN_LETTERS), so
+ * the words on both sides are two terms. The slash is looked at twice: before the
+ * split (the common case) and again on the cleaned term, because the apostrophe cut
+ * can bring two letters together across a slash ("Erdoğan'/Bahçeli" -> 'erdoğan/bahçeli',
+ * h145 review TS-3); a second pass would otherwise split what the first left whole.
  */
 function searchTerms(q: string, limit: number): SearchTerm[] {
   const out: SearchTerm[] = [];
-  for (const typed of cleanQueryUnicode(q).replace(UNSAFE_CHARS, " ").split(/\s+/)) {
+  for (const typed of cleanQueryUnicode(q)
+    .replace(UNSAFE_CHARS, " ")
+    .replace(SLASH_BETWEEN_LETTERS, " ")
+    .split(/\s+/)) {
     if (typed === "") continue;
     // Lower-casing can leave a pair the next pass would compose (Turkish 'İ'
     // + U+0301 becomes 'i' + U+0301), so normalise once more after it.
@@ -352,8 +369,24 @@ function searchTerms(q: string, limit: number): SearchTerm[] {
       normaliseSearchQuery(typed).toLocaleLowerCase("tr").normalize("NFKC"),
     );
     if (term === "" || isDashOnly(term)) continue;
-    out.push({ typed, term });
-    if (out.length >= limit) break;
+    // The apostrophe cut can leave a slash between two letters: split the term again. Each piece is
+    // its own term, with the matching piece of the typed word as its echo (the typed word split on the
+    // same characters; the piece itself when the counts differ).
+    const pieces = term.split(SLASH_BETWEEN_LETTERS);
+    if (pieces.length === 1) {
+      out.push({ typed, term });
+      if (out.length >= limit) break;
+      continue;
+    }
+    const typedPieces = typed.split(/[\/\\|]/);
+    const aligned = typedPieces.length === pieces.length;
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = stripEdgePunctuation(pieces[i] as string);
+      if (piece === "" || isDashOnly(piece)) continue;
+      const echo = aligned ? (typedPieces[i] as string) : "";
+      out.push({ typed: echo === "" ? piece : echo, term: piece });
+      if (out.length >= limit) return out;
+    }
   }
   return out;
 }
@@ -368,8 +401,13 @@ function searchTerms(q: string, limit: number): SearchTerm[] {
  *      the double quote of a phrase search are kept;
  *   4. terms left empty, or made of dashes only ('Erdoğan - Bahçeli',
  *      'trump <-> iran'), are dropped and only the first MAX_SEARCH_TERMS kept;
- *   5. the whole is cut to MAX_SEARCH_QUERY_LENGTH without leaving half a
- *      surrogate pair, and the cut term's edge is stripped again.
+ *   5. the whole is cut to MAX_SEARCH_QUERY_LENGTH. When the cut lands inside a
+ *      term and more than one term is kept, that partial term is dropped whole
+ *      (h144-search-3: a pasted headline used to search 'iste' of 'isteyenler', a
+ *      fragment no story holds, and answered "sonuç bulunamadı"). A single term
+ *      longer than the bound keeps the cut itself, without leaving half a
+ *      surrogate pair, and its edge is stripped again.
+ * A '/', '\' or '|' between two letters separates words (step 3's walk).
  * Pure, idempotent and linear in the input. '' means "nothing to search for".
  * No Turkish fold (see the header above): the RPC arguments do not change.
  */
@@ -379,17 +417,31 @@ export function canonicalSearchQuery(q: string): string {
   const joined = terms.join(" ");
   if (joined.length <= MAX_SEARCH_QUERY_LENGTH) return joined;
 
+  // h144-search-3: a cut inside a term (the character after the cut is not a space) leaves half
+  // a word, which the archive then searches as a word of its own. With more than one term kept
+  // the partial term goes entirely, back to the last space. The terms before it are whole and
+  // already canonical, so a second pass finds nothing to do (idempotent), and no surrogate pair
+  // can be split. A single term longer than the bound has nothing to fall back to: it keeps
+  // the cut below.
+  const head = joined.slice(0, MAX_SEARCH_QUERY_LENGTH);
+  if (joined.charAt(MAX_SEARCH_QUERY_LENGTH) !== " ") {
+    const lastWholeEnd = head.lastIndexOf(" ");
+    if (lastWholeEnd > 0) return head.slice(0, lastWholeEnd).trim();
+  }
+
   // The cut can land between the halves of a surrogate pair (a lone high
   // surrogate does not survive the JSON body to Postgres) or leave the last
   // term ending in punctuation, so strip that term's edge again: this keeps
   // the function idempotent.
-  const cut = joined.slice(0, MAX_SEARCH_QUERY_LENGTH).replace(/[\ud800-\udbff]$/, "");
+  const cut = head.replace(/[\ud800-\udbff]$/, "");
   const lastSpace = cut.lastIndexOf(" ");
   // The cut can also leave an apostrophe tail that is a suffix only now
   // ("k’daİ" cut to "k’da"), so the apostrophe rule runs on that term again.
   const lastTerm = stripEdgePunctuation(normaliseSearchQuery(cut.slice(lastSpace + 1)));
-  // A cut through '-bahçeli' leaves a lone '-': it would be a separator on the
-  // next pass, so it goes now and the function stays idempotent.
+  // A cut through a single long term of dashes can leave a lone '-' (a cut through
+  // '-bahçeli' among other terms no longer does: that partial term is dropped whole
+  // above): it would be a separator on the next pass, so it goes now and the function
+  // stays idempotent.
   return (cut.slice(0, lastSpace + 1) + (isDashOnly(lastTerm) ? "" : lastTerm)).trim();
 }
 
@@ -421,6 +473,19 @@ export function searchQueryCut(q: string): SearchQueryCut | null {
 }
 
 /**
+ * True when the length cut lands INSIDE a word that the search then uses as a fragment: the first
+ * term is longer than MAX_SEARCH_QUERY_LENGTH, which is exactly when `canonicalSearchQuery` takes its
+ * single-term cut (nothing before that term to fall back to). A 3-word query that is too long drops
+ * whole words and reads false; a first word of exactly the bound is kept whole and reads false too.
+ * The page words its length note with this (h145 review TS-5): "the words that fit" is false for a
+ * single 300-letter word whose first 64 letters are searched. Reads one term, so the cost is linear.
+ */
+export function searchQueryCutsWord(q: string): boolean {
+  const first = searchTerms(q, 1)[0];
+  return first !== undefined && first.term.length > MAX_SEARCH_QUERY_LENGTH;
+}
+
+/**
  * True when the caps dropped part of what the reader typed. False for a
  * canonical query passed back in (it is already within both caps).
  */
@@ -429,14 +494,22 @@ export function searchQueryWasShortened(q: string): boolean {
 }
 
 /**
- * The first MAX_SEARCH_TERMS words of `q` as the reader typed them (case and
+ * The words of `q` the search used, as the reader typed them (case and
  * punctuation kept, whitespace collapsed, bare-punctuation words skipped as the
- * search skips them): the text the page echoes back for a shortened query.
+ * search skips them): the text the page echoes back for a shortened query. Under
+ * a term cut that is the first MAX_SEARCH_TERMS words; under a length cut
+ * (h144-search-3) it is the first k words, k being the number of terms the
+ * canonical query kept, so the echo never shows a word the 64-character cut
+ * dropped. A split '/' word is two words here, as in the search.
  */
 export function searchedWordsAsTyped(q: string): string {
-  return searchTerms(q, MAX_SEARCH_TERMS)
-    .map((t) => t.typed)
-    .join(" ");
+  const words = searchTerms(q, MAX_SEARCH_TERMS).map((t) => t.typed);
+  if (searchQueryCut(q) === "length") {
+    // A term holds no space, so the canonical query's terms are its space-separated pieces.
+    const kept = canonicalSearchQuery(q).split(" ").filter((t) => t !== "").length;
+    if (kept > 0) return words.slice(0, kept).join(" ");
+  }
+  return words.join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +554,60 @@ export function searchedWordsAsTyped(q: string): string {
 //       The allowlist is closed on purpose: a general doubled-consonant rule turns
 //       'messi' into 'mes'. Add a root only after checking it against the live archive.
 //
-// Not covered (on purpose): the other possessive and case endings. A rule is added
+// Two more rules, added with their live counts (h144-search-1, production, 2026-11-12,
+// ts_lexize('turkish_stem') and search_cluster_ids(array[q], tayf_search_fold(q), 50)).
+// The stemmer cuts the bare word and its case-suffixed form differently:
+//
+//   imamoğlu -> imamoğlu, but imamoğluna -> imamoğl      suriye -> suri, but suriyede -> suriye
+//   adana -> ada, but adanada -> adana                   kaza -> kaz, but kazada -> kaza
+//   oylama -> oyla, but oylamada and oylamayı -> oylama
+//
+// 'imamoğluna' 0, 'kılıçdaroğlunu' 0, 'suriyede' 0, 'adanada' 0, 'abdye' 0, 'çinde' 0, 'trumpa' 0
+// (against 50 for each bare word; 'ankarada' 9, 'bursada' 3); 'netanyahu bloğu ilk oylama' 0
+// against 2 for 'oylamayı' and 'oylamada'; 'bolu kaza' 7 against 29 for 'bolu kazada'.
+// The apostrophe form ('İmamoğlu'na') already works: APOSTROPHE_TAIL cuts it.
+//
+//   (C) a case suffix typed WITHOUT an apostrophe (siblingTerm): the root of a letters-only
+//       term. The tails are tried longest first, the root is the term minus the tail, and every
+//       gate must hold:
+//         (i)   the root has at least 4 letters;
+//         (ii)  phonotactics: nın nin nun nün and ya ye yı yi yu yü follow a vowel; na ne nı ni
+//               nu nü and nda nde ndan nden follow ı i u ü (the n of a possessive: -oğlu names);
+//               da de dan den follow a vowel or a voiced consonant; ta te tan ten follow a
+//               voiceless one (ç f h k p s ş t);
+//         (iii) vowel harmony with the root's LAST vowel (a ı o u take the a-form of a two-way
+//               tail, e i ö ü the e-form; four-way tails: a ı -> ı, e i -> i, o u -> u, ö ü -> ü;
+//               an ASCII i counts as i, so 'imamogluna' qualifies);
+//         (iv)  the term is not in the deny set (NO_SIBLING_TERMS): kanada, hollanda, makine ...
+//               fit the shape and their 'root' is another word or a junk stem.
+//       imamoğluna -> imamoğlu, suriyede -> suriye, adanada -> adana, ankaradan -> ankara,
+//       kılıçdaroğlunu -> kılıçdaroğlu. A closed allowlist of acronyms and short names
+//       (SHORT_CASE_ROOTS: abd ab bm çin chp mhp akp ysk aym tbmm tcmb meb sgk spk tuik thy
+//       nato, read letter by letter: ABD'ye, CHP'nin, TBMM'de) skips gates (i) to (iii) and also
+//       takes a bare a / e: abdye -> abd, chpnin -> chp, tbmmde -> tbmm, çinde -> çin. The bare a / e
+//       is NOT taken for 'ab' and 'çin' (BARE_VOWEL_HOMOGRAPHS): abe, aba, çine and cina are words
+//       and names of their own (Abe, Çine), and their root would be the EU or China.
+//   Out of scope, because the false-positive risk is too high: the bare a / e dative, the bare ı / i
+//   accusative and the bare ın / in genitive after a consonant ('trumpa', 'erdoğana' have no rule of
+//   their own). The 'nın nin nun nün' and n-buffer tails can still read such a form as root + n +
+//   suffix: 'erdoğanın' -> 'erdoğa', 'putinin' -> 'puti', 'mardinde' -> 'mardi', 'giresunda' -> 'giresu'
+//   (the longest tail wins, and 'mardin' + 'de' reads the same letters the other way). The root is
+//   then a junk lexeme (ts_lexize: erdoğa -> 'erdok', puti -> 'puti' but putin -> 'put', mardi ->
+//   'mardi' but mardin -> 'mardı'), the typed call has already found the name through its own stem, and
+//   the sibling finds next to nothing: replayed on production, 'mardinde kaza' 0 -> 0, 'berlinde
+//   protesto' 7 -> 7, 'giresunda sel' 2 -> 3 (the extra row is unrelated), 'putinin açıklaması' 0 -> 0.
+//   The cost is one extra call on a short page, which searchFoldedSibling makes for any vowel-final
+//   word anyway. Over the 6,000 newest headlines (2026-11-12), 4,002 distinct words are read by rule
+//   C; in 2,505 the root has the word's own stem (the sibling adds nothing), in 1,497 it does not
+//   (the intended case: imamoğlu / imamoğl, türkiye / türki, ankara / ankar), and a handful are
+//   wrong parses with a junk root (see the deny set).
+//
+//   The second half of the fix is searchFoldedSibling: a BARE vowel-final noun with no root sibling
+//   ('bolu kaza', 'tarla') is searched again with its locative ('boluda kazada', 'tarlada'), as the variants AND
+//   the folded text of the same second call.
+//
+// Not covered (on purpose): the other possessive and case endings (the instrumental -la / -le, the
+// plural, the bare consonant forms), and a bare vowel-final name with no suffix. A rule is added
 // only with the live counts that justify it.
 // ---------------------------------------------------------------------------
 
@@ -505,17 +631,138 @@ const GEMINATE_BY_FOLD: ReadonlyMap<string, string> = new Map(
   [...GEMINATE_ROOTS].map(([doubled, root]) => [foldTr(doubled), root]),
 );
 
-// Terms that fit rule A's shape and are not a possessive of their 'root': 'kayısı' is the
-// fruit, 'kayı' is something else. Compared folded, so 'kayısı' and 'kayisi' are one entry.
-// Add a word only with a live example of the wrong sibling.
-const NO_SIBLING_TERMS: ReadonlySet<string> = new Set(["kayisi"]);
+// Terms that fit rule A's or rule C's shape and are not an inflection of their 'root': 'kayısı' is
+// the fruit, 'kayı' is something else; 'kanada' is Canada, not kana + da. Compared folded, so 'kayısı'
+// and 'kayisi' are one entry. Add a word only with a live example of the wrong sibling.
+//
+// Rule C (h144-search-1; ts_lexize('turkish_stem', ...) on production, 2026-11-12, the word's stem
+// / the root's stem). The root stems to a lexeme of its own that no headline of the word holds:
+//   kanada -> kana: 'kana' / 'ka'         granada -> grana: 'grana' / 'gra'
+//   makine -> maki: 'mak' / 'maki'        kabine -> kabi: 'kap' / 'kabi'      hazine -> hazi: 'haz' / 'hazi'
+// The root is not a word, and its stem is the word's own, so a sibling would only cost a call:
+//   hollanda -> hollan 'holla' / 'holla'  florida -> flori 'flori' / 'flori'  uganda -> ugan 'uga' / 'uga'
+//   ruanda -> ruan 'ruan' / 'ruan'        propaganda -> propagan 'propaga' / 'propaga'
+//   ajanda -> ajan 'aja' / 'aja'          veranda -> veran 'vera' / 'vera'    medine -> medi 'medi' / 'medi'
+// 'suriye' is the root of 'suriyede' and itself has the shape of 'suri' + 'ye' (both stem to 'suri'):
+// denied, so the sibling of 'suriyede' is a fixed point and a second pass finds nothing to do.
+// Very common function words that rule C reads as root + tail, whose root stems to a 1 to 3 letter
+// junk lexeme (the 6,000 newest headlines, 2026-11-12: yeniden in 70, ardından 43, nerede 15,
+// konseyi 11): yeniden -> yeni ('yeni' / 'ye'), ardından -> ardı ('ardı' / 'ar'), nerede -> nere
+// ([] / 'ner'), konseyi -> konse ('konse' / 'ko', the word is konsey + i). Live wrong sibling:
+// 'yeniden sayım' asked for 'yeni sayım' and gained 'Yeni Zelanda'daki ... oy sayım işlemi'.
+// The deny set is the TYPED word's: 'kanadada' still reaches 'kanada'.
+const NO_SIBLING_TERMS: ReadonlySet<string> = new Set([
+  "kayisi",
+  "kanada", "hollanda", "florida", "uganda", "ruanda", "propaganda", "ajanda", "veranda", "granada",
+  "makine", "kabine", "hazine", "medine",
+  "suriye",
+  "yeniden", "ardindan", "nerede", "konseyi",
+]);
 
 // Rule A. One unbounded quantifier, anchored on both ends: linear. The -sı / -si ending
 // only (a -su / -sü word is a compound name, see the header). ASCII 'i' is in both
 // classes, so an ASCII-typed term ('vergisi', 'cezasi') qualifies.
 const POSSESSIVE_AFTER_VOWEL = /^(\p{L}{2,}[aeıioöuü])s[ıi]$/u;
 
-/** The root of one term under rule B then rule A (after the deny set), or null. The term is not cased yet. */
+// Rule C (h144-search-1). The case suffixes of a name typed without its apostrophe, with what each
+// one needs before it. `ways` is the harmony class of its vowel (2: a / e, 4: ı i u ü); `after`
+// says which sound the root must end in: "v" a vowel, "p" one of ı i u ü (the n of a possessive),
+// "d" a vowel or a voiced consonant, "t" a voiceless consonant. Sorted longest first below.
+type CaseAfter = "v" | "p" | "d" | "t";
+const CASE_TAILS: ReadonlyArray<readonly [tail: string, ways: 2 | 4, after: CaseAfter]> = (
+  [
+    ["ndan", 2, "p"], ["nden", 2, "p"],
+    ["nın", 4, "v"], ["nin", 4, "v"], ["nun", 4, "v"], ["nün", 4, "v"],
+    ["nda", 2, "p"], ["nde", 2, "p"],
+    ["dan", 2, "d"], ["den", 2, "d"], ["tan", 2, "t"], ["ten", 2, "t"],
+    ["ya", 2, "v"], ["ye", 2, "v"], ["yı", 4, "v"], ["yi", 4, "v"], ["yu", 4, "v"], ["yü", 4, "v"],
+    ["na", 2, "p"], ["ne", 2, "p"], ["nı", 4, "p"], ["ni", 4, "p"], ["nu", 4, "p"], ["nü", 4, "p"],
+    ["da", 2, "d"], ["de", 2, "d"], ["ta", 2, "t"], ["te", 2, "t"],
+  ] as const
+)
+  .slice()
+  .sort((a, b) => b[0].length - a[0].length);
+
+// The letters a term of rule C is made of, and the classes the gates read.
+const LETTERS_ONLY = /^\p{L}+$/u;
+const VOWELS = "aeıioöuü";
+const VOICED_CONSONANTS = "bcdgğjlmnrvyz";
+const VOICELESS_CONSONANTS = "çfhkpsşt";
+const POSSESSIVE_VOWELS = "ıiuü";
+
+// Acronyms and short names read letter by letter, whose case suffix follows the sound of the
+// last LETTER (ABD'ye, CHP'nin, TBMM'de, YSK'dan), not a vowel of the word: gates (i) to (iii)
+// are skipped for them. Compared folded ('çin' and 'cin' are one entry). CLOSED on purpose.
+const SHORT_CASE_ROOTS: ReadonlySet<string> = new Set([
+  "abd", "ab", "bm", "cin", "chp", "mhp", "akp", "ysk", "aym", "tbmm", "tcmb", "meb", "sgk", "spk",
+  "tuik", "thy", "nato",
+]);
+
+// Short roots whose bare a / e form is a word or a name of its own: abe, aba (Abe), çine, cina
+// (Çine, an Aydın district). The tails above still apply to them.
+const BARE_VOWEL_HOMOGRAPHS: ReadonlySet<string> = new Set(["ab", "cin"]);
+
+/** The vowel of `tail` that carries its harmony, or "" when it has none. */
+function firstVowel(s: string): string {
+  for (const ch of s) if (VOWELS.includes(ch)) return ch;
+  return "";
+}
+
+/** The last vowel of `root`, or "" when it has none. */
+function lastVowel(root: string): string {
+  for (let i = root.length - 1; i >= 0; i--) if (VOWELS.includes(root[i] as string)) return root[i] as string;
+  return "";
+}
+
+/** The vowel a tail of class `ways` must carry after a root whose last vowel is `v`. */
+function harmonyVowel(v: string, ways: 2 | 4): string {
+  if (ways === 2) return "aıou".includes(v) ? "a" : "e";
+  if (v === "a" || v === "ı") return "ı";
+  if (v === "e" || v === "i") return "i";
+  return v === "o" || v === "u" ? "u" : "ü";
+}
+
+/** Gates (i) to (iii) of rule C for one tail: length, phonotactics, vowel harmony. */
+function caseRootFits(root: string, tail: string, ways: 2 | 4, after: CaseAfter): boolean {
+  if (Array.from(root).length < 4) return false;
+  const end = root.slice(-1);
+  const soundFits =
+    after === "v"
+      ? VOWELS.includes(end)
+      : after === "p"
+        ? POSSESSIVE_VOWELS.includes(end)
+        : after === "d"
+          ? VOWELS.includes(end) || VOICED_CONSONANTS.includes(end)
+          : VOICELESS_CONSONANTS.includes(end);
+  if (!soundFits) return false;
+  const v = lastVowel(root);
+  return v !== "" && firstVowel(tail) === harmonyVowel(v, ways);
+}
+
+/**
+ * The root of a letters-only term that carries a case suffix typed without its apostrophe, or null
+ * (rule C). `low` is the term lower-cased with the Turkish rules and already past the deny set.
+ * Tails are tried longest first and the first whose gates hold wins, so 'imamoğlunda' is
+ * imamoğlu + nda. A short root reads its tail without the gates, and a bare a / e after it. A handful
+ * of `endsWith` and one `slice` per tail on a term of at most MAX_SEARCH_QUERY_LENGTH characters: linear.
+ */
+function caseSuffixRoot(low: string): string | null {
+  if (!LETTERS_ONLY.test(low)) return null;
+  for (const [tail, ways, after] of CASE_TAILS) {
+    if (low.length <= tail.length || !low.endsWith(tail)) continue;
+    const root = low.slice(0, low.length - tail.length);
+    if (SHORT_CASE_ROOTS.has(foldTr(root)) || caseRootFits(root, tail, ways, after)) return root;
+  }
+  const bare = low.slice(-1);
+  if (bare === "a" || bare === "e") {
+    const root = low.slice(0, -1);
+    const folded = foldTr(root);
+    if (SHORT_CASE_ROOTS.has(folded) && !BARE_VOWEL_HOMOGRAPHS.has(folded)) return root;
+  }
+  return null;
+}
+
+/** The root of one term under rule B, then (after the deny set) rule A, then rule C, or null. The term is not cased yet. */
 function siblingTerm(term: string): string | null {
   // A canonical query holds terms of at most MAX_SEARCH_QUERY_LENGTH characters;
   // a longer one is not a word and is never examined, so the cost per term is bounded.
@@ -528,13 +775,15 @@ function siblingTerm(term: string): string | null {
   }
   if (NO_SIBLING_TERMS.has(foldTr(low))) return null;
   const match = POSSESSIVE_AFTER_VOWEL.exec(low);
-  return match === null ? null : (match[1] as string);
+  if (match !== null) return match[1] as string;
+  return caseSuffixRoot(low);
 }
 
 /**
- * The same query with every term that is a possessive-after-a-vowel or a listed
- * doubled-stem form replaced by its root ('elektrik zammı' -> 'elektrik zam',
- * 'emlak vergisi' -> 'emlak vergi'); the other terms are kept as typed. Null when
+ * The same query with every term that is a possessive-after-a-vowel, a listed
+ * doubled-stem form or a case suffix typed without its apostrophe replaced by its
+ * root ('elektrik zammı' -> 'elektrik zam', 'emlak vergisi' -> 'emlak vergi',
+ * 'imamoğluna' -> 'imamoğlu', 'suriyede' -> 'suriye'); the other terms are kept as typed. Null when
  * the query uses websearch syntax (`hasSearchOperator`: the reader is in charge)
  * or when no term changes, so applying it to its own output gives null. The term
  * count never changes, so the 6-term and 64-character bound of the canonical
@@ -551,6 +800,80 @@ export function searchSiblingQuery(q: string): string | null {
       if (root === null) return t;
       changed = true;
       return root;
+    });
+  return changed ? terms.join(" ") : null;
+}
+
+// ---------------------------------------------------------------------------
+// Folded sibling: the locative of a bare vowel-final noun (h144-search-1).
+//
+// The stemmer cuts a bare vowel-final noun one letter shorter than its inflected form
+// (kaza -> kaz, but kazada and kazayı -> kaza; oylama -> oyla, but oylamada -> oylama;
+// toplantı -> topla, but toplantıda -> toplantı), so the bare word the reader types never meets
+// the stem that the headlines holding an inflected form carry: 'bolu kaza' found 7 stories and
+// 'bolu kazada' 29 (33 against the union), 'netanyahu bloğu ilk oylama' found 0 and 2 with
+// 'oylamada'. `searchFoldedSibling` gives such a term its locative, and search-query.ts makes a second
+// call for it, only when the typed page is short and only when `searchSiblingQuery` found no root.
+//
+// The locative is BOTH arguments of that call, `p_variants` and `p_folded`: every call folds its own
+// variants. Migration 166's over-stem guard (and the tiers of 172 / 194) read `p_folded` ONLY, so a call
+// whose variants spell another text searches stems the guard never checked. The first version of this
+// call sent the typed spelling as variants with the locative as the folded text; on production (read-only,
+// search_cluster_ids at limit 24) ['tarla'] with 'tarlada' returned 24 rows where the typed call found 11,
+// and of the 13 appended rows 6 held no 'tarl' word (the stemmer cuts 'tarla' to 'tar', which matches
+// 'Bakan Yumaklı', 'İş cinayetleri raporu', ...), while ['tarlada'] with 'tarlada' appended 13 rows, none
+// of them junk, and 'netanyahu bloğu ilk oylama' kept its 0 -> 2 with the locative as variants too. The
+// typed call has already searched the typed stems, so the second call has no reason to repeat them.
+//
+// With a root sibling (rule A, B or C: 'tarlası' -> 'tarla') the locative is not used: that call is the
+// sibling's own, the sibling as variants and folded text, exactly as before this function existed. The
+// locative as variants loses proper nouns there ('boluda kazada' finds 0 where 'bolu kaza' finds 7), and
+// the sibling of 'tarlası' ('tarla') would otherwise reach the same unguarded call through its own locative.
+//
+// KNOWN LIMIT (replayed on production, 2026-11-12, search_cluster_ids at limit 24, typed page / locative
+// page / union): the stemmer also shortens a vowel-final PROPER noun when it is bare ('bolu' -> 'bol',
+// 'bursa' -> 'burs') and keeps the letter in the locative ('boluda' -> 'bolu'), so giving EVERY term its
+// locative asks for a stem that the Bolu headlines do not hold: 'bolu kaza' 7 / 0 / 7, 'bursa kaza' 6 / 0 / 6,
+// 'manisa kaza' 11 / 0 / 11. The typed call has already listed those, and the second call only appends, so
+// a name loses nothing: it gains nothing from this call, which is the price of keeping every call guarded.
+// Where no term is such a name the locative page is the one that helps: 'mersin kaza' 2 / 14 / 14,
+// 'meclis oylama' 16 / 24 / 38 (the page keeps 24), 'netanyahu bloğu ilk oylama' 0 / 2 / 2. A second known
+// limit: the locative's stem 'kaza' is also the stem of 'kazandı' and 'kazanın', so 'van kaza' (2 / 6 / 8)
+// appends rows of those words next to the 'kazada' stories.
+// ---------------------------------------------------------------------------
+
+/** The term with the locative of Turkish two-way harmony after its last vowel (a ı o u: da, e i ö ü: de), or null. */
+function withLocative(term: string): string | null {
+  // The same bound as siblingTerm: a longer term is not a word.
+  if (term.length > MAX_SEARCH_QUERY_LENGTH) return null;
+  const low = term.toLocaleLowerCase("tr");
+  if (!LETTERS_ONLY.test(low) || Array.from(low).length < 4) return null;
+  const last = low.slice(-1);
+  if (!VOWELS.includes(last)) return null;
+  return term + (harmonyVowel(last, 2) === "a" ? "da" : "de");
+}
+
+/**
+ * The same query with the locative added to every term that is letters only, at least 4 letters
+ * long and ends in a vowel ('bolu kaza' -> 'boluda kazada', 'meclis oylama' -> 'meclis oylamada',
+ * 'toplantı' -> 'toplantıda'); the other terms are kept as typed. Null when the query uses websearch
+ * syntax (`hasSearchOperator`: the reader is in charge) or when no term changes. The term count
+ * never changes, so the 6-term bound holds; each changed term grows by two letters. search-query.ts
+ * sends it as BOTH the variants and the folded text of the second archive call, and only when the
+ * query has no root sibling (`searchSiblingQuery` is null): the guard of migration 166 reads the folded
+ * text only, so the call must fold the same words its variants spell, and a sibling call keeps its own.
+ */
+export function searchFoldedSibling(q: string): string | null {
+  if (hasSearchOperator(q)) return null;
+  let changed = false;
+  const terms = q
+    .split(/\s+/)
+    .filter((t) => t !== "")
+    .map((t) => {
+      const locative = withLocative(t);
+      if (locative === null) return t;
+      changed = true;
+      return locative;
     });
   return changed ? terms.join(" ") : null;
 }
