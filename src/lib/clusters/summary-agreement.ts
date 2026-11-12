@@ -2,7 +2,13 @@ import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/ent
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { isHeadlineEcho } from "@/lib/articles/description-boilerplate";
 import { hasFiniteVerb } from "@/lib/articles/finite-verb";
-import { clampCutIntroducedQuote, isCtaFeedCut, isUnmarkedClamp, tidySummaryText } from "@/lib/articles/summary-tidy";
+import {
+  clampCutIntroducedQuote,
+  isCtaFeedCut,
+  isUnmarkedClamp,
+  leadInStub,
+  tidySummaryText,
+} from "@/lib/articles/summary-tidy";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { sourceLang } from "@/lib/sources/source-language";
 import type { SummaryMember } from "./summary-attribution";
@@ -218,8 +224,8 @@ export const AGREEMENT_HIGH = 0.75;
 export const AGREEMENT_MIN_GAIN = 0.3;
 /**
  * A replacement must score at least this (inclusive) when the seed is a form defect
- * ({@link SeedDefect}: a CMS field dump, a stub, unbalanced quotes, only quotations, a live line, a
- * teaser or an echo)
+ * ({@link SeedDefect}: a CMS field dump, a lower-cased headline, a stub, unbalanced quotes, only
+ * quotations, a live line, a teaser, a lead-in or an echo)
  * instead of {@link AGREEMENT_HIGH}; behind a stub that scores under {@link AGREEMENT_STUB_LOW_SEED}
  * it is {@link AGREEMENT_LOW} (h132-ozetpost-1). In the replay of the 1,600 newest clusters of 3
  * members or more, the clean replacements behind a live line scored 0.6 to 0.7 against
@@ -817,7 +823,46 @@ function unbalancedQuotes(s: string): boolean {
   return straight % 2 === 1 || curly !== 0;
 }
 
-export type SeedDefect = "cms" | "stub" | "quotes" | "quote-only" | "live" | "teaser" | "echo";
+export type SeedDefect = "cms" | "case" | "stub" | "quotes" | "quote-only" | "live" | "teaser" | "lead-in" | "echo";
+
+/** JavaScript's `toLowerCase` of "İ" is "i" followed by this combining dot above. */
+const COMBINING_DOT_ABOVE = "\u0307";
+/** A text with this many lower-case letters and no upper-case letter at all is a lower-cased headline. */
+export const CASE_MIN_LOWER_LETTERS = 25;
+const ANY_UPPER_LETTER = /^[\p{Lu}\p{Lt}]$/u;
+const ANY_LOWER_LETTER = /^\p{Ll}$/u;
+const ANY_LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
+
+/**
+ * True for a text whose letters were broken by a feed's lower-casing (h164-summaries-2). En Politik
+ * ships its headline as the description, lower-cased by JavaScript's default `toLowerCase`: a title in
+ * capitals gives "i" + U+0307 for "İ" (a2260dd6's "hi" + U+0307 + "jyenden") and an ASCII "i" for "I"
+ * ("çocuklarin"), which the headline echo test cannot match and the Özet shows as it is. Two signs,
+ * either is enough:
+ *   - U+0307 right after an "i" (nothing legitimate in a Turkish news text);
+ *   - at least {@link CASE_MIN_LOWER_LETTERS} lower-case letters, no upper-case letter at all, and the
+ *     first letter or digit is a lower-case letter: a headline put in lower case ("emine erdoğan: atık
+ *     krizi ..."). A text that starts with a digit ("14 yıl boyunca kayıplara karışan firari hükümlü ...",
+ *     İşçi Haber, which holds no capital by chance) is a sentence and is not flagged; the sign counts
+ *     lower-case letters, so a script without case (Arabic, Japanese) never reaches it.
+ * A normal mixed-case text, an all-caps acronym line ("TBMM NATO ABD") and the empty text are not
+ * flagged. One pass over the text, no regular expression over it.
+ */
+export function isCaseGarbled(text: string): boolean {
+  if (typeof text !== "string" || text === "") return false;
+  for (let at = text.indexOf(COMBINING_DOT_ABOVE); at !== -1; at = text.indexOf(COMBINING_DOT_ABOVE, at + 1)) {
+    if (at > 0 && text.charAt(at - 1) === "i") return true;
+  }
+  let lower = 0;
+  let startsLower: boolean | null = null; // the first letter or digit is a lower-case letter
+  for (const ch of text) {
+    if (ANY_UPPER_LETTER.test(ch)) return false;
+    const isLower = ANY_LOWER_LETTER.test(ch);
+    if (isLower) lower++;
+    if (startsLower === null && (isLower || ANY_LETTER_OR_DIGIT.test(ch))) startsLower = isLower;
+  }
+  return startsLower === true && lower >= CASE_MIN_LOWER_LETTERS;
+}
 
 /** A text that opens with "Peki" or "İşte" as a whole word (the folded COME_ON rule, anchored at the start). */
 const OPENS_WITH_COME_ON = /^(?:peki|iste)(?![\p{L}\p{N}])/u;
@@ -836,6 +881,8 @@ export interface SeedTitles {
  *   - "cms": the RAW text holds a field of Independent Türkçe's CMS dump ("SEO Title:",
  *     "Main image:", "copyright Independentturkish"; {@link CMS_RESIDUE}, h122-ozet-1). The
  *     tidied text has the dump cut away, so only the raw text can tell;
+ *   - "case": the shown text is a lower-cased headline with broken Turkish letters
+ *     ({@link isCaseGarbled}, h164-summaries-2: En Politik's "hijyenden tasarruf ...");
  *   - "stub": a feed cut it (see {@link isCutStub}): the shown text ends in "..."
  *     or "…" and the raw text is a known feed-cap cut, an unmarked 400 / 500
  *     character cut, a Turkuvaz CTA feed cut ({@link isCtaFeedCut}, h122-ozet-3) or the last
@@ -850,7 +897,12 @@ export interface SeedTitles {
  *   - "live": a live-blog line ({@link isLiveLine});
  *   - "teaser": the shown text OPENS with Peki / İşte (the tidy step cuts a come-on
  *     that has a complete sentence in front of it, so what is left is one with nothing
- *     to cut);
+ *     to cut). A text the lead-in back-off emptied is read as it stood before the back-off
+ *     ("İşte ... satır başları:" is a teaser, and was one before h164);
+ *   - "lead-in": the text ends in ":" or ";" and the tidy step's back-off to the sentence in front
+ *     of it ({@link leadInStub}, h164-summaries-1) emptied the text or kept fewer than
+ *     {@link AGREEMENT_MIN_CHARS} characters: what is left is not a summary. A back-off that kept
+ *     60 characters or more leaves a clean shown text, which is not a defect;
  *   - "echo": the shown text only repeats a headline: the seed article's own
  *     (`titles.memberTitle`) or the cluster's (`titles.clusterTitle`), compared with
  *     `isHeadlineEcho` (case, blanks, trailing marks and a cut-off "…" do not matter).
@@ -863,12 +915,17 @@ export interface SeedTitles {
 export function seedDisqualified(raw: string, shown: string, titles: SeedTitles = {}): SeedDefect | null {
   if (typeof raw !== "string" || typeof shown !== "string") return null;
   if (CMS_RESIDUE.test(raw)) return "cms";
+  // Before the quote and echo verdicts: a lower-cased headline in quotation marks is 'case', not 'quote-only'.
+  if (isCaseGarbled(shown)) return "case";
   if (isCutStub(raw, shown)) return "stub";
   if (clampCutIntroducedQuote(raw)) return "stub";
   if (unbalancedQuotes(shown)) return "quotes";
   if (isQuoteOnly(shown)) return "quote-only";
   if (isLiveLine(shown)) return "live";
-  if (OPENS_WITH_COME_ON.test(fold(shown.trimStart()))) return "teaser";
+  // h164-summaries-1: the text before the lead-in back-off, when the back-off left no summary.
+  const leadIn = leadInStub(raw, AGREEMENT_MIN_CHARS);
+  if (OPENS_WITH_COME_ON.test(fold((leadIn ?? shown).trimStart()))) return "teaser";
+  if (leadIn !== null) return "lead-in";
   if (isHeadlineEcho(titles.memberTitle, shown) || isHeadlineEcho(titles.clusterTitle, shown)) return "echo";
   return null;
 }
@@ -1076,14 +1133,16 @@ function byNewest(a: Scored, b: Scored): number {
  *     copy of an agency's words is the agency's), and its tidied text is not a
  *     near copy of one either ({@link AGENCY_COPY_OVERLAP}: a phrase dropped, a
  *     word changed, a CTA tail added still leave the agency's words);
- *   - its tidied text is at least {@link AGREEMENT_MIN_CHARS} long and has no
- *     {@link summaryDefect} (a live-blog line included, h95-summaries-1);
+ *   - its tidied text is at least {@link AGREEMENT_MIN_CHARS} long, has no
+ *     {@link summaryDefect} (a live-blog line included, h95-summaries-1) and is not
+ *     {@link isCaseGarbled} (h164-summaries-2);
  *   - its tidied text is not an echo of a headline: its own article's title
  *     (`member.article.title`, absent on a lighter projection) or the cluster title
  *     (`isHeadlineEcho`, h95-summaries-1);
  *   - its score passes {@link agreementSwitches}, with the floor of the seed's defect:
- *     {@link AGREEMENT_FORM_DEFECT_MIN} behind a CMS dump, a stub, quotes, quotations only, a
- *     live line, a teaser or an echo ({@link seedDisqualified}), {@link AGREEMENT_LOW} behind a
+ *     {@link AGREEMENT_FORM_DEFECT_MIN} behind a CMS dump, a lower-cased headline, a stub, quotes,
+ *     quotations only, a live line, a teaser, a lead-in or an echo ({@link seedDisqualified}),
+ *     {@link AGREEMENT_LOW} behind a
  *     stub that scores under {@link AGREEMENT_STUB_LOW_SEED} (h132-ozetpost-1), {@link AGREEMENT_HIGH}
  *     otherwise (an opinion, a stale or an explainer seed keep it: what they say is the
  *     problem, not how they look). A candidate is never filtered by its OWN title. Behind a clean
@@ -1192,6 +1251,8 @@ export function findAgreeingMember({
     const shown = tidySummaryText(raw);
     if (shown.length < AGREEMENT_MIN_CHARS) return;
     if (summaryDefect(raw, shown) !== null) return;
+    // A lower-cased headline with broken letters (En Politik) is no better a summary than the seed's (h164-summaries-2).
+    if (isCaseGarbled(shown)) return;
     // A description that is only a headline says nothing the page does not (h95-
     // summaries-1): the member's own, or the cluster's, for every seed.
     if (isHeadlineEcho(m.article.title, shown) || isHeadlineEcho(title, shown)) return;

@@ -26,6 +26,13 @@ import { isHeadlineEcho } from "@/lib/articles/description-boilerplate";
 import { tidySummaryText } from "@/lib/articles/summary-tidy";
 import type { Source, SourceKind } from "@/types";
 
+/**
+ * Synthetic seeds and candidates start with a capital letter: an all-lower-case text of 25 letters or
+ * more is a 'case' defect since h164-summaries-2 (En Politik's lower-cased headline), and these cases are
+ * about the other bars. The title stems are folded to lower case, so the score is the same.
+ */
+const cap = (text: string): string => text.charAt(0).toLocaleUpperCase("tr") + text.slice(1);
+
 const T0 = "2026-09-06T10:00:00.000Z";
 function src(id: string): Source {
   return { id, name: id, slug: id, url: "https://x", rss_url: "https://x/r", bias: "center", logo_url: null, active: true };
@@ -740,8 +747,10 @@ function leavesNothingOpen(s: string): boolean {
  * What truncateWords did before h29: cut at the last space of the window,
  * whatever it left open. h30-live-1 changed one thing about that cut on purpose
  * ("Partisi,…" is now "Partisi…"), so the oracle drops ", ; : – — -" in front of
- * the ellipsis too. Returns the cut and where the dangling-free text ends, so a
- * caller can tell a cut that ends inside the label.
+ * the ellipsis too. h164-summaries-2 changed one more thing on purpose: a cut that
+ * already ends in "..." or "…" is not closed with another "…" ("yazdı...…"), so the
+ * oracle leaves such a cut as it is. Returns the cut and where the dangling-free
+ * text ends, so a caller can tell a cut that ends inside the label.
  */
 function legacyCut(full: string, max: number): { out: string; end: number } {
   if (full.length <= max) return { out: full, end: full.length };
@@ -750,7 +759,8 @@ function legacyCut(full: string, max: number): { out: string; end: number } {
   const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
   let end = cut.length;
   while (end > 0 && (",;:–—-".includes(cut.charAt(end - 1)) || cut.charAt(end - 1).trim() === "")) end--;
-  return { out: cut.slice(0, end) + "…", end };
+  const body = cut.slice(0, end);
+  return { out: body.endsWith("…") || body.endsWith("...") ? body : body + "…", end };
 }
 
 
@@ -980,10 +990,10 @@ describe("describeForMeta never ends inside an open quotation (h29-regress-1)", 
       expect(insideLabel).toBeGreaterThan(0);
     });
 
-    it("a cut that ends in '…' keeps the old doubled ellipsis", () => {
+    it("a cut that ends in '…' is not closed with a second one (h164-summaries-2; it was 'Bekleniyor……')", () => {
       const text = "Bekleniyor… ardından açıklama geldi.";
       const max = prefix.length + "Bekleniyor… ".length + 1;
-      expect(describeForMeta({ count: 2, attribution: { text, source: null } }, max)).toBe(`${prefix}Bekleniyor……`);
+      expect(describeForMeta({ count: 2, attribution: { text, source: null } }, max)).toBe(`${prefix}Bekleniyor…`);
     });
 
     it("a text with closed quotations: a balanced cut gives the old output, any other cut is balanced", () => {
@@ -1830,8 +1840,8 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       const TITLE8 = WORDS.join(" ");
       const tokens = (prefix: string, from: number, to: number) =>
         Array.from({ length: to - from + 1 }, (_, i) => `${prefix}${String(from + i).padStart(2, "0")}`);
-      const text = (...parts: string[][]) => `${[...WORDS, ...parts.flat()].join(" ")}.`;
-      const SEED_OFF = "hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi (seed).";
+      const text = (...parts: string[][]) => cap(`${[...WORDS, ...parts.flat()].join(" ")}.`);
+      const SEED_OFF = "Hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi (seed).";
 
       const run = (agencyText: string, candidateText: string, kind: "wire" | "aggregator" = "wire") => {
         const seed = outlet("Tohum", "tohum", SEED_AT, SEED_OFF);
@@ -1869,8 +1879,8 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
     it("is bounded: 300 qualifying members against 300 agency members stay well under two seconds", () => {
       const WORDS = ["kedi", "köpek", "kuş", "balık", "aslan", "kaplan", "zürafa", "horoz"];
       const own = (tag: string, i: number) =>
-        `${WORDS.join(" ")} ${Array.from({ length: 12 }, (_, j) => `${tag}${String(i).padStart(3, "0")}${String.fromCharCode(97 + j)}`).join(" ")}.`;
-      const off = "hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi (seed).";
+        cap(`${WORDS.join(" ")} ${Array.from({ length: 12 }, (_, j) => `${tag}${String(i).padStart(3, "0")}${String.fromCharCode(97 + j)}`).join(" ")}.`);
+      const off = "Hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi (seed).";
       const seed = outlet("Tohum", "tohum", SEED_AT, off);
       const members = [seed];
       for (let i = 0; i < 300; i++) {
@@ -1889,7 +1899,7 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
     const TITLE8 = WORDS.join(" ");
     /** A sentence that carries the first `hits` title words and nothing else of the title. */
     const sentence = (hits: number, salt = "") =>
-      `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`;
+      cap(`${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`);
 
     const run = (seedHits: number, candidateHits: number) => {
       const seed = outlet("Tohum", "tohum", SEED_AT, sentence(seedHits, " (seed)"));
@@ -1932,7 +1942,7 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       const words = ["abaka", "bobin", "cidem", "dalka", "ekmek", "fidan", "gazoz", "havuz", "irmak", "jeton", "kapak", "lamba", "masal", "nehir", "orman", "pamuk", "rakip"];
       const title17 = words.join(" ");
       const make = (hits: number, salt: string) =>
-        `${words.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`;
+        cap(`${words.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`);
       const seed = outlet("Tohum", "tohum", SEED_AT, make(8, " (seed)"));
       expect(titleAgreement(title17, make(8, ""))).toBeCloseTo(8 / 17, 10);
       const strong = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", make(14, ""));
@@ -2403,10 +2413,10 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       const WORDS = ["elma", "armut", "kiraz", "üzüm", "incir", "çilek", "muz", "nar"];
       const TITLE8 = WORDS.join(" ");
       const sentence = (hits: number) =>
-        `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`;
+        cap(`${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`);
       /** A cut text with no verb in it that carries the first `hits` title words. */
       const stub = (hits: number) =>
-        `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler ve uzmanların görüşleri…`;
+        cap(`${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler ve uzmanların görüşleri…`);
       const run = (seedText: string, candidateText: string) => {
         const seed = outlet("Tohum", "tohum", SEED_AT, seedText);
         const candidate = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", candidateText);
@@ -2451,7 +2461,7 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
     describe("4. a clean seed that covers half of the headline is never replaced", () => {
       const WORDS = ["elma", "armut", "kiraz", "üzüm", "incir", "çilek", "muz", "nar"];
       const TITLE8 = WORDS.join(" ");
-      const best = `${WORDS.join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`;
+      const best = cap(`${WORDS.join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`);
       const kept = (seedText: string) => {
         const seed = outlet("Tohum", "tohum", SEED_AT, seedText);
         const candidate = outlet("Aday", "aday", "2026-11-04T09:00:00.000Z", best);
@@ -2460,18 +2470,18 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       };
 
       it.each([
-        ["an ellipsis after a sentence that has its verb", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi…"],
-        ["three dots after a clause that has its verb", "elma armut kiraz üzüm hakkında şehir genelinde uzmanlar açıklama yaptı..."],
-        ["balanced curly quotes", "elma armut kiraz üzüm hakkında “şehir genelinde yeni gelişmeler” yaşandığı bildirildi."],
-        ["balanced straight quotes", 'elma armut kiraz üzüm hakkında "şehir genelinde yeni gelişmeler" yaşandığı bildirildi.'],
-        ["apostrophes and single curly quotes", "elma armut kiraz üzüm hakkında ‘şehir’ genelinde Ankara’daki yeni gelişmeler yaşandığı bildirildi."],
-        ["an ellipsis in the middle", "elma armut kiraz üzüm hakkında şehir genelinde ... yeni gelişmeler yaşandığı bildirildi."],
+        ["an ellipsis after a sentence that has its verb", "Elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi…"],
+        ["three dots after a clause that has its verb", "Elma armut kiraz üzüm hakkında şehir genelinde uzmanlar açıklama yaptı..."],
+        ["balanced curly quotes", "Elma armut kiraz üzüm hakkında “şehir genelinde yeni gelişmeler” yaşandığı bildirildi."],
+        ["balanced straight quotes", 'Elma armut kiraz üzüm hakkında "şehir genelinde yeni gelişmeler" yaşandığı bildirildi.'],
+        ["apostrophes and single curly quotes", "Elma armut kiraz üzüm hakkında ‘şehir’ genelinde Ankara’daki yeni gelişmeler yaşandığı bildirildi."],
+        ["an ellipsis in the middle", "Elma armut kiraz üzüm hakkında şehir genelinde ... yeni gelişmeler yaşandığı bildirildi."],
       ])("%s", (_label, seedText) => {
         expect(kept(seedText)).toBe(true);
       });
 
       it("a 500-character ingest clamp that the tidy step cut back to a sentence end", () => {
-        const one = "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi.";
+        const one = "Elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi.";
         const two = "Uzmanlar durumu değerlendirdi ve yetkililer açıklama yapacağını duyurdu.";
         let body = "";
         for (let i = 0; body.length < 560; i++) body += `${i % 2 === 0 ? one : two} `;
@@ -2485,14 +2495,14 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
     describe("5. the seed's form: every shape is replaced by a clean member, alone", () => {
       const WORDS = ["elma", "armut", "kiraz", "üzüm", "incir", "çilek", "muz", "nar"];
       const TITLE8 = WORDS.join(" ");
-      const clean = `${WORDS.slice(0, 7).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`;
+      const clean = cap(`${WORDS.slice(0, 7).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi.`);
       const SEED_SHAPES: Array<[string, string]> = [
-        ["a cut with no verb", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler ve uzmanların açıklama..."],
-        ["an ellipsis character", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler ve uzmanların açıklamaları…"],
-        ["an opener with no closer", "elma armut kiraz üzüm hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi."],
-        ["a closer with no opener", "elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi.”"],
-        ["an odd straight quote", 'elma armut kiraz üzüm hakkında "şehir genelinde yeni gelişmeler yaşandığı bildirildi.'],
-        ["two openers and a closer", "elma “armut kiraz üzüm” hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi."],
+        ["a cut with no verb", "Elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler ve uzmanların açıklama..."],
+        ["an ellipsis character", "Elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler ve uzmanların açıklamaları…"],
+        ["an opener with no closer", "Elma armut kiraz üzüm hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi."],
+        ["a closer with no opener", "Elma armut kiraz üzüm hakkında şehir genelinde yeni gelişmeler yaşandığı bildirildi.”"],
+        ["an odd straight quote", 'Elma armut kiraz üzüm hakkında "şehir genelinde yeni gelişmeler yaşandığı bildirildi.'],
+        ["two openers and a closer", "Elma “armut kiraz üzüm” hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi."],
       ];
 
       it.each(SEED_SHAPES)("%s", (_label, seedText) => {
@@ -3460,8 +3470,11 @@ describe("h95-summaries-1: a stub that a surname hid, and a teaser seed", () => 
   });
 
   it("459a7b61: a seed that opens with 'İşte' and has nothing to cut is a teaser", () => {
+    // h164-summaries-1: the text ends in a colon and is one clause, so the lead-in back-off leaves nothing ('' is the shown
+    // text, it was "İşte Erdoğan'ın açıklamalarından öne çıkan satır başları:"); the verdict reads the text before the
+    // back-off and is still 'teaser', so a clean member still takes the Özet over (the resolve tests above and below).
     const shown = tidySummaryText(H45_SUMMARY);
-    expect(shown.startsWith("İşte")).toBe(true);
+    expect(shown).toBe("");
     expect(seedDisqualified(H45_SUMMARY, shown)).toBe("teaser");
   });
 });
@@ -4394,5 +4407,46 @@ describe("h132-ozetpost-1: negative pins", () => {
     const res = resolve(H132_ECE_TITLE, H132_ECE_SUMMARY, members);
     expect(res?.source?.name).toBe("Star");
     expect(res?.text).toBe(H132_ECE_SUMMARY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-summaries-2: the meta description never ends in "...…". Hukuki Haber's Özet is
+// "Av. Baran Can KAYA yazdı... https://www.hukukihaber.net/..." and the word cut lands right
+// behind the dots, where the cut then appended its own "…".
+// ---------------------------------------------------------------------------
+describe("describeForMeta never appends '…' to a cut that already ends in '...' or '…' (h164-summaries-2)", () => {
+  const HK = src("Hukuki Haber");
+
+  it("a word cut that lands right behind 'yazdı...' keeps the dots as they are", () => {
+    const text = "Av. Baran Can KAYA yazdı... https://www.hukukihaber.net/guncel-anayasa-mahkemesi-karari-isiginda-7571-sayili-kanun";
+    const out = describeForMeta({ count: 1, attribution: { text, source: HK } }, 60);
+    expect(out).toBe("1 kaynak. Hukuki Haber: Av. Baran Can KAYA yazdı...");
+    expect(out.endsWith("...…")).toBe(false);
+  });
+
+  it("the same for a cut that ends in '…'", () => {
+    const text = "Av. Baran Can KAYA yazdı… https://www.hukukihaber.net/guncel-anayasa-mahkemesi-karari-isiginda-7571-sayili-kanun";
+    const out = describeForMeta({ count: 1, attribution: { text, source: HK } }, 60);
+    expect(out).toBe("1 kaynak. Hukuki Haber: Av. Baran Can KAYA yazdı…");
+    expect(out.endsWith("……")).toBe(false);
+  });
+
+  it("an ordinary word cut still ends in one '…'", () => {
+    const out = describeForMeta({ count: 2, attribution: { text: "bir iki üç dört", source: src("AA") } }, 24);
+    expect(out).toBe("2 kaynak. AA: bir iki…");
+  });
+
+  it("a text that fits is not changed, dots or not", () => {
+    expect(describeForMeta({ count: 1, attribution: { text: "Av. Baran Can KAYA yazdı...", source: HK } })).toBe(
+      "1 kaynak. Hukuki Haber: Av. Baran Can KAYA yazdı...",
+    );
+  });
+
+  it("a quote back-off that ends on a sentence of '...' keeps them too", () => {
+    const first = "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da düzenlediği basın toplantısında kamuoyuna açıkladı...";
+    const text = `${first} Yılmaz, “${"çok önemli bir adım ".repeat(10)}`;
+    const out = describeForMeta({ count: 1, attribution: { text, source: HK } }, 160);
+    expect(out).toBe(`1 kaynak. Hukuki Haber: ${first}`);
   });
 });

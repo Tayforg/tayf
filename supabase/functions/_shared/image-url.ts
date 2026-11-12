@@ -6,10 +6,10 @@
 // from `src/lib/images/image-url.ts`), which is what lets render-time
 // normalisation heal rows already stored with a bad spelling -- no backfill.
 //
-// Nine real-world defects it fixes. Each one is a REPAIR, not a filter: either
+// Ten real-world defects it fixes. Each one is a REPAIR, not a filter: either
 // the publisher's own CDN serves the same image at the repaired spelling
-// (1-5, 9, all HEAD-verified), or the value was never an image and storing it
-// only blocks the og:image backfill (6, 7), or the image exists at a form the
+// (1-5, 9, 10, all HEAD-verified), or the value was never an image and storing
+// it only blocks the og:image backfill (6, 7), or the image exists at a form the
 // optimizer can fetch (8):
 //
 //   1. A doubled leading path slash, e.g. haber7's
@@ -61,6 +61,15 @@
 //      which rejects anything under 320 px, fell back to a favicon tile) and
 //      BBC Turkce `/ace/ws/240/`, plus the older rcman `Cw150h84q95gc` preset.
 //      See `upgradeImageVariant`.
+//  10. NTV's resizer query. Every `images.ntv.com.tr` URL in the feed ends in
+//      `?width=930&format=webp` (44 of 44 rows in 30 days to 2026-11-12), and the
+//      /_next/image allowlist refuses a query on that host (h30-abuse-4), so an
+//      NTV image never rendered and an NTV-only story showed the logo tier. The
+//      file is served without the query (HEAD: 200 image/jpeg, 745 KB), so the
+//      query is dropped, for that one host and only when every key is one of
+//      width / height / format / quality (a key spelled `amp;format`, the
+//      `&amp;` artefact serbestiyet re-publishes, counts as `format`). Any other
+//      query on NTV is kept, and so stays refused. See `dropNtvResizerQuery`.
 //
 // Deliberately NOT done: URL re-serialisation. `new URL(u).toString()` would
 // lowercase hosts, percent-encode characters and add a trailing slash,
@@ -172,6 +181,45 @@ function repairAksamImgsdisk(u: string): string {
   return AKSAM_IMGSDISK.test(u) ? u.replace(AKSAM_IMGSDISK, (_m, host: string, year: string) => `${host}/imgsdisk/${year}/`) : u;
 }
 
+const NTV_IMAGE_HOST = "images.ntv.com.tr";
+const NTV_RESIZER_KEYS: ReadonlySet<string> = new Set(["width", "height", "format", "quality"]);
+// `&amp;format=webp` read as a query is the pair `amp;format=webp`.
+const AMP_ARTEFACT = "amp;";
+
+/**
+ * Drop the resizer query of an `images.ntv.com.tr` URL, by string rewrite: the
+ * path and a fragment are kept byte for byte, only the `?...` between them goes.
+ *
+ * Narrow on purpose (h30-abuse-4 keeps every query refused on the allowlist):
+ *   - the host must be exactly `images.ntv.com.tr` (the parsed, lower-cased
+ *     hostname, so `www.ntv.com.tr`, `x.images.ntv.com.tr` and look-alikes stay);
+ *   - every key must be `width`, `height`, `format` or `quality`, compared as
+ *     written (no percent-decoding, case-sensitive), after removing one leading
+ *     `amp;`; one other key (`cb`, `v`, `u`) and the whole query stays;
+ *   - at least one key must be present (`?` or `?&` alone is left as it is).
+ *
+ * `parsed` must be the URL `s` parses to. Every other URL is returned `===`.
+ */
+function dropNtvResizerQuery(s: string, parsed: URL): string {
+  if (parsed.hostname !== NTV_IMAGE_HOST || parsed.search === "") return s;
+  let keys = 0;
+  for (const pair of parsed.search.slice(1).split("&")) {
+    if (pair === "") continue;
+    const eq = pair.indexOf("=");
+    let key = eq === -1 ? pair : pair.slice(0, eq);
+    if (key.startsWith(AMP_ARTEFACT)) key = key.slice(AMP_ARTEFACT.length);
+    if (!NTV_RESIZER_KEYS.has(key)) return s;
+    keys++;
+  }
+  if (keys === 0) return s;
+  // `parsed.search` is not empty, so the first `?` opens the query and any `#`
+  // that follows it opens the fragment.
+  const q = s.indexOf("?");
+  if (q === -1) return s;
+  const h = s.indexOf("#", q);
+  return h === -1 ? s.slice(0, q) : s.slice(0, q) + s.slice(h);
+}
+
 const OKSIJEN_SMALL = /^(https?:\/\/i\.gazeteoksijen\.com\/2\/)150\/84\//i;
 const BBC_SMALL = /^(https?:\/\/ichef\.bbci\.co\.uk\/ace\/)ws\/240\//i;
 const RCMAN_SMALL = "/rcman/Cw150h84q95gc/";
@@ -233,6 +281,13 @@ export function normalizeImageUrl(u: string | null | undefined): string | null {
   const poster = youtubeThumbnail(parsed);
   if (poster !== null) return poster;
 
+  // NTV's resizer query goes first, while `s` is still exactly what `parsed` read. A host root that only carried the
+  // resizer query is a host root once it is gone: not an image, as the check above says of any root, and normalising
+  // its result again would then give null (h165 review).
+  const dropped = dropNtvResizerQuery(s, parsed);
+  if (dropped !== s && ONLY_SLASHES.test(parsed.pathname) && !parsed.hash) return null;
+  s = dropped;
+
   // Order matters: collapse the leading slashes first so a URL carrying both
   // defects heals in a single call, and so the aksam rewrite sees the segment
   // it anchors on as the first one.
@@ -288,6 +343,23 @@ export function isOptimizableImageUrl(u: string | null | undefined): boolean {
  * cards that recur every few days). Names that follow the 'son dakika' /
  * default-photo shape belong in PLACEHOLDER_BASENAME instead, so they need no
  * entry here.
+ *
+ * RUNBOOK -- run weekly. Karar and Istiklal rotate their 'SON DAKIKA' card file
+ * every 3-5 days, so an exact key goes dead within a week and the next file is
+ * not matched until someone adds it (h87's three Karar / Istiklal keys were
+ * dead by 2026-11-07, and the h164 cards had been live for 1-12 days):
+ *
+ *   1. `node scripts/placeholder-candidates.mjs --print-sql` prints a read-only
+ *      SELECT: per source and image_url over the last 7 days, the URLs with >= 5
+ *      distinct titles on >= 3 distinct publication days.
+ *   2. Run it against production with any read-only runner; pipe the JSON rows
+ *      into `node scripts/placeholder-candidates.mjs`. It prints the rows that
+ *      isPlaceholderImageUrl does NOT already match.
+ *   3. Look at every printed image. A logo or 'SON DAKIKA' card becomes a key
+ *      below (host + path, normalised form, a comment with its distinct titles,
+ *      the window and the date it was visually checked). A real photo that
+ *      merely recurred (a topical stock photo, e.g. karar news/1946513) does not.
+ *   4. Leave the dead keys in place; a stale key costs one Set lookup.
  */
 export const PLACEHOLDER_IMAGE_ASSETS: ReadonlySet<string> = new Set([
   // cnn-turk: the red CNN TÜRK logo card, 174 distinct titles.
@@ -341,6 +413,21 @@ export const PLACEHOLDER_IMAGE_ASSETS: ReadonlySet<string> = new Set([
   // `//` is kept: normalizeImageUrl only collapses LEADING slashes, so this is
   // the form normalisation produces.
   "i20.haber7.net/resize/1280x720//haber/haber7/photos/2024/32/0MFPK_1723247439_4294.jpg",
+  // h164-heroimg-1: the cards that replaced the dead karar / istiklal keys above.
+  // Distinct titles are over the 14 days to 2026-11-12, one source each, and every
+  // file was visually checked on 2026-11-12.
+  // karar: red 'SON DAKİKA' card news/1946618 (1200x675), 13 distinct titles,
+  // 2026-11-07 to 2026-11-12.
+  "cdn.karar.com/news/1946618.jpg",
+  // karar: red 'SON DAKİKA' card news/1947232 (1200x675), 10 distinct titles,
+  // 2026-11-10 to 2026-11-12. news/1946513 is NOT listed: it is a real gold-shop
+  // stock photo.
+  "cdn.karar.com/news/1947232.jpg",
+  // istiklal: 'SON DAKİKA' card news/668615 (1280x720), 11 distinct titles,
+  // 2026-11-01 to 2026-11-12.
+  "cdn.istiklal.com.tr/news/668615.jpg",
+  // istiklal: 'Günün Özeti' logo card news/625929, 10 distinct titles.
+  "cdn.istiklal.com.tr/news/625929.jpg",
 ]);
 
 // A whole directory of stand-ins on one host: `host` is compared to the
@@ -350,8 +437,19 @@ export const PLACEHOLDER_IMAGE_ASSETS: ReadonlySet<string> = new Set([
 //   foto.haberler.com/genel/editor/  haberler-com byline avatars, 150-196 px,
 //                                    20 rows / 4 URLs in 7 days to 2026-11-09.
 //                                    Real photos live under /haber/YYYY/MM/DD/.
+//   indyturk.com /sites/default/files/default_images/
+//                                    IndyTurk's Drupal default-image directory
+//                                    (index1.png, a 300x168 'no picture' image):
+//                                    6 rows in 14 days to 2026-11-12, each the
+//                                    stand-in for a story without a photo.
+//                                    Real photos live under
+//                                    /sites/default/files/article/ (505 rows in
+//                                    14 days) and /styles/ (79). Both hosts the
+//                                    feed uses are listed (h164-heroimg-1).
 const PLACEHOLDER_PATH_PREFIXES: ReadonlyArray<{ host: string; prefix: string }> = [
   { host: "foto.haberler.com", prefix: "/genel/editor/" },
+  { host: "www.indyturk.com", prefix: "/sites/default/files/default_images/" },
+  { host: "indyturk.com", prefix: "/sites/default/files/default_images/" },
 ];
 
 // Applied to the LAST path segment's basename only (percent-decoded, final
@@ -470,8 +568,8 @@ function parseNormalized(u: string): URL | null {
  * look of another. The verdict is: an exact asset (PLACEHOLDER_IMAGE_ASSETS,
  * compared as lower-case host + path, so query, fragment, scheme, a doubled
  * leading slash and host case do not matter), a path under a placeholder
- * directory on one host (PLACEHOLDER_PATH_PREFIXES, h87: haberler-com byline
- * avatars) or a basename that matches PLACEHOLDER_BASENAME. A resizer URL that
+ * directory on one host (PLACEHOLDER_PATH_PREFIXES: haberler-com byline avatars,
+ * IndyTurk's default-image directory) or a basename that matches PLACEHOLDER_BASENAME. A resizer URL that
  * wraps its origin in a `u=` query value is checked on the wrapped origin as
  * well.
  *

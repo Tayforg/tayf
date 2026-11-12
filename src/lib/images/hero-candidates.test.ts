@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { HERO_CANDIDATE_CAP, pickHeroCandidates } from "./hero-candidates";
 import { GENERATED_IMAGE_HOSTS } from "./remote-image-hosts.data";
-import { isAllowedRemoteImageUrl } from "./remote-image-hosts";
+import { QUERY_HOSTS, isAllowedRemoteImageUrl } from "./remote-image-hosts";
 
 // h99-clientjs-1: a story card or the cluster hero used to hand EVERY member's
 // image URL to the client component (up to 44 on the home page, plus a credits
@@ -159,6 +159,93 @@ describe("pickHeroCandidates", () => {
   it("keeps Unicode and percent-escaped paths as they are", () => {
     const u = `https://${HOST}/görsel/%C3%A7ay-%F0%9F%8D%B5.jpg`;
     expect(pickHeroCandidates([u])).toEqual([u]);
+  });
+});
+
+// h164-heroimg-2: every images.ntv.com.tr URL carries `?width=930&format=webp`
+// (44 of 44 stored rows in 30 days to 2026-11-12). The allowlist refuses a query
+// on that host (h30-abuse-4), so an NTV-only story fell back to the logo tier.
+// normalizeImageUrl now drops that one resizer query, which the CDN serves
+// without (HEAD 200 image/jpeg); the allowlist itself is not widened.
+describe("pickHeroCandidates: the NTV resizer query (h164-heroimg-2)", () => {
+  const AA =
+    "https://images.ntv.com.tr/images/AA-20261110-43028900-43028899-CUMHURBASKANI_ERDOGAN_BM_GENEL_SEKRETERI_GUTERRES_ILE_GORUSTU-983810(2).jpg";
+
+  // One real stored URL per path shape from the 30-day dump (the whole dump is
+  // 44 distinct URLs): AA wire names, a uuid, parentheses, a non-ASCII path, a
+  // curly apostrophe, `_C3_B6` escapes, png and webp files.
+  const STORED_NTV: readonly string[] = [
+    "https://images.ntv.com.tr/images/AA-20261110-43023654-43023646-BASKENTE_KAR_YAGISI-529133.jpg?width=930&format=webp",
+    "https://images.ntv.com.tr/images/477a4d82-9d42-44a3-8135-f2a9ec017f8a.jpg?width=930&format=webp",
+    "https://images.ntv.com.tr/images/AA-20261110-43028900-43028899-CUMHURBASKANI_ERDOGAN_BM_GENEL_SEKRETERI_GUTERRES_ILE_GORUSTU-983810(2).jpg?width=930&format=webp",
+    "https://images.ntv.com.tr/images/ahmetyoncaşık-959546(3).jpg?width=930&format=webp",
+    "https://images.ntv.com.tr/images/DışişleriBakanlığı-120292(9).jpg?width=930&format=webp",
+    "https://images.ntv.com.tr/images/GIRESUN’DA-TIP-LITERATURUNE-GIRECEK-AME_1564142_465436-639663.jpg?width=930&format=webp",
+    "https://images.ntv.com.tr/images/Ekrang_C3_B6r_C3_BCnt_C3_BCs_C3_BC2026-10-19092318-370878-885707.png?width=930&format=webp",
+    "https://images.ntv.com.tr/images/ÖmerÇelik-944138.jpg?width=930&format=webp",
+    "https://images.ntv.com.tr/images/thumbs_b_c_832de7c3c9b5b064b0b7b3ee329d9474-970507.webp?width=930&format=webp",
+    "https://images.ntv.com.tr/images/iStock-2208547132-450384-812650.png?width=930&format=webp",
+  ];
+
+  const stripQuery = (u: string): string => u.slice(0, u.indexOf("?"));
+
+  it("the raw URL is refused by the allowlist, but pickHeroCandidates returns the query-less one", () => {
+    const raw = `${AA}?width=930&format=webp`;
+    expect(isAllowedRemoteImageUrl(raw)).toBe(false);
+    expect(isAllowedRemoteImageUrl(AA)).toBe(true);
+    expect(pickHeroCandidates([raw])).toEqual([AA]);
+  });
+
+  it("the &amp; spelling (serbestiyet re-publishes it) comes back query-less too", () => {
+    expect(pickHeroCandidates([`${AA}?width=930&amp;format=webp`])).toEqual([AA]);
+  });
+
+  it("a non-ASCII path comes back as normalisation spells it (raw, not re-encoded)", () => {
+    const clean = "https://images.ntv.com.tr/images/ahmetyoncaşık-959546(3).jpg";
+    expect(pickHeroCandidates([`${clean}?width=930&format=webp`])).toEqual([clean]);
+  });
+
+  it("replay: every stored NTV URL shape is usable (0 before, all after)", () => {
+    expect(STORED_NTV).toHaveLength(10);
+    for (const raw of STORED_NTV) {
+      expect(isAllowedRemoteImageUrl(raw)).toBe(false);
+      expect(pickHeroCandidates([raw])).toEqual([stripQuery(raw)]);
+    }
+    // Past the default cap of 8, so every shape is looked at in one call.
+    expect(pickHeroCandidates(STORED_NTV, STORED_NTV.length)).toEqual(STORED_NTV.map(stripQuery));
+  });
+
+  it("the raw and the query-less spelling of one NTV image are one entry", () => {
+    expect(pickHeroCandidates([`${AA}?width=930&format=webp`, AA, `${AA}?width=930&amp;format=webp`])).toEqual([AA]);
+  });
+
+  it("an NTV photo leads when it is the first usable member (the logo tier is not reached)", () => {
+    const good = img("ok");
+    expect(pickHeroCandidates([`${AA}?width=930&format=webp`, good])).toEqual([AA, good]);
+  });
+
+  it("any other query on NTV stays dropped (the h30-abuse-4 rule)", () => {
+    for (const q of ["?cb=1", "?width=930&v=2", "?v=2&width=930", "?width=930&amp;cb=1", "?Width=930"]) {
+      expect(pickHeroCandidates([`${AA}${q}`])).toEqual([]);
+    }
+  });
+
+  it("other query hosts are untouched: a tmgrup ?u= resizer and a sozcucdn ?w= URL keep their query", () => {
+    const tmgrup = "https://iaahbr.tmgrup.com.tr/c18248/1200/675/0/0/1200/675?u=https://iahbr.tmgrup.com.tr/uploads/a.jpg";
+    const sozcu = "https://img.sozcucdn.com/Uploads/a.jpg?w=1200&amp;h=675&mode=crop";
+    expect(isAllowedRemoteImageUrl(tmgrup)).toBe(true);
+    expect(isAllowedRemoteImageUrl(sozcu)).toBe(true);
+    expect(pickHeroCandidates([tmgrup, sozcu])).toEqual([tmgrup, sozcu]);
+  });
+
+  it("a resizer query on a host that is not images.ntv.com.tr is not dropped", () => {
+    const www = "https://www.ntv.com.tr/a.jpg?width=930&format=webp";
+    expect(pickHeroCandidates([www])).toEqual([]);
+  });
+
+  it("NTV is handled by normalisation, not by the QUERY_HOSTS set", () => {
+    for (const entry of QUERY_HOSTS) expect(entry).not.toMatch(/ntv/);
+    expect(isAllowedRemoteImageUrl(`${AA}?cb=1`)).toBe(false);
   });
 });
 

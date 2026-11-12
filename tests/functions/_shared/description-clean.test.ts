@@ -12,6 +12,7 @@ import {
   ROLE_TOKENS,
   cleanDescription,
   cutAppendedTicker,
+  cutLoneTrailingHeadline,
   descriptionNamesSwap,
   foldNameToken,
   personNames,
@@ -19,6 +20,7 @@ import {
   stripIndyturkCmsDump,
   stripTrailingTeasers,
 } from "../../../supabase/functions/_shared/cluster/description-clean.ts";
+import tailFixtures from "../../fixtures/summary-tail-h164.json";
 import { expectLinear, rep } from "../../_helpers/linear-time";
 import type { Gen } from "../../_helpers/linear-time";
 import { GENERIC_ENTITIES } from "../../../supabase/functions/_shared/cluster/constants.ts";
@@ -2276,6 +2278,273 @@ describe("stripIndyturkCmsDump has one implementation (h122-ozet-1)", () => {
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
       const rss = stripTsComments(readFileSync(resolve(dir, f), "utf8"));
       expect(rss, `${f} must not use stripIndyturkCmsDump`).not.toMatch(/stripIndyturkCmsDump/);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-summaries-1 (2026-11-12): Milliyet and Posta paste ONE other story's headline as the
+// last line of a description ("...öğrenildi.\nCumhurbaşkanı Erdoğan'dan COP31'de diplomasi
+// trafiği"), and nothing cut it: cutAppendedTicker needs a "Son dakika" ticker behind the
+// headline, stripTrailingTeasers needs a "!" headline in the run. cutLoneTrailingHeadline()
+// drops up to two such lines when the line in front of them ends a sentence. The raw rows are
+// the members' descriptions dumped read-only from prod (tests/fixtures/summary-tail-h164.json).
+// ---------------------------------------------------------------------------
+
+type TailMember = { source: string; description: string };
+type TailCluster = { id: string; members: TailMember[] };
+const TAIL = (tailFixtures as { clusters: Record<string, TailCluster> }).clusters;
+
+/** The raw description of `source` in the fixture cluster `short` (the 8-character id prefix). */
+function tailRaw(short: string, source: string): string {
+  const member = TAIL[short]?.members.find((m) => m.source === source);
+  if (member === undefined) throw new Error(`no fixture member ${short} / ${source}`);
+  return member.description;
+}
+
+describe("cutLoneTrailingHeadline (h164-summaries-1): the real rows", () => {
+  it("bb349ef1 (Milliyet): the COP31 headline goes, the sentence in front of it stays", () => {
+    const raw = tailRaw("bb349ef1", "Milliyet");
+    const out = cutLoneTrailingHeadline(raw);
+    expect(out).toBe(raw.slice(0, raw.lastIndexOf("\n")));
+    expect(out.endsWith("bulunulduğu öğrenildi.")).toBe(true);
+    expect(out).not.toContain("COP31");
+  });
+
+  it("0ad663a9 (Milliyet, Van crash): the Trump headline goes", () => {
+    const out = cutLoneTrailingHeadline(tailRaw("0ad663a9", "Milliyet"));
+    expect(out.endsWith("ekipleri sevk edildi.")).toBe(true);
+    expect(out).not.toContain("Trump");
+  });
+
+  it("f4451eba and 818f4e62 (Posta): the 'Nev’in ağabeyi' headline goes", () => {
+    for (const short of ["f4451eba", "818f4e62"]) {
+      const out = cutLoneTrailingHeadline(tailRaw(short, "Posta"));
+      expect(out, short).not.toContain("Nev’in ağabeyi");
+      expect(out.endsWith("."), short).toBe(true);
+    }
+  });
+
+  it("e663db44: the two headlines behind the placeholder line go, the placeholder line is the new tail", () => {
+    // The placeholder line itself is summary-tidy's (step 1a); here only the two headline lines are cut.
+    const out = cutLoneTrailingHeadline(tailRaw("e663db44", "Milliyet"));
+    expect(out.endsWith("\nAyrıntılar birazdan...")).toBe(true);
+    expect(out).not.toContain("Sercan Sayal");
+    expect(out).not.toContain("villada");
+  });
+
+  it("fdfc440c (Milliyet): 'when unsure, keep' - the headline shares the 'soruşturma' stem with the body, so it stays", () => {
+    // "Erdoğan'dan fon soruşturmasıyla ilgili açıklama: Haksız kazanç ..." is another story's headline, but the body says
+    // "soruşturma" (the 6-letter stem 'soruşt'). A line about the same words is never cut: known remainder of h164.
+    const raw = tailRaw("fdfc440c", "Milliyet");
+    expect(cutLoneTrailingHeadline(raw)).toBe(raw);
+  });
+
+  it("c51ea9b0 (h23's Zelenskiy row): behind cleanDescription the colon headline is still a lone trailing headline, and goes", () => {
+    const f = FIXTURES.find((row) => row.id.startsWith("c51ea9b0"))!;
+    const cleaned = cleanDescription(f.description);
+    expect(cleaned).toContain("\nZelenskiy ile görüşen");
+    expect(cutLoneTrailingHeadline(cleaned)).toBe(f.description.slice(0, f.description.indexOf("\n")));
+  });
+
+  it("fefb05a2 (Sabah): the last line is the column's own clamp tail with its CTA glued on, not a headline: it stays", () => {
+    // "Hangi birini sayalım? Mehmet Keçeciler......Devamı için tıklayınız" is unpunctuated, short and shares no stem with the
+    // body, but it holds an ellipsis: a headline pasted by a feed has none. Found by the 14-day replay of h164.
+    const raw = tailRaw("fefb05a2", "Sabah");
+    expect(raw).toContain("......Devamı için tıklayınız");
+    expect(cutLoneTrailingHeadline(raw)).toBe(raw);
+  });
+
+  it("cleanDescription is NOT changed: the cluster consumer's text for these rows is as it was", () => {
+    for (const [short, source] of [["bb349ef1", "Milliyet"], ["0ad663a9", "Milliyet"], ["f4451eba", "Posta"]] as const) {
+      const raw = tailRaw(short, source);
+      expect(cleanDescription(raw), short).toBe(raw);
+    }
+  });
+});
+
+describe("cutLoneTrailingHeadline: shapes that ARE cut", () => {
+  const BODY = "Edinilen bilgilere göre kaza Van karayolunda meydana geldi.";
+
+  it("one unpunctuated headline line behind a sentence", () => {
+    expect(cutLoneTrailingHeadline(`${BODY}\nCumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü`)).toBe(BODY);
+  });
+
+  it("two unpunctuated headline lines behind a sentence, blank lines skipped", () => {
+    const text = `${BODY}\n\nCumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü\n\n\nSerbest bırakılan tutuklular evlerine döndü\n`;
+    expect(cutLoneTrailingHeadline(text)).toBe(BODY);
+  });
+
+  it("a headline without '!' but with a colon in the middle", () => {
+    expect(cutLoneTrailingHeadline(`${BODY}\nİran'dan açıklama: Barış görüşmeleri sürecek`)).toBe(BODY);
+  });
+
+  it("a headline that carries a '!' (an anchor) is cut as well", () => {
+    expect(cutLoneTrailingHeadline(`${BODY}\nDünyanın gözü ABD'de! Sonuçlar belli oluyor`)).toBe(BODY);
+  });
+
+  it("the kept sentence may close with a quote or a bracket (closers aside)", () => {
+    const quoted = "Bakan “Önümüzdeki hafta açıklanacak.”";
+    expect(cutLoneTrailingHeadline(`${quoted}\nUkrayna'da yeni saldırı dalgası başladı`)).toBe(quoted);
+    const bracket = "Olay yerine ekipler sevk edildi (Ayrıntılar yolda.)";
+    expect(cutLoneTrailingHeadline(`${bracket}\nUkrayna'da yeni saldırı dalgası başladı`)).toBe(bracket);
+  });
+
+  it("a headline right behind line 0 goes, line 0 stays", () => {
+    expect(cutLoneTrailingHeadline("Tek cümlelik haber metni burada bitti.\nUkrayna'da yeni saldırı dalgası başladı")).toBe(
+      "Tek cümlelik haber metni burada bitti.",
+    );
+  });
+});
+
+describe("cutLoneTrailingHeadline: shapes that must NOT be cut (the SAME string comes back)", () => {
+  const BODY = "Edinilen bilgilere göre kaza Van karayolunda meydana geldi.";
+  const unchanged = (text: string) => {
+    expect(cutLoneTrailingHeadline(text)).toBe(text);
+  };
+
+  it("a last line that shares a 6-letter stem with the body is about the same story", () => {
+    unchanged(`${BODY}\nVan karayolunda meydana gelen kazada yeni gelişme`);
+    // "karayolunda" -> 'karayo' is the shared stem; no other word of the line is in the body.
+    unchanged(`${BODY}\nKarayollarında yeni düzenleme yapıldı`);
+  });
+
+  it("line 0 is never cut: an unpunctuated first line behind nothing", () => {
+    unchanged("Cumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü");
+    unchanged("Cumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü\n");
+    unchanged("\n\nCumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü");
+  });
+
+  it("the nearest kept line must end a sentence: an unpunctuated line in front keeps the lot", () => {
+    unchanged("Cumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü\nUkrayna'da yeni saldırı dalgası başladı");
+    // three headline-shaped lines: only two may go, so the third (unpunctuated) one is the line in front
+    unchanged(
+      `${BODY}\nCumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü\nUkrayna'da yeni saldırı dalgası başladı\nFenerbahçe transferde sürpriz isme imza attırdı`,
+    );
+  });
+
+  it("a numbered list", () => {
+    unchanged(`${BODY}\n1. Birinci madde burada yazıyor\n2. İkinci madde orada yazıyor`);
+    unchanged(`${BODY}\n1) Birinci madde burada yazıyor\n2) İkinci madde orada yazıyor`);
+  });
+
+  it("a list with markers", () => {
+    unchanged(`${BODY}\n- Koreli öğrenciler sohbet etti\n- Başka bir madde burada`);
+    unchanged(`${BODY}\n• Koreli öğrenciler sohbet etti\n• Başka bir madde burada`);
+  });
+
+  it("a last line that ends in a sentence mark, a clamp '…' or a question mark is text", () => {
+    unchanged(`${BODY}\nUkrayna'da yeni saldırı dalgası başladı.`);
+    unchanged(`${BODY}\nUkrayna'da yeni saldırı dalgası başlayacak mı?`);
+    unchanged(`${BODY}\nUkrayna'da yeni saldırı dalgası başlayacak…`);
+    unchanged(`${BODY}\nUkrayna'da yeni saldırı dalgası başlayacak...`);
+  });
+
+  it("a line that holds an ellipsis ('…' or two dots or more) anywhere is a cut text, not a headline", () => {
+    unchanged(`${BODY}\nHangi birini sayalım? Mehmet Keçeciler...Devamı için tıklayınız`);
+    unchanged(`${BODY}\nHangi birini sayalım? Mehmet Keçeciler…Devamı için tıklayınız`);
+    unchanged(`${BODY}\nUkrayna'da yeni saldırı dalgası... Başladı mı başlamadı mı bilinmiyor`);
+    unchanged(`${BODY}\nUkrayna'da yeni saldırı dalgası.. Başladı mı başlamadı mı bilinmiyor`);
+    // one dot is a dot
+    expect(cutLoneTrailingHeadline(`${BODY}\nUkrayna'da yeni saldırı dalgası. Başladı mı başlamadı mı bilinmiyor`)).toBe(BODY);
+  });
+
+  it("a quoted line, a line led by a conjunction, a short line and a long line", () => {
+    unchanged(`${BODY}\nBakan "Ukrayna'da yeni saldırı dalgası" dedi`);
+    unchanged(`${BODY}\nAncak Ukrayna'da yeni saldırı dalgası başladı`);
+    unchanged(`${BODY}\nKısa satır`);
+    unchanged(`${BODY}\n${"Uzun bir başlık satırı ".repeat(8)}burada bitiyor`);
+  });
+
+  it("a kept line that does not end in a sentence mark (a clamp without dots)", () => {
+    unchanged("Bakan konuşmasında şunları söyledi ve devam etti\nUkrayna'da yeni saldırı dalgası başladı");
+  });
+
+  it("no line break at all, an empty string and a blank text", () => {
+    unchanged("Ukrayna'da yeni saldırı dalgası başladı");
+    unchanged("");
+    unchanged("   \n  \n ");
+  });
+
+  it("the h23 ticker rows: what cutAppendedTicker leaves is not cut again", () => {
+    for (const f of FIXTURES) {
+      const ticked = cutAppendedTicker(f.description);
+      expect(cutLoneTrailingHeadline(ticked), f.id).toBe(ticked);
+    }
+  });
+
+  it("the h34 teaser rows: what stripTrailingTeasers leaves is not cut again, except fd00fb08's unanchored headline", () => {
+    for (const row of [T_D91, T_AB24, T_1E6D]) {
+      const stripped = stripTrailingTeasers(row);
+      expect(cutLoneTrailingHeadline(stripped), row.slice(0, 30)).toBe(stripped);
+    }
+    // T_1E6D's kept headline shares the stem 'acikla' with its body; T_FD00's "İçişleri Bakanlığı duyurdu: Çukurova ..."
+    // shares none and stands behind a sentence: it was left by the teaser strip only for want of an anchor.
+    expect(cutLoneTrailingHeadline(stripTrailingTeasers(T_FD00))).toBe(
+      T_FD00_KEPT.slice(0, T_FD00_KEPT.lastIndexOf("\n")),
+    );
+  });
+});
+
+describe("cutLoneTrailingHeadline: properties", () => {
+  const ROWS: readonly string[] = [
+    ...Object.values(TAIL).flatMap((c) => c.members.map((m) => m.description)),
+    ...FIXTURES.map((f) => f.description),
+    "a\nb\nc",
+    "Cümle bitti.\nBaşlık gibi duran bir satır\n",
+  ];
+
+  it("is idempotent on every row, input and output", () => {
+    for (const row of ROWS) {
+      const once = cutLoneTrailingHeadline(row);
+      expect(cutLoneTrailingHeadline(once), row.slice(0, 40)).toBe(once);
+    }
+  });
+
+  it("never lengthens a text, only ever cuts its end and keeps its first line", () => {
+    for (const row of ROWS) {
+      const out = cutLoneTrailingHeadline(row);
+      expect(out.length).toBeLessThanOrEqual(row.length);
+      expect(row.startsWith(out)).toBe(true);
+      expect(out.split("\n")[0]).toBe(row.split("\n")[0]);
+    }
+  });
+
+  it("returns non-strings as they are and never throws on odd input", () => {
+    expect(cutLoneTrailingHeadline(undefined as unknown as string)).toBeUndefined();
+    expect(cutLoneTrailingHeadline(null as unknown as string)).toBeNull();
+    for (const s of ["\n", "\n\n", "\r", "\u0000", "😀\n😀 😀 😀", "\ud83d\nA B C D E F G", "!\n!", "a\nb", "\n\n\nA b c d e f g h"]) {
+      expect(() => cutLoneTrailingHeadline(s), JSON.stringify(s)).not.toThrow();
+    }
+  });
+
+  const INTRO = "Giriş cümlesi burada bitti.\n";
+  it.each([
+    ["an intro, then 'Başlık satırı burada\\n' x 3000", rep("Başlık satırı burada\n", INTRO), 100_000],
+    ["an intro, then 'a' x 100000", rep("a", INTRO), 100_000],
+    ["an intro, then 100000 blanks and a headline", rep(" ", INTRO, "Başlık gibi duran satır"), 100_000],
+    ["100000 newlines, then a headline", rep("\n", "", "Başlık gibi duran satır"), 100_000],
+    ["'x\\n' x 50000, then a headline", rep("x\n", "", "Başlık gibi duran satır"), 100_000],
+    ["'Giriş. ' x 14000, then a headline line", rep("Giriş. ", "", "\nBaşlık gibi duran satır"), 100_000],
+    ["an intro, then 'A b c ' x 25000", rep("A b c ", INTRO), 150_000],
+  ] as Array<[string, Gen, number]>)("100k-character adversarial input scales linearly: %s", (_name, gen, n) => {
+    expectLinear(gen, (s) => cutLoneTrailingHeadline(s), { n, ceilingMs: 1_000 });
+  });
+});
+
+describe("cutLoneTrailingHeadline has one implementation (h164-summaries-1)", () => {
+  it("summary-tidy.ts imports it from the shared cluster module and does not redefine it", () => {
+    const src = stripTsComments(readFileSync(resolve(__dirname, "..", "..", "..", "src", "lib", "articles", "summary-tidy.ts"), "utf8"));
+    expect(src).toContain('from "../../../supabase/functions/_shared/cluster/description-clean"');
+    expect(src).toMatch(/\bcutLoneTrailingHeadline\(/);
+    expect(src).not.toMatch(/function\s+cutLoneTrailingHeadline/);
+  });
+
+  it("the ingest modules never import it (the stored description stays as it is)", () => {
+    const dir = resolve(__dirname, "..", "..", "..", "supabase", "functions", "_shared", "rss");
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
+      const src = stripTsComments(readFileSync(resolve(dir, f), "utf8"));
+      expect(src, `${f} must not use cutLoneTrailingHeadline`).not.toMatch(/cutLoneTrailingHeadline/);
     }
   });
 });

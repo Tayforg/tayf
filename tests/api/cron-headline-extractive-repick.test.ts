@@ -1373,3 +1373,77 @@ describe("headline cron: the English-language outlets are flagged for the picker
     expect(String(patchOf(updateFor("c1")!).title_tr_neutral)).toContain("Rutte");
   });
 });
+
+// h164-titles-2: İşçi Haber (isci-haber) writes machine-cased headlines whose names lost their capitals ('Bakan kurum:
+// ...', 'libya ve venezuela'). The cron derives `caseUnreliable` from the member's source slug, exactly as it derives
+// `english`, and the picker recases such a title from its siblings. 4797e4f6 is the live example.
+describe("headline cron: the lower-case-prone outlets are flagged for the picker (h164-titles-2)", () => {
+  const ISCI = "Bakan kurum: Tarihte bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz";
+  const HABER7 = "Bakan Kurum'dan COP31'den dünyaya çağrı: Kaderlerimiz birbirine bağlıdır";
+  const MILLIYET = "Bakan Kurum: Bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz";
+
+  function membersWithSources(id: string, rows: Array<{ title: string; sourceSlug?: string }>): void {
+    dbState.membersByCluster[id] = rows.map((r, i) => ({
+      title: r.title,
+      sourceSlug: r.sourceSlug,
+      published_at: new Date(Date.UTC(2026, 0, i + 1)).toISOString(),
+    }));
+  }
+
+  it("the re-pick of a stored İşçi Haber title with lost capitals writes the recased wording", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: ISCI, article_count: 3, title_neutral_member_count: 3 })];
+    membersWithSources("r1", [
+      { title: ISCI, sourceSlug: "isci-haber" },
+      { title: HABER7, sourceSlug: "haber7" },
+      { title: MILLIYET, sourceSlug: "milliyet" },
+    ]);
+
+    const { res, body } = await run("203.0.113.221");
+    expect(res.status).toBe(200);
+    expect(body.repicked).toBe(1);
+    const written = String(patchOf(updateFor("r1")!).title_tr_neutral);
+    expect(written).toContain("Bakan Kurum");
+    expect(written).not.toContain("Bakan kurum");
+  });
+
+  it("the same members from any other outlet keep the stored title: only the slug sets the flag", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: ISCI, article_count: 3, title_neutral_member_count: 3 })];
+    membersWithSources("r1", [
+      { title: ISCI, sourceSlug: "sozcu" },
+      { title: HABER7, sourceSlug: "haber7" },
+      { title: MILLIYET, sourceSlug: "milliyet" },
+    ]);
+
+    const { res, body } = await run("203.0.113.222");
+    expect(res.status).toBe(200);
+    expect(body.repicked).toBe(0);
+    expect(body.repickKept).toBe(1);
+    expect(patchOf(updateFor("r1")!).title_tr_neutral).toBeUndefined();
+  });
+
+  it("a first pick never ships the lower-case name either", async () => {
+    dbState.clusters = [cluster("c1", { article_count: 3 })];
+    membersWithSources("c1", [
+      { title: ISCI, sourceSlug: "isci-haber" },
+      { title: HABER7, sourceSlug: "haber7" },
+      { title: MILLIYET, sourceSlug: "milliyet" },
+    ]);
+
+    const { body } = await run("203.0.113.223");
+    expect(body.rewrote).toBe(1);
+    expect(String(patchOf(updateFor("c1")!).title_tr_neutral)).not.toContain("Bakan kurum");
+  });
+
+  it("accepts the embed as an array and as null (the shapes PostgREST can hand back)", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: ISCI, article_count: 3, title_neutral_member_count: 3 })];
+    dbState.membersByCluster["r1"] = [
+      { title: ISCI, published_at: "2026-01-01T00:00:00.000Z", sourcesRaw: [{ slug: "isci-haber" }] },
+      { title: HABER7, published_at: "2026-01-02T00:00:00.000Z", sourcesRaw: null },
+      { title: MILLIYET, published_at: "2026-01-03T00:00:00.000Z", sourcesRaw: { slug: "milliyet" } },
+    ];
+
+    const { body } = await run("203.0.113.224");
+    expect(body.repicked).toBe(1);
+    expect(String(patchOf(updateFor("r1")!).title_tr_neutral)).toContain("Bakan Kurum");
+  });
+});

@@ -351,7 +351,8 @@ describe("GET /rss.xml", () => {
   });
 
   it("truncates a long summary to at most 400 chars on a word boundary, ending in an ellipsis", async () => {
-    const longText = "kelime ".repeat(100).trim(); // 699 chars, no XML-special chars
+    // 699 chars, no XML-special chars. Starts with a capital: an all-lower-case text is a 'case' defect (h164-summaries-2) and is hidden.
+    const longText = `Kelime ${"kelime ".repeat(99)}`.trim();
     expect(longText.length).toBeGreaterThan(600);
     mockBundles = [
       bundle({ id: "trunc1", summary: longText, articleCount: 4, effectiveArticleCount: 4, isWireRedistribution: false }),

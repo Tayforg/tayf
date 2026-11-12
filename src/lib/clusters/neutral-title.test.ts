@@ -17,9 +17,11 @@ import {
   gluedJoinCount,
   incumbentDefect,
   incumbentIsMemberTitle,
+  isAblativeStatementTitle,
   isAcceptableNeutral,
   isExtractiveModelId,
   isGenericTitle,
+  isQuestionTeaser,
   isQuestionTitle,
   isTitleCaseTitle,
   isUnattributedVoice,
@@ -7048,5 +7050,748 @@ describe("h140-seo-1: the re-pick of bffb0a3f", () => {
 
   it("a stored title the outlets quote is not replaced for being carried: the scare-quoted wording stays a member's", () => {
     expect(incumbentIsMemberTitle(H140_SCARE_QUOTED, H140_CURRENT)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-titles-1: content-free H1s pass the gate
+// ---------------------------------------------------------------------------
+//
+// "MHP Lideri Bahçeli'den açıklamalar" (27 members) and "Cumhurbaşkanı Erdoğan'dan açıklamalar" (22 members) were
+// served as the H1 of the day's two speech clusters: GENERIC_CLEANED knew only 'konuşuyor' and 'açıklamalarda
+// bulunuyor', and 'açıklamalar' is not filler. The question teasers 'Tera'nın patronu Emre Tezmen YENİ Parti ile neden
+// görüşmedi' (four members state that he refused), '... oy oranı ne oldu: Birinci sıra dikkat çekti' and '...: Listede
+// kimler var' ask without a '?', and isQuestionTitle knew only six phrases. The fixture
+// (src/lib/clusters/__fixtures__/h164-generic.json, test-only) is the member titles (newest first) of eight such
+// clusters as read on production on 2026-11-12.
+
+interface H164Cluster {
+  cid: string;
+  id: string;
+  stored: string;
+  model: string;
+  stamped: number;
+  article_count: number;
+  members: Array<{ source: string; title: string; opinion: boolean }>;
+}
+
+interface H164Fixture {
+  finding: string;
+  clusters: H164Cluster[];
+}
+
+const H164_GENERIC: H164Fixture = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h164-generic.json"), "utf8"),
+) as H164Fixture;
+
+function h164Generic(cid: string): H164Cluster {
+  const found = H164_GENERIC.clusters.find((c) => c.cid === cid);
+  if (found === undefined) throw new Error(`h164-generic.json has no cluster ${cid}`);
+  return found;
+}
+
+const h164Members = (c: H164Cluster) => c.members.map((m) => ({ title: m.title, source: m.source, opinion: m.opinion }));
+
+describe("h164-titles-1: the fixture", () => {
+  it("holds the eight clusters with their stored titles and every member title", () => {
+    expect(H164_GENERIC.clusters.map((c) => c.cid)).toEqual([
+      "67695cbd", "298bbb75", "9df76d26", "ece7ef31", "32a3e53c", "df08098c", "404dda61", "fd7428e8", "9d5ad97a", "1c7c34ba",
+    ]);
+    for (const c of H164_GENERIC.clusters) {
+      expect(c.model).toBe("extractive-v6");
+      expect(c.members).toHaveLength(c.article_count);
+      for (const m of c.members) {
+        expect(m.source.length).toBeGreaterThan(0);
+        expect(m.title.trim().length).toBeGreaterThan(0);
+      }
+    }
+    expect(h164Generic("67695cbd").stored).toBe("MHP Lideri Bahçeli'den açıklamalar");
+    expect(h164Generic("298bbb75").stored).toBe("Cumhurbaşkanı Erdoğan'dan açıklamalar");
+    expect(h164Generic("fd7428e8").stored).toBe("Tera'nın patronu Emre Tezmen YENİ Parti ile neden görüşmedi");
+  });
+});
+
+describe("h164-titles-1: isGenericTitle knows the '<kişi>'den açıklamalar' placeholder", () => {
+  it.each([
+    "MHP Lideri Bahçeli'den açıklamalar",
+    "Cumhurbaşkanı Erdoğan'dan açıklamalar",
+    "Cumhurbaşkanı Erdoğan’dan önemli açıklamalar",
+    "Cumhurbaşkanı'ndan önemli mesajlar",
+    "Cumhurbaşkanı Erdoğan'dan son dakika açıklamalar",
+    "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz'dan açıklamalar",
+    "COP31 Zirvesi. Bakan Kurum'dan açıklamalar",
+    "111. Dönem Kaymakamlar Kurası Töreni. Cumhurbaşkanı Erdoğan'dan önemli açıklamalar",
+    "Bakanlıktan açıklama",
+  ])("%s is generic", (title) => {
+    expect(isGenericTitle(title)).toBe(true);
+  });
+
+  it.each([
+    "Bahçeli'den 10 Kasım mesajı: Atatürk'ü anlamanın en sağlıklı yolu...",
+    "Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı",
+    "Dışişleri'nden Kıbrıs'taki üçlü görüşmeye ilişkin açıklama",
+    "Erdoğan'dan fon soruşturmasıyla ilgili açıklama: Haksız kazanç sağlayanlar hesap verecek",
+    "MHP lideri Bahçeli: Türkiye'ye parmak sallamak Avrupa'nın harcı değil",
+  ])("%s is not generic", (title) => {
+    expect(isGenericTitle(title)).toBe(false);
+  });
+
+  it("reads the label in front of the last sentence break, however long, and the whole title when it is short", () => {
+    expect(isGenericTitle("İş Dünyası ve Yatırım Zirvesi'nin Açılış Programı. Bakan Kurum'dan açıklamalar")).toBe(true);
+    expect(isGenericTitle("Bakan Kurum'dan açıklamalar")).toBe(true);
+    // The outlet's '!' is a sentence break after cleanHeadline.
+    expect(isGenericTitle("COP31 Zirvesi! Bakan Kurum'dan açıklamalar")).toBe(true);
+    // Six words before the ablative are still a label; seven and no sentence break are a sentence.
+    expect(isGenericTitle("Cumhurbaşkanlığı Kabinesi toplantısının ardından Bakan Kurum'dan açıklamalar")).toBe(true);
+    expect(isGenericTitle("Cumhurbaşkanlığı Kabinesi Toplantısı'nın ardından Bakan Kurum'dan açıklamalar")).toBe(false);
+  });
+
+  it("wants the ablative, the placeholder word and nothing after it", () => {
+    expect(isGenericTitle("Bakan Kurum açıklamalar")).toBe(false);
+    expect(isGenericTitle("Bakan Kurum'dan açıklamalar geldi")).toBe(false);
+    expect(isGenericTitle("Bakan Kurum'dan iklim açıklamaları")).toBe(false);
+    expect(isGenericTitle("Bakan Kurum'a açıklamalar")).toBe(false);
+    expect(isGenericTitle("Bakan Kurum'dan bomba açıklamalar")).toBe(false);
+    expect(isGenericTitle("Bakan Kurum'dan açıklamalar: iklim hedefleri")).toBe(false);
+  });
+
+  it("is a verdict on the placeholder only: the gate then rejects it, and the pick never offers it", () => {
+    for (const title of ["MHP Lideri Bahçeli'den açıklamalar", "Cumhurbaşkanı Erdoğan'dan açıklamalar", "Bakanlıktan açıklama"]) {
+      expect(isAcceptableNeutral(title, [])).toBe(false);
+      expect(pickNeutralTitle(asMembers([title, title]), { floor: true })).toBeNull();
+    }
+  });
+
+  it("is linear on hostile input", () => {
+    expectLinear(rep("a'dan "), (shape) => isGenericTitle(`${shape} açıklamalar`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("x "), (shape) => isGenericTitle(`${shape}'dan açıklamalar`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("x. "), (shape) => isGenericTitle(`${shape}Bakan'dan açıklamalar`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("dan "), (shape) => isGenericTitle(shape), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("a"), (shape) => isGenericTitle(`${shape}dan açıklama`), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+describe("h164-titles-1: isQuestionTitle knows the teasers that ask without a '?'", () => {
+  it.each([
+    "Tera'nın patronu Emre Tezmen YENİ Parti ile neden görüşmedi",
+    "Son seçim anketinde partilerin oy oranı ne oldu: Birinci sıra dikkat çekti",
+    "10 meslek grubuna yeşil pasaport umudu: Listede kimler var",
+    "Mekke Anlaşması Meclis'te kabul edildi: Hangi parti ne oy verdi",
+  ])("%s is a question", (title) => {
+    expect(isQuestionTitle(title)).toBe(true);
+  });
+
+  it.each([
+    "Saadet lideri Mahmut Arıkan'dan fon tepkisi: O listede kimler var açıkladı",
+    "Bakan, saldırının neden yapıldığını anlattı",
+    "Sinirlioğlu'nun neden böldüğünü sordu",
+    "Neden istifa ettiğini açıkladı",
+    "X: 'Neden susmadı'",
+  ])("%s is not", (title) => {
+    expect(isQuestionTitle(title)).toBe(false);
+  });
+
+  it.each([
+    "Kazada ne oldu: Savcılık açıklama yaptı",
+    "Gazze'de neler oldu",
+    "Bugün piyasada neler var",
+    "Seçim sonuçlarında Ne Oldu, Kim Kazandı",
+    "Başbakan neden Meclis'e gelmedi",
+    "Bakan neden bu kararı almadı",
+    "Hangi İl Ne Kadar Oy Aldı",
+    "Listede kimler var: İsimler belli oldu",
+    "Hangi ilde: kimler var",
+  ])("%s is a question too (the new phrases and clauses)", (title) => {
+    expect(isQuestionTitle(title)).toBe(true);
+  });
+
+  it.each([
+    // whole words only
+    "Müdür nenin ne olduğunu açıkladı",
+    "Hangi bakan ilgilendi",
+    "Kimler varmış: yeni liste",
+    // a clause that does not end in 'kimler var'
+    "Kimler var kimler yok, tam liste açıklandı",
+    // 'neden' with a verb that is not a negative past, or too many words before it
+    "Bakan neden yaptığını anlattı",
+    "Neden bir iki üç dört beş altı etmedi",
+    "Bakan neden istifa edeceğini açıkladı",
+    // the negative past without 'neden'
+    "Bakan toplantıya gelmedi",
+    // the colon splits clauses: 'neden' and the verb are in two clauses
+    "Bakan neden: toplantıya gelmedi",
+    "Hangi: parti ne",
+    "Kimler: var",
+    // a quote after a speaker label is the speaker's own words
+    "Bakan açıkladı: 'Neden gelmedi bilmiyorum'",
+    "Özel: “Listede kimler var”",
+    "Bahçeli: \"Ne oldu bu ülkeye?\"",
+    "Ankara'da: 'Neler var neler'",
+  ])("%s is not", (title) => {
+    expect(isQuestionTitle(title)).toBe(false);
+  });
+
+  it("keeps the six old phrases", () => {
+    for (const t of ["Saniye Caran kimdir", "Saniye Caran nereli", "Zam ne zaman yapılacak", "Bugün deprem oldu mu"]) {
+      expect(isQuestionTitle(t), t).toBe(true);
+    }
+  });
+
+  it("is linear on hostile input", () => {
+    expectLinear(rep("neden a "), (shape) => isQuestionTitle(`${shape}b`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("hangi a "), (shape) => isQuestionTitle(shape), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("kimler var "), (shape) => isQuestionTitle(`${shape}x`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("ne "), (shape) => isQuestionTitle(shape), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep(": "), (shape) => isQuestionTitle(`${shape}neden medi`), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+describe("h164-titles-1: the gate rejects a teaser, so a stored one is not protected", () => {
+  it("isAcceptableNeutral rejects the new teasers and leaves the old explainer phrases to the floor ranking", () => {
+    for (const t of [
+      "Tera'nın patronu Emre Tezmen YENİ Parti ile neden görüşmedi",
+      "Son seçim anketinde partilerin oy oranı ne oldu: Birinci sıra dikkat çekti",
+      "10 meslek grubuna yeşil pasaport umudu: Listede kimler var",
+      "Mekke Anlaşması Meclis'te kabul edildi: Hangi parti ne oy verdi",
+    ]) {
+      expect(isAcceptableNeutral(t, []), t).toBe(false);
+    }
+    expect(isAcceptableNeutral("Saadet lideri Mahmut Arıkan'dan fon tepkisi: O listede kimler var açıkladı", [])).toBe(true);
+    expect(isAcceptableNeutral("Emre Tezmen Yeni Parti'nin görüşme talebini reddetti", [])).toBe(true);
+    // 'ne zaman' is an old phrase: the floor ranking knows it, the gate does not (unchanged).
+    expect(isAcceptableNeutral("Emekli ikramiyesi ne zaman yatacak açıklandı", [])).toBe(true);
+  });
+});
+
+describe("h164-titles-1: the re-pick of the generic and teaser clusters", () => {
+  for (const cid of ["67695cbd", "298bbb75"]) {
+    const cluster = h164Generic(cid);
+    it(`${cid}: a first pick and a re-pick with the stored title are no placeholder`, () => {
+      const members = h164Members(cluster);
+      for (const opts of [{}, { floor: true }, { incumbent: cluster.stored }, { incumbent: cluster.stored, floor: true }]) {
+        const picked = pickNeutralTitle(members, opts);
+        expect(picked, JSON.stringify(opts)).not.toBeNull();
+        expect(isGenericTitle(picked as string), `${picked} ${JSON.stringify(opts)}`).toBe(false);
+        expect(isAcceptableNeutral(picked as string, cluster.members.map((m) => m.title)), picked as string).toBe(true);
+        expect(incumbentIsMemberTitle(picked as string, cluster.members.map((m) => m.title)), picked as string).toBe(true);
+      }
+    });
+  }
+
+  it("fd7428e8: the re-pick of the teaser is a statement that says he refused", () => {
+    const cluster = h164Generic("fd7428e8");
+    const picked = pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(cluster.stored);
+    expect(isQuestionTitle(picked as string)).toBe(false);
+    expect(incumbentIsMemberTitle(picked as string, cluster.members.map((m) => m.title)), picked as string).toBe(true);
+    expect(picked).toMatch(/reddet/u);
+    // The same as the cron's call for a stored title that fails the gate.
+    expect(pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored, floor: true })).toBe(picked);
+    // A first pick does not pick the teaser either.
+    expect(isQuestionTitle(pickNeutralTitle(h164Members(cluster)) as string)).toBe(false);
+  });
+
+  it("9d5ad97a: a member passes the gate, so the re-pick is not the teaser", () => {
+    const cluster = h164Generic("9d5ad97a");
+    const titles = cluster.members.map((m) => m.title);
+    expect(titles.some((t) => isAcceptableNeutral(t, titles))).toBe(true);
+    const picked = pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(cluster.stored);
+    expect(isQuestionTitle(picked as string)).toBe(false);
+    expect(incumbentIsMemberTitle(picked as string, titles), picked as string).toBe(true);
+    expect(isQuestionTitle(pickNeutralTitle(h164Members(cluster)) as string)).toBe(false);
+  });
+
+  it("1c7c34ba: every member asks, so the floor still gives the cron a title (no loop), and it stays a question", () => {
+    const cluster = h164Generic("1c7c34ba");
+    expect(pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored })).toBeNull();
+    const picked = pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored, floor: true });
+    expect(picked).not.toBeNull();
+    expect(isQuestionTitle(picked as string)).toBe(true);
+  });
+
+  it("the other generic clusters (9df76d26, ece7ef31, 32a3e53c, df08098c, 404dda61) no longer title with the placeholder", () => {
+    for (const cid of ["9df76d26", "ece7ef31", "32a3e53c", "df08098c", "404dda61"]) {
+      const cluster = h164Generic(cid);
+      expect(isGenericTitle(cluster.stored), cid).toBe(true);
+      const picked = pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored, floor: true });
+      if (picked !== null) expect(isGenericTitle(picked), `${cid}: ${picked}`).toBe(false);
+    }
+  });
+
+  it("is deterministic and a fixed point: the new title is kept by the next re-pick", () => {
+    for (const cid of ["67695cbd", "298bbb75", "fd7428e8", "9d5ad97a"]) {
+      const cluster = h164Generic(cid);
+      const first = pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored });
+      expect(pickNeutralTitle(h164Members(cluster), { incumbent: cluster.stored })).toBe(first);
+      expect(pickNeutralTitle(h164Members(cluster), { incumbent: first as string }), cid).toBe(first);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-titles-2: İşçi Haber's machine-cased headlines and a mispaired quote
+// ---------------------------------------------------------------------------
+//
+// İşçi Haber's own member titles reached the H1 with lost capitals: 'Bakan Bayraktar'dan libya ve venezuela mesajı',
+// 'Dışişleri Bakanı Hakan Fidan çöp31 zirvesini değerlendirdi' ('çöp' is garbage; four siblings write COP31), 'Bakan
+// kurum: ...', 'Bakan memişoğlu: ...'. lowerCaseSourced fires only on a title that opens lower case, so no sibling
+// restored them. The headline cron now sets `caseUnreliable` on the members of LOWERCASE_PRONE_SOURCE_SLUGS, and the
+// picker recases such a candidate from its siblings. 852702d8's stored title lost the first quote mark of a title that
+// opens and closes with two different quoted spans. The fixture (src/lib/clusters/__fixtures__/h164-casing.json,
+// test-only) is the member titles (newest first, with the source slug) of eight clusters as read on production on
+// 2026-11-12.
+
+const H164_CASING: H164Fixture = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h164-casing.json"), "utf8"),
+) as H164Fixture;
+
+function h164Casing(cid: string): H164Cluster {
+  const found = H164_CASING.clusters.find((c) => c.cid === cid);
+  if (found === undefined) throw new Error(`h164-casing.json has no cluster ${cid}`);
+  return found;
+}
+
+/** The members as the headline cron hands them over: the İşçi Haber ones flagged `caseUnreliable` unless `flag` is false. */
+const casingMembers = (c: H164Cluster, flag = true) =>
+  c.members.map((m) => ({
+    title: m.title,
+    source: m.source,
+    opinion: m.opinion,
+    ...(flag && m.source === "isci-haber" ? { caseUnreliable: true } : {}),
+  }));
+
+describe("h164-titles-2: the fixture", () => {
+  it("holds the eight clusters, each with its stored title, an İşçi Haber member that carries it, and every member title", () => {
+    expect(H164_CASING.clusters.map((c) => c.cid)).toEqual([
+      "3039d877", "0834c3ba", "4797e4f6", "ecbc23a0", "3175d6f7", "ad976c62", "588c58ce", "852702d8",
+    ]);
+    for (const c of H164_CASING.clusters) {
+      expect(c.model).toBe("extractive-v6");
+      expect(c.members).toHaveLength(c.article_count);
+    }
+    for (const cid of ["3039d877", "0834c3ba", "4797e4f6", "ecbc23a0", "3175d6f7", "ad976c62", "588c58ce"]) {
+      const c = h164Casing(cid);
+      expect(c.members.some((m) => m.source === "isci-haber" && m.title === c.stored), cid).toBe(true);
+    }
+    expect(h164Casing("852702d8").stored).toBe("İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın?");
+  });
+});
+
+describe("h164-titles-2: a caseUnreliable member gets its capitals back from its siblings", () => {
+  const OPTS: Array<{ incumbent?: string; floor?: boolean }> = [{}, { floor: true }];
+
+  const picks = (cid: string): Array<[string, string]> => {
+    const c = h164Casing(cid);
+    const all: Array<{ incumbent?: string; floor?: boolean }> = [
+      ...OPTS,
+      { incumbent: c.stored },
+      { incumbent: c.stored, floor: true },
+    ];
+    return all.map((opts) => {
+      const picked = pickNeutralTitle(casingMembers(c), opts);
+      expect(picked, `${cid} ${JSON.stringify(opts)}`).not.toBeNull();
+      return [JSON.stringify(opts), picked as string];
+    });
+  };
+
+  it("3039d877: 'Libya' and 'Venezuela' are capitalised, never 'libya', fresh and with the stored title", () => {
+    for (const [opts, picked] of picks("3039d877")) {
+      expect(picked, opts).toContain("Libya");
+      expect(picked, opts).toContain("Venezuela");
+      expect(picked, opts).not.toContain("libya");
+      expect(picked, opts).not.toContain("venezuela");
+    }
+  });
+
+  it("0834c3ba: never 'çöp31'; the recased title or a sibling's", () => {
+    const c = h164Casing("0834c3ba");
+    const others = c.members.filter((m) => m.source !== "isci-haber").map((m) => cleanHeadline(m.title));
+    for (const [opts, picked] of picks("0834c3ba")) {
+      expect(picked, opts).not.toContain("çöp31");
+      expect(picked.toLocaleLowerCase("tr"), opts).not.toContain("çöp");
+      expect([...others, "Dışişleri Bakanı Hakan Fidan COP31 zirvesini değerlendirdi"], opts).toContain(picked);
+    }
+  });
+
+  it("4797e4f6: 'Bakan Kurum'", () => {
+    for (const [opts, picked] of picks("4797e4f6")) {
+      expect(picked, opts).toContain("Bakan Kurum");
+      expect(picked, opts).not.toContain("Bakan kurum");
+    }
+  });
+
+  it("ecbc23a0: 'Bakan Memişoğlu' or a sibling's wording, never 'memişoğlu'", () => {
+    for (const [opts, picked] of picks("ecbc23a0")) {
+      expect(picked, opts).toContain("Memişoğlu");
+      expect(picked, opts).not.toContain("memişoğlu");
+    }
+  });
+
+  it("588c58ce: no 'Kktc' and no 'ataoğlu'", () => {
+    for (const [opts, picked] of picks("588c58ce")) {
+      expect(picked, opts).not.toContain("Kktc");
+      expect(picked, opts).not.toContain("ataoğlu");
+    }
+  });
+
+  it("3175d6f7 and ad976c62: the lower-case 'bakanlığından' and 'yardımcısı' are capitalised", () => {
+    for (const [opts, picked] of picks("3175d6f7")) expect(picked, opts).not.toContain("bakanlığından");
+    for (const [opts, picked] of picks("ad976c62")) expect(picked, opts).not.toContain("yardımcısı");
+  });
+
+  it("every pick is a member's own wording, recased at most (the name of a member's title, fold-equal)", () => {
+    for (const c of H164_CASING.clusters.filter((x) => x.cid !== "852702d8")) {
+      const titles = c.members.map((m) => m.title);
+      for (const [opts, picked] of picks(c.cid)) {
+        if (c.cid === "0834c3ba" && picked.includes("COP31 zirvesini")) continue; // 'çöp31' -> 'COP31' is no fold-equal of a member
+        expect(incumbentIsMemberTitle(picked, titles), `${c.cid} ${opts}: ${picked}`).toBe(true);
+      }
+    }
+  });
+
+  it("is a fixed point: the next re-pick keeps what the first one wrote", () => {
+    for (const cid of ["3039d877", "0834c3ba", "4797e4f6", "ecbc23a0", "3175d6f7", "ad976c62", "588c58ce"]) {
+      const c = h164Casing(cid);
+      const first = pickNeutralTitle(casingMembers(c), { incumbent: c.stored }) as string;
+      expect(pickNeutralTitle(casingMembers(c), { incumbent: first }), cid).toBe(first);
+    }
+  });
+
+  it("without the flag nothing changes: the title-only path (display-headline.ts) keeps its behaviour", () => {
+    const stored = (cid: string): string => h164Casing(cid).stored;
+    const unflagged = (cid: string, opts: { incumbent?: string; floor?: boolean }) =>
+      pickNeutralTitle(casingMembers(h164Casing(cid), false), opts);
+    // The stored lower-case titles are protected as before ...
+    for (const cid of ["3039d877", "0834c3ba", "4797e4f6", "ecbc23a0", "3175d6f7"]) {
+      expect(unflagged(cid, { incumbent: stored(cid) }), cid).toBe(stored(cid));
+    }
+    // ... and the fresh picks are the ones main made.
+    expect(unflagged("3039d877", {})).toBe("Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı");
+    expect(unflagged("4797e4f6", {})).toBe("Bakan Kurum: Bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz");
+    expect(unflagged("ecbc23a0", {})).toBe("Bakan memişoğlu: Bilgi ve tecrübeyi iş birliğine dönüştüreceğiz");
+    expect(unflagged("588c58ce", {})).toBe("Bakan Bak, KKTC Başbakan Yardımcısı Ataoğlu ile görüştü");
+    // A flag set to false is no flag.
+    const members = h164Casing("4797e4f6").members.map((m) => ({ title: m.title, caseUnreliable: false }));
+    expect(pickNeutralTitle(members, { incumbent: stored("4797e4f6") })).toBe(stored("4797e4f6"));
+  });
+
+  it("a flagged title that is already well cased is left alone", () => {
+    const members = [
+      { title: "Merkez Bankası faiz kararını açıkladı", caseUnreliable: true },
+      { title: "Merkez Bankası faizi sabit tuttu" },
+      { title: "TCMB faiz kararı: Politika faizi sabit" },
+    ];
+    expect(pickNeutralTitle(members)).toBe(pickNeutralTitle(members.map((m) => ({ title: m.title }))));
+  });
+
+  it("a flagged title with a lower-case name that no sibling restores is not offered while a sibling is", () => {
+    const sibling = "Bakan Kurum dün Berlin'de iklim zirvesi yapıldı";
+    const flagged = "Bakan Kurum dün berlinden iklim mesajı verdi";
+    const members = [{ title: flagged, caseUnreliable: true }, { title: sibling }];
+    // 'berlinden' starts with the name a sibling capitalises and no sibling writes it: the leak guard keeps it out.
+    expect(pickNeutralTitle(members)).toBe(sibling);
+    expect(pickNeutralTitle(members, { floor: true })).toBe(sibling);
+    // Alone, a flagged title is the only candidate there is: the floor keeps it as written.
+    expect(pickNeutralTitle([{ title: flagged, caseUnreliable: true }], { floor: true })).toBe(flagged);
+  });
+
+  it("restores a letters-and-digits code from a sibling ('çöp31' -> 'COP31') and nothing else", () => {
+    const stored = "Bakan Fidan çöp31 zirvesinde konuştu";
+    const members = [
+      { title: stored, caseUnreliable: true },
+      { title: "Bakan Fidan COP31 liderler zirvesinde iklim mesajı verdi" },
+    ];
+    // The recased wording is a floor/first pick of its own; the stored one gives way to the sibling.
+    expect(pickNeutralTitle(members, { floor: true })).not.toContain("çöp31");
+    expect(pickNeutralTitle(members, { incumbent: stored })).toBe("Bakan Fidan COP31 liderler zirvesinde iklim mesajı verdi");
+    // No sibling writes the code in capitals: it stays as written.
+    const lone = [{ title: stored, caseUnreliable: true }, { title: "Bakan Fidan iklim zirvesinde konuştu" }];
+    expect(pickNeutralTitle(lone, { incumbent: stored })).toBe(stored);
+  });
+
+  it("a case-trusted twin stands for a machine-cased one that folds the same", () => {
+    const members = [
+      { title: "Bakan kurum iklim zirvesinde konuştu", caseUnreliable: true },
+      { title: "Bakan Kurum iklim zirvesinde konuştu" },
+    ];
+    expect(pickNeutralTitle(members)).toBe("Bakan Kurum iklim zirvesinde konuştu");
+    expect(pickNeutralTitle(members, { incumbent: "Bakan kurum iklim zirvesinde konuştu" })).toBe("Bakan Kurum iklim zirvesinde konuştu");
+    // Unflagged twins are counted once, the first standing, as before.
+    expect(pickNeutralTitle([{ title: "Bakan kurum iklim zirvesinde konuştu" }, { title: "Bakan Kurum iklim zirvesinde konuştu" }])).toBe(
+      "Bakan kurum iklim zirvesinde konuştu",
+    );
+  });
+
+  it("two flagged members do not veto each other's capitals", () => {
+    const members = [
+      { title: "Bakan kurum iklim zirvesinde konuştu", caseUnreliable: true },
+      { title: "Bakan kurum iklim zirvesinden mesaj verdi", caseUnreliable: true },
+      { title: "Bakan Kurum iklim zirvesinde sorulara yanıt verdi" },
+    ];
+    for (const picked of [pickNeutralTitle(members), pickNeutralTitle(members, { floor: true })]) {
+      expect(picked).toContain("Bakan Kurum");
+    }
+    expect(pickNeutralTitle(members, { incumbent: "Bakan kurum iklim zirvesinde konuştu" })).toContain("Bakan Kurum");
+  });
+
+  it("is linear on hostile input: a 100 KB flagged title among 200", () => {
+    expectLinear(
+      (n) => {
+        const titles = Array.from({ length: 200 }, (_, i) => `Merkez Bankası faiz kararını ${i} numaralı toplantıda açıkladı`);
+        titles[50] = `${"bakan çöp31 ".repeat(n)}faiz kararı`;
+        return titles;
+      },
+      (titles) => {
+        const members = titles.map((title, i) => ({ title, ...(i === 50 ? { caseUnreliable: true } : {}) }));
+        pickNeutralTitle(members, { floor: true });
+        pickNeutralTitle(members, { incumbent: titles[50] });
+      },
+      { n: 20_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+describe("h164-titles-2: cleanHeadline pairs quotes before it strips a wrapping pair", () => {
+  const SINGLE = "'İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın?'";
+  const DOUBLE_TWIN = "\"İmamoğlu çıkar amaçlı suç örgütü\" davası: 'Seçim vaadimiz var kreş yapar mısın?'";
+
+  it("a title that opens and ends with two different quoted spans keeps both pairs", () => {
+    const cleaned = cleanHeadline(SINGLE);
+    expect(cleaned.startsWith("'İmamoğlu")).toBe(true);
+    expect(cleaned.endsWith("mısın?'")).toBe(true);
+    expect(cleaned).toBe(SINGLE);
+  });
+
+  it("the double-quote twin keeps its quotes too", () => {
+    const cleaned = cleanHeadline(DOUBLE_TWIN);
+    expect(cleaned.startsWith("\"İmamoğlu")).toBe(true);
+    expect(cleaned.endsWith("mısın?'")).toBe(true);
+    expect(cleaned).toBe(DOUBLE_TWIN);
+    expect(cleanHeadline("“İmamoğlu suç örgütü” davası: “Seçim vaadimiz var” dedi “kreş yapar mısın”")).toBe(
+      "“İmamoğlu suç örgütü” davası: “Seçim vaadimiz var” dedi “kreş yapar mısın”",
+    );
+  });
+
+  it("a single wrapped span is stripped as before, whatever its pair of marks", () => {
+    expect(cleanHeadline("'Durum acil'")).toBe("Durum acil");
+    expect(cleanHeadline('"Durum acil"')).toBe("Durum acil");
+    expect(cleanHeadline("“Durum acil”")).toBe("Durum acil");
+    expect(cleanHeadline("‘Durum acil’")).toBe("Durum acil");
+    // The apostrophe of a suffix inside the span is not a mark.
+    expect(cleanHeadline("'Erdoğan'ın sözleri Meclis'te tartışıldı'")).toBe("Erdoğan'ın sözleri Meclis'te tartışıldı");
+    expect(cleanHeadline("\"Özel'e Kılıçdaroğlu’ndan yanıt\"")).toBe("Özel'e Kılıçdaroğlu’ndan yanıt");
+    // A mark of the other family inside it is not a pair of the opener's.
+    expect(cleanHeadline("'Durum \"acil\" dedi'")).toBe("Durum \"acil\" dedi");
+  });
+
+  it("a first-person quote still keeps its quotes, a mismatched one is still rewritten as “…”", () => {
+    expect(cleanHeadline('"Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz"')).toBe(
+      '"Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz"',
+    );
+    expect(cleanHeadline("\"Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz”")).toBe(
+      "“Toplum sağlığını tehdit eden alışkanlıklarla mücadelemizi sürdürüyoruz”",
+    );
+  });
+
+  it("is linear on hostile input", () => {
+    expectLinear(rep("'a "), (shape) => cleanHeadline(`'${shape}'`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("\"a' "), (shape) => cleanHeadline(`"${shape}"`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("'"), (shape) => cleanHeadline(shape), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+describe("h164-titles-2: a single quote that closes before one opens fails the gate", () => {
+  const STORED = "İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın?";
+
+  it("the stored 852702d8 title (its first mark outside words is a closer) is rejected; the cleaned twins are not", () => {
+    expect(isAcceptableNeutral("İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın", [])).toBe(false);
+    expect(isAcceptableNeutral("'İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın", [])).toBe(true);
+    expect(isAcceptableNeutral("İmamoğlu çıkar amaçlı suç örgütü’ davası: ‘Seçim vaadimiz var", [])).toBe(false);
+    expect(isAcceptableNeutral("İmamoğlu çıkar amaçlı suç örgütü’ davası: ‘Seçim vaadimiz var’", [])).toBe(false);
+    expect(isAcceptableNeutral("‘İmamoğlu çıkar amaçlı suç örgütü’ davası: ‘Seçim vaadimiz var’ dedi", [])).toBe(true);
+  });
+
+  it("apostrophes inside words, pairs, a lone opener or closer and a year elision do not count", () => {
+    for (const t of [
+      "Bakan açıkladı: Yeni düzenleme yarın geliyor’",
+      "Bakan açıkladı: ‘Yeni düzenleme yarın geliyor",
+      "Kılıçdaroğlu'ndan Özel'e yanıt: Meclis'te konuştu",
+      "Bakan Kurum: 'Zam yok' dedi, Özel'e yanıt verdi",
+      "Özel: ‘Kimse yanılmasın’ dedi, Meclis'te konuştu",
+      "’90'lı yılların efsanesi Meclis'te anıldı",
+      "Bakan 'zam yok dedi ve Meclis'te konuştu",
+      "1990'larda 5'er 10'ar kişilik gruplar kuruldu",
+    ]) {
+      expect(isAcceptableNeutral(t, []), t).toBe(true);
+    }
+  });
+
+  it("the stored title is not what the re-pick returns: a member's own wording that keeps both pairs", () => {
+    const c = h164Casing("852702d8");
+    expect(c.stored).toBe(STORED);
+    // Every member asks (the quoted question ends in '?'), so the gate takes none and the pick is the floor's, as for a
+    // stored title that fails it (the cron passes { floor } then). The quotes are the point: both pairs survive.
+    const picked = pickNeutralTitle(casingMembers(c), { incumbent: c.stored, floor: true });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect((picked as string).startsWith("'İmamoğlu") || (picked as string).startsWith("\"İmamoğlu")).toBe(true);
+    expect((picked as string).endsWith("mısın?'")).toBe(true);
+    // With the question mark gone, the gate takes it; the stored title, which opens on a closer, it does not.
+    expect(isAcceptableNeutral((picked as string).replaceAll("?", ""), [])).toBe(true);
+    expect(isAcceptableNeutral(STORED.replaceAll("?", ""), [])).toBe(false);
+    expect(pickNeutralTitle(casingMembers(c), { floor: true })).toBe(picked);
+    // A fixed point.
+    expect(pickNeutralTitle(casingMembers(c), { incumbent: picked as string, floor: true })).toBe(picked);
+  });
+
+  it("is linear on hostile input", () => {
+    expectLinear(rep("a' "), (shape) => isAcceptableNeutral(shape, []), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("'a "), (shape) => isAcceptableNeutral(`${shape}'`, []), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("’"), (shape) => isAcceptableNeutral(shape, []), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h165 review fixes: the teaser and the placeholder rules of h164-titles-1, and the case rule of h164-titles-2
+// ---------------------------------------------------------------------------
+
+describe("h165 review: 'neden ol-' (causative) and a reported answer are no teaser", () => {
+  const STATEMENTS = [
+    '"Dur" ihtarını dinlemedi, kazaya neden oldu! Firari sürücü cezadan kaçamadı',
+    "Ölümüne neden olan sürücü tutuklanmadı",
+    "Kazaya neden olan kamyon şoförü hâlâ bulunamadı",
+    "Selin neden olduğu hasar hâlâ giderilmedi",
+    "Yangına neden olan şüpheli yakalanmadı",
+    "Bakan Tekin hangi ilde ne yapılacağını açıkladı",
+  ];
+
+  it.each(STATEMENTS)("%s is a statement: no question, no teaser, acceptable", (title) => {
+    expect(isQuestionTeaser(title)).toBe(false);
+    expect(isQuestionTitle(title)).toBe(false);
+    expect(isAcceptableNeutral(title, [])).toBe(true);
+  });
+
+  it.each([
+    "Tera'nın patronu Emre Tezmen YENİ Parti ile neden görüşmedi",
+    "Başbakan neden Meclis'e gelmedi",
+    "Mekke Anlaşması Meclis'te kabul edildi: Hangi parti ne oy verdi",
+  ])("%s is still a teaser", (title) => {
+    expect(isQuestionTeaser(title)).toBe(true);
+    expect(isQuestionTitle(title)).toBe(true);
+    expect(isAcceptableNeutral(title, [])).toBe(false);
+  });
+
+  it("a clause ends at '!', '?' and a sentence break, so 'neden' cannot reach a verb in the next sentence", () => {
+    expect(isQuestionTeaser("Bakan neden istifa etti! Yönetim konuşmadı")).toBe(false);
+    expect(isQuestionTeaser("Bakan neden gelmedi! Yönetim konuşmadı")).toBe(true);
+    expect(isQuestionTeaser("Bakan neden gelmedi. Yönetim konuşmadı")).toBe(true);
+    expect(isQuestionTeaser("Bakan neden Meclis'e. Yönetim konuşmadı")).toBe(false);
+    expect(isQuestionTeaser("Bakan neden Meclis'e! Yönetim konuşmadı")).toBe(false);
+    // A dot that no space follows is no sentence break.
+    expect(isQuestionTeaser("Bakan neden 3.5 puan gelmedi")).toBe(true);
+  });
+
+  it("'hangi <word> ne' is still a teaser unless the clause holds a nominalised reported answer", () => {
+    expect(isQuestionTeaser("Hangi il ne kadar oy aldı")).toBe(true);
+    expect(isQuestionTeaser("Bakan hangi ilde ne yaptığını anlattı")).toBe(false);
+    expect(isQuestionTeaser("Bakan hangi ilde ne olduğunu açıkladı")).toBe(false);
+    expect(isQuestionTeaser("Bakan hangi ilde ne edeceğini söyledi")).toBe(false);
+    // The answer sits in the next clause: the question is a clause of its own.
+    expect(isQuestionTeaser("Hangi parti ne oy verdi: Bakan yaptığını açıkladı")).toBe(true);
+  });
+
+  it("is linear on hostile input", () => {
+    expectLinear(rep("neden a "), (shape) => isQuestionTeaser(`${shape}ol`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("hangi a ne "), (shape) => isQuestionTeaser(shape), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("hangi a ne yaptigini "), (shape) => isQuestionTeaser(shape), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("! "), (shape) => isQuestionTeaser(`${shape}neden medi`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep(". "), (shape) => isQuestionTeaser(`${shape}neden medi`), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+describe("h165 review: a placeholder is a label or a name in front of the speaker line, never a sentence", () => {
+  const SENTENCES = [
+    "Rusya'nın ABD Büyükelçisi Aleksandr Darçiyev hayatını kaybetti! Moskova'dan açıklama",
+    "Putin, Trump'ın temsilcileriyle görüşecek: Kremlin'den açıklama",
+    "Azil süreci başladı! Trump'tan açıklama",
+    "Hürmüz Boğazı'nda tanker olayı: UKMTO'dan açıklama",
+    "KYK burs ve kredilerine 2027'de zam yapılacak! Bakan Bak'tan yeni açıklama",
+  ];
+
+  it.each(SENTENCES)("%s is no placeholder and the gate takes it", (title) => {
+    expect(isAblativeStatementTitle(title)).toBe(false);
+    expect(isGenericTitle(title)).toBe(false);
+    expect(isAcceptableNeutral(title, [])).toBe(true);
+  });
+
+  it("the pick keeps such a title as a candidate (it is no longer dropped as a placeholder)", () => {
+    const picked = pickNeutralTitle([
+      { title: "Putin, Trump'ın temsilcileriyle görüşecek: Kremlin'den açıklama" },
+      { title: "Putin Trump'ın temsilcileriyle görüşecek! Kremlin'den açıklama" },
+    ]);
+    expect(picked).not.toBeNull();
+    for (const t of SENTENCES) expect(pickNeutralTitle([{ title: t }, { title: t }]), t).not.toBeNull();
+  });
+
+  it.each([
+    "MHP Lideri Bahçeli'den açıklamalar",
+    "COP31 Zirvesi. Bakan Kurum'dan açıklamalar",
+    "111. Dönem Kaymakamlar Kurası Töreni. Cumhurbaşkanı Erdoğan'dan önemli açıklamalar",
+    "Cumhurbaşkanlığı Kabinesi toplantısının ardından Bakan Kurum'dan açıklamalar",
+    "COP31 Zirvesi! Bakan Kurum'dan açıklamalar",
+    "Prof. Dr. Ali Kurtulmuş'tan açıklama",
+    "Kurtulmuş'tan açıklamalar",
+  ])("%s stays a placeholder", (title) => {
+    expect(isAblativeStatementTitle(title)).toBe(true);
+    expect(isGenericTitle(title)).toBe(true);
+    expect(isAcceptableNeutral(title, [])).toBe(false);
+  });
+
+  it("isAblativeStatementTitle and isGenericTitle give one verdict on a title that is only the speaker's line", () => {
+    for (const t of [...SENTENCES, "MHP Lideri Bahçeli'den açıklamalar", "COP31 Zirvesi. Bakan Kurum'dan açıklamalar"]) {
+      if (isAblativeStatementTitle(t)) expect(isGenericTitle(t), t).toBe(true);
+    }
+  });
+
+  it("is linear on hostile input", () => {
+    expectLinear(rep("a'dan "), (shape) => isGenericTitle(`${shape}Bakan'dan açıklama`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("x: "), (shape) => isGenericTitle(`${shape}Bakan'dan açıklama`), { n: 250_000, ceilingMs: 8_000 });
+    expectLinear(rep("yaptı. "), (shape) => isGenericTitle(`${shape}Bakan'dan açıklama`), { n: 250_000, ceilingMs: 8_000 });
+  });
+});
+
+describe("h165 review: a case-trusted twin that wrote the stored title's exact casing keeps it", () => {
+  const INC = "Bakan Bayraktar'dan enerji işbirliği ve doğalgaz anlaşması mesajı";
+  const S1 = "Bayraktar: Enerji İşbirliği ve Doğalgaz Anlaşması için yeni adım atıldı";
+  const S2 = "Bakan Bayraktar, Enerji İşbirliği ve Doğalgaz Anlaşması imzalandı dedi";
+
+  it("the flagged copy first, the trusted copy second", () => {
+    const members = [{ title: INC, caseUnreliable: true }, { title: INC }, { title: S1 }, { title: S2 }];
+    expect(pickNeutralTitle(members, { incumbent: INC })).toBe(INC);
+  });
+
+  it("the trusted copy first, the flagged copy second", () => {
+    const members = [{ title: INC }, { title: INC, caseUnreliable: true }, { title: S1 }, { title: S2 }];
+    expect(pickNeutralTitle(members, { incumbent: INC })).toBe(INC);
+  });
+
+  it("a trusted twin written with another apostrophe (same fold, other bytes) and no flagged member also keep it", () => {
+    const twin = INC.replace("'", "’");
+    expect(pickNeutralTitle([{ title: INC, caseUnreliable: true }, { title: twin }, { title: S1 }, { title: S2 }], { incumbent: INC })).toBe(INC);
+    expect(pickNeutralTitle([{ title: INC }, { title: S1 }, { title: S2 }], { incumbent: INC })).toBe(INC);
+  });
+
+  it("a flagged title that no trusted outlet wrote that way still gives way to the capitals its siblings write", () => {
+    const members = [
+      { title: "Bakan kurum iklim zirvesinde konuştu", caseUnreliable: true },
+      { title: "Bakan Kurum iklim zirvesinde konuştu" },
+      { title: "Bakan Kurum iklim zirvesinde sorulara yanıt verdi" },
+    ];
+    const picked = pickNeutralTitle(members, { incumbent: "Bakan kurum iklim zirvesinde konuştu" }) as string;
+    expect(picked).toContain("Bakan Kurum");
+    expect(picked).not.toContain("Bakan kurum");
   });
 });

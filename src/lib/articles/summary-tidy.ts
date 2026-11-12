@@ -1,5 +1,6 @@
 import {
   cutAppendedTicker,
+  cutLoneTrailingHeadline,
   isUnpunctuatedShortLine,
   stripFeedWrappers,
   stripTrailingTeasers,
@@ -55,7 +56,14 @@ import { endsWithFiniteVerb } from "./finite-verb";
 //     / "Detaylar gelecek...", alone or as the first line of a text that goes on
 //     with another story's headline (a72f9464); the whole summary is hidden
 //   - another story's headline appended after the body (Milliyet: a "related
-//     news" line and its "Son dakika..." ticker)
+//     news" line and its "Son dakika..." ticker; Milliyet and Posta: ONE
+//     unpunctuated headline as the last line, h164-summaries-1)
+//   - a placeholder line in the middle of the text ("Ayrıntılar birazdan..."):
+//     it and everything behind it are another story's (h164-summaries-1)
+//   - a lead-in that ends the text ("... şunları söyledi:", "... anlattı;"): the
+//     text is backed off to the last sentence end, or hidden (h164-summaries-1)
+//   - a bare URL line, and the byline stub it leaves ("Av. Baran Can KAYA
+//     yazdı...\n\nhttps://www.hukukihaber.net/..."; h164-summaries-2)
 //   - double spaces
 //
 // The ingest side must not change (content_hash and the corpus-equality test
@@ -71,6 +79,8 @@ export const WIDGET_HEADINGS: ReadonlySet<string> = new Set([
   "ilginizi çekebilir",
   "ilgili haberler",
   "bunlar da ilginizi çekebilir",
+  // Milliyet's live-blog card ("...canlı bloğundan takip edebilirsiniz.\nCanlı Haber İçerik Kartı", 8fc54aa1).
+  "canlı haber içerik kartı",
 ]);
 
 /** Upper bound on how many stacked CTAs one call will peel off. */
@@ -1174,6 +1184,150 @@ function peelTrailingCtas(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// The tail of a text (h164-summaries-1) and bare URLs (h164-summaries-2).
+//
+// Three shapes of foreign or unfinished text at the END of a summary, none of which the CTA tail
+// ({@link peelTrailingCtas}) or the teaser strip reaches:
+//   - a placeholder line in the middle: "...incelemeleri devam ediyor.\nAyrıntılar birazdan...\n
+//     Kırmızı bültenle aranan...\n..." (e663db44, Milliyet). The phrases are the ones
+//     startsWithPlaceholderLine knows; a placeholder on LINE 0 hides the whole text (the first
+//     step of tidySummaryText), on a later line it is a cut point: it and every line behind it
+//     go, when a complete sentence stands in front (the text in front ends in . ! ? or …, closers
+//     aside). Anything else stays ("when unsure, keep"), the CTA tail strip still takes a
+//     placeholder that ends the text.
+//   - a lead-in that ends the text: "... Göktaş 2027 yılı bütçe sunumunda şunları söyledi:" (c44095e2),
+//     "... Detayları, CNN TÜRK Muhabiri Merve Tokaz anlattı;" (f2da6a54). The list, the quotation or
+//     the report the colon announces is not there (the feed cut it), so the text promises something it
+//     does not give. {@link trimDanglingLeadIn} backs it off to the last sentence end that keeps at
+//     least {@link LEAD_IN_MIN_KEPT} characters and does not leave a quotation open, and gives ""
+//     when there is none (the Özet is then hidden; one sentence, "... şöyle;", has nothing to keep).
+//   - a bare URL on a line of its own behind line 0 (Hukuki Haber: "Av. Baran Can KAYA yazdı...\n\nhttps://
+//     www.hukukihaber.net/..."). The line goes; when that leaves only a byline stub (at most 8 words and
+//     the last one "yazdı", dots aside) the whole text is a stub and goes too. A sentence that merely
+//     mentions a domain ("tayfhaber.com") is not a bare URL line and stays.
+// No regular expression runs over the text: lines are found with indexOf, a line is looked at with
+// bounded scans, the sentence search is the backward scan of {@link lastSentenceEnd}.
+// ---------------------------------------------------------------------------
+
+/** True when `s` ends in . ! ? or … once the closing quotes and brackets are looked past. */
+function endsInSentenceMark(s: string): boolean {
+  let end = s.length;
+  while (end > 0 && CLOSERS.has(s.charAt(end - 1))) end--;
+  return end > 0 && SENTENCE_MARKS.has(s.charAt(end - 1));
+}
+
+/**
+ * `text` up to the first placeholder line after line 0 ({@link startsWithPlaceholderLine}: the
+ * line is one of BOILERPLATE_PHRASES on its own), trimmed, when a complete sentence stands in front
+ * of it; otherwise the SAME string. Line 0 (the first non-blank line) is never the cut point:
+ * a placeholder there is the "pre" step of {@link tidySummaryText}. Linear: one pass over the line
+ * breaks, and a bounded scan of every line.
+ */
+function cutPlaceholderTail(text: string): string {
+  let lineStart = 0;
+  while (lineStart < text.length && isBlankChar(text.charAt(lineStart))) lineStart++;
+  let nl = text.indexOf("\n", lineStart); // the end of line 0
+  while (nl !== -1) {
+    const next = text.indexOf("\n", nl + 1);
+    const line = text.slice(nl + 1, next === -1 ? text.length : next);
+    if (startsWithPlaceholderLine(line)) {
+      const kept = text.slice(0, nl).trimEnd();
+      return endsInSentenceMark(kept) ? kept : text;
+    }
+    nl = next;
+  }
+  return text;
+}
+
+/** True when the trimmed `line` is one URL and nothing else: "http://" or "https://" and no blank in it. */
+function isBareUrlLine(line: string): boolean {
+  const t = line.trim();
+  const head = t.slice(0, 8).toLowerCase();
+  const prefix = head === "https://" ? 8 : head.startsWith("http://") ? 7 : 0;
+  if (prefix === 0 || t.length === prefix) return false;
+  for (let i = prefix; i < t.length; i++) if (isBlankChar(t.charAt(i))) return false;
+  return true;
+}
+
+/** A byline stub has at most this many words. */
+const BYLINE_MAX_WORDS = 8;
+/** The last word of a byline stub, in the tr-TR lower case. */
+const BYLINE_VERB = "yazdı";
+
+/**
+ * True for a byline stub: after its trailing dots, "…" and blanks are taken off, at most
+ * {@link BYLINE_MAX_WORDS} words, the last of them "yazdı" ("Av. Baran Can KAYA yazdı..."). `s` has
+ * its blanks collapsed (step 4b of {@link tidySummaryText}).
+ */
+function isBylineStub(s: string): boolean {
+  let end = s.length;
+  while (end > 0 && (s.charAt(end - 1) === "." || s.charAt(end - 1) === "…" || isBlankChar(s.charAt(end - 1)))) end--;
+  const body = s.slice(0, end);
+  if (body === "") return false;
+  let words = 1;
+  for (let i = 0; i < body.length; i++) if (body.charAt(i) === " ") words++;
+  if (words > BYLINE_MAX_WORDS) return false;
+  return body.slice(body.lastIndexOf(" ") + 1).toLocaleLowerCase("tr-TR") === BYLINE_VERB;
+}
+
+/** A text that ends in one of these (closers aside) announces something that is not there. */
+const LEAD_IN_MARKS: ReadonlySet<string> = new Set([":", ";"]);
+/** The back-off of {@link trimDanglingLeadIn} keeps at least this many characters, else the text is "". */
+const LEAD_IN_MIN_KEPT = 40;
+
+/** The longest entity name looked for behind an "&" ("&thinsp;" is 6 characters, "&#x1F600;" 7). */
+const MAX_ENTITY_NAME = 10;
+
+/** True when the ";" at `semi` ends an entity the feed left undecoded ("&gt;", "&#62;"): an "&", then letters, digits or "#". */
+function endsEntity(s: string, semi: number): boolean {
+  for (let i = semi - 1; i >= 0 && semi - i <= MAX_ENTITY_NAME + 1; i--) {
+    const ch = s.charAt(i);
+    if (ch === "&") return semi - i > 1;
+    if (ch !== "#" && !isLetterOrDigit(ch)) return false;
+  }
+  return false;
+}
+
+/**
+ * Index of the trailing ":" or ";" of `s` (closing quotes, brackets and blanks aside), or -1. The ";"
+ * that ends an undecoded entity ("...&gt;") is no lead-in.
+ */
+function leadInMarkIndex(s: string): number {
+  let end = s.length;
+  while (end > 0 && (CLOSERS.has(s.charAt(end - 1)) || isBlankChar(s.charAt(end - 1)))) end--;
+  if (end === 0 || !LEAD_IN_MARKS.has(s.charAt(end - 1))) return -1;
+  return s.charAt(end - 1) === ";" && endsEntity(s, end - 1) ? -1 : end - 1;
+}
+
+/**
+ * Step 7 of {@link tidySummaryText} (h164-summaries-1): a text that ends in ":" or ";" (closing quotes
+ * and brackets aside) is backed off to the last sentence end (. ! ? … and the closers behind them; an
+ * abbreviation's, an initial's or an ordinal's dot is none, {@link lastSentenceEnd}) that leaves no
+ * quotation open and keeps at least {@link LEAD_IN_MIN_KEPT} characters; when there is none the
+ * result is "" (the Özet is hidden). Any other text comes back as the SAME string. Linear.
+ */
+function trimDanglingLeadIn(s: string): string {
+  const mark = leadInMarkIndex(s);
+  if (mark === -1) return s;
+  const end = lastSentenceEnd(s.slice(0, mark), [], quoteBalance(s));
+  return end < LEAD_IN_MIN_KEPT ? "" : s.slice(0, end).trimEnd();
+}
+
+/**
+ * The tidied text BEFORE the lead-in back-off of `raw` when that back-off leaves fewer than
+ * `minKept` characters (nothing, or a stub), else null (h164-summaries-1). `seedDisqualified`
+ * (summary-agreement.ts) calls such a seed 'lead-in' so that a clean member can replace it; the
+ * returned text is what the seed said before the back-off (a seed that opens with "İşte" is a teaser
+ * whatever its tail does). Null for a text that does not end in a lead-in.
+ */
+export function leadInStub(raw: string, minKept: number): string | null {
+  if (typeof raw !== "string" || (!raw.includes(":") && !raw.includes(";"))) return null;
+  const before = tidyBeforeLeadIn(raw);
+  if (leadInMarkIndex(before) === -1) return null;
+  return trimDanglingLeadIn(before).length < minKept ? before : null;
+}
+
+// ---------------------------------------------------------------------------
 // Glued sub-headings (h25-live-2). Haberport ships "<sub-heading><body>" with the
 // block separator dropped by the tag stripper: "odaklı ziyaretİçişleri Bakanı",
 // "yenilendiBüyükçekmece Belediye Meclisi", or "<label>:<body>" ("ziyaretin
@@ -1628,7 +1782,12 @@ export function stripLeadingStyleRules(description: string): string {
  *      ({@link isCtaFeedCut}, h122-ozet-3: a letter, digit or comma, the dots, a
  *      "continue reading" CTA, at least 100 characters in front of the dots): the
  *      body in front of the dots is repaired and the CTA is not seen again;
- *   1. drop whole lines that are a widget heading ("İlginizi Çekebilir");
+ *   1. drop whole lines that are a widget heading ("İlginizi Çekebilir", "Canlı
+ *      Haber İçerik Kartı") and, behind line 0, a line that is one bare http(s) URL
+ *      ({@link isBareUrlLine}, h164-summaries-2);
+ *   1a. cut a placeholder line behind line 0 ("Ayrıntılar birazdan...") and every line
+ *      after it, when a complete sentence stands in front ({@link cutPlaceholderTail},
+ *      h164-summaries-1);
  *   1b. strip the Diken header ("<title> dd.mm.yyyy Diken"), the WordPress /
  *      Yoast footers ("The post ... appeared first on ...", "... yazısı ilk
  *      önce ... adresinde yayınlanmıştır."), the Medyascope site-name footer
@@ -1658,6 +1817,11 @@ export function stripLeadingStyleRules(description: string): string {
  *      ({@link stripTrailingTeasers}, h34-reader-5): an exclamation headline that
  *      shares no content stem with the text in front of it, and the unpunctuated
  *      headlines after it. Never the first line; when unsure the line stays;
+ *   1c3. drop up to two unpunctuated headline-shaped lines at the very end, behind a
+ *      sentence ({@link cutLoneTrailingHeadline}, h164-summaries-1: Milliyet's and
+ *      Posta's one pasted headline): no content stem shared with the text in front of
+ *      them, no ellipsis in them, never line 0; the same function the shared cluster
+ *      module exports;
  *   1d. drop a heading first line ({@link dropHeadingLine}, h30-live-1): 15 to
  *      140 characters, none of ". ! ? : …", not ending in ", ; – — -" or in a
  *      continuation word ({@link LINE_CONTINUATION_WORDS}), not
@@ -1721,7 +1885,13 @@ export function stripLeadingStyleRules(description: string): string {
  *      sentence of 60 characters or more stands in front of it and it does not start
  *      inside an open quotation ("... araştırılıyor. Peki, X kimdir? ..." ends at
  *      "araştırılıyor."; a statement or the answer behind the come-on, "İşte bunlardan biri
- *      California'da yaşanıyor.", keeps the text whole). Never empties the text.
+ *      California'da yaşanıyor.", keeps the text whole). Never empties the text;
+ *   7. back a text that ends in ":" or ";" (closers aside) off to the last sentence end
+ *      that keeps 40 characters and leaves no quotation open, or "" when there is none
+ *      ({@link trimDanglingLeadIn}, h164-summaries-1: "... Göktaş 2027 yılı bütçe
+ *      sunumunda şunları söyledi:"). A byline stub that a dropped URL line left
+ *      ("Av. Baran Can KAYA yazdı...", {@link isBylineStub}) is "" too (step 5b,
+ *      h164-summaries-2).
  *
  * Step 0 repairs a clamp with {@link cutAppendedTicker} first: foreign text is
  * never kept, so a clamped text that holds a ticker line ends where the ticker
@@ -1746,6 +1916,13 @@ export function stripLeadingStyleRules(description: string): string {
  * only once it has become part of the first line).
  */
 export function tidySummaryText(s: string): string {
+  // 7. A text that ends in a lead-in (":" / ";") is backed off to the last sentence end, or
+  //    hidden (h164-summaries-1), on the final text, after everything else has had its say.
+  return trimDanglingLeadIn(tidyBeforeLeadIn(s));
+}
+
+/** Steps pre to 6 of {@link tidySummaryText}: the tidied text before the lead-in back-off. */
+function tidyBeforeLeadIn(s: string): string {
   // pre. A placeholder first line: nothing behind it is ours to show. On the raw
   //     input, before anything is reshaped. Linear (see startsWithPlaceholderLine).
   if (startsWithPlaceholderLine(s)) return "";
@@ -1753,11 +1930,28 @@ export function tidySummaryText(s: string): string {
   // 0. Ingest clamp ("...tedaviye devam edecek şeki..."), on the raw input.
   const repaired = repairClamp(s);
 
-  // 1. Widget heading lines.
+  // 1. Widget heading lines, and bare URL lines (h164-summaries-2: Hukuki Haber's byline
+  //    "Av. ... yazdı...\n\nhttps://www.hukukihaber.net/...").
+  //    Line 0 (the first line that holds anything) is never a URL line: when unsure, keep.
+  let urlDropped = false;
+  let seenLine0 = false;
   let out = (repaired ?? s)
     .split(/\r?\n/)
-    .filter((line) => !isWidgetLine(line))
+    .filter((line) => {
+      if (isWidgetLine(line)) return false;
+      if (line.trim() === "") return true;
+      if (seenLine0 && isBareUrlLine(line)) {
+        urlDropped = true;
+        return false;
+      }
+      seenLine0 = true;
+      return true;
+    })
     .join("\n");
+
+  // 1a. A placeholder line after line 0 ("Ayrıntılar birazdan...") cuts itself and every line
+  //     behind it, when a complete sentence stands in front (h164-summaries-1, e663db44).
+  out = cutPlaceholderTail(out);
 
   // 1b. Diken / Serbestiyet feed wrappers (h19-ingest-2). The text still holds
   //     its newlines here: the footers are found by them.
@@ -1785,6 +1979,13 @@ export function tidySummaryText(s: string): string {
   //     cluster consumer's cleanDescription applies; the first line is never cut, so a
   //     text is never emptied. While the line breaks are still there.
   out = stripTrailingTeasers(out);
+
+  // 1c3. ONE headline-shaped line (or two) as the last line, behind a sentence, that shares no
+  //     content stem with the text in front of it (h164-summaries-1: Milliyet's "Cumhurbaşkanı
+  //     Erdoğan'dan COP31'de diplomasi trafiği", Posta's "Nev’in ağabeyi miras için ..."). The
+  //     same function lives in the shared cluster module; line 0 is never cut. While the line
+  //     breaks are still there.
+  out = cutLoneTrailingHeadline(out);
 
   // 1d. A heading line on top of the body (h30-live-1), while the line breaks
   //     are still there.
@@ -1819,6 +2020,9 @@ export function tidySummaryText(s: string): string {
 
   // 5.
   out = out.trim();
+
+  // 5b. What a bare URL line left is a byline stub ("Av. Baran Can KAYA yazdı..."): nothing to show.
+  if (urlDropped && isBylineStub(out)) return "";
 
   // 6. A trailing "Peki, X kimdir? ..." / "İşte ..." run (h95-summaries-1), on the
   //    final text: every earlier step has put its sentence marks in place.

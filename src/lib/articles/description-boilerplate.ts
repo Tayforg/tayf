@@ -198,13 +198,25 @@ function stripTrailingMarks(s: string): string {
 }
 
 /**
- * The comparison form of a title or a description: NFC, tr-TR lower case (so
- * "ISPARTA'DA" and "Isparta'da" agree, and "İZMİR" meets "İzmir"), every
- * whitespace run one blank, no trailing blanks or punctuation (an ellipsis
- * included). Linear.
+ * The comparison form of a title or a description: no combining dot above
+ * (U+0307), NFC, tr-TR lower case (so "ISPARTA'DA" and "Isparta'da" agree, and
+ * "İZMİR" meets "İzmir"), "ı" folded to "i", every whitespace run one blank, no
+ * trailing blanks or punctuation (an ellipsis included). Linear.
+ *
+ * h164-summaries-2: En Politik ships its title lower-cased by JavaScript's
+ * default `toLowerCase` as the description. For a title in capitals that turns
+ * "İ" into "i" followed by U+0307, and "I" into an ASCII "i" ("çocuklarin"
+ * under "ÇOCUKLARIN"), so the tr-TR form of the title ("hijyenden",
+ * "çocukların") never met the description's. Both sides lose the U+0307 (before
+ * the NFC step: "a" + U+0307 would compose to "ȧ") and fold the dotless "ı" to
+ * "i". For a headline echo the two spellings are the same word, and the fold
+ * only ever makes two texts that are the same words in the same order compare
+ * equal ("Izmir'de deprem" now echoes "İzmir'de deprem": a title typed without
+ * the Turkish letters).
  */
 function echoForm(s: string): string {
-  return stripTrailingMarks(s.normalize("NFC").toLocaleLowerCase("tr-TR").replace(/\s+/g, " ").trim());
+  const lower = s.replaceAll("\u0307", "").normalize("NFC").toLocaleLowerCase("tr-TR");
+  return stripTrailingMarks(lower.replaceAll("ı", "i").replace(/\s+/g, " ").trim());
 }
 
 /** True when `s` (blanks aside) ends in "…" or in three or more dots. */

@@ -63,9 +63,11 @@ create function pg_temp.offered200() returns text language sql as $f$
     from public.neutral_title_repick_candidates('extractive-v6', 50)
 $f$;
 
--- The quote-free fixtures every release must offer the same way: one scenario, run on 184's body and again on 200's.
-create temp table mix200(phase text, offered text);
-create function pg_temp.mix200(p_phase text) returns void language plpgsql as $f$
+-- The quote-free fixtures every release must offer the same way: one scenario, run on 184's body and again on 200's. It RETURNS the
+-- offered set as text (it writes nothing of its own): the caller captures the value with psql's \gset inside the transaction and rolls
+-- the fixtures back, then compares the captured literals. (A temp-table row inserted inside the rolled-back transaction would be gone
+-- by the time it is read, and `NULL <> 'x'` and `NULL is distinct from NULL` never raise: h165 review, db-2.)
+create function pg_temp.mix200() returns text language plpgsql as $f$
 begin
   -- 162: an edited-away title (a plain one, no quote anywhere) is offered; a still-carried one is not
   perform pg_temp.fx200(1, 'Merkez Bankası faiz kararını açıkladı', 3, 3);
@@ -96,7 +98,7 @@ begin
   perform pg_temp.fx200(11, 'CHP''nin kurultay davası 18 Kasım''a ertelendi', 3, 3);
   perform pg_temp.mem200(11, 1, 'CHP’nin kurultay davası 18 Kasım’a ertelendi');
   perform pg_temp.old200(11, 1, 'CHP''nin kurultay davası 18 Kasım''a ertelendi');
-  insert into mix200 select p_phase, pg_temp.offered200();
+  return pg_temp.offered200();
 end $f$;
 
 -- Baseline: this is production's function (md5(prosrc) read on production on 2026-11-12) with its ACL (owner + service_role,
@@ -144,12 +146,13 @@ rollback;
 
 -- What 184 offers for the quote-free fixtures: 1 (edited away), 6 (young), 7 (shout), 9 (growth), 10 (another model).
 begin;
-select pg_temp.mix200('before');
+select pg_temp.mix200() as mix200_before \gset
 rollback;
+create temp table mix200_before_seen as select :'mix200_before'::text as v;
 do $$
 begin
-  if (select offered from mix200 where phase = 'before') <> '1,6,7,9,10' then
-    raise exception 'baseline: unexpected offered set on 184''s body: %', (select offered from mix200 where phase = 'before');
+  if (select v from mix200_before_seen) is distinct from '1,6,7,9,10' then
+    raise exception 'baseline: unexpected offered set on 184''s body: %', (select v from mix200_before_seen);
   end if;
 end $$;
 
@@ -340,13 +343,15 @@ rollback;
 
 -- 7. Everything 162, 169 and 184 offered is still offered, and nothing else is (the quote-free fixtures of the baseline). ------------
 begin;
-select pg_temp.mix200('after');
+select pg_temp.mix200() as mix200_after \gset
 rollback;
+create temp table mix200_after_seen as select :'mix200_after'::text as v;
 do $$
 begin
-  if (select offered from mix200 where phase = 'after') is distinct from (select offered from mix200 where phase = 'before') then
+  if (select v from mix200_after_seen) is null
+     or (select v from mix200_after_seen) is distinct from (select v from mix200_before_seen) then
     raise exception '200: the quote-free fixtures are offered differently: before % / after %',
-      (select offered from mix200 where phase = 'before'), (select offered from mix200 where phase = 'after');
+      (select v from mix200_before_seen), (select v from mix200_after_seen);
   end if;
 end $$;
 

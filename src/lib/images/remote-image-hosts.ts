@@ -86,12 +86,23 @@ const GOOGLE_S2_HOSTS = ["www.google.com", "google.com"] as const;
  *   **.sozcucdn.com                  n 1940  n_query   20  share  1.0%  (`?w=..&amp;h=..&mode=crop`)
  *   **.ekonomim.com                  n 1345  n_query    4  share  0.3%
  *
- * Below the rule, so not listed: **.ntv.com.tr (n 5, n_query 1) and
- * d2udx5iz3h7s4h.cloudfront.net (no rows in the window; 15 of 15 over 30 days
- * carried a query, last seen 2026-10-18). Re-measure monthly with the runbook
- * in scripts/gen-image-hosts.mjs and update this set (and these numbers).
- * remote-image-hosts.test.ts and tests/guards/image-remote-patterns.test.ts pin
- * that it is a small, non-empty subset of GENERATED_IMAGE_HOSTS.
+ * Below the rule, so not listed: d2udx5iz3h7s4h.cloudfront.net (no rows in the
+ * window; 15 of 15 over 30 days carried a query, last seen 2026-10-18).
+ *
+ * **.ntv.com.tr is deliberately NOT in the set either, although it is not a
+ * small case: 44 of 44 NTV rows in the 30 days to 2026-11-12 carry the resizer
+ * query `?width=930&format=webp` (the 7-day window above caught only n 5,
+ * n_query 1, because the feed produced rows on 3 of 30 days). The query is
+ * dropped by normalizeImageUrl (supabase/functions/_shared/image-url.ts,
+ * `dropNtvResizerQuery`), for images.ntv.com.tr only and only when every key is
+ * width / height / format / quality, because the file is served without it
+ * (HEAD 200 image/jpeg). So NTV is handled by normalisation, not by this set: a
+ * `?cb=N` variant on that host stays refused here and by Next (h164-heroimg-2).
+ *
+ * Re-measure monthly with the runbook in scripts/gen-image-hosts.mjs and update
+ * this set (and these numbers). remote-image-hosts.test.ts and
+ * tests/guards/image-remote-patterns.test.ts pin that it is a small, non-empty
+ * subset of GENERATED_IMAGE_HOSTS.
  */
 export const QUERY_HOSTS: ReadonlySet<string> = new Set([
   "**.anlatilaninotesi.com.tr",

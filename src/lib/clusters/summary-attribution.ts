@@ -2,7 +2,7 @@ import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/ent
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
 import { backOffOpenQuote, tidySummaryText, trimDanglingEnd } from "@/lib/articles/summary-tidy";
 import { normalizeSourceKind } from "@/lib/bias/config";
-import { findAgreeingMember } from "./summary-agreement";
+import { findAgreeingMember, isCaseGarbled, seedDisqualified } from "./summary-agreement";
 import { textComponentsOf, type WireSignal } from "./wire";
 import type { BiasCategory, SourceKind } from "@/types";
 
@@ -313,7 +313,16 @@ export function summaryAttribution({
   if (seedMember && majority.members.has(seedMember)) return null;
 
   const shown = tidySummaryText(text);
-  if (shown.length === 0) return null;
+  // h164-summaries-1: a seed whose whole text was a lead-in ("İşte ... satır başları:",
+  // "Bakan Şimşek ... paylaştı:") tidies to "" and has always been hidden, EXCEPT that a
+  // "İşte" teaser used to be shown whole and so was replaced by a clean member. Such a seed
+  // still goes to the title agreement; it is hidden when no member takes its place.
+  const emptiedByLeadIn =
+    shown.length === 0 &&
+    agreeWithTitle !== undefined &&
+    seedMember !== null &&
+    ["lead-in", "teaser"].includes(seedDisqualified(text, shown) ?? "");
+  if (shown.length === 0 && !emptiedByLeadIn) return null;
 
   // "Kaynak açıklaması" (no member holds the text) has no seed outlet to compare
   // a language or a rights flag against: it stays as stored.
@@ -327,10 +336,18 @@ export function summaryAttribution({
     });
     if (better) return attributedTo(better.text, better.member);
   }
+  // Nothing replaced it: the text a back-off emptied, and a lower-cased headline with broken
+  // letters (En Politik, h164-summaries-2), are no Özet at all.
+  if (shown.length === 0 || isCaseGarbled(shown)) return null;
   return attributedTo(shown, credited);
 }
 
 const ELLIPSIS = "…";
+
+/** True when `s` already ends in "…" or in three dots: a cut must not be closed with another "…" (h164-summaries-2). */
+function endsInEllipsis(s: string): boolean {
+  return s.endsWith(ELLIPSIS) || s.endsWith("...");
+}
 
 /**
  * A quote back-off must keep at least this many characters of the attribution
@@ -357,7 +374,7 @@ function finishBackOff(
   if (kept === null) return null;
   const text = kept.endsWith(ELLIPSIS) ? kept.slice(0, -ELLIPSIS.length) : kept;
   if (text.length - floor < minKeptAfterBackOff) return null;
-  if (kept.endsWith(ELLIPSIS)) return kept;
+  if (endsInEllipsis(kept)) return kept;
   return kept.slice(0, trimDanglingEnd(kept, kept.length)) + ELLIPSIS;
 }
 
@@ -406,7 +423,9 @@ function truncateWords(
     // would leave one blank in front of the ellipsis ("geçirilecek. …"), and a
     // dangling mark would read ",…".
     const end = trimDanglingEnd(cut, cut.length);
-    return end <= floor ? null : cut.slice(0, end) + ELLIPSIS;
+    if (end <= floor) return null;
+    // "Av. Baran Can KAYA yazdı..." cut right behind its dots keeps them: never "...…" (h164-summaries-2).
+    return endsInEllipsis(cut.slice(0, end)) ? cut.slice(0, end) : cut.slice(0, end) + ELLIPSIS;
   }
   return finishBackOff(kept, floor, minKeptAfterBackOff);
 }
@@ -537,6 +556,6 @@ export function summaryAttributionWithoutMembers({
   if (text.length === 0) return null;
   if (wire.isWireRedistribution) return null;
   const shown = tidySummaryText(text);
-  if (shown.length === 0) return null;
+  if (shown.length === 0 || isCaseGarbled(shown)) return null;
   return { text: shown, source: null };
 }

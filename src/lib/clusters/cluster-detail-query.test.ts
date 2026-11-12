@@ -156,6 +156,7 @@ vi.mock("@/lib/clusters/recall-matched-zones", async (importOriginal) => {
 import { cacheLife, cacheTag } from "next/cache";
 import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
+import { pickHeroCandidates } from "@/lib/images/hero-candidates";
 import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 import {
   getClusterDetail,
@@ -891,6 +892,79 @@ describe("gif-filter article image_url (http-1)", () => {
     expect(byArticle["a-logo"].image_url).toBeNull();
     expect(byArticle["a-sd"].image_url).toBeNull();
     expect(byArticle["a-jpg"].image_url).toBe("https://cdn.example/a-jpg.jpg");
+  });
+
+  // h164-heroimg-1: IndyTurk's 300x168 'no picture' default image is the newest
+  // member of the story, and it was the cluster page's LCP hero although dokuz8
+  // had a photo. The query boundary nulls it, so the photo is hero candidate [0].
+  it("an IndyTurk default image (newest member) never leads the hero: the dokuz8 photo is candidate [0]", async () => {
+    const indy = "https://www.indyturk.com/sites/default/files/default_images/index1.png";
+    const dokuz8 = "https://cdn.dokuz8haber.net/uploads/2024/10/kadir-ozkaya-1.webp";
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a-indy", "s-indy", "2026-04-17T10:00:00Z", {
+            article: { image_url: indy },
+          }),
+          mkEmbeddedMember("a-dokuz8", "s-dokuz8", "2026-04-17T09:00:00Z", {
+            article: { image_url: dokuz8 },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    const byArticle = Object.fromEntries(
+      result!.members.map((m) => [m.article.id, m.article]),
+    );
+    expect(byArticle["a-indy"].image_url).toBeNull();
+    expect(byArticle["a-dokuz8"].image_url).toBe(dokuz8);
+    // The page builds its hero exactly this way (cluster/[id]/page.tsx).
+    const candidates = pickHeroCandidates(
+      imageEligibleMembers(result!.members).map((m) => m.article.image_url),
+    );
+    expect(candidates[0]).toBe(dokuz8);
+    expect(candidates).toEqual([dokuz8]);
+  });
+
+  it("nulls the four Karar / Istiklal cards of h164 and keeps the gold-shop stock photo", async () => {
+    const cards = [
+      "https://cdn.karar.com/news/1946618.jpg",
+      "https://cdn.karar.com/news/1947232.jpg",
+      "https://cdn.istiklal.com.tr/news/668615.jpg",
+      "https://cdn.istiklal.com.tr/news/625929.jpg",
+    ];
+    const photo = "https://cdn.karar.com/news/1946513.jpg";
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          ...cards.map((image_url, i) =>
+            mkEmbeddedMember(`a-card-${i}`, `s-card-${i}`, `2026-04-17T10:0${i}:00Z`, {
+              article: { image_url },
+            }),
+          ),
+          mkEmbeddedMember("a-photo", "s-photo", "2026-04-17T09:00:00Z", {
+            article: { image_url: photo },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    const byArticle = Object.fromEntries(
+      result!.members.map((m) => [m.article.id, m.article]),
+    );
+    for (let i = 0; i < cards.length; i++) expect(byArticle[`a-card-${i}`].image_url).toBeNull();
+    expect(byArticle["a-photo"].image_url).toBe(photo);
+    expect(
+      pickHeroCandidates(imageEligibleMembers(result!.members).map((m) => m.article.image_url)),
+    ).toEqual([photo]);
   });
 
   it("leaves a null article image_url null", async () => {

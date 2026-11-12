@@ -98,6 +98,16 @@ export const ENGLISH_SOURCE_SLUGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Slugs of the outlets whose headlines are machine-cased: names lose their capitals ('Bakan Bayraktar'dan libya ve
+ * venezuela mesajı', 'Bakan kurum: ...', 'çöp31' for COP31). The headline cron sets `caseUnreliable` on a member whose
+ * source slug is in this set, exactly as it sets `english` from ENGLISH_SOURCE_SLUGS (h164-titles-2), and the extractive
+ * picker recases such a title from its siblings instead of copying it into the H1. Only İşçi Haber so far: 7 of the 52
+ * served titles that are İşçi Haber's own text (13%) carry lost capitals, in the 1,500-cluster sample of 2-12 November
+ * 2026. A code constant, like the English set: `public.sources` has no column for it and nothing is written.
+ */
+export const LOWERCASE_PRONE_SOURCE_SLUGS: ReadonlySet<string> = new Set(["isci-haber"]);
+
+/**
  * Display names of the same outlets, already folded (see `foldName`): the
  * names production returns for those slugs plus their ASCII spellings.
  */
