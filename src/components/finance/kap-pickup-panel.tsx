@@ -5,9 +5,11 @@ import { ZONE_META } from "@/lib/bias/config";
 import {
   formatPickupLag,
   formatPickupRate,
+  pickupPanelRows,
   pickupRowKind,
   pressCodeNote,
   RELATED_ONLY_LABEL,
+  RELATED_ONLY_SHORT,
   relatedOnlyCountLabel,
   type DisclosurePickup,
   type PickupTotals,
@@ -33,6 +35,11 @@ import type { MediaDnaZone } from "@/types";
 // stats above count the company's own filings alone, so "bildirim" agrees with
 // the "KAP ile basın arası" panel. All wording lives in pure helpers in
 // kap-pickup.ts (tested there); this file only lays it out.
+//
+// h144-ekonomi-2: every own filing the totals count is listed. The list is capped at 8 rows, but
+// related-only notices (no numbers) take the slots the own filings leave over, and the ones that do
+// not fit wait behind a native <details> ("<n> hisseyi anan bildirim daha"), so the panel never
+// silently drops a notice and "ortak pencere" never points at a row that is not there.
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -78,6 +85,41 @@ function PickupRowStatus({ p }: { p: DisclosurePickup }) {
         </>
       );
   }
+}
+
+/**
+ * One list row: time, the KAP link, and the grey status line. `hasNote`: a sibling's press is named above, so
+ * an issuer row has no verdict of its own to give (a related-only row keeps its own, still-true label).
+ */
+function PickupRow({ p, hasNote }: { p: DisclosurePickup; hasNote: boolean }) {
+  return (
+    <li className="grid grid-cols-[3.25rem_minmax(0,1fr)] gap-x-3 px-3 py-1.5 font-mono text-[11px]">
+      <time dateTime={p.disclosedAt} className="tabular-nums text-muted-foreground">
+        {fmtWhen(p.disclosedAt)}
+      </time>
+      <div className="min-w-0 space-y-0.5">
+        <a
+          href={p.kapUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-foreground/90 hover:text-brand"
+        >
+          {p.subject ?? "Bildirim"}
+          <NewTabHint />
+        </a>
+        {hasNote && p.issuer ? null : (
+          <p className="text-[10px] text-muted-foreground">
+            <PickupRowStatus p={p} />
+            {!hasNote && p.overlapping > 0 ? (
+              <span className="ml-1 text-muted-foreground">
+                (yakın tarihli {p.overlapping} bildirimle ortak pencere)
+              </span>
+            ) : null}
+          </p>
+        )}
+      </div>
+    </li>
+  );
 }
 
 /** The four headline numbers above the rows (the panel swaps them for a note when a sibling code carries the press). */
@@ -133,7 +175,8 @@ export async function KapPickupPanel({ ticker, pressCode = null }: { ticker: str
   if (data.pickups.length === 0) return null;
 
   const { totals } = data;
-  const rows = data.pickups.slice(0, 8);
+  // h144-ekonomi-2: all own filings, plus as many of the newest related-only notices as fit under 8 rows.
+  const { shown, hidden } = pickupPanelRows(data.pickups);
   const relatedOnlyNote = relatedOnlyCountLabel(totals.relatedOnly);
   // h108-kapdisclosures-2: this code has no press of its own, a sibling has it; numbers computed from
   // this code's mentions would read 0 / %0, so the panel names the sibling instead.
@@ -158,36 +201,20 @@ export async function KapPickupPanel({ ticker, pressCode = null }: { ticker: str
       )}
 
       <ol className="divide-y divide-border/70">
-        {rows.map((p) => (
-          <li key={p.disclosureIndex} className="grid grid-cols-[3.25rem_minmax(0,1fr)] gap-x-3 px-3 py-1.5 font-mono text-[11px]">
-            <time dateTime={p.disclosedAt} className="tabular-nums text-muted-foreground">
-              {fmtWhen(p.disclosedAt)}
-            </time>
-            <div className="min-w-0 space-y-0.5">
-              <a
-                href={p.kapUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-foreground/90 hover:text-brand"
-              >
-                {p.subject ?? "Bildirim"}
-                <NewTabHint />
-              </a>
-              {/* With a sibling's press named above, an issuer row has no verdict of its own to give. */}
-              {note && p.issuer ? null : (
-                <p className="text-[10px] text-muted-foreground">
-                  <PickupRowStatus p={p} />
-                  {!note && p.overlapping > 0 ? (
-                    <span className="ml-1 text-muted-foreground">
-                      (yakın tarihli {p.overlapping} bildirimle ortak pencere)
-                    </span>
-                  ) : null}
-                </p>
-              )}
-            </div>
-          </li>
+        {shown.map((p) => (
+          <PickupRow key={p.disclosureIndex} p={p} hasNote={note !== null} />
         ))}
       </ol>
+      {hidden.length > 0 ? (
+        <details className="border-t border-border/70">
+          <summary className="px-3 py-1.5 font-mono text-[10px] text-muted-foreground">{`${hidden.length} ${RELATED_ONLY_SHORT} daha`}</summary>
+          <ol className="divide-y divide-border/70 border-t border-border/70">
+            {hidden.map((p) => (
+              <PickupRow key={p.disclosureIndex} p={p} hasNote={note !== null} />
+            ))}
+          </ol>
+        </details>
+      ) : null}
 
       <p className="border-t border-border/70 px-3 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
         Yankı: bildirimden sonraki 48 saatte hisseyi anan haberler; bildirimden önceki haberler sayılmaz. Kaynak

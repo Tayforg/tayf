@@ -126,6 +126,7 @@ import {
   canonicalSearchQuery,
   foldTr,
   normaliseSearchQuery,
+  searchFoldedSibling,
   searchSiblingQuery,
   turkishQueryVariants,
 } from "./turkish-query";
@@ -249,13 +250,13 @@ describe("searchClusters query shape", () => {
     expect(normalised).toBe("Özel Şişli");
     await searchClusters(q);
 
-    expect(fixture.rpcCalls).toEqual([
-      {
-        p_variants: turkishQueryVariants(normalised),
-        p_folded: foldTr(normalised),
-        p_limit: 24,
-      },
-    ]);
+    // The typed call is the first one. 'şişli' ends in a vowel, so a short page also makes the
+    // second call with its locative folded text (h144-search-1; its own tests are below).
+    expect(fixture.rpcCalls[0]).toEqual({
+      p_variants: turkishQueryVariants(normalised),
+      p_folded: foldTr(normalised),
+      p_limit: 24,
+    });
     expect(Object.keys(fixture.rpcCalls[0] as object).sort()).toEqual([
       "p_folded",
       "p_limit",
@@ -266,11 +267,20 @@ describe("searchClusters query shape", () => {
   it("ASCII typing reaches the RPC as the folded Turkish form's key (sisli, cumhurbaskani)", async () => {
     await searchClusters("sisli");
     await searchClusters("Cumhurbaşkanı");
+    // Both end in a vowel and the fixture's typed page is empty, so each search makes the second
+    // call too (h144-search-1): the locative is BOTH its variants and its folded text, so the 166
+    // guard (which reads p_folded only) covers the words the variants arm searches.
     expect(fixture.rpcCalls).toEqual([
       { p_variants: ["sisli"], p_folded: "sisli", p_limit: 24 },
+      { p_variants: ["sislide"], p_folded: "sislide", p_limit: 24 },
       {
         p_variants: turkishQueryVariants("Cumhurbaşkanı"),
         p_folded: "cumhurbaskani",
+        p_limit: 24,
+      },
+      {
+        p_variants: turkishQueryVariants("cumhurbaşkanıda"),
+        p_folded: "cumhurbaskanida",
         p_limit: 24,
       },
     ]);
@@ -350,13 +360,20 @@ describe("searchClusters canonical key", () => {
     for (const q of ["IŞIK", "Işık", "ışık", "İSTANBUL", "ŞİŞLİ"]) {
       fixture.rpcCalls = [];
       await searchClusters(q);
-      expect(fixture.rpcCalls, q).toEqual([
-        {
-          p_variants: turkishQueryVariants(normaliseSearchQuery(q)),
-          p_folded: foldTr(normaliseSearchQuery(q)),
-          p_limit: 24,
-        },
-      ]);
+      // The first call is the typed one; a vowel-final word (ŞİŞLİ) adds the h144-search-1 second call.
+      expect(fixture.rpcCalls[0], q).toEqual({
+        p_variants: turkishQueryVariants(normaliseSearchQuery(q)),
+        p_folded: foldTr(normaliseSearchQuery(q)),
+        p_limit: 24,
+      });
+      // Every call after the first folds its own variants: the locative of the typed words.
+      const canonical = canonicalSearchQuery(q);
+      const second = searchSiblingQuery(canonical) ?? searchFoldedSibling(canonical);
+      for (const extra of fixture.rpcCalls.slice(1) as Array<{ p_variants: string[]; p_folded: string }>) {
+        expect(second, q).not.toBeNull();
+        expect(extra.p_variants, q).toEqual(turkishQueryVariants(second as string));
+        expect(extra.p_folded, q).toBe(foldTr(second as string));
+      }
     }
   });
 
@@ -491,13 +508,19 @@ describe("searchClusters alias expansion (AKP <-> AK Parti)", () => {
     async (q) => {
       await searchClusters(q);
       const canonical = canonicalSearchQuery(q);
-      expect(fixture.rpcCalls).toEqual([
-        {
-          p_variants: turkishQueryVariants(canonical),
-          p_folded: foldTr(canonical),
-          p_limit: 24,
-        },
-      ]);
+      // The typed call is first. A vowel-final word ('akparti', 'afyonlu') adds the second call of
+      // h144-search-1, which folds its own variants (the locative of the typed words): nothing is expanded.
+      expect(fixture.rpcCalls[0]).toEqual({
+        p_variants: turkishQueryVariants(canonical),
+        p_folded: foldTr(canonical),
+        p_limit: 24,
+      });
+      const second = searchSiblingQuery(canonical) ?? searchFoldedSibling(canonical);
+      for (const extra of fixture.rpcCalls.slice(1) as Array<{ p_variants: string[]; p_folded: string }>) {
+        expect(second).not.toBeNull();
+        expect(extra.p_variants).toEqual(turkishQueryVariants(second as string));
+        expect(extra.p_folded).toBe(foldTr(second as string));
+      }
     },
   );
 
@@ -574,13 +597,19 @@ describe("searchClusters one-way alias expansion (afyon / urfa / antep)", () => 
     async (q) => {
       await searchClusters(q);
       const canonical = canonicalSearchQuery(q);
-      expect(fixture.rpcCalls).toEqual([
-        {
-          p_variants: turkishQueryVariants(canonical),
-          p_folded: foldTr(canonical),
-          p_limit: 24,
-        },
-      ]);
+      // The typed call is first. A vowel-final word ('akparti', 'afyonlu') adds the second call of
+      // h144-search-1, which folds its own variants (the locative of the typed words): nothing is expanded.
+      expect(fixture.rpcCalls[0]).toEqual({
+        p_variants: turkishQueryVariants(canonical),
+        p_folded: foldTr(canonical),
+        p_limit: 24,
+      });
+      const second = searchSiblingQuery(canonical) ?? searchFoldedSibling(canonical);
+      for (const extra of fixture.rpcCalls.slice(1) as Array<{ p_variants: string[]; p_folded: string }>) {
+        expect(second).not.toBeNull();
+        expect(extra.p_variants).toEqual(turkishQueryVariants(second as string));
+        expect(extra.p_folded).toBe(foldTr(second as string));
+      }
     },
   );
 
@@ -631,6 +660,8 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
   });
 
   it.each([
+    // The sibling path keeps HEAD's call: the sibling's spellings as variants and the sibling folded, with
+    // no locative (the typed call already searched the typed stems; h144-search-1 review TS-1).
     ["emlak vergisi", ["emlak vergisi"], "emlak vergisi", ["emlak vergi"], "emlak vergi"],
     ["doğal gaz zammı", ["doğal gaz zammı", "doğal gaz zammi"], "dogal gaz zammi", ["doğal gaz zam"], "dogal gaz zam"],
     ["Asgari Ücret Zammı", ["asgari ücret zammı", "asgari ücret zammi"], "asgari ucret zammi", ["asgari ücret zam"], "asgari ucret zam"],
@@ -727,18 +758,30 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
     expect(result.capped).toBe(false);
   });
 
-  it("'karasu' has no sibling: one call with ['karasu'] (the -su compound is not a possessive)", async () => {
+  it("'karasu' has no root sibling (the -su compound is not a possessive): the typed call, then a second call that folds the locative 'karasuda' as variants and folded text (h144-search-1)", async () => {
     await searchClusters("karasu");
-    expect(fixture.rpcCalls).toEqual([{ p_variants: ["karasu"], p_folded: "karasu", p_limit: 24 }]);
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["karasu"], p_folded: "karasu", p_limit: 24 },
+      { p_variants: ["karasuda"], p_folded: "karasuda", p_limit: 24 },
+    ]);
+    expect(searchSiblingQuery("karasu")).toBeNull();
   });
 
   it.each(["kayısı", "sarısu", "ılısu", "Karasu"])(
-    "%j has no sibling: exactly one call, the typed arguments",
+    "%j has no root sibling: the typed call, then the locative as variants and folded text, never the root of a possessive",
     async (q) => {
       await searchClusters(q);
       const canonical = canonicalSearchQuery(q);
-      expect(fixture.rpcCalls).toEqual([
-        { p_variants: turkishQueryVariants(canonical), p_folded: foldTr(canonical), p_limit: 24 },
+      expect(searchSiblingQuery(canonical)).toBeNull();
+      expect(fixture.rpcCalls[0]).toEqual({
+        p_variants: turkishQueryVariants(canonical),
+        p_folded: foldTr(canonical),
+        p_limit: 24,
+      });
+      const locative = searchFoldedSibling(canonical) as string;
+      expect(locative).not.toBeNull();
+      expect(fixture.rpcCalls.slice(1)).toEqual([
+        { p_variants: turkishQueryVariants(locative), p_folded: foldTr(locative), p_limit: 24 },
       ]);
     },
   );
@@ -752,6 +795,7 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
       expect(sibling, q).not.toBeNull();
       expect(fixture.rpcCalls.length, q).toBe(2);
       expect(argsOf(0).p_folded, q).toBe(foldTr(canonical));
+      // The sibling path folds the sibling exactly, with no locative (HEAD's call).
       expect(argsOf(1).p_folded, q).toBe(foldTr(sibling as string));
       expect(argsOf(1).p_folded, q).not.toBe(argsOf(0).p_folded);
       expect(argsOf(0).p_variants, q).toEqual(turkishQueryVariants(canonical));
@@ -797,7 +841,7 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
     expect(argsOf(1).p_variants).toEqual(["emlak vergi zam trafik ceza yeni"]);
   });
 
-  it.each(["Erdoğan", "messi", "burdur", "miller", "elektrik zam", "emlak vergi", "seçim", "iran", "zammına"])(
+  it.each(["Erdoğan", "burdur", "miller", "elektrik zam", "seçim", "iran"])(
     "%j has no sibling: one call, the arguments are exactly what they were before",
     async (q) => {
       await searchClusters(q);
@@ -881,6 +925,266 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h144-search-1: two more things the SECOND call asks for, and only when the typed
+// call left the page short (fewer than SEARCH_LIMIT ids), after the typed ids.
+//
+//   * a case suffix typed without an apostrophe ('imamoğluna', 'suriyede') is
+//     searched as its root ('imamoğlu', 'suriye'), the rule C of searchSiblingQuery;
+//   * a bare vowel-final noun ('bolu kaza' with no root sibling) is asked again with its
+//     locative ('boluda kazada'), because the stemmer cuts 'kaza' to 'kaz' but 'kazada'
+//     to 'kaza', so the headlines that inflect the noun were never found.
+//
+// Every call folds its OWN variants (review TS-1): the 166 over-stem guard reads p_folded
+// only, so a second call whose variants differ from its folded text searches stems the guard
+// does not cover ('tarla' as variants with 'tarlada' folded appended 6 rows with no 'tarl'
+// word). The locative path sends the locative as BOTH arguments; the sibling path (a root
+// such as 'imamoğlu') sends HEAD's call, the sibling as both, with no locative: the typed call
+// has already searched the typed stems, and a locative of a proper noun finds less
+// ('boluda kazada' 0 against 7 for 'bolu kaza').
+//
+// A full typed page makes no second call, so typed ranks never move.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters: case-suffix sibling and folded locative (h144-search-1)", () => {
+  type RpcArgs = { p_variants: string[]; p_folded?: string; p_limit: number };
+  const argsOf = (i: number) => fixture.rpcCalls[i] as RpcArgs;
+  const ids = (n: number, prefix: string) =>
+    Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+
+  it("'bolu kaza' with a short typed page (7 ids): the second call sends the locative as variants and folded text", async () => {
+    fixture.rpcIdsPerCall = [ids(7, "t")];
+    await searchClusters("bolu kaza");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("bolu kaza"), p_folded: "bolu kaza", p_limit: 24 },
+      { p_variants: turkishQueryVariants("boluda kazada"), p_folded: "boluda kazada", p_limit: 24 },
+    ]);
+  });
+
+  // TS-1 (review): the second call used to send the TYPED spellings as variants with the locative as the
+  // folded text. 'tarla' stems to 'tar' and 'tarlada' to 'tarla': the 166 guard read the locative's 'tarla'
+  // while the variants arm searched 'tar', and 6 of the 13 appended rows held no 'tarl' word.
+  it("'tarla' with a short typed page: the second call is the locative as variants AND folded text", async () => {
+    fixture.rpcIdsPerCall = [ids(11, "t")];
+    await searchClusters("tarla");
+    expect(searchSiblingQuery("tarla")).toBeNull();
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("tarla"), p_folded: "tarla", p_limit: 24 },
+      { p_variants: turkishQueryVariants("tarlada"), p_folded: "tarlada", p_limit: 24 },
+    ]);
+  });
+
+  // The sibling path of the same hole: 'tarlası' -> sibling 'tarla'. Its second call is HEAD's sibling call, with
+  // no locative: the locative of a proper noun finds less ('boluda kazada' 0 against 7 for 'bolu kaza').
+  it("'tarlası' (sibling 'tarla'): the second call is the sibling as variants AND folded text, no locative", async () => {
+    fixture.rpcIdsPerCall = [ids(3, "t")];
+    await searchClusters("tarlası");
+    expect(searchSiblingQuery("tarlası")).toBe("tarla");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("tarlası"), p_folded: "tarlasi", p_limit: 24 },
+      { p_variants: turkishQueryVariants("tarla"), p_folded: "tarla", p_limit: 24 },
+    ]);
+  });
+
+  it("every RPC call after the first folds its own variants: p_folded === foldTr(p_variants[0])", async () => {
+    const queries = [
+      "tarla",
+      "tarlası",
+      "bolu kaza",
+      "imamoğluna",
+      "suriyede",
+      "netanyahu bloğu ilk oylama",
+      "sisli",
+      "Cumhurbaşkanı",
+      "zammına",
+    ];
+    for (const q of queries) {
+      fixture.rpcCalls = [];
+      fixture.rpcIdsPerCall = [ids(2, "t")];
+      await searchClusters(q);
+      expect(fixture.rpcCalls.length, q).toBeGreaterThan(1);
+      for (const call of fixture.rpcCalls.slice(1) as RpcArgs[]) {
+        expect(call.p_folded, q).toBe(foldTr(call.p_variants[0] as string));
+      }
+    }
+  });
+
+  it("'imamoğluna' with no typed hit: the second call is HEAD's sibling call, 'imamoğlu' as variants and folded text", async () => {
+    fixture.rpcIdsPerCall = [[]];
+    await searchClusters("imamoğluna");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("imamoğluna"), p_folded: "imamogluna", p_limit: 24 },
+      { p_variants: turkishQueryVariants("imamoğlu"), p_folded: "imamoglu", p_limit: 24 },
+    ]);
+  });
+
+  it("'netanyahu bloğu ilk oylama': the typed words, then the locative of every word as variants and folded text", async () => {
+    await searchClusters("Netanyahu bloğu ilk oylama");
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_variants: turkishQueryVariants("netanyahu bloğu ilk oylama"),
+        p_folded: "netanyahu blogu ilk oylama",
+        p_limit: 24,
+      },
+      {
+        p_variants: turkishQueryVariants("netanyahuda bloğuda ilk oylamada"),
+        p_folded: "netanyahuda bloguda ilk oylamada",
+        p_limit: 24,
+      },
+    ]);
+  });
+
+  it.each([
+    ["suriyede", "suriye"],
+    ["Adanada", "adana"],
+    ["abdye", "abd"],
+    ["çinde", "çin"],
+  ])("%j (no typed hit): the second call asks for %j, folded as itself", async (q, sibling) => {
+    await searchClusters(q);
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(argsOf(1).p_variants).toEqual(turkishQueryVariants(sibling));
+    expect(argsOf(1).p_folded).toBe(foldTr(sibling));
+  });
+
+  it("a full typed page (24 ids) makes no second call, whatever the query holds", async () => {
+    for (const q of ["bolu kaza", "imamoğluna", "suriyede", "netanyahu bloğu ilk oylama"]) {
+      fixture.rpcCalls = [];
+      fixture.rpcIdsPerCall = [ids(24, "t")];
+      fixture.data = ids(24, "t").map((id) => mkRow({ id, members: [{ id: `a-${id}`, sourceId: "s1" }] }));
+      const result = await searchClusters(q);
+      expect(fixture.rpcCalls, q).toHaveLength(1);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.capped, q).toBe(true);
+      expect(result.bundles.map((b) => b.cluster.id), q).toEqual(ids(24, "t"));
+    }
+  });
+
+  it("typed ids first, then the second call's new ids, deduplicated, up to SEARCH_LIMIT", async () => {
+    // 'bolu kaza': 7 typed hits, the second call returns 2 of them again plus 30 new ones.
+    fixture.rpcIdsPerCall = [ids(7, "t"), ["t3", "t0", ...ids(30, "s")]];
+    const result = await searchClusters("bolu kaza");
+    const state = fixture.lastState as BuilderState;
+    const expected = [...ids(7, "t"), ...ids(17, "s")];
+    expect(expected).toHaveLength(SEARCH_LIMIT);
+    expect(state.in).toEqual([{ col: "id", vals: expected }]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.capped).toBe(true);
+  });
+
+  it("an empty typed page is filled by the second call's ids: 'imamoğluna' lists the 'imamoğlu' stories", async () => {
+    const sib = ids(5, "i");
+    fixture.rpcIdsPerCall = [[], sib];
+    fixture.data = sib.map((id) => mkRow({ id, members: [{ id: `a-${id}`, sourceId: "s1" }] }));
+    const result = await searchClusters("imamoğluna");
+    expect(fixture.rpcCalls).toHaveLength(2);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(sib);
+    expect(result.capped).toBe(false);
+  });
+
+  it("a second call that adds nothing new leaves the typed page exactly as it was", async () => {
+    fixture.rpcIdsPerCall = [["t1", "t2"], ["t2", "t1"]];
+    fixture.data = [
+      mkRow({ id: "t1", members: [{ id: "a-t1", sourceId: "s1" }] }),
+      mkRow({ id: "t2", members: [{ id: "a-t2", sourceId: "s2" }] }),
+    ];
+    const result = await searchClusters("bolu kaza");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["t1", "t2"]);
+    expect(result.capped).toBe(false);
+  });
+
+  it.each([
+    ["messi", "messide"],
+    ["emlak vergi", "emlak vergide"],
+  ])("%j has no root sibling: the second call sends the locative %j as variants and folded text", async (q, locative) => {
+    await searchClusters(q);
+    const canonical = canonicalSearchQuery(q);
+    expect(searchSiblingQuery(canonical)).toBeNull();
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants(canonical), p_folded: foldTr(canonical), p_limit: 24 },
+      { p_variants: turkishQueryVariants(locative), p_folded: foldTr(locative), p_limit: 24 },
+    ]);
+  });
+
+  it("'zammına' reads as zammı + na (rule C): the second call asks for 'zammı', folded as itself (no locative)", async () => {
+    await searchClusters("zammına");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("zammına"), p_folded: "zammina", p_limit: 24 },
+      { p_variants: turkishQueryVariants("zammı"), p_folded: "zammi", p_limit: 24 },
+    ]);
+  });
+
+  it("a query with a case suffix AND a possessive sends one sibling that holds both roots", async () => {
+    await searchClusters("trafik cezası imamoğluna");
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(argsOf(1).p_variants).toEqual(turkishQueryVariants("trafik ceza imamoğlu"));
+    expect(argsOf(1).p_folded).toBe(foldTr("trafik ceza imamoğlu"));
+  });
+
+  it("every call keeps at most three variants and the term count of the canonical query", async () => {
+    for (const q of ["bolu kaza", "imamoğluna", "Işık kaza", "netanyahu bloğu ilk oylama", "vergisi kaza imamoğluna"]) {
+      fixture.rpcCalls = [];
+      await searchClusters(q);
+      const termCount = canonicalSearchQuery(q).split(" ").length;
+      for (const call of fixture.rpcCalls as RpcArgs[]) {
+        expect(call.p_variants.length, q).toBeLessThanOrEqual(MAX_QUERY_VARIANTS);
+        expect(call.p_folded!.split(" "), q).toHaveLength(termCount);
+        expect(call.p_variants.every((v) => v.split(" ").length === termCount), q).toBe(true);
+      }
+    }
+  });
+
+  it.each(["Erdoğan", "iran", "seçim", "deprem", "istanbul", "2026", "%50", "TCMB", "ab"])(
+    "%j holds nothing to inflect: exactly one call, the typed arguments",
+    async (q) => {
+      await searchClusters(q);
+      const canonical = canonicalSearchQuery(q);
+      expect(fixture.rpcCalls).toEqual([
+        { p_variants: turkishQueryVariants(canonical), p_folded: foldTr(canonical), p_limit: 24 },
+      ]);
+    },
+  );
+
+  it.each(['"bolu kaza"', "-kaza", "bolu -kaza", "bolu kaza or imamoğluna", "akp or chp"])(
+    "%j uses websearch syntax: no folded sibling, one call",
+    async (q) => {
+      await searchClusters(q);
+      expect(fixture.rpcCalls).toHaveLength(1);
+      expect(argsOf(0).p_folded).toBe(foldTr(canonicalSearchQuery(q)));
+    },
+  );
+
+  it("an alias query ('AKP kaza') is expanded as before and gets no second call", async () => {
+    await searchClusters("AKP kaza");
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_variants: turkishQueryVariants('akp kaza or "ak parti" kaza'),
+        p_folded: "akp kaza or ak parti kaza",
+        p_limit: 24,
+      },
+    ]);
+  });
+
+  it("falls back to 083's two-argument function for the second call too (no p_folded in it)", async () => {
+    fixture.rpcErrorThreeArg = { message: "not found", code: "PGRST202" };
+    await searchClusters("bolu kaza");
+    const typed = turkishQueryVariants("bolu kaza");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: typed, p_folded: "bolu kaza", p_limit: 24 },
+      { p_variants: typed, p_limit: 24 },
+      { p_variants: turkishQueryVariants("boluda kazada"), p_limit: 24 },
+    ]);
+  });
+
+  it("an error on the second call fails the attempt: the live retry runs both calls again", async () => {
+    fixture.rpcErrorAtCalls = { indexes: [1], error: { message: "statement timeout" } };
+    const result = await searchClusters("bolu kaza");
+    expect(fixture.rpcCalls).toHaveLength(4);
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // In-flight cap + single-flight (per instance). Cache entries are not modelled
 // by the vitest build ("use cache" is a no-op there), so every call that is not
 // de-duplicated by single-flight reaches the RPC; held RPCs make the overlap
@@ -888,7 +1192,9 @@ describe("searchClusters sibling variants (h96-search-1)", () => {
 // ---------------------------------------------------------------------------
 
 describe("searchClusters in-flight cap", () => {
-  const DISTINCT = ["alfa", "beta", "gama", "delta"];
+  // Consonant-final words: a vowel-final word of 4 letters would add the second call of h144-search-1
+  // and double every call count below, which these tests read one search at a time.
+  const DISTINCT = ["alfan", "betan", "gaman", "deltan"];
 
   async function startHeld(queries: string[]) {
     fixture.hold = true;
@@ -914,7 +1220,7 @@ describe("searchClusters in-flight cap", () => {
     const tagCalls = vi.mocked(cacheTag).mock.calls.length;
 
     await expect(searchClusters("epsilon")).resolves.toEqual({ ok: false });
-    await expect(searchClusters("zeta")).resolves.toEqual({ ok: false });
+    await expect(searchClusters("zetan")).resolves.toEqual({ ok: false });
     expect(fixture.rpcCalls).toHaveLength(4);
     // The shed never entered the cache boundary, so it can never be memoised.
     expect(vi.mocked(cacheTag).mock.calls).toHaveLength(tagCalls);
@@ -944,7 +1250,7 @@ describe("searchClusters in-flight cap", () => {
 
   it("releases the slots after a throw: more failing searches than slots are all attempted", async () => {
     fixture.rpcThrows = true;
-    const queries = ["alfa", "beta", "gama", "delta", "epsilon", "zeta"];
+    const queries = ["alfan", "betan", "gaman", "deltan", "epsilon", "zetan"];
     for (const q of queries) {
       await expect(searchClusters(q), q).resolves.toEqual({ ok: false });
     }
@@ -981,8 +1287,8 @@ describe("searchClusters in-flight cap", () => {
   });
 
   it("does not remember a finished search: the same query runs again later", async () => {
-    await searchClusters("alfa");
-    await searchClusters("alfa");
+    await searchClusters("alfan");
+    await searchClusters("alfan");
     expect(fixture.rpcCalls).toHaveLength(2);
   });
 });
@@ -1014,8 +1320,8 @@ describe("searchClusters single-flight", () => {
 
   it("an identical query is never refused while the instance is saturated", async () => {
     fixture.hold = true;
-    const running = ["alfa", "beta", "gama", "delta"].map((q) => searchClusters(q));
-    const twin = searchClusters("ALFA!");
+    const running = ["alfan", "betan", "gaman", "deltan"].map((q) => searchClusters(q));
+    const twin = searchClusters("ALFAN!");
     await tick();
     expect(fixture.rpcCalls).toHaveLength(4);
 
@@ -1028,8 +1334,8 @@ describe("searchClusters single-flight", () => {
 
   it("a shared failure is answered to every waiter, and the next call tries afresh", async () => {
     fixture.hold = true;
-    const a = searchClusters("alfa");
-    const b = searchClusters("ALFA");
+    const a = searchClusters("alfan");
+    const b = searchClusters("ALFAN");
     await tick();
     expect(fixture.rpcCalls).toHaveLength(1);
 
@@ -1044,7 +1350,7 @@ describe("searchClusters single-flight", () => {
 
     fixture.rpcThrows = false;
     fixture.rpcCalls = [];
-    await expect(searchClusters("alfa")).resolves.toMatchObject({ ok: true });
+    await expect(searchClusters("alfan")).resolves.toMatchObject({ ok: true });
     expect(fixture.rpcCalls).toHaveLength(1);
   });
 });
@@ -1052,14 +1358,14 @@ describe("searchClusters single-flight", () => {
 describe("searchClusters live retry under load", () => {
   it("control: a lone failing search still does the live retry (2 RPC calls)", async () => {
     fixture.rpcThrows = true;
-    await expect(searchClusters("alfa")).resolves.toEqual({ ok: false });
+    await expect(searchClusters("alfan")).resolves.toEqual({ ok: false });
     expect(fixture.rpcCalls).toHaveLength(2);
   });
 
   it("skips the retry while saturated: A fails with ONE RPC, B/C/D unaffected", async () => {
     fixture.hold = true;
-    const a = searchClusters("alfa");
-    const others = ["beta", "gama", "delta"].map((q) => searchClusters(q));
+    const a = searchClusters("alfan");
+    const others = ["betan", "gaman", "deltan"].map((q) => searchClusters(q));
     await tick();
     expect(fixture.rpcCalls).toHaveLength(4);
 
@@ -1067,7 +1373,7 @@ describe("searchClusters live retry under load", () => {
     await expect(a).resolves.toEqual({ ok: false });
 
     const forA = (fixture.rpcCalls as Array<{ p_folded?: string }>).filter(
-      (c) => c.p_folded === "alfa",
+      (c) => c.p_folded === "alfan",
     );
     expect(forA).toHaveLength(1);
     expect(fixture.rpcCalls).toHaveLength(4);
@@ -1079,8 +1385,8 @@ describe("searchClusters live retry under load", () => {
 
   it("retries again once a slot is free (3 in flight + the failing one is below the cap)", async () => {
     fixture.hold = true;
-    const a = searchClusters("alfa");
-    const others = ["beta", "gama"].map((q) => searchClusters(q));
+    const a = searchClusters("alfan");
+    const others = ["betan", "gaman"].map((q) => searchClusters(q));
     await tick();
     expect(fixture.rpcCalls).toHaveLength(3);
 

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Bar5m } from "@/lib/finance/queries";
-import { captionMarkers, IntradayChart, priceTagTops, sessionAxisTicks, type ChartMarker } from "./intraday-chart";
+import { barCloseMinutes, captionMarkers, IntradayChart, priceTagTops, sessionAxisTicks, type ChartMarker } from "./intraday-chart";
 
 // The chart labels are HTML positioned over the SVG (an SVG <text> shrinks
 // with the viewBox: about 3 px on a 390 px phone). Their horizontal and
@@ -577,5 +577,124 @@ describe("IntradayChart caption lists the latest markers and counts the rest (h1
     expect(ariaOf(render(markersOf(18)))).toBe("Seans içi fiyat, son 11,90 · 18 işaret");
     expect(ariaOf(render(markersOf(1)))).toBe("Seans içi fiyat, son 11,90 · 1 işaret");
     expect(ariaOf(render([]))).toBe("Seans içi fiyat, son 11,90");
+  });
+});
+
+// h144-ekonomi-1: bist_bars_5m is stamped with each bar's START (051: "ts is the bar start, floored to 5 min"), so
+// the close of the bar stamped 09:55 is the price at 10:00. The path used to plot every close at x(b.ts), five
+// minutes early; it now plots it at the minute it happened. Markers, the last-price tag and closeOverride are
+// not part of this.
+describe("barCloseMinutes (h144-ekonomi-1)", () => {
+  it("is the Istanbul minute of the bar's start plus five: 09:00Z is 12:00 in Istanbul, so 12:05", () => {
+    expect(barCloseMinutes("2026-11-11T09:00:00Z")).toBe(12 * 60 + 5);
+  });
+
+  it("the 09:55 opening stub closes at 10:00, the session start", () => {
+    expect(barCloseMinutes("2026-11-11T06:55:00Z")).toBe(10 * 60);
+  });
+
+  it("the 18:00 stub closes at 18:05, still before the 18:10 session end (it fits on the axis)", () => {
+    expect(barCloseMinutes("2026-11-11T15:00:00Z")).toBe(18 * 60 + 5);
+    expect(barCloseMinutes("2026-11-11T15:00:00Z")).toBeLessThan(18 * 60 + 10);
+  });
+
+  it("reads the Istanbul clock whatever the offset the timestamp is written in", () => {
+    expect(barCloseMinutes("2026-11-11T12:00:00+03:00")).toBe(12 * 60 + 5);
+    expect(barCloseMinutes("2026-11-11T09:00:00.000Z")).toBe(12 * 60 + 5);
+  });
+
+  it("ignores seconds and milliseconds inside the stamped minute", () => {
+    expect(barCloseMinutes("2026-11-11T09:00:59.999Z")).toBe(12 * 60 + 5);
+  });
+
+  it("an unparseable stamp gives NaN, as the Istanbul-minute reader already did, not a number", () => {
+    expect(Number.isNaN(barCloseMinutes("not a time"))).toBe(true);
+    expect(Number.isNaN(barCloseMinutes(""))).toBe(true);
+  });
+});
+
+describe("IntradayChart plots each close at the minute it happened (h144-ekonomi-1)", () => {
+  // THYAO 11 Nov: the 09:55 volume-0 opening stub, the first trades at 10:00, 11:55 and 12:00, the 18:00 auction stub.
+  const bars: Bar5m[] = [
+    { ts: "2026-11-11T06:55:00.000Z", close: 100.2, volume: 0 },
+    { ts: "2026-11-11T07:00:00.000Z", close: 100.4, volume: 1582333 },
+    { ts: "2026-11-11T08:55:00.000Z", close: 103, volume: 210000 },
+    { ts: "2026-11-11T09:00:00.000Z", close: 103.5, volume: 220000 },
+    { ts: "2026-11-11T15:00:00.000Z", close: 104.9, volume: 0 },
+  ];
+  const W = 720;
+  const PAD_LEFT = 8;
+  const PAD_RIGHT = 6;
+  const PLOT_W = W - PAD_LEFT - PAD_RIGHT;
+  /** x of an Istanbul minute of the day on the 10:00-18:10 session axis, as the path prints it. */
+  const xAtMinute = (mins: number) => (PAD_LEFT + ((mins - 600) / 490) * PLOT_W).toFixed(1);
+  const render = (extra: { markers?: ChartMarker[]; prevClose?: number | null; closeOverride?: number | null } = {}) =>
+    renderToStaticMarkup(IntradayChart({ bars, markers: [], prevClose: null, ...extra }));
+  const pathOf = (html: string) => /<path d="([^"]+)"/.exec(html)?.[1] ?? "";
+  /** The path's points as [x, y] strings, in drawing order ("M8.0,120.5 L13.8,..."). */
+  const pointsOf = (html: string): Array<[string, string]> =>
+    pathOf(html)
+      .split(" ")
+      .map((p) => p.slice(1).split(","))
+      .map(([x, y]) => [x ?? "", y ?? ""]);
+
+  it("the first point of a 09:55-stamped bar is at xAt(600): the 10:00 gridline, the left edge of the plot", () => {
+    const first = pointsOf(render())[0]!;
+    expect(first[0]).toBe("8.0");
+    expect(first[0]).toBe(xAtMinute(600));
+    // the same x as the 10:00 label under the plot (the axis ticks come from the plot's own xAt)
+    expect(Number(first[0])).toBeCloseTo((sessionAxisTicks()[0]!.leftPct / 100) * W, 1);
+  });
+
+  it("every close sits at its bar's start plus five minutes", () => {
+    const xs = pointsOf(render()).map((p) => p[0]);
+    expect(xs).toEqual(bars.map((b) => xAtMinute(barCloseMinutes(b.ts))));
+    expect(xs).toEqual([xAtMinute(600), xAtMinute(605), xAtMinute(720), xAtMinute(725), xAtMinute(1085)]);
+  });
+
+  it("the close of the bar stamped 11:55 is drawn on the 12:00 gridline, not five minutes before it", () => {
+    const xs = pointsOf(render()).map((p) => p[0]);
+    const noon = (sessionAxisTicks()[1]!.leftPct / 100) * W;
+    expect(Number(xs[2])).toBeCloseTo(noon, 1);
+  });
+
+  it("the 18:00 stub stays inside the plot box (18:05 is before the 18:10 session end)", () => {
+    const last = pointsOf(render()).at(-1)!;
+    expect(Number(last[0])).toBeGreaterThan(PAD_LEFT);
+    expect(Number(last[0])).toBeLessThanOrEqual(W - PAD_RIGHT);
+    expect(last[0]).toBe(xAtMinute(18 * 60 + 5));
+  });
+
+  it("the x values are strictly increasing, so the line never doubles back", () => {
+    const xs = pointsOf(render()).map((p) => Number(p[0]));
+    for (let i = 1; i < xs.length; i++) expect(xs[i]!).toBeGreaterThan(xs[i - 1]!);
+  });
+
+  it("only x moved: the y of every point is still its close's level on the 136-unit plot", () => {
+    const closes = bars.map((b) => b.close);
+    const lo = Math.min(...closes);
+    const span = Math.max(...closes) - lo;
+    const yAt = (v: number) => (8 + (1 - (v - lo) / span) * (150 - 8 - 6)).toFixed(1);
+    expect(pointsOf(render()).map((p) => p[1])).toEqual(closes.map(yAt));
+  });
+
+  it("a marker stays at its headline's own minute: 12:00 Istanbul is on the 12:00 gridline, not shifted by five minutes", () => {
+    const html = render({ markers: [{ ts: "2026-11-11T09:00:00.000Z", label: "BirGün: GLRMK" }] });
+    const at = html.indexOf("stroke-brand/70");
+    expect(at).toBeGreaterThan(0);
+    const tag = html.slice(html.lastIndexOf("<line", at), at);
+    const x1 = /x1="([\d.]+)"/.exec(tag)?.[1];
+    expect(Number(x1)).toBeCloseTo((sessionAxisTicks()[1]!.leftPct / 100) * W, 1);
+  });
+
+  it("the last-price tag and the aria-label still read the last bar's close, and closeOverride still replaces them", () => {
+    const html = render({ prevClose: 100 });
+    expect(/aria-label="([^"]+)"/.exec(html)?.[1]).toBe("Seans içi fiyat, son 104,90");
+    expect(html).toContain(">104,90</span>");
+    const settled = render({ prevClose: 100, closeOverride: 105 });
+    expect(/aria-label="([^"]+)"/.exec(settled)?.[1]).toBe("Seans içi fiyat, kapanış 105,00, gün içi veri eksik");
+    expect(settled).toContain(">105,00</span>");
+    // the path does not depend on the override
+    expect(pathOf(settled)).toBe(pathOf(html));
   });
 });

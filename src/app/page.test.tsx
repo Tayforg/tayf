@@ -532,7 +532,7 @@ describe("HomeFeed: the visible result line says 'en ilgili' when the archive is
     const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
 
     expect(visibleText(tree)).toContain(
-      "için en ilgili 24 sonuç. Arama sorgunun ilk 64 karakteriyle yapıldı.",
+      "için en ilgili 24 sonuç. Arama sorgunun ilk 64 karakterine sığan kelimelerle yapıldı.",
     );
   });
 
@@ -869,7 +869,10 @@ describe("HomeFeed: a query past the search cap says so (h42-search-2)", () => {
   const six = "Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan Erdoğan";
   const seven = `${six} zebra`;
   const TERM_NOTE = "Arama ilk 6 kelimeyle yapıldı.";
-  const LENGTH_NOTE = "Arama sorgunun ilk 64 karakteriyle yapıldı.";
+  // h144-search-3: the length cut drops whole words, so the note names "the words that fit". The one
+  // exception is a single word longer than the bound (h145 review TS-5): a fragment of it is searched.
+  const LENGTH_NOTE = "Arama sorgunun ilk 64 karakterine sığan kelimelerle yapıldı.";
+  const FRAGMENT_NOTE = "Arama sorgunun ilk 64 karakteriyle yapıldı.";
 
   function givenFeed() {
     getPoliticsClusters.mockResolvedValue(
@@ -955,6 +958,35 @@ describe("HomeFeed: a query past the search cap says so (h42-search-2)", () => {
     expect(visibleText(tree)).toContain(LENGTH_NOTE);
     expect(visibleText(tree)).not.toContain(TERM_NOTE);
     expect(liveRegionText(tree)).toContain(LENGTH_NOTE);
+  });
+
+  it("a single word longer than 64 characters keeps the fragment wording: no whole word was dropped", async () => {
+    givenFeed();
+    const q = "a".repeat(300);
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+
+    expect(visibleText(tree)).toContain(FRAGMENT_NOTE);
+    expect(visibleText(tree)).not.toContain("kelimelerle yapıldı");
+    expect(liveRegionText(tree)).toContain(FRAGMENT_NOTE);
+    expect(liveRegionText(tree)).not.toContain("kelimelerle yapıldı");
+  });
+
+  it("a long first word followed by more words is still a fragment of that word", async () => {
+    givenFeed();
+    const q = `${"a".repeat(70)} bb`;
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+
+    expect(visibleText(tree)).toContain(FRAGMENT_NOTE);
+    expect(visibleText(tree)).not.toContain("kelimelerle yapıldı");
+  });
+
+  it("a first word kept whole (40 + 40 letters) uses the whole-words wording", async () => {
+    givenFeed();
+    const q = `${"a".repeat(40)} ${"b".repeat(40)}`;
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+
+    expect(visibleText(tree)).toContain(LENGTH_NOTE);
+    expect(visibleText(tree)).not.toContain(FRAGMENT_NOTE);
   });
 
   it("keeps the empty-search card to the 6 searched words, and the count line carries the note once", async () => {

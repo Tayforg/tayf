@@ -189,3 +189,20 @@ export function supersededDisclosureIndexes(disclosures: readonly CorrectionDisc
 export function disclosureCorrectionChains(disclosures: readonly CorrectionDisclosure[]): Map<number, CorrectionChain> {
   return correctionChains(toCorrectionRows(disclosures));
 }
+
+/** The small tag a notice carries in a list: "düzeltme" (this is a correction) or "düzeltildi" (a correction replaced it). */
+export type CorrectionTag = "düzeltme" | "düzeltildi";
+
+/**
+ * h144-ekonomi-3: the one rule for the tag beside a notice's subject, shared by the ticker page's KAP list
+ * and the /ekonomi stream. A row a correction replaced (`superseded`, from supersededDisclosureIndexes over the
+ * same rows) is "düzeltildi", even when it is itself a DUZENLENEN in the middle of a chain; else a DUZENLENEN
+ * row is a "düzeltme"; else no tag.
+ */
+export function correctionTag(
+  d: { disclosureIndex: number; modifyStatus?: string | null },
+  superseded: ReadonlySet<number>,
+): CorrectionTag | null {
+  if (superseded.has(d.disclosureIndex)) return "düzeltildi";
+  return d.modifyStatus === MODIFY_STATUS_CORRECTION ? "düzeltme" : null;
+}

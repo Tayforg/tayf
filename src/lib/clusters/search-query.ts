@@ -6,6 +6,7 @@ import { expandAliasQuery } from "./search-aliases";
 import {
   canonicalSearchQuery,
   foldTr,
+  searchFoldedSibling,
   searchSiblingQuery,
   turkishQueryVariants,
 } from "./turkish-query";
@@ -35,6 +36,16 @@ import {
 // (turkish-query.ts, h96-search-1). Every call sends at most 3 variants, and each call
 // folds its own words: the typed call sends `p_folded` = the typed words, the sibling call
 // the sibling's words (h124-postship-1).
+// The same second call serves two more shapes (h144-search-1): a case suffix typed without
+// an apostrophe ('imamoğluna', 'suriyede') is searched as its root (the sibling call, as ever), and
+// a bare vowel-final noun with no root sibling ('bolu kaza', 'tarla') is searched with its locative
+// ('boluda kazada', 'tarlada'), because the stemmer cuts 'kaza' to 'kaz' and 'kazada' to 'kaza'.
+// EVERY call folds its own variants: `p_folded` = foldTr(the text its variants spell). The 166
+// over-stem guard reads `p_folded` only, so a call whose variants differ from its folded text
+// searches stems the guard does not cover ('tarla' as variants with 'tarlada' folded stems to 'tar'
+// and appended 6 rows with no 'tarl' word). The locative therefore goes to BOTH arguments, and only
+// when there is no root sibling: the typed call already searched the typed stems, and on the sibling
+// path a locative loses proper nouns ('boluda kazada' finds 0 where the sibling 'bolu kaza' finds 7).
 // An alias in the query (AKP <-> AK Parti, search-aliases.ts) is expanded into a
 // two-way websearch `or` for BOTH arguments, so 'AKP' and 'AK Parti' send the
 // same RPC call; the cache key below stays the canonical query.
@@ -126,6 +137,15 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // folded arm on a word no headline holds: 0 stories against 7 for 'asgari ucret zam'. The
   // sibling call only fills empty slots after the typed ids, so typed ranks never move.
   const sibling = searchSiblingQuery(base);
+  // h144-search-1: with no root sibling, a bare vowel-final noun ('bolu kaza', 'tarla') still gets a
+  // second call, for its locative ('boluda kazada', 'tarlada'), so the stem of the inflected headlines is
+  // met. The locative is BOTH the variants and the folded text of that call: the 166 guard reads
+  // `p_folded` only, so variants of another spelling ('tarla' stems to 'tar', 'tarlada' to 'tarla') would
+  // run unguarded (6 of the 13 rows 'tarla' appended held no 'tarl' word). With a root sibling the locative
+  // is not used at all: that call is HEAD's, the sibling folded as itself ('tarlası' -> 'tarla'). Alias and
+  // operator queries give null for both helpers, so they make the one call they always made.
+  const foldedSibling = sibling === null ? searchFoldedSibling(base) : null;
+  const secondQuery = sibling ?? foldedSibling;
   const folded = foldTr(expansion ? expansion.foldedQuery : key);
 
   const supabase = createReaderClient();
@@ -160,11 +180,13 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   }
 
   const ids = await searchIds(typed, folded);
-  // The typed page has room left: ask for the sibling and append what is new, after the
-  // typed ids, up to SEARCH_LIMIT. A full typed page is never touched.
-  if (sibling !== null && ids.length < SEARCH_LIMIT) {
+  // The typed page has room left: ask for the sibling (or the locative) and append what is new, after the
+  // typed ids, up to SEARCH_LIMIT. A full typed page is never touched. Both arguments come from the same
+  // text, so the call folds its own variants.
+  if (secondQuery !== null && ids.length < SEARCH_LIMIT) {
     const seen = new Set(ids);
-    for (const id of await searchIds(turkishQueryVariants(sibling), foldTr(sibling))) {
+    const secondIds = await searchIds(turkishQueryVariants(secondQuery), foldTr(secondQuery));
+    for (const id of secondIds) {
       if (ids.length >= SEARCH_LIMIT) break;
       if (seen.has(id)) continue;
       seen.add(id);

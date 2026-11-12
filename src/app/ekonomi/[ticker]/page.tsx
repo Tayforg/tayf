@@ -9,6 +9,7 @@ import { IntradayChart } from "@/components/finance/intraday-chart";
 import { KapPickupPanel } from "@/components/finance/kap-pickup-panel";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
+import { chartKapMarkers } from "@/lib/finance/chart-markers";
 import { companyDisplayName } from "@/lib/finance/company-display-name";
 import { disclosureClassLabel } from "@/lib/finance/disclosure-class";
 import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
@@ -24,7 +25,7 @@ import {
   limitFlag,
   moveClass,
 } from "@/lib/finance/format";
-import { MODIFY_STATUS_CORRECTION, supersededDisclosureIndexes } from "@/lib/finance/kap-corrections";
+import { correctionTag, supersededDisclosureIndexes } from "@/lib/finance/kap-corrections";
 import { filerName, pressCodeNote, RELATED_ONLY_SHORT } from "@/lib/finance/kap-pickup";
 import { optionalRead } from "@/lib/finance/optional-read";
 import {
@@ -352,10 +353,13 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // the settled close (the chart's tag and colour contradicted the header). Once the daily bar is in, the chart is
   // given the settled close. A cut session keeps its own override and wording; the panel meta stays tied to `cut`.
   const auction = cut ? null : auctionStubSettledClose({ lastBar, intradayDay: sessionDay, stat, nowMs });
+  // h144-ekonomi-3: a KAP marker says something happened to THIS company, so a notice that only names the share
+  // (an MKK ban list, another company's insider-trade filing) is not one; chartKapMarkers keeps the own filings and
+  // Borsa Istanbul's halt of this share alone (h145 review TS-4).
   const markers = sessionDay
     ? [
         ...page.articles.filter((a) => istToday(new Date(a.publishedAt).getTime()) === sessionDay).map((a) => ({ ts: a.publishedAt, label: a.title, lang: sourceLang(a.source) })),
-        ...page.disclosures.filter((d) => istToday(new Date(d.publishedAt).getTime()) === sessionDay).map((d) => ({ ts: d.publishedAt, label: `KAP: ${d.subject ?? "bildirim"}` })),
+        ...chartKapMarkers(page.disclosures, ticker, sessionDay, istToday),
       ].sort((a, b) => a.ts.localeCompare(b.ts))
     : [];
 
@@ -539,7 +543,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           ) : (
             <ol className="divide-y divide-border/70">
               {page.disclosures.map((d) => {
-                const replaced = supersededRows.has(d.disclosureIndex);
+                const tag = correctionTag(d, supersededRows);
                 const summaryLine = d.summary ?? reportPeriodLine(d);
                 return (
                   <li key={d.disclosureIndex} className="grid grid-cols-[3.25rem_minmax(0,1fr)] gap-x-3 px-3 py-1.5 font-mono text-[11px]">
@@ -554,14 +558,14 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                           href={`https://www.kap.org.tr/tr/Bildirim/${d.disclosureIndex}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className={replaced ? "text-muted-foreground hover:text-brand" : "text-foreground/90 hover:text-brand"}
+                          className={tag === "düzeltildi" ? "text-muted-foreground hover:text-brand" : "text-foreground/90 hover:text-brand"}
                         >
                           {d.subject ?? "Bildirim"}
                           <NewTabHint />
                         </a>
                         {/* h108-kapdisclosures-3: KAP files a correction as a new notice; tell the two apart. */}
-                        {d.modifyStatus === MODIFY_STATUS_CORRECTION ? <span className="text-[10px] text-amber-400">düzeltme</span> : null}
-                        {replaced ? <span className="text-[10px] text-muted-foreground">düzeltildi</span> : null}
+                        {tag === "düzeltme" ? <span className="text-[10px] text-amber-400">düzeltme</span> : null}
+                        {tag === "düzeltildi" ? <span className="text-[10px] text-muted-foreground">düzeltildi</span> : null}
                       </div>
                       {summaryLine ? <p className="truncate text-[10px] text-muted-foreground">{summaryLine}</p> : null}
                       {/* h108-kapdisclosures-1: a notice another company filed (an insider purchase of this

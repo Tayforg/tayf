@@ -15,7 +15,9 @@ import {
   isTurkishSuffixTail,
   normaliseSearchQuery,
   pgLower,
+  searchFoldedSibling,
   searchQueryCut,
+  searchQueryCutsWord,
   searchQueryWasShortened,
   searchSiblingQuery,
   searchedWordsAsTyped,
@@ -428,14 +430,13 @@ describe("canonicalSearchQuery", () => {
       t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
-    // No apostrophes: normaliseSearchQuery's apostrophe rule peels one
-    // apostrophe per pass from a stacked run ("ş''z" -> "ş'z" -> "ş"), so it is
-    // not idempotent on that input. That predates this function and does not
-    // matter for the key (searchClusters applies it once), but it would make
-    // this property fail for a reason unrelated to the canonical form.
+    // h145 review TS-3: the slash, backslash, bar and apostrophe are in the alphabet. An apostrophe that
+    // ends a word ("Erdoğan'/Bahçeli") is cut by normaliseSearchQuery AFTER the slash was looked at, so the
+    // slash used to sit between two letters only in the output and a second pass split it.
     const alphabet = [
       "a", "b", "z", "I", "İ", "ı", "ş", "Ğ", "1", " ", " ", " ", ".", ",", "!", "?",
       "“", "-", '"', "(", ")", "$", "\u{1F600}", "\u{1F525}", "\u0000", "\ud83d", "\t",
+      "/", "\\", "|", "'", "/", "'",
     ];
     for (let n = 0; n < 3000; n++) {
       const len = Math.floor(next() * 140);
@@ -592,6 +593,69 @@ describe("searchQueryCut", () => {
     for (const q of ["", "x", "a b c d e f", "a b c d e f g", "a".repeat(80)]) {
       expect(searchQueryWasShortened(q)).toBe(searchQueryCut(q) !== null);
     }
+  });
+});
+
+// h145 review TS-5: the page words the 64-character cut as "the words that fit". That is wrong for a single
+// word longer than the bound, whose first 64 characters are searched as a fragment of one word.
+describe("searchQueryCutsWord", () => {
+  it("is true for a single word longer than the bound: a fragment of it is searched", () => {
+    expect(searchQueryCutsWord("a".repeat(300))).toBe(true);
+    expect(searchQueryCutsWord("a".repeat(65))).toBe(true);
+    expect(canonicalSearchQuery("a".repeat(300))).toBe("a".repeat(64));
+    // Still true when other words follow: the first one is the cut term, nothing before it to fall back to.
+    expect(searchQueryCutsWord(`${"a".repeat(70)} bb`)).toBe(true);
+    expect(canonicalSearchQuery(`${"a".repeat(70)} bb`)).toBe("a".repeat(64));
+  });
+
+  it("is false for a 3-word query of 70 characters: whole words are dropped, none is cut", () => {
+    const q = `${"a".repeat(23)} ${"b".repeat(23)} ${"c".repeat(22)}`;
+    expect(q).toHaveLength(70);
+    expect(searchQueryCut(q)).toBe("length");
+    expect(searchQueryCutsWord(q)).toBe(false);
+  });
+
+  it("is false when the first word is kept whole: 40 + 40 letters", () => {
+    expect(searchQueryCutsWord(`${"a".repeat(40)} ${"b".repeat(40)}`)).toBe(false);
+    expect(canonicalSearchQuery(`${"a".repeat(40)} ${"b".repeat(40)}`)).toBe("a".repeat(40));
+  });
+
+  it("is false for a first word of exactly the bound, and for a word one short of it", () => {
+    expect(searchQueryCutsWord("a".repeat(MAX_SEARCH_QUERY_LENGTH))).toBe(false);
+    expect(searchQueryCutsWord(`${"a".repeat(MAX_SEARCH_QUERY_LENGTH)} bb`)).toBe(false);
+    expect(searchQueryCutsWord("a".repeat(MAX_SEARCH_QUERY_LENGTH - 1))).toBe(false);
+  });
+
+  it("is false for a short query, an empty query and a query of bare punctuation", () => {
+    expect(searchQueryCutsWord("deprem")).toBe(false);
+    expect(searchQueryCutsWord("a".repeat(40))).toBe(false);
+    expect(searchQueryCutsWord("")).toBe(false);
+    expect(searchQueryCutsWord("   ")).toBe(false);
+    expect(searchQueryCutsWord("!!! ???")).toBe(false);
+  });
+
+  it("reads the first TERM, so leading punctuation and apostrophe suffixes do not count", () => {
+    expect(searchQueryCutsWord(`!!! ${"a".repeat(300)}`)).toBe(true);
+    expect(searchQueryCutsWord(`${"a".repeat(60)}'ın bb`)).toBe(false);
+  });
+
+  it("agrees with the single-term cut of canonicalSearchQuery on every length around the bound", () => {
+    for (const n of [1, 30, 63, 64, 65, 66, 100, 1000]) {
+      const q = "a".repeat(n);
+      const cutsWord = canonicalSearchQuery(q).length < n;
+      expect(searchQueryCutsWord(q), `n=${n}`).toBe(cutsWord);
+    }
+  });
+
+  it("is linear in a long input (CPU-time ladder)", () => {
+    expectLinear(
+      (n) => ({ one: rep("a", "", "")(n), many: rep("ab ", "", "c")(n) }),
+      (q) => {
+        searchQueryCutsWord(q.one);
+        searchQueryCutsWord(q.many);
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
   });
 });
 
@@ -825,10 +889,15 @@ describe("apostrophes: only a Turkish suffix is cut (h50-search-2)", () => {
   });
 
   it("the 64-character cut cannot leave a lone '-' behind (it would be a separator next time)", () => {
+    // h144-search-3: the partial '-bahçeli' is now dropped whole (more than one term is kept), so no
+    // fragment of it, not even a lone '-', reaches the key. The idempotence assertion stays.
     const q = `${"a".repeat(62)} -bahçeli`;
     const once = canonicalSearchQuery(q);
     expect(once).toBe("a".repeat(62));
     expect(canonicalSearchQuery(once)).toBe(once);
+    // A single term of 64 dashes and more is the one cut that can still end in a lone '-'.
+    const dashes = canonicalSearchQuery(`${"-".repeat(64)}abc`);
+    expect(canonicalSearchQuery(dashes)).toBe(dashes);
   });
 
   it("is linear on the shapes that make a backtracking regex quadratic", () => {
@@ -978,6 +1047,7 @@ describe("canonicalSearchQuery is idempotent over the h50-search-2 inputs", () =
       "a", "n", "ı", "d", "e", "l", "r", "I", "İ", "ş", "Ğ", "1", " ", " ", " ",
       "'", "'", "’", "ʼ", "‘", "-", "-", "—", "<", ">", '"', ".", "!",
       "​", "­", "﻿", "́", "̇", "̧", "Ａ", "－", "\u{1F600}", "\ud83d", "\u0000", "\t",
+      "/", "\\", "|", "/",
     ];
     for (let n = 0; n < 4000; n++) {
       const len = Math.floor(next() * 120);
@@ -1117,7 +1187,6 @@ describe("searchSiblingQuery (h96-search-1)", () => {
     "elektrik zam",
     "emlak vergi",
     "trafik ceza",
-    "zammına", // the allowlist rule covers the bare vowel forms only
     "zamlar",
     "istanbul",
     "imamoğlu",
@@ -1126,6 +1195,12 @@ describe("searchSiblingQuery (h96-search-1)", () => {
     "   ",
   ])("returns null when no term qualifies: %j", (q) => {
     expect(searchSiblingQuery(q)).toBeNull();
+  });
+
+  it("'zammına' is no longer a miss: rule C (h144-search-1) reads it as zammı + na, so the second call asks for 'zammı'", () => {
+    // Before h144 the allowlist rule covered the bare vowel forms only and this was null.
+    expect(searchSiblingQuery("zammına")).toBe("zammı");
+    expect(searchSiblingQuery("hakkına")).toBe("hakkı");
   });
 
   it("the allowlist is closed: a doubled consonant that is not listed is left alone", () => {
@@ -1192,6 +1267,692 @@ describe("searchSiblingQuery (h96-search-1)", () => {
         expect(searchSiblingQuery(q.longTerm)).toBeNull();
         expect(searchSiblingQuery(q.manyTerms)).not.toBeNull();
         expect(searchSiblingQuery(q.dotless)).toBeNull();
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h144-search-3: a '/', '\' or '|' between two letters separates words, and the
+// 64-character cut never keeps half a word when more than one term is kept.
+//
+// 'Rusya/Ukrayna' was ONE term, so the archive looked for one lexeme 'rusya/ukrayna'
+// that no story holds (0 against 50 for 'rusya ukrayna'); 'Dolar/TL' found 1 against 13.
+// The 64-character cut kept 'iste' of 'isteyenler': a pasted 14-source headline searched a
+// fragment no story holds and answered "sonuç bulunamadı".
+// ---------------------------------------------------------------------------
+
+const PASTED_HEADLINE =
+  "Cumhurbaşkanı Erdoğan Azerbaycan’da: “Kardeşliğimizi zayıflatmak isteyenler emellerine asla ulaşamayacak”";
+const PASTED_CANONICAL = "cumhurbaşkanı erdoğan azerbaycan kardeşliğimizi zayıflatmak";
+
+describe("canonicalSearchQuery: a slash, backslash or bar between letters separates words (h144-search-3)", () => {
+  it.each([
+    ["Rusya/Ukrayna", "rusya ukrayna"],
+    ["Dolar/TL", "dolar tl"],
+    ["CHP|AKP", "chp akp"],
+    ["Rusya\\Ukrayna", "rusya ukrayna"],
+    ["a/b/c", "a b c"],
+    ["Rusya/Ukrayna/Belarus", "rusya ukrayna belarus"],
+    ["İran/İsrail", "iran israil"],
+    ["Ak/Parti seçim", "ak parti seçim"],
+    ["ŞİŞLİ/BEŞİKTAŞ", "şişli beşiktaş"],
+  ])("%j -> %j", (input, expected) => {
+    expect(canonicalSearchQuery(input)).toBe(expected);
+  });
+
+  it.each([
+    ["24/7", "24/7"],
+    ["1/2", "1/2"],
+    ["3/4 oy", "3/4 oy"],
+    ["a/1", "a/1"],
+    ["1/a", "1/a"],
+    ["2026|2027", "2026|2027"],
+  ])("digits are untouched: %j -> %j", (input, expected) => {
+    expect(canonicalSearchQuery(input)).toBe(expected);
+  });
+
+  it("a slash that is not between two letters stays out of the way as before", () => {
+    expect(canonicalSearchQuery("Rusya/")).toBe("rusya");
+    expect(canonicalSearchQuery("/Rusya")).toBe("rusya");
+    expect(canonicalSearchQuery("Rusya / Ukrayna")).toBe("rusya ukrayna");
+    expect(canonicalSearchQuery("Rusya// Ukrayna")).toBe("rusya ukrayna");
+  });
+
+  // h145 review TS-3 / sec-LOW-1: SLASH_BETWEEN_LETTERS ran before normaliseSearchQuery deleted the apostrophe, so
+  // "Erdoğan'/Bahçeli" gave 'erdoğan/bahçeli' and a second pass gave 'erdoğan bahçeli': the cache key, the RPC
+  // and the in-feed filter then disagreed about the words. The slash is looked at again after the cleanup.
+  it.each([
+    ["Erdoğan'/Bahçeli", "erdoğan bahçeli"],
+    ["Rusya'/Ukrayna", "rusya ukrayna"],
+    ["a'/b", "a b"],
+    ["a'|b", "a b"],
+    ["Rusya\u2019\\Ukrayna", "rusya ukrayna"],
+    ["a'/b'/c", "a b c"],
+    ["Erdoğan''/Bahçeli", "erdoğan bahçeli"],
+    ["Erdoğan'ın/Bahçeli'nin", "erdoğan bahçeli"],
+  ])("an apostrophe before the slash is cut first, then the slash separates: %j -> %j", (input, expected) => {
+    expect(canonicalSearchQuery(input)).toBe(expected);
+    expect(canonicalSearchQuery(expected)).toBe(expected);
+  });
+
+  it("the apostrophe-slash pieces are separate terms: the echo has one word per searched term", () => {
+    expect(searchedWordsAsTyped("Erdoğan'/Bahçeli").split(" ")).toHaveLength(2);
+    expect(canonicalSearchQuery(searchedWordsAsTyped("Erdoğan'/Bahçeli"))).toBe("erdoğan bahçeli");
+    expect(searchedWordsAsTyped("Rusya'/Ukrayna Dolar/TL").split(" ")).toHaveLength(4);
+    expect(canonicalSearchQuery(searchedWordsAsTyped("Rusya'/Ukrayna Dolar/TL"))).toBe("rusya ukrayna dolar tl");
+  });
+
+  it("the apostrophe-slash pieces use up term slots like any other word", () => {
+    expect(canonicalSearchQuery("a'/b'/c'/d'/e'/f'/g")).toBe("a b c d e f");
+    expect(searchQueryCut("a'/b'/c'/d'/e'/f")).toBeNull();
+    expect(searchQueryCut("a'/b'/c'/d'/e'/f'/g")).toBe("terms");
+  });
+
+  it("an apostrophe that is not a Turkish-suffix tail still keeps its word: \"O'Brien/Kur'an\"", () => {
+    expect(canonicalSearchQuery("O'Brien/Kur'an")).toBe("o'brien kur'an");
+  });
+
+  it("a quoted phrase with a slash inside becomes a phrase of two words", () => {
+    expect(canonicalSearchQuery('"Rusya/Ukrayna"')).toBe('"rusya ukrayna"');
+  });
+
+  it("the split words use up term slots like any other word", () => {
+    expect(canonicalSearchQuery("a/b/c/d/e/f/g")).toBe("a b c d e f");
+    expect(searchQueryCut("a/b/c/d/e/f")).toBeNull();
+    expect(searchQueryCut("a/b/c/d/e/f/g")).toBe("terms");
+  });
+
+  it("searchedWordsAsTyped echoes the words, split", () => {
+    expect(searchedWordsAsTyped("Rusya/Ukrayna")).toBe("Rusya Ukrayna");
+    expect(searchedWordsAsTyped("Dolar/TL")).toBe("Dolar TL");
+  });
+
+  it("the RPC arguments of 'Rusya/Ukrayna' are those of 'rusya ukrayna'", () => {
+    const slash = canonicalSearchQuery("Rusya/Ukrayna");
+    const spaced = canonicalSearchQuery("Rusya Ukrayna");
+    expect(slash).toBe(spaced);
+    expect(turkishQueryVariants(slash)).toEqual(turkishQueryVariants(spaced));
+    expect(foldTr(slash)).toBe("rusya ukrayna");
+  });
+
+  it.each([
+    "Rusya/Ukrayna",
+    "Dolar/TL",
+    "CHP|AKP",
+    "24/7",
+    "a/b/c",
+    "Rusya\\Ukrayna",
+    '"a/b"',
+    "a/b-c/d",
+    // h145 review TS-3: the apostrophe goes after the slash was looked at, so the slash ends up between letters.
+    "Erdoğan'/Bahçeli",
+    "Rusya'/Ukrayna",
+    "a'/b",
+    "a'|b",
+  ])(
+    "is idempotent: %j",
+    (q) => {
+      const once = canonicalSearchQuery(q);
+      expect(canonicalSearchQuery(once)).toBe(once);
+    },
+  );
+
+  it("is linear: a long run of slashes, bars and digit slashes (CPU-time ladder)", () => {
+    expectLinear(
+      (n) => ({
+        slashes: rep("a/", "", "b")(n),
+        bars: rep("a|", "", "b")(n),
+        digits: rep("1/", "", "2")(n),
+        lone: rep("/", "a", "b")(n),
+      }),
+      (q) => {
+        for (const text of Object.values(q)) {
+          canonicalSearchQuery(text);
+          searchedWordsAsTyped(text);
+          searchQueryCut(text);
+        }
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+describe("canonicalSearchQuery: the 64-character cut keeps whole words (h144-search-3)", () => {
+  it("the pasted 14-source headline keeps its first 5 words, not a fragment of the 6th", () => {
+    expect(canonicalSearchQuery(PASTED_HEADLINE)).toBe(PASTED_CANONICAL);
+    // The 6th term is 'isteyenler': the old cut ended in 'iste'.
+    expect(canonicalSearchQuery(PASTED_HEADLINE).endsWith("iste")).toBe(false);
+  });
+
+  it("drops the partial last term entirely and trims", () => {
+    expect(canonicalSearchQuery(`${"a".repeat(60)} ${"b".repeat(30)}`)).toBe("a".repeat(60));
+    expect(canonicalSearchQuery(`${"a".repeat(63)} ${"b".repeat(10)}`)).toBe("a".repeat(63));
+    expect(canonicalSearchQuery(`aa ${"b".repeat(61)} ${"c".repeat(20)}`)).toBe(`aa ${"b".repeat(61)}`);
+  });
+
+  it("keeps the last term when the cut lands exactly after it (the next character is a space)", () => {
+    const q = `${"a".repeat(30)} ${"b".repeat(33)} ccc`;
+    expect(canonicalSearchQuery(q)).toBe(`${"a".repeat(30)} ${"b".repeat(33)}`);
+    expect(canonicalSearchQuery(q)).toHaveLength(MAX_SEARCH_QUERY_LENGTH);
+    // One more letter in the second term and it no longer fits: it is dropped.
+    expect(canonicalSearchQuery(`${"a".repeat(30)} ${"b".repeat(34)} ccc`)).toBe("a".repeat(30));
+  });
+
+  it("a single term longer than 64 keeps today's cut", () => {
+    expect(canonicalSearchQuery("a".repeat(70))).toBe("a".repeat(64));
+    expect(canonicalSearchQuery("a".repeat(500))).toBe("a".repeat(64));
+    // Still one term when others follow: nothing before it to fall back to.
+    expect(canonicalSearchQuery(`${"a".repeat(70)} bb`)).toBe("a".repeat(64));
+  });
+
+  it("a single term keeps the surrogate and edge repairs", () => {
+    const cut = canonicalSearchQuery("a".repeat(63) + "\u{1F600}" + "b");
+    expect(cut).toBe("a".repeat(63));
+    expect(hasLoneSurrogate(cut)).toBe(false);
+    expect(canonicalSearchQuery("a".repeat(63) + ".b")).toBe("a".repeat(63));
+    expect(canonicalSearchQuery(`${"a".repeat(61)}'daxyz`)).toBe("a".repeat(61));
+  });
+
+  it("an emoji inside the cut term never leaves a lone surrogate behind", () => {
+    const q = `${"a".repeat(30)} ${"b".repeat(32)}\u{1F600}${"x".repeat(10)}`;
+    const out = canonicalSearchQuery(q);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(out).toBe("a".repeat(30));
+  });
+
+  it("a dash-only or '-negated' fragment is dropped with the partial term", () => {
+    expect(canonicalSearchQuery(`${"a".repeat(62)} -bahçeli`)).toBe("a".repeat(62));
+    expect(canonicalSearchQuery(`${"a".repeat(30)} ${"b".repeat(32)} -bahçeli`)).toBe(
+      `${"a".repeat(30)} ${"b".repeat(32)}`,
+    );
+  });
+
+  it("searchQueryCut still says 'length' for a query the cut shortened, and null for the output", () => {
+    expect(searchQueryCut(PASTED_HEADLINE)).toBe("length");
+    expect(searchQueryCut(`${"a".repeat(60)} ${"b".repeat(30)}`)).toBe("length");
+    expect(searchQueryCut(PASTED_CANONICAL)).toBeNull();
+    expect(searchQueryWasShortened(PASTED_HEADLINE)).toBe(true);
+  });
+
+  it("the pasted headline's RPC arguments hold whole words only", () => {
+    const key = canonicalSearchQuery(PASTED_HEADLINE);
+    for (const v of turkishQueryVariants(key)) {
+      expect(v.split(" ").every((w) => /^\p{L}+$/u.test(w)), v).toBe(true);
+    }
+    expect(foldTr(key)).toBe("cumhurbaskani erdogan azerbaycan kardesligimizi zayiflatmak");
+  });
+
+  it.each([
+    PASTED_HEADLINE,
+    `${"a".repeat(60)} ${"b".repeat(30)}`,
+    `${"a".repeat(30)} ${"b".repeat(33)} ccc`,
+    `${"a".repeat(70)} bb`,
+    `${"a".repeat(30)} ${"b".repeat(32)}\u{1F600}${"x".repeat(10)}`,
+    "Rusya/Ukrayna/Belarus ".repeat(6),
+  ])("is idempotent over a cut query: %j", (q) => {
+    const once = canonicalSearchQuery(q);
+    expect(canonicalSearchQuery(once)).toBe(once);
+    expect(once.length).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+  });
+
+  it("is idempotent, bounded and word-whole over 4000 seeded random queries with slashes and long words", () => {
+    let state = 0x2f6e2b1;
+    const next = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const letters = ["a", "b", "z", "I", "İ", "ı", "ş", "Ğ", "ü", "1"];
+    // h145 review TS-3: an apostrophe before the slash ("a'/b") is in the mix, so the echo check below
+    // also covers the pieces the second look at the slash produces.
+    const separators = [" ", " ", " ", "/", "|", "\\", " - ", "  ", "/ ", "-", "'/", "'|", "''\\", "\u2019/"];
+    for (let n = 0; n < 4000; n++) {
+      const words = 1 + Math.floor(next() * 9);
+      let q = "";
+      for (let w = 0; w < words; w++) {
+        const len = 1 + Math.floor(next() * 30);
+        for (let i = 0; i < len; i++) q += letters[Math.floor(next() * letters.length)]!;
+        q += separators[Math.floor(next() * separators.length)]!;
+      }
+      const once = canonicalSearchQuery(q);
+      const label = JSON.stringify(q);
+      expect(canonicalSearchQuery(once), label).toBe(once);
+      expect(once.length, label).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+      expect(once.split(" ").filter(Boolean).length, label).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+      expect(once, label).toBe(once.trim());
+      // No slash, backslash or bar is left between two letters (digits keep theirs).
+      expect(/\p{L}[\/\\|]\p{L}/u.test(once), label).toBe(false);
+      // The echo of a cut query re-reads as the same canonical query.
+      expect(canonicalSearchQuery(searchedWordsAsTyped(q)), label).toBe(once);
+    }
+  });
+});
+
+describe("searchedWordsAsTyped under a length cut (h144-search-3)", () => {
+  it("the pasted headline echoes its first 5 typed words, the ones the search used", () => {
+    expect(searchedWordsAsTyped(PASTED_HEADLINE)).toBe(
+      "Cumhurbaşkanı Erdoğan Azerbaycan’da: “Kardeşliğimizi zayıflatmak",
+    );
+    expect(searchedWordsAsTyped(PASTED_HEADLINE).split(" ")).toHaveLength(5);
+  });
+
+  it("the echo is searched as the same canonical query and is no longer cut", () => {
+    const echo = searchedWordsAsTyped(PASTED_HEADLINE);
+    expect(canonicalSearchQuery(echo)).toBe(canonicalSearchQuery(PASTED_HEADLINE));
+    expect(searchQueryCut(echo)).toBeNull();
+  });
+
+  it("echoes the first k words where k is the number of kept terms", () => {
+    expect(searchedWordsAsTyped(`Aa! ${"b".repeat(60)} ${"c".repeat(30)} d`)).toBe(`Aa! ${"b".repeat(60)}`);
+    expect(searchedWordsAsTyped(`${"a".repeat(60)} ${"b".repeat(30)}`)).toBe("a".repeat(60));
+  });
+
+  it("a single long term is echoed whole, as before (k is 1)", () => {
+    expect(searchedWordsAsTyped("a".repeat(70))).toBe("a".repeat(70));
+    expect(searchedWordsAsTyped(`${"a".repeat(70)} bb`)).toBe("a".repeat(70));
+  });
+
+  it("a term cut and a length cut together: the length cut decides", () => {
+    // 7 words, the first 6 already too long for 64 characters: 5 survive.
+    expect(searchedWordsAsTyped(`${PASTED_HEADLINE} bir iki`).split(" ")).toHaveLength(5);
+  });
+
+  it("is unchanged under a term cut or no cut", () => {
+    expect(searchedWordsAsTyped("a b c d e f g")).toBe("a b c d e f");
+    expect(searchedWordsAsTyped("Erdoğan Özel")).toBe("Erdoğan Özel");
+    expect(searchedWordsAsTyped("")).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h144-search-1: the case suffix typed WITHOUT an apostrophe, and the bare vowel-final noun.
+//
+// The stemmer cuts the bare word and its suffixed form differently (ts_lexize, production,
+// 2026-11-12): imamoğlu stays imamoğlu but imamoğluna becomes imamoğl; suriye -> suri but
+// suriyede -> suriye; adana -> ada but adanada -> adana; kaza -> kaz but kazada -> kaza;
+// oylama -> oyla but oylamada and oylamayı -> oylama. The archive found nothing for
+// 'imamoğluna', 'suriyede', 'trumpa' and 'netanyahu bloğu ilk oylama' (0) while the bare
+// words found 50 and 'oylamayı' found 2.
+//
+// Rule C of searchSiblingQuery rewrites a case-suffixed word to its root; searchFoldedSibling
+// gives the bare vowel-final noun its locative for the folded arm of the second call.
+// ---------------------------------------------------------------------------
+
+describe("searchSiblingQuery rule C: a case suffix typed without an apostrophe (h144-search-1)", () => {
+  it.each([
+    ["imamoğluna", "imamoğlu"],
+    ["imamogluna", "imamoglu"],
+    ["kılıçdaroğlunu", "kılıçdaroğlu"],
+    ["suriyede", "suriye"],
+    ["adanada", "adana"],
+    ["ankaradan", "ankara"],
+    ["bursada", "bursa"],
+    ["yalovada", "yalova"],
+    ["niğdede", "niğde"],
+    ["boluda", "bolu"],
+    ["ispartada", "isparta"],
+    ["abdye", "abd"],
+    ["chpnin", "chp"],
+    ["tbmmde", "tbmm"],
+    ["çinde", "çin"],
+    ["yskdan", "ysk"],
+    ["erdoğan imamoğluna", "erdoğan imamoğlu"],
+  ])("%j -> %j", (q, sibling) => {
+    expect(searchSiblingQuery(q)).toBe(sibling);
+  });
+
+  it.each([
+    ["imamoğlunda", "imamoğlu"], // 'nda' is tried before 'da'
+    ["kılıçdaroğlundan", "kılıçdaroğlu"],
+    ["imamoğlunun", "imamoğlu"],
+    ["imamoğlundan", "imamoğlu"],
+    ["türkiyenin", "türkiye"],
+    ["suriyeyi", "suriye"],
+    ["ukraynayı", "ukrayna"],
+    ["istanbulda", "istanbul"],
+    ["istanbuldan", "istanbul"],
+    ["erdoğanda", "erdoğan"],
+    ["kitaptan", "kitap"],
+    ["çocukta", "çocuk"],
+    ["tunada", "tuna"],
+    ["kafeye", "kafe"],
+  ])("tails, longest first: %j -> %j", (q, root) => {
+    expect(searchSiblingQuery(q)).toBe(root);
+  });
+
+  it("reads the term with Turkish casing and keeps the other terms as typed", () => {
+    expect(searchSiblingQuery("İMAMOĞLUNA")).toBe("imamoğlu");
+    expect(searchSiblingQuery("SURİYEDE")).toBe("suriye");
+    expect(searchSiblingQuery("ABDYE")).toBe("abd");
+    expect(searchSiblingQuery("Erdoğan İmamoğluna")).toBe("Erdoğan imamoğlu");
+  });
+
+  it("an ASCII-typed term qualifies: the ASCII i counts as i, and ç, ğ fold", () => {
+    expect(searchSiblingQuery("cinde")).toBe("cin");
+    expect(searchSiblingQuery("nigdede")).toBe("nigde");
+    expect(searchSiblingQuery("kilicdaroglunu")).toBe("kilicdaroglu");
+  });
+
+  it.each([
+    "adana", // the 'na' root 'ada' ends in a
+    "dünya", // root 'dün' is 3 letters
+    "rusya", // 'rus' is 3 letters and ends in a consonant
+    "antalya", // 'antal' ends in a consonant: 'ya' needs a vowel
+    "ukrayna", // 'ukray' does not end in ı i u ü
+    "kanada", // fits the shape, the root 'kana' is another word (deny set)
+    "hollanda",
+    "makine",
+    "kabine",
+    "kaza", // a bare a / e dative is out of scope
+    "bursa",
+    "trumpa",
+    "erdoğana",
+    "imamoğlu",
+    "erdoğan",
+    "istanbul",
+  ])("returns null: %j", (q) => {
+    expect(searchSiblingQuery(q)).toBeNull();
+  });
+
+  it("an operator query is the reader's own: no sibling", () => {
+    expect(searchSiblingQuery('"imamoğluna"')).toBeNull();
+    expect(searchSiblingQuery("-imamoğluna")).toBeNull();
+    expect(searchSiblingQuery("imamoğluna or suriyede")).toBeNull();
+  });
+
+  describe("the gates", () => {
+    it("(i) the root is at least 4 letters: a 3-letter root is left alone, a 4-letter one is not", () => {
+      expect(searchSiblingQuery("adada")).toBeNull(); // 'ada' + da
+      expect(searchSiblingQuery("evde")).toBeNull(); // 'ev' + de
+      expect(searchSiblingQuery("boluda")).toBe("bolu");
+      expect(searchSiblingQuery("tunada")).toBe("tuna");
+    });
+
+    it("(ii) phonotactics: a tail only follows the sound it is made for", () => {
+      // da de dan den: a vowel or a voiced consonant
+      expect(searchSiblingQuery("çocukda")).toBeNull();
+      expect(searchSiblingQuery("kitapdan")).toBeNull();
+      // ta te tan ten: a voiceless consonant
+      expect(searchSiblingQuery("ankarata")).toBeNull();
+      expect(searchSiblingQuery("istanbulta")).toBeNull();
+      // na ne nı ni nu nü and nda nde ndan nden: ı i u ü
+      expect(searchSiblingQuery("ankarana")).toBeNull();
+      expect(searchSiblingQuery("trabzonna")).toBeNull();
+      // ya ye yı yi yu yü and nın nin nun nün: a vowel
+      expect(searchSiblingQuery("istanbulya")).toBeNull();
+      expect(searchSiblingQuery("trabzonnun")).toBeNull();
+    });
+
+    it("(iii) vowel harmony with the last vowel of the root", () => {
+      expect(searchSiblingQuery("ankarade")).toBeNull(); // a takes da
+      expect(searchSiblingQuery("imamoğlude")).toBeNull(); // u takes da
+      expect(searchSiblingQuery("niğdeda")).toBeNull(); // e takes de
+      expect(searchSiblingQuery("imamoğluni")).toBeNull(); // u takes nu
+      expect(searchSiblingQuery("suriyeya")).toBeNull();
+      expect(searchSiblingQuery("suriyeyu")).toBeNull(); // e takes yi
+      expect(searchSiblingQuery("suriyeyi")).toBe("suriye");
+      expect(searchSiblingQuery("kılıçdaroğlunü")).toBeNull(); // u takes nu, not nü
+      expect(searchSiblingQuery("kılıçdaroğlunu")).toBe("kılıçdaroğlu");
+      // ö and ü take the front forms
+      expect(searchSiblingQuery("türküde")).toBe("türkü");
+      expect(searchSiblingQuery("türküya")).toBeNull();
+    });
+
+    it("the four-way tails follow the four vowel classes", () => {
+      expect(searchSiblingQuery("ukraynayı")).toBe("ukrayna"); // a -> ı
+      expect(searchSiblingQuery("bahçeliyi")).toBe("bahçeli"); // i -> i
+      expect(searchSiblingQuery("davutoğluyu")).toBe("davutoğlu"); // u -> u
+      expect(searchSiblingQuery("türküyü")).toBe("türkü"); // ü -> ü
+      expect(searchSiblingQuery("bahçeliyı")).toBeNull();
+      expect(searchSiblingQuery("türküyu")).toBeNull();
+    });
+
+    it("(iv) the deny set: words that fit the shape but whose root is another word or a junk stem", () => {
+      // ts_lexize('turkish_stem', ...) on production, 2026-11-12: the word's stem / the root's stem.
+      //   kanada    kana  -> 'kana' / 'ka'          granada  grana  -> 'grana' / 'gra'
+      //   makine    maki  -> 'mak'  / 'maki'        kabine   kabi   -> 'kap'   / 'kabi'
+      //   hazine    hazi  -> 'haz'  / 'hazi'
+      // each root stems to a lexeme of its own that no headline of the word holds. The rest are
+      // not words as roots, and their stem equals the word's own, so a sibling adds nothing:
+      //   hollanda  hollan   -> 'holla' / 'holla'     florida   flori    -> 'flori' / 'flori'
+      //   uganda    ugan     -> 'uga'   / 'uga'        ruanda    ruan     -> 'ruan'  / 'ruan'
+      //   propaganda propagan -> 'propaga' / 'propaga'  ajanda    ajan     -> 'aja'   / 'aja'
+      //   veranda   veran    -> 'vera'  / 'vera'       medine    medi     -> 'medi'  / 'medi'
+      // 'suriye' is the root of 'suriyede' and itself fits the shape ('suri' + 'ye', both stem to
+      // 'suri'): denied, so the sibling of 'suriyede' is a fixed point.
+      // The very common function words whose root stems to a 1-3 letter junk lexeme (6,000 newest
+      // headlines, 2026-11-12: yeniden 70, ardından 43, nerede 15, konseyi 11):
+      //   yeniden -> yeni 'yeni' / 'ye'   ardından -> ardı 'ardı' / 'ar'   nerede -> nere [] / 'ner'
+      //   konseyi -> konse 'konse' / 'ko'  ('yeniden sayım' gained 'Yeni Zelanda ... oy sayım').
+      for (const word of [
+        "kanada", "hollanda", "florida", "uganda", "ruanda", "propaganda", "ajanda", "veranda",
+        "granada", "makine", "kabine", "hazine", "medine", "suriye",
+        "yeniden", "ardından", "nerede", "konseyi",
+      ]) {
+        expect(searchSiblingQuery(word), word).toBeNull();
+        expect(searchSiblingQuery(word.toLocaleUpperCase("tr")), word).toBeNull();
+      }
+      // The deny set is the typed word's: the inflections of a denied word still reach it.
+      expect(searchSiblingQuery("kanadada")).toBe("kanada");
+      expect(searchSiblingQuery("hollandada")).toBe("hollanda");
+      expect(searchSiblingQuery("suriyede")).toBe("suriye");
+      expect(searchSiblingQuery("makineye")).toBe("makine");
+    });
+  });
+
+  describe("SHORT_CASE_ROOTS: acronyms and short names read letter by letter", () => {
+    it.each([
+      ["abdye", "abd"],
+      ["abnin", "ab"],
+      ["abye", "ab"],
+      ["bmde", "bm"],
+      ["çinden", "çin"],
+      ["chpnin", "chp"],
+      ["mhpnin", "mhp"],
+      ["akpye", "akp"],
+      ["yskdan", "ysk"],
+      ["aymye", "aym"],
+      ["tbmmde", "tbmm"],
+      ["tcmbnin", "tcmb"],
+      ["mebnin", "meb"],
+      ["sgkya", "sgk"],
+      ["spkya", "spk"],
+      ["tuikte", "tuik"],
+      ["thyye", "thy"],
+      ["natoya", "nato"],
+      ["natonun", "nato"],
+      ["ABD'NİN".replaceAll("'", ""), "abd"],
+    ])("%j -> %j (the harmony and length gates are skipped)", (q, root) => {
+      expect(searchSiblingQuery(q)).toBe(root);
+    });
+
+    it("a bare a / e dative is accepted for a short root, except 'ab' and 'çin' (Abe, Çine, aba are other words)", () => {
+      expect(searchSiblingQuery("tuike")).toBe("tuik");
+      expect(searchSiblingQuery("mebe")).toBe("meb");
+      expect(searchSiblingQuery("abe")).toBeNull();
+      expect(searchSiblingQuery("aba")).toBeNull();
+      expect(searchSiblingQuery("çine")).toBeNull();
+      expect(searchSiblingQuery("cina")).toBeNull();
+    });
+
+    it("the list is closed: the same shape on another root is left alone", () => {
+      for (const q of ["xyzye", "abcnin", "tbmnde", "abdulye", "cinsiyetde", "kuzeyye", "nat"]) {
+        expect(searchSiblingQuery(q), q).toBeNull();
+      }
+    });
+
+    it("the acronym alone, and an acronym with an apostrophe, is not rewritten", () => {
+      for (const q of ["abd", "chp", "tbmm", "nato", "ysk"]) expect(searchSiblingQuery(q), q).toBeNull();
+    });
+  });
+
+  describe("rules A and B come first and are unchanged", () => {
+    it("a possessive or a listed doubled stem is rewritten by its own rule, not by rule C", () => {
+      expect(searchSiblingQuery("belediyesi")).toBe("belediye");
+      expect(searchSiblingQuery("zammı")).toBe("zam");
+      expect(searchSiblingQuery("cezası")).toBe("ceza");
+      expect(searchSiblingQuery("Karasu belediyesi")).toBe("Karasu belediye");
+    });
+
+    it("a term that rule A or B rewrites and a term that rule C rewrites live side by side", () => {
+      expect(searchSiblingQuery("trafik cezası imamoğluna")).toBe("trafik ceza imamoğlu");
+    });
+
+    it("the -su compound names and the fruit keep no sibling", () => {
+      for (const q of ["karasu", "sarısu", "kayısı"]) expect(searchSiblingQuery(q), q).toBeNull();
+    });
+  });
+
+  describe("the shape of a term it will look at", () => {
+    it("only letters: a digit, an apostrophe, a hyphen or a dot keeps the term whole", () => {
+      for (const q of ["imamoğlu1na", "imamoğlu'na", "imamoğlu-na", "imamoğlu.na", "f16ya", "2026de", "%50de", "imamoğluna!"]) {
+        expect(searchSiblingQuery(q), q).toBeNull();
+      }
+    });
+
+    it("never changes the term count and never rewrites a term twice", () => {
+      const q = "imamoğluna suriyede ankaradan kitaptan";
+      const sibling = searchSiblingQuery(q)!;
+      expect(sibling).toBe("imamoğlu suriye ankara kitap");
+      expect(sibling.split(" ")).toHaveLength(q.split(" ").length);
+    });
+
+    it("a term longer than the canonical bound is not examined", () => {
+      expect(searchSiblingQuery(`${"a".repeat(80)}da`)).toBeNull();
+    });
+  });
+
+  it("is idempotent: the sibling of a rewritten query is null", () => {
+    for (const q of [
+      "imamoğluna", "imamogluna", "kılıçdaroğlunu", "suriyede", "adanada", "ankaradan", "bursada",
+      "yalovada", "niğdede", "boluda", "ispartada", "abdye", "chpnin", "tbmmde", "çinde", "yskdan",
+      "imamoğlunda", "kitaptan", "natoya", "erdoğan imamoğluna", "istanbulda",
+    ]) {
+      const once = searchSiblingQuery(q);
+      expect(once, q).not.toBeNull();
+      expect(searchSiblingQuery(once!), q).toBeNull();
+    }
+  });
+
+  it("a sibling is a prefix of its term: it only removes letters and changes no letter", () => {
+    for (const q of ["imamoğluna", "suriyede", "ankaradan", "çinde", "chpnin", "natoya", "kitaptan"]) {
+      const sib = searchSiblingQuery(q)!;
+      expect(q.startsWith(sib), q).toBe(true);
+      expect(sib.length, q).toBeLessThan(q.length);
+    }
+  });
+
+  it("scales linearly: a long single term, a long run of terms and a run of tails (CPU-time ladder)", () => {
+    expectLinear(
+      (n) => ({
+        longTerm: rep("a", "", "da")(n),
+        manyTerms: rep("ab ", "", "imamoğluna")(n),
+        tails: rep("nde", "", "x")(n),
+        short: rep("abd ", "", "abdye")(n),
+      }),
+      (q) => {
+        expect(searchSiblingQuery(q.longTerm)).toBeNull();
+        expect(searchSiblingQuery(q.manyTerms)).not.toBeNull();
+        expect(searchSiblingQuery(q.tails)).toBeNull();
+        expect(searchSiblingQuery(q.short)).not.toBeNull();
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+describe("searchFoldedSibling (h144-search-1)", () => {
+  it.each([
+    ["bolu kaza", "boluda kazada"],
+    ["meclis oylama", "meclis oylamada"],
+    ["toplantı", "toplantıda"],
+    ["müzakere", "müzakerede"],
+    ["netanyahu bloğu ilk oylama", "netanyahuda bloğuda ilk oylamada"],
+    ["mardin kaza", "mardin kazada"],
+    ["elektrik zammı", "elektrik zammıda"],
+  ])("%j -> %j", (q, folded) => {
+    expect(searchFoldedSibling(q)).toBe(folded);
+  });
+
+  it("the locative follows the harmony of the last vowel: a ı o u take da, e i ö ü take de", () => {
+    expect(searchFoldedSibling("kaza")).toBe("kazada");
+    expect(searchFoldedSibling("toplantı")).toBe("toplantıda");
+    expect(searchFoldedSibling("metro")).toBe("metroda");
+    expect(searchFoldedSibling("bolu")).toBe("boluda");
+    expect(searchFoldedSibling("müzakere")).toBe("müzakerede");
+    expect(searchFoldedSibling("vergi")).toBe("vergide");
+    expect(searchFoldedSibling("abcö")).toBe("abcöde");
+    expect(searchFoldedSibling("gölü")).toBe("gölüde");
+  });
+
+  it("an ASCII-typed term is read the same way (the ASCII i is an i)", () => {
+    expect(searchFoldedSibling("imamoglu")).toBe("imamogluda");
+    expect(searchFoldedSibling("toplanti")).toBe("toplantide");
+    expect(searchFoldedSibling("ankara")).toBe("ankarada");
+  });
+
+  it("reads upper case with the Turkish rules and keeps the term as typed", () => {
+    expect(searchFoldedSibling("BOLU KAZA")).toBe("BOLUda KAZAda");
+    expect(searchFoldedSibling("İSTANBUL KAZA")).toBe("İSTANBUL KAZAda");
+  });
+
+  it.each([
+    "erdoğan", // ends in a consonant
+    "ab", // shorter than 4 letters
+    "zam",
+    "ada",
+    "abd",
+    "trump2", // not letters only
+    "2026",
+    "%50",
+    "ak-parti",
+    "kur'an",
+    "",
+    "   ",
+  ])("returns null when no term changes: %j", (q) => {
+    expect(searchFoldedSibling(q)).toBeNull();
+  });
+
+  it("returns null for a query that uses websearch syntax: the reader is in charge", () => {
+    for (const q of ["-oylama", '"oylama"', "kaza or oylama", "bolu -kaza", '"bolu kaza"']) {
+      expect(searchFoldedSibling(q), q).toBeNull();
+    }
+  });
+
+  it("keeps the other terms and never changes the term count or the 6-term bound", () => {
+    const q = "bolu kaza trump erdoğan zam toplantı";
+    const folded = searchFoldedSibling(q)!;
+    expect(folded).toBe("boluda kazada trump erdoğan zam toplantıda");
+    expect(folded.split(" ")).toHaveLength(q.split(" ").length);
+    expect(folded.split(" ").length).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+  });
+
+  it("folds, with foldTr, to the ASCII locative the folded arm reads", () => {
+    expect(foldTr(searchFoldedSibling("netanyahu bloğu ilk oylama")!)).toBe("netanyahuda bloguda ilk oylamada");
+    expect(foldTr(searchFoldedSibling("imamoğlu")!)).toBe("imamogluda");
+  });
+
+  it("works on the sibling of a rule-C query: 'imamoğluna' -> sibling 'imamoğlu' -> folded 'imamoğluda'", () => {
+    const sibling = searchSiblingQuery("imamoğluna")!;
+    expect(sibling).toBe("imamoğlu");
+    expect(searchFoldedSibling(sibling)).toBe("imamoğluda");
+  });
+
+  it("a term longer than the canonical bound is kept as it is, and the folded text grows by 2 letters a term at most", () => {
+    expect(searchFoldedSibling("a".repeat(80))).toBeNull();
+    const q = "bolu kaza toplantı müzakere ankara vergi";
+    expect(searchFoldedSibling(q)!.length).toBeLessThanOrEqual(q.length + 2 * MAX_SEARCH_TERMS);
+  });
+
+  it("scales linearly: a long single term and a long run of terms (CPU-time ladder)", () => {
+    expectLinear(
+      (n) => ({ longTerm: rep("a", "", "")(n), manyTerms: rep("ab kaza ", "", "kaza")(n) }),
+      (q) => {
+        expect(searchFoldedSibling(q.longTerm)).toBeNull();
+        expect(searchFoldedSibling(q.manyTerms)).not.toBeNull();
       },
       { n: 200_000, ceilingMs: 8_000 },
     );

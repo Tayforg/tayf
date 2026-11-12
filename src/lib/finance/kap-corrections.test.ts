@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { correctionChains, disclosureCorrectionChains, supersededDisclosureIndexes, supersededIndexes } from "./kap-corrections";
+import {
+  correctionChains,
+  correctionTag,
+  disclosureCorrectionChains,
+  supersededDisclosureIndexes,
+  supersededIndexes,
+} from "./kap-corrections";
 
 // h108-kapdisclosures-3: KAP files a correction as a NEW disclosure (modify_status
 // DUZENLENEN) with the same subject and summary as the notice it replaces. The original
@@ -356,5 +362,62 @@ describe("supersededDisclosureIndexes (the same rule on the page's Disclosure ro
   it("tolerates a row without the correction fields (an older fixture or a narrow select)", () => {
     const bare = { disclosureIndex: 1, publishedAt: at(0), filerCodes: ["OTTO"], subject: "X", summary: null };
     expect(supersededDisclosureIndexes([bare, { ...bare, disclosureIndex: 2 }]).size).toBe(0);
+  });
+});
+
+// h144-ekonomi-3: the /ekonomi KAP stream printed corrections (DUZENLENEN) as new filings, with no tag. The ticker page
+// and the stream now ask this one function which small tag a row carries.
+describe("correctionTag", () => {
+  const none: ReadonlySet<number> = new Set();
+
+  it("a DUZENLENEN row is a 'düzeltme'", () => {
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "DUZENLENEN" }, none)).toBe("düzeltme");
+  });
+
+  it("a row a correction replaced is 'düzeltildi'", () => {
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: null }, new Set([7]))).toBe("düzeltildi");
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "DUZELTILEN" }, new Set([7]))).toBe("düzeltildi");
+  });
+
+  it("superseded wins, even for a row that is itself a DUZENLENEN (the middle of a chain)", () => {
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "DUZENLENEN" }, new Set([7]))).toBe("düzeltildi");
+  });
+
+  it("a plain row, or one with no status at all, has no tag", () => {
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: null }, none)).toBeNull();
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "" }, none)).toBeNull();
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: undefined }, none)).toBeNull();
+  });
+
+  it("another status is not a correction; a DUZELTILEN row the match did not find is left untagged here", () => {
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "ACIK" }, none)).toBeNull();
+    // supersededIndexes adds every DUZELTILEN row itself, so on real data this never reaches the tag unmarked.
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "DUZELTILEN" }, none)).toBeNull();
+  });
+
+  it("only the exact status counts (no case folding, no substring)", () => {
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "duzenlenen" }, none)).toBeNull();
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: "DUZENLENEN " }, none)).toBeNull();
+  });
+
+  it("another row's index in the set does not tag this one", () => {
+    expect(correctionTag({ disclosureIndex: 7, modifyStatus: null }, new Set([8, 9]))).toBeNull();
+  });
+
+  it("agrees with supersededDisclosureIndexes on the OTTO pair: original 'düzeltildi', correction 'düzeltme'", () => {
+    const base = {
+      publishedAt: "2026-11-06T15:10:24+00:00",
+      filerCodes: ["OTTO"],
+      subject: "Sorumluluk Beyanı (Konsolide)",
+      summary: "Otto Holding A.Ş. 3. Aylık Finansal Durum Raporu Ve Ekleri Sorumluluk Beyanı",
+      year: "2026",
+      period: "3",
+    };
+    const original = { ...base, disclosureIndex: 1694030, modifyStatus: "DUZELTILEN" };
+    const correction = { ...base, disclosureIndex: 1694331, publishedAt: "2026-11-06T15:48:38+00:00", modifyStatus: "DUZENLENEN" };
+    const superseded = supersededDisclosureIndexes([correction, original]);
+
+    expect(correctionTag(original, superseded)).toBe("düzeltildi");
+    expect(correctionTag(correction, superseded)).toBe("düzeltme");
   });
 });

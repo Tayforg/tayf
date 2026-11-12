@@ -356,3 +356,46 @@ export function formatPickupRate(rate: number | null): string {
 export function relatedOnlyCountLabel(n: number): string | null {
   return n > 0 ? `+${n} ${RELATED_ONLY_SHORT}` : null;
 }
+
+/** How many rows the "Medyada yankı" list shows before it folds notices that only name the share. */
+export const PICKUP_PANEL_ROWS = 8;
+
+/** Newest first by the instant a row was filed; text order is the fallback for a stamp that does not parse. */
+function newestFirst(a: { disclosedAt: string }, b: { disclosedAt: string }): number {
+  const am = Date.parse(a.disclosedAt);
+  const bm = Date.parse(b.disclosedAt);
+  if (Number.isFinite(am) && Number.isFinite(bm) && am !== bm) return bm - am;
+  return b.disclosedAt.localeCompare(a.disclosedAt);
+}
+
+/**
+ * h144-ekonomi-2: which pickup rows the "Medyada yankı" list prints and which wait behind its
+ * "<n> hisseyi anan bildirim daha" summary. The list used to be `pickups.slice(0, 8)`, so a busy
+ * ticker's related-only notices (no numbers: a Takasbank or MKK list that names the share) pushed
+ * the ticker's OWN filings, the ones the totals count, off the panel: THYAO read "bildirim 7" over
+ * 3 listed own filings.
+ *
+ * `shown` is every own (`issuer`) row plus the newest related-only rows that still fit under `cap`
+ * (none once the own filings fill it); `hidden` is the rest, all related-only. Both are newest
+ * first. Pure: the input is not changed.
+ */
+export function pickupPanelRows<T extends { issuer: boolean; disclosedAt: string }>(
+  pickups: readonly T[],
+  cap: number = PICKUP_PANEL_ROWS,
+): { shown: T[]; hidden: T[] } {
+  const ordered = [...pickups].sort(newestFirst);
+  let relatedSlots = Math.max(0, cap - ordered.filter((p) => p.issuer).length);
+  const shown: T[] = [];
+  const hidden: T[] = [];
+  for (const p of ordered) {
+    if (p.issuer) {
+      shown.push(p);
+    } else if (relatedSlots > 0) {
+      shown.push(p);
+      relatedSlots -= 1;
+    } else {
+      hidden.push(p);
+    }
+  }
+  return { shown, hidden };
+}

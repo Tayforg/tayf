@@ -8,6 +8,7 @@ import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
 import { disclosureClassLabel } from "@/lib/finance/disclosure-class";
 import { fmtWhen, pctChange } from "@/lib/finance/format";
+import { correctionTag, supersededDisclosureIndexes } from "@/lib/finance/kap-corrections";
 import { filerName } from "@/lib/finance/kap-pickup";
 import { optionalRead } from "@/lib/finance/optional-read";
 import {
@@ -66,6 +67,9 @@ export default async function EkonomiPage() {
     optionalRead<Disclosure[]>("circuit-breakers", fetchCircuitBreakers(), []),
   ]);
   const breakers = breakersRead.value;
+  // h144-ekonomi-3: KAP files a correction as a new notice; the stream tags it as the ticker page does. The
+  // match only sees the rows read here, so "düzeltildi" shows when the original is among them too.
+  const supersededRows = supersededDisclosureIndexes(disclosures);
   // TS-11: normalise the ticker set ONCE, outside the cache boundary, and
   // hand every cached fetcher the same sorted array. getQuotes/fetchQuoteStats
   // each independently sort+dedupe internally too, but doing it here as well
@@ -212,40 +216,45 @@ export default async function EkonomiPage() {
             <PanelEmpty>KAP akışı boş. kap-ingest fonksiyonu ilk çekimi yaptığında bildirimler burada listelenir.</PanelEmpty>
           ) : (
             <ol className="divide-y divide-border/70">
-              {disclosures.map((d) => (
-                <li key={d.disclosureIndex} className="grid grid-cols-[3.25rem_minmax(0,1fr)] gap-x-3 px-3 py-1.5 font-mono text-[11px]">
-                  <time dateTime={d.publishedAt} className="tabular-nums text-muted-foreground">
-                    {fmtWhen(d.publishedAt)}
-                  </time>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-baseline gap-x-2">
-                      {d.stockCodes.slice(0, 3).map((c) => (
-                        <Link key={c} href={`/ekonomi/${c}`} className="inline-flex min-h-6 items-center text-brand hover:underline">
-                          {c}
-                        </Link>
-                      ))}
-                      {d.stockCodes.length > 3 ? <span className="text-muted-foreground">+{d.stockCodes.length - 3}</span> : null}
-                      {/* h108-kapdisclosures-1: the chips are the rated companies; say whose notice it is. */}
-                      {d.agencyFiled ? <span className="text-muted-foreground">{`· ${filerName(d)} bildirimi`}</span> : null}
-                      {d.disclosureClass ? (
-                        <span className={d.disclosureClass === "FR" ? "text-amber-400" : "text-muted-foreground"}>
-                          {disclosureClassLabel(d.disclosureClass)}
-                        </span>
-                      ) : null}
-                      <a
-                        href={`https://www.kap.org.tr/tr/Bildirim/${d.disclosureIndex}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-foreground/90 hover:text-brand"
-                      >
-                        {d.subject ?? "Bildirim"}
-                        <NewTabHint />
-                      </a>
+              {disclosures.map((d) => {
+                const tag = correctionTag(d, supersededRows);
+                return (
+                  <li key={d.disclosureIndex} className="grid grid-cols-[3.25rem_minmax(0,1fr)] gap-x-3 px-3 py-1.5 font-mono text-[11px]">
+                    <time dateTime={d.publishedAt} className="tabular-nums text-muted-foreground">
+                      {fmtWhen(d.publishedAt)}
+                    </time>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-baseline gap-x-2">
+                        {d.stockCodes.slice(0, 3).map((c) => (
+                          <Link key={c} href={`/ekonomi/${c}`} className="inline-flex min-h-6 items-center text-brand hover:underline">
+                            {c}
+                          </Link>
+                        ))}
+                        {d.stockCodes.length > 3 ? <span className="text-muted-foreground">+{d.stockCodes.length - 3}</span> : null}
+                        {/* h108-kapdisclosures-1: the chips are the rated companies; say whose notice it is. */}
+                        {d.agencyFiled ? <span className="text-muted-foreground">{`· ${filerName(d)} bildirimi`}</span> : null}
+                        {d.disclosureClass ? (
+                          <span className={d.disclosureClass === "FR" ? "text-amber-400" : "text-muted-foreground"}>
+                            {disclosureClassLabel(d.disclosureClass)}
+                          </span>
+                        ) : null}
+                        <a
+                          href={`https://www.kap.org.tr/tr/Bildirim/${d.disclosureIndex}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={tag === "düzeltildi" ? "text-muted-foreground hover:text-brand" : "text-foreground/90 hover:text-brand"}
+                        >
+                          {d.subject ?? "Bildirim"}
+                          <NewTabHint />
+                        </a>
+                        {tag === "düzeltme" ? <span className="text-[10px] text-amber-400">düzeltme</span> : null}
+                        {tag === "düzeltildi" ? <span className="text-[10px] text-muted-foreground">düzeltildi</span> : null}
+                      </div>
+                      {d.summary ? <p className="truncate text-[10px] text-muted-foreground">{d.summary}</p> : null}
                     </div>
-                    {d.summary ? <p className="truncate text-[10px] text-muted-foreground">{d.summary}</p> : null}
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ol>
           )}
         </Panel>
