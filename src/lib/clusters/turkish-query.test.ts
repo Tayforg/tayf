@@ -12,10 +12,12 @@ import {
   canonicalSearchQuery,
   cleanQueryUnicode,
   foldTr,
+  holdsLocativeWitness,
   isTurkishSuffixTail,
   normaliseSearchQuery,
   pgLower,
   searchFoldedSibling,
+  searchFoldedSiblingParts,
   searchQueryCut,
   searchQueryCutsWord,
   searchQueryWasShortened,
@@ -1953,6 +1955,230 @@ describe("searchFoldedSibling (h144-search-1)", () => {
       (q) => {
         expect(searchFoldedSibling(q.longTerm)).toBeNull();
         expect(searchFoldedSibling(q.manyTerms)).not.toBeNull();
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+// h157-search-1: the locative call also finds 'kazandı' rows ('kazada' and 'kazandı' share the stem
+// 'kaza'). A row only that call found is kept when its text holds the typed term as a word start that
+// is not 'term + n...'; the genitive (kazanın, oylamanın) is kept.
+describe("holdsLocativeWitness (h157-search-1)", () => {
+  const holds = (text: string, term: string) => holdsLocativeWitness(foldTr(text), term);
+
+  it.each([
+    "Mersin'de kazada 11 yaralı",
+    "trafik kazası",
+    "kaza",
+    "kazalar",
+    "kazaya",
+    "kazayı",
+    "Tokat'ta kazada 2 yaralı",
+    "kazanın ardından",
+    "KAZANIN ardından",
+    "Kazakistan", // documented false positive: a word start that is not an inflection
+  ])("true for %j (term 'kaza')", (text) => {
+    expect(holds(text, "kaza")).toBe(true);
+  });
+
+  it.each([
+    "Zafer Kazandı",
+    "seçimi kazanan",
+    "kazanırken",
+    "kazan",
+    "trafikkaza", // not a word start
+    "ödülü kazandık",
+    "",
+    "   ",
+    "seçim sonuçları",
+  ])("false for %j (term 'kaza')", (text) => {
+    expect(holds(text, "kaza")).toBe(false);
+  });
+
+  it("the genitive nin / nun (folded nın nin nun nün) keeps the row, a longer 'n...' tail does not", () => {
+    expect(holds("oylamanın ardından", "oylama")).toBe(true);
+    expect(holds("meclis oylaması", "oylama")).toBe(true);
+    expect(holds("oylamaya katıldı", "oylama")).toBe(true);
+    expect(holds("oylamanun", "oylama")).toBe(true);
+    expect(holds("oylamanın", "oylama")).toBe(true);
+    expect(holds("oylamanız", "oylama")).toBe(false);
+    expect(holds("oylamanin", "oylama")).toBe(true);
+    expect(holds("oylamaninki", "oylama")).toBe(false);
+  });
+
+  it("a word with an apostrophe or punctuation is split on it: Tokat'ta, kaza, (kaza)", () => {
+    expect(holds("Tokat'ta kaza, 2 ölü", "kaza")).toBe(true);
+    expect(holds("(kaza)", "kaza")).toBe(true);
+    expect(holds("kaza-yolu", "kaza")).toBe(true);
+    expect(holds("kaza'nın", "kaza")).toBe(true);
+    expect(holds("kazan'ın", "kaza")).toBe(false);
+  });
+
+  it("one witness word is enough among many that fail", () => {
+    expect(holds("Zafer Kazandı; Mersin'de kazada 2 yaralı", "kaza")).toBe(true);
+    expect(holds("Zafer Kazandı; seçimi kazanan", "kaza")).toBe(false);
+  });
+
+  it("an ASCII-folded text meets the ASCII term (the caller folds both)", () => {
+    expect(holds("Toplantıda söz aldı", "toplanti")).toBe(true);
+    expect(holds("Toplantının ardından", "toplanti")).toBe(true);
+    expect(holds("Müzakereye başladı", "muzakere")).toBe(true);
+  });
+
+  it("a term with a hyphen is read from the part after the last hyphen: 'e-posta' -> 'posta'", () => {
+    expect(holds("anonim e-postayla yapılan tehdit", "e-posta")).toBe(true);
+    expect(holds("Pentagon'un e-postaları", "e-posta")).toBe(true);
+    expect(holds("e-posta", "e-posta")).toBe(true);
+    expect(holds("300 okul tahliye edildi", "e-posta")).toBe(false);
+    expect(holds("e-fatura düzenlendi", "e-fatura")).toBe(true);
+    expect(holds("e-faturan", "e-fatura")).toBe(false);
+  });
+
+  it("keeps the row when the term cannot be judged (empty tail, a character outside a-z 0-9): never drops on doubt", () => {
+    expect(holds("kaza", "")).toBe(true);
+    expect(holds("kaza", "e-")).toBe(true);
+    expect(holds("seçim", "naïve")).toBe(true);
+    expect(holds("", "")).toBe(true);
+  });
+
+  it("never throws on odd input and builds no RegExp from the term", () => {
+    for (const term of ["(", "[", "a+", ".*", "\\", "kaza)", "a|b", "$"]) {
+      expect(() => holdsLocativeWitness("kaza (kaza) [x] a+ b", term), term).not.toThrow();
+    }
+    expect(holdsLocativeWitness("kaza (kaza)", "(")).toBe(true);
+    expect(holdsLocativeWitness("kaza kazan", ".*")).toBe(true);
+  });
+
+  it("scales linearly in the text (CPU-time ladder): many words, one long word, many separators", () => {
+    expectLinear(
+      (n) => ({
+        words: "kazan ".repeat(Math.ceil(n / 6)),
+        oneWord: rep("n", "kaza", "")(n),
+        separators: rep("'-.,; ", "", "kaza")(n),
+      }),
+      (q) => {
+        expect(holdsLocativeWitness(q.words, "kaza")).toBe(false);
+        expect(holdsLocativeWitness(q.oneWord, "kaza")).toBe(false);
+        expect(holdsLocativeWitness(q.separators, "kaza")).toBe(true);
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+describe("searchFoldedSiblingParts (h157-search-1)", () => {
+  it("'tokat kaza' gives the query and the one term the locative changed", () => {
+    expect(searchFoldedSiblingParts("tokat kaza")).toEqual({ query: "tokat kazada", terms: ["kaza"] });
+  });
+
+  it("'bolu kaza' gives both terms, folded", () => {
+    expect(searchFoldedSiblingParts("bolu kaza")).toEqual({ query: "boluda kazada", terms: ["bolu", "kaza"] });
+  });
+
+  it("'meclis oylama' gives ['oylama'] and keeps the unchanged term out of `terms`", () => {
+    expect(searchFoldedSiblingParts("meclis oylama")).toEqual({ query: "meclis oylamada", terms: ["oylama"] });
+  });
+
+  it("terms are the folded ORIGINAL terms (the typed spelling, not the locative)", () => {
+    expect(searchFoldedSiblingParts("Netanyahu bloğu ilk oylama")).toEqual({
+      query: "Netanyahuda bloğuda ilk oylamada",
+      terms: ["netanyahu", "blogu", "oylama"],
+    });
+    expect(searchFoldedSiblingParts("İSTANBUL KAZA")).toEqual({ query: "İSTANBUL KAZAda", terms: ["kaza"] });
+    expect(searchFoldedSiblingParts("toplantı")).toEqual({ query: "toplantıda", terms: ["toplanti"] });
+  });
+
+  it("is null for a websearch query and when no term changes", () => {
+    for (const q of ['"tokat kaza"', "-kaza", "bolu -kaza", "kaza or oylama", "erdoğan", "", "   ", "zam"]) {
+      expect(searchFoldedSiblingParts(q), q).toBeNull();
+    }
+  });
+
+  it("searchFoldedSibling is its `query`, byte for byte, for every shape", () => {
+    for (const q of [
+      "bolu kaza",
+      "meclis oylama",
+      "toplantı",
+      "netanyahu bloğu ilk oylama",
+      "BOLU KAZA",
+      "elektrik zammı",
+      "e-posta",
+      "e-okul",
+      '"bolu kaza"',
+      "erdoğan",
+      "",
+    ]) {
+      expect(searchFoldedSibling(q), q).toBe(searchFoldedSiblingParts(q)?.query ?? null);
+    }
+  });
+
+  it("has one term per changed word, in query order, and never more than the 6-term bound", () => {
+    const parts = searchFoldedSiblingParts("bolu kaza trump erdoğan zam toplantı")!;
+    expect(parts.terms).toEqual(["bolu", "kaza", "toplanti"]);
+    expect(parts.terms.length).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+  });
+});
+
+// h157-search-3: 'e-posta' is stored as the lexeme 'e-pos' but every inflected form as 'e-posta', so the
+// bare compound found 1 story where 7 hold the word. withLocative takes ONE letter, a hyphen and a tail of 3
+// letters or more that ends in a vowel, so the second call asks for 'e-postada'.
+describe("searchFoldedSibling: a one-letter hyphen compound (h157-search-3)", () => {
+  it.each([
+    ["e-posta", "e-postada"],
+    ["E-Posta", "E-Postada"],
+    ["e-fatura", "e-faturada"],
+    ["e-vize", "e-vizede"],
+    // 'adres' ends in a consonant and is left as typed; 'adresi' is a plain vowel-final word of 6 letters, so it gets its own
+    // locative under the existing rule, exactly as 'zammı' does in 'elektrik zammı'.
+    ["e-posta adres", "e-postada adres"],
+    ["e-posta adresi", "e-postada adreside"],
+    ["e-imza", "e-imzada"],
+    ["e-ticaret ve e-posta", "e-ticaret ve e-postada"],
+  ])("%j -> %j", (q, folded) => {
+    expect(searchFoldedSibling(q)).toBe(folded);
+  });
+
+  it("the term recorded for the witness is the folded original: 'e-posta'", () => {
+    expect(searchFoldedSiblingParts("e-posta")).toEqual({ query: "e-postada", terms: ["e-posta"] });
+    expect(searchFoldedSiblingParts("E-Posta adres")).toEqual({ query: "E-Postada adres", terms: ["e-posta"] });
+    expect(searchFoldedSiblingParts("E-Posta adresi")).toEqual({
+      query: "E-Postada adreside",
+      terms: ["e-posta", "adresi"],
+    });
+  });
+
+  it.each([
+    "e-okul", // consonant-final
+    "e-devlet", // consonant-final
+    "f-16", // digits
+    "s-400",
+    "ab-cdef", // two letters before the hyphen
+    "e-po", // the tail has fewer than 3 letters
+    "e-pos",
+    "a-b-cd", // a chain
+    "e-posta-x1",
+    "-e-posta", // a search operator
+    "e-", // no tail
+    "-posta",
+    "e--posta",
+    "e-posta-",
+  ])("is null for %j", (q) => {
+    expect(searchFoldedSibling(q), q).toBeNull();
+  });
+
+  it("a hyphen compound keeps every other rule: the plain word, the digits, the 64-character bound", () => {
+    expect(searchFoldedSibling("ak-parti")).toBeNull();
+    expect(searchFoldedSibling("kaza")).toBe("kazada");
+    expect(searchFoldedSibling("e-" + "a".repeat(80))).toBeNull();
+  });
+
+  it("is linear in a long run of hyphen compounds (CPU-time ladder)", () => {
+    expectLinear(
+      (n) => ({ many: rep("e-posta ", "", "e-posta")(n), hyphens: rep("e-", "", "posta")(n) }),
+      (q) => {
+        expect(searchFoldedSibling(q.many)).not.toBeNull();
+        expect(searchFoldedSibling(q.hyphens)).toBeNull();
       },
       { n: 200_000, ceilingMs: 8_000 },
     );

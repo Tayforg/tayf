@@ -15,6 +15,7 @@ import {
   exportSummaryText,
   IMPORT_BUTTON_TEXT,
   IMPORT_HINT_TEXT,
+  IMPORT_KEPT_FOR_RETRY_TEXT,
   IMPORT_LABEL_TEXT,
   importErrorText,
   importSummaryText,
@@ -79,7 +80,10 @@ export async function runExport(deps: {
 /**
  * The click handler of "İçe aktar", without React. A code that does not parse is
  * refused whole and no store is called. Otherwise both stores are called
- * (bookmarks first) and the input is cleared only when both wrote.
+ * (bookmarks first) and the input is cleared only when both wrote AND nothing was
+ * skipped for a list cap: after a partly applied import the code stays in the box,
+ * with one more sentence, so the reader can make room and press the button again
+ * (the items already added then count as "zaten listenizde").
  */
 export function runImport(
   text: string,
@@ -95,10 +99,13 @@ export function runImport(
   const bookmarks = deps.importBookmarks(parsed.payload.saved);
   const follows = deps.importFollows(parsed.payload.follows);
   const stored = bookmarks.stored && follows.stored;
+  const complete = stored && bookmarks.skipped === 0 && follows.skipped === 0;
+  const summary = importSummaryText({ saved: bookmarks, follows, stored });
   return {
-    status: importSummaryText({ saved: bookmarks, follows, stored }),
+    // A failed write has its own text (IMPORT_NOT_STORED_TEXT) and keeps the input too.
+    status: stored && !complete ? `${summary} ${IMPORT_KEPT_FOR_RETRY_TEXT}` : summary,
     invalid: false,
-    clearInput: stored,
+    clearInput: complete,
   };
 }
 

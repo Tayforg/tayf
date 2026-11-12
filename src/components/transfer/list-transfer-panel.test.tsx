@@ -5,12 +5,13 @@ import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { SAVED_MAX_IDS } from "@/components/bookmark/saved-lookup";
-import type { FollowKind } from "@/lib/follows/follows";
+import { followKey, type FollowKind } from "@/lib/follows/follows";
 
 import {
   buildTransferCode,
   EXPORT_EMPTY_TEXT,
   IMPORT_HINT_TEXT,
+  IMPORT_KEPT_FOR_RETRY_TEXT,
   IMPORT_NOT_STORED_TEXT,
   importErrorText,
   TRANSFER_MAX_CHARS,
@@ -340,6 +341,118 @@ describe("runImport", () => {
     const result = runImport(JSON.stringify({ format: "tayf-liste", v: 1, saved: [], follows: [] }), d);
     expect(result).toEqual({ status: "Kodda aktarılacak bir şey yok.", invalid: false, clearInput: true });
   });
+
+  it("runImport of a valid code with a no-break space, BOM or zero-width space at an edge imports it like the bare code", () => {
+    const code = JSON.stringify({ format: "tayf-liste", v: 1, saved: [A], follows: [] });
+    const wrapped = [
+      `${code}\u00a0`,
+      `\u00a0${code}`,
+      `\ufeff${code}`,
+      `${code}\u200b`,
+      `${code}\u2028`,
+      `\u200b\u00a0${code}\u00a0\ufeff\u200b`,
+    ];
+    for (const text of wrapped) {
+      const d = deps(ok({ added: 1 }), ok());
+      expect(runImport(text, d)).toEqual({ status: "1 hikâye ve 0 takip eklendi.", invalid: false, clearInput: true });
+      expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+      expect(d.importBookmarks).toHaveBeenCalledWith([A]);
+      expect(d.importFollows).toHaveBeenCalledWith([]);
+    }
+  });
+
+  it("runImport still refuses blanks-only text and a real character at an edge, and calls no store", () => {
+    const d = deps();
+    const code = JSON.stringify({ format: "tayf-liste", v: 1, saved: [A], follows: [] });
+    expect(runImport("\u200b\u00a0\ufeff", d)).toEqual({ status: importErrorText("empty"), invalid: true, clearInput: false });
+    expect(runImport(`\u00a0${code}x`, d)).toEqual({ status: importErrorText("invalid"), invalid: true, clearInput: false });
+    expect(runImport(`${"\u00a0".repeat(TRANSFER_MAX_CHARS)}${code}`, d)).toEqual({
+      status: importErrorText("too-large"),
+      invalid: true,
+      clearInput: false,
+    });
+    expect(d.importBookmarks).not.toHaveBeenCalled();
+    expect(d.importFollows).not.toHaveBeenCalled();
+  });
+
+  describe("a partly applied import keeps the code for a retry", () => {
+    const code = JSON.stringify({
+      format: "tayf-liste",
+      v: 1,
+      saved: [A],
+      follows: [{ kind: "konu", value: "spor" }],
+    });
+    const RETRY = "Kod alanda duruyor: yer açtıktan sonra yeniden İçe aktar'a basın.";
+
+    it("IMPORT_KEPT_FOR_RETRY_TEXT is the exact retry sentence", () => {
+      expect(IMPORT_KEPT_FOR_RETRY_TEXT).toBe(RETRY);
+    });
+
+    it("follows skipped at the cap: the sentence is appended once and the input is kept", () => {
+      const result = runImport(code, deps(ok(), ok({ added: 2, skipped: 3 })));
+      expect(result).toEqual({
+        status:
+          "0 hikâye ve 2 takip eklendi. 3 takip eklenmedi: en fazla 20 takip olabilir. Kod alanda duruyor: yer açtıktan sonra yeniden İçe aktar'a basın.",
+        invalid: false,
+        clearInput: false,
+      });
+      expect(count(result.status, RETRY)).toBe(1);
+    });
+
+    it("saved skipped at the cap: the sentence is appended and the input is kept, even when nothing was added", () => {
+      const result = runImport(code, deps(ok({ skipped: 2 }), ok()));
+      expect(result).toEqual({
+        status: `0 hikâye ve 0 takip eklendi. 2 hikâye eklenmedi: liste 1.000 kayda ulaştı. ${RETRY}`,
+        invalid: false,
+        clearInput: false,
+      });
+    });
+
+    it("both lists skipped: both cap notes, then the sentence ONCE, at the very end", () => {
+      const result = runImport(code, deps(ok({ added: 1, skipped: 1 }), ok({ existing: 1, skipped: 4 })));
+      expect(result.clearInput).toBe(false);
+      expect(result.invalid).toBe(false);
+      expect(result.status).toBe(
+        `1 hikâye ve 0 takip eklendi. Zaten listenizde olan 1 kayıt atlandı. 1 hikâye eklenmedi: liste 1.000 kayda ulaştı. 4 takip eklenmedi: en fazla 20 takip olabilir. ${RETRY}`,
+      );
+      expect(count(result.status, RETRY)).toBe(1);
+      expect(result.status.endsWith(RETRY)).toBe(true);
+    });
+
+    it("the same text run again after making room adds the rest, reports the present ones, and clears the input", () => {
+      const first = runImport(code, deps(ok(), ok({ added: 2, existing: 0, skipped: 3 })));
+      expect(first.clearInput).toBe(false);
+      const second = runImport(code, deps(ok(), ok({ added: 3, existing: 2, skipped: 0 })));
+      expect(second).toEqual({
+        status: "0 hikâye ve 3 takip eklendi. Zaten listenizde olan 2 kayıt atlandı.",
+        invalid: false,
+        clearInput: true,
+      });
+      expect(second.status.includes(RETRY)).toBe(false);
+    });
+
+    it("storage failure with skipped items: the not-stored text alone, input kept (no retry sentence)", () => {
+      const bookmarksFail = runImport(code, deps(ok({ added: 1, skipped: 2, stored: false }), ok()));
+      expect(bookmarksFail).toEqual({ status: IMPORT_NOT_STORED_TEXT, invalid: false, clearInput: false });
+      const followsFail = runImport(code, deps(ok(), ok({ added: 1, skipped: 2, stored: false })));
+      expect(followsFail).toEqual({ status: IMPORT_NOT_STORED_TEXT, invalid: false, clearInput: false });
+    });
+
+    it("full success, 'already there' and 'nothing to import' do not carry the sentence and still clear the input", () => {
+      const added = runImport(code, deps(ok({ added: 1 }), ok({ added: 1 })));
+      const present = runImport(code, deps(ok({ existing: 1 }), ok({ existing: 1 })));
+      const nothing = runImport(code, deps(ok(), ok()));
+      for (const result of [added, present, nothing]) {
+        expect(result.clearInput).toBe(true);
+        expect(result.status.includes(RETRY)).toBe(false);
+      }
+    });
+
+    it("a parse failure keeps the input and carries no retry sentence", () => {
+      const result = runImport("bu bir kod değil", deps(ok({ skipped: 1 }), ok({ skipped: 1 })));
+      expect(result).toEqual({ status: importErrorText("invalid"), invalid: true, clearInput: false });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -530,6 +643,65 @@ describe("store integration", () => {
     expect(second.status).toBe(IMPORT_NOT_STORED_TEXT);
     expect(second.clearInput).toBe(false);
     expect(browser.storage.has("tayf:follows")).toBe(false);
+  });
+
+  it("at the follow cap the code stays for a retry; after unfollowing to make room the same code adds the rest and clears", async () => {
+    const seeded = Array.from({ length: 18 }, (_, i) => ({
+      kind: "q",
+      value: `eski ${i}`,
+      addedAt: NOW,
+      seenAt: NOW,
+      seenIds: null,
+      seenFloor: null,
+    }));
+    browser = installBrowser({ "tayf:follows": JSON.stringify(seeded) });
+    const { importBookmarkIds, followsStore } = await loadStores();
+    const d = {
+      importBookmarks: (ids: readonly string[]) => importBookmarkIds(ids, SAVED_MAX_IDS),
+      importFollows: (follows: readonly { kind: FollowKind; value: string }[]) => followsStore.importMany(follows),
+    };
+    const code = buildTransferCode(
+      [],
+      Array.from({ length: 5 }, (_, i) => ({ kind: "q" as const, value: `yeni ${i}` })),
+    ).code;
+
+    const first = runImport(code, d);
+    expect(first).toEqual({
+      status:
+        "0 hikâye ve 2 takip eklendi. 3 takip eklenmedi: en fazla 20 takip olabilir. Kod alanda duruyor: yer açtıktan sonra yeniden İçe aktar'a basın.",
+      invalid: false,
+      clearInput: false,
+    });
+    expect(followsStore.read()).toHaveLength(20);
+
+    for (const i of [0, 1, 2]) followsStore.remove(followKey({ kind: "q", value: `eski ${i}` }));
+    expect(followsStore.read()).toHaveLength(17);
+
+    const second = runImport(code, d);
+    expect(second).toEqual({
+      status: "0 hikâye ve 3 takip eklendi. Zaten listenizde olan 2 kayıt atlandı.",
+      invalid: false,
+      clearInput: true,
+    });
+    expect(followsStore.read()).toHaveLength(20);
+    expect(second.status.includes(IMPORT_KEPT_FOR_RETRY_TEXT)).toBe(false);
+  });
+
+  it("with 1,000 saved stories a code of 2 new ids is skipped whole: the status says so and the input is kept", async () => {
+    const full = Array.from({ length: SAVED_MAX_IDS }, (_, i) => uuid(i));
+    browser = installBrowser({ "tayf:bookmarks": JSON.stringify(full) });
+    const { importBookmarkIds, followsStore } = await loadStores();
+    const code = buildTransferCode([uuid(5000), uuid(5001)], []).code;
+    const result = runImport(code, {
+      importBookmarks: (ids) => importBookmarkIds(ids, SAVED_MAX_IDS),
+      importFollows: (follows) => followsStore.importMany(follows),
+    });
+    expect(result).toEqual({
+      status: `0 hikâye ve 0 takip eklendi. 2 hikâye eklenmedi: liste 1.000 kayda ulaştı. ${IMPORT_KEPT_FOR_RETRY_TEXT}`,
+      invalid: false,
+      clearInput: false,
+    });
+    expect(browser.setItem).not.toHaveBeenCalled();
   });
 
   it("followsStore.importMany reports stored:true again once a write goes through", async () => {

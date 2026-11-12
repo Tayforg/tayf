@@ -1,12 +1,18 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { mergeBookmarkIds } from "@/components/bookmark/bookmark-ids";
 import { SAVED_MAX_IDS } from "@/components/bookmark/saved-lookup";
 import { MAX_FOLLOWS, mergeFollows, type Follow } from "@/lib/follows/follows";
 
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
+
 import {
   buildTransferCode,
   exportSummaryText,
+  IMPORT_KEPT_FOR_RETRY_TEXT,
   importErrorText,
   importSummaryText,
   parseTransferCode,
@@ -330,6 +336,159 @@ describe("parseTransferCode – oversized", () => {
   });
 });
 
+describe("parseTransferCode – invisible characters at the edges", () => {
+  // A code travels through a messenger, a mail client or a notes app, which add a
+  // no-break space, a byte-order mark, a zero-width space, U+2028 or U+3000 at an
+  // end. Every character below is written as an escape: a literal one is invisible
+  // and an editor or a formatter may drop it.
+  const code = codeOf({ saved: [A] });
+  const bare = { ok: true, payload: { saved: [A], follows: [] } };
+
+  const span = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+  const ZERO_WIDTH = [0x200b, 0x200c, 0x200d, 0x2060];
+  // What is cut at an edge: what String.prototype.trim strips, then the zero-width
+  // format characters it leaves. Written out here, independent of the module.
+  const STRIPPED: number[] = [
+    ...span(0x09, 0x0d),
+    0x20,
+    0xa0,
+    0x1680,
+    ...span(0x2000, 0x200a),
+    0x200b,
+    0x200c,
+    0x200d,
+    0x2028,
+    0x2029,
+    0x202f,
+    0x205f,
+    0x2060,
+    0x3000,
+    0xfeff,
+  ];
+
+  it.each([
+    ["a trailing NBSP", "", "\u00a0"],
+    ["a leading NBSP", "\u00a0", ""],
+    ["a leading BOM", "\ufeff", ""],
+    ["a trailing zero-width space", "", "\u200b"],
+    ["a trailing U+2028", "", "\u2028"],
+    ["a trailing U+3000", "", "\u3000"],
+    ["zero-width, no-break and BOM characters at both ends, mixed", "\u200b\u00a0", "\u00a0\ufeff\u200b"],
+    ["a CRLF pair", "", "\r\n"],
+    ["a zero-width joiner and a word joiner between blanks", "\u200d \u2060", "\u2060 \u200d"],
+  ])("%s around a valid code parses ok with the same payload as the bare code", (_label, before, after) => {
+    expect(parseTransferCode(`${before}${code}${after}`)).toEqual(bare);
+  });
+
+  it("the cleaned edges reach JSON.parse: it is called with the bare code, never with the wrapped text", () => {
+    const parse = vi.spyOn(JSON, "parse");
+    expect(parseTransferCode(`\u200b\u00a0${code}\u00a0\ufeff`)).toEqual(bare);
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledWith(code);
+  });
+
+  it("text that is only blanks and zero-width characters is empty, and JSON.parse is not called", () => {
+    const parse = vi.spyOn(JSON, "parse");
+    expect(reasonOf("\u200b\u00a0\ufeff")).toBe("empty");
+    expect(reasonOf("\u2028\u2029\u3000\u2060\u200c")).toBe("empty");
+    expect(reasonOf(" \u200b\n\u00a0\t\ufeff ")).toBe("empty");
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it("characters INSIDE the code are not touched: a no-break space or a zero-width space between tokens stays invalid", () => {
+    expect(reasonOf(`{"format":"tayf-liste",\u00a0"v":1,"saved":[],"follows":[]}`)).toBe("invalid");
+    expect(reasonOf(`{"format":"tayf-liste","v":1,\u200b"saved":[],"follows":[]}`)).toBe("invalid");
+    expect(reasonOf(`{"format":"tayf-liste","v":1,"saved":[],"follows":[]\ufeff}`)).toBe("invalid");
+    // The inside of an entry stays strict too: an id with an NBSP or a ZWSP is no uuid.
+    expect(reasonOf(codeOf({ saved: [`${A}\u00a0`] }))).toBe("invalid");
+    expect(reasonOf(codeOf({ saved: [`\u200b${A}`] }))).toBe("invalid");
+    expect(reasonOf(codeOf({ saved: [A, ` ${B}`] }))).toBe("invalid");
+  });
+
+  it("a real character next to the code still makes it invalid, wrapped or not", () => {
+    expect(reasonOf(`${code}x`)).toBe("invalid");
+    expect(reasonOf(`x${code}`)).toBe("invalid");
+    expect(reasonOf(`\u00a0${code}x\u00a0`)).toBe("invalid");
+    expect(reasonOf(`\u200b${code}\u200b}`)).toBe("invalid");
+    expect(reasonOf(`${code}${code}`)).toBe("invalid");
+    // U+0085 and U+180E are not stripped by trim, so they are not stripped here.
+    expect(reasonOf(`${code}\u0085`)).toBe("invalid");
+    expect(reasonOf(`\u180e${code}`)).toBe("invalid");
+    expect(reasonOf("\u0085")).toBe("invalid");
+  });
+
+  it("the size check is on the RAW text: a 50,001-character input whose edges are no-break spaces is still too-large", () => {
+    const parse = vi.spyOn(JSON, "parse");
+    const pad = "\u00a0".repeat(TRANSFER_MAX_CHARS + 1 - code.length);
+    const raw = `${pad}${code}`;
+    expect(raw.length).toBe(TRANSFER_MAX_CHARS + 1);
+    expect(parseTransferCode(raw)).toEqual({ ok: false, reason: "too-large" });
+    expect(parseTransferCode(`${code}${pad}`)).toEqual({ ok: false, reason: "too-large" });
+    expect(parseTransferCode("\u00a0".repeat(TRANSFER_MAX_CHARS + 1))).toEqual({ ok: false, reason: "too-large" });
+    expect(parseTransferCode("\u200b".repeat(TRANSFER_MAX_CHARS + 1))).toEqual({ ok: false, reason: "too-large" });
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it("a code padded with no-break spaces to exactly TRANSFER_MAX_CHARS is accepted", () => {
+    const raw = `\u00a0${code}${"\u200b".repeat(TRANSFER_MAX_CHARS - code.length - 1)}`;
+    expect(raw.length).toBe(TRANSFER_MAX_CHARS);
+    expect(parseTransferCode(raw)).toEqual(bare);
+  });
+
+  it("the stripped set is what String.prototype.trim strips plus U+200B, U+200C, U+200D and U+2060", () => {
+    const byEngine: number[] = [];
+    for (let u = 0; u <= 0xffff; u++) {
+      if (String.fromCharCode(u).trim() === "") byEngine.push(u);
+    }
+    expect(byEngine).toEqual(STRIPPED.filter((u) => !ZERO_WIDTH.includes(u)));
+    expect(STRIPPED).toEqual([...STRIPPED].sort((a, b) => a - b));
+  });
+
+  it("sweep of every UTF-16 code unit: exactly the stripped ones are cut at an edge, every other one keeps the code invalid", () => {
+    const stripped = new Set(STRIPPED);
+    const wrong: string[] = [];
+    for (let u = 0; u <= 0xffff; u++) {
+      const ch = String.fromCharCode(u);
+      const want = stripped.has(u);
+      const front = reasonOf(`${ch}${code}`);
+      const back = reasonOf(`${code}${ch}`);
+      const alone = reasonOf(ch);
+      if (front !== (want ? "ok" : "invalid") || back !== (want ? "ok" : "invalid") || alone !== (want ? "empty" : "invalid")) {
+        wrong.push(`U+${u.toString(16).padStart(4, "0")}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("cuts a long run at an edge in linear time, wherever the run sits (no regex backtracking)", () => {
+    // Under TRANSFER_MAX_CHARS, so the walk runs. The run is a mix of no-break, zero-width,
+    // U+2028 and BOM characters. The worst shapes for a "^\s+|\s+$" regex are a long run
+    // that does NOT end the text (a trailing "x"), and one that starts after a real character.
+    const unit = "\u00a0\u200b\u2028\ufeff \u3000";
+    const run = (input: string) => parseTransferCode(input);
+    const options = { n: 48_000, ceilingMs: 2_000 };
+    expectLinear(rep(unit, "", code), run, options);
+    expectLinear(rep(unit, code, ""), run, options);
+    expectLinear(rep(unit, "", "x"), run, options);
+    expectLinear(rep(unit, "x", "x"), run, options);
+    expectLinear(rep(unit, "x", ""), run, options);
+    expect(run(rep(unit, "", code)(48_000))).toEqual(bare);
+    expect(reasonOf(rep(unit, "x", "x")(48_000))).toBe("invalid");
+  });
+
+  it("keeps the comment above true: neither transfer test file holds a literal invisible character", () => {
+    // no-break space, mongolian vowel separator, zero-width space/non-joiner/joiner, U+2028, U+2029,
+    // word joiner, ideographic space and the byte-order mark. The class itself is written as escapes.
+    const invisible = /[\u00a0\u180e\u200b-\u200d\u2028\u2029\u2060\u3000\ufeff]/u;
+    for (const file of ["list-transfer.test.ts", "list-transfer-panel.test.tsx"]) {
+      const source = readFileSync(resolve(process.cwd(), "src/components/transfer", file), "utf8");
+      const hit = invisible.exec(source);
+      const line = hit === null ? 0 : source.slice(0, hit.index).split("\n").length;
+      expect({ file, line }).toEqual({ file, line: 0 });
+    }
+  });
+});
+
 describe("mergeBookmarkIds", () => {
   it("appends new ids after the stored ones and never removes one", () => {
     const merge = mergeBookmarkIds([A, B], [C], SAVED_MAX_IDS);
@@ -514,6 +673,14 @@ describe("copy", () => {
     expect(importErrorText("empty")).toBe("Önce bir aktarma kodu yapıştırın.");
     expect(importErrorText("too-large")).toBe("Kod çok uzun: en fazla 1.000 kayıtlı hikâye ve 20 takip aktarılabilir.");
     expect(importErrorText("invalid")).toBe("Kod okunamadı. Kodu eksiksiz kopyaladığınızdan emin olun.");
+  });
+
+  it("IMPORT_KEPT_FOR_RETRY_TEXT is exactly the retry sentence, and importSummaryText alone does not append it", () => {
+    expect(IMPORT_KEPT_FOR_RETRY_TEXT).toBe("Kod alanda duruyor: yer açtıktan sonra yeniden İçe aktar'a basın.");
+    const zero = { added: 0, existing: 0, skipped: 0 };
+    const summary = importSummaryText({ saved: zero, follows: { ...zero, added: 2, skipped: 3 }, stored: true });
+    expect(summary).toBe("0 hikâye ve 2 takip eklendi. 3 takip eklenmedi: en fazla 20 takip olabilir.");
+    expect(summary.includes(IMPORT_KEPT_FOR_RETRY_TEXT)).toBe(false);
   });
 
   it("importSummaryText head, existing, both cap notes, all-present, nothing, storage-failed", () => {

@@ -58,6 +58,13 @@
 //     the ordinary-word names of sources that are inactive today (or that no
 //     headline used in the window), because a source can be reactivated and the
 //     word does not change.
+//     Q3 READ THE NEUTRAL CLUSTER TITLE ONLY, which understated a word that the SOURCES' own headlines use
+//     (h157-search-2): iha scored 4 clusters, yet 196 of 68,693 ARTICLE titles of the last 7 days
+//     (2026-11-12) hold İHA as a whole word (the drone: "Rusya: Moskova bölgesine 417 İHA yönlendirildi")
+//     and 0 of them come from the İHA source, which has never stored an article. /?q=iha showed
+//     "Haber kaynağı: İHA kaynak sayfası" above 22 drone stories and linked an empty, noindex page, so
+//     "iha" joins OUTLET_WORD_DENY. A future re-run of Q3 must count ARTICLE titles as well as cluster
+//     titles: the neutral title of a cluster hides how often a headline writer uses the word.
 // Q4  Two active sources with one compact key (name folded, separators dropped):
 //     0 rows. If two ever do, the first in the registry's order (by name) wins.
 // Q5  hurriyet, sozcu, ntv and halk-tv are all active; THYAO, KCHOL and ISCTR are
@@ -181,6 +188,9 @@ export const OUTLET_WORD_DENY: ReadonlySet<string> = new Set([
   "dunya",
   "karar",
   "cumhuriyet",
+  // iha: the drone word. 196 of 68,693 article titles in 7 days (2026-11-12) hold İHA, 0 from the İHA
+  // source, which has never stored an article. "iha gazetesi" still reaches it (OUTLET_QUALIFIER).
+  "iha",
   "korkusuz",
   "muhalif",
   "evrensel",

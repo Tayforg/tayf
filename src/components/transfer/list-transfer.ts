@@ -15,7 +15,8 @@
 //         browser starts a fresh baseline through addFollow. At most MAX_FOLLOWS.
 //
 // The parser is all-or-nothing: one bad entry rejects the whole code and nothing is
-// merged. Its only regex is the existing anchored UUID_RE.
+// merged. Its only regex is the existing anchored UUID_RE. The two ends of the pasted
+// text are cleaned by a character walk (trimTransferEdges), not by a regex.
 
 import { normaliseBookmarkId, normaliseBookmarkIds } from "@/components/bookmark/bookmark-ids";
 import { SAVED_MAX_IDS, UUID_RE } from "@/components/bookmark/saved-lookup";
@@ -59,6 +60,8 @@ export const EXPORT_COPY_FAILED_TEXT = "Otomatik kopyalanamadı — kutudaki met
 export const IMPORT_NOT_STORED_TEXT = "Kaydedilemedi: tarayıcı yerel depolamaya yazmaya izin vermiyor.";
 export const IMPORT_NOTHING_TEXT = "Kodda aktarılacak bir şey yok.";
 export const IMPORT_ALL_PRESENT_TEXT = "Koddaki her şey zaten listenizde.";
+/** Added to the status of a partly applied import (a list cap skipped items): the code stays in the box. */
+export const IMPORT_KEPT_FOR_RETRY_TEXT = "Kod alanda duruyor: yer açtıktan sonra yeniden İçe aktar'a basın.";
 
 // ---------------------------------------------------------------------------
 // Build
@@ -129,20 +132,52 @@ function isFollowKind(v: unknown): v is FollowKind {
 }
 
 /**
+ * The characters cut from the two ends of a pasted code, as UTF-16 code units (all
+ * of them are in the BMP). First what String.prototype.trim strips: tab, line feed,
+ * vertical tab, form feed, carriage return, space, no-break space, U+1680, U+2000 to
+ * U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 and the byte-order mark U+FEFF.
+ * Then the zero-width format characters trim leaves: U+200B, U+200C, U+200D, U+2060.
+ * A messenger, a mail client or a notes app adds these at an end of a copied code.
+ * U+0085 and U+180E are not in it, as with trim.
+ */
+const EDGE_CHAR_CODES: ReadonlySet<number> = new Set([
+  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x00a0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+  0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff, 0x200b, 0x200c, 0x200d,
+  0x2060,
+]);
+
+/**
+ * `raw` without the EDGE_CHAR_CODES characters at its start and at its end, in any
+ * mix and order ("repeat until stable" is one walk over the one set). Two index
+ * walks, one from each end, each step one Set lookup: linear in the number of
+ * characters cut, with no regex and no backtracking (CodeQL js/redos). Characters
+ * inside the text are never touched.
+ */
+function trimTransferEdges(raw: string): string {
+  let start = 0;
+  let end = raw.length;
+  while (start < end && EDGE_CHAR_CODES.has(raw.charCodeAt(start))) start += 1;
+  while (end > start && EDGE_CHAR_CODES.has(raw.charCodeAt(end - 1))) end -= 1;
+  return start === 0 && end === raw.length ? raw : raw.slice(start, end);
+}
+
+/**
  * Reads a pasted code. Checked in this order, stopping at the first failure:
- * not a string, longer than TRANSFER_MAX_CHARS (before trimming or parsing),
- * blank, not JSON (any throw, RangeError included), the wrong envelope, the
- * wrong format or version, saved / follows not arrays, too many entries, then
- * every entry. Never throws.
+ * not a string, longer than TRANSFER_MAX_CHARS (on the RAW text, so the edge walk
+ * below never sees more than that), blank once its edges are cleaned
+ * (trimTransferEdges), not JSON (any throw, RangeError included; JSON.parse gets
+ * the cleaned text), the wrong envelope, the wrong format or version, saved /
+ * follows not arrays, too many entries, then every entry. Never throws.
  */
 export function parseTransferCode(raw: unknown): TransferParse {
   if (typeof raw !== "string") return INVALID;
   if (raw.length > TRANSFER_MAX_CHARS) return TOO_LARGE;
-  if (raw.trim() === "") return { ok: false, reason: "empty" };
+  const text = trimTransferEdges(raw);
+  if (text === "") return { ok: false, reason: "empty" };
 
   let data: unknown;
   try {
-    data = JSON.parse(raw);
+    data = JSON.parse(text);
   } catch {
     return INVALID;
   }
