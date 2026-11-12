@@ -41,6 +41,7 @@ import {
   nonVotingOutsideZone,
 } from "@/lib/bias/zone-summary";
 import { cardEnterClass } from "@/lib/ui/card-enter";
+import { splitFeedHead } from "@/lib/ui/feed-head";
 import {
   getBlindspotsSafe,
   type BlindspotBundle,
@@ -63,6 +64,16 @@ import { getFeedStatusSummary } from "@/lib/sources/feed-status";
 // the feed (see BlindspotsFeed): React reveals a nested boundary only after
 // its parent has revealed, so the band can never paint before the feed and
 // push it down (perf-4 layout shift).
+//
+// h166-perf-3: the feed itself is cut in two. The head (count lines, band and
+// the first FEED_HEAD_CARDS cards: the LCP) renders in the feed's boundary; the
+// other cards, the compact list, the newsletter block and the near band render
+// in a nested boundary after it (BlindspotsFeedTail). A boundary cannot reveal
+// before its last card has streamed and reveals come in windows of about 300 ms,
+// so with all 30 cards in the head's boundary the LCP paragraph waited for the
+// whole list (byte 864,620 of 1,284,031). Same cards, same order, same
+// markup: only the boundary moves. Feeds of FEED_HEAD_CARDS or fewer cards have
+// no tail and render exactly as before.
 export default function BlindspotsPage() {
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
@@ -140,6 +151,10 @@ export async function BlindspotsFeed() {
 
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
+  // h166-perf-3: head and tail of the card list. The failed and empty states
+  // have no bundles, so their tail is empty and they never mount one.
+  const feedSplit = splitFeedHead(result.ok ? result.bundles : []);
+  const hasTail = feedSplit.tail.length > 0;
   const countLine = result.ok
     ? blindspotCountLine(
         result.claimCount,
@@ -226,37 +241,32 @@ export async function BlindspotsFeed() {
               names the band, not the list. Screen-reader only: nothing moves. */}
           <h2 className="sr-only">Kör nokta haberleri</h2>
           <div className="space-y-4">
-            {result.bundles.map((b, i) => {
-              const hoursAgo =
-                (nowMs - new Date(b.cluster.updated_at).getTime()) / 3_600_000;
-              const prevZone =
-                i > 0 ? result.bundles[i - 1]?.dominantZone ?? null : null;
-              const showDivider = i > 0 && b.dominantZone !== prevZone;
-              return (
-                <div key={b.cluster.id}>
-                  {showDivider && (
-                    <div className="h-px bg-gradient-to-r from-transparent via-border/30 to-transparent my-6" />
-                  )}
-                  <div className={cardEnterClass(i, "cap6") || undefined}>
-                    <BlindspotCard
-                      bundle={b}
-                      index={i}
-                      isAging={hoursAgo > 48}
-                    />
-                  </div>
-                </div>
-              );
-            })}
+            {feedSplit.head.map((b, i) =>
+              renderBlindspotCard(result.bundles, b, i, nowMs),
+            )}
           </div>
-          {result.more.length > 0 && <MoreBlindspotList rows={result.more} />}
+          {/* h166-perf-3: more than FEED_HEAD_CARDS cards: the rest of the list,
+              the compact list, the newsletter block and the near band stream
+              behind this nested boundary, after the head has been revealed.
+              The fallback is null: nothing sits below the head in this state, so
+              nothing can be pushed down by the tail arriving. */}
+          {hasTail ? (
+            <Suspense fallback={null}>
+              <BlindspotsFeedTail
+                bundles={result.bundles}
+                more={result.more}
+                nowMs={nowMs}
+              />
+            </Suspense>
+          ) : (
+            result.more.length > 0 && <MoreBlindspotList rows={result.more} />
+          )}
         </>
       )}
 
-      {isMailConfigured() && (
-        <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 max-w-sm">
-          <NewsletterForm />
-        </div>
-      )}
+      {/* With a tail, the newsletter block and the near band are the tail's last
+          children (BlindspotsFeedTail), so the order on the page is the same. */}
+      {!hasTail && feedNewsletterBlock()}
 
       {/* "Kör noktaya yakın" (display only, not blindspots) is the LAST child,
           in every state (ok, empty, failed), so the visual order is unchanged.
@@ -266,9 +276,112 @@ export async function BlindspotsFeed() {
           the feed does not await it, a slow or failed fetch only delays or
           hides the band (no skeleton, fallback null), and SilenceDigestBand
           and DenominatorNote above use the main bundles only. */}
-      <Suspense fallback={null}>
-        <NearBlindspotsSection />
-      </Suspense>
+      {!hasTail && nearBlindspotsBand()}
+    </>
+  );
+}
+
+// One card of the list: today's wrapper, zone divider, entrance class and
+// BlindspotCard, unchanged. `i` is the card's position in the WHOLE list, not in
+// the head or the tail: the banner priority (index 0 is the LCP card), the
+// cap6 stagger and the divider (which compares the zone with card i - 1, so the
+// first tail card is compared with the last head card) all depend on it.
+function renderBlindspotCard(
+  bundles: readonly BlindspotBundle[],
+  b: BlindspotBundle,
+  i: number,
+  nowMs: number,
+) {
+  const hoursAgo =
+    (nowMs - new Date(b.cluster.updated_at).getTime()) / 3_600_000;
+  return (
+    <div key={b.cluster.id}>
+      {zoneDividerBefore(bundles, b, i) && (
+        <div className="h-px bg-gradient-to-r from-transparent via-border/30 to-transparent my-6" />
+      )}
+      <div className={cardEnterClass(i, "cap6") || undefined}>
+        <BlindspotCard bundle={b} index={i} isAging={hoursAgo > 48} />
+      </div>
+    </div>
+  );
+}
+
+// A divider sits before card i when its dominant zone differs from card
+// i - 1's (never before card 0).
+function zoneDividerBefore(
+  bundles: readonly BlindspotBundle[],
+  b: BlindspotBundle,
+  i: number,
+): boolean {
+  const prevZone = i > 0 ? bundles[i - 1]?.dominantZone ?? null : null;
+  return i > 0 && b.dominantZone !== prevZone;
+}
+
+// The newsletter sign-up block under the list. A function that returns the
+// element (not a component), so the feed and its tail share one definition and
+// the element tree keeps the shape it always had.
+function feedNewsletterBlock() {
+  return (
+    isMailConfigured() && (
+      <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 max-w-sm">
+        <NewsletterForm />
+      </div>
+    )
+  );
+}
+
+// "Kör noktaya yakın" in its own nested boundary (see the note in
+// BlindspotsFeed): the last element of the feed, or of its tail when it has one.
+function nearBlindspotsBand() {
+  return (
+    <Suspense fallback={null}>
+      <NearBlindspotsSection />
+    </Suspense>
+  );
+}
+
+// The part of the feed after its first FEED_HEAD_CARDS cards (h166-perf-3):
+// the remaining cards, the compact list, the newsletter block and the near band,
+// in the order the single feed had them. Mounted by BlindspotsFeed behind its own
+// <Suspense> only when the list is longer than the head; exported like
+// BlindspotsFeed so tests can render it directly.
+//
+// It is async on purpose: an async component makes Flight serialize the tail
+// after the head's rows, so the head's boundary completes and reveals first.
+// connection() is already this file's idiom for that and reads no clock;
+// `nowMs` comes in as a prop from the feed's one reading.
+//
+// Spacing: the page container is space-y-5, so the head's list gets 20 px below
+// it, and this list's -mt-1 (-4 px) collapses with that to the 16 px between two
+// cards of the single space-y-4 list. The compact list, the newsletter block and
+// the near band stay siblings of the card list (not children of it), so they keep
+// the container's 20 px. When the first tail card carries a zone divider, its own
+// my-6 (24 px) already collapses with the 20 px to the 24 px gap the single list
+// had there, so the -4 px is left out: with it the gap would be 20 px.
+export async function BlindspotsFeedTail({
+  bundles,
+  more,
+  nowMs,
+}: {
+  bundles: BlindspotBundle[];
+  more: BlindspotMoreRow[];
+  nowMs: number;
+}) {
+  await connection();
+
+  const { tail, tailStart } = splitFeedHead(bundles);
+  const first = tail[0];
+  const dividerLeads =
+    first !== undefined && zoneDividerBefore(bundles, first, tailStart);
+
+  return (
+    <>
+      <div className={dividerLeads ? "space-y-4" : "-mt-1 space-y-4"}>
+        {tail.map((b, k) => renderBlindspotCard(bundles, b, tailStart + k, nowMs))}
+      </div>
+      {more.length > 0 && <MoreBlindspotList rows={more} />}
+      {feedNewsletterBlock()}
+      {nearBlindspotsBand()}
     </>
   );
 }

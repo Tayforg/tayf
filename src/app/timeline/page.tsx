@@ -216,8 +216,12 @@ export default async function TimelinePage() {
                     >
                       {formatRowTime(row.first_published)}
                     </time>
+                    {/* No prefetch: this list holds up to TIMELINE_LIMIT (200) request-time
+                        cluster pages, and every row entering the viewport would fetch two
+                        RSC payloads (h166-perf-1). */}
                     <Link
                       href={`/cluster/${row.id}`}
+                      prefetch={false}
                       lang={row.lang}
                       className="min-w-0 flex-1 text-sm font-medium leading-snug hover:text-foreground sm:line-clamp-2 max-sm:order-last max-sm:basis-full max-sm:line-clamp-4"
                     >

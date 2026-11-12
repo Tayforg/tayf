@@ -63,10 +63,17 @@ vi.mock("@/lib/clusters/near-blindspots-query", () => ({
   getNearBlindspotsSafe: () => getNearBlindspots(),
 }));
 
-import BlindspotsPage, { BlindspotsFeed, NearBlindspotsSection, metadata } from "./page";
-import { createElement, Suspense } from "react";
+import BlindspotsPage, {
+  BlindspotsFeed,
+  BlindspotsFeedTail,
+  NearBlindspotsSection,
+  metadata,
+} from "./page";
+import { connection } from "next/server";
+import { createElement, Fragment, Suspense } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { NewsletterForm } from "@/components/newsletter/newsletter-form";
 import { PageHero } from "@/components/ui/page-hero";
 import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
@@ -214,6 +221,24 @@ async function renderSlot(tree: unknown, componentName: string): Promise<unknown
     throw new Error(`no <Suspense> around ${componentName}`);
   }
   return (child.type as (props: unknown) => Promise<unknown>)(child.props);
+}
+
+/**
+ * The whole feed as a reader has it once both boundaries have revealed (h166-perf-3):
+ * the head tree and, when the list was split, the awaited tail tree. Tests that
+ * look at every card or at the "Diğer kör noktalar" list use this instead of
+ * BlindspotsFeed() alone.
+ */
+async function feedWithTail(): Promise<unknown[]> {
+  const head = await BlindspotsFeed();
+  const child = findSuspenseAround(head, "BlindspotsFeedTail")?.props?.children as
+    | SlotElement
+    | undefined;
+  if (!child) return [head];
+  return [
+    head,
+    await BlindspotsFeedTail(child.props as unknown as Parameters<typeof BlindspotsFeedTail>[0]),
+  ];
 }
 
 describe("/blindspots page", () => {
@@ -1440,7 +1465,8 @@ describe("/blindspots page — the whole window is listed (h53-consistency-1)", 
     );
     getBlindspots.mockResolvedValueOnce(okResult(cards, rows));
 
-    const tree = await BlindspotsFeed();
+    // h166-perf-3: 30 cards are split into a head and a tail; the claim is about the whole page.
+    const tree = await feedWithTail();
 
     const cardIds = collectElements(tree)
       .filter((el) => typeof el.props?.bundle === "object")
@@ -1581,6 +1607,441 @@ describe("/blindspots page — the whole window is listed (h53-consistency-1)", 
       );
 
       expect(links).toEqual([]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h166-perf-3. The first FEED_HEAD_CARDS cards (with the title, the count lines
+// and the band) stay in the boundary that holds the page head; the other cards,
+// the compact list, the newsletter block and "Kör noktaya yakın" move into a
+// nested boundary after it (BlindspotsFeedTail), so React can reveal the head
+// without waiting for the whole list. Nothing the reader sees changes: same
+// cards, same order, same global index, same dividers and entrance classes.
+// ---------------------------------------------------------------------------
+describe("/blindspots page — the head reveals before the card list (h166-perf-3)", () => {
+  const NOW = Date.parse("2026-11-12T12:00:00Z");
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  type Keyed = Elementish & { key?: string | null };
+
+  function mk(id: string, zone: MediaDnaZone = "iktidar") {
+    return {
+      cluster: { id, updated_at: new Date(NOW - 3_600_000).toISOString() },
+      articles: [],
+      sources: [],
+      dominantZone: zone,
+      dominantPct: 1,
+      votingZoneCounts: {
+        iktidar: zone === "iktidar" ? 5 : 0,
+        bagimsiz: 0,
+        muhalefet: zone === "muhalefet" ? 5 : 0,
+      },
+      isWireRedistribution: false,
+      effectiveArticleCount: 5,
+    };
+  }
+
+  function moreRow(id: string) {
+    return {
+      id,
+      title: `Kompakt ${id}`,
+      dominantZone: "iktidar" as MediaDnaZone,
+      dominantPct: 1,
+      sourceCount: 5,
+      firstPublished: "2026-11-10T10:00:00.000Z",
+      votingZoneCounts: { iktidar: 5, bagimsiz: 0, muhalefet: 0 },
+    };
+  }
+
+  // Zones: c0 c1 c2 iktidar | c3 c4 muhalefet. A divider is drawn before c3
+  // only (the zone changes there), never before c2.
+  const FIVE = [
+    mk("c0"),
+    mk("c1"),
+    mk("c2"),
+    mk("c3", "muhalefet"),
+    mk("c4", "muhalefet"),
+  ];
+  const TWO_MORE = [moreRow("m1"), moreRow("m2")];
+
+  const DIVIDER_CLASS =
+    "h-px bg-gradient-to-r from-transparent via-border/30 to-transparent my-6";
+
+  const nameOf = (el: Elementish | undefined) =>
+    typeof el?.type === "function" ? (el.type as { name?: string }).name : undefined;
+
+  /** The `space-y-4` div that holds the card wrappers. */
+  function cardLists(tree: unknown): Elementish[] {
+    return collectElements(tree).filter(
+      (el) => el.type === "div" && el.props?.className === "space-y-4",
+    );
+  }
+
+  function wrappersOf(list: Elementish | undefined): Keyed[] {
+    return [list?.props?.children].flat(2).filter(Boolean) as Keyed[];
+  }
+
+  function cardIn(wrapper: Elementish): Elementish | undefined {
+    return collectElements(wrapper).find((el) => nameOf(el) === "BlindspotCard");
+  }
+
+  function tailBoundaries(tree: unknown): Elementish[] {
+    return collectElements(tree).filter(
+      (el) =>
+        el.type === Suspense &&
+        (el.props?.children as Elementish | undefined)?.type === BlindspotsFeedTail,
+    );
+  }
+
+  function nearBoundaries(tree: unknown): Elementish[] {
+    return collectElements(tree).filter(
+      (el) =>
+        el.type === Suspense &&
+        (el.props?.children as Elementish | undefined)?.type === NearBlindspotsSection,
+    );
+  }
+
+  function moreListsIn(tree: unknown): Elementish[] {
+    return collectElements(tree).filter((el) => nameOf(el) === "MoreBlindspotList");
+  }
+
+  function newsletters(tree: unknown): Elementish[] {
+    return collectElements(tree).filter((el) => el.type === NewsletterForm);
+  }
+
+  /** Props of the one tail boundary, exactly as the page hands them to the tail. */
+  function tailProps(tree: unknown): Parameters<typeof BlindspotsFeedTail>[0] {
+    const found = tailBoundaries(tree);
+    expect(found).toHaveLength(1);
+    return (found[0]?.props?.children as Elementish).props as unknown as Parameters<
+      typeof BlindspotsFeedTail
+    >[0];
+  }
+
+  /** The tail's fragment children, flattened: [cardsDiv, more?, newsletter?, near]. */
+  async function tailChildren(
+    props: Parameters<typeof BlindspotsFeedTail>[0],
+  ): Promise<Elementish[]> {
+    const out = (await BlindspotsFeedTail(props)) as Elementish;
+    expect(out.type).toBe(Fragment);
+    return [out.props?.children].flat(2).filter(Boolean) as Elementish[];
+  }
+
+  describe("(a) the head", () => {
+    it("the cards container holds exactly the first 2 card wrappers, keyed by the first 2 cluster ids", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult(FIVE, TWO_MORE));
+
+      const tree = await BlindspotsFeed();
+
+      const lists = cardLists(tree);
+      expect(lists).toHaveLength(1);
+      const wrappers = wrappersOf(lists[0]);
+      expect(wrappers.map((w) => w.key)).toEqual(["c0", "c1"]);
+      expect(wrappers.map((w) => cardIn(w)?.props?.index)).toEqual([0, 1]);
+    });
+
+    it("keeps card 0 free of the entrance animation (the LCP card) and card 1 on stagger-2", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult(FIVE, TWO_MORE));
+
+      const wrappers = wrappersOf(cardLists(await BlindspotsFeed())[0]);
+      const enter = (w: Elementish) =>
+        collectElements(w).find(
+          (el) => el.type === "div" && el.props?.className !== undefined,
+        )?.props?.className;
+
+      expect(enter(wrappers[0] as Elementish)).toBeUndefined();
+      expect(enter(wrappers[1] as Elementish)).toBe("animate-fade-up stagger-2");
+    });
+
+    it("keeps the count line, the unlisted line, the band and the sr-only heading in the head", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult(FIVE, TWO_MORE, { unlistedCount: 3 }),
+      );
+
+      const tree = await BlindspotsFeed();
+
+      expect(collectText(tree).some((t) => t.startsWith("Son 7 günde 7 kör nokta"))).toBe(true);
+      expect(
+        collectText(tree).some((t) => t.startsWith("Bu dönemde kör nokta etiketi taşıyan ")),
+      ).toBe(true);
+      expect(collectElements(tree).filter((el) => el.type === SilenceDigestBand)).toHaveLength(1);
+      const heading = collectElements(tree).filter(
+        (el) => el.type === "h2" && el.props?.className === "sr-only",
+      );
+      expect(heading).toHaveLength(1);
+      expect(collectText(heading[0]).join("")).toBe("Kör nokta haberleri");
+    });
+  });
+
+  describe("(b) the tail boundary", () => {
+    it("is exactly one Suspense around BlindspotsFeedTail, after the cards container, with a null fallback", async () => {
+      process.env.RESEND_API_KEY = "re_test_key";
+      getBlindspots.mockResolvedValueOnce(okResult(FIVE, TWO_MORE));
+
+      const tree = await BlindspotsFeed();
+
+      const found = tailBoundaries(tree);
+      expect(found).toHaveLength(1);
+      expect(found[0]?.props?.fallback).toBeNull();
+      const flat = collectElements(tree);
+      expect(flat.indexOf(cardLists(tree)[0] as Elementish)).toBeGreaterThan(-1);
+      expect(flat.indexOf(cardLists(tree)[0] as Elementish)).toBeLessThan(
+        flat.indexOf(found[0] as Elementish),
+      );
+    });
+
+    it("hands the tail the fetcher's bundles and more rows (same references) and the page's one clock reading", async () => {
+      const result = okResult(FIVE, TWO_MORE);
+      getBlindspots.mockResolvedValueOnce(result);
+
+      const props = tailProps(await BlindspotsFeed());
+
+      expect(props.bundles).toBe(result.bundles);
+      expect(props.more).toBe(result.more);
+      expect(props.nowMs).toBe(NOW);
+    });
+
+    it("moves the compact list, the newsletter block and the near band out of the head", async () => {
+      process.env.RESEND_API_KEY = "re_test_key";
+      getBlindspots.mockResolvedValueOnce(okResult(FIVE, TWO_MORE));
+
+      const tree = await BlindspotsFeed();
+
+      expect(moreListsIn(tree)).toHaveLength(0);
+      expect(newsletters(tree)).toHaveLength(0);
+      expect(nearBoundaries(tree)).toHaveLength(0);
+      expect(collectText(tree).join(" ")).not.toContain("Diğer kör noktalar");
+    });
+
+    it("3 bundles (one over the head): a tail of exactly one card, c2 at index 2", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult(FIVE.slice(0, 3), []));
+
+      const tree = await BlindspotsFeed();
+      const [list] = await tailChildren(tailProps(tree));
+
+      const wrappers = wrappersOf(list);
+      expect(wrappers.map((w) => w.key)).toEqual(["c2"]);
+      expect(cardIn(wrappers[0] as Elementish)?.props?.index).toBe(2);
+    });
+
+    it("is never mounted on the empty and failed paths", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult([]));
+      expect(tailBoundaries(await BlindspotsFeed())).toHaveLength(0);
+
+      getBlindspots.mockResolvedValueOnce({ ok: false });
+      expect(tailBoundaries(await BlindspotsFeed())).toHaveLength(0);
+    });
+  });
+
+  describe("(c) BlindspotsFeedTail", () => {
+    async function tailOf(
+      bundles: ReturnType<typeof mk>[],
+      more: unknown[] = TWO_MORE,
+    ) {
+      getBlindspots.mockResolvedValueOnce(okResult(bundles, more));
+      return tailProps(await BlindspotsFeed());
+    }
+
+    it("yields the cards div with the 3 remaining wrappers in order, then the compact list, the newsletter block and the near band", async () => {
+      process.env.RESEND_API_KEY = "re_test_key";
+      const props = await tailOf(FIVE);
+
+      const [list, more, newsletter, near, ...extra] = await tailChildren(props);
+
+      expect(extra).toEqual([]);
+      expect(list?.type).toBe("div");
+      expect(String(list?.props?.className)).toContain("-mt-1 space-y-4");
+      expect(wrappersOf(list).map((w) => w.key)).toEqual(["c2", "c3", "c4"]);
+      expect(nameOf(more)).toBe("MoreBlindspotList");
+      expect(more?.props?.rows).toBe(TWO_MORE);
+      expect(newsletter?.type).toBe("div");
+      expect(newsletters(newsletter)).toHaveLength(1);
+      expect(near?.type).toBe(Suspense);
+      expect(near?.props?.fallback).toBeNull();
+      expect((near?.props?.children as Elementish).type).toBe(NearBlindspotsSection);
+    });
+
+    it("keeps the global card index (2, 3, 4) and the cap6 entrance stagger of the old single list", async () => {
+      const [list] = await tailChildren(await tailOf(FIVE));
+
+      const wrappers = wrappersOf(list);
+      expect(wrappers.map((w) => cardIn(w)?.props?.index)).toEqual([2, 3, 4]);
+      const stagger = wrappers.map(
+        (w) =>
+          collectElements(w).find(
+            (el) =>
+              el.type === "div" &&
+              typeof el.props?.className === "string" &&
+              el.props.className.startsWith("animate-fade-up"),
+          )?.props?.className,
+      );
+      expect(stagger).toEqual([
+        "animate-fade-up stagger-3",
+        "animate-fade-up stagger-4",
+        "animate-fade-up stagger-5",
+      ]);
+    });
+
+    it("takes the zone-divider decision of the first tail card against bundle 1, not against nothing", async () => {
+      // c1 and c2 share a zone: no divider before c2. A tail-local 'previous'
+      // would be undefined and wrongly draw one.
+      const same = await tailChildren(await tailOf(FIVE));
+      const sameWrappers = wrappersOf(same[0]);
+      const dividerOf = (w: Elementish) => (w.props?.children as unknown[])[0];
+      expect(dividerOf(sameWrappers[0] as Elementish)).toBeFalsy();
+      // c3 differs from c2: the divider the old list drew there.
+      const drawn = dividerOf(sameWrappers[1] as Elementish) as Elementish;
+      expect(drawn.props?.className).toBe(DIVIDER_CLASS);
+      // c4 shares c3's zone.
+      expect(dividerOf(sameWrappers[2] as Elementish)).toBeFalsy();
+    });
+
+    it("draws the divider before c2 when c2's zone differs from c1's, and then drops -mt-1 (the divider's own 24 px margin already makes the gap)", async () => {
+      const bundles = [mk("c0"), mk("c1"), mk("c2", "muhalefet"), mk("c3", "muhalefet"), mk("c4")];
+      const [list] = await tailChildren(await tailOf(bundles));
+
+      const wrappers = wrappersOf(list);
+      const first = (wrappers[0]?.props?.children as unknown[])[0] as Elementish;
+      expect(first.props?.className).toBe(DIVIDER_CLASS);
+      // Collapsed with the container's 20 px, the divider's 24 px margin is the
+      // gap the single list had; a -4 px margin on top would make it 20.
+      expect(list?.props?.className).toBe("space-y-4");
+      // c4 differs from c3 again.
+      const last = (wrappers[2]?.props?.children as unknown[])[0] as Elementish;
+      expect(last.props?.className).toBe(DIVIDER_CLASS);
+    });
+
+    it("without a divider before the first tail card the container is exactly '-mt-1 space-y-4' (20 px - 4 px = the 16 px of the single list)", async () => {
+      const [list] = await tailChildren(await tailOf(FIVE));
+
+      expect(list?.props?.className).toBe("-mt-1 space-y-4");
+    });
+
+    it("starts with await connection() and reads no clock: the page's nowMs comes in as a prop", async () => {
+      const props = await tailOf(FIVE);
+      vi.mocked(connection).mockClear();
+
+      await BlindspotsFeedTail(props);
+
+      expect(connection).toHaveBeenCalledTimes(1);
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(join(here, "page.tsx"), "utf8");
+      const start = source.indexOf("export async function BlindspotsFeedTail");
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = source.indexOf("\n}\n", start);
+      const body = source.slice(start, end);
+      const at = (needle: string) => body.indexOf(needle);
+      expect(at("await connection();")).toBeGreaterThan(-1);
+      expect(at("await connection();")).toBeLessThan(at("splitFeedHead("));
+      expect(body).not.toContain("Date.now(");
+      expect(body).not.toContain("new Date()");
+    });
+
+    it("renders no compact list without `more` rows, no newsletter without a mail key, and still ends with the near band", async () => {
+      const props = await tailOf(FIVE, []);
+
+      const children = await tailChildren(props);
+
+      expect(moreListsIn(children)).toHaveLength(0);
+      expect(newsletters(children)).toHaveLength(0);
+      expect(children).toHaveLength(2);
+      expect(children[1]?.type).toBe(Suspense);
+      expect((children[1]?.props?.children as Elementish).type).toBe(NearBlindspotsSection);
+    });
+  });
+
+  describe("(d) 2 or fewer bundles keep today's shape", () => {
+    it.each([1, 2])(
+      "%i bundle(s): no tail; cards, compact list, newsletter and near band stay in the feed, in that order",
+      async (n) => {
+        process.env.RESEND_API_KEY = "re_test_key";
+        const bundles = FIVE.slice(0, n);
+        getBlindspots.mockResolvedValueOnce(okResult(bundles, TWO_MORE));
+
+        const tree = (await BlindspotsFeed()) as Elementish;
+
+        expect(tailBoundaries(tree)).toHaveLength(0);
+        const lists = cardLists(tree);
+        expect(lists).toHaveLength(1);
+        expect(wrappersOf(lists[0]).map((w) => w.key)).toEqual(bundles.map((b) => b.cluster.id));
+        expect(wrappersOf(lists[0]).map((w) => cardIn(w)?.props?.index)).toEqual(
+          bundles.map((_, i) => i),
+        );
+        // A single-list class: no -mt-1 anywhere.
+        expect(JSON.stringify(collectElements(tree).map((el) => el.props?.className))).not.toContain(
+          "-mt-1",
+        );
+
+        const flat = collectElements(tree);
+        const at = (el: Elementish | undefined) => flat.indexOf(el as Elementish);
+        expect(moreListsIn(tree)).toHaveLength(1);
+        expect(newsletters(tree)).toHaveLength(1);
+        expect(nearBoundaries(tree)).toHaveLength(1);
+        expect(at(lists[0])).toBeLessThan(at(moreListsIn(tree)[0]));
+        expect(at(moreListsIn(tree)[0])).toBeLessThan(at(newsletters(tree)[0]));
+        expect(at(newsletters(tree)[0])).toBeLessThan(at(nearBoundaries(tree)[0]));
+
+        // The feed's own children: denominator slot, the list branch, newsletter, near band.
+        const children = tree.props?.children as Elementish[];
+        expect(children).toHaveLength(4);
+        expect(children[2]?.type).toBe("div");
+        expect(newsletters(children[2])).toHaveLength(1);
+        expect(children[3]).toBe(nearBoundaries(tree)[0]);
+      },
+    );
+
+    it("2 bundles with no mail key: the same shape minus the newsletter block (false in its slot)", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult(FIVE.slice(0, 2), TWO_MORE));
+
+      const tree = (await BlindspotsFeed()) as Elementish;
+
+      const children = tree.props?.children as unknown[];
+      expect(children).toHaveLength(4);
+      expect(children[2]).toBe(false);
+      expect((children[3] as Elementish).type).toBe(Suspense);
+    });
+  });
+
+  describe("head and tail together are the page it was", () => {
+    it("every card appears once and in order, the compact list, the newsletter and the near band exactly once", async () => {
+      process.env.RESEND_API_KEY = "re_test_key";
+      getBlindspots.mockResolvedValueOnce(okResult(FIVE, TWO_MORE));
+
+      const full = await feedWithTail();
+
+      const ids = collectElements(full)
+        .filter((el) => nameOf(el) === "BlindspotCard")
+        .map((el) => (el.props?.bundle as { cluster: { id: string } }).cluster.id);
+      expect(ids).toEqual(["c0", "c1", "c2", "c3", "c4"]);
+      expect(moreListsIn(full)).toHaveLength(1);
+      expect(newsletters(full)).toHaveLength(1);
+      expect(nearBoundaries(full)).toHaveLength(1);
+      // The compact list, newsletter and near band come after the last card.
+      const flat = collectElements(full);
+      const lastCard = flat.map((el) => nameOf(el)).lastIndexOf("BlindspotCard");
+      expect(flat.indexOf(moreListsIn(full)[0] as Elementish)).toBeGreaterThan(lastCard);
+      expect(flat.indexOf(newsletters(full)[0] as Elementish)).toBeGreaterThan(
+        flat.indexOf(moreListsIn(full)[0] as Elementish),
+      );
+      expect(flat.indexOf(nearBoundaries(full)[0] as Elementish)).toBeGreaterThan(
+        flat.indexOf(newsletters(full)[0] as Elementish),
+      );
+    });
+
+    it("the near band stays one level below the tail boundary, so it still reveals after the cards (perf-4)", async () => {
+      // feedWithTail() reads the feed once more, so the result is not a one-shot.
+      getBlindspots.mockResolvedValue(okResult(FIVE, TWO_MORE));
+
+      const head = await BlindspotsFeed();
+      const tail = await feedWithTail();
+
+      expect(nearBoundaries(head)).toHaveLength(0);
+      expect(nearBoundaries(tail)).toHaveLength(1);
     });
   });
 });

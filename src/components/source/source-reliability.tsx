@@ -81,6 +81,7 @@ export function SourceReliabilityCard({
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <Link
           href="/metodoloji#kaynak-gostergeleri"
+          prefetch={false}
           className="text-[11px] text-muted-foreground hover:text-foreground transition-colors brand-underline"
         >
           Yöntem

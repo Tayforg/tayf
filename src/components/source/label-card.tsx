@@ -126,6 +126,7 @@ export function LabelCard({
         </h2>
         <Link
           href="/metodoloji#kaynaklar"
+          prefetch={false}
           className="text-[11px] text-muted-foreground hover:text-foreground transition-colors brand-underline"
         >
           Bölgeler nasıl hesaplanıyor?
@@ -188,6 +189,7 @@ export function LabelCard({
           {" · elle girilen etiket, bağımsız bir derecelendirme değil · "}
           <Link
             href="/metodoloji#guvenilirlik"
+            prefetch={false}
             className="hover:text-foreground transition-colors brand-underline"
           >
             nasıl belirleniyor?

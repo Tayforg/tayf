@@ -55,6 +55,7 @@ function methodNote(check: ClickbaitPrecisionCheck | null) {
           İtiraz ve düzeltme için{" "}
           <Link
             href="/metodoloji#duzeltme"
+            prefetch={false}
             className="underline decoration-dotted underline-offset-2 hover:text-foreground"
           >
             buraya bakın

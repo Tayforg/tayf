@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -26,6 +29,11 @@ vi.mock("next/cache", () => ({
   cacheTag: vi.fn(),
 }));
 
+// h166-perf-3: EntityHubTail starts with await connection(); outside a request that throws.
+vi.mock("next/server", () => ({
+  connection: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/lib/entities/entity-hub-query", () => ({
   getEntityHub: (...args: unknown[]) => {
     mocks.order.push("hub");
@@ -49,15 +57,16 @@ vi.mock("next/navigation", () => ({
 }));
 
 import Link from "next/link";
-import { Fragment } from "react";
+import { connection } from "next/server";
+import { Fragment, Suspense } from "react";
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { FollowButton } from "@/components/follow/follow-button";
 import { HubTrendChart } from "@/components/trends/hub-trend-chart";
-import { entityByKey } from "@/lib/entities/entity-hub";
+import { entityByKey, hubCardBannerIndex } from "@/lib/entities/entity-hub";
 
-import EntityHubPage, { generateMetadata } from "./page";
+import EntityHubPage, { EntityHubTail, generateMetadata } from "./page";
 
 type El = { type?: unknown; props?: Record<string, unknown> };
 
@@ -134,8 +143,31 @@ function bundle(id: string, ...rest: [dist?: unknown]) {
 type Sayfa = string | string[] | undefined;
 const searchParamsOf = (sayfa?: Sayfa) => Promise.resolve(sayfa === undefined ? {} : { sayfa });
 
-const renderHub = (key = "erdogan", sayfa?: Sayfa) =>
+// The page as the route returns it: the head, with the card list's tail still behind its <Suspense>.
+const renderHubHead = (key = "erdogan", sayfa?: Sayfa) =>
   EntityHubPage({ params: Promise.resolve({ key }), searchParams: searchParamsOf(sayfa) });
+
+/** The <Suspense> elements that wrap EntityHubTail in a tree (h166-perf-3). */
+const tailBoundaries = (tree: unknown) =>
+  walkAll(tree).filter(
+    (el) => el.type === Suspense && (el.props?.children as El | undefined)?.type === EntityHubTail,
+  );
+
+/** What EntityHubTail resolves to for the props the page handed its boundary. */
+async function awaitTail(boundary: El | undefined) {
+  const child = boundary?.props?.children as El | undefined;
+  if (!child) throw new Error("no <Suspense> around EntityHubTail");
+  return EntityHubTail(child.props as unknown as Parameters<typeof EntityHubTail>[0]);
+}
+
+// The whole page once both boundaries have revealed: the head tree, then the awaited tail tree. Every
+// assertion that is about the page (all 20 cards, the pager, the nav) reads this; the head-only
+// structure is pinned in the h166-perf-3 block at the end of the file.
+const renderHub = async (key = "erdogan", sayfa?: Sayfa) => {
+  const head = await renderHubHead(key, sayfa);
+  const boundary = tailBoundaries(head)[0];
+  return boundary === undefined ? head : [head, await awaitTail(boundary)];
+};
 
 beforeEach(() => {
   mocks.result = null;
@@ -891,5 +923,299 @@ describe("/gundem/[key] first-card banner priority (h159-perf-3)", () => {
 
     expect(charts(tree)).toHaveLength(0);
     expect(cardIndexes(tree)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h166-perf-3. The first FEED_HEAD_CARDS cards stay in the boundary that holds the page head (title, counts, chart,
+// spectrum); the other cards, the pager and the 'Gündem bağlantıları' nav stream behind a nested <Suspense> as
+// EntityHubTail, so React can reveal the head without waiting for the whole list. Same cards, same order, same
+// banner priority (hubCardBannerIndex with the GLOBAL position), same markup, same spacing.
+// ---------------------------------------------------------------------------
+describe("/gundem/[key] the head reveals before the card list (h166-perf-3)", () => {
+  const NOW = Date.parse("2026-11-12T12:00:00Z");
+  const keyOf = (el: El | undefined) => (el as { key?: string | null } | undefined)?.key;
+  const nameOf = (el: El | undefined) =>
+    typeof el?.type === "function" ? (el.type as { name?: string }).name : undefined;
+
+  // The card lists: the head's `space-y-4` and the tail's `space-y-4 -mt-4`.
+  const headLists = (tree: unknown) =>
+    walkAll(tree).filter((el) => el.type === "div" && el.props?.className === "space-y-4");
+  const tailLists = (tree: unknown) =>
+    walkAll(tree).filter((el) => el.type === "div" && el.props?.className === "space-y-4 -mt-4");
+  const linkNavs = (tree: unknown) =>
+    walkAll(tree).filter((el) => el.type === "nav" && el.props?.["aria-label"] === "Gündem bağlantıları");
+  const cardKeys = (tree: unknown) => elementsOfType(tree, ClusterCard).map(keyOf);
+  const cardIndexes = (tree: unknown) => elementsOfType(tree, ClusterCard).map((el) => el.props?.index);
+
+  /** The tail's fragment children, flattened. */
+  async function tailParts(tree: unknown): Promise<El[]> {
+    const boundaries = tailBoundaries(tree);
+    expect(boundaries).toHaveLength(1);
+    const out = (await awaitTail(boundaries[0])) as El;
+    expect(out.type).toBe(Fragment);
+    return [out.props?.children].flat(2).filter(Boolean) as El[];
+  }
+
+  describe("the head", () => {
+    it("lists exactly the first 2 cards, with hubCardBannerIndex(i, trendChartDrawn) for i = 0 and 1 (chart drawn: both lazy)", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+      mocks.trend = okTrend();
+
+      const head = await renderHubHead();
+
+      const lists = headLists(head);
+      expect(lists).toHaveLength(1);
+      const cards = elementsOfType(lists[0], ClusterCard);
+      expect(cards.map(keyOf)).toEqual(["c1", "c2"]);
+      expect(cards.map((el) => el.props?.index)).toEqual([0, 1].map((i) => hubCardBannerIndex(i, true)));
+      expect(cards.map((el) => el.props?.index)).toEqual([undefined, undefined]);
+      // Every card of the head is in this list: none leaked out of it.
+      expect(elementsOfType(head, ClusterCard)).toHaveLength(2);
+    });
+
+    it("without a drawn chart (no trend), card 0 keeps its LCP position and card 1 its own", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+      mocks.trend = null;
+
+      const cards = elementsOfType(await renderHubHead(), ClusterCard);
+
+      expect(cards.map((el) => el.props?.index)).toEqual([0, 1].map((i) => hubCardBannerIndex(i, false)));
+      expect(cards.map((el) => el.props?.index)).toEqual([0, 1]);
+    });
+
+    it("keeps the chart, the spectrum section and the head list in their order, then the tail boundary", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+      mocks.trend = okTrend();
+
+      const head = await renderHubHead();
+
+      const all = walkAll(head);
+      const chart = all.indexOf(charts(head)[0] as El);
+      const spectrum = all.indexOf(spectrumSections(head)[0] as El);
+      const list = all.indexOf(headLists(head)[0] as El);
+      const boundary = all.indexOf(tailBoundaries(head)[0] as El);
+      expect(chart).toBeGreaterThan(-1);
+      expect(chart).toBeLessThan(spectrum);
+      expect(spectrum).toBeLessThan(list);
+      expect(list).toBeLessThan(boundary);
+    });
+
+    it("keeps the CollectionPage JSON-LD in the parent, built from every bundle (head and tail)", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+
+      const head = await renderHubHead();
+
+      const ld = walkAll(head).filter((el) => el.type === "script" && el.props?.type === "application/ld+json");
+      expect(ld).toHaveLength(1);
+      const html = String(
+        (ld[0]?.props?.dangerouslySetInnerHTML as { __html: string } | undefined)?.__html,
+      );
+      for (const id of ["c1", "c2", "c3", "c4"]) expect(html).toContain(`/cluster/${id}`);
+    });
+  });
+
+  describe("the tail boundary", () => {
+    it("is exactly one <Suspense fallback={null}> around EntityHubTail, with no nav and no pager left in the head", async () => {
+      mocks.result = { bundles: bundles(4), total: 152, asOfMs: NOW };
+
+      const head = await renderHubHead();
+
+      const found = tailBoundaries(head);
+      expect(found).toHaveLength(1);
+      expect(found[0]?.props?.fallback).toBeNull();
+      expect(linkNavs(head)).toHaveLength(0);
+      expect(navs(head)).toHaveLength(0);
+    });
+
+    it("hands the tail the read's bundles (same array), the page's key, page, lastPage, label, nowMs and the chart flag", async () => {
+      const result = { bundles: bundles(4), total: 152, asOfMs: NOW };
+      mocks.result = result;
+      mocks.trend = okTrend();
+
+      const head = await renderHubHead("erdogan");
+
+      const props = (tailBoundaries(head)[0]?.props?.children as El).props as Record<string, unknown>;
+      expect(props.bundles).toBe(result.bundles);
+      expect(props.hubKey).toBe("erdogan");
+      expect(props.page).toBe(1);
+      expect(props.lastPage).toBe(8);
+      expect(props.label).toBe(entityByKey("erdogan")!.label);
+      expect(props.nowMs).toBe(NOW);
+      expect(props.trendChartDrawn).toBe(true);
+    });
+
+    it("3 bundles (one over the head): the tail is exactly one card, c3 at global position 2", async () => {
+      mocks.result = { bundles: bundles(3), total: 3, asOfMs: NOW };
+
+      const parts = await tailParts(await renderHubHead());
+
+      expect(parts[0]?.props?.className).toBe("space-y-4 -mt-4");
+      expect(cardKeys(parts[0])).toEqual(["c3"]);
+      expect(cardIndexes(parts[0])).toEqual([hubCardBannerIndex(2, false)]);
+    });
+  });
+
+  describe("EntityHubTail", () => {
+    it("yields the 'space-y-4 -mt-4' list of cards i = 2 and 3, then the pager when lastPage > 1, then the Gündem nav", async () => {
+      mocks.result = { bundles: bundles(4), total: 152, asOfMs: NOW };
+      mocks.trend = okTrend();
+
+      const parts = await tailParts(await renderHubHead("erdogan"));
+
+      expect(parts).toHaveLength(3);
+      const [list, pager, nav] = parts;
+      expect(list?.type).toBe("div");
+      expect(list?.props?.className).toBe("space-y-4 -mt-4");
+      expect(cardKeys(list)).toEqual(["c3", "c4"]);
+      expect(cardIndexes(list)).toEqual([2, 3].map((i) => hubCardBannerIndex(i, true)));
+      expect(nameOf(pager)).toBe("HubPager");
+      expect(pager?.props).toEqual({ hubKey: "erdogan", page: 1, lastPage: 8 });
+      expect(nav?.type).toBe("nav");
+      expect(nav?.props?.["aria-label"]).toBe("Gündem bağlantıları");
+    });
+
+    it("cards i = 2 and 3 take their position as the banner index when no chart is drawn (page 1, no trend)", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+      mocks.trend = null;
+
+      const [list] = await tailParts(await renderHubHead());
+
+      expect(cardIndexes(list)).toEqual([2, 3]);
+    });
+
+    it("has no pager when the hub fits one page: the list, then the nav", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+
+      const parts = await tailParts(await renderHubHead());
+
+      expect(parts).toHaveLength(2);
+      expect(parts[0]?.props?.className).toBe("space-y-4 -mt-4");
+      expect(parts[1]?.props?.["aria-label"]).toBe("Gündem bağlantıları");
+      expect(navs(parts)).toHaveLength(0);
+    });
+
+    it("on page 2 the pager keeps Önceki and Sonraki, and the cards keep their positions (no chart on a later page)", async () => {
+      mocks.result = { bundles: bundles(20, 21), total: 152, asOfMs: NOW };
+      mocks.trend = okTrend();
+
+      const head = await renderHubHead("chp", "2");
+      const parts = await tailParts(head);
+
+      expect(cardIndexes(head)).toEqual([0, 1]);
+      expect(cardIndexes(parts[0])).toEqual(Array.from({ length: 18 }, (_, i) => i + 2));
+      expect(linksIn(parts[1])).toEqual([
+        { href: "/gundem/chp", text: "Önceki" },
+        { href: "/gundem/chp?sayfa=3", text: "Sonraki" },
+      ]);
+    });
+
+    it("the nav keeps its two links: 'Tüm arşivde ara' with the label as the query, and 'Tüm gündem başlıkları'", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+
+      const parts = await tailParts(await renderHubHead("erdogan"));
+      const nav = parts[parts.length - 1];
+
+      const anchors = walkAll(nav).filter((el) => el.type === "a");
+      expect(anchors).toHaveLength(1);
+      expect(anchors[0]?.props?.href).toBe(`/?q=${encodeURIComponent(entityByKey("erdogan")!.label)}`);
+      expect(textOf(anchors[0])).toBe("Tüm arşivde ara");
+      expect(linksIn(nav)).toEqual([{ href: "/gundem", text: "Tüm gündem başlıkları" }]);
+    });
+
+    it("gives head and tail cards the same nowMs and the same aging (the read's own timestamp, no clock read)", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+
+      const head = await renderHubHead();
+      const [list] = await tailParts(head);
+
+      for (const card of [...elementsOfType(head, ClusterCard), ...elementsOfType(list, ClusterCard)]) {
+        expect(card.props?.nowMs).toBe(NOW);
+        // updated 2026-10-30, read 2026-11-12: well over 48 h
+        expect(card.props?.isAging).toBe(true);
+      }
+    });
+
+    it("starts with await connection() and reads no clock", async () => {
+      mocks.result = { bundles: bundles(4), total: 4, asOfMs: NOW };
+      const head = await renderHubHead();
+      vi.mocked(connection).mockClear();
+
+      await awaitTail(tailBoundaries(head)[0]);
+
+      expect(connection).toHaveBeenCalledTimes(1);
+      const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "page.tsx"), "utf8");
+      const start = source.indexOf("export async function EntityHubTail");
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = source.indexOf("\n}\n", start);
+      const body = source.slice(start, end);
+      expect(body.indexOf("await connection();")).toBeGreaterThan(-1);
+      expect(body.indexOf("await connection();")).toBeLessThan(body.indexOf("splitFeedHead("));
+      expect(body).not.toContain("Date.now(");
+      expect(body).not.toContain("new Date()");
+    });
+  });
+
+  describe("every other state renders the nav where it does today, with no tail", () => {
+    const states: Array<[string, unknown, string | undefined]> = [
+      ["1 bundle", { bundles: bundles(1), total: 1, asOfMs: NOW }, undefined],
+      ["2 bundles (exactly the head)", { bundles: bundles(2), total: 2, asOfMs: NOW }, undefined],
+      ["2 bundles on a later page, with a pager", { bundles: bundles(2, 21), total: 22, asOfMs: NOW }, "2"],
+      ["empty", { bundles: [], total: 0, asOfMs: NOW }, undefined],
+      ["failed", null, undefined],
+      ["unavailable", { bundles: [], total: 0, asOfMs: NOW, unavailable: true }, "2"],
+      ["past the end", { bundles: [], total: 152, asOfMs: NOW }, "9"],
+    ];
+
+    it.each(states)("%s: no tail boundary, the Gündem nav is the container's last child", async (_label, result, sayfa) => {
+      mocks.result = result;
+
+      const head = (await renderHubHead("chp", sayfa)) as El;
+
+      expect(tailBoundaries(head)).toHaveLength(0);
+      expect(tailLists(head)).toHaveLength(0);
+      expect(linkNavs(head)).toHaveLength(1);
+      const children = head.props?.children as unknown[];
+      expect(children[children.length - 1]).toBe(linkNavs(head)[0]);
+    });
+
+    it("2 bundles with a pager: the list, then the pager, exactly as before", async () => {
+      mocks.result = { bundles: bundles(2, 21), total: 22, asOfMs: NOW };
+
+      const head = await renderHubHead("chp", "2");
+
+      expect(cardKeys(head)).toEqual(["c21", "c22"]);
+      expect(navs(head)).toHaveLength(1);
+      expect(textOf(navs(head)[0])).toContain("Sayfa 2 / 2");
+      // One walk, positions by predicate: the walk expands HubPager into a fresh element on every call.
+      const all = walkAll(head);
+      const at = (aria: string) => all.findIndex((el) => el.type === "nav" && el.props?.["aria-label"] === aria);
+      const list = all.findIndex((el) => el.type === "div" && el.props?.className === "space-y-4");
+      expect(list).toBeGreaterThan(-1);
+      expect(list).toBeLessThan(at("Sayfalar"));
+      expect(at("Sayfalar")).toBeLessThan(at("Gündem bağlantıları"));
+    });
+  });
+
+  describe("head and tail together are the page it was", () => {
+    it("every card once and in order, one pager, one Gündem nav, one chart, one spectrum section", async () => {
+      mocks.result = { bundles: bundles(20), total: 152, asOfMs: NOW };
+      mocks.trend = okTrend();
+
+      const full = await renderHub("chp");
+
+      expect(cardKeys(full)).toEqual(Array.from({ length: 20 }, (_, i) => `c${i + 1}`));
+      expect(navs(full)).toHaveLength(1);
+      expect(linkNavs(full)).toHaveLength(1);
+      expect(charts(full)).toHaveLength(1);
+      expect(spectrumSections(full)).toHaveLength(1);
+      // One walk, positions by predicate: the walk expands HubPager into a fresh element on every call.
+      const all = walkAll(full);
+      const at = (aria: string) => all.findIndex((el) => el.type === "nav" && el.props?.["aria-label"] === aria);
+      const lastCard = all.lastIndexOf(elementsOfType(full, ClusterCard)[19] as El);
+      expect(lastCard).toBeGreaterThan(-1);
+      expect(lastCard).toBeLessThan(at("Sayfalar"));
+      expect(at("Sayfalar")).toBeLessThan(at("Gündem bağlantıları"));
+    });
   });
 });

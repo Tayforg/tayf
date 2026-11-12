@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 import { NextRequest } from "next/server";
 
 import { middleware, config } from "@/middleware";
@@ -286,7 +286,15 @@ vi.mock("next/navigation", () => ({
   },
 }));
 
+// h166-perf-3: EntityHubTail starts with await connection(), which throws outside a request.
+// Partial mock: NextRequest and NextResponse (the middleware half of this file) stay real.
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  connection: async () => undefined,
+}));
+
 import EntityHubPage, {
+  EntityHubTail,
   generateMetadata,
   generateStaticParams,
 } from "@/app/gundem/[key]/page";
@@ -363,8 +371,22 @@ function bundle(id: string, dist: unknown = { center: 1 }) {
   };
 }
 
-const renderHub = (key = "erdogan") =>
+// h166-perf-3: with more than 2 clusters the card list continues in EntityHubTail behind a
+// nested <Suspense>. Every body-state assertion below is about the whole page, so the tail is
+// awaited here and appended to the head tree (src/app/gundem/[key]/page.test.tsx pins the split).
+const renderHubHead = (key = "erdogan") =>
   EntityHubPage({ params: Promise.resolve({ key }), searchParams: Promise.resolve({}) });
+
+const renderHub = async (key = "erdogan") => {
+  const head = await renderHubHead(key);
+  const boundary = elements(
+    head,
+    (el) => el.type === Suspense && (el.props?.children as El | undefined)?.type === EntityHubTail,
+  )[0];
+  const child = boundary?.props?.children as El | undefined;
+  if (!child) return head;
+  return [head, await EntityHubTail(child.props as unknown as Parameters<typeof EntityHubTail>[0])];
+};
 
 beforeEach(() => {
   mocks.result = null;
@@ -580,7 +602,8 @@ describe("/gundem/[key] structured data", () => {
 
   it("the script is the first child of the page container, ahead of the hero", async () => {
     mocks.result = { bundles: [bundle("c1"), bundle("c2"), bundle("c3")], total: 3, asOfMs: 0 };
-    const tree = (await renderHub("chp")) as { props: { children: unknown[] } };
+    // The page container itself, so the head tree (the tail is a separate, later boundary).
+    const tree = (await renderHubHead("chp")) as { props: { children: unknown[] } };
 
     const first = tree.props.children[0] as El;
     expect(first.type).toBe("script");
