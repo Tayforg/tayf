@@ -128,6 +128,8 @@ interface MkClusterOpts {
     image_allowed?: boolean;
     /** Migration 089 ("ADMIT") — omit for "never admitted". */
     politics_admitted_at?: string | null;
+    /** The RSS description (server-only wire signal) — omit for "column not selected". */
+    description?: string | null;
   }>;
 }
 
@@ -160,6 +162,7 @@ function mkCluster(opts: MkClusterOpts) {
         category: m.category ?? "politika",
         content_hash: m.content_hash === undefined ? `h-${m.id}` : m.content_hash,
         politics_admitted_at: m.politics_admitted_at ?? null,
+        ...(m.description !== undefined ? { description: m.description } : {}),
         sources: {
           id: m.sourceId,
           name: m.sourceName ?? `Source ${m.sourceId}`,
@@ -225,6 +228,9 @@ describe("getPoliticsClusters query shape", () => {
     expect(selectArg).toMatch(/\btitle_tr_neutral\b/);
     // Migration 089 ("ADMIT"): the 60%-politics gate must see the stamp.
     expect(selectArg).toMatch(/\bpolitics_admitted_at\b/);
+    // h138-roadmap2-1: the wire signal also reads the agency lead (description)
+    // on the ARTICLE embed, never on the sources embed.
+    expect(selectArg).toMatch(/articles\s*\(\s*id, [^)]*\bdescription\b/);
 
     // ≥2 members, newest clusters first, capped at 200 (CANDIDATE_LIMIT).
     const gte = steps.find((s) => s.method === "gte");
@@ -1933,5 +1939,90 @@ describe("getPoliticsClusters stale-if-error and single-flight", () => {
     vi.setSystemTime(NOW_MS + 5_001);
     await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
     expect(clustersQueries()).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h138-roadmap2-1: the same agency lead under a reworded headline is one text,
+// and the description that proves it never leaves the server.
+// ---------------------------------------------------------------------------
+
+describe("home feed wire signal reads the member description (h138-roadmap2-1)", () => {
+  // One 120-character agency lead, printed under five different headlines
+  // (so five different content_hash values).
+  const LEAD =
+    "Anadolu Ajansının edindiği bilgiye göre, Bakanlık yeni düzenlemeyi yarından itibaren uygulamaya koyacağını açıkladı.";
+
+  function reprintRow(descriptions: Array<string | null | undefined>) {
+    return mkCluster({
+      id: "c-reprint",
+      members: descriptions.map((description, i) => ({
+        id: `r${i}`,
+        sourceId: `rs${i}`,
+        title: `Her kaynağın kendi başlığı ${i}`,
+        content_hash: `hash-${i}`,
+        ...(description !== undefined ? { description } : {}),
+      })),
+    }) as unknown as EmbeddedClusterRow;
+  }
+
+  it("flags five members on one lead as wire and counts one effective source, although all five hashes differ", () => {
+    const row = reprintRow([LEAD, LEAD, LEAD, LEAD, LEAD]);
+    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row), null, NOW_MS);
+    expect(bundle.isWireRedistribution).toBe(true);
+    expect(bundle.effectiveArticleCount).toBe(1);
+    expect(bundle.cluster.article_count).toBe(5);
+  });
+
+  it("without a description the same five members stay five independent texts (today's result)", () => {
+    for (const blank of [undefined, null, ""]) {
+      const row = reprintRow(Array(5).fill(blank));
+      const { bundle } = buildClusterBundle(row, flattenClusterMembers(row), null, NOW_MS);
+      expect(bundle.isWireRedistribution).toBe(false);
+      expect(bundle.effectiveArticleCount).toBe(5);
+    }
+  });
+
+  it("the mapped home-feed member shape has no description key (server-only input)", () => {
+    const row = reprintRow([LEAD, LEAD, LEAD, LEAD, LEAD]);
+    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row), null, NOW_MS);
+    expect(bundle.articles).toHaveLength(5);
+    for (const article of bundle.articles) {
+      expect(Object.keys(article).sort()).toEqual(
+        ["id", "image_url", "published_at", "source_id", "title", "url"],
+      );
+      expect("description" in article).toBe(false);
+    }
+    // Nowhere in the whole bundle either: not on the cluster, the sources, the signal.
+    expect(JSON.stringify(bundle)).not.toContain("Anadolu Ajansının edindiği bilgiye göre");
+    expect(JSON.stringify(bundle)).not.toContain("description");
+  });
+
+  it("the cached, returned feed payload carries no description either", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c-feed",
+          members: Array.from({ length: 4 }, (_, i) => ({
+            id: `f${i}`,
+            sourceId: `fs${i}`,
+            content_hash: `hash-${i}`,
+            description: LEAD,
+          })),
+        }),
+      ],
+      error: null,
+    };
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getPoliticsClusters();
+      expect(result.bundles).toHaveLength(1);
+      expect(result.bundles[0]!.isWireRedistribution).toBe(true);
+      const wire = JSON.stringify(result);
+      expect(wire).not.toContain("description");
+      expect(wire).not.toContain("Anadolu Ajansının");
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

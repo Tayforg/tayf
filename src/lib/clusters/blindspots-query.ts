@@ -136,8 +136,11 @@ const DISPLAY_LIMIT = DEFAULT_PICK_SIZE;
 export const EMBED_BATCH_SIZE = 50;
 const DAY_MS = 24 * 3_600_000;
 
+// h138-roadmap2-1: the embed also selects the raw RSS description, a SERVER-SIDE
+// input of the wire signal (blindspot-feed.ts's EmbeddedArticle does not carry it
+// and stays untouched: its h66 copy_dedup keeps its hash-plus-headline meaning).
 type EmbeddedClusterArticle = {
-  articles: EmbeddedArticle | null;
+  articles: (EmbeddedArticle & { description?: string | null }) | null;
 };
 
 export type EmbeddedClusterRow = {
@@ -167,7 +170,7 @@ export type EmbeddedClusterRow = {
 const EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, blindspot_recall_suspect, article_count, first_published, updated_at,
          cluster_articles (
            articles (
-             id, title, url, image_url, published_at, source_id, category, content_hash, politics_admitted_at,
+             id, title, url, image_url, published_at, source_id, category, content_hash, description, politics_admitted_at,
              sources ( id, name, bias, logo_url, kind, image_allowed, excerpt_allowed )
            )
          )`;
@@ -304,8 +307,13 @@ function toBlindspotBundle(
   health: ZoneFeedHealth | null,
 ): BlindspotBundle | null {
   const members: EmbeddedArticle[] = [];
+  // dedupeBySource's member type has no description; keep it aside by article id.
+  const descriptionById = new Map<string, string | null | undefined>();
   for (const ca of c.cluster_articles ?? []) {
-    if (ca.articles) members.push(ca.articles);
+    if (ca.articles) {
+      members.push(ca.articles);
+      descriptionById.set(ca.articles.id, ca.articles.description);
+    }
   }
   if (members.length === 0) return null;
 
@@ -341,8 +349,15 @@ function toBlindspotBundle(
   }
 
   const dominantPct = tally.dominantShare;
+  // h138-roadmap2-1: the description (the agency lead) is a server-side input
+  // of the wire signal only. `articles` below is a field-by-field map that
+  // does not carry it, so it never reaches the cached payload or the client.
   const wire = wireSignalOf(
-    deduped.map((m) => ({ id: m.id, content_hash: m.content_hash })),
+    deduped.map((m) => ({
+      id: m.id,
+      content_hash: m.content_hash,
+      description: descriptionById.get(m.id),
+    })),
   );
 
   // Re-sort newest-first for the rendered list, matching ClusterCard's

@@ -1299,6 +1299,65 @@ describe("getClusterDetail wire signal — independent headlines (reader-data)",
   });
 });
 
+describe("getClusterDetail wire signal — same agency lead (h138-roadmap2-1)", () => {
+  const LEAD =
+    "Anadolu Ajansının edindiği bilgiye göre, Bakanlık yeni düzenlemeyi yarından itibaren uygulamaya koyacağını açıkladı.";
+
+  function reprintMembers(descriptions: Array<string | null>) {
+    return descriptions.map((description, i) =>
+      mkEmbeddedMember(`a${i + 1}`, `s${i + 1}`, `2026-04-17T${String(10 - i).padStart(2, "0")}:00:00Z`, {
+        article: {
+          content_hash: `hash-${i + 1}`,
+          title: `Her kaynağın kendi yazdığı farklı başlık ${i + 1}`,
+          description,
+        },
+      }),
+    );
+  }
+
+  it("flags 5 members with 5 distinct hashes and headlines but one agency lead as wire, 1 effective source", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: { data: reprintMembers([LEAD, LEAD, LEAD, LEAD, LEAD]), error: null },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.wire.isWireRedistribution).toBe(true);
+    expect(result!.wire.effectiveArticleCount).toBe(1);
+    expect(result!.wire.memberCount).toBe(5);
+    // "N bağımsız başlık" keeps its headline meaning: five different headlines.
+    expect(result!.wire.independentHeadlineCount).toBe(5);
+  });
+
+  it("does not flag the same members when each description is its own", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: reprintMembers([1, 2, 3, 4, 5].map((n) => `${LEAD} Ek bilgi ${n}.`)),
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.wire.isWireRedistribution).toBe(false);
+    expect(result!.wire.effectiveArticleCount).toBe(5);
+  });
+
+  it("a null description never links anything: today's hash-only result", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: { data: reprintMembers([null, null, null, null, null]), error: null },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.wire.isWireRedistribution).toBe(false);
+    expect(result!.wire.effectiveArticleCount).toBe(5);
+  });
+});
+
 describe("getClusterDetail feed-health suppression", () => {
   // A shared link must never show a blindspot claim the /blindspots feed has
   // already withdrawn — same gate, applied to the DB-stored `is_blindspot`

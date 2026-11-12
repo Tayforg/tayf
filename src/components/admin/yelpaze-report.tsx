@@ -5,6 +5,7 @@ import Link from "next/link";
 import { AlertTriangle, Check, Copy as CopyIcon } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
+import { ZONE_KANAT } from "@/lib/bias/zone-phrases";
 import { reportToMarkdown } from "@/lib/reports/markdown";
 import type {
   YelpazeReport as YelpazeReportData,
@@ -94,10 +95,13 @@ function renderBlindspotBody(report: YelpazeReportData) {
     );
   }
 
-  const silenceClause = silentLabel ? `, ${silentLabel} kanadı sessiz kaldı` : "";
+  // "Bağımsız" is an adjective: the whole phrase comes from ZONE_KANAT, so it
+  // reads "Bağımsız kanat", never "Bağımsız kanadı" (h138-suffix-1).
+  const dominantKanat = b.dominantZone ? ZONE_KANAT[b.dominantZone] : "bilinmeyen taraf kanadı";
+  const silenceClause = b.silentZone ? `, ${ZONE_KANAT[b.silentZone]} sessiz kaldı` : "";
   return (
     <p className="text-foreground">
-      Kör nokta: {dominantLabel} kanadı haberi verdi{silenceClause} — {b.caveat}.
+      Kör nokta: {dominantKanat} haberi verdi{silenceClause} — {b.caveat}.
     </p>
   );
 }

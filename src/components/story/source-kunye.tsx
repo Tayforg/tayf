@@ -65,8 +65,22 @@ function kunyeRow(source: SourceKunyeSource, className: string) {
   );
 }
 
-export function SourceKunye({ sources }: { sources: readonly SourceKunyeSource[] }) {
+export function SourceKunye({
+  sources,
+  headingLevel = 2,
+}: {
+  sources: readonly SourceKunyeSource[];
+  /**
+   * The label's heading level. 2 on /cluster/[id], where the strip is a section
+   * of the page; 3 where it sits under a story's own <h2> (each side of
+   * /karsilastir), so the outline does not repeat one "Kaynak künyesi" <h2>
+   * per side. h1-h3 share the serif heading font in globals.css, so the look
+   * is the same.
+   */
+  headingLevel?: 2 | 3;
+}) {
   if (sources.length === 0) return null;
+  const Heading = headingLevel === 3 ? "h3" : "h2";
 
   const collapse = sources.length >= KUNYE_COLLAPSE_MIN;
   const visible = collapse ? sources.slice(0, KUNYE_VISIBLE) : sources;
@@ -78,9 +92,9 @@ export function SourceKunye({ sources }: { sources: readonly SourceKunyeSource[]
           the strip. Same classes: h1-h3 get the serif heading font from
           globals.css (font-serif is already here) and tracking-wide overrides
           the heading letter-spacing, so the label looks as it did. */}
-      <h2 className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <Heading className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Kaynak künyesi
-      </h2>
+      </Heading>
       <ul className={LIST_CLASS}>
         {visible.map((source, i) => kunyeRow(source, rowClass(i, true)))}
       </ul>

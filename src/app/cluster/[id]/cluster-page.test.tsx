@@ -163,7 +163,17 @@ function collectText(node: unknown, out: string[] = []): string[] {
   if (node && typeof node === "object") {
     const el = node as { type?: unknown; props?: { children?: ReactNode } };
     if (el.type === RelativeTime) {
-      out.push(renderToStaticMarkup(node as ReactElement).replace(/<[^>]+>/g, ""));
+      // Text outside tags, by a character walk (a regex tag strip trips CodeQL's
+      // js/incomplete-multi-character-sanitization even in tests).
+      const html = renderToStaticMarkup(node as ReactElement);
+      let text = "";
+      let inTag = false;
+      for (const ch of html) {
+        if (ch === "<") inTag = true;
+        else if (ch === ">") inTag = false;
+        else if (!inTag) text += ch;
+      }
+      out.push(text);
       return out;
     }
     if (el.props?.children !== undefined) collectText(el.props.children, out);
@@ -1867,7 +1877,7 @@ describe("ClusterDetailPage — mobile tap targets (h16-mobile-2)", () => {
       "Bu kümedeki haberlerin tamamı aynı ajans metninin kopyası",
     ]);
     expect(chipTitles(multi)).toEqual([
-      "Bu kümedeki haberlerin en az yarısı başka bir haberin birebir kopyası",
+      "Bu kümedeki haberlerin en az yarısı, başlığı farklı olsa da başka bir haberle aynı metni paylaşıyor",
     ]);
   });
 

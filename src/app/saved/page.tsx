@@ -21,7 +21,7 @@ export default function SavedPage() {
       <h1 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight mb-4">
         Kaydedilenler
       </h1>
-      <p className="-mt-2 mb-4 text-[12px] text-muted-foreground">
+      <p className="-mt-2 mb-1 text-[12px] text-muted-foreground">
         Hangi taraftan ne kadar okuduğunuzu görmek için:{" "}
         <Link
           href="/diyetim"
@@ -29,7 +29,9 @@ export default function SavedPage() {
         >
           Haber diyetim
         </Link>
-        {" · "}
+      </p>
+      <p className="mb-4 text-[12px] text-muted-foreground">
+        Takip ettiğiniz konu, kişi ve kelimelerdeki yeni haberler:{" "}
         <Link
           href="/takip"
           className="underline decoration-dotted underline-offset-2 hover:text-foreground"

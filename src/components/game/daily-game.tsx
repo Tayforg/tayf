@@ -14,6 +14,7 @@ import Link from "next/link";
 
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { ZONE_META } from "@/lib/bias/config";
+import { ZONE_BOLGE_DATIVE } from "@/lib/bias/zone-phrases";
 import { markAnswered } from "@/lib/game/answered-headlines";
 import {
   STREAK_STORAGE_KEY,
@@ -275,7 +276,7 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
       setAnnouncement(
         isMatch
           ? `${current.sourceName} · ${ZONE_META[current.zone].label} — Tayf'ın etiketiyle aynı`
-          : `${current.sourceName} — Tayf bu kaynağı ${ZONE_META[current.zone].label} bölgesine koyuyor`,
+          : `${current.sourceName} — Tayf bu kaynağı ${ZONE_BOLGE_DATIVE[current.zone]} koyuyor`,
       );
 
       // Fire-and-forget, exactly like zone-guess-game.tsx's handleGuess:
@@ -551,7 +552,7 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
             <p className="text-sm">
               {guessedZone === current.zone
                 ? `${current.sourceName} · ${ZONE_META[current.zone].label} — Tayf'ın etiketiyle aynı`
-                : `${current.sourceName} — Tayf bu kaynağı ${ZONE_META[current.zone].label} bölgesine koyuyor`}
+                : `${current.sourceName} — Tayf bu kaynağı ${ZONE_BOLGE_DATIVE[current.zone]} koyuyor`}
             </p>
             <button
               ref={nextRef}

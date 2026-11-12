@@ -32,7 +32,7 @@ import { createSupabaseFake, type SupabaseFakeOptions } from "../../../tests/_he
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 
 // Import AFTER mocks are declared.
-import { buildOwnershipSection, buildYelpazeReport } from "./yelpaze";
+import { buildOwnershipSection, buildYelpazeReport, formatHealthFragment } from "./yelpaze";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -501,6 +501,113 @@ describe("buildYelpazeReport — blindspot suppression", () => {
   });
 });
 
+// h138-suffix-1: the blindspot caveat is a lowercase fragment spliced into one
+// sentence, and "Bağımsız" is an adjective, so it never takes "kanadının"
+// ("bağımsız kanadın feed sağlığı ..."). iktidar and muhalefet keep their exact text.
+describe("blindspot caveat zone wording (h138-suffix-1)", () => {
+  const stats = {
+    total: 10,
+    fetchOk: 9,
+    fetchOkShare: 0.9,
+    delivering: 9,
+    votingDelivering: 9,
+    deliveringShare: 0.9,
+    healthy: 9,
+    healthyShare: 0.9,
+    degraded: false,
+  };
+
+  describe("formatHealthFragment", () => {
+    it("a Bağımsız zone prints 'bağımsız kanadın feed sağlığı ...'", () => {
+      expect(formatHealthFragment("bagimsiz", stats)).toBe(
+        "bağımsız kanadın feed sağlığı yeterli (9/10 sağlıklı, %90)",
+      );
+      expect(formatHealthFragment("bagimsiz", { ...stats, degraded: true })).toBe(
+        "bağımsız kanadın feed sağlığı düşük (9/10 sağlıklı, %90)",
+      );
+      expect(formatHealthFragment("bagimsiz", stats)).not.toContain("kanadının");
+    });
+
+    it("iktidar and muhalefet keep their lowercase text", () => {
+      expect(formatHealthFragment("iktidar", stats)).toBe(
+        "iktidar kanadının feed sağlığı yeterli (9/10 sağlıklı, %90)",
+      );
+      expect(formatHealthFragment("muhalefet", { ...stats, degraded: true })).toBe(
+        "muhalefet kanadının feed sağlığı düşük (9/10 sağlıklı, %90)",
+      );
+    });
+  });
+
+  const CLUSTER_ID = "11111111-1111-4111-8111-111111111111";
+
+  it("a withdrawn iktidar claim still names the muhalefet wing exactly as before", async () => {
+    setSupabaseFixtures({
+      tables: {
+        clusters: [
+          mkClusterRow({
+            is_blindspot: true,
+            blindspot_side: "pro_government",
+            bias_distribution: { pro_government: 5 },
+          }),
+        ],
+        cluster_articles: [],
+        sources: [
+          mkFeedHealthRow("iktidar-1", "pro_government", true),
+          mkFeedHealthRow("muhalefet-1", "opposition", false),
+          mkFeedHealthRow("muhalefet-2", "opposition", false),
+        ],
+      },
+    });
+    const report = await buildYelpazeReport(CLUSTER_ID);
+    expect(report!.blindspot.caveat).toBe("muhalefet kanadının feed sağlığı düşük (0/2 sağlıklı, %0)");
+  });
+
+  it("an active claim with a healthy silent wing prints the sufficient-health fragment as before", async () => {
+    setSupabaseFixtures({
+      tables: {
+        clusters: [
+          mkClusterRow({
+            is_blindspot: true,
+            blindspot_side: "pro_government",
+            bias_distribution: { pro_government: 5 },
+          }),
+        ],
+        cluster_articles: [],
+        sources: [
+          mkFeedHealthRow("iktidar-1", "pro_government", true),
+          mkFeedHealthRow("muhalefet-1", "opposition", true),
+          mkFeedHealthRow("muhalefet-2", "opposition", true),
+        ],
+      },
+    });
+    const report = await buildYelpazeReport(CLUSTER_ID);
+    expect(report!.blindspot.healthStatus).toBe("healthy");
+    expect(report!.blindspot.caveat).toBe("muhalefet kanadının feed sağlığı yeterli (2/2 sağlıklı, %100)");
+  });
+
+  it("an unknown-health claim names the opposite pole wing exactly as before", async () => {
+    setSupabaseFixtures({
+      tables: {
+        clusters: [
+          mkClusterRow({
+            is_blindspot: true,
+            blindspot_side: "opposition",
+            bias_distribution: { opposition: 5 },
+          }),
+        ],
+        cluster_articles: [],
+        sources: () => ({ data: null, error: { message: "sources boom" } }),
+      },
+    });
+    const report = await buildYelpazeReport(CLUSTER_ID);
+    expect(report!.blindspot.healthStatus).toBe("unknown");
+    expect(report!.blindspot.silentZone).toBe("iktidar");
+    expect(report!.blindspot.caveat).toBe(
+      "iktidar kanadının feed sağlığı bilinmiyor, bu iddia doğrulanmadan gösteriliyor",
+    );
+  });
+});
+
 describe("buildYelpazeReport — KVKK guard (D-KVKK-SUMMARY)", () => {
   it("never serializes the cluster's raw summary_tr, or a member's description/image_url, onto the report handed to the client component", async () => {
     setSupabaseFixtures({
@@ -544,5 +651,43 @@ describe("buildYelpazeReport — KVKK guard (D-KVKK-SUMMARY)", () => {
     expect(json).not.toContain("GİZLİ-ÖZET-METNİ-KAÇAK");
     expect(json).not.toContain("GİZLİ-ALINTI-METNİ-KAÇAK");
     expect(json).not.toContain("gizli-foto-kacak.jpg");
+  });
+});
+
+// h139 review ts-5: a zone's own wire note must be computed the way the
+// cluster-level `overallWire` is (cluster-detail-query.ts feeds descriptions
+// to wireSignalOf), or the report's "Genel" line says an agency copy was
+// detected while the zone's row prints "4 bağımsız yayın".
+describe("buildYelpazeReport — zone wire signal reads the agency lead (h139 ts-5)", () => {
+  const AA_LEAD =
+    "Cumhurbaşkanı yeni ekonomi paketinin ayrıntılarını bu sabah düzenlenen toplantıda kamuoyuna açıkladı.";
+
+  it("a zone whose outlets reprint one lead under distinct hashes is wire with one effective text", async () => {
+    const outlets = ["sabah", "yenisafak", "turkiye", "star"].map((slug) =>
+      mkEmbeddedSource(`s-${slug}`, slug, "pro_government"),
+    );
+    setSupabaseFixtures({
+      tables: {
+        clusters: [mkClusterRow()],
+        cluster_articles: outlets.map((source, i) =>
+          mkEmbeddedMember(`a-${source.slug}`, source, `2026-04-17T0${7 + i}:00:00Z`, {
+            // Distinct hash per outlet (reworded headline), identical lead.
+            content_hash: `distinct-hash-${i}`,
+            description: AA_LEAD,
+          }),
+        ),
+        sources: outlets.map((source) => mkFeedHealthRow(source.slug, "pro_government", true)),
+      },
+    });
+
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
+    expect(report).not.toBeNull();
+
+    const iktidar = report!.timeline.zones.find((z) => z.zone === "iktidar")!;
+    expect(iktidar.wire.memberCount).toBe(4);
+    expect(iktidar.wire.isWireRedistribution).toBe(true);
+    expect(iktidar.wire.effectiveArticleCount).toBe(1);
+    // The cluster-level signal agrees with the zone row.
+    expect(report!.timeline.overallWire.isWireRedistribution).toBe(true);
   });
 });

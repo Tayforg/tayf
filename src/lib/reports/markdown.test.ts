@@ -233,6 +233,82 @@ describe("reportToMarkdown — blindspot caveat", () => {
   });
 });
 
+// h138-suffix-1: "Bağımsız" is an adjective, so section 03 never glues "kanadı"
+// to it ("Bağımsız kanat haberi verdi"). İktidar and Muhalefet keep their old text.
+describe("reportToMarkdown — blindspot zone wording", () => {
+  type Zone = "iktidar" | "bagimsiz" | "muhalefet";
+
+  function claimLine(dominantZone: Zone | null, silentZone: Zone | null, caveat = "bir dayanak"): string {
+    const md = reportToMarkdown(
+      baseReport({
+        blindspot: {
+          isBlindspot: true,
+          blindspotSide: null,
+          dominantZone,
+          blindspotSuppressed: false,
+          silentZone,
+          healthStatus: "healthy",
+          caveat,
+        },
+      }),
+    );
+    return md.split("## 03")[1]!.split("## 04")[0]!.split("\n").find((l) => l.startsWith("Kör nokta:"))!;
+  }
+
+  it("a Bağımsız dominant zone prints 'Bağımsız kanat haberi verdi'", () => {
+    expect(claimLine("bagimsiz", null)).toBe("Kör nokta: Bağımsız kanat haberi verdi — bir dayanak.");
+    expect(claimLine("bagimsiz", "muhalefet")).toBe(
+      "Kör nokta: Bağımsız kanat haberi verdi, Muhalefet kanadı sessiz kaldı — bir dayanak.",
+    );
+  });
+
+  it("a Bağımsız silent zone prints ', Bağımsız kanat sessiz kaldı'", () => {
+    expect(claimLine("iktidar", "bagimsiz")).toBe(
+      "Kör nokta: İktidar kanadı haberi verdi, Bağımsız kanat sessiz kaldı — bir dayanak.",
+    );
+  });
+
+  it("never prints 'Bağımsız kanadı' for either side", () => {
+    expect(claimLine("bagimsiz", "bagimsiz")).not.toContain("Bağımsız kanadı");
+    expect(claimLine("bagimsiz", "bagimsiz")).toBe(
+      "Kör nokta: Bağımsız kanat haberi verdi, Bağımsız kanat sessiz kaldı — bir dayanak.",
+    );
+  });
+
+  it("İktidar and Muhalefet lines are unchanged", () => {
+    expect(claimLine("iktidar", "muhalefet", "muhalefet kanadının feed sağlığı yeterli (9/10 sağlıklı, %90)")).toBe(
+      "Kör nokta: İktidar kanadı haberi verdi, Muhalefet kanadı sessiz kaldı — muhalefet kanadının feed sağlığı yeterli (9/10 sağlıklı, %90).",
+    );
+    expect(claimLine("muhalefet", "iktidar")).toBe(
+      "Kör nokta: Muhalefet kanadı haberi verdi, İktidar kanadı sessiz kaldı — bir dayanak.",
+    );
+    expect(claimLine("iktidar", null)).toBe("Kör nokta: İktidar kanadı haberi verdi — bir dayanak.");
+  });
+
+  it("an unknown dominant zone keeps its fallback wording", () => {
+    expect(claimLine(null, null)).toBe("Kör nokta: bilinmeyen taraf kanadı haberi verdi — bir dayanak.");
+  });
+
+  it("a withdrawn claim still names the zones without a suffix", () => {
+    const md = reportToMarkdown(
+      baseReport({
+        blindspot: {
+          isBlindspot: false,
+          blindspotSide: null,
+          dominantZone: "bagimsiz",
+          blindspotSuppressed: true,
+          silentZone: "muhalefet",
+          healthStatus: "suppressed",
+          caveat: "bir dayanak",
+        },
+      }),
+    );
+    expect(md).toContain(
+      "Kör nokta iddiası (Bağımsız baskın, Muhalefet sessiz) bu raporda gösterilmiyor çünkü bir dayanak.",
+    );
+  });
+});
+
 describe("reportToMarkdown — section structure", () => {
   it("prints headings 01..07 in order", () => {
     const md = reportToMarkdown(baseReport());

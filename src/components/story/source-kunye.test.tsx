@@ -144,6 +144,36 @@ describe("SourceKunye - thresholds", () => {
   });
 });
 
+// h139 review react-a11y-1: on /karsilastir the strip sits inside an <article>
+// whose story title is already an <h2>, so a second sibling <h2> "Kaynak
+// künyesi" per side repeats an unlabelled heading. The caller picks the level;
+// /cluster/[id] keeps the default h2.
+describe("SourceKunye - headingLevel (h139 react-a11y-1)", () => {
+  const CLASS =
+    "font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground";
+
+  it("defaults to an <h2> (the cluster page)", () => {
+    const html = render(makeSources(3));
+    expect(html).toContain(`<h2 class="${CLASS}">Kaynak künyesi</h2>`);
+    expect(html).not.toMatch(/<h3[\s>]/);
+  });
+
+  it("headingLevel={3} renders an <h3> with the same classes and no <h2>", () => {
+    const html = renderToStaticMarkup(<SourceKunye sources={makeSources(3)} headingLevel={3} />);
+    expect(html).toContain(`<h3 class="${CLASS}">Kaynak künyesi</h3>`);
+    expect(html).not.toMatch(/<h2[\s>]/);
+  });
+
+  it("headingLevel={2} is the default", () => {
+    const html = renderToStaticMarkup(<SourceKunye sources={makeSources(3)} headingLevel={2} />);
+    expect(html).toContain(`<h2 class="${CLASS}">Kaynak künyesi</h2>`);
+  });
+
+  it("still renders nothing for an empty list at either level", () => {
+    expect(renderToStaticMarkup(<SourceKunye sources={[]} headingLevel={3} />)).toBe("");
+  });
+});
+
 describe("SourceKunye - 21 sources", () => {
   const sources = makeSources(21);
   const html = render(sources);

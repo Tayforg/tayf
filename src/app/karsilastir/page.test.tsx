@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 
 import type {
   ClusterDetail,
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
-import type { WireSignal } from "@/lib/clusters/wire";
+import { wireBadgeTitle, type WireSignal } from "@/lib/clusters/wire";
 import type { BiasDistribution, MediaDnaZone, Source } from "@/types";
 
 const getClusterDetailOrThrow = vi.fn();
@@ -18,6 +18,8 @@ vi.mock("@/lib/clusters/cluster-detail-query", () => ({
 import KarsilastirPage, { CompareBody, metadata } from "./page";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
+import { SourceKunye } from "@/components/story/source-kunye";
+import { SOURCE_METADATA } from "@/lib/sources/factuality";
 import { ZONE_META } from "@/lib/bias/config";
 import { RemoveSideLink } from "@/components/compare/remove-side-link";
 import { PageHero } from "@/components/ui/page-hero";
@@ -297,7 +299,11 @@ describe("CompareBody — fetching", () => {
     // Muhalefet each have a voting source, so the plain line appears nowhere.
     expect(text).toContain("Spektruma sayılan kaynaklardan haber yok");
     expect(text).not.toContain("Bu bölgeden kaynak yok");
-    expect(text).toContain("Toplayıcı / niş (spektruma sayılmaz): Haber Toplayıcı");
+    // The label and the linked names are separate nodes (h138-roadmap2-4), so
+    // read the footnote without the separator the space-joined `text` inserts.
+    expect(collectText(tree).join("")).toContain(
+      "Toplayıcı / niş (spektruma sayılmaz): Haber Toplayıcı",
+    );
     // Kör nokta pill only on the blindspot side.
     expect(text.split("Kör nokta")).toHaveLength(2);
   });
@@ -546,7 +552,7 @@ describe("CompareBody — qualifiers shared with the cluster page", () => {
       expect(notes.bagimsiz.type).toBe("p");
       expect(notes.muhalefet.type).toBe("p");
       expect(notes.bagimsiz.className).toBe(notes.muhalefet.className);
-      expect(kidsOf(first)).toHaveLength(8);
+      expect(kidsOf(first)).toHaveLength(9);
     });
 
     it("derives the line from SPECTRUM_ABSENT_QUALIFIED, first letter upper-cased", async () => {
@@ -663,14 +669,14 @@ describe("CompareBody — qualifiers shared with the cluster page", () => {
         expect(zoneNotes(first).muhalefet.text).toBe(ENGLISH_ONLY);
       });
 
-      it("uses the same <p> element and classes, and keeps eight children (row order holds)", async () => {
+      it("uses the same <p> element and classes, and keeps nine children (row order holds)", async () => {
         const { first } = await renderSide({ members: englishOnly() });
         const notes = zoneNotes(first);
         expect(notes.bagimsiz.type).toBe("p");
         expect(notes.muhalefet.type).toBe("p");
         expect(notes.bagimsiz.className).toBe("text-[13px] text-muted-foreground");
         expect(notes.muhalefet.className).toBe("text-[13px] text-muted-foreground");
-        expect(kidsOf(first)).toHaveLength(8);
+        expect(kidsOf(first)).toHaveLength(9);
       });
 
       it("does not leak into the other side (a Turkish side keeps its own lines)", async () => {
@@ -716,7 +722,7 @@ describe("CompareBody — qualifiers shared with the cluster page", () => {
         expect(notes.muhalefet.text).toBe(RECALL);
         expect(notes.muhalefet.type).toBe("p");
         expect(notes.muhalefet.className).toBe("text-[13px] text-muted-foreground");
-        expect(kidsOf(first)).toHaveLength(8);
+        expect(kidsOf(first)).toHaveLength(9);
       });
 
       it("qualifies every matched empty zone and only those", async () => {
@@ -838,20 +844,25 @@ describe("CompareBody — qualifiers shared with the cluster page", () => {
         expect(zoneNotes(first).bagimsiz.text).toBe(ENGLISH_ONLY);
       });
 
-      it("adds no other lang attribute anywhere in the side", async () => {
+      it("adds no other lang attribute anywhere in the side: only the title and the English outlets' own links", async () => {
         const { first } = await renderSide({ members: englishOnly() });
         const withLang = collectElements(first).filter(
           (el) => el.props && el.props.lang !== undefined,
         );
-        expect(withLang).toHaveLength(1);
-        expect(withLang[0]?.props?.href).toBe(`/cluster/${A}`);
+        // The h2 anchor, then one roster link per English outlet (h138-roadmap2-4).
+        expect(withLang.map((el) => el.props?.href)).toEqual([
+          `/cluster/${A}`,
+          "/source/a-news",
+          "/source/trt-world",
+        ]);
+        expect(withLang.every((el) => el.props?.lang === "en")).toBe(true);
       });
 
       it("keeps the title text, the meta line and the remove label unchanged", async () => {
         const { first } = await renderSide({ members: englishOnly() });
         expect(textOf(kidsOf(first)[0])).toBe("Birinci hikâye");
         expect(textOf(kidsOf(first)[1])).toBe("3 kaynak · İlk yayın: 22 Ekim 2026 14:05");
-        expect(kidsOf(first)[7]?.props?.["aria-label"]).toBe("Bu tarafı kaldır: Birinci hikâye");
+        expect(kidsOf(first)[8]?.props?.["aria-label"]).toBe("Bu tarafı kaldır: Birinci hikâye");
       });
     });
   });
@@ -883,12 +894,10 @@ describe("CompareBody — qualifiers shared with the cluster page", () => {
       expect(text).toContain("2 kaynak · İlk yayın");
       expect(text).toContain("Ajans ağırlıklı · 4 haber, 2 farklı metin");
       expect(text).not.toContain("Tek kaynaktan dağıtıldı");
+      // The tooltip is the cluster page's own wireBadgeTitle(2), not a copy of its
+      // words: the wording is owned by wire.ts and may change with its detection.
       expect(
-        collectElements(first).some(
-          (el) =>
-            el.props?.title ===
-            "Bu kümedeki haberlerin en az yarısı başka bir haberin birebir kopyası",
-        ),
+        collectElements(first).some((el) => el.props?.title === wireBadgeTitle(2)),
       ).toBe(true);
     });
 
@@ -944,11 +953,11 @@ describe("CompareBody — qualifiers shared with the cluster page", () => {
       expect(textOf(metaRow(second))).toContain("5 kaynak · İlk yayın");
     });
 
-    it("a wire side still has eight direct children", async () => {
+    it("a wire side still has nine direct children", async () => {
       const { first } = await renderSide({
         wire: { isWireRedistribution: true, memberCount: 3, effectiveArticleCount: 1 },
       });
-      expect(kidsOf(first)).toHaveLength(8);
+      expect(kidsOf(first)).toHaveLength(9);
     });
   });
 });
@@ -996,7 +1005,7 @@ describe("CompareBody — remove control updates the tray", () => {
 // h14-polish-5: the two ok columns share grid rows at md+ (subgrid), so the
 // İktidar / Bağımsız / Muhalefet rosters line up across the columns instead of
 // drifting by the height difference of the title, the meta line or a roster.
-// Every ok <article> therefore has the SAME eight direct children in the same
+// Every ok <article> therefore has the SAME nine direct children in the same
 // order; a missing optional one is replaced by an aria-hidden placeholder so
 // the row count never differs between the sides.
 // ---------------------------------------------------------------------------
@@ -1031,7 +1040,7 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
     return { tree, withNonVoting: articles[0]!, without: articles[1]! };
   }
 
-  it("keeps the outer two-column grid and makes each article a subgrid spanning eight rows", async () => {
+  it("keeps the outer two-column grid and makes each article a subgrid spanning nine rows", async () => {
     const { tree, withNonVoting, without } = await renderOkPair();
 
     const grid = collectElements(tree).find(
@@ -1043,7 +1052,7 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
       const tokens = tokensOf(article);
       expect(tokens).toContain("md:grid");
       expect(tokens).toContain("md:grid-rows-subgrid");
-      expect(tokens).toContain("md:row-span-8");
+      expect(tokens).toContain("md:row-span-9");
       // Stacked (flex column) below md, with the same 1rem rhythm as before.
       expect(tokens).toContain("flex");
       expect(tokens).toContain("flex-col");
@@ -1054,14 +1063,14 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
     }
   });
 
-  it("gives both articles exactly eight direct element children", async () => {
+  it("gives both articles exactly nine direct element children", async () => {
     const { withNonVoting, without } = await renderOkPair();
 
-    expect(childrenOf(withNonVoting)).toHaveLength(8);
-    expect(childrenOf(without)).toHaveLength(8);
+    expect(childrenOf(withNonVoting)).toHaveLength(9);
+    expect(childrenOf(without)).toHaveLength(9);
   });
 
-  it("orders the children: title, meta, spectrum, three zone rows, non-voting slot, remove link", async () => {
+  it("orders the children: title, meta, spectrum, three zone rows, non-voting slot, künye slot, remove link", async () => {
     const { withNonVoting, without } = await renderOkPair();
 
     for (const article of [withNonVoting, without]) {
@@ -1070,8 +1079,38 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
       expect(kids[1]!.type).toBe("div");
       expect(textOf(kids[1])).toContain("kaynak");
       expect(collectElements(kids[2]).some((el) => el.type === BiasSpectrum)).toBe(true);
-      expect(textOf(kids[7])).toBe("Bu tarafı kaldır");
+      // Row 8 is the Kaynak künyesi slot: nobody in these fixtures is rated, so
+      // it is the aria-hidden md-only placeholder that keeps the row count.
+      expect(kids[7]!.type).toBe("div");
+      expect(kids[7]!.props?.["aria-hidden"]).toBe("true");
+      expect(textOf(kids[8])).toBe("Bu tarafı kaldır");
     }
+  });
+
+  // h139 review react-a11y-1: each ok article's title is an <h2>, so the künye
+  // label inside it is an <h3> (two sibling "Kaynak künyesi" <h2>s read as the
+  // same heading twice). /cluster/[id] keeps the default <h2>.
+  it("mounts the Kaynak künyesi strip under the story's <h2> as an <h3> (headingLevel 3) on both sides", async () => {
+    const ratedSlugs = Object.keys(SOURCE_METADATA);
+    expect(ratedSlugs.length).toBeGreaterThanOrEqual(2);
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      makeDetail(id, id === A ? "Birinci hikâye" : "İkinci hikâye", {
+        members: ratedSlugs.slice(0, 2).map((slug) => makeMember(makeSource(slug, `Kaynak ${slug}`, "center"))),
+      }),
+    );
+    const tree = await render({ a: A, b: B });
+    const articles = collectElements(tree).filter((el) => el.type === "article");
+    expect(articles).toHaveLength(2);
+    for (const article of articles) {
+      const kids = childrenOf(article);
+      expect(kids[0]!.type).toBe("h2");
+      const kunye = collectElements(kids[7]).filter((el) => el.type === SourceKunye);
+      expect(kunye).toHaveLength(1);
+      expect(kunye[0]!.props?.headingLevel).toBe(3);
+    }
+    const html = renderToStaticMarkup(tree as ReactElement);
+    expect(html).not.toMatch(/<h2[^>]*>Kaynak künyesi<\/h2>/);
+    expect(html.match(/<h3[^>]*>Kaynak künyesi<\/h3>/g)).toHaveLength(2);
   });
 
   it("puts one roster per zone in rows 4-6, in ZONES order, as direct children (no wrapper)", async () => {
@@ -1112,7 +1151,7 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
     const { withNonVoting, without } = await renderOkPair();
 
     for (const article of [withNonVoting, without]) {
-      const link = childrenOf(article)[7]!;
+      const link = childrenOf(article)[8]!;
       const tokens = tokensOf(link);
       // align-self: flex-start in the flex column (<md), justify-self: start in the grid (md+)
       expect(tokens).toContain("self-start");
@@ -1122,16 +1161,16 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
     }
   });
 
-  it("still holds eight children when the spectrum renders nothing (all-zero distribution)", async () => {
+  it("still holds nine children when the spectrum renders nothing (all-zero distribution)", async () => {
     getClusterDetailOrThrow.mockImplementation(async (id: string) =>
       makeDetail(id, id, { zeroDistribution: true }),
     );
     const tree = await render({ a: A, b: B });
     const [first] = collectElements(tree).filter((el) => el.type === "article");
 
-    expect(childrenOf(first)).toHaveLength(8);
+    expect(childrenOf(first)).toHaveLength(9);
     // BiasSpectrum returns null for an all-zero distribution. Its slot is a real
-    // wrapper element, so the DOM keeps eight grid items and the zone rows below
+    // wrapper element, so the DOM keeps nine grid items and the zone rows below
     // do not slide up one row relative to the other column.
     const { bias_distribution } = makeDetail(A, "x", { zeroDistribution: true }).cluster;
     expect(BiasSpectrum({ distribution: bias_distribution, compact: true })).toBeNull();
@@ -1144,7 +1183,7 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
   it.each([
     ["missing", { a: A }, 1],
     ["unavailable", { a: A, b: B }, 1],
-  ] as const)("the %s side spans all eight rows without stretching row 1", async (name, sp, noticeCount) => {
+  ] as const)("the %s side spans all nine rows without stretching row 1", async (name, sp, noticeCount) => {
     getClusterDetailOrThrow.mockImplementation(async (id: string) => {
       if (name === "unavailable" && id === B) throw new Error("reader timeout");
       return makeDetail(id, "Sağlam hikâye");
@@ -1157,7 +1196,7 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
     expect(notices).toHaveLength(noticeCount);
     for (const notice of notices) {
       const tokens = tokensOf(notice);
-      expect(tokens).toContain("md:row-span-8");
+      expect(tokens).toContain("md:row-span-9");
       expect(tokens).toContain("md:self-start");
     }
     // The ok side next to it is still a full subgrid.
@@ -1170,7 +1209,7 @@ describe("CompareBody — zone rows aligned across the two columns", () => {
     const box = src.match(/const NOTICE_BOX =\s*"([^"]+)"/);
     expect(box).not.toBeNull();
     const tokens = box![1]!.split(/\s+/);
-    expect(tokens).toContain("md:row-span-8");
+    expect(tokens).toContain("md:row-span-9");
     expect(tokens).toContain("md:self-start");
     // every notice case renders NOTICE_BOX rather than its own class string
     expect(src.match(/<div className=\{NOTICE_BOX\}>/g)).toHaveLength(6);

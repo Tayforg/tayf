@@ -239,3 +239,70 @@ describe("buildAlertRss", () => {
     expect(empty).toContain("<channel>");
   });
 });
+
+// h138-suffix-1: "Bağımsız" is an adjective, so the RSS sentences never glue
+// "bölgesinden" / "bölgesindeki" to it. İktidar and Muhalefet keep their old text.
+describe("buildAlertRss — zone phrasing", () => {
+  const base = "https://tayf.test";
+  const ZONE_COUNTS = {
+    iktidar: { iktidar: 5, bagimsiz: 1, muhalefet: 0 },
+    bagimsiz: { iktidar: 0, bagimsiz: 5, muhalefet: 1 },
+    muhalefet: { iktidar: 0, bagimsiz: 1, muhalefet: 5 },
+  } as const;
+  const pct = Math.round(BLINDSPOT.dominantShare * 100);
+
+  const blindspotXml = (zone: "iktidar" | "bagimsiz" | "muhalefet") =>
+    buildAlertRss(
+      [toV1AlertRecord(item({ dominantZone: zone, zoneCounts: { ...ZONE_COUNTS[zone] } }))],
+      base,
+    );
+  const silentXml = (zone: "iktidar" | "bagimsiz" | "muhalefet") =>
+    buildAlertRss(
+      [
+        toV1AlertRecord(
+          item({
+            type: "one_zone_silent",
+            dominantZone: null,
+            silentZones: [zone],
+            sourceCount: 5,
+          }),
+        ),
+      ],
+      base,
+    );
+
+  it("a Bağımsız-dominant blindspot says 'Bağımsız bölgeden'", () => {
+    const xml = blindspotXml("bagimsiz");
+    expect(xml).toContain(`Kaynakların en az %${pct}&apos;i Bağımsız bölgeden.`);
+    expect(xml).not.toContain("Bağımsız bölgesinden");
+  });
+
+  it("a one_zone_silent alert for Bağımsız says 'Bağımsız bölgedeki kaynaklardan'", () => {
+    const xml = silentXml("bagimsiz");
+    expect(xml).toContain(
+      "Tayf, Bağımsız bölgedeki kaynaklardan bu kümeye eşleşen haber bulamadı.",
+    );
+    expect(xml).not.toContain("Bağımsız bölgesindeki");
+  });
+
+  it("keeps the item titles as they are for Bağımsız", () => {
+    expect(blindspotXml("bagimsiz")).toContain("Kör nokta · Bağımsız ağırlıklı: ");
+    expect(silentXml("bagimsiz")).toContain("Sessiz bölge · Bağımsız: ");
+  });
+
+  it("İktidar and Muhalefet blindspot sentences are unchanged", () => {
+    expect(blindspotXml("iktidar")).toContain(`Kaynakların en az %${pct}&apos;i İktidar bölgesinden.`);
+    expect(blindspotXml("muhalefet")).toContain(
+      `Kaynakların en az %${pct}&apos;i Muhalefet bölgesinden.`,
+    );
+  });
+
+  it("İktidar and Muhalefet silent sentences are unchanged", () => {
+    expect(silentXml("iktidar")).toContain(
+      "Tayf, İktidar bölgesindeki kaynaklardan bu kümeye eşleşen haber bulamadı.",
+    );
+    expect(silentXml("muhalefet")).toContain(
+      "Tayf, Muhalefet bölgesindeki kaynaklardan bu kümeye eşleşen haber bulamadı.",
+    );
+  });
+});

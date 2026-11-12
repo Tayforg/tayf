@@ -8,6 +8,7 @@ import {
   summaryLabel,
 } from "./summary-attribution";
 import type { ClusterDetailMember } from "./cluster-detail-query";
+import { wireSignalOf } from "./wire";
 import {
   AGENCY_COPY_OVERLAP,
   AGREEMENT_FORM_DEFECT_MIN,
@@ -74,6 +75,76 @@ describe("summaryAttribution", () => {
     expect(summaryAttribution({ summary: "AA metni", members, wire })).toEqual({ text: "AA metni", source: seed.source });
   });
 });
+// h139 review ts-3: the wire majority is a TEXT (a connected component of the
+// same content_hash or the same agency lead, wire.ts textComponentsOf), not a
+// content_hash. Under h138-roadmap2-1 a cluster can be wire with every hash
+// distinct, so hash counts alone hid the independent seed (all hashes tie at
+// 1) and showed the copied lead (two unrelated members sharing one hash).
+describe("summaryAttribution wire majority is the largest text, not the largest hash (h139 ts-3)", () => {
+  const AA_LEAD = "Bakanlık yeni düzenlemenin ayrıntılarını bu sabah düzenlenen basın toplantısıyla kamuoyuna duyurdu.";
+  const OWN_TEXT = "Belediye başkanı kentte yürütülen altyapı çalışmalarının üçüncü etabının tamamlandığını söyledi.";
+  const wireOf = (members: ClusterDetailMember[]) =>
+    wireSignalOf(
+      members.map((m, i) => ({
+        id: `a${i}`,
+        content_hash: m.article.content_hash,
+        description: m.article.description,
+      })),
+    );
+
+  it("(a) shows the independent seed when four others copy an agency lead under distinct hashes", () => {
+    const seed = member("seed", "2026-09-06T09:00:00Z", OWN_TEXT, "h-seed");
+    const members = [
+      seed,
+      member("c1", "2026-09-06T09:10:00Z", AA_LEAD, "h-c1"),
+      member("c2", "2026-09-06T09:20:00Z", AA_LEAD, "h-c2"),
+      member("c3", "2026-09-06T09:30:00Z", AA_LEAD, "h-c3"),
+      member("c4", "2026-09-06T09:40:00Z", AA_LEAD, "h-c4"),
+      member("solo", "2026-09-06T09:50:00Z", "Bambaşka bir kaynağın kendi yazdığı, tamamen farklı ve yeterince uzun metin.", "h-solo"),
+    ];
+    const wire = wireOf(members);
+    expect(wire.isWireRedistribution).toBe(true);
+    expect(summaryAttribution({ summary: OWN_TEXT, members, wire })).toEqual({ text: OWN_TEXT, source: seed.source });
+  });
+
+  it("(b) hides the copied lead when the seed holds it under a distinct hash and two unrelated members share a hash", () => {
+    const seed = member("seed", "2026-09-06T09:00:00Z", AA_LEAD, "h-seed");
+    const members = [
+      seed,
+      member("c1", "2026-09-06T09:10:00Z", AA_LEAD, "h-c1"),
+      member("c2", "2026-09-06T09:20:00Z", AA_LEAD, "h-c2"),
+      member("c3", "2026-09-06T09:30:00Z", AA_LEAD, "h-c3"),
+      member("x1", "2026-09-06T09:40:00Z", "Birinci bağımsız kaynağın kendi yazdığı, yeterince uzun bir açıklama metni.", "hX"),
+      member("x2", "2026-09-06T09:50:00Z", "İkinci bağımsız kaynağın kendi yazdığı, yeterince uzun bir açıklama metni.", "hX"),
+    ];
+    const wire = wireOf(members);
+    expect(wire.isWireRedistribution).toBe(true);
+    expect(summaryAttribution({ summary: AA_LEAD, members, wire })).toBeNull();
+  });
+
+  it("hides a seed with a null content_hash when it sits in the lead group (identity, not hash)", () => {
+    const seed = member("seed", "2026-09-06T09:00:00Z", AA_LEAD, null);
+    const members = [
+      seed,
+      member("c1", "2026-09-06T09:10:00Z", AA_LEAD, "h-c1"),
+      member("c2", "2026-09-06T09:20:00Z", AA_LEAD, "h-c2"),
+      member("solo", "2026-09-06T09:30:00Z", "Bağımsız kaynağın kendi yazdığı, yeterince uzun bir açıklama metni burada.", "h-solo"),
+    ];
+    const wire = wireOf(members);
+    expect(wire.isWireRedistribution).toBe(true);
+    expect(summaryAttribution({ summary: AA_LEAD, members, wire })).toBeNull();
+  });
+
+  it("a wire flag over members that share no text hides nothing (no majority of at least two)", () => {
+    const seed = member("seed", "2026-09-06T09:00:00Z", OWN_TEXT, "h1");
+    const members = [seed, member("b", "2026-09-06T09:10:00Z", null, "h2"), member("c", "2026-09-06T09:20:00Z", null, "h3")];
+    expect(summaryAttribution({ summary: OWN_TEXT, members, wire: { isWireRedistribution: true } })).toEqual({
+      text: OWN_TEXT,
+      source: seed.source,
+    });
+  });
+});
+
 describe("BL-13 excerpt_allowed gate on summaryAttribution", () => {
   const notWire = { isWireRedistribution: false };
 
@@ -3572,7 +3643,11 @@ describe("h95-summaries-2: identical text is credited to the wire, then the outl
   });
 
   describe("(d) the wire-majority hide is still decided on the earliest-published match, today's seed", () => {
-    const text = "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı ile Ankara'da bir araya geldi.";
+    // Under 40 characters once folded (SAME_DESCRIPTION_MIN_CHARS), on purpose: the seed and the credited
+    // member hold this same text, and a description of 40 or more characters links them into ONE text
+    // (h139 ts-3), so they could no longer sit on different sides of the majority. A short description
+    // links nothing, so the hash alone decides, which is what these cases pin.
+    const text = "Fidan Hırvat mevkidaşıyla görüştü.";
     const WIRE = { isWireRedistribution: true };
     const other = (n: number): ClusterDetailMember =>
       fx(`Başka ${n}`, `baska-${n}`, "outlet", `2026-11-08T11:0${n}:00Z`, "Farklı bir metin.", "x");
@@ -3604,6 +3679,15 @@ describe("h95-summaries-2: identical text is credited to the wire, then the outl
       // The wire comes first, so it is the seed: its hash is not the majority, so the text is shown, credited to the wire.
       const res = summaryAttribution({ summary: text, members: [aa, agg, ...rest], wire: WIRE });
       expect(res?.source?.name).toBe("Ajans");
+    });
+
+    it("a lead of 40+ characters links the seed to the credited wire, so the seed is hidden when either holds the majority hash (h139 ts-3)", () => {
+      const lead = "Dışişleri Bakanı Fidan, Hırvatistan Meclis Başkanı ile Ankara'da bir araya geldi.";
+      const early = withHash(fx("Toplayıcı", "toplayici", "aggregator", "2026-11-08T10:00:00Z", lead, "x"), "SOLO");
+      const aa = withHash(fx("Ajans", "ajans", "wire", "2026-11-08T10:10:00Z", lead, "x"), "MAJ");
+      const members = [early, aa, withHash(other(1), "MAJ"), withHash(other(2), "MAJ")];
+      // One text (the shared lead) joins SOLO to MAJ: four members on one dispatch.
+      expect(summaryAttribution({ summary: lead, members, wire: WIRE })).toBeNull();
     });
 
     it("without a wire redistribution nothing is hidden, as before", () => {

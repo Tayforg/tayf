@@ -15,6 +15,7 @@
 //      never leak into the printed Markdown.
 
 import { ZONE_META } from "@/lib/bias/config";
+import { ZONE_KANAT } from "@/lib/bias/zone-phrases";
 import type {
   CoverageZoneRow,
   FramingArticleRef,
@@ -161,8 +162,11 @@ function renderBlindspot(report: YelpazeReport): string {
   }
 
   // Active claim (healthy / degraded / unknown) — claim + caveat, one sentence.
-  const silenceClause = silentLabel ? `, ${silentLabel} kanadı sessiz kaldı` : "";
-  lines.push(`Kör nokta: ${dominantLabel} kanadı haberi verdi${silenceClause} — ${b.caveat}.`);
+  // "Bağımsız" is an adjective: the whole phrase comes from ZONE_KANAT, so it
+  // reads "Bağımsız kanat", never "Bağımsız kanadı" (h138-suffix-1).
+  const dominantKanat = b.dominantZone ? ZONE_KANAT[b.dominantZone] : "bilinmeyen taraf kanadı";
+  const silenceClause = b.silentZone ? `, ${ZONE_KANAT[b.silentZone]} sessiz kaldı` : "";
+  lines.push(`Kör nokta: ${dominantKanat} haberi verdi${silenceClause} — ${b.caveat}.`);
   return lines.join("\n");
 }
 

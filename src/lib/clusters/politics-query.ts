@@ -143,7 +143,8 @@ export interface ClusterBundle {
   sources: BundleSource[];
   /**
    * R2 wire-collapse: true when ≥50% of the cluster's deduped members
-   * share the same `content_hash`, meaning the cluster is one AA/DHA/IHA
+   * repeat another member's text (the same `content_hash`, or the same agency
+   * lead under a reworded headline), meaning the cluster is one AA/DHA/IHA
    * wire copy amplified by N outlets rather than N independent reports.
    * Optional so the public type stays backward-compatible with consumers
    * that don't care about ranking. The /clusters page can use this to
@@ -162,8 +163,8 @@ export interface ClusterBundle {
   /**
    * R2 wire-collapse: the count to use for ranking. Equals
    * `cluster.article_count` for normal clusters; for wire redistributions
-   * it's the number of DISTINCT content_hashes — i.e. the wire copy
-   * counts as 1 source instead of 5. R1's scoreCluster reads this so a
+   * it's the number of DISTINCT texts (content_hash or shared agency lead
+   * linked) — i.e. the wire copy counts as 1 source instead of 5. R1's scoreCluster reads this so a
    * wire-collapsed cluster competes against the rest of the candidate
    * pool with its honest article-count footprint, not its inflated one.
    */
@@ -250,6 +251,16 @@ export type EmbeddedArticle = {
    * misclassified as wire (see `detectWireRedistribution`).
    */
   content_hash: string | null;
+  /**
+   * The raw RSS description (the agency lead). A SERVER-SIDE input of the wire
+   * signal only (h138-roadmap2-1): outlets that reword the headline over the
+   * same AA lead get distinct content_hash values but the same description,
+   * and `detectWireRedistribution` links members that share one. It is never
+   * copied into `ClusterBundle` (`articles` below is an explicit field-by-field
+   * map), so it cannot reach a client component or an RSC prop. Optional so
+   * fixtures and rows fetched without the column pass through unchanged.
+   */
+  description?: string | null;
   /** Migration 089 ("ADMIT"): non-null once Jev has admitted this article
    * into political clustering under a live claim. NULL on every row until
    * a later promotion PR; see isPoliticsMember in src/lib/bias/config.ts. */
@@ -296,7 +307,7 @@ export type EmbeddedClusterRow = {
 export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
          cluster_articles (
            articles (
-             id, title, url, image_url, published_at, source_id, category, content_hash, politics_admitted_at,
+             id, title, url, image_url, published_at, source_id, category, content_hash, description, politics_admitted_at,
              sources ( id, name, bias, logo_url, kind, image_allowed, excerpt_allowed )
            )
          )`;
@@ -563,7 +574,7 @@ export function buildClusterBundle(
   if (wire.isWire) {
     console.log(
       `[politics-query] wire-collapse: cluster ${c.id} ` +
-        `(${dedupedMembers.length} members → ${wire.uniqueHashes} unique hashes)`
+        `(${dedupedMembers.length} members → ${wire.uniqueHashes} distinct texts)`
     );
   }
 

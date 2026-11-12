@@ -59,7 +59,7 @@ import {
   BALANCE_ONE_SIDED_MAX,
   BALANCE_TWO_ZONE_MIN_SHARE,
 } from "@/lib/bias/balance";
-import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
+import { SAME_DESCRIPTION_MIN_CHARS, WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import { BLINDSPOT_LIST_FILTERS } from "@/lib/clusters/blindspot-feed";
 import {
   BLINDSPOT_LIST_LOOKBACK_DAYS,
@@ -364,13 +364,14 @@ describe("/metodoloji page", () => {
   });
 
   // h120-methodology-1 (b): the date order of the whole list, newest first.
-  it("renders the CHANGELOG dates newest first: 2026-11-11, -10, -09, -08, -07, -06, ... (h120-methodology-1, h130-blindspots-2)", async () => {
+  it("renders the CHANGELOG dates newest first: 2026-11-11 (twice: h138-roadmap2-1, h130-blindspots-2), -10, -09, -08, -07, -06, ... (h120-methodology-1)", async () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
     const tail = text.slice(text.indexOf("Son güncelleme:"));
     const entryDates = (tail.match(/\d{4}-\d{2}-\d{2}/g) ?? []).slice(1);
-    expect(entryDates.slice(0, 8)).toEqual([
+    expect(entryDates.slice(0, 9)).toEqual([
+      "2026-11-11",
       "2026-11-11",
       "2026-11-10",
       "2026-11-09",
@@ -438,13 +439,13 @@ describe("/metodoloji page", () => {
       expect(entry).toContain("kartta ve haber sayfasında yine görünebilir");
     });
 
-    it("quotes no typed digit: every number in the four entries comes from a constant (the 2026-11-11 one included, h130-blindspots-2)", () => {
+    it("quotes no typed digit: every number in the five entries comes from a constant (both 2026-11-11 ones included, h130-blindspots-2, h138-roadmap2-1)", () => {
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(join(here, "page.tsx"), "utf8");
-      // The CHANGELOG array, from its opening to the first entry older than these four.
+      // The CHANGELOG array, from its opening to the first entry older than these five.
       const block = source.slice(source.indexOf("const CHANGELOG = ["), source.indexOf('date: "2026-11-07"'));
       const entries = block.split(/\n\s*\{\n/).filter((piece) => piece.includes("text:"));
-      expect(entries).toHaveLength(4);
+      expect(entries).toHaveLength(5);
       for (const entry of entries) {
         const text = entry.slice(entry.indexOf("text:")).replace(/\$\{[^}]*\}/g, "#");
         expect(text).not.toMatch(/\d/);
@@ -482,11 +483,12 @@ describe("/metodoloji page", () => {
     // The entry's date directly precedes its text.
     expect(tail).toContain(`2026-11-01 ${entry}`);
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer (the newest entry's date), then the 2026-11-11 entry (h130-blindspots-2),
-    // the 2026-11-10, -09 and -08 entries
+    // footer (the newest entry's date), then the two 2026-11-11 entries
+    // (h138-roadmap2-1, h130-blindspots-2), the 2026-11-10, -09 and -08 entries
     // (h120-methodology-1), the 2026-11-07, 2026-11-06 (h62-methodology-2),
     // 2026-11-05 and 2026-11-02 (h62-methodology-1) entries, then this one.
-    expect(dates.slice(0, 10)).toEqual([
+    expect(dates.slice(0, 11)).toEqual([
+      "2026-11-11",
       "2026-11-11",
       "2026-11-11",
       "2026-11-10",
@@ -1243,13 +1245,14 @@ describe("/metodoloji page: changelog order", () => {
     expect(denge).toBeGreaterThan(sources);
 
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer, then the 2026-11-11 entry (h130-blindspots-2), the 2026-11-10, -09
-    // and -08 entries (h120-methodology-1), the
+    // footer, then the two 2026-11-11 entries (h138-roadmap2-1, h130-blindspots-2),
+    // the 2026-11-10, -09 and -08 entries (h120-methodology-1), the
     // 2026-11-07 balance/English entry, the 2026-11-06 column
     // entry, the 2026-11-05 feed-delay entry, the 2026-11-02 unclustered-arm
     // entry (148), the 2026-11-01 sibling-veto entry (126), then the three
     // 2026-10-22 entries
-    expect(dates.slice(0, 13)).toEqual([
+    expect(dates.slice(0, 14)).toEqual([
+      "2026-11-11",
       "2026-11-11",
       "2026-11-11",
       "2026-11-10",
@@ -1710,13 +1713,13 @@ describe("/metodoloji page: a public claim can be withdrawn after the wait (h130
     expect(text).not.toContain("geri alınmaz");
   });
 
-  it("CHANGELOG[0] is the new 2026-11-11 entry, the footer pin reads it, and it says the rule did not change", async () => {
+  it("the h130-blindspots-2 entry is dated 2026-11-11 (the footer date, under the h138-roadmap2-1 entry of the same day) and says the rule did not change", async () => {
     const text = await pageText();
     const entry = `Kör nokta etiketinin, göründükten sonra da ilk ${SIBLING_VETO.scopeHours} saat içinde kaldırılabileceği açıkça yazıldı; kural değişmedi.`;
 
     const tail = text.slice(text.indexOf("Son güncelleme:"));
     expect(tail.startsWith("Son güncelleme: 2026-11-11")).toBe(true);
-    // The first rendered entry: its date directly precedes its text, and it is the newest.
+    // Its date directly precedes its text; the h138-roadmap2-1 entry of the same day sits above it.
     expect(tail).toContain(`2026-11-11 ${entry}`);
     expect(tail.indexOf(`2026-11-11 ${entry}`)).toBeLessThan(
       tail.indexOf("2026-11-10 Kör nokta ifadesi:"),
@@ -1724,6 +1727,63 @@ describe("/metodoloji page: a public claim can be withdrawn after the wait (h130
     const entryDates = tail.match(/\d{4}-\d{2}-\d{2}/g)?.slice(1) ?? [];
     expect(entryDates[0]).toBe("2026-11-11");
     expect(entryDates).toEqual([...entryDates].sort().reverse());
+  });
+});
+
+// h138-roadmap2-1: the wire rule now links members that share the same agency lead
+// (description) under a reworded headline. The "Tek kaynaktan dağıtım" card says so,
+// and the 2026-11-11 CHANGELOG entry logs it; the number comes from the constant.
+describe("/metodoloji page: same agency lead is one text (h138-roadmap2-1)", () => {
+  async function pageText() {
+    const { default: MethodologyPage } = await import("./page");
+    return collectText(await MethodologyPage()).join("");
+  }
+  const ENTRY_CORE =
+    "Ajans ağırlıklı rozeti artık aynı ajans özetini paylaşan ama başlığı değiştirilmiş haberleri de tek metin sayıyor";
+
+  it("the Tek kaynaktan dağıtım card says the same fingerprint or the same summary counts as one text, with the floor from the constant", async () => {
+    const text = await pageText();
+    // The card's two paragraphs: from its first sentence to the "/kalite" note.
+    const start = text.indexOf("aslında birden fazla gazetecilik çabası değil");
+    const end = text.indexOf("Güncel kalite sayıları:");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const card = text.slice(start, end);
+
+    expect(SAME_DESCRIPTION_MIN_CHARS).toBe(40);
+    expect(card).toContain(
+      `aynı içerik parmak izine (content hash) ya da aynı haber özetine (RSS özeti; büyük/küçük harf, noktalama ve boşluk farkları yok sayılır, en az ${SAME_DESCRIPTION_MIN_CHARS} karakter) sahip haberler tek metin sayılır`,
+    );
+    expect(card).toContain("başlığını değiştirip ajansın özetini aynen basan haber de kopya sayılır");
+    // The ratio keeps its published value, and the badge the page now names is the one on the cards.
+    expect(card).toContain(`Benzersiz metin oranı ≤ %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)}`);
+    expect(card).toContain("Ajans ağırlıklı");
+    expect(card).toContain("benzersiz metin sayısına indirilir");
+    // The headline paragraph keeps its own meaning: the independent-headline count is untouched.
+    expect(card).toContain("Tayf ayrıca aynı başlığı kullanan kaynakları sayar");
+    expect(card).toContain("12 kaynak · 4 bağımsız başlık");
+  });
+
+  it("no longer describes the rule as hash-only", async () => {
+    const text = await pageText();
+    expect(text).not.toContain("makalelerin içerik özetlerinin (content hash) kaçının birbirinden");
+    expect(text).not.toContain("benzersiz dispeç sayısına indirilir");
+  });
+
+  it("CHANGELOG[0] is the 2026-11-11 entry that logs it, above the h130-blindspots-2 entry of the same day", async () => {
+    const text = await pageText();
+    const tail = text.slice(text.indexOf("Son güncelleme:"));
+
+    expect(tail.startsWith("Son güncelleme: 2026-11-11")).toBe(true);
+    const entry = `${ENTRY_CORE} (özet en az ${SAME_DESCRIPTION_MIN_CHARS} karakter olmalı); bu kümelerde gösterilen kaynak sayısı da buna göre düşüyor. Oran eşiği (%${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)}) değişmedi.`;
+    // The footer date is directly followed by the first entry's own date and text.
+    expect(tail.startsWith(`Son güncelleme: 2026-11-112026-11-11 ${entry}`)).toBe(true);
+    expect(tail.indexOf(`2026-11-11 ${entry}`)).toBeLessThan(
+      tail.indexOf("2026-11-11 Kör nokta etiketinin, göründükten sonra da"),
+    );
+    // It says the ratio did not move, so it is not a rule change of the threshold.
+    expect(entry).toContain("Oran eşiği");
+    expect(entry).toContain("değişmedi");
   });
 });
 
@@ -1743,7 +1803,14 @@ describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
   // sentence inserted after "veritabanındaki işaretleme anlıktır.", nothing else).
   // It changes what the page tells a reader about the wait, so it has the 2026-11-11
   // CHANGELOG entry ("kural değişmedi": no threshold, delay, veto or query moved).
-  const RULES_SHA256 = "8b500eb4965cf481f1dace1bdcb41483cc86d9455970f29c40fc071458eb848b";
+  // h138-roadmap2-1: 8b500eb4... -> b386e447... rewrites exactly one paragraph of the
+  // "Tek kaynaktan dağıtım" card (its first, the wire rule): the flag now reads "the
+  // same content fingerprint OR the same RSS summary of SAME_DESCRIPTION_MIN_CHARS
+  // characters or more counts as one text", names the "Ajans ağırlıklı" badge, and says
+  // "benzersiz metin" where it said "benzersiz içerik" / "benzersiz dispeç". The code
+  // changed with it (wire.ts links members that share a summary), so it has the second
+  // 2026-11-11 CHANGELOG entry; the ratio (WIRE_UNIQUE_HASH_RATIO) did not move.
+  const RULES_SHA256 = "b386e4475d592f37d243ca160c7f6aeeca8f42393a2cf94671293968c5bc5c1b";
 
   it("the rendered text of everything above the CHANGELOG hashes to the pinned value", async () => {
     // The two inputs that are not the page's own text: the registry-backed tagged
