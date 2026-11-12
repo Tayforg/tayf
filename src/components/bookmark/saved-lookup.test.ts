@@ -31,6 +31,19 @@ import {
   type SavedRpcName,
 } from "./saved-lookup";
 
+// Text outside tags, by a character walk (a regex tag strip trips CodeQL's
+// js/incomplete-multi-character-sanitization even in tests).
+function textOutsideTags(html: string): string {
+  let text = "";
+  let inTag = false;
+  for (const ch of html) {
+    if (ch === "<") inTag = true;
+    else if (ch === ">") inTag = false;
+    else if (!inTag) text += ch;
+  }
+  return text;
+}
+
 // h135 / h134-reader-2: /saved sent only the newest 200 bookmarks to saved_clusters_v4 (the RPC's own cap), so a
 // reader with more bookmarks lost the older ones from the page with no notice. savedLookupPlan splits the saved
 // ids into chunks of at most 200 (newest chunk first, at most 5 chunks), mergeSavedRows puts the answers back in
@@ -269,7 +282,7 @@ describe("SavedTruncationNote", () => {
 
   it("groups thousands with a dot, at any size", () => {
     const text = (shown: number, total: number) =>
-      renderToStaticMarkup(createElement(SavedTruncationNote, { shown, total })).replace(/<[^>]*>/g, "").replace(/[<>]/g, "");
+      textOutsideTags(renderToStaticMarkup(createElement(SavedTruncationNote, { shown, total })));
     expect(text(1000, 12345)).toBe("En yeni 1.000 kayıt gösteriliyor; toplam 12.345 kayıt var.");
     expect(text(200, 201)).toBe("En yeni 200 kayıt gösteriliyor; toplam 201 kayıt var.");
   });
@@ -941,7 +954,7 @@ describe("fixture: 201 real saved ids (production shape, 2026-11-11)", () => {
     expect(rows.map((r) => r.id)).toEqual(many.slice(1).reverse()); // newest first
     expect(plan).toMatchObject({ total: 1001, requested: 1000 });
     expect(
-      renderToStaticMarkup(createElement(SavedTruncationNote, { shown: plan.requested, total: plan.total })).replace(/<[^>]*>/g, "").replace(/[<>]/g, ""),
+      textOutsideTags(renderToStaticMarkup(createElement(SavedTruncationNote, { shown: plan.requested, total: plan.total }))),
     ).toBe("En yeni 1.000 kayıt gösteriliyor; toplam 1.001 kayıt var.");
   });
 
