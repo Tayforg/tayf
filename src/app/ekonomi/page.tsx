@@ -147,9 +147,12 @@ export default async function EkonomiPage() {
                   <time dateTime={item.publishedAt} className="font-mono text-[11px] tabular-nums text-muted-foreground">
                     {fmtWhen(item.publishedAt)}
                   </time>
-                  <span className="hidden truncate font-mono text-[11px] text-muted-foreground sm:block" lang={sourceLang(item.source)}>
+                  <span className="hidden min-w-0 font-mono text-[11px] text-muted-foreground sm:block" lang={sourceLang(item.source)}>
                     {item.source ? (
-                      <Link href={`/source/${item.source.slug}`} className="hover:text-foreground">
+                      <Link
+                        href={`/source/${item.source.slug}`}
+                        className="block truncate hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
                         {item.source.name}
                       </Link>
                     ) : null}

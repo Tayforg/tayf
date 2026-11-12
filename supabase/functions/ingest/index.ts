@@ -497,6 +497,12 @@ interface CycleStats {
   // registered a paid ad click. Summary line and HTTP JSON only, no
   // `ingest_cycles` column. Normally 0.
   adLinksDropped: number;
+  // `paidContentDropped` (h148-sources-1): items whose url opens with a paid
+  // content section (`/advertorial/` or `/tanitim-bulteni/` as the first or second
+  // path segment, `isPaidContentUrl`) that normalizeItem threw away instead of
+  // storing them as news (Posta and CNN Türk publish them almost daily). Summary
+  // line and HTTP JSON only, no `ingest_cycles` column.
+  paidContentDropped: number;
   // `foreignHostSkipped` (h63-clusterintegrity-2): items left to another source
   // because their link host is the host of a different active source (an
   // aggregator feed carrying a registered outlet's stream: haberler.com's feed
@@ -1770,6 +1776,7 @@ async function runCycle(): Promise<CycleStats> {
     twinsKeyCapped: 0,
     contentlessTitlesDropped: 0,
     adLinksDropped: 0,
+    paidContentDropped: 0,
     foreignHostSkipped: 0,
     offHostItems: 0,
     parseDeferred: 0,
@@ -2197,7 +2204,7 @@ async function runCycleBody(
       const bootstrapUnchanged =
         bootstrap && !!result.bodyHash && result.bodyHash === source.fetch_body_hash;
       // Per source, so the log line below names the feed that sent the junk.
-      const normalizeCounters = { contentlessTitles: 0, adLinks: 0 };
+      const normalizeCounters = { contentlessTitles: 0, adLinks: 0, paidContent: 0 };
       // Phase 1 (hunt-11): the cheap half of the normalisation for every item.
       // A bootstrap whose body is the stored one prepares nothing.
       const preparedAll = bootstrapUnchanged
@@ -2254,6 +2261,13 @@ async function runCycleBody(
         // Slug and count only: never a url or a headline.
         console.log(
           `[ingest] ${source.slug}: ${normalizeCounters.adLinks} item(s) dropped: ad click link`,
+        );
+      }
+      if (normalizeCounters.paidContent > 0) {
+        stats.paidContentDropped += normalizeCounters.paidContent;
+        // Slug and count only: never a url or a headline.
+        console.log(
+          `[ingest] ${source.slug}: ${normalizeCounters.paidContent} item(s) dropped: paid content url`,
         );
       }
       if (offHost > 0) {

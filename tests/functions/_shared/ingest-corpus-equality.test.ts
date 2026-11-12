@@ -209,7 +209,7 @@ describe("normalizeItem over the ingest corpus", () => {
 
   it("counts a contentless title exactly where it was counted before", () => {
     for (const row of corpus.rows) {
-      const counters: NormalizeCounters = { contentlessTitles: 0, adLinks: 0 };
+      const counters: NormalizeCounters = { contentlessTitles: 0, adLinks: 0, paidContent: 0 };
       normalizeItem(sourceOf(row), row.item, corpus.nowMs, counters);
       expect(counters.contentlessTitles).toBe(row.expected.contentless ? 1 : 0);
     }
@@ -217,7 +217,7 @@ describe("normalizeItem over the ingest corpus", () => {
 
   it("drops no recorded row as an ad click link (h130-feeds-2: the host rule changes no stored shape)", () => {
     for (const row of corpus.rows) {
-      const counters: NormalizeCounters = { contentlessTitles: 0, adLinks: 0 };
+      const counters: NormalizeCounters = { contentlessTitles: 0, adLinks: 0, paidContent: 0 };
       normalizeItem(sourceOf(row), row.item, corpus.nowMs, counters);
       expect(counters.adLinks).toBe(0);
     }
@@ -228,10 +228,10 @@ describe("prepareItem + completeItem over the ingest corpus", () => {
   it("compose to exactly normalizeItem, nulls included, with identical contentless counts", () => {
     for (const row of corpus.rows) {
       const source = sourceOf(row);
-      const whole: NormalizeCounters = { contentlessTitles: 0, adLinks: 0 };
+      const whole: NormalizeCounters = { contentlessTitles: 0, adLinks: 0, paidContent: 0 };
       const expected = normalizeItem(source, row.item, corpus.nowMs, whole);
 
-      const split: NormalizeCounters = { contentlessTitles: 0, adLinks: 0 };
+      const split: NormalizeCounters = { contentlessTitles: 0, adLinks: 0, paidContent: 0 };
       const prepared = prepareItem(source, row.item, split);
       const composed = prepared ? completeItem(source, prepared, corpus.nowMs) : null;
 
@@ -260,7 +260,7 @@ describe("prepareItem + completeItem over the ingest corpus", () => {
 
   it("prepareItem returns null without a link (silently) and for a contentless title (counted)", () => {
     const source = { id: "s", name: "s", slug: "s", url: "https://s.test", rss_url: "" };
-    const counters: NormalizeCounters = { contentlessTitles: 0, adLinks: 0 };
+    const counters: NormalizeCounters = { contentlessTitles: 0, adLinks: 0, paidContent: 0 };
     expect(prepareItem(source, { title: "Başlık", link: "  " }, counters)).toBeNull();
     expect(counters.contentlessTitles).toBe(0);
     expect(prepareItem(source, { title: "   ", link: "/a" }, counters)).toBeNull();

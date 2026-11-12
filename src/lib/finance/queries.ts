@@ -11,6 +11,7 @@ import {
   filterFeedTickers,
   isHiddenMatch,
   isLegalNotice,
+  isPaidContentUrl,
   relevanceKey,
   type AttentionRawRow,
   type AttentionRow,
@@ -1256,6 +1257,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
         (r) =>
           !legalIds.has(r.id) &&
           !isLegalNotice(r.title, r.url) &&
+          !isPaidContentUrl(r.url) &&
           !isHiddenMatch(scores.get(relevanceKey(r.id, ticker))),
       )
       .map((r) => ({

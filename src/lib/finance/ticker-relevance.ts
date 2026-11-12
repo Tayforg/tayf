@@ -1,11 +1,18 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { isLegalNotice } from "../../../supabase/functions/_shared/rss/legal-notice";
+import { isPaidContentUrl } from "../../../supabase/functions/_shared/rss/paid-content";
 
 // ingest-hygiene: BİK court / official notices are dropped at ingest, but rows
 // already stored (and any that slip through) are filtered here at read time.
 // Re-exported so finance queries share the one Deno/Next implementation.
 export { isLegalNotice };
+
+// h148-sources-1: paid advertorials and press releases (url section
+// /advertorial/ or /tanitim-bulteni/) are dropped at ingest too; the rows stored
+// before that are hidden at read time by url alone, with no data rewrite.
+// Re-exported for the same reason as isLegalNotice.
+export { isPaidContentUrl };
 
 // Jev ticker-relevance gate (§4(b), reader-data, no migration).
 //
@@ -227,12 +234,15 @@ interface FeedTickerItem {
 }
 
 /**
- * First drop legal/official notices (`isLegalNotice` on title + url), then
+ * First drop legal/official notices (`isLegalNotice` on title + url) and paid
+ * content (`isPaidContentUrl` on url, h148-sources-1: a Dünya /advertorial/ that
+ * matched 'garanti bbva' is dropped whatever its relevance score), then
  * drop hidden ticker matches (score < 0.2) from each item's ticker list, then
  * drop any item left with zero tickers. Used for /ekonomi's feed —
  * over-fetching upstream (fetchEconFeed requests 1.25x the display limit)
  * absorbs the items this drops. The notice check is fail-open: an item
- * without a string title is never dropped by it.
+ * without a string title is never dropped by it, and an item without a string
+ * url is never dropped by the paid-content check.
  */
 export function filterFeedTickers<T extends FeedTickerItem>(
   items: readonly T[],
@@ -246,6 +256,7 @@ export function filterFeedTickers<T extends FeedTickerItem>(
     ) {
       continue;
     }
+    if (isPaidContentUrl(item.url)) continue;
     const kept = item.tickers.filter((t) => !isHiddenMatch(scores.get(relevanceKey(item.id, t))));
     if (kept.length === 0) continue;
     out.push({ ...item, tickers: kept });

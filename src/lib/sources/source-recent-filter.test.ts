@@ -143,3 +143,84 @@ describe("selectSourceRecentArticles", () => {
     expect(kept).toBe(withExtras);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h148-sources-1. A paid advertorial or press release (url section /advertorial/
+// or /tanitim-bulteni/) is not news. Halk TV's quarantined feed left a
+// /tanitim-bulteni/ item at the top of 'Son haberler' for weeks, and one such row
+// sat in a 2-member cluster. The list drops it BEFORE the clustered-id exemption:
+// a paid row is dropped whether or not it is in a cluster. Rows stored before the
+// ingest filter are hidden here on read; nothing in the table is rewritten.
+// ---------------------------------------------------------------------------
+
+interface UrlRow extends Row {
+  url?: string | null;
+}
+
+const HALK_PR_URL =
+  "https://halktv.com.tr/tanitim-bulteni/otel-fiyatlarini-karsilastirmanin-pratik-bir-yolu-1061590h";
+const POSTA_ADV_URL =
+  "https://www.posta.com.tr/advertorial/ziraat-bankasi-10-trilyon-tl-aktif-buyuklugu-asan-ilk-banka-oldu-3063347";
+
+function urlRow(i: number, url: string | null | undefined): UrlRow {
+  return { id: `u${i}`, title: `Bütçe görüşmesi ${i}`, description: null, url };
+}
+
+describe("selectSourceRecentArticles: paid content urls (h148-sources-1)", () => {
+  it("drops a /tanitim-bulteni/ row even when its id is in clusteredIds", () => {
+    const paid = urlRow(1, HALK_PR_URL);
+    const news = urlRow(2, "https://halktv.com.tr/gundem/bir-haber-1061591h");
+    expect(selectSourceRecentArticles([paid, news], new Set([paid.id]))).toEqual([news]);
+  });
+
+  it("drops an unclustered /advertorial/ row", () => {
+    const paid = urlRow(1, POSTA_ADV_URL);
+    const news = urlRow(2, "https://www.posta.com.tr/gundem/bir-haber-3063348");
+    expect(selectSourceRecentArticles([paid, news], NONE)).toEqual([news]);
+  });
+
+  it("still fills the 20-row cap from later rows", () => {
+    const rows: UrlRow[] = [
+      urlRow(0, HALK_PR_URL),
+      urlRow(1, POSTA_ADV_URL),
+      ...Array.from({ length: 30 }, (_, i) => urlRow(i + 2, `https://halktv.com.tr/gundem/haber-${i}h`)),
+    ];
+
+    const out = selectSourceRecentArticles(rows, NONE);
+
+    expect(out).toHaveLength(20);
+    expect(out.map((r) => r.id)).toEqual(rows.slice(2, 22).map((r) => r.id));
+  });
+
+  it("keeps rows without a url exactly as before (null and undefined)", () => {
+    const noUrl = urlRow(1, undefined);
+    const nullUrl = urlRow(2, null);
+    expect(selectSourceRecentArticles([noUrl, nullUrl], NONE)).toEqual([noUrl, nullUrl]);
+    // and the private-individual filter still decides an unclustered url-less row
+    const flagged: UrlRow = { ...WORK_ACCIDENT, url: null };
+    expect(selectSourceRecentArticles([flagged], NONE)).toEqual([]);
+    expect(selectSourceRecentArticles([flagged], new Set([flagged.id]))).toEqual([flagged]);
+  });
+
+  it("keeps a row whose url only mentions the section outside the first two path segments", () => {
+    const rows = [
+      urlRow(1, "https://x.com/haber/advertorial-ajansi-kuruldu-1"),
+      urlRow(2, "https://x.com/haber/x?ref=advertorial"),
+      urlRow(3, "https://x.com/a/b/advertorial/x"),
+    ];
+    expect(selectSourceRecentArticles(rows, NONE)).toEqual(rows);
+  });
+
+  it("drops a paid row whose second path segment is the section, clustered or not", () => {
+    const paid = urlRow(1, "https://x.com/tr/advertorial/y");
+    expect(selectSourceRecentArticles([paid], new Set([paid.id]))).toEqual([]);
+  });
+
+  it("does not mutate its input and returns the same row objects it kept", () => {
+    const rows = [urlRow(1, HALK_PR_URL), urlRow(2, "https://halktv.com.tr/gundem/bir-haber-1061591h")];
+    const snapshot = [...rows];
+    const out = selectSourceRecentArticles(rows, NONE);
+    expect(rows).toEqual(snapshot);
+    expect(out[0]).toBe(rows[1]);
+  });
+});

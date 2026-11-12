@@ -1268,12 +1268,12 @@ describe("normalize.ts ad click links: dropped and counted (h130-feeds-2)", () =
   };
   const AD_URL = "https://pubads.g.doubleclick.net/gampad/clk?id=7487496184&iu=/31903365";
   const adItem = { title: "Kentin İyi Yaşam Çizgisi: KENT Etiler", link: AD_URL };
-  const fresh = () => ({ contentlessTitles: 0, adLinks: 0 });
+  const fresh = () => ({ contentlessTitles: 0, adLinks: 0, paidContent: 0 });
 
   it("prepareItem drops the Habertürk ad item and counts it as an ad link only", () => {
     const counters = fresh();
     expect(mod!.prepareItem(haberturk, adItem, counters)).toBeNull();
-    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 1 });
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 1, paidContent: 0 });
   });
 
   it("normalizeItem returns null for the ad item and counts it once", () => {
@@ -1303,7 +1303,7 @@ describe("normalize.ts ad click links: dropped and counted (h130-feeds-2)", () =
     const row = mod!.normalizeItem(haberturk, item, 0, counters);
     expect(row).not.toBeNull();
     expect(row!.url).toBe("https://www.haberturk.com/ekonomi/merkez-bankasi-faiz-1234567");
-    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0 });
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0, paidContent: 0 });
   });
 
   it("a relative link resolves against the source before the host check", () => {
@@ -1342,25 +1342,25 @@ describe("normalize.ts ad click links: dropped and counted (h130-feeds-2)", () =
     const counters = fresh();
     expect(mod!.prepareItem(haberturk, { title: "Bağlantısız" }, counters)).toBeNull();
     expect(mod!.prepareItem(haberturk, { title: "Bağlantısız", link: "  " }, counters)).toBeNull();
-    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0 });
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0, paidContent: 0 });
   });
 
   it("contentless titles still count separately: the title checks run before the ad check", () => {
     const counters = fresh();
     expect(mod!.prepareItem(haberturk, { title: "&nbsp", link: AD_URL }, counters)).toBeNull();
-    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 0 });
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 0, paidContent: 0 });
     expect(mod!.prepareItem(haberturk, { title: "   ", link: AD_URL }, counters)).toBeNull();
-    expect(counters).toEqual({ contentlessTitles: 2, adLinks: 0 });
+    expect(counters).toEqual({ contentlessTitles: 2, adLinks: 0, paidContent: 0 });
     expect(mod!.prepareItem(haberturk, { title: "&nbsp", link: "/x" }, counters)).toBeNull();
-    expect(counters).toEqual({ contentlessTitles: 3, adLinks: 0 });
+    expect(counters).toEqual({ contentlessTitles: 3, adLinks: 0, paidContent: 0 });
     expect(mod!.prepareItem(haberturk, adItem, counters)).toBeNull();
-    expect(counters).toEqual({ contentlessTitles: 3, adLinks: 1 });
+    expect(counters).toEqual({ contentlessTitles: 3, adLinks: 1, paidContent: 0 });
   });
 
   it("adds to a counters object that already holds a count", () => {
-    const counters = { contentlessTitles: 4, adLinks: 5 };
+    const counters = { contentlessTitles: 4, adLinks: 5, paidContent: 0 };
     mod!.prepareItem(haberturk, adItem, counters);
-    expect(counters).toEqual({ contentlessTitles: 4, adLinks: 6 });
+    expect(counters).toEqual({ contentlessTitles: 4, adLinks: 6, paidContent: 0 });
   });
 
   const batch = [
@@ -1376,14 +1376,14 @@ describe("normalize.ts ad click links: dropped and counted (h130-feeds-2)", () =
     const counters = fresh();
     const rows = mod!.normalizeArticles(haberturk, batch, 0, counters);
     expect(rows.map((r) => r.title)).toEqual(["Önce gerçek bir başlık", "Sonra başka bir başlık"]);
-    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 2 });
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 2, paidContent: 0 });
   });
 
   it("prepareArticles totals both counters and returns only the real items, in order", () => {
     const counters = fresh();
     const prepared = mod!.prepareArticles(haberturk, batch, counters);
     expect(prepared.map((p) => p.title)).toEqual(["Önce gerçek bir başlık", "Sonra başka bir başlık"]);
-    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 2 });
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 2, paidContent: 0 });
   });
 
   it("an ad link drop logs nothing in the normaliser (ingest owns the log line, slug and count only)", () => {
@@ -1391,6 +1391,187 @@ describe("normalize.ts ad click links: dropped and counted (h130-feeds-2)", () =
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mod!.normalizeArticles(haberturk, batch, 0, fresh());
     mod!.prepareArticles(haberturk, batch, fresh());
+    expect(errSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h148-sources-1: paid advertorials and press releases ride the same feeds as
+// news and carry a section segment in the url (/advertorial/ on Posta, CNN Turk,
+// Dunya, Turkiye Gazetesi; /tanitim-bulteni/ on Halk TV). prepareItem drops such
+// an item, counted in `counters.paidContent`, right after the ad click-link
+// check: the title checks run first, so a headline-less item stays counted as
+// contentless, and an ad click-tracker stays counted as an ad link.
+// ---------------------------------------------------------------------------
+
+describe("normalize.ts paid content urls: dropped and counted (h148-sources-1)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const posta = {
+    id: "src-posta",
+    name: "Posta",
+    slug: "posta",
+    url: "https://www.posta.com.tr",
+    rss_url: "https://www.posta.com.tr/rss",
+  };
+  const halk = {
+    id: "src-halk-tv",
+    name: "Halk TV",
+    slug: "halk-tv",
+    url: "https://halktv.com.tr",
+    rss_url: "https://halktv.com.tr/rss",
+  };
+  const PAID_URL =
+    "https://www.posta.com.tr/advertorial/ziraat-bankasi-10-trilyon-tl-aktif-buyuklugu-asan-ilk-banka-oldu-3063347";
+  const PR_URL =
+    "https://halktv.com.tr/tanitim-bulteni/otel-fiyatlarini-karsilastirmanin-pratik-bir-yolu-1061590h";
+  const NEWS_URL = "https://www.posta.com.tr/gundem/bir-haber-3063348";
+  const paidItem = {
+    title: "Ziraat Bankası 10 trilyon TL aktif büyüklüğü aşan ilk banka oldu",
+    link: PAID_URL,
+  };
+  const fresh = () => ({ contentlessTitles: 0, adLinks: 0, paidContent: 0 });
+
+  it("prepareItem drops the Posta advertorial and counts it as paid content only", () => {
+    const counters = fresh();
+    expect(mod!.prepareItem(posta, paidItem, counters)).toBeNull();
+    expect(counters.paidContent).toBe(1);
+    expect(counters.adLinks).toBe(0);
+    expect(counters.contentlessTitles).toBe(0);
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0, paidContent: 1 });
+  });
+
+  it("prepareItem drops the Halk TV press release (/tanitim-bulteni/)", () => {
+    const counters = fresh();
+    const item = { title: "Otel fiyatlarını karşılaştırmanın pratik bir yolu", link: PR_URL };
+    expect(mod!.prepareItem(halk, item, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0, paidContent: 1 });
+  });
+
+  it("normalizeItem returns null for the advertorial and counts it once", () => {
+    const counters = fresh();
+    expect(mod!.normalizeItem(posta, paidItem, 0, counters)).toBeNull();
+    expect(counters.paidContent).toBe(1);
+  });
+
+  it("drops the advertorial without a counters object (the old 2- and 3-argument calls)", () => {
+    expect(mod!.prepareItem(posta, paidItem)).toBeNull();
+    expect(mod!.normalizeItem(posta, paidItem)).toBeNull();
+    expect(mod!.normalizeItem(posta, paidItem, 0)).toBeNull();
+  });
+
+  it("a Posta /gundem/ link passes, uncounted", () => {
+    const counters = fresh();
+    const item = { title: "Merkez Bankası faizi sabit tuttu", link: NEWS_URL };
+    const prepared = mod!.prepareItem(posta, item, counters);
+    expect(prepared).not.toBeNull();
+    expect(prepared!.url).toBe(NEWS_URL);
+    expect(mod!.normalizeItem(posta, item, 0, counters)).not.toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0, paidContent: 0 });
+  });
+
+  it("a relative link resolves against the source before the path check", () => {
+    const counters = fresh();
+    const prepared = mod!.prepareItem(
+      posta,
+      { title: "Göreli reklam yolu", link: "/advertorial/goreli-yol-1" },
+      counters,
+    );
+    expect(prepared).toBeNull();
+    expect(counters.paidContent).toBe(1);
+    // The section only counts as the first or second path segment: a third is a story.
+    const deep = mod!.prepareItem(
+      posta,
+      { title: "Derin yol", link: "/a/b/advertorial/derin-yol-2" },
+      counters,
+    );
+    expect(deep).not.toBeNull();
+    expect(counters.paidContent).toBe(1);
+  });
+
+  it("a segment-prefix lookalike and a query mention are kept and uncounted", () => {
+    const counters = fresh();
+    expect(
+      mod!.prepareItem(
+        posta,
+        { title: "Ajans kuruldu", link: "https://www.posta.com.tr/haber/advertorial-ajansi-kuruldu-1" },
+        counters,
+      ),
+    ).not.toBeNull();
+    expect(
+      mod!.prepareItem(
+        posta,
+        { title: "Sorgu anması", link: "https://www.posta.com.tr/haber/x?ref=advertorial" },
+        counters,
+      ),
+    ).not.toBeNull();
+    expect(counters.paidContent).toBe(0);
+  });
+
+  it("an item without a link stays silent: not counted as paid content", () => {
+    const counters = fresh();
+    expect(mod!.prepareItem(posta, { title: "Bağlantısız" }, counters)).toBeNull();
+    expect(mod!.prepareItem(posta, { title: "Bağlantısız", link: "  " }, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0, paidContent: 0 });
+  });
+
+  it("a contentless title with an /advertorial/ link is counted as contentless, not paid content (order of checks)", () => {
+    const counters = fresh();
+    expect(mod!.prepareItem(posta, { title: "&nbsp", link: PAID_URL }, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 0, paidContent: 0 });
+    expect(mod!.prepareItem(posta, { title: "   ", link: PAID_URL }, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 2, adLinks: 0, paidContent: 0 });
+    expect(mod!.prepareItem(posta, paidItem, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 2, adLinks: 0, paidContent: 1 });
+  });
+
+  it("an ad click-tracker is counted as an ad link, not paid content, even with an /advertorial/ path", () => {
+    const counters = fresh();
+    const item = {
+      title: "Reklam izleyici",
+      link: "https://ad.doubleclick.net/advertorial/clk/1;2;3",
+    };
+    expect(mod!.prepareItem(posta, item, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 1, paidContent: 0 });
+  });
+
+  it("adds to a counters object that already holds a count", () => {
+    const counters = { contentlessTitles: 4, adLinks: 5, paidContent: 6 };
+    mod!.prepareItem(posta, paidItem, counters);
+    expect(counters).toEqual({ contentlessTitles: 4, adLinks: 5, paidContent: 7 });
+  });
+
+  const batch = [
+    { title: "Önce gerçek bir başlık", link: "/gundem/bir-1" },
+    paidItem,
+    { title: "&amp;nbsp", link: "/gundem/uc-3" },
+    { title: "Halk TV tanıtım", link: "https://www.posta.com.tr/tr/tanitim-bulteni/dort-4" },
+    { title: "Sonra başka bir başlık", link: "/gundem/bes-5" },
+    { title: "Bağlantısız başlık" },
+  ];
+
+  it("normalizeArticles totals the counters and returns only the real rows", () => {
+    const counters = fresh();
+    const rows = mod!.normalizeArticles(posta, batch, 0, counters);
+    expect(rows.map((r) => r.title)).toEqual(["Önce gerçek bir başlık", "Sonra başka bir başlık"]);
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 0, paidContent: 2 });
+  });
+
+  it("prepareArticles totals the counters and returns only the real items, in order", () => {
+    const counters = fresh();
+    const prepared = mod!.prepareArticles(posta, batch, counters);
+    expect(prepared.map((p) => p.title)).toEqual(["Önce gerçek bir başlık", "Sonra başka bir başlık"]);
+    expect(counters).toEqual({ contentlessTitles: 1, adLinks: 0, paidContent: 2 });
+  });
+
+  it("a paid content drop logs nothing in the normaliser (ingest owns the log line, slug and count only)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mod!.normalizeArticles(posta, batch, 0, fresh());
+    mod!.prepareArticles(posta, batch, fresh());
     expect(errSpy).not.toHaveBeenCalled();
     expect(logSpy).not.toHaveBeenCalled();
   });
