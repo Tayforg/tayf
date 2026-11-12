@@ -5,6 +5,7 @@
 // Istanbul is a fixed UTC+3 (no DST since 2016), so calendar days are derived
 // by shifting the epoch by hand, the same way format.ts does.
 
+import { bistCalendarEntry, bistCalendarLabel, bistDayNumber, bistTradingDay } from "@/lib/finance/bist-calendar";
 import { fmtKat, limitPrices } from "@/lib/finance/format";
 import type { Company, QuoteStat } from "@/lib/finance/queries";
 import type { Quote } from "@/lib/finance/quotes";
@@ -17,12 +18,18 @@ export const SESSION_OPEN_MIN = 9 * 60 + 55;
 export const SESSION_CLOSE_MIN = 18 * 60 + 15;
 
 /**
- * A quote whose last trade is more than this many Istanbul calendar days old
- * is shown by its date only. Four days covers a normal weekend plus a one-day
- * holiday (Fri close read on Tuesday); the 9-day bayram gaps land here too,
- * which is why the label states the date and never asserts a halt.
+ * The half-day twin of SESSION_CLOSE_MIN: 12:45. BIST "Pay Piyasası İşlem Saatleri Çizelgeleri" (04.11.2019),
+ * "YARIM İŞ GÜNLERİNDE": continuous trading 10:00-12:30, closing-price trades 12:38-12:40. The full day's 18:15 is
+ * the 18:10 end of its closing-price trades plus 5 minutes of slack, and so is this: 12:40 plus 5 minutes.
  */
-export const HALTED_AFTER_DAYS = 4;
+export const HALF_DAY_CLOSE_MIN = 12 * 60 + 45;
+
+/**
+ * A quote is shown by its date only ("son işlem dd.MM.yyyy") once this many BIST sessions have passed between its
+ * day and today without a trade. Weekends and closed holidays are not sessions, so a bayram closure never counts;
+ * a half day is one.
+ */
+export const HALTED_AFTER_MISSED_SESSIONS = 2;
 
 export type QuoteFreshness =
   | { kind: "live"; label: "bugün" }
@@ -55,37 +62,62 @@ function ddMMOfDay(day: string): string | null {
 /** Comparable YYYY-MM-DD key (tolerates a longer ISO string). */
 const dayKey = (day: string) => day.slice(0, 10);
 
+/** Whether an epoch-day number is a half day in the BIST calendar (arife, 28 Ekim): the session ends at 12:30. */
+function isHalfDay(dayNum: number | null): boolean {
+  return dayNum !== null && bistCalendarEntry(dayNum)?.kind === "half";
+}
+
 /**
- * Whether the BIST continuous session is running at `nowMs`: a weekday inside
- * 09:55-18:15 Istanbul time (both bounds inclusive). Clock only: there is no
- * holiday calendar, so a weekday holiday reads as open. That is the safe
- * direction for wording, because "Piyasa kapalı" is claimed only when the
- * market is certainly closed (weekend or outside the session hours).
- * An unparsable `nowMs` is not open.
+ * Whether the BIST continuous session is running at `nowMs`: a trading day
+ * inside 09:55-18:15 Istanbul time (both bounds inclusive). A trading day is a
+ * weekday that is not a closed row of the static BIST calendar
+ * (bist-calendar.ts); a half day (arife, 28 Ekim) ends at HALF_DAY_CLOSE_MIN,
+ * 12:45, instead of 18:15. Past the table's last day only the weekday rule
+ * applies. An unparsable or out-of-range `nowMs` is not open; never throws.
  */
 export function marketOpen(nowMs: number): boolean {
   if (!Number.isFinite(nowMs)) return false;
   const now = new Date(nowMs + IST_OFFSET_MS);
-  const weekday = now.getUTCDay(); // 0 = Sunday .. 6 = Saturday
+  if (Number.isNaN(now.getTime())) return false;
+  const d = istDay(nowMs);
+  if (!bistTradingDay(d)) return false;
+  const close = isHalfDay(d) ? HALF_DAY_CLOSE_MIN : SESSION_CLOSE_MIN;
   const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
-  return weekday >= 1 && weekday <= 5 && minute >= SESSION_OPEN_MIN && minute <= SESSION_CLOSE_MIN;
+  return minute >= SESSION_OPEN_MIN && minute <= close;
+}
+
+/**
+ * How many BIST sessions fall strictly between two Istanbul days, counting only up to HALTED_AFTER_MISSED_SESSIONS.
+ * A gap of more than 31 days is the cap without walking it, so the loop is bounded.
+ */
+function missedSessions(fromDay: number, toDay: number): number {
+  if (toDay - fromDay > 31) return HALTED_AFTER_MISSED_SESSIONS;
+  let missed = 0;
+  for (let d = fromDay + 1; d < toDay && missed < HALTED_AFTER_MISSED_SESSIONS; d++) {
+    if (bistTradingDay(d)) missed++;
+  }
+  return missed;
 }
 
 /**
  * How current a quote is, for the word shown next to its move.
- *  - halted: the last trade is more than HALTED_AFTER_DAYS calendar days back.
- *  - live: traded today, on a weekday, inside the 09:55-18:15 session.
- *  - last_session: everything else (weekend, overnight, closed for the day).
+ *  - halted: two or more BIST sessions passed between the quote's day and today without a trade; weekends and
+ *    closed holidays are not sessions, half days are.
+ *  - live: traded today, on a trading day, inside the session (09:55-18:15, or to 12:45 on a half day).
+ *  - last_session: everything else (weekend, holiday, overnight, closed for the day).
  */
 export function quoteFreshness(asOfIso: string, nowMs: number): QuoteFreshness {
   const asOfMs = Date.parse(asOfIso);
   if (!Number.isFinite(asOfMs)) return { kind: "last_session", label: "son seans" };
   if (!Number.isFinite(nowMs)) return { kind: "last_session", label: `son seans ${ddMM(asOfMs)}` };
 
-  const gapDays = istDay(nowMs) - istDay(asOfMs);
-  if (gapDays > HALTED_AFTER_DAYS) return { kind: "halted", label: `son işlem ${ddMMyyyy(asOfMs)}` };
+  const asOfDay = istDay(asOfMs);
+  const today = istDay(nowMs);
+  if (missedSessions(asOfDay, today) >= HALTED_AFTER_MISSED_SESSIONS) {
+    return { kind: "halted", label: `son işlem ${ddMMyyyy(asOfMs)}` };
+  }
 
-  if (gapDays === 0 && marketOpen(nowMs)) return { kind: "live", label: "bugün" };
+  if (today === asOfDay && marketOpen(nowMs)) return { kind: "live", label: "bugün" };
   return { kind: "last_session", label: `son seans ${ddMM(asOfMs)}` };
 }
 
@@ -96,8 +128,11 @@ export function quoteFreshness(asOfIso: string, nowMs: number): QuoteFreshness {
  * Quotes are cached for minutes and served stale-while-revalidate, so at the
  * open every cached quote can still carry the previous session's date while
  * BIST is trading. The newest quote's date alone therefore cannot say the
- * market is closed; the clock decides that:
- *  - market closed (weekend, before the open, after the close): "Piyasa kapalı · <label>".
+ * market is closed; the clock and the BIST calendar decide that:
+ *  - market closed (weekend, holiday, before the open, after the close): "Piyasa kapalı · <label>", with the
+ *    reason between them on a closed holiday ("Piyasa kapalı · Cumhuriyet Bayramı tatili · son seans 28.10") and
+ *    on a half day after its close ("... Cumhuriyet Bayramı arifesi, yarım gün ..."); a half day before the open
+ *    and a plain weekend or evening carry no reason.
  *  - session hours but the newest quote is not today's: "Veriler gecikmeli · <label>",
  *    which states what is on screen and claims nothing about the market.
  * An unparsable `nowMs` takes the neutral wording.
@@ -107,7 +142,24 @@ export function marketCueText(asOfIso: string | null, nowMs: number): string | n
   const fresh = quoteFreshness(asOfIso, nowMs);
   if (fresh.kind === "live") return null;
   const closed = Number.isFinite(nowMs) && !marketOpen(nowMs);
-  return closed ? `Piyasa kapalı · ${fresh.label}` : `Veriler gecikmeli · ${fresh.label}`;
+  if (!closed) return `Veriler gecikmeli · ${fresh.label}`;
+  const reason = closedReason(nowMs);
+  return reason ? `Piyasa kapalı · ${reason} · ${fresh.label}` : `Piyasa kapalı · ${fresh.label}`;
+}
+
+/**
+ * Why the market is closed at `nowMs`, when the calendar says so: the holiday's label on a closed day, the arife
+ * label on a half day once it is past HALF_DAY_CLOSE_MIN. Null on a plain day, on a half day before its close
+ * (it is closed only because it has not opened) and for an unreadable clock.
+ */
+function closedReason(nowMs: number): string | null {
+  if (!Number.isFinite(nowMs)) return null;
+  const entry = bistCalendarEntry(istDay(nowMs));
+  if (!entry) return null;
+  if (entry.kind === "closed") return bistCalendarLabel(entry);
+  const now = new Date(nowMs + IST_OFFSET_MS);
+  const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
+  return minute > HALF_DAY_CLOSE_MIN ? bistCalendarLabel(entry) : null;
 }
 
 /**
@@ -142,12 +194,19 @@ export function chartBaseline(args: {
  */
 const CUT_BAR_BEFORE_MIN = 17 * 60 + 30;
 
+/**
+ * The half-day twin of CUT_BAR_BEFORE_MIN: 12:00, 30 minutes before the 12:30 end of continuous trading (BIST
+ * çizelge 04.11.2019, "YARIM İŞ GÜNLERİNDE"), as 17:30 is 30 minutes before 18:00.
+ */
+const HALF_DAY_CUT_BAR_BEFORE_MIN = 12 * 60;
+
 /** Relative gap between the last bar's close and the settled close that is worth correcting (0.5 %). */
 const CUT_CLOSE_GAP = 0.005;
 
 /**
  * Whether the session of Istanbul day `session` (YYYY-MM-DD) is over at `nowMs`: a later Istanbul day, or the
- * same day after SESSION_CLOSE_MIN (18:15). An unparsable `nowMs` is not over. The one definition of "over" that
+ * same day after the session end: SESSION_CLOSE_MIN (18:15), or HALF_DAY_CLOSE_MIN (12:45) when `session` is a
+ * half day of the BIST calendar. An unparsable `nowMs` is not over. The one definition of "over" that
  * intradayCutShort and auctionStubSettledClose share.
  */
 function sessionOver(nowMs: number, session: string): boolean {
@@ -155,7 +214,8 @@ function sessionOver(nowMs: number, session: string): boolean {
   const now = new Date(nowMs + IST_OFFSET_MS);
   const today = now.toISOString().slice(0, 10);
   const nowMinute = now.getUTCHours() * 60 + now.getUTCMinutes();
-  return today > session || (today === session && nowMinute > SESSION_CLOSE_MIN);
+  const closeMin = isHalfDay(bistDayNumber(session)) ? HALF_DAY_CLOSE_MIN : SESSION_CLOSE_MIN;
+  return today > session || (today === session && nowMinute > closeMin);
 }
 
 /**
@@ -170,12 +230,14 @@ function sessionOver(nowMs: number, session: string): boolean {
  * contradicted the header. This is true only when ALL of these hold:
  *  1. there is a last bar and a session day;
  *  2. the stat is the daily bar of that same day and has a usable settled close;
- *  3. the session is over: a later Istanbul day, or the same day after 18:15;
- *  4. the last bar is before 17:30 Istanbul;
+ *  3. the session is over: a later Istanbul day, or the same day after 18:15
+ *     (12:45 on a half day);
+ *  4. the last bar is before 17:30 Istanbul (before 12:00 on a half day);
  *  5. the last bar's close is more than 0.5 % away from the settled close.
- * Anything unreadable is false: a normal day, a half day (its bars end near
- * 12:30 and agree with the settle) and an open session all keep the chart as it
- * is. The chart's settled close is stat.lastClose, the header's own number.
+ * Anything unreadable is false: a normal day, a half day (a half day's bars end
+ * near 12:30, which the 12:00 threshold and the 12:45 session end of the BIST
+ * calendar account for) and an open session all keep the chart as it is. The
+ * chart's settled close is stat.lastClose, the header's own number.
  */
 export function intradayCutShort(a: {
   lastBar: { ts: string; close: number } | null;
@@ -193,7 +255,8 @@ export function intradayCutShort(a: {
   const barMs = Date.parse(lastBar.ts);
   if (!Number.isFinite(barMs)) return false;
   const bar = new Date(barMs + IST_OFFSET_MS);
-  if (bar.getUTCHours() * 60 + bar.getUTCMinutes() >= CUT_BAR_BEFORE_MIN) return false;
+  const cutBefore = isHalfDay(bistDayNumber(dayKey(intradayDay))) ? HALF_DAY_CUT_BAR_BEFORE_MIN : CUT_BAR_BEFORE_MIN;
+  if (bar.getUTCHours() * 60 + bar.getUTCMinutes() >= cutBefore) return false;
 
   return Math.abs(lastBar.close / stat.lastClose - 1) > CUT_CLOSE_GAP;
 }
@@ -205,6 +268,12 @@ export function intradayCutShort(a: {
 const AUCTION_STUB_FROM_MIN = 18 * 60;
 
 /**
+ * The half-day twin of AUCTION_STUB_FROM_MIN: 12:30, where continuous trading ends and the closing-price phase
+ * starts (BIST çizelge 04.11.2019, "YARIM İŞ GÜNLERİNDE"), as 18:00 is on a full day.
+ */
+const HALF_DAY_AUCTION_STUB_FROM_MIN = 12 * 60 + 30;
+
+/**
  * The settled close to draw the intraday chart's last price from instead of the 18:00 stub bar, or null when the
  * chart should keep reading its last bar (h120-finance-2).
  *
@@ -214,10 +283,11 @@ const AUCTION_STUB_FROM_MIN = 18 * 60;
  * and aria-label from that bar and contradicted the header, which reads the settled close. It is stat.lastClose
  * that is returned, the header's own number. This is the chart-side twin of intradayCutShort, whose rule
  * (bars before 17:30) never fires for a bar at 18:00. Non-null only when ALL of these hold:
- *  1. there is a last bar with volume exactly 0 and a finite close, whose Istanbul time is 18:00 or later;
+ *  1. there is a last bar with volume exactly 0 and a finite close, whose Istanbul time is 18:00 or later
+ *     (12:30 or later on a half day of the BIST calendar);
  *  2. the stat is the daily bar of the session day on screen and has a usable settled close;
  *  3. the session is over, by the same rule as intradayCutShort (a later Istanbul day, or the same day after
- *     SESSION_CLOSE_MIN);
+ *     SESSION_CLOSE_MIN, or HALF_DAY_CLOSE_MIN on a half day);
  *  4. the stub's close is not already the settled close.
  * Anything unreadable gives null. Never throws.
  *
@@ -244,7 +314,8 @@ export function auctionStubSettledClose(a: {
     const barMs = Date.parse(lastBar.ts);
     if (!Number.isFinite(barMs)) return null;
     const bar = new Date(barMs + IST_OFFSET_MS);
-    if (bar.getUTCHours() * 60 + bar.getUTCMinutes() < AUCTION_STUB_FROM_MIN) return null;
+    const stubFrom = isHalfDay(bistDayNumber(dayKey(intradayDay))) ? HALF_DAY_AUCTION_STUB_FROM_MIN : AUCTION_STUB_FROM_MIN;
+    if (bar.getUTCHours() * 60 + bar.getUTCMinutes() < stubFrom) return null;
 
     return lastBar.close !== stat.lastClose ? stat.lastClose : null;
   } catch {

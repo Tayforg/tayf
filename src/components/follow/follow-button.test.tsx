@@ -39,6 +39,7 @@ vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
 vi.mock("@/lib/entities/entity-hub-query", () => ({
   getEntityHub: () => Promise.resolve(null),
 }));
+vi.mock("@/lib/entities/hub-trend-query", () => ({ getHubTrend: () => Promise.resolve(null) }));
 
 // ---------------------------------------------------------------------------
 // The vitest environment is "node" (no DOM), so the component is covered two

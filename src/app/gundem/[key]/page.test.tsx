@@ -14,6 +14,11 @@ const mocks = vi.hoisted(() => ({
   result: null as unknown,
   // [key, page] of every getEntityHub call (h136-roadmap-2).
   hubCalls: [] as unknown[][],
+  // The daily chart's read (h154-hub-trend): what getHubTrend resolves, and its calls.
+  trend: null as unknown,
+  trendCalls: [] as unknown[][],
+  // "trend" / "hub" in the order the page started the two reads.
+  order: [] as string[],
 }));
 
 vi.mock("next/cache", () => ({
@@ -23,8 +28,17 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/entities/entity-hub-query", () => ({
   getEntityHub: (...args: unknown[]) => {
+    mocks.order.push("hub");
     mocks.hubCalls.push(args);
     return Promise.resolve(mocks.result);
+  },
+}));
+
+vi.mock("@/lib/entities/hub-trend-query", () => ({
+  getHubTrend: (...args: unknown[]) => {
+    mocks.order.push("trend");
+    mocks.trendCalls.push(args);
+    return Promise.resolve(mocks.trend);
   },
 }));
 
@@ -35,10 +49,13 @@ vi.mock("next/navigation", () => ({
 }));
 
 import Link from "next/link";
+import { Fragment } from "react";
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { FollowButton } from "@/components/follow/follow-button";
+import { HubTrendChart } from "@/components/trends/hub-trend-chart";
+import { entityByKey } from "@/lib/entities/entity-hub";
 
 import EntityHubPage, { generateMetadata } from "./page";
 
@@ -123,6 +140,9 @@ const renderHub = (key = "erdogan", sayfa?: Sayfa) =>
 beforeEach(() => {
   mocks.result = null;
   mocks.hubCalls = [];
+  mocks.trend = null;
+  mocks.trendCalls = [];
+  mocks.order = [];
 });
 
 describe("/gundem/[key] kaynak dağılımı", () => {
@@ -607,3 +627,192 @@ describe("/gundem/[key] ?sayfa body", () => {
 function robotsMetasOf(tree: unknown) {
   return walkAll(tree).filter((el) => el.type === "meta" && el.props?.name === "robots");
 }
+
+// ---------------------------------------------------------------------------
+// h154-hub-trend. Page 1 of a hub that lists clusters draws a daily bar chart of THIS hub's clusters (migration 206's
+// entity_cluster_days through getHubTrend), directly under the "Son 14 günde N küme" header block and before the
+// spectrum section. Page 1 only; a failed, unavailable, empty or past-the-end state never draws it; generateMetadata
+// never reads it.
+// ---------------------------------------------------------------------------
+
+const TREND_DAYS = [
+  "2026-10-30",
+  "2026-10-31",
+  "2026-11-01",
+  "2026-11-02",
+  "2026-11-03",
+  "2026-11-04",
+  "2026-11-05",
+  "2026-11-06",
+  "2026-11-07",
+  "2026-11-08",
+  "2026-11-09",
+  "2026-11-10",
+  "2026-11-11",
+  "2026-11-12",
+];
+const TREND_COUNTS = [6, 4, 5, 7, 11, 9, 9, 8, 12, 7, 5, 2, 4, 3];
+
+function okTrend(earlier = 5) {
+  return {
+    status: "ok" as const,
+    days: TREND_DAYS.map((day, i) => ({ day, clusters: TREND_COUNTS[i] })),
+    earlier,
+  };
+}
+
+const charts = (tree: unknown) => elementsOfType(tree, HubTrendChart);
+
+describe("/gundem/[key] günlük küme grafiği", () => {
+  it("page 1 with clusters reads getHubTrend(key) once and renders HubTrendChart with label, days and earlier before the spectrum section", async () => {
+    mocks.result = { bundles: bundles(20), total: 97, asOfMs: 0 };
+    mocks.trend = okTrend(5);
+
+    const tree = await renderHub("ozgur-ozel");
+
+    expect(mocks.trendCalls).toEqual([["ozgur-ozel"]]);
+    expect(mocks.hubCalls).toEqual([["ozgur-ozel", 1]]);
+    const found = charts(tree);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.props).toEqual({
+      label: entityByKey("ozgur-ozel")!.label,
+      days: okTrend(5).days,
+      earlier: 5,
+    });
+
+    // before the spectrum section, and the FIRST child of the fragment that holds the list
+    const all = walkAll(tree);
+    const spectrum = spectrumSections(tree);
+    expect(spectrum).toHaveLength(1);
+    expect(all.indexOf(found[0] as El)).toBeGreaterThan(-1);
+    expect(all.indexOf(found[0] as El)).toBeLessThan(all.indexOf(spectrum[0] as El));
+    const fragment = all.find(
+      (el) => el.type === Fragment && Array.isArray(el.props?.children) && (el.props.children as unknown[]).includes(found[0]),
+    ) as El;
+    expect(fragment).toBeDefined();
+    const children = fragment.props?.children as El[];
+    expect(children[0]).toBe(found[0]);
+    expect(children[1]).toBe(spectrum[0]);
+
+    // and below the header block: the count note comes first in document order
+    const note = all.findIndex((el) => el.type === "p" && textOf(el).startsWith("Son 14 günde 97 küme"));
+    expect(note).toBeGreaterThan(-1);
+    expect(note).toBeLessThan(all.indexOf(found[0] as El));
+    // the list and the pager keep their place after the spectrum
+    expect(elementsOfType(tree, ClusterCard)).toHaveLength(20);
+  });
+
+  it("reads the trend for every hub key it renders, one call per render", async () => {
+    mocks.result = { bundles: bundles(3), total: 3, asOfMs: 0 };
+    mocks.trend = okTrend(0);
+    for (const key of ["akp", "chp", "tcmb"]) {
+      mocks.trendCalls = [];
+      await renderHub(key);
+      expect(mocks.trendCalls, key).toEqual([[key]]);
+    }
+  });
+
+  it("page 2 never calls getHubTrend and renders no chart", async () => {
+    mocks.result = { bundles: bundles(20, 21), total: 152, asOfMs: 0 };
+    mocks.trend = okTrend();
+    for (const sayfa of ["2", "3", "51", "99999", ["2", "x"]] as Sayfa[]) {
+      const tree = await renderHub("chp", sayfa);
+      expect(charts(tree), JSON.stringify(sayfa)).toHaveLength(0);
+    }
+    expect(mocks.trendCalls).toEqual([]);
+  });
+
+  it("junk ?sayfa values are page 1 and do read the trend", async () => {
+    mocks.result = { bundles: bundles(20), total: 152, asOfMs: 0 };
+    mocks.trend = okTrend();
+    for (const sayfa of ["abc", "0", "1", ["x", "4"]] as Sayfa[]) {
+      mocks.trendCalls = [];
+      const tree = await renderHub("chp", sayfa);
+      expect(charts(tree), JSON.stringify(sayfa)).toHaveLength(1);
+      expect(mocks.trendCalls, JSON.stringify(sayfa)).toEqual([["chp"]]);
+    }
+  });
+
+  it("a null or unavailable trend renders no chart and the rest of the page is unchanged", async () => {
+    mocks.result = { bundles: bundles(20), total: 152, asOfMs: 0 };
+
+    mocks.trend = null;
+    const none = await renderHub("chp");
+    mocks.trend = { status: "unavailable" };
+    const unavailable = await renderHub("chp");
+    mocks.trend = okTrend();
+    const withChart = await renderHub("chp");
+
+    expect(charts(none)).toHaveLength(0);
+    expect(charts(unavailable)).toHaveLength(0);
+    expect(charts(withChart)).toHaveLength(1);
+
+    // the same elements and the same text everywhere else
+    const shape = (tree: unknown) => walkAll(tree).filter((el) => el.type !== HubTrendChart).length;
+    expect(shape(unavailable)).toBe(shape(none));
+    expect(shape(withChart)).toBe(shape(none));
+    expect(textOf(unavailable)).toBe(textOf(none));
+    expect(textOf(withChart)).toBe(textOf(none));
+    expect(textOf(none)).toContain("Son 14 günde 152 küme · en yeni 20 tanesi listeleniyor");
+    expect(elementsOfType(none, ClusterCard)).toHaveLength(20);
+    expect(spectrumSections(none)).toHaveLength(1);
+    expect(navs(none)).toHaveLength(1);
+    // the without-chart fragment starts at the spectrum section
+    const fragment = walkAll(none).find(
+      (el) => el.type === Fragment && Array.isArray(el.props?.children) && (el.props.children as El[]).some((c) => c === spectrumSections(none)[0]),
+    ) as El;
+    expect((fragment.props?.children as unknown[])[0]).toBeNull();
+    expect(((fragment.props?.children as unknown[])[1] as El).props?.["aria-labelledby"]).toBe("entity-spectrum-heading");
+  });
+
+  it("the failed, unavailable-page, empty and past-the-end states render no chart even with an ok trend", async () => {
+    mocks.trend = okTrend();
+
+    mocks.result = null;
+    expect(charts(await renderHub("chp")), "failed read").toHaveLength(0);
+
+    mocks.result = { bundles: [], total: 0, asOfMs: 0 };
+    expect(charts(await renderHub("chp")), "empty hub").toHaveLength(0);
+
+    mocks.result = { bundles: [], total: 0, asOfMs: 0, unavailable: true };
+    expect(charts(await renderHub("chp")), "unavailable (page 1 shape)").toHaveLength(0);
+    expect(charts(await renderHub("chp", "2")), "unavailable page 2").toHaveLength(0);
+
+    mocks.result = { bundles: [], total: 152, asOfMs: 0 };
+    expect(charts(await renderHub("chp", "9")), "past the end").toHaveLength(0);
+    expect(charts(await renderHub("chp", "99999")), "far past the end").toHaveLength(0);
+  });
+
+  it("an unknown key still 404s and reads no trend", async () => {
+    mocks.trend = okTrend();
+    await expect(renderHub("bilinmeyen")).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(mocks.trendCalls).toEqual([]);
+  });
+
+  it("generateMetadata does not call getHubTrend", async () => {
+    mocks.result = { bundles: bundles(20), total: 152, asOfMs: 0 };
+    mocks.trend = okTrend();
+    await PAGE_META("chp");
+    await PAGE_META("chp", "2");
+    await PAGE_META("akp", ["3", "4"]);
+    await PAGE_META("bilinmeyen");
+    mocks.result = null;
+    await PAGE_META("ysk");
+    expect(mocks.trendCalls).toEqual([]);
+    // the metadata read is the hub's alone
+    expect(mocks.hubCalls.length).toBeGreaterThan(0);
+  });
+
+  it("the page starts the trend read before the hub read on page 1 only, so both run in parallel", async () => {
+    mocks.result = { bundles: bundles(3), total: 3, asOfMs: 0 };
+    mocks.trend = okTrend();
+
+    const tree = await renderHub("tcmb");
+    expect(mocks.order).toEqual(["trend", "hub"]);
+    expect(charts(tree)).toHaveLength(1);
+
+    mocks.order = [];
+    await renderHub("tcmb", "2");
+    expect(mocks.order).toEqual(["hub"]);
+  });
+});

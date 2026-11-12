@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 import { FollowButton } from "@/components/follow/follow-button";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCard } from "@/components/story/cluster-card";
+import { HubTrendChart } from "@/components/trends/hub-trend-chart";
 import { PageHero } from "@/components/ui/page-hero";
 import {
   distributionTotal,
@@ -23,6 +24,7 @@ import {
   parseEntityHubPage,
 } from "@/lib/entities/entity-hub";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
+import { getHubTrend } from "@/lib/entities/hub-trend-query";
 import {
   buildBreadcrumbs,
   buildClusterCollectionPage,
@@ -47,6 +49,14 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 // page that was ASKED for, never a clamped one (h79/h98). While migration 199's
 // `entity_cluster_ids_v4` is unapplied a later page is `unavailable` and says so
 // (entity-hub-query.ts); page 1 never depends on it.
+//
+// Page 1 of a hub that lists clusters also draws a daily bar chart (h154-hub-trend): how many of THIS hub's clusters had
+// their first report on each of the last 14 Istanbul days, from migration 206's `entity_cluster_days` (the hub's own match,
+// counted per day; src/lib/entities/hub-trend-query.ts). It does not read the daily rollup of /trends
+// (trends_daily_entity_counts_ist_rollup): that counts headline articles, not clusters, and each of its days keeps the
+// basis of its last refresh (neither 163 nor 182 was backfilled), so a series built on it would show a code change as
+// news. The read starts before the hub read and runs beside it; an unapplied 206 (PGRST202), a failed read, a later page
+// and every state without a list draw no chart, and generateMetadata never reads it.
 //
 // Unknown keys never get here: src/middleware.ts rewrites them to the real 404
 // (gate 6). The notFound() below is defence in depth.
@@ -159,7 +169,10 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
   const page = parseEntityHubPage(sayfa);
 
   const { label } = entity;
+  // Started before the hub read so both run in parallel; page 1 only.
+  const trendPromise = page === 1 ? getHubTrend(key) : null;
   const result = await getEntityHub(key, page);
+  const trend = trendPromise === null ? null : await trendPromise;
   // No clock read here, the rule this page had when it was fully static (a
   // Date.now() in the render body fails `next build` once the cached read
   // succeeds): relative times use the read's own timestamp, stamped inside the
@@ -284,6 +297,9 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
         )
       ) : (
         <>
+          {trend !== null && trend.status === "ok" ? (
+            <HubTrendChart label={label} days={trend.days} earlier={trend.earlier} />
+          ) : null}
           <section aria-labelledby="entity-spectrum-heading" className={spectrumWrapClass}>
             <h2 id="entity-spectrum-heading" className={spectrumHeadingClass}>
               Listelenen haberlerin kaynak dağılımı
