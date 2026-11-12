@@ -1928,6 +1928,36 @@ describe("ticker-legal-notices (migration 107): BİK notices do not count as tic
     expect(page.attention.reduce((s, d) => s + d.articles, 0)).toBe(1);
   });
 
+  it("fetchTickerPage hides a paid /advertorial/ article from the list whatever its score (h148-sources-1)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    const [first, second] = tickerPageArticles();
+    fixture.tickerArticlesRows = [
+      {
+        ...first!,
+        id: "adv1",
+        title: "GARANTİ BBVA KİRALA'DAN IPHONEKİRALAMA VE DİJİTALDEN İKİNCİ EL ARAÇ SATIŞI",
+        url: "https://www.dunya.com/advertorial/garanti-bbva-kiraladan-iphonekiralama-846144",
+      },
+      { ...second!, id: "a2" },
+      {
+        ...second!,
+        id: "pr1",
+        title: "Garanti BBVA sigorta tanıtımı",
+        url: "https://halktv.com.tr/tanitim-bulteni/garanti-bbva-sigorta-1061600h",
+      },
+    ];
+    fixture.jevRows = [
+      { subject_id: "adv1:GARAN", jev_prob: 1, created_at: "2026-09-13T09:30:00Z" },
+      { subject_id: "pr1:GARAN", jev_prob: 1, created_at: "2026-09-13T09:30:00Z" },
+    ];
+
+    const page = await fetchTickerPage("GARAN");
+
+    expect(page.articles.map((a) => a.id)).toEqual(["a2"]);
+  });
+
   it("fetchTickerPage looks notices up over its 30-day attention window plus the coverage view's 2-day reach", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));

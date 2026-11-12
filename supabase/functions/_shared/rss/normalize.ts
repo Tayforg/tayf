@@ -38,6 +38,7 @@ import {
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 import { isLegalNotice } from "./legal-notice.ts";
 import { isAdClickLink } from "./ad-link.ts";
+import { isPaidContentUrl } from "./paid-content.ts";
 import { findInlineImgSrc } from "./inline-image.ts";
 import { clampForScan, stripTagsLinear } from "./strip-tags.ts";
 import { classifyCategory } from "./category.ts";
@@ -55,10 +56,16 @@ export type { NewsCategory } from "./category.ts";
  * click-tracker host (`isAdClickLink`: a DoubleClick `gampad/clk` link). The
  * ad check runs after the title checks, so a blank or contentless title is
  * counted as contentless, never as an ad link.
+ * `paidContent` counts the items dropped because their absolute url opens with a
+ * paid-content section (`isPaidContentUrl`, h148-sources-1: `/advertorial/` or
+ * `/tanitim-bulteni/` as the first or second path segment). It runs right after
+ * the ad-link check, so a blank or contentless title stays counted as
+ * contentless and an ad click-tracker stays counted as an ad link.
  */
 export interface NormalizeCounters {
   contentlessTitles: number;
   adLinks: number;
+  paidContent: number;
 }
 
 export interface NormalizedArticle {
@@ -595,9 +602,11 @@ export interface PreparedItem {
  * null (silent); blank title -> counted, null; decode / strip the title, then
  * `isContentlessTitle` -> counted, null; then an absolute url on an ad
  * click-tracker host (`isAdClickLink`, h130-feeds-2) -> counted in `adLinks`,
- * null; otherwise the cleaned title and the absolute url. It does NOT decide the
- * legal-notice drop (that stays in `completeItem`, as a legal notice is never
- * counted as contentless).
+ * null; then an absolute url whose first or second path segment is a paid
+ * content section (`isPaidContentUrl`, h148-sources-1) -> counted in
+ * `paidContent`, null; otherwise the cleaned title and the absolute url. It does
+ * NOT decide the legal-notice drop (that stays in `completeItem`, as a legal
+ * notice is never counted as contentless).
  *
  * Ingest runs this for every parsed item, looks up which urls are already
  * stored, and calls `completeItem` only for the rest: 99% of the items of a
@@ -639,6 +648,14 @@ export function prepareItem(
   const url = absolutiseUrl(rawLink, source);
   if (isAdClickLink(url)) {
     if (counters) counters.adLinks++;
+    return null;
+  }
+  // h148-sources-1: a paid advertorial or press release is not news (Posta and
+  // CNN Türk '/advertorial/', Halk TV '/tanitim-bulteni/'). Same absolute url,
+  // checked by whole path segment, after the ad-link check, so the order of
+  // counting is kept: contentless title, ad link, paid content.
+  if (isPaidContentUrl(url)) {
+    if (counters) counters.paidContent++;
     return null;
   }
   return { item, title, url };
@@ -700,7 +717,8 @@ export function completeItem(
  * `articles` table. `content_hash` is computed via `strictFingerprint`
  * exclusively. Returns `null` if the item lacks a link, has no headline text
  * (see below), links to an ad click-tracker host (`isAdClickLink`, counted in
- * `counters.adLinks`), or is a BİK legal notice (`isLegalNotice`).
+ * `counters.adLinks`), links to a paid-content section (`isPaidContentUrl`,
+ * counted in `counters.paidContent`), or is a BİK legal notice (`isLegalNotice`).
  *
  * "No headline text" = the raw title is empty or whitespace-only, or the
  * decoded title holds no letter or digit (`isContentlessTitle`: '&nbsp',
@@ -742,8 +760,8 @@ function logSkippedItems(slug: string, skipped: number, firstMessage: string): v
  * Normalise an array of raw items, dropping any that fail the title/link
  * filter. Order preserved. `counters`, when given, is forwarded to every
  * `normalizeItem` call and totals the headline-less items of the batch
- * (`contentlessTitles`) and the ad click links (`adLinks`); omitting it behaves
- * exactly as before.
+ * (`contentlessTitles`), the ad click links (`adLinks`) and the paid content
+ * urls (`paidContent`); omitting it behaves exactly as before.
  *
  * One item that throws (a malformed field the decoders did not anticipate)
  * must not take the rest of the source's items down with it: it is skipped on

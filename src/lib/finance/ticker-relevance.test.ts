@@ -12,6 +12,7 @@ import {
   filterFeedTickers,
   isHiddenMatch,
   isLegalNotice,
+  isPaidContentUrl,
   istanbulDay,
   LEGAL_NOTICE_LOOKUP_LIMIT,
   relevanceKey,
@@ -550,5 +551,84 @@ describe("isLegalNotice re-export", () => {
   it("is exposed from ticker-relevance for finance queries", () => {
     expect(isLegalNotice("BARTIN 2. ASLİYE HUKUK MAHKEMESİ")).toBe(true);
     expect(isLegalNotice("Merkez Bankası faizi sabit tuttu")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h148-sources-1. A paid advertorial (url section /advertorial/) matched GARAN by
+// the alias 'garanti bbva' and showed on /ekonomi/GARAN as Garanti BBVA news.
+// filterFeedTickers hides it on read, whatever its relevance score: the rows
+// already stored are not rewritten.
+// ---------------------------------------------------------------------------
+
+describe("filterFeedTickers: paid content urls (h148-sources-1)", () => {
+  const DUNYA_ADV =
+    "https://www.dunya.com/advertorial/garanti-bbva-kiraladan-iphonekiralama-ve-dijitalden-ikinci-el-arac-satisi-haberi-846144";
+
+  it("drops an item whose url is a dunya /advertorial/ url even with relevance score 1.0", () => {
+    const items = [
+      {
+        id: "b63a23fd",
+        tickers: ["GARAN"],
+        title: "GARANTİ BBVA KİRALA'DAN IPHONEKİRALAMA VE DİJİTALDEN İKİNCİ EL ARAÇ SATIŞI",
+        url: DUNYA_ADV,
+      },
+    ];
+    const scores = new Map<string, number>([["b63a23fd:GARAN", 1.0]]);
+    expect(filterFeedTickers(items, scores)).toEqual([]);
+  });
+
+  it("keeps a normal item with the same ticker", () => {
+    const items = [
+      {
+        id: "b63a23fd",
+        tickers: ["GARAN"],
+        title: "Garanti BBVA kiralama ürünlerini genişletti",
+        url: DUNYA_ADV,
+      },
+      {
+        id: "c1",
+        tickers: ["GARAN"],
+        title: "Garanti BBVA kâr açıkladı",
+        url: "https://www.dunya.com/finans/banka/garanti-bbva-kar-acikladi-846200",
+      },
+    ];
+    const scores = new Map<string, number>([
+      ["b63a23fd:GARAN", 1.0],
+      ["c1:GARAN", 1.0],
+    ]);
+    expect(filterFeedTickers(items, scores).map((i) => i.id)).toEqual(["c1"]);
+  });
+
+  it("drops a /tanitim-bulteni/ item and a second-segment /advertorial/ item", () => {
+    const out = filterFeedTickers(
+      [
+        { id: "p1", tickers: ["GARAN"], title: "Basın bülteni", url: "https://halktv.com.tr/tanitim-bulteni/x-1h" },
+        { id: "p2", tickers: ["GARAN"], title: "Reklam", url: "https://x.com/tr/advertorial/y" },
+      ],
+      new Map(),
+    );
+    expect(out).toEqual([]);
+  });
+
+  it("needs no title: an untitled item with a paid url is still dropped", () => {
+    expect(filterFeedTickers([{ id: "p3", tickers: ["GARAN"], url: DUNYA_ADV }], new Map())).toEqual([]);
+  });
+
+  it("keeps items whose url is missing or not a string, and lookalike urls (fail-open)", () => {
+    const items = [
+      { id: "k1", tickers: ["THYAO"], title: "Başlık bir" },
+      { id: "k2", tickers: ["THYAO"], title: "Başlık iki", url: { href: DUNYA_ADV } },
+      { id: "k3", tickers: ["THYAO"], title: "Başlık üç", url: "https://x.com/haber/advertorial-ajansi-kuruldu-1" },
+      { id: "k4", tickers: ["THYAO"], title: "Başlık dört", url: "https://x.com/haber/x?ref=advertorial" },
+    ];
+    expect(filterFeedTickers(items, new Map()).map((i) => i.id)).toEqual(["k1", "k2", "k3", "k4"]);
+  });
+});
+
+describe("isPaidContentUrl re-export", () => {
+  it("is exposed from ticker-relevance for finance queries", () => {
+    expect(isPaidContentUrl("https://www.posta.com.tr/advertorial/x-1")).toBe(true);
+    expect(isPaidContentUrl("https://www.posta.com.tr/gundem/x-1")).toBe(false);
   });
 });
