@@ -72,6 +72,15 @@
 //     when isLanguageIsolatedCluster. The news sitemap (src/lib/seo/sitemaps.ts
 //     readNewsSitemapXml) leaves isolated clusters out because every entry
 //     declares <news:language>tr</news:language>; clusters-YYYY-MM.xml keeps them.
+//   - h151-home-1: ClusterCard (src/components/story/cluster-card.tsx), so every
+//     page that lists a card carries the rule: the home archive search (/?q=),
+//     /konu/<slug>, /gundem/<key> and /blindspots. Those pages hand it the
+//     bundle's own articles and deduped member sources (names only, no slug), and
+//     the card judges ALL its articles by display name (an unresolvable member is
+//     unknown, not English). For an all-English cluster it prints
+//     ENGLISH_ONLY_SPECTRUM_LINE under the zone bar (the bar itself stays) and
+//     draws neither the Denge chip nor the "Kör nokta" badge. The home feed
+//     itself never lists such a cluster (politics-query.ts).
 //   - /ekonomi feed, /ekonomi/[ticker] news list and intraday chart caption
 //     (h101-a11yrecent-2): each row's headline link and source-name span, by
 //     {slug, name} (both queries carry the slug). The chart's marker captions

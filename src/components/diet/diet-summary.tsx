@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect } from "react";
 
 import { useReadingDiet } from "./use-reading-diet";
 import { DIET_ZONES, type DietZone } from "@/lib/diet/diet";
+import { pruneStoredDiet } from "@/lib/diet/diet-store";
 import { ZONE_META } from "@/lib/bias/config";
 
 // Zone bar segment widths as literal-percentage inline styles (never
@@ -36,6 +38,19 @@ function ZoneBar({ counts, total }: { counts: Record<DietZone, number>; total: n
 
 export function DietSummary() {
   const { hydrated, available, summary } = useReadingDiet();
+
+  // h151-clientstate-2: opening /diyetim deletes the entries older than the
+  // retention window; before this only the next counted click did. Expired
+  // entries now leave storage when this page is opened or on the next counted
+  // click. Nothing prunes in the background, so a reader who does neither keeps
+  // them, and privacy item 3's "kendiliğinden silinir" (src/app/diyetim/page.tsx)
+  // is still not literally true. Its copy change is a separate decision. Runs once,
+  // after hydration, never during SSR. The counts above are unaffected because
+  // summarizeDiet already windows to 30 days. Declared before the early returns so
+  // every branch below prunes.
+  useEffect(() => {
+    pruneStoredDiet();
+  }, []);
 
   if (!hydrated) {
     return <div className="h-3 animate-pulse rounded-full bg-muted" aria-hidden="true" />;

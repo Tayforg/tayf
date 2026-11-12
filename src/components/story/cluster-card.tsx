@@ -12,7 +12,12 @@ import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { pickHeroCandidates } from "@/lib/images/hero-candidates";
-import { headlineLang, sourceLang } from "@/lib/sources/source-language";
+import {
+  ENGLISH_ONLY_SPECTRUM_LINE,
+  headlineLang,
+  isLanguageIsolatedCluster,
+  sourceLang,
+} from "@/lib/sources/source-language";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution } from "@/types";
 
@@ -339,6 +344,23 @@ export function ClusterCard({
   const Heading = headingLevel === 3 ? "h3" : "h2";
   const sourceById = new Map(sources.map((s) => [s.id, s]));
 
+  // h151-home-1: a cluster whose every member is an English outlet formed among
+  // English articles only, so its bar's "İktidar %100" is not a verdict on the
+  // Turkish zones (the home feed leaves such clusters out; the archive search,
+  // /konu, /gundem and /blindspots still list them). The card takes the cluster
+  // page's own predicate: it prints ENGLISH_ONLY_SPECTRUM_LINE under the bar and
+  // draws neither the Denge chip nor the "Kör nokta" badge. Judged over ALL the
+  // articles, not the `resolved` list below: a member whose name cannot be
+  // resolved is null, which clusterTextLang treats as unknown, not English (the
+  // rule politics-query.ts uses), and an empty list is not isolated.
+  const languageIsolated = isLanguageIsolatedCluster(
+    articles.map((a) => {
+      const src = sourceById.get(a.source_id);
+      const name = a.source_name ?? src?.name;
+      return name ? { slug: src?.slug, name } : null;
+    }),
+  );
+
   const resolved = articles
     .map((a) => {
       const src = sourceById.get(a.source_id);
@@ -478,7 +500,7 @@ export function ClusterCard({
         <div className="p-6 sm:p-5 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-2 min-w-0 flex-1">
-              {cluster.is_blindspot && (
+              {cluster.is_blindspot && !languageIsolated && (
                 <div className="flex items-center gap-1.5 mb-2">
                   <AlertTriangle
                     className="h-3.5 w-3.5 text-amber-500"
@@ -500,7 +522,7 @@ export function ClusterCard({
                 isWireRedistribution={isWireRedistribution}
                 effectiveArticleCount={effectiveArticleCount}
                 distribution={cluster.bias_distribution}
-                balance={balanceFromDistribution(cluster.bias_distribution)}
+                balance={languageIsolated ? null : balanceFromDistribution(cluster.bias_distribution)}
                 nowMs={nowMs}
               />
             </div>
@@ -542,6 +564,9 @@ export function ClusterCard({
           <div className="spectrum-glow rounded">
             <BiasSpectrum distribution={cluster.bias_distribution} compact />
           </div>
+          {languageIsolated && (
+            <p className="text-[11px] leading-snug text-muted-foreground">{ENGLISH_ONLY_SPECTRUM_LINE}</p>
+          )}
 
           {visible.length > 0 && (
             <ul className="space-y-1.5 pt-1">

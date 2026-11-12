@@ -279,7 +279,11 @@ describe("cluster-card.tsx balance chip (Denge puanı)", () => {
 
   it("derives the score from the same distribution the BiasSpectrum bar uses", () => {
     expect(src).toContain("balanceFromDistribution(cluster.bias_distribution)");
-    expect(src).toContain("balance={balanceFromDistribution(cluster.bias_distribution)}");
+    // h151-home-1: the same score, except that an all-English cluster draws no
+    // chip (cluster-card-english.test.tsx asserts the rendered result).
+    expect(src).toContain(
+      "balance={languageIsolated ? null : balanceFromDistribution(cluster.bias_distribution)}",
+    );
     expect(src).toContain(
       "<BiasSpectrum distribution={cluster.bias_distribution} compact />",
     );
@@ -683,7 +687,10 @@ describe("cluster-card.tsx source-count pill (h66-statsparity-1)", () => {
     expect(src).toContain(
       "<BiasSpectrum distribution={cluster.bias_distribution} compact />",
     );
-    expect(src).toContain("balance={balanceFromDistribution(cluster.bias_distribution)}");
+    // h151-home-1: an all-English cluster passes null instead of the score.
+    expect(src).toContain(
+      "balance={languageIsolated ? null : balanceFromDistribution(cluster.bias_distribution)}",
+    );
   });
 });
 
