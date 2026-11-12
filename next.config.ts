@@ -32,7 +32,8 @@ import { buildSecurityHeaders } from "./src/lib/security/headers";
  *   - cacheComponents: true  -> Next 16 flag that replaces experimental.dynamicIO and unifies PPR.
  *     Requires adopting `use cache` across Server Components and would change navigation semantics
  *     (React <Activity> preserves state across routes). Too invasive for a config-only pass.
- *   - experimental.* flags -> none needed; all desired features are already top-level stable in 16.
+ *   - experimental.* flags -> only experimental.inlineCss (h159-perf-1, see the comment above
+ *     it in the config); every other desired feature is already top-level stable in 16.
  *
  * Confirmed absent (good — nothing to remove):
  *   - images.unoptimized (we want the optimizer)
@@ -89,6 +90,21 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN ?? "",
   },
   cacheComponents: true,
+  // Inline the Tailwind sheet into every document (h159-perf-1). The site's one
+  // 20 KB-br stylesheet blocked rendering, and on a slow link it ended late
+  // because it fair-shares the pipe with the font preloads, the async JS and
+  // the LCP image: FCP = the stylesheet's end + ~65 ms on /, /cluster, /gundem
+  // and /ekonomi (2.3-2.5 s on Slow 4G). In the <head> as a <style
+  // data-precedence="next">, first paint needs only the first ~25 KB br of the
+  // HTML. Trade-offs: about +25 KB br per HTML document (the CSS appears in the
+  // <style> and twice more in the RSC payload; a local build of / went from
+  // 9.1 to 34.2 KB br), the separately cached stylesheet is lost on hard
+  // navigations, and each page cached by the service worker grows by about
+  // 375 KB decoded. Font url()s stay absolute (/_next/static/media/...), so
+  // nothing 404s once the CSS leaves /_next/static/chunks; CI checks that on
+  // the built shells with scripts/check-inline-css.mjs. Revert the flag on any
+  // font 404, FOUC, CLS above 0.01 or home LCP regression.
+  experimental: { inlineCss: true },
   // Under cacheComponents, generateMetadata output streams into <body> for
   // humans, which lets Google ignore the canonical and the noindex-on-error
   // hardening. Next's default htmlLimitedBots list omits Googlebot and

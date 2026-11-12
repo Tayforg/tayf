@@ -816,3 +816,80 @@ describe("/gundem/[key] günlük küme grafiği", () => {
     expect(mocks.order).toEqual(["hub"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h159-perf-3. With the FULL chart drawn above the list (hubTrendState === "chart", at least 3 clusters in the window),
+// the first card sits below the fold (y=898 of 915 on a phone), so no card may ask for the eager, preloaded,
+// fetchpriority=high banner: every ClusterCard gets no `index`. Only the full chart pushes card 0 below the fold: the
+// sparse state draws a heading and one or two text lines (about 170-210 px shorter), and 0 clusters over 0 earlier
+// renders nothing, so there card 0 is back above the fold and keeps its position, like without a chart (page 2+, or a
+// trend that is null or unavailable).
+// ---------------------------------------------------------------------------
+describe("/gundem/[key] first-card banner priority (h159-perf-3)", () => {
+  const cardIndexes = (tree: unknown) => elementsOfType(tree, ClusterCard).map((el) => el.props?.index);
+
+  it("page 1 with the chart: no card carries an index, so card 0 is not the LCP candidate", async () => {
+    mocks.result = { bundles: bundles(20), total: 97, asOfMs: 0 };
+    mocks.trend = okTrend();
+
+    const tree = await renderHub("erdogan");
+
+    expect(charts(tree)).toHaveLength(1);
+    const indexes = cardIndexes(tree);
+    expect(indexes).toHaveLength(20);
+    expect(indexes.every((i) => i === undefined)).toBe(true);
+  });
+
+  it("page 1 without a drawn chart (null or unavailable trend): the cards keep their positions, card 0 is the candidate", async () => {
+    mocks.result = { bundles: bundles(3), total: 3, asOfMs: 0 };
+
+    mocks.trend = null;
+    expect(cardIndexes(await renderHub("erdogan"))).toEqual([0, 1, 2]);
+    mocks.trend = { status: "unavailable" };
+    expect(cardIndexes(await renderHub("erdogan"))).toEqual([0, 1, 2]);
+  });
+
+  it("page 1 with a sparse or empty chart (under 3 clusters in the window): card 0 is above the fold again and keeps index 0", async () => {
+    mocks.result = { bundles: bundles(3), total: 3, asOfMs: 0 };
+    const zeros = TREND_DAYS.map((day) => ({ day, clusters: 0 }));
+    const twoClusters = TREND_DAYS.map((day, i) => ({ day, clusters: i === 5 || i === 9 ? 1 : 0 }));
+
+    // (a) sparse: two clusters in the window, none earlier. The chart component is still drawn (a heading and a note).
+    mocks.trend = { status: "ok" as const, days: twoClusters, earlier: 0 };
+    let tree = await renderHub("tcmb");
+    expect(charts(tree)).toHaveLength(1);
+    expect(cardIndexes(tree)).toEqual([0, 1, 2]);
+
+    // (b) 0 in the window and 0 earlier: HubTrendChart renders null.
+    mocks.trend = { status: "ok" as const, days: zeros, earlier: 0 };
+    tree = await renderHub("tcmb");
+    expect(cardIndexes(tree)).toEqual([0, 1, 2]);
+
+    // (c) sparse, with clusters only earlier than the window.
+    mocks.trend = { status: "ok" as const, days: zeros, earlier: 5 };
+    tree = await renderHub("tcmb");
+    expect(cardIndexes(tree)).toEqual([0, 1, 2]);
+  });
+
+  it("page 1 at the boundary: 3 clusters in the window is the full chart (no index), 2 is sparse (positions)", async () => {
+    mocks.result = { bundles: bundles(3), total: 3, asOfMs: 0 };
+    const withTotal = (total: number) =>
+      TREND_DAYS.map((day, i) => ({ day, clusters: i === 13 ? total : 0 }));
+
+    mocks.trend = { status: "ok" as const, days: withTotal(3), earlier: 0 };
+    expect(cardIndexes(await renderHub("tcmb"))).toEqual([undefined, undefined, undefined]);
+
+    mocks.trend = { status: "ok" as const, days: withTotal(2), earlier: 0 };
+    expect(cardIndexes(await renderHub("tcmb"))).toEqual([0, 1, 2]);
+  });
+
+  it("page 2 never draws the chart, so its cards keep their positions", async () => {
+    mocks.result = { bundles: bundles(20, 21), total: 97, asOfMs: 0 };
+    mocks.trend = okTrend();
+
+    const tree = await renderHub("erdogan", "2");
+
+    expect(charts(tree)).toHaveLength(0);
+    expect(cardIndexes(tree)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+  });
+});

@@ -124,6 +124,28 @@ export function entityHubNote(total: number, shown: number, page = 1): string {
   return total > shown ? `${base} · en yeni ${shown} tanesi listeleniyor` : base;
 }
 
+/**
+ * The `index` a hub list hands `ClusterCard` for the card at `position` (h159-perf-3).
+ *
+ * `ClusterCard` promotes the banner of index 0 (eager, `<link rel="preload">`,
+ * `fetchpriority=high`; `mobileBannerImageProps`). That is right only while card 0 is
+ * above the fold. Since PR #283 (6b053ac) page 1 draws the trend chart and the spectrum
+ * section above the list, so on /gundem/erdogan (a 915 px phone viewport) the first card
+ * starts at y=898 with 17 px visible. Its 17 KB banner was fetched at High priority at
+ * about 650 ms, was never the LCP (the chart caption is), and shared the link with the
+ * 20 KB render-blocking CSS that gates FCP and LCP.
+ *
+ * No card is an LCP candidate only while the FULL chart (`hubTrendState(days) === "chart"`)
+ * is drawn: `undefined` gives every banner the lazy default (Chrome's lazy-load threshold
+ * still fetches the first one right after first layout). The sparse state draws just a
+ * heading and a note (about 170-210 px shorter) and a 0/0 trend renders nothing, so with
+ * those, like without the chart (page 2 and later, a null or unavailable trend), card 0 is
+ * back above the fold and keeps its position, so its hint stays.
+ */
+export function hubCardBannerIndex(position: number, fullChartDrawn: boolean): number | undefined {
+  return fullChartDrawn ? undefined : position;
+}
+
 // ---------------------------------------------------------------------------
 // Precision (migration 125). A hub lists only stories that LITERALLY name the
 // entity: the stemmed tsquery over `queries` gives recall on the GIN index, and

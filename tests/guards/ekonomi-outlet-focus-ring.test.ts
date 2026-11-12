@@ -290,9 +290,17 @@ describe("/ekonomi 'Haber akışı' outlet-name link focus ring (h148-keyboard-1
     expect(ancestors.filter((a) => a.name === "li")).toHaveLength(1);
     expect(ancestors.filter((a) => a.name === "ol")).toHaveLength(1);
     expect(ancestors.filter((a) => a.name === "Panel")).toHaveLength(1);
-    expect(ancestors.filter((a) => a.name === "div").length).toBeGreaterThanOrEqual(2);
+    // The grid wrapper is in the body. The page wrapper div moved to EkonomiPage (h159-perf-2: the body returns a
+    // fragment into it, so it is still the link's DOM ancestor); it is checked separately below.
+    expect(ancestors.filter((a) => a.name === "div").length).toBeGreaterThanOrEqual(1);
     const clipped = ancestors.filter((a) => classTokens(a.text).some(clips));
     expect(clipped).toEqual([]);
+    const shellAt = EKONOMI_PAGE.indexOf("export default function EkonomiPage(");
+    expect(shellAt).toBeGreaterThan(-1);
+    const pageWrapper = tagsNamed(EKONOMI_PAGE, "div").find((t) => t.start > shellAt);
+    expect(pageWrapper).toBeDefined();
+    expect(classTokens(pageWrapper!.text)).toContain("space-y-3");
+    expect(classTokens(pageWrapper!.text).filter(clips)).toEqual([]);
     // Panel (a component) draws the section and the content div around the rows.
     expect(tagsNamed(PANEL, "section").concat(tagsNamed(PANEL, "div")).filter((t) => classTokens(t.text).some(clips))).toEqual([]);
     expect(PANEL).not.toContain("overflow-");

@@ -313,7 +313,9 @@ export function extractShellAssets(html: string, origin: string, max: number): s
   const out: string[] = [];
   if (!(max > 0)) return out;
   const seen = new Set<string>();
-  const re = /(?:src|href)="(\/_next\/static\/[^"#]+)"/g;
+  // `(?:^|\s)` keeps `data-href=` / `data-src=` out (Next's inlineCss writes a space-joined data-href on <style>), and
+  // `\s` in the class means a value that holds whitespace never becomes one bogus URL. sw-source.ts holds the twin.
+  const re = /(?:^|\s)(?:src|href)="(\/_next\/static\/[^"#\s]+)"/g;
   for (const m of html.matchAll(re)) {
     const abs = parseUrl(origin + (m[1] as string).replace(/&amp;/g, "&"));
     // `new URL` collapses "..": reject anything that stops being a same-origin static asset.

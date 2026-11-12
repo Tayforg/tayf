@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -16,6 +17,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 //
 // The page is a server component, so these tests read the returned element
 // tree instead of rendering it.
+//
+// h159-perf-2: the header renders in the static PPR shell. EkonomiPage is a plain
+// function; the data (connection(), every read, the quotes re-basing, the market
+// cue) lives in loadEkonomiView, which the Suspense-wrapped EkonomiMarketCue and
+// EkonomiBody await. The resilience cases below therefore drive loadEkonomiView()
+// and the element tree of EkonomiBody, with the same assertions as before. Outside
+// the server renderer React's cache() is a pass-through, so every call here runs the
+// view once, as one request would.
 // ---------------------------------------------------------------------------
 
 const {
@@ -62,7 +71,8 @@ vi.mock("@/lib/finance/quotes", () => ({
   getQuotes: (...args: unknown[]) => getQuotesMock(...args),
 }));
 
-import EkonomiPage from "@/app/ekonomi/page";
+import EkonomiPage, { EkonomiBody, EkonomiMarketCue, loadEkonomiView } from "@/app/ekonomi/page";
+import { EkonomiBodySkeleton } from "@/app/ekonomi/loading";
 import { BreakerStrip } from "@/components/finance/breaker-strip";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
 import { NewTabHint } from "@/components/ui/new-tab-hint";
@@ -145,7 +155,7 @@ function stubHealthyReads() {
 }
 
 async function render() {
-  return collectEls(await EkonomiPage());
+  return collectEls(await EkonomiBody());
 }
 
 const tapeQuotes = (els: El[]) => els.find((e) => e.type === TickerTape)!.props.quotes as Record<string, Quote>;
@@ -324,27 +334,27 @@ describe("/ekonomi -- every optional read rejects at once", () => {
 });
 
 describe("/ekonomi -- an essential read still throws to the error boundary", () => {
-  it("fetchEconFeed rejecting rejects the page with that error", async () => {
+  it("fetchEconFeed rejecting rejects the view with that error", async () => {
     const boom = new Error("[finance] fetchEconFeed: statement timeout");
     fetchEconFeedMock.mockRejectedValue(boom);
 
-    await expect(EkonomiPage()).rejects.toBe(boom);
+    await expect(loadEkonomiView()).rejects.toBe(boom);
     expect(warn).not.toHaveBeenCalled();
     // Without the feed there is no ticker set to quote.
     expect(getQuotesMock).not.toHaveBeenCalled();
   });
 
-  it("fetchTopTickers rejecting rejects the page", async () => {
+  it("fetchTopTickers rejecting rejects the view", async () => {
     fetchTopTickersMock.mockRejectedValue(new Error("[finance] fetchTopTickers: statement timeout"));
 
-    await expect(EkonomiPage()).rejects.toThrow("fetchTopTickers");
+    await expect(loadEkonomiView()).rejects.toThrow("fetchTopTickers");
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("fetchRecentDisclosures rejecting rejects the page", async () => {
+  it("fetchRecentDisclosures rejecting rejects the view", async () => {
     fetchRecentDisclosuresMock.mockRejectedValue(new Error("[finance] fetchRecentDisclosures: statement timeout"));
 
-    await expect(EkonomiPage()).rejects.toThrow("fetchRecentDisclosures");
+    await expect(loadEkonomiView()).rejects.toThrow("fetchRecentDisclosures");
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -353,7 +363,184 @@ describe("/ekonomi -- an essential read still throws to the error boundary", () 
     fetchEconFeedMock.mockRejectedValue(boom);
     fetchCircuitBreakersMock.mockRejectedValue(new Error("breakers down too"));
 
-    await expect(EkonomiPage()).rejects.toBe(boom);
+    await expect(loadEkonomiView()).rejects.toBe(boom);
+  });
+
+  it("both Suspense children reject with the same error, so the error boundary (error.tsx) renders; nothing is caught", async () => {
+    const boom = new Error("[finance] fetchEconFeed: statement timeout");
+    fetchEconFeedMock.mockRejectedValue(boom);
+
+    await expect(EkonomiBody()).rejects.toBe(boom);
+    await expect(EkonomiMarketCue()).rejects.toBe(boom);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h159-perf-2: the view model and the market cue.
+// ---------------------------------------------------------------------------
+describe("/ekonomi -- loadEkonomiView (h159-perf-2)", () => {
+  it("calls connection() before any read, and reads the clock after it", async () => {
+    await loadEkonomiView();
+
+    expect(connectionMock).toHaveBeenCalledTimes(1);
+    const connectionAt = connectionMock.mock.invocationCallOrder[0]!;
+    for (const m of [fetchEconFeedMock, fetchTopTickersMock, fetchRecentDisclosuresMock, fetchCircuitBreakersMock]) {
+      expect(m.mock.invocationCallOrder[0]!).toBeGreaterThan(connectionAt);
+    }
+  });
+
+  it("returns the re-based quotes, the optional reads' outcome and the stale set the body draws", async () => {
+    const view = await loadEkonomiView();
+
+    expect(view.feed).toEqual(FEED);
+    expect(view.top).toEqual(TOP);
+    expect(view.breakers).toEqual(BREAKERS);
+    expect(view.breakersFailed).toBe(false);
+    expect(view.quotes.THYAO!.prevClose).toBe(320);
+    expect(view.quotes.THYAO!.changePct).toBeCloseTo(3.125, 3);
+    expect(view.staleTickers.size).toBe(0);
+    // A live quote during the session needs no cue.
+    expect(view.marketCue).toBeNull();
+  });
+
+  it("marks a quote whose last trade is days old as stale", async () => {
+    getQuotesMock.mockResolvedValue({ THYAO: { ...yahooQuote(), asOf: "2026-10-30T15:00:00.000Z" } });
+
+    const view = await loadEkonomiView();
+
+    expect([...view.staleTickers]).toEqual(["THYAO"]);
+  });
+});
+
+describe("/ekonomi -- EkonomiMarketCue (h159-perf-2)", () => {
+  type CueEl = { type: unknown; props: { className?: string; children?: unknown } };
+
+  it("renders nothing while the freshest quote is live", async () => {
+    expect(await EkonomiMarketCue()).toBeNull();
+  });
+
+  it("renders the muted line when the freshest quote is not today's during the session", async () => {
+    getQuotesMock.mockResolvedValue({ THYAO: { ...yahooQuote(), asOf: "2026-11-04T15:00:00.000Z" } });
+
+    const cue = (await EkonomiMarketCue()) as unknown as CueEl;
+
+    expect(cue.type).toBe("p");
+    expect(cue.props.className).toBe("text-muted-foreground");
+    expect(cue.props.children).toBe("Veriler gecikmeli · son seans 04.11");
+  });
+
+  it("renders nothing when there are no quotes at all", async () => {
+    getQuotesMock.mockResolvedValue({});
+
+    expect(await EkonomiMarketCue()).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h159-perf-2: the static shell. EkonomiPage() is a plain element tree: the h1 and the
+// subtitle (the LCP text) are reachable without passing a Suspense boundary, so they
+// paint with the PPR shell; the cue and the body each sit inside one.
+// ---------------------------------------------------------------------------
+describe("/ekonomi -- the header renders in the static shell (h159-perf-2)", () => {
+  type Hit = { el: El; inSuspense: boolean };
+
+  /** Every element of the tree with whether a Suspense element sits between it and the root. */
+  function walkTree(node: unknown, inSuspense = false, out: Hit[] = []): Hit[] {
+    if (node == null || typeof node !== "object") return out;
+    if (Array.isArray(node)) {
+      for (const n of node) walkTree(n, inSuspense, out);
+      return out;
+    }
+    const el = node as { type?: unknown; props?: Record<string, unknown> };
+    if (el.props === undefined) return out;
+    out.push({ el: { type: el.type, props: el.props }, inSuspense });
+    walkTree(el.props.children, inSuspense || el.type === Suspense, out);
+    return out;
+  }
+
+  function textOfNode(node: unknown): string {
+    if (node == null || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(textOfNode).join("");
+    return textOfNode((node as { props?: { children?: unknown } }).props?.children);
+  }
+
+  it("returns a plain element, not a thenable", () => {
+    const tree = EkonomiPage();
+
+    expect(tree).not.toBeInstanceOf(Promise);
+    expect(typeof (tree as unknown as { then?: unknown }).then).toBe("undefined");
+    expect(tree.type).toBe("div");
+  });
+
+  it("reads no data and no clock while building the shell", () => {
+    const nowSpy = vi.spyOn(Date, "now");
+
+    EkonomiPage();
+
+    expect(connectionMock).not.toHaveBeenCalled();
+    for (const m of [fetchEconFeedMock, fetchTopTickersMock, fetchRecentDisclosuresMock, fetchCircuitBreakersMock, fetchQuoteStatsMock, fetchReferencePricesMock, getQuotesMock]) {
+      expect(m).not.toHaveBeenCalled();
+    }
+    expect(nowSpy).not.toHaveBeenCalled();
+  });
+
+  it("reaches the h1 and the subtitle without passing through a Suspense element", () => {
+    const hits = walkTree(EkonomiPage());
+
+    const h1 = hits.find((h) => h.el.type === "h1");
+    expect(h1).toBeDefined();
+    expect(textOfNode(h1!.el.props.children)).toBe("Tayf Ekonomi");
+    expect(h1!.inSuspense).toBe(false);
+
+    const subtitle = hits.find((h) => h.el.type === "p" && textOfNode(h.el.props.children).startsWith("Haberde adı geçen hisseler"));
+    expect(subtitle).toBeDefined();
+    expect(subtitle!.inSuspense).toBe(false);
+    expect(subtitle!.el.props.className).toBe("text-muted-foreground");
+    expect(textOfNode(subtitle!.el.props.children)).toContain("Yatırım tavsiyesi değildir.");
+  });
+
+  it("puts EkonomiMarketCue and EkonomiBody each inside a Suspense element, and nothing else data-driven outside one", () => {
+    const hits = walkTree(EkonomiPage());
+
+    const cue = hits.filter((h) => h.el.type === EkonomiMarketCue);
+    const body = hits.filter((h) => h.el.type === EkonomiBody);
+    expect(cue).toHaveLength(1);
+    expect(body).toHaveLength(1);
+    expect(cue[0]!.inSuspense).toBe(true);
+    expect(body[0]!.inSuspense).toBe(true);
+    // The shell holds no data component: the cue and the body are the only function-typed children.
+    const components = hits.filter((h) => typeof h.el.type === "function" && h.el.type !== Suspense);
+    expect(components.map((h) => h.el.type)).toEqual([EkonomiMarketCue, EkonomiBody]);
+  });
+
+  it("the cue's fallback is null and the body's fallback is the shared skeleton", () => {
+    const suspenses = walkTree(EkonomiPage()).filter((h) => h.el.type === Suspense);
+
+    expect(suspenses).toHaveLength(2);
+    const [cueBoundary, bodyBoundary] = suspenses;
+    expect(cueBoundary!.el.props.fallback).toBeNull();
+    expect((bodyBoundary!.el.props.fallback as { type: unknown }).type).toBe(EkonomiBodySkeleton);
+  });
+
+  it("keeps the header markup of the loaded page: outer div, header row, h1, then the subtitle before the cue slot", () => {
+    const tree = EkonomiPage() as unknown as { props: { className: string; children: unknown[] } };
+
+    expect(tree.props.className).toBe("mx-auto w-full max-w-[1600px] px-4 py-6 space-y-3");
+    const [row, rest] = tree.props.children as Array<{ type: unknown; props: { className?: string; children: unknown[] } }>;
+    expect(row!.type).toBe("div");
+    expect(row!.props.className).toBe("flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 font-mono text-[12px]");
+    const [h1, right] = row!.props.children as Array<{ type: unknown; props: { className?: string; children: unknown } }>;
+    expect(h1!.type).toBe("h1");
+    expect(h1!.props.className).toBe("font-mono text-[12px] font-normal text-foreground");
+    expect(right!.type).toBe("div");
+    expect(right!.props.className).toBe("space-y-0.5");
+    const [subtitle, cueSlot] = right!.props.children as Array<{ type: unknown; props: { className?: string } }>;
+    expect(subtitle!.type).toBe("p");
+    expect(subtitle!.props.className).toBe("text-muted-foreground");
+    expect(cueSlot!.type).toBe(Suspense);
+    expect((rest as unknown as { type: unknown }).type).toBe(Suspense);
   });
 });
 

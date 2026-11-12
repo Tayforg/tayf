@@ -299,7 +299,16 @@ describe("runtime parity with sw-policy.ts", () => {
   it("extractShellAssets", () => {
     const html = OFFLINE_HTML +
       '<script src="/_next/static/chunks/b.js"></script><link href="/_next/static/x.css?a=1&amp;b=2"/>' +
-      '<script src="/_next/static/../../admin/x.js"></script><img src="/_next/static/frag.png#x"/>';
+      '<script src="/_next/static/../../admin/x.js"></script><img src="/_next/static/frag.png#x"/>' +
+      // experimental.inlineCss: a space-joined data-href that is not an asset (the worker twin must ignore it too).
+      '<style data-precedence="next" data-href="/_next/static/chunks/a.css /_next/static/chunks/b.css">x</style>' +
+      '<img data-src="/_next/static/media/lazy.png"/><script\tsrc="/_next/static/chunks/tab.js"></script>';
+    const inlined = '<style data-precedence="next" data-href="/_next/static/chunks/a.css /_next/static/chunks/b.css">x</style>';
+    // The twin must be held to the fixed output, not only equal to the policy copy.
+    expect(call("extractShellAssets", inlined, ORIGIN, 60)).toEqual([]);
+    expect(call("extractShellAssets", html, ORIGIN, 60) as string[]).not.toContain(
+      `${ORIGIN}/_next/static/chunks/a.css%20/_next/static/chunks/b.css`,
+    );
     for (const [h, max] of [[html, 60], [html, 1], [html, 0], ["", 5], ["<p/>", 5]] as const) {
       expect(call("extractShellAssets", h, ORIGIN, max)).toEqual(twin(policy.extractShellAssets, h, ORIGIN, max));
     }
