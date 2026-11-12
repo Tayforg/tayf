@@ -115,6 +115,27 @@ function istMinutes(iso: string): number {
   return d.getUTCHours() * 60 + d.getUTCMinutes();
 }
 
+/** How many marker rows the caption lists under the chart; the rest are counted, not dropped silently. */
+const CAPTION_MARKERS_MAX = 6;
+
+/**
+ * The markers the caption lists, and how many it leaves out (h142-a11y-2). The chart draws every marker as a
+ * triangle, but a caption of 18 rows would swamp the panel, so it lists the LATEST `max` (nearest the current
+ * price, and the ones a reader looks for) in ascending time order and reports the count of the older ones so
+ * the caption can say so. Sorts a copy by time, so the pick does not rely on the caller's order; equal times keep
+ * their input order. A `max` of 0 or less lists nothing; NaN falls back to the default of six.
+ */
+export function captionMarkers(
+  markers: ChartMarker[],
+  max: number = CAPTION_MARKERS_MAX,
+): { shown: ChartMarker[]; hidden: number } {
+  const cap = Number.isNaN(max) ? CAPTION_MARKERS_MAX : Math.max(0, Math.floor(max));
+  const at = (m: ChartMarker) => new Date(m.ts).getTime();
+  const ordered = [...markers].sort((a, b) => at(a) - at(b) || 0);
+  const hidden = Math.max(0, ordered.length - cap);
+  return { shown: ordered.slice(hidden), hidden };
+}
+
 const PRICE_TAG_CLASS = "absolute left-full ml-1 -translate-y-1/2 font-mono text-[10px] tabular-nums";
 
 /**
@@ -158,12 +179,15 @@ export function IntradayChart({
     return mins >= SESSION_START_MIN - 30 && mins <= SESSION_END_MIN;
   });
   const tops = priceTagTops(y(lastClose), prevClose != null ? y(prevClose) : null, H, PRICE_TAG_PHONE_GAP);
-  const ariaLabel =
+  const priceLabel =
     settled == null
       ? `Seans içi fiyat, son ${fmtPrice(last.close)}`
       : overrideReason === "auction"
         ? `Seans içi fiyat, kapanış ${fmtPrice(settled)}`
         : `Seans içi fiyat, kapanış ${fmtPrice(settled)}, gün içi veri eksik`;
+  // h142-a11y-2: the svg draws every marker, the caption lists only the latest few; the label gives the real count.
+  const ariaLabel = inSession.length > 0 ? `${priceLabel} · ${inSession.length} işaret` : priceLabel;
+  const { shown, hidden } = captionMarkers(inSession);
 
   return (
     <figure className="px-3 py-2">
@@ -219,13 +243,15 @@ export function IntradayChart({
       </div>
       {inSession.length > 0 ? (
         <figcaption className="mt-1 space-y-0.5 font-mono text-[10px] text-muted-foreground">
-          {inSession.slice(0, 6).map((m, i) => (
+          {shown.map((m, i) => (
             <div key={`${m.ts}-${i}`} className="flex gap-2">
-              <span className="text-brand">▲</span>
+              <span className="text-brand" aria-hidden="true">▲</span>
               <span className="tabular-nums">{fmtClock(m.ts)}</span>
               <span className="truncate" lang={m.lang}>{m.label}</span>
             </div>
           ))}
+          {/* Markers include KAP notices, hence "işaret", not "haber". One text node (no <!-- --> split). */}
+          {hidden > 0 ? <div>{`+${hidden} işaret daha · tümü aşağıdaki listelerde`}</div> : null}
         </figcaption>
       ) : null}
     </figure>

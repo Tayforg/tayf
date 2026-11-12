@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Bar5m } from "@/lib/finance/queries";
-import { IntradayChart, priceTagTops, sessionAxisTicks, type ChartMarker } from "./intraday-chart";
+import { captionMarkers, IntradayChart, priceTagTops, sessionAxisTicks, type ChartMarker } from "./intraday-chart";
 
 // The chart labels are HTML positioned over the SVG (an SVG <text> shrinks
 // with the viewBox: about 3 px on a 390 px phone). Their horizontal and
@@ -356,5 +356,226 @@ describe("IntradayChart marker captions carry their language (h101-a11yrecent-2)
     const html = render([{ ts: "2026-11-06T05:00:00.000Z", label: EN, lang: "en" }]);
     expect(html).not.toContain(EN);
     expect(html).not.toContain("lang=");
+  });
+});
+
+// h142-a11y-2: the chart draws every in-session marker as a triangle, but the caption under it listed only the
+// first six (THYAO: 18 triangles, 6 rows) and said nothing about the rest, and because the markers are sorted
+// ascending the cap kept the earliest and dropped the latest, the ones nearest the current price. The ▲ before
+// each row was also read aloud. captionMarkers keeps the LATEST rows and counts what it hides; the caption says so.
+describe("captionMarkers (h142-a11y-2)", () => {
+  /** n markers 20 minutes apart from 07:00Z (10:00 Istanbul), ascending. */
+  const many = (n: number): ChartMarker[] =>
+    Array.from({ length: n }, (_, i) => ({
+      ts: new Date(Date.UTC(2026, 10, 6, 7, 0) + i * 20 * 60_000).toISOString(),
+      label: `Haber ${i}`,
+    }));
+
+  it("18 markers: the LAST six, in ascending order, and 12 hidden", () => {
+    const all = many(18);
+    const { shown, hidden } = captionMarkers(all);
+    expect(shown).toEqual(all.slice(12));
+    expect(shown.map((m) => m.label)).toEqual(["Haber 12", "Haber 13", "Haber 14", "Haber 15", "Haber 16", "Haber 17"]);
+    expect(hidden).toBe(12);
+  });
+
+  it("5 markers: all five, none hidden", () => {
+    const all = many(5);
+    expect(captionMarkers(all)).toEqual({ shown: all, hidden: 0 });
+  });
+
+  it("exactly six: all six, none hidden; seven: the last six and one hidden", () => {
+    expect(captionMarkers(many(6))).toEqual({ shown: many(6), hidden: 0 });
+    const seven = many(7);
+    expect(captionMarkers(seven)).toEqual({ shown: seven.slice(1), hidden: 1 });
+  });
+
+  it("no markers: nothing shown, nothing hidden", () => {
+    expect(captionMarkers([])).toEqual({ shown: [], hidden: 0 });
+  });
+
+  it("takes the cap as the second argument", () => {
+    const all = many(10);
+    expect(captionMarkers(all, 3)).toEqual({ shown: all.slice(7), hidden: 7 });
+    expect(captionMarkers(all, 10)).toEqual({ shown: all, hidden: 0 });
+    expect(captionMarkers(all, 25)).toEqual({ shown: all, hidden: 0 });
+  });
+
+  it("a cap of 0 (or less) shows nothing and hides everything; slice(-0) would have shown the lot", () => {
+    const all = many(4);
+    expect(captionMarkers(all, 0)).toEqual({ shown: [], hidden: 4 });
+    expect(captionMarkers(all, -2)).toEqual({ shown: [], hidden: 4 });
+  });
+
+  it("a NaN cap falls back to the default of six; a fractional cap rounds down", () => {
+    const all = many(9);
+    expect(captionMarkers(all, Number.NaN)).toEqual({ shown: all.slice(3), hidden: 3 });
+    expect(captionMarkers(all, 2.9)).toEqual({ shown: all.slice(7), hidden: 7 });
+  });
+
+  it("keeps the LATEST by time even when the input is not sorted, and returns them ascending", () => {
+    const all = many(8);
+    const shuffled = [all[5]!, all[0]!, all[7]!, all[2]!, all[6]!, all[1]!, all[4]!, all[3]!];
+    const { shown, hidden } = captionMarkers(shuffled, 3);
+    expect(shown.map((m) => m.label)).toEqual(["Haber 5", "Haber 6", "Haber 7"]);
+    expect(hidden).toBe(5);
+  });
+
+  it("does not reorder or mutate the caller's array", () => {
+    const all = many(8);
+    const shuffled = [all[5]!, all[0]!, all[7]!, all[2]!, all[6]!, all[1]!, all[4]!, all[3]!];
+    const copy = [...shuffled];
+    captionMarkers(shuffled, 3);
+    expect(shuffled).toEqual(copy);
+  });
+
+  it("markers at the same instant keep their input order", () => {
+    const ts = "2026-11-06T08:00:00.000Z";
+    const tied: ChartMarker[] = [
+      { ts, label: "a" },
+      { ts, label: "b" },
+      { ts, label: "c" },
+    ];
+    expect(captionMarkers(tied, 2).shown.map((m) => m.label)).toEqual(["b", "c"]);
+  });
+
+  it("copes with 10k markers", () => {
+    const { shown, hidden } = captionMarkers(many(10_000));
+    expect(shown).toHaveLength(6);
+    expect(hidden).toBe(9_994);
+    expect(shown[5]!.label).toBe("Haber 9999");
+  });
+});
+
+describe("IntradayChart caption lists the latest markers and counts the rest (h142-a11y-2)", () => {
+  const bars: Bar5m[] = [
+    { ts: "2026-11-06T07:00:00.000Z", close: 11.8, volume: 100 },
+    { ts: "2026-11-06T09:30:00.000Z", close: 11.7, volume: 60 },
+    { ts: "2026-11-06T12:00:00.000Z", close: 11.9, volume: 60 },
+  ];
+  /** n in-session markers, 20 minutes apart from 07:00Z: 10:00, 10:20, ... Istanbul. All inside 09:30-18:10. */
+  const markersOf = (n: number): ChartMarker[] =>
+    Array.from({ length: n }, (_, i) => ({
+      ts: new Date(Date.UTC(2026, 10, 6, 7, 0) + i * 20 * 60_000).toISOString(),
+      label: `Haber numarası ${i}`,
+    }));
+  const render = (markers: ChartMarker[]) => renderToStaticMarkup(IntradayChart({ bars, markers, prevClose: 11.67 }));
+
+  const OPEN = "<figcaption";
+  const CLOSE = "</figcaption>";
+  /** The figcaption element's markup ("" when there is none). indexOf/slice only, no regular expression over markup. */
+  function captionOf(html: string): string {
+    const start = html.indexOf(OPEN);
+    const end = html.indexOf(CLOSE);
+    return start === -1 || end === -1 ? "" : html.slice(start, end + CLOSE.length);
+  }
+  /** Text nodes only, by a character walk (never a tag-stripping regex). */
+  function textIn(html: string): string {
+    let text = "";
+    let inTag = false;
+    for (const ch of html) {
+      if (ch === "<") inTag = true;
+      else if (ch === ">") inTag = false;
+      else if (!inTag) text += ch;
+    }
+    return text;
+  }
+  const ROW = '<div class="flex gap-2">';
+  const rowCount = (caption: string) => caption.split(ROW).length - 1;
+  const clocks = (caption: string) => Array.from(caption.matchAll(/<span class="tabular-nums">(\d\d:\d\d)<\/span>/g), (m) => m[1]);
+
+  it("18 markers: six rows ending at the latest marker, then one '+12' line", () => {
+    const html = render(markersOf(18));
+    const caption = captionOf(html);
+
+    // The chart still draws all eighteen triangles.
+    expect(html.split("<polygon").length - 1).toBe(18);
+    expect(rowCount(caption)).toBe(6);
+    // 07:00Z + 12..17 x 20 min = 11:00Z..12:40Z = 14:00..15:40 Istanbul.
+    expect(clocks(caption)).toEqual(["14:00", "14:20", "14:40", "15:00", "15:20", "15:40"]);
+    expect(caption).toContain("Haber numarası 17");
+    expect(caption).not.toContain("Haber numarası 11<");
+    expect(caption).not.toContain("Haber numarası 0<");
+    expect(textIn(caption)).toContain("+12 işaret daha · tümü aşağıdaki listelerde");
+    // Exactly one such line, after the last row.
+    expect(textIn(caption).split("+12").length - 1).toBe(1);
+    expect(caption.lastIndexOf("+12")).toBeGreaterThan(caption.lastIndexOf("Haber numarası 17"));
+  });
+
+  it("the extra line is not a marker row (no clock, no triangle)", () => {
+    const caption = captionOf(render(markersOf(18)));
+    // The last <div> of the caption is the note line.
+    const line = caption.slice(caption.lastIndexOf("<div"));
+
+    expect(textIn(line)).toBe("+12 işaret daha · tümü aşağıdaki listelerde");
+    expect(line.startsWith(ROW)).toBe(false);
+    expect(line.includes("▲")).toBe(false);
+    expect(clocks(line)).toEqual([]);
+    expect(rowCount(caption)).toBe(6);
+  });
+
+  it("the hidden count follows the number of in-session markers: 7 give '+1', 6 give no line", () => {
+    expect(textIn(captionOf(render(markersOf(7))))).toContain("+1 işaret daha");
+    expect(rowCount(captionOf(render(markersOf(7))))).toBe(6);
+    expect(captionOf(render(markersOf(6))).includes("işaret daha")).toBe(false);
+  });
+
+  it("5 markers: five rows and no '+' line", () => {
+    const caption = captionOf(render(markersOf(5)));
+
+    expect(rowCount(caption)).toBe(5);
+    expect(clocks(caption)).toEqual(["10:00", "10:20", "10:40", "11:00", "11:20"]);
+    expect(caption.includes("+")).toBe(false);
+    expect(caption.includes("işaret daha")).toBe(false);
+  });
+
+  it("no markers: no caption at all", () => {
+    expect(render([]).includes(OPEN)).toBe(false);
+  });
+
+  it("markers outside the session window are neither captioned nor counted in the hidden total", () => {
+    // 05:00Z is 08:00 Istanbul, before the 09:30 floor: 7 in session + 3 outside = '+1', not '+4'.
+    const outside: ChartMarker[] = ["05:00", "05:10", "05:20"].map((t, i) => ({ ts: `2026-11-06T${t}:00.000Z`, label: `Seans dışı ${i}` }));
+    const caption = captionOf(render([...outside, ...markersOf(7)]));
+
+    expect(caption.includes("Seans dışı")).toBe(false);
+    expect(textIn(caption)).toContain("+1 işaret daha");
+    expect(textIn(caption).includes("+4")).toBe(false);
+  });
+
+  it("every ▲ in the caption sits directly inside an element marked aria-hidden", () => {
+    for (const n of [1, 5, 6, 18]) {
+      const caption = captionOf(render(markersOf(n)));
+      const triangles: number[] = [];
+      for (let at = caption.indexOf("▲"); at !== -1; at = caption.indexOf("▲", at + 1)) triangles.push(at);
+
+      expect(triangles).toHaveLength(Math.min(n, 6));
+      for (const at of triangles) {
+        // The glyph is the whole text of its span, so the nearest tag before it is its parent's opening tag.
+        const tag = caption.slice(caption.lastIndexOf("<", at), at);
+        expect(tag.startsWith("<span")).toBe(true);
+        expect(tag).toContain('aria-hidden="true"');
+      }
+    }
+  });
+
+  it("the caption's clock, label and lang= are unchanged (the language attribute stays on the label span)", () => {
+    const html = render([
+      { ts: "2026-11-06T08:00:00.000Z", label: "Aselsan signs a deal", lang: "en" },
+      { ts: "2026-11-06T08:10:00.000Z", label: "KAP: Yeni İş İlişkisi" },
+    ]);
+
+    expect(html).toContain('<span class="tabular-nums">11:00</span>');
+    expect(html).toContain('<span class="truncate" lang="en">Aselsan signs a deal</span>');
+    expect(html).toContain('<span class="truncate">KAP: Yeni İş İlişkisi</span>');
+    expect((html.match(/\blang=/g) ?? []).length).toBe(1);
+  });
+
+  it("the svg's aria-label also says how many markers it draws, only when it draws some", () => {
+    const ariaOf = (html: string) => /aria-label="([^"]+)"/.exec(html)?.[1];
+
+    expect(ariaOf(render(markersOf(18)))).toBe("Seans içi fiyat, son 11,90 · 18 işaret");
+    expect(ariaOf(render(markersOf(1)))).toBe("Seans içi fiyat, son 11,90 · 1 işaret");
+    expect(ariaOf(render([]))).toBe("Seans içi fiyat, son 11,90");
   });
 });

@@ -116,6 +116,7 @@ function mkRows(n: number) {
     title_tr_neutral: null,
     title: `Küme ${i}`,
     article_count: 2,
+    source_count: 2,
     first_published: new Date(
       Date.UTC(2026, 8, 18, 10, 0, 0) - i * 60_000,
     ).toISOString(),
@@ -130,6 +131,7 @@ function mkRowsInOneHour(n: number) {
     title_tr_neutral: null,
     title: `Küme ${i}`,
     article_count: 2,
+    source_count: 2,
     first_published: new Date(
       Date.UTC(2026, 8, 18, 10, 59, 0) - i * 1000,
     ).toISOString(),
@@ -183,6 +185,7 @@ describe("/timeline", () => {
         title_tr_neutral: null,
         title: `Küme ${i}`,
         article_count: 2,
+        source_count: 2,
         first_published: new Date(Date.UTC(2026, 8, 18, 10, 0, 0) + i * 1000).toISOString(),
       })),
       total: 1234,
@@ -244,6 +247,7 @@ describe("/timeline", () => {
           title_tr_neutral: null,
           title: "Bir",
           article_count: 3,
+          source_count: 3,
           first_published: "2026-09-18T10:05:00.000Z",
         },
         {
@@ -252,6 +256,7 @@ describe("/timeline", () => {
           title_tr_neutral: "İki nötr",
           title: "İki nötr",
           article_count: 2,
+          source_count: 2,
           first_published: "2026-09-18T10:40:00.000Z",
         },
       ],
@@ -550,6 +555,7 @@ describe("/timeline row layout on phones (h46-mobile-2)", () => {
           title_tr_neutral: "Nötr başlık",
           title: "Nötr başlık",
           article_count: 7,
+          source_count: 7,
           first_published: "2026-09-18T10:05:00.000Z",
         },
         {
@@ -558,6 +564,7 @@ describe("/timeline row layout on phones (h46-mobile-2)", () => {
           title_tr_neutral: null,
           title: "Yalnız ham başlık",
           article_count: 2,
+          source_count: 2,
           first_published: "2026-09-18T10:40:00.000Z",
         },
       ],
@@ -632,6 +639,7 @@ describe("/timeline English-only rows (h118-english-1)", () => {
       title_tr_neutral: title,
       title,
       article_count: 2,
+      source_count: 2,
       first_published: "2026-09-18T10:05:00.000Z",
       ...extra,
     };
@@ -679,5 +687,220 @@ describe("/timeline English-only rows (h118-english-1)", () => {
     });
     expect(others.length).toBeGreaterThan(0);
     expect(others.every((el) => el.props?.lang === undefined)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h142-consistency-1: /timeline printed `row.article_count` ("8 kaynak") for a
+// wire-redistribution cluster while the cluster page header says "3 kaynak ·
+// Ajans ağırlıklı · 8 haber, 3 farklı metin". getRecentClusters now hands every
+// row the honest `source_count` and, for a wire cluster only, `wire`. The row
+// prints source_count and, when `wire` is set, a small violet tag after it: the
+// leading words of wireBadgeLabel (wire.ts, the cluster page's badge text), with
+// the full label as its tooltip.
+// ---------------------------------------------------------------------------
+describe("/timeline honest source count and wire tag (h142-consistency-1)", () => {
+  function mkWireRow(
+    id: string,
+    over: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      id,
+      title_tr: `Küme ${id}`,
+      title_tr_neutral: `Nötr ${id}`,
+      title: `Nötr ${id}`,
+      article_count: 8,
+      source_count: 3,
+      wire: { memberCount: 8, uniqueTexts: 3 },
+      first_published: "2026-11-12T08:00:00.000Z",
+      ...over,
+    };
+  }
+
+  function findAll(tree: unknown, match: (el: El) => boolean): El[] {
+    const hits: El[] = [];
+    walk(tree, (el) => {
+      if (match(el)) hits.push(el);
+    });
+    return hits;
+  }
+
+  const textOf = (el: El | undefined): string => collectText(el?.props?.children).join("");
+  const classTokens = (el: El | undefined): string[] =>
+    String(el?.props?.className ?? "")
+      .split(/\s+/)
+      .filter(Boolean);
+  const rowItems = (tree: unknown) =>
+    findAll(tree, (el) => el.type === "li" && typeof el.props?.className === "string");
+  /** The wire tag: the one element in the tree that carries the badge tooltip. */
+  const wireTags = (tree: unknown) =>
+    findAll(tree, (el) => el.type === "span" && typeof el.props?.title === "string");
+  /** The count cell of a row: the `<li>`'s third child. */
+  const countCellOf = (li: El): El => (li.props?.children as El[])[2] as El;
+
+  it("prints source_count, not article_count: 8 members of 3 texts read '3 kaynak'", async () => {
+    mocks.result = { rows: [mkWireRow("532ee77c")], total: 1 };
+
+    const tree = await TimelinePage();
+
+    const text = collectText(tree).join("");
+    expect(text).toContain("3 kaynak");
+    expect(text).not.toContain("8 kaynak");
+    const cell = countCellOf(rowItems(tree)[0] as El);
+    expect(textOf(cell).startsWith("3 kaynak")).toBe(true);
+  });
+
+  it("a wire row gets the violet 'Ajans ağırlıklı' tag after the count, titled with the cluster page's badge text", async () => {
+    mocks.result = { rows: [mkWireRow("532ee77c")], total: 1 };
+
+    const tree = await TimelinePage();
+
+    const tags = wireTags(tree);
+    expect(tags).toHaveLength(1);
+    const tag = tags[0] as El;
+    expect(textOf(tag)).toBe("Ajans ağırlıklı");
+    expect(tag.props?.title).toBe("Ajans ağırlıklı · 8 haber, 3 farklı metin");
+    // After the count, inside the same right-hand cell: the row keeps its three
+    // children (time, headline, count).
+    const li = rowItems(tree)[0] as El;
+    expect((li.props?.children as El[]).map((k) => k.type)).toEqual(["time", Link, "span"]);
+    const cell = countCellOf(li);
+    expect(collectText(cell.props?.children)[0]).toBe("3");
+    expect(textOf(cell)).toBe("3 kaynak Ajans ağırlıklı");
+    // A real space text node sits right before the tag, so copy, extracted text
+    // and inline screen-reader text never read "3 kaynakAjans ağırlıklı".
+    const parts = collectText(cell.props?.children);
+    const tagAt = parts.indexOf("Ajans ağırlıklı");
+    expect(tagAt).toBeGreaterThan(0);
+    expect(parts[tagAt - 1]).toBe(" ");
+  });
+
+  it("styles the tag with literal violet classes like the card's wire badge", async () => {
+    mocks.result = { rows: [mkWireRow("532ee77c")], total: 1 };
+
+    const tree = await TimelinePage();
+
+    const tokens = classTokens(wireTags(tree)[0]);
+    for (const t of [
+      "rounded-full",
+      "bg-violet-500/15",
+      "border-violet-500/30",
+      "text-violet-800",
+      "dark:text-violet-400",
+      "font-medium",
+      "whitespace-nowrap",
+    ]) {
+      expect(tokens).toContain(t);
+    }
+    for (const token of tokens) {
+      // No hole left in a class (a computed name never reaches Tailwind's scanner).
+      expect(token).not.toMatch(/undefined|\$\{|\[object/);
+    }
+  });
+
+  it("a single-text wire (all copies of one dispatch) uses the cluster page's single-source words", async () => {
+    mocks.result = {
+      rows: [
+        mkWireRow("copy-1", {
+          article_count: 5,
+          source_count: 1,
+          wire: { memberCount: 5, uniqueTexts: 1 },
+        }),
+      ],
+      total: 1,
+    };
+
+    const tree = await TimelinePage();
+
+    const tag = wireTags(tree)[0] as El;
+    expect(textOf(tag)).toBe("Tek kaynaktan dağıtıldı");
+    expect(tag.props?.title).toBe("Tek kaynaktan dağıtıldı · 5 kopya");
+    expect(textOf(countCellOf(rowItems(tree)[0] as El))).toBe("1 kaynak Tek kaynaktan dağıtıldı");
+  });
+
+  it("a row without `wire` has no tag, and its count cell is exactly 'N kaynak'", async () => {
+    mocks.result = {
+      rows: [
+        mkWireRow("plain-1", { article_count: 4, source_count: 4, wire: undefined }),
+        mkWireRow("plain-2", { article_count: 2, source_count: 2, wire: undefined }),
+      ],
+      total: 2,
+    };
+
+    const tree = await TimelinePage();
+
+    expect(wireTags(tree)).toHaveLength(0);
+    const cells = rowItems(tree).map((li) => textOf(countCellOf(li)));
+    expect(cells).toEqual(["4 kaynak", "2 kaynak"]);
+  });
+
+  it("tags only the wire rows of a mixed page, each with its own tooltip", async () => {
+    mocks.result = {
+      rows: [
+        mkWireRow("w-1", { first_published: "2026-11-12T08:30:00.000Z" }),
+        mkWireRow("p-1", {
+          article_count: 3,
+          source_count: 3,
+          wire: undefined,
+          first_published: "2026-11-12T08:20:00.000Z",
+        }),
+        mkWireRow("w-2", {
+          article_count: 4,
+          source_count: 2,
+          wire: { memberCount: 4, uniqueTexts: 2 },
+          first_published: "2026-11-12T08:10:00.000Z",
+        }),
+      ],
+      total: 3,
+    };
+
+    const tree = await TimelinePage();
+
+    const cells = rowItems(tree).map((li) => textOf(countCellOf(li)));
+    expect(cells).toEqual([
+      "3 kaynak Ajans ağırlıklı",
+      "3 kaynak",
+      "2 kaynak Ajans ağırlıklı",
+    ]);
+    expect(wireTags(tree).map((t) => t.props?.title)).toEqual([
+      "Ajans ağırlıklı · 8 haber, 3 farklı metin",
+      "Ajans ağırlıklı · 4 haber, 2 farklı metin",
+    ]);
+  });
+
+  it("the count cell keeps its phone layout classes with a tag inside", async () => {
+    mocks.result = { rows: [mkWireRow("532ee77c")], total: 1 };
+
+    const tree = await TimelinePage();
+
+    const tokens = classTokens(countCellOf(rowItems(tree)[0] as El));
+    for (const t of ["shrink-0", "max-sm:ml-auto", "text-[11px]", "text-muted-foreground", "tabular-nums"]) {
+      expect(tokens).toContain(t);
+    }
+  });
+
+  it("only the row's own fields reach the page tree: a stray description never renders or reaches the pill", async () => {
+    const SECRET = "GİZLİ AJANS DESCRIPTION METNİ";
+    mocks.result = {
+      rows: [
+        mkWireRow("532ee77c", { description: SECRET, content_hash: "deadbeef" }),
+      ],
+      total: 1,
+    };
+
+    const tree = await TimelinePage();
+
+    // Server-rendered text and the client pill's props never carry a row's
+    // description (the query never returns one; this pins that the page does not
+    // forward a row either).
+    expect(collectText(tree).join("").includes(SECRET)).toBe(false);
+    const pill = findPills(tree)[0];
+    expect(Object.keys(pill?.props ?? {}).sort()).toEqual([
+      "floorPublished",
+      "knownIds",
+      "newestPublished",
+    ]);
+    expect(JSON.stringify(pill?.props).includes(SECRET)).toBe(false);
+    expect(JSON.stringify(pill?.props).includes("wire")).toBe(false);
   });
 });

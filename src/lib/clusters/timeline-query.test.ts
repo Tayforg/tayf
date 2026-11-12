@@ -10,6 +10,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // h118-english-1 adds a second `cluster_articles` read, the language-isolation
 // read (member sources of the small clusters); the resolver tells the two apart
 // by the select string: only the isolation read embeds `sources`.
+// h142-consistency-1 adds a third, the wire member read (every row's members with
+// content_hash and description, chunked); only that read selects `content_hash`.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -42,6 +44,18 @@ const fixture = vi.hoisted(() => ({
   isolationThrows: false,
   /** Builder state of EVERY isolation read, in order (empty = none was issued). */
   isolationStates: [] as unknown[],
+  /**
+   * Rows the wire member read (cluster_articles -> articles with content_hash and
+   * description) holds. The resolver answers each chunk with only the rows whose
+   * cluster_id that chunk asked for, like PostgREST.
+   */
+  wireMembers: [] as unknown[],
+  wireError: null as { message: string } | null,
+  wireThrows: false,
+  /** A chunk that asks for any of these cluster ids answers with an error. */
+  wireErrorIds: [] as string[],
+  /** Builder state of EVERY wire read, in order (empty = none was issued). */
+  wireStates: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -61,6 +75,21 @@ const supabaseFake = await vi.hoisted(async () => {
         return { data: fixture.data, error: fixture.error };
       },
       cluster_articles: (state) => {
+        if (String(state.selectArgs[0]).includes("content_hash")) {
+          fixture.wireStates.push(state);
+          if (fixture.wireThrows) throw new Error("wire boom");
+          if (fixture.wireError) return { data: null, error: fixture.wireError };
+          const asked = new Set<unknown>(state.in[0]?.vals ?? []);
+          if (fixture.wireErrorIds.some((id) => asked.has(id))) {
+            return { data: null, error: { message: "wire chunk failed" } };
+          }
+          return {
+            data: (fixture.wireMembers as Array<{ cluster_id: string }>).filter((r) =>
+              asked.has(r.cluster_id),
+            ),
+            error: null,
+          };
+        }
         if (String(state.selectArgs[0]).includes("sources")) {
           fixture.isolationStates.push(state);
           if (fixture.isolationThrows) throw new Error("isolation boom");
@@ -112,13 +141,15 @@ function mkRow(id: string, firstPublished = "2026-09-18T10:00:00.000Z") {
 }
 
 /**
- * What a row becomes once the display title is attached: no stored neutral
- * title and no members, so the title is `title_tr`.
+ * What a row becomes once the display title and the source count are attached:
+ * no stored neutral title and no members read, so the title is `title_tr` and the
+ * count falls back to `article_count` (h142-consistency-1).
  */
 function withTitles(rows: unknown[]) {
-  return (rows as Array<{ title_tr: string }>).map((r) => ({
+  return (rows as Array<{ title_tr: string; article_count: number }>).map((r) => ({
     ...r,
     title: r.title_tr,
+    source_count: r.article_count,
   }));
 }
 
@@ -141,6 +172,11 @@ beforeEach(() => {
   fixture.isolationError = null;
   fixture.isolationThrows = false;
   fixture.isolationStates = [];
+  fixture.wireMembers = [];
+  fixture.wireError = null;
+  fixture.wireThrows = false;
+  fixture.wireErrorIds = [];
+  fixture.wireStates = [];
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -418,7 +454,7 @@ describe("getRecentClusters display title: stored neutral titles", () => {
     expect(fixture.memberStates).toHaveLength(0);
   });
 
-  it("keeps every original column on the row and adds title next to them", async () => {
+  it("keeps every original column on the row and adds title and source_count next to them", async () => {
     fixture.data = [mkClusterRow("c1", "Ham", "Nötr")];
 
     const result = await getRecentClusters();
@@ -430,6 +466,7 @@ describe("getRecentClusters display title: stored neutral titles", () => {
       article_count: 2,
       first_published: "2026-11-08T18:30:00.000Z",
       title: "Nötr",
+      source_count: 2,
     });
   });
 });
@@ -701,8 +738,18 @@ describe("getRecentClusters language isolation (h118-english-1)", () => {
 
     const result = await getRecentClusters();
 
+    // h142-consistency-1: source_count is the one key a non-wire row gained; no
+    // `wire` key unless the cluster is a wire redistribution.
     expect(Object.keys(result?.rows[0] ?? {}).sort()).toEqual(
-      ["article_count", "first_published", "id", "title", "title_tr", "title_tr_neutral"].sort(),
+      [
+        "article_count",
+        "first_published",
+        "id",
+        "source_count",
+        "title",
+        "title_tr",
+        "title_tr_neutral",
+      ].sort(),
     );
   });
 
@@ -796,6 +843,7 @@ describe("getRecentClusters language isolation (h118-english-1)", () => {
         article_count: 2,
         first_published: "2026-11-08T18:30:00.000Z",
         title: "English neutral",
+        source_count: 2,
       },
       {
         id: TR_ID,
@@ -804,6 +852,7 @@ describe("getRecentClusters language isolation (h118-english-1)", () => {
         article_count: 2,
         first_published: "2026-11-08T18:30:00.000Z",
         title: "Nötr",
+        source_count: 2,
       },
     ]);
     expect((result?.rows ?? []).some((r) => "lang" in r)).toBe(false);
@@ -910,6 +959,593 @@ describe("getRecentClusters language isolation (h118-english-1)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h142-consistency-1: /timeline printed the raw member count ("8 kaynak") for a
+// wire-redistribution cluster while the cluster page, the cards, the embed and
+// the meta print the honest distinct-text count ("3 kaynak · Ajans ağırlıklı").
+// The row read carries no members, so fetchRecentClusters does ONE chunked,
+// never-throw member read over every row (cluster_articles -> articles with
+// content_hash and description), dedupes each cluster to the earliest article
+// per source (cluster-detail-query.ts) and runs detectWireRedistribution from
+// wire.ts. Each row gains `source_count` (distinct texts when wire, else the
+// deduped member count, else article_count when nothing was read) and, only for
+// a wire cluster, `wire: { memberCount, uniqueTexts }`. The description and the
+// hash are server-side inputs: no row carries them.
+// ---------------------------------------------------------------------------
+
+const WIRE_ID = "532ee77c-525b-43c8-9bc5-20097064c7e2";
+const PLAIN_ID = "a1b2c3d4-0000-4000-8000-000000000001";
+const DUP_ID = "a1b2c3d4-0000-4000-8000-000000000002";
+
+// Three different agency leads, each well over SAME_DESCRIPTION_MIN_CHARS (40).
+const LEAD_A = "Cumhurbaşkanı Erdoğan NATO zirvesi öncesinde Brüksel'de liderlerle bir araya gelecek";
+const LEAD_B =
+  "Merkez Bankası politika faizini yüzde 40 seviyesinde sabit tutarak piyasa beklentilerini karşıladı";
+const LEAD_C = "İstanbul Boğazı'nda yoğun sis nedeniyle gemi trafiği çift yönlü olarak askıya alındı";
+
+type WireMemberFixture = {
+  id: string;
+  source_id: string | null;
+  content_hash: string | null;
+  description: unknown;
+  title: string;
+  published_at: string;
+};
+
+/** One `cluster_articles` row of the wire read; every field overridable. */
+function wireMember(
+  clusterId: string,
+  a: Partial<WireMemberFixture> & { id: string },
+): { cluster_id: string; articles: WireMemberFixture } {
+  return {
+    cluster_id: clusterId,
+    articles: {
+      source_id: `src-${a.id}`,
+      content_hash: `hash-${a.id}`,
+      description: null,
+      title: `Başlık ${a.id}`,
+      published_at: "2026-11-12T08:00:00Z",
+      ...a,
+    },
+  };
+}
+
+/** `HH:MM` on 2026-11-12 as an ISO timestamp (UTC). */
+function at(hhmm: string): string {
+  return `2026-11-12T${hhmm}:00Z`;
+}
+
+// 8 members, 8 sources, 8 DISTINCT content hashes (the stored article_count says 8
+// sources) whose descriptions fall into 3 same-lead groups of 3 + 3 + 2. Variants
+// within a group differ in the apostrophe glyph, trailing punctuation and spacing,
+// which the lead fold ignores.
+const WIRE_MEMBERS_8 = [
+  wireMember(WIRE_ID, { id: "a1", description: LEAD_A, published_at: at("08:00") }),
+  wireMember(WIRE_ID, {
+    id: "a2",
+    description: LEAD_A.replace("'", "’") + ".",
+    published_at: at("08:05"),
+  }),
+  wireMember(WIRE_ID, { id: "a3", description: `  ${LEAD_A}  `, published_at: at("08:10") }),
+  wireMember(WIRE_ID, { id: "a4", description: LEAD_B, published_at: at("08:15") }),
+  wireMember(WIRE_ID, { id: "a5", description: LEAD_B + "!", published_at: at("08:20") }),
+  wireMember(WIRE_ID, { id: "a6", description: LEAD_B, published_at: at("08:25") }),
+  wireMember(WIRE_ID, { id: "a7", description: LEAD_C, published_at: at("08:30") }),
+  wireMember(WIRE_ID, { id: "a8", description: LEAD_C.replace("'", "’"), published_at: at("08:35") }),
+];
+
+function wireRow(id: string, articleCount: number, neutral: string | null = "Nötr başlık") {
+  return { ...mkClusterRow(id, `Ham ${id}`, neutral), article_count: articleCount };
+}
+
+function rowById(result: Awaited<ReturnType<typeof getRecentClusters>>, id: string) {
+  const row = result?.rows.find((r) => r.id === id);
+  if (!row) throw new Error(`row ${id} missing`);
+  return row;
+}
+
+describe("getRecentClusters honest source count (h142-consistency-1)", () => {
+  it("(a) 8 members, 8 sources, 8 distinct hashes in 3 same-lead groups: source_count 3 and wire {8, 3}", async () => {
+    fixture.data = [wireRow(WIRE_ID, 8)];
+    fixture.wireMembers = WIRE_MEMBERS_8;
+
+    const result = await getRecentClusters();
+
+    const row = rowById(result, WIRE_ID);
+    expect(row.source_count).toBe(3);
+    expect(row.wire).toEqual({ memberCount: 8, uniqueTexts: 3 });
+    // The stored count is untouched: it is the raw member count.
+    expect(row.article_count).toBe(8);
+  });
+
+  it("a same-hash wire (3 copies of one text): source_count 1 and wire {3, 1}", async () => {
+    fixture.data = [wireRow(WIRE_ID, 3)];
+    fixture.wireMembers = [
+      wireMember(WIRE_ID, { id: "h1", content_hash: "same", published_at: at("09:00") }),
+      wireMember(WIRE_ID, { id: "h2", content_hash: "same", published_at: at("09:01") }),
+      wireMember(WIRE_ID, { id: "h3", content_hash: "same", published_at: at("09:02") }),
+    ];
+
+    const row = rowById(await getRecentClusters(), WIRE_ID);
+
+    expect(row.source_count).toBe(1);
+    expect(row.wire).toEqual({ memberCount: 3, uniqueTexts: 1 });
+  });
+
+  it("a cluster of independent reports: source_count is the member count and there is NO wire key", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 4)];
+    fixture.wireMembers = [
+      wireMember(PLAIN_ID, { id: "p1", description: LEAD_A }),
+      wireMember(PLAIN_ID, { id: "p2", description: LEAD_B }),
+      wireMember(PLAIN_ID, { id: "p3", description: LEAD_C }),
+      wireMember(PLAIN_ID, { id: "p4", description: null }),
+    ];
+
+    const row = rowById(await getRecentClusters(), PLAIN_ID);
+
+    expect(row.source_count).toBe(4);
+    expect("wire" in row).toBe(false);
+  });
+
+  it("(b) a 2-member row with an identical hash is never wire: source_count 2, no wire key", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 2)];
+    fixture.wireMembers = [
+      wireMember(PLAIN_ID, { id: "t1", content_hash: "same", published_at: at("09:00") }),
+      wireMember(PLAIN_ID, { id: "t2", content_hash: "same", published_at: at("09:01") }),
+    ];
+
+    const row = rowById(await getRecentClusters(), PLAIN_ID);
+
+    expect(row.source_count).toBe(2);
+    expect("wire" in row).toBe(false);
+  });
+
+  it("a short stock description ('Detaylar haberimizde') never links members: no wire", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 4)];
+    fixture.wireMembers = ["s1", "s2", "s3", "s4"].map((id) =>
+      wireMember(PLAIN_ID, { id, description: "Detaylar haberimizde" }),
+    );
+
+    const row = rowById(await getRecentClusters(), PLAIN_ID);
+
+    expect(row.source_count).toBe(4);
+    expect("wire" in row).toBe(false);
+  });
+
+  it("a null content_hash is a unique pseudo-hash: legacy members are not collapsed", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 3)];
+    fixture.wireMembers = ["n1", "n2", "n3"].map((id) =>
+      wireMember(PLAIN_ID, { id, content_hash: null }),
+    );
+
+    const row = rowById(await getRecentClusters(), PLAIN_ID);
+
+    expect(row.source_count).toBe(3);
+    expect("wire" in row).toBe(false);
+  });
+
+  it("(c) two members of one source are deduped before detection: the count is distinct sources", async () => {
+    fixture.data = [wireRow(DUP_ID, 4)];
+    fixture.wireMembers = [
+      wireMember(DUP_ID, { id: "d1", source_id: "s1", content_hash: "h1", published_at: at("10:00") }),
+      wireMember(DUP_ID, { id: "d2", source_id: "s1", content_hash: "h1", published_at: at("10:05") }),
+      wireMember(DUP_ID, { id: "d3", source_id: "s2", content_hash: "h2", published_at: at("10:10") }),
+      wireMember(DUP_ID, { id: "d4", source_id: "s3", content_hash: "h3", published_at: at("10:15") }),
+    ];
+
+    const row = rowById(await getRecentClusters(), DUP_ID);
+
+    // 4 stored members, 3 distinct sources. Un-deduped it would print 4.
+    expect(row.article_count).toBe(4);
+    expect(row.source_count).toBe(3);
+    expect("wire" in row).toBe(false);
+  });
+
+  it("(c) the EARLIEST article of a source is the one detection sees, whatever the read order", async () => {
+    fixture.data = [wireRow(DUP_ID, 4)];
+    // Newest-first on purpose. The s1 article that survives is d-old (hash h1): the
+    // three kept members share h1, so the cluster is wire {3, 1}. Keeping the later
+    // s1 article (hash h2) would give 2 texts over 3 members (not wire); skipping the
+    // dedupe would give 2 texts over 4 members (wire {4, 2}). Only the earliest-per-
+    // source rule gives {3, 1}.
+    fixture.wireMembers = [
+      wireMember(DUP_ID, { id: "d-new", source_id: "s1", content_hash: "h2", published_at: at("10:30") }),
+      wireMember(DUP_ID, { id: "d-c", source_id: "s2", content_hash: "h1", published_at: at("10:10") }),
+      wireMember(DUP_ID, { id: "d-d", source_id: "s3", content_hash: "h1", published_at: at("10:20") }),
+      wireMember(DUP_ID, { id: "d-old", source_id: "s1", content_hash: "h1", published_at: at("10:00") }),
+    ];
+
+    const row = rowById(await getRecentClusters(), DUP_ID);
+
+    expect(row.wire).toEqual({ memberCount: 3, uniqueTexts: 1 });
+    expect(row.source_count).toBe(1);
+  });
+
+  it("a member with no source_id is never folded into another's source", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 2)];
+    fixture.wireMembers = [
+      wireMember(PLAIN_ID, { id: "x1", source_id: null }),
+      wireMember(PLAIN_ID, { id: "x2", source_id: null }),
+    ];
+
+    expect(rowById(await getRecentClusters(), PLAIN_ID).source_count).toBe(2);
+  });
+
+  it("tolerates an array-shaped embed, a null embed and a non-string description", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 4)];
+    fixture.wireMembers = [
+      { cluster_id: PLAIN_ID, articles: null },
+      { cluster_id: PLAIN_ID, articles: [wireMember(PLAIN_ID, { id: "m1" }).articles] },
+      wireMember(PLAIN_ID, { id: "m2", description: 42 }),
+      wireMember(PLAIN_ID, { id: "m3", description: { lead: LEAD_A } }),
+    ];
+
+    const result = await getRecentClusters();
+
+    expect(result).not.toBeNull();
+    // 3 usable members: the null embed is not a member.
+    expect(rowById(result, PLAIN_ID).source_count).toBe(3);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a cluster with no readable member keeps article_count while its neighbour gets the honest count", async () => {
+    fixture.data = [wireRow(WIRE_ID, 8), wireRow(PLAIN_ID, 5)];
+    fixture.wireMembers = WIRE_MEMBERS_8;
+
+    const result = await getRecentClusters();
+
+    expect(rowById(result, WIRE_ID).source_count).toBe(3);
+    const plain = rowById(result, PLAIN_ID);
+    expect(plain.source_count).toBe(5);
+    expect("wire" in plain).toBe(false);
+  });
+
+  it("an all-null-embed cluster counts as read nothing: article_count, no wire", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 6)];
+    fixture.wireMembers = [
+      { cluster_id: PLAIN_ID, articles: null },
+      { cluster_id: PLAIN_ID, articles: null },
+    ];
+
+    const row = rowById(await getRecentClusters(), PLAIN_ID);
+
+    expect(row.source_count).toBe(6);
+    expect("wire" in row).toBe(false);
+  });
+
+  it("members are grouped by cluster_id when the rows of two clusters interleave", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 2), wireRow(WIRE_ID, 8)];
+    const plainMembers = [
+      wireMember(PLAIN_ID, { id: "g1" }),
+      wireMember(PLAIN_ID, { id: "g2" }),
+    ];
+    fixture.wireMembers = [
+      WIRE_MEMBERS_8[0],
+      plainMembers[0],
+      ...WIRE_MEMBERS_8.slice(1, 5),
+      plainMembers[1],
+      ...WIRE_MEMBERS_8.slice(5),
+    ];
+
+    const result = await getRecentClusters();
+
+    expect(rowById(result, WIRE_ID).wire).toEqual({ memberCount: 8, uniqueTexts: 3 });
+    expect(rowById(result, PLAIN_ID).source_count).toBe(2);
+  });
+
+  it("is independent of the title read: a title-less wire cluster gets both", async () => {
+    fixture.data = [{ ...mkClusterRow(KABINE_ID, KABINE_RAW, null), article_count: 3 }];
+    fixture.members = KABINE_MEMBERS;
+    fixture.wireMembers = ["k1", "k2", "k3"].map((id) =>
+      wireMember(KABINE_ID, { id, content_hash: "same" }),
+    );
+
+    const result = await getRecentClusters();
+
+    expect(titlesOf(result)).toEqual([KABINE_NEUTRAL]);
+    expect(rowById(result, KABINE_ID).wire).toEqual({ memberCount: 3, uniqueTexts: 1 });
+    expect(fixture.memberStates).toHaveLength(1);
+    expect(fixture.wireStates).toHaveLength(1);
+  });
+});
+
+describe("getRecentClusters wire member read shape (h142-consistency-1)", () => {
+  function storedRows(n: number) {
+    return Array.from({ length: n }, (_, i) => mkClusterRow(`k${i}`, `t${i}`, `Nötr ${i}`));
+  }
+  const states = () => fixture.wireStates as BuilderState[];
+
+  it("reads cluster_articles -> articles with the columns detection needs, filtered .in('cluster_id', ids)", async () => {
+    fixture.data = [wireRow("c1", 3), wireRow("c2", 3)];
+
+    await getRecentClusters();
+
+    expect(states()).toHaveLength(1);
+    const state = states()[0]!;
+    expect(state.table).toBe("cluster_articles");
+    expect(state.in).toEqual([{ col: "cluster_id", vals: ["c1", "c2"] }]);
+    const select = String(state.selectArgs[0]);
+    expect(select).toMatch(/\bcluster_id\b/);
+    expect(select).toMatch(/articles\s*\(/);
+    for (const col of ["id", "source_id", "content_hash", "description", "published_at"]) {
+      expect(select).toMatch(new RegExp(`[(,\\s]${col}\\s*[,)]`));
+    }
+    // The title is not needed here (the title read keeps its own narrow select).
+    expect(select).not.toMatch(/\btitle\b/);
+  });
+
+  it("covers EVERY row, including ones with a stored neutral title and big clusters", async () => {
+    fixture.data = [
+      { ...wireRow("stored", 3, "Saklı"), article_count: 3 },
+      { ...wireRow("big", 40, "Büyük"), article_count: 40 },
+      wireRow("titleless", 2, null),
+    ];
+
+    await getRecentClusters();
+
+    expect(states()).toHaveLength(1);
+    expect(states()[0]!.in[0]?.vals).toEqual(["stored", "big", "titleless"]);
+  });
+
+  it("(f) 120 row ids are read in chunks of 50: more than one .in call, each with limit <= 1000", async () => {
+    fixture.data = storedRows(120);
+
+    await getRecentClusters();
+
+    expect(states().length).toBeGreaterThan(1);
+    expect(states()).toHaveLength(3);
+    const seen: unknown[] = [];
+    for (const state of states()) {
+      const vals = state.in[0]?.vals ?? [];
+      expect(state.in[0]?.col).toBe("cluster_id");
+      expect(vals.length).toBeLessThanOrEqual(50);
+      expect(state.limit).not.toBeNull();
+      expect(state.limit as number).toBeLessThanOrEqual(1000);
+      expect(state.limit).toBe(Math.min(vals.length * 50, 1000));
+      seen.push(...vals);
+    }
+    // Every id is asked about exactly once.
+    expect(seen).toEqual(fixture.data.map((r) => (r as { id: string }).id));
+  });
+
+  it("(f) a window the size of today's (200 rows) is 4 reads, never one 1000+ row read", async () => {
+    fixture.data = storedRows(200);
+
+    await getRecentClusters();
+
+    expect(states()).toHaveLength(4);
+    expect(states().every((s) => (s.limit as number) <= 1000)).toBe(true);
+  });
+
+  it("a 50-id window is one read; a 51-id window is two", async () => {
+    fixture.data = storedRows(50);
+    await getRecentClusters();
+    expect(states()).toHaveLength(1);
+
+    fixture.wireStates = [];
+    fixture.data = storedRows(51);
+    await getRecentClusters();
+    expect(states()).toHaveLength(2);
+  });
+
+  it("reuses the page's one capped reader client (no client per chunk)", async () => {
+    fixture.data = storedRows(120);
+    fixture.count = 120;
+
+    await getRecentClusters();
+
+    expect(states().length).toBeGreaterThan(1);
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+
+  it("an empty window issues no wire read", async () => {
+    fixture.data = [];
+    fixture.count = 0;
+
+    await getRecentClusters();
+
+    expect(fixture.wireStates).toHaveLength(0);
+  });
+
+  it("a row-read error still wins: null, and no wire read is attempted", async () => {
+    fixture.error = { message: "relation missing" };
+    fixture.data = [wireRow("c1", 3)];
+
+    await expect(getRecentClusters()).resolves.toBeNull();
+    expect(fixture.wireStates).toHaveLength(0);
+  });
+
+  it("a chunk that came back as full as its row limit may be cut: it is not trusted (article_count, logged)", async () => {
+    // One id: limit 50. Exactly 50 rows could be a cluster of 50 or the first 50
+    // of more, and a cut list would under-count the sources.
+    fixture.data = [wireRow(PLAIN_ID, 60)];
+    fixture.wireMembers = Array.from({ length: 50 }, (_, i) =>
+      wireMember(PLAIN_ID, { id: `full-${i}` }),
+    );
+
+    const row = rowById(await getRecentClusters(), PLAIN_ID);
+
+    expect(row.source_count).toBe(60);
+    expect("wire" in row).toBe(false);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("truncated"));
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("one row short of the limit is trusted", async () => {
+    fixture.data = [wireRow(PLAIN_ID, 60)];
+    fixture.wireMembers = Array.from({ length: 49 }, (_, i) =>
+      wireMember(PLAIN_ID, { id: `short-${i}` }),
+    );
+
+    expect(rowById(await getRecentClusters(), PLAIN_ID).source_count).toBe(49);
+  });
+});
+
+describe("getRecentClusters wire member read failure (h142-consistency-1)", () => {
+  function assertFellBack(result: Awaited<ReturnType<typeof getRecentClusters>>) {
+    expect(result).not.toBeNull();
+    for (const row of result?.rows ?? []) {
+      expect(row.source_count).toBe(row.article_count);
+      expect("wire" in row).toBe(false);
+    }
+    // The rows are still the page: the normal window, and exactly one cacheLife.
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+  }
+
+  it("(d) an error from the member read keeps every row at source_count = article_count, logs, cluster-feed", async () => {
+    fixture.data = [wireRow(WIRE_ID, 8), wireRow(PLAIN_ID, 3)];
+    fixture.count = 2;
+    fixture.wireMembers = WIRE_MEMBERS_8;
+    fixture.wireError = { message: "wire members timed out" };
+
+    const result = await getRecentClusters();
+
+    assertFellBack(result);
+    expect(result?.rows).toHaveLength(2);
+    expect(result?.total).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("wire members timed out"));
+  });
+
+  it("(d) a member read that throws (including the reader-cap abort) is contained the same way", async () => {
+    fixture.data = [wireRow(WIRE_ID, 8), wireRow(PLAIN_ID, 3)];
+    fixture.wireThrows = true;
+
+    const result = await getRecentClusters();
+
+    assertFellBack(result);
+    expect(result?.rows).toHaveLength(2);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("wire boom"));
+  });
+
+  it("a failed read does not touch the display title or the language mark", async () => {
+    fixture.data = [mkClusterRow(EN_ID, "English raw", "English neutral")];
+    fixture.isolation = EN_MEMBERS;
+    fixture.wireError = { message: "wire members timed out" };
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows[0]?.title).toBe("English neutral");
+    expect(result?.rows[0]?.lang).toBe("en");
+    expect(result?.rows[0]?.source_count).toBe(2);
+  });
+
+  it("one failed chunk only drops ITS clusters to article_count; the other chunks keep the honest count", async () => {
+    const rows = Array.from({ length: 120 }, (_, i) => mkClusterRow(`k${i}`, `t${i}`, `Nötr ${i}`));
+    fixture.data = rows.map((r) => ({ ...r, article_count: 3 }));
+    fixture.wireMembers = rows.flatMap((r) =>
+      ["x", "y", "z"].map((s) =>
+        wireMember(r.id, { id: `${r.id}-${s}`, content_hash: `same-${r.id}` }),
+      ),
+    );
+    // k60 sits in the second chunk (k50..k99).
+    fixture.wireErrorIds = ["k60"];
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows).toHaveLength(120);
+    expect(fixture.wireStates).toHaveLength(3);
+    result?.rows.forEach((row, i) => {
+      if (i >= 50 && i < 100) {
+        expect(row.source_count).toBe(3);
+        expect("wire" in row).toBe(false);
+      } else {
+        expect(row.source_count).toBe(1);
+        expect(row.wire).toEqual({ memberCount: 3, uniqueTexts: 1 });
+      }
+    });
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("wire chunk failed"));
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+});
+
+describe("getRecentClusters keeps the wire inputs server-side (h142-consistency-1)", () => {
+  const SERVER_ONLY_KEYS = [
+    "description",
+    "content_hash",
+    "articles",
+    "members",
+    "source_id",
+    "title_neutral_model",
+  ];
+
+  it("(e) no row carries a description, a content_hash or a member array", async () => {
+    fixture.data = [wireRow(WIRE_ID, 8), wireRow(PLAIN_ID, 2)];
+    fixture.wireMembers = [
+      ...WIRE_MEMBERS_8,
+      wireMember(PLAIN_ID, { id: "q1", description: LEAD_A }),
+      wireMember(PLAIN_ID, { id: "q2", description: LEAD_B }),
+    ];
+
+    const result = await getRecentClusters();
+
+    expect(result?.rows).toHaveLength(2);
+    for (const row of result?.rows ?? []) {
+      for (const key of SERVER_ONLY_KEYS) {
+        expect(key in row).toBe(false);
+      }
+    }
+    // The only wire payload is the two numbers.
+    expect(Object.keys(rowById(result, WIRE_ID).wire ?? {}).sort()).toEqual([
+      "memberCount",
+      "uniqueTexts",
+    ]);
+  });
+
+  it("(e) the serialised result never contains the fixture description text or a hash", async () => {
+    fixture.data = [wireRow(WIRE_ID, 8)];
+    fixture.wireMembers = WIRE_MEMBERS_8;
+
+    const result = await getRecentClusters();
+
+    const json = JSON.stringify(result);
+    expect(json.includes("Brüksel")).toBe(false);
+    expect(json.includes("politika faizini")).toBe(false);
+    expect(json.includes("gemi trafiği")).toBe(false);
+    expect(json.includes("hash-a1")).toBe(false);
+    expect(json.includes("content_hash")).toBe(false);
+    expect(json.includes("description")).toBe(false);
+    // Sanity: the serialiser did see the row (the checks above are not vacuous).
+    expect(json.includes(WIRE_ID)).toBe(true);
+    expect(json.includes('"wire":{"memberCount":8,"uniqueTexts":3}')).toBe(true);
+  });
+
+  it("(e) a wire row serialises to exactly the old keys plus source_count and wire", async () => {
+    fixture.data = [wireRow(WIRE_ID, 8)];
+    fixture.wireMembers = WIRE_MEMBERS_8;
+
+    const row = rowById(await getRecentClusters(), WIRE_ID);
+
+    expect(Object.keys(row).sort()).toEqual(
+      [
+        "article_count",
+        "first_published",
+        "id",
+        "source_count",
+        "title",
+        "title_tr",
+        "title_tr_neutral",
+        "wire",
+      ].sort(),
+    );
+  });
+});
+
+describe("getRecentClusters leaves the head probe's shape alone (h142-consistency-1)", () => {
+  it("toTimelineHead still maps only id and first_published, whatever the row now carries", async () => {
+    const { toTimelineHead } = await import("./timeline-head");
+    fixture.data = [wireRow(WIRE_ID, 8)];
+    fixture.wireMembers = WIRE_MEMBERS_8;
+
+    const result = await getRecentClusters();
+    const head = toTimelineHead(result?.rows ?? []);
+
+    expect(head).toEqual([{ id: WIRE_ID, first_published: "2026-11-08T18:30:00.000Z" }]);
+  });
+});
+
 describe("/timeline page renders the display title (source guard)", () => {
   const page = readFileSync(resolve(__dirname, "../../app/timeline/page.tsx"), "utf8");
 
@@ -924,5 +1560,19 @@ describe("/timeline page renders the display title (source guard)", () => {
 
   it("hands the row's lang to the headline link (h118-english-1)", () => {
     expect(page).toMatch(/lang=\{row\.lang\}/);
+  });
+
+  // h142-consistency-1: the page prints the honest count the query computed and
+  // takes the wire words from wire.ts; it never reprints the raw member count.
+  it("prints row.source_count, never the raw row.article_count", () => {
+    expect(page).toMatch(/\{row\.source_count\} kaynak/);
+    expect(page).not.toMatch(/row\.article_count/);
+  });
+
+  it("takes the wire tooltip from wireBadgeLabel in wire.ts and reads only row.wire's two numbers", () => {
+    expect(page).toMatch(/from "@\/lib\/clusters\/wire"/);
+    expect(page).toMatch(/wireBadgeLabel\(row\.wire\.memberCount, row\.wire\.uniqueTexts\)/);
+    // (The page's own metadata has a `description`; only a row's would matter.)
+    expect(page).not.toMatch(/row\.description|row\.content_hash/);
   });
 });

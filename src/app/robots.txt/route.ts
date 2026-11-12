@@ -23,7 +23,7 @@
 // directive line a strict parser could choke on.
 
 // Bots that get the ALLOW-WITH-TERMS + /api/sources carve-out (plus the
-// /api/v1/openapi.json one, see group()). The /api/sources carve-out exists
+// /api/v1/openapi.json and /api/oembed ones, see group()). The /api/sources carve-out exists
 // because pack B (M-04) publishes the machine-readable source registry at
 // /api/sources and /api/sources/{slug}; the whole point is that answer
 // engines can fetch and cite it. Until pack B merges, requests to that path
@@ -71,12 +71,27 @@ const AI_BOT_USER_AGENTS = [
 // keyed endpoints (/api/v1/clusters, ...) and the rest of /api/ stay
 // disallowed. tests/api/llms-txt.test.ts checks every llms.txt link against
 // these rules.
+//
+// `Allow: /api/oembed` is the same kind of carve-out for the public oEmbed
+// provider: every cluster page advertises it through
+// <link rel="alternate" type="application/json+oembed"> (and Tayf serves that
+// tag to WordPress, Iframely and Embedly on purpose, see
+// src/lib/seo/html-limited-bots.ts), so a crawler that follows the tag must
+// not be told by `Disallow: /api/` that the URL is off limits. The response is
+// small and CDN-cached (s-maxage=3600, stale-while-revalidate=86400). Only the
+// JSON endpoint is opened: the iframe it points at, /embed/, stays disallowed
+// below (browsers load it, and the route already answers X-Robots-Tag:
+// noindex), as does the rest of /api/. tests/api/robots.test.ts derives the
+// path from oembedDiscoveryHref so renaming the endpoint breaks that guard.
+// Keeping this in the shared group() means the carve-out cannot drift between
+// groups.
 function group(userAgent: string): string {
   return [
     `User-agent: ${userAgent}`,
     "Allow: /",
     "Allow: /api/sources",
     "Allow: /api/v1/openapi.json",
+    "Allow: /api/oembed",
     "Disallow: /admin",
     "Disallow: /api/",
     // The script-less iframe widget (src/app/embed): a frame target for other
@@ -138,6 +153,9 @@ ${group("*")}
 # It may 404 until that pack ships; that is expected and harmless.
 # The OpenAPI file under /api/v1 is carved out too: it is the keyless contract
 # that /llms.txt links to; the keyed /api/v1 endpoints themselves stay disallowed.
+# So is /api/oembed, the public oEmbed provider that every cluster page
+# advertises through <link rel="alternate" type="application/json+oembed">;
+# the /embed/ iframe it points at stays disallowed.
 ${AI_BOT_USER_AGENTS.map(group).join("\n\n")}
 
 ${group("Googlebot")}
