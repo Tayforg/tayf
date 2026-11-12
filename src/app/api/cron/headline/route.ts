@@ -13,7 +13,7 @@ import {
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
-import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";
+import { ENGLISH_SOURCE_SLUGS, LOWERCASE_PRONE_SOURCE_SLUGS } from "@/lib/sources/source-language";
 import {
   EXTRACTIVE_MODEL_ID,
   isAcceptableNeutral,
@@ -328,6 +328,11 @@ interface MemberItem {
    * picker prefers a Turkish member while one has a usable title. Only the slug goes this far.
    */
   english: boolean;
+  /**
+   * The article's outlet writes machine-cased headlines (LOWERCASE_PRONE_SOURCE_SLUGS, h164-titles-2: İşçi Haber's
+   * 'libya ve venezuela', 'Bakan kurum'): the picker recases such a title from its siblings. Only the slug goes this far.
+   */
+  caseUnreliable: boolean;
 }
 
 /**
@@ -339,7 +344,7 @@ interface MemberItem {
  * columnist's insult); the URL itself goes no further. It also carries `english`,
  * derived from the outlet's slug (h59-english-2: 749b0eea was titled with Daily
  * Sabah's English headline beside A Haber's Turkish one); a row with no source
- * embed is a Turkish one.
+ * embed is a Turkish one. And `caseUnreliable`, derived from the slug the same way (h164-titles-2).
  */
 async function fetchMemberItems(
   supabase: SupabaseClient,
@@ -362,6 +367,7 @@ async function fetchMemberItems(
       published_at: a.published_at,
       opinion: isOpinionUrl(a.url),
       english: typeof source?.slug === "string" && ENGLISH_SOURCE_SLUGS.has(source.slug),
+      caseUnreliable: typeof source?.slug === "string" && LOWERCASE_PRONE_SOURCE_SLUGS.has(source.slug),
     });
   }
   // Newest-first so the LLM sees the freshest framings of the story.

@@ -305,7 +305,10 @@ describe("isHeadlineEcho (h48-ingest-1)", () => {
     // "ISPARTA'DA" vs "Isparta'da" and "İZMİR" vs "İzmir" both need the tr-TR rules to stay equal.
     expect(isHeadlineEcho("ISPARTA'DA YANGIN", "Isparta'da yangın")).toBe(true);
     expect(isHeadlineEcho("İZMİR'DE DEPREM", "İzmir'de deprem")).toBe(true);
-    expect(isHeadlineEcho("İzmir'de deprem", "Izmir'de deprem")).toBe(false); // İ -> i, I -> ı: different words
+    // h164-summaries-2: "ı" folds to "i" on both sides now ("çocuklarin" under "ÇOCUKLARIN"), so a title typed without the
+    // Turkish letters echoes the one with them. It was false (İ -> i, I -> ı: different words) before.
+    expect(isHeadlineEcho("İzmir'de deprem", "Izmir'de deprem")).toBe(true);
+    expect(isHeadlineEcho("İzmir'de deprem", "Ankara'da deprem")).toBe(false);
   });
 
   it("normalises to NFC: a decomposed letter equals the composed one", () => {
@@ -374,5 +377,44 @@ describe("isHeadlineEcho (h48-ingest-1)", () => {
     expect(isHeadlineEcho("a ".repeat(100_000), " ".repeat(200_000) + "b")).toBe(false);
     expect(isHeadlineEcho("x", "!".repeat(200_000) + "...")).toBe(false);
     expect(performance.now() - start).toBeLessThan(500);
+  });
+});
+
+describe("isHeadlineEcho: En Politik's lower-cased echo with broken Turkish letters (h164-summaries-2)", () => {
+  // JS toLowerCase turns "İ" into "i" + U+0307 and the feed's own lower-casing leaves ASCII "i" for "I".
+  const TITLE = 'ÖZDAĞ: “HİJYENDEN TASARRUF EDİLEMEZ!"';
+  const ECHO = "özdağ: “hi\u0307jyenden tasarruf edi\u0307lemez!”";
+
+  it("the garbled echo is an echo of its capitals title", () => {
+    expect(ECHO).toContain("\u0307");
+    expect(isHeadlineEcho(TITLE, ECHO)).toBe(true);
+  });
+
+  it("an ASCII 'i' for the dotless 'ı' of the title is an echo too ('çocuklarin')", () => {
+    expect(isHeadlineEcho("ÇOCUKLARIN BESLENMESİ ERTELENEMEZ", "çocuklarin beslenmesi\u0307 ertelenemez")).toBe(true);
+    expect(isHeadlineEcho("Çocukların beslenmesi ertelenemez", "çocuklarin beslenmesi ertelenemez")).toBe(true);
+  });
+
+  it("the folds apply on both sides: a title with U+0307 and a description without it", () => {
+    expect(isHeadlineEcho("hi\u0307jyenden tasarruf edi\u0307lemez", "HİJYENDEN TASARRUF EDİLEMEZ")).toBe(true);
+    expect(isHeadlineEcho("hi\u0307jyenden tasarruf edi\u0307lemez", "hi\u0307jyenden tasarruf edi\u0307lemez!")).toBe(true);
+  });
+
+  it("an ellipsis cut of the garbled echo is a prefix echo", () => {
+    expect(isHeadlineEcho(TITLE, "özdağ: “hi\u0307jyenden tasarruf...")).toBe(true);
+  });
+
+  it("the existing rules stay: a description that goes on after the title is a summary", () => {
+    expect(isHeadlineEcho(TITLE, `${ECHO} Çocukların beslenmesi ertelenemez, okul güvenliği ihmal edilemez!`)).toBe(false);
+    expect(isHeadlineEcho(TITLE, "Merkez Bankası faizi sabit tuttu")).toBe(false);
+  });
+
+  it("two words that differ only in i / ı are the same word for the echo test (a headline echo, not a lexicon)", () => {
+    expect(isHeadlineEcho("Sır çözüldü", "sir çözüldü")).toBe(true);
+    expect(isHeadlineEcho("Sır çözüldü", "sır çözüldü")).toBe(true);
+  });
+
+  it("a combining dot after another letter is dropped as well (any U+0307 is a lower-casing artefact here)", () => {
+    expect(isHeadlineEcho("Bakan açıkladı", "bakan açıkla\u0307dı")).toBe(true);
   });
 });

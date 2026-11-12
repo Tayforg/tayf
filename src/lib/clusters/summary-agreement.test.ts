@@ -13,6 +13,7 @@ import {
   contentWords,
   findAgreeingMember,
   hasFiniteVerb,
+  isCaseGarbled,
   isExplainerTitle,
   isLiveLine,
   isQuoteOnly,
@@ -26,6 +27,8 @@ import {
   titleStemOverlap,
 } from "./summary-agreement";
 import { clampCutIntroducedQuote, isCtaFeedCut, tidySummaryText } from "@/lib/articles/summary-tidy";
+import tailFixtures from "../../../tests/fixtures/summary-tail-h164.json";
+import { summaryAttribution, summaryAttributionWithoutMembers } from "./summary-attribution";
 import type { SummaryMember } from "./summary-attribution";
 import type { SourceKind } from "@/types";
 import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
@@ -830,7 +833,8 @@ describe("seedDisqualified (h34-reader-4)", () => {
   });
 
   it("is linear: a 100k-word text is judged in well under a second", () => {
-    const text = `${Array.from({ length: 100_000 }, (_, i) => `kelime${i}`).join(" ")} yaptı.`;
+    // Capitalised: an all-lower-case text of 25 letters or more is a 'case' defect since h164-summaries-2.
+    const text = `${Array.from({ length: 100_000 }, (_, i) => `Kelime${i}`).join(" ")} yaptı.`;
     const start = Date.now();
     expect(seedDisqualified(text, text)).toBeNull();
     expect(Date.now() - start).toBeLessThan(1000);
@@ -2290,15 +2294,18 @@ describe("a live line with a digit-bearing name is a defect of a seed and of a c
 describe("findAgreeingMember: a stub seed that covers almost none of the headline (h132-ozetpost-1)", () => {
   const WORDS = ["abaka", "bobin", "cidem", "dalka", "ekmek", "fidan", "gazoz", "havuz", "irmak", "jeton"];
   const TITLE10 = WORDS.join(" ");
+  // The fixtures start with a capital letter: an all-lower-case text of 25 letters or more is a 'case' defect
+  // since h164-summaries-2, and these cases are about the other defects. The title stems are unchanged by it.
+  const cap = (text: string): string => text.charAt(0).toLocaleUpperCase("tr") + text.slice(1);
   /** A complete sentence that carries the first `hits` title words and nothing else of the title. */
   const clean = (hits: number, salt = ""): string =>
-    `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`.trim();
+    cap(`${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmeler yaşandığı ve uzmanların açıklama yaptığı bildirildi${salt}.`.trim());
   /** A feed cut that carries the first `hits` title words: no verb in its last sentence, so a stub. */
-  const stub = (hits: number): string => `${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmelerin ayrıntıları…`.trim();
+  const stub = (hits: number): string => cap(`${WORDS.slice(0, hits).join(" ")} hakkında şehir genelinde yeni gelişmelerin ayrıntıları…`.trim());
   /** A live line (no digit, one sentence) that carries the first `hits` title words. */
   const live = (hits: number): string => `Bakan ${WORDS.slice(0, hits).join(" ")} toplantısında konuşuyor.`;
   /** Unbalanced quotes: one “ against no ”. */
-  const quotes = (hits: number): string => `${WORDS.slice(0, hits).join(" ")} hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi.`.trim();
+  const quotes = (hits: number): string => cap(`${WORDS.slice(0, hits).join(" ")} hakkında “şehir genelinde yeni gelişmeler yaşandığı bildirildi.`.trim());
 
   const AT = (n: number): string => `2026-11-11T10:${String(n).padStart(2, "0")}:00Z`;
   const seedOf = (text: string): SummaryMember => mem("Tohum", "outlet", AT(0), text, "tohum");
@@ -2428,6 +2435,288 @@ describe("findAgreeingMember: a stub seed that covers almost none of the headlin
         wireMajorityHashes: new Set<string>(),
       });
       expect(out).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-summaries-1 / h164-summaries-2 (2026-11-12): the 'lead-in' and 'case' defects of a seed.
+// The raw rows are the members' descriptions dumped read-only from prod
+// (tests/fixtures/summary-tail-h164.json).
+// ---------------------------------------------------------------------------
+
+type TailMember = { source: string; title: string; description: string };
+type TailCluster = { id: string; title: string; members: TailMember[] };
+const TAIL = (tailFixtures as { clusters: Record<string, TailCluster> }).clusters;
+
+/** The raw description of `source` in the fixture cluster `short` (the 8-character id prefix). */
+function tailRaw(short: string, source: string): string {
+  const member = TAIL[short]?.members.find((m) => m.source === source);
+  if (member === undefined) throw new Error(`no fixture member ${short} / ${source}`);
+  return member.description;
+}
+
+describe("seedDisqualified: 'lead-in' (h164-summaries-1)", () => {
+  const KEEP40 = "Ab cd ef Ab cd ef Ab cd ef Ab cd ef Abc.";
+  const SIXTY = "Bakan Yılmaz yeni vergi düzenlemesini bugün Ankara'da açıkladı.";
+
+  it("the back-off emptied the text: 'lead-in' (226929aa, one sentence that ends in a colon)", () => {
+    const raw = tailRaw("226929aa", "Haber.com");
+    expect(tidySummaryText(raw)).toBe("");
+    expect(seedDisqualified(raw, "")).toBe("lead-in");
+  });
+
+  it("the back-off kept fewer than 60 characters: 'lead-in'", () => {
+    const raw = `${KEEP40} Şunlar açıklandı:`;
+    const shown = tidySummaryText(raw);
+    expect(shown).toBe(KEEP40);
+    expect(seedDisqualified(raw, shown)).toBe("lead-in");
+  });
+
+  it("the back-off kept 60 characters or more: the shown text is clean again", () => {
+    expect(SIXTY.length).toBeGreaterThanOrEqual(60);
+    const raw = `${SIXTY} Şunlar değişti:`;
+    const shown = tidySummaryText(raw);
+    expect(shown).toBe(SIXTY);
+    expect(seedDisqualified(raw, shown)).toBeNull();
+    const c44 = tailRaw("c44095e2", "Hürriyet");
+    expect(seedDisqualified(c44, tidySummaryText(c44))).toBeNull();
+  });
+
+  it("a ';' lead-in counts too, closing quotes aside", () => {
+    const raw = `${KEEP40} Bakan şöyle konuştu: “Hedefimiz açık;”`;
+    expect(seedDisqualified(raw, tidySummaryText(raw))).toBe("lead-in");
+  });
+
+  it("a teaser that ends in a colon stays 'teaser': the verdict reads the text before the back-off", () => {
+    const iste = "İşte Erdoğan'ın açıklamalarından öne çıkan satır başları:";
+    expect(tidySummaryText(iste)).toBe("");
+    expect(seedDisqualified(iste, tidySummaryText(iste))).toBe("teaser");
+  });
+
+  it("a text that does not end in a lead-in, and a shown text that is not the raw text's, are not 'lead-in'", () => {
+    expect(seedDisqualified(SIXTY, SIXTY)).toBeNull();
+    expect(seedDisqualified("Bakanlar şunlar: Yılmaz, Demir ve Kaya toplantıya katıldı.", "Kısa metin.")).toBeNull();
+  });
+
+  it("never throws on a non-string", () => {
+    expect(seedDisqualified(null as unknown as string, "x")).toBeNull();
+    expect(seedDisqualified("x:", undefined as unknown as string)).toBeNull();
+  });
+});
+
+describe("findAgreeingMember: a 'lead-in' seed is replaced by a clean member (h164-summaries-1)", () => {
+  const TITLE = "Bakan Yılmaz yeni vergi düzenlemesini açıkladı";
+  const SEED_RAW = "Bakan Yılmaz yeni vergi düzenlemesini açıkladı. Şunlar değişti:";
+  const CLEAN = "Bakan Yılmaz, yeni vergi düzenlemesinin ayrıntılarını bugün düzenlediği basın toplantısında kamuoyuyla paylaştı.";
+
+  it("the seed's own text covers the whole headline, yet its form lets a 0.6 member replace it", () => {
+    expect(tidySummaryText(SEED_RAW)).toBe("Bakan Yılmaz yeni vergi düzenlemesini açıkladı.");
+    const seed = mem("Tohum", "outlet", "2026-11-12T10:00:00Z", SEED_RAW, "Başlık");
+    const clean = mem("Temiz", "outlet", "2026-11-12T10:05:00Z", CLEAN, "Başka başlık");
+    const pick = pickFor(TITLE, [seed, clean], "Tohum");
+    expect(pick?.member.source.name).toBe("Temiz");
+    expect(pick?.text).toBe(CLEAN);
+  });
+
+  it("the same seed without the lead-in is kept: it agrees with the headline and is well formed", () => {
+    const seed = mem("Tohum", "outlet", "2026-11-12T10:00:00Z", "Bakan Yılmaz yeni vergi düzenlemesini bugün Ankara'da açıkladı.", "Başlık");
+    const clean = mem("Temiz", "outlet", "2026-11-12T10:05:00Z", CLEAN, "Başka başlık");
+    expect(pickFor(TITLE, [seed, clean], "Tohum")).toBeNull();
+  });
+
+  it("a member that covers less than the form floor (0.6) does not replace it", () => {
+    const seed = mem("Tohum", "outlet", "2026-11-12T10:00:00Z", SEED_RAW, "Başlık");
+    const weak = mem("Zayıf", "outlet", "2026-11-12T10:05:00Z", "Hava bugün parçalı bulutlu ve rüzgarlı geçecek, sıcaklıklar mevsim normallerinde seyredecek.", "Başka başlık");
+    expect(pickFor(TITLE, [seed, weak], "Tohum")).toBeNull();
+  });
+
+  it("a text that the back-off emptied is replaced through summaryAttribution too (it is not hidden before the swap)", () => {
+    const raw = tailRaw("226929aa", "Haber.com");
+    const title = "Bakan Şimşek Dezenflasyonu Destekleyecek 4 Temel Unsuru Açıkladı";
+    const seed = mem("Haber.com", "outlet", "2026-11-12T10:00:00Z", raw, "Bakan Şimşek Dezenflasyonu Destekleyecek 4 Temel Unsuru Açıkladı");
+    const clean = mem(
+      "Temiz",
+      "outlet",
+      "2026-11-12T10:05:00Z",
+      "Bakan Şimşek, dezenflasyonu destekleyecek dört temel unsuru açıkladı ve önümüzdeki dönemde fiyat istikrarının sürdürüleceğini söyledi.",
+      "Başka başlık",
+    );
+    const wire = { isWireRedistribution: false };
+    const swapped = summaryAttribution({ summary: raw, members: [seed, clean], wire, agreeWithTitle: title });
+    expect(swapped?.source?.name).toBe("Temiz");
+    // Without a member that agrees the Özet is hidden, and without the title agreement it is hidden too.
+    expect(summaryAttribution({ summary: raw, members: [seed], wire, agreeWithTitle: title })).toBeNull();
+    expect(summaryAttribution({ summary: raw, members: [seed, clean], wire })).toBeNull();
+  });
+
+  it("a teaser that ends in a colon is still replaced by a clean member (the swap the teaser verdict always gave)", () => {
+    const raw = "İşte Bakan Yılmaz'ın vergi düzenlemesine ilişkin açıklamalarından öne çıkan satır başları:";
+    const seed = mem("Tohum", "outlet", "2026-11-12T10:00:00Z", raw, "Başlık");
+    const clean = mem("Temiz", "outlet", "2026-11-12T10:05:00Z", CLEAN, "Başka başlık");
+    const swapped = summaryAttribution({
+      summary: raw,
+      members: [seed, clean],
+      wire: { isWireRedistribution: false },
+      agreeWithTitle: TITLE,
+    });
+    expect(swapped?.source?.name).toBe("Temiz");
+  });
+});
+
+describe("437c0d7e (11 sources): the Milliyet seed 'satır başları şöyle;' is a lead-in with nothing to back off to (h164-summaries-1)", () => {
+  const CLUSTER = TAIL["437c0d7e"]!;
+  const toMember = (m: TailMember & { kind: string; published_at: string }): SummaryMember =>
+    mem(m.source, m.kind as SourceKind, m.published_at, m.description, m.title);
+  const MEMBERS = (CLUSTER.members as Array<TailMember & { kind: string; published_at: string }>).map(toMember);
+  const wire = { isWireRedistribution: false };
+
+  it("the seed is 'lead-in', and only an aggregator covers the headline: the Özet is hidden, not the dangling line", () => {
+    const seed = memberNamed(MEMBERS, "Milliyet");
+    const raw = seed.article.description ?? "";
+    expect(tidySummaryText(raw)).toBe("");
+    expect(seedDisqualified(raw, "", { clusterTitle: CLUSTER.title })).toBe("lead-in");
+    expect(summaryAttribution({ summary: raw, members: MEMBERS, wire, agreeWithTitle: CLUSTER.title })).toBeNull();
+  });
+
+  it("a member that covers the headline from the form floor (0.6) up takes it over", () => {
+    const seed = memberNamed(MEMBERS, "Milliyet");
+    const clean = mem(
+      "Temiz",
+      "outlet",
+      "2026-11-10T09:00:00Z",
+      "Cumhurbaşkanı Erdoğan, iç cephemizi yeni hamlelerle daha da tahkim ediyoruz diyerek önümüzdeki dönemin yol haritasını açıkladı.",
+      "Başka başlık",
+    );
+    const shown = summaryAttribution({
+      summary: seed.article.description ?? "",
+      members: [...MEMBERS, clean],
+      wire,
+      agreeWithTitle: CLUSTER.title,
+    });
+    expect(shown?.source?.name).toBe("Temiz");
+  });
+});
+
+describe("isCaseGarbled / seedDisqualified: 'case' (h164-summaries-2)", () => {
+  const A2260 = tailRaw("a2260dd6", "En Politik");
+  const EA472 = tailRaw("ea472c81", "En Politik");
+
+  it("a2260dd6 and ea472c81: U+0307 after an 'i' is 'case', before 'quote-only' and 'echo'", () => {
+    expect(A2260).toContain("i\u0307");
+    expect(EA472).toContain("i\u0307");
+    expect(isCaseGarbled(A2260)).toBe(true);
+    expect(isCaseGarbled(EA472)).toBe(true);
+    expect(seedDisqualified(A2260, tidySummaryText(A2260))).toBe("case");
+    expect(isQuoteOnly(tidySummaryText(EA472))).toBe(true);
+    expect(seedDisqualified(EA472, tidySummaryText(EA472))).toBe("case");
+    expect(
+      seedDisqualified(EA472, tidySummaryText(EA472), { memberTitle: TAIL["ea472c81"]?.members[0]?.title, clusterTitle: "x" }),
+    ).toBe("case");
+  });
+
+  it("25 or more lower-case letters, no upper-case letter and a lower-case start is 'case' (En Politik's title in lower case)", () => {
+    for (const text of [
+      "emine erdoğan: atık krizi aynı zamanda bir zihniyet ve kültür krizidir",
+      "cumhurbaşkanı erdoğan: sivil anayasayı milletimize kazandırmak istiyoruz",
+      "“bahçeli’den muhalefete: kimse yanlış hesap yapmasın!”",
+    ]) {
+      expect(isCaseGarbled(text), text).toBe(true);
+      expect(seedDisqualified(text, text), text).toBe("case");
+    }
+  });
+
+  it("the boundary is 25 lower-case letters", () => {
+    expect(isCaseGarbled("abcde fghij klmno pqrst uvwxy")).toBe(true); // 25
+    expect(isCaseGarbled("abcde fghij klmno pqrst uvwx")).toBe(false); // 24
+  });
+
+  it("a normal mixed-case text and an all-caps acronym line are not 'case'", () => {
+    for (const text of [
+      "Bakan Yılmaz, yeni vergi düzenlemesini bugün Ankara'da açıkladı.",
+      "Bakan Yılmaz yeni düzenlemeyi açıkladı ve iPhone satışlarına ilişkin kararı duyurdu.",
+      "TBMM NATO ABD THY ASELSAN BIST",
+      "AA - ANKARA HABER MERKEZİ",
+      "",
+    ]) {
+      expect(isCaseGarbled(text), text).toBe(false);
+      expect(seedDisqualified(text, text), text).toBeNull();
+    }
+  });
+
+  it("a text that starts with a digit is a sentence, not a lower-cased headline (when unsure, keep)", () => {
+    // c7931eb3 (İşçi Haber) and 5aaadcc2: real sentences that happen to hold no capital letter.
+    for (const text of [
+      "14 yıl boyunca kayıplara karışan firari hükümlü, emekli maaşını çektiği yerden tespit edilerek yakalandı.",
+      "2026-2027 eğitim öğretim yılı için belirlenen ara tatil tarihleri, öğrencilerin merak ettiği konular arasında yer alıyor.",
+    ]) {
+      expect(isCaseGarbled(text), text).toBe(false);
+    }
+  });
+
+  it("a text in a script without case is not 'case' (no lower-case letters to count)", () => {
+    expect(isCaseGarbled("هذا نص طويل بما يكفي للاختبار هنا وهو بدون حروف كبيرة")).toBe(false);
+    expect(isCaseGarbled("これは大文字のない十分に長い日本語のテキストです。それはテストのために使用されます。")).toBe(false);
+  });
+
+  it("U+0307 elsewhere than after an 'i' does not count on its own", () => {
+    expect(isCaseGarbled("Bakan Yılmaz, yeni düzenlemeyi aç\u0307ıkladı.")).toBe(false);
+  });
+
+  it("is linear: lower-case words with a trailing capital, and the same text lower-cased, are judged in one pass", () => {
+    expect(isCaseGarbled(`${"kelime ".repeat(1000)}Sonuç`)).toBe(false);
+    expect(isCaseGarbled("kelime ".repeat(1000))).toBe(true);
+    const gen = rep("kelime ", "", "Sonuç");
+    expectLinear(gen, (s) => isCaseGarbled(s), { n: 100_000, ceilingMs: 1_000 });
+    expectLinear(rep("kelime "), (s) => isCaseGarbled(s), { n: 100_000, ceilingMs: 1_000 });
+  });
+
+  it("never throws on a non-string", () => {
+    expect(isCaseGarbled(null as unknown as string)).toBe(false);
+    expect(isCaseGarbled(undefined as unknown as string)).toBe(false);
+  });
+
+  describe("replacement and hiding", () => {
+    const TITLE = "ÖZDAĞ: “HİJYENDEN TASARRUF EDİLEMEZ!\"";
+    const CLEAN =
+      "Selçuk Özdağ, okullarda hijyenden tasarruf edilemeyeceğini söyleyerek bakanlığa seslendi ve gerekli önlemlerin hemen alınmasını istedi.";
+    const wire = { isWireRedistribution: false };
+
+    it("a2260dd6 (1 member): the Özet is hidden", () => {
+      const seed = mem("En Politik", "outlet", "2026-11-12T10:00:00Z", A2260, TITLE);
+      expect(summaryAttribution({ summary: A2260, members: [seed], wire, agreeWithTitle: TITLE })).toBeNull();
+      expect(summaryAttribution({ summary: A2260, members: [seed], wire })).toBeNull();
+      expect(summaryAttributionWithoutMembers({ summary: A2260, wire })).toBeNull();
+    });
+
+    it("ea472c81 (1 member): the Özet is hidden", () => {
+      const title = "SELÇUK ÖZDAĞ’DAN TBMM’DE MEKKE ANLAŞMASINA SERT TEPKİ";
+      const seed = mem("En Politik", "outlet", "2026-11-12T10:00:00Z", EA472, title);
+      expect(summaryAttribution({ summary: EA472, members: [seed], wire, agreeWithTitle: title })).toBeNull();
+    });
+
+    it("a multi-member cluster: a clean member is swapped in", () => {
+      const seed = mem("En Politik", "outlet", "2026-11-12T10:00:00Z", A2260, TITLE);
+      const clean = mem("Temiz", "outlet", "2026-11-12T10:05:00Z", CLEAN, "Başka başlık");
+      const pick = pickFor(TITLE, [seed, clean], "En Politik");
+      expect(pick?.member.source.name).toBe("Temiz");
+      expect(pick?.text).toBe(CLEAN);
+      const shown = summaryAttribution({ summary: A2260, members: [seed, clean], wire, agreeWithTitle: TITLE });
+      expect(shown?.text).toBe(CLEAN);
+    });
+
+    it("a multi-member cluster without a clean member: the Özet is hidden, not the garbled text", () => {
+      const seed = mem("En Politik", "outlet", "2026-11-12T10:00:00Z", A2260, TITLE);
+      const other = mem("Başka", "outlet", "2026-11-12T10:05:00Z", "Hava bugün parçalı bulutlu ve rüzgarlı geçecek, sıcaklıklar mevsim normallerinde seyredecek.", "Başlık");
+      expect(summaryAttribution({ summary: A2260, members: [seed, other], wire, agreeWithTitle: TITLE })).toBeNull();
+    });
+
+    it("a member that is garbled never stands in for the seed, whatever it scores", () => {
+      const seed = mem("Tohum", "outlet", "2026-11-12T10:00:00Z", "Hava bugün parçalı bulutlu ve rüzgarlı geçecek, sıcaklıklar mevsim normallerinde seyredecek.", "Başlık");
+      const garbled = mem("En Politik", "outlet", "2026-11-12T10:05:00Z", "özdağ: hijyenden tasarruf edilemez; çocukların beslenmesi ertelenemez ve okul güvenliği ihmal edilemez!", "Başlık");
+      expect(pickFor(TITLE, [seed, garbled], "Tohum")).toBeNull();
+      const clean = mem("Temiz", "outlet", "2026-11-12T10:06:00Z", CLEAN, "Başka başlık");
+      expect(pickFor(TITLE, [seed, garbled, clean], "Tohum")?.member.source.name).toBe("Temiz");
     });
   });
 });

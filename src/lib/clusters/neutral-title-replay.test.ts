@@ -759,3 +759,104 @@ describe("re-pick replay: the hunt-42 sample of the 14-day set", () => {
     expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
   });
 });
+
+// ---------------------------------------------------------------------------
+// hunt 164 (2026-11-12): h164-titles-1 (the "<kişi>'den açıklamalar" placeholder, the teasers that ask without a '?') and
+// h164-titles-2 (İşçi Haber's lost capitals, the mispaired quote). The budget: the rules reach new picks, the cron's re-picks of
+// the clusters migration 208 offers, and the re-picks of grown clusters; they change NONE of the 150 corpus picks.
+//
+// Read-only replay on production, 2026-11-12 ~19:10Z, the cron's call (pickNeutralTitle(members, { incumbent: stored, floor: the
+// stored title fails the gate }), members flagged caseUnreliable by their source slug), before (HEAD 286b39e) and after:
+//   1,402 clusters (extractive-v6, not archived, no LLM title, 2+ members, updated in the last 6 days; 7,020 members):
+//     11 re-picks change title (0.8%), every one hand-checked, old -> new:
+//       3039d877  "Bakan Bayraktar'dan libya ve venezuela mesajı"                  -> "...'dan Libya ve Venezuela ile enerji işbirliği mesajı"  better
+//       4797e4f6  "Bakan kurum: Tarihte bugün ..."                                 -> "Bakan Kurum: Bugün hiç olmadığımız ..."                 better
+//       ecbc23a0  "Bakan memişoğlu: Bilgi ve tecrübeyi ..."                        -> "Bakan Memişoğlu: Bilgi ve tecrübeyi ..."                better
+//       3175d6f7  "Dışişleri bakanlığından Mısır'daki kazaya taziye"              -> "Dışişleri Bakanlığından Mısır'a tren kazası için ..."   better
+//       37915ace  "Cevdet yılmaz COP31 zirvesinde ..."                             -> "Cevdet Yılmaz COP31 zirvesinde ..."                    better
+//       2040cdf1  "Emine Erdoğan, undp Başkanı de croo ile ..."                    -> "... undp Başkanı De Croo ile ..."                       better (undp stays: no sibling spells it)
+//       8541cbe6  "İranlı bakandan batı basınına soykırım eleştirisi"              -> "İranlı bakandan Batı basınına ..."                      lateral
+//       9df76d26  "111. Dönem Kaymakamlar Kurası Töreni. Cumhurbaşkanı Erdoğan'dan önemli açıklamalar" (stale)
+//                 -> "Cumhurbaşkanı Erdoğan 111. dönem Kaymakamlar Kurası'nda"       lateral (HEAD's replacement had 'kaymakamlar')
+//       0aa78ccd  "MHP'li Yıldız'dan komisyonda sarsıcı çıkış. ..."                -> "MHP’li Yıldız’dan Komisyonda sarsıcı çıkış. ..."          lateral (Yeni Akit's twin stands for İşçi Haber's)
+//       32a3e53c  "İş Dünyası ve Yatırım Zirvesi'nin Açılış Programı. Bakan Kurum'dan açıklamalar" -> "COP31 İş Dünyası ve Yatırım Zirvesi
+//                 yapıldı. Cumhurbaşkanı Yardımcısı Yılmaz’dan ortak yatırım çağrısı"                                                 better
+//       fd7428e8  "Tera'nın patronu Emre Tezmen YENİ Parti ile neden görüşmedi"    -> "Tera Yatırım'ın patronu Emre Tezmen, Yeni Parti’nin görüşme talebini reddetti"  better
+//     0 worse. No stored title that was good changes. Two first picks (not re-picks) move for a member title judged a placeholder by
+//     the tail rule (c9525327: two "...! Bakan Akın Gürlek’ten açıklama" members; b19ea407: "...İşte Bakü’den Mesajlar"): lateral.
+//   211 clusters of the last 7 days that have an isci-haber member (1,948 members): 12 re-picks change (the nine above that are İşçi
+//     Haber's, plus 609f9e22 'çöp31' -> 'COP31', cdc9adfb 'palestine action' -> 'Palestine Action' and ad976c62 'Cumhurbaşkanı
+//     yardımcısı' -> "Cumhurbaşkanı Yardımcısı Yılmaz: Türkiye, krizlerin çözümünde aktif rol üstleniyor"), all better or lateral;
+//     zero changes in any of the 1,402 clusters without an isci-haber member apart from the placeholder and teaser clusters of
+//     h164-titles-1 (32a3e53c, fd7428e8 re-picks; b19ea407 a first pick) and the 150 corpus clusters (none).
+// ---------------------------------------------------------------------------
+
+interface H164ReplayFixture {
+  clusters: Array<{
+    cid: string;
+    stored: string;
+    members: Array<{ source: string; title: string; opinion: boolean }>;
+  }>;
+}
+
+const h164Fixture = (name: string): H164ReplayFixture =>
+  JSON.parse(readFileSync(resolve(__dirname, `__fixtures__/${name}`), "utf8")) as H164ReplayFixture;
+
+/** The cron's re-pick call for a stored title, members flagged the way the cron flags them. */
+function h164Repick(c: H164ReplayFixture["clusters"][number]): string | null {
+  const titles = c.members.map((m) => m.title);
+  return pickNeutralTitle(
+    c.members.map((m) => ({ title: m.title, opinion: m.opinion, caseUnreliable: m.source === "isci-haber" })),
+    { incumbent: c.stored, floor: !isAcceptableNeutral(c.stored, titles) },
+  );
+}
+
+describe("re-pick replay: the hunt-164 rules", () => {
+  it("change none of the 150 corpus picks beyond the sixteen of before (churn 16/150 = 10.7%)", () => {
+    const changed = CLUSTERS.filter((c) => {
+      const next = repick(c);
+      return next !== null && next !== c.stored;
+    }).map((c) => c.cid);
+    expect(changed.sort()).toEqual(
+      [...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31, ...CORPUS_CHANGED_BY_H42].sort(),
+    );
+    expect(changed).toHaveLength(16);
+    expect(changed.length / CLUSTERS.length).toBeLessThan(0.15);
+  });
+
+  it("the ten placeholder and teaser clusters: nine get a member's own wording (HEAD: four), the all-teaser one is kept for the floor", () => {
+    const fixture = h164Fixture("h164-generic.json");
+    expect(fixture.clusters).toHaveLength(10);
+    const changed = fixture.clusters.filter((c) => {
+      const next = h164Repick(c);
+      return next !== null && next !== c.stored;
+    });
+    expect(changed.map((c) => c.cid).sort()).toEqual(
+      ["298bbb75", "32a3e53c", "404dda61", "67695cbd", "9d5ad97a", "9df76d26", "df08098c", "ece7ef31", "fd7428e8"].sort(),
+    );
+    for (const c of changed) {
+      const next = h164Repick(c) as string;
+      expect(incumbentIsMemberTitle(next, c.members.map((m) => m.title)), `${c.cid}: ${next}`).toBe(true);
+      // A fixed point: the next re-pick keeps what this one wrote.
+      expect(
+        pickNeutralTitle(
+          c.members.map((m) => ({ title: m.title, opinion: m.opinion, caseUnreliable: m.source === "isci-haber" })),
+          { incumbent: next },
+        ),
+        c.cid,
+      ).toBe(next);
+    }
+    const kept = fixture.clusters.find((c) => c.cid === "1c7c34ba")!;
+    expect(h164Repick(kept)).toBe(kept.stored);
+  });
+
+  it("the eight casing clusters: every stored title is replaced (HEAD: one, 588c58ce), by a member's wording with its capitals", () => {
+    const fixture = h164Fixture("h164-casing.json");
+    expect(fixture.clusters).toHaveLength(8);
+    for (const c of fixture.clusters) {
+      const next = h164Repick(c);
+      expect(next, c.cid).not.toBeNull();
+      expect(next, c.cid).not.toBe(c.stored);
+    }
+  });
+});

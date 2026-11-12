@@ -1,0 +1,432 @@
+{
+ "_note": "h164 summaries-1/2: raw member descriptions of the cited clusters, dumped read-only from prod on 2026-11-12 (sbq.py -e). summary is clusters.summary_tr as stored.",
+ "clusters": {
+  "0ad663a9": {
+   "id": "0ad663a9-9671-4065-8ab4-1b7432a18449",
+   "title": "VAN KAZA HABERLERİ: Van'da tır minibüsle çarpıştı: 9 ölü, 5 yaralı",
+   "summary": "Edinilen bilgilere göre, kaza Van-Özalp karayolunda meydana geldi. Tır ile minibüsün çarpıştığı kazada ilk belirlemelere göre 7 kişi hayatını kaybederken, 7 kişi de yaralandı. İhbar üzerine bölgeye ambulans, polis, jandarma, AFAD, UMKE, Özalp, Erçek ve İpekyolu İtfaiye Grup Amirliği ekipleri sevk edildi.\nCumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü",
+   "members": [
+    {
+     "source": "Milliyet",
+     "kind": "outlet",
+     "title": "VAN KAZA HABERLERİ: Van'da tır minibüsle çarpıştı: 9 ölü, 5 yaralı",
+     "description": "Edinilen bilgilere göre, kaza Van-Özalp karayolunda meydana geldi. Tır ile minibüsün çarpıştığı kazada ilk belirlemelere göre 7 kişi hayatını kaybederken, 7 kişi de yaralandı. İhbar üzerine bölgeye ambulans, polis, jandarma, AFAD, UMKE, Özalp, Erçek ve İpekyolu İtfaiye Grup Amirliği ekipleri sevk edildi.\nCumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü",
+     "published_at": "2026-11-07 17:44:45+00"
+    }
+   ]
+  },
+  "2145f51f": {
+   "id": "2145f51f-0cc9-4e9a-97f7-f8f31e47b401",
+   "title": "GÜNCEL ANAYASA MAHKEMESİ KARARI IŞIĞINDA 7571 SAYILI KANUN ÖNCESİ DÖNEMDE BÖLGE ADLİYE MAHKEMESİ CEZA DAİRELERİNİN KANUNİ DAYANAKTAN YOKSUN BOZMA KARARLARININ VE YARGITAY UYGULAMASININ DEĞERLENDİRİLMESİ",
+   "summary": "Av. Baran Can KAYA yazdı...\n\nhttps://www.hukukihaber.net/guncel-anayasa-mahkemesi-karari-isiginda-7571-sayili-kanun-oncesi-donemde-bolge-adliye-mahkemesi-ceza-dairelerinin-kanuni-dayanaktan-yoksun-bozma-kararlarinin-ve-yargitay-uygulamasinin-degerlendirilmesi",
+   "members": [
+    {
+     "source": "Hukuki Haber",
+     "kind": "niche",
+     "title": "GÜNCEL ANAYASA MAHKEMESİ KARARI IŞIĞINDA 7571 SAYILI KANUN ÖNCESİ DÖNEMDE BÖLGE ADLİYE MAHKEMESİ CEZA DAİRELERİNİN KANUNİ DAYANAKTAN YOKSUN BOZMA KARARLARININ VE YARGITAY UYGULAMASININ DEĞERLENDİRİLMESİ",
+     "description": "Av. Baran Can KAYA yazdı...\n\nhttps://www.hukukihaber.net/guncel-anayasa-mahkemesi-karari-isiginda-7571-sayili-kanun-oncesi-donemde-bolge-adliye-mahkemesi-ceza-dairelerinin-kanuni-dayanaktan-yoksun-bozma-kararlarinin-ve-yargitay-uygulamasinin-degerlendirilmesi",
+     "published_at": "2026-11-12 05:27:00+00"
+    }
+   ]
+  },
+  "226929aa": {
+   "id": "226929aa-9c64-47bc-a3a7-d9eef8c80dff",
+   "title": "Bakan Şimşek Dezenflasyonu Destekleyecek 4 Temel Unsuru Açıkladı",
+   "summary": "Bakan Şimşek, önümüzdeki süreçte fiyat istikrarı hedefine katkı sunacak dört kritik başlığı kamuoyuyla paylaştı:",
+   "members": [
+    {
+     "source": "Haber.com",
+     "kind": "outlet",
+     "title": "Bakan Şimşek Dezenflasyonu Destekleyecek 4 Temel Unsuru Açıkladı",
+     "description": "Bakan Şimşek, önümüzdeki süreçte fiyat istikrarı hedefine katkı sunacak dört kritik başlığı kamuoyuyla paylaştı:",
+     "published_at": "2026-11-03 14:04:54+00"
+    }
+   ]
+  },
+  "2bfbe1e2": {
+   "id": "2bfbe1e2-dd92-4cda-9a7e-7a1b3f6d6bc7",
+   "title": "Yaşar Karayel: \"En kötü sivil irade, en iyi askeri cuntadan iyidir\"",
+   "summary": "Birlik Vakfı Kayseri Şubesi tarafından düzenlenen konferansa konuşmacı olarak katılan Birlik Vakfı Kurucular Kurulu Başkanı, önceki dönem Kayseri Milletvekili ve TBMM Darbe Araştırma Komisyonu Başkan Yardımcısı Yaşar Karayel;",
+   "members": [
+    {
+     "source": "Haberler.com",
+     "kind": "aggregator",
+     "title": "Yaşar Karayel: \"En kötü sivil irade, en iyi askeri cuntadan iyidir\"",
+     "description": "Birlik Vakfı Kayseri Şubesi tarafından düzenlenen konferansa konuşmacı olarak katılan Birlik Vakfı Kurucular Kurulu Başkanı, önceki dönem Kayseri Milletvekili ve TBMM Darbe Araştırma Komisyonu Başkan Yardımcısı Yaşar Karayel;",
+     "published_at": "2026-10-31 13:43:16+00"
+    }
+   ]
+  },
+  "437c0d7e": {
+   "id": "437c0d7e-21a2-44f3-808d-09f6bc136b5d",
+   "title": "Son dakika... Cumhurbaşkanı Erdoğan: İç cephemizi yeni hamlelerle daha da tahkim ediyoruz",
+   "summary": "Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle;",
+   "members": [
+    {
+     "source": "Anadolu Ajansı",
+     "kind": "wire",
+     "title": "Cumhurbaşkanı Erdoğan: Sınırlarımızın ötesinde de huzuru, güvenliği ve istikrarı güçlendiriyoruz",
+     "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, Atatürk Kültür, Dil ve Tarih Yüksek Kurumunda düzenlenen anma töreninde konuşuyor.",
+     "published_at": "2026-11-10 06:36:23+00"
+    },
+    {
+     "source": "İşçi Haber",
+     "kind": "niche",
+     "title": "Cumhurbaşkanı Erdoğan'dan sınır ötesi güvenlik mesajı: Huzur ve istikrarı güçlendiriyoruz",
+     "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, Atatürk Kültür, Dil ve Tarih Yüksek Kurumu bünyesinde gerçekleştirilen anma programına katıldı. Türkiye'nin sadece yurt içinde değil sınır ötesinde de huzur, güvenlik ve istikrarı pekiştirdiğini belirten Erdoğan, kararlılık mesajı verdi.",
+     "published_at": "2026-11-10 09:30:40+00"
+    },
+    {
+     "source": "Milliyet",
+     "kind": "outlet",
+     "title": "Son dakika... Cumhurbaşkanı Erdoğan: İç cephemizi yeni hamlelerle daha da tahkim ediyoruz",
+     "description": "Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle;",
+     "published_at": "2026-11-10 08:59:23+00"
+    },
+    {
+     "source": "Haber Global",
+     "kind": "outlet",
+     "title": "Cumhurbaşkanı Erdoğan'dan önemli açıklamalar",
+     "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, Atatürk'ü Anma Töreni'nde önemli açıklamalarda bulunuyor.",
+     "published_at": "2026-11-10 08:59:00+00"
+    },
+    {
+     "source": "Haberet",
+     "kind": "outlet",
+     "title": "Cumhurbaşkanı Erdoğan: Cumhuriyeti yeniden cumhurla buluşturduk",
+     "description": "Cumhurbaşkanı Erdoğan, Atatürk Kültür, Dil ve Tarih Yüksek Kurumunda “Atatürk’ü Anma Töreni”nde konuşuyor.",
+     "published_at": "2026-11-10 09:05:21+00"
+    },
+    {
+     "source": "Takvim",
+     "kind": "outlet",
+     "title": "Başkan Erdoğan'dan Atatürk'ü Anma Töreni'nde iç cephe mesajı: Cumhuriyet'i yeniden cumhur ile buluşturduk... Sivil anayasa mesajı",
+     "description": "Başkan Recep Tayyip Erdoğan, Atatürk Kültür, Dil ve Tarih Yüksek Kurumunda Gazi Mustafa Kemal Atatürk'ün ebediyete intikalinin 88. yıl dönümüne ilişkin düzenlenen anma töreninde açıklamalarda bulunuyor.",
+     "published_at": "2026-11-10 09:00:04+00"
+    },
+    {
+     "source": "Beyaz Gazete",
+     "kind": "aggregator",
+     "title": "Cumhurbaşkanı Erdoğan'dan Önemli Açıklamalar",
+     "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, Atatürk Kültür, Dil ve Tarih Yüksek Kurumunda Gazi Mustafa Kemal Atatürk'ün ebediyete intikalinin 88. yıl dönümüne ilişkin düzenlenen anma töreninde açıklamalarda bulunuyor.",
+     "published_at": "2026-11-10 09:04:50+00"
+    },
+    {
+     "source": "Star",
+     "kind": "outlet",
+     "title": "Atatürk'ü anmada \"sivil anayasa\" vurgusu! Başkan Erdoğan: Ülkemize en büyük hizmetlerimizden biri olacak",
+     "description": "Atatürk Kültür, Dil ve Tarih Yüksek Kurumu'nda \"Atatürk'ü Anma Töreni\"nde açıklamalarda bulunan Cumhurbaşkanı Erdoğan, \"Cumhuriyet'imizin kurucusu Atatürk'ü rahmetle anıyoruz.\" dedi.",
+     "published_at": "2026-11-10 09:17:00+00"
+    },
+    {
+     "source": "Posta",
+     "kind": "outlet",
+     "title": "Cumhurbaşkanı Erdoğan: Atatürk bağımsızlık meşalesini ateşledi",
+     "description": "Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle;\nAziz Milletim, Atatürk Kültür, Dil ve Tarih Kurumu'nun değerli mensupları sizleri saygıyla hürmetle selamlıyorum. Cumhuriyetimizin kurucusu Atatürk'ü rahmetle yad ediyoruz. Cumhuriyete giden yolu çan Gazi Meclis'imizin o dönemki tüm şehitlerini rahmetle yad ediyoruz. Bin yıldır verdiğimiz tüm kavgalarda yiğitçe mertçe kahramanca toprağa düşen şehitlerimizi bugün bir kez daha rahmetle yad ediyoruz.\nŞurası muhakkak ki; cumhuriyeti k...",
+     "published_at": "2026-11-10 09:13:06+00"
+    },
+    {
+     "source": "Haberler.com",
+     "kind": "aggregator",
+     "title": "Cumhurbaşkanı Erdoğan: \"Dahili ve harici saldırılar karşısında sığındığımız en muhkem kalemiz olan iç cephemizi, yeni hamlelerle daha da tahkim ediyoruz\"",
+     "description": "Cumhurbaşkanı Erdoğan: \"Dahili ve harici saldırılar karşısında sığındığımız en muhkem kalemiz olan iç cephemizi, yeni hamlelerle daha da tahkim ediyoruz\"",
+     "published_at": "2026-11-10 09:15:46+00"
+    },
+    {
+     "source": "Hürriyet",
+     "kind": "outlet",
+     "title": "Cumhurbaşkanı Erdoğan'dan önemli açıklamalar",
+     "description": "Cumhurbaşkanı Recep Tayyip Erdoğan, Atatürk Kültür, Dil ve Tarih Yüksek Kurumunda “Atatürk’ü Anma Töreni”ne katılıyor.",
+     "published_at": "2026-11-10 09:00:31+00"
+    }
+   ]
+  },
+  "459a7b61": {
+   "id": "459a7b61-0377-4a2c-82d1-bfee912232f5",
+   "title": "Son dakika... Cumhurbaşkanı Erdoğan: Bakü'nün sevinci Ankara'nın sevincidir",
+   "summary": "HABER MERKEZİ- İşte Erdoğan'ın açıklamalarından öne çıkan satır başları:",
+   "members": [
+    {
+     "source": "Akşam",
+     "kind": "outlet",
+     "title": "Bir millet iki devlet! Başkan Erdoğan: Bakü'nün sevinci Ankara'nın sevincidir",
+     "description": "Şuşa'da Azerbaycan Cumhurbaşkanı İlham Aliyev ile ortak basın toplantısı düzenleyen Başkan Erdoğan, Karabağ Zafer Günü'nü 6.yılını kutlayarak, \" Şanlı zafer Azerbaycan'ın haklı davasıdır. Beraberliğimiz her zaman daim olacak. Bakü'nün sevinci Ankara'nın sevincidir\" dedi.",
+     "published_at": "2026-11-08 11:58:00+00"
+    },
+    {
+     "source": "Milliyet",
+     "kind": "outlet",
+     "title": "Son dakika... Cumhurbaşkanı Erdoğan: Bakü'nün sevinci Ankara'nın sevincidir",
+     "description": "HABER MERKEZİ- İşte Erdoğan'ın açıklamalarından öne çıkan satır başları:",
+     "published_at": "2026-11-08 11:56:47+00"
+    },
+    {
+     "source": "A Haber",
+     "kind": "outlet",
+     "title": "Erdoğan ve Aliyev'den Şuşu'da net mesaj: Kardeşliğimiz daim olacak",
+     "description": "Başkan Recep Tayyip Erdoğan Azerbaycan Cumhurbaşkanı İlham Aliyev ile ortak basın toplantısında açıklamalarda bulunuyor. Azerbaycan Cumhurbaşkanı İlham Aliyev, Başkan Recep Tayyip Erdoğan'ın...Devamı için tıklayınız",
+     "published_at": "2026-11-08 11:59:19+00"
+    },
+    {
+     "source": "Haber7",
+     "kind": "outlet",
+     "title": "Cumhurbaşkanı Erdoğan'dan Azerbaycan'da önemli açıklamalar",
+     "description": "Cumhurbaşkanı Erdoğan, Azerbaycan Cumhurbaşkanı Aliyev ile yaptığı ortak toplantıda açıklamalarda bulunuyor.",
+     "published_at": "2026-11-08 12:05:00+00"
+    }
+   ]
+  },
+  "46d3ed77": {
+   "id": "46d3ed77-432f-4772-a3ed-b3a6b54f6afa",
+   "title": "Bakan Memişoğlu: \"Sağlıkta tam bağımsız Türkiye hedefliyoruz\"",
+   "summary": "Sağlık Bakanı Prof. Dr. Kemal Memişoğlu, 12. Türk Tıp Dünyası Kurultayı ve 2026 TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni’nde yaptığı konuşmada, \"Hedefimiz açık;",
+   "members": [
+    {
+     "source": "Haberler.com",
+     "kind": "aggregator",
+     "title": "Bakan Memişoğlu: \"Sağlıkta tam bağımsız Türkiye hedefliyoruz\"",
+     "description": "Sağlık Bakanı Prof. Dr. Kemal Memişoğlu, 12. Türk Tıp Dünyası Kurultayı ve 2026 TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik Ödülleri Töreni’nde yaptığı konuşmada, \"Hedefimiz açık;",
+     "published_at": "2026-10-31 12:16:15+00"
+    },
+    {
+     "source": "Haberport",
+     "kind": "outlet",
+     "title": "Sağlıkta tam bağımsızlığa giden yol: yerli teknoloji ve Aziz Sancar ilacı",
+     "description": "Sağlıkta tam bağımsızlık hedefi ve yerli üretim vurgusu\nSağlık Bakanı Prof. Dr. Kemal Memişoğlu, İstanbul'da düzenlenen 12. Türk Tıp Dünyası Kurultayı ve 2026 TÜSEB Aziz Sancar Bilim, Hizmet ve Teşvik...",
+     "published_at": "2026-10-31 12:21:10+00"
+    }
+   ]
+  },
+  "818f4e62": {
+   "id": "818f4e62-3fa8-40a7-a808-813cafd45688",
+   "title": "Dost buluşması",
+   "summary": "Mekan çıkışında Yüsra Geyik, ayaküstü röportaj verdi. Uzun yıllar rol aldığı Arka Sokaklar’ın çekimlerinin yapıldığı evi ziyaret ettiğini ve duygusal anlar yaşadığını anlattı.\nO sırada Nehir Erdoğan’ın da kendisiyle birlikte geleceğini düşünerek taksiyi bekletti. Ancak Erdoğan, mekânın arka kapısından arkadaşlarıyla birlikte ayrılmayı tercih etti.\nNev’in ağabeyi miras için harekete mi geçti? Avukatından sert yanıt: 'Küslük söz konusu değil'",
+   "members": [
+    {
+     "source": "Posta",
+     "kind": "outlet",
+     "title": "Dost buluşması",
+     "description": "Mekan çıkışında Yüsra Geyik, ayaküstü röportaj verdi. Uzun yıllar rol aldığı Arka Sokaklar’ın çekimlerinin yapıldığı evi ziyaret ettiğini ve duygusal anlar yaşadığını anlattı.\nO sırada Nehir Erdoğan’ın da kendisiyle birlikte geleceğini düşünerek taksiyi bekletti. Ancak Erdoğan, mekânın arka kapısından arkadaşlarıyla birlikte ayrılmayı tercih etti.\nNev’in ağabeyi miras için harekete mi geçti? Avukatından sert yanıt: 'Küslük söz konusu değil'",
+     "published_at": "2026-11-01 04:00:50+00"
+    }
+   ]
+  },
+  "8fc54aa1": {
+   "id": "8fc54aa1-ea26-4fda-99d0-7038d2cfcfbb",
+   "title": "ABD SEÇİMLERİ SON DURUM: Dünyanın gözü ABD'deki ara seçimlerde! Oy sayımı devam ediyor: Cumhuriyetçiler mi Demokratlar mı?",
+   "summary": "ABD'deki ara seçimlere dair tüm sıcak gelişmeleri Milliyet.com.tr canlı bloğundan takip edebilirsiniz.\nCanlı Haber İçerik Kartı",
+   "members": [
+    {
+     "source": "Milliyet",
+     "kind": "outlet",
+     "title": "ABD SEÇİMLERİ SON DURUM: Dünyanın gözü ABD'deki ara seçimlerde! Oy sayımı devam ediyor: Cumhuriyetçiler mi Demokratlar mı?",
+     "description": "ABD'deki ara seçimlere dair tüm sıcak gelişmeleri Milliyet.com.tr canlı bloğundan takip edebilirsiniz.\nCanlı Haber İçerik Kartı",
+     "published_at": "2026-11-04 04:37:26+00"
+    }
+   ]
+  },
+  "a2260dd6": {
+   "id": "a2260dd6-8a3f-49ad-b056-c7c0e34e062d",
+   "title": "ÖZDAĞ: “HİJYENDEN TASARRUF EDİLEMEZ!\"",
+   "summary": "özdağ: “hi̇jyenden tasarruf edi̇lemez! çocuklarin beslenmesi̇ ertelenemez, okul güvenli̇ği̇ i̇hmal edi̇lemez!”",
+   "members": [
+    {
+     "source": "En Politik",
+     "kind": "outlet",
+     "title": "ÖZDAĞ: “HİJYENDEN TASARRUF EDİLEMEZ!\"",
+     "description": "özdağ: “hi̇jyenden tasarruf edi̇lemez! çocuklarin beslenmesi̇ ertelenemez, okul güvenli̇ği̇ i̇hmal edi̇lemez!”",
+     "published_at": "2026-11-12 07:47:46+00"
+    }
+   ]
+  },
+  "aa1be55d": {
+   "id": "aa1be55d-ad19-4ff9-9122-0ba4e8eca0ef",
+   "title": "İBB’deki liyakat tiyatrosu mahkemede çöktü! \"Akraba kayırmadık\" yalanı sülale boyu torpil belgeleriyle patladı!",
+   "summary": "İmamoğlu Çıkar Amaçlı Suç Örgütü davasının 105. gününde savunma tanığı olarak dinlenen Başkan Danışmanı Yiğit Oğuz Duman, İmamoğlu'nun kendisine \"Siyasete göre değil, liyakate göre seçim yapacaksın\" dediğini ve eş, dost, akraba taleplerini reddettiklerini iddia etti. Ancak İBB iştiraklerindeki eş, dost ve akraba atamaları şu vahim ayrıntılarla yeniden belgelendi:",
+   "members": [
+    {
+     "source": "Yeni Akit",
+     "kind": "outlet",
+     "title": "İBB’deki liyakat tiyatrosu mahkemede çöktü! \"Akraba kayırmadık\" yalanı sülale boyu torpil belgeleriyle patladı!",
+     "description": "İmamoğlu Çıkar Amaçlı Suç Örgütü davasının 105. gününde savunma tanığı olarak dinlenen Başkan Danışmanı Yiğit Oğuz Duman, İmamoğlu'nun kendisine \"Siyasete göre değil, liyakate göre seçim yapacaksın\" dediğini ve eş, dost, akraba taleplerini reddettiklerini iddia etti. Ancak İBB iştiraklerindeki eş, dost ve akraba atamaları şu vahim ayrıntılarla yeniden belgelendi:",
+     "published_at": "2026-11-05 20:01:00+00"
+    }
+   ]
+  },
+  "bb349ef1": {
+   "id": "bb349ef1-c596-4c01-995b-70b355311658",
+   "title": "Kurtulmuş ve Bahçeli arasında 40 dakikalık kritik görüşme!",
+   "summary": "Bahçeli'nin Meclis'teki makamında basına kapalı gerçekleşen görüşme yaklaşık 40 dakika sürdü.\nGörüşmede, Milli Dayanışma ve Toplumsal Bütünleşmenin Güçlendirilmesine Dair Kanun kapsamında TBMM'de kurulacak \"izleme komisyonu\" hakkında fikir alışverişinde bulunulduğu öğrenildi.\nCumhurbaşkanı Erdoğan'dan COP31'de diplomasi trafiği",
+   "members": [
+    {
+     "source": "Milliyet",
+     "kind": "outlet",
+     "title": "Kurtulmuş ve Bahçeli arasında 40 dakikalık kritik görüşme!",
+     "description": "Bahçeli'nin Meclis'teki makamında basına kapalı gerçekleşen görüşme yaklaşık 40 dakika sürdü.\nGörüşmede, Milli Dayanışma ve Toplumsal Bütünleşmenin Güçlendirilmesine Dair Kanun kapsamında TBMM'de kurulacak \"izleme komisyonu\" hakkında fikir alışverişinde bulunulduğu öğrenildi.\nCumhurbaşkanı Erdoğan'dan COP31'de diplomasi trafiği",
+     "published_at": "2026-11-12 11:57:18+00"
+    },
+    {
+     "source": "Haberler.com",
+     "kind": "aggregator",
+     "title": "TBMM Başkanı Kurtulmuş, İzleme Komisyonu için Bahçeli ile Meclis'te görüştü",
+     "description": "TBMM Başkanı Numan Kurtulmuş, 'Terörsüz Türkiye' süreci kapsamında kurulacak İzleme Komisyonu'na ilişkin MHP Genel Başkanı Devlet Bahçeli'yi Meclis'teki makamında ziyaret etti. Basına kapalı görüşme yaklaşık 40 dakika sürdü ve ardından herhangi bir açıklama yapılmadı.",
+     "published_at": "2026-11-12 12:10:39+00"
+    },
+    {
+     "source": "Posta",
+     "kind": "outlet",
+     "title": "Kurtulmuş ve Bahçeli arasında 40 dakikalık kritik görüşme!",
+     "description": "Bahçeli'nin Meclis'teki makamında basına kapalı gerçekleşen görüşme yaklaşık 40 dakika sürdü.\n\nGörüşmede, Milli Dayanışma ve Toplumsal Bütünleşmenin Güçlendirilmesine Dair Kanun kapsamında TBMM'de kurulacak \"izleme komisyonu\" hakkında fikir alışverişinde bulunulduğu öğrenildi.",
+     "published_at": "2026-11-12 12:19:30+00"
+    }
+   ]
+  },
+  "c44095e2": {
+   "id": "c44095e2-0dd5-4312-9ffd-c7632b9c87cf",
+   "title": "Aile Bakanı Göktaş açıkladı: Risk altındaki 15 bin 374 çocuk yakın takipte",
+   "summary": "AİLE ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş, Plan ve Bütçe Komisyonu’nda kadına yönelik yeni şiddet türlerini araştırmaya başladıklarını belirterek, “Risk altındaki 15 bin 374 çocuğu takip ediyoruz. 3 bin 306 zararlı içeriğe müdahale ettik” dedi. Göktaş 2027 yılı bütçe sunumunda şunları söyledi:",
+   "members": [
+    {
+     "source": "Hürriyet",
+     "kind": "outlet",
+     "title": "Aile Bakanı Göktaş açıkladı: Risk altındaki 15 bin 374 çocuk yakın takipte",
+     "description": "AİLE ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş, Plan ve Bütçe Komisyonu’nda kadına yönelik yeni şiddet türlerini araştırmaya başladıklarını belirterek, “Risk altındaki 15 bin 374 çocuğu takip ediyoruz. 3 bin 306 zararlı içeriğe müdahale ettik” dedi. Göktaş 2027 yılı bütçe sunumunda şunları söyledi:",
+     "published_at": "2026-11-12 04:00:00+00"
+    }
+   ]
+  },
+  "d6c3c539": {
+   "id": "d6c3c539-b68a-4bb4-9d94-1a4cc4c3196d",
+   "title": "Fona cerrahla... Özel’e dozerle!",
+   "summary": "YENİ Parti’nin kuruluş kurultayının yaklaşmasıyla birlikte başta genel başkan Özgür Özel olmak üzere saldırının dozu da arttı.  30 Ekim 2024 Esenyurt’la başlayan sürecin değişik bir aşamasına geldik. 2024’ün son aylarında Erdoğan Esenyurt’la kalınmaması gerektiğinin mesajını “Belediyeleri silkeleyin” sözleriyle vermişti. O günden bu yana üçlü kıskaç devam ediyor:",
+   "members": [
+    {
+     "source": "Cumhuriyet",
+     "kind": "outlet",
+     "title": "Fona cerrahla... Özel’e dozerle!",
+     "description": "YENİ Parti’nin kuruluş kurultayının yaklaşmasıyla birlikte başta genel başkan Özgür Özel olmak üzere saldırının dozu da arttı.  30 Ekim 2024 Esenyurt’la başlayan sürecin değişik bir aşamasına geldik. 2024’ün son aylarında Erdoğan Esenyurt’la kalınmaması gerektiğinin mesajını “Belediyeleri silkeleyin” sözleriyle vermişti. O günden bu yana üçlü kıskaç devam ediyor:",
+     "published_at": "2026-11-12 01:00:00+00"
+    }
+   ]
+  },
+  "e663db44": {
+   "id": "e663db44-16a0-4ad2-9ab3-d95e348e6d95",
+   "title": "Son dakika... Beyoğlu'nda halıya sarılı ceset bulundu",
+   "summary": "İstanbul Beyoğlu’na bağlı Sütlüce Mahallesi’nde bir evde halıya sarılmış halde erkek cesedi bulundu. İhbar üzerine adrese sevk edilen ekiplerin olay yerindeki incelemeleri devam ediyor.\nAyrıntılar birazdan...\nKırmızı bültenle aranan suç örgütü elebaşı Sercan Sayal Türkiye'ye getirildi\nİş insanının villada sır ölümü! Eve gelenlerin karşılaştığı manzara dehşete düşürdü",
+   "members": [
+    {
+     "source": "Milliyet",
+     "kind": "outlet",
+     "title": "Son dakika... Beyoğlu'nda halıya sarılı ceset bulundu",
+     "description": "İstanbul Beyoğlu’na bağlı Sütlüce Mahallesi’nde bir evde halıya sarılmış halde erkek cesedi bulundu. İhbar üzerine adrese sevk edilen ekiplerin olay yerindeki incelemeleri devam ediyor.\nAyrıntılar birazdan...\nKırmızı bültenle aranan suç örgütü elebaşı Sercan Sayal Türkiye'ye getirildi\nİş insanının villada sır ölümü! Eve gelenlerin karşılaştığı manzara dehşete düşürdü",
+     "published_at": "2026-11-12 12:21:09+00"
+    }
+   ]
+  },
+  "ea472c81": {
+   "id": "ea472c81-eed3-4d6a-81b3-01e61f4aa275",
+   "title": "SELÇUK ÖZDAĞ’DAN TBMM’DE MEKKE ANLAŞMASINA SERT TEPKİ",
+   "summary": "“bi̇z taşeron muyuz? bi̇z bağimsiz bi̇r türki̇ye cumhuri̇yeti̇ devleti̇yi̇z!”",
+   "members": [
+    {
+     "source": "En Politik",
+     "kind": "outlet",
+     "title": "SELÇUK ÖZDAĞ’DAN TBMM’DE MEKKE ANLAŞMASINA SERT TEPKİ",
+     "description": "“bi̇z taşeron muyuz? bi̇z bağimsiz bi̇r türki̇ye cumhuri̇yeti̇ devleti̇yi̇z!”",
+     "published_at": "2026-11-05 20:32:01+00"
+    }
+   ]
+  },
+  "f2da6a54": {
+   "id": "f2da6a54-b062-47b2-8f6c-e5d7b17c38a0",
+   "title": "Emir Sarıgül'ün ek ifadesi CNN TÜRk'te! \"Atkı paketinde 100 bin dolar\" iddiası",
+   "summary": "Mustafa Sarıgül hakkında örgüt kurmak, kara para aklamak ve çocuğun cinsel tacizi gibi suçlamalardan açılan soruşturmalarda yeni ifadeler, yeni iddialar var. Emir Sarıgül ve Mustafa Sarıgül’ün korumasının ek ifadesi de dosyaya girdi. Detayları, CNN TÜRK Muhabiri Merve Tokaz anlattı;",
+   "members": [
+    {
+     "source": "CNN Türk",
+     "kind": "outlet",
+     "title": "Emir Sarıgül'ün ek ifadesi CNN TÜRk'te! \"Atkı paketinde 100 bin dolar\" iddiası",
+     "description": "Mustafa Sarıgül hakkında örgüt kurmak, kara para aklamak ve çocuğun cinsel tacizi gibi suçlamalardan açılan soruşturmalarda yeni ifadeler, yeni iddialar var. Emir Sarıgül ve Mustafa Sarıgül’ün korumasının ek ifadesi de dosyaya girdi. Detayları, CNN TÜRK Muhabiri Merve Tokaz anlattı;",
+     "published_at": "2026-11-10 05:03:51+00"
+    }
+   ]
+  },
+  "f4451eba": {
+   "id": "f4451eba-2632-4955-b152-51cb77896e4a",
+   "title": "Boş Ders'te bol kahkaha",
+   "summary": "İkilinin bol esprili ve kahkahalı sohbetine, mekânın 360 derecelik dijital dünyası eşlik etti.\nKarşılıklı atışmalar, eğlenceli oyunlar ve sürprizlerle renklenen çekimde izleyiciler de bu keyifli buluşmanın bir parçası oldu.\nTalk show formatını interaktif dijital deneyimle buluşturan program, iki haftada bir The Cube’da yapılacak seyircili çekimlerle devam edecek.\nNev’in ağabeyi miras için harekete mi geçti? Avukatından sert yanıt: 'Küslük söz konusu değil'",
+   "members": [
+    {
+     "source": "Posta",
+     "kind": "outlet",
+     "title": "Boş Ders'te bol kahkaha",
+     "description": "İkilinin bol esprili ve kahkahalı sohbetine, mekânın 360 derecelik dijital dünyası eşlik etti.\nKarşılıklı atışmalar, eğlenceli oyunlar ve sürprizlerle renklenen çekimde izleyiciler de bu keyifli buluşmanın bir parçası oldu.\nTalk show formatını interaktif dijital deneyimle buluşturan program, iki haftada bir The Cube’da yapılacak seyircili çekimlerle devam edecek.\nNev’in ağabeyi miras için harekete mi geçti? Avukatından sert yanıt: 'Küslük söz konusu değil'",
+     "published_at": "2026-11-01 04:00:50+00"
+    }
+   ]
+  },
+  "fdfc440c": {
+   "id": "fdfc440c-057e-479b-9b5e-49b21d6ae37d",
+   "title": "SON DAKİKA HABERİİ: Fatma Betül Sayan Kaya tutuklama talebiyle hakimliğe sevk edildi",
+   "summary": "İstanbul Cumhuriyet Başsavcılığı tarafından yürütülen Sermaye piyasalarına ilişkin soruşturma kapsamında; şüpheli sıfatıyla ifadeleri alınmak üzere savcılığa çağırılan Fatma Betül Sayan Kaya, eşi İlyas Kaya ve İbrahim Ömer Gönül adliyeye geldi.\nİFADE İŞLEMLERİ TAMAMLANDI\nFatma Betül Sayan Kaya, eşi İlyas Kaya ve İbrahim Ömer Gönül, ifade işlemleri tamamlandı. İfadelerin 2 saat 15 dakika sürdüğü öğrenildi.\nErdoğan'dan fon soruşturmasıyla ilgili açıklama: Haksız kazanç sağlayanlar hesap verecek",
+   "members": [
+    {
+     "source": "Milliyet",
+     "kind": "outlet",
+     "title": "SON DAKİKA HABERİİ: Fatma Betül Sayan Kaya tutuklama talebiyle hakimliğe sevk edildi",
+     "description": "İstanbul Cumhuriyet Başsavcılığı tarafından yürütülen Sermaye piyasalarına ilişkin soruşturma kapsamında; şüpheli sıfatıyla ifadeleri alınmak üzere savcılığa çağırılan Fatma Betül Sayan Kaya, eşi İlyas Kaya ve İbrahim Ömer Gönül adliyeye geldi.\nİFADE İŞLEMLERİ TAMAMLANDI\nFatma Betül Sayan Kaya, eşi İlyas Kaya ve İbrahim Ömer Gönül, ifade işlemleri tamamlandı. İfadelerin 2 saat 15 dakika sürdüğü öğrenildi.\nErdoğan'dan fon soruşturmasıyla ilgili açıklama: Haksız kazanç sağlayanlar hesap verecek",
+     "published_at": "2026-11-05 18:08:09+00"
+    },
+    {
+     "source": "Aydınlık",
+     "kind": "outlet",
+     "title": "Fon soruşturmasında Fatma Betül Sayan Kaya tutuklandı",
+     "description": "Sermaye piyasası işlemlerine yönelik yürütülen soruşturma kapsamında AK Parti'li Fatma Betül Sayan Kaya, eşi İlyas Kaya ve eski Sermaye Piyasası Kurulu (SPK) Başkanı İbrahim Ömer Gönül'ün ifade işlemleri sona erdi. Üç isim, soruşturma kapsamında şüpheli sıfatıyla yeniden ifade verdi.",
+     "published_at": "2026-11-05 19:26:43+00"
+    },
+    {
+     "source": "İşçi Haber",
+     "kind": "niche",
+     "title": "Fatma Betül Sayan Kaya ve eşinin ifade işlemleri sona erdi",
+     "description": "AK Parti'li Fatma Betül Sayan Kaya, eşi İlyas Kaya ve eski SPK Başkanı İbrahim Ömer Gönül'ün ifade işlemleri tamamlandı.",
+     "published_at": "2026-11-05 19:38:24+00"
+    },
+    {
+     "source": "Dokuz8 Haber",
+     "kind": "outlet",
+     "title": "Fon soruşturmasında AKP'li eski bakan Fatma Betül Sayan Kaya tutuklandı",
+     "description": "İstanbul Cumhuriyet Başsavcılığı tarafından yürütülen fon vurgunu soruşturmasında hakimliğe sevk edilen eski bakan Fatma Betül Sayan Kaya tutuklandı.",
+     "published_at": "2026-11-05 23:01:05+00"
+    },
+    {
+     "source": "Haberler.com",
+     "kind": "aggregator",
+     "title": "Fatma Betül Sayan Kaya milletvekili mi, bakan mı, ne bakanı? Fatma Betül Sayan Kaya şu an milletvekili mi?",
+     "description": "Fon soruşturması kapsamında tutuklanan Fatma Betül Sayan Kaya'nın geçmişte üstlendiği siyasi görevler gündeme geldi. AK Parti'de önemli görevlerde bulunan ve bir dönem kabinede yer alan Kaya'nın milletvekilliği ve bakanlık geçmişine ilişkin ayrıntılar araştırılıyor. Peki, Fatma Betül Sayan Kaya milletvekili mi, bakan mı, ne bakanı? Fatma Betül Sayan Kaya şu an milletvekili mi? Detaylar haberimizde.",
+     "published_at": "2026-11-05 23:24:33+00"
+    },
+    {
+     "source": "Elips Haber",
+     "kind": "outlet",
+     "title": "Eski Bakan Fatma Betül Sayan Kaya fon soruşturmasında tutuklandı",
+     "description": "Fon krizi soruşturmasında eski Aile ve Sosyal Hizmetler Bakanı ve AK Parti Genel Başkan Yardımcısı Fatma Betül Sayan Kaya tutuklandı.",
+     "published_at": "2026-11-06 03:42:00+00"
+    }
+   ]
+  },
+  "fefb05a2": {
+   "id": "fefb05a2-0d24-49ac-b7d2-973065603e69",
+   "title": "Onlar da belediye başkanıydı",
+   "summary": "Ankara, İstanbul, İzmir, Bursa, Trabzon, Konya, Antalya, Yozgat, Samsun, Gaziantep, Eskişehir... Türkiye'nin her yerinde... Farklı dönemlerde... Değişik partilerden.\nHangi birini sayalım? Mehmet Keçeciler......Devamı için tıklayınız",
+   "members": [
+    {
+     "source": "Sabah",
+     "kind": "outlet",
+     "title": "Onlar da belediye başkanıydı",
+     "description": "Ankara, İstanbul, İzmir, Bursa, Trabzon, Konya, Antalya, Yozgat, Samsun, Gaziantep, Eskişehir... Türkiye'nin her yerinde... Farklı dönemlerde... Değişik partilerden.\nHangi birini sayalım? Mehmet Keçeciler......Devamı için tıklayınız",
+     "published_at": "2026-11-04 22:31:23+00"
+    }
+   ]
+  }
+ }
+}

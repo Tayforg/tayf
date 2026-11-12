@@ -88,6 +88,7 @@ import { pickNeutralTitle } from "./neutral-title";
 import { BLINDSPOT } from "../../../supabase/functions/_shared/cluster/blindspot";
 import { createReaderClient, createServerClient } from "@/lib/supabase/server";
 import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
+import { pickHeroCandidates } from "@/lib/images/hero-candidates";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -763,6 +764,65 @@ describe("placeholder image_url gate (db-4)", () => {
     expect(byId["a-logo"].image_url).toBeNull();
     expect(byId["a-sd"].image_url).toBeNull();
     expect(byId["a-jpg"].image_url).toBe("https://cdn.allowed.example/foto.jpg");
+  });
+
+  // h164-heroimg-1: IndyTurk's 300x168 'no picture' default image is the newest
+  // member of the story, and it used to be the hero although dokuz8 had a photo.
+  // The query boundary nulls it, so the first hero candidate is the photo.
+  it("an IndyTurk default image (newest member) never leads the hero: the dokuz8 photo is candidate [0]", async () => {
+    const indy = "https://www.indyturk.com/sites/default/files/default_images/index1.png";
+    const dokuz8 = "https://cdn.dokuz8haber.net/uploads/2024/10/kadir-ozkaya-1.webp";
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            { id: "a-indy", sourceId: "s-indy", image_url: indy, published_at: iso(5 * 60 * 1000) },
+            { id: "a-dokuz8", sourceId: "s-dokuz8", image_url: dokuz8, published_at: iso(60 * 60 * 1000) },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    const byId = Object.fromEntries(bundles[0].articles.map((a) => [a.id, a]));
+    expect(byId["a-indy"].image_url).toBeNull();
+    expect(byId["a-dokuz8"].image_url).toBe(dokuz8);
+    const candidates = pickHeroCandidates(bundles[0].articles.map((a) => a.image_url));
+    expect(candidates[0]).toBe(dokuz8);
+    expect(candidates).toEqual([dokuz8]);
+  });
+
+  it("nulls the four Karar / Istiklal cards of h164 and keeps the gold-shop stock photo", async () => {
+    const cards = [
+      "https://cdn.karar.com/news/1946618.jpg",
+      "https://cdn.karar.com/news/1947232.jpg",
+      "https://cdn.istiklal.com.tr/news/668615.jpg",
+      "https://cdn.istiklal.com.tr/news/625929.jpg",
+    ];
+    const photo = "https://cdn.karar.com/news/1946513.jpg";
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            ...cards.map((image_url, i) => ({
+              id: `a-card-${i}`,
+              sourceId: `s-card-${i}`,
+              image_url,
+              published_at: iso((5 + i) * 60 * 1000),
+            })),
+            { id: "a-photo", sourceId: "s-photo", image_url: photo, published_at: iso(60 * 60 * 1000) },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    const byId = Object.fromEntries(bundles[0].articles.map((a) => [a.id, a]));
+    for (let i = 0; i < cards.length; i++) expect(byId[`a-card-${i}`].image_url).toBeNull();
+    expect(byId["a-photo"].image_url).toBe(photo);
+    expect(pickHeroCandidates(bundles[0].articles.map((a) => a.image_url))).toEqual([photo]);
   });
 });
 

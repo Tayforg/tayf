@@ -654,6 +654,85 @@ export function stripTrailingTeasers(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// A lone trailing headline (h164-summaries-1, hunt 164).
+//
+// Milliyet and Posta paste ONE other story's headline as the last line of a description, with
+// no "Son dakika" ticker behind it ({@link cutAppendedTicker}) and no "!" headline in the run
+// ({@link stripTrailingTeasers}):
+//   bb349ef1 "...bulunulduğu öğrenildi.\nCumhurbaşkanı Erdoğan'dan COP31'de diplomasi trafiği"
+//   0ad663a9 "...ekipleri sevk edildi.\nCumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü"
+//   f4451eba "...devam edecek.\nNev’in ağabeyi miras için harekete mi geçti? Avukatından sert yanıt: '...'"
+// The line stands out by four things together, and a line that fails ANY of them stays ("when
+// unsure, keep"):
+//  1. It is the last, or the last but one, non-blank line, and not line 0.
+//  2. Its shape is a headline's: short and unpunctuated ({@link isUnpunctuatedShortLine}) and
+//     teaser-shaped (teaserShape >= 1: no quote, no conjunction opener, three words, a capital),
+//     with no ellipsis ("…" or two dots) anywhere in it: a line with one is a text a feed cut,
+//     not a headline it pasted (fefb05a2's last line "Hangi birini sayalım? Mehmet
+//     Keçeciler......Devamı için tıklayınız" is the column's own clamp tail with its CTA).
+//  3. It shares no TEASER_STEM_LEN stem with the text in front of it (the stripTrailingTeasers
+//     rule: a line about the same words is about the same story; fdfc440c's "Erdoğan'dan fon
+//     soruşturmasıyla ..." shares 'soruşt' with its body and stays).
+//  4. The nearest line that is kept ends in a sentence mark (closers aside). A text whose last
+//     lines are all unpunctuated is a bullet list or a digest, not a sentence and a headline.
+// At most two lines go. Lines are found with indexOf / lastIndexOf, only lines of at most 400
+// raw characters are looked at and the stem sets cover at most 2,000 characters of lead text, so
+// the cost is linear in the input; no regular expression runs over the text.
+// ---------------------------------------------------------------------------
+
+/** At most this many trailing lines are dropped. */
+const LONE_HEADLINE_MAX_LINES = 2;
+
+/** True when `line` holds "…" or two dots in a row: a cut text, which no feed pastes as a headline. */
+function holdsEllipsis(line: string): boolean {
+  return line.includes("…") || line.includes("..");
+}
+
+/** True when `s` ends in . ! ? or … once the closing quotes and brackets are looked past. */
+function endsInSentenceMark(s: string): boolean {
+  let end = s.length;
+  while (end > 0 && LINE_CLOSERS.has(s.charAt(end - 1))) end--;
+  return end > 0 && LINE_SENTENCE_MARKS.has(s.charAt(end - 1));
+}
+
+/**
+ * Drop up to two headline-shaped lines pasted at the end of a description, behind a sentence
+ * (see the section comment). The first non-blank line is never touched. The SAME string is
+ * returned when nothing is cut; otherwise the kept text with its end trimmed. Pure, linear,
+ * idempotent; an empty string and a non-string are returned as they are.
+ */
+export function cutLoneTrailingHeadline(text: string): string {
+  if (typeof text !== "string" || text.length === 0) return text;
+  const leadEnd = leadLineEnd(text);
+  if (leadEnd === -1) return text;
+
+  let end = text.length; // exclusive end of the span under inspection
+  let cutAt = -1;
+  let dropped = 0;
+  while (end > leadEnd && dropped < LONE_HEADLINE_MAX_LINES) {
+    // `end > leadEnd` and text[leadEnd] is "\n": the search cannot fall off the front.
+    const nl = text.lastIndexOf("\n", end - 1);
+    const start = nl + 1;
+    if (end - start > TEASER_MAX_RAW_LINE) break;
+    const line = text.slice(start, end).trim();
+    if (line === "") {
+      end = nl;
+      continue;
+    }
+    if (!isUnpunctuatedShortLine(line) || teaserShape(line) === 0 || holdsEllipsis(line)) break;
+    const lead = new Set<string>();
+    addTeaserStems(text, Math.min(start, TEASER_LEAD_SCAN), lead);
+    if (sharesTeaserStem(line, lead)) break;
+    cutAt = nl;
+    end = nl;
+    dropped++;
+  }
+  if (cutAt === -1) return text;
+  const kept = text.slice(0, cutAt).trimEnd();
+  return endsInSentenceMark(kept) ? kept : text;
+}
+
+// ---------------------------------------------------------------------------
 // Description swap detector (h16-precision-2, hunt 16). LOG-ONLY this wave.
 //
 // A publisher can ship the RSS description of a DIFFERENT story: sabah

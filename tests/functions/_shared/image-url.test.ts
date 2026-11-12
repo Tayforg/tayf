@@ -1026,6 +1026,10 @@ describe("upgradeImageVariant (h15-images-4)", () => {
       "https://ichef.bbci.co.uk/ace/ws/240/cpsprodpb/x.jpg",
       "https://www.youtube.com/embed/2lKJof-8DeE",
       "https://youtu.be/2lKJof-8DeE",
+      // h165 review: an NTV host root that only carried the resizer query (the query's removal made it a host root)
+      "https://images.ntv.com.tr/?width=930",
+      "https://images.ntv.com.tr?width=930",
+      "https://images.ntv.com.tr//?format=webp",
     ]) {
       const once = normalizeImageUrl(x);
       expect(normalizeImageUrl(once)).toBe(once);
@@ -1161,8 +1165,9 @@ describe("isPlaceholderImageUrl: five stand-ins that slipped through (h73-ingest
     expect(
       PLACEHOLDER_IMAGE_ASSETS.has("imgs.stargazete.com/imgsdisk/2026/10/02/1138373167528_2-15012019114103500-41.jpg"),
     ).toBe(true);
-    // 9 up to h73 + the 9 exact keys of h87-imagerelevance-1.
-    expect(PLACEHOLDER_IMAGE_ASSETS.size).toBe(18);
+    // 9 up to h73 + the 9 exact keys of h87-imagerelevance-1 + the 4 of
+    // h164-heroimg-1 (two Karar and two Istiklal cards).
+    expect(PLACEHOLDER_IMAGE_ASSETS.size).toBe(22);
   });
 
   it("the two new exact keys are already in normalised form", () => {
@@ -1648,5 +1653,314 @@ describe("isPlaceholderImageUrl: byline avatars and stand-in cards (h87-imagerel
         expect(extractHeroImageFromHtml(html)).toBeNull();
       });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-heroimg-1: IndyTurk's 300x168 'no picture' default image (a whole Drupal
+// directory) and four Karar / Istiklal 'SON DAKIKA' / 'Gunun Ozeti' cards that
+// replaced the cards h87 listed (those files are dead). The IndyTurk default was
+// the live LCP hero of multi-source stories although another member had a photo.
+// Real photos stay false: IndyTurk keeps them under /sites/default/files/article/
+// (505 rows in 14 days) and /styles/ (79); the Karar gold-shop stock photo is a
+// topical image.
+// ---------------------------------------------------------------------------
+
+describe("isPlaceholderImageUrl: IndyTurk default images and four Karar / Istiklal cards (h164-heroimg-1)", () => {
+  const PLACEHOLDERS: ReadonlyArray<readonly [string, string]> = [
+    ["indyturk default index1.png", "https://www.indyturk.com/sites/default/files/default_images/index1.png"],
+    ["indyturk apex host, another file in the directory", "https://indyturk.com/sites/default/files/default_images/other.jpg"],
+    ["karar 1946618", "https://cdn.karar.com/news/1946618.jpg"],
+    ["karar 1947232", "https://cdn.karar.com/news/1947232.jpg"],
+    ["istiklal 668615", "https://cdn.istiklal.com.tr/news/668615.jpg"],
+    ["istiklal 625929", "https://cdn.istiklal.com.tr/news/625929.jpg"],
+  ];
+
+  // Real photos: the two IndyTurk URLs are copied from a read-only prod dump
+  // (2026-11-12), the Karar ones are the gold-shop stock photo and another card
+  // neighbour that is a photo.
+  const REAL_PHOTOS: ReadonlyArray<readonly [string, string]> = [
+    ["indyturk /article/ photo", "https://www.indyturk.com/sites/default/files/article/main_image/2026/11/12/1383707-1885291925.png"],
+    [
+      "indyturk /styles/ photo with its itok query",
+      "https://www.indyturk.com/sites/default/files/styles/800xauto/public/thumbnails/image/2026/11/12/1383692-475907018.jpeg?itok=ktasTCAN",
+    ],
+    ["karar 1946513 (topical gold stock photo)", "https://cdn.karar.com/news/1946513.jpg"],
+    ["karar 1942808", "https://cdn.karar.com/news/1942808.jpg"],
+  ];
+
+  // `https://host/a` -> `https://host//a`: the doubled leading path slash.
+  const doubled = (url: string): string => {
+    const { origin, pathname, search } = new URL(url);
+    return `${origin}/${pathname}${search}`;
+  };
+
+  it.each(PLACEHOLDERS)("is true for the stored URL: %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(url)).toBe(true);
+  });
+
+  it.each(PLACEHOLDERS)("is true with a query string: %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(`${url}?v=1`)).toBe(true);
+  });
+
+  it.each(PLACEHOLDERS)("is true with a doubled leading path slash: %s", (_label, url) => {
+    const d = doubled(url);
+    expect(d).not.toBe(url);
+    expect(isPlaceholderImageUrl(d)).toBe(true);
+  });
+
+  it.each(PLACEHOLDERS)("is true for the protocol-relative, http and upper-case-host spellings: %s", (_label, url) => {
+    const rest = url.slice("https://".length);
+    const host = rest.slice(0, rest.indexOf("/"));
+    expect(isPlaceholderImageUrl(`//${rest}`)).toBe(true);
+    expect(isPlaceholderImageUrl(`http://${rest}`)).toBe(true);
+    expect(isPlaceholderImageUrl(url.replaceAll(host, host.toUpperCase()))).toBe(true);
+  });
+
+  it.each(REAL_PHOTOS)("is false for the real photo: %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(url)).toBe(false);
+  });
+
+  it("is the same verdict through the render re-export and through ingest / optimizedThumbUrl", () => {
+    const source = {
+      id: "src-h164",
+      name: "Test Source",
+      slug: "test",
+      url: "https://example.test",
+      rss_url: "https://example.test/rss",
+    };
+    for (const [, url] of PLACEHOLDERS) {
+      expect(renderIsPlaceholderImageUrl(url)).toBe(true);
+      expect(optimizedThumbUrl(url, 128)).toBeNull();
+      const row = normalizeItem(source, {
+        title: "Afyonkarahisar'da dehşet: araç içinde 5 kişinin cansız bedeni bulundu",
+        link: "https://example.test/haber/1",
+        enclosure: { url, type: "image/jpeg" },
+      });
+      expect(row?.image_url).toBeNull();
+    }
+    for (const [, url] of REAL_PHOTOS) {
+      expect(renderIsPlaceholderImageUrl(url)).toBe(false);
+    }
+  });
+
+  describe("the IndyTurk directory rule is narrow", () => {
+    it.each([
+      ["a file name nobody has seen yet under the directory", "https://www.indyturk.com/sites/default/files/default_images/brand-new-name.webp"],
+      ["a nested file under the directory", "https://www.indyturk.com/sites/default/files/default_images/a/b/c.png"],
+    ])("is true for %s", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(true);
+    });
+
+    it("matches the directory case-insensitively (path and host)", () => {
+      expect(isPlaceholderImageUrl("https://WWW.IndyTurk.com/Sites/Default/Files/Default_Images/Index1.png")).toBe(true);
+    });
+
+    it.each([
+      ["the bare directory name without a trailing slash", "https://www.indyturk.com/sites/default/files/default_images"],
+      ["a look-alike directory", "https://www.indyturk.com/sites/default/files/default_images2/a.png"],
+      ["the directory name not at the start of the path", "https://www.indyturk.com/sites/default/files/article/default_images/a.png"],
+      ["the directory only in the query", "https://www.indyturk.com/sites/default/files/article/a.png?p=/sites/default/files/default_images/a.png"],
+      ["the directory on another host", "https://cdn.example.com/sites/default/files/default_images/a.png"],
+      ["a look-alike host that starts with www.indyturk.com", "https://www.indyturk.com.evil.test/sites/default/files/default_images/a.png"],
+      ["a host that ends with indyturk.com", "https://evil-indyturk.com/sites/default/files/default_images/a.png"],
+      ["another indyturk subdomain (only www and the apex are listed)", "https://img.indyturk.com/sites/default/files/default_images/a.png"],
+    ])("is false for %s", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    });
+
+    it("is a path-prefix family, not an exact asset", () => {
+      for (const k of PLACEHOLDER_IMAGE_ASSETS) {
+        expect(k).not.toMatch(/default_images/);
+      }
+    });
+
+    it("stays linear on a very long path under and beside the directory", () => {
+      expectCpuUnder(() => {
+        expect(isPlaceholderImageUrl(`https://www.indyturk.com/sites/default/files/default_images/${"a/".repeat(20000)}x.png`)).toBe(true);
+        expect(isPlaceholderImageUrl(`https://www.indyturk.com/sites/default/files/default_imagez/${"a/".repeat(20000)}x.png`)).toBe(false);
+      }, 2000);
+    });
+  });
+
+  describe("exact asset keys", () => {
+    const NEW_KEYS = [
+      "cdn.karar.com/news/1946618.jpg",
+      "cdn.karar.com/news/1947232.jpg",
+      "cdn.istiklal.com.tr/news/668615.jpg",
+      "cdn.istiklal.com.tr/news/625929.jpg",
+    ];
+
+    it("holds the four new keys, so the normalised-form guard above covers them", () => {
+      expect(new Set(NEW_KEYS).size).toBe(4);
+      for (const k of NEW_KEYS) expect(PLACEHOLDER_IMAGE_ASSETS.has(k)).toBe(true);
+    });
+
+    it("every new key is already in normalised form", () => {
+      for (const k of NEW_KEYS) {
+        expect(normalizeImageUrl("https://" + k)).toBe("https://" + k);
+      }
+    });
+
+    it("leaves the dead h87 keys in place and does NOT list the gold-shop photo", () => {
+      for (const k of ["cdn.karar.com/news/1944983.jpg", "cdn.karar.com/news/1944031.jpg", "cdn.istiklal.com.tr/news/658385.jpg"]) {
+        expect(PLACEHOLDER_IMAGE_ASSETS.has(k)).toBe(true);
+      }
+      expect(PLACEHOLDER_IMAGE_ASSETS.has("cdn.karar.com/news/1946513.jpg")).toBe(false);
+    });
+
+    it("neighbouring file ids of the new cards are not placeholders", () => {
+      for (const u of [
+        "https://cdn.karar.com/news/1946619.jpg",
+        "https://cdn.karar.com/news/1947233.jpg",
+        "https://cdn.istiklal.com.tr/news/668616.jpg",
+        "https://cdn.istiklal.com.tr/news/625930.jpg",
+        "https://cdn.karar.com/news/1946618.png",
+        "https://cdn.example.com/news/1946618.jpg",
+      ]) {
+        expect(isPlaceholderImageUrl(u)).toBe(false);
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-heroimg-2: every images.ntv.com.tr URL carries the resizer query
+// `?width=930&format=webp`, which the /_next/image allowlist refuses (a query is
+// allowed only on QUERY_HOSTS, h30-abuse-4), so an NTV image never rendered. The
+// file is served WITHOUT the query (HEAD 200 image/jpeg), so normalisation drops
+// the resizer query for that one host. The allowlist is not widened.
+// ---------------------------------------------------------------------------
+
+describe("normalizeImageUrl: the NTV resizer query (h164-heroimg-2)", () => {
+  const AA =
+    "https://images.ntv.com.tr/images/AA-20261110-43028900-43028899-CUMHURBASKANI_ERDOGAN_BM_GENEL_SEKRETERI_GUTERRES_ILE_GORUSTU-983810(2).jpg";
+  const NON_ASCII = "https://images.ntv.com.tr/images/ahmetyoncaşık-959546(3).jpg";
+  const ENCODED = "https://images.ntv.com.tr/images/ahmetyonca%C5%9F%C4%B1k-959546(3).jpg";
+
+  it.each([
+    ["the AA photo", AA],
+    ["a non-ASCII path (normalisation leaves the raw spelling)", NON_ASCII],
+    ["a percent-encoded path", ENCODED],
+  ])("drops ?width=930&format=webp: %s", (_label, clean) => {
+    expect(normalizeImageUrl(`${clean}?width=930&format=webp`)).toBe(clean);
+  });
+
+  it.each([
+    ["the AA photo", AA],
+    ["a non-ASCII path", NON_ASCII],
+    ["a percent-encoded path", ENCODED],
+  ])("drops the &amp; spelling that serbestiyet re-publishes: %s", (_label, clean) => {
+    expect(normalizeImageUrl(`${clean}?width=930&amp;format=webp`)).toBe(clean);
+  });
+
+  it("drops every combination of the four resizer keys", () => {
+    for (const q of [
+      "?width=930",
+      "?height=520",
+      "?format=webp",
+      "?quality=85",
+      "?height=520&quality=85",
+      "?quality=85&format=webp&width=1200&height=630",
+      "?width=930&amp;height=520&amp;quality=85&amp;format=webp",
+      "?width=&format=",
+      "?width",
+    ]) {
+      expect(normalizeImageUrl(`${AA}${q}`)).toBe(AA);
+    }
+  });
+
+  it("keeps a fragment byte for byte and still drops the query before it", () => {
+    expect(normalizeImageUrl(`${AA}?width=930&format=webp#x`)).toBe(`${AA}#x`);
+  });
+
+  it("works for the upper-case host, the protocol-relative spelling and a doubled leading slash", () => {
+    expect(normalizeImageUrl("https://IMAGES.NTV.COM.TR/images/a-1.jpg?width=930&format=webp")).toBe(
+      "https://IMAGES.NTV.COM.TR/images/a-1.jpg",
+    );
+    expect(normalizeImageUrl("//images.ntv.com.tr/images/a-1.jpg?width=930&format=webp")).toBe(
+      "https://images.ntv.com.tr/images/a-1.jpg",
+    );
+    expect(normalizeImageUrl("https://images.ntv.com.tr//images/a-1.jpg?width=930&format=webp")).toBe(
+      "https://images.ntv.com.tr/images/a-1.jpg",
+    );
+  });
+
+  it("a host root that only carried a resizer query is not an image (h165 review)", () => {
+    for (const root of [
+      "https://images.ntv.com.tr/?width=930",
+      "https://images.ntv.com.tr?width=930",
+      "https://images.ntv.com.tr//?format=webp",
+      "https://images.ntv.com.tr/?width=930&amp;format=webp",
+    ]) {
+      expect(normalizeImageUrl(root), root).toBeNull();
+    }
+    // A file under the host still loses its query and keeps the rest.
+    expect(normalizeImageUrl("https://images.ntv.com.tr/2026/a.jpg?width=930")).toBe("https://images.ntv.com.tr/2026/a.jpg");
+    // A host root with a fragment, or with a query that is not the resizer's, is judged as before.
+    expect(normalizeImageUrl("https://images.ntv.com.tr/?u=https://images.ntv.com.tr/a.jpg")).not.toBeNull();
+    expect(normalizeImageUrl("https://images.ntv.com.tr/")).toBeNull();
+  });
+
+  it("is idempotent and leaves a query-less NTV URL identical", () => {
+    const once = normalizeImageUrl(`${NON_ASCII}?width=930&format=webp`);
+    expect(normalizeImageUrl(once)).toBe(once);
+    expect(normalizeImageUrl(AA)).toBe(AA);
+    expect(normalizeImageUrl(`${AA}?`)).toBe(`${AA}?`);
+  });
+
+  it("the normalised URL is allowed by the /_next/image allowlist, the raw one is not", () => {
+    for (const clean of [AA, NON_ASCII, ENCODED]) {
+      const raw = `${clean}?width=930&format=webp`;
+      expect(isAllowedRemoteImageUrl(raw)).toBe(false);
+      const normalized = normalizeImageUrl(raw);
+      expect(normalized).toBe(clean);
+      expect(isAllowedRemoteImageUrl(normalized as string)).toBe(true);
+    }
+  });
+
+  describe("every other query on NTV stays refused (the h30-abuse-4 rule)", () => {
+    it.each([
+      ["a cache-buster", `${AA}?cb=1`],
+      ["a resizer key next to a foreign one", `${AA}?width=930&v=2`],
+      ["a foreign key first", `${AA}?v=2&width=930`],
+      ["the &amp; spelling with a foreign key", `${AA}?width=930&amp;cb=1`],
+      ["a doubled amp; prefix", `${AA}?amp;amp;format=webp`],
+      ["an upper-case key", `${AA}?Width=930`],
+      ["a repeated resizer key beside a foreign one", `${AA}?width=1&width=2&cb=3`],
+      ["a wrapped origin", `${AA}?u=https://images.ntv.com.tr/images/b.jpg`],
+      ["only separators (no key at all)", `${AA}?&&`],
+    ])("keeps %s byte for byte, and the allowlist still refuses it", (_label, url) => {
+      expect(normalizeImageUrl(url)).toBe(url);
+      expect(isAllowedRemoteImageUrl(url)).toBe(false);
+    });
+  });
+
+  describe("other hosts are untouched", () => {
+    it.each([
+      ["tmgrup ?u= resizer", "https://iaahbr.tmgrup.com.tr/c18248/1200/675/0/0/1200/675?u=https://iahbr.tmgrup.com.tr/uploads/a.jpg"],
+      ["sozcucdn ?w= resizer", "https://img.sozcucdn.com/Uploads/a.jpg?w=1200&amp;h=675&mode=crop"],
+      ["indyturk itok", "https://www.indyturk.com/sites/default/files/styles/800xauto/public/a.jpeg?itok=ktasTCAN"],
+      ["a resizer-keyed query on another host", "https://cdn.example.com/a.jpg?width=930&format=webp"],
+      ["www.ntv.com.tr (only images.ntv.com.tr is handled)", "https://www.ntv.com.tr/a.jpg?width=930&format=webp"],
+      ["a look-alike host", "https://images.ntv.com.tr.evil.test/a.jpg?width=930&format=webp"],
+      ["a host that ends with images.ntv.com.tr", "https://evil-images.ntv.com.tr/a.jpg?width=930&format=webp"],
+      ["a host that ends with it as a subdomain", "https://x.images.ntv.com.tr/a.jpg?width=930&format=webp"],
+    ])("returns %s identical", (_label, url) => {
+      expect(normalizeImageUrl(url)).toBe(url);
+    });
+  });
+
+  it("does not turn an NTV image into a placeholder", () => {
+    expect(isPlaceholderImageUrl(`${AA}?width=930&format=webp`)).toBe(false);
+    expect(isPlaceholderImageUrl(AA)).toBe(false);
+  });
+
+  it("stays linear on a very long resizer query and on a very long foreign one", () => {
+    expectCpuUnder(() => {
+      expect(normalizeImageUrl(`${AA}?${"width=1&".repeat(20000)}format=webp`)).toBe(AA);
+      expect(normalizeImageUrl(`${AA}?${"width=1&".repeat(20000)}cb=1`)).toBe(`${AA}?${"width=1&".repeat(20000)}cb=1`);
+      expect(normalizeImageUrl(`${AA}?${"&amp;".repeat(20000)}`)).toBe(`${AA}?${"&amp;".repeat(20000)}`);
+    }, 2000);
   });
 });

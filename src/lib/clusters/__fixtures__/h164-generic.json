@@ -1,0 +1,586 @@
+{
+ "finding": "h164-titles-1",
+ "note": "Test-only. The member titles (newest first) of the clusters whose stored neutral title is a content-free '<Kişi>'den açıklamalar' H1 or a question teaser without a '?', as read on production on 2026-11-12 (read-only SELECT of cluster_articles x articles x sources), with each stored title, its stamp and article count. `opinion` is isOpinionUrl of the article URL (the URL itself is not kept).",
+ "clusters": [
+  {
+   "cid": "67695cbd",
+   "id": "67695cbd-c276-4bc1-9cbe-37e9ee78ed33",
+   "stored": "MHP Lideri Bahçeli'den açıklamalar",
+   "model": "extractive-v6",
+   "stamped": 27,
+   "article_count": 27,
+   "members": [
+    {
+     "source": "tele1",
+     "title": "Bahçeli: Türkiye'ye parmak sallamak Avrupa'nın harcı değildir",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Bahçeli, MHP TBMM Grup Toplantısı'nda konuştu:",
+     "opinion": false
+    },
+    {
+     "source": "dunya",
+     "title": "Bahçeli'den İsrail seçimleri değerlendirmesi: Netanyahu'ya Gazze mesajı",
+     "opinion": false
+    },
+    {
+     "source": "haberport",
+     "title": "Bahçeli'den uyarı: Avrupa'nın Sanayi Devrimi üstünlüğü sürmüyor",
+     "opinion": false
+    },
+    {
+     "source": "haberturk",
+     "title": "MHP lideri Bahçeli'den açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "sputnik-turkce",
+     "title": "Bahçeli: Kimse yanlış hesap yapmasın, kargaşadan medet ummasın",
+     "opinion": false
+    },
+    {
+     "source": "odatv",
+     "title": "Devlet Bahçeli TBMM Grup Toplantısı'nda konuştu... 'Türk dünyasında birlik ve dirlik istiyoruz'",
+     "opinion": false
+    },
+    {
+     "source": "f5-haber",
+     "title": "Bahçeli'den TBMM'de önemli açıklamalar! En büyük hürriyet Cumhuriyettir",
+     "opinion": false
+    },
+    {
+     "source": "cgtn-turk",
+     "title": "Bahçeli grup toplantısında konuşuyor...",
+     "opinion": false
+    },
+    {
+     "source": "yeni-asir",
+     "title": "MHP lideri Bahçeli'den partisinin grup toplantısında önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "evrensel",
+     "title": "Devlet Bahçeli MHP grup toplantısında konuştu: Siyasette arınma ve aklanma ertelenemez",
+     "opinion": false
+    },
+    {
+     "source": "yeni-safak",
+     "title": "MHP lideri Bahçeli'den önemli açıklamalar: Türkiye’ye parmak sallamak Avrupa'nın harcı değil",
+     "opinion": false
+    },
+    {
+     "source": "beyaz-gazete",
+     "title": "Devlet Bahçeli'den Önemli Açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "ilke-tv",
+     "title": "Grup Toplantısı | Bahçeli’den süreç mesajı: ‘Tarihi bir öneme sahip’",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "MHP Lideri Bahçeli: Türkler Anadolu'da ikinci Ergenekon destanı yazdı",
+     "opinion": false
+    },
+    {
+     "source": "yenicag",
+     "title": "MHP lideri Devlet Bahçeli partisinin grup toplantısında konuşuyor",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "Son dakika... MHP lideri Bahçeli: Kudüs İttifakı gerçekleştirilmelidir",
+     "opinion": false
+    },
+    {
+     "source": "sabah",
+     "title": "SON DAKİKA | MHP lideri Devlet Bahçeli'den net mesaj: Akdeniz'de oldubittiye izin vermeyiz!",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "Bahçeli açıklamalarda bulunuyor",
+     "opinion": false
+    },
+    {
+     "source": "cumhuriyet",
+     "title": "Son dakika... MHP lideri Bahçeli'den Avrupa'ya Fransa, ekonomi ve Türkiye mesajı: 'Pedal çevirecek dermanı kalmadı'",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "SON DAKİKA... MHP lideri Bahçeli: Terör bitecek kardeşlik yükselecek",
+     "opinion": false
+    },
+    {
+     "source": "a-haber",
+     "title": "CANLI | MHP lideri Bahçeli'den önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "takvim",
+     "title": "MHP Grup Toplantısı! Devlet Bahçeli'den TBMM'de önemli açıklamalar - Canlı Yayın",
+     "opinion": false
+    },
+    {
+     "source": "birgun",
+     "title": "Devlet Bahçeli konuşuyor: Hangi mesajları verecek?",
+     "opinion": false
+    },
+    {
+     "source": "haber7",
+     "title": "MHP lideri Bahçeli, TBMM'de grup toplantısında konuşuyor",
+     "opinion": false
+    },
+    {
+     "source": "haber-global",
+     "title": "MHP lideri Bahçeli: Türkiye'ye parmak sallamak Avrupa'nın harcı değil",
+     "opinion": false
+    },
+    {
+     "source": "elips-haber",
+     "title": "CANLI | Devlet Bahçeli, TBMM'deki grup toplantısında konuşuyor",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "298bbb75",
+   "id": "298bbb75-6af2-48db-b6c5-8b29f25f2438",
+   "stored": "Cumhurbaşkanı Erdoğan'dan açıklamalar",
+   "model": "extractive-v6",
+   "stamped": 18,
+   "article_count": 22,
+   "members": [
+    {
+     "source": "on-haber",
+     "title": "Erdoğan: Cumhuriyeti yeniden cumhurla buluşturduk",
+     "opinion": false
+    },
+    {
+     "source": "indyturk",
+     "title": "Cumhurbaşkanı Erdoğan: Cumhuriyeti yeniden cumhurla buluşturduk",
+     "opinion": false
+    },
+    {
+     "source": "haberport",
+     "title": "Milli mücadele vurgusu: Erdoğan'dan Atatürk'ü anma töreninde tarih değerlendirmesi",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Cumhurbaşkanı Erdoğan'ın Atatürk'le ilgili sözleri anma törenine damga vurdu",
+     "opinion": false
+    },
+    {
+     "source": "sputnik-turkce",
+     "title": "Cumhurbaşkanı Erdoğan: Gazi'nin mirasını istismar edenler, on yıllar boyunca bu millete tepeden baktılar",
+     "opinion": false
+    },
+    {
+     "source": "ekonomim",
+     "title": "Cumhurbaşkanı Erdoğan: Gazi'nin mirasını istismar edenler bu millete tepeden baktılar",
+     "opinion": false
+    },
+    {
+     "source": "odatv",
+     "title": "Erdoğan 10 Kasım töreninde konuştu: Atatürk'e Namık Kemal'li anma",
+     "opinion": false
+    },
+    {
+     "source": "ajans-haber",
+     "title": "Cumhurbaşkanı Erdoğan: “Cumhuriyeti yeniden cumhurla buluşturduk”",
+     "opinion": false
+    },
+    {
+     "source": "yeni-akit",
+     "title": "Cumhurbaşkanı Erdoğan, Atatürk’ü Anma Töreni'nde konuştu: Gazi'nin mirasını istismar edenler yıllarca bu millete tepeden baktı",
+     "opinion": false
+    },
+    {
+     "source": "yeni-safak",
+     "title": "Cumhurbaşkanı Erdoğan: Sivil anayasayı milletimize kazandıracağız",
+     "opinion": false
+    },
+    {
+     "source": "yeni-asir",
+     "title": "Başkan Erdoğan'dan Atatürk'ü Anma Töreni'nde önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "sabah",
+     "title": "Atatürk'ü anma töreni... Başkan Erdoğan'dan önemli mesajlar",
+     "opinion": false
+    },
+    {
+     "source": "elips-haber",
+     "title": "CANLI | Erdoğan, Atatürk'ü Anma Programı'nda konuşuyor",
+     "opinion": false
+    },
+    {
+     "source": "haber7",
+     "title": "Cumhurbaşkanı Erdoğan'dan son dakika açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "turkiye-gazetesi",
+     "title": "Cumhurbaşkanı'ndan önemli mesajlar",
+     "opinion": false
+    },
+    {
+     "source": "haberturk",
+     "title": "Cumhurbaşkanı Erdoğan'dan açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "takvim",
+     "title": "Başkan Erdoğan'dan Atatürk'ü Anma Töreni'nde iç cephe mesajı: Cumhuriyet'i yeniden cumhur ile buluşturduk... Sivil anayasa mesajı",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "#CANLI Cumhurbaşkanı Erdoğan açıklamalarda bulunuyor",
+     "opinion": false
+    },
+    {
+     "source": "a-haber",
+     "title": "CANLI Başkan Erdoğan'dan Atatürk'ü anma töreninde önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "Atatürk'ü Anma Töreni... Başkan Erdoğan: Atatürk'ü rahmetle yad ediyoruz",
+     "opinion": false
+    },
+    {
+     "source": "trt-haber",
+     "title": "Cumhurbaşkanı Erdoğan: Cumhuriyet'i yeniden cumhurla buluşturduk",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "CANLI: Cumhurbaşkanı Erdoğan konuşuyor",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "9df76d26",
+   "id": "9df76d26-9243-4689-bfdc-d2a9568146d5",
+   "stored": "111. Dönem Kaymakamlar Kurası Töreni. Cumhurbaşkanı Erdoğan'dan önemli açıklamalar",
+   "model": "extractive-v6",
+   "stamped": 16,
+   "article_count": 18,
+   "members": [
+    {
+     "source": "haber-com",
+     "title": "Cumhurbaşkanı Erdoğan: Benim gözümde kaymakamın mesaisi olmaz",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Cumhurbaşkanı Erdoğan 111. dönem kaymakamlar Kurası'nda",
+     "opinion": false
+    },
+    {
+     "source": "posta",
+     "title": "111. Dönem Kaymakamlar Kurası Töreni | Cumhurbaşkanı Erdoğan: 'Bu işin mesaisi olmaz'",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "SON DAKİKA! Cumhurbaşkanı Erdoğan'dan: Hiçbir yapıya müsamahamız yok",
+     "opinion": false
+    },
+    {
+     "source": "elips-haber",
+     "title": "Erdoğan 'kaymakamlar kurası' töreninde konuştu: Devlet kapısı, çare kapısıdır",
+     "opinion": false
+    },
+    {
+     "source": "cgtn-turk",
+     "title": "Cumhurbaşkanı Erdoğan konuşuyor...",
+     "opinion": false
+    },
+    {
+     "source": "turkiye-gazetesi",
+     "title": "Erdoğan, Kaymakamlar Kurası Töreni'nde konuşuyor",
+     "opinion": false
+    },
+    {
+     "source": "istiklal",
+     "title": "Cumhurbaşkanı Recep Tayyip Erdoğan: \"İnsanımızı Belirsizliğe Mahkûm Etmeyin”",
+     "opinion": false
+    },
+    {
+     "source": "ajans-haber",
+     "title": "Cumhurbaşkanı Erdoğan: “Kaymakamın mesaisi olmaz, gecesi gündüzü olmaz”",
+     "opinion": false
+    },
+    {
+     "source": "yeni-asir",
+     "title": "Başkan Erdoğan'dan 111. Dönem Kaymakamlar Kurası Töreni'nde önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "yeni-safak",
+     "title": "Cumhurbaşkanı Erdoğan'dan kaymakam adaylarına 'ateşten gömlek' uyarısı: Emanete gölge düşürmeyeceksiniz",
+     "opinion": false
+    },
+    {
+     "source": "hurriyet",
+     "title": "111. Dönem Kaymakamlar Kurası Töreni | Cumhurbaşkanı Erdoğan’dan önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "a-haber",
+     "title": "Başkan Erdoğan'dan Cumhurbaşkanlığı Külliyesi'nde önemli mesajlar",
+     "opinion": false
+    },
+    {
+     "source": "takvim",
+     "title": "Başkan Erdoğan'dan '111. Dönem Kaymakamlar Kurası'nda önemli mesajlar",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "111. Dönem Kaymakamlar Kurası Töreni... Başkan Erdoğan'dan önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "Cumhurbaşkanı Erdoğan'dan \"ateşten gömlek\" benzetmesi: Benim gözümde kaymakamın mesaisi olmaz",
+     "opinion": false
+    },
+    {
+     "source": "sabah",
+     "title": "Son Dakika | Başkan Erdoğan'dan önemli açıklamalar: Yönetici zor günde vatandaşın yanında olmalı",
+     "opinion": false
+    },
+    {
+     "source": "trt-haber",
+     "title": "Cumhurbaşkanı Erdoğan: Yöneticinin güven vermesi köklü devlet geleneğimizin temelidir",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "ece7ef31",
+   "id": "ece7ef31-6f4c-49ab-87c4-a3479b5e9730",
+   "stored": "COP31 Zirvesi. Bakan Kurum'dan açıklamalar",
+   "model": "extractive-v6",
+   "stamped": 4,
+   "article_count": 6,
+   "members": [
+    {
+     "source": "posta",
+     "title": "Bakan Kurum’dan COP31’de dünyaya mesaj: İklim risklerinin sınırı yok",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "Bakan Kurum’dan COP31’de dünyaya mesaj: İklim risklerinin sınırı yok",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "SON DAKİKA | Bakan Kurum'dan COP31'de üç kritik çağrı: İklim hedefleri yatırıma dönüşmeli",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "Bakan Kurum açıklamalarda bulunuyor",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "COP31 Zirvesi! Bakan Kurum'dan açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "ajans-haber",
+     "title": "Bakan Kurum: “İklim risklerinin sınırı yok, küresel dayanışma şart”",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "32a3e53c",
+   "id": "32a3e53c-0b24-4e2c-8964-54ae2b18aff0",
+   "stored": "İş Dünyası ve Yatırım Zirvesi'nin Açılış Programı. Bakan Kurum'dan açıklamalar",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 4,
+   "members": [
+    {
+     "source": "haberler-com",
+     "title": "İKLİM ZİRVESİ COP31 ANTALYA - Cumhurbaşkanı Yardımcısı Yılmaz, COP31 kapsamındaki \"İş Dünyası ve Yatırım Zirvesi\"nde konuştu:",
+     "opinion": false
+    },
+    {
+     "source": "yeni-akit",
+     "title": "COP31 İş Dünyası ve Yatırım Zirvesi yapıldı! Cumhurbaşkanı Yardımcısı Yılmaz’dan ortak yatırım çağrısı",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "COP31'de dünyaya çağrı... Bakan Kurum: Hep birlikte harekete geçeceğiz",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "İş Dünyası ve Yatırım Zirvesi'nin Açılış Programı... Bakan Kurum'dan açıklamalar",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "df08098c",
+   "id": "df08098c-cbdc-4a68-8bcd-548bb65bb848",
+   "stored": "Cumhurbaşkanı Erdoğan’dan önemli açıklamalar",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 4,
+   "members": [
+    {
+     "source": "haberport",
+     "title": "Erdoğan kaymakamlığa adanmışlık vurguladı: mesai kavramı yok",
+     "opinion": false
+    },
+    {
+     "source": "haberet",
+     "title": "Cumhurbaşkanı Erdoğan’dan önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "Son dakika... Cumhurbaşkanı Erdoğan'dan kaymakamlara talimat: Devlet kapısı, çare kapısıdır",
+     "opinion": false
+    },
+    {
+     "source": "haber-global",
+     "title": "Cumhurbaşkanı Erdoğan kaymakamlara seslendi: Emanete gölge düşürmeyin",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "404dda61",
+   "id": "404dda61-36f0-43cf-9aec-3dc475a9f2e4",
+   "stored": "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz'dan açıklamalar",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "posta",
+     "title": "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz açıkladı... Emekliye refah düzenlemesiyle ilgili epeydir çalışıyoruz",
+     "opinion": false
+    },
+    {
+     "source": "hurriyet",
+     "title": "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz'dan açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "gazete-oksijen",
+     "title": "Cevdet Yılmaz'dan fon açıklaması: Olağanüstü tasfiyeler sürüyor, 130 milyar TL ödeme yapıldı",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "fd7428e8",
+   "id": "fd7428e8-aa57-4fad-ac21-1d222cbf8e51",
+   "stored": "Tera'nın patronu Emre Tezmen YENİ Parti ile neden görüşmedi",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 5,
+   "members": [
+    {
+     "source": "evrensel",
+     "title": "Yeni Partiden fon tutuklularına ziyaret: Tera CEO'su Emre Tezmen görüşmeyi reddetti",
+     "opinion": false
+    },
+    {
+     "source": "ekonomim",
+     "title": "YENİ Parti cezaevindeki TERA CEO'su ile görüştü: Emre Tezmen görüşme talebini reddetti",
+     "opinion": false
+    },
+    {
+     "source": "birgun",
+     "title": "YENİ Parti heyeti cezaevindeki TERA CEO'su ile görüştü: Emre Tezmen görüşme talebini reddetti",
+     "opinion": false
+    },
+    {
+     "source": "odatv",
+     "title": "Tera'nın patronu Emre Tezmen YENİ Parti ile neden görüşmedi",
+     "opinion": false
+    },
+    {
+     "source": "elips-haber",
+     "title": "Tera Yatırım'ın patronu Emre Tezmen, Yeni Parti’nin görüşme talebini reddetti",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "9d5ad97a",
+   "id": "9d5ad97a-5fe1-4d14-8d58-bd253a492a05",
+   "stored": "Son seçim anketinde partilerin oy oranı ne oldu: Birinci sıra dikkat çekti",
+   "model": "extractive-v6",
+   "stamped": 5,
+   "article_count": 5,
+   "members": [
+    {
+     "source": "mynet",
+     "title": "Seçim anketinde ilk sırada onlar var: Ne AK Parti ne de Yeni Parti",
+     "opinion": false
+    },
+    {
+     "source": "cumhuriyet",
+     "title": "Sandıkta dengeleri değiştirecek tablo... Son seçim anketinde birinci sıra sürprizi!",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Birinci sıra şaşırttı! 31 ilde yapılan seçim anketinden çıkan sonuca bakın",
+     "opinion": false
+    },
+    {
+     "source": "sozcu",
+     "title": "Son seçim anketinde ezber bozan sonuç! Birinci sıra şaşırttı",
+     "opinion": false
+    },
+    {
+     "source": "birgun",
+     "title": "Son seçim anketinde partilerin oy oranı ne oldu: Birinci sıra dikkat çekti",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "1c7c34ba",
+   "id": "1c7c34ba-3a84-423a-a003-f9deee8dab33",
+   "stored": "10 meslek grubuna yeşil pasaport umudu: Listede kimler var",
+   "model": "extractive-v6",
+   "stamped": 2,
+   "article_count": 2,
+   "members": [
+    {
+     "source": "kamudanhaber",
+     "title": "Yeşil pasaportta kapsam genişliyor mu? 10 meslek grubu için yeni teklifler Meclis'te",
+     "opinion": false
+    },
+    {
+     "source": "odatv",
+     "title": "10 meslek grubuna yeşil pasaport umudu: Listede kimler var",
+     "opinion": false
+    }
+   ]
+  }
+ ]
+}

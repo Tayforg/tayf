@@ -16,6 +16,7 @@ import {
   ENGLISH_SOURCE_SLUGS,
   headlineLang,
   isLanguageIsolatedCluster,
+  LOWERCASE_PRONE_SOURCE_SLUGS,
   sourceLang,
 } from "./source-language";
 
@@ -604,5 +605,20 @@ describe("source/[slug]/page.tsx wiring (source guard)", () => {
     );
     // No other lang= attribute on the page (source name, time-ago, headings stay Turkish).
     expect(page.match(/\blang=/g)).toHaveLength(2);
+  });
+});
+
+// h164-titles-2: İşçi Haber's headlines are machine-cased ('libya ve venezuela', 'Bakan kurum'); the headline cron
+// flags its members (MemberTitle.caseUnreliable) from the slug, the way it flags `english`.
+describe("LOWERCASE_PRONE_SOURCE_SLUGS", () => {
+  it("is exactly İşçi Haber, a code constant that is not the English set", () => {
+    expect([...LOWERCASE_PRONE_SOURCE_SLUGS]).toEqual(["isci-haber"]);
+    for (const slug of LOWERCASE_PRONE_SOURCE_SLUGS) expect(ENGLISH_SOURCE_SLUGS.has(slug)).toBe(false);
+  });
+
+  it("is a set of slugs: a display name or a near spelling is not in it", () => {
+    for (const not of ["İşçi Haber", "isci haber", "isci-haber ", "ISCI-HABER", "isci", "sozcu", ""]) {
+      expect(LOWERCASE_PRONE_SOURCE_SLUGS.has(not), not).toBe(false);
+    }
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import h26Fixtures from "../../../tests/fixtures/summary-tidy-h26.json";
+import tailFixtures from "../../../tests/fixtures/summary-tail-h164.json";
 import { expectCpuUnder, expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import type { Gen } from "../../../tests/_helpers/linear-time";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
@@ -11,6 +12,7 @@ import {
   isCtaFeedCut,
   isUnmarkedClamp,
   KNOWN_AGENCIES,
+  leadInStub,
   stripDatelineLead,
   stripLeadingStyleRules,
   tidySummaryText,
@@ -902,8 +904,10 @@ describe("tidySummaryText trailing CTA sentence (h22-editorial-2)", () => {
     expect(tidySummaryText(input)).toBe(expected);
   });
 
-  it("a colon is kept when no CTA was stripped", () => {
-    expect(tidySummaryText("Gelişmeler şöyle:")).toBe("Gelişmeler şöyle:");
+  it("a colon with no CTA stripped is a lead-in with nothing in front of it to back off to: '' (h164-summaries-1)", () => {
+    // Until h164 this kept "Gelişmeler şöyle:"; a text that ends on a lead-in promises what it does not give, so it is
+    // backed off to the last sentence end, and hidden when there is none (trimDanglingLeadIn).
+    expect(tidySummaryText("Gelişmeler şöyle:")).toBe("");
   });
 
   it.each(["Detaylar haberimizde", "İşte ayrıntılar...", "işte detaylar", "  İŞTE DETAYLAR  "])(
@@ -4207,9 +4211,15 @@ describe("tidySummaryText drops trailing teaser lines (h34-reader-5)", () => {
     expect(out).toContain("AK Parti İstanbul İl Başkanı Abdullah Özdemir");
   });
 
-  it("fd00fb08 and 1e6da42b: the kept headline is still there (nothing proves it is a teaser)", () => {
-    expect(tidySummaryText(H34_FD00)).toContain("Çukurova Belediye Başkanı Emrah Kozay görevden uzaklaştırıldı");
+  it("fd00fb08 and 1e6da42b: the headline in front of the teaser is kept only when it shares a stem with the text", () => {
+    // h164-summaries-1: fd00fb08's "İçişleri Bakanlığı duyurdu: Çukurova Belediye Başkanı Emrah Kozay görevden
+    // uzaklaştırıldı" (no anchor, so the teaser strip left it: "nothing proves it is a teaser") is now a lone
+    // trailing headline behind a sentence of the fire report, shares no stem with it, and goes (cutLoneTrailingHeadline).
+    // 1e6da42b's "Jülide Kural sessizliğini bozdu! ... ilk açıklama" shares the stem 'acikla' with the earthquake
+    // report ("açıkladı"), so the line stays: when unsure, keep.
+    expect(tidySummaryText(H34_FD00)).not.toContain("Çukurova Belediye Başkanı Emrah Kozay");
     expect(tidySummaryText(H34_FD00)).not.toContain("Volkswagen");
+    expect(tidySummaryText(H34_FD00).endsWith("çalışmalarını sürdürüyor.")).toBe(true);
     expect(tidySummaryText(H34_1E6D)).toContain("Jülide Kural sessizliğini bozdu!");
     expect(tidySummaryText(H34_1E6D)).not.toContain("Arıboğan");
   });
@@ -5687,5 +5697,369 @@ describe("clampCutIntroducedQuote (h122-ozet-3)", () => {
     const raw = "Bakan Yılmaz, yeni düzenlemeye ilişkin açıklamasında şunları kaydetti: \"Düzenleme çok önemli bir adımdır ve kurumların hızla uygulamaya geçmesi gerekir çünkü zaman çok az kaldı ve geç...Devamı için tıklayınız";
     expect(isCtaFeedCut(raw)).toBe(true);
     expect(clampCutIntroducedQuote(raw)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h164-summaries-1 / h164-summaries-2 (2026-11-12): the tail and the feed junk of a summary.
+// The raw rows are the members' descriptions dumped read-only from prod
+// (tests/fixtures/summary-tail-h164.json).
+// ---------------------------------------------------------------------------
+
+type TailMember = { source: string; description: string };
+type TailCluster = { id: string; members: TailMember[] };
+const TAIL = (tailFixtures as { clusters: Record<string, TailCluster> }).clusters;
+
+/** The raw description of `source` in the fixture cluster `short` (the 8-character id prefix). */
+function tailRaw(short: string, source: string): string {
+  const member = TAIL[short]?.members.find((m) => m.source === source);
+  if (member === undefined) throw new Error(`no fixture member ${short} / ${source}`);
+  return member.description;
+}
+
+describe("tidySummaryText: another story's headline as the last line (h164-summaries-1)", () => {
+  it("bb349ef1 (Milliyet): ends on 'bulunulduğu öğrenildi.'", () => {
+    const out = tidySummaryText(tailRaw("bb349ef1", "Milliyet"));
+    expect(out.endsWith("bulunulduğu öğrenildi.")).toBe(true);
+    expect(out).not.toContain("COP31");
+  });
+
+  it("0ad663a9 (Van crash): ends on 'ekipleri sevk edildi.'", () => {
+    const out = tidySummaryText(tailRaw("0ad663a9", "Milliyet"));
+    expect(out.endsWith("ekipleri sevk edildi.")).toBe(true);
+    expect(out).not.toContain("Trump");
+  });
+
+  it("f4451eba and 818f4e62 (Posta): no 'Nev’in ağabeyi' text", () => {
+    for (const short of ["f4451eba", "818f4e62"]) {
+      const out = tidySummaryText(tailRaw(short, "Posta"));
+      expect(out, short).not.toContain("Nev’in ağabeyi");
+      expect(out.endsWith("."), short).toBe(true);
+    }
+    expect(tidySummaryText(tailRaw("f4451eba", "Posta")).endsWith("seyircili çekimlerle devam edecek.")).toBe(true);
+    expect(tidySummaryText(tailRaw("818f4e62", "Posta")).endsWith("ayrılmayı tercih etti.")).toBe(true);
+  });
+
+  it("e663db44: the 'Ayrıntılar birazdan...' line is a cut point, it and everything after it go", () => {
+    const out = tidySummaryText(tailRaw("e663db44", "Milliyet"));
+    expect(out.endsWith("incelemeleri devam ediyor.")).toBe(true);
+    expect(out).not.toContain("Ayrıntılar");
+    expect(out).not.toContain("Kırmızı bülten");
+  });
+
+  it("8fc54aa1: the 'Canlı Haber İçerik Kartı' widget heading is dropped", () => {
+    const out = tidySummaryText(tailRaw("8fc54aa1", "Milliyet"));
+    expect(out).not.toContain("Canlı Haber İçerik Kartı");
+    expect(out.endsWith("takip edebilirsiniz.")).toBe(true);
+    expect(WIDGET_HEADINGS.has("canlı haber içerik kartı")).toBe(true);
+  });
+
+  it("fdfc440c (Milliyet): pinned - the headline shares the 'soruşturma' stem with the body, so 'when unsure, keep'", () => {
+    // "Erdoğan'dan fon soruşturmasıyla ilgili açıklama: Haksız kazanç sağlayanlar hesap verecek" is another story's
+    // headline, but the body says "soruşturma" (the shared 6-letter stem 'soruşt'): a line about the same words is never
+    // cut. A known remainder of h164-summaries-1, not a miss of the rule.
+    const out = tidySummaryText(tailRaw("fdfc440c", "Milliyet"));
+    expect(out.endsWith("Haksız kazanç sağlayanlar hesap verecek")).toBe(true);
+  });
+
+  it("fefb05a2 (Sabah): the last line is the column's own clamp tail with its CTA, not a headline: it stays (14-day replay)", () => {
+    const out = tidySummaryText(tailRaw("fefb05a2", "Sabah"));
+    expect(out.endsWith("Hangi birini sayalım? Mehmet Keçeciler......")).toBe(true);
+  });
+
+  it("is idempotent on every fixture description", () => {
+    for (const cluster of Object.values(TAIL)) {
+      for (const m of cluster.members) {
+        const once = tidySummaryText(m.description);
+        expect(tidySummaryText(once), `${cluster.id} / ${m.source}`).toBe(once);
+      }
+    }
+  });
+
+  describe("negatives that stay as they were (line breaks become blanks, nothing is cut)", () => {
+    const BODY = "Edinilen bilgilere göre kaza Van karayolunda meydana geldi.";
+
+    it("an unpunctuated last line that shares a 6-letter stem with the body", () => {
+      const last = "Van karayolunda meydana gelen kazada yeni gelişme";
+      expect(tidySummaryText(`${BODY}\n${last}`)).toBe(`${BODY} ${last}`);
+    });
+
+    it("line 0 is never cut", () => {
+      expect(tidySummaryText("Cumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü")).toBe(
+        "Cumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü",
+      );
+      expect(tidySummaryText("Cumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü\nUkrayna'da yeni saldırı dalgası başladı")).toBe(
+        "Cumhurbaşkanı Erdoğan ABD Başkanı Trump ile görüştü. Ukrayna'da yeni saldırı dalgası başladı",
+      );
+    });
+
+    it("a numbered list", () => {
+      expect(tidySummaryText(`${BODY}\n1. Birinci madde burada yazıyor\n2. İkinci madde orada yazıyor`)).toBe(
+        `${BODY} 1. Birinci madde burada yazıyor 2. İkinci madde orada yazıyor`,
+      );
+    });
+
+    it("a last line that ends in '…' (a clamp tail)", () => {
+      const last = "Ukrayna'da yeni saldırı dalgası başlayacak…";
+      expect(tidySummaryText(`${BODY}\n${last}`)).toBe(`${BODY} ${last}`);
+    });
+
+    it("a headline that ends the sentence of the body is text", () => {
+      const last = "Ukrayna'da yeni saldırı dalgası başladı.";
+      expect(tidySummaryText(`${BODY}\n${last}`)).toBe(`${BODY} ${last}`);
+    });
+  });
+
+  it("the h34 teaser and the h23 ticker cuts still run: Milliyet's related-news line and ticker go", () => {
+    const body = "MHP Genel Başkanı Devlet Bahçeli açıklama yaptı.";
+    expect(tidySummaryText(`${body}\nBaşka bir haberin başlığı burada duruyor\nSon dakika... Yeni gelişme var`)).toBe(body);
+    const teaser = "Birinci cümle burada bitiyor.\nAnkara'da kritik güvenlik zirvesi! Bakan Çiftçi, İtalyan mevkidaşı ile bir araya geldi";
+    expect(tidySummaryText(teaser)).toBe("Birinci cümle burada bitiyor.");
+  });
+});
+
+describe("tidySummaryText: a placeholder line after line 0 cuts itself and everything behind it (h164-summaries-1)", () => {
+  const BODY = "İstanbul'da bir evde erkek cesedi bulundu ve ekipler olay yerinde incelemelere başladı.";
+
+  it.each(["Ayrıntılar birazdan...", "Ayrıntılar geliyor…", "Detaylar gelecek.", "DETAYLAR GELİYOR", "  Ayrıntılar gelecek...  "])(
+    "%j behind a complete sentence",
+    (placeholder) => {
+      // Behind the placeholder: another story's full sentences (no headline shape, so no other step would cut them).
+      expect(tidySummaryText(`${BODY}\n${placeholder}\nBaşka bir haberin metni burada tamamen bitiyor.\nBir başkasının metni de burada bitiyor.`)).toBe(BODY);
+    },
+  );
+
+  it("the placeholder may be the last line, with blank lines around it", () => {
+    expect(tidySummaryText(`${BODY}\n\nAyrıntılar birazdan...\n\n`)).toBe(BODY);
+  });
+
+  it("no complete sentence in front: the text is kept (when unsure, keep)", () => {
+    const out = tidySummaryText(
+      "Beyoğlu'nda halıya sarılı ceset bulundu\nAyrıntılar birazdan...\nBaşka bir haberin metni burada tamamen bitiyor.",
+    );
+    expect(out).toContain("Başka bir haberin metni burada tamamen bitiyor.");
+  });
+
+  it("a placeholder as line 0 still hides the whole text (the existing rule)", () => {
+    expect(tidySummaryText("Ayrıntılar geliyor...\nKKTC Başbakanı Üstel, bir açıklama yaptı ve teşekkür etti.")).toBe("");
+  });
+
+  it("a line that only starts with the phrase is text", () => {
+    const text = `${BODY}\nAyrıntılar geliyor: Bakan Yılmaz yarın açıklama yapacak.`;
+    expect(tidySummaryText(text)).toBe(`${BODY} Ayrıntılar geliyor: Bakan Yılmaz yarın açıklama yapacak.`);
+  });
+
+  it("the sentence-style CTA phrases ('İşte ayrıntılar') are not placeholders and open real paragraphs", () => {
+    const text = `${BODY}\nİşte ayrıntılar\nOlay yerine polis ekipleri sevk edildi.`;
+    expect(tidySummaryText(text)).toContain("Olay yerine polis ekipleri sevk edildi.");
+  });
+});
+
+describe("tidySummaryText: a trailing lead-in is backed off to the sentence in front of it (h164-summaries-1)", () => {
+  it("c44095e2 (Hürriyet): ends on the quoted sentence, not on 'şunları söyledi:'", () => {
+    const out = tidySummaryText(tailRaw("c44095e2", "Hürriyet"));
+    expect(out.endsWith("3 bin 306 zararlı içeriğe müdahale ettik” dedi.")).toBe(true);
+    expect(out).not.toContain("şunları söyledi");
+  });
+
+  it("aa1be55d (Yeni Akit): ends at the previous sentence end", () => {
+    const out = tidySummaryText(tailRaw("aa1be55d", "Yeni Akit"));
+    expect(out.endsWith("reddettiklerini iddia etti.")).toBe(true);
+    expect(out).not.toContain("şu vahim ayrıntılarla");
+  });
+
+  it("d6c3c539 (Cumhuriyet): ends at 'vermişti.'", () => {
+    expect(tidySummaryText(tailRaw("d6c3c539", "Cumhuriyet")).endsWith("sözleriyle vermişti.")).toBe(true);
+  });
+
+  it("f2da6a54 (CNN Türk, ends in ';'): ends on 'dosyaya girdi.'", () => {
+    expect(tidySummaryText(tailRaw("f2da6a54", "CNN Türk")).endsWith("ek ifadesi de dosyaya girdi.")).toBe(true);
+  });
+
+  it("2bfbe1e2, 46d3ed77 and 226929aa are ONE sentence that ends in a lead-in mark: no sentence end to back off to, the Özet is hidden", () => {
+    // 46d3ed77's only earlier dots are 'Prof.', 'Dr.' and the ordinal '12.', none of them a sentence end.
+    expect(tidySummaryText(tailRaw("2bfbe1e2", "Haberler.com"))).toBe("");
+    expect(tidySummaryText(tailRaw("46d3ed77", "Haberler.com"))).toBe("");
+    expect(tidySummaryText(tailRaw("226929aa", "Haber.com"))).toBe("");
+  });
+
+  it("a text that is only a lead-in line returns '' (the Özet is hidden)", () => {
+    expect(tidySummaryText("Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle;")).toBe("");
+    expect(tidySummaryText("Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle:")).toBe("");
+  });
+
+  it("':' and ';' behind closing quotes and brackets count (closers aside)", () => {
+    const first = "Toplantı yarın saat onda başlayacak ve iki gün sürecek.";
+    expect(tidySummaryText(`${first} Bakan şöyle konuştu: “Hedefimiz açık;”`)).toBe(first);
+    expect(tidySummaryText(`${first} Gelişmeler şöyle (ayrıntılar yolda:)`)).toBe(first);
+  });
+
+  it("the back-off keeps at least 40 characters, otherwise the text is ''", () => {
+    const keep40 = "Ab cd ef Ab cd ef Ab cd ef Ab cd ef Abc.";
+    const keep39 = "Ab cd ef Ab cd ef Ab cd ef Ab cd ef Ab.";
+    expect(keep40).toHaveLength(40);
+    expect(keep39).toHaveLength(39);
+    expect(tidySummaryText(`${keep40} Şunlar açıklandı:`)).toBe(keep40);
+    expect(tidySummaryText(`${keep39} Şunlar açıklandı:`)).toBe("");
+  });
+
+  it("an abbreviation's, an initial's or an ordinal's dot is not a sentence end", () => {
+    expect(tidySummaryText("Sağlık Bakanı Prof. Dr. Kemal Memişoğlu, 12. Kurultay'da yaptığı konuşmada şunları söyledi:")).toBe("");
+  });
+
+  it("the last sentence end that keeps 40 characters wins, an earlier one is not looked at", () => {
+    const text =
+      "Birinci uzun cümle burada tamamen bitiyor. İkinci uzun cümle de burada tamamen bitiyor. Üçüncü cümle şöyle devam ediyor:";
+    expect(tidySummaryText(text)).toBe("Birinci uzun cümle burada tamamen bitiyor. İkinci uzun cümle de burada tamamen bitiyor.");
+  });
+
+  it("a ':' or ';' inside the text, a text that ends in a sentence mark or in '…', and a time of day are untouched", () => {
+    for (const text of [
+      "Bakanlar şunlar: Yılmaz, Demir ve Kaya toplantıya katıldı ve görüşmeler iki saat sürdü.",
+      "Toplantı yarın saat onda başlayacak ve iki gün sürecek; ardından basın açıklaması yapılacak.",
+      "Bakan Yılmaz, yeni düzenlemeye ilişkin açıklamasında şunları kaydetti…",
+      "Toplantı yarın saat 14:30 sularında başlayacak ve iki gün sürecek, ardından açıklama gelecek.",
+    ]) {
+      expect(tidySummaryText(text), text).toBe(text);
+    }
+  });
+
+  it("a ';' that ends an undecoded entity is no lead-in", () => {
+    for (const text of [
+      "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da açıkladı ve ayrıntıları paylaştı &gt;",
+      "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da açıkladı ve ayrıntıları paylaştı &#62;",
+      "Bakan Yılmaz yeni düzenlemeyi bugün Ankara'da açıkladı ve ayrıntıları paylaştı &nbsp;",
+    ]) {
+      expect(tidySummaryText(text), text).toBe(text);
+    }
+    // Not an entity: no "&" in front of the word, or a word that is too long to be one.
+    expect(tidySummaryText("Bakan Yılmaz yeni düzenlemeyi bugün açıkladı. Detaylar şöyle;")).toBe("Bakan Yılmaz yeni düzenlemeyi bugün açıkladı.");
+    expect(tidySummaryText("Bakan Yılmaz yeni düzenlemeyi bugün açıkladı. R&D-ayrıntılarışöyleuzunbirsözcük;")).toBe(
+      "Bakan Yılmaz yeni düzenlemeyi bugün açıkladı.",
+    );
+  });
+
+  it("the dropDanglingColon CTA cases are unchanged: the colon goes with the CTA, nothing more", () => {
+    expect(tidySummaryText("Gelişmeler şöyle: Detaylar haberimizde")).toBe("Gelişmeler şöyle");
+    expect(tidySummaryText("Toplantı yapıldı. Bakan şöyle dedi: Devamı için tıklayınız")).toBe("Toplantı yapıldı. Bakan şöyle dedi");
+  });
+
+  it("is idempotent on the lead-in rows", () => {
+    for (const [short, source] of [
+      ["c44095e2", "Hürriyet"],
+      ["aa1be55d", "Yeni Akit"],
+      ["d6c3c539", "Cumhuriyet"],
+      ["f2da6a54", "CNN Türk"],
+      ["2bfbe1e2", "Haberler.com"],
+      ["46d3ed77", "Haberler.com"],
+    ] as const) {
+      const once = tidySummaryText(tailRaw(short, source));
+      expect(tidySummaryText(once), short).toBe(once);
+    }
+  });
+});
+
+describe("leadInStub (h164-summaries-1)", () => {
+  it("is the text before the back-off when the back-off leaves fewer than `minKept` characters", () => {
+    const raw = "Ab cd ef Ab cd ef Ab cd ef Ab cd ef Abc. Şunlar açıklandı:";
+    expect(leadInStub(raw, 60)).toBe(raw);
+    expect(leadInStub("Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle;", 60)).toBe(
+      "Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları şöyle;",
+    );
+  });
+
+  it("is null when the back-off keeps `minKept` characters or more, or the text does not end in a lead-in", () => {
+    const sixty = "Bakan Yılmaz yeni vergi düzenlemesini bugün Ankara'da açıkladı.";
+    expect(leadInStub(`${sixty} Şunlar değişti:`, 60)).toBeNull();
+    expect(leadInStub(`${sixty} Şunlar değişti:`, 64)).toBe(`${sixty} Şunlar değişti:`);
+    expect(leadInStub(sixty, 60)).toBeNull();
+    expect(leadInStub("Bakanlar şunlar: Yılmaz, Demir ve Kaya toplantıya katıldı.", 60)).toBeNull();
+    expect(leadInStub("", 60)).toBeNull();
+    expect(leadInStub("Bakan Yılmaz yeni düzenlemeyi açıkladı &gt;", 60)).toBeNull();
+  });
+
+  it("reads the tidied text: a lead-in behind a CTA the tidy step drops is not a lead-in any more", () => {
+    expect(leadInStub("Gelişmeler şöyle: Detaylar haberimizde", 60)).toBeNull();
+  });
+
+  it("never throws on a non-string", () => {
+    expect(leadInStub(null as unknown as string, 60)).toBeNull();
+    expect(leadInStub(undefined as unknown as string, 60)).toBeNull();
+  });
+});
+
+describe("tidySummaryText: bare URLs and a byline stub (h164-summaries-2)", () => {
+  it("2145f51f (Hukuki Haber): the byline and its bare URL leave nothing, the Özet is hidden", () => {
+    expect(tidySummaryText(tailRaw("2145f51f", "Hukuki Haber"))).toBe("");
+    expect(tidySummaryText("Av. Baran Can KAYA yazdı...\n\nhttps://www.hukukihaber.net/...")).toBe("");
+  });
+
+  it("line 0 is never dropped: a text that is only a URL is left as it is (when unsure, keep)", () => {
+    expect(tidySummaryText("https://www.hukukihaber.net/bir-bakanin-tutuklanmasi")).toBe("https://www.hukukihaber.net/bir-bakanin-tutuklanmasi");
+    expect(tidySummaryText("\n  http://example.com/haber/123456789  \n")).toBe("http://example.com/haber/123456789");
+  });
+
+  it("an upper-case URL line behind line 0 is dropped too", () => {
+    expect(tidySummaryText("Bakan Yılmaz yeni düzenlemeyi bugün açıkladı.\n\n  HTTPS://WWW.EXAMPLE.COM/HABER/YENI  ")).toBe(
+      "Bakan Yılmaz yeni düzenlemeyi bugün açıkladı.",
+    );
+  });
+
+  it("a URL inside a line is not a bare URL line", () => {
+    const text = "Bakan Yılmaz ayrıntıları https://www.example.com/haber/yeni adresinden paylaştı ve açıklama yaptı.";
+    expect(tidySummaryText(text)).toBe(text);
+  });
+
+  it("a URL line behind a real text is dropped, the text stays", () => {
+    expect(tidySummaryText("Bakan Yılmaz yeni düzenlemeyi bugün açıkladı.\nhttps://www.example.com/haber/yeni-duzenleme-aciklandi")).toBe(
+      "Bakan Yılmaz yeni düzenlemeyi bugün açıkladı.",
+    );
+  });
+
+  it("a longer byline keeps its words (the stub is at most 8 words ending in 'yazdı')", () => {
+    const out = tidySummaryText("Av. Baran Can KAYA ile Prof. Dr. Ahmet Mehmet Veli Hasan yazdı...\n\nhttps://www.hukukihaber.net/abc-def-ghi");
+    expect(out).toBe("Av. Baran Can KAYA ile Prof. Dr. Ahmet Mehmet Veli Hasan yazdı...");
+  });
+
+  it("a stub that does not end in 'yazdı' keeps its words", () => {
+    expect(tidySummaryText("Av. Baran Can KAYA yazıyor...\n\nhttps://www.hukukihaber.net/abc-def-ghi")).toBe("Av. Baran Can KAYA yazıyor...");
+  });
+
+  it("a byline stub without a URL is not this rule's business (nothing was dropped)", () => {
+    expect(tidySummaryText("Av. Baran Can KAYA yazdı...")).toBe("Av. Baran Can KAYA yazdı...");
+  });
+
+  it("a sentence that merely mentions a domain is untouched", () => {
+    for (const text of [
+      "Haber tayfhaber.com adresinde yayımlandı ve bugün yüz binlerce kişi tarafından okundu.",
+      "Bakan açıklamayı www.example.com üzerinden yaptı ve ayrıntıları paylaştı.",
+    ]) {
+      expect(tidySummaryText(text), text).toBe(text);
+    }
+  });
+
+  it("is idempotent", () => {
+    for (const text of [tailRaw("2145f51f", "Hukuki Haber"), "Bakan Yılmaz yeni düzenlemeyi açıkladı.\nhttps://www.example.com/haber/yeni"]) {
+      const once = tidySummaryText(text);
+      expect(tidySummaryText(once)).toBe(once);
+    }
+  });
+});
+
+describe("tidySummaryText: linear time on the h164 steps (CodeQL js/redos)", () => {
+  const SENTENCE = "Giriş cümlesi burada bitti. ";
+  it.each([
+    ["'Ayrıntılar birazdan...\\n' x 4000 behind a sentence", rep("Ayrıntılar birazdan...\n", "Giriş cümlesi burada bitti.\n"), 100_000],
+    ["an intro, then 'Başlık satırı burada\\n' x 3000", rep("Başlık satırı burada\n", "Giriş cümlesi burada bitti.\n"), 100_000],
+    ["'Giriş. ' x 14000 and a lead-in", rep("Giriş. ", "", " Şunlar açıklandı:"), 100_000],
+    ["'a: ' x 30000 and a lead-in", rep("a: ", SENTENCE, "şöyle;"), 100_000],
+    ["an open quotation, 'Giriş. ' x 14000 and a lead-in (no back-off point is balanced)", rep("Giriş. ", "“", " Şunlar açıklandı:"), 100_000],
+    ["'.' x 100000 and a lead-in", rep(".", SENTENCE, " şöyle:"), 100_000],
+    ["'.\"' x 50000 and a lead-in", rep('."', SENTENCE, " şöyle;"), 100_000],
+    ["100000 blanks then a URL line", rep(" ", "Giriş cümlesi burada bitti.\n", "\nhttps://example.com/abc"), 100_000],
+    ["'https://' x 12000", rep("https://", "Giriş cümlesi burada bitti.\n"), 100_000],
+    ["'http://a\\n' x 10000", rep("http://a\n"), 100_000],
+  ] as Array<[string, Gen, number]>)("%s", (_name, gen, n) => {
+    expectLinear(gen, (s) => tidySummaryText(s), { n, ceilingMs: 4_000 });
   });
 });

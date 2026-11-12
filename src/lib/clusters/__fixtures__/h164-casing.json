@@ -1,0 +1,236 @@
+{
+ "finding": "h164-titles-2",
+ "note": "Test-only. The member titles (newest first) and source slugs of the clusters whose stored neutral title is an İşçi Haber headline that lost its capitals (isci-haber), or that mispairs two quoted spans, as read on production on 2026-11-12 (read-only SELECT of cluster_articles x articles x sources), with each stored title, its stamp and article count. `opinion` is isOpinionUrl of the article URL (the URL itself is not kept).",
+ "clusters": [
+  {
+   "cid": "3039d877",
+   "id": "3039d877-3c4a-4132-8ff9-766faf030cc3",
+   "stored": "Bakan Bayraktar'dan libya ve venezuela mesajı",
+   "model": "extractive-v6",
+   "stamped": 6,
+   "article_count": 6,
+   "members": [
+    {
+     "source": "haber7",
+     "title": "Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı",
+     "opinion": false
+    },
+    {
+     "source": "posta",
+     "title": "Bakan Bayraktar'dan enerji diplomasisi! Türkiye'den Libya ve Venezuela ile yeni enerji iş birliği adımları",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "Bakan Bayraktar'dan enerji diplomasisi! Türkiye'den Libya ve Venezuela ile yeni enerji iş birliği adımları",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Bakan Bayraktar'dan libya ve venezuela mesajı",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "İKLİM ZİRVESİ COP31 ANTALYA - Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "0834c3ba",
+   "id": "0834c3ba-8291-4bac-8d8e-9a81cbbcf364",
+   "stored": "Dışişleri Bakanı Hakan Fidan çöp31 zirvesini değerlendirdi",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 5,
+   "members": [
+    {
+     "source": "ajans-haber",
+     "title": "Bakan Fidan'dan COP31 Liderler Zirvesi sonrası iklim değişikliğiyle mücadele mesajı",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Dışişleri Bakanı Hakan Fidan çöp31 zirvesini değerlendirdi",
+     "opinion": false
+    },
+    {
+     "source": "posta",
+     "title": "Dışişleri Bakanı Hakan Fidan: COP31 toplantısının Liderler Zirvesi bölümü tamamlandı",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Dışişleri Bakanı Fidan'dan COP31 Liderler Zirvesi'ne dair paylaşım",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Dışişleri Bakanı Hakan Fidan, COP31 Liderler Zirvesi'nin tamamlandığını duyurdu",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "4797e4f6",
+   "id": "4797e4f6-7b7c-4a9f-8aba-c27b59fb26ff",
+   "stored": "Bakan kurum: Tarihte bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "haber7",
+     "title": "Bakan Kurum'dan COP31'den dünyaya çağrı: Kaderlerimiz birbirine bağlıdır",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Bakan kurum: Tarihte bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "Bakan Kurum: Bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "ecbc23a0",
+   "id": "ecbc23a0-cfde-4400-b6cb-9a86199884bb",
+   "stored": "Bakan memişoğlu: Bilgi ve tecrübeyi iş birliğine dönüştüreceğiz",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "haber7",
+     "title": "COP31’de sağlık için kritik adım! Bakan Memişoğlu 2026-2030 Eylem Planı’nı açıkladı",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Bakan memişoğlu: Bilgi ve tecrübeyi iş birliğine dönüştüreceğiz",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Bakan Memişoğlu: Ülkelerin bilgi ve tecrübelerini kalıcı işbirliğine dönüştürmeyi amaçlıyoruz",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "3175d6f7",
+   "id": "3175d6f7-f126-464d-9a0e-fc6f4fe2f032",
+   "stored": "Dışişleri bakanlığından Mısır'daki kazaya taziye",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 4,
+   "members": [
+    {
+     "source": "aksam",
+     "title": "Dışişleri Bakanlığından Mısır'a tren kazası için taziye mesajı",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Dışişleri bakanlığından Mısır'daki kazaya taziye",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Dışişleri Bakanlığından Mısır'daki tren kazasında hayatını kaybedenler için taziye mesajı",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Dışişleri Bakanlığı, Mısır'ın Giza'sındaki tren kazası için taziye mesajı yayımladı",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "ad976c62",
+   "id": "ad976c62-ae85-4e8b-ac5e-743419ba5817",
+   "stored": "Cumhurbaşkanı yardımcısı Yılmaz'dan dış politika vurgusu",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "indyturk",
+     "title": "Cumhurbaşkanı Yardımcısı Yılmaz: Türkiye, krizlerin çözümünde aktif rol üstleniyor",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Cumhurbaşkanı yardımcısı Yılmaz'dan dış politika vurgusu",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Cumhurbaşkanı Yardımcısı Yılmaz: Türkiye, diplomatik temaslarını genişleterek krizlerin kontrolünde aktif rol almıştır",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "588c58ce",
+   "id": "588c58ce-e91f-44aa-b0d8-4636a5073717",
+   "stored": "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "isci-haber",
+     "title": "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi",
+     "opinion": false
+    },
+    {
+     "source": "tele1",
+     "title": "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "852702d8",
+   "id": "852702d8-3c13-4be2-bbbe-96650a0ec3a4",
+   "stored": "İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın?",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "posta",
+     "title": "'İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın?'",
+     "opinion": false
+    },
+    {
+     "source": "haber-global",
+     "title": "\"İmamoğlu çıkar amaçlı suç örgütü\" davası: 'Seçim vaadimiz var kreş yapar mısın?'",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "'İmamoğlu çıkar amaçlı suç örgütü' davası: 'Seçim vaadimiz var kreş yapar mısın?'",
+     "opinion": false
+    }
+   ]
+  }
+ ]
+}
