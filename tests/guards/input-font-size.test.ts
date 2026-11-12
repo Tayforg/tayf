@@ -159,7 +159,7 @@ describe("editable public fields keep a 16 px font on phones (iOS focus zoom)", 
     expect(checked.length).toBeGreaterThanOrEqual(5);
   });
 
-  it("exempts only the honeypots, the read-only copy box and the shortcuts switch (no field hides behind an exemption)", () => {
+  it("exempts only the honeypots, the read-only copy boxes and the shortcuts switch (no field hides behind an exemption)", () => {
     const exempt = allTags
       .filter(({ tag }) => exemption(tag) !== null)
       .map(({ file, kind }) => `${file} <${kind}>`)
@@ -170,6 +170,8 @@ describe("editable public fields keep a 16 px font on phones (iOS focus zoom)", 
       "src/components/newsletter/newsletter-form.tsx <input>",
       "src/components/story/correction-form.tsx <input>",
       "src/components/story/share-button.tsx <textarea>",
+      // list-transfer-panel.tsx: the read-only "Aktarma kodu" box (its editable import box is checked).
+      "src/components/transfer/list-transfer-panel.tsx <textarea>",
     ]);
   });
 

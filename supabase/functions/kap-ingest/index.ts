@@ -59,7 +59,8 @@ interface Stats {
   errors: string[];
   durationMs: number;
   /** false when every attempted day errored — TSF-01, so a total drain
-   *  outage doesn't look like a healthy 200 in the cron logs. */
+   *  outage doesn't look like a healthy 200 in the cron logs. A partial cycle
+   *  keeps ok true; see partial. */
   ok: boolean;
   /** Failed operations that were KAP's fault: a final 5xx, a network error, a
    *  timeout, or a body that is not a list of disclosures (isUpstreamUnavailable).
@@ -70,6 +71,18 @@ interface Stats {
    *  other throw. A breaker trip counts here too, and also sets the cycle's
    *  `tripped` flag. The deadline counts in neither. */
   tayfErrors: number;
+  /** The Istanbul dates of this cycle's range that did not ingest, in range
+   *  order: a fetch that threw, and a day the 50 s deadline or a breaker trip
+   *  ended the loop before trying. [] on a healthy cycle and on a
+   *  companies-only refresh. A day whose fetch succeeded but whose upsert
+   *  failed is NOT listed; it stays in errors and tayfErrors as before.
+   *  h153-kap-health. */
+  failedDays: string[];
+  /** Set (true) only when at least one day ingested and at least one did not.
+   *  `ok` stays true and the answer stays 200, because ops_health_report row 2
+   *  (edge_http_errors_30m) counts status codes only and a 502 here would fail
+   *  it within five kap-drain ticks. h153-kap-health. */
+  partial?: boolean;
   /** Set (true) only when ok is false and every failure in the cycle was KAP's:
    *  no Tayf-side failure and no breaker trip. The handler answers 200 for it
    *  instead of 502, so a KAP outage no longer counts as an Edge 5xx in
@@ -178,6 +191,8 @@ interface RangeOutcome {
   tripped: boolean;
   /** The first upstream failure, for kap_fetch_state.last_status / last_error. */
   firstUpstream: { status: number; message: string } | null;
+  /** Days whose fetch completed: exactly the days stats.days counts. */
+  ingestedDays: string[];
 }
 
 async function ingestRange(
@@ -188,7 +203,7 @@ async function ingestRange(
   stats: Stats,
   isBackfill: boolean,
 ): Promise<RangeOutcome> {
-  const outcome: RangeOutcome = { tripped: false, firstUpstream: null };
+  const outcome: RangeOutcome = { tripped: false, firstUpstream: null, ingestedDays: [] };
   // SEC-07 follow-up: clear the breaker's last_error at most once per
   // cycle, on the first day that actually succeeds — not once per day,
   // which would write kap_fetch_state on every successful fetchDay call.
@@ -209,6 +224,7 @@ async function ingestRange(
         breakerCleared = true;
       }
       stats.days++;
+      outcome.ingestedDays.push(day);
       stats.fetched += items.length;
       const rows: KapDisclosureRow[] = [];
       for (const item of items) {
@@ -481,6 +497,9 @@ export async function runCycle(body: Body): Promise<Stats | KapBreakerSkip> {
     ok: true,
     upstreamErrors: 0,
     tayfErrors: 0,
+    // Last on purpose: the body still starts with {"days": (the ops queries
+    // that look for kap-ingest responses in net._http_response rely on it).
+    failedDays: [],
   };
 
   if (body.companies) await syncCompanies(supabase, stats);
@@ -495,13 +514,18 @@ export async function runCycle(body: Body): Promise<Stats | KapBreakerSkip> {
   // (no `from`) poll path is the one that switches to ON CONFLICT DO NOTHING.
   if (!body.companies || body.from) {
     const outcome = await ingestRange(supabase, from, to, deadline, stats, Boolean(body.from));
+    // h153-kap-health: which days of the range did not ingest (a fetch that
+    // threw, or a day the deadline or a breaker trip ended the loop before).
+    const range = dayRange(from, to);
+    const ingested = new Set(outcome.ingestedDays);
+    stats.failedDays = range.filter((d) => !ingested.has(d));
 
     // TSF-01: every day-level throw inside ingestRange is caught and
     // swallowed into stats.errors (so one poison day doesn't block the
     // rest), which otherwise means a KAP outage or a WAF block on every
     // attempted day still reports HTTP 200 — a silent, 720x/day drain
     // failure. Mirrors quotes-ingest's SEC-05 total-outage guard.
-    const attemptedDays = dayRange(from, to).length;
+    const attemptedDays = range.length;
     if (attemptedDays > 0 && stats.days === 0) {
       stats.ok = false;
       captureException(
@@ -518,6 +542,14 @@ export async function runCycle(body: Body): Promise<Stats | KapBreakerSkip> {
           await recordUpstreamError(supabase, outcome.firstUpstream.status, outcome.firstUpstream.message);
         }
       }
+    }
+    // h153-kap-health: some days ingested and some did not. ok stays true and
+    // the answer stays 200 (see the handler); the body and one log line say
+    // which days the next tick has to retry. No Sentry event: a stretch of
+    // failures on one day would otherwise raise one every 2 minutes.
+    if (stats.days > 0 && stats.failedDays.length > 0) {
+      stats.partial = true;
+      console.warn(`[kap-ingest] partial cycle: ${stats.failedDays.join(",")} not ingested`);
     }
   }
 
@@ -575,6 +607,7 @@ Deno.serve(withSentry("kap-ingest", async (req: Request) => {
     // ops_health_report row 2 (edge_http_errors_30m) and a KAP outage pinned it
     // at FAIL every 2 minutes, masking real Edge faults. A Tayf-side failure,
     // a mixed cycle and a breaker trip (403/429) still answer 502.
+    // h153: a partial cycle keeps ok true and answers 200 (partial + failedDays in the body)
     return new Response(JSON.stringify(result), {
       status: result.ok || result.upstream_unavailable ? 200 : 502,
       headers: { "content-type": "application/json" },

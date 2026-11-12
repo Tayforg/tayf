@@ -420,6 +420,46 @@ export function addFollow(
   return { list: [...list, next], result: "added" };
 }
 
+export type FollowMerge = {
+  list: readonly Follow[];
+  added: number;
+  existing: number;
+  /** Valid follows that did not fit: the list is at MAX_FOLLOWS. */
+  skipped: number;
+  invalid: number;
+};
+
+/**
+ * Adds every incoming follow through addFollow (the one rule for every path), in
+ * order, and counts the outcomes. Nothing is removed. When nothing is added the
+ * input list itself comes back, so a caller can tell "no change" by reference.
+ */
+export function mergeFollows(
+  list: readonly Follow[],
+  incoming: ReadonlyArray<{ kind: FollowKind; value: string }>,
+  nowIso: string,
+): FollowMerge {
+  let next = list;
+  let added = 0;
+  let existing = 0;
+  let skipped = 0;
+  let invalid = 0;
+  for (const f of incoming) {
+    const r = addFollow(next, f, nowIso);
+    if (r.result === "added") {
+      next = r.list;
+      added += 1;
+    } else if (r.result === "exists") {
+      existing += 1;
+    } else if (r.result === "full") {
+      skipped += 1;
+    } else {
+      invalid += 1;
+    }
+  }
+  return { list: added === 0 ? list : next, added, existing, skipped, invalid };
+}
+
 export function removeFollow(list: readonly Follow[], key: string): Follow[] {
   return list.filter((f) => followKey(f) !== key);
 }

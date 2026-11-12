@@ -80,6 +80,7 @@ vi.mock("@/lib/game/agreement", () => agreement);
 
 import { cacheLife, cacheTag } from "next/cache";
 import {
+  getActiveSourceNames,
   getActiveSourceSlugs,
   getRegistryDetail,
   getRegistryRows,
@@ -298,6 +299,75 @@ describe("getActiveSourceSlugs", () => {
     const { resolve } = await import("node:path");
     const source = readFileSync(resolve(__dirname, "registry-query.ts"), "utf8");
     const start = source.indexOf("export async function getActiveSourceSlugs");
+    expect(start).toBeGreaterThan(-1);
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    expect(body).not.toContain("connection(");
+    expect(body).not.toContain("fetchRegistryRows");
+    expect(body).not.toContain("Date.now");
+  });
+});
+
+// h153: the home search matches a one-word query against the outlets' names
+// (slug and name only), through the same cached entry and with the same null
+// contract as getActiveSourceSlugs.
+describe("getActiveSourceNames", () => {
+  const TWO_ROWS = [
+    { ...ROWS[0], id: "src-1", slug: "hurriyet", name: "Hürriyet" },
+    { ...ROWS[0], id: "src-2", slug: "halk-tv", name: "Halk TV" },
+  ];
+
+  it("returns slug and name of every active source, in the registry's order, and nothing else", async () => {
+    fixture.sources = [ok(TWO_ROWS)];
+
+    const names = await getActiveSourceNames();
+
+    expect(names).toEqual([
+      { slug: "hurriyet", name: "Hürriyet" },
+      { slug: "halk-tv", name: "Halk TV" },
+    ]);
+    expect(Object.keys(names?.[0] ?? {}).sort()).toEqual(["name", "slug"]);
+  });
+
+  it("returns [] (not null) for a registry that read fine but holds no active source", async () => {
+    fixture.sources = [ok(null)];
+    expect(await getActiveSourceNames()).toEqual([]);
+  });
+
+  it("reuses the cached registry read: reader client, active-only filter, one cacheLife", async () => {
+    await getActiveSourceNames();
+
+    expect(clients.reader).toHaveBeenCalledTimes(1);
+    expect(clients.plain).not.toHaveBeenCalled();
+    expect(fixture.served.sources).toBe(1);
+    expect((fixture.sourcesStates[0] as State).eq).toEqual([{ col: "active", val: true }]);
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("returns null on a failed attempt and does NOT retry live (a null contract)", async () => {
+    fixture.sources = [fail("canceling statement due to statement timeout"), ok(TWO_ROWS)];
+
+    expect(await getActiveSourceNames()).toBeNull();
+
+    expect(fixture.served.sources).toBe(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("never throws: a sustained outage and a missing Supabase env var both come back as null", async () => {
+    fixture.sources = [fail("boom")];
+    await expect(getActiveSourceNames()).resolves.toBeNull();
+
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    await expect(getActiveSourceNames()).resolves.toBeNull();
+  });
+
+  it("keeps connection() and the live retry out of it (prerender-safe)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const source = readFileSync(resolve(__dirname, "registry-query.ts"), "utf8");
+    const start = source.indexOf("export async function getActiveSourceNames");
     expect(start).toBeGreaterThan(-1);
     const body = source.slice(start, source.indexOf("\n}\n", start));
     expect(body).not.toContain("connection(");
