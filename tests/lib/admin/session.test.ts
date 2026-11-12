@@ -28,24 +28,31 @@ const cookieJar = vi.hoisted(() => {
     options: Record<string, unknown>;
   }> = [];
   const deleted: string[] = [];
-  return { values, setCalls, deleted };
+  // When set, cookies() rejects, like a call outside a request scope.
+  const state = { fail: false };
+  return { values, setCalls, deleted, state };
 });
 
 vi.mock("next/headers", () => ({
-  cookies: async () => ({
-    get: (name: string) => {
-      const value = cookieJar.values.get(name);
-      return value === undefined ? undefined : { name, value };
-    },
-    set: (name: string, value: string, options: Record<string, unknown>) => {
-      cookieJar.values.set(name, value);
-      cookieJar.setCalls.push({ name, value, options });
-    },
-    delete: (name: string) => {
-      cookieJar.values.delete(name);
-      cookieJar.deleted.push(name);
-    },
-  }),
+  cookies: async () => {
+    if (cookieJar.state.fail) {
+      throw new Error("cookies() called outside a request scope");
+    }
+    return {
+      get: (name: string) => {
+        const value = cookieJar.values.get(name);
+        return value === undefined ? undefined : { name, value };
+      },
+      set: (name: string, value: string, options: Record<string, unknown>) => {
+        cookieJar.values.set(name, value);
+        cookieJar.setCalls.push({ name, value, options });
+      },
+      delete: (name: string) => {
+        cookieJar.values.delete(name);
+        cookieJar.deleted.push(name);
+      },
+    };
+  },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -58,14 +65,19 @@ import {
   checkAdminPassword,
   createAdminSession,
   deleteAdminSession,
+  deriveDeviceSigningKey,
   deriveSessionSigningKey,
   hasAdminSession,
+  issueAdminDeviceCookie,
+  mintDeviceTokenForTest,
   mintSessionTokenForTest,
+  readAdminDeviceId,
   requireAdminSession,
   signSessionBody,
 } from "@/lib/admin/session";
 
 const COOKIE = "admin_session";
+const DEVICE_COOKIE = "admin_device";
 const SECRET = "unit-test-session-secret-0123456789";
 const OTHER_SECRET = "a-completely-different-secret-value";
 const PASSWORD_A = "correct horse battery staple";
@@ -111,11 +123,38 @@ function present(value: string): void {
   cookieJar.values.set(COOKIE, value);
 }
 
+const DEVICE_ID = "0123456789abcdef0123456789abcdef";
+const DEVICE_LIFETIME = 30 * DAY;
+
+/**
+ * A correctly signed, currently valid device token minted under
+ * (secret, password); override any payload field to forge a variant. Wire
+ * shape: base64url(JSON {kind, id, iat, expiresAt}) "." base64url(HMAC-SHA256(
+ * device key, body)), where the device key is domain-separated from the
+ * session signing key.
+ */
+function deviceToken(
+  over: TokenParts = {},
+  password = PASSWORD_A,
+  secret = SECRET,
+): string {
+  return mintDeviceTokenForTest(
+    { kind: "device", id: DEVICE_ID, iat: NOW, expiresAt: NOW + DEVICE_LIFETIME, ...over },
+    secret,
+    password,
+  );
+}
+
+function presentDevice(value: string): void {
+  cookieJar.values.set(DEVICE_COOKIE, value);
+}
+
 describe("admin session", () => {
   beforeEach(() => {
     cookieJar.values.clear();
     cookieJar.setCalls.length = 0;
     cookieJar.deleted.length = 0;
+    cookieJar.state.fail = false;
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
@@ -464,6 +503,388 @@ describe("admin session", () => {
       expect(checkAdminPassword(PASSWORD_A)).toBe(true);
       expect(checkAdminPassword(PASSWORD_B)).toBe(false);
       expect(checkAdminPassword("")).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Device cookie (migration 207). A browser that logged in with the current
+  // password carries a signed `admin_device` cookie. It lets that browser be
+  // throttled per device instead of through the shared per-IP + global bucket.
+  // It is NOT a login: hasAdminSession() never accepts it, and it is bound to
+  // the password and the secret through a key that is domain-separated from the
+  // session signing key.
+  // -------------------------------------------------------------------------
+  describe("device cookie", () => {
+    describe("issueAdminDeviceCookie", () => {
+      it("sets one 30-day httpOnly strict cookie named admin_device on path /admin", async () => {
+        vi.stubEnv("NODE_ENV", "test");
+        await issueAdminDeviceCookie();
+        expect(cookieJar.setCalls).toHaveLength(1);
+        const { name, options } = cookieJar.setCalls[0]!;
+        expect(name).toBe(DEVICE_COOKIE);
+        expect(options.httpOnly).toBe(true);
+        expect(options.sameSite).toBe("strict");
+        expect(options.path).toBe("/admin");
+        expect(options.maxAge).toBe(30 * 86_400);
+        expect(options.expires).toEqual(new Date(NOW + DEVICE_LIFETIME));
+        expect(options.secure).toBe(false);
+      });
+
+      it("sets the secure flag in production", async () => {
+        vi.stubEnv("NODE_ENV", "production");
+        await issueAdminDeviceCookie();
+        expect(cookieJar.setCalls[0]!.options.secure).toBe(true);
+      });
+
+      it("round-trips: the id readAdminDeviceId returns is the 32-hex id inside the token", async () => {
+        await issueAdminDeviceCookie();
+        const value = cookieJar.setCalls[0]!.value;
+        const body = value.slice(0, value.indexOf("."));
+        const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Record<
+          string,
+          unknown
+        >;
+        expect(Object.keys(payload).sort()).toEqual(["expiresAt", "iat", "id", "kind"]);
+        expect(payload.kind).toBe("device");
+        expect(payload.iat).toBe(NOW);
+        expect(payload.expiresAt).toBe(NOW + DEVICE_LIFETIME);
+
+        const id = await readAdminDeviceId();
+        expect(id).not.toBeNull();
+        expect(id).toMatch(/^[0-9a-f]{32}$/);
+        expect(id).toBe(payload.id);
+      });
+
+      it("mints a fresh random id on every issue", async () => {
+        await issueAdminDeviceCookie();
+        const first = await readAdminDeviceId();
+        await issueAdminDeviceCookie();
+        const second = await readAdminDeviceId();
+        expect(first).not.toBeNull();
+        expect(second).not.toBeNull();
+        expect(second).not.toBe(first);
+      });
+
+      it("does not put the password or the secret into the cookie", async () => {
+        await issueAdminDeviceCookie();
+        const value = cookieJar.setCalls[0]!.value;
+        const body = value.slice(0, value.indexOf("."));
+        const decoded = Buffer.from(body, "base64url").toString("utf8");
+        for (const text of [decoded, value]) {
+          expect(text).not.toContain(PASSWORD_A);
+          expect(text).not.toContain(SECRET);
+        }
+      });
+
+      it("signs with the device key, not with the session signing key", async () => {
+        await issueAdminDeviceCookie();
+        const value = cookieJar.setCalls[0]!.value;
+        const dot = value.indexOf(".");
+        const body = value.slice(0, dot);
+        const sig = value.slice(dot + 1);
+        expect(sig).toBe(signSessionBody(deriveDeviceSigningKey(SECRET, PASSWORD_A), body));
+        expect(sig).not.toBe(signSessionBody(deriveSessionSigningKey(SECRET, PASSWORD_A), body));
+      });
+
+      it("is best effort: without ADMIN_PASSWORD it sets nothing and does not throw (the session is already set)", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.stubEnv("ADMIN_PASSWORD", undefined);
+        await expect(issueAdminDeviceCookie()).resolves.toBeUndefined();
+        expect(cookieJar.setCalls).toHaveLength(0);
+      });
+
+      it("createAdminSession sets no device cookie, and deleteAdminSession (logout) leaves the device cookie alone", async () => {
+        await createAdminSession();
+        expect(cookieJar.setCalls.map((c) => c.name)).toEqual([COOKIE]);
+        await issueAdminDeviceCookie();
+        const id = await readAdminDeviceId();
+        await deleteAdminSession();
+        expect(cookieJar.deleted).toEqual([COOKIE]);
+        expect(await readAdminDeviceId()).toBe(id);
+      });
+    });
+
+    describe("readAdminDeviceId", () => {
+      it("returns the id of a valid token", async () => {
+        presentDevice(deviceToken());
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+      });
+
+      it("returns null without a cookie and for malformed cookie values", async () => {
+        expect(await readAdminDeviceId()).toBeNull();
+        for (const value of ["", "abc", ".abc", "abc.", "a.b.c", "....", "%%%.%%%"]) {
+          presentDevice(value);
+          expect(await readAdminDeviceId(), value).toBeNull();
+        }
+      });
+
+      it("returns null for a tampered signature or body", async () => {
+        const good = deviceToken();
+        const dot = good.indexOf(".");
+        const flippedLast = good[good.length - 1] === "A" ? "B" : "A";
+        presentDevice(good.slice(0, -1) + flippedLast);
+        expect(await readAdminDeviceId()).toBeNull();
+        const flippedFirst = good[dot + 1] === "A" ? "B" : "A";
+        presentDevice(good.slice(0, dot + 1) + flippedFirst + good.slice(dot + 2));
+        expect(await readAdminDeviceId()).toBeNull();
+        // Tampered body (another id), original signature.
+        const forgedBody = Buffer.from(
+          JSON.stringify({
+            kind: "device",
+            id: "ffffffffffffffffffffffffffffffff",
+            iat: NOW,
+            expiresAt: NOW + DEVICE_LIFETIME,
+          }),
+        ).toString("base64url");
+        presentDevice(`${forgedBody}.${good.slice(dot + 1)}`);
+        expect(await readAdminDeviceId()).toBeNull();
+      });
+
+      it("returns null for an expired token, valid up to the last millisecond", async () => {
+        presentDevice(deviceToken({ expiresAt: NOW - 1 }));
+        expect(await readAdminDeviceId()).toBeNull();
+
+        presentDevice(deviceToken());
+        vi.setSystemTime(NOW + DEVICE_LIFETIME - 1);
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+        vi.setSystemTime(NOW + DEVICE_LIFETIME);
+        expect(await readAdminDeviceId()).toBeNull();
+      });
+
+      it("returns null for a token whose lifetime (expiresAt - iat) is over 30 days", async () => {
+        presentDevice(deviceToken({ iat: NOW, expiresAt: NOW + DEVICE_LIFETIME + 1 }));
+        expect(await readAdminDeviceId()).toBeNull();
+        presentDevice(deviceToken({ iat: NOW, expiresAt: NOW + 365 * DAY }));
+        expect(await readAdminDeviceId()).toBeNull();
+        // Exactly 30 days is the longest accepted lifetime.
+        presentDevice(deviceToken({ iat: NOW, expiresAt: NOW + DEVICE_LIFETIME }));
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+      });
+
+      it("returns null for an iat more than 60 s in the future, accepts one within the skew", async () => {
+        presentDevice(deviceToken({ iat: NOW + 61_000, expiresAt: NOW + 61_000 + DAY }));
+        expect(await readAdminDeviceId()).toBeNull();
+        presentDevice(deviceToken({ iat: NOW + 60_000, expiresAt: NOW + 60_000 + DAY }));
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+      });
+
+      it("returns null for a token minted under the old ADMIN_PASSWORD, and accepts it again under the old one", async () => {
+        presentDevice(deviceToken({}, PASSWORD_A));
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+
+        vi.stubEnv("ADMIN_PASSWORD", PASSWORD_B);
+        expect(await readAdminDeviceId()).toBeNull();
+        presentDevice(deviceToken({}, PASSWORD_B));
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+
+        vi.stubEnv("ADMIN_PASSWORD", PASSWORD_A);
+        presentDevice(deviceToken({}, PASSWORD_B));
+        expect(await readAdminDeviceId()).toBeNull();
+      });
+
+      it("returns null for a token minted under another ADMIN_SESSION_SECRET", async () => {
+        presentDevice(deviceToken({}, PASSWORD_A, OTHER_SECRET));
+        expect(await readAdminDeviceId()).toBeNull();
+        vi.stubEnv("ADMIN_SESSION_SECRET", OTHER_SECRET);
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+        vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+        expect(await readAdminDeviceId()).toBeNull();
+      });
+
+      it("returns null for a valid admin_session token presented as admin_device", async () => {
+        presentDevice(token());
+        expect(await readAdminDeviceId()).toBeNull();
+        // Even if the payload is made to look like a device payload, the
+        // session signing key is not the device key.
+        presentDevice(token({ kind: "device", id: DEVICE_ID, expiresAt: NOW + DEVICE_LIFETIME }));
+        expect(await readAdminDeviceId()).toBeNull();
+        await createAdminSession();
+        presentDevice(cookieJar.setCalls[0]!.value);
+        expect(await readAdminDeviceId()).toBeNull();
+      });
+
+      it("returns null for a payload that is not kind 'device', even when correctly signed", async () => {
+        for (const kind of [undefined, "session", "Device", "device ", 1, null, ["device"]]) {
+          presentDevice(deviceToken({ kind }));
+          expect(await readAdminDeviceId(), JSON.stringify(kind) ?? "undefined").toBeNull();
+        }
+      });
+
+      it("returns null unless the id is exactly 32 lowercase hex characters", async () => {
+        const bad: unknown[] = [
+          undefined,
+          null,
+          42,
+          ["0123456789abcdef0123456789abcdef"],
+          "",
+          "0123456789abcdef0123456789abcde",
+          "0123456789abcdef0123456789abcdef0",
+          "0123456789ABCDEF0123456789ABCDEF",
+          "0123456789abcdeg0123456789abcdef",
+          "0123456789abcdef0123456789abcdef\n",
+          " 0123456789abcdef0123456789abcdef",
+        ];
+        for (const id of bad) {
+          presentDevice(deviceToken({ id }));
+          expect(await readAdminDeviceId(), JSON.stringify(id) ?? "undefined").toBeNull();
+        }
+      });
+
+      it("returns null for a missing or non-numeric iat or expiresAt, and for non-object payloads", async () => {
+        for (const over of [
+          { iat: undefined },
+          { iat: "now" },
+          { iat: null },
+          { expiresAt: undefined },
+          { expiresAt: String(NOW + DAY) },
+          { expiresAt: null },
+        ]) {
+          presentDevice(deviceToken(over));
+          expect(await readAdminDeviceId(), JSON.stringify(over)).toBeNull();
+        }
+        for (const payload of [null, 42, "text", [1, 2, 3], true]) {
+          presentDevice(mintDeviceTokenForTest(payload, SECRET, PASSWORD_A));
+          expect(await readAdminDeviceId(), JSON.stringify(payload)).toBeNull();
+        }
+      });
+
+      it("returns null for a validly signed body that is not JSON", async () => {
+        const body = Buffer.from("not json {").toString("base64url");
+        const sig = signSessionBody(deriveDeviceSigningKey(SECRET, PASSWORD_A), body);
+        presentDevice(`${body}.${sig}`);
+        expect(await readAdminDeviceId()).toBeNull();
+      });
+
+      it("returns null (and does not throw) without ADMIN_PASSWORD or with a short or missing secret", async () => {
+        presentDevice(deviceToken());
+        vi.stubEnv("ADMIN_PASSWORD", undefined);
+        await expect(readAdminDeviceId()).resolves.toBeNull();
+        vi.stubEnv("ADMIN_PASSWORD", "");
+        await expect(readAdminDeviceId()).resolves.toBeNull();
+        vi.stubEnv("ADMIN_PASSWORD", PASSWORD_A);
+        vi.stubEnv("ADMIN_SESSION_SECRET", "short");
+        await expect(readAdminDeviceId()).resolves.toBeNull();
+        vi.stubEnv("ADMIN_SESSION_SECRET", undefined);
+        await expect(readAdminDeviceId()).resolves.toBeNull();
+      });
+
+      it("returns null when the cookie store itself fails", async () => {
+        presentDevice(deviceToken());
+        cookieJar.state.fail = true;
+        await expect(readAdminDeviceId()).resolves.toBeNull();
+      });
+
+      it("compares the signature with timingSafeEqual, once, on equal-length buffers", async () => {
+        presentDevice(deviceToken());
+        const spy = vi.spyOn(crypto, "timingSafeEqual");
+        expect(await readAdminDeviceId()).toBe(DEVICE_ID);
+        expect(spy).toHaveBeenCalledTimes(1);
+        const [a, b] = spy.mock.calls[0] as [Buffer, Buffer];
+        expect(a.length).toBe(b.length);
+        expect(a.length).toBe(43);
+      });
+
+      it("still compares in constant time for a well-formed but wrong signature", async () => {
+        const spy = vi.spyOn(crypto, "timingSafeEqual");
+        presentDevice(deviceToken({}, PASSWORD_B));
+        expect(await readAdminDeviceId()).toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+      });
+
+      it("a signature of the wrong length never reaches timingSafeEqual, and runs no PBKDF2", async () => {
+        const secret = "device-structural-secret-0011223344";
+        const password = "device-structural-password-xyz";
+        vi.stubEnv("ADMIN_SESSION_SECRET", secret);
+        vi.stubEnv("ADMIN_PASSWORD", password);
+        const good = deviceToken({}, password, secret);
+        const compare = vi.spyOn(crypto, "timingSafeEqual");
+        const derive = vi.spyOn(crypto, "pbkdf2Sync");
+        const baseline = derive.mock.calls.length;
+        for (const value of ["", "abc", ".abc", "abc.", "....", good + "AAAA", good.slice(0, -4)]) {
+          presentDevice(value);
+          expect(await readAdminDeviceId(), value).toBeNull();
+        }
+        expect(compare).not.toHaveBeenCalled();
+        expect(derive.mock.calls.length).toBe(baseline);
+      });
+    });
+
+    describe("domain separation from the session cookie", () => {
+      it("hasAdminSession is false for a valid device token presented as admin_session", async () => {
+        present(deviceToken());
+        expect(await hasAdminSession()).toBe(false);
+        await issueAdminDeviceCookie();
+        present(cookieJar.setCalls[0]!.value);
+        expect(await hasAdminSession()).toBe(false);
+      });
+
+      it("a device token in the admin_device slot does not make a session", async () => {
+        presentDevice(deviceToken());
+        expect(await hasAdminSession()).toBe(false);
+        await expect(requireAdminSession()).rejects.toThrow("NEXT_REDIRECT:/admin/login");
+      });
+
+      it("the device signing key is 32 bytes, differs from the session key, and changes with either input", () => {
+        const sessionKey = deriveSessionSigningKey(SECRET, PASSWORD_A);
+        const deviceKey = deriveDeviceSigningKey(SECRET, PASSWORD_A);
+        expect(deviceKey.length).toBe(32);
+        expect(deviceKey.equals(sessionKey)).toBe(false);
+        expect(deriveDeviceSigningKey(SECRET, PASSWORD_B).equals(deviceKey)).toBe(false);
+        expect(deriveDeviceSigningKey(OTHER_SECRET, PASSWORD_A).equals(deviceKey)).toBe(false);
+        expect(deriveDeviceSigningKey(SECRET, PASSWORD_A).equals(deviceKey)).toBe(true);
+      });
+
+      // deviceKey = HMAC-SHA256(sessionSigningKey, "tayf/admin-device/v1"). The
+      // vectors were computed in a scratch script with crypto.pbkdf2Sync and
+      // crypto.createHmac, independently of session.ts.
+      const FIXED_DEVICE_BODY =
+        "eyJraW5kIjoiZGV2aWNlIiwiaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImlhdCI6MTc5MzYyMDgwMDAwMCwiZXhwaXJlc0F0IjoxNzk2MjEyODAwMDAwfQ";
+      const DEVICE_VECTORS: Array<[string, string, string, string]> = [
+        [
+          "unit-test-session-secret-0123456789",
+          "correct horse battery staple",
+          "9db720ce854fc194dfa01438ee3f1dc69849c00a11945d1f055a1f0109f7b06b",
+          "HyTDncWESfoi-yfb-uW99Rsmh-LIr1ihqHv0zHpvjWs",
+        ],
+        [
+          "test-secret",
+          "test-password",
+          "0667005dab768e065dcc55fcabe4a22dc96caba504d1911a856bc9d4b0bd3ccc",
+          "DD2Bk94j7oH4vZo_tjoyalC0KwgkXfeuStSir6my950",
+        ],
+      ];
+
+      it("decodes to the fixed device body the vectors sign", () => {
+        expect(JSON.parse(Buffer.from(FIXED_DEVICE_BODY, "base64url").toString("utf8"))).toEqual({
+          kind: "device",
+          id: DEVICE_ID,
+          iat: NOW,
+          expiresAt: NOW + DEVICE_LIFETIME,
+        });
+      });
+
+      for (const [secret, password, keyHex, signature] of DEVICE_VECTORS) {
+        it(`matches the fixed device key and signature vectors for secret ${JSON.stringify(secret)}`, () => {
+          const key = deriveDeviceSigningKey(secret, password);
+          expect(key.toString("hex")).toBe(keyHex);
+          expect(signSessionBody(key, FIXED_DEVICE_BODY)).toBe(signature);
+        });
+      }
+
+      it("only session.ts holds the device domain label", () => {
+        const label = "tayf/admin-device/v1";
+        const owner = readFileSync(resolve(__dirname, "../../..", "src/lib/admin/session.ts"), "utf8");
+        expect(owner.includes(label)).toBe(true);
+        for (const rel of [
+          "src/middleware.ts",
+          "src/lib/admin/login-throttle.ts",
+          "src/lib/api/db-throttle.ts",
+          "src/lib/game/framing-session.ts",
+        ]) {
+          const src = readFileSync(resolve(__dirname, "../../..", rel), "utf8");
+          expect(src.includes(label), rel).toBe(false);
+        }
+      });
     });
   });
 

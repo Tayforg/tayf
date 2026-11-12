@@ -1185,7 +1185,7 @@ update cron.job set active = false where jobname = 'jev-shadow';
 supabase secrets unset AI_GATEWAY_API_KEY --project-ref "$PROJECT_REF"
 ```
 
-**WARNING — gold labels cascade-delete with their articles.** `jev_gold_labels.article_id` references `jev_gold_set(article_id)` which references `articles(id)`, both `on delete cascade`. The admin `nuke_articles` action (`src/app/api/admin/route.ts`) deletes every row of `public.articles` in one press, which silently and irrecoverably destroys the entire hand-labeled gold set with it. Before running `nuke_articles`, or any other bulk article delete, snapshot both tables:
+**WARNING — gold labels cascade-delete with their articles.** `jev_gold_labels.article_id` references `jev_gold_set(article_id)` which references `articles(id)`, both `on delete cascade`. The admin `nuke_articles` action (`src/app/api/admin/route.ts`) deletes every row of `public.articles` in one press, which silently and irrecoverably destroys the entire hand-labeled gold set with it. The action is disabled (403) unless the deployment sets `ADMIN_ALLOW_NUKE=1`; it is off by default. Before running `nuke_articles`, or any other bulk article delete, snapshot both tables:
 
 ```sql
 copy (select * from public.jev_gold_set) to '/tmp/jev_gold_set_backup.csv' with csv header;
@@ -1443,7 +1443,7 @@ select count(*) from public.jev_shadow_predictions
   where task = 'framing' and jsonb_typeof(jev_answer -> 'answer' -> 'probabilities') = 'object';
 ```
 
-**WARNING -- the crowd vote ledger cascade-deletes with its articles.** `framing_votes.article_id` references `articles(id) on delete cascade`, the same hazard 063 documents for `jev_gold_labels`. The admin `nuke_articles` action deletes every row of `public.articles` in one press, which silently and irrecoverably destroys every crowd vote with it. Before running `nuke_articles`, or any other bulk article delete, snapshot the ledger:
+**WARNING -- the crowd vote ledger cascade-deletes with its articles.** `framing_votes.article_id` references `articles(id) on delete cascade`, the same hazard 063 documents for `jev_gold_labels`. The admin `nuke_articles` action deletes every row of `public.articles` in one press, which silently and irrecoverably destroys every crowd vote with it. The action is disabled (403) unless the deployment sets `ADMIN_ALLOW_NUKE=1`; it is off by default. Before running `nuke_articles`, or any other bulk article delete, snapshot the ledger:
 
 ```sql
 copy (select * from public.framing_votes) to '/tmp/framing_votes_backup.csv' with csv header;
@@ -4903,3 +4903,43 @@ delete from supabase_migrations.schema_migrations where version = '205';
 **Verify** (read-only, after applying): `md5(prosrc), length(prosrc)` of `'public.entity_cluster_days(text[], text[], timestamptz, boolean)'::regprocedure` is `8af79e4bf68de3cae33f06f64db0a8e1`, 1458, and of `entity_cluster_ids_v4` still `364c7c7d99da7c27b42dc9673319ac14`, 1174; `has_function_privilege('anon', …, 'execute')` and `('authenticated', …)` false and `('service_role', …)` true, `proacl` `{postgres=X/postgres,service_role=X/postgres}`; `select version, name from supabase_migrations.schema_migrations where version = '206'` returns one row; `select count(*), sum(clusters) from public.entity_cluster_days(array['özgür özel'], array['\mozgur\s+ozel'], null, false)` returns 15 rows and a sum equal to `select max(total) from public.entity_cluster_ids_v3(array['özgür özel'], array['\mozgur\s+ozel'], null, 50, false)` (97 on 2026-11-12). Then, one request per second and after the cache entry is rebuilt, `GET /gundem/ozgur-ozel` contains "Günlere göre küme sayısı", one `role="img"` and "Günlük sayıları tablo olarak göster"; `GET /gundem/ozgur-ozel?sayfa=2` does not contain the heading; `GET /gundem/tcmb` shows "günlük grafik için çok az" and no chart.
 
 **Rollback:** `drop function public.entity_cluster_days(text[], text[], timestamptz, boolean);` then `delete from supabase_migrations.schema_migrations where version = '206'; notify pgrst, 'reload schema';`. The app draws no chart on PGRST202 by itself; `entity_cluster_ids_v3` and `_v4` are not part of this migration and are not touched.
+
+## 207 — the owner's browser is throttled per device, not through the global login bucket (new `admin_login_throttle_device(text)`; a signed `admin_device` cookie selects it): APPLY 207 BEFORE the Vercel deploy
+
+**Why:** h156-admin-1 (hunt 156, production read-only, 2026-11-12). 086's `admin_login_throttle(text)` refuses a login when the caller's key has 5 attempts in the last 15 minutes or when all keys together have 50. The global counter is shared by every caller of `/admin/login` and a refusal never looks at the password, so while it stays full the owner is refused as well: a new browser, an expired 24 h session cookie, or a login after an incident all get "Çok fazla deneme". The login Server Action is public and every denial is the same generic message, so the owner cannot tell this from their own typos. `admin_login_attempts` had 0 rows on 2026-11-12, so nothing was happening. 207 narrows the exposure: a browser that has already logged in keeps working while the shared bucket is full. A browser with no valid device cookie (the first login after the deploy, a new browser, a login more than 30 days after the last, or any login after a password rotation) still depends on the shared bucket, and the escape hatch below still applies to it. The global cap stays, because it still bounds distributed guessing of the one shared password for every caller that has not proved it.
+
+**What 207 does** (additive, one transaction with `lock_timeout = '5s'`, safe to re-apply):
+
+- adds one function, `public.admin_login_throttle_device(p_key_hash text) returns table (allowed boolean, retry_after_seconds integer)`: 086's body without the global count. Same 64-hex key check (errcode `22023`), same advisory lock id `86086086` (the two functions serialise with each other), same 1-day retention sweep, per-key cap 5 over 15 minutes, `retry_after_seconds` from the oldest counted attempt, blocked attempts not recorded. Its rows sit in the same `admin_login_attempts` table, so device attempts still count toward 086's global 50 for callers without a device cookie; they are just never refused by it. `security definer`, `set search_path = ''`, revoked from `anon`, `authenticated` and `public`, executable by `service_role` only, ledger `'207'`;
+- changes no table, index, policy, grant or existing function; 086 is not edited. Because the function is `service_role` only, `ops_health_report()` row 17 (the anon allowlist) needs no change.
+
+**What the app does** (`src/lib/admin/session.ts`, `src/lib/admin/login-throttle.ts`, `src/app/admin/login/actions.ts`):
+
+- after a login with the correct password the browser gets an `admin_device` cookie: HttpOnly, SameSite=Strict, Secure in production, path `/admin`, 30 days, a random 16-byte id, signed with a key that is derived from the session signing key under its own domain label (`tayf/admin-device/v1`) and so is bound to `ADMIN_PASSWORD` and `ADMIN_SESSION_SECRET`: rotating either one invalidates every device cookie, and a session token can never verify as a device token or the reverse. It is not a session and grants nothing by itself. No new environment variable;
+- on `/admin/login`, a valid device cookie selects `admin_login_throttle_device` (5 attempts per 15 minutes per device, keyed by `HMAC(subkey, 'device:' + id)`, never the raw id). A limited device gets the generic error. An unavailable device RPC (for instance 207 not yet applied) falls back to the per-IP + global path (a timeout does not fall back: the timed-out RPC is not cancelled and may still record its attempt, so it is refused like a limited device). A missing, forged, expired or mismatched cookie is not a device and takes that same path, unchanged;
+- logout leaves the device cookie alone.
+
+**Order:** APPLY `207_admin_login_throttle_device.sql` (`supabase db push`, or post the SQL; the PR applies nothing; the founder applies it) before the Vercel deploy that ships the code. If the deploy comes first nothing breaks: the device RPC errors, the app treats that as unavailable and uses the 086 path, and the device cookie simply has no effect until 207 is applied. 206 belongs to another open PR and 197 and 202 stay unused; no guard requires a contiguous chain.
+
+**Verify** (read-only, after applying):
+
+```sql
+select p.prosecdef, p.proconfig, pg_get_function_result(p.oid)
+  from pg_proc p
+ where p.oid = 'public.admin_login_throttle_device(text)'::regprocedure;
+-- true, {search_path=""}, TABLE(allowed boolean, retry_after_seconds integer)
+select has_function_privilege('anon', 'public.admin_login_throttle_device(text)', 'execute') as anon_exec,
+       has_function_privilege('authenticated', 'public.admin_login_throttle_device(text)', 'execute') as auth_exec,
+       has_function_privilege('service_role', 'public.admin_login_throttle_device(text)', 'execute') as service_exec;
+-- false, false, true
+select version, name from supabase_migrations.schema_migrations where version = '207';
+```
+
+**Escape hatch** (unchanged from 086; the device function reads and writes the same table): `delete from public.admin_login_attempts;` clears both the per-IP and the per-device counters. Rotating `ADMIN_PASSWORD` or `ADMIN_SESSION_SECRET` ends every device cookie at once.
+
+**Rollback** (the app falls back to the 086 path on its own):
+
+```sql
+drop function if exists public.admin_login_throttle_device(text);
+delete from supabase_migrations.schema_migrations where version = '207';
+```

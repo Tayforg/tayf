@@ -14,19 +14,23 @@ const fixture = vi.hoisted(() => ({
 
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../../../tests/_helpers/supabase-fake");
+  // Both throttle functions answer through the same fixture, so one set of
+  // cases drives the per-IP and the per-device wrapper alike.
+  const respond = async (args: unknown) => {
+    fixture.rpcArgsLog.push(args);
+    if (fixture.neverResolve) {
+      // Never resolves -- exercises the timeout path.
+      return await new Promise(() => {});
+    }
+    if (fixture.rpcImpl) {
+      return fixture.rpcImpl(args) as { data: unknown; error: unknown };
+    }
+    return { data: null, error: null };
+  };
   return helper.createSupabaseFake({
     rpc: {
-      admin_login_throttle: async (args: unknown) => {
-        fixture.rpcArgsLog.push(args);
-        if (fixture.neverResolve) {
-          // Never resolves -- exercises the timeout path.
-          return await new Promise(() => {});
-        }
-        if (fixture.rpcImpl) {
-          return fixture.rpcImpl(args) as { data: unknown; error: unknown };
-        }
-        return { data: null, error: null };
-      },
+      admin_login_throttle: respond,
+      admin_login_throttle_device: respond,
     },
   });
 });
@@ -38,11 +42,15 @@ vi.mock("@supabase/supabase-js", () => ({
 import {
   hashLoginKey,
   checkAdminLoginThrottle,
+  checkAdminDeviceLoginThrottle,
+  LOGIN_THROTTLE_DEVICE_RPC,
+  LOGIN_THROTTLE_RPC,
   LOGIN_THROTTLE_TIMEOUT_MS,
 } from "./login-throttle";
 
 const SECRET = "a".repeat(32);
 const IP = "203.0.113.7";
+const DEVICE_ID = "0123456789abcdef0123456789abcdef";
 
 describe("login-throttle", () => {
   beforeEach(() => {
@@ -50,6 +58,7 @@ describe("login-throttle", () => {
     fixture.rpcImpl = null;
     fixture.rpcArgsLog = [];
     fixture.neverResolve = false;
+    supabaseFake.calls.rpc.length = 0;
     process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
     process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role-key";
     process.env.ADMIN_SESSION_SECRET = SECRET;
@@ -148,7 +157,7 @@ describe("login-throttle", () => {
       await vi.advanceTimersByTimeAsync(LOGIN_THROTTLE_TIMEOUT_MS);
       const decision = await p;
 
-      expect(decision).toEqual({ allowed: false, reason: "unavailable" });
+      expect(decision).toEqual({ allowed: false, reason: "unavailable", timedOut: true });
     });
 
     it("returns unavailable and never calls the RPC when the secret is missing", async () => {
@@ -214,6 +223,130 @@ describe("login-throttle", () => {
       const decision = await checkAdminLoginThrottle(IP);
 
       expect(decision).toEqual({ allowed: true });
+    });
+  });
+
+  // Device cookie (migration 207): a browser that has logged in with the
+  // current password is throttled per device and skips the global bucket. The
+  // wrapper must behave exactly like checkAdminLoginThrottle: same fail-closed
+  // rules, same row validation, same timeout; only the RPC name and the hashed
+  // key differ.
+  describe("checkAdminDeviceLoginThrottle", () => {
+    it("calls admin_login_throttle_device with p_key_hash = hashLoginKey('device:' + id, secret) and nothing else", async () => {
+      fixture.rpcImpl = () => ({ data: { allowed: true, retry_after_seconds: 0 }, error: null });
+
+      const decision = await checkAdminDeviceLoginThrottle(DEVICE_ID);
+
+      expect(decision).toEqual({ allowed: true });
+      expect(LOGIN_THROTTLE_DEVICE_RPC).toBe("admin_login_throttle_device");
+      expect(supabaseFake.calls.rpc).toHaveLength(1);
+      const call = supabaseFake.calls.rpc[0]!;
+      expect(call.name).toBe("admin_login_throttle_device");
+      expect(call.args).toEqual({ p_key_hash: hashLoginKey("device:" + DEVICE_ID, SECRET) });
+      expect(JSON.stringify(call.args)).not.toContain(DEVICE_ID);
+    });
+
+    it("hashes under a different key than the per-IP call, and the per-IP call still uses its own RPC", async () => {
+      fixture.rpcImpl = () => ({ data: { allowed: true, retry_after_seconds: 0 }, error: null });
+
+      await checkAdminLoginThrottle(IP);
+      await checkAdminDeviceLoginThrottle(DEVICE_ID);
+
+      expect(LOGIN_THROTTLE_RPC).toBe("admin_login_throttle");
+      expect(supabaseFake.calls.rpc.map((c) => c.name)).toEqual([
+        "admin_login_throttle",
+        "admin_login_throttle_device",
+      ]);
+      expect(hashLoginKey("device:" + DEVICE_ID, SECRET)).not.toBe(hashLoginKey(DEVICE_ID, SECRET));
+    });
+
+    it("returns limited with retryAfterSeconds for a blocked row", async () => {
+      fixture.rpcImpl = () => ({ data: [{ allowed: false, retry_after_seconds: 240 }], error: null });
+
+      expect(await checkAdminDeviceLoginThrottle(DEVICE_ID)).toEqual({
+        allowed: false,
+        reason: "limited",
+        retryAfterSeconds: 240,
+      });
+    });
+
+    it("floors a zero retry_after_seconds up to 1", async () => {
+      fixture.rpcImpl = () => ({ data: { allowed: false, retry_after_seconds: 0 }, error: null });
+
+      expect(await checkAdminDeviceLoginThrottle(DEVICE_ID)).toEqual({
+        allowed: false,
+        reason: "limited",
+        retryAfterSeconds: 1,
+      });
+    });
+
+    it("fails closed when the secret is missing or short, without calling the RPC", async () => {
+      delete process.env.ADMIN_SESSION_SECRET;
+      expect(await checkAdminDeviceLoginThrottle(DEVICE_ID)).toEqual({
+        allowed: false,
+        reason: "unavailable",
+      });
+      process.env.ADMIN_SESSION_SECRET = "short";
+      expect(await checkAdminDeviceLoginThrottle(DEVICE_ID)).toEqual({
+        allowed: false,
+        reason: "unavailable",
+      });
+      expect(supabaseFake.calls.rpc).toHaveLength(0);
+    });
+
+    it("fails closed, without calling the RPC, for an id that is not 32 lowercase hex characters", async () => {
+      for (const bad of ["", "abc", "anon", "A".repeat(32), "g".repeat(32), DEVICE_ID + "0", DEVICE_ID.slice(1)]) {
+        expect(await checkAdminDeviceLoginThrottle(bad), bad).toEqual({
+          allowed: false,
+          reason: "unavailable",
+        });
+      }
+      expect(supabaseFake.calls.rpc).toHaveLength(0);
+    });
+
+    it("fails closed on an RPC error and never logs the device id", async () => {
+      fixture.rpcImpl = () => ({ data: null, error: { code: "42883", message: `no function for ${DEVICE_ID}` } });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      expect(await checkAdminDeviceLoginThrottle(DEVICE_ID)).toEqual({
+        allowed: false,
+        reason: "unavailable",
+      });
+      expect(warnSpy).toHaveBeenCalled();
+      for (const call of warnSpy.mock.calls) {
+        for (const arg of call) expect(String(arg)).not.toContain(DEVICE_ID);
+      }
+    });
+
+    it("fails closed when the rpc call throws", async () => {
+      fixture.rpcImpl = () => {
+        throw new Error("network down");
+      };
+
+      expect(await checkAdminDeviceLoginThrottle(DEVICE_ID)).toEqual({
+        allowed: false,
+        reason: "unavailable",
+      });
+    });
+
+    it("fails closed after the 3 s timeout when the RPC never resolves", async () => {
+      vi.useFakeTimers();
+      fixture.neverResolve = true;
+
+      const p = checkAdminDeviceLoginThrottle(DEVICE_ID);
+      await vi.advanceTimersByTimeAsync(LOGIN_THROTTLE_TIMEOUT_MS);
+
+      expect(await p).toEqual({ allowed: false, reason: "unavailable", timedOut: true });
+    });
+
+    it("fails closed on an empty, array-empty or malformed row", async () => {
+      for (const data of [null, [], { allowed: "yes" }, [{ allowed: 1 }], "allowed"]) {
+        fixture.rpcImpl = () => ({ data, error: null });
+        expect(await checkAdminDeviceLoginThrottle(DEVICE_ID), JSON.stringify(data)).toEqual({
+          allowed: false,
+          reason: "unavailable",
+        });
+      }
     });
   });
 

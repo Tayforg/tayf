@@ -664,6 +664,109 @@ describe("fetchFeed posta-shaped item [posta-image-url]", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h156-edge-1: the body of a non-2xx response is sized by the remote host (and
+// the runtime inflates a gzip body before it is read), so fetchFeed must never
+// buffer it. It cancels the stream and returns the same FetchResult as before.
+// The 2xx path is bounded by readBoundedBytes (tests above); this is the other
+// branch.
+// ---------------------------------------------------------------------------
+
+describe("fetchFeed non-2xx body is never read [h156-edge-1]", () => {
+  const CHUNK_BYTES = 1 << 20;
+  const TOTAL_CHUNKS = 64;
+
+  it.each([404, 503])(
+    "cancels a %i body instead of buffering it",
+    async (status) => {
+      let pulls = 0;
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulls >= TOTAL_CHUNKS) {
+            controller.close();
+            return;
+          }
+          pulls++;
+          controller.enqueue(new Uint8Array(CHUNK_BYTES));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      stubFetch(() => new Response(body, { status }));
+
+      const result = await fetchFeed(source);
+
+      expect(result.error).toBe(`Status code ${status}`);
+      expect(result.status).toBe(status);
+      expect(result.items).toEqual([]);
+      expect(result.etag).toBeUndefined();
+      expect(result.lastModified).toBeUndefined();
+      expect(result.bodyHash).toBeUndefined();
+      expect(xmlParseCalls).toHaveLength(0);
+      // The stream may pre-pull one chunk before anyone reads; nothing more.
+      expect(pulls).toBeLessThanOrEqual(2);
+      expect(cancelled).toBe(true);
+    },
+  );
+
+  it("returns the same result when cancelling the body rejects", async () => {
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        // Bounded on purpose: a stream that never ends would take the test
+        // worker down with it on code that still drains the body.
+        if (pulls >= 4) {
+          controller.close();
+          return;
+        }
+        pulls++;
+        controller.enqueue(new Uint8Array(16));
+      },
+      cancel() {
+        throw new Error("socket already torn down");
+      },
+    });
+    stubFetch(() => new Response(body, { status: 502 }));
+
+    const result = await fetchFeed(source);
+
+    expect(result.error).toBe("Status code 502");
+    expect(result.status).toBe(502);
+    expect(result.items).toEqual([]);
+    expect(xmlParseCalls).toHaveLength(0);
+  });
+
+  it("returns the same result for a non-2xx response that has no body stream", async () => {
+    stubFetch(() => new Response(null, { status: 500 }));
+
+    const result = await fetchFeed(source);
+
+    expect(result.error).toBe("Status code 500");
+    expect(result.status).toBe(500);
+    expect(result.items).toEqual([]);
+    expect(xmlParseCalls).toHaveLength(0);
+  });
+
+  it("leaves the conditional cache untouched on a non-2xx response", async () => {
+    const before = { etag: 'W/"old"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" };
+    const conditionalCache = new Map([[source.id, before]]);
+    stubFetch(
+      () =>
+        new Response("gone", {
+          status: 410,
+          headers: { ETag: '"new"', "Last-Modified": "Thu, 23 Oct 2026 10:00:00 GMT" },
+        }),
+    );
+
+    const result = await fetchFeed(source, { conditionalCache });
+
+    expect(result.error).toBe("Status code 410");
+    expect(conditionalCache.get(source.id)).toEqual(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Parse budget (twin-articles item, part B): ingest cycles were dying on the
 // platform CPU limit (HTTP 546, reason CPUTime) because one cycle decoded,
 // parsed and normalised every changed feed. `admitParse(bodyBytes)` lets the

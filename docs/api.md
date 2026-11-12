@@ -99,8 +99,8 @@ Admin actions. Rate limited: 20-token bucket, 0.2 tokens/sec refill.
 |---|---|---|
 | `ingest` | — | Trigger RSS ingest (skips if worker active) |
 | `backfill_images` | — | Fetch og:image for imageless articles |
-| `nuke_articles` | — | Delete all articles + clusters |
-| `nuke_clusters` | — | Delete all clusters (articles preserved) |
+| `nuke_articles` | — | Delete all articles + clusters. Disabled (403) unless the deployment sets `ADMIN_ALLOW_NUKE=1` |
+| `nuke_clusters` | — | Delete all clusters (articles preserved). Disabled (403) unless the deployment sets `ADMIN_ALLOW_NUKE=1` |
 | `toggle_source` | `slug`, `active` | Enable/disable a source |
 | `add_source` | `name`, `slug`, `url`, `rss_url`, `bias` | Add new source |
 | `update_source` | `id`, + optional fields | Update source fields |

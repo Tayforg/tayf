@@ -52,11 +52,37 @@ import { redirect } from "next/navigation";
  * browser's cookie: a copy of it stays valid until one of those happens,
  * because server-side revocation is not implemented (it would need a table,
  * i.e. a migration).
+ *
+ * Device cookie (`admin_device`, migration 207): a second, much weaker signed
+ * cookie, set only after a successful login. It is NOT a session:
+ * `hasAdminSession()` never accepts it and it grants nothing by itself. Its only
+ * use is to tell /admin/login "this browser has already proved the current
+ * password", so the login throttle can count the browser's attempts per device
+ * instead of through the per-IP and global buckets that every other caller
+ * shares (the OWASP device-cookie pattern; see src/app/admin/login/actions.ts).
+ * Token = `base64url({kind:"device", id, iat, expiresAt}) "." base64url(HMAC-
+ * SHA256(deviceKey, body))`, `id` being 16 random bytes in hex. The device key
+ * is HMAC-SHA256(sessionSigningKey, "tayf/admin-device/v1"): derived from the
+ * session signing key, so rotating ADMIN_PASSWORD or ADMIN_SESSION_SECRET kills
+ * every device cookie, and carrying its own domain label, so a session token can
+ * never verify as a device token or the reverse. Lifetime 30 days, bounded on
+ * both sides like the session. A device cookie that is missing, forged,
+ * expired or minted under another password simply reads as "no device", and the
+ * caller takes the normal per-IP + global path.
  */
 
 const COOKIE_NAME = "admin_session";
+const DEVICE_COOKIE_NAME = "admin_device";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24; // 24 hours
 const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
+const DEVICE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // 30 days
+const DEVICE_MAX_AGE_MS = DEVICE_MAX_AGE_SECONDS * 1000;
+// Domain label of the device key. Only this module holds it, and it differs from
+// every other label in use, so no other token can verify under the device key.
+const DEVICE_KEY_LABEL = "tayf/admin-device/v1";
+// 16 random bytes, lowercase hex. The login throttle hashes it, and the database
+// only ever sees that digest.
+const DEVICE_ID_PATTERN = /^[0-9a-f]{32}$/;
 // A token minted by another instance may carry an iat slightly ahead of this
 // instance's clock; anything further ahead than this is forged or broken.
 const CLOCK_SKEW_MS = 60_000;
@@ -193,6 +219,37 @@ export function mintSessionTokenForTest(
   return encodeToken(payload, deriveSessionSigningKey(secret, password));
 }
 
+/**
+ * Key that signs and verifies device tokens: HMAC-SHA256(sessionSigningKey,
+ * "tayf/admin-device/v1"). It inherits the password and secret binding of the
+ * session key (rotating either changes it) and is a different key, so a token
+ * signed for one cookie never verifies for the other. One HMAC over a short
+ * label is cheap; the expensive PBKDF2 step is the memoized session key.
+ */
+export function deriveDeviceSigningKey(secret: string, password: string): Buffer {
+  return crypto
+    .createHmac("sha256", deriveSessionSigningKey(secret, password))
+    .update(DEVICE_KEY_LABEL)
+    .digest();
+}
+
+/**
+ * Test helper, the device-cookie twin of mintSessionTokenForTest: mints a token
+ * for an arbitrary payload under (secret, password) with the production wire
+ * format, so tests can build valid and forged device tokens. Production code
+ * does not call it.
+ */
+export function mintDeviceTokenForTest(
+  payload: unknown,
+  secret: string,
+  password: string,
+): string {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("mintDeviceTokenForTest is not available in production");
+  }
+  return encodeToken(payload, deriveDeviceSigningKey(secret, password));
+}
+
 function isSessionPayload(value: unknown): value is SessionPayload {
   if (!value || typeof value !== "object") return false;
   const p = value as Record<string, unknown>;
@@ -253,6 +310,67 @@ function parseToken(token: string | undefined): SessionPayload | null {
   return payload;
 }
 
+interface DevicePayload {
+  kind: "device";
+  id: string;
+  iat: number;
+  expiresAt: number;
+}
+
+function isDevicePayload(value: unknown): value is DevicePayload {
+  if (!value || typeof value !== "object") return false;
+  const p = value as Record<string, unknown>;
+  return (
+    p.kind === "device" &&
+    typeof p.id === "string" &&
+    DEVICE_ID_PATTERN.test(p.id) &&
+    typeof p.iat === "number" &&
+    Number.isFinite(p.iat) &&
+    typeof p.expiresAt === "number" &&
+    Number.isFinite(p.expiresAt)
+  );
+}
+
+/**
+ * Verifies a device token and returns its id, or null. Same order as
+ * parseToken: cheap structural checks first (so junk cookies never trigger the
+ * key derivation), then the constant-time signature compare, then the shape and
+ * the lifetime. Throws only if ADMIN_SESSION_SECRET is missing or short;
+ * readAdminDeviceId turns that into null.
+ */
+function parseDeviceToken(token: string | undefined): string | null {
+  if (!token) return null;
+  const dot = token.indexOf(".");
+  if (dot <= 0 || dot === token.length - 1) return null;
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+
+  if (sig.length !== SIGNATURE_LENGTH) return null;
+  const password = process.env.ADMIN_PASSWORD;
+  if (!password) return null;
+
+  const key = deriveDeviceSigningKey(getSessionSecret(), password);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(signSessionBody(key, body));
+  if (a.length !== b.length) return null;
+  if (!crypto.timingSafeEqual(a, b)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fromBase64url(body).toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!isDevicePayload(parsed)) return null;
+
+  const now = Date.now();
+  if (parsed.expiresAt <= now) return null;
+  if (parsed.iat > now + CLOCK_SKEW_MS) return null;
+  if (parsed.expiresAt - parsed.iat > DEVICE_MAX_AGE_MS) return null;
+
+  return parsed.id;
+}
+
 /**
  * Constant-time password check. Both sides are run through scrypt so the
  * comparison is over equal-length digests (no length leak through timing)
@@ -287,6 +405,54 @@ export async function createAdminSession(): Promise<void> {
 export async function deleteAdminSession(): Promise<void> {
   const store = await cookies();
   store.delete(COOKIE_NAME);
+}
+
+/**
+ * Marks this browser as one that has logged in with the current password: sets
+ * the signed `admin_device` cookie (HttpOnly, SameSite=Strict, Secure in
+ * production, path /admin, 30 days) with a fresh random id. Call it right after
+ * createAdminSession(), only after the password check has passed.
+ *
+ * Best effort by design: the session cookie is already set when this runs, and
+ * a device cookie that cannot be set only means the next login takes the normal
+ * per-IP + global throttle path. Never throws; logs only an exception name.
+ */
+export async function issueAdminDeviceCookie(): Promise<void> {
+  try {
+    const key = deriveDeviceSigningKey(getSessionSecret(), getAdminPassword());
+    const iat = Date.now();
+    const expiresAt = iat + DEVICE_MAX_AGE_MS;
+    const id = crypto.randomBytes(16).toString("hex");
+    const token = encodeToken({ kind: "device", id, iat, expiresAt }, key);
+    const store = await cookies();
+    store.set(DEVICE_COOKIE_NAME, token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      path: "/admin",
+      maxAge: DEVICE_MAX_AGE_SECONDS,
+      expires: new Date(expiresAt),
+    });
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "Error";
+    console.warn(`[admin-login] device cookie not issued: ${name}`);
+  }
+}
+
+/**
+ * The id inside a valid `admin_device` cookie, or null when the cookie is
+ * absent, forged, expired, over-long, minted under another password or secret,
+ * or the environment is not configured. Swallows every error: a caller treats
+ * null as "not a known device" and uses the normal throttle path. The id is a
+ * throttle key, not a credential; never log it.
+ */
+export async function readAdminDeviceId(): Promise<string | null> {
+  try {
+    const store = await cookies();
+    return parseDeviceToken(store.get(DEVICE_COOKIE_NAME)?.value);
+  } catch {
+    return null;
+  }
 }
 
 /**
