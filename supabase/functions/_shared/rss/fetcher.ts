@@ -329,9 +329,14 @@ export async function fetchFeed(
   }
 
   if (!response.ok) {
-    // Drain the body so the underlying connection can be reused.
+    // The body of a non-2xx response is sized by the remote host, and the
+    // runtime inflates a gzip or deflate body (we send Accept-Encoding) as it
+    // is read, so a small reply can become a very large buffer. It carries
+    // nothing we use, so it is never read: cancel the stream and let the
+    // platform release it. Giving up connection reuse costs nothing but this
+    // error path.
     try {
-      await response.arrayBuffer();
+      await response.body?.cancel();
     } catch {
       // ignore
     }

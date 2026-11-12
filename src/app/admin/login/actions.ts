@@ -6,8 +6,14 @@ import {
   checkAdminPassword,
   createAdminSession,
   deleteAdminSession,
+  issueAdminDeviceCookie,
+  readAdminDeviceId,
 } from "@/lib/admin/session";
-import { checkAdminLoginThrottle } from "@/lib/admin/login-throttle";
+import {
+  checkAdminDeviceLoginThrottle,
+  checkAdminLoginThrottle,
+  type LoginThrottleDecision,
+} from "@/lib/admin/login-throttle";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 export type LoginState = { error?: string } | undefined;
@@ -42,7 +48,22 @@ const loginLimit = createRateLimiter("admin-login", {
  *      attempt with a generic message rather than falling through to
  *      `checkAdminPassword`.
  *
- * Only once both layers allow the attempt do we sleep ~250ms so a wrong
+ * Device cookie (migration 207): layer 2 has a per-device form. A browser that
+ * has logged in with the current password carries a signed `admin_device`
+ * cookie (src/lib/admin/session.ts); when it is valid, the attempt is counted
+ * per device (`checkAdminDeviceLoginThrottle`, 5 per 15 minutes) and is never
+ * refused by the global cap (its row still counts toward that cap for other
+ * callers), so the owner's own browser keeps working while the shared per-IP
+ * and global caps are full. The device throttle fails closed too:
+ * a limited device gets the generic error and is never sent to the per-IP path,
+ * but an unavailable device RPC (for instance migration 207 not yet applied)
+ * falls back to `checkAdminLoginThrottle`, exactly the path a browser without
+ * the cookie takes, except a timeout, which is refused like a limited device
+ * (the timed-out RPC is not cancelled and may still record its attempt). A missing, forged, expired or mismatched cookie reads as no
+ * device at all. The cookie is set only after the password has been checked,
+ * so it can only be held by someone who has presented the right password.
+ *
+ * Only once the throttles allow the attempt do we sleep ~250ms so a wrong
  * password takes roughly the same wall time as a right one — cheap
  * defense against timing attacks scripting attempts against /admin/login
  * — and then run the constant-time `checkAdminPassword` compare
@@ -65,7 +86,21 @@ export async function loginAction(
     return { error: TOO_MANY_ATTEMPTS_ERROR };
   }
 
-  const throttle = await checkAdminLoginThrottle(key);
+  // Layer 2. A valid device cookie selects the per-device throttle; a limited
+  // device is refused outright, an unavailable device RPC falls back to the
+  // per-IP + global throttle unless it timed out (the timed-out RPC is not
+  // cancelled and may still record its attempt, so it is refused too). Without
+  // a device cookie only the per-IP + global throttle runs.
+  const deviceId = await readAdminDeviceId();
+  let throttle: LoginThrottleDecision;
+  if (deviceId === null) {
+    throttle = await checkAdminLoginThrottle(key);
+  } else {
+    throttle = await checkAdminDeviceLoginThrottle(deviceId);
+    if (!throttle.allowed && throttle.reason === "unavailable" && !throttle.timedOut) {
+      throttle = await checkAdminLoginThrottle(key);
+    }
+  }
   if (!throttle.allowed) {
     // Fail closed and indistinguishable: whether the DB-backed throttle
     // rate-limited this attempt or was unreachable, the caller sees the
@@ -83,6 +118,9 @@ export async function loginAction(
   }
 
   await createAdminSession();
+  // Only a successful password check gets here, so only then is the browser
+  // marked as a known device. Best effort: it never fails the login.
+  await issueAdminDeviceCookie();
   redirect("/admin");
 }
 

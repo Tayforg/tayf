@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { CLUSTER_FEED_TAGS, clusterMembershipTags } from "@/lib/clusters/merge";
 
@@ -162,6 +164,8 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   delete process.env.CRON_SECRET;
+  // The nuke actions are off unless a test opts in; never inherit it from the shell.
+  delete process.env.ADMIN_ALLOW_NUKE;
   resetTableResponses();
   writes = [];
   selectCalls = [];
@@ -175,6 +179,7 @@ afterEach(() => {
     "NEXT_PUBLIC_SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
     "CRON_SECRET",
+    "ADMIN_ALLOW_NUKE",
   ]) {
     if (k in ORIGINAL_ENV) {
       process.env[k] = ORIGINAL_ENV[k] as string;
@@ -1242,7 +1247,14 @@ describe("POST /api/admin", () => {
   });
 
   describe("nuke actions", () => {
+    // The two whole-corpus wipes are refused unless the deployment opts in with
+    // ADMIN_ALLOW_NUKE === "1" (exactly). The variable is not in any committed
+    // .env file; the tests that exercise the delete order opt in explicitly.
+    const NUKE_ACTIONS = ["nuke_articles", "nuke_clusters"] as const;
+    const NUKE_OFF_MESSAGE = "nuke disabled: set ADMIN_ALLOW_NUKE=1 to enable";
+
     it("nuke_articles deletes cluster_articles, then clusters, then articles, in order", async () => {
+      process.env.ADMIN_ALLOW_NUKE = "1";
       const res = await postAdmin({ action: "nuke_articles" });
       expect(res.status).toBe(200);
       const order = writes
@@ -1253,6 +1265,7 @@ describe("POST /api/admin", () => {
     });
 
     it("nuke_clusters deletes cluster_articles then clusters, and never touches articles", async () => {
+      process.env.ADMIN_ALLOW_NUKE = "1";
       const res = await postAdmin({ action: "nuke_clusters" });
       expect(res.status).toBe(200);
       const order = writes
@@ -1260,6 +1273,66 @@ describe("POST /api/admin", () => {
         .map((w) => w.table);
       expect(order).toEqual(["cluster_articles", "clusters"]);
       expect(writes.some((w) => w.table === "articles")).toBe(false);
+    });
+
+    for (const action of NUKE_ACTIONS) {
+      it(`${action} is refused with 403 when ADMIN_ALLOW_NUKE is unset, with no delete issued`, async () => {
+        expect(process.env.ADMIN_ALLOW_NUKE).toBeUndefined();
+        const res = await postAdmin({ action });
+        expect(res.status).toBe(403);
+        expect(writes.filter((w) => w.op === "delete")).toEqual([]);
+        expect(writes).toEqual([]);
+      });
+
+      it(`${action} is refused with the apiError envelope naming ADMIN_ALLOW_NUKE`, async () => {
+        const res = await postAdmin({ action });
+        expect(res.status).toBe(403);
+        expect(res.headers.get("content-type")).toContain("application/json");
+        const body = (await res.json()) as { error?: unknown; success?: unknown };
+        expect(body).toEqual({ error: NUKE_OFF_MESSAGE });
+        expect(body.success).toBeUndefined();
+      });
+
+      // Only the exact string "1" enables it: other truthy-looking values,
+      // padding, case variants and the empty string all keep it off.
+      for (const value of ["0", "true", "TRUE", "yes", "on", "", " 1", "1 ", "01", "1\n"]) {
+        it(`${action} is refused with 403 when ADMIN_ALLOW_NUKE is ${JSON.stringify(value)}`, async () => {
+          process.env.ADMIN_ALLOW_NUKE = value;
+          const res = await postAdmin({ action });
+          expect(res.status).toBe(403);
+          expect(writes).toEqual([]);
+          expect(rpcCalls).toEqual([]);
+        });
+      }
+
+      // Auth runs before the nuke gate: with the gate OPEN ("1") a request
+      // without a session must still be a 401 with nothing written, so a
+      // refactor that handled an enabled nuke before hasAdminSession() fails.
+      for (const value of [undefined, "1"] as const) {
+        it(`${action} 401s before the nuke gate when there is no session, with ADMIN_ALLOW_NUKE ${value === undefined ? "unset" : JSON.stringify(value)}`, async () => {
+          if (value !== undefined) process.env.ADMIN_ALLOW_NUKE = value;
+          __adminAuthed = false;
+          const res = await postAdmin({ action });
+          expect(res.status).toBe(401);
+          expect(writes).toEqual([]);
+          expect(rpcCalls).toEqual([]);
+        });
+      }
+    }
+
+    it("leaves every other mutating action available when ADMIN_ALLOW_NUKE is unset", async () => {
+      const res = await postAdmin({ action: "toggle_source", slug: "test-source", active: false });
+      expect(res.status).toBe(200);
+      expect(writes.some((w) => w.table === "sources" && w.op === "update")).toBe(true);
+    });
+
+    it("keeps the nuke gate out of the committed env templates", () => {
+      for (const name of [".env.example", ".env.local.example"]) {
+        const path = resolve(__dirname, "..", "..", name);
+        if (existsSync(path)) {
+          expect(readFileSync(path, "utf8").includes("ADMIN_ALLOW_NUKE"), name).toBe(false);
+        }
+      }
     });
 
     it("nuke_articles 401s without a session, with no delete issued", async () => {
@@ -1277,6 +1350,7 @@ describe("POST /api/admin", () => {
     });
 
     it("returns 500 and never issues the articles delete when the clusters delete fails", async () => {
+      process.env.ADMIN_ALLOW_NUKE = "1";
       setTableResponse("clusters", {
         data: [],
         count: 0,

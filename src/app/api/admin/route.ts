@@ -37,6 +37,19 @@ const adminPostLimit = createRateLimiter("admin-post", {
   refillPerSecond: 0.2,
 });
 
+// The two whole-corpus wipes (nuke_articles, nuke_clusters) are off unless the
+// deployment opts in with ADMIN_ALLOW_NUKE set to exactly "1". They are three
+// sequential, non-transactional deletes with no bound on size, and the only
+// other guard is the admin session; a deployment that never needs them keeps
+// them unreachable. Not gated on VERCEL_ENV: previews can share the production
+// database. A developer who wants them locally sets the variable in .env.local;
+// it is not in any committed env file.
+function nukeAllowed(): boolean {
+  return process.env.ADMIN_ALLOW_NUKE === "1";
+}
+
+const NUKE_DISABLED_MESSAGE = "nuke disabled: set ADMIN_ALLOW_NUKE=1 to enable";
+
 // A source id is a uuid; anything else never reaches the delete_source RPC.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -100,6 +113,7 @@ export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
 
   switch (action) {
     case "nuke_articles": {
+      if (!nukeAllowed()) return apiError(403, NUKE_DISABLED_MESSAGE);
       const { error: caError } = await supabase.from("cluster_articles").delete().gte("cluster_id", "00000000-0000-0000-0000-000000000000");
       if (caError) return apiServerError(caError);
       const { error: clError } = await supabase.from("clusters").delete().gte("id", "00000000-0000-0000-0000-000000000000");
@@ -110,6 +124,7 @@ export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
     }
 
     case "nuke_clusters": {
+      if (!nukeAllowed()) return apiError(403, NUKE_DISABLED_MESSAGE);
       const { error: caError } = await supabase.from("cluster_articles").delete().gte("cluster_id", "00000000-0000-0000-0000-000000000000");
       if (caError) return apiServerError(caError);
       const { error: clError } = await supabase.from("clusters").delete().gte("id", "00000000-0000-0000-0000-000000000000");

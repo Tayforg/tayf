@@ -29,9 +29,22 @@ import { createServerClient } from "@/lib/supabase/server";
  * "limited": a generic error, never a bypass. The next attempt simply
  * retries the RPC, so a transient DB hiccup can never lock the admin out
  * permanently.
+ *
+ * Device variant (migration 207): `checkAdminDeviceLoginThrottle` serves a
+ * browser that carries a valid signed `admin_device` cookie (see
+ * src/lib/admin/session.ts). It calls public.admin_login_throttle_device(text),
+ * which has the per-key cap but no global counter, with a key derived from the
+ * device id instead of the client address. Both functions share one RPC call,
+ * one timeout and one row check below, and fail closed the same way. The only
+ * thing the caller does differently on "unavailable" is fall back to
+ * `checkAdminLoginThrottle` (never to "allowed"), except after a timeout
+ * (`timedOut: true`): the timed-out RPC is not cancelled and may still record
+ * its attempt, so a fallback could count the same attempt twice and add
+ * another 3 s of waiting while the database is degraded.
  */
 
 export const LOGIN_THROTTLE_RPC = "admin_login_throttle";
+export const LOGIN_THROTTLE_DEVICE_RPC = "admin_login_throttle_device";
 export const LOGIN_THROTTLE_TIMEOUT_MS = 3000;
 
 /** Domain-separation label: keeps this HMAC subkey unrelated to (and
@@ -42,7 +55,7 @@ const HMAC_DOMAIN = "tayf/admin-login-throttle/v1";
 export type LoginThrottleDecision =
   | { allowed: true }
   | { allowed: false; reason: "limited"; retryAfterSeconds: number }
-  | { allowed: false; reason: "unavailable" };
+  | { allowed: false; reason: "unavailable"; timedOut?: true };
 
 /**
  * key_hash = HMAC-SHA256(subkey, clientKey), where
@@ -91,33 +104,32 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * that hits the fallback would otherwise share one DB-backed bucket. */
 const ANON_CLIENT_KEY = "anon";
 
-export async function checkAdminLoginThrottle(clientKey: string): Promise<LoginThrottleDecision> {
-  const secret = process.env.ADMIN_SESSION_SECRET;
-  if (!secret || secret.length < 16) {
-    console.warn("[admin-login] throttle unavailable: secret not configured");
-    return { allowed: false, reason: "unavailable" };
-  }
+/** Prefix that keeps device keys apart from client keys: no client key (an IP address or "anon") starts with it. */
+const DEVICE_KEY_PREFIX = "device:";
+/** The id `issueAdminDeviceCookie` mints: 16 random bytes, lowercase hex. */
+const DEVICE_ID_PATTERN = /^[0-9a-f]{32}$/;
 
-  // Refuse before hashing or calling the RPC: on any deploy target where
-  // the "anon" sentinel can be reached by more than one caller, sharing
-  // one bucket would let one client lock out another. Fail closed the
-  // same way an unconfigured secret does, rather than mint a shared
-  // bucket for it.
-  if (clientKey === ANON_CLIENT_KEY) {
-    console.warn("[admin-login] throttle unavailable: anon client key");
-    return { allowed: false, reason: "unavailable" };
-  }
-
-  const keyHash = hashLoginKey(clientKey, secret);
-
+/**
+ * One throttle RPC, shared by the per-IP and the per-device check: call
+ * `rpcName` with the finished digest as `p_key_hash`, bound the call by
+ * LOGIN_THROTTLE_TIMEOUT_MS and turn the answer into a decision. Every failure
+ * (error, exception, timeout, malformed row) is "unavailable".
+ */
+async function callThrottleRpc(rpcName: string, keyHash: string): Promise<LoginThrottleDecision> {
   let data: unknown;
   let error: { code?: string; message?: string } | null;
   try {
-    const call = createServerClient().rpc(LOGIN_THROTTLE_RPC, { p_key_hash: keyHash });
+    const call = createServerClient().rpc(rpcName, { p_key_hash: keyHash });
     const result = await withTimeout(Promise.resolve(call), LOGIN_THROTTLE_TIMEOUT_MS);
     data = (result as { data: unknown; error: { code?: string; message?: string } | null }).data;
     error = (result as { data: unknown; error: { code?: string; message?: string } | null }).error;
   } catch (err) {
+    if (err instanceof TimeoutError) {
+      // The timed-out RPC is not cancelled and may still record its attempt,
+      // so say so: the caller must not retry it on another path.
+      console.warn("[admin-login] throttle unavailable: TimeoutError");
+      return { allowed: false, reason: "unavailable", timedOut: true };
+    }
     const name = err instanceof Error ? err.name : "Error";
     console.warn(`[admin-login] throttle unavailable: ${name}`);
     return { allowed: false, reason: "unavailable" };
@@ -140,4 +152,47 @@ export async function checkAdminLoginThrottle(clientKey: string): Promise<LoginT
   const raw = Math.floor(Number(row.retry_after_seconds));
   const retryAfterSeconds = Number.isFinite(raw) ? Math.max(1, raw) : 60;
   return { allowed: false, reason: "limited", retryAfterSeconds };
+}
+
+export async function checkAdminLoginThrottle(clientKey: string): Promise<LoginThrottleDecision> {
+  const secret = process.env.ADMIN_SESSION_SECRET;
+  if (!secret || secret.length < 16) {
+    console.warn("[admin-login] throttle unavailable: secret not configured");
+    return { allowed: false, reason: "unavailable" };
+  }
+
+  // Refuse before hashing or calling the RPC: on any deploy target where
+  // the "anon" sentinel can be reached by more than one caller, sharing
+  // one bucket would let one client lock out another. Fail closed the
+  // same way an unconfigured secret does, rather than mint a shared
+  // bucket for it.
+  if (clientKey === ANON_CLIENT_KEY) {
+    console.warn("[admin-login] throttle unavailable: anon client key");
+    return { allowed: false, reason: "unavailable" };
+  }
+
+  return callThrottleRpc(LOGIN_THROTTLE_RPC, hashLoginKey(clientKey, secret));
+}
+
+/**
+ * Per-device throttle for a browser holding a valid `admin_device` cookie
+ * (migration 207): the per-key cap of 5 attempts / 15 minutes, no global
+ * counter. `deviceId` is the id `readAdminDeviceId()` returned; anything that
+ * is not 32 lowercase hex characters is refused before the RPC, so a malformed
+ * id can never mint an unrelated bucket. Fails closed exactly like
+ * `checkAdminLoginThrottle`. Never logs the id.
+ */
+export async function checkAdminDeviceLoginThrottle(deviceId: string): Promise<LoginThrottleDecision> {
+  const secret = process.env.ADMIN_SESSION_SECRET;
+  if (!secret || secret.length < 16) {
+    console.warn("[admin-login] throttle unavailable: secret not configured");
+    return { allowed: false, reason: "unavailable" };
+  }
+
+  if (!DEVICE_ID_PATTERN.test(deviceId)) {
+    console.warn("[admin-login] throttle unavailable: malformed device id");
+    return { allowed: false, reason: "unavailable" };
+  }
+
+  return callThrottleRpc(LOGIN_THROTTLE_DEVICE_RPC, hashLoginKey(DEVICE_KEY_PREFIX + deviceId, secret));
 }
