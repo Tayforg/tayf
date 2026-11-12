@@ -4727,3 +4727,39 @@ select version, name from supabase_migrations.schema_migrations where version = 
 **Verify** (read-only, after applying): `md5(prosrc), length(prosrc)` of `'public.entity_cluster_ids_v4(text[], text[], timestamptz, integer, boolean, integer)'::regprocedure` is `364c7c7d99da7c27b42dc9673319ac14`, 1174, and of `entity_cluster_ids_v3` still `bc1ea39f547ca8d6810833f12c7bd983`, 1117; `has_function_privilege('anon', …, 'execute')` and `('authenticated', …)` false and `('service_role', …)` true, `proacl` `{postgres=X/postgres,service_role=X/postgres}`; `select version, name from supabase_migrations.schema_migrations where version = '199'` returns one row; `select count(*), max(total) from public.entity_cluster_ids_v4(array['chp'], array['\mchp\M'], null, 20, false, 20)` returns 20 rows and a total about 151, and its ids are disjoint from the same call with `p_offset` 0. Then, one request per second and after the cache entry is rebuilt, `GET /gundem/chp?sayfa=2` lists 20 `/cluster/` ids that `GET /gundem/chp` does not, with the canonical `/gundem/chp?sayfa=2` and `noindex, follow`; `GET /gundem/chp?sayfa=9` says "Bu sayfada küme yok. Liste 8. sayfada bitiyor." under the title "CHP — Sayfa 9".
 
 **Rollback:** `drop function public.entity_cluster_ids_v4(text[], text[], timestamptz, integer, boolean, integer);` then `delete from supabase_migrations.schema_migrations where version = '199'; notify pgrst, 'reload schema';`. The app falls back to the "unavailable" state of a later page on PGRST202 by itself; `entity_cluster_ids_v3` is not part of this migration and is not touched.
+
+## 205 — `jev-signals-nightly` gets its own 5-minute `statement_timeout` and a heartbeat row (`cron.alter_job` changes the command only; one `ops_cron_expected` row): APPLY 205 only, no deploy-order constraint, ship before about Nov 14 04:05Z
+
+**Why:** h146-pipeline-1 (hunt 146, production read-only, 2026-11-12). pg_cron job 39 `jev-signals-nightly` (`05 4 * * *`) is three bare selects (`jev_source_drift_compute`, `jev_kap_canary_compute`, `jev_alerts_auto_resolve`) and ran under the platform's 120 s `statement_timeout` (`pg_settings` `reset_val` 120000; the role `postgres` has no override). Its runs took 43-57 s from 10-29 to 11-08, then 100.6, 105.8, 105.9 and 111.6 s (11-09 to 11-12), about 4 s more a night, so it reaches 120 s around Nov 14-15. One timeout cancels the whole run (one implicit transaction): no `source_drift_daily` row for the day, no KAP canary row, no `jev_alerts` auto-resolve. `jev_source_drift_compute(p_day default yesterday)` computes only yesterday and the self-heal is held (h68-sqlperf-1), so nothing backfills the night. `public.ops_cron_expected` did not list the job, so `cron_jobs_stalled` never reported a failed or missing run. The consumers are the admin Jev panels: the impact is internal data, not a public page. This is not h140-rejected-4 (an index): there is no index, no function change and no data change here.
+
+**What 205 does** (additive, one transaction with `lock_timeout = '5s'`, safe to re-apply):
+
+- `cron.alter_job(job_id := <job 39>, command := ...)` changes the command and nothing else (no `schedule`, no `active`): `set local statement_timeout = '5min'; select public.jev_source_drift_compute(); select public.jev_kap_canary_compute(); select public.jev_alerts_auto_resolve();`, the three selects verbatim and in order, in the format 148 gave `blindspot-recall-veto`. 5 min is about 2.7 times the worst run (111.6 s) and the same order as jobs 48 and 54, while a pathological run still fails fast. The job is found by name; no pg_cron, or no job of that name, is a notice and a skip;
+- inserts `('jev-signals-nightly', interval '26 hours', '05 4 * * *')` into `public.ops_cron_expected` (`on conflict (jobname) do nothing`, only when the table exists; 26 h is the daily rule of "Kuyruk ve cron canlılığı" in `docs/ops-heartbeat.md`), so a failed run reads `warn` and a missed one `fail` in `ops_health_report()` row 19 (`cron_jobs_stalled`);
+- changes no function, index, table, schedule or data, and runs no job.
+
+**Order:** APPLY `205_jev_signals_timeout.sql` (`supabase db push`, or post the SQL; the PR applies nothing; the founder applies it) before Nov 14 04:05Z. There is no deploy and no app change; the next 04:05Z run uses the new command. The numbers 202 (held on a local branch), 203 and 204 (an open PR) are not prerequisites, and no guard requires a contiguous chain.
+
+**Replay** (production, read-only, 2026-11-12 04:52Z): row 19's query over the table plus the new row gave 21 jobs, 0 missing, 0 inactive, 0 stale, 0 failed. The new row's newest run started 2026-11-12 04:05:00Z (0.80 h old against 26 h), so applying 205 cannot turn the heartbeat red; its detail changes from `20 iş izleniyor` to `21 iş izleniyor`.
+
+**Verify** (read-only, after applying):
+
+```sql
+select command, schedule, active from cron.job where jobname = 'jev-signals-nightly';
+-- the command starts with "set local statement_timeout = '5min';"; the schedule '05 4 * * *' and active true are unchanged
+select jobname, max_gap, note from public.ops_cron_expected where jobname = 'jev-signals-nightly';   -- 26:00:00, 05 4 * * *
+select status, detail from public.ops_health_report() where check_name = 'cron_jobs_stalled';          -- pass, 21 iş izleniyor
+select start_time, status, end_time - start_time as took
+  from cron.job_run_details
+ where jobid = (select jobid from cron.job where jobname = 'jev-signals-nightly')
+ order by start_time desc limit 3;                                                                      -- the next 04:05Z run: succeeded
+```
+
+**Rollback** (nothing else depends on 205):
+
+```sql
+select cron.alter_job((select jobid from cron.job where jobname = 'jev-signals-nightly'),
+  command := 'select public.jev_source_drift_compute(); select public.jev_kap_canary_compute(); select public.jev_alerts_auto_resolve();');
+delete from public.ops_cron_expected where jobname = 'jev-signals-nightly';
+delete from supabase_migrations.schema_migrations where version = '205';
+```
