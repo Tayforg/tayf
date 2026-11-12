@@ -10,14 +10,27 @@ import { followKey, type FollowKind } from "@/lib/follows/follows";
 import {
   buildTransferCode,
   EXPORT_EMPTY_TEXT,
+  IMPORT_ALL_PRESENT_TEXT,
   IMPORT_HINT_TEXT,
   IMPORT_KEPT_FOR_RETRY_TEXT,
   IMPORT_NOT_STORED_TEXT,
+  IMPORT_NOTHING_TEXT,
   importErrorText,
+  importSummaryText,
   TRANSFER_MAX_CHARS,
   TRANSFER_SUMMARY_TEXT,
 } from "./list-transfer";
-import { ListTransferPanel, ListTransferView, runExport, runImport } from "./list-transfer-panel";
+import {
+  importBoxInput,
+  importBoxStatus,
+  importClick,
+  INITIAL_IMPORT_BOX,
+  ListTransferPanel,
+  ListTransferView,
+  runExport,
+  runImport,
+  type ImportBoxState,
+} from "./list-transfer-panel";
 
 // The vitest environment is "node" (no DOM, no effects), so the panel is covered
 // the way follow-feed.test.tsx covers /takip: renderToStaticMarkup for what the
@@ -451,6 +464,249 @@ describe("runImport", () => {
     it("a parse failure keeps the input and carries no retry sentence", () => {
       const result = runImport("bu bir kod değil", deps(ok({ skipped: 1 }), ok({ skipped: 1 })));
       expect(result).toEqual({ status: importErrorText("invalid"), invalid: true, clearInput: false });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// importClick: the state transition the "İçe aktar" button calls. After a complete
+// import the box is cleared, so a second activation (double-click, a second Enter or
+// Space) would parse "" and replace the success status with the empty-input error.
+// There is no DOM here, so the double-click is driven through the exact function
+// the button's handler calls.
+// ---------------------------------------------------------------------------
+
+describe("importClick: a repeated activation after a complete import", () => {
+  type Counts = { added: number; existing: number; skipped: number; stored: boolean };
+  const ok = (over: Partial<Counts> = {}): Counts => ({ added: 0, existing: 0, skipped: 0, stored: true, ...over });
+
+  function deps(b: Counts = ok(), f: Counts = ok()) {
+    return {
+      importBookmarks: vi.fn((ids: readonly string[]) => {
+        void ids;
+        return b;
+      }),
+      importFollows: vi.fn((follows: readonly { kind: string; value: string }[]) => {
+        void follows;
+        return f;
+      }),
+    };
+  }
+
+  const code = JSON.stringify({
+    format: "tayf-liste",
+    v: 1,
+    saved: [A, B],
+    follows: [{ kind: "konu", value: "spor" }],
+  });
+  const emptyCode = JSON.stringify({ format: "tayf-liste", v: 1, saved: [], follows: [] });
+  const EMPTY_ERROR = importErrorText("empty");
+  const withInput = (input: string): ImportBoxState => ({ ...INITIAL_IMPORT_BOX, input });
+
+  it("INITIAL_IMPORT_BOX is an empty, valid, not-cleared box", () => {
+    expect(INITIAL_IMPORT_BOX).toEqual({ input: "", status: "", invalid: false, clearedBySuccess: false });
+  });
+
+  it("a complete import clears the input and says so; the second activation returns the SAME state, calls no store and keeps the success status", () => {
+    const d = deps(ok({ added: 2 }), ok({ added: 1 }));
+    const s1 = importClick(withInput(code), d);
+    expect(s1.input).toBe("");
+    expect(s1.invalid).toBe(false);
+    expect(s1.clearedBySuccess).toBe(true);
+    expect(s1.status).toBe(importSummaryText({ saved: ok({ added: 2 }), follows: ok({ added: 1 }), stored: true }));
+    expect(s1.status).toBe("2 hikâye ve 1 takip eklendi.");
+    expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+    expect(d.importFollows).toHaveBeenCalledTimes(1);
+
+    const s2 = importClick(s1, d);
+    expect(s2).toBe(s1);
+    expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+    expect(d.importFollows).toHaveBeenCalledTimes(1);
+    expect(s2.status).not.toBe(EMPTY_ERROR);
+    expect(s2.invalid).toBe(false);
+  });
+
+  it("any number of further activations keep the same state and never touch a store again", () => {
+    const d = deps(ok({ added: 1 }), ok());
+    const s1 = importClick(withInput(code), d);
+    let s = s1;
+    for (let i = 0; i < 5; i += 1) s = importClick(s, d);
+    expect(s).toBe(s1);
+    expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+    expect(d.importFollows).toHaveBeenCalledTimes(1);
+  });
+
+  const outcomes: Array<{ name: string; text: string; b: Counts; f: Counts; code: string }> = [
+    { name: "everything is already there", text: IMPORT_ALL_PRESENT_TEXT, b: ok({ existing: 2 }), f: ok({ existing: 1 }), code },
+    { name: "there is nothing to import", text: IMPORT_NOTHING_TEXT, b: ok(), f: ok(), code: emptyCode },
+  ];
+  for (const outcome of outcomes) {
+    it(`after '${outcome.text}' (${outcome.name}) the second activation returns the same state and keeps that status`, () => {
+      const d = deps(outcome.b, outcome.f);
+      const s1 = importClick(withInput(outcome.code), d);
+      expect(s1).toEqual({ input: "", status: outcome.text, invalid: false, clearedBySuccess: true });
+      const s2 = importClick(s1, d);
+      expect(s2).toBe(s1);
+      expect(s2.status).toBe(outcome.text);
+      expect(s2.status).not.toBe(EMPTY_ERROR);
+      expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+      expect(d.importFollows).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it("a cleared box whose input is only edge blanks (trimTransferEdges: no-break space, zero-width space, BOM) is still 'empty' and keeps the same state", () => {
+    const d = deps(ok({ added: 1 }), ok());
+    const s1 = importClick(withInput(code), d);
+    for (const blank of ["", " ", "\n\t", "\u00a0", "\u200b\u00a0\ufeff"]) {
+      const cleared: ImportBoxState = { ...s1, input: blank };
+      expect(importClick(cleared, d)).toBe(cleared);
+    }
+    expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+  });
+
+  it("a cleared-by-success flag with real text in the box is not an empty box: it runs the import like any other click", () => {
+    const d = deps(ok({ added: 1 }), ok());
+    const s1 = importClick(withInput(code), d);
+    const stale: ImportBoxState = { ...s1, input: code };
+    const next = importClick(stale, d);
+    expect(next).not.toBe(stale);
+    expect(d.importBookmarks).toHaveBeenCalledTimes(2);
+    expect(next.clearedBySuccess).toBe(true);
+    expect(next.input).toBe("");
+  });
+
+  it("importBoxInput sets the value and re-arms the empty-box message, even when the box is cleared by hand ('' and ' ')", () => {
+    const d = deps(ok({ added: 1 }), ok());
+    const s1 = importClick(withInput(code), d);
+    for (const value of [" ", "", "\u200b", "\n"]) {
+      const edited = importBoxInput(s1, value);
+      expect(edited).toEqual({ input: value, status: s1.status, invalid: false, clearedBySuccess: false });
+      const clicked = importClick(edited, d);
+      expect(clicked).toEqual({ input: value, status: EMPTY_ERROR, invalid: true, clearedBySuccess: false });
+    }
+    // Only the first import wrote; the empty clicks called no store.
+    expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+    expect(d.importFollows).toHaveBeenCalledTimes(1);
+  });
+
+  it("importBoxInput does not mutate the state it is given", () => {
+    const s1 = importClick(withInput(code), deps(ok({ added: 1 }), ok()));
+    const snapshot = { ...s1 };
+    const edited = importBoxInput(s1, "x");
+    expect(edited).not.toBe(s1);
+    expect(s1).toEqual(snapshot);
+  });
+
+  it("pasting a new code after a complete import imports it (an edit re-arms the click)", () => {
+    const d = deps(ok({ added: 1 }), ok());
+    const s1 = importClick(withInput(code), d);
+    const pasted = importBoxInput(s1, emptyCode);
+    expect(pasted.clearedBySuccess).toBe(false);
+    const s2 = importClick(pasted, d);
+    expect(d.importBookmarks).toHaveBeenCalledTimes(2);
+    expect(s2.clearedBySuccess).toBe(true);
+    expect(s2.input).toBe("");
+    // ...and the double-click after THAT one is quiet again.
+    expect(importClick(s2, d)).toBe(s2);
+    expect(d.importBookmarks).toHaveBeenCalledTimes(2);
+  });
+
+  it("first use: INITIAL_IMPORT_BOX followed by importClick gives the empty-box error with invalid true and calls no store", () => {
+    const d = deps();
+    const s = importClick(INITIAL_IMPORT_BOX, d);
+    expect(s).toEqual({ input: "", status: EMPTY_ERROR, invalid: true, clearedBySuccess: false });
+    expect(s.status).toBe("Önce bir aktarma kodu yapıştırın.");
+    expect(d.importBookmarks).not.toHaveBeenCalled();
+    expect(d.importFollows).not.toHaveBeenCalled();
+    // The shared initial value is never modified.
+    expect(INITIAL_IMPORT_BOX).toEqual({ input: "", status: "", invalid: false, clearedBySuccess: false });
+    // A repeated click on an empty box keeps saying so.
+    expect(importClick(s, d)).toEqual(s);
+  });
+
+  it("a refused code keeps the text, is not 'cleared by success', and a second click re-checks it", () => {
+    const d = deps();
+    const s1 = importClick(withInput("bu bir kod değil"), d);
+    expect(s1).toEqual({ input: "bu bir kod değil", status: importErrorText("invalid"), invalid: true, clearedBySuccess: false });
+    const s2 = importClick(s1, d);
+    expect(s2).toEqual(s1);
+    expect(d.importBookmarks).not.toHaveBeenCalled();
+  });
+
+  describe("a partly applied import keeps the code and its retry (unchanged)", () => {
+    for (const [name, b, f] of [
+      ["follows skipped at the cap", ok(), ok({ added: 2, skipped: 3 })],
+      ["saved skipped at the cap", ok({ skipped: 2 }), ok()],
+    ] as const) {
+      it(`${name}: input kept, clearedBySuccess false, the second activation calls the stores again, and a later complete run clears`, () => {
+        const d = deps(b, f);
+        const s1 = importClick(withInput(code), d);
+        expect(s1.input).toBe(code);
+        expect(s1.clearedBySuccess).toBe(false);
+        expect(s1.invalid).toBe(false);
+        expect(s1.status.endsWith(IMPORT_KEPT_FOR_RETRY_TEXT)).toBe(true);
+        expect(count(s1.status, IMPORT_KEPT_FOR_RETRY_TEXT)).toBe(1);
+
+        const s2 = importClick(s1, d);
+        expect(s2).not.toBe(s1);
+        expect(s2.input).toBe(code);
+        expect(s2.clearedBySuccess).toBe(false);
+        expect(d.importBookmarks).toHaveBeenCalledTimes(2);
+        expect(d.importFollows).toHaveBeenCalledTimes(2);
+
+        // Room is made: the same code completes, the box clears, and the next click is quiet.
+        const room = deps(ok({ existing: 1 }), ok({ added: 1, existing: 1 }));
+        const s3 = importClick(s2, room);
+        expect(s3.input).toBe("");
+        expect(s3.clearedBySuccess).toBe(true);
+        expect(s3.status.includes(IMPORT_KEPT_FOR_RETRY_TEXT)).toBe(false);
+        expect(importClick(s3, room)).toBe(s3);
+        expect(room.importBookmarks).toHaveBeenCalledTimes(1);
+      });
+    }
+  });
+
+  describe("a failed write keeps the code and its retry (unchanged)", () => {
+    for (const [name, b, f] of [
+      ["bookmarks not stored", ok({ added: 1, stored: false }), ok()],
+      ["follows not stored", ok(), ok({ added: 1, stored: false })],
+    ] as const) {
+      it(`${name}: input kept with IMPORT_NOT_STORED_TEXT, and the second activation re-runs`, () => {
+        const d = deps(b, f);
+        const s1 = importClick(withInput(code), d);
+        expect(s1).toEqual({ input: code, status: IMPORT_NOT_STORED_TEXT, invalid: false, clearedBySuccess: false });
+        const s2 = importClick(s1, d);
+        expect(s2).toEqual(s1);
+        expect(s2).not.toBe(s1);
+        expect(d.importBookmarks).toHaveBeenCalledTimes(2);
+        expect(d.importFollows).toHaveBeenCalledTimes(2);
+      });
+    }
+  });
+
+  describe("importBoxStatus (used by export)", () => {
+    it("after a complete import, an export status then a click on the empty box gives the empty-box error", () => {
+      const d = deps(ok({ added: 1 }), ok());
+      const s1 = importClick(withInput(code), d);
+      const exported = importBoxStatus(s1, EXPORT_EMPTY_TEXT);
+      expect(exported).toEqual({ input: "", status: EXPORT_EMPTY_TEXT, invalid: false, clearedBySuccess: false });
+      const s2 = importClick(exported, d);
+      expect(s2).toEqual({ input: "", status: EMPTY_ERROR, invalid: true, clearedBySuccess: false });
+      expect(d.importBookmarks).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps what is typed in the import box, clears the invalid flag and does not mutate the state it is given", () => {
+      const refused = importClick(withInput("bu bir kod değil"), deps());
+      expect(refused.invalid).toBe(true);
+      const snapshot = { ...refused };
+      const exported = importBoxStatus(refused, "Kod kopyalandı: 1 kayıtlı hikâye, 0 takip.");
+      expect(exported).toEqual({
+        input: "bu bir kod değil",
+        status: "Kod kopyalandı: 1 kayıtlı hikâye, 0 takip.",
+        invalid: false,
+        clearedBySuccess: false,
+      });
+      expect(refused).toEqual(snapshot);
     });
   });
 });
@@ -902,6 +1158,87 @@ describe("source guards", () => {
     expect(count(body, "<p ")).toBe(1);
     expect(textOf(markup).includes("sunucu")).toBe(false);
     expect(textOf(markup).includes("saklanır")).toBe(false);
+  });
+
+  describe("the panel's handlers go through the pure box functions", () => {
+    const panelSrc = readFileSync(resolve(__dirname, "list-transfer-panel.tsx"), "utf8");
+    const panelAt = panelSrc.indexOf("export function ListTransferPanel");
+
+    /** The text of the `const name = ...` handler inside ListTransferPanel, up to the next sibling statement. */
+    function handler(name: string): string {
+      expect(panelAt).toBeGreaterThan(0);
+      const start = panelSrc.indexOf(`  const ${name} = `, panelAt);
+      expect(start, `const ${name} in ListTransferPanel`).toBeGreaterThan(panelAt);
+      const ends = [panelSrc.indexOf("\n  const ", start + 1), panelSrc.indexOf("\n  return ", start + 1)].filter(
+        (i) => i > start,
+      );
+      expect(ends.length).toBeGreaterThan(0);
+      return panelSrc.slice(start, Math.min(...ends));
+    }
+
+    /** The argument text of every `setBox(` call in the panel, by parenthesis balance. */
+    function setBoxArgs(): string[] {
+      const out: string[] = [];
+      let from = panelSrc.indexOf("setBox(", panelAt);
+      while (from >= 0) {
+        const open = from + "setBox".length;
+        let depth = 0;
+        let end = open;
+        for (; end < panelSrc.length; end += 1) {
+          const ch = panelSrc[end];
+          if (ch === "(") depth += 1;
+          else if (ch === ")") {
+            depth -= 1;
+            if (depth === 0) break;
+          }
+        }
+        out.push(panelSrc.slice(open + 1, end));
+        from = panelSrc.indexOf("setBox(", end);
+      }
+      return out;
+    }
+
+    it("onImport calls importClick and does not call runImport directly", () => {
+      const onImport = handler("onImport");
+      expect(onImport.includes("importClick(")).toBe(true);
+      expect(onImport.includes("runImport(")).toBe(false);
+      // The next state is computed in the handler and only stored when it changed.
+      expect(onImport.includes("next !== box")).toBe(true);
+      expect(onImport.includes("setBox(next)")).toBe(true);
+    });
+
+    it("importClick never appears inside a setBox updater (store writes must not run twice under StrictMode)", () => {
+      const calls = setBoxArgs();
+      expect(calls.length).toBeGreaterThanOrEqual(3);
+      for (const args of calls) {
+        expect(args.includes("importClick"), `setBox(${args})`).toBe(false);
+        expect(args.includes("runImport"), `setBox(${args})`).toBe(false);
+      }
+      // The updaters that are there are the two pure ones.
+      expect(calls.some((args) => args.startsWith("(") && args.includes("importBoxInput("))).toBe(true);
+      expect(calls.some((args) => args.startsWith("(") && args.includes("importBoxStatus("))).toBe(true);
+      expect(panelSrc.includes("setBox((")).toBe(true);
+    });
+
+    it("onInput goes through importBoxInput, and the view receives that handler", () => {
+      expect(handler("onInput").includes("importBoxInput(")).toBe(true);
+      expect(panelSrc.includes("onInput={onInput}")).toBe(true);
+      expect(panelSrc.includes("onInput={setInput}")).toBe(false);
+    });
+
+    it("onExport's result goes through importBoxStatus", () => {
+      expect(handler("onExport").includes("importBoxStatus(")).toBe(true);
+    });
+
+    it("the panel keeps one box state and no separate input, status or invalid state", () => {
+      const panelBody = panelSrc.slice(panelAt);
+      expect(panelBody.includes("useState<ImportBoxState>(INITIAL_IMPORT_BOX)")).toBe(true);
+      expect(panelBody.includes("setInput(")).toBe(false);
+      expect(panelBody.includes("setStatus(")).toBe(false);
+      expect(panelBody.includes("setInvalid(")).toBe(false);
+      // The export code box keeps its own state.
+      expect(panelBody.includes("setCode(")).toBe(true);
+    });
   });
 
   it("use-bookmarks.ts imports nothing from @/components/transfer or @/lib/follows", () => {

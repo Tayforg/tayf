@@ -403,10 +403,122 @@ describe("every /_next/image producer in src/ applies the allowlist (e)", () => 
     expect(files.some((f) => f.rel === "src/lib/images/image-url.ts")).toBe(true);
   });
 
-  it("only ClusterCardImage imports next/image, and it filters with isAllowedRemoteImageUrl", () => {
+  // h160-1: the home shell preloads the first card's banner, which needs the
+  // URLs next/image would write for it. That is getImageProps (a plain function,
+  // callable from a Server Component, which the client ClusterCardImage is not),
+  // used by ClusterCard's mobileBannerPreload. It does not filter its argument
+  // itself; instead its one caller feeds it the first entry of cardHeroCandidates,
+  // which is pickHeroCandidates, which applies isAllowedRemoteImageUrl. So the
+  // card module is the one other importer, pinned tightly: the named
+  // getImageProps import only (never the Image component), one call, and every
+  // use of mobileBannerPreload fed from the allowlisted candidate list.
+  it("only ClusterCardImage and the card's banner-preload helper import next/image, each behind the allowlist", () => {
     const importers = files.filter((f) => /from\s*["']next\/image["']/.test(f.code));
-    expect(importers.map((f) => f.rel)).toEqual(["src/components/story/cluster-card-image.tsx"]);
-    for (const f of importers) expect(f.code, f.rel).toContain("isAllowedRemoteImageUrl(");
+    expect(importers.map((f) => f.rel).sort()).toEqual([
+      "src/components/story/cluster-card-image.tsx",
+      "src/components/story/cluster-card.tsx",
+    ]);
+
+    const image = importers.find((f) => f.rel === "src/components/story/cluster-card-image.tsx");
+    expect(image?.code).toContain("isAllowedRemoteImageUrl(");
+
+    const card = importers.find((f) => f.rel === "src/components/story/cluster-card.tsx");
+    expect(card?.code).toContain('import { getImageProps } from "next/image";');
+    expect(card?.code.split("getImageProps(").length).toBe(2); // exactly one call
+    // The only source of its candidates is the allowlisted pick.
+    expect(card?.code).toContain("pickHeroCandidates(");
+    expect(card?.code).toContain("export function mobileBannerPreload(");
+  });
+
+  // The one binding the preload caller may use for its argument.
+  const HERO_BINDING =
+    "const src = card ? cardHeroCandidates(card.articles, card.sources)[0] : undefined;";
+
+  /**
+   * True only when `code` has exactly one `mobileBannerPreload(` call, that call
+   * takes the bare identifier `src`, and `src` is bound exactly once, to the
+   * first of cardHeroCandidates(...) (which is allowlist-filtered). A fallback
+   * (`src ?? other`), another expression, a second binding or a shadowing of
+   * `src` all make it false. indexOf / slice / split only, no regex.
+   */
+  function feedsOnlyHeroCandidate(code: string): boolean {
+    if (code.split(HERO_BINDING).length !== 2) return false;
+    if (code.split(" src =").length !== 2) return false;
+    const call = "mobileBannerPreload(";
+    if (code.split(call).length !== 2) return false;
+    const argFrom = code.indexOf(call) + call.length;
+    return code.slice(argFrom, code.indexOf(")", argFrom)) === "src";
+  }
+
+  it("mobileBannerPreload is only ever fed an allowlisted hero candidate", () => {
+    const users = files.filter(
+      (f) => f.code.includes("mobileBannerPreload(") && !f.rel.endsWith(".test.ts"),
+    );
+    expect(users.map((f) => f.rel).sort()).toEqual([
+      "src/components/home/home-lcp-preload.tsx",
+      "src/components/story/cluster-card.tsx",
+    ]);
+    const caller = users.find((f) => f.rel === "src/components/home/home-lcp-preload.tsx");
+    expect(caller).toBeDefined();
+    // The argument is `src`, and `src` is the first of cardHeroCandidates(...),
+    // nothing else: no fallback, no second binding, no other expression.
+    expect(feedsOnlyHeroCandidate(caller!.code)).toBe(true);
+
+    // The card module only defines the helper; it never calls it.
+    const card = users.find((f) => f.rel === "src/components/story/cluster-card.tsx");
+    expect(card).toBeDefined();
+    expect(card!.code.split("mobileBannerPreload(").length).toBe(2);
+    expect(card!.code).toContain("export function mobileBannerPreload(");
+  });
+
+  it("feedsOnlyHeroCandidate rejects a caller that feeds the helper anything but the hero candidate", () => {
+    const caller = files.find((f) => f.rel === "src/components/home/home-lcp-preload.tsx");
+    expect(caller).toBeDefined();
+    const code = caller!.code;
+    expect(feedsOnlyHeroCandidate(code)).toBe(true);
+
+    const mutate = (from: string, to: string): string => {
+      expect(code, from).toContain(from);
+      const out = code.replace(from, to);
+      expect(out).not.toBe(code);
+      return out;
+    };
+
+    // A fallback to an off-list URL.
+    expect(
+      feedsOnlyHeroCandidate(
+        mutate("mobileBannerPreload(src)", 'mobileBannerPreload(src ?? "https://evil.example/x.jpg")'),
+      ),
+    ).toBe(false);
+    // An unrelated expression.
+    expect(
+      feedsOnlyHeroCandidate(mutate("mobileBannerPreload(src)", "mobileBannerPreload(card!.cluster.title)")),
+    ).toBe(false);
+    // A second, unfiltered binding that the call uses instead.
+    expect(
+      feedsOnlyHeroCandidate(
+        mutate("mobileBannerPreload(src)", "mobileBannerPreload(src2)").replace(
+          HERO_BINDING,
+          `${HERO_BINDING}\n  const src2 = "https://evil.example/x.jpg";`,
+        ),
+      ),
+    ).toBe(false);
+    // `src` re-bound to an off-list URL while the call still says `src`.
+    expect(
+      feedsOnlyHeroCandidate(
+        code.replace(HERO_BINDING, `${HERO_BINDING}\n  const other = 1;\n  let src = "https://evil.example/x.jpg";`),
+      ),
+    ).toBe(false);
+    // The binding itself loosened to a non-allowlisted source.
+    expect(
+      feedsOnlyHeroCandidate(
+        mutate(HERO_BINDING, "const src = card ? card.cluster.og_image_url : undefined;"),
+      ),
+    ).toBe(false);
+    // A second call.
+    expect(
+      feedsOnlyHeroCandidate(mutate("mobileBannerPreload(src)", "mobileBannerPreload(src); mobileBannerPreload(src)")),
+    ).toBe(false);
   });
 
   it("only image-url.ts builds a /_next/image?url= string, and it gates it on the allowlist", () => {

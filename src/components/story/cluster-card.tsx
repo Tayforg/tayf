@@ -1,4 +1,5 @@
 import { AlertTriangle, Clock, Copy, Users } from "lucide-react";
+import { getImageProps } from "next/image";
 import Link from "next/link";
 
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
@@ -187,6 +188,78 @@ export function mobileBannerImageProps(index?: number): {
     fetchPriority: isLcpCandidate ? "high" : undefined,
     sizes: MOBILE_BANNER_SIZES,
     quality: 50,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Banner preload for the home shell (h160-1)
+// ---------------------------------------------------------------------------
+//
+// On a hard load of "/" the first card's image element and its own preload sit
+// inside the streamed feed, about 40 KB (wire) into the document, so the
+// browser finds the banner late. HomeLcpPreload asks React to preload the SAME
+// banner while the prerendered shell renders, which puts the <link> in <head>.
+// For React to write one <link> and drop the card's duplicate on resume, the
+// shell's hint must carry the card's own srcset, sizes and priority. So they
+// are built here, next to the card, from the same values the card's
+// <ClusterCardImage> gets: the intrinsic size below, MOBILE_BANNER_SIZES and the
+// banner's quality.
+
+/** Intrinsic size of the mobile banner (16:9), passed to its <ClusterCardImage>. */
+export const MOBILE_BANNER_WIDTH = 640;
+export const MOBILE_BANNER_HEIGHT = 360;
+
+/**
+ * The hero candidates of a card: the usable image URLs of the members whose
+ * source resolves (a name on the article, else the source looked up by id),
+ * normalised, de-duplicated and capped (pickHeroCandidates). ClusterCard builds
+ * its banner and thumbnail from this list, and HomeLcpPreload takes its first
+ * entry, so the preload names the image the card will render.
+ */
+export function cardHeroCandidates(
+  articles: ClusterCardArticle[],
+  sources: ClusterCardSource[],
+): string[] {
+  const sourceById = new Map(sources.map((s) => [s.id, s]));
+  return pickHeroCandidates(
+    articles
+      .filter((a) => (a.source_name ?? sourceById.get(a.source_id)?.name))
+      .map((a) => a.image_url),
+  );
+}
+
+/**
+ * The arguments for react-dom's `preload()` that match the first card's mobile
+ * banner for `src`: the `href` and srcset next/image would write for it, its
+ * `sizes`, and `fetchPriority: "high"`. Built with `getImageProps` and the
+ * banner's own width, height, sizes and quality, so the URLs are the ones the
+ * rendered banner image asks for.
+ */
+export function mobileBannerPreload(src: string): {
+  href: string;
+  options: {
+    as: "image";
+    imageSrcSet: string | undefined;
+    imageSizes: string | undefined;
+    fetchPriority: "high";
+  };
+} {
+  const { props } = getImageProps({
+    src,
+    alt: "",
+    width: MOBILE_BANNER_WIDTH,
+    height: MOBILE_BANNER_HEIGHT,
+    sizes: MOBILE_BANNER_SIZES,
+    quality: mobileBannerImageProps(0).quality,
+  });
+  return {
+    href: props.src,
+    options: {
+      as: "image",
+      imageSrcSet: props.srcSet,
+      imageSizes: props.sizes,
+      fetchPriority: "high",
+    },
   };
 }
 
@@ -419,10 +492,12 @@ export function ClusterCard({
   // has 14 other working images. Only the first HERO_CANDIDATE_CAP USABLE
   // URLs are passed (h99-clientjs-1): every one is serialised into the RSC
   // payload, a 44-member cluster used to ship 44, and the client drops the
-  // unusable ones anyway. pickHeroCandidates normalises, filters and
-  // de-duplicates exactly like ClusterCardImage does, so the hero and the
-  // fallback order within the cap are what they were.
-  const heroCandidates = pickHeroCandidates(resolved.map((a) => a.image_url));
+  // unusable ones anyway. cardHeroCandidates (pickHeroCandidates over the
+  // resolved members' images) normalises, filters and de-duplicates exactly
+  // like ClusterCardImage does, so the hero and the fallback order within the
+  // cap are what they were. The home shell takes its first entry to preload
+  // this very banner (HomeLcpPreload, h160-1).
+  const heroCandidates = cardHeroCandidates(articles, sources);
   const heroSrc = heroCandidates[0] ?? null;
   const heroFallbacks = heroCandidates.slice(1);
   const banner = mobileBannerImageProps(index);
@@ -485,8 +560,8 @@ export function ClusterCard({
             logoSrc={resolved[0]?.source_logo_url ?? null}
             logoAlt={resolved[0]?.source_name ?? "Kaynak"}
             alt=""
-            width={640}
-            height={360}
+            width={MOBILE_BANNER_WIDTH}
+            height={MOBILE_BANNER_HEIGHT}
             sizes={banner.sizes}
             quality={banner.quality}
             minIntrinsicWidth={320}

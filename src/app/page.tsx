@@ -12,6 +12,7 @@ import { ClusterCard } from "@/components/story/cluster-card";
 import { FollowButton } from "@/components/follow/follow-button";
 import { ClearSearchLink } from "@/components/home/clear-search-link";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
+import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { SearchEcho } from "@/components/search/search-echo";
 import { PageHero } from "@/components/ui/page-hero";
@@ -180,31 +181,41 @@ export default function HomePage({
   searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
 }) {
   return (
-    <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
-      <PageHero
-        kicker="Türkiye haber takibi"
-        title="Haberler"
-        subtitle="Aynı olayı kaç farklı kaynak, hangi bakış açısıyla ele alıyor? Otomatik kümelenmiş güncel politika haberleri."
-      />
-
-      <Suspense fallback={<SearchBarPlaceholder />}>
-        <SearchBar />
+    <>
+      {/* h160-1: the first card's banner preload, written into <head> by the
+          prerendered shell (see HomeLcpPreload). A sibling BEFORE the container
+          and OUTSIDE the feed boundary, in a Suspense of its own: it renders
+          nothing, and if its feed read is postponed only this boundary waits,
+          instead of the whole page falling back to loading.tsx. */}
+      <Suspense fallback={null}>
+        <HomeLcpPreload />
       </Suspense>
+      <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
+        <PageHero
+          kicker="Türkiye haber takibi"
+          title="Haberler"
+          subtitle="Aynı olayı kaç farklı kaynak, hangi bakış açısıyla ele alıyor? Otomatik kümelenmiş güncel politika haberleri."
+        />
 
-      {/* tabIndex -1: focusable from script (the pager hands focus here after
-          a page change), never a tab stop. No outline: it is not an
-          interactive control, and the list itself is the focus indicator. */}
-      <section
-        id={HOME_FEED_ID}
-        aria-label="Haber akışı"
-        tabIndex={-1}
-        className="space-y-5 focus:outline-none"
-      >
-        <Suspense fallback={<FeedSkeleton />}>
-          <HomeFeed searchParams={searchParams} />
+        <Suspense fallback={<SearchBarPlaceholder />}>
+          <SearchBar />
         </Suspense>
-      </section>
-    </div>
+
+        {/* tabIndex -1: focusable from script (the pager hands focus here after
+            a page change), never a tab stop. No outline: it is not an
+            interactive control, and the list itself is the focus indicator. */}
+        <section
+          id={HOME_FEED_ID}
+          aria-label="Haber akışı"
+          tabIndex={-1}
+          className="space-y-5 focus:outline-none"
+        >
+          <Suspense fallback={<FeedSkeleton />}>
+            <HomeFeed searchParams={searchParams} />
+          </Suspense>
+        </section>
+      </div>
+    </>
   );
 }
 
