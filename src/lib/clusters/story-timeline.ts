@@ -27,6 +27,27 @@ export const STORY_TIMELINE_MIN_SOURCES = 3;
 /** Two times closer than this read as "the same minute". */
 export const STORY_TIE_MS = 60_000;
 
+/**
+ * h162-cluster-1: how old a story may be before the degraded-feed line is
+ * dropped. "Bağımsız kaynakların akışı şu an sorunlu" reads CURRENT feed health,
+ * so it is only a fair explanation of a silence while the story is still inside
+ * the window in which a feed that stopped delivering is judged (the 72 h
+ * `FEED_YIELD_WINDOW_MS` of feed-health.ts: parity pinned by story-timeline.test.ts).
+ * Past it, today's outage says nothing about why a zone did not cover a story
+ * from weeks ago, and the plain absence wording applies. A local literal on
+ * purpose: feed-health.ts reads the server Supabase client, and this module is
+ * imported by client code.
+ */
+export const STORY_DEGRADED_NOTE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * h162-cluster-1: the framing comparison's empty-column line for a zone whose
+ * feeds are degraded (the timeline's `degradedAbsentZones`). The column's own
+ * wording of DEGRADED_TEXT below: "bu taraftaki" is the read-across's phrase for
+ * "this side", and "akışı şu an sorunlu" the timeline's.
+ */
+export const DEGRADED_EMPTY_COLUMN = "— bu taraftaki kaynakların akışı şu an sorunlu —";
+
 /** Share of the first→last span added as padding (half on each side). */
 const AXIS_PADDING = 0.1;
 
@@ -258,8 +279,9 @@ function firstMoverLabel(names: readonly string[]): string {
  * `members` must be voting members only. `seenAt` maps article id → the
  * article's `created_at` (when Tayf first saw it); it caps a source-supplied
  * future pubDate (CNN Türk runs ~2.84 h ahead) but never moves a point
- * later. `health` only explains an absent zone; null means unknown and
- * never marks anything degraded.
+ * later. `health` only explains an absent zone, and only while the story is
+ * recent (see `nowMs` below); null means unknown and never marks anything
+ * degraded.
  *
  * `nonVoting` (toplayıcı / niş sources) are plotted as context only: they
  * widen the axis and appear in `points` with `voting: false`, but never
@@ -290,6 +312,15 @@ function firstMoverLabel(names: readonly string[]): string {
  * wording; an English-only cluster states no absence. Undefined or empty leaves
  * every string as it was. Wording only: `absentZones` and everything else are
  * unchanged.
+ *
+ * `nowMs` (h162-cluster-1) is the page's per-request render stamp. `health` is the
+ * zone feeds' state NOW, so it only explains an absence while the story is no
+ * older than STORY_DEGRADED_NOTE_MAX_AGE_MS (measured from the first voting
+ * report, boundary inclusive). Past that, `degradedAbsentZones` is [] and an
+ * absent zone falls through to its plain absence wording (the non-voting
+ * qualifier and the recall note still apply); the framing column reads the same
+ * `degradedAbsentZones`, so the two never disagree. Undefined, or not finite,
+ * keeps today's behaviour. Wording only, like the rest.
  */
 export function buildStoryTimeline(
   members: readonly StoryTimelineMember[],
@@ -298,6 +329,7 @@ export function buildStoryTimeline(
   nonVoting: readonly StoryTimelineMember[] = [],
   languageIsolated = false,
   recallMatchedZones?: ReadonlySet<MediaDnaZone>,
+  nowMs?: number,
 ): StoryTimeline | null {
   const votingOrdered = earliestPerSource(members, seenAt).sort(byTimeThenName);
   const votingFirst = votingOrdered[0];
@@ -361,7 +393,15 @@ export function buildStoryTimeline(
   // member whose times are both unparseable is still coverage, just not
   // placeable. Non-voting members are never coverage.
   const absentZones = missingZones(members);
-  const degradedAbsentZones = absentZones.filter((z) => health?.[z].degraded === true);
+  // h162-cluster-1: today's feed health explains an absence only for a story still
+  // inside the feed-yield window; an older one reads its plain absence wording.
+  const healthApplies =
+    nowMs === undefined ||
+    !Number.isFinite(nowMs) ||
+    nowMs - firstT <= STORY_DEGRADED_NOTE_MAX_AGE_MS;
+  const degradedAbsentZones = healthApplies
+    ? absentZones.filter((z) => health?.[z].degraded === true)
+    : [];
   // Zones with a plotted non-voting point: their absence line is qualified.
   const nonVotingZones = new Set(points.filter((p) => !p.voting).map((p) => p.zone));
 

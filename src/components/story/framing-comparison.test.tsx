@@ -4,6 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ZONE_META } from "@/lib/bias/config";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { SPECTRUM_ABSENT_QUALIFIED } from "@/lib/bias/zone-summary";
+import { RECALL_MATCH_EMPTY_COLUMN, RECALL_MATCH_NOTE } from "@/lib/clusters/recall-matched-zones";
+import { DEGRADED_EMPTY_COLUMN } from "@/lib/clusters/story-timeline";
+import { ENGLISH_ONLY_EMPTY_COLUMN } from "@/lib/sources/source-language";
 import type { MediaDnaZone, Source } from "@/types";
 
 import { FramingComparison } from "./framing-comparison";
@@ -712,13 +715,18 @@ describe("FramingComparison — empty zone Jev matched in another cluster (h106-
     expect(html).not.toContain("benzer haber");
   });
 
-  it("precedence 2: a zone a toplayıcı / niş source covered keeps the spectrum wording over the matched one", () => {
+  it("precedence 2: a zone a toplayıcı / niş source covered keeps the spectrum wording over the matched one, and adds the note (h162-cluster-2)", () => {
     const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]), {
       nonVotingZones: new Set<MediaDnaZone>(["muhalefet"]),
     });
     const muhalefet = section(html, "Muhalefet");
-    expect(muhalefet).toContain(QUALIFIED_LINE);
-    expect(muhalefet).not.toContain("benzer haber");
+    // h162-cluster-2: the matched note used to be dropped here; the column now
+    // keeps the spectrum wording AND the qualifier, as the timeline's line does.
+    expect(muhalefet).toContain(`— ${SPECTRUM_ABSENT_QUALIFIED} · ${RECALL_MATCH_NOTE} —`);
+    // Not the bare qualified line, not the recall-only line, not "sessizlik".
+    expect(muhalefet).not.toContain(QUALIFIED_LINE);
+    expect(muhalefet).not.toContain("sessizlik");
+    expect(muhalefet).not.toContain(MATCHED_LINE);
     // Bağımsız has no non-voting source: the matched wording applies there.
     expect(section(html, "Bağımsız")).toContain(MATCHED_LINE);
   });
@@ -749,5 +757,304 @@ describe("FramingComparison — empty zone Jev matched in another cluster (h106-
       <FramingComparison members={members} nowMs={NOW_MS} nonVotingZones={new Set()} />,
     );
     expect(html).toContain(PLAIN_LINE);
+  });
+});
+
+/**
+ * The text of a zone column's empty-state line (the italic span inside the dashed
+ * box), found by scanning, or null when the column lists headlines.
+ */
+function emptyLine(column: string): string | null {
+  const open = '<span class="text-[11px] italic text-muted-foreground">';
+  const at = column.indexOf(open);
+  if (at === -1) return null;
+  const start = at + open.length;
+  return column.slice(start, column.indexOf("</span>", start));
+}
+
+// h162-cluster-1: the timeline said "Bağımsız kaynakların akışı şu an sorunlu" for
+// a zone whose feeds are degraded right now, while the Bağımsız column of the same
+// page said "— bu tarafta sessizlik —". `degradedZones` (the timeline's
+// degradedAbsentZones, which only holds a zone while the story is inside the
+// feed-yield window) makes the column say the same thing in its own words.
+describe("FramingComparison — empty zone whose feeds are degraded (h162-cluster-1)", () => {
+  const IKTIDAR_A = mkSource("sabah", "Sabah", "pro_government");
+  const IKTIDAR_B = mkSource("aksam", "Akşam", "pro_government");
+  const members = [
+    mkMember("d1", IKTIDAR_A, "Sabah başlığı"),
+    mkMember("d2", IKTIDAR_B, "Akşam başlığı", "2026-09-06T11:00:00.000Z"),
+  ];
+
+  const DEGRADED_LINE = "— bu taraftaki kaynakların akışı şu an sorunlu —";
+  const PLAIN_LINE = "— bu tarafta sessizlik —";
+  const MATCHED_LINE = `— ${RECALL_MATCH_EMPTY_COLUMN} —`;
+  const QUALIFIED_LINE = `— ${SPECTRUM_ABSENT_QUALIFIED} —`;
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+  function renderWith(
+    degradedZones: ReadonlySet<MediaDnaZone> | undefined,
+    {
+      nonVotingZones = new Set<MediaDnaZone>(),
+      recallMatchedZones,
+      languageIsolated = false,
+      list = members,
+    }: {
+      nonVotingZones?: ReadonlySet<MediaDnaZone>;
+      recallMatchedZones?: ReadonlySet<MediaDnaZone>;
+      languageIsolated?: boolean;
+      list?: ClusterDetailMember[];
+    } = {},
+  ): string {
+    return renderToStaticMarkup(
+      <FramingComparison
+        members={list}
+        nowMs={NOW_MS}
+        nonVotingZones={nonVotingZones}
+        languageIsolated={languageIsolated}
+        {...(recallMatchedZones === undefined ? {} : { recallMatchedZones })}
+        {...(degradedZones === undefined ? {} : { degradedZones })}
+      />,
+    );
+  }
+
+  it("exports the line the column prints, and it is the timeline's own wording", () => {
+    expect(DEGRADED_EMPTY_COLUMN).toBe(DEGRADED_LINE);
+  });
+
+  it("a Bağımsız column with no member and a degraded Bağımsız zone prints DEGRADED_EMPTY_COLUMN, not 'sessizlik'", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz"]));
+    const bagimsiz = section(html, "Bağımsız");
+    expect(emptyLine(bagimsiz)).toBe(DEGRADED_EMPTY_COLUMN);
+    expect(bagimsiz).not.toContain("sessizlik");
+    // Muhalefet is empty but not degraded: today's line.
+    expect(emptyLine(section(html, "Muhalefet"))).toBe(PLAIN_LINE);
+  });
+
+  it("prints it in every degraded empty column", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]));
+    expect(count(html, DEGRADED_LINE)).toBe(2);
+    expect(html).not.toContain("sessizlik");
+  });
+
+  it("precedence 1: an all-English cluster keeps 'Türkçe kaynaklarla karşılaştırılmadı' over the degraded line", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]), {
+      languageIsolated: true,
+      list: [mkMember("e1", DAILY_SABAH, EN_TITLE)],
+    });
+    expect(emptyLine(section(html, "Bağımsız"))).toBe(ENGLISH_ONLY_EMPTY_COLUMN);
+    expect(emptyLine(section(html, "Muhalefet"))).toBe(ENGLISH_ONLY_EMPTY_COLUMN);
+    expect(html).not.toContain("sorunlu");
+  });
+
+  it("precedence 2: the degraded line wins over a non-voting writer and over a Jev recall match", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz"]), {
+      nonVotingZones: new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]),
+      recallMatchedZones: new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]),
+    });
+    const bagimsiz = section(html, "Bağımsız");
+    expect(emptyLine(bagimsiz)).toBe(DEGRADED_EMPTY_COLUMN);
+    expect(bagimsiz).not.toContain("spektruma sayılan");
+    expect(bagimsiz).not.toContain("benzer haber");
+    // Muhalefet is not degraded: the combined non-voting + recall wording.
+    expect(emptyLine(section(html, "Muhalefet"))).toBe(
+      `— ${SPECTRUM_ABSENT_QUALIFIED} · ${RECALL_MATCH_NOTE} —`,
+    );
+  });
+
+  it("the degraded line wins over a recall match alone and over a non-voting writer alone", () => {
+    const recallOnly = renderWith(new Set<MediaDnaZone>(["muhalefet"]), {
+      recallMatchedZones: new Set<MediaDnaZone>(["muhalefet"]),
+    });
+    expect(emptyLine(section(recallOnly, "Muhalefet"))).toBe(DEGRADED_EMPTY_COLUMN);
+    expect(recallOnly).not.toContain(MATCHED_LINE);
+
+    const nonVotingOnly = renderWith(new Set<MediaDnaZone>(["muhalefet"]), {
+      nonVotingZones: new Set<MediaDnaZone>(["muhalefet"]),
+    });
+    expect(emptyLine(section(nonVotingOnly, "Muhalefet"))).toBe(DEGRADED_EMPTY_COLUMN);
+    expect(nonVotingOnly).not.toContain(QUALIFIED_LINE);
+  });
+
+  it("a zone with voting members ignores the set: its headlines stay", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["iktidar", "bagimsiz"]));
+    const iktidar = section(html, "İktidar");
+    expect(emptyLine(iktidar)).toBeNull();
+    expect(iktidar).not.toContain("sorunlu");
+    expect(iktidar).toContain("Sabah başlığı");
+    expect(iktidar).toContain("2 manşet");
+  });
+
+  it("an omitted prop and an empty Set both render exactly today's markup", () => {
+    const today = render(members);
+    expect(renderWith(undefined)).toBe(today);
+    expect(renderWith(new Set())).toBe(today);
+    expect(count(today, PLAIN_LINE)).toBe(2);
+    expect(today).not.toContain("sorunlu");
+  });
+
+  it("a set naming only zones that have voting members renders today's markup", () => {
+    expect(renderWith(new Set<MediaDnaZone>(["iktidar"]))).toBe(render(members));
+  });
+
+  it("only swaps the words: the degraded markup is the plain markup with that one line replaced (same dashed box)", () => {
+    const plain = renderWith(new Set());
+    const degraded = renderWith(new Set<MediaDnaZone>(["muhalefet"]));
+    // Muhalefet is the last column, so its silent line is the last occurrence.
+    const at = plain.lastIndexOf(PLAIN_LINE);
+    expect(at).toBeGreaterThan(-1);
+    expect(degraded).toBe(plain.slice(0, at) + DEGRADED_LINE + plain.slice(at + PLAIN_LINE.length));
+  });
+
+  it("changes no count: both empty zones still read '0 manşet', İktidar keeps its two", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]));
+    expect(section(html, "Bağımsız")).toContain("0 manşet");
+    expect(section(html, "Muhalefet")).toContain("0 manşet");
+    expect(section(html, "İktidar")).toContain("2 manşet");
+    expect(html).toContain("2 kaynağın kendi manşetleri");
+    expect(listItems(html)).toHaveLength(2);
+  });
+
+  it("emits no lang attribute for the degraded line", () => {
+    const html = renderWith(new Set<MediaDnaZone>(["bagimsiz", "muhalefet"]), {
+      list: [mkMember("a1", DAILY_SABAH, EN_TITLE)],
+    });
+    expect(html.split("lang=").length - 1).toBe(2);
+  });
+
+  it("is optional, like languageIsolated: a caller that omits it still compiles and renders", () => {
+    const html = renderToStaticMarkup(
+      <FramingComparison members={members} nowMs={NOW_MS} nonVotingZones={new Set()} />,
+    );
+    expect(html).toContain(PLAIN_LINE);
+  });
+});
+
+// h162-cluster-2: cluster 9efa4848 (a blindspot of six Muhalefet-side outlets) had
+// haberler-com, an aggregator, as its only İktidar writer, and Jev matched the
+// İktidar zone with the same event in another cluster. The timeline read "Spektruma
+// sayılan İktidar kaynaklarından bu kümede haber yok · benzer haber başka kümede
+// olabilir", the read-across the same note, but the İktidar column kept only
+// "spektruma sayılan kaynaklardan haber yok": the non-voting wording and the recall
+// wording were mutually exclusive there. They now stack, in the timeline's order.
+describe("FramingComparison — non-voting writer and Jev recall in one empty zone (h162-cluster-2)", () => {
+  const CUMHURIYET = mkSource("cumhuriyet", "Cumhuriyet", "opposition_leaning");
+  const ELIPS = mkSource("elips-haber", "Elips Haber", "opposition_leaning");
+  const KISA_DALGA = mkSource("kisa-dalga", "Kısa Dalga", "opposition_leaning");
+  const SOZCU_M = mkSource("sozcu", "Sözcü", "opposition_leaning");
+  const KORKUSUZ = mkSource("korkusuz", "Korkusuz", "opposition_leaning");
+  const EVRENSEL = mkSource("evrensel", "Evrensel", "opposition");
+  // Modelled on 9efa4848, built from the stated members (not a live read).
+  const members = [
+    mkMember("m1", CUMHURIYET, "Cumhuriyet başlığı", "2026-11-12T08:00:00.000Z"),
+    mkMember("m2", ELIPS, "Elips Haber başlığı", "2026-11-12T08:05:00.000Z"),
+    mkMember("m3", KISA_DALGA, "Kısa Dalga başlığı", "2026-11-12T08:10:00.000Z"),
+    mkMember("m4", SOZCU_M, "Sözcü başlığı", "2026-11-12T08:15:00.000Z"),
+    mkMember("m5", KORKUSUZ, "Korkusuz başlığı", "2026-11-12T08:20:00.000Z"),
+    mkMember("m6", EVRENSEL, "Evrensel başlığı", "2026-11-12T08:25:00.000Z"),
+  ];
+
+  const BOTH = "— spektruma sayılan kaynaklardan haber yok · benzer haber başka kümede olabilir —";
+  const QUALIFIED = "— spektruma sayılan kaynaklardan haber yok —";
+  const RECALL_ONLY = "— bu kümede yok · benzer haber başka kümede olabilir —";
+  const SILENCE = "— bu tarafta sessizlik —";
+
+  function renderWith(
+    nonVotingZones: ReadonlySet<MediaDnaZone>,
+    recallMatchedZones: ReadonlySet<MediaDnaZone> | undefined,
+    degradedZones?: ReadonlySet<MediaDnaZone>,
+  ): string {
+    return renderToStaticMarkup(
+      <FramingComparison
+        members={members}
+        nowMs={NOW_MS}
+        nonVotingZones={nonVotingZones}
+        {...(recallMatchedZones === undefined ? {} : { recallMatchedZones })}
+        {...(degradedZones === undefined ? {} : { degradedZones })}
+      />,
+    );
+  }
+
+  const NV = new Set<MediaDnaZone>(["iktidar", "bagimsiz"]);
+  const RECALL = new Set<MediaDnaZone>(["iktidar"]);
+
+  it("the İktidar column carries the spectrum wording and the recall note", () => {
+    const html = renderWith(NV, RECALL);
+    const iktidar = section(html, "İktidar");
+    expect(emptyLine(iktidar)).toBe(BOTH);
+    expect(iktidar).not.toContain("sessizlik");
+  });
+
+  it("the Bağımsız column (non-voting writer, no recall match) is unchanged", () => {
+    const html = renderWith(NV, RECALL);
+    expect(emptyLine(section(html, "Bağımsız"))).toBe(QUALIFIED);
+    expect(section(html, "Bağımsız")).not.toContain("benzer haber");
+  });
+
+  it("a recall match without a non-voting writer is still RECALL_MATCH_EMPTY_COLUMN", () => {
+    const html = renderWith(new Set(), RECALL);
+    expect(emptyLine(section(html, "İktidar"))).toBe(RECALL_ONLY);
+    expect(RECALL_ONLY).toBe(`— ${RECALL_MATCH_EMPTY_COLUMN} —`);
+    expect(html).not.toContain("spektruma sayılan");
+  });
+
+  it("neither a non-voting writer nor a recall match is still '— bu tarafta sessizlik —'", () => {
+    const html = renderWith(new Set(), undefined);
+    expect(emptyLine(section(html, "İktidar"))).toBe(SILENCE);
+    expect(emptyLine(section(html, "Bağımsız"))).toBe(SILENCE);
+    expect(renderWith(new Set(), new Set())).toBe(html);
+  });
+
+  it("with the non-voting writer but no recall match the column is today's qualified line", () => {
+    const html = renderWith(NV, undefined);
+    expect(emptyLine(section(html, "İktidar"))).toBe(QUALIFIED);
+    expect(renderWith(NV, new Set())).toBe(html);
+  });
+
+  it("a recall match in the other zone does not leak into the qualified column", () => {
+    const html = renderWith(NV, new Set<MediaDnaZone>(["bagimsiz"]));
+    expect(emptyLine(section(html, "İktidar"))).toBe(QUALIFIED);
+    expect(emptyLine(section(html, "Bağımsız"))).toBe(BOTH);
+  });
+
+  it("the populated Muhalefet column ignores both sets and keeps its six headlines", () => {
+    const html = renderWith(NV, RECALL);
+    const muhalefet = section(html, "Muhalefet");
+    expect(emptyLine(muhalefet)).toBeNull();
+    expect(muhalefet).toContain("6 manşet");
+    expect(listItems(muhalefet)).toHaveLength(6);
+  });
+
+  it("changes no count or wording outside the empty column", () => {
+    const html = renderWith(NV, RECALL);
+    const without = renderWith(NV, undefined);
+    expect(html).toContain("6 kaynağın kendi manşetleri");
+    expect(section(html, "İktidar")).toContain("0 manşet");
+    expect(section(html, "Bağımsız")).toContain("0 manşet");
+    // Only the İktidar empty line differs from the non-recall render.
+    const at = without.indexOf(QUALIFIED);
+    expect(at).toBeGreaterThan(-1);
+    expect(html).toBe(without.slice(0, at) + BOTH + without.slice(at + QUALIFIED.length));
+  });
+
+  it("precedence: the English-only line still wins over the combined wording", () => {
+    const html = renderToStaticMarkup(
+      <FramingComparison
+        members={[mkMember("e1", DAILY_SABAH, EN_TITLE)]}
+        nowMs={NOW_MS}
+        nonVotingZones={NV}
+        recallMatchedZones={new Set<MediaDnaZone>(["bagimsiz"])}
+        languageIsolated
+      />,
+    );
+    // Daily Sabah fills İktidar; Bağımsız is a non-voting AND recall-matched zone.
+    expect(emptyLine(section(html, "Bağımsız"))).toBe(ENGLISH_ONLY_EMPTY_COLUMN);
+    expect(html).not.toContain("benzer haber");
+    expect(html).not.toContain("spektruma sayılan");
+  });
+
+  it("precedence: a degraded zone (h162-cluster-1) wins over the combined wording", () => {
+    const html = renderWith(NV, RECALL, new Set<MediaDnaZone>(["iktidar"]));
+    expect(emptyLine(section(html, "İktidar"))).toBe(DEGRADED_EMPTY_COLUMN);
+    expect(emptyLine(section(html, "Bağımsız"))).toBe(QUALIFIED);
   });
 });

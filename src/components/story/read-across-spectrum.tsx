@@ -53,6 +53,11 @@ interface ReadAcrossSpectrumProps {
    * copy names them instead of implying total silence — "İzlediğimiz
    * kaynaklar arasında…" reads as a factual claim that nobody covered the
    * story, which is false when a niche/aggregator source did.
+   *
+   * h162-cluster-2: a non-blindspot empty pole names them too ("Muhalefet
+   * tarafında henüz haber yok · 1 toplayıcı / niş kaynak yazdı (spektruma
+   * sayılmaz)"): the flat sentence next to a niche Muhalefet writer disagreed with
+   * the timeline and the framing column of the same page. Wording only.
    */
   nonVotingZoneCounts?: Partial<Record<MediaDnaZone, number>>;
   /**
@@ -70,7 +75,8 @@ interface ReadAcrossSpectrumProps {
    * as a set, the one the framing comparison gets): a similar story sits in another
    * cluster. The blindspot caption then says so instead of stating the silence
    * flatly. Optional (empty), so every other caller renders exactly as before.
-   * Wording only: no count, vote or link reads it.
+   * Wording only: no count, vote or link reads it. h162-cluster-2: outside a
+   * blindspot the single-pole and both-poles captions carry the note as well.
    */
   recallMatchedZones?: ReadonlySet<MediaDnaZone>;
 }
@@ -120,21 +126,27 @@ export function ReadAcrossSpectrum({
     // silent side(s) instead of letting the copy imply total silence. For a
     // single empty pole, only that zone's non-voting count matters; for
     // both-poles-empty, either pole's non-voting writers are worth naming.
+    // h162-cluster-2: not gated on `isBlindspot` any more. A non-blindspot story
+    // (3039d877) written by a niche Muhalefet source read a flat "Muhalefet
+    // tarafında henüz haber yok" while the timeline and the framing column of the
+    // same page named that writer.
     const nonVotingCount = bothPolesEmpty
       ? (nonVotingZoneCounts?.iktidar ?? 0) + (nonVotingZoneCounts?.muhalefet ?? 0)
       : (nonVotingZoneCounts?.[zone] ?? 0);
     const nonVotingSuffix =
-      isBlindspot && nonVotingCount > 0
+      nonVotingCount > 0
         ? ` · ${nonVotingCount} toplayıcı / niş kaynak yazdı (spektruma sayılmaz)`
         : "";
     // h108-sharesurfaces-1: a silent pole Jev matched with this event reads
     // "benzer haber başka kümede olabilir" (the framing comparison's qualifier),
     // not a flat silence. A single empty pole is judged on its own zone; with both
     // poles empty either pole's match is enough. An empty / missing Set is today's.
+    // h162-cluster-2: not gated on `isBlindspot` either; the order after the
+    // sentence is degraded suffix, recall note, non-voting writers.
     const recallMatched = bothPolesEmpty
       ? recallMatchedZones?.has("iktidar") === true || recallMatchedZones?.has("muhalefet") === true
       : recallMatchedZones?.has(zone) === true;
-    const recallSuffix = isBlindspot && recallMatched ? ` · ${RECALL_MATCH_NOTE}` : "";
+    const recallSuffix = recallMatched ? ` · ${RECALL_MATCH_NOTE}` : "";
     // h72-newreader-1: the blindspot caption names the SILENT zone inside the
     // sentence and leaves nothing in brackets after "kör nokta": a bracketed
     // zone read as the zone that owns the blind spot, while /blindspots counts
@@ -144,10 +156,10 @@ export function ReadAcrossSpectrum({
         ? recallMatched
           ? `Bu kümede iki kutuptan da haber yok${recallSuffix}${nonVotingSuffix}`
           : `İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı${nonVotingSuffix}`
-        : "İki kutupta da henüz haber yok"
+        : `İki kutupta da henüz haber yok${recallSuffix}${nonVotingSuffix}`
       : isBlindspot
         ? `Spektruma sayılan ${zoneLabel} kaynaklarından bu kümede haber yok (kör nokta)${recallSuffix}${nonVotingSuffix}`
-        : `${zoneLabel} tarafında henüz haber yok${degradedSuffix}`;
+        : `${zoneLabel} tarafında henüz haber yok${degradedSuffix}${recallSuffix}${nonVotingSuffix}`;
     return (
       <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground">
         {emptyText}

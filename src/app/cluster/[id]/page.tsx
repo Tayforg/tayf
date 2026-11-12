@@ -118,6 +118,11 @@ import { isContentlessTitle } from "../../../../supabase/functions/_shared/rss/e
  * `recallMatchedZones` (h108-sharesurfaces-1) is the Set the framing comparison
  * gets: an absent zone Jev matched with this event reads "… bu kümede haber yok ·
  * benzer haber başka kümede olabilir". Wording only; no extra read.
+ *
+ * `nowMs` (h162-cluster-1) is the page's render stamp. The feed-health read is
+ * still made for any story with an absent zone, but `buildStoryTimeline` lets it
+ * explain that zone only while the story is inside the feed-yield window; its
+ * `degradedAbsentZones` is what the framing comparison is handed too.
  */
 async function loadStoryTimeline(
   clusterId: string,
@@ -125,6 +130,7 @@ async function loadStoryTimeline(
   nonVotingMembers: Parameters<typeof timelineMembersFrom>[0],
   languageIsolated: boolean,
   recallMatchedZones: ReadonlySet<MediaDnaZone>,
+  nowMs: number,
 ): Promise<StoryTimelineData | null> {
   const members = timelineMembersFrom(votingMembers);
   if (votingSourceCount(members) < STORY_TIMELINE_MIN_SOURCES) return null;
@@ -141,6 +147,7 @@ async function loadStoryTimeline(
     timelineMembersFrom(nonVotingMembers),
     languageIsolated,
     recallMatchedZones,
+    nowMs,
   );
 }
 
@@ -695,6 +702,25 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     ? await getCachedClusterFramingReceipt(id)
     : null;
 
+  // h47-time-1: the one clock read of this file (currentTimeMs() is the repo's
+  // Date.now() wrapper; react-hooks/purity forbids the direct call), and the
+  // instant this page was rendered. The service worker keeps story pages for
+  // up to 14 days and serves them offline, on a timeout or on a 5xx, so a saved
+  // copy would show ages frozen at render time. Every age below is a
+  // <RelativeTime> against this stamp (its server text is unchanged; after
+  // mount it re-bases to the reader's clock) and <StaleCopyNotice> compares it
+  // with the instant the document loaded to say "this is an old copy" past 30
+  // minutes.
+  // Taken here, in the per-request body after the data awaits above, and
+  // nowhere else: in a static PPR shell or a "use cache" body it would be the
+  // build or the cache fill, and every reader would be told a fresh page is an
+  // old copy (tests/guards/cluster-relative-time.test.ts). It never reaches the
+  // JSON-LD, the metadata or a cache key.
+  // h162-cluster-1: the timeline below reads it too, to tell a story still inside
+  // the feed-yield window (feed health can explain an empty zone) from an old one
+  // (it cannot). Taken above that call, so it is still the only clock read.
+  const renderNowMs = currentTimeMs();
+
   // "Kim önce yazdı?" — per-story first-mover timeline. Only voting members
   // can be first or make a zone "join" (an aggregator reposting first must
   // not); non-voting members are just plotted as hollow rings.
@@ -704,6 +730,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     nonVotingMembers,
     languageIsolated,
     recallMatchedZones,
+    renderNowMs,
   );
   // The story-thread pill and the fact-check box are optional widgets: each is
   // read by its own async slot (ClusterThreadSlot / ClusterFactCheckSlot) inside
@@ -726,22 +753,6 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     cluster.updated_at,
     members.map((m) => m.article.published_at),
   );
-
-  // h47-time-1: the one clock read of this file (currentTimeMs() is the repo's
-  // Date.now() wrapper; react-hooks/purity forbids the direct call), and the
-  // instant this page was rendered. The service worker keeps story pages for
-  // up to 14 days and serves them offline, on a timeout or on a 5xx, so a saved
-  // copy would show ages frozen at render time. Every age below is a
-  // <RelativeTime> against this stamp (its server text is unchanged; after
-  // mount it re-bases to the reader's clock) and <StaleCopyNotice> compares it
-  // with the instant the document loaded to say "this is an old copy" past 30
-  // minutes.
-  // Taken here, in the per-request body after the data awaits above, and
-  // nowhere else: in a static PPR shell or a "use cache" body it would be the
-  // build or the cache fill, and every reader would be told a fresh page is an
-  // old copy (tests/guards/cluster-relative-time.test.ts). It never reaches the
-  // JSON-LD, the metadata or a cache key.
-  const renderNowMs = currentTimeMs();
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -1150,7 +1161,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           stay out of the columns and the counts. A column Jev's recall stage
           matched with this event in another cluster (recallMatchedZones,
           h106-blindspotbadges-1) reads "bu kümede yok · benzer haber başka
-          kümede olabilir" rather than "sessizlik". For an all-English cluster
+          kümede olabilir" rather than "sessizlik"; with a non-voting writer too
+          (h162-cluster-2) it reads the two together. A column whose feeds are
+          degraded right now (degradedZones, h162-cluster-1: the timeline's
+          degradedAbsentZones, empty for a story past the feed-yield window) says
+          so, as the timeline above does. For an all-English cluster
           (languageIsolated, h59-english-1) an empty column reads "Türkçe
           kaynaklarla karşılaştırılmadı" and the read-across slot carries the one note.
           Omitted entirely when no voting member exists — the spectrum
@@ -1164,6 +1179,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             nonVotingZones={nonVotingZones}
             languageIsolated={languageIsolated}
             recallMatchedZones={recallMatchedZones}
+            degradedZones={new Set(storyTimeline?.degradedAbsentZones ?? [])}
           />
         </div>
       )}

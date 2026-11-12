@@ -335,6 +335,12 @@ interface ClusterMetaBadgesProps {
   balance?: BalanceScore | null;
   /** See ClusterCardProps.nowMs. */
   nowMs?: number;
+  /**
+   * Id of the row's root div. The card link points its aria-describedby at it
+   * (h162-a11yname-1), so the source count, the age and the Denge line are the
+   * link's description. Omitted: no id attribute.
+   */
+  id?: string;
 }
 
 function ClusterMetaBadges({
@@ -346,11 +352,12 @@ function ClusterMetaBadges({
   distribution,
   balance,
   nowMs,
+  id,
 }: ClusterMetaBadgesProps) {
   const countTitle = cardSourceCountTitle(effectiveArticleCount ?? articleCount, distribution);
 
   return (
-    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+    <div id={id} className="flex flex-wrap items-center gap-2 text-[11px]">
       <span
         className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground"
         title={countTitle}
@@ -502,10 +509,23 @@ export function ClusterCard({
   const heroFallbacks = heroCandidates.slice(1);
   const banner = mobileBannerImageProps(index);
 
-  // The card link is named by its own visible headline: the Link points at
-  // the headline through aria-labelledby (see the comment below). Per cluster, so the
-  // ids stay unique across a feed.
+  // The card link is named by its own visible label and described by the line
+  // under it (h162-a11yname-1): the Link points at the "Kör nokta" badge (when
+  // it is drawn) and the headline through aria-labelledby, and at the meta
+  // pills and the spectrum bar through aria-describedby (see the comment
+  // below). Per cluster, so the ids stay unique across a feed.
   const headingId = `kart-baslik-${cluster.id}`;
+  const badgeId = `kart-rozet-${cluster.id}`;
+  const metaId = `kart-meta-${cluster.id}`;
+  const spectrumId = `kart-spektrum-${cluster.id}`;
+  // The "not compared with Turkish sources" note of an all-English card: it sits
+  // under the bar for sighted users, so it joins the link's description too
+  // (react-a11y-2). Drawn only when `languageIsolated`, listed only then.
+  const langNoteId = `kart-dil-${cluster.id}`;
+  // One condition decides both whether the badge is drawn (h151-home-1: not on
+  // an all-English cluster) and whether the link's name carries it, so a name
+  // never points at a badge that is not there.
+  const showBadge = cluster.is_blindspot && !languageIsolated;
 
   // Approach A (b-8): the entire card is a single <Link> to /cluster/{id}.
   // We deliberately convert the previously-linked article list items into
@@ -523,12 +543,23 @@ export function ClusterCard({
   // name from an <article> descendant (name-from-content skips the role), so
   // the old <a><article>…</article></a> was a nameless link for voice control,
   // the links list and UIA clients (h10-a11y-1). The name instead comes from
-  // the headline via aria-labelledby={headingId}. If the same cluster renders twice
-  // on one page the id repeats, but both headlines read the same text, so
-  // the resolved name is identical and harmless. The thumbnails are decorative
-  // (alt="": the headline is right beside them) and the member rows carry a
-  // screen-reader-only ": " so a source and its title do not run together.
-  // tests/guards/card-link-name.test.ts keeps an <article> out of any link.
+  // the badge and the headline via aria-labelledby: "Kör nokta <headline>" on a
+  // flagged card, the headline alone otherwise. WCAG 2.5.3 (label in name): the
+  // name starts with the first visible words, so a voice user can say "Kör
+  // nokta" to reach the link. The name stays short on purpose; naming the link
+  // from its content would add the member headlines and run to several hundred
+  // characters. The meta pills (source count, age, Denge line) and the spectrum
+  // bar are the link's DESCRIPTION through aria-describedby, so a screen reader
+  // still announces them, after the name. On an all-English card the "not
+  // compared with Turkish sources" note (ENGLISH_ONLY_SPECTRUM_LINE, h151-home-1)
+  // joins the description after the bar, so the one-sided bar is never announced
+  // without its qualifier. If the same cluster renders twice on
+  // one page the ids repeat, but both copies read the same text, so the
+  // resolved name and description are identical and harmless. The thumbnails
+  // are decorative (alt="": the headline is right beside them) and the member
+  // rows carry a screen-reader-only ": " so a source and its title do not run
+  // together. tests/guards/card-link-name.test.ts keeps an <article> out of
+  // any link.
   return (
     <article className="relative">
       <BookmarkButton
@@ -539,7 +570,8 @@ export function ClusterCard({
       />
       <Link
       href={`/cluster/${cluster.id}`}
-      aria-labelledby={headingId}
+      aria-labelledby={showBadge ? `${badgeId} ${headingId}` : headingId}
+      aria-describedby={languageIsolated ? `${metaId} ${spectrumId} ${langNoteId}` : `${metaId} ${spectrumId}`}
       className={`hover-lift group block min-h-[44px] touch-manipulation rounded-xl ring-1 ${
         cluster.is_blindspot
           ? "ring-amber-500/40 hover:ring-amber-500/60"
@@ -575,13 +607,16 @@ export function ClusterCard({
         <div className="p-6 sm:p-5 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-2 min-w-0 flex-1">
-              {cluster.is_blindspot && !languageIsolated && (
+              {showBadge && (
                 <div className="flex items-center gap-1.5 mb-2">
                   <AlertTriangle
                     className="h-3.5 w-3.5 text-amber-500"
                     strokeWidth={2.5}
                   />
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                  <span
+                    id={badgeId}
+                    className="text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400"
+                  >
                     Kör nokta
                   </span>
                 </div>
@@ -599,6 +634,7 @@ export function ClusterCard({
                 distribution={cluster.bias_distribution}
                 balance={languageIsolated ? null : balanceFromDistribution(cluster.bias_distribution)}
                 nowMs={nowMs}
+                id={metaId}
               />
             </div>
 
@@ -636,11 +672,11 @@ export function ClusterCard({
             </div>
           </div>
 
-          <div className="spectrum-glow rounded">
+          <div className="spectrum-glow rounded" id={spectrumId}>
             <BiasSpectrum distribution={cluster.bias_distribution} compact />
           </div>
           {languageIsolated && (
-            <p className="text-[11px] leading-snug text-muted-foreground">{ENGLISH_ONLY_SPECTRUM_LINE}</p>
+            <p id={langNoteId} className="text-[11px] leading-snug text-muted-foreground">{ENGLISH_ONLY_SPECTRUM_LINE}</p>
           )}
 
           {visible.length > 0 && (
