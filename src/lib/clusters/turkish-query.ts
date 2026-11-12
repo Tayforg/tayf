@@ -837,26 +837,81 @@ export function searchSiblingQuery(q: string): string | null {
 // 'manisa kaza' 11 / 0 / 11. The typed call has already listed those, and the second call only appends, so
 // a name loses nothing: it gains nothing from this call, which is the price of keeping every call guarded.
 // Where no term is such a name the locative page is the one that helps: 'mersin kaza' 2 / 14 / 14,
-// 'meclis oylama' 16 / 24 / 38 (the page keeps 24), 'netanyahu bloğu ilk oylama' 0 / 2 / 2. A second known
-// limit: the locative's stem 'kaza' is also the stem of 'kazandı' and 'kazanın', so 'van kaza' (2 / 6 / 8)
-// appends rows of those words next to the 'kazada' stories.
+// 'meclis oylama' 16 / 24 / 38 (the page keeps 24), 'netanyahu bloğu ilk oylama' 0 / 2 / 2.
+//
+// THE SECOND LIMIT, now filtered (h157-search-1): the locative's stem 'kaza' is also the stem of 'kazandı' and
+// 'kazanın' (ts_lexize('turkish_stem'): kaz <- kaza, but kaza <- kazada, kazayı, kazalar, kazandı, kazanın), so
+// '<il> kaza' appended election and court rows that hold 'kazandı' only. The 166 guard cannot see it: it reads
+// p_folded 'kazada', which is exempt (a 4-letter stem plus 'da'). Replayed on production (typed page / rows
+// only the locative call appended / of those, rows whose title_tr_neutral || title_tr || summary_tr, the text of
+// the generated column search_tsv, holds a WITNESS word):
+//   tokat kaza 1 / 5 / 0,  kayseri kaza 3 / 2 / 0,  konya kaza 1 / 1 / 0,  mersin kaza 2 / 12 / 6,
+//   aydın kaza 3 / 17 / 10,  van kaza 2 / 6 / 5,  denizli kaza 2 / 6 / 5,  sivas kaza 1 / 2 / 2.
+// The same rule drops no good row of another vowel-final word: meclis oylama 16 / 22 / 22 (4 of them hold only
+// 'oylamanın', which the genitive clause keeps), 'netanyahu bloğu ilk oylama' 0 / 2 / 2, tarla 11 / 13 / 13,
+// 'izmir saldırı' 8 / 4 / 4.
+// WITNESS (holdsLocativeWitness): some word of the folded text starts with the typed (folded) term and what
+// follows is nothing, a letter other than 'n', or the folded genitive 'nin' / 'nun'. 'kazada', 'kazayı',
+// 'kazalar' and 'kazanın' hold it; 'kazandı', 'kazanan', 'kazanırken' and 'kazan' do not. 'Kazakistan' holds
+// it too (a word start that is not an inflection), which is the price of an exact, regex-free test, and it
+// only ever KEEPS a row. search-query.ts drops a row only when it was appended by the locative call and some
+// changed term has no witness in it: a typed row, and every row of the root-sibling call, is never judged.
+//
+// HYPHEN COMPOUND (h157-search-3): the same split hides on 'e-posta', which LETTERS_ONLY refused. The bare compound is
+// stored as the lexeme 'e-pos' and every inflected form (e-postayla, e-postalar, e-postada, e-postaları) as 'e-posta',
+// so 'e-posta' found 1 story where 7 hold the word (search_cluster_ids at limit 24: ['e-posta'] 1, ['e-postada'] 6,
+// union 7). A one-letter prefix, a hyphen and a tail of 3 letters or more that ends in a vowel gets its locative too
+// ('e-postada', 'e-faturada', 'e-vizede'); e-fatura 1 / 0 / 1, e-vize 0 / 0 / 0 and e-imza 0 / 0 / 0 change nothing, and
+// consonant-final compounds ('e-okul', 'e-devlet'), digits ('f-16', 's-400') and chains stay one call.
 // ---------------------------------------------------------------------------
 
-/** The term with the locative of Turkish two-way harmony after its last vowel (a ı o u: da, e i ö ü: de), or null. */
+// One letter, a hyphen and a tail of 3 letters or more ('e-posta', 'e-fatura', 'e-vize'). Anchored, no nested
+// quantifier: linear (CodeQL js/redos). The stemmer stores the bare compound as 'e-pos' and every inflected form as
+// 'e-posta' (h157-search-3), the same split as 'kaza' / 'kazada' on a word that LETTERS_ONLY does not accept.
+const LETTER_HYPHEN_COMPOUND = /^\p{L}-\p{L}{3,}$/u;
+
+/**
+ * The term with the locative of Turkish two-way harmony after its last vowel (a ı o u: da, e i ö ü: de), or null.
+ * A term is a word of letters only and at least 4 letters, or a one-letter hyphen compound with a tail of at least
+ * 3 letters ('e-posta' -> 'e-postada'); either must end in a vowel, and the harmony reads that last vowel.
+ */
 function withLocative(term: string): string | null {
   // The same bound as siblingTerm: a longer term is not a word.
   if (term.length > MAX_SEARCH_QUERY_LENGTH) return null;
   const low = term.toLocaleLowerCase("tr");
-  if (!LETTERS_ONLY.test(low) || Array.from(low).length < 4) return null;
+  const plainWord = LETTERS_ONLY.test(low) && Array.from(low).length >= 4;
+  if (!plainWord && !LETTER_HYPHEN_COMPOUND.test(low)) return null;
   const last = low.slice(-1);
   if (!VOWELS.includes(last)) return null;
   return term + (harmonyVowel(last, 2) === "a" ? "da" : "de");
 }
 
 /**
+ * The folded sibling of a query and the terms that gave it its locative: `query` is `searchFoldedSibling(q)` and
+ * `terms` holds `foldTr` of every ORIGINAL term that `withLocative` changed ('tokat kaza' -> ['kaza'], 'bolu kaza' ->
+ * ['bolu', 'kaza'], 'e-posta' -> ['e-posta']). search-query.ts hands `terms` to `holdsLocativeWitness` for the rows
+ * that only the locative call found. Null when the query uses websearch syntax or no term changes.
+ */
+export function searchFoldedSiblingParts(q: string): { query: string; terms: string[] } | null {
+  if (hasSearchOperator(q)) return null;
+  const terms: string[] = [];
+  const words = q
+    .split(/\s+/)
+    .filter((t) => t !== "")
+    .map((t) => {
+      const locative = withLocative(t);
+      if (locative === null) return t;
+      terms.push(foldTr(t));
+      return locative;
+    });
+  return terms.length > 0 ? { query: words.join(" "), terms } : null;
+}
+
+/**
  * The same query with the locative added to every term that is letters only, at least 4 letters
- * long and ends in a vowel ('bolu kaza' -> 'boluda kazada', 'meclis oylama' -> 'meclis oylamada',
- * 'toplantı' -> 'toplantıda'); the other terms are kept as typed. Null when the query uses websearch
+ * long and ends in a vowel, or a one-letter hyphen compound with a tail of 3 letters or more that ends in a vowel
+ * ('bolu kaza' -> 'boluda kazada', 'meclis oylama' -> 'meclis oylamada', 'toplantı' -> 'toplantıda',
+ * 'e-posta' -> 'e-postada'); the other terms are kept as typed. Null when the query uses websearch
  * syntax (`hasSearchOperator`: the reader is in charge) or when no term changes. The term count
  * never changes, so the 6-term bound holds; each changed term grows by two letters. search-query.ts
  * sends it as BOTH the variants and the folded text of the second archive call, and only when the
@@ -864,16 +919,61 @@ function withLocative(term: string): string | null {
  * text only, so the call must fold the same words its variants spell, and a sibling call keeps its own.
  */
 export function searchFoldedSibling(q: string): string | null {
-  if (hasSearchOperator(q)) return null;
-  let changed = false;
-  const terms = q
-    .split(/\s+/)
-    .filter((t) => t !== "")
-    .map((t) => {
-      const locative = withLocative(t);
-      if (locative === null) return t;
-      changed = true;
-      return locative;
-    });
-  return changed ? terms.join(" ") : null;
+  return searchFoldedSiblingParts(q)?.query ?? null;
+}
+
+const CHAR_0 = 48;
+const CHAR_9 = 57;
+const CHAR_LOWER_A = 97;
+const CHAR_LOWER_Z = 122;
+
+/** True for one UTF-16 unit of [a-z0-9]. */
+function isFoldedWordUnit(code: number): boolean {
+  return (code >= CHAR_LOWER_A && code <= CHAR_LOWER_Z) || (code >= CHAR_0 && code <= CHAR_9);
+}
+
+/**
+ * Whether a row that the locative second call appended really holds the typed term (h157-search-1). The stemmer cuts
+ * a vowel-final noun ('kaza') to 'kaz' but its locative, and 'kazandı' (won), to 'kaza', so the locative call finds
+ * 'kazandı' rows that the reader did not ask for. `foldedText` is `foldTr` of the row's text (title_tr_neutral,
+ * title_tr and summary_tr, what `search_tsv` holds) and `foldedTerm` the folded typed term. True when some word of
+ * the text (a run of [a-z0-9]) starts with the term and what follows it is
+ *   - nothing ('kaza'),
+ *   - a letter or digit other than 'n' ('kazada', 'kazayı', 'kazalar', 'kazası'), or
+ *   - the folded genitive 'nin' / 'nun' ('kazanın', 'oylamanın': nın and nin fold to nin, nun and nün to nun).
+ * 'kazandı', 'kazanan', 'kazanırken' and 'kazan' are not witnesses. A word that merely begins with the term
+ * ('Kazakistan') is one: a false positive that keeps a row, never drops one. A term with a hyphen is read from the
+ * part after the last hyphen ('e-posta' -> 'posta': the text splits at the hyphen too). A term that cannot be
+ * judged (an empty tail, a character outside a-z and 0-9) keeps the row: a row is dropped only on a sure miss.
+ * One walk over the text, a prefix compare per word of at most MAX_SEARCH_QUERY_LENGTH characters, no RegExp built
+ * from the term: linear, never throws.
+ */
+export function holdsLocativeWitness(foldedText: string, foldedTerm: string): boolean {
+  const hyphen = foldedTerm.lastIndexOf("-");
+  const stem = hyphen >= 0 ? foldedTerm.slice(hyphen + 1) : foldedTerm;
+  if (stem === "") return true;
+  for (let i = 0; i < stem.length; i++) {
+    if (!isFoldedWordUnit(stem.charCodeAt(i))) return true;
+  }
+  const n = foldedText.length;
+  let start = 0;
+  while (start < n) {
+    if (!isFoldedWordUnit(foldedText.charCodeAt(start))) {
+      start++;
+      continue;
+    }
+    let end = start + 1;
+    while (end < n && isFoldedWordUnit(foldedText.charCodeAt(end))) end++;
+    const restStart = start + stem.length;
+    if (end >= restStart && foldedText.startsWith(stem, start)) {
+      if (end === restStart) return true;
+      if (foldedText[restStart] !== "n") return true;
+      if (end - restStart === 3) {
+        const tail = foldedText.slice(restStart, end);
+        if (tail === "nin" || tail === "nun") return true;
+      }
+    }
+    start = end;
+  }
+  return false;
 }

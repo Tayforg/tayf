@@ -6,7 +6,8 @@ import { expandAliasQuery } from "./search-aliases";
 import {
   canonicalSearchQuery,
   foldTr,
-  searchFoldedSibling,
+  holdsLocativeWitness,
+  searchFoldedSiblingParts,
   searchSiblingQuery,
   turkishQueryVariants,
 } from "./turkish-query";
@@ -38,14 +39,20 @@ import {
 // the sibling's words (h124-postship-1).
 // The same second call serves two more shapes (h144-search-1): a case suffix typed without
 // an apostrophe ('imamoğluna', 'suriyede') is searched as its root (the sibling call, as ever), and
-// a bare vowel-final noun with no root sibling ('bolu kaza', 'tarla') is searched with its locative
-// ('boluda kazada', 'tarlada'), because the stemmer cuts 'kaza' to 'kaz' and 'kazada' to 'kaza'.
+// a bare vowel-final noun with no root sibling ('bolu kaza', 'tarla', and a one-letter hyphen compound such as
+// 'e-posta', h157-search-3) is searched with its locative ('boluda kazada', 'tarlada', 'e-postada'), because the
+// stemmer cuts 'kaza' to 'kaz' and 'kazada' to 'kaza'.
 // EVERY call folds its own variants: `p_folded` = foldTr(the text its variants spell). The 166
 // over-stem guard reads `p_folded` only, so a call whose variants differ from its folded text
 // searches stems the guard does not cover ('tarla' as variants with 'tarlada' folded stems to 'tar'
 // and appended 6 rows with no 'tarl' word). The locative therefore goes to BOTH arguments, and only
 // when there is no root sibling: the typed call already searched the typed stems, and on the sibling
 // path a locative loses proper nouns ('boluda kazada' finds 0 where the sibling 'bolu kaza' finds 7).
+// A row that ONLY the locative call found is kept only when its text holds the typed term as a word that is not
+// 'term + n...' (h157-search-1): the stemmer cuts 'kazada' AND 'kazandı' to 'kaza', so '<il> kaza' used to append
+// election and court rows of 'kazandı' ('tokat kaza' showed 5 such cards out of 6). The text is the embed's own
+// title_tr_neutral, title_tr and summary_tr (what search_tsv holds), the RPC arguments do not change, and typed
+// rows and the rows of the root-sibling call are never judged (turkish-query.ts, holdsLocativeWitness).
 // An alias in the query (AKP <-> AK Parti, search-aliases.ts) is expanded into a
 // two-way websearch `or` for BOTH arguments, so 'AKP' and 'AK Parti' send the
 // same RPC call; the cache key below stays the canonical query.
@@ -144,8 +151,11 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // run unguarded (6 of the 13 rows 'tarla' appended held no 'tarl' word). With a root sibling the locative
   // is not used at all: that call is HEAD's, the sibling folded as itself ('tarlası' -> 'tarla'). Alias and
   // operator queries give null for both helpers, so they make the one call they always made.
-  const foldedSibling = sibling === null ? searchFoldedSibling(base) : null;
-  const secondQuery = sibling ?? foldedSibling;
+  // h157-search-1: `locTerms` are the folded typed terms that got a locative; the rows only that call finds are
+  // checked against them below (empty on the sibling path, which is never filtered).
+  const foldedParts = sibling === null ? searchFoldedSiblingParts(base) : null;
+  const locTerms = foldedParts?.terms ?? [];
+  const secondQuery = sibling ?? foldedParts?.query ?? null;
   const folded = foldTr(expansion ? expansion.foldedQuery : key);
 
   const supabase = createReaderClient();
@@ -183,18 +193,28 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // The typed page has room left: ask for the sibling (or the locative) and append what is new, after the
   // typed ids, up to SEARCH_LIMIT. A full typed page is never touched. Both arguments come from the same
   // text, so the call folds its own variants.
+  // `locIds` = the ids that ONLY the locative call appended (h157-search-1). An id of the typed page is in `seen`
+  // already, so it is never in `locIds`; the sibling path leaves it empty.
+  const locIds = new Set<string>();
+  // `secondMayHaveMore` = the second call can hold ids that never reached the page: it filled its own p_limit, or
+  // it still had a NEW id left when the page was full. Only then may a dropped row not turn `capped` off.
+  let secondMayHaveMore = false;
   if (secondQuery !== null && ids.length < SEARCH_LIMIT) {
     const seen = new Set(ids);
     const secondIds = await searchIds(turkishQueryVariants(secondQuery), foldTr(secondQuery));
+    secondMayHaveMore = secondIds.length >= SEARCH_LIMIT;
     for (const id of secondIds) {
-      if (ids.length >= SEARCH_LIMIT) break;
       if (seen.has(id)) continue;
+      if (ids.length >= SEARCH_LIMIT) {
+        secondMayHaveMore = true;
+        break;
+      }
       seen.add(id);
       ids.push(id);
+      if (sibling === null) locIds.add(id);
     }
   }
   if (ids.length === 0) return { bundles: [], capped: false };
-  const capped = ids.length >= SEARCH_LIMIT;
 
   // Same feed-health gate as politics-query.ts's fetchPoliticsClusters,
   // fetched once per search — so search-result cards (which render the
@@ -218,9 +238,28 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // order (ids-first: `.in('id', ids)` does not preserve the `IN (...)`
   // list order) — re-sort by the RPC's id order before building bundles.
   const order = new Map(ids.map((id, i) => [id, i]));
-  const rows = [...(embedRes.data ?? [])].sort(
+  const ranked = [...(embedRes.data ?? [])].sort(
     (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
   );
+
+  // h157-search-1: a row that only the locative call found must hold every typed term that got a locative as a
+  // word that is not 'term + n...' (kazada, kazayı, kazanın; not kazandı), in the text search_tsv is built from.
+  // `capped` reads the page that remains, but only when the locative call was fully consumed: a dropped row turns
+  // `capped` off only if the second call was neither a full page of its own nor left a new id unconsidered
+  // (secondMayHaveMore false). Otherwise the list stays "capped" ("en ilgili N sonuc"), because the archive may
+  // hold more rows and a plain "N sonuc" would claim a complete total. Dropped slots are not refilled.
+  let dropped = 0;
+  const rows =
+    locIds.size === 0
+      ? ranked
+      : ranked.filter((row) => {
+          if (!locIds.has(row.id)) return true;
+          const text = foldTr(`${row.title_tr_neutral ?? ""} ${row.title_tr ?? ""} ${row.summary_tr ?? ""}`);
+          if (locTerms.every((term) => holdsLocativeWitness(text, term))) return true;
+          dropped++;
+          return false;
+        });
+  const capped = ids.length >= SEARCH_LIMIT && (dropped === 0 || secondMayHaveMore);
 
   // One clock read for the whole result: it ages every row's blindspot claim
   // (this body only runs inside the "use cache" attempt or after the request

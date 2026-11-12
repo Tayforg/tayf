@@ -182,6 +182,7 @@ function mkRow(opts: {
   id: string;
   title_tr?: string;
   title_tr_neutral?: string | null;
+  summary_tr?: string;
   category?: string;
   bias_distribution?: unknown;
   is_blindspot?: boolean;
@@ -193,7 +194,7 @@ function mkRow(opts: {
     id: opts.id,
     title_tr: opts.title_tr ?? `Cluster ${opts.id}`,
     title_tr_neutral: opts.title_tr_neutral ?? null,
-    summary_tr: "summary",
+    summary_tr: opts.summary_tr ?? "summary",
     bias_distribution: opts.bias_distribution ?? {},
     is_blindspot: opts.is_blindspot ?? false,
     blindspot_side: opts.blindspot_side ?? null,
@@ -1181,6 +1182,283 @@ describe("searchClusters: case-suffix sibling and folded locative (h144-search-1
     const result = await searchClusters("bolu kaza");
     expect(fixture.rpcCalls).toHaveLength(4);
     expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h157-search-1: the stemmer cuts 'kaza' to 'kaz' but 'kazada', 'kazayı' AND 'kazandı' to 'kaza', so the
+// locative second call of '<il> kaza' appended election and court rows that hold 'kazandı' only ('tokat
+// kaza' showed 5 such cards out of 6). A row that ONLY the locative call found is dropped when its text
+// (title_tr_neutral, title_tr, summary_tr: the columns of search_tsv, already in the embed) holds the typed
+// term only as 'term + n...'. Typed rows and the rows of the root-sibling call are never touched, and the
+// RPC arguments do not change.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters: the locative witness filter (h157-search-1)", () => {
+  type RpcArgs = { p_variants: string[]; p_folded?: string; p_limit: number };
+  const ids = (n: number, prefix: string) =>
+    Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+  const row = (id: string, title: string, extra: { neutral?: string | null; summary?: string } = {}) =>
+    mkRow({
+      id,
+      title_tr: title,
+      title_tr_neutral: extra.neutral ?? null,
+      summary_tr: extra.summary ?? "ozet",
+      members: [{ id: `a-${id}`, sourceId: "s1" }],
+    });
+  const idsOf = (result: Awaited<ReturnType<typeof searchClusters>>) => {
+    if (!result.ok) throw new Error("expected ok");
+    return result.bundles.map((b) => b.cluster.id);
+  };
+
+  it("'tokat kaza': the rows that hold only 'kazandı' are dropped, the typed row and the 'kazada' row stay", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["l1", "l2", "l3"]];
+    fixture.data = [
+      row("t0", "Kaza sonrası kaybolan Esma Nur'u arama çalışmaları Tokat'a uzandı"),
+      row("l1", "Tokat'ta ara seçim: 4 Belde sonuçları belli oldu", { summary: "AK Parti 3 beldeyi kazandı" }),
+      row("l2", "Tokat'ta Zafer Kazandı"),
+      row("l3", "Tokat'ta kazada 2 yaralı"),
+    ];
+    const result = await searchClusters("tokat kaza");
+    expect(idsOf(result)).toEqual(["t0", "l3"]);
+    expect(result.ok && result.capped).toBe(false);
+    // The arguments of both calls are exactly what they were before the filter existed.
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("tokat kaza"), p_folded: "tokat kaza", p_limit: 24 },
+      { p_variants: turkishQueryVariants("tokat kazada"), p_folded: "tokat kazada", p_limit: 24 },
+    ]);
+    // The embed still reads every id the RPCs listed (no extra DB call, no narrower select).
+    expect((fixture.lastState as BuilderState).in).toEqual([{ col: "id", vals: ["t0", "l1", "l2", "l3"] }]);
+  });
+
+  it("reads all three texts of search_tsv: the neutral title and the summary count as a witness too", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["l1", "l2", "l3", "l4"]];
+    fixture.data = [
+      row("t0", "Kaza sonrası arama"),
+      row("l1", "Seçimi kazandı", { neutral: "Tokat'ta kazada 2 yaralı" }),
+      row("l2", "Seçimi kazandı", { summary: "Sürücü kazaya karıştı." }),
+      row("l3", "Seçimi kazandı", { neutral: "Zafer kazandı", summary: "Kazanan belli oldu" }),
+      row("l4", "Kaza haberi: trafik kazası"),
+    ];
+    expect(idsOf(await searchClusters("tokat kaza"))).toEqual(["t0", "l1", "l2", "l4"]);
+  });
+
+  it("a row with a null neutral title and no witness anywhere is dropped without a throw", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["l1"]];
+    fixture.data = [row("t0", "Kaza sonrası arama"), row("l1", "Seçim", { neutral: null })];
+    expect(idsOf(await searchClusters("tokat kaza"))).toEqual(["t0"]);
+  });
+
+  it("the genitive is kept: 'meclis oylama' keeps a locative row that holds only 'oylamanın'", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["l1", "l2", "l3"]];
+    fixture.data = [
+      row("t0", "Meclis oylama yaptı"),
+      row("l1", "Meclis'te oylamanın ardından kriz"),
+      row("l2", "Genel Kurul oylamada bir araya geldi"),
+      row("l3", "Meclis oyladı"),
+    ];
+    expect(idsOf(await searchClusters("meclis oylama"))).toEqual(["t0", "l1", "l2"]);
+  });
+
+  it("a typed id that the locative call also returned is a typed row: kept even with no witness", async () => {
+    fixture.rpcIdsPerCall = [["t1", "t2"], ["t2", "l1", "t1"]];
+    fixture.data = [
+      row("t1", "Zafer Kazandı"),
+      row("t2", "Seçimi kazanan aday"),
+      row("l1", "Maçı kazandı"),
+    ];
+    expect(idsOf(await searchClusters("tokat kaza"))).toEqual(["t1", "t2"]);
+  });
+
+  it("a typed row is never judged, whatever it holds", async () => {
+    fixture.rpcIdsPerCall = [["t0"], []];
+    fixture.data = [row("t0", "Zafer Kazandı")];
+    expect(idsOf(await searchClusters("tokat kaza"))).toEqual(["t0"]);
+  });
+
+  it("the sibling path ('tarlası' -> 'tarla') is not filtered: rows with no witness stay", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["s1", "s2"]];
+    fixture.data = [row("t0", "Tarlası yandı"), row("s1", "Bakan Yumaklı açıkladı"), row("s2", "Çiftçi destek")];
+    const result = await searchClusters("tarlası");
+    expect(searchSiblingQuery("tarlası")).toBe("tarla");
+    expect(idsOf(result)).toEqual(["t0", "s1", "s2"]);
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("tarlası"), p_folded: "tarlasi", p_limit: 24 },
+      { p_variants: turkishQueryVariants("tarla"), p_folded: "tarla", p_limit: 24 },
+    ]);
+  });
+
+  it("the rule-C sibling path ('imamoğluna') is not filtered either", async () => {
+    fixture.rpcIdsPerCall = [[], ["i1", "i2"]];
+    fixture.data = [row("i1", "Seçim gündemi"), row("i2", "Başka haber")];
+    expect(idsOf(await searchClusters("imamoğluna"))).toEqual(["i1", "i2"]);
+  });
+
+  it("typed 20 + locative 4 with 2 failing: 22 bundles and capped false (it was 24 and true)", async () => {
+    const typed = ids(20, "t");
+    const loc = ids(4, "l");
+    fixture.rpcIdsPerCall = [typed, loc];
+    fixture.data = [
+      ...typed.map((id) => row(id, "Trafik kazası")),
+      row("l0", "Tokat'ta kazada 2 yaralı"),
+      row("l1", "Seçimi kazandı"),
+      row("l2", "Zafer Kazandı"),
+      row("l3", "Kazaya karışan araç"),
+    ];
+    const result = await searchClusters("tokat kaza");
+    expect(idsOf(result)).toEqual([...typed, "l0", "l3"]);
+    expect(idsOf(result)).toHaveLength(22);
+    expect(result.ok && result.capped).toBe(false);
+  });
+
+  it("typed 20 + locative 4, none failing: 24 bundles and capped true (nothing changes when nothing is junk)", async () => {
+    const typed = ids(20, "t");
+    const loc = ids(4, "l");
+    fixture.rpcIdsPerCall = [typed, loc];
+    fixture.data = [...typed, ...loc].map((id) => row(id, "Tokat'ta kazada yaralı"));
+    const result = await searchClusters("tokat kaza");
+    expect(idsOf(result)).toHaveLength(24);
+    expect(result.ok && result.capped).toBe(true);
+  });
+
+  it("a locative page longer than the room left: the appended ids stop at SEARCH_LIMIT, then the filter runs on those", async () => {
+    const typed = ids(20, "t");
+    const loc = ids(10, "l");
+    fixture.rpcIdsPerCall = [typed, loc];
+    fixture.data = [...typed, ...ids(4, "l")].map((id, i) =>
+      row(id, i === 21 ? "Seçimi kazandı" : "Trafik kazası"),
+    );
+    const result = await searchClusters("tokat kaza");
+    expect((fixture.lastState as BuilderState).in).toEqual([{ col: "id", vals: [...typed, ...ids(4, "l")] }]);
+    expect(idsOf(result)).toHaveLength(23);
+    // l4..l9 were never considered, so the list is not complete: capped stays true.
+    expect(result.ok && result.capped).toBe(true);
+  });
+
+  it("typed 0 + a full locative page of 24 with 2 failing: 22 bundles and capped true (the RPC was limited)", async () => {
+    const loc = ids(24, "l");
+    fixture.rpcIdsPerCall = [[], loc];
+    fixture.data = loc.map((id, i) =>
+      row(id, i === 3 || i === 11 ? "Seçimi kazandı" : "Tokat'ta kazada yaralı"),
+    );
+    const result = await searchClusters("tokat kaza");
+    expect(idsOf(result)).toHaveLength(22);
+    expect(result.ok && result.capped).toBe(true);
+  });
+
+  it("typed 20 + a locative page whose tail is typed duplicates, one new id failing: 23 bundles and capped false", async () => {
+    const typed = ids(20, "t");
+    fixture.rpcIdsPerCall = [typed, ["l0", "l1", "l2", "l3", "t0", "t1"]];
+    fixture.data = [
+      ...typed.map((id) => row(id, "Trafik kazası")),
+      row("l0", "Tokat'ta kazada 2 yaralı"),
+      row("l1", "Seçimi kazandı"),
+      row("l2", "Tokat'ta kazada 3 yaralı"),
+      row("l3", "Kazaya karışan araç"),
+    ];
+    const result = await searchClusters("tokat kaza");
+    expect(idsOf(result)).toHaveLength(23);
+    expect(result.ok && result.capped).toBe(false);
+  });
+
+  it("every id dropped: { bundles: [], capped: false }", async () => {
+    fixture.rpcIdsPerCall = [[], ["l1", "l2"]];
+    fixture.data = [row("l1", "Seçimi kazandı"), row("l2", "Zafer Kazandı")];
+    const result = await searchClusters("tokat kaza");
+    expect(result).toEqual({ ok: true, bundles: [], capped: false });
+  });
+
+  it("a two-term locative ('bolu kaza') drops a row that lacks either term's witness", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["l1", "l2", "l3"]];
+    fixture.data = [
+      row("t0", "Bolu'da kaza"),
+      row("l1", "Bolu'da kazada 2 yaralı"),
+      row("l2", "Bolu'da seçimi kazandı"),
+      row("l3", "Ankara'da kazada 3 yaralı"),
+    ];
+    expect(idsOf(await searchClusters("bolu kaza"))).toEqual(["t0", "l1"]);
+  });
+
+  it("a full typed page makes no second call and no row is dropped", async () => {
+    const typed = ids(24, "t");
+    fixture.rpcIdsPerCall = [typed];
+    fixture.data = typed.map((id) => row(id, "Zafer Kazandı"));
+    const result = await searchClusters("tokat kaza");
+    expect(fixture.rpcCalls).toHaveLength(1);
+    expect(idsOf(result)).toEqual(typed);
+    expect(result.ok && result.capped).toBe(true);
+  });
+
+  it("a query with websearch syntax has no locative call and so no filter", async () => {
+    fixture.rpcIdsPerCall = [["t0", "t1"]];
+    fixture.data = [row("t0", "Zafer Kazandı"), row("t1", "Seçimi kazandı")];
+    expect(idsOf(await searchClusters('"tokat kaza"'))).toEqual(["t0", "t1"]);
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+
+  it("a query whose terms the locative does not change ('tokat') has no filter to run", async () => {
+    fixture.rpcIdsPerCall = [["t0", "t1"]];
+    fixture.data = [row("t0", "Zafer Kazandı"), row("t1", "Seçimi kazandı")];
+    expect(idsOf(await searchClusters("tokat"))).toEqual(["t0", "t1"]);
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+
+  it("the locative second call keeps sending the locative as p_variants AND p_folded (the 166 guard reads p_folded only)", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["l1"]];
+    fixture.data = [row("t0", "Kaza"), row("l1", "Kazada ölü")];
+    await searchClusters("tokat kaza");
+    const second = fixture.rpcCalls[1] as RpcArgs;
+    expect(second.p_variants).toEqual(turkishQueryVariants("tokat kazada"));
+    expect(second.p_folded).toBe("tokat kazada");
+  });
+});
+
+// h157-search-3: a one-letter hyphen compound gets the locative second call too.
+describe("searchClusters: 'e-posta' and the locative of a hyphen compound (h157-search-3)", () => {
+  type RpcArgs = { p_variants: string[]; p_folded?: string; p_limit: number };
+  const row = (id: string, title: string) =>
+    mkRow({ id, title_tr: title, members: [{ id: `a-${id}`, sourceId: "s1" }] });
+
+  it("'e-posta' with a short typed page: the typed call, then the locative 'e-postada' as variants AND folded text", async () => {
+    fixture.rpcIdsPerCall = [["t0"]];
+    await searchClusters("e-posta");
+    expect(searchSiblingQuery("e-posta")).toBeNull();
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("e-posta"), p_folded: "e-posta", p_limit: 24 },
+      { p_variants: turkishQueryVariants("e-postada"), p_folded: "e-postada", p_limit: 24 },
+    ]);
+  });
+
+  it("'e-okul' (consonant-final) with a short typed page makes ONE call", async () => {
+    fixture.rpcIdsPerCall = [["t0"]];
+    await searchClusters("e-okul");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("e-okul"), p_folded: "e-okul", p_limit: 24 },
+    ]);
+  });
+
+  it.each(["e-devlet", "f-16", "s-400", "ab-cdef", "e-po"])("%j makes one call", async (q) => {
+    fixture.rpcIdsPerCall = [["t0"]];
+    await searchClusters(q);
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+
+  it("the appended 'e-postayla' rows are kept (witness 'posta'), a row with no 'posta' word is dropped", async () => {
+    fixture.rpcIdsPerCall = [["t0"], ["l1", "l2", "l3"]];
+    fixture.data = [
+      row("t0", "300 okul tahliye edildi"),
+      row("l1", "Meloni, anonim e-postayla yapılan okul tehdidine tepki gösterdi"),
+      row("l2", "Pentagon'un e-postaları"),
+      row("l3", "Okul tehdidi"),
+    ];
+    const result = await searchClusters("e-posta");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["t0", "l1", "l2"]);
+    expect(fixture.rpcCalls[1] as RpcArgs).toEqual({
+      p_variants: turkishQueryVariants("e-postada"),
+      p_folded: "e-postada",
+      p_limit: 24,
+    });
   });
 });
 

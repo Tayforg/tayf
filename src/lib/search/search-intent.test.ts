@@ -40,6 +40,7 @@ const SOURCES: IntentSource[] = [
   { slug: "haberler-com", name: "Haberler.com" },
   { slug: "yenicag", name: "Yeniçağ" },
   { slug: "gercek-gundem", name: "Gerçek Gündem" },
+  { slug: "iha", name: "İHA" },
 ];
 
 const slugOf = (q: string, sources: IntentSource[] | null = SOURCES): string | null => {
@@ -352,6 +353,65 @@ describe("OUTLET_WORD_DENY", () => {
   it("records the measured collisions (Step 0, 2026-11-12): every outlet name in 10 or more clusters", () => {
     for (const word of ["cumhuriyet", "dunya", "karar"]) {
       expect(OUTLET_WORD_DENY.has(word), word).toBe(true);
+    }
+  });
+
+  // h157-search-2: 196 of 68,693 article titles of the last 7 days (2026-11-12) hold the drone word İHA and
+  // none of them comes from the İHA source, which has never stored an article. The cluster-title count of Q3
+  // (iha 4) hid it, so the word is denied from the evidence of the article titles.
+  it("denies 'iha': the drone word, not the agency", () => {
+    expect(OUTLET_WORD_DENY.has("iha")).toBe(true);
+  });
+});
+
+describe("the word İHA (h157-search-2)", () => {
+  const withIha = SOURCES.filter((s) => s.slug === "iha");
+
+  it("the fixture holds the İHA source, so the tests below can fail", () => {
+    expect(withIha).toEqual([{ slug: "iha", name: "İHA" }]);
+    expect(outletNameWords("İHA")).toEqual(["iha"]);
+  });
+
+  it.each(["İHA", "iha", "Iha", "İha", "IHA", "İHA'", "İHA'nın", "İHA’sı", "i.h.a", "İ-H-A"])(
+    "matchOutlet gives null for %j (folded words, with the İHA source in the list)",
+    (q) => {
+      const words = outletQueryWords(q);
+      expect(words, q).toEqual(["iha"]);
+      expect(matchOutlet(words as string[], SOURCES), q).toBeNull();
+      expect(matchOutlet(words as string[], withIha), q).toBeNull();
+    },
+  );
+
+  it("the whole intent the page uses returns no outlet intent for 'İHA' (and none for a ticker either)", () => {
+    for (const q of ["İHA", "iha", "Iha", "İHA'"]) {
+      expect(resolveSearchIntent({ q, sources: SOURCES, tickers: ["THYAO"] }), q).toBeNull();
+      expect(resolveSearchIntent({ q, sources: SOURCES, tickers: null }), q).toBeNull();
+    }
+  });
+
+  it("'iha gazetesi' still resolves to the İHA source: the OUTLET_QUALIFIER path is unchanged", () => {
+    expect(slugOf("iha gazetesi")).toBe("iha");
+    expect(slugOf("İHA Gazetesi")).toBe("iha");
+    expect(resolveSearchIntent({ q: "iha gazetesi", sources: SOURCES, tickers: null })).toEqual({
+      kind: "source",
+      slug: "iha",
+      name: "İHA",
+    });
+  });
+
+  it("a longer query that merely contains the word is no outlet either: 'iha haberleri', 'rusya iha'", () => {
+    expect(slugOf("iha haberleri")).toBeNull();
+    expect(slugOf("rusya iha")).toBeNull();
+  });
+
+  it("hurriyet, sozcu, ntv and halk tv stay linkable next to the new entry", () => {
+    for (const [q, slug] of [
+      ["hürriyet", "hurriyet"],
+      ["sözcü", "sozcu"],
+      ["NTV", "ntv"],
+      ["Halk TV", "halk-tv"],
+    ] as const) {
+      expect(resolveSearchIntent({ q, sources: SOURCES, tickers: null }), q).toMatchObject({ kind: "source", slug });
     }
   });
 });
