@@ -904,3 +904,55 @@ describe("/timeline honest source count and wire tag (h142-consistency-1)", () =
     expect(JSON.stringify(pill?.props).includes("wire")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h166-perf-1: the row links are a compact list of up to 180 request-time
+// cluster pages. With next/link's default prefetch every row entering the
+// viewport fetched two RSC payloads (about 2.4 KB and 2 requests per row; 7
+// requests for the 4 rows of the first viewport). Each row link opts out with
+// prefetch={false}, as MoreBlindspotList and related-stories already do.
+// ---------------------------------------------------------------------------
+describe("/timeline row links do not viewport-prefetch (h166-perf-1)", () => {
+  function mkRowAt(id: string, first_published: string) {
+    return {
+      id,
+      title_tr: `Küme ${id}`,
+      title_tr_neutral: null,
+      title: `Küme ${id}`,
+      article_count: 2,
+      source_count: 2,
+      first_published,
+    };
+  }
+
+  it("every /cluster/ row Link has prefetch === false, one per row", async () => {
+    // Three rows across two UTC hours (10:xx and 09:xx), newest first.
+    mocks.result = {
+      rows: [
+        mkRowAt("a1", "2026-09-18T10:40:00.000Z"),
+        mkRowAt("a2", "2026-09-18T10:05:00.000Z"),
+        mkRowAt("b1", "2026-09-18T09:30:00.000Z"),
+      ],
+      total: 3,
+    };
+
+    const tree = await TimelinePage();
+
+    const hourSections: El[] = [];
+    const rowLinks: El[] = [];
+    walk(tree, (el) => {
+      if (el.type === "section") hourSections.push(el);
+      const href = el.props?.href;
+      if (el.type === Link && typeof href === "string" && href.startsWith("/cluster/")) {
+        rowLinks.push(el);
+      }
+    });
+
+    expect(hourSections).toHaveLength(2);
+    expect(rowLinks).toHaveLength(3);
+    expect(rowLinks.map((l) => l.props?.href)).toEqual(["/cluster/a1", "/cluster/a2", "/cluster/b1"]);
+    for (const link of rowLinks) {
+      expect(link.props?.prefetch).toBe(false);
+    }
+  });
+});

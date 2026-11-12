@@ -100,7 +100,8 @@ describe("/blindspots heading outline (h67-landmarks-1)", () => {
     expect(page).toContain('<h2 className="sr-only">Kör nokta haberleri</h2>');
     const band = page.indexOf("<SilenceDigestBand");
     const label = page.indexOf('<h2 className="sr-only">');
-    const cards = page.indexOf("result.bundles.map(");
+    // h166-perf-3: the head list maps feedSplit.head (the first cards); the tail renders the rest after it.
+    const cards = page.indexOf("feedSplit.head.map(");
     expect(band).toBeGreaterThan(-1);
     expect(label).toBeGreaterThan(band);
     expect(cards).toBeGreaterThan(label);

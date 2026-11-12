@@ -220,8 +220,13 @@ export default async function SourceProfilePage({ params }: PageProps) {
           an unnamed landmark would sit next to the named "Ana menü" and
           "Alt menü". */}
       <div>
+        {/* No prefetch: /sources is a 362 KB-decoded static payload that most
+            search-entry readers never open. The click is still a soft navigation:
+            this stays next/link, not a plain <a>, so it does not re-download the
+            125 KB inline stylesheet (h166-perf-2). */}
         <Link
           href="/sources"
+          prefetch={false}
           className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="h-3.5 w-3.5" />

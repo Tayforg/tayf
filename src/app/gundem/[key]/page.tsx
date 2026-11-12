@@ -1,12 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { connection } from "next/server";
+import { Suspense } from "react";
 
 import { FollowButton } from "@/components/follow/follow-button";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { HubTrendChart } from "@/components/trends/hub-trend-chart";
 import { PageHero } from "@/components/ui/page-hero";
+import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import {
   distributionTotal,
   SPECTRUM_EMPTY_COPY,
@@ -34,6 +37,7 @@ import {
 } from "@/lib/seo/json-ld";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
+import { splitFeedHead } from "@/lib/ui/feed-head";
 
 // /gundem/[key] — entity hub (roadmap G2): the clusters that mention one
 // curated person, party, institution or country (rising-entities.ts), with the
@@ -59,6 +63,13 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 // basis of its last refresh (neither 163 nor 182 was backfilled), so a series built on it would show a code change as
 // news. The read starts before the hub read and runs beside it; an unapplied 206 (PGRST202), a failed read, a later page
 // and every state without a list draw no chart, and generateMetadata never reads it.
+//
+// h166-perf-3: a hub with more than FEED_HEAD_CARDS (2) clusters on the page splits its card list. The first two cards
+// render with the head (title, counts, chart, spectrum); the rest, the pager and the 'Gündem bağlantıları' nav render in
+// EntityHubTail behind a nested <Suspense>. React reveals a boundary only once its last card has streamed and in windows
+// of about 300 ms, so with all 20 cards in the head's boundary the LCP note waited for the whole list (byte 676,506 of
+// 885,693). Same cards, same order, same markup and banner priority; only the boundary moves. A page with 2 or fewer
+// clusters, and every empty, failed, unavailable and past-the-end state, has no tail and renders as before.
 //
 // Unknown keys never get here: src/middleware.ts rewrites them to the real 404
 // (gate 6). The notFound() below is defence in depth.
@@ -199,6 +210,13 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
   const distribution = sumDistributions(result?.bundles ?? []);
   const spectrumTotal = distributionTotal(distribution);
 
+  // h166-perf-3: the cut of the card list. Only the list branch below reads
+  // these, so the bundles are the ones that branch renders (a failed read, an
+  // unavailable page and an empty page list none).
+  const listed = result !== null && result.unavailable !== true ? result.bundles : [];
+  const feedSplit = splitFeedHead(listed);
+  const hasTail = feedSplit.tail.length > 0;
+
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-8">
       {page === 1 && result !== null && entityHubRobots(result) === undefined ? (
@@ -326,40 +344,117 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
           </section>
 
           <div className={listClass}>
-            {result.bundles.map((b, i) => {
-              const hoursAgo =
-                (nowMs - new Date(b.cluster.updated_at).getTime()) /
-                3_600_000;
-              return (
-                <ClusterCard
-                  key={b.cluster.id}
-                  cluster={b.cluster}
-                  articles={b.articles}
-                  sources={b.sources}
-                  index={hubCardBannerIndex(i, trendChartDrawn)}
-                  isAging={hoursAgo > 48}
-                  isWireRedistribution={b.isWireRedistribution}
-                  effectiveArticleCount={b.effectiveArticleCount}
-                  nowMs={nowMs}
-                />
-              );
-            })}
+            {feedSplit.head.map((b, i) => renderHubCard(b, i, nowMs, trendChartDrawn))}
           </div>
-          {lastPage > 1 ? <HubPager hubKey={key} page={page} lastPage={lastPage} /> : null}
+          {hasTail ? (
+            // More than FEED_HEAD_CARDS cards: the rest of the list, the pager and
+            // the nav stream behind this nested boundary, after the head has been
+            // revealed. The fallback is null: with the nav inside the tail nothing
+            // sits below the head, so nothing can be pushed down by the tail arriving.
+            <Suspense fallback={null}>
+              <EntityHubTail
+                bundles={result.bundles}
+                hubKey={key}
+                page={page}
+                lastPage={lastPage}
+                label={label}
+                nowMs={nowMs}
+                trendChartDrawn={trendChartDrawn}
+              />
+            </Suspense>
+          ) : lastPage > 1 ? (
+            <HubPager hubKey={key} page={page} lastPage={lastPage} />
+          ) : null}
         </>
       )}
 
-      <nav aria-label="Gündem bağlantıları" className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
-        {/* Plain <a>: the home feed is a DB-backed route; next/link would
-            prefetch it as an RSC request for every hub view. */}
-        <a href={`/?q=${encodeURIComponent(label)}`} className={footerLinkClass}>
-          Tüm arşivde ara
-        </a>
-        <Link href="/gundem" className={footerLinkClass}>
-          Tüm gündem başlıkları
-        </Link>
-      </nav>
+      {hasTail ? null : hubLinksNav(label)}
     </div>
+  );
+}
+
+// One card of the list. `i` is the card's position in the WHOLE page, never in the
+// head or the tail: the first-card banner priority (hubCardBannerIndex) depends
+// on it. The one place this page renders a card, shared by the head and the tail.
+function renderHubCard(b: ClusterBundle, i: number, nowMs: number, trendChartDrawn: boolean) {
+  const hoursAgo = (nowMs - new Date(b.cluster.updated_at).getTime()) / 3_600_000;
+  return (
+    <ClusterCard
+      key={b.cluster.id}
+      cluster={b.cluster}
+      articles={b.articles}
+      sources={b.sources}
+      index={hubCardBannerIndex(i, trendChartDrawn)}
+      isAging={hoursAgo > 48}
+      isWireRedistribution={b.isWireRedistribution}
+      effectiveArticleCount={b.effectiveArticleCount}
+      nowMs={nowMs}
+    />
+  );
+}
+
+// The footer links. A function that returns the element (not a component), so the
+// page and the tail share one definition and the element tree keeps its shape.
+function hubLinksNav(label: string) {
+  return (
+    <nav aria-label="Gündem bağlantıları" className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+      {/* Plain <a>: the home feed is a DB-backed route; next/link would
+          prefetch it as an RSC request for every hub view. */}
+      <a href={`/?q=${encodeURIComponent(label)}`} className={footerLinkClass}>
+        Tüm arşivde ara
+      </a>
+      <Link href="/gundem" className={footerLinkClass}>
+        Tüm gündem başlıkları
+      </Link>
+    </nav>
+  );
+}
+
+// The part of a hub page after its first FEED_HEAD_CARDS cards (h166-perf-3): the
+// remaining cards, the pager when there is more than one page, and the footer nav,
+// in the order the single page had them. Mounted by EntityHubPage behind its own
+// <Suspense> only when the page lists more than the head; exported so tests can
+// render it directly.
+//
+// It is async on purpose: an async component makes Flight serialize the tail after
+// the head's rows, so the head's boundary completes and reveals first. connection()
+// is the idiom of the other async slots in this codebase and reads no clock; the
+// page already awaits searchParams, so its static/dynamic status does not change.
+// `nowMs` is the read's own timestamp, passed in.
+//
+// Spacing: the page container is space-y-8, so the head's list gets 32 px below it,
+// and this list's -mt-4 (-16 px) collapses with that to the 16 px between two cards
+// of the single space-y-4 list. The pager and the nav stay siblings of the list (not
+// children of it), so they keep the container's 32 px.
+export async function EntityHubTail({
+  bundles,
+  hubKey,
+  page,
+  lastPage,
+  label,
+  nowMs,
+  trendChartDrawn,
+}: {
+  bundles: ClusterBundle[];
+  hubKey: string;
+  page: number;
+  lastPage: number;
+  label: string;
+  nowMs: number;
+  trendChartDrawn: boolean;
+}) {
+  await connection();
+
+  const { tail, tailStart } = splitFeedHead(bundles);
+
+  return (
+    <>
+      <div className="space-y-4 -mt-4">
+        {tail.map((b, k) => renderHubCard(b, tailStart + k, nowMs, trendChartDrawn))}
+      </div>
+      {lastPage > 1 ? <HubPager hubKey={hubKey} page={page} lastPage={lastPage} /> : null}
+      {hubLinksNav(label)}
+    </>
   );
 }
 

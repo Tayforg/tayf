@@ -55,8 +55,12 @@ export function NearBlindspotList({ items }: { items: NearBlindspotItem[] | null
               key={item.id}
               className="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
             >
+              {/* No prefetch: a compact list of request-time cluster pages, and every
+                  row entering the viewport would fetch two RSC payloads (h166-perf-1),
+                  as in MoreBlindspotList. */}
               <Link
                 href={`/cluster/${item.id}`}
+                prefetch={false}
                 className="min-w-0 font-serif text-sm font-medium text-foreground underline-offset-2 hover:underline"
               >
                 {item.title}

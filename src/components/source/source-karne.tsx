@@ -123,6 +123,7 @@ export function SourceKarneCard({ karne, slug, kind }: SourceKarneCardProps) {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <Link
           href="/metodoloji#kaynaklar"
+          prefetch={false}
           className="text-[11px] text-muted-foreground hover:text-foreground transition-colors brand-underline"
         >
           Nasıl hesaplanıyor?

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import Link from "next/link";
 import { renderToStaticMarkup } from "react-dom/server";
 
 // House pattern: see silence-digest-band.test.tsx. The list is a plain server
@@ -156,6 +157,48 @@ describe("NearBlindspotList", () => {
     );
     expect(markup).not.toContain("<script>");
     expect(markup).toContain("&lt;script&gt;");
+  });
+});
+
+// h166-perf-1: the rows are a compact list of request-time cluster pages. With
+// next/link's default prefetch every row entering the viewport fetched two RSC
+// payloads, so each row link opts out with prefetch={false} (as MoreBlindspotList
+// does). The methodology footer link is not a row and is not asserted.
+describe("NearBlindspotList row links do not viewport-prefetch (h166-perf-1)", () => {
+  type El = { type?: unknown; props?: Record<string, unknown> };
+
+  function walk(node: unknown, visit: (el: El) => void) {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child, visit);
+      return;
+    }
+    if (node && typeof node === "object") {
+      const el = node as El;
+      visit(el);
+      if (el.props?.children !== undefined) walk(el.props.children, visit);
+    }
+  }
+
+  it("every /cluster/ row Link has prefetch === false, one per item", () => {
+    const tree = NearBlindspotList({
+      items: [
+        mkItem({ id: "c1", title: "Birinci haber" }),
+        mkItem({ id: "c2", title: "İkinci haber" }),
+      ],
+    });
+
+    const rowLinks: El[] = [];
+    walk(tree, (el) => {
+      const href = el.props?.href;
+      if (el.type === Link && typeof href === "string" && href.startsWith("/cluster/")) {
+        rowLinks.push(el);
+      }
+    });
+
+    expect(rowLinks.map((l) => l.props?.href)).toEqual(["/cluster/c1", "/cluster/c2"]);
+    for (const link of rowLinks) {
+      expect(link.props?.prefetch).toBe(false);
+    }
   });
 });
 
