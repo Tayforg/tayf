@@ -351,6 +351,24 @@ const FRAMING_FOLDED: RegExp[] = [
   /böyle\s+görüntülen/u,
 ];
 
+// 'şaibe' (h140-seo-1, bffb0a3f): the partisan label for the CHP congress case, "CHP'nin şaibeli kurultay davası 18 Kasım'a
+// ertelendi". Left edge only, any suffix (şaibe, şaibeli, şaibesi), the dotless i and the plain s of a title typed without
+// diacritics ('SAIBELI' folds to 'saıbelı'). The privative -siz/-sız is not the label: 'şaibesiz' ('free of irregularity',
+// "Seçim şaibesiz tamamlandı"), 'şaibesizlik' and the undotted 'SAIBESIZ' ('saıbesız') say the opposite, so the lookahead
+// refuses them (ts-3). It is listed in LOADED_FOLDED next to 'butlan CHP'si'; it is also in LOADED_OWN_WORDS_ONLY, which
+// loadedPenalty reads.
+const SAIBE_FOLDED = new RegExp(`${L}[şs]a[ıi]be(?!s[ıi]z)`, "u");
+
+/**
+ * The rules loadedPenalty tests on the headline's own words only: the text after a speaker label's opening quote
+ * (SPEAKER_QUOTE_OPEN, "Özel: 'Şaibe iddiaları asılsız'") is someone's own wording and is cut off first. Every other rule
+ * of LOADED_FOLDED is tested on the whole title, as before. A quote that is not a speaker's ("CHP'nin 'şaibeli kurultay'
+ * davası", 'Dava ertelendi! CHP'deki “şaibeli kurultay” ...') is charged: an epithet right after an opening quote is
+ * charged (h54 rule (b)). A bulletin lead-in ('Son dakika:', 'FLAŞ:', 'Şok:', chained) is not a speaker label: the quote
+ * after it is the headline's own scare quote and is charged too (ts-1; see ownWordsFolded).
+ */
+const LOADED_OWN_WORDS_ONLY: ReadonlySet<RegExp> = new Set([SAIBE_FOLDED]);
+
 // Wording that editorialises rather than reports. Costs more than framing:
 // the hunt found 'Netanyahu Trump'a yalvardı' standing in for a hedged
 // "... talep ettiği iddiası" in 8 of 500 sampled clusters.
@@ -421,6 +439,11 @@ const LOADED_FOLDED: RegExp[] = [
   // are the lexicon's 'korkunç' and 'görkemli' under other words; 'kıskacı' only as the possessive
   // ("rüşvet kıskacı"), so the military 'kıskaç hareketi' stays free; 'gözyaşlarına boğul' is the tear-jerker idiom.
   new RegExp(`(?<!mutlak\\s)${L}butlan\\s+chp`, "u"),
+  // 'şaibe' is the other partisan label of the same case (h140-seo-1: bffb0a3f served "CHP'nin şaibeli kurultay davası
+  // 18 Kasım'a ertelendi", an Akşam headline Akşam later edited away, while Milliyet, Yeni Şafak, Posta and haberler-com
+  // carry 'şaibeli kurultay' in scare quotes). Charged quoted or not; only a speaker's quote is exempt (see
+  // LOADED_OWN_WORDS_ONLY), so "Özel: 'Şaibe iddiaları asılsız'" stays free.
+  SAIBE_FOLDED,
   new RegExp(`${L}feci${R}`, "u"),
   new RegExp(`${L}k[ıi]skac[ıi]${R}`, "u"),
   new RegExp(`${L}gözyaşlarına\\s+boğul`, "u"),
@@ -754,11 +777,38 @@ function sequelTeaser(title: string): boolean {
   return false;
 }
 
+/**
+ * `folded` up to the first speaker label's opening quote (SPEAKER_QUOTE_OPEN: "<speaker>: '", with ", “, ‘ or « too): what
+ * follows is the speaker's own wording. The whole text when there is no such quote. Leading bulletin lead-ins ('Son dakika:',
+ * 'FLAŞ:', 'Şok:', chained, the same LEAD_IN / LEAD_IN_PASSES stripLeadIns uses) are skipped first: they are a label for the
+ * bulletin, not a speaker, so "Son dakika: 'Şaibeli kurultay' davası ..." keeps its scare quote in the headline's own words
+ * (ts-1). scoreTitle is handed the raw member title, lead-in included. A bounded number of anchored matches, then one scan.
+ * LEAD_IN and LEAD_IN_PASSES are declared below; that is fine, the function runs only at call time.
+ */
+function ownWordsFolded(folded: string): string {
+  let from = 0;
+  for (let pass = 0; pass < LEAD_IN_PASSES; pass++) {
+    const lead = LEAD_IN.exec(folded.slice(from));
+    if (!lead || lead[0].length === 0) break;
+    from += lead[0].length;
+  }
+  const quote = SPEAKER_QUOTE_OPEN.exec(folded.slice(from));
+  return quote ? folded.slice(0, from + quote.index) : folded;
+}
+
 /** Number of loaded-wording rules the title trips (0.25 each in scoreTitle). */
 export function loadedPenalty(title: string): number {
   const folded = foldTr(title);
   let n = 0;
-  for (const re of LOADED_FOLDED) if (re.test(folded)) n++;
+  let own: string | null = null;
+  for (const re of LOADED_FOLDED) {
+    if (!re.test(folded)) continue;
+    if (LOADED_OWN_WORDS_ONLY.has(re)) {
+      own ??= ownWordsFolded(folded);
+      if (!re.test(own)) continue;
+    }
+    n++;
+  }
   // A blow on a named body part is physical, whatever the intensifier (review, correctness-2).
   if (!BLOW_ON_BODY.test(folded)) {
     if (DARBE_INTENSIFIER.test(folded)) n++;
@@ -2769,11 +2819,44 @@ function preferFewerStrayQuotes(chosen: string, memberTitles: readonly string[])
 // this asks whether it still is, ignoring everything the picker itself changes (case, quotes,
 // separators, a glued join, a lead-in).
 
-/** Every character outside letters and digits, removed: the key ignores case, quotes and separators. */
-const NOT_LETTER_OR_DIGIT_KEY = /[^\p{L}\p{N}]+/gu;
+/**
+ * U+0001 stands in the member key for a quotation mark that sits outside a word (h140-seo-1). A literal U+0001 in a title is
+ * removed first, so no title can forge one. Migration 200's stale key writes it chr(1).
+ */
+const KEY_QUOTE_SENTINEL = "\u0001";
+/** The quotation marks the key reads: ' ‘ ’ " “ ” « ». */
+const KEY_QUOTE_MARKS: ReadonlySet<string> = new Set(["'", "‘", "’", '"', "“", "”", "«", "»"]);
+/** Every character outside letters, digits and the sentinel, removed: the key ignores case and separators. */
+const NOT_KEY_CHAR = /[^\p{L}\p{N}\u0001]+/gu;
 
+/**
+ * The membership key of a title (h42-titles-1, quote-aware since h140-seo-1), five steps: (a) any U+0001 is removed;
+ * (b) every quotation mark that does NOT sit between two letters or digits becomes the sentinel (the rule marksOutsideWords
+ * uses, so the in-word apostrophe of "CHP'nin", "Kasım’a" and "Erdoğan’dan" is not a mark); (c) the Turkish lower case;
+ * (d) everything but letters, digits and the sentinel is removed; (e) the sentinels at the two ends of the key are removed.
+ * The key is blind to case, separators, which quotation mark is used (straight, curly, guillemets), the in-word apostrophe
+ * and quotes that wrap the whole title (they say nothing about a span inside it: a stored '"Diplomatik çözüm için
+ * çalışıyoruz"' is still the member that writes it bare). It is not blind to WHERE a span is quoted: a title that writes
+ * 'şaibeli kurultay' in quotes is not the title that writes it bare. One pass; the lower case comes after the marks are
+ * found, so the positions are the title's own. Migration 200 does the same in SQL.
+ */
 function memberKey(title: string): string {
-  return title.toLocaleLowerCase("tr").replace(NOT_LETTER_OR_DIGIT_KEY, "");
+  const t = title.replaceAll(KEY_QUOTE_SENTINEL, "");
+  const parts: string[] = [];
+  let from = 0;
+  for (let i = 0; i < t.length; i++) {
+    if (!KEY_QUOTE_MARKS.has(t.charAt(i))) continue;
+    if (isWordCharAt(t, i - 1) && isWordCharAt(t, i + 1)) continue;
+    parts.push(t.slice(from, i), KEY_QUOTE_SENTINEL);
+    from = i + 1;
+  }
+  parts.push(t.slice(from));
+  const key = parts.join("").toLocaleLowerCase("tr").replace(NOT_KEY_CHAR, "");
+  let start = 0;
+  let end = key.length;
+  while (start < end && key.charAt(start) === KEY_QUOTE_SENTINEL) start++;
+  while (end > start && key.charAt(end - 1) === KEY_QUOTE_SENTINEL) end--;
+  return key.slice(start, end);
 }
 
 // cleanHeadline's house-style rewrite as it stood before it learned to leave "Başkan Erdoğan Tosun" alone
@@ -2783,13 +2866,16 @@ const LEGACY_HOUSE_STYLE = /(?<![\p{L}\p{N}])Başkan Erdoğan(?![\p{L}\p{N}])/gu
 
 /**
  * Whether the stored title `inc` is still some member's wording. True when a member title m has
- * key(cleanHeadline(m)) === key(inc) or key(m) contains key(inc), where key is the Turkish lower
- * case with every character outside letters and digits removed. That makes it blind to case,
- * separators and quotes, so a recased ("türkiye" -> "Türkiye"), sentence-cased (a shouted
- * member), quote-repaired or glued-twin ("Tel Aviv-Washington" against "Tel AvivWashington")
- * form of a member title still counts, and so does the cleaned form of a title with a lead-in,
- * an outlet prefix, and the "Başkan Erdoğan" -> "Cumhurbaşkanı Erdoğan" rewrite older cleaning rules
- * applied before a capitalised name. Pass ALL raw member titles, not the
+ * key(cleanHeadline(m)) === key(inc) or key(m) contains key(inc), where key is memberKey: the Turkish
+ * lower case with every character outside letters and digits removed and every quotation mark that
+ * sits outside a word, except at the very edges of the title, kept as one sentinel. That makes it blind
+ * to case, separators, the kind of quotation mark and the in-word apostrophe, so a recased ("türkiye" ->
+ * "Türkiye"), sentence-cased (a shouted member), quote-repaired (curly against straight, a stray leading
+ * quote dropped) or glued-twin ("Tel Aviv-Washington" against "Tel AvivWashington") form of a member title
+ * still counts, and so does the cleaned form of a title with a lead-in, an outlet prefix, and the
+ * "Başkan Erdoğan" -> "Cumhurbaşkanı Erdoğan" rewrite older cleaning rules applied before a capitalised
+ * name. It is NOT blind to where a span is quoted (h140-seo-1): a member that writes 'şaibeli kurultay' in
+ * quotes does not carry a stored title that writes the span bare. Pass ALL raw member titles, not the
  * generic-filtered list. A title with no letter or digit is not judged here (true): the
  * acceptance gate rejects it. No members: false. Each member is read up to
  * EVIDENCE_MAX_CHARS characters, so a hostile feed title costs a bounded scan. Pure.

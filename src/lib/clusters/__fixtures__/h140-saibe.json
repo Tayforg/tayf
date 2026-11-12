@@ -1,0 +1,169 @@
+{
+ "finding": "h140-seo-1",
+ "cid": "bffb0a3f",
+ "id": "bffb0a3f-a552-45d6-a2fd-a2f69050c73b",
+ "note": "Test-only. The 36 member titles of the cluster as read on production 2026-11-12 (read-only SELECT of cluster_articles x articles x sources, newest first), the stored neutral title it served, and the two old_title values article_title_versions holds for the Akşam article 897ffa49 (the outlet's own edit history, never rendered).",
+ "stored": "CHP'nin şaibeli kurultay davası 18 Kasım'a ertelendi",
+ "model": "extractive-v6",
+ "stamped": 25,
+ "article_count": 36,
+ "members": [
+  {
+   "source": "bha",
+   "title": "CHP kurultay davasında yeni tarih belli oldu: Duruşma 18 Kasım’a ertelendi"
+  },
+  {
+   "source": "yenicag",
+   "title": "CHP kurultay ceza davası 18 Kasım’a ertelendi"
+  },
+  {
+   "source": "muhalif",
+   "title": "CHP kurultay davasında yeni tarih belli oldu: Duruşma 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "isci-haber",
+   "title": "CHP'nin 38. Olağan Kurultayı davasında yeni karar: Duruşma 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "medyascope",
+   "title": "CHP kurultay davası ertelendi"
+  },
+  {
+   "source": "haber-com",
+   "title": "CHP'de Kurultay Davası 18 Kasım'a Ertelendi"
+  },
+  {
+   "source": "dokuz8-haber",
+   "title": "CHP'nin kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "evrensel",
+   "title": "CHP kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "kamudanhaber",
+   "title": "CHP'nin 38. Olağan Kurultayı'na ilişkin dava 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "posta",
+   "title": "CHP'nin 'şaibeli kurultay' davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "odatv",
+   "title": "CHP’nin 38. Olağan Kurultayı davası ertelendi"
+  },
+  {
+   "source": "abc-haber",
+   "title": "CHP Kurultay Davası’nda yeni karar: Duruşma 18 Kasım’a ertelendi"
+  },
+  {
+   "source": "cgtn-turk",
+   "title": "CHP Kurultay Davası ertelendi"
+  },
+  {
+   "source": "f5-haber",
+   "title": "CHP'nin kurultay davası ertelendi"
+  },
+  {
+   "source": "sputnik-turkce",
+   "title": "CHP'nin kurultay davası ertelendi"
+  },
+  {
+   "source": "yeni-akit",
+   "title": "Dava 18 Kasım'a ertelendi! CHP'deki “şaibeli kurultay” kördüğüm oldu"
+  },
+  {
+   "source": "takvim",
+   "title": "Ekrem İmamoğlu’nun da yargılandığı CHP kurultayı davasında duruşma 18 Kasım’a ertelendi"
+  },
+  {
+   "source": "karar",
+   "title": "Son dakika! CHP Kurultay Davası yine ertelendi"
+  },
+  {
+   "source": "star",
+   "title": "CHP'nin şaibeli 38.Kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "yeni-safak",
+   "title": "CHP'nin 'şaibeli kurultay' davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "mynet",
+   "title": "CHP'de kurultay davası 18 Kasım'a ertelendi!"
+  },
+  {
+   "source": "turkiye-gazetesi",
+   "title": "CHP'nin Kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "istiklal",
+   "title": "CHP kurultay davasında sıcak gelişme"
+  },
+  {
+   "source": "aksam",
+   "title": "CHP'nin şaibeli kurultay davasında karar"
+  },
+  {
+   "source": "haber-global",
+   "title": "CHP'nin kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "ekonomim",
+   "title": "Ekrem İmamoğlu’nun da yargılandığı kurultay davası ertelendi"
+  },
+  {
+   "source": "sozcu",
+   "title": "SON DAKİKA.... CHP Kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "cnn-turk",
+   "title": "Son dakika haberi: CHP kurultayında \"şaibe davası\" ertelendi"
+  },
+  {
+   "source": "haberler-com",
+   "title": "CHP’nin “şaibeli kurultay” davası 18 Kasım’a ertelendi"
+  },
+  {
+   "source": "birgun",
+   "title": "CHP Kurultay Davası ertelendi"
+  },
+  {
+   "source": "sabah",
+   "title": "SON DAKİKA... CHP'nin 38'inci Olağan Kurultayı davası ertelendi"
+  },
+  {
+   "source": "hurriyet",
+   "title": "CHP'nin kurultay davası ertelendi"
+  },
+  {
+   "source": "haber7",
+   "title": "Son Dakika: CHP'nin kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "source": "gzt",
+   "title": "CHP'nin 38'inci Olağan Kurultayı davasında yeni gelişme: Dava ertelendi"
+  },
+  {
+   "source": "elips-haber",
+   "title": "CHP'nin 38. kurultay davasında yeni gelişme"
+  },
+  {
+   "source": "milliyet",
+   "title": "Son dakika... CHP'nin 'şaibeli kurultay' davası 18 Kasım'a ertelendi"
+  }
+ ],
+ "aksamArticle": "897ffa49",
+ "aksamOldTitles": [
+  {
+   "version_id": 823303,
+   "seen_at": "2026-11-11 11:45:10.154382+00",
+   "old_title": "CHP kurultay davası 18 Kasım'a ertelendi"
+  },
+  {
+   "version_id": 823721,
+   "seen_at": "2026-11-11 12:18:05.083742+00",
+   "old_title": "CHP'nin şaibeli kurultay davası 18 Kasım'a ertelendi"
+  }
+ ]
+}
