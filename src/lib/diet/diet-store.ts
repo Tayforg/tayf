@@ -4,6 +4,7 @@ import {
   appendDiet,
   dietEntryFromTrack,
   parseDiet,
+  pruneDiet,
   serializeDiet,
   type DietEntry,
 } from "./diet";
@@ -125,6 +126,51 @@ export function recordReadingClick(event: TrackEvent, props?: TrackProps): void 
     notifyChange();
   } catch {
     // Belt-and-suspenders: this function must never throw.
+  }
+}
+
+/**
+ * Deletes the stored entries the retention rule says are gone (older than
+ * DIET_TTL_DAYS, more than 60 s in the future, or beyond the newest
+ * DIET_MAX_ENTRIES). recordReadingClick prunes on a counted click, and
+ * DietSummary calls this when /diyetim is opened. Nothing runs in the
+ * background: a reader who neither opens /diyetim nor clicks again keeps the
+ * expired entries, so the privacy line "daha eskiler kendiliğinden silinir" is
+ * narrowed, not yet literally true (its copy change is a separate decision).
+ * The verdict comes from `pruneDiet`, the very function the click-time prune
+ * uses, so both paths share one 30-day boundary.
+ *
+ * Returns how many entries were dropped. Writes (and notifies subscribers) only
+ * when that is more than 0: an untouched, empty or unparseable store is never
+ * rewritten. Never throws and is a no-op on the server or whenever storage
+ * access fails; 0 is returned in each of those cases. Device-local only: no
+ * network, no analytics.
+ */
+export function pruneStoredDiet(nowMs: number = Date.now()): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    const storage = getStorage();
+    if (!storage) return 0;
+    let raw: string | null;
+    try {
+      raw = storage.getItem(DIET_STORAGE_KEY);
+    } catch {
+      return 0;
+    }
+    const parsed = parseDiet(raw);
+    const kept = pruneDiet(parsed, nowMs);
+    if (kept.length === parsed.length) return 0;
+    try {
+      if (kept.length === 0) storage.removeItem(DIET_STORAGE_KEY);
+      else storage.setItem(DIET_STORAGE_KEY, serializeDiet(kept));
+    } catch {
+      return 0;
+    }
+    notifyChange();
+    return parsed.length - kept.length;
+  } catch {
+    // Belt-and-suspenders: this function must never throw.
+    return 0;
   }
 }
 
