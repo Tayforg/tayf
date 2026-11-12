@@ -7779,7 +7779,7 @@ describe("h165 review: a case-trusted twin that wrote the stored title's exact c
   });
 
   it("a trusted twin written with another apostrophe (same fold, other bytes) and no flagged member also keep it", () => {
-    const twin = INC.replace("'", "’");
+    const twin = INC.replaceAll("'", "’");
     expect(pickNeutralTitle([{ title: INC, caseUnreliable: true }, { title: twin }, { title: S1 }, { title: S2 }], { incumbent: INC })).toBe(INC);
     expect(pickNeutralTitle([{ title: INC }, { title: S1 }, { title: S2 }], { incumbent: INC })).toBe(INC);
   });
