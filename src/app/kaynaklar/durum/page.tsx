@@ -76,16 +76,15 @@ const itemsPerDayFormatter = new Intl.NumberFormat("tr-TR", {
 
 type ItemsPerDayPromise = ReturnType<typeof getSourceItemsPerDay>;
 
-export default async function KaynakDurumPage() {
-  // connection() signals to PPR that the code below must run at request
-  // time (it reads Date.now() indirectly via getSourceFeedStatuses). The
-  // static shell renders while this streams in.
-  await connection();
-
-  const rows = await getSourceFeedStatuses();
-  // Not awaited — see the file header (PERF-01).
-  const itemsPerDayPromise = getSourceItemsPerDay();
-
+// h177-perfsweep-1: the hero (h1 and its subtitle, the LCP text) and the pointer to /durum
+// render in the PPR shell. KaynakDurumPage used to be async and to open with connection(), so
+// the whole page, h1 included, streamed as one hidden segment after ~431 KB of HTML (mobile
+// LCP 2.56-2.72 s against ~1 s on the prerendered pages). Now it is a plain function holding
+// only static copy; everything that needs the request (connection(), the feed rows, the
+// items-per-day promise) is DurumBody, behind DurumBodySkeleton. A read that rejects rejects
+// the boundary and the error boundary (error.tsx) renders as before: nothing here catches it.
+// tests/guards/static-hero-shell.test.ts pins the split.
+export default function KaynakDurumPage() {
   return (
     <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
       <PageHero
@@ -105,16 +104,72 @@ export default async function KaynakDurumPage() {
         sayfasına bakın.
       </p>
 
-      {rows === null ? (
-        <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-          <p className="text-sm text-muted-foreground">
-            Kaynak durumu şu anda bilinmiyor — veri geçici olarak
-            ulaşılamıyor. Birkaç dakika içinde tekrar deneyin.
-          </p>
+      <Suspense fallback={<DurumBodySkeleton />}>
+        <DurumBody />
+      </Suspense>
+    </div>
+  );
+}
+
+/**
+ * Everything below the hero. connection() signals to PPR that this must run at request time
+ * (it reads Date.now() indirectly via getSourceFeedStatuses); it is only ever reached from
+ * inside the Suspense boundary above, never from the shell.
+ */
+export async function DurumBody() {
+  await connection();
+
+  const rows = await getSourceFeedStatuses();
+  // Not awaited — see the file header (PERF-01).
+  const itemsPerDayPromise = getSourceItemsPerDay();
+
+  if (rows === null) {
+    return (
+      <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
+        <p className="text-sm text-muted-foreground">
+          Kaynak durumu şu anda bilinmiyor — veri geçici olarak
+          ulaşılamıyor. Birkaç dakika içinde tekrar deneyin.
+        </p>
+      </div>
+    );
+  }
+  return <KaynakDurumBody rows={rows} itemsPerDayPromise={itemsPerDayPromise} />;
+}
+
+/**
+ * The fallback of DurumBody's boundary: grey placeholders in the footprint of what arrives, no
+ * copy of its own (the hero above is the real one). Three zone cards in the loaded grid, the
+ * totals lines, and the table card with its header row and a floor height. The loaded table is
+ * far taller than any placeholder (one row per active source), so the footer below stays under
+ * the fold in both states; it is `main`'s min-height that holds it there.
+ */
+export function DurumBodySkeleton() {
+  return (
+    <div aria-hidden="true" className="space-y-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {Array.from({ length: 3 }, (_, i) => (
+          <div
+            key={i}
+            className="h-[120px] rounded-xl border border-border/60 bg-card/40 animate-pulse"
+          />
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        <div className="h-3 w-full max-w-3xl rounded bg-muted/40 animate-pulse" />
+        <div className="h-3 w-2/3 max-w-2xl rounded bg-muted/40 animate-pulse" />
+      </div>
+
+      <div className="rounded-xl ring-1 ring-border/60 bg-card p-4 sm:p-6 min-h-[480px]">
+        {/* overflow-hidden: seven 64 px cells and their gaps are wider than a phone card, and an
+            unclipped flex row widened the page to 576 px at 360 px (measured). The loaded table
+            scrolls inside its own region; the placeholder just clips. */}
+        <div className="flex items-center gap-4 overflow-hidden border-b border-border/60 pb-2">
+          {Array.from({ length: 7 }, (_, i) => (
+            <div key={i} className="h-3 w-16 shrink-0 rounded bg-muted/50 animate-pulse" />
+          ))}
         </div>
-      ) : (
-        <KaynakDurumBody rows={rows} itemsPerDayPromise={itemsPerDayPromise} />
-      )}
+      </div>
     </div>
   );
 }

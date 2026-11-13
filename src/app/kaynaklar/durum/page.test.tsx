@@ -1,14 +1,22 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Suspense, type ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
 // A-M4: no test file existed for /kaynaklar/durum before. Covers the
-// rows / null / empty-array branches of the default export, plus the
+// rows / null / empty-array branches of the async child (DurumBody), plus the
 // KaynakDurumBody / ItemsPerDayCell named exports (page.tsx exports them
 // specifically so this file doesn't need a full React renderer capable of
 // resolving async Server Components).
+//
+// h177-perfsweep-1: the default export is a plain (sync) function that returns
+// the static shell (hero, the /durum pointer) with the one dynamic child behind
+// <Suspense fallback={<DurumBodySkeleton />}>. The shell and the async child
+// (DurumBody: connection(), the reads, the unavailable state, the table) are
+// rendered separately below; tests/guards/static-hero-shell.test.ts pins the
+// split in the source.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -48,7 +56,11 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+import { connection } from "next/server";
+
 import KaynakDurumPage, {
+  DurumBody,
+  DurumBodySkeleton,
   KaynakDurumBody,
   ItemsPerDayCell,
   metadata,
@@ -89,6 +101,21 @@ function collectText(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
+/** Every element under `node`, depth first, expanding no components (the shell/skeleton tests below). */
+type TreeEl = { type?: unknown; props?: Record<string, unknown> };
+function walkTree(node: unknown, out: TreeEl[] = []): TreeEl[] {
+  if (Array.isArray(node)) {
+    for (const child of node) walkTree(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as TreeEl;
+    out.push(el);
+    if (el.props?.children !== undefined) walkTree(el.props.children, out);
+  }
+  return out;
+}
+
 const NOW = Date.parse("2026-09-18T12:00:00.000Z");
 
 // h126-a11y-2: the cell that names a row is a <th scope="row">, so a row's cells
@@ -110,26 +137,177 @@ function rawRow(overrides: Partial<SourceFeedStatusRawRow> = {}): SourceFeedStat
   };
 }
 
-describe("KaynakDurumPage (default export)", () => {
+describe("DurumBody (async child of the page)", () => {
+  beforeEach(() => {
+    vi.mocked(connection).mockClear();
+  });
+
   it("renders the honest 'durum bilinmiyor' state when the query errors (never fabricates a table)", async () => {
     fixture.data = [];
     fixture.error = { message: "canceling statement due to statement timeout" };
 
-    const tree = await KaynakDurumPage();
+    const tree = await DurumBody();
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("Kaynak durumu şu anda bilinmiyor");
+    expect(text).toContain("veri geçici olarak ulaşılamıyor");
+    expect(text).not.toContain("Şu anda listelenecek aktif kaynak yok");
   });
 
   it("renders the table shell for a successful, non-empty response", async () => {
     fixture.data = [rawRow()];
     fixture.error = null;
 
-    const tree = await KaynakDurumPage();
+    const tree = await DurumBody();
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("Örnek Kaynak");
     expect(text).not.toContain("Kaynak durumu şu anda bilinmiyor");
+  });
+
+  it("renders the empty-list state (not the unavailable one) when the read worked and no source is active", async () => {
+    fixture.data = [];
+    fixture.error = null;
+
+    const text = collectText(await DurumBody()).join(" ");
+
+    expect(text).toContain("Şu anda listelenecek aktif kaynak yok");
+    expect(text).not.toContain("Kaynak durumu şu anda bilinmiyor");
+  });
+
+  it("hands KaynakDurumBody the shaped rows and the still-pending items-per-day promise, as before", async () => {
+    fixture.data = [rawRow()];
+    fixture.error = null;
+
+    const tree = (await DurumBody()) as { type?: unknown; props?: Record<string, unknown> };
+
+    expect(tree.type).toBe(KaynakDurumBody);
+    const rows = tree.props?.rows as Array<{ slug: string; name: string }>;
+    expect(rows.map((r) => r.slug)).toEqual(["ornek-kaynak"]);
+    // Not awaited by the page (PERF-01): a thenable that the nested Suspense cells consume.
+    expect(typeof (tree.props?.itemsPerDayPromise as { then?: unknown }).then).toBe("function");
+  });
+
+  it("calls connection() so the reads run at request time, and never from the shell", async () => {
+    fixture.data = [rawRow()];
+    fixture.error = null;
+
+    KaynakDurumPage();
+    expect(connection).not.toHaveBeenCalled();
+
+    await DurumBody();
+    expect(connection).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not swallow a failed read: a rejected rows read rejects the child (error.tsx renders as before)", async () => {
+    // getSourceFeedStatuses itself never throws (null = unknown); a throw from deeper (here the
+    // client factory) must still surface, not be caught by the page.
+    fixture.data = [rawRow()];
+    fixture.error = null;
+    const feedStatus = await import("@/lib/sources/feed-status");
+    const spy = vi
+      .spyOn(feedStatus, "getSourceFeedStatuses")
+      .mockRejectedValueOnce(new Error("boom"));
+    try {
+      await expect(DurumBody()).rejects.toThrow("boom");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("KaynakDurumPage (static shell, h177-perfsweep-1)", () => {
+  it("is a plain function: calling it returns the element tree synchronously, not a promise", () => {
+    const tree = KaynakDurumPage();
+    expect(tree).not.toBeInstanceOf(Promise);
+    expect(typeof (tree as unknown as { then?: unknown }).then).toBe("undefined");
+  });
+
+  it("holds the hero text and the /durum pointer without any data read", () => {
+    fixture.data = [];
+    fixture.error = { message: "must not be read by the shell" };
+
+    const tree = KaynakDurumPage();
+    const text = collectText(tree).join(" ");
+
+    // PageHero takes its copy as props, so read them off the element.
+    const hero = walkTree(tree).find((e) => e.type === PageHero);
+    expect(hero, "PageHero").toBeDefined();
+    expect(hero?.props?.kicker).toBe("Kapsam düzeltmesi");
+    expect(hero?.props?.title).toBe("Kaynak durumu");
+    expect(String(hero?.props?.subtitle)).toContain(
+      "yalnızca son 72 saatte en az bir haber veren kaynaklar üzerinden hesaplanır",
+    );
+    expect(text).toContain("Haber akışının genel durumu için");
+    expect(text).toContain("sayfasına bakın.");
+    // Neither table copy nor the unavailable state: those arrive with the child.
+    expect(text).not.toContain("Kaynak durumu şu anda bilinmiyor");
+    expect(text).not.toContain("Aktif kaynakların besleme durumu");
+  });
+
+  it("puts the one dynamic child behind a Suspense whose fallback is the skeleton", () => {
+    const tree = KaynakDurumPage() as { props?: { children?: unknown } };
+    const children = (Array.isArray(tree.props?.children) ? tree.props?.children : []) as Array<{
+      type?: unknown;
+      props?: { fallback?: { type?: unknown }; children?: { type?: unknown } };
+    }>;
+    const suspenses = children.filter((c) => c.type === Suspense);
+
+    expect(suspenses).toHaveLength(1);
+    expect(suspenses[0]?.props?.fallback?.type).toBe(DurumBodySkeleton);
+    expect(suspenses[0]?.props?.children?.type).toBe(DurumBody);
+    // the hero and the pointer come before it, in the shell
+    const heroAt = children.findIndex((c) => c.type === PageHero);
+    expect(heroAt).toBe(0);
+    expect(children.indexOf(suspenses[0] as (typeof children)[number])).toBeGreaterThan(heroAt);
+  });
+});
+
+describe("DurumBodySkeleton (same-footprint fallback)", () => {
+  /** Plain-text content of rendered markup: a linear tag scan, no regex over HTML. */
+  function textOfMarkup(markup: string): string {
+    let inTag = false;
+    let out = "";
+    for (const ch of markup) {
+      if (ch === "<") inTag = true;
+      else if (ch === ">") inTag = false;
+      else if (!inTag) out += ch;
+    }
+    return out;
+  }
+
+  type El = TreeEl;
+  const walk = walkTree;
+  const classOf = (el: El): string => String(el.props?.className ?? "");
+
+  it("renders no text at all (no copy is duplicated while the body streams) and is hidden from assistive tech", () => {
+    const markup = renderToStaticMarkup(<DurumBodySkeleton />);
+    expect(textOfMarkup(markup).trim()).toBe("");
+    expect(markup).toContain('aria-hidden="true"');
+    expect(markup).not.toContain("<h1");
+    expect(markup).not.toContain("<h2");
+    expect(markup).not.toContain("<table");
+  });
+
+  it("reserves the zone cards, the totals line and the table card with the seven header cells", () => {
+    const els = walk(DurumBodySkeleton());
+    // three zone cards in the same grid as the loaded ones
+    const grid = els.find((e) => classOf(e) === "grid grid-cols-1 sm:grid-cols-3 gap-3");
+    expect(grid, "zone grid").toBeDefined();
+    expect(walk(grid?.props?.children).filter((e) => classOf(e).includes("rounded-xl"))).toHaveLength(3);
+    // the table card has the loaded card's chrome, a header row of 7 cells and a floor height
+    const card = els.find((e) => classOf(e).startsWith("rounded-xl ring-1 ring-border/60 bg-card p-4 sm:p-6"));
+    expect(card, "table card").toBeDefined();
+    expect(classOf(card as El)).toContain("min-h-[");
+    const headerRow = walk(card?.props?.children).find((e) => classOf(e).includes("border-b border-border/60"));
+    expect(headerRow, "header row").toBeDefined();
+    expect(walk(headerRow?.props?.children).filter((e) => e.type === "div")).toHaveLength(7);
+  });
+
+  it("clips the header row, so seven placeholder cells cannot widen the page on a phone (576 px at 360 px, measured)", () => {
+    const headerRow = walk(DurumBodySkeleton()).find((e) => classOf(e).includes("border-b border-border/60"));
+    expect(headerRow, "header row").toBeDefined();
+    expect(classOf(headerRow as El).split(" ")).toContain("overflow-hidden");
   });
 });
 
@@ -140,10 +318,9 @@ describe("KaynakDurumPage metadata (h24-pages-3)", () => {
     expect(metadata.twitter?.title).toBe("Kaynak durumu — Tayf");
   });
 
-  it("the H1 (PageHero title) agrees with the <title>", async () => {
-    fixture.data = [rawRow()];
-    fixture.error = null;
-    const tree = await KaynakDurumPage();
+  it("the H1 (PageHero title) agrees with the <title>", () => {
+    // The hero is in the static shell now: no data and no await needed to reach it.
+    const tree = KaynakDurumPage();
 
     function heroTitles(node: unknown, out: unknown[] = []): unknown[] {
       if (Array.isArray(node)) {
@@ -1168,16 +1345,18 @@ describe("KaynakDurumPage cross-link to /durum", () => {
     expect(pointer).toBeLessThan(branch);
   });
 
-  it("renders the pointer in the page tree for both the data and the unavailable state", async () => {
+  it("renders the pointer in the shell whatever the data does (it is static copy, not part of the child)", async () => {
     fixture.data = [rawRow()];
     fixture.error = null;
-    const ok = collectText(await KaynakDurumPage()).join(" ");
+    const ok = collectText(KaynakDurumPage()).join(" ");
     expect(ok).toContain("Haber akışının genel durumu için");
+    expect(collectText(await DurumBody()).join(" ")).not.toContain("Haber akışının genel durumu için");
 
     fixture.data = [];
     fixture.error = { message: "canceling statement due to statement timeout" };
-    const down = collectText(await KaynakDurumPage()).join(" ");
+    const down = collectText(KaynakDurumPage()).join(" ");
     expect(down).toContain("Haber akışının genel durumu için");
+    expect(collectText(await DurumBody()).join(" ")).not.toContain("Haber akışının genel durumu için");
   });
 });
 

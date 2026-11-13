@@ -850,7 +850,7 @@ production) — this endpoint is always ticker- and time-bounded on
   "attribution": "...", "methodology": "...", "generated_at": "...",
   "ticker": "THYAO", "window_hours": 48,
   "since": "…", "until": "…",
-  "relevance_filter": { "task": "ticker_relevance", "min_prob": 0.2, "applied": true },
+  "relevance_filter": { "task": "ticker_relevance", "min_prob": 0.35, "applied": true },
   "truncated": false,
   "capped": false, "total_disclosures": 15, "superseded": 1,
   "press_code": null,
@@ -913,7 +913,7 @@ Notes:
   response stays a `200`). This is the "Basın bu şirketi ISCTR koduyla anıyor"
   note of `/ekonomi/[ticker]`.
 - **Relevance filter**: mentions Jev's `ticker_relevance` shadow model
-  scored below 0.2 are excluded (a documented false-positive band — e.g. a
+  scored below 0.35 are excluded (a documented false-positive band — e.g. a
   political-party story matching a same-named ticker). Unscored mentions
   are always kept. If the relevance lookup itself fails, the endpoint fails
   open (`relevance_filter.applied: false`) rather than 500ing.
@@ -929,7 +929,12 @@ Notes:
   are missing.
 - **`superseded`** (additive): the number of notices KAP later replaced with a
   correction (a new disclosure with `modify_status` `DUZENLENEN`, same issuer,
-  subject, summary, year, period and `related_stocks`, filed within 14 days).
+  subject, summary, year, period and `related_stocks`, filed within 14 days; for
+  a periodic report, where year and period are both set, the two summaries are
+  compared ignoring case (Turkish rules), repeated whitespace, a leading issuer
+  stock code and one trailing "(Düzeltme)", "(Düzeltilmiş)" or "(Revize)",
+  because KAP retitles such corrections; any other notice needs an identical
+  summary).
   A correction replaces one earlier notice, so a notice KAP files every day
   (a share buyback report) loses one row per correction, not the whole series.
   The replaced notice is read but left out of `disclosures`, `count` and every

@@ -3,7 +3,14 @@ import { resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { istDay, parseDailyBars, parseIntradayBars, yahooChartUrl } from "../../supabase/functions/_shared/bars.ts";
+import {
+  type DailyBar,
+  freshDailyBars,
+  istDay,
+  parseDailyBars,
+  parseIntradayBars,
+  yahooChartUrl,
+} from "../../supabase/functions/_shared/bars.ts";
 
 // Shapes captured from query1.finance.yahoo.com on 2026-09-14 (THYAO.IS).
 const daily = {
@@ -59,6 +66,102 @@ describe("bars", () => {
   it("returns nothing for an error payload", () => {
     expect(parseDailyBars("X", { chart: { result: null } })).toEqual([]);
     expect(parseIntradayBars("X", {})).toEqual([]);
+  });
+});
+
+// h176-ekonomi-2: bist_bars_daily DUNYH held Yahoo's flat 109,10 volume-0 placeholder for every day from 2026-10-28
+// to 11-11, and the daily pass re-upserts every row with day >= last_day (the settled bar of last_day included), so
+// the 2026-11-09 15:21Z pass overwrote the traded 11-06 bar (close 11.92) with a placeholder. freshDailyBars keeps
+// the watermark rule and stops that overwrite.
+describe("freshDailyBars (h176-ekonomi-2)", () => {
+  const bar = (day: string, over: Partial<DailyBar> = {}): DailyBar => ({
+    ticker: "DUNYH",
+    day,
+    open: 14.5,
+    high: 15.2,
+    low: 14.1,
+    close: 14.83,
+    volume: 2_203_679,
+    ...over,
+  });
+  const placeholder = (day: string, price = 109.1): DailyBar => bar(day, { open: price, high: price, low: price, close: price, volume: 0 });
+  const days = (rows: DailyBar[]) => rows.map((r) => r.day);
+
+  it("the DUNYH fixture: lastDay 11-06 and a flat 109,10 volume-0 row on 11-06 is dropped, the 11-09 bar stays", () => {
+    const rows = [placeholder("2026-11-06"), bar("2026-11-09")];
+    expect(freshDailyBars(rows, "2026-11-06")).toEqual([bar("2026-11-09")]);
+  });
+
+  it("keeps every row after lastDay", () => {
+    const rows = [bar("2026-11-09"), bar("2026-11-10"), bar("2026-11-11")];
+    expect(freshDailyBars(rows, "2026-11-06")).toEqual(rows);
+  });
+
+  it("keeps the lastDay row when it is a real bar (the settled re-read the h11-finance-2 rotation relies on)", () => {
+    const rows = [bar("2026-11-06", { close: 11.92 }), bar("2026-11-09")];
+    expect(days(freshDailyBars(rows, "2026-11-06"))).toEqual(["2026-11-06", "2026-11-09"]);
+  });
+
+  it("drops rows before lastDay, as the watermark filter always did", () => {
+    const rows = [bar("2026-11-05"), bar("2026-11-06"), bar("2026-11-09")];
+    expect(days(freshDailyBars(rows, "2026-11-06"))).toEqual(["2026-11-06", "2026-11-09"]);
+  });
+
+  it("returns every row, placeholders included, when lastDay is null (a never-fetched ticker keeps its full warmup)", () => {
+    const rows = [placeholder("2026-10-28"), placeholder("2026-11-06"), bar("2026-11-12")];
+    expect(freshDailyBars(rows, null)).toEqual(rows);
+  });
+
+  it("returns every row for an undefined lastDay too, and an empty list for no rows", () => {
+    const rows = [placeholder("2026-11-06")];
+    expect(freshDailyBars(rows, undefined)).toEqual(rows);
+    expect(freshDailyBars([], "2026-11-06")).toEqual([]);
+    expect(freshDailyBars([], null)).toEqual([]);
+  });
+
+  it("a placeholder AFTER lastDay is a new row, not an overwrite, and is kept", () => {
+    const rows = [bar("2026-11-06"), placeholder("2026-11-09")];
+    expect(days(freshDailyBars(rows, "2026-11-06"))).toEqual(["2026-11-06", "2026-11-09"]);
+  });
+
+  describe("only the flat volume-0 placeholder is rejected", () => {
+    const lastDay = "2026-11-06";
+    const keptAtLastDay = (over: Partial<DailyBar>) => freshDailyBars([bar(lastDay, over)], lastDay).length === 1;
+
+    it("a volume-0 bar whose open differs from its close is a real bar (SASA: 4 zero-volume rows with a range)", () => {
+      expect(keptAtLastDay({ open: 10, high: 10.5, low: 9.8, close: 10.2, volume: 0 })).toBe(true);
+    });
+
+    it("a flat bar with volume above 0 is a real bar locked at one price (a limit-locked tavan day)", () => {
+      expect(keptAtLastDay({ open: 20, high: 20, low: 20, close: 20, volume: 1 })).toBe(true);
+      expect(keptAtLastDay({ open: 20, high: 20, low: 20, close: 20, volume: 5_000_000 })).toBe(true);
+    });
+
+    it("each of the four prices alone breaks the flat test", () => {
+      expect(keptAtLastDay({ open: 20.01, high: 20, low: 20, close: 20, volume: 0 })).toBe(true);
+      expect(keptAtLastDay({ open: 20, high: 20.01, low: 20, close: 20, volume: 0 })).toBe(true);
+      expect(keptAtLastDay({ open: 20, high: 20, low: 19.99, close: 20, volume: 0 })).toBe(true);
+      expect(keptAtLastDay({ open: 20, high: 20, low: 20, close: 20.01, volume: 0 })).toBe(true);
+    });
+
+    it("a missing volume (null) or a missing price (null) is not proof of a placeholder: kept", () => {
+      expect(keptAtLastDay({ open: 20, high: 20, low: 20, close: 20, volume: null })).toBe(true);
+      expect(keptAtLastDay({ open: null, high: null, low: null, close: 20, volume: 0 })).toBe(true);
+      expect(keptAtLastDay({ open: 20, high: null, low: 20, close: 20, volume: 0 })).toBe(true);
+    });
+
+    it("the placeholder itself is rejected whatever its price", () => {
+      expect(keptAtLastDay({ open: 109.1, high: 109.1, low: 109.1, close: 109.1, volume: 0 })).toBe(false);
+      expect(keptAtLastDay({ open: 0.01, high: 0.01, low: 0.01, close: 0.01, volume: 0 })).toBe(false);
+    });
+  });
+
+  it("does not change its input and returns a new array", () => {
+    const rows = [placeholder("2026-11-06"), bar("2026-11-09")];
+    const copy = structuredClone(rows);
+    const out = freshDailyBars(rows, "2026-11-06");
+    expect(rows).toEqual(copy);
+    expect(out).not.toBe(rows);
   });
 });
 
@@ -308,6 +411,55 @@ describe("quotes-ingest runCycle", () => {
       .upsert("bist_bars_daily")
       .flatMap((c) => c.patch as Array<{ day: string }>);
     expect(rows.map((r) => r.day).sort()).toEqual(["2026-09-15", "2026-09-16"]);
+  });
+
+  it("daily mode does not overwrite the stored last_day bar with Yahoo's flat volume-0 placeholder (h176-ekonomi-2)", async () => {
+    quotesRpcState.dailyTargets = [{ ticker: "DUNYH", last_day: "2026-11-06" }];
+    const day06 = utcSecs(2026, 10, 6, 12, 0);
+    const day09 = utcSecs(2026, 10, 9, 12, 0);
+    fetchImpl = async () =>
+      new Response(
+        JSON.stringify({
+          chart: {
+            result: [
+              {
+                timestamp: [day06, day09],
+                indicators: {
+                  quote: [
+                    {
+                      open: [109.1, 12.5],
+                      high: [109.1, 12.9],
+                      low: [109.1, 12.4],
+                      close: [109.1, 12.8],
+                      volume: [0, 1_500_000],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+
+    const { runCycle } = await import("../../supabase/functions/quotes-ingest/index.ts");
+    const stats = await runCycle({ mode: "daily" });
+
+    expect(dailyRows().map((r) => r.day)).toEqual(["2026-11-09"]);
+    expect(stats.bars).toBe(1);
+    expect(stats.fetched).toBe(1);
+  });
+
+  it("daily mode still re-upserts a real last_day bar (the settled re-read) beside the new day", async () => {
+    quotesRpcState.dailyTargets = [{ ticker: "DUNYH", last_day: "2026-11-06" }];
+    const day06 = utcSecs(2026, 10, 6, 12, 0);
+    const day09 = utcSecs(2026, 10, 9, 12, 0);
+    fetchImpl = async () => new Response(JSON.stringify(chartPayload([day06, day09])), { status: 200 });
+
+    const { runCycle } = await import("../../supabase/functions/quotes-ingest/index.ts");
+    await runCycle({ mode: "daily" });
+
+    expect(dailyRows().map((r) => r.day)).toEqual(["2026-11-06", "2026-11-09"]);
   });
 
   it("returns ok:false and captures once when every ticker fails (SEC-05)", async () => {

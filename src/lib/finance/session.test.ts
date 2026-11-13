@@ -6,6 +6,8 @@ import type { Quote } from "@/lib/finance/quotes";
 import { limitFlag } from "./format";
 import {
   HALTED_AFTER_MISSED_SESSIONS,
+  UNIT_BREAK_MAX,
+  UNIT_BREAK_MIN,
   auctionStubSettledClose,
   chartBaseline,
   companyMetaLine,
@@ -905,15 +907,16 @@ describe("sparklineCloses (h120-finance-1)", () => {
   });
 
   it("keeps only the last 5 values and never returns more than 5", () => {
+    // h176-ekonomi-2: the closes stay inside the unit-break band (a 1 -> 2 -> ... -> 81.85 ladder is itself a break and is cut).
     const q = citas({
-      closes: [1, 2, 3, 4, 81.85],
+      closes: [101, 103, 100, 102, 81.85],
       closeDays: ["2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"],
     });
     const out = sparklineCloses(q, citasStat());
-    expect(out).toEqual([2, 3, 4, 90.9, 81.85]);
+    expect(out).toEqual([103, 100, 102, 90.9, 81.85]);
     expect(out.length).toBeLessThanOrEqual(5);
     const long = citas({
-      closes: [1, 2, 3, 4, 5, 6, 81.85],
+      closes: [99, 101, 103, 100, 102, 104, 81.85],
       closeDays: ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-11"],
     });
     expect(sparklineCloses(long, citasStat())).toHaveLength(5);
@@ -941,6 +944,155 @@ describe("sparklineCloses (h120-finance-1)", () => {
     expect(() => sparklineCloses(citas(), s)).not.toThrow();
     expect(sparklineCloses(citas(), s)).toEqual([108.9, 101, 101, 81.85]);
     expect(() => sparklineCloses({ ...citas(), closes: undefined } as unknown as Quote, citasStat())).not.toThrow();
+  });
+});
+
+// h176-ekonomi-2: /ekonomi/DUNYH drew 109,10 / 109,10 / 109,10 / 14,83 / 16,31 (-86 % beside "tavan +%9,98") because
+// Yahoo's flat volume-0 placeholder closes sit in front of the traded bars. The same band as migration 174's
+// unit_break (a daily limit of +-10 % cannot move a close outside 0.75 .. 1.35) cuts the line at the LAST such step.
+describe("sparklineCloses: no line across a unit break (h176-ekonomi-2)", () => {
+  const dunyh = (over: Partial<Quote> = {}): Quote => ({
+    ticker: "DUNYH",
+    price: 16.31,
+    prevClose: 14.83,
+    changePct: 9.98,
+    hasBaseline: true,
+    closes: [109.1, 109.1, 109.1, 14.83, 16.31],
+    closeDays: ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-12", "2026-11-13"],
+    currency: "TRY",
+    asOf: "2026-11-13T08:16:00Z",
+    ...over,
+  });
+  const stat = (over: Partial<QuoteStat> = {}): QuoteStat => ({
+    ticker: "DUNYH",
+    lastDay: "2026-11-12",
+    lastClose: 14.83,
+    prevClose: 109.1,
+    lastVolume: 2_203_679,
+    avgVolume20: null,
+    rvol: null,
+    ...over,
+  });
+
+  it("uses migration 174's band: 0.75 .. 1.35 of the previous close", () => {
+    expect(UNIT_BREAK_MIN).toBe(0.75);
+    expect(UNIT_BREAK_MAX).toBe(1.35);
+  });
+
+  it("DUNYH replay: three 109,10 placeholders, then 14,83 and 16,31, gives only the two traded closes, drawn upward", () => {
+    const out = sparklineCloses(dunyh(), null);
+    expect(out).toEqual([14.83, 16.31]);
+    expect(out[1]! - out[0]!).toBeGreaterThan(0);
+  });
+
+  it("the same quote with a stat that adds nothing is cut the same way", () => {
+    expect(sparklineCloses(dunyh(), stat())).toEqual([14.83, 16.31]);
+  });
+
+  it("a series with no step outside the band is the same array, untouched", () => {
+    const q = dunyh({ closes: [100, 104, 99, 108, 112.5] });
+    expect(sparklineCloses(q, null)).toBe(q.closes);
+    expect(sparklineCloses(q, null)).toEqual([100, 104, 99, 108, 112.5]);
+  });
+
+  it("a break before the last point leaves that single point; <Sparkline> hides a line of fewer than 2", () => {
+    const q = dunyh({ price: 14.83, closes: [109.1, 109.1, 109.1, 14.83], closeDays: ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-12"] });
+    expect(sparklineCloses(q, null)).toEqual([14.83]);
+  });
+
+  it("only the LAST break counts: an older break inside the kept part does not cut again", () => {
+    const q = dunyh({ closes: [1, 10, 100, 100, 104], closeDays: ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-12", "2026-11-13"] });
+    // 1 -> 10 and 10 -> 100 are both breaks; the cut is at the later one, so 100, 100, 104 stay.
+    expect(sparklineCloses(q, null)).toEqual([100, 100, 104]);
+  });
+
+  it("a break upward (a lot-size change the other way) cuts too", () => {
+    const q = dunyh({ closes: [10, 10.2, 10.1, 101, 102], closeDays: ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-12", "2026-11-13"] });
+    expect(sparklineCloses(q, null)).toEqual([101, 102]);
+  });
+
+  it("the band is inclusive of 0.75 and 1.35 and outside it from 0.7499 / 1.3501 on", () => {
+    const base = (closes: number[]) => dunyh({ closes, closeDays: closes.map((_, i) => `2026-11-0${i + 1}`) });
+    expect(sparklineCloses(base([100, 75]), null)).toEqual([100, 75]);
+    expect(sparklineCloses(base([100, 135]), null)).toEqual([100, 135]);
+    expect(sparklineCloses(base([100, 74.99]), null)).toEqual([74.99]);
+    expect(sparklineCloses(base([100, 135.01]), null)).toEqual([135.01]);
+  });
+
+  it("the daily limit still reads as a normal step: a +10 % tavan and a -10 % taban are inside the band", () => {
+    const q = dunyh({ closes: [100, 110, 99, 108.9, 98.01], closeDays: ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-12", "2026-11-13"] });
+    expect(sparklineCloses(q, null)).toBe(q.closes);
+  });
+
+  it("the D-1 stat insertion still happens before the cut: the inserted settled close is part of the line", () => {
+    // During the 11-13 session Yahoo's array has no 11-12 bar; the stat's 14.83 goes back in, then the cut leaves 14.83, 16.31.
+    const q = dunyh({
+      closes: [109.1, 109.1, 109.1, 16.31],
+      closeDays: ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-13"],
+    });
+    expect(sparklineCloses(q, stat())).toEqual([14.83, 16.31]);
+  });
+
+  it("an inserted close that follows the placeholders starts the line: the break is placeholder -> settled close", () => {
+    // Stat close 14.83 inserted between a 109,10 placeholder and a live 14,9 print: the break is placeholder -> 14.83.
+    const q = dunyh({
+      price: 14.9,
+      closes: [109.1, 109.1, 14.9],
+      closeDays: ["2026-11-09", "2026-11-10", "2026-11-13"],
+    });
+    expect(sparklineCloses(q, stat())).toEqual([14.83, 14.9]);
+  });
+
+  it("every early return is cut too: no stat, no closeDays, an unusable stat close, an unusable asOf", () => {
+    const cut = [14.83, 16.31];
+    expect(sparklineCloses(dunyh(), undefined)).toEqual(cut);
+    expect(sparklineCloses(dunyh({ closeDays: undefined }), stat())).toEqual(cut);
+    expect(sparklineCloses(dunyh({ closeDays: ["2026-11-06"] }), stat())).toEqual(cut);
+    expect(sparklineCloses(dunyh(), stat({ lastClose: Number.NaN }))).toEqual(cut);
+    expect(sparklineCloses(dunyh({ asOf: "garbage" }), stat())).toEqual(cut);
+    expect(sparklineCloses(dunyh(), stat({ lastDay: "garbage" }))).toEqual(cut);
+  });
+
+  it("the catch path is cut too: a stat that throws while it is read still gives the closes after the break", () => {
+    const hostile = {
+      get lastClose(): number {
+        throw new Error("boom");
+      },
+    } as unknown as QuoteStat;
+    expect(() => sparklineCloses(dunyh(), hostile)).not.toThrow();
+    expect(sparklineCloses(dunyh(), hostile)).toEqual([14.83, 16.31]);
+  });
+
+  it("a step needs a finite positive previous close and a finite close to be a ratio (174 divides only by lag(close) > 0)", () => {
+    const days = (closes: number[]) => closes.map((_, i) => `2026-11-0${i + 1}`);
+    for (const closes of [[0, 0, 0], [0, 5, 6], [-1, -2, -3], [Number.NaN, 5, 6], [5, Number.NaN, 6], [5, Number.POSITIVE_INFINITY, 6]]) {
+      const q = dunyh({ closes, closeDays: days(closes) });
+      expect(() => sparklineCloses(q, null)).not.toThrow();
+      expect(sparklineCloses(q, null)).toBe(q.closes);
+    }
+    // A zero close after a positive one is a ratio of 0: outside the band, exactly as 174 counts it.
+    const zero = dunyh({ closes: [5, 0, 6], closeDays: days([5, 0, 6]) });
+    expect(sparklineCloses(zero, null)).toEqual([0, 6]);
+  });
+
+  it("an empty or one-close series is returned as it is", () => {
+    const empty = dunyh({ closes: [], closeDays: [] });
+    expect(sparklineCloses(empty, null)).toBe(empty.closes);
+    const one = dunyh({ closes: [14.83], closeDays: ["2026-11-12"] });
+    expect(sparklineCloses(one, null)).toBe(one.closes);
+  });
+
+  it("never mutates the quote", () => {
+    const q = dunyh();
+    const copy = structuredClone(q);
+    sparklineCloses(q, stat());
+    expect(q).toEqual(copy);
+  });
+
+  it("agrees with the header: the line's last step has the sign of the move beside it", () => {
+    const q = dunyh();
+    const out = sparklineCloses(q, null);
+    expect(Math.sign(out[out.length - 1]! - out[out.length - 2]!)).toBe(Math.sign(q.changePct));
   });
 });
 

@@ -21,7 +21,7 @@ export { isPaidContentUrl };
 // actually what the article is about, vs. a false string match (a party
 // named after a company, a district sharing a ticker's name, etc — see the
 // evidence block in the task spec: DEVA/EREGL/AEFES/AKSGY/TURSG false
-// positives at p<0.2). Predictions land in `jev_shadow_predictions` keyed
+// positives, all scored below the hide line TICKER_HIDE_BELOW). Predictions land in `jev_shadow_predictions` keyed
 // by `subject_id = "${article_id}:${ticker}"` — that format is OWNED by
 // jev.ts; the static guard test in ticker-relevance.test.ts catches drift.
 //
@@ -44,8 +44,24 @@ export { isPaidContentUrl };
 // articles instead would add reads that cannot fit the 4 s reader cap on a
 // cold Micro database. `fetchLegalNoticeIdsSince` is FAIL-OPEN like the rest.
 
-export const TICKER_HIDE_BELOW = 0.2;
+/**
+ * The one hide line of every reader surface: a ticker match Jev scored BELOW this is not shown (the /ekonomi feed
+ * chips, the /ekonomi/<ticker> article list and coverage rows, and, through kap-pickup.ts's TICKER_RELEVANCE_MIN, the
+ * KAP pickup counts, /api/v1/kap/pickup and the v1 docs). Strict '<', and an unscored match (undefined) is shown.
+ *
+ * h176-ekonomi-1: it was 0.2. hunt-176: since 2026-11-09 the 28 rows scored 0.20-0.35 are all alias matches (0 code), and
+ * by title and lede 26 of them are not about the company (a basketball game, an art show, a bank-holiday explainer, a
+ * singer named Berdan); the 2 that are (LYDYE, Lydia Holding's chairman among those arrested) score 0.31 and 0.34. So the
+ * line moved to 0.35. Rows from 0.35 up to TICKER_ATTENTION_MIN are still shown; they just do not count as attention.
+ */
+export const TICKER_HIDE_BELOW = 0.35;
 export const TICKER_ATTENTION_MIN = 0.5;
+/**
+ * The line baked into migration 179's SQL (`filter (where p.jev_prob < 0.2)` in low_precision_aliases). 179 is applied
+ * and its file is not edited, so the alias-precision report keeps this 0.2 and the reader gate's TICKER_HIDE_BELOW
+ * moves on its own. Nothing but the 179 contract test reads it.
+ */
+export const ALIAS_PRECISION_REPORT_LOW_BELOW = 0.2;
 export const RELEVANCE_CHUNK = 100;
 /**
  * Total row cap of the legal-notice id lookup. Measured volume (migration 107
@@ -64,7 +80,7 @@ export function relevanceKey(articleId: string, ticker: string): string {
   return `${articleId}:${ticker}`;
 }
 
-/** A ticker match Jev is confident enough is wrong to hide from the feed. */
+/** A ticker match Jev is confident enough is wrong to hide from the feed (score < TICKER_HIDE_BELOW). */
 export function isHiddenMatch(score: number | undefined): boolean {
   return score !== undefined && score < TICKER_HIDE_BELOW;
 }
@@ -73,8 +89,8 @@ export function isHiddenMatch(score: number | undefined): boolean {
  * Whether a row counts toward attention aggregates: either unscored
  * (fail-open — Jev hasn't reached it yet, or the lookup itself failed) or
  * scored at/above the attention floor. Note this is a *higher* bar than
- * `!isHiddenMatch` — the 0.2–0.5 band is shown in the feed (not hidden)
- * but does not count toward "attention".
+ * `!isHiddenMatch` — the band from TICKER_HIDE_BELOW up to TICKER_ATTENTION_MIN
+ * is shown in the feed (not hidden) but does not count toward "attention".
  */
 export function countsTowardAttention(score: number | undefined): boolean {
   return score === undefined || score >= TICKER_ATTENTION_MIN;
@@ -237,9 +253,9 @@ interface FeedTickerItem {
  * First drop legal/official notices (`isLegalNotice` on title + url) and paid
  * content (`isPaidContentUrl` on url, h148-sources-1: a Dünya /advertorial/ that
  * matched 'garanti bbva' is dropped whatever its relevance score), then
- * drop hidden ticker matches (score < 0.2) from each item's ticker list, then
+ * drop hidden ticker matches (`isHiddenMatch`, score < TICKER_HIDE_BELOW) from each item's ticker list, then
  * drop any item left with zero tickers. Used for /ekonomi's feed —
- * over-fetching upstream (fetchEconFeed requests 1.25x the display limit)
+ * over-fetching upstream (fetchEconFeed requests ECON_FEED_OVERFETCH x the display limit)
  * absorbs the items this drops. The notice check is fail-open: an item
  * without a string title is never dropped by it, and an item without a string
  * url is never dropped by the paid-content check.

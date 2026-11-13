@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 import { BALANCE_MIN_SOURCES } from "../../src/lib/bias/balance";
 import { BIAS_TO_ZONE } from "../../src/lib/bias/config";
-import { WIRE_UNIQUE_HASH_RATIO } from "../../src/lib/clusters/wire";
+import { WIRE_MIN_MEMBERS, WIRE_UNIQUE_HASH_RATIO } from "../../src/lib/clusters/wire";
 
 // Static SQL-contract test for migration 111 ("Kaynak göstergeleri"): a
 // sibling rollup table (cadence, wire-copy count, zone mix), a per-source
@@ -272,13 +272,16 @@ describe("migration 111_source_reliability.sql (SQL contract)", () => {
       );
     });
 
-    it("the wire cluster threshold `>= 3` equals wire.ts's `members.length < 3` guard", () => {
+    // h176-methodtruth-1: wire.ts's guard reads the exported WIRE_MIN_MEMBERS (which /metodoloji
+    // prints) instead of a literal, so the SQL is compared with the constant itself.
+    it("the wire cluster threshold `>= 3` equals wire.ts's WIRE_MIN_MEMBERS, the constant its `members.length <` guard reads", () => {
       const ts = readFileSync(WIRE_TS, "utf8");
-      const tsMin = /members\.length\s*<\s*(\d+)/.exec(ts);
-      expect(tsMin, "wire.ts must keep its `members.length < N` guard").not.toBeNull();
+      expect(ts, "wire.ts must keep its guard on WIRE_MIN_MEMBERS").toContain(
+        "members.length < WIRE_MIN_MEMBERS",
+      );
       const m = /having pg_catalog\.count\(\*\) >= (\d+) and/.exec(body);
       expect(m, "wire CTE minimum member count").not.toBeNull();
-      expect(Number(m![1])).toBe(Number(tsMin![1]));
+      expect(Number(m![1])).toBe(WIRE_MIN_MEMBERS);
     });
 
     it("the unique-hash ratio `<= 0.5` equals WIRE_UNIQUE_HASH_RATIO", () => {

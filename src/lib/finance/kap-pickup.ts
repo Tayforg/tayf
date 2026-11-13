@@ -1,5 +1,6 @@
 import { isVotingKind, normalizeSourceKind, zoneOf } from "@/lib/bias/config";
 import { companyDisplayName } from "@/lib/finance/company-display-name";
+import { TICKER_HIDE_BELOW } from "@/lib/finance/ticker-relevance";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 /**
@@ -35,12 +36,16 @@ export const PICKUP_WINDOW_HOURS = 48;
 const PICKUP_WINDOW_MS = PICKUP_WINDOW_HOURS * 3_600_000;
 
 /**
- * data-3: 15.9% of scored article_tickers rows sampled below 0.2 were all
+ * data-3: 15.9% of scored article_tickers rows sampled below the old 0.2 line were all
  * false matches (political-party-vs-ticker collisions like DEVA). Rows
  * jev_shadow_predictions never scored (no row at all) are kept — this is
  * an automatic *removal* filter, not a positive relevance gate.
+ *
+ * h176-ekonomi-1: this IS the reader lists' hide line (ticker-relevance.ts TICKER_HIDE_BELOW), not a copy of its
+ * number, so the pickup counts, /api/v1/kap/pickup and the v1 docs move with the list (the h72-kap-1 rule that list
+ * and counts share one gate).
  */
-export const TICKER_RELEVANCE_MIN = 0.2;
+export const TICKER_RELEVANCE_MIN = TICKER_HIDE_BELOW;
 
 /**
  * CNN Türk's `published_at` runs ~2.84h into the future (synthetic skew).

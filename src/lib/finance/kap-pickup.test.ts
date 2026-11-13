@@ -19,6 +19,7 @@ import {
   type PickupMention,
   type PickupSource,
 } from "@/lib/finance/kap-pickup";
+import { TICKER_HIDE_BELOW } from "@/lib/finance/ticker-relevance";
 
 const T = new Date("2026-09-01T00:00:00.000Z").getTime();
 const HOUR = 3_600_000;
@@ -575,10 +576,30 @@ describe("dropIrrelevant", () => {
     expect(dropIrrelevant([m], "THYAO", scores)).toEqual([]);
   });
 
-  it("keeps a mention scored exactly 0.2 (the threshold is inclusive)", () => {
+  // h176-ekonomi-1: the pickup counts share the reader lists' hide line (0.35).
+  it("drops a mention scored 0.34 and keeps one scored 0.35", () => {
+    const low = mention({ articleId: "a1" });
+    const edge = mention({ articleId: "a2" });
+    const scores = new Map([
+      ["a1:THYAO", 0.34],
+      ["a2:THYAO", 0.35],
+    ]);
+    expect(dropIrrelevant([low, edge], "THYAO", scores)).toEqual([edge]);
+  });
+
+  it("drops a mention scored the old 0.2 line (it is inside the hidden band now)", () => {
+    const m = mention({ articleId: "a1" });
+    expect(dropIrrelevant([m], "THYAO", new Map([["a1:THYAO", 0.2]]))).toEqual([]);
+  });
+
+  it("keeps a mention scored exactly TICKER_RELEVANCE_MIN (the threshold is inclusive)", () => {
     const m = mention({ articleId: "a1" });
     const scores = new Map([["a1:THYAO", TICKER_RELEVANCE_MIN]]);
     expect(dropIrrelevant([m], "THYAO", scores)).toEqual([m]);
+  });
+
+  it("guard: the pickup gate IS the reader lists' hide line, so list and counts cannot disagree (h72-kap-1)", () => {
+    expect(TICKER_RELEVANCE_MIN).toBe(TICKER_HIDE_BELOW);
   });
 
   it("keeps an unscored mention", () => {

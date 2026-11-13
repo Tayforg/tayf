@@ -42,7 +42,11 @@ import {
 } from "@/lib/clusters/recall-matched-zones";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
 import { SIBLING_VETO } from "@/lib/clusters/sibling-veto";
-import { SAME_DESCRIPTION_MIN_CHARS, WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
+import {
+  SAME_DESCRIPTION_MIN_CHARS,
+  WIRE_MIN_MEMBERS,
+  WIRE_UNIQUE_HASH_RATIO,
+} from "@/lib/clusters/wire";
 import {
   KARNE_MIN_CLUSTERS,
   KARNE_MIN_MULTI_FOR_ZONES,
@@ -50,6 +54,7 @@ import {
   KARNE_WINDOW_DAYS,
 } from "@/lib/sources/karne";
 import { countClassifiedSources } from "@/lib/sources/classification";
+import { WINDOW_OVERFLOW_RECENT_MS } from "@/lib/sources/feed-status";
 import { getSourceMetadata, type Factuality } from "@/lib/sources/factuality";
 import { ENGLISH_ONLY_EMPTY_COLUMN } from "@/lib/sources/source-language";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
@@ -62,6 +67,9 @@ import {
 import { getNeutralizedStatus } from "@/lib/headline/status";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { WRITABLE_SOURCE_BIAS } from "@/lib/validation/source-input";
+// Dependency-free rule modules the ingest function runs on (Deno and Next share them).
+import { AD_CLICK_HOSTS } from "../../../supabase/functions/_shared/rss/ad-link";
+import { PAID_CONTENT_SEGMENTS } from "../../../supabase/functions/_shared/rss/paid-content";
 
 // /metodoloji — Tayf's methodology + trust page. Every number on this page
 // is imported from the same contract modules the pipeline runs on
@@ -95,6 +103,24 @@ const wireRatioPct = Math.round(WIRE_UNIQUE_HASH_RATIO * 100);
 const looseJaccardPct = Math.round(SIBLING_VETO.looseMinJaccard * 100);
 const rareSharePct = (SIBLING_VETO.rareMaxDocShare * 100).toLocaleString("tr-TR");
 
+// h176-methodtruth-1: what Tayf drops before it counts an RSS item as news, quoted from the
+// constants the ingest function runs on. The two lists are read, never retyped:
+// PAID_CONTENT_SEGMENTS (paid-content.ts, isPaidContentUrl: the first or second url path
+// segment, whole) and AD_CLICK_HOSTS (ad-link.ts, isAdClickLink: the host or a subdomain).
+// Both drops happen in normalize.ts (prepareItem), the notice drop (legal-notice.ts,
+// isLegalNotice on title, url and description) in completeItem; a cluster made only of
+// notices is noindex on its page (notice-only-clusters.ts, isNoticeOnlyCluster). The page
+// names three example hosts, the same count as the CHANGELOG entry that quotes them.
+const AD_HOST_EXAMPLE_COUNT = 3;
+const paidContentSections = PAID_CONTENT_SEGMENTS.map((segment) => `/${segment}/`).join(" ya da ");
+const adHostExamples = AD_CLICK_HOSTS.slice(0, AD_HOST_EXAMPLE_COUNT).join(", ");
+
+// h176-methodtruth-1 (migration 212): the cadence value reads "en az ... haber/gün" while the
+// feed window overflowed within WINDOW_OVERFLOW_RECENT_MS (feed-status.ts, isWindowOverflowRecent;
+// the rule itself is feed-window.ts, isWindowOverflow; the wording is reliability.ts,
+// WINDOW_OVERFLOW_NOTE). The CHANGELOG below quotes the window as well as the Yayın sıklığı card.
+const windowOverflowRecentDays = WINDOW_OVERFLOW_RECENT_MS / 86_400_000;
+
 // The empty framing column of an all-English cluster, without its dashes
 // ("— Türkçe kaynaklarla karşılaştırılmadı —"), so the Kaynaklar note quotes the
 // very string the cluster page prints.
@@ -112,7 +138,29 @@ const englishOnlyEmptyColumn = ENGLISH_ONLY_EMPTY_COLUMN.replace(/^—\s*|\s*—
 // withdrawn after it shows) and h138-roadmap2-1 (the same agency lead under a
 // reworded headline is one text; listed above h130's entry, same date). Every
 // number is read from the constant the code runs on.
+//
+// h176-methodtruth-1: 2026-11-11 (#270, ad-click links dropped at ingest), 2026-11-12 (#279,
+// paid url sections dropped) and 2026-11-13 (#292, court and tender notices dropped and
+// notice-only pages noindex, migration 210; #295, the cadence "en az" floor, migration 212;
+// and this page's own definitions of the Kapsama karnesi and the wire card's member floor,
+// copy only). The ad-link entry sits with the two 2026-11-11 ones. Same rule: no typed digit.
 const CHANGELOG = [
+  {
+    date: "2026-11-13",
+    text: "Resmî ilanların ayıklanması genişledi: özeti “İlan-” ile başlayan mahkeme ilanları ve EKAP ihale duyuruları da artık haber olarak kaydedilmiyor; yalnızca bu tür ilanlardan oluşan haber sayfaları arama motorlarına kapalı. Ayrıntı “Habere sayılmayanlar” bölümünde.",
+  },
+  {
+    date: "2026-11-13",
+    text: `Yayın sıklığı: akışı her seferinde yalnızca son haberleri veren ve bu sınırı son ${windowOverflowRecentDays} günde aşan kaynaklarda değer artık “en az … haber/gün” diye gösteriliyor, çünkü bazı haberler Tayf’a ulaşmamıştır; sayının hesabı değişmedi.`,
+  },
+  {
+    date: "2026-11-13",
+    text: `Kapsama karnesinin nasıl hesaplandığı ve “Tek kaynaktan dağıtım” kartındaki en az ${WIRE_MIN_MEMBERS} farklı kaynak koşulu yazıldı; kural değişmedi.`,
+  },
+  {
+    date: "2026-11-12",
+    text: `Ücretli tanıtım içerikleri artık haber olarak kaydedilmiyor: adresinin ilk iki yol bölümünden biri ${paidContentSections} olan içerikler kaynaktan alınırken ayıklanıyor.`,
+  },
   {
     date: "2026-11-11",
     text: `Ajans ağırlıklı rozeti artık aynı ajans özetini paylaşan ama başlığı değiştirilmiş haberleri de tek metin sayıyor (özet en az ${SAME_DESCRIPTION_MIN_CHARS} karakter olmalı); bu kümelerde gösterilen kaynak sayısı da buna göre düşüyor. Oran eşiği (%${wireRatioPct}) değişmedi.`,
@@ -120,6 +168,10 @@ const CHANGELOG = [
   {
     date: "2026-11-11",
     text: `Kör nokta etiketinin, göründükten sonra da ilk ${SIBLING_VETO.scopeHours} saat içinde kaldırılabileceği açıkça yazıldı; kural değişmedi.`,
+  },
+  {
+    date: "2026-11-11",
+    text: `Reklam ve tıklama izleme adreslerine (ör. ${adHostExamples}) giden bağlantılar artık haber olarak kaydedilmiyor.`,
   },
   {
     date: "2026-11-10",
@@ -426,6 +478,48 @@ export default async function MethodologyPage() {
             {`Köşe yazıları ayrı bir kaynak türü sayılmaz: bir yayın kuruluşunun köşe yazısı, kümede o kaynağın haberi gibi yanlılık dağılımına, kör nokta ve denge hesaplarına katılır. Tayf bir yazıyı adresindeki yol bölümünden (ör. /yazarlar/, /kose-yazilari/, /opinion/) köşe yazısı olarak tanır; adresi bu kalıpta olmayan köşe yazıları haber gibi işlem görür. Yalnızca İngilizce yayın yapan kaynakların (ör. Daily Sabah, TRT World) oluşturduğu kümeler Türkçe haberlerle eşleşmediği için bölgeler arasında karşılaştırılmaz: ana sayfada listelenmez ve küme sayfasında boş bir bölge “bu tarafta sessizlik” yerine “${englishOnlyEmptyColumn}” diye gösterilir.`}
           </p>
         </div>
+        {/* h176-methodtruth-1: what is dropped before an RSS item counts as news. The paid
+            sections and the example hosts are PAID_CONTENT_SEGMENTS and AD_CLICK_HOSTS
+            (above), the notice rules are legal-notice.ts's; all three run at ingest
+            (normalize.ts), and notice-only-clusters.ts closes a notice-only cluster page
+            to search engines. Copy only: no rule or threshold changed. */}
+        <div id="habere-sayilmayanlar" className={cardClass + " space-y-3"}>
+          <h3 className="font-serif text-base font-semibold tracking-tight">
+            Habere sayılmayanlar
+          </h3>
+          <p className={proseClass}>
+            Tayf, RSS akışlarındaki her öğeyi haber olarak kaydetmez. Şunlar
+            kaynaktan alınırken ayıklanır:
+          </p>
+          <ul className="divide-y divide-border/30 overflow-hidden rounded-lg ring-1 ring-border/50 bg-muted/20">
+            <li className="px-3 py-2 text-sm text-muted-foreground leading-relaxed">
+              <span className="font-medium text-foreground">Ücretli içerik</span>
+              {" — "}
+              {`Adresinin ilk iki yol bölümünden biri ${paidContentSections} olan içerikler (ücretli tanıtım yazıları ve basın bültenleri) haber olarak kaydedilmez.`}
+            </li>
+            <li className="px-3 py-2 text-sm text-muted-foreground leading-relaxed">
+              <span className="font-medium text-foreground">İlanlar</span>
+              {" — "}
+              Mahkeme, icra ve ihale ilanları (Basın İlan Kurumu resmî
+              ilanları, EKAP ihale duyuruları) haber olarak kaydedilmez;
+              yalnızca bu tür ilanlardan oluşan haber sayfaları arama
+              motorlarına kapalıdır (noindex).
+            </li>
+            <li className="px-3 py-2 text-sm text-muted-foreground leading-relaxed">
+              <span className="font-medium text-foreground">Reklam bağlantıları</span>
+              {" — "}
+              {`Reklam ve tıklama izleme adreslerine giden bağlantılar (ör. ${adHostExamples}; alt alan adları dahil) haber olarak kaydedilmez.`}
+            </li>
+          </ul>
+          <p className={proseClass}>
+            Bu yüzden bir kaynağın Tayf&apos;ta görünen haber sayısı, RSS
+            akışındaki öğe sayısından az olabilir.
+          </p>
+          <p className={noteClass}>
+            Bu kurallar kaynaktan alma sırasında çalışır; kuraldan önce
+            kaydedilmiş benzer içerikler olabilir.
+          </p>
+        </div>
       </section>
 
       <section aria-labelledby="kor-nokta" className="space-y-3">
@@ -637,13 +731,17 @@ export default async function MethodologyPage() {
             değil, tek bir ajans (AA, DHA, İHA gibi) dispeçinin farklı
             kaynaklarca birebir yeniden yayınlanmasıdır.{" "}
             {`Tayf, bir kümedeki haberlerin kaçının birbirinden farklı bir metin taşıdığına bakar: aynı içerik parmak izine (content hash) ya da aynı haber özetine (RSS özeti; büyük/küçük harf, noktalama ve boşluk farkları yok sayılır, en az ${SAME_DESCRIPTION_MIN_CHARS} karakter) sahip haberler tek metin sayılır; bu yüzden başlığını değiştirip ajansın özetini aynen basan haber de kopya sayılır.`}{" "}
-            Benzersiz metin oranı ≤ %{wireRatioPct}
+            {/* h176-methodtruth-1: WIRE_MIN_MEMBERS is wire.ts's floor
+                (detectWireRedistribution answers isWire false below it). Both callers
+                keep one member per source first, so the floor counts distinct sources. */}
+            {`En az ${WIRE_MIN_MEMBERS} farklı kaynaktan haberi olan kümelerde, benzersiz metin oranı ≤ %${wireRatioPct}`}
             {" "}
             ise küme &quot;tek kaynaktan dağıtım&quot; olarak işaretlenir
             (birden fazla farklı metin varsa rozet &quot;Ajans ağırlıklı&quot;
             der) ve gösterilen kaynak sayısı, kopya sayısı yerine benzersiz
             metin sayısına indirilir — böylece &quot;7 kaynak&quot; aslında tek
             bir ajans haberinin 7 kopyası olduğunda bu dürüstçe belirtilir.
+            Daha küçük kümeler işaretlenmez.
           </p>
           <p className={proseClass}>
             Tayf ayrıca aynı başlığı kullanan kaynakları sayar: büyük/küçük
@@ -742,7 +840,7 @@ export default async function MethodologyPage() {
             <div className={ruleCard}>
               <dt className={ruleTerm}>Yayın sıklığı</dt>
               <dd className={ruleDef}>
-                {`Son ${KARNE_WINDOW_DAYS} günde yayımlanan haber sayısının ${KARNE_WINDOW_DAYS}’a bölümü; etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati).`}
+                {`Son ${KARNE_WINDOW_DAYS} günde yayımlanan haber sayısının ${KARNE_WINDOW_DAYS}’a bölümü; etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati). Akışı her seferinde yalnızca son haberleri veren ve bu sınırı son ${windowOverflowRecentDays} günde aşan kaynaklarda değer “en az … haber/gün” diye gösterilir; bazı haberler Tayf’a ulaşmamıştır.`}
               </dd>
             </div>
             <div className={ruleCard}>
@@ -765,6 +863,21 @@ export default async function MethodologyPage() {
                   Denge puanı
                 </a>
                 {` ortalaması. En az ${KARNE_MIN_MULTI_FOR_ZONES} böyle küme gerekir.`}
+              </dd>
+            </div>
+            {/* h176-methodtruth-1: the definition behind the "Nasıl hesaplanıyor?" link of the
+                karne card on a source page (source-karne.tsx). The counts are karne.ts's
+                (KARNE_WINDOW_DAYS, KARNE_MIN_CLUSTERS, KARNE_MIN_MULTI_FOR_ZONES,
+                KARNE_STALE_AFTER_HOURS); the labels and the zone note are the card's own. */}
+            <div id="kapsama-karnesi" className={ruleCard + " sm:col-span-2"}>
+              <dt className={ruleTerm}>Kapsama karnesi</dt>
+              <dd className={ruleDef}>
+                <p>
+                  {`Kaynak sayfasındaki karne, kaynağın son ${KARNE_WINDOW_DAYS} günde en az bir haberinin yer aldığı haber kümelerini sayar; yalnızca Tayf'ın kümelediği (siyaset ve son dakika) haberler girer. “Başka kaynakların da yazdığı haberler”, bu kümelerden başka bir oy veren kaynağın (haber kuruluşu ya da ajans) da yer aldığı kümelerin payıdır; “Tayf'ın başka bir kaynakla eşleştiremediği haberler” kalanların payıdır. “Aynı haberi yazan diğer kaynakların bölgesi” satırları, başka kaynakların yer aldığı kümelerin kaçında İktidar, Bağımsız ve Muhalefet bölgesinden de bir kaynak bulunduğunu gösterir. Bir haber birden çok bölgeden kaynak içerebilir; oranların toplamı %100 değildir. “Kör nokta işaretli haberler”, kaynağın yer aldığı kümelerden kör nokta olarak işaretlenenlerin sayısıdır; karşı taraftan aynı olayı anlatan haber bulunan kümeler bu sayıya dahil değildir.`}
+                </p>
+                <p className="mt-2">
+                  {`Kaynağın en az ${KARNE_MIN_CLUSTERS} haber kümesi yoksa karne yerine “yeterli haber yok” notu gösterilir; bölge dağılımı için en az ${KARNE_MIN_MULTI_FOR_ZONES} çok kaynaklı haber gerekir. Karne günde bir kez yeniden hesaplanır; ${KARNE_STALE_AFTER_HOURS} saatten eski bir hesaplama kaynak sayfasında belirtilir.`}
+                </p>
               </dd>
             </div>
           </dl>

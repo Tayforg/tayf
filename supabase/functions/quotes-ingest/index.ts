@@ -21,7 +21,14 @@
 //
 // Optional {"tickers":["THYAO"],"range":"1y"} overrides the target list.
 
-import { type DailyBar, type IntradayBar, parseDailyBars, parseIntradayBars, yahooChartUrl } from "../_shared/bars.ts";
+import {
+  type DailyBar,
+  freshDailyBars,
+  type IntradayBar,
+  parseDailyBars,
+  parseIntradayBars,
+  yahooChartUrl,
+} from "../_shared/bars.ts";
 import { fetchWithRetry, TAYF_BOT_UA } from "../_shared/kap.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
@@ -216,8 +223,10 @@ export async function runCycle(body: Body): Promise<Stats> {
         const rows = parseDailyBars(t.ticker, await fetchChart(t.ticker, range, "1d"));
         // Same watermark guard as intraday, keyed on the calendar day
         // instead of a timestamp — a ticker with no last_day (never
-        // fetched) keeps the full 1y/1mo warmup, unfiltered.
-        const fresh = t.last_day ? rows.filter((r) => r.day >= t.last_day!) : rows;
+        // fetched) keeps the full 1y/1mo warmup, unfiltered. The last_day
+        // row is re-read (h11-finance-2) but never replaced by Yahoo's flat
+        // volume-0 placeholder (h176-ekonomi-2); see freshDailyBars.
+        const fresh = freshDailyBars(rows, t.last_day ?? null);
         for (const row of fresh) daily.push({ ...row, fetched_at: fetchedAt });
         stats.bars += fresh.length;
       } else {

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import {
+  ALIAS_PRECISION_REPORT_LOW_BELOW,
   aggregateAttention,
   countsTowardAttention,
   fetchLegalNoticeIdsSince,
@@ -23,9 +24,18 @@ import {
 
 describe("ticker-relevance constants", () => {
   it("matches the documented thresholds", () => {
-    expect(TICKER_HIDE_BELOW).toBe(0.2);
+    expect(TICKER_HIDE_BELOW).toBe(0.35);
     expect(TICKER_ATTENTION_MIN).toBe(0.5);
     expect(RELEVANCE_CHUNK).toBe(100);
+  });
+
+  it("keeps the alias-precision report's baked-in line at 0.2, apart from the reader gate (migration 179's SQL is applied)", () => {
+    expect(ALIAS_PRECISION_REPORT_LOW_BELOW).toBe(0.2);
+    expect(ALIAS_PRECISION_REPORT_LOW_BELOW).toBeLessThan(TICKER_HIDE_BELOW);
+  });
+
+  it("keeps the hide line under the attention floor (the 0.35-0.5 band is shown but not counted)", () => {
+    expect(TICKER_HIDE_BELOW).toBeLessThan(TICKER_ATTENTION_MIN);
   });
 });
 
@@ -35,12 +45,26 @@ describe("relevanceKey", () => {
   });
 });
 
+// h176-ekonomi-1: hunt-176 found that since 2026-11-09 the 28 rows Jev scored 0.20-0.35 were all alias
+// matches, about 20 of them false by title (a basketball game, an art show, a singer named Berdan).
+// The hide line is TICKER_HIDE_BELOW = 0.35, strict '<'.
 describe("isHiddenMatch boundaries", () => {
   it("hides just below 0.2", () => {
     expect(isHiddenMatch(0.199)).toBe(true);
   });
-  it("shows exactly at 0.2", () => {
-    expect(isHiddenMatch(0.2)).toBe(false);
+  it("hides exactly at 0.2 (the old line: the 0.20-0.35 band is no longer shown)", () => {
+    expect(isHiddenMatch(0.2)).toBe(true);
+  });
+  it("hides just below 0.35", () => {
+    expect(isHiddenMatch(0.349)).toBe(true);
+  });
+  it("shows exactly at 0.35 (strict '<')", () => {
+    expect(isHiddenMatch(0.35)).toBe(false);
+  });
+  it("shows well above the line, including the attention floor", () => {
+    expect(isHiddenMatch(0.36)).toBe(false);
+    expect(isHiddenMatch(0.5)).toBe(false);
+    expect(isHiddenMatch(1)).toBe(false);
   });
   it("shows when the score is undefined (fail-open)", () => {
     expect(isHiddenMatch(undefined)).toBe(false);
@@ -75,6 +99,39 @@ describe("filterFeedTickers", () => {
       { id: "a1", tickers: ["THYAO"] },
       { id: "a3", tickers: ["ASELS"] },
     ]);
+  });
+
+  // h176-ekonomi-1: the Karar 'COP31 sponsorları kimler' row carried an LMKDC chip scored 0.29.
+  it("drops a ticker scored 0.29 and the item left with no ticker (the Karar COP31 / LMKDC row)", () => {
+    const items = [
+      { id: "k1", title: "COP31 sponsorları kimler, hangi şirketler yer alıyor", url: "https://www.karar.com/ekonomi/cop31", tickers: ["LMKDC"] },
+      { id: "k2", title: "3 SENARYO MASADA", url: "https://x/3-senaryo", tickers: ["ISMEN", "TAC"] },
+    ];
+    const scores = new Map<string, number>([
+      ["k1:LMKDC", 0.29],
+      ["k2:ISMEN", 0.9],
+      ["k2:TAC", 0.31],
+    ]);
+    expect(filterFeedTickers(items, scores)).toEqual([
+      { id: "k2", title: "3 SENARYO MASADA", url: "https://x/3-senaryo", tickers: ["ISMEN"] },
+    ]);
+  });
+
+  it("keeps a ticker scored exactly 0.35, and drops one scored 0.349", () => {
+    const items = [
+      { id: "b1", tickers: ["AAAAA"] },
+      { id: "b2", tickers: ["BBBBB"] },
+    ];
+    const scores = new Map<string, number>([
+      ["b1:AAAAA", 0.35],
+      ["b2:BBBBB", 0.349],
+    ]);
+    expect(filterFeedTickers(items, scores)).toEqual([{ id: "b1", tickers: ["AAAAA"] }]);
+  });
+
+  it("an unscored ticker is still shown (fail-open is unchanged)", () => {
+    const items = [{ id: "u1", tickers: ["UNSCO"] }];
+    expect(filterFeedTickers(items, new Map())).toEqual(items);
   });
 });
 

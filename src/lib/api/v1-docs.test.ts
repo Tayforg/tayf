@@ -9,8 +9,8 @@ import { TICKER_RELEVANCE_MIN } from "@/lib/finance/kap-pickup";
 import { API_PLANS, V1_COMMON_NOTES_TR, V1_ENDPOINTS } from "./v1-docs";
 
 // h27/h29: the developer page and the OpenAPI document are Turkish copy, and
-// Turkish writes a decimal with a comma ("0,2", not "0.2"). The kap pickup note
-// printed the ticker_relevance cut-off as "0.2". The Turkish text now derives
+// Turkish writes a decimal with a comma ("0,35", not "0.35"). The kap pickup note
+// printed the ticker_relevance cut-off with an ASCII point. The Turkish text now derives
 // the number from TICKER_RELEVANCE_MIN through Intl.NumberFormat("tr-TR"); the
 // English text and the JSON field values keep the ASCII point.
 
@@ -65,13 +65,15 @@ describe("kap pickup relevance note (Turkish decimal)", () => {
   it("writes the cut-off with a decimal comma", () => {
     const note = pickup!.notesTr.find((n) => n.startsWith("relevance_filter:"));
     expect(note).toBeDefined();
-    expect(note).toContain("0,2 altında");
-    expect(note).not.toContain("0.2");
+    expect(note).toContain("0,35 altında");
+    expect(note).not.toContain("0.35");
+    expect(note).not.toContain("0,2 altında");
   });
 
   it("derives the number from TICKER_RELEVANCE_MIN, so the constant and the copy cannot drift", () => {
     const note = pickup!.notesTr.find((n) => n.startsWith("relevance_filter:"))!;
-    expect(TICKER_RELEVANCE_MIN).toBe(0.2);
+    expect(TICKER_RELEVANCE_MIN).toBe(0.35);
+    expect(note).toContain("modelinin 0,35 altında puanladığı");
     expect(note).toContain(`modelinin ${trNumber.format(TICKER_RELEVANCE_MIN)} altında puanladığı`);
   });
 

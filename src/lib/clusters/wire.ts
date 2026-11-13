@@ -30,6 +30,19 @@
  */
 export const WIRE_UNIQUE_HASH_RATIO = 0.5;
 
+/**
+ * The smallest cluster that can be a wire redistribution. Below this many members
+ * `detectWireRedistribution` answers `isWire: false`: 2 articles with the same
+ * hash are more likely one outlet's double publish than a wire reprint, and the
+ * same-source dedupe pass has already handled that case. The floor is counted
+ * after the one-per-source dedupe (politics-query dedupedMembers, timeline-query
+ * dedupeEarliestPerSource), so it counts distinct sources, not articles.
+ * /metodoloji's "Tek kaynaktan dağıtım" card prints this number
+ * (h176-methodtruth-1), so it is exported rather than written as a literal in the
+ * function.
+ */
+export const WIRE_MIN_MEMBERS = 3;
+
 export interface WireDetectionResult {
   isWire: boolean;
   /**
@@ -159,15 +172,15 @@ export function textComponentsOf(
  * or same agency lead, chained; see there for the null-hash and short-
  * description rules).
  *
- * Clusters with fewer than 3 members are never marked wire: 2 articles
- * with the same hash is more likely a same-source double-publish than a
- * wire redistribution and is already handled by the same-source dedupe
+ * Clusters with fewer than WIRE_MIN_MEMBERS (3) members are never marked wire:
+ * 2 articles with the same hash is more likely a same-source double-publish
+ * than a wire redistribution and is already handled by the same-source dedupe
  * pass above.
  */
 export function detectWireRedistribution(
   members: Array<{ id: string; content_hash: string | null; description?: string | null }>
 ): WireDetectionResult {
-  if (members.length < 3) {
+  if (members.length < WIRE_MIN_MEMBERS) {
     return { isWire: false, uniqueHashes: members.length };
   }
   const uniqueHashes = new Set(textComponentsOf(members)).size;

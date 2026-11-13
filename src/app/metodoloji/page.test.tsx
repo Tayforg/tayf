@@ -59,7 +59,12 @@ import {
   BALANCE_ONE_SIDED_MAX,
   BALANCE_TWO_ZONE_MIN_SHARE,
 } from "@/lib/bias/balance";
-import { SAME_DESCRIPTION_MIN_CHARS, WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
+import {
+  detectWireRedistribution,
+  SAME_DESCRIPTION_MIN_CHARS,
+  WIRE_MIN_MEMBERS,
+  WIRE_UNIQUE_HASH_RATIO,
+} from "@/lib/clusters/wire";
 import { BLINDSPOT_LIST_FILTERS } from "@/lib/clusters/blindspot-feed";
 import {
   BLINDSPOT_LIST_LOOKBACK_DAYS,
@@ -83,11 +88,28 @@ import {
   NEAR_BLINDSPOT_MIN_SHARE,
 } from "@/lib/clusters/near-blindspot-rule";
 import {
+  buildKarneView,
+  karneFreshness,
   KARNE_MIN_CLUSTERS,
   KARNE_MIN_MULTI_FOR_ZONES,
   KARNE_STALE_AFTER_HOURS,
   KARNE_WINDOW_DAYS,
+  toSourceKarne,
 } from "@/lib/sources/karne";
+import { WINDOW_OVERFLOW_RECENT_MS } from "@/lib/sources/feed-status";
+import {
+  buildReliabilityView,
+  toSourceReliability,
+  WINDOW_OVERFLOW_NOTE,
+} from "@/lib/sources/reliability";
+import { SourceKarneCard } from "@/components/source/source-karne";
+import { isNoticeOnlyCluster } from "@/lib/seo/notice-only-clusters";
+import { AD_CLICK_HOSTS, isAdClickLink } from "../../../supabase/functions/_shared/rss/ad-link";
+import { isLegalNotice } from "../../../supabase/functions/_shared/rss/legal-notice";
+import {
+  isPaidContentUrl,
+  PAID_CONTENT_SEGMENTS,
+} from "../../../supabase/functions/_shared/rss/paid-content";
 import { countClassifiedSources } from "@/lib/sources/classification";
 import { getSourceMetadata, type SourceFactualityMetadata } from "@/lib/sources/factuality";
 import { OPINION_PATH_SEGMENTS } from "@/lib/articles/opinion-url";
@@ -176,6 +198,21 @@ function collectStringProps(node: unknown, out: string[] = []): string[] {
   }
   return out;
 }
+
+// h176-methodtruth-1: the CHANGELOG entries of 2026-11-11 to 2026-11-13, written from the
+// constants the code runs on (never typed): the paid url sections (paid-content.ts), the
+// ad-click hosts (ad-link.ts), the feed-window overflow window (feed-status.ts) and the
+// wire floor (wire.ts). The page and these pins both read the same constants.
+const DAY_MS = 86_400_000;
+const PAID_SECTIONS = PAID_CONTENT_SEGMENTS.map((segment) => `/${segment}/`).join(" ya da ");
+const AD_HOST_EXAMPLES = AD_CLICK_HOSTS.slice(0, 3).join(", ");
+const OVERFLOW_DAYS = WINDOW_OVERFLOW_RECENT_MS / DAY_MS;
+const NOTICES_ENTRY =
+  "Resmî ilanların ayıklanması genişledi: özeti “İlan-” ile başlayan mahkeme ilanları ve EKAP ihale duyuruları da artık haber olarak kaydedilmiyor; yalnızca bu tür ilanlardan oluşan haber sayfaları arama motorlarına kapalı. Ayrıntı “Habere sayılmayanlar” bölümünde.";
+const CADENCE_ENTRY = `Yayın sıklığı: akışı her seferinde yalnızca son haberleri veren ve bu sınırı son ${OVERFLOW_DAYS} günde aşan kaynaklarda değer artık “en az … haber/gün” diye gösteriliyor, çünkü bazı haberler Tayf’a ulaşmamıştır; sayının hesabı değişmedi.`;
+const COPY_ENTRY = `Kapsama karnesinin nasıl hesaplandığı ve “Tek kaynaktan dağıtım” kartındaki en az ${WIRE_MIN_MEMBERS} farklı kaynak koşulu yazıldı; kural değişmedi.`;
+const PAID_ENTRY = `Ücretli tanıtım içerikleri artık haber olarak kaydedilmiyor: adresinin ilk iki yol bölümünden biri ${PAID_SECTIONS} olan içerikler kaynaktan alınırken ayıklanıyor.`;
+const AD_ENTRY = `Reklam ve tıklama izleme adreslerine (ör. ${AD_HOST_EXAMPLES}) giden bağlantılar artık haber olarak kaydedilmiyor.`;
 
 describe("/metodoloji page", () => {
   beforeEach(() => {
@@ -332,8 +369,8 @@ describe("/metodoloji page", () => {
 
   // h120-methodology-1: the footer is pinned to the FIRST rendered entry, never to a
   // literal of an older entry, so the next CHANGELOG line cannot leave a stale pin
-  // behind. The date below is the newest entry's (h130-blindspots-2: 2026-11-11).
-  it("lists the 2026-11-11 CHANGELOG entry first and the footer reads the first rendered entry's date (h120-methodology-1, h130-blindspots-2)", async () => {
+  // behind. The date below is the newest entry's (h176-methodtruth-1: 2026-11-13).
+  it("lists the 2026-11-13 CHANGELOG entry first and the footer reads the first rendered entry's date (h120-methodology-1, h176-methodtruth-1)", async () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
@@ -342,13 +379,19 @@ describe("/metodoloji page", () => {
     const entryDates = tail.match(/\d{4}-\d{2}-\d{2}/g)?.slice(1) ?? [];
     // The footer is the first rendered entry's date, and that is the newest.
     expect(footer).toBe(entryDates[0]);
-    expect(footer).toBe("2026-11-11");
+    expect(footer).toBe("2026-11-13");
     expect(tail.startsWith(`Son güncelleme: ${entryDates[0]}`)).toBe(true);
     // The first list item: its date directly precedes its text, and it comes
-    // before the 2026-11-10, 2026-11-09, 2026-11-08 and 2026-11-07 entries.
-    const first = tail.indexOf(`${entryDates[0]} Kör nokta etiketinin, göründükten sonra da`);
+    // before the 2026-11-12, -11, -10, -09, -08 and -07 entries.
+    const first = tail.indexOf(`${entryDates[0]} ${NOTICES_ENTRY}`);
     expect(first).toBeGreaterThan(0);
-    expect(first).toBeLessThan(tail.indexOf("2026-11-10 Kör nokta ifadesi:"));
+    expect(first).toBeLessThan(tail.indexOf("2026-11-12 Ücretli tanıtım içerikleri"));
+    expect(tail.indexOf("2026-11-12 Ücretli tanıtım içerikleri")).toBeLessThan(
+      tail.indexOf("2026-11-11 Ajans ağırlıklı rozeti"),
+    );
+    expect(tail.indexOf("2026-11-11 Ajans ağırlıklı rozeti")).toBeLessThan(
+      tail.indexOf("2026-11-10 Kör nokta ifadesi:"),
+    );
     expect(tail.indexOf("2026-11-10 Kör nokta ifadesi:")).toBeLessThan(
       tail.indexOf("2026-11-09 Kaynak göstergeleri:"),
     );
@@ -364,13 +407,20 @@ describe("/metodoloji page", () => {
   });
 
   // h120-methodology-1 (b): the date order of the whole list, newest first.
-  it("renders the CHANGELOG dates newest first: 2026-11-11 (twice: h138-roadmap2-1, h130-blindspots-2), -10, -09, -08, -07, -06, ... (h120-methodology-1)", async () => {
+  // h176-methodtruth-1: three 2026-11-13 entries, one 2026-11-12, and the ad-link entry
+  // joins the two 2026-11-11 ones (h138-roadmap2-1, h130-blindspots-2).
+  it("renders the CHANGELOG dates newest first: 2026-11-13 (three), -12, -11 (three), -10, -09, -08, -07, -06, ... (h120-methodology-1, h176-methodtruth-1)", async () => {
     const { default: MethodologyPage } = await import("./page");
     const text = collectText(await MethodologyPage()).join("");
 
     const tail = text.slice(text.indexOf("Son güncelleme:"));
     const entryDates = (tail.match(/\d{4}-\d{2}-\d{2}/g) ?? []).slice(1);
-    expect(entryDates.slice(0, 9)).toEqual([
+    expect(entryDates.slice(0, 15)).toEqual([
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-12",
+      "2026-11-11",
       "2026-11-11",
       "2026-11-11",
       "2026-11-10",
@@ -380,6 +430,7 @@ describe("/metodoloji page", () => {
       "2026-11-06",
       "2026-11-05",
       "2026-11-02",
+      "2026-11-01",
     ]);
     // Newest first all the way down: the list is already in descending order.
     expect(entryDates).toEqual([...entryDates].sort().reverse());
@@ -439,13 +490,13 @@ describe("/metodoloji page", () => {
       expect(entry).toContain("kartta ve haber sayfasında yine görünebilir");
     });
 
-    it("quotes no typed digit: every number in the five entries comes from a constant (both 2026-11-11 ones included, h130-blindspots-2, h138-roadmap2-1)", () => {
+    it("quotes no typed digit: every number in the ten entries from 2026-11-08 up comes from a constant (the three 2026-11-13, the 2026-11-12 and the three 2026-11-11 ones included, h176-methodtruth-1, h130-blindspots-2, h138-roadmap2-1)", () => {
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(join(here, "page.tsx"), "utf8");
-      // The CHANGELOG array, from its opening to the first entry older than these five.
+      // The CHANGELOG array, from its opening to the first entry older than these ten.
       const block = source.slice(source.indexOf("const CHANGELOG = ["), source.indexOf('date: "2026-11-07"'));
       const entries = block.split(/\n\s*\{\n/).filter((piece) => piece.includes("text:"));
-      expect(entries).toHaveLength(5);
+      expect(entries).toHaveLength(10);
       for (const entry of entries) {
         const text = entry.slice(entry.indexOf("text:")).replace(/\$\{[^}]*\}/g, "#");
         expect(text).not.toMatch(/\d/);
@@ -483,11 +534,17 @@ describe("/metodoloji page", () => {
     // The entry's date directly precedes its text.
     expect(tail).toContain(`2026-11-01 ${entry}`);
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer (the newest entry's date), then the two 2026-11-11 entries
-    // (h138-roadmap2-1, h130-blindspots-2), the 2026-11-10, -09 and -08 entries
+    // footer (the newest entry's date), then the three 2026-11-13 entries, the 2026-11-12
+    // one and the three 2026-11-11 ones (h176-methodtruth-1; h138-roadmap2-1 and
+    // h130-blindspots-2 among them), the 2026-11-10, -09 and -08 entries
     // (h120-methodology-1), the 2026-11-07, 2026-11-06 (h62-methodology-2),
     // 2026-11-05 and 2026-11-02 (h62-methodology-1) entries, then this one.
-    expect(dates.slice(0, 11)).toEqual([
+    expect(dates.slice(0, 16)).toEqual([
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-12",
       "2026-11-11",
       "2026-11-11",
       "2026-11-11",
@@ -1136,7 +1193,10 @@ describe("/metodoloji page: Kaynak göstergeleri", () => {
     );
     // The section itself sits between Güvenilirlik and Başlıklar.
     expect(ids.indexOf("kaynak-gostergeleri")).toBe(ids.indexOf("guvenilirlik") + 1);
-    expect(ids.indexOf("basliklar")).toBe(ids.indexOf("kaynak-gostergeleri") + 1);
+    // h176-methodtruth-1: the Kapsama karnesi item (id=kapsama-karnesi) is the last thing in
+    // the section, so it is the one id between the section heading and Başlıklar.
+    expect(ids.indexOf("kapsama-karnesi")).toBe(ids.indexOf("kaynak-gostergeleri") + 1);
+    expect(ids.indexOf("basliklar")).toBe(ids.indexOf("kapsama-karnesi") + 1);
     expect(collectText(tree)).toContain("Kaynak göstergeleri");
   });
 
@@ -1245,13 +1305,19 @@ describe("/metodoloji page: changelog order", () => {
     expect(denge).toBeGreaterThan(sources);
 
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    // footer, then the two 2026-11-11 entries (h138-roadmap2-1, h130-blindspots-2),
+    // footer, then the three 2026-11-13 entries, the 2026-11-12 one and the three
+    // 2026-11-11 ones (h176-methodtruth-1; h138-roadmap2-1, h130-blindspots-2),
     // the 2026-11-10, -09 and -08 entries (h120-methodology-1), the
     // 2026-11-07 balance/English entry, the 2026-11-06 column
     // entry, the 2026-11-05 feed-delay entry, the 2026-11-02 unclustered-arm
     // entry (148), the 2026-11-01 sibling-veto entry (126), then the three
     // 2026-10-22 entries
-    expect(dates.slice(0, 14)).toEqual([
+    expect(dates.slice(0, 19)).toEqual([
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-13",
+      "2026-11-12",
       "2026-11-11",
       "2026-11-11",
       "2026-11-11",
@@ -1713,19 +1779,22 @@ describe("/metodoloji page: a public claim can be withdrawn after the wait (h130
     expect(text).not.toContain("geri alınmaz");
   });
 
-  it("the h130-blindspots-2 entry is dated 2026-11-11 (the footer date, under the h138-roadmap2-1 entry of the same day) and says the rule did not change", async () => {
+  it("the h130-blindspots-2 entry is dated 2026-11-11 (under the h138-roadmap2-1 entry of the same day, above the 2026-11-10 ones) and says the rule did not change", async () => {
     const text = await pageText();
     const entry = `Kör nokta etiketinin, göründükten sonra da ilk ${SIBLING_VETO.scopeHours} saat içinde kaldırılabileceği açıkça yazıldı; kural değişmedi.`;
 
     const tail = text.slice(text.indexOf("Son güncelleme:"));
-    expect(tail.startsWith("Son güncelleme: 2026-11-11")).toBe(true);
     // Its date directly precedes its text; the h138-roadmap2-1 entry of the same day sits above it.
     expect(tail).toContain(`2026-11-11 ${entry}`);
+    expect(tail.indexOf("2026-11-11 Ajans ağırlıklı rozeti")).toBeLessThan(
+      tail.indexOf(`2026-11-11 ${entry}`),
+    );
     expect(tail.indexOf(`2026-11-11 ${entry}`)).toBeLessThan(
       tail.indexOf("2026-11-10 Kör nokta ifadesi:"),
     );
     const entryDates = tail.match(/\d{4}-\d{2}-\d{2}/g)?.slice(1) ?? [];
-    expect(entryDates[0]).toBe("2026-11-11");
+    // h176-methodtruth-1: the 2026-11-13 and -12 entries sit above the 2026-11-11 ones.
+    expect(entryDates[0]).toBe("2026-11-13");
     expect(entryDates).toEqual([...entryDates].sort().reverse());
   });
 });
@@ -1756,7 +1825,7 @@ describe("/metodoloji page: same agency lead is one text (h138-roadmap2-1)", () 
     );
     expect(card).toContain("başlığını değiştirip ajansın özetini aynen basan haber de kopya sayılır");
     // The ratio keeps its published value, and the badge the page now names is the one on the cards.
-    expect(card).toContain(`Benzersiz metin oranı ≤ %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)}`);
+    expect(card).toContain(`benzersiz metin oranı ≤ %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)}`);
     expect(card).toContain("Ajans ağırlıklı");
     expect(card).toContain("benzersiz metin sayısına indirilir");
     // The headline paragraph keeps its own meaning: the independent-headline count is untouched.
@@ -1770,20 +1839,423 @@ describe("/metodoloji page: same agency lead is one text (h138-roadmap2-1)", () 
     expect(text).not.toContain("benzersiz dispeç sayısına indirilir");
   });
 
-  it("CHANGELOG[0] is the 2026-11-11 entry that logs it, above the h130-blindspots-2 entry of the same day", async () => {
+  it("the 2026-11-11 entry that logs it stays the first of that day, above the h130-blindspots-2 entry (h176-methodtruth-1: the 2026-11-13 and -12 entries now sit above both)", async () => {
     const text = await pageText();
     const tail = text.slice(text.indexOf("Son güncelleme:"));
 
-    expect(tail.startsWith("Son güncelleme: 2026-11-11")).toBe(true);
     const entry = `${ENTRY_CORE} (özet en az ${SAME_DESCRIPTION_MIN_CHARS} karakter olmalı); bu kümelerde gösterilen kaynak sayısı da buna göre düşüyor. Oran eşiği (%${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)}) değişmedi.`;
-    // The footer date is directly followed by the first entry's own date and text.
-    expect(tail.startsWith(`Son güncelleme: 2026-11-112026-11-11 ${entry}`)).toBe(true);
+    // Its date directly precedes its text, after the 2026-11-12 entry.
+    expect(tail).toContain(`2026-11-11 ${entry}`);
+    expect(tail.indexOf("2026-11-12 Ücretli tanıtım içerikleri")).toBeLessThan(
+      tail.indexOf(`2026-11-11 ${entry}`),
+    );
     expect(tail.indexOf(`2026-11-11 ${entry}`)).toBeLessThan(
       tail.indexOf("2026-11-11 Kör nokta etiketinin, göründükten sonra da"),
     );
     // It says the ratio did not move, so it is not a rule change of the threshold.
     expect(entry).toContain("Oran eşiği");
     expect(entry).toContain("değişmedi");
+  });
+});
+
+// h176-methodtruth-1: /metodoloji lagged the rule changes of 2026-11-11 to 2026-11-13. It now
+// says what is dropped before it counts as news (paid-content.ts, ad-link.ts, legal-notice.ts,
+// notice-only-clusters.ts), the cadence floor (reliability.ts, feed-window.ts, feed-status.ts),
+// the Kapsama karnesi (karne.ts) and the wire card's member floor (wire.ts). Every number below
+// is read from the constant the code runs on, and each statement is also run against the
+// function it describes, so the copy cannot drift from the code unnoticed.
+describe("/metodoloji page: what Tayf does not count as news (h176-methodtruth-1)", () => {
+  async function renderTree() {
+    const { default: MethodologyPage } = await import("./page");
+    return MethodologyPage();
+  }
+  const byId = (tree: unknown, id: string) => findElement(tree, (el) => el.props?.id === id);
+  const sectionOf = (tree: unknown, id: string) =>
+    findElement(tree, (el) => el.type === "section" && el.props?.["aria-labelledby"] === id);
+  const textOfEl = (el: unknown) => collectText(el).join("");
+
+  describe("the Habere sayılmayanlar card", () => {
+    it("is a card with id=habere-sayilmayanlar, the last child of the #kaynaklar section, after the category card", async () => {
+      const tree = await renderTree();
+      const section = sectionOf(tree, "kaynaklar");
+      expect(section).not.toBeNull();
+      expect(collectIds(section)).toContain("habere-sayilmayanlar");
+      const children = section?.props?.children as unknown[];
+      const last = children[children.length - 1] as Node;
+      expect(last.props?.id).toBe("habere-sayilmayanlar");
+      // The category table card is above it, not replaced by it.
+      expect(collectIds(section).indexOf("habere-sayilmayanlar")).toBeGreaterThan(
+        collectIds(section).indexOf("kaynaklar"),
+      );
+      expect(textOfEl(last).startsWith("Habere sayılmayanlar")).toBe(true);
+    });
+
+    it("names every PAID_CONTENT_SEGMENTS value (imported, not retyped), the first AD_CLICK_HOSTS, 'ilan' and the search-engine closure", async () => {
+      const card = textOfEl(byId(await renderTree(), "habere-sayilmayanlar"));
+
+      expect(PAID_CONTENT_SEGMENTS.length).toBeGreaterThan(0);
+      for (const segment of PAID_CONTENT_SEGMENTS) expect(card).toContain(segment);
+      expect(card).toContain(PAID_SECTIONS);
+      expect(card).toContain("doubleclick.net");
+      expect(AD_CLICK_HOSTS[0]).toBe("doubleclick.net");
+      for (const host of AD_CLICK_HOSTS.slice(0, 3)) expect(card).toContain(host);
+      expect(card).toContain("ilan");
+      expect(card.includes("noindex") || card.includes("arama motorlarına kapalı")).toBe(true);
+    });
+
+    it("states the four rules in plain Turkish, the paid sections and the example hosts from the constants", async () => {
+      const card = textOfEl(byId(await renderTree(), "habere-sayilmayanlar"));
+
+      expect(card).toContain(
+        `Adresinin ilk iki yol bölümünden biri ${PAID_SECTIONS} olan içerikler (ücretli tanıtım yazıları ve basın bültenleri) haber olarak kaydedilmez.`,
+      );
+      expect(card).toContain(
+        "Mahkeme, icra ve ihale ilanları (Basın İlan Kurumu resmî ilanları, EKAP ihale duyuruları) haber olarak kaydedilmez; yalnızca bu tür ilanlardan oluşan haber sayfaları arama motorlarına kapalıdır (noindex).",
+      );
+      expect(card).toContain(
+        `Reklam ve tıklama izleme adreslerine giden bağlantılar (ör. ${AD_HOST_EXAMPLES}; alt alan adları dahil) haber olarak kaydedilmez.`,
+      );
+      expect(card).toContain(
+        "Bu yüzden bir kaynağın Tayf'ta görünen haber sayısı, RSS akışındaki öğe sayısından az olabilir.",
+      );
+      // The rules run when an item is taken from the feed: an older stored item can still exist.
+      expect(card).toContain(
+        "Bu kurallar kaynaktan alma sırasında çalışır; kuraldan önce kaydedilmiş benzer içerikler olabilir.",
+      );
+    });
+
+    it("the paid-content sentence is true of isPaidContentUrl: the first or the second path segment, whole, not the third", () => {
+      for (const segment of PAID_CONTENT_SEGMENTS) {
+        expect(isPaidContentUrl(`https://example.com/${segment}/yazi-1`)).toBe(true);
+        expect(isPaidContentUrl(`https://example.com/tr/${segment}/yazi-1`)).toBe(true);
+        expect(isPaidContentUrl(`https://example.com/a/b/${segment}/yazi-1`)).toBe(false);
+        expect(isPaidContentUrl(`https://example.com/haber/${segment}-ajansi-kuruldu-1`)).toBe(false);
+      }
+    });
+
+    it("the ad-link sentence is true of isAdClickLink: each example host and its subdomains, not a lookalike", () => {
+      for (const host of AD_CLICK_HOSTS.slice(0, 3)) {
+        expect(isAdClickLink(`https://${host}/clk?id=1`)).toBe(true);
+        expect(isAdClickLink(`https://pubads.g.${host}/gampad/clk?id=1`)).toBe(true);
+        expect(isAdClickLink(`https://not${host}/clk?id=1`)).toBe(false);
+        expect(isAdClickLink(`https://${host}.example.com/clk?id=1`)).toBe(false);
+      }
+    });
+
+    it("the notice sentence is true of isLegalNotice and isNoticeOnlyCluster: court, icra and EKAP notices drop; real news and a mixed cluster do not", () => {
+      type Member = { title: string; url: string; description?: string | null };
+      const court: Member = { title: "T.C. SAMSUN 2. SULH HUKUK MAHKEMESİNDEN", url: "https://example.com/a/1" };
+      const icra: Member = { title: "BAKIRKÖY GAYRİMENKUL SATIŞ İCRA DAİRESİ", url: "https://example.com/a/2" };
+      const tender: Member = {
+        title: "ÜMRANİYE BELEDİYE BAŞKANLIĞI",
+        url: "https://example.com/a/3",
+        description: "4734 sayılı Kamu İhale Kanunu'nun 21/b maddesi gereği ihale edilecektir.",
+      };
+      const news: Member = { title: "Anayasa Mahkemesi CHP'nin başvurusunu reddetti", url: "https://example.com/a/4" };
+      // The 2026-11-13 widening (migration 210): a notice under a mixed-case title that only its
+      // summary marks ("İlan-"). Title and url alone do not drop it, the summary does.
+      const dashed: Member = {
+        title: "Kırıkhan Asliye Ceza Mahkemesi ilanı",
+        url: "https://example.com/a/5",
+        description: "İlan-T.C. Kırıkhan 2. Asliye Ceza Mahkemesi 2024/1 Esas sayılı dosya",
+      };
+
+      for (const notice of [court, icra, tender]) {
+        expect(isLegalNotice(notice.title, notice.url, notice.description)).toBe(true);
+      }
+      expect(isLegalNotice(news.title, news.url)).toBe(false);
+      // The tender law alone, under a mixed-case title, is real news and is not dropped.
+      expect(isLegalNotice(news.title, news.url, tender.description)).toBe(false);
+
+      expect(isLegalNotice(dashed.title, dashed.url)).toBe(false);
+      expect(isLegalNotice(dashed.title, dashed.url, dashed.description)).toBe(true);
+
+      expect(isNoticeOnlyCluster([court, tender, dashed])).toBe(true);
+      expect(isNoticeOnlyCluster([court, news])).toBe(false);
+      expect(isNoticeOnlyCluster([])).toBe(false);
+    });
+  });
+
+  describe("the Yayın sıklığı definition", () => {
+    const FLOOR_SENTENCE = `Akışı her seferinde yalnızca son haberleri veren ve bu sınırı son ${OVERFLOW_DAYS} günde aşan kaynaklarda değer “en az … haber/gün” diye gösterilir; bazı haberler Tayf’a ulaşmamıştır.`;
+
+    async function cadenceDd(): Promise<string> {
+      const dd = findElement(
+        await renderTree(),
+        (el) =>
+          el.type === "dd" &&
+          textOfEl(el).startsWith(`Son ${KARNE_WINDOW_DAYS} günde yayımlanan haber sayısının`),
+      );
+      expect(dd).not.toBeNull();
+      return textOfEl(dd);
+    }
+
+    it("contains 'en az' as the cadence floor, with the overflow window read from WINDOW_OVERFLOW_RECENT_MS", async () => {
+      const dd = await cadenceDd();
+
+      expect(OVERFLOW_DAYS).toBe(7);
+      expect(dd).toContain("en az");
+      expect(dd).toContain(FLOOR_SENTENCE);
+      // The existing definition is kept, the floor comes after it.
+      expect(dd).toContain(
+        `Son ${KARNE_WINDOW_DAYS} günde yayımlanan haber sayısının ${KARNE_WINDOW_DAYS}’a bölümü; etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati).`,
+      );
+      expect(dd.indexOf("Türkiye saati")).toBeLessThan(dd.indexOf("“en az … haber/gün”"));
+    });
+
+    it("says what WINDOW_OVERFLOW_NOTE (the note the source page prints) says: the feed shows only its newest items, in the last OVERFLOW_DAYS days", async () => {
+      const dd = await cadenceDd();
+
+      for (const phrase of [
+        "her seferinde yalnızca son haberleri",
+        `son ${OVERFLOW_DAYS} günde`,
+      ]) {
+        expect(WINDOW_OVERFLOW_NOTE).toContain(phrase);
+        expect(dd).toContain(phrase);
+      }
+    });
+
+    it("is true of buildReliabilityView: 'en az <rate> haber/gün' only when the feed window overflowed recently", () => {
+      const rel = toSourceReliability({
+        source_id: "9236e05a-56d9-47b0-a378-02ec8e880180",
+        window_days: KARNE_WINDOW_DAYS,
+        window_start: "2026-08-29T21:00:00Z",
+        window_end: "2026-09-28T21:00:00Z",
+        n_articles: 600,
+        active_days: 30,
+        n_clusters: 100,
+        n_wire_copy: 12,
+        zone_mix: [
+          [2, 2, 1, 10],
+          [0, 5, 0, 5],
+        ],
+        computed_at: "2026-09-29T00:00:00Z",
+      });
+      expect(rel).not.toBeNull();
+      const valueOf = (recent: boolean) =>
+        buildReliabilityView(rel!, null, { windowOverflowRecent: recent }).find((r) => r.key === "cadence")?.value;
+
+      expect(valueOf(true)?.startsWith("en az ")).toBe(true);
+      expect(valueOf(true)).toContain(" haber/gün");
+      expect(valueOf(false)?.startsWith("en az ")).toBe(false);
+    });
+  });
+
+  describe("the Kapsama karnesi definition", () => {
+    async function karneItem() {
+      const tree = await renderTree();
+      const section = sectionOf(tree, "kaynak-gostergeleri");
+      expect(section).not.toBeNull();
+      expect(collectIds(section)).toContain("kapsama-karnesi");
+      const item = byId(section, "kapsama-karnesi");
+      expect(item).not.toBeNull();
+      return { tree, item };
+    }
+
+    it("is an item with id=kapsama-karnesi inside #kaynak-gostergeleri, headed 'Kapsama karnesi' (dt)", async () => {
+      const { item } = await karneItem();
+      const dt = findElement(item, (el) => el.type === "dt");
+      expect(textOfEl(dt)).toBe("Kapsama karnesi");
+      expect(findElement(item, (el) => el.type === "dd")).not.toBeNull();
+    });
+
+    it("contains the window, both floors and the staleness hours, read from the karne constants", async () => {
+      const { item } = await karneItem();
+      const text = textOfEl(item);
+
+      expect(text).toContain(String(KARNE_MIN_CLUSTERS));
+      expect(text).toContain(String(KARNE_MIN_MULTI_FOR_ZONES));
+      expect(text).toContain(String(KARNE_WINDOW_DAYS));
+      expect(text).toContain(`son ${KARNE_WINDOW_DAYS} gün`);
+      expect(text).toContain(`en az ${KARNE_MIN_CLUSTERS} haber kümesi yoksa karne yerine “yeterli haber yok” notu gösterilir`);
+      expect(text).toContain(`en az ${KARNE_MIN_MULTI_FOR_ZONES} çok kaynaklı haber`);
+      expect(text).toContain("günde bir kez yeniden hesaplanır");
+      expect(text).toContain(`${KARNE_STALE_AFTER_HOURS} saatten eski`);
+    });
+
+    it("defines the four things the card shows: the shared share, the unmatched share, the other zones, the kör nokta count", async () => {
+      const { item } = await karneItem();
+      const text = textOfEl(item);
+      const k = toSourceKarne({
+        source_id: "9236e05a-56d9-47b0-a378-02ec8e880180",
+        window_days: KARNE_WINDOW_DAYS,
+        window_start: "2026-08-30T12:00:00Z",
+        window_end: "2026-09-29T12:00:00Z",
+        n_clusters: 120,
+        n_multi: 60,
+        co_iktidar: 30,
+        co_bagimsiz: 45,
+        co_muhalefet: 15,
+        n_blindspot: 6,
+        n_blindspot_same_side: 2,
+        computed_at: "2026-09-29T06:00:00Z",
+      })!;
+      const view = buildKarneView(k);
+      expect(view.state).toBe("ok");
+      if (view.state !== "ok") return;
+
+      // The labels the card prints on a source page, so a reader finds them here word for word.
+      expect(text).toContain("Başka kaynakların da yazdığı haberler");
+      expect(text).toContain("Tayf'ın başka bir kaynakla eşleştiremediği haberler");
+      expect(text).toContain("Aynı haberi yazan diğer kaynakların bölgesi");
+      expect(view.zoneHeader.startsWith("Aynı haberi yazan diğer kaynakların bölgesi")).toBe(true);
+      // The zone note of the card, whole: a story can count for several zones, so they need not add up to 100.
+      expect(text).toContain(view.zoneNote);
+      expect(text).toContain("Kör nokta işaretli haberler");
+      expect(view.blindspotText.startsWith("Kör nokta işaretli haberler")).toBe(true);
+    });
+
+    it("the floors are true of buildKarneView: under KARNE_MIN_CLUSTERS no figures, under KARNE_MIN_MULTI_FOR_ZONES no zone rows", () => {
+      const row = (nClusters: number, nMulti: number) =>
+        toSourceKarne({
+          source_id: "9236e05a-56d9-47b0-a378-02ec8e880180",
+          window_days: KARNE_WINDOW_DAYS,
+          window_start: "2026-08-30T12:00:00Z",
+          window_end: "2026-09-29T12:00:00Z",
+          n_clusters: nClusters,
+          n_multi: nMulti,
+          co_iktidar: 0,
+          co_bagimsiz: 0,
+          co_muhalefet: 0,
+          n_blindspot: 0,
+          n_blindspot_same_side: 0,
+          computed_at: "2026-09-29T06:00:00Z",
+        })!;
+
+      expect(buildKarneView(row(KARNE_MIN_CLUSTERS - 1, 0)).state).toBe("insufficient");
+      const atFloor = buildKarneView(row(KARNE_MIN_CLUSTERS, KARNE_MIN_MULTI_FOR_ZONES - 1));
+      expect(atFloor.state).toBe("ok");
+      expect(atFloor.state === "ok" && atFloor.zones).toBeNull();
+      const withZones = buildKarneView(row(KARNE_MIN_CLUSTERS, KARNE_MIN_MULTI_FOR_ZONES));
+      expect(withZones.state === "ok" && withZones.zones).toHaveLength(3);
+    });
+
+    it("the staleness hours are true of karneFreshness: older than KARNE_STALE_AFTER_HOURS is stale, exactly that is not", () => {
+      const computedAt = "2026-09-29T06:00:00Z";
+      const at = Date.parse(computedAt) + KARNE_STALE_AFTER_HOURS * 3_600_000;
+      expect(karneFreshness(computedAt, at).isStale).toBe(false);
+      expect(karneFreshness(computedAt, at + 1).isStale).toBe(true);
+    });
+
+    it("the source page's 'Nasıl hesaplanıyor?' link lands on this item", async () => {
+      const { tree } = await karneItem();
+      const k = toSourceKarne({
+        source_id: "9236e05a-56d9-47b0-a378-02ec8e880180",
+        window_days: KARNE_WINDOW_DAYS,
+        window_start: "2026-08-30T12:00:00Z",
+        window_end: "2026-09-29T12:00:00Z",
+        n_clusters: 120,
+        n_multi: 60,
+        co_iktidar: 30,
+        co_bagimsiz: 45,
+        co_muhalefet: 15,
+        n_blindspot: 6,
+        n_blindspot_same_side: 2,
+        computed_at: "2026-09-29T06:00:00Z",
+      })!;
+      const card = SourceKarneCard({ karne: { ...k, isStale: false, ageDays: 0 }, slug: "sozcu" });
+      const link = findElement(
+        card,
+        (el) => typeof el.props?.href === "string" && textOfEl(el) === "Nasıl hesaplanıyor?",
+      );
+      expect(link?.props?.href).toBe("/metodoloji#kapsama-karnesi");
+      const [path, fragment] = String(link?.props?.href).split("#");
+      expect(path).toBe("/metodoloji");
+      expect(collectIds(tree)).toContain(fragment);
+      // ... and the old target is still a real section, but no longer the karne's link.
+      expect(collectIds(tree)).toContain("kaynaklar");
+    });
+  });
+
+  describe("the Tek kaynaktan dağıtım card", () => {
+    it("says the floor: 'En az WIRE_MIN_MEMBERS farklı kaynaktan haberi olan kümelerde ...; daha küçük kümeler işaretlenmez.'", async () => {
+      const card = textOfEl(sectionOf(await renderTree(), "tek-kaynak"));
+
+      expect(WIRE_MIN_MEMBERS).toBe(3);
+      expect(card).toContain(`En az ${WIRE_MIN_MEMBERS} farklı kaynaktan`);
+      expect(card).toContain(
+        `En az ${WIRE_MIN_MEMBERS} farklı kaynaktan haberi olan kümelerde, benzersiz metin oranı ≤ %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)} ise küme "tek kaynaktan dağıtım" olarak işaretlenir`,
+      );
+      expect(card).toContain("Daha küçük kümeler işaretlenmez.");
+    });
+
+    it("is true of detectWireRedistribution: the same text in WIRE_MIN_MEMBERS - 1 members is not marked, in WIRE_MIN_MEMBERS it is", () => {
+      const same = (n: number) =>
+        Array.from({ length: n }, (_, i) => ({ id: `a${i}`, content_hash: "h" }));
+      expect(detectWireRedistribution(same(WIRE_MIN_MEMBERS - 1)).isWire).toBe(false);
+      expect(detectWireRedistribution(same(WIRE_MIN_MEMBERS)).isWire).toBe(true);
+    });
+  });
+
+  describe("the CHANGELOG entries of 2026-11-11 to 2026-11-13", () => {
+    async function tailOf(): Promise<string> {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+      return text.slice(text.indexOf("Son güncelleme:"));
+    }
+
+    it("the footer reads 'Son güncelleme: 2026-11-13'", async () => {
+      const tail = await tailOf();
+      expect(tail.startsWith("Son güncelleme: 2026-11-13")).toBe(true);
+    });
+
+    it("lists the five entries under their dates, newest first, each date directly before its text", async () => {
+      const tail = await tailOf();
+      const at = (date: string, entry: string) => {
+        const index = tail.indexOf(`${date} ${entry}`);
+        expect(index, `${date} ${entry.slice(0, 40)}`).toBeGreaterThan(0);
+        return index;
+      };
+
+      const notices = at("2026-11-13", NOTICES_ENTRY);
+      const cadence = at("2026-11-13", CADENCE_ENTRY);
+      const copy = at("2026-11-13", COPY_ENTRY);
+      const paid = at("2026-11-12", PAID_ENTRY);
+      const ad = at("2026-11-11", AD_ENTRY);
+      const tenth = tail.indexOf("2026-11-10 Kör nokta ifadesi:");
+      expect(notices).toBeLessThan(cadence);
+      expect(cadence).toBeLessThan(copy);
+      expect(copy).toBeLessThan(paid);
+      expect(paid).toBeLessThan(tail.indexOf("2026-11-11 Ajans ağırlıklı rozeti"));
+      expect(tail.indexOf("2026-11-11 Ajans ağırlıklı rozeti")).toBeLessThan(ad);
+      expect(ad).toBeLessThan(tenth);
+    });
+
+    it("the 2026-11-13 notice entry says the summary-marked court notices and EKAP tenders are dropped too, and notice-only pages are closed to search engines", async () => {
+      expect(NOTICES_ENTRY).toContain("özeti “İlan-” ile başlayan mahkeme ilanları ve EKAP ihale duyuruları da artık haber olarak kaydedilmiyor");
+      expect(NOTICES_ENTRY).toContain("arama motorlarına kapalı");
+      expect((await tailOf()).includes(NOTICES_ENTRY)).toBe(true);
+    });
+
+    it("the 2026-11-12 entry names every paid url section, the 2026-11-11 entry the example ad hosts, the cadence entry the overflow days", () => {
+      for (const segment of PAID_CONTENT_SEGMENTS) expect(PAID_ENTRY).toContain(`/${segment}/`);
+      for (const host of AD_CLICK_HOSTS.slice(0, 3)) expect(AD_ENTRY).toContain(host);
+      expect(CADENCE_ENTRY).toContain(`son ${WINDOW_OVERFLOW_RECENT_MS / DAY_MS} günde`);
+    });
+  });
+
+  describe("source guard", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pageSource = readFileSync(join(here, "page.tsx"), "utf8");
+
+    it("imports the constants it prints instead of retyping them", () => {
+      expect(pageSource).toContain("PAID_CONTENT_SEGMENTS");
+      expect(pageSource).toContain("AD_CLICK_HOSTS");
+      expect(pageSource).toContain("WIRE_MIN_MEMBERS");
+      expect(pageSource).toContain("WINDOW_OVERFLOW_RECENT_MS");
+      expect(pageSource).toContain("_shared/rss/paid-content");
+      expect(pageSource).toContain("_shared/rss/ad-link");
+    });
+
+    it("does not spell the segments, the hosts or the floor as literals in the copy", () => {
+      for (const segment of PAID_CONTENT_SEGMENTS) {
+        expect(pageSource, segment).not.toContain(`"${segment}"`);
+        expect(pageSource, segment).not.toContain(`/${segment}/`);
+      }
+      for (const host of AD_CLICK_HOSTS) expect(pageSource, host).not.toContain(host);
+      expect(pageSource).not.toContain("En az 3 haberi");
+      expect(pageSource).not.toContain("son 7 günde");
+    });
   });
 });
 
@@ -1810,7 +2282,22 @@ describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
   // "benzersiz metin" where it said "benzersiz içerik" / "benzersiz dispeç". The code
   // changed with it (wire.ts links members that share a summary), so it has the second
   // 2026-11-11 CHANGELOG entry; the ratio (WIRE_UNIQUE_HASH_RATIO) did not move.
-  const RULES_SHA256 = "b386e4475d592f37d243ca160c7f6aeeca8f42393a2cf94671293968c5bc5c1b";
+  // h176-methodtruth-1: b386e447... -> b2fd400c... adds five things and changes nothing else
+  // (checked by rendering the HEAD page and this one and diffing the two texts, as above): the
+  // "Habere sayılmayanlar" card at the end of #kaynaklar (paid url sections, court and tender
+  // notices, ad-click hosts: all three already enforced at ingest), the cadence floor sentence
+  // of "Yayın sıklığı", the "Kapsama karnesi" item of #kaynak-gostergeleri, and in the Tek
+  // kaynaktan dağıtım card the sentence's opening "En az WIRE_MIN_MEMBERS haberi olan
+  // kümelerde," (it began "Benzersiz"; reworded to "farklı kaynaktan haberi olan" below) plus "Daha küçük kümeler işaretlenmez." (wire.ts's
+  // floor, unchanged since the card was written). No rule or threshold moved: copy only,
+  // logged by the three 2026-11-13 CHANGELOG entries and the 2026-11-12 and 2026-11-11 ones.
+  // h177 review (h176-methodtruth-1 wording): b2fd400c... -> 7044f6d5... inserts exactly one
+  // phrase, "farklı kaynaktan" (distinct sources), into that same sentence's opening, which now
+  // reads "En az WIRE_MIN_MEMBERS farklı kaynaktan haberi olan kümelerde,". Both callers
+  // (politics-query dedupedMembers, timeline-query dedupeEarliestPerSource) keep one member per
+  // source before detectWireRedistribution, so the floor counts sources, not articles. The rule
+  // did not move: copy only, logged by the 2026-11-13 "kural değişmedi" entry.
+  const RULES_SHA256 = "7044f6d5b149855b5c075b9d469d7707e903d4377e76d208f639f8f627866e9d";
 
   it("the rendered text of everything above the CHANGELOG hashes to the pinned value", async () => {
     // The two inputs that are not the page's own text: the registry-backed tagged

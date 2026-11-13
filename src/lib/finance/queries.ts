@@ -339,11 +339,22 @@ interface EconFeedRow {
 // — "the wrong direction" (see 054's header). `econ_feed` (migration 058)
 // starts from the indexed article_tickers side instead, the same fix
 // `ticker_articles` (migration 054) applied to the per-ticker page below.
+/**
+ * reader-data (§4b): how many times the display limit `readEconFeed` asks `econ_feed` for, so the items the
+ * hide line drops still leave close to `limit` on screen. Measured on prod 2026-11-13 (h176-ekonomi-1 moved the
+ * line from 0.2 to the 0.35 TICKER_HIDE_BELOW): of econ_feed(100), 20 items lose every ticker at 0.2 and 26 at
+ * 0.35, and econ_feed(120) leaves 90 at 0.35, before the legal-notice and paid-content drops. 1.25x left only
+ * about 74 of the 80 /ekonomi shows.
+ */
+export const ECON_FEED_OVERFETCH = 1.5;
+
 async function readEconFeed(limit: number): Promise<FeedItem[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
-  // reader-data (§4b): over-fetch 25% so the ~20% of items a hidden-ticker
-  // drop can remove still leave close to `limit` items on screen.
-  const { data, error } = await supabase.rpc("econ_feed", { p_limit: Math.ceil(limit * 1.25) });
+  // Over-fetch (ECON_FEED_OVERFETCH): ~26% of items lose every ticker at the 0.35 hide line, and the
+  // legal-notice and paid-content drops come on top.
+  const { data, error } = await supabase.rpc("econ_feed", {
+    p_limit: Math.ceil(limit * ECON_FEED_OVERFETCH),
+  });
   if (error) throw new Error(`[finance] fetchEconFeed: ${error.message}`);
   const items = ((data ?? []) as EconFeedRow[]).map((r) => ({
     id: r.id,
@@ -1070,7 +1081,7 @@ interface CoverageRow {
  * are string accidents the section read "basında yer bulan 2, ilk haber medyan 2
  * gün sonra" while the list showed "Haberler 0". A row goes when its article is a
  * legal notice (`legalIds`) or its score at relevanceKey(article_id, ticker) is
- * below TICKER_HIDE_BELOW (0.2, `isHiddenMatch`). An unscored article stays
+ * below TICKER_HIDE_BELOW (`isHiddenMatch`; 0.35 since h176-ekonomi-1). An unscored article stays
  * (fail-open, like isHiddenMatch): a failed or partial relevance read gives an
  * empty or short `scores` map and so the old, ungated behaviour. Pure; rows are
  * not changed, and the disclosure_coverage view stays raw for its other readers.
