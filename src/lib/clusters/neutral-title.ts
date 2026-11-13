@@ -247,6 +247,14 @@
 // (causative: "kazaya neden oldu") is no teaser and a clause ends at '!', '?' and a sentence break; 'hangi <word> ne' with a
 // reported answer in the clause ("ne yapılacağını") is no teaser; and the 'case' rule keeps a stored title that a
 // case-trusted outlet wrote with exactly that casing.
+// h168 (hunt 168). -1, an outlet's epithet as the H1: 49facb31's "Trump, katillere desteğiyle övündü: ..." and 8ab79860's "... ihale
+// rantı tepkisi" were stored titles no rule charged, so the h42 'loaded' incumbent switch kept them. LOADED_FOLDED charges three
+// more, one unit each, on the headline's own words (LOADED_OWN_WORDS_ONLY): the label 'katil' for a party or a state ('katillere
+// destek', 'katil rejim'; never 'katıl-'), 'ihale rantı' and 'rant kapısı'. -2, the case rule: an ordinal ('111.', '13.') is no
+// sentence end for the capital evidence (caseEvidence), so the 'Dönem' of "111. Dönem Kaymakamlar Kurası" counts and a flagged
+// title is no longer half-recased; and the recased twin of the stored title (the same words, other capitals) is not blocked by
+// the Title Case guard of the switch rules when the 'case' rule holds (a short run of names reads as Title Case once its capitals
+// are back). Migration 209 offers the stored titles these rules reject (no stamp condition).
 
 import { hasFiniteVerb } from "../articles/finite-verb";
 
@@ -396,6 +404,27 @@ const FRAMING_FOLDED: RegExp[] = [
 // loadedPenalty reads.
 const SAIBE_FOLDED = new RegExp(`${L}[şs]a[ıi]be(?!s[ıi]z)`, "u");
 
+// Three more partisan epithets (h168-titles-1: 49facb31 served Star's "Trump, katillere desteğiyle övündü: ..." as the home
+// page's top story while Oksijen, Karar and AA write the sentence without it, and 8ab79860 Akşam's "... İBB yönetimine ihale
+// rantı tepkisi"). One unit each, no right edge on the last word of a phrase (desteği, desteğiyle, rantı), and only the
+// epithets the replay proves:
+//   - 'katil' as the label of a party or a state: 'katillere destek', 'katile desteği', 'katilin destekçileri' (the case
+//     suffixes below, then 'destek' or 'desteğ-') and 'katil rejim | devlet | ordu | hükümet | siyonist'. The dotted i
+//     only: foldTr keeps the dotless ı, so every 'katıl-' word (katılan, katılım, katıldı) never matches, and 'katil
+//     zanlısı' / 'seri katil' / 'katilinin ilk ifadesi' have no party behind the word. The Title Case 'Katil <Name>' rule
+//     (EPITHET_BEFORE_NAME_RAW) is a different one and keeps counting apart;
+//   - 'ihale rantı' (the figurative 'rant' of a tender, not 'Kamu İhale Kanunu');
+//   - 'rant kapısı' (possessive only: 'rant kapısı', 'rant kapısına'; a bare 'rant' stays free, "siyasi rant devşiriyor").
+// Every one is in LOADED_OWN_WORDS_ONLY: the words after a speaker label's opening quote ("Erdoğan: 'Katillere destek
+// verenler hesap verecek'") are the speaker's own and stay free. Each repeat is bounded or a single class, so the scan is
+// linear.
+const KATIL_AS_LABEL_FOLDED = new RegExp(
+  `${L}(?:katil(?:ler)?(?:e|i|in|ini|ine|lere|leri|lerin|lerine)?\\s+deste[kğ]|katil\\s+(?:rejim|devlet|ordu|hükümet|siyonist))`,
+  "u",
+);
+const IHALE_RANT_FOLDED = new RegExp(`${L}ihale\\s+rant`, "u");
+const RANT_KAPISI_FOLDED = new RegExp(`${L}rant\\s+kap[ıi]s`, "u");
+
 /**
  * The rules loadedPenalty tests on the headline's own words only: the text after a speaker label's opening quote
  * (SPEAKER_QUOTE_OPEN, "Özel: 'Şaibe iddiaları asılsız'") is someone's own wording and is cut off first. Every other rule
@@ -404,7 +433,12 @@ const SAIBE_FOLDED = new RegExp(`${L}[şs]a[ıi]be(?!s[ıi]z)`, "u");
  * charged (h54 rule (b)). A bulletin lead-in ('Son dakika:', 'FLAŞ:', 'Şok:', chained) is not a speaker label: the quote
  * after it is the headline's own scare quote and is charged too (ts-1; see ownWordsFolded).
  */
-const LOADED_OWN_WORDS_ONLY: ReadonlySet<RegExp> = new Set([SAIBE_FOLDED]);
+const LOADED_OWN_WORDS_ONLY: ReadonlySet<RegExp> = new Set([
+  SAIBE_FOLDED,
+  KATIL_AS_LABEL_FOLDED,
+  IHALE_RANT_FOLDED,
+  RANT_KAPISI_FOLDED,
+]);
 
 // Wording that editorialises rather than reports. Costs more than framing:
 // the hunt found 'Netanyahu Trump'a yalvardı' standing in for a hedged
@@ -485,6 +519,10 @@ const LOADED_FOLDED: RegExp[] = [
   new RegExp(`${L}k[ıi]skac[ıi]${R}`, "u"),
   new RegExp(`${L}gözyaşlarına\\s+boğul`, "u"),
   new RegExp(`${L}tarihi\\s+karşılama`, "u"),
+  // h168-titles-1: the three epithets above (the label 'katil', 'ihale rantı', 'rant kapısı'), on the headline's own words.
+  KATIL_AS_LABEL_FOLDED,
+  IHALE_RANT_FOLDED,
+  RANT_KAPISI_FOLDED,
 ];
 
 // Partisan epithets (hunt 54, h54-editorial-4). Seven multi-source titles of ten days carried them as the "neutral"
@@ -1789,6 +1827,17 @@ const LEAK_MIN_LETTERS = 4;
 const LEAK_MAX_NAME_CHARS = 40;
 
 const SENTENCE_END_CHARS = new Set([".", ":", "!", "?", "…"]);
+/**
+ * An ordinal: one to three digits and a dot ('111.', '13.', '1.'). Whole token only. It ends no sentence ('111. Dönem
+ * Kaymakamlar Kurası', '13. Yargı Paketi': the capital behind it is the name's own); a four-digit year ('2026.') still reads
+ * as the end of one (h168-titles-2). Anchored and bounded, so the test is linear.
+ */
+const ORDINAL_TOKEN = /^\d{1,3}\.$/;
+
+/** True when the token ends a sentence: its last character is one of SENTENCE_END_CHARS and it is not an ordinal. */
+function endsSentence(token: string): boolean {
+  return SENTENCE_END_CHARS.has(token.charAt(token.length - 1)) && !ORDINAL_TOKEN.test(token);
+}
 const OPENING_QUOTES = new Set(['"', "“", "‘", "«", "'"]);
 const CLOSING_QUOTES = new Set(['"', "”", "»", "’", "'"]);
 /** Punctuation that may follow a closing quote ('..." dedi,' / '...".'). */
@@ -1948,7 +1997,7 @@ function caseEvidence(title: string, lenient = false): CaseEvidence {
     }
     const prev = i > 0 ? tokens[i - 1]! : "";
     const skipped =
-      i === 0 || SENTENCE_END_CHARS.has(prev.charAt(prev.length - 1)) || OPENING_QUOTES.has(token.charAt(0));
+      i === 0 || endsSentence(prev) || OPENING_QUOTES.has(token.charAt(0));
     if (!skipped && letters >= 2) words.push({ stem, capitalEvidence: !quoted[i] && !runFlags[i] });
   });
   const titleCase = long >= TITLE_CASE_MIN_WORDS && longCapitalised / long >= TITLE_CASE_SHARE;
@@ -2969,7 +3018,19 @@ function incumbentSwitchRule(
   bestCentrality: () => number,
   flaggedTitles: readonly string[],
 ): SwitchRule | null {
-  if (isTitleCaseTitle(best, SWITCH_TARGET_TITLE_CASE_WORDS)) return null;
+  if (isTitleCaseTitle(best, SWITCH_TARGET_TITLE_CASE_WORDS)) {
+    // The recased twin of the stored title (the same words, only their capitals differ) is no swap to a Title Case
+    // headline: a short run of names ("Cumhurbaşkanı Erdoğan 111. Dönem Kaymakamlar Kurası'nda") reads as Title Case once
+    // the lost capitals are back, and that must not keep the half-recased stored title (h168-titles-2, 9df76d26). Only the
+    // recased twin: a case-trusted member's own Title Case headline can be fold-equal to the stored title too (usableItems
+    // swaps a flagged member for its trusted twin), and that is an outlet's wording, not a recasing of the stored one
+    // ("Bakan Kurum: Bugün Hiç Olmadığımız ...": the stored title is recased in place, see recasedFlaggedIncumbent; h169 review, ts-2).
+    return fold(best) === fold(inc) &&
+      !items.some((m) => m.caseUnreliable !== true && (m.title === best || cleanHeadline(m.title.slice(0, EVIDENCE_MAX_CHARS)) === best)) &&
+      caseDefectIncumbent(inc, best, items, memberTitles, flaggedTitles)
+      ? "case"
+      : null;
+  }
   // No rule trades toward more framing: d1ed614b swapped "fon vurgunu tepkisi" for "olay çağrı" in the replay. The 'case'
   // rule has its own version of this guard: the acronym it restores ('KKTC', 'TBMM') is a shouted word to framingPenalty.
   if (framingPenalty(best) > framingPenalty(inc)) {
@@ -3047,17 +3108,49 @@ function lostCapitalsIncumbent(
   items: readonly MemberTitle[],
   flaggedTitles: readonly string[],
 ): boolean {
-  if (flaggedTitles.length === 0) return false;
+  const recase = lenientRecasing(inc, items, flaggedTitles);
+  return recase !== null && recase(inc) !== inc && recase(best) === best;
+}
+
+/**
+ * The lenient recasing a stored title that is a caseUnreliable member's wording gets: its siblings' capital forms (every
+ * usable member read with its own flag, a flagged one leniently) and the capital codes they write, as a function of a title.
+ * Null when the stored title is no flagged member's wording (fold-equal to one of `flaggedTitles`, raw or cleaned) or when a
+ * case-trusted member wrote exactly that wording, byte for byte (raw or cleaned): that casing is an outlet's own.
+ */
+function lenientRecasing(
+  inc: string,
+  items: readonly MemberTitle[],
+  flaggedTitles: readonly string[],
+): ((title: string) => string) | null {
+  if (flaggedTitles.length === 0) return null;
   const incFold = fold(inc);
-  if (!flaggedTitles.some((t) => fold(t) === incFold || fold(cleanHeadline(t.slice(0, EVIDENCE_MAX_CHARS))) === incFold)) return false;
+  if (!flaggedTitles.some((t) => fold(t) === incFold || fold(cleanHeadline(t.slice(0, EVIDENCE_MAX_CHARS))) === incFold)) return null;
   const cleaned = items.map((m) => cleanHeadline(m.title.slice(0, EVIDENCE_MAX_CHARS)));
-  if (items.some((m, i) => m.caseUnreliable !== true && (m.title === inc || cleaned[i] === inc))) return false;
+  if (items.some((m, i) => m.caseUnreliable !== true && (m.title === inc || cleaned[i] === inc))) return null;
   const forms = capitalFormsFrom(
     items.map((m, i) => memberEvidence(cleaned[i]!, m, true)),
     lenientMinTitles(items.length - 1),
   );
   const codes = codeFormsFrom(cleaned.map(codeSpellingsOf));
-  return recaseWith(forms, inc, undefined, codes) !== inc && recaseWith(forms, best, undefined, codes) === best;
+  return (title) => recaseWith(forms, title, undefined, codes);
+}
+
+/**
+ * The stored title recased in place, or null: it is a caseUnreliable member's wording with no case-trusted byte-equal twin
+ * (lenientRecasing) and the siblings would restore capitals in it. What the switch rules leave behind: a row the picker can
+ * recase must leave the re-pick set whatever the best candidate is (h169 review, db-209-B and ts-2: the stored
+ * "Bakan kurum: ..." was kept and offered again on every tick, or swapped for a trusted outlet's Title Case headline).
+ */
+function recasedFlaggedIncumbent(
+  inc: string,
+  items: readonly MemberTitle[],
+  flaggedTitles: readonly string[],
+): string | null {
+  const recase = lenientRecasing(inc, items, flaggedTitles);
+  if (recase === null) return null;
+  const recased = recase(inc);
+  return recased !== inc ? recased : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -3555,6 +3648,10 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
       if (incumbentSwitchRule(inc, best.cleaned, items, memberTitles, incCentrality, bestCentrality, flaggedTitles) !== null) {
         return best.cleaned;
       }
+      // No switch rule holds, but the stored title is a flagged member's own wording that its siblings would recase: the
+      // recased title (never a different headline) replaces it, so no row the picker can recase is kept as it is.
+      const recased = recasedFlaggedIncumbent(inc, items, flaggedTitles);
+      if (recased !== null && isAcceptableNeutral(recased, memberTitles)) return recased;
       // A stored title that is itself the defect (a minority claim, Title Case, no
       // majority subject) gives way to any member title that outscores it at all.
       if (incumbentDefect(inc, best.cleaned, memberTitles)) return best.score > incScore ? best.cleaned : incumbent;

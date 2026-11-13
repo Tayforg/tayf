@@ -71,6 +71,20 @@ import type { BiasCategory, SourceKind } from "@/types";
 // h95-summaries-1 also moves the tidy step (a Peki / İşte tail and an unmarked 400 / 500
 // character cut, summary-tidy.ts), so the text itself differs from what was stored for
 // those two shapes with or without `agreeWithTitle`.
+//
+// h168-ozet-1: a seed with nothing to show used to hide the Özet whole, even when other members had
+// a clean sentence (41ebdae3 "Ayrıntılar geliyor...", 1e6350f0 " "). Two shapes, both only with
+// `agreeWithTitle` (the cluster page), both through `findAgreeingMember` like a lead-in seed:
+//   - a PLACEHOLDER seed ("Ayrıntılar geliyor...") tidies to "" with the verdict 'placeholder'
+//     (`seedDisqualified`); it is handed to the title agreement and hidden only when no member
+//     qualifies, as for a lead-in or a teaser;
+//   - a BLANK summary_tr (nothing after `repairEntityResidue` and trim): the seed is the earliest
+//     member that may be shown (`inTimeOrder`, `mayShowExcerpt`: the same stand-in the other paths
+//     use for "today's seed"; it is never its own replacement), and the pick of `findAgreeingMember`
+//     with `seedShown` "" is the Özet. The BL-13 rights gate and the wire-majority hashes apply to the
+//     replacement exactly as for any other seed; with no member, no showable member, no headline
+//     that says anything or no qualifying member the result is null, as before.
+// Without `agreeWithTitle` (rss.xml, the digest, the cards) nothing changes.
 
 // Structural subset of ClusterDetailMember (cluster-detail-query.ts): the
 // cluster page's members satisfy this shape as-is, and lighter callers
@@ -267,9 +281,40 @@ function wireMajority(
 }
 
 /**
+ * The Özet of a cluster whose summary_tr is blank (h168-ozet-1), or null. Only with a headline
+ * (`agreeWithTitle`) and a member that may be shown: that member, the earliest by publish time
+ * (`inTimeOrder`), stands in as the seed with nothing shown, and the member
+ * `findAgreeingMember` picks against the headline is the summary. It is never the stand-in itself.
+ * The rights, kind, language, wire-majority, length, defect and agency-copy gates of
+ * `findAgreeingMember` apply to the pick as for any seed.
+ */
+function blankSeedReplacement({
+  members,
+  wire,
+  agreeWithTitle,
+}: {
+  members: SummaryMember[];
+  wire: Pick<WireSignal, "isWireRedistribution">;
+  agreeWithTitle: string | undefined;
+}): SummaryAttribution | null {
+  if (agreeWithTitle === undefined) return null;
+  const seed = inTimeOrder(members).find(mayShowExcerpt);
+  if (!seed) return null;
+  const better = findAgreeingMember({
+    members,
+    seed,
+    seedShown: "",
+    title: agreeWithTitle,
+    wireMajorityHashes: wireMajority(members, wire).hashes,
+  });
+  return better ? attributedTo(better.text, better.member) : null;
+}
+
+/**
  * Null hides the summary: blank text, or a wire copy the seed source didn't
  * write. `agreeWithTitle` (opt-in, the cluster page only; see the header) swaps
- * a seed that disagrees with that title for the member that agrees best.
+ * a seed that disagrees with that title for the member that agrees best; a placeholder
+ * or blank seed (nothing to show) is replaced by the member that agrees (h168-ozet-1).
  */
 export function summaryAttribution({
   summary,
@@ -283,7 +328,7 @@ export function summaryAttribution({
   agreeWithTitle?: string;
 }): SummaryAttribution | null {
   const text = repairEntityResidue(summary).trim();
-  if (text.length === 0) return null;
+  if (text.length === 0) return blankSeedReplacement({ members, wire, agreeWithTitle });
 
   // BL-13 rights gate: every member whose description literally matches
   // this excerpt has a source that has asked Tayf not to reuse its text —
@@ -317,11 +362,12 @@ export function summaryAttribution({
   // "Bakan Şimşek ... paylaştı:") tidies to "" and has always been hidden, EXCEPT that a
   // "İşte" teaser used to be shown whole and so was replaced by a clean member. Such a seed
   // still goes to the title agreement; it is hidden when no member takes its place.
+  // h168-ozet-1: so does a placeholder seed ("Ayrıntılar geliyor..."), which tidies to "" too.
   const emptiedByLeadIn =
     shown.length === 0 &&
     agreeWithTitle !== undefined &&
     seedMember !== null &&
-    ["lead-in", "teaser"].includes(seedDisqualified(text, shown) ?? "");
+    ["lead-in", "teaser", "placeholder"].includes(seedDisqualified(text, shown) ?? "");
   if (shown.length === 0 && !emptiedByLeadIn) return null;
 
   // "Kaynak açıklaması" (no member holds the text) has no seed outlet to compare

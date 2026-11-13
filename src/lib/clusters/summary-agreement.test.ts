@@ -2720,3 +2720,128 @@ describe("isCaseGarbled / seedDisqualified: 'case' (h164-summaries-2)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// h168-ozet-1: a seed that is a "coming soon" placeholder ("Ayrıntılar geliyor...") tidies to ""
+// and used to hide the Özet even when other members had a clean sentence (41ebdae3, bb7e0804,
+// df08098c). It is a form defect now, so a clean member replaces it. A placeholder or blank seed
+// covers none of the headline, so the floor is AGREEMENT_LOW (the near-zero stub's), not 0.6/0.75.
+// ---------------------------------------------------------------------------
+describe("seedDisqualified: 'placeholder' (h168-ozet-1)", () => {
+  const A72F =
+    "Ayrıntılar geliyor...\n\n\n\nKKTC Başbakanı Üstel, KKTC ile ilgili açıklamaları için Cumhurbaşkanı Erdoğan'a teşekkür etti";
+  const PLACEHOLDERS = [
+    "Ayrıntılar geliyor...",
+    "ayrıntılar geliyor...",
+    "Detaylar gelecek…",
+    "DETAYLAR GELİYOR",
+    "Ayrıntılar birazdan...\nKaynak: TRT Haber",
+    A72F,
+  ];
+
+  it("a placeholder that tidies to nothing is 'placeholder' (41ebdae3's Milliyet seed)", () => {
+    expect(tidySummaryText("Ayrıntılar geliyor...")).toBe("");
+    expect(seedDisqualified("Ayrıntılar geliyor...", "")).toBe("placeholder");
+  });
+
+  it.each(PLACEHOLDERS)("%j is 'placeholder' once the tidy step has emptied it", (raw) => {
+    const shown = tidySummaryText(raw);
+    expect(shown).toBe("");
+    expect(seedDisqualified(raw, shown)).toBe("placeholder");
+  });
+
+  it("only an EMPTY shown text can be 'placeholder': the verdict of every non-empty shown text is unchanged", () => {
+    // The same raw text with something shown (a caller that tidied it differently): no placeholder verdict.
+    expect(seedDisqualified("Ayrıntılar geliyor...", "Bakan Yılmaz yeni vergi düzenlemesini açıkladı.")).toBeNull();
+    expect(seedDisqualified(A72F, "Bakan Yılmaz yeni vergi düzenlemesini açıkladı.")).toBeNull();
+    // A real sentence that merely starts with the phrase is shown whole and is not a placeholder.
+    const sentence = "Ayrıntılar geliyor: Bakan Yılmaz yeni vergi düzenlemesini açıkladı ve gelecek ay yürürlüğe girecek.";
+    expect(seedDisqualified(sentence, tidySummaryText(sentence))).toBeNull();
+    // The earlier verdicts keep their place: a cut stub is still 'stub', a lead-in still 'lead-in'.
+    const cut = "CHP’den istifa ederek Yeni Parti’ye katılan iki meclis üyesinin ayrı oturma düzeni talebi, Silivri Belediye Meclisi’nin ...";
+    expect(seedDisqualified(cut, cut)).toBe("stub");
+    const leadIn = "Bakan Yılmaz yeni vergi düzenlemesini açıkladı. Şunlar değişti:";
+    expect(seedDisqualified(leadIn, tidySummaryText(leadIn))).toBe("lead-in");
+    const emptied = "Cumhurbaşkanı Erdoğan'ın açıklamalarından öne çıkan satır başları şöyle;";
+    expect(seedDisqualified(emptied, "")).toBe("lead-in");
+  });
+
+  it("a blank or whitespace-only raw text is not a placeholder (there is nothing to recognise)", () => {
+    expect(seedDisqualified("", "")).toBeNull();
+    expect(seedDisqualified("  ", "")).toBeNull();
+    expect(seedDisqualified("\n", "")).toBeNull();
+  });
+
+  it("never throws on a non-string", () => {
+    expect(seedDisqualified(null as unknown as string, "")).toBeNull();
+    expect(seedDisqualified("Ayrıntılar geliyor...", undefined as unknown as string)).toBeNull();
+  });
+});
+
+describe("findAgreeingMember: a placeholder or blank seed is replaced by a member that covers half the headline (h168-ozet-1)", () => {
+  // 41ebdae3: six content stems (izmir, habas, demir, celik, fabri, patla).
+  const TITLE = "İzmir'de Habaş Demir Çelik Fabrikası'nda patlama";
+  const HALF = "İzmir'in Aliağa ilçesinde HABAŞ'a ait karbondioksit dolum tesisinde patlama meydana geldi.";
+  const THIRD = "İzmir'in Aliağa ilçesinde bir karbondioksit dolum tesisinde patlama meydana geldi ve ekipler sevk edildi.";
+
+  it("the seed is 'placeholder' and Sözcü's sentence (3 of 6 stems, 0.5) replaces it: the floor is AGREEMENT_LOW, not 0.6", () => {
+    const seed = mem("Milliyet", "outlet", "2026-11-09T09:33:58Z", "Ayrıntılar geliyor...", "Başlık");
+    const sozcu = mem("Sözcü", "outlet", "2026-11-09T09:35:17Z", HALF, "Başka başlık");
+    expect(titleAgreement(TITLE, tidySummaryText(HALF))).toBeCloseTo(0.5, 9);
+    expect(AGREEMENT_LOW).toBeLessThan(AGREEMENT_FORM_DEFECT_MIN);
+    const pick = pickFor(TITLE, [seed, sozcu], "Milliyet");
+    expect(pick?.member.source.name).toBe("Sözcü");
+    expect(pick?.text).toBe(HALF);
+  });
+
+  it("a member under the floor (2 of 6 stems) does not replace it, and with none the result is null", () => {
+    const seed = mem("Milliyet", "outlet", "2026-11-09T09:33:58Z", "Ayrıntılar geliyor...", "Başlık");
+    const weak = mem("Sözcü", "outlet", "2026-11-09T09:35:17Z", THIRD, "Başka başlık");
+    expect(titleAgreement(TITLE, tidySummaryText(THIRD))).toBeLessThan(AGREEMENT_LOW);
+    expect(pickFor(TITLE, [seed, weak], "Milliyet")).toBeNull();
+    expect(pickFor(TITLE, [seed], "Milliyet")).toBeNull();
+  });
+
+  it("another outlet's placeholder is never the pick, and neither is a text under the length floor", () => {
+    const seed = mem("Milliyet", "outlet", "2026-11-09T09:33:58Z", "Ayrıntılar geliyor...", "Başlık");
+    const other = mem("Hürriyet", "outlet", "2026-11-09T09:34:00Z", "Ayrıntılar geliyor...", "Başlık 2");
+    const short = mem("Kısa", "outlet", "2026-11-09T09:34:30Z", "İzmir'de HABAŞ'ta patlama.", "Başlık 3");
+    expect(pickFor(TITLE, [seed, other, short], "Milliyet")).toBeNull();
+  });
+
+  it("the rest of the candidate rules still apply: a wire, an aggregator and a rights-blocked member are skipped", () => {
+    const seed = mem("Milliyet", "outlet", "2026-11-09T09:33:58Z", "Ayrıntılar geliyor...", "Başlık");
+    const wire = mem("AA", "wire", "2026-11-09T09:35:00Z", HALF, "Başka başlık");
+    const aggregator = mem("Haberler.com", "aggregator", "2026-11-09T09:36:00Z", `${HALF} Ekipler bölgede.`, "Başka başlık");
+    const blocked = mem("Engelli", "outlet", "2026-11-09T09:37:00Z", `${HALF} Çalışmalar sürüyor.`, "Başka başlık");
+    blocked.source.excerpt_allowed = false;
+    expect(pickFor(TITLE, [seed, wire, aggregator, blocked], "Milliyet")).toBeNull();
+  });
+
+  it("a blank seed (nothing shown, no defect) takes the same floor", () => {
+    const seed = mem("AA", "wire", "2026-11-11T14:22:44Z", "", "Başlık");
+    const sozcu = mem("Sözcü", "outlet", "2026-11-11T14:30:00Z", HALF, "Başka başlık");
+    const pick = findAgreeingMember({
+      members: [seed, sozcu],
+      seed,
+      seedShown: "",
+      title: TITLE,
+      wireMajorityHashes: new Set<string>(),
+    });
+    expect(pick?.member.source.name).toBe("Sözcü");
+    expect(pick?.text).toBe(HALF);
+  });
+
+  it("a clean seed that shows text keeps its floor: a 0.5 member does not replace a seed scoring 0", () => {
+    const seed = mem("Tohum", "outlet", "2026-11-09T09:33:58Z", "Hava bugün parçalı bulutlu ve rüzgarlı geçecek, sıcaklıklar mevsim normallerinde seyredecek.", "Başlık");
+    const sozcu = mem("Sözcü", "outlet", "2026-11-09T09:35:17Z", HALF, "Başka başlık");
+    expect(pickFor(TITLE, [seed, sozcu], "Tohum")).toBeNull();
+  });
+
+  it("a lead-in seed keeps the 0.6 floor it always had", () => {
+    const seed = mem("Tohum", "outlet", "2026-11-09T09:33:58Z", "Cumhurbaşkanı Erdoğan'ın açıklamalarından öne çıkan satır başları şöyle;", "Başlık");
+    const sozcu = mem("Sözcü", "outlet", "2026-11-09T09:35:17Z", HALF, "Başka başlık");
+    expect(seedDisqualified(seed.article.description ?? "", "")).toBe("lead-in");
+    expect(pickFor(TITLE, [seed, sozcu], "Tohum")).toBeNull();
+  });
+});

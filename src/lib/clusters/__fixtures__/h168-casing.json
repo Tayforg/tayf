@@ -1,0 +1,691 @@
+{
+ "finding": "h168-titles-2",
+ "note": "Test-only. The member titles (newest first) and source slugs of the clusters whose stored neutral title is an İşçi Haber (isci-haber) headline that lost its capitals or that the ordinal fix changes (9df76d26, 2490109a), plus the five İşçi Haber-owned rows the picker keeps (8e179d37, 0792bdea, 688af268, f53a766f, 829ef5cc) and 37915ace (a stored title that must keep COP31), as read on production on 2026-11-12 (read-only SELECT of cluster_articles x articles x sources), with each stored title as it stood then, its stamp and article count. `opinion` is isOpinionUrl of the article URL (the URL itself is not kept).",
+ "clusters": [
+  {
+   "cid": "9df76d26",
+   "id": "9df76d26-9243-4689-bfdc-d2a9568146d5",
+   "stored": "Cumhurbaşkanı Erdoğan 111. dönem Kaymakamlar Kurası'nda",
+   "model": "extractive-v6",
+   "stamped": 18,
+   "article_count": 18,
+   "members": [
+    {
+     "source": "haber-com",
+     "title": "Cumhurbaşkanı Erdoğan: Benim gözümde kaymakamın mesaisi olmaz",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Cumhurbaşkanı Erdoğan 111. dönem kaymakamlar Kurası'nda",
+     "opinion": false
+    },
+    {
+     "source": "posta",
+     "title": "111. Dönem Kaymakamlar Kurası Töreni | Cumhurbaşkanı Erdoğan: 'Bu işin mesaisi olmaz'",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "SON DAKİKA! Cumhurbaşkanı Erdoğan'dan: Hiçbir yapıya müsamahamız yok",
+     "opinion": false
+    },
+    {
+     "source": "elips-haber",
+     "title": "Erdoğan 'kaymakamlar kurası' töreninde konuştu: Devlet kapısı, çare kapısıdır",
+     "opinion": false
+    },
+    {
+     "source": "cgtn-turk",
+     "title": "Cumhurbaşkanı Erdoğan konuşuyor...",
+     "opinion": false
+    },
+    {
+     "source": "turkiye-gazetesi",
+     "title": "Erdoğan, Kaymakamlar Kurası Töreni'nde konuşuyor",
+     "opinion": false
+    },
+    {
+     "source": "istiklal",
+     "title": "Cumhurbaşkanı Recep Tayyip Erdoğan: \"İnsanımızı Belirsizliğe Mahkûm Etmeyin”",
+     "opinion": false
+    },
+    {
+     "source": "ajans-haber",
+     "title": "Cumhurbaşkanı Erdoğan: “Kaymakamın mesaisi olmaz, gecesi gündüzü olmaz”",
+     "opinion": false
+    },
+    {
+     "source": "yeni-asir",
+     "title": "Başkan Erdoğan'dan 111. Dönem Kaymakamlar Kurası Töreni'nde önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "yeni-safak",
+     "title": "Cumhurbaşkanı Erdoğan'dan kaymakam adaylarına 'ateşten gömlek' uyarısı: Emanete gölge düşürmeyeceksiniz",
+     "opinion": false
+    },
+    {
+     "source": "hurriyet",
+     "title": "111. Dönem Kaymakamlar Kurası Töreni | Cumhurbaşkanı Erdoğan’dan önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "a-haber",
+     "title": "Başkan Erdoğan'dan Cumhurbaşkanlığı Külliyesi'nde önemli mesajlar",
+     "opinion": false
+    },
+    {
+     "source": "takvim",
+     "title": "Başkan Erdoğan'dan '111. Dönem Kaymakamlar Kurası'nda önemli mesajlar",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "111. Dönem Kaymakamlar Kurası Töreni... Başkan Erdoğan'dan önemli açıklamalar",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "Cumhurbaşkanı Erdoğan'dan \"ateşten gömlek\" benzetmesi: Benim gözümde kaymakamın mesaisi olmaz",
+     "opinion": false
+    },
+    {
+     "source": "sabah",
+     "title": "Son Dakika | Başkan Erdoğan'dan önemli açıklamalar: Yönetici zor günde vatandaşın yanında olmalı",
+     "opinion": false
+    },
+    {
+     "source": "trt-haber",
+     "title": "Cumhurbaşkanı Erdoğan: Yöneticinin güven vermesi köklü devlet geleneğimizin temelidir",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "2490109a",
+   "id": "2490109a-9a9e-4f3a-86f6-7a7ccdc58ec5",
+   "stored": "13. yargı paketi ne zaman çıkıyor? Detaylar belli oldu",
+   "model": "extractive-v6",
+   "stamped": 2,
+   "article_count": 2,
+   "members": [
+    {
+     "source": "isci-haber",
+     "title": "13. yargı paketi ne zaman çıkıyor? Detaylar belli oldu",
+     "opinion": false
+    },
+    {
+     "source": "yeni-akit",
+     "title": "13. Yargı Paketi çıktı mı, ne zaman Meclis'e gelecek? 13. Yargı Paketi maddeleri neler, infaz indirimi ve genel af var mı, kimler yararlanacak?",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "3039d877",
+   "id": "3039d877-3c4a-4132-8ff9-766faf030cc3",
+   "stored": "Bakan Bayraktar'dan libya ve venezuela mesajı",
+   "model": "extractive-v6",
+   "stamped": 6,
+   "article_count": 6,
+   "members": [
+    {
+     "source": "haber7",
+     "title": "Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı",
+     "opinion": false
+    },
+    {
+     "source": "posta",
+     "title": "Bakan Bayraktar'dan enerji diplomasisi! Türkiye'den Libya ve Venezuela ile yeni enerji iş birliği adımları",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "Bakan Bayraktar'dan enerji diplomasisi! Türkiye'den Libya ve Venezuela ile yeni enerji iş birliği adımları",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Bakan Bayraktar'dan libya ve venezuela mesajı",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "İKLİM ZİRVESİ COP31 ANTALYA - Bakan Bayraktar'dan Libya ve Venezuela ile enerji işbirliği mesajı",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "0834c3ba",
+   "id": "0834c3ba-8291-4bac-8d8e-9a81cbbcf364",
+   "stored": "Dışişleri Bakanı Hakan Fidan çöp31 zirvesini değerlendirdi",
+   "model": "extractive-v6",
+   "stamped": 6,
+   "article_count": 7,
+   "members": [
+    {
+     "source": "sabah",
+     "title": "Bakan Fidan'dan COP31 Liderler Zirvesi paylaşımı: “Çalışmalarımıza devam edeceğiz”",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "Bakan Fidan'dan COP31 Liderler Zirvesi'ne dair paylaşım",
+     "opinion": false
+    },
+    {
+     "source": "ajans-haber",
+     "title": "Bakan Fidan'dan COP31 Liderler Zirvesi sonrası iklim değişikliğiyle mücadele mesajı",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Dışişleri Bakanı Hakan Fidan çöp31 zirvesini değerlendirdi",
+     "opinion": false
+    },
+    {
+     "source": "posta",
+     "title": "Dışişleri Bakanı Hakan Fidan: COP31 toplantısının Liderler Zirvesi bölümü tamamlandı",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Dışişleri Bakanı Fidan'dan COP31 Liderler Zirvesi'ne dair paylaşım",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Dışişleri Bakanı Hakan Fidan, COP31 Liderler Zirvesi'nin tamamlandığını duyurdu",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "609f9e22",
+   "id": "609f9e22-805e-420e-8758-b721172d557d",
+   "stored": "İran Cumhurbaşkanı Pezeşkiyan'dan çöp31 temasları açıklaması",
+   "model": "extractive-v6",
+   "stamped": 2,
+   "article_count": 2,
+   "members": [
+    {
+     "source": "isci-haber",
+     "title": "İran Cumhurbaşkanı Pezeşkiyan'dan çöp31 temasları açıklaması",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "İran Cumhurbaşkanı Pezeşkiyan, COP31 kapsamında gerçekleştirdiği temasların olumlu geçtiğini söyledi",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "4797e4f6",
+   "id": "4797e4f6-7b7c-4a9f-8aba-c27b59fb26ff",
+   "stored": "Bakan kurum: Tarihte bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "haber7",
+     "title": "Bakan Kurum'dan COP31'den dünyaya çağrı: Kaderlerimiz birbirine bağlıdır",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Bakan kurum: Tarihte bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "Bakan Kurum: Bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "ecbc23a0",
+   "id": "ecbc23a0-cfde-4400-b6cb-9a86199884bb",
+   "stored": "Bakan memişoğlu: Bilgi ve tecrübeyi iş birliğine dönüştüreceğiz",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "haber7",
+     "title": "COP31’de sağlık için kritik adım! Bakan Memişoğlu 2026-2030 Eylem Planı’nı açıkladı",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Bakan memişoğlu: Bilgi ve tecrübeyi iş birliğine dönüştüreceğiz",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Bakan Memişoğlu: Ülkelerin bilgi ve tecrübelerini kalıcı işbirliğine dönüştürmeyi amaçlıyoruz",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "3175d6f7",
+   "id": "3175d6f7-f126-464d-9a0e-fc6f4fe2f032",
+   "stored": "Dışişleri bakanlığından Mısır'daki kazaya taziye",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 4,
+   "members": [
+    {
+     "source": "aksam",
+     "title": "Dışişleri Bakanlığından Mısır'a tren kazası için taziye mesajı",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Dışişleri bakanlığından Mısır'daki kazaya taziye",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Dışişleri Bakanlığından Mısır'daki tren kazasında hayatını kaybedenler için taziye mesajı",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Dışişleri Bakanlığı, Mısır'ın Giza'sındaki tren kazası için taziye mesajı yayımladı",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "8541cbe6",
+   "id": "8541cbe6-db02-4d8f-b427-1edbfbb45723",
+   "stored": "İranlı bakandan batı basınına soykırım eleştirisi",
+   "model": "extractive-v6",
+   "stamped": 2,
+   "article_count": 2,
+   "members": [
+    {
+     "source": "isci-haber",
+     "title": "İranlı bakandan batı basınına soykırım eleştirisi",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "İran Dışişleri Bakanı, Batı basınının İsrail'in Gazze'deki \"sessiz soykırımına\" ilgisizliğini eleştirdi",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "588c58ce",
+   "id": "588c58ce-e91f-44aa-b0d8-4636a5073717",
+   "stored": "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 3,
+   "members": [
+    {
+     "source": "isci-haber",
+     "title": "Bakan bak, Kktc başbakan yardımcısı ataoğlu ile görüştü",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi",
+     "opinion": false
+    },
+    {
+     "source": "tele1",
+     "title": "Bakan Bak, Dostluk Kupası öncesi KKTC Başbakan Yardımcısı Ataoğlu ile bir araya geldi",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "2040cdf1",
+   "id": "2040cdf1-eb07-4a98-8dc9-8df2b7c1fe06",
+   "stored": "Emine Erdoğan, undp Başkanı de croo ile bir araya geldi",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 4,
+   "members": [
+    {
+     "source": "sabah",
+     "title": "Emine Erdoğan'dan COP31 marjında önemli görüşmeler",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Emine Erdoğan, undp Başkanı de croo ile bir araya geldi",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Emine Erdoğan, BM Kalkınma Programı Başkanı De Croo ile görüştü",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Emine Erdoğan, BM Kalkınma Programı Başkanı De Croo ile görüştü:",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "37915ace",
+   "id": "37915ace-c34f-4a5c-8222-7adac23f3675",
+   "stored": "Cevdet yılmaz COP31 zirvesinde diplomatik temaslarda bulundu",
+   "model": "extractive-v6",
+   "stamped": 2,
+   "article_count": 2,
+   "members": [
+    {
+     "source": "isci-haber",
+     "title": "Cevdet yılmaz COP31 zirvesinde diplomatik temaslarda bulundu",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Cumhurbaşkanı Yardımcısı Yılmaz, temaslarda bulundu",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "8e179d37",
+   "id": "8e179d37-1e4d-427a-b7c6-e077f949e3aa",
+   "stored": "Bakan Tekin’den MHP Lideri Bahçeli’ye taziye ziyareti",
+   "model": "extractive-v6",
+   "stamped": 9,
+   "article_count": 11,
+   "members": [
+    {
+     "source": "yeni-safak",
+     "title": "Milli Eğitim Bakanı Tekin’den MHP lideri Bahçeli’ye makamında ziyaret: Hem taziyede bulundu hem düğüne davet etti",
+     "opinion": false
+    },
+    {
+     "source": "sozcu",
+     "title": "Bakan Tekin’den Bahçeli’ye taziye ziyaretinde düğün davetiyesi",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "Bakan Tekin'den Bahçeli'ye Meclis'te ziyaret! Düğün davetini iletti",
+     "opinion": false
+    },
+    {
+     "source": "sabah",
+     "title": "Milli Eğitim Bakanı Tekin, MHP lideri Bahçeli'yi ziyaret etti",
+     "opinion": false
+    },
+    {
+     "source": "elips-haber",
+     "title": "Bakan Tekin, Devlet Bahçeli'yi ziyaret etti",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "Bakan Tekin'den MHP Genel Başkanı Bahçeli'ye ziyaret",
+     "opinion": false
+    },
+    {
+     "source": "takvim",
+     "title": "Milli Eğitim Bakanı Yusuf Tekin'den Bahçeli'ye hem taziye hem davetiye! İki kitap takdim etti",
+     "opinion": false
+    },
+    {
+     "source": "a-haber",
+     "title": "Bakan Yusuf Tekin'den Devlet Bahçeli'ye ziyaret",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Bakan Tekin’den MHP Lideri Bahçeli’ye taziye ziyareti",
+     "opinion": false
+    },
+    {
+     "source": "yeni-akit",
+     "title": "Bakan Tekin’den MHP Lideri Devlet Bahçeli’ye taziye ziyareti",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "MEB Bakanı Tekin, TBMM'de Bahçeli'ye taziye dileklerini iletti ve kitap takdim etti",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "0792bdea",
+   "id": "0792bdea-e6f6-4823-b0b4-87c4481e391a",
+   "stored": "TBMM Başkanı Numan Kurtulmuş'tan 10 Kasım Atatürk'ü anma günü mesajı",
+   "model": "extractive-v6",
+   "stamped": 6,
+   "article_count": 8,
+   "members": [
+    {
+     "source": "cumhuriyet",
+     "title": "10 Kasım Atatürk'ü Anma Günü: Siyasi liderlerden dikkat çeken mesajlar",
+     "opinion": false
+    },
+    {
+     "source": "ajans-haber",
+     "title": "TBMM’de Atatürk için anma töreni düzenlendi",
+     "opinion": false
+    },
+    {
+     "source": "dirilis-postasi",
+     "title": "TBMM Başkanı Numan Kurtulmuş: Atatürk'ün aziz hatırasını yad ediyoruz",
+     "opinion": false
+    },
+    {
+     "source": "trt-haber",
+     "title": "Büyük Önder Atatürk için TBMM'de anıldı",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "TBMM Başkanı Numan Kurtulmuş'tan 10 Kasım Atatürk'ü anma günü mesajı",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "Siyasilerden 10 Kasım Atatürk'ü Anma Günü Mesajları",
+     "opinion": false
+    },
+    {
+     "source": "ekonomim",
+     "title": "TBMM Başkanı Kurtulmuş'tan 10 Kasım mesajı",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "TBMM Başkanı Kurtulmuş, Atatürk'ün vefatının 88. yılı için anma mesajı yayımladı",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "688af268",
+   "id": "688af268-9cdf-43ee-b836-f5c1d10613c8",
+   "stored": "İçişleri Bakanı Mustafa Çiftçi, 111. Dönem kaymakamlarını kabul etti",
+   "model": "extractive-v6",
+   "stamped": 2,
+   "article_count": 2,
+   "members": [
+    {
+     "source": "isci-haber",
+     "title": "İçişleri Bakanı Mustafa Çiftçi, 111. Dönem kaymakamlarını kabul etti",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "İçişleri Bakanı Çiftçi, 111. Dönem kaymakamlarını Bakanlıkta ağırladı",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "f53a766f",
+   "id": "f53a766f-cc38-4330-b6b0-c59c690918ea",
+   "stored": "Emine Erdoğan'dan iklim değişikliği için çağrı",
+   "model": "extractive-v6",
+   "stamped": 14,
+   "article_count": 16,
+   "members": [
+    {
+     "source": "anadolu-ajansi",
+     "title": "Emine Erdoğan'dan \"Küresel Sıfır Atık İttifakı Lider Eşleri Yüksek Düzeyli Toplantısı\"na ilişkin video paylaşımı",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "Emine Erdoğan'dan COP31 paylaşımı",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "Emine Erdoğan'dan COP31 paylaşımı",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Emine Erdoğan'dan 'Küresel Sıfır Atık Lider Eşleri Toplantısı'na ilişkin paylaşım",
+     "opinion": false
+    },
+    {
+     "source": "muhalif",
+     "title": "Emine Erdoğan'dan küresel iklim krizine karşı 'yaşam kültürü' çağrısı",
+     "opinion": false
+    },
+    {
+     "source": "son-dakika",
+     "title": "Emine Erdoğan: Sıfır atık anlayışını yaşam kültürümüzün parçası haline getirmeliyiz",
+     "opinion": false
+    },
+    {
+     "source": "tele1",
+     "title": "Emine Erdoğan: Sıfır atık anlayışını yaşam kültürümüzün parçası haline getirmeliyiz",
+     "opinion": false
+    },
+    {
+     "source": "yeni-safak",
+     "title": "Emine Erdoğan COP31 zirvesinde dünyaya seslendi: İklim değişikliği sadece çevre değil bir medeniyet krizidir",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "Emine Erdoğan: Sıfır Atık'ı konuşmak, aslında hayatı konuşmaktır",
+     "opinion": false
+    },
+    {
+     "source": "posta",
+     "title": "Emine Erdoğan: Sıfır Atık'ı konuşmak, aslında hayatı konuşmaktır",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Emine Erdoğan'dan iklim değişikliği için çağrı",
+     "opinion": false
+    },
+    {
+     "source": "haberport",
+     "title": "Emine Erdoğan’dan döngüsel çağrı: Sıfır Atık hayatla bağ kurmaktır",
+     "opinion": false
+    },
+    {
+     "source": "milliyet",
+     "title": "Emine Erdoğan: Sıfır Atık'ı konuşmak, aslında hayatı konuşmaktır",
+     "opinion": false
+    },
+    {
+     "source": "sabah",
+     "title": "Emine Erdoğan: \"Sıfır Atık'ı konuşmak, aslında hayatı konuşmaktır\"",
+     "opinion": false
+    },
+    {
+     "source": "trt-haber",
+     "title": "Emine Erdoğan: İklim değişikliğiyle mücadele, teknik tedbirlerin ötesinde bir zihniyet dönüşümünü gerektiriyor",
+     "opinion": false
+    },
+    {
+     "source": "hurriyet",
+     "title": "Emine Erdoğan: Uyarıların ötesine geçmeliyiz",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "829ef5cc",
+   "id": "829ef5cc-2524-4afc-83dd-123189f1906a",
+   "stored": "1 milyon kişinin GSS prim borcu silinecek: 15 maddelik torba yasa Meclis'e geliyor",
+   "model": "extractive-v6",
+   "stamped": 7,
+   "article_count": 10,
+   "members": [
+    {
+     "source": "onedio",
+     "title": "GSS Prim Borçları Silinecek mi? Genel Sağlık Sigortası Affı Kimleri Kapsıyor, Borç Nasıl Sorgulanır?",
+     "opinion": false
+    },
+    {
+     "source": "f5-haber",
+     "title": "GSS prim borçlarına af düzenlemesi! Kimleri kapsayacağı açıklandı",
+     "opinion": false
+    },
+    {
+     "source": "haber7",
+     "title": "TBMM'ye sunuldu: GSS prim borçları silinecek",
+     "opinion": false
+    },
+    {
+     "source": "karar",
+     "title": "GSS prim borçlarına af geliyor: 2017 öncesi borçların tamamı ceza ve faiziyle silinecek",
+     "opinion": false
+    },
+    {
+     "source": "sputnik-turkce",
+     "title": "GSS borçları siliniyor: Milyonlarca kişiyi ilgilendiren teklif TBMM'de",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "GSS prim borcu silinecek mi? SON DAKİKA! Genel Sağlık Sigortası borçları için af çıktı mı, kimleri kapsıyor?",
+     "opinion": false
+    },
+    {
+     "source": "abc-haber",
+     "title": "1 milyon kişinin GSS borcu silinebilir! İşte kapsam ve kritik tarih",
+     "opinion": false
+    },
+    {
+     "source": "takvim",
+     "title": "5,6 milyar TL'lik GSS borçlarına af geliyor! 2 milyon 199 bin kişiyi ilgilendiren torba yasa Meclis'te",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "1 milyon kişinin GSS prim borcu silinecek: 15 maddelik torba yasa Meclis'e geliyor",
+     "opinion": false
+    },
+    {
+     "source": "a-haber",
+     "title": "1 milyon kişinin GSS prim borcu siliniyor! 15 maddelik torba yasa bugün Meclis'te",
+     "opinion": false
+    }
+   ]
+  }
+ ]
+}

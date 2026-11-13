@@ -57,6 +57,7 @@ import {
 } from "@/lib/clusters/related-clusters";
 import { getTopicClusters } from "@/lib/clusters/topic-query";
 import { hasIndexableTitle } from "@/lib/seo/indexable-title";
+import { isNoticeOnlyCluster } from "@/lib/seo/notice-only-clusters";
 import { awaitRequestScope, coalesce } from "@/lib/cache-resilience";
 import { hasStoryCardCoverage, storyCardHref } from "@/lib/cards/story-card";
 import { buildShareText } from "@/lib/clusters/share";
@@ -263,17 +264,40 @@ const NO_HEADLINE_FALLBACK = "Haber";
 // test is hasIndexableTitle (src/lib/seo/indexable-title.ts) on the title the
 // page serves (`title_tr`, which is the neutral title when there is one); the
 // month and news sitemaps and the IndexNow ping apply the very same test, so
-// none of them lists a URL this tag refuses. Module-private: a page file may
-// only export the Next.js route API.
+// none of them lists a URL this tag refuses for that reason (the notice-only
+// condition below is the one exception).
+//
+// h168-notices-1: so is a cluster in which EVERY member is a legal notice (a
+// court or tender notice: isLegalNotice on the member's title, url and
+// description; isNoticeOnlyCluster, src/lib/seo/notice-only-clusters.ts). Two
+// municipalities' EKAP tenders became the 2-source story "Ümraniye belediye
+// başkanlığı" and were served index,follow. One real member keeps the page
+// indexable, and an empty member list is not "every member" (a read that
+// returned no members says nothing about the cluster). Reader side only: no
+// data rewrite, the page still answers 200 with its own canonical.
+//
+// The sitemaps and the IndexNow ping apply the same title test (and the news
+// sitemap its own language-isolation test) but NOT the notice-only test: they
+// read clusters without members, and a member read per rebuild (about 75 reads
+// and up to ~25 MB for each hourly month-sitemap rebuild) costs far more than
+// the few legacy notice-only clusters are worth. So a legacy notice-only
+// cluster can still be listed in a sitemap or pinged while its page says
+// noindex. New ones cannot form: isLegalNotice's description rules now drop
+// notices at ingest. Module-private: a page file may only export the Next.js
+// route API.
 function isIndexableCluster(
   cluster: { is_archived: boolean; article_count: number; title_tr: string },
   hasHeadline: boolean,
+  members: ReadonlyArray<{
+    article: { title: string; url: string; description?: string | null };
+  }>,
 ): boolean {
   return (
     !cluster.is_archived &&
     hasHeadline &&
     cluster.article_count >= 2 &&
-    hasIndexableTitle({ title_tr: cluster.title_tr })
+    hasIndexableTitle({ title_tr: cluster.title_tr }) &&
+    !isNoticeOnlyCluster(members.map((m) => m.article))
   );
 }
 
@@ -401,8 +425,9 @@ export async function generateMetadata({
     // article_count >= 2 and skip a question / explainer title through the same
     // hasIndexableTitle, so the page agrees with them on both counts. The
     // canonical, og:url and JSON-LD stay as they are: shared links still work,
-    // and the page indexes itself the moment a second outlet joins.
-    ...(!isIndexableCluster(cluster, hasHeadline)
+    // and the page indexes itself the moment a second outlet joins. A cluster of
+    // legal notices only (h168-notices-1) is noindex the same way.
+    ...(!isIndexableCluster(cluster, hasHeadline, members)
       ? { robots: { index: false, follow: true } }
       : {}),
     openGraph: {
@@ -1255,7 +1280,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
       {/* İlgili haberler: last child, so its streamed arrival moves nothing
           above it. Indexable pages only (see isIndexableCluster). */}
-      {isIndexableCluster(cluster, hasHeadline) && (
+      {isIndexableCluster(cluster, hasHeadline, members) && (
         <Suspense fallback={null}>
           <ClusterRelatedSlot
             clusterId={cluster.id}

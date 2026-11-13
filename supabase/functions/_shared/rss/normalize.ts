@@ -664,8 +664,8 @@ export function prepareItem(
 /**
  * The heavy half of `normalizeItem`: legal notice, canonical url, description,
  * image, date, content hash, category. Returns `null` for a BİK legal notice
- * (`isLegalNotice`). `nowMs` is the clock `parseDate` falls back to and clamps
- * against.
+ * (`isLegalNotice` on the title, the url and the raw description). `nowMs` is
+ * the clock `parseDate` falls back to and clamps against.
  */
 export function completeItem(
   source: RssSource,
@@ -674,12 +674,30 @@ export function completeItem(
 ): NormalizedArticle | null {
   const { item, title, url: absoluteUrl } = prepared;
 
-  // ingest-hygiene: BİK court / official notices are not news.
-  if (isLegalNotice(title, absoluteUrl)) return null;
+  // The raw feed description, read twice below: by the notice check and by
+  // cleanDescription (which stores it).
+  const rawDescription = item.contentSnippet ?? item.content;
+
+  // ingest-hygiene: BİK court / official notices are not news. h168-notices-1:
+  // the description is read too (Yeniçağ's "İlan-<title>" notices, municipal
+  // and BOTAŞ tenders under an all-caps title with the 4734 sayılı Kamu İhale
+  // Kanunu sentence), clamped like cleanDescription so a huge description
+  // never costs more than a bounded scan.
+  if (
+    isLegalNotice(
+      title,
+      absoluteUrl,
+      typeof rawDescription === "string"
+        ? clampForScan(rawDescription, DESCRIPTION_SCAN_CAP)
+        : null,
+    )
+  ) {
+    return null;
+  }
 
   const canonicalUrl = canonicalizeUrl(absoluteUrl, source.slug);
 
-  const description = cleanDescription(item.contentSnippet ?? item.content);
+  const description = cleanDescription(rawDescription);
   const imageUrl = extractImage(item);
   const publishedAt = parseDate(item.isoDate ?? item.pubDate, {
     nowMs,
@@ -718,7 +736,8 @@ export function completeItem(
  * exclusively. Returns `null` if the item lacks a link, has no headline text
  * (see below), links to an ad click-tracker host (`isAdClickLink`, counted in
  * `counters.adLinks`), links to a paid-content section (`isPaidContentUrl`,
- * counted in `counters.paidContent`), or is a BİK legal notice (`isLegalNotice`).
+ * counted in `counters.paidContent`), or is a BİK legal notice (`isLegalNotice`,
+ * which also reads the description: h168-notices-1).
  *
  * "No headline text" = the raw title is empty or whitespace-only, or the
  * decoded title holds no letter or digit (`isContentlessTitle`: '&nbsp',

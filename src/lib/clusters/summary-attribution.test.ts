@@ -1969,7 +1969,12 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
 
     it("the gates in front of the choice are untouched: blank, rights-blocked everywhere, wire majority, tidied-empty", () => {
       const { members } = story();
-      expect(withTitle(members, TITLE, "   ")).toBeNull();
+      // A blank summary is hidden without the headline (rss.xml, the digest, the cards) ...
+      expect(summaryAttribution({ summary: "   ", members, wire: notWire })).toBeNull();
+      // ... and, since h168-ozet-1, replaced by the member that agrees best when the page passes it:
+      // Türkiye Gazetesi, the newest of the two members that cover the whole headline; the earliest
+      // member (TRT, the stand-in seed) is never its own replacement.
+      expect(withTitle(members, TITLE, "   ")).toStrictEqual({ text: TURKIYE_TEXT, source: members[0]!.source });
 
       const blocked = story();
       blocked.seed.source.excerpt_allowed = false;
@@ -1983,8 +1988,13 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
       // Not a wire redistribution: the same cluster is fine.
       expect(withTitle(wireStory.members, TITLE, SEED_TEXT, notWire)?.source?.slug).toBe("turkiye-gazetesi");
 
+      // A summary that is only a CTA tidies to nothing and is hidden: with no member that agrees ...
       const cta = outlet("TRT Haber", "trt-haber", SEED_AT, "Devamı için tıklayınız");
-      expect(withTitle([cta, ...members.slice(0, 2)], TITLE, "Devamı için tıklayınız")).toBeNull();
+      expect(withTitle([cta], TITLE, "Devamı için tıklayınız")).toBeNull();
+      expect(summaryAttribution({ summary: "Devamı için tıklayınız", members: [cta, ...members.slice(0, 2)], wire: notWire })).toBeNull();
+      // ... and, since h168-ozet-1 (a CTA-only text is a placeholder by the tidy step's own test), replaced
+      // by the member that agrees best when the page passes the headline: Türkiye Gazetesi (1.0, the newest).
+      expect(withTitle([cta, ...members.slice(0, 2)], TITLE, "Devamı için tıklayınız")?.source?.slug).toBe("turkiye-gazetesi");
     });
 
     it("a rights-blocked seed hands the attribution to the next matching member, then compares", () => {
@@ -2633,9 +2643,10 @@ describe("agreeWithTitle: the seed is replaced only when it disagrees with the t
         expect(withTitle(members, VANCE_TITLE, VANCE_SEED, notWire)?.source?.slug).toBe("aksam");
       });
 
-      it("a blank summary and a summary no member holds behave as before", () => {
+      it("a summary no member holds behaves as before; a blank one is hidden without the headline (h168-ozet-1: with it, Akşam's 1.0 sentence)", () => {
         const { members } = vanceMembers();
-        expect(withTitle(members, VANCE_TITLE, "   ")).toBeNull();
+        expect(summaryAttribution({ summary: "   ", members, wire: notWire })).toBeNull();
+        expect(withTitle(members, VANCE_TITLE, "   ")?.source?.slug).toBe("aksam");
         const stored = 'Başka bir metin, hiçbir üyenin açıklaması olmayan, "saklanmış bir özet metni.';
         expect(withTitle(members, VANCE_TITLE, stored)).toStrictEqual({ text: stored, source: null });
       });
@@ -4448,5 +4459,273 @@ describe("describeForMeta never appends '…' to a cut that already ends in '...
     const text = `${first} Yılmaz, “${"çok önemli bir adım ".repeat(10)}`;
     const out = describeForMeta({ count: 1, attribution: { text, source: HK } }, 160);
     expect(out).toBe(`1 kaynak. Hukuki Haber: ${first}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h168-ozet-1: a placeholder ("Ayrıntılar geliyor...") or blank seed hid the Özet although other
+// members had a clean sentence. 41ebdae3 (İzmir HABAŞ explosion, 16 dead), bb7e0804 (Kabine) and
+// df08098c showed no Özet and a fallback meta description; 1e6350f0's summary_tr is " " (AA's
+// description is empty). The shown text is still a member's own description, attributed to that
+// member, and only when the page passes the headline (`agreeWithTitle`).
+// ---------------------------------------------------------------------------
+describe("h168-ozet-1: a placeholder or blank seed is replaced by a clean member's sentence", () => {
+  const WIRE_OFF = { isWireRedistribution: false };
+
+  function h168(
+    name: string,
+    slug: string,
+    kind: SourceKind,
+    at: string,
+    title: string,
+    description: string,
+    opts: { hash?: string | null; excerptAllowed?: boolean } = {},
+  ): ClusterDetailMember {
+    const source = { ...src(slug), name, kind };
+    if (opts.excerptAllowed !== undefined) source.excerpt_allowed = opts.excerptAllowed;
+    return {
+      source,
+      article: {
+        id: `${slug}@${at}`,
+        title,
+        url: `https://example.com/${slug}`,
+        published_at: at,
+        image_url: null,
+        content_hash: opts.hash === undefined ? `h-${slug}` : opts.hash,
+        description,
+      },
+    };
+  }
+
+  const ask = (summary: string, members: ClusterDetailMember[], title: string | undefined, wire = WIRE_OFF) =>
+    summaryAttribution({ summary, members, wire, agreeWithTitle: title });
+
+  // 41ebdae3 (3 kaynak): Milliyet's seed is the placeholder; Sözcü's lead is a clean sentence; Yeni Asır's is a
+  // Turkuvaz CTA cut ("...Devamı için tıklayınız"), a stub that never stands in.
+  const PLACEHOLDER = "Ayrıntılar geliyor...";
+  const TITLE_41 = "İzmir'de Habaş Demir Çelik Fabrikası'nda patlama";
+  const SOZCU_41 = "İzmir'in Aliağa ilçesinde HABAŞ'a ait karbondioksit dolum tesisinde patlama meydana geldi.";
+  const YENI_ASIR_41 =
+    "Son dakika İzmir haberleri...İzmir'de Aliağa HABAŞ Demir-Çelik Fabrikası’nda patlama meydana geldi. İzmir Valiliği tarafından yapılan açıklamada patlamada 10 vatandaşın hayatını kaybettiği ve yaralılar...Devamı için tıklayınız";
+  const members41 = (): ClusterDetailMember[] => [
+    h168("Milliyet", "milliyet", "outlet", "2026-11-09T09:33:58Z", "SON DAKİKA PATLAMA HABERLERİ: İzmir'de HABAŞ Demir-Çelik Fabrikası’nda patlama", PLACEHOLDER),
+    h168("Sözcü", "sozcu", "outlet", "2026-11-09T09:35:17Z", "SON DAKİKA | İzmir'de Habaş Demir Çelik Fabrikası'nda patlama", SOZCU_41),
+    h168("Yeni Asır", "yeni-asir", "outlet", "2026-11-09T09:45:07Z", "Son dakika: İzmir'deki HABAŞ demir çelik fabrikasında patlama", YENI_ASIR_41),
+  ];
+
+  describe("1. 41ebdae3: Milliyet's 'Ayrıntılar geliyor...' gives way to Sözcü's sentence", () => {
+    it("is hidden today without the headline and is Sözcü's sentence, attributed to Sözcü, with it", () => {
+      const members = members41();
+      expect(ask(PLACEHOLDER, members, undefined)).toBeNull();
+      const res = ask(PLACEHOLDER, members, TITLE_41);
+      expect(res).toEqual({ text: SOZCU_41, source: members[1]!.source });
+      expect(res?.source?.slug).toBe("sozcu");
+      expect(res?.opinion).toBeUndefined();
+    });
+
+    it("the member order does not matter", () => {
+      const members = members41();
+      expect(ask(PLACEHOLDER, [...members].reverse(), TITLE_41)?.source?.slug).toBe("sozcu");
+      expect(ask(PLACEHOLDER, [members[1]!, members[2]!, members[0]!], TITLE_41)?.source?.slug).toBe("sozcu");
+    });
+
+    it("the meta description carries Sözcü's sentence, not the 'tek haber' fallback", () => {
+      const res = ask(PLACEHOLDER, members41(), TITLE_41);
+      const meta = describeForMeta({ count: 3, attribution: res, title: TITLE_41 });
+      expect(meta.startsWith("3 kaynak. Sözcü: İzmir'in Aliağa ilçesinde HABAŞ'a ait karbondioksit")).toBe(true);
+      expect(meta).not.toContain("tek haber");
+      // The same cluster before: no attribution, the title fallback.
+      expect(describeForMeta({ count: 3, attribution: ask(PLACEHOLDER, members41(), undefined), title: TITLE_41 })).toBe(
+        "3 kaynak, tek haber: İzmir'de Habaş Demir Çelik Fabrikası'nda patlama",
+      );
+    });
+
+    it("Yeni Asır's CTA cut is not what is shown, and without Sözcü nothing qualifies, so the Özet stays hidden", () => {
+      const withoutSozcu = members41().filter((m) => m.source.slug !== "sozcu");
+      expect(ask(PLACEHOLDER, withoutSozcu, TITLE_41)).toBeNull();
+    });
+
+    it("the live row: Sözcü's description ends in a cut ('... itfai...'), a stub, so the real cluster stays hidden (documented residual)", () => {
+      const members = members41();
+      members[1]!.article.description = `${SOZCU_41} Olayın ardından bölgeye itfai...`;
+      expect(ask(PLACEHOLDER, members, TITLE_41)).toBeNull();
+    });
+  });
+
+  // bb7e0804 (4 kaynak): the stored title is "Son dakika... Kabine, ..."; the neutral one is the page's headline.
+  describe("2. bb7e0804: Milliyet's placeholder gives way to Haberet's (or Hürriyet's) sentence", () => {
+    const TITLE_BB = "Kabine, Cumhurbaşkanı Erdoğan başkanlığında toplandı";
+    const KABINE = "Kabine, Cumhurbaşkanı Recep Tayyip Erdoğan'ın başkanlığında toplandı";
+    const membersBb = (): ClusterDetailMember[] => [
+      h168("Milliyet", "milliyet", "outlet", "2026-11-09T13:34:49Z", "Son dakika... Kabine, Cumhurbaşkanı Erdoğan başkanlığında toplandı", PLACEHOLDER),
+      h168("Hürriyet", "hurriyet", "outlet", "2026-11-09T13:44:04Z", "Kabine, Cumhurbaşkanı Erdoğan başkanlığında toplandı", `Son dakika… ${KABINE}`),
+      h168("CNN Türk", "cnn-turk", "outlet", "2026-11-09T13:53:10Z", "Son dakika... Kabine, Cumhurbaşkanı Erdoğan başkanlığında toplandı", "Son dakika haberine göre; Cumhurbaşkanı Recep Tayyip Erdoğan, Kabine Toplantısı'na başkanlık ediyor."),
+      h168("Haberet", "haberet", "outlet", "2026-11-09T14:31:52Z", "Kabine, Cumhurbaşkanı Erdoğan başkanlığında toplandı", KABINE),
+    ];
+
+    it("returns the tidied sentence of Haberet or Hürriyet, never the placeholder", () => {
+      const res = ask(PLACEHOLDER, membersBb(), TITLE_BB);
+      expect(res).not.toBeNull();
+      expect(["Haberet", "Hürriyet"]).toContain(res?.source?.name);
+      expect(res?.text).toBe(KABINE);
+      expect(res?.text).not.toMatch(/Ayrıntılar/);
+    });
+
+    it("is hidden without the headline", () => {
+      expect(ask(PLACEHOLDER, membersBb(), undefined)).toBeNull();
+    });
+  });
+
+  // 1e6350f0 (3 kaynak): summary_tr is " ", AA's description is empty, Diriliş Postası and haberler.com have sentences.
+  describe("3. 1e6350f0: a blank summary_tr takes the sentence of a member that agrees with the headline", () => {
+    const TITLE_1E = "TBMM Başkanı Kurtulmuş, ATO Başkanı Baran'ı kabul etti";
+    const DIRILIS = "TBMM Başkanı Numan Kurtulmuş, ATO Başkanı Gürsel Baran ve beraberindeki heyeti kabul etti.";
+    const members1e = (): ClusterDetailMember[] => [
+      h168("Haberler.com", "haberler-com", "aggregator", "2026-11-11T14:21:33Z", "TBMM Başkanı Kurtulmuş, ATO Başkanı Baran ve kurulunu basına kapalı kabul etti", "TBMM Başkanı Numan Kurtulmuş, Ankara Ticaret Odası (ATO) Başkanı Gürsel Baran ve beraberindeki yönetim kurulu üyelerini kabul etti. TBMM Başkanlığından yapılan açıklamaya göre Kurtulmuş'un makamındaki görüşme basına kapalı gerçekleşti."),
+      h168("Anadolu Ajansı", "anadolu-ajansi", "wire", "2026-11-11T14:22:44Z", "TBMM Başkanı Kurtulmuş, ATO Başkanı Baran'ı kabul etti", ""),
+      h168("Diriliş Postası", "dirilis-postasi", "outlet", "2026-11-11T14:48:00Z", "TBMM Başkanı Kurtulmuş, ATO Başkanı Baran'ı kabul etti", DIRILIS),
+    ];
+
+    it("returns Diriliş Postası's sentence, attributed to it, for ' ', '' and a newline alike", () => {
+      for (const blank of [" ", "", "\n \t"]) {
+        const members = members1e();
+        const res = ask(blank, members, TITLE_1E);
+        expect(res, JSON.stringify(blank)).toEqual({ text: DIRILIS, source: members[2]!.source });
+      }
+    });
+
+    it("is hidden without the headline (rss.xml, the digest and the cards pass none)", () => {
+      expect(ask(" ", members1e(), undefined)).toBeNull();
+      expect(summaryAttributionWithoutMembers({ summary: " ", wire: WIRE_OFF })).toBeNull();
+      expect(resolveSummaryAttribution({ summary: " ", members: members1e(), lookupFailed: false, wire: WIRE_OFF })).toBeNull();
+      expect(resolveSummaryAttribution({ summary: " ", members: undefined, lookupFailed: false, wire: WIRE_OFF })).toBeNull();
+      expect(resolveSummaryAttribution({ summary: " ", members: undefined, lookupFailed: true, wire: WIRE_OFF })).toBeNull();
+    });
+
+    it("the member order does not matter", () => {
+      expect(ask(" ", [...members1e()].reverse(), TITLE_1E)?.source?.slug).toBe("dirilis-postasi");
+    });
+
+    it("a headline with too few content words says nothing: still hidden", () => {
+      expect(ask(" ", members1e(), "Kabul etti")).toBeNull();
+      expect(ask(" ", members1e(), "")).toBeNull();
+    });
+
+    it("no members, or only members that do not agree, keep it hidden", () => {
+      expect(ask(" ", [], TITLE_1E)).toBeNull();
+      const weak = members1e();
+      weak[2]!.article.description = "Hava bugün parçalı bulutlu ve rüzgarlı geçecek, sıcaklıklar mevsim normallerinde seyredecek.";
+      expect(ask(" ", weak, TITLE_1E)).toBeNull();
+    });
+
+    it("the earliest member that may be shown is the stand-in seed: a rights-blocked earliest member is skipped, never read", () => {
+      const members = members1e();
+      members[0]!.source.excerpt_allowed = false; // earliest, blocked: Anadolu Ajansı becomes the stand-in seed
+      expect(ask(" ", members, TITLE_1E)?.source?.slug).toBe("dirilis-postasi");
+      // Every member blocked: nobody may be shown, nothing to stand in.
+      for (const m of members) m.source.excerpt_allowed = false;
+      expect(ask(" ", members, TITLE_1E)).toBeNull();
+    });
+
+    // h169 review (ts-3): the stand-in is never its own replacement. The blocked earliest member (haberler.com) is skipped, the next
+    // one that may be shown (here an outlet, so that its kind never excludes it) is the stand-in, and its sentence, which agrees
+    // with the headline better than Diriliş Postası's, is not what is shown. With the stand-in taken from inTimeOrder(members)[0]
+    // (the rights filter dropped) the blocked member would stand in and this sentence would win: the test fails then.
+    it("a stand-in whose own sentence agrees better is not its own replacement: the next member is shown", () => {
+      const AGREES_BEST = "TBMM Başkanı Kurtulmuş, ATO Başkanı Baran'ı kabul etti. Görüşme Meclis'te yapıldı.";
+      const WEAKER = "TBMM Başkanı Numan Kurtulmuş, Ankara Ticaret Odası yönetim kurulunu kabul etti.";
+      const members = members1e();
+      members[0]!.source.excerpt_allowed = false; // earliest, blocked
+      members[1]!.source.kind = "outlet"; // the earliest member that may be shown, and never excluded by its kind
+      members[1]!.article.description = AGREES_BEST;
+      members[2]!.article.description = WEAKER; // still a sentence that qualifies, with a lower score than the stand-in's
+
+      const res = ask(" ", members, TITLE_1E);
+      expect(res?.source?.slug).toBe("dirilis-postasi");
+      expect(res?.text).toBe(WEAKER);
+
+      // The control: when someone EARLIER stands in (a member that may be shown but holds nothing useful), the better sentence wins,
+      // so it really does agree better than Diriliş Postası's and only the stand-in rule kept it out above.
+      const earlier = h168("Erken", "erken", "outlet", "2026-11-11T14:00:00Z", "Başka haber", "");
+      expect(ask(" ", [earlier, ...members], TITLE_1E)?.source?.slug).toBe("anadolu-ajansi");
+      expect(ask(" ", [earlier, ...members], TITLE_1E)?.text).toBe(AGREES_BEST);
+    });
+  });
+
+  describe("4. unchanged", () => {
+    it("a placeholder that is the only member is still hidden, with the meta fallback of every other hidden summary", () => {
+      const only = [h168("Milliyet", "milliyet", "outlet", "2026-11-09T09:33:58Z", "Başlık", PLACEHOLDER)];
+      expect(ask(PLACEHOLDER, only, TITLE_41)).toBeNull();
+      expect(ask(PLACEHOLDER, only, undefined)).toBeNull();
+      expect(describeForMeta({ count: 1, attribution: ask(PLACEHOLDER, only, TITLE_41), title: TITLE_41 })).toBe(
+        describeForMeta({ count: 1, attribution: ask("Click to continue", [h168("Milliyet", "milliyet", "outlet", "2026-11-09T09:33:58Z", "Başlık", "Click to continue")], TITLE_41), title: TITLE_41 }),
+      );
+    });
+
+    it("a placeholder with no member holding it (the stored text is not any current description) is hidden", () => {
+      const members = members41();
+      members[0]!.article.description = "Başka bir metin";
+      expect(ask(PLACEHOLDER, members, TITLE_41)).toBeNull();
+    });
+
+    it("a placeholder from a source that has asked Tayf not to reuse its text stays hidden (BL-13), whatever the others hold", () => {
+      const members = members41();
+      members[0]!.source.excerpt_allowed = false;
+      expect(ask(PLACEHOLDER, members, TITLE_41)).toBeNull();
+    });
+
+    it("BL-13: a rights-blocked member is never the replacement, and the next qualifier is taken instead", () => {
+      const members = members41();
+      members[1]!.source.excerpt_allowed = false;
+      expect(ask(PLACEHOLDER, members, TITLE_41)).toBeNull();
+      const second = h168("Karar", "karar", "outlet", "2026-11-09T09:50:00Z", "Başka başlık", "İzmir Aliağa'daki HABAŞ Demir Çelik Fabrikası'nda meydana gelen patlamada çok sayıda kişi hayatını kaybetti.");
+      const res = ask(PLACEHOLDER, [...members, second], TITLE_41);
+      expect(res?.source?.slug).toBe("karar");
+      // The same for the blank seed.
+      expect(ask(" ", [...members, second], TITLE_41)?.source?.slug).toBe("karar");
+    });
+
+    it("a wire or an aggregator never stands in for the seed", () => {
+      for (const kind of ["wire", "aggregator"] as const) {
+        const members = members41();
+        members[1]!.source.kind = kind;
+        expect(ask(PLACEHOLDER, members, TITLE_41), kind).toBeNull();
+      }
+    });
+
+    it("wire majority: a member that holds a dispatch the wire redistribution copied is not the replacement", () => {
+      const members = members41();
+      const copy = h168("Hürriyet", "hurriyet", "outlet", "2026-11-09T09:36:00Z", "Başka başlık", "Kısa metin.", { hash: "h-dispatch" });
+      members[1]!.article.content_hash = "h-dispatch"; // Sözcü and Hürriyet share a hash: the largest text of the wire redistribution
+      expect(ask(PLACEHOLDER, [...members, copy], TITLE_41, { isWireRedistribution: true })).toBeNull();
+      // Without the wire flag the same members are an ordinary cluster, and Sözcü is the pick again.
+      expect(ask(PLACEHOLDER, [...members, copy], TITLE_41)?.source?.slug).toBe("sozcu");
+    });
+
+    // h169 review (ts-3): the same gate on the BLANK seed (blankSeedReplacement hands findAgreeingMember the wire majority's hashes
+    // itself). Replacing `wireMajority(members, wire).hashes` with an empty set makes this fail.
+    it("wire majority, blank seed: the member that holds the redistributed dispatch is not the replacement either", () => {
+      const members = members41();
+      const copy = h168("Hürriyet", "hurriyet", "outlet", "2026-11-09T09:36:00Z", "Başka başlık", "Kısa metin.", { hash: "h-dispatch" });
+      members[1]!.article.content_hash = "h-dispatch"; // Sözcü and Hürriyet share the dispatch the wire redistribution copied
+      for (const blank of [" ", "", "\n \t"]) {
+        const res = ask(blank, [...members, copy], TITLE_41, { isWireRedistribution: true });
+        expect(res, JSON.stringify(blank)).toBeNull();
+        expect(res?.source?.slug, JSON.stringify(blank)).not.toBe("sozcu");
+        // Without the wire flag it is an ordinary cluster again, and Sözcü's sentence is the Özet.
+        expect(ask(blank, [...members, copy], TITLE_41)?.source?.slug, JSON.stringify(blank)).toBe("sozcu");
+      }
+    });
+
+    it("a clean seed is unchanged: the Özet is the seed's, attributed to it, with or without the headline", () => {
+      const seed = "Bakan Yılmaz yeni vergi düzenlemesini bugün Ankara'da açıkladı.";
+      const members = [
+        h168("Milliyet", "milliyet", "outlet", "2026-11-09T09:33:58Z", "Başlık", seed),
+        h168("Sözcü", "sozcu", "outlet", "2026-11-09T09:35:17Z", "Başka başlık", SOZCU_41),
+      ];
+      const withTitle = ask(seed, members, "Bakan Yılmaz vergi düzenlemesini açıkladı");
+      expect(withTitle).toEqual({ text: seed, source: members[0]!.source });
+      expect(ask(seed, members, undefined)).toEqual(withTitle);
+    });
   });
 });
