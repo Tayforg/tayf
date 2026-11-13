@@ -19,13 +19,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // ---------------------------------------------------------------------------
 
 const getPoliticsClusters = vi.fn();
-vi.mock("@/lib/clusters/politics-query", () => ({
-  getPoliticsClusters: () => getPoliticsClusters(),
-}));
+// Only the read is faked: the page's pure helpers (splitHomeFeed, knownBreakingIds; h170-roadmap-2) stay real.
+vi.mock("@/lib/clusters/politics-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/politics-query")>();
+  return { ...actual, getPoliticsClusters: () => getPoliticsClusters() };
+});
 
+// Every argument is forwarded, so a call for page 1 (`searchClusters(q)`) and for a later archive page
+// (`searchClusters(q, 2)`, h170-roadmap-1) are told apart exactly as the page makes them.
 const searchClusters = vi.fn();
 vi.mock("@/lib/clusters/search-query", () => ({
-  searchClusters: (q: string) => searchClusters(q),
+  searchClusters: (...args: unknown[]) => searchClusters(...args),
 }));
 
 // h153: the home search's one link row (a BIST code or an outlet name). The
@@ -60,11 +64,32 @@ vi.mock("@/lib/time", async (importOriginal) => {
   };
 });
 
+// h170-roadmap-3: the "Yükselen konular" rail reads the same cached entry /trends reads. HomeFeed starts
+// that read beside the feed read (loadRisingRail) and never awaits it (the rail is its own Suspense
+// boundary), so the read is a spy a test can leave pending or reject.
+const getRisingEntities = vi.fn();
+vi.mock("@/lib/trends/rising-query", () => ({
+  getRisingEntities: () => getRisingEntities(),
+}));
+
+// h170-roadmap-3: dailyTeaserSlot passes through to the real implementation unless a test installs
+// `teaserOverride`, to show the rail renders whether or not the teaser does.
+let teaserOverride: ((input: unknown) => unknown) | null = null;
+vi.mock("@/lib/game/daily-teaser", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/game/daily-teaser")>();
+  return {
+    ...actual,
+    dailyTeaserSlot: (input: Parameters<typeof actual.dailyTeaserSlot>[0]) =>
+      teaserOverride ? teaserOverride(input) : actual.dailyTeaserSlot(input),
+  };
+});
+
 import HomePage, { HomeFeed, generateMetadata } from "./page";
 import { ClearSearchLink } from "@/components/home/clear-search-link";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { FollowButton } from "@/components/follow/follow-button";
 import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
+import { RisingRail } from "@/components/home/rising-rail";
 import { homeFirstCard } from "@/lib/home/first-card";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 import { resultCountPhrase } from "@/lib/search/search-status";
@@ -1586,5 +1611,702 @@ describe("HomeFeed — search intent row (h153)", () => {
 
     expect(started).toBe(3);
     expect(intentLinks(tree)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h170-roadmap-1: the archive search can be paged to its 96 best matches (?arsiv=N, 4 pages of 24).
+// Page 1 stays what it was; a pager follows the archive list when the TYPED call filled its page, and
+// a later page is the archive rows of that page only (no in-feed sections).
+// ---------------------------------------------------------------------------
+
+describe("HomeFeed — archive pages (?arsiv=N, h170-roadmap-1)", () => {
+  const inFeed = [bundle("f1", "Enflasyon rakamları açıklandı"), bundle("f2", "Enflasyon beklentisi düştü")];
+  const archiveRows = (n: number, prefix = "x") =>
+    Array.from({ length: n }, (_, i) => bundle(`${prefix}${i + 1}`, `Arşiv haberi ${prefix}${i + 1}`));
+
+  async function render(
+    sp: { q?: string | string[]; page?: string | string[]; arsiv?: string | string[] },
+    search: unknown,
+    feed = feedOf(...inFeed),
+  ) {
+    getPoliticsClusters.mockResolvedValue(feed);
+    searchClusters.mockResolvedValue(search);
+    return (await HomeFeed({ searchParams: Promise.resolve(sp) })) as Elementish;
+  }
+
+  /** The element ArchivePager renders (a pure function component), or null when the page has none. */
+  function pager(tree: unknown): Elementish | null {
+    const el = collectElements(tree).find((e) => typeName(e) === "ArchivePager");
+    return el ? (el.type as (props: unknown) => Elementish)(el.props) : null;
+  }
+
+  const linksOf = (node: unknown) =>
+    collectElements(node)
+      .filter((el) => typeof el.props?.href === "string")
+      .map((el) => [textOf(el), el.props?.href]);
+
+  const full = (n = 24) => ({ ok: true as const, bundles: archiveRows(n), capped: true, typedFull: true as const });
+
+  describe("the pager on page 1", () => {
+    it("appears when the typed call filled the page: 'Sonraki sonuçlar →' to arsiv=2, the page as '1. sayfa', no previous link", async () => {
+      const tree = await render({ q: "enflasyon" }, full());
+      const nav = pager(tree);
+      expect(nav).not.toBeNull();
+      expect(linksOf(nav)).toEqual([["Sonraki sonuçlar →", "/?q=enflasyon&arsiv=2"]]);
+      const current = collectElements(nav).filter((el) => el.props?.["aria-current"] === "page");
+      expect(current).toHaveLength(1);
+      expect(textOf(current[0])).toContain("1. sayfa");
+      const navEl = collectElements(nav).find((el) => el.type === "nav");
+      expect(navEl?.props?.["aria-label"]).toBe("Arama sonuç sayfaları");
+    });
+
+    it("sits after the archive list: the last section before it is the archive, and nothing follows it", async () => {
+      const tree = await render({ q: "enflasyon" }, full());
+      const names = collectElements(tree).map((el) => (el.type === "section" ? "section" : typeName(el) ?? ""));
+      const last = names.lastIndexOf("ArchivePager");
+      expect(last).toBeGreaterThan(names.lastIndexOf("section"));
+    });
+
+    it("is absent when the sibling or locative call filled the page (capped, but not by the typed call)", async () => {
+      const tree = await render({ q: "enflasyon" }, { ok: true, bundles: archiveRows(24), capped: true });
+      expect(pager(tree)).toBeNull();
+    });
+
+    it("is absent for fewer than 24 hits", async () => {
+      const tree = await render({ q: "enflasyon" }, { ok: true, bundles: archiveRows(23), capped: false });
+      expect(pager(tree)).toBeNull();
+    });
+
+    it("is absent on in-feed page 2 of a search (the archive list shows on page 1 of the feed only)", async () => {
+      const tree = await render({ q: "enflasyon", page: "2" }, full(), feedOf(...manyBundles(31).map((b, i) => bundle(b.cluster.id, `Enflasyon haberi ${i}`))));
+      expect(pager(tree)).toBeNull();
+    });
+
+    it("is absent when the archive failed", async () => {
+      expect(pager(await render({ q: "enflasyon" }, { ok: false }))).toBeNull();
+    });
+
+    it("still shows when every archive row is already in the feed (page 2 can hold rows the list does not)", async () => {
+      const search = { ok: true, bundles: inFeed, capped: true, typedFull: true };
+      const tree = await render({ q: "enflasyon" }, search);
+      expect(pager(tree)).not.toBeNull();
+    });
+
+    it("uses Pagination's link classes (44 px targets on phones)", async () => {
+      const withPager = pager(await render({ q: "enflasyon" }, full()));
+      const archiveLink = collectElements(withPager).find((el) => typeof el.props?.href === "string");
+      const feedTree = await render({}, undefined, feedOf(...manyBundles(31)));
+      const paginationEl = collectElements(feedTree).find((e) => typeName(e) === "Pagination")!;
+      const pagination = (paginationEl.type as (p: unknown) => Elementish)(paginationEl.props);
+      const feedLink = collectElements(pagination).find((el) => typeof el.props?.href === "string");
+      expect(archiveLink?.props?.className).toBe(feedLink?.props?.className);
+      expect(String(archiveLink?.props?.className)).toContain("min-h-[44px]");
+    });
+
+    it("leaves everything else of page 1 as it was: the same cards, headings, lines and status with and without typedFull", async () => {
+      const a = await render({ q: "enflasyon" }, { ok: true, bundles: archiveRows(24), capped: true, typedFull: true });
+      const b = await render({ q: "enflasyon" }, { ok: true, bundles: archiveRows(24), capped: true });
+      expect(clusterCardIds(a)).toEqual(clusterCardIds(b));
+      expect(visibleText(a)).toBe(visibleText(b));
+      expect(liveRegionText(a)).toBe(liveRegionText(b));
+      expect(liveRegionText(a)).toBe("“enflasyon” için en ilgili 26 sonuç gösteriliyor.");
+      expect(searchClusters).toHaveBeenLastCalledWith("enflasyon");
+    });
+
+    it("calls the search with the query only, as before (page 1 never passes a page)", async () => {
+      await render({ q: "enflasyon", arsiv: "1" }, full());
+      expect(searchClusters).toHaveBeenCalledTimes(1);
+      expect(searchClusters).toHaveBeenCalledWith("enflasyon");
+    });
+  });
+
+  describe("page 2", () => {
+    const page2 = () => render({ q: "enflasyon", arsiv: "2" }, { ok: true, bundles: [...archiveRows(22, "y"), inFeed[0]!, inFeed[1]!], capped: true });
+
+    it("asks the search for page 2", async () => {
+      await page2();
+      expect(searchClusters).toHaveBeenCalledTimes(1);
+      expect(searchClusters).toHaveBeenCalledWith("enflasyon", 2);
+    });
+
+    it("lists the page's archive rows and no in-feed section: no Son Dakika, no day buckets, no in-feed cards, no Pagination", async () => {
+      const tree = await page2();
+      const ids = clusterCardIds(tree);
+      expect(ids).toEqual(archiveRows(22, "y").map((b) => b.cluster.id));
+      expect(ids).not.toContain("f1");
+      expect(ids).not.toContain("f2");
+      const names = collectElements(tree).map((e) => typeName(e));
+      expect(names).not.toContain("Pagination");
+      const headings = collectElements(tree).filter((el) => el.type === "h2").map((el) => textOf(el));
+      expect(headings).toEqual(["Arşivden: en ilgili sonuçlar (2. sayfa)"]);
+    });
+
+    it("links back with 'Önceki sonuçlar' (to the first page, no arsiv) and on with 'Sonraki sonuçlar'", async () => {
+      const nav = pager(await page2());
+      expect(linksOf(nav)).toEqual([
+        ["← Önceki sonuçlar", "/?q=enflasyon"],
+        ["Sonraki sonuçlar →", "/?q=enflasyon&arsiv=3"],
+      ]);
+      const current = collectElements(nav).filter((el) => el.props?.["aria-current"] === "page");
+      expect(current.map((el) => textOf(el))).toEqual(["2. sayfa"]);
+    });
+
+    it("says which page it shows in the live region and in the visible line, with no count", async () => {
+      const tree = await page2();
+      expect(liveRegionText(tree)).toBe("“enflasyon” için en ilgili sonuçların 2. sayfası gösteriliyor.");
+      expect(visibleText(tree)).toContain("“enflasyon” için en ilgili sonuçların 2. sayfası");
+      expect(visibleText(tree)).not.toContain("sonuç gösteriliyor");
+    });
+
+    it("keeps the follow button and the search echo of the query", async () => {
+      const tree = await page2();
+      const follow = collectElements(tree).find((el) => el.type === FollowButton);
+      expect(follow?.props).toMatchObject({ kind: "q", value: "enflasyon" });
+    });
+
+    it("hands the island the archive page so a pager change moves focus to the feed", async () => {
+      const tree = await page2();
+      const focus = collectElements(tree).find((el) => el.type === FocusFeedOnPageChange);
+      expect(focus?.props).toEqual({ page: 1, query: "enflasyon", targetId: "haber-akisi", archivePage: 2 });
+    });
+
+    it("the last-visit pill counts nothing the reader did not see (no in-feed rows on this page)", async () => {
+      const tree = await page2();
+      const pill = collectElements(tree).find((el) => typeName(el) === "NewSinceLastVisit");
+      expect(pill?.props?.items).toEqual([]);
+      expect(pill?.props?.stamp).toBe(false);
+    });
+  });
+
+  describe("the arrows are decorative (react-3)", () => {
+    /** A node's text without the subtrees marked aria-hidden="true": what a screen reader puts in the link's name. */
+    function accessibleText(node: unknown): string {
+      if (typeof node === "string" || typeof node === "number") return String(node);
+      if (Array.isArray(node)) return node.map(accessibleText).join("");
+      if (node && typeof node === "object") {
+        const el = node as Elementish;
+        if (el.props?.["aria-hidden"] === "true") return "";
+        return accessibleText(el.props?.children);
+      }
+      return "";
+    }
+
+    const pagerLinks = (nav: Elementish | null) =>
+      collectElements(nav).filter((el) => typeof el.props?.href === "string");
+
+    it("the link names are exactly 'Önceki sonuçlar' and 'Sonraki sonuçlar': each glyph sits in its own aria-hidden span", async () => {
+      const nav = pager(await render({ q: "enflasyon", arsiv: "2" }, full()));
+      const [prev, next] = pagerLinks(nav);
+      expect(accessibleText(prev).trim()).toBe("Önceki sonuçlar");
+      expect(accessibleText(next).trim()).toBe("Sonraki sonuçlar");
+      const hidden = (link: Elementish | undefined) =>
+        collectElements(link).filter((el) => el.type === "span" && el.props?.["aria-hidden"] === "true");
+      expect(hidden(prev).map(textOf)).toEqual(["← "]);
+      expect(hidden(next).map(textOf)).toEqual([" →"]);
+      // The visible text is unchanged: the glyph and the words, in the same order.
+      expect(textOf(prev)).toBe("← Önceki sonuçlar");
+      expect(textOf(next)).toBe("Sonraki sonuçlar →");
+    });
+
+    it("holds on the first page (next only) and the last page (previous only)", async () => {
+      const first = pagerLinks(pager(await render({ q: "enflasyon" }, full())));
+      expect(first.map((l) => accessibleText(l).trim())).toEqual(["Sonraki sonuçlar"]);
+      const last = pagerLinks(
+        pager(await render({ q: "enflasyon", arsiv: "4" }, { ok: true, bundles: archiveRows(24), capped: true })),
+      );
+      expect(last.map((l) => accessibleText(l).trim())).toEqual(["Önceki sonuçlar"]);
+    });
+
+    it("no arrow glyph is left outside an aria-hidden span", async () => {
+      const nav = pager(await render({ q: "enflasyon", arsiv: "2" }, full()));
+      for (const link of pagerLinks(nav)) expect(accessibleText(link)).not.toMatch(/[←→]/);
+    });
+  });
+
+  describe("page 3", () => {
+    it("links to page 2 and page 4", async () => {
+      const tree = await render({ q: "enflasyon", arsiv: "3" }, full());
+      expect(searchClusters).toHaveBeenCalledWith("enflasyon", 3);
+      expect(linksOf(pager(tree))).toEqual([
+        ["← Önceki sonuçlar", "/?q=enflasyon&arsiv=2"],
+        ["Sonraki sonuçlar →", "/?q=enflasyon&arsiv=4"],
+      ]);
+    });
+  });
+
+  describe("page 4, the last", () => {
+    it("when full, prints the end line and no next link", async () => {
+      const tree = await render({ q: "enflasyon", arsiv: "4" }, { ok: true, bundles: archiveRows(24), capped: true });
+      const nav = pager(tree);
+      expect(linksOf(nav)).toEqual([["← Önceki sonuçlar", "/?q=enflasyon&arsiv=3"]]);
+      expect(textOf(nav)).toContain("En ilgili 96 sonuç gösterildi; daha fazlası için aramayı daraltın.");
+      expect(textOf(nav)).not.toContain("Sonraki sonuçlar");
+      expect(textOf(nav)).toContain("4. sayfa");
+    });
+
+    it("when not full, there is no end line (the ranking ended on its own) and still no next link", async () => {
+      const tree = await render({ q: "enflasyon", arsiv: "4" }, { ok: true, bundles: archiveRows(10), capped: false });
+      const nav = pager(tree);
+      expect(textOf(nav)).not.toContain("En ilgili 96 sonuç");
+      expect(textOf(nav)).not.toContain("Sonraki sonuçlar");
+      expect(linksOf(nav)).toEqual([["← Önceki sonuçlar", "/?q=enflasyon&arsiv=3"]]);
+    });
+
+    it("a page past the last is page 4", async () => {
+      const tree = await render({ q: "enflasyon", arsiv: "9" }, { ok: true, bundles: archiveRows(24), capped: true });
+      expect(searchClusters).toHaveBeenCalledWith("enflasyon", 4);
+      expect(textOf(pager(tree))).toContain("En ilgili 96 sonuç gösterildi");
+      expect(liveRegionText(tree)).toBe("“enflasyon” için en ilgili sonuçların 4. sayfası gösteriliyor.");
+    });
+  });
+
+  describe("which parameter wins, and when arsiv counts", () => {
+    it("?page=2&arsiv=2: arsiv wins (archive page 2, no in-feed section, no page in any link)", async () => {
+      const feed = feedOf(...Array.from({ length: 31 }, (_, i) => bundle(`f${i + 1}`, `Enflasyon haberi ${i + 1}`)));
+      const tree = await render({ q: "enflasyon", page: "2", arsiv: "2" }, { ok: true, bundles: archiveRows(24), capped: true }, feed);
+      expect(searchClusters).toHaveBeenCalledWith("enflasyon", 2);
+      expect(clusterCardIds(tree)).toEqual(archiveRows(24).map((b) => b.cluster.id));
+      for (const [, href] of linksOf(pager(tree))) expect(String(href)).not.toContain("page=");
+      expect(collectElements(tree).map((e) => typeName(e))).not.toContain("Pagination");
+    });
+
+    it("arsiv without q is ignored: no search, the plain page", async () => {
+      const plain = await render({}, undefined, feedOf(...inFeed));
+      searchClusters.mockClear();
+      const withArsiv = await render({ arsiv: "2" }, undefined, feedOf(...inFeed));
+      expect(searchClusters).not.toHaveBeenCalled();
+      expect(clusterCardIds(withArsiv)).toEqual(clusterCardIds(plain));
+      expect(visibleText(withArsiv)).toBe(visibleText(plain));
+      expect(liveRegionText(withArsiv)).toBe("");
+      expect(pager(withArsiv)).toBeNull();
+      const focus = collectElements(withArsiv).find((el) => el.type === FocusFeedOnPageChange);
+      expect(focus?.props).toEqual({ page: 1, query: "", targetId: "haber-akisi" });
+    });
+
+    it("arsiv with a blank or too-short q is ignored too", async () => {
+      for (const q of ["", "   ", "a", "!!"]) {
+        searchClusters.mockClear();
+        const tree = await render({ q, arsiv: "3" }, { ok: true, bundles: [] });
+        expect(searchClusters, JSON.stringify(q)).not.toHaveBeenCalledWith(expect.anything(), 3);
+        expect(pager(tree), JSON.stringify(q)).toBeNull();
+        const focus = collectElements(tree).find((el) => el.type === FocusFeedOnPageChange);
+        expect(focus?.props).not.toHaveProperty("archivePage");
+      }
+    });
+
+    it("plain '/' renders identically, with or without the new parameter", async () => {
+      const a = await render({}, undefined, feedOf(...manyBundles(31)));
+      const b = await render({ arsiv: "1" }, undefined, feedOf(...manyBundles(31)));
+      expect(clusterCardIds(b)).toEqual(clusterCardIds(a));
+      expect(visibleText(b)).toBe(visibleText(a));
+      expect(collectElements(b).length).toBe(collectElements(a).length);
+      expect(searchClusters).not.toHaveBeenCalled();
+    });
+
+    it("a value that is not a page reads as page 1: no pager link, the plain search call", async () => {
+      for (const arsiv of ["abc", "0", "-1", "", "1", "2.5"] as const) {
+        searchClusters.mockClear();
+        const tree = await render({ q: "enflasyon", arsiv }, { ok: true, bundles: archiveRows(5), capped: false });
+        expect(searchClusters, arsiv).toHaveBeenCalledWith("enflasyon");
+        expect(pager(tree), arsiv).toBeNull();
+        expect(clusterCardIds(tree), arsiv).toContain("f1");
+      }
+    });
+
+    it("a repeated ?arsiv= is page 1, as is a repeated ?q= that reads its first value", async () => {
+      searchClusters.mockClear();
+      await render({ q: "enflasyon", arsiv: ["2", "3"] }, { ok: true, bundles: [] });
+      expect(searchClusters).toHaveBeenCalledWith("enflasyon");
+    });
+  });
+
+  describe("an unavailable page (migration 211 not applied)", () => {
+    const unavailable = () => render({ q: "enflasyon", arsiv: "2" }, { ok: false, unavailablePage: true });
+
+    it("prints 'Bu sayfa şu an gösterilemiyor.' with a link to page 1, and no list, no pager, no retry card", async () => {
+      const tree = await unavailable();
+      const el = collectElements(tree).find((e) => typeName(e) === "ArchivePageUnavailable");
+      expect(el, "the unavailable-page block").toBeDefined();
+      const block = (el!.type as (props: unknown) => Elementish)(el!.props);
+      expect(textOf(block)).toContain("Bu sayfa şu an gösterilemiyor.");
+      expect(linksOf(block)).toEqual([["İlk sayfaya dön", "/?q=enflasyon"]]);
+      expect(clusterCardIds(tree)).toEqual([]);
+      expect(pager(tree)).toBeNull();
+      expect(collectRendered(tree, new Set(["EmptySearch"])).some((e) => typeName(e) === "SearchUnavailable")).toBe(false);
+    });
+
+    it("says so in the live region", async () => {
+      expect(liveRegionText(await unavailable())).toBe("Bu sayfa şu an gösterilemiyor.");
+    });
+
+    it("is not announced as an empty search", async () => {
+      expect(visibleText(await unavailable())).not.toContain("Hiç haber bulunamadı");
+    });
+
+    it("a plain failure on a later page is the retry card, not the page message", async () => {
+      const tree = await render({ q: "enflasyon", arsiv: "2" }, { ok: false });
+      expect(collectRendered(tree, new Set(["EmptySearch"])).some((e) => typeName(e) === "SearchUnavailable")).toBe(true);
+      expect(visibleText(tree)).not.toContain("Bu sayfa şu an gösterilemiyor.");
+    });
+  });
+
+  describe("an empty later page", () => {
+    it("says there is nothing on this page and leads back, never 'Hiç haber bulunamadı'", async () => {
+      const tree = await render({ q: "enflasyon", arsiv: "2" }, { ok: true, bundles: [], capped: false });
+      expect(visibleText(tree)).not.toContain("Hiç haber bulunamadı");
+      expect(visibleText(tree)).toContain("Bu sayfada sonuç yok.");
+      expect(linksOf(pager(tree))).toEqual([["← Önceki sonuçlar", "/?q=enflasyon"]]);
+    });
+  });
+
+  describe("the hrefs", () => {
+    it("are built with URLSearchParams: the query is encoded, arsiv is omitted on page 1", async () => {
+      const q = "asgari ücret & zam";
+      const tree = await render({ q, arsiv: "3" }, full());
+      const links = linksOf(pager(tree));
+      const params = (href: unknown) => new URLSearchParams(String(href).slice(2));
+      expect(params(links[0]![1]).get("q")).toBe(q);
+      expect(params(links[0]![1]).get("arsiv")).toBe("2");
+      expect(params(links[1]![1]).get("arsiv")).toBe("4");
+      const first = await render({ q, arsiv: "2" }, full());
+      const back = linksOf(pager(first))[0]![1];
+      expect(params(back).has("arsiv")).toBe(false);
+      expect(params(back).get("q")).toBe(q);
+      expect(String(back)).toBe(`/?${new URLSearchParams({ q }).toString()}`);
+    });
+
+    it("never carry a markup-looking query unescaped (it is a href value, not HTML)", async () => {
+      const tree = await render({ q: '"><script>x</script>', arsiv: "2" }, full());
+      const links = linksOf(pager(tree));
+      expect(links.length).toBeGreaterThan(0);
+      for (const [, href] of links) {
+        expect(String(href).startsWith("/?q=")).toBe(true);
+        expect(String(href)).not.toContain("<");
+        expect(String(href)).not.toContain('"');
+      }
+    });
+  });
+});
+
+describe("generateMetadata — archive pages (?arsiv=N, h170-roadmap-1)", () => {
+  const meta = (sp: { q?: string | string[]; page?: string | string[]; arsiv?: string | string[] }) =>
+    generateMetadata({ searchParams: Promise.resolve(sp) });
+  const noindex = { index: false, follow: true };
+
+  it("titles page 2 and later with the page, and stays noindex,follow", async () => {
+    expect(await meta({ q: "enflasyon", arsiv: "2" })).toEqual({
+      title: { absolute: "“enflasyon” araması — 2. sayfa — Tayf" },
+      robots: noindex,
+    });
+    expect(await meta({ q: "enflasyon", arsiv: "4" })).toEqual({
+      title: { absolute: "“enflasyon” araması — 4. sayfa — Tayf" },
+      robots: noindex,
+    });
+  });
+
+  it("a page past the last is titled as the last page", async () => {
+    expect((await meta({ q: "enflasyon", arsiv: "9" })).title).toEqual({ absolute: "“enflasyon” araması — 4. sayfa — Tayf" });
+  });
+
+  it("page 1, an unreadable value and a repeated value keep today's title", async () => {
+    const today = { title: { absolute: "“enflasyon” araması — Tayf" }, robots: noindex };
+    for (const arsiv of [undefined, "1", "0", "abc", "", ["2", "3"]]) {
+      expect(await meta({ q: "enflasyon", arsiv }), JSON.stringify(arsiv)).toEqual(today);
+    }
+  });
+
+  it("arsiv wins over page, and neither reads the feed", async () => {
+    expect((await meta({ q: "enflasyon", page: "3", arsiv: "2" })).title).toEqual({ absolute: "“enflasyon” araması — 2. sayfa — Tayf" });
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+  });
+
+  it("arsiv without a searchable q changes nothing: the plain home metadata, or the too-short query's title", async () => {
+    expect(await meta({ arsiv: "2" })).toEqual({});
+    expect(await meta({ q: "", arsiv: "2" })).toEqual({});
+    expect(await meta({ q: "a", arsiv: "3" })).toEqual({ title: { absolute: "“a” araması — Tayf" }, robots: noindex });
+    expect(await meta({ q: "!!", arsiv: "3" })).toEqual({ title: { absolute: "“!!” araması — Tayf" }, robots: noindex });
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+  });
+
+  it("the title never carries markup from the query", async () => {
+    const result = await meta({ q: "<b>x</b>", arsiv: "2" });
+    expect(result.title).toEqual({ absolute: "“<b>x</b>” araması — 2. sayfa — Tayf" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h170-roadmap-3: the compact "Yükselen konular" rail. It sits right after the first story section
+// of page 1 of the plain feed (after Son Dakika when the strip has stories, otherwise after the first
+// ranked section: the two spots the "Günün Tayf'ı" teaser uses), in a Suspense of its own with a null
+// fallback, so a slow or failed rising read can never delay or fail the feed. Nothing above the first
+// story section changes. What the rail renders is pinned in src/components/home/rising-rail.test.tsx.
+// Its read (loadRisingRail) starts beside the feed read, so the rail's data is not waiting for HomeFeed
+// to finish rendering (react-2: a rail that starts reading only after the feed returned reveals later
+// than the feed and shifts everything below it); the feed never awaits it.
+// ---------------------------------------------------------------------------
+
+describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
+  type Params = { q?: string | string[]; page?: string | string[]; arsiv?: string | string[] };
+
+  beforeEach(() => {
+    teaserOverride = null;
+    getRisingEntities.mockReset();
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+  });
+
+  /** What the feed returns, in document order, with Fragments and arrays flattened and nothing else opened. */
+  function siblingsOf(node: unknown, out: Elementish[] = []): Elementish[] {
+    if (Array.isArray(node)) {
+      for (const child of node) siblingsOf(child, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as Elementish;
+      if (el.type === Fragment) siblingsOf(el.props?.children, out);
+      else if (el.type !== undefined) out.push(el);
+    }
+    return out;
+  }
+
+  const isRail = (el: Elementish): boolean =>
+    el.type === Suspense && (el.props?.children as Elementish | undefined)?.type === RisingRail;
+
+  const isTeaser = (el: Elementish): boolean => el.type === "aside" && el.props?.["aria-label"] === "Günün Tayf'ı";
+
+  const heading = (section: Elementish): string =>
+    textOf(collectElements(section).find((el) => el.type === "h2"));
+
+  async function feedFor(params: Params, feed: PoliticsClustersResult) {
+    getPoliticsClusters.mockResolvedValue(feed);
+    return siblingsOf(await HomeFeed({ searchParams: Promise.resolve(params) }));
+  }
+
+  const railsIn = (siblings: Elementish[]) => siblings.filter(isRail);
+
+  /** `bundle()` with its day fixed, so the day buckets are known. */
+  function dated(id: string, iso: string) {
+    const b = bundle(id, `Haber ${id}`);
+    b.cluster.first_published = iso;
+    b.cluster.updated_at = iso;
+    return b;
+  }
+
+  const NOW = Date.parse("2026-11-12T10:00:00Z");
+
+  /** Two day buckets (Bugün, Dün) and, when asked, a Son Dakika strip of two. */
+  function twoBuckets(withStrip: boolean) {
+    return {
+      bundles: [dated("t", "2026-11-12T05:00:00Z"), dated("y", "2026-11-11T08:00:00Z")],
+      breakingBundles: withStrip
+        ? [dated("s1", "2026-11-12T09:50:00Z"), dated("s2", "2026-11-12T09:40:00Z")]
+        : [],
+    } as unknown as PoliticsClustersResult;
+  }
+
+  describe("where it sits", () => {
+    it("right after Son Dakika when the strip has stories, before the first day bucket", async () => {
+      nowOverrideMs = NOW;
+      const siblings = await feedFor({}, twoBuckets(true));
+
+      const sections = siblings.filter((el) => el.type === "section");
+      expect(sections.map(heading)).toEqual(["Son Dakika", "Bugün", "Dün"]);
+      expect(railsIn(siblings)).toHaveLength(1);
+      const at = siblings.findIndex(isRail);
+      expect(siblings[at - 1]).toBe(sections[0]);
+      expect(at).toBeLessThan(siblings.indexOf(sections[1]!));
+    });
+
+    it("otherwise right after the first ranked section, not the last", async () => {
+      nowOverrideMs = NOW;
+      const siblings = await feedFor({}, twoBuckets(false));
+
+      const sections = siblings.filter((el) => el.type === "section");
+      expect(sections.map(heading)).toEqual(["Bugün", "Dün"]);
+      expect(railsIn(siblings)).toHaveLength(1);
+      const at = siblings.findIndex(isRail);
+      expect(siblings[at - 1]).toBe(sections[0]);
+      expect(at).toBeLessThan(siblings.indexOf(sections[1]!));
+    });
+
+    it("shares the gap after the first section with the 'Günün Tayf'ı' teaser, in both spots", async () => {
+      nowOverrideMs = NOW;
+      for (const withStrip of [true, false]) {
+        const siblings = await feedFor({}, twoBuckets(withStrip));
+        const sections = siblings.filter((el) => el.type === "section");
+        const gap = siblings.slice(siblings.indexOf(sections[0]!) + 1, siblings.indexOf(sections[1]!));
+        expect(gap.some(isRail), `rail, strip ${withStrip}`).toBe(true);
+        expect(gap.some(isTeaser), `teaser, strip ${withStrip}`).toBe(true);
+      }
+    });
+
+    it("renders whether or not the teaser does (a null teaser slot leaves the rail in place)", async () => {
+      nowOverrideMs = NOW;
+      teaserOverride = () => null;
+      for (const withStrip of [true, false]) {
+        const siblings = await feedFor({}, twoBuckets(withStrip));
+        const sections = siblings.filter((el) => el.type === "section");
+        expect(siblings.some(isTeaser), `teaser, strip ${withStrip}`).toBe(false);
+        expect(railsIn(siblings), `rail, strip ${withStrip}`).toHaveLength(1);
+        expect(siblings[siblings.findIndex(isRail) - 1], `position, strip ${withStrip}`).toBe(sections[0]);
+      }
+    });
+
+    it("is one boundary: a Suspense with a null fallback around <RisingRail data={promise} />", async () => {
+      const siblings = await feedFor({}, twoBuckets(true));
+
+      const boundary = siblings.find(isRail)!;
+      expect(boundary.props?.fallback).toBeNull();
+      const rail = boundary.props?.children as Elementish;
+      expect(rail.type).toBe(RisingRail);
+      // Nothing from the request reaches it but the read HomeFeed started: one `data` promise.
+      expect(Object.keys(rail.props ?? {})).toEqual(["data"]);
+      expect(rail.props?.data).toBeInstanceOf(Promise);
+    });
+
+    it("is not a sibling of the cards: no ClusterCard element sits inside the boundary", async () => {
+      const siblings = await feedFor({}, twoBuckets(true));
+      expect(collectElements(siblings.find(isRail)).filter((el) => el.props?.cluster !== undefined)).toHaveLength(0);
+    });
+  });
+
+  describe("on the plain feed only", () => {
+    const base = () => feedOf(...manyBundles(5));
+
+    it("renders once on the plain home feed, on an explicit ?page=1, on a blank ?q= and on a clamped ?page=99 of a one-page feed", async () => {
+      for (const params of [{}, { page: "1" }, { q: "   " }, { page: "99" }] as Params[]) {
+        expect(railsIn(await feedFor(params, base())), JSON.stringify(params)).toHaveLength(1);
+      }
+    });
+
+    it("renders when ?arsiv= comes without a query (the parameter is ignored there)", async () => {
+      expect(railsIn(await feedFor({ arsiv: "2" }, base()))).toHaveLength(1);
+    });
+
+    it("is absent on ?page=2, and on the later page ?page=99 clamps to", async () => {
+      const big = () => feedOf(...manyBundles(31));
+      expect(railsIn(await feedFor({ page: "2" }, big()))).toHaveLength(0);
+      expect(railsIn(await feedFor({ page: "99" }, big()))).toHaveLength(0);
+    });
+
+    it("is absent on a /?q= search, a repeated ?q=, and a search on page 2", async () => {
+      const feed = () => feedOf(...manyBundles(5).map((b, i) => bundle(b.cluster.id, `Seçim haberi ${i}`)));
+      expect(railsIn(await feedFor({ q: "seçim" }, feed()))).toHaveLength(0);
+      expect(railsIn(await feedFor({ q: ["seçim", "ekonomi"] }, feed()))).toHaveLength(0);
+      expect(railsIn(await feedFor({ q: "seçim", page: "2" }, feed()))).toHaveLength(0);
+    });
+
+    it("is absent on a later page of a search archive (?arsiv=N) and on a too-short query", async () => {
+      expect(railsIn(await feedFor({ q: "haber", arsiv: "2" }, base()))).toHaveLength(0);
+      expect(railsIn(await feedFor({ q: "a" }, base()))).toHaveLength(0);
+    });
+
+    it("is absent in the outage shell", async () => {
+      getPoliticsClusters.mockRejectedValue(new Error("db down"));
+      const siblings = siblingsOf(await HomeFeed({ searchParams: Promise.resolve({}) }));
+      expect(railsIn(siblings)).toHaveLength(0);
+    });
+
+    it("is absent when the feed has nothing to list (no sections, so no 'first section' to follow)", async () => {
+      expect(railsIn(await feedFor({}, feedOf()))).toHaveLength(0);
+    });
+  });
+
+  describe("starts beside the feed read and never delays or fails the feed", () => {
+    /** The `data` promise of the rail element HomeFeed returned. */
+    const dataOf = (siblings: Elementish[]): Promise<unknown> =>
+      ((railsIn(siblings)[0]!.props?.children as Elementish).props?.data) as Promise<unknown>;
+
+    /** One macrotask: every already-queued microtask (the awaits of HomeFeed) has run. */
+    const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    it("getRisingEntities is called before the feed read resolves", async () => {
+      let resolveFeed: (feed: PoliticsClustersResult) => void = () => {};
+      getPoliticsClusters.mockReturnValue(
+        new Promise<PoliticsClustersResult>((resolve) => {
+          resolveFeed = resolve;
+        }),
+      );
+
+      const pending = HomeFeed({ searchParams: Promise.resolve({}) });
+      await flush();
+      expect(getPoliticsClusters).toHaveBeenCalledTimes(1);
+      expect(getRisingEntities).toHaveBeenCalledTimes(1);
+
+      resolveFeed(feedOf(...manyBundles(5)));
+      const siblings = siblingsOf(await pending);
+      expect(railsIn(siblings)).toHaveLength(1);
+      // Read once: the rail does not start a second read of its own.
+      expect(getRisingEntities).toHaveBeenCalledTimes(1);
+    });
+
+    it("HomeFeed resolves with the rising read still pending, and the rail's data is still pending", async () => {
+      getRisingEntities.mockReturnValue(new Promise(() => {}));
+      const siblings = await feedFor({}, feedOf(...manyBundles(5)));
+      expect(railsIn(siblings)).toHaveLength(1);
+      expect(getRisingEntities).toHaveBeenCalledTimes(1);
+      const state = await Promise.race([dataOf(siblings), flush().then(() => "pending")]);
+      expect(state).toBe("pending");
+    });
+
+    it("HomeFeed resolves when the rising read rejects, and the rail's data resolves to null", async () => {
+      getRisingEntities.mockRejectedValue(new Error("rising down"));
+      const siblings = await feedFor({}, feedOf(...manyBundles(5)));
+      expect(railsIn(siblings)).toHaveLength(1);
+      expect(getRisingEntities).toHaveBeenCalledTimes(1);
+      await expect(dataOf(siblings)).resolves.toBeNull();
+    });
+
+    it("the rail's data resolves to null when there is nothing rising to show (insufficient history)", async () => {
+      getRisingEntities.mockResolvedValue({ status: "insufficient" });
+      const siblings = await feedFor({}, feedOf(...manyBundles(5)));
+      await expect(dataOf(siblings)).resolves.toBeNull();
+    });
+
+    it("getRisingEntities is not called on a /?q= search, a repeated ?q= or a too-short query", async () => {
+      const feed = () => feedOf(...manyBundles(5).map((b, i) => bundle(b.cluster.id, `Seçim haberi ${i}`)));
+      for (const params of [{ q: "seçim" }, { q: ["seçim", "ekonomi"] }, { q: "a" }, { q: "seçim", arsiv: "2" }] as Params[]) {
+        await feedFor(params, feed());
+        expect(getRisingEntities, JSON.stringify(params)).not.toHaveBeenCalled();
+      }
+    });
+
+    it("is read for the plain feed, including a blank ?q= (the same test the rail uses), once per render", async () => {
+      for (const params of [{}, { q: "   " }] as Params[]) {
+        getRisingEntities.mockClear();
+        await feedFor(params, feedOf(...manyBundles(5)));
+        expect(getRisingEntities, JSON.stringify(params)).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it("the outage shell still resolves, with no rail", async () => {
+      getPoliticsClusters.mockRejectedValue(new Error("db down"));
+      getRisingEntities.mockRejectedValue(new Error("rising down"));
+      const siblings = siblingsOf(await HomeFeed({ searchParams: Promise.resolve({}) }));
+      expect(railsIn(siblings)).toHaveLength(0);
+    });
+  });
+
+  describe("nothing above the first story section changes (the LCP path)", () => {
+    it("the feed opens with the same four elements as before, and the rail is none of them", async () => {
+      nowOverrideMs = NOW;
+      for (const withStrip of [true, false]) {
+        const siblings = await feedFor({}, twoBuckets(withStrip));
+        const firstSection = siblings.findIndex((el) => el.type === "section");
+        expect(siblings.slice(0, firstSection).map(typeName), `strip ${withStrip}`).toEqual([
+          "SearchStatus",
+          "NewSinceLastVisit",
+          "NewBreakingPill",
+          "FocusFeedOnPageChange",
+        ]);
+        expect(siblings.findIndex(isRail)).toBeGreaterThan(firstSection);
+      }
+    });
+
+    it("the static shell (HomePage) does not mention the rail: it lives behind the feed boundary", () => {
+      const tree = HomePage({ searchParams: Promise.resolve({}) });
+      expect(collectElements(tree).some((el) => el.type === RisingRail)).toBe(false);
+      expect(collectElements(tree).some(isRail)).toBe(false);
+    });
   });
 });

@@ -122,8 +122,11 @@ const W_VELOCITY = 1.0;
 //
 // Window: 2 hours. Cap: 6 slots so a major-event burst (e.g. earthquake
 // night, election night) doesn't drown out the rest of the feed.
-const BREAKING_WINDOW_MS = 2 * 60 * 60 * 1000;
-const BREAKING_LIMIT = 6;
+// Exported (h170-roadmap-2) for splitHomeFeed below, which the home page and
+// /api/home/head share. The window is applied once, when the cached entry is filled:
+// nothing downstream re-tests it against a later clock (knownBreakingIds does not).
+export const BREAKING_WINDOW_MS = 2 * 60 * 60 * 1000;
+export const BREAKING_LIMIT = 6;
 // h59-homefeed-3: the Son Dakika strip needs two voting outlets (kind outlet or
 // wire, isVotingKind), counted over distinct source ids.
 const BREAKING_MIN_VOTING_SOURCES = 2;
@@ -1026,6 +1029,56 @@ export async function getPoliticsClusters(
     () => getPoliticsClustersCached(profile),
     () => fetchPoliticsClusters(profile),
   );
+}
+
+/**
+ * The plain home feed's Son Dakika derivation, written once (h170-roadmap-2).
+ * HomeFeed calls it for the strip and the ranked list, and /api/home/head calls it
+ * for the strip alone (the probe behind the "yeni son dakika haberi" pill), so the
+ * head and the strip can never drift: both are `filteredBreaking`.
+ *
+ * - `filteredBreaking`: the feed's breakingBundles that pass `keep`, at most
+ *   BREAKING_LIMIT of them, in the order the cache fill gave them (newest first).
+ *   The window (BREAKING_WINDOW_MS) and the voting-source floor are applied when the
+ *   cached entry is filled, not here: both callers read that entry.
+ * - `filtered`: the ranked bundles that pass `keep` (the whole matching set, not a
+ *   page of it), which the search view reads to avoid listing a story twice.
+ * - `ranked`: `filtered` without the stories already in the strip. A cluster that
+ *   is both breaking (< 2 h) and in the top-30 ranked set would otherwise render
+ *   twice; the strip wins, so each story appears in exactly one place.
+ *
+ * `keep` narrows the strip and the list alike (an in-feed search on the home page);
+ * omitted, it is the plain feed that /api/home/head describes. Pure: the bundles
+ * are returned as they are (same objects), the lists are new arrays, and the feed
+ * is not mutated.
+ */
+export function splitHomeFeed(
+  feed: Pick<PoliticsClustersResult, "bundles" | "breakingBundles">,
+  keep: (b: ClusterBundle) => boolean = () => true,
+): { filteredBreaking: ClusterBundle[]; filtered: ClusterBundle[]; ranked: ClusterBundle[] } {
+  const filteredBreaking = feed.breakingBundles.filter(keep).slice(0, BREAKING_LIMIT);
+  const filtered = feed.bundles.filter(keep);
+  const breakingIds = new Set(filteredBreaking.map((b) => b.cluster.id));
+  const ranked = filtered.filter((b) => !breakingIds.has(b.cluster.id));
+  return { filteredBreaking, filtered, ranked };
+}
+
+/**
+ * The ids of every story the page lists, in listed order, each once. No clock and no
+ * window: the Son Dakika window (BREAKING_WINDOW_MS) is applied ONCE, when the cached
+ * entry is filled (the entry is revalidated every 300 s), so the strip can still hold
+ * a story that is over 2 h old by the render clock, and a head read from that same
+ * entry lists it too. Filtering by the render's clock here made such a story
+ * "unknown" to the pill (a false "1 yeni son dakika haberi") and made the page
+ * fingerprint change with the clock rather than with the entry. The home page hands
+ * this to the pill, which treats a head id outside it as a story that entered the
+ * strip after the render. It is at most the 6 strip slots plus the ranked set, 36 ids
+ * or about 1.4 KB, so nothing needs trimming.
+ */
+export function knownBreakingIds(listed: ReadonlyArray<{ id: string }>): string[] {
+  const out = new Set<string>();
+  for (const item of listed) out.add(item.id);
+  return [...out];
 }
 
 /**

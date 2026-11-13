@@ -9,6 +9,29 @@ export function parseHomePage(raw: string | string[] | undefined): number {
   return Math.max(1, parseInt(first ?? "1", 10) || 1);
 }
 
+// h170-roadmap-1: the archive search can be paged (?arsiv=N): 4 pages of 24 = the 96 best matches.
+// ARCHIVE_PAGE_SIZE mirrors SEARCH_LIMIT in src/lib/clusters/search-query.ts (a 'use cache' server
+// module, not imported here; search-query.test.ts fails if the two drift) and ARCHIVE_MAX_PAGE is
+// the clamp of migration 211's offset ((4 - 1) * 24 = 72; tests/migrations/211-*.test.ts).
+export const ARCHIVE_PAGE_SIZE = 24;
+export const ARCHIVE_MAX_PAGE = 4;
+
+/**
+ * `?arsiv=` → the archive page, 1 to ARCHIVE_MAX_PAGE. Only a plain run of digits is a page: anything
+ * else (a missing value, '', 'abc', '0', '-1', '2.5', '2x', a repeated `?arsiv=` which Next gives as an
+ * array) is page 1, so a hand-edited URL can never reach a page the reader did not ask for. A page past
+ * the last is the last page. A character scan, no pattern: the value is reader-supplied.
+ */
+export function parseArchivePage(raw: string | string[] | undefined): number {
+  if (typeof raw !== "string" || raw.length === 0) return 1;
+  for (const ch of raw) {
+    if (ch < "0" || ch > "9") return 1;
+  }
+  const n = Number(raw);
+  if (!(n >= 1)) return 1;
+  return Math.min(Math.floor(n), ARCHIVE_MAX_PAGE);
+}
+
 export function homeTotalPages(rankedCount: number): number {
   if (!Number.isFinite(rankedCount) || rankedCount < 0) return 1;
   return Math.max(1, Math.ceil(rankedCount / HOME_PAGE_SIZE));

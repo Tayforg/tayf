@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { formatCountTr } from "@/lib/format/number-tr";
 import { dayLabelTr } from "@/lib/trends/day-label";
-import type { RisingResult } from "@/lib/trends/rising";
+import { risingHint, type RisingResult } from "@/lib/trends/rising";
 
 // "Yükselen Konular" card at the top of /trends (migration 112). Pure
 // presentation over what `getRisingEntities()` returns: a ranked list, an
@@ -66,11 +66,7 @@ export function RisingTopics({ data }: { data: RisingResult | null }) {
                 {item.label}
               </Link>
               <span className="block text-[12px] text-muted-foreground">
-                {`${dayLabelTr(data.day)}: ${formatCountTr(item.count)} haber · ${
-                  item.isNew
-                    ? "geçen hafta neredeyse hiç yoktu"
-                    : `7 günlük ortalamanın ${item.ratioIsLowerBound ? "en az " : ""}${item.ratioLabel} katı`
-                }`}
+                {`${dayLabelTr(data.day)}: ${formatCountTr(item.count)} haber · ${risingHint(item)}`}
               </span>
             </li>
           ))}

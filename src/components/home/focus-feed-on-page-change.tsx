@@ -19,6 +19,9 @@ import { useEffect } from "react";
 // input would break typing. An editable active element is skipped for the
 // same reason.
 //
+// The archive pager (?arsiv=N, h170-roadmap-1) is a page change too: it moves
+// `archivePage` and leaves `page` alone, so the position carries both.
+//
 // Accepted side effect: the state is per document, so coming back to "/" from
 // another route on a different page than the one last seen here (client-side
 // navigation) also moves focus to the feed. That lands the user on the list
@@ -27,6 +30,8 @@ import { useEffect } from "react";
 interface FeedPosition {
   page: number;
   query: string;
+  /** The archive search page (?arsiv=N, h170-roadmap-1). Absent is page 1. */
+  archivePage?: number;
 }
 
 let lastSeen: FeedPosition | null = null;
@@ -60,25 +65,28 @@ export function shouldFocusFeed(
   if (prev === null) return false;
   if (activeIsEditable) return false;
   if (prev.query !== next.query) return false;
-  return prev.page !== next.page;
+  return prev.page !== next.page || (prev.archivePage ?? 1) !== (next.archivePage ?? 1);
 }
 
 export function FocusFeedOnPageChange({
   page,
   query,
   targetId,
+  archivePage,
 }: {
   page: number;
   query: string;
   targetId: string;
+  /** The archive search page; the pager of ?arsiv=N changes it without changing `page`. */
+  archivePage?: number;
 }) {
   useEffect(() => {
-    const next = { page, query };
+    const next = { page, query, archivePage };
     if (shouldFocusFeed(lastSeen, next, isEditableTarget(document.activeElement))) {
       document.getElementById(targetId)?.focus({ preventScroll: false });
     }
     lastSeen = next;
-  }, [page, query, targetId]);
+  }, [page, query, targetId, archivePage]);
 
   return null;
 }

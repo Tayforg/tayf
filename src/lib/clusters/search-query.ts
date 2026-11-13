@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
+import { ARCHIVE_MAX_PAGE } from "@/lib/seo/home-canonical";
 import { createReaderClient } from "@/lib/supabase/server";
 import { expandAliasQuery } from "./search-aliases";
 import {
@@ -72,6 +73,16 @@ import {
 // `buildClusterBundle` so ClusterCard renders them identically to the main
 // feed.
 //
+// Later pages (h170-roadmap-1). `searchClusters(q, archivePage)` pages the ranking of the TYPED call:
+// page N (2 to ARCHIVE_MAX_PAGE) is ONE call to migration 211's `search_cluster_ids_v2` with page 1's typed
+// `p_variants` and `p_folded`, `p_limit` SEARCH_LIMIT and `p_offset` (N - 1) * SEARCH_LIMIT, so the 96 best
+// matches are reachable in 4 pages. No sibling and no locative call is made there (a merged list has no
+// offset to page by), which is why page 1 reports `typedFull`: only a page 1 that the typed call filled
+// by itself has a page 2 that continues it. Page 1 is untouched: the same calls and the same cache entry.
+// A later page has a cache function of its own (`cachedSearchClustersPage`, the page is part of its key),
+// so at most 3 entries per query are added, and it takes a slot of the same in-flight cap. PGRST202 on v2
+// (211 not applied yet) is `{ ok: false, unavailablePage: true }`, memoised for `minutes` only.
+//
 // Deploy order: if the app ships before migration 129, PostgREST answers
 // PGRST202 for the 3-arg call and `fetchSearchClusters` falls back once to
 // 083's 2-arg function (no folding, no ranking), so there is no outage.
@@ -103,9 +114,13 @@ export const MAX_IN_FLIGHT_SEARCHES = 4;
 // `capped` = the RPC filled its page (SEARCH_LIMIT ids), so the archive may
 // hold more matches than were returned. Optional so callers and mocks that
 // predate it still compile; `composeSearchView` reads it as `=== true`.
+// `typedFull` (page 1 only, set only when true) = the TYPED call alone returned
+// SEARCH_LIMIT ids, so no sibling or locative call ran and page 2 of the same
+// typed ranking continues this page (h170-roadmap-1). `unavailablePage` = a later
+// page whose function is not in the schema cache yet (migration 211 unapplied).
 export type SearchResult =
-  | { ok: true; bundles: ClusterBundle[]; capped?: boolean }
-  | { ok: false };
+  | { ok: true; bundles: ClusterBundle[]; capped?: boolean; typedFull?: true }
+  | { ok: false; unavailablePage?: true };
 
 interface SearchIdRow {
   id: string;
@@ -114,6 +129,87 @@ interface SearchIdRow {
 interface SearchFetch {
   bundles: ClusterBundle[];
   capped: boolean;
+  typedFull?: true;
+  unavailable?: true;
+}
+
+// The typed call's arguments, shared by page 1 and every later page so a later page asks for exactly the
+// ranking page 1 showed.
+// h42-search-1: a query holding an alias is searched under both spellings. The
+// expansion is built from the canonical key, so the cost bound (6 terms, 64
+// characters, one alias, two disjuncts) holds, and a query without an alias
+// (the common case) takes exactly the arguments it always did.
+function typedSearchArguments(key: string): { base: string; typed: string[]; folded: string } {
+  const expansion = expandAliasQuery(key);
+  const base = expansion ? expansion.variantsQuery : key;
+  return {
+    base,
+    typed: turkishQueryVariants(base),
+    folded: foldTr(expansion ? expansion.foldedQuery : key),
+  };
+}
+
+// The ids' embed and bundles, shared by page 1 and the later pages: one feed-health read, one
+// `.in('id', ids)` embed select, the RPC's order, a cluster with no visible member left out.
+// `locIds` / `locTerms` are page 1's locative witness filter (h157-search-1); a later page passes
+// none. THROWS on a Supabase error. `dropped` = the locative rows the witness filter removed.
+async function hydrateBundles(
+  supabase: ReturnType<typeof createReaderClient>,
+  ids: string[],
+  locIds: ReadonlySet<string>,
+  locTerms: string[],
+): Promise<{ bundles: ClusterBundle[]; dropped: number }> {
+  // Same feed-health gate as politics-query.ts's fetchPoliticsClusters,
+  // fetched once per search — so search-result cards (which render the
+  // identical ClusterCard blindspot badge) never disagree with the home
+  // feed about a suppressed cluster. Run in parallel with the embed fetch:
+  // neither depends on the other.
+  const [health, embedRes] = await Promise.all([
+    getZoneFeedHealth(),
+    supabase
+      .from("clusters")
+      .select(CLUSTER_EMBED_SELECT)
+      .in("id", ids)
+      .returns<EmbeddedClusterRow[]>(),
+  ]);
+
+  if (embedRes.error) {
+    throw new Error(`[clusters] search-query error: ${embedRes.error.message}`);
+  }
+
+  // The embed's row order is not guaranteed to match the RPC's ranked
+  // order (ids-first: `.in('id', ids)` does not preserve the `IN (...)`
+  // list order) — re-sort by the RPC's id order before building bundles.
+  const order = new Map(ids.map((id, i) => [id, i]));
+  const ranked = [...(embedRes.data ?? [])].sort(
+    (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
+  );
+
+  // h157-search-1: a row that only the locative call found must hold every typed term that got a locative as a
+  // word that is not 'term + n...' (kazada, kazayı, kazanın; not kazandı), in the text search_tsv is built from.
+  let dropped = 0;
+  const rows =
+    locIds.size === 0
+      ? ranked
+      : ranked.filter((row) => {
+          if (!locIds.has(row.id)) return true;
+          const text = foldTr(`${row.title_tr_neutral ?? ""} ${row.title_tr ?? ""} ${row.summary_tr ?? ""}`);
+          if (locTerms.every((term) => holdsLocativeWitness(text, term))) return true;
+          dropped++;
+          return false;
+        });
+
+  // One clock read for the whole result: it ages every row's blindspot claim
+  // (this body only runs inside the "use cache" attempt or after the request
+  // scope on the live retry, so the read is allowed).
+  const nowMs = Date.now();
+  const bundles: ClusterBundle[] = [];
+  for (const row of rows) {
+    const members = flattenClusterMembers(row);
+    if (members.length === 0) continue;
+    bundles.push(buildClusterBundle(row, members, health, nowMs).bundle);
+  }
+  return { bundles, dropped };
 }
 
 // Internal, UNCACHED implementation. THROWS on a Supabase error/exception
@@ -123,13 +219,7 @@ interface SearchFetch {
 // as `searchClusters`' retry on a cache-attempt failure. `key` is already
 // canonical and length-checked by `searchClusters` before this is ever called.
 async function fetchSearchClusters(key: string): Promise<SearchFetch> {
-  // h42-search-1: a query holding an alias is searched under both spellings. The
-  // expansion is built from the canonical key, so the cost bound (6 terms, 64
-  // characters, one alias, two disjuncts) holds, and a query without an alias
-  // (the common case) takes exactly the arguments it always did.
-  const expansion = expandAliasQuery(key);
-  const base = expansion ? expansion.variantsQuery : key;
-  const typed = turkishQueryVariants(base);
+  const { base, typed, folded } = typedSearchArguments(key);
   if (typed.length === 0) return { bundles: [], capped: false };
   // h96-search-1: 'elektrik zammı' and 'emlak vergisi' are stored under the stems of
   // 'zam' and 'vergi', so a query holding a possessive or a doubled-stem form also asks
@@ -156,7 +246,6 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   const foldedParts = sibling === null ? searchFoldedSiblingParts(base) : null;
   const locTerms = foldedParts?.terms ?? [];
   const secondQuery = sibling ?? foldedParts?.query ?? null;
-  const folded = foldTr(expansion ? expansion.foldedQuery : key);
 
   const supabase = createReaderClient();
 
@@ -190,6 +279,10 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   }
 
   const ids = await searchIds(typed, folded);
+  // h170-roadmap-1: the typed call alone filled the page. Read before the second call can append anything: a full
+  // typed page never makes one, so this is also "no sibling, no locative", and page 2 (search_cluster_ids_v2 on
+  // these same typed arguments) continues exactly this ranking.
+  const typedFull = ids.length >= SEARCH_LIMIT;
   // The typed page has room left: ask for the sibling (or the locative) and append what is new, after the
   // typed ids, up to SEARCH_LIMIT. A full typed page is never touched. Both arguments come from the same
   // text, so the call folds its own variants.
@@ -216,62 +309,42 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   }
   if (ids.length === 0) return { bundles: [], capped: false };
 
-  // Same feed-health gate as politics-query.ts's fetchPoliticsClusters,
-  // fetched once per search — so search-result cards (which render the
-  // identical ClusterCard blindspot badge) never disagree with the home
-  // feed about a suppressed cluster. Run in parallel with the embed fetch:
-  // neither depends on the other.
-  const [health, embedRes] = await Promise.all([
-    getZoneFeedHealth(),
-    supabase
-      .from("clusters")
-      .select(CLUSTER_EMBED_SELECT)
-      .in("id", ids)
-      .returns<EmbeddedClusterRow[]>(),
-  ]);
-
-  if (embedRes.error) {
-    throw new Error(`[clusters] search-query error: ${embedRes.error.message}`);
-  }
-
-  // The embed's row order is not guaranteed to match the RPC's ranked
-  // order (ids-first: `.in('id', ids)` does not preserve the `IN (...)`
-  // list order) — re-sort by the RPC's id order before building bundles.
-  const order = new Map(ids.map((id, i) => [id, i]));
-  const ranked = [...(embedRes.data ?? [])].sort(
-    (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
-  );
-
-  // h157-search-1: a row that only the locative call found must hold every typed term that got a locative as a
-  // word that is not 'term + n...' (kazada, kazayı, kazanın; not kazandı), in the text search_tsv is built from.
+  const { bundles, dropped } = await hydrateBundles(supabase, ids, locIds, locTerms);
   // `capped` reads the page that remains, but only when the locative call was fully consumed: a dropped row turns
   // `capped` off only if the second call was neither a full page of its own nor left a new id unconsidered
   // (secondMayHaveMore false). Otherwise the list stays "capped" ("en ilgili N sonuc"), because the archive may
   // hold more rows and a plain "N sonuc" would claim a complete total. Dropped slots are not refilled.
-  let dropped = 0;
-  const rows =
-    locIds.size === 0
-      ? ranked
-      : ranked.filter((row) => {
-          if (!locIds.has(row.id)) return true;
-          const text = foldTr(`${row.title_tr_neutral ?? ""} ${row.title_tr ?? ""} ${row.summary_tr ?? ""}`);
-          if (locTerms.every((term) => holdsLocativeWitness(text, term))) return true;
-          dropped++;
-          return false;
-        });
   const capped = ids.length >= SEARCH_LIMIT && (dropped === 0 || secondMayHaveMore);
+  return typedFull ? { bundles, capped, typedFull: true } : { bundles, capped };
+}
 
-  // One clock read for the whole result: it ages every row's blindspot claim
-  // (this body only runs inside the "use cache" attempt or after the request
-  // scope on the live retry, so the read is allowed).
-  const nowMs = Date.now();
-  const bundles: ClusterBundle[] = [];
-  for (const row of rows) {
-    const members = flattenClusterMembers(row);
-    if (members.length === 0) continue;
-    bundles.push(buildClusterBundle(row, members, health, nowMs).bundle);
+// A later page (h170-roadmap-1), UNCACHED like fetchSearchClusters and THROWING on a Supabase
+// error. ONE call to migration 211's `search_cluster_ids_v2` with page 1's typed `p_variants` and
+// `p_folded`, `p_limit` SEARCH_LIMIT and `p_offset` (page - 1) * SEARCH_LIMIT; no sibling, no locative.
+// PGRST202 = 211 is not applied (the function is not in PostgREST's schema cache): `unavailable`,
+// never a throw, so the page says so instead of failing and page 1 never notices. `capped` = the call
+// returned a full page of ids (counted before the visibility filter, as page 1 counts).
+// `key` is canonical and length-checked, `page` is 2 to ARCHIVE_MAX_PAGE (searchClusters bounds both).
+async function fetchSearchPage(key: string, page: number): Promise<SearchFetch> {
+  const { typed, folded } = typedSearchArguments(key);
+  if (typed.length === 0) return { bundles: [], capped: false };
+
+  const supabase = createReaderClient();
+  const res = await supabase.rpc("search_cluster_ids_v2", {
+    p_variants: typed,
+    p_folded: folded,
+    p_limit: SEARCH_LIMIT,
+    p_offset: (page - 1) * SEARCH_LIMIT,
+  });
+  if (res.error?.code === "PGRST202") return { bundles: [], capped: false, unavailable: true };
+  if (res.error) {
+    throw new Error(`[clusters] search-query error: ${res.error.message}`);
   }
-  return { bundles, capped };
+  const ids = ((res.data ?? []) as SearchIdRow[]).map((r) => r.id);
+  if (ids.length === 0) return { bundles: [], capped: false };
+
+  const { bundles } = await hydrateBundles(supabase, ids, new Set(), []);
+  return { bundles, capped: ids.length >= SEARCH_LIMIT };
 }
 
 // Build-safety: `attemptCached` swallows whatever `fetchSearchClusters`
@@ -305,6 +378,22 @@ async function cachedSearchClusters(key: string) {
   return r;
 }
 
+// The cache entry of a LATER page (h170-roadmap-1): its own function, so page 1 keeps the one-argument
+// key it always had, and the page is part of this one's key (at most 3 entries per query: pages 2-4).
+// Same rules as above: plain "use cache", `cacheTag` first, one literal `cacheLife` per invocation after
+// the attempt. A page whose function is not applied yet (`unavailable`, migration 211) is memoised like
+// a failure, for `minutes` only, so applying 211 heals it within minutes.
+async function cachedSearchClustersPage(key: string, page: number) {
+  "use cache";
+  cacheTag("clusters-search");
+  const r = await attemptCached("clusters-search", () =>
+    fetchSearchPage(key, page),
+  );
+  if (r.ok && r.data.unavailable !== true) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
+}
+
 // Per-instance load state (module scope: shared by every request this instance
 // serves). `pending` holds the one in-flight search per canonical key;
 // `inFlight` counts the searches running, which equals `pending.size` and is
@@ -312,13 +401,22 @@ async function cachedSearchClusters(key: string) {
 const pending = new Map<string, Promise<SearchResult>>();
 let inFlight = 0;
 
+// What a read of either kind says to the caller. `typedFull` and `unavailable` are carried only when true, so
+// a result without them is exactly the object it always was.
+function resultOf(read: SearchFetch): SearchResult {
+  if (read.unavailable === true) return { ok: false, unavailablePage: true };
+  return read.typedFull === true
+    ? { ok: true, bundles: read.bundles, capped: read.capped, typedFull: true }
+    : { ok: true, bundles: read.bundles, capped: read.capped };
+}
+
 // The cached attempt, then (if it failed and the instance has room) one live
-// retry. `inFlight` already counts this search's own slot.
-async function runSearch(key: string): Promise<SearchResult> {
-  const attempt = await cachedSearchClusters(key);
-  if (attempt.ok) {
-    return { ok: true, bundles: attempt.data.bundles, capped: attempt.data.capped };
-  }
+// retry. `inFlight` already counts this search's own slot. `page` 1 is the search
+// it always was; a later page reads through its own cache function and fetch.
+async function runSearch(key: string, page: number): Promise<SearchResult> {
+  const attempt =
+    page === 1 ? await cachedSearchClusters(key) : await cachedSearchClustersPage(key, page);
+  if (attempt.ok) return resultOf(attempt.data);
 
   // A live retry doubles the database work of a failing search. When the
   // instance is already at its cap the database is the likely problem, so the
@@ -329,13 +427,20 @@ async function runSearch(key: string): Promise<SearchResult> {
   }
 
   try {
-    const { bundles, capped } = await fetchSearchClusters(key);
-    return { ok: true, bundles, capped };
+    return resultOf(page === 1 ? await fetchSearchClusters(key) : await fetchSearchPage(key, page));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[clusters] search-query failed: ${message}`);
     return { ok: false };
   }
+}
+
+// The page a read uses: 1 for anything that is not a whole number from 2 up, and every page past the
+// last servable one is the last (ARCHIVE_MAX_PAGE, where migration 211 clamps its offset too), so the
+// cache and the single-flight map hold at most ARCHIVE_MAX_PAGE entries per canonical query.
+function archiveReadPage(archivePage: number): number {
+  if (!Number.isInteger(archivePage) || archivePage < 2) return 1;
+  return Math.min(archivePage, ARCHIVE_MAX_PAGE);
 }
 
 // Public entry point. The canonical query becomes part of the cached function's
@@ -351,15 +456,21 @@ async function runSearch(key: string): Promise<SearchResult> {
 // bundles: [] }) from "still failing" or shed ({ ok: false }, never logging `q`
 // itself — it's reader-typed input) so HomeFeed only shows a retry affordance
 // on a genuine, still-failing outage. Never throws.
-export async function searchClusters(q: string): Promise<SearchResult> {
+//
+// `archivePage` (h170-roadmap-1, default 1): page N of the typed ranking, see "Later pages" above.
+// The single-flight key of a later page is the canonical query plus the page behind a NUL, which
+// canonicalSearchQuery strips from every query, so a page key can never equal a page-1 key.
+export async function searchClusters(q: string, archivePage = 1): Promise<SearchResult> {
   const key = canonicalSearchQuery(q);
   if (key.length < MIN_QUERY_LENGTH) {
     return { ok: true, bundles: [] };
   }
+  const page = archiveReadPage(archivePage);
+  const flightKey = page === 1 ? key : `${key}\u0000${page}`;
 
   // Single-flight: the check and the registration below run in one synchronous
   // stretch, so two callers can never both start the same key.
-  const running = pending.get(key);
+  const running = pending.get(flightKey);
   if (running) return running;
 
   if (inFlight >= MAX_IN_FLIGHT_SEARCHES) {
@@ -368,10 +479,10 @@ export async function searchClusters(q: string): Promise<SearchResult> {
   }
 
   inFlight++;
-  const search = runSearch(key).finally(() => {
+  const search = runSearch(key, page).finally(() => {
     inFlight--;
-    pending.delete(key);
+    pending.delete(flightKey);
   });
-  pending.set(key, search);
+  pending.set(flightKey, search);
   return search;
 }

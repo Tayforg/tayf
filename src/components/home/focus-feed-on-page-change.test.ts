@@ -10,6 +10,39 @@ import { isEditableTarget, shouldFocusFeed } from "./focus-feed-on-page-change";
 // function so it can be tested without a DOM; the effect itself only reads
 // the active element and calls focus().
 
+describe("shouldFocusFeed: the archive pager (?arsiv=N, h170-roadmap-1)", () => {
+  it("moves focus when only the archive page changes, forwards or backwards", () => {
+    expect(
+      shouldFocusFeed({ page: 1, query: "enflasyon", archivePage: 1 }, { page: 1, query: "enflasyon", archivePage: 2 }, false),
+    ).toBe(true);
+    expect(
+      shouldFocusFeed({ page: 1, query: "enflasyon", archivePage: 3 }, { page: 1, query: "enflasyon", archivePage: 2 }, false),
+    ).toBe(true);
+  });
+
+  it("an absent archivePage is page 1: the pager and the plain feed are unchanged", () => {
+    expect(shouldFocusFeed({ page: 1, query: "ak" }, { page: 1, query: "ak", archivePage: 1 }, false)).toBe(false);
+    expect(shouldFocusFeed({ page: 1, query: "ak", archivePage: 1 }, { page: 1, query: "ak" }, false)).toBe(false);
+    expect(shouldFocusFeed({ page: 1, query: "ak" }, { page: 1, query: "ak", archivePage: 2 }, false)).toBe(true);
+  });
+
+  it("still never moves focus when the query changed, or while the reader types, or on a first render", () => {
+    expect(
+      shouldFocusFeed({ page: 1, query: "ak", archivePage: 1 }, { page: 1, query: "akp", archivePage: 2 }, false),
+    ).toBe(false);
+    expect(
+      shouldFocusFeed({ page: 1, query: "ak", archivePage: 1 }, { page: 1, query: "ak", archivePage: 2 }, true),
+    ).toBe(false);
+    expect(shouldFocusFeed(null, { page: 1, query: "ak", archivePage: 2 }, false)).toBe(false);
+  });
+
+  it("the same archive page twice does nothing", () => {
+    expect(
+      shouldFocusFeed({ page: 1, query: "ak", archivePage: 2 }, { page: 1, query: "ak", archivePage: 2 }, false),
+    ).toBe(false);
+  });
+});
+
 describe("shouldFocusFeed", () => {
   it("never moves focus on the first render of a document (nothing seen yet)", () => {
     expect(shouldFocusFeed(null, { page: 1, query: "" }, false)).toBe(false);

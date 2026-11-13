@@ -59,6 +59,20 @@ export function resultCountPhrase(count: number, capped: boolean): string {
   return capped ? `en ilgili ${text}` : text;
 }
 
+/**
+ * h170-roadmap-1: what a later page of the archive ranking (?arsiv=N, N >= 2) is called: "en ilgili
+ * sonuçların 2. sayfası". It stands where `resultCountPhrase` stands, in the visible line and in the
+ * live region, because the count of one page is not the count of the search.
+ */
+export function archivePagePhrase(archivePage: number): string {
+  return `en ilgili sonuçların ${archivePage}. sayfası`;
+}
+
+/** An archive page after the first: a whole number from 2 up. Anything else is page 1's wording. */
+function isLaterArchivePage(archivePage: number | undefined): archivePage is number {
+  return archivePage !== undefined && Number.isInteger(archivePage) && archivePage >= 2;
+}
+
 export interface SearchStatusArgs {
   q: string | undefined;
   /** Results for the whole search, all pages: in-feed matches plus archive-only rows. */
@@ -67,6 +81,13 @@ export interface SearchStatusArgs {
   capped: boolean;
   /** The archive search failed or timed out. */
   unavailable: boolean;
+  /**
+   * The archive page being shown (?arsiv=N). Absent or 1: the sentences below as they always were. 2 and
+   * later: the page is named and no count is claimed (h170-roadmap-1).
+   */
+  archivePage?: number;
+  /** `unavailable` because migration 211 is not applied: this page cannot be shown, the search can. */
+  pageUnavailable?: boolean;
 }
 
 /**
@@ -81,10 +102,21 @@ export function searchStatusText({
   count,
   capped,
   unavailable,
+  archivePage,
+  pageUnavailable,
 }: SearchStatusArgs): string {
   const shown = displayQuery(q);
   if (!shown) return "";
   if (isTooShortQuery(q)) return `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
+
+  // h170-roadmap-1: a later page of the ranking names its page. Its count is the page's, never the search's,
+  // so it is not claimed; a page that cannot be shown says so, and any other failure is the plain one.
+  if (isLaterArchivePage(archivePage)) {
+    if (unavailable) {
+      return pageUnavailable === true ? "Bu sayfa şu an gösterilemiyor." : "Arama şu an yanıt vermiyor.";
+    }
+    return `“${shown}” için ${archivePagePhrase(archivePage)} gösteriliyor.`;
+  }
 
   const results = Number.isFinite(count) && count > 0 ? count : 0;
   if (unavailable) {
@@ -101,9 +133,14 @@ export function searchStatusText({
 
 /**
  * Page title for "/?q=…". The root layout's title template appends " — Tayf".
- * A blank query falls back to "Arama" rather than an empty pair of quotes.
+ * A blank query falls back to "Arama" rather than an empty pair of quotes. A later
+ * archive page (?arsiv=N, N >= 2) adds " — N. sayfa".
  */
-export function searchTitle(q: string | undefined): string {
+export function searchTitle(q: string | undefined, archivePage = 1): string {
   const shown = displayQuery(q);
-  return shown ? `“${shown}” araması` : "Arama";
+  if (!shown) return "Arama";
+  // h170-roadmap-1: a later archive page says which page it is (WCAG 2.4.2: the tab and the route announcer change).
+  return isLaterArchivePage(archivePage)
+    ? `“${shown}” araması — ${archivePage}. sayfa`
+    : `“${shown}” araması`;
 }

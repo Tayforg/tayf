@@ -52,6 +52,7 @@ const REQUIRED: readonly string[] = [
   "api/sources",
   "api/sources/[slug]",
   "api/timeline/head",
+  "api/home/head",
   "api/oembed",
 ];
 

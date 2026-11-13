@@ -273,6 +273,24 @@ describe("archiveHeading", () => {
   it("reads 'Arşivden: en ilgili N sonuç' when the RPC hit its cap", () => {
     expect(archiveHeading(22, true)).toBe("Arşivden: en ilgili 22 sonuç");
   });
+
+  // h170-roadmap-1: a later page of the archive ranking has no count in its heading: the rows are the page's.
+  it("names the page, not a count, on archive page 2 and later", () => {
+    expect(archiveHeading(24, true, 2)).toBe("Arşivden: en ilgili sonuçlar (2. sayfa)");
+    expect(archiveHeading(7, false, 3)).toBe("Arşivden: en ilgili sonuçlar (3. sayfa)");
+    expect(archiveHeading(24, true, 4)).toBe("Arşivden: en ilgili sonuçlar (4. sayfa)");
+  });
+
+  it("page 1, given or omitted, is today's heading", () => {
+    expect(archiveHeading(22, true, 1)).toBe(archiveHeading(22, true));
+    expect(archiveHeading(5, false, 1)).toBe(archiveHeading(5, false));
+  });
+
+  it("a page that is not 2 or more is page 1's wording", () => {
+    for (const page of [0, -3, Number.NaN, 1.5]) {
+      expect(archiveHeading(5, false, page), String(page)).toBe("Arşivden: 5 sonuç");
+    }
+  });
 });
 
 // h42-search-1: the archive treats AKP and AK Parti as one party (search-aliases.ts),

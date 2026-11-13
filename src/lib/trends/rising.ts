@@ -114,6 +114,23 @@ export function formatRatio(r: number): string {
   return ratioFormat.format(Math.floor(r * 10 + 1e-9) / 10);
 }
 
+/**
+ * The "how much" half of a rising row, the text after "7 Kasım: 15 haber · " on
+ * /trends and the gloss on a home rail chip (h170-roadmap-3), so both print the
+ * same words. A brand-new topic says it "didn't exist" instead of quoting a
+ * multiple; otherwise the multiple against the 7-day mean, with "en az" when the
+ * ratio is only a lower bound (see `ratioIsLowerBound`, never stated as exact).
+ * Names no day and no count: the caller owns both (the day by its date, the
+ * count through formatCountTr).
+ */
+export function risingHint(
+  item: Pick<RisingItem, "isNew" | "ratioIsLowerBound" | "ratioLabel">,
+): string {
+  return item.isNew
+    ? "geçen hafta neredeyse hiç yoktu"
+    : `7 günlük ortalamanın ${item.ratioIsLowerBound ? "en az " : ""}${item.ratioLabel} katı`;
+}
+
 const KNOWN: ReadonlyMap<string, (typeof RISING_ENTITIES)[number]> = new Map(
   RISING_ENTITIES.map((e) => [e.key, e]),
 );
