@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -52,6 +55,12 @@ const fixture = vi.hoisted(() => ({
   rpcErrorThreeArg: null as { message: string; code?: string } | null,
   rpcThrows: false,
   rpcCalls: [] as unknown[],
+  // h170-roadmap-1: the later archive pages call search_cluster_ids_v2 (migration 211). Its calls are
+  // recorded apart from `rpcCalls`, so every existing assertion on the page-1 function stays as it was.
+  v2Calls: [] as unknown[],
+  v2Ids: [] as string[],
+  v2Error: null as { message: string; code?: string } | null,
+  v2Throws: false,
   // While `hold` is true every search_cluster_ids call returns a pending
   // promise that the test settles through its deferred (in-flight cap,
   // single-flight and shed tests).
@@ -105,6 +114,21 @@ const supabaseFake = await vi.hoisted(async () => {
           error: null,
         };
       },
+      search_cluster_ids_v2: (args: unknown) => {
+        fixture.v2Calls.push(args);
+        if (fixture.hold) {
+          return new Promise<{ data: unknown; error: null }>((resolve, reject) => {
+            fixture.deferreds.push({
+              args,
+              succeed: () => resolve({ data: fixture.v2Ids.map((id) => ({ id })), error: null }),
+              fail: (err) => reject(err),
+            });
+          });
+        }
+        if (fixture.v2Throws) throw new Error("rpc connection reset");
+        if (fixture.v2Error) return { data: null, error: fixture.v2Error };
+        return { data: fixture.v2Ids.map((id) => ({ id })), error: null };
+      },
     },
   });
 });
@@ -114,6 +138,7 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { cacheLife, cacheTag } from "next/cache";
+import { ARCHIVE_MAX_PAGE, ARCHIVE_PAGE_SIZE } from "../seo/home-canonical";
 import {
   MAX_IN_FLIGHT_SEARCHES,
   SEARCH_LIMIT,
@@ -154,6 +179,10 @@ beforeEach(() => {
   fixture.rpcErrorThreeArg = null;
   fixture.rpcThrows = false;
   fixture.rpcCalls = [];
+  fixture.v2Calls = [];
+  fixture.v2Ids = [];
+  fixture.v2Error = null;
+  fixture.v2Throws = false;
   fixture.hold = false;
   fixture.deferreds = [];
   feedHealth.getZoneFeedHealth.mockReset();
@@ -2151,5 +2180,414 @@ describe("feed-health gated blindspot suppression (search results)", () => {
     expect(byId.get("young")?.is_blindspot).toBe(false);
     expect(byId.get("young")?.blindspot_side).toBeNull();
     expect(byId.get("old")?.is_blindspot).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h170-roadmap-1: the archive can be paged to its 96 best matches (4 pages of 24).
+// Page 1 is the search it always was; a later page is ONE call to migration 211's
+// search_cluster_ids_v2 with page 1's typed arguments and p_offset (page - 1) * 24.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters: archive pages (h170-roadmap-1)", () => {
+  type V2Args = { p_variants: string[]; p_folded: string; p_limit: number; p_offset: number };
+  const v2At = (i: number) => fixture.v2Calls[i] as V2Args;
+  const ids = (n: number, prefix = "c") => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+  const rowsFor = (list: string[]) =>
+    list.map((id) => mkRow({ id, members: [{ id: `a-${id}`, sourceId: "s1" }] }));
+
+  it("the page constants the home page prints and parses are the ones this module serves", () => {
+    expect(ARCHIVE_PAGE_SIZE).toBe(SEARCH_LIMIT);
+    expect(ARCHIVE_MAX_PAGE).toBe(4);
+  });
+
+  describe("page 1 is untouched", () => {
+    it("an explicit page 1 makes today's calls and never touches search_cluster_ids_v2", async () => {
+      await searchClusters("IŞIK", 1);
+      expect(fixture.rpcCalls).toEqual([{ p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24 }]);
+      expect(fixture.v2Calls).toEqual([]);
+    });
+
+    it("omitting the page and passing 1 are the same search: same calls, same result", async () => {
+      fixture.rpcIdsPerCall = [["c1"], ["c1"]];
+      fixture.data = rowsFor(["c1"]);
+      const implicit = await searchClusters("trafik cezası");
+      const callsImplicit = [...fixture.rpcCalls];
+      fixture.rpcCalls = [];
+      const explicit = await searchClusters("trafik cezası", 1);
+      expect(fixture.rpcCalls).toEqual(callsImplicit);
+      expect(explicit).toEqual(implicit);
+      expect(fixture.v2Calls).toEqual([]);
+    });
+
+    it("a page that is not a whole number from 1 up is page 1 (the typed call, no v2 call)", async () => {
+      for (const page of [0, -1, -24, Number.NaN, 1.5, 2.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.MIN_SAFE_INTEGER]) {
+        fixture.rpcCalls = [];
+        await searchClusters("deprem", page);
+        expect(fixture.rpcCalls, String(page)).toHaveLength(1);
+        expect(fixture.v2Calls, String(page)).toEqual([]);
+      }
+    });
+
+    it("keeps the one literal cacheLife per invocation: cluster-feed on a read", async () => {
+      fixture.rpcIds = [];
+      await searchClusters("merhaba", 1);
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+      expect(cacheTag).toHaveBeenCalledWith("clusters-search");
+    });
+
+    it("typedFull: the typed call alone returned 24 ids", async () => {
+      fixture.rpcIdsPerCall = [ids(24, "t")];
+      fixture.data = rowsFor(ids(24, "t"));
+      const result = await searchClusters("trafik cezası");
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.typedFull).toBe(true);
+      expect(result.capped).toBe(true);
+      // a full typed page never makes the sibling call
+      expect(fixture.rpcCalls).toHaveLength(1);
+    });
+
+    it("typedFull is not set when the sibling call filled the page, though the page is capped", async () => {
+      fixture.rpcIdsPerCall = [ids(10, "t"), ids(24, "s")];
+      fixture.data = rowsFor([...ids(10, "t"), ...ids(14, "s")]);
+      const result = await searchClusters("trafik cezası");
+      if (!result.ok) throw new Error("expected ok");
+      expect(fixture.rpcCalls).toHaveLength(2);
+      expect(result.capped).toBe(true);
+      expect(result.bundles).toHaveLength(24);
+      expect(result.typedFull).not.toBe(true);
+    });
+
+    it("typedFull is not set when the locative call filled the page", async () => {
+      fixture.rpcIdsPerCall = [ids(5, "t"), ids(24, "l")];
+      fixture.data = rowsFor([...ids(5, "t"), ...ids(19, "l")]);
+      const result = await searchClusters("tarla");
+      if (!result.ok) throw new Error("expected ok");
+      expect(fixture.rpcCalls).toHaveLength(2);
+      expect(result.typedFull).not.toBe(true);
+    });
+
+    it("typedFull is not set for fewer than 24 ids, and not for an empty result", async () => {
+      for (const n of [0, 1, 23]) {
+        fixture.rpcIds = ids(n);
+        fixture.data = rowsFor(ids(n));
+        const result = await searchClusters("deprem");
+        if (!result.ok) throw new Error("expected ok");
+        expect(result.typedFull, String(n)).not.toBe(true);
+      }
+    });
+  });
+
+  describe("a later page is one call to search_cluster_ids_v2", () => {
+    it("page 2: ONE call with page 1's typed variants and folded text, p_limit 24 and p_offset 24", async () => {
+      await searchClusters("IŞIK", 2);
+      expect(fixture.v2Calls).toEqual([
+        { p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24, p_offset: 24 },
+      ]);
+      expect(fixture.rpcCalls).toEqual([]);
+    });
+
+    it("sends exactly page 1's typed arguments: the same p_variants and p_folded as the page-1 call", async () => {
+      for (const q of ["Özel'den  Şişli", "Erdoğan’ın", "enflasyon", "AKP", "afyon"]) {
+        fixture.rpcCalls = [];
+        fixture.v2Calls = [];
+        await searchClusters(q, 1);
+        const typed = fixture.rpcCalls[0] as { p_variants: string[]; p_folded: string };
+        await searchClusters(q, 2);
+        expect(fixture.v2Calls, q).toHaveLength(1);
+        expect(v2At(0).p_variants, q).toEqual(typed.p_variants);
+        expect(v2At(0).p_folded, q).toBe(typed.p_folded);
+      }
+    });
+
+    it("makes no sibling call for a possessive and no locative call for a bare vowel-final noun", async () => {
+      for (const q of ["elektrik zammı", "emlak vergisi", "tarla", "bolu kaza", "imamoğluna"]) {
+        fixture.rpcCalls = [];
+        fixture.v2Calls = [];
+        await searchClusters(q, 2);
+        expect(fixture.rpcCalls, q).toEqual([]);
+        expect(fixture.v2Calls, q).toHaveLength(1);
+        // the typed words only: the sibling's words never reach a later page
+        expect(v2At(0).p_folded, q).toBe(foldTr(canonicalSearchQuery(q)));
+      }
+    });
+
+    it("page 3 sends p_offset 48 and page 4 sends p_offset 72", async () => {
+      await searchClusters("deprem", 3);
+      await searchClusters("deprem", 4);
+      expect(fixture.v2Calls.map((c) => (c as V2Args).p_offset)).toEqual([48, 72]);
+      expect(fixture.v2Calls.map((c) => (c as V2Args).p_limit)).toEqual([24, 24]);
+    });
+
+    it("a page past the last is the last page: 5, 9 and a huge page all send p_offset 72, never a larger one", async () => {
+      for (const page of [5, 9, 1000, Number.MAX_SAFE_INTEGER]) {
+        fixture.v2Calls = [];
+        await searchClusters("deprem", page);
+        expect(fixture.v2Calls, String(page)).toHaveLength(1);
+        expect(v2At(0).p_offset, String(page)).toBe(72);
+      }
+    });
+
+    it("the alias expansion reaches a later page as it reaches page 1: AKP and AK Parti send one expanded call", async () => {
+      await searchClusters("AKP", 2);
+      await searchClusters("AK Parti", 2);
+      expect(fixture.v2Calls).toHaveLength(2);
+      expect(v2At(0).p_variants).toEqual(v2At(1).p_variants);
+      expect(v2At(0).p_folded).toBe(v2At(1).p_folded);
+    });
+
+    it("a too-short query is no search on any page: no call, no slot, no cache entry", async () => {
+      for (const q of ["", "a", "!!", "  "]) {
+        await expect(searchClusters(q, 2), q).resolves.toEqual({ ok: true, bundles: [] });
+      }
+      expect(fixture.v2Calls).toEqual([]);
+      expect(fixture.rpcCalls).toEqual([]);
+      expect(cacheLife).not.toHaveBeenCalled();
+      expect(cacheTag).not.toHaveBeenCalled();
+    });
+
+    it("hydrates the ids in the RPC's order with the embed select, as page 1 does", async () => {
+      fixture.v2Ids = ["b", "c", "a"];
+      fixture.data = rowsFor(["a", "b", "c"]);
+      const result = await searchClusters("deprem", 2);
+      const state = fixture.lastState as BuilderState;
+      expect(state.table).toBe("clusters");
+      expect(state.in).toEqual([{ col: "id", vals: ["b", "c", "a"] }]);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["b", "c", "a"]);
+    });
+
+    it("drops a cluster with no visible member exactly as page 1 does", async () => {
+      fixture.v2Ids = ["a", "empty", "b"];
+      fixture.data = [
+        mkRow({ id: "a", members: [{ id: "a-a", sourceId: "s1" }] }),
+        mkRow({ id: "empty", members: [] }),
+        mkRow({ id: "b", members: [{ id: "a-b", sourceId: "s1" }] }),
+      ];
+      fixture.rpcIds = ["a", "empty", "b"];
+      const later = await searchClusters("deprem", 2);
+      const first = await searchClusters("deprem", 1);
+      if (!later.ok || !first.ok) throw new Error("expected ok");
+      expect(later.bundles.map((b) => b.cluster.id)).toEqual(["a", "b"]);
+      expect(later.bundles.map((b) => b.cluster.id)).toEqual(first.bundles.map((b) => b.cluster.id));
+    });
+
+    it("applies the feed-health gate to a later page like page 1 (one health read per page)", async () => {
+      fixture.v2Ids = ["a"];
+      fixture.data = rowsFor(["a"]);
+      await searchClusters("deprem", 2);
+      expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    });
+
+    it("capped is true when the v2 call returned a full page of 24 ids, false for fewer", async () => {
+      fixture.v2Ids = ids(24);
+      fixture.data = rowsFor(ids(24));
+      const full = await searchClusters("deprem", 2);
+      if (!full.ok) throw new Error("expected ok");
+      expect(full.capped).toBe(true);
+      expect(full.bundles).toHaveLength(24);
+
+      fixture.v2Ids = ids(23);
+      fixture.data = rowsFor(ids(23));
+      const short = await searchClusters("enflasyon", 3);
+      if (!short.ok) throw new Error("expected ok");
+      expect(short.capped).toBe(false);
+    });
+
+    it("capped counts the ids, not the rows left after the visibility filter", async () => {
+      fixture.v2Ids = ids(24);
+      fixture.data = [...rowsFor(ids(23)), mkRow({ id: "c23", members: [] })];
+      const result = await searchClusters("deprem", 2);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.capped).toBe(true);
+      expect(result.bundles).toHaveLength(23);
+    });
+
+    it("a page past the end (no ids) is ok with no bundles, capped false, and no embed read", async () => {
+      fixture.v2Ids = [];
+      await expect(searchClusters("deprem", 4)).resolves.toEqual({ ok: true, bundles: [], capped: false });
+      expect(fixture.lastState).toBeNull();
+    });
+  });
+
+  describe("migration 211 not applied (PGRST202)", () => {
+    it("page 2 resolves { ok: false, unavailablePage: true } without throwing, after ONE call and no live retry", async () => {
+      fixture.v2Error = { message: "Could not find the function public.search_cluster_ids_v2", code: "PGRST202" };
+      await expect(searchClusters("deprem", 2)).resolves.toEqual({ ok: false, unavailablePage: true });
+      expect(fixture.v2Calls).toHaveLength(1);
+      expect(fixture.rpcCalls).toEqual([]);
+    });
+
+    it("the unavailable page is memoised for 'minutes' only, so applying 211 heals it soon", async () => {
+      fixture.v2Error = { message: "missing", code: "PGRST202" };
+      await searchClusters("deprem", 3);
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+      expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+      expect(cacheTag).toHaveBeenCalledWith("clusters-search");
+    });
+
+    it("page 1 is unaffected: it never calls v2 and answers with its results", async () => {
+      fixture.v2Error = { message: "missing", code: "PGRST202" };
+      fixture.rpcIds = ["c1"];
+      fixture.data = rowsFor(["c1"]);
+      const result = await searchClusters("deprem", 1);
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["c1"]);
+      expect(result).not.toHaveProperty("unavailablePage");
+      expect(fixture.v2Calls).toEqual([]);
+      expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    });
+
+    it("page 1 stays healthy after a later page was unavailable (separate entries)", async () => {
+      fixture.v2Error = { message: "missing", code: "PGRST202" };
+      await searchClusters("deprem", 2);
+      fixture.rpcIds = ["c1"];
+      fixture.data = rowsFor(["c1"]);
+      const first = await searchClusters("deprem");
+      expect(first.ok).toBe(true);
+    });
+
+    it("any other error on v2 is the plain { ok: false } (no unavailablePage), with one live retry", async () => {
+      fixture.v2Error = { message: "statement timeout", code: "57014" };
+      const result = await searchClusters("deprem", 2);
+      expect(result).toEqual({ ok: false });
+      expect(result).not.toHaveProperty("unavailablePage");
+      // the cached attempt and the live retry
+      expect(fixture.v2Calls).toHaveLength(2);
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+    });
+
+    it("an error without a code, a throwing RPC and a failing embed are { ok: false } too, never a throw", async () => {
+      fixture.v2Error = { message: "db down" };
+      await expect(searchClusters("deprem", 2)).resolves.toEqual({ ok: false });
+      fixture.v2Error = null;
+      fixture.v2Throws = true;
+      await expect(searchClusters("enflasyon", 2)).resolves.toEqual({ ok: false });
+      fixture.v2Throws = false;
+      fixture.v2Ids = ["c1"];
+      fixture.error = { message: "embed down" };
+      await expect(searchClusters("seçim", 2)).resolves.toEqual({ ok: false });
+    });
+
+    it("a successful later page keeps the cluster-feed window (one literal cacheLife per invocation)", async () => {
+      fixture.v2Ids = ["c1"];
+      fixture.data = rowsFor(["c1"]);
+      await searchClusters("deprem", 2);
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+      expect(cacheTag).toHaveBeenCalledWith("clusters-search");
+    });
+  });
+
+  describe("cache key and load shape", () => {
+    const SOURCE = readFileSync(resolve(__dirname, "search-query.ts"), "utf8");
+
+    it("page 1 keeps its cache function and its one-argument key; a later page has a cache function of its own with the page in its key", () => {
+      expect(SOURCE).toContain("async function cachedSearchClusters(key: string) {");
+      expect(SOURCE).toContain("async function cachedSearchClustersPage(key: string, page: number) {");
+      expect(SOURCE).toContain("cachedSearchClusters(key)");
+      expect(SOURCE).toContain("cachedSearchClustersPage(key, page)");
+    });
+
+    it("each cached function keeps exactly one literal cacheLife per outcome, after the attempt, and cacheTag first", () => {
+      expect(SOURCE.split('cacheLife("cluster-feed")').length - 1).toBe(2);
+      expect(SOURCE.split('cacheLife("minutes")').length - 1).toBe(2);
+      expect(SOURCE.split("cacheTag(\"clusters-search\")").length - 1).toBe(2);
+      for (const name of ["cachedSearchClusters(key: string)", "cachedSearchClustersPage(key: string, page: number)"]) {
+        const at = SOURCE.indexOf(name);
+        const end = SOURCE.indexOf("\n}\n", at);
+        const body = SOURCE.slice(at, end);
+        expect(body.indexOf("cacheTag(")).toBeLessThan(body.indexOf("attemptCached("));
+        expect(body.indexOf("attemptCached(")).toBeLessThan(body.indexOf("cacheLife("));
+      }
+    });
+
+    it("the same canonical query on two pages is two searches; the same page twice is one (single-flight per page)", async () => {
+      fixture.hold = true;
+      fixture.rpcIds = ["c1"];
+      fixture.v2Ids = ["c2"];
+      fixture.data = rowsFor(["c1", "c2"]);
+      const running = [
+        searchClusters("deprem", 1),
+        searchClusters("DEPREM!", 2),
+        searchClusters("deprem", 2),
+        searchClusters("deprem", 3),
+        searchClusters("deprem", 3),
+      ];
+      await tick();
+      expect(fixture.rpcCalls).toHaveLength(1);
+      expect(fixture.v2Calls.map((c) => (c as V2Args).p_offset)).toEqual([24, 48]);
+      fixture.hold = false;
+      for (const d of fixture.deferreds) d.succeed();
+      const results = await Promise.all(running);
+      expect(results.every((r) => r.ok)).toBe(true);
+    });
+
+    it("a canonical query never holds the NUL that separates a later page's flight key, so no page-1 key can equal one", () => {
+      for (const q of ["deprem\u00002", "deprem\u0000", "\u0000\u0000deprem", "deprem\u00002\u0000", "deprem\u0000\u0000"]) {
+        expect(canonicalSearchQuery(q), JSON.stringify(q)).not.toContain("\u0000");
+      }
+    });
+
+    it("'deprem' on page 2 and 'deprem 2' on page 1 are two searches, neither shared with the other", async () => {
+      fixture.hold = true;
+      const running = [searchClusters("deprem", 2), searchClusters("deprem 2", 1), searchClusters("deprem\u00002", 1)];
+      await tick();
+      // 'deprem' page 2 is the one v2 call; 'deprem 2' (and the NUL spelling of it, the same canonical key) one page-1 call
+      expect(fixture.v2Calls).toHaveLength(1);
+      expect(fixture.rpcCalls).toHaveLength(1);
+      fixture.hold = false;
+      for (const d of fixture.deferreds) d.succeed();
+      await Promise.all(running);
+    });
+
+    it("MAX_IN_FLIGHT_SEARCHES applies to later pages: the 5th concurrent distinct search is shed with no RPC", async () => {
+      fixture.hold = true;
+      const running = ["alfan", "betan", "gaman", "deltan"].map((q) => searchClusters(q, 2));
+      await tick();
+      expect(fixture.v2Calls).toHaveLength(4);
+      const tagCalls = vi.mocked(cacheTag).mock.calls.length;
+      await expect(searchClusters("epsilon", 2)).resolves.toEqual({ ok: false });
+      await expect(searchClusters("epsilon", 3)).resolves.toEqual({ ok: false });
+      await expect(searchClusters("epsilon", 1)).resolves.toEqual({ ok: false });
+      expect(fixture.v2Calls).toHaveLength(4);
+      expect(fixture.rpcCalls).toEqual([]);
+      // the shed never entered the cache boundary, so it can never be memoised
+      expect(vi.mocked(cacheTag).mock.calls).toHaveLength(tagCalls);
+      fixture.hold = false;
+      for (const d of fixture.deferreds) d.succeed();
+      await Promise.all(running);
+    });
+
+    it("page 1 and later pages share the same slots (3 page-1 searches and 1 page-2 search fill the cap)", async () => {
+      fixture.hold = true;
+      const running = [
+        searchClusters("alfan", 1),
+        searchClusters("betan", 1),
+        searchClusters("gaman", 1),
+        searchClusters("deltan", 2),
+      ];
+      await tick();
+      expect(fixture.rpcCalls).toHaveLength(3);
+      expect(fixture.v2Calls).toHaveLength(1);
+      await expect(searchClusters("epsilon", 4)).resolves.toEqual({ ok: false });
+      await expect(searchClusters("epsilon", 1)).resolves.toEqual({ ok: false });
+      fixture.hold = false;
+      for (const d of fixture.deferreds) d.succeed();
+      await Promise.all(running);
+    });
+
+    it("releases the slot of a later page after success and after a failure", async () => {
+      fixture.v2Throws = true;
+      for (const q of ["alfan", "betan", "gaman", "deltan", "epsilon", "zetan"]) {
+        await expect(searchClusters(q, 2), q).resolves.toEqual({ ok: false });
+      }
+      fixture.v2Throws = false;
+      await expect(searchClusters("eta", 2)).resolves.toMatchObject({ ok: true });
+    });
   });
 });

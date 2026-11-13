@@ -13,12 +13,16 @@ import { FollowButton } from "@/components/follow/follow-button";
 import { ClearSearchLink } from "@/components/home/clear-search-link";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
+import { NewBreakingPill } from "@/components/home/new-breaking-pill";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
+import { RisingRail, loadRisingRail } from "@/components/home/rising-rail";
 import { SearchEcho } from "@/components/search/search-echo";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import {
   getPoliticsClusters,
+  knownBreakingIds,
+  splitHomeFeed,
   type ClusterBundle,
   type PoliticsClustersResult,
 } from "@/lib/clusters/politics-query";
@@ -43,6 +47,7 @@ import { searchIntentLink, type SearchIntent } from "@/lib/search/search-intent"
 import { loadSearchIntent } from "@/lib/search/search-intent-query";
 import {
   MIN_QUERY_LENGTH,
+  archivePagePhrase,
   displayQuery,
   isTooShortQuery,
   resultCountPhrase,
@@ -50,10 +55,13 @@ import {
   searchTitle,
 } from "@/lib/search/search-status";
 import {
+  ARCHIVE_MAX_PAGE,
+  ARCHIVE_PAGE_SIZE,
   HOME_PAGE_SIZE,
   homeCanonicalPath,
   homePageTitle,
   homeTotalPages,
+  parseArchivePage,
   parseHomePage,
   rankedCountOf,
 } from "@/lib/seo/home-canonical";
@@ -78,11 +86,23 @@ function firstQuery(raw: string | string[] | undefined): string | undefined {
   return first?.trim() || undefined;
 }
 
+// h170-roadmap-1: ?arsiv=N pages the archive ranking, and only for a query the archive actually
+// searches. "Searches" is HomeFeed's `searchable` below (typed, and not too short once canonical),
+// written once more here for generateMetadata so the title can never name a page the body does not
+// show: a too-short q with ?arsiv=3 is page 1 in both. Without a q the parameter is ignored.
+function searchArchivePage(q: string, raw: string | string[] | undefined): number {
+  const typed = displayQuery(q) !== "";
+  const tooShort = isTooShortQuery(q) || (typed && canonicalSearchQuery(q).length < MIN_QUERY_LENGTH);
+  return typed && !tooShort ? parseArchivePage(raw) : 1;
+}
+
 // A search results page ("/?q=...") is noindex,follow: the URL space is
 // unbounded and the content is a filtered view of the feed, not a page of its
 // own. It does get its own title ("“q” araması", the layout template adds
 // " — Tayf") so the tab, history and a screen reader's page announcement say
 // what was searched instead of repeating the generic home title (WCAG 2.4.2).
+// A later page of the archive ranking (?arsiv=N, N >= 2, h170-roadmap-1) adds
+// its page to that title ("“q” araması — N. sayfa") and stays noindex,follow.
 // Nothing else is returned, so the canonical stays the layout's "/" (the
 // robots object replaces the layout's wholesale: metadata merges shallowly).
 // Otherwise, for /?page=N (N > 1, clamped to the last page): a title of its
@@ -100,13 +120,18 @@ function firstQuery(raw: string | string[] | undefined): string | undefined {
 export async function generateMetadata({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[] }>;
 }): Promise<Metadata> {
-  const { q: qRaw, page: pageRaw } = await searchParams;
+  const { q: qRaw, page: pageRaw, arsiv: arsivRaw } = await searchParams;
   const q = firstQuery(qRaw);
   // title.absolute: the root layout's "%s — Tayf" template only applies to
   // CHILD segments, never to this page in the layout's own segment.
-  if (q) return { title: { absolute: `${searchTitle(q)} — Tayf` }, robots: { index: false, follow: true } };
+  if (q) {
+    return {
+      title: { absolute: `${searchTitle(q, searchArchivePage(q, arsivRaw))} — Tayf` },
+      robots: { index: false, follow: true },
+    };
+  }
   const page = parseHomePage(pageRaw);
   if (page <= 1) return {};
   let rankedCount: number | null = null;
@@ -178,7 +203,7 @@ const HOME_FEED_ID = "haber-akisi";
 export default function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[] }>;
 }) {
   return (
     <>
@@ -273,9 +298,9 @@ async function loadFeed(): Promise<PoliticsClustersResult | null> {
 export async function HomeFeed({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[] }>;
 }) {
-  const { q: qRaw, page: pageRaw } = await searchParams;
+  const { q: qRaw, page: pageRaw, arsiv: arsivRaw } = await searchParams;
   const q = firstQuery(qRaw);
   const page = parseHomePage(pageRaw);
 
@@ -294,6 +319,10 @@ export async function HomeFeed({
     isTooShortQuery(q) ||
     (typed && canonicalSearchQuery(q).length < MIN_QUERY_LENGTH);
   const searchable = typed && !tooShort;
+  // h170-roadmap-1: the archive page (?arsiv=N, 1 to ARCHIVE_MAX_PAGE) of a query that is searched; without
+  // one the parameter is ignored. A page after the first shows that page's archive rows ONLY: the in-feed
+  // sections (Son Dakika, the day buckets and their pager) belong to page 1, and arsiv wins over ?page=.
+  const archivePage = searchable ? parseArchivePage(arsivRaw) : 1;
   // h42-search-2: the archive keeps at most MAX_SEARCH_TERMS words and
   // MAX_SEARCH_QUERY_LENGTH characters (a cost bound, h30-abuse-1). When that cut
   // part of what the reader typed, the page says so and echoes only the words the
@@ -320,6 +349,15 @@ export async function HomeFeed({
   // the canonical decision wins in the live region too.
   const tooShortStatus = `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
 
+  // h170-roadmap-3 (react-2): the rising rail's read starts HERE, beside the feed read, not when the
+  // rail renders after the feed. It is never awaited by HomeFeed (only RisingRail awaits it, inside
+  // its own Suspense) and never rejects (loadRisingRail resolves null on any failure), so it can
+  // neither delay nor fail the feed, and an early return (the outage shell) just leaves a promise that
+  // settles on its own. The condition is `!q`, the test the rail uses further down: whether this is
+  // page 1 is not known until the feed is (a clamped ?page=99 of a one-page feed is page 1), so a
+  // later page may start a read it never shows, a cached entry and at most 6 shared hub reads.
+  const railRead = !q ? loadRisingRail() : null;
+
   // None of the fetches depends on another — run them in parallel. `search` is
   // only attempted for a searchable query (searchClusters itself also
   // enforces the floor, but skipping the call entirely here avoids an
@@ -330,7 +368,12 @@ export async function HomeFeed({
   // rejects (a failed lookup is null: no row).
   const [feed, search, intent] = await Promise.all([
     loadFeed(),
-    searchable ? searchClusters(q) : Promise.resolve(null),
+    // Page 1 is called exactly as before (the query alone); a later archive page passes its page.
+    searchable
+      ? archivePage === 1
+        ? searchClusters(q)
+        : searchClusters(q, archivePage)
+      : Promise.resolve(null),
     searchable ? loadSearchIntent(q) : Promise.resolve(null),
   ]);
 
@@ -379,31 +422,30 @@ export async function HomeFeed({
     alternatives === null ||
     alternatives.some((tokens) => titleMatchesTokens(b.cluster.title_tr, tokens));
 
-  const filteredBreaking = breakingBundles.filter(matchesQuery);
-  const filtered = bundles.filter(matchesQuery);
-
   // Dedupe: a cluster that's both "breaking" (< 2h) AND in the top-30
   // ranked set would otherwise render twice. The Son Dakika strip wins
   // — we remove those ids from the main ranked list so each cluster
   // appears in exactly one place on the page.
-  const breakingIds = new Set(filteredBreaking.map((b) => b.cluster.id));
-  const ranked = filtered.filter((b) => !breakingIds.has(b.cluster.id));
+  // h170-roadmap-2: the filter and the dedupe are splitHomeFeed's, the same helper
+  // /api/home/head takes its strip from, so the "yeni son dakika haberi" head and
+  // this strip can never drift.
+  const { filteredBreaking, filtered, ranked } = splitHomeFeed(feed, matchesQuery);
 
   const totalPages = homeTotalPages(ranked.length);
   // Clamp the requested page so /?page=999 still renders the last page
   // instead of an empty list.
   const safePage = Math.min(page, totalPages);
-  const paged = ranked.slice(
-    (safePage - 1) * HOME_PAGE_SIZE,
-    safePage * HOME_PAGE_SIZE
-  );
+  const paged =
+    archivePage > 1
+      ? []
+      : ranked.slice((safePage - 1) * HOME_PAGE_SIZE, safePage * HOME_PAGE_SIZE);
 
   // Son Dakika is a page-1-only strip. On page 2+ the user is browsing
   // deeper into the feed — re-showing the same breaking cards they
   // already scanned at the top of page 1 would be noise. Search
   // filtering still applies (via `filteredBreaking`), so a user
   // searching for a specific story won't see an irrelevant strip.
-  const breaking = safePage === 1 ? filteredBreaking : [];
+  const breaking = safePage === 1 && archivePage === 1 ? filteredBreaking : [];
 
   // Feeds the "N yeni haber" pill: only clusters actually rendered on this page.
   // The id matters as much as the time: a story that became listed (2nd source)
@@ -458,7 +500,7 @@ export async function HomeFeed({
     ...filteredBreaking.map((b) => b.cluster.id),
     ...filtered.map((b) => b.cluster.id),
   ]);
-  const view = composeSearchView({ q, page: safePage, inFeedIds, search });
+  const view = composeSearchView({ q, page: safePage, archivePage, inFeedIds, search });
 
   const hasInFeedMatches = filtered.length > 0 || filteredBreaking.length > 0;
 
@@ -470,10 +512,14 @@ export async function HomeFeed({
   // The visible line words the count like the live region does (h50-search-3):
   // "en ilgili 24 sonuç" when the archive filled its page, because a bare
   // "24 sonuç" reads as the total. A failed archive search is never "capped".
-  const resultPhrase = resultCountPhrase(
-    resultCount,
-    view.archiveCappedTotal && !view.archiveUnavailable,
-  );
+  // A later archive page names its page instead: one page's rows are not the search's count (h170-roadmap-1).
+  const resultPhrase =
+    archivePage > 1
+      ? archivePagePhrase(archivePage)
+      : resultCountPhrase(
+          resultCount,
+          view.archiveCappedTotal && !view.archiveUnavailable,
+        );
 
   // We track a global render index across buckets so the first ~3
   // ClusterCards (above the fold) still get the priority hint, even
@@ -494,6 +540,21 @@ export async function HomeFeed({
     </aside>
   ) : null;
 
+  // h170-roadmap-3: the compact "Yükselen konular" rail. Page 1 of the plain feed only (no search, no
+  // ?page=N, no ?arsiv=N, which needs a q), and only inside the block that lists stories, so it is
+  // absent from the outage shell and an empty feed too. It sits where the teaser sits, right after
+  // the first story section, never above it, and is decided apart from the teaser: it renders
+  // whether or not the teaser does. Its own Suspense with a null fallback: the rising read (the
+  // cached entry /trends reads) was started beside the feed read (railRead above) but is never
+  // awaited by HomeFeed, so a slow or failed read can never delay or fail the feed, and RisingRail
+  // renders nothing when there is nothing rising. `railRead` is non-null exactly when `!q`.
+  const rail =
+    safePage === 1 && !q && railRead !== null ? (
+      <Suspense fallback={null}>
+        <RisingRail data={railRead} />
+      </Suspense>
+    ) : null;
+
   return (
     <>
       {/* First child at a fixed position, mounted for every state of the
@@ -510,6 +571,8 @@ export async function HomeFeed({
                   count: resultCount,
                   capped: view.archiveCappedTotal,
                   unavailable: view.archiveUnavailable,
+                  archivePage,
+                  pageUnavailable: view.archivePageUnavailable === true,
                 }),
                 cutNote,
               ]
@@ -526,10 +589,23 @@ export async function HomeFeed({
         listed={listedItems}
       />
 
+      {/* h170-roadmap-2: "N yeni son dakika haberi · Yenile". Mounted exactly where the last-visit stamp
+          runs (page 1 of the plain feed, never a search, ?page=N or the outage shell), and told only the
+          ids of every story this render lists (the strip and the whole ranked set, at most 36), with no
+          age filter: the 2 h window is applied when the cached entry is filled, so a render-clock filter
+          would drop a story the entry and the head still carry. Its region is fixed, so nothing above the
+          fold moves. */}
+      {shouldStampLastVisit({ page: safePage, q, feedOk: true }) && (
+        <NewBreakingPill knownIds={knownBreakingIds(listedItems)} />
+      )}
+
+      {/* On a later archive page ?page= does not count (arsiv wins), and the island is told the archive
+          page, so the pager of ?arsiv=N moves focus to the feed like the in-feed pager does. */}
       <FocusFeedOnPageChange
-        page={safePage}
+        page={archivePage > 1 ? 1 : safePage}
         query={q ?? ""}
         targetId={HOME_FEED_ID}
+        {...(archivePage > 1 ? { archivePage } : {})}
       />
 
       {/* The echo is capped and wrapped (SearchEcho): a pasted URL of 170
@@ -551,7 +627,7 @@ export async function HomeFeed({
         <EmptyClusters />
       ) : (
         <>
-          {hasInFeedMatches && (
+          {archivePage === 1 && hasInFeedMatches && (
             <>
               {breaking.length > 0 && (
                 <section className="space-y-3">
@@ -577,6 +653,7 @@ export async function HomeFeed({
                   </div>
                 </section>
               )}
+              {breaking.length > 0 && rail}
               {breaking.length > 0 && teaser}
 
               {bucketsWithClusters.map((bucket, bucketIdx) => (
@@ -597,6 +674,7 @@ export async function HomeFeed({
                     )}
                   </div>
                 </section>
+                {breaking.length === 0 && bucketIdx === 0 && rail}
                 {breaking.length === 0 && bucketIdx === 0 && teaser}
                 </Fragment>
               ))}
@@ -613,7 +691,7 @@ export async function HomeFeed({
             <section className="space-y-3">
               <div className="flex items-center gap-3">
                 <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                  {archiveHeading(view.archive.length, view.archiveCapped)}
+                  {archiveHeading(view.archive.length, view.archiveCapped, archivePage)}
                 </h2>
                 <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
               </div>
@@ -625,8 +703,39 @@ export async function HomeFeed({
             </section>
           )}
 
+          {/* A later page with nothing new to list: its rows are not "no results" (the card below never
+              shows on it). Either the page is past the end of the ranking, or every row of it is already
+              in the list of page 1. */}
+          {archivePage > 1 &&
+            search?.ok === true &&
+            view.archive.length === 0 && (
+              <p className="text-center text-xs text-muted-foreground">
+                {search.bundles.length === 0
+                  ? "Bu sayfada sonuç yok."
+                  : "Bu sayfadaki sonuçlar ilk sayfada zaten listelendi."}
+              </p>
+            )}
+
+          {/* h170-roadmap-1: the archive pager follows the archive list. Page 1: only when the typed call
+              filled the page (view.archiveHasNext); a later page: always, for the way back. */}
+          {searchable &&
+            (view.archiveHasNext === true ||
+              (archivePage > 1 && !view.archiveUnavailable)) && (
+              <ArchivePager
+                q={q}
+                page={archivePage}
+                hasNext={view.archiveHasNext === true}
+                end={view.archiveEnd === true}
+              />
+            )}
+
+          {searchable && view.archivePageUnavailable === true && (
+            <ArchivePageUnavailable q={q} />
+          )}
+
           {view.archiveUnavailable &&
-            (hasInFeedMatches ? (
+            view.archivePageUnavailable !== true &&
+            (archivePage === 1 && hasInFeedMatches ? (
               <p className="text-xs text-muted-foreground">
                 Arşiv araması şu an yanıt vermiyor.{" "}
                 <RetryButton />
@@ -791,6 +900,11 @@ function SearchUnavailable() {
 // Pagination
 // ---------------------------------------------------------------------------
 
+// The class of every pager link on the page (Pagination and ArchivePager): one literal string, so a
+// target is 44 px high on a phone and the two pagers cannot drift apart.
+const PAGER_LINK_CLASS =
+  "inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted hover:border-brand/40 hover:text-brand";
+
 interface PaginationProps {
   currentPage: number;
   totalPages: number;
@@ -811,8 +925,7 @@ function Pagination({ currentPage, totalPages, query }: PaginationProps) {
     return qs ? `/?${qs}` : "/";
   };
 
-  const linkCls =
-    "inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted hover:border-brand/40 hover:text-brand";
+  const linkCls = PAGER_LINK_CLASS;
 
   return (
     <nav
@@ -837,5 +950,89 @@ function Pagination({ currentPage, totalPages, query }: PaginationProps) {
         </Link>
       ) : null}
     </nav>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Archive pager (h170-roadmap-1)
+// ---------------------------------------------------------------------------
+
+// The address of one page of the archive ranking: the query and, after the first page, `arsiv`. Built
+// with URLSearchParams from scratch (so page 1 is the plain "/?q=" the search box makes, the query is
+// encoded, and `?page=` never rides along: an archive page is not an in-feed page).
+function archiveHref(q: string, archivePage: number): string {
+  const params = new URLSearchParams();
+  params.set("q", q);
+  if (archivePage > 1) params.set("arsiv", String(archivePage));
+  return `/?${params.toString()}`;
+}
+
+// The pager under the archive list: "← Önceki sonuçlar", the page as "N. sayfa" (aria-current), and
+// "Sonraki sonuçlar →". A pure server component: plain links, no client JS. prefetch is off because
+// a followed link costs one archive search (each page is its own RPC, bounded at 4 per query), and a
+// prefetch would spend it for a page the reader may never open. `end`: the last page (the 96 best
+// matches) came back full, so the page says there is no next one and what to do instead.
+function ArchivePager({
+  q,
+  page,
+  hasNext,
+  end,
+}: {
+  q: string;
+  page: number;
+  hasNext: boolean;
+  end: boolean;
+}) {
+  return (
+    <div className="space-y-2 pt-4">
+      <nav
+        aria-label="Arama sonuç sayfaları"
+        className="flex items-center justify-center gap-3"
+      >
+        {page > 1 ? (
+          <Link
+            href={archiveHref(q, page - 1)}
+            prefetch={false}
+            className={PAGER_LINK_CLASS}
+          >
+            <span aria-hidden="true">← </span>Önceki sonuçlar
+          </Link>
+        ) : null}
+        <span aria-current="page" className="text-[11px] text-muted-foreground">
+          {page}. sayfa
+        </span>
+        {hasNext ? (
+          <Link
+            href={archiveHref(q, page + 1)}
+            prefetch={false}
+            className={PAGER_LINK_CLASS}
+          >
+            Sonraki sonuçlar<span aria-hidden="true"> →</span>
+          </Link>
+        ) : null}
+      </nav>
+      {end ? (
+        <p className="text-center text-xs text-muted-foreground">
+          {`En ilgili ${ARCHIVE_MAX_PAGE * ARCHIVE_PAGE_SIZE} sonuç gösterildi; daha fazlası için aramayı daraltın.`}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// A later page whose function is not in the schema cache yet (migration 211 is applied before the
+// deploy; until then only pages 2-4 degrade, to this). It says so and leads to page 1.
+function ArchivePageUnavailable({ q }: { q: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-10 text-center">
+      <p className="text-xs text-muted-foreground">Bu sayfa şu an gösterilemiyor.</p>
+      <Link
+        href={archiveHref(q, 1)}
+        prefetch={false}
+        className={PAGER_LINK_CLASS}
+      >
+        İlk sayfaya dön
+      </Link>
+    </div>
   );
 }

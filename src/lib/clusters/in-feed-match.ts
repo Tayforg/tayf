@@ -290,7 +290,11 @@ export function titleMatchesTokens(
  * number of ids, ranked by relevance; when it returned that many, the list is
  * the best matches rather than all of them, and the heading says so.
  */
-export function archiveHeading(count: number, capped: boolean): string {
+export function archiveHeading(count: number, capped: boolean, archivePage = 1): string {
+  // h170-roadmap-1: a later page of the ranking (?arsiv=N) names its page; its rows are that page's, not a count.
+  if (Number.isInteger(archivePage) && archivePage >= 2) {
+    return `Arşivden: en ilgili sonuçlar (${archivePage}. sayfa)`;
+  }
   return capped
     ? `Arşivden: en ilgili ${count} sonuç`
     : `Arşivden: ${count} sonuç`;

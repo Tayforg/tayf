@@ -12,6 +12,7 @@ import {
   NEW_BASELINE_MAX,
   computeRising,
   formatRatio,
+  risingHint,
   shiftDayKey,
   withHubLinks,
   type RisingItem,
@@ -739,5 +740,56 @@ describe("withHubLinks", () => {
 
   it("returns an empty list for no items", () => {
     expect(withHubLinks([], new Map())).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// risingHint (h170-roadmap-3): the "how much" half of a rising row, extracted
+// from RisingTopics so the home rail prints exactly what /trends prints. It is
+// the text after "7 Kasım: 15 haber · ", never the day or the count.
+// ---------------------------------------------------------------------------
+
+describe("risingHint", () => {
+  it("an exact ratio reads '7 günlük ortalamanın {ratioLabel} katı'", () => {
+    expect(risingHint(risingItem({ ratioLabel: "5,0" }))).toBe("7 günlük ortalamanın 5,0 katı");
+    expect(risingHint(risingItem({ ratioLabel: "2,4" }))).toBe("7 günlük ortalamanın 2,4 katı");
+  });
+
+  it("a lower-bound ratio says 'en az' before the multiple", () => {
+    expect(risingHint(risingItem({ ratioLabel: "6,5", ratioIsLowerBound: true }))).toBe(
+      "7 günlük ortalamanın en az 6,5 katı",
+    );
+  });
+
+  it("an exact ratio never says 'en az'", () => {
+    expect(risingHint(risingItem({ ratioIsLowerBound: false }))).not.toContain("en az");
+  });
+
+  it("a brand-new topic says 'geçen hafta neredeyse hiç yoktu' and quotes no multiple", () => {
+    const hint = risingHint(risingItem({ isNew: true, ratioIsLowerBound: true, ratioLabel: "7,0" }));
+    expect(hint).toBe("geçen hafta neredeyse hiç yoktu");
+    expect(hint).not.toContain("katı");
+    expect(hint).not.toContain("en az");
+    expect(hint).not.toContain("7,0");
+  });
+
+  it("isNew wins over a lower-bound ratio, and over an exact one", () => {
+    expect(risingHint(risingItem({ isNew: true, ratioIsLowerBound: false }))).toBe(
+      "geçen hafta neredeyse hiç yoktu",
+    );
+  });
+
+  it("carries no day, no count and no relative-day word (the caller owns those)", () => {
+    const hint = risingHint(risingItem({ count: 1234, ratioLabel: "3,2" }));
+    expect(hint).not.toContain("haber");
+    expect(hint).not.toContain("1.234");
+    expect(hint).not.toContain("Bugün");
+    expect(hint).not.toContain("Dün");
+  });
+
+  it("reads only the three fields it needs (a bare object is enough)", () => {
+    expect(risingHint({ isNew: false, ratioIsLowerBound: false, ratioLabel: "2,0" })).toBe(
+      "7 günlük ortalamanın 2,0 katı",
+    );
   });
 });

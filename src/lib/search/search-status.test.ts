@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   MIN_QUERY_LENGTH,
   SEARCH_QUERY_DISPLAY_MAX,
+  archivePagePhrase,
   displayQuery,
   isTooShortQuery,
   resultCountPhrase,
@@ -339,5 +340,71 @@ describe("searchTitle", () => {
   it("falls back to a plain 'Arama' for a blank query rather than an empty quote pair", () => {
     expect(searchTitle("   ")).toBe("Arama");
     expect(searchTitle("")).toBe("Arama");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h170-roadmap-1: archive pages (?arsiv=N). The live region and the visible line name the page, not a count,
+// and the title of a later page says which page it is.
+// ---------------------------------------------------------------------------
+
+describe("archivePagePhrase (h170-roadmap-1)", () => {
+  it("names the page of the best matches", () => {
+    expect(archivePagePhrase(2)).toBe("en ilgili sonuçların 2. sayfası");
+    expect(archivePagePhrase(4)).toBe("en ilgili sonuçların 4. sayfası");
+  });
+});
+
+describe("searchStatusText on a later archive page (h170-roadmap-1)", () => {
+  const page = { q: "enflasyon", count: 24, capped: true, unavailable: false };
+
+  it("says which page of the best matches is shown, whatever the count", () => {
+    expect(searchStatusText({ ...page, archivePage: 2 })).toBe("“enflasyon” için en ilgili sonuçların 2. sayfası gösteriliyor.");
+    expect(searchStatusText({ ...page, archivePage: 4, count: 3, capped: false })).toBe(
+      "“enflasyon” için en ilgili sonuçların 4. sayfası gösteriliyor.",
+    );
+  });
+
+  it("page 1, given or omitted, is today's sentence", () => {
+    expect(searchStatusText({ ...page, archivePage: 1 })).toBe(searchStatusText(page));
+    expect(searchStatusText(page)).toBe("“enflasyon” için en ilgili 24 sonuç gösteriliyor.");
+  });
+
+  it("an unavailable later page says so (the page, not the whole search)", () => {
+    expect(searchStatusText({ ...page, archivePage: 2, unavailable: true, pageUnavailable: true })).toBe(
+      "Bu sayfa şu an gösterilemiyor.",
+    );
+  });
+
+  it("a plain failure on a later page is today's 'not responding' sentence", () => {
+    expect(searchStatusText({ ...page, archivePage: 2, count: 0, unavailable: true })).toBe("Arama şu an yanıt vermiyor.");
+  });
+
+  it("a blank or too-short query still announces nothing or the floor, on any page", () => {
+    expect(searchStatusText({ ...page, q: "", archivePage: 2 })).toBe("");
+    expect(searchStatusText({ ...page, q: "a", archivePage: 2 })).toBe("En az 2 karakter yazın.");
+  });
+
+  it("quotes the query as text, never as markup", () => {
+    expect(searchStatusText({ ...page, q: "<b>x</b>", archivePage: 3 })).toBe(
+      "“<b>x</b>” için en ilgili sonuçların 3. sayfası gösteriliyor.",
+    );
+  });
+});
+
+describe("searchTitle on a later archive page (h170-roadmap-1)", () => {
+  it("adds the page to the title for page 2 and later", () => {
+    expect(searchTitle("enflasyon", 2)).toBe("“enflasyon” araması — 2. sayfa");
+    expect(searchTitle("enflasyon", 4)).toBe("“enflasyon” araması — 4. sayfa");
+  });
+
+  it("page 1, given or omitted, is today's title", () => {
+    expect(searchTitle("enflasyon", 1)).toBe("“enflasyon” araması");
+    expect(searchTitle("enflasyon")).toBe("“enflasyon” araması");
+  });
+
+  it("a blank query is 'Arama' on any page", () => {
+    expect(searchTitle("", 3)).toBe("Arama");
+    expect(searchTitle(undefined, 2)).toBe("Arama");
   });
 });

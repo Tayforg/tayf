@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import {
+  ARCHIVE_MAX_PAGE,
+  ARCHIVE_PAGE_SIZE,
   HOME_PAGE_SIZE,
   homeCanonicalPath,
   homePageTitle,
   homeTotalPages,
+  parseArchivePage,
   parseHomePage,
   rankedCountOf,
 } from "./home-canonical";
@@ -21,6 +25,49 @@ describe("parseHomePage", () => {
     expect(parseHomePage("7x")).toBe(7);
     expect(parseHomePage(["3", "9"])).toBe(3);
     expect(parseHomePage([])).toBe(1);
+  });
+});
+
+describe("parseArchivePage (?arsiv=, h170-roadmap-1)", () => {
+  it("the archive is paged to 4 pages of 24: the 96 best matches", () => {
+    expect(ARCHIVE_MAX_PAGE).toBe(4);
+    expect(ARCHIVE_PAGE_SIZE).toBe(24);
+    expect(ARCHIVE_MAX_PAGE * ARCHIVE_PAGE_SIZE).toBe(96);
+  });
+  it("reads 2, 3 and 4 as themselves", () => {
+    expect(parseArchivePage("2")).toBe(2);
+    expect(parseArchivePage("3")).toBe(3);
+    expect(parseArchivePage("4")).toBe(4);
+  });
+  it("reads 1 and a missing value as page 1", () => {
+    expect(parseArchivePage("1")).toBe(1);
+    expect(parseArchivePage(undefined)).toBe(1);
+  });
+  it("reads anything that is not a positive whole number as page 1", () => {
+    for (const raw of ["abc", "0", "-1", "", " ", "2.5", "1e3", "0x2", "2x", " 2", "²", "NaN", "Infinity", "٢"]) {
+      expect(parseArchivePage(raw), JSON.stringify(raw)).toBe(1);
+    }
+  });
+  it("reads an array (a repeated ?arsiv=) as page 1, not as its first value", () => {
+    expect(parseArchivePage(["2"])).toBe(1);
+    expect(parseArchivePage(["3", "4"])).toBe(1);
+    expect(parseArchivePage([])).toBe(1);
+  });
+  it("clamps a page past the last one to 4", () => {
+    expect(parseArchivePage("5")).toBe(4);
+    expect(parseArchivePage("9")).toBe(4);
+    expect(parseArchivePage("99999999999999999999")).toBe(4);
+    expect(parseArchivePage("9".repeat(400))).toBe(4);
+  });
+  it("accepts leading zeros without changing the page", () => {
+    expect(parseArchivePage("02")).toBe(2);
+    expect(parseArchivePage("000004")).toBe(4);
+    expect(parseArchivePage("00")).toBe(1);
+  });
+  it("a very long digit string is read in linear time", () => {
+    // Load-robust (tests/_helpers/linear-time.ts): the growth over a size ladder, not an absolute time.
+    expectLinear(rep("9"), (raw) => parseArchivePage(raw), { n: 200_000, ceilingMs: 2000 });
+    expect(parseArchivePage("9".repeat(200_000))).toBe(4);
   });
 });
 

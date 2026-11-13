@@ -327,7 +327,7 @@ describe("middleware bad-encoding parity: static handlers", () => {
 
   it("finds a non-vacuous set of static handlers", () => {
     expect(bases.length).toBeGreaterThanOrEqual(40);
-    for (const must of ["/rss.xml", "/sitemap.xml", "/api/sources", "/api/health", "/api/oembed", "/api/v1"]) {
+    for (const must of ["/rss.xml", "/sitemap.xml", "/api/sources", "/api/health", "/api/oembed", "/api/v1", "/api/home/head"]) {
       expect(bases, must).toContain(must);
     }
     expect(bases.filter((b) => b.startsWith("/api/v1/"))).toEqual([]);

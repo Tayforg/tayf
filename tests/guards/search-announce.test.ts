@@ -139,8 +139,10 @@ describe("src/app/page.tsx: the search result live region", () => {
     // h50-search-3: "en ilgili N sonuç" when the archive is capped, from
     // resultCountPhrase (search-status.ts), like searchStatusText.
     expect(homeFeed).toContain("için {resultPhrase}");
+    // h170-roadmap-1: a later archive page (?arsiv=N, N >= 2) names its page with archivePagePhrase (the same
+    // helper file as the live region's sentence) instead of a count; page 1 is resultCountPhrase as before.
     expect(homeFeed).toMatch(
-      /const resultPhrase = resultCountPhrase\(\s*resultCount,\s*view\.archiveCappedTotal && !view\.archiveUnavailable,?\s*\);/,
+      /const resultPhrase =\s*archivePage > 1\s*\? archivePagePhrase\(archivePage\)\s*: resultCountPhrase\(\s*resultCount,\s*view\.archiveCappedTotal && !view\.archiveUnavailable,?\s*\);/,
     );
     expect(homeFeed).not.toContain("formatCountTr(");
     expect(homeFeed).not.toContain("için sonuçlar");
@@ -164,7 +166,10 @@ describe("src/app/page.tsx: the search result live region", () => {
   });
 
   it("gives /?q= its own title from searchTitle and keeps the noindex,follow robots", () => {
-    expect(page).toMatch(/if \(q\) return \{ title: \{ absolute: `\$\{searchTitle\(q\)\} — Tayf` \}, robots: \{ index: false, follow: true \} \};/);
+    // h170-roadmap-1: a later archive page adds its page to the same title (searchTitle(q, archivePage)).
+    expect(page).toMatch(
+      /if \(q\) \{\s*return \{\s*title: \{ absolute: `\$\{searchTitle\(q, searchArchivePage\(q, arsivRaw\)\)\} — Tayf` \},\s*robots: \{ index: false, follow: true \},?\s*\};\s*\}/,
+    );
   });
 });
 

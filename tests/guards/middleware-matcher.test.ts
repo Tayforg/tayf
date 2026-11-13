@@ -364,7 +364,7 @@ describe("middleware matcher — static route handlers (h17-contracts-1)", () =>
 
   it("walks a non-vacuous set of static handlers, /api/v1 children excluded", () => {
     expect(STATIC_BASES.length).toBeGreaterThanOrEqual(40);
-    for (const must of ["/rss.xml", "/sitemap.xml", "/api/sources", "/api/health", "/api/oembed", "/api/timeline/head"]) {
+    for (const must of ["/rss.xml", "/sitemap.xml", "/api/sources", "/api/health", "/api/oembed", "/api/timeline/head", "/api/home/head"]) {
       expect(STATIC_BASES, must).toContain(must);
     }
     // The bare v1 root is a static handler; its children are the wildcard's business.

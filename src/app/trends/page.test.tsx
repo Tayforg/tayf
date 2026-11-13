@@ -1171,13 +1171,21 @@ describe("/trends page: rising rows link only to indexable hubs", () => {
     expect(hrefs(await risingData())).toEqual(["/gundem/msb", "/?q=Merkez%20Bankas%C4%B1"]);
   });
 
-  it("never reads a hub inside a \"use cache\" function (the page itself carries no cache directive)", () => {
-    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  // h170-roadmap-3: the hub reads moved to src/lib/trends/rising-links.ts (linkRisingHubs), shared with
+  // the home rail. The page still calls it after getRisingEntities resolved, at page level.
+  it("never reads a hub inside a \"use cache\" function (neither the page nor rising-links.ts carries a cache directive)", () => {
+    const strip = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    const page = strip(readFileSync(resolve(__dirname, "page.tsx"), "utf8"));
+    const links = strip(readFileSync(resolve(__dirname, "../../lib/trends/rising-links.ts"), "utf8"));
 
-    expect(code).not.toMatch(/["']use cache/);
-    expect(code).toMatch(/getEntityHub\(/);
-    expect(code).toMatch(/withHubLinks\(/);
+    expect(page).not.toMatch(/["']use cache/);
+    expect(links).not.toMatch(/["']use cache/);
+    expect(page).toMatch(/linkRisingHubs\(/);
+    expect(page).toMatch(/from\s*["']@\/lib\/trends\/rising-links["']/);
+    expect(page).not.toMatch(/function\s+linkRisingHubs/);
+    expect(links).toMatch(/getEntityHub\(/);
+    expect(links).toMatch(/withHubLinks\(/);
   });
 });
 

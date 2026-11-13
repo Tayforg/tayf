@@ -26,13 +26,21 @@ vi.mock("react", async (orig) => {
 });
 
 const getPoliticsClusters = vi.fn();
-vi.mock("@/lib/clusters/politics-query", () => ({
-  getPoliticsClusters: () => getPoliticsClusters(),
-}));
+// Only the read is faked: the page's pure helpers (splitHomeFeed, knownBreakingIds; h170-roadmap-2) stay real.
+vi.mock("@/lib/clusters/politics-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/politics-query")>();
+  return { ...actual, getPoliticsClusters: () => getPoliticsClusters() };
+});
 
 const searchClusters = vi.fn();
 vi.mock("@/lib/clusters/search-query", () => ({
   searchClusters: (q: string) => searchClusters(q),
+}));
+
+// HomeFeed starts the "Yükselen konular" rail's read beside the feed read (loadRisingRail). Faked, so no
+// test here reaches the database: an empty answer is a rail that renders nothing.
+vi.mock("@/lib/trends/rising-query", () => ({
+  getRisingEntities: () => Promise.resolve(null),
 }));
 
 import { HomeFeed } from "./page";

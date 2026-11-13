@@ -20,12 +20,11 @@ import { formatCountTr } from "@/lib/format/number-tr";
 import { niceScale } from "@/lib/format/nice-scale";
 import { xAxisLabels } from "@/lib/trends/axis-labels";
 import { trendBarTitle } from "@/lib/trends/bar-title";
-import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { chartTableRows } from "@/lib/trends/chart-table";
 import { getSourceFeedStatuses } from "@/lib/sources/feed-status";
 import { darkVotingSourcesInWindow, istanbulDayStartIso } from "@/lib/trends/dark-sources";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
-import { MAX_ITEMS, withHubLinks, type RisingResult } from "@/lib/trends/rising";
+import { linkRisingHubs } from "@/lib/trends/rising-links";
 import { getRisingEntities } from "@/lib/trends/rising-query";
 import type { MediaDnaZone } from "@/types";
 
@@ -69,13 +68,15 @@ import type { MediaDnaZone } from "@/types";
 //
 // Hub links (h43-entities-3). A rising row links to its /gundem hub only when
 // that hub is indexable; a thin or unreadable one links to the home search
-// instead (withHubLinks). The hubs are read HERE, at page level and after
-// getRisingEntities resolved, for at most MAX_ITEMS rows, and never inside a
-// "use cache" function: getEntityHub is a resolveCachedOrRetry getter, and its
-// live retry awaits connection(), which throws inside a cache body and fails
-// `next build` (tests/guards/cache-retry-prerender.test.ts). Each read is one
-// of the 62 per-key cache entries /gundem/[key] and the hubs sitemap already
-// share, so a warm page costs no extra query.
+// instead (withHubLinks). linkRisingHubs (src/lib/trends/rising-links.ts, shared
+// with the home "Yükselen konular" rail since h170-roadmap-3) reads the hubs
+// HERE, at page level and after getRisingEntities resolved, for at most
+// MAX_ITEMS rows, and never inside a "use cache" function: getEntityHub is a
+// resolveCachedOrRetry getter, and its live retry awaits connection(), which
+// throws inside a cache body and fails `next build`
+// (tests/guards/cache-retry-prerender.test.ts). Each read is one of the 62
+// per-key cache entries /gundem/[key] and the hubs sitemap already share, so a
+// warm page costs no extra query.
 //
 // Dark sources (h90-trends-2). A voting outlet that stops delivering inside the
 // window lowers its zone's share from that day on, which reads as editorial
@@ -174,22 +175,6 @@ const PARTIAL_FILL_OPACITY = 0.45;
 const PARTIAL_DASH = "3 2";
 const PARTIAL_HEADER_NOTE = " (son gün dahil, eksik)";
 const PARTIAL_ARIA_NOTE = " Son günün sayımı eksik.";
-
-/**
- * The rising result with each row's href settled against its hub. A result
- * without rows (failed read, thin history, nothing rising) is returned as is
- * and reads no hub. Rows past MAX_ITEMS are dropped (computeRising never
- * returns more) so the reads stay bounded.
- */
-async function linkRisingHubs(rising: RisingResult | null): Promise<RisingResult | null> {
-  if (rising === null || rising.status !== "ok" || rising.items.length === 0) {
-    return rising;
-  }
-  const items = rising.items.slice(0, MAX_ITEMS);
-  const reads = await Promise.all(items.map((item) => getEntityHub(item.key)));
-  const hubs = new Map(items.map((item, i) => [item.key, reads[i] ?? null] as const));
-  return { ...rising, items: withHubLinks(items, hubs) };
-}
 
 export default async function TrendsPage() {
   const [buckets, risingRaw, statuses] = await Promise.all([
