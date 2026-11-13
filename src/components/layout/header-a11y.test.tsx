@@ -192,7 +192,10 @@ describe("NavLinks — 44 px touch targets on phones (h14-polish-5)", () => {
   // px-2.5 / py-1.5: 34 x 26 px. WCAG 2.5.8 only asks for 24 px, but the rest
   // of the site uses 44 px; `max-sm:` lifts the floor without touching the
   // sm+ look (the header row is h-14, so its height does not change).
-  const MOBILE_TOKENS = ["max-sm:min-h-11", "max-sm:min-w-11", "max-sm:justify-center"];
+  // The floor is 44 px, written in px (h172-mobilelayout-1): `min-w-11` is
+  // 2.75rem, which grew to 57 px at a 130% root font and pushed the row past a
+  // 360 px viewport. See src/components/layout/header-fit.test.ts.
+  const MOBILE_TOKENS = ["max-sm:min-h-[44px]", "max-sm:min-w-[44px]", "max-sm:justify-center"];
   const tokensOf = (el: Elementish | undefined) =>
     String(el?.props?.className).split(/\s+/).filter(Boolean);
 
@@ -207,6 +210,8 @@ describe("NavLinks — 44 px touch targets on phones (h14-polish-5)", () => {
       // The sm+ size must not change: no unprefixed (or sm:-leaking) floor.
       expect(tokens).not.toContain("min-h-11");
       expect(tokens).not.toContain("min-w-11");
+      expect(tokens).not.toContain("min-h-[44px]");
+      expect(tokens).not.toContain("min-w-[44px]");
       expect(tokens).not.toContain("justify-center");
     },
   );
@@ -333,7 +338,12 @@ describe("Header — decorative dividers are hidden from assistive tech (h67-lan
   // "separator" between nav items and split the logo link's reading in browse
   // mode. They are kept (their margin sets the spacing) but are aria-hidden
   // decoration, with the same literal classes, so the layout does not move.
-  const NAV_DIVIDER_CLASS = "h-3 mx-0.5 shrink-0 bg-border";
+  // `max-[24rem]:hidden` since h172-mobilelayout-1: below 24rem (384 px at the
+  // default font size) the margins plus the two flex gaps around each divider
+  // added 12 px between the icon links, which pushed the row past 276-306 px
+  // viewports. Not `max-sm:`: that moved the nav at 390 px at 100% zoom. The
+  // spans stay in the DOM.
+  const NAV_DIVIDER_CLASS = "h-3 mx-0.5 shrink-0 bg-border max-[24rem]:hidden";
   // `md:` since h73-breakpoints-2: the tagline beside it moved to md so the nav
   // fits on one line from 640 px (tests/guards/header-nowrap.test.ts).
   const LOGO_DIVIDER_CLASS = "h-3.5 mx-0 hidden md:block shrink-0 bg-border/40";

@@ -9,6 +9,18 @@ import { Telescope, Eye, Bookmark, Settings, TrendingUp } from "lucide-react";
 // the site; WCAG 2.5.8 only requires 24). sm+ is unchanged, and the h-14 header
 // row is taller than 44 px, so the header height does not move.
 //
+// Fit (h172-mobilelayout-1): the floor is written in px (`min-w-[44px]`), not
+// rem (`min-w-11` is 2.75rem), so a larger root font cannot grow the four links
+// past 44 px and push the header row wider than the viewport. Below 24rem (384 px
+// at the default font size) the dividers also collapse and the nav gap drops to
+// 2 px, so the row needs 276 CSS px instead of 306. It fits from a 276 px CSS
+// viewport: a 280 px cover screen, a 360 px phone at 130% page zoom (277 CSS px),
+// or a 360 px phone with the root font at 130% or 150% (a media query ignores a
+// JS-set root font size, so the compaction stays on there). 150% page zoom on a
+// 360 px phone (240 CSS px) still scrolls. 384 px and up at 100% keeps the
+// original layout: the compaction is `max-[24rem]:`, not `max-sm:` (below 640 px),
+// which moved the nav from 212 to 182 px at 390 px. Pinned by header-fit.test.ts.
+//
 // Current-page cue (h41-a11y-1, WCAG 1.4.1 / 1.4.11): the tint alone is
 // bg-foreground/10 over the header, 1.21:1 on the dark theme, and below `sm`
 // there is no label for font-weight to show on. The active link therefore also
@@ -16,7 +28,7 @@ import { Telescope, Eye, Bookmark, Settings, TrendingUp } from "lucide-react";
 // by tests/styles/nav-current-contrast.test.ts). It is a border rather than a
 // ring or box-shadow, which forced-colors mode drops. `border-b-2` is in the
 // shared base so every link reserves the same height (the border sits inside
-// min-h-11 under border-box, so the 44 px floor and the h-14 row hold), and the
+// min-h-[44px] under border-box, so the 44 px floor and the h-14 row hold), and the
 // colour is chosen per state: `border-transparent` lives in `inactive` only,
 // because Tailwind emits .border-transparent after .border-foreground and the
 // two together would leave the active bar invisible.
@@ -27,7 +39,7 @@ import { Telescope, Eye, Bookmark, Settings, TrendingUp } from "lucide-react";
 // the page background there, so only the current link keeps a visible bar. It
 // belongs to the idle states only, never to `active`.
 const baseLink =
-  "flex items-center gap-1.5 rounded-md border-b-2 px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center";
+  "flex items-center gap-1.5 rounded-md border-b-2 px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-[44px] max-sm:min-w-[44px] max-sm:justify-center";
 const inactive =
   "border-transparent forced-colors:border-[Canvas] text-foreground/80 hover:text-foreground hover:bg-muted/50";
 const active = "border-foreground bg-foreground/10 text-foreground font-medium";
@@ -55,8 +67,12 @@ interface NavLinksProps {
  * They are decoration, so they are aria-hidden (h67-landmarks-3): a separator
  * role inside one nav made a screen reader announce "separator" between the
  * links. The spans stay rather than being deleted because their `mx-0.5` is
- * the spacing between the links. tests/guards/no-role-separator.test.ts keeps
- * the role out of the layout.
+ * the spacing between the links at 384 px and up. Below 24rem they are
+ * `max-[24rem]:hidden` (display: none, so they also leave the flex gaps): the
+ * margins plus the two gaps around each one cost 12 px between the icon links,
+ * and the row would not fit a 276-306 px viewport (h172-mobilelayout-1); the
+ * nav gap drops to 2 px there too. tests/guards/no-role-separator.test.ts
+ * keeps the role out of the layout.
  *
  * Hook-free nav markup. `pathname === null` means "no link is active". This
  * is what the header's static-shell <Suspense> fallback renders: calling
@@ -77,7 +93,10 @@ export function NavLinksView({
   const isAdmin = pathname?.startsWith("/admin") ?? false;
 
   return (
-    <nav aria-label="Ana menü" className="flex items-center gap-1 text-[13px]">
+    <nav
+      aria-label="Ana menü"
+      className="flex min-w-0 items-center gap-1 text-[13px] max-[24rem]:gap-0.5"
+    >
       <Link
         href="/"
         aria-current={isHome ? "page" : undefined}
@@ -87,7 +106,10 @@ export function NavLinksView({
         <span className="sr-only sm:hidden">Haberler</span>
         <span className="hidden sm:inline whitespace-nowrap">Haberler</span>
       </Link>
-      <span aria-hidden="true" className="h-3 mx-0.5 shrink-0 bg-border" />
+      <span
+        aria-hidden="true"
+        className="h-3 mx-0.5 shrink-0 bg-border max-[24rem]:hidden"
+      />
       <Link
         href="/blindspots"
         aria-current={isBlindspots ? "page" : undefined}
@@ -97,7 +119,10 @@ export function NavLinksView({
         <span className="sr-only sm:hidden">Kör noktalar</span>
         <span className="hidden sm:inline whitespace-nowrap">Kör noktalar</span>
       </Link>
-      <span aria-hidden="true" className="h-3 mx-0.5 shrink-0 bg-border" />
+      <span
+        aria-hidden="true"
+        className="h-3 mx-0.5 shrink-0 bg-border max-[24rem]:hidden"
+      />
       <Link
         href="/ekonomi"
         aria-current={isEkonomi ? "page" : undefined}
@@ -107,7 +132,10 @@ export function NavLinksView({
         <span className="sr-only sm:hidden">Ekonomi</span>
         <span className="hidden sm:inline whitespace-nowrap">Ekonomi</span>
       </Link>
-      <span aria-hidden="true" className="h-3 mx-0.5 shrink-0 bg-border" />
+      <span
+        aria-hidden="true"
+        className="h-3 mx-0.5 shrink-0 bg-border max-[24rem]:hidden"
+      />
       <Link
         href="/saved"
         aria-current={isSaved ? "page" : undefined}
@@ -121,12 +149,12 @@ export function NavLinksView({
         <>
           <span
             aria-hidden="true"
-            className="h-3 mx-0.5 shrink-0 bg-border"
+            className="h-3 mx-0.5 shrink-0 bg-border max-[24rem]:hidden"
           />
           <Link
             href="/admin"
             aria-current={isAdmin ? "page" : undefined}
-            className={`flex items-center gap-1.5 rounded-md border-b-2 px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center ${
+            className={`flex items-center gap-1.5 rounded-md border-b-2 px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-[44px] max-sm:min-w-[44px] max-sm:justify-center ${
               isAdmin
                 ? active
                 : "border-transparent forced-colors:border-[Canvas] text-muted-foreground hover:text-foreground hover:bg-muted/50"

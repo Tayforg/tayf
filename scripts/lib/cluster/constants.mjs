@@ -71,6 +71,23 @@ export const TOKEN_MIN_LEN = 4;
 // MHP-fesh sub-clusters that Wave 2 left fragmented.
 export const MINHASH_SOFT_ACCEPT_JACCARD = 0.5;    // was 0.6 (W5 V4 §7 #2)
 
+// h172-clusterpurity-1 -- the soft-accept lane has no headline floor. A pair with
+// J >= MINHASH_SOFT_ACCEPT_JACCARD scores 0.6 + 0.4 * J on the MinHash lane alone, and
+// unlike the primary lane (ENTITY_TEXT_FLOOR) nothing asks the two headlines to share a
+// word: prod cluster d587d519 ('Erdogan - Serif', 22 members) took AA 46227b32 'CANLI -
+// Cumhurbaskani Erdogan konusuyor' (every word a HEADLINE_GENERIC_PREFIXES word, so the
+// headline lane is off) on J 0.531, a shared COP31 agency lead, and 15 speech items then
+// attached to that stub. A titled pair whose headlines share fewer than 2 content tokens,
+// whose J is under MINHASH_SOLE_CARRIER_MIN_JACCARD and whose other lanes alone fall
+// short of MATCH_THRESHOLD has its MinHash lane capped at SUBJECT_VETO_CAP (ensemble.ts,
+// score(); components.minhashSoleCarrierCapped). At or above this floor the lane is a
+// wire rewrite and keeps its score. MINHASH_SOFT_ACCEPT_JACCARD itself is unchanged.
+// Replay of the last 38 h of prod politics articles (1,427 non-first joins, old vs new
+// scorer, h173): 8 joins fall under it, 6 into another event's cluster and 2 (odatv
+// 8b0abb34, haberler-com f53a766f) into their own event's, which now opens a cluster of its
+// own (the known twin trade-off); no other join's decision changes.
+export const MINHASH_SOLE_CARRIER_MIN_JACCARD = 0.7;
+
 // W5-A3: raised 0.35 → 0.40 (and ENTITY_WEIGHT lowered 0.65 → 0.60). V4 §7
 // #3: "Entity-heavy weight (0.65) + lowered threshold (0.48) overfit MIXED
 // precision. The 7 MIXED clusters all share the failure pattern 'hot entity

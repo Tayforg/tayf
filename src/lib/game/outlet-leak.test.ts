@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import { titleNamesOutlet } from "./outlet-leak";
 
 // titleNamesOutlet: does a headline NAME its own outlet ("CNN TÜRK'te", "GZT
@@ -64,7 +65,10 @@ describe("titleNamesOutlet -- single-word names that are ordinary Turkish words"
     "Haberiniz",
   ])("never reports a leak for the ordinary-word name %s", (name) => {
     expect(titleNamesOutlet(`${name} haberi: yeni gelişme`, { name })).toBe(false);
-    expect(titleNamesOutlet(`Son dakika ${name.toUpperCase()}`, { name })).toBe(false);
+    // Lowercase, as the common word is written. (An ALL-CAPS "SÖZCÜ" or a name
+    // followed by an apostrophe is the outlet's own self-reference: the section
+    // "ordinary-word names, forms the common word never takes" below.)
+    expect(titleNamesOutlet(`Son dakika ${name.toLocaleLowerCase("tr-TR")}`, { name })).toBe(false);
   });
 
   it.each(["Agos", "Bianet", "BirGün", "Habertürk", "NTV", "T24", "Tele1", "Medyascope", "Haber7"])(
@@ -78,6 +82,241 @@ describe("titleNamesOutlet -- single-word names that are ordinary Turkish words"
     expect(titleNamesOutlet("Türkiye Gazetesi'ne konuştu", { name: "Türkiye Gazetesi" })).toBe(true);
     expect(titleNamesOutlet("Yeni Şafak yazarı açıkladı", { name: "Yeni Şafak" })).toBe(true);
     expect(titleNamesOutlet("Türkiye ile Azerbaycan", { name: "Türkiye Gazetesi" })).toBe(false);
+  });
+});
+
+// h172-oyun-2: an ordinary-word name is exempt as a bare word, but an outlet
+// naming itself takes forms the common word never takes: an apostrophe suffix
+// ("Milliyet’e konuştu"), ALL CAPS ("KARAR"), a series line ("Cumhuriyet
+// Silivri'den bildiriyor"), an alias (CNN for CNN Türk).
+describe("titleNamesOutlet -- the six live self-references", () => {
+  it.each([
+    [
+      "KKTC CTP Genel Başkanı İncirli, COP31 Zirvesi’nde Milliyet’e konuştu: Türkiye tüm adanın garantörü",
+      "Milliyet",
+    ],
+    [
+      "İYİ Partili Vekil Kavuncu KARAR'ın gündeme getirdiği skandalı Meclis'e taşıdı: Camideki ayıba kimler izin verdi?",
+      "Karar",
+    ],
+    [
+      "Kılıçdaroğlu’ndan Mahiroğlu’na “50 milyon dolar” davası! Çelişkiyi Takvim yakaladı... Bay Kemal aslında ne dedi",
+      "Takvim",
+    ],
+    [
+      "Cumhuriyet Silivri'den bildiriyor... İmamoğlu, İBB davasında gazetecilere seslendi: 'Kalemi hür gazetecileri Allah korusun'",
+      "Cumhuriyet",
+    ],
+    [
+      "Cumhuriyet Silivri'den bildiriyor... İBB davasında 108. duruşma günü: Tahliye talepleri devam ediyor",
+      "Cumhuriyet",
+    ],
+    ["Bakan Murat Kurum, CNN'e konuştu: Yaşayacak doğanız yoksa bütçe artırmak neden?", "CNN Türk"],
+  ])("true for %j / %s", (title, name) => {
+    expect(titleNamesOutlet(title, { name })).toBe(true);
+  });
+});
+
+describe("titleNamesOutlet -- outlet aliases", () => {
+  it("CNN Türk is also named CNN, TRT Haber also TRT, as a whole word", () => {
+    expect(titleNamesOutlet("Bakan Kurum CNN'e konuştu", { name: "CNN Türk" })).toBe(true);
+    expect(titleNamesOutlet("CNN: bakan açıkladı", { name: "CNN Türk" })).toBe(true);
+    expect(titleNamesOutlet("Bakan Kurum TRT'ye konuştu", { name: "TRT Haber" })).toBe(true);
+    expect(titleNamesOutlet("Bakan Kurum TRT 1'de açıkladı", { name: "TRT Haber" })).toBe(true);
+  });
+
+  it("the full phrase still matches as before", () => {
+    expect(titleNamesOutlet("CNN TÜRK'te konuştu", { name: "CNN Türk" })).toBe(true);
+    expect(titleNamesOutlet("TRT Haber'e konuştu", { name: "TRT Haber" })).toBe(true);
+  });
+
+  it("the key is the folded name, so case, diacritics and spacing of the source name do not matter", () => {
+    expect(titleNamesOutlet("Bakan CNN'e konuştu", { name: "CNN TÜRK" })).toBe(true);
+    expect(titleNamesOutlet("Bakan CNN'e konuştu", { name: "cnn turk" })).toBe(true);
+    expect(titleNamesOutlet("Bakan CNN'e konuştu", { name: "  CNN   Türk " })).toBe(true);
+  });
+
+  it("an alias is a whole word: it does not match inside a longer word", () => {
+    expect(titleNamesOutlet("CNNX raporu açıklandı", { name: "CNN Türk" })).toBe(false);
+    expect(titleNamesOutlet("ACNN raporu açıklandı", { name: "CNN Türk" })).toBe(false);
+    expect(titleNamesOutlet("Trta raporu açıklandı", { name: "TRT Haber" })).toBe(false);
+    expect(titleNamesOutlet("Strt projesi açıklandı", { name: "TRT Haber" })).toBe(false);
+  });
+
+  it("an alias belongs to its own outlet only", () => {
+    expect(titleNamesOutlet("Bakan CNN'e konuştu", { name: "NTV" })).toBe(false);
+    expect(titleNamesOutlet("Bakan CNN'e konuştu", { name: "CGTN Türk" })).toBe(false);
+    expect(titleNamesOutlet("Bakan TRT'ye konuştu", { name: "CNN Türk" })).toBe(false);
+    expect(titleNamesOutlet("Bakan CNN'e konuştu", { name: "TRT Haber" })).toBe(false);
+    expect(titleNamesOutlet("Bakan CNN'e konuştu", { name: "CNN" })).toBe(true);
+  });
+});
+
+describe("titleNamesOutlet -- ordinary-word names, forms the common word never takes", () => {
+  describe("the name followed by an apostrophe and a letter, in Title case or ALL CAPS", () => {
+    it.each([
+      ["Sözcü'ye konuştu", "Sözcü"],
+      ["Bakan Sözcü’ye konuştu", "Sözcü"],
+      ["Bakan SÖZCÜ’ye konuştu", "Sözcü"],
+      ["Bakan SOZCU'ya konuştu", "Sözcü"],
+      ["Bakan Hürriyet’e konuştu", "Hürriyet"],
+      ["Bakan AKŞAM'a konuştu", "Akşam"],
+      ["Bakan Sabah'a konuştu", "Sabah"],
+      ["Bakan Posta’ya konuştu", "Posta"],
+      ["Bakan İstiklal’e konuştu", "İstiklal"],
+      ["Bakan Bugün’e konuştu", "Bugün"],
+      ["Bakan STAR'a konuştu", "Star"],
+      ["Bakan Evrensel’e konuştu", "Evrensel"],
+      ["Bakan Sözcü‘ye konuştu", "Sözcü"],
+      ["Bakan Sözcüʼye konuştu", "Sözcü"],
+    ])("true for %j / %s", (title, name) => {
+      expect(titleNamesOutlet(title, { name })).toBe(true);
+    });
+
+    it("is false for lowercase, a bare apostrophe, or an apostrophe not followed by a letter", () => {
+      expect(titleNamesOutlet("sözcü'ye konuştu", { name: "Sözcü" })).toBe(false);
+      expect(titleNamesOutlet("Bakan sabah'a kadar bekledi", { name: "Sabah" })).toBe(false);
+      expect(titleNamesOutlet("Bakan Karar' dedi", { name: "Karar" })).toBe(false);
+      expect(titleNamesOutlet("Bakan Karar'", { name: "Karar" })).toBe(false);
+      expect(titleNamesOutlet("Bakan Karar'1 dedi", { name: "Karar" })).toBe(false);
+    });
+
+    it("is false for mixed case that is neither Title case nor ALL CAPS", () => {
+      expect(titleNamesOutlet("Bakan sÖzcü'ye konuştu", { name: "Sözcü" })).toBe(false);
+      expect(titleNamesOutlet("Bakan SözCü'ye konuştu", { name: "Sözcü" })).toBe(false);
+    });
+
+    it("needs the whole name before the apostrophe, not a longer word that ends in it", () => {
+      expect(titleNamesOutlet("Bakan Karardan'a konuştu", { name: "Karar" })).toBe(false);
+      expect(titleNamesOutlet("Bakan AKarar'a konuştu", { name: "Karar" })).toBe(false);
+      expect(titleNamesOutlet("Bakan Sözcüsü'ne konuştu", { name: "Sözcü" })).toBe(false);
+    });
+  });
+
+  describe("an ALL-CAPS whole word of 4 or more letters", () => {
+    it.each([
+      ["Bakan SÖZCÜ'ye değil, SÖZCÜ yazdı", "Sözcü"],
+      ["Gündeme getiren KARAR oldu", "Karar"],
+      ["KARAR gazetesi yazdı: bakan istifa etti", "Karar"],
+      ["Bakan AKŞAM yazdı", "Akşam"],
+      ["Bakan YURT yazdı", "Yurt"],
+      ["Bakan DİKEN yazdı", "Diken"],
+    ])("true for %j / %s", (title, name) => {
+      expect(titleNamesOutlet(title, { name })).toBe(true);
+    });
+
+    it("is false for lowercase and Title case at the title start (the common word)", () => {
+      expect(titleNamesOutlet("Sabah saatlerinde deprem", { name: "Sabah" })).toBe(false);
+      expect(titleNamesOutlet("Anayasa Mahkemesi karar verdi", { name: "Karar" })).toBe(false);
+    });
+  });
+
+  describe("the sub-list Milliyet, Takvim, Sözcü, Korkusuz, Diken: Title case after the first word", () => {
+    it.each([
+      ["Çelişkiyi Takvim yakaladı", "Takvim"],
+      ["Bakan, Milliyet yazarına yanıt verdi", "Milliyet"],
+      ["Çelişkiyi Sözcü yakaladı", "Sözcü"],
+      ["Çelişkiyi Korkusuz yakaladı", "Korkusuz"],
+      ["Çelişkiyi Diken yakaladı", "Diken"],
+      ["Bakan yanıt verdi - Takvim", "Takvim"],
+    ])("true for %j / %s", (title, name) => {
+      expect(titleNamesOutlet(title, { name })).toBe(true);
+    });
+
+    it("is false at the title start, where the common word is capitalised", () => {
+      expect(titleNamesOutlet("Takvim yaprağı değişti", { name: "Takvim" })).toBe(false);
+      expect(titleNamesOutlet("Sözcü Ömer Çelik açıkladı", { name: "Sözcü" })).toBe(false);
+      expect(titleNamesOutlet("Milliyet haberi: yeni gelişme", { name: "Milliyet" })).toBe(false);
+    });
+
+    it("is false for lowercase, and for a longer word that only starts with the name", () => {
+      expect(titleNamesOutlet("seçim takvimi açıklandı", { name: "Takvim" })).toBe(false);
+      expect(titleNamesOutlet("Hükümet takvim açıkladı", { name: "Takvim" })).toBe(false);
+      expect(titleNamesOutlet("AK Parti Sözcüsü Çelik açıkladı", { name: "Sözcü" })).toBe(false);
+      expect(titleNamesOutlet("Bakan dikenli telin yanında", { name: "Diken" })).toBe(false);
+    });
+
+    it("does not extend to the other ordinary-word names", () => {
+      expect(titleNamesOutlet("Mahkemenin Karar Duruşması başladı", { name: "Karar" })).toBe(false);
+      expect(titleNamesOutlet("Meclis Cumhuriyet Bayramı için toplandı", { name: "Cumhuriyet" })).toBe(false);
+      expect(titleNamesOutlet("Bakan Sabah Namazı sonrası konuştu", { name: "Sabah" })).toBe(false);
+    });
+  });
+
+  describe("a title-initial series line, '<Name> <place>'den bildiriyor'", () => {
+    it.each([
+      ["Cumhuriyet Silivri'den bildiriyor... İBB davasında karar", "Cumhuriyet"],
+      ["Cumhuriyet Ankara’dan bildiriyor: Meclis'te son durum", "Cumhuriyet"],
+      ["Sabah Ankara'dan bildiriyor", "Sabah"],
+      ["Cumhuriyet Mersin'den bildiriyor", "Cumhuriyet"],
+      ["Cumhuriyet Antep'ten bildiriyor", "Cumhuriyet"],
+      ["  Cumhuriyet Silivri'den bildiriyor", "Cumhuriyet"],
+      ["CUMHURİYET SİLİVRİ'DEN BİLDİRİYOR", "Cumhuriyet"],
+      ["cumhuriyet silivri'den bildiriyor", "Cumhuriyet"],
+    ])("true for %j / %s", (title, name) => {
+      expect(titleNamesOutlet(title, { name })).toBe(true);
+    });
+
+    it.each([
+      ["Silivri'den bildiriyor Cumhuriyet", "Cumhuriyet"],
+      ["Muhabir Cumhuriyet Silivri'den bildiriyor", "Cumhuriyet"],
+      ["Cumhuriyet Halk Partisi Silivri'den bildiriyor", "Cumhuriyet"],
+      ["Cumhuriyet Silivri'ye bildiriyor", "Cumhuriyet"],
+      ["Cumhuriyet Silivri'den haber geldi", "Cumhuriyet"],
+      ["Cumhuriyet Silivri bildiriyor", "Cumhuriyet"],
+      ["Cumhuriyet Silivri'den bildiriyor", "Sabah"],
+      ["Cumhuriyet Silivri'den bildiriyor", "Habertürk"],
+    ])("false for %j / %s", (title, name) => {
+      expect(titleNamesOutlet(title, { name })).toBe(false);
+    });
+  });
+
+  describe("the exemptions that stay", () => {
+    it("Türkiye is never reported in any form (the country, not only an outlet)", () => {
+      expect(titleNamesOutlet("Türkiye'nin ekonomisi büyüdü", { name: "Türkiye" })).toBe(false);
+      expect(titleNamesOutlet("TÜRKİYE'de enflasyon düştü", { name: "Türkiye" })).toBe(false);
+      expect(titleNamesOutlet("Bakan TÜRKİYE yazdı", { name: "Türkiye" })).toBe(false);
+      expect(titleNamesOutlet("Bakan Türkiye'ye döndü", { name: "Türkiye" })).toBe(false);
+      expect(titleNamesOutlet("Türkiye Ankara'dan bildiriyor", { name: "Türkiye" })).toBe(false);
+    });
+
+    it("Türkiye Gazetesi is the multi-word phrase and does not fire on the country", () => {
+      expect(titleNamesOutlet("Türkiye'nin ekonomisi büyüdü", { name: "Türkiye Gazetesi" })).toBe(false);
+      expect(titleNamesOutlet("TÜRKİYE'de enflasyon düştü", { name: "Türkiye Gazetesi" })).toBe(false);
+    });
+
+    it("another outlet's name in the title is not this outlet's self-reference", () => {
+      expect(titleNamesOutlet("Bakan Hürriyet’e konuştu", { name: "Sabah" })).toBe(false);
+      expect(titleNamesOutlet("Bakan SÖZCÜ'ye konuştu", { name: "Karar" })).toBe(false);
+      expect(titleNamesOutlet("Çelişkiyi Takvim yakaladı", { name: "Milliyet" })).toBe(false);
+    });
+
+    it("Cumhuriyet Halk Partisi stays a party, in every form it takes", () => {
+      expect(titleNamesOutlet("Cumhuriyet Halk Partisi açıklama yaptı", { name: "Cumhuriyet" })).toBe(false);
+      expect(titleNamesOutlet("Bakan Cumhuriyet Halk Partisi'ne yanıt verdi", { name: "Cumhuriyet" })).toBe(false);
+    });
+  });
+
+  describe("linear time", () => {
+    // Every shape is a title that does NOT match (checked below), so the whole
+    // title is scanned: a shape that matched at its first word would return at
+    // once and guard nothing.
+    const shapes: Array<[string, (n: number) => string, string]> = [
+      ["candidate words, apostrophe not followed by a letter", rep("Karar' "), "Karar"],
+      ["lowercase candidates with an apostrophe suffix", rep("karar'ın "), "Karar"],
+      ["mixed-case candidates", rep("kARAR "), "Karar"],
+      ["Title-case candidates after the first word, name not on the sub-list", rep("Bakan Karar "), "Karar"],
+      ["Title-case candidates, apostrophe run", rep("'", "Karar"), "Karar"],
+      ["series line with a long place token", rep("a'", "Cumhuriyet ", " bildiriyor"), "Cumhuriyet"],
+      ["series line with a long run of apostrophes", rep("'", "Cumhuriyet x"), "Cumhuriyet"],
+      ["one long word", rep("a", "Karar"), "Karar"],
+      ["whitespace run", rep(" ", "Karar"), "Karar"],
+      ["alias candidates", rep("CNNX "), "CNN Türk"],
+    ];
+    it.each(shapes)("grows linearly with the title: %s", (_label, gen, name) => {
+      expect(titleNamesOutlet(gen(1_000), { name })).toBe(false);
+      expectLinear(gen, (title) => titleNamesOutlet(title, { name }), { n: 200_000, ceilingMs: 4000 });
+    });
   });
 });
 

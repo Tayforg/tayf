@@ -1817,17 +1817,22 @@ function sameSourceDupEvidence(
 // The score a scored pair may contribute to the fallback join loop (see the
 // call site). A result below MATCH_THRESHOLD whose entity/tfidf lane was capped
 // by ENTITY_TEXT_FLOOR (components.textFloorCapped) and which that capped lane
-// alone produced (raw above the MinHash lane's score; the headline lane never
-// coexists with the cap) is entities-only evidence: it contributes 0. Any other
-// result contributes its own score. Total over partial `components` objects.
+// alone produced is entities-only evidence: it contributes 0. "Alone" is raw above the MinHash
+// lane's contribution to raw: components.jaccardForRaw (the lane after the vetoes' cap and the
+// sole-carrier guard), or components.jaccardScore (the lane's own value) when a result carries no
+// jaccardForRaw. jaccardScore alone is not enough: the guard reports it uncapped, so a pair whose
+// MinHash lane was capped at SUBJECT_VETO_CAP looked MinHash-carried and joined below the threshold.
+// The headline lane never coexists with the cap. Any other result contributes its own score.
+// Total over partial `components` objects.
 function fallbackEligibleScore(res: {
   score: number;
-  components?: Partial<{ textFloorCapped: boolean; raw: number; jaccardScore: number }>;
+  components?: Partial<{ textFloorCapped: boolean; raw: number; jaccardScore: number; jaccardForRaw: number }>;
 }): number {
   const c = res.components;
+  const minhashInRaw = typeof c?.jaccardForRaw === "number" ? c.jaccardForRaw : c?.jaccardScore;
   const carriedByCappedLane = c?.textFloorCapped === true &&
-    typeof c.raw === "number" && typeof c.jaccardScore === "number" &&
-    c.raw > c.jaccardScore;
+    typeof c.raw === "number" && typeof minhashInRaw === "number" &&
+    c.raw > minhashInRaw;
   return carriedByCappedLane && res.score < MATCH_THRESHOLD ? 0 : res.score;
 }
 
