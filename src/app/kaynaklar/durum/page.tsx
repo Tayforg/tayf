@@ -61,6 +61,15 @@ const SILENCE_BADGE_CLASS: Record<SilenceReason, string> = {
   sessiz: "bg-amber-500/15 border-amber-500/30 text-amber-800 dark:text-amber-400",
 };
 
+// Migration 212 (h174-latency-1): a feed that shows only its newest items and lost
+// some inside the last 7 days (haberport: 50 items, replaced hourly). It is a fact
+// about the feed, not about silence: the source still delivers, so the tag sits next
+// to the dash of a delivering source. Literal classes on purpose (Tailwind only emits
+// what it can read), the same AA shades as the badges above.
+const WINDOW_OVERFLOW_TAG = "akış penceresi taşıyor";
+const WINDOW_OVERFLOW_TAG_CLASS =
+  "bg-violet-500/15 border-violet-500/30 text-violet-800 dark:text-violet-300";
+
 const itemsPerDayFormatter = new Intl.NumberFormat("tr-TR", {
   maximumFractionDigits: 1,
 });
@@ -123,6 +132,7 @@ export function KaynakDurumBody({
 }) {
   const { all: summary, voting } = summariseFeedStatus(rows);
   const quarantinedCount = rows.filter((r) => r.quarantined).length;
+  const windowOverflowCount = rows.filter((r) => r.windowOverflowRecent).length;
 
   // Silent-first, then alphabetical (the underlying query already sorts by
   // name — Array#sort is stable, so this only reorders across the
@@ -221,6 +231,15 @@ export function KaynakDurumBody({
           <strong>erişim yok</strong> — besleme son denemede alınamadı ya da
           karantinada; <strong>sessiz</strong> — besleme güncel, ama son 72
           saatte Tayf&apos;a yeni haber eklenmedi.
+        </p>
+      )}
+
+      {windowOverflowCount > 0 && (
+        <p className="text-xs text-muted-foreground">
+          <strong>{WINDOW_OVERFLOW_TAG}</strong> etiketi: besleme her seferinde
+          yalnızca son haberleri veriyor ve son 7 günde bu sınır aşıldı; arada
+          yayımlanan bazı haberler Tayf&apos;a ulaşmadı, bu kaynağın sayıları en
+          az değerdir.
         </p>
       )}
 
@@ -352,6 +371,14 @@ export function KaynakDurumBody({
                               className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-800 dark:text-rose-300 font-medium whitespace-nowrap"
                             >
                               karantinada
+                            </span>
+                          ) : null}
+                          {row.windowOverflowRecent ? (
+                            <span
+                              title="Son 7 günde besleme penceresi taştı: bazı haberler Tayf'a ulaşmadı"
+                              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ${WINDOW_OVERFLOW_TAG_CLASS}`}
+                            >
+                              {WINDOW_OVERFLOW_TAG}
                             </span>
                           ) : null}
                         </span>

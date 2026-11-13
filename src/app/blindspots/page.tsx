@@ -31,6 +31,7 @@ import { BLINDSPOT_LIST_LOOKBACK_DAYS } from "@/lib/clusters/blindspot-pick";
 import { RECALL_MATCH_NOTE } from "@/lib/clusters/recall-matched-zones";
 import {
   blindspotCountLine,
+  blindspotHealthWithdrawnLine,
   blindspotUnlistedLine,
 } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
@@ -166,6 +167,12 @@ export async function BlindspotsFeed() {
   // (list rules, live tally); null at 0 and for a payload cached
   // before the field existed, so nothing renders then.
   const unlistedLine = result.ok ? blindspotUnlistedLine(result.unlistedCount) : null;
+  // h174-silentfail-1: the claims the feed-health gate withdrew (the silent pole's
+  // feeds are degraded); null at 0 and for a payload cached before the field
+  // existed, so the page then renders exactly what it did before.
+  const healthLine = result.ok
+    ? blindspotHealthWithdrawnLine(result.healthWithdrawn)
+    : null;
 
   return (
     <>
@@ -203,10 +210,21 @@ export async function BlindspotsFeed() {
         </div>
       ) : result.bundles.length === 0 ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-          <p className="text-sm text-muted-foreground">
-            Şu an için belirgin bir kör nokta yok. Her taraftan haberler dengeli
-            dağılmış.
-          </p>
+          {healthLine ? (
+            // h174-silentfail-1: nothing is listed because the gate withdrew claims,
+            // not because the coverage is balanced, so the page must not say so.
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">
+                Şu an listelenebilecek kör nokta yok.
+              </p>
+              {healthWithdrawnNote(healthLine)}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Şu an için belirgin bir kör nokta yok. Her taraftan haberler dengeli
+              dağılmış.
+            </p>
+          )}
         </div>
       ) : (
         <>
@@ -218,6 +236,10 @@ export async function BlindspotsFeed() {
           {countLine && (
             <p className="text-sm text-muted-foreground">{countLine}</p>
           )}
+          {/* h174-silentfail-1: when the feed-health gate withdraws claims (the
+              opposite pole's feeds are degraded) the list and the side counts above
+              shrink; this line, directly under the count line, says so. */}
+          {healthLine && healthWithdrawnNote(healthLine)}
           {/* h130-blindspots-1: /hafta counts every public claim of the same 7
               days (49 on 2026-11-11) and this page lists 45: the others keep the
               label on their card and story page but fail a list rule or the live
@@ -278,6 +300,33 @@ export async function BlindspotsFeed() {
           and DenominatorNote above use the main bundles only. */}
       {!hasTail && nearBlindspotsBand()}
     </>
+  );
+}
+
+// h174-silentfail-1: the withdrawal line with its two plain links (the rule and
+// the live feed status), in the unlisted line's own style. A function that returns
+// the element (not a component), like feedNewsletterBlock, so the empty state and
+// the list share one definition and the element tree stays flat. Plain <a>, like
+// the other links of this page: /metodoloji is static and /kaynaklar/durum is a
+// DB-backed page that must not prefetch.
+function healthWithdrawnNote(line: string) {
+  return (
+    <p className="text-xs text-muted-foreground">
+      {line}{" "}
+      <a
+        href="/metodoloji#besleme-sagligi"
+        className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+      >
+        Besleme sağlığı
+      </a>
+      {" · "}
+      <a
+        href="/kaynaklar/durum"
+        className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+      >
+        Kaynak durumu
+      </a>
+    </p>
   );
 }
 

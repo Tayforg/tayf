@@ -1544,6 +1544,7 @@ function statusRow(over: Partial<SourceFeedStatus> = {}): SourceFeedStatus {
     failStreak: 38,
     quarantined: true,
     silenceReason: "erisim_yok",
+    windowOverflowRecent: false,
     ...over,
   };
 }

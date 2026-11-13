@@ -1511,6 +1511,207 @@ describe("getBlindspots unlistedCount (h130-blindspots-1)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h174-silentfail-1: the feed-health gate withdraws a claim whose OPPOSITE pole
+// has degraded feeds. Those drops are deliberately not `unlistedCount`, so the
+// page had no way to say a withdrawal happened: the list and its İktidar /
+// Muhalefet counts shrank silently, and an empty list read "dengeli dağılmış".
+// `healthWithdrawn` carries how many rows the gate dropped and which poles'
+// feeds caused it. Display only: claims, counts, digest and unlistedCount are
+// exactly what they were without it.
+// ---------------------------------------------------------------------------
+
+const HEALTHY_ZONE = { total: 10, healthy: 9, healthyShare: 0.9, degraded: false };
+const DEGRADED_ZONE = { total: 10, healthy: 2, healthyShare: 0.2, degraded: true };
+
+describe("getBlindspots healthWithdrawn (h174-silentfail-1)", () => {
+  it("counts the claims the gate withdrew and names the degraded pole; unlistedCount is today's formula", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue({
+      iktidar: HEALTHY_ZONE,
+      muhalefet: DEGRADED_ZONE,
+      bagimsiz: HEALTHY_ZONE,
+    });
+    // Muhalefet is silent-and-degraded, so every iktidar-dominant claim is withdrawn.
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+    seedRows([
+      mkClaimRow("ik-1", "iktidar", 5, 0),
+      mkClaimRow("ik-2", "iktidar", 5, 0),
+      mkClaimRow("ik-3", "iktidar", 5, 0),
+      mkClaimRow("mu-1", "muhalefet", 5, 0),
+    ]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getBlindspots();
+
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["mu-1"]);
+      expect(result.claimCount).toBe(1);
+      expect(result.healthWithdrawn).toEqual({ count: 3, zones: ["muhalefet"] });
+      // The h130-blindspots-1 invariant: a withdrawal is not "unlisted".
+      expect(result.unlistedCount).toBe(0);
+      expect(result.sideCounts).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 1 });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("is { count: 0, zones: [] } when feed health is unknown (null): nothing is withdrawn", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
+    // The real gate fails open on null health; a gate that did not would still
+    // never be able to name a zone, so the count must not move either.
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (_zone: string, health: unknown) => health != null,
+    );
+    seedRows([
+      mkClaimRow("ik-1", "iktidar", 5, 0),
+      mkClaimRow("mu-1", "muhalefet", 5, 0),
+    ]);
+
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(2);
+    expect(result.healthWithdrawn).toEqual({ count: 0, zones: [] });
+  });
+
+  it("is { count: 0, zones: [] } when health is known and the gate withdraws nothing", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue({
+      iktidar: HEALTHY_ZONE,
+      muhalefet: HEALTHY_ZONE,
+      bagimsiz: HEALTHY_ZONE,
+    });
+    feedHealthMock.shouldSuppressBlindspot.mockReturnValue(false);
+    seedRows([
+      mkClaimRow("ik-1", "iktidar", 5, 0),
+      mkClaimRow("mu-1", "muhalefet", 5, 0),
+    ]);
+
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(2);
+    expect(result.healthWithdrawn).toEqual({ count: 0, zones: [] });
+  });
+
+  it("is { count: 0, zones: [] } on the empty path (no Step-A candidate at all)", async () => {
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(0);
+    expect(result.healthWithdrawn).toEqual({ count: 0, zones: [] });
+  });
+
+  it("lists both poles, İktidar first whatever the row order, when each pole's claims are withdrawn by the other's feeds", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue({
+      iktidar: DEGRADED_ZONE,
+      muhalefet: DEGRADED_ZONE,
+      bagimsiz: HEALTHY_ZONE,
+    });
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar" || zone === "muhalefet",
+    );
+    seedRows([
+      // A row's silent zone is the opposite degraded pole of its stored side
+      // (degradedSilentZone), so the iktidar-side rows that come first add "muhalefet"
+      // first and insertion order would read ["muhalefet", "iktidar"]; only the
+      // ZONE_ROW_ORDER sort gives ["iktidar", "muhalefet"].
+      mkClaimRow("ik-1", "iktidar", 5, 0),
+      mkClaimRow("ik-2", "iktidar", 5, 0),
+      mkClaimRow("mu-1", "muhalefet", 5, 0),
+      mkClaimRow("bag-1", "bagimsiz", 5, 0),
+    ]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getBlindspots();
+
+      // The mocked gate keeps the bagimsiz claim; the three pole claims are withdrawn.
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["bag-1"]);
+      expect(result.healthWithdrawn.count).toBe(3);
+      expect(result.healthWithdrawn.zones).toEqual(["iktidar", "muhalefet"]);
+      expect(result.unlistedCount).toBe(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("applies the same stored-side gate as unlistedCount: a list-rule drop on a withdrawn side counts as withdrawn, one on a healthy side stays unlisted", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue({
+      iktidar: HEALTHY_ZONE,
+      muhalefet: DEGRADED_ZONE,
+      bagimsiz: HEALTHY_ZONE,
+    });
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+    seedRows([
+      mkClaimRow("ik-suppressed", "iktidar", 5, 0),
+      // Fails copy_dedup first, but its stored side is iktidar: withdrawn, not unlisted.
+      mkCopyDedupRow("copy-dedup"),
+      // 4 of 6 voters = 0.667: below the dominant share; stored side muhalefet is healthy.
+      mkClaimRow("mu-diluted", "muhalefet", 4, 2),
+      mkClaimRow("mu-keep", "muhalefet", 5, 0),
+    ]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getBlindspots();
+
+      expect(result.claimCount).toBe(1);
+      expect(result.unlistedCount).toBe(1);
+      expect(result.healthWithdrawn).toEqual({ count: 2, zones: ["muhalefet"] });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("does not count a dropped row that has no stored side (the gate never applies to it)", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue({
+      iktidar: HEALTHY_ZONE,
+      muhalefet: DEGRADED_ZONE,
+      bagimsiz: HEALTHY_ZONE,
+    });
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+    seedRows([
+      mkClaimRow("mu-keep", "muhalefet", 5, 0),
+      { ...mkClaimRow("no-side", "muhalefet", 4, 2), blindspot_side: null },
+    ]);
+
+    const result = await getBlindspots();
+
+    expect(result.claimCount).toBe(1);
+    expect(result.unlistedCount).toBe(1);
+    expect(result.healthWithdrawn).toEqual({ count: 0, zones: [] });
+  });
+
+  it("does not move the claim list, the side counts, the digest or unlistedCount", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue({
+      iktidar: HEALTHY_ZONE,
+      muhalefet: DEGRADED_ZONE,
+      bagimsiz: HEALTHY_ZONE,
+    });
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+    seedRows([
+      mkClaimRow("ik-1", "iktidar", 5, 0),
+      mkClaimRow("mu-1", "muhalefet", 5, 0),
+      mkClaimRow("mu-2", "muhalefet", 5, 0),
+    ]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { healthWithdrawn, ...rest } = await getBlindspots();
+
+      expect(healthWithdrawn.count).toBe(1);
+      expect(rest.claimCount).toBe(2);
+      expect(rest.bundles.map((b) => b.cluster.id).sort()).toEqual(["mu-1", "mu-2"]);
+      expect(rest.sideCounts).toEqual({ iktidar: 0, bagimsiz: 0, muhalefet: 2 });
+      expect(rest.digest.windowTotal).toBe(2);
+      expect(rest.unlistedCount).toBe(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // h106-blindspotbadges-1: a public claim whose silent zone the site's own Jev
 // recall stage matched with the same event (clusters.blindspot_recall_suspect,
 // migration 064) must not print absolute silence for that zone. The fetcher

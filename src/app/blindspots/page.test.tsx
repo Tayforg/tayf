@@ -37,6 +37,8 @@ type FeedResult =
       claimCount: number;
       /** h130-blindspots-1: Step-A claims the fetcher dropped (list rules, live tally, feed health). */
       unlistedCount: number;
+      /** h174-silentfail-1: how many claims the feed-health gate withdrew, and whose feeds caused it. */
+      healthWithdrawn: { count: number; zones: MediaDnaZone[] };
       sideCounts: Record<MediaDnaZone, number>;
       digest: SilenceDigest;
     }
@@ -78,6 +80,7 @@ import { PageHero } from "@/components/ui/page-hero";
 import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
 import {
+  blindspotHealthWithdrawnLine,
   blindspotUnlistedLine,
   buildSilenceDigest,
   type SilenceDigest,
@@ -106,6 +109,7 @@ function okResult(
     more,
     claimCount: bundles.length + more.length,
     unlistedCount: 0,
+    healthWithdrawn: { count: 0, zones: [] },
     sideCounts,
     digest: buildSilenceDigest(
       bundles as Parameters<typeof buildSilenceDigest>[0],
@@ -1561,13 +1565,17 @@ describe("/blindspots page — the whole window is listed (h53-consistency-1)", 
       const startsWith = (el: unknown, prefix: string) =>
         (el as Elementish | null)?.type === "p" &&
         collectText(el).join("").startsWith(prefix);
-      // The list branch's children: [count line, unlisted line, band, h2, cards, ...].
+      // The list branch's children: [count line, (health line), unlisted line, band, h2,
+      // cards, ...]. A line that is not rendered leaves a null in the children array
+      // (h174-silentfail-1 added one), so those are dropped: what is asserted is the
+      // order of what a reader sees.
       const siblings = collectElements(tree)
         .map((el) => el.props?.children)
         .find(
           (children): children is unknown[] =>
             Array.isArray(children) && children.some((c) => startsWith(c, "Son 7 günde ")),
-        );
+        )
+        ?.filter(Boolean);
       expect(siblings).toBeDefined();
       const countAt = siblings!.findIndex((c) => startsWith(c, "Son 7 günde "));
 
@@ -1607,6 +1615,253 @@ describe("/blindspots page — the whole window is listed (h53-consistency-1)", 
       );
 
       expect(links).toEqual([]);
+    });
+  });
+
+  // h174-silentfail-1: the feed-health gate withdraws every claim whose silent pole's
+  // feeds are degraded. Without a notice the list and its İktidar / Muhalefet counts
+  // shrank silently (the header would read "İktidar ağırlıklı 0"), and an empty list
+  // asserted "Her taraftan haberler dengeli dağılmış". The fetcher now reports how
+  // many claims the gate withdrew (healthWithdrawn) and the page says so.
+  describe("the feed-health withdrawal line (h174-silentfail-1)", () => {
+    const EMPTY_TODAY =
+      "Şu an için belirgin bir kör nokta yok. Her taraftan haberler dengeli dağılmış.";
+    const EMPTY_WITHDRAWN = "Şu an listelenebilecek kör nokta yok.";
+    const HEALTH_START = "Muhalefet kaynaklarının akışı şu an sorunlu olduğu için ";
+    const HEALTH_PATH = "/metodoloji#besleme-sagligi";
+    const STATUS_PATH = "/kaynaklar/durum";
+
+    const withdrawn = (count: number, zones: MediaDnaZone[] = ["muhalefet"]) => ({
+      count,
+      zones,
+    });
+
+    /** The text of every <p> in the tree, in tree order. */
+    function paragraphs(tree: unknown): string[] {
+      return collectElements(tree)
+        .filter((el) => el.type === "p")
+        .map((el) => collectText(el).join(""));
+    }
+
+    function healthParagraphs(tree: unknown): string[] {
+      return paragraphs(tree).filter((t) => t.startsWith(HEALTH_START));
+    }
+
+    /** The <a> elements (the DenominatorNote's own link sits in a Suspense fallback, not in children). */
+    function anchorsTo(tree: unknown, href: string): Elementish[] {
+      return collectElements(tree).filter((el) => el.type === "a" && el.props?.href === href);
+    }
+
+    /** The list branch's visible children: [count line, ..., band, h2, cards, ...] without the nulls of unrendered lines. */
+    function listChildren(tree: unknown): unknown[] {
+      const children = collectElements(tree)
+        .map((el) => el.props?.children)
+        .find(
+          (c): c is unknown[] =>
+            Array.isArray(c) &&
+            c.some(
+              (x) =>
+                (x as Elementish | null)?.type === "p" &&
+                collectText(x).join("").startsWith("Son 7 günde "),
+            ),
+        );
+      expect(children).toBeDefined();
+      return (children as unknown[]).filter(Boolean);
+    }
+
+    const isParagraphStartingWith = (el: unknown, prefix: string) =>
+      (el as Elementish | null)?.type === "p" && collectText(el).join("").startsWith(prefix);
+
+    it("empty list with 2 withdrawn claims: no 'dengeli dağılmış', 'Şu an listelenebilecek kör nokta yok.' plus the line", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult([], [], { healthWithdrawn: withdrawn(2) }));
+
+      const tree = await BlindspotsFeed();
+      const leaves = collectText(tree);
+      const all = leaves.join(" ");
+
+      expect(all).not.toContain("dengeli dağılmış");
+      expect(all).not.toContain("belirgin bir kör nokta yok");
+      expect(leaves).toContain(EMPTY_WITHDRAWN);
+      expect(leaves).toContain(
+        "Muhalefet kaynaklarının akışı şu an sorunlu olduğu için 2 kör nokta geçici olarak gösterilmiyor.",
+      );
+      expect(leaves).toContain(blindspotHealthWithdrawnLine(withdrawn(2)) as string);
+      // The line appears once, not once per branch.
+      expect(healthParagraphs(tree)).toHaveLength(1);
+    });
+
+    it("empty list: the line links to the rule (Besleme sağlığı) and the live status (Kaynak durumu) as plain <a>", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult([], [], { healthWithdrawn: withdrawn(2) }));
+
+      const tree = await BlindspotsFeed();
+      const rule = anchorsTo(tree, HEALTH_PATH);
+      const status = anchorsTo(tree, STATUS_PATH);
+
+      expect(rule).toHaveLength(1);
+      expect(status).toHaveLength(1);
+      // Plain <a>, not next/link: both targets are static or live-read pages that must not prefetch.
+      expect(rule[0]?.type).toBe("a");
+      expect(status[0]?.type).toBe("a");
+      expect(collectText(rule[0]).join("")).toBe("Besleme sağlığı");
+      expect(collectText(status[0]).join("")).toBe("Kaynak durumu");
+      // Both links sit inside the line's own paragraph.
+      const paragraph = collectElements(tree).find(
+        (el) => el.type === "p" && collectText(el).join("").startsWith(HEALTH_START),
+      );
+      expect(anchorsTo(paragraph, HEALTH_PATH)).toHaveLength(1);
+      expect(anchorsTo(paragraph, STATUS_PATH)).toHaveLength(1);
+    });
+
+    it("empty list with 0 withdrawn claims keeps today's copy exactly, and no line, no links", async () => {
+      getBlindspots.mockResolvedValueOnce(okResult([], [], { healthWithdrawn: withdrawn(0, []) }));
+
+      const tree = await BlindspotsFeed();
+
+      expect(paragraphs(tree)).toContain(EMPTY_TODAY);
+      expect(collectText(tree)).toContain(EMPTY_TODAY);
+      expect(collectText(tree).join(" ")).not.toContain("listelenebilecek");
+      expect(healthParagraphs(tree)).toEqual([]);
+      expect(anchorsTo(tree, HEALTH_PATH)).toEqual([]);
+      // The default okResult (count 0) is the same state.
+      getBlindspots.mockResolvedValueOnce(okResult([]));
+      expect(collectText(await BlindspotsFeed())).toContain(EMPTY_TODAY);
+    });
+
+    it("a payload cached before the field existed renders like count 0 on the empty list", async () => {
+      const { healthWithdrawn: _omitted, ...legacy } = okResult([]);
+      void _omitted;
+      getBlindspots.mockResolvedValueOnce(legacy as unknown as FeedResult);
+
+      const tree = await BlindspotsFeed();
+
+      expect(collectText(tree)).toContain(EMPTY_TODAY);
+      expect(collectText(tree).join(" ")).not.toContain("listelenebilecek");
+      expect(healthParagraphs(tree)).toEqual([]);
+      expect(anchorsTo(tree, HEALTH_PATH)).toEqual([]);
+    });
+
+    it("a payload cached before the field existed renders like count 0 on a non-empty list (no line, no links)", async () => {
+      const { healthWithdrawn: _omitted, ...legacy } = okResult([cardFixture("c1")], MORE);
+      void _omitted;
+      getBlindspots.mockResolvedValueOnce(legacy as unknown as FeedResult);
+
+      const tree = await BlindspotsFeed();
+
+      expect(countLines(tree)).toHaveLength(1);
+      expect(healthParagraphs(tree)).toEqual([]);
+      expect(anchorsTo(tree, HEALTH_PATH)).toEqual([]);
+      // The status link of the DenominatorNote is not in children; nothing here adds one.
+      expect(anchorsTo(tree, STATUS_PATH)).toEqual([]);
+    });
+
+    it("a malformed field (null, or a count that is not a number) renders like count 0", async () => {
+      for (const bad of [
+        null,
+        { count: Number.NaN, zones: ["muhalefet"] },
+        { zones: ["muhalefet"] },
+      ]) {
+        getBlindspots.mockResolvedValueOnce(
+          okResult([], [], { healthWithdrawn: bad as unknown as { count: number; zones: MediaDnaZone[] } }),
+        );
+        const tree = await BlindspotsFeed();
+
+        expect(collectText(tree)).toContain(EMPTY_TODAY);
+        expect(healthParagraphs(tree)).toEqual([]);
+      }
+    });
+
+    it("non-empty list with 40 withdrawn claims renders the line directly under the count line, above the silence band", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult([cardFixture("c1", "muhalefet")], MORE, {
+          claimCount: 6,
+          sideCounts: COUNTS(0, 0, 6),
+          healthWithdrawn: withdrawn(40),
+        }),
+      );
+
+      const tree = await BlindspotsFeed();
+      const siblings = listChildren(tree);
+      const countAt = siblings.findIndex((c) => isParagraphStartingWith(c, "Son 7 günde "));
+
+      expect(countLines(tree)).toEqual([
+        "Son 7 günde 6 kör nokta · İktidar ağırlıklı 0 · Muhalefet ağırlıklı 6",
+      ]);
+      expect(isParagraphStartingWith(siblings[countAt + 1], HEALTH_START)).toBe(true);
+      expect(healthParagraphs(tree)).toHaveLength(1);
+      expect(healthParagraphs(tree)[0]?.startsWith(
+        "Muhalefet kaynaklarının akışı şu an sorunlu olduğu için 40 kör nokta geçici olarak gösterilmiyor.",
+      )).toBe(true);
+      expect((siblings[countAt + 2] as Elementish).type).toBe(SilenceDigestBand);
+      // A non-empty list has its own cards: the empty-state copy never shows.
+      expect(collectText(tree)).not.toContain(EMPTY_WITHDRAWN);
+      expect(collectText(tree)).not.toContain(EMPTY_TODAY);
+    });
+
+    it("non-empty list: the same two plain links, and the paragraph has the unlisted line's own class", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult([cardFixture("c1")], MORE, { healthWithdrawn: withdrawn(40), unlistedCount: 4 }),
+      );
+
+      const tree = await BlindspotsFeed();
+      const paragraphsOf = (prefix: string) =>
+        collectElements(tree).filter(
+          (el) => el.type === "p" && collectText(el).join("").startsWith(prefix),
+        );
+      const health = paragraphsOf(HEALTH_START);
+      const unlisted = paragraphsOf("Bu dönemde kör nokta etiketi taşıyan ");
+
+      expect(anchorsTo(tree, HEALTH_PATH)).toHaveLength(1);
+      expect(anchorsTo(tree, STATUS_PATH)).toHaveLength(1);
+      expect(anchorsTo(tree, HEALTH_PATH)[0]?.type).toBe("a");
+      expect(anchorsTo(tree, STATUS_PATH)[0]?.type).toBe("a");
+      expect(health).toHaveLength(1);
+      expect(unlisted).toHaveLength(1);
+      expect(health[0]?.props?.className).toBe("text-xs text-muted-foreground");
+      expect(health[0]?.props?.className).toBe(unlisted[0]?.props?.className);
+    });
+
+    it("with both lines: count line, then the withdrawal line, then the unlisted line, then the band", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult([cardFixture("c1")], MORE, { healthWithdrawn: withdrawn(40), unlistedCount: 4 }),
+      );
+
+      const siblings = listChildren(await BlindspotsFeed());
+      const countAt = siblings.findIndex((c) => isParagraphStartingWith(c, "Son 7 günde "));
+
+      expect(isParagraphStartingWith(siblings[countAt + 1], HEALTH_START)).toBe(true);
+      expect(
+        isParagraphStartingWith(siblings[countAt + 2], "Bu dönemde kör nokta etiketi taşıyan "),
+      ).toBe(true);
+      expect((siblings[countAt + 3] as Elementish).type).toBe(SilenceDigestBand);
+    });
+
+    it("names both poles when both are degraded", async () => {
+      getBlindspots.mockResolvedValueOnce(
+        okResult([], [], { healthWithdrawn: withdrawn(12, ["iktidar", "muhalefet"]) }),
+      );
+
+      const leaves = collectText(await BlindspotsFeed());
+
+      expect(leaves).toContain(
+        "İktidar ve Muhalefet kaynaklarının akışı şu an sorunlu olduğu için 12 kör nokta geçici olarak gösterilmiyor.",
+      );
+    });
+
+    it("renders no line and no link on the failed path", async () => {
+      getBlindspots.mockResolvedValueOnce({ ok: false });
+
+      const tree = await BlindspotsFeed();
+
+      expect(healthParagraphs(tree)).toEqual([]);
+      expect(anchorsTo(tree, HEALTH_PATH)).toEqual([]);
+      expect(collectText(tree)).not.toContain(EMPTY_WITHDRAWN);
+    });
+
+    it("the link target exists: /metodoloji carries id=\"besleme-sagligi\" on the feed-health paragraph", () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(join(here, "../metodoloji/page.tsx"), "utf8");
+
+      expect(source).toContain('id="besleme-sagligi"');
     });
   });
 });

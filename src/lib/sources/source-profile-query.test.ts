@@ -1183,3 +1183,129 @@ describe("/source/[slug] page: a timeout is not a 404", () => {
     expect(connection).not.toHaveBeenCalled();
   });
 });
+
+// migration 212 (h174-latency-1): ingest stamps sources.fetch_window_overflow_at
+// when a poll of a full-sized feed window finds none of its items stored (haberport
+// holds its 50 newest items and loses the rest on busy weekdays). The profile hands
+// the page one boolean, decided with the same `nowMs` as the quarantine and frozen
+// verdicts: did that happen in the last 7 days. The card then prints the rate as a
+// floor ("en az ...") with a note. Nothing here reads the clock again.
+describe("getSourceProfile feed window overflow (migration 212)", () => {
+  const NOW = Date.parse("2026-11-13T09:00:00.000Z");
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const withOverflow = (over: Record<string, unknown>) => {
+    fixture.sources = [
+      {
+        data: [
+          {
+            ...SOURCE_ROW,
+            fetch_quarantined_until: null,
+            fetch_last_status: 200,
+            fetch_fail_streak: 0,
+            fetch_newest_item_at: ago(HOUR),
+            fetch_items_count: 50,
+            ...over,
+          },
+        ],
+        error: null,
+      },
+    ];
+    fixture.served = { sources: 0, count: 0, articles: 0, history: 0, clusterArticles: 0 };
+  };
+
+  it("selects fetch_window_overflow_at beside the other fetch columns", async () => {
+    await getSourceProfile("ornek-gazete");
+    const cols = (fixture.sourceSelects[0] ?? "").split(",").map((c) => c.trim());
+    expect(cols).toContain("fetch_window_overflow_at");
+    for (const c of ["fetch_newest_item_at", "fetch_items_count", "fetch_quarantined_until"]) {
+      expect(cols).toContain(c);
+    }
+  });
+
+  it("an overflow stamped an hour ago is recent", async () => {
+    withOverflow({ fetch_window_overflow_at: ago(HOUR) });
+    const profile = await getSourceProfile("ornek-gazete");
+    expect(profile?.windowOverflowRecent).toBe(true);
+  });
+
+  it("the boundary is 7 days: exactly 7 days is recent, 7 days + 1 ms is not", async () => {
+    withOverflow({ fetch_window_overflow_at: ago(7 * DAY) });
+    expect((await getSourceProfile("ornek-gazete"))?.windowOverflowRecent).toBe(true);
+    withOverflow({ fetch_window_overflow_at: ago(7 * DAY + 1) });
+    expect((await getSourceProfile("ornek-gazete"))?.windowOverflowRecent).toBe(false);
+  });
+
+  it("null, an absent column and an unparseable value are not recent", async () => {
+    for (const over of [{ fetch_window_overflow_at: null }, {}, { fetch_window_overflow_at: "dün" }]) {
+      withOverflow(over);
+      const profile = await getSourceProfile("ornek-gazete");
+      expect(profile?.windowOverflowRecent, JSON.stringify(over)).toBe(false);
+    }
+  });
+
+  it("does not change the other verdicts: a flagged source that delivers is neither frozen nor down", async () => {
+    withOverflow({ fetch_window_overflow_at: ago(2 * HOUR) });
+    const profile = await getSourceProfile("ornek-gazete");
+    expect(profile?.quarantined).toBe(false);
+    expect(profile?.feedFrozen).toBe(false);
+    expect(profile?.newestFeedItemAt).toBe(ago(HOUR));
+  });
+
+  it("when only the new column is missing (119 applied, 212 not) the read retries ONCE without it and the profile still renders", async () => {
+    fixture.sources = [
+      {
+        data: null,
+        error: { message: "column sources.fetch_window_overflow_at does not exist", code: "42703" },
+      },
+      { data: [{ ...SOURCE_ROW, fetch_newest_item_at: ago(HOUR), fetch_items_count: 50 }], error: null },
+    ];
+    const profile = await getSourceProfile("ornek-gazete");
+    expect(profile).not.toBeNull();
+    expect(profile?.windowOverflowRecent).toBe(false);
+    expect(fixture.sourceSelects).toHaveLength(2);
+    expect(fixture.sourceSelects[0]).toContain("fetch_window_overflow_at");
+    expect(fixture.sourceSelects[1]).not.toContain("fetch_window_overflow_at");
+    // everything else the profile reads stays in the retry
+    for (const c of ["fetch_newest_item_at", "fetch_items_count", "fetch_quarantined_until", "trustee_note"]) {
+      expect(fixture.sourceSelects[1], c).toContain(c);
+    }
+    // a success keeps the normal lifetime, never the short failure one
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a missing column that is NOT the new one is not retried: the read fails as before (never a 404)", async () => {
+    fixture.sources = [
+      { data: null, error: { message: "column sources.fetch_items_count does not exist", code: "42703" } },
+    ];
+    await expect(getSourceProfile("ornek-gazete")).rejects.toThrow(/source query failed: column sources\.fetch_items_count/);
+    // cached attempt + the live retry of getSourceProfile, one select each: the column fallback did not fire
+    expect(fixture.sourceSelects).toHaveLength(2);
+    expect(fixture.sourceSelects.every((s) => s.includes("fetch_window_overflow_at"))).toBe(true);
+  });
+
+  it("an error on the fallback read is an error (the read throws, never a null profile)", async () => {
+    fixture.sources = [
+      { data: null, error: { message: "column sources.fetch_window_overflow_at does not exist", code: "42703" } },
+      { data: null, error: { message: "canceling statement due to statement timeout", code: "57014" } },
+    ];
+    await expect(getSourceProfile("ornek-gazete")).rejects.toThrow(/source query failed/);
+  });
+
+  it("decides the 7-day verdict with the shared nowMs, not with a clock read of its own", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(resolve(here, "source-profile-query.ts"), "utf8");
+    expect(src).toContain("isWindowOverflowRecent(source.fetch_window_overflow_at, nowMs)");
+  });
+});
