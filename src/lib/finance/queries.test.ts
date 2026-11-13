@@ -233,6 +233,7 @@ import { fmtKat, istToday } from "./format";
 import {
   AGENCY_FILED_SUBJECTS,
   bucketLags,
+  ECON_FEED_OVERFETCH,
   coverageStats,
   fetchCircuitBreakers,
   fetchEconFeed,
@@ -772,13 +773,20 @@ describe("finance query transforms", () => {
       const ids = (rows: ReadonlyArray<{ article_id: string }>) => rows.map((r) => r.article_id);
 
       describe("filterCoverageRows", () => {
-        it("drops a row scored 0.02, keeps a row scored exactly 0.2 and keeps an unscored row (fail-open)", () => {
+        it("drops a row scored 0.02, keeps a row scored exactly 0.35 and keeps an unscored row (fail-open)", () => {
           const rows = [row(1, 30, "low"), row(1, 40, "edge"), row(1, 50, "unscored")];
           const scores = new Map([
             [key("low"), 0.02],
-            [key("edge"), 0.2],
+            [key("edge"), 0.35],
           ]);
           expect(ids(filterCoverageRows(rows, TICKER, scores, new Set()))).toEqual(["edge", "unscored"]);
+        });
+
+        // h176-ekonomi-1: the 0.20-0.35 band (all alias matches since 2026-11-09, about 20 of 28 false by title) is hidden too.
+        it("drops a row scored 0.3 (the band the hide line moved over), whichever filing it is joined to", () => {
+          const rows = [row(1, 30, "band"), row(2, 10, "band"), row(2, 20, "ok")];
+          const scores = new Map([[key("band"), 0.3]]);
+          expect(filterCoverageRows(rows, TICKER, scores, new Set())).toEqual([row(2, 20, "ok")]);
         });
 
         it("reads the score under THIS ticker's key only", () => {
@@ -807,12 +815,13 @@ describe("finance query transforms", () => {
           expect(rows).toEqual(copy);
         });
 
-        it("scores of exactly 0 and just under the floor hide; 0.2 and above show", () => {
-          const rows = [row(1, 1, "zero"), row(1, 2, "just"), row(1, 3, "at"), row(1, 4, "high")];
+        it("scores of exactly 0 and just under the floor hide; 0.35 and above show", () => {
+          const rows = [row(1, 1, "zero"), row(1, 2, "old"), row(1, 3, "just"), row(1, 4, "at"), row(1, 5, "high")];
           const scores = new Map([
             [key("zero"), 0],
-            [key("just"), 0.1999],
-            [key("at"), 0.2],
+            [key("old"), 0.2],
+            [key("just"), 0.3499],
+            [key("at"), 0.35],
             [key("high"), 0.97],
           ]);
           expect(ids(filterCoverageRows(rows, TICKER, scores, new Set()))).toEqual(["at", "high"]);
@@ -1533,9 +1542,9 @@ describe("finance query fetchers (live Supabase shape)", () => {
         tickers: ["ASELS", "VESTL"],
       },
     ]);
-    // reader-data (§4b): over-fetches 1.25x so a hidden-ticker drop still
-    // leaves close to `limit` items — ceil(10 * 1.25) = 13.
-    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 13 } });
+    // reader-data (§4b): over-fetches ECON_FEED_OVERFETCH (1.5x) so a hidden-ticker drop still
+    // leaves close to `limit` items — ceil(10 * 1.5) = 15.
+    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 15 } });
   });
 
   it("fetchEconFeed cleans the outbound url (Diken '&#038;', Evrensel utm_*)", async () => {
@@ -1649,7 +1658,7 @@ describe("finance query fetchers (live Supabase shape)", () => {
 });
 
 describe("reader-data (§4b): Jev ticker-relevance gate", () => {
-  it("fetchEconFeed asks econ_feed for 1.25x the display limit and hides a p<0.2 ticker", async () => {
+  it("fetchEconFeed asks econ_feed for ECON_FEED_OVERFETCH (1.5x) the display limit and hides a p<0.35 ticker", async () => {
     fixture.econFeedRows = [
       {
         id: "a1",
@@ -1690,7 +1699,8 @@ describe("reader-data (§4b): Jev ticker-relevance gate", () => {
 
     const items = await fetchEconFeed(80);
 
-    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 100 } });
+    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 120 } });
+    expect(Math.ceil(80 * ECON_FEED_OVERFETCH)).toBe(120);
     const byId = Object.fromEntries(items.map((i) => [i.id, i]));
     // a1 keeps THYAO but loses the hidden DEVA match.
     expect(byId.a1?.tickers).toEqual(["THYAO"]);
@@ -1759,6 +1769,72 @@ describe("reader-data (§4b): Jev ticker-relevance gate", () => {
     expect(page.articles.map((a) => a.id)).toEqual(["a2"]);
     const totalAttentionArticles = page.attention.reduce((s, d) => s + d.articles, 0);
     expect(totalAttentionArticles).toBe(1);
+  });
+});
+
+// h176-ekonomi-1: /ekonomi/TTKOM listed 'Doğuş Özdemiroğlu'ndan double-double: Türk Telekom Cluj'u 89-81 yendi'
+// (a basketball game, Jev score 0.30) as Türk Telekom news: the hide line was 0.2 and the band 0.2-0.5 was shown.
+describe("h176-ekonomi-1: readTickerPage hides a story Jev scored 0.30, keeps one scored 0.47", () => {
+  it("drops the TTKOM row 'Türk Telekom Cluj'u 89-81 yendi' (0.30) and keeps a 0.47 row", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-13T09:00:00Z"));
+    fixture.articleTickers = [
+      { ticker: "TTKOM", article_id: "g1", published_at: "2026-11-12T20:00:00Z", source_id: "s1" },
+      { ticker: "TTKOM", article_id: "g2", published_at: "2026-11-12T21:00:00Z", source_id: "s2" },
+    ];
+    fixture.tickerArticlesRows = [
+      {
+        id: "g1",
+        title: "Doğuş Özdemiroğlu'ndan double-double: Türk Telekom Cluj'u 89-81 yendi",
+        url: "https://x/spor/1",
+        published_at: "2026-11-12T20:00:00Z",
+        category: "spor",
+        source_name: "Sözcü",
+        source_slug: "sozcu",
+        matched_on: "alias:türk telekom",
+      },
+      {
+        id: "g2",
+        title: "Türk Telekom'dan yeni fiber yatırımı",
+        url: "https://x/ekonomi/2",
+        published_at: "2026-11-12T21:00:00Z",
+        category: "ekonomi",
+        source_name: "Dünya",
+        source_slug: "dunya",
+        matched_on: "alias:türk telekom",
+      },
+    ];
+    fixture.jevRows = [
+      { subject_id: "g1:TTKOM", jev_prob: 0.3, created_at: "2026-11-12T20:00:00Z" },
+      { subject_id: "g2:TTKOM", jev_prob: 0.47, created_at: "2026-11-12T21:00:00Z" },
+    ];
+
+    const page = await fetchTickerPage("TTKOM");
+
+    expect(page.articles.map((a) => a.id)).toEqual(["g2"]);
+  });
+
+  it("an article scored exactly 0.35 stays on the page", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-13T09:00:00Z"));
+    fixture.articleTickers = [{ ticker: "LYDYE", article_id: "l1", published_at: "2026-11-12T20:00:00Z", source_id: "s1" }];
+    fixture.tickerArticlesRows = [
+      {
+        id: "l1",
+        title: "Lydia Holding Başkanı Enver Çevik gözaltına alındı",
+        url: "https://x/l1",
+        published_at: "2026-11-12T20:00:00Z",
+        category: "ekonomi",
+        source_name: "Sözcü",
+        source_slug: "sozcu",
+        matched_on: "alias:lydia holding",
+      },
+    ];
+    fixture.jevRows = [{ subject_id: "l1:LYDYE", jev_prob: 0.35, created_at: "2026-11-12T20:00:00Z" }];
+
+    const page = await fetchTickerPage("LYDYE");
+
+    expect(page.articles.map((a) => a.id)).toEqual(["l1"]);
   });
 });
 

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { WIRE_UNIQUE_HASH_RATIO, wireSignalOf } from "@/lib/clusters/wire";
+import { WIRE_MIN_MEMBERS, WIRE_UNIQUE_HASH_RATIO, wireSignalOf } from "@/lib/clusters/wire";
 import { ALLOWED_RPCS, ALLOWED_RPC_IDENTITIES } from "../_helpers/anon-rpc-allowlist";
 import { assertLiveReady } from "../_helpers/live-db";
 
@@ -516,8 +516,10 @@ describe("migration 192_saved_clusters_v4.sql (SQL contract)", () => {
   it("applies wire.ts's thresholds: fewer than 3 members never collapse, and distinct hashes / members <= WIRE_UNIQUE_HASH_RATIO do", () => {
     const n = norm(v4Body);
     expect(WIRE_UNIQUE_HASH_RATIO).toBe(0.5);
-    expect(readFileSync(WIRE_TS, "utf8")).toContain("members.length < 3");
-    expect(n).toContain(`when t.members >= 3 and t.texts::numeric / t.members <= ${WIRE_UNIQUE_HASH_RATIO} then t.texts`);
+    // h176-methodtruth-1: the guard reads WIRE_MIN_MEMBERS (3), which /metodoloji prints.
+    expect(WIRE_MIN_MEMBERS).toBe(3);
+    expect(readFileSync(WIRE_TS, "utf8")).toContain("members.length < WIRE_MIN_MEMBERS");
+    expect(n).toContain(`when t.members >= ${WIRE_MIN_MEMBERS} and t.texts::numeric / t.members <= ${WIRE_UNIQUE_HASH_RATIO} then t.texts`);
     expect(n).toContain("else t.members end::integer as effective_article_count");
     // no cluster tree at all: NULL, so the client falls back to the stored article_count instead of printing 0
     expect(n).toContain("when t.members = 0 then null");

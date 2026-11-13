@@ -29,7 +29,7 @@ export const V1_PROFILE_WINDOW_DAYS = 30;
 export const V1_PROFILE_MIN_CLUSTERS = 20;
 export const V1_PROFILE_MIN_MULTI = 10;
 
-// The relevance cut-off as Turkish copy writes a decimal ("0,2", never "0.2").
+// The relevance cut-off as Turkish copy writes a decimal ("0,35", never "0.35").
 // Derived from the constant the pickup query filters on, so the note cannot
 // drift from the behaviour. The English text and the JSON values keep the ASCII
 // point.

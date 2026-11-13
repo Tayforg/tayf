@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { assertLiveReady } from "../_helpers/live-db";
-import { TICKER_HIDE_BELOW, relevanceKey } from "@/lib/finance/ticker-relevance";
+import { ALIAS_PRECISION_REPORT_LOW_BELOW, TICKER_HIDE_BELOW, relevanceKey } from "@/lib/finance/ticker-relevance";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 179 ("alias_precision_report"), h72-kap-4.
@@ -358,9 +358,11 @@ describe("179 low_precision_aliases (the report)", () => {
     expect(lowBody).toContain("t.article_id::text || ':' || t.ticker");
   });
 
-  it("counts a row as low below the reader gate's own line (TICKER_HIDE_BELOW, 0.2) and scored as a non-null jev_prob", () => {
-    expect(TICKER_HIDE_BELOW).toBe(0.2);
-    expect(lowBody).toContain(`filter (where p.jev_prob < ${TICKER_HIDE_BELOW})`);
+  it("counts a row as low below the line baked into 179's SQL (ALIAS_PRECISION_REPORT_LOW_BELOW, 0.2) and scored as a non-null jev_prob", () => {
+    // h176-ekonomi-1: the reader gate moved to 0.35; 179 is applied and keeps its 0.2, so the report has its own constant.
+    expect(ALIAS_PRECISION_REPORT_LOW_BELOW).toBe(0.2);
+    expect(TICKER_HIDE_BELOW).toBeGreaterThanOrEqual(ALIAS_PRECISION_REPORT_LOW_BELOW);
+    expect(lowBody).toContain(`filter (where p.jev_prob < ${ALIAS_PRECISION_REPORT_LOW_BELOW})`);
     expect(lowBody).toContain("pg_catalog.count(p.jev_prob)::int as scored");
     expect(lowBody).toContain("pg_catalog.count(*)::int as hits");
   });

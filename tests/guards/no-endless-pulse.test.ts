@@ -48,6 +48,10 @@ const ALLOWED: Readonly<Record<string, Allowance>> = {
     reason: "SearchBarPlaceholder and FeedSkeleton, the static-shell placeholders (the Son Dakika dot is NOT one)",
   },
   "src/app/blindspots/page.tsx": { count: 1, reason: "BlindspotsSkeleton card placeholder" },
+  "src/app/kaynaklar/durum/page.tsx": {
+    count: 4,
+    reason: "DurumBodySkeleton (h177-perfsweep-1): zone card, totals line, table header cell placeholders, all aria-hidden",
+  },
   "src/app/karsilastir/page.tsx": { count: 1, reason: "CompareSkeleton card placeholder" },
   "src/components/bookmark/saved-list.tsx": {
     count: 2,

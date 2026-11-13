@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import {
   correctionChains,
   correctionTag,
@@ -419,5 +420,248 @@ describe("correctionTag", () => {
 
     expect(correctionTag(original, superseded)).toBe("düzeltildi");
     expect(correctionTag(correction, superseded)).toBe("düzeltme");
+  });
+});
+
+// h176-ekonomi-3: a periodic-report correction can carry a retitled summary. CUSAN 1695918 (11-09, Faaliyet Raporu
+// (Konsolide), '30.09.2026 Faaliyet Raporu') was corrected by 1697403 (11-11, DUZENLENEN, '30.09.2026 Faaliyet Raporu
+// (Düzeltme)'); ARZUM 1696055 ('30.09.2026 Faaliyet Raporu') by 1697247 ('ARZUM 30.09.2026 FAALİYET RAPORU'). The raw
+// summary equality left both originals unpaired: no 'düzeltildi' tag, and the correction counted as a second notice and
+// a second event. When year AND period are both set, the summaries are compared after normalizeReportSummary; a row with
+// year or period null (a daily notice: TABGD's 'Pay Geri Alım İşlemleri') keeps the exact rule.
+describe("supersededIndexes: periodic-report corrections with a retitled summary (h176-ekonomi-3)", () => {
+  const filing = (over: Record<string, unknown> = {}) => ({
+    disclosure_index: 1,
+    published_at: "2026-11-09T17:34:56Z",
+    stock_codes: ["CUSAN"] as string[] | null,
+    related_stocks: [] as string[] | null,
+    subject: "Faaliyet Raporu (Konsolide)" as string | null,
+    summary: "30.09.2026 Faaliyet Raporu" as string | null,
+    year: "2026" as string | null,
+    period: "3" as string | null,
+    modify_status: null as string | null,
+    ...over,
+  });
+  const cusanOriginal = () => filing({ disclosure_index: 1695918 });
+  const cusanCorrection = () =>
+    filing({
+      disclosure_index: 1697403,
+      published_at: "2026-11-11T18:31:52Z",
+      summary: "30.09.2026 Faaliyet Raporu (Düzeltme)",
+      modify_status: "DUZENLENEN",
+    });
+  const arzum = (summary: string, over: Record<string, unknown> = {}) =>
+    filing({ stock_codes: ["ARZUM"], summary, ...over });
+  const arzumPair = () => [
+    arzum("30.09.2026 Faaliyet Raporu", { disclosure_index: 1696055, published_at: "2026-11-09T17:30:00Z" }),
+    arzum("ARZUM 30.09.2026 FAALİYET RAPORU", {
+      disclosure_index: 1697247,
+      published_at: "2026-11-11T18:00:00Z",
+      modify_status: "DUZENLENEN",
+    }),
+  ];
+
+  it("the CUSAN fixture: 1695918 is superseded by 1697403 although its summary was retitled '(Düzeltme)'", () => {
+    const rows = [cusanOriginal(), cusanCorrection()];
+    expect([...supersededIndexes(rows)]).toEqual([1695918]);
+    expect([...supersededIndexes([...rows].reverse())]).toEqual([1695918]);
+  });
+
+  it("the CUSAN chain: 1697403 maps to earliestIndex 1695918, published at the original's instant", () => {
+    const chains = correctionChains([cusanOriginal(), cusanCorrection()]);
+    expect([...chains.keys()]).toEqual([1697403]);
+    expect(chains.get(1697403)).toEqual({ earliestIndex: 1695918, earliestPublishedAt: "2026-11-09T17:34:56Z" });
+  });
+
+  it("ARZUM: '30.09.2026 Faaliyet Raporu' and 'ARZUM 30.09.2026 FAALİYET RAPORU' pair the same way (leading code, upper case, dotted İ)", () => {
+    const rows = arzumPair();
+    expect([...supersededIndexes(rows)]).toEqual([1696055]);
+    expect(correctionChains(rows).get(1697247)).toMatchObject({ earliestIndex: 1696055 });
+  });
+
+  it("the page-side wrappers see the same pair through filerCodes", () => {
+    const d = (over: Record<string, unknown>) => ({
+      disclosureIndex: 1695918,
+      publishedAt: "2026-11-09T17:34:56Z",
+      filerCodes: ["CUSAN"],
+      relatedCodes: [] as string[],
+      subject: "Faaliyet Raporu (Konsolide)",
+      summary: "30.09.2026 Faaliyet Raporu" as string | null,
+      year: "2026",
+      period: "3",
+      modifyStatus: null as string | null,
+      ...over,
+    });
+    const rows = [
+      d({}),
+      d({ disclosureIndex: 1697403, publishedAt: "2026-11-11T18:31:52Z", summary: "30.09.2026 Faaliyet Raporu (Düzeltme)", modifyStatus: "DUZENLENEN" }),
+    ];
+    const superseded = supersededDisclosureIndexes(rows);
+    expect([...superseded]).toEqual([1695918]);
+    expect(correctionTag(rows[0]!, superseded)).toBe("düzeltildi");
+    expect(correctionTag(rows[1]!, superseded)).toBe("düzeltme");
+    expect(disclosureCorrectionChains(rows).get(1697403)).toMatchObject({ earliestIndex: 1695918 });
+  });
+
+  it("the same pair with period '2' on one side does not pair", () => {
+    expect(supersededIndexes([cusanOriginal(), { ...cusanCorrection(), period: "2" }]).size).toBe(0);
+    expect(supersededIndexes([{ ...cusanOriginal(), period: "2" }, cusanCorrection()]).size).toBe(0);
+  });
+
+  it("a different year does not pair either, nor a different subject or issuer", () => {
+    expect(supersededIndexes([cusanOriginal(), { ...cusanCorrection(), year: "2025" }]).size).toBe(0);
+    expect(supersededIndexes([cusanOriginal(), { ...cusanCorrection(), subject: "Finansal Rapor" }]).size).toBe(0);
+    expect(supersededIndexes([cusanOriginal(), { ...cusanCorrection(), stock_codes: ["ARZUM"] }]).size).toBe(0);
+  });
+
+  it("a daily twin (year and period null) whose summaries differ only by ' (Düzeltme)' still does NOT pair: the strict rule is kept", () => {
+    const daily = (over: Record<string, unknown>) =>
+      filing({
+        stock_codes: ["TABGD"],
+        subject: "Pay Geri Alım İşlemleri",
+        summary: "Pay Geri Alım İşlemleri",
+        year: null,
+        period: null,
+        ...over,
+      });
+    const rows = [
+      daily({ disclosure_index: 10, published_at: "2026-11-09T17:00:00Z" }),
+      daily({
+        disclosure_index: 11,
+        published_at: "2026-11-10T17:00:00Z",
+        summary: "Pay Geri Alım İşlemleri (Düzeltme)",
+        modify_status: "DUZENLENEN",
+      }),
+    ];
+    expect(supersededIndexes(rows).size).toBe(0);
+    expect(correctionChains(rows).size).toBe(0);
+  });
+
+  it("year set but period null (or the other way round) keeps the exact rule too", () => {
+    const retitled = { summary: "30.09.2026 Faaliyet Raporu (Düzeltme)" };
+    expect(supersededIndexes([{ ...cusanOriginal(), period: null }, { ...cusanCorrection(), ...retitled, period: null }]).size).toBe(0);
+    expect(supersededIndexes([{ ...cusanOriginal(), year: null }, { ...cusanCorrection(), ...retitled, year: null }]).size).toBe(0);
+    // ...and identical summaries still pair under the exact rule, as before.
+    const same = { summary: "30.09.2026 Faaliyet Raporu" };
+    expect([...supersededIndexes([{ ...cusanOriginal(), period: null }, { ...cusanCorrection(), ...same, period: null }])]).toEqual([1695918]);
+  });
+
+  it("different summaries that normalization does not make equal still do not pair (another quarter, another report)", () => {
+    const retitled = (summary: string) => ({ ...cusanCorrection(), summary });
+    expect(supersededIndexes([cusanOriginal(), retitled("30.06.2026 Faaliyet Raporu (Düzeltme)")]).size).toBe(0);
+    expect(supersededIndexes([cusanOriginal(), retitled("30.09.2026 Finansal Rapor (Düzeltme)")]).size).toBe(0);
+  });
+
+  describe("normalizeReportSummary rules, seen through the pairing", () => {
+    const pairs = (originalSummary: string | null, correctionSummary: string | null, codes: string[] = ["CUSAN"]) =>
+      supersededIndexes([
+        filing({ stock_codes: codes, summary: originalSummary }),
+        filing({
+          disclosure_index: 2,
+          published_at: "2026-11-11T18:31:52Z",
+          stock_codes: codes,
+          summary: correctionSummary,
+          modify_status: "DUZENLENEN",
+        }),
+      ]).size === 1;
+
+    it("lower-cases with Turkish rules: 'FAALİYET RAPORU' equals 'Faaliyet Raporu'", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "30.09.2026 FAALİYET RAPORU")).toBe(true);
+      expect(pairs("30.09.2026 FAALİYET RAPORU", "30.09.2026 Faaliyet Raporu")).toBe(true);
+    });
+
+    it("collapses runs of whitespace and trims the ends", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "  30.09.2026   Faaliyet\t Raporu \n")).toBe(true);
+    });
+
+    it("drops a leading token equal to one of the row's own codes, in any case", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "cusan 30.09.2026 Faaliyet Raporu")).toBe(true);
+      expect(pairs("30.09.2026 Faaliyet Raporu", "CUSAN 30.09.2026 Faaliyet Raporu")).toBe(true);
+      expect(pairs("30.09.2026 Faaliyet Raporu", "CUSAN 30.09.2026 Faaliyet Raporu", ["OTHER", "CUSAN"])).toBe(true);
+    });
+
+    it("drops the code on the original's side too, and from a summary that is only the code", () => {
+      expect(pairs("CUSAN 30.09.2026 Faaliyet Raporu", "30.09.2026 Faaliyet Raporu (Düzeltme)")).toBe(true);
+      expect(pairs("CUSAN", null)).toBe(true);
+    });
+
+    it("lower-cases a code with the Turkish dotless i, the same way as the text (ISCTR -> ısctr on both sides)", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "ISCTR 30.09.2026 FAALİYET RAPORU", ["ISCTR"])).toBe(true);
+    });
+
+    it("does not drop a code that is not the leading token, or one that belongs to no code of the row", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "30.09.2026 Faaliyet Raporu CUSAN")).toBe(false);
+      expect(pairs("30.09.2026 Faaliyet Raporu", "ARZUM 30.09.2026 Faaliyet Raporu", ["CUSAN"])).toBe(false);
+    });
+
+    it("a leading token that only starts with a code is not the code (CUSANX)", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "CUSANX 30.09.2026 Faaliyet Raporu")).toBe(false);
+    });
+
+    it("drops one trailing '(Düzeltme)', '(Düzeltilmiş)' or '(Revize)', in any case", () => {
+      for (const tail of ["(Düzeltme)", "(DÜZELTME)", "(düzeltilmiş)", "(Düzeltilmiş)", "(Revize)", "(REVİZE)"]) {
+        expect(pairs("30.09.2026 Faaliyet Raporu", `30.09.2026 Faaliyet Raporu ${tail}`), tail).toBe(true);
+      }
+      // the original may carry the tag instead
+      expect(pairs("30.09.2026 Faaliyet Raporu (Düzeltme)", "30.09.2026 Faaliyet Raporu")).toBe(true);
+    });
+
+    it("drops only ONE trailing parenthetical, and only at the end, and only these three words", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "30.09.2026 Faaliyet Raporu (Düzeltme) (Düzeltme)")).toBe(false);
+      expect(pairs("30.09.2026 Faaliyet Raporu", "30.09.2026 (Düzeltme) Faaliyet Raporu")).toBe(false);
+      expect(pairs("30.09.2026 Faaliyet Raporu", "30.09.2026 Faaliyet Raporu (Ek)")).toBe(false);
+      expect(pairs("30.09.2026 Faaliyet Raporu", "30.09.2026 Faaliyet Raporu (Düzeltme")).toBe(false);
+    });
+
+    it("null, undefined and empty are all the empty summary on a periodic row", () => {
+      expect(pairs(null, "")).toBe(true);
+      expect(pairs("", null)).toBe(true);
+      expect(pairs(null, "   ")).toBe(true);
+      expect(pairs(null, "30.09.2026 Faaliyet Raporu")).toBe(false);
+      expect(pairs("30.09.2026 Faaliyet Raporu", null)).toBe(false);
+    });
+
+    it("the code and the tag both go: 'CUSAN 30.09.2026 FAALİYET RAPORU (DÜZELTME)'", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", "CUSAN 30.09.2026 FAALİYET RAPORU (DÜZELTME)")).toBe(true);
+    });
+
+    it("is linear in the summary length: spaces, open parentheses and repeated tags (a CPU-time ladder, no wall-clock budget)", () => {
+      expect(pairs("30.09.2026 Faaliyet Raporu", `${" ".repeat(1_000)}(düzeltme${"(".repeat(1_000)}`)).toBe(false);
+      for (const [unit, prefix, suffix] of [
+        [" ", "", "(düzeltme"],
+        ["(", "", ""],
+        [" (düzeltme", "", ""],
+        ["\t", "x", ""],
+      ] as const) {
+        expectLinear(rep(unit, prefix, suffix), (hostile) => pairs("30.09.2026 Faaliyet Raporu", hostile), { n: 200_000, ceilingMs: 4000 });
+      }
+    });
+  });
+
+  it("one-to-one is unchanged: a second correction claims the newest unclaimed original, a retitled one included", () => {
+    const first = cusanOriginal();
+    const second = filing({ disclosure_index: 1696000, published_at: "2026-11-10T10:00:00Z", summary: "30.09.2026 Faaliyet Raporu (Düzeltme)", modify_status: "DUZENLENEN" });
+    const third = filing({ disclosure_index: 1697403, published_at: "2026-11-11T18:31:52Z", summary: "30.09.2026 Faaliyet Raporu (Düzeltme)", modify_status: "DUZENLENEN" });
+    const rows = [first, second, third];
+    // 1696000 claims 1695918; 1697403 then claims the newest unclaimed: 1696000. Chain 1695918 <- 1696000 <- 1697403.
+    expect([...supersededIndexes(rows)].sort((a, b) => a - b)).toEqual([1695918, 1696000]);
+    expect(correctionChains(rows).get(1697403)).toMatchObject({ earliestIndex: 1695918 });
+  });
+
+  it("two periodic filings of different companies in one list pair only within their own company", () => {
+    const rows = [cusanOriginal(), cusanCorrection(), ...arzumPair()];
+    expect([...supersededIndexes(rows)].sort((a, b) => a - b)).toEqual([1695918, 1696055]);
+  });
+
+  it("a periodic correction with no original in the list (ARENA 1684426) stays unpaired", () => {
+    const arena = filing({
+      disclosure_index: 1684426,
+      stock_codes: ["ARENA"],
+      published_at: "2026-10-21T10:00:00Z",
+      summary: "ARENA 30.09.2026 FAALİYET RAPORU (DÜZELTME)",
+      modify_status: "DUZENLENEN",
+    });
+    expect(supersededIndexes([arena, cusanOriginal()]).size).toBe(0);
+    expect(correctionChains([arena]).size).toBe(0);
   });
 });

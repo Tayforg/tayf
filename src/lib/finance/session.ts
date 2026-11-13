@@ -431,6 +431,14 @@ const SPARKLINE_POINTS = 5;
 const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * The band of migration 174's unit_break (bist_quote_stats): a close outside 0.75 .. 1.35 of the previous one is a unit
+ * change or a placeholder, not a trade, because BIST's daily band is +-10 percent. Both ends are inclusive of the band
+ * (a ratio of exactly 0.75 or 1.35 is a normal step).
+ */
+export const UNIT_BREAK_MIN = 0.75;
+export const UNIT_BREAK_MAX = 1.35;
+
+/**
  * The values for the header sparkline: quote.closes with the D-1 settled close put back (h120-finance-1).
  *
  * During a session Yahoo's 5d/1d array has no bar for the previous day (CITAS 2026-11-11 11:16 Istanbul: 5, 6 and
@@ -446,33 +454,61 @@ const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
  *  4. the stat day is before the session day, so it is a finished session and not today's own bar;
  *  5. no close already sits on the stat day;
  *  6. the stat day is later than every close day that is before the session day, so the insert keeps the order.
- * A new array is returned only when a value was inserted. Never throws, never mutates the quote.
+ * A new array is returned only when a value was inserted or the line was cut. Never throws, never mutates the quote.
+ *
+ * h176-ekonomi-2: whatever the path (the early returns and the catch included) the result is then cut at the LAST unit
+ * break, so the line never runs across one (cutAtLastUnitBreak): /ekonomi/DUNYH drew 109,10 / 109,10 / 109,10 / 14,83 /
+ * 16,31 (-86 %) beside "tavan +%9,98", the flat placeholder closes Yahoo carries for a share it did not trade. The D-1
+ * insertion above happens first, so the settled close is part of the line that gets cut.
  */
 export function sparklineCloses(quote: Quote, stat: QuoteStat | null | undefined): number[] {
   try {
-    const closes = quote.closes;
-    const days = quote.closeDays;
-    if (!stat || !Number.isFinite(stat.lastClose) || !(stat.lastClose > 0)) return closes;
-    if (!Array.isArray(days) || days.length !== closes.length) return closes;
-    if (typeof stat.lastDay !== "string") return closes;
-    const sessionDay = quoteSessionDay(quote.asOf);
-    if (sessionDay === null) return closes;
-    const statDay = dayKey(stat.lastDay);
-    if (!DAY_KEY_RE.test(statDay) || !(statDay < sessionDay)) return closes;
-
-    let insertAt = days.length;
-    for (let i = 0; i < days.length; i++) {
-      const d = days[i];
-      if (typeof d !== "string" || !DAY_KEY_RE.test(d)) return closes;
-      if (d === statDay) return closes;
-      if (d < sessionDay && d > statDay) return closes;
-      if (d >= sessionDay && insertAt === days.length) insertAt = i;
-    }
-
-    return [...closes.slice(0, insertAt), stat.lastClose, ...closes.slice(insertAt)].slice(-SPARKLINE_POINTS);
+    return cutAtLastUnitBreak(withSettledClose(quote, stat));
   } catch {
-    return Array.isArray(quote?.closes) ? quote.closes : [];
+    return cutAtLastUnitBreak(Array.isArray(quote?.closes) ? quote.closes : []);
   }
+}
+
+/**
+ * The closes after the LAST neighbour step whose ratio is outside UNIT_BREAK_MIN .. UNIT_BREAK_MAX; the same array when
+ * there is no such step. A step is a ratio only between two finite closes with a positive previous one (174 divides by
+ * lag(close) only when it is above 0). A break at the last point leaves that one point, and <Sparkline> draws nothing for
+ * fewer than 2 values. Never throws, never mutates.
+ */
+function cutAtLastUnitBreak(closes: number[]): number[] {
+  for (let i = closes.length - 1; i >= 1; i--) {
+    const prev = closes[i - 1];
+    const cur = closes[i];
+    if (typeof prev !== "number" || typeof cur !== "number") continue;
+    if (!Number.isFinite(prev) || !Number.isFinite(cur) || !(prev > 0)) continue;
+    const ratio = cur / prev;
+    if (ratio < UNIT_BREAK_MIN || ratio > UNIT_BREAK_MAX) return closes.slice(i);
+  }
+  return closes;
+}
+
+/** sparklineCloses before the cut: quote.closes with the D-1 settled close put back (see its comment for the six conditions). */
+function withSettledClose(quote: Quote, stat: QuoteStat | null | undefined): number[] {
+  const closes = quote.closes;
+  const days = quote.closeDays;
+  if (!stat || !Number.isFinite(stat.lastClose) || !(stat.lastClose > 0)) return closes;
+  if (!Array.isArray(days) || days.length !== closes.length) return closes;
+  if (typeof stat.lastDay !== "string") return closes;
+  const sessionDay = quoteSessionDay(quote.asOf);
+  if (sessionDay === null) return closes;
+  const statDay = dayKey(stat.lastDay);
+  if (!DAY_KEY_RE.test(statDay) || !(statDay < sessionDay)) return closes;
+
+  let insertAt = days.length;
+  for (let i = 0; i < days.length; i++) {
+    const d = days[i];
+    if (typeof d !== "string" || !DAY_KEY_RE.test(d)) return closes;
+    if (d === statDay) return closes;
+    if (d < sessionDay && d > statDay) return closes;
+    if (d >= sessionDay && insertAt === days.length) insertAt = i;
+  }
+
+  return [...closes.slice(0, insertAt), stat.lastClose, ...closes.slice(insertAt)].slice(-SPARKLINE_POINTS);
 }
 
 /**

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { parsePickupParams, toV1PickupBody } from "@/lib/api/v1-kap-pickup";
+import { TICKER_RELEVANCE_MIN } from "@/lib/finance/kap-pickup";
 import type { TickerPickup } from "@/lib/finance/kap-pickup-query";
 
 // ---------------------------------------------------------------------------
@@ -344,6 +345,24 @@ function tickerPickup(overrides: Partial<TickerPickup> = {}): TickerPickup {
     ...overrides,
   };
 }
+
+// h176-ekonomi-1: the wire body names the cut-off the query filtered on. It was a literal 0.2 beside the
+// constant, so raising the gate to 0.35 would have left the response claiming the old line.
+describe("toV1PickupBody: relevance_filter.min_prob follows the gate (h176-ekonomi-1)", () => {
+  it("reports TICKER_RELEVANCE_MIN (0.35), not a copy of an older line", () => {
+    const body = toV1PickupBody(tickerPickup());
+    expect(TICKER_RELEVANCE_MIN).toBe(0.35);
+    expect(body.relevance_filter).toEqual({ task: "ticker_relevance", min_prob: TICKER_RELEVANCE_MIN, applied: true });
+  });
+
+  it("keeps `applied` independent of the line", () => {
+    expect(toV1PickupBody(tickerPickup({ relevanceApplied: false })).relevance_filter).toEqual({
+      task: "ticker_relevance",
+      min_prob: 0.35,
+      applied: false,
+    });
+  });
+});
 
 describe("toV1PickupBody: capped and total_disclosures", () => {
   it("maps capped: true when the disclosure list reached its limit", () => {

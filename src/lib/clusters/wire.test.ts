@@ -16,6 +16,7 @@ import {
   SAME_DESCRIPTION_MIN_CHARS,
   SAME_HEADLINE_MIN_CHARS,
   SAME_HEADLINE_MIN_TOKENS,
+  WIRE_MIN_MEMBERS,
   WIRE_UNIQUE_HASH_RATIO,
 } from "./wire";
 
@@ -70,6 +71,40 @@ describe("detectWireRedistribution", () => {
     const result = detectWireRedistribution(members([null, null, null, "h", "h"]));
     expect(result.uniqueHashes).toBe(4);
     expect(result.isWire).toBe(false);
+  });
+});
+
+// h176-methodtruth-1: /metodoloji's "Tek kaynaktan dağıtım" card says "En az
+// ${WIRE_MIN_MEMBERS} haberi olan kümelerde ... daha küçük kümeler işaretlenmez". The
+// number is the exported constant, and these pin that the code agrees with the card.
+describe("WIRE_MIN_MEMBERS: the smallest cluster that can be a wire redistribution", () => {
+  it("is 3, the number /metodoloji prints", () => {
+    expect(WIRE_MIN_MEMBERS).toBe(3);
+  });
+
+  it("WIRE_MIN_MEMBERS - 1 members with the same hash are not a wire (and read as that many texts)", () => {
+    const below = members(Array<string>(WIRE_MIN_MEMBERS - 1).fill("h"));
+    expect(below).toHaveLength(WIRE_MIN_MEMBERS - 1);
+    expect(detectWireRedistribution(below)).toEqual({
+      isWire: false,
+      uniqueHashes: WIRE_MIN_MEMBERS - 1,
+    });
+    // The source count is not lowered either: the effective count is the member count.
+    expect(wireSignalOf(below)).toMatchObject({
+      isWireRedistribution: false,
+      effectiveArticleCount: WIRE_MIN_MEMBERS - 1,
+    });
+  });
+
+  it("exactly WIRE_MIN_MEMBERS members with the same hash are a wire (the floor is inclusive)", () => {
+    const at = members(Array<string>(WIRE_MIN_MEMBERS).fill("h"));
+    expect(detectWireRedistribution(at)).toEqual({ isWire: true, uniqueHashes: 1 });
+  });
+
+  it("the floor is read from the member count, not from the number of distinct hashes", () => {
+    // 2 members, 1 distinct hash: ratio 0.5 would be wire if the floor did not stop it.
+    expect(1 / (WIRE_MIN_MEMBERS - 1)).toBeLessThanOrEqual(WIRE_UNIQUE_HASH_RATIO);
+    expect(detectWireRedistribution(members(["h", "h"])).isWire).toBe(false);
   });
 });
 

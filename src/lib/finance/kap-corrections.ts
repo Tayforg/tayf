@@ -1,7 +1,8 @@
 // Which KAP disclosures a later correction has replaced.
 //
 // h108-kapdisclosures-3: KAP files a correction as a NEW disclosure, with
-// modify_status DUZENLENEN, the same issuer, subject, summary, year and period as the
+// modify_status DUZENLENEN, the same issuer, subject, summary (normalized for periodic reports;
+// see h176-ekonomi-3 below), year and period as the
 // notice it replaces (OTTO 1694030 -> 1694331, ATEKS 1695283 -> 1696599, TTKOM
 // 1692808 -> 1694263). The original is flagged DUZELTILEN only when the daily replay
 // happened to cover it (3 of 30 in 30 days), so the pair read as the same filing twice
@@ -16,6 +17,17 @@
 //     null = none), subject, summary (null equals null), year and period. The subject must
 //     be present: two rows without one say nothing.
 //     A correction of a correction chains: 1 <- 2 <- 3 supersedes 1 and 2.
+//
+// h176-ekonomi-3: the summary comparison is exact only for a row without a report period. When
+// year AND period are both set (a periodic report: they are already required equal, so they are
+// set on both rows) the summaries are compared after normalizeReportSummary, because KAP retitles
+// the summary of such a correction: CUSAN 1695918 (11-09, '30.09.2026 Faaliyet Raporu') and its
+// correction 1697403 (11-11, DUZENLENEN, '30.09.2026 Faaliyet Raporu (Düzeltme)'); ARZUM 1696055
+// ('30.09.2026 Faaliyet Raporu') and 1697247 ('ARZUM 30.09.2026 FAALİYET RAPORU'). Under the exact
+// rule both stayed unpaired: the original got no 'düzeltildi' tag and the correction counted as a
+// second notice and a second event (/ekonomi/CUSAN read 'bildirim 4 olay 2' for 3 and 1). A daily
+// twin (year and period null: TABGD's 'Pay Geri Alım İşlemleri') keeps the strict rule: its summary
+// repeats every day, and a '(Düzeltme)' on it does not make the day before it the same filing.
 //
 // Why one-to-one: a daily notice has the same subject and summary every day (TABGD's "Pay
 // Geri Alım İşlemleri": eight rows in ten days, year and period null), so a rule that let
@@ -63,13 +75,47 @@ function sameCodeSet(a: readonly string[] | null | undefined, b: readonly string
   return true;
 }
 
+/** The one trailing tag a periodic correction may add to its summary. Anchored at the end, no nested quantifier: linear. */
+const CORRECTION_TAIL_RE = /\((düzeltme|düzeltilmiş|revize)\)$/;
+
+/**
+ * A periodic report's summary with what a correction may change removed, so the original's and the correction's compare
+ * equal: null or empty is ''; lower-cased with Turkish rules (İ -> i, I -> ı, both sides alike); whitespace collapsed and
+ * trimmed; a LEADING token equal to one of the row's own stock_codes (lower-cased the same way) dropped; one trailing
+ * '(düzeltme)', '(düzeltilmiş)' or '(revize)' dropped; trimmed again. Only used when the row has a year and a period.
+ */
+function normalizeReportSummary(summary: string | null | undefined, codes: readonly string[] | null | undefined): string {
+  if (summary == null || summary === "") return "";
+  let out = summary.toLocaleLowerCase("tr-TR").split(/\s+/).filter((word) => word !== "").join(" ");
+  if (out !== "") {
+    const space = out.indexOf(" ");
+    const first = space === -1 ? out : out.slice(0, space);
+    if ((codes ?? []).some((code) => code !== "" && code.toLocaleLowerCase("tr-TR") === first)) {
+      out = space === -1 ? "" : out.slice(space + 1);
+    }
+  }
+  return out.replace(CORRECTION_TAIL_RE, "").trim();
+}
+
+function sameSummary(original: CorrectionRow, correction: CorrectionRow): boolean {
+  // Year and period are equal on both rows by the time this runs; both set means a periodic report.
+  if (text(original.year) === null || text(original.period) === null) {
+    return (original.summary ?? null) === (correction.summary ?? null);
+  }
+  return (
+    normalizeReportSummary(original.summary, original.stock_codes) ===
+    normalizeReportSummary(correction.summary, correction.stock_codes)
+  );
+}
+
 function sameFiling(original: CorrectionRow, correction: CorrectionRow): boolean {
   if (original.subject == null || original.subject !== correction.subject) return false;
-  if ((original.summary ?? null) !== (correction.summary ?? null)) return false;
   if (text(original.year) !== text(correction.year) || text(original.period) !== text(correction.period)) return false;
   if (!sameCodeSet(original.related_stocks, correction.related_stocks)) return false;
   const codes = original.stock_codes ?? [];
-  return (correction.stock_codes ?? []).some((c) => codes.includes(c));
+  if (!(correction.stock_codes ?? []).some((c) => codes.includes(c))) return false;
+  // Last, and so only for a pair that matches on everything cheaper: it is the one that allocates.
+  return sameSummary(original, correction);
 }
 
 /**

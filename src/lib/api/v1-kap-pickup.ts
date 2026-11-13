@@ -1,5 +1,5 @@
 import { parseIsoInstant, parseLimit } from "@/lib/api/v1-clusters";
-import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
+import { PICKUP_WINDOW_HOURS, TICKER_RELEVANCE_MIN } from "@/lib/finance/kap-pickup";
 import type { TickerPickup } from "@/lib/finance/kap-pickup-query";
 
 /**
@@ -139,7 +139,7 @@ export function toV1PickupBody(r: TickerPickup, pressCode: string | null = null)
     window_hours: PICKUP_WINDOW_HOURS,
     since: r.since,
     until: r.until,
-    relevance_filter: { task: "ticker_relevance", min_prob: 0.2, applied: r.relevanceApplied },
+    relevance_filter: { task: "ticker_relevance", min_prob: TICKER_RELEVANCE_MIN, applied: r.relevanceApplied },
     truncated: r.truncated,
     capped: r.capped,
     total_disclosures: r.totalDisclosures,

@@ -57,6 +57,35 @@ function text(k: SourceKarneRead | null, slug = "sozcu", kind?: SourceKind | nul
     .replace(/\s+/g, " ");
 }
 
+type Node = { props?: { href?: unknown; children?: unknown } };
+
+/** The text of every string or number child below `node`, joined. */
+function textOf(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (node && typeof node === "object") return textOf((node as Node).props?.children);
+  return "";
+}
+
+/** The first element (depth-first) with an href whose text is `label`, or null. */
+function findLink(node: unknown, label: string): { href: string } | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findLink(child, label);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as Node;
+    if (typeof el.props?.href === "string" && textOf(el.props.children) === label) {
+      return { href: el.props.href };
+    }
+    if (el.props?.children !== undefined) return findLink(el.props.children, label);
+  }
+  return null;
+}
+
 describe("SourceKarneCard", () => {
   it("renders nothing for a null karne", () => {
     expect(html(null)).toBe("");
@@ -136,10 +165,20 @@ describe("SourceKarneCard", () => {
   it("has the right links and encodes the dispute slug", () => {
     const h = html(karne(), "a b&c/ü");
     expect(h).toContain('href="/blindspots"');
-    expect(h).toContain('href="/metodoloji#kaynaklar"');
+    // h176-methodtruth-1: the help link goes to the karne's own definition on /metodoloji,
+    // not to #kaynaklar (that section defines only the bias categories and zones).
+    expect(h).toContain('href="/metodoloji#kapsama-karnesi"');
+    expect(h).not.toContain('href="/metodoloji#kaynaklar"');
     expect(h).toContain(
       `href="/metodoloji?source=${encodeURIComponent("a b&c/ü").replace(/&/g, "&amp;")}#duzeltme"`,
     );
+  });
+
+  it("'Nasıl hesaplanıyor?' is a link whose href is exactly /metodoloji#kapsama-karnesi (h176-methodtruth-1)", () => {
+    const tree = SourceKarneCard({ karne: karne(), slug: "sozcu" });
+    const link = findLink(tree, "Nasıl hesaplanıyor?");
+    expect(link).not.toBeNull();
+    expect(link?.href).toBe("/metodoloji#kapsama-karnesi");
   });
 
   it("omits the same-side clause when there are no blindspots", () => {
