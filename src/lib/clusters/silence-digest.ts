@@ -233,3 +233,36 @@ export function blindspotUnlistedLine(n: number): string | null {
   if (!(n > 0)) return null;
   return `Bu dönemde kör nokta etiketi taşıyan ${formatCountTr(n)} haber daha burada listelenmiyor: liste kuralları (aynı metnin kopyası, arama açıklaması başlığı, ağırlıkla Dünya ya da politika dışı haber) ya da güncel kaynak sayımı nedeniyle.`;
 }
+
+/**
+ * h174-silentfail-1: the line for the claims the feed-health gate withdrew
+ * (`BlindspotsData.healthWithdrawn`):
+ *
+ *   "Muhalefet kaynaklarının akışı şu an sorunlu olduğu için 40 kör nokta geçici
+ *    olarak gösterilmiyor."
+ *
+ * A claim names the zone that DID cover the story; the gate withholds it when the
+ * OPPOSITE pole's feeds are too broken for its silence to mean anything
+ * (feed-health.ts `shouldSuppressBlindspot`), so `zones` are those silent,
+ * degraded poles. Both read "İktidar ve Muhalefet kaynaklarının ...". Same
+ * wording as the story timeline ("akışı şu an sorunlu"). Without it the list and
+ * its İktidar / Muhalefet counts shrank with no notice, and an empty list said
+ * "dengeli dağılmış". Word order keeps Turkish case suffixes off the number
+ * ("40 kör nokta", never "40'ı"). Claims were withdrawn but no zone is named
+ * (cannot happen with the real gate): "Bazı kaynakların ...", no zone invented.
+ *
+ * `null` for nothing withdrawn: a count that is not above zero, including NaN,
+ * and a payload cached before the field existed (`undefined`), so the page
+ * renders exactly what it did before.
+ */
+export function blindspotHealthWithdrawnLine(
+  w: { count: number; zones: readonly MediaDnaZone[] } | null | undefined,
+): string | null {
+  if (!w || !(w.count > 0)) return null;
+  // Array.isArray narrows a readonly array to any[]; the annotation puts the type back.
+  const zones: readonly MediaDnaZone[] = Array.isArray(w.zones) ? w.zones : [];
+  const labels = zones.map((zone) => ZONE_META[zone].label);
+  const subject =
+    labels.length > 0 ? `${labels.join(" ve ")} kaynaklarının` : "Bazı kaynakların";
+  return `${subject} akışı şu an sorunlu olduğu için ${formatCountTr(w.count)} kör nokta geçici olarak gösterilmiyor.`;
+}

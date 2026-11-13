@@ -4,6 +4,7 @@ import * as silenceModule from "./silence-digest";
 import {
   ZONE_ROW_ORDER,
   blindspotCountLine,
+  blindspotHealthWithdrawnLine,
   blindspotUnlistedLine,
   buildSilenceDigest,
   capitalizeTr,
@@ -552,6 +553,83 @@ describe("blindspotUnlistedLine (h130-blindspots-1)", () => {
 
   it("never says görmezden, sustu or gizledi, and never says 'X tarafında N'", () => {
     const line = blindspotUnlistedLine(4) ?? "";
+    expect(line).not.toContain("görmezden");
+    expect(line).not.toContain("sustu");
+    expect(line).not.toContain("gizledi");
+    expect(line).not.toContain("tarafında");
+  });
+});
+
+// h174-silentfail-1: when the feed-health gate withdraws claims (the OPPOSITE pole's
+// feeds are too broken for its silence to mean anything), the /blindspots list and
+// its İktidar/Muhalefet counts shrink with no notice, and an empty list asserts
+// "dengeli dağılmış". This is the one sentence that names the withdrawal; the
+// story timeline already says "akışı şu an sorunlu" for the same condition.
+describe("blindspotHealthWithdrawnLine (h174-silentfail-1)", () => {
+  it("is null for undefined (a payload cached before the field existed), null, a zero count and a count that is not a number", () => {
+    expect(blindspotHealthWithdrawnLine(undefined)).toBeNull();
+    expect(blindspotHealthWithdrawnLine(null)).toBeNull();
+    expect(blindspotHealthWithdrawnLine({ count: 0, zones: [] })).toBeNull();
+    // Even with a zone named: nothing was withdrawn, so nothing is said.
+    expect(blindspotHealthWithdrawnLine({ count: 0, zones: ["muhalefet"] })).toBeNull();
+    expect(blindspotHealthWithdrawnLine({ count: -2, zones: ["muhalefet"] })).toBeNull();
+    expect(blindspotHealthWithdrawnLine({ count: Number.NaN, zones: ["muhalefet"] })).toBeNull();
+    expect(
+      blindspotHealthWithdrawnLine({
+        count: undefined as unknown as number,
+        zones: ["muhalefet"],
+      }),
+    ).toBeNull();
+  });
+
+  it("names the one degraded pole and the count of withdrawn claims", () => {
+    expect(blindspotHealthWithdrawnLine({ count: 40, zones: ["muhalefet"] })).toBe(
+      "Muhalefet kaynaklarının akışı şu an sorunlu olduğu için 40 kör nokta geçici olarak gösterilmiyor.",
+    );
+    expect(blindspotHealthWithdrawnLine({ count: 3, zones: ["iktidar"] })).toBe(
+      "İktidar kaynaklarının akışı şu an sorunlu olduğu için 3 kör nokta geçici olarak gösterilmiyor.",
+    );
+  });
+
+  it("reads 'İktidar ve Muhalefet kaynaklarının ...' when both poles are degraded", () => {
+    expect(
+      blindspotHealthWithdrawnLine({ count: 12, zones: ["iktidar", "muhalefet"] }),
+    ).toBe(
+      "İktidar ve Muhalefet kaynaklarının akışı şu an sorunlu olduğu için 12 kör nokta geçici olarak gösterilmiyor.",
+    );
+  });
+
+  it("still speaks, without inventing a zone, when claims were withdrawn but no zone is named", () => {
+    const line = blindspotHealthWithdrawnLine({ count: 5, zones: [] });
+
+    expect(line).toBe(
+      "Bazı kaynakların akışı şu an sorunlu olduğu için 5 kör nokta geçici olarak gösterilmiyor.",
+    );
+    expect(
+      blindspotHealthWithdrawnLine({ count: 5, zones: undefined as unknown as [] }),
+    ).toBe(line);
+  });
+
+  it("groups thousands the Turkish way (formatCountTr)", () => {
+    expect(blindspotHealthWithdrawnLine({ count: 1234, zones: ["muhalefet"] })).toContain(
+      " 1.234 kör nokta geçici olarak",
+    );
+  });
+
+  it("puts no Turkish case suffix on the number (no 'N'ü', 'N'i', 'N kör noktayı')", () => {
+    for (const count of [1, 4, 12, 40, 1234]) {
+      for (const zones of [["muhalefet"], ["iktidar", "muhalefet"]] as MediaDnaZone[][]) {
+        const line = blindspotHealthWithdrawnLine({ count, zones }) ?? "";
+        // The digit run is followed by a space, never by an apostrophe or a letter.
+        expect(line).not.toMatch(/\d['’]/);
+        expect(line).not.toMatch(/\d[a-zçğıöşüâîû]/i);
+        expect(line).toContain(" kör nokta geçici olarak gösterilmiyor.");
+      }
+    }
+  });
+
+  it("never says görmezden, sustu or gizledi, and never says 'X tarafında N'", () => {
+    const line = blindspotHealthWithdrawnLine({ count: 40, zones: ["muhalefet"] }) ?? "";
     expect(line).not.toContain("görmezden");
     expect(line).not.toContain("sustu");
     expect(line).not.toContain("gizledi");

@@ -151,6 +151,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
     quarantined,
     feedFrozen: feedFrozenVerdict,
     newestFeedItemAt,
+    windowOverflowRecent,
   } = profile;
 
   // h47-sources-1: a profile used to look the same whether the source is still
@@ -317,10 +318,13 @@ export default async function SourceProfilePage({ params }: PageProps) {
 
       <SourceKarneCard karne={sourceKarne} slug={source.slug} kind={source.kind} />
 
+      {/* Migration 212: the feed window overflowed in the last 7 days (decided by
+          the profile read, no clock here), so the daily rate is a floor. */}
       <SourceReliabilityCard
         reliability={sourceReliability}
         karne={sourceKarne}
         slug={source.slug}
+        windowOverflowRecent={windowOverflowRecent === true}
       />
 
       {karne ? (

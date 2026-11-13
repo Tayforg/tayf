@@ -849,6 +849,87 @@ describe("buildReliabilityView", () => {
       expect((r.value === null) !== (r.note === null)).toBe(true);
     }
   });
+
+  // migration 212 (h174-latency-1): a feed that holds only its newest N items
+  // and lost some of them inside the last 7 days publishes MORE than Tayf
+  // stored, so the daily rate is a floor, not a measurement. The one row that
+  // counts articles says so; with the flag off nothing changes.
+  describe("Yayın sıklığı: the feed window overflowed in the last 7 days (migration 212)", () => {
+    const NOTE =
+      "Bu kaynağın RSS akışı her seferinde yalnızca son haberleri veriyor ve son 7 günde bu sınır aşıldı; bazı haberleri Tayf'a ulaşmadı, bu yüzden sayı en az değerdir.";
+    const cadenceOf = (rows: ReturnType<typeof buildReliabilityView>) => rows.find((r) => r.key === "cadence")!;
+
+    it("true: the value is prefixed with 'en az ' and the row carries the note", () => {
+      const row = cadenceOf(buildReliabilityView(rel(), karneRow(), { windowOverflowRecent: true }));
+      expect(row.value).toBe("en az 20 haber/gün · 30/30 gün yayın");
+      expect(row.note).toBe(NOTE);
+    });
+
+    it("true: haberport's real shape (518,4 a day) reads 'en az 518,4 haber/gün · 30/31 gün yayın'", () => {
+      const row = cadenceOf(
+        buildReliabilityView(
+          rel({
+            nArticles: 15552,
+            activeDays: 30,
+            windowStart: "2026-10-06T15:00:00Z",
+            windowEnd: "2026-11-05T15:00:00Z",
+          }),
+          null,
+          { windowOverflowRecent: true },
+        ),
+      );
+      expect(row.value).toBe("en az 518,4 haber/gün · 30/31 gün yayın");
+    });
+
+    it("false: the output is identical to the call without the option, value, note and how", () => {
+      const plain = buildReliabilityView(rel(), karneRow());
+      expect(buildReliabilityView(rel(), karneRow(), { windowOverflowRecent: false })).toEqual(plain);
+      expect(buildReliabilityView(rel(), karneRow(), {})).toEqual(plain);
+      expect(buildReliabilityView(rel(), karneRow(), undefined)).toEqual(plain);
+      const row = cadenceOf(plain);
+      expect(row.value).toBe("20 haber/gün · 30/30 gün yayın");
+      expect(row.note).toBeNull();
+    });
+
+    it("true changes the cadence row only: the other three rows are the same objects' content", () => {
+      const plain = buildReliabilityView(rel(), karneRow());
+      const flagged = buildReliabilityView(rel(), karneRow(), { windowOverflowRecent: true });
+      expect(flagged.map((r) => r.key)).toEqual(plain.map((r) => r.key));
+      expect(flagged.slice(1)).toEqual(plain.slice(1));
+      expect(cadenceOf(flagged).label).toBe(cadenceOf(plain).label);
+      expect(cadenceOf(flagged).how).toBe(cadenceOf(plain).how);
+      expect(cadenceOf(flagged).basis).toBeNull();
+    });
+
+    it("true with the tiny-rate floor: 'en az <0,1 haber/gün ...' (a floor of a floor is still a floor)", () => {
+      const row = cadenceOf(buildReliabilityView(rel({ nArticles: 1, activeDays: 1 }), null, { windowOverflowRecent: true }));
+      expect(row.value).toBe("en az <0,1 haber/gün · 1/30 gün yayın");
+    });
+
+    it("true with no articles in the window: nothing to floor, so the 'no articles' line and no note", () => {
+      const row = cadenceOf(
+        buildReliabilityView(rel({ nArticles: 0, activeDays: 0, nClusters: 0, nWireCopy: 0 }), null, {
+          windowOverflowRecent: true,
+        }),
+      );
+      expect(row.value).toBe("Son 30 günde haber yok");
+      expect(row.note).toBeNull();
+    });
+
+    it("a truthy non-boolean is not the flag: only `true` prefixes", () => {
+      for (const v of [1, "true", {}, [] as unknown]) {
+        const rows = buildReliabilityView(rel(), karneRow(), { windowOverflowRecent: v as boolean });
+        expect(cadenceOf(rows).value, String(v)).toBe("20 haber/gün · 30/30 gün yayın");
+      }
+    });
+
+    it("the note is one sentence in Turkish that says why the number is a floor, and names no url or time", () => {
+      expect(NOTE).toContain("en az değerdir");
+      expect(NOTE).toContain("son 7 günde");
+      const row = cadenceOf(buildReliabilityView(rel(), karneRow(), { windowOverflowRecent: true }));
+      expect(row.note).not.toContain("http");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

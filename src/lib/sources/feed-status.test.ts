@@ -40,6 +40,9 @@ const fixture = vi.hoisted(() => ({
   // answers a select naming fetch_items_count with Postgres 42703 (column missing)
   selects: [] as string[],
   failNewColumns: false,
+  // migration 212: answers a select naming fetch_window_overflow_at with 42703 for THAT
+  // column only (119 applied, 212 not yet)
+  failOverflowColumn: false,
   retryError: null as { message: string; code?: string } | null,
   // a query that throws (client blew up) instead of answering with an error
   throwOnQuery: false,
@@ -90,6 +93,15 @@ const supabaseFake = await vi.hoisted(async () => {
         );
         fixture.selects.push(select);
         if (fixture.throwOnQuery) throw new Error("connection reset");
+        if (fixture.failOverflowColumn && select.includes("fetch_window_overflow_at")) {
+          return {
+            data: null,
+            error: {
+              message: "column sources.fetch_window_overflow_at does not exist",
+              code: "42703",
+            },
+          };
+        }
         if (fixture.failNewColumns && select.includes("fetch_items_count")) {
           return {
             data: null,
@@ -125,6 +137,8 @@ vi.mock("@supabase/supabase-js", () => ({
 
 import {
   isRowQuarantined,
+  isWindowOverflowRecent,
+  WINDOW_OVERFLOW_RECENT_MS,
   toFeedStatusRows,
   toItemsPerDayMap,
   toItemsPerDayMapFromRpc,
@@ -176,6 +190,7 @@ beforeEach(() => {
   fixture.lastState = null;
   fixture.selects = [];
   fixture.failNewColumns = false;
+  fixture.failOverflowColumn = false;
   fixture.retryError = null;
   fixture.throwOnQuery = false;
   fixture.rpcRows = [];
@@ -492,6 +507,75 @@ describe("toFeedStatusRows silenceReason [migration 119]", () => {
   });
 });
 
+describe("windowOverflowRecent [migration 212]", () => {
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+  const flagOf = (overrides: Partial<SourceFeedStatusRawRow>) => {
+    const [row] = toFeedStatusRows([rawRow(overrides)], NOW);
+    return row!.windowOverflowRecent;
+  };
+
+  it("WINDOW_OVERFLOW_RECENT_MS is 7 days", () => {
+    expect(WINDOW_OVERFLOW_RECENT_MS).toBe(7 * DAY);
+  });
+
+  it("true when ingest saw the window overflow within the last 7 days, for a source that is delivering (haberport is never silent)", () => {
+    const [row] = toFeedStatusRows(
+      [rawRow({ fetch_window_overflow_at: new Date(NOW - 3 * HOUR).toISOString() })],
+      NOW,
+    );
+    expect(row!.silent).toBe(false);
+    expect(row!.windowOverflowRecent).toBe(true);
+  });
+
+  it("the boundary: exactly 7 days is still recent, 7 days + 1 ms is not", () => {
+    expect(flagOf({ fetch_window_overflow_at: new Date(NOW - 7 * DAY).toISOString() })).toBe(true);
+    expect(flagOf({ fetch_window_overflow_at: new Date(NOW - 7 * DAY - 1).toISOString() })).toBe(false);
+  });
+
+  it("false for a column that is null, absent, empty or not a date (never throws)", () => {
+    expect(flagOf({ fetch_window_overflow_at: null })).toBe(false);
+    expect(flagOf({})).toBe(false);
+    expect(flagOf({ fetch_window_overflow_at: "" })).toBe(false);
+    expect(flagOf({ fetch_window_overflow_at: "bugün" })).toBe(false);
+    expect(flagOf({ fetch_window_overflow_at: "0000-00-00" })).toBe(false);
+  });
+
+  it("a stamp a few minutes ahead of this server's clock (skew between the edge runtime and the page) is still recent", () => {
+    expect(flagOf({ fetch_window_overflow_at: new Date(NOW + 2 * 60 * 1000).toISOString() })).toBe(true);
+  });
+
+  it("isWindowOverflowRecent is the same rule on its own: null, undefined and junk are false", () => {
+    expect(isWindowOverflowRecent(new Date(NOW - HOUR).toISOString(), NOW)).toBe(true);
+    expect(isWindowOverflowRecent(null, NOW)).toBe(false);
+    expect(isWindowOverflowRecent(undefined, NOW)).toBe(false);
+    expect(isWindowOverflowRecent("x", NOW)).toBe(false);
+    expect(isWindowOverflowRecent(new Date(NOW - HOUR).toISOString(), Number.NaN)).toBe(false);
+  });
+
+  it("never exposes the raw timestamp on the shaped row", () => {
+    const stamp = new Date(NOW - 5 * HOUR).toISOString();
+    const [row] = toFeedStatusRows([rawRow({ fetch_window_overflow_at: stamp })], NOW);
+    expect(Object.keys(row!)).not.toContain("fetch_window_overflow_at");
+    expect(JSON.stringify(row)).not.toContain(stamp);
+  });
+
+  it("is independent of the silence verdict: a silent, flagged source carries both", () => {
+    const [row] = toFeedStatusRows(
+      [
+        rawRow({
+          latest: [{ published_at: new Date(NOW - 96 * HOUR).toISOString() }],
+          fetch_window_overflow_at: new Date(NOW - 6 * DAY).toISOString(),
+        }),
+      ],
+      NOW,
+    );
+    expect(row!.silent).toBe(true);
+    expect(row!.silenceReason).toBe("sessiz");
+    expect(row!.windowOverflowRecent).toBe(true);
+  });
+});
+
 describe("toItemsPerDayMap", () => {
   function statsRow(overrides: Partial<ItemsPerDayRawRow> = {}): ItemsPerDayRawRow {
     return { slug: "ornek-kaynak", stats: [{ count: 14 }], ...overrides };
@@ -697,6 +781,54 @@ describe("getSourceFeedStatuses", () => {
     expect(fixture.selects).toHaveLength(1);
     expect(fixture.selects[0]).toContain("fetch_newest_item_at");
     expect(fixture.selects[0]).toContain("fetch_items_count");
+  });
+
+  it("migration 212: selects fetch_window_overflow_at too, with the 119 columns still in the same select", async () => {
+    await getSourceFeedStatuses();
+    expect(fixture.selects).toHaveLength(1);
+    expect(fixture.selects[0]).toContain("fetch_window_overflow_at");
+    expect(fixture.selects[0]).toContain("fetch_items_count");
+    expect(fixture.selects[0]).toContain("fetch_newest_item_at");
+  });
+
+  it("migration 212: end-to-end through the fake client, a flagged source carries windowOverflowRecent and an unflagged one does not", async () => {
+    fixture.data = [
+      rawRow({
+        slug: "haberport",
+        name: "Haberport",
+        fetch_window_overflow_at: new Date(Date.now() - 3_600_000).toISOString(),
+      }),
+      rawRow({ slug: "sakin", name: "Sakin", fetch_window_overflow_at: null }),
+    ];
+    const rows = await getSourceFeedStatuses();
+    expect(rows!.map((r) => [r.slug, r.windowOverflowRecent])).toEqual([
+      ["haberport", true],
+      ["sakin", false],
+    ]);
+  });
+
+  it("migration 212: when only the new column is missing (119 applied) it retries ONCE with 119's select, keeping the freshness columns", async () => {
+    fixture.failOverflowColumn = true;
+    fixture.data = [
+      rawRow({
+        latest: [{ published_at: new Date(Date.now() - 96 * 3_600_000).toISOString() }],
+        fetch_items_count: 5,
+        fetch_newest_item_at: new Date(Date.now() - 80 * 3_600_000).toISOString(),
+      }),
+    ];
+
+    const rows = await getSourceFeedStatuses();
+
+    expect(rows).not.toBeNull();
+    expect(fixture.selects).toHaveLength(2);
+    expect(fixture.selects[0]).toContain("fetch_window_overflow_at");
+    expect(fixture.selects[1]).not.toContain("fetch_window_overflow_at");
+    expect(fixture.selects[1]).toContain("fetch_items_count");
+    expect(fixture.selects[1]).toContain("fetch_newest_item_at");
+    expect(fixture.selects[1]).toContain("latest:articles(published_at)");
+    // 119's verdict survives the fallback, and nothing reads as flagged
+    expect(rows![0]!.silenceReason).toBe("akis_donmus");
+    expect(rows![0]!.windowOverflowRecent).toBe(false);
   });
 
   it("migration 119: maps the reasons end-to-end through the fake Supabase client", async () => {

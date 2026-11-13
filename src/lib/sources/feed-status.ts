@@ -88,6 +88,15 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 // retried once with the select that ran before 119, and every silent source
 // reads as reachable-and-current (`sessiz`) or `erişim yok` from its status.
 //
+// Migration 212 (feed window overflow): ingest stamps `fetch_window_overflow_at`
+// when a poll of a full-sized feed window finds none of its items stored (the feed
+// moved past the previous poll, so items were never offered). The row exposes only
+// `windowOverflowRecent`, true for 7 days after the stamp, whether or not the source
+// is silent: haberport delivers every hour, which is exactly why nothing else on the
+// status page shows the loss. A database with 119 but without 212 answers the select
+// with a 42703 that NAMES the new column; the query is then retried once with 119's
+// select, so the freshness verdicts survive and only the tag is missing.
+//
 // Fail-open discipline, and what a failure costs (2026-10-24 /sources '—'
 // incident): a `"use cache"` body must never throw (a throw there fails
 // `next build`'s prerender even when the caller catches), so each reader splits
@@ -120,6 +129,33 @@ export interface SourceFeedStatus {
   quarantined: boolean;
   /** Why the source is silent (migration 119); null when it is not silent. */
   silenceReason: SilenceReason | null;
+  /**
+   * Migration 212: ingest saw this feed's window overflow within the last 7 days
+   * (the feed shows only its newest items and more appeared between two polls),
+   * so some of its items never reached Tayf. Independent of `silent`.
+   */
+  windowOverflowRecent: boolean;
+}
+
+/** How long a feed window overflow stays "recent" (migration 212). */
+export const WINDOW_OVERFLOW_RECENT_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * True when `overflowAt` (sources.fetch_window_overflow_at) is a date within
+ * WINDOW_OVERFLOW_RECENT_MS before `nowMs`, the boundary included. A stamp ahead of
+ * `nowMs` (a few seconds of skew between the edge runtime that wrote it and the
+ * server that reads it) counts as recent. Null, undefined, an unparseable value or a
+ * non-finite `nowMs` is false. Pure: callers pass a `nowMs` stamped inside their own
+ * cache fill, this never reads the clock.
+ */
+export function isWindowOverflowRecent(
+  overflowAt: string | null | undefined,
+  nowMs: number,
+): boolean {
+  if (typeof overflowAt !== "string" || !Number.isFinite(nowMs)) return false;
+  const ms = Date.parse(overflowAt);
+  if (!Number.isFinite(ms)) return false;
+  return nowMs - ms <= WINDOW_OVERFLOW_RECENT_MS;
 }
 
 // Local 3-line quarantine check -- deliberately not imported from
@@ -148,6 +184,8 @@ export interface SourceFeedStatusRawRow {
   fetch_newest_item_at?: string | null;
   /** Migration 119: entries the feed held at its last parse (null = never measured). */
   fetch_items_count?: number | null;
+  /** Migration 212: last time a poll found the feed window overflowed (null = never). */
+  fetch_window_overflow_at?: string | null;
   latest?: Array<{ published_at: string }>;
 }
 
@@ -212,6 +250,7 @@ export function toFeedStatusRows(
             nowMs,
           )
         : null,
+      windowOverflowRecent: isWindowOverflowRecent(row.fetch_window_overflow_at, nowMs),
     });
   }
 
@@ -303,12 +342,16 @@ export function summariseFeedStatus(
   return { all, voting };
 }
 
-// The select that ran before migration 119, and the current one. The retry on
-// Postgres 42703 (undefined column) falls back to the legacy string.
+// The select that ran before migration 119, the one that ran before migration 212,
+// and the current one. The retry on Postgres 42703 (undefined column) falls back to
+// the select the missing column belongs to: an error naming fetch_window_overflow_at
+// (119 applied, 212 not) to the 119 select, any other to the legacy string.
 const FEED_STATUS_SELECT_LEGACY =
   "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, latest:articles(published_at)";
-const FEED_STATUS_SELECT =
+const FEED_STATUS_SELECT_119 =
   "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, fetch_newest_item_at, fetch_items_count, latest:articles(published_at)";
+const FEED_STATUS_SELECT =
+  "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, fetch_newest_item_at, fetch_items_count, fetch_window_overflow_at, latest:articles(published_at)";
 
 // Raw read: THROWS on a Supabase error so a failure can never be mistaken for
 // "no active sources". Runs inside `getSourceFeedStatusesCached`, so the clock
@@ -330,9 +373,14 @@ async function fetchSourceFeedStatuses(): Promise<SourceFeedStatus[]> {
 
   let { data, error } = await query(FEED_STATUS_SELECT);
   if (error?.code === "42703") {
-    // Migration 119 is not applied yet: one retry with the select that ran
-    // before it. Never a loop; a second error falls through to the throw.
-    ({ data, error } = await query(FEED_STATUS_SELECT_LEGACY));
+    // A column is missing, so one retry with the select that ran before it. When
+    // the error names the 212 column (119 is applied) the retry keeps 119's
+    // freshness columns; otherwise migration 119 is not applied yet and the retry
+    // is the legacy select. Never a loop; a second error falls through to the throw.
+    const olderSelect = (error.message ?? "").includes("fetch_window_overflow_at")
+      ? FEED_STATUS_SELECT_119
+      : FEED_STATUS_SELECT_LEGACY;
+    ({ data, error } = await query(olderSelect));
   }
 
   if (error) {

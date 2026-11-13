@@ -32,6 +32,7 @@ import {
   recallQualifiedZones,
 } from "@/lib/clusters/recall-matched-zones";
 import {
+  ZONE_ROW_ORDER,
   buildSilenceDigest,
   type SilenceDigest,
 } from "@/lib/clusters/silence-digest";
@@ -274,6 +275,20 @@ export interface BlindspotsData {
    * `blindspotUnlistedLine` treats that as 0.
    */
   unlistedCount: number;
+  /**
+   * h174-silentfail-1: the other half of the gate. `count` is how many embedded
+   * Step-A rows the feed-health gate withdrew (the very rows `unlistedCount`
+   * leaves out: dropped, with a stored `blindspot_side` that
+   * `shouldSuppressBlindspot` withholds), and `zones` are the silent poles whose
+   * degraded feeds caused it (`degradedSilentZone`), İktidar before Muhalefet.
+   * Without it the list and its İktidar / Muhalefet counts shrank with no notice
+   * and an empty list read "dengeli dağılmış". `{ count: 0, zones: [] }` when
+   * health is unknown or nothing was withdrawn. Display only: no flag, veto, count,
+   * share or list moves because of it, and `unlistedCount` is unchanged. A payload
+   * cached before this field existed lacks it, and `blindspotHealthWithdrawnLine`
+   * treats that as 0.
+   */
+  healthWithdrawn: { count: number; zones: MediaDnaZone[] };
   /** Claims per dominant zone over the whole window; sums to claimCount. */
   sideCounts: Record<MediaDnaZone, number>;
   /** "Bu listede kim yer vermedi?", counted over ALL claims, not the cards. */
@@ -571,6 +586,7 @@ async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
       more: [],
       claimCount: 0,
       unlistedCount: 0,
+      healthWithdrawn: { count: 0, zones: [] },
       sideCounts: zeroSideCounts(),
       digest: scopedDigest([], 0),
     };
@@ -599,11 +615,18 @@ async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
   // (summariseWeek), the cards and the story page drop these too, so they are
   // not "unlisted" (see BlindspotsData.unlistedCount).
   let suppressedDrops = 0;
+  // h174-silentfail-1: the silent poles behind those drops, so the page can say
+  // whose feeds withdrew them.
+  const withdrawnZones = new Set<MediaDnaZone>();
   for (const row of rows) {
     const bundle = toBlindspotBundle(row, health);
     if (!bundle) {
       const side = row.blindspot_side ? zoneOf(row.blindspot_side) : null;
-      if (side !== null && shouldSuppressBlindspot(side, health)) suppressedDrops++;
+      if (side !== null && shouldSuppressBlindspot(side, health)) {
+        suppressedDrops++;
+        const silentZone = health ? degradedSilentZone(side, health) : null;
+        if (silentZone !== null) withdrawnZones.add(silentZone);
+      }
       continue;
     }
     built.push(bundle);
@@ -634,6 +657,11 @@ async function fetchBlindspots(profile: ReadProfile): Promise<BlindspotsData> {
     // too. Rows above the safety cap never reach this point, so they are not
     // counted (see BlindspotsData.unlistedCount).
     unlistedCount: rows.length - built.length - suppressedDrops,
+    // The same rows, by count and by cause; ZONE_ROW_ORDER puts İktidar first.
+    healthWithdrawn: {
+      count: suppressedDrops,
+      zones: ZONE_ROW_ORDER.filter((zone) => withdrawnZones.has(zone)),
+    },
     sideCounts,
     digest: scopedDigest(claims, bundles.length),
   };

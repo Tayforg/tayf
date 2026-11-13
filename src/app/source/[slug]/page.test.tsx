@@ -40,6 +40,7 @@ vi.mock("@/lib/sources/clickbait", async (importOriginal) => {
 });
 
 import SourceProfilePage, { generateMetadata } from "./page";
+import { SourceReliabilityCard } from "@/components/source/source-reliability";
 import { getSourceProfile, type SourceProfile } from "@/lib/sources/source-profile-query";
 
 const INACTIVE_LINE =
@@ -623,5 +624,37 @@ describe("/source/[slug] excerpt line is tidied like a cluster summary (h52-sour
     const tree = await render(profile);
     expect(excerptParagraphs(tree)).toHaveLength(0);
     expect(textOf(tree)).not.toContain(DIKEN_BODY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// migration 212 (h174-latency-1): the profile read stamps `windowOverflowRecent`
+// (the feed window overflowed in the last 7 days) and the page hands it to the
+// "Kaynak göstergeleri" card, which prints the rate as a floor. The page has no
+// clock of its own: it only forwards the verdict.
+// ---------------------------------------------------------------------------
+describe("/source/[slug] hands the feed window overflow verdict to the reliability card (migration 212)", () => {
+  async function cardProps(profile: SourceProfile): Promise<Record<string, unknown>> {
+    const tree = await render(profile);
+    const cards = findAll(tree, (el) => el.type === SourceReliabilityCard);
+    expect(cards).toHaveLength(1);
+    return (cards[0] as El).props as Record<string, unknown>;
+  }
+
+  it("true verdict: windowOverflowRecent={true}", async () => {
+    const profile = { ...profileOf({}), windowOverflowRecent: true };
+    expect((await cardProps(profile)).windowOverflowRecent).toBe(true);
+  });
+
+  it("false verdict, and a profile that predates the field: windowOverflowRecent={false}", async () => {
+    expect((await cardProps({ ...profileOf({}), windowOverflowRecent: false })).windowOverflowRecent).toBe(false);
+    expect((await cardProps(profileOf({}))).windowOverflowRecent).toBe(false);
+  });
+
+  it("still passes the reliability row, the karne and the slug", async () => {
+    const props = await cardProps({ ...profileOf({}), windowOverflowRecent: true });
+    expect(props.slug).toBe("ornek-gazete");
+    expect(props).toHaveProperty("reliability");
+    expect(props).toHaveProperty("karne");
   });
 });

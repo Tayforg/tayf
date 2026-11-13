@@ -6,7 +6,7 @@ import type { ZoneHistoryEntry } from "@/components/source/label-card";
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { attemptCached } from "@/lib/cache-resilience";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
-import { isRowQuarantined } from "@/lib/sources/feed-status";
+import { isRowQuarantined, isWindowOverflowRecent } from "@/lib/sources/feed-status";
 import { classifySilence } from "@/lib/sources/silence-reason";
 import { selectSourceRecentArticles } from "@/lib/sources/source-recent-filter";
 import { createReaderClient } from "@/lib/supabase/server";
@@ -61,6 +61,8 @@ interface SourceFeedStateFields {
   fetch_fail_streak?: number | null;
   fetch_newest_item_at?: string | null;
   fetch_items_count?: number | null;
+  // Migration 212: last time a poll found the feed window overflowed (null = never).
+  fetch_window_overflow_at?: string | null;
 }
 
 export type SourceWithRegistry = Source &
@@ -103,6 +105,15 @@ export interface SourceProfile {
    * reported at its last parse, or null (never measured, empty or undated feed).
    */
   newestFeedItemAt: string | null;
+  /**
+   * Migration 212 (h174-latency-1): ingest saw this feed's window overflow within
+   * the last 7 days (the feed shows only its newest items and more appeared between
+   * two polls), so some of its items never reached Tayf and the 30-day rate is a
+   * floor. Decided with the same `nowMs` as `quarantined` and `feedFrozen`, so
+   * rendering it never touches the clock. Optional in the type only so a profile
+   * fixture that predates it reads as false.
+   */
+  windowOverflowRecent?: boolean;
   articleCount7d: number;
   articles: ArticleRow[];
   zoneHistory: ZoneHistoryEntry[];
@@ -151,19 +162,31 @@ async function readClusteredIds(
   }
 }
 
+// The `sources` columns the profile reads: the ones before migration 212, and the
+// current list, which adds fetch_window_overflow_at.
+const SOURCE_COLUMNS_BEFORE_212 =
+  "id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note, fetch_quarantined_until, fetch_last_status, fetch_fail_streak, fetch_newest_item_at, fetch_items_count";
+const SOURCE_COLUMNS = `${SOURCE_COLUMNS_BEFORE_212}, fetch_window_overflow_at`;
+
 // Uncached implementation. THROWS on a source, count or articles query error
 // (never returns null for a failure); returns null only when no row matches
 // the slug. A zone-history failure is deliberately non-fatal.
 async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   const supabase = createReaderClient();
 
-  const { data: sourceRow, error: sourceError } = await supabase
-    .from("sources")
-    .select(
-      "id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note, fetch_quarantined_until, fetch_last_status, fetch_fail_streak, fetch_newest_item_at, fetch_items_count",
-    )
-    .eq("slug", slug)
-    .maybeSingle();
+  const readSource = (columns: string) =>
+    supabase.from("sources").select(columns).eq("slug", slug).maybeSingle();
+  let { data: sourceRow, error: sourceError } = await readSource(SOURCE_COLUMNS);
+  if (
+    sourceError?.code === "42703" &&
+    (sourceError.message ?? "").includes("fetch_window_overflow_at")
+  ) {
+    // Migration 212 is not applied yet (the error names its column): one retry
+    // without it, so the profile renders as it did before 212 instead of failing
+    // every source page. Never a loop; any other error, or a second one, falls
+    // through to the throw below.
+    ({ data: sourceRow, error: sourceError } = await readSource(SOURCE_COLUMNS_BEFORE_212));
+  }
 
   // `maybeSingle` returns null (not an error) when no row matches; only a
   // genuine query failure should throw. notFound() is handled by the page.
@@ -172,7 +195,7 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   }
   if (!sourceRow) return null;
 
-  const source = sourceRow as SourceWithRegistry;
+  const source = sourceRow as unknown as SourceWithRegistry;
 
   // Three read-only fetches that depend only on source.id - fire in
   // parallel (one round-trip). The 7-day count uses head/exact to avoid
@@ -290,11 +313,16 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
       nowMs,
     ) === "akis_donmus";
 
+  // Migration 212: the feed window overflowed within the last 7 days. Same `nowMs`
+  // as the verdicts above, so the read stays at one clock read.
+  const windowOverflowRecent = isWindowOverflowRecent(source.fetch_window_overflow_at, nowMs);
+
   return {
     source,
     quarantined,
     feedFrozen,
     newestFeedItemAt,
+    windowOverflowRecent,
     articleCount7d: countResult.count ?? 0,
     articles: selectSourceRecentArticles(repaired, clusteredIds),
     zoneHistory,

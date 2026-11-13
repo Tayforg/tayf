@@ -1468,3 +1468,164 @@ describe("KaynakDurumBody voting denominator (h71-transparency-2)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// migration 212 (h174-latency-1): a feed that holds only its newest N items
+// (haberport: 50, replaced hourly) lost items whenever more than N appeared
+// between two polls. Ingest stamps sources.fetch_window_overflow_at; the page
+// tags a source whose window overflowed in the last 7 days, whether or not it
+// is silent (haberport delivers every hour, which is exactly why nothing else
+// on this page shows the loss), and says what the tag means.
+// ---------------------------------------------------------------------------
+describe("KaynakDurumBody feed window overflow [migration 212]", () => {
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+  const TAG = "akış penceresi taşıyor";
+  const LEGEND =
+    "akış penceresi taşıyor etiketi: besleme her seferinde yalnızca son haberleri veriyor ve son 7 günde bu sınır aşıldı; arada yayımlanan bazı haberler Tayf'a ulaşmadı, bu kaynağın sayıları en az değerdir.";
+
+  type El = { type?: unknown; key?: unknown; props?: Record<string, unknown> };
+
+  function elements(node: unknown, out: El[] = []): El[] {
+    if (Array.isArray(node)) {
+      for (const child of node) elements(child, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as El;
+      out.push(el);
+      const children = el.props?.children;
+      if (children !== undefined) elements(children, out);
+    }
+    return out;
+  }
+
+  const textOf = (node: unknown) => collectText(node).join("");
+
+  function body(raw: SourceFeedStatusRawRow[]) {
+    return KaynakDurumBody({
+      rows: toFeedStatusRows(raw, NOW),
+      itemsPerDayPromise: Promise.resolve({}),
+    });
+  }
+
+  function rowOf(tree: unknown, slug: string): El {
+    const tr = elements(tree).find((e) => e.type === "tr" && e.key === slug);
+    if (!tr) throw new Error(`no <tr> for ${slug}`);
+    return tr;
+  }
+
+  const legendOf = (tree: unknown) =>
+    elements(tree).find((e) => e.type === "p" && textOf(e).startsWith("akış penceresi taşıyor etiketi"));
+
+  const fixtures = (): SourceFeedStatusRawRow[] => [
+    rawRow({
+      slug: "haberport",
+      name: "Haberport",
+      fetch_window_overflow_at: new Date(NOW - 2 * HOUR).toISOString(),
+    }),
+    rawRow({ slug: "sakin-akis", name: "Sakin Akış", fetch_window_overflow_at: null }),
+    rawRow({
+      slug: "eski-tasma",
+      name: "Eski Taşma",
+      fetch_window_overflow_at: new Date(NOW - 8 * DAY).toISOString(),
+    }),
+  ];
+
+  it("a flagged source shows the tag and an unflagged one does not", () => {
+    const tree = body(fixtures());
+    expect(textOf(rowOf(tree, "haberport"))).toContain(TAG);
+    expect(textOf(rowOf(tree, "sakin-akis"))).not.toContain(TAG);
+  });
+
+  it("a stamp older than 7 days no longer tags the source", () => {
+    expect(textOf(rowOf(body(fixtures()), "eski-tasma"))).not.toContain(TAG);
+  });
+
+  it("the tag is in the Sessiz cell (td[1]) next to the dash of a delivering source, and nowhere else in the row", () => {
+    const tree = body(fixtures());
+    const cells = elements(rowOf(tree, "haberport")).filter((e) => e.type === "td" || e.type === "th");
+    expect(cells).toHaveLength(7);
+    expect(textOf(cells[1])).toContain(TAG);
+    expect(textOf(cells[1])).toContain("—");
+    for (const i of [0, 2, 3, 4, 5, 6]) expect(textOf(cells[i]), `cell ${i}`).not.toContain(TAG);
+  });
+
+  it("an unflagged delivering source keeps its plain dash (td[1] is exactly '—')", () => {
+    const cells = elements(rowOf(body(fixtures()), "sakin-akis")).filter((e) => e.type === "td" || e.type === "th");
+    expect(textOf(cells[1])).toBe("—");
+  });
+
+  it("a silent and flagged source shows its silence reason and the tag together, and the karantinada badge keeps its place", () => {
+    const stale = [{ published_at: new Date(NOW - 96 * HOUR).toISOString() }];
+    const tree = body([
+      rawRow({
+        slug: "hem-sessiz",
+        name: "Hem Sessiz",
+        latest: stale,
+        fetch_fail_streak: 21,
+        fetch_quarantined_until: new Date(NOW + 6 * HOUR).toISOString(),
+        fetch_window_overflow_at: new Date(NOW - 3 * DAY).toISOString(),
+      }),
+    ]);
+    const cells = elements(rowOf(tree, "hem-sessiz")).filter((e) => e.type === "td" || e.type === "th");
+    const text = textOf(cells[1]);
+    expect(text).toContain("erişim yok");
+    expect(text).toContain("karantinada");
+    expect(text).toContain(TAG);
+    expect(text.indexOf("karantinada")).toBeLessThan(text.indexOf(TAG));
+  });
+
+  it("prints the legend, word for word, only when at least one source is tagged", () => {
+    const flagged = legendOf(body(fixtures()));
+    expect(flagged, "legend paragraph").toBeDefined();
+    expect(textOf(flagged)).toBe(LEGEND);
+    // none tagged: no legend
+    expect(legendOf(body([rawRow({ slug: "a" }), rawRow({ slug: "b", fetch_window_overflow_at: new Date(NOW - 9 * DAY).toISOString() })]))).toBeUndefined();
+    // an empty list: no legend
+    expect(legendOf(KaynakDurumBody({ rows: [], itemsPerDayPromise: Promise.resolve({}) }))).toBeUndefined();
+  });
+
+  it("places the legend after the totals paragraph and before the table", () => {
+    const text = collectText(body(fixtures())).join(" ");
+    const totals = text.indexOf("bu pencerede sessiz");
+    const legend = text.indexOf("etiketi: besleme her seferinde");
+    const table = text.indexOf("Aktif kaynakların besleme durumu");
+    expect(totals).toBeGreaterThan(-1);
+    expect(legend).toBeGreaterThan(totals);
+    expect(table).toBeGreaterThan(legend);
+  });
+
+  it("the tag is a literal-class pill like the karantinada one: AA shades (800 light, 300 dark), 11 px, one line, with a title", () => {
+    const tree = body(fixtures());
+    const tag = elements(rowOf(tree, "haberport"))
+      .filter((e) => e.type === "span" && textOf(e) === TAG)
+      .pop() as El;
+    expect(tag).toBeDefined();
+    const cls = String(tag.props?.className);
+    expect(cls).toContain("text-[11px]");
+    expect(cls).toContain("whitespace-nowrap");
+    expect(cls).toContain("rounded-full");
+    expect(cls).toContain("border");
+    expect(cls).toContain("-800");
+    expect(cls).toContain("dark:text-");
+    expect(cls).toContain("-300");
+    // the shades the page already ruled out below AA at 11 px
+    expect(cls).not.toContain("text-amber-700");
+    expect(cls).not.toMatch(/\btext-[a-z]+-(?:500|600|700)\b/);
+    expect(String(tag.props?.title)).toContain("bazı haberler Tayf'a ulaşmadı");
+  });
+
+  it("pins the label and the literal classes in the page source", () => {
+    const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+    expect(src).toContain(TAG);
+    expect(src).toContain("row.windowOverflowRecent");
+  });
+
+  it("never shows a raw timestamp for the overflow, the column name or a count", () => {
+    const text = collectText(body(fixtures())).join(" ");
+    expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+    expect(text).not.toContain("fetch_window_overflow_at");
+    expect(text).not.toMatch(/\bundefined\b|\bnull\b|NaN/);
+  });
+});

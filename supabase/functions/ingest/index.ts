@@ -58,6 +58,12 @@
 //      stored values stay). A source whose count is still NULL is bootstrapped
 //      once: no conditional request, no body-hash short-circuit, one parse (a
 //      frozen feed with a byte-identical body is otherwise never parsed again).
+//      Feed window overflow (migration 212) rides along too: a poll of a
+//      full-sized window (10 items or more) none of whose urls is stored yet
+//      means the feed moved past the previous poll and items were never offered
+//      (haberport holds its 50 newest and is replaced hourly). That poll's state
+//      row carries `fetch_window_overflow_at`; every other outcome OMITS the key
+//      (see _shared/rss/feed-window.ts). Detection only: nothing is recovered.
 //
 // CPU budget: the platform kills an isolate that burns more than 2 s of CPU IN
 // TOTAL (HTTP 546, reason CPUTime) -- the allowance is spent across the cycles a
@@ -82,6 +88,7 @@ import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
 import { computeFeedFreshness, storableItemDate } from "../_shared/rss/feed-freshness.ts";
 import type { FeedFreshness } from "../_shared/rss/feed-freshness.ts";
+import { isWindowOverflow } from "../_shared/rss/feed-window.ts";
 import type { NormalizedArticle, PreparedItem } from "../_shared/rss/normalize.ts";
 import {
   canonicalizeUrl,
@@ -534,6 +541,11 @@ interface CycleStats {
   // fetch_items_count was still NULL (the one-time bootstrap). Summary line and
   // HTTP JSON only: there is no `ingest_cycles` column for it.
   freshnessBootstraps: number;
+  // Feed window overflow (migration 212): polls of a full-sized feed window none
+  // of whose urls was stored yet, i.e. feeds that moved past the previous poll
+  // and lost items. One per feed per cycle, never per item. Summary line, HTTP
+  // JSON and `ingest_cycles.window_overflows`.
+  windowOverflows: number;
   // Per-item work spent on items that are never inserted (hunt-11,
   // A-ingest-cpu). Ingest looks up which of a feed's urls are already stored
   // BEFORE the full normalisation; `itemsNormalized` counts the rows that got
@@ -1534,6 +1546,12 @@ interface SourceFetchState {
   // pair (a key that is merely undefined would still be a key in a test double).
   fetch_newest_item_at?: string | null;
   fetch_items_count?: number | null;
+  // Feed window overflow (migration 212). PRESENT only on a poll that found a
+  // full-sized window with none of its urls stored; every other outcome (a normal
+  // poll, a bootstrap, a 304, a failure) OMITS it, never null, so the writer's
+  // coalesce keeps the last time an overflow was seen. A database still on the
+  // pre-212 writer ignores the unknown key (jsonb_to_recordset).
+  fetch_window_overflow_at?: string;
 }
 
 // Builds the row to persist for one attempted source this cycle. `fresh`
@@ -1547,12 +1565,15 @@ interface SourceFetchState {
 // `QUARANTINE_AFTER_FAILURES`, sets an escalating `fetch_quarantined_until`.
 // `freshness` (migration 119) is passed only by a cycle that parsed the feed;
 // when it is absent the two freshness keys are OMITTED, not nulled.
+// `windowOverflowAt` (migration 212) is passed only by a poll that found its feed
+// window overflowed; when it is absent the key is OMITTED, same discipline.
 function buildFetchStateUpdate(
   source: SourceRow,
   status: number,
   ok: boolean,
   fresh?: { etag: string | null; lastModified: string | null; bodyHash: string | null },
   freshness?: FeedFreshness,
+  windowOverflowAt?: string,
 ): SourceFetchState {
   const quarantine = nextQuarantineState(source.fetch_fail_streak, ok, Date.now());
   const state: SourceFetchState = {
@@ -1570,6 +1591,9 @@ function buildFetchStateUpdate(
     // persistSourceFetchState), and this is third-party input.
     state.fetch_newest_item_at = storableItemDate(freshness.newestItemAt);
     state.fetch_items_count = freshness.itemsCount;
+  }
+  if (windowOverflowAt !== undefined) {
+    state.fetch_window_overflow_at = windowOverflowAt;
   }
   return state;
 }
@@ -1679,6 +1703,13 @@ function isMissingColumnError(error: { code?: string; message?: string }): boole
   return /could not find the .* column|column .* does not exist/i.test(error.message ?? "");
 }
 
+// True when a missing-column error names `column` (Postgres: `column "x" of
+// relation ... does not exist`; PostgREST: `Could not find the 'x' column of ...`).
+// Both messages carry the column name; a plain substring check keeps it linear.
+function errorNamesColumn(error: { message?: string }, column: string): boolean {
+  return (error.message ?? "").includes(column);
+}
+
 // Best-effort telemetry write: one row per cycle in `ingest_cycles`
 // (migration 039), regardless of whether the cycle finished cleanly or
 // `runCycle` is unwinding through a thrown error. Errors here are logged
@@ -1693,6 +1724,12 @@ function isMissingColumnError(error: { code?: string; message?: string }): boole
 // 159; the counters are simply absent until the migrations are applied. Apply
 // both first anyway: a cycle row written without them is a cycle you cannot
 // count, and with 159 missing it also loses 157's three.
+//
+// Migration 212 adds `window_overflows`. A database that has 157 and 159 but not
+// 212 answers the first insert with an error that NAMES that column, so the first
+// retry drops only it and keeps the five counters above; any other missing-column
+// error still goes straight to the legacy row. Ingest can be deployed before or
+// after 212, and a late 212 never costs the 157 and 159 counters.
 async function recordIngestCycle(
   supabase: ReturnType<typeof createServiceClient>,
   startedAt: number,
@@ -1719,18 +1756,35 @@ async function recordIngestCycle(
     // Migration 157: how often the budgets deferred a changed feed this cycle,
     // and the longest streak of consecutive deferrals of one feed. Migration 159:
     // how many of the stale feeds were still deferred, and the age of the oldest.
-    const { error } = await supabase.from("ingest_cycles").insert({
+    const withDeferral = {
       ...row,
       isolate_budget_deferred: stats.isolateBudgetDeferred,
       parse_deferred: stats.parseDeferred,
       parse_deferred_max_streak: stats.parseDeferredMaxStreak,
       stale_deferred: stats.staleDeferred,
       oldest_stale_min: stats.oldestStaleMin,
+    };
+    // Migration 212: feeds whose window overflowed this cycle (window_overflows).
+    const { error } = await supabase.from("ingest_cycles").insert({
+      ...withDeferral,
+      window_overflows: stats.windowOverflows,
     });
     if (!error) return;
     if (!isMissingColumnError(error)) {
       console.error(`[ingest] ingest_cycles insert failed: ${error.message}`);
       return;
+    }
+    if (errorNamesColumn(error, "window_overflows")) {
+      console.warn(
+        "[ingest] ingest_cycles.window_overflows missing (migration 212 not applied?): inserting the row without it",
+      );
+      const second = await supabase.from("ingest_cycles").insert(withDeferral);
+      if (!second.error) return;
+      if (!isMissingColumnError(second.error)) {
+        console.error(`[ingest] ingest_cycles insert failed: ${second.error.message}`);
+        return;
+      }
+      // 157 or 159 is missing as well: fall through to the legacy row.
     }
     console.warn(
       "[ingest] ingest_cycles deferral columns missing (migration 157 not applied? or 159?): inserting the legacy row",
@@ -1783,6 +1837,7 @@ async function runCycle(): Promise<CycleStats> {
     parseDeferredMaxStreak: 0,
     parsedBytes: 0,
     freshnessBootstraps: 0,
+    windowOverflows: 0,
     itemsKnownSkipped: 0,
     knownUrlLookupErrors: 0,
     reslugRestamped: 0,
@@ -2004,6 +2059,8 @@ async function runCycleBody(
       status: number;
       fresh: { etag: string | null; lastModified: string | null; bodyHash: string | null };
       freshness: FeedFreshness;
+      // Migration 212: set only when this poll found its feed window overflowed.
+      windowOverflowAt?: string;
     }
   >();
   // Sources with at least one row that was skipped, never attempted or failed.
@@ -2309,6 +2366,34 @@ async function runCycleBody(
           else absentUrls.add(p.url);
         }
       }
+      // Feed window overflow (migration 212, h174-latency-1). The feed keeps only
+      // its newest N items; a poll of a full-sized window whose urls are ALL
+      // absent from `articles` (any source, any headline: a retitled url still
+      // proves the windows touch) means the window moved past the previous poll
+      // and items were never offered. Detection only. Fail-open: a failed lookup
+      // or a bootstrap poll concludes nothing (see _shared/rss/feed-window.ts).
+      let storedCount = 0;
+      if (lookup.ok) {
+        for (const p of prepared) {
+          if (lookup.byUrl.get(p.url) !== undefined) storedCount++;
+        }
+      }
+      let windowOverflowAt: string | undefined;
+      if (
+        isWindowOverflow({
+          itemCount: prepared.length,
+          storedCount,
+          lookupOk: lookup.ok,
+          bootstrap,
+        })
+      ) {
+        stats.windowOverflows++;
+        // Slug and count only: never a url or a headline.
+        console.log(
+          `[ingest] ${source.slug}: feed window overflow (${prepared.length} items, none stored before)`,
+        );
+        windowOverflowAt = new Date().toISOString();
+      }
       // Phase 2: the heavy half, only for the items that are not known. The
       // result is aligned with `toComplete` (null: legal notice, or threw).
       const completed = completeArticles(source, toComplete, sourceNowMs);
@@ -2436,7 +2521,7 @@ async function runCycleBody(
         // validators are safe to save right away.
         fetchStateUpdates.set(
           source.id,
-          buildFetchStateUpdate(source, result.status, true, fresh, freshness),
+          buildFetchStateUpdate(source, result.status, true, fresh, freshness, windowOverflowAt),
         );
         await maybeFlushFetchState(supabase, fetchStateUpdates);
       } else {
@@ -2445,7 +2530,13 @@ async function runCycleBody(
         // body-hash hit forever while its rows never landed. Park them, and
         // put the module cache back as it was before `fetchFeed` stamped the
         // fresh values on it; both are committed once the rows are durable.
-        deferred.set(source.id, { source, status: result.status, fresh, freshness });
+        deferred.set(source.id, {
+          source,
+          status: result.status,
+          fresh,
+          freshness,
+          windowOverflowAt,
+        });
         if (cacheBeforeCopy) conditionalCache.set(source.id, cacheBeforeCopy);
         else conditionalCache.delete(source.id);
       }
@@ -2734,7 +2825,7 @@ async function runCycleBody(
     if (!d) continue;
     fetchStateUpdates.set(
       id,
-      buildFetchStateUpdate(d.source, d.status, true, d.fresh, d.freshness),
+      buildFetchStateUpdate(d.source, d.status, true, d.fresh, d.freshness, d.windowOverflowAt),
     );
     // Memory now equals what the DB will hold.
     if (d.fresh.etag || d.fresh.lastModified) {
@@ -2747,11 +2838,12 @@ async function runCycleBody(
   for (const id of withheld) {
     const d = deferred.get(id);
     if (!d) continue;
-    // The validators stay old (the feed is re-offered), but the freshness is a
-    // fact about the feed, not about row durability: it is saved either way.
+    // The validators stay old (the feed is re-offered), but the freshness (and the
+    // window overflow, migration 212) is a fact about the feed, not about row
+    // durability: it is saved either way.
     fetchStateUpdates.set(
       id,
-      buildFetchStateUpdate(d.source, d.status, true, undefined, d.freshness),
+      buildFetchStateUpdate(d.source, d.status, true, undefined, d.freshness, d.windowOverflowAt),
     );
   }
   stats.validatorsWithheld = withheld.length;

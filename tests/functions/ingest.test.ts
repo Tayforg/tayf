@@ -232,6 +232,10 @@ let ingestCyclesFailAllCode: string | null = null;
 // not 159. An insert that names stale_deferred or oldest_stale_min fails with this
 // code; a row without them is accepted.
 let ingestCyclesMissing159Code: string | null = null;
+// h174-latency-1 (migration 212): the same switch for a database that has 157 and 159 but
+// not 212. An insert that names window_overflows fails with this code (the message
+// names that one column, as Postgres and PostgREST do); a row without it is accepted.
+let ingestCyclesMissing212Code: string | null = null;
 
 // One entry per `.rpc("existing_source_content_hash_pairs", { p_source_ids,
 // p_hashes })` call this test made -- the chunked (source_id, content_hash)
@@ -649,6 +653,21 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
                 },
               });
             }
+            if (
+              ingestCyclesMissing212Code &&
+              arr.some((r) => "window_overflows" in (r as Record<string, unknown>))
+            ) {
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code: ingestCyclesMissing212Code,
+                  message:
+                    ingestCyclesMissing212Code === "42703"
+                      ? 'column "window_overflows" of relation "ingest_cycles" does not exist'
+                      : "Could not find the 'window_overflows' column of 'ingest_cycles' in the schema cache",
+                },
+              });
+            }
             if (forcedIngestCyclesInsertError) {
               return Promise.resolve({
                 data: null,
@@ -902,6 +921,7 @@ beforeEach(() => {
   ingestCyclesInsertAttempts = 0;
   ingestCyclesMissingColumnCode = null;
   ingestCyclesMissing159Code = null;
+  ingestCyclesMissing212Code = null;
   ingestCyclesFailAllCode = null;
   fakeSources.length = 0;
   for (const k of Object.keys(fetchResponses)) delete fetchResponses[k];
@@ -7384,5 +7404,169 @@ describe("ingest: the cluster kick (h106-attachdesign-1)", () => {
       expect(kick).toContain("EdgeRuntime");
       expect(kick).toContain("waitUntil");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h174-latency-1 (migration 212): haberport's feed holds its 50 newest items and is
+// replaced once an hour; on busy weekdays more than 50 items appear between two polls
+// and the rest are never offered. A poll of a full-sized window that finds NONE of its
+// items stored is counted per cycle (ingest_cycles.window_overflows, the HTTP JSON
+// `windowOverflows`) and stamps sources.fetch_window_overflow_at. The stamp itself is
+// pinned in tests/functions/ingest-fetch-state.test.ts; this block pins the counter on
+// the cycle row and the fallback for a database that has 157 and 159 but not 212.
+// ---------------------------------------------------------------------------
+describe("ingest_cycles window_overflows (migration 212)", () => {
+  function seedFeed(id: string, itemCount: number, extra: Record<string, unknown> = {}): string[] {
+    const rss = `https://${id}.h174.example/rss.xml`;
+    fakeSources.push({
+      id,
+      name: id,
+      slug: id,
+      url: `https://${id}.h174.example`,
+      rss_url: rss,
+      active: true,
+      fetch_etag: null,
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 0,
+      // measured before (a number, not null): the poll is not a bootstrap
+      fetch_items_count: itemCount,
+      ...extra,
+    });
+    const links = Array.from({ length: itemCount }, (_, i) => `https://${id}.h174.example/haber/konu-${i}`);
+    fetcherItems[rss] = links.map((link, i) => ({
+      title: `${id} kaynağının ${i}. haberi`,
+      link,
+      pubDate: "Fri, 13 Nov 2026 06:00:00 GMT",
+    }));
+    return links;
+  }
+
+  async function runCycle(): Promise<Record<string, unknown>> {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  it("a full window with none of its items stored counts 1 on the cycle row and in the HTTP JSON", async () => {
+    seedFeed("tasan", 50);
+
+    const c = await runCycle();
+
+    expect(c.windowOverflows).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(1);
+    expect((ingestCycleInserts[0] as Record<string, unknown>).window_overflows).toBe(1);
+    // the 157 and 159 counters are still on the same row
+    for (const k of ["isolate_budget_deferred", "parse_deferred", "parse_deferred_max_streak", "stale_deferred", "oldest_stale_min"]) {
+      expect(ingestCycleInserts[0], k).toHaveProperty(k);
+    }
+  });
+
+  it("counts one per overflowing source, not per item", async () => {
+    seedFeed("tasan-bir", 50);
+    seedFeed("tasan-iki", 12);
+    seedFeed("sakin", 5); // under the 10-item floor: proves nothing
+
+    const c = await runCycle();
+
+    expect(c.windowOverflows).toBe(2);
+    expect((ingestCycleInserts[0] as Record<string, unknown>).window_overflows).toBe(2);
+  });
+
+  it("one stored item is enough overlap: 0 on the row", async () => {
+    const links = seedFeed("ortusen", 50);
+    storedArticlesByUrl[links[49] as string] = { id: "art-1", title: "baska bir baslik", source_id: "baska-kaynak" };
+
+    const c = await runCycle();
+
+    expect(c.windowOverflows).toBe(0);
+    expect((ingestCycleInserts[0] as Record<string, unknown>).window_overflows).toBe(0);
+  });
+
+  it("a failed stored-url lookup proves nothing: 0 on the row", async () => {
+    seedFeed("belirsiz", 50);
+    forcedTitleLookupError = "simulated lookup failure";
+
+    const c = await runCycle();
+
+    expect(c.knownUrlLookupErrors).toBe(1);
+    expect(c.windowOverflows).toBe(0);
+    expect((ingestCycleInserts[0] as Record<string, unknown>).window_overflows).toBe(0);
+  });
+
+  it("a source never measured (fetch_items_count null: the bootstrap poll) is not an overflow", async () => {
+    seedFeed("yeni", 50, { fetch_items_count: null });
+
+    const c = await runCycle();
+
+    expect(c.freshnessBootstraps).toBe(1);
+    expect(c.windowOverflows).toBe(0);
+  });
+
+  it("an ordinary cycle writes 0, not null", async () => {
+    seedFeed("sakin", 3);
+    await runCycle();
+    expect((ingestCycleInserts[0] as Record<string, unknown>).window_overflows).toBe(0);
+  });
+
+  for (const code of ["PGRST204", "42703"]) {
+    it(`retries the cycle row once without window_overflows when the database lacks migration 212 (error ${code}), keeping the 157 and 159 counters`, async () => {
+      ingestCyclesMissing212Code = code;
+      seedFeed("tasan", 50);
+
+      await runCycle();
+
+      expect(ingestCyclesInsertAttempts).toBe(2);
+      expect(ingestCycleInserts).toHaveLength(1);
+      const row = ingestCycleInserts[0] as Record<string, unknown>;
+      expect(row).not.toHaveProperty("window_overflows");
+      for (const k of ["isolate_budget_deferred", "parse_deferred", "parse_deferred_max_streak", "stale_deferred", "oldest_stale_min"]) {
+        expect(row, k).toHaveProperty(k);
+      }
+      expect(row.fetched).toBe(1);
+      expect(row).toHaveProperty("prefilter_errors");
+    });
+  }
+
+  it("a database with 157 but not 159 or 212 still ends in the legacy row (one more retry is never needed)", async () => {
+    ingestCyclesMissing159Code = "42703";
+    ingestCyclesMissing212Code = "42703";
+    seedFeed("tasan", 50);
+
+    await runCycle();
+
+    expect(ingestCycleInserts).toHaveLength(1);
+    const row = ingestCycleInserts[0] as Record<string, unknown>;
+    expect(row).not.toHaveProperty("window_overflows");
+    expect(row).not.toHaveProperty("stale_deferred");
+    expect(row.fetched).toBe(1);
+  });
+
+  it("a missing-column error that does not name window_overflows still goes straight to the legacy row (two attempts)", async () => {
+    ingestCyclesMissingColumnCode = "42703";
+    seedFeed("tasan", 50);
+
+    await runCycle();
+
+    expect(ingestCyclesInsertAttempts).toBe(2);
+    const row = ingestCycleInserts[0] as Record<string, unknown>;
+    expect(row).not.toHaveProperty("window_overflows");
+    expect(row).not.toHaveProperty("isolate_budget_deferred");
+  });
+
+  it("an error that is not a missing column is not retried at all", async () => {
+    ingestCyclesFailAllCode = "42501";
+    seedFeed("tasan", 50);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await runCycle();
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(ingestCyclesInsertAttempts).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(0);
   });
 });

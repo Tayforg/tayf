@@ -17,6 +17,11 @@ export interface SourceReliabilityCardProps {
   /** The karne row supplies the blindspot share; null shows its own note. */
   karne: SourceKarneRead | null;
   slug: string;
+  /**
+   * Migration 212: the feed window overflowed in the last 7 days, so the daily rate
+   * is a floor ("en az") with a note. Decided by the profile read; absent = false.
+   */
+  windowOverflowRecent?: boolean;
 }
 
 const FOOTNOTE =
@@ -26,10 +31,11 @@ export function SourceReliabilityCard({
   reliability,
   karne,
   slug,
+  windowOverflowRecent = false,
 }: SourceReliabilityCardProps) {
   if (!reliability) return null;
 
-  const rows = buildReliabilityView(reliability, karne);
+  const rows = buildReliabilityView(reliability, karne, { windowOverflowRecent });
 
   return (
     <section className="space-y-4 rounded-xl border border-border/60 bg-card/40 p-5 sm:p-6">
@@ -58,6 +64,9 @@ export function SourceReliabilityCard({
               ) : (
                 <p className="text-xs text-muted-foreground">{row.note}</p>
               )}
+              {row.value !== null && row.note !== null ? (
+                <p className="text-[11px] text-muted-foreground">{row.note}</p>
+              ) : null}
               {row.basis !== null ? (
                 <p className="text-[11px] text-muted-foreground">{row.basis}</p>
               ) : null}

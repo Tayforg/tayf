@@ -61,9 +61,15 @@ function html(
   r: SourceReliabilityRead | null,
   k: SourceKarneRead | null = karne(),
   slug = "sozcu",
+  windowOverflowRecent?: boolean,
 ): string {
   return renderToStaticMarkup(
-    createElement(SourceReliabilityCard, { reliability: r, karne: k, slug }),
+    createElement(SourceReliabilityCard, {
+      reliability: r,
+      karne: k,
+      slug,
+      ...(windowOverflowRecent === undefined ? {} : { windowOverflowRecent }),
+    }),
   );
 }
 
@@ -89,8 +95,9 @@ function text(
   r: SourceReliabilityRead | null,
   k: SourceKarneRead | null = karne(),
   slug = "sozcu",
+  windowOverflowRecent?: boolean,
 ): string {
-  return stripTags(html(r, k, slug))
+  return stripTags(html(r, k, slug, windowOverflowRecent))
     .replace(/&#x27;/g, "'")
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ");
@@ -345,5 +352,65 @@ describe("SourceReliabilityCard", () => {
     const h = html(reliability({ isStale: true, ageDays: 2 }));
     expect(h).not.toMatch(/\btext-(?:muted-foreground|brand)\/\d+/);
     expect(h).toContain("text-muted-foreground");
+  });
+
+  // migration 212 (h174-latency-1): a feed window that overflowed in the last
+  // 7 days makes the daily rate a floor. The card prints the floor and, under
+  // it, why. The note sits under the VALUE (the other rows only print a note
+  // when they have no value), before that row's disclosure.
+  describe("window overflow (migration 212)", () => {
+    const NOTE =
+      "Bu kaynağın RSS akışı her seferinde yalnızca son haberleri veriyor ve son 7 günde bu sınır aşıldı; bazı haberleri Tayf'a ulaşmadı, bu yüzden sayı en az değerdir.";
+
+    it("flagged: the cadence value reads 'en az ...' and the note is printed once, under it, before its disclosure", () => {
+      const h = html(reliability(), karne(), "haberport", true);
+      const t = text(reliability(), karne(), "haberport", true);
+      expect(t).toContain("en az 20 haber/gün · 30/31 gün yayın");
+      expect(t.split(NOTE).length - 1).toBe(1);
+      const value = h.indexOf("en az 20 haber/gün");
+      const note = h.indexOf("bazı haberleri Tayf");
+      const firstDisclosure = h.indexOf("Nasıl hesaplanır?");
+      expect(value).toBeGreaterThan(-1);
+      expect(note).toBeGreaterThan(value);
+      expect(note).toBeLessThan(firstDisclosure);
+    });
+
+    it("the note is a muted 11px line like the basis line, not the 12px note of a value-less row", () => {
+      const h = html(reliability(), karne(), "haberport", true);
+      expect(h).toContain('<p class="text-[11px] text-muted-foreground">Bu kaynağın RSS akışı');
+    });
+
+    it("not flagged (false or omitted): the render is byte-identical to today's", () => {
+      const plain = html(reliability());
+      expect(html(reliability(), karne(), "sozcu", false)).toBe(plain);
+      expect(plain).not.toContain("en az 20 haber");
+      expect(plain).not.toContain("RSS akışı");
+      expect(plain).toContain("20 haber/gün · 30/31 gün yayın");
+    });
+
+    it("flagged does not touch the other rows or the footnote", () => {
+      const plain = text(reliability());
+      const flagged = text(reliability(), karne(), "sozcu", true);
+      for (const piece of [
+        "%12 (12/100)",
+        "%5 (6/120)",
+        "Ortalama Denge puanı 50/100 (n = 20 küme)",
+        "Bu göstergeler bir doğruluk ya da kalite notu değildir",
+      ]) {
+        expect(plain, piece).toContain(piece);
+        expect(flagged, piece).toContain(piece);
+      }
+    });
+
+    it("flagged for a source that published nothing: no floor and no note", () => {
+      const r = reliability({ nArticles: 0, activeDays: 0, nClusters: 0, nWireCopy: 0, zoneMix: [] });
+      const t = stripTags(html(r, karne(), "x", true));
+      expect(t).toContain("Son 30 günde haber yok");
+      expect(t).not.toContain("RSS akışı");
+    });
+
+    it("renders nothing for a null reliability row, flagged or not", () => {
+      expect(html(null, karne(), "x", true)).toBe("");
+    });
   });
 });

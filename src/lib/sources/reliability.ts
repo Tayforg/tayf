@@ -182,6 +182,11 @@ export interface ReliabilityRow {
   label: string;
   /** null when the row is below its sample gate (then `note` explains). */
   value: string | null;
+  /**
+   * Why `value` is null (below its sample gate). One row also carries a note
+   * next to its value: the cadence row, when the feed window overflowed in the
+   * last 7 days (migration 212): the number is then a floor and the note says so.
+   */
   note: string | null;
   /** "Nasıl hesaplanır?" disclosure text. */
   how: string;
@@ -246,7 +251,7 @@ function cadenceSpan(rel: SourceReliability): number {
   return Number.isFinite(span) && span >= rel.windowDays ? span : rel.windowDays;
 }
 
-function cadenceValue(rel: SourceReliability): string {
+function cadenceValue(rel: SourceReliability, floor: boolean): string {
   if (rel.nArticles === 0) return `Son ${rel.windowDays} günde haber yok`;
   const perDay = rel.nArticles / rel.windowDays;
   // A non-zero rate must never be shown as "0".
@@ -254,7 +259,25 @@ function cadenceValue(rel: SourceReliability): string {
     Math.round(perDay * 10) === 0 ? "<0,1" : RATE_FORMAT.format(perDay);
   const span = cadenceSpan(rel);
   const days = Math.min(rel.activeDays, span);
-  return `${rate} haber/gün · ${days}/${span} gün yayın`;
+  return `${floor ? "en az " : ""}${rate} haber/gün · ${days}/${span} gün yayın`;
+}
+
+/**
+ * Migration 212 (h174-latency-1): the note under a cadence value that is a floor.
+ * Ingest saw the feed's window overflow in the last 7 days (the feed shows only its
+ * newest items and more than that appeared between two polls), so some items never
+ * reached Tayf and the daily rate undercounts the outlet.
+ */
+export const WINDOW_OVERFLOW_NOTE =
+  "Bu kaynağın RSS akışı her seferinde yalnızca son haberleri veriyor ve son 7 günde bu sınır aşıldı; bazı haberleri Tayf'a ulaşmadı, bu yüzden sayı en az değerdir.";
+
+export interface ReliabilityViewOptions {
+  /**
+   * The source's feed window overflowed in the last 7 days (decided where the clock
+   * is read, see source-profile-query.ts). Only `true` counts. Absent or false: the
+   * output is exactly what it was before migration 212.
+   */
+  windowOverflowRecent?: boolean;
 }
 
 function cadenceHow(rel: SourceReliability): string {
@@ -277,12 +300,16 @@ function karneBasis(karne: SourceKarne): string {
 export function buildReliabilityView(
   rel: SourceReliability,
   karne: SourceKarne | null,
+  options: ReliabilityViewOptions = {},
 ): ReliabilityRow[] {
+  // A floor only makes sense for a count: with no articles in the window there is
+  // nothing to put "en az" in front of.
+  const floor = options.windowOverflowRecent === true && rel.nArticles > 0;
   const cadence: ReliabilityRow = {
     key: "cadence",
     label: "Yayın sıklığı",
-    value: cadenceValue(rel),
-    note: null,
+    value: cadenceValue(rel, floor),
+    note: floor ? WINDOW_OVERFLOW_NOTE : null,
     how: cadenceHow(rel),
     basis: null,
   };
