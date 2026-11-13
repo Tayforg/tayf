@@ -1,0 +1,106 @@
+{
+ "finding": "h168-titles-1",
+ "note": "Test-only. The member titles (newest first) and source slugs of the two clusters whose stored neutral title carries one outlet's partisan epithet, as read on production on 2026-11-12 (read-only SELECT of cluster_articles x articles x sources), with each stored title, its stamp and article count. 49facb31 is Star's 'Trump, katillere desteğiyle övündü: ...', 8ab79860 Akşam's 'ihale rantı'. `opinion` is isOpinionUrl of the article URL (the URL itself is not kept).",
+ "clusters": [
+  {
+   "cid": "49facb31",
+   "id": "49facb31-1ba4-4816-a679-e6bff7a03c4f",
+   "stored": "Trump, katillere desteğiyle övündü: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim",
+   "model": "extractive-v6",
+   "stamped": 11,
+   "article_count": 12,
+   "members": [
+    {
+     "source": "takvim",
+     "title": "Trump'tan İsrail için şaşırtan başbakanlık çıkışı! İran'a askeri operasyon mesajı da verdi",
+     "opinion": false
+    },
+    {
+     "source": "ekonomim",
+     "title": "Trump'tan İsrail'e tam destek: Gidip orada başbakan olabilirim",
+     "opinion": false
+    },
+    {
+     "source": "cgtn-turk",
+     "title": "Trump ABD'den umudu kesti gözünü İsrail başbakanlığına dikti",
+     "opinion": false
+    },
+    {
+     "source": "cnn-turk",
+     "title": "Trump'tan İsrail çıkışı! \"Başbakan olabilirim\"",
+     "opinion": false
+    },
+    {
+     "source": "isci-haber",
+     "title": "Trump'tan şaşırtan açıklama: İsrail'de başbakan olabilirim",
+     "opinion": false
+    },
+    {
+     "source": "yenicag",
+     "title": "Donald Trump, ‘İran işi bitince İsrail’e başbakan olabilirim’ dedi",
+     "opinion": false
+    },
+    {
+     "source": "abc-haber",
+     "title": "Trump'tan İsrail çıkışı: “Bu iş bittiğinde gidip başbakan olabilirim”",
+     "opinion": false
+    },
+    {
+     "source": "anadolu-ajansi",
+     "title": "ABD Başkanı Trump: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim",
+     "opinion": false
+    },
+    {
+     "source": "star",
+     "title": "Trump, katillere desteğiyle övündü: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim",
+     "opinion": false
+    },
+    {
+     "source": "karar",
+     "title": "Trump: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "Trump, İsrail'de yüzde 99 destek gördüğünü savunup başbakan olabileceğini söyledi",
+     "opinion": false
+    },
+    {
+     "source": "gazete-oksijen",
+     "title": "Trump: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "8ab79860",
+   "id": "8ab79860-9f6e-414d-acdf-082dc7ff4194",
+   "stored": "Şerbetli tatlıya tuzlu fatura. İBB yönetimine ihale rantı tepkisi",
+   "model": "extractive-v6",
+   "stamped": 3,
+   "article_count": 4,
+   "members": [
+    {
+     "source": "star",
+     "title": "Kamu zararı vurgusu! İBB Meclisinde Sayıştay'ın ihalelerdeki tespitlerine ilişkin soru önergesi verildi",
+     "opinion": false
+    },
+    {
+     "source": "aksam",
+     "title": "Şerbetli tatlıya tuzlu fatura... İBB yönetimine ihale rantı tepkisi",
+     "opinion": false
+    },
+    {
+     "source": "ekonomim",
+     "title": "İBB Meclisi'nde Sayıştay'ın ihalelerdeki tespitlerine ilişkin soru önergesi",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "İBB Meclisi Sayıştay'ın ihale tespitlerine dair önergeyi oy birliğiyle kabul etti",
+     "opinion": false
+    }
+   ]
+  }
+ ]
+}

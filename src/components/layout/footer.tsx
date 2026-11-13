@@ -67,10 +67,14 @@ export function Footer() {
 
           {/* Navigation */}
           <nav aria-label="Alt menü" className="flex flex-wrap gap-x-5 gap-y-2 max-sm:gap-y-0">
+            {/* prefetch={false}: the footer is on every page, so a default next/link
+                prefetched /sources (362 KB decoded RSC) and /metodoloji for every visitor
+                who scrolled to the bottom (h168). Still next/link: soft navigation. */}
             {NAV_LINKS.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
+                prefetch={false}
                 className="text-[11px] text-muted-foreground hover:text-foreground transition-colors max-sm:inline-flex max-sm:min-h-11 max-sm:items-center"
               >
                 {link.label}

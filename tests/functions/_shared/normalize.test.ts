@@ -1,6 +1,9 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { INVALID_XML_CHARS_RE } from "../../../supabase/functions/_shared/rss/entities.ts";
+import * as legalNotice from "../../../supabase/functions/_shared/rss/legal-notice.ts";
+import { NOTICE_DESCRIPTION_SCAN_CAP } from "../../../supabase/functions/_shared/rss/legal-notice.ts";
 import { expectLinear, rep } from "../../_helpers/linear-time";
+import type { Gen } from "../../_helpers/linear-time";
 
 // ---------------------------------------------------------------------------
 // Sanitisation coverage for supabase/functions/_shared/rss/normalize.ts.
@@ -2416,5 +2419,196 @@ describe("stableArticleId (hunt-114)", () => {
     ["a run of question marks", rep("?", "https://www.aa.com.tr/slug")],
   ])("%s in the url scales linearly", (_name, gen) => {
     expectLinear(gen, (url) => ids.stableArticleId(AA, url), { n: 200_000, ceilingMs: 1_000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h168-notices-1: a court or tender notice (resmi ilan) that the title rules miss
+// is recognised by its DESCRIPTION. Yeniçağ prints "İlan-<title>" under a
+// mixed-case title; Yeni Mesaj, Milat and Diriliş Postası print a municipal or
+// BOTAŞ tender under an all-caps title with the 4734 sayılı Kamu İhale Kanunu
+// sentence in the description. completeItem passes the raw feed description
+// (contentSnippet, else content) to isLegalNotice and returns null. Real news
+// that merely mentions the tender law, or starts "İlan sitesine", is kept.
+// ---------------------------------------------------------------------------
+
+describe("normalize.ts h168-notices-1: the legal-notice filter reads the description", () => {
+  const NOW = Date.parse("2026-11-12T08:00:00Z");
+
+  const YENICAG_ITEM = {
+    title: "T.C. Kırıkhan 2. Asliye Ceza Mahkemesi",
+    link: "https://www.yenicaggazetesi.com/tc-kirikhan-2-asliye-ceza-mahkemesi-1090289h.htm",
+    contentSnippet: "İlan-T.C. Kırıkhan 2. Asliye Ceza Mahkemesi",
+  };
+  const YENIMESAJ_ITEM = {
+    title: "ÜMRANİYE BELEDİYE BAŞKANLIĞI",
+    link: "https://www.yenimesaj.com.tr/umraniye-belediye-baskanligi-H1621484.htm",
+    contentSnippet:
+      "İLAN BİNA İNŞAATI YAPTIRILACAKTIR ... 4734 sayılı Kamu İhale Kanununun 19 uncu maddesine göre açık ihale usulü ile ihale edilecektir.",
+  };
+  const MILAT_ITEM = {
+    title: "ŞİŞLİ BELEDİYE BAŞKANLIĞI",
+    link: "https://www.milatgazetesi.com/sisli-belediye-baskanligi",
+    contentSnippet:
+      "JENERATÖR MONTAJ DAHİL ALIMI İŞİ ... mal alımı 4734 sayılı Kamu İhale Kanununun 19 uncu maddesine göre ...",
+  };
+  const NEWS_ITEMS = [
+    {
+      title: "İlan sitesine 111 TL yazıp alıcıdan 6 bin TL isteyen satıcıya soruşturma",
+      link: "https://www.cnnturk.com/turkiye/ilan-sitesine-111-tl-yazip-alicidan-6-bin-tl-isteyen-saticiya-sorusturma",
+      contentSnippet: "İlan sitesine 111 TL yazıp alıcıdan 6 bin TL isteyen satıcı hakkında soruşturma başlatıldı.",
+    },
+    {
+      title: "Meclis’te kabul edildi, Kızılay’a ihalesiz alım yolu açıldı",
+      link: "https://www.example-news.test/gundem/kizilay-ihalesiz-alim",
+      contentSnippet: "Teklifle Kızılay’ın alımları 4734 sayılı Kamu İhale Kanunu kapsamı dışına çıkarılıyor.",
+    },
+  ];
+
+  it.each([
+    ["Yeniçağ 'İlan-' court notice", YENICAG_ITEM],
+    ["Yeni Mesaj municipality tender", YENIMESAJ_ITEM],
+    ["Milat municipality tender", MILAT_ITEM],
+  ])("normalizeItem returns null for the %s", (_label, item) => {
+    expect(mod!.normalizeItem(source, item, NOW)).toBeNull();
+  });
+
+  it("completeItem (the heavy phase) is the one that drops them; prepareItem keeps them", () => {
+    for (const item of [YENICAG_ITEM, YENIMESAJ_ITEM, MILAT_ITEM]) {
+      const prepared = mod!.prepareItem(source, item);
+      expect(prepared).not.toBeNull();
+      expect(mod!.completeItem(source, prepared!, NOW)).toBeNull();
+    }
+  });
+
+  it("reads `content` when the feed has no contentSnippet", () => {
+    const { contentSnippet, ...rest } = YENICAG_ITEM;
+    expect(mod!.normalizeItem(source, { ...rest, content: contentSnippet }, NOW)).toBeNull();
+    const { contentSnippet: tender, ...tenderRest } = YENIMESAJ_ITEM;
+    expect(mod!.normalizeItem(source, { ...tenderRest, content: tender }, NOW)).toBeNull();
+  });
+
+  it("the same titles WITHOUT the description marker are still stored (the description decides)", () => {
+    const plainYenicag = mod!.normalizeItem(source, { ...YENICAG_ITEM, contentSnippet: "Dava dosyası ile ilgili duruşma yapıldı." }, NOW);
+    expect(plainYenicag).not.toBeNull();
+    const plainTender = mod!.normalizeItem(source, { ...YENIMESAJ_ITEM, contentSnippet: "Belediye başkanı yeni projeleri anlattı." }, NOW);
+    expect(plainTender).not.toBeNull();
+    expect(mod!.normalizeItem(source, { title: YENICAG_ITEM.title, link: YENICAG_ITEM.link }, NOW)).not.toBeNull();
+  });
+
+  it.each(NEWS_ITEMS.map((n) => [n.title, n] as const))("keeps the real story %s", (_title, item) => {
+    const row = mod!.normalizeItem(source, item, NOW);
+    expect(row).not.toBeNull();
+    expect(row!.title).toBe(item.title);
+    expect(row!.description).toBe(item.contentSnippet);
+  });
+
+  it("a dropped notice is not counted as contentless, ad link or paid content", () => {
+    const counters = { contentlessTitles: 0, adLinks: 0, paidContent: 0 };
+    expect(mod!.normalizeItem(source, YENICAG_ITEM, NOW, counters)).toBeNull();
+    expect(mod!.normalizeItem(source, YENIMESAJ_ITEM, NOW, counters)).toBeNull();
+    expect(counters).toEqual({ contentlessTitles: 0, adLinks: 0, paidContent: 0 });
+  });
+
+  it("normalizeArticles keeps the news and drops the notices, order kept", () => {
+    const rows = mod!.normalizeArticles(
+      source,
+      [NEWS_ITEMS[0]!, YENICAG_ITEM, YENIMESAJ_ITEM, NEWS_ITEMS[1]!, MILAT_ITEM],
+      NOW,
+    );
+    expect(rows.map((r) => r.title)).toEqual([NEWS_ITEMS[0]!.title, NEWS_ITEMS[1]!.title]);
+  });
+
+  it("scans a bounded prefix of a huge description (linear, no blow-up)", () => {
+    const run = (description: string) =>
+      mod!.normalizeItem(
+        source,
+        { title: "ÜMRANİYE BELEDİYE BAŞKANLIĞI", link: "/h168-huge", contentSnippet: description },
+        NOW,
+      );
+    expectLinear(rep("4734 sayılı Kamu İhale Kanun "), run, { sizes: [250_000, 500_000, 1_000_000, 2_000_000], ceilingMs: 2_000 });
+    expectLinear(rep(" ", "", "İlan-x"), run, { sizes: [250_000, 500_000, 1_000_000, 2_000_000], ceilingMs: 2_000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h169 review (ts-4, sec-ingest-nfc-quadratic-dos): the description that completeItem hands isLegalNotice is bounded twice.
+// Outer: clampForScan(rawDescription, DESCRIPTION_SCAN_CAP = 20,000), like cleanDescription. Inner: isNoticeByDescription cuts
+// to NOTICE_DESCRIPTION_SCAN_CAP (2,000) before the NFC pass, because normalize() is super-linear on combining marks that need
+// reordering (152 ms for 20,000 hostile units, where benign text of that size takes 0.01 ms). HEAD never normalised the
+// description, and the isolate has a cumulative 2 s of CPU: about 14 hostile items in a cycle would exhaust it every tick while
+// ISOLATE_ITEM_BUDGET books each as a few items. Removing either bound must fail a test below.
+// ---------------------------------------------------------------------------
+
+describe("normalize.ts h169 review: the legal-notice description scan is bounded (ts-4, sec-ingest-nfc-quadratic-dos)", () => {
+  const NOW = Date.parse("2026-11-12T08:00:00Z");
+  const MARKER = "4734 sayılı Kamu İhale Kanunu";
+  const TITLE = "ÜMRANİYE BELEDİYE BAŞKANLIĞI";
+  const item = (contentSnippet: string) => ({ title: TITLE, link: "/h169-bound", contentSnippet });
+  const OUTER_CAP = 20_000;
+
+  it("the control: the tender sentence inside the scan bound drops the item", () => {
+    expect(mod!.normalizeItem(source, item(`${"a ".repeat(10)}${MARKER}`), NOW)).toBeNull();
+    const prepared = mod!.prepareItem(source, item(`${"a ".repeat(10)}${MARKER}`));
+    expect(mod!.completeItem(source, prepared!, NOW)).toBeNull();
+  });
+
+  it("the sentence just past the inner bound ('a '.repeat(N) + the sentence) is not read: the item is kept, through both phases", () => {
+    const description = `${"a ".repeat(NOTICE_DESCRIPTION_SCAN_CAP / 2 + 1)}${MARKER}`;
+    const row = mod!.normalizeItem(source, item(description), NOW);
+    expect(row).not.toBeNull();
+    expect(row!.title).toBe(TITLE);
+    const prepared = mod!.prepareItem(source, item(description));
+    expect(mod!.completeItem(source, prepared!, NOW)).not.toBeNull();
+  });
+
+  it("the sentence just inside the inner bound still drops the item (the bound is not tighter than it says)", () => {
+    const pad = "a ".repeat(Math.floor((NOTICE_DESCRIPTION_SCAN_CAP - MARKER.length) / 2));
+    expect(pad.length + MARKER.length).toBeLessThanOrEqual(NOTICE_DESCRIPTION_SCAN_CAP);
+    expect(mod!.normalizeItem(source, item(`${pad}${MARKER}`), NOW)).toBeNull();
+  });
+
+  it("the sentence past the outer bound (20,000 units) is kept too", () => {
+    const description = `${"a ".repeat(OUTER_CAP / 2 + 1)}${MARKER}`;
+    expect(mod!.normalizeItem(source, item(description), NOW)).not.toBeNull();
+  });
+
+  it("completeItem hands isLegalNotice at most the outer bound of the raw description, whatever its size (the outer clamp)", () => {
+    const spy = vi.spyOn(legalNotice, "isLegalNotice");
+    try {
+      const huge = "x".repeat(5 * OUTER_CAP);
+      const prepared = mod!.prepareItem(source, item(huge));
+      expect(mod!.completeItem(source, prepared!, NOW)).not.toBeNull();
+      const description = spy.mock.calls.at(-1)?.[2];
+      expect(typeof description).toBe("string");
+      expect((description as string).length).toBeLessThanOrEqual(OUTER_CAP);
+      // A description that fits is passed through as it is (same string, no copy).
+      const small = "Kısa bir açıklama.";
+      mod!.completeItem(source, mod!.prepareItem(source, item(small))!, NOW);
+      expect(spy.mock.calls.at(-1)?.[2]).toBe(small);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Hostile combining marks: 230-class marks, then 220-class marks, and alternating. The ceiling (40 ms of CPU) is what the
+  // inner bound buys: without it the outer clamp alone still lets a 20,000-unit normalisation through (70 to 150 ms).
+  const HOSTILE: Array<[string, Gen]> = [
+    ["a run of 230-class marks, then 220-class marks", (n) => `a${"\u0301".repeat(n >> 1)}${"\u0316".repeat(n - (n >> 1))}`],
+    ["alternating 230-class and 220-class marks", rep("\u0301\u0316", "a")],
+  ];
+  it.each(HOSTILE)("a combining-mark description is linear through completeItem: %s", (_label, gen) => {
+    expectLinear(gen, (d) => mod!.normalizeItem(source, item(d), NOW), {
+      sizes: [25_000, 50_000, 100_000, 200_000],
+      ceilingMs: 40,
+    });
+  });
+
+  it("the same with a mixed-case title (the description is normalised whatever the title says)", () => {
+    expectLinear(
+      HOSTILE[0]![1],
+      (d) => mod!.normalizeItem(source, { title: "Mixed case title", link: "/h169-mixed", contentSnippet: d }, NOW),
+      { sizes: [25_000, 50_000, 100_000, 200_000], ceilingMs: 40 },
+    );
   });
 });

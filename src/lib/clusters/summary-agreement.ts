@@ -1,6 +1,6 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import { isOpinionUrl } from "@/lib/articles/opinion-url";
-import { isHeadlineEcho } from "@/lib/articles/description-boilerplate";
+import { isHeadlineEcho, startsWithPlaceholderLine } from "@/lib/articles/description-boilerplate";
 import { hasFiniteVerb } from "@/lib/articles/finite-verb";
 import {
   clampCutIntroducedQuote,
@@ -215,6 +215,18 @@ import type { SummaryMember } from "./summary-attribution";
 //     candidate (defect, agency copy, language, rights, echo, length) is unchanged, and with no
 //     qualifying member the seed stays, never blank (9dd62dcd: the live line is kept, no member
 //     is clean and covers enough). A past tense ("açıklama yaptı") stays a report, not a live line.
+//
+// h168-ozet-1: a seed with NOTHING to show was never looked at. A "coming soon" placeholder
+// ("Ayrıntılar geliyor...", 41ebdae3, bb7e0804, df08098c: Milliyet's seed under a story that Sözcü,
+// Haberet and Haber Global had written up in a sentence) tidies to "" and the page hid the Özet, the
+// same as when no member had anything. It is a form defect now ('placeholder' in `seedDisqualified`:
+// the shown text is empty and the RAW text is a placeholder by the tidy step's own test,
+// `startsWithPlaceholderLine`), and summary-attribution.ts hands it to `findAgreeingMember` like a
+// lead-in. A seed that shows nothing covers none of the headline, so the floor is AGREEMENT_LOW, the
+// near-zero stub's (h132-ozetpost-1), not 0.6: a member that covers half of the headline is a better
+// Özet than none. The same floor holds for a BLANK seed (summary_tr " ", 1e6350f0: AA's description is
+// empty) that summary-attribution.ts passes in with `seedShown` "" and no defect. Every other gate of
+// a candidate is unchanged, and with no qualifying member the Özet stays hidden, as before.
 
 /** A seed scoring below this disagrees with the title (exclusive: 0.5 is kept). */
 export const AGREEMENT_LOW = 0.5;
@@ -823,7 +835,17 @@ function unbalancedQuotes(s: string): boolean {
   return straight % 2 === 1 || curly !== 0;
 }
 
-export type SeedDefect = "cms" | "case" | "stub" | "quotes" | "quote-only" | "live" | "teaser" | "lead-in" | "echo";
+export type SeedDefect =
+  | "cms"
+  | "case"
+  | "stub"
+  | "quotes"
+  | "quote-only"
+  | "live"
+  | "teaser"
+  | "lead-in"
+  | "echo"
+  | "placeholder";
 
 /** JavaScript's `toLowerCase` of "İ" is "i" followed by this combining dot above. */
 const COMBINING_DOT_ABOVE = "\u0307";
@@ -906,11 +928,16 @@ export interface SeedTitles {
  *   - "echo": the shown text only repeats a headline: the seed article's own
  *     (`titles.memberTitle`) or the cluster's (`titles.clusterTitle`), compared with
  *     `isHeadlineEcho` (case, blanks, trailing marks and a cut-off "…" do not matter).
- *     Without `titles` there is nothing to echo.
+ *     Without `titles` there is nothing to echo;
+ *   - "placeholder": the shown text is EMPTY and the raw text is a "coming soon" placeholder
+ *     ("Ayrıntılar geliyor...", "Detaylar gelecek…", "Ayrıntılar birazdan...\nKaynak: ...": the first
+ *     line is one of the tidy step's placeholder phrases, {@link startsWithPlaceholderLine}, h168-ozet-1).
+ *     Checked last, so every verdict above keeps its place and a non-empty shown text is never one.
  * Every one of them is a form defect: the replacement needs
  * {@link AGREEMENT_FORM_DEFECT_MIN}, not {@link AGREEMENT_HIGH}; behind a "stub" that scores under
- * {@link AGREEMENT_STUB_LOW_SEED} against the title, {@link AGREEMENT_LOW} (h132-ozetpost-1,
- * decided in {@link findAgreeingMember}, which knows the title). Never throws.
+ * {@link AGREEMENT_STUB_LOW_SEED} against the title, and behind a "placeholder", {@link AGREEMENT_LOW}
+ * (h132-ozetpost-1, h168-ozet-1, decided in {@link findAgreeingMember}, which knows the title).
+ * Never throws.
  */
 export function seedDisqualified(raw: string, shown: string, titles: SeedTitles = {}): SeedDefect | null {
   if (typeof raw !== "string" || typeof shown !== "string") return null;
@@ -927,6 +954,8 @@ export function seedDisqualified(raw: string, shown: string, titles: SeedTitles 
   if (OPENS_WITH_COME_ON.test(fold((leadIn ?? shown).trimStart()))) return "teaser";
   if (leadIn !== null) return "lead-in";
   if (isHeadlineEcho(titles.memberTitle, shown) || isHeadlineEcho(titles.clusterTitle, shown)) return "echo";
+  // h168-ozet-1: nothing is shown and the raw text is a placeholder, not a text the tidy step emptied for another reason.
+  if (shown === "" && startsWithPlaceholderLine(raw)) return "placeholder";
   return null;
 }
 
@@ -1143,7 +1172,8 @@ function byNewest(a: Scored, b: Scored): number {
  *     {@link AGREEMENT_FORM_DEFECT_MIN} behind a CMS dump, a lower-cased headline, a stub, quotes,
  *     quotations only, a live line, a teaser, a lead-in or an echo ({@link seedDisqualified}),
  *     {@link AGREEMENT_LOW} behind a
- *     stub that scores under {@link AGREEMENT_STUB_LOW_SEED} (h132-ozetpost-1), {@link AGREEMENT_HIGH}
+ *     stub that scores under {@link AGREEMENT_STUB_LOW_SEED} (h132-ozetpost-1) and behind a seed that
+ *     shows nothing (a placeholder, or a blank summary; h168-ozet-1), {@link AGREEMENT_HIGH}
  *     otherwise (an opinion, a stale or an explainer seed keep it: what they say is the
  *     problem, not how they look). A candidate is never filtered by its OWN title. Behind a clean
  *     seed a copy of the seed's text scores what the seed scores, so it can never pass.
@@ -1193,7 +1223,12 @@ export function findAgreeingMember({
   });
   const malformed = defect !== null || stale || opinionSeed || explainerSeed;
   const nearZeroStub = defect === "stub" && seedScore < AGREEMENT_STUB_LOW_SEED - EPSILON;
-  const floor = nearZeroStub ? AGREEMENT_LOW : defect !== null ? AGREEMENT_FORM_DEFECT_MIN : AGREEMENT_HIGH;
+  // h168-ozet-1: a seed with nothing to show (a placeholder, or a blank summary_tr that has no defect)
+  // covers none of the title: the near-zero stub's floor. A lead-in or a teaser the tidy step emptied
+  // keeps AGREEMENT_FORM_DEFECT_MIN: its raw text says something about the story.
+  const nothingShown = seedShown === "" && (defect === "placeholder" || defect === null);
+  const floor =
+    nearZeroStub || nothingShown ? AGREEMENT_LOW : defect !== null ? AGREEMENT_FORM_DEFECT_MIN : AGREEMENT_HIGH;
   if (!malformed && !disagrees(seedScore)) return null;
 
   const texts = members.map((m) => repairEntityResidue(m.article.description ?? "").trim());

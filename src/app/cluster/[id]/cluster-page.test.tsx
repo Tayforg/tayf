@@ -5010,6 +5010,23 @@ describe("generateMetadata — a question or SEO-explainer headline is noindex,f
       expect(src, file).toContain("hasIndexableTitle(");
     }
   });
+
+  // h168-notices-1: the page is also `noindex` when every member is a legal notice, through the predicate isNoticeOnlyCluster.
+  // The sitemaps and IndexNow deliberately do NOT apply that test (they carry no members, and a member read per rebuild is far too
+  // heavy for the few legacy notice-only clusters; new notices are dropped at ingest), so they must not import the notice module:
+  // this keeps the comment above isIndexableCluster in page.tsx true.
+  it("the notice-only test is the page's alone: the sitemaps and IndexNow do not read members for it", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "lib", "seo");
+    for (const file of ["sitemaps.ts", "indexnow.ts"]) {
+      const src = readFileSync(join(root, file), "utf8");
+      expect(src, file).not.toContain("notice-only-clusters");
+    }
+    const page = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "page.tsx"), "utf8");
+    expect(page).toContain('from "@/lib/seo/notice-only-clusters"');
+    const helper = readFileSync(join(root, "notice-only-clusters.ts"), "utf8");
+    expect(helper).toContain("export function isNoticeOnlyCluster(");
+    expect(helper).toContain("isLegalNotice(");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -5751,5 +5768,192 @@ describe("ClusterDetailPage — share text of an all-English cluster (h118-share
   it("controls: a mixed a-haber + daily-sabah cluster keeps today's share text", async () => {
     const { text } = await shareOf(withVotes(MIXED_SOURCES, { pro_government: 2 }));
     expect(text).toBe("2 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h168-notices-1: two municipalities' EKAP tenders (yeni-mesaj and milat,
+// all-caps titles, the 4734 sayılı Kamu İhale Kanunu sentence in the
+// descriptions) became the 2-source story "Ümraniye belediye başkanlığı" and was
+// served index,follow. A cluster in which EVERY member is a legal notice
+// (isLegalNotice on the member's title, url and description) is not a story: the
+// page is noindex,follow and gets no "İlgili haberler" block, through the same
+// isIndexableCluster helper as the other noindex conditions. One real member
+// keeps the page indexable. Reader side only: nothing in the table is rewritten.
+// ---------------------------------------------------------------------------
+
+describe("generateMetadata and the page: a cluster of only legal notices is noindex,follow (h168-notices-1)", () => {
+  interface MemberSpec {
+    id: string;
+    slug: string;
+    name: string;
+    title: string;
+    url: string;
+    description: string | null;
+  }
+
+  const UMRANIYE: MemberSpec = {
+    id: "a-yeni-mesaj",
+    slug: "yeni-mesaj",
+    name: "Yeni Mesaj",
+    title: "ÜMRANİYE BELEDİYE BAŞKANLIĞI",
+    url: "https://www.yenimesaj.com.tr/umraniye-belediye-baskanligi-H1621484.htm",
+    description:
+      "İLAN BİNA İNŞAATI YAPTIRILACAKTIR ... 4734 sayılı Kamu İhale Kanununun 19 uncu maddesine göre açık ihale usulü ile ihale edilecektir.",
+  };
+  const SISLI: MemberSpec = {
+    id: "a-milat",
+    slug: "milat",
+    name: "Milat",
+    title: "ŞİŞLİ BELEDİYE BAŞKANLIĞI",
+    url: "https://www.milatgazetesi.com/sisli-belediye-baskanligi",
+    description:
+      "JENERATÖR MONTAJ DAHİL ALIMI İŞİ ... mal alımı 4734 sayılı Kamu İhale Kanununun 19 uncu maddesine göre ...",
+  };
+  const YENICAG_COURT: MemberSpec = {
+    id: "a-yenicag",
+    slug: "yenicag",
+    name: "Yeniçağ",
+    title: "T.C. Kırıkhan 2. Asliye Ceza Mahkemesi",
+    url: "https://www.yenicaggazetesi.com/tc-kirikhan-2-asliye-ceza-mahkemesi-1090289h.htm",
+    description: "İlan-T.C. Kırıkhan 2. Asliye Ceza Mahkemesi",
+  };
+  const COURT_TITLE_ONLY: MemberSpec = {
+    id: "a-court",
+    slug: "mahkeme",
+    name: "Mahkeme Haber",
+    title: "BARTIN 2. ASLİYE HUKUK MAHKEMESİ",
+    url: "https://example.test/haber/1",
+    description: null,
+  };
+  const REAL_KIZILAY: MemberSpec = {
+    id: "a-kizilay",
+    slug: "kizilay-haber",
+    name: "Kızılay Haber",
+    title: "Meclis’te kabul edildi, Kızılay’a ihalesiz alım yolu açıldı",
+    url: "https://www.example-news.test/gundem/kizilay-ihalesiz-alim",
+    description: "Teklifle Kızılay’ın alımları 4734 sayılı Kamu İhale Kanunu kapsamı dışına çıkarılıyor.",
+  };
+  const REAL_ILAN_SITESI: MemberSpec = {
+    id: "a-ilan-sitesi",
+    slug: "cnn-turk",
+    name: "CNN Türk",
+    title: "İlan sitesine 111 TL yazıp alıcıdan 6 bin TL isteyen satıcıya soruşturma",
+    url: "https://www.cnnturk.com/turkiye/ilan-sitesine-111-tl-yazip-alicidan-6-bin-tl-isteyen-saticiya-sorusturma",
+    description: "İlan sitesine 111 TL yazıp alıcıdan 6 bin TL isteyen satıcı hakkında soruşturma başlatıldı.",
+  };
+
+  function detailOf(
+    specs: readonly MemberSpec[],
+    opts: { articleCount?: number; topic7?: string } = {},
+  ): ClusterDetail {
+    const members: ClusterDetailMember[] = specs.map((s) => ({
+      source: makeSource({ id: s.id, slug: s.slug, name: s.name }),
+      article: {
+        id: s.id,
+        title: s.title,
+        url: s.url,
+        published_at: "2026-11-12T08:00:00.000Z",
+        image_url: null,
+        content_hash: `hash-${s.id}`,
+        description: s.description,
+      },
+    }));
+    const count = opts.articleCount ?? members.length;
+    return {
+      cluster: {
+        ...makeCluster({
+          bias_distribution: emptyDistribution(),
+          article_count: count,
+          title_tr: "Ümraniye belediye başkanlığı",
+        }),
+        ...(opts.topic7 ? { topic7: opts.topic7 } : {}),
+      } as ClusterDetail["cluster"],
+      members,
+      allSources: members.map((m) => m.source),
+      wire: { isWireRedistribution: false, effectiveArticleCount: count, memberCount: count },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  const meta = () => generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+  const NOINDEX = { index: false, follow: true };
+
+  it("the 550b5df0 shape (yeni-mesaj + milat tenders, 2 sources) is noindex,follow with its headline, canonical and og:url unchanged", async () => {
+    getClusterDetail.mockResolvedValue(detailOf([UMRANIYE, SISLI]));
+
+    const metadata = await meta();
+
+    expect(metadata.robots).toEqual(NOINDEX);
+    expect(metadata.title).toBe("Ümraniye belediye başkanlığı");
+    expect(metadata.alternates?.canonical).toBe("/cluster/c1");
+    expect(metadata.openGraph?.url).toBe("/cluster/c1");
+    expect(notFound).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Yeniçağ 'İlan-' notices", [YENICAG_COURT, { ...YENICAG_COURT, id: "a-yenicag-2", slug: "yenicag-2" }]],
+    ["a title-rule court notice beside a tender", [COURT_TITLE_ONLY, UMRANIYE]],
+    ["three notices of three kinds", [YENICAG_COURT, UMRANIYE, COURT_TITLE_ONLY]],
+  ])("%s: noindex,follow", async (_label, specs) => {
+    getClusterDetail.mockResolvedValue(detailOf(specs));
+    expect((await meta()).robots).toEqual(NOINDEX);
+  });
+
+  it("an /ilan/ url notice with an ordinary title counts as a notice", async () => {
+    const pathNotice: MemberSpec = { ...COURT_TITLE_ONLY, title: "Satılık araç", url: "https://example.test/ilan/12345" };
+    getClusterDetail.mockResolvedValue(detailOf([pathNotice, UMRANIYE]));
+    expect((await meta()).robots).toEqual(NOINDEX);
+  });
+
+  it.each([
+    ["a real story beside a tender", [UMRANIYE, REAL_KIZILAY]],
+    ["a real 'İlan sitesine' story beside a court notice", [YENICAG_COURT, REAL_ILAN_SITESI]],
+    ["a real story among three notices", [UMRANIYE, SISLI, YENICAG_COURT, REAL_KIZILAY]],
+    ["two real stories", [REAL_KIZILAY, REAL_ILAN_SITESI]],
+  ])("%s: robots left to the root layout (indexable)", async (_label, specs) => {
+    getClusterDetail.mockResolvedValue(detailOf(specs));
+    expect((await meta()).robots).toBeUndefined();
+  });
+
+  it("a cluster with no members read is not judged a notice cluster (an empty list is not 'every member')", async () => {
+    getClusterDetail.mockResolvedValue(detailOf([], { articleCount: 3 }));
+    expect((await meta()).robots).toBeUndefined();
+  });
+
+  it("merges with the other conditions: a single-article notice cluster is noindex on either count", async () => {
+    getClusterDetail.mockResolvedValue(detailOf([UMRANIYE], { articleCount: 1 }));
+    expect((await meta()).robots).toEqual(NOINDEX);
+  });
+
+  it("the page gives a notice-only cluster no 'İlgili haberler' block and reads no feed, agreeing with the robots tag", async () => {
+    getTopicClusters.mockResolvedValue({ bundles: [], hasMore: false, page: 1 });
+
+    getClusterDetail.mockResolvedValue(detailOf([UMRANIYE, SISLI], { topic7: "ekonomi" }));
+    const noticeTree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(findSuspenseAround(noticeTree, "ClusterRelatedSlot")).toBeNull();
+    expect((await meta()).robots).toEqual(NOINDEX);
+    expect(getTopicClusters).not.toHaveBeenCalled();
+
+    // Control: one real member brings the block (and the index) back.
+    getClusterDetail.mockResolvedValue(detailOf([UMRANIYE, REAL_KIZILAY], { topic7: "ekonomi" }));
+    const newsTree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(findSuspenseAround(newsTree, "ClusterRelatedSlot")).not.toBeNull();
+    expect((await meta()).robots).toBeUndefined();
+  });
+
+  it("the page source builds the verdict from isNoticeOnlyCluster over the members in the one shared helper", () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "page.tsx"), "utf8");
+    // The predicate lives in src/lib/seo/notice-only-clusters.ts (the page is its only caller).
+    expect(src).toContain('from "@/lib/seo/notice-only-clusters"');
+    expect(src).not.toContain("supabase/functions/_shared/rss/legal-notice");
+    const start = src.indexOf("function isIndexableCluster(");
+    const body = src.slice(start, src.indexOf("\n}\n", start) + 2);
+    expect(body).toContain("isNoticeOnlyCluster(");
+    expect(body).toContain("m.article");
+    // Still the one definition: the definition and its two call sites, both passing the members.
+    expect(src.split("isIndexableCluster(").length - 1).toBe(3);
+    expect(src.split("isIndexableCluster(cluster, hasHeadline, members)").length - 1).toBe(2);
   });
 });

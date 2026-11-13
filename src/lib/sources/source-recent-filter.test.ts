@@ -224,3 +224,133 @@ describe("selectSourceRecentArticles: paid content urls (h148-sources-1)", () =>
     expect(out[0]).toBe(rows[1]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h168-notices-1. A court or tender notice (resmi ilan) is not news. Yeniçağ's
+// mixed-case "İlan-<title>" notices filled 7 of the 20 'Son haberler' rows on
+// /source/yenicag, and two clustered municipality tenders (all-caps title, the
+// 4734 sayılı Kamu İhale Kanunu sentence in the description) sat in a 2-source
+// cluster. The list drops a notice BEFORE the clustered-id exemption, clustered
+// or not, on title, url and description (isLegalNotice). Rows stored before the
+// ingest rule are hidden here on read; nothing in the table is rewritten.
+// ---------------------------------------------------------------------------
+
+const NOTICE_URL = "https://www.yenicaggazetesi.com/tc-kirikhan-2-asliye-ceza-mahkemesi-1090289h.htm";
+
+function noticeRow(id: string, title: string, description: string | null, url: string | null = NOTICE_URL): UrlRow {
+  return { id, title, description, url };
+}
+
+const COURT_NOTICE = noticeRow(
+  "n-court",
+  "T.C. Kırıkhan 2. Asliye Ceza Mahkemesi",
+  "İlan-T.C. Kırıkhan 2. Asliye Ceza Mahkemesi",
+);
+const TENDER_NOTICE = noticeRow(
+  "n-tender",
+  "ÜMRANİYE BELEDİYE BAŞKANLIĞI",
+  "İLAN BİNA İNŞAATI YAPTIRILACAKTIR ... 4734 sayılı Kamu İhale Kanununun 19 uncu maddesine göre açık ihale usulü ...",
+  "https://www.yenimesaj.com.tr/umraniye-belediye-baskanligi-H1621484.htm",
+);
+const TITLE_NOTICE = noticeRow("n-title", "BARTIN 2. ASLİYE HUKUK MAHKEMESİ", null, "https://example.test/haber/1");
+const PATH_NOTICE = noticeRow("n-path", "Satılık araç", null, "https://example.test/ilan/12345");
+
+// Real stories that share a word or a law number with the notices above.
+const ILAN_SITESI_NEWS = noticeRow(
+  "k-ilan-sitesi",
+  "İlan sitesine 111 TL yazıp alıcıdan 6 bin TL isteyen satıcıya soruşturma",
+  "İlan sitesine 111 TL yazıp alıcıdan 6 bin TL isteyen satıcı hakkında soruşturma başlatıldı.",
+  "https://www.cnnturk.com/turkiye/ilan-sitesine-111-tl-yazip-alicidan-6-bin-tl-isteyen-saticiya-sorusturma",
+);
+const KIZILAY_NEWS = noticeRow(
+  "k-kizilay",
+  "Meclis’te kabul edildi, Kızılay’a ihalesiz alım yolu açıldı",
+  "Teklifle Kızılay’ın alımları 4734 sayılı Kamu İhale Kanunu kapsamı dışına çıkarılıyor.",
+  "https://www.example-news.test/gundem/kizilay-ihalesiz-alim",
+);
+
+describe("selectSourceRecentArticles: legal notices (h168-notices-1)", () => {
+  it.each([
+    ["a Yeniçağ 'İlan-' court notice", COURT_NOTICE],
+    ["an all-caps municipality tender with the 4734 sentence", TENDER_NOTICE],
+    ["an all-caps court title (title rule)", TITLE_NOTICE],
+    ["an /ilan/ url (url rule)", PATH_NOTICE],
+  ])("drops %s when it is in no cluster", (_label, notice) => {
+    const news = urlRow(1, "https://halktv.com.tr/gundem/bir-haber-1061591h");
+    expect(selectSourceRecentArticles([notice, news], NONE)).toEqual([news]);
+  });
+
+  it.each([
+    ["a Yeniçağ 'İlan-' court notice", COURT_NOTICE],
+    ["an all-caps municipality tender with the 4734 sentence", TENDER_NOTICE],
+    ["an all-caps court title (title rule)", TITLE_NOTICE],
+    ["an /ilan/ url (url rule)", PATH_NOTICE],
+  ])("drops %s even when its id is in clusteredIds (the check runs before the exemption)", (_label, notice) => {
+    const news = urlRow(1, "https://halktv.com.tr/gundem/bir-haber-1061591h");
+    expect(selectSourceRecentArticles([notice, news], new Set([notice.id, news.id]))).toEqual([news]);
+  });
+
+  it("keeps the real stories that mention the tender law or start 'İlan sitesine', clustered or not", () => {
+    expect(selectSourceRecentArticles([ILAN_SITESI_NEWS, KIZILAY_NEWS], NONE)).toEqual([
+      ILAN_SITESI_NEWS,
+      KIZILAY_NEWS,
+    ]);
+    expect(
+      selectSourceRecentArticles(
+        [ILAN_SITESI_NEWS, KIZILAY_NEWS],
+        new Set([ILAN_SITESI_NEWS.id, KIZILAY_NEWS.id]),
+      ),
+    ).toEqual([ILAN_SITESI_NEWS, KIZILAY_NEWS]);
+  });
+
+  it("judges the description a row carries: the same title is kept without the marker", () => {
+    const plain = noticeRow("p1", COURT_NOTICE.title, "Dava dosyası ile ilgili duruşma yapıldı.");
+    const noDescription = noticeRow("p2", COURT_NOTICE.title, null);
+    expect(selectSourceRecentArticles([plain, noDescription], NONE)).toEqual([plain, noDescription]);
+  });
+
+  it("a row with no url or description field at all is judged on its title", () => {
+    const bare: Row = { id: "b1", title: "BARTIN 2. ASLİYE HUKUK MAHKEMESİ", description: null };
+    const ordinary: Row = { id: "b2", title: "Bütçe görüşmesi", description: null };
+    expect(selectSourceRecentArticles([bare, ordinary], NONE)).toEqual([ordinary]);
+  });
+
+  it("fills the 20-row cap from later rows when 7 of the newest 20 are notices (the /source/yenicag shape)", () => {
+    const notices = [
+      "T.C. Kırıkhan 2. Asliye Ceza Mahkemesi",
+      "T.C. Gelibolu (Sulh Hukuk Mah.) Satış Memurluğu",
+      "T.C. Akyazı 2. Asliye Hukuk Mahkemesi",
+      "Hamidiye Kaynak Suları San. Tur Ve Tic. A.Ş.",
+      "T.C. İstanbul 14. Asliye Hukuk Mahkemesi",
+      "T.C. Kocaeli 7. Asliye Hukuk Mahkemesinden İlan",
+      "Ankara Defterdarlığı (Cumhuriyet Vergi Dairesi Müdürlüğü)",
+    ].map((title, i) => noticeRow(`y-notice-${i}`, title, `İlan-${title}`));
+    const news = Array.from({ length: 33 }, (_, i) => ({
+      ...urlRow(100 + i, `https://www.yenicaggazetesi.com/gundem/haber-${i}h.htm`),
+      title: `Bütçe görüşmesi ${i}`,
+    }));
+    // Notices interleaved among the newest 20, as in production.
+    const rows: UrlRow[] = [];
+    let n = 0;
+    for (let i = 0; i < 40; i += 1) {
+      const isNotice = i < 20 && i % 3 === 0 && n < notices.length;
+      rows.push(isNotice ? notices[n++]! : news.shift()!);
+    }
+    expect(n).toBe(7);
+
+    const out = selectSourceRecentArticles(rows, new Set(notices.map((r) => r.id)));
+
+    expect(out).toHaveLength(20);
+    expect(out.some((r) => r.id.startsWith("y-notice-"))).toBe(false);
+    expect(out.map((r) => r.id)).toEqual(rows.filter((r) => !r.id.startsWith("y-notice-")).slice(0, 20).map((r) => r.id));
+  });
+
+  it("does not mutate its input and returns the same row objects it kept", () => {
+    const rows = [COURT_NOTICE, TENDER_NOTICE, ILAN_SITESI_NEWS];
+    const snapshot = [...rows];
+    const out = selectSourceRecentArticles(rows, new Set([TENDER_NOTICE.id]));
+    expect(rows).toEqual(snapshot);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe(ILAN_SITESI_NEWS);
+  });
+});

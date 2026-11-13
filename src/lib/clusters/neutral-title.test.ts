@@ -7795,3 +7795,441 @@ describe("h165 review: a case-trusted twin that wrote the stored title's exact c
     expect(picked).not.toContain("Bakan kurum");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h168-titles-1: one outlet's partisan epithet as the 'neutral' H1 ('katillere destek', 'ihale rantı')
+// ---------------------------------------------------------------------------
+//
+// 49facb31 (12 members, the home page's top story) carried Star's "Trump, katillere desteğiyle övündü: Bu iş bittiğinde
+// İsrail'e gidip başbakan olabilirim" as its H1 and 8ab79860 Akşam's "... İBB yönetimine ihale rantı tepkisi": no rule of
+// LOADED_FOLDED charged either, so the h42 'loaded' incumbent switch could not replace them. Three rules are added, one unit
+// each, all on the headline's own words (a speaker's quoted words stay free, as 'şaibe' does). The fixture
+// (src/lib/clusters/__fixtures__/h168-loaded.json, test-only) is the member titles (newest first) and source slugs of the
+// two clusters as read on production on 2026-11-12.
+
+const H168_LOADED: H164Fixture = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h168-loaded.json"), "utf8"),
+) as H164Fixture;
+
+function h168Loaded(cid: string): H164Cluster {
+  const found = H168_LOADED.clusters.find((c) => c.cid === cid);
+  if (found === undefined) throw new Error(`h168-loaded.json has no cluster ${cid}`);
+  return found;
+}
+
+describe("h168-titles-1: the fixture", () => {
+  it("holds the two clusters with their stored title, stamp and every member title", () => {
+    expect(H168_LOADED.clusters.map((c) => c.cid)).toEqual(["49facb31", "8ab79860"]);
+    for (const c of H168_LOADED.clusters) {
+      expect(c.model).toBe("extractive-v6");
+      expect(c.members).toHaveLength(c.article_count);
+    }
+    expect(h168Loaded("49facb31").stored).toBe(
+      "Trump, katillere desteğiyle övündü: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim",
+    );
+    expect(h168Loaded("8ab79860").stored).toBe("Şerbetli tatlıya tuzlu fatura. İBB yönetimine ihale rantı tepkisi");
+    // Only Star writes the epithet in 49facb31; Oksijen and Karar write the same sentence without it.
+    const members = h168Loaded("49facb31").members;
+    expect(members.filter((m) => m.title.includes("katil")).map((m) => m.source)).toEqual(["star"]);
+    expect(members.some((m) => m.title === "Trump: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim")).toBe(true);
+  });
+});
+
+describe("h168-titles-1: loadedPenalty charges the label 'katil' for a party, 'ihale rantı' and 'rant kapısı'", () => {
+  it.each([
+    "Trump, katillere desteğiyle övündü: Bu iş bittiğinde İsrail'e gidip başbakan olabilirim",
+    "Şerbetli tatlıya tuzlu fatura. İBB yönetimine ihale rantı tepkisi",
+    "Katillere destek veren hükümet",
+    "katil rejimin saldırısı",
+  ])("%s is charged one unit", (title) => {
+    expect(loadedPenalty(title)).toBe(1);
+  });
+
+  it.each([
+    // 'katil' as the label of a party, with the Turkish case suffixes the rule lists, in front of 'destek' or 'desteği-'.
+    "Katile destek veren ülkeler",
+    "Katili destekleyen hükümet",
+    "Katillerin desteği sürüyor",
+    "Hükümet katillerine destek verdi",
+    "Katillere desteğini sürdürdü",
+    "Bakan: katillerin destekçileri hesap verecek",
+    // 'katil' in front of a state word.
+    "Katil devlet yine saldırdı",
+    "katil ordu sınırı geçti",
+    "Katil hükümet istifa etmeli",
+    "Katil siyonist yönetim açıklama yaptı",
+    // The other two rules, with their suffixes.
+    "İhale rantına tepki büyüyor",
+    "Belediyede ihale rantları ortaya çıktı",
+    "ihale rantı iddiası",
+    "Rant kapısı olmuş belediye",
+    "Kentte rant kapısına dönüştü",
+    "Kentsel dönüşüm rant kapısı mı",
+  ])("%s is charged", (title) => {
+    expect(loadedPenalty(title)).toBeGreaterThanOrEqual(1);
+  });
+
+  it.each([
+    // 'katil' (killer) as a noun, with no party behind it.
+    "Afyonkarahisar'daki katliamda yeni gelişme: 8 kişinin katilinin ilk ifadesi ortaya çıktı",
+    "Katil zanlısı yakalandı",
+    "Seri katil belgeseli yayında",
+    "Katil zanlısına destek veren kişi gözaltına alındı",
+    "Eşini öldüren katil yakalandı",
+    // every 'katıl-' word: the dotless ı is a different letter, foldTr keeps it, so 'katil' never reads inside it.
+    "COP31'e katılan liderlere destek",
+    "Katılım bankalarına destek paketi",
+    "Katılımcılara destek verildi",
+    "KATILIM BANKALARINA DESTEK PAKETİ",
+    "Katıldı destek veren kuruluşlar",
+    "Etkinliğe katılanlara destek sözü",
+    "Katılımcı rejim değişikliği istedi",
+    // a speaker's own words, behind the label's opening quote.
+    "Bahçeli: Avrupa göçmen karşıtlığından siyasi rant devşiriyor",
+    "Erdoğan: 'Katillere destek verenler hesap verecek'",
+    "Özel: “İBB'de ihale rantı var”",
+    "Bahçeli: \"Rant kapısı kapatıldı\"",
+    // 'ihale' and 'rant' that never meet.
+    "Kamu İhale Kanunu değişikliği Meclis'te",
+    "İhale sonuçları açıklandı, rant iddiası yok",
+    "Rant, kapısı olmayan bir kavram",
+    "Rantabilite oranları yükseldi",
+  ])("%s stays free", (title) => {
+    expect(loadedPenalty(title)).toBe(0);
+  });
+
+  it("a quote that is not a speaker's is the headline's own scare quote and is charged", () => {
+    expect(loadedPenalty("İBB'de 'ihale rantı' iddiası")).toBe(1);
+    expect(loadedPenalty("Dava ertelendi! 'Rant kapısı' sözü yeniden gündemde")).toBe(1);
+    // A bulletin lead-in is not a speaker label.
+    expect(loadedPenalty("Son dakika: 'Katillere destek' çıkışı")).toBe(1);
+  });
+
+  it("the three rules are one unit each: a title that trips two pays two, and the existing epithet rule still counts apart", () => {
+    expect(loadedPenalty("İBB'de ihale rantı ve rant kapısı")).toBe(2);
+    expect(loadedPenalty("Katillere destek veren İBB'de ihale rantı")).toBe(2);
+    expect(loadedPenalty("Katil İsrail'e destek")).toBe(1);
+  });
+
+  it("is linear on hostile input", () => {
+    const opts = { n: 250_000, ceilingMs: 8_000 };
+    expectLinear(rep("katil "), (shape) => loadedPenalty(`${shape}destek`), opts);
+    expectLinear(rep("katillerine "), (shape) => loadedPenalty(`${shape}destek`), opts);
+    expectLinear(rep("katil"), (shape) => loadedPenalty(shape), opts);
+    expectLinear(rep("ihale "), (shape) => loadedPenalty(`${shape}rant`), opts);
+    expectLinear(rep("rant "), (shape) => loadedPenalty(`${shape}kapı`), opts);
+    expectLinear(rep(" "), (shape) => loadedPenalty(`katil${shape}x`), opts);
+    expectLinear(rep(" "), (shape) => loadedPenalty(`ihale${shape}x`), opts);
+  });
+});
+
+describe("h168-titles-1: the stored epithet gives way to a member's own wording", () => {
+  it("49facb31: the stored title is charged, and fresh, with the incumbent and with the floor no pick carries 'katil'", () => {
+    const c = h168Loaded("49facb31");
+    expect(loadedPenalty(c.stored)).toBeGreaterThanOrEqual(1);
+    const titles = c.members.map((m) => m.title);
+    for (const opts of [{}, { floor: true }, { incumbent: c.stored }, { incumbent: c.stored, floor: true }]) {
+      const picked = pickNeutralTitle(h164Members(c), opts);
+      expect(picked, JSON.stringify(opts)).not.toBeNull();
+      expect((picked as string).toLocaleLowerCase("tr"), JSON.stringify(opts)).not.toContain("katil");
+      expect(loadedPenalty(picked as string), JSON.stringify(opts)).toBe(0);
+      expect(incumbentIsMemberTitle(picked as string, titles), JSON.stringify(opts)).toBe(true);
+    }
+  });
+
+  it("49facb31: with the stored title as the incumbent, the wording the other outlets share replaces it", () => {
+    const c = h168Loaded("49facb31");
+    const picked = pickNeutralTitle(h164Members(c), { incumbent: c.stored }) as string;
+    expect(picked).not.toBe(c.stored);
+    expect(picked).toContain("başbakan olabilirim");
+  });
+
+  it("8ab79860: the stored title is charged, and fresh, with the incumbent and with the floor no pick carries 'rant'", () => {
+    const c = h168Loaded("8ab79860");
+    expect(loadedPenalty(c.stored)).toBeGreaterThanOrEqual(1);
+    const titles = c.members.map((m) => m.title);
+    for (const opts of [{}, { floor: true }, { incumbent: c.stored }, { incumbent: c.stored, floor: true }]) {
+      const picked = pickNeutralTitle(h164Members(c), opts);
+      expect(picked, JSON.stringify(opts)).not.toBeNull();
+      expect((picked as string).toLocaleLowerCase("tr"), JSON.stringify(opts)).not.toContain("rant");
+      expect(loadedPenalty(picked as string), JSON.stringify(opts)).toBe(0);
+      expect(incumbentIsMemberTitle(picked as string, titles), JSON.stringify(opts)).toBe(true);
+    }
+  });
+
+  it("is a fixed point: the next re-pick keeps what the first one wrote", () => {
+    for (const cid of ["49facb31", "8ab79860"]) {
+      const c = h168Loaded(cid);
+      const first = pickNeutralTitle(h164Members(c), { incumbent: c.stored }) as string;
+      expect(pickNeutralTitle(h164Members(c), { incumbent: first }), cid).toBe(first);
+      expect(pickNeutralTitle(h164Members(c), { incumbent: first, floor: true }), cid).toBe(first);
+    }
+  });
+
+  it("a cluster whose every member carries the epithet keeps it: there is nothing clean to swap to", () => {
+    const members = [
+      { title: "Hükümet katillere destek sözü verdi" },
+      { title: "Katillere destek: Hükümetten yeni açıklama" },
+    ];
+    const picked = pickNeutralTitle(members, { floor: true });
+    expect(picked).not.toBeNull();
+    expect(pickNeutralTitle(members, { incumbent: picked as string, floor: true })).toBe(picked);
+  });
+
+  it("a title nobody charges is not moved: a clean incumbent among clean members stays", () => {
+    const members = [
+      { title: "Merkez Bankası faiz kararını açıkladı" },
+      { title: "Merkez Bankası faizi sabit tuttu" },
+      { title: "TCMB faiz kararı: Politika faizi sabit" },
+    ];
+    const stored = "Merkez Bankası faiz kararını açıkladı";
+    expect(pickNeutralTitle(members, { incumbent: stored })).toBe(stored);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h168-titles-2: an ordinal ('111.', '13.') is not a sentence end
+// ---------------------------------------------------------------------------
+//
+// caseEvidence skips the word after a token that ends in '.', ':', '!', '?' or '…' (a capital there says nothing). '111.'
+// is an ordinal, so the 'Dönem' of "111. Dönem Kaymakamlar Kurası" never counted as capital evidence: 9df76d26's re-pick
+// (by 208) came out half-recased ("Cumhurbaşkanı Erdoğan 111. dönem Kaymakamlar Kurası'nda": twelve siblings write '111.
+// Dönem') and 2490109a's floor pick turned "13. yargı paketi ..." into the worse "13. yargı Paketi ...". A token of one to
+// three digits and a dot is no sentence end; a four-digit year ('2026.') and every other token that ends in one of the five
+// characters still is. The fixture (src/lib/clusters/__fixtures__/h168-casing.json, test-only) is the member titles (newest
+// first) and source slugs of the clusters this and migration 209's casing branch concern, as read on production on 2026-11-12.
+
+const H168_CASING: H164Fixture = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h168-casing.json"), "utf8"),
+) as H164Fixture;
+
+function h168Casing(cid: string): H164Cluster {
+  const found = H168_CASING.clusters.find((c) => c.cid === cid);
+  if (found === undefined) throw new Error(`h168-casing.json has no cluster ${cid}`);
+  return found;
+}
+
+describe("h168-titles-2: the fixture", () => {
+  it("holds the clusters of the finding: eleven that change, the five İşçi Haber rows the picker keeps, and 37915ace", () => {
+    expect(H168_CASING.clusters.map((c) => c.cid)).toEqual([
+      "9df76d26", "2490109a", "3039d877", "0834c3ba", "609f9e22", "4797e4f6", "ecbc23a0", "3175d6f7", "8541cbe6", "588c58ce",
+      "2040cdf1", "37915ace", "8e179d37", "0792bdea", "688af268", "f53a766f", "829ef5cc",
+    ]);
+    for (const c of H168_CASING.clusters) {
+      expect(c.model).toBe("extractive-v6");
+      expect(c.members).toHaveLength(c.article_count);
+    }
+    // Every stored title but 9df76d26's (a re-pick's own recasing) is an İşçi Haber member's wording.
+    for (const c of H168_CASING.clusters.filter((x) => x.cid !== "9df76d26")) {
+      expect(c.members.some((m) => m.source === "isci-haber" && m.title.trim() === c.stored.trim()), c.cid).toBe(true);
+    }
+    expect(h168Casing("9df76d26").stored).toBe("Cumhurbaşkanı Erdoğan 111. dönem Kaymakamlar Kurası'nda");
+    expect(h168Casing("2490109a").stored).toBe("13. yargı paketi ne zaman çıkıyor? Detaylar belli oldu");
+  });
+});
+
+describe("h168-titles-2: the ordinal fix on the live clusters", () => {
+  it("9df76d26: no pick holds '111. dönem', fresh or with the stored title as the incumbent", () => {
+    const c = h168Casing("9df76d26");
+    for (const opts of [{}, { floor: true }, { incumbent: c.stored }, { incumbent: c.stored, floor: true }]) {
+      const picked = pickNeutralTitle(casingMembers(c), opts);
+      expect(picked, JSON.stringify(opts)).not.toBeNull();
+      expect(picked as string, JSON.stringify(opts)).not.toContain("111. dönem");
+    }
+  });
+
+  it("9df76d26: the stored title is recased, not replaced by nothing: '111. Dönem' with its capital", () => {
+    const c = h168Casing("9df76d26");
+    const picked = pickNeutralTitle(casingMembers(c), { incumbent: c.stored }) as string;
+    expect(picked).toContain("111. Dönem");
+    // Once the capitals are back the five names read as Title Case: the recased twin of the stored title is no swap to a Title
+    // Case headline, but nothing else is (the unflagged copy of the cluster keeps the stored title as before).
+    expect(picked).toBe("Cumhurbaşkanı Erdoğan 111. Dönem Kaymakamlar Kurası'nda");
+    expect(pickNeutralTitle(casingMembers(c, false), { incumbent: c.stored })).toBe(c.stored);
+  });
+
+  it("2490109a: the floor pick of the stored title never reads 'yargı Paketi'", () => {
+    const c = h168Casing("2490109a");
+    for (const opts of [{ incumbent: c.stored, floor: true }, { floor: true }]) {
+      const picked = pickNeutralTitle(casingMembers(c), opts);
+      expect(picked, JSON.stringify(opts)).not.toBeNull();
+      expect(picked as string, JSON.stringify(opts)).not.toContain("yargı Paketi");
+      expect(picked as string, JSON.stringify(opts)).not.toContain("yargı paketi");
+    }
+    expect(pickNeutralTitle(casingMembers(c), { incumbent: c.stored, floor: true })).toContain("13. Yargı Paketi");
+  });
+
+  it("every pick of both is a fixed point", () => {
+    for (const cid of ["9df76d26", "2490109a"]) {
+      const c = h168Casing(cid);
+      const first = pickNeutralTitle(casingMembers(c), { incumbent: c.stored, floor: true }) as string;
+      expect(pickNeutralTitle(casingMembers(c), { incumbent: first, floor: true }), cid).toBe(first);
+    }
+  });
+
+  it("the h164 casing clusters and the İşçi Haber rows the picker keeps are unchanged by the fix", () => {
+    for (const cid of ["688af268", "829ef5cc", "0792bdea", "8e179d37", "f53a766f"]) {
+      const c = h168Casing(cid);
+      expect(pickNeutralTitle(casingMembers(c), { incumbent: c.stored }), cid).toBe(c.stored);
+    }
+    expect(pickNeutralTitle(casingMembers(h168Casing("3039d877")), { incumbent: h168Casing("3039d877").stored })).toContain("Libya ve Venezuela");
+  });
+});
+
+describe("h168-titles-2: the recased twin of a flagged stored title is no swap to a Title Case headline", () => {
+  // 441ea6a3 (two members): once 'pirc' has its capital back the five names read as Title Case, and the switch rules refuse a Title
+  // Case target, so the stored "... pirc Musar'dan ..." stayed on the site. The recased twin has the same words: it is no new headline.
+  const STORED = "Slovenya Cumhurbaşkanı pirc Musar'dan Çevre uyarısı";
+  const MEMBERS = [
+    { title: "Slovenya Cumhurbaşkanı Pirc Musar: Çevre sorunlarını hafife almak geriye doğru atılmış bir adımdır" },
+    { title: STORED, caseUnreliable: true },
+  ];
+
+  it("the stored title is recased from the sibling's capital", () => {
+    expect(pickNeutralTitle(MEMBERS, { incumbent: STORED })).toBe("Slovenya Cumhurbaşkanı Pirc Musar'dan Çevre uyarısı");
+    expect(pickNeutralTitle(MEMBERS, { incumbent: STORED, floor: true })).toBe("Slovenya Cumhurbaşkanı Pirc Musar'dan Çevre uyarısı");
+  });
+
+  it("is a fixed point: the recased title is kept", () => {
+    const twin = "Slovenya Cumhurbaşkanı Pirc Musar'dan Çevre uyarısı";
+    expect(pickNeutralTitle(MEMBERS, { incumbent: twin })).toBe(twin);
+  });
+
+  it("without the flag nothing changes: the stored title is the outlet's own and is kept", () => {
+    expect(pickNeutralTitle(MEMBERS.map((m) => ({ title: m.title })), { incumbent: STORED })).toBe(STORED);
+  });
+
+  it("a Title Case headline that is a different title is still no swap target", () => {
+    const members = [
+      { title: "Cumhurbaşkanı Erdoğan Kabine Toplantısı Sonrası Önemli Açıklamalar Yaptı" },
+      { title: "Kabine toplantısı sona erdi: Cumhurbaşkanı Erdoğan konuşuyor", caseUnreliable: true },
+      { title: "Cumhurbaşkanı Erdoğan kabine toplantısının ardından konuştu" },
+    ];
+    const stored = "Kabine toplantısı sona erdi: Cumhurbaşkanı Erdoğan konuşuyor";
+    const picked = pickNeutralTitle(members, { incumbent: stored }) as string;
+    expect(picked).not.toBe("Cumhurbaşkanı Erdoğan Kabine Toplantısı Sonrası Önemli Açıklamalar Yaptı");
+  });
+
+  // h169 review (ts-2): `usableItems` swaps a flagged member for its case-trusted twin, so a trusted outlet's real Title Case
+  // headline can be fold-equal to the stored title. That headline is an outlet's wording, not the recased twin of the stored
+  // one: the 'case' rule must not land on it, and the stored title is recased in place instead.
+  const KURUM_STORED = "Bakan kurum: bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz";
+  const KURUM_TRUSTED = "Bakan Kurum: Bugün Hiç Olmadığımız Kadar Birbirimize İhtiyaç Duyuyoruz";
+  const KURUM_MEMBERS = [
+    { title: KURUM_STORED, caseUnreliable: true },
+    { title: KURUM_TRUSTED },
+    { title: "Çevre Bakanı Kurum deprem bölgesinde konuştu: birbirimize ihtiyacımız var" },
+  ];
+
+  it.each([false, true])(
+    "a trusted outlet's own Title Case headline is no swap target for the flagged stored title (floor %s): it is recased in place",
+    (floor) => {
+      const picked = pickNeutralTitle(KURUM_MEMBERS.map((m) => ({ ...m })), { incumbent: KURUM_STORED, floor }) as string;
+      expect(picked).not.toBe(KURUM_TRUSTED);
+      expect(picked).not.toContain("Bakan kurum");
+      expect(picked).toBe("Bakan Kurum: bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz");
+    },
+  );
+
+  it("the Pirc case: the trusted Title Case headline is not served, the stored title takes the sibling's capital", () => {
+    const stored = "Slovenya Cumhurbaşkanı pirc Musar'dan Çevre uyarısı";
+    const members = [
+      { title: stored, caseUnreliable: true },
+      { title: "Slovenya Cumhurbaşkanı Pirc Musar'dan Çevre Uyarısı" },
+      { title: "Slovenya Cumhurbaşkanı Pirc Musar iklim krizine dikkat çekti" },
+    ];
+    for (const floor of [false, true]) {
+      expect(pickNeutralTitle(members.map((m) => ({ ...m })), { incumbent: stored, floor }), `floor ${floor}`).toBe(
+        "Slovenya Cumhurbaşkanı Pirc Musar'dan Çevre uyarısı",
+      );
+    }
+  });
+
+  it("the recased title is a fixed point, and a trusted member that wrote the stored casing keeps it", () => {
+    const recased = "Bakan Kurum: bugün hiç olmadığımız kadar birbirimize ihtiyaç duyuyoruz";
+    expect(pickNeutralTitle(KURUM_MEMBERS.map((m) => ({ ...m })), { incumbent: recased })).toBe(recased);
+    // The same words, written with exactly the stored casing by a case-trusted outlet: that casing is the outlet's own.
+    const trustedTwin = [{ title: KURUM_STORED }, ...KURUM_MEMBERS.slice(1).map((m) => ({ ...m }))];
+    expect(pickNeutralTitle(trustedTwin, { incumbent: KURUM_STORED })).not.toBe(KURUM_TRUSTED);
+    expect(pickNeutralTitle(trustedTwin, { incumbent: KURUM_STORED })).toBe(KURUM_STORED);
+  });
+
+  it("a Title Case best that is not fold-equal to the stored title is no swap target: deleting the fold check must fail this", () => {
+    // best = the same outlet's second article (flagged too, so no trusted member wrote it) in Title Case with one more word: its
+    // fold differs from the stored title's, and caseDefectIncumbent would hold (the siblings restore capitals in the stored
+    // title, the best one needs none). Only the fold check keeps this different headline from replacing the stored title.
+    const best = "Bakan Kurum: Bugün Hiç Olmadığımız Kadar Birbirimize Muhtacız Dedi";
+    const members = [KURUM_MEMBERS[0]!, { title: best, caseUnreliable: true }, KURUM_MEMBERS[2]!];
+    expect(isTitleCaseTitle(best, 5)).toBe(true);
+    expect(searchFoldTr(best)).not.toBe(searchFoldTr(KURUM_STORED));
+    for (const floor of [false, true]) {
+      const picked = pickNeutralTitle(members.map((m) => ({ ...m })), { incumbent: KURUM_STORED, floor }) as string;
+      expect(picked, `floor ${floor}`).not.toBe(best);
+      expect(searchFoldTr(picked), `floor ${floor}`).toBe(searchFoldTr(KURUM_STORED));
+    }
+  });
+});
+
+describe("h168-titles-2: a token of one to three digits and a dot is no sentence end; every other token ending in one still is", () => {
+  const FLAGGED = (stored: string) => ({ title: stored, caseUnreliable: true });
+
+  // The flagged stored title writes the word in lower case; both siblings write it with a capital right after `lead`. When the
+  // capital counts as evidence the stored title gives way (recased from the siblings); when it does not it is kept.
+  const run = (lead: string, word: string) => {
+    const stored = `Bakan Kurum ${lead} ${word} kaymakamlarıyla bir araya geldi`;
+    const members = [
+      FLAGGED(stored),
+      { title: `Bakan Kurum ${lead} ${word.charAt(0).toLocaleUpperCase("tr")}${word.slice(1)} adaylarını kabul etti` },
+      { title: `Kurum, ${lead} ${word.charAt(0).toLocaleUpperCase("tr")}${word.slice(1)} kaymakamlarıyla görüştü` },
+    ];
+    return { stored, picked: pickNeutralTitle(members, { incumbent: stored }) as string };
+  };
+
+  it.each(["1.", "13.", "111."])("%s: the capital behind it is evidence, so the lower-case stored word is recased", (lead) => {
+    const { stored, picked } = run(lead, "dönem");
+    expect(picked).not.toBe(stored);
+    expect(picked).not.toContain(`${lead} dönem`);
+  });
+
+  it.each(["2026.", "12345.", "a.", "açıkladı:", "açıkladı!", "açıkladı…", "açıkladı.", "1.5.", "x1."])(
+    "%s still ends a sentence: the capital behind it says nothing, so the stored title is kept",
+    (lead) => {
+      const { stored, picked } = run(lead, "dönem");
+      expect(picked).toBe(stored);
+    },
+  );
+
+  it("the evidence itself: the sibling capital counts behind '1.' to '999.' and not behind a year or any of the five ends", () => {
+    const forms = (lead: string) => siblingCapitalForms([`Bakan Kurum ${lead} Dönem kaymakamlarıyla görüştü`]);
+    for (const lead of ["1.", "13.", "111.", "999."]) expect(forms(lead).get("dönem"), lead).toBe("Dönem");
+    for (const lead of ["2026.", "1000.", "açıkladı.", "açıkladı:", "açıkladı!", "açıkladı?", "açıkladı…", "1.5.", "x1.", "a."]) {
+      expect(forms(lead).has("dönem"), lead).toBe(false);
+    }
+    // The ordinal is the whole token, and the word after it still has to be a non-first word.
+    expect(siblingCapitalForms(["111. Dönem Kaymakamlar Kurası töreni yapıldı"]).get("dönem")).toBe("Dönem");
+    expect(siblingCapitalForms(["Dönem Kaymakamlar Kurası töreni yapıldı"]).has("dönem")).toBe(false);
+  });
+
+  it("the digits rule is the whole previous token: '2026.' and 'x13.' are not ordinals", () => {
+    for (const lead of ["x13.", "2013.", "v2."]) {
+      const { stored, picked } = run(lead, "dönem");
+      expect(picked, lead).toBe(stored);
+    }
+  });
+
+  it("without the flag the fix changes nothing: an unflagged stored title is kept as before", () => {
+    const stored = "Bakan Kurum 111. dönem kaymakamlarıyla bir araya geldi";
+    const members = [
+      { title: stored },
+      { title: "Bakan Kurum 111. Dönem adaylarını kabul etti" },
+      { title: "Kurum, 111. Dönem kaymakamlarıyla görüştü" },
+    ];
+    expect(pickNeutralTitle(members, { incumbent: stored })).toBe(stored);
+  });
+
+  it("is linear on hostile input", () => {
+    const opts = { n: 250_000, ceilingMs: 8_000 };
+    expectLinear(rep("1. a "), (shape) => pickNeutralTitle([{ title: `Bakan ${shape}`, caseUnreliable: true }, { title: `Bakan ${shape}`.toUpperCase() }]), opts);
+    expectLinear(rep("111. Ab "), (shape) => pickNeutralTitle([{ title: `Bakan ${shape}`, caseUnreliable: true }, { title: "Bakan Kurum 111. Dönem" }]), opts);
+  });
+});
