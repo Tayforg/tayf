@@ -53,7 +53,7 @@ export function Header() {
       <div className="container mx-auto flex h-14 items-center justify-between px-4 sm:px-6">
         <Link
           href="/"
-          className="group flex items-center gap-3 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="group flex shrink-0 items-center gap-3 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {/* Logo mark — spectrum bars */}
           <div className="flex gap-[2px] h-7 items-end shrink-0">

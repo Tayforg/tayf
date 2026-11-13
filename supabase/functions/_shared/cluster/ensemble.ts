@@ -53,6 +53,22 @@
 //     primary and MinHash lanes at SUBJECT_VETO_CAP, because the intruders of
 //     five prod clusters joined on those lanes too (h114-clusterpurity-2; see
 //     templateActorMismatchFires())
+//   counterpart veto: two bilateral-meeting headlines ("X, Kongo Cumhurbaskani ile
+//     gorustu", "X, Pakistan Basbakani Serif'i kabul etti") that name disjoint
+//     counterparts are two meetings, not one story. No headline exemption, like the
+//     template veto: it withdraws the headline lane (actorMismatchFires) and caps the
+//     primary and MinHash lanes at SUBJECT_VETO_CAP, because the five Irak (Amedi)
+//     articles of prod cluster ddae920b (the Kongo meeting) joined on those lanes
+//     (h172-clusterpurity-2; see counterpartVetoFires())
+//   MinHash sole-carrier guard: the MinHash soft-accept lane has no headline floor, so
+//     a shared agency lead (J 0.53) carried a cross-event join into d587d519. A titled
+//     pair whose headlines share fewer than 2 content tokens, whose J is under
+//     MINHASH_SOLE_CARRIER_MIN_JACCARD and whose other lanes alone fall short of
+//     MATCH_THRESHOLD has its MinHash lane capped at SUBJECT_VETO_CAP
+//     (h172-clusterpurity-1; components.minhashSoleCarrierCapped)
+//   event tag: a leading all-caps tag of 3-5 tokens before a spaced separator ("COP31
+//     LIDERLER ZIRVESI - ") does not count toward the SUBJECT_SPAN_MAX_WORDS window the
+//     speaker readers walk (h172-clusterpurity-3; see stripEventTag())
 //   generic headline name conflict: when the headline lane fired for two headlines
 //     of at most HEADLINE_GENERIC_MAX_TOKENS tokens that name nobody ("Fon
 //     sorusturmasinda yeni gozalti") and both CLEANED descriptions are given
@@ -109,6 +125,7 @@ import {
   MATCH_THRESHOLD,
   MIN_SHARED_ENTITIES,
   MINHASH_SOFT_ACCEPT_JACCARD,
+  MINHASH_SOLE_CARRIER_MIN_JACCARD,
   STATEMENT_TEMPLATE_NOUNS,
   SUBJECT_SPAN_MAX_WORDS,
   SUBJECT_STOP_WORDS,
@@ -162,6 +179,11 @@ export interface ScoreComponents {
   autoAccept: boolean;
   jaccard: number;
   jaccardScore: number;
+  // The MinHash lane's contribution to `raw`: jaccardScore after the vetoes' SUBJECT_VETO_CAP and the
+  // sole-carrier guard (1 on a strict auto-accept). `jaccardScore` stays the lane's own value; this is
+  // what `raw` was built from, so a caller can tell which lane carried a pair (the consumer's fallback
+  // join reads it).
+  jaccardForRaw: number;
   sharedEntities?: number;
   // Entity numerator after weighting generic entities (>= 1 when anything is
   // shared); sharedEntities stays the raw count.
@@ -210,6 +232,16 @@ export interface ScoreComponents {
   // were capped at SUBJECT_VETO_CAP (the headline lane is withdrawn through
   // actorVeto); see templateActorMismatchFires().
   templateVeto: boolean;
+  // True when both headlines are bilateral-meeting headlines ("X, Kongo Cumhurbaşkanı
+  // Nguesso ile görüştü", "X, Pakistan Başbakanı Şerif'i kabul etti") that name disjoint
+  // counterparts, so the primary and MinHash lanes were capped at SUBJECT_VETO_CAP (the
+  // headline lane is withdrawn through actorVeto); see counterpartVetoFires().
+  counterpartVeto: boolean;
+  // True when the MinHash soft-accept lane alone carried a titled pair whose headlines
+  // share fewer than 2 content tokens at a J under MINHASH_SOLE_CARRIER_MIN_JACCARD, and
+  // it was capped at SUBJECT_VETO_CAP (the other lanes alone were under MATCH_THRESHOLD);
+  // `raw` is the capped value, `jaccardScore` stays the lane's own.
+  minhashSoleCarrierCapped: boolean;
   // True when the headline lane fired but the two headlines name different
   // actors, so the lane was withdrawn (headlineLane is then false and the
   // lane's score is dropped); see actorMismatchFires(). Also true when the lane
@@ -584,6 +616,114 @@ function acronymAlias(aRaw: readonly string[], bRaw: readonly string[]): boolean
     (bRaw.length === 1 && isAcronym(bRaw[0]!) && spellsAcronym(bRaw[0]!, aRaw));
 }
 
+// ---------------------------------------------------------------------------
+// Event tag (h172-clusterpurity-3)
+// ---------------------------------------------------------------------------
+
+// A leading event tag is 3 to 5 all-caps tokens before a spaced separator.
+const EVENT_TAG_MIN_TOKENS = 3;
+const EVENT_TAG_MAX_TOKENS = 5;
+// What must be left after the tag: at least this many words, one of them with a lower-case letter.
+const EVENT_TAG_REMAINDER_MIN_WORDS = 3;
+const EVENT_TAG_SEPARATORS: ReadonlySet<string> = new Set(["-", "\u2013", "\u2014", "|"]);
+// One character of a tag token: the first is an upper-case Turkish letter or a digit, the
+// rest may also be a dot or an apostrophe ("T.C.", "AK'LI"). Tested one character at a
+// time, so there is no regular expression to backtrack.
+const EVENT_TAG_FIRST_CHAR = /^[A-Z\u00c7\u011e\u0130\u00d6\u015e\u00dc0-9]$/u;
+const EVENT_TAG_NEXT_CHAR = /^[A-Z\u00c7\u011e\u0130\u00d6\u015e\u00dc0-9.'\u2019]$/u;
+
+function isEventTagToken(token: string): boolean {
+  let first = true;
+  for (const ch of token) {
+    if (!(first ? EVENT_TAG_FIRST_CHAR : EVENT_TAG_NEXT_CHAR).test(ch)) return false;
+    first = false;
+  }
+  return !first;
+}
+
+// True when `s` holds a letter that has an upper-case form different from itself.
+function hasLowerCaseLetter(s: string): boolean {
+  for (const ch of s) if (ch !== ch.toLocaleUpperCase("tr")) return true;
+  return false;
+}
+
+// True when `s` holds at least `n` whitespace-separated words.
+function hasAtLeastWords(s: string, n: number): boolean {
+  let words = 0;
+  let inWord = false;
+  for (let i = 0; i < s.length; i++) {
+    if (isSpaceCode(s.charCodeAt(i))) {
+      inWord = false;
+    } else if (!inWord) {
+      inWord = true;
+      if (++words >= n) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The title without a leading all-caps event tag: 'COP31 LIDERLER ZIRVESI - Iletisim
+ * Baskani Duran'dan ...' -> 'Iletisim Baskani Duran'dan ...'. A tag takes 3 to 5 of the
+ * SUBJECT_SPAN_MAX_WORDS words the speaker readers walk (subjectOf, leadRun, clippedWords),
+ * which pushed the speaker out of the window and blinded the subject and template vetoes
+ * (prod cluster a283e05b held the Duran, Erdogan and Ala statements; h172-clusterpurity-3).
+ *
+ * The tag is a run of 3 to 5 tokens, each starting with an upper-case Turkish letter
+ * (A-Z, C with cedilla, G with breve, dotted I, O with diaeresis, S with cedilla, U with
+ * diaeresis) or a digit and holding no lower-case letter (a dot or an apostrophe may follow
+ * the first character), followed by a SPACED separator: ' - ', an en dash, an em dash or
+ * ' | '. It is stripped only when what remains has at least one lower-case letter and at
+ * least 3 words; otherwise the title is returned unchanged. A colon is never a separator:
+ * an all-caps run before one is often the speaker ("CHP GENEL BASKANI OZEL: ..."), and a
+ * tag of 1, 2 or 6+ tokens ("SON DAKIKA | ", "AK PARTI - MHP zirvesi") is left alone.
+ * Pure; anything that is not a string is returned as it came. One left-to-right scan of
+ * at most six tokens plus the remainder checks: linear, no regular expression over the
+ * title. headlineTokens(), the fingerprints and the stored title never see this.
+ *
+ * The speaker readers use it through onEitherTagReading(): a veto fires when it fires on the
+ * titles as written OR on the titles without their tag. Reading only the stripped titles would
+ * lose vetoes the tag itself used to cause (the replay of 36 h of prod politics found 578
+ * pairs where a tag such as 'IKLIM ZIRVESI COP31 ANTALYA - ' was read as the actor of the
+ * tagged headline and vetoed it against a different story), so the strip only adds.
+ */
+export function stripEventTag(title: string): string {
+  if (typeof title !== "string") return title;
+  const n = title.length;
+  let i = 0;
+  let tokens = 0;
+  for (;;) {
+    while (i < n && isSpaceCode(title.charCodeAt(i))) i++;
+    if (i >= n) return title;
+    let j = i;
+    while (j < n && !isSpaceCode(title.charCodeAt(j))) j++;
+    const token = title.slice(i, j);
+    if (tokens >= EVENT_TAG_MIN_TOKENS && EVENT_TAG_SEPARATORS.has(token)) {
+      let k = j;
+      while (k < n && isSpaceCode(title.charCodeAt(k))) k++;
+      const rest = title.slice(k);
+      return hasLowerCaseLetter(rest) && hasAtLeastWords(rest, EVENT_TAG_REMAINDER_MIN_WORDS) ? rest : title;
+    }
+    if (tokens >= EVENT_TAG_MAX_TOKENS || !isEventTagToken(token)) return title;
+    tokens++;
+    i = j;
+  }
+}
+
+// True when `fires` holds for the two titles as written or, when either carries a leading
+// event tag, for the two titles without it. Additive by construction: a veto that fired
+// before the tag strip still fires, and the strip adds the vetoes the tag hid.
+function onEitherTagReading(
+  aTitle: string,
+  bTitle: string,
+  fires: (a: string, b: string) => boolean,
+): boolean {
+  if (fires(aTitle, bTitle)) return true;
+  const a = stripEventTag(aTitle);
+  const b = stripEventTag(bTitle);
+  return (a !== aTitle || b !== bTitle) && fires(a, b);
+}
+
 // The comma that closes a subject ("Lavrov, Japon mevkidasi ..."): not the
 // decimal comma between two digits ("2,5 saat"). A colon is deliberately NOT a
 // break: "TBMM'de kritik hafta: ..." or "Zelenski: ..." name a venue, an
@@ -643,7 +783,7 @@ function subjectOf(title: string): HeadlineSubject {
  * empty span: a role is not a named actor. "Disisleri Bakani Fidan," keeps Fidan.
  */
 export function subjectVetoFires(aTitle: string, bTitle: string): boolean {
-  return subjectsDisjoint(subjectOf(aTitle), subjectOf(bTitle));
+  return onEitherTagReading(aTitle, bTitle, (a: string, b: string) => subjectsDisjoint(subjectOf(a), subjectOf(b)));
 }
 
 function subjectsDisjoint(a: HeadlineSubject, b: HeadlineSubject): boolean {
@@ -921,16 +1061,24 @@ function oneSidedActorMismatch(a: HeadlineSubject, b: HeadlineSubject, bTitle: s
  * Also true for a family member against the principal that shares the surname
  * ("Emine Erdogan'dan ..." vs "Cumhurbaskani Erdogan ..."): their subject
  * spans overlap, so neither check above sees two actors (familyHomonymFires,
- * h101-clustermembers-1). Symmetric.
+ * h101-clustermembers-1). Also true for two bilateral-meeting headlines that name
+ * disjoint counterparts ("Erdogan, Irak Cumhurbaskani Amedi ile gorustu" vs "Erdogan,
+ * Kongo Cumhurbaskani Nguesso ile gorustu"; counterpartVetoFires, h172-clusterpurity-2).
+ * Symmetric.
  */
 export function actorMismatchFires(aTitle: string, bTitle: string): boolean {
+  return onEitherTagReading(aTitle, bTitle, actorMismatchOnTitles) || counterpartVetoFires(aTitle, bTitle);
+}
+
+// actorMismatchFires for the titles exactly as given (no tag reading, no counterpart rule).
+function actorMismatchOnTitles(aTitle: string, bTitle: string): boolean {
   const a = subjectOf(aTitle);
   const b = subjectOf(bTitle);
   return subjectsDisjoint(a, b) ||
     oneSidedActorMismatch(a, b, bTitle) ||
     oneSidedActorMismatch(b, a, aTitle) ||
     familyHomonymFires(aTitle, bTitle) ||
-    templateActorMismatchFires(aTitle, bTitle);
+    templateActorMismatchOnTitles(aTitle, bTitle);
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,7 +1365,310 @@ function ministriesDiffer(aTitle: string, bTitle: string): boolean {
 export function templateActorMismatchFires(aTitle: string, bTitle: string): boolean {
   if (typeof aTitle !== "string" || typeof bTitle !== "string") return false;
   if (aTitle === "" || bTitle === "") return false;
+  return onEitherTagReading(aTitle, bTitle, templateActorMismatchOnTitles);
+}
+
+// templateActorMismatchFires for non-empty titles exactly as given (no tag reading).
+function templateActorMismatchOnTitles(aTitle: string, bTitle: string): boolean {
   return statementActorsDiffer(aTitle, bTitle) || ministriesDiffer(aTitle, bTitle);
+}
+
+// ---------------------------------------------------------------------------
+// Counterpart veto (h172-clusterpurity-2)
+// ---------------------------------------------------------------------------
+
+// Words that name a role, a place of the story or the speaker's own country, not the
+// counterpart: dropped from a counterpart phrase (folded). The possessive forms of Kral,
+// Emir and Prens are listed because that is how they are written ("Katar Emiri").
+const COUNTERPART_STOP: ReadonlySet<string> = new Set([
+  "cumhurbaskani", "baskan", "baskani", "basbakan", "basbakani", "bakan", "bakani",
+  "kral", "krali", "emir", "emiri", "prens", "prensi", "genel", "sekreter", "sekreteri",
+  "erdogan", "antalya", "cop31", "turkiye", "cumhuriyeti", "birlesik", "devlet", "mevkidasi",
+]);
+
+// Words that mark a role inside a counterpart phrase ("Irak Cumhurbaskani Nizar Amedi": what comes
+// before the last role word is the counterpart's country or body, what comes after is the person).
+// With the role prefixes of isRolePiece(), "Basbakani", "Kral", "Emir", "Prens", "Sekreter" and
+// "mevkidasi" in their bare and possessive forms.
+const COUNTERPART_ROLE_WORDS: ReadonlySet<string> = new Set([
+  "basbakan", "basbakani", "kral", "krali", "emir", "emiri", "prens", "prensi",
+  "sekreter", "sekreteri", "mevkidasi",
+]);
+
+// The verb phrases that make a headline a bilateral meeting (folded words). The phrase
+// starts within COUNTERPART_VERB_MAX_OFFSET words after "ile".
+const COUNTERPART_VERBS: ReadonlyArray<readonly string[]> = [
+  ["gorustu"],
+  ["telefonda", "gorustu"],
+  ["bir", "araya", "geldi"],
+  ["gorusme", "gerceklestirdi"],
+];
+const COUNTERPART_VERB_MAX_OFFSET = 2;
+// Two counterpart tokens match when one is a prefix of the other and at least this long
+// ("irak" / "iraklı"), or when both share their first ACTOR_PREFIX_LEN letters.
+const COUNTERPART_MIN_PREFIX = 4;
+// A counterpart token of exactly this many letters also matches a word of the other title that
+// starts with it ("rus" / "rusya", "cin" / "cinli": a short country stem against the country or its
+// nationality).
+const COUNTERPART_SHORT_TOKEN_LEN = 3;
+// Two counterpart tokens longer than this many letters also match when they share that many leading
+// letters ("gurcu" / "gurcistan", "azeri" / "azerbaycan": a nationality against its country).
+const COUNTERPART_SHARED_STEM_LEN = 4;
+// Two person pieces at least this long within one edit of each other are one name written two ways
+// ("erakci" / "arakci", the transliterations of one Iranian minister).
+const COUNTERPART_NEAR_NAME_MIN_LEN = 5;
+// A piece shorter than this names nobody ("Al" in "Al Sani" / "Al Sabah", the 'N' of "N'Guesso").
+const COUNTERPART_TOKEN_MIN_LEN = 3;
+// The accusative of a name behind an apostrophe, folded: i, u, yi, yu ("Serif'i", "Amedi'yi").
+const ACCUSATIVE_SUFFIX = /^y?[iu]$/;
+
+// True when `raw` ends with a comma or a colon, closing quotes and brackets aside.
+function endsWithBreak(raw: string): boolean {
+  let i = raw.length - 1;
+  while (i >= 0 && "\"\u201d\u2019')]".includes(raw[i]!)) i--;
+  return i >= 0 && (raw[i] === "," || raw[i] === ":");
+}
+
+// True when the folded words `folded` hold a verb phrase of COUNTERPART_VERBS at `at`.
+function verbPhraseAt(folded: readonly string[], at: number): boolean {
+  for (const phrase of COUNTERPART_VERBS) {
+    if (at + phrase.length > folded.length) continue;
+    let ok = true;
+    for (let k = 0; ok && k < phrase.length; k++) if (folded[at + k] !== phrase[k]) ok = false;
+    if (ok) return true;
+  }
+  return false;
+}
+
+// The word between "ile" and the verb of "X ile <word> gorustu" is a place ("Antalya'da":
+// an apostrophe suffix) or plain lower case. A bare capitalised word is a second party
+// ("Fidan ile Lavrov telefonda gorustu"): the words before "ile" are then a party, not the
+// counterpart.
+function isPlaceOrPlainWord(raw: string): boolean {
+  const parts = trimWord(raw).split(HOMONYM_APOSTROPHE);
+  return parts.length > 1 || !startsCapitalised(parts[0] ?? "");
+}
+
+interface CounterpartSide {
+  // The folded pieces of the capitalised words after the last role word of the counterpart
+  // phrase ("Nizar Amedi"), or of the whole phrase when it names no role (a bare name: "Amedi"),
+  // less roles, COUNTERPART_STOP words and the speaker's own words.
+  person: string[];
+  // The folded pieces of the capitalised words before the last role word ("Irak", "Kongo",
+  // "UNDP"), under the same rules.
+  org: string[];
+  // The stemmed raw word of every `org` piece that came from an all-caps word (isAcronym():
+  // "AIIB", "BAE", "UNDP"); one entry per piece, so it is as long as `org` when the whole
+  // organisation is named by acronyms.
+  orgAcronyms: string[];
+  // The stemmed raw word of every capitalised word of the counterpart phrase (roles and stop
+  // words included): what an acronym of the phrase is spelled from ("Asya Altyapi Yatirim
+  // Bankasi" -> AAYB).
+  capRaws: string[];
+  // Every folded word of the (clipped) title.
+  words: string[];
+}
+
+// The index of the "ile" or "kabul" that closes the counterpart phrase of a bilateral
+// headline, or -1 when the headline is not one.
+function counterpartEnd(raws: readonly string[], folded: readonly string[]): number {
+  for (let i = 0; i < raws.length; i++) {
+    if (folded[i] === "ile" && i > 0) {
+      for (let off = 1; off <= COUNTERPART_VERB_MAX_OFFSET; off++) {
+        if (!verbPhraseAt(folded, i + off)) continue;
+        let between = true;
+        for (let k = i + 1; k < i + off; k++) if (!isPlaceOrPlainWord(raws[k]!)) between = false;
+        if (between) return i;
+      }
+    } else if (folded[i] === "kabul" && folded[i + 1] === "etti" && i > 0) {
+      const parts = trimWord(raws[i - 1]!).split(HOMONYM_APOSTROPHE);
+      if (parts.length > 1 && ACCUSATIVE_SUFFIX.test(foldTurkishWord(parts[1]))) return i;
+    }
+  }
+  return -1;
+}
+
+// The counterpart of a bilateral headline: the capitalised words between the last comma or
+// colon before "ile" / "kabul etti" (or the title start) and that word, apostrophe suffixes
+// dropped and folded, less roles, stop words and the words of the clause before the comma (the
+// speaker), split at the last role word of the phrase into `org` (before it: the country or body)
+// and `person` (after it, or the whole phrase when it has no role word); `words` is every folded
+// word of the (clipped) title. null when the title is not a bilateral headline.
+function counterpartSideOf(title: string): CounterpartSide | null {
+  const raws = clippedWords(title);
+  const folded = raws.map((w) => foldTurkishWord(trimWord(w)));
+  const end = counterpartEnd(raws, folded);
+  if (end < 0) return null;
+  let begin = 0;
+  for (let j = end - 1; j >= 0; j--) {
+    if (endsWithBreak(raws[j]!)) {
+      begin = j + 1;
+      break;
+    }
+  }
+  const piecesOf = (raw: string): string[] =>
+    foldTurkishWord(stemOfWord(raw)).split(/[^a-z0-9]+/).filter((p) => p.length >= COUNTERPART_TOKEN_MIN_LEN);
+  const isRole = (p: string): boolean => isRolePiece(p) || COUNTERPART_ROLE_WORDS.has(p);
+  const speaker = new Set<string>();
+  for (let k = 0; k < begin; k++) {
+    if (startsCapitalised(stemOfWord(raws[k]!))) for (const p of piecesOf(raws[k]!)) speaker.add(p);
+  }
+  let lastRole = -1;
+  for (let k = begin; k < end; k++) if (piecesOf(raws[k]!).some(isRole)) lastRole = k;
+  const person: string[] = [];
+  const org: string[] = [];
+  const orgAcronyms: string[] = [];
+  const capRaws: string[] = [];
+  for (let k = begin; k < end; k++) {
+    const stem = stemOfWord(raws[k]!);
+    if (!startsCapitalised(stem)) continue;
+    capRaws.push(stem);
+    for (const p of piecesOf(raws[k]!)) {
+      if (COUNTERPART_STOP.has(p) || SUBJECT_STOP.has(p) || isRole(p) || speaker.has(p)) continue;
+      const toOrg = lastRole !== -1 && k <= lastRole;
+      (toOrg ? org : person).push(p);
+      if (toOrg && isAcronym(stem)) orgAcronyms.push(stem);
+    }
+  }
+  return { person, org, orgAcronyms, capRaws, words: [...foldedWordSet(title)] };
+}
+
+function sameCounterpartToken(x: string, y: string): boolean {
+  if (x === y) return true;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  if (short.length >= COUNTERPART_MIN_PREFIX && long.startsWith(short)) return true;
+  return short.length >= ACTOR_PREFIX_LEN && x.slice(0, ACTOR_PREFIX_LEN) === y.slice(0, ACTOR_PREFIX_LEN);
+}
+
+// True when some counterpart token matches (sameCounterpartToken) some word of the other title, or
+// is a COUNTERPART_SHORT_TOKEN_LEN-letter stem that word starts with, or shares its first
+// COUNTERPART_SHARED_STEM_LEN letters with a word when both are longer than that.
+function occursIn(tokens: readonly string[], words: readonly string[]): boolean {
+  for (const t of tokens) {
+    for (const w of words) {
+      if (sameCounterpartToken(t, w)) return true;
+      if (t.length === COUNTERPART_SHORT_TOKEN_LEN && w.startsWith(t)) return true;
+      if (
+        t.length > COUNTERPART_SHARED_STEM_LEN && w.length > COUNTERPART_SHARED_STEM_LEN &&
+        t.slice(0, COUNTERPART_SHARED_STEM_LEN) === w.slice(0, COUNTERPART_SHARED_STEM_LEN)
+      ) return true;
+    }
+  }
+  return false;
+}
+
+// True when `x` and `y` differ by at most one inserted, deleted or substituted letter. Linear, no
+// regex.
+function withinOneEdit(x: string, y: string): boolean {
+  if (Math.abs(x.length - y.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < x.length && j < y.length) {
+    if (x[i] === y[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (x.length > y.length) i++;
+    else if (y.length > x.length) j++;
+    else {
+      i++;
+      j++;
+    }
+  }
+  return edits + (x.length - i) + (y.length - j) <= 1;
+}
+
+// True when some person piece of `a` and some of `b` are both COUNTERPART_NEAR_NAME_MIN_LEN or more
+// letters and within one edit: the same person, two transliterations. Person pieces only: Iranli and
+// Irakli are two countries, one letter apart.
+function personNearMatch(a: readonly string[], b: readonly string[]): boolean {
+  for (const x of a) {
+    if (x.length < COUNTERPART_NEAR_NAME_MIN_LEN) continue;
+    for (const y of b) if (y.length >= COUNTERPART_NEAR_NAME_MIN_LEN && withinOneEdit(x, y)) return true;
+  }
+  return false;
+}
+
+// True when one side names its counterpart's body only by acronyms ("AIIB", "BAE", "IKBY") and the
+// other spells it out: the other's body has two or more pieces, or an acronym of this side is spelled
+// by the capitalised words of the other's phrase ("Asya Altyapi Yatirim Bankasi" is AAYB). One body
+// under two names; two acronyms of different bodies ("UNDP" against "Kongo") are no alias.
+function orgAcronymAlias(a: CounterpartSide, b: CounterpartSide): boolean {
+  const spelledBy = (s: CounterpartSide, o: CounterpartSide): boolean =>
+    s.orgAcronyms.length > 0 && s.orgAcronyms.length === s.org.length &&
+    (o.org.length >= 2 || s.orgAcronyms.some((ac) => spellsAcronym(ac, o.capRaws)));
+  return spelledBy(a, b) || spelledBy(b, a);
+}
+
+/**
+ * True when two bilateral-meeting headlines name different counterparts
+ * (h172-clusterpurity-2): "Erdogan, Antalya'da Cumhurbaskani Nizar Amedi ile gorustu"
+ * against "Cumhurbaskani Erdogan, Kongo Cumhuriyeti Cumhurbaskani Nguesso ile Antalya'da
+ * gorustu" (prod cluster ddae920b held five Irak articles in the Kongo meeting: the
+ * subject, ablative and template readers all stop at the speaker, so nothing compared the
+ * object of 'ile gorustu'). Pure, symmetric, false for anything that is not a non-empty
+ * string; reads the title clipped to HEADLINE_TITLE_MAX_CHARS.
+ *
+ * A bilateral headline has "ile" followed, within COUNTERPART_VERB_MAX_OFFSET words, by
+ * gorustu, telefonda gorustu, bir araya geldi or gorusme gerceklestirdi (the word between
+ * them a place such as "Antalya'da" or lower case, never a bare capitalised name:
+ * "Fidan ile Lavrov telefonda gorustu" names both parties before the verb), or has a word
+ * with an accusative apostrophe suffix directly before "kabul etti" ("Serif'i kabul etti").
+ * Its counterpart is the capitalised words between the last comma or colon before that
+ * "ile" / "kabul" (or the title start) and it, apostrophe suffixes dropped and folded; roles
+ * (cumhurbaskan, bakan, baskan, ... prefixes), SUBJECT_STOP_WORDS, COUNTERPART_STOP words
+ * (Cumhurbaskani, Basbakani, Kral, Emir, Prens, Genel, Sekreter, Erdogan, Antalya, COP31,
+ * Turkiye, Cumhuriyeti, Birlesik, Devlet, mevkidasi) and the words of the clause before the
+ * comma (the speaker) are dropped.
+ *
+ * It fires when both titles are bilateral, the two counterparts are comparable and no counterpart
+ * token of either title matches a word of the other title. Comparable: both name a person (the
+ * words after the last role word, or a bare name) or both name a country or body (the words
+ * before it); a title that names its guest by person against one that names it by office ("Becirovic
+ * ve Komsic ile" vs "Bosna-Hersek Devlet Baskanligi Konseyi Baskani ile") is one meeting under two
+ * names, not two meetings (the replay found that pair, 0.87 on the full scorer). Two bodies are
+ * not comparable either when one side names its body only by acronyms and the other spells it out
+ * (orgAcronymAlias: "AIIB Baskani" vs "Asya Altyapi Yatirim Bankasi Baskani Zou Ciayi", "BAE" vs
+ * "Birlesik Arap Emirlikleri", "IKBY", "KKTC"): the other side has two or more body pieces, or the
+ * acronym is spelled by its capitalised words; "UNDP" against "Kongo" is still two bodies. Two
+ * persons are one when some person piece of each is at least COUNTERPART_NEAR_NAME_MIN_LEN letters
+ * long and within one edit (insert, delete, substitute) of the other's ("Erakci" / "Arakci"): a
+ * name written two ways; the rule reads person pieces only, so "Iranli" and "Irakli" (two
+ * countries) still fire. A token matches when one is a prefix of the other and at least
+ * COUNTERPART_MIN_PREFIX letters long ("irak" / "irakli"), or both share their first
+ * ACTOR_PREFIX_LEN letters, or the token is exactly COUNTERPART_SHORT_TOKEN_LEN letters and the
+ * word starts with it ("rus" / "rusya", "cin" / "cinli"), or both are longer than
+ * COUNTERPART_SHARED_STEM_LEN letters and share that many leading letters ("gurcu" / "gurcistan",
+ * "azeri" / "azerbaycan"). Matching against every word of the
+ * other title, not only its counterpart, keeps the reversed meeting ("Motegi, Fidan ile
+ * gorustu" vs "Fidan, Motegi ile gorustu") and a counterpart named elsewhere in the other
+ * headline from firing.
+ */
+export function counterpartVetoFires(aTitle: string, bTitle: string): boolean {
+  if (typeof aTitle !== "string" || typeof bTitle !== "string") return false;
+  if (aTitle === "" || bTitle === "") return false;
+  const a = counterpartSideOf(aTitle);
+  if (a === null) return false;
+  const b = counterpartSideOf(bTitle);
+  if (b === null) return false;
+  // Comparable only when both titles name the counterpart the same way: both by a person, or both
+  // by a country or body. A person against an office ("Becirovic ve Komsic" vs "Bosna-Hersek
+  // Devlet Baskanligi Konseyi Baskani", "Hirvatistan Basbakani" vs "Plenkovic") cannot be told
+  // apart from the title alone: one meeting, two ways to name its guest.
+  const bothPersons = a.person.length > 0 && b.person.length > 0;
+  const bothOrgs = a.org.length > 0 && b.org.length > 0;
+  // A body named by acronym on one side and spelled out on the other ("AIIB Başkanı" vs "Asya Altyapı
+  // Yatırım Bankası Başkanı") is one counterpart, so two org sides are not comparable then.
+  const comparable = bothPersons || (bothOrgs && !orgAcronymAlias(a, b));
+  if (!comparable) return false;
+  // The same person under two transliterations ("Erakçi" / "Arakçi") is no different counterpart.
+  if (personNearMatch(a.person, b.person)) return false;
+  const aTokens = [...a.org, ...a.person];
+  const bTokens = [...b.org, ...b.person];
+  return !occursIn(aTokens, b.words) && !occursIn(bTokens, a.words);
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,6 +1977,10 @@ export function counterVetoFires(aTitle: string, bTitle: string): boolean {
 // score()
 // ---------------------------------------------------------------------------
 
+// h172-clusterpurity-1: a headline pair that shares fewer content tokens than this (and has a
+// J under MINHASH_SOLE_CARRIER_MIN_JACCARD) is not carried by the MinHash lane alone.
+const SOLE_CARRIER_MIN_SHARED = 2;
+
 export function score(
   a: ScoringFingerprint | FingerprintBundle | null | undefined,
   b: ScoringFingerprint | FingerprintBundle | null | undefined,
@@ -1546,6 +2001,7 @@ export function score(
         autoAccept: true,
         jaccard: 1,
         jaccardScore: 1,
+        jaccardForRaw: 1,
         entityRatio: 1,
         tfidfScore: clip01(tfidfCosine),
         primary: 1,
@@ -1563,6 +2019,8 @@ export function score(
         counterVeto: false,
         homonymVeto: false,
         templateVeto: false,
+        counterpartVeto: false,
+        minhashSoleCarrierCapped: false,
         actorVeto: false,
       },
     };
@@ -1693,15 +2151,42 @@ export function score(
   // MinHash and the primary lane as well, so withdrawing the headline lane
   // (actorMismatchFires) is not enough.
   const templateVeto = !!aTitle && !!bTitle && templateActorMismatchFires(aTitle, bTitle);
+  // Counterpart veto (h172-clusterpurity-2): two bilateral-meeting headlines naming disjoint
+  // counterparts ("... Kongo Cumhurbaskani ile gorustu" vs "... Irak Cumhurbaskani Amedi ile
+  // gorustu"). No headline exemption, like the template veto: the Irak items of ddae920b
+  // joined on the primary lane, which no subject-side veto sees, and a lane that fired is
+  // withdrawn through actorMismatchFires() above.
+  const counterpartVeto = !!aTitle && !!bTitle && counterpartVetoFires(aTitle, bTitle);
   let jaccardForRaw = jaccardScore;
-  if (subjectVeto || incidentVeto || counterVeto || homonymVeto || templateVeto) {
+  if (subjectVeto || incidentVeto || counterVeto || homonymVeto || templateVeto || counterpartVeto) {
     primaryForRaw = Math.min(primaryForRaw, SUBJECT_VETO_CAP);
     jaccardForRaw = Math.min(jaccardScore, SUBJECT_VETO_CAP);
   }
+  // 7. Time decay (read by the sole-carrier guard below and by the final score).
+  const timeDecay = timeDecayFor(hoursDelta);
+  // MinHash sole-carrier guard (h172-clusterpurity-1): the soft-accept lane (J >= 0.5 scores
+  // 0.6 + 0.4 J) has no headline floor, so a shared agency lead carried AA 'CANLI - Cumhurbaskani
+  // Erdogan konusuyor' (no content token: the headline lane is off) into d587d519 at J 0.531.
+  // When both titles are present, no headline lane is in effect, the headlines share fewer
+  // than SOLE_CARRIER_MIN_SHARED content tokens, J is under MINHASH_SOLE_CARRIER_MIN_JACCARD
+  // (above it the pair is a wire rewrite and keeps its score), the lane is the strict maximum
+  // of the lanes and the other lanes alone would not clear MATCH_THRESHOLD, the pair is carried
+  // by that lane and by nothing else: the lane is capped at SUBJECT_VETO_CAP. A pair whose other
+  // lanes clear the threshold on their own keeps its score (the lane is not its sole carrier),
+  // and a lane a veto above already capped is left to that veto.
+  let minhashSoleCarrierCapped = false;
+  if (!!aTitle && !!bTitle && !headlineEffective &&
+      jaccard < MINHASH_SOLE_CARRIER_MIN_JACCARD &&
+      headlineShared < SOLE_CARRIER_MIN_SHARED &&
+      jaccardForRaw > SUBJECT_VETO_CAP) {
+    const otherLanes = Math.max(primaryForRaw, headlineScore);
+    if (jaccardForRaw > otherLanes && otherLanes * timeDecay * sourcePenalty < MATCH_THRESHOLD) {
+      jaccardForRaw = SUBJECT_VETO_CAP;
+      minhashSoleCarrierCapped = true;
+    }
+  }
   const raw = clip01(Math.max(jaccardForRaw, primaryForRaw, headlineScore));
 
-  // 7. Time decay.
-  const timeDecay = timeDecayFor(hoursDelta);
   const finalScore = raw * timeDecay * sourcePenalty;
 
   return {
@@ -1710,6 +2195,7 @@ export function score(
       autoAccept: false,
       jaccard,
       jaccardScore,
+      jaccardForRaw,
       sharedEntities: sharedCount,
       sharedEntitiesWeighted: sharedEffective,
       entityRatioRaw,
@@ -1731,6 +2217,8 @@ export function score(
       counterVeto,
       homonymVeto,
       templateVeto,
+      counterpartVeto,
+      minhashSoleCarrierCapped,
       actorVeto,
     },
   };

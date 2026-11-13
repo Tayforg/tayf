@@ -5,6 +5,7 @@ import {
   DAILY_ENGLISH_GATE_FROM,
   DAILY_GAME_SIZE,
   DAILY_MAX_PER_ZONE,
+  DAILY_PII_STEM_FROM,
   DAILY_POLITICS_GATE_FROM,
   DAILY_TITLE_ASOF_FROM,
   DAILY_TITLE_MAX,
@@ -564,6 +565,73 @@ describe("isDailyEligible -- twin gate (opts.twinGate)", () => {
   });
 });
 
+describe("isDailyEligible -- pii stem gate (opts.piiStemGate)", () => {
+  const GATED = { piiStemGate: true } as const;
+  const inflected = (text: string) => candidate({ title: title(text) });
+
+  it.each([
+    "Sarıgül soruşturmasında tutuklanmıştı: Aylin Kotil'den suç duyurusu",
+    // 'yazar', not 'gazeteci': the fixture source's slug holds 'gazete', which is a substring of
+    // 'gazeteci', so a 'gazeteci' title was rejected by the outlet-leak rule with the gate off too.
+    "Mesleki faaliyeti nedeniyle tutuklanan yazar Ali Tarakçı tahliye edildi",
+    "Casusluk soruşturmasıyla gözaltına alınmıştı: X'in ifadesi ortaya çıktı",
+    "HABAŞ'ta hayatını kaybeden işçiler için anma töreni düzenlendi",
+    "Komşusunu öldüren kişi hakkında karar çıktı",
+  ])("rejects %j when the gate is on, accepts it when the gate is off", (text) => {
+    expect(isDailyEligible(inflected(text), WINDOW, GATED)).toBe(false);
+    // The gate is what makes the difference: the same title is eligible without it.
+    expect(isDailyEligible(inflected(text), WINDOW, { piiStemGate: false })).toBe(true);
+  });
+
+  it("accepts the same title when the gate is off or absent (the keys players already saw keep their rules)", () => {
+    const c = inflected("Sarıgül soruşturmasında tutuklanmıştı: Aylin Kotil'den suç duyurusu");
+    expect(isDailyEligible(c, WINDOW)).toBe(true);
+    expect(isDailyEligible(c, WINDOW, {})).toBe(true);
+    expect(isDailyEligible(c, WINDOW, { piiStemGate: false })).toBe(true);
+  });
+
+  it("the v1 list still rejects without the gate (tutuklandı)", () => {
+    const c = inflected("Zanlı bugün çıkarıldığı mahkemece tutuklandı, iddia edildi");
+    expect(isDailyEligible(c, WINDOW)).toBe(false);
+    expect(isDailyEligible(c, WINDOW, { piiStemGate: false })).toBe(false);
+    expect(isDailyEligible(c, WINDOW, GATED)).toBe(false);
+  });
+
+  it("accepts a clean candidate when the gate is on", () => {
+    expect(isDailyEligible(candidate(), WINDOW, GATED)).toBe(true);
+  });
+
+  it("composes with the other gates", () => {
+    const all = { politicsGate: true, englishGate: true, twinGate: true, piiStemGate: true } as const;
+    expect(isDailyEligible(candidate(), WINDOW, all)).toBe(true);
+    expect(isDailyEligible(inflected("Yazar tutuklanmıştı, ifadesi bugün ortaya çıktı"), WINDOW, all)).toBe(false);
+    expect(isDailyEligible(candidate({ crossZoneTwin: true }), WINDOW, all)).toBe(false);
+  });
+});
+
+describe("DAILY_PII_STEM_FROM", () => {
+  it("has not moved (replay byte-identity contract: the first Istanbul date key after the deploy day)", () => {
+    expect(DAILY_PII_STEM_FROM).toBe("2026-11-14");
+  });
+
+  it("is a valid date key", () => {
+    expect(isDateKey(DAILY_PII_STEM_FROM)).toBe(true);
+  });
+
+  // Every key up to the deploy day is replayable and recomputes from a cold
+  // cache, so a gate on or before today would rewrite a puzzle already played.
+  // The change deploys on 2026-11-13 (Istanbul): the first unseen key is 11-14.
+  it("is not earlier than 2026-11-14, a key nobody has seen at deploy time", () => {
+    expect(DAILY_PII_STEM_FROM >= "2026-11-14").toBe(true);
+  });
+
+  it("comes after the other gates, so they keep their order", () => {
+    expect(DAILY_PII_STEM_FROM > DAILY_TITLE_ASOF_FROM).toBe(true);
+    expect(DAILY_PII_STEM_FROM > DAILY_TWIN_KEY_V2_FROM).toBe(true);
+    expect(DAILY_PII_STEM_FROM > DAILY_TWIN_GATE_FROM).toBe(true);
+  });
+});
+
 describe("DAILY_TWIN_GATE_FROM", () => {
   it("is a valid date key", () => {
     expect(isDateKey(DAILY_TWIN_GATE_FROM)).toBe(true);
@@ -1030,6 +1098,81 @@ describe("pickDailySet -- twin gate", () => {
     expect(pickDailySet(key, flagMuhalefet(pool(key, 12)))).toBeNull();
     const preKey = addDays(key, -1);
     expect(pickDailySet(preKey, flagMuhalefet(pool(preKey, 12)))).not.toBeNull();
+  });
+});
+
+describe("pickDailySet -- pii stem gate", () => {
+  const INFLECTED = "Sarıgül soruşturmasında tutuklanmıştı: Aylin Kotil'den suç duyurusu";
+
+  /**
+   * `pool(key, 12)` with the dailyHash-first candidate retitled to a headline v1
+   * lets through and v2 rejects. It is the first of its zone in hash order, so a
+   * pick that may use it always does.
+   */
+  function poolWithHashFirstInflected(key: string): { all: DailyCandidate[]; inflectedId: string } {
+    const all = pool(key, 12);
+    const first = [...all].sort((a, b) => dailyHash(key, a.articleId) - dailyHash(key, b.articleId))[0]!;
+    return {
+      all: all.map((c) => (c.articleId === first.articleId ? { ...c, title: title(INFLECTED) } : c)),
+      inflectedId: first.articleId,
+    };
+  }
+
+  it.each([0, 1, 5])("excludes the inflected title on and after the gate (+%i days)", (offset) => {
+    const key = addDays(DAILY_PII_STEM_FROM, offset);
+    const { all, inflectedId } = poolWithHashFirstInflected(key);
+
+    const result = pickDailySet(key, all);
+
+    expect(result).not.toBeNull();
+    expect(result).toHaveLength(DAILY_GAME_SIZE);
+    expect(result!.some((h) => h.articleId === inflectedId)).toBe(false);
+  });
+
+  it("includes the same title the day before the gate (the set players saw does not move)", () => {
+    const key = addDays(DAILY_PII_STEM_FROM, -1);
+    expect(key < DAILY_PII_STEM_FROM).toBe(true);
+    const { all, inflectedId } = poolWithHashFirstInflected(key);
+
+    const result = pickDailySet(key, all);
+
+    expect(result).not.toBeNull();
+    expect(result!.some((h) => h.articleId === inflectedId)).toBe(true);
+  });
+
+  it("a pre-gate puzzle is byte-identical to the pre-change rules: the inflected title is a plain eligible title", () => {
+    for (let back = 1; back <= 7; back++) {
+      const key = addDays(DAILY_PII_STEM_FROM, -back);
+      const { all, inflectedId } = poolWithHashFirstInflected(key);
+      // The v1 list is what the pre-change code ran on every key. With a title
+      // v1 passes, the first candidate is an ordinary one: swapping its text
+      // for another v1-clean text must not move a single pick.
+      const clean = all.map((c) =>
+        c.articleId === inflectedId ? { ...c, title: title("Siyasi gündemde bugün önemli bir gelişme yaşandı") } : c,
+      );
+      const a = pickDailySet(key, all)!;
+      const b = pickDailySet(key, clean)!;
+
+      expect(a.map((h) => h.articleId)).toEqual(b.map((h) => h.articleId));
+    }
+  });
+
+  it("a gated day equals the pick from the pool without the inflected candidates", () => {
+    const key = DAILY_PII_STEM_FROM;
+    const { all, inflectedId } = poolWithHashFirstInflected(key);
+    const without = all.filter((c) => c.articleId !== inflectedId);
+
+    expect(pickDailySet(key, all)).toEqual(pickDailySet(key, without));
+  });
+
+  it("returns null on a gated day when inflected titles leave a zone empty, but not on the day before", () => {
+    const key = DAILY_PII_STEM_FROM;
+    const retitleMuhalefet = (candidates: DailyCandidate[]) =>
+      candidates.map((c) => (c.source.bias === "opposition" ? { ...c, title: title(INFLECTED) } : c));
+
+    expect(pickDailySet(key, retitleMuhalefet(pool(key, 12)))).toBeNull();
+    const preKey = addDays(key, -1);
+    expect(pickDailySet(preKey, retitleMuhalefet(pool(preKey, 12)))).not.toBeNull();
   });
 });
 

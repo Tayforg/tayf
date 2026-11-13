@@ -18,7 +18,27 @@
 // unacceptable failure mode is the true positive we MISS: a private
 // individual's name surfacing in the game pool, which is a KVKK problem.
 // Bias every judgement call on this list toward exclusion.
-export const PRIVATE_INDIVIDUAL_PATTERNS: readonly RegExp[] = [
+//
+// TWO versions of the list exist, because the daily puzzle must replay byte for
+// byte (daily-set.ts: DAILY_PII_STEM_FROM):
+//   * PRIVATE_INDIVIDUAL_PATTERNS_V1 is the list as it stood when the daily
+//     puzzles already played were drawn. Its stems are anchored on ONE
+//     inflection of a word ("tutukland" matches "tutuklandı" but not
+//     "tutuklanmıştı" or "tutuklanan"). Only the daily set uses it, for the
+//     keys before the gate, through `isGameEligibleTitleV1`.
+//   * PRIVATE_INDIVIDUAL_PATTERNS (v2) is the same list with the stem of four
+//     words it already holds widened to every inflection (the "öldür" stem is
+//     anchored on a word start, see below). Everything else
+//     (Bölge, Çerçeve, embeds, cards, social, the daily set from the gate on)
+//     uses it through `isGameEligibleTitle`.
+// The list is founder-owned (migration 165): v2 adds no new WORD, it only widens
+// what a listed word matches. Adding a word is a founder decision.
+
+/**
+ * The list the already-played daily puzzles were drawn with. Frozen: do not
+ * edit it, a change would rewrite a puzzle a player has seen.
+ */
+export const PRIVATE_INDIVIDUAL_PATTERNS_V1: readonly RegExp[] = [
   /yaşındaki/,
   /isimli/,
   /adlı/,
@@ -44,6 +64,55 @@ export const PRIVATE_INDIVIDUAL_PATTERNS: readonly RegExp[] = [
   /bıçakl/,
 ];
 
+/**
+ * The current list: PRIVATE_INDIVIDUAL_PATTERNS_V1 with the stem of four listed
+ * words widened so that every inflection matches ("tutuklanmıştı", "tutuklanan",
+ * "gözaltına alınmıştı", "gözaltına alınan", "hayatını kaybeden", "öldüren"):
+ *   /tutukland/ -> /tutuklan/, /gözaltına alınd/ -> /gözaltına alın/ (plus
+ *   /gözaltı/ next to /gözaltında/, the noun in "gözaltı kararı"),
+ *   /hayatını kaybet/ -> /hayatını kayb/, /öldürül/ -> /(?<![a-zçğıöşü])öldür/.
+ * v2 is a widening of v1 with one exception: a title v1 rejects, v2 rejects
+ * too, except that v1's folded /oldurul/ also matched mid-word "doldurul-"
+ * ("sandık doldurulacak"), which is no PII word. The stem of "öldür" must start
+ * a word: its diacritic-folded copy is /oldur/, which sits inside every
+ * "doldur-" / "soldur-" form ("Boşluğu Ankara dolduruyor", "Meydanı doldurdu",
+ * "koltuğunu kim doldurabilecek", "renkler soldurdu"; 20 of 32,104 prod titles
+ * in 3 days) and would drop those ordinary headlines from the pool. The
+ * lookbehind is one character, so the match stays linear. "öldüren",
+ * "öldürülen", "öldürdü", "Ali'yi öldürdü" and the diacritic-free "oldurdu"
+ * still match. All other entries are unchanged.
+ *
+ * Deliberately NOT here (founder proposals, see migration 165's comment that this
+ * list is founder-owned): /yaşamını yitir/ (a synonym of the listed "hayatını
+ * kaybet"), /zanlı/ (a synonym of the listed "şüpheli") and /etkin pişmanlık/.
+ */
+export const PRIVATE_INDIVIDUAL_PATTERNS: readonly RegExp[] = [
+  /yaşındaki/,
+  /isimli/,
+  /adlı/,
+  /çocuk/,
+  /reşit olmayan/,
+  /şüpheli/,
+  /sanık/,
+  /mağdur/,
+  /tutuklan/,
+  /tutuklu/,
+  /tutuklama/,
+  /gözaltına alın/,
+  /gözaltında/,
+  /gözaltı/,
+  /cinayet/,
+  /taciz/,
+  /istismar/,
+  /tecavüz/,
+  /intihar/,
+  /ceset/,
+  /(?<![a-zçğıöşü])öldür/,
+  /yaralan/,
+  /hayatını kayb/,
+  /bıçakl/,
+];
+
 // Maps every Turkish diacritic letter this list's patterns use to its
 // diacritic-free ASCII counterpart. Degraded/mistranscribed Turkish text
 // (this pipeline already carries a CP1254 mojibake regression case) can
@@ -64,13 +133,34 @@ function foldDiacritics(input: string): string {
   return input.replace(/[çğıöşü]/g, (ch) => DIACRITIC_FOLD_MAP[ch] ?? ch);
 }
 
-// Pre-folded copy of PRIVATE_INDIVIDUAL_PATTERNS, tested against the
-// diacritic-folded title below. Built once at module load, not per call.
-const FOLDED_PRIVATE_INDIVIDUAL_PATTERNS: readonly RegExp[] =
-  PRIVATE_INDIVIDUAL_PATTERNS.map((pattern) => new RegExp(foldDiacritics(pattern.source)));
+// Pre-folded copies of the two lists, tested against the diacritic-folded title
+// below. Built once at module load, not per call.
+function foldPatterns(patterns: readonly RegExp[]): readonly RegExp[] {
+  return patterns.map((pattern) => new RegExp(foldDiacritics(pattern.source)));
+}
+
+const FOLDED_PRIVATE_INDIVIDUAL_PATTERNS: readonly RegExp[] = foldPatterns(
+  PRIVATE_INDIVIDUAL_PATTERNS,
+);
+const FOLDED_PRIVATE_INDIVIDUAL_PATTERNS_V1: readonly RegExp[] = foldPatterns(
+  PRIVATE_INDIVIDUAL_PATTERNS_V1,
+);
+
+function isEligibleUnder(
+  title: string,
+  patterns: readonly RegExp[],
+  foldedPatterns: readonly RegExp[],
+): boolean {
+  const normalized = title.toLocaleLowerCase("tr-TR");
+  const folded = foldDiacritics(normalized);
+  return !(
+    patterns.some((pattern) => pattern.test(normalized)) ||
+    foldedPatterns.some((pattern) => pattern.test(folded))
+  );
+}
 
 /**
- * False when `title` matches any `PRIVATE_INDIVIDUAL_PATTERNS` entry, in
+ * False when `title` matches any `PRIVATE_INDIVIDUAL_PATTERNS` (v2) entry, in
  * either its diacritic-aware or diacritic-folded form.
  *
  * Matching is case-insensitive AND Turkish-locale aware: plain regex `/i`
@@ -87,10 +177,23 @@ const FOLDED_PRIVATE_INDIVIDUAL_PATTERNS: readonly RegExp[] =
  * under-exclusion is a KVKK problem.
  */
 export function isGameEligibleTitle(title: string): boolean {
-  const normalized = title.toLocaleLowerCase("tr-TR");
-  const folded = foldDiacritics(normalized);
-  return !(
-    PRIVATE_INDIVIDUAL_PATTERNS.some((pattern) => pattern.test(normalized)) ||
-    FOLDED_PRIVATE_INDIVIDUAL_PATTERNS.some((pattern) => pattern.test(folded))
+  return isEligibleUnder(
+    title,
+    PRIVATE_INDIVIDUAL_PATTERNS,
+    FOLDED_PRIVATE_INDIVIDUAL_PATTERNS,
+  );
+}
+
+/**
+ * `isGameEligibleTitle` under PRIVATE_INDIVIDUAL_PATTERNS_V1, the list the
+ * daily puzzles already played were drawn with. Only daily-set.ts calls it, for
+ * the keys before DAILY_PII_STEM_FROM, so those puzzles recompute exactly as
+ * they were served. Every other caller uses `isGameEligibleTitle`.
+ */
+export function isGameEligibleTitleV1(title: string): boolean {
+  return isEligibleUnder(
+    title,
+    PRIVATE_INDIVIDUAL_PATTERNS_V1,
+    FOLDED_PRIVATE_INDIVIDUAL_PATTERNS_V1,
   );
 }

@@ -21,6 +21,7 @@ import {
   HEADLINE_LANE_MIN_JACCARD,
   HEADLINE_TITLE_MAX_CHARS,
   MATCH_THRESHOLD,
+  MINHASH_SOLE_CARRIER_MIN_JACCARD,
   TFIDF_WEIGHT,
   TIME_WINDOW_HOURS,
 } from "../../../supabase/functions/_shared/cluster/constants.ts";
@@ -1074,4 +1075,189 @@ describe("h19-recall-1 entity-sparse same-event pairs", () => {
       });
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// h172-clusterpurity-1/2/3: three narrow false-merge guards (the MinHash sole-carrier
+// cap, the bilateral counterpart veto, the leading event tag). Each only vetoes the
+// pattern its spec proves; every pair below is the SAME event under the same or a
+// reworded headline and must keep matching. The 36 h production replay (every
+// non-first join of the window, old vs new scorer) is in the PR; these are its
+// regression pins.
+// ---------------------------------------------------------------------------
+describe("h172 guards: recall is unchanged for same-event pairs", () => {
+  // Two 64-slot signatures that agree on `agree` slots: J = agree / 64.
+  const sigs = (agree: number) => {
+    const a = new Uint32Array(64);
+    const b = new Uint32Array(64);
+    for (let i = 0; i < 64; i++) {
+      a[i] = i + 1;
+      b[i] = i < agree ? i + 1 : i + 1000;
+    }
+    return [{ strict: null, signature: a }, { strict: null, signature: b }] as const;
+  };
+  const ENTS = ["erdogan", "antalya"];
+
+  describe("MinHash sole-carrier guard", () => {
+    const AA_LIVE = "CANLI - Cumhurbaşkanı Erdoğan konuşuyor";
+    const SERIF = "Cumhurbaşkanı Erdoğan, Pakistan Başbakanı Şerif'i kabul etti";
+
+    it("a wire rewrite (J >= the floor, zero shared headline tokens) still joins", () => {
+      const floorSlots = Math.ceil(MINHASH_SOLE_CARRIER_MIN_JACCARD * 64);
+      const [fa, fb] = sigs(floorSlots);
+      const r = score(fa, fb, ENTS, ENTS, 0.2, 2.5, { aTitle: AA_LIVE, bTitle: SERIF });
+      expect(r.components.headlineShared).toBe(0);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("a near-duplicate with two shared headline tokens at J 0.53 still joins", () => {
+      const [fa, fb] = sigs(34);
+      const r = score(fa, fb, ["chp"], ["chp"], 0.2, 2, {
+        aTitle: "Merkezefendi başkanvekili seçimi sonuçlandı",
+        bTitle: "Merkezefendi Belediyesi'nde başkanvekili belli oldu",
+      });
+      expect(r.components.headlineShared).toBe(2);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("a pair the headline lane or the primary lane carries is scored exactly as before", () => {
+      // Same fixture with and without titles: the guard never lowers a score the other lanes carry.
+      const [fa, fb] = sigs(34);
+      for (const tfidf of [0.5, 0.6, 0.8, 1]) {
+        const withTitles = score(fa, fb, ENTS, ENTS, tfidf, 1, { aTitle: AA_LIVE, bTitle: SERIF });
+        const without = score(fa, fb, ENTS, ENTS, tfidf, 1);
+        expect(withTitles.score, `tfidf ${tfidf}`).toBe(without.score);
+        expect(withTitles.components.minhashSoleCarrierCapped).toBe(false);
+      }
+    });
+
+    it("the strict fingerprint still auto-accepts and the pair without signatures is untouched", () => {
+      const same = { strict: "a".repeat(40), signature: null };
+      expect(score(same, same, [], [], 0, 1, { aTitle: AA_LIVE, bTitle: SERIF }).score).toBe(1);
+      const noFp = { strict: null, signature: null };
+      const r = score(noFp, noFp, ["erdogan"], ["erdogan"], 0.69, 0.5, { aTitle: AA_LIVE, bTitle: SERIF });
+      expect(isMatch(r)).toBe(true);
+    });
+  });
+
+  describe("counterpart veto", () => {
+    const noFp = { strict: null, signature: null };
+    const HOURS = 0.5;
+    const IRAK_TITLES = [
+      "Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü",
+      "Erdoğan, Irak Cumhurbaşkanı Nizar Amedi ile görüştü",
+      "Antalya- Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Nizar Amedi ile görüştü",
+      "Erdoğan, Iraklı mevkidaşı Amedi ile görüştü",
+      "Erdoğan, Irak Cumhurbaşkanı Amedi ile bir araya geldi",
+      "Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile Antalya'da görüştü",
+    ];
+    const KONGO_TITLES = [
+      "Cumhurbaşkanı Erdoğan, Kongo Cumhuriyeti Cumhurbaşkanı Nguesso ile Antalya’da görüştü",
+      "Başkan Erdoğan, Kongo Cumhurbaşkanı ile görüştü!",
+      "Erdoğan, Kongo Cumhurbaşkanı Sassou Nguesso ile bir araya geldi",
+    ];
+
+    it("the same counterpart under every wording of the ddae920b cluster still joins (all pairs, both orders)", () => {
+      for (const group of [IRAK_TITLES, KONGO_TITLES]) {
+        for (const a of group) {
+          for (const b of group) {
+            if (a === b) continue;
+            const r = score(noFp, noFp, ["erdogan"], ["erdogan"], 0.6, HOURS, { aTitle: a, bTitle: b });
+            expect(r.components.counterpartVeto, `${a} | ${b}`).toBe(false);
+            expect(isMatch(r), `${a} | ${b}`).toBe(true);
+          }
+        }
+      }
+    });
+
+    it("the Bosna-Hersek meeting named by its guests and by their office still joins (birgun vs sabah, 0.87)", () => {
+      const names = "Başkan Erdoğan, Becirovic ve Komsic ile görüştü";
+      const office = "Erdoğan, Bosna-Hersek Devlet Başkanlığı Konseyi Başkanı ile bir araya geldi";
+      for (const [a, b] of [[names, office], [office, names]] as const) {
+        const r = score(noFp, noFp, ["erdogan"], ["erdogan"], 0.6, 0.03, { aTitle: a, bTitle: b });
+        expect(r.components.counterpartVeto, `${a} | ${b}`).toBe(false);
+        expect(isMatch(r), `${a} | ${b}`).toBe(true);
+      }
+    });
+
+    it("a guest named by person in one headline and by country in the other still joins", () => {
+      const r = score(noFp, noFp, ["erdogan"], ["erdogan"], 0.6, 0.5, {
+        aTitle: "Erdoğan, Hırvatistan Başbakanı ile görüştü",
+        bTitle: "Erdoğan, Plenkoviç ile görüştü",
+      });
+      expect(r.components.counterpartVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("the same meeting with the parties in the other order still joins", () => {
+      const r = score(noFp, noFp, ["fidan"], ["fidan"], 0.6, HOURS, {
+        aTitle: "Bakan Fidan, Japon mevkidaşı Motegi ile görüştü",
+        bTitle: "Japonya Dışişleri Bakanı Motegi, Bakan Fidan ile görüştü",
+      });
+      expect(r.components.counterpartVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("a bilateral title against a non-bilateral report of the same meeting still joins", () => {
+      for (const other of [
+        "Erdoğan ile Sassou Nguesso'nun görüşmesi ikili ilişkilerde yeni dönem işareti",
+        "Antalya'da kritik zirve: Erdoğan ve N'Guesso iklim ve ticaret gündemiyle buluştu",
+        "Antalya’daki Erdoğan-Nguesso görüşmesinde ikili ilişkiler ele alındı",
+      ]) {
+        const r = score(noFp, noFp, ["erdogan", "antalya"], ["erdogan", "antalya"], 0.55, HOURS, {
+          aTitle: KONGO_TITLES[0]!,
+          bTitle: other,
+        });
+        expect(r.components.counterpartVeto, other).toBe(false);
+        expect(isMatch(r), other).toBe(true);
+      }
+    });
+
+    it("the headline lane between two identical counterpart headlines is not withdrawn", () => {
+      const title = "Cumhurbaşkanı Erdoğan, Katar Emiri ile görüştü: Kalkınma Yolu Projesi, enerji iş birliği ve bölgesel gelişmeler ele alındı";
+      const r = score(noFp, noFp, ["erdogan"], ["erdogan"], 0.3, 1, { aTitle: title, bTitle: title.replaceAll("Cumhurbaşkanı", "Başkan") });
+      expect(r.components.headlineLane).toBe(true);
+      expect(r.components.counterpartVeto).toBe(false);
+      expect(r.components.actorVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+  });
+
+  describe("event tag prefix", () => {
+    const noFp = { strict: null, signature: null };
+    const DURAN = "İletişim Başkanı Duran'dan COP31 Liderler Zirvesi'ne ilişkin açıklama:";
+    const ERDOGAN = "Cumhurbaşkanı Erdoğan'dan COP31 Liderler Zirvesi'ne ilişkin açıklama";
+
+    it("the same speaker with and without a tag, and under two different tags, still joins (haberler-com seed, posta, sabah)", () => {
+      const titles = [`COP31 LİDERLER ZİRVESİ - ${DURAN}`, DURAN, `İKLİM ZİRVESİ COP31 ANTALYA - ${DURAN}`, `SON DAKİKA | ${DURAN}`];
+      for (const a of titles) {
+        for (const b of titles) {
+          if (a === b) continue;
+          const r = score(noFp, noFp, ["cop31"], ["cop31"], 0.7, 2, { aTitle: a, bTitle: b });
+          expect(r.components.templateVeto, `${a} | ${b}`).toBe(false);
+          expect(r.components.actorVeto, `${a} | ${b}`).toBe(false);
+          expect(isMatch(r), `${a} | ${b}`).toBe(true);
+        }
+      }
+    });
+
+    it("the same Erdoğan statement with and without a tag still joins (hurriyet, milliyet)", () => {
+      const tagged = `COP31 LİDERLER ZİRVESİ - ${ERDOGAN}`;
+      for (const [a, b] of [[tagged, ERDOGAN], [ERDOGAN, tagged]] as const) {
+        const r = score(noFp, noFp, ["erdogan", "cop31"], ["erdogan", "cop31"], 0.7, 2, { aTitle: a, bTitle: b });
+        expect(r.components.templateVeto).toBe(false);
+        expect(isMatch(r)).toBe(true);
+        expect(headlineOnlyScore(headlineTokens(a), headlineTokens(b), 2, { aTitle: a, bTitle: b })).toBeGreaterThan(MATCH_THRESHOLD);
+      }
+    });
+
+    it("a title that only looks tagged keeps today's behaviour: a speaker before a colon, a two-word tag", () => {
+      for (const t of ["BAHÇELİ: Türkiye Yüzyılı'nda kimse yalnız kalmayacak", "SON DAKİKA | Bahçeli'den önemli açıklama geldi"]) {
+        const r = score(noFp, noFp, ["bahceli"], ["bahceli"], 0.7, 1, { aTitle: t, bTitle: t });
+        expect(isMatch(r), t).toBe(true);
+      }
+    });
+  });
 });

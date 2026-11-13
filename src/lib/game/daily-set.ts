@@ -42,7 +42,7 @@
 import { isPoliticsMember, zoneOf } from "@/lib/bias/config";
 import { sourceKindOf } from "@/lib/sources/kind";
 import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";
-import { isGameEligibleTitle } from "./pii-filter";
+import { isGameEligibleTitle, isGameEligibleTitleV1 } from "./pii-filter";
 import type { TwinKeyVersion } from "./title-twin";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
@@ -121,6 +121,20 @@ export const DAILY_TWIN_KEY_V2_FROM = "2026-11-12";
 // merge if the deploy date is on or after it. It is on or after
 // DAILY_TWIN_GATE_FROM, so an as-of key always runs the twin rule.
 export const DAILY_TITLE_ASOF_FROM = "2026-11-13";
+// From this puzzle date onward the private-individual filter is the v2 list
+// (pii-filter.ts, PRIVATE_INDIVIDUAL_PATTERNS): the stems of the words it already
+// holds are widened to every inflection ("tutuklanmıştı", "tutuklanan",
+// "gözaltına alınmıştı", "hayatını kaybeden", "öldüren" pass the v1 list, which
+// is anchored on one inflection per word). Before it, a puzzle is filtered with
+// the v1 list (`isGameEligibleTitleV1`), exactly as it was when it was served.
+// Same replay contract as the gates above: gated on the puzzle key, never on the
+// clock, so every EARLIER key recomputes byte-identically from a cold cache. It
+// MUST be a key no player has seen when this deploys (every key up to the deploy
+// day is replayable and recomputes from a cold cache). It is the first Istanbul
+// date strictly after the deploy day (2026-11-13); bump it before merge if the
+// deploy date is on or after it. Every other caller (Bölge, Çerçeve, embeds,
+// cards, social) has no replay contract and uses the v2 list straight away.
+export const DAILY_PII_STEM_FROM = "2026-11-14";
 export const DAILY_MAX_PER_ZONE = 2;
 export const DAILY_TITLE_MIN = 25;
 export const DAILY_TITLE_MAX = 180;
@@ -383,8 +397,8 @@ export function dailyHash(key: string, articleId: string): number {
 
 // Same six-letter Turkish diacritic fold pii-filter.ts uses, duplicated
 // here rather than imported: pii-filter.ts exports no fold helper (only
-// isGameEligibleTitle, imported read-only below) and this module owns no
-// edits to that file.
+// isGameEligibleTitle and isGameEligibleTitleV1, imported read-only above) and
+// this module owns no edits to that file.
 const DIACRITIC_FOLD_MAP: Record<string, string> = {
   ç: "c",
   ğ: "g",
@@ -457,6 +471,12 @@ function isWithinWindow(candidate: DailyCandidate, window: PuzzleWindow): boolea
  * candidate's cluster, not of the other candidates, so the rule is per-candidate
  * and prefix-consistent too.
  *
+ * `opts.piiStemGate` (on for keys >= DAILY_PII_STEM_FROM) filters the title with
+ * the v2 private-individual list (`isGameEligibleTitle`); off or absent it is the
+ * v1 list (`isGameEligibleTitleV1`) every earlier puzzle was served with. The v2
+ * list only ever widens v1, so the gate can only remove candidates. Per-candidate,
+ * so prefix-consistent as well.
+ *
  * Does NOT check the article_title_versions ("edited headline") exclusion
  * or the jev_prob threshold — both are applied earlier, at the query
  * layer (daily-query.ts), before a row ever becomes a `DailyCandidate`.
@@ -464,13 +484,21 @@ function isWithinWindow(candidate: DailyCandidate, window: PuzzleWindow): boolea
 export function isDailyEligible(
   candidate: DailyCandidate,
   window: PuzzleWindow,
-  opts?: { politicsGate?: boolean; englishGate?: boolean; twinGate?: boolean },
+  opts?: {
+    politicsGate?: boolean;
+    englishGate?: boolean;
+    twinGate?: boolean;
+    piiStemGate?: boolean;
+  },
 ): boolean {
   const { source } = candidate;
   if (!source.active) return false;
   if (sourceKindOf({ kind: source.kind ?? undefined }) !== "outlet") return false;
   if (opts?.englishGate && ENGLISH_SOURCE_SLUGS.has(source.slug)) return false;
-  if (!isGameEligibleTitle(candidate.title)) return false;
+  const titleEligible = opts?.piiStemGate
+    ? isGameEligibleTitle(candidate.title)
+    : isGameEligibleTitleV1(candidate.title);
+  if (!titleEligible) return false;
   const len = candidate.title.length;
   if (len < DAILY_TITLE_MIN || len > DAILY_TITLE_MAX) return false;
   if (titleLeaksOutlet(candidate.title, source)) return false;
@@ -502,9 +530,10 @@ function zoneOfCandidate(candidate: DailyCandidate): MediaDnaZone {
  * 1. Filters `candidates` to the eligible subset (`isDailyEligible`) for
  *    `key`'s window; from DAILY_POLITICS_GATE_FROM onward that includes the
  *    politics-member requirement, from DAILY_ENGLISH_GATE_FROM onward the
- *    no-English-outlet requirement, and from DAILY_TWIN_GATE_FROM onward the
- *    no-cross-zone-twin requirement (earlier keys are filtered exactly as
- *    before each gate existed, so past puzzles recompute identically).
+ *    no-English-outlet requirement, from DAILY_TWIN_GATE_FROM onward the
+ *    no-cross-zone-twin requirement, and from DAILY_PII_STEM_FROM onward the v2
+ *    private-individual list (earlier keys are filtered exactly as before each
+ *    gate existed, so past puzzles recompute identically).
  * 2. Sorts that subset ascending by `dailyHash(key, articleId)` (ties
  *    broken by articleId so the sort is a strict total order).
  * 3. Phase 1: for each zone in the fixed order iktidar, bagimsiz,
@@ -535,8 +564,9 @@ export function pickDailySet(
   const politicsGate = key >= DAILY_POLITICS_GATE_FROM;
   const englishGate = key >= DAILY_ENGLISH_GATE_FROM;
   const twinGate = key >= DAILY_TWIN_GATE_FROM;
+  const piiStemGate = key >= DAILY_PII_STEM_FROM;
   const eligible = candidates.filter((c) =>
-    isDailyEligible(c, window, { politicsGate, englishGate, twinGate }),
+    isDailyEligible(c, window, { politicsGate, englishGate, twinGate, piiStemGate }),
   );
 
   const sorted = [...eligible].sort((a, b) => {

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import {
   actorMismatchFires,
+  counterpartVetoFires,
   counterVetoFires,
   familyHomonymFires,
   genericHeadlineNameConflict,
@@ -8,6 +9,7 @@ import {
   headlineOnlyScore,
   isMatch,
   score,
+  stripEventTag,
   subjectVetoFires,
   templateActorMismatchFires,
   type ScoreResult,
@@ -39,6 +41,8 @@ import {
   HEADLINE_TITLE_MAX_CHARS,
   INSTITUTION_HEAD_WORDS,
   MATCH_THRESHOLD,
+  MINHASH_SOFT_ACCEPT_JACCARD,
+  MINHASH_SOLE_CARRIER_MIN_JACCARD,
   STATEMENT_TEMPLATE_NOUNS,
   SUBJECT_SPAN_MAX_WORDS,
   SUBJECT_STOP_WORDS,
@@ -3251,5 +3255,1036 @@ describe("generic headline name conflict (h114-clusterpurity-4)", () => {
         expect(headlineOnlyScore(ha, hb, 0.4, opts), `${a} | ${b}`).toBe(legacy.headlineOnlyScore(ha, hb, 0.4, opts));
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h172-clusterpurity-1: the MinHash soft-accept lane (J >= 0.5 scores 0.6 + 0.4 J)
+// has no headline floor. Cluster d587d519 ('Erdogan - Serif') holds AA 46227b32
+// 'CANLI - Cumhurbaskani Erdogan konusuyor': every word of that title is a
+// HEADLINE_GENERIC_PREFIXES word, so the headline lane is off, and a shared COP31
+// agency lead gives J 0.531 against the Pakistan PM seed. The primary lane has a
+// text floor; the MinHash lane alone carried the join and 15 speech items then
+// attached to the stub. The guard caps that lane when it is the ONLY lane that
+// carries a titled pair whose headlines share fewer than two content tokens and
+// whose J is under MINHASH_SOLE_CARRIER_MIN_JACCARD.
+// ---------------------------------------------------------------------------
+describe("MinHash sole-carrier guard (h172-clusterpurity-1)", () => {
+  const AA_LIVE = "CANLI - Cumhurbaşkanı Erdoğan konuşuyor";
+  const SERIF = "Cumhurbaşkanı Erdoğan, Pakistan Başbakanı Şerif'i kabul etti";
+  const MF_A = "Merkezefendi başkanvekili seçimi sonuçlandı";
+  const MF_B = "Merkezefendi Belediyesi'nde başkanvekili belli oldu";
+  const ENTS = ["erdogan", "antalya"];
+  const NO_FP = { strict: null, signature: null };
+
+  // Two 64-slot signatures that agree on `agree` slots: J = agree / 64.
+  const sigs = (agree: number) => {
+    const a = new Uint32Array(64);
+    const b = new Uint32Array(64);
+    for (let i = 0; i < 64; i++) {
+      a[i] = i + 1;
+      b[i] = i < agree ? i + 1 : i + 1000;
+    }
+    return [{ strict: null, signature: a }, { strict: null, signature: b }] as const;
+  };
+  const run = (
+    agree: number,
+    aTitle: string | null,
+    bTitle: string | null,
+    tfidf = 0.37,
+    hours = 2.5,
+    extra: { aSourceSlug?: string } = {},
+  ): ScoreResult => {
+    const [fa, fb] = sigs(agree);
+    return score(fa, fb, ENTS, ENTS, tfidf, hours, { aTitle, bTitle, ...extra });
+  };
+
+  describe("constants", () => {
+    it("the floor is 0.7 and nothing else moved", () => {
+      expect(MINHASH_SOLE_CARRIER_MIN_JACCARD).toBe(0.7);
+      expect(MINHASH_SOFT_ACCEPT_JACCARD).toBe(0.5);
+      expect(MATCH_THRESHOLD).toBe(0.4);
+      expect(SUBJECT_VETO_CAP).toBeCloseTo(MATCH_THRESHOLD * 0.9 - 0.01, 12);
+    });
+  });
+
+  describe("the pattern: a shared agency lead, a headline with no content token (d587d519)", () => {
+    it("(a) J 0.531, titles 'CANLI - ...' vs the Pakistan PM seed: capped under the threshold", () => {
+      const r = run(34, AA_LIVE, SERIF);
+      expect(r.components.jaccard).toBeCloseTo(34 / 64, 12);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.headlineShared).toBe(0);
+      expect(r.components.minhashSoleCarrierCapped).toBe(true);
+      // Nothing but the primary lane is left in `raw` (0.35 < 0.40 after the decay), not the MinHash lane's 0.81.
+      expect(r.components.raw).toBe(r.components.primary);
+      expect(r.components.raw).toBeLessThan(0.4);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD);
+      expect(isMatch(r)).toBe(false);
+      // The reported lane value is the uncapped one; only `raw` moved.
+      expect(r.components.jaccardScore).toBeCloseTo(0.6 + 0.4 * (34 / 64), 12);
+    });
+
+    it("control: the same inputs match today when a title is missing (no guard without both titles)", () => {
+      for (const [a, b] of [[null, null], [AA_LIVE, null], [null, SERIF], ["", ""], [AA_LIVE, ""]] as const) {
+        const r = run(34, a, b);
+        expect(isMatch(r), `${a} | ${b}`).toBe(true);
+        expect(r.components.minhashSoleCarrierCapped, `${a} | ${b}`).toBe(false);
+        expect(r.score).toBeCloseTo(0.8125 * (1 - 2.5 / TIME_WINDOW_HOURS), 12);
+      }
+    });
+
+    it("the capped lane sits under the consumer's fallback floor too: it is SUBJECT_VETO_CAP", () => {
+      // tf-idf 0.1: the primary lane is 0.23 at 0 h, so the capped MinHash lane (0.35) is what is left.
+      const r = run(34, AA_LIVE, SERIF, 0.1, 0);
+      expect(r.components.minhashSoleCarrierCapped).toBe(true);
+      expect(r.components.raw).toBe(SUBJECT_VETO_CAP);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
+    });
+
+    it("one shared content token is still fewer than two: capped; zero shared too", () => {
+      const one = run(34, "Merkezefendi'de seçim", "Merkezefendi başkanvekili belli oldu");
+      expect(one.components.headlineShared).toBe(1);
+      expect(one.components.minhashSoleCarrierCapped).toBe(true);
+      expect(isMatch(one)).toBe(false);
+    });
+  });
+
+  describe("what it leaves alone", () => {
+    it("(b) two shared content tokens (J 0.66): still matches, not capped", () => {
+      const r = run(42, MF_A, MF_B, 0.2, 2);
+      expect(r.components.jaccard).toBeCloseTo(42 / 64, 12);
+      expect(r.components.headlineShared).toBe(2);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("(c) J 0.72 with zero shared tokens (a wire rewrite): still matches, not capped", () => {
+      const r = run(46, AA_LIVE, SERIF);
+      expect(r.components.jaccard).toBeCloseTo(46 / 64, 12);
+      expect(r.components.headlineShared).toBe(0);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("the J floor is inclusive at 0.7: 44 of 64 slots (0.6875) is capped, 45 of 64 (0.703) matches", () => {
+      expect(run(44, AA_LIVE, SERIF).components.minhashSoleCarrierCapped).toBe(true);
+      expect(isMatch(run(44, AA_LIVE, SERIF))).toBe(false);
+      expect(run(45, AA_LIVE, SERIF).components.minhashSoleCarrierCapped).toBe(false);
+      expect(isMatch(run(45, AA_LIVE, SERIF))).toBe(true);
+    });
+
+    it("(d) a strict-fingerprint pair still auto-accepts", () => {
+      const same = { strict: "d".repeat(40), signature: null };
+      const r = score(same, same, [], [], 0.1, 1, { aTitle: AA_LIVE, bTitle: SERIF });
+      expect(r.components.autoAccept).toBe(true);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+      expect(r.score).toBe(1);
+    });
+
+    it("(e) when the primary lane is above the MinHash lane the score is unchanged", () => {
+      // tf-idf 1.0 at 0 h: primary 0.86 > jaccardScore 0.8125, so the MinHash lane carries nothing.
+      const withTitles = run(34, AA_LIVE, SERIF, 1, 0);
+      const without = run(34, null, null, 1, 0);
+      expect(withTitles.components.minhashSoleCarrierCapped).toBe(false);
+      expect(withTitles.components.primary).toBeGreaterThan(withTitles.components.jaccardScore);
+      expect(withTitles.score).toBe(without.score);
+      expect(withTitles.components.raw).toBe(without.components.raw);
+    });
+
+    it("the other lanes alone clear the threshold: not the sole carrier, so the score is unchanged", () => {
+      // tf-idf 0.5 at 2.5 h: primary 0.443 * decay 0.948 = 0.42 >= 0.40 on its own.
+      const withTitles = run(34, AA_LIVE, SERIF, 0.5, 2.5);
+      const without = run(34, null, null, 0.5, 2.5);
+      expect(withTitles.components.jaccardScore).toBeGreaterThan(withTitles.components.primary);
+      expect(withTitles.components.minhashSoleCarrierCapped).toBe(false);
+      expect(withTitles.score).toBe(without.score);
+      expect(isMatch(withTitles)).toBe(true);
+    });
+
+    it("the source penalty counts: the same pair is sole-carried once haberler-com's 0.85 pulls the primary lane under", () => {
+      const plain = run(34, AA_LIVE, SERIF, 0.5, 2.5);
+      expect(plain.components.minhashSoleCarrierCapped).toBe(false);
+      const penalised = run(34, AA_LIVE, SERIF, 0.5, 2.5, { aSourceSlug: "haberler-com" });
+      expect(penalised.components.sourcePenalty).toBe(0.85);
+      expect(penalised.components.minhashSoleCarrierCapped).toBe(true);
+      expect(isMatch(penalised)).toBe(false);
+    });
+
+    it("below the soft-accept floor the MinHash lane is 0.5 * J and carries nothing: not flagged", () => {
+      const r = run(20, AA_LIVE, SERIF, 0.37, 0);
+      expect(r.components.jaccard).toBeCloseTo(20 / 64, 12);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+    });
+
+    it("a lane another veto already capped is not flagged again (the veto owns it)", () => {
+      const a = "Lavrov, Japon mevkidaşıyla görüştü";
+      const b = "Fidan, Atlanta'da yatırımları konuştu";
+      const r = run(36, a, b, 0.1, 1);
+      expect(r.components.subjectVeto).toBe(true);
+      expect(r.components.headlineShared).toBeLessThan(2);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+    });
+
+    it("a pair the headline lane carries is not touched, whatever the signatures say", () => {
+      const a = "Cumhurbaşkanı Erdoğan, Katar Emiri ile COP31 Zirvesi kapsamında Antalya'da görüştü";
+      const b = "Cumhurbaşkanı Erdoğan, Katar Emiri ile COP31 Zirvesi kapsamında görüştü";
+      const r = run(34, a, b, 0.1, 1);
+      expect(r.components.headlineLane).toBe(true);
+      expect(r.components.minhashSoleCarrierCapped).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+  });
+
+  describe("the component", () => {
+    it("is a boolean on every branch: auto-accept, no signatures, no titles, capped, not capped", () => {
+      const same = { strict: "d".repeat(40), signature: null };
+      const results = [
+        score(same, same, [], [], 0.1, 1, { aTitle: AA_LIVE, bTitle: SERIF }),
+        score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, 1, { aTitle: AA_LIVE, bTitle: SERIF }),
+        score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, 1),
+        run(34, AA_LIVE, SERIF),
+        run(34, null, null),
+      ];
+      for (const r of results) expect(typeof r.components.minhashSoleCarrierCapped).toBe("boolean");
+      expect(results.map((r) => r.components.minhashSoleCarrierCapped)).toEqual([false, false, false, true, false]);
+    });
+
+    describe("jaccardForRaw: the MinHash lane's contribution to raw (the consumer's fallback reads it)", () => {
+      // The review probe: a text-floor-capped pair (tf-idf 0.18) whose MinHash lane the guard capped.
+      const LIDERLER = "Liderler zirvesinde iklim finansmanı için yeni fon çağrısı";
+      const ENTS3 = ["erdogan", "antalya", "cop31"];
+      const probe = (agree: number) => {
+        const [fa, fb] = sigs(agree);
+        return score(fa, fb, ENTS3, ENTS3, 0.18, 0.3, { aTitle: AA_LIVE, bTitle: LIDERLER });
+      };
+
+      it("J 0.547 (35 of 64): capped by the guard, so jaccardForRaw is SUBJECT_VETO_CAP while jaccardScore stays 0.819", () => {
+        const r = probe(35);
+        expect(r.components.jaccard).toBeCloseTo(35 / 64, 12);
+        expect(r.components.minhashSoleCarrierCapped).toBe(true);
+        expect(r.components.textFloorCapped).toBe(true);
+        expect(r.components.jaccardForRaw).toBe(SUBJECT_VETO_CAP);
+        expect(r.components.jaccardScore).toBeCloseTo(0.6 + 0.4 * (35 / 64), 12);
+        // raw rests on the text-floor-capped primary lane, which is above the capped MinHash lane.
+        expect(r.components.raw).toBeGreaterThan(r.components.jaccardForRaw);
+      });
+
+      it("J 0.31 (20 of 64): the lane is under the soft-accept floor, jaccardForRaw is its own score", () => {
+        const r = probe(20);
+        expect(r.components.minhashSoleCarrierCapped).toBe(false);
+        expect(r.components.textFloorCapped).toBe(true);
+        expect(r.components.jaccardForRaw).toBe(r.components.jaccardScore);
+        expect(r.components.raw).toBeGreaterThan(r.components.jaccardScore);
+      });
+
+      it("an uncapped pair reports the lane's own score; a veto reports min(lane, SUBJECT_VETO_CAP); auto-accept reports 1", () => {
+        const plain = run(34, null, null);
+        expect(plain.components.jaccardForRaw).toBe(plain.components.jaccardScore);
+        const vetoed = run(36, "Lavrov, Japon mevkidaşıyla görüştü", "Fidan, Atlanta'da yatırımları konuştu", 0.1, 1);
+        expect(vetoed.components.subjectVeto).toBe(true);
+        expect(vetoed.components.jaccardForRaw).toBe(SUBJECT_VETO_CAP);
+        const same = { strict: "d".repeat(40), signature: null };
+        const auto = score(same, same, [], [], 0.1, 1, { aTitle: AA_LIVE, bTitle: SERIF });
+        expect(auto.components.jaccardForRaw).toBe(1);
+      });
+    });
+
+    it("the existing components keep their values for a capped pair (additive)", () => {
+      const r = run(34, AA_LIVE, SERIF);
+      expect(r.components.subjectVeto).toBe(false);
+      expect(r.components.incidentVeto).toBe(false);
+      expect(r.components.counterVeto).toBe(false);
+      expect(r.components.homonymVeto).toBe(false);
+      expect(r.components.templateVeto).toBe(false);
+      expect(r.components.textFloorCapped).toBe(false);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h172-clusterpurity-2: bilateral-meeting headlines with different counterparts.
+// Cluster ddae920b (Erdogan - Kongo, 9 members) holds five Erdogan - Irak (Amedi)
+// articles: every veto reads the SUBJECT before the first comma or ablative, and
+// the object of 'X ile gorustu' / 'X'i kabul etti' is never compared, so the primary
+// lane (tf-idf on the shared 'Cumhurbaskani Erdogan ... Antalya ... gorustu'
+// template + the shared entities) is uncapped.
+// ---------------------------------------------------------------------------
+describe("counterpart veto (h172-clusterpurity-2)", () => {
+  const KONGO = "Cumhurbaşkanı Erdoğan, Kongo Cumhuriyeti Cumhurbaşkanı Nguesso ile Antalya’da görüştü";
+  const KONGO_SABAH = "Başkan Erdoğan, Kongo Cumhurbaşkanı ile görüştü!";
+  const IRAK_YENICAG = "Erdoğan, Antalya'da Cumhurbaşkanı Nizar Amedi ile görüştü";
+  const IRAK_CNN = "Antalya- Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Nizar Amedi ile görüştü";
+  const IRAK_GLOBAL = "Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü";
+  const SERIF = "Cumhurbaşkanı Erdoğan, Pakistan Başbakanı Şerif'i kabul etti";
+  // The words after the verb are free, so two near-identical headlines can differ only in the
+  // counterpart: the headline lane fires for this pair.
+  const TAIL = "görüştü: Kalkınma Yolu Projesi, enerji iş birliği ve bölgesel gelişmeler ele alındı";
+  const KATAR = `Cumhurbaşkanı Erdoğan, Katar Emiri ile ${TAIL}`;
+  const KUVEYT = `Cumhurbaşkanı Erdoğan, Kuveyt Emiri ile ${TAIL}`;
+  const HOURS = 0.83;
+  const NO_FP = { strict: null, signature: null };
+  const run = (aTitle: string, bTitle: string, tfidf = 0.51, hours = HOURS, ea = ["erdogan", "antalya"], eb = ["erdogan", "antalya"]) =>
+    score(NO_FP, NO_FP, ea, eb, tfidf, hours, { aTitle, bTitle });
+
+  describe("fires: two bilateral headlines naming disjoint counterparts (both argument orders)", () => {
+    const FIRES: ReadonlyArray<readonly [string, string, string]> = [
+      ["ddae920b: yenicag's Amedi vs ajans-haber's Kongo", IRAK_YENICAG, KONGO],
+      ["ddae920b: cnn-turk's Amedi vs ajans-haber's Kongo", IRAK_CNN, KONGO],
+      ["ddae920b: haber-global's Amedi vs ajans-haber's Kongo", IRAK_GLOBAL, KONGO],
+      ["ddae920b: haber-global's Amedi vs sabah's Kongo", IRAK_GLOBAL, KONGO_SABAH],
+      ["'kabul etti' (the Pakistan PM) vs 'ile görüştü' (Irak)", SERIF, IRAK_GLOBAL],
+      ["two emirs, the same template", KATAR, KUVEYT],
+      ["a minister and two different counterparts", "Bakan Fidan, Japon mevkidaşı Motegi ile bir araya geldi", "Bakan Fidan, ABD Dışişleri Bakanı Rubio ile görüştü"],
+    ];
+    it.each(FIRES)("true: %s", (_name, a, b) => {
+      expect(counterpartVetoFires(a, b)).toBe(true);
+      expect(counterpartVetoFires(b, a)).toBe(true);
+    });
+
+    it("a typographic apostrophe, an all-caps title and Title Case read like the plain title", () => {
+      expect(counterpartVetoFires("Cumhurbaşkanı Erdoğan, Pakistan Başbakanı Şerif’i kabul etti", IRAK_GLOBAL)).toBe(true);
+      expect(counterpartVetoFires("CUMHURBAŞKANI ERDOĞAN, IRAK CUMHURBAŞKANI AMEDİ İLE GÖRÜŞTÜ", KONGO)).toBe(true);
+      expect(counterpartVetoFires("Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi İle Görüştü", KONGO)).toBe(true);
+      expect(counterpartVetoFires("Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü", "Cumhurbaşkanı Erdoğan, Kongo Cumhurbaşkanı ile görüştü")).toBe(true);
+    });
+
+    it("the possessive forms of Kral, Emir and Prens are roles too: 'Katar Emiri' vs 'Kuveyt Emiri'", () => {
+      expect(counterpartVetoFires("Erdoğan, Katar Emiri ile görüştü", "Erdoğan, Kuveyt Emiri ile görüştü")).toBe(true);
+      expect(counterpartVetoFires("Erdoğan, Ürdün Kralı ile görüştü", "Erdoğan, Bahreyn Kralı ile görüştü")).toBe(true);
+      expect(counterpartVetoFires("Erdoğan, Suudi Veliaht Prensi Selman ile görüştü", "Erdoğan, Katar Emiri ile görüştü")).toBe(true);
+    });
+
+    it("every bilateral verb phrase counts: bir araya geldi, telefonda görüştü, görüşme gerçekleştirdi", () => {
+      for (const verb of ["bir araya geldi", "telefonda görüştü", "görüşme gerçekleştirdi", "Antalya'da bir araya geldi", "Antalya'da görüştü"]) {
+        const a = `Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile ${verb}`;
+        expect(counterpartVetoFires(a, KONGO), verb).toBe(true);
+        expect(counterpartVetoFires(KONGO, a), verb).toBe(true);
+      }
+    });
+
+    it("the counterpart NP starts after the last comma or colon before 'ile'", () => {
+      expect(counterpartVetoFires("Son dakika: Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü", KONGO)).toBe(true);
+      expect(counterpartVetoFires("Antalya: Erdoğan Irak Cumhurbaşkanı Amedi ile görüştü", KONGO)).toBe(true);
+      // The speaker clause before the comma is not part of the counterpart: a speaker's name in it is no match.
+      expect(counterpartVetoFires("Emine Erdoğan, UNDP Başkanı De Croo ile bir araya geldi", "Cumhurbaşkanı Erdoğan, Kongo Cumhurbaşkanı ile görüştü")).toBe(true);
+    });
+  });
+
+  describe("does not fire", () => {
+    it("a shared counterpart: Kongo in both (the same meeting, sabah vs ajans-haber)", () => {
+      expect(counterpartVetoFires(KONGO_SABAH, KONGO)).toBe(false);
+      expect(counterpartVetoFires(KONGO, KONGO_SABAH)).toBe(false);
+    });
+
+    it("the same counterpart named by nationality and by country: 'Iraklı' and 'Irak' share a 4+ letter prefix", () => {
+      expect(counterpartVetoFires("Erdoğan, Iraklı mevkidaşı ile görüştü", IRAK_GLOBAL)).toBe(false);
+      expect(counterpartVetoFires(IRAK_GLOBAL, "Erdoğan, Iraklı mevkidaşı ile görüştü")).toBe(false);
+      expect(
+        counterpartVetoFires("Erdoğan, Iraklı mevkidaşı Amedi ile görüştü", "Erdoğan, Irak Cumhurbaşkanı Amedi ile bir araya geldi"),
+      ).toBe(false);
+    });
+
+    it("an inflection of the same name: tokens sharing their first five letters match", () => {
+      expect(counterpartVetoFires("Erdoğan, Sassou Nguesso ile görüştü", "Erdoğan, Nguessonun mevkidaşı Nguessolu ile görüştü")).toBe(false);
+      expect(counterpartVetoFires("Erdoğan, Zelenskiy ile görüştü", "Erdoğan, Zelenski ile telefonda görüştü")).toBe(false);
+    });
+
+    it("a title that is not bilateral: the Amedi / Erdoğan 'görüşme' noun, a list headline, any other verb", () => {
+      expect(counterpartVetoFires("Antalya’daki Erdoğan-Amedi görüşmesinde Terörsüz Bölge hedefi vurgulandı", KONGO)).toBe(false);
+      expect(counterpartVetoFires("Erdoğan ile Sassou Nguesso'nun görüşmesi ikili ilişkilerde yeni dönem işareti", IRAK_GLOBAL)).toBe(false);
+      expect(counterpartVetoFires("Antalya'da kritik zirve: Erdoğan ve N'Guesso iklim ve ticaret gündemiyle buluştu", IRAK_GLOBAL)).toBe(false);
+      expect(counterpartVetoFires("Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile yemek yedi", KONGO)).toBe(false);
+      expect(counterpartVetoFires("Cumhurbaşkanı Erdoğan, Kongo ile görüşme hakkında konuştu", IRAK_GLOBAL)).toBe(false);
+    });
+
+    it("a bilateral title against one without the template", () => {
+      const emine = "Emine Erdoğan, UNDP Başkanı De Croo ile bir araya geldi";
+      expect(counterpartVetoFires(emine, "Cumhurbaşkanı Erdoğan, COP31 Liderler Zirvesi'nde konuştu")).toBe(false);
+      expect(counterpartVetoFires("Hava bugün parçalı bulutlu", emine)).toBe(false);
+      expect(counterpartVetoFires(emine, emine)).toBe(false);
+    });
+
+    it("an empty counterpart: only roles, stop words or lower case before 'ile'", () => {
+      expect(counterpartVetoFires("Erdoğan, mevkidaşı ile görüştü", KONGO)).toBe(false);
+      expect(counterpartVetoFires("Erdoğan, Cumhurbaşkanı ile görüştü", KONGO)).toBe(false);
+      expect(counterpartVetoFires("Erdoğan, bir ülkenin lideri ile görüştü", KONGO)).toBe(false);
+      expect(counterpartVetoFires("Erdoğan, Türkiye Cumhuriyeti Devlet Başkanı ile görüştü", KONGO)).toBe(false);
+    });
+
+    it("'A ile B görüştü': when B stands between 'ile' and the verb the word before 'ile' is a party, not a counterpart", () => {
+      const same = "Fidan, Lavrov ile telefonda görüştü";
+      expect(counterpartVetoFires("Fidan ile Lavrov telefonda görüştü", same)).toBe(false);
+      expect(counterpartVetoFires(same, "Fidan ile Lavrov telefonda görüştü")).toBe(false);
+      expect(counterpartVetoFires("Erdoğan ile Putin görüştü", IRAK_GLOBAL)).toBe(false);
+    });
+
+    it("role words are dropped, so two roles of different countries are still different counterparts", () => {
+      // 'Cumhurbaşkanı', 'Başbakanı', 'Başkanı' ... name nobody: sharing one never makes two counterparts alike.
+      expect(counterpartVetoFires("Erdoğan, Irak Cumhurbaşkanı ile görüştü", "Erdoğan, Kongo Cumhurbaşkanı ile görüştü")).toBe(true);
+      expect(counterpartVetoFires("Erdoğan, Hırvatistan Başbakanı ile görüştü", "Erdoğan, Slovenya Başbakanı ile görüştü")).toBe(true);
+      // The title and role fillers of SUBJECT_STOP_WORDS and the role prefixes of the actor rules count as roles.
+      expect(counterpartVetoFires("Erdoğan, Katar Dışişleri Bakanı ile görüştü", "Erdoğan, Kuveyt Dışişleri Bakanı ile görüştü")).toBe(true);
+      expect(counterpartVetoFires("Erdoğan, Katar Dışişleri Bakanı Al Sani ile görüştü", "Erdoğan, Katar Dışişleri Bakanı Al Sani ile telefonda görüştü")).toBe(false);
+    });
+
+    it("false for anything that is not a non-empty string", () => {
+      for (const bad of [undefined, null, 42, {}, [], ""]) {
+        expect(counterpartVetoFires(bad as unknown as string, KONGO)).toBe(false);
+        expect(counterpartVetoFires(KONGO, bad as unknown as string)).toBe(false);
+      }
+    });
+
+    it("the speaker's own tokens are dropped: a speaker named again in the counterpart clause is no counterpart", () => {
+      // Without the drop the first title's counterpart set would hold 'fidan' too, which occurs in
+      // the second title (its speaker) and would hide the two different counterparts.
+      expect(
+        counterpartVetoFires("Bakan Fidan, Fidan'ın Japon mevkidaşı Motegi ile görüştü", "Bakan Fidan, ABD Dışişleri Bakanı Rubio ile görüştü"),
+      ).toBe(true);
+    });
+
+    it("reversed roles are the same meeting: a counterpart that is the other title's speaker is no different counterpart", () => {
+      const a = "Bakan Fidan, Japon mevkidaşı Motegi ile görüştü";
+      const b = "Japonya Dışişleri Bakanı Motegi, Bakan Fidan ile görüştü";
+      expect(counterpartVetoFires(a, b)).toBe(false);
+      expect(counterpartVetoFires(b, a)).toBe(false);
+      expect(counterpartVetoFires("Rubio, Fidan ile görüştü", "Fidan, Rubio ile görüştü")).toBe(false);
+      // A shared party is not a different counterpart either (the veto leaves that to the other rules).
+      expect(counterpartVetoFires("Rubio, Fidan ile görüştü", "Fidan, Lavrov ile görüştü")).toBe(false);
+      expect(counterpartVetoFires("Rubio, Fidan ile görüştü", "Lavrov, Wang Yi ile görüştü")).toBe(true);
+    });
+
+    it("one meeting under two names: a person against an office or a country is not comparable (the Bosna-Hersek pair, 0.87 on the full scorer)", () => {
+      const names = "Cumhurbaşkanı Erdoğan, Becirovic ve Komsic ile görüştü";
+      const office = "Erdoğan, Bosna-Hersek Devlet Başkanlığı Konseyi Başkanı ile bir araya geldi";
+      expect(counterpartVetoFires(names, office)).toBe(false);
+      expect(counterpartVetoFires(office, names)).toBe(false);
+      expect(counterpartVetoFires("Erdoğan, Hırvatistan Başbakanı ile görüştü", "Erdoğan, Plenkoviç ile görüştü")).toBe(false);
+      expect(counterpartVetoFires("Erdoğan, Iraklı mevkidaşı ile görüştü", "Erdoğan, Amedi ile görüştü")).toBe(false);
+      expect(counterpartVetoFires("Erdoğan, Katar Emiri ile görüştü", "Erdoğan, Şeyh Temim ile görüştü")).toBe(false);
+      // The same shapes still veto when both sides name the guest the same way.
+      expect(counterpartVetoFires("Erdoğan, Pezeşkiyan ile görüştü", "Erdoğan, Amedi ile görüştü")).toBe(true);
+      expect(counterpartVetoFires(names, "Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü")).toBe(true);
+      expect(counterpartVetoFires(office, "Erdoğan, Hırvatistan Başbakanı Plenkoviç ile görüştü")).toBe(true);
+      // A person named in both is one meeting however the rest is written.
+      expect(counterpartVetoFires(names, "Erdoğan, Bosna Hersek Başkanlık Konseyi Üyesi Komsic ile görüştü")).toBe(false);
+    });
+
+    it("a counterpart named anywhere in the other headline is not a different counterpart", () => {
+      expect(counterpartVetoFires("Erdoğan, Sassou Nguesso ile görüştü", "Erdoğan, Irak Cumhurbaşkanı Amedi ile Nguesso'nun ardından görüştü")).toBe(false);
+    });
+  });
+
+  // The review of h173: one counterpart written two ways (an acronym and its long name, a
+  // nationality and its country, a title and a name, two transliterations) is one meeting, not two.
+  describe("one counterpart, two spellings: the same event does not fire (both argument orders)", () => {
+    const AIIB_SHORT = "Bakan Şimşek, AIIB Başkanı ile bir araya geldi";
+    const AIIB_LONG = "Bakan Şimşek, Asya Altyapı Yatırım Bankası Başkanı Zou Ciayi ile görüştü";
+    const SAME_EVENT: ReadonlyArray<readonly [string, string, string]> = [
+      ["prod: AIIB vs its long name and a person", AIIB_SHORT, AIIB_LONG],
+      [
+        "prod: Erakçi vs Arakçi (two transliterations, one edit)",
+        "Dışişleri Bakanı Fidan, İranlı mevkidaşı Erakçi ile telefonda görüştü",
+        "Bakan Fidan, Arakçi ile görüştü",
+      ],
+      [
+        "Rus vs Rusya",
+        "Dışişleri Bakanı Fidan, Rus mevkidaşı Lavrov ile telefonda görüştü",
+        "Dışişleri Bakanı Fidan, Rusya Dışişleri Bakanı ile görüştü",
+      ],
+      ["Çinli vs Çin", "Erdoğan, Çinli mevkidaşı ile görüştü", "Erdoğan, Çin Devlet Başkanı ile görüştü"],
+      ["BAE vs Birleşik Arap Emirlikleri", "Erdoğan, BAE Devlet Başkanı ile görüştü", "Erdoğan, Birleşik Arap Emirlikleri Devlet Başkanı ile görüştü"],
+      [
+        "KKTC vs Kuzey Kıbrıs Türk Cumhuriyeti",
+        "Erdoğan, KKTC Cumhurbaşkanı ile bir araya geldi",
+        "Erdoğan, Kuzey Kıbrıs Türk Cumhuriyeti Cumhurbaşkanı ile bir araya geldi",
+      ],
+      ["IKBY vs Irak Kürt Bölgesel Yönetimi", "Fidan, IKBY Başkanı ile görüştü", "Fidan, Irak Kürt Bölgesel Yönetimi Başkanı ile görüştü"],
+      ["Gürcü vs Gürcistan", "Fidan, Gürcü mevkidaşı ile görüştü", "Fidan, Gürcistan Dışişleri Bakanı ile görüştü"],
+      ["Azeri vs Azerbaycan", "Fidan, Azeri mevkidaşı ile görüştü", "Fidan, Azerbaycan Dışişleri Bakanı ile görüştü"],
+    ];
+    it.each(SAME_EVENT)("false: %s", (_name, a, b) => {
+      expect(counterpartVetoFires(a, b)).toBe(false);
+      expect(counterpartVetoFires(b, a)).toBe(false);
+    });
+
+    it("different countries and different people still fire (the nationality of Iran is not Irak, Armenia is not Brazil)", () => {
+      for (const [a, b] of [
+        ["Erdoğan, İranlı mevkidaşı ile görüştü", "Erdoğan, Iraklı mevkidaşı ile görüştü"],
+        ["Erdoğan, Ermenistan Başbakanı Paşinyan ile görüştü", "Erdoğan, Brezilya Devlet Başkanı Lula ile görüştü"],
+      ] as const) {
+        expect(counterpartVetoFires(a, b), `${a} | ${b}`).toBe(true);
+        expect(counterpartVetoFires(b, a), `${b} | ${a}`).toBe(true);
+      }
+    });
+
+    it("an acronym is an alias only of a long name: UNDP against Kongo still fires, as does a two-word acronym mismatch", () => {
+      expect(counterpartVetoFires("Emine Erdoğan, UNDP Başkanı De Croo ile bir araya geldi", "Cumhurbaşkanı Erdoğan, Kongo Cumhurbaşkanı ile görüştü")).toBe(true);
+      expect(counterpartVetoFires("Cumhurbaşkanı Erdoğan, Kongo Cumhurbaşkanı ile görüştü", "Emine Erdoğan, UNDP Başkanı De Croo ile bir araya geldi")).toBe(true);
+      // Both sides acronyms: not an alias of one another (neither has a long name), so the tokens decide.
+      expect(counterpartVetoFires("Erdoğan, AIIB Başkanı ile görüştü", "Erdoğan, UNDP Başkanı ile görüştü")).toBe(true);
+    });
+
+    it("the one-edit person rule needs 5+ letters on both sides, and at most one edit (insert, delete, substitute)", () => {
+      // The names differ in their first four letters, so no prefix or shared-stem rule decides these:
+      // only the one-edit rule reads them as one person.
+      const pair = (x: string, y: string) => counterpartVetoFires(`Erdoğan, ${x} ile görüştü`, `Erdoğan, ${y} ile görüştü`);
+      expect(pair("Erakçi", "Arakçi")).toBe(false); // substitute
+      expect(pair("Erakçi", "Erkçi")).toBe(false); // delete
+      expect(pair("Erkçi", "Erakçi")).toBe(false); // insert
+      // Two edits: two people.
+      expect(pair("Erakçi", "Arakçe")).toBe(true);
+      // A 4-letter name is too short to be read as a typo of another.
+      expect(pair("Lula", "Mula")).toBe(true);
+    });
+
+    it("the one-edit rule reads person pieces only: Iranlı / Iraklı are country names and still fire", () => {
+      expect(counterpartVetoFires("Erdoğan, İranlı mevkidaşı ile görüştü", "Erdoğan, Iraklı mevkidaşı ile görüştü")).toBe(true);
+    });
+
+    it("the 3-letter and shared-stem rules do not blur unrelated countries", () => {
+      // 'Rus' / 'Çin' lead only the words that start with them: Irak and Çek do not.
+      expect(counterpartVetoFires("Erdoğan, Rus mevkidaşı ile görüştü", "Erdoğan, Irak Cumhurbaşkanı ile görüştü")).toBe(true);
+      expect(counterpartVetoFires("Erdoğan, Çin Devlet Başkanı ile görüştü", "Erdoğan, Çek Cumhurbaşkanı ile görüştü")).toBe(true);
+      // Two 5+ letter names share a stem only when their first four letters agree.
+      expect(counterpartVetoFires("Erdoğan, Katar Emiri ile görüştü", "Erdoğan, Kuveyt Emiri ile görüştü")).toBe(true);
+      expect(counterpartVetoFires("Erdoğan, Gürcü mevkidaşı ile görüştü", "Erdoğan, Gürcistan Dışişleri Bakanı ile görüştü")).toBe(false);
+    });
+
+    it("score(): the AIIB pair at J 0.75, tf-idf 0.5, 0.5 h is a match, not capped by the veto", () => {
+      const a = new Uint32Array(64);
+      const b = new Uint32Array(64);
+      for (let i = 0; i < 64; i++) {
+        a[i] = i + 1;
+        b[i] = i < 48 ? i + 1 : i + 1000;
+      }
+      const r = score(
+        { strict: null, signature: a },
+        { strict: null, signature: b },
+        ["simsek", "aiib"],
+        ["simsek", "asya"],
+        0.5,
+        0.5,
+        { aTitle: AIIB_SHORT, bTitle: AIIB_LONG },
+      );
+      expect(r.components.jaccard).toBeCloseTo(0.75, 12);
+      expect(r.components.counterpartVeto).toBe(false);
+      expect(r.score).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
+      expect(isMatch(r)).toBe(true);
+    });
+  });
+
+  describe("score(): the veto caps the primary and MinHash lanes, with no headline exemption", () => {
+    it("the yenicag-vs-ajans-haber pair (tf-idf 0.51, shared erdogan / antalya) is under the threshold", () => {
+      const control = score(NO_FP, NO_FP, ["erdogan", "antalya"], ["erdogan", "antalya"], 0.51, HOURS);
+      expect(isMatch(control)).toBe(true);
+      const r = run(IRAK_YENICAG, KONGO);
+      expect(r.components.counterpartVeto).toBe(true);
+      expect(r.components.primary).toBeGreaterThan(MATCH_THRESHOLD);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD);
+      expect(r.score).toBeLessThan(MATCH_THRESHOLD * 0.9);
+      // None of the older vetoes sees this pair (the finding).
+      expect(r.components.subjectVeto).toBe(false);
+      expect(r.components.incidentVeto).toBe(false);
+      expect(r.components.counterVeto).toBe(false);
+      expect(r.components.homonymVeto).toBe(false);
+      expect(r.components.templateVeto).toBe(false);
+    });
+
+    it("the MinHash lane is capped too", () => {
+      const description = "Cumhurbaşkanı Erdoğan, COP31 kapsamında Antalya'da devlet başkanlarıyla ikili görüşmelerini sürdürdü. Görüşmelerde ikili ilişkiler ve bölgesel gelişmeler ele alındı.";
+      const fa = fingerprint(IRAK_GLOBAL, description);
+      const fb = fingerprint(KONGO, description);
+      const r = score(fa, fb, ["erdogan"], ["erdogan"], 0.9, 0.5, { aTitle: IRAK_GLOBAL, bTitle: KONGO });
+      expect(r.components.jaccardScore).toBeGreaterThan(MATCH_THRESHOLD);
+      expect(r.components.counterpartVeto).toBe(true);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("a pair whose headline lane fires is withdrawn and capped (the veto has no headline exemption)", () => {
+      const lane = headlineLane(headlineTokens(KATAR), headlineTokens(KUVEYT), 1);
+      expect(lane.fired).toBe(true);
+      const r = run(KATAR, KUVEYT, 0.95, 0.2);
+      expect(r.components.counterpartVeto).toBe(true);
+      expect(r.components.actorVeto).toBe(true);
+      expect(r.components.headlineLane).toBe(false);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("same counterpart, same template: matches as before and reports the component false", () => {
+      const r = run(IRAK_GLOBAL, IRAK_GLOBAL.replaceAll("Cumhurbaşkanı Erdoğan", "Başkan Erdoğan"));
+      expect(r.components.counterpartVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+      const kongo = run(KONGO_SABAH, KONGO);
+      expect(kongo.components.counterpartVeto).toBe(false);
+      expect(isMatch(kongo)).toBe(true);
+    });
+
+    it("counterpartVeto is a boolean component of every branch: auto-accept, missing titles, one title", () => {
+      const same = { strict: "c".repeat(40), signature: null };
+      const auto = score(same, same, [], [], 0.1, 1, { aTitle: IRAK_YENICAG, bTitle: KONGO });
+      expect(auto.components.autoAccept).toBe(true);
+      expect(auto.components.counterpartVeto).toBe(false);
+      expect(auto.score).toBe(1);
+      const noTitles = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, HOURS);
+      expect(noTitles.components.counterpartVeto).toBe(false);
+      expect(isMatch(noTitles)).toBe(true);
+      const oneTitle = score(NO_FP, NO_FP, ["erdogan"], ["erdogan"], 0.58, HOURS, { aTitle: IRAK_YENICAG });
+      expect(oneTitle.components.counterpartVeto).toBe(false);
+      expect(isMatch(oneTitle)).toBe(true);
+    });
+  });
+
+  describe("actorMismatchFires and the headline-only paths inherit it", () => {
+    it("actorMismatchFires is true for every fires pair, both orders", () => {
+      for (const [a, b] of [[IRAK_YENICAG, KONGO], [IRAK_CNN, KONGO], [IRAK_GLOBAL, KONGO_SABAH], [SERIF, IRAK_GLOBAL], [KATAR, KUVEYT]] as const) {
+        expect(actorMismatchFires(a, b), `${a} | ${b}`).toBe(true);
+        expect(actorMismatchFires(b, a), `${b} | ${a}`).toBe(true);
+      }
+      // Control: a shared counterpart is no actor mismatch.
+      expect(actorMismatchFires(KONGO_SABAH, KONGO)).toBe(false);
+      expect(actorMismatchFires(IRAK_GLOBAL, "Başkan Erdoğan, Irak Cumhurbaşkanı Nizar Amedi ile bir araya geldi")).toBe(false);
+    });
+
+    it("headlineOnlyScore (the member-headline scan, attach.ts) is 0 for a lane hit across counterparts", () => {
+      const ha = headlineTokens(KATAR);
+      const hb = headlineTokens(KUVEYT);
+      expect(headlineOnlyScore(ha, hb, 1)).toBeGreaterThan(0.5); // the lane fires on tokens alone
+      expect(headlineOnlyScore(ha, hb, 1, { aTitle: KATAR, bTitle: KUVEYT })).toBe(0);
+      expect(headlineOnlyScore(hb, ha, 1, { aTitle: KUVEYT, bTitle: KATAR })).toBe(0);
+      // Same counterpart: the lane score stands.
+      const same = headlineOnlyScore(ha, ha, 1, { aTitle: KATAR, bTitle: KATAR });
+      expect(same).toBeGreaterThan(0.9);
+    });
+  });
+
+  describe("cost", () => {
+    it("costs the same for a 12 KB title as for a 100 KB one: the clip bounds the work (CPU time, not wall clock)", () => {
+      expectLinear(
+        rep("Irak Cumhurbaşkanı Amedi ile görüştü, ", "Cumhurbaşkanı Erdoğan, "),
+        (other) => {
+          expect(counterpartVetoFires(KONGO, other)).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+
+    it("a title of nothing but 'ile' is linear too", () => {
+      expectLinear(
+        rep("ile görüştü ile ", "Erdoğan, Irak Amedi "),
+        (other) => {
+          expect(typeof counterpartVetoFires(KONGO, other)).toBe("boolean");
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h172-clusterpurity-3: a leading all-caps event tag ('COP31 LIDERLER ZIRVESI - ',
+// 'IKLIM ZIRVESI COP31 ANTALYA - ') takes 3-5 of the SUBJECT_SPAN_MAX_WORDS = 6
+// words the subject, one-sided actor and template-speaker readers walk, so the
+// speaker falls out of the window and the vetoes go blind: the Duran, Erdogan and
+// Ala statements share cluster a283e05b. The tag does not count toward the window.
+// ---------------------------------------------------------------------------
+describe("event tag prefix (h172-clusterpurity-3)", () => {
+  const DURAN_BODY = "İletişim Başkanı Duran'dan COP31 Liderler Zirvesi'ne ilişkin açıklama:";
+  const TAG_LIDERLER = "COP31 LİDERLER ZİRVESİ - ";
+  const TAG_IKLIM = "İKLİM ZİRVESİ COP31 ANTALYA - ";
+  const DURAN_TAGGED = `${TAG_LIDERLER}${DURAN_BODY}`;
+  const DURAN_TAGGED_IKLIM = `${TAG_IKLIM}${DURAN_BODY}`;
+  const ERDOGAN = "Cumhurbaşkanı Erdoğan'dan COP31 Liderler Zirvesi'ne ilişkin açıklama";
+  const ALA = "AK Parti Genel Başkanvekili Ala'dan COP31 Liderler Zirvesi'ne ilişkin açıklama";
+  const NO_FP = { strict: null, signature: null };
+
+  describe("stripEventTag", () => {
+    it("removes a 3-token tag and a 4-token tag before a spaced hyphen", () => {
+      expect(stripEventTag(DURAN_TAGGED)).toBe(DURAN_BODY);
+      expect(stripEventTag(DURAN_TAGGED_IKLIM)).toBe(DURAN_BODY);
+    });
+
+    it("removes a 3 to 5 token run before ' - ', ' – ', ' — ' and ' | '", () => {
+      for (const sep of [" - ", " – ", " — ", " | "]) {
+        expect(stripEventTag(`COP31 LİDERLER ZİRVESİ${sep}Bakan Kurum'dan açıklama geldi`), sep).toBe("Bakan Kurum'dan açıklama geldi");
+      }
+      expect(stripEventTag("A B C D E - Bakan Kurum'dan açıklama geldi")).toBe("Bakan Kurum'dan açıklama geldi");
+      expect(stripEventTag("A B C - Bakan Kurum'dan açıklama geldi")).toBe("Bakan Kurum'dan açıklama geldi");
+      // Digits start a tag token; apostrophes and dots may follow inside it.
+      expect(stripEventTag("COP31 2026 T.C. - Bakan Kurum'dan açıklama geldi")).toBe("Bakan Kurum'dan açıklama geldi");
+      expect(stripEventTag("COP31 AK'LI ZİRVE’Sİ - Bakan Kurum'dan açıklama geldi")).toBe("Bakan Kurum'dan açıklama geldi");
+    });
+
+    it("keeps a title whose tag is shorter (2 tokens) or longer (6 tokens) than 3 to 5", () => {
+      for (const t of [
+        "AK PARTİ - MHP zirvesi",
+        "AK PARTİ - MHP zirvesi sonrası açıklama yaptı",
+        "SON DAKİKA | Bakan Kurum'dan açıklama geldi",
+        "SON DAKİKA - Bakan Kurum'dan açıklama geldi",
+        "A B C D E F - Bakan Kurum'dan açıklama geldi",
+        "CANLI - Bakan Kurum'dan açıklama geldi",
+      ]) {
+        expect(stripEventTag(t), t).toBe(t);
+      }
+    });
+
+    it("keeps a title that is a speaker before a colon: 'BAHÇELİ: ...', 'CHP GENEL BAŞKANI ÖZEL: ...'", () => {
+      for (const t of [
+        "BAHÇELİ: Türkiye Yüzyılı'nda kimse yalnız kalmayacak",
+        "CHP GENEL BAŞKANI ÖZEL: Bu iktidar gidecek, sandık gelecek",
+      ]) {
+        expect(stripEventTag(t), t).toBe(t);
+      }
+      // A colon is never a separator, even after a 3-token run.
+      expect(stripEventTag("COP31 LİDERLER ZİRVESİ: İletişim Başkanı Duran açıklama yaptı")).toBe(
+        "COP31 LİDERLER ZİRVESİ: İletişim Başkanı Duran açıklama yaptı",
+      );
+    });
+
+    it("keeps a fully all-caps title and a remainder with no lowercase letter", () => {
+      for (const t of [
+        "COP31 LİDERLER ZİRVESİ - İLETİŞİM BAŞKANI DURAN AÇIKLAMA YAPTI",
+        "COP31 LİDERLER ZİRVESİ - 12 3 45 6",
+        "BAKAN KURUM'DAN 10 KASIM MESAJI",
+      ]) {
+        expect(stripEventTag(t), t).toBe(t);
+      }
+    });
+
+    it("keeps a title when fewer than 3 words would remain", () => {
+      expect(stripEventTag("COP31 LİDERLER ZİRVESİ - Duran konuştu")).toBe("COP31 LİDERLER ZİRVESİ - Duran konuştu");
+      expect(stripEventTag("COP31 LİDERLER ZİRVESİ - ")).toBe("COP31 LİDERLER ZİRVESİ - ");
+      expect(stripEventTag("COP31 LİDERLER ZİRVESİ - Duran konuştu bugün")).toBe("Duran konuştu bugün");
+    });
+
+    it("needs a SPACED separator and an all-caps run: 'ZİRVESİ- ', 'ZİRVESİ -İletişim', a lower-case letter in the tag", () => {
+      for (const t of [
+        "COP31 LİDERLER ZİRVESİ- İletişim Başkanı Duran açıklama yaptı",
+        "COP31 LİDERLER ZİRVESİ -İletişim Başkanı Duran açıklama yaptı",
+        "COP31 LİDERLER ZİRVESİ-İletişim Başkanı Duran açıklama yaptı",
+        "COP31 Liderler ZİRVESİ - İletişim Başkanı Duran açıklama yaptı",
+        "COP31 LİDERLER ZİRVESİ . İletişim Başkanı Duran açıklama yaptı",
+        "COP31 LİDERLER ZİRVESİ -- İletişim Başkanı Duran açıklama yaptı",
+        "ZİRVE ! COP31 LİDERLER - İletişim Başkanı Duran açıklama yaptı",
+      ]) {
+        expect(stripEventTag(t), t).toBe(t);
+      }
+    });
+
+    it("only a leading run: a tag in the middle is left alone", () => {
+      const t = "Bakan Kurum açıkladı COP31 LİDERLER ZİRVESİ - İletişim Başkanı Duran açıklama yaptı";
+      expect(stripEventTag(t)).toBe(t);
+    });
+
+    it("leading and repeated whitespace is tolerated; the remainder starts at its first word", () => {
+      expect(stripEventTag("  COP31   LİDERLER\tZİRVESİ   -   Bakan  Kurum'dan açıklama geldi")).toBe("Bakan  Kurum'dan açıklama geldi");
+    });
+
+    it("strips only one tag", () => {
+      expect(stripEventTag("A B C - D E F - Bakan Kurum'dan açıklama geldi")).toBe("D E F - Bakan Kurum'dan açıklama geldi");
+    });
+
+    it("an empty or non-title input is returned unchanged", () => {
+      expect(stripEventTag("")).toBe("");
+      expect(stripEventTag("   ")).toBe("   ");
+      expect(stripEventTag(undefined as unknown as string)).toBeUndefined();
+      expect(stripEventTag(null as unknown as string)).toBeNull();
+    });
+  });
+
+  describe("the speaker and template vetoes see through a tag (both argument orders)", () => {
+    it("control: the untagged Duran title is vetoed against the Erdoğan one today", () => {
+      expect(actorMismatchFires(DURAN_BODY, ERDOGAN)).toBe(true);
+      expect(templateActorMismatchFires(DURAN_BODY, ERDOGAN)).toBe(true);
+      expect(actorMismatchFires(`SON DAKİKA | ${DURAN_BODY}`, ERDOGAN)).toBe(true);
+    });
+
+    it.each([
+      ["COP31 LİDERLER ZİRVESİ - ", DURAN_TAGGED],
+      ["İKLİM ZİRVESİ COP31 ANTALYA - ", DURAN_TAGGED_IKLIM],
+    ])("a283e05b: '%s' Duran vs Erdoğan: actorMismatchFires and templateActorMismatchFires are true", (_tag, tagged) => {
+      expect(actorMismatchFires(tagged, ERDOGAN)).toBe(true);
+      expect(actorMismatchFires(ERDOGAN, tagged)).toBe(true);
+      expect(templateActorMismatchFires(tagged, ERDOGAN)).toBe(true);
+      expect(templateActorMismatchFires(ERDOGAN, tagged)).toBe(true);
+    });
+
+    it("a283e05b: the tagged Duran seed vs the AA 'AK Parti Genel Başkanvekili Ala' title", () => {
+      expect(templateActorMismatchFires(DURAN_TAGGED, ALA)).toBe(true);
+      expect(templateActorMismatchFires(ALA, DURAN_TAGGED)).toBe(true);
+      expect(actorMismatchFires(DURAN_TAGGED, ALA)).toBe(true);
+    });
+
+    it("the subject veto reads past the tag: a tagged comma subject against another actor", () => {
+      const tagged = "COP31 LİDERLER ZİRVESİ - Lavrov, Japon mevkidaşı Motegi ile görüştü";
+      const other = "Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü";
+      expect(subjectVetoFires(tagged, other)).toBe(true);
+      expect(subjectVetoFires(other, tagged)).toBe(true);
+    });
+
+    it("the same tag in front of an Erdoğan title vs an untagged Erdoğan title: no veto of any kind", () => {
+      for (const tag of [TAG_LIDERLER, TAG_IKLIM]) {
+        const tagged = `${tag}${ERDOGAN}`;
+        for (const [a, b] of [[tagged, ERDOGAN], [ERDOGAN, tagged]] as const) {
+          expect(actorMismatchFires(a, b), `${a} | ${b}`).toBe(false);
+          expect(templateActorMismatchFires(a, b), `${a} | ${b}`).toBe(false);
+          expect(subjectVetoFires(a, b), `${a} | ${b}`).toBe(false);
+          expect(familyHomonymFires(a, b), `${a} | ${b}`).toBe(false);
+        }
+      }
+    });
+
+    it("two tagged Duran titles (haberler-com, posta): no veto", () => {
+      expect(actorMismatchFires(DURAN_TAGGED, DURAN_BODY)).toBe(false);
+      expect(actorMismatchFires(DURAN_TAGGED, DURAN_TAGGED_IKLIM)).toBe(false);
+      expect(templateActorMismatchFires(DURAN_TAGGED, DURAN_TAGGED_IKLIM)).toBe(false);
+    });
+
+    it("no veto is lost: a tag read as the actor of the tagged headline still vetoes it against a different story", () => {
+      // Before the strip these fired because 'IKLİM ZİRVESİ COP31 ANTALYA' (all capitalised) was read as a named
+      // actor leading a comma-less headline; the replay found 578 such pairs. The strip must only add.
+      const tagged = "İKLİM ZİRVESİ COP31 ANTALYA - Norveç Başbakanı Store, okyanus temelli çözümlere dikkati çekti";
+      const other = "Cumhurbaşkanı Erdoğan, Ermenistan Başbakanı Paşinyan'ı kabul etti";
+      expect(actorMismatchFires(tagged, other)).toBe(true);
+      expect(actorMismatchFires(other, tagged)).toBe(true);
+      const tagged2 = "İKLİM ZİRVESİ COP31 ANTALYA - Avusturya Cumhurbaşkanı Van der Bellen'den iklim değişikliğiyle mücadelede eylem";
+      expect(actorMismatchFires(tagged2, "Cumhurbaşkanı Erdoğan, Avustralya Başbakanı Albanese ile görüştü")).toBe(true);
+    });
+
+    it("a tag that stripEventTag keeps does not change a veto: a 6-token tag still blinds the window (documented limit)", () => {
+      const sixTokens = `A B C D E F - ${DURAN_BODY}`;
+      expect(stripEventTag(sixTokens)).toBe(sixTokens);
+      expect(templateActorMismatchFires(sixTokens, ERDOGAN)).toBe(false);
+    });
+  });
+
+  describe("score()", () => {
+    const HOURS = 4;
+    it("the tagged Duran seed against the Erdoğan item is capped and under the threshold (hurriyet vs haberler-com seed)", () => {
+      const r = score(NO_FP, NO_FP, ["erdogan", "cop31"], ["erdogan", "cop31"], 0.8, HOURS, { aTitle: ERDOGAN, bTitle: DURAN_TAGGED });
+      expect(r.components.templateVeto).toBe(true);
+      expect(r.components.raw).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(r.components.headlineLane).toBe(false);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("the tagged Duran seed against another Duran item (untagged posta) still matches", () => {
+      const posta = "İletişim Başkanı Duran'dan COP31 Liderler Zirvesi'ne ilişkin açıklama";
+      const r = score(NO_FP, NO_FP, ["cop31"], ["cop31"], 0.8, HOURS, { aTitle: posta, bTitle: DURAN_TAGGED });
+      expect(r.components.templateVeto).toBe(false);
+      expect(isMatch(r)).toBe(true);
+    });
+
+    it("headlineOnlyScore (the member scan) is 0 across actors behind a tag", () => {
+      const ha = headlineTokens(ERDOGAN);
+      const hb = headlineTokens(DURAN_TAGGED);
+      expect(headlineOnlyScore(ha, hb, 1)).toBeGreaterThan(0); // control: the lane fires on tokens alone
+      expect(headlineOnlyScore(ha, hb, 1, { aTitle: ERDOGAN, bTitle: DURAN_TAGGED })).toBe(0);
+    });
+  });
+
+  describe("what the tag strip does not touch", () => {
+    it("headline tokens, fingerprints and the stored title are read as before", () => {
+      // The tag words stay in the headline tokens (the headline lane and its generic-prefix rules
+      // read the title as stored) and in the strict fingerprint.
+      expect(headlineTokens(DURAN_TAGGED_IKLIM).tokens.has("iklim")).toBe(true);
+      expect(headlineTokens(DURAN_BODY).tokens.has("iklim")).toBe(false);
+      expect(headlineTokens(DURAN_TAGGED).tokens.has("iklim")).toBe(false); // that tag has no 'iklim'
+      expect(DURAN_TAGGED.startsWith(TAG_LIDERLER)).toBe(true);
+      expect(DURAN_TAGGED_IKLIM.startsWith(TAG_IKLIM)).toBe(true);
+    });
+  });
+
+  describe("cost", () => {
+    it("stripEventTag costs the same for a 12 KB title as for a 100 KB one (CPU time, not wall clock)", () => {
+      expectLinear(
+        rep("ÇOK BÜYÜK HABER ", "COP31 LİDERLER ZİRVESİ - "),
+        (title) => {
+          expect(stripEventTag(title)).toBe(title); // no lower-case letter after the tag: kept
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+      expectLinear(
+        rep("A ", ""),
+        (title) => {
+          expect(stripEventTag(title)).toBe(title);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+      expectLinear(
+        rep(" ", "A B C -"),
+        (title) => {
+          expect(stripEventTag(title)).toBe(title);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+
+    it("the veto functions that read a tagged title cost the same for a 12 KB title as for a 100 KB one", () => {
+      expectLinear(
+        rep("Liderler Zirvesi'ne ilişkin açıklama ", `${TAG_LIDERLER}İletişim Başkanı Duran'dan `),
+        (title) => {
+          expect(templateActorMismatchFires(title, ERDOGAN)).toBe(true);
+        },
+        { n: 100_000, ceilingMs: 4_000 },
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The three h172 guards agree with the scripts/lib/cluster (.mjs) twin, which the
+// golden-vector parity suite (cluster.test.ts) holds byte-equivalent.
+// ---------------------------------------------------------------------------
+describe("h172 guards: parity with scripts/lib/cluster (.mjs twin)", () => {
+  interface MjsSide {
+    counterpartVetoFires: (a: string, b: string) => boolean;
+    stripEventTag: (t: string) => string;
+    actorMismatchFires: (a: string, b: string) => boolean;
+    templateActorMismatchFires: (a: string, b: string) => boolean;
+    score: (
+      a: unknown,
+      b: unknown,
+      ea: Iterable<string>,
+      eb: Iterable<string>,
+      tfidf: number,
+      hours: number,
+      opts?: { aTitle?: string | null; bTitle?: string | null; aSourceSlug?: string | null },
+    ) => { score: number; components: Record<string, unknown> };
+    headlineOnlyScore: (a: unknown, b: unknown, hours: number, opts?: { aTitle?: string | null; bTitle?: string | null }) => number;
+  }
+  let legacy: MjsSide;
+  let legacyConstants: { MINHASH_SOLE_CARRIER_MIN_JACCARD: number; MINHASH_SOFT_ACCEPT_JACCARD: number };
+  beforeAll(async () => {
+    legacy = (await import("../../../scripts/lib/cluster/ensemble.mjs")) as unknown as MjsSide;
+    legacyConstants = (await import("../../../scripts/lib/cluster/constants.mjs")) as unknown as typeof legacyConstants;
+  });
+
+  const NO_FP = { strict: null, signature: null };
+  const TAIL = "görüştü: Kalkınma Yolu Projesi, enerji iş birliği ve bölgesel gelişmeler ele alındı";
+  const DURAN = "İletişim Başkanı Duran'dan COP31 Liderler Zirvesi'ne ilişkin açıklama:";
+  const ERDOGAN = "Cumhurbaşkanı Erdoğan'dan COP31 Liderler Zirvesi'ne ilişkin açıklama";
+  const PAIRS: ReadonlyArray<readonly [string, string]> = [
+    ["Erdoğan, Antalya'da Cumhurbaşkanı Nizar Amedi ile görüştü", "Cumhurbaşkanı Erdoğan, Kongo Cumhuriyeti Cumhurbaşkanı Nguesso ile Antalya’da görüştü"],
+    ["Antalya- Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Nizar Amedi ile görüştü", "Başkan Erdoğan, Kongo Cumhurbaşkanı ile görüştü!"],
+    ["Cumhurbaşkanı Erdoğan, Pakistan Başbakanı Şerif'i kabul etti", "Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü"],
+    ["Erdoğan, Iraklı mevkidaşı ile görüştü", "Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü"],
+    ["Erdoğan, Iraklı mevkidaşı Amedi ile görüştü", "Erdoğan, Irak Cumhurbaşkanı Amedi ile bir araya geldi"],
+    ["Antalya’daki Erdoğan-Amedi görüşmesinde Terörsüz Bölge hedefi vurgulandı", "Cumhurbaşkanı Erdoğan, Irak Cumhurbaşkanı Amedi ile görüştü"],
+    ["Emine Erdoğan, UNDP Başkanı De Croo ile bir araya geldi", "Cumhurbaşkanı Erdoğan, Kongo Cumhurbaşkanı ile görüştü"],
+    [`Cumhurbaşkanı Erdoğan, Katar Emiri ile ${TAIL}`, `Cumhurbaşkanı Erdoğan, Kuveyt Emiri ile ${TAIL}`],
+    ["Fidan ile Lavrov telefonda görüştü", "Fidan, Lavrov ile telefonda görüştü"],
+    ["Bakan Fidan, Japon mevkidaşı Motegi ile görüştü", "Japonya Dışişleri Bakanı Motegi, Bakan Fidan ile görüştü"],
+    ["Erdoğan, Katar Dışişleri Bakanı ile görüştü", "Erdoğan, Kuveyt Dışişleri Bakanı ile görüştü"],
+    ["Bakan Şimşek, AIIB Başkanı ile bir araya geldi", "Bakan Şimşek, Asya Altyapı Yatırım Bankası Başkanı Zou Ciayi ile görüştü"],
+    ["Dışişleri Bakanı Fidan, İranlı mevkidaşı Erakçi ile telefonda görüştü", "Bakan Fidan, Arakçi ile görüştü"],
+    ["Dışişleri Bakanı Fidan, Rus mevkidaşı Lavrov ile telefonda görüştü", "Dışişleri Bakanı Fidan, Rusya Dışişleri Bakanı ile görüştü"],
+    ["Erdoğan, Çinli mevkidaşı ile görüştü", "Erdoğan, Çin Devlet Başkanı ile görüştü"],
+    ["Erdoğan, BAE Devlet Başkanı ile görüştü", "Erdoğan, Birleşik Arap Emirlikleri Devlet Başkanı ile görüştü"],
+    ["Erdoğan, KKTC Cumhurbaşkanı ile bir araya geldi", "Erdoğan, Kuzey Kıbrıs Türk Cumhuriyeti Cumhurbaşkanı ile bir araya geldi"],
+    ["Fidan, IKBY Başkanı ile görüştü", "Fidan, Irak Kürt Bölgesel Yönetimi Başkanı ile görüştü"],
+    ["Fidan, Gürcü mevkidaşı ile görüştü", "Fidan, Gürcistan Dışişleri Bakanı ile görüştü"],
+    ["Fidan, Azeri mevkidaşı ile görüştü", "Fidan, Azerbaycan Dışişleri Bakanı ile görüştü"],
+    ["Erdoğan, İranlı mevkidaşı ile görüştü", "Erdoğan, Iraklı mevkidaşı ile görüştü"],
+    ["Erdoğan, Ermenistan Başbakanı Paşinyan ile görüştü", "Erdoğan, Brezilya Devlet Başkanı Lula ile görüştü"],
+    ["Erdoğan, Rubio ile görüştü", "Erdoğan, Rubiyo ile görüştü"],
+    [`COP31 LİDERLER ZİRVESİ - ${DURAN}`, ERDOGAN],
+    [`İKLİM ZİRVESİ COP31 ANTALYA - ${DURAN}`, ERDOGAN],
+    [`COP31 LİDERLER ZİRVESİ - ${ERDOGAN}`, ERDOGAN],
+    [`SON DAKİKA | ${DURAN}`, ERDOGAN],
+    [`COP31 LİDERLER ZİRVESİ - ${DURAN}`, "AK Parti Genel Başkanvekili Ala'dan COP31 Liderler Zirvesi'ne ilişkin açıklama"],
+    ["COP31 LİDERLER ZİRVESİ - Lavrov, Japon mevkidaşı Motegi ile görüştü", "Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü"],
+    ["CHP GENEL BAŞKANI ÖZEL: Bu iktidar gidecek, sandık gelecek", ERDOGAN],
+    ["Bakan Kurum'dan 10 Kasım Atatürk'ü Anma Günü mesajı", "Cumhurbaşkanı Erdoğan'dan 10 Kasım Atatürk'ü Anma Günü mesajı"],
+  ];
+  const TAGS: readonly string[] = [
+    `COP31 LİDERLER ZİRVESİ - ${DURAN}`,
+    `İKLİM ZİRVESİ COP31 ANTALYA - ${DURAN}`,
+    "A B C D E F - Bakan Kurum'dan açıklama geldi",
+    "A B C - Bakan Kurum'dan açıklama geldi",
+    "AK PARTİ - MHP zirvesi",
+    "SON DAKİKA | Bakan Kurum'dan açıklama geldi",
+    "COP31 LİDERLER ZİRVESİ: İletişim Başkanı Duran açıklama yaptı",
+    "COP31 LİDERLER ZİRVESİ - İLETİŞİM BAŞKANI DURAN AÇIKLAMA YAPTI",
+    "COP31 LİDERLER ZİRVESİ - Duran konuştu",
+    "COP31 LİDERLER ZİRVESİ- İletişim Başkanı Duran açıklama yaptı",
+    "  COP31   LİDERLER\tZİRVESİ   -   Bakan  Kurum'dan açıklama geldi",
+    "COP31 LİDERLER ZİRVESİ – Bakan Kurum'dan açıklama geldi",
+    "COP31 LİDERLER ZİRVESİ — Bakan Kurum'dan açıklama geldi",
+    "",
+    "   ",
+  ];
+  const sigs = (agree: number) => {
+    const a = new Uint32Array(64);
+    const b = new Uint32Array(64);
+    for (let i = 0; i < 64; i++) {
+      a[i] = i + 1;
+      b[i] = i < agree ? i + 1 : i + 1000;
+    }
+    return [{ strict: null, signature: a }, { strict: null, signature: b }] as const;
+  };
+
+  it("the floor is 0.7 in both constants files, next to the unchanged soft-accept floor", () => {
+    expect(legacyConstants.MINHASH_SOLE_CARRIER_MIN_JACCARD).toBe(MINHASH_SOLE_CARRIER_MIN_JACCARD);
+    expect(legacyConstants.MINHASH_SOLE_CARRIER_MIN_JACCARD).toBe(0.7);
+    expect(legacyConstants.MINHASH_SOFT_ACCEPT_JACCARD).toBe(MINHASH_SOFT_ACCEPT_JACCARD);
+  });
+
+  it("counterpartVetoFires, actorMismatchFires and templateActorMismatchFires agree on every pair, both orders", () => {
+    for (const [a, b] of PAIRS) {
+      expect(legacy.counterpartVetoFires(a, b), `${a} | ${b}`).toBe(counterpartVetoFires(a, b));
+      expect(legacy.counterpartVetoFires(b, a), `${b} | ${a}`).toBe(counterpartVetoFires(b, a));
+      expect(legacy.actorMismatchFires(a, b), `${a} | ${b}`).toBe(actorMismatchFires(a, b));
+      expect(legacy.actorMismatchFires(b, a), `${b} | ${a}`).toBe(actorMismatchFires(b, a));
+      expect(legacy.templateActorMismatchFires(a, b), `${a} | ${b}`).toBe(templateActorMismatchFires(a, b));
+    }
+  });
+
+  it("stripEventTag agrees on every tag shape", () => {
+    for (const t of TAGS) expect(legacy.stripEventTag(t), JSON.stringify(t)).toBe(stripEventTag(t));
+  });
+
+  it("score and every component are identical (===) on every pair, with and without signatures", () => {
+    for (const [a, b] of PAIRS) {
+      for (const tfidf of [0.05, 0.37, 0.51, 0.9]) {
+        for (const agree of [-1, 20, 34, 44, 45, 46]) {
+          const [fa, fb] = agree < 0 ? [NO_FP, NO_FP] : sigs(agree);
+          const opts = { aTitle: a, bTitle: b };
+          const port = score(fa, fb, ["erdogan", "antalya"], ["erdogan", "antalya"], tfidf, 1.5, opts);
+          const old = legacy.score(fa, fb, ["erdogan", "antalya"], ["erdogan", "antalya"], tfidf, 1.5, opts);
+          expect(port.score, `${a} | ${b} @${tfidf}/${agree}`).toBe(old.score);
+          expect(Object.keys(port.components).sort()).toEqual(Object.keys(old.components).sort());
+          expect(Object.keys(port.components)).toContain("counterpartVeto");
+          expect(Object.keys(port.components)).toContain("minhashSoleCarrierCapped");
+          for (const k of Object.keys(port.components)) {
+            expect((port.components as Record<string, unknown>)[k], `${a} | ${b} @${tfidf}/${agree}: ${k}`).toBe(old.components[k]);
+          }
+        }
+      }
+    }
+  });
+
+  it("score is identical with a haberler-com side (the penalty enters the sole-carrier test)", () => {
+    const [fa, fb] = sigs(34);
+    for (const tfidf of [0.45, 0.5, 0.55]) {
+      const opts = { aTitle: "CANLI - Cumhurbaşkanı Erdoğan konuşuyor", bTitle: "Cumhurbaşkanı Erdoğan, Pakistan Başbakanı Şerif'i kabul etti", aSourceSlug: "haberler-com" };
+      const port = score(fa, fb, ["erdogan", "antalya"], ["erdogan", "antalya"], tfidf, 2.5, opts);
+      const old = legacy.score(fa, fb, ["erdogan", "antalya"], ["erdogan", "antalya"], tfidf, 2.5, opts);
+      expect(port.score).toBe(old.score);
+      expect(port.components.minhashSoleCarrierCapped).toBe(old.components.minhashSoleCarrierCapped);
+    }
+  });
+
+  it("headlineOnlyScore with titles is identical on every pair", () => {
+    for (const [a, b] of PAIRS) {
+      const ha = headlineTokens(a);
+      const hb = headlineTokens(b);
+      expect(headlineOnlyScore(ha, hb, 1, { aTitle: a, bTitle: b }), `${a} | ${b}`).toBe(
+        legacy.headlineOnlyScore(ha, hb, 1, { aTitle: a, bTitle: b }),
+      );
+    }
   });
 });

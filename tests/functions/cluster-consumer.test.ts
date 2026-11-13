@@ -2093,6 +2093,41 @@ describe("cluster-consumer Edge Function", () => {
       expect(linkedClusters()).toEqual([B.cluster]);
     });
 
+    it("a MinHash lane the sole-carrier guard capped does not carry the join: the reported jaccardScore is the uncapped one, jaccardForRaw is what reached raw", async () => {
+      seedClusters();
+      // Review of h173: J 0.55 (jaccardScore 0.82) was capped at SUBJECT_VETO_CAP 0.35 by the
+      // sole-carrier guard, so raw (0.39) rests on the text-floor-capped lane only. raw > jaccardScore
+      // is false here, but raw > jaccardForRaw is true: the capped lane carried it, it never joins.
+      scoreBy({
+        [A.fp]: result(0.6),
+        [B.fpSeed]: result(0.37, {
+          textFloorCapped: true,
+          raw: 0.39,
+          jaccardScore: 0.82,
+          jaccardForRaw: 0.35,
+          minhashSoleCarrierCapped: true,
+        }),
+      });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(0);
+      expect(linkedClusters()).toEqual([]);
+    });
+
+    it("jaccardForRaw equal to raw means the MinHash lane carried the pair: it still joins", async () => {
+      seedClusters();
+      scoreBy({
+        [A.fp]: result(0.6),
+        [B.fpSeed]: result(0.38, { textFloorCapped: true, raw: 0.8, jaccardScore: 0.8, jaccardForRaw: 0.8, primary: 0.2 }),
+      });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(1);
+      expect(linkedClusters()).toEqual([B.cluster]);
+    });
+
     it("a capped seed result does not hide an ordinary sub-threshold latest result of the same cluster", async () => {
       seedClusters({ bHasLatest: true });
       scoreBy({
