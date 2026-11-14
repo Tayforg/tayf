@@ -118,7 +118,11 @@ const W_VELOCITY = 1.0;
 // BREAKING_MIN_VOTING_SOURCES distinct voting outlets (h59-homefeed-3): the
 // DB-level floor counts articles, so one outlet plus a Haberler.com echo, or
 // a pair of niche and aggregator sources, passed it and took a breaking slot
-// although the spectrum has nothing to show for it.
+// although the spectrum has nothing to show for it. The floor counts
+// independent texts (R2's effectiveArticleCount) as well as voting source ids
+// (h182): two outlets and the wire printing one agency text are three source
+// ids but one text, and the ranked list already collapses them, so the strip
+// waits for a second text like it does for every one-source story.
 //
 // Window: 2 hours. Cap: 6 slots so a major-event burst (e.g. earthquake
 // night, election night) doesn't drown out the rest of the feed.
@@ -420,14 +424,15 @@ async function fetchPoliticsClusters(
     // is a recency guarantee, not a ranking. Capped at BREAKING_LIMIT
     // so a major-event burst doesn't push every other section below
     // the fold. h59-homefeed-3: a candidate needs BREAKING_MIN_VOTING_SOURCES
-    // distinct voting sources; one left out can still rank in `bundles`, and
-    // then the page's breakingIds dedupe no longer removes it from the list.
+    // distinct voting sources, and (h182) as many independent texts; one left
+    // out can still rank in `bundles`, and then the page's breakingIds dedupe
+    // no longer removes it from the list.
     const breakingBundles = bundles
       .filter(
         (b) =>
           nowMs - new Date(b.cluster.first_published).getTime() <
             BREAKING_WINDOW_MS &&
-          countVotingSources(b.sources) >= BREAKING_MIN_VOTING_SOURCES
+          meetsBreakingVotingFloor(b)
       )
       .sort(
         (a, b) =>
@@ -780,6 +785,28 @@ function countVotingSources(sources: readonly BundleSource[]): number {
     if (isVotingKind(s.kind)) voting.add(s.id);
   }
   return voting.size;
+}
+
+/**
+ * The Son Dakika strip's admission floor (h59-homefeed-3, h182): the smaller of
+ * the distinct voting sources and the independent texts must reach
+ * BREAKING_MIN_VOTING_SOURCES. The text count is R2's `effectiveArticleCount`,
+ * which buildClusterBundle sets to the distinct-text count for a wire
+ * redistribution and to the member count otherwise (and that is never below the
+ * source count), so only a wire cluster is affected: three outlets on one agency
+ * text is one text, not three. An absent count (a hand-built bundle) leaves the
+ * voting-source count alone to decide. Pure; the ranked pool is not filtered by
+ * it.
+ */
+export function meetsBreakingVotingFloor(
+  b: Pick<ClusterBundle, "sources" | "effectiveArticleCount">,
+): boolean {
+  return (
+    Math.min(
+      countVotingSources(b.sources),
+      b.effectiveArticleCount ?? Number.POSITIVE_INFINITY,
+    ) >= BREAKING_MIN_VOTING_SOURCES
+  );
 }
 
 function normalizeDistribution(raw: unknown): BiasDistribution {

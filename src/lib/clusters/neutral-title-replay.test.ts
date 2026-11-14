@@ -860,3 +860,78 @@ describe("re-pick replay: the hunt-164 rules", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// h181-content2-1 (h182): the consensus misspelling and the sarcastic 'Hani ...' clause
+//
+// Live replay (read-only SELECT, 2026-11-14 22:20Z; old = HEAD before the change, new = this change, both called the way the
+// headline cron calls the re-pick: { incumbent: stored, floor: stored fails the gate }, members newest first and flagged the way
+// the cron flags them):
+//   1,468 clusters (extractive-v6, not archived, no LLM title, 2+ members, updated in the last 6 days; 7,234 members):
+//     2 re-picks change title (0.14%), every one hand-checked, old -> new:
+//       d5f47490  "CHP programında gazetecilere saldırı: Hani basın özgürlüğü" (Odatv's)
+//                 -> "CHP programında gazetecilere saldırı: Kadın gazeteciye tokat atıldı"                better (the sarcastic tail is gone)
+//       4e5557f5  "Katamonu’da iş makinesi isteyen başkan Baltacı’ya AK Partili Namlı: Gel bize" (Yeniçağ's)
+//                 -> "İş makinesi desteği isteyen Belediye başkanına AK Partili Namlı’dan davet: Gelin bize, yaparız bazı şeyler"
+//                                                                                                        better (no misspelling; names no city)
+//     0 worse. 0 of the 1,468 first picks (floor, no incumbent) change. The 150 corpus clusters: none change.
+//   Rule hits over every member title of those clusters (6,625 distinct titles, each against its cluster's others):
+//     'hani': 1 (d5f47490). Misspelling: 7. Four are misspellings or name variants ('Katamonu', 'seçilldi' for 'seçildi',
+//     'Anltalya', 'Vendavi' against the four 'Vindavi'); three are look-alike words of the same cluster ('kadarı' beside 'kararı',
+//     'Başkanı' beside 'Bakanı' twice). None of the three moves a pick, the penalty being one loaded unit, not a veto.
+// ---------------------------------------------------------------------------
+
+describe("re-pick replay: the h181 rules", () => {
+  it("change none of the 150 corpus picks beyond the sixteen of before (churn 16/150 = 10.7%)", () => {
+    const changed = CLUSTERS.filter((c) => {
+      const next = repick(c);
+      return next !== null && next !== c.stored;
+    }).map((c) => c.cid);
+    expect(changed.sort()).toEqual(
+      [...CORPUS_CHANGED_BEFORE_H26, ...CORPUS_CHANGED_BY_H31, ...CORPUS_CHANGED_BY_H42].sort(),
+    );
+    expect(changed).toHaveLength(16);
+  });
+
+  it("the fixture holds the two clusters, neither in the 150 corpus", () => {
+    const fixture = h164Fixture("h181-consensus.json");
+    expect(fixture.clusters.map((c) => c.cid)).toEqual(["4e5557f5", "d5f47490"]);
+    for (const c of fixture.clusters) expect(CLUSTERS.some((x) => x.cid === c.cid)).toBe(false);
+  });
+
+  it("both stored titles are replaced, by a member's own wording the gate accepts, and the next re-pick keeps it", () => {
+    const fixture = h164Fixture("h181-consensus.json");
+    for (const c of fixture.clusters) {
+      const titles = c.members.map((m) => m.title);
+      const next = h164Repick(c);
+      expect(next, c.cid).not.toBeNull();
+      expect(next, c.cid).not.toBe(c.stored);
+      expect(incumbentIsMemberTitle(next as string, titles), c.cid).toBe(true);
+      expect(isAcceptableNeutral(next as string, titles), c.cid).toBe(true);
+      expect(loadedPenalty(next as string), c.cid).toBe(0);
+      expect(
+        pickNeutralTitle(
+          c.members.map((m) => ({ title: m.title, opinion: m.opinion, caseUnreliable: m.source === "isci-haber" })),
+          { incumbent: next },
+        ),
+        c.cid,
+      ).toBe(next);
+    }
+    const typo = fixture.clusters.find((c) => c.cid === "4e5557f5")!;
+    expect(h164Repick(typo)).not.toContain("Katamonu");
+    const hani = fixture.clusters.find((c) => c.cid === "d5f47490")!;
+    expect(h164Repick(hani)).not.toContain("Hani");
+  });
+
+  it("a first pick of either cluster (no incumbent, floor) is the title the re-pick lands on", () => {
+    const fixture = h164Fixture("h181-consensus.json");
+    for (const c of fixture.clusters) {
+      const members = c.members.map((m) => ({ title: m.title, opinion: m.opinion, caseUnreliable: m.source === "isci-haber" }));
+      expect(pickNeutralTitle(members, { floor: true }), c.cid).toBe(h164Repick(c));
+    }
+  });
+
+  it("no model bump: the id stays extractive-v6 while the v6 heal is running", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
+  });
+});

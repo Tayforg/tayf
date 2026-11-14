@@ -1,0 +1,111 @@
+{
+ "finding": "h181-content2-1",
+ "note": "Test-only. The member titles (newest first) and source slugs of the two clusters whose stored neutral title is one outlet's headline with a consensus misspelling ('Katamonu’da' over 'Kastamonu', 4e5557f5, Yeniçağ) or a sarcastic 'Hani ...' tail (d5f47490, Odatv), as read on production on 2026-11-14 (read-only SELECT of cluster_articles x articles x sources), with each stored title, its stamp and article count. `opinion` is isOpinionUrl of the article URL (the URL itself is not kept).",
+ "clusters": [
+  {
+   "cid": "4e5557f5",
+   "id": "4e5557f5-26c6-43ba-b4ec-c0f6a175a48e",
+   "stored": "Katamonu’da iş makinesi isteyen başkan Baltacı’ya AK Partili Namlı: Gel bize",
+   "model": "extractive-v6",
+   "stamped": 9,
+   "article_count": 9,
+   "members": [
+    {
+     "source": "son-dakika",
+     "title": "Kastamonu'da 34 iş makinesi tartışması: AK Partili Namlı'dan başkana davet",
+     "opinion": false
+    },
+    {
+     "source": "haberler-com",
+     "title": "İş makinesi desteği isteyen Belediye başkanına AK Partili Namlı’dan davet: Gelin bize, yaparız bazı şeyler",
+     "opinion": false
+    },
+    {
+     "source": "cumhuriyet",
+     "title": "İş makinesi için destek isteyen Kastamonu Belediye Başkanı Baltacı’ya AKP’li isimden skandal sözler: ‘Gelin bize yaparız bazı şeyler’",
+     "opinion": false
+    },
+    {
+     "source": "odatv",
+     "title": "AKP'den 'iş makineli' transfer teklifi: Yeni Partili başkandan yanıt",
+     "opinion": false
+    },
+    {
+     "source": "elips-haber",
+     "title": "İş makinesi isteyen Yeni Partili belediye başkanına AK Partililerden dikkat çeken cevap!",
+     "opinion": false
+    },
+    {
+     "source": "birgun",
+     "title": "AKP'li Namlı’dan Kastamonu Belediye Başkanı'na partiye davet: Başkan'dan \"Kendi öz gücümüzle bu Kastamonu’ya hizmet edeceğiz\" yanıtı",
+     "opinion": false
+    },
+    {
+     "source": "yenicag",
+     "title": "Katamonu’da iş makinesi isteyen başkan Baltacı’ya AK Partili Namlı: Gel bize",
+     "opinion": false
+    },
+    {
+     "source": "sozcu",
+     "title": "Belediye Başkanı'nı partisine katılmaya davet eden AKP'li isime çarpıcı yanıt",
+     "opinion": false
+    },
+    {
+     "source": "evrensel",
+     "title": "İş makinesi isteyen Kastamonu Belediye Başkanı Baltacı’ya AKP’lilerin cevabı tepki çekti: Gelin bize yaparız bazı şeyler",
+     "opinion": false
+    }
+   ]
+  },
+  {
+   "cid": "d5f47490",
+   "id": "d5f47490-cacd-4004-9f59-7e075ee3bb3f",
+   "stored": "CHP programında gazetecilere saldırı: Hani basın özgürlüğü",
+   "model": "extractive-v6",
+   "stamped": 7,
+   "article_count": 8,
+   "members": [
+    {
+     "source": "yenicag",
+     "title": "CHP'nin programında gazetecilere saldırı: Kadın gazeteciye tokat iddiası",
+     "opinion": false
+    },
+    {
+     "source": "ilke-tv",
+     "title": "CHP programında gazetecilere saldırı: Kadın gazeteciye tokat atıldı",
+     "opinion": false
+    },
+    {
+     "source": "abc-haber",
+     "title": "CHP programında gazetecilere saldırı iddiası: Görüntü almaları engellendi",
+     "opinion": false
+    },
+    {
+     "source": "cumhuriyet",
+     "title": "Kılıçdaroğlu'nun Kocaeli programında gazetecilere saldırı: Kadın gazeteciye tokat!",
+     "opinion": false
+    },
+    {
+     "source": "birgun",
+     "title": "Mutlak butlan Kılıçdaroğlu'nun etkinliğini takip eden gazetecilere saldırı",
+     "opinion": false
+    },
+    {
+     "source": "odatv",
+     "title": "CHP programında gazetecilere saldırı: Hani basın özgürlüğü",
+     "opinion": false
+    },
+    {
+     "source": "evrensel",
+     "title": "Kılıçdaroğlu’nun programında basına saldırı: Kadın gazeteciye tokat atıldı",
+     "opinion": false
+    },
+    {
+     "source": "karar",
+     "title": "Kılıçdaroğlu'nun katıldığı CHP programında kavga: Kadın gazetecilere müdahale tepki çekti",
+     "opinion": false
+    }
+   ]
+  }
+ ]
+}
