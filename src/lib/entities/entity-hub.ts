@@ -1,4 +1,5 @@
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
+import { formatCountTr } from "@/lib/format/number-tr";
 import {
   RISING_ENTITIES,
   RISING_FOLD_FROM,
@@ -116,7 +117,7 @@ export function entityHubPageRobots(
  * later page, ranging over what the page shows (`shown` rows from the page's first).
  */
 export function entityHubNote(total: number, shown: number, page = 1): string {
-  const base = `Son ${ENTITY_HUB_WINDOW_DAYS} günde ${total} küme`;
+  const base = `Son ${ENTITY_HUB_WINDOW_DAYS} günde ${formatCountTr(total)} küme`;
   if (page > 1) {
     const from = (page - 1) * ENTITY_HUB_LIMIT + 1;
     return `${base} · ${from}-${from + shown - 1} arası listeleniyor`;

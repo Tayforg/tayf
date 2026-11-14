@@ -10,7 +10,7 @@ import type { GameHeadline } from "@/lib/game/headline-pool";
 // MF-08: this file was previously untested, so the acceptance criterion —
 // "the game is playable end to end with keyboard only, stores no cookies,
 // and survives a 429 or a network failure on a guess without interrupting
-// play" — was asserted by nothing. `vitest.config.ts` runs with
+// play" — was asserted by nothing. `vitest.config.mts` runs with
 // `environment: "node"` and this repo has neither jsdom nor
 // @testing-library installed, so no simulated clicks/events: coverage here
 // follows the repo's two actual conventions instead —

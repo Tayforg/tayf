@@ -36,7 +36,7 @@
   ],
   "exclude": [
     "node_modules",
-    "vitest.config.ts",
+    "vitest.config.mts",
     "**/*.test.ts",
     "supabase/functions/**"
   ]

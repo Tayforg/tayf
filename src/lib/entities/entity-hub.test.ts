@@ -182,6 +182,11 @@ describe("entityHubRobots", () => {
 });
 
 describe("entityHubNote", () => {
+  it("groups a four-digit total the tr-TR way, like every sibling count", () => {
+    expect(entityHubNote(1234, 20)).toBe("Son 14 günde 1.234 küme · en yeni 20 tanesi listeleniyor");
+    expect(entityHubNote(1234, 20, 2)).toBe("Son 14 günde 1.234 küme · 21-40 arası listeleniyor");
+    expect(entityHubNote(999, 999)).toBe("Son 14 günde 999 küme");
+  });
   it("states the total when everything is listed", () => {
     expect(entityHubNote(5, 5)).toBe("Son 14 günde 5 küme");
     expect(entityHubNote(0, 0)).toBe("Son 14 günde 0 küme");
@@ -313,7 +318,7 @@ describe("entityHubPageRobots", () => {
 });
 
 describe("purity", () => {
-  it("imports only rising-entities, the Turkish query helper and the shared sum-distributions", () => {
+  it("imports only rising-entities, the Turkish query helper, the shared sum-distributions and the tr-TR count formatter", () => {
     const src = readFileSync(resolve(__dirname, "entity-hub.ts"), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
@@ -322,6 +327,7 @@ describe("purity", () => {
       [
         "@/lib/bias/sum-distributions",
         "@/lib/clusters/turkish-query",
+        "@/lib/format/number-tr",
         "@/lib/trends/rising-entities",
       ].sort(),
     );

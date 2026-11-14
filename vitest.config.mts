@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export default defineConfig({
   test: {
@@ -23,7 +23,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      // import.meta.url, not __dirname: Vite's native (ESM) config loader has no __dirname.
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
 });

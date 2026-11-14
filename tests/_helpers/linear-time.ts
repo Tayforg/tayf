@@ -12,7 +12,7 @@
 //     helper thread (GC, concurrent compile), is not billed to the test. Where
 //     Node lacks it, the fallback is process.cpuUsage(), which is per PROCESS: it
 //     is exact only when vitest runs a file in its own forked process (the
-//     `pool: "forks"` in vitest.config.ts), so off the main thread the fallback
+//     `pool: "forks"` in vitest.config.mts), so off the main thread the fallback
 //     refuses to run instead of reporting other files' CPU.
 //   - every rung of a size ladder is timed as the minimum of K runs, with the
 //     rungs interleaved so a load spike hits all of them alike;
