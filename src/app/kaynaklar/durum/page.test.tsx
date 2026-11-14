@@ -1303,6 +1303,70 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
       expect(elements(tree).filter((e) => e.type === "caption")).toHaveLength(0);
     });
   });
+
+  // h178-keyboard-1 (WCAG 2.4.7 / 2.4.11): the outlet link sits flush with the left
+  // edge of the overflow scroller (the th has no left padding), so the default
+  // outside focus ring lost its left side on every one of the 118 rows. The link
+  // now draws an inset ring on its own box (the ticker-chip pattern), and the
+  // Kaynak header takes the same 4px indent so the label stays aligned.
+  describe("inset focus ring on the outlet link (h178-keyboard-1)", () => {
+    const classOf = (el: El | undefined): string => String(el?.props?.className);
+    const tokens = (cls: string) => cls.split(/\s+/);
+    const INSET_RING = [
+      "inline-block",
+      "rounded-sm",
+      "px-1",
+      "hover:underline",
+      "focus-visible:outline-none",
+      "focus-visible:ring-2",
+      "focus-visible:ring-inset",
+      "focus-visible:ring-ring",
+    ];
+    const linkOf = (tree: unknown, slug: string): El | undefined =>
+      elements(rowOf(tree, slug)).find((e) => e.props?.href === `/source/${slug}`);
+
+    it("the first row-header link carries the inset ring classes", () => {
+      const tree = body(fixtures());
+      const firstHead = elements(tree).find((e) => e.type === "th" && e.props?.scope === "row");
+      expect(firstHead, "first row header").toBeDefined();
+      const link = elements(firstHead).find((e) => typeof e.props?.href === "string");
+      expect(link, "link in the first row header").toBeDefined();
+      expect(link!.props?.href).toBe("/source/donmus");
+      for (const token of INSET_RING) expect(tokens(classOf(link)), token).toContain(token);
+    });
+
+    it("every row's name link has them, not only the first", () => {
+      const tree = body(fixtures());
+      for (const slug of ["donmus", "engelli", "sakin", "aktif"]) {
+        const link = linkOf(tree, slug);
+        expect(link, `${slug} link`).toBeDefined();
+        for (const token of INSET_RING) expect(tokens(classOf(link)), `${slug} ${token}`).toContain(token);
+      }
+    });
+
+    it("the ring is inset only: no outside ring offset class is left on the link", () => {
+      const cls = tokens(classOf(linkOf(body(fixtures()), "donmus")));
+      expect(cls.filter((t) => t.startsWith("focus-visible:ring-offset"))).toEqual([]);
+      expect(cls.filter((t) => t.startsWith("focus-visible:outline-offset"))).toEqual([]);
+    });
+
+    it("the 'Kaynak' column header takes the same 4px indent (pl-1) and keeps its sticky opaque classes", () => {
+      const th = elements(body(fixtures())).find((e) => isColHead(e) && textOf(e) === "Kaynak");
+      expect(th, "Kaynak <th>").toBeDefined();
+      const cls = tokens(classOf(th));
+      expect(cls).toContain("pl-1");
+      expect(cls).toContain("pr-4");
+      for (const token of ["sticky", "left-0", "z-10", "bg-card"]) expect(cls).toContain(token);
+    });
+
+    it("no other column header is indented", () => {
+      const heads = elements(body(fixtures())).filter(isColHead);
+      expect(heads).toHaveLength(7);
+      for (const th of heads.filter((h) => textOf(h) !== "Kaynak")) {
+        expect(tokens(classOf(th)), textOf(th)).not.toContain("pl-1");
+      }
+    });
+  });
 });
 
 describe("ItemsPerDayCell", () => {

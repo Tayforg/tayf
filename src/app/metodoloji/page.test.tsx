@@ -2179,6 +2179,20 @@ describe("/metodoloji page: what Tayf does not count as news (h176-methodtruth-1
       expect(card).toContain("Daha küçük kümeler işaretlenmez.");
     });
 
+    // h178-copy-1: "yayınlanmak" means to be broadcast; a dispatch that other outlets
+    // run again is "yeniden yayımlanmak" (TDK: yayımla- for publishing, as the rest of
+    // this page already writes "yayımlanan" and "yayımlanmış").
+    it("spells the re-publishing of a dispatch 'yayımlanmasıdır' (TDK), not 'yayınlanmasıdır' (broadcast) (h178-copy-1)", async () => {
+      const tree = await renderTree();
+      const card = textOfEl(sectionOf(tree, "tek-kaynak"));
+      const page = collectText(tree).join("");
+
+      expect(card).toContain("birebir yeniden yayımlanmasıdır");
+      expect(card).not.toContain("yayınlanmasıdır");
+      expect(page).toContain("yeniden yayımlanmasıdır");
+      expect(page).not.toContain("yayınlanmasıdır");
+    });
+
     it("is true of detectWireRedistribution: the same text in WIRE_MIN_MEMBERS - 1 members is not marked, in WIRE_MIN_MEMBERS it is", () => {
       const same = (n: number) =>
         Array.from({ length: n }, (_, i) => ({ id: `a${i}`, content_hash: "h" }));
@@ -2297,7 +2311,12 @@ describe("/metodoloji page: rule text pin (h120-methodology-1)", () => {
   // (politics-query dedupedMembers, timeline-query dedupeEarliestPerSource) keep one member per
   // source before detectWireRedistribution, so the floor counts sources, not articles. The rule
   // did not move: copy only, logged by the 2026-11-13 "kural değişmedi" entry.
-  const RULES_SHA256 = "7044f6d5b149855b5c075b9d469d7707e903d4377e76d208f639f8f627866e9d";
+  // h178-copy-1: 7044f6d5... -> 946797bb... changes exactly one character (checked by rendering
+  // the HEAD page and this one and diffing the two texts, as above): the Tek kaynaktan dağıtım
+  // card's "yeniden yayınlanmasıdır" (broadcast) now reads "yeniden yayımlanmasıdır" (TDK
+  // yayımla-, publish), as the rest of the page already writes "yayımlanan". Spelling only, no
+  // rule, threshold or number moved, so no CHANGELOG entry.
+  const RULES_SHA256 = "946797bb540ccdcfc2d38d752d544604a1e0202f4eda5afab24115596e9f2e4a";
 
   it("the rendered text of everything above the CHANGELOG hashes to the pinned value", async () => {
     // The two inputs that are not the page's own text: the registry-backed tagged

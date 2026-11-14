@@ -312,3 +312,27 @@ describe("source profile same-side note (h128-apiv1-2)", () => {
     expect(note).toContain("null");
   });
 });
+
+// h178-copy-1: the docs write "publish" with TDK's yayımla-. "yayınla-" means to broadcast,
+// which these docs never mean: the pickup window note counts the articles an outlet
+// published after a disclosure, and the same site already writes "yayımlanan" elsewhere.
+describe("Turkish docs spell publishing 'yayımlan-', not 'yayınlan-' (h178-copy-1)", () => {
+  it("the kap/pickup window note says 'penceresinde yayımlanan her haberi sayar'", () => {
+    const pickup = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/kap/pickup")!;
+    const windowNotes = pickup.notesTr.filter((n) => n.includes("penceresinde yayımlanan"));
+    expect(windowNotes).toHaveLength(1);
+    expect(windowNotes[0]).toContain("penceresinde yayımlanan her haberi sayar");
+    expect(windowNotes[0]).toContain("[bildirim_zamanı, bildirim_zamanı+48s)");
+  });
+
+  it("no summaryTr, notesTr or other Turkish string of any endpoint says 'yayınlan-' (broadcast)", () => {
+    // toLocaleLowerCase("tr") turns I into the dotless ı, so "Yayınlan" and "YAYINLAN" are caught too.
+    const offenders = turkishStrings()
+      .filter((s) => s.text.toLocaleLowerCase("tr").includes("yayınlan"))
+      .map((s) => s.where);
+    expect(offenders).toEqual([]);
+    // Non-vacuous: the scan covers the endpoint summaries and notes.
+    expect(V1_ENDPOINTS.some((e) => e.summaryTr.length > 0 && e.notesTr.length > 0)).toBe(true);
+    expect(turkishStrings().length).toBeGreaterThan(50);
+  });
+});
