@@ -622,7 +622,10 @@ describe("NewBreakingPill -- the literal classes compile", () => {
     [...token].map((c) => (/[A-Za-z0-9_-]/.test(c) ? c : `\\${c}`)).join("");
 
   const compiled = (async () => {
-    const result = await postcss([tailwindcss({ base: ROOT })]).process(
+    // Typed through AcceptedPlugin: @tailwindcss/postcss 4.3.5 ships its own postcss plugin type, and
+    // comparing it with postcss's AcceptedPlugin union overflows tsc's stack (TS2321) in a .tsx file.
+    const plugins: postcss.AcceptedPlugin[] = [tailwindcss({ base: ROOT }) as unknown as postcss.AcceptedPlugin];
+    const result = await postcss(plugins).process(
       readFileSync(GLOBALS, "utf8"),
       { from: GLOBALS },
     );
