@@ -425,6 +425,20 @@ const KATIL_AS_LABEL_FOLDED = new RegExp(
 const IHALE_RANT_FOLDED = new RegExp(`${L}ihale\\s+rant`, "u");
 const RANT_KAPISI_FOLDED = new RegExp(`${L}rant\\s+kap[ıi]s`, "u");
 
+// A clause that opens with 'hani' (h181-content2-1, d5f47490): the sarcastic rhetorical tail one outlet puts on a headline
+// ("CHP programında gazetecilere saldırı: Hani basın özgürlüğü") while the other seven members state the event. One unit, on the
+// headline's own words (LOADED_OWN_WORDS_ONLY): the title start or the position after ':', '!' or '.' (spaces allowed), the
+// whole word on the folded title. 'hanı' (the dotless i is another word, an inn), 'han', 'hanım' and 'Haniye' never match
+// ('hani' must not run on into a letter), and 'hani' inside a sentence ("... hani basın özgürlüğü diye sordu") is no opener.
+// 'Hani'de' and 'Hani’nin' (the district: an apostrophe suffix straight after the word, ASCII, typographic or modifier
+// apostrophe) are never the particle, which is never followed by an apostrophe suffix (review h182 ts-2). Known residue,
+// not asserted: 'T.C. Hani Kaymakamlığı açıkladı' and 'Hani Zeydan: gelecek' (the district or a name straight after a
+// mark, no suffix) still read as an opener; 'next word capitalised' is no guard because the rule runs on the lower-cased
+// title and Title Case outlets capitalise every word, and a place lookahead would lose 'hani belediye başkanı ...' (sarcasm).
+// The lookbehind keeps the scan linear: only a position that follows one of the three marks (or the start) scans the spaces
+// behind it, once.
+const HANI_CLAUSE_FOLDED = new RegExp(`(?:^|(?<=[:!.]))\\s*hani(?![\\p{L}\\p{N}'’ʼ])`, "u");
+
 /**
  * The rules loadedPenalty tests on the headline's own words only: the text after a speaker label's opening quote
  * (SPEAKER_QUOTE_OPEN, "Özel: 'Şaibe iddiaları asılsız'") is someone's own wording and is cut off first. Every other rule
@@ -438,6 +452,7 @@ const LOADED_OWN_WORDS_ONLY: ReadonlySet<RegExp> = new Set([
   KATIL_AS_LABEL_FOLDED,
   IHALE_RANT_FOLDED,
   RANT_KAPISI_FOLDED,
+  HANI_CLAUSE_FOLDED,
 ]);
 
 // Wording that editorialises rather than reports. Costs more than framing:
@@ -523,6 +538,8 @@ const LOADED_FOLDED: RegExp[] = [
   KATIL_AS_LABEL_FOLDED,
   IHALE_RANT_FOLDED,
   RANT_KAPISI_FOLDED,
+  // h181-content2-1: the sarcastic 'Hani ...' clause, on the headline's own words.
+  HANI_CLAUSE_FOLDED,
 ];
 
 // Partisan epithets (hunt 54, h54-editorial-4). Seven multi-source titles of ten days carried them as the "neutral"
@@ -2604,22 +2621,163 @@ export interface PickOptions {
   incumbent?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// The consensus misspelling (h181-content2-1, 4e5557f5).
+// ---------------------------------------------------------------------------
+//
+// Yeniçağ's "Katamonu’da iş makinesi isteyen başkan ..." was the H1 of a cluster whose other members write 'Kastamonu'. A
+// candidate token (letters only, six or more of them, folded) that no OTHER member title carries, and that is exactly one
+// insertion, deletion, substitution or adjacent transposition away from a token three or more other member titles carry
+// (the same first letter and the same last three letters), is a misspelling of a word the cluster agrees on, and the
+// candidate pays MISSPELLING_PENALTY, the weight of one loaded rule: it loses to any equally central clean title and still
+// wins when nothing better exists (every candidate that shares the spelling is unpenalised, because then no title is the odd
+// one out). The same first letter and last three letters keep a suffix variant ('belediyeye' for 'belediyesi'), a plural
+// or a different word out; the fold keeps a diacritic variant ('Kilicdaroglu') equal; a token with a digit never counts; and
+// the consensus needs the candidate plus three other titles (a cluster of four).
+//
+// Pick-time only: the rule is a score term, not a hard defect (hasHardDefect stays as it was), and EXTRACTIVE_MODEL_ID is
+// unchanged. The work is linear: each title contributes at most SPELLING_MAX_TOKENS tokens, read from its first
+// EVIDENCE_MAX_CHARS characters, a token is at most SPELLING_MAX_LETTERS long, the consensus tokens sit in buckets keyed by
+// their first letter and last three, and the edit check is one pass over two short strings.
+
+/** The consensus-misspelling weight: one loaded rule (loadedPenalty's 0.25), see hasConsensusMisspelling. */
+export const MISSPELLING_PENALTY = 0.25;
+
+/** A candidate token, and the consensus token it is measured against, have at least this many letters ('baskan' and 'bakan' are two words). */
+const SPELLING_MIN_LETTERS = 6;
+const SPELLING_MAX_LETTERS = 40;
+/** Tokens read per title (letters only, SPELLING_MIN_LETTERS or more). */
+const SPELLING_MAX_TOKENS = 24;
+/** How many OTHER member titles must carry a word for it to be the consensus spelling. */
+const SPELLING_CONSENSUS_TITLES = 3;
+/** The candidate plus the consensus: fewer member titles say nothing about a misspelling. */
+const SPELLING_MIN_MEMBERS = SPELLING_CONSENSUS_TITLES + 1;
+const SPELLING_END_LETTERS = 3;
+const LATIN_LETTERS_ONLY = /^[a-z]+$/;
+
+/** The folded letters-only tokens of a title that can take part (at most SPELLING_MAX_TOKENS, in order, each once). */
+function spellingTokens(title: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const token of fold(title.slice(0, EVIDENCE_MAX_CHARS)).split(" ")) {
+    if (out.length >= SPELLING_MAX_TOKENS) break;
+    if (token.length < SPELLING_MIN_LETTERS || token.length > SPELLING_MAX_LETTERS) continue;
+    if (!LATIN_LETTERS_ONLY.test(token) || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+
+/** 'başkan' and 'bakan' folded to one spelling, so the two words (and their inflections) compare equal (the folded tokens are Latin only). */
+const officeFold = (s: string): string => s.replaceAll("baskan", "bakan");
+
+/** The first letter and the last three: a misspelling in between keeps both. */
+function spellingEnds(token: string): string {
+  return token.charAt(0) + token.slice(-SPELLING_END_LETTERS);
+}
+
+/** Exactly one insertion, deletion, substitution or adjacent transposition apart (equal strings are zero edits). */
+function oneEditApart(a: string, b: string): boolean {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  const shared = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < shared && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  if (a.length !== b.length) {
+    return a.length > b.length ? a.slice(i + 1) === b.slice(i) : b.slice(i + 1) === a.slice(i);
+  }
+  if (a.slice(i + 1) === b.slice(i + 1)) return true;
+  return a.charCodeAt(i) === b.charCodeAt(i + 1) && a.charCodeAt(i + 1) === b.charCodeAt(i) && a.slice(i + 2) === b.slice(i + 2);
+}
+
+/** What the member titles of one pick spell, read once. */
+interface SpellingEvidence {
+  /** The tokens of each member title, index-aligned with the pick's members. */
+  tokens: ReadonlyArray<ReadonlySet<string>>;
+  /** For each token, the number of member titles that carry it. */
+  df: ReadonlyMap<string, number>;
+  /** The tokens that SPELLING_CONSENSUS_TITLES or more titles carry, by spellingEnds. */
+  consensus: ReadonlyMap<string, readonly string[]>;
+}
+
+/** The evidence of `titles`, or null when there are fewer than `minTitles` of them. */
+function spellingEvidence(titles: readonly string[], minTitles: number): SpellingEvidence | null {
+  if (titles.length < minTitles) return null;
+  const tokens = titles.map((t) => new Set(spellingTokens(t)));
+  const df = new Map<string, number>();
+  for (const set of tokens) for (const token of set) df.set(token, (df.get(token) ?? 0) + 1);
+  const consensus = new Map<string, string[]>();
+  for (const [token, count] of df) {
+    if (count < SPELLING_CONSENSUS_TITLES) continue;
+    const key = spellingEnds(token);
+    const bucket = consensus.get(key);
+    if (bucket === undefined) consensus.set(key, [token]);
+    else bucket.push(token);
+  }
+  return { tokens, df, consensus };
+}
+
+/** How many member titles other than `own` (indexes into the evidence) carry the token. */
+function othersCarrying(ev: SpellingEvidence, token: string, own: readonly number[]): number {
+  let n = ev.df.get(token) ?? 0;
+  for (const i of own) if (ev.tokens[i]?.has(token) === true) n--;
+  return n;
+}
+
+/**
+ * Whether the title has a token no other member title carries that is one edit from a token SPELLING_CONSENSUS_TITLES or more
+ * other member titles carry. `own` names the evidence entries that ARE this title (a candidate's own index; the members the
+ * stored title equals), so a title is never evidence against itself.
+ */
+function misspellsConsensus(title: string, ev: SpellingEvidence | null, own: readonly number[]): boolean {
+  if (ev === null) return false;
+  for (const token of spellingTokens(title)) {
+    if (othersCarrying(ev, token, own) !== 0) continue;
+    for (const word of ev.consensus.get(spellingEnds(token)) ?? []) {
+      // 'başkan' / 'bakan' (and their inflections) are two real words, the commonest look-alike pair in this corpus (3 of 7
+      // replay hits were look-alikes): the pair is never a misspelling. 'kadarı' / 'kararı' stays a known residue.
+      if (officeFold(token) === officeFold(word)) continue;
+      if (oneEditApart(token, word) && othersCarrying(ev, word, own) >= SPELLING_CONSENSUS_TITLES) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether `title` carries a consensus misspelling against the member titles `others` (the cluster's other members): a token of
+ * six or more letters that none of them carries, one edit from a token three or more of them carry, with the same first letter
+ * and last three letters. Fewer than three others never say enough. The pick charges MISSPELLING_PENALTY for it.
+ */
+export function hasConsensusMisspelling(title: string, others: readonly string[]): boolean {
+  return misspellsConsensus(title, spellingEvidence(others, SPELLING_CONSENSUS_TITLES), []);
+}
+
 /** What the members of one cluster say about their own wording. */
 interface ScoreContext {
   /** Enough members hedge ('iddia', 'öne sürdü', 'ifade'): dropping it costs HEDGE_LOSS_PENALTY. */
   hedged: boolean;
   /** Enough members carry an acting qualifier ('vekaleten', 'vekil...'): dropping it costs QUALIFIER_LOSS_PENALTY. */
   qualified: boolean;
+  /** How the members spell their words (null under four members): a misspelling of a shared word costs MISSPELLING_PENALTY. */
+  spelling: SpellingEvidence | null;
 }
 
 // One formula for a member candidate and for the stored title it competes with.
 // The title is the text as written (a member's raw title, the stored title); `attribution` is read off its
-// cleaned form and the labelled members (attributionCost, h94-neutraltitles-2).
-function scoreTitle(title: string, centrality: number, ctx: ScoreContext, attribution: AttributionCost): number {
+// cleaned form and the labelled members (attributionCost, h94-neutraltitles-2). `own` lists the members the title IS
+// (ctx.spelling's indexes): [i] for candidate i, the members the stored title equals for an incumbent.
+function scoreTitle(
+  title: string,
+  centrality: number,
+  ctx: ScoreContext,
+  attribution: AttributionCost,
+  own: readonly number[],
+): number {
   return (
     centrality -
     0.12 * framingPenalty(title) -
     0.25 * loadedPenalty(title) -
+    (misspellsConsensus(title, ctx.spelling, own) ? MISSPELLING_PENALTY : 0) -
     (ctx.hedged && !carriesHedge(title) ? HEDGE_LOSS_PENALTY : 0) -
     (ctx.qualified && !carriesQualifier(title) ? QUALIFIER_LOSS_PENALTY : 0) -
     (attribution.dropped ? ATTRIBUTION_LOSS_PENALTY : 0) -
@@ -3515,6 +3673,10 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
     qualified:
       items.length >= QUALIFIED_MIN_MEMBERS &&
       items.filter((m) => carriesQualifier(m.title)).length / items.length >= QUALIFIED_SHARE,
+    spelling: spellingEvidence(
+      items.map((m) => m.title),
+      SPELLING_MIN_MEMBERS,
+    ),
   };
 
   // The cleaned titles, and the members that name a speaker (h94-neutraltitles-2): a title that restates what a
@@ -3530,7 +3692,7 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
     const centrality = items.length > 1 ? sim / (items.length - 1) : 0;
     scored.push({
       index: i,
-      score: scoreTitle(items[i]!.title, centrality, ctx, attributionCost(cleanedItems[i]!, labelled, i)),
+      score: scoreTitle(items[i]!.title, centrality, ctx, attributionCost(cleanedItems[i]!, labelled, i), [i]),
     });
   }
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
@@ -3617,14 +3779,19 @@ function pickNeutralTitleCore(members: MemberTitle[], opts: CoreOptions): string
       const incToks = tokens(inc);
       let sim = 0;
       let n = 0;
+      // The members the stored title is: its misspelling check does not count them as evidence against it.
+      const incOwn: number[] = [];
       for (let j = 0; j < items.length; j++) {
         const t = items[j]!.title;
-        if (fold(t) === incFold || fold(cleanHeadline(t)) === incFold) continue;
+        if (fold(t) === incFold || fold(cleanHeadline(t)) === incFold) {
+          incOwn.push(j);
+          continue;
+        }
         sim += jaccard(incToks, toks[j]!);
         n++;
       }
       const incCentrality = n > 0 ? sim / n : 0;
-      const incScore = scoreTitle(inc, incCentrality, ctx, attributionCost(cleanHeadline(inc), labelled, -1));
+      const incScore = scoreTitle(inc, incCentrality, ctx, attributionCost(cleanHeadline(inc), labelled, -1), incOwn);
       // The best candidate's centrality, the same mean against the members that are not the candidate itself
       // (raw, cleaned or as shown): asked only by the loaded rule.
       const bestCentrality = (): number => {

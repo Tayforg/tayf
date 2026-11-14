@@ -63,3 +63,44 @@ describe("isNoticeOnlyCluster", () => {
     expect(isNoticeOnlyCluster([{ ...TENDER_A, description: null }, TENDER_B])).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h181-sourcepages-1: a cluster whose only members are tax-office, enforcement-office or mixed-case court notices is notice-only
+// too (rows of 2026-11-14 with the private text cut away).
+// ---------------------------------------------------------------------------
+
+describe("isNoticeOnlyCluster: tax-office, enforcement-office and mixed-case court notices (h181-sourcepages-1)", () => {
+  const TAX_OFFICE: Art = {
+    title: "KOZYATAĞI VERGİ DAİRESİ MÜDÜRLÜĞÜ",
+    url: "https://www.milatgazetesi.com/kozyatagi-vergi-dairesi-mudurlugu",
+    description: "İSTANBUL DEFTERDARLIĞI’NDAN İLANEN TEBLİĞVergi NoSoyad Ad/UnvanAdresVergi DönemiAna Vergi KoduVergi Kodu",
+  };
+  const ENFORCEMENT_OFFICE: Art = {
+    title: "SİLİVRİ İCRA VE İFLAS MÜDÜRLÜĞÜ",
+    url: "https://www.yenimesaj.com.tr/silivri-icra-ve-iflas-mudurlugu-H1",
+    description: "Örnek No:55*\tT.C.SİLİVRİİCRA DAİRESİ\t2025/623 TLMT.\tTAŞINMAZIN GAZETE VEYA İNTERNET HABER SİTESİ İLANI",
+  };
+  const MIXED_COURT: Art = {
+    title: "Kocaeli 3. sulh hukuk Mahkemesi'nden ilanen tebliğ",
+    url: "https://www.iscihaber.net/yerel-haberler/kocaeli-3-sulh-hukuk-mahkemesinden-ilanen-teblig/281043",
+    description: "Kocaeli 3. Sulh Hukuk Mahkemesi, adresine ulaşılamayan davalı Örnek Kişi için ilanen tebligat kararı aldı.",
+  };
+  /** Real news with a court in its title (the eighth İşçi Haber row of the fortnight). */
+  const AYM_NEWS: Art = {
+    title: "Anayasa Mahkemesi'nden Canan Karatay Kararı: İfade Özgürlüğü Vurgusu",
+    url: "https://www.iscihaber.net/gundem/anayasa-mahkemesinden-canan-karatay-karari-ifade-ozgurlugu-vurgusu/278533",
+    description: "Anayasa Mahkemesi, Prof. Dr. Canan Karatay'ın aşılarla ilgili açıklamaları nedeniyle aldığı meslekten geçici men cezasının ifade özgürlüğünü ihlal ettiğine hükmetti.",
+  };
+
+  it("is true for a cluster of two of these notices, and for each alone", () => {
+    expect(isNoticeOnlyCluster([TAX_OFFICE, ENFORCEMENT_OFFICE])).toBe(true);
+    expect(isNoticeOnlyCluster([TAX_OFFICE, MIXED_COURT])).toBe(true);
+    expect(isNoticeOnlyCluster([ENFORCEMENT_OFFICE, MIXED_COURT, YENICAG])).toBe(true);
+    expect(isNoticeOnlyCluster([TAX_OFFICE])).toBe(true);
+  });
+
+  it("one real story keeps the cluster indexable", () => {
+    expect(isNoticeOnlyCluster([TAX_OFFICE, ENFORCEMENT_OFFICE, AYM_NEWS])).toBe(false);
+    expect(isNoticeOnlyCluster([AYM_NEWS])).toBe(false);
+  });
+});

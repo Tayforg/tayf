@@ -22,6 +22,8 @@ run | 137-source-items-7d.test.ts | - | - | 0
 run | stub-guard.test.ts | - | - | 0
 # --- raw migrations as setup (what the live block's header says is applied) ----------------------
 run | 107-legal-notice-articles.test.ts | supabase/migrations/107_legal_notice_articles.sql | - | 0
+# 213: the 3-argument is_legal_notice is 107 -> 210 -> 213 (each create-or-replace builds on the one before).
+run | 213-legal-notice-tax-court.test.ts | supabase/migrations/107_legal_notice_articles.sql supabase/migrations/210_legal_notice_description.sql supabase/migrations/213_legal_notice_tax_court.sql | - | 0
 run | 114-sources-newly-dark.test.ts | supabase/migrations/114_sources_newly_dark.sql | - | 0
 run | 115-sources-newly-dark-24h.test.ts | supabase/migrations/114_sources_newly_dark.sql supabase/migrations/115_sources_newly_dark_24h.sql | - | 0
 run | 132-legacy-bias-range-tools.test.ts | supabase/migrations/132_legacy_bias_range_tools.sql | - | 0

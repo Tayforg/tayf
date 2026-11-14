@@ -1953,11 +1953,13 @@ describe("/metodoloji page: what Tayf does not count as news (h176-methodtruth-1
       };
       const news: Member = { title: "Anayasa Mahkemesi CHP'nin başvurusunu reddetti", url: "https://example.com/a/4" };
       // The 2026-11-13 widening (migration 210): a notice under a mixed-case title that only its
-      // summary marks ("İlan-"). Title and url alone do not drop it, the summary does.
+      // summary marks ("İlan-"). Title and url alone do not drop it, the summary does. (The example is
+      // a tax-office notice: since h181-sourcepages-1 a sentence-case title that names a court and ends
+      // in "ilanı" is dropped by its title alone, which would no longer show the summary rule.)
       const dashed: Member = {
-        title: "Kırıkhan Asliye Ceza Mahkemesi ilanı",
+        title: "Ankara Defterdarlığı (Cumhuriyet Vergi Dairesi Müdürlüğü)",
         url: "https://example.com/a/5",
-        description: "İlan-T.C. Kırıkhan 2. Asliye Ceza Mahkemesi 2024/1 Esas sayılı dosya",
+        description: "İlan-Ankara Defterdarlığı (Cumhuriyet Vergi Dairesi Müdürlüğü)",
       };
 
       for (const notice of [court, icra, tender]) {

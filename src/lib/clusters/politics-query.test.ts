@@ -81,6 +81,7 @@ import {
   buildClusterBundle,
   flattenClusterMembers,
   getPoliticsClusters,
+  meetsBreakingVotingFloor,
   type EmbeddedClusterRow,
 } from "./politics-query";
 import type { ZoneFeedHealth } from "./feed-health";
@@ -1361,6 +1362,204 @@ describe("breaking strip voting-source floor (h59-homefeed-3)", () => {
     const { bundles, breakingBundles } = await getPoliticsClusters();
     expect(ids(bundles)).toEqual(["old-ok"]);
     expect(breakingBundles).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h182: the floor counts independent texts, not only source ids. A cluster whose
+// members all carry one agency text is R2's wire collapse (effectiveArticleCount
+// 1): the ranked list already shrinks it, so the strip must wait for a second text.
+// ---------------------------------------------------------------------------
+
+describe("breaking strip counts independent texts (h182)", () => {
+  type Kind = "outlet" | "wire" | "aggregator" | "niche";
+  const MIN = 60 * 1000;
+  const ids = (bundles: Array<{ cluster: { id: string } }>) => bundles.map((b) => b.cluster.id);
+  // One 120-character agency lead, printed under different headlines (different hashes).
+  const LEAD =
+    "Anadolu Ajansının edindiği bilgiye göre, Bakanlık yeni düzenlemeyi yarından itibaren uygulamaya koyacağını açıkladı.";
+
+  interface Member {
+    sourceId: string;
+    kind: Kind;
+    hash?: string;
+    description?: string;
+  }
+  const fresh = (clusterId: string, ageMs: number, members: Member[]) =>
+    mkCluster({
+      id: clusterId,
+      first_published: iso(ageMs),
+      members: members.map((m, i) => ({
+        id: `${clusterId}-${i}`,
+        sourceId: m.sourceId,
+        kind: m.kind,
+        category: "politika",
+        ...(m.hash !== undefined ? { content_hash: m.hash } : {}),
+        ...(m.description !== undefined ? { description: m.description } : {}),
+      })),
+    });
+
+  it("a fresh cluster of two outlets and the wire printing one text (shared content_hash) takes no strip slot", async () => {
+    response = {
+      data: [
+        fresh("wire-only", 5 * MIN, [
+          { sourceId: "dirilis-postasi", kind: "outlet", hash: "AA" },
+          { sourceId: "milat", kind: "outlet", hash: "AA" },
+          { sourceId: "anadolu-ajansi", kind: "wire", hash: "AA" },
+        ]),
+      ],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual([]);
+    // Still a ranked-pool member, with the R2 flag and the collapsed count intact.
+    expect(ids(bundles)).toEqual(["wire-only"]);
+    expect(bundles[0]!.isWireRedistribution).toBe(true);
+    expect(bundles[0]!.effectiveArticleCount).toBe(1);
+    expect(bundles[0]!.sources).toHaveLength(3);
+  });
+
+  it("the same lead under three reworded headlines (distinct hashes, one description) takes no strip slot", async () => {
+    response = {
+      data: [
+        fresh("lead-only", 5 * MIN, [
+          { sourceId: "dirilis-postasi", kind: "outlet", hash: "h1", description: LEAD },
+          { sourceId: "milat", kind: "outlet", hash: "h2", description: LEAD },
+          { sourceId: "anadolu-ajansi", kind: "wire", hash: "h3", description: LEAD },
+        ]),
+      ],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual([]);
+    expect(bundles[0]!.isWireRedistribution).toBe(true);
+    expect(bundles[0]!.effectiveArticleCount).toBe(1);
+  });
+
+  it("a wire cluster with three voting sources and two unique texts takes a slot", async () => {
+    // 4 members, 2 texts: still R2 wire (2 / 4 <= 0.5), effectiveArticleCount 2.
+    response = {
+      data: [
+        fresh("two-texts", 5 * MIN, [
+          { sourceId: "yenicag", kind: "outlet", hash: "AA" },
+          { sourceId: "abc-haber", kind: "outlet", hash: "AA" },
+          { sourceId: "anadolu-ajansi", kind: "wire", hash: "BB" },
+          { sourceId: "haberler-com", kind: "aggregator", hash: "BB" },
+        ]),
+      ],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(bundles[0]!.isWireRedistribution).toBe(true);
+    expect(bundles[0]!.effectiveArticleCount).toBe(2);
+    expect(ids(breakingBundles)).toEqual(["two-texts"]);
+  });
+
+  it("a non-wire cluster with three voting sources and two unique texts takes a slot", async () => {
+    // 3 members, 2 texts: 2 / 3 is above the wire ratio, so not wire.
+    response = {
+      data: [
+        fresh("three-two", 5 * MIN, [
+          { sourceId: "yenicag", kind: "outlet", hash: "AA" },
+          { sourceId: "abc-haber", kind: "outlet", hash: "AA" },
+          { sourceId: "cnn-turk", kind: "outlet", hash: "BB" },
+        ]),
+      ],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(bundles[0]!.isWireRedistribution).toBe(false);
+    expect(ids(breakingBundles)).toEqual(["three-two"]);
+  });
+
+  it("a non-wire cluster with exactly two voting sources still takes a slot, even on one shared hash", async () => {
+    // Under WIRE_MIN_MEMBERS (3) two members are never wire, so the floor is unchanged.
+    response = {
+      data: [
+        fresh("pair", 5 * MIN, [
+          { sourceId: "yenicag", kind: "outlet", hash: "AA" },
+          { sourceId: "abc-haber", kind: "outlet", hash: "AA" },
+        ]),
+      ],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(bundles[0]!.isWireRedistribution).toBe(false);
+    expect(ids(breakingBundles)).toEqual(["pair"]);
+  });
+
+  it("one voting source plus an aggregator stays out (unchanged)", async () => {
+    response = {
+      data: [
+        fresh("echo", 5 * MIN, [
+          { sourceId: "haber-global", kind: "outlet", hash: "AA" },
+          { sourceId: "haberler-com", kind: "aggregator", hash: "BB" },
+        ]),
+      ],
+      error: null,
+    };
+    const { breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual([]);
+  });
+
+  it("a wire-only cluster does not block a later independent one and the strip keeps newest-first order", async () => {
+    response = {
+      data: [
+        fresh("wire-newest", 1 * MIN, [
+          { sourceId: "dirilis-postasi", kind: "outlet", hash: "AA" },
+          { sourceId: "milat", kind: "outlet", hash: "AA" },
+          { sourceId: "anadolu-ajansi", kind: "wire", hash: "AA" },
+        ]),
+        fresh("indep-b", 9 * MIN, [
+          { sourceId: "yenicag", kind: "outlet", hash: "B1" },
+          { sourceId: "abc-haber", kind: "outlet", hash: "B2" },
+        ]),
+        fresh("indep-a", 3 * MIN, [
+          { sourceId: "cnn-turk", kind: "outlet", hash: "A1" },
+          { sourceId: "sozcu", kind: "outlet", hash: "A2" },
+        ]),
+      ],
+      error: null,
+    };
+    const { bundles, breakingBundles } = await getPoliticsClusters();
+    expect(ids(breakingBundles)).toEqual(["indep-a", "indep-b"]);
+    expect(ids(bundles).sort()).toEqual(["indep-a", "indep-b", "wire-newest"]);
+  });
+});
+
+describe("meetsBreakingVotingFloor (h182)", () => {
+  const src = (id: string, kind?: "outlet" | "wire" | "aggregator" | "niche" | null) => ({
+    id,
+    name: id,
+    bias: "center" as const,
+    logo_url: null,
+    kind,
+  });
+
+  it("takes the smaller of the voting-source count and the independent-text count", () => {
+    const three = [src("a", "outlet"), src("b", "outlet"), src("c", "wire")];
+    expect(meetsBreakingVotingFloor({ sources: three, effectiveArticleCount: 1 })).toBe(false);
+    expect(meetsBreakingVotingFloor({ sources: three, effectiveArticleCount: 2 })).toBe(true);
+    expect(meetsBreakingVotingFloor({ sources: three, effectiveArticleCount: 3 })).toBe(true);
+    expect(meetsBreakingVotingFloor({ sources: three, effectiveArticleCount: 0 })).toBe(false);
+  });
+
+  it("an undefined effectiveArticleCount passes on the voting-source count alone", () => {
+    const two = [src("a", "outlet"), src("b", "wire")];
+    expect(meetsBreakingVotingFloor({ sources: two })).toBe(true);
+    expect(meetsBreakingVotingFloor({ sources: two, effectiveArticleCount: undefined })).toBe(true);
+    expect(meetsBreakingVotingFloor({ sources: [src("a", "outlet")] })).toBe(false);
+    expect(meetsBreakingVotingFloor({ sources: [src("a", "outlet"), src("h", "aggregator")] })).toBe(false);
+    expect(meetsBreakingVotingFloor({ sources: [] })).toBe(false);
+  });
+
+  it("counts a source with no kind as voting and a repeated source id once", () => {
+    expect(
+      meetsBreakingVotingFloor({ sources: [src("a"), src("b", null)], effectiveArticleCount: 5 }),
+    ).toBe(true);
+    expect(
+      meetsBreakingVotingFloor({ sources: [src("a", "outlet"), src("a", "outlet")], effectiveArticleCount: 5 }),
+    ).toBe(false);
   });
 });
 

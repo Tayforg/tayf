@@ -354,3 +354,67 @@ describe("selectSourceRecentArticles: legal notices (h168-notices-1)", () => {
     expect(out[0]).toBe(ILAN_SITESI_NEWS);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h181-sourcepages-1. Tax-office, enforcement-office and mixed-case court notices (a debtor's or a defendant's name, tax
+// number and address) passed every earlier rule and filled 'Son haberler' on /source/milat, /source/dirilis-postasi and
+// /source/isci-haber. They are unclustered in production; the check runs before the clustered-id exemption, so one that gets
+// clustered later is hidden too. Rows are production rows of 2026-11-14 with the private text cut away.
+// ---------------------------------------------------------------------------
+
+describe("selectSourceRecentArticles: tax-office, enforcement-office and mixed-case court notices (h181-sourcepages-1)", () => {
+  const TAX_OFFICE = noticeRow(
+    "h181-tax",
+    "KOZYATAĞI VERGİ DAİRESİ MÜDÜRLÜĞÜ",
+    "İSTANBUL DEFTERDARLIĞI’NDAN İLANEN TEBLİĞVergi NoSoyad Ad/UnvanAdresVergi DönemiAna Vergi KoduVergi KoduAna Takip Dosya No",
+    null,
+  );
+  const ENFORCEMENT_OFFICE = noticeRow(
+    "h181-icra",
+    "SİLİVRİ İCRA VE İFLAS MÜDÜRLÜĞÜ",
+    "Örnek No:55*\tT.C.SİLİVRİİCRA DAİRESİ\t2025/623 TLMT.\tTAŞINMAZIN GAZETE VEYA İNTERNET HABER SİTESİ İLANI\tBir borçtan dolayı",
+    "https://www.yenimesaj.com.tr/silivri-icra-ve-iflas-mudurlugu-H1",
+  );
+  const MIXED_COURT = noticeRow(
+    "h181-court",
+    "Kocaeli 3. sulh hukuk Mahkemesi'nden ilanen tebliğ",
+    "Kocaeli 3. Sulh Hukuk Mahkemesi, adresine ulaşılamayan davalı Örnek Kişi için ilanen tebligat kararı aldı.",
+    "https://www.iscihaber.net/yerel-haberler/kocaeli-3-sulh-hukuk-mahkemesinden-ilanen-teblig/281043",
+  );
+  // The eighth İşçi Haber row of the same fortnight: real news with a court in its title. It stays.
+  const AYM_NEWS = noticeRow(
+    "h181-aym",
+    "Anayasa Mahkemesi'nden Canan Karatay Kararı: İfade Özgürlüğü Vurgusu",
+    "Anayasa Mahkemesi, Prof. Dr. Canan Karatay'ın aşılarla ilgili açıklamaları nedeniyle aldığı meslekten geçici men cezasının ifade özgürlüğünü ihlal ettiğine hükmetti.",
+    "https://www.iscihaber.net/gundem/anayasa-mahkemesinden-canan-karatay-karari-ifade-ozgurlugu-vurgusu/278533",
+  );
+  const NOTICES = [
+    ["a tax office's notice (title rule, url null)", TAX_OFFICE],
+    ["an enforcement office's sale notice (title and description rules)", ENFORCEMENT_OFFICE],
+    ["a sentence-case court notice (mixed-case court rule)", MIXED_COURT],
+  ] as const;
+
+  it.each(NOTICES)("drops %s when it is in no cluster", (_label, notice) => {
+    const news = urlRow(1, "https://halktv.com.tr/gundem/bir-haber-1061591h");
+    expect(selectSourceRecentArticles([notice, news], NONE)).toEqual([news]);
+  });
+
+  it.each(NOTICES)("drops %s even when its id is in clusteredIds (the check runs before the exemption)", (_label, notice) => {
+    const news = urlRow(1, "https://halktv.com.tr/gundem/bir-haber-1061591h");
+    expect(selectSourceRecentArticles([notice, news], new Set([notice.id, news.id]))).toEqual([news]);
+  });
+
+  it("keeps the real Anayasa Mahkemesi story, clustered or not", () => {
+    expect(isGameEligibleTitle(AYM_NEWS.title)).toBe(true);
+    expect(selectSourceRecentArticles([AYM_NEWS], NONE)).toEqual([AYM_NEWS]);
+    expect(selectSourceRecentArticles([AYM_NEWS], new Set([AYM_NEWS.id]))).toEqual([AYM_NEWS]);
+  });
+
+  it("the three notices leave the cap to later rows: the list holds 20 stories, none of them a notice", () => {
+    const news = Array.from({ length: 30 }, (_, i) => urlRow(200 + i, `https://halktv.com.tr/gundem/haber-${i}h`));
+    const rows: UrlRow[] = [TAX_OFFICE, ENFORCEMENT_OFFICE, news[0]!, MIXED_COURT, ...news.slice(1)];
+    const out = selectSourceRecentArticles(rows, new Set([TAX_OFFICE.id, MIXED_COURT.id]));
+    expect(out).toHaveLength(20);
+    expect(out.map((r) => r.id)).toEqual(news.slice(0, 20).map((r) => r.id));
+  });
+});

@@ -19,7 +19,23 @@
 //      municipality's or BOTAŞ's EKAP tender under a bare "ÜMRANİYE BELEDİYE
 //      BAŞKANLIĞI" title). The tender law alone is NOT a notice marker: real
 //      news (Kızılay ihalesiz alım, Emniyet kumanya, Gaziantep ihalesi) quotes
-//      it under mixed-case titles, which is why D2 also needs the uppercase gate.
+//      it under mixed-case titles, which is why D2 also needs the uppercase gate;
+//   E. (h181-sourcepages-1) tax-office, enforcement-office and mixed-case court
+//      notices (a debtor's or a defendant's name, tax number and address on an
+//      indexable source page): E1 the title is MOSTLY UPPERCASE and ENDS in a tax
+//      or enforcement office's own name ("KOZYATAĞI VERGİ DAİRESİ MÜDÜRLÜĞÜ",
+//      "SİLİVRİ İCRA VE İFLAS MÜDÜRLÜĞÜ", ENDS_WITH_OFFICE); E2 the title is
+//      MOSTLY UPPERCASE and the description carries the notice's own header
+//      ("İLANEN TEBLİĞ", "GAZETE VEYA İNTERNET HABER SİTESİ İLANI"); E3 (TS only,
+//      MIXED_COURT_NOTICE) İşçi Haber rewrites a BİK court notice into a
+//      sentence-case title ("Kocaeli 3. sulh hukuk Mahkemesi'nden ilanen tebliğ"):
+//      a court-level word, then "mahkemesi", and the notice word (ilan, ilanı,
+//      ilanen tebliğ or ilanen tebligat) must follow "mahkemesi" directly, after a
+//      space or after the ablative -nden (apostrophe optional, at most 24
+//      characters between), and END the title. A court story whose title does not
+//      read that way ("Kandıra sulh hukuk mahkemesi Kerpe'de 6 arsayı satıyor",
+//      "Aile Mahkemesi'ne yeni hakim alım ilanı") is a known residue or plain
+//      news and stays visible: no title rule can tell it from news.
 //
 // A bare "MAHKEMESİ" or "İLAN" in the MIDDLE of a headline must NOT trigger,
 // so real all-caps news ("ANAYASA MAHKEMESİ CHP'NİN BAŞVURUSUNU REDDETTİ",
@@ -46,6 +62,18 @@
 // description.test.ts). They live in their own object, not in
 // LEGAL_NOTICE_PATTERNS, because the 107 parity test iterates that object and
 // the 107 SQL must keep embedding exactly its five patterns.
+//
+// The h181 rules E1 and E2 have their own twin, the same 3-argument function re-created by
+// migration 213 (the live body of 210 plus two blocks), which embeds the `.source` of
+// LEGAL_NOTICE_TITLE_V2_PATTERNS and LEGAL_NOTICE_DESCRIPTION_V2_PATTERNS verbatim under the same
+// constraints (tests/migrations/213-legal-notice-tax-court.test.ts). They are two more objects, not
+// entries of the two earlier ones, for the same reason as above: the 107 and 210 parity tests iterate
+// those objects and each migration must keep embedding exactly its own patterns. E3 (MIXED_COURT_NOTICE)
+// has NO SQL twin on purpose: it lower-cases the title with the Turkish locale (İ -> i, I -> ı), and case
+// folding of İ and ı is not reliable in a POSIX ARE (it depends on the database's collation); the
+// /ekonomi ticker counts, the SQL twin's only consumer, do not depend on it (h181 replay, migration 213).
+// MIXED_COURT_NOTICE is therefore free of the ARE limits (\p{L}, lookahead) but uses bounded quantifiers
+// only, and judges only a title of at most MIXED_COURT_NOTICE_MAX_TITLE characters.
 //
 // The description is attacker-controlled feed text and String.prototype.normalize
 // is super-linear on combining marks that need reordering ('a' + U+0301 x n/2 +
@@ -100,6 +128,42 @@ const DESCRIPTION_TENDER_LAW = /4734 sayılı Kamu İhale Kanunu/u;
 const DESCRIPTION_TENDER_REGISTRY = /İhale Kayıt Numarası/u;
 const DESCRIPTION_STARTS_WITH_ILAN = /^\s*[İI]LAN\s/u;
 
+// E (h181-sourcepages-1).
+//
+// E1: the title ENDS in a tax office's or an enforcement office's own name, trailing punctuation tolerated. Like
+// ENDS_WITH_INSTITUTION it is trusted only under a mostly-uppercase title (the regex is case-sensitive, so a
+// mixed-case "Kadıköy Vergi Dairesi Müdürlüğü" is not matched at all: a known false negative). The
+// bank-claims enforcement office ("BANKA ALACAKLARI İCRA DAİRESİ MÜDÜRLÜĞÜ") is covered by the "İCRA DAİRESİ"
+// alternative. [İI] / [Eİ] / [ĞG] / [ÜU] accept feeds that strip Turkish letters; the hyphen is last in the class
+// and nothing is escaped, so the `.source` is a valid Postgres ARE unchanged (migration 213 embeds it).
+const ENDS_WITH_OFFICE =
+  /((V[Eİ]RG[İI]|[İI]CRA) DA[İI]RES[İI]|[İI]CRA VE [İI]FLAS) M[ÜU]D[ÜU]RL[ÜU][ĞG][ÜU][\s.:;,!-]*$/u;
+// E2: the notice's own header in the description, case-sensitive literals (linear on any input, valid Postgres AREs
+// unchanged), each only trusted under a mostly-uppercase title: a lower-case or title-case "ilanen tebliğ" in a
+// description is ordinary prose.
+const DESCRIPTION_ILANEN_TEBLIG = /İLANEN TEBLİĞ/u;
+const DESCRIPTION_GAZETE_INTERNET_ILANI = /GAZETE VEYA İNTERNET HABER SİTESİ İLANI/u;
+
+// E3 (TS only, no SQL twin: see the header). Run on the NFC title lower-cased with the Turkish locale. A court-level
+// word (a whole word) is followed, within 40 characters, by "mahkemesi" (which also reads "mahkemesinden"
+// and "mahkemesi'nden"). The notice word (ilan, ilanı, ilanen tebliğ or ilanen tebligat) must then follow "mahkemesi"
+// DIRECTLY and END the title (trailing punctuation tolerated): the tail is tested on the text right after the first
+// "mahkemesi" match, and is either a space and the notice word ("Ankara 22. Aile Mahkemesi ilanı") or the ablative
+// -nden (the apostrophe, ASCII or typographic, is optional), at most 24 characters, then the notice word
+// ("Batman 6. asliye hukuk Mahkemesi'nden tapu iptal ilanı"). A notice word anywhere else after a court name
+// ("Aile Mahkemesi'ne yeni hakim alım ilanı", "Ticaret Mahkemesi'nin kararının ardından Boyner'den iflas ilanı") is news,
+// not a notice. "Ticaret Mahkemesi'nden iflas ilanı" has the exact shape of a notice and stays flagged (accepted).
+// Every quantifier is bounded, so the work is bounded by the title cap times the gap.
+const MIXED_COURT_LEVEL =
+  /(?:^|[^\p{L}])(?:asliye|sulh|ağır ceza|icra|iş|aile|tüketici|idare|vergi|ticaret|kadastro|fikri|infaz|çocuk|bölge)(?![\p{L}])[\s\S]{0,40}?mahkemesi/u;
+const MIXED_NOTICE_TAIL =
+  /^(?:['’]?nden[\s\S]{0,24}?)?[^\p{L}](?:ilan|ilanı|ilanen tebliğ|ilanen tebligat)[\s.:;,!-]{0,20}$/u;
+// Cheap precheck (an ASCII case-insensitive substring test) so the lower-casing runs only for titles that name a court.
+const COURT_STEM = /mahkeme/i;
+
+/** The longest title (after NFC and trim) MIXED_COURT_NOTICE judges. A notice title is short; a longer one is read as news. */
+export const MIXED_COURT_NOTICE_MAX_TITLE = 300;
+
 /**
  * The five title / url rules, exported so the SQL twin can be checked against
  * them (see the header). Not part of the runtime API: callers use isLegalNotice.
@@ -122,6 +186,32 @@ export const LEGAL_NOTICE_DESCRIPTION_PATTERNS = {
   DESCRIPTION_TENDER_LAW,
   DESCRIPTION_TENDER_REGISTRY,
   DESCRIPTION_STARTS_WITH_ILAN,
+} as const;
+
+/**
+ * The h181 title rule (E1), exported so the 3-argument SQL twin (migration 213) can be checked against it. Kept apart
+ * from LEGAL_NOTICE_PATTERNS and LEGAL_NOTICE_DESCRIPTION_PATTERNS on purpose (see the header).
+ */
+export const LEGAL_NOTICE_TITLE_V2_PATTERNS = {
+  ENDS_WITH_OFFICE,
+} as const;
+
+/**
+ * The two h181 description rules (E2), exported for the same reason. Kept apart from LEGAL_NOTICE_DESCRIPTION_PATTERNS
+ * on purpose (migration 210 embeds exactly its four).
+ */
+export const LEGAL_NOTICE_DESCRIPTION_V2_PATTERNS = {
+  DESCRIPTION_ILANEN_TEBLIG,
+  DESCRIPTION_GAZETE_INTERNET_ILANI,
+} as const;
+
+/**
+ * The h181 mixed-case court rule (E3). TS only: it has NO SQL twin on purpose (see the header), so these sources are
+ * not Postgres AREs and no migration embeds them.
+ */
+export const MIXED_COURT_NOTICE = {
+  COURT_LEVEL: MIXED_COURT_LEVEL,
+  NOTICE_TAIL: MIXED_NOTICE_TAIL,
 } as const;
 
 /**
@@ -171,6 +261,10 @@ export function isLegalNotice(
     // but is exactly the notice marker, so it only needs the ratio gate
     // (3 letters = the word itself).
     if (STARTS_WITH_ILAN.test(t) && isMostlyUppercase(t, 3)) return true;
+    // E1 (h181-sourcepages-1): a tax or enforcement office's own name at the end of a mostly-uppercase title.
+    if (ENDS_WITH_OFFICE.test(t) && isMostlyUppercase(t, LEGAL_NOTICE_MIN_LETTERS)) return true;
+    // E3 (h181-sourcepages-1, TS only): a sentence-case court notice.
+    if (isMixedCourtNotice(t)) return true;
   }
 
   if (url) {
@@ -190,7 +284,7 @@ export function isLegalNotice(
 /**
  * Rule C. NFC first, like the title rules ("İ" can arrive as I + U+0307), on the
  * first NOTICE_DESCRIPTION_SCAN_CAP units of the description only.
- * D1 needs no title; D2 needs a mostly-uppercase title, checked LAST because
+ * D1 needs no title; D2 and E2 need a mostly-uppercase title, checked LAST because
  * it lower-cases every letter of the title.
  */
 function isNoticeByDescription(title: unknown, description: string): boolean {
@@ -201,9 +295,24 @@ function isNoticeByDescription(title: unknown, description: string): boolean {
   if (
     DESCRIPTION_TENDER_LAW.test(d) ||
     DESCRIPTION_TENDER_REGISTRY.test(d) ||
-    DESCRIPTION_STARTS_WITH_ILAN.test(d)
+    DESCRIPTION_STARTS_WITH_ILAN.test(d) ||
+    DESCRIPTION_ILANEN_TEBLIG.test(d) ||
+    DESCRIPTION_GAZETE_INTERNET_ILANI.test(d)
   ) {
     return isMostlyUppercase(title.normalize("NFC").trim(), LEGAL_NOTICE_MIN_LETTERS);
   }
   return false;
+}
+
+/**
+ * E3. `t` is the NFC, trimmed title. A title over MIXED_COURT_NOTICE_MAX_TITLE characters is not judged: cutting it
+ * would test an arbitrary mid-sentence boundary for "ends in ilan", and a notice title is short. The cheap substring
+ * test comes first, so the Turkish lower-casing (a per-letter locale lookup) runs only for a title that names a court.
+ */
+function isMixedCourtNotice(t: string): boolean {
+  if (t.length > MIXED_COURT_NOTICE_MAX_TITLE) return false;
+  if (!COURT_STEM.test(t)) return false;
+  const lower = t.toLocaleLowerCase("tr");
+  const m = MIXED_COURT_LEVEL.exec(lower);
+  return m !== null && MIXED_NOTICE_TAIL.test(lower.slice(m.index + m[0].length));
 }

@@ -6,6 +6,7 @@ import {
   EXTRACTIVE_MODEL_ID,
   FULL_LENGTH_TITLE_CHARS,
   HEDGE_LOSS_PENALTY,
+  MISSPELLING_PENALTY,
   QUALIFIER_LOSS_PENALTY,
   REPICK_MARGIN,
   REPICK_MARGIN_FULL_LENGTH,
@@ -16,6 +17,7 @@ import {
   framingPenalty,
   gluedJoinCount,
   incumbentDefect,
+  hasConsensusMisspelling,
   incumbentIsMemberTitle,
   isAblativeStatementTitle,
   isAcceptableNeutral,
@@ -8231,5 +8233,425 @@ describe("h168-titles-2: a token of one to three digits and a dot is no sentence
     const opts = { n: 250_000, ceilingMs: 8_000 };
     expectLinear(rep("1. a "), (shape) => pickNeutralTitle([{ title: `Bakan ${shape}`, caseUnreliable: true }, { title: `Bakan ${shape}`.toUpperCase() }]), opts);
     expectLinear(rep("111. Ab "), (shape) => pickNeutralTitle([{ title: `Bakan ${shape}`, caseUnreliable: true }, { title: "Bakan Kurum 111. Dönem" }]), opts);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h181-content2-1: a member headline that misspells a word the others agree on, or ends in a sarcastic 'Hani ...'
+// ---------------------------------------------------------------------------
+//
+// 4e5557f5 carried Yeniçağ's "Katamonu’da iş makinesi isteyen başkan Baltacı’ya AK Partili Namlı: Gel bize" as its H1 while
+// the members that name the city write 'Kastamonu', and d5f47490 carried Odatv's "CHP programında gazetecilere saldırı: Hani
+// basın özgürlüğü" (the sarcastic tail is Odatv's; the other seven members carry none). Two pick-time rules, no model bump
+// (the v6 heal is running) and no hard defect: a candidate token that no other member title carries but that is one edit
+// from a token three or more other titles carry (same first letter, same last three letters) costs MISSPELLING_PENALTY, the
+// weight of one loaded rule; a clause-opening 'hani' is one loaded rule on the headline's own words. The fixture
+// (src/lib/clusters/__fixtures__/h181-consensus.json, test-only) is the member titles (newest first) and source slugs of the
+// two clusters as read on production on 2026-11-14.
+
+const H181_CONSENSUS: H164Fixture = JSON.parse(
+  readFileSync(resolve(__dirname, "__fixtures__/h181-consensus.json"), "utf8"),
+) as H164Fixture;
+
+function h181(cid: string): H164Cluster {
+  const found = H181_CONSENSUS.clusters.find((c) => c.cid === cid);
+  if (found === undefined) throw new Error(`h181-consensus.json has no cluster ${cid}`);
+  return found;
+}
+
+const YENICAG_TYPO = "Katamonu’da iş makinesi isteyen başkan Baltacı’ya AK Partili Namlı: Gel bize";
+const ODATV_HANI = "CHP programında gazetecilere saldırı: Hani basın özgürlüğü";
+const HABERLER_COM_PICK =
+  "İş makinesi desteği isteyen Belediye başkanına AK Partili Namlı’dan davet: Gelin bize, yaparız bazı şeyler";
+const KATILMA_TOKAT = "CHP programında gazetecilere saldırı: Kadın gazeteciye tokat atıldı";
+
+describe("h181-content2-1: the fixture", () => {
+  it("holds the two clusters with their stored title, stamp and every member title", () => {
+    expect(H181_CONSENSUS.clusters.map((c) => c.cid)).toEqual(["4e5557f5", "d5f47490"]);
+    for (const c of H181_CONSENSUS.clusters) {
+      expect(c.model).toBe("extractive-v6");
+      expect(c.members).toHaveLength(c.article_count);
+    }
+    expect(h181("4e5557f5").stored).toBe(YENICAG_TYPO);
+    expect(h181("d5f47490").stored).toBe(ODATV_HANI);
+    // Only Yeniçağ writes 'Katamonu'; four other members spell the city 'Kastamonu'.
+    const members = h181("4e5557f5").members;
+    expect(members.filter((m) => m.title.includes("Katamonu")).map((m) => m.source)).toEqual(["yenicag"]);
+    expect(members.filter((m) => m.title.includes("Kastamonu")).length).toBeGreaterThanOrEqual(3);
+    // Only Odatv ends in 'Hani ...'.
+    expect(h181("d5f47490").members.filter((m) => m.title.includes("Hani")).map((m) => m.source)).toEqual(["odatv"]);
+  });
+});
+
+describe("h181-content2-1: hasConsensusMisspelling", () => {
+  const KASTAMONU_OTHERS = [
+    "Kastamonu Belediye Başkanı Baltacı'ya davet",
+    "Kastamonu'da iş makinesi tartışması",
+    "AK Partili Namlı'dan Kastamonu Belediye Başkanı'na yanıt",
+    "İş makinesi isteyen başkana yanıt geldi",
+  ];
+
+  it("is the weight of one loaded rule", () => {
+    expect(MISSPELLING_PENALTY).toBe(0.25);
+  });
+
+  it("fires on Yeniçağ's 'Katamonu' against the members that write 'Kastamonu'", () => {
+    expect(hasConsensusMisspelling("Katamonu’da iş makinesi isteyen başkan", KASTAMONU_OTHERS)).toBe(true);
+    expect(hasConsensusMisspelling(YENICAG_TYPO, h181("4e5557f5").members.filter((m) => m.source !== "yenicag").map((m) => m.title))).toBe(true);
+  });
+
+  it.each([
+    ["an insertion", "Kastaamonu Belediye Başkanı"],
+    ["a deletion", "Katamonu Belediye Başkanı"],
+    ["a substitution", "Kastemonu Belediye Başkanı"],
+    ["an adjacent transposition", "Katsamonu Belediye Başkanı"],
+  ])("fires on %s of one letter", (_label, candidate) => {
+    expect(hasConsensusMisspelling(candidate, KASTAMONU_OTHERS)).toBe(true);
+  });
+
+  it("folds case and diacritics before it compares: a shouted or unaccented typo still fires", () => {
+    expect(hasConsensusMisspelling("KATAMONU BELEDİYE BAŞKANI", KASTAMONU_OTHERS)).toBe(true);
+    expect(hasConsensusMisspelling("Katamonu'da iş makinesi", KASTAMONU_OTHERS)).toBe(true);
+  });
+
+  it.each([
+    ["two edits away", "Katamnu Belediye Başkanı"],
+    ["another first letter", "Zastamonu Belediye Başkanı"],
+    ["another ending (the last three letters differ)", "Kastamoxyz Belediye Başkanı"],
+    ["a token under six letters (Katar / Kadar)", "Kadar Belediye Başkanı"],
+  ])("does not fire on a candidate %s", (_label, candidate) => {
+    const others = ["Katar'da deprem", "Katar'da yangın", "Katar'a ziyaret", "Katar sınırında gerginlik"];
+    expect(hasConsensusMisspelling(candidate, [...KASTAMONU_OTHERS, ...others])).toBe(false);
+  });
+
+  it("does not fire on a suffix variant: 'belediyeye' against 'belediyesi'", () => {
+    const others = [
+      "Belediyesi soruşturma açıldı",
+      "Bakırköy belediyesi açıklama yaptı",
+      "İstanbul belediyesi karar aldı",
+      "Ankara belediyesi toplantı yaptı",
+    ];
+    expect(hasConsensusMisspelling("Belediyeye soruşturma", others)).toBe(false);
+    expect(hasConsensusMisspelling("Belediyesini soruşturma", others)).toBe(false);
+    expect(hasConsensusMisspelling("Belediyeden soruşturma", others)).toBe(false);
+  });
+
+  it("does not fire on a proper noun only one member spells at all (no consensus to be wrong against)", () => {
+    expect(hasConsensusMisspelling("Baltacı iş makinesi istedi", KASTAMONU_OTHERS)).toBe(false);
+    expect(hasConsensusMisspelling("Namlı'dan yanıt", KASTAMONU_OTHERS)).toBe(false);
+  });
+
+  it("needs three other titles for a consensus: two are not enough", () => {
+    const two = ["Kastamonu Belediye Başkanı Baltacı'ya davet", "Kastamonu'da iş makinesi tartışması", "İş makinesi isteyen başkana yanıt geldi"];
+    expect(hasConsensusMisspelling("Katamonu Belediye Başkanı", two)).toBe(false);
+    expect(hasConsensusMisspelling("Katamonu Belediye Başkanı", [...two, "Kastamonu'dan haber"])).toBe(true);
+  });
+
+  it("does not fire on a diacritic variant that folds equal (Kılıçdaroğlu / Kilicdaroglu)", () => {
+    const others = ["Kılıçdaroğlu açıklama yaptı", "Kılıçdaroğlu'ndan yanıt", "Kılıçdaroğlu programa katıldı", "Kılıçdaroğlu gazetecilerle görüştü"];
+    expect(hasConsensusMisspelling("Kilicdaroglu açıklama yaptı", others)).toBe(false);
+    expect(hasConsensusMisspelling("KILIÇDAROĞLU AÇIKLAMA YAPTI", others)).toBe(false);
+  });
+
+  it("does not fire when another member spells the candidate's word the same way (it is not the odd one out)", () => {
+    expect(hasConsensusMisspelling("Katamonu Belediye Başkanı", [...KASTAMONU_OTHERS, "Katamonu'da toplantı"])).toBe(false);
+  });
+
+  it("does not fire in a cluster of fewer than four members (the candidate and fewer than three others)", () => {
+    const two = ["Kastamonu Belediye Başkanı Baltacı'ya davet", "Kastamonu'da iş makinesi tartışması"];
+    expect(hasConsensusMisspelling("Katamonu Belediye Başkanı", two)).toBe(false);
+    expect(hasConsensusMisspelling("Katamonu Belediye Başkanı", [])).toBe(false);
+  });
+
+  it("ignores numerals: 'cop31' against 'cop30', and any token with a digit", () => {
+    const others = ["COP30 zirvesi başladı", "COP30 zirvesinde açıklama", "COP30 toplantısı sürüyor", "COP30 kararları"];
+    expect(hasConsensusMisspelling("COP31 zirvesi başladı", others)).toBe(false);
+    expect(hasConsensusMisspelling("Kastamonu34 haberi", KASTAMONU_OTHERS)).toBe(false);
+    expect(hasConsensusMisspelling("2026 2025 20266", ["2026 yılı", "2026 yılında", "2026 bütçesi", "2026 seçimi"])).toBe(false);
+  });
+
+  // ts-3 (review h182): 'başkan' and 'bakan' (and their inflections) are two real words, one edit apart, and the commonest
+  // look-alike pair in this corpus. The pair is never a misspelling, in either direction.
+  describe("başkan / bakan are two words, not a misspelling of each other", () => {
+    const BAKANI = [
+      "Bakanı Yılmaz açıklama yaptı",
+      "Bakanı Yılmaz'dan yeni karar",
+      "Bakanı Yılmaz toplantıya katıldı",
+      "Bakanı Yılmaz gazetecilerle görüştü",
+    ];
+    const BASKANI = [
+      "Başkanı Yılmaz açıklama yaptı",
+      "Başkanı Yılmaz'dan yeni karar",
+      "Başkanı Yılmaz toplantıya katıldı",
+      "Başkanı Yılmaz gazetecilerle görüştü",
+    ];
+    const BAKANLIGI = [
+      "Bakanlığı açıklama yaptı",
+      "Bakanlığı duyurdu yeni düzenleme",
+      "Bakanlığı toplantı yapıldı bugün",
+      "Bakanlığı genelge yayımladı",
+    ];
+
+    it("does not fire on 'Başkanı' against members that write 'Bakanı'", () => {
+      expect(hasConsensusMisspelling("Başkanı Yılmaz'dan açıklama", BAKANI)).toBe(false);
+    });
+
+    it("does not fire on 'Başkanlığı' against members that write 'Bakanlığı'", () => {
+      expect(hasConsensusMisspelling("Başkanlığı açıklama yaptı", BAKANLIGI)).toBe(false);
+    });
+
+    it("does not fire in the other direction: 'Bakanı' against members that write 'Başkanı'", () => {
+      expect(hasConsensusMisspelling("Bakanı Yılmaz'dan açıklama", BASKANI)).toBe(false);
+    });
+
+    it("does not fire on other inflections of the pair, shouted or unaccented", () => {
+      expect(hasConsensusMisspelling("BAŞKANLIĞI AÇIKLAMA YAPTI", BAKANLIGI)).toBe(false);
+      expect(hasConsensusMisspelling("Baskanligi acikladi", BAKANLIGI)).toBe(false);
+      expect(hasConsensusMisspelling("Bakanlığı açıklama yaptı", ["Başkanlığı duyurdu", "Başkanlığı yeni düzenleme", "Başkanlığı toplantı yaptı", "Başkanlığı genelge yayımladı"])).toBe(false);
+    });
+
+    it("still fires on a genuine seven-letter typo ('Vendavi' beside 'Vindavi')", () => {
+      const others = ["Vindavi toplantısı yarın", "Vindavi'den açıklama", "Vindavi yönetimi karar aldı"];
+      expect(hasConsensusMisspelling("Vendavi toplantısı", others)).toBe(true);
+    });
+
+    it("still fires on a typo of 'bakan' that is not 'başkan' ('Bakkanı' beside 'Bakanı')", () => {
+      expect(hasConsensusMisspelling("Bakkanı Yılmaz'dan açıklama", BAKANI)).toBe(true);
+    });
+  });
+
+  it("takes blank, empty and punctuation-only input without firing", () => {
+    expect(hasConsensusMisspelling("", KASTAMONU_OTHERS)).toBe(false);
+    expect(hasConsensusMisspelling("   ", KASTAMONU_OTHERS)).toBe(false);
+    expect(hasConsensusMisspelling("!!! ??? ...", KASTAMONU_OTHERS)).toBe(false);
+    expect(hasConsensusMisspelling("Katamonu", ["", "  ", "!!!", "..."])).toBe(false);
+  });
+});
+
+describe("h181-content2-1: the pick prefers the consensus spelling", () => {
+  // The typo title is the most central candidate (it carries the words the others split between them), so it wins on a
+  // fresh pick today; the other four write 'Kastamonu'.
+  const TYPO = "Katamonu Belediye Başkanı Baltacı iş makinesi talebine Namlı'dan davet geldi";
+  const CLEAN = "Kastamonu Belediye Başkanı Baltacı'ya Namlı'dan davet geldi";
+  const titles = [
+    TYPO,
+    "Kastamonu Belediye Başkanı Baltacı iş makinesi talebini açıkladı",
+    CLEAN,
+    "Kastamonu Başkanı Baltacı iş makinesi talebine Namlı'dan yanıt",
+    "Kastamonu Belediye Başkanı iş makinesi talebine davet yanıtı",
+  ];
+
+  it("a typo title loses to an equally central clean title (fresh, floor and as the stored title)", () => {
+    for (const opts of [{}, { floor: true }, { incumbent: TYPO }, { incumbent: TYPO, floor: true }]) {
+      const picked = pickNeutralTitle(asMembers(titles), opts);
+      expect(picked, JSON.stringify(opts)).not.toBeNull();
+      expect(picked, JSON.stringify(opts)).not.toContain("Katamonu");
+      expect(picked, JSON.stringify(opts)).toBe(CLEAN);
+    }
+  });
+
+  it("the typo title still wins when every candidate shares it (nobody is the odd one out)", () => {
+    const shared = [
+      "Katamonu Belediye Başkanı Baltacı iş makinesi talebine Namlı'dan davet geldi",
+      "Katamonu Belediye Başkanı Baltacı iş makinesi talebini açıkladı",
+      "Katamonu Belediye Başkanı Baltacı'ya Namlı'dan davet geldi",
+      "Katamonu Başkanı Baltacı iş makinesi talebine Namlı'dan yanıt",
+      "Katamonu Belediye Başkanı iş makinesi talebine davet yanıtı",
+    ];
+    expect(pickNeutralTitle(asMembers(shared))).toBe(shared[0]);
+    expect(pickNeutralTitle(asMembers(shared), { incumbent: shared[0] })).toBe(shared[0]);
+  });
+
+  it("a stored typo title that no clean title outscores by the penalty is kept: the penalty is one rule, not a veto", () => {
+    // Every clean candidate has a different, much less central wording: the typo title leads by more than the penalty
+    // plus the full-length margin, so the stored title stays.
+    const members = [
+      "Katamonu Belediye Başkanı Baltacı iş makinesi talebine Namlı'dan davet geldi",
+      "Kastamonu iş makinesi",
+      "Kastamonu'da Başkan",
+      "Kastamonu haberi geldi bugün",
+      "Namlı gelin dedi",
+    ];
+    const stored = members[0]!;
+    const picked = pickNeutralTitle(asMembers(members), { incumbent: stored });
+    expect(picked).toBe(stored);
+  });
+
+  it("a clean cluster is untouched: nothing is the odd one out, the pick equals the pick of an unpenalised pool", () => {
+    const clean = [
+      "Merkez Bankası faiz kararını açıkladı",
+      "Merkez Bankası faizi sabit tuttu",
+      "TCMB faiz kararı: Politika faizi sabit",
+      "Merkez Bankası politika faizini yüzde 40'ta tuttu",
+    ];
+    expect(pickNeutralTitle(asMembers(clean))).toBe("Merkez Bankası politika faizini yüzde 40'ta tuttu");
+  });
+});
+
+describe("h181-content2-1: loadedPenalty charges a clause-opening 'hani'", () => {
+  it.each([
+    "Hani basın özgürlüğü",
+    "CHP programında gazetecilere saldırı: Hani basın özgürlüğü",
+    "Bakan açıkladı! Hani vergi artmayacaktı",
+    "Zam geldi. Hani enflasyon düşecekti",
+    "Son dakika: Hani basın özgürlüğü",
+    "HANİ BASIN ÖZGÜRLÜĞÜ",
+    "Kararı açıkladı:   Hani basın özgürlüğü",
+  ])("%s is charged one unit", (title) => {
+    expect(loadedPenalty(title)).toBe(1);
+  });
+
+  it.each([
+    "Erdoğan: 'Hani basın özgürlüğü' diyenler sustu",
+    "Özel: \"Hani basın özgürlüğü\" diyenler nerede",
+    "Özel: “Hani basın özgürlüğü” diyenler nerede",
+    "Özel: ‘Hani basın özgürlüğü’ diyenler nerede",
+    "Bahçeli: «Hani basın özgürlüğü» diyenler nerede",
+  ])("%s is free: a speaker's own words", (title) => {
+    expect(loadedPenalty(title)).toBe(0);
+  });
+
+  it.each([
+    "Hanı bulamadık",
+    "Eski Hanı gezdiler",
+    "Han Kuyusu kazısı başladı",
+    "Han hükümdarı anıldı",
+    "Hanım kızlar açıkladı",
+    "Hanımeli Sokak yenilendi",
+    "Hanife Yıldız: yeni dönem",
+    "Haniye suikastı soruşturması",
+    "İsmail Haniye'nin cenazesi",
+    "Gazeteci hani basın özgürlüğü diye sordu",
+    "Muhammed Hani Yılmaz tutuklandı",
+    "Basın özgürlüğü hani nerede?",
+  ])("%s is free: not the word, or not a clause opener", (title) => {
+    expect(loadedPenalty(title)).toBe(0);
+  });
+
+  // ts-2 (review h182): Hani is a district, and 'Hani'de' (the name and an apostrophe suffix straight after it) opens
+  // local news. The sarcastic particle is never followed by an apostrophe suffix.
+  it.each([
+    "Hani'de silahlı kavga: 2 ölü",
+    "Diyarbakır: Hani'de trafik kazası",
+    "Hani’nin belediye başkanı açıklama yaptı",
+  ])("%s is free: the district Hani with an apostrophe suffix is not the particle", (title) => {
+    expect(loadedPenalty(title)).toBe(0);
+  });
+
+  it("charges one unit, however many clauses open with it", () => {
+    expect(loadedPenalty("Hani vergi artmayacaktı! Hani enflasyon düşecekti. Hani faiz inecekti: Hani")).toBe(1);
+  });
+});
+
+describe("h181-content2-1: the re-pick of 4e5557f5 and d5f47490", () => {
+  it("4e5557f5: the stored title is replaced by a member title that does not carry the typo", () => {
+    const c = h181("4e5557f5");
+    const titles = c.members.map((m) => m.title);
+    const picked = pickNeutralTitle(h164Members(c), { incumbent: c.stored });
+    expect(picked).not.toBe(c.stored);
+    expect(picked).not.toContain("Katamonu");
+    // Haberler.com's headline leads the clean candidates; it names no city, but no clean candidate that does outscores it.
+    expect(picked).toBe(HABERLER_COM_PICK);
+    expect(incumbentIsMemberTitle(picked as string, titles)).toBe(true);
+  });
+
+  it("4e5557f5: where the clean candidates name the city, the pick spells 'Kastamonu'", () => {
+    const c = h181("4e5557f5");
+    const members = h164Members(c).filter((m) => m.source === "yenicag" || m.title.includes("Kastamonu"));
+    expect(members.length).toBeGreaterThanOrEqual(4);
+    for (const opts of [{ incumbent: c.stored }, { incumbent: c.stored, floor: true }, {}, { floor: true }]) {
+      const picked = pickNeutralTitle(members, opts);
+      expect(picked, JSON.stringify(opts)).not.toBeNull();
+      expect(picked, JSON.stringify(opts)).not.toContain("Katamonu");
+      expect(picked, JSON.stringify(opts)).toContain("Kastamonu");
+    }
+  });
+
+  it("4e5557f5: a fresh and a floor pick are the same title as before (Yeniçağ's was never the fresh pick)", () => {
+    const c = h181("4e5557f5");
+    expect(pickNeutralTitle(h164Members(c))).toBe(HABERLER_COM_PICK);
+    expect(pickNeutralTitle(h164Members(c), { floor: true })).toBe(HABERLER_COM_PICK);
+  });
+
+  it("d5f47490: the stored 'Hani ...' title is charged and replaced by the title the members share", () => {
+    const c = h181("d5f47490");
+    expect(loadedPenalty(c.stored)).toBe(1);
+    const titles = c.members.map((m) => m.title);
+    for (const opts of [{}, { floor: true }, { incumbent: c.stored }, { incumbent: c.stored, floor: true }]) {
+      const picked = pickNeutralTitle(h164Members(c), opts);
+      expect(picked, JSON.stringify(opts)).not.toBeNull();
+      expect(picked, JSON.stringify(opts)).not.toContain("Hani");
+      expect(picked, JSON.stringify(opts)).toBe(KATILMA_TOKAT);
+      expect(loadedPenalty(picked as string), JSON.stringify(opts)).toBe(0);
+      expect(incumbentIsMemberTitle(picked as string, titles), JSON.stringify(opts)).toBe(true);
+    }
+  });
+
+  it("is a fixed point: the next re-pick keeps what the first one wrote", () => {
+    for (const cid of ["4e5557f5", "d5f47490"]) {
+      const c = h181(cid);
+      const first = pickNeutralTitle(h164Members(c), { incumbent: c.stored }) as string;
+      expect(pickNeutralTitle(h164Members(c), { incumbent: first }), cid).toBe(first);
+      expect(pickNeutralTitle(h164Members(c), { incumbent: first, floor: true }), cid).toBe(first);
+    }
+  });
+
+  it("a cluster whose every member opens a clause with 'hani' keeps one: there is nothing clean to swap to", () => {
+    const members = [
+      { title: "Gazetecilere saldırı: Hani basın özgürlüğü" },
+      { title: "Programda gazetecilere saldırı! Hani basın özgürlüğü" },
+    ];
+    const picked = pickNeutralTitle(members, { floor: true });
+    expect(picked).not.toBeNull();
+    expect(pickNeutralTitle(members, { incumbent: picked as string, floor: true })).toBe(picked);
+  });
+
+  it("EXTRACTIVE_MODEL_ID is unchanged: the v6 heal is running", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v6");
+  });
+});
+
+describe("h181-content2-1: hostile input stays cheap", () => {
+  const opts = { n: 250_000, ceilingMs: 8_000 };
+
+  it.each<[string, Gen]>([
+    ["\"hani \" repeated", rep("hani ")],
+    ["\": hani \" repeated", rep(": hani ")],
+    ["\". Hani \" repeated", rep(". Hani ")],
+    ["a long run of spaces after a colon", rep(" ", ":", "hani")],
+    ["'a' repeated", rep("a")],
+  ])("loadedPenalty scales linearly on %s", (_name, gen) => {
+    expectLinear(gen, (shape) => loadedPenalty(shape), opts);
+  });
+
+  it("hasConsensusMisspelling scales linearly in a long candidate and in long other titles", () => {
+    const others = ["Kastamonu Belediye Başkanı", "Kastamonu'da haber", "Kastamonu'dan yanıt", "Kastamonu iş makinesi"];
+    expectLinear(rep("katamonu kastamonu ", "Katamonu "), (shape) => hasConsensusMisspelling(shape, others), opts);
+    expectLinear(rep("kastamonu katamonu ", "Kastamonu "), (shape) => hasConsensusMisspelling("Katamonu", [shape, shape, shape, shape]), opts);
+    expectLinear(rep("a"), (shape) => hasConsensusMisspelling(shape, [shape, shape, shape, shape]), opts);
+  });
+
+  it("a re-pick over 200 members with a 100 KB title among them scales linearly in that title", () => {
+    expectLinear(
+      (n) => {
+        const members = Array.from({ length: 200 }, (_, i) => `Kastamonu Belediye Başkanı iş makinesi talep etti ${i}`);
+        members[100] = `Katamonu ${"belediye ".repeat(n)}başkanı`;
+        return members;
+      },
+      (titles) => {
+        pickNeutralTitle(asMembers(titles), { incumbent: titles[0] });
+        pickNeutralTitle(asMembers(titles), { incumbent: titles[100] });
+      },
+      { n: 20_000, ceilingMs: 8_000 },
+    );
+  });
+
+  it("a cluster of 200 titles that all fall in one spelling bucket stays cheap", () => {
+    const members = Array.from({ length: 200 }, (_, i) => {
+      const words = Array.from({ length: 24 }, (_, k) => `a${String.fromCharCode(97 + ((i + k) % 26))}${String.fromCharCode(97 + ((i * 7 + k) % 26))}bcd`);
+      return words.join(" ");
+    });
+    // CPU time (tests/_helpers/linear-time.ts), at the 8 s backstop the other hostile-input tests use.
+    expectCpuUnder(() => pickNeutralTitle(asMembers(members), { incumbent: members[0] }), 8_000);
   });
 });
