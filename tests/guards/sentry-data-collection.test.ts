@@ -663,7 +663,6 @@ describe("Sentry browser entry point", () => {
         "sentry.server.config.ts",
         "sentry.edge.config.ts",
         "src/lib/sentry/server.ts",
-        "src/lib/sentry/edge.ts",
         "src/lib/sentry/browser-init.ts",
       ]);
       const files: string[] = [];

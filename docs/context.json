@@ -1058,7 +1058,7 @@
       "keyFunctions": []
     },
     {
-      "path": "vitest.config.ts",
+      "path": "vitest.config.mts",
       "purpose": "Vitest configuration with @ path alias and Node environment",
       "exports": [
         "default"
@@ -1093,7 +1093,7 @@
     }
   },
   "conventions": {
-    "config": "next.config.ts at root, vitest.config.ts at root, Tailwind configured inline via @theme in globals.css",
+    "config": "next.config.ts at root, vitest.config.mts at root, Tailwind configured inline via @theme in globals.css",
     "output": ".next/ build output directory (standard Next.js)",
     "testing": "Vitest with Node environment, tests colocated as *.test.ts files (e.g. src/lib/bias/cross-spectrum.test.ts), @ path alias configured",
     "buildTool": "Next.js built-in compiler (SWC/Turbopack)"

@@ -42,7 +42,7 @@ vi.mock("react", async (importOriginal) => {
 // alongside it had nothing pinning them: a late vote POST response could
 // overwrite a newer headline's tally, the "X oy" counter under-counted by
 // one vote for the entire reveal window, and the "loading" phase rendered a
-// blank panel. `vitest.config.ts` runs with `environment: "node"` and this
+// blank panel. `vitest.config.mts` runs with `environment: "node"` and this
 // repo has neither jsdom nor @testing-library installed, so — mirroring
 // zone-guess-game.test.tsx's established convention — coverage here is
 // (A) a static render assertion via `renderToStaticMarkup` (idle phase

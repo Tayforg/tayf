@@ -40,7 +40,7 @@ Checked against this checkout on 2026-11-12: `src/app`, `src/lib`, `supabase/mig
 - 144 outlets in `supabase/seed_sources.sql` (`docs/architecture.md` keeps the dated count of those the ingest function actually polls).
 - 201 migration files, numbered 001-205 (010, 082, 197 and 202 are not in this checkout).
 - 7 Edge Functions under `supabase/functions` (ingest, cluster-consumer, image-consumer, kap-ingest, quotes-ingest, jev-shadow, archive-export) and five Vercel crons in `vercel.ts` (headline, digest, fact-checks, social, alerts-webhooks).
-- 823 test files matched by `vitest.config.ts`.
+- 823 test files matched by `vitest.config.mts`.
 - Reader surface under `src/app`: the feed (`/`), `/blindspots`, `/cluster/[id]`, `/sources` and `/source/[slug]`, `/gundem`, `/konu`, `/timeline`, `/trends`, `/hafta`, `/hikaye/[slug]`, `/karsilastir`, `/saved`, `/takip`, `/diyetim`, `/oyun`, `/ekonomi`, `/durum`, `/kaynaklar/durum`, `/kalite`, `/metodoloji`, `/duzeltmeler`, `/gelistirici`, `/rapor/[token]`, the feeds `/rss.xml`, `/rss/[topic]` and `/blindspots/rss.xml`, `/llms.txt`, the sitemaps and a keyed `/api/v1`.
 
 **Where the pitches stand**
