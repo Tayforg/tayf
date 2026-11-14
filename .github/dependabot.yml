@@ -20,3 +20,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # codeql.yml pins github/codeql-action/init and /analyze, which must stay on one commit. Without a group
+      # Dependabot opens one PR per action path (#258, #259), each moving a single step: both fail CI (the pin
+      # guard and CodeQL's own version-mismatch check) and can never merge. One group, no update-types filter, so
+      # a major release also lands as a single PR.
+      codeql-action:
+        patterns:
+          - "github/codeql-action"
+          - "github/codeql-action/*"

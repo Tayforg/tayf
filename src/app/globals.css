@@ -420,4 +420,14 @@
     outline: 2px solid Highlight;
     outline-offset: 2px;
   }
+  /* h178-keyboard-1: an author who chose an inset ring (`focus-visible:ring-inset`,
+     used where an overflow scroller would clip an outside indicator: the /ekonomi
+     market-strip chips) gets an inset outline here too. The bare rule above draws
+     the outline 2px OUTSIDE the element, and the strip clipped its top band. The
+     -2px offset puts the whole 2px stroke inside the element's own box. Specificity
+     (0,2,0) beats the bare :focus-visible rule. tests/guards/inset-focus-ring.test.ts
+     requires every ring-inset class list to also carry focus-visible:outline-none. */
+  .focus-visible\:ring-inset:focus-visible {
+    outline-offset: -2px;
+  }
 }

@@ -331,7 +331,7 @@ export function KaynakDurumBody({
                   <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                     <th
                       scope="col"
-                      className="sticky left-0 z-10 bg-card py-2 pr-4 font-medium whitespace-nowrap"
+                      className="sticky left-0 z-10 bg-card py-2 pl-1 pr-4 font-medium whitespace-nowrap"
                     >
                       Kaynak
                     </th>
@@ -400,9 +400,15 @@ export function KaynakDurumBody({
                         scope="row"
                         className="sticky left-0 z-10 bg-card py-2.5 pr-4 text-left font-medium text-foreground whitespace-nowrap"
                       >
+                        {/* h178-keyboard-1: the link sits flush with the left edge of
+                            the overflow scroller (the th has no left padding), which
+                            clipped the left side of an outside focus ring on every
+                            row. An inset ring on the link's own box (the ticker-chip
+                            pattern) paints nothing outside it; px-1 gives the ring
+                            room, and the Kaynak header carries the same pl-1. */}
                         <Link
                           href={`/source/${row.slug}`}
-                          className="hover:underline"
+                          className="inline-block rounded-sm px-1 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                         >
                           {row.name}
                         </Link>

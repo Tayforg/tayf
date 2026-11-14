@@ -375,18 +375,24 @@ describe("dep-audit.yml edge-audit job (scripts/edge-audit)", () => {
   });
 });
 
+/**
+ * The lines of the `- package-ecosystem: <name>` entry of dependabot.yml (the entry's own line excluded), up to the
+ * next entry. Empty when the ecosystem is absent.
+ */
+function ecosystemEntry(dependabotLines: string[], name: string): string[] {
+  const at = dependabotLines.findIndex((l) => l.trim() === `- package-ecosystem: ${name}`);
+  if (at === -1) return [];
+  const out: string[] = [];
+  for (let i = at + 1; i < dependabotLines.length; i++) {
+    if ((dependabotLines[i] as string).trim().startsWith("- package-ecosystem:")) break;
+    out.push(dependabotLines[i] as string);
+  }
+  return out;
+}
+
 describe("dependabot leaves the edge-pinned ESM-only majors alone", () => {
   const dependabot = codeLines(readFileSync(resolve(ROOT, ".github", "dependabot.yml"), "utf8"));
-  const npmEntry = (() => {
-    const at = dependabot.findIndex((l) => l.trim() === "- package-ecosystem: npm");
-    if (at === -1) return [];
-    const out: string[] = [];
-    for (let i = at + 1; i < dependabot.length; i++) {
-      if ((dependabot[i] as string).trim().startsWith("- package-ecosystem:")) break;
-      out.push(dependabot[i] as string);
-    }
-    return out;
-  })();
+  const npmEntry = ecosystemEntry(dependabot, "npm");
 
   it("has the npm entry", () => {
     expect(npmEntry.length).toBeGreaterThan(0);
@@ -406,6 +412,52 @@ describe("dependabot leaves the edge-pinned ESM-only majors alone", () => {
       .map((l) => l.trim().slice("- dependency-name:".length).trim());
     expect(names.sort()).toEqual(["fast-xml-parser", "strnum"]);
     expect(npmEntry.some((l) => l.trim() === "update-types: [minor, patch]")).toBe(true);
+  });
+});
+
+// h178-testhealth-1: without a `groups:` block on the github-actions entry Dependabot opens one PR per action PATH.
+// codeql.yml pins github/codeql-action/init and /analyze, so a release produced two PRs (#259 moved init, #258
+// moved analyze), each leaving the two steps on different commits: tests/guards/workflow-action-pins.test.ts
+// ('pins the codeql init and analyze steps to the same commit') and CodeQL's own version-mismatch check both fail,
+// and neither PR can ever go green. One group puts every codeql-action step of a release into ONE PR.
+describe("dependabot updates every github/codeql-action step in one PR", () => {
+  const dependabot = codeLines(readFileSync(resolve(ROOT, ".github", "dependabot.yml"), "utf8"));
+  const actionsEntry = ecosystemEntry(dependabot, "github-actions");
+  const npmEntry = ecosystemEntry(dependabot, "npm");
+  const groups = blockOf(actionsEntry, "groups", 4);
+  const codeqlGroup = blockOf(groups, "codeql-action", 6);
+
+  it("has the github-actions entry", () => {
+    expect(actionsEntry.length).toBeGreaterThan(0);
+  });
+
+  it("has a `codeql-action` group under groups:", () => {
+    expect(groups.length).toBeGreaterThan(0);
+    expect(groups.some((l) => indentOf(l) === 6 && l.trim() === "codeql-action:")).toBe(true);
+    expect(codeqlGroup.length).toBeGreaterThan(0);
+  });
+
+  it('groups exactly "github/codeql-action" and "github/codeql-action/*" (the base action and every sub-action)', () => {
+    const patterns = blockOf(codeqlGroup, "patterns", 8).map((l) => l.trim());
+    expect(patterns).toEqual(['- "github/codeql-action"', '- "github/codeql-action/*"']);
+  });
+
+  it("puts no update-types restriction on the group, so a major release also lands as one PR", () => {
+    expect(codeqlGroup.length).toBeGreaterThan(0); // not vacuous: the group exists
+    expect(codeqlGroup.some((l) => l.includes("update-types"))).toBe(false);
+  });
+
+  it("is the only group on the github-actions entry (other actions keep one PR each)", () => {
+    const names = groups.filter((l) => indentOf(l) === 6).map((l) => l.trim());
+    expect(names).toEqual(["codeql-action:"]);
+  });
+
+  it("leaves the npm entry alone: still the minor-and-patch group, no codeql-action group", () => {
+    const npmGroups = blockOf(npmEntry, "groups", 4)
+      .filter((l) => indentOf(l) === 6)
+      .map((l) => l.trim());
+    expect(npmGroups).toEqual(["minor-and-patch:"]);
+    expect(npmEntry.some((l) => l.includes("codeql-action"))).toBe(false);
   });
 });
 

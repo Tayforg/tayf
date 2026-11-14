@@ -729,7 +729,7 @@ export default async function MethodologyPage() {
           <p className={proseClass}>
             Bazı &quot;kümeler&quot; aslında birden fazla gazetecilik çabası
             değil, tek bir ajans (AA, DHA, İHA gibi) dispeçinin farklı
-            kaynaklarca birebir yeniden yayınlanmasıdır.{" "}
+            kaynaklarca birebir yeniden yayımlanmasıdır.{" "}
             {`Tayf, bir kümedeki haberlerin kaçının birbirinden farklı bir metin taşıdığına bakar: aynı içerik parmak izine (content hash) ya da aynı haber özetine (RSS özeti; büyük/küçük harf, noktalama ve boşluk farkları yok sayılır, en az ${SAME_DESCRIPTION_MIN_CHARS} karakter) sahip haberler tek metin sayılır; bu yüzden başlığını değiştirip ajansın özetini aynen basan haber de kopya sayılır.`}{" "}
             {/* h176-methodtruth-1: WIRE_MIN_MEMBERS is wire.ts's floor
                 (detectWireRedistribution answers isWire false below it). Both callers

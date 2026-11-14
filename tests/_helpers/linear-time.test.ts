@@ -211,10 +211,11 @@ describe("expectLinear with a scripted clock", () => {
     const stall = (len: number, call: number) => (len / 100) * (len === 40_000 && call === 1 ? 6 : 1);
     const k5 = scripted(stall);
     expect(() => expectLinear(gen, k5.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, runs: 5, clock: k5.clock })).not.toThrow();
-    // With a single run and no confirmation the stalled sample is the only one, and it reads as super-linear.
+    // With a single run, no confirmation and a single attempt the stalled sample is the only one, and it reads as
+    // super-linear (a second attempt would measure the 40k rung again, unstalled: see "measures a failing ladder once more").
     const k1 = scripted(stall);
     expect(() =>
-      expectLinear(gen, k1.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, runs: 1, confirmRuns: 0, clock: k1.clock }),
+      expectLinear(gen, k1.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, runs: 1, confirmRuns: 0, attempts: 1, clock: k1.clock }),
     ).toThrow(/super-linear/);
   });
 
@@ -226,7 +227,15 @@ describe("expectLinear with a scripted clock", () => {
     expect(() => expectLinear(gen, stalled.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, runs: 1, clock: stalled.clock })).not.toThrow();
     const unconfirmed = scripted(stall);
     expect(() =>
-      expectLinear(gen, unconfirmed.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, runs: 1, confirmRuns: 0, clock: unconfirmed.clock }),
+      expectLinear(gen, unconfirmed.fn, {
+        n: 80_000,
+        sizes: SIZES,
+        ceilingMs: 5_000,
+        runs: 1,
+        confirmRuns: 0,
+        attempts: 1, // the confirmation is what is under test here, not the second attempt
+        clock: unconfirmed.clock,
+      }),
     ).toThrow(/super-linear/);
     // A cost that is quadratic on EVERY sample stays quadratic after any number of extra samples.
     const quad = scripted((len) => (len / 10_000) ** 2);
@@ -320,9 +329,12 @@ describe("expectLinear with a scripted clock", () => {
     const ok = scripted((len) => len / 100);
     expectLinear(gen, ok.fn, { n: 80_000, sizes: SIZES, ceilingMs: 5_000, clock: ok.clock });
     expect(ok.calls()).toBe(1 + 4 * 2); // 100 .. 800 ms rungs: two samples each, nothing more
-    // 300 ms -> 1200 ms is x4 but both rungs are slow: the plain two samples decide.
+    // 300 ms -> 1200 ms is x4 but both rungs are slow: the plain two samples decide (one attempt: a second one
+    // would repeat the same 2 x 2 samples).
     const slow = scripted((len) => 300 * (len / 10_000) ** 2);
-    expect(() => expectLinear(gen, slow.fn, { n: 20_000, sizes: [10_000, 20_000], ceilingMs: 5_000, clock: slow.clock })).toThrow(/super-linear/);
+    expect(() =>
+      expectLinear(gen, slow.fn, { n: 20_000, sizes: [10_000, 20_000], ceilingMs: 5_000, attempts: 1, clock: slow.clock }),
+    ).toThrow(/super-linear/);
     expect(slow.calls()).toBe(1 + 2 * 2);
   });
 
@@ -412,6 +424,184 @@ describe("expectLinear with a scripted clock", () => {
 });
 
 // ---------------------------------------------------------------------------
+// h178-testhealth-2: one measuring pass has no second chance. On main (CI run 42596460729) a linear classify-category
+// ladder read 4, 6, 14, 30 ms and then 93 ms on the 400k extension rung: 3.10x against a 3.00x limit, a cache tier
+// hit on the one rung that decided the verdict. A real quadratic is slow on EVERY sample of EVERY attempt; a noisy
+// rung is not. So a ladder that fails 'super-linear' is measured once more, from scratch, before the helper throws.
+// The scripted clock hands cost(len, call) the per-size call number, which counts across attempts: a rung that is
+// noisy for its first K calls is noisy for all of attempt 1 and clean in attempt 2.
+// ---------------------------------------------------------------------------
+
+describe("expectLinear measures a failing ladder once more before it throws (attempts)", () => {
+  const TOP = 80_000;
+  const OPTS = { n: TOP, sizes: SIZES, ceilingMs: 20_000 };
+  const callsAt = (s: { sizesSeen: number[] }, size: number) => s.sizesSeen.filter((len) => len === size).length;
+  const messageOf = (run: () => unknown): string => {
+    try {
+      run();
+    } catch (e) {
+      return (e as Error).message;
+    }
+    return "";
+  };
+
+  /** How many samples of `size` ONE failing attempt takes when they are all slow: the sample count the noise must cover. */
+  function samplesPerFailingAttempt(cost: (len: number) => number, size: number): number {
+    const probe = scripted(cost);
+    expect(() => expectLinear(gen, probe.fn, { ...OPTS, attempts: 1, clock: probe.clock })).toThrow(/super-linear/);
+    return callsAt(probe, size);
+  }
+
+  it("(a) a first attempt that is noisy on the top rung passes by default and still throws with attempts: 1", () => {
+    // Linear: 10, 20, 40, 80 ms, the 160k extension size linear too. The top rung reads 10x for its first K calls.
+    const linearCost = (len: number) => len / 1_000;
+    const K = samplesPerFailingAttempt((len) => linearCost(len) * (len === TOP ? 10 : 1), TOP);
+    expect(K).toBeGreaterThan(1);
+    const noisy = (len: number, call: number) => linearCost(len) * (len === TOP && call <= K ? 10 : 1);
+
+    const single = scripted(noisy);
+    expect(() => expectLinear(gen, single.fn, { ...OPTS, attempts: 1, clock: single.clock })).toThrow(/super-linear/);
+
+    const twice = scripted(noisy);
+    const report = expectLinear(gen, twice.fn, { ...OPTS, clock: twice.clock });
+    expect(twice.sizesSeen.filter((len) => len === TOP).length).toBeGreaterThan(K);
+    // The report is the passing attempt's own: a fresh `min`, not the noisy readings of attempt 1.
+    expect(report.minMs).toEqual([10, 20, 40, 80]);
+  });
+
+  it("(b) replays CI run 42596460729: a noisy extension rung read 3.10x, a second attempt is clean", () => {
+    // classify-category read 25k 4, 50k 6, 100k 14, 200k 30 and, on the 400k extension rung, 93 ms. Scaled to the test
+    // ladder 10k .. 80k with a 160k extension. The top rung reads 45 ms while the base ladder is confirmed (14 -> 45 is
+    // 3.2x: one step, so the extension rung is timed) and 30 ms once the extension loop samples it again, as on CI:
+    // 93 / 30 = 3.10x after a step of 2.14x.
+    const fixed: Record<number, number> = { 10_000: 4, 20_000: 6, 40_000: 14, 160_000: 93 };
+    const K = (() => {
+      // Samples of the top rung up to the extension: the same sample count as a one-step ladder that cannot extend.
+      const probe = scripted((len) => (len === TOP ? 45 : fixed[len]!));
+      expect(() => expectLinear(gen, probe.fn, { ...OPTS, extendTop: false, attempts: 1, clock: probe.clock })).toThrow(
+        /super-linear: 40000 -> 80000/,
+      );
+      return callsAt(probe, TOP);
+    })();
+    const ci = (len: number, call: number) => (len === TOP ? (call <= K ? 45 : 30) : fixed[len]!);
+
+    const single = scripted(ci);
+    expect(() => expectLinear(gen, single.fn, { ...OPTS, attempts: 1, clock: single.clock })).toThrow(
+      /super-linear: 80000 -> 160000 grew 3\.10x after a 40000 -> 80000 step of 2\.14x/,
+    );
+    expect(callsAt(single, 160_000)).toBeGreaterThanOrEqual(3); // it really was the extension rung that decided
+
+    const twice = scripted(ci);
+    const report = expectLinear(gen, twice.fn, { ...OPTS, clock: twice.clock });
+    expect(report.minMs).toEqual([4, 6, 14, 30]);
+    expect(callsAt(twice, 160_000)).toBe(callsAt(single, 160_000)); // attempt 2 needed no extension rung
+  });
+
+  it("(c) a true quadratic still throws by default, after both attempts, and the message shows the first ladder", () => {
+    const quadratic = (len: number) => (len / 1_000) ** 2; // 100, 400, 1600, 6400 ms
+    const single = scripted(quadratic);
+    expect(() => expectLinear(gen, single.fn, { ...OPTS, attempts: 1, clock: single.clock })).toThrow(/super-linear/);
+
+    const twice = scripted(quadratic);
+    const message = messageOf(() => expectLinear(gen, twice.fn, { ...OPTS, clock: twice.clock }));
+    expect(message).toMatch(/^super-linear: /);
+    expect(message).toContain("attempt 2 of 2");
+    expect(message).toContain("[attempt 2 of 2; attempt 1: 10000: 100.0 ms, 20000: 400.0 ms, 40000: 1600.0 ms, 80000: 6400.0 ms]");
+    // Both attempts took every sample (a quadratic is slow on all of them): the measuring body ran twice. The JIT
+    // warm-up is the one call outside it and runs once, so the total is 2 x the single attempt's calls minus one.
+    expect(twice.calls()).toBe(1 + 2 * (single.calls() - 1));
+  });
+
+  it("with attempts: 1 the message is the single attempt's own, with no attempt suffix", () => {
+    const s = scripted((len) => (len / 1_000) ** 2);
+    const message = messageOf(() => expectLinear(gen, s.fn, { ...OPTS, attempts: 1, clock: s.clock }));
+    expect(message).toMatch(/^super-linear: /);
+    expect(message).not.toContain("attempt");
+  });
+
+  it("(d) a ceiling breach is never retried: the runaway backstop stays fail-fast", () => {
+    const single = scripted((len) => len / 20); // 10k -> 500 ms, over the 100 ms ceiling
+    expect(() => expectLinear(gen, single.fn, { n: TOP, sizes: SIZES, ceilingMs: 100, attempts: 1, clock: single.clock })).toThrow(/over the .* ceiling/);
+    const dflt = scripted((len) => len / 20);
+    const message = messageOf(() => expectLinear(gen, dflt.fn, { n: TOP, sizes: SIZES, ceilingMs: 100, clock: dflt.clock }));
+    expect(message).toMatch(/over the .* ceiling/);
+    expect(message).not.toContain("attempt");
+    expect(dflt.calls()).toBe(single.calls()); // warm-up + one timed call: no second attempt ran
+    expect(dflt.calls()).toBe(2);
+  });
+
+  it("(d) a ceiling breach in the second attempt propagates as a ceiling error, not as a super-linear one", () => {
+    // Attempt 1: the top rung reads 10x for its first K calls (super-linear). Attempt 2: the top rung is over the ceiling.
+    const base = (len: number) => len / 1_000;
+    const K = samplesPerFailingAttempt((len) => base(len) * (len === TOP ? 10 : 1), TOP);
+    const s = scripted((len, call) => (len === TOP ? (call <= K ? base(len) * 10 : 9_000) : base(len)));
+    const message = messageOf(() => expectLinear(gen, s.fn, { ...OPTS, ceilingMs: 5_000, clock: s.clock }));
+    expect(message).toMatch(/size 80000 took 9000\.0 ms, over the 5000 ms ceiling/);
+    expect(message).not.toContain("attempt");
+  });
+
+  it.each([0, 1.5, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "(e) rejects attempts: %s with a validation error before running anything",
+    (attempts) => {
+      const s = scripted(() => 1);
+      expect(() => expectLinear(gen, s.fn, { ...OPTS, attempts, clock: s.clock })).toThrow(/^expectLinear: attempts must be an integer >= 1/);
+      expect(s.calls()).toBe(0);
+    },
+  );
+
+  it("attempts: 3 gives a third chance, and its message says N of N", () => {
+    const base = (len: number) => len / 1_000;
+    const K = samplesPerFailingAttempt((len) => base(len) * (len === TOP ? 10 : 1), TOP);
+    // Noisy through the first TWO attempts' samples of the top rung: a third attempt is the first clean one.
+    const noisyTwice = (len: number, call: number) => base(len) * (len === TOP && call <= 2 * K ? 10 : 1);
+    const two = scripted(noisyTwice);
+    expect(messageOf(() => expectLinear(gen, two.fn, { ...OPTS, attempts: 2, clock: two.clock }))).toContain("[attempt 2 of 2; attempt 1: 10000: 10.0 ms");
+    const three = scripted(noisyTwice);
+    expect(expectLinear(gen, three.fn, { ...OPTS, attempts: 3, clock: three.clock }).minMs).toEqual([10, 20, 40, 80]);
+    const quad = scripted((len) => (len / 1_000) ** 2);
+    expect(messageOf(() => expectLinear(gen, quad.fn, { ...OPTS, attempts: 3, clock: quad.clock }))).toContain("attempt 3 of 3");
+  });
+
+  it("starts every attempt from a fresh `min` and a fresh confirmation budget", () => {
+    // Attempt 1 spends the whole 1000 ms confirmation budget on the quadratic pair (2 rounds of 500 ms on the 10k and
+    // 20k rungs), so an attempt 2 that inherited the spent budget would take no confirmation samples on them.
+    const twice = scripted((len) => (len / 1_000) ** 2);
+    expect(() => expectLinear(gen, twice.fn, { ...OPTS, clock: twice.clock })).toThrow(/attempt 2 of 2/);
+    const once = scripted((len) => (len / 1_000) ** 2);
+    expect(() => expectLinear(gen, once.fn, { ...OPTS, attempts: 1, clock: once.clock })).toThrow(/super-linear/);
+    // Every rung is sampled exactly as often in attempt 2 as in attempt 1 (the warm-up is one extra call on the smallest rung).
+    for (const size of SIZES) {
+      const warm = size === SIZES[0] ? 1 : 0;
+      expect(callsAt(twice, size) - warm, `rung ${size}`).toBe(2 * (callsAt(once, size) - warm));
+    }
+    // The confirmation samples really happened in attempt 1: warm-up + 2 plain samples (a rung of 20 ms and up) + 2 rounds.
+    expect(callsAt(once, 10_000)).toBe(1 + 2 + 2);
+  });
+
+  it("builds the extension input once even when both attempts reach the extension rung", () => {
+    // Constant costs 4, 6, 14, 45, 140: a step of 3.2x at the top, then 3.11x again after it. The cost keeps growing
+    // faster than linear past the step, so the extension rung fails it in EVERY attempt.
+    const costs: Record<number, number> = { 10_000: 4, 20_000: 6, 40_000: 14, 80_000: 45, 160_000: 140 };
+    const s = scripted((len) => costs[len]!);
+    const built: number[] = [];
+    const message = messageOf(() =>
+      expectLinear(
+        (n) => {
+          built.push(n);
+          return gen(n);
+        },
+        s.fn,
+        { ...OPTS, clock: s.clock },
+      ),
+    );
+    expect(message).toMatch(/^super-linear: 80000 -> 160000 grew 3\.11x after a 40000 -> 80000 step of 3\.21x/);
+    // Both attempts reached the extension rung (so the retry really happened), the input was built a single time.
+    expect(message).toContain("[attempt 2 of 2; attempt 1: 10000: 4.0 ms, 20000: 6.0 ms, 40000: 14.0 ms, 80000: 45.0 ms, 160000: 140.0 ms]");
+    expect(built).toEqual([10_000, 20_000, 40_000, 80_000, 160_000]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Real process.cpuUsage clock. A busy loop does the same amount of CPU work
 // whether the machine is idle or loaded, which is the point of the helper.
 // ---------------------------------------------------------------------------
@@ -435,6 +625,8 @@ function linear(n: number): void {
 // vitest's testTimeout is wall clock, while this fixture burns CPU on a size ladder (about 1 s alone,
 // 4.8 s on a loaded CI runner, 13.4 s once, which timed out at 10 s): 60 s is 4.5x the worst run seen.
 // The sizes, ceiling and assertion of the quadratic loop (the one that burns that CPU) are unchanged.
+// It runs a single attempt (`attempts: 1`): the retry of a failing ladder is proven with the scripted clock above,
+// and a second attempt would double this CPU and halve the headroom.
 //
 // Which of these can flake on a shared runner (h89-flaky-1), and how each is kept steady:
 //   - quadratic loop must throw: runner noise only makes a rung slower, which reads as MORE super-linear, so it
@@ -452,7 +644,7 @@ describe("expectLinear with the real CPU clock", { timeout: 60_000 }, () => {
   const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
   it("fails a deliberately quadratic loop with /super-linear/", () => {
-    expect(() => expectLinear((n) => n, quadratic, { n: 16_000, sizes: realSizes, ceilingMs: 20_000, floorMs: 1 })).toThrow(/super-linear/);
+    expect(() => expectLinear((n) => n, quadratic, { n: 16_000, sizes: realSizes, ceilingMs: 20_000, floorMs: 1, attempts: 1 })).toThrow(/super-linear/);
   });
 
   it("passes a linear loop under the noise floor (real-clock smoke test)", () => {
