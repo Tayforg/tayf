@@ -16,6 +16,7 @@ import {
 import { savedRemovalAnnouncement, savedRemoveLabel } from "@/components/bookmark/bookmark-label";
 import {
   changeBadgeLabels,
+  changeTitleFor,
   pruneSnapshots,
   readSnapshots,
   reconcileSnapshots,
@@ -415,7 +416,7 @@ export function SavedList() {
                 {changeBadgeLabels(change).map((label) => (
                   <span
                     key={label}
-                    title={change.basis === "save" ? "Kaydettiğinizden beri" : "Bu listeyi ilk açtığınızdan beri"}
+                    title={changeTitleFor(change.basis)}
                     className="inline-flex items-center rounded-full border border-brand/30 bg-brand/10 px-2 py-0.5 text-[10px] font-medium text-brand"
                   >
                     {label}

@@ -89,6 +89,7 @@ import { ClearSearchLink } from "@/components/home/clear-search-link";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { FollowButton } from "@/components/follow/follow-button";
 import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
+import { RelaxedSearchLinks } from "@/components/home/relaxed-search-links";
 import { RisingRail } from "@/components/home/rising-rail";
 import { homeFirstCard } from "@/lib/home/first-card";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
@@ -192,6 +193,16 @@ function visibleText(node: unknown): string {
  */
 function clearSearchLinks(tree: unknown): Elementish[] {
   return collectRendered(tree, new Set(["EmptySearch"])).filter((e) => e.type === ClearSearchLink);
+}
+
+/**
+ * The "Kelimeleri tek tek deneyin" chips of the empty card (h185-roadmap2-1). A client component with
+ * hooks, so it is found as an element (its `words` prop), like ClearSearchLink.
+ */
+function relaxedSearchLinks(tree: unknown): Elementish[] {
+  return collectRendered(tree, new Set(["EmptySearch", "SearchUnavailable"])).filter(
+    (e) => e.type === RelaxedSearchLinks,
+  );
 }
 
 /** The live region's text (SearchStatus's `text` prop). */
@@ -718,6 +729,170 @@ describe("HomeFeed: a punctuation-only query (no search ran)", () => {
     const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "!!" }) });
     expect(searchClusters).not.toHaveBeenCalled();
     expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
+  });
+});
+
+// h185-roadmap2-1: the archive ANDs every typed word, so 'emekli bayram ikramiyesi ne zaman' finds nothing
+// while each word has results. A multi-word search with no result offers one chip per word; no new read,
+// and every other state is byte-identical to before.
+describe("HomeFeed: the empty card offers one chip per word of a multi-word search", () => {
+  const QUESTION = "emekli bayram ikramiyesi ne zaman";
+
+  beforeEach(() => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("ak", "AK Parti")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+  });
+
+  async function emptyCard(q: string) {
+    return HomeFeed({ searchParams: Promise.resolve({ q }) });
+  }
+
+  it("q='emekli bayram ikramiyesi ne zaman': the card holds the four words and still the clear link", async () => {
+    const tree = await emptyCard(QUESTION);
+    const chips = relaxedSearchLinks(tree);
+    expect(chips).toHaveLength(1);
+    expect(chips[0]?.props?.words).toEqual(["emekli", "bayram", "ikramiyesi", "zaman"]);
+    expect(chips[0]?.props?.targetId).toBe("haber-akisi");
+    const clear = clearSearchLinks(tree);
+    expect(clear).toHaveLength(1);
+    expect(clear[0]?.props?.targetId).toBe("haber-akisi");
+  });
+
+  it("puts the chips after the apology and before 'Aramayı temizle'", async () => {
+    const tree = await emptyCard(QUESTION);
+    const order = collectRendered(tree, new Set(["EmptySearch"]));
+    const apology = order.findIndex(
+      (e) => e.type === "p" && textOf(e.props?.children).includes("Farklı bir kelime deneyin."),
+    );
+    const chips = order.findIndex((e) => e.type === RelaxedSearchLinks);
+    const clear = order.findIndex((e) => e.type === ClearSearchLink);
+    expect(apology).toBeGreaterThanOrEqual(0);
+    expect(chips).toBeGreaterThan(apology);
+    expect(clear).toBeGreaterThan(chips);
+  });
+
+  it("does not change the apology copy or the live region", async () => {
+    const tree = await emptyCard(QUESTION);
+    const text = visibleText(tree);
+    expect(text).toContain("Hiç haber bulunamadı");
+    expect(text).toContain("için sonuç yok. Farklı bir kelime deneyin.");
+    expect(liveRegionText(tree)).toContain("sonuç bulunamadı");
+  });
+
+  it("reads nothing more: one feed read, one archive search, one intent lookup", async () => {
+    await emptyCard(QUESTION);
+    expect(getPoliticsClusters).toHaveBeenCalledTimes(1);
+    expect(searchClusters).toHaveBeenCalledTimes(1);
+    expect(searchClusters).toHaveBeenCalledWith(QUESTION);
+    expect(loadSearchIntent).toHaveBeenCalledTimes(1);
+  });
+
+  it("chips follow the archive's canonical words: Turkish case, repeats, quotes, a negation", async () => {
+    expect(relaxedSearchLinks(await emptyCard("Kripto KRİPTO para"))[0]?.props?.words).toEqual(["kripto", "para"]);
+    expect(relaxedSearchLinks(await emptyCard('"kripto para" vergisi'))[0]?.props?.words).toEqual([
+      "kripto",
+      "para",
+      "vergisi",
+    ]);
+    expect(relaxedSearchLinks(await emptyCard("kripto -vergi"))[0]?.props?.words).toEqual(["kripto"]);
+  });
+
+  it("a query cut at 6 words offers only the 6 words the archive searched", async () => {
+    const tree = await emptyCard("birinci ikinci ucuncu dorduncu besinci altinci yedinci");
+    expect(relaxedSearchLinks(tree)[0]?.props?.words).toEqual([
+      "birinci",
+      "ikinci",
+      "ucuncu",
+      "dorduncu",
+      "besinci",
+      "altinci",
+    ]);
+  });
+
+  it("markup in the query reaches the chips as plain words (React escapes them at render)", async () => {
+    const tree = await emptyCard("<b>x</b> kripto vergisi");
+    const words = relaxedSearchLinks(tree)[0]?.props?.words as string[];
+    expect(words).toContain("kripto");
+    expect(words).toContain("vergisi");
+    expect(collectElements(tree).some((e) => e.type === "b")).toBe(false);
+    // The words are props of a client component that renders them as React children and encodes them into
+    // the href (relaxed-search-links.test.tsx pins the markup); the page itself adds no element for them.
+    expect(words.every((w) => typeof w === "string")).toBe(true);
+  });
+
+  it("q='zzqxkv' (one word): no chips, the old card is unchanged", async () => {
+    const tree = await emptyCard("zzqxkv");
+    expect(relaxedSearchLinks(tree)).toHaveLength(0);
+    expect(clearSearchLinks(tree)).toHaveLength(1);
+    const text = visibleText(tree);
+    expect(text).toContain("Hiç haber bulunamadı");
+    expect(text).toContain("için sonuç yok. Farklı bir kelime deneyin.");
+    expect(text).not.toContain("Kelimeleri tek tek deneyin");
+  });
+
+  it("q='kripto neden düştü': 'neden' is an engine stop word, so the chips are 'kripto' and 'düştü'", async () => {
+    const tree = await emptyCard("kripto neden düştü");
+    const chips = relaxedSearchLinks(tree);
+    expect(chips).toHaveLength(1);
+    expect(chips[0]?.props?.words).toEqual(["kripto", "düştü"]);
+  });
+
+  it("q='zzqxkv ne': the lone survivor of a stop word runs the same search, so no chips, and the clear link stays", async () => {
+    const tree = await emptyCard("zzqxkv ne");
+    expect(relaxedSearchLinks(tree)).toHaveLength(0);
+    expect(clearSearchLinks(tree)).toHaveLength(1);
+    expect(visibleText(tree)).toContain("Hiç haber bulunamadı");
+    expect(visibleText(tree)).not.toContain("Kelimeleri tek tek deneyin");
+  });
+
+  it("a multi-word query whose words are all too short ('ne mi') offers no chips", async () => {
+    const tree = await emptyCard("ne mi");
+    expect(relaxedSearchLinks(tree)).toHaveLength(0);
+    expect(visibleText(tree)).toContain("Hiç haber bulunamadı");
+  });
+
+  it("a too-short query (no search ran) offers no chips", async () => {
+    for (const q of ["a", "!!", "\u{1F600}\u{1F600}"]) {
+      const tree = await emptyCard(q);
+      expect(relaxedSearchLinks(tree), JSON.stringify(q)).toHaveLength(0);
+      expect(visibleText(tree), JSON.stringify(q)).toContain("Aramak için biraz daha yazın");
+      expect(clearSearchLinks(tree), JSON.stringify(q)).toHaveLength(1);
+    }
+  });
+
+  it("an unavailable archive shows the retry card, no chips", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf());
+    searchClusters.mockResolvedValue({ ok: false });
+    const tree = await emptyCard(QUESTION);
+    expect(collectRendered(tree, new Set(["EmptySearch", "SearchUnavailable"])).some((e) => typeName(e) === "SearchUnavailable")).toBe(true);
+    expect(relaxedSearchLinks(tree)).toHaveLength(0);
+    expect(clearSearchLinks(tree)).toHaveLength(0);
+  });
+
+  it("a page with results offers no chips", async () => {
+    searchClusters.mockResolvedValue({ ok: true, bundles: [bundle("x", "Emekli bayram ikramiyesi açıklandı")] });
+    const tree = await emptyCard("emekli bayram ikramiyesi");
+    expect(clusterCardIds(tree)).toContain("x");
+    expect(relaxedSearchLinks(tree)).toHaveLength(0);
+    expect(visibleText(tree)).not.toContain("Kelimeleri tek tek deneyin");
+  });
+
+  it("a multi-word query that matches only in the feed offers no chips", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("ak", "AK Parti kongre")));
+    const tree = await emptyCard("ak parti");
+    expect(clusterCardIds(tree)).toEqual(["ak"]);
+    expect(relaxedSearchLinks(tree)).toHaveLength(0);
+  });
+
+  it("the plain home page and a later archive page offer no chips", async () => {
+    expect(relaxedSearchLinks(await HomeFeed({ searchParams: Promise.resolve({}) }))).toHaveLength(0);
+    const later = await HomeFeed({ searchParams: Promise.resolve({ q: QUESTION, arsiv: "2" }) });
+    expect(relaxedSearchLinks(later)).toHaveLength(0);
+  });
+
+  it("stays noindex like every search page", async () => {
+    const meta = await generateMetadata({ searchParams: Promise.resolve({ q: QUESTION }) });
+    expect(meta.robots).toEqual({ index: false, follow: true });
   });
 });
 

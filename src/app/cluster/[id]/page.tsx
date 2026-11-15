@@ -20,6 +20,7 @@ import { FramingReceiptCard } from "@/components/story/framing-receipt";
 import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption";
 import { ShareButton } from "@/components/story/share-button";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
+import { SavedSeenMark } from "@/components/bookmark/saved-seen-mark";
 import { CompareButton } from "@/components/compare/compare-button";
 import { SourceKunye } from "@/components/story/source-kunye";
 import { OwnershipLine } from "@/components/story/ownership-line";
@@ -1050,6 +1051,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     clusterId={id}
                     storyTitle={hasHeadline ? cluster.title_tr : null}
                   />
+                  {/* Renders nothing: marks a saved story seen on this device so the /saved
+                      "yeni gelişme" badge clears (h185-roadmap2-2). The id and the server
+                      updated_at of this copy (a stale offline copy must not clear the badge),
+                      no counts and no client clock. */}
+                  <SavedSeenMark clusterId={id} updatedAt={cluster.updated_at} />
                   <CompareButton clusterId={id} />
                   <Link
                     href={`/metodoloji?cluster=${id}#duzeltme`}
